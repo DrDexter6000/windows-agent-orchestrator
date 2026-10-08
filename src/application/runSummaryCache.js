@@ -37,7 +37,7 @@
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 
-import { readTranscript } from "../transcript.js";
+import { readTranscript, transcriptPathFor } from "../transcript.js";
 import { extractRunFacts } from "./runList.js";
 
 const DEFAULT_MAX_ENTRIES = 4096;
@@ -140,7 +140,7 @@ export function createRunSummaryCache({
     // 修复前 extractFactsFn(events) 无 runId → boundReportScope(events, null)
     // 返回 null → 历史无绑定读法（外 run 终态尾条可翻转 MCP runs_list /
     // lead_preflight / Owner 看板缓存行——三面全部经本缓存）。stem 是调用方
-    // join(resolvedRunDir, `${runId}.jsonl`) 的原样回取，非新事实。
+    // transcriptPathFor(resolvedRunDir, runId) 的原样回取，非新事实。
     const facts = extractFactsFn(events, basename(key, ".jsonl"));
     if (preKey !== null && postKey === preKey) {
       entries.set(key, { meta: preKey, facts });

@@ -26,7 +26,7 @@
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq, transcriptPathFor } from "../transcript.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
@@ -115,7 +115,7 @@ export async function stopRun(input) {
 
   // Resolve runDir
   const resolvedRunDir = resolveRunDir(runDir);
-  const transcriptPath = join(resolvedRunDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(resolvedRunDir, runId);
 
   // Read transcript
   let events;

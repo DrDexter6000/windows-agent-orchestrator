@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript, STATE_CHANGE_REASON } from "../transcript.js";
+import { JsonlTranscript, STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
 import { readRegistry } from "../registry.js";
@@ -836,7 +836,7 @@ export async function dispatchRun({
   }
 
   // All preflight passed — now write transcript durable facts.
-  const transcriptPath = join(resolvedRunDir, `${finalRunId}.jsonl`);
+  const transcriptPath = transcriptPathFor(resolvedRunDir, finalRunId);
   const transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
 
   // Initial durable facts, in order: background_submitted, then pending.

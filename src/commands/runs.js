@@ -25,7 +25,7 @@ import { readdir, unlink, readFile, mkdir, rename, stat } from "node:fs/promises
 import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 
-import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES, transcriptPathFor } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
 // R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
 // isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
@@ -257,7 +257,7 @@ async function runsWaitCommand(args, config, deps = {}) {
   // still unbound — the "same SSOT" claim above is true again) — no second
   // parser; a read failure degrades to state "unknown" rather than crashing
   // the interrupt path.
-  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(runDir, runId);
   const onSigint = () => {
     void (async () => {
       let state = "unknown";
@@ -886,7 +886,7 @@ async function runsMetricsCommand(args, config) {
   if (!isValidRunId(runId)) {
     throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
   const events = await readTranscript(filePath);
   // R18 (TD-128 W1)：聚合事实读取绑定到本 run 信封（boundReportScope 单一定
   // 义处）——外 run/伪造尾条不再污染 state/tokens/cost/duration。
@@ -921,7 +921,7 @@ async function runsScorecardCommand(args, config) {
   if (!isValidRunId(runId)) {
     throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
   const events = await readTranscript(filePath);
   // R18 (TD-128 W1)：scorecard 事实读取经 boundReportScope 收窄到本 run 信封
   // （首条纪律——与修复前 events.find 的首条序语义一致）：本 run 无自身

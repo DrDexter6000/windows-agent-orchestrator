@@ -52,8 +52,7 @@ import {
   REVERIFY_SETUP_COMMAND_MAX_LENGTH,
   REVERIFY_TIMEOUT_MS_MIN,
   REVERIFY_TIMEOUT_MS_MAX,
-  REVERIFY_TIMEOUT_MS_DEFAULT,
-} from "../transcript.js";
+  REVERIFY_TIMEOUT_MS_DEFAULT, transcriptPathFor } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyDelivery, createCallerGate } from "../deliveryVerification.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
@@ -295,7 +294,7 @@ export async function runDeliveryReverify({
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const _verify = verifyDeliveryFn ?? verifyDelivery;
 
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
   const events = await _readTranscript(filePath);
 
   // Phase 0: preconditions (fail closed before any append/verify).

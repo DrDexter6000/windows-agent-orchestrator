@@ -33,8 +33,7 @@ import {
   findState,
   findLastEventSeq,
   JsonlTranscript,
-  TERMINAL_STATES,
-} from "../transcript.js";
+  TERMINAL_STATES, transcriptPathFor } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 
 /** 审计事件类型：Lead 侧验收落盘（TD-219）。 */
@@ -227,7 +226,7 @@ export async function recordAcceptance({
     }
   }
 
-  const transcriptPath = join(runsDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(runsDir, runId);
   const events = await readTranscriptOrTyped(transcriptPath, runId);
   assertRunTerminal(events, runId);
 
@@ -267,7 +266,7 @@ export async function listAcceptance({ runsDir, runId }) {
     throw new AcceptanceRecordError("invalid_runs_dir", "runsDir is required");
   }
   assertValidRunId(runId);
-  const transcriptPath = join(runsDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(runsDir, runId);
   const events = await readTranscriptOrTyped(transcriptPath, runId);
   return events.filter(
     (e) => e && e.type === ACCEPTANCE_EVENT_TYPE && e.runId === runId,

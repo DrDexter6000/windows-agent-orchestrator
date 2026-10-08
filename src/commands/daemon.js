@@ -35,6 +35,7 @@ import { readSupervisorState } from "../daemonSupervisor.js";
 // TD-98 阶段 2a：parseOptions/loadPrompt 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions, loadPrompt } from "./shared.js";
 import { validateBoundedWaitTimeout } from "../application/timeoutPolicy.js";
+import { transcriptPathFor } from "../transcript.js";
 
 // daemon 命令族：start/stop/status/ping/list。常驻 daemon（P3-T1，ADR 0012 命名管道 IPC）。
 // start: fork detached node src/daemon.js；ping/status/list/stop: 经 IPC 连 daemon。
@@ -187,7 +188,7 @@ async function daemonRunCommand(args, config) {
   const prompt = await loadPrompt(options);
   try {
     const res = await connectDaemon(pipe, { cmd: "start", agentId, prompt }, { timeoutMs: Number(options.timeout ?? 10000) });
-    const transcript = join(runDir, `${res.runId}.jsonl`);
+    const transcript = transcriptPathFor(runDir, res.runId);
     console.log(JSON.stringify({
       ok: true, runId: res.runId, transcript, ownedBy: "daemon",
       note: "run owned by daemon. Poll with `daemon list`/`daemon status`/`tail`.",

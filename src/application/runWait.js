@@ -19,7 +19,7 @@
 import { join, resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 
-import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 // R20-C（TD-128）：liveness 进度计数的绑定作用域复用 metrics.js 的
 // boundReportScope 单一定义处（runList.js 同款 application → metrics 接线，
@@ -279,7 +279,7 @@ export async function runWait(input) {
   const pollIntervalMs = input.pollIntervalMs ?? 2000;
 
   const resolvedRunDir = resolve(runDir);
-  const transcriptPath = join(resolvedRunDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(resolvedRunDir, runId);
 
   // Read transcript
   let events;

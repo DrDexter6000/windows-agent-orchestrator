@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { createServer, createConnection as netCreateConnection } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
-import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
@@ -512,7 +512,7 @@ export async function handleRequest(req, manager, ctx = {}) {
     }
     // 不在内存：读 transcript 兜底
     const { runDir } = ctx;
-    const filePath = join(runDir, `${runId}.jsonl`);
+    const filePath = transcriptPathFor(runDir, runId);
     if (existsSync(filePath)) {
       const raw = readFileSync(filePath, "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));

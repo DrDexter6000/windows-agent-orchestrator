@@ -66,8 +66,7 @@ import {
   PROCESS_MISSING_RECOVERY_REASON,
   PROCESS_MISSING_CONFIRMED_TYPE,
   RepackageCasPolicyError,
-  REPACKAGE_CAS_POLICY_CODES,
-} from "../transcript.js";
+  REPACKAGE_CAS_POLICY_CODES, transcriptPathFor } from "../transcript.js";
 import {
   assertCommittedDeliveryRef,
   isValidRunId,
@@ -911,7 +910,7 @@ export async function runDeliveryRepackage({
   const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
 
   // TD-226: a well-formed runId with no transcript is a closed-set rejection
   // (not an unexpected error) — and records NO audit event, because appending

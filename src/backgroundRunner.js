@@ -26,7 +26,7 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
-import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
+import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
@@ -101,7 +101,7 @@ function makeObjectRegistry(registryObj) {
 
 /** 0045 W3c：解析/校验类失败的具名收口（W2b 形状提炼）——run.error + failed 终态，零 spawn。 */
 async function failClosedResolution(runDir, runId, agentId, code, message) {
-  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(runDir, runId);
   try {
     const t = new JsonlTranscript(transcriptPath, { runId, agentId: agentId ?? "unknown", initialSeq: 0 });
     await t.append("run.error", { phase: "dispatch_resolution", error: code, message });
@@ -213,7 +213,7 @@ export async function runBackground(opts = {}) {
         lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
       });
       if (resolution.kind === "error") {
-        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        const transcriptPath = transcriptPathFor(runDir, runId);
         try {
           const t = new JsonlTranscript(transcriptPath, {
             runId, agentId: agentId ?? "unknown", initialSeq: 0,
@@ -431,7 +431,7 @@ export async function runResumeBackground(opts = {}) {
 }
 
 async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error }) {
-  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(runDir, runId);
   let events = [];
   try {
     events = await readTranscript(transcriptPath);
@@ -519,7 +519,7 @@ export async function runMain(argv = process.argv.slice(2)) {
       const runDir = opts["run-dir"];
       const runId = opts["run-id"];
       if (runDir && runId) {
-        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        const transcriptPath = transcriptPathFor(runDir, runId);
         try {
           let events = [];
           try { events = await readTranscript(transcriptPath); } catch { events = []; }
@@ -562,7 +562,7 @@ export async function runMain(argv = process.argv.slice(2)) {
       const runDir = opts["run-dir"];
       const runId = opts["run-id"];
       if (runDir && runId) {
-        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        const transcriptPath = transcriptPathFor(runDir, runId);
         try {
           let events = [];
           try { events = await readTranscript(transcriptPath); } catch { events = []; }
@@ -682,7 +682,7 @@ async function appendDurableResumeFailure(runId, runDir, reasonText) {
     const { JsonlTranscript } = await import("./transcript.js");
     // 终审修正：签名为 (filePath, context)——此前误传 (runId, runDir) 把事实写到
     // 工作目录裸文件。规范形状对齐 runManager（join(runDir, runId.jsonl) + 绑定上下文）。
-    const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "resume-runner" });
+    const t = new JsonlTranscript(transcriptPathFor(runDir, runId), { runId, agentId: "resume-runner" });
     await t.append("run.error", { phase: "resume", error: reasonText });
   } catch (e) {
     process.stderr.write(`backgroundRunner: durable resume-failure fact unwritable: ${e.message}

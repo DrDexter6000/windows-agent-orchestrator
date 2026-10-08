@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1097,7 +1097,7 @@ export class RunManager {
     const dir = resolve(runDir ?? this.config.runDir);
     await mkdir(dir, { recursive: true });
 
-    const transcript = new JsonlTranscript(join(dir, `${finalRunId}.jsonl`), {
+    const transcript = new JsonlTranscript(transcriptPathFor(dir, finalRunId), {
       runId: finalRunId,
       agentId,
     });
@@ -1540,7 +1540,7 @@ export class RunManager {
   async resume(runId, options = {}) {
     const { runDir } = options;
     const dir = resolve(runDir ?? this.config.runDir);
-    const transcript = new JsonlTranscript(join(dir, `${runId}.jsonl`), {
+    const transcript = new JsonlTranscript(transcriptPathFor(dir, runId), {
       runId,
       agentId: "unknown",
     });

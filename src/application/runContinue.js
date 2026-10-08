@@ -39,8 +39,7 @@ import {
   findLatestBound,
   extractCanonicalAgentId,
   TERMINAL_STATES,
-  STATE_CHANGE_REASON,
-} from "../transcript.js";
+  STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
@@ -338,7 +337,7 @@ export async function continueRun({
   //    runId + one canonical agentId. A single cross-run/corrupt event invalidates
   //    identity rather than donating another run's worker/session lineage.
   const resolvedRunDir = resolve(runDir);
-  const parentTranscriptPath = join(resolvedRunDir, `${parentRunId}.jsonl`);
+  const parentTranscriptPath = transcriptPathFor(resolvedRunDir, parentRunId);
   let parentEvents;
   try {
     parentEvents = await readTranscript(parentTranscriptPath);
@@ -708,7 +707,7 @@ export async function continueRun({
   }
   runnerArgs[runnerArgs.indexOf("--session-reuse-json") + 1] = JSON.stringify(contTurn.routing);
   const claim = contTurn.claim;
-  const transcriptPath = join(resolvedRunDir, `${childRunId}.jsonl`);
+  const transcriptPath = transcriptPathFor(resolvedRunDir, childRunId);
 
   // 14. Worktree transition: re-pin the retained worktree to base on the CHILD
   //     branch, preserving the parent delivery/candidate bytes as unstaged

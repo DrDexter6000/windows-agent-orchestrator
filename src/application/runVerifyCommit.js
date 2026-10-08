@@ -78,8 +78,7 @@ import {
   JsonlTranscript,
   TERMINAL_STATES,
   REVERIFY_SETUP_COMMANDS_LIMIT,
-  REVERIFY_SETUP_COMMAND_MAX_LENGTH,
-} from "../transcript.js";
+  REVERIFY_SETUP_COMMAND_MAX_LENGTH, transcriptPathFor } from "../transcript.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
@@ -443,7 +442,7 @@ export async function runVerifyCommit({
   }
 
   // ===== 裁定①：前置（转录存在 / workspace 归属 / 终态 / delivery_created） =====
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
   let events;
   try {
     events = await _read(filePath);

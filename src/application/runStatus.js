@@ -23,7 +23,7 @@
 
 import { join } from "node:path";
 
-import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { projectExecutionStage } from "./runStageProjection.js";
@@ -249,7 +249,7 @@ export async function getRunStatus({
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const _now = nowFn ?? Date.now;
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
 
   // Read-only: readTranscript throws if the file does not exist (fail-closed).
   // The service must NOT create the file.

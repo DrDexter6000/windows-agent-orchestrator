@@ -43,8 +43,7 @@ import {
   CORRECTION_OUTCOMES,
   CORRECTION_REJECTION_REASONS,
   // TD-234 验收修（opus C5）：CAS 形状拒绝专用类型（其余异常一律意外上抛）。
-  CorrectionShapeError,
-} from "../transcript.js";
+  CorrectionShapeError, transcriptPathFor } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -125,7 +124,7 @@ export async function correctRun({
   }
 
   const reader = readTranscriptFn ?? readTranscript;
-  const transcriptPath = join(resolve(runDir), `${runId}.jsonl`);
+  const transcriptPath = transcriptPathFor(resolve(runDir), runId);
 
   // 2. Transcript must exist and carry one canonical agentId envelope.
   let events;

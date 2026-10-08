@@ -1,5 +1,5 @@
 import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import {
@@ -29,6 +29,17 @@ export const RUN_STATES = [
 ];
 
 export const TERMINAL_STATES = ["completed", "failed", "aborted", "timed_out"];
+
+/**
+ * TD-190 D0：转录路径的唯一构造入口（读侧/写侧共用）。所有按 runId 定位
+ * `<runDir>/<runId>.jsonl` 的消费者必须经此函数——项目分桶布局（Owner
+ * 2026-09-30 裁定形态）落地时只改这里，不再散改全仓。行为与既有惯用法字节
+ * 兼容：join(runDir, `${runId}.jsonl`)；调用方原有 resolve 语义保持在外侧
+ * （不在此收口，避免 D0 行为漂移——待 D2 全消费面迁移后再评估统一 resolve）。
+ */
+export function transcriptPathFor(runDir, runId) {
+  return join(runDir, `${runId}.jsonl`);
+}
 
 // Round 4 Bundle A（2026-08-16，Owner 批准的冻结契约——TD-120 豁免款）：
 // `run.state_change` 事件 `reason` 字段的**写入侧冻结闭集** SSOT。

@@ -44,7 +44,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
-import { readTranscript } from "../transcript.js";
+import { readTranscript, transcriptPathFor } from "../transcript.js";
 import { validateDeliveryFacts } from "../transcript.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -115,7 +115,7 @@ export async function resolveRunDeliveryReviewTarget({
 
   // 2. Read the host-owned transcript.
   const { join } = await import("node:path");
-  const filePath = join(runDir, `${runId}.jsonl`);
+  const filePath = transcriptPathFor(runDir, runId);
   let events;
   try {
     events = await _readTranscript(filePath);

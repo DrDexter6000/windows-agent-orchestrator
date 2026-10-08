@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript } from "../transcript.js";
+import { JsonlTranscript, transcriptPathFor } from "../transcript.js";
 import { loadWorkflow, applyTemplate } from "../workflow/loader.js";
 import { WorkflowEngine } from "../workflow/engine.js";
 import { parseOptions, resolveIsolateFlag, newRunManager } from "./shared.js";
@@ -121,7 +121,7 @@ async function workflowRunCommand(args, config) {
   const runDir = resolve(options.runDir ?? config.runDir);
   await mkdir(runDir, { recursive: true });
   const workflowRunId = `wf_${new Date().toISOString().replace(/[-:.TZ]/g, "")}`;
-  const transcript = new JsonlTranscript(join(runDir, `${workflowRunId}.jsonl`), {
+  const transcript = new JsonlTranscript(transcriptPathFor(runDir, workflowRunId), {
     runId: workflowRunId,
     agentId: effectiveDef.id,
   });
