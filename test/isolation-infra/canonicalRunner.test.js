@@ -2385,12 +2385,22 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
 test("TD-233: workerBannerLine — 命中 WAO_IN_WORKER 给出 0047 预期红说明，未命中为 null", () => {
   assert.equal(workerBannerLine({}), null, "worker 上下文外不打横幅");
   assert.equal(workerBannerLine({ WAO_IN_WORKER: "" }), null, "空值视为未命中");
+  assert.equal(workerBannerLine({ WAO_IN_WORKER: "0" }), null,
+    "显式 \"0\" 不触发（验收会审 astra：触发必须镜像守卫的字面 \"1\" 语义）");
   const line = workerBannerLine({ WAO_IN_WORKER: "1" });
   assert.ok(line, "命中必须返回横幅行");
   assert.ok(line.startsWith("[canonical]"), "横幅走套件既有 [canonical] stderr 通道");
   assert.ok(line.includes("WAO_IN_WORKER"), "横幅点名检测到的 env");
   assert.ok(line.includes("0047"), "横幅点名决定 0047（防向下派发门）");
   assert.ok(line.includes("预期") && line.includes("非回归"), "横幅必须说明会红属预期非回归");
+});
+
+test("TD-233: workerBannerLine — 已有 Lead 豁免时只报上下文事实，不预判红绿（验收会审 astra 反例）", () => {
+  const line = workerBannerLine({ WAO_IN_WORKER: "1", WAO_ALLOW_NESTED_DISPATCH: "1" });
+  assert.ok(line, "豁免在场仍返回横幅（上下文事实有价值）");
+  assert.ok(line.includes("豁免"), "点名豁免在场");
+  assert.ok(!line.includes("会变红"), "env 标记臂被豁免中和，不得预判会红");
+  assert.ok(!line.includes("非回归"), "无预判则无非回归声明");
 });
 
 test("TD-233: runIdFromWorktreeCwd — 从 .wao-worktrees/<runId> 形态解析 runId", () => {
@@ -2408,10 +2418,12 @@ test("TD-233: runIdFromWorktreeCwd — 解析失败一律返回 null（不附 ru
   assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", "..")), null, "段是父目录引用（ traversal 拒绝）");
 });
 
-test("TD-233: runIdFromWorktreeCwd — 末次出现优先 + 显示侧 64 字符帽", () => {
+test("TD-233: runIdFromWorktreeCwd — 末次出现优先 + Windows 大小写 + 超帽整体丢弃", () => {
   const nested = join(tmpdir(), "host", ".wao-worktrees", "decoy01", "inner", ".wao-worktrees", "run_real1");
   assert.equal(runIdFromWorktreeCwd(nested), "run_real1", "取最后一次 .wao-worktrees 之后的段");
   const long = "a".repeat(100);
-  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", long)), "a".repeat(64),
-    "合法形态但超长 ⇒ 截到显示侧 64 字符帽");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", long)), null,
+    "超 64 帽的候选整体丢弃（验收会审 astra：截断会冒充另一个 runId，禁止）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".WAO-WORKTREES", "run_case1")), "run_case1",
+    "Windows 大小写变体同样归因（验收会审 astra 反例）");
 });

@@ -490,23 +490,26 @@ export async function runCommand(args, config) {
     // never a gate). Both rejections run before any side effect (manager.start /
     // dispatchRun / transcript write)——与 DC-5/A-3 同理上移到注册表解析之前：
     // 隔离 worktree 无私有 config/agents.json 时其 ENOENT 会劫持这两个声明
-    // 冲突拒绝面（TD-239 批验收实测）。
+    // 冲突拒绝面（TD-239 批验收实测）。--explain 例外（验收会审 astra/sol 反例）：
+    // explain 在解析块内短路返回解析 JSON，从不到达这些拒绝——保持该语义。
     //   - × --delivery-spec-file: a read-only run is observation, never a
     //     delivery — the combination is contradictory.
     //   - × --no-isolate: read-only forces isolation; explicitly demanding no
     //     isolation contradicts the declaration.
-    const readOnlyEarly = resolveReadOnlyFlag(options);
-    if (readOnlyEarly && earlyDeliveryRef.value) {
-      throw new Error(
-        "--read-only is mutually exclusive with --delivery-spec-file "
-        + "(read_only_delivery_conflict: a read-only run is advisory observation, never a delivery)",
-      );
-    }
-    if (readOnlyEarly && resolveIsolateFlag(options) === false) {
-      throw new Error(
-        "--read-only requires isolation; --no-isolate contradicts a read-only declaration "
-        + "(remove --no-isolate, or drop --read-only)",
-      );
+    if (!options.explain) {
+      const readOnlyEarly = resolveReadOnlyFlag(options);
+      if (readOnlyEarly && earlyDeliveryRef.value) {
+        throw new Error(
+          "--read-only is mutually exclusive with --delivery-spec-file "
+          + "(read_only_delivery_conflict: a read-only run is advisory observation, never a delivery)",
+        );
+      }
+      if (readOnlyEarly && resolveIsolateFlag(options) === false) {
+        throw new Error(
+          "--read-only requires isolation; --no-isolate contradicts a read-only declaration "
+          + "(remove --no-isolate, or drop --read-only)",
+        );
+      }
     }
   }
   if (true) {

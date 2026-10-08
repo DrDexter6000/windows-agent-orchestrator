@@ -85,20 +85,35 @@ function srcDirty(root, gitBin) {
 }
 
 // Module-load capture. In the MCP server this module loads at startup, so
-// these pin the build the server actually booted from.
+// these pin the build the server actually booted from. src/ dirtiness is
+// captured at load too — without it, a start-dirty → still-dirty checkout
+// would be indistinguishable from start-clean → stayed-clean, and the consumer
+// could not tell "matches start" from "cannot confirm" (验收会审 astra/sol
+// 反例：仅凭启动 HEAD 判"unchanged"超出证据).
 const STARTED_AT = new Date().toISOString();
 const CODE_ROOT = deriveCodeRoot();
 const HEAD_AT_START = CODE_ROOT != null ? revParseHead(CODE_ROOT, "git") : null;
+// Only meaningful when the load-time HEAD was readable; otherwise null (the
+// start-state dirty flag alone proves nothing about what was loaded).
+const SRC_DIRTY_AT_START = CODE_ROOT != null && HEAD_AT_START != null
+  ? srcDirty(CODE_ROOT, "git")
+  : null;
 const PACKAGE_VERSION = readPackageVersion();
 
 /**
  * Read the structured server-build facts (pure read; no writes, no caching
  * of call-time results).
  *
+ * The two call-time reads (HEAD, src/ dirty) are NOT atomic with each other
+ * or with the load-time capture: a checkout/restore landing between them can
+ * make the pair momentarily inconsistent. Consumers must treat these as
+ * ADVISORY facts, never as proof of what modules are loaded.
+ *
  * @param {{gitBin?: string, codeRoot?: string}} [opts] — injection points for
  *   tests (fake git binary / relocated code root).
  * @returns {{startedAt: string, headAtStart: string|null, headNow: string|null,
- *   srcDirtyNow: boolean|null, readable: boolean, packageVersion: string|null}}
+ *   srcDirtyAtStart: boolean|null, srcDirtyNow: boolean|null, readable: boolean,
+ *   packageVersion: string|null}}
  *   readable is true ONLY when both the load-time and current HEAD were read —
  *   a null on either side is "cannot confirm", never "matches".
  */
@@ -113,6 +128,7 @@ export function readServerBuildFacts(opts = {}) {
     startedAt: STARTED_AT,
     headAtStart: HEAD_AT_START,
     headNow,
+    srcDirtyAtStart: SRC_DIRTY_AT_START,
     srcDirtyNow,
     readable: HEAD_AT_START != null && headNow != null,
     packageVersion: PACKAGE_VERSION,

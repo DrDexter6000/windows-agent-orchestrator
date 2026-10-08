@@ -17,13 +17,16 @@ import { parseArgs, main } from "../../scripts/reliability/runtime-identity-cli.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..", "..", "scripts", "reliability", "runtime-identity-cli.mjs");
 
+// 成功分支必须真实捕获 stderr（验收会审 astra/sol 反例：原先成功路径不
+// 返回 stderr，"零 stderr"断言因 undefined 恒真——exit 0 却外泄噪声也能过）。
 function runCli(args, { expectFail = false } = {}) {
   try {
     const stdout = execFileSync(process.execPath, [CLI, ...args], {
       encoding: "utf8",
       windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    return { code: 0, stdout };
+    return { code: 0, stdout, stderr: "" };
   } catch (error) {
     if (!expectFail) throw error;
     return { code: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };

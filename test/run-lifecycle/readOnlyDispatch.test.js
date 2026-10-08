@@ -603,6 +603,42 @@ test("RO-C2: run --read-only × --no-isolate is rejected as a contradictory decl
   );
 });
 
+test("RO-C2a: --explain short-circuits ahead of the hoisted read-only conflict rejections (验收会审 astra/sol 反例)", async () => {
+  // 冲突拒绝上移到注册表解析之前（DC-5/A-3 反劫持）后，explain 语义必须
+  // 保持：打印解析结果即返，从不到达这些拒绝。
+  const { runCommand } = await import("../../src/commands/run.js");
+  const readRegistry = async () => ({
+    getAgent(id, overrides = {}) {
+      const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
+      return { id, backend: "claude-code", cwd: ".", ...defined };
+    },
+    listAgents() { return []; },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-c2a-"));
+  try {
+    const spec = join(dir, "spec.json");
+    writeFileSync(spec, JSON.stringify({
+      mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"],
+    }), "utf8");
+    for (const argv of [
+      ["glm-flash", "--prompt", "x", "--explain", "--read-only", "--no-isolate"],
+      ["glm-flash", "--prompt", "x", "--explain", "--read-only", "--delivery-spec-file", spec, "--isolate"],
+    ]) {
+      const logs = [];
+      const origLog = console.log;
+      console.log = (s) => logs.push(String(s));
+      try {
+        await runCommand(argv, { readRegistry });
+      } finally {
+        console.log = origLog;
+      }
+      assert.match(logs.join("\n"), /"status"/, `${argv.join(" ")} 打印解析 JSON 即返`);
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("RO-C3: the usage page and command summary list --read-only", async () => {
   const { RUN_USAGE_TEXT, HELP_TEXT } = await import("../../src/cliHelp.js");
   assert.match(RUN_USAGE_TEXT, /--read-only/, "RUN_USAGE_TEXT lists the flag");

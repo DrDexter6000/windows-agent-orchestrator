@@ -169,14 +169,33 @@ test("SBF-A5: git binary failure at query time → readable:false (query-side de
 
 // ===== B. aggregator consumption of serverBuildFactsFn =====
 
-test("SB-B1: unchanged facts → one observation line, no warning, complete stays true", async () => {
+test("SB-B1: unchanged facts (both sides provably clean) → one observation line, no warning, complete stays true", async () => {
   const sha = "f".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: false, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}, checkout unchanged`));
+  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}, checkout unchanged since start`));
   assert.ok(!result.warnings.includes(DRIFT_WARNING));
   assert.equal(result.complete, true);
+});
+
+test("SB-B9: started dirty, still dirty (same HEAD) → equality-unverified observation, NEVER a match claim and NEVER drift (验收会审 astra/sol 反例)", async () => {
+  const sha = "e".repeat(40);
+  const result = await aggregateLeadPreflight(baseInput({
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: true, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
+  }));
+  assert.ok(result.observations.some((o) => o.includes("src/ had uncommitted changes at start and still does (content equality unverified)")),
+    `line shape: ${JSON.stringify(result.observations)}`);
+  assert.ok(!result.observations.some((o) => o.includes("checkout unchanged")), "双侧脏不得宣称 unchanged");
+  assert.ok(!result.warnings.includes(DRIFT_WARNING), "同头双侧脏不可证漂移，不得告警（防误报训练用户忽略）");
+});
+
+test("SB-B10: started dirty, now clean (same HEAD) → drift warning (checkout differs from what was loaded)", async () => {
+  const sha = "d".repeat(40);
+  const result = await aggregateLeadPreflight(baseInput({
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: true, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
+  }));
+  assert.ok(result.warnings.includes(DRIFT_WARNING), "脏→净=与启动态不同（加载过的是脏内容）");
 });
 
 test("SB-B2: HEAD drift → drift warning; complete STILL true (complete covers only the three sections)", async () => {
@@ -190,10 +209,10 @@ test("SB-B2: HEAD drift → drift warning; complete STILL true (complete covers 
     "checkStatus still exactly the three complete-covered sections");
 });
 
-test("SB-B3: src/ dirty (same HEAD) → drift warning", async () => {
+test("SB-B3: src/ dirty (clean start → dirty now, same HEAD) → drift warning", async () => {
   const sha = "a".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: false, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
   }));
   assert.ok(result.warnings.includes(DRIFT_WARNING));
 });
@@ -210,9 +229,9 @@ test("SB-B4: readable:false → degraded observation with package version, never
 test("SB-B5: dirty status unreadable (HEAD same) → says exactly that; no warning, no unchanged claim", async () => {
   const sha = "b".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyNow: null, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: null, srcDirtyNow: null, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}, src/ dirty status unreadable`));
+  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}; src/ dirty status not fully readable — cannot confirm checkout matches start`));
   assert.ok(!result.warnings.includes(DRIFT_WARNING));
 });
 
@@ -264,10 +283,10 @@ test("VG-C1: free → exact line 'verification gate: free'", async () => {
   assert.ok(result.observations.includes("verification gate: free"));
 });
 
-test("VG-C2: held by code-known owner + valid runId → labeled line with durations", async () => {
+test("VG-C2: held by code-known owner + valid runId → labeled line with durations + lease-declared marker", async () => {
   const result = await aggregateLeadPreflight(baseInput({ gateStatusFn: async () => heldStatus() }));
   assert.ok(result.observations.some((o) =>
-    /^verification gate: held by cli\/runs-gate run=run_[A-Za-z0-9_-]+, held 42s, heartbeat 3s$/.test(o)),
+    /^verification gate: held by cli\/runs-gate run=run_[A-Za-z0-9_-]+ \(lease-declared\), held 42s, heartbeat 3s$/.test(o)),
     `line shape: ${JSON.stringify(result.observations)}`);
 });
 
@@ -276,9 +295,18 @@ test("VG-C3: untrusted owner (path/prompt bait) → collapses to 'other', never 
   const result = await aggregateLeadPreflight(baseInput({
     gateStatusFn: async () => heldStatus({ owner: bait }),
   }));
-  assert.ok(result.observations.some((o) => /^verification gate: held by other( run=run_[A-Za-z0-9_-]+)?, held \d+s, heartbeat \d+s$/.test(o) || /^verification gate: held by other( run=run_[A-Za-z0-9_-]+)?$/.test(o)));
+  assert.ok(result.observations.some((o) => /^verification gate: held by other( run=run_[A-Za-z0-9_-]+)? \(lease-declared\)(, held \d+s, heartbeat \d+s)?$/.test(o)));
   assert.ok(!JSON.stringify(result).includes(bait), "untrusted owner never echoed");
   assert.ok(!JSON.stringify(result).includes("evil"), "path fragment never echoed");
+});
+
+test("VG-C8: contradictory snapshot {free:true, corrupt:true} → unreadable, NEVER free (验收会审 astra 反例)", async () => {
+  const result = await aggregateLeadPreflight(baseInput({
+    gateStatusFn: async () => ({ free: true, corrupt: true, holder: null }),
+  }));
+  assert.ok(result.observations.some((o) => o === "verification gate: state unreadable"),
+    `line shape: ${JSON.stringify(result.observations)}`);
+  assert.ok(!result.observations.some((o) => o === "verification gate: free"), "矛盾快照绝不可渲染为 free");
 });
 
 test("VG-C4: malformed runIds are dropped (traversal / over-cap / wrong prefix)", async () => {

@@ -144,15 +144,20 @@ function defaultGateStatus() {
 // from the snapshot's own numbers (no second clock read): heldMs =
 // ageMs + (heartbeatAt - startedAt). No causal claim anywhere — the line
 // says what the lease IS, never that any particular run is queued.
+// Unreadable/corrupt shapes are judged BEFORE free (验收会审 astra 反例：
+// 矛盾快照 {free:true, corrupt:true} 曾渲染成 free——生产 status() 当前
+// 不产此组合，防御性判序仍收紧). Holder is labeled "(lease-declared)" —
+// the lease file is machine-global untrusted input; a known-looking label
+// is what the lease CLAIMS, not an authenticated identity.
 function renderGateStatusLine(lease, knownAgentIds) {
   if (lease == null || typeof lease !== "object") {
     return "verification gate: state unreadable";
   }
-  if (lease.free === true) return "verification gate: free";
-  if (lease.corrupt === true || lease.holder == null || typeof lease.holder !== "object") {
+  if (lease.corrupt === true || (lease.free !== true && (lease.holder == null || typeof lease.holder !== "object"))) {
     // corrupt OR held-without-parsable-holder: NEVER rendered as free.
     return "verification gate: state unreadable";
   }
+  if (lease.free === true) return "verification gate: free";
   const h = lease.holder;
   const label = renderGateHolder(h, knownAgentIds);
   const parts = [];
@@ -161,7 +166,7 @@ function renderGateStatusLine(lease, knownAgentIds) {
     parts.push(`held ${Math.floor(heldMs / 1000)}s`);
     parts.push(`heartbeat ${Math.floor(Math.max(0, h.ageMs) / 1000)}s`);
   }
-  return `verification gate: held by ${label}${parts.length > 0 ? `, ${parts.join(", ")}` : ""}`;
+  return `verification gate: held by ${label} (lease-declared)${parts.length > 0 ? `, ${parts.join(", ")}` : ""}`;
 }
 
 /**
@@ -236,17 +241,16 @@ export async function aggregateLeadPreflight({
 
   // --- Section 0: server-build facts (injected dependency; advisory only) ---
   // The git subprocess lives in serverBuildFacts.js; only the structured
-  // facts are consumed here. Truthfulness rules:
-  //   readable + same HEAD + src/ clean  → one factual observation
-  //   readable + HEAD or src/ changed    → one warning (FACTUAL drift report —
-  //                                        it never asserts old code "is
-  //                                        running": same HEAD can still be a
-  //                                        different build)
+  // facts are consumed here. Truthfulness rules (验收会审 astra/sol 修正：
+  // "unchanged" 只在启动与当下两侧都证明干净时才可说；启动时已脏 → 当下
+  // 仍脏是内容未证等价、不是匹配也不是漂移；警告永不断言旧代码"正在"运行):
+  //   same HEAD + both sides provably clean → "checkout unchanged since start"
+  //   HEAD differs OR dirty flag flipped (clean↔dirty) → drift warning
+  //   same HEAD + dirty on BOTH sides → factual observation: content equality
+  //                                        unverified (NOT a match, NOT drift)
+  //   any dirty flag null (and not drift)  → observation: cannot confirm match
   //   not readable (git failed / non-Git)→ degraded observation (start time +
   //                                        package version), no warning
-  //   dirty status unreadable (HEAD same)→ observation says exactly that —
-  //                                        cannot claim unchanged, must not
-  //                                        claim drift
   // Any unexpected throw omits the lines entirely (never fails the preflight,
   // never flips complete — the server-build line is outside the three
   // complete-covered sections).
@@ -261,15 +265,20 @@ export async function aggregateLeadPreflight({
         const headAtStart = headShape(f.headAtStart) ? f.headAtStart : null;
         const headNow = headShape(f.headNow) ? f.headNow : null;
         if (startedAt != null && headAtStart != null && headNow != null) {
-          if (headAtStart === headNow && f.srcDirtyNow === false) {
-            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, checkout unchanged`);
-          } else if (headAtStart !== headNow || f.srcDirtyNow === true) {
+          const headSame = headAtStart === headNow;
+          const dirtyBothKnown = f.srcDirtyAtStart != null && f.srcDirtyNow != null;
+          if (headSame && f.srcDirtyAtStart === false && f.srcDirtyNow === false) {
+            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, checkout unchanged since start`);
+          } else if (!headSame || (dirtyBothKnown && f.srcDirtyAtStart !== f.srcDirtyNow)) {
             warnings.push(
               "server code checkout differs from server start (HEAD or src/ changed) — restart host before trusting MCP dogfood results",
             );
+          } else if (f.srcDirtyAtStart === true && f.srcDirtyNow === true) {
+            observations.push(`server build: started ${startedAt} at HEAD ${headNow}; src/ had uncommitted changes at start and still does (content equality unverified)`);
           } else {
-            // srcDirtyNow === null: HEAD matches but dirty status is unreadable.
-            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, src/ dirty status unreadable`);
+            // 剩余形态：HEAD 相同但至少一侧 dirty 状态不可读——既不可宣称
+            // 匹配，也不可宣称漂移，如实说"无法确认"。
+            observations.push(`server build: started ${startedAt} at HEAD ${headNow}; src/ dirty status not fully readable — cannot confirm checkout matches start`);
           }
         } else if (startedAt != null) {
           const v = typeof f.packageVersion === "string" && f.packageVersion.length > 0
