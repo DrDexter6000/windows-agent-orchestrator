@@ -707,8 +707,10 @@ export async function waoDoctorCommand(args, config) {
     : null;
   if (existsSync(skillsCopySkill)) {
     if (skillsSlotTarget !== null) {
-      rootVersions.push(["B skills 槽位（junction→A）", skillsVersion ?? "未知"]);
-      installLines.push(`skills 槽位是 junction/symlink → ${skillsSlotTarget}（与目标同体，零拷贝漂移；TD-191⑥）。`);
+      // 验收修（astra+opus）：不预断目标就是 A（当前检出）——如实显示实际目标，
+      // 是否同一份由读报告的人对照"当前检出"行判断。
+      rootVersions.push(["B skills 槽位（junction）", skillsVersion ?? "未知"]);
+      installLines.push(`skills 槽位是 junction/symlink → ${skillsSlotTarget}（与该目标同体；对照下方"当前检出"行判断是否同一份；TD-191⑥）。`);
     } else {
       rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
       const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");

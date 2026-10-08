@@ -412,6 +412,8 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
 // 上游 id 同一性对 CLI 后端作观测记录不作门：resume 若铸造新 thread id，"跨
 // run 上下文携带"仍由差分对照证明——不偷换判据，也不静默降杠。
 export const PHASE6_BACKEND_SHAPES = Object.freeze({
+  // 注（验收小项，opus）：distribution 字段只被 CLI 形状路径消费；deepseek-acp
+  // 走 legacy 判定（不读该字段）——保留它仅为形状表自描述完整性。
   "deepseek-acp": Object.freeze({
     distribution: "dsh",
     legacy: true,
@@ -948,6 +950,15 @@ function sessionReuseEvidenceCliShape(json, { expectedRuntimeIdentity = null, sh
     // 差分对照（形状差异①）：fresh 会话 first 轮、正常完成、答不出暗号。
     freshDifferential: turnFresh === "first" && negD.state === "completed" && !echoFresh.includes(json.marker),
     terminalCompleted: run1.state === "completed" && run2.state === "completed" && run3.state === "completed",
+    // 验收修 M1（astra+opus 双席可复现误放行）：run1 零工具必须被组件层判定消费
+    //——drill 侧断言不构成登记判据；字段缺失按不合格处理。
+    run1ZeroTool: run1.toolEventCount === 0,
+    // 验收修 M2：run2/run3/fresh 的零工具计数本版"在场必须为 0"（现存两份证据
+    // 未携带这些字段，其零工具事实由 2026-10-09 验收会审事后转录复核背书；
+    // 下次证据刷新起 drill 全量携带，届时改为必填）。
+    run2ZeroToolIfRecorded: run2.toolEventCount === undefined || run2.toolEventCount === 0,
+    run3ZeroToolIfRecorded: run3.toolEventCount === undefined || run3.toolEventCount === 0,
+    freshZeroToolIfRecorded: negD?.toolEventCount === undefined || negD?.toolEventCount === 0,
   };
   const derivedClaims = {
     resumeTurnRouted: positiveConditions.resumeTurnRouted,
@@ -994,6 +1005,26 @@ function sessionReuseEvidenceCliShape(json, { expectedRuntimeIdentity = null, sh
     return inconclusive("fail-closed negatives incomplete: negativeA/B/C/D must each reference an embedded negative control");
   }
 
+  // 验收修 M3（astra+opus 双席可复现误放行）：N-D 差分对照必须绑定为**同一个
+  // 独立 run**——fresh 输入、negativeD 摘要、embedded control 输入与派发摘要
+  // 四方 runId 一致，且不得与任一正向 run 重合；对照 prompt 必须与 run2 的
+  // 复述 prompt 逐字相同（差分才成立，也顺带堵"对照 prompt 携带暗号"）。
+  const freshRunIdCandidates = new Set([
+    inputs.freshControl.runId,
+    negD?.runId,
+    controlD?.input?.runId,
+    freshStep?.runId,
+  ]);
+  const freshRunId = [...freshRunIdCandidates][0];
+  if (freshRunIdCandidates.size !== 1
+    || typeof freshRunId !== "string" || freshRunId.length === 0
+    || freshRunId === run1.runId || freshRunId === run2.runId || freshRunId === run3.runId) {
+    return inconclusive("the N-D fresh differential control is not bound to one distinct run (fresh runIds disagree across input/summary/control/dispatch facts, or collide with a positive run)");
+  }
+  if (controlD.input?.prompt !== inputs.run2.prompt) {
+    return inconclusive("the N-D control prompt differs from the run2 echo prompt — the differential is not same-prompt");
+  }
+
   const rawNegativePasses = {
     negativeA: controlA.input?.kind === "prior-transcript-session-id"
       && controlA.input?.runId === run3.runId
@@ -1027,6 +1058,8 @@ function sessionReuseEvidenceCliShape(json, { expectedRuntimeIdentity = null, sh
     negativeD: controlD.input?.kind === "fresh-lead-differential"
       && controlD.control?.kind === "fresh_session_control"
       && controlD.control?.dispatchAccepted === true
+      && controlD.control?.providerSessionRouting === "first_turn_requested"
+      && freshStep?.accepted === true
       && controlD.control?.turn === "first"
       && controlD.control?.terminalState === "completed"
       && controlD.control?.markerEchoed === false,

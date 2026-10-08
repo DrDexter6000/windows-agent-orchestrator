@@ -170,10 +170,15 @@ function nativeSessionId(events, runId) {
   return typeof sid === "string" && sid.length > 0 && !PROC_PLACEHOLDER.test(sid) ? sid : null;
 }
 
-// 会审修②：run1 零工具断言的辅助——统计 tool_use/tool_result/command 事件数。
+// 会审修②+验收修 M2（opus）：零工具计数必须含 file_written（codex parser 把
+// file_change 投影成 kind:"file_written"——只数 tool_use/tool_result/command 堵不住
+// "写 workspace 文件"那条泄漏路径）。已知边界如实记：codex parser 不投影
+// mcp_tool_call / web_search 类 item，此类调用在转录里不可见，计数照不到。
+// 暗号已在 workspace（本 drill 的转录就在 ROOT/.wao/runs/ 下、cwd=ROOT）——
+// 所以 run2/run3/fresh 也必须零工具，不能只断言 run1。
 function toolEventCount(events, runId) {
   return events.filter((e) => e?.type === "run.event" && e.runId === runId
-    && (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "command")).length;
+    && (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "command" || e.kind === "file_written")).length;
 }
 
 async function dispatch(prompt, label, lead = LEAD) {
@@ -242,11 +247,28 @@ evidence.steps.run2 = {
   },
 };
 if (t2.state !== "completed") fail(`run2 state=${t2.state}`);
+// 验收修 M2：run2 也必须零工具——暗号已随 run1 转录落在 ROOT/.wao/runs/ 下，
+// run2 若动工具即可从 workspace 读到，差分即失效。
+const run2ToolEvents = toolEventCount(t2.events, r2.runId);
+evidence.steps.run2.toolEventCount = run2ToolEvents;
+if (run2ToolEvents !== 0) fail(`run2 used ${run2ToolEvents} tool/command/file events — marker reachable from workspace, differential invalid`);
 if (evidence.steps.run2.runSessionReuseTurn !== "resume") fail("run2 run.session_reuse.turn !== resume");
 if (sid2 === null) fail("run2 has no late-bound native session id — a run3 would be fail-closed refused (TD-188 shape)");
 if (!echo2.includes(MARKER)) fail("run2 did not echo the marker (context not carried)");
 
 // ── 正向 run 3（会审修③，链深 ≥2）：路由条目应已推进到 run2，run3 续 run2 ──
+// 验收采纳（astra/opus 建议）：run2 终态后、run3 派发前拍路由条目快照——应为
+// {runId: run2.runId}，与 run3 的 resume 事实共同钉住"条目推进到 run2"。
+try {
+  const snapDir = join(runDir, ".session-reuse");
+  for (const name of readdirSync(snapDir)) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(join(snapDir, name), "utf8"));
+      if (parsed?.runId === r2.runId) evidence.routingEntryAfterRun2 = { keyFile: name, runId: parsed.runId };
+    } catch { /* 损坏条目跳过 */ }
+  }
+} catch { /* 目录读失败如实缺省 */ }
 const r3 = await dispatch(run2Prompt, "run3");
 if (!r3.accepted) fail("run3 not accepted");
 if (r3.providerSessionRouting !== "resume_requested") fail(`run3 routing=${r3.providerSessionRouting}`);
@@ -267,6 +289,10 @@ evidence.steps.run3 = {
   },
 };
 if (t3.state !== "completed") fail(`run3 state=${t3.state}`);
+// 验收修 M2：run3 同 run2 理由——链上任何一轮动工具都会污染差分。
+const run3ToolEvents = toolEventCount(t3.events, r3.runId);
+evidence.steps.run3.toolEventCount = run3ToolEvents;
+if (run3ToolEvents !== 0) fail(`run3 used ${run3ToolEvents} tool/command/file events`);
 if (evidence.steps.run3.runSessionReuseTurn !== "resume") fail("run3 run.session_reuse.turn !== resume");
 if (sid3 === null) fail("run3 has no late-bound native session id — chain cannot continue");
 if (!echo3.includes(MARKER)) fail("run3 did not echo the marker (chain context lost)");
@@ -318,6 +344,10 @@ evidence.negativeD = {
 if (t4.state !== "completed") fail(`N-D fresh control state=${t4.state} (must complete to be a valid control)`);
 if (evidence.negativeD.runSessionReuseTurn !== "first") fail("N-D fresh control was not routed as a first turn");
 if (echo4.includes(MARKER)) fail("N-D fresh conversation echoed the marker — context leaked outside the resumed conversation (workspace file or cross-session memory); positive evidence invalidated");
+// 验收修 M2：fresh 对照同样零工具（它若读 workspace 也能答出，差分即失效）。
+const freshToolEvents = toolEventCount(t4.events, r4.runId);
+evidence.negativeD.toolEventCount = freshToolEvents;
+if (freshToolEvents !== 0) fail(`N-D fresh control used ${freshToolEvents} tool/command/file events`);
 evidence.negativeD.pass = true;
 
 // ── 负向 A（共享核心，后端无关）：前任转录（=最新 run3）session.created.backendSessionId
@@ -383,12 +413,14 @@ evidence.negativeB = {
 writeFileSync(entryPath, entryBackup, "utf8");
 if (!evidence.negativeB.pass) fail(`negative B failed: ${JSON.stringify(negB)}`);
 
-// ── 负向 C（会审修④）：关联指向不存在的会话 → 上游在会话查找阶段拒绝 →
-//    run failed，绝不静默新会话。CLI 形状断言：(a) run 以 failed 终态且
-//    run.error 文本命中该后端实测的上游拒绝形状；(b) 本 run 从未观察到非占位
-//    native id，也无 run.provider_session_bound——若上游静默回退新会话，run 会
-//    completed 且 late-bind 出新 id，两条都不会成立。真实进程；上游在模型调用
-//    前拒绝（本轮无 usage 事实，不宣称零 token）。──
+// ── 负向 C（会审修④+验收收窄）：关联指向不存在的会话 → 上游拒绝 → run
+//    failed，绝不静默新会话。CLI 形状断言：(a) run 以 failed 终态且 run.error
+//    文本命中该后端实测的上游拒绝形状；(b) 本 run 全部 session.created 里从未
+//    出现非占位 native id，也无 run.provider_session_bound——若上游静默回退新
+//    会话，run 会 completed 且 late-bind 出新 id，两条都不会成立。真实进程。
+//    文案纪律（astra）：观察到会话查找拒绝错误；无 native id、无
+//    provider_session_bound；未观察到 usage，不宣称零 token、不宣称"模型调用前"
+//    为转录直接证明的事实。──
 const fakeSid = cfg.negativeCFakeId;
 rewritePrior(t3.events, (e) => (e?.type === "session.created" && e.runId === r3.runId
   ? { ...e, backendSessionId: fakeSid }
@@ -399,7 +431,11 @@ if (!r5.accepted || r5.providerSessionRouting !== "resume_requested") {
 }
 const t5 = await waitForTerminal(r5.runId);
 const err5 = fact(t5.events, "run.error", r5.runId);
-const nativeObserved = nativeSessionId(t5.events, r5.runId) !== null;
+// 验收修 astra-3：判"从未出现 native id"必须扫该 run 的**全部** session.created
+//（LAST-bound 会漏"native → proc_"序列——早先出现过 native id 一样是回退证据）。
+const nativeObserved = t5.events.some((e) => e?.type === "session.created" && e.runId === r5.runId
+  && typeof e.backendSessionId === "string" && e.backendSessionId.length > 0
+  && !PROC_PLACEHOLDER.test(e.backendSessionId));
 const providerSessionBoundEvents = t5.events.filter((e) => e?.type === "run.provider_session_bound" && e.runId === r5.runId).length;
 evidence.negativeC = {
   evidenceRef: "negativeC",
@@ -499,7 +535,7 @@ evidence.embeddedEvidence = {
 evidence.pass = true;
 evidence.repro = [
   `node scripts/wao-node.cjs scripts/reliability/session-reuse-drill.mjs --backend ${backendName}`,
-  "consumes real tokens (run1/run2/run3/fresh-control are small model turns; negC is rejected upstream at session lookup, before the model — no usage fact observed this turn)",
+  "consumes real tokens (run1/run2/run3/fresh-control are small model turns; negC observed a session-lookup refusal error with no native id and no provider_session_bound, no usage observed — zero-token is NOT claimed)",
   `prereq: ${backendName} CLI on PATH and logged in; registry source ${registrySource} (read-only copy, scratch lane injected)`,
 ];
 writeFileSync(evidencePath, JSON.stringify(evidence, null, 2), "utf8");

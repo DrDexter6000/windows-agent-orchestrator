@@ -1418,6 +1418,63 @@ test("kernel: TD-184 CLI 形状验证器——暗号泄漏/占位 id/差分缺�
   assert.equal(r6.accepted, true, `kimi synthetic evidence must pass: ${r6.detail}`);
 });
 
+// 验收修反例（2026-10-09 astra+opus 验收会审可复现误放行，双席各复现一部分）：
+// M1 run1 零工具门、M2 在场必须为 0、M3 N-D 四方 runId 绑定与同 prompt。
+test("kernel: TD-184 验收修——run1 零工具门与 N-D 四方绑定反例", () => {
+  const clone = () => structuredClone(cliEvidenceBase());
+
+  // M1：toolEventCount 改 9 → 不得 accepted。
+  const usedTools = clone();
+  usedTools.steps.run1.toolEventCount = 9;
+  const m1a = sessionReuseEvidenceFromPhase6File(usedTools, { backendName: "codex" });
+  assert.equal(m1a.accepted, false);
+
+  // M1：字段删除（undefined）同样不得 accepted——零工具是登记判据非可选装饰。
+  const noCount = clone();
+  delete noCount.steps.run1.toolEventCount;
+  const m1b = sessionReuseEvidenceFromPhase6File(noCount, { backendName: "codex" });
+  assert.equal(m1b.accepted, false);
+
+  // M2：run2 携带非零 toolEventCount（在场必须为 0）→ 不得 accepted。
+  const run2Tools = clone();
+  run2Tools.steps.run2.toolEventCount = 2;
+  const m2 = sessionReuseEvidenceFromPhase6File(run2Tools, { backendName: "codex" });
+  assert.equal(m2.accepted, false);
+
+  // M3：fresh 派发摘要（steps.negD_fresh_control.runId）指向 run2 → 四方不一致。
+  const swapped = clone();
+  swapped.steps.negD_fresh_control.runId = swapped.steps.run2.runId;
+  const m3a = sessionReuseEvidenceFromPhase6File(swapped, { backendName: "codex" });
+  assert.equal(m3a.accepted, false);
+  assert.match(m3a.detail, /not bound to one distinct run/);
+
+  // M3：对照 prompt 与 run2 复述 prompt 不同（差分不成立）。
+  const diffPrompt = clone();
+  for (const c of diffPrompt.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeD") c.input.prompt = "some other prompt";
+  }
+  const m3b = sessionReuseEvidenceFromPhase6File(diffPrompt, { backendName: "codex" });
+  assert.equal(m3b.accepted, false);
+  assert.match(m3b.detail, /not same-prompt|differential is not same-prompt/);
+
+  // M3：对照 prompt 携带暗号明文（astra 复现形）→ 不得 accepted。
+  const markerPrompt = clone();
+  for (const c of markerPrompt.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeD") c.input.prompt += ` (it is ${markerPrompt.marker})`;
+  }
+  const m3c = sessionReuseEvidenceFromPhase6File(markerPrompt, { backendName: "codex" });
+  assert.equal(m3c.accepted, false);
+
+  // M3：fresh 派发 accepted=false 冒充差分 → 不得 accepted。
+  const notAccepted = clone();
+  notAccepted.steps.negD_fresh_control.accepted = false;
+  for (const c of notAccepted.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeD") c.control.dispatchAccepted = false;
+  }
+  const m3d = sessionReuseEvidenceFromPhase6File(notAccepted, { backendName: "codex" });
+  assert.equal(m3d.accepted, false);
+});
+
 test("kernel: 配置传递按支持范围——装配带 model → 值必须送达；装配无 model → 注入必须明确拒绝（ADR-0032 §2）", () => {
   const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
   // 支持范围含模型选择（装配携带 model 块）：送达 → 绿；未送达/静默丢弃 → 红。
