@@ -48,7 +48,7 @@ import { readTranscript } from "../transcript.js";
 import { validateDeliveryFacts } from "../transcript.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
-import { assertDeliveryCommitInRepository, isValidRunId } from "../delivery.js";
+import { assertDeliveryCommitInRepository, isValidRunId, gitChildEnv } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
 import { projectDeliveryReadiness } from "./runDelivery.js";
 import { REVIEW_PENDING_REASON } from "./reviewUnavailableReasons.js";
@@ -225,8 +225,8 @@ function gitReadBounded(args, cwd, gitExec) {
     const out = exec("git", args, {
       cwd,
       encoding: "utf8",
-      // TD-236：review 面 diff 读取禁用 replace objects（force-last，注入 exec 不受影响）。
-      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+      // TD-236：review 面 diff 读取禁用 replace objects（gitChildEnv SSOT，注入 exec 不受影响）。
+      env: gitChildEnv(),
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
       maxBuffer: GIT_DIFF_MAX_BUFFER,

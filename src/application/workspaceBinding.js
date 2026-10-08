@@ -29,6 +29,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { gitChildEnv } from "../delivery.js";
 
 // Windows: normalize drive letter casing and slashes for comparison.
 /**
@@ -85,8 +86,8 @@ function git(args, cwd, opts = {}) {
   return execFileSync(bin, args, {
     cwd,
     encoding: "utf8",
-    // TD-236：期望锚证明读取禁用 replace objects（force-last）。
-    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+    // TD-236：期望锚证明读取禁用 replace objects（gitChildEnv SSOT）。
+    env: gitChildEnv(),
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 }

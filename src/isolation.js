@@ -1,7 +1,7 @@
 import { execSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync, rmSync } from "node:fs";
-import { isValidRunId } from "./delivery.js";
+import { isValidRunId, gitChildEnv } from "./delivery.js";
 import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
 /**
@@ -58,8 +58,8 @@ export async function createWorktree(sourceCwd, name, opts = {}) {
   }
   execFileSync("git", args, {
     cwd,
-    // TD-236：交付 worktree 创建/检出禁用 replace objects（force-last）。
-    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+    // TD-236：交付 worktree 创建/检出禁用 replace objects（gitChildEnv SSOT）。
+    env: gitChildEnv(),
     stdio: "pipe",
     windowsHide: true,
   });
@@ -89,8 +89,8 @@ export function removeWorktree(wtPath) {
     try {
       execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: path,
-        // TD-236：worktree 清理同样禁用 replace objects（force-last）。
-        env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+        // TD-236：worktree 清理同样禁用 replace objects（gitChildEnv SSOT）。
+        env: gitChildEnv(),
         stdio: "pipe",
         windowsHide: true,
       });

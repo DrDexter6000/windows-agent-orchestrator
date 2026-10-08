@@ -730,17 +730,24 @@ async function _repackageAllPhases({
     try {
       resolved = await _resolve(deliveryCtx);
     } catch (err) {
-      // 会审验收修（opus R1）：Phase 0 实测 HEAD==base 的候选，resolve 阶段的
-      // artifact_mismatch 只能意味着 HEAD 在本次尝试内被移动后回退失败——
-      // 基础设施故障，不洗成政策拒绝。判据是 Phase 0 的实测事实，不是
-      // recoveryKind 代理（后者对 disallowed_scope 的同形残留守不住）。
-      const rollbackFailure = err instanceof DeliveryError
+      // TD-235 精确化（会审 astra 判定，2026-10-08，取代 opus R1 的 headAtBase
+      // 单判据）：artifact_mismatch→worktree_unusable 桥只在【错误确来自
+      // resolveDeliveryCommit 的 recover 分支】且【Phase 0 实测 headAtBase===false】
+      // 时成立——真漂移（外来提交/中断残留）经 recover 全验失败才是政策拒绝。
+      // 其余 artifact_mismatch 一律原样抛出：package 分支的打包回退失败（Phase 0
+      // 测值可能已陈旧——恰见他方打包中间态、他方回退到 base 后本方打包回退
+      // 失败）与无标记错误（注入/旧内核）都按基础设施故障处理，不得洗成可
+      // 重试的政策拒绝（失败安全方向）。
+      const recoverMismatch = err instanceof DeliveryError
         && err.deliveryCode === "artifact_mismatch"
-        && original.headAtBase === true;
+        && err.resolveBranch === "recover"
+        && original.headAtBase === false;
       const code = err instanceof DeliveryError
         && Object.hasOwn(REPACKAGE_DELIVERY_POLICY_CODES, err.deliveryCode)
         ? REPACKAGE_DELIVERY_POLICY_CODES[err.deliveryCode] : null;
-      if (code && !rollbackFailure) throw new RepackageRejectionError(code, err.message);
+      const bridged = code !== null
+        && (err.deliveryCode !== "artifact_mismatch" || recoverMismatch);
+      if (bridged) throw new RepackageRejectionError(code, err.message);
       throw err;
     }
     resolvedRef = resolved.ref;

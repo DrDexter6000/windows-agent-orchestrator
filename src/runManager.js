@@ -10,7 +10,7 @@ import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
-import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
+import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256 } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
@@ -1139,8 +1139,8 @@ export class RunManager {
         execFileSync("git", ["rev-parse", "HEAD"], {
           cwd: agent.cwd,
           encoding: "utf8",
-          // TD-236：base head 冻结读取禁用 replace objects（force-last）。
-          env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+          // TD-236：base head 冻结读取禁用 replace objects（gitChildEnv SSOT）。
+          env: gitChildEnv(),
           stdio: ["pipe", "pipe", "ignore"],
           windowsHide: true,
         }),

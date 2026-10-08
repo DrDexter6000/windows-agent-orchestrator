@@ -19,6 +19,7 @@
       "backends/stallBudget.test.js",
       "backends/zcode.test.js",
       "delivery/deliveryReview.test.js",
+      "delivery/gitChildEnvGuard.test.js",
       "delivery/m11-12b-verificationSummary.test.js",
       "delivery/m11-8c-gate.test.js",
       "delivery/mcpRunDelivery.test.js",
@@ -232,7 +233,8 @@
       "run-lifecycle/runsListSmoke.test.js",
       "isolation-infra/workspaceBinding.test.js",
       "registry-roles/leadPreflightObservability.test.js",
-      "delivery/gitNoReplacePin.test.js"
+      "delivery/gitNoReplacePin.test.js",
+      "delivery/td235ResolveBranch.test.js"
     ],
     "worktree": [
       "delivery/delivery.test.js",

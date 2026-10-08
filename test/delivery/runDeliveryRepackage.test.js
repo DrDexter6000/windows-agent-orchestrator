@@ -1829,6 +1829,15 @@ const td231Input = (s) => ({
   allowedPaths: ["root.txt", "src"], verifyDeliveryFn: passedVerifier,
 });
 
+// TD-235：按内核契约构造带 resolveBranch 标记的注入 fault（不可枚举，同
+// delivery.js tagResolveBranch 的选形）；branch 为 null/undefined 时不打标
+// （模拟无标记错误——注入或旧内核形态）。
+function taggedResolveFault(deliveryCode, message, branch) {
+  const fault = new DeliveryError(deliveryCode, message);
+  if (branch) Object.defineProperty(fault, "resolveBranch", { value: branch });
+  return fault;
+}
+
 function assertAuditDelta(before, after, code) {
   assert.deepEqual(after.slice(0, before.length), before, "existing facts preserved");
   const delta = after.slice(before.length);
@@ -2077,10 +2086,10 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
         assertAuditDelta(before, await readEvents(s.runDir), null);
       }
     }
-    // 会审验收修（opus R1）：artifact_mismatch 的桥接前提是 Phase 0 实测 HEAD≠base
-    // （真漂移——外来提交/中断恢复残留）。fixture 默认 HEAD==base，在该形态下
-    // artifact_mismatch 只能是本方打包回退残留 → 保持意外（防洗白）。外来提交
-    // 前奏让本行回到真漂移形态。
+    // TD-235 精确化（会审 astra 判定，取代 opus R1 的 headAtBase 单判据）：
+    // artifact_mismatch→worktree_unusable 桥只在【resolveBranch==="recover"】
+    // 且【Phase 0 实测 HEAD≠base】时成立。注入 fault 按内核契约带标记；其余
+    // 码（disallowed_path 等）的映射不要求标记。
     for (const [deliveryCode, expected, driftPreamble] of [
       ["artifact_mismatch", "worktree_unusable", true],
       ["disallowed_path", "scope_violation", false],
@@ -2089,20 +2098,67 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
     ]) {
       if (driftPreamble) git(["commit", "--allow-empty", "-m", "foreign"], s.worktreePath);
       const before = await readEvents(s.runDir);
-      await assert.rejects(runDeliveryRepackage({ ...td231Input(s), resolveDeliveryCommitFn: () => { throw new DeliveryError(deliveryCode, "arbitrary wording"); } }), isCode(expected));
+      await assert.rejects(runDeliveryRepackage({
+        ...td231Input(s),
+        resolveDeliveryCommitFn: () => {
+          throw taggedResolveFault(deliveryCode, "arbitrary wording",
+            deliveryCode === "artifact_mismatch" ? "recover" : undefined);
+        },
+      }), isCode(expected));
       assertAuditDelta(before, await readEvents(s.runDir), expected);
     }
-    // R1 反例钉（opus 真实 Git 复现）：disallowed_scope 且 Phase 0 实测 HEAD==base，
-    // resolve 抛 artifact_mismatch（打包回退残留形态）→ 不桥接、零审计。
-    {
+    // TD-235 守卫矩阵（_resolve 注入，确定性，不打真并发竞态）：除
+    // recover+真漂移外一律原样抛出——无标记错误默认按基础设施故障处理
+    // （失败安全方向），不洗成可重试的政策拒绝、零审计。
+    // 行元组 [resolveBranch, drift（外来提交前奏→Phase 0 实测 headAtBase=false）, 期望]。
+    for (const [branch, drift, expected] of [
+      ["recover", true, "worktree_unusable"], // 真漂移 + recover 全验失败 → 政策拒绝
+      ["recover", false, null], // Phase 0 实测 base：漂移发生在本次尝试内 → 意外（R1 语义保留）
+      ["package", true, null],  // TD-235 修复：陈旧 Phase 0 测值不得洗白 package 回退失败
+      ["package", false, null],
+      [null, true, null],       // 无标记（注入/旧内核形态）→ 意外（失败安全默认）
+      [null, false, null],
+    ]) {
       const s2 = await setupDisallowedScenario();
       try {
-        const fault = new DeliveryError("artifact_mismatch", "recovered commit message mismatch");
+        if (drift) git(["commit", "--allow-empty", "-m", "foreign"], s2.worktreePath);
+        const fault = taggedResolveFault("artifact_mismatch", "TD-235 guard matrix fault", branch);
         const before = await readEvents(s2.runDir);
         await assert.rejects(runDeliveryRepackage({
           ...td231Input(s2),
           resolveDeliveryCommitFn: () => { throw fault; },
-        }), (err) => err === fault, "HEAD==base 的 artifact_mismatch 保持意外（防洗白，opus R1）");
+        }), expected
+          ? isCode(expected)
+          : (err) => err === fault && classifyRepackageRejection(err) === null,
+          `resolveBranch=${branch} headAtBase=${drift ? "false" : "true"} → ${expected ?? "保持原错误"}`);
+        assertAuditDelta(before, await readEvents(s2.runDir), expected);
+      } finally { await cleanupDir(s2.repo); await cleanupDir(s2.runDir); }
+    }
+    // TD-235 并发场景钉（台账①，opus R1 场景的精确化复现）：Phase 0 恰见他方
+    // 打包的中间态（实测 headAtBase=false），他方随后回退到 base；本方 resolve
+    // 入口见 HEAD==base（package 分支），本方打包回退失败 → 不得按陈旧的
+    // Phase 0 测值洗成可重试的 worktree_unusable（保持原错误可见、零审计）。
+    {
+      const s2 = await setupDisallowedScenario();
+      try {
+        git(["commit", "--allow-empty", "-m", "foreign intermediate"], s2.worktreePath);
+        const fault = taggedResolveFault(
+          "artifact_mismatch", "packaging rollback failed (concurrent winner rolled back)", "package");
+        const before = await readEvents(s2.runDir);
+        await assert.rejects(runDeliveryRepackage({
+          ...td231Input(s2),
+          resolveDeliveryCommitFn: async () => {
+            // Phase 0 已实测漂移（此刻分支仍在他方中间态）；他方回退到 base 后
+            // 本方才进入 resolve——入口 HEAD==base，走的是 package 分支。
+            assert.notEqual(git(["rev-parse", "HEAD"], s2.worktreePath), s2.baseCommit,
+              "前置自检：Phase 0 必已实测 headAtBase=false");
+            git(["update-ref", `refs/heads/wao/${RUN_ID}`, s2.baseCommit], s2.repo);
+            assert.equal(git(["rev-parse", "HEAD"], s2.worktreePath), s2.baseCommit,
+              "回退后 resolve 入口 HEAD==base（package 分支）");
+            throw fault;
+          },
+        }), (err) => err === fault && classifyRepackageRejection(err) === null,
+          "不得洗成可重试的 worktree_unusable（TD-235：保持原错误可见）");
         assertAuditDelta(before, await readEvents(s2.runDir), null);
       } finally { await cleanupDir(s2.repo); await cleanupDir(s2.runDir); }
     }

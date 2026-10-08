@@ -839,7 +839,18 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      this.seq = Math.max(this.seq, await readMaxSeq(this.filePath)) + 1;
+      // TD-235 残余（TD-234 同款）：锁内读失败不再吞成 0——ENOENT 仅在
+      // 【证明确为首写】（this.seq===0：实例既无 initialSeq、未写过事件、也未
+      // 读到过非空账本）时视为合法空账本；既有账本丢失（seq>0 的 ENOENT）、
+      // 其余 I/O 故障、撕裂行 JSON.parse 失败一律上抛。
+      let maxSeq;
+      try {
+        maxSeq = await readMaxSeq(this.filePath);
+      } catch (err) {
+        if (err && err.code === "ENOENT" && this.seq === 0) maxSeq = 0;
+        else throw err;
+      }
+      this.seq = Math.max(this.seq, maxSeq) + 1;
       const event = {
         ...this.redact(payload),
         ts: new Date().toISOString(),
@@ -2403,12 +2414,12 @@ async function removeStaleLock(lockPath) {
   }
 }
 
+// TD-235 残余（会审，2026-10-08）：锁内读失败不再吞成 0。除【证明确为首写】的
+// ENOENT（豁免在调用方 append 内按 this.seq===0 判定，TD-234 同款）外一律
+// 重抛——撕裂行 JSON.parse 失败也重抛：此后转录无法再追加，这是有意的
+// 失败安全（钉测试见 test/transcript/transcript.test.js 的 readMaxSeq 三态）。
 async function readMaxSeq(filePath) {
-  try {
-    return findLastEventSeq(await readTranscript(filePath));
-  } catch {
-    return 0;
-  }
+  return findLastEventSeq(await readTranscript(filePath));
 }
 
 function sleep(ms) {

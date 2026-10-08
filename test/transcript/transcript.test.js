@@ -64,7 +64,15 @@ test("append auto-increments seq monotonically", async () => {
 
 test("append can continue from an existing max seq", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-transcript-resume-seq-"));
-  const transcript = new JsonlTranscript(join(dir, "run.jsonl"), {
+  const filePath = join(dir, "run.jsonl");
+  // TD-235：锁内读不再吞 ENOENT——续写场景必须真实存在账本（seed 到 seq 6）。
+  // initialSeq>0 而文件不存在 = 账本丢失，按失败安全上抛（TD-234 同款语义，
+  // 钉在下方 TD-235 三态测试）。
+  await writeFile(filePath, Array.from({ length: 6 }, (_, i) => JSON.stringify({
+    ts: "2026-07-01T00:00:00.000Z", seq: i + 1, runId: "run_seq", agentId: "agent_x",
+    type: "run.event", payloadIndex: i,
+  })).join("\n") + "\n", "utf8");
+  const transcript = new JsonlTranscript(filePath, {
     runId: "run_seq",
     agentId: "agent_x",
     initialSeq: 6,
@@ -73,7 +81,7 @@ test("append can continue from an existing max seq", async () => {
   await transcript.append("run.stop_requested", {});
 
   const events = await readTranscript(transcript.filePath);
-  assert.equal(events[0].seq, 7);
+  assert.equal(events[6].seq, 7);
 });
 
 test("TD-55: append coordinates seq across multiple transcript instances", async () => {
@@ -1554,6 +1562,105 @@ test("TD-71: EEXIST still routes to stale-lock handling (regression — retry se
     await release();
   } finally {
     __resetAppendLockFsForTest();
+  }
+});
+
+// ── TD-235 残余：append 锁内 readMaxSeq 三态钉 ──────────────────────────────
+// ENOENT 仅在【证明确为首写】（this.seq===0）时放行为空账本；其余读失败与
+// 撕裂行一律重抛。撕裂行重抛意味着该转录无法再追加——这是有意的失败安全
+// （吞掉撕裂行会静默覆盖既有事件的 seq），不是事故。
+
+test("TD-235: 首写 ENOENT 放行——新转录第一次 append（seq===0）正常落盘", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td235-firstwrite-"));
+  try {
+    const filePath = join(dir, "run.jsonl");
+    const t = new JsonlTranscript(filePath, { runId: "run_td235", agentId: "agent_x" });
+    assert.equal(t.seq, 0, "新实例无 initialSeq、未写过——证明确为首写");
+    const event = await t.append("run.started", { cwd: "D:/projects/worktree" });
+    assert.equal(event.seq, 1, "空账本上首事件 seq=1");
+    assert.equal((await readTranscript(filePath)).length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-235: 既有账本丢失的 ENOENT 重抛（initialSeq>0 与本实例已写过两种形态）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td235-lostledger-"));
+  try {
+    // 形态一：restart/resume 携带 initialSeq>0，文件却不存在——账本丢失，不是首写。
+    const restarted = new JsonlTranscript(join(dir, "a.jsonl"), {
+      runId: "run_td235", agentId: "agent_x", initialSeq: 3,
+    });
+    await assert.rejects(
+      () => restarted.append("run.event", {}),
+      (err) => err?.code === "ENOENT",
+      "initialSeq>0 的 ENOENT 是账本丢失，必须上抛",
+    );
+    // 形态二：本实例已成功写过（this.seq>0），文件随后消失——同样不是首写。
+    const filePath = join(dir, "b.jsonl");
+    const t = new JsonlTranscript(filePath, { runId: "run_td235", agentId: "agent_x" });
+    await t.append("run.event", {});
+    await rm(filePath, { force: true });
+    await assert.rejects(
+      () => t.append("run.event", {}),
+      (err) => err?.code === "ENOENT",
+      "本实例已写过的 ENOENT 是账本丢失，必须上抛",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-235: 非 ENOENT 读失败重抛（注入 EACCES），且不落任何字节", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "td235-eacces-"));
+  const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+  const read = fsPromises.readFile;
+  const mocked = t.mock.method(fsPromises, "readFile", async (path, ...rest) => {
+    if (path === join(dir, "run.jsonl")) throw fault;
+    return read(path, ...rest);
+  });
+  syncBuiltinESMExports();
+  try {
+    const transcript = new JsonlTranscript(join(dir, "run.jsonl"), {
+      runId: "run_td235", agentId: "agent_x",
+    });
+    await assert.rejects(
+      () => transcript.append("run.event", {}),
+      (err) => err === fault,
+      "锁内读失败原样上抛（不再吞成 0）",
+    );
+    assert.equal(mocked.mock.calls.length >= 1, true, "注入点确实命中");
+    // 用 mock 生效前捕获的原始 readFile 断言字节面：失败的 append 不创建转录。
+    await assert.rejects(read(join(dir, "run.jsonl")), (err) => err?.code === "ENOENT",
+      "失败的 append 不落任何字节（转录文件未创建）");
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-235: 撕裂行重抛——转录无法再追加（有意的失败安全，非事故）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td235-torn-"));
+  try {
+    const filePath = join(dir, "run.jsonl");
+    const torn = [
+      JSON.stringify({ ts: "2026-07-01T00:00:00.000Z", seq: 1, runId: "run_td235", agentId: "agent_x", type: "run.event", ok: true }),
+      '{"seq":2 "torn line without comma',
+    ].join("\n") + "\n";
+    await writeFile(filePath, torn, "utf8");
+    const t = new JsonlTranscript(filePath, { runId: "run_td235", agentId: "agent_x" });
+    await assert.rejects(
+      () => t.append("run.event", {}),
+      (err) => err instanceof SyntaxError && /JSON/.test(String(err.message)),
+      "撕裂行 JSON.Parse 失败必须上抛（吞掉即静默重编 seq）",
+    );
+    // 钉死副作用面：失败的 append 不改变账本字节——之后仍无法追加（同错重抛）。
+    assert.equal(await readFile(filePath, "utf8"), torn, "账本字节不变");
+    await assert.rejects(() => t.append("run.event", {}), (err) => err instanceof SyntaxError,
+      "撕裂账本持续拒绝追加（失败安全保持）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

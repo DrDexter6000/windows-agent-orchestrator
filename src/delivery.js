@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { resolve, isAbsolute, normalize as posixNormalize } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, isAbsolute, join, normalize as posixNormalize } from "node:path";
 import { posix } from "node:path";
 
 /**
@@ -49,6 +50,20 @@ const DELIVERY_IDENTITY = {
 // ===== Git execution (structured args, never shell strings) =====
 
 /**
+ * TD-236 升级（会审 opus）：交付完整性面 git 子进程 env 的唯一 SSOT。
+ * force-last 注入 GIT_NO_REPLACE_OBJECTS=1——spread 在前、覆写在后，调用方
+ * env 无法反盖（refs/replace 可整体替换提交对象/伪造父链，洗白走私改动）。
+ * 调用方的身份 env（如 commitEnv 的 GIT_AUTHOR_*）经 spread 原样传递、不受
+ * 影响。交付完整性模块一律 import 此函数，不得复制第二份注入字面量（源钉
+ * test/delivery/gitNoReplacePin.test.js；扫源守卫 test/delivery/gitChildEnvGuard.test.js）。
+ * @param {object} [callerEnv] — 调用方 env（缺省 process.env）
+ * @returns {object} 新构造的 env 对象（不修改 callerEnv）
+ */
+export function gitChildEnv(callerEnv) {
+  return { ...(callerEnv ?? process.env), GIT_NO_REPLACE_OBJECTS: "1" };
+}
+
+/**
  * Run git with structured args, return stdout (utf8 by default).
  * @param {string[]} args
  * @param {{cwd?: string, encoding?: string|null, input?: string|Buffer, env?: object}} [opts]
@@ -58,10 +73,7 @@ function git(args, opts = {}) {
   return execFileSync("git", args, {
     cwd: opts.cwd,
     encoding: opts.encoding ?? "utf8",
-    // TD-236（2026-10-09）：交付完整性读取禁用 replace objects（refs/replace
-    // 可整体替换提交对象/graft 伪造父链——会审 opus 实测）。force-last：调用方
-    // env 无法反盖此值。
-    env: { ...(opts.env ?? process.env), GIT_NO_REPLACE_OBJECTS: "1" },
+    env: gitChildEnv(opts.env),
     input: opts.input,
     stdio: ["pipe", "pipe", "ignore"], // swallow stderr to keep errors clean
     windowsHide: true,
@@ -1939,6 +1951,36 @@ function recoverDeliveryCommit(input) {
 }
 
 /**
+ * TD-235（会审 opus 选形，2026-10-08）：给 resolveDeliveryCommit 抛出的错误打
+ * 分支来源标记。不可枚举属性：不改错误 identity/name，不被 JSON 序列化带出。
+ * 防洗白守卫（runDeliveryRepackage）只认显式的 "recover" 标记；无标记的错误
+ * 按基础设施故障处理（失败安全方向）。
+ * @param {unknown} err
+ * @param {"package"|"recover"} branch
+ */
+function tagResolveBranch(err, branch) {
+  if (err instanceof Error) {
+    Object.defineProperty(err, "resolveBranch", { value: branch });
+  }
+}
+
+/**
+ * TD-236 升级（会审 opus 推断防线，按 fail-closed 实现）：GIT_NO_REPLACE_OBJECTS
+ * 管不到 .git/info/grafts——grafts 文件可等价伪造父链，骗过 package/recover 的
+ * 父链与内容全验（git 2.50 实测：grafts 生效且不受该 env 影响）。共享对象库
+ * 所属的 common git dir 下 grafts 文件在场即拒绝交付判定，不解读内容。
+ * @param {string} cwd — worktree 路径
+ * @throws {DeliveryError} code "grafts_present"
+ */
+function assertNoGrafts(cwd) {
+  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
+  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
+  if (existsSync(join(commonDirRaw, "info", "grafts"))) {
+    throw new DeliveryError("grafts_present", "grafts 文件在场不支持交付判定");
+  }
+}
+
+/**
  * Resolve the unique delivery commit for a model-free repackage: package fresh
  * when HEAD is at base, or recover the existing commit when HEAD is already past
  * base (crash/concurrency convergence). Deterministic — same inputs always yield
@@ -1946,9 +1988,16 @@ function recoverDeliveryCommit(input) {
  * HEAD was at base), falls back to recovering the now-current HEAD instead of
  * erroring, so competing same-input requests converge on one commit.
  *
+ * TD-235：每个抛出的错误都带不可枚举的 resolveBranch 标记——依据是【入口那
+ * 一刻 HEAD 是否等于 base】：package 分支（入口 HEAD==base 的打包失败，含
+ * 回退后仍在 base 的形态）标 "package"；两个 recover 入口（入口即漂移、
+ * 打包竞态败给并发胜者后的回退恢复）的失败标 "recover"。分支判定前的
+ * 基础设施 git 读失败不带标记（守卫按基础设施故障处理）。
+ *
  * @param {object} input — same shape as packageDelivery/inspectDelivery
  * @returns {{ref: object, source: "packaged"|"recovered"}}
- * @throws {DeliveryError} on any packaging/proof failure
+ * @throws {DeliveryError} on any packaging/proof failure — carrying the
+ *   non-enumerable resolveBranch tag ("package"|"recover") described above
  */
 export function resolveDeliveryCommit(input) {
   const validated = validateInput(input);
@@ -1959,6 +2008,10 @@ export function resolveDeliveryCommit(input) {
   ).trim();
   const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
 
+  // TD-236：grafts 防线在分支判定前执行（坏仓库的既有错误行为由上方两次
+  // rev-parse 先行保持不变）。
+  assertNoGrafts(cwd);
+
   if (head === canonicalBase) {
     // Fresh package. The update-ref CAS makes a concurrent package fail; if HEAD
     // has since advanced, recover the winner's commit (deterministic convergence).
@@ -1968,11 +2021,26 @@ export function resolveDeliveryCommit(input) {
     } catch (err) {
       const headNow = String(git(["rev-parse", "HEAD"], { cwd })).trim();
       if (headNow !== canonicalBase) {
-        return { ref: recoverDeliveryCommit(input), source: "recovered" };
+        // TD-235（astra 警告同向）：这是第二个 recover 入口——此处的失败按
+        // "recover" 标记，不因外层进过 package 分支而误标 "package"。
+        try {
+          return { ref: recoverDeliveryCommit(input), source: "recovered" };
+        } catch (recoverErr) {
+          tagResolveBranch(recoverErr, "recover");
+          throw recoverErr;
+        }
       }
+      // TD-235：入口 HEAD==base 的打包失败（回退后仍在 base）是 package 分支
+      // ——Phase 0 的陈旧 headAtBase 测值不得把它洗成政策拒绝。
+      tagResolveBranch(err, "package");
       throw err;
     }
   }
   // HEAD is past base — recover the existing exact delivery commit.
-  return { ref: recoverDeliveryCommit(input), source: "recovered" };
+  try {
+    return { ref: recoverDeliveryCommit(input), source: "recovered" };
+  } catch (err) {
+    tagResolveBranch(err, "recover");
+    throw err;
+  }
 }
