@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { createOwnerDashboardServer } from "../../src/ownerDashboardServer.js";
 import * as app from "../../src/owner-dashboard/app.js";
-import { ENVELOPE_ACTIVITY_LABELS, projectRunActivity } from "../../src/application/runActivityProjection.js";
+import { ENVELOPE_ACTIVITY_LABELS, projectRunActivity, CORRECTION_ACTIVITY_STATUSES } from "../../src/application/runActivityProjection.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, "../..", "src", "owner-dashboard");
@@ -1198,15 +1198,18 @@ test("RACE WIRING: bootstrap/poll/loadOlder each capture the binding and gate su
   const js = readAsset("app.js");
   // selectRun advances the epoch via the pure helper (the binding source).
   assert.match(js, /advanceSelection\(state,\s*runId\)/, "selectRun advances the epoch");
-  // Each of the three activity-fetch paths captures the SAME binding shape.
-  const captures = js.match(/const captured\s*=\s*\{\s*runId,\s*epoch:\s*state\.selectionEpoch\s*\}/g) || [];
+  // Each of the three activity-fetch paths captures the binding shape.
+  // 会审修（2026-10-08，astra R2）：bootstrap/poll 的绑定扩展了单调 fetchSeq
+  // （同选择乱序防护），loadOlder 保持基础形——两种形状都合法。
+  const captures = js.match(/const captured\s*=\s*\{\s*runId,\s*epoch:\s*state\.selectionEpoch(,\s*fetchSeq:\s*state\.selectionFetchSeq)?\s*\}/g) || [];
   assert.ok(captures.length >= 3,
     `bootstrap/poll/loadOlder each capture the binding (found ${captures.length})`);
   // Every capture is guarded in BOTH the try (success) and catch (error):
-  // ≥ 2 isCurrentSelection guards per capture.
-  const guards = js.match(/isCurrentSelection\(state,\s*captured\)/g) || [];
-  assert.ok(guards.length >= captures.length * 2,
-    `every path guards success AND error (guards ${guards.length} >= ${captures.length * 2})`);
+  // ≥ 2 guards per capture（success 走 fetch 序门或选择门，error 走选择门）。
+  const guardsSel = (js.match(/isCurrentSelection\(state,\s*captured\)/g) || []).length;
+  const guardsFetch = (js.match(/isCurrentActivityFetch\(state,\s*captured\)/g) || []).length;
+  assert.ok(guardsSel + guardsFetch >= captures.length * 2,
+    `every path guards success AND error (guards ${guardsSel + guardsFetch} >= ${captures.length * 2})`);
   // The protected commit sites are reached ONLY after a guard (late → return).
   assert.match(js, /isCurrentSelection\(state,\s*captured\)\)\s*return;[\s\S]*?applyBootstrapPage/,
     "applyBootstrapPage is guarded");
@@ -1644,10 +1647,11 @@ test("TD-228② PROJECTION SMOKE: real run.correction_* events render as correct
 });
 
 test("TD-228① FOLD: baseline never transitions; only non-terminal→terminal does; terminal is absorbing", () => {
-  // Baseline (null slot): the bootstrap that created the selection already
-  // carries the run's current shape — record, never transition.
-  assert.deepEqual(app.foldSelectionTerminal(null, true), { observed: true, transition: false });
-  assert.deepEqual(app.foldSelectionTerminal(undefined, true), { observed: true, transition: false });
+  // 会审修（2026-10-08，astra R2）：首次观察即为终态也按转移处理——原 baseline
+  // 语义在同 epoch 乱序下不可靠（poll 先至终态建 baseline 后，迟到的非终态首屏
+  // 覆盖较新状态且重取永不触发）。选中已终态 run 的代价是一次幂等重取。
+  assert.deepEqual(app.foldSelectionTerminal(null, true), { observed: true, transition: true });
+  assert.deepEqual(app.foldSelectionTerminal(undefined, true), { observed: true, transition: true });
   assert.deepEqual(app.foldSelectionTerminal(null, false), { observed: false, transition: false });
   // THE one transition.
   assert.deepEqual(app.foldSelectionTerminal(false, true), { observed: true, transition: true });
@@ -1728,10 +1732,10 @@ test("TD-228① SESSION: a selection change re-arms the slot; re-selecting an al
   assert.equal(state.selectionTerminalObserved, null, "a new selection session starts unobserved");
   app.advanceSelection(state, "run_a");
   assert.equal(state.selectionTerminalObserved, null);
-  // A's fresh bootstrap observes terminal → BASELINE (never a transition): the
-  // bootstrap itself already carries the run's final shape.
-  assert.equal(app.foldSelectionTerminal(state.selectionTerminalObserved, true).transition, false,
-    "re-selecting an already-terminal run never triggers the refetch");
+  // 会审修（astra R2）：A 的新 bootstrap 观察到终态 → 也是转移（一次幂等重取，
+  // 重取的 bootstrap 观察到终态时槽已 true → absorbing，不会循环）。
+  assert.equal(app.foldSelectionTerminal(state.selectionTerminalObserved, true).transition, true,
+    "re-selecting an already-terminal run triggers ONE idempotent refetch");
 });
 
 test("TD-228① WIRING: both observe sites route the transition through the epoch-bound refetch and skip their trailing commit", () => {
@@ -1753,7 +1757,62 @@ test("TD-228① WIRING: both observe sites route the transition through the epoc
     /const binding = advanceSelection\(state, runId\);\s*\n\s*if \(deps && typeof deps\.refetch === "function"\) await deps\.refetch\(state\);/,
     "terminalRefetchOnce bumps the EXISTING selection epoch and awaits the injected refetch");
   // The SAME advanceSelection resets the slot — the re-arm point per selection.
-  assert.match(js, /state\.selectionTerminalObserved = null;\s*\n\s*return \{ runId, epoch: state\.selectionEpoch \};/,
-    "advanceSelection resets the slot");
+  // 会审修（2026-10-08，astra R2）：重置区现在还重置 fetchSeq 计数器（插在槽重置
+  // 与 return 之间），钉允许该插行。
+  assert.match(js, /state\.selectionTerminalObserved = null;[\s\S]*?state\.selectionAppliedSeq = 0;\s*\r?\n\s*return \{ runId, epoch: state\.selectionEpoch \};/,
+    "advanceSelection resets the slot AND the fetch counters");
   assert.match(js, /selectionTerminalObserved: null/, "boot state initializes the slot");
+});
+
+
+// =====================================================================
+// G) 会审修回归钉（2026-10-08，opus P2-3 / astra R2）
+// =====================================================================
+
+test("council fix P2-3: client CORRECTION_LABELS mirror the server CORRECTION_ACTIVITY_STATUSES closed set (no silent drift)", () => {
+  // 客户端闭集是手抄镜像——服务端将来加状态时客户端只会安全塌缩哨兵，但必须
+  // 有机器对账让"漂移"在测试期变红，而不是运行期静默。
+  assert.deepEqual([...app.CORRECTION_LABELS], [...CORRECTION_ACTIVITY_STATUSES],
+    "client correction labels must mirror the server closed set member-for-member");
+});
+
+test("council fix R2: same-selection fetch-order gate drops a late EARLIER fetch (stale bootstrap cannot clobber a newer poll)", () => {
+  const state = freshSelectionState();
+  state.selectedRunId = "run_t";
+  // bootstrap 先发起（fetchSeq 1），poll 后发起（fetchSeq 2）——poll 先返回并
+  // apply（终态快照），迟到的 bootstrap 再返回：其 fetchSeq 1 < 已应用 2 → 丢弃。
+  const bootstrapCaptured = { runId: "run_t", epoch: state.selectionEpoch, fetchSeq: 1 };
+  const pollCaptured = { runId: "run_t", epoch: state.selectionEpoch, fetchSeq: 2 };
+
+  // poll 先 apply：当前且序新 → 通过；推进已应用序。
+  assert.equal(app.isCurrentActivityFetch(state, pollCaptured), true, "the newer poll applies");
+  state.selectionAppliedSeq = pollCaptured.fetchSeq;
+
+  // 迟到的旧 bootstrap：仍是当前选择（epoch 未变）但 fetchSeq 落后 → 丢弃。
+  assert.equal(app.isCurrentSelection(state, bootstrapCaptured), true,
+    "the epoch gate alone would still accept it (the R2 hole)");
+  assert.equal(app.isCurrentActivityFetch(state, bootstrapCaptured), false,
+    "the fetch-order gate drops the stale late bootstrap");
+
+  // 终态观察已在 poll apply 时折叠为转移（null+terminal 也算转移）→ 重取触发，
+  // 迟到旧快照无法再把已折叠的槽或升级后的 exitStatus 冻结回去。
+  const fold = app.foldSelectionTerminal(state.selectionTerminalObserved ?? null, true);
+  assert.equal(fold.transition, true, "first-observation-as-terminal still triggers the refetch");
+
+  // 跨选择仍由既有 epoch 门拦截（fetchSeq 不越权）：换选后旧 fetch 全部失效。
+  app.advanceSelection(state, "run_other");
+  const lateAny = { runId: "run_other", epoch: state.selectionEpoch - 1, fetchSeq: 99 };
+  assert.equal(app.isCurrentActivityFetch(state, lateAny), false, "cross-selection stays epoch-gated");
+});
+
+test("council fix R2 WIRING: bootstrap and poll issue monotonic fetchSeq and commit through the fetch-order gate", () => {
+  const js = readAsset("app.js");
+  assert.match(js, /export function isCurrentActivityFetch\(state, captured\)/,
+    "the fetch-order gate exists");
+  const issues = js.match(/state\.selectionFetchSeq = \(state\.selectionFetchSeq \?\? 0\) \+ 1;/g) || [];
+  assert.ok(issues.length >= 2, `bootstrap AND poll issue a monotonic fetchSeq (found ${issues.length})`);
+  const gates = js.match(/if \(!isCurrentActivityFetch\(state, captured\)\) return;/g) || [];
+  assert.ok(gates.length >= 3, `every activity apply point commits through the gate (found ${gates.length})`);
+  assert.match(js, /selectionFetchSeq = 0;\s*\r?\n\s*state\.selectionAppliedSeq = 0;/,
+    "advanceSelection resets the counters per selection");
 });

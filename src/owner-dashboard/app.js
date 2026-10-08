@@ -53,7 +53,7 @@ const ENVELOPE_LABELS = Object.freeze([
 // TD-228②：correction 生命周期状态的客户端闭集（镜像服务端
 // CORRECTION_ACTIVITY_STATUSES，由 run.correction_* 事件类型推导）。
 // 未知/缺失状态塌缩为固定哨兵，不回显 correctionId 或任何载荷。
-const CORRECTION_LABELS = Object.freeze([
+export const CORRECTION_LABELS = Object.freeze([
   "requested", "claimed", "delivered", "delivery_failed", "rejected",
 ]);
 
@@ -662,6 +662,10 @@ export function advanceSelection(state, runId) {
   // a new selection session re-arms the exactly-once terminal refetch (whose
   // bootstrap then re-baselines this slot from its own first page).
   state.selectionTerminalObserved = null;
+  // 会审修（2026-10-08，astra R2）：同选择内的 fetch 单调序计数器——见
+  // isCurrentActivityFetch。每个新选择会话从 0 重新计。
+  state.selectionFetchSeq = 0;
+  state.selectionAppliedSeq = 0;
   return { runId, epoch: state.selectionEpoch };
 }
 
@@ -680,6 +684,19 @@ export function isCurrentSelection(state, captured) {
   if (state.selectedRunId !== captured.runId) return false;
   if (state.selectionEpoch !== captured.epoch) return false;
   return true;
+}
+
+// 会审修（2026-10-08，astra R2）：同选择内的 fetch 单调序门。M12-17 的 epoch
+// 只防【跨选择】错绑；同一选择里 bootstrap 与 poll 并发时，发起较早的 fetch
+// 可能晚到——其快照较旧，无条件 apply 会用非终态旧快照覆盖较新的终态 poll
+// 状态（终态重取因此归零、升级后的 exitStatus 被旧 unknown 冻结）。规则：每个
+// activity fetch 发起时领一个单调 fetchSeq（随 captured 绑定），apply 仅当其
+// fetchSeq 不早于本选择已 apply 的最高序；apply 后推进已应用序。纯函数。
+export function isCurrentActivityFetch(state, captured) {
+  if (!isCurrentSelection(state, captured)) return false;
+  if (!Number.isInteger(captured.fetchSeq)) return false;
+  const applied = Number.isInteger(state.selectionAppliedSeq) ? state.selectionAppliedSeq : 0;
+  return captured.fetchSeq >= applied;
 }
 
 // ===== TD-228① — exactly-once re-bootstrap on the FIRST terminal observation ====
@@ -716,7 +733,13 @@ export function foldSelectionTerminal(prev, terminal) {
     return { observed: prev === true ? true : (prev === false ? false : null), transition: false };
   }
   if (prev === true) return { observed: true, transition: false };
-  if (prev === null || prev === undefined) return { observed: terminal, transition: false };
+  // 会审修（2026-10-08，astra R2）：首次观察即为终态也按转移处理。原 baseline
+  // 语义（null+terminal 只记录不重取）在同 epoch 乱序下不可靠——poll 先至终态
+  // 建立 baseline 后，迟到的非终态首屏快照可覆盖较新状态且重取永不触发。
+  // 统一为"首观察即终态 → 一次幂等重取"：选中已终态 run 的代价是多余但无循环
+  // 的一次 bootstrap（重取的 bootstrap 观察到终态时槽已 true → absorbing），
+  // 乱序漏检场景则被彻底修复。
+  if (prev === null || prev === undefined) return { observed: terminal, transition: terminal };
   return { observed: terminal, transition: terminal };
 }
 
@@ -1312,6 +1335,8 @@ function boot() {
     // selection session). Its non-terminal → terminal transition triggers the
     // exactly-once re-bootstrap; advanceSelection resets it per selection.
     selectionTerminalObserved: null,
+    selectionFetchSeq: 0,
+    selectionAppliedSeq: 0,
   };
 
   els.app.hidden = false;
@@ -1833,13 +1858,16 @@ async function bootstrapActivity(state, opts = {}) {
   // M12-17 race binding: capture the selection at issue time. If the Owner
   // selects another run while this read is in flight, the late response is
   // dropped — it must NEVER mutate the current selection's facts or freshness.
-  const captured = { runId, epoch: state.selectionEpoch };
+  state.selectionFetchSeq = (state.selectionFetchSeq ?? 0) + 1;
+  const captured = { runId, epoch: state.selectionEpoch, fetchSeq: state.selectionFetchSeq };
   try {
     const page = await fetchJson(
       state.token,
       `/api/activity?runId=${encodeURIComponent(runId)}&order=desc&pageSize=50`,
     );
-    if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
+    // 会审修（astra R2）：晚到的较早 fetch（同选择乱序）一并丢弃。
+    if (!isCurrentActivityFetch(state, captured)) return; // late/stale — drop, never mutate
+    state.selectionAppliedSeq = captured.fetchSeq;
     applyBootstrapPage(state, page);
     // TD-228①: a transition observed here (e.g. the manual refresh path, where
     // no advanceSelection preceded this read) triggers the EXACTLY-ONCE
@@ -1898,7 +1926,8 @@ async function pollOnce(state) {
   // M12-17 race binding: the snapshot (afterSeq + every cursor page) belongs to
   // THIS selection. A selection change mid-snapshot drops the whole poll — a
   // late page never mutates the current selection's timeline/freshness.
-  const captured = { runId, epoch: state.selectionEpoch };
+  state.selectionFetchSeq = (state.selectionFetchSeq ?? 0) + 1;
+  const captured = { runId, epoch: state.selectionEpoch, fetchSeq: state.selectionFetchSeq };
   const params = pollParams(state.maxSeq);
   try {
     // Every page in this snapshot — page 1 and each cursor continuation — is
@@ -1907,7 +1936,9 @@ async function pollOnce(state) {
     // "seq > afterSeq" view page 1 established.
     let url = pollRequestUrl(runId, params, null);
     let page = await fetchJson(state.token, url);
-    if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
+    // 会审修（astra R2）：晚到的较早 fetch（同选择乱序）一并丢弃。
+    if (!isCurrentActivityFetch(state, captured)) return; // late/stale — drop, never mutate
+    state.selectionAppliedSeq = captured.fetchSeq;
     applyPollPage(state, page);
     // Follow cursors mechanically while a full page indicates more new entries
     // may exist — bounded by a small safety counter so a burst can't loop.
@@ -1918,7 +1949,8 @@ async function pollOnce(state) {
       && guard < 4) {
       url = pollRequestUrl(runId, params, page.activity.nextCursor);
       page = await fetchJson(state.token, url);
-      if (!isCurrentSelection(state, captured)) return; // late mid-snapshot — drop
+      if (!isCurrentActivityFetch(state, captured)) return; // late mid-snapshot — drop
+      state.selectionAppliedSeq = captured.fetchSeq;
       applyPollPage(state, page);
       guard += 1;
     }

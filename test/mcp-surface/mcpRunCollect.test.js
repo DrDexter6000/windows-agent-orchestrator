@@ -1189,3 +1189,45 @@ test("TD-121: consistent projection through the same seam succeeds and commits t
     await server.close();
   }
 });
+
+
+// 会审修回归钉（2026-10-08，opus C1-反例 / astra R1——两席独立复现）：
+// 页预算仅剩 1 个 UTF-16 单元且下一条消息以代理对（emoji）开头时，安全切片
+// 退成空串——零进展切片不得入列（否则机械重组凭空多出一条空消息）。
+// 复现数据：["a"*11999, <U+1F600>+"z"]，两席给出完全相同的 entry 形状。
+test("TD-224 council fix R1: zero-progress empty slice is never emitted (surrogate-pair page-tail boundary)", async () => {
+  const mkServer = (data) => createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data, reconstructed: true, backend: "process" }),
+  });
+  const msg = (text) => ({ kind: "message", role: "assistant", parts: [{ type: "text", text }] });
+  const server = mkServer([msg("a".repeat(11999)), msg(String.fromCodePoint(0x1f600) + "z")]);
+  const client = await buildInMemoryClient(server);
+  try {
+    const full = [];
+    let cursor = null;
+    for (;;) {
+      const res = await client.callTool({
+        name: "run_collect",
+        arguments: { runId: "run_x", mode: "full", ...(cursor ? { cursor } : {}) },
+      });
+      const page = JSON.parse(res.content.find((b) => b.type === "text").text);
+      for (const m of page.messages || []) full.push(m);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    // 无零长度 entry
+    assert.ok(full.every((m) => m.text.length > 0), "zero-progress slices are never emitted");
+    // 机械重组保真：粘 continuation、否则新消息 → 恰 2 条，长度 [11999, 3]
+    const reassembled = [];
+    for (const m of full) {
+      if (m.continuation === true) reassembled[reassembled.length - 1] += m.text;
+      else reassembled.push(m.text);
+    }
+    assert.deepEqual(reassembled.map((s) => s.length), [11999, 3],
+      "mechanical reassembly reproduces exactly the source messages");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

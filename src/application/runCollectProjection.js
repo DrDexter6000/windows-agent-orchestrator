@@ -331,6 +331,13 @@ function paginate(redactedTexts, startMsgIdx, startOffset) {
     // code units; a lone surrogate would corrupt the output.)
     const text = safeSliceUtf16(full, offset, offset + take);
 
+    // 会审修（2026-10-08，opus C1-反例 / astra R1——两席独立复现）：页预算仅剩
+    // 1 个 UTF-16 单元且下一条消息以代理对开头时，安全切片退成空串——零进展
+    // 切片若入列会凭空制造一个消息起点（continuation 缺席），机械重组多出一条
+    // 空消息。空切片不入列：游标原地停留，下一页从这里续读，空消息与空续接
+    // 一并消除。
+    if (text.length === 0) break;
+
     // TD-224: continuation marker — present (true) iff this slice begins
     // mid-message (`offset > 0`: a later in-page slice OR the first slice
     // after a mid-message cursor resume). Absent on message-start slices;
