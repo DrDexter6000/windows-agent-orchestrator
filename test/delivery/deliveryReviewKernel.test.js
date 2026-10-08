@@ -884,7 +884,10 @@ test("M11-3A-COUNT: merge fixture (first-parent=base, count>1) fails on commit-c
     }
     assert.ok(caught, "merge fixture must fail the proof");
     assert.equal(caught.deliveryCode, "artifact_mismatch");
-    assert.match(caught.message, /1 commit|count/i, "failure reason is commit-count");
+    // TD-233 会审验收修（2026-10-08）：单父强校验已前移到 count 之前——合并提交
+    // 现在在"恰好一个父提交"处被拦（旧语义是 count 拦，防线前移更严格，此测试
+    // 的语义按新防线更新；count>1 的构造保证仍是合并形态）。
+    assert.match(caught.message, /exactly one parent|1 commit|count/i, "failure is the single-parent/count family");
   } finally {
     await cleanupRepo(repo);
   }
