@@ -58,6 +58,8 @@ export async function createWorktree(sourceCwd, name, opts = {}) {
   }
   execFileSync("git", args, {
     cwd,
+    // TD-236：交付 worktree 创建/检出禁用 replace objects（force-last）。
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
     stdio: "pipe",
     windowsHide: true,
   });
@@ -87,6 +89,8 @@ export function removeWorktree(wtPath) {
     try {
       execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: path,
+        // TD-236：worktree 清理同样禁用 replace objects（force-last）。
+        env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
         stdio: "pipe",
         windowsHide: true,
       });

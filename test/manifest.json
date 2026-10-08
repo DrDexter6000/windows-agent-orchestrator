@@ -231,7 +231,8 @@
       "run-lifecycle/runsListCloseout.test.js",
       "run-lifecycle/runsListSmoke.test.js",
       "isolation-infra/workspaceBinding.test.js",
-      "registry-roles/leadPreflightObservability.test.js"
+      "registry-roles/leadPreflightObservability.test.js",
+      "delivery/gitNoReplacePin.test.js"
     ],
     "worktree": [
       "delivery/delivery.test.js",

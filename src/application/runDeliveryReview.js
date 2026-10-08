@@ -225,6 +225,8 @@ function gitReadBounded(args, cwd, gitExec) {
     const out = exec("git", args, {
       cwd,
       encoding: "utf8",
+      // TD-236：review 面 diff 读取禁用 replace objects（force-last，注入 exec 不受影响）。
+      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
       maxBuffer: GIT_DIFF_MAX_BUFFER,

@@ -58,7 +58,10 @@ function git(args, opts = {}) {
   return execFileSync("git", args, {
     cwd: opts.cwd,
     encoding: opts.encoding ?? "utf8",
-    env: opts.env,
+    // TD-236（2026-10-09）：交付完整性读取禁用 replace objects（refs/replace
+    // 可整体替换提交对象/graft 伪造父链——会审 opus 实测）。force-last：调用方
+    // env 无法反盖此值。
+    env: { ...(opts.env ?? process.env), GIT_NO_REPLACE_OBJECTS: "1" },
     input: opts.input,
     stdio: ["pipe", "pipe", "ignore"], // swallow stderr to keep errors clean
     windowsHide: true,

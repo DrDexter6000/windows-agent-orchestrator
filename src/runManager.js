@@ -1139,6 +1139,8 @@ export class RunManager {
         execFileSync("git", ["rev-parse", "HEAD"], {
           cwd: agent.cwd,
           encoding: "utf8",
+          // TD-236：base head 冻结读取禁用 replace objects（force-last）。
+          env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
           stdio: ["pipe", "pipe", "ignore"],
           windowsHide: true,
         }),

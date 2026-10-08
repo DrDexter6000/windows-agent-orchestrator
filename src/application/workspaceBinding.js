@@ -85,6 +85,8 @@ function git(args, cwd, opts = {}) {
   return execFileSync(bin, args, {
     cwd,
     encoding: "utf8",
+    // TD-236：期望锚证明读取禁用 replace objects（force-last）。
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 }

@@ -2183,3 +2183,80 @@ test("TD-233 B: merge-commit forgery (second parent smuggles changes past first-
     );
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });
+
+// ── TD-236：refs/replace 攻击面（会审 opus 实测形态的行为钉）──────────────────
+
+test("TD-236: refs/replace 整体替换洗白被 GIT_NO_REPLACE_OBJECTS 阻断", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    // 真身 M：走私改动 + 攻击者消息/身份（单父 base）。
+    writeFileSync(join(s.worktreePath, "src", "evil.js"), "smuggled\n", "utf8");
+    git(["add", "."], s.worktreePath);
+    git(["-c", "user.name=attacker", "-c", "user.email=attacker@evil",
+      "commit", "-m", "smuggled"], s.worktreePath);
+    const M = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    // 替身 F：干净允许面改动 + WAO 交付消息/身份（单父 base）。
+    git(["checkout", "-q", s.baseCommit, "--", "."], s.worktreePath);
+    git(["reset", "-q", "--hard", s.baseCommit], s.worktreePath);
+    writeFileSync(join(s.worktreePath, "src", "a.js"), "const a = 43;\n", "utf8");
+    git(["add", "src/a.js"], s.worktreePath);
+    gitWithIdentity(s.worktreePath, ["commit", "-m", `wao-delivery: ${RUN_ID}`]);
+    const F = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    // git replace M F：replace 生效的读取会把 M 看成 F（消息/树全来自替身）。
+    git(["replace", M, F], s.worktreePath);
+    // 终态 HEAD=M：若交付读取未禁 replace，各层检查读到的是 F（消息对、树干净）
+    // → M 被当合法交付收编（洗白）；禁用后读到真身 → 拒绝。
+    git(["checkout", "-q", M], s.worktreePath);
+    await assert.rejects(
+      () => runDeliveryRepackage({
+        runId: RUN_ID, runDir: s.runDir,
+        allowedPaths: ["src", "root.txt", "src/a.js", "src/evil.js"],
+        authorizedWorkspaceRoot: s.repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }),
+      (e) => e instanceof Error,
+      "replace 替身不得让走私提交通过任何一层（真身消息/树不符即拒）",
+    );
+    // 反向钉：被拒后不得产生任何交付事实（无 repackage 侧提交）。
+    const head = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    assert.equal(head, M, "被拒后 worktree HEAD 保持 M（无打包回退）");
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+test("TD-236: --graft 伪造单父被禁用 replace 阻断（父链检查层独立钉）", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    const main = git(["rev-parse", "--abbrev-ref", "HEAD"], s.worktreePath).trim() || "master";
+    git(["add", "."], s.worktreePath);
+    git(["commit", "-m", "side changes"], s.worktreePath);
+    const side = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    git(["checkout", "-q", s.baseCommit], s.worktreePath);
+    git(["checkout", "-q", "-b", "wao-graft"], s.worktreePath);
+    writeFileSync(join(s.worktreePath, "src", "grafted.js"), "grafted\n", "utf8");
+    git(["add", "src/grafted.js"], s.worktreePath);
+    gitWithIdentity(s.worktreePath,
+      ["commit", "-m", `wao-delivery: ${RUN_ID}`]);
+    const single = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    git(["merge", "--no-ff", "-m", "merge smuggle", side], s.worktreePath);
+    const X = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    git(["checkout", "-q", single], s.worktreePath);
+    gitWithIdentity(s.worktreePath, ["commit", "--allow-empty", "-m", "x"], s.worktreePath);
+    // graft：让 X 的读取形态呈现为 [single] 单父（替身链）。
+    git(["replace", "--graft", X, single], s.worktreePath);
+    git(["checkout", "-q", X], s.worktreePath);
+    assert.notEqual(single, X, "夹具自检：X 与 single 是不同对象");
+    assert.notEqual(main, "", "夹具自检");
+    await assert.rejects(
+      () => runDeliveryRepackage({
+        runId: RUN_ID, runDir: s.runDir,
+        allowedPaths: ["src", "root.txt", "src/grafted.js"],
+        authorizedWorkspaceRoot: s.repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }),
+      (e) => e instanceof Error && !/unexpected internal/.test(String(e.message)),
+      "graft 替身不得骗过父链/内容任一层",
+    );
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
