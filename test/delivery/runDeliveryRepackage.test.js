@@ -1739,3 +1739,62 @@ test("TD-226-CLASSIFIER: classification is TYPE-gated — plain Errors and unkno
   assert.equal(classifyRepackageRejection(null), null);
 });
 
+// 会审修回归钉（2026-10-08，astra C3-REFUTE / opus P2-1）：持久化 allowedPaths 损坏
+// 归 candidate_contract_malformed（非 malformed_input），且在 phases 内 → 落审计。
+test("TD-226 council fix: persisted allowedPaths corruption → candidate_contract_malformed + audit", async () => {
+  const { repo, baseCommit, runDir, worktreePath } = await setupDisallowedScenario();
+  try {
+    // 重播同形事件，唯独持久化合同的 allowedPaths 非法（Lead 本次入参合法）。
+    const corrupted = disallowedPathEvents({
+      repo, worktreePath, baseCommit, allowedPaths: ["../outside"], verificationCommands: ["npm test"],
+    });
+    seedTranscript(runDir, RUN_ID, corrupted);
+    const before = (await readEvents(runDir)).length;
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    }), isCode("candidate_contract_malformed"));
+    const after = await readEvents(runDir);
+    assert.equal(after.length, before + 1, "phases 内拒绝 → 恰落一条审计");
+    assert.equal(after[after.length - 1].type, "run.delivery_repackage_rejected");
+    assert.equal(after[after.length - 1].rejectionReason, "candidate_contract_malformed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// 会审修回归钉（2026-10-08，astra C2-REFUTE）：既有 DeliveryRef 结构损坏
+// （schemaVersion:2）→ durable_chain_inconsistent（typed + 审计），不再
+// DeliveryError 透传塌缩零诊断。断言结果面：无论 provenance 门或 ref 断言先拦，
+// 终局必须是该 typed 码。
+test("TD-226 council fix: corrupted existing DeliveryRef → durable_chain_inconsistent (typed, audited)", async () => {
+  const { repo, baseCommit, runDir, worktreePath } = await setupDisallowedScenario();
+  try {
+    const badRef = {
+      schemaVersion: 2, // 不在支持闭集 → assertCommittedDeliveryRef 必抛
+      kind: "git_commit", runId: RUN_ID,
+      baseCommit, deliveryCommit: "d".repeat(40), branch: `wao/${RUN_ID}`,
+      worktreePath, changedFiles: ["src/a.js"],
+      verification: { status: "passed", commands: ["npm test"], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    const t = new JsonlTranscript(join(runDir, `${RUN_ID}.jsonl`), { runId: RUN_ID, agentId: AGENT_ID });
+    await t.append("run.delivery_created", { delivery: badRef });
+    await t.append("run.delivery_repackaged", { source: "recovered", recoveryKind: "disallowed_scope", delivery: badRef });
+    const before = (await readEvents(runDir)).length;
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    }), isCode("durable_chain_inconsistent"));
+    const after = await readEvents(runDir);
+    assert.equal(after.length, before + 1, "typed 拒绝落一条审计");
+    assert.equal(after[after.length - 1].rejectionReason, "durable_chain_inconsistent");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});

@@ -181,6 +181,15 @@ for (const field of ["verificationCommands", "verificationSetupCommands"]) {
         ["no test flag", "node test/one.test.js", []],
         ["similar flag", "node --test-name-pattern smoke", []],
         ["flags only after test", "node --test --test-force-exit", ["verification_bare_node"]],
+        // 会审修回归钉（2026-10-08，opus P2-4 / astra P2-3 实测反例）：
+        ["value flag value not a path", 'node --test --test-name-pattern "TD-226" test/one.test.js', ["verification_bare_node"]],
+        ["reporter value not a path", "node --test --test-reporter spec", ["verification_bare_node"]],
+        ["compound tail echo", "node --test test/one.test.js && echo done", ["verification_bare_node"]],
+        ["compound cd prefix catches bare node", 'cd sub && node --test "test/*.test.js"', ["verification_bare_node"]],
+        ["ts suffix whitelisted from dir-form", "node --test test/one.ts", ["verification_bare_node"]],
+        ["shim with value flag", 'node scripts/wao-node.cjs --test --test-name-pattern smoke "test/*.test.js"', []],
+        ["shim with reporter value", "node scripts/wao-node.cjs --test --test-reporter tap test/one.test.js", []],
+        ["compound directory form still caught", "cd sub && node --test test/mcp-surface", ["verification_dir_test_form", "verification_bare_node"]],
       ];
       for (const [name, command, expected] of cases) {
         await t.test(name, async () => {

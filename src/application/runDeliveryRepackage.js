@@ -180,6 +180,23 @@ function _normalizeAllowedPaths(allowedPaths) {
 }
 
 /**
+ * 会审修（2026-10-08，opus P2-1 / astra C3-REFUTE）：对 run.started 里【持久化的】
+ * original allowedPaths 做同一校验，但失败语义是候选合同损坏（candidate_
+ * contract_malformed），不是 Lead 入参错误（malformed_input）——后者按文档
+ * 契约不落审计，而持久化合同损坏发生在 phases 内、必须落审计。
+ */
+function _normalizeOriginalAllowedPaths(allowedPaths) {
+  try {
+    return _normalizeAllowedPaths(allowedPaths);
+  } catch (err) {
+    if (err instanceof RepackageRejectionError && err.code === "malformed_input") {
+      throw new RepackageRejectionError("candidate_contract_malformed", `runDeliveryRepackage: persisted allowedPaths rejected (${err.message})`);
+    }
+    throw err;
+  }
+}
+
+/**
  * M12-13: validate the ORIGINAL per-command execution timeout persisted on
  * run.started.delivery.verificationTimeoutMs. Absent (undefined) → returns
  * undefined (zero drift: the verifier's consumer default applies). Present but
@@ -287,7 +304,7 @@ function _proveProcessMissingEligibility({
   ) {
     throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started delivery contract is malformed");
   }
-  const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
+  const originalAllowedPaths = _normalizeOriginalAllowedPaths(delivery.allowedPaths);
   // The Lead may widen but never narrow the original contract.
   for (const orig of originalAllowedPaths) {
     if (!isPathAllowed(orig, newAllowedPaths)) {
@@ -518,7 +535,7 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
     throw new RepackageRejectionError("worktree_unusable", "runDeliveryRepackage: candidate HEAD does not match the original base");
   }
 
-  const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
+  const originalAllowedPaths = _normalizeOriginalAllowedPaths(delivery.allowedPaths);
   return {
     worktreePath: bound.worktreePath,
     baseCommit: delivery.baseCommit,
@@ -666,7 +683,15 @@ async function _repackageAllPhases({
     if (resolvedRef.changedFiles.some((p) => !isPathAllowed(p, newAllowedPaths))) {
       throw new RepackageRejectionError("scope_violation", "runDeliveryRepackage: new allowedPaths do not cover the existing delivery");
     }
-    assertCommittedDeliveryRef(resolvedRef);
+    // 会审修（2026-10-08，astra C2-REFUTE）：既有 DeliveryRef 的结构校验失败是
+    // 持久化链损坏（durable_chain_inconsistent）——此前 DeliveryError 透传被
+    // 分类为 null，塌缩零诊断（astra 以持久化 schemaVersion:2 实测复现）。
+    try {
+      assertCommittedDeliveryRef(resolvedRef);
+    } catch (err) {
+      if (err instanceof RepackageRejectionError) throw err;
+      throw new RepackageRejectionError("durable_chain_inconsistent", `runDeliveryRepackage: existing delivery ref is not structurally valid (${err?.message ?? "invalid ref"})`);
+    }
     source = provenance.source;
   } else {
     const deliveryCtx = {

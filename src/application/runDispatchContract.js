@@ -182,21 +182,42 @@ function* commandLiteralTokens(command) {
 
 // TD-227: pure string lint; no filesystem or shell evaluation. Reuse the
 // quote-aware literal scanner, and inspect both resolved verification lists.
+// 会审修（2026-10-08，opus P2-4 / astra P2-3）：① --test-* 取值旗标的值不是路径
+// 实参（--test-name-pattern "X" file.js 不再误报目录形式）；② 复合命令按 shell
+// 连接符（&& || ; |）分段独立分析——修 `cd sub && node --test` 漏报与
+// `--test x.js && echo done` 误报；③ 后缀白名单扩 .ts/.mts/.cts（advisory
+// 宁缺勿滥）。
+const TEST_VALUE_FLAGS = new Set([
+  "--test-name-pattern",
+  "--test-reporter",
+  "--test-timeout",
+  "--test-concurrency",
+  "--test-isolation",
+  "--test-shard",
+]);
+
 function lintVerificationCommands(commands) {
   let directoryForm = false;
   let bareNode = false;
   for (const command of commands) {
     if (typeof command !== "string") continue;
-    const argv = [...commandLiteralTokens(command)];
-    const testAt = argv.indexOf("--test");
-    if (testAt < 0) continue;
-    if (argv.slice(testAt + 1).some((arg) => arg.length > 0
-      && !arg.startsWith("-") && !arg.includes("*") && !/\.(?:js|mjs|cjs)$/.test(arg))) {
-      directoryForm = true;
+    for (const segment of command.split(/&&|\|\||;|\|/)) {
+      const argv = [...commandLiteralTokens(segment)];
+      const testAt = argv.indexOf("--test");
+      if (testAt < 0) continue;
+      const suspectArgs = [];
+      for (let i = testAt + 1; i < argv.length; i += 1) {
+        if (TEST_VALUE_FLAGS.has(argv[i - 1])) continue; // 取值旗标的值不是路径
+        suspectArgs.push(argv[i]);
+      }
+      if (suspectArgs.some((arg) => arg.length > 0
+        && !arg.startsWith("-") && !arg.includes("*") && !/\.(?:js|mjs|cjs|ts|mts|cts)$/.test(arg))) {
+        directoryForm = true;
+      }
+      const usesShim = argv.slice(1, testAt).some((arg) =>
+        arg.replace(/\\/g, "/").replace(/^\.\//, "") === "scripts/wao-node.cjs");
+      if (/^node(?:\.exe)?$/i.test(argv[0]) && !usesShim) bareNode = true;
     }
-    const usesShim = argv.slice(1, testAt).some((arg) =>
-      arg.replace(/\\/g, "/").replace(/^\.\//, "") === "scripts/wao-node.cjs");
-    if (/^node(?:\.exe)?$/i.test(argv[0]) && !usesShim) bareNode = true;
   }
   return { directoryForm, bareNode };
 }
