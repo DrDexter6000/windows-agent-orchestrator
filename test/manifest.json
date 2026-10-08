@@ -141,6 +141,7 @@
       "run-lifecycle/runDispatch.test.js",
       "run-lifecycle/runEvidenceAssessment.test.js",
       "run-lifecycle/runManager.test.js",
+      "run-lifecycle/runManagerAlertLanding.test.js",
       "run-lifecycle/runManagerCwdExistence.test.js",
       "run-lifecycle/runManagerDeadline.test.js",
       "run-lifecycle/runReadOnlyObservation.test.js",

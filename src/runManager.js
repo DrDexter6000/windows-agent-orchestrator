@@ -2645,7 +2645,7 @@ export class Run {
       // S1-3 告警：超预算是重大事件，立即弹窗 + 写 ALERTS.log（告警失败不阻塞终态）
       raiseAlert("budget",
         `token budget exceeded: used ${budgetUsed}×${tokenBudgetMultiplier} > ${tokenBudget}`,
-        { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+        { runId: this.runId, logPath: this._alertsLogPath() },
       ).catch(() => { /* 告警失败不影响终态 */ });
       const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.budget_exceeded);
       await this._runCleanup();
@@ -2927,6 +2927,22 @@ export class Run {
   }
 
   /**
+   * TD-239 残余收口（告警落点，同 runStop TD-233 修法）：本 Run 全部告警的
+   * logPath 统一跟随实际写转录的目录 dirname(transcript.filePath)——覆盖
+   * start/resume/runDir override 三形态（transcript 创建点均先 resolve 再
+   * join，filePath 恒绝对路径），绝不回落 config.runDir 或进程 cwd。
+   * transcript 在八处调用点理论上必在（都在有转录的 run 生命周期内，且各自
+   * 上游已有 transcript 操作先行）；万一不可得，fail-safe 回落原 config.runDir
+   * 路径，不引入新失败面。
+   */
+  _alertsLogPath() {
+    const dir = this.transcript?.filePath
+      ? dirname(this.transcript.filePath)
+      : this.config.runDir;
+    return join(dir, "ALERTS.log");
+  }
+
+  /**
    * TD-150 批A（T3）：交付类 run 的 completed_empty 失败出口告警（level=no_effect）。
    * 触发条件（双席定稿）：交付类 run + doneMarker==="completed_empty" + 失败出口
    * 终态 failed（scorecard 门拦或打包失败两种形态）。非交付 run 不警（咨询类已有
@@ -2941,7 +2957,7 @@ export class Run {
     }
     this._noEffectAlertRaised = true;
     raiseAlert("no_effect", message,
-      { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+      { runId: this.runId, logPath: this._alertsLogPath() },
     ).catch(() => { /* 告警失败不影响终态 */ });
   }
 
@@ -3270,12 +3286,12 @@ export class Run {
           // Do NOT silently swallow: fire a safe evidence-write alert.
           raiseAlert("stop_unverified",
             `_runCleanup evidence write failed (run ${this.runId}): probe error unrecordable`,
-            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+            { runId: this.runId, logPath: this._alertsLogPath() },
           ).catch(() => {});
         }
         raiseAlert("stop_unverified",
           `_runCleanup process stop unverified (run ${this.runId}): probe error`,
-          { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+          { runId: this.runId, logPath: this._alertsLogPath() },
         ).catch(() => {});
       } else if (probeResult.quiet) {
         // Probe succeeded: process is quiet. Write stop_verified.
@@ -3290,7 +3306,7 @@ export class Run {
         } catch {
           raiseAlert("stop_unverified",
             `_runCleanup evidence write failed (run ${this.runId}): stop_verified unrecordable`,
-            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+            { runId: this.runId, logPath: this._alertsLogPath() },
           ).catch(() => {});
         }
       } else {
@@ -3304,12 +3320,12 @@ export class Run {
         } catch {
           raiseAlert("stop_unverified",
             `_runCleanup evidence write failed (run ${this.runId}): stop_unverified unrecordable`,
-            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+            { runId: this.runId, logPath: this._alertsLogPath() },
           ).catch(() => {});
         }
         raiseAlert("stop_unverified",
           `_runCleanup process stop not verified (run ${this.runId}): process may still be running`,
-          { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+          { runId: this.runId, logPath: this._alertsLogPath() },
         ).catch(() => {});
       }
       return;
@@ -3336,7 +3352,7 @@ export class Run {
       // 告警：_runCleanup 路径的 abort 未验证，后台可能仍在烧（TD-38 缺口）
       raiseAlert("stop_unverified",
         `_runCleanup stop not verified (run ${this.runId}): backend may still be running`,
-        { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+        { runId: this.runId, logPath: this._alertsLogPath() },
       ).catch(() => { /* 告警失败不影响终态 */ });
     }
   }
