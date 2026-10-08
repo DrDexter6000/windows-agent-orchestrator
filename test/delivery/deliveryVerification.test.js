@@ -1340,3 +1340,42 @@ test("ID-B5: legal identity fields with boundary whitespace remain accepted (Str
   }
 });
 
+
+// =====================================================================
+// TD-230（2026-10-08）：verifier 环境确定性钉——部署级认证门禁与 worker 血统
+// 标记不得渗入验证子进程（TD-227 交付实战两例：门禁变量使派发族测试在
+// verifier 里必假红；canonical 套件已同钉，本测试钉 verifier 侧对齐）。
+// =====================================================================
+test("TD-230: attempt env pins the deployment gate off and strips the worker lineage marker even when the host env carries both", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-td230-");
+  const savedGate = process.env.WAO_MCP_REQUIRE_CERTIFIED;
+  const savedWorker = process.env.WAO_IN_WORKER;
+  // 宿主呈污染态（模拟 User 作用域 setx + worker 宿主两种实证形态）。
+  process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
+  process.env.WAO_IN_WORKER = "1";
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "td230\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    const calls = [];
+    const result = await verifyDelivery(ref, { runCommand: recordingRunCommand(calls) });
+    assert.equal(result.outcome, "passed");
+    assert.ok(calls.length >= 1, "至少一条验证命令被执行");
+    for (const c of calls) {
+      const env = c.opts?.env ?? {};
+      assert.equal(env.WAO_MCP_REQUIRE_CERTIFIED, "0",
+        "部署级认证门禁在 verifier 子进程里强制关闭（MCP 边界策略不适用于验证子进程）");
+      assert.equal(env.WAO_IN_WORKER, undefined,
+        "worker 血统标记被剥除（verifier 是控制面工具，其测试子进程不是 worker）");
+      assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, "1",
+        "0047 嵌套派发豁免保持不变");
+      assert.equal(env.TMP !== process.env.TMP || env.TEMP !== process.env.TEMP, true,
+        "每 attempt 独立 TEMP 注入不受影响");
+    }
+  } finally {
+    if (savedGate === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
+    else process.env.WAO_MCP_REQUIRE_CERTIFIED = savedGate;
+    if (savedWorker === undefined) delete process.env.WAO_IN_WORKER;
+    else process.env.WAO_IN_WORKER = savedWorker;
+    await cleanupDir(repo);
+  }
+});

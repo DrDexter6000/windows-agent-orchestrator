@@ -1753,9 +1753,11 @@ test("TD-228① WIRING: both observe sites route the transition through the epoc
   assert.ok(gates.length >= 2, `bootstrap AND poll route the transition through the refetch (found ${gates.length})`);
   // The refetch reuses THE existing epoch mechanism — advanceSelection inside
   // terminalRefetchOnce; no second epoch counter, no new concurrency primitive.
+  // TD-232（2026-10-08）：快照保留（try/catch 包 refetch）后形状更新——epoch bump
+  // 仍在 refetch 之前，await 在 try 内。
   assert.match(js,
-    /const binding = advanceSelection\(state, runId\);\s*\n\s*if \(deps && typeof deps\.refetch === "function"\) await deps\.refetch\(state\);/,
-    "terminalRefetchOnce bumps the EXISTING selection epoch and awaits the injected refetch");
+    /const binding = advanceSelection\(state, runId\);\s*\r?\n\s*if \(deps && typeof deps\.refetch === "function"\) \{\s*\r?\n\s*try \{\s*\r?\n\s*await deps\.refetch\(state\);/,
+    "terminalRefetchOnce bumps the EXISTING selection epoch BEFORE the refetch and awaits it inside a snapshot-protecting try");
   // The SAME advanceSelection resets the slot — the re-arm point per selection.
   // 会审修（2026-10-08，astra R2）：重置区现在还重置 fetchSeq 计数器（插在槽重置
   // 与 return 之间），钉允许该插行。
@@ -1815,4 +1817,53 @@ test("council fix R2 WIRING: bootstrap and poll issue monotonic fetchSeq and com
   assert.ok(gates.length >= 3, `every activity apply point commits through the gate (found ${gates.length})`);
   assert.match(js, /selectionFetchSeq = 0;\s*\r?\n\s*state\.selectionAppliedSeq = 0;/,
     "advanceSelection resets the counters per selection");
+});
+
+
+// =====================================================================
+// TD-232（2026-10-08，opus P2-2 会审）：terminalRefetchOnce 的快照保留——
+// refetch 失败时恢复既有可见内容（epoch bump 保持在 refetch 之前，防错绑
+// 纪律不变；错误本身不吞、交还调用路径 catch）。
+// =====================================================================
+test("TD-232 REFETCH-FAIL: a failed terminal refetch restores the pre-clear snapshot (never empty+stale)", async () => {
+  const state = freshSelectionState();
+  const selection = app.advanceSelection(state, "run_t"); // epoch 1
+  state.selectionTerminalObserved = false;
+  state.timeline = [
+    { seq: 1, category: "command", ts: "t", exitStatus: "ok" },
+    { seq: 2, category: "message", ts: "t" },
+  ];
+  state.maxSeq = 2;
+  state.lastGoodActivity = { marker: "last-good" };
+
+  const boom = new Error("fetch failed");
+  await assert.rejects(
+    () => app.terminalRefetchOnce(state, { refetch: async () => { throw boom; } }),
+    (err) => err === boom,
+    "错误原样上抛（不吞）",
+  );
+
+  assert.equal(state.selectionEpoch, selection.epoch + 1, "epoch 已 bump（防错绑纪律不变）");
+  assert.equal(state.timeline.length, 2, "快照恢复：timeline 不丢");
+  assert.deepEqual(state.timeline[0], { seq: 1, category: "command", ts: "t", exitStatus: "ok" },
+    "升级后的 exitStatus 不被回滚成 unknown");
+  assert.equal(state.maxSeq, 2, "maxSeq 恢复");
+  assert.deepEqual(state.lastGoodActivity, { marker: "last-good" }, "最后好快照恢复（M12-8）");
+
+  // 恢复发生在【新】epoch 下——pre-bump 的在飞页仍会被 isCurrentSelection 丢弃，
+  // 无并发写竞争。
+  assert.equal(app.isCurrentSelection(state, selection), false, "旧绑定依旧失效");
+
+  // 成功路径不受影响：refetch 正常 → 快照作废、bootstrap 重建。
+  const okState = freshSelectionState();
+  app.advanceSelection(okState, "run_t2");
+  okState.timeline = [{ seq: 1, category: "command", ts: "t" }];
+  const res = await app.terminalRefetchOnce(okState, {
+    refetch: async (s) => {
+      s.timeline = [{ seq: 5, category: "state", ts: "t" }];
+      s.maxSeq = 5;
+    },
+  });
+  assert.equal(res.refetched, true);
+  assert.equal(okState.timeline[0].seq, 5, "成功路径由 refetch 重建状态");
 });

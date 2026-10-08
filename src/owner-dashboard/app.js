@@ -769,8 +769,30 @@ export async function terminalRefetchOnce(state, deps) {
   if (!state || typeof state !== "object") return { refetched: false };
   const runId = state.selectedRunId;
   if (typeof runId !== "string" || runId.length === 0) return { refetched: false };
+  // TD-232（2026-10-08，opus P2-2 会审）：重取失败不丢现有内容。advanceSelection
+  // 会清空 timeline/maxSeq/lastGoodActivity——若 refetch 恰逢 fetch 失败，看板将
+  // 呈"空+stale"（违 M12-8"保留最后一份好快照"）。epoch bump 必须在 refetch 前
+  // （防错绑纪律不变），但可见内容先快照：refetch 抛错则恢复快照（新 epoch 下
+  // 恢复一致——所有 pre-bump 在飞页都会被 isCurrentSelection 丢弃，无并发写
+  // 竞争）；refetch 成功则 bootstrap 已重建，快照自然作废。
+  const snapshot = {
+    timeline: state.timeline,
+    maxSeq: state.maxSeq,
+    lastGoodActivity: state.lastGoodActivity,
+  };
   const binding = advanceSelection(state, runId);
-  if (deps && typeof deps.refetch === "function") await deps.refetch(state);
+  if (deps && typeof deps.refetch === "function") {
+    try {
+      await deps.refetch(state);
+    } catch (err) {
+      state.timeline = snapshot.timeline;
+      state.maxSeq = snapshot.maxSeq;
+      state.lastGoodActivity = snapshot.lastGoodActivity;
+      // 快照恢复后错误面交还给调用路径的 catch（renderDetail/setStatus 照常
+      // 呈"过期但非空"）；不吞错误本身。
+      throw err;
+    }
+  }
   return { refetched: true, binding };
 }
 

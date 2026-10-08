@@ -2792,6 +2792,10 @@ const RUN_AWAIT_RESULT_MESSAGE = z.object({
 const RUN_AWAIT_RESULT_RESULT = z.object({
   status: z.enum(["available", "empty", "not_terminal", "too_large", "unavailable"]),
   messages: z.array(RUN_AWAIT_RESULT_MESSAGE),
+  // TD-232（2026-10-08）：compact too_large 的降级指引（与 run_collect 的
+  // COLLECT_COMPACT_TOO_LARGE_GUIDANCE 同句静态文本；仅在 result.status ===
+  // "too_large" 时由 handler 附加，其余变体缺席）。
+  compactFallback: z.string().optional(),
   // Truthful null when nothing was collected (not_terminal / unavailable).
   evidenceCounts: RUN_AWAIT_RESULT_EVIDENCE_COUNTS.nullable(),
   itemCount: z.number().int().nonnegative().nullable(),
@@ -5720,6 +5724,11 @@ export function createWaoMcpServer({
         // observation outcome + termination source, plus (on a terminal run) the
         // M12-9 outcome diagnosis category + delivery facts. Attached immediately
         // before the strict parse (same trust boundary as availableDrilldowns).
+        // TD-232：compact too_large 带内降级指引（run_collect 同款静态文本，
+        // 由 server.js 单一常量承载——两工具零漂移）。
+        if (payload.result && payload.result.status === "too_large") {
+          payload.result.compactFallback = COLLECT_COMPACT_TOO_LARGE_GUIDANCE;
+        }
         payload.semanticNotes = selectSemanticNotes("run_await_result", {
           observationOutcome: payload.observationOutcome,
           outcome: payload.observation?.outcome,

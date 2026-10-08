@@ -671,7 +671,9 @@ const RED_23_WIRE = 75492;
 // 纯 additive 可选 schema 成员，无工具增减、无校验移除、无描述字节变化
 // （FROZEN_23_DESC_CEILING 实测 10442 不动）。实测 85277 → 85360（+83B，两条
 // schema 条目），按实测重冻；Owner 硬顶 85939 不变，余 579B。
-const FROZEN_23_WIRE_CEILING = 85360;
+// TD-232 重冻（Lead，2026-10-08）：run_await_result result 子 schema 增可选
+// compactFallback（too_large 降级指引，+36B；Owner 硬顶 85939 余 543B）。
+const FROZEN_23_WIRE_CEILING = 85396;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -855,7 +857,9 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // TD-224（2026-10-08）：run_collect 出参 messages entries 增可选 const-true
   // continuation 标记 + 顶层可选 compactFallback——两条件目均在 stripped 载荷内，
   // SHA 如实翻新；无描述字节变化。
-  "08a685cb2946707ec10bb3765f3b7e7ed3050562322626c60c91e587203acc33";
+  // TD-232（2026-10-08）：run_await_result result 子 schema 增可选 compactFallback
+  // （too_large 降级指引）——同样在 stripped 载荷内，SHA 如实翻新。
+  "dc1c0a44598f7f0ee2bc91668605dc1170e3c360d58fcecd1598dc41315023e2";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -639,3 +639,42 @@ test("FR-08-C3 attachment: unexpected internal exceptions stay fixed opaque MCP 
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); }
 });
+
+
+// =====================================================================
+// TD-232（2026-10-08）：run_await_result 的 compact too_large 带内降级指引
+// （与 run_collect 的 COLLECT_COMPACT_TOO_LARGE_GUIDANCE 同句静态文本——单一
+// 常量承载、两工具零漂移；仅 result.status==="too_large" 附加，其余变体缺席）。
+// =====================================================================
+test("TD-232: run_await_result too_large carries the shared compact fallback guidance; other statuses carry none", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td232-a-"));
+  makeGitRepo(dir);
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td232-a-rd-"));
+  try {
+    // 终态 run + 超长末条 assistant 消息（>4000 字符）⇒ compact too_large。
+    seedTranscript(runDir, "run_td232a", {
+      terminal: true, workspaceCwd: dir,
+      messages: ["z".repeat(4600)],
+    });
+    // 对照：普通短消息终态 run ⇒ available，无指引。
+    seedTranscript(runDir, "run_td232b", {
+      terminal: true, workspaceCwd: dir,
+      messages: ["short"],
+    });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const big = await client.callTool({ name: "run_await_result", arguments: { runId: "run_td232a", waitMs: 0 } });
+      assert.equal(big.structuredContent.result.status, "too_large");
+      const fb = big.structuredContent.result.compactFallback;
+      assert.equal(typeof fb, "string", "too_large 携带指引");
+      assert.ok(fb.includes("mode=full") && fb.includes("continuation"), "指引含逃生门与重组规则");
+      assert.ok(!fb.includes("run_td232a"), "静态文本：不插值 run 内容");
+
+      const small = await client.callTool({ name: "run_await_result", arguments: { runId: "run_td232b", waitMs: 0 } });
+      assert.equal(small.structuredContent.result.status, "available");
+      assert.equal(small.structuredContent.result.compactFallback, undefined,
+        "available 变体不携带 compactFallback");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});

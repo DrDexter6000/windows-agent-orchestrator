@@ -1,4 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
+// TD-230：worker 血统标记名复用 0047 SSOT 常量（单一真相，不手抄字符串）。
+import { NESTED_DISPATCH_ENV_MARKER as NESTED_WORKER_MARKER_ENV } from "./nestedDispatchGuard.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -234,13 +236,30 @@ async function _prepareAttemptEnv(gateHeld = false) {
 // 防向下派发门。这是 Lead 授权场景（验证即 Lead 行为），注入豁免；worker
 // 自发 shell 不经此 env，门对其仍然有效。
 const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
+  // TD-230（2026-10-08，本批两例实证）：verifier 环境确定性钉。①部署级认证
+  // 门禁 WAO_MCP_REQUIRE_CERTIFIED（User 作用域 setx）会随 process.env 渗入
+  // 验证子进程——派发族测试在 verifier 里必假红（TD-227 交付实战：worker 自跑
+  // 4 红 + Lead 干净 shell 同红，门禁归零后同一提交 60/60）。该门禁是 MCP 边界
+  // 的派发策略，验证子进程不是生产派发；canonical 套件对测试子进程已同钉
+  // （buildCanonicalChildEnv），verifier 对齐。②剥 WAO_IN_WORKER 血统标记
+  // （纵深防御：现消费方 nestedDispatchGuard 认 WAO_ALLOW_NESTED_DISPATCH
+  // 逃生口，但未来新增消费方未必——verifier 是控制面工具，其测试子进程不该
+  // 被当 worker 对待）。
+  const {
+    [NESTED_WORKER_MARKER_ENV]: _strippedWorkerMarker,
+    ...envBase
+  } = process.env;
+  const deterministicEnv = {
+    ...envBase,
+    WAO_MCP_REQUIRE_CERTIFIED: "0",
+  };
   try {
     const dir = await mkdtemp(join(tmpdir(), "wao-verify-"));
-    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" }, tempDir: dir, isolated: true };
+    return { env: { ...deterministicEnv, TMP: dir, TEMP: dir, TMPDIR: dir, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" }, tempDir: dir, isolated: true };
   } catch {
     const fallback = tmpdir();
     return {
-      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" },
+      env: { ...deterministicEnv, TMP: fallback, TEMP: fallback, TMPDIR: fallback, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" },
       tempDir: null,
       isolated: false,
     };
