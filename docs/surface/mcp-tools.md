@@ -319,6 +319,7 @@ Output:
 | view | string | no | const: compact |
 | compactStatus | string | no | enum: available \| empty \| too_large |
 | assistantMessageCount | integer | no |  |
+| compactFallback | string | no |  |
 | availableDrilldowns | array<object> | yes |  |
 
 ## run_diagnose

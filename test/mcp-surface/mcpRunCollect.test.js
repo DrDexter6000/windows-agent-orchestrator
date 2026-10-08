@@ -521,6 +521,186 @@ test("TD-119: multi-message page — entry truncated:false marks the message bou
 });
 
 // ---------------------------------------------------------------------
+// TD-224 (2026-10-08): compact too_large in-band fallback guidance + full-mode
+// mechanical continuation markers on chunk entries.
+// ---------------------------------------------------------------------
+
+// The mechanical reassembly algorithm the marker contract must support: glue a
+// continuation:true entry onto the previous buffer; an entry WITHOUT the key
+// starts a new message. Pages arrive in cursor order; an open buffer survives
+// a page boundary (the page carried nextCursor, the next page's first entry is
+// marked continuation:true).
+function reassembleByContinuation(pages) {
+  const messages = [];
+  let acc = null;
+  for (const page of pages) {
+    for (const entry of page.messages) {
+      if (entry.continuation === true) {
+        assert.ok(acc !== null, "continuation entry never starts a stream (marker lies otherwise)");
+        acc += entry.text;
+      } else {
+        assert.ok(!("continuation" in entry), "message-start entries OMIT the key (absent ≡ start, never false)");
+        if (acc !== null) messages.push(acc);
+        acc = entry.text;
+      }
+    }
+  }
+  if (acc !== null) messages.push(acc);
+  return messages;
+}
+
+test("TD-224: compact too_large carries actionable fallback guidance in text and structuredContent", async () => {
+  // too_large shape: the LAST assistant message exceeds the 4000-char bound.
+  const mkServer = (data) => createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data, reconstructed: true, backend: "process" }),
+  });
+  const msg = (text) => ({ kind: "message", role: "assistant", parts: [{ type: "text", text }] });
+
+  // --- too_large: guidance present on BOTH faces ---
+  const server = mkServer([msg("w".repeat(5000))]);
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", mode: "compact" } });
+    assert.equal(res.isError, undefined, "too_large compact is a successful bounded result, not an error");
+    const text = res.content.find((b) => b.type === "text").text;
+    const parsed = JSON.parse(text);
+    assert.equal(parsed.compactStatus, "too_large");
+    assert.deepEqual(parsed.messages, [], "no partial text on too_large");
+    // D1-D3 discipline (observe.js CLI marker precedent, lifted to MCP): static
+    // text, escape hatch named WITHOUT the failing option, plus the mechanical
+    // reassembly rule for the full-mode chunks it points at.
+    assert.equal(typeof parsed.compactFallback, "string", "compactFallback present");
+    assert.ok(/without mode=compact/.test(parsed.compactFallback), "names dropping the failing option");
+    assert.ok(/mode=full/.test(parsed.compactFallback), "names the full-mode escape hatch");
+    assert.ok(/nextCursor/.test(parsed.compactFallback), "names cursor continuation across pages");
+    assert.ok(/continuation:true/.test(parsed.compactFallback), "names the mechanical chunk-reassembly rule");
+    assert.ok(!parsed.compactFallback.includes("run_x"), "static text never interpolates run/worker content");
+    assert.equal(res.structuredContent.compactFallback, parsed.compactFallback,
+      "structuredContent carries the same guidance (text block is the same parsed object)");
+    assert.ok(Array.isArray(parsed.availableDrilldowns) && parsed.availableDrilldowns.length > 0,
+      "existing availableDrilldowns structure untouched");
+    assert.equal(parsed.truncated, false, "compact states stay truncated:false + nextCursor:null");
+    assert.equal(parsed.nextCursor, null);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+
+  // --- closed emission: every other variant carries NO compactFallback ---
+  for (const [label, args, data] of [
+    ["compact available", { runId: "run_x", mode: "compact" }, [msg("short final")]],
+    ["compact empty", { runId: "run_x", mode: "compact" }, []],
+    ["full (default mode)", { runId: "run_x" }, [msg("w".repeat(5000))]],
+  ]) {
+    const s = mkServer(data);
+    const c2 = await buildInMemoryClient(s);
+    try {
+      const res = await c2.callTool({ name: "run_collect", arguments: args });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.ok(!("compactFallback" in parsed), `${label}: no compactFallback field`);
+    } finally {
+      await c2.close();
+      await s.close();
+    }
+  }
+});
+
+test("TD-224: full-mode chunk entries carry mechanical continuation markers (concat reassembly)", async () => {
+  const mkServer = (data) => createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data, reconstructed: true, backend: "process" }),
+  });
+  const msg = (text) => ({ kind: "message", role: "assistant", parts: [{ type: "text", text }] });
+
+  // --- single 9615-char message: in-page chunks, lossless, NOT page-truncated ---
+  const full = "y".repeat(9615);
+  const server = mkServer([msg(full)]);
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.ok(parsed.messages.length >= 2, "message spans chunk entries");
+    assert.ok(!("continuation" in parsed.messages[0]), "first slice (message start) OMITS the key");
+    for (const m of parsed.messages.slice(1)) {
+      assert.equal(m.continuation, true, "later in-page slices carry continuation:true");
+    }
+    assert.equal(parsed.messages.map((m) => m.text).join(""), full, "concat still reproduces the full message");
+    assert.equal(parsed.truncated, false, "TD-119 semantics intact: nothing withheld");
+    assert.equal(parsed.nextCursor, null);
+    assert.deepEqual(reassembleByContinuation([parsed]), [full],
+      "marker-rule reconstruction yields exactly one message");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+
+  // --- two messages on one page: boundaries recover mechanically ---
+  const msg1 = "m".repeat(9615);
+  const msg2 = "n".repeat(2000);
+  const server2 = mkServer([msg(msg1), msg(msg2)]);
+  const client2 = await buildInMemoryClient(server2);
+  try {
+    const res = await client2.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(reassembleByContinuation([parsed]), [msg1, msg2],
+      "continuation markers separate the two messages without naive whole-page glue");
+  } finally {
+    await client2.close();
+    await server2.close();
+  }
+
+  // --- cross-page: page-2 first entry is marked as a mid-message resume ---
+  const big = "z".repeat(15000);
+  const server3 = mkServer([msg(big)]);
+  const client3 = await buildInMemoryClient(server3);
+  try {
+    const pages = [];
+    let cursor;
+    do {
+      const args = { runId: "run_x" };
+      if (cursor) args.cursor = cursor;
+      const res = await client3.callTool({ name: "run_collect", arguments: args });
+      pages.push(JSON.parse(res.content.find((b) => b.type === "text").text));
+      cursor = pages.at(-1).nextCursor;
+    } while (cursor && pages.length < 10);
+    assert.ok(pages.length >= 2, "message spanned pages");
+    assert.ok(!("continuation" in pages[0].messages[0]), "page-1 first slice starts the message (no key)");
+    for (const page of pages.slice(1)) {
+      assert.equal(page.messages[0].continuation, true,
+        "every resumed page opens with a continuation:true entry (mid-message cursor resume)");
+    }
+    assert.deepEqual(reassembleByContinuation(pages), [big],
+      "cross-page marker-rule reconstruction is byte-exact");
+  } finally {
+    await client3.close();
+    await server3.close();
+  }
+
+  // --- wire: the output schema declares the marker (tools/list face) ---
+  const dir = mkdtempSync(join(tmpdir(), "wao-td224-schema-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const server4 = createWaoMcpServer({ registryPath, runDir: join(dir, "runs") });
+    const client4 = await buildInMemoryClient(server4);
+    try {
+      const rc = (await client4.listTools()).tools.find((t) => t.name === "run_collect");
+      const entryProps = rc.outputSchema.properties.messages.items.properties;
+      assert.ok("continuation" in entryProps, "messages entries declare continuation");
+      assert.equal(entryProps.continuation.const, true,
+        "marker is const-true only (present ⇔ continuation slice; absent ≡ message start — the SDK serializes z.literal(true).optional() with type:boolean + const:true)");
+      assert.ok("compactFallback" in rc.outputSchema.properties, "top level declares compactFallback");
+    } finally {
+      await client4.close();
+      await server4.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
 // M9-4B-10: CLI and MCP call same service — messages.collected parity (in-memory).
 // ---------------------------------------------------------------------
 

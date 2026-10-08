@@ -28,6 +28,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { projectCollectResult } from "../../src/application/runCollectProjection.js";
+
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM = join(REPO_ROOT, "scripts", "wao-node.cjs");
 const STDIO_ENTRY = join(REPO_ROOT, "src", "mcp", "stdio.js");
@@ -426,4 +428,70 @@ test("M11-4-STDIO-SERVE: serve continuation over real HTTP boundary retrieves >5
   } finally {
     cleanupDir(dir);
   }
+});
+
+// =====================================================================
+// TD-224 (2026-10-08) projection-layer shape pin: the mechanical continuation
+// marker on full-mode chunk entries. The MARKER contract lives in
+// projectCollectResult/paginate (shared by MCP + CLI); this pins the exact
+// EMIT shape at the layer that owns it:
+//   - a slice that begins mid-message (later in-page slice, or the first slice
+//     after a mid-message cursor resume) carries exactly { continuation: true };
+//   - a message-start slice OMITS the key entirely (absent ≡ message start —
+//     the projection NEVER emits continuation:false);
+//   - compact entries keep the exact legacy three-key shape (run_await_result
+//     reuses the compact projection and its consumers pin that shape — the
+//     marker is full-mode-only);
+//   - the too_large guidance text is an MCP-handler concern: the projection
+//     itself never emits a fallback field (layer-responsibility pin).
+// =====================================================================
+test("TD-224 projection shape: continuation marker is emit-only-true on full-mode slices; compact entries unchanged", () => {
+  const svc = (texts) => ({
+    data: texts.map((t) => ({ kind: "message", role: "assistant", parts: [{ type: "text", text: t }] })),
+    reconstructed: true,
+    backend: "process",
+  });
+  const START_KEYS = ["role", "text", "truncated"];
+
+  // Full mode, one 9615-char message → 3 in-page slices.
+  const page1 = projectCollectResult(svc(["y".repeat(9615)]), { runId: "run_shape" });
+  assert.equal(page1.messages.length, 3, "9615 chars → 3 slices");
+  assert.deepEqual(Object.keys(page1.messages[0]), START_KEYS,
+    "message-start slice OMITS the continuation key (never false)");
+  assert.deepEqual(page1.messages[0], { role: "assistant", text: "y".repeat(4000), truncated: true },
+    "message-start slice keeps the exact legacy entry shape");
+  for (const m of page1.messages.slice(1)) {
+    assert.deepEqual(Object.keys(m), [...START_KEYS, "continuation"], "later slices add exactly one key");
+    assert.equal(m.continuation, true, "marker value is exactly true");
+  }
+  assert.equal(page1.messages.map((m) => m.text).join(""), "y".repeat(9615), "lossless concat (TD-119 intact)");
+
+  // Full mode, short messages → no marker anywhere.
+  const shorts = projectCollectResult(svc(["a", "b"]), { runId: "run_shape" });
+  for (const m of shorts.messages) {
+    assert.deepEqual(Object.keys(m), START_KEYS, "unsplit messages carry no marker");
+  }
+
+  // Cross-page resume: a 15000-char message; page 2 opens mid-message.
+  const bigPage1 = projectCollectResult(svc(["z".repeat(15000)]), { runId: "run_shape" });
+  assert.ok(bigPage1.nextCursor, "15000 chars withholds a tail");
+  const bigPage2 = projectCollectResult(svc(["z".repeat(15000)]), { runId: "run_shape", cursor: bigPage1.nextCursor });
+  assert.deepEqual(Object.keys(bigPage2.messages[0]), [...START_KEYS, "continuation"],
+    "cursor-resumed first slice is marked as a continuation of the previous page");
+  assert.equal(bigPage2.messages[0].continuation, true);
+
+  // Compact mode (available): exact legacy three-key entry — the compatibility
+  // fact that keeps run_await_result / collect --final consumers byte-identical.
+  const compact = projectCollectResult(svc(["short final", "LAST-body"]), { runId: "run_shape", mode: "compact" });
+  assert.equal(compact.compactStatus, "available");
+  assert.deepEqual(compact.messages, [{ role: "assistant", text: "LAST-body", truncated: false }],
+    "compact entry is byte-shape-identical to the pre-TD-224 projection (no marker key)");
+
+  // Compact too_large: empty messages, and the projection layer adds NO
+  // guidance field of its own — the MCP handler owns that text.
+  const tooLarge = projectCollectResult(svc(["w".repeat(5000)]), { runId: "run_shape", mode: "compact" });
+  assert.equal(tooLarge.compactStatus, "too_large");
+  assert.deepEqual(tooLarge.messages, []);
+  assert.ok(!("compactFallback" in tooLarge),
+    "projection emits no fallback guidance — MCP handler concern (layer pin)");
 });

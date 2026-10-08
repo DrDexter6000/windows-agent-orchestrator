@@ -1514,6 +1514,18 @@ const RUN_STATUS_DESCRIPTION =
 // （静态后缀不破坏"绝不泄漏原始异常"契约；collect 取回失败 ≠ 运行失败——
 // run_diagnose 给的是已记录的运行状态与失败证据，不承诺解释取回故障本身）。
 const COLLECT_ERROR_TEXT = "run_collect failed — call run_diagnose for the recorded run state and failure evidence";
+// TD-224 (2026-10-08): compact too_large degradation guidance — the D1-D3
+// discipline from the CLI --final marker (src/commands/observe.js), lifted to
+// the MCP surface: static text (never interpolates run/worker content), names
+// the runnable escape hatch WITHOUT the failing option (drop mode=compact),
+// and teaches the mechanical chunk-reassembly rule. Attached by the handler
+// ONLY when compactStatus === "too_large"; available/empty/full outputs carry
+// no compactFallback field.
+const COLLECT_COMPACT_TOO_LARGE_GUIDANCE =
+  "compact too_large: the last assistant message exceeds the 4000-char compact bound; " +
+  "re-run run_collect without mode=compact (or with mode=full) and follow nextCursor across pages — " +
+  "mechanical reassembly: concatenate an entry with continuation:true onto the previous entry; " +
+  "an entry without continuation starts a new message";
 const COLLECT_LIMIT = 50;
 // Cursor alphabet: base64url (RFC 4648 §5), no padding. ≤192 chars.
 const COLLECT_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
@@ -1539,6 +1551,16 @@ const COLLECTED_MESSAGE = z.object({
   role: z.string(),
   text: z.string(),
   truncated: z.boolean(),
+  // TD-224 (2026-10-08): mechanical continuation marker. Present (const true)
+  // ONLY on slices that begin mid-message — a later in-page slice of the same
+  // message, or the first slice after a mid-message cursor resume. Message-
+  // start slices OMIT the key (absent ≡ message start); the projection never
+  // emits false, which keeps compact entries (run_await_result's compact
+  // consumer included) byte-shape-compatible. Reassembly: glue a
+  // continuation:true entry onto the previous entry; an entry without the key
+  // starts a new message. z.literal mirrors the existing optional-marker
+  // pattern (`view: z.literal("compact").optional()` below) — SDK-proven shape.
+  continuation: z.literal(true).optional(),
 });
 
 const RUN_COLLECT_OUTPUT = z.object({
@@ -1566,6 +1588,12 @@ const RUN_COLLECT_OUTPUT = z.object({
   view: z.literal("compact").optional(),
   compactStatus: z.enum(["available", "empty", "too_large"]).optional(),
   assistantMessageCount: z.number().int().nonnegative().optional(),
+  // TD-224: compact-only too_large degradation guidance. Static text set by
+  // the handler exactly when compactStatus === "too_large" (see
+  // COLLECT_COMPACT_TOO_LARGE_GUIDANCE); absent in every other variant. The
+  // text block is JSON.stringify(parsed), so the guidance reaches BOTH the
+  // text content and structuredContent from this one field.
+  compactFallback: z.string().optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
@@ -5035,6 +5063,12 @@ export function createWaoMcpServer({
         // M11-8B closeout: project agentId through the SSOT and return the
         // PARSED safe object. The strict schema is the trust boundary.
         payload.agentId = safeProjectAgentId(payload.agentId);
+        // TD-224: compact too_large gets an actionable in-band fallback —
+        // static guidance text attached BEFORE the schema parse (fail-closed:
+        // a bad attach collapses to the fixed error with zero audit append).
+        if (payload.compactStatus === "too_large") {
+          payload.compactFallback = COLLECT_COMPACT_TOO_LARGE_GUIDANCE;
+        }
         // M12-8B: bounded progressive-disclosure metadata — computed BEFORE the
         // schema parse so the deferred-audit semantics hold unchanged: any
         // drilldown failure would collapse to the fixed error with zero append

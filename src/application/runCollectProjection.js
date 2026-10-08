@@ -13,7 +13,9 @@
 //     so a secret spanning a page boundary is already [REDACTED] before slice);
 //   - C0/C1/DEL control sanitization (LF/TAB preserved);
 //   - per-page caps: ≤8 messages, ≤4000 chars/message, ≤12000 chars/page;
-//     long messages are delivered losslessly as in-page chunk entries (TD-119);
+//     long messages are delivered losslessly as in-page chunk entries (TD-119)
+//     whose mid-message slices carry a mechanical continuation:true marker
+//     (TD-224 — consumers can reassemble message boundaries mechanically);
 //   - evidenceCounts tally over the FULL snapshot (unchanged semantic);
 //   - opaque base64url cursor codec + trust-boundary validation;
 //   - snapshot stability: frozen-prefix replay protection (append-only safe,
@@ -276,6 +278,19 @@ function extractAssistantTexts(rawResult, redactor) {
 // concatenating the entries reproduces the full message. TD-119 (2026-08-15):
 // `pageTruncated` is withheld-only (=== hasMore, always paired with a
 // nextCursor); entry-level `truncated:true` merely marks a slice.
+//
+// TD-224 (2026-10-08): chunk entries carry a MECHANICAL continuation marker.
+// A slice that begins mid-message (nonzero intra-message start offset — a
+// later slice of the same message, or the first slice after a mid-message
+// cursor resume) carries `continuation:true`; a slice that begins its source
+// message at char 0 OMITS the key entirely (absent ≡ message start, never
+// emitted as false — compact entries and run_await_result's compact consumer
+// stay byte-shape-compatible). Reassembly rule: glue an entry with
+// `continuation:true` onto the previous entry's text; an entry without the
+// key starts a new message (across pages, a page whose first entry carries
+// the key continues the previous cursor page's last entry). This does NOT
+// change TD-119 semantics: lossless, pageTruncated === hasMore pairing, and
+// entry `truncated` (slice marker) are all untouched.
 
 function paginate(redactedTexts, startMsgIdx, startOffset) {
   const messages = [];
@@ -316,7 +331,16 @@ function paginate(redactedTexts, startMsgIdx, startOffset) {
     // code units; a lone surrogate would corrupt the output.)
     const text = safeSliceUtf16(full, offset, offset + take);
 
-    messages.push({ role: "assistant", text, truncated: perTruncated || totalHit });
+    // TD-224: continuation marker — present (true) iff this slice begins
+    // mid-message (`offset > 0`: a later in-page slice OR the first slice
+    // after a mid-message cursor resume). Absent on message-start slices;
+    // never emitted as false (see the paginate doc comment above).
+    messages.push({
+      role: "assistant",
+      text,
+      truncated: perTruncated || totalHit,
+      ...(offset > 0 ? { continuation: true } : {}),
+    });
     totalChars += text.length;
 
     offset += text.length;

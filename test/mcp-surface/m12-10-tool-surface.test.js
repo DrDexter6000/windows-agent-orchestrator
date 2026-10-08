@@ -664,7 +664,14 @@ const RED_23_WIRE = 75492;
 // 集成重冻（Lead，2026-10-08）：TD-227 contract_check issueCodes 扩两枚举（+55B，
 // 交付 48b3534）与 TD-226 并行交付、各自重冻互不包含对方——集成 main 实测叠加
 // 85277（85222+55）。按实测重冻；Owner 硬顶 85939 不变，余 662B。
-const FROZEN_23_WIRE_CEILING = 85277;
+// TD-224（2026-10-08，run_collect 可用性双修）：①run_collect 出参 messages entries
+// 增可选 const-true 续接标记 continuation（z.literal(true).optional()——仅续接切片
+// 携带，缺席 ≡ 消息开头；schema 序列化为 {type:boolean,const:true}）；②顶层增可选
+// compactFallback（仅 compactStatus==="too_large" 时 handler 附静态降级指引文本）。
+// 纯 additive 可选 schema 成员，无工具增减、无校验移除、无描述字节变化
+// （FROZEN_23_DESC_CEILING 实测 10442 不动）。实测 85277 → 85360（+83B，两条
+// schema 条目），按实测重冻；Owner 硬顶 85939 不变，余 579B。
+const FROZEN_23_WIRE_CEILING = 85360;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -845,7 +852,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // 集成重冻（Lead，2026-10-08）：TD-227 与 TD-226 并行交付各自重冻结互不包含对方
   // （TD-227 contract_check issueCodes 扩两枚举 + TD-226 rejectionReason schema），
   // 集成后按 main 实测叠加值重冻（85222→85277，Owner 硬顶 85939 余 662B）。
-  "c6304a19be16b05a266a7fa4a9f1eb03298668b96eeb6fc80a7531aefe9114ab";
+  // TD-224（2026-10-08）：run_collect 出参 messages entries 增可选 const-true
+  // continuation 标记 + 顶层可选 compactFallback——两条件目均在 stripped 载荷内，
+  // SHA 如实翻新；无描述字节变化。
+  "08a685cb2946707ec10bb3765f3b7e7ed3050562322626c60c91e587203acc33";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
