@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 
 import { JsonlTranscript, readTranscript, validateDeliveryFacts } from "../../src/transcript.js";
@@ -884,10 +885,17 @@ function countingService(result) {
 }
 
 async function runCli(args, service) {
-  const out = await captureLog(async () => {
-    await runsCommand(["verify-commit", ...args], { runDir: "runs" }, { runVerifyCommitFn: service });
-  });
-  return out;
+  // staticRunsGuard 卫生：run-dir 一律 tmpdir（裸 "runs" 在 npm test 下解析到
+  // 仓库真实 runs/——源级零容忍，即便注入 service 不触盘）。
+  const tmp = mkdtempSync(join(tmpdir(), "wao-vc-cli-"));
+  try {
+    const out = await captureLog(async () => {
+      await runsCommand(["verify-commit", ...args], { runDir: tmp }, { runVerifyCommitFn: service });
+    });
+    return out;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 test("TD-240 CLI：RUNS_SUBCOMMANDS 收录 + 未知子命令文案", () => {
