@@ -33,15 +33,14 @@ async function captureLog(fn) {
   return lines.join("\n");
 }
 
-// 用字面 `node`（PATH 上的 node）执行 `node src/cli.js <cmd>` 并返回 stdout。
-// 这些 registry list/validate 行为测试的子进程验证的是 CLI 行为本身，不是
-// version guard（guard 的行为由 test/nodeVersionGuard.test.js 专测）。字面
-// `node` 常是 PATH 上的 v24，会被 src/cli.js 的 version guard 拒——canonical
-// runner（scripts/canonical-test.mjs）在父进程 env 注入 WAO_SKIP_VERSION_GUARD=1，
-// 直接 focused 执行时没有。因此本 helper 在 child env 显式注入同一变量，让测试
-// 自包含；不写全局/用户 env，不改生产代码。
+// 用与套件相同的解释器执行 CLI 并返回 stdout。这些 registry list/validate 行为
+// 测试的子进程验证的是 CLI 行为本身，不是 version guard（guard 的行为由
+// test/nodeVersionGuard.test.js 专测）。TD-242（2026-10-09）：改用
+// process.execPath（canonical 套件实际运行的 v22）钉住解释器——PATH 上的
+// node 常是 v24 且其行为漂移会让本文件对机器环境过敏（历史"PATH 基线"红的
+// 一半来由）；WAO_SKIP_VERSION_GUARD=1 保留，双保险。不写全局/用户 env。
 function runCliOnPathNode(cmd) {
-  return execSync(`node src/cli.js ${cmd}`, {
+  return execSync(`"${process.execPath}" src/cli.js ${cmd}`, {
     cwd: process.cwd(),
     encoding: "utf8",
     env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
@@ -1237,7 +1236,9 @@ test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all bac
     writeFileSync(registryPath, JSON.stringify({
       agents: {
         // kimi-code + valid systemPrompt → 应 pass（不再 warn）
-        coder_mm: { backend: "kimi-code", cwd: dir, systemPrompt: "config/roles/coder_mm.md" },
+        // TD-242（2026-10-09）：coder_mm.md 已随 0046 席位矩阵重构除名，夹具
+        // 改指向现行角色文件 coder.md（陈旧引用是本测试慢性红的真凶——非 PATH）。
+        coder_mm: { backend: "kimi-code", cwd: dir, systemPrompt: "config/roles/coder.md" },
         // codex + valid systemPrompt → 应 pass（不再 warn）
         tester: { backend: "codex", cwd: dir, systemPrompt: "config/roles/tester.md" },
         // claude-code + valid systemPrompt → 应 pass
@@ -1696,9 +1697,13 @@ test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级
     ["src/cli.js", "wao", "onboarding", "--agent", "ghost_worker"],
     { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
   assert.equal(refused.status, 1, "refused outcome 必须 exit 1（脚本/CI 门控语义不变）");
-  // preview 路径：模板真实存在的 tester（零写）→ exit 0，且 selected 分支打印分级块。
+  // preview 路径：模板真实存在的席位（零写）→ exit 0，且 selected 分支打印分级块。
+  // TD-242（2026-10-09）：tester 已随 0046 席位矩阵重构从入库模板除名（现行
+  // 候选=车道键 glm-pro/glm-flash/kimi/sol/astra/opus/deepseek-pro/deepseek-flash），
+  // 改用现行席位 sol——"tester 不在模板"导致的 REFUSED exit 1 是本测试慢性红
+  // 的真凶（非 PATH、非解释器版本）。
   const preview = spawnSync(process.execPath,
-    ["src/cli.js", "wao", "onboarding", "--agent", "tester"],
+    ["src/cli.js", "wao", "onboarding", "--agent", "sol"],
     { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
   assert.equal(preview.status, 0, `preview outcome 必须 exit 0，stderr=${preview.stderr}`);
   // R10 集成修正：分级块的数据面（模板面/已配置面）取决于本机是否存在私有
