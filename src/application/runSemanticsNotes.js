@@ -216,9 +216,10 @@ const CATALOG = Object.freeze({
   }),
   "delivery.waiting": Object.freeze({
     id: "delivery.waiting",
-    meaning: "The delivery is waiting for packaging or verification to settle.",
+    meaning: "The delivery is waiting for packaging or verification to settle. Verification may be waiting behind the same-machine gate; see the holder via runs gate CLI or lead_preflight.",
     doesNotMean: [
       "It does not mean the delivery passed or failed verification.",
+      "It does not mean this run itself is queued behind the gate.",
     ],
   }),
   "delivery.not_requested": Object.freeze({

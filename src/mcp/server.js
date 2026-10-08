@@ -277,6 +277,7 @@ import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP, WORKSPACE_UNBOUND_REASONS } from "../application/leadPreflight.js";
+import { readServerBuildFacts } from "../application/serverBuildFacts.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -3935,6 +3936,9 @@ export function createWaoMcpServer({
           runDir,
           userEnvReader: resolveUserEnv,
           getRegistryInventoryFn: inventoryResolver,
+          // Server-build drift facts (the git subprocess lives in
+          // serverBuildFacts.js; the aggregator only consumes the result).
+          serverBuildFactsFn: readServerBuildFacts,
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
             ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,

@@ -22,10 +22,15 @@
 //
 // Architectural contract:
 //   - Does NOT import src/mcp/*, src/commands/*, MCP SDK, or zod.
-//   - Does NOT shell out or call the WAO CLI.
+//   - Does NOT shell out or call the WAO CLI. The ONE git-subprocess fact
+//     (server-build drift) comes from serverBuildFacts.js as an INJECTED
+//     dependency — this module consumes only the structured result.
 //   - Does NOT dispatch, stop, select a worker, write transcript/worktree/branch,
-//     or persist anything.
-//   - Composes existing application services (getRegistryInventory, listRuns).
+//     or persist anything. The verification-gate status line is a pure READ of
+//     the machine lease (createVerificationGate().status() — the same read-only
+//     API the `runs gate` CLI displays; no claim, no heartbeat, no writes).
+//   - Composes existing application services (getRegistryInventory, listRuns,
+//     verificationGate.status).
 
 import {
   getRegistryInventory,
@@ -33,6 +38,7 @@ import {
   projectRegistryIssues,
   normalizeInventoryResult,
 } from "./registryInventory.js";
+import { createVerificationGate } from "../verificationGate.js";
 
 /**
  * @typedef {Object} PreflightWorkspace
@@ -88,6 +94,76 @@ export const WORKSPACE_UNBOUND_REASONS = Object.freeze([
   "no_workspace_authority",
 ]);
 
+// ===== Verification-gate status line (queue visibility) =====
+//
+// The lease file is machine-global and ANY local process can write it, so the
+// holder identity is UNTRUSTED input. owner renders only against a known-label
+// closed set — the code-known owner strings below plus the CURRENT registry
+// seat ids (passed in); everything else collapses to the opaque label "other"
+// and is never echoed verbatim (no paths, no free text). runId must pass a
+// conservative shape gate before display; anything else is dropped.
+const CODE_KNOWN_GATE_OWNERS = Object.freeze([
+  "cli/runs-gate",                            // src/commands/runs.js `runs gate`
+  "RunManager._verifyDeliveryResult",         // src/runManager.js delivery verification
+  "runDeliveryRepackage",                     // src/application/runDeliveryRepackage.js
+  "runDeliveryReverify",                      // src/application/runDeliveryReverify.js
+  "scripts/canonical-test.mjs",               // scripts/canonical-test.mjs
+  "scripts/canonical-test.mjs#observation",   // scripts/canonical-test.mjs observation lane
+]);
+
+// Shape gate for a holder runId (same conservative allowlist family as
+// delivery.js isValidRunId, plus the run_ prefix and a 64-char display cap).
+// Returns the runId when displayable, null when it must be dropped.
+function sanitizeGateRunId(v) {
+  if (typeof v !== "string") return null;
+  if (v.length === 0 || v.length > 64) return null;
+  if (!v.startsWith("run_")) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(v)) return null;
+  return v;
+}
+
+// Render the sanitized holder label: known owner (closed set) + optional
+// shape-valid runId. Never renders untrusted free text.
+function renderGateHolder(holder, knownAgentIds) {
+  const owner = typeof holder.owner === "string" ? holder.owner : "";
+  const known = CODE_KNOWN_GATE_OWNERS.includes(owner)
+    || (Array.isArray(knownAgentIds) && knownAgentIds.includes(owner));
+  const label = known ? owner : "other";
+  const runId = sanitizeGateRunId(holder.runId);
+  return runId == null ? label : `${label} run=${runId}`;
+}
+
+// Default read-only gate status. Constructing the gate is inert; status()
+// only READS the lease (no claim, no heartbeat, no writes). Constructed per
+// call so machineGatePaths observes env overrides live (nothing cached).
+function defaultGateStatus() {
+  return createVerificationGate().status();
+}
+
+// One observation-time FACT line from a status snapshot. Durations derive
+// from the snapshot's own numbers (no second clock read): heldMs =
+// ageMs + (heartbeatAt - startedAt). No causal claim anywhere — the line
+// says what the lease IS, never that any particular run is queued.
+function renderGateStatusLine(lease, knownAgentIds) {
+  if (lease == null || typeof lease !== "object") {
+    return "verification gate: state unreadable";
+  }
+  if (lease.free === true) return "verification gate: free";
+  if (lease.corrupt === true || lease.holder == null || typeof lease.holder !== "object") {
+    // corrupt OR held-without-parsable-holder: NEVER rendered as free.
+    return "verification gate: state unreadable";
+  }
+  const h = lease.holder;
+  const label = renderGateHolder(h, knownAgentIds);
+  const parts = [];
+  if (Number.isFinite(h.ageMs) && Number.isFinite(h.startedAt) && Number.isFinite(h.heartbeatAt)) {
+    const heldMs = Math.max(0, h.ageMs + (h.heartbeatAt - h.startedAt));
+    parts.push(`held ${Math.floor(heldMs / 1000)}s`);
+    parts.push(`heartbeat ${Math.floor(Math.max(0, h.ageMs) / 1000)}s`);
+  }
+  return `verification gate: held by ${label}${parts.length > 0 ? `, ${parts.join(", ")}` : ""}`;
+}
+
 /**
  * Aggregate the mechanical preflight facts. Each section is settled
  * independently — a throw in one section is captured and reported as a warning,
@@ -127,6 +203,16 @@ export const WORKSPACE_UNBOUND_REASONS = Object.freeze([
  *   application-layer use / tests), the real getRegistryInventory is used — but
  *   the MCP path always passes an explicit resolver to guarantee one read.
  * @param {Function} [input.listRunsFn] — injectable; signature matches listRuns
+ * @param {Function} [input.serverBuildFactsFn] — injectable server-build facts
+ *   reader (serverBuildFacts.readServerBuildFacts; the MCP handler passes the
+ *   real one). When provided, one advisory server-build line is derived from the
+ *   structured facts (observation / warning / degraded observation — never a
+ *   failure). When omitted (direct application-layer use / tests), NO
+ *   server-build line is emitted — this module itself never shells out.
+ * @param {Function} [input.gateStatusFn] — injectable read-only verification
+ *   gate status (defaults to createVerificationGate().status()). Supplies the
+ *   one queue-visibility observation line; any throw degrades to line
+ *   omission, never a preflight failure.
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -139,12 +225,63 @@ export async function aggregateLeadPreflight({
   userEnvReader,
   getRegistryInventoryFn,
   listRunsFn,
+  serverBuildFactsFn,
+  gateStatusFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
   const observations = [];
   const checkStatus = {};
   let workspaceSelection = null;
+
+  // --- Section 0: server-build facts (injected dependency; advisory only) ---
+  // The git subprocess lives in serverBuildFacts.js; only the structured
+  // facts are consumed here. Truthfulness rules:
+  //   readable + same HEAD + src/ clean  → one factual observation
+  //   readable + HEAD or src/ changed    → one warning (FACTUAL drift report —
+  //                                        it never asserts old code "is
+  //                                        running": same HEAD can still be a
+  //                                        different build)
+  //   not readable (git failed / non-Git)→ degraded observation (start time +
+  //                                        package version), no warning
+  //   dirty status unreadable (HEAD same)→ observation says exactly that —
+  //                                        cannot claim unchanged, must not
+  //                                        claim drift
+  // Any unexpected throw omits the lines entirely (never fails the preflight,
+  // never flips complete — the server-build line is outside the three
+  // complete-covered sections).
+  if (typeof serverBuildFactsFn === "function") {
+    try {
+      const f = await serverBuildFactsFn();
+      if (f != null && typeof f === "object") {
+        const startedAt = typeof f.startedAt === "string" && f.startedAt.length > 0
+          ? f.startedAt
+          : null;
+        const headShape = (v) => typeof v === "string" && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(v);
+        const headAtStart = headShape(f.headAtStart) ? f.headAtStart : null;
+        const headNow = headShape(f.headNow) ? f.headNow : null;
+        if (startedAt != null && headAtStart != null && headNow != null) {
+          if (headAtStart === headNow && f.srcDirtyNow === false) {
+            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, checkout unchanged`);
+          } else if (headAtStart !== headNow || f.srcDirtyNow === true) {
+            warnings.push(
+              "server code checkout differs from server start (HEAD or src/ changed) — restart host before trusting MCP dogfood results",
+            );
+          } else {
+            // srcDirtyNow === null: HEAD matches but dirty status is unreadable.
+            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, src/ dirty status unreadable`);
+          }
+        } else if (startedAt != null) {
+          const v = typeof f.packageVersion === "string" && f.packageVersion.length > 0
+            ? f.packageVersion
+            : "unknown";
+          observations.push(`server build facts degraded: started ${startedAt}, package version ${v}, code checkout HEAD unreadable`);
+        }
+      }
+    } catch {
+      // Facts unavailable → omit the line entirely; preflight never fails on it.
+    }
+  }
 
   // --- Section 1: workspace (already resolved by the adapter) ---
   // Distinguish three cases:
@@ -282,7 +419,10 @@ export async function aggregateLeadPreflight({
     const conditional = workers.filter((w) => w.certification === "conditional");
     const missing = workers.filter((w) => w.credentialAvailability === "missing");
     if (conditional.length > 0) {
-      observations.push(`${conditional.length} worker(s) have conditional certification (reported only)`);
+      // Drilldown pointer appended in place — still ONE bounded observation line.
+      observations.push(
+        `${conditional.length} worker(s) have conditional certification (reported only); drilldown: registry_list detail=certificationEvidence`,
+      );
     }
     if (missing.length > 0) {
       observations.push(`${missing.length} worker(s) are missing a required credential — see registry_list for env names`);
@@ -352,6 +492,29 @@ export async function aggregateLeadPreflight({
   } else {
     // workspace unknown (resolver threw) → cannot determine; leave activeRuns null.
     checkStatus.activeRuns = "unknown";
+  }
+
+  // --- Section 4: verification gate status (machine-local, read-only, independent) ---
+  // One observation-time fact for queue visibility. The holder identity is
+  // untrusted (machine-global file, writable by any local process): owner maps
+  // to the known-label closed set (code-known owners + current registry seat
+  // ids — workers observed above plus the caller's knownAgentIds), unknowns
+  // collapse to "other"; runId displays only past the shape gate. corrupt /
+  // read failure render "state unreadable" — NEVER as free. Any throw omits
+  // the line; the preflight never fails on it and complete is untouched.
+  try {
+    const statusFn = typeof gateStatusFn === "function" ? gateStatusFn : defaultGateStatus;
+    const lease = await statusFn();
+    const gateKnownOwners = Array.from(new Set([
+      ...(Array.isArray(knownAgentIds) ? knownAgentIds.filter((id) => typeof id === "string") : []),
+      ...(workers ?? []).map((w) => w.id),
+    ]));
+    const line = renderGateStatusLine(lease, gateKnownOwners);
+    if (typeof line === "string" && line.length > 0) {
+      observations.push(line);
+    }
+  } catch {
+    // Read threw unexpectedly → omit the line entirely (never fail, never fake free).
   }
 
   // complete = every section reliably observed AND no selection failure.
