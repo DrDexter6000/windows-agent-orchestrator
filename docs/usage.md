@@ -689,6 +689,8 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 | `run.delivery_rejected` | TD-103：Lead 拒绝——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
 | `run.delivery_repackage_rejected` | TD-226：`run_delivery_repackage` 的 expected-policy 拒绝审计——payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 | TD-226 |
 | `run.read_only_declared` | Round 4：只读声明（`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only`）——start 时恰一次的 durable 事实；payload 为空（envelope 即事实，无 prompt/路径/argv），其存在是 `run_activity` 附带 `readOnlyObservation` 观察投影的权威输入，本身不构成任何门 | R4 |
+| `run.lead_commit_check_started` | TD-240：`runs verify-commit` 首命令前写入——checkId 随机 nonce、受检提交全形、命令清单原文 + commands-file 字节 sha256、timeoutMs、终态判定依据（state_change/legacy_inferred）、提交关系事实字段（isDeliveryCommit/containsDeliveryCommit/adoptedFromTrailer，记事实不设拒）；`kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁；仅 started 无 outcome = 合法**不完整**证据（绝不读作通过） | TD-240 |
+| `run.lead_commit_check_outcome` | TD-240：`runs verify-commit` 收口——status∈{passed,failed,aborted}、results[]（index/exitCode/timedOut/durationMs + 失败 8KiB 尾，TD-130 式）、独立 cleanup∈{ok,failed} 字段；不做恰一条 CAS（允许多次核验，checkId 区分）；事件族**不进** validateDeliveryFacts/decide/wao accept 任何判定输入 | TD-240 |
 | `workflow.*` | DAG 节点级事件（workflow.started/completed、node.started/completed），独立 `wf_*.jsonl` | M5 |
 
 > `run.message`：不是落盘事件类型——RunManager 把 message 的 role/parts 传给 scorecard 供 `requireAssistantText` 检查，不写进 transcript。
@@ -1268,6 +1270,17 @@ Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery
 3. **独立审计强制**：采纳必须经独立审计席回审，证据规格写死：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog；禁止 Lead 单方闭环（自证闭环已被实证抓过一次：TD-150 批B 首轮"已集成"声称被 reflog/grep 证伪）。
 4. **集成后全量终验**照 §8.2 错峰执行，绿后方可推送。
 5. **集成前工作区纪律（2026-09-17 实证）**：cherry-pick 交付提交前，Lead 工作区必须干净（未提交改动先提交）——交付提交与 Lead 本地改动触碰同一文件（如 `.wao/decisions/map.md`）时会冲突中止。
+
+**`runs verify-commit`（TD-240，2026-10-09 双席裁定）承载边界**：本命令只承载上述协议**第 1 步（Lead 侧归因）与第 4 步（集成后终验）的执行**——在临时 worktree 检出指定提交、执行 Lead 提供的命令清单、把证据以 `run.lead_commit_check_started/_outcome` 事件族追加进指定 run 的转录（仅 started 无 outcome = 合法**不完整**证据，绝不读作通过）。它**不满足第 3 步独立审计证据规格**（HEAD hash + `git branch --contains <sha>` + reflog——本命令的 outcome 不是这些证据的替代品，不得当受审对象替代品；独立审计席仍必须按第 3 步证据规格另行回审）。两事件带 `kind:"lead_self_check"`+`independentAuditRequired:true` 边界锁，CLI 输出与投影不出现 accepted/verified 措辞，事件族不进 validateDeliveryFacts / decide / wao accept 任何判定输入。
+
+```bash
+npm run cli -- runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
+```
+
+- `--commit`：**全形** canonical SHA（40/64 小写 hex；短形拒绝——TD-238 短形只用于期望锚），经 `rev-parse --verify --end-of-options <sha>^{commit}` 等值校验；`--commands-file`：UTF-8 JSON 字符串数组（与 `runs delivery reverify --setup-commands-file` 同一解析器与边界：≤32 条×每条≤512 字符；命令含静态可辨绝对路径字面量即拒绝——防越出临时 worktree）；`--timeout-ms`：单值闭区间 `[1000,7200000]`（每命令预算，缺省 300000）。
+- 前置：runId 须为该 workspace 的**已终态** delivery run（转录含 `run.delivery_created`）；提交与 run 的关系记事实字段（isDeliveryCommit / containsDeliveryCommit / adoptedFromTrailer）**不设拒**——跨 run 同仓提交可核验。
+- 执行：一律走系统唯一有意 shell 边界（`runVerificationCommand`）+ verifier 同款 attempt env 确定性钉（TD-230）+ 同机机器验证闸串行；临时 worktree 在 `<repo>/.wao-worktrees/verify-<nonce>/`（检出+用后清理；不进 os.tmpdir()）。
+- 退出码：outcome 为 passed 且 cleanup 为 ok 才是 0；失败/中断/清理失败均非零（结果照记，`cleanup:"failed"` 如实落事件）。
 
 `run_delivery` 投影在验证失败摘要中携带 `stderrTailInTranscript` 布尔提示位（true = 失败命令的 result frame 带非空 stdoutTail/stderrTail，诊断细节去转录里读；投影永不携带尾内容本身）。
 

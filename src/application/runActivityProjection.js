@@ -466,6 +466,12 @@ const SKIP_TYPES = new Set([
   // TD-219 验收附注（opus 会审 Q2）：Lead 侧验收落盘是 Lead 动作审计事件，
   // 非 worker 活动——与 messages.collected 同型，跳过（读取面为 wao accept --show）。
   "acceptance.recorded",
+  // TD-240（2026-10-08）：runs verify-commit 的 lead_commit_check 事件族是
+  // Lead 侧自检审计事件（采纳协议承载），非 worker 活动——与
+  // acceptance.recorded 同型跳过（在此消化，绝不落 [unknown_event]）；
+  // 读取面为转录与 projectLeadCommitChecks（src/application/runVerifyCommit.js）。
+  "run.lead_commit_check_started",
+  "run.lead_commit_check_outcome",
 ]);
 
 /**

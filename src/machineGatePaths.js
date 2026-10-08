@@ -8,7 +8,7 @@
 // "wao-canonical-test.inflight". os.tmpdir() resolves through TMP/TEMP/TMPDIR,
 // and the delivery harness injects a FRESH per-attempt temp dir into exactly
 // those variables of every verification subprocess (src/deliveryVerification.js
-// _prepareAttemptEnv). Two channels that both derived "the" marker path from
+// prepareAttemptEnv — 原 _prepareAttemptEnv，TD-240 导出). Two channels that both derived "the" marker path from
 // os.tmpdir() therefore resolved two different files and could never see each
 // other — the advisory WARNING was structurally blind precisely in the harness
 // context it exists for. These paths must instead derive from machine-global

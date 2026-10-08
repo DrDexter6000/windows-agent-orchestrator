@@ -60,6 +60,14 @@ import {
   REVERIFY_TIMEOUT_MS_MIN,
   REVERIFY_TIMEOUT_MS_MAX,
 } from "../application/runDeliveryReverify.js";
+import {
+  runVerifyCommit,
+  LEAD_COMMIT_CHECK_STATUSES,
+  LEAD_COMMIT_CHECK_CLEANUP_STATUSES,
+  VERIFY_COMMIT_TIMEOUT_MS_MIN,
+  VERIFY_COMMIT_TIMEOUT_MS_MAX,
+} from "../application/runVerifyCommit.js";
+import { createHash } from "node:crypto";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
@@ -90,9 +98,11 @@ import { readRegistry } from "../registry.js";
 // fail-closed unknown-subcommand error below cannot swallow it.
 // TD-200③（2026-10-02）：导出供 docs-consistency 的 MCP↔CLI 映射表守卫派生核对
 // （docs/usage.md 映射表是手写值指纹——TD-120 家族，必须绑定断言防静默腐烂）。
+// TD-240（2026-10-08）：`verify-commit`——采纳协议承载命令（Lead 侧归因 +
+// 集成后终验执行；不满足独立审计证据规格，见 docs/usage.md 采纳协议节）。
 export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
-  "dashboard", "diagnose", "delivery", "wait", "gate",
+  "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit",
 ];
 
 async function runsCommand(args, config, deps) {
@@ -139,6 +149,10 @@ async function runsCommand(args, config, deps) {
   }
   if (sub === "gate") {
     await runsGateCommand(tail, config, deps);
+    return;
+  }
+  if (sub === "verify-commit") {
+    await runsVerifyCommitCommand(tail, config, deps);
     return;
   }
   if (sub === "forecast") {
@@ -1387,6 +1401,44 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
 }
 
 /**
+ * M12-6 FR-07 / TD-240③（2026-10-08）：UTF-8 JSON 字符串数组 commands-file 的
+ * 唯一解析器——`--setup-commands-file`（runs delivery reverify）与
+ * `--commands-file`（runs verify-commit）共用同一解析器与边界（≤32 条×每条
+ * ≤512 字符，REVERIFY_* service 导出——无第二份边界常量）。TD-240 裁定③"复用
+ * reverify --setup-commands-file 的解析器与边界"的落地形态：自 reverify CLI
+ * 内联块提取为具名函数；reverify 旗标的历史错误文案逐字节保持（flagName +
+ * echoValue + exceedLabel 参数化，reverify 路径传原字面量）。
+ */
+async function parseCommandsFileBuffer(buf, flagName, echoValue, exceedLabel) {
+  let parsed;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    throw new Error(`${flagName} must be valid UTF-8 JSON: ${echoValue}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${flagName} must contain a JSON array of strings`);
+  }
+  if (parsed.length > REVERIFY_SETUP_COMMANDS_LIMIT) {
+    throw new Error(`${flagName} exceeds ${REVERIFY_SETUP_COMMANDS_LIMIT} commands`);
+  }
+  const out = [];
+  for (const cmd of parsed) {
+    if (typeof cmd !== "string") {
+      throw new Error(`${flagName} must contain only strings`);
+    }
+    if (cmd.trim().length === 0) {
+      throw new Error(`${flagName} must not contain blank commands`);
+    }
+    if (cmd.length > REVERIFY_SETUP_COMMAND_MAX_LENGTH) {
+      throw new Error(`${exceedLabel} exceeds ${REVERIFY_SETUP_COMMAND_MAX_LENGTH} characters`);
+    }
+    out.push(cmd);
+  }
+  return out;
+}
+
+/**
  * M12-6 FR-07: `runs delivery reverify <runId> --reason <code>`
  * `[--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]`
  *
@@ -1462,34 +1514,19 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   // --setup-commands-file: UTF-8 JSON string array. Missing = empty array (the
   // service default). Rejected: non-JSON / non-array / non-string elements /
   // blank elements / oversize (bounded by the SERVICE exports — no second copy).
+  // TD-240③: the parse itself is delegated to the ONE shared commands-file
+  // parser (parseCommandsFileBuffer) with this command's historical texts.
   let setupCommands;
   if (flags.setupCommandsFile !== undefined) {
-    let parsed;
+    let buf;
     try {
-      parsed = JSON.parse(await readFile(resolve(flags.setupCommandsFile), "utf8"));
+      buf = await readFile(resolve(flags.setupCommandsFile));
     } catch {
       throw new Error(`--setup-commands-file must be valid UTF-8 JSON: ${flags.setupCommandsFile}`);
     }
-    if (!Array.isArray(parsed)) {
-      throw new Error("--setup-commands-file must contain a JSON array of strings");
-    }
-    if (parsed.length > REVERIFY_SETUP_COMMANDS_LIMIT) {
-      throw new Error(`--setup-commands-file exceeds ${REVERIFY_SETUP_COMMANDS_LIMIT} commands`);
-    }
-    const out = [];
-    for (const cmd of parsed) {
-      if (typeof cmd !== "string") {
-        throw new Error("--setup-commands-file must contain only strings");
-      }
-      if (cmd.trim().length === 0) {
-        throw new Error("--setup-commands-file must not contain blank commands");
-      }
-      if (cmd.length > REVERIFY_SETUP_COMMAND_MAX_LENGTH) {
-        throw new Error(`setup command exceeds ${REVERIFY_SETUP_COMMAND_MAX_LENGTH} characters`);
-      }
-      out.push(cmd);
-    }
-    setupCommands = out;
+    setupCommands = await parseCommandsFileBuffer(
+      buf, "--setup-commands-file", flags.setupCommandsFile, "setup command",
+    );
   }
 
   // --timeout-ms: strict integer in the service [MIN, MAX]; missing = service
@@ -1569,6 +1606,181 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   console.log(`Delivery: ${result.deliveryCommit}`);
   console.log(`Reason: ${result.reason} (${result.state})`);
   console.log(`Verification: ${result.verificationStatus}${result.failureCode ? ` (${result.failureCode})` : ""}`);
+}
+
+/**
+ * TD-240（2026-10-08，裁定①-⑥）: `runs verify-commit <runId> --commit <sha>`
+ * `--commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]`
+ *
+ * 采纳协议承载命令：在临时 worktree 检出指定提交 → 执行 commands-file 的命令
+ * → 以 run.lead_commit_check_started/_outcome 事件族追加证据 → 清理。
+ * Delegates to the SAME runVerifyCommit application service——CLI 不重实现算法、
+ * 不解析转录、不复制边界常量。CLI owns only:
+ *   - strict argv parsing（runs wait/reverify 同纪律：未知 flag 拒绝）
+ *   - --commit 全形 canonical SHA 语法前置（40/64 小写 hex——短形拒绝；服务端
+ *     再 rev-parse 等值校验）
+ *   - --commands-file 读取 + 字节 sha256 + 共享解析器（parseCommandsFileBuffer，
+ *     reverify 同一解析器与边界）
+ *   - --timeout-ms 严格整数闭区间 [1000,7200000]（service 导出常量）
+ *   - authorizedWorkspaceRoot 由既有 cwd/workspace proof 路径产生
+ *   - SIGINT 尽力路径：置 interrupt 标志（服务在命令间/命令后收敛为 aborted）
+ *   - 安全输出：闭集字段 only——绝不出现 accepted/verified 措辞（裁定⑥）、
+ *     绝不回显命令文本/尾内容/路径/env
+ *
+ * outcome 非 passed 或 cleanup 失败 → 打印结果后置 process.exitCode=1
+ * （清理失败"结果照记+整体非零退出"）。
+ *
+ * @param {string[]} args — everything after `verify-commit`
+ * @param {object} config
+ * @param {object} [hostDeps] — { runVerifyCommitFn } service injection for testing
+ */
+const RUNS_VERIFY_COMMIT_KNOWN_FLAGS = new Set([
+  "--commit", "--commands-file", "--timeout-ms",
+  "--run-dir", "--cwd", "--format",
+]);
+
+async function runsVerifyCommitCommand(args, config, hostDeps = {}) {
+  const seenFlags = new Set();
+  const flags = {};
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (RUNS_VERIFY_COMMIT_KNOWN_FLAGS.has(a)) {
+      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
+      seenFlags.add(a);
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      flags[key] = v;
+      i += 1;
+    } else if (a.startsWith("--")) {
+      throw new Error(`unknown flag for runs verify-commit: ${a}`);
+    } else {
+      positionals.push(a);
+    }
+  }
+
+  if (positionals.length !== 1) {
+    throw new Error("runs verify-commit requires exactly one <runId>");
+  }
+  const runId = positionals[0];
+  if (runId.trim().length === 0 || !/^[A-Za-z0-9_-]+$/.test(runId)) {
+    throw new Error("runs verify-commit requires a valid <runId>");
+  }
+
+  // 裁定③：SHA 过 isCanonicalCommitId 全形（40/64 小写 hex）——短形不接受。
+  if (flags.commit === undefined) {
+    throw new Error("runs verify-commit requires --commit <sha>");
+  }
+  if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(flags.commit)) {
+    throw new Error("--commit must be a canonical full-form 40/64-hex commit id (short forms are not accepted)");
+  }
+
+  // 裁定③：commands-file 必填；读字节（sha256 基于同一份字节）+ 共享解析器。
+  if (flags.commandsFile === undefined) {
+    throw new Error("runs verify-commit requires --commands-file FILE (UTF-8 JSON string array)");
+  }
+  let commandsBuf;
+  try {
+    commandsBuf = await readFile(resolve(flags.commandsFile));
+  } catch {
+    throw new Error(`--commands-file must be valid UTF-8 JSON: ${flags.commandsFile}`);
+  }
+  const commands = await parseCommandsFileBuffer(
+    commandsBuf, "--commands-file", flags.commandsFile, "command",
+  );
+  const commandsFileSha256 = createHash("sha256").update(commandsBuf).digest("hex");
+
+  // 裁定③：--timeout-ms 单值闭区间 [1000,7200000]（service 导出边界——无第二份）。
+  let timeoutMs;
+  if (flags.timeoutMs !== undefined) {
+    if (!/^\d+$/.test(flags.timeoutMs)) {
+      throw new Error(`--timeout-ms must be an integer in [${VERIFY_COMMIT_TIMEOUT_MS_MIN}, ${VERIFY_COMMIT_TIMEOUT_MS_MAX}]`);
+    }
+    const n = Number(flags.timeoutMs);
+    if (!Number.isInteger(n) || n < VERIFY_COMMIT_TIMEOUT_MS_MIN || n > VERIFY_COMMIT_TIMEOUT_MS_MAX) {
+      throw new Error(`--timeout-ms must be an integer in [${VERIFY_COMMIT_TIMEOUT_MS_MIN}, ${VERIFY_COMMIT_TIMEOUT_MS_MAX}]`);
+    }
+    timeoutMs = n;
+  }
+
+  if (flags.format !== undefined && flags.format !== "json") {
+    throw new Error("--format only supports 'json' (text mode is default)");
+  }
+
+  // authorizedWorkspaceRoot 走既有 cwd/workspace proof 路径（reverify/review 同款）
+  // ——调用方输入不能直接命名 workspace root。
+  const cwd = flags.cwd ? resolve(flags.cwd) : resolveTargetCwd({ cwd: undefined }, config);
+  const runDir = resolve(flags.runDir ?? config.runDir);
+
+  // SIGINT（Ctrl-C）尽力路径：置 interrupt 标志；服务在当前命令沉降后收敛为
+  // aborted（子进程随控制台 Ctrl-C 自终止；未终止则 bounded by --timeout-ms）。
+  const interrupt = { requested: false };
+  const onSigint = () => { interrupt.requested = true; };
+  process.on("SIGINT", onSigint);
+  let raw;
+  try {
+    const service = hostDeps.runVerifyCommitFn ?? runVerifyCommit;
+    raw = await service({
+      runId,
+      runDir,
+      authorizedWorkspaceRoot: cwd,
+      commit: flags.commit,
+      commands,
+      commandsFileSha256,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      invocationCwd: cwd,
+      interrupt,
+    });
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+
+  // 安全投影：闭集字段逐项校验（fail closed——服务结果形状不被信任直传）。
+  if (raw.runId !== runId) throw new Error("verify-commit runId mismatch");
+  if (raw.commit !== flags.commit) throw new Error("verify-commit commit mismatch");
+  if (!/^[0-9a-f]{16,64}$/.test(String(raw.checkId ?? ""))) throw new Error("verify-commit bad checkId");
+  if (!LEAD_COMMIT_CHECK_STATUSES.includes(raw.status)) throw new Error("verify-commit bad status");
+  if (!LEAD_COMMIT_CHECK_CLEANUP_STATUSES.includes(raw.cleanup)) throw new Error("verify-commit bad cleanup");
+  if (!Array.isArray(raw.results)) throw new Error("verify-commit bad results");
+  for (const r of raw.results) {
+    if (!r || typeof r.index !== "number" || typeof r.timedOut !== "boolean") {
+      throw new Error("verify-commit bad result row");
+    }
+  }
+  const result = {
+    runId,
+    checkId: raw.checkId,
+    commit: raw.commit,
+    status: raw.status,
+    cleanup: raw.cleanup,
+    results: raw.results.map((r) => ({
+      index: r.index,
+      exitCode: r.exitCode,
+      timedOut: r.timedOut,
+      durationMs: r.durationMs,
+      ...(r.contentDrift === true ? { contentDrift: true } : {}),
+    })),
+  };
+
+  if (flags.format === "json") {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    // 裁定⑥：text 输出绝不出现 accepted/verified 字样。
+    console.log(`Run: ${result.runId}`);
+    console.log(`Check: ${result.checkId}`);
+    console.log(`Commit: ${result.commit}`);
+    console.log(`Status: ${result.status}`);
+    console.log(`Cleanup: ${result.cleanup}`);
+    console.log(`Commands run: ${result.results.length}`);
+    for (const r of result.results) {
+      const drift = r.contentDrift === true ? " (worktree drift)" : "";
+      console.log(`  [${r.index}] exit=${r.exitCode ?? "null"} timedOut=${r.timedOut} ${r.durationMs}ms${drift}`);
+    }
+  }
+  // 清理失败/failed/aborted → 整体非零退出（结果已照记）。
+  if (raw.exitCode !== 0) process.exitCode = 1;
 }
 
 export { runsCommand, runsDeliveryCommand, runsGateCommand };

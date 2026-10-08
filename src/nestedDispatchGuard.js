@@ -25,6 +25,9 @@
 //   RunManager.start（一切派发的单一咽喉：CLI run/spawn、MCP run_dispatch、
 //   consult 扇出、resume）；MCP run_dispatch/run_consult/run_continue 处理器头
 //   （worker 会话拉起的 MCP 服务实例在 side effect 之前被拒）。
+//   TD-240 追加第四处：runs verify-commit 服务头（src/application/
+//   runVerifyCommit.js）——env 准备之前先过本门，防本 CLI 成为 worker 获取
+//   净化环境/嵌套豁免的入口（Lead 主检出语境正常放行）。
 import { resolve as resolvePath } from "node:path";
 
 export const NESTED_DISPATCH_ENV_MARKER = "WAO_IN_WORKER";

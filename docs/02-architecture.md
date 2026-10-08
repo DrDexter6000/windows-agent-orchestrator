@@ -468,6 +468,8 @@ interface TranscriptEvent {
 | `run.delivery_rejected` | Lead 拒绝 delivery | `[S]` Phase 3C-2 |
 | `run.delivery_repackage_rejected` | repackage expected-policy 拒绝的有界审计事实（TD-226）：payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 | `[S]` TD-226 |
 | `run.read_only_declared` | 只读 run 声明；空 payload，envelope 即事实 | `[M]` R4 |
+| `run.lead_commit_check_started` | TD-240 `runs verify-commit`（采纳协议承载）：首命令前写入——checkId nonce、提交全形、命令原文+commands-file sha256、终态判定依据、提交关系事实字段；`kind:"lead_self_check"`+`independentAuditRequired:true`；仅 started 无 outcome = 合法不完整证据 | `[S]` TD-240 |
+| `run.lead_commit_check_outcome` | TD-240：status∈{passed,failed,aborted}+results[]（失败 8KiB 尾）+独立 cleanup∈{ok,failed}；无恰一条 CAS（checkId 区分多次核验）；不进 validateDeliveryFacts/decide/wao accept 判定输入 | `[S]` TD-240 |
 | `workflow.*` | DAG 节点事件，写入独立 `wf_*.jsonl` | `[M]` M5 |
 
 `run.message` 不是落盘事件类型；它只是传给 scorecard 的 message 快照，因此不进入本表。

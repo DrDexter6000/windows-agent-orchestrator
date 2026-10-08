@@ -48,7 +48,7 @@ import { waoMachineStateDir, verificationLeasePath } from "./machineGatePaths.js
 
 /**
  * 注入到验证子进程 env 的标记：子进程看到它就知道本进程已持闸，跳过再次认领
- * （防自锁）。由 deliveryVerification._prepareAttemptEnv 写入。
+ * （防自锁）。由 deliveryVerification.prepareAttemptEnv（原 _prepareAttemptEnv，TD-240 导出）写入。
  */
 export const VERIFICATION_GATE_HELD_ENV = "WAO_VERIFICATION_GATE_HELD";
 

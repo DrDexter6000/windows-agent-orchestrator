@@ -359,6 +359,36 @@ test("R4 只读 run：usage.md 事件投影必须含 run.read_only_declared 正�
   );
 });
 
+// TD-240⑥（2026-10-09，consult_20261008164029600fyqngp 双席裁定）：runs
+// verify-commit 的采纳协议承载边界句必须钉在 usage.md——防后续编辑静默弱化
+// "不满足独立审计证据规格 / outcome 不得当受审对象替代品"的红线。事件行集
+// 本身由上方"两表行集相等"守卫覆盖（架构表 + usage 投影两侧同步）。
+test("TD-240: usage.md 采纳协议节钉 runs verify-commit 承载边界句", () => {
+  const usage = read("docs/usage.md");
+  const heading = "### 验证失败采纳协议";
+  const start = usage.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage.md 缺验证失败采纳协议节");
+  const nextSection = usage.indexOf("\n### ", start + 1);
+  const section = usage.slice(start, nextSection === -1 ? undefined : nextSection);
+  assert.ok(
+    section.includes("runs verify-commit"),
+    "采纳协议节必须记载 runs verify-commit 承载命令",
+  );
+  assert.ok(
+    /第 1 步（Lead 侧归因）与第 4 步（集成后终验）的执行/.test(section),
+    "采纳协议节必须写明 verify-commit 只承载第 1 步归因与第 4 步终验",
+  );
+  assert.ok(
+    /不满足第 3 步独立审计证据规格/.test(section)
+      && /HEAD hash \+ `git branch --contains <sha>` \+ reflog/.test(section),
+    "采纳协议节必须写明 verify-commit 不满足第 3 步独立审计证据规格（HEAD+branch --contains+reflog）",
+  );
+  assert.ok(
+    /不当受审对象替代品|不得当受审对象替代品/.test(section),
+    "采纳协议节必须写明 outcome 不得当受审对象替代品",
+  );
+});
+
 test("SKILL.md 必须在正文最前显式声明 lead 角色与职责链", () => {
   // 没有角色定义，coding agent 装了技能也会退回单体模式（不编排/不派发/不验收）。
   // 身份声明必须紧跟 frontmatter（agent 加载技能后读到的第一段）。

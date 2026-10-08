@@ -39,6 +39,7 @@ Commands:
   runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
   runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（默认 text；窗口到期 exit 0）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt + kill switch（只读）；--release 人工破锁（破除失败 fail-closed）
+  runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # TD-240 采纳协议承载：临时 worktree 检出提交→执行命令→lead_commit_check 事件族落证→清理（Lead 侧自检，非独立审计证据；outcome 不当受审对象替代品）
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）
   playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）

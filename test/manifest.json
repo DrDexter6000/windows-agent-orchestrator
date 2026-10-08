@@ -258,6 +258,7 @@
       "run-lifecycle/m12-19-processRecovery.test.js",
       "delivery/runDelivery.test.js",
       "delivery/runDeliveryReadBinding.test.js",
+      "delivery/runsVerifyCommit.test.js",
       "delivery/verificationTailCapture.test.js",
       "run-lifecycle/readOnlyDispatch.test.js"
     ],

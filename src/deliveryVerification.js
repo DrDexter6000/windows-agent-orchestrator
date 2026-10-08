@@ -225,11 +225,16 @@ function _validateTimeout(timeoutMs) {
  * `isolated` is false so the persisted environment fact records the degradation
  * rather than lying. This never aborts a run on a transient temp-dir failure.
  *
+ * TD-240（2026-10-08，裁定⑤）：导出为共享函数（原模块私有 `_prepareAttemptEnv`
+ * 纯改名+导出，行为零变化）——`runs verify-commit`（src/application/
+ * runVerifyCommit.js）复用同一 env 确定性钉（TD-230 钉/剥 WAO_IN_WORKER/0047
+ * 豁免/逐次 TMP 隔离），不复制第二份 env 构造。
+ *
  * @param {boolean} [gateHeld=false] — 本进程持闸时，每个 attempt env 追加
  *     WAO_VERIFICATION_GATE_HELD=1（env 第一跳：验证子进程见即跳过再认领）。
  * @returns {Promise<{env: object, tempDir: string|null, isolated: boolean}>}
  */
-async function _prepareAttemptEnv(gateHeld = false) {
+export async function prepareAttemptEnv(gateHeld = false) {
   // 防自锁标记只在本进程真正持闸时注入；无闸/fail-open 绝不谎报。
   
 // 0047（补席审计缺口）：验证命令由控制面在交付 worktree 内执行——cwd 命中
@@ -266,8 +271,10 @@ const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
   }
 }
 
-/** Best-effort cleanup of a per-attempt temp dir. Never throws. */
-async function _cleanupAttemptEnv(attempt) {
+/** Best-effort cleanup of a per-attempt temp dir. Never throws.
+ * TD-240（裁定⑤）：随 prepareAttemptEnv 一同导出（纯改名+导出，行为零变化）
+ * ——runs verify-commit 的逐命令 attempt 清理复用同一实现。 */
+export async function cleanupAttemptEnv(attempt) {
   if (!attempt || !attempt.tempDir) return;
   try {
     await rm(attempt.tempDir, { recursive: true, force: true });
@@ -533,13 +540,13 @@ const ASSERT_CODES = { launch: "execution_error", timeout: "command_timeout", no
  * @returns {Promise<{outcome:"ok"|"mutated"|"failed", failureCode?:string, result:object}>}
  */
 async function _runOneCommand(runCommand, command, cwd, timeoutMs, deliveryRef, isolation, codes, gateHeld = false) {
-  const attempt = await _prepareAttemptEnv(gateHeld);
+  const attempt = await prepareAttemptEnv(gateHeld);
   if (!attempt.isolated) isolation.fullyHeld = false;
   let result;
   try {
     result = await runCommand(command, cwd, { timeoutMs, env: attempt.env });
   } finally {
-    await _cleanupAttemptEnv(attempt);
+    await cleanupAttemptEnv(attempt);
   }
 
   // CTO RED #2 fix: re-run exact proof after EVERY command outcome (exit 0,
