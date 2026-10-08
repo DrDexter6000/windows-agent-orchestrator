@@ -12,6 +12,9 @@
 //   - fixed error on service throw; no structuredContent on error
 //   - malicious / malformed service-output attack matrix collapses to fixed error
 //   - the adapter passes the bound authorizedWorkspaceRoot to the service
+//   - TD-226: typed closed-set policy rejections are structured outcomes with
+//     rejectionReason (decide M12-9 discipline); plain/unknown errors stay the
+//     fixed safe error
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +24,10 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+import {
+  RepackageRejectionError,
+  REPACKAGE_REJECTION_CODES,
+} from "../../src/application/runDeliveryRepackage.js";
 
 // ===== Helpers =====
 
@@ -195,8 +202,10 @@ test("M12-1S2-M4: bound success → bounded structured output; authorizedWorkspa
       assert.deepEqual(
         Object.keys(sc).sort(),
         // TD-215：status 枚举加入（ok|pending——pending 时 ok 字段缺席 .optional 化）。
-        ["created", "deliveryCommit", "recoveryKind", "runId", "source", "status", "verificationStatus"],
+        // TD-226：rejectionReason 恒在（成功为 null）。
+        ["created", "deliveryCommit", "recoveryKind", "rejectionReason", "runId", "source", "status", "verificationStatus"],
       );
+      assert.equal(sc.rejectionReason, null, "success carries no rejection");
       assert.equal(sc.runId, "run_m4");
       assert.match(sc.deliveryCommit, /^[0-9a-f]{40}$/, "canonical commit only");
       assert.equal(sc.verificationStatus, "passed");
@@ -276,6 +285,112 @@ test("M12-1S2-M6: malformed service output collapses to fixed error (no leak)", 
         assert.equal(r.isError, true, `${label} → error`);
         assert.equal(r.structuredContent, undefined, `${label} → no structuredContent`);
         assert.equal(r.content[0].text, "run_delivery_repackage failed", `${label} → fixed text`);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// Group 7 (TD-226): typed closed-set policy rejections are structured
+// outcomes with rejectionReason — never the bare fixed error text
+// =====================================================================
+
+test("TD-226-MCP-1: every closed-set code maps to a structured outcome, not the bare error text", async () => {
+  const dir = makeGitDir("td226-mcp1-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+    for (const code of REPACKAGE_REJECTION_CODES) {
+      const server = createWaoMcpServer({
+        registryPath: join(dir, "agents.json"),
+        runDir: dir,
+        workspaceRoot: dir,
+        getRunDeliveryRepackageFn: async () => {
+          throw new RepackageRejectionError(code, `arbitrary human wording for ${code} C:\\secret <script>`);
+        },
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const r = await client.callTool({
+          name: "run_delivery_repackage",
+          arguments: { runId: "run_td226", allowedPaths: ["src"] },
+        });
+        assert.equal(r.isError, undefined, `${code} → normal structured outcome, not MCP error`);
+        const sc = r.structuredContent;
+        assert.deepEqual(
+          Object.keys(sc).sort(),
+          ["rejectionReason", "runId", "status"],
+          `${code} → bounded rejection payload (optional delivery fields absent)`,
+        );
+        assert.equal(sc.status, "ok", `${code} → synchronous completed outcome`);
+        assert.equal(sc.runId, "run_td226");
+        assert.equal(sc.rejectionReason, code, `${code} → code survives`);
+        // No raw gate wording / path / credential leak anywhere in the wire.
+        const wire = JSON.stringify(r);
+        assert.ok(!wire.includes("arbitrary human wording") && !wire.includes("secret") && !wire.includes("script"),
+          `${code} → no raw message leak`);
+        assert.ok(!wire.includes("run_delivery_repackage failed"), `${code} → not the bare fixed text`);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-226-MCP-2: transport classification is TYPE-gated — plain Errors and unknown codes stay the fixed error", async () => {
+  const dir = makeGitDir("td226-mcp2-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+    // 1. A plain Error carrying the EXACT old gate sentence must NOT classify.
+    {
+      const server = createWaoMcpServer({
+        registryPath: join(dir, "agents.json"),
+        runDir: dir,
+        workspaceRoot: dir,
+        getRunDeliveryRepackageFn: async () => {
+          throw new Error("runDeliveryRepackage: new allowedPaths do not cover actual changed paths: src/x");
+        },
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const r = await client.callTool({
+          name: "run_delivery_repackage",
+          arguments: { runId: "run_td226b", allowedPaths: ["src"] },
+        });
+        assert.equal(r.isError, true, "plain Error with an old gate sentence stays the fixed error");
+        assert.equal(r.structuredContent, undefined, "no structured rejection for a plain Error");
+        assert.equal(r.content[0].text, "run_delivery_repackage failed", "fixed safe text");
+        assert.ok(!JSON.stringify(r).includes("cover actual changed"), "no raw gate text leaks");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+    // 2. The DEDICATED type with an UNKNOWN code fails closed → fixed error.
+    {
+      const server = createWaoMcpServer({
+        registryPath: join(dir, "agents.json"),
+        runDir: dir,
+        workspaceRoot: dir,
+        getRunDeliveryRepackageFn: async () => {
+          throw new RepackageRejectionError("not_a_real_code", "x");
+        },
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const r = await client.callTool({
+          name: "run_delivery_repackage",
+          arguments: { runId: "run_td226c", allowedPaths: ["src"] },
+        });
+        assert.equal(r.isError, true, "unknown code fails closed");
+        assert.equal(r.structuredContent, undefined, "no structured rejection for an unknown code");
       } finally {
         await client.close();
         await server.close();

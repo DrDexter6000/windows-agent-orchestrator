@@ -19,16 +19,26 @@
 //     run.delivery_created and exactly one final verification outcome for the
 //     same input; different scopes never overwrite each other.
 //   - No long lock: packaging/verification run outside the transcript lock.
+//
+// TD-226: every expected-policy rejection is a TYPED closed-set code
+// (RepackageRejectionError + REPACKAGE_REJECTION_CODES SSOT) and, once the
+// transcript is readable, appends exactly one bounded
+// `run.delivery_repackage_rejected` audit event (payload { rejectionReason }).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { runDeliveryRepackage } from "../../src/application/runDeliveryRepackage.js";
+import {
+  runDeliveryRepackage,
+  RepackageRejectionError,
+  REPACKAGE_REJECTION_CODES,
+  classifyRepackageRejection,
+} from "../../src/application/runDeliveryRepackage.js";
 import { resolveDeliveryCommit } from "../../src/delivery.js";
 import { verifyDelivery } from "../../src/deliveryVerification.js";
 import { computeCandidateInventory } from "../../src/application/candidateInventory.js";
@@ -1056,9 +1066,17 @@ test("M12-1S2-RETRY-SCOPE: an idempotent retry must still cover the existing del
         authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
         verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
       }),
-      /cover the existing delivery/i,
+      (err) => err instanceof RepackageRejectionError && err.code === "scope_violation",
     );
-    assert.deepEqual(await readEvents(runDir), before, "rejected retry leaves transcript unchanged");
+    // TD-226: the ONLY transcript delta is exactly one bounded rejection audit
+    // event — no created/outcome/provenance/state mutation.
+    const after = await readEvents(runDir);
+    assert.equal(after.length, before.length + 1, "exactly one appended event");
+    const audit = after[after.length - 1];
+    assert.equal(audit.type, "run.delivery_repackage_rejected");
+    assert.equal(audit.rejectionReason, "scope_violation");
+    assert.equal(audit.runId, RUN_ID);
+    assert.deepEqual(Object.keys(audit).filter((k) => !["ts", "seq", "runId", "agentId", "type"].includes(k)), ["rejectionReason"], "bounded payload");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1195,9 +1213,13 @@ test("M12-1S2-FAIL-CLOSED-ORPHAN: verification without created rejects before tr
         authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
         verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
       }),
-      /orphan verification/i,
+      (err) => err instanceof RepackageRejectionError && err.code === "durable_chain_inconsistent",
     );
-    assert.deepEqual(await readEvents(runDir), before);
+    // TD-226: exactly one bounded rejection audit event, no other mutation.
+    const after = await readEvents(runDir);
+    assert.equal(after.length, before.length + 1);
+    assert.equal(after[after.length - 1].type, "run.delivery_repackage_rejected");
+    assert.equal(after[after.length - 1].rejectionReason, "durable_chain_inconsistent");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1369,8 +1391,12 @@ test("M12-13-REPKG-TIMEOUT-ABSENT: absent verificationTimeoutMs is zero drift �
 test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verificationTimeoutMs fails closed BEFORE inventory / packaging / append / verification", async () => {
   // A present-but-malformed persisted value must never be silently defaulted or
   // widened: it rejects in Phase 0 (preconditions) BEFORE any inventory read, Git
-  // packaging, transcript append, or verifier execution. All closed-set malformations
+  // packaging, delivery append, or verifier execution. All closed-set malformations
   // (string / fraction / below-min / above-max / null) must behave identically.
+  // TD-226: the rejection is TYPED (candidate_contract_malformed); the ONLY
+  // transcript interaction is the single bounded audit attempt (the injected
+  // factory refuses to write, so the file bytes stay unchanged — proving the
+  // audit is secondary and cannot mask the typed rejection).
   for (const bad of ["600000", 600000.5, 999, 7200001, null, "oops"]) {
     const { repo, runDir } = await setupDisallowedScenario({ verificationTimeoutMs: bad });
     const filePath = join(runDir, `${RUN_ID}.jsonl`);
@@ -1389,13 +1415,13 @@ test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verific
           verifyDeliveryFn: async () => { verifyCalls += 1; throw new Error("must not verify"); },
           transcriptFactory: async () => { transcriptCalls += 1; throw new Error("must not append"); },
         }),
-        /verificationTimeoutMs|integer/i,
+        (err) => err instanceof RepackageRejectionError && err.code === "candidate_contract_malformed",
         `malformed ${JSON.stringify(bad)} must fail closed`,
       );
       assert.equal(inventoryCalls, 0, `inventory NOT called for ${JSON.stringify(bad)}`);
       assert.equal(resolveCalls, 0, `resolve NOT called for ${JSON.stringify(bad)}`);
       assert.equal(verifyCalls, 0, `verify NOT called for ${JSON.stringify(bad)}`);
-      assert.equal(transcriptCalls, 0, `transcript append NOT called for ${JSON.stringify(bad)}`);
+      assert.equal(transcriptCalls, 1, `only the TD-226 rejection audit attempt for ${JSON.stringify(bad)}`);
       assert.equal(
         readFileSync(filePath, "utf8").length,
         bytesBefore,
@@ -1407,3 +1433,309 @@ test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verific
     }
   }
 });
+
+// ============================================================
+// TD-226: typed closed-set rejection codes + bounded audit event
+// ============================================================
+
+/** Durable facts for a NONTERMINAL process-backed orphan (M12-19 shape). */
+function orphanSeedEvents({ repo, worktreePath, baseCommit, pid = 999999 }) {
+  return [
+    { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
+    {
+      type: "run.started", backend: "claude-code", cwd: repo, worktreePath,
+      worktreeBranch: `wao/${RUN_ID}`,
+      delivery: { mode: "git_commit_v1", baseCommit, allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    },
+    { type: "session.created", backend: "process", backendSessionId: `proc_${pid}` },
+    { type: "run.state_change", from: null, to: "pending", reason: "created" },
+    { type: "run.state_change", from: "pending", to: "submitted", reason: "spawned" },
+    { type: "run.state_change", from: "submitted", to: "running", reason: "first_event" },
+  ];
+}
+
+async function setupOrphanScenario(prefix = "td226-orphan-") {
+  const { repo, baseCommit } = await makeRepo(prefix);
+  const runDir = await mkdtemp(join(tmpdir(), `${prefix}runs-`));
+  const worktreePath = makeLinkedWorktree(repo);
+  await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
+  seedTranscript(runDir, RUN_ID, orphanSeedEvents({ repo, worktreePath, baseCommit }));
+  return { repo, baseCommit, runDir, worktreePath };
+}
+
+const deadProbe = () => false;
+const aliveProbe = () => true;
+const missingLease = () => ({ present: false });
+const NOW = () => 100000;
+
+const isCode = (code) => (err) => err instanceof RepackageRejectionError && err.code === code;
+
+test("TD-226-CODES: every REPACKAGE_REJECTION_CODES member is constructibly triggered", async () => {
+  // The SSOT is frozen and every member is reachable — no dead codes, no
+  // untyped leftovers (the same discipline M12-9 applied to decide).
+  assert.equal(Object.isFrozen(REPACKAGE_REJECTION_CODES), true);
+  assert.equal(new Set(REPACKAGE_REJECTION_CODES).size, REPACKAGE_REJECTION_CODES.length);
+  assert.equal(REPACKAGE_REJECTION_CODES.length, 13);
+
+  // 1. malformed_input — allowedPaths not an array.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: "src", authorizedWorkspaceRoot: repo,
+        verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      }), isCode("malformed_input"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 2. run_not_found — well-formed runId, no transcript file.
+  {
+    const { repo } = await makeRepo("td226-nf-");
+    const runDir = await mkdtemp(join(tmpdir(), "td226-nf-runs-"));
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: "run_missing_xyz", runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      }), isCode("run_not_found"));
+      assert.equal(existsSync(join(runDir, "run_missing_xyz.jsonl")), false, "no transcript invented");
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 3. workspace_not_authorized — run belongs to another workspace.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    const otherRepo = await makeRepo("td226-other-");
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: otherRepo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("workspace_not_authorized"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); await cleanupDir(otherRepo); }
+  }
+
+  // 4. candidate_ineligible — terminal completed (not failed).
+  {
+    const { repo, baseCommit, runDir, worktreePath } = await setupDisallowedScenario();
+    try {
+      const completed = disallowedPathEvents({
+        repo, worktreePath, baseCommit, allowedPaths: ["src"], verificationCommands: ["npm test"],
+      }).map((e) => (e.type === "run.state_change" && e.to === "failed"
+        ? { ...e, to: "completed", reason: "done" }
+        : e));
+      seedTranscript(runDir, RUN_ID, completed);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("candidate_ineligible"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 5. candidate_contract_malformed — malformed persisted verificationTimeoutMs.
+  {
+    const { repo, runDir } = await setupDisallowedScenario({ verificationTimeoutMs: "600000" });
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("candidate_contract_malformed"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 6. worktree_unusable — backend_failed candidate HEAD drifted off the base.
+  {
+    const { repo, runDir, worktreePath } = await setupBackendFailureScenario();
+    try {
+      git(["commit", "--allow-empty", "-m", "advance"], worktreePath);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("worktree_unusable"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 7/8/9. inventory_unavailable / inventory_incomplete / inventory_empty.
+  {
+    const inventoryCases = [
+      ["inventory_unavailable", async () => null],
+      ["inventory_incomplete", async () => ({
+        originalAllowedPaths: ["src"], originalAllowedCount: 1, originalAllowedTruncated: false,
+        actualChangedPaths: ["src/a.js"], actualChangedCount: 300, actualChangedTruncated: true,
+        disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false,
+      })],
+      ["inventory_empty", async () => ({
+        originalAllowedPaths: ["src"], originalAllowedCount: 1, originalAllowedTruncated: false,
+        actualChangedPaths: [], actualChangedCount: 0, actualChangedTruncated: false,
+        disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false,
+      })],
+    ];
+    for (const [code, fakeInventory] of inventoryCases) {
+      const { repo, runDir } = await setupDisallowedScenario();
+      try {
+        await assert.rejects(() => runDeliveryRepackage({
+          runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+          resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+          computeInventoryFn: fakeInventory,
+        }), isCode(code));
+      } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+    }
+  }
+
+  // 10. scope_violation — new allowedPaths do not cover an actual changed path.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("scope_violation"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 11. durable_chain_inconsistent — orphan verification outcome (no created).
+  {
+    const { repo, worktreePath, baseCommit, runDir } = await setupDisallowedScenario();
+    try {
+      const ref = {
+        schemaVersion: 1, kind: "git_commit", runId: RUN_ID,
+        baseCommit, deliveryCommit: "d".repeat(40), branch: `wao/${RUN_ID}`,
+        worktreePath, changedFiles: ["src/a.js"],
+        verification: { status: "failed", commands: ["npm test"], verifiedCommit: "d".repeat(40), results: [] },
+        acceptance: { status: "pending", reviewerType: "lead_agent" },
+        integration: { status: "pending", targetCommit: null },
+      };
+      const t = new JsonlTranscript(join(runDir, `${RUN_ID}.jsonl`), { runId: RUN_ID, agentId: AGENT_ID });
+      await t.append("run.delivery_verification_failed", { delivery: ref });
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["root.txt", "src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("durable_chain_inconsistent"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 12. concurrent_terminal_ineligible — settlement loses first-terminal-wins
+  // to a concurrent `completed` terminal that is not recovery-eligible.
+  {
+    const { repo, runDir } = await setupOrphanScenario("td226-race-");
+    try {
+      const racingFactory = async (filePath, context) => {
+        const t = new JsonlTranscript(filePath, context);
+        t.transitionState = async () => {
+          await t.append("run.state_change", { from: "running", to: "completed", reason: "external" });
+          return { accepted: false };
+        };
+        return t;
+      };
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory, transcriptFactory: racingFactory,
+        nowFn: NOW, isAliveFn: deadProbe, ownerLeaseReader: missingLease,
+      }), isCode("concurrent_terminal_ineligible"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // 13. liveness_proof_failed — orphan whose detached process is still alive.
+  {
+    const { repo, runDir } = await setupOrphanScenario("td226-alive-");
+    try {
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+        nowFn: NOW, isAliveFn: aliveProbe, ownerLeaseReader: missingLease,
+      }), isCode("liveness_proof_failed"));
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+});
+
+test("TD-226-AUDIT: a typed rejection appends exactly one bounded audit event; unexpected errors append none", async () => {
+  // Typed rejection (scope_violation): exactly one audit event, bounded payload.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    try {
+      const before = await readEvents(runDir);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("scope_violation"));
+      const after = await readEvents(runDir);
+      assert.equal(after.length, before.length + 1, "exactly one appended event");
+      const audit = after[after.length - 1];
+      assert.equal(audit.type, "run.delivery_repackage_rejected");
+      assert.equal(audit.rejectionReason, "scope_violation");
+      assert.equal(audit.runId, RUN_ID);
+      assert.equal(typeof audit.ts, "string");
+      assert.equal(typeof audit.seq, "number");
+      assert.deepEqual(
+        Object.keys(audit).sort(),
+        ["agentId", "rejectionReason", "runId", "seq", "ts", "type"],
+        "bounded payload — no paths, no credentials, no counts",
+      );
+      // No state/delivery mutation rides along with the audit.
+      for (const mutated of ["run.delivery_created", "run.delivery_verification_passed", "run.state_change", "run.delivery_repackaged"]) {
+        assert.equal(
+          after.filter((e) => e.type === mutated).length,
+          before.filter((e) => e.type === mutated).length,
+          `no new ${mutated}`,
+        );
+      }
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // Unexpected error (packaging infra failure): NO audit event — the collapsed
+  // fixed error path stays byte-identical.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    try {
+      const before = await readEvents(runDir);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: async () => { throw new Error("git packaging boom"); },
+        verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      }), /git packaging boom/);
+      const after = await readEvents(runDir);
+      assert.equal(after.filter((e) => e.type === "run.delivery_repackage_rejected").length, 0,
+        "unexpected errors write no rejection audit");
+      assert.equal(after.length, before.length, "transcript unchanged");
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+
+  // malformed_input: the gates fire BEFORE the transcript read — no audit event.
+  {
+    const { repo, runDir } = await setupDisallowedScenario();
+    try {
+      const before = await readEvents(runDir);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: [], authorizedWorkspaceRoot: repo,
+        verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      }), isCode("malformed_input"));
+      assert.deepEqual(await readEvents(runDir), before, "no audit for malformed_input");
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); }
+  }
+});
+
+test("TD-226-CLASSIFIER: classification is TYPE-gated — plain Errors and unknown codes stay null", () => {
+  // A plain Error carrying the EXACT old gate sentence must NOT classify.
+  assert.equal(
+    classifyRepackageRejection(new Error("runDeliveryRepackage: new allowedPaths do not cover actual changed paths: src/x")),
+    null,
+  );
+  // The dedicated type with an unknown code fails closed.
+  assert.equal(classifyRepackageRejection(new RepackageRejectionError("not_a_real_code", "x")), null);
+  // The dedicated type with a member code → the code (message wording irrelevant).
+  assert.equal(
+    classifyRepackageRejection(new RepackageRejectionError("scope_violation", "completely different wording")),
+    "scope_violation",
+  );
+  // Non-error throwables never classify.
+  assert.equal(classifyRepackageRejection("scope_violation"), null);
+  assert.equal(classifyRepackageRejection(null), null);
+});
+

@@ -32,6 +32,19 @@
 //            existing outcome — a retry continues from the created stage without
 //            re-packaging and without a second outcome.
 //
+// TD-226 (zero-observability failure): every EXPECTED policy rejection below
+// is a TYPED closed-set code thrown via RepackageRejectionError (the M12-9
+// run_delivery_decide discipline — the machine protocol is the type + code,
+// never parsed message text). The MCP transport maps a typed rejection to a
+// normal structured outcome carrying rejectionReason. After a readable
+// transcript exists, each typed rejection ALSO appends exactly one bounded
+// audit fact (`run.delivery_repackage_rejected`, payload { rejectionReason }
+// — no paths, no credentials) so the attempt is observable in the transcript;
+// the audit append is secondary and can never mask the typed rejection. Only
+// genuinely unexpected failures (Git packaging, verifier crash, append/lock
+// infra, non-ENOENT read errors) stay plain throws — those leave the
+// transcript byte-identical.
+//
 // Architectural contract:
 //   - No argv parsing, no console.log, no process.exit.
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
@@ -72,6 +85,69 @@ import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspace } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
 
+// ===== TD-226: closed-set repackage rejection codes (single authority) =====
+//
+// The frozen SSOT for EXPECTED policy rejections. A code is thrown ONLY via
+// RepackageRejectionError — never parsed from a human message. The classifier
+// below accepts nothing but the dedicated type + a member of this set; a plain
+// Error (even with byte-identical gate wording) and an unknown code both fail
+// closed to the caller's fixed safe error.
+
+export const REPACKAGE_REJECTION_CODES = Object.freeze([
+  // Lead-side input failed the service shape gates (runId/runDir/allowedPaths entry/limit).
+  "malformed_input",
+  // runs/<runId>.jsonl does not exist — no candidate to repackage (no audit event is written for it).
+  "run_not_found",
+  // The run does not belong to the authorized workspace root (or no root was supplied).
+  "workspace_not_authorized",
+  // Outside the eligibility closed set: terminal not failed, durable recovery facts unclassifiable, original delivery never requested, or a Lead decision already exists.
+  "candidate_ineligible",
+  // The persisted run.started delivery contract is unusable (not exactly one bound run.started; missing worktreePath/baseCommit/allowedPaths/verification declaration; malformed verificationTimeoutMs).
+  "candidate_contract_malformed",
+  // The persisted worktree is missing/not provable as a Git worktree top-level, or its HEAD already left the original base before the first repackage.
+  "worktree_unusable",
+  // The candidate inventory read failed — the candidate cannot be enumerated.
+  "inventory_unavailable",
+  // Some inventory list was truncated — the scope-coverage proof cannot be trusted.
+  "inventory_incomplete",
+  // The candidate has zero actual changed paths — nothing to package.
+  "inventory_empty",
+  // The new allowedPaths narrow the original contract or fail to cover every actual changed path / the existing delivery's changedFiles.
+  "scope_violation",
+  // The existing durable delivery chain is orphaned/ambiguous/unbound (created/outcome/provenance counts or binding contradict).
+  "durable_chain_inconsistent",
+  // process_missing settlement lost the first-terminal-wins race to a terminal that is not independently recovery-eligible.
+  "concurrent_terminal_ineligible",
+  // The process_missing liveness proof failed — the detached runner may still be alive; retry later or stop it explicitly.
+  "liveness_proof_failed",
+]);
+
+/**
+ * TD-226: the dedicated error type for repackage policy rejections.
+ * `code` is the machine protocol (a member of REPACKAGE_REJECTION_CODES);
+ * `message` is human diagnostics ONLY and is never parsed by consumers.
+ */
+export class RepackageRejectionError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "RepackageRejectionError";
+    this.code = code;
+  }
+}
+
+/**
+ * Classify a thrown policy error into the closed-set rejection code, or null
+ * when the error is not a recognized policy rejection (unexpected/internal —
+ * the caller keeps it a fixed safe error).
+ * @param {unknown} err
+ * @returns {string|null} one of REPACKAGE_REJECTION_CODES, or null
+ */
+export function classifyRepackageRejection(err) {
+  if (!(err instanceof RepackageRejectionError)) return null;
+  if (!REPACKAGE_REJECTION_CODES.includes(err.code)) return null;
+  return err.code;
+}
+
 const REPACKAGE_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
   "run.delivery_verification_failed",
@@ -89,12 +165,18 @@ export const REPACKAGE_ALLOWED_PATHS_LIMIT = INVENTORY_PATHS_LIMIT;
  */
 function _normalizeAllowedPaths(allowedPaths) {
   if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
-    throw new Error("runDeliveryRepackage: allowedPaths must be a non-empty array");
+    throw new RepackageRejectionError("malformed_input", "runDeliveryRepackage: allowedPaths must be a non-empty array");
   }
   if (allowedPaths.length > REPACKAGE_ALLOWED_PATHS_LIMIT) {
-    throw new Error(`runDeliveryRepackage: allowedPaths exceeds ${REPACKAGE_ALLOWED_PATHS_LIMIT}`);
+    throw new RepackageRejectionError("malformed_input", `runDeliveryRepackage: allowedPaths exceeds ${REPACKAGE_ALLOWED_PATHS_LIMIT}`);
   }
-  return [...new Set(allowedPaths.map((p) => validateProjectedPath(p)))].sort();
+  let validated;
+  try {
+    validated = allowedPaths.map((p) => validateProjectedPath(p));
+  } catch (err) {
+    throw new RepackageRejectionError("malformed_input", `runDeliveryRepackage: allowedPaths entry rejected (${err?.message ?? "invalid path"})`);
+  }
+  return [...new Set(validated)].sort();
 }
 
 /**
@@ -120,7 +202,8 @@ function _validateVerificationTimeoutMs(value) {
     || value < VERIFICATION_TIMEOUT_MS_MIN
     || value > VERIFICATION_TIMEOUT_MS_MAX
   ) {
-    throw new Error(
+    throw new RepackageRejectionError(
+      "candidate_contract_malformed",
       `runDeliveryRepackage: persisted verificationTimeoutMs must be an integer in [${VERIFICATION_TIMEOUT_MS_MIN}, ${VERIFICATION_TIMEOUT_MS_MAX}]`,
     );
   }
@@ -172,9 +255,13 @@ function _proveProcessMissingEligibility({
   ownerLeaseReader,
 }) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
-    throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
+    throw new RepackageRejectionError("workspace_not_authorized", "runDeliveryRepackage: authorizedWorkspaceRoot is required");
   }
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  try {
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  } catch (err) {
+    throw new RepackageRejectionError("workspace_not_authorized", `runDeliveryRepackage: ${err?.message ?? "workspace ownership proof failed"}`);
+  }
 
   const livenessDeps = {
     runDir,
@@ -183,12 +270,12 @@ function _proveProcessMissingEligibility({
     ...(typeof ownerLeaseReader === "function" ? { ownerLeaseReader } : {}),
   };
   if (proveProcessMissing(events, runId, livenessDeps).eligible !== true) {
-    throw new Error("runDeliveryRepackage: process_missing liveness proof failed");
+    throw new RepackageRejectionError("liveness_proof_failed", "runDeliveryRepackage: process_missing liveness proof failed");
   }
 
   const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
   if (started.length !== 1) {
-    throw new Error("runDeliveryRepackage: expected exactly one bound run.started");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: expected exactly one bound run.started");
   }
   const bound = started[0];
   const delivery = bound.delivery;
@@ -198,34 +285,34 @@ function _proveProcessMissingEligibility({
     || !Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0
     || typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0
   ) {
-    throw new Error("runDeliveryRepackage: run.started delivery contract is malformed");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started delivery contract is malformed");
   }
   const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
   // The Lead may widen but never narrow the original contract.
   for (const orig of originalAllowedPaths) {
     if (!isPathAllowed(orig, newAllowedPaths)) {
-      throw new Error("runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
+      throw new RepackageRejectionError("scope_violation", "runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
     }
   }
 
   // FULL non-empty untruncated inventory + coverage of every actual changed path.
   const inventory = computeInventoryFn(bound.worktreePath, delivery.baseCommit, originalAllowedPaths);
   if (!inventory) {
-    throw new Error("runDeliveryRepackage: candidate inventory unavailable (read failed)");
+    throw new RepackageRejectionError("inventory_unavailable", "runDeliveryRepackage: candidate inventory unavailable (read failed)");
   }
   if (
     inventory.actualChangedTruncated
     || inventory.originalAllowedTruncated
     || inventory.disallowedTruncated
   ) {
-    throw new Error("runDeliveryRepackage: process_missing candidate inventory is incomplete");
+    throw new RepackageRejectionError("inventory_incomplete", "runDeliveryRepackage: process_missing candidate inventory is incomplete");
   }
   if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
-    throw new Error("runDeliveryRepackage: candidate inventory is empty");
+    throw new RepackageRejectionError("inventory_empty", "runDeliveryRepackage: candidate inventory is empty");
   }
   const uncovered = inventory.actualChangedPaths.filter((p) => !isPathAllowed(p, newAllowedPaths));
   if (uncovered.length > 0) {
-    throw new Error("runDeliveryRepackage: new allowedPaths do not cover actual changed paths");
+    throw new RepackageRejectionError("scope_violation", "runDeliveryRepackage: new allowedPaths do not cover actual changed paths");
   }
 }
 
@@ -280,7 +367,7 @@ async function _settleProcessMissingOrphan({
   // BEFORE any mutation: never re-confirm or re-transition an already-recovered
   // orphan, never package on an ambiguous durable record.
   if (events.some((e) => e && e.runId === runId && e.type === PROCESS_MISSING_CONFIRMED_TYPE)) {
-    throw new Error("runDeliveryRepackage: run.process_missing_confirmed already exists for this run");
+    throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: run.process_missing_confirmed already exists for this run");
   }
 
   // Prove the full precondition set BEFORE mutation. A throw leaves the
@@ -321,7 +408,7 @@ async function _settleProcessMissingOrphan({
   // touching Git.
   const authoritativeKind = classifyRecoveryCandidate(authoritativeEvents, runId);
   if (!RECOVERY_CANDIDATE_KINDS.includes(authoritativeKind)) {
-    throw new Error("runDeliveryRepackage: a concurrent terminal state is not recovery-eligible");
+    throw new RepackageRejectionError("concurrent_terminal_ineligible", "runDeliveryRepackage: a concurrent terminal state is not recovery-eligible");
   }
   return authoritativeEvents;
 }
@@ -340,19 +427,23 @@ async function _settleProcessMissingOrphan({
 function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, hasCreated) {
   // Workspace ownership — the run must belong to the authorized workspace.
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
-    throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
+    throw new RepackageRejectionError("workspace_not_authorized", "runDeliveryRepackage: authorizedWorkspaceRoot is required");
   }
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  try {
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  } catch (err) {
+    throw new RepackageRejectionError("workspace_not_authorized", `runDeliveryRepackage: ${err?.message ?? "workspace ownership proof failed"}`);
+  }
 
   // Terminal state must be failed (the retained failure).
   const terminalState = findState(events.filter((e) => e && e.runId === runId));
   if (terminalState !== "failed") {
-    throw new Error(`runDeliveryRepackage: run terminal state is ${terminalState}, must be failed`);
+    throw new RepackageRejectionError("candidate_ineligible", `runDeliveryRepackage: run terminal state is ${terminalState}, must be failed`);
   }
 
   const recoveryKind = classifyRecoveryCandidate(events, runId);
   if (!recoveryKind) {
-    throw new Error("runDeliveryRepackage: durable recovery facts are not eligible");
+    throw new RepackageRejectionError("candidate_ineligible", "runDeliveryRepackage: durable recovery facts are not eligible");
   }
 
   // No existing decision — once the Lead decided, repackage is not allowed.
@@ -360,32 +451,32 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
     (e) => e && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") && e.runId === runId,
   );
   if (decision) {
-    throw new Error("runDeliveryRepackage: a decision already exists for this run");
+    throw new RepackageRejectionError("candidate_ineligible", "runDeliveryRepackage: a decision already exists for this run");
   }
 
   // Original delivery must have been requested.
   if (!_deliveryWasRequested(events, runId)) {
-    throw new Error("runDeliveryRepackage: original delivery was not requested");
+    throw new RepackageRejectionError("candidate_ineligible", "runDeliveryRepackage: original delivery was not requested");
   }
 
   // Exactly one bound run.started with a usable delivery context + worktreePath.
   const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
   if (started.length !== 1) {
-    throw new Error(`runDeliveryRepackage: expected exactly one bound run.started, got ${started.length}`);
+    throw new RepackageRejectionError("candidate_contract_malformed", `runDeliveryRepackage: expected exactly one bound run.started, got ${started.length}`);
   }
   const bound = started[0];
   const delivery = bound.delivery;
   if (!delivery || typeof delivery !== "object") {
-    throw new Error("runDeliveryRepackage: run.started has no delivery context");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started has no delivery context");
   }
   if (!isCanonicalCommitId(delivery.baseCommit)) {
-    throw new Error("runDeliveryRepackage: run.started delivery.baseCommit is not canonical");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started delivery.baseCommit is not canonical");
   }
   if (!Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0) {
-    throw new Error("runDeliveryRepackage: run.started has no original allowedPaths");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started has no original allowedPaths");
   }
   if (typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0) {
-    throw new Error("runDeliveryRepackage: run.started has no worktreePath");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started has no worktreePath");
   }
   // ORIGINAL verification declaration must be present (commands or reason).
   const hasCommands = Array.isArray(delivery.verificationCommands) && delivery.verificationCommands.length > 0
@@ -393,7 +484,7 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   const hasReason = typeof delivery.verificationUnavailableReason === "string"
     && delivery.verificationUnavailableReason.trim().length > 0;
   if (!hasCommands && !hasReason) {
-    throw new Error("runDeliveryRepackage: run.started has no original verification declaration");
+    throw new RepackageRejectionError("candidate_contract_malformed", "runDeliveryRepackage: run.started has no original verification declaration");
   }
   // M12-6 (FR-05): reuse the ORIGINAL setup commands too, so a repackaged
   // DeliveryRef preserves the Lead-declared environment contract (otherwise
@@ -413,13 +504,18 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   // Before the first backend-failure recovery, HEAD must still be the exact
   // original base. After delivery_created exists, idempotent re-entry is bound
   // by the committed DeliveryRef + provenance instead.
-  const workspaceProof = proveWorkspace(bound.worktreePath);
+  let workspaceProof;
+  try {
+    workspaceProof = proveWorkspace(bound.worktreePath);
+  } catch (err) {
+    throw new RepackageRejectionError("worktree_unusable", `runDeliveryRepackage: candidate worktree is not provable (${err?.message ?? "unprovable worktree"})`);
+  }
   if (
     (recoveryKind === "backend_failed" || recoveryKind === "process_missing")
     && !hasCreated
     && workspaceProof.gitHead !== delivery.baseCommit
   ) {
-    throw new Error("runDeliveryRepackage: candidate HEAD does not match the original base");
+    throw new RepackageRejectionError("worktree_unusable", "runDeliveryRepackage: candidate HEAD does not match the original base");
   }
 
   const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
@@ -436,29 +532,17 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
 }
 
 /**
- * Repackage a retained disallowed_path failure into an auditable delivery.
- *
- * @param {object} input
- * @param {string} input.runId — must pass isValidRunId
- * @param {string} input.runDir — runs/ directory (host-owned)
- * @param {string[]} input.allowedPaths — the Lead's NEW approved scope (must
- *   include the ORIGINAL allowedPaths and cover every actual changed path)
- * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding
- * @param {Function} [input.resolveDeliveryCommitFn] — injectable (default resolveDeliveryCommit)
- * @param {Function} [input.verifyDeliveryFn] — injectable (default verifyDelivery)
- * @param {Function} [input.computeInventoryFn] — injectable (default computeCandidateInventory)
- * @param {Function} [input.readTranscriptFn] — injectable for testing
- * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
- * @param {Function} [input.nowFn] — M12-19: injectable clock for the process_missing liveness proof
- * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID probe
- * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease reader
- * @returns {Promise<{runId, deliveryCommit, verificationStatus, outcome, source, created, verificationRecorded}>}
- * @throws {Error} on any precondition / scope / inventory / packaging / proof failure
+ * The phased repackage state machine (Phase -1..5) over an ALREADY-READ
+ * transcript. Every expected-policy gate inside throws the typed
+ * RepackageRejectionError (TD-226); unexpected infra failures stay plain
+ * throws. @private
  */
-export async function runDeliveryRepackage({
+async function _repackageAllPhases({
+  events,
   runId,
   runDir,
-  allowedPaths,
+  filePath,
+  newAllowedPaths,
   authorizedWorkspaceRoot,
   resolveDeliveryCommitFn,
   verifyDeliveryFn,
@@ -469,20 +553,10 @@ export async function runDeliveryRepackage({
   isAliveFn,
   ownerLeaseReader,
 }) {
-  if (!runId || typeof runId !== "string") throw new Error("runDeliveryRepackage: runId is required");
-  if (!runDir || typeof runDir !== "string") throw new Error("runDeliveryRepackage: runDir is required");
-  if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
-
-  // Validate + normalize the Lead's new scope BEFORE any read (fail closed).
-  const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
-
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const _resolve = resolveDeliveryCommitFn ?? resolveDeliveryCommit;
   const _verify = verifyDeliveryFn ?? verifyDelivery;
   const _inventory = computeInventoryFn ?? computeCandidateInventory;
-
-  const filePath = join(runDir, `${runId}.jsonl`);
-  let events = await _readTranscript(filePath);
 
   // Idempotency pre-read: an existing created/outcome lets us skip the expensive
   // package/verify steps. The lock-scoped CAS methods re-check authoritatively.
@@ -498,13 +572,13 @@ export async function runDeliveryRepackage({
     (e) => e && e.type === "run.delivery_repackaged" && e.runId === runId,
   );
   if (createdEvents.length > 1 || outcomeEvents.length > 1) {
-    throw new Error("runDeliveryRepackage: ambiguous durable delivery chain");
+    throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: ambiguous durable delivery chain");
   }
   if (outcomeEvents.length > 0 && createdEvents.length === 0) {
-    throw new Error("runDeliveryRepackage: orphan verification outcome");
+    throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: orphan verification outcome");
   }
   if (provenanceEvents.length > 1 || (provenanceEvents.length > 0 && createdEvents.length === 0)) {
-    throw new Error("runDeliveryRepackage: orphan or ambiguous recovery provenance");
+    throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: orphan or ambiguous recovery provenance");
   }
 
   // Phase -1 (M12-19): process_missing orphan settlement. When the run is a
@@ -542,7 +616,7 @@ export async function runDeliveryRepackage({
   // idempotent retries after a delivery has already been created.
   for (const orig of original.originalAllowedPaths) {
     if (!isPathAllowed(orig, newAllowedPaths)) {
-      throw new Error("runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
+      throw new RepackageRejectionError("scope_violation", "runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
     }
   }
 
@@ -552,10 +626,10 @@ export async function runDeliveryRepackage({
   if (!existingCreated) {
     const inventory = await _inventory(original.worktreePath, original.baseCommit, original.originalAllowedPaths);
     if (!inventory) {
-      throw new Error("runDeliveryRepackage: candidate inventory unavailable (read failed)");
+      throw new RepackageRejectionError("inventory_unavailable", "runDeliveryRepackage: candidate inventory unavailable (read failed)");
     }
     if (inventory.actualChangedTruncated) {
-      throw new Error("runDeliveryRepackage: candidate inventory truncated — verify manually");
+      throw new RepackageRejectionError("inventory_incomplete", "runDeliveryRepackage: candidate inventory truncated — verify manually");
     }
     if (
       (original.recoveryKind === "backend_failed" || original.recoveryKind === "process_missing")
@@ -564,15 +638,16 @@ export async function runDeliveryRepackage({
         || inventory.disallowedTruncated
       )
     ) {
-      throw new Error("runDeliveryRepackage: candidate inventory is incomplete");
+      throw new RepackageRejectionError("inventory_incomplete", "runDeliveryRepackage: candidate inventory is incomplete");
     }
     if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
-      throw new Error("runDeliveryRepackage: candidate inventory is empty");
+      throw new RepackageRejectionError("inventory_empty", "runDeliveryRepackage: candidate inventory is empty");
     }
     // The Lead's scope must COVER every actual changed path.
     const uncovered = inventory.actualChangedPaths.filter((p) => !isPathAllowed(p, newAllowedPaths));
     if (uncovered.length > 0) {
-      throw new Error(
+      throw new RepackageRejectionError(
+        "scope_violation",
         `runDeliveryRepackage: new allowedPaths do not cover actual changed paths: ${uncovered.join(", ")}`,
       );
     }
@@ -586,10 +661,10 @@ export async function runDeliveryRepackage({
     resolvedRef = existingCreated.delivery;
     const provenance = findValidRepackageProvenance(events, runId, resolvedRef);
     if (!provenance) {
-      throw new Error("runDeliveryRepackage: existing recovery provenance is invalid");
+      throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: existing recovery provenance is invalid");
     }
     if (resolvedRef.changedFiles.some((p) => !isPathAllowed(p, newAllowedPaths))) {
-      throw new Error("runDeliveryRepackage: new allowedPaths do not cover the existing delivery");
+      throw new RepackageRejectionError("scope_violation", "runDeliveryRepackage: new allowedPaths do not cover the existing delivery");
     }
     assertCommittedDeliveryRef(resolvedRef);
     source = provenance.source;
@@ -642,7 +717,7 @@ export async function runDeliveryRepackage({
   if (existingOutcome) {
     const facts = validateDeliveryFacts(events);
     if (!facts.valid || facts.deliveryCommit !== authoritativeRef.deliveryCommit) {
-      throw new Error("runDeliveryRepackage: existing verification outcome is not bound to the delivery");
+      throw new RepackageRejectionError("durable_chain_inconsistent", "runDeliveryRepackage: existing verification outcome is not bound to the delivery");
     }
     return {
       runId,
@@ -692,6 +767,126 @@ export async function runDeliveryRepackage({
     created: createdResult.created,
     verificationRecorded: verificationResult.recorded,
   };
+}
+
+/**
+ * TD-226: append the bounded rejection audit fact. Payload is exactly
+ * { rejectionReason } — no paths, no credentials, no counts. The append is
+ * SECONDARY to the typed rejection itself: when it cannot be durably written
+ * (injected failing factory, unwritable runDir), the failure is swallowed so
+ * the structured rejection still reaches the Lead — the rejection already
+ * failed closed before any state mutation. @private
+ */
+async function _recordRejectionAudit({ filePath, events, runId, code, transcriptFactory }) {
+  try {
+    const context = {
+      runId,
+      agentId: events[0]?.agentId ?? "unknown",
+      initialSeq: findLastEventSeq(events),
+    };
+    const transcript = transcriptFactory
+      ? await transcriptFactory(filePath, context)
+      : new JsonlTranscript(filePath, context);
+    await transcript.append("run.delivery_repackage_rejected", { rejectionReason: code });
+  } catch {
+    // Secondary audit only — never mask the typed rejection (see JSDoc).
+  }
+}
+
+/**
+ * Repackage a retained disallowed_path failure into an auditable delivery.
+ *
+ * @param {object} input
+ * @param {string} input.runId — must pass isValidRunId
+ * @param {string} input.runDir — runs/ directory (host-owned)
+ * @param {string[]} input.allowedPaths — the Lead's NEW approved scope (must
+ *   include the ORIGINAL allowedPaths and cover every actual changed path)
+ * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding
+ * @param {Function} [input.resolveDeliveryCommitFn] — injectable (default resolveDeliveryCommit)
+ * @param {Function} [input.verifyDeliveryFn] — injectable (default verifyDelivery)
+ * @param {Function} [input.computeInventoryFn] — injectable (default computeCandidateInventory)
+ * @param {Function} [input.readTranscriptFn] — injectable for testing
+ * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
+ * @param {Function} [input.nowFn] — M12-19: injectable clock for the process_missing liveness proof
+ * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID probe
+ * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease reader
+ * @returns {Promise<{runId, deliveryCommit, verificationStatus, outcome, source, created, verificationRecorded}>}
+ * @throws {RepackageRejectionError} (TD-226 closed-set code) on any expected
+ *   precondition / scope / inventory / proof rejection — after a readable
+ *   transcript exists, exactly one bounded `run.delivery_repackage_rejected`
+ *   audit event is appended first (never for malformed_input/run_not_found).
+ * @throws {Error} on unexpected packaging / verification / append failures
+ *   (transcript left byte-identical)
+ */
+export async function runDeliveryRepackage({
+  runId,
+  runDir,
+  allowedPaths,
+  authorizedWorkspaceRoot,
+  resolveDeliveryCommitFn,
+  verifyDeliveryFn,
+  computeInventoryFn,
+  readTranscriptFn,
+  transcriptFactory,
+  nowFn,
+  isAliveFn,
+  ownerLeaseReader,
+}) {
+  if (!runId || typeof runId !== "string") {
+    throw new RepackageRejectionError("malformed_input", "runDeliveryRepackage: runId is required");
+  }
+  if (!runDir || typeof runDir !== "string") {
+    throw new RepackageRejectionError("malformed_input", "runDeliveryRepackage: runDir is required");
+  }
+  if (!isValidRunId(runId)) {
+    throw new RepackageRejectionError("malformed_input", `Invalid runId: ${JSON.stringify(runId)}`);
+  }
+
+  // Validate + normalize the Lead's new scope BEFORE any read (fail closed).
+  const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
+
+  const _readTranscript = readTranscriptFn ?? readTranscript;
+  const filePath = join(runDir, `${runId}.jsonl`);
+
+  // TD-226: a well-formed runId with no transcript is a closed-set rejection
+  // (not an unexpected error) — and records NO audit event, because appending
+  // would CREATE a transcript for a run that never existed.
+  let events;
+  try {
+    events = await _readTranscript(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      throw new RepackageRejectionError("run_not_found", "runDeliveryRepackage: no transcript for runId");
+    }
+    throw err;
+  }
+
+  try {
+    return await _repackageAllPhases({
+      events,
+      runId,
+      runDir,
+      filePath,
+      newAllowedPaths,
+      authorizedWorkspaceRoot,
+      resolveDeliveryCommitFn,
+      verifyDeliveryFn,
+      computeInventoryFn,
+      readTranscriptFn,
+      transcriptFactory,
+      nowFn,
+      isAliveFn,
+      ownerLeaseReader,
+    });
+  } catch (err) {
+    const code = classifyRepackageRejection(err);
+    if (code) {
+      // TD-226: make the rejected attempt observable in the transcript. The
+      // audit append itself is best-effort (see _recordRejectionAudit).
+      await _recordRejectionAudit({ filePath, events, runId, code, transcriptFactory });
+    }
+    throw err;
+  }
 }
 
 function _outcomeFromEventType(type) {

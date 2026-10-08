@@ -190,6 +190,9 @@ import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
   REPACKAGE_ALLOWED_PATHS_LIMIT,
+  // TD-226: closed-set expected-policy rejection protocol (decide M12-9 discipline).
+  REPACKAGE_REJECTION_CODES,
+  classifyRepackageRejection,
 } from "../application/runDeliveryRepackage.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { REVIEW_UNAVAILABLE_REASONS, REVIEW_PENDING_REASON } from "../application/reviewUnavailableReasons.js";
@@ -2384,8 +2387,9 @@ const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
-  // TD-215：status 枚举——"ok"=同步完成（其余字段必在，handler 侧强校验）；
-  // "pending"=有界等待超窗（验证在服务进程继续，其余字段缺席，poll run_delivery）。
+  // TD-215：status 枚举——"ok"=同步完成（成功载荷，或 TD-226 闭集拒绝——此时仅
+  // rejectionReason 非空，可选交付字段缺席）；"pending"=有界等待超窗（验证在服务
+  // 进程继续，其余字段缺席，poll run_delivery）。
   status: z.enum(["ok", "pending"]),
   runId: z.string().min(1),
   deliveryCommit: COMMIT_HASH_SCHEMA.optional(),
@@ -2393,6 +2397,9 @@ const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
   source: z.enum(["packaged", "recovered"]).optional(),
   recoveryKind: RECOVERY_CANDIDATE_KIND_SCHEMA.optional(),
   created: z.boolean().optional(),
+  // TD-226：expected-policy 拒绝的闭集拒绝码（应用层 REPACKAGE_REJECTION_CODES
+  // SSOT 的 zod 枚举镜像——数组即权威，绝不手抄第二份清单）；成功/pending 恒 null。
+  rejectionReason: z.enum(REPACKAGE_REJECTION_CODES).nullable(),
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
@@ -6148,6 +6155,7 @@ export function createWaoMcpServer({
           const pending = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({
             status: "pending",
             runId,
+            rejectionReason: null,
           });
           return {
             content: [{
@@ -6161,6 +6169,13 @@ export function createWaoMcpServer({
             structuredContent: pending,
           };
         }
+        // TD-226: withBoundedWait RESOLVES a service rejection as a VALUE (the
+        // raw error object — TD-215 late-rejection contract). Re-throw it
+        // verbatim BEFORE the field validation below, so the typed
+        // classification in the catch sees the ORIGINAL error — otherwise a
+        // RepackageRejectionError would be masked by a plain "runId mismatch"
+        // Error and collapse to the bare fixed text (the TD-226 incident shape).
+        if (result instanceof Error) throw result;
         // Build a NEW payload from the service result — validate every field.
         // Any violation throws → fixed error with no structuredContent.
         if (result.runId !== runId) throw new Error("runId mismatch");
@@ -6180,13 +6195,31 @@ export function createWaoMcpServer({
           source: result.source,
           recoveryKind: result.recoveryKind,
           created: result.created,
+          rejectionReason: null,
         };
         const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({ ...payload, status: "ok" });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (err) {
+        // TD-226（镜像 run_delivery_decide 的 M12-9 纪律）：expected-policy 拒绝是
+        // 正常结构化结果——typed 闭集码 → status:"ok" + rejectionReason，可选交付
+        // 字段缺席；无原始 gate 文本、无 validator 消息、无 path/event 泄漏。服务层
+        // 已为此追加一条有界 run.delivery_repackage_rejected 审计事件。只有非 typed
+        // 的意外异常保留 DELIVERY_REPACKAGE_ERROR_TEXT 塌缩。
+        const rejectionReason = classifyRepackageRejection(err);
+        if (rejectionReason) {
+          const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({
+            status: "ok",
+            runId,
+            rejectionReason,
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(parsed) }],
+            structuredContent: parsed,
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REPACKAGE_ERROR_TEXT }],

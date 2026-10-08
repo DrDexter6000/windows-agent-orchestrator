@@ -687,6 +687,7 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 | `run.delivery_verification_unavailable` | TD-103：无验证命令（unavailableReason） | Phase 3B |
 | `run.delivery_accepted` | TD-103：Lead 接受——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
 | `run.delivery_rejected` | TD-103：Lead 拒绝——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
+| `run.delivery_repackage_rejected` | TD-226：`run_delivery_repackage` 的 expected-policy 拒绝审计——payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 | TD-226 |
 | `run.read_only_declared` | Round 4：只读声明（`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only`）——start 时恰一次的 durable 事实；payload 为空（envelope 即事实，无 prompt/路径/argv），其存在是 `run_activity` 附带 `readOnlyObservation` 观察投影的权威输入，本身不构成任何门 | R4 |
 | `workflow.*` | DAG 节点级事件（workflow.started/completed、node.started/completed），独立 `wf_*.jsonl` | M5 |
 
@@ -1301,7 +1302,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-
 
 追加一条 recovery provenance（`run.delivery_repackaged`），绑定 DeliveryRef / 请求 runId / 已批准 scope / `recoveryKind`。原始终态 failed **不被改写**为 completed；但当且仅当 durable recovery facts、provenance、唯一 DeliveryRef 与 verification chain 一致且 verification=passed 时，`run_delivery_decide(accepted)` 可被 Lead 显式接受（仍由 Lead 决定，非自动）。verification failed/unavailable 仍可供 Lead review/reject，绝不自动 reject。
 
-失败返回固定 `run_delivery_repackage failed`。`run_delivery`（结果查询）与 `run_delivery_review` 仍是结果查询/审查 SSOT。
+**expected policy rejection 是正常结构化结果，不是错误（TD-226）**：资格/合同/worktree/清单/范围/并发等前置门未过时返回 `status:"ok"` + 闭集 `rejectionReason`（成功与 pending 恒为 `null`；此时交付字段缺席），不再是裸文案 `run_delivery_repackage failed`。闭集（服务层 `REPACKAGE_REJECTION_CODES` SSOT）：`malformed_input`（入参形状不过服务侧门）、`run_not_found`（无 transcript）、`workspace_not_authorized`（run 不属于授权 workspace）、`candidate_ineligible`（资格闭集外：终态非 failed / 恢复事实不合格 / 原始 delivery 未请求 / 已有 Lead 决策）、`candidate_contract_malformed`（run.started 持久化合同残缺或 `verificationTimeoutMs` 越界）、`worktree_unusable`（持久化 worktree 缺失/不可证明，或 HEAD 已离开原始 base）、`inventory_unavailable`/`inventory_incomplete`/`inventory_empty`（候选清单读取失败/截断/为空）、`scope_violation`（新 allowedPaths 收窄原合同或未覆盖全部实际改动/既有 delivery）、`durable_chain_inconsistent`（既有 delivery 链孤儿/歧义/未绑定）、`concurrent_terminal_ineligible`（process_missing 结算输给不可恢复的并发终态）、`liveness_proof_failed`（进程仍在，禁止结算）。每次被拒尝试在 transcript 追加恰一条有界审计事件 `run.delivery_repackage_rejected`（payload 仅 `rejectionReason`；`malformed_input`/`run_not_found` 不落——后者无 transcript 可落）。**拒绝≠交付失败、recovery≠acceptance**：拒绝不产生 delivery、不改写终态、不消费 Lead 决策；修复输入后重试收敛到同一交付语义。只有真正的意外内部异常（Git 打包、验证器崩溃、append/锁基础设施、非 ENOENT 读取错误）保留固定 `run_delivery_repackage failed` 塌缩，无 partial structured output。`run_delivery`（结果查询）与 `run_delivery_review` 仍是结果查询/审查 SSOT。
 
 ### MCP `run_stop`（stop runaway worker，M10 P0-2）
 

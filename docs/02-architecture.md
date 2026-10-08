@@ -465,6 +465,7 @@ interface TranscriptEvent {
 | `run.delivery_verification_unavailable` | 无验证命令，携带 unavailableReason | `[S]` Phase 3B |
 | `run.delivery_accepted` | Lead 接受 delivery | `[S]` Phase 3C-2 |
 | `run.delivery_rejected` | Lead 拒绝 delivery | `[S]` Phase 3C-2 |
+| `run.delivery_repackage_rejected` | repackage expected-policy 拒绝的有界审计事实（TD-226）：payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 | `[S]` TD-226 |
 | `run.read_only_declared` | 只读 run 声明；空 payload，envelope 即事实 | `[M]` R4 |
 | `workflow.*` | DAG 节点事件，写入独立 `wf_*.jsonl` | `[M]` M5 |
 
