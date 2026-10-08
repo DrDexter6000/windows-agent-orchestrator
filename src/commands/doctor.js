@@ -43,7 +43,7 @@
 // 本模块内部 helper：_doctorParseSmoke、isProviderWrappedClaudeCodeWorker、
 // hasClaudeOauthCredentials、whichCli（均为 doctor 专用，随 doctor 族搬迁）。
 
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -688,8 +688,17 @@ export async function waoDoctorCommand(args, config) {
   } else {
     installLines.push("PATH 上无全局 \`wao\`——用 \`npm run cli -- <command>\`（走 v22 shim）调用；这是仓内正常调用形态，不是安装缺失。");
   }
-  const skillsCopySkill = join(homedir(), ".agents", "skills", "wao-orchestrator", "SKILL.md");
-  const skillsPkg = join(homedir(), ".agents", "skills", "wao-orchestrator", "package.json");
+  const skillsSlot = join(homedir(), ".agents", "skills", "wao-orchestrator");
+  const skillsCopySkill = join(skillsSlot, "SKILL.md");
+  const skillsPkg = join(skillsSlot, "package.json");
+  // TD-191⑥ 会审修（2026-10-09，astra+opus 方案会审 + Lead 亲手复核）：skills 槽位
+  // 可能是 junction/symlink 指向主仓（本机实测形态），不是独立整仓拷贝——junction
+  // 与目标同体、天然零拷贝漂移；把 junction 报成"拷贝+可能不同步"是失实。
+  let skillsSlotTarget = null;
+  try {
+    skillsSlotTarget = lstatSync(skillsSlot).isSymbolicLink() ? realpathSync(skillsSlot) : null;
+  } catch { /* 探测失败按普通目录如实继续 */
+  }
   // 三根盘点（TD-191⑥ 一致性机制，Owner 2026-10-02 裁定 C=日常根）：收集各在场
   // 安装形态的版本事实，末尾统一做一致性裁决报告——只报事实与漂移，不自动选根。
   const rootVersions = [];
@@ -697,21 +706,27 @@ export async function waoDoctorCommand(args, config) {
     ? (() => { try { return JSON.parse(readFileSync(skillsPkg, "utf8")).version ?? "未知"; } catch { return "未知"; } })()
     : null;
   if (existsSync(skillsCopySkill)) {
-    rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
-    const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
-    let inSync = null;
-    try {
-      const a = await readFile(repoSkillPath, "utf8");
-      const b = await readFile(skillsCopySkill, "utf8");
-      inSync = a === b;
-    } catch { /* 读失败如实报未探测 */ }
-    installLines.push(
-      inSync === null
-        ? `skills 整仓拷贝在场（${dirname(skillsCopySkill)}；同步性未探测）。`
-        : inSync
-          ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${skillsVersion ?? "未知"}）。`
-          : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${skillsVersion ?? "未知"}）——宿主可能加载旧技能（TD-191⑥）。`,
-    );
+    if (skillsSlotTarget !== null) {
+      rootVersions.push(["B skills 槽位（junction→A）", skillsVersion ?? "未知"]);
+      installLines.push(`skills 槽位是 junction/symlink → ${skillsSlotTarget}（与目标同体，零拷贝漂移；TD-191⑥）。`);
+    } else {
+      rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
+      const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
+      let inSync = null;
+      try {
+        const a = await readFile(repoSkillPath, "utf8");
+        const b = await readFile(skillsCopySkill, "utf8");
+        inSync = a === b;
+      } catch { /* 读失败如实报未探测 */
+      }
+      installLines.push(
+        inSync === null
+          ? `skills 整仓拷贝在场（${dirname(skillsCopySkill)}；同步性未探测）。`
+          : inSync
+            ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${skillsVersion ?? "未知"}）。`
+            : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${skillsVersion ?? "未知"}）——宿主可能加载旧技能（TD-191⑥）。`,
+      );
+    }
   }
   // C 根（installer 形态，AGENT_ONBOARDING §4a 默认 %USERPROFILE%\wao）
   const installerPkg = join(homedir(), "wao", "package.json");
