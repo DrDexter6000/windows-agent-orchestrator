@@ -18,10 +18,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import {
@@ -399,4 +399,45 @@ test("TD-226-MCP-2: transport classification is TYPE-gated — plain Errors and 
   } finally {
     cleanupDir(dir);
   }
+});
+
+test("TD-231 MCP end-to-end: backend_failed staged worktree bridges to rejectionReason", async () => {
+  const dir = makeGitDir("td231-mcp-");
+  const runId = "run_td231_mcp";
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true, stdio: ["pipe", "pipe", "ignore"] }).trim();
+  try {
+    const baseCommit = git("rev-parse", "HEAD");
+    const worktreePath = join(dir, "wt");
+    git("worktree", "add", worktreePath, "-b", "wao/" + runId);
+    writeFileSync(join(worktreePath, "src", "a.js"), "staged by failed worker\n");
+    execFileSync("git", ["add", "src/a.js"], { cwd: worktreePath, stdio: "ignore", windowsHide: true });
+    const runDir = join(dir, "test-runs");
+    mkdirSync(runDir);
+    const events = [
+      { type: "run.background_submitted", cwd: dir, deliveryRequested: true },
+      { type: "run.started", cwd: dir, worktreePath, worktreeBranch: "wao/" + runId,
+        delivery: { mode: "git_commit_v1", baseCommit, allowedPaths: ["src"], verificationCommands: ["npm test"] } },
+      { type: "run.state_change", from: null, to: "pending", reason: "created" },
+      { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
+      { type: "run.state_change", from: "running", to: "failed", reason: "backend_error" },
+      { type: "run.stop_verified", path: "_runCleanup" },
+    ].map((event, i) => ({ runId, agentId: "w", ts: "2026-10-08T00:00:00.000Z", seq: i + 1, ...event }));
+    const filePath = join(runDir, runId + ".jsonl");
+    writeFileSync(filePath, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }));
+    // No service injection: MCP -> real application -> real Git packaging error.
+    const server = createWaoMcpServer({ registryPath: join(dir, "agents.json"), runDir, workspaceRoot: dir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const result = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"] } });
+      assert.equal(result.isError, undefined);
+      assert.deepEqual(result.structuredContent, { status: "ok", runId, rejectionReason: "worktree_unusable" });
+      const after = readFileSync(filePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(after.slice(0, events.length), events);
+      assert.equal(after.length, events.length + 1);
+      assert.equal(after.at(-1).type, "run.delivery_repackage_rejected");
+      assert.equal(after.at(-1).rejectionReason, "worktree_unusable");
+      assert.ok(!JSON.stringify(result).includes(worktreePath));
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
 });

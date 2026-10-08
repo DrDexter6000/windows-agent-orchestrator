@@ -32,6 +32,8 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 
 import {
   runDeliveryRepackage,
@@ -39,12 +41,15 @@ import {
   REPACKAGE_REJECTION_CODES,
   classifyRepackageRejection,
 } from "../../src/application/runDeliveryRepackage.js";
-import { resolveDeliveryCommit } from "../../src/delivery.js";
+import { resolveDeliveryCommit, DeliveryError } from "../../src/delivery.js";
 import { verifyDelivery } from "../../src/deliveryVerification.js";
 import { computeCandidateInventory } from "../../src/application/candidateInventory.js";
 import { getRunDelivery, getRunDeliveryReadiness } from "../../src/application/runDelivery.js";
 import { decideRunDelivery } from "../../src/application/runDelivery.js";
-import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
+import {
+  JsonlTranscript, readTranscript, RepackageCasPolicyError,
+  REPACKAGE_CAS_POLICY_CODES, validateDeliveryFacts, findValidRepackageProvenance,
+} from "../../src/transcript.js";
 
 const RUN_ID = "run_m12s2_test";
 const AGENT_ID = "coder_hq";
@@ -1797,4 +1802,270 @@ test("TD-226 council fix: corrupted existing DeliveryRef → durable_chain_incon
     await cleanupDir(repo);
     await cleanupDir(runDir);
   }
+});
+
+// TD-231: deterministic CAS races. Inject exactly once at the lock boundary;
+// compare the transcript after the injected winner with the rejected attempt.
+const td231Input = (s) => ({
+  runId: RUN_ID, runDir: s.runDir, authorizedWorkspaceRoot: s.repo,
+  allowedPaths: ["root.txt", "src"], verifyDeliveryFn: passedVerifier,
+});
+
+function assertAuditDelta(before, after, code) {
+  assert.deepEqual(after.slice(0, before.length), before, "existing facts preserved");
+  const delta = after.slice(before.length);
+  assert.equal(delta.length, code ? 1 : 0, "only the bounded audit may be appended");
+  if (code) {
+    assert.equal(delta[0].type, "run.delivery_repackage_rejected");
+    assert.equal(delta[0].rejectionReason, code);
+    assert.deepEqual(Object.keys(delta[0]).sort(), ["agentId", "rejectionReason", "runId", "seq", "ts", "type"]);
+  }
+  assert.equal(new Set(after.map((e) => e.seq)).size, after.length, "seq remains unique");
+}
+
+const casCases = [
+  { name: "multiple created", code: "durable_chain_inconsistent", inject: async (t, a) => {
+    await t.append("run.delivery_created", { delivery: a.delivery });
+    await t.append("run.delivery_created", { delivery: a.delivery });
+  } },
+  { name: "invalid existing chain", code: "durable_chain_inconsistent", inject: async (t, a) => {
+    await t.append("run.delivery_created", { delivery: a.delivery });
+  } },
+  { name: "winner scope exceeds loser", code: "scope_violation", inject: async (t, a, original) => {
+    const winner = { ...a.delivery, changedFiles: [...a.delivery.changedFiles, "winner.txt"] };
+    await original({ ...a, delivery: winner, approvedAllowedPaths: [...a.approvedAllowedPaths, "winner.txt"] });
+  } },
+  { name: "canonical id invariant", code: null, mutate: (a) => ({ ...a, delivery: { ...a.delivery, deliveryCommit: "HEAD" } }) },
+  { name: "recovery kind changed", code: "candidate_ineligible", mutate: (a) => ({ ...a, recoveryKind: "backend_failed" }) },
+  { name: "original scope lost", code: "candidate_contract_malformed", mutate: (a) => ({ ...a, approvedAllowedPaths: ["root.txt"] }) },
+  { name: "created count changed before outcome", phase: "verification", code: "candidate_ineligible", inject: async (t, a) => {
+    await t.append("run.delivery_created", { delivery: a.delivery });
+  } },
+  { name: "multiple outcomes", phase: "verification", code: "durable_chain_inconsistent", inject: async (t, a) => {
+    await t.append("run.delivery_verification_passed", { delivery: a.delivery });
+    await t.append("run.delivery_verification_failed", { delivery: a.delivery });
+  } },
+  { name: "outcome belongs to another delivery", phase: "verification", code: "durable_chain_inconsistent", inject: async (t, a) => {
+    await t.append("run.delivery_verification_passed", { delivery: { ...a.delivery, deliveryCommit: "e".repeat(40) } });
+  } },
+];
+for (const item of casCases) {
+  test("TD-231 CAS: " + item.name, async () => {
+    const s = await setupDisallowedScenario();
+    let beforeCas;
+    let injections = 0;
+    try {
+      const method = item.phase === "verification" ? "tryAppendRepackageVerification" : "tryAppendRepackageCreated";
+      const racingFactory = async (filePath, context) => {
+        const t = new JsonlTranscript(filePath, context);
+        const original = t[method].bind(t);
+        t[method] = async (args) => {
+          assert.equal(injections++, 0, "one injection, never repeated by audit factory");
+          if (item.inject) await item.inject(t, args, original);
+          beforeCas = await readEvents(s.runDir);
+          try {
+            return await original(item.mutate ? item.mutate(args) : args);
+          } catch (err) {
+            assert.equal(err instanceof RepackageCasPolicyError, Boolean(item.code));
+            if (item.code) assert.equal(err.code, item.code, "CAS typed code before application bridge");
+            throw err;
+          }
+        };
+        return t;
+      };
+      await assert.rejects(runDeliveryRepackage({ ...td231Input(s), transcriptFactory: racingFactory }),
+        item.code ? isCode(item.code) : (err) => err instanceof Error && classifyRepackageRejection(err) === null);
+      assert.equal(injections, 1);
+      assertAuditDelta(beforeCas, await readEvents(s.runDir), item.code);
+    } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+  });
+}
+
+test("TD-231 winner remains valid and acceptable after loser audit", async () => {
+  const s = await setupDisallowedScenario();
+  let winner;
+  let beforeCas;
+  try {
+    await assert.rejects(runDeliveryRepackage({
+      ...td231Input(s),
+      resolveDeliveryCommitFn: async (ctx) => {
+        // Winner packages its wider scope after the loser's inventory read.
+        await writeFile(join(s.worktreePath, "winner.txt"), "winner\n");
+        winner = resolveDeliveryCommit({ ...ctx, allowedPaths: [...ctx.allowedPaths, "winner.txt"] });
+        return winner;
+      },
+      transcriptFactory: async (filePath, context) => {
+        const t = new JsonlTranscript(filePath, context);
+        const original = t.tryAppendRepackageCreated.bind(t);
+        t.tryAppendRepackageCreated = async (args) => {
+          await original({ ...args, approvedAllowedPaths: [...args.approvedAllowedPaths, "winner.txt"] });
+          await t.tryAppendRepackageVerification(await passedVerifier(winner.ref));
+          beforeCas = await readEvents(s.runDir);
+          return original(args);
+        };
+        return t;
+      },
+    }), isCode("scope_violation"));
+    const after = await readEvents(s.runDir);
+    assertAuditDelta(beforeCas, after, "scope_violation");
+    const facts = validateDeliveryFacts(after);
+    assert.equal(facts.valid, true);
+    assert.equal(facts.recoveryAcceptable, true);
+    assert.ok(findValidRepackageProvenance(after, RUN_ID, winner.ref));
+    const accepted = await decideRunDelivery({ runId: RUN_ID, runDir: s.runDir, decision: "accepted", reason: "reviewed winner" });
+    assert.equal(accepted.accepted, true);
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+for (const kind of ["parent", "message", "dirty", "committed path after inventory"]) {
+  test("TD-231 real Git artifact: " + kind, async () => {
+    const s = await setupDisallowedScenario();
+    const ctx = { runId: RUN_ID, worktreePath: s.worktreePath, baseCommit: s.baseCommit,
+      isolation: { type: "worktree", strategy: "persistent" }, allowedPaths: ["root.txt", "src"], verificationCommands: ["npm test"] };
+    const expected = kind === "committed path after inventory" ? "scope_violation" : "worktree_unusable";
+    const messages = { parent: /parent does not match/, message: /message mismatch/, dirty: /dirty during recovery/ };
+    try {
+      if (kind === "message" || kind === "parent") {
+        git(["add", "."], s.worktreePath);
+        git(["commit", "-m", "foreign commit"], s.worktreePath);
+        if (kind === "parent") git(["commit", "--allow-empty", "-m", "another foreign commit"], s.worktreePath);
+      } else if (kind === "dirty") {
+        resolveDeliveryCommit(ctx);
+        await writeFile(join(s.worktreePath, "src", "a.js"), "dirty after package\n");
+      }
+      const before = await readEvents(s.runDir);
+      let observed;
+      await assert.rejects(runDeliveryRepackage({
+        ...td231Input(s),
+        computeInventoryFn: async (...args) => {
+          const inventory = await computeCandidateInventory(...args);
+          if (kind === "committed path after inventory") {
+            await writeFile(join(s.worktreePath, "extra.txt"), "extra committed path\n");
+            resolveDeliveryCommit({ ...ctx, allowedPaths: ["extra.txt", ...ctx.allowedPaths] });
+          }
+          return inventory;
+        },
+        resolveDeliveryCommitFn: (input) => {
+          try { return resolveDeliveryCommit(input); } catch (err) { observed = err; throw err; }
+        },
+      }), isCode(expected));
+      assert.ok(observed instanceof DeliveryError);
+      assert.equal(observed.deliveryCode, kind === "committed path after inventory" ? "disallowed_path" : "artifact_mismatch");
+      if (messages[kind]) assert.match(observed.message, messages[kind]);
+      assertAuditDelta(before, await readEvents(s.runDir), expected);
+    } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+  });
+}
+
+test("TD-231 backend_failed worker staged changes before crashing", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    git(["add", "src/a.js"], s.worktreePath);
+    const indexBefore = git(["diff", "--cached"], s.worktreePath);
+    const before = await readEvents(s.runDir);
+    await assert.rejects(runDeliveryRepackage({ ...td231Input(s), allowedPaths: ["src"] }), isCode("worktree_unusable"));
+    assertAuditDelta(before, await readEvents(s.runDir), "worktree_unusable");
+    assert.equal(git(["rev-parse", "HEAD"], s.worktreePath), s.baseCommit);
+    assert.equal(git(["diff", "--cached"], s.worktreePath), indexBefore);
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+for (const phase of ["created", "verification"]) {
+  test("TD-231 locked " + phase + " read EACCES is unexpected with zero audit", async (t) => {
+    const s = await setupDisallowedScenario();
+    const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+    let beforeCas;
+    try {
+      await assert.rejects(runDeliveryRepackage({ ...td231Input(s), transcriptFactory: async (filePath, context) => {
+        const transcript = new JsonlTranscript(filePath, context);
+        const method = phase === "created" ? "tryAppendRepackageCreated" : "tryAppendRepackageVerification";
+        const original = transcript[method].bind(transcript);
+        transcript[method] = async (args) => {
+          beforeCas = await readEvents(s.runDir);
+          const read = fsPromises.readFile;
+          const mocked = t.mock.method(fsPromises, "readFile", async (path, ...rest) => {
+            if (path === filePath) throw fault;
+            return read(path, ...rest);
+          });
+          syncBuiltinESMExports();
+          try { return await original(args); }
+          finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+        };
+        return transcript;
+      } }), (err) => err === fault && classifyRepackageRejection(err) === null);
+      assertAuditDelta(beforeCas, await readEvents(s.runDir), null);
+    } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+  });
+}
+
+for (const recoveryKind of ["backend_failed", "process_missing"]) {
+  for (const deliveryCode of ["cleanup_failed", "artifact_mismatch"]) {
+    test("TD-231 rollback fault stays unexpected: " + recoveryKind + "/" + deliveryCode, async () => {
+      const s = recoveryKind === "backend_failed" ? await setupBackendFailureScenario() : await setupOrphanScenario();
+      let beforeResolve;
+      let fault;
+      try {
+        await assert.rejects(runDeliveryRepackage({ ...td231Input(s), allowedPaths: ["src"],
+          nowFn: NOW, isAliveFn: deadProbe, ownerLeaseReader: missingLease,
+          resolveDeliveryCommitFn: (ctx) => {
+            beforeResolve = readFileSync(join(s.runDir, RUN_ID + ".jsonl"), "utf8");
+            assert.equal(git(["rev-parse", "HEAD"], s.worktreePath), s.baseCommit, "Phase 0 proved base");
+            git(["commit", "--allow-empty", "-m", "failed package residue"], s.worktreePath);
+            assert.notEqual(git(["rev-parse", "HEAD"], s.worktreePath), s.baseCommit);
+            if (deliveryCode === "cleanup_failed") {
+              fault = new DeliveryError("cleanup_failed", "injected packaging cleanup failure");
+              throw fault;
+            }
+            // The resolver's fallback loses the original cleanup failure and
+            // reports artifact_mismatch against the unproven residual HEAD.
+            try { return resolveDeliveryCommit(ctx); } catch (err) { fault = err; throw err; }
+          },
+        }), (err) => err === fault && err.deliveryCode === deliveryCode && classifyRepackageRejection(err) === null);
+        assert.equal(readFileSync(join(s.runDir, RUN_ID + ".jsonl"), "utf8"), beforeResolve);
+        assert.equal((await readEvents(s.runDir)).filter((e) => e.type === "run.delivery_repackage_rejected").length, 0);
+      } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+    });
+  }
+}
+
+test("TD-231 bridge fail-closed negatives and local delivery whitelist", async () => {
+  const s = await setupDisallowedScenario();
+  try {
+    const plain = "tryAppendRepackageCreated: existing recovery chain is invalid";
+    const faults = [
+      new Error(plain),
+      Object.assign(new Error(plain), { code: "durable_chain_inconsistent" }),
+      new RepackageCasPolicyError("unknown", plain),
+      Object.assign(new Error("artifact mismatch"), { deliveryCode: "artifact_mismatch" }),
+      ...["unknown", "commit_failed", "cleanup_failed", "commit_integrity", "staging_mismatch", "recovery_unavailable", "toString"].map((code) => new DeliveryError(code, "x")),
+    ];
+    for (const fault of faults) {
+      const before = await readEvents(s.runDir);
+      for (const boundary of ["resolve", "cas"]) {
+        const injection = boundary === "resolve" ? { resolveDeliveryCommitFn: () => { throw fault; } } : {
+          // Avoid Git changes in this negative matrix; only the CAS bridge is under test.
+          resolveDeliveryCommitFn: () => ({ ref: {}, source: "packaged" }),
+          transcriptFactory: (filePath, context) => {
+            const t = new JsonlTranscript(filePath, context);
+            t.tryAppendRepackageCreated = async () => { throw fault; };
+            return t;
+          },
+        };
+        await assert.rejects(runDeliveryRepackage({ ...td231Input(s), ...injection }), (err) => err === fault);
+        assertAuditDelta(before, await readEvents(s.runDir), null);
+      }
+    }
+    for (const [deliveryCode, expected] of [["artifact_mismatch", "worktree_unusable"], ["disallowed_path", "scope_violation"], ["pre_staged_changes", "worktree_unusable"], ["empty_diff", "inventory_empty"]]) {
+      const before = await readEvents(s.runDir);
+      await assert.rejects(runDeliveryRepackage({ ...td231Input(s), resolveDeliveryCommitFn: () => { throw new DeliveryError(deliveryCode, "arbitrary wording"); } }), isCode(expected));
+      assertAuditDelta(before, await readEvents(s.runDir), expected);
+    }
+    const source = readFileSync(new URL("../../src/application/runDeliveryRepackage.js", import.meta.url), "utf8");
+    const literal = source.match(/const REPACKAGE_DELIVERY_POLICY_CODES = Object\.freeze\((\{[^}]+\})\);/);
+    assert.ok(literal, "local whitelist is frozen, not exported");
+    const table = Function("return (" + literal[1] + ")")();
+    assert.deepEqual(table, { artifact_mismatch: "worktree_unusable", disallowed_path: "scope_violation", pre_staged_changes: "worktree_unusable", empty_diff: "inventory_empty" });
+    assert.ok(Object.values(table).every((code) => REPACKAGE_REJECTION_CODES.includes(code)));
+    assert.ok(REPACKAGE_CAS_POLICY_CODES.every((code) => REPACKAGE_REJECTION_CODES.includes(code)));
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });

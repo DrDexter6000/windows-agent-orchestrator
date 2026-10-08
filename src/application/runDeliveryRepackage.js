@@ -42,8 +42,8 @@
 // — no paths, no credentials) so the attempt is observable in the transcript;
 // the audit append is secondary and can never mask the typed rejection. Only
 // genuinely unexpected failures (Git packaging, verifier crash, append/lock
-// infra, non-ENOENT read errors) stay plain throws — those leave the
-// transcript byte-identical.
+// infra, non-ENOENT read errors) stay plain throws and add no rejection audit.
+// Earlier phases may already have changed Git or appended durable facts.
 //
 // Architectural contract:
 //   - No argv parsing, no console.log, no process.exit.
@@ -65,6 +65,8 @@ import {
   RECOVERY_CANDIDATE_KINDS,
   PROCESS_MISSING_RECOVERY_REASON,
   PROCESS_MISSING_CONFIRMED_TYPE,
+  RepackageCasPolicyError,
+  REPACKAGE_CAS_POLICY_CODES,
 } from "../transcript.js";
 import {
   assertCommittedDeliveryRef,
@@ -72,6 +74,7 @@ import {
   isCanonicalCommitId,
   isPathAllowed,
   resolveDeliveryCommit,
+  DeliveryError,
   VERIFICATION_TIMEOUT_MS_MIN,
   VERIFICATION_TIMEOUT_MS_MAX,
 } from "../delivery.js";
@@ -104,7 +107,7 @@ export const REPACKAGE_REJECTION_CODES = Object.freeze([
   "candidate_ineligible",
   // The persisted run.started delivery contract is unusable (not exactly one bound run.started; missing worktreePath/baseCommit/allowedPaths/verification declaration; malformed verificationTimeoutMs).
   "candidate_contract_malformed",
-  // The persisted worktree is missing/not provable as a Git worktree top-level, or its HEAD already left the original base before the first repackage.
+  // The worktree is missing/unprovable, its index is non-empty, or its HEAD is not a provable delivery artifact.
   "worktree_unusable",
   // The candidate inventory read failed — the candidate cannot be enumerated.
   "inventory_unavailable",
@@ -147,6 +150,15 @@ export function classifyRepackageRejection(err) {
   if (!REPACKAGE_REJECTION_CODES.includes(err.code)) return null;
   return err.code;
 }
+
+// TD-231: deliberately local to the resolve call site, not a global
+// DeliveryError classifier. Packaging/rollback faults must remain unexpected.
+const REPACKAGE_DELIVERY_POLICY_CODES = Object.freeze({
+  artifact_mismatch: "worktree_unusable",
+  disallowed_path: "scope_violation",
+  pre_staged_changes: "worktree_unusable",
+  empty_diff: "inventory_empty",
+});
 
 const REPACKAGE_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
@@ -711,7 +723,22 @@ async function _repackageAllPhases({
         ? { verificationTimeoutMs: original.verificationTimeoutMs }
         : {}),
     };
-    const resolved = await _resolve(deliveryCtx);
+    let resolved;
+    try {
+      resolved = await _resolve(deliveryCtx);
+    } catch (err) {
+      // These first-attempt candidates proved HEAD === base in Phase 0.
+      // artifact_mismatch here can hide a failed packaging rollback; do not
+      // launder that infrastructure failure into an expected policy rejection.
+      const rollbackFailure = err instanceof DeliveryError
+        && err.deliveryCode === "artifact_mismatch"
+        && (original.recoveryKind === "backend_failed" || original.recoveryKind === "process_missing");
+      const code = err instanceof DeliveryError
+        && Object.hasOwn(REPACKAGE_DELIVERY_POLICY_CODES, err.deliveryCode)
+        ? REPACKAGE_DELIVERY_POLICY_CODES[err.deliveryCode] : null;
+      if (code && !rollbackFailure) throw new RepackageRejectionError(code, err.message);
+      throw err;
+    }
     resolvedRef = resolved.ref;
     source = resolved.source;
   }
@@ -799,8 +826,9 @@ async function _repackageAllPhases({
  * { rejectionReason } — no paths, no credentials, no counts. The append is
  * SECONDARY to the typed rejection itself: when it cannot be durably written
  * (injected failing factory, unwritable runDir), the failure is swallowed so
- * the structured rejection still reaches the Lead — the rejection already
- * failed closed before any state mutation. @private
+ * the structured rejection still reaches the Lead. A late CAS rejection may
+ * follow Git packaging or a durable delivery_created; neither is rolled back.
+ * @private
  */
 async function _recordRejectionAudit({ filePath, events, runId, code, transcriptFactory }) {
   try {
@@ -887,22 +915,30 @@ export async function runDeliveryRepackage({
   }
 
   try {
-    return await _repackageAllPhases({
-      events,
-      runId,
-      runDir,
-      filePath,
-      newAllowedPaths,
-      authorizedWorkspaceRoot,
-      resolveDeliveryCommitFn,
-      verifyDeliveryFn,
-      computeInventoryFn,
-      readTranscriptFn,
-      transcriptFactory,
-      nowFn,
-      isAliveFn,
-      ownerLeaseReader,
-    });
+    try {
+      return await _repackageAllPhases({
+        events,
+        runId,
+        runDir,
+        filePath,
+        newAllowedPaths,
+        authorizedWorkspaceRoot,
+        resolveDeliveryCommitFn,
+        verifyDeliveryFn,
+        computeInventoryFn,
+        readTranscriptFn,
+        transcriptFactory,
+        nowFn,
+        isAliveFn,
+        ownerLeaseReader,
+      });
+    } catch (err) {
+      // Convert only the dedicated CAS type + known code within the audited try.
+      if (err instanceof RepackageCasPolicyError && REPACKAGE_CAS_POLICY_CODES.includes(err.code)) {
+        throw new RepackageRejectionError(err.code, err.message);
+      }
+      throw err;
+    }
   } catch (err) {
     const code = classifyRepackageRejection(err);
     if (code) {

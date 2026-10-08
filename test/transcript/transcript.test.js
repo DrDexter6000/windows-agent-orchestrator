@@ -18,6 +18,8 @@ import {
   TERMINAL_STATES,
   DELIVERY_DECISION_POLICY_CODES,
   DeliveryDecisionPolicyError,
+  REPACKAGE_CAS_POLICY_CODES,
+  RepackageCasPolicyError,
 } from "../../src/transcript.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
 
@@ -393,7 +395,7 @@ test("M12-1S2-T2B: tryAppendRepackageVerification rejects an orphan outcome with
         delivery: m12Ref(),
         outcome: "passed",
       }),
-      /exactly one delivery_created/i,
+      (err) => err instanceof RepackageCasPolicyError && err.code === "candidate_ineligible",
     );
 
     assert.equal(await readFile(filePath, "utf8"), before, "orphan rejection is byte-identical");
@@ -2372,4 +2374,31 @@ test("TD-179-W3: an impossible pending ACCEPTED on disk is a durable conflict â€
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("TD-231 CAS policy codes are a frozen application subset", async () => {
+  const { REPACKAGE_REJECTION_CODES } = await import("../../src/application/runDeliveryRepackage.js");
+  assert.equal(Object.isFrozen(REPACKAGE_CAS_POLICY_CODES), true);
+  assert.deepEqual(REPACKAGE_CAS_POLICY_CODES, [
+    "durable_chain_inconsistent", "scope_violation", "candidate_ineligible", "candidate_contract_malformed",
+  ]);
+  assert.ok(REPACKAGE_CAS_POLICY_CODES.every((code) => REPACKAGE_REJECTION_CODES.includes(code)));
+  const error = new RepackageCasPolicyError("scope_violation", "human diagnostics");
+  assert.ok(error instanceof Error);
+  assert.equal(error.name, "RepackageCasPolicyError");
+  assert.equal(error.code, "scope_violation");
+});
+
+test("TD-231 missing transcript is a read error in both CAS primitives, never empty facts", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td231-read-"));
+  try {
+    const filePath = join(dir, "missing.jsonl");
+    const t = new JsonlTranscript(filePath, { runId: M12_RUN, agentId: M12_AGENT });
+    const input = { delivery: m12Ref(), approvedAllowedPaths: ["root.txt", "src"], source: "packaged", outcome: "passed" };
+    for (const method of ["tryAppendRepackageCreated", "tryAppendRepackageVerification"]) {
+      await assert.rejects(t[method](input), (err) => err.code === "ENOENT" && !(err instanceof RepackageCasPolicyError));
+      await assert.rejects(readFile(filePath), { code: "ENOENT" });
+      // A second call can acquire the same lock: the read failure released it.
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

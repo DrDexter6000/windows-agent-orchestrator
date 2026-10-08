@@ -264,6 +264,23 @@ export class DeliveryDecisionPolicyError extends Error {
   }
 }
 
+// TD-231: CAS policy subset of the application repackage rejection contract.
+// Consumers must check both the dedicated type and this closed set.
+export const REPACKAGE_CAS_POLICY_CODES = Object.freeze([
+  "durable_chain_inconsistent",
+  "scope_violation",
+  "candidate_ineligible",
+  "candidate_contract_malformed",
+]);
+
+export class RepackageCasPolicyError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "RepackageCasPolicyError";
+    this.code = code;
+  }
+}
+
 export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
   "disallowed_scope",
   "backend_failed",
@@ -1199,18 +1216,13 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      const events = await readTranscript(this.filePath);
 
       const existingEvents = events.filter(
         (e) => e && e.type === "run.delivery_created" && e.runId === this.context.runId,
       );
       if (existingEvents.length > 1) {
-        throw new Error("tryAppendRepackageCreated: multiple delivery_created events");
+        throw new RepackageCasPolicyError("durable_chain_inconsistent", "tryAppendRepackageCreated: multiple delivery_created events");
       }
       if (existingEvents.length === 1) {
         const existing = existingEvents[0];
@@ -1220,11 +1232,11 @@ export class JsonlTranscript {
           existing.delivery,
         );
         if (!provenance) {
-          throw new Error("tryAppendRepackageCreated: existing recovery chain is invalid");
+          throw new RepackageCasPolicyError("durable_chain_inconsistent", "tryAppendRepackageCreated: existing recovery chain is invalid");
         }
         const approved = _normalizeApprovedPaths(approvedAllowedPaths);
         if (!approved || existing.delivery.changedFiles.some((p) => !isPathAllowed(p, approved))) {
-          throw new Error("tryAppendRepackageCreated: requested scope does not cover existing delivery");
+          throw new RepackageCasPolicyError("scope_violation", "tryAppendRepackageCreated: requested scope does not cover existing delivery");
         }
         return { created: false, ref: existing.delivery, provenance };
       }
@@ -1246,7 +1258,7 @@ export class JsonlTranscript {
       const effectiveRecoveryKind = recoveryKind
         ?? (durableRecoveryKind === "disallowed_scope" ? "disallowed_scope" : null);
       if (!durableRecoveryKind || effectiveRecoveryKind !== durableRecoveryKind) {
-        throw new Error("tryAppendRepackageCreated: recoveryKind does not match durable recovery facts");
+        throw new RepackageCasPolicyError("candidate_ineligible", "tryAppendRepackageCreated: recoveryKind does not match durable recovery facts");
       }
       const approved = _normalizeApprovedPaths(approvedAllowedPaths);
       if (!approved) {
@@ -1254,7 +1266,7 @@ export class JsonlTranscript {
       }
       const original = _originalAllowedPaths(events, this.context.runId);
       if (!original || original.some((p) => !isPathAllowed(p, approved))) {
-        throw new Error("tryAppendRepackageCreated: approvedAllowedPaths must cover the original scope");
+        throw new RepackageCasPolicyError("candidate_contract_malformed", "tryAppendRepackageCreated: approvedAllowedPaths must cover the original scope");
       }
       if (!Array.isArray(delivery.changedFiles) || delivery.changedFiles.length === 0) {
         throw new Error("tryAppendRepackageCreated: delivery.changedFiles must be non-empty");
@@ -1305,12 +1317,7 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      const events = await readTranscript(this.filePath);
 
       if (!delivery || typeof delivery !== "object") {
         throw new Error("tryAppendRepackageVerification: delivery must be an object");
@@ -1326,7 +1333,7 @@ export class JsonlTranscript {
         (e) => e && e.type === "run.delivery_created" && e.runId === this.context.runId,
       );
       if (createdEvents.length !== 1) {
-        throw new Error("tryAppendRepackageVerification: expected exactly one delivery_created event");
+        throw new RepackageCasPolicyError("candidate_ineligible", "tryAppendRepackageVerification: expected exactly one delivery_created event");
       }
       if (!_sameDeliveryIdentity(createdEvents[0].delivery, delivery, this.context.runId)) {
         throw new Error("tryAppendRepackageVerification: delivery does not match delivery_created");
@@ -1337,12 +1344,12 @@ export class JsonlTranscript {
         (e) => e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === this.context.runId,
       );
       if (existingEvents.length > 1) {
-        throw new Error("tryAppendRepackageVerification: multiple verification outcomes");
+        throw new RepackageCasPolicyError("durable_chain_inconsistent", "tryAppendRepackageVerification: multiple verification outcomes");
       }
       if (existingEvents.length === 1) {
         const existing = existingEvents[0];
         if (!_sameDeliveryIdentity(existing.delivery, delivery, this.context.runId)) {
-          throw new Error("tryAppendRepackageVerification: existing outcome belongs to another delivery");
+          throw new RepackageCasPolicyError("durable_chain_inconsistent", "tryAppendRepackageVerification: existing outcome belongs to another delivery");
         }
         return {
           recorded: false,
