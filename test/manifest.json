@@ -85,9 +85,7 @@
       "migration-0045/longTailConsumers.test.js",
       "migration-0045/mcpExplicitDispatch.test.js",
       "migration-0045/reliabilityScopePin.test.js",
-      "migration-0045/rolePinning.test.js",
       "migration-0045/rolePolicy.test.js",
-      "migration-0045/sessionKeyUpgrade.test.js",
       "parsers/claudeCode.test.js",
       "parsers/codex.test.js",
       "parsers/kimiCode.test.js",
@@ -293,6 +291,8 @@
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",
+      "migration-0045/rolePinning.test.js",
+      "migration-0045/sessionKeyUpgrade.test.js",
       "run-lifecycle/terminalArbitration.test.js"
     ],
     "timeout": [
