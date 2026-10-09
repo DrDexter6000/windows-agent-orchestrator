@@ -853,3 +853,141 @@ export async function rerenderConsultFromRecord({
     },
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 0051 载荷合同：MCP 面机械回执 + 按席分页（CLI 全量内核不变）。
+//
+// 背景（TD-241 C3 实证 + 决定 0051）：MCP run_consult 原样返回全量结果对象
+// 双通道（text=JSON.stringify(parsed) + structuredContent=parsed），每席正文
+// 经 finalText 与 attribution 双份携带，codex 实测 ~21KB/通道即截断。本层提供
+// 纯投影/分页函数；MCP 面消费，CLI consult show 继续走全量内核（0039 不变式
+// ①的作用域=存储/渲染内核与 CLI 面；MCP 面零摘要零截断的兑现方式=回执无正文
+// + 分页无损拼回，不是选择性预览）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 单页响应（含外壳元数据）序列化后 UTF-8 字节的默认帽（TD-241 C3：codex
+ * 0.159.2 实测 ~21KB 截断；12KiB 初始帽是工程裕度选择，非 21KB÷1.75 的推导）。 */
+export const CONSULT_PAGE_CAP_BYTES = 12 * 1024;
+
+/** 机械回执（含外壳元数据）序列化后 UTF-8 字节的文档化帽。成立边界（测试钉
+ * MRC-F1）：≤5 席 × ≤32 字席位 id × ≤128 字视角 snippet × ≤10 问 × ≤120 字
+ * 问句标题——schema 上限超出此边界的病态输入可破帽（正文体积则完全无关）。 */
+export const CONSULT_RECEIPT_CAP_BYTES = 6 * 1024;
+
+/** 席位正文 sha256（hex）——分页版本锚：跨页拼接时调用方比对每页的
+ * textSha256，不一致=正文在读取间隙变化，必须从第 1 页重读（不静默混拼）。 */
+export function consultTextSha256(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** i 是否为 text 的码点边界（不切开代理对）。i===0 恒为边界。 */
+function isCodePointBoundary(text, i) {
+  if (i <= 0 || i >= text.length) return true;
+  const prev = text.charCodeAt(i - 1);
+  return !(prev >= 0xd800 && prev <= 0xdbff);
+}
+
+/**
+ * 把席位正文切成确定性页序列（纯函数，无 IO）。
+ *
+ * - measure(candidatePageText) 由调用方注入：返回"以 candidate 为 pageText 的
+ *   完整 seatPage 结果对象 JSON 序列化后的 UTF-8 字节数"——页帽作用于整页响应
+ *   （含外壳与转义），不是 JS 字符串长度（12K 个中文字符按字符数算约 36KB，
+ *   必截断——会审必改）。
+ * - 切页规则（会审定稿）：行边界优先（回退到候选区间内最后一个 "\n" 之后，
+ *   保留 CRLF 与行尾换行于页内）；单行超帽时按码点硬切（绝不切开代理对）；
+ *   全部原文无损保留——各页 pageText 按序拼接逐字节等于输入文本。
+ * - 返回 { pages: string[], totalChars }；空文本 → pages=[]。
+ */
+export function paginateConsultText(text, { capBytes = CONSULT_PAGE_CAP_BYTES, measure }) {
+  if (typeof text !== "string") throw new Error("paginateConsultText: text must be a string");
+  if (typeof measure !== "function") throw new Error("paginateConsultText: measure(repr) is required");
+  if (!Number.isInteger(capBytes) || capBytes <= 0) throw new Error("paginateConsultText: capBytes must be a positive integer");
+  const pages = [];
+  let rest = text;
+  while (rest.length > 0) {
+    // 二分找最大可装前缀长度 hi（measure 随前缀单调不减）。
+    let lo = 0; // 空前缀也必须可装（外壳自身超帽=cap 配置错误，如实抛）
+    if (measure("") > capBytes) {
+      throw new Error("paginateConsultText: envelope alone exceeds capBytes — cap misconfigured");
+    }
+    let hi = rest.length;
+    if (measure(rest) <= capBytes) {
+      // 整段装得下：最后一页。
+      pages.push(rest);
+      break;
+    }
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (measure(rest.slice(0, mid)) <= capBytes) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo <= 0) {
+      throw new Error("paginateConsultText: cannot fit a single code point under capBytes");
+    }
+    // 行边界优先：回退到 ≤lo 的最后一个换行之后（存在且 >0 才回退）。
+    let take = lo;
+    const nl = rest.lastIndexOf("\n", take - 1);
+    if (nl >= 0) {
+      const lineEnd = nl + 1; // 换行符留在本页页尾
+      if (lineEnd > 0 && lineEnd <= take && measure(rest.slice(0, lineEnd)) <= capBytes) {
+        take = lineEnd;
+      }
+    }
+    // 二分得到的 lo 一定是码点边界（measure 单调 + 代理对拆开会产生非法替换
+    // 字符改变长度——显式校正兜底）。
+    while (!isCodePointBoundary(rest, take)) take -= 1;
+    if (take <= 0) {
+      throw new Error("paginateConsultText: code-point adjustment collapsed to zero");
+    }
+    pages.push(rest.slice(0, take));
+    rest = rest.slice(take);
+  }
+  return { pages, totalChars: text.length };
+}
+
+/**
+ * 全量结果 → MCP 机械回执（纯投影）。create 成功与 read 无 seat 两路径共用
+ * 同一函数（会审必改：不造第三种形状）。
+ *
+ * 剥离：每席 finalText（正文）与 attribution（正文第二份拷贝——会审补充靶点
+ * 事实）、record（组记录副本——席位-runId 回链锚点已由回执 seats 自带
+ * runId 承载，持久记录在 recordPath）、每席 backend/provider（bricks.
+ * runtimeFacts 已携带，去重）。保留：fieldDiff/fieldValues/bricks（体积小且
+ * 是 0039 不变式②标记机制本身）。回执不含任何正文摘录/预览（0039 不变式①：
+ * 预览=有选择的截断）。
+ *
+ * pageMeasure(seat, candidatePageText) 由调用方注入（与 seatPage 视图同一
+ * 信封构造器）——回执里每席的 pages 与后续分页读同一把尺，计数不漂移。
+ */
+export function projectConsultReceipt(result, { pageMeasure } = {}) {
+  if (!result || typeof result !== "object") throw new Error("projectConsultReceipt: result object required");
+  if (typeof pageMeasure !== "function") throw new Error("projectConsultReceipt: pageMeasure(seat, repr) is required");
+  const seats = (result.seats ?? []).map((seat) => {
+    const { finalText, attribution, backend, provider, ...rest } = seat;
+    const text = typeof finalText === "string" ? finalText : "";
+    let pages = 0;
+    if (text.length > 0) {
+      pages = paginateConsultText(text, { measure: (candidate) => pageMeasure(seat, candidate) }).pages.length;
+    }
+    return {
+      ...rest,
+      chars: text.length,
+      pages,
+      textFinal: TERMINAL_STATES.includes(seat.runState),
+    };
+  });
+  return {
+    view: "receipt",
+    consultId: result.consultId,
+    recordPath: result.recordPath,
+    questions: result.questions,
+    brief: result.brief,
+    budgetMs: result.budgetMs,
+    elapsedMs: result.elapsedMs,
+    seats,
+    fieldDiff: result.fieldDiff,
+    fieldValues: result.fieldValues,
+    bricks: result.bricks,
+  };
+}

@@ -175,7 +175,7 @@ Output:
 
 ## run_consult
 
-Convene a multi-seat read-only council consult (Agent Union). Create {brief, seats}: brief is INLINE text (never a file path); one read-only sub-run per seat; waitMs 0..600000 (default 270000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a zero-truncation council-diff (full per-seat text) + consultId + independence facts + runId backlinks. Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: re-render the stored group record with ZERO dispatch.
+Convene a multi-seat read-only council consult (Agent Union). Create {brief, seats}: brief is INLINE text (never a file path); one read-only sub-run per seat; waitMs 0..600000 (default 270000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts: per-seat {runId, runState, formatState, chars, pages, textFinal} + fieldDiff markers + independence facts + consultId/recordPath). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt re-rendered, ZERO dispatch. Read {consultId, seat, page?}: ONE PAGE of that seat's final text (page default 1; each full response ≤12KiB serialized; line-boundary split, code-point safe; pages reassemble byte-exact; every page carries textSha256 of the full current text — a mismatch across pages means the text changed mid-read: restart from page 1, never stitch across versions). seat/page in create mode, page without seat, unknown seat, or out-of-range page → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -189,23 +189,36 @@ Input:
 | perspectives | array<object> | no |  |
 | fields | object | no |  |
 | reviewedRunId | string | no |  |
+| seat | string | no |  |
+| page | integer | no |  |
 | waitMs | integer | no |  |
 
 Output:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
+| view | string | yes | enum: receipt \| seatPage |
 | consultId | string | yes |  |
-| recordPath | string | yes |  |
-| record | object | yes |  |
-| questions | array<object> | yes |  |
-| brief | object | yes |  |
-| budgetMs | integer | yes |  |
-| elapsedMs | integer\|null | yes |  |
-| seats | array<object> | yes |  |
-| fieldDiff | array<string> | yes |  |
-| fieldValues | object | yes |  |
-| bricks | object | yes |  |
+| recordPath | string | no |  |
+| questions | array<object> | no |  |
+| brief | object | no |  |
+| budgetMs | integer | no |  |
+| elapsedMs | integer\|null | no |  |
+| seats | array<object> | no |  |
+| fieldDiff | array<string> | no |  |
+| fieldValues | object | no |  |
+| bricks | object | no |  |
+| seat | string | no |  |
+| runId | string\|null | no |  |
+| runState | string | no |  |
+| formatState | string | no | enum: structured \| partial \| unstructured \| empty |
+| budgetExpired | boolean | no |  |
+| textFinal | boolean | no |  |
+| page | integer | no |  |
+| totalPages | integer | no |  |
+| totalChars | integer | no |  |
+| textSha256 | string | no |  |
+| pageText | string | no |  |
 
 ## run_continue
 

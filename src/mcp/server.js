@@ -179,6 +179,10 @@ import {
   loadConsultRecord,
   rerenderConsultFromRecord,
   CONSULT_WAIT_MAX_MS,
+  CONSULT_PAGE_CAP_BYTES,
+  consultTextSha256,
+  paginateConsultText,
+  projectConsultReceipt,
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
@@ -1025,6 +1029,13 @@ const RUN_CONSULT_ERROR_TEXT = "run_consult failed";
 const RUN_CONSULT_MODE_TEXT =
   "run_consult refused: exactly one mode — consultId (read, zero dispatch) or " +
   "brief+seats (create); the create fields and consultId are mutually exclusive.";
+// 0051 分页参数拒绝文案（固定文本；seat id 是模型供给的有界串，安全具名回显）。
+const RUN_CONSULT_PAGE_WITHOUT_SEAT_TEXT =
+  "run_consult refused: page requires seat — read mode pages one seat at a time: " +
+  "{consultId, seat, page}";
+const RUN_CONSULT_PAGING_IN_CREATE_TEXT =
+  "run_consult refused: seat/page are read-mode-only parameters — create mode " +
+  "({brief, seats}) returns a receipt; page it afterwards via {consultId, seat, page}";
 const RUN_CONSULT_WAIT_MIN_MS = 0;
 const RUN_CONSULT_WAIT_DEFAULT_MS = 270000;
 
@@ -1045,6 +1056,10 @@ const RUN_CONSULT_INPUT = z.object({
   // "field value differs" markers only; the tool never concludes.
   fields: z.record(z.string().regex(/^Q\d+$/), z.array(z.string().min(1))).optional(),
   reviewedRunId: z.string().min(1).optional(),
+  // 0051 读模式分页参数：seat 选席（省略=回执重渲染）、page 选页（默认 1）。
+  // 仅 read 模式合法——create 模式携带任一 → 固定文案拒绝（派发计数为 0）。
+  seat: z.string().min(1).max(128).optional(),
+  page: z.number().int().min(1).optional(),
   waitMs: z.number().int().min(RUN_CONSULT_WAIT_MIN_MS).max(CONSULT_WAIT_MAX_MS)
     .default(RUN_CONSULT_WAIT_DEFAULT_MS),
 }).strict();
@@ -1065,70 +1080,48 @@ const RUN_CONSULT_BRIEF_FACT = z.object({
   path: z.string().nullable(),
   sha256: z.string().length(64),
 }).strict();
-const RUN_CONSULT_ATTRIBUTION = z.object({
-  ordered: z.array(z.object({ q: z.number().int().positive(), text: z.string() }).strict()),
-  unclassified: z.string(),
-  preamble: z.string(),
-}).strict();
-const RUN_CONSULT_RECORD_SEAT = z.object({
+// （0051：MCP 面不再携带 attribution 与组记录副本——正文拷贝随 finalText 一并
+// 从回执剥离，record 语义由 recordPath 指针承载；内核结果仍全量，由 CLI
+// consult show 完整渲染。原 RUN_CONSULT_RECORD(_SEAT) schema 镜像随之移除。）
+// 0051 载荷合同：单一 strict 对象 + view 判别（"receipt" | "seatPage"）。
+// 不用顶层 union——会在 tools/list 的 schema 序列化上重蹈 M9-2B-01（会审必改
+// 2）。两视图的字段全为可选、按 view 组合，形状一致性由 handler 构造与测试
+// 钉保证（schema 层不重复约束）。
+const RUN_CONSULT_RECEIPT_SEAT = z.object({
   agentId: z.string().min(1),
   runId: z.string().nullable(),
   runState: z.string(),
   formatState: RUN_CONSULT_FORMAT_STATES,
-  backend: z.string().nullable(),
-  provider: z.string().nullable(),
   perspectiveSnippet: z.string().optional(),
-  budgetExpired: z.literal(true).optional(),
-  // 0045 W3d（独立性三枚举，R4 裁定）：laneGroup=车道等价类编号（null=无事实）；
-  // authorRelation/modelRelation 闭集 + unknown；providerSessionRelation 恒 unknown
-  // （会话关联未记录——如实）。读路径（rerender）在场；纯 CLI 场景可缺席。
+  budgetExpired: z.boolean(),
+  dispatchError: z.string().optional(),
+  // 0045 W3d（独立性三枚举）：读/写两路径均携带；缺事实=unknown/null。
+  // backend/provider 不在此（回执去重——bricks.runtimeFacts 已携带）。
   laneGroup: z.number().int().nullable().optional(),
   authorRelation: z.enum(["same_lane", "different_lane", "unknown"]).optional(),
   modelRelation: z.enum(["same_model", "different_model", "unknown"]).optional(),
   providerSessionRelation: z.literal("unknown").optional(),
-}).strict();
-const RUN_CONSULT_RECORD = z.object({
-  consultId: z.string().min(1),
-  createdAt: z.string().min(1),
-  brief: RUN_CONSULT_BRIEF_FACT,
-  budgetMs: z.number().int().nonnegative(),
-  elapsedMs: z.number().int().nonnegative(),
-  questions: z.array(RUN_CONSULT_QUESTION),
-  declaredFields: z.record(z.array(z.string().min(1))).optional(),
-  seats: z.array(RUN_CONSULT_RECORD_SEAT),
-  fieldDiff: z.array(z.string()),
-  reviewedRunId: z.string().min(1).optional(),
+  // 0051 回执分页元数据：chars=正文 UTF-16 长度；pages=当前分页总页数（0=无
+  // 正文：缺席/派发失败/空文本）；textFinal=runState 已终态（false=正文仍可能
+  // 增长，分页边界会漂移——跨页必须比对每页 textSha256）。
+  chars: z.number().int().nonnegative(),
+  pages: z.number().int().nonnegative(),
+  textFinal: z.boolean(),
 }).strict();
 const RUN_CONSULT_OUTPUT = z.object({
+  view: z.enum(["receipt", "seatPage"]),
   consultId: z.string().min(1),
-  recordPath: z.string(),
-  record: RUN_CONSULT_RECORD,
-  questions: z.array(RUN_CONSULT_QUESTION),
-  brief: RUN_CONSULT_BRIEF_FACT,
-  budgetMs: z.number().int().nonnegative(),
+  // —— receipt 视图（create 成功与 read 无 seat 同形，同一投影函数）——
+  recordPath: z.string().optional(),
+  questions: z.array(RUN_CONSULT_QUESTION).optional(),
+  brief: RUN_CONSULT_BRIEF_FACT.optional(),
+  budgetMs: z.number().int().nonnegative().optional(),
   // Create mode: measured elapsed; read mode: the record's historical value
   // (null only for a hand-corrupted record without it).
-  elapsedMs: z.number().int().nonnegative().nullable(),
-  seats: z.array(z.object({
-    agentId: z.string().min(1),
-    runId: z.string().nullable(),
-    runState: z.string(),
-    formatState: RUN_CONSULT_FORMAT_STATES,
-    backend: z.string().nullable(),
-    provider: z.string().nullable(),
-    perspectiveSnippet: z.string().optional(),
-    budgetExpired: z.boolean(),
-    attribution: RUN_CONSULT_ATTRIBUTION,
-    finalText: z.string().optional(),
-    dispatchError: z.string().optional(),
-    // 0045 W3d（独立性三枚举）：读/写两路径均携带；缺事实=unknown/null。
-    laneGroup: z.number().int().nullable().optional(),
-    authorRelation: z.enum(["same_lane", "different_lane", "unknown"]).optional(),
-    modelRelation: z.enum(["same_model", "different_model", "unknown"]).optional(),
-    providerSessionRelation: z.literal("unknown").optional(),
-  }).strict()),
-  fieldDiff: z.array(z.string()),
-  fieldValues: z.record(z.record(z.string().nullable())),
+  elapsedMs: z.number().int().nonnegative().nullable().optional(),
+  seats: z.array(RUN_CONSULT_RECEIPT_SEAT).optional(),
+  fieldDiff: z.array(z.string()).optional(),
+  fieldValues: z.record(z.record(z.string().nullable())).optional(),
   bricks: z.object({
     runtimeFacts: z.array(z.object({
       agentId: z.string().min(1),
@@ -1144,7 +1137,22 @@ const RUN_CONSULT_OUTPUT = z.object({
     reviewedAgentId: z.string().nullable(),
     reviewedRunId: z.string().min(1).optional(),
     sessionIndependence: z.string(),
-  }).strict(),
+  }).strict().optional(),
+  // —— seatPage 视图（read 模式 seat 选席；page 默认 1）——
+  seat: z.string().min(1).optional(),
+  runId: z.string().nullable().optional(),
+  runState: z.string().optional(),
+  formatState: RUN_CONSULT_FORMAT_STATES.optional(),
+  budgetExpired: z.boolean().optional(),
+  textFinal: z.boolean().optional(),
+  page: z.number().int().positive().optional(),
+  totalPages: z.number().int().nonnegative().optional(),
+  totalChars: z.number().int().nonnegative().optional(),
+  // 分页版本锚（0051）：全文 sha256。跨页拼接前比对每页此值——不一致=正文在
+  // 读取间隙变化，从第 1 页重读（服务端无状态，不静默混拼的兑现=可检测）。
+  textSha256: z.string().length(64).optional(),
+  // 页正文（行边界优先切页；无损：各页按序拼接逐字节等于席位最终文本）。
+  pageText: z.string().optional(),
 }).strict();
 
 // Consult convenes real worker sub-runs (spawned processes) and persists a group
@@ -1158,15 +1166,57 @@ const RUN_CONSULT_ANNOTATIONS = {
 
 const RUN_CONSULT_DESCRIPTION =
   // Post-M12 全量铺开（2026-10-03；钉×8：INLINE text / 0..600000 / default 270000 /
-  // observation cutoff only / never killed or re-dispatched / zero-truncation /
-  // never synthesizes / ZERO dispatch）。
+  // observation cutoff only / never killed or re-dispatched / lossless / never
+  // synthesizes / ZERO dispatch）。0051（2026-10-09）：载荷合同=机械回执+按席
+  // 分页——MCP 面不再返回正文全量（TD-241 C3 实证 ~21KB/通道截断）。
   "Convene a multi-seat read-only council consult (Agent Union). Create {brief, seats}: " +
   "brief is INLINE text (never a file path); one read-only sub-run per seat; waitMs " +
   "0..600000 (default 270000; expiry = observation cutoff only — seats keep running, " +
-  "never killed or re-dispatched); returns a zero-truncation council-diff (full per-seat " +
-  "text) + consultId + independence facts + runId backlinks. Facts only — never " +
-  "synthesizes, merges, ranks, or concludes. Read {consultId}: re-render the stored group " +
-  "record with ZERO dispatch.";
+  "never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body " +
+  "text, no excerpts: per-seat {runId, runState, formatState, chars, pages, " +
+  "textFinal} + fieldDiff markers + independence facts + consultId/recordPath). " +
+  "Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: " +
+  "same receipt re-rendered, ZERO dispatch. Read {consultId, seat, page?}: ONE PAGE " +
+  "of that seat's final text (page default 1; each full response ≤12KiB serialized; " +
+  "line-boundary split, code-point safe; pages reassemble byte-exact; every page " +
+  "carries textSha256 of the full current text — a mismatch across pages means the " +
+  "text changed mid-read: restart from page 1, never stitch across versions). " +
+  "seat/page in create mode, page without seat, unknown seat, or out-of-range page " +
+  "→ fixed refusal text.";
+
+// 0051：seatPage 视图的唯一信封构造器——真实页与 measure 试算共用同一形状，
+// 防两处漂移（measure 用 page/totalPages=9999 作 4 位数字上界，真实值恒 ≤
+// 占位 ⇒ 真实序列化 ≤ 试算值，页帽按整页响应 UTF-8 字节成立）。
+function buildConsultSeatPageView({ consultId, seat, textFinal, textSha256, page, totalPages, pageText }) {
+  const text = typeof seat.finalText === "string" ? seat.finalText : "";
+  return {
+    view: "seatPage",
+    consultId,
+    seat: seat.agentId,
+    runId: seat.runId,
+    runState: seat.runState,
+    formatState: seat.formatState,
+    budgetExpired: seat.budgetExpired,
+    textFinal,
+    page,
+    totalPages,
+    totalChars: text.length,
+    textSha256,
+    pageText,
+  };
+}
+
+function consultSeatPageMeasure(consultId) {
+  return (seat, candidate) => Buffer.byteLength(JSON.stringify(buildConsultSeatPageView({
+    consultId,
+    seat,
+    textFinal: TERMINAL_STATES.includes(seat.runState),
+    textSha256: consultTextSha256(typeof seat.finalText === "string" ? seat.finalText : ""),
+    page: 9999,
+    totalPages: 9999,
+    pageText: candidate,
+  })), "utf8");
+}
 
 // ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====
 //
@@ -4580,10 +4630,19 @@ export function createWaoMcpServer({
       if (!readMode && (input.brief === undefined || input.seats === undefined)) {
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_MODE_TEXT }] };
       }
+      // 0051 分页参数守门（全部在 service/dispatch 调用之前——拒绝时派发计数
+      // 恒为 0）：create 模式禁带 seat/page；page 只与 seat 同现。
+      if (!readMode && (input.seat !== undefined || input.page !== undefined)) {
+        return { isError: true, content: [{ type: "text", text: RUN_CONSULT_PAGING_IN_CREATE_TEXT }] };
+      }
+      if (readMode && input.page !== undefined && input.seat === undefined) {
+        return { isError: true, content: [{ type: "text", text: RUN_CONSULT_PAGE_WITHOUT_SEAT_TEXT }] };
+      }
 
       // ---- Read mode: re-render the stored group record. ZERO dispatch — this
       // branch never touches consultService/dispatcher (invariant, pinned by
-      // test). CLI `consult show` parity via the SAME shared re-render kernel.
+      // test). CLI `consult show` keeps the FULL render via the same kernel;
+      // this MCP face projects it (0051: receipt, or one seat page).
       if (readMode) {
         try {
           const record = await loadConsultRecord({ consultId: input.consultId, consultsDir: consultRecordsDir });
@@ -4593,7 +4652,65 @@ export function createWaoMcpServer({
             consultsDir: consultRecordsDir,
             env: process.env,
           });
-          const parsed = RUN_CONSULT_OUTPUT.parse(result);
+          if (input.seat !== undefined) {
+            const seatResult = (result.seats ?? []).find((s) => s.agentId === input.seat);
+            if (!seatResult) {
+              return {
+                isError: true,
+                content: [{
+                  type: "text",
+                  text: `run_consult refused: seat not in this consult record: ${input.seat}`,
+                }],
+              };
+            }
+            const text = typeof seatResult.finalText === "string" ? seatResult.finalText : "";
+            if (text.length === 0) {
+              return {
+                isError: true,
+                content: [{
+                  type: "text",
+                  text: `run_consult refused: seat ${seatResult.agentId} has no final text to page ` +
+                    `(runState: ${seatResult.runState}, formatState: ${seatResult.formatState})`,
+                }],
+              };
+            }
+            const sha = consultTextSha256(text);
+            const textFinal = TERMINAL_STATES.includes(seatResult.runState);
+            const measureForSeat = consultSeatPageMeasure(result.consultId);
+            const measure = (candidate) => measureForSeat(seatResult, candidate);
+            const { pages, totalChars } = paginateConsultText(text, {
+              capBytes: CONSULT_PAGE_CAP_BYTES,
+              measure,
+            });
+            const page = input.page ?? 1;
+            if (page > pages.length) {
+              return {
+                isError: true,
+                content: [{
+                  type: "text",
+                  text: `run_consult refused: page ${page} out of range (totalPages: ${pages.length}) — ` +
+                    "re-read the receipt for the current page count",
+                }],
+              };
+            }
+            const parsed = RUN_CONSULT_OUTPUT.parse(buildConsultSeatPageView({
+              consultId: result.consultId,
+              seat: seatResult,
+              textFinal,
+              textSha256: sha,
+              page,
+              totalPages: pages.length,
+              pageText: pages[page - 1],
+            }));
+            return {
+              content: [{ type: "text", text: JSON.stringify(parsed) }],
+              structuredContent: parsed,
+            };
+          }
+          // 0051 回执重渲染（与 create 成功同一投影函数——同形，不造第三种形状）。
+          const parsed = RUN_CONSULT_OUTPUT.parse(projectConsultReceipt(result, {
+            pageMeasure: consultSeatPageMeasure(result.consultId),
+          }));
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
             structuredContent: parsed,
@@ -4716,7 +4833,10 @@ export function createWaoMcpServer({
           env: process.env,
           dispatchFn: dispatcher,
         });
-        const parsed = RUN_CONSULT_OUTPUT.parse(result);
+        // 0051：create 成功 → 机械回执（正文零携带；分页经读模式按席取）。
+        const parsed = RUN_CONSULT_OUTPUT.parse(projectConsultReceipt(result, {
+          pageMeasure: consultSeatPageMeasure(result.consultId),
+        }));
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,

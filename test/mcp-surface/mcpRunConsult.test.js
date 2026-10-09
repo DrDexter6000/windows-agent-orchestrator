@@ -1,30 +1,38 @@
 // test/mcp-surface/mcpRunConsult.test.js
 //
-// M13-r2 (decision 0039) — the `run_consult` MCP tool: multi-seat read-only
-// council consult on the Agent Union MCP face.
+// M13-r2 (decision 0039) + 0051 载荷合同 — the `run_consult` MCP tool:
+// multi-seat read-only council consult on the Agent Union MCP face.
 //
-// Contracts under test (task book M13-r2 + 0039 v0.2):
+// Contracts under test:
 //   A — create mode end-to-end: fan-out via the server's dispatch seam is
 //       READ-ONLY per seat (readOnly:true + inline brief kernel + perspective
-//       tail); the council-diff snapshot carries each seat's FULL original
-//       text (zero truncation — one seat's reply exceeds the 4000-char compact
-//       cap on purpose); fieldDiff is marker-only (no conclusion words).
-//   B — bounded-wait semantics: waitMs=0 is valid (immediate point-in-time
-//       snapshot); expiry is an OBSERVATION CUTOFF ONLY — a non-terminal seat
-//       stays truthfully running with budgetExpired:true and the dispatch
-//       count NEVER grows (no re-send, 0039 invariant ③); a missing
-//       transcript observes "missing"; a failed dispatch degrades to
-//       dispatch_failed without breaking the other seats (partial success).
+//       tail); returns a MECHANICAL RECEIPT (0051): no per-seat body text, no
+//       excerpts — per-seat {runState, formatState, chars, pages, textFinal} +
+//       fieldDiff markers + independence facts; receipt ≤4KiB serialized
+//       (body-size independent); fieldDiff is marker-only (no conclusion words).
+//   B — bounded-wait semantics: waitMs=0 is valid; expiry is an OBSERVATION
+//       CUTOFF ONLY — a non-terminal seat stays truthfully running with
+//       budgetExpired:true, textFinal:false, and the dispatch count NEVER grows
+//       (0039 invariant ③); a missing transcript observes "missing" (chars=0,
+//       pages=0); a failed dispatch degrades to dispatch_failed.
 //   C — read mode: consultId re-renders the stored group record with ZERO
-//       dispatch (MCP-layer invariant — the dispatch seam count stays 0).
-//   D — closed-set input: mode mutual exclusion (fixed text), per-seat
-//       registry existence naming the missing seats, duplicate-seat and
-//       stray-perspective refusals, waitMs schema bounds — every refusal
-//       leaves the dispatch count at 0.
-//   E — surface truth: run_consult is on tools/list (registered between
-//       run_dispatch_contract_check and run_continue), carries dispatch-family
-//       annotations, description semantic guards, and is NOT a drilldown
-//       carrier (advisory action tool, not an observation tool).
+//       dispatch (receipt view). {consultId, seat, page?} returns ONE PAGE of
+//       that seat's final text: each full response ≤12KiB serialized; pages
+//       reassemble byte-exact (0051 losslessness); every page carries the same
+//       textSha256 (version anchor — mismatch means re-read from page 1);
+//       line-boundary split preferred; code-point safe (surrogate pairs never
+//       split); escape-dense text paged losslessly.
+//   D — closed-set input: mode mutual exclusion (fixed text), 0051 paging
+//       refusals (seat/page in create mode / page without seat / unknown seat /
+//       no-text seat / out-of-range page), per-seat registry existence, duplicate
+//       seats, stray perspectives, waitMs schema bounds — every refusal leaves
+//       the dispatch count at 0.
+//   E — surface truth: roster slot, dispatch-family annotations, description
+//       semantic guards, NOT a drilldown carrier.
+//   F — receipt capacity boundary: metadata-max shape ≤4KiB; body independence
+//       (8 seats × 100KB replies → still ≤4KiB).
+//   G — pure pager edges (paginateConsultText): empty text; envelope-over-cap
+//       throws; tiny-cap hard split is code-point safe and lossless.
 //
 // All filesystem state is tmpdir-anchored (staticRunsGuard discipline): git
 // repo + registry + runDir + consultsDir under mkdtempSync; dispatch is a
@@ -37,8 +45,15 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
-import { isValidConsultId } from "../../src/application/consultService.js";
+import {
+  isValidConsultId,
+  projectConsultReceipt,
+  paginateConsultText,
+  CONSULT_PAGE_CAP_BYTES,
+  CONSULT_RECEIPT_CAP_BYTES,
+} from "../../src/application/consultService.js";
 import { DRILLDOWN_TOOLS } from "../../src/application/runDrilldowns.js";
 
 // ---- harness ----
@@ -125,20 +140,27 @@ function errText(res) {
   return (res?.content ?? []).map((c) => c.text || "").join(" ");
 }
 
+/** 整个 text 通道（=JSON.stringify(structuredContent)）的 UTF-8 字节数。 */
+function wireBytes(res) {
+  return Buffer.byteLength(res.content[0].text, "utf8");
+}
+
 const BRIEF = "会审任务书\n\n## Q1 方案可行吗\n\nQ2: 首选哪个\n";
 
+const sha256 = (t) => createHash("sha256").update(t, "utf8").digest("hex");
+
 // =====================================================================
-// A — create mode end-to-end
+// A — create mode end-to-end (0051 receipt contract)
 // =====================================================================
 
-test("MRC-A1: create mode fans out read-only per-seat runs and returns a zero-truncation council-diff snapshot", async () => {
+test("MRC-A1: create mode fans out read-only per-seat runs and returns a ≤4KiB mechanical receipt (no body text)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-a1-"));
   try {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir);
     const runDir = join(dir, "runs");
     const consultsDir = join(dir, ".wao", "runs", "consults");
-    // seat_a：结构化回复，长度 > 4000（超过 compact 路径的截断上限——零截断证明）。
+    // seat_a：结构化长回复（多页体量；正文只经分页读出，回执零携带）。
     const longBody = "理由是成本可控。".repeat(520);
     const seatAText = `Q1: 采纳 A\n${longBody}\n\nQ2: 选 B\n风险可控。\n`;
     assert.ok(seatAText.length > 4000, "测试前提：seat_a 回复超过 4000 字");
@@ -167,6 +189,7 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a zero-tr
       assert.equal(bCall.prompt, BRIEF, "无视角席 = 纯 brief 内核");
 
       const p = res.structuredContent;
+      assert.equal(p.view, "receipt", "0051：create 成功 → 机械回执");
       assert.ok(isValidConsultId(p.consultId), `consultId 形状：${p.consultId}`);
       assert.equal(p.recordPath, join(consultsDir, `${p.consultId}.json`));
       assert.ok(existsSync(p.recordPath), "组记录落盘");
@@ -176,36 +199,41 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a zero-tr
       assert.equal(mapping.seat_a, "run_consult_stub_seat_a");
       assert.equal(mapping.seat_b, "run_consult_stub_seat_b");
 
-      // 零截断快照：每席完整原文在场（seat_a > 4000 字逐字节）。
+      // 回执零正文：finalText/attribution/正文片段一律不在（任何通道）。
+      const serialized = JSON.stringify(p);
+      for (const banned of ["finalText", "attribution", "理由是成本可控", "风险可控"]) {
+        assert.ok(!serialized.includes(banned), `回执不得携带正文/归组拷贝：${banned}`);
+      }
+      // 回执分页元数据：chars=正文长度；pages≥2（长文多页）；textFinal=终态。
       const seatA = p.seats.find((s) => s.agentId === "seat_a");
       const seatB = p.seats.find((s) => s.agentId === "seat_b");
-      assert.equal(seatA.finalText, seatAText, "seat_a 完整原文逐字节（>4000 字）");
-      assert.equal(seatA.attribution.ordered.length, 2, "seat_a 双问归组");
-      assert.equal(seatA.formatState, "structured");
+      assert.equal(seatA.chars, seatAText.length, "chars=正文 UTF-16 长度");
+      assert.ok(seatA.pages >= 2, `长文席 pages≥2（实测 ${seatA.pages}）`);
+      assert.equal(seatA.textFinal, true, "completed → textFinal");
       assert.equal(seatA.runState, "completed");
+      assert.equal(seatA.formatState, "structured");
       assert.equal(seatA.budgetExpired, false);
-      // 归组零损失（0039 ①）：三块拼接 === 原文。
-      const rebuilt = seatA.attribution.preamble
-        + seatA.attribution.ordered.map((e) => e.text).join("")
-        + seatA.attribution.unclassified;
-      assert.equal(rebuilt, seatAText, "MCP 快照归组零信息损失");
-      assert.equal(seatA.perspectiveSnippet, "你是成本视角：先自测预算是否闭合。", "视角片段进快照");
-      assert.equal(seatB.formatState, "structured");
+      assert.equal(seatA.perspectiveSnippet, "你是成本视角：先自测预算是否闭合。", "视角片段进回执");
+      assert.equal(seatB.pages, 1, "短文席单页");
+      assert.equal(seatB.textFinal, true);
+
+      // 0051 容量：整个 text 通道（=JSON.stringify(structuredContent)）≤回执帽。
+      assert.ok(wireBytes(res) <= CONSULT_RECEIPT_CAP_BYTES,
+        `回执 text 通道 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${wireBytes(res)}B）`);
 
       // 标记即提示（0039 ②）：fieldDiff 只报 Qn；值并列；无结论词。
       assert.deepEqual(p.fieldDiff, ["Q1"]);
       assert.deepEqual(p.fieldValues.Q1, { seat_a: "A", seat_b: "B" });
-      const serialized = JSON.stringify(p);
       for (const word of ["agree", "disagree", "一致", "分歧"]) {
-        assert.ok(!serialized.includes(word), `快照不得携带结论词：${word}`);
+        assert.ok(!serialized.includes(word), `回执不得携带结论词：${word}`);
       }
 
       // 三块砖①厂族：registry 原始字段直读（wrapper 形 provider.baseUrl）。
       assert.equal(p.bricks.runtimeFacts.find((f) => f.agentId === "seat_a").provider, "https://stub.example/api/anthropic");
       assert.equal(p.bricks.runtimeFacts.find((f) => f.agentId === "seat_b").provider, null);
 
-      // 不进 drilldowns 目录（advisory 动作工具，非观察工具）。
-      assert.equal("availableDrilldowns" in p, false, "快照不携带 availableDrilldowns");
+      // 不进 drilldowns 目录（advisory 动作工具，非观察工具；0051 维持六工具闭集）。
+      assert.equal("availableDrilldowns" in p, false, "回执不携带 availableDrilldowns");
     } finally {
       await client.close();
       await server.close();
@@ -219,7 +247,7 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a zero-tr
 // B — bounded wait / degraded views (WQ-02 state enumeration)
 // =====================================================================
 
-test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetExpired, never re-dispatched); missing transcript and failed dispatch degrade without breaking the rest", async () => {
+test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetExpired, textFinal:false, never re-dispatched); missing transcript and failed dispatch degrade without breaking the rest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-b1-"));
   try {
     makeGitRepo(dir);
@@ -237,18 +265,23 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
         waitMs: 0,
       });
       assert.equal(threw, false);
-      assert.notEqual(res.isError, true, `partial-success snapshot is not an error: ${errText(res)}`);
+      assert.notEqual(res.isError, true, `partial-success receipt is not an error: ${errText(res)}`);
       const p = res.structuredContent;
       const seatA = p.seats.find((s) => s.agentId === "seat_a");
       const seatB = p.seats.find((s) => s.agentId === "seat_b");
+      assert.equal(p.view, "receipt");
       assert.equal(seatA.runState, "running", "到期不改写状态");
       assert.equal(seatA.budgetExpired, true, "观察截止如实标记");
+      assert.equal(seatA.textFinal, false, "非终态席 textFinal=false（分页边界仍会漂移）");
+      assert.ok(seatA.chars > 0 && seatA.pages >= 1, "非终态席当下文本可分页读取");
       // 半结构化：只覆盖 Q1（brief 有 Q1+Q2）→ partial，非 structured。
       assert.equal(seatA.formatState, "partial");
-      assert.ok(seatA.finalText.includes("仍在核对预算"), "非终态席的当下文本照常入快照");
       assert.equal(seatB.runState, "missing", "缺席=观察事实");
       assert.equal(seatB.budgetExpired, true);
       assert.equal(seatB.formatState, "empty");
+      assert.equal(seatB.chars, 0, "缺席席零正文");
+      assert.equal(seatB.pages, 0, "缺席席零页");
+      assert.equal(seatB.textFinal, false);
       // ③ 零自动重发：到期/缺席后派发计数不再增长。
       assert.equal(dispatchCalls.length, 2, "each seat dispatched exactly once — no re-send on expiry");
     } finally {
@@ -269,6 +302,7 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
       const seatB = p.seats.find((s) => s.agentId === "seat_b");
       assert.equal(seatB.runState, "dispatch_failed");
       assert.equal(seatB.runId, null);
+      assert.equal(seatB.pages, 0, "派发失败席零页");
       assert.equal(p.seats.find((s) => s.agentId === "seat_a").runState, "completed", "其余席不受连坐");
     } finally {
       await c2.close();
@@ -279,7 +313,7 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
   }
 });
 
-test("MRC-B2: malformed (unstructured prose) seat — full prose preserved, zero re-send, no penalty", async () => {
+test("MRC-B2: malformed (unstructured prose) seat — prose paged verbatim, zero re-send, no penalty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-b2-"));
   try {
     makeGitRepo(dir);
@@ -293,10 +327,16 @@ test("MRC-B2: malformed (unstructured prose) seat — full prose preserved, zero
       const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
       assert.equal(threw, false);
       assert.notEqual(res.isError, true, errText(res));
-      const seat = res.structuredContent.seats[0];
+      const receipt = res.structuredContent;
+      const seat = receipt.seats[0];
       assert.equal(seat.runState, "completed");
       assert.equal(seat.formatState, "unstructured", "completed+未结构化合法（两维分离）");
-      assert.equal(seat.attribution.unclassified, prose, "整段散文原文保留，不做句子级切分");
+      assert.equal(seat.chars, prose.length, "散文字符数如实");
+      assert.equal(seat.pages, 1, "短散文单页");
+      // 正文经分页无损读出（不做句子级切分——整段散文原文）。
+      const page = await callConsult(client, { consultId: receipt.consultId, seat: "seat_a", page: 1 });
+      assert.notEqual(page.res.isError, true, errText(page.res));
+      assert.equal(page.res.structuredContent.pageText, prose, "分页读出=整段散文原文逐字节");
       assert.equal(dispatchCalls.length, 1, "malformed 零自动重发");
     } finally {
       await client.close();
@@ -308,10 +348,10 @@ test("MRC-B2: malformed (unstructured prose) seat — full prose preserved, zero
 });
 
 // =====================================================================
-// C — read mode: ZERO dispatch (MCP-layer invariant)
+// C — read mode: ZERO dispatch (MCP-layer invariant) + 0051 seat paging
 // =====================================================================
 
-test("MRC-C1: read mode re-renders the group record with ZERO dispatch; unknown consultId fails closed to the fixed error", async () => {
+test("MRC-C1: read mode re-renders the group record as the SAME receipt shape with ZERO dispatch; unknown consultId fails closed to the fixed error", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-c1-"));
   try {
     makeGitRepo(dir);
@@ -329,19 +369,22 @@ test("MRC-C1: read mode re-renders the group record with ZERO dispatch; unknown 
       const consultId = created.res.structuredContent.consultId;
       const dispatchesAfterCreate = dispatchCalls.length;
 
-      // 读取模式：零派发（不变式本体）+ 经 runId 回链重读 transcript 重渲染。
+      // 读取模式（无 seat）：零派发（不变式本体）+ 同一回执形状（0051：不造
+      // 第三种形状——create 与 read-no-seat 共用同一投影函数）。
       const read = await callConsult(client, { consultId });
       assert.equal(read.threw, false);
       assert.notEqual(read.res.isError, true, errText(read.res));
       const p = read.res.structuredContent;
+      assert.equal(p.view, "receipt", "read 无 seat = 回执重渲染");
       assert.equal(p.consultId, consultId);
       assert.equal(dispatchCalls.length, dispatchesAfterCreate, "read mode dispatch count MUST stay 0");
       const seat = p.seats.find((s) => s.agentId === "seat_a");
-      assert.equal(seat.finalText, reply, "重渲染回读席位原文（CLI consult show 同一内核）");
+      assert.equal(seat.chars, reply.length, "重渲染回读席位正文长度（CLI consult show 同一内核）");
       assert.equal(seat.formatState, "structured");
       assert.deepEqual(p.fieldDiff, ["Q2"], "重渲染重新比对字段（两席 Q2 值不同）");
       assert.deepEqual(p.fieldValues.Q2, { seat_a: "B", seat_b: "A" });
       assert.ok(p.recordPath.includes(consultId));
+      assert.ok(wireBytes(read.res) <= CONSULT_RECEIPT_CAP_BYTES, "read 回执同受回执帽");
 
       // 未知 consultId：固定错误文本（fail closed，不泄漏动态内容）。
       const unknown = await callConsult(client, { consultId: "consult_20990101000000000nonexist" });
@@ -358,17 +401,117 @@ test("MRC-C1: read mode re-renders the group record with ZERO dispatch; unknown 
   }
 });
 
+test("MRC-C2: seat paging — every page ≤12KiB serialized, pages reassemble byte-exact, one textSha256 across pages, line-boundary preferred, default page=1", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-c2-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    // 中文密集长文（≈48KB UTF-8 → ≥4 页；每行短句 → 行边界优先可证）。
+    const lines = [];
+    for (let i = 0; i < 2000; i++) lines.push(`第${i}行：理由是成本可控，风险可测，边界可守。`);
+    const seatAText = `Q1: 采纳 A\n${lines.join("\n")}\nQ2: 选 B\n`;
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: seatAText }));
+    const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const receipt = created.res.structuredContent;
+      const seatA = receipt.seats[0];
+      assert.ok(seatA.pages >= 3, `长文席至少 3 页（实测 ${seatA.pages}）`);
+      assert.ok(wireBytes(created.res) <= CONSULT_RECEIPT_CAP_BYTES, "回执不随正文膨胀（回执帽）");
+
+      // 逐页取：每页整响应（text 通道=JSON.stringify(structuredContent)）≤12KiB。
+      const pages = [];
+      const shas = new Set();
+      for (let n = 1; n <= seatA.pages; n++) {
+        const args = { consultId: receipt.consultId, seat: "seat_a" };
+        if (n > 1) args.page = n; // n=1 故意省略 page → 默认第 1 页
+        const page = await callConsult(client, args);
+        assert.equal(page.threw, false);
+        assert.notEqual(page.res.isError, true, errText(page.res));
+        const sp = page.res.structuredContent;
+        assert.equal(sp.view, "seatPage");
+        assert.equal(sp.page, n, "页码如实");
+        assert.equal(sp.totalPages, seatA.pages, "页数与回执一致（同一把尺）");
+        assert.equal(sp.textFinal, true);
+        assert.ok(wireBytes(page.res) <= CONSULT_PAGE_CAP_BYTES,
+          `第 ${n} 页整响应 ≤${CONSULT_PAGE_CAP_BYTES}B（实测 ${wireBytes(page.res)}B）`);
+        shas.add(sp.textSha256);
+        pages.push(sp.pageText);
+      }
+      // 无损（0051 的零截断兑现）：各页按序拼接逐字节 === 原文。
+      assert.equal(pages.join(""), seatAText, "分页拼回=原文逐字节");
+      // 版本锚：同一正文的全部页携带同一 sha（跨页不一致=版本变化信号）。
+      assert.equal(shas.size, 1, "同版本全页同一 textSha256");
+      assert.equal([...shas][0], sha256(seatAText), "textSha256=全文 sha256");
+      // 行边界优先：非末页以换行收尾（fixture 全短行可达成）。
+      for (let n = 0; n < pages.length - 1; n++) {
+        assert.ok(pages[n].endsWith("\n"), `第 ${n + 1} 页行边界收尾`);
+      }
+      // 分页零派发。
+      assert.equal(dispatchCalls.length, 1, "paging never dispatches");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-C3: hostile text fixtures — escape-dense and no-newline surrogate text page losslessly under the cap", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-c3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    // 逃逸密集：引号/反斜杠/制表/换行混排（JSON 转义放大）。
+    const dense = "引号\"反斜杠\\制表\t换行\n".repeat(900);
+    // 无换行+代理对：强制码点硬切，绝不允许切开代理对。
+    const emoji = "🚀🚀🚀".repeat(3000);
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: dense }));
+    writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: emoji }));
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0 });
+      const receipt = created.res.structuredContent;
+      for (const [seatId, original] of [["seat_a", dense], ["seat_b", emoji]]) {
+        const meta = receipt.seats.find((s) => s.agentId === seatId);
+        const pages = [];
+        for (let n = 1; n <= meta.pages; n++) {
+          const page = await callConsult(client, { consultId: receipt.consultId, seat: seatId, page: n });
+          assert.equal(page.threw, false);
+          assert.notEqual(page.res.isError, true, errText(page.res));
+          assert.ok(wireBytes(page.res) <= CONSULT_PAGE_CAP_BYTES,
+            `${seatId} 第 ${n} 页 ≤${CONSULT_PAGE_CAP_BYTES}B（实测 ${wireBytes(page.res)}B）`);
+          pages.push(page.res.structuredContent.pageText);
+        }
+        assert.equal(pages.join(""), original, `${seatId} 恶劣文本分页拼回=原文逐字节`);
+        assert.ok(meta.pages >= 2, `${seatId} 多页（实测 ${meta.pages}）`);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // =====================================================================
 // D — closed-set input: every refusal leaves dispatch at 0
 // =====================================================================
 
-test("MRC-D1: mode mutual exclusion + seat refusals name the offender; dispatch count stays 0", async () => {
+test("MRC-D1: mode mutual exclusion + seat refusals + 0051 paging refusals name the offender; dispatch count stays 0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-d1-"));
   try {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir);
     const runDir = join(dir, "runs");
     const consultsDir = join(dir, ".wao", "runs", "consults");
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: A\n\nQ2: B\n" }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
       // consultId 与创建字段互斥。
@@ -394,8 +537,39 @@ test("MRC-D1: mode mutual exclusion + seat refusals name the offender; dispatch 
       const stray = await callConsult(client, { brief: "x", seats: ["seat_a"], perspectives: [{ agentId: "seat_b", text: "y" }] });
       assert.equal(stray.res.isError, true);
       assert.match(errText(stray.res), /not in seats: seat_b/);
-      // 拒绝后派发计数为 0。
-      assert.equal(dispatchCalls.length, 0, "every refusal above dispatched nothing");
+      // 0051：create 模式禁带分页参数。
+      const pagingInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], seat: "seat_a" });
+      assert.equal(pagingInCreate.res.isError, true);
+      assert.match(errText(pagingInCreate.res), /read-mode-only/);
+      const pageInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], page: 1 });
+      assert.equal(pageInCreate.res.isError, true);
+      assert.match(errText(pageInCreate.res), /read-mode-only/);
+
+      // 0051 读模式分页拒绝面（先建一份真实 consult）。
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0 });
+      assert.equal(created.threw, false);
+      const consultId = created.res.structuredContent.consultId;
+      const dispatchesAfterCreate = dispatchCalls.length;
+      // page 无 seat。
+      const pageNoSeat = await callConsult(client, { consultId, page: 1 });
+      assert.equal(pageNoSeat.res.isError, true);
+      assert.match(errText(pageNoSeat.res), /page requires seat/);
+      // 未知席位（不在组记录）。
+      const unknownSeat = await callConsult(client, { consultId, seat: "ghost", page: 1 });
+      assert.equal(unknownSeat.res.isError, true);
+      assert.match(errText(unknownSeat.res), /seat not in this consult record: ghost/);
+      // 无正文席（seat_b 缺席 transcript）。
+      const noText = await callConsult(client, { consultId, seat: "seat_b", page: 1 });
+      assert.equal(noText.res.isError, true);
+      assert.match(errText(noText.res), /has no final text to page/);
+      assert.match(errText(noText.res), /runState: missing/);
+      // 越界页（seat_a 单页）。
+      const outOfRange = await callConsult(client, { consultId, seat: "seat_a", page: 2 });
+      assert.equal(outOfRange.res.isError, true);
+      assert.match(errText(outOfRange.res), /page 2 out of range \(totalPages: 1\)/);
+      // 拒绝后派发计数为 0（读模式拒绝同样零派发）。
+      assert.equal(dispatchCalls.length, dispatchesAfterCreate, "every refusal above dispatched nothing");
+      assert.equal(dispatchesAfterCreate, 2, "前置：create 恰好两席各一次");
     } finally {
       await client.close();
       await server.close();
@@ -424,6 +598,11 @@ test("MRC-D2: waitMs and fields are wire-validated closed sets (600001 / bad fie
       assert.equal(badKey.threw, false);
       assert.equal(badKey.res.isError, true, "fields key outside Qn rejected by the input schema");
       assert.match(errText(badKey.res), /Input validation error|-32602/);
+      // seat/page 同受 schema 闭集约束（负数页/空席名）。
+      const badPage = await callConsult(client, { consultId: "consult_20260101000000000aaaaaa", seat: "seat_a", page: 0 });
+      assert.equal(badPage.threw, false);
+      assert.equal(badPage.res.isError, true, "page=0 rejected by the input schema");
+      assert.match(errText(badPage.res), /Input validation error|-32602/);
       assert.equal(dispatchCalls.length, 0, "schema-rejected calls never dispatch");
     } finally {
       await client.close();
@@ -468,7 +647,12 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
       assert.match(d, /default 270000/);
       assert.match(d, /observation cutoff only/);
       assert.match(d, /never killed or re-dispatched/);
-      assert.match(d, /zero-truncation/);
+      assert.match(d, /MECHANICAL RECEIPT/, "0051：create 返回机械回执");
+      assert.match(d, /no per-seat body text, no excerpts/, "回执零正文零预览（0039 ①：预览=选择性截断）");
+      assert.match(d, /12KiB serialized/, "页帽单位=整页序列化字节");
+      assert.match(d, /reassemble byte-exact/, "分页无损");
+      assert.match(d, /textSha256/, "版本锚");
+      assert.match(d, /restart from page 1/);
       assert.match(d, /never synthesizes/);
       assert.match(d, /ZERO dispatch/);
     } finally {
@@ -481,4 +665,98 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
   // 闭集目录：run_consult 不是 drilldown 载体（advisory 动作工具）。
   assert.equal(DRILLDOWN_TOOLS.includes("run_consult"), false,
     "run_consult must not be a drilldown carrier (it is an advisory action tool)");
+});
+
+// =====================================================================
+// F — receipt capacity boundary (pure projection; body independence)
+// =====================================================================
+
+test("MRC-F1: receipt ≤4KiB for the documented metadata-max shape and body-size independent (5 seats × 100KB replies)", () => {
+  // 声明边界（opus 会审："回执帽的守卫要写清边界"）：≤5 席 × ≤32 字席位
+  // id × ≤128 字视角 snippet × ≤10 问 × ≤120 字问句标题。schema 上限（id 128
+  // 字/perspective 无帽/brief 派生问题无帽）超出此边界时回执可破帽——那是
+  // 病态输入，0051 已记；正文体积则完全无关（本断言的第二半）。
+  const longId = "s".repeat(32);
+  const snippet = "视角".repeat(64); // 128 chars
+  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `h${i} `.repeat(24).trim() }));
+  const body = "正文不应进回执。".repeat(8000); // ~100KB
+  const mkSeat = (i) => ({
+    agentId: i === 0 ? longId : `${longId}_${i}`,
+    runId: "run_20260101000000000aaaaaa",
+    runState: "completed",
+    formatState: "structured",
+    backend: "claude-code",
+    provider: null,
+    perspectiveSnippet: snippet,
+    budgetExpired: false,
+    finalText: body, // 100KB 正文——投影后必须消失
+    attribution: { ordered: [{ q: 1, text: body }], unclassified: "", preamble: "" },
+  });
+  const result = {
+    consultId: "consult_20260101000000000aaaaaa",
+    recordPath: "x".repeat(80),
+    record: { consultId: "consult_20260101000000000aaaaaa" }, // 投影必须丢弃
+    questions,
+    brief: { path: null, sha256: "a".repeat(64) },
+    budgetMs: 600000,
+    elapsedMs: 123456,
+    seats: Array.from({ length: 5 }, (_, i) => mkSeat(i)),
+    fieldDiff: ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"],
+    fieldValues: {},
+    bricks: {
+      runtimeFacts: Array.from({ length: 5 }, (_, i) => ({ agentId: `${longId}_${i}`, backend: "claude-code", provider: null })),
+      authorInSeats: null,
+      reviewedAgentId: null,
+      sessionIndependence: "未提供",
+    },
+  };
+  // 与 server.js 同一信封测度（页帽语义：整页序列化字节）。
+  const measure = (seat, candidate) => Buffer.byteLength(JSON.stringify({
+    view: "seatPage", consultId: result.consultId, seat: seat.agentId, runId: seat.runId,
+    runState: seat.runState, formatState: seat.formatState, budgetExpired: seat.budgetExpired,
+    textFinal: true, page: 9999, totalPages: 9999, totalChars: body.length,
+    textSha256: "a".repeat(64), pageText: candidate,
+  }), "utf8");
+  const receipt = projectConsultReceipt(result, { pageMeasure: measure });
+  const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
+  assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
+    `元数据最大化回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B；边界=5席×32字id×128字snippet×10问×120字heading）`)
+  assert.ok(!JSON.stringify(receipt).includes("正文不应进回执"), "正文不进回执（body-size 无关）");
+  assert.ok(!("record" in receipt), "组记录副本不进回执（recordPath 指针承载）");
+  for (const seat of receipt.seats) {
+    assert.equal(seat.chars, body.length);
+    assert.ok(seat.pages >= 1, "100KB 正文页数如实（仅计数进回执）");
+    assert.equal(seat.textFinal, true);
+    assert.ok(!("backend" in seat) && !("provider" in seat), "backend/provider 去重（bricks 已携带）");
+  }
+});
+
+// =====================================================================
+// G — pure pager edges (paginateConsultText)
+// =====================================================================
+
+test("MRC-G1: pure pager — empty text yields zero pages; envelope-over-cap throws; tiny-cap hard split is code-point safe and lossless", () => {
+  const naive = (slack) => (candidate) => Buffer.byteLength(candidate, "utf8") + slack;
+
+  // 空文本 → 零页。
+  const empty = paginateConsultText("", { measure: naive(300) });
+  assert.deepEqual(empty, { pages: [], totalChars: 0 });
+
+  // 外壳自身超帽 → 如实抛（cap 配置错误，不静默）。
+  assert.throws(() => paginateConsultText("x", { capBytes: 10, measure: naive(300) }), /envelope alone exceeds capBytes/);
+
+  // 极小帽（只装得下少量码点）：码点硬切不拆代理对、无损拼回。
+  const emojiText = "🚀🚀🚀🚀🚀🚀🚀🚀"; // 8 个 emoji=16 个 UTF-16 码元
+  const tiny = paginateConsultText(emojiText, { capBytes: 4 + 300, measure: naive(300) });
+  assert.ok(tiny.pages.length === 8, `每页恰一个 emoji（实测 ${tiny.pages.length} 页）`);
+  assert.equal(tiny.pages.join(""), emojiText, "硬切无损拼回");
+  for (const page of tiny.pages) {
+    assert.equal(page, "🚀", "每页是完整代理对，无孤立半对");
+  }
+
+  // 行边界优先：短行文本在极小帽下仍按行切。
+  const lines = "一行\n两行\n三行\n";
+  const byLine = paginateConsultText(lines, { capBytes: 3 * 3 + 300, measure: naive(300) });
+  assert.equal(byLine.pages.join(""), lines, "行切无损");
+  assert.ok(byLine.pages.slice(0, -1).every((p) => p.endsWith("\n")), "非末页行边界收尾");
 });

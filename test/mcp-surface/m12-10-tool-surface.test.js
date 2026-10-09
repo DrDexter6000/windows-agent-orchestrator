@@ -877,7 +877,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // 无描述字节变化（F5 专属文案为运行时文案，不进 tools/list）。
   // TD-241 C2b（2026-10-09）：repackage/reverify 出参 schema 增 guidance 可选闭集
 // 数组（在 stripped 载荷内），SHA 如实翻新；无描述字节变化。
-"8775b1bbc6f3c76910d545dd8645fc41f21ee77408591184fd7f3b5197064547";
+  // 0051（2026-10-09）：run_consult 载荷合同改机械回执+按席分页——inputSchema
+// 增可选 seat/page、outputSchema 重构为 view 判别双视图（去 record/attribution
+// 镜像），描述扩写分页语义；SHA 与 desc 顶均如实翻新（Owner 批准的三工作批）。
+"188d36b21af5c6e91b4c8ddc40f423d77bc8c1b30f8a02c4c71939adb78dfcde";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
@@ -917,7 +920,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 0045 清账批 CB-1 重冻（2026-10-05）：同上 wire 重冻批——desc 顶（11837）对实测
 // （10442）静默松弛 1395 B，重冻于实测值。防 creep 语义不变：新增/改写描述超顶
 // 即红，需要 Owner 逐次裁定。
-const FROZEN_23_DESC_CEILING = 10442;
+// 0051 重冻（2026-10-09）：run_consult 描述扩写分页语义（receipt/页帽/版本锚/
+// 拒绝面），10442 → 10976，实测重冻（Owner 批准的三工作批；防 creep 语义不变）。
+const FROZEN_23_DESC_CEILING = 10976;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new
