@@ -83,7 +83,7 @@ export function identifyProjectFromCwd(raw, io = {}) {
   if (/^\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/i.test(p)) {
     return { kind: "unattributed", reason: "cwd is a bare relative .wao-worktrees path — owning repo root not derivable" };
   }
-  if (!/^[A-Za-z]:[\/]/.test(p) && !p.startsWith("/") && !p.startsWith("\\\\")) {
+  if (!/^[A-Za-z]:[\/]/.test(p) && !p.startsWith("/")) {
     return { kind: "unattributed", reason: `cwd is a relative path (${raw}) — identity would depend on the resolving process cwd` };
   }
   p = p.replace(WORKTREE_SEGRE_SAFE(platform), "");
@@ -156,15 +156,19 @@ export const PROJECT_IDENTITY_RULES_VERSION = "td190-r2";
 // 自行拼装造成 realpath/tmpdir 口径漂移。
 // M5：win32 下 native 形态返回盘上规范大小写（普通形态原样返回输入的
 // 大小写——displayName 派生会漂）；非 win32 两者同义。
-import { realpathSync as _realpathSyncPlain } from "node:fs";
-import { realpathSync as _realpathSyncNative } from "node:fs";
+import { realpathSync as _realpathSync } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
 export function productionProjectIo() {
-  const useNative = typeof process !== "undefined" && process.platform === "win32";
+  // M5 Round-2 必改（双席复核出首轮空操作）：win32 必须用函数属性
+  // realpathSync.native（盘上规范大小写）——它不是命名导出，首轮误当双命名
+  // 导入导致两分支执行同一普通版（大写 cwd → key/bucket 漂移 + R4 大小写
+  // 敏感剥离失效 → 错误事实永久入档）。非 win32 两者同义。
+  const useNative = typeof process !== "undefined" && process.platform === "win32"
+    && typeof _realpathSync?.native === "function";
   return {
     realpath: useNative
-      ? (p) => _realpathSyncNative(p)
-      : (p) => _realpathSyncPlain(p),
+      ? (p) => _realpathSync.native(p)
+      : (p) => _realpathSync(p),
     tmpdir: _tmpdir(),
   };
 }
@@ -206,6 +210,14 @@ const FACT_BUCKET_RE = /^[A-Za-z0-9._-]+-[0-9a-f]{8,}$/;
  */
 export function identityOfFirstEvent(first, io) {
   const fact = first?.project;
+  // Round-2 M3/F3（sol 复核）：project 字段**在场**即是事实主张——对象形但缺
+  // kind/坏形状一律 factError，不得静默回退 cwd 推导（掩盖损坏）；只有字段
+  // 缺省（legacy run）才走推导。
+  if (fact !== undefined && fact !== null) {
+    if (typeof fact !== "object" || Array.isArray(fact) || typeof fact.kind !== "string") {
+      return { identity: { kind: "unattributed", reason: "recorded project fact malformed (not a kinded object)" }, factError: "malformed fact shape (missing kind)" };
+    }
+  }
   if (fact && typeof fact === "object" && typeof fact.kind === "string") {
     if (!PROJECT_FACT_KINDS.includes(fact.kind)) {
       return { identity: { kind: "unattributed", reason: `recorded project fact has unknown kind ${JSON.stringify(fact.kind)}` }, factError: `unknown fact kind ${JSON.stringify(fact.kind)}` };

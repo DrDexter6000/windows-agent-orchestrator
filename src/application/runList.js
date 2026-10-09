@@ -20,7 +20,7 @@ import { readdirSync, existsSync, realpathSync, readFileSync, openSync, readSync
 import { tmpdir } from "node:os";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
-import { identityOfFirstEvent, deriveProjectBucketSlug } from "../projectIdentity.js";
+import { identityOfFirstEvent, deriveProjectBucketSlug, productionProjectIo } from "../projectIdentity.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
@@ -262,7 +262,7 @@ function summaryWindowMs(facts) {
 // projectFilter 的每候选分类器：读文件头一小块切首行；identity 经共享
 // identityOfFirstEvent（在档事实优先，与迁移计划器同语义）。
 function makeFirstEventClassifier(resolvedRunDir, projectIo) {
-  const io = projectIo ?? { realpath: realpathSync, tmpdir: tmpdir() };
+  const io = projectIo ?? productionProjectIo();
   return (file) => {
     try {
       const fh = openSync(join(resolvedRunDir, file), "r");
@@ -394,7 +394,7 @@ export async function listRuns(input) {
       const looksLikePath = /[\\/]/.test(rawFilter) || /^[A-Za-z]:/.test(rawFilter);
       const argName = rawFilter.toLowerCase();
       const pathIdentity = looksLikePath
-        ? identityOfFirstEvent({ cwd: rawFilter }, input.projectIo ?? { realpath: realpathSync, tmpdir: tmpdir() }).identity
+        ? identityOfFirstEvent({ cwd: rawFilter }, input.projectIo ?? productionProjectIo()).identity
         : null;
       const argKey = pathIdentity?.kind === "project" ? pathIdentity.key : null;
       candidates = candidates.filter(({ file }) => {

@@ -22,7 +22,7 @@
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
 import { unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -36,6 +36,7 @@ import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { planProjectsMigration } from "../application/runsMigrateProjects.js";
+import { productionProjectIo } from "../projectIdentity.js";
 // M9-6A: delivery query/decision delegated to shared application services.
 // M11-10: readiness/wait delegated to the SAME shared service the MCP tool uses.
 import {
@@ -161,7 +162,7 @@ async function runsCommand(args, config, deps) {
   if (sub === "migrate-projects") {
     // TD-190 D3：存量分桶迁移计划——dry-run 唯一形态（物理迁移须 Owner 显式
     // 点名后另窗执行，本命令不提供 --execute）。
-    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: { tmpdir: tmpdir(), realpath: realpathSync } });
+    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: productionProjectIo() });
     console.log(`[migrate-projects] rules=${plan.rulesVersion} DRY-RUN（只读，零写入；实迁须 Owner 显式点名）`);
     console.log(`  扫描根层转录 ${plan.scanned} 个；保留目录跳过：${plan.reservedDirsSkipped.join(", ") || "无"}`);
     for (const b of plan.buckets) {
@@ -623,9 +624,13 @@ async function runsListCommand(args, config) {
   if (options.project === true) {
     throw new Error("--project requires a value (a project path/name, or @sandbox/@scratch/@unattributed)");
   }
-  // 终审 opus C：--project . 不静默空集——解析为当前目录（绝对路径进服务侧）。
-  if (options.project === "." || options.project === "./") {
-    options.project = resolve(process.cwd());
+  // 终审 opus C + Round-2 非阻断：相对路径形参数统一 resolve（./sub、../x
+  // 曾在服务侧判 unattributed 后静默空集）；@选择器与裸名不动。
+  if (typeof options.project === "string" && !options.project.startsWith("@")
+    && (options.project === "." || options.project === "./"
+      || options.project.startsWith("./") || options.project.startsWith("../")
+      || /^\.\.[\/]/.test(options.project))) {
+    options.project = resolve(options.project);
   }
 
   // CLI is human/ops — no workspace authorization.

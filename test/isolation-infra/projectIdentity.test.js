@@ -202,3 +202,41 @@ test("TD-190 D2-②a: projectFactFromCwd 四 kind 形状钉（rulesVersion 随�
   assert.equal(unattr.kind, "unattributed");
   assert.match(unattr.reason, /bare relative/i);
 });
+
+
+// Round-2 M5 必改的回归钉（opus 建议原样）：生产 io 必须真用 .native——首轮
+// 误当命名导出导致空操作（大写 cwd → key/bucket 漂移），注入式测试测不出。
+// 仅 win32 运行（.native 是 win32 语义）。
+test("TD-190 Round-2 M5: 生产 io 真调 realpathSync.native（大写 cwd 同 key 同 slug）", { skip: process.platform !== "win32" }, async () => {
+  const { realpathSync } = await import("node:fs");
+  const { productionProjectIo, projectFactFromCwd } = await import("../../src/projectIdentity.js");
+  const cwd = process.cwd();
+  const io = productionProjectIo();
+  // 生产 io 的 realpath 必须与 .native 同结果（盘上规范大小写），而非普通版
+  assert.equal(io.realpath(cwd.toUpperCase()), realpathSync.native(cwd.toUpperCase()));
+  // 大写 cwd 落档的事实 = 原写法的事实（同 key 同 bucket）
+  const a = projectFactFromCwd(cwd, io);
+  const b = projectFactFromCwd(cwd.toUpperCase(), io);
+  assert.equal(b.key, a.key, "uppercase cwd must not fork the project key");
+  assert.equal(b.bucket, a.bucket, "uppercase cwd must not fork the bucket slug");
+});
+
+// Round-2 M3/F3：project 字段在场但坏形状（对象缺 kind / 数组 / 非对象）
+// 不得静默回退 cwd 推导——factError 显式（sol 探针：project:{} 曾 parseFailures=[]）。
+test("TD-190 Round-2 M3: 在场坏事实 → factError，不静默回退推导", async () => {
+  const { identityOfFirstEvent } = await import("../../src/projectIdentity.js");
+  const io = { realpath: (p) => p, tmpdir: "C:/PROBE-TMP" };
+  for (const bad of [{}]) {
+    const r = identityOfFirstEvent({ cwd: "D:/projects/x", project: bad }, io);
+    assert.ok(r.factError, "missing-kind object fact must be an explicit factError");
+    assert.equal(r.identity.kind, "unattributed");
+  }
+  const arr = identityOfFirstEvent({ cwd: "D:/projects/x", project: ["x"] }, io);
+  assert.ok(arr.factError);
+  const str = identityOfFirstEvent({ cwd: "D:/projects/x", project: "junk" }, io);
+  assert.ok(str.factError);
+  // 缺省（legacy）才走推导
+  const legacy = identityOfFirstEvent({ cwd: "D:/projects/x" }, io);
+  assert.equal(legacy.factError, null);
+  assert.equal(legacy.identity.kind, "project");
+});
