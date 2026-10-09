@@ -1092,11 +1092,11 @@ const RUN_CONSULT_RECEIPT_SEAT = z.object({
   runId: z.string().nullable(),
   runState: z.string(),
   formatState: RUN_CONSULT_FORMAT_STATES,
-  perspectiveSnippet: z.string().optional(),
   budgetExpired: z.boolean(),
   dispatchError: z.string().optional(),
   // 0045 W3d（独立性三枚举）：读/写两路径均携带；缺事实=unknown/null。
-  // backend/provider 不在此（回执去重——bricks.runtimeFacts 已携带）。
+  // backend/provider/perspectiveSnippet 不在此（回执去重/瘦身——bricks.
+  // runtimeFacts 与 recordPath 已分别携带；视角全文是回执帽主要破帽项）。
   laneGroup: z.number().int().nullable().optional(),
   authorRelation: z.enum(["same_lane", "different_lane", "unknown"]).optional(),
   modelRelation: z.enum(["same_model", "different_model", "unknown"]).optional(),
@@ -1185,8 +1185,9 @@ const RUN_CONSULT_DESCRIPTION =
   "→ fixed refusal text.";
 
 // 0051：seatPage 视图的唯一信封构造器——真实页与 measure 试算共用同一形状，
-// 防两处漂移（measure 用 page/totalPages=9999 作 4 位数字上界，真实值恒 ≤
-// 占位 ⇒ 真实序列化 ≤ 试算值，页帽按整页响应 UTF-8 字节成立）。
+// 防两处漂移。measure 试算用 page/totalPages=text.length 作占位：每页至少一个
+// UTF-16 码元 ⇒ totalPages ≤ pages ≤ text.length，合法 page ≤ totalPages——
+// 占位是**已证明**的数字宽度上界（sol 验收修正：9999 非证明上界，10000 页即破）。
 function buildConsultSeatPageView({ consultId, seat, textFinal, textSha256, page, totalPages, pageText }) {
   const text = typeof seat.finalText === "string" ? seat.finalText : "";
   return {
@@ -1207,15 +1208,29 @@ function buildConsultSeatPageView({ consultId, seat, textFinal, textSha256, page
 }
 
 function consultSeatPageMeasure(consultId) {
-  return (seat, candidate) => Buffer.byteLength(JSON.stringify(buildConsultSeatPageView({
-    consultId,
-    seat,
-    textFinal: TERMINAL_STATES.includes(seat.runState),
-    textSha256: consultTextSha256(typeof seat.finalText === "string" ? seat.finalText : ""),
-    page: 9999,
-    totalPages: 9999,
-    pageText: candidate,
-  })), "utf8");
+  // opus S1：sha/终态每席只算一次（二分每页 O(log n) 次试算，全文 sha 重复
+  // 计算是实测 31s/95 万字的主要来源之一）。
+  const shaCache = new Map();
+  const finalCache = new Map();
+  return (seat, candidate) => {
+    let sha = shaCache.get(seat);
+    if (sha === undefined) {
+      const text = typeof seat.finalText === "string" ? seat.finalText : "";
+      sha = consultTextSha256(text);
+      shaCache.set(seat, sha);
+      finalCache.set(seat, TERMINAL_STATES.includes(seat.runState));
+    }
+    const text = typeof seat.finalText === "string" ? seat.finalText : "";
+    return Buffer.byteLength(JSON.stringify(buildConsultSeatPageView({
+      consultId,
+      seat,
+      textFinal: finalCache.get(seat),
+      textSha256: sha,
+      page: text.length,
+      totalPages: text.length,
+      pageText: candidate,
+    })), "utf8");
+  };
 }
 
 // ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====

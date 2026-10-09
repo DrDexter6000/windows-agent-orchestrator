@@ -8,7 +8,7 @@
 //       READ-ONLY per seat (readOnly:true + inline brief kernel + perspective
 //       tail); returns a MECHANICAL RECEIPT (0051): no per-seat body text, no
 //       excerpts — per-seat {runState, formatState, chars, pages, textFinal} +
-//       fieldDiff markers + independence facts; receipt ≤4KiB serialized
+//       fieldDiff markers + independence facts; receipt ≤ receipt cap serialized
 //       (body-size independent); fieldDiff is marker-only (no conclusion words).
 //   B — bounded-wait semantics: waitMs=0 is valid; expiry is an OBSERVATION
 //       CUTOFF ONLY — a non-terminal seat stays truthfully running with
@@ -29,8 +29,9 @@
 //       the dispatch count at 0.
 //   E — surface truth: roster slot, dispatch-family annotations, description
 //       semantic guards, NOT a drilldown carrier.
-//   F — receipt capacity boundary: metadata-max shape ≤4KiB; body independence
-//       (8 seats × 100KB replies → still ≤4KiB).
+//   F — receipt capacity boundary: metadata-max shape ≤ receipt cap (8KiB,
+//       Chinese headings + populated field values); body independence
+//       (5 seats × 100KB replies → still within cap).
 //   G — pure pager edges (paginateConsultText): empty text; envelope-over-cap
 //       throws; tiny-cap hard split is code-point safe and lossless.
 //
@@ -153,7 +154,7 @@ const sha256 = (t) => createHash("sha256").update(t, "utf8").digest("hex");
 // A — create mode end-to-end (0051 receipt contract)
 // =====================================================================
 
-test("MRC-A1: create mode fans out read-only per-seat runs and returns a ≤4KiB mechanical receipt (no body text)", async () => {
+test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped mechanical receipt (no body text)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-a1-"));
   try {
     makeGitRepo(dir);
@@ -213,7 +214,9 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a ≤4KiB
       assert.equal(seatA.runState, "completed");
       assert.equal(seatA.formatState, "structured");
       assert.equal(seatA.budgetExpired, false);
-      assert.equal(seatA.perspectiveSnippet, "你是成本视角：先自测预算是否闭合。", "视角片段进回执");
+      assert.ok(!("perspectiveSnippet" in seatA), "视角全文不进回执（recordPath 取——验收批 M3a）");
+      assert.equal(JSON.parse(readFileSync(p.recordPath, "utf8")).seats.find((x) => x.agentId === "seat_a").perspectiveSnippet,
+        "你是成本视角：先自测预算是否闭合。", "视角全文在组记录（回链锚点不丢）");
       assert.equal(seatB.pages, 1, "短文席单页");
       assert.equal(seatB.textFinal, true);
 
@@ -671,15 +674,20 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
 // F — receipt capacity boundary (pure projection; body independence)
 // =====================================================================
 
-test("MRC-F1: receipt ≤4KiB for the documented metadata-max shape and body-size independent (5 seats × 100KB replies)", () => {
-  // 声明边界（opus 会审："回执帽的守卫要写清边界"）：≤5 席 × ≤32 字席位
-  // id × ≤128 字视角 snippet × ≤10 问 × ≤120 字问句标题。schema 上限（id 128
-  // 字/perspective 无帽/brief 派生问题无帽）超出此边界时回执可破帽——那是
-  // 病态输入，0051 已记；正文体积则完全无关（本断言的第二半）。
+test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese headings + populated field values, no snippets) and body-size independent", () => {
+  // 验收批修订（sol 反例实跑：71 字 ASCII 标题+空 fieldValues 的旧夹具量出
+  // 4916B，中文 120 字标题=7786B、字段值在场=6896B——旧 6KiB 帽不可证）：
+  // ①视角 snippet（真实记录全文 265-607 字/席）整体出回执；②帽重冻 8KiB；
+  // ③夹具改中文标题+在场字段值。成立边界：≤5 席 × ≤32 字 id × ≤10 问 ×
+  // ≤120 字中文标题 × 短字段值、无视角原文。schema 上限（id 128 字/brief
+  // 派生问题无帽）超界或字段值病态长可破帽——已知未收紧；正文体积完全无关。
   const longId = "s".repeat(32);
-  const snippet = "视角".repeat(64); // 128 chars
-  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `h${i} `.repeat(24).trim() }));
+  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `问题标题第${i}号`.repeat(10) }));
   const body = "正文不应进回执。".repeat(8000); // ~100KB
+  const fieldDiff = ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"];
+  const fieldValues = Object.fromEntries(fieldDiff.map((q, i) => [q, Object.fromEntries(
+    Array.from({ length: 5 }, (_, j) => [`席位_${j}`, `选项${i}`]),
+  )]));
   const mkSeat = (i) => ({
     agentId: i === 0 ? longId : `${longId}_${i}`,
     runId: "run_20260101000000000aaaaaa",
@@ -687,7 +695,7 @@ test("MRC-F1: receipt ≤4KiB for the documented metadata-max shape and body-siz
     formatState: "structured",
     backend: "claude-code",
     provider: null,
-    perspectiveSnippet: snippet,
+    perspectiveSnippet: "视角全文不进回执。".repeat(100), // 病态长也必须被剥离
     budgetExpired: false,
     finalText: body, // 100KB 正文——投影后必须消失
     attribution: { ordered: [{ q: 1, text: body }], unclassified: "", preamble: "" },
@@ -701,8 +709,8 @@ test("MRC-F1: receipt ≤4KiB for the documented metadata-max shape and body-siz
     budgetMs: 600000,
     elapsedMs: 123456,
     seats: Array.from({ length: 5 }, (_, i) => mkSeat(i)),
-    fieldDiff: ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"],
-    fieldValues: {},
+    fieldDiff,
+    fieldValues,
     bricks: {
       runtimeFacts: Array.from({ length: 5 }, (_, i) => ({ agentId: `${longId}_${i}`, backend: "claude-code", provider: null })),
       authorInSeats: null,
@@ -710,18 +718,20 @@ test("MRC-F1: receipt ≤4KiB for the documented metadata-max shape and body-siz
       sessionIndependence: "未提供",
     },
   };
-  // 与 server.js 同一信封测度（页帽语义：整页序列化字节）。
+  // 与 server.js 同一信封测度（页帽语义：整页序列化字节；占位=text.length
+  // 已证明上界——sol 验收修正：9999 非证明上界）。
   const measure = (seat, candidate) => Buffer.byteLength(JSON.stringify({
     view: "seatPage", consultId: result.consultId, seat: seat.agentId, runId: seat.runId,
     runState: seat.runState, formatState: seat.formatState, budgetExpired: seat.budgetExpired,
-    textFinal: true, page: 9999, totalPages: 9999, totalChars: body.length,
+    textFinal: true, page: body.length, totalPages: body.length, totalChars: body.length,
     textSha256: "a".repeat(64), pageText: candidate,
   }), "utf8");
   const receipt = projectConsultReceipt(result, { pageMeasure: measure });
   const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
   assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
-    `元数据最大化回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B；边界=5席×32字id×128字snippet×10问×120字heading）`)
+    `诚实边界回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B；边界=5席×32字id×10问×120字中文标题×在场字段值×无snippet）`);
   assert.ok(!JSON.stringify(receipt).includes("正文不应进回执"), "正文不进回执（body-size 无关）");
+  assert.ok(!JSON.stringify(receipt).includes("视角全文不进回执"), "视角全文不进回执（病态长也被剥离）");
   assert.ok(!("record" in receipt), "组记录副本不进回执（recordPath 指针承载）");
   for (const seat of receipt.seats) {
     assert.equal(seat.chars, body.length);
@@ -759,4 +769,13 @@ test("MRC-G1: pure pager — empty text yields zero pages; envelope-over-cap thr
   const byLine = paginateConsultText(lines, { capBytes: 3 * 3 + 300, measure: naive(300) });
   assert.equal(byLine.pages.join(""), lines, "行切无损");
   assert.ok(byLine.pages.slice(0, -1).every((p) => p.endsWith("\n")), "非末页行边界收尾");
+
+  // sol 验收反例（逐位前缀测度非单调）：JSON.stringify 把落单高位代理转义成
+  // 6 字节 ud-XXX 形式，比完整代理对（4 字节 UTF-8）更大——逐位二分在三个
+  // rocket、cap=6 时误判"装不下"。码点边界搜索修复后：每页恰一个完整 emoji。
+  const jsonMeasure = (candidate) => Buffer.byteLength(JSON.stringify(candidate), "utf8");
+  const threeRocket = "🚀🚀🚀";
+  const fixed = paginateConsultText(threeRocket, { capBytes: 6, measure: jsonMeasure });
+  assert.equal(fixed.pages.length, 3, "cap=6 时每页恰一个完整 emoji（非单调反例修复）");
+  assert.equal(fixed.pages.join(""), threeRocket, "修复后仍无损");
 });

@@ -83,7 +83,9 @@ WAO exposes **23 MCP tools** covering the supervised Lead loop:
 plus `runs_list` recovery. `run_consult` (CLI `wao consult`, a.k.a. the **Agent Union**)
 convenes bounded multi-seat, cross-family consultations: mechanical fan-out, verbatim
 collection, and a council-diff view that places each seat's full original answer side
-by side — advice is recorded, never auto-synthesized; the Lead reads the divergence and
+by side (CLI renders in full; the MCP face returns a capped receipt and pages each
+seat's answer losslessly — decision 0051) — advice is recorded, never auto-synthesized;
+the Lead reads the divergence and
 decides. The playbook catalog is read on demand via MCP resources
 (`wao://playbooks`), not tools. Every state-changing operation calls the same shared
 application service as the CLI fallback, producing identical transcript durable facts.

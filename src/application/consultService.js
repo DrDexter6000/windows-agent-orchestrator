@@ -20,9 +20,10 @@
 //   → 持久写组记录（.wao/runs/consults/<consultId>.json，席位-runId 映射
 //   = 意见-决策回链锚点）。
 //
-// 只读重渲染 rerenderConsultFromRecord({...deps})（M13-r2）：
-//   从组记录回读各席位 transcript 重建同形结果对象（CLI consult show 与 MCP
-//   run_consult 读取模式共用）——零派发（不持有 dispatch 通道）。
+// 只读重渲染 rerenderConsultFromRecord({...deps})（M13-r2；0051 修订）：
+//   从组记录回读各席位 transcript 重建全量结果对象（CLI consult show 全量渲染；
+//   MCP run_consult 读取模式在本内核之上加回执/分页投影层——面合同见决定
+//   0051，内核形状不变）——零派发（不持有 dispatch 通道）。
 //
 // 三条不变式（0039 §2.2，红绿测试钉住于 test/run-lifecycle/consult.test.js）：
 //   ① 零信息损失——attributeReply 输出的 preamble+ordered+unclassified 三块
@@ -721,9 +722,10 @@ export async function loadConsultRecord({ consultId, consultsDir, readFileFn = r
 }
 
 /**
- * 从组记录只读重渲染 council-diff 结果对象（M13-r2：CLI `consult show` 与 MCP
- * `run_consult` 读取模式共用同一实现——同形输出、零漂移；代码自 CLI 适配层
- * 原样上移，CLI 字节面不变）。
+ * 从组记录只读重渲染 council-diff 结果对象（M13-r2；0051 修订：CLI `consult
+ * show` 与 MCP `run_consult` 读取模式共用本内核——但"MCP 面同形输出"合同已废
+ * 止，MCP 面在本内核之上加回执/按席分页投影层（见 server.js 投影与决定 0051）；
+ * 代码自 CLI 适配层原样上移，CLI 字节面不变）。
  *
  * 重渲染语义：经组记录的席位-runId 映射回读各 transcript，重新归组/比对；
  * runState/formatState 按当前 transcript 真值重导出（show 是当下观察）；组
@@ -870,9 +872,11 @@ export async function rerenderConsultFromRecord({
 export const CONSULT_PAGE_CAP_BYTES = 12 * 1024;
 
 /** 机械回执（含外壳元数据）序列化后 UTF-8 字节的文档化帽。成立边界（测试钉
- * MRC-F1）：≤5 席 × ≤32 字席位 id × ≤128 字视角 snippet × ≤10 问 × ≤120 字
- * 问句标题——schema 上限超出此边界的病态输入可破帽（正文体积则完全无关）。 */
-export const CONSULT_RECEIPT_CAP_BYTES = 6 * 1024;
+ * MRC-F1，验收批修订 2026-10-09：中文标题+字段值实测下 6KiB 不可证、视角
+ * snippet 携全文故整体剥离）：≤5 席 × ≤32 字席位 id × ≤10 问 × ≤120 字中文
+ * 标题 × 短字段值、无视角原文（recordPath 取）——schema 上限超界或字段值
+ * 病态长可破帽（已知未收紧）；正文体积完全无关。 */
+export const CONSULT_RECEIPT_CAP_BYTES = 8 * 1024;
 
 /** 席位正文 sha256（hex）——分页版本锚：跨页拼接时调用方比对每页的
  * textSha256，不一致=正文在读取间隙变化，必须从第 1 页重读（不静默混拼）。 */
@@ -880,11 +884,22 @@ export function consultTextSha256(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-/** i 是否为 text 的码点边界（不切开代理对）。i===0 恒为边界。 */
-function isCodePointBoundary(text, i) {
-  if (i <= 0 || i >= text.length) return true;
-  const prev = text.charCodeAt(i - 1);
-  return !(prev >= 0xd800 && prev <= 0xdbff);
+/** text 的全部码点边界位置（升序，含 0 与 text.length；代理对不拆开）。
+ * JSON 序列化测度在码点边界上严格单调（每追加一个完整码点，序列化串至少
+ * 增 1 字节——含转义形式；而落在代理对中间的前缀会把落单高位代理转义成
+ * 6 字节 \udXXX，比完整代理对的 4 字节更大，即 UTF-16 逐位前缀**非单调**，
+ * sol 验收反例：🚀🚀🚀 cap=6 时逐位二分会误判"装不下"）——分页搜索只在
+ * 码点边界上进行，单调性得以成立。 */
+function codePointBoundaries(text) {
+  const bounds = [0];
+  let i = 0;
+  while (i < text.length) {
+    const c = text.charCodeAt(i);
+    i += (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length
+      && text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) ? 2 : 1;
+    bounds.push(i);
+  }
+  return bounds;
 }
 
 /**
@@ -894,54 +909,59 @@ function isCodePointBoundary(text, i) {
  *   完整 seatPage 结果对象 JSON 序列化后的 UTF-8 字节数"——页帽作用于整页响应
  *   （含外壳与转义），不是 JS 字符串长度（12K 个中文字符按字符数算约 36KB，
  *   必截断——会审必改）。
- * - 切页规则（会审定稿）：行边界优先（回退到候选区间内最后一个 "\n" 之后，
- *   保留 CRLF 与行尾换行于页内）；单行超帽时按码点硬切（绝不切开代理对）；
- *   全部原文无损保留——各页 pageText 按序拼接逐字节等于输入文本。
+ * - 切页规则（会审定稿 + 验收批修订）：行边界优先（候选区间内最后一个 "\n"
+ *   之后且不浪费超过候选一半，防"开头一个换行+超长无换行"退化成 1 页 1 字）；
+ *   单行超帽时按码点硬切（绝不切开代理对）；全部原文无损保留——各页 pageText
+ *   按序拼接逐字节等于输入文本。
  * - 返回 { pages: string[], totalChars }；空文本 → pages=[]。
  */
 export function paginateConsultText(text, { capBytes = CONSULT_PAGE_CAP_BYTES, measure }) {
   if (typeof text !== "string") throw new Error("paginateConsultText: text must be a string");
   if (typeof measure !== "function") throw new Error("paginateConsultText: measure(repr) is required");
   if (!Number.isInteger(capBytes) || capBytes <= 0) throw new Error("paginateConsultText: capBytes must be a positive integer");
+  if (text.length === 0) return { pages: [], totalChars: 0 };
+  if (measure("") > capBytes) {
+    throw new Error("paginateConsultText: envelope alone exceeds capBytes — cap misconfigured");
+  }
+  const cpBounds = codePointBoundaries(text);
   const pages = [];
-  let rest = text;
-  while (rest.length > 0) {
-    // 二分找最大可装前缀长度 hi（measure 随前缀单调不减）。
-    let lo = 0; // 空前缀也必须可装（外壳自身超帽=cap 配置错误，如实抛）
-    if (measure("") > capBytes) {
-      throw new Error("paginateConsultText: envelope alone exceeds capBytes — cap misconfigured");
-    }
-    let hi = rest.length;
-    if (measure(rest) <= capBytes) {
-      // 整段装得下：最后一页。
-      pages.push(rest);
+  let offset = 0;
+  while (offset < text.length) {
+    // 本页候选=码点边界二分（测度在码点边界上严格单调）；每个 UTF-16 码元
+    // 序列化后至少 1 字节 ⇒ 可装前缀长度 ≤ capBytes（opus S1 上界收紧）。
+    const idxLimit = Math.min(text.length, offset + capBytes);
+    // lo/hi 为 cpBounds 中的下标：lo 恒可装（measure("")≤cap 且非空页至少要
+    // 一个码点——首个码点装不下会在下面如实抛出）。
+    let lo = cpBounds.findIndex((b) => b > offset) - 1; // 指向 offset 自身边界
+    let hi = cpBounds.length - 1;
+    while (cpBounds[hi] > idxLimit) hi -= 1;
+    if (hi <= lo) hi = lo + 1 <= cpBounds.length - 1 ? lo + 1 : lo;
+    // 整段剩余装得下（未截上界且末边界可装）→ 最后一页。
+    if (hi === cpBounds.length - 1 && measure(text.slice(offset, cpBounds[hi])) <= capBytes) {
+      pages.push(text.slice(offset));
       break;
     }
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
-      if (measure(rest.slice(0, mid)) <= capBytes) lo = mid;
+      if (measure(text.slice(offset, cpBounds[mid])) <= capBytes) lo = mid;
       else hi = mid - 1;
     }
-    if (lo <= 0) {
+    // cpBounds[lo+1] 必存在（剩余非空 ⇒ 后面还有边界）；lo 停在"装得下"的最
+    // 大边界。lo 自身=offset（空页）说明首码点都装不下 → 如实抛。
+    if (cpBounds[lo] <= offset) {
       throw new Error("paginateConsultText: cannot fit a single code point under capBytes");
     }
-    // 行边界优先：回退到 ≤lo 的最后一个换行之后（存在且 >0 才回退）。
-    let take = lo;
-    const nl = rest.lastIndexOf("\n", take - 1);
-    if (nl >= 0) {
-      const lineEnd = nl + 1; // 换行符留在本页页尾
-      if (lineEnd > 0 && lineEnd <= take && measure(rest.slice(0, lineEnd)) <= capBytes) {
+    let take = cpBounds[lo] - offset;
+    // 行边界优先（S2：回退不浪费超过候选一半）。
+    const nl = text.lastIndexOf("\n", offset + take - 1);
+    if (nl >= offset) {
+      const lineEnd = nl + 1 - offset;
+      if (lineEnd >= Math.ceil(take / 2) && measure(text.slice(offset, offset + lineEnd)) <= capBytes) {
         take = lineEnd;
       }
     }
-    // 二分得到的 lo 一定是码点边界（measure 单调 + 代理对拆开会产生非法替换
-    // 字符改变长度——显式校正兜底）。
-    while (!isCodePointBoundary(rest, take)) take -= 1;
-    if (take <= 0) {
-      throw new Error("paginateConsultText: code-point adjustment collapsed to zero");
-    }
-    pages.push(rest.slice(0, take));
-    rest = rest.slice(take);
+    pages.push(text.slice(offset, offset + take));
+    offset += take;
   }
   return { pages, totalChars: text.length };
 }
@@ -953,9 +973,10 @@ export function paginateConsultText(text, { capBytes = CONSULT_PAGE_CAP_BYTES, m
  * 剥离：每席 finalText（正文）与 attribution（正文第二份拷贝——会审补充靶点
  * 事实）、record（组记录副本——席位-runId 回链锚点已由回执 seats 自带
  * runId 承载，持久记录在 recordPath）、每席 backend/provider（bricks.
- * runtimeFacts 已携带，去重）。保留：fieldDiff/fieldValues/bricks（体积小且
- * 是 0039 不变式②标记机制本身）。回执不含任何正文摘录/预览（0039 不变式①：
- * 预览=有选择的截断）。
+ * runtimeFacts 已携带，去重）、每席 perspectiveSnippet（视角**全文**——验收批
+ * 实测 265-607 字/席，是回执帽的主要破帽项；原文在 recordPath）。保留：
+ * fieldDiff/fieldValues/bricks（体积小且是 0039 不变式②标记机制本身）。回执
+ * 不含任何正文摘录/预览（0039 不变式①：预览=有选择的截断）。
  *
  * pageMeasure(seat, candidatePageText) 由调用方注入（与 seatPage 视图同一
  * 信封构造器）——回执里每席的 pages 与后续分页读同一把尺，计数不漂移。
@@ -964,7 +985,7 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
   if (!result || typeof result !== "object") throw new Error("projectConsultReceipt: result object required");
   if (typeof pageMeasure !== "function") throw new Error("projectConsultReceipt: pageMeasure(seat, repr) is required");
   const seats = (result.seats ?? []).map((seat) => {
-    const { finalText, attribution, backend, provider, ...rest } = seat;
+    const { finalText, attribution, backend, provider, perspectiveSnippet, ...rest } = seat;
     const text = typeof finalText === "string" ? finalText : "";
     let pages = 0;
     if (text.length > 0) {

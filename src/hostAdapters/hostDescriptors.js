@@ -30,7 +30,7 @@ function mcpServersShape(entry) {
 
 // zcode 对单个 MCP 工具调用的默认超时是 30000ms（zcode-guide diagnosing-mcp；
 // .mcp.json stdio 条目可选 timeoutMs 字段覆盖）。WAO 等待族全部超过该默认
-// （run_wait 180000..600000、run_await_result ≤270000、run_consult budgetMs
+// （run_wait 180000..600000、run_await_result ≤270000、run_consult waitMs
 // ≤600000）——不带此字段时每个 >30s 的等待调用都会被宿主掐成"假失败"
 // （2026-10-04 跨项目会话实测：run_consult/run_await_result 双双 30s 死亡）。
 // 660000 = 最大阻塞预算 600s + 60s 响应余量。插件通道透传+执行已实证：

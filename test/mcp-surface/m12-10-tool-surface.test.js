@@ -880,7 +880,9 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // 0051（2026-10-09）：run_consult 载荷合同改机械回执+按席分页——inputSchema
 // 增可选 seat/page、outputSchema 重构为 view 判别双视图（去 record/attribution
 // 镜像），描述扩写分页语义；SHA 与 desc 顶均如实翻新（Owner 批准的三工作批）。
-"188d36b21af5c6e91b4c8ddc40f423d77bc8c1b30f8a02c4c71939adb78dfcde";
+// 0051 验收批（同日）：回执再剥离 perspectiveSnippet（视角全文=破帽项），回执
+// 帽 6→8KiB；SHA 再翻新（描述字节未变，desc 顶不动）。
+"d23f0ed18565aed6721b1ebd7f1bd521961df0418bc8f041e3f3762c0329cfe9";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
