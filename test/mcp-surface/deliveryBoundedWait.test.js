@@ -51,13 +51,21 @@ test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、stru
       // TD-215 定稿：schema 增 status 枚举（会审批准的契约最小扩展）——pending 带
       // structuredContent={status:"pending", runId}；ok 字段缺席（.optional 化）。
       // TD-226（2026-10-08）：rejectionReason 为 required-nullable，pending 恒
-      // null（无拒绝在案）——键集含三键。
+      // null（无拒绝在案）。
+      // TD-241 C2b（2026-10-09，Owner 批准小幅重冻）：闭集指引 guidance 数组进
+      // structuredContent——探针实测 claude 模型在成功面只见 structuredContent，
+      // 指引只放 text 对 claude 失明。键集含四键。
       assert.deepEqual(
         Object.keys(res.structuredContent ?? {}).sort(),
-        ["rejectionReason", "runId", "status"],
+        ["guidance", "rejectionReason", "runId", "status"],
       );
       assert.equal(res.structuredContent?.status, "pending");
       assert.equal(res.structuredContent?.rejectionReason, null, "pending 无拒绝在案");
+      assert.ok(Array.isArray(res.structuredContent?.guidance)
+        && res.structuredContent.guidance.length >= 1
+        && res.structuredContent.guidance.includes("do_not_reenter_reentry_reexecutes_verification")
+        && res.structuredContent.guidance.includes("poll_run_delivery_with_waitMs_for_settled_outcome"),
+      "pending 指引必须进 structuredContent（claude 失明修复）");
       assert.match(text, /run_delivery_repackage pending/);
       assert.match(text, /typically continues server-side/);
       assert.match(text, /Do NOT blind-retry/);

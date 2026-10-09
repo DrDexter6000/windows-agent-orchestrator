@@ -681,7 +681,11 @@ const RED_23_WIRE = 75492;
 // 专属文案）为运行时 handler 文案——零 wire、零 schema 变化，不占本顶。无描述
 // 字节变化（FROZEN_23_DESC_CEILING 实测 10442 不动）。按实测重冻；Owner 硬顶
 // 85939 不变，余 569B。
-const FROZEN_23_WIRE_CEILING = 85370;
+// TD-241 C2b 重冻（Lead，2026-10-09，Owner 批准小幅重冻）：run_delivery_repackage
+// 与 run_delivery_reverify 出参 schema 各增可选闭集 guidance 数组（pending 回执
+// 指引进 structuredContent——claude 成功面只读 structuredContent 的探针实证）。
+// 纯 schema 增量 +328 字节，描述字节零变化（M12-16-B 仍绿）。
+const FROZEN_23_WIRE_CEILING = 85698;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -871,7 +875,9 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // 入参 expectedGitHead 的 pattern 由两分支全形正则换成单分支 7..64 短哈希正则
   // （EXPECTED_GIT_HEAD_RE SSOT）——inputSchema 在 stripped 载荷内，SHA 如实翻新；
   // 无描述字节变化（F5 专属文案为运行时文案，不进 tools/list）。
-  "afaf58ee18284bda36f375a4ec75a98dea058be58ba10478cb5aaf643684d806";
+  // TD-241 C2b（2026-10-09）：repackage/reverify 出参 schema 增 guidance 可选闭集
+// 数组（在 stripped 载荷内），SHA 如实翻新；无描述字节变化。
+"8775b1bbc6f3c76910d545dd8645fc41f21ee77408591184fd7f3b5197064547";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -2389,6 +2389,18 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   timeoutMs: z.number().int().min(REVERIFY_TIMEOUT_MS_MIN).max(REVERIFY_TIMEOUT_MS_MAX).optional(),
 }).strict();
 
+// ===== TD-241 C2b：pending 回执的闭集指引（kimi+opus 裁定会审
+// consult_20261009081329035swaqvc；opus 新发现 + Lead 复核）=====
+// pending 回执走**成功面**——"去轮询/勿重入"指引原只放 text，而探针实测
+// claude 模型在成功面只见 structuredContent（text 被宿主丢弃）→ 指引对
+// claude 失明；reverify 工具描述又写 "reentrant — retries converge"，模型
+// 极易直接重调触发重复验证。修法=闭集指引数组进 structuredContent（text
+// 原文保留，两通道同源枚举不漂移）。可选字段：settled 结果缺席。
+const DELIVERY_PENDING_GUIDANCE = Object.freeze([
+  "poll_run_delivery_with_waitMs_for_settled_outcome",
+  "do_not_reenter_reentry_reexecutes_verification",
+]);
+
 const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
   // TD-215：status 枚举（同 REPACKAGE——"pending"=超窗续跑，poll run_delivery）。
   status: z.enum(["ok", "pending"]),
@@ -2400,6 +2412,8 @@ const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
   failureCode: z.enum(REVERIFY_FAILURE_CODES).nullable().optional(),
   requested: z.boolean().optional(),
   outcomeRecorded: z.boolean().optional(),
+  // C2b：pending 时在场（见 DELIVERY_PENDING_GUIDANCE）；settled 缺席。
+  guidance: z.array(z.enum([...DELIVERY_PENDING_GUIDANCE])).optional(),
 }).strict();
 
 const RUN_DELIVERY_REVERIFY_ANNOTATIONS = {
@@ -2450,6 +2464,8 @@ const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
   // TD-226：expected-policy 拒绝的闭集拒绝码（应用层 REPACKAGE_REJECTION_CODES
   // SSOT 的 zod 枚举镜像——数组即权威，绝不手抄第二份清单）；成功/pending 恒 null。
   rejectionReason: z.enum(REPACKAGE_REJECTION_CODES).nullable(),
+  // C2b：pending 时在场（见 DELIVERY_PENDING_GUIDANCE）；settled 缺席。
+  guidance: z.array(z.enum([...DELIVERY_PENDING_GUIDANCE])).optional(),
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
@@ -3148,6 +3164,15 @@ const RUN_ACTIVITY_RECOVERY = z.object({
   status: z.enum([...ACTIVITY_CURSOR_RECOVERY_STATUSES]),
   choices: z.array(z.enum([...ACTIVITY_CURSOR_RECOVERY_CHOICES])),
 }).strict();
+
+// TD-241 C2（kimi+opus 裁定会审 consult_20261009081329035swaqvc；探针层2证据：
+// claude-code 模型在 isError 面只见 text 通道——恢复信息只放 structuredContent
+// 对 claude 实测失明）：cursor_rejected 的错误 text 必须自含恢复要点，且从与
+// 结构化载荷同一 SSOT 常量生成，两通道不得漂移。保留 RUN_ACTIVITY_ERROR_TEXT
+// 前缀（既有消费者按前缀 includes 匹配）。全量=一行：闭集状态+两条静态选择，
+// 无路径/无原始 cursor/无动态文本——与结构化面同等披露纪律。
+const RUN_ACTIVITY_CURSOR_REJECTED_TEXT = `${RUN_ACTIVITY_ERROR_TEXT}: ${ACTIVITY_CURSOR_RECOVERY_STATUSES[0]}`
+  + ` — choices: ${ACTIVITY_CURSOR_RECOVERY_CHOICES.join(" | ")}`;
 
 const RUN_ACTIVITY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -5870,7 +5895,9 @@ export function createWaoMcpServer({
         if (e instanceof CursorRejectedError) {
           return {
             isError: true,
-            content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }],
+            // C2：text 自含恢复要点（同一 SSOT 常量生成），claude 类只读 text 的
+            // 宿主不再失明；前缀不变。
+            content: [{ type: "text", text: RUN_ACTIVITY_CURSOR_REJECTED_TEXT }],
             structuredContent: RUN_ACTIVITY_RECOVERY.parse(buildCursorRecovery()),
           };
         }
@@ -6263,6 +6290,7 @@ export function createWaoMcpServer({
             status: "pending",
             runId,
             rejectionReason: null,
+            guidance: [...DELIVERY_PENDING_GUIDANCE],
           });
           return {
             content: [{
@@ -6367,7 +6395,11 @@ export function createWaoMcpServer({
           authorizedWorkspaceRoot: binding.root,
         }), { runId, op: "run_delivery_reverify" });
         if (result?.__boundedWaitPending) {
-          const pending = RUN_DELIVERY_REVERIFY_OUTPUT.parse({ status: "pending", runId });
+          const pending = RUN_DELIVERY_REVERIFY_OUTPUT.parse({
+            status: "pending",
+            runId,
+            guidance: [...DELIVERY_PENDING_GUIDANCE],
+          });
           return {
             content: [{
               type: "text",

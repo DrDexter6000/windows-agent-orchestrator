@@ -650,6 +650,7 @@ Output:
 | recoveryKind | string | no | enum: disallowed_scope \| backend_failed \| process_missing |
 | created | boolean | no |  |
 | rejectionReason | string\|null | yes | enum: malformed_input \| run_not_found \| workspace_not_authorized \| candidate_ineligible \| candidate_contract_malformed \| worktree_unusable \| inventory_unavailable \| inventory_incomplete \| inventory_empty \| scope_violation \| durable_chain_inconsistent \| concurrent_terminal_ineligible \| liveness_proof_failed |
+| guidance | array<string> | no | enum: poll_run_delivery_with_waitMs_for_settled_outcome \| do_not_reenter_reentry_reexecutes_verification |
 
 ## run_delivery_reverify
 
@@ -679,4 +680,5 @@ Output:
 | failureCode | string\|null | no | enum: command_failed \| command_timeout \| execution_error \| setup_failed \| setup_timeout \| setup_environment_error \| artifact_mutated |
 | requested | boolean | no |  |
 | outcomeRecorded | boolean | no |  |
+| guidance | array<string> | no | enum: poll_run_delivery_with_waitMs_for_settled_outcome \| do_not_reenter_reentry_reexecutes_verification |
 

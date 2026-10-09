@@ -467,6 +467,12 @@ test("MAA-12: a cursor bound to a different run → cursor_rejected recovery (st
       assert.ok(sc, "recovery carries structuredContent (not only the generic error)");
       assert.equal(sc.status, "cursor_rejected", "closed-set recovery fact");
       assert.deepEqual(sc.choices, [...ACTIVITY_CURSOR_RECOVERY_CHOICES], "static recovery choices");
+      // TD-241 C2（2026-10-09 裁定会审）：isError 面 text 必须自含恢复要点（同一
+      // SSOT 常量生成）——探针实测 claude 模型在 isError 面只见 text 通道。
+      const errText = res.content?.find((b) => b.type === "text")?.text ?? "";
+      assert.ok(errText.includes("cursor_rejected")
+        && ACTIVITY_CURSOR_RECOVERY_CHOICES.every((c) => errText.includes(c)),
+        "cursor_rejected 的 text 携带闭集恢复要点（SSOT 同源）");
       // the raw cursor token is NEVER echoed back.
       assert.ok(!dumped.includes(cursorA), "raw cursor never leaks");
       // the recovery payload reveals NO mismatch subtype, run/workspace path, or
