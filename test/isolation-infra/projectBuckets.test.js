@@ -439,3 +439,69 @@ test("D2-②b 三轮 sol①: 抢占原子性——陈旧 claim 双抢占者只�
     assert.equal(results.filter(Boolean).length, 1, `双抢占者恰一个胜出（实测 ${JSON.stringify(results)}）`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 四轮钉（consult_…ew672e：A/sol① 抢占互斥锁 + R2 释放不删新持有者）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 四轮: steal 互斥锁——锁忙时抢占 fail-closed（交错双胜者不可达）", () => {
+  const root = makeRoot("wao-pb-l1-");
+  try {
+    const claimPath = join(root, ".claims", "run_lock");
+    assert.equal(claimRunIdForWrite(root, "run_lock").claimed, true);
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    // 预置 .steal 锁在场且新鲜（=另一写者正在临界区：stat→rm→wx 之中）
+    writeFileSync(`${claimPath}.steal`, String(Date.now()), "utf8");
+    assert.equal(claimRunIdForWrite(root, "run_lock").claimed, false,
+      "锁忙=对方在临界区——抢占 fail-closed（交错双胜者的入口被封死）");
+    // 释放同样让位：锁忙时 release 跳过本次删除（TTL 自愈），不与 stealer 竞争
+    releaseRunIdClaim(root, "run_lock", { nonce: "whatever" });
+    assert.equal(existsSync(claimPath), true, "锁忙时释放不删（交由临界区持有者/TTL）");
+    // 清锁后正常抢占（陈旧 claim 仍可被唯一胜者接管）
+    rmSync(`${claimPath}.steal`, { force: true });
+    assert.equal(claimRunIdForWrite(root, "run_lock").claimed, true, "锁释放后抢占恢复");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 四轮: 释放只删自己的新 claim（nonce 校验在锁内——读删窗口关闭）", () => {
+  const root = makeRoot("wao-pb-l2-");
+  try {
+    const claimPath = join(root, ".claims", "run_rel");
+    const a = claimRunIdForWrite(root, "run_rel");
+    assert.equal(a.claimed, true);
+    // 慢持有者 A（旧 nonce）在 B 抢占后释放：nonce 不匹配（锁内重读）→ 不删。
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    const b = claimRunIdForWrite(root, "run_rel");
+    assert.equal(b.claimed, true, "陈旧被 B 抢占");
+    assert.notEqual(a.nonce, b.nonce);
+    releaseRunIdClaim(root, "run_rel", { nonce: a.nonce });
+    assert.equal(existsSync(claimPath), true, "A 的旧 nonce 删不掉 B 的新 claim（R2 关闭）");
+    releaseRunIdClaim(root, "run_rel", { nonce: b.nonce });
+    assert.equal(existsSync(claimPath), false, "B 自释成功");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 四轮 B: 重建遇并发半写（首读空串→次读正常）不误报损坏", () => {
+  const root = makeRoot("wao-pb-b1-");
+  try {
+    const dirA = join(root, "repo-hw");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w = resolveRunDirForWrite(root, id);
+    // 损坏索引 → 重建；首读返回空串（半写窗），重读返回真记录 → 不入 unreadable。
+    const recPath = join(w.transcriptDir, ".project.json");
+    const real = readFileSync(recPath, "utf8");
+    let reads = 0;
+    const halfWriteIo = { readFileSync: (p, ...rest) => { if (String(p) === recPath && reads++ === 0) return ""; return real; } };
+    const w2 = resolveRunDirForWrite(root, { ...id }, { io: halfWriteIo });
+    assert.equal(w2.bucket, w.bucket, "半写重读后照常确认（不硬错）");
+    // 持续空串（真损坏）→ 仍硬错（三轮 sol② 语义保持）。
+    let reads2 = 0;
+    const brokenIo = { readFileSync: (p, ...rest) => { if (String(p) === recPath && reads2++ >= 0) return ""; return real; } };
+    assert.throws(() => resolveRunDirForWrite(root, { ...id }, { io: brokenIo }),
+      (e) => e.code === "transcript-resolution-conflict" && /unreadable during index rebuild/.test(e.message),
+      "持续半写=损坏仍硬错");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

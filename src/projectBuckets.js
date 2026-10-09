@@ -152,25 +152,29 @@ export function loadBucketIndex(runDir, { io, forceRebuild = false } = {}) {
   const entries = {};
   const unreadableBuckets = [];
   for (const { dir } of listBucketDirs(runDir, i)) {
-    let raw;
-    try {
-      raw = i.readFileSync(join(dir, PROJECT_RECORD_NAME), "utf8");
-    } catch (e) {
-      // ENOENT=无记录文件的保留桶（_sandbox 等）不入索引；**其它读错误
-      //（EACCES 等）=损坏信号**——如实上报（写侧据此硬错，三轮 sol②）。
-      if (e?.code === "ENOENT") continue;
+    // 四轮 B：wx 创建与内容落盘之间的半写窗口（另一新 key 写者并发重建时
+    // 可见空文件）≠损坏——非 ENOENT 读错误与解析失败都走**有界重读+退避**
+    //（与 readProjectRecord 同纪律），重读仍失败才计不可读（三轮 sol②语义）。
+    let rec = null;
+    let unreadable = false;
+    for (let retry = 0; retry < PROJECT_RECORD_RETRIES && rec === null && !unreadable; retry++) {
+      if (retry > 0) i.sleepSync(PROJECT_RECORD_RETRY_BACKOFF_MS);
+      try {
+        const raw = i.readFileSync(join(dir, PROJECT_RECORD_NAME), "utf8");
+        rec = JSON.parse(raw);
+      } catch (e) {
+        if (e?.code === "ENOENT") { rec = false; break; } // 无记录文件=保留桶，不入索引
+        if (retry === PROJECT_RECORD_RETRIES - 1) unreadable = true;
+      }
+    }
+    if (rec === false) continue;
+    if (unreadable || rec === null) {
       unreadableBuckets.push(dir);
       continue;
     }
-    try {
-      const rec = JSON.parse(raw);
-      // 验收批修复：记录给出的 slug 过安全形状（路径成分拒绝）；无效条目
-      // 如实跳过（缓存重建），写侧命中路径仍会核验桶内权威。
-      if (rec && typeof rec.key === "string" && isSafeBucketSlug(rec.slug)) entries[rec.key] = rec.slug;
-    } catch {
-      // 三轮 sol②：记录在场但不可解析=损坏信号——如实上报（写侧据此硬错）。
-      unreadableBuckets.push(dir);
-    }
+    // 验收批修复：记录给出的 slug 过安全形状（路径成分拒绝）；无效条目
+    // 如实跳过（缓存重建），写侧命中路径仍会核验桶内权威。
+    if (rec && typeof rec.key === "string" && isSafeBucketSlug(rec.slug)) entries[rec.key] = rec.slug;
   }
   return { entries, rebuilt: true, unreadableBuckets };
 }
@@ -250,7 +254,12 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
   }
   if (typeof rebuilt.entries[identity.key] === "string") {
     const hit2 = confirmedBucketFor(runDir, identity.key, rebuilt.entries[identity.key], i, { onUnreadable: "throw" });
-    if (hit2 !== null) return { transcriptDir: hit2, bucket: basename(hit2), kind: "project" };
+    if (hit2 !== null) {
+      // 四轮 C：重建找回的条目**回写索引**——否则该 key 每次写都全量扫描
+      // 且每次暴露在半写误读面下。
+      saveBucketIndex(runDir, rebuilt.entries, i);
+      return { transcriptDir: hit2, bucket: basename(hit2), kind: "project" };
+    }
   }
   // 新桶候选链（M2）：`<displayName>-<sha256(key)[0:n]>`，n=8→10→12…64——
   // 加长的是哈希段，形状恒过 FACT_BUCKET_RE（`-[0-9a-f]{8,}$`）；displayName
@@ -280,8 +289,8 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
       }
     }
     if (readProjectRecord(dir, i)?.key === identity.key) {
-      entries[identity.key] = slug;
-      saveBucketIndex(runDir, entries, i);
+      rebuilt.entries[identity.key] = slug; // 四轮 C：保存重建后的权威集（含找回条目）
+      saveBucketIndex(runDir, rebuilt.entries, i);
       return { transcriptDir: dir, bucket: slug, kind: "project" };
     }
     // 真·碰撞（不同 key 同 slug）→ 下一候选（更长哈希；永不覆盖既有记录）。
@@ -296,18 +305,23 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
 export function releaseRunIdClaim(runDir, runId, { io, nonce = null } = {}) {
   const i = defaultIo(io);
   const claimPath = join(runDir, CLAIMS_DIRNAME, runId);
-  try {
-    // 三轮 R2/sol①：只删自己的 claim——nonce 不匹配（含已被抢占/无 nonce 的
-    // 旧形态）不删，防慢持有者误删抢占者的新 claim。nonce 入参缺省=不校验
-    // 直接删（仅测试/清理路径）。
+  // 四轮 R2/sol：读 nonce→rm 的 TOCTOU 由同一把互斥锁关闭（锁忙=stealer
+  // 在临界区——跳过本次删除，TTL 自愈）。nonce 不匹配不删（慢持有者删不掉
+  // 抢占者的新 claim）；nonce 入参缺省=不校验直接删（仅测试/清理路径）。
+  withClaimLock(i, claimPath, () => {
     if (nonce !== null) {
       try {
         const parsed = JSON.parse(i.readFileSync(claimPath, "utf8"));
-        if (parsed?.nonce !== nonce) return;
-      } catch { return; /* 不可读=不删（TTL 自愈） */ }
+        if (parsed?.nonce !== nonce) return true;
+      } catch {
+        return true; // 不可读=不删（TTL 自愈）
+      }
     }
-    i.rmSync?.(claimPath, { force: true });
-  } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
+    try {
+      i.rmSync?.(claimPath, { force: true });
+    } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
+    return true;
+  });
 }
 
 /**
@@ -328,29 +342,62 @@ export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_0
     nonce: randomUUID(),
   });
   i.mkdirSync(claimsDir, { recursive: true });
-  // 三轮 sol①：抢占必须原子——unlink 后走 wx 独占重试，双抢占者只有一个
-  // wx 成功（读 mtime→覆盖写的形态两胜者已被实测推翻）。nonce 标识持有者，
-  // 释放校验持有者（慢持有者不得删掉抢占者的新 claim）。
+  // 四轮 A/sol①：wx 只保证创建瞬间独占——stat→rm→wx 与 读nonce→rm 各自的
+  // TOCTOU 交错（双胜者/删新持有者）已被两席探针实测推翻。终法=**互斥
+  // steal 锁**包住整个临界区（抢占与释放共用 `.claims/<runId>.steal` 的 wx
+  // 锁；锁窗口毫秒级，泄漏由 5s TTL 自清理；锁忙=对方在临界区——抢占方
+  // 返回 false（fail-closed），释放方跳过本次删除（TTL 自愈））。
+  let nonce = randomUUID();
+  try {
+    i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
+    return { claimed: true, nonce };
+  } catch (e) {
+    if (e?.code !== "EEXIST") throw e;
+  }
+  // EEXIST → 抢占评估（带锁）：陈旧（超 stealAfterMs 的一次性 TTL，不续期）
+  // 才 unlink+wx 重试。
+  if (!withClaimLock(i, claimPath, () => {
+    let age;
+    try {
+      age = Date.now() - i.statSync(claimPath).mtimeMs;
+    } catch {
+      age = NaN;
+    }
+    if (!Number.isFinite(age) || age <= stealAfterMs) return false;
+    i.rmSync?.(claimPath, { force: true });
+    i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
+    return true;
+  })) {
+    return { claimed: false, nonce: null };
+  }
+  return { claimed: true, nonce };
+}
+
+/** 互斥 claim 临界区锁（四轮终法）：wx 独占 `.steal` 锁；忙=返回 false 由
+ * 调用方按语义处置；锁自身泄漏由 5s TTL 自清理（窗口毫秒级）。 */
+function withClaimLock(i, claimPath, critical) {
+  const lockPath = `${claimPath}.steal`;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      i.writeFileSync(claimPath, payload(), { encoding: "utf8", flag: "wx" });
-      return { claimed: true, nonce: JSON.parse(i.readFileSync(claimPath, "utf8")).nonce };
+      i.writeFileSync(lockPath, String(Date.now()), { encoding: "utf8", flag: "wx" });
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
-      if (attempt === 1) return { claimed: false, nonce: null };
-      // 复验 F1 兜底：陈旧 claim（写者崩溃且释放未及执行）不永久封锁该
-      // runId——超 stealAfterMs 视为泄漏，unlink 后 wx 重试抢占。claim 一次性
-      // TTL、不续期（与 .owner 心跳的持续刷新语义不同——如实措辞）。
       try {
-        const age = Date.now() - i.statSync(claimPath).mtimeMs;
-        if (!Number.isFinite(age) || age <= stealAfterMs) {
-          return { claimed: false, nonce: null };
+        const lockAge = Date.now() - i.statSync(lockPath).mtimeMs;
+        if (Number.isFinite(lockAge) && lockAge > 5000) {
+          i.rmSync?.(lockPath, { force: true });
+          continue; // 陈旧锁清理后重试一次
         }
-        i.rmSync?.(claimPath, { force: true });
-      } catch { /* stat 失败按活跃处理（fail-closed） */ }
+      } catch { /* stat 失败按忙处理 */ }
+      return false; // 对方在临界区（fail-closed）
+    }
+    try {
+      return critical();
+    } finally {
+      try { i.rmSync?.(lockPath, { force: true }); } catch { /* best-effort */ }
     }
   }
-  return { claimed: false, nonce: null };
+  return false;
 }
 
 /** basename 助手（避免再引 node:path 的第二个具名导入形状）。 */

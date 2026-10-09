@@ -1124,20 +1124,29 @@ export class RunManager {
         if (e?.code !== "transcript-not-found") throw e;
         if (transcriptLegacyFlat === true) {
           resolvedTranscriptPath = transcriptPathFor(dir, finalRunId);
-        } else if (claimRunIdForWrite(dir, finalRunId).claimed) {
+        } else {
+          // 四轮 opus 简化：直接用返回对象（claim 文件回读窗口废除）。
+          const selfClaim = claimRunIdForWrite(dir, finalRunId);
+          if (selfClaim.claimed) {
           claimedSelfRun = true; // 复验 F1：run.started 落盘即释放（见下方 finally）
-          claimNonceSelf = claimRunIdNonceOf(dir, finalRunId); // 三轮 sol①：持有者标识
+          claimNonceSelf = selfClaim.nonce; // 三轮 sol①：持有者标识
           const startIdentity = identifyProjectFromCwd(typeof agent?.cwd === "string" ? agent.cwd : "", productionProjectIo());
           const startWrite = resolveRunDirForWrite(dir, startIdentity);
           selfWrite = { identity: startIdentity, write: startWrite };
           resolvedTranscriptPath = transcriptPathFor(startWrite.transcriptDir, finalRunId);
-        } else {
+          } else {
           // 仲裁失败=并发写者正在建同 runId：按既有档重解析；仍找不到=如实冲突。
           try {
             resolvedTranscriptPath = resolveTranscriptPath(dir, finalRunId, { forAppend: true });
           } catch {
+            let claimAgeNote = "";
+            try {
+              const age = Date.now() - statSync(join(dir, ".claims", finalRunId)).mtimeMs;
+              if (Number.isFinite(age)) claimAgeNote = ` (existing claim age ${Math.round(age / 1000)}s; stale claims self-heal after 600s)`;
+            } catch { /* claim 已消失=纯竞态窗口 */ }
             throw new TranscriptResolutionError("transcript-resolution-conflict",
-              `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check`);
+              `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check${claimAgeNote}`);
+          }
           }
         }
       }
@@ -3593,14 +3602,3 @@ function _auditEvidenceOnFailure(evidence, messages) {
   return { passed, checks };
 }
 
-
-// 三轮 sol①：从 claim 文件回读 nonce（claimRunIdForWrite 返回对象被
-// else-if 条件消费后，释放路径仍需持有者标识——回读自盘上真值）。
-function claimRunIdNonceOf(runDir, runId) {
-  try {
-    const raw = readFileSync(join(runDir, ".claims", runId), "utf8");
-    return JSON.parse(raw)?.nonce ?? null;
-  } catch {
-    return null;
-  }
-}
