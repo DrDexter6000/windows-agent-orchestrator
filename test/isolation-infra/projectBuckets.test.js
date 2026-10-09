@@ -312,7 +312,7 @@ test("D2-②b 验收批竞态: .claims 中心原子仲裁——同 runId 只有�
     assert.equal(claimRunIdForWrite(root, "run_race_1").claimed, true, "首个写者 wx 成功");
     assert.equal(claimRunIdForWrite(root, "run_race_1").claimed, false, "并发第二写者 EEXIST 被拒");
     assert.equal(claimRunIdForWrite(root, "run_race_2").claimed, true, "不同 runId 互不影响");
-    assert.ok(existsSync(join(root, ".claims", "run_race_1")), "claim 标记落中心根");
+    assert.ok(existsSync(join(root, ".claims", "run_race_1.g0")), "claim 代际文件落中心根（wx 即仲裁）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -320,22 +320,29 @@ test("D2-②b 验收批竞态: .claims 中心原子仲裁——同 runId 只有�
 // 复验二轮钉（consult_…tn2juh：F1 生命周期/sol④ 不可读硬错/F3 下划线）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("D2-②b 复验 F1: 陈旧 claim 可抢占（泄漏自愈），新鲜 claim 拒绝", () => {
+test("D2-②b 复验 F1（六轮代际版）: 陈旧代可抢占、释放只标记、双抢占唯一胜者", () => {
   const root = makeRoot("wao-pb-f1-");
   try {
-    const claimPath = join(root, ".claims", "run_stale");
-    const c1 = claimRunIdForWrite(root, "run_stale");
-    assert.equal(c1.claimed, true);
-    assert.ok(c1.nonce, "claim 携带持有者 nonce");
-    assert.equal(claimRunIdForWrite(root, "run_stale").claimed, false, "新鲜 claim 拒绝第二写者");
-    // 三轮 sol①：释放校验持有者——nonce 不匹配不删（慢持有者护不住抢占者）
-    releaseRunIdClaim(root, "run_stale", { nonce: "wrong-nonce" });
-    assert.equal(existsSync(claimPath), true, "nonce 不匹配不删");
+    const claimsDir = join(root, ".claims");
+    const a = claimRunIdForWrite(root, "run_stale");
+    assert.equal(a.claimed, true);
+    assert.ok(a.nonce, "claim 携带持有者 nonce");
+    assert.equal(claimRunIdForWrite(root, "run_stale").claimed, false, "新鲜代拒绝第二写者");
+    // 慢持有者旧 nonce 释放：不标记新代（若已被抢占）
+    const g0 = join(claimsDir, "run_stale.g0");
     const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    assert.equal(claimRunIdForWrite(root, "run_stale").claimed, true, "陈旧 claim 被抢占（泄漏自愈）");
-    releaseRunIdClaim(root, "run_stale");
-    assert.equal(existsSync(claimPath), false, "释放后标记消失");
+    utimesSync(g0, old, old);
+    const b = claimRunIdForWrite(root, "run_stale");
+    assert.equal(b.claimed, true, "陈旧代被抢占（g1）");
+    assert.notEqual(a.nonce, b.nonce);
+    releaseRunIdClaim(root, "run_stale", { nonce: a.nonce });
+    assert.equal(existsSync(join(claimsDir, "run_stale.g1.released")), false, "旧 nonce 不标记新代（R2）");
+    releaseRunIdClaim(root, "run_stale", { nonce: b.nonce });
+    assert.equal(existsSync(join(claimsDir, "run_stale.g1.released")), true, "持有者标记释放（只加标记不删文件）");
+    // 释放后的代=空闲 → 下一个 claim 开新代
+    const c = claimRunIdForWrite(root, "run_stale");
+    assert.equal(c.claimed, true, "已释放代可再仲裁（新代 g2）");
+    assert.ok(existsSync(join(claimsDir, "run_stale.g2")), "代际文件在场（wx 创建即仲裁）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -425,18 +432,16 @@ test("D2-②b 三轮 sol②: 重建遇不可读权威记录 → 写侧硬错（�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("D2-②b 三轮 sol①: 抢占原子性——陈旧 claim 双抢占者只有一个胜出", () => {
+test("D2-②b 三轮 sol①（六轮代际版）: 抢占原子——wx 创建即单胜者", () => {
   const root = makeRoot("wao-pb-a1-");
   try {
-    const claimPath = join(root, ".claims", "run_atomic");
+    const claimsDir = join(root, ".claims");
     assert.equal(claimRunIdForWrite(root, "run_atomic").claimed, true);
-    const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    // 模拟交错：A 先 stat（见陈旧）→ B 完整抢占成功 → A 才走 unlink+wx。
-    // unlink 后 B 的 claim 已不在（B 持有）→ A 的 wx 撞 EEXIST → 唯一胜者 B。
-    const results = [];
-    for (let k = 0; k < 2; k++) results.push(claimRunIdForWrite(root, "run_atomic").claimed);
-    assert.equal(results.filter(Boolean).length, 1, `双抢占者恰一个胜出（实测 ${JSON.stringify(results)}）`);
+    utimesSync(join(claimsDir, "run_atomic.g0"), new Date(Date.now() - 11 * 60_000), new Date(Date.now() - 11 * 60_000));
+    const r1 = claimRunIdForWrite(root, "run_atomic").claimed;
+    const r2 = claimRunIdForWrite(root, "run_atomic").claimed;
+    assert.equal(r1 || r2, true, "至少一个胜者");
+    assert.ok(!(r1 && r2), `连续双抢占恰一胜者（实测 ${r1},${r2}——胜者新代新鲜，后来者 fail-closed）`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -444,42 +449,35 @@ test("D2-②b 三轮 sol①: 抢占原子性——陈旧 claim 双抢占者只�
 // 四轮钉（consult_…ew672e：A/sol① 抢占互斥锁 + R2 释放不删新持有者）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("D2-②b 四轮: steal 互斥锁——锁忙时抢占 fail-closed（交错双胜者不可达）", () => {
+test("D2-②b 六轮: 代际仲裁——wx 创建即单胜者（无锁层=无锁忙泄漏面）", () => {
   const root = makeRoot("wao-pb-l1-");
   try {
-    const claimPath = join(root, ".claims", "run_lock");
+    // 陈旧 g0 + 双写者连续抢占：wx g1 只有一个胜者（创建即仲裁，无 rm/rename）
+    const claimsDir = join(root, ".claims");
     assert.equal(claimRunIdForWrite(root, "run_lock").claimed, true);
-    const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    // 预置 .steal 锁在场且新鲜（=另一写者正在临界区：stat→rm→wx 之中）
-    writeFileSync(`${claimPath}.steal`, String(Date.now()), "utf8");
-    assert.equal(claimRunIdForWrite(root, "run_lock").claimed, false,
-      "锁忙=对方在临界区——抢占 fail-closed（交错双胜者的入口被封死）");
-    // 释放同样让位：锁忙时 release 跳过本次删除（TTL 自愈），不与 stealer 竞争
-    releaseRunIdClaim(root, "run_lock", { nonce: "whatever" });
-    assert.equal(existsSync(claimPath), true, "锁忙时释放不删（交由临界区持有者/TTL）");
-    // 清锁后正常抢占（陈旧 claim 仍可被唯一胜者接管）
-    rmSync(`${claimPath}.steal`, { force: true });
-    assert.equal(claimRunIdForWrite(root, "run_lock").claimed, true, "锁释放后抢占恢复");
+    utimesSync(join(claimsDir, "run_lock.g0"), new Date(Date.now() - 11 * 60_000), new Date(Date.now() - 11 * 60_000));
+    const r1 = claimRunIdForWrite(root, "run_lock").claimed;
+    const r2 = claimRunIdForWrite(root, "run_lock").claimed;
+    assert.equal(r1 || r2, true, "至少一个胜者（陈旧可抢占）");
+    assert.ok(!(r1 && r2), `连续双抢占恰一胜者（实测 ${r1},${r2}）——胜者的新代是新鲜的`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("D2-②b 四轮: 释放只删自己的新 claim（nonce 校验在锁内——读删窗口关闭）", () => {
+test("D2-②b 六轮: 释放只删不进——released 标记后旧代文件在场（ABA 结构性消除）", () => {
   const root = makeRoot("wao-pb-l2-");
   try {
-    const claimPath = join(root, ".claims", "run_rel");
+    const claimsDir = join(root, ".claims");
     const a = claimRunIdForWrite(root, "run_rel");
     assert.equal(a.claimed, true);
-    // 慢持有者 A（旧 nonce）在 B 抢占后释放：nonce 不匹配（锁内重读）→ 不删。
-    const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    const b = claimRunIdForWrite(root, "run_rel");
-    assert.equal(b.claimed, true, "陈旧被 B 抢占");
-    assert.notEqual(a.nonce, b.nonce);
     releaseRunIdClaim(root, "run_rel", { nonce: a.nonce });
-    assert.equal(existsSync(claimPath), true, "A 的旧 nonce 删不掉 B 的新 claim（R2 关闭）");
-    releaseRunIdClaim(root, "run_rel", { nonce: b.nonce });
-    assert.equal(existsSync(claimPath), false, "B 自释成功");
+    assert.equal(existsSync(join(claimsDir, "run_rel.g0")), true, "代文件不删（删除才是 ABA 之源）");
+    assert.equal(existsSync(join(claimsDir, "run_rel.g0.released")), true, "released 标记在场");
+    // 已释放 → 新 claim 开新代
+    const b = claimRunIdForWrite(root, "run_rel");
+    assert.equal(b.claimed, true);
+    assert.ok(existsSync(join(claimsDir, "run_rel.g1")), "新代 g1");
+    // 清理：旧代（g0*）应被 best-effort 清掉（小于最大代）
+    assert.equal(existsSync(join(claimsDir, "run_rel.g0")), false, "旧代已清理（不影响仲裁）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -510,45 +508,20 @@ test("D2-②b 四轮 B: 重建遇并发半写（首读空串→次读正常）�
 // 五轮钉（consult_…g43b9：F1 EPERM 归类/F2 临界区 EEXIST 契约/C 回写）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("D2-②b 五轮 F1: Windows 删除挂起的 EPERM 按锁忙处理（不原始上抛）", () => {
+test("D2-②b 六轮 F1: 代际 wx 的 EPERM/EACCES=忙（不原始上抛；release 永不抛）", () => {
   const root = makeRoot("wao-pb-p1-");
   try {
-    const claimPath = join(root, ".claims", "run_eperm");
-    assert.equal(claimRunIdForWrite(root, "run_eperm").claimed, true);
-    const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    // 注入：wx 建锁时抛 EPERM（模拟删除挂起态）
+    // 注入：g0 代 wx 创建抛 EPERM（Windows 删除挂起态形状）
     const realWrite = writeFileSync;
-    const epermIo = { writeFileSync: (p, data, opts) => { if (String(p).endsWith(".steal") && opts?.flag === "wx") { const e = new Error("operation not permitted"); e.code = "EPERM"; throw e; } return realWrite(p, data, opts); } };
+    const epermIo = { writeFileSync: (p, data, opts) => { if (String(p).endsWith(".g0") && opts?.flag === "wx") { const e = new Error("operation not permitted"); e.code = "EPERM"; throw e; } return realWrite(p, data, opts); } };
     assert.equal(claimRunIdForWrite(root, "run_eperm", { io: epermIo }).claimed, false,
-      "EPERM=锁忙→fail-closed（修前：原始 EPERM 击穿具名冲突路径）");
-    // release 同样不抛（best-effort 兑现）
-    releaseRunIdClaim(root, "run_eperm", { nonce: "any", io: epermIo });
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("D2-②b 五轮 F2: 临界区内 wx 撞 EEXIST（快速路径插入）→ claimed:false 契约", () => {
-  const root = makeRoot("wao-pb-p2-");
-  try {
-    const claimPath = join(root, ".claims", "run_f2c");
-    assert.equal(claimRunIdForWrite(root, "run_f2c").claimed, true);
-    const old = new Date(Date.now() - 11 * 60_000);
-    utimesSync(claimPath, old, old);
-    // 注入：临界区 rm claim 后，另一写者的 claim wx 已先成功——我方 wx 必 EEXIST
-    const realWrite = writeFileSync;
-    const raceIo = {
-      writeFileSync: (p, data, opts) => {
-        if (String(p) === claimPath && opts?.flag === "wx") {
-          // 模拟快速路径赢家已在场：首次（外部 stat 前）成功、临界区内重试撞 EEXIST
-          if (raceIo._inCritical) { const e = new Error("exists"); e.code = "EEXIST"; throw e; }
-        }
-        return realWrite(p, data, opts);
-      },
-      rmSync: (p, opts) => { if (String(p) === claimPath) raceIo._inCritical = true; return rmSync(p, opts); },
-      _inCritical: false,
-    };
-    assert.equal(claimRunIdForWrite(root, "run_f2c", { io: raceIo }).claimed, false,
-      "临界区输家=claimed:false（修前：原始 EEXIST 上抛）");
+      "EPERM=忙→fail-closed（修前：原始 EPERM 击穿具名冲突路径）");
+    // release 全异常吞（EIO/ENOSPC/EMFILE 均不抛——best-effort 兑现）
+    const claimPathDir = join(root, ".claims");
+    for (const code of ["EIO", "ENOSPC", "EMFILE"]) {
+      const badIo = { readdirSync: () => { const e = new Error(code); e.code = code; throw e; } };
+      releaseRunIdClaim(root, "run_eperm", { nonce: "any", io: badIo }); // 不抛即过
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

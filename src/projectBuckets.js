@@ -299,141 +299,122 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
     `bucket slug collision not resolvable after ${candidates.length} hash lengths for key ${identity.key}`);
 }
 
-/** 释放 runId 仲裁标记（best-effort；验收复验 F1：claim 生命周期=仲裁成功→
- * 转录首条事实落盘/失败抛错——落盘后同 runId 写者走既有档分支，claim 即废）。
- */
-export function releaseRunIdClaim(runDir, runId, { io, nonce = null } = {}) {
-  const i = defaultIo(io);
-  const claimPath = join(runDir, CLAIMS_DIRNAME, runId);
-  // 四轮 R2/sol：读 nonce→rm 的 TOCTOU 由同一把互斥锁关闭（锁忙=stealer
-  // 在临界区——跳过本次删除，TTL 自愈）。nonce 不匹配不删（慢持有者删不掉
-  // 抢占者的新 claim）；nonce 入参缺省=不校验直接删（仅测试/清理路径）。
-  // 五轮 opus-a：锁忙时**有界重试**（临界区毫秒级，3×20ms 足以让位）；
-  // 重试仍忙=跳过本次删除（claim 由 TTL 自愈——台账 D 残余在册）。
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) i.sleepSync(PROJECT_RECORD_RETRY_BACKOFF_MS);
-    const ran = withClaimLock(i, claimPath, () => {
-      if (nonce !== null) {
-        try {
-          const parsed = JSON.parse(i.readFileSync(claimPath, "utf8"));
-          if (parsed?.nonce !== nonce) return true;
-        } catch {
-          return true; // 不可读=不删（TTL 自愈）
-        }
-      }
-      try {
-        i.rmSync?.(claimPath, { force: true });
-      } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
-      return true;
-    });
-    if (ran) return;
-  }
-}
-
-/**
- * 新 runId 的中心原子仲裁（并发首建竞态修复，验收会审 sol 必改①/opus TD 案）：
- * wx 独占创建 `runs/.claims/<runId>`——两写者并发首个新 runId 只有一个成功；
- * 失败方必须按"既有档"重解析（对方此刻正在写），仍找不到=如实冲突。
- * 覆盖面=新代码写者互斥；旧代码写者不受约束（切换窗纪律+孪生硬错兜底）。
- */
-export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_000 } = {}) {
-  const i = defaultIo(io);
-  if (!runDir || typeof runDir !== "string") throw new Error("claimRunIdForWrite: runDir required");
-  if (!runId || typeof runId !== "string") throw new Error("claimRunIdForWrite: runId required");
-  const claimsDir = join(runDir, CLAIMS_DIRNAME);
-  const claimPath = join(claimsDir, runId);
-  i.mkdirSync(claimsDir, { recursive: true });
-  // 四轮 A/sol①：wx 只保证创建瞬间独占——stat→rm→wx 与 读nonce→rm 各自的
-  // TOCTOU 交错（双胜者/删新持有者）已被两席探针实测推翻。终法=**互斥
-  // steal 锁**包住整个临界区（抢占与释放共用 `.claims/<runId>.steal` 的 wx
-  // 锁；锁窗口毫秒级，泄漏由 5s TTL 自清理；锁忙=对方在临界区——抢占方
-  // 返回 false（fail-closed），释放方跳过本次删除（TTL 自愈））。
-  let nonce = randomUUID();
-  try {
-    i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
-    return { claimed: true, nonce };
-  } catch (e) {
-    if (e?.code !== "EEXIST") throw e;
-  }
-  // EEXIST → 抢占评估（带锁）：陈旧（超 stealAfterMs 的一次性 TTL，不续期）
-  // 才 unlink+wx 重试。
-  if (!withClaimLock(i, claimPath, () => {
-    let age;
-    try {
-      age = Date.now() - i.statSync(claimPath).mtimeMs;
-    } catch {
-      age = NaN;
-    }
-    if (!Number.isFinite(age) || age <= stealAfterMs) return false;
-    i.rmSync?.(claimPath, { force: true });
-    try {
-      i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
-    } catch (e) {
-      // 五轮 F2：rm 之后无锁快速路径可插入先成功——输家按契约返回 false，
-      // 绝不把原始 EEXIST/EPERM 抛给调用方。
-      if (LOCK_BUSY_CODES.has(e?.code)) return false;
-      throw e;
-    }
-    return true;
-  })) {
-    return { claimed: false, nonce: null };
-  }
-  return { claimed: true, nonce };
-}
-
-/**
- * 互斥 claim 临界区锁（五轮终法，取代四轮版）。四轮版的三个实测缺口：
- *  ① Windows 删除挂起态下 wx 得 EPERM/EACCES（非 EEXIST）——原样上抛击穿
- *     dispatch 的"重解析→具名冲突"路径，release 抛错更会在首条事实落盘后
- *     中止派发（孤儿档风险）；
- *  ② 临界区内 rm 陈旧 claim 后，无锁快速路径可插入先 wx 成功——输家收到
- *     原始 EEXIST 而非约定的 claimed:false；
- *  ③ 陈旧锁回收 stat→rm 自身 TOCTOU（两回收者先后得锁；>TTL 卡顿持有者的
- *     finally 会删掉接管者的锁）。
- * 终法：忙=闭集 {EEXIST,EPERM,EACCES,EBUSY}（不抛）；陈旧回收用 **rename
- * 墓碑**（原子——rename 到唯一墓碑名只有一个胜者，败者 ENOENT）；锁载荷带
- * 持有者 token，finally 只删自己的锁（token 不匹配=已被回收接管，不删）。
- * 锁 TTL 30s（临界区毫秒级；卡顿持有者视为已死由回收接管）。
- */
-const CLAIM_LOCK_TTL_MS = 30_000;
-const LOCK_BUSY_CODES = new Set(["EEXIST", "EPERM", "EACCES", "EBUSY"]);
-
-function withClaimLock(i, claimPath, critical) {
-  const lockPath = `${claimPath}.steal`;
-  const token = randomUUID();
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      i.writeFileSync(lockPath, JSON.stringify({ token, at: new Date().toISOString() }), { encoding: "utf8", flag: "wx" });
-    } catch (e) {
-      if (!LOCK_BUSY_CODES.has(e?.code)) throw e;
-      // 忙 → 陈旧评估：超 TTL 用 rename 墓碑原子回收（单胜者；败者 ENOENT
-      // 落入下方 stat/ENOENT 处理）。
-      try {
-        const age = Date.now() - i.statSync(lockPath).mtimeMs;
-        if (Number.isFinite(age) && age > CLAIM_LOCK_TTL_MS) {
-          i.renameSync?.(lockPath, `${lockPath}.dead-${token}`);
-          continue; // 回收成功 → 重试 wx 一次
-        }
-      } catch { /* stat/rename 失败（含墓碑败者 ENOENT）→ 按忙 */ }
-      return false; // 对方在临界区（fail-closed）
-    }
-    try {
-      return critical();
-    } finally {
-      // 只删自己的锁：token 不匹配=已被陈旧回收接管（新持有者在临界区）。
-      try {
-        const raw = i.readFileSync(lockPath, "utf8");
-        if (JSON.parse(raw)?.token === token) i.rmSync?.(lockPath, { force: true });
-      } catch { /* 锁不可读/已不在：best-effort（TTL 兜底） */ }
-    }
-  }
-  return false;
-}
-
 /** basename 助手（避免再引 node:path 的第二个具名导入形状）。 */
 function basename(p) {
   const parts = String(p).replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || p;
+}
+
+export const CLAIM_STALE_MS = 10 * 60_000;
+
+function listClaimGenerations(i, claimsDir, runId) {
+  const prefix = `${runId}.g`;
+  const gens = [];
+  try {
+    for (const name of i.readdirSync(claimsDir)) {
+      if (!name.startsWith(prefix)) continue;
+      const tail = name.slice(prefix.length);
+      const m = tail.match(/^(\d+)(\.released)?$/);
+      if (m) gens.push({ gen: Number(m[1]), released: Boolean(m[2]), name });
+    }
+  } catch { /* 目录不可读=无代际（按首建处理） */ }
+  return gens;
+}
+
+function tryClaimGeneration(i, claimsDir, runId, gen) {
+  const nonce = randomUUID();
+  try {
+    const payload = JSON.stringify({
+      pid: typeof process !== "undefined" ? process.pid : null,
+      claimedAt: new Date().toISOString(),
+      nonce,
+    });
+    i.writeFileSync(join(claimsDir, `${runId}.g${gen}`), payload, { encoding: "utf8", flag: "wx" });
+    return { ok: true, nonce };
+  } catch (e) {
+    // 六轮 F1 延伸：Windows 删除挂起/权限态下 wx 可能得 EPERM/EACCES——
+    // 全部按"忙"处理（claimed:false），绝不把原始错误抛给调用方；真实权限
+    // 问题会被误报为并发冲突——文案已注明（TD-245 在册取舍）。
+    if (e?.code === "EEXIST" || e?.code === "EPERM" || e?.code === "EACCES" || e?.code === "EBUSY") {
+      return { ok: false, nonce: null };
+    }
+    throw e;
+  }
+}
+
+export function claimRunIdForWrite(runDir, runId, { io, staleAfterMs = CLAIM_STALE_MS } = {}) {
+  const i = defaultIo(io);
+  if (!runDir || typeof runDir !== "string") throw new Error("claimRunIdForWrite: runDir required");
+  if (!runId || typeof runId !== "string") throw new Error("claimRunIdForWrite: runId required");
+  const claimsDir = join(runDir, CLAIMS_DIRNAME);
+  i.mkdirSync(claimsDir, { recursive: true });
+
+  const byGen = new Map();
+  let maxGen = -1;
+  for (const g of listClaimGenerations(i, claimsDir, runId)) {
+    if (!byGen.has(g.gen)) byGen.set(g.gen, { released: false });
+    if (g.released) byGen.get(g.gen).released = true;
+    maxGen = Math.max(maxGen, g.gen);
+  }
+
+  // 首建（无任何代际）。
+  if (maxGen < 0) {
+    const r = tryClaimGeneration(i, claimsDir, runId, 0);
+    if (r.ok) return { claimed: true, nonce: r.nonce };
+    // 首建 wx 失败=并发首建者已建 g0 → 按既有档路径由调用方重解析。
+    return { claimed: false, nonce: null };
+  }
+
+  // 抢占评估：最大代已 released → 直接下一代；未 released → 按 mtime 陈旧
+  // （一次性 TTL，不续期——与 .owner 心跳的持续刷新语义不同）才下一代。
+  const maxPath = join(claimsDir, `${runId}.g${maxGen}`);
+  const top = byGen.get(maxGen);
+  let free = top.released;
+  if (!free) {
+    try {
+      const age = Date.now() - i.statSync(maxPath).mtimeMs;
+      if (Number.isFinite(age) && age > staleAfterMs) free = true;
+    } catch { /* stat 失败按持有中（fail-closed） */ }
+  }
+  if (!free) return { claimed: false, nonce: null };
+
+  const attempt = tryClaimGeneration(i, claimsDir, runId, maxGen + 1);
+  if (attempt.ok) {
+    // 清理旧代（< 新最大代；不影响仲裁，best-effort）。
+    for (const g of listClaimGenerations(i, claimsDir, runId)) {
+      if (g.gen < maxGen + 1) {
+        try { i.rmSync?.(join(claimsDir, g.name), { force: true }); } catch { /* best-effort */ }
+      }
+    }
+    return { claimed: true, nonce: attempt.nonce };
+  }
+  // EEXIST=并发写者已建同代（wx 单胜者）→ fail-closed。
+  return { claimed: false, nonce: null };
+}
+
+/**
+ * 释放（六轮终法）：持有者对**当前最大代**追加 `.released` 标记——绝不删除
+ * 代文件（删除才是 ABA 之源）。nonce 匹配才标记（慢持有者不越权）；整体
+ * best-effort（任何异常吞掉——首条事实落盘后的释放绝不中止派发）。
+ */
+export function releaseRunIdClaim(runDir, runId, { io, nonce = null } = {}) {
+  try {
+    const i = defaultIo(io);
+    const claimsDir = join(runDir, CLAIMS_DIRNAME);
+    const gens = listClaimGenerations(i, claimsDir, runId);
+    if (gens.length === 0) return;
+    let maxGen = -1;
+    for (const g of gens) maxGen = Math.max(maxGen, g.gen);
+    if (nonce !== null) {
+      try {
+        const parsed = JSON.parse(i.readFileSync(join(claimsDir, `${runId}.g${maxGen}`), "utf8"));
+        if (parsed?.nonce !== nonce) return; // 不是自己的代（已被抢占）——不标记
+      } catch { return; /* 不可读=不标记（TTL 自愈） */ }
+    }
+    try {
+      i.writeFileSync(join(claimsDir, `${runId}.g${maxGen}.released`), new Date().toISOString(), { encoding: "utf8", flag: "wx" });
+    } catch { /* 已标记/忙=已释放语义（幂等） */ }
+  } catch { /* 整体 best-effort：残留 claim 只影响该 runId 的重试提示 */ }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
