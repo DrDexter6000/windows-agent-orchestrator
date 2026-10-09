@@ -193,7 +193,7 @@ test("TD-190 D0: transcriptPathFor 形状钉（与既有惯用法字节兼容）
 // ─────────────────────────────────────────────────────────────────────────────
 const TRANSCRIPT_PATH_FOR_RATCHET = new Map(Object.entries({
   "src/transcript.js": 1, // 唯一入口定义自身
-  "src/projectBuckets.js": 4, // 读侧解析权威（链内平铺层/孪生观测的合法构造）
+  "src/projectBuckets.js": 5, // 读侧解析权威（链内平铺层/孪生观测/降级快命中的合法构造——验收批统一规则后）
   "src/application/runDispatch.js": 1, // 写侧：桶内纯形状构造（decide-once 后）
   "src/application/runContinue.js": 1, // 写侧：continuation 子转录桶内构造
   "src/backgroundRunner.js": 3, // 旧平铺合法分支×2（fail-closed ternary）+runner 定位助手 O(1) 直取

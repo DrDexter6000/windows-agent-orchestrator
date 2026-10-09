@@ -48,7 +48,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 - **adapters**（所有外部面/入口）：`src/mcp/**`、`src/commands/**`、`src/cli.js`、`src/ownerDashboardServer.js`（第三个网络面：loopback HTTP 观察边界）、`src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js`。
 - **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared/core 成员例外清单内者。
-- **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
+- **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（含 D2-②b 起的转录分桶路径权威 `src/projectBuckets.js`——新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺只读兼容，定位一律经其三级解析链；与 transcript.js 同层=路径权威对）（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
 - **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/projectIdentity.js`（TD-190 D1 项目身份规范化纯函数：cwd 规范化/稳定键/桶 slug 派生）、`src/waoCliPath.js`、`src/version.js`（CLI/MCP 版本常量，读 package.json 单一来源，决定 0038）+ `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
 - `src/owner-dashboard/**` 是浏览器静态资产，不参与 Node import 图。

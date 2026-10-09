@@ -91,7 +91,7 @@ Scorecard defaults to `warn`; `--scorecard-mode hard` only when missing evidence
 
 ## State and Read On Demand
 
-Run truth lives in `runs/<runId>.jsonl`; project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. On demand: architecture/event contracts `docs/02-architecture.md`; roadmap `docs/roadmap.md`; operations `docs/usage.md` + `npm run cli -- help`; roles `docs/team-roles.md`; diagnosis `docs/troubleshooting.md`; CLI/tool reference `docs/surface/`（生成层——surface 变更后 `npm run gen:surface` 再生成，不手改）.
+Run truth lives in `runs/<runId>.jsonl` (+`projects/*/`); project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. On demand: architecture/event contracts `docs/02-architecture.md`; roadmap `docs/roadmap.md`; operations `docs/usage.md` + `npm run cli -- help`; roles `docs/team-roles.md`; diagnosis `docs/troubleshooting.md`; CLI/tool reference `docs/surface/`（生成层——surface 变更后 `npm run gen:surface` 再生成，不手改）.
 
 At the end of each batch report one line:
 `mainline: <before> -> <after>; next: <shortest next step>`

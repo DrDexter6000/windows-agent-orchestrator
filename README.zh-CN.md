@@ -31,7 +31,7 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   Kimi 桌面 web 通道、Codex CLI、DeepSeek over ACP。参考机队的全部 8 个席位都运行在
   原厂 harness 上；共支持 8 个 backend 适配器——逐轴事实见生成的
   [能力矩阵](docs/surface/certification.md)。
-- **Transcript 即事实来源**——每个 run 都可以从 `runs/<runId>.jsonl` 完整重建；
+- **Transcript 即事实来源**——每个 run 都可以从其转录完整重建（新档在 `runs/projects/*/<runId>.jsonl`，旧档平铺 `runs/<runId>.jsonl`）；
   交付审查是有界且脱敏的投影，永远不是裸 diff。
 - **监测，不监督**——WAO 观察、封装、呈现证据；语义裁定（接受/拒绝/返工）永远归 Lead。
 - **Windows 原生，体积极小**——纯 Node ESM；仅两个直接生产依赖

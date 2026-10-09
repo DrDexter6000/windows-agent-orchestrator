@@ -116,7 +116,17 @@ export async function stopRun(input) {
 
   // Resolve runDir
   const resolvedRunDir = resolveRunDir(runDir);
-  const transcriptPath = resolveTranscriptPath(resolvedRunDir, runId, { forAppend: true });
+  // 验收批 S2：跨层未命中映射回既有 not-found 拒绝（同 catch 内 ENOENT 语义）；
+  // 孪生冲突等损坏形态如实上抛。
+  let transcriptPath;
+  try {
+    transcriptPath = resolveTranscriptPath(resolvedRunDir, runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      throw new Error(`cannot read transcript for run ${runId}: transcript missing in any layer`);
+    }
+    throw e;
+  }
 
   // Read transcript
   let events;

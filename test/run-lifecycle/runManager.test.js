@@ -2,9 +2,10 @@ import { mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { rmSync, readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { listTranscriptsDeep, resolveTranscriptPath } from "../../src/projectBuckets.js";
+import { identifyProjectFromCwd } from "../../src/projectIdentity.js";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, basename} from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Run, RunManager, gracefulShutdown } from "../../src/runManager.js";
@@ -74,6 +75,8 @@ function createManager(dir, fetchImpl) {
   // readRegistry mock：返回一个固定 agent
   const readRegistry = async () => ({
     getAgent(id, overrides = {}) {
+      // 验收批 M1 附注：生产 registry 的 getAgent 会过滤 undefined 覆盖——
+      // mock 对齐（曾把 cwd 覆盖成 undefined，制造"agent.cwd 神秘缺失"假象）。
       return {
         id,
         backend: "opencode-serve",
@@ -81,7 +84,7 @@ function createManager(dir, fetchImpl) {
         agent: "build",
         cwd: "D:/test",
         model: { providerID: "p", id: "m" },
-        ...overrides,
+        ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)),
       };
     },
     listAgents() { return []; },
@@ -3019,3 +3022,46 @@ test("TD-150-T7: klwc9 真实案卷转录回放 ⇒ 诊断投影区分性事实 
   assert.equal(lastState.reason, "delivery_failed");
 });
 // test/runManager.test.js
+// 验收批 M1（consult_…tzta）：自决新桶的 run.started 归属事实必须与**最终写位**
+// 同源——冻结索引里的 slug ≠ 现行推导 slug 时，事实 bucket === 转录实际目录名。
+test("D2-②b M1: 前台自决桶 → run.started 归属事实与转录实际位置一致", async () => {
+  const dir = await makeTempDir();
+  try {
+    // 注：夹具在 os.tmpdir() 下——生产 R5 规则把 tmpdir 前缀 cwd 判 scratch
+    //（by design）。本钉验证 M1 核心=事实与最终写位同源；project-kind 的
+    // "冻结 slug≠现行推导"分叉留在 projectBuckets.test.js 单元层（同 key 复用
+    // 旧桶+碰撞加长两钉已覆盖）。
+    const backend = {
+      async spawn() {
+        return {
+          backend: "fake",
+          backendSessionId: "ses_m1",
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "ok" }] };
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "config/agents.json", runDir: join(dir, "runs"), pollInterval: 10, waitTimeout: 2000, timeout: 2000, retries: 0 },
+      readRegistry: async () => ({
+        getAgent: (id, overrides = {}) => ({ id, backend: "fake", cwd: dir, ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)) }),
+        listAgents: () => [],
+      }),
+      backendFor: () => backend,
+    });
+    const run = await manager.start("w", { prompt: "go", runId: "run_m1_fact" });
+    try { await run.waitForCompletion({ pollInterval: 5 }); } catch { /* tolerate */ }
+    const raw = await import("node:fs/promises").then((m) => m.readFile(run.transcript.filePath, "utf8"));
+    const started = raw.trim().split("\n").map((l) => JSON.parse(l)).find((e) => e.type === "run.started");
+    assert.ok(started, "run.started 在档");
+    assert.equal(started.project.kind, "scratch", "tmpdir cwd → scratch 事实（生产 R5）");
+    assert.equal(started.project.key, "_scratch");
+    assert.equal(basename(dirname(run.transcript.filePath)), "_scratch", "转录实际位置=保留桶");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

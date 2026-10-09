@@ -713,7 +713,7 @@ category=no_effect ↔ code=completed_empty）；交付类 + completed_empty 的
 ```powershell
 npm run cli -- tail <runId> --limit 50
 # 或直接
-Get-Content runs\<runId>.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+Get-Content (wao 解析链定位到的转录路径：D2-②b 起新 run 在 runs/projects/*/<runId>.jsonl，旧档 runs/<runId>.jsonl——见 §转录与事件流权威段) | ForEach-Object { $_ | ConvertFrom-Json }
 ```
 
 ---

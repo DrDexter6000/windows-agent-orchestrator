@@ -77,7 +77,7 @@ serve 后台进程不一定。
 ### 诊断套路（worker 卡 submitted 时）
 
 ```
-1. 查 transcript: runs/<runId>.jsonl
+1. 查 transcript: 经解析链定位（见 usage 转录权威段）
    - 看最后状态：submitted（卡住）/ running（正常）/ timed_out
    - 看 backendSessionId
 
@@ -259,7 +259,7 @@ serve 后台进程不一定。
   - `legacy_event_shape` — 快照含 JSON 合法但不可用的历史条目（null / 原始值 / 数组），或快照不是数组
   - `snapshot_unavailable` — 其他安全的非解析类失败（如残留投影派生失败）
 - **根因**：transcript 文件损坏或被截断写入（进程被杀、磁盘满、跨进程并发写同一 jsonl）
-- **修复**：检查 `runs/<runId>.jsonl` 完整性；`transcript_parse_failed` 多为写入中断，`legacy_event_shape` 多为旧格式历史数据。控制面**绝不泄漏**错误 message/path/command/credential——字段只有闭集码，成功路径（observed）为 `null`
+- **修复**：检查转录完整性（经解析链定位）；`transcript_parse_failed` 多为写入中断，`legacy_event_shape` 多为旧格式历史数据。控制面**绝不泄漏**错误 message/path/command/credential——字段只有闭集码，成功路径（observed）为 `null`
 - **注意**：unexpected 内部异常仍是固定 opaque 错误（`run_await_result failed`），不会变成 success 形状
 
 ---
@@ -273,7 +273,7 @@ worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktre
 - **非 delivery run**：同样可用本手工配方（实证两次：scbs8j / qjg202 两次 workdir_escape 死亡均以此救回）。§快速索引表"workdir_escape 无 salvage 面"说的是**控制面工具**（不 repackage/review/decide）——手工抢救在控制面之外，两者不矛盾。
 
 ```bash
-# 1. 定位 worktree（.wao-worktrees/<runId>；或读 runs/<runId>.jsonl 里 delivery 事件的 worktreePath）
+# 1. 定位 worktree（.wao-worktrees/<runId>；或读转录 delivery 事件的 worktreePath（经链定位）
 # 2. 导出补丁（含 untracked：先 add -N 再 diff）
 git -C <worktreeRoot> add -A -N
 git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
@@ -350,7 +350,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   {"runId":"run_xxx","completed":false,"failed":true,"timedOut":false,"error":"provider error [401]: 身份验证失败"}
   ```
   主控现在能看到 runId（定位 run）+ error（决定是否接手）。`run`/`spawn --wait`/并行 wait 三个路径都已接入。
-- **主控接手决策**：收到 `failed:true` 后，主控可：读 transcript（`runs/<runId>.jsonl`）看详细证据 → 判断失败原因（可恢复/不可恢复）→ 决定重试、换 worker、或自己接手
+- **主控接手决策**：收到 `failed:true` 后，主控可：读转录（经解析链定位）看详细证据 → 判断失败原因（可恢复/不可恢复）→ 决定重试、换 worker、或自己接手
 
 ### 6.5 snapshot-stable 伪完成（codex 实测暴露，已修复）
 

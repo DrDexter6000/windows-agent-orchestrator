@@ -27,7 +27,7 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
-import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath } from "../projectBuckets.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, TranscriptResolutionError } from "../projectBuckets.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
@@ -843,20 +843,38 @@ export async function dispatchRun({
   // "旧父进程配新 runner"孤儿形态，规格 §6.11-1）。
   const ownershipIdentity = identifyProjectFromCwd(ownershipCwd ?? cwd, productionProjectIo());
   // runId 跨层唯一性（M9-2A-03 合同保持）：已有转录（旧平铺或既有桶）→ 写
-  // 原位（pending 终态拒绝等既有语义在该档上照常仲裁，不制造孪生）；全新
-  // runId → 决定新桶（decide-once）并传 --transcript-dir。孪生冲突等具名
-  // 错误如实上抛（不择一、不静默）。
+  // 原位（pending 终态拒绝等既有语义在该档上照常仲裁，不制造孪生）——复用
+  // 分支同样传 --transcript-dir 指向既有档目录（验收批 S1：防 runner
+  // legacyFlat 兜底在别层再造孪生）；全新 runId → 中心 .claims 原子仲裁
+  // （并发首建竞态修复）→ 决定新桶。孪生冲突等具名错误如实上抛。
   let writeTarget = null;
   let transcriptPath;
   try {
     transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
+    runnerArgs.push("--transcript-dir", dirname(transcriptPath));
   } catch (e) {
-    if (e?.code === "transcript-not-found") {
+    if (e?.code !== "transcript-not-found") throw e;
+    if (!claimRunIdForWrite(resolvedRunDir, finalRunId)) {
+      // 并发写者正在建同 runId：按既有档重解析一次；仍找不到=如实冲突。
+      try {
+        transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
+        runnerArgs.push("--transcript-dir", dirname(transcriptPath));
+      } catch {
+        throw new TranscriptResolutionError("transcript-resolution-conflict",
+          `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check`);
+      }
+    } else {
       writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);
       transcriptPath = transcriptPathFor(writeTarget.transcriptDir, finalRunId);
       runnerArgs.push("--transcript-dir", writeTarget.transcriptDir);
-    } else {
-      throw e;
+    }
+  }
+  // 验收批必改⑥：--transcript-dir 追加后对**最终完整 argv** 复检长度门
+  //（首个门在转录写入之前，只约束当时已在场的参数）。
+  {
+    const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+    if (finalArgvLen > ARGV_MAX_TOTAL) {
+      throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
     }
   }
 

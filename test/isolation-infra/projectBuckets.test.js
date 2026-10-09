@@ -19,10 +19,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveRunDirForWrite, resolveTranscriptPath, listTranscriptsDeep, findTranscriptTwin,
-  projectFactForWrite, readFirstProjectFact, loadBucketIndex,
+  projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite,
   TranscriptResolutionError, TRANSCRIPT_SCAN_BUCKET_LIMIT,
 } from "../../src/projectBuckets.js";
-import { identifyProjectFromCwd } from "../../src/projectIdentity.js";
+import { identifyProjectFromCwd, identityOfFirstEvent } from "../../src/projectIdentity.js";
 
 // 圈养身份 io：realpath 恒等 + 虚构 tmpdir（R5：tmpdir 前缀才判 scratch——
 // 生产 io 下 os.tmpdir() 内一切都是 scratch，本套件的 mkdtemp 根会全数落
@@ -54,24 +54,45 @@ test("D2-②b 写侧: 同 key 先写者胜（冻结桶名，永不按新规则�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("D2-②b 写侧: 碰撞（同 slug 异 key）→ 扩长后缀不覆盖既有记录", () => {
+test("D2-②b 写侧: 碰撞（同 slug 异 key）→ 加长哈希新桶；扩长形状过事实校验器（往返）", () => {
   const root = makeRoot("wao-pb-w2-");
   try {
     const dirA = join(root, "same-name");
     mkdirSync(dirA, { recursive: true });
     const wA = resolveRunDirForWrite(root, identifyProjectFromCwd(dirA, IO));
-    // 伪造哈希碰撞：手工创建与 wA 同名的第二桶但异 key 记录，再重建索引指向它
+    // 伪造哈希碰撞：把既有桶记录篡改为异 key——resolveRunDirForWrite 必须
+    // 加长哈希另建（8→10 hex），且新 slug 恒过 identityOfFirstEvent 校验器。
     const slug = wA.bucket;
     const collisionDir = join(root, "projects", slug);
-    // 直接篡改既有桶记录为异 key —— resolveRunDirForWrite 必须扩长而非覆盖
     const recordPath = join(collisionDir, ".project.json");
     const rec = JSON.parse(readFileSync(recordPath, "utf8"));
     writeFileSync(recordPath, JSON.stringify({ ...rec, key: "D:\\other\\key" }, null, 2), "utf8");
     const w2 = resolveRunDirForWrite(root, identifyProjectFromCwd(dirA, IO));
-    assert.notEqual(w2.bucket, slug, "异 key 记录 → 扩长新 slug");
-    assert.ok(w2.bucket.startsWith(slug + "-"), `扩长形态 ${slug}-<n>（实测 ${w2.bucket}）`);
+    assert.notEqual(w2.bucket, slug, "异 key 记录 → 加长哈希新 slug");
+    assert.match(w2.bucket, /-[0-9a-f]{10,}$/, `加长哈希段（实测 ${w2.bucket}）——不是 -2/-x 数字后缀`);
     const recAfter = JSON.parse(readFileSync(recordPath, "utf8"));
     assert.equal(recAfter.key, "D:\\other\\key", "既有记录不被覆盖（老桶永不改名）");
+    // 验收批 M2 往返钉：扩长桶名的事实经 identityOfFirstEvent 必须零 factError。
+    const fact = projectFactForWrite(identifyProjectFromCwd(dirA, IO), w2);
+    const { factError, identity } = identityOfFirstEvent({ cwd: dirA, project: fact }, IO);
+    assert.equal(factError, null, `扩长 slug 过事实校验器（bucket=${w2.bucket}）`);
+    assert.equal(identity.kind, "project");
+    assert.equal(identity.bucket, w2.bucket);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 写侧: displayName 首段为 Windows 保留名 → 0- 前缀破首段（三校验器同过）", () => {
+  const root = makeRoot("wao-pb-w2b-");
+  try {
+    const dirA = join(root, "aux-tools");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    assert.equal(id.kind, "project", "测试前提：普通目录是项目身份");
+    const w = resolveRunDirForWrite(root, id);
+    assert.ok(w.bucket.startsWith("0-aux-tools-"), `0- 前缀破保留首段（实测 ${w.bucket}）`);
+    const fact = projectFactForWrite(id, w);
+    assert.equal(identityOfFirstEvent({ cwd: dirA, project: fact }, IO).factError, null,
+      "0- 前缀桶名过事实校验器（aux- 直形在 HEAD 段会被保留名防御拒）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -189,5 +210,104 @@ test("D2-②b 枚举: listTranscriptsDeep 两层 + .index.json 非桶 + readFirs
     write(join(w.transcriptDir, "run_fact.jsonl"), JSON.stringify({ type: "run.started", project: { kind: "scratch", key: "_scratch" } }) + "\n");
     assert.deepEqual(readFirstProjectFact(join(w.transcriptDir, "run_fact.jsonl")), { kind: "scratch", key: "_scratch" });
     assert.equal(readFirstProjectFact(join(w.transcriptDir, "run_bucket.jsonl")), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 验收批修复反例钉（2026-10-09 夜，consult_…tzta 必改②④⑤+竞态）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 验收批④: 索引缓存塞路径成分（../../outside）→ 不越权、不据此建/读", () => {
+  const root = makeRoot("wao-pb-v4-");
+  try {
+    mkdirSync(join(root, "repo-esc"), { recursive: true });
+    const id = identifyProjectFromCwd(join(root, "repo-esc"), IO);
+    const w = resolveRunDirForWrite(root, id);
+    write(join(w.transcriptDir, "run_esc.jsonl"), "{\"a\":1}\n");
+    // 篡改索引：key→"../../outside"（读侧 hint 与写侧命中都不得照单全收）
+    const idx = join(root, "projects", ".index.json");
+    const parsed = JSON.parse(readFileSync(idx, "utf8"));
+    parsed.entries[id.key] = "../../outside";
+    writeFileSync(idx, JSON.stringify(parsed), "utf8");
+    // 读侧 hint：不得解析出 projects/ 之外的路径（此处回落扫描层命中真桶）
+    const p = resolveTranscriptPath(root, "run_esc", { cwdHint: join(root, "repo-esc") });
+    assert.equal(p, join(w.transcriptDir, "run_esc.jsonl"), "越权条目被拒→回落扫描层命中真桶");
+    assert.ok(!existsSync(join(root, "outside")), "未在 projects/ 外创建任何目录");
+    // 写侧：篡改条目核验不过 → 重建索引 → 沿用既有真桶（不据越权条目写档）
+    const w2 = resolveRunDirForWrite(root, id);
+    assert.equal(w2.bucket, w.bucket, "写侧拒绝越权条目后经权威重建回到真桶");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 验收批⑤: 孪生之一哈希读失败 → 具名硬错（null 不与 null 判同）", () => {
+  const root = makeRoot("wao-pb-v5-");
+  try {
+    mkdirSync(join(root, "repo-hf"), { recursive: true });
+    const w = resolveRunDirForWrite(root, identifyProjectFromCwd(join(root, "repo-hf"), IO));
+    const bucketFile = join(w.transcriptDir, "run_hf.jsonl");
+    write(bucketFile, "{\"same\":1}\n");
+    write(join(root, "run_hf.jsonl"), "{\"same\":1}\n");
+    // 注入 sha 读失败（io.sha256 对平铺路径抛错——模拟损坏/占用）
+    const badIo = { sha256: (p) => { if (p.endsWith("run_hf.jsonl") && !p.includes("projects")) throw new Error("EACCES"); return "x"; } };
+    assert.throws(() => resolveTranscriptPath(root, "run_hf", { io: badIo }),
+      (e) => e.code === "transcript-resolution-conflict" && /unreadable/.test(e.message),
+      "哈希读失败=硬错（不判同、不择一）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 验收批⑤: hint 与无 hint 同一套孪生规则（三份同内容→单返回不报错）", () => {
+  const root = makeRoot("wao-pb-v6-");
+  try {
+    mkdirSync(join(root, "repo-u1"), { recursive: true });
+    mkdirSync(join(root, "repo-u2"), { recursive: true });
+    const w1 = resolveRunDirForWrite(root, identifyProjectFromCwd(join(root, "repo-u1"), IO));
+    const w2 = resolveRunDirForWrite(root, identifyProjectFromCwd(join(root, "repo-u2"), IO));
+    const same = "{\"same\":1}\n";
+    write(join(w1.transcriptDir, "run_u.jsonl"), same);
+    write(join(w2.transcriptDir, "run_u.jsonl"), same);
+    write(join(root, "run_u.jsonl"), same);
+    // 注入圈养 io（与写侧同源）：夹具在 os.tmpdir() 下——生产 R5 会把 tmpdir
+    // 前缀的 hint 判成 scratch（by design），此处要测的是 project-hint 语义。
+    const io = { realpath: (p) => p, tmpdir: IO.tmpdir };
+    // 无 hint：全层收集→全同→字典序最小桶（不因多份报错）
+    const noHint = resolveTranscriptPath(root, "run_u", { io });
+    assert.equal(noHint, join([w1, w2].sort((a, b) => a.bucket.localeCompare(b.bucket))[0].transcriptDir, "run_u.jsonl"),
+      "无 hint：全同三份→字典序最小桶");
+    // 有 hint（指向另一桶）：同规则收集→全同→hint 桶优先
+    const hinted = resolveTranscriptPath(root, "run_u", { cwdHint: join(root, "repo-u2"), io });
+    assert.equal(hinted, join(w2.transcriptDir, "run_u.jsonl"), "hint 桶优先（同一套规则，仅优先级不同）");
+    // 异内容：两种路径同一硬错
+    writeFileSync(join(w2.transcriptDir, "run_u.jsonl"), "{\"CHANGED\":true}\n", "utf8");
+    assert.throws(() => resolveTranscriptPath(root, "run_u"), (e) => e.code === "transcript-resolution-conflict");
+    assert.throws(() => resolveTranscriptPath(root, "run_u", { cwdHint: join(root, "repo-u2"), io }),
+      (e) => e.code === "transcript-resolution-conflict", "hint 不豁免异内容硬错");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 验收批S3: 快命中遇扫描超限 → 可观测降级；无快命中仍硬错", () => {
+  const root = makeRoot("wao-pb-v7-");
+  try {
+    for (let i = 0; i <= TRANSCRIPT_SCAN_BUCKET_LIMIT; i++) {
+      mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
+    }
+    write(join(root, "run_flat.jsonl"), "{\"b\":1}\n");
+    // 平铺快命中在场：降级返回平铺（不抛 over-limit；孪生检测本轮放弃）
+    assert.equal(resolveTranscriptPath(root, "run_flat"), join(root, "run_flat.jsonl"), "快命中降级");
+    // 无快命中：保持具名硬错
+    assert.throws(() => resolveTranscriptPath(root, "run_none2"),
+      (e) => e.code === "transcript-resolution-scan-over-limit");
+    // 诊断面：findTranscriptTwin 对超限仍硬错（可观测）
+    assert.throws(() => findTranscriptTwin(root, "run_flat"),
+      (e) => e.code === "transcript-resolution-scan-over-limit");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 验收批竞态: .claims 中心原子仲裁——同 runId 只有一个写者胜出", () => {
+  const root = makeRoot("wao-pb-v8-");
+  try {
+    assert.equal(claimRunIdForWrite(root, "run_race_1"), true, "首个写者 wx 成功");
+    assert.equal(claimRunIdForWrite(root, "run_race_1"), false, "并发第二写者 EEXIST 被拒");
+    assert.equal(claimRunIdForWrite(root, "run_race_2"), true, "不同 runId 互不影响");
+    assert.ok(existsSync(join(root, ".claims", "run_race_1")), "claim 标记落中心根");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

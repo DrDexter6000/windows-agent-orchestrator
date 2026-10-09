@@ -36,7 +36,7 @@ npm run cli -- run coder_low --prompt "What is 2+2?" --format json --registry co
 
 验证点：
 - [ ] `run` 命令返回且打印了 assistant 文本
-- [ ] transcript（`runs/<runId>.jsonl`）含 `run.state_change` 链：pending→submitted→running→completed
+- [ ] transcript（经解析链定位：`runs/projects/*/<runId>.jsonl` 或旧平铺）含 `run.state_change` 链：pending→submitted→running→completed
 - [ ] `--format json` 的 messages 含 assistant 角色
 
 ## Codex smoke

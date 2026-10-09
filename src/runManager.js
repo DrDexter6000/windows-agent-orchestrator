@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
-import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath } from "./projectBuckets.js";
+import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1106,12 +1106,13 @@ export class RunManager {
 
     // TD-190 D2-②b 桶目录 decide-once（写侧四点之二）：①显式 transcriptDir
     // （父进程已定）→ 用；②旧父进程标记（transcriptLegacyFlat）→ 旧平铺形状；
-    // ③前台 CLI / daemon IPC（无提示）→ 此处决定一次（identity 源=agent.cwd，
-    // 与下方 run.started 归属事实同源——桶与事实永不分叉）。
+    // ③前台 CLI / daemon IPC（无提示）→ 此处决定一次（identity 源=agent.cwd
+    // 缺席时按空串=unattributed——桶与下方 run.started 事实**同一 identity**
+    // 派生，永不分叉；验收批 M1）。
     // runId 跨层唯一性（与 runDispatch 同款合同）：已有转录（旧平铺/既有桶）
-    // → 写原位；显式 transcriptDir（父进程已定）仍优先——父进程已做同款检查，
-    // 两者一致；仅在前台/daemon 自决且无既有档时才开新桶。
+    // → 写原位；新建前先经中心 .claims 原子仲裁（并发首建竞态修复）。
     let resolvedTranscriptPath = null;
+    let selfWrite = null; // 自决新桶的 {identity, write}——事实绑定用（M1）
     if (typeof transcriptDir === "string" && transcriptDir.length > 0) {
       resolvedTranscriptPath = transcriptPathFor(resolve(transcriptDir), finalRunId);
     } else {
@@ -1121,9 +1122,19 @@ export class RunManager {
         if (e?.code !== "transcript-not-found") throw e;
         if (transcriptLegacyFlat === true) {
           resolvedTranscriptPath = transcriptPathFor(dir, finalRunId);
+        } else if (claimRunIdForWrite(dir, finalRunId)) {
+          const startIdentity = identifyProjectFromCwd(typeof agent?.cwd === "string" ? agent.cwd : "", productionProjectIo());
+          const startWrite = resolveRunDirForWrite(dir, startIdentity);
+          selfWrite = { identity: startIdentity, write: startWrite };
+          resolvedTranscriptPath = transcriptPathFor(startWrite.transcriptDir, finalRunId);
         } else {
-          const startIdentity = identifyProjectFromCwd(agent?.cwd ?? process.cwd(), productionProjectIo());
-          resolvedTranscriptPath = transcriptPathFor(resolveRunDirForWrite(dir, startIdentity).transcriptDir, finalRunId);
+          // 仲裁失败=并发写者正在建同 runId：按既有档重解析；仍找不到=如实冲突。
+          try {
+            resolvedTranscriptPath = resolveTranscriptPath(dir, finalRunId, { forAppend: true });
+          } catch {
+            throw new TranscriptResolutionError("transcript-resolution-conflict",
+              `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check`);
+          }
         }
       }
     }
@@ -1353,7 +1364,11 @@ export class RunManager {
       // D2-②b：后台 run 首事件（background_submitted）已带权威归属事实且与
       // 桶位置一致——沿用同一事实（不二次推导造成同转录两份事实分叉）；
       // 前台/daemon 新建转录无首事件事实 → 按本进程视角推导（与上方桶决定同源）。
-      project: readFirstProjectFact(transcript.filePath) ?? projectFactFromCwd(agent.cwd),
+      // 验收批 M1：自决新桶时事实=同一 identity+最终写位（与桶永不分叉）；
+      // 非自决（父进程已定/既有档）沿用首事件事实，缺档才按本进程视角推导。
+      project: selfWrite
+        ? projectFactForWrite(selfWrite.identity, selfWrite.write)
+        : (readFirstProjectFact(transcript.filePath) ?? projectFactFromCwd(typeof agent?.cwd === "string" ? agent.cwd : "")),
       ...(deliveryContext ? {
         delivery: {
           mode: deliveryContext.mode,

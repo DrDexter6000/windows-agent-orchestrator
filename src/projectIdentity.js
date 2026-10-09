@@ -32,7 +32,7 @@ const WINDOWS_RESERVED = new Set([
 ]);
 export const RUNS_RESERVED_DIRNAMES = Object.freeze([
   "reliability", "verify", "smoke", "projects", "_unattributed", "_scratch",
-  "_sandbox", ".session-reuse", ".lineage-reuse",
+  "_sandbox", ".session-reuse", ".lineage-reuse", ".claims",
 ]);
 
 const WORKTREE_SEG_RE = /[\\/]\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/;

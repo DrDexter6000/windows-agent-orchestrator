@@ -785,3 +785,37 @@ test("M12-25-ROUT-6: accepted:false (terminal transcript) → providerSessionRou
     assert.equal(calls.length, 0, "no spawn");
   } finally { cleanupDir(dir); }
 });
+
+// 验收批必改⑥（consult_…tzta）：--transcript-dir 在首个 argv 长度门**之后**
+// 追加——追加后必须对最终完整 argv 复检（sol 实测 24121>24000 曾被 accepted）。
+test("D2-②b argv 门: --transcript-dir 追加后复检最终 argv 长度（两门之间窗口必红）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-argv2-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    const runDir = join(dir, "runs");
+    // 校准：先发一次短 prompt，从捕获的最终实参测量总长与 transcript-dir 对的
+    // 占用；随后把 prompt 加长到"过首门、撞复检门"的窗口内。
+    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn });
+    assert.equal(probe.accepted, true);
+    const args = calls[calls.length - 1].args;
+    const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
+    const totalProbe = totalOf(args);
+    const tdIdx = args.indexOf("--transcript-dir");
+    assert.ok(tdIdx >= 0, "探针实参含 --transcript-dir");
+    const tdPair = "--transcript-dir".length + 1 + String(args[tdIdx + 1]).length + 1;
+    const probePrompt = "X".length;
+    // 窗口：pre 门总额 = total - tdPair + Δ ≤ 24000 且 final = total + Δ > 24000。
+    const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2); // 窗口中点附近
+    const bigPrompt = "X".repeat(probePrompt + delta);
+    await assert.rejects(
+      dispatchRun({ agentId: "coder_low", prompt: bigPrompt, registryPath, runDir, cwd: dir, spawnFn: fakeSpawn }),
+      /argv too long after transcript-dir/,
+      `复检门命中（探针总额 ${totalProbe}，tdPair ${tdPair}，Δ ${delta}）`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -35,7 +35,7 @@ you.
   adapters are supported in total — per-axis facts in the generated
   [capability matrix](docs/surface/certification.md).
 - **Transcript is the source of truth** — every run reconstructable from
-  `runs/<runId>.jsonl`; delivery review is bounded and redacted, never a raw diff.
+  the run's transcript (bucketed `runs/projects/*/<runId>.jsonl` or legacy flat); delivery review is bounded and redacted, never a raw diff.
 - **Monitors, never supervises** — WAO observes, packages, and presents evidence; the
   semantic call (accept, reject, rework) always belongs to the Lead.
 - **Windows-native, minimal footprint** — plain Node ESM; two direct production

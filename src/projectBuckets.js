@@ -2,23 +2,29 @@
 //
 // TD-190 D2-②b（规格 v2.2，决定 0050/0051 批）：runs/ 转录**目录分桶**的写侧
 // 权威与读侧解析链。落位说明（对规格 §2 的一处有意偏离）：规格写的是
-// transcript.js，但 transcript.js 是纯形状/常数 SSOT（零 IO）——本模块为根级
-// 新模块（import projectIdentity.js，方向与既有根模块一致），transcript.js
-// 不引入 IO。
+// transcript.js，但 transcript.js 是形状/常数 SSOT——分桶解析是独立权威职责，
+// 归入与 transcript.js 同层（layering core 桶）的本模块，不把读写权威混进
+// 形状模块。
 //
 // 布局：新 run 转录写 `runs/projects/<slug>/<runId>.jsonl`；保留桶
 // `_sandbox|_scratch|_unattributed`；旧平铺 `runs/<runId>.jsonl` 只读兼容
-//（D3 实迁另窗）。`.owner-<runId>`、daemon/复用状态等跨项目资产常驻中心根。
+//（D3 实迁另窗）。`.owner-<runId>`、daemon/复用状态等跨项目资产常驻中心根；
+// `.claims/<runId>` 是新 runId 的中心原子仲裁标记（并发首建竞态修复）。
 //
 // 桶名权威链（§6.1/§6.11-5）：key→slug 由**中心索引**（runs/projects/
 // .index.json，缓存）+ **桶内 `.project.json`**（权威、可重建索引）承载；
-// 读侧 cwdHint 只准经索引找桶，**不按现行规则重推桶名**；写侧才派生新桶。
-// 碰撞（不同 key 同 slug）→ 校验 full key 拒绝并扩长后缀（astra 裁定）；
+// 索引/记录给出的 slug 一律过安全形状校验（SAFE_BUCKET_SLUG_RE——拒绝
+// 路径分隔符与 `..` 越权）。读侧 cwdHint 只准经索引找桶，**不按现行规则
+// 重推桶名**；写侧才派生新桶。碰撞（不同 key 同 slug）→ 校验 full key
+// 拒绝并**加长哈希**（8→10→12…hex，扩长形状恒过 FACT_BUCKET_RE 校验器）；
 // 老桶永不改名（冻结意图）。
 //
 // 读侧解析链（§2，opus 顺序）：①cwdHint→桶（经索引）→②旧平铺→③64 桶有界
-// 扫描兜底。fast-hit（①②）仍履行重复检测：桶+平铺同 runId 并存时，sha256
-// 相同→桶内优先（可检测：findTranscriptTwin），sha256 不同→具名硬错（不择一）。
+// 扫描兜底。重复检测统一规则（验收批修复）：收集全部层命中（hint 桶+平铺+
+// 扫描桶），sha256 全同→单一返回（优先级 hint 桶>字典序桶>平铺）；任一哈希
+// 读失败或哈希不同→具名硬错（不判同、不择一）。快命中（①②）遇扫描超限→
+// 可观测降级返回快命中（孪生检测不可用，经 findTranscriptTwin 可诊断），
+// 无快命中时超限仍硬错。
 // 同步实现（对规格 async 的一处有意偏离）：本地 fs 全同步可用，48 个消费点
 // 多在同步上下文，免控制流重写；行为边界不变。
 
@@ -29,16 +35,27 @@ import { join } from "node:path";
 import { transcriptPathFor } from "./transcript.js";
 import {
   identifyProjectFromCwd,
-  deriveProjectBucketSlug,
   isReservedBucketSlug,
   PROJECT_IDENTITY_RULES_VERSION,
 } from "./projectIdentity.js";
 
-export const PROJECTS_DIRNAME = "projects";export const PROJECT_INDEX_NAME = ".index.json";
+export const PROJECTS_DIRNAME = "projects";
+export const PROJECT_INDEX_NAME = ".index.json";
 export const PROJECT_RECORD_NAME = ".project.json";
+export const CLAIMS_DIRNAME = ".claims";
+/**
+ * 索引/记录给出的桶 slug 安全形状（验收批修复）：必须以字母数字开头、只含
+ * [A-Za-z0-9._-]——`..`、`../../outside`、绝对/相对路径成分一律拒绝（索引是
+ * 可手改的缓存文件，不得成为路径注入面）。FACT_BUCKET_RE 兼容（事实校验器
+ * 可接受本形状的子集），比 projectIdentity 的记录形状校验更严（那侧管事实，
+ * 这侧管路径安全）。
+ */
+export const SAFE_BUCKET_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** 解析链第 3 级有界扫描上限（§6.10）：runs/projects/ 一层目录项数。 */
 export const TRANSCRIPT_SCAN_BUCKET_LIMIT = 64;
 export const PROJECT_RECORD_RETRIES = 3;
+/** 桶记录并发半写重读的同步退避间隔（ms）——紧循环重读对半写窗口无效。 */
+export const PROJECT_RECORD_RETRY_BACKOFF_MS = 20;
 
 /** 具名错误闭集（closed-set；消费者按 code 分支，不 parse 文案）。 */
 export const TRANSCRIPT_RESOLUTION_ERROR_CODES = Object.freeze([
@@ -70,7 +87,13 @@ function defaultIo(io = {}) {
     readSync: io.readSync ?? fsDefault.readSync,
     closeSync: io.closeSync ?? fsDefault.closeSync,
     sha256: io.sha256 ?? ((p) => createHash("sha256").update(fsDefault.readFileSync(p, "utf8"), "utf8").digest("hex")),
+    sleepSync: io.sleepSync ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }),
   };
+}
+
+/** 索引/记录给出的 slug 是否安全可用（形状+非保留名；路径成分拒绝）。 */
+function isSafeBucketSlug(slug) {
+  return typeof slug === "string" && SAFE_BUCKET_SLUG_RE.test(slug) && !isReservedBucketSlug(slug);
 }
 
 export function projectsDirFor(runDir) {
@@ -82,10 +105,11 @@ export function projectsDirFor(runDir) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function readProjectRecord(bucketDir, io) {
-  // §6.11-6：wx 创建成功 ≠ 内容完整可读（并发半写）——有界重读；持续失败 =
-  // 显式错误，不得认作碰撞另建桶。
+  // §6.11-6：wx 创建成功 ≠ 内容完整可读（并发半写）——有界重读+同步退避
+  //（紧循环对半写窗口无效）；持续失败 = 显式错误，不得认作碰撞另建桶。
   let lastErr = null;
-  for (let i = 0; i < PROJECT_RECORD_RETRIES; i++) {
+  for (let attempt = 0; attempt < PROJECT_RECORD_RETRIES; attempt++) {
+    if (attempt > 0) io.sleepSync(PROJECT_RECORD_RETRY_BACKOFF_MS);
     try {
       return JSON.parse(io.readFileSync(join(bucketDir, PROJECT_RECORD_NAME), "utf8"));
     } catch (e) {
@@ -128,7 +152,9 @@ export function loadBucketIndex(runDir, { io, forceRebuild = false } = {}) {
   for (const { dir } of listBucketDirs(runDir, i)) {
     try {
       const rec = JSON.parse(i.readFileSync(join(dir, PROJECT_RECORD_NAME), "utf8"));
-      if (rec && typeof rec.key === "string" && typeof rec.slug === "string") entries[rec.key] = rec.slug;
+      // 验收批修复：记录给出的 slug 过安全形状（路径成分拒绝）；无效条目
+      // 如实跳过（缓存重建），写侧命中路径仍会核验桶内权威。
+      if (rec && typeof rec.key === "string" && isSafeBucketSlug(rec.slug)) entries[rec.key] = rec.slug;
     } catch { /* 无记录的保留桶（_sandbox 等）不入索引 */ }
   }
   return { entries, rebuilt: true };
@@ -146,13 +172,27 @@ function saveBucketIndex(runDir, entries, io) {
 // 写侧：resolveRunDirForWrite（桶只在这里决定/创建；调用方拿到目录后显式传递）
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** 缓存/重建索引给出的 slug 是否可作为既有桶使用（安全形状+目录存在+权威核验）。 */
+function confirmedBucketFor(runDir, key, slug, i) {
+  if (!isSafeBucketSlug(slug)) return null; // `..`/分隔符/保留名——路径成分拒绝
+  const dir = join(projectsDirFor(runDir), slug);
+  if (!i.existsSync(dir)) return null;
+  try {
+    if (readProjectRecord(dir, i)?.key !== key) return null; // 权威=.project.json
+  } catch {
+    return null; // 记录不可读：不据此写档（缓存条目作废；显式路径见下方新建分支）
+  }
+  return dir;
+}
+
 /**
  * 为一次新写入决定转录目录（写侧唯一入口）。
  *
  * @param {string} runDir 中心状态根（runs/）——.owner 心跳文件/daemon/索引所在。
  * @param {object} identity identifyProjectFromCwd 输出（kind=project 需 key+displayName）。
  * @returns {{transcriptDir: string, bucket: string, kind: string}}
- *   bucket=最终写入位置（碰撞扩长后的最终 slug；事实里的 bucket 必须记这个值）。
+ *   bucket=最终写入位置（碰撞加长哈希后的最终 slug；事实里的 bucket 必须记这个值——
+ *   该形状恒过 identityOfFirstEvent 的 FACT_BUCKET_RE 校验器，验收批 M2）。
  */
 export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
   const i = defaultIo(io);
@@ -167,64 +207,86 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
     return { transcriptDir: dir, bucket, kind: identity.kind };
   }
   if (identity.kind !== "project") throw new Error(`resolveRunDirForWrite: unknown identity kind ${JSON.stringify(identity.kind)}`);
-
-  const { entries } = loadBucketIndex(runDir, { io: i });
-  // 先写者胜：已有 key → 沿用旧桶（冻结；永不按新规则重推）。索引是缓存——
-  // 命中后仍校验桶内记录的 key（陈旧/手改索引不据此写档）。
-  let slug = typeof entries[identity.key] === "string" ? entries[identity.key] : null;
-  if (slug !== null && i.existsSync(join(projectsDirFor(runDir), slug))) {
-    let recordOk = false;
-    try {
-      recordOk = readProjectRecord(join(projectsDirFor(runDir), slug), i)?.key === identity.key;
-    } catch {
-      recordOk = false;
-    }
-    if (recordOk) {
-      return { transcriptDir: join(projectsDirFor(runDir), slug), bucket: slug, kind: "project" };
-    }
-    // 索引指向的桶记录不匹配：如实重建（权威=.project.json），不走陈旧条目。
-    const rebuilt = loadBucketIndex(runDir, { io: i, forceRebuild: true });
-    const reslug = rebuilt.entries[identity.key];
-    if (typeof reslug === "string" && i.existsSync(join(projectsDirFor(runDir), reslug))) {
-      return { transcriptDir: join(projectsDirFor(runDir), reslug), bucket: reslug, kind: "project" };
-    }
-    slug = null;
+  if (typeof identity.key !== "string" || identity.key.length === 0 || typeof identity.displayName !== "string") {
+    throw new Error("resolveRunDirForWrite: project identity requires key + displayName");
   }
-  // 新桶：按当前规则派生（必要时扩长——扩长只发生在创建时）。
-  slug = deriveProjectBucketSlug(identity);
-  if (isReservedBucketSlug(slug)) slug = `${slug}-x`;
-  const root = projectsDirFor(runDir);
-  i.mkdirSync(root, { recursive: true });
-  let attempt = 0;
-  for (;;) {
-    const dir = join(root, slug);
-    const record = { key: identity.key, slug, displayName: identity.displayName ?? null, rulesVersion: PROJECT_IDENTITY_RULES_VERSION, createdAt: new Date().toISOString(), aliases: [] };
-    if (!i.existsSync(dir)) {
-      i.mkdirSync(dir, { recursive: true });
+
+  // 先写者胜：缓存索引命中 → 安全形状+桶内权威核验后沿用旧桶（冻结；永不按
+  // 新规则重推）。核验不过 → 权威重建一次；仍无 → 走新建。
+  const { entries } = loadBucketIndex(runDir, { io: i });
+  if (typeof entries[identity.key] === "string") {
+    const hit = confirmedBucketFor(runDir, identity.key, entries[identity.key], i);
+    if (hit !== null) return { transcriptDir: hit, bucket: basename(hit), kind: "project" };
+    const rebuilt = loadBucketIndex(runDir, { io: i, forceRebuild: true });
+    if (typeof rebuilt.entries[identity.key] === "string") {
+      const hit2 = confirmedBucketFor(runDir, identity.key, rebuilt.entries[identity.key], i);
+      if (hit2 !== null) return { transcriptDir: hit2, bucket: basename(hit2), kind: "project" };
     }
+  }
+  // 新桶候选链（M2）：`<displayName>-<sha256(key)[0:n]>`，n=8→10→12…64——
+  // 加长的是哈希段，形状恒过 FACT_BUCKET_RE（`-[0-9a-f]{8,}$`）；displayName
+  // 首段是 Windows 保留名时全链加 `_x-` 前缀（破首段，同时过两校验器）。
+  const root = projectsDirFor(runDir);
+  const hash = createHash("sha256").update(identity.key, "utf8").digest("hex");
+  const candidates = [];
+  for (let n = 8; n <= hash.length; n += 2) candidates.push(`${identity.displayName}-${hash.slice(0, n)}`);
+  if (candidates.some((c) => isReservedBucketSlug(c))) {
+    // displayName 首段为 Windows 保留设备名（aux/con/nul/…）：加 `0-` 前缀破
+    // 首段——同时通过 SAFE_BUCKET_SLUG_RE、FACT_BUCKET_RE 与保留名三校验。
+    for (let k = 0; k < candidates.length; k++) candidates[k] = `0-${candidates[k]}`;
+  }
+  i.mkdirSync(root, { recursive: true });
+  for (let ci = 0; ci < candidates.length; ci++) {
+    const slug = candidates[ci];
+    const dir = join(root, slug);
+    if (!i.existsSync(dir)) i.mkdirSync(dir, { recursive: true });
     const recordPath = join(dir, PROJECT_RECORD_NAME);
     if (!i.existsSync(recordPath)) {
       try {
-        // wx 独占创建（§6.2）：并发新建同桶只有一个成功；失败方走 EEXIST 校验。
+        // wx 独占创建（§6.2）：并发新建同桶只有一个成功；失败方走读取校验。
+        const record = { key: identity.key, slug, displayName: identity.displayName, rulesVersion: PROJECT_IDENTITY_RULES_VERSION, createdAt: new Date().toISOString(), aliases: [] };
         i.writeFileSync(recordPath, JSON.stringify(record, null, 2), { encoding: "utf8", flag: "wx" });
       } catch (e) {
         if (e?.code !== "EEXIST") throw e;
       }
     }
-    const existing = readProjectRecord(dir, i);
-    if (existing && existing.key === identity.key) {
+    if (readProjectRecord(dir, i)?.key === identity.key) {
       entries[identity.key] = slug;
       saveBucketIndex(runDir, entries, i);
       return { transcriptDir: dir, bucket: slug, kind: "project" };
     }
-    // 真·碰撞（不同 key 同 slug）/记录异 key：扩长重试（永不覆盖既有记录）。
-    attempt += 1;
-    if (attempt > 32) {
-      throw new TranscriptResolutionError("transcript-resolution-conflict",
-        `bucket slug collision not resolvable after 32 extensions for key ${identity.key}`);
-    }
-    slug = `${slug}-${attempt + 1}`;
+    // 真·碰撞（不同 key 同 slug）→ 下一候选（更长哈希；永不覆盖既有记录）。
   }
+  throw new TranscriptResolutionError("transcript-resolution-conflict",
+    `bucket slug collision not resolvable after ${candidates.length} hash lengths for key ${identity.key}`);
+}
+
+/**
+ * 新 runId 的中心原子仲裁（并发首建竞态修复，验收会审 sol 必改①/opus TD 案）：
+ * wx 独占创建 `runs/.claims/<runId>`——两写者并发首个新 runId 只有一个成功；
+ * 失败方必须按"既有档"重解析（对方此刻正在写），仍找不到=如实冲突。
+ * 覆盖面=新代码写者互斥；旧代码写者不受约束（切换窗纪律+孪生硬错兜底）。
+ */
+export function claimRunIdForWrite(runDir, runId, { io } = {}) {
+  const i = defaultIo(io);
+  if (!runDir || typeof runDir !== "string") throw new Error("claimRunIdForWrite: runDir required");
+  if (!runId || typeof runId !== "string") throw new Error("claimRunIdForWrite: runId required");
+  const claimsDir = join(runDir, CLAIMS_DIRNAME);
+  i.mkdirSync(claimsDir, { recursive: true });
+  try {
+    i.writeFileSync(join(claimsDir, runId),
+      JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString() }), { encoding: "utf8", flag: "wx" });
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  }
+}
+
+/** basename 助手（避免再引 node:path 的第二个具名导入形状）。 */
+function basename(p) {
+  const parts = String(p).replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || p;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -288,12 +350,16 @@ function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
     const dir = join(projectsDirFor(runDir), bucket);
     return io.existsSync(dir) ? dir : null;
   }
-  // §6.11-5：经冻结 key→slug 索引找桶——不按现行规则重推桶名。
+  // §6.11-5：经冻结 key→slug 索引找桶——不按现行规则重推桶名。索引条目过
+  // 安全形状（路径成分拒绝——缓存文件是可手改面）；核验不过 → 权威重建一次；
+  // 仍无 → 无 hint（落 ②③ 层，语义不变）。
   const { entries } = loadBucketIndex(runDir, { io });
-  const slug = entries[identity.key];
-  if (typeof slug !== "string") return null;
-  const dir = join(projectsDirFor(runDir), slug);
-  return io.existsSync(dir) ? dir : null;
+  let dir = confirmedBucketFor(runDir, identity.key, entries[identity.key], io);
+  if (dir === null) {
+    const rebuilt = loadBucketIndex(runDir, { io, forceRebuild: true });
+    dir = confirmedBucketFor(runDir, identity.key, rebuilt.entries[identity.key], io);
+  }
+  return dir;
 }
 
 /**
@@ -302,10 +368,15 @@ function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
  * 的 ENOENT 语义与迁移前逐字节兼容），forAppend:true 时具名硬错
  * transcript-not-found（追加者不得误建旧平铺新文件——§6.9）。
  *
- * 重复检测（§6.5 统一规则，fast-hit 也履行）：桶+平铺同 runId 并存 →
- * sha256 相同=返回桶内路径（可经 findTranscriptTwin 观测，不静默吞孪生事实）；
- * sha256 不同=具名硬错 transcript-resolution-conflict（列出两路径，不择一）。
- * 扫描层多命中：哈希全同=字典序最小桶（同层固定次序）+可观测；哈希异=硬错。
+ * 重复检测统一规则（验收批修复：hint 与无 hint 同一套规则）——收集全部层
+ * 命中（hint 桶 + 平铺 + 扫描桶去重）：
+ *   - 仅一份 → 返回它；
+ *   - 多份且 sha256 全同 → 单一返回，优先级 hint 桶 > 字典序最小桶 > 平铺
+ *     （桶优先于平铺=§6.5；hint 是最强定位器）；
+ *   - 任一哈希**读失败** → 具名硬错（null 不得与 null 判同——哈希失败=损坏，
+ *     不猜）；哈希不同 → 具名硬错（列全路径，不择一）。
+ * 扫描超限：有快命中（hint 桶/平铺）→ 可观测降级返回快命中（孪生检测此轮
+ * 不可用；findTranscriptTwin 仍会硬错供诊断）；无快命中 → 保持具名硬错。
  */
 export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend = false, io } = {}) {
   const i = defaultIo(io);
@@ -314,52 +385,42 @@ export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend
   const flat = transcriptPathFor(runDir, runId);
   const flatExists = i.existsSync(flat);
 
-  // ① cwdHint → 桶（经索引）。
-  const hinted = bucketCandidateFromCwdHint(runDir, cwdHint, i);
-  if (hinted !== null) {
-    const p = transcriptPathFor(hinted, runId);
-    if (i.existsSync(p)) {
-      if (flatExists) {
-        const a = shaOfIfExists(p, i);
-        const b = shaOfIfExists(flat, i);
-        if (a !== b) {
-          throw new TranscriptResolutionError("transcript-resolution-conflict",
-            `runId ${runId} exists in bucket AND flat with different content: ${p} vs ${flat}`);
-        }
-      }
-      return p;
+  // ① cwdHint → 桶（经冻结索引+权威核验）。
+  const hintedDir = bucketCandidateFromCwdHint(runDir, cwdHint, i);
+  const hintedPath = hintedDir !== null && i.existsSync(transcriptPathFor(hintedDir, runId))
+    ? transcriptPathFor(hintedDir, runId)
+    : null;
+  const fastPath = hintedPath ?? (flatExists ? flat : null);
+
+  // ②③ 扫描层（含平铺/hint 未命中时的兜底定位 + 全层孪生检测）。
+  let bucketHits;
+  try {
+    bucketHits = scanBucketHits(runDir, runId, i);
+  } catch (e) {
+    if (e instanceof TranscriptResolutionError && e.code === "transcript-resolution-scan-over-limit" && fastPath !== null) {
+      // 可观测降级：快命中在场，孪生检测本轮放弃（诊断面 findTranscriptTwin）。
+      return fastPath;
     }
+    throw e;
+  }
+  const all = [...new Set([hintedPath, ...bucketHits, flatExists ? flat : null].filter((p) => p !== null))];
+  if (all.length === 1) return all[0];
+  if (all.length > 1) {
+    const hashes = all.map((p) => shaOfIfExists(p, i));
+    const badIdx = hashes.findIndex((h) => h === null);
+    if (badIdx >= 0) {
+      throw new TranscriptResolutionError("transcript-resolution-conflict",
+        `runId ${runId} has multiple copies and one is unreadable (hash failed): ${all[badIdx]} — refusing to pick without comparison`);
+    }
+    if (new Set(hashes).size > 1) {
+      throw multiBucketConflict(runId, all);
+    }
+    // 全同：hint 桶 > 字典序最小桶 > 平铺。
+    if (hintedPath !== null) return hintedPath;
+    const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => a.localeCompare(b));
+    return bucketOnly[0] ?? flat;
   }
 
-  // ② 旧平铺（fast-hit 重复检测：反查 projects 层孪生）。
-  if (flatExists) {
-    const twins = scanBucketHits(runDir, runId, i);
-    if (twins.length === 1) {
-      const a = shaOfIfExists(twins[0], i);
-      const b = shaOfIfExists(flat, i);
-      if (a !== b) {
-        throw new TranscriptResolutionError("transcript-resolution-conflict",
-          `runId ${runId} exists flat AND in bucket with different content: ${flat} vs ${twins[0]}`);
-      }
-      return twins[0]; // 哈希同 → 桶内优先（§6.5 统一规则）
-    }
-    if (twins.length > 1) {
-      throw multiBucketConflict(runId, twins);
-    }
-    return flat;
-  }
-
-  // ③ 64 桶有界扫描兜底。
-  const hits = scanBucketHits(runDir, runId, i);
-  if (hits.length === 1) return hits[0];
-  if (hits.length > 1) {
-    // 同层固定次序 + 哈希统一规则：全同 → 字典序最小；异 → 硬错。
-    const hashes = hits.map((h) => shaOfIfExists(h, i));
-    if (hashes.some((h) => h === null) || new Set(hashes).size > 1) {
-      throw multiBucketConflict(runId, hits);
-    }
-    return [...hits].sort((a, b) => a.localeCompare(b))[0];
-  }
   if (forAppend) {
     throw new TranscriptResolutionError("transcript-not-found",
       `runId ${runId} not found in any layer (flat or ${TRANSCRIPT_SCAN_BUCKET_LIMIT}-bucket scan); appenders must not create a legacy flat file`);
