@@ -124,7 +124,7 @@ test("TD-190 D1 slug 保留名防御: runs 保留目录与 Windows 设备名不�
 // 沙箱闭表。确定性锚点：沙箱树已被 harness 回收（本机实测两例）——词法判定
 // 不得依赖 realpath 成败。
 test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死树恒定）", () => {
-  const dead = identity("C:\\Users\\17865\\.codex\\worktrees\\filesystem-eight\\windows-agent-orchestrator-poc", {
+  const dead = identity("C:\\Users\\probe-user\\.codex\\worktrees\\filesystem-eight\\windows-agent-orchestrator-poc", {
     realpath: () => { throw new Error("ENOENT — sandbox reclaimed by harness"); },
   });
   assert.equal(dead.kind, "sandbox");
@@ -133,7 +133,7 @@ test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死�
   assert.equal(dead.worktreeName, "filesystem-eight");
   assert.equal(dead.repoHint, "windows-agent-orchestrator-poc", "repoHint=词法第二段，是 hint 不是归属");
   // 仓内更深 cwd 同样命中（两段之后任意深度）
-  const deep = identity("C:/Users/17865/.codex/worktrees/623d/my-repo/src/x", { realpath: () => { throw new Error("dead"); } });
+  const deep = identity("C:/probe-wt/.codex/worktrees/623d/my-repo/src/x", { realpath: () => { throw new Error("dead"); } });
   assert.equal(deep.kind, "sandbox");
   assert.equal(deep.repoHint, "my-repo");
   // 段锚定不锚 homedir（CODEX_HOME 重定向容忍）+ 大小写不敏感
@@ -144,7 +144,7 @@ test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死�
   assert.equal(noRepo.kind, "sandbox");
   assert.equal(noRepo.repoHint, null);
   // 沙箱内嵌 WAO 工作树：先剥 .wao-worktrees 再判 R7（opus 顺序）
-  const nested = identity("C:/Users/17865/.codex/worktrees/wt1/repo/.wao-worktrees/run_x", { realpath: () => { throw new Error("dead"); } });
+  const nested = identity("C:/probe-wt/.codex/worktrees/wt1/repo/.wao-worktrees/run_x", { realpath: () => { throw new Error("dead"); } });
   assert.equal(nested.kind, "sandbox");
   assert.equal(nested.repoHint, "repo");
   // 非沙箱路径不受影响（普通项目/死路径仍走 R3 语义）
@@ -160,7 +160,7 @@ test("TD-190 D2-②a: projectFactFromCwd 四 kind 形状钉（rulesVersion 随�
   assert.equal(fact.key, "d:/projects/windows-agent-orchestrator-poc");
   assert.match(fact.bucket, /^windows-agent-orchestrator-poc-[0-9a-f]{8}$/);
 
-  const sandbox = projectFactFromCwd("C:/Users/17865/.codex/worktrees/w1/repo");
+  const sandbox = projectFactFromCwd("C:/probe-wt/.codex/worktrees/w1/repo");
   assert.equal(sandbox.kind, "sandbox");
   assert.equal(sandbox.key, "_sandbox");
   assert.equal(sandbox.harness, "codex");

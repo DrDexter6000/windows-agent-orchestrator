@@ -33,7 +33,7 @@ test("TD-190 计划器: 记录事实优先于推导（规则演进不拆旧桶�
       bucket: "other-project-11111111",
     });
     // 新档 sandbox 事实（cwd 也长着沙箱样，双保险一致）
-    seed(runDir, "run_fact_sb", "C:/Users/17865/.codex/worktrees/w1/repo", {
+    seed(runDir, "run_fact_sb", "C:/probe-wt/.codex/worktrees/w1/repo", {
       kind: "sandbox", rulesVersion: "td190-r2", key: "_sandbox",
       harness: "codex", worktreeName: "w1", repoHint: "repo",
     });

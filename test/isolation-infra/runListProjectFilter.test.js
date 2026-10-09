@@ -32,7 +32,7 @@ test("TD-190 projectFilter: 路径键/裸名/slug 匹配与三选择器（只读
     seed(runDir, "run_main_1", MAIN);
     seed(runDir, "run_main_2", MAIN.replace(/\//g, "\\")); // 分隔符混写=同键
     seed(runDir, "run_other_1", OTHER);
-    seed(runDir, "run_sandbox_1", "C:/Users/17865/.codex/worktrees/wt-x/some-repo");
+    seed(runDir, "run_sandbox_1", "C:/probe-wt/.codex/worktrees/wt-x/some-repo");
     seed(runDir, "run_scratch_1", `${tmpdir().replace(/\\/g, "/")}/wao-probe-tmp`);
     seed(runDir, "run_unattr_1", ".");
 

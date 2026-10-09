@@ -102,6 +102,9 @@ const REGISTERED_CENSUS = {
   "application/panelReadiness.js": { "opencode-serve": 1 },
   "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
   "application/runStop.js": { "opencode-serve": 3 },
+  // TD-190 R7（2026-10-09）：外国 harness 沙箱闭表条目的 harness 标签——轴向=
+  // 沙箱身份标注（桶归属 fact），不选 backend、不分叉运行时行为。
+  "projectIdentity.js": { codex: 1 },
   "backends/deepSeekAcp.js": { "deepseek-acp": 1 },
   "backends/deepSeekHarness.js": { "deepseek-harness": 1 },
   "backends/kimiWeb.js": { "kimi-web": 1 },
