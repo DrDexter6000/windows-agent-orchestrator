@@ -91,6 +91,34 @@ test("TD-190 D1 R1 尾斜杠: 尾斜杠归一（纯盘符根保留）", () => {
   assert.equal(identity("D:/").key, "d:/");
 });
 
+// 终审 M4（opus 探针反例）：非 "." 的相对路径不得经 realpath 按进程 cwd 归属
+//（"src" 曾得本仓 key+"src-8629bc9a" 桶——归属随进程漂移）。
+test("TD-190 终审 M4: 相对路径（非 '.'）→ unattributed，不猜进程 cwd", () => {
+  for (const rel of ["src", "some/relative/path", "./nested"]) {
+    const r = identity(rel);
+    assert.equal(r.kind, "unattributed", rel);
+    assert.match(r.reason, /relative path/);
+  }
+  // 特例序：裸相对 worktree 判定先于通相对门（更具体的事实先行）
+  const wt = identity(".wao-worktrees/run_x");
+  assert.match(wt.reason, /bare relative \.wao-worktrees/);
+});
+
+// 终审 M5：同 key 必须同 slug——displayName 取 resolved basename，不随原始
+// 写法大小写漂移（opus 探针曾分出两个桶）。
+test("TD-190 终审 M5: 同 key 同 slug（displayName 与 key 同源）", () => {
+  // 模拟 native realpath 的盘上规范大小写（本例=目录在盘上为小写）
+  const io = {
+    realpath: (p) => p.toLowerCase().replace(/^([a-z]):/, (m0, d) => d.toUpperCase() + ":"),
+    tmpdir: "C:/PROBE-TMP",
+    platform: "win32",
+  };
+  const a = identifyProjectFromCwd("D:/projects/windows-agent-orchestrator-poc", io);
+  const b = identifyProjectFromCwd("D:\\Projects\\Windows-Agent-Orchestrator-POC", io);
+  assert.equal(a.key, b.key);
+  assert.equal(deriveProjectBucketSlug(a), deriveProjectBucketSlug(b), "同 key 不同写法不得分桶");
+});
+
 test("TD-190 D1 slug: displayName 净化 + 哈希绑定完整键", () => {
   const a = identity("D:/projects/windows-agent-orchestrator-poc");
   const slug = deriveProjectBucketSlug(a);
@@ -136,7 +164,7 @@ test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死�
   const deep = identity("C:/probe-wt/.codex/worktrees/623d/my-repo/src/x", { realpath: () => { throw new Error("dead"); } });
   assert.equal(deep.kind, "sandbox");
   assert.equal(deep.repoHint, "my-repo");
-  // 段锚定不锚 homedir（CODEX_HOME 重定向容忍）+ 大小写不敏感
+  // 段锚定不锚 homedir（覆盖 .codex 父目录搬迁；CODEX_HOME 整体重定向不含 .codex 段不命中——补齐待生产 io 锚点）+ 大小写不敏感
   const redirected = identity("E:/alt-home/.codex/Worktrees/x/Some-Repo");
   assert.equal(redirected.kind, "sandbox");
   // 只有一段（无 repo）也可判，repoHint=null

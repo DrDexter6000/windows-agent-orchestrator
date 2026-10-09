@@ -169,7 +169,24 @@ async function runsCommand(args, config, deps) {
     }
     console.log(`  scratch 桶 ${plan.scratchFileCount} 文件 / ${(plan.scratchBytes / 1024).toFixed(1)} KB`);
     console.log(`  sandbox 桶 ${plan.sandboxFileCount} 文件 / ${(plan.sandboxBytes / 1024).toFixed(1)} KB${plan.sandboxHarnesses.length ? `（${plan.sandboxHarnesses.join("、")}）` : ""}`);
-    console.log(`  无法归因 ${plan.unattributed.length} 个（"." / 缺失 cwd / realpath 失效）${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
+    console.log(`  无法归因 ${plan.unattributed.length} 个${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
+    // opus 终审 A 条件：按原因分类计数（D3 执行窗前必须摸清规模才能裁定）
+    const byReason = {};
+    for (const u of plan.unattributed) {
+      const cat = /bare relative '\.'/.test(u.reason) ? "dot"
+        : /cwd missing/.test(u.reason) ? "missing"
+        : /realpath failed/.test(u.reason) ? "realpath-dead"
+        : /relative path/.test(u.reason) ? "relative"
+        : /worktrees/.test(u.reason) ? "bare-worktree"
+        : "other";
+      byReason[cat] = (byReason[cat] ?? 0) + 1;
+    }
+    const cats = Object.entries(byReason).map(([k, v]) => `${k}=${v}`).join(" ");
+    if (cats) console.log(`    原因分布：${cats}`);
+    if (plan.slugConflicts?.length) {
+      console.log(`  **slug 冲突 ${plan.slugConflicts.length} 处（同 key 不同在档桶名——如实上报不合并）：**`);
+      for (const c of plan.slugConflicts.slice(0, 5)) console.log(`    ${c.key}: ${c.bucketSlug} vs ${c.conflictingSlug}（${c.file}）`);
+    }
     if (plan.parseFailures.length) {
       console.log(`  解析失败 ${plan.parseFailures.length} 个（首事件形状异常，如实列出）：`);
       for (const f of plan.parseFailures.slice(0, 5)) console.log(`    ${f.file}: ${f.reason}`);
@@ -605,6 +622,10 @@ async function runsListCommand(args, config) {
   // 项目路径/裸名——语义权威在 listRuns 服务侧）。裸旗拒绝同 --state 惯例。
   if (options.project === true) {
     throw new Error("--project requires a value (a project path/name, or @sandbox/@scratch/@unattributed)");
+  }
+  // 终审 opus C：--project . 不静默空集——解析为当前目录（绝对路径进服务侧）。
+  if (options.project === "." || options.project === "./") {
+    options.project = resolve(process.cwd());
   }
 
   // CLI is human/ops — no workspace authorization.

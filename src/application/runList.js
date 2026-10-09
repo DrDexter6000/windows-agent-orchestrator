@@ -16,11 +16,11 @@
 //     query-scoped workspace verifier SSOT.
 
 import { basename, join, resolve } from "node:path";
-import { readdirSync, existsSync, realpathSync, readFileSync } from "node:fs";
+import { readdirSync, existsSync, realpathSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
-import { identifyProjectFromCwd, deriveProjectBucketSlug } from "../projectIdentity.js";
+import { identityOfFirstEvent, deriveProjectBucketSlug } from "../projectIdentity.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
@@ -259,6 +259,27 @@ function summaryWindowMs(facts) {
  *   - scanScope: ONLY for scanScope "active"|"history" (echoes the input so a
  *     client can guard mode/epoch races). ABSENT in the default scope.
  */
+// projectFilter 的每候选分类器：读文件头一小块切首行；identity 经共享
+// identityOfFirstEvent（在档事实优先，与迁移计划器同语义）。
+function makeFirstEventClassifier(resolvedRunDir, projectIo) {
+  const io = projectIo ?? { realpath: realpathSync, tmpdir: tmpdir() };
+  return (file) => {
+    try {
+      const fh = openSync(join(resolvedRunDir, file), "r");
+      try {
+        const buf = Buffer.alloc(8192);
+        const n = readSync(fh, buf, 0, buf.length, 0);
+        const firstLine = buf.toString("utf8", 0, n).split("\n")[0];
+        return identityOfFirstEvent(JSON.parse(firstLine), io);
+      } finally {
+        closeSync(fh);
+      }
+    } catch {
+      return { identity: { kind: "unattributed", reason: "first event unreadable" }, factError: null };
+    }
+  };
+}
+
 export async function listRuns(input) {
   const {
     runDir,
@@ -351,35 +372,50 @@ export async function listRuns(input) {
       .map((file) => ({ runId: file.replace(/\.jsonl$/, ""), file }));
   }
 
-  // TD-190 projectFilter（只读、前置——过滤只花每候选一行的首事件读取）。
+  // TD-190 projectFilter（只读、前置）。终审 F4/M2 修正：
+  //  - 分类经共享 identityOfFirstEvent（在档事实优先——与迁移计划器同语义）；
+  //  - @选择器闭集校验（未知值报错不静默空集——TD-153 惯例）；
+  //  - 裸名（不含分隔符/盘符）不走 realpath——避免相对名被按进程 cwd 解析成
+  //    路径键（opus 终审：worktree 里传 "src" 会匹配整个仓）；
+  //  - 首事件读取有界（文件头一小块，不整读转录——此前 readFileSync 整读与
+  //    "只读一行"注释不符）；
+  //  - io 可注入（测试不依赖本机路径，终审 M6）。
   if (projectFilter !== undefined && projectFilter !== null && String(projectFilter).length > 0) {
-    const sel = String(projectFilter).startsWith("@")
-      ? String(projectFilter).slice(1).toLowerCase()
-      : null;
-    const argIdentity = sel === null
-      ? identifyProjectFromCwd(String(projectFilter), { realpath: realpathSync, tmpdir: tmpdir() })
-      : null;
-    const argName = sel === null ? String(projectFilter).toLowerCase() : null;
-    const argKey = argIdentity?.kind === "project" ? argIdentity.key : null;
-    const argSlug = argIdentity?.kind === "project" ? deriveProjectBucketSlug(argIdentity).toLowerCase() : null;
-    const classify = (file) => {
-      try {
-        const first = JSON.parse(readFileSync(join(resolvedRunDir, file), "utf8").trim().split("\n")[0]);
-        return identifyProjectFromCwd(first?.cwd, { realpath: realpathSync, tmpdir: tmpdir() });
-      } catch {
-        return { kind: "unattributed", reason: "first event unreadable" };
+    const rawFilter = String(projectFilter);
+    const classify = makeFirstEventClassifier(resolvedRunDir, input.projectIo);
+    if (rawFilter.startsWith("@")) {
+      const SELECTORS = ["sandbox", "scratch", "unattributed"];
+      const sel = rawFilter.slice(1).toLowerCase();
+      if (!SELECTORS.includes(sel)) {
+        throw new Error(`unknown --project selector: ${rawFilter} (valid: ${SELECTORS.map((x) => `@${x}`).join(", ")}, or a project path/name)`);
       }
-    };
-    candidates = candidates.filter(({ file }) => {
-      const id = classify(file);
-      if (sel !== null) {
-        return id.kind === sel;
-      }
-      if (id.kind !== "project") return false;
-      if (argKey !== null && id.key === argKey) return true;
-      return id.displayName.toLowerCase() === argName
-        || deriveProjectBucketSlug(id).toLowerCase() === argSlug;
-    });
+      candidates = candidates.filter(({ file }) => classify(file)?.identity.kind === sel);
+    } else {
+      const looksLikePath = /[\\/]/.test(rawFilter) || /^[A-Za-z]:/.test(rawFilter);
+      const argName = rawFilter.toLowerCase();
+      const pathIdentity = looksLikePath
+        ? identityOfFirstEvent({ cwd: rawFilter }, input.projectIo ?? { realpath: realpathSync, tmpdir: tmpdir() }).identity
+        : null;
+      const argKey = pathIdentity?.kind === "project" ? pathIdentity.key : null;
+      candidates = candidates.filter(({ file }) => {
+        const id = classify(file)?.identity;
+        if (!id || id.kind !== "project") return false;
+        if (argKey !== null && id.key === argKey) return true;
+        if (looksLikePath) return false; // 路径形参数只按键精确匹配（不猜名字）
+        // 裸名/slug：串匹配（不经 realpath 派生——终审 F4）。在档事实无
+        // displayName 字段（形状=kind/key/bucket）——从 key 尾段兜底派生。
+        const nameOf = (id) => (id.displayName
+          ?? String(id.key).replace(/\/+$/, "").split("/").pop()
+          ?? "").toLowerCase();
+        const slugOf = (id) => (id.bucket
+          ?? deriveProjectBucketSlug({
+            kind: "project",
+            key: id.key,
+            displayName: String(id.key).replace(/\/+$/, "").split("/").pop() ?? "project",
+          })).toLowerCase();
+        return nameOf(id) === argName || slugOf(id) === argName;
+      });
+    }
   }
 
   const summaries = [];

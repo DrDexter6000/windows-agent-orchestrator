@@ -40,6 +40,7 @@ import {
   extractCanonicalAgentId,
   TERMINAL_STATES,
   STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
+import { projectFactFromCwd } from "../projectIdentity.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
@@ -737,6 +738,9 @@ export async function continueRun({
       continuation: true,
       parentRunId,
       rootRunId,
+      // 终审 F1（sol）：续接子 run 的首事件同款落档桶归属事实——与
+      // dispatch/runManager 同一构造器（口径不分叉）。
+      project: projectFactFromCwd(authorizedWorkspaceRoot),
     });
 
     const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.background_spawned);

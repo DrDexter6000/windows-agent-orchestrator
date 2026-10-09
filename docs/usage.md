@@ -568,6 +568,8 @@ cost:     $0.0576
 
 ```powershell
 npm run cli -- runs list                    # 列出所有 run + 状态
+npm run cli -- runs list --project <路径|裸名> # 按项目过滤（TD-190：路径=键精确；裸名/slug=不区分大小写）
+npm run cli -- runs list --project @sandbox   # 特殊桶选择器：@sandbox/@scratch/@unattributed（闭集，未知值报错）
 npm run cli -- runs summary                 # 状态统计
 npm run cli -- runs grep "error"            # 搜索 transcript
 npm run cli -- runs prune --older-than 7d   # 清理 7 天前的 run

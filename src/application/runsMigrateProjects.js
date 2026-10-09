@@ -15,7 +15,7 @@
 // 架构契约：core 纯读服务；IO 全注入（测试可控）；不 import commands/mcp。
 
 import { readdirSync as fsReaddirSync, statSync as fsStatSync, readFileSync as fsReadFileSync } from "node:fs";
-import { identifyProjectFromCwd, deriveProjectBucketSlug, RUNS_RESERVED_DIRNAMES } from "../projectIdentity.js";
+import { identityOfFirstEvent, deriveProjectBucketSlug, RUNS_RESERVED_DIRNAMES, PROJECT_IDENTITY_RULES_VERSION } from "../projectIdentity.js";
 import { TERMINAL_STATES } from "../transcript.js";
 
 // 首事件类型闭集（实测：run.started / run.background_submitted，两者都带 cwd）。
@@ -33,11 +33,12 @@ export function planProjectsMigration({ runDir, io = {} }) {
   const readFileSync = io.readFileSync ?? fsReadFileSync;
   const realpath = io.realpath ?? ((p) => p);
 
-  const rulesVersion = "td190-r2"; // R1-R7（R7=外国 harness 沙箱闭表）+ slug v1；规则演进时递增——
+  const rulesVersion = PROJECT_IDENTITY_RULES_VERSION; // 与 projectIdentity SSOT 同源（td190-r2：R1-R7+slug v1）——
   // 计划与未来写入侧的桶归属事实都携带该版本（opus 补强 1 的读侧对应物）。
 
   const out = {
     rulesVersion,
+    slugConflicts: [],
     buckets: [],
     scratchFileCount: 0,
     scratchBytes: 0,
@@ -98,21 +99,24 @@ export function planProjectsMigration({ runDir, io = {} }) {
       }
     } catch { /* 读取失败按非终态处理（fail-closed：不可证的绝不迁） */ }
 
-    // D2-②a（opus 补强#1）：首事件在档的归属**事实优先**（projectFactFromCwd
-    // 落档后的新 run 不再重推导——规则演进不拆旧桶）；legacy 无事实才推导。
-    // 事实的四 kind 形状与 identifyProjectFromCwd 输出同构（key/bucket/harness/
-    // worktreeName/repoHint/reason），直接按同构消费。
-    const recordedFact = first?.project && typeof first.project === "object" && typeof first.project.kind === "string"
-      ? first.project
-      : null;
-    const identity = recordedFact ?? identifyProjectFromCwd(first.cwd, {
+    // 终审 M2/F3：经共享校验入口 identityOfFirstEvent——在档事实优先（校验闭集
+    // 后采用；坏事实入 parseFailures 不静默掩盖），legacy 回退推导。list --project
+    // 同一入口，两侧语义不分叉。
+    const { identity, factError } = identityOfFirstEvent(first, {
       platform: io.platform ?? process.platform,
       realpath,
       tmpdir: io.tmpdir,
     });
+    if (factError !== null) {
+      out.parseFailures.push({ file, reason: `recorded project fact rejected: ${factError}` });
+      continue;
+    }
     const bucketSlugOf = (id) => (id.kind === "project"
       ? (id.bucket ?? deriveProjectBucketSlug({ kind: "project", key: id.key, displayName: id.displayName ?? basenameOf(id.key) }))
       : null);
+    // 终审 F2：同 key 不同在档 bucket（或事实与推导桶名分叉）不得静默合并——
+    // slugConflicts 如实上报（slug 冻结意图的边界：记录归属冻结，但冲突必须可见）。
+    const slugForThisFile = bucketSlugOf(identity);
 
     if (identity.kind === "unattributed") {
       out.unattributed.push({ file, reason: identity.reason ?? "unattributed (recorded fact)" });
@@ -137,7 +141,7 @@ export function planProjectsMigration({ runDir, io = {} }) {
     let bucket = bucketByKey.get(identity.key);
     if (!bucket) {
       bucket = {
-        slug: bucketSlugOf(identity),
+        slug: slugForThisFile,
         displayName: identity.displayName ?? basenameOf(identity.key),
         projectKey: identity.key,
         fileCount: 0,
@@ -146,6 +150,8 @@ export function planProjectsMigration({ runDir, io = {} }) {
       };
       bucketByKey.set(identity.key, bucket);
       out.buckets.push(bucket);
+    } else if (bucket.slug !== slugForThisFile) {
+      out.slugConflicts.push({ key: identity.key, bucketSlug: bucket.slug, conflictingSlug: slugForThisFile, file });
     }
     if (!TERMINAL_STATES.includes(state)) {
       bucket.skippedNonTerminal.push(file);

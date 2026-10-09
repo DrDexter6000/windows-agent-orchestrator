@@ -38,7 +38,8 @@ export const RUNS_RESERVED_DIRNAMES = Object.freeze([
 const WORKTREE_SEG_RE = /[\\/]\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/;
 // R7 外国 harness 沙箱闭表（opus+sol 会审 consult_20261009101128557nyuuys）：
 // 一个条目=已实测的 codex exec 沙箱。段锚定（同 R4 对 .wao-worktrees 的先例，
-// 不锚 homedir——CODEX_HOME 可重定向）；两段形状 <worktree>/<repo>（repo 可
+// 不锚 homedir——覆盖".codex 父目录搬迁"形态；注意 CODEX_HOME 整体重定向后
+// 路径不含 .codex 段则不命中，届时由生产 io 注入 codexHome 锚点补齐）；两段形状 <worktree>/<repo>（repo 可
 // 缺省）。**必须排在 R3 realpath 之前**：沙箱树被 harness 回收后 realpath 会
 // 失败，词法判定不受树死活影响（分类确定性——opus 实证两个已死沙箱）。新
 // harness 形状（zcode/claude 等）须实测路径后再入表；仓内嵌套形状
@@ -69,15 +70,21 @@ export function identifyProjectFromCwd(raw, io = {}) {
   //（保留纯盘符根 "D:/" 形状）。
   let p = raw.replace(/\\/g, "/");
   if (!/^[A-Za-z]:\/$/.test(p)) p = p.replace(/\/+$/, "");
-  // R6 显式相对当前目录 "."（历史转录实测 12 条）——无路径身份，不猜 cwd
+  // R6 相对路径无路径身份——不猜进程 cwd（opus 终审 M4：realpath 按进程 cwd
+  // 解析相对路径，归属会随进程漂移；"." 是历史实测 12 条的特例，其它相对
+  // 形状同判）。
   if (p === "." || p === "./" || p.length === 0) {
     return { kind: "unattributed", reason: "cwd is a bare relative '.' — no path identity" };
   }
   // R4 隔离工作树回溯到所属仓根（worktree 段本身可含子路径）。裸相对形态
   //（无前导分隔符，实测存量出现过 `.wao-worktrees/run_x`）剥离后没有可归因
   // 的仓根——如实 unattributed（相对 worktree 路径推不出所属项目，不猜 cwd）。
+  // ——特例判定在 M4 通相对门**之前**（更具体的事实先行）。
   if (/^\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/i.test(p)) {
     return { kind: "unattributed", reason: "cwd is a bare relative .wao-worktrees path — owning repo root not derivable" };
+  }
+  if (!/^[A-Za-z]:[\/]/.test(p) && !p.startsWith("/") && !p.startsWith("\\\\")) {
+    return { kind: "unattributed", reason: `cwd is a relative path (${raw}) — identity would depend on the resolving process cwd` };
   }
   p = p.replace(WORKTREE_SEGRE_SAFE(platform), "");
   // R7 外国 harness 沙箱（词法、闭表、先于 R5/R3=确定性——沙箱树被 harness
@@ -112,9 +119,11 @@ export function identifyProjectFromCwd(raw, io = {}) {
   }
   // R4 在 realpath 之后重放（junction 可能揭示 worktree 段）
   resolved = resolved.replace(WORKTREE_SEGRE_SAFE(platform), "");
-  // R2 win32 大小写折叠（键）；displayName 取原 basename
+  // R2 win32 大小写折叠（键）；displayName 取 **resolved** 路径的 basename
+  //（opus 终审 M5：取 realpath 之前的 basename 时，同 key 因原始写法/junction
+  // 别名分出两个桶——桶名确定性要求 displayName 与 key 同源）。
   const key = platform === "win32" ? resolved.toLowerCase() : resolved;
-  const displayNameRaw = basename(p.replace(/\/+$/, "")) || "project";
+  const displayNameRaw = basename(resolved.replace(/\/+$/, "")) || "project";
   return { kind: "project", key, displayName: sanitizeDisplayName(displayNameRaw) };
 }
 
@@ -145,10 +154,19 @@ export const PROJECT_IDENTITY_RULES_VERSION = "td190-r2";
 
 // 生产 IO 组装（写侧调用方用；测试注入自己的 io）。集中一处避免各调用点
 // 自行拼装造成 realpath/tmpdir 口径漂移。
-import { realpathSync as _realpathSync } from "node:fs";
+// M5：win32 下 native 形态返回盘上规范大小写（普通形态原样返回输入的
+// 大小写——displayName 派生会漂）；非 win32 两者同义。
+import { realpathSync as _realpathSyncPlain } from "node:fs";
+import { realpathSync as _realpathSyncNative } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
 export function productionProjectIo() {
-  return { realpath: _realpathSync, tmpdir: _tmpdir() };
+  const useNative = typeof process !== "undefined" && process.platform === "win32";
+  return {
+    realpath: useNative
+      ? (p) => _realpathSyncNative(p)
+      : (p) => _realpathSyncPlain(p),
+    tmpdir: _tmpdir(),
+  };
 }
 
 /**
@@ -168,6 +186,55 @@ export function projectFactFromCwd(rawCwd, io = productionProjectIo()) {
   if (id.kind === "sandbox") return { ...base, key: id.key, harness: id.harness, worktreeName: id.worktreeName, repoHint: id.repoHint };
   if (id.kind === "scratch") return { ...base, key: id.key };
   return { ...base, reason: id.reason };
+}
+
+// 终审 M3/F3：在档归属事实的校验闭集。bucket 安全形状=净化名段+短哈希后缀
+//（^[A-Za-z0-9._-]+-[0-9a-f]{8,}$）且非保留名——事实将来就是迁移清单的 to
+// 路径成分，不校验即注入面（opus 探针：kind:"remote" 产出 slug:null 桶、
+// bucket:"../../evil" 原样进计划）。
+export const PROJECT_FACT_KINDS = Object.freeze(["project", "sandbox", "scratch", "unattributed"]);
+const FACT_BUCKET_RE = /^[A-Za-z0-9._-]+-[0-9a-f]{8,}$/;
+
+/**
+ * 终审 M2/F3/F4 共享入口：首事件的归属判定——在档 project 事实优先（校验后
+ * 采用），坏事实显式报错（不静默回退掩盖损坏），legacy 无事实回退 cwd 推导。
+ * 计划器与 list --project 共用同一语义（规则改版两者不再分叉）。
+ *
+ * @returns {{identity: object, factError: string|null}}
+ *   identity = 四 kind 身份（与 identifyProjectFromCwd 输出同构）；
+ *   factError 非空 = 在档事实损坏（调用方决定入 parseFailures / 计数上报）。
+ */
+export function identityOfFirstEvent(first, io) {
+  const fact = first?.project;
+  if (fact && typeof fact === "object" && typeof fact.kind === "string") {
+    if (!PROJECT_FACT_KINDS.includes(fact.kind)) {
+      return { identity: { kind: "unattributed", reason: `recorded project fact has unknown kind ${JSON.stringify(fact.kind)}` }, factError: `unknown fact kind ${JSON.stringify(fact.kind)}` };
+    }
+    if (fact.kind === "project") {
+      if (typeof fact.key !== "string" || fact.key.length === 0
+        || typeof fact.bucket !== "string" || !FACT_BUCKET_RE.test(fact.bucket)) {
+        return { identity: { kind: "unattributed", reason: "recorded project fact malformed (key/bucket shape)" }, factError: "malformed project fact (key/bucket)" };
+      }
+      if (isReservedBucketSlug(fact.bucket)) {
+        return { identity: { kind: "unattributed", reason: `recorded bucket ${fact.bucket} is a reserved name` }, factError: "reserved bucket name in fact" };
+      }
+      return { identity: { ...fact }, factError: null };
+    }
+    if (fact.kind === "sandbox") {
+      if (fact.key !== "_sandbox" || typeof fact.harness !== "string" || typeof fact.worktreeName !== "string") {
+        return { identity: { kind: "unattributed", reason: "recorded sandbox fact malformed" }, factError: "malformed sandbox fact" };
+      }
+      return { identity: { ...fact }, factError: null };
+    }
+    if (fact.kind === "scratch") {
+      if (fact.key !== "_scratch") {
+        return { identity: { kind: "unattributed", reason: "recorded scratch fact malformed" }, factError: "malformed scratch fact" };
+      }
+      return { identity: { ...fact }, factError: null };
+    }
+    return { identity: { kind: "unattributed", reason: typeof fact.reason === "string" ? fact.reason : "unattributed (recorded fact)" }, factError: null };
+  }
+  return { identity: identifyProjectFromCwd(first?.cwd, io ?? productionProjectIo()), factError: null };
 }
 
 /**
