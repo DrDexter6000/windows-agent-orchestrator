@@ -24,6 +24,7 @@
 import { readdir, unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
+import { tmpdir } from "node:os";
 
 import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES, transcriptPathFor } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
@@ -34,6 +35,7 @@ import { isValidRunId } from "../delivery.js";
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
+import { planProjectsMigration } from "../application/runsMigrateProjects.js";
 // M9-6A: delivery query/decision delegated to shared application services.
 // M11-10: readiness/wait delegated to the SAME shared service the MCP tool uses.
 import {
@@ -103,6 +105,7 @@ import { readRegistry } from "../registry.js";
 export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
   "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit",
+  "migrate-projects",
 ];
 
 async function runsCommand(args, config, deps) {
@@ -153,6 +156,23 @@ async function runsCommand(args, config, deps) {
   }
   if (sub === "verify-commit") {
     await runsVerifyCommitCommand(tail, config, deps);
+    return;
+  }
+  if (sub === "migrate-projects") {
+    // TD-190 D3：存量分桶迁移计划——dry-run 唯一形态（物理迁移须 Owner 显式
+    // 点名后另窗执行，本命令不提供 --execute）。
+    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: { tmpdir: tmpdir() } });
+    console.log(`[migrate-projects] rules=${plan.rulesVersion} DRY-RUN（只读，零写入；实迁须 Owner 显式点名）`);
+    console.log(`  扫描根层转录 ${plan.scanned} 个；保留目录跳过：${plan.reservedDirsSkipped.join(", ") || "无"}`);
+    for (const b of plan.buckets) {
+      console.log(`  桶 ${b.slug}  项目键 ${b.projectKey}  ${b.fileCount} 文件 / ${(b.bytes / 1024).toFixed(1)} KB${b.skippedNonTerminal.length ? `  （非终态跳过 ${b.skippedNonTerminal.length}：${b.skippedNonTerminal.slice(0, 3).join(", ")}${b.skippedNonTerminal.length > 3 ? "…" : ""}）` : ""}`);
+    }
+    console.log(`  scratch 桶 ${plan.scratchFileCount} 文件 / ${(plan.scratchBytes / 1024).toFixed(1)} KB`);
+    console.log(`  无法归因 ${plan.unattributed.length} 个（"." / 缺失 cwd / realpath 失效）${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
+    if (plan.parseFailures.length) {
+      console.log(`  解析失败 ${plan.parseFailures.length} 个（首事件形状异常，如实列出）：`);
+      for (const f of plan.parseFailures.slice(0, 5)) console.log(`    ${f.file}: ${f.reason}`);
+    }
     return;
   }
   if (sub === "forecast") {

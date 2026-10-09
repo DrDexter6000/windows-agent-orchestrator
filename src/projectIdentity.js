@@ -61,7 +61,12 @@ export function identifyProjectFromCwd(raw, io = {}) {
   if (p === "." || p === "./" || p.length === 0) {
     return { kind: "unattributed", reason: "cwd is a bare relative '.' — no path identity" };
   }
-  // R4 隔离工作树回溯到所属仓根（worktree 段本身可含子路径）
+  // R4 隔离工作树回溯到所属仓根（worktree 段本身可含子路径）。裸相对形态
+  //（无前导分隔符，实测存量出现过 `.wao-worktrees/run_x`）剥离后没有可归因
+  // 的仓根——如实 unattributed（相对 worktree 路径推不出所属项目，不猜 cwd）。
+  if (/^\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/i.test(p)) {
+    return { kind: "unattributed", reason: "cwd is a bare relative .wao-worktrees path — owning repo root not derivable" };
+  }
   p = p.replace(WORKTREE_SEGRE_SAFE(platform), "");
   // R5 系统临时目录 → scratch（一次性探针目录不占项目桶）
   const tmp = (io.tmpdir ?? defaultTmpdir(platform)).replace(/\\/g, "/").toLowerCase();

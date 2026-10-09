@@ -61,6 +61,11 @@ test("TD-190 D1 R4: .wao-worktrees/<runId> 回溯到所属仓根（隔离工作�
   // worktree 段可含子路径
   const r2 = identity("D:/projects/wao/.wao-worktrees/run_x/sub/dir");
   assert.equal(r2.key, "d:/projects/wao");
+  // 真实存量冒烟（dry-run 实跑抓到的形状）：裸相对 .wao-worktrees 路径剥不出
+  // 仓根——unattributed，不猜。
+  const bare = identity(".wao-worktrees/run_20260920143049316b9leob");
+  assert.equal(bare.kind, "unattributed");
+  assert.match(bare.reason, /bare relative \.wao-worktrees/);
 });
 
 test("TD-190 D1 R3: junction 经 realpath 解析（解析失败=unattributed 不静默用未解析键）", () => {
