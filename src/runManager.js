@@ -1114,6 +1114,7 @@ export class RunManager {
     let resolvedTranscriptPath = null;
     let selfWrite = null; // 自决新桶的 {identity, write}——事实绑定用（M1）
     let claimedSelfRun = false; // 复验 F1：claim 生命周期标记
+    let claimNonceSelf = null; // 三轮 sol①：释放校验持有者（claim 文件回读）
     if (typeof transcriptDir === "string" && transcriptDir.length > 0) {
       resolvedTranscriptPath = transcriptPathFor(resolve(transcriptDir), finalRunId);
     } else {
@@ -1123,8 +1124,9 @@ export class RunManager {
         if (e?.code !== "transcript-not-found") throw e;
         if (transcriptLegacyFlat === true) {
           resolvedTranscriptPath = transcriptPathFor(dir, finalRunId);
-        } else if (claimRunIdForWrite(dir, finalRunId)) {
+        } else if (claimRunIdForWrite(dir, finalRunId).claimed) {
           claimedSelfRun = true; // 复验 F1：run.started 落盘即释放（见下方 finally）
+          claimNonceSelf = claimRunIdNonceOf(dir, finalRunId); // 三轮 sol①：持有者标识
           const startIdentity = identifyProjectFromCwd(typeof agent?.cwd === "string" ? agent.cwd : "", productionProjectIo());
           const startWrite = resolveRunDirForWrite(dir, startIdentity);
           selfWrite = { identity: startIdentity, write: startWrite };
@@ -1403,7 +1405,7 @@ export class RunManager {
       } : {}),
     });
     } finally {
-      if (claimedSelfRun) releaseRunIdClaim(dir, finalRunId);
+      if (claimedSelfRun) releaseRunIdClaim(dir, finalRunId, { nonce: claimNonceSelf });
     }
     // Round 4 Bundle B: the read-only DECLARATION durable fact — written at
     // start, exactly once (the append is an idempotent CAS, so the foreground
@@ -3589,4 +3591,16 @@ function _auditEvidenceOnFailure(evidence, messages) {
   // passed = 有产出证据（文件写入 或 命令成功）——任一即说明 worker 做了实事
   const passed = a.hasFileWritten || a.hasCommandExit0;
   return { passed, checks };
+}
+
+
+// 三轮 sol①：从 claim 文件回读 nonce（claimRunIdForWrite 返回对象被
+// else-if 条件消费后，释放路径仍需持有者标识——回读自盘上真值）。
+function claimRunIdNonceOf(runDir, runId) {
+  try {
+    const raw = readFileSync(join(runDir, ".claims", runId), "utf8");
+    return JSON.parse(raw)?.nonce ?? null;
+  } catch {
+    return null;
+  }
 }

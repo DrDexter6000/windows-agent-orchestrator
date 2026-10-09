@@ -855,3 +855,34 @@ test("D2-②b F1: 复检门拒绝后同 runId 重试可 accepted，claim 零残�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 三轮 sol⑥：argv 终检必须覆盖**既有档复用分支**（--transcript-dir 同样
+// 追加；修前该分支漏检，24041>24000 仍 accepted）。
+test("D2-②b 三轮 sol⑥: 复用分支同样过最终 argv 门", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-argv4-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    const runDir = join(dir, "runs");
+    const runId = "run_reuse_gate";
+    // 建档：短 prompt 首发成功（转录落位）
+    const first = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId });
+    assert.equal(first.accepted, true);
+    const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
+    const args = calls[calls.length - 1].args;
+    const totalProbe = totalOf(args);
+    const tdIdx = args.indexOf("--transcript-dir");
+    const tdPair = "--transcript-dir".length + 1 + String(args[tdIdx + 1]).length + 1;
+    const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2);
+    // 复用分支（同 runId 已有档）+ 超长 prompt → 必须拒（修前漏检）
+    await assert.rejects(
+      dispatchRun({ agentId: "coder_low", prompt: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId }),
+      /argv too long after transcript-dir/,
+      "复用分支也过最终门（sol 探针：24041 曾 accepted）",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

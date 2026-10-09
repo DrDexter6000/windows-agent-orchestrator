@@ -13,6 +13,7 @@
 //   - 枚举：listTranscriptsDeep 两层、根层原序、.index.json 非桶。
 //   - 事实：projectFactForWrite 记最终写位（扩长后与目录一致）；readFirstProjectFact。
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -308,9 +309,9 @@ test("D2-②b 验收批S3: 快命中遇扫描超限 → 可观测降级；无快
 test("D2-②b 验收批竞态: .claims 中心原子仲裁——同 runId 只有一个写者胜出", () => {
   const root = makeRoot("wao-pb-v8-");
   try {
-    assert.equal(claimRunIdForWrite(root, "run_race_1"), true, "首个写者 wx 成功");
-    assert.equal(claimRunIdForWrite(root, "run_race_1"), false, "并发第二写者 EEXIST 被拒");
-    assert.equal(claimRunIdForWrite(root, "run_race_2"), true, "不同 runId 互不影响");
+    assert.equal(claimRunIdForWrite(root, "run_race_1").claimed, true, "首个写者 wx 成功");
+    assert.equal(claimRunIdForWrite(root, "run_race_1").claimed, false, "并发第二写者 EEXIST 被拒");
+    assert.equal(claimRunIdForWrite(root, "run_race_2").claimed, true, "不同 runId 互不影响");
     assert.ok(existsSync(join(root, ".claims", "run_race_1")), "claim 标记落中心根");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -323,11 +324,16 @@ test("D2-②b 复验 F1: 陈旧 claim 可抢占（泄漏自愈），新鲜 claim
   const root = makeRoot("wao-pb-f1-");
   try {
     const claimPath = join(root, ".claims", "run_stale");
-    assert.equal(claimRunIdForWrite(root, "run_stale"), true);
-    assert.equal(claimRunIdForWrite(root, "run_stale"), false, "新鲜 claim 拒绝第二写者");
+    const c1 = claimRunIdForWrite(root, "run_stale");
+    assert.equal(c1.claimed, true);
+    assert.ok(c1.nonce, "claim 携带持有者 nonce");
+    assert.equal(claimRunIdForWrite(root, "run_stale").claimed, false, "新鲜 claim 拒绝第二写者");
+    // 三轮 sol①：释放校验持有者——nonce 不匹配不删（慢持有者护不住抢占者）
+    releaseRunIdClaim(root, "run_stale", { nonce: "wrong-nonce" });
+    assert.equal(existsSync(claimPath), true, "nonce 不匹配不删");
     const old = new Date(Date.now() - 11 * 60_000);
     utimesSync(claimPath, old, old);
-    assert.equal(claimRunIdForWrite(root, "run_stale"), true, "陈旧 claim 被抢占（泄漏自愈）");
+    assert.equal(claimRunIdForWrite(root, "run_stale").claimed, true, "陈旧 claim 被抢占（泄漏自愈）");
     releaseRunIdClaim(root, "run_stale");
     assert.equal(existsSync(claimPath), false, "释放后标记消失");
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -363,5 +369,73 @@ test("D2-②b 复验 F3: 下划线开头 displayName 的桶经索引正常确认
     assert.equal(entries[id.key], w1.bucket);
     const w2 = resolveRunDirForWrite(root, id);
     assert.equal(w2.bucket, w1.bucket, "二次写沿用（无强制重建回路）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 三轮复验钉（consult_…uklc4i：R1 索引缺 key/sol② 重建吞不可读/sol① 原子抢占）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 三轮 R1: 索引缺 key → 重建后沿用冻结桶（不按现行推导另建）", () => {
+  const root = makeRoot("wao-pb-r1-");
+  try {
+    const dirA = join(root, "repo-x");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w = resolveRunDirForWrite(root, id); // 建 8-hex 桶并写索引
+    // 伪造"冻结桶"：同 key 的 12-hex slug 桶（记录完好）+ 索引丢失该 key
+    //（模拟 saveBucketIndex 并发丢条目——opus 探针形状）。
+    const hash12 = createHash("sha256").update(id.key).digest("hex").slice(0, 12);
+    const frozenSlug = `${id.displayName}-${hash12}`;
+    const frozenDir = join(root, "projects", frozenSlug);
+    mkdirSync(frozenDir, { recursive: true });
+    writeFileSync(join(frozenDir, ".project.json"),
+      JSON.stringify({ key: id.key, slug: frozenSlug, displayName: id.displayName, rulesVersion: "td190-r2", createdAt: new Date().toISOString(), aliases: [] }), "utf8");
+    const idxPath = join(root, "projects", ".index.json");
+    const idx = JSON.parse(readFileSync(idxPath, "utf8"));
+    delete idx.entries[id.key];
+    writeFileSync(idxPath, JSON.stringify(idx), "utf8");
+    // 修前：缺 key 直接新建（8-hex）→ 同 key 双桶；修后：重建找到冻结桶沿用。
+    // opus 探针原形：现场只有冻结桶（清掉探针自建的 8-hex 桶与它的索引条目）。
+    rmSync(join(root, "projects", w.bucket), { recursive: true, force: true });
+    const w2 = resolveRunDirForWrite(root, id);
+    assert.equal(w2.bucket, frozenSlug, "索引缺 key 也经权威重建沿用冻结桶（R1）");
+    const same = readdirSync(join(root, "projects")).filter((b) => b.startsWith(`${id.displayName}-`));
+    assert.deepEqual(same, [frozenSlug], "同 key 只有一个桶（未按现行推导另建 8-hex）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 三轮 sol②: 重建遇不可读权威记录 → 写侧硬错（缓存损坏不拆 key）", () => {
+  const root = makeRoot("wao-pb-s2-");
+  try {
+    const dirA = join(root, "repo-rb");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w = resolveRunDirForWrite(root, id);
+    // 损坏缓存索引 + 该桶 .project.json 持续不可读（sol 探针形状）
+    writeFileSync(join(root, "projects", ".index.json"), "{corrupt", "utf8");
+    const recPath = join(w.transcriptDir, ".project.json");
+    const realRead = readFileSync;
+    const badIo = { readFileSync: (p, ...rest) => { if (String(p) === recPath) { const e = new Error("EACCES"); e.code = "EACCES"; throw e; } return realRead(p, ...rest); } };
+    assert.throws(() => resolveRunDirForWrite(root, { ...id, displayName: "current-name" }, { io: badIo }),
+      (e) => e.code === "transcript-resolution-conflict" && /unreadable during index rebuild/.test(e.message),
+      "重建遇不可读权威记录=写侧硬错（修前：吞掉+换名另建桶）");
+    const buckets = readdirSync(join(root, "projects")).filter((b) => !b.startsWith("."));
+    assert.equal(buckets.length, 1, "未另建第二桶");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 三轮 sol①: 抢占原子性——陈旧 claim 双抢占者只有一个胜出", () => {
+  const root = makeRoot("wao-pb-a1-");
+  try {
+    const claimPath = join(root, ".claims", "run_atomic");
+    assert.equal(claimRunIdForWrite(root, "run_atomic").claimed, true);
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    // 模拟交错：A 先 stat（见陈旧）→ B 完整抢占成功 → A 才走 unlink+wx。
+    // unlink 后 B 的 claim 已不在（B 持有）→ A 的 wx 撞 EEXIST → 唯一胜者 B。
+    const results = [];
+    for (let k = 0; k < 2; k++) results.push(claimRunIdForWrite(root, "run_atomic").claimed);
+    assert.equal(results.filter(Boolean).length, 1, `双抢占者恰一个胜出（实测 ${JSON.stringify(results)}）`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

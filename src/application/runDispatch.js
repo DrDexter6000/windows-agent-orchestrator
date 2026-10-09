@@ -850,41 +850,51 @@ export async function dispatchRun({
   let writeTarget = null;
   let transcriptPath;
   let claimed = false; // 复验 F1：claim 成功→首条事实落盘窗口标记
+  let claimNonce = null; // 三轮 sol①：持有者标识（释放校验）
   try {
     transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
     runnerArgs.push("--transcript-dir", dirname(transcriptPath));
   } catch (e) {
     if (e?.code !== "transcript-not-found") throw e;
-    if (!claimRunIdForWrite(resolvedRunDir, finalRunId)) {
-      // 并发写者正在建同 runId：按既有档重解析一次；仍找不到=如实冲突。
+    const claim = claimRunIdForWrite(resolvedRunDir, finalRunId);
+    if (!claim.claimed) {
+      // 并发写者正在建同 runId：按既有档重解析一次；仍找不到=如实冲突（附
+      // claim 年龄与 TTL 提示——三轮 R3：中段泄漏的报错不得误导为永久并发）。
+      let claimAgeNote = "";
+      try {
+        const age = Date.now() - statSync(join(resolvedRunDir, ".claims", finalRunId)).mtimeMs;
+        if (Number.isFinite(age)) claimAgeNote = ` (existing claim age ${Math.round(age / 1000)}s; stale claims self-heal after 600s)`;
+      } catch { /* claim 已消失=纯竞态窗口 */ }
       try {
         transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
         runnerArgs.push("--transcript-dir", dirname(transcriptPath));
       } catch {
         throw new TranscriptResolutionError("transcript-resolution-conflict",
-          `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check`);
+          `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check${claimAgeNote}`);
       }
     } else {
       // 复验 F1：claim 生命周期=仲裁成功→首条事实落盘（background_submitted）。
       // 窗口内任何抛错（含下方零副作用拒绝）都释放；落盘后同 runId 走既有档
-      // 分支，claim 即废（不留永久标记、不阻断同 runId 重试）。
+      // 分支，claim 即废。释放只删自己的 claim（nonce 持有者校验）。
+      claimNonce = claim.nonce;
       try {
         writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);
         transcriptPath = transcriptPathFor(writeTarget.transcriptDir, finalRunId);
         runnerArgs.push("--transcript-dir", writeTarget.transcriptDir);
-        // 验收批必改⑥：--transcript-dir 追加后对**最终完整 argv** 复检长度门
-        //（首个门在转录写入之前，只约束当时已在场的参数）。
-        {
-          const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
-          if (finalArgvLen > ARGV_MAX_TOTAL) {
-            throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
-          }
-        }
         claimed = true;
       } catch (e2) {
-        releaseRunIdClaim(resolvedRunDir, finalRunId);
+        releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
         throw e2;
       }
+    }
+  }
+  // 三轮 sol⑥：argv 终检覆盖**所有路径决定分支**（既有档复用分支同样在
+  // --transcript-dir 追加后必须复查——只查新建分支曾漏检 24041>24000）。
+  {
+    const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+    if (finalArgvLen > ARGV_MAX_TOTAL) {
+      if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
+      throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
     }
   }
 
@@ -894,7 +904,7 @@ export async function dispatchRun({
   try {
     transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
   } catch (e3) {
-    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
+    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
     throw e3;
   }
 
@@ -924,13 +934,13 @@ export async function dispatchRun({
       : projectFactFromCwd(ownershipCwd ?? cwd),
     });
   } catch (e4) {
-    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
+    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
     throw e4;
   }
 
   // 复验 F1：首条持久事实已落盘——同 runId 的并发写者此后经既有档分支可
   // 见本档，claim 使命完成即释放（不残留、不阻断后续同名新档仲裁）。
-  if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
+  if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
 
   // pending via transitionState — first-terminal-wins arbitration. If the
   // runId was reused against an already-terminal transcript, this is rejected
