@@ -1,4 +1,5 @@
 import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
@@ -39,6 +40,14 @@ export const TERMINAL_STATES = ["completed", "failed", "aborted", "timed_out"];
  */
 export function transcriptPathFor(runDir, runId) {
   return join(runDir, `${runId}.jsonl`);
+}
+
+/**
+ * TD-190 D0：转录文件枚举的唯一入口，返回文件名（保持 readdir 原序）。
+ * 仅过滤 .jsonl 后缀；run_ 前缀等更窄条件与排序保持在调用方，行为不收窄。
+ */
+export function listTranscriptFiles(runDir) {
+  return readdirSync(runDir).filter((name) => name.endsWith(".jsonl"));
 }
 
 // Round 4 Bundle A（2026-08-16，Owner 批准的冻结契约——TD-120 豁免款）：

@@ -15,10 +15,10 @@
 //   - Reuses transcript readTranscript/findState, isValidRunId, and the
 //     query-scoped workspace verifier SSOT.
 
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 
-import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
+import { readTranscript, findState, RUN_STATES, TERMINAL_STATES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
@@ -44,9 +44,9 @@ export const ACTIVITY_BASES = [
  */
 function scanRunFiles(runDir) {
   if (!existsSync(runDir)) return [];
-  const files = readdirSync(runDir);
+  const files = listTranscriptFiles(runDir);
   return files
-    .filter((f) => f.startsWith("run_") && f.endsWith(".jsonl"))
+    .filter((f) => f.startsWith("run_"))
     .sort();
 }
 
@@ -338,7 +338,7 @@ export async function listRuns(input) {
   let candidates;
   if (scanScope === "active") {
     candidates = scanOwnerLeaseCandidates(resolvedRunDir)
-      .map((runId) => ({ runId, file: `${runId}.jsonl` }));
+      .map((runId) => ({ runId, file: basename(transcriptPathFor(resolvedRunDir, runId)) }));
   } else {
     candidates = scanRunFiles(resolvedRunDir)
       .map((file) => ({ runId: file.replace(/\.jsonl$/, ""), file }));

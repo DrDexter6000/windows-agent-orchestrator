@@ -14,19 +14,19 @@
 //   - 共享 service：../application/runWait.js（runs wait 与 MCP run_wait 同一
 //     等待服务）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd，纯函数）
-//   - node built-in：fs/promises（readdir/unlink/mkdir/rename/stat）、fs
+//   - node built-in：fs/promises（unlink/mkdir/rename/stat）、fs
 //     （existsSync）、path（join/resolve/dirname）
 //
 // 本模块内部 helper：parseDuration（runs prune --older-than 与 runs list
 // --since 共用的唯一 duration 解析器，TD-153 提为导出）、loadRunFiles（runs 族
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
-import { readdir, unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
+import { unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
-import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES, transcriptPathFor } from "../transcript.js";
+import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
 // R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
 // isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
@@ -477,8 +477,8 @@ export function sortRunFileNames(names) {
 
 async function loadRunFiles(runDir) {
   if (!existsSync(runDir)) return [];
-  const files = await readdir(runDir);
-  return sortRunFileNames(files.filter((f) => f.endsWith(".jsonl")));
+  const files = listTranscriptFiles(runDir);
+  return sortRunFileNames(files);
 }
 
 /**

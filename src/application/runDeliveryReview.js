@@ -562,8 +562,7 @@ export async function getRunDeliveryReview(
     throw new Error("authorizedWorkspaceRoot must be a non-empty string");
   }
   const _readTranscriptForGate = hostDependencies.readTranscriptFn ?? readTranscript;
-  const { join: _pathJoin } = await import("node:path");
-  const _gateFilePath = _pathJoin(runDir, `${runId}.jsonl`);
+  const _gateFilePath = transcriptPathFor(runDir, runId);
   let _gateEvents;
   try {
     _gateEvents = await _readTranscriptForGate(_gateFilePath);

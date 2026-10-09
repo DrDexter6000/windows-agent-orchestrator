@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { createServer, createConnection as netCreateConnection } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
-import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor, listTranscriptFiles } from "./transcript.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
@@ -93,10 +93,9 @@ export function isDaemonAlive(handshake, now, thresholdMs = DEFAULT_LIVENESS_THR
  */
 export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS) {
   if (!existsSync(runDir)) return [];
-  const files = readdirSync(runDir);
+  const files = listTranscriptFiles(runDir);
   const resumable = [];
   for (const file of files) {
-    if (!file.endsWith(".jsonl")) continue;
     const runId = file.replace(/\.jsonl$/, "");
     try {
       const raw = readFileSync(join(runDir, file), "utf8");
@@ -143,10 +142,9 @@ export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAUL
  */
 export function scanAllRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS, daemonOwnedSet = new Set()) {
   if (!existsSync(runDir)) return [];
-  const files = readdirSync(runDir);
+  const files = listTranscriptFiles(runDir);
   const runs = [];
   for (const file of files) {
-    if (!file.endsWith(".jsonl")) continue;
     const runId = file.replace(/\.jsonl$/, "");
     try {
       const raw = readFileSync(join(runDir, file), "utf8");
