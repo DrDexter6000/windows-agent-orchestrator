@@ -3119,7 +3119,7 @@ test("D2-②b M1b: project-kind 自决桶 → 事实沿冻结 slug（≠现行�
     assert.equal(started.project.bucket, frozenSlug, "事实 bucket=冻结 slug（M1b 核心：经 manager 落档的分叉用例）");
     assert.equal(started.project.bucket, basename(dirname(run.transcript.filePath)), "事实=实际目录");
     // 三轮 R3：manager 侧 claim 释放有钉——run.started 落盘后 .claims 零残留。
-    assert.equal(existsSync(join(runDir, ".claims", "run_m1b_fact")), false, "manager claim 已释放（run.started 落盘）");
+    assert.ok(existsSync(join(runDir, ".claims", "run_m1b_fact.g0.released")), "manager claim 已释放（run.started 落盘→g0.released 标记——八轮 R7-a：manager 侧释放从此有真钉）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

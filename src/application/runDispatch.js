@@ -868,7 +868,7 @@ export async function dispatchRun({
         runnerArgs.push("--transcript-dir", dirname(transcriptPath));
       } catch {
         throw new TranscriptResolutionError("transcript-resolution-conflict",
-          `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check${claimAgeNote}`);
+          `runId ${finalRunId} concurrently claimed by another writer (or claim I/O failure — permission/disk) and not resolvable after re-check${claimAgeNote}`);
       }
     } else {
       // 复验 F1：claim 生命周期=仲裁成功→首条事实落盘（background_submitted）。

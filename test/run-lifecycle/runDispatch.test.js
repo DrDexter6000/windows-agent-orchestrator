@@ -846,11 +846,11 @@ test("D2-②b F1: 复检门拒绝后同 runId 重试可 accepted，claim 零残�
       dispatchRun({ agentId: "coder_low", prompt: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId }),
       /argv too long after transcript-dir/,
     );
-    assert.equal(existsSync(join(runDir, ".claims", customRunId)), false, "拒绝后 claim 零残留（F1 核心）");
+    assert.ok(existsSync(join(runDir, ".claims", `${customRunId}.g0.released`)), "拒绝路径 claim 已释放（g0.released——代文件按终法永不删除，八轮 R7-a 语义）");
     // 第二次：同 runId、短 prompt → accepted（修前=永久 concurrently claimed）
     const retry = await dispatchRun({ agentId: "coder_low", prompt: "short", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId });
     assert.equal(retry.accepted, true, "同 runId 重试 accepted");
-    assert.equal(existsSync(join(runDir, ".claims", customRunId)), false, "首条事实落盘后 claim 已释放");
+    assert.ok(existsSync(join(runDir, ".claims", `${customRunId}.g0.released`)), "首条事实落盘后持有代已标记释放（八轮 R7-a：改断真路径）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

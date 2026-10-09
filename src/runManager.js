@@ -1143,7 +1143,7 @@ export class RunManager {
             const ageMs = claimAgeMs(dir, finalRunId);
             if (ageMs !== null) claimAgeNote = ` (existing claim age ${Math.round(ageMs / 1000)}s; stale claims self-heal after 600s)`;
             throw new TranscriptResolutionError("transcript-resolution-conflict",
-              `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check${claimAgeNote}`);
+              `runId ${finalRunId} concurrently claimed by another writer (or claim I/O failure — permission/disk) and not resolvable after re-check${claimAgeNote}`);
           }
           }
         }
