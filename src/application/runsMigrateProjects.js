@@ -33,7 +33,7 @@ export function planProjectsMigration({ runDir, io = {} }) {
   const readFileSync = io.readFileSync ?? fsReadFileSync;
   const realpath = io.realpath ?? ((p) => p);
 
-  const rulesVersion = "td190-r1"; // R1-R6 + slug v1（D1）；规则演进时递增——
+  const rulesVersion = "td190-r2"; // R1-R7（R7=外国 harness 沙箱闭表）+ slug v1；规则演进时递增——
   // 计划与未来写入侧的桶归属事实都携带该版本（opus 补强 1 的读侧对应物）。
 
   const out = {
@@ -41,6 +41,9 @@ export function planProjectsMigration({ runDir, io = {} }) {
     buckets: [],
     scratchFileCount: 0,
     scratchBytes: 0,
+    sandboxFileCount: 0,
+    sandboxBytes: 0,
+    sandboxHarnesses: [],
     unattributed: [],
     reservedDirsSkipped: [],
     scanned: 0,
@@ -109,6 +112,15 @@ export function planProjectsMigration({ runDir, io = {} }) {
       if (!TERMINAL_STATES.includes(state)) continue; // 非终态一律跳过（各桶同规则）
       out.scratchFileCount += 1;
       out.scratchBytes += fileSizeOf(statSync, runDir, file);
+      continue;
+    }
+    if (identity.kind === "sandbox") {
+      // R7：真活不是探针——独立 _sandbox 桶（与 scratch 分开），非终态同规则跳过。
+      if (!TERMINAL_STATES.includes(state)) continue;
+      out.sandboxFileCount += 1;
+      out.sandboxBytes += fileSizeOf(statSync, runDir, file);
+      const tag = `${identity.harness}:${identity.worktreeName}${identity.repoHint ? `→${identity.repoHint}` : ""}`;
+      if (!out.sandboxHarnesses.includes(tag)) out.sandboxHarnesses.push(tag);
       continue;
     }
     // kind === "project"

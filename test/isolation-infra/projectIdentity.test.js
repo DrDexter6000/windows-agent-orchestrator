@@ -106,7 +106,7 @@ test("TD-190 D1 slug: displayName 净化 + 哈希绑定完整键", () => {
 });
 
 test("TD-190 D1 slug 保留名防御: runs 保留目录与 Windows 设备名不得成为桶名", () => {
-  for (const reserved of ["reliability", "verify", "smoke", "projects", "_scratch"]) {
+  for (const reserved of ["reliability", "verify", "smoke", "projects", "_scratch", "_sandbox"]) {
     assert.equal(isReservedBucketSlug(reserved), true, reserved);
   }
   // 正常 slug（带哈希后缀）不误伤
@@ -116,4 +116,36 @@ test("TD-190 D1 slug 保留名防御: runs 保留目录与 Windows 设备名不�
   // Windows 设备名裸形拒绝
   assert.equal(isReservedBucketSlug("con"), true);
   assert.equal(isReservedBucketSlug("aux-1a2b3c4d"), true, "con/aux 等设备名即使带后缀也拒绝（防御性）");
+});
+
+// R7（2026-10-09 opus+sol 会审 consult_20261009101128557nyuuys）：外国 harness
+// 沙箱闭表。确定性锚点：沙箱树已被 harness 回收（本机实测两例）——词法判定
+// 不得依赖 realpath 成败。
+test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死树恒定）", () => {
+  const dead = identity("C:\\Users\\17865\\.codex\\worktrees\\filesystem-eight\\windows-agent-orchestrator-poc", {
+    realpath: () => { throw new Error("ENOENT — sandbox reclaimed by harness"); },
+  });
+  assert.equal(dead.kind, "sandbox");
+  assert.equal(dead.key, "_sandbox");
+  assert.equal(dead.harness, "codex");
+  assert.equal(dead.worktreeName, "filesystem-eight");
+  assert.equal(dead.repoHint, "windows-agent-orchestrator-poc", "repoHint=词法第二段，是 hint 不是归属");
+  // 仓内更深 cwd 同样命中（两段之后任意深度）
+  const deep = identity("C:/Users/17865/.codex/worktrees/623d/my-repo/src/x", { realpath: () => { throw new Error("dead"); } });
+  assert.equal(deep.kind, "sandbox");
+  assert.equal(deep.repoHint, "my-repo");
+  // 段锚定不锚 homedir（CODEX_HOME 重定向容忍）+ 大小写不敏感
+  const redirected = identity("E:/alt-home/.codex/Worktrees/x/Some-Repo");
+  assert.equal(redirected.kind, "sandbox");
+  // 只有一段（无 repo）也可判，repoHint=null
+  const noRepo = identity("E:/alt-home/.codex/worktrees/only-name");
+  assert.equal(noRepo.kind, "sandbox");
+  assert.equal(noRepo.repoHint, null);
+  // 沙箱内嵌 WAO 工作树：先剥 .wao-worktrees 再判 R7（opus 顺序）
+  const nested = identity("C:/Users/17865/.codex/worktrees/wt1/repo/.wao-worktrees/run_x", { realpath: () => { throw new Error("dead"); } });
+  assert.equal(nested.kind, "sandbox");
+  assert.equal(nested.repoHint, "repo");
+  // 非沙箱路径不受影响（普通项目/死路径仍走 R3 语义）
+  const normal = identity("D:/projects/windows-agent-orchestrator-poc");
+  assert.equal(normal.kind, "project");
 });

@@ -13,6 +13,8 @@
 //   R5 系统临时目录（os.tmpdir 形状）→ scratch 桶（一次性探针目录不占项目桶）
 //   R6 "."/空/缺失 → unattributed（**身份缺失 ≠ 原路径失效**，两类事实分开，
 //      不把无法 realpath 的历史路径静默归入 scratch）
+//   R7 外国 harness 沙箱（闭表，当前仅 codex exec）→ _sandbox 桶（词法判定，
+//      排在 R3 前=不受沙箱树死活影响；与 scratch 分开——沙箱里是真活不是探针）
 //
 // 架构契约：core 纯函数；不 import src/commands/*、src/mcp/*、SDK、zod；
 // filesystem 只经注入的 realpath（测试可控，生产传 node:fs realpathSync）。
@@ -30,10 +32,20 @@ const WINDOWS_RESERVED = new Set([
 ]);
 export const RUNS_RESERVED_DIRNAMES = Object.freeze([
   "reliability", "verify", "smoke", "projects", "_unattributed", "_scratch",
-  ".session-reuse", ".lineage-reuse",
+  "_sandbox", ".session-reuse", ".lineage-reuse",
 ]);
 
 const WORKTREE_SEG_RE = /[\\/]\.wao-worktrees[\\/][^\\/]+(?:[\\/].*)?$/;
+// R7 外国 harness 沙箱闭表（opus+sol 会审 consult_20261009101128557nyuuys）：
+// 一个条目=已实测的 codex exec 沙箱。段锚定（同 R4 对 .wao-worktrees 的先例，
+// 不锚 homedir——CODEX_HOME 可重定向）；两段形状 <worktree>/<repo>（repo 可
+// 缺省）。**必须排在 R3 realpath 之前**：沙箱树被 harness 回收后 realpath 会
+// 失败，词法判定不受树死活影响（分类确定性——opus 实证两个已死沙箱）。新
+// harness 形状（zcode/claude 等）须实测路径后再入表；仓内嵌套形状
+//（<repo>/.claude/worktrees/<x> 一类）属 R4 回溯族，不入本表。
+const HARNESS_SANDBOX_SEGMENTS = Object.freeze([
+  Object.freeze({ harness: "codex", re: /(^|\/)\.codex\/worktrees\/([^/]+)(?:\/([^/]+))?(?:\/.*)?$/i }),
+]);
 // 净化后显示名长度帽：覆盖常见仓名（如本仓 30 字符）仍留余量；总桶名 =
 // 显示名 + '-' + 8 hex，Windows 路径预算内。
 const DISPLAY_NAME_MAX = 40;
@@ -68,6 +80,22 @@ export function identifyProjectFromCwd(raw, io = {}) {
     return { kind: "unattributed", reason: "cwd is a bare relative .wao-worktrees path — owning repo root not derivable" };
   }
   p = p.replace(WORKTREE_SEGRE_SAFE(platform), "");
+  // R7 外国 harness 沙箱（词法、闭表、先于 R5/R3=确定性——沙箱树被 harness
+  // 回收后 realpath 必失败，词法判定不受树死活影响）：命中即 sandbox 桶，携带
+  // harness/worktreeName/repoHint（repoHint=纯词法第二段 basename，是 hint 不是
+  // 归属——所属仓无法从词法证明，按 R4 裸相对先例"不猜"）。
+  for (const entry of HARNESS_SANDBOX_SEGMENTS) {
+    const m = p.match(entry.re);
+    if (m) {
+      return {
+        kind: "sandbox",
+        key: "_sandbox",
+        harness: entry.harness,
+        worktreeName: m[2],
+        repoHint: m[3] ?? null,
+      };
+    }
+  }
   // R5 系统临时目录 → scratch（一次性探针目录不占项目桶）
   const tmp = (io.tmpdir ?? defaultTmpdir(platform)).replace(/\\/g, "/").toLowerCase();
   const folded = p.toLowerCase();

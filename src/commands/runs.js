@@ -22,7 +22,7 @@
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
 import { unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -161,13 +161,14 @@ async function runsCommand(args, config, deps) {
   if (sub === "migrate-projects") {
     // TD-190 D3：存量分桶迁移计划——dry-run 唯一形态（物理迁移须 Owner 显式
     // 点名后另窗执行，本命令不提供 --execute）。
-    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: { tmpdir: tmpdir() } });
+    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: { tmpdir: tmpdir(), realpath: realpathSync } });
     console.log(`[migrate-projects] rules=${plan.rulesVersion} DRY-RUN（只读，零写入；实迁须 Owner 显式点名）`);
     console.log(`  扫描根层转录 ${plan.scanned} 个；保留目录跳过：${plan.reservedDirsSkipped.join(", ") || "无"}`);
     for (const b of plan.buckets) {
       console.log(`  桶 ${b.slug}  项目键 ${b.projectKey}  ${b.fileCount} 文件 / ${(b.bytes / 1024).toFixed(1)} KB${b.skippedNonTerminal.length ? `  （非终态跳过 ${b.skippedNonTerminal.length}：${b.skippedNonTerminal.slice(0, 3).join(", ")}${b.skippedNonTerminal.length > 3 ? "…" : ""}）` : ""}`);
     }
     console.log(`  scratch 桶 ${plan.scratchFileCount} 文件 / ${(plan.scratchBytes / 1024).toFixed(1)} KB`);
+    console.log(`  sandbox 桶 ${plan.sandboxFileCount} 文件 / ${(plan.sandboxBytes / 1024).toFixed(1)} KB${plan.sandboxHarnesses.length ? `（${plan.sandboxHarnesses.join("、")}）` : ""}`);
     console.log(`  无法归因 ${plan.unattributed.length} 个（"." / 缺失 cwd / realpath 失效）${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
     if (plan.parseFailures.length) {
       console.log(`  解析失败 ${plan.parseFailures.length} 个（首事件形状异常，如实列出）：`);
