@@ -65,6 +65,7 @@
       "isolation-infra/waoLayout.test.js",
       "isolation-infra/waoStage.test.js",
       "isolation-infra/waoState.test.js",
+      "mcp-surface/claudeBlindnessGuard.test.js",
       "mcp-surface/f5-cursorRejectedText.test.js",
       "mcp-surface/m12-10-tool-surface.test.js",
       "mcp-surface/m12-12-semantics-catalog.test.js",
