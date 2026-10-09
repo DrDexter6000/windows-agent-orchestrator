@@ -51,6 +51,7 @@ import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 // TD-191⑥：安装权威如实化探测消费版本单一来源（决定 0038）。
 import { WAO_VERSION } from "../version.js";
+import { gitChildEnv } from "../delivery.js";
 
 import { validateWaoDir } from "../waoDir.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
@@ -711,6 +712,24 @@ export async function waoDoctorCommand(args, config) {
       // 是否同一份由读报告的人对照"当前检出"行判断。
       rootVersions.push(["B skills 槽位（junction）", skillsVersion ?? "未知"]);
       installLines.push(`skills 槽位是 junction/symlink → ${skillsSlotTarget}（与该目标同体；对照下方"当前检出"行判断是否同一份；TD-191⑥）。`);
+      // 决定 0049 advisory（kimi+opus 会审共同风险项，advisory 不阻断）：junction
+      // 换来零漂移的同时丢掉了开发/执行隔离——目标恰为当前检出时，全局入口跑的
+      // 就是这份检出的实时状态。如实报告其分支与脏态：非 main 或有未提交改动时
+      // 提醒"全局 wao 正在执行开发中代码"。
+      const checkoutRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+      if (resolve(skillsSlotTarget) === checkoutRoot) {
+        let branch = "未知";
+        let dirtyCount = -1;
+        try {
+          branch = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: checkoutRoot, encoding: "utf8", windowsHide: true, env: gitChildEnv() }).stdout?.trim() || "未知";
+          const st = spawnSync("git", ["status", "--porcelain"], { cwd: checkoutRoot, encoding: "utf8", windowsHide: true, env: gitChildEnv() }).stdout ?? "";
+          dirtyCount = st.split("\n").filter((l) => l.trim().length > 0).length;
+        } catch { /* 探测失败如实未知 */ }
+        const hot = (branch !== "main" && branch !== "未知") || dirtyCount > 0;
+        installLines.push(
+          `junction 目标=当前检出：分支 ${branch}${dirtyCount >= 0 ? `、未提交改动 ${dirtyCount} 处` : ""}${hot ? "——全局入口正在执行开发中代码（决定 0049 advisory，不阻断）" : "（开发面干净）"}。`,
+        );
+      }
     } else {
       rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
       const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
