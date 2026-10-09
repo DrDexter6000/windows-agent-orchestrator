@@ -10,6 +10,8 @@ import {
   identifyProjectFromCwd,
   deriveProjectBucketSlug,
   isReservedBucketSlug,
+  projectFactFromCwd,
+  PROJECT_IDENTITY_RULES_VERSION,
 } from "../../src/projectIdentity.js";
 
 const identity = (raw, io = {}) => identifyProjectFromCwd(raw, {
@@ -148,4 +150,27 @@ test("TD-190 D1 R7: codex 沙箱 → _sandbox（词法、先于 realpath、死�
   // 非沙箱路径不受影响（普通项目/死路径仍走 R3 语义）
   const normal = identity("D:/projects/windows-agent-orchestrator-poc");
   assert.equal(normal.kind, "project");
+});
+
+// D2-②a（2026-10-09 断点续接项②前半）：首事件归属事实的四 kind 有界形状。
+test("TD-190 D2-②a: projectFactFromCwd 四 kind 形状钉（rulesVersion 随档）", () => {
+  const fact = projectFactFromCwd("D:/projects/windows-agent-orchestrator-poc");
+  assert.equal(fact.kind, "project");
+  assert.equal(fact.rulesVersion, PROJECT_IDENTITY_RULES_VERSION);
+  assert.equal(fact.key, "d:/projects/windows-agent-orchestrator-poc");
+  assert.match(fact.bucket, /^windows-agent-orchestrator-poc-[0-9a-f]{8}$/);
+
+  const sandbox = projectFactFromCwd("C:/Users/17865/.codex/worktrees/w1/repo");
+  assert.equal(sandbox.kind, "sandbox");
+  assert.equal(sandbox.key, "_sandbox");
+  assert.equal(sandbox.harness, "codex");
+  assert.equal(sandbox.worktreeName, "w1");
+
+  const scratch = projectFactFromCwd("C:/PROBE-TMP/x", { realpath: (p) => p, tmpdir: "C:/PROBE-TMP" });
+  assert.deepEqual(Object.keys(scratch).sort(), ["key", "kind", "rulesVersion"]);
+  assert.equal(scratch.key, "_scratch");
+
+  const unattr = projectFactFromCwd(".");
+  assert.equal(unattr.kind, "unattributed");
+  assert.match(unattr.reason, /bare relative/i);
 });

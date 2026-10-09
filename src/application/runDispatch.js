@@ -26,6 +26,7 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
+import { projectFactFromCwd } from "../projectIdentity.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
@@ -856,6 +857,9 @@ export async function dispatchRun({
     // stable fact to gate run_correct (a correction may only queue against a
     // run dispatched correctable). Written before the runner forks.
     ...(correctable ? { correctable: true } : {}),
+    // TD-190 D2-②a：首事件落档有界桶归属事实（opus 补强#1）——读侧以记录
+    // 事实为准不再重推导，规则演进不拆旧桶。形状见 projectFactFromCwd。
+    project: projectFactFromCwd(ownershipCwd ?? cwd),
   });
 
   // pending via transitionState — first-terminal-wins arbitration. If the

@@ -139,6 +139,37 @@ function sanitizeDisplayName(name) {
   return cleaned.length > 0 ? cleaned : "project";
 }
 
+// 桶归属事实的规则版本（与 planProjectsMigration 的 rulesVersion 同源——
+// 写入首事件的归属事实携带版本，未来规则演进可区分新旧事实）。
+export const PROJECT_IDENTITY_RULES_VERSION = "td190-r2";
+
+// 生产 IO 组装（写侧调用方用；测试注入自己的 io）。集中一处避免各调用点
+// 自行拼装造成 realpath/tmpdir 口径漂移。
+import { realpathSync as _realpathSync } from "node:fs";
+import { tmpdir as _tmpdir } from "node:os";
+export function productionProjectIo() {
+  return { realpath: _realpathSync, tmpdir: _tmpdir() };
+}
+
+/**
+ * TD-190 D2-②a（opus 补强#1，2026-10-09 断点续接项②的前半）：把首事件 cwd
+ * 判定结果构造成**有界可序列化归属事实**，随 run.started / run.background_submitted
+ * 一并落档。读侧（迁移计划器/未来查询）以记录事实为准、不再重推导——规则
+ * 演进不会悄悄拆旧桶。形状（按 kind 收敛，全闭集）：
+ *   project  → {kind, rulesVersion, key, bucket}
+ *   sandbox  → {kind, rulesVersion, key:"_sandbox", harness, worktreeName, repoHint}
+ *   scratch  → {kind, rulesVersion, key:"_scratch"}
+ *   unattributed → {kind, rulesVersion, reason}
+ */
+export function projectFactFromCwd(rawCwd, io = productionProjectIo()) {
+  const id = identifyProjectFromCwd(rawCwd, io);
+  const base = { kind: id.kind, rulesVersion: PROJECT_IDENTITY_RULES_VERSION };
+  if (id.kind === "project") return { ...base, key: id.key, bucket: deriveProjectBucketSlug(id) };
+  if (id.kind === "sandbox") return { ...base, key: id.key, harness: id.harness, worktreeName: id.worktreeName, repoHint: id.repoHint };
+  if (id.kind === "scratch") return { ...base, key: id.key };
+  return { ...base, reason: id.reason };
+}
+
 /**
  * 从稳定项目键派生桶 slug：`<displayName>-<sha256(key)[0:8]>`。
  * 哈希绑定完整规范化路径——项目改名/移动=新键=新桶（别名关联由中央索引

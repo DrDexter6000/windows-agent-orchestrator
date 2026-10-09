@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
+import { projectFactFromCwd } from "./projectIdentity.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1318,6 +1319,9 @@ export class RunManager {
         : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
+      // TD-190 D2-②a：首事件落档有界桶归属事实（与 run.background_submitted
+      // 同款；worktree 派发的 cwd 经 R4 回溯到所属仓根）。
+      project: projectFactFromCwd(agent.cwd),
       ...(deliveryContext ? {
         delivery: {
           mode: deliveryContext.mode,

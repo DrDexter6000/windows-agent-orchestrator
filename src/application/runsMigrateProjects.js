@@ -98,14 +98,24 @@ export function planProjectsMigration({ runDir, io = {} }) {
       }
     } catch { /* 读取失败按非终态处理（fail-closed：不可证的绝不迁） */ }
 
-    const identity = identifyProjectFromCwd(first.cwd, {
+    // D2-②a（opus 补强#1）：首事件在档的归属**事实优先**（projectFactFromCwd
+    // 落档后的新 run 不再重推导——规则演进不拆旧桶）；legacy 无事实才推导。
+    // 事实的四 kind 形状与 identifyProjectFromCwd 输出同构（key/bucket/harness/
+    // worktreeName/repoHint/reason），直接按同构消费。
+    const recordedFact = first?.project && typeof first.project === "object" && typeof first.project.kind === "string"
+      ? first.project
+      : null;
+    const identity = recordedFact ?? identifyProjectFromCwd(first.cwd, {
       platform: io.platform ?? process.platform,
       realpath,
       tmpdir: io.tmpdir,
     });
+    const bucketSlugOf = (id) => (id.kind === "project"
+      ? (id.bucket ?? deriveProjectBucketSlug({ kind: "project", key: id.key, displayName: id.displayName ?? basenameOf(id.key) }))
+      : null);
 
     if (identity.kind === "unattributed") {
-      out.unattributed.push({ file, reason: identity.reason });
+      out.unattributed.push({ file, reason: identity.reason ?? "unattributed (recorded fact)" });
       continue;
     }
     if (identity.kind === "scratch") {
@@ -127,8 +137,8 @@ export function planProjectsMigration({ runDir, io = {} }) {
     let bucket = bucketByKey.get(identity.key);
     if (!bucket) {
       bucket = {
-        slug: deriveProjectBucketSlug(identity),
-        displayName: identity.displayName,
+        slug: bucketSlugOf(identity),
+        displayName: identity.displayName ?? basenameOf(identity.key),
         projectKey: identity.key,
         fileCount: 0,
         bytes: 0,
@@ -146,6 +156,12 @@ export function planProjectsMigration({ runDir, io = {} }) {
   }
   out.buckets.sort((a, b) => b.fileCount - a.fileCount);
   return out;
+}
+
+
+function basenameOf(key) {
+  const parts = String(key).replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || "project";
 }
 
 function joinPath(dir, file) {
