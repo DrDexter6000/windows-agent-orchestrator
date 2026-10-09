@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveRunDirForWrite, resolveTranscriptPath, listTranscriptsDeep, findTranscriptTwin,
-  projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite, releaseRunIdClaim,
+  projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs,
   TranscriptResolutionError, TRANSCRIPT_SCAN_BUCKET_LIMIT,
 } from "../../src/projectBuckets.js";
 import { identifyProjectFromCwd, identityOfFirstEvent } from "../../src/projectIdentity.js";
@@ -476,8 +476,10 @@ test("D2-②b 六轮: 释放只删不进——released 标记后旧代文件在�
     const b = claimRunIdForWrite(root, "run_rel");
     assert.equal(b.claimed, true);
     assert.ok(existsSync(join(claimsDir, "run_rel.g1")), "新代 g1");
-    // 清理：旧代（g0*）应被 best-effort 清掉（小于最大代）
-    assert.equal(existsSync(join(claimsDir, "run_rel.g0")), false, "旧代已清理（不影响仲裁）");
+    // 七轮 F7-1：**旧代永不删除**——删除会让代号可被迟到写者复用（双持有者
+    // 探针实锤）；代文件保留是"创建即仲裁"前提。
+    assert.equal(existsSync(join(claimsDir, "run_rel.g0")), true, "旧代保留（删除=复用窗口）");
+    assert.equal(existsSync(join(claimsDir, "run_rel.g0.released")), true, "旧 released 标记保留（无害——只影响旧代）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -541,5 +543,54 @@ test("D2-②b 五轮 C: 重建找回的条目回写索引（下次同 key 零扫
     assert.equal(w2.bucket, w.bucket);
     const after = JSON.parse(readFileSync(idxPath, "utf8"));
     assert.equal(after.entries[id.key], w.bucket, "找回条目已回写（C 补钉）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 七轮钉（consult_…teg1p4：F7-1 复用窗口/F7-2 枚举失败 fail-closed/F7-3 年龄）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 七轮 F7-1: released 后旧代保留——迟到写者不能重建已用代号", () => {
+  const root = makeRoot("wao-pb-f71-");
+  try {
+    const claimsDir = join(root, ".claims");
+    // 场景压缩：g0 released → g1 建成（胜者）→ 迟到写者（判过 g0 可用）wx g0
+    const a = claimRunIdForWrite(root, "run_late");
+    assert.equal(a.claimed, true); // g0
+    releaseRunIdClaim(root, "run_late", { nonce: a.nonce }); // g0.released
+    const b = claimRunIdForWrite(root, "run_late");
+    assert.equal(b.claimed, true); // g1（g0 已 released）
+    assert.ok(existsSync(join(claimsDir, "run_late.g1")), "新代 g1");
+    // 迟到写者（停在 readdir→wx 之间、判过 g0 可用）wx g0 → 文件在场 EEXIST
+    assert.equal(existsSync(join(claimsDir, "run_late.g0")), true, "旧代在场（删除才有复用窗口——永不删除）");
+    let lateG0 = false;
+    try { writeFileSync(join(claimsDir, "run_late.g0"), "{}", { flag: "wx" }); lateG0 = true; } catch { lateG0 = false; }
+    assert.equal(lateG0, false, "迟到写者不能重建 g0（创建即仲裁的前提=名字从未被删）");
+    // g1 新鲜持有中 → 第三写者 fail-closed
+    assert.equal(claimRunIdForWrite(root, "run_late").claimed, false, "新鲜代持有中=拒绝");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 七轮 F7-2: 目录枚举失败 fail-closed（不按无代际首建）", () => {
+  const root = makeRoot("wao-pb-f72-");
+  try {
+    assert.equal(claimRunIdForWrite(root, "run_enum").claimed, true); // g0 在场
+    const realReaddir = readdirSync;
+    const eioIo = { readdirSync: (p, ...rest) => { if (String(p).endsWith(".claims")) { const e = new Error("io"); e.code = "EIO"; throw e; } return realReaddir(p, ...rest); } };
+    assert.equal(claimRunIdForWrite(root, "run_enum", { io: eioIo }).claimed, false,
+      "枚举失败=按持有中 fail-closed（修前：吞错→首建判断→可能重建已删代号）");
+    // ENOENT（目录不存在）仍按首建（合法：新 runDir）
+    const enoentIo = { readdirSync: (p, ...rest) => { if (String(p).endsWith(".claims")) { const e = new Error("no dir"); e.code = "ENOENT"; throw e; } return realReaddir(p, ...rest); } };
+    assert.equal(claimRunIdForWrite(root, "run_fresh2", { io: enoentIo }).claimed, true, "ENOENT=首建（新 runId）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 七轮 F7-3: claimAgeMs 读当前最大代（年龄提示可用）", () => {
+  const root = makeRoot("wao-pb-f73-");
+  try {
+    assert.equal(claimAgeMs(root, "run_age"), null, "无代际=null");
+    assert.equal(claimRunIdForWrite(root, "run_age").claimed, true);
+    const age = claimAgeMs(root, "run_age");
+    assert.ok(typeof age === "number" && age >= -50 && age < 5000, `当前代年龄（实测 ${age}ms；NTFS 时间戳粒度可致微小负值）`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -27,7 +27,7 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
-import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, TranscriptResolutionError } from "../projectBuckets.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, TranscriptResolutionError } from "../projectBuckets.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
@@ -861,10 +861,8 @@ export async function dispatchRun({
       // 并发写者正在建同 runId：按既有档重解析一次；仍找不到=如实冲突（附
       // claim 年龄与 TTL 提示——三轮 R3：中段泄漏的报错不得误导为永久并发）。
       let claimAgeNote = "";
-      try {
-        const age = Date.now() - statSync(join(resolvedRunDir, ".claims", finalRunId)).mtimeMs;
-        if (Number.isFinite(age)) claimAgeNote = ` (existing claim age ${Math.round(age / 1000)}s; stale claims self-heal after 600s)`;
-      } catch { /* claim 已消失=纯竞态窗口 */ }
+      const ageMs = claimAgeMs(resolvedRunDir, finalRunId);
+      if (ageMs !== null) claimAgeNote = ` (existing claim age ${Math.round(ageMs / 1000)}s; stale claims self-heal after 600s)`;
       try {
         transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
         runnerArgs.push("--transcript-dir", dirname(transcriptPath));
@@ -875,7 +873,7 @@ export async function dispatchRun({
     } else {
       // 复验 F1：claim 生命周期=仲裁成功→首条事实落盘（background_submitted）。
       // 窗口内任何抛错（含下方零副作用拒绝）都释放；落盘后同 runId 走既有档
-      // 分支，claim 即废。释放只删自己的 claim（nonce 持有者校验）。
+      // 分支，claim 即废。释放=对持有代加 .released 标记（nonce 校验，不删文件）。
       claimNonce = claim.nonce;
       try {
         writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);

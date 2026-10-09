@@ -9,7 +9,7 @@
 // 布局：新 run 转录写 `runs/projects/<slug>/<runId>.jsonl`；保留桶
 // `_sandbox|_scratch|_unattributed`；旧平铺 `runs/<runId>.jsonl` 只读兼容
 //（D3 实迁另窗）。`.owner-<runId>`、daemon/复用状态等跨项目资产常驻中心根；
-// `.claims/<runId>` 是新 runId 的中心原子仲裁标记（并发首建竞态修复）。
+// `.claims/<runId>.g<N>` 是新 runId 的中心原子仲裁代际文件（并发首建竞态修复，六轮终法）。
 //
 // 桶名权威链（§6.1/§6.11-5）：key→slug 由**中心索引**（runs/projects/
 // .index.json，缓存）+ **桶内 `.project.json`**（权威、可重建索引）承载；
@@ -317,7 +317,11 @@ function listClaimGenerations(i, claimsDir, runId) {
       const m = tail.match(/^(\d+)(\.released)?$/);
       if (m) gens.push({ gen: Number(m[1]), released: Boolean(m[2]), name });
     }
-  } catch { /* 目录不可读=无代际（按首建处理） */ }
+  } catch (e) {
+    // 七轮 F7-2：目录读取失败≠无代际（吞错=首建=可能重建已删代号=双持有
+    // 者）——除 ENOENT（目录确不存在）外一律向上抛（fail-closed）。
+    if (e?.code !== "ENOENT") throw e;
+  }
   return gens;
 }
 
@@ -351,7 +355,15 @@ export function claimRunIdForWrite(runDir, runId, { io, staleAfterMs = CLAIM_STA
 
   const byGen = new Map();
   let maxGen = -1;
-  for (const g of listClaimGenerations(i, claimsDir, runId)) {
+  let gens;
+  try {
+    gens = listClaimGenerations(i, claimsDir, runId);
+  } catch {
+    // 七轮 F7-2（终形）：枚举失败（非 ENOENT）=状态不可知——fail-closed 返回
+    // 未获仲裁（不让原始 IO 错击穿 dispatch 的具名冲突路径）。
+    return { claimed: false, nonce: null };
+  }
+  for (const g of gens) {
     if (!byGen.has(g.gen)) byGen.set(g.gen, { released: false });
     if (g.released) byGen.get(g.gen).released = true;
     maxGen = Math.max(maxGen, g.gen);
@@ -380,16 +392,30 @@ export function claimRunIdForWrite(runDir, runId, { io, staleAfterMs = CLAIM_STA
 
   const attempt = tryClaimGeneration(i, claimsDir, runId, maxGen + 1);
   if (attempt.ok) {
-    // 清理旧代（< 新最大代；不影响仲裁，best-effort）。
-    for (const g of listClaimGenerations(i, claimsDir, runId)) {
-      if (g.gen < maxGen + 1) {
-        try { i.rmSync?.(join(claimsDir, g.name), { force: true }); } catch { /* best-effort */ }
-      }
-    }
+    // 七轮 F7-1/F7-2：**不做旧代清理**——删除会让代号可被迟到写者 wx 复用
+    //（两席探针实锤：A 停在 readdir→wx 之间，B 建新代+清理+释放后 A 重建旧
+    // 代成功=双持有者）。"创建即仲裁"只在名字从未被删过时成立；代文件永不
+    // 删除（每 runId 每轮多两个小文件，增长可忽略——g0 本来就不删）。
     return { claimed: true, nonce: attempt.nonce };
   }
   // EEXIST=并发写者已建同代（wx 单胜者）→ fail-closed。
   return { claimed: false, nonce: null };
+}
+
+/** 只读：runId 当前最大代的年龄（ms；无代际/不可读=null）。七轮 F7-3——
+ * dispatch/manager 的冲突文案年龄提示经此读取（旧 .claims/<runId> 路径已亡）。 */
+export function claimAgeMs(runDir, runId, { io } = {}) {
+  const i = defaultIo(io);
+  try {
+    const gens = listClaimGenerations(i, join(runDir, CLAIMS_DIRNAME), runId);
+    let maxGen = -1;
+    for (const g of gens) maxGen = Math.max(maxGen, g.gen);
+    if (maxGen < 0) return null;
+    const age = Date.now() - i.statSync(join(runDir, CLAIMS_DIRNAME, `${runId}.g${maxGen}`)).mtimeMs;
+    return Number.isFinite(age) ? age : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

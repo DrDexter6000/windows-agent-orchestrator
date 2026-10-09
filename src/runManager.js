@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
-import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
+import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1140,10 +1140,8 @@ export class RunManager {
             resolvedTranscriptPath = resolveTranscriptPath(dir, finalRunId, { forAppend: true });
           } catch {
             let claimAgeNote = "";
-            try {
-              const age = Date.now() - statSync(join(dir, ".claims", finalRunId)).mtimeMs;
-              if (Number.isFinite(age)) claimAgeNote = ` (existing claim age ${Math.round(age / 1000)}s; stale claims self-heal after 600s)`;
-            } catch { /* claim 已消失=纯竞态窗口 */ }
+            const ageMs = claimAgeMs(dir, finalRunId);
+            if (ageMs !== null) claimAgeNote = ` (existing claim age ${Math.round(ageMs / 1000)}s; stale claims self-heal after 600s)`;
             throw new TranscriptResolutionError("transcript-resolution-conflict",
               `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check${claimAgeNote}`);
           }
