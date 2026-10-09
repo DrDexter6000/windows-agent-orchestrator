@@ -819,3 +819,39 @@ test("D2-②b argv 门: --transcript-dir 追加后复检最终 argv 长度（两
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 复验 F1（consult_…tn2juh）：claim 生命周期=仲裁→首条事实。零副作用拒绝
+//（复检 argv 门在转录写入之前）不得残留 claim——同 runId 换短 prompt 重试
+// 必须 accepted。
+test("D2-②b F1: 复检门拒绝后同 runId 重试可 accepted，claim 零残留", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-argv3-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    const runDir = join(dir, "runs");
+    const customRunId = "run_custom_retry_f1";
+    // 校准探针（同 argv 门测试法）
+    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: "run_probe_cal" });
+    assert.equal(probe.accepted, true);
+    const args = calls[calls.length - 1].args;
+    const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
+    const totalProbe = totalOf(args);
+    const tdIdx = args.indexOf("--transcript-dir");
+    const tdPair = "--transcript-dir".length + 1 + String(args[tdIdx + 1]).length + 1;
+    const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2);
+    // 第一次：超长 prompt 撞复检门（零副作用拒绝——claim 必须随之释放）
+    await assert.rejects(
+      dispatchRun({ agentId: "coder_low", prompt: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId }),
+      /argv too long after transcript-dir/,
+    );
+    assert.equal(existsSync(join(runDir, ".claims", customRunId)), false, "拒绝后 claim 零残留（F1 核心）");
+    // 第二次：同 runId、短 prompt → accepted（修前=永久 concurrently claimed）
+    const retry = await dispatchRun({ agentId: "coder_low", prompt: "short", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId });
+    assert.equal(retry.accepted, true, "同 runId 重试 accepted");
+    assert.equal(existsSync(join(runDir, ".claims", customRunId)), false, "首条事实落盘后 claim 已释放");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

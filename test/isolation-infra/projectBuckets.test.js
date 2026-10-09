@@ -14,12 +14,12 @@
 //   - 事实：projectFactForWrite 记最终写位（扩长后与目录一致）；readFirstProjectFact。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveRunDirForWrite, resolveTranscriptPath, listTranscriptsDeep, findTranscriptTwin,
-  projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite,
+  projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite, releaseRunIdClaim,
   TranscriptResolutionError, TRANSCRIPT_SCAN_BUCKET_LIMIT,
 } from "../../src/projectBuckets.js";
 import { identifyProjectFromCwd, identityOfFirstEvent } from "../../src/projectIdentity.js";
@@ -291,8 +291,11 @@ test("D2-②b 验收批S3: 快命中遇扫描超限 → 可观测降级；无快
       mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
     }
     write(join(root, "run_flat.jsonl"), "{\"b\":1}\n");
-    // 平铺快命中在场：降级返回平铺（不抛 over-limit；孪生检测本轮放弃）
+    // 平铺快命中在场：读降级返回平铺（stderr 告警）；forAppend 不降级——
+    // 未完成孪生比较不得当作无冲突（复验 sol）。
     assert.equal(resolveTranscriptPath(root, "run_flat"), join(root, "run_flat.jsonl"), "快命中降级");
+    assert.throws(() => resolveTranscriptPath(root, "run_flat", { forAppend: true }),
+      (e) => e.code === "transcript-resolution-scan-over-limit", "forAppend 不降级（未比较≠无冲突）");
     // 无快命中：保持具名硬错
     assert.throws(() => resolveTranscriptPath(root, "run_none2"),
       (e) => e.code === "transcript-resolution-scan-over-limit");
@@ -309,5 +312,56 @@ test("D2-②b 验收批竞态: .claims 中心原子仲裁——同 runId 只有�
     assert.equal(claimRunIdForWrite(root, "run_race_1"), false, "并发第二写者 EEXIST 被拒");
     assert.equal(claimRunIdForWrite(root, "run_race_2"), true, "不同 runId 互不影响");
     assert.ok(existsSync(join(root, ".claims", "run_race_1")), "claim 标记落中心根");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 复验二轮钉（consult_…tn2juh：F1 生命周期/sol④ 不可读硬错/F3 下划线）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 复验 F1: 陈旧 claim 可抢占（泄漏自愈），新鲜 claim 拒绝", () => {
+  const root = makeRoot("wao-pb-f1-");
+  try {
+    const claimPath = join(root, ".claims", "run_stale");
+    assert.equal(claimRunIdForWrite(root, "run_stale"), true);
+    assert.equal(claimRunIdForWrite(root, "run_stale"), false, "新鲜 claim 拒绝第二写者");
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    assert.equal(claimRunIdForWrite(root, "run_stale"), true, "陈旧 claim 被抢占（泄漏自愈）");
+    releaseRunIdClaim(root, "run_stale");
+    assert.equal(existsSync(claimPath), false, "释放后标记消失");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 复验 sol④: 写侧确认遇不可读权威记录 → 硬错，不给同 key 建第二桶", () => {
+  const root = makeRoot("wao-pb-s4-");
+  try {
+    const dirA = join(root, "repo-ur");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w = resolveRunDirForWrite(root, id);
+    const realRead = readFileSync;
+    const badIo = { readFileSync: (p, ...rest) => { if (String(p).includes(w.bucket) && String(p).endsWith(".project.json")) { const e = new Error("EACCES"); e.code = "EACCES"; throw e; } return realRead(p, ...rest); } };
+    assert.throws(() => resolveRunDirForWrite(root, id, { io: badIo }),
+      (e) => e.code === "transcript-resolution-conflict" && /unreadable/.test(e.message),
+      "同 key 写入遇不可读权威记录=硬错（sol 探针形状：吞掉会建第二桶）");
+    const buckets = readdirSync(join(root, "projects")).filter((b) => b.startsWith("repo-ur"));
+    assert.deepEqual(buckets, [w.bucket], "未建第二桶");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 复验 F3: 下划线开头 displayName 的桶经索引正常确认（不每次强制重建）", () => {
+  const root = makeRoot("wao-pb-f3-");
+  try {
+    const dirA = join(root, "_foo");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w1 = resolveRunDirForWrite(root, id);
+    assert.ok(w1.bucket.startsWith("_foo-"), `slug 保留下划线开头（实测 ${w1.bucket}）`);
+    const { entries, rebuilt } = loadBucketIndex(root);
+    assert.equal(rebuilt, false, "缓存索引可确认（SAFE 正则放行前导下划线）");
+    assert.equal(entries[id.key], w1.bucket);
+    const w2 = resolveRunDirForWrite(root, id);
+    assert.equal(w2.bucket, w1.bucket, "二次写沿用（无强制重建回路）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

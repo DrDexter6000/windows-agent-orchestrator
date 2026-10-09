@@ -3065,3 +3065,60 @@ test("D2-②b M1: 前台自决桶 → run.started 归属事实与转录实际位
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 复验 sol②：project-kind 的"冻结 slug≠现行推导"分叉必须经 RunManager.start
+// 真实落档——agent.cwd 指向仓库真实目录（非 tmpdir → project 身份；夹具
+// runDir 仍在 tmpdir，写面零越界）。
+test("D2-②b M1b: project-kind 自决桶 → 事实沿冻结 slug（≠现行推导）且等于实际目录", async () => {
+  const dir = await makeTempDir();
+  try {
+    const repoCwd = process.cwd(); // 仓库真目录=project 身份（不经 tmpdir 判定）
+    const { resolveRunDirForWrite, projectFactForWrite } = await import("../../src/projectBuckets.js");
+    const { identifyProjectFromCwd } = await import("../../src/projectIdentity.js");
+    const prodIo = (await import("../../src/projectIdentity.js")).productionProjectIo();
+    const identity = identifyProjectFromCwd(repoCwd, prodIo);
+    assert.equal(identity.kind, "project", "测试前提：仓库 cwd=project 身份");
+    // 冻结桶：手工建加长哈希 slug（≠现行 8-hex 推导）+索引
+    const derived = (await import("node:crypto")).createHash("sha256").update(identity.key, "utf8").digest("hex");
+    const frozenSlug = `${identity.displayName}-${derived.slice(0, 12)}`;
+    assert.notEqual(frozenSlug, `${identity.displayName}-${derived.slice(0, 8)}`, "冻结名≠现行推导名");
+    const runDir = join(dir, "runs");
+    const frozenDir = join(runDir, "projects", frozenSlug);
+    await mkdir(frozenDir, { recursive: true });
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(frozenDir, ".project.json"),
+      JSON.stringify({ key: identity.key, slug: frozenSlug, displayName: identity.displayName, rulesVersion: "td190-r2", createdAt: new Date().toISOString(), aliases: [] }), "utf8");
+    await writeFile(join(runDir, "projects", ".index.json"),
+      JSON.stringify({ version: 1, entries: { [identity.key]: frozenSlug } }), "utf8");
+    const backend = {
+      async spawn() {
+        return {
+          backend: "fake", backendSessionId: "ses_m1b",
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "ok" }] };
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {}, isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "config/agents.json", runDir, pollInterval: 10, waitTimeout: 2000, timeout: 2000, retries: 0 },
+      readRegistry: async () => ({
+        getAgent: (id, overrides = {}) => ({ id, backend: "fake", cwd: repoCwd, ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)) }),
+        listAgents: () => [],
+      }),
+      backendFor: () => backend,
+    });
+    const run = await manager.start("w", { prompt: "go", runId: "run_m1b_fact" });
+    try { await run.waitForCompletion({ pollInterval: 5 }); } catch { /* tolerate */ }
+    assert.equal(basename(dirname(run.transcript.filePath)), frozenSlug, "转录实际位置=冻结桶（非重推 8-hex）");
+    const raw = await import("node:fs/promises").then((m) => m.readFile(run.transcript.filePath, "utf8"));
+    const started = raw.trim().split("\n").map((l) => JSON.parse(l)).find((e) => e.type === "run.started");
+    assert.ok(started, "run.started 在档");
+    assert.equal(started.project.bucket, frozenSlug, "事实 bucket=冻结 slug（M1b 核心：经 manager 落档的分叉用例）");
+    assert.equal(started.project.bucket, basename(dirname(run.transcript.filePath)), "事实=实际目录");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

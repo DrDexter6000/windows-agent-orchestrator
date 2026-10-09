@@ -50,7 +50,7 @@ export const CLAIMS_DIRNAME = ".claims";
  * 可接受本形状的子集），比 projectIdentity 的记录形状校验更严（那侧管事实，
  * 这侧管路径安全）。
  */
-export const SAFE_BUCKET_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const SAFE_BUCKET_SLUG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 /** 解析链第 3 级有界扫描上限（§6.10）：runs/projects/ 一层目录项数。 */
 export const TRANSCRIPT_SCAN_BUCKET_LIMIT = 64;
 export const PROJECT_RECORD_RETRIES = 3;
@@ -86,6 +86,7 @@ function defaultIo(io = {}) {
     openSync: io.openSync ?? fsDefault.openSync,
     readSync: io.readSync ?? fsDefault.readSync,
     closeSync: io.closeSync ?? fsDefault.closeSync,
+    rmSync: io.rmSync ?? fsDefault.rmSync,
     sha256: io.sha256 ?? ((p) => createHash("sha256").update(fsDefault.readFileSync(p, "utf8"), "utf8").digest("hex")),
     sleepSync: io.sleepSync ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }),
   };
@@ -173,15 +174,21 @@ function saveBucketIndex(runDir, entries, io) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 缓存/重建索引给出的 slug 是否可作为既有桶使用（安全形状+目录存在+权威核验）。 */
-function confirmedBucketFor(runDir, key, slug, i) {
+function confirmedBucketFor(runDir, key, slug, i, { onUnreadable = "null" } = {}) {
   if (!isSafeBucketSlug(slug)) return null; // `..`/分隔符/保留名——路径成分拒绝
   const dir = join(projectsDirFor(runDir), slug);
   if (!i.existsSync(dir)) return null;
+  let rec;
   try {
-    if (readProjectRecord(dir, i)?.key !== key) return null; // 权威=.project.json
-  } catch {
-    return null; // 记录不可读：不据此写档（缓存条目作废；显式路径见下方新建分支）
+    rec = readProjectRecord(dir, i);
+  } catch (e) {
+    // 复验 sol④：**写侧**（onUnreadable=throw）遇不可读权威记录=硬错——吞掉
+    // 后落入新建分支会给同 key 建第二桶（sol 探针实证）。读侧 hint（null）维
+    // 持降级（回落扫描层仍可定位转录——记录损坏不阻断读取）。
+    if (onUnreadable === "throw") throw e;
+    return null;
   }
+  if (rec?.key !== key) return null; // 权威=.project.json
   return dir;
 }
 
@@ -215,11 +222,11 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
   // 新规则重推）。核验不过 → 权威重建一次；仍无 → 走新建。
   const { entries } = loadBucketIndex(runDir, { io: i });
   if (typeof entries[identity.key] === "string") {
-    const hit = confirmedBucketFor(runDir, identity.key, entries[identity.key], i);
+    const hit = confirmedBucketFor(runDir, identity.key, entries[identity.key], i, { onUnreadable: "throw" });
     if (hit !== null) return { transcriptDir: hit, bucket: basename(hit), kind: "project" };
     const rebuilt = loadBucketIndex(runDir, { io: i, forceRebuild: true });
     if (typeof rebuilt.entries[identity.key] === "string") {
-      const hit2 = confirmedBucketFor(runDir, identity.key, rebuilt.entries[identity.key], i);
+      const hit2 = confirmedBucketFor(runDir, identity.key, rebuilt.entries[identity.key], i, { onUnreadable: "throw" });
       if (hit2 !== null) return { transcriptDir: hit2, bucket: basename(hit2), kind: "project" };
     }
   }
@@ -231,7 +238,7 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
   const candidates = [];
   for (let n = 8; n <= hash.length; n += 2) candidates.push(`${identity.displayName}-${hash.slice(0, n)}`);
   if (candidates.some((c) => isReservedBucketSlug(c))) {
-    // displayName 首段为 Windows 保留设备名（aux/con/nul/…）：加 `0-` 前缀破
+    // displayName 首段为 Windows 保留设备名（aux/con/nul/…）：加 "0-" 前缀破
     // 首段——同时通过 SAFE_BUCKET_SLUG_RE、FACT_BUCKET_RE 与保留名三校验。
     for (let k = 0; k < candidates.length; k++) candidates[k] = `0-${candidates[k]}`;
   }
@@ -261,25 +268,47 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
     `bucket slug collision not resolvable after ${candidates.length} hash lengths for key ${identity.key}`);
 }
 
+/** 释放 runId 仲裁标记（best-effort；验收复验 F1：claim 生命周期=仲裁成功→
+ * 转录首条事实落盘/失败抛错——落盘后同 runId 写者走既有档分支，claim 即废）。
+ */
+export function releaseRunIdClaim(runDir, runId, { io } = {}) {
+  const i = defaultIo(io);
+  try {
+    i.rmSync?.(join(runDir, CLAIMS_DIRNAME, runId), { force: true });
+  } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
+}
+
 /**
  * 新 runId 的中心原子仲裁（并发首建竞态修复，验收会审 sol 必改①/opus TD 案）：
  * wx 独占创建 `runs/.claims/<runId>`——两写者并发首个新 runId 只有一个成功；
  * 失败方必须按"既有档"重解析（对方此刻正在写），仍找不到=如实冲突。
  * 覆盖面=新代码写者互斥；旧代码写者不受约束（切换窗纪律+孪生硬错兜底）。
  */
-export function claimRunIdForWrite(runDir, runId, { io } = {}) {
+export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_000 } = {}) {
   const i = defaultIo(io);
   if (!runDir || typeof runDir !== "string") throw new Error("claimRunIdForWrite: runDir required");
   if (!runId || typeof runId !== "string") throw new Error("claimRunIdForWrite: runId required");
   const claimsDir = join(runDir, CLAIMS_DIRNAME);
+  const claimPath = join(claimsDir, runId);
   i.mkdirSync(claimsDir, { recursive: true });
   try {
-    i.writeFileSync(join(claimsDir, runId),
+    i.writeFileSync(claimPath,
       JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString() }), { encoding: "utf8", flag: "wx" });
     return true;
   } catch (e) {
-    if (e?.code === "EEXIST") return false;
-    throw e;
+    if (e?.code !== "EEXIST") throw e;
+    // 复验 F1 兜底：claim 残留（写者在窗口内崩溃且释放路径未及执行）不得
+    // 永久封锁该 runId——超过 stealAfterMs 的陈旧 claim 视为泄漏，抢占续写。
+    // 真实并发窗口（仲裁→首条事实）为亚秒级，10 分钟阈值与之相差三个数量级。
+    try {
+      const age = Date.now() - i.statSync(claimPath).mtimeMs;
+      if (Number.isFinite(age) && age > stealAfterMs) {
+        i.writeFileSync(claimPath,
+          JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), stoleFromStale: true }), "utf8");
+        return true;
+      }
+    } catch { /* stat 失败按活跃处理（fail-closed） */ }
+    return false;
   }
 }
 
@@ -398,7 +427,10 @@ export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend
     bucketHits = scanBucketHits(runDir, runId, i);
   } catch (e) {
     if (e instanceof TranscriptResolutionError && e.code === "transcript-resolution-scan-over-limit" && fastPath !== null) {
-      // 可观测降级：快命中在场，孪生检测本轮放弃（诊断面 findTranscriptTwin）。
+      // 复验 sol/S3：降级必须发信号（stderr 告警行——静默返回不算可观测）；
+      // forAppend 不降级——追加者未完成孪生比较不得当作无冲突。
+      if (forAppend) throw e;
+      console.warn(`[transcript-resolution] scan over limit (${e.detail}); degraded to fast hit without twin check: ${fastPath}`);
       return fastPath;
     }
     throw e;
@@ -417,7 +449,8 @@ export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend
     }
     // 全同：hint 桶 > 字典序最小桶 > 平铺。
     if (hintedPath !== null) return hintedPath;
-    const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => a.localeCompare(b));
+    // 复验 F4：码元比较（localeCompare 随 locale 漂移——确定性要求）。
+    const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     return bucketOnly[0] ?? flat;
   }
 
@@ -474,7 +507,7 @@ export function listTranscriptsDeep(runDir, { io } = {}) {
       if (name.endsWith(".jsonl")) out.push({ path: join(runDir, name), name, bucket: null });
     }
   }
-  for (const { name, dir } of [...listBucketDirs(runDir, i)].sort((a, b) => a.name.localeCompare(b.name))) {
+  for (const { name, dir } of [...listBucketDirs(runDir, i)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     for (const f of i.readdirSync(dir)) {
       if (f.endsWith(".jsonl")) out.push({ path: join(dir, f), name: f, bucket: name });
     }

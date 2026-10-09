@@ -27,7 +27,7 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
-import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, TranscriptResolutionError } from "../projectBuckets.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, TranscriptResolutionError } from "../projectBuckets.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
@@ -849,6 +849,7 @@ export async function dispatchRun({
   // （并发首建竞态修复）→ 决定新桶。孪生冲突等具名错误如实上抛。
   let writeTarget = null;
   let transcriptPath;
+  let claimed = false; // 复验 F1：claim 成功→首条事实落盘窗口标记
   try {
     transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
     runnerArgs.push("--transcript-dir", dirname(transcriptPath));
@@ -864,25 +865,42 @@ export async function dispatchRun({
           `runId ${finalRunId} concurrently claimed by another writer and not resolvable after re-check`);
       }
     } else {
-      writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);
-      transcriptPath = transcriptPathFor(writeTarget.transcriptDir, finalRunId);
-      runnerArgs.push("--transcript-dir", writeTarget.transcriptDir);
-    }
-  }
-  // 验收批必改⑥：--transcript-dir 追加后对**最终完整 argv** 复检长度门
-  //（首个门在转录写入之前，只约束当时已在场的参数）。
-  {
-    const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
-    if (finalArgvLen > ARGV_MAX_TOTAL) {
-      throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
+      // 复验 F1：claim 生命周期=仲裁成功→首条事实落盘（background_submitted）。
+      // 窗口内任何抛错（含下方零副作用拒绝）都释放；落盘后同 runId 走既有档
+      // 分支，claim 即废（不留永久标记、不阻断同 runId 重试）。
+      try {
+        writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);
+        transcriptPath = transcriptPathFor(writeTarget.transcriptDir, finalRunId);
+        runnerArgs.push("--transcript-dir", writeTarget.transcriptDir);
+        // 验收批必改⑥：--transcript-dir 追加后对**最终完整 argv** 复检长度门
+        //（首个门在转录写入之前，只约束当时已在场的参数）。
+        {
+          const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+          if (finalArgvLen > ARGV_MAX_TOTAL) {
+            throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
+          }
+        }
+        claimed = true;
+      } catch (e2) {
+        releaseRunIdClaim(resolvedRunDir, finalRunId);
+        throw e2;
+      }
     }
   }
 
-  // All preflight passed — now write transcript durable facts.
-  const transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
+  // All preflight passed — now write transcript durable facts.（复验 F1：构造/
+  // 首条追加若抛错同样释放 claim——窗口终点=background_submitted 落盘。）
+  let transcript;
+  try {
+    transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
+  } catch (e3) {
+    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
+    throw e3;
+  }
 
   // Initial durable facts, in order: background_submitted, then pending.
-  await transcript.append("run.background_submitted", {
+  try {
+    await transcript.append("run.background_submitted", {
     background: true,
     // TD-198: the ABSOLUTE resolved ownership cwd (explicit --cwd or the
     // registry entry, resolved) — a relative fact is unprovable workspace
@@ -904,7 +922,15 @@ export async function dispatchRun({
     project: writeTarget
       ? projectFactForWrite(ownershipIdentity, writeTarget)
       : projectFactFromCwd(ownershipCwd ?? cwd),
-  });
+    });
+  } catch (e4) {
+    if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
+    throw e4;
+  }
+
+  // 复验 F1：首条持久事实已落盘——同 runId 的并发写者此后经既有档分支可
+  // 见本档，claim 使命完成即释放（不残留、不阻断后续同名新档仲裁）。
+  if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId);
 
   // pending via transitionState — first-terminal-wins arbitration. If the
   // runId was reused against an already-terminal transcript, this is rejected

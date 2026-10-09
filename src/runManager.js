@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
-import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
+import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1113,6 +1113,7 @@ export class RunManager {
     // → 写原位；新建前先经中心 .claims 原子仲裁（并发首建竞态修复）。
     let resolvedTranscriptPath = null;
     let selfWrite = null; // 自决新桶的 {identity, write}——事实绑定用（M1）
+    let claimedSelfRun = false; // 复验 F1：claim 生命周期标记
     if (typeof transcriptDir === "string" && transcriptDir.length > 0) {
       resolvedTranscriptPath = transcriptPathFor(resolve(transcriptDir), finalRunId);
     } else {
@@ -1123,6 +1124,7 @@ export class RunManager {
         if (transcriptLegacyFlat === true) {
           resolvedTranscriptPath = transcriptPathFor(dir, finalRunId);
         } else if (claimRunIdForWrite(dir, finalRunId)) {
+          claimedSelfRun = true; // 复验 F1：run.started 落盘即释放（见下方 finally）
           const startIdentity = identifyProjectFromCwd(typeof agent?.cwd === "string" ? agent.cwd : "", productionProjectIo());
           const startWrite = resolveRunDirForWrite(dir, startIdentity);
           selfWrite = { identity: startIdentity, write: startWrite };
@@ -1291,7 +1293,11 @@ export class RunManager {
     const tagsPayload = tags ? parseTags(tags) : undefined;
     const scorecardRules = resolveScorecardRules(scorecard, agent.scorecard, scorecardMode);
 
-    await transcript.append("run.started", {
+    // 复验 F1：前台自决新 runId 的中心 claim 在首条持久事实（run.started）
+    // 落盘即释放——此后同 runId 写者经既有档分支可见本档（窗口内抛错由
+    // claimRunIdForWrite 的陈旧抢占兜底，不复验窗口中段逐一挂钩）。
+    try {
+      await transcript.append("run.started", {
       backend: agent.backend,
       cwd: agent.cwd,
       ...(worktreeInfo ? { worktreePath: worktreeInfo.path, worktreeBranch: worktreeInfo.branch } : {}),
@@ -1396,6 +1402,9 @@ export class RunManager {
         },
       } : {}),
     });
+    } finally {
+      if (claimedSelfRun) releaseRunIdClaim(dir, finalRunId);
+    }
     // Round 4 Bundle B: the read-only DECLARATION durable fact — written at
     // start, exactly once (the append is an idempotent CAS, so the foreground
     // and runner paths share ONE single write point). Empty bounded payload:
