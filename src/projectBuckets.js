@@ -308,20 +308,26 @@ export function releaseRunIdClaim(runDir, runId, { io, nonce = null } = {}) {
   // 四轮 R2/sol：读 nonce→rm 的 TOCTOU 由同一把互斥锁关闭（锁忙=stealer
   // 在临界区——跳过本次删除，TTL 自愈）。nonce 不匹配不删（慢持有者删不掉
   // 抢占者的新 claim）；nonce 入参缺省=不校验直接删（仅测试/清理路径）。
-  withClaimLock(i, claimPath, () => {
-    if (nonce !== null) {
-      try {
-        const parsed = JSON.parse(i.readFileSync(claimPath, "utf8"));
-        if (parsed?.nonce !== nonce) return true;
-      } catch {
-        return true; // 不可读=不删（TTL 自愈）
+  // 五轮 opus-a：锁忙时**有界重试**（临界区毫秒级，3×20ms 足以让位）；
+  // 重试仍忙=跳过本次删除（claim 由 TTL 自愈——台账 D 残余在册）。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) i.sleepSync(PROJECT_RECORD_RETRY_BACKOFF_MS);
+    const ran = withClaimLock(i, claimPath, () => {
+      if (nonce !== null) {
+        try {
+          const parsed = JSON.parse(i.readFileSync(claimPath, "utf8"));
+          if (parsed?.nonce !== nonce) return true;
+        } catch {
+          return true; // 不可读=不删（TTL 自愈）
+        }
       }
-    }
-    try {
-      i.rmSync?.(claimPath, { force: true });
-    } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
-    return true;
-  });
+      try {
+        i.rmSync?.(claimPath, { force: true });
+      } catch { /* best-effort：残留 claim 只影响该 runId 的重试提示，不影响真值 */ }
+      return true;
+    });
+    if (ran) return;
+  }
 }
 
 /**
@@ -336,11 +342,6 @@ export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_0
   if (!runId || typeof runId !== "string") throw new Error("claimRunIdForWrite: runId required");
   const claimsDir = join(runDir, CLAIMS_DIRNAME);
   const claimPath = join(claimsDir, runId);
-  const payload = () => JSON.stringify({
-    pid: typeof process !== "undefined" ? process.pid : null,
-    claimedAt: new Date().toISOString(),
-    nonce: randomUUID(),
-  });
   i.mkdirSync(claimsDir, { recursive: true });
   // 四轮 A/sol①：wx 只保证创建瞬间独占——stat→rm→wx 与 读nonce→rm 各自的
   // TOCTOU 交错（双胜者/删新持有者）已被两席探针实测推翻。终法=**互斥
@@ -365,7 +366,14 @@ export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_0
     }
     if (!Number.isFinite(age) || age <= stealAfterMs) return false;
     i.rmSync?.(claimPath, { force: true });
-    i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
+    try {
+      i.writeFileSync(claimPath, JSON.stringify({ pid: typeof process !== "undefined" ? process.pid : null, claimedAt: new Date().toISOString(), nonce }), { encoding: "utf8", flag: "wx" });
+    } catch (e) {
+      // 五轮 F2：rm 之后无锁快速路径可插入先成功——输家按契约返回 false，
+      // 绝不把原始 EEXIST/EPERM 抛给调用方。
+      if (LOCK_BUSY_CODES.has(e?.code)) return false;
+      throw e;
+    }
     return true;
   })) {
     return { claimed: false, nonce: null };
@@ -373,28 +381,50 @@ export function claimRunIdForWrite(runDir, runId, { io, stealAfterMs = 10 * 60_0
   return { claimed: true, nonce };
 }
 
-/** 互斥 claim 临界区锁（四轮终法）：wx 独占 `.steal` 锁；忙=返回 false 由
- * 调用方按语义处置；锁自身泄漏由 5s TTL 自清理（窗口毫秒级）。 */
+/**
+ * 互斥 claim 临界区锁（五轮终法，取代四轮版）。四轮版的三个实测缺口：
+ *  ① Windows 删除挂起态下 wx 得 EPERM/EACCES（非 EEXIST）——原样上抛击穿
+ *     dispatch 的"重解析→具名冲突"路径，release 抛错更会在首条事实落盘后
+ *     中止派发（孤儿档风险）；
+ *  ② 临界区内 rm 陈旧 claim 后，无锁快速路径可插入先 wx 成功——输家收到
+ *     原始 EEXIST 而非约定的 claimed:false；
+ *  ③ 陈旧锁回收 stat→rm 自身 TOCTOU（两回收者先后得锁；>TTL 卡顿持有者的
+ *     finally 会删掉接管者的锁）。
+ * 终法：忙=闭集 {EEXIST,EPERM,EACCES,EBUSY}（不抛）；陈旧回收用 **rename
+ * 墓碑**（原子——rename 到唯一墓碑名只有一个胜者，败者 ENOENT）；锁载荷带
+ * 持有者 token，finally 只删自己的锁（token 不匹配=已被回收接管，不删）。
+ * 锁 TTL 30s（临界区毫秒级；卡顿持有者视为已死由回收接管）。
+ */
+const CLAIM_LOCK_TTL_MS = 30_000;
+const LOCK_BUSY_CODES = new Set(["EEXIST", "EPERM", "EACCES", "EBUSY"]);
+
 function withClaimLock(i, claimPath, critical) {
   const lockPath = `${claimPath}.steal`;
+  const token = randomUUID();
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      i.writeFileSync(lockPath, String(Date.now()), { encoding: "utf8", flag: "wx" });
+      i.writeFileSync(lockPath, JSON.stringify({ token, at: new Date().toISOString() }), { encoding: "utf8", flag: "wx" });
     } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
+      if (!LOCK_BUSY_CODES.has(e?.code)) throw e;
+      // 忙 → 陈旧评估：超 TTL 用 rename 墓碑原子回收（单胜者；败者 ENOENT
+      // 落入下方 stat/ENOENT 处理）。
       try {
-        const lockAge = Date.now() - i.statSync(lockPath).mtimeMs;
-        if (Number.isFinite(lockAge) && lockAge > 5000) {
-          i.rmSync?.(lockPath, { force: true });
-          continue; // 陈旧锁清理后重试一次
+        const age = Date.now() - i.statSync(lockPath).mtimeMs;
+        if (Number.isFinite(age) && age > CLAIM_LOCK_TTL_MS) {
+          i.renameSync?.(lockPath, `${lockPath}.dead-${token}`);
+          continue; // 回收成功 → 重试 wx 一次
         }
-      } catch { /* stat 失败按忙处理 */ }
+      } catch { /* stat/rename 失败（含墓碑败者 ENOENT）→ 按忙 */ }
       return false; // 对方在临界区（fail-closed）
     }
     try {
       return critical();
     } finally {
-      try { i.rmSync?.(lockPath, { force: true }); } catch { /* best-effort */ }
+      // 只删自己的锁：token 不匹配=已被陈旧回收接管（新持有者在临界区）。
+      try {
+        const raw = i.readFileSync(lockPath, "utf8");
+        if (JSON.parse(raw)?.token === token) i.rmSync?.(lockPath, { force: true });
+      } catch { /* 锁不可读/已不在：best-effort（TTL 兜底） */ }
     }
   }
   return false;

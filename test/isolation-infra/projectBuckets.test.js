@@ -505,3 +505,68 @@ test("D2-②b 四轮 B: 重建遇并发半写（首读空串→次读正常）�
       "持续半写=损坏仍硬错");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 五轮钉（consult_…g43b9：F1 EPERM 归类/F2 临界区 EEXIST 契约/C 回写）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("D2-②b 五轮 F1: Windows 删除挂起的 EPERM 按锁忙处理（不原始上抛）", () => {
+  const root = makeRoot("wao-pb-p1-");
+  try {
+    const claimPath = join(root, ".claims", "run_eperm");
+    assert.equal(claimRunIdForWrite(root, "run_eperm").claimed, true);
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    // 注入：wx 建锁时抛 EPERM（模拟删除挂起态）
+    const realWrite = writeFileSync;
+    const epermIo = { writeFileSync: (p, data, opts) => { if (String(p).endsWith(".steal") && opts?.flag === "wx") { const e = new Error("operation not permitted"); e.code = "EPERM"; throw e; } return realWrite(p, data, opts); } };
+    assert.equal(claimRunIdForWrite(root, "run_eperm", { io: epermIo }).claimed, false,
+      "EPERM=锁忙→fail-closed（修前：原始 EPERM 击穿具名冲突路径）");
+    // release 同样不抛（best-effort 兑现）
+    releaseRunIdClaim(root, "run_eperm", { nonce: "any", io: epermIo });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 五轮 F2: 临界区内 wx 撞 EEXIST（快速路径插入）→ claimed:false 契约", () => {
+  const root = makeRoot("wao-pb-p2-");
+  try {
+    const claimPath = join(root, ".claims", "run_f2c");
+    assert.equal(claimRunIdForWrite(root, "run_f2c").claimed, true);
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(claimPath, old, old);
+    // 注入：临界区 rm claim 后，另一写者的 claim wx 已先成功——我方 wx 必 EEXIST
+    const realWrite = writeFileSync;
+    const raceIo = {
+      writeFileSync: (p, data, opts) => {
+        if (String(p) === claimPath && opts?.flag === "wx") {
+          // 模拟快速路径赢家已在场：首次（外部 stat 前）成功、临界区内重试撞 EEXIST
+          if (raceIo._inCritical) { const e = new Error("exists"); e.code = "EEXIST"; throw e; }
+        }
+        return realWrite(p, data, opts);
+      },
+      rmSync: (p, opts) => { if (String(p) === claimPath) raceIo._inCritical = true; return rmSync(p, opts); },
+      _inCritical: false,
+    };
+    assert.equal(claimRunIdForWrite(root, "run_f2c", { io: raceIo }).claimed, false,
+      "临界区输家=claimed:false（修前：原始 EEXIST 上抛）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 五轮 C: 重建找回的条目回写索引（下次同 key 零扫描）", () => {
+  const root = makeRoot("wao-pb-c1-");
+  try {
+    const dirA = join(root, "repo-wb");
+    mkdirSync(dirA, { recursive: true });
+    const id = identifyProjectFromCwd(dirA, IO);
+    const w = resolveRunDirForWrite(root, id);
+    // 丢索引条目 → 下一次写应命中重建并**回写**
+    const idxPath = join(root, "projects", ".index.json");
+    const idx = JSON.parse(readFileSync(idxPath, "utf8"));
+    delete idx.entries[id.key];
+    writeFileSync(idxPath, JSON.stringify(idx), "utf8");
+    const w2 = resolveRunDirForWrite(root, id);
+    assert.equal(w2.bucket, w.bucket);
+    const after = JSON.parse(readFileSync(idxPath, "utf8"));
+    assert.equal(after.entries[id.key], w.bucket, "找回条目已回写（C 补钉）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
