@@ -19,7 +19,8 @@
 
 import { join } from "node:path";
 
-import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
+import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W2 升格修复）：重建输入的绑定作用域——metrics.js 单一定义处。
 import { boundReportScope } from "../metrics.js";
@@ -174,7 +175,7 @@ export async function collectRunMessages({
   }
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
-  const transcriptPath = transcriptPathFor(runDir, runId);
+  const transcriptPath = resolveTranscriptPath(runDir, runId);
 
   const events = await _readTranscript(transcriptPath);
 

@@ -68,7 +68,8 @@
 
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState, findLatestBound, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
+import { readTranscript, findState, findLatestBound, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W2 升格修复）：compact 重建输入的绑定作用域——metrics.js 单一
 // 定义处。
@@ -506,7 +507,7 @@ export async function runAwaitResult(input) {
   }
 
   const resolvedRunDir = resolve(runDir);
-  const transcriptPath = transcriptPathFor(resolvedRunDir, runId);
+  const transcriptPath = resolveTranscriptPath(resolvedRunDir, runId);
 
   // Single baseline for deadline + waitedMs + progress fraction. Captured once
   // so a fake clock is not advanced twice (test determinism).

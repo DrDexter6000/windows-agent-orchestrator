@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { rmSync, readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { listTranscriptsDeep, resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Run, RunManager, gracefulShutdown } from "../../src/runManager.js";
@@ -1999,7 +2000,8 @@ test("S1-3 集成: budget_exceeded 触发 raiseAlert → ALERTS.log 被写", asy
     assert.equal(run.state, "failed");
     // raiseAlert 是 fire-and-forget，等一下让异步写完成
     await new Promise((r) => setTimeout(r, 50));
-    const alertsPath = join(dir, "ALERTS.log");
+    // D2-②b：ALERTS 随转录实际目录（分桶子目录）。
+    const alertsPath = join(dirname(run.transcript.filePath), "ALERTS.log");
     const { readFileSync, existsSync } = await import("node:fs");
     assert.ok(existsSync(alertsPath), "budget_exceeded 必须触发告警写 ALERTS.log");
     const content = readFileSync(alertsPath, "utf8");
@@ -2147,9 +2149,10 @@ test("P1-1: requireCertified + 缺 summary → 拒绝", async () => {
     const managerInDir = [...manager.allRuns?.values?.() ?? []];
     // 直接验证：dir 下应有 transcript 记录 certification-gate 错误
     const { readdirSync, readFileSync: rf } = await import("node:fs");
-    const jsonl = readdirSync(dir).find((f) => f.endsWith(".jsonl"));
+    // D2-②b：经深层枚举正牌入口（根层 + projects/* 桶内；.index.json 非桶）。
+    const jsonl = listTranscriptsDeep(dir).map((e) => e.path)[0];
     assert.ok(jsonl, "应有 transcript 文件");
-    const content = rf(join(dir, jsonl), "utf8");
+    const content = rf(jsonl, "utf8");
     assert.ok(content.includes("certification-gate"), "transcript 应记录 certification-gate 拒绝");
     assert.ok(content.includes("reliability-summary.json 不存在"));
   } finally {
@@ -2313,7 +2316,8 @@ test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submit
     await spawnEntered;
 
     // 第二个 writer 在 spawn resolve 前 claim aborted（确定性，不依赖 sleep）。
-    const tp = join(dir, `${runId}.jsonl`);
+    // D2-②b：外部写者必须写本 run 实际转录位置（分桶后经解析链定位）。
+    const tp = resolveTranscriptPath(dir, runId);
     const externalWriter = new JsonlTranscript(tp, { runId, agentId: "test_agent" });
     await externalWriter.transitionState("pending", "aborted", "external_stop");
 
@@ -2879,7 +2883,8 @@ test("TD-150-T5: klwc9 形状（marker+empty_diff）走真实 manager.start ⇒ 
 
     // T3 活路径：告警恰一次
     await new Promise((r) => setTimeout(r, 50));
-    const count = countNoEffectLines(join(runDir, "ALERTS.log"));
+    // D2-②b：ALERTS 随转录实际目录（分桶子目录）。
+    const count = countNoEffectLines(join(dirname(run.transcript.filePath), "ALERTS.log"));
     assert.equal(count, 1, `no_effect 告警必须恰好一次，实际 ${count}`);
 
     // 下游消费自证：诊断投影区分性事实（码 fail-closed null——红线自证）

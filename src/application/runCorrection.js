@@ -44,6 +44,7 @@ import {
   CORRECTION_REJECTION_REASONS,
   // TD-234 验收修（opus C5）：CAS 形状拒绝专用类型（其余异常一律意外上抛）。
   CorrectionShapeError, transcriptPathFor } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -124,7 +125,15 @@ export async function correctRun({
   }
 
   const reader = readTranscriptFn ?? readTranscript;
-  const transcriptPath = transcriptPathFor(resolve(runDir), runId);
+  // D2-②b：解析链具名错映射回既有拒绝闭集（unknown_run）——跨层找不到转录
+  // 是"目标 run 不存在"，不是调用方异常；孪生冲突等损坏形态如实上抛。
+  let transcriptPath;
+  try {
+    transcriptPath = resolveTranscriptPath(resolve(runDir), runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") return reject("unknown_run");
+    throw e;
+  }
 
   // 2. Transcript must exist and carry one canonical agentId envelope.
   let events;

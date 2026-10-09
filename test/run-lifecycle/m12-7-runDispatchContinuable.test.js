@@ -14,6 +14,7 @@
 //   - a busy lineage slot refuses before any transcript/fork.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -92,7 +93,7 @@ test("M12-7-DCT-01: continuable:true establishes the lineage first turn (argv en
 
     // Bounded audit fact: run_lineage / turn:first / rootRunId (WAO runId only —
     // never the opaque uuid, Lead id, or workspace).
-    const events = await readTranscript(join(dir, `${r.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, r.runId));
     const reuseEvt = findLatest(events, "run.session_reuse");
     assert.equal(reuseEvt.mode, "run_lineage");
     assert.equal(reuseEvt.turn, "first");
@@ -122,7 +123,7 @@ test("M12-7-DCT-02: continuable omitted = ordinary delivery dispatch (no lineage
     // No lineage routing on the runner argv (ordinary delivery dispatch).
     assert.equal(argVal(calls, "--session-reuse-json"), undefined, "no session-reuse routing for ordinary dispatch");
     // No run.session_reuse audit fact.
-    const events = await readTranscript(join(dir, `${r.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, r.runId));
     assert.equal(findLatest(events, "run.session_reuse"), undefined);
     // Delivery dispatch still isolates + ships the delivery.
     assert.ok(calls[0].args.includes("--isolate"));
@@ -210,7 +211,7 @@ test("2026-10-04: kimi-web + continuable (REAL factory resolver) passes the capa
       spawnFn: fakeSpawn,
     });
     assert.equal(r.accepted, true, "kimi-web declares supportsSessionReuse=true — the gate must pass (the drift refused exactly this)");
-    const events = await readTranscript(join(dir, `${r.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, r.runId));
     const reuse = findLatest(events, "run.session_reuse");
     assert.ok(reuse, "lineage first-turn audit fact written");
     assert.equal(reuse.mode, "run_lineage");

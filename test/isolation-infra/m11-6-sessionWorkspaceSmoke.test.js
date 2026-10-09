@@ -12,6 +12,7 @@
 // the Lead can recover an unconfigured session by selecting the project.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,7 +118,7 @@ test("M11-6-SMOKE: unbound → workspace_select → status → dispatch succeeds
       // 8. Close client; detached runner continues. Wait for terminal.
       await client.close();
       const { readTranscript, findState } = await import("../../src/transcript.js");
-      const transcriptPath = join(runDir, `${runId}.jsonl`);
+      const transcriptPath = resolveTranscriptPath(runDir, runId);
       let state = null;
       for (let i = 0; i < 150; i++) {
         if (existsSync(transcriptPath)) {

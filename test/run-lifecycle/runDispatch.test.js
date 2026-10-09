@@ -14,6 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
@@ -77,7 +78,7 @@ test("M9-2A-01: accepted dispatch writes initial durable facts and spawns detach
     assert.equal(result.state, "pending", "state is pending");
 
     // Transcript must already be readable and contain the initial durable facts.
-    const transcriptPath = join(runDir, `${result.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, result.runId);
     assert.ok(existsSync(transcriptPath), "transcript file exists before spawn returns");
     const events = await readTranscript(transcriptPath);
     const submitted = findLatest(events, "run.background_submitted");
@@ -189,7 +190,7 @@ test("M9-2A-03: existing terminal transcript rejects pending, no spawn, structur
     const runId = "run_preexist_terminal";
     // Pre-seed a terminal transcript so transitionState(null,pending) is rejected.
     const { JsonlTranscript } = await import("../../src/transcript.js");
-    const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "coder_low" });
+    const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId: "coder_low" });
     await t.transitionState(null, "pending", "seed");
     await t.transitionState("pending", "failed", "seed_terminal");
 
@@ -343,7 +344,7 @@ test("M9-2A-07: requireCertified propagated — fails at certification-gate, nev
       requireCertified: true,
     });
 
-    const transcriptPath = join(runDir, `${result.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, result.runId);
     let events = [];
     for (let i = 0; i < 80; i += 1) {
       if (existsSync(transcriptPath)) {
@@ -453,7 +454,7 @@ test("M9-7A-01: valid delivery passes through prepareDeliveryRequest, argv gets 
     assert.ok(!dj.verification, "no internal nested verification structure");
     // Isolate forced.
     assert.ok(argv.includes("--isolate"), "argv has --isolate");
-    const events = await readTranscript(join(dir, "runs", `${result.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(join(dir, "runs"), result.runId));
     const submitted = events.find((event) => event.type === "run.background_submitted");
     assert.equal(
       submitted?.deliveryRequested,
@@ -657,7 +658,7 @@ function reusableClaudeAgent(dir, extra = {}) {
 // Seed a prior run transcript to a terminal state (with/without session.created).
 async function seedTranscript(runDir, runId, agentId, { terminal, sessionCreated } = {}) {
   const { JsonlTranscript } = await import("../../src/transcript.js");
-  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
+  const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId });
   await t.transitionState(null, "pending", "seed");
   await t.append("run.started", { backend: "claude-code" });
   if (sessionCreated) {
@@ -773,7 +774,7 @@ test("M12-25-ROUT-6: accepted:false (terminal transcript) → providerSessionRou
     mkdirSync(runDir, { recursive: true });
     const runId = "run_preexist_terminal_rout6";
     const { JsonlTranscript } = await import("../../src/transcript.js");
-    const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "coder_low" });
+    const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId: "coder_low" });
     await t.transitionState(null, "pending", "seed");
     await t.transitionState("pending", "failed", "seed_terminal");
     const result = await dispatchRun({

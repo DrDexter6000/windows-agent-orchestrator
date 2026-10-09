@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -176,10 +177,10 @@ test("M11-5-A-RED4a: RunManager.start passes roleContract to backend spawn (beha
     assert.ok(/canonical WAO agentId/i.test(calls[0].roleContract),
       "composed roleContract carries the identity header (M11-8B)");
     // Transcript must NOT contain role body.
-    const transcriptPath = join(runDir, `${calls[0].agentId ? "" : ""}`);
-    const jsonlFiles = readdirSync(runDir).filter(f => f.endsWith(".jsonl"));
+    // D2-②b：深层枚举（新 run 转录在 projects/<slug>/ 桶内）。
+    const jsonlFiles = listTranscriptsDeep(runDir);
     assert.ok(jsonlFiles.length >= 1, "transcript created");
-    const content = readFileSync(join(runDir, jsonlFiles[0]), "utf8");
+    const content = readFileSync(jsonlFiles[0].path, "utf8");
     assert.ok(!content.includes("ROLE_BEHAVIORAL"), "role body zero-leaked to transcript");
   } finally {
     cleanupDir(dir);

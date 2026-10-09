@@ -7,6 +7,7 @@
 // （字节兼容）。本文件钉：纯函数形状 + run.started 落点（有 args/无 args 双路）。
 
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -73,7 +74,8 @@ function makeManager(dir, agentOverrides = {}) {
 }
 
 function readStarted(dir, runId) {
-  const lines = readFileSync(join(dir, `${runId}.jsonl`), "utf8").trim().split("\n");
+  // D2-②b：经解析链定位（前台 manager 自决写桶后转录在 projects/<slug>/）。
+  const lines = readFileSync(resolveTranscriptPath(dir, runId), "utf8").trim().split("\n");
   const started = lines.map((l) => JSON.parse(l)).find((e) => e.type === "run.started" && e.runId === runId);
   assert.ok(started, "run.started 在转录中");
   return started;

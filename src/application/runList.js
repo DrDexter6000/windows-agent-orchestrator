@@ -19,7 +19,8 @@ import { basename, join, resolve } from "node:path";
 import { readdirSync, existsSync, realpathSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-import { readTranscript, findState, RUN_STATES, TERMINAL_STATES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
+import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
+import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
 import { identityOfFirstEvent, deriveProjectBucketSlug, productionProjectIo } from "../projectIdentity.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
@@ -46,10 +47,11 @@ export const ACTIVITY_BASES = [
  */
 function scanRunFiles(runDir) {
   if (!existsSync(runDir)) return [];
-  const files = listTranscriptFiles(runDir);
-  return files
-    .filter((f) => f.startsWith("run_"))
-    .sort();
+  // D2-②b：深层枚举（根层 + projects/* 桶内）——返回绝对路径（根层/桶内
+  // 混合后 join(runDir, file) 不再成立）。
+  return listTranscriptsDeep(runDir)
+    .filter((e) => e.name.startsWith("run_"))
+    .map((e) => e.path);
 }
 
 // M12-20: enumerate the CURRENT owner-lease candidates — the .owner-<runId>
@@ -263,9 +265,10 @@ function summaryWindowMs(facts) {
 // identityOfFirstEvent（在档事实优先，与迁移计划器同语义）。
 function makeFirstEventClassifier(resolvedRunDir, projectIo) {
   const io = projectIo ?? productionProjectIo();
-  return (file) => {
+  // D2-②b：候选现携带绝对 filePath（根层/桶内混合，join(runDir, name) 不再成立）。
+  return (filePath) => {
     try {
-      const fh = openSync(join(resolvedRunDir, file), "r");
+      const fh = openSync(filePath, "r");
       try {
         const buf = Buffer.alloc(8192);
         const n = readSync(fh, buf, 0, buf.length, 0);
@@ -366,10 +369,10 @@ export async function listRuns(input) {
   let candidates;
   if (scanScope === "active") {
     candidates = scanOwnerLeaseCandidates(resolvedRunDir)
-      .map((runId) => ({ runId, file: basename(transcriptPathFor(resolvedRunDir, runId)) }));
+      .map((runId) => ({ runId, filePath: resolveTranscriptPath(resolvedRunDir, runId) }));
   } else {
     candidates = scanRunFiles(resolvedRunDir)
-      .map((file) => ({ runId: file.replace(/\.jsonl$/, ""), file }));
+      .map((filePath) => ({ runId: basename(filePath).replace(/\.jsonl$/, ""), filePath }));
   }
 
   // TD-190 projectFilter（只读、前置）。终审 F4/M2 修正：
@@ -389,7 +392,7 @@ export async function listRuns(input) {
       if (!SELECTORS.includes(sel)) {
         throw new Error(`unknown --project selector: ${rawFilter} (valid: ${SELECTORS.map((x) => `@${x}`).join(", ")}, or a project path/name)`);
       }
-      candidates = candidates.filter(({ file }) => classify(file)?.identity.kind === sel);
+      candidates = candidates.filter(({ filePath }) => classify(filePath)?.identity.kind === sel);
     } else {
       const looksLikePath = /[\\/]/.test(rawFilter) || /^[A-Za-z]:/.test(rawFilter);
       const argName = rawFilter.toLowerCase();
@@ -397,8 +400,8 @@ export async function listRuns(input) {
         ? identityOfFirstEvent({ cwd: rawFilter }, input.projectIo ?? productionProjectIo()).identity
         : null;
       const argKey = pathIdentity?.kind === "project" ? pathIdentity.key : null;
-      candidates = candidates.filter(({ file }) => {
-        const id = classify(file)?.identity;
+      candidates = candidates.filter(({ filePath }) => {
+        const id = classify(filePath)?.identity;
         if (!id || id.kind !== "project") return false;
         if (argKey !== null && id.key === argKey) return true;
         if (looksLikePath) return false; // 路径形参数只按键精确匹配（不猜名字）
@@ -420,7 +423,7 @@ export async function listRuns(input) {
 
   const summaries = [];
   let unresolvedCount = 0;
-  for (const { runId, file } of candidates) {
+  for (const { runId, filePath } of candidates) {
     // Validate runId from filename / lease-name (active candidates are already
     // pre-filtered; this is a no-op for them and kept for default/history).
     if (!isValidRunId(runId)) continue;
@@ -437,7 +440,7 @@ export async function listRuns(input) {
     let ownershipView;
     if (input.readSummaryFn) {
       try {
-        facts = await input.readSummaryFn(join(resolvedRunDir, file));
+        facts = await input.readSummaryFn(filePath);
       } catch {
         // Unreadable/vanished/corrupt file — skip silently (fail-closed per file)
         continue;
@@ -447,7 +450,7 @@ export async function listRuns(input) {
     } else {
       let events;
       try {
-        events = await _readTranscript(join(resolvedRunDir, file));
+        events = await _readTranscript(filePath);
       } catch {
         // Malformed/unreadable transcript — skip silently (fail-closed per file)
         continue;

@@ -10,6 +10,7 @@
 // states, read-only no-side-effects, real stdio dispatch->status->failed flow.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -387,7 +388,7 @@ test("M9-3B-06: repeated status calls leave transcript unchanged", async () => {
       ev({ type: "run.state_change", to: "pending", reason: "init", ts: "2026-07-14T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
       ev({ type: "run.event", kind: "command", command: "echo hi", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "w", seq: 2 }),
     );
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
     const before = readFileSync(transcriptPath, "utf8");
 
     const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
@@ -859,7 +860,7 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
     assert.ok(runId, "dispatch returned runId");
     assert.equal(dispPayload.state, "pending", "dispatch response state is pending");
 
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
 
     // 2. Poll via run_status ONLY until terminal.
     let lastStatus = null;

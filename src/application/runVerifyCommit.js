@@ -78,7 +78,8 @@ import {
   JsonlTranscript,
   TERMINAL_STATES,
   REVERIFY_SETUP_COMMANDS_LIMIT,
-  REVERIFY_SETUP_COMMAND_MAX_LENGTH, transcriptPathFor } from "../transcript.js";
+  REVERIFY_SETUP_COMMAND_MAX_LENGTH } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
@@ -442,7 +443,17 @@ export async function runVerifyCommit({
   }
 
   // ===== 裁定①：前置（转录存在 / workspace 归属 / 终态 / delivery_created） =====
-  const filePath = transcriptPathFor(runDir, runId);
+  // D2-②b：跨层未命中映射回既有 run not found 拒绝（不误建平铺）；孪生
+  // 冲突等损坏形态如实上抛。
+  let filePath;
+  try {
+    filePath = resolveTranscriptPath(runDir, runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      throw new Error(`runVerifyCommit: run not found (transcript missing in any layer: ${runId})`);
+    }
+    throw e;
+  }
   let events;
   try {
     events = await _read(filePath);

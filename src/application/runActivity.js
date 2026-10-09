@@ -33,7 +33,8 @@ import {
   findLatestBound,
   TERMINAL_STATES,
   extractCanonicalAgentId,
-  assertEventsBoundToRunId, transcriptPathFor } from "../transcript.js";
+  assertEventsBoundToRunId } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -53,7 +54,7 @@ export async function readRunActivity({ runId, runDir, authorizedWorkspaceRoot, 
   if (!runDir || typeof runDir !== "string") throw new Error("invalid runDir");
 
   const reader = readTranscriptFn ?? readTranscript;
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
 
   // Single read. No wait loop, no re-read, no append.
   const events = await reader(filePath);

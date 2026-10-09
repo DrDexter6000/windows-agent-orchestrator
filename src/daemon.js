@@ -22,7 +22,8 @@ import { join } from "node:path";
 import { createServer, createConnection as netCreateConnection } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
-import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor, listTranscriptFiles } from "./transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
+import { resolveTranscriptPath, listTranscriptsDeep } from "./projectBuckets.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
@@ -93,12 +94,13 @@ export function isDaemonAlive(handshake, now, thresholdMs = DEFAULT_LIVENESS_THR
  */
 export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS) {
   if (!existsSync(runDir)) return [];
-  const files = listTranscriptFiles(runDir);
+  // D2-②b：深层枚举（根层 + projects/* 桶内）——恢复扫描看得见分桶新档。
+  const files = listTranscriptsDeep(runDir);
   const resumable = [];
-  for (const file of files) {
-    const runId = file.replace(/\.jsonl$/, "");
+  for (const entry of files) {
+    const runId = entry.name.replace(/\.jsonl$/, "");
     try {
-      const raw = readFileSync(join(runDir, file), "utf8");
+      const raw = readFileSync(entry.path, "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
       // R20 (TD-128 M7)：终态判定绑定到【文件名 stem runId】（R15 范式）——
       // 外 run 伪终态尾条不再永久压制 resume 候选（孤儿恢复效应：真实在飞 +
@@ -142,12 +144,13 @@ export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAUL
  */
 export function scanAllRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS, daemonOwnedSet = new Set()) {
   if (!existsSync(runDir)) return [];
-  const files = listTranscriptFiles(runDir);
+  // D2-②b：同款深层枚举（根层 + projects/* 桶内）。
+  const files = listTranscriptsDeep(runDir);
   const runs = [];
-  for (const file of files) {
-    const runId = file.replace(/\.jsonl$/, "");
+  for (const entry of files) {
+    const runId = entry.name.replace(/\.jsonl$/, "");
     try {
-      const raw = readFileSync(join(runDir, file), "utf8");
+      const raw = readFileSync(entry.path, "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
       // R20 (TD-128 M7，会审补扫漏网)：统一视图的 state 与 agentId 读取同款
       // 绑定到 stem runId——外 run 伪终态尾条不再把在飞 run 从统一视图抹掉
@@ -510,7 +513,8 @@ export async function handleRequest(req, manager, ctx = {}) {
     }
     // 不在内存：读 transcript 兜底
     const { runDir } = ctx;
-    const filePath = transcriptPathFor(runDir, runId);
+    // D2-②b：状态兜底走解析链（桶/平铺/有界扫描）。
+    const filePath = resolveTranscriptPath(runDir, runId);
     if (existsSync(filePath)) {
       const raw = readFileSync(filePath, "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));

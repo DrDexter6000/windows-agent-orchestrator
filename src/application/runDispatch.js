@@ -26,7 +26,8 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
-import { projectFactFromCwd } from "../projectIdentity.js";
+import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath } from "../projectBuckets.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
@@ -836,8 +837,30 @@ export async function dispatchRun({
     throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
   }
 
+  // All preflight passed — now decide the transcript bucket ONCE (TD-190 D2-②b
+  // decide-once：桶目录在本进程决定，经 --transcript-dir 显式传给 runner；
+  // runner/RunManager 收到即用不重推——防 projects/x/projects/x 双重分桶与
+  // "旧父进程配新 runner"孤儿形态，规格 §6.11-1）。
+  const ownershipIdentity = identifyProjectFromCwd(ownershipCwd ?? cwd, productionProjectIo());
+  // runId 跨层唯一性（M9-2A-03 合同保持）：已有转录（旧平铺或既有桶）→ 写
+  // 原位（pending 终态拒绝等既有语义在该档上照常仲裁，不制造孪生）；全新
+  // runId → 决定新桶（decide-once）并传 --transcript-dir。孪生冲突等具名
+  // 错误如实上抛（不择一、不静默）。
+  let writeTarget = null;
+  let transcriptPath;
+  try {
+    transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      writeTarget = resolveRunDirForWrite(resolvedRunDir, ownershipIdentity);
+      transcriptPath = transcriptPathFor(writeTarget.transcriptDir, finalRunId);
+      runnerArgs.push("--transcript-dir", writeTarget.transcriptDir);
+    } else {
+      throw e;
+    }
+  }
+
   // All preflight passed — now write transcript durable facts.
-  const transcriptPath = transcriptPathFor(resolvedRunDir, finalRunId);
   const transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
 
   // Initial durable facts, in order: background_submitted, then pending.
@@ -857,9 +880,12 @@ export async function dispatchRun({
     // stable fact to gate run_correct (a correction may only queue against a
     // run dispatched correctable). Written before the runner forks.
     ...(correctable ? { correctable: true } : {}),
-    // TD-190 D2-②a：首事件落档有界桶归属事实（opus 补强#1）——读侧以记录
-    // 事实为准不再重推导，规则演进不拆旧桶。形状见 projectFactFromCwd。
-    project: projectFactFromCwd(ownershipCwd ?? cwd),
+    // TD-190 D2-②a/②b：首事件落档有界桶归属事实——读侧以记录事实为准不再重
+    // 推导，规则演进不拆旧桶；bucket 记**最终写入位置**（resolveRunDirForWrite
+    // 的结果，碰撞扩长后与目录一致——规格 §6.1）。
+    project: writeTarget
+      ? projectFactForWrite(ownershipIdentity, writeTarget)
+      : projectFactFromCwd(ownershipCwd ?? cwd),
   });
 
   // pending via transitionState — first-terminal-wins arbitration. If the

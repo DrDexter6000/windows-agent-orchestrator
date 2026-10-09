@@ -23,10 +23,11 @@
 //   CLI path (authorizedWorkspaceRoot absent) skips authorization — CLI is
 //   human/ops and can stop any run in the specified runDir.
 
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq, transcriptPathFor } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
@@ -115,7 +116,7 @@ export async function stopRun(input) {
 
   // Resolve runDir
   const resolvedRunDir = resolveRunDir(runDir);
-  const transcriptPath = transcriptPathFor(resolvedRunDir, runId);
+  const transcriptPath = resolveTranscriptPath(resolvedRunDir, runId, { forAppend: true });
 
   // Read transcript
   let events;
@@ -310,7 +311,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     // 来源，stopRun 传入的 resolvedRunDir），绝不回落到进程 cwd。
     await alert("stop_unverified",
       `stop ${runId} not verified: process may still be running (pid=${pid}, outcome=${outcome})`,
-      { runId, logPath: join(runDir, "ALERTS.log") },
+      { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
 
@@ -394,7 +395,7 @@ async function opencodeStop({ transcript, session, fromState, runId, deps, stopR
     // TD-233（告警落点收口）：同 processStop——告警跟随实际写转录的 runDir。
     await alert("stop_unverified",
       `stop ${runId} not verified: opencode session may still be active`,
-      { runId, logPath: join(runDir, "ALERTS.log") },
+      { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
 
@@ -435,7 +436,7 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
   // TD-233（告警落点收口）：同 processStop——告警跟随实际写转录的 runDir。
   await alert("stop_unverified",
     `Run ${runId} has invalid PID: ${rawPid}`,
-    { runId, logPath: join(runDir, "ALERTS.log") },
+    { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
   ).catch(() => { /* alert failure doesn't affect terminal state */ });
 
   return {

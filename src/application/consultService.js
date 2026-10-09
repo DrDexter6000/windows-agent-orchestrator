@@ -48,6 +48,7 @@ import { join, resolve } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 
 // 0045 W4d：runtimeFacts 的同步解析缓存（模块级一次）。
 let _registryAgentsCache = null;
@@ -334,7 +335,7 @@ export function isValidConsultId(id) {
  *   null = transcript 不可读（缺席/损坏——观察事实，不 throw）。
  */
 export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTranscript, env }) {
-  const events = await readTranscriptFn(transcriptPathFor(resolve(runDir), runId));
+  const events = await readTranscriptFn(resolveTranscriptPath(resolve(runDir), runId));
   const scope = boundReportScope(events, runId) ?? events;
   const state = findState(scope);
   return {
@@ -532,7 +533,7 @@ export async function runConsult({
     if (remaining > 0) await sleepFn(Math.min(pollIntervalMs, remaining));
     for (const seat of pending) {
       try {
-        const events = await readTranscriptFn(transcriptPathFor(resolvedRunDir, seat.runId));
+        const events = await readTranscriptFn(resolveTranscriptPath(resolvedRunDir, seat.runId));
         const scope = boundReportScope(events, seat.runId) ?? events;
         const state = findState(scope);
         lastState.set(seat.runId, state);
@@ -602,7 +603,7 @@ export async function runConsult({
   let reviewedAgentId = null;
   if (typeof reviewedRunId === "string" && reviewedRunId.length > 0) {
     try {
-      const events = await readTranscriptFn(transcriptPathFor(resolvedRunDir, reviewedRunId));
+      const events = await readTranscriptFn(resolveTranscriptPath(resolvedRunDir, reviewedRunId));
       reviewedAgentId = extractCanonicalAgentId(events, reviewedRunId);
       authorInSeats = reviewedAgentId !== "unknown" && seatIds.includes(reviewedAgentId);
     } catch {
@@ -785,7 +786,7 @@ export async function rerenderConsultFromRecord({
   let authorIdentityFacts = null;
   if (record.reviewedRunId) {
     try {
-      const events = await readTranscriptFn(transcriptPathFor(runDir, record.reviewedRunId));
+      const events = await readTranscriptFn(resolveTranscriptPath(runDir, record.reviewedRunId));
       reviewedAgentId = extractCanonicalAgentId(events, record.reviewedRunId);
       authorInSeats = reviewedAgentId !== "unknown"
         && (record.seats ?? []).some((s) => s.agentId === reviewedAgentId);
@@ -803,7 +804,7 @@ export async function rerenderConsultFromRecord({
   const seatFactsForRelations = [];
   for (const seat of seatResults) {
     try {
-      const evs = await readTranscriptFn(transcriptPathFor(runDir, seat.runId));
+      const evs = await readTranscriptFn(resolveTranscriptPath(runDir, seat.runId));
       const st = evs.find((e) => e && e.type === "run.started" && e.runId === seat.runId);
       const identity = st ? deriveStartedIdentity(st) : null;
       seatFactsForRelations.push({

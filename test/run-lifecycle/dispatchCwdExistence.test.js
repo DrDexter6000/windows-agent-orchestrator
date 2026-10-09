@@ -76,9 +76,10 @@
 // end-to-end (CE-7), which is REFUSED before any fork.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,8 +120,10 @@ function makeFakeSpawn() {
 
 /** List the .jsonl transcripts in a runs dir (empty list if the dir is absent). */
 function listTranscripts(runDir) {
+  // D2-②b：深层枚举（分桶转录在 projects/<slug>/ 内）。
   if (!existsSync(runDir)) return [];
-  return readdirSync(runDir).filter((f) => f.endsWith(".jsonl"));
+  return [...readdirSync(runDir).filter((f) => f.endsWith(".jsonl")),
+    ...(existsSync(join(runDir, "projects")) ? readdirSync(join(runDir, "projects")).filter((b) => statSync(join(runDir, "projects", b)).isDirectory()).flatMap((b) => readdirSync(join(runDir, "projects", b)).filter((f) => f.endsWith(".jsonl")).map((f) => join("projects", b, f))) : [])];
 }
 
 const NO_ENV_READER = async () => ({});
@@ -281,7 +284,7 @@ test("CE-5: legit absolute cwd (real directory) → accepted (regression)", asyn
     });
     assert.equal(result.accepted, true);
     assert.equal(calls.length, 1);
-    const events = await import("../../src/transcript.js").then((m) => m.readTranscript(join(dir, "runs", `${result.runId}.jsonl`)));
+    const events = await import("../../src/transcript.js").then((m) => m.readTranscript(resolveTranscriptPath(join(dir, "runs"), result.runId)));
     const submitted = events.find((e) => e.type === "run.background_submitted");
     assert.equal(submitted.cwd, targetProject, "ownership record still built from the explicit cwd");
   } finally {
@@ -1054,7 +1057,7 @@ test("MO-9: resume rebuilds run.started.modelOverride — daemon takeover keeps 
     assert.deepEqual(spawnedModels, [{ id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 }],
       "the run.rerun re-spawn keeps the dispatched model — no silent registry fallback");
     assert.equal(run.agent.model.id, "gpt-5.6-sol-xhigh", "the returned Run handle carries the override");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     assert.ok(events.some((e) => e.type === "run.rerun"), "the replay branch actually re-spawned");
   } finally {
     cleanupDir(dir);
@@ -1131,7 +1134,7 @@ test("MO-9c: a persisted modelOverride failing the SSOT shape gate → resume re
       const run = await manager.resume(runId);
       assert.equal(run, null, `corrupt persisted value ${JSON.stringify(bad)} → resume refuses`);
       assert.equal(spawns, 0, "zero re-spawns");
-      const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+      const events = await readTranscript(resolveTranscriptPath(runDir, runId));
       assert.equal(events.length, lines.length, "no events appended by the refused resume");
       assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
     }
@@ -1732,7 +1735,7 @@ test("RO-9: resume rebuilds run.started.reasoningOverride — daemon takeover ke
     assert.deepEqual(spawnedReasonings, [{ effort: "xhigh" }],
       "the run.rerun re-spawn keeps the dispatched effort — no silent registry fallback");
     assert.equal(run.agent.reasoning.effort, "xhigh", "the returned Run handle carries the override");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     assert.ok(events.some((e) => e.type === "run.rerun"), "the replay branch actually re-spawned");
   } finally {
     cleanupDir(dir);
@@ -1809,7 +1812,7 @@ test("RO-9c: a persisted reasoningOverride outside the closed set → resume ref
       const run = await manager.resume(runId);
       assert.equal(run, null, `corrupt persisted value ${JSON.stringify(bad)} → resume refuses`);
       assert.equal(spawns, 0, "zero re-spawns");
-      const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+      const events = await readTranscript(resolveTranscriptPath(runDir, runId));
       assert.equal(events.length, lines.length, "no events appended by the refused resume");
       assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
     }

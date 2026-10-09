@@ -36,6 +36,7 @@
 // zero subprocess, zero provider token.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -185,7 +186,7 @@ test("DC-3: delivery + explicit --cwd → dispatchRun accepts; background_submit
 
     // The ownership record is complete: the review-time SSOT resolves it instead
     // of throwing the malformed-ownership failure that motivated this fix.
-    const events = await readTranscript(join(runDir, `${result.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, result.runId));
     const submitted = events.find((e) => e.type === "run.background_submitted");
     assert.equal(submitted.deliveryRequested, true);
     assert.equal(submitted.cwd, targetProject, "run.background_submitted.cwd is the explicit --cwd");
@@ -218,7 +219,7 @@ test("DC-4: NO delivery + NO --cwd → dispatchRun accepts as before (default re
     assert.equal(calls.length, 1);
     const argv = calls[0].args;
     assert.ok(!argv.includes("--delivery-json"), "no delivery payload");
-    const events = await readTranscript(join(dir, "runs", `${result.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(join(dir, "runs"), result.runId));
     const submitted = events.find((e) => e.type === "run.background_submitted");
     assert.equal(submitted.deliveryRequested, false, "not a delivery run — the gate's defect face does not apply");
   } finally {

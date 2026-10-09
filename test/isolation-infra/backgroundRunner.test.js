@@ -1,4 +1,5 @@
 import test from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -151,7 +152,7 @@ test("P2 CLI --background: 立即返回 + detached runner 推进状态机到终�
     assert.match(parsed.note ?? "", /detached runner owns lifecycle/i, "应说明 runner 接管生命周期");
 
     // 等 detached runner 进程推进状态机（binary 不存在会快速 failed）
-    const transcriptPath = path.join(runDir, `${parsed.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, parsed.runId);
     let state = null;
     for (let i = 0; i < 40; i += 1) {
       if (existsSync(transcriptPath)) {
@@ -263,7 +264,7 @@ test("TD-54: runBackground 启动失败也写 failed transcript（不产生 ghos
     assert.equal(result.failed, true, "启动失败应返回 failed:true");
     assert.match(result.error ?? "", /Unknown agent|missing_agent/, "错误应说明 agent 不存在");
 
-    const transcriptPath = path.join(dir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(dir, runId);
     assert.ok(existsSync(transcriptPath), "启动失败也必须留下 transcript，不能 ghost");
     const events = await readTranscript(transcriptPath);
     assert.equal(findState(events), "failed", "启动失败 transcript 最终态应为 failed");

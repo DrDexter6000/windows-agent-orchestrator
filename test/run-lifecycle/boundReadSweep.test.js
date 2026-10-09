@@ -47,6 +47,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -190,7 +191,7 @@ test("R14-SR-3: legacy 明示选择 — 无信封（事件无 runId 字段）的
 // 事实）+ live-provider 状态。cwd 指向真实 git repo（ownership 证明需要）。
 async function seedCorrectionRun(dir, runId, { correctable = false } = {}) {
   makeGitRepo(dir);
-  const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+  const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" });
   await t.append("run.background_submitted", {
     background: true, cwd: dir, deliveryRequested: true,
     ...(correctable ? { correctable: true } : {}),
@@ -246,7 +247,7 @@ test("R14-CR-2: 合法路径回归 — 绑定的 background_submitted 无 correc
 // session.created（使合法路径停在 no_provider_session，证明 lineage 门已通过）。
 async function seedLineageParent(dir, runId) {
   mkdirSync(dir, { recursive: true });
-  const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+  const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" });
   await t.append("run.background_submitted", { background: true, cwd: dir, deliveryRequested: true });
   await t.transitionState(null, "pending", "background_spawned");
   await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: runId });
@@ -623,7 +624,7 @@ test("R16-CO-1: 篡改探针 — 外 run 尾条 session.created 不再重定向 
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 修复前 findLatest 采信尾条 → serve 路径 → fetch 打到伪造 serveUrl/sessionId。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "session.created", runId: "run_evil", agentId: "researcher",
       backend: "opencode-serve", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
     });
@@ -653,7 +654,7 @@ test("R16-CO-2: 篡改探针 — 外 run 尾条 run.started.cwd 不再重定向 
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 修复前 findLatest 取末条 run.started（无视信封）→ 伪造 D:/evil 赢得 directory。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.started", runId: "run_evil", agentId: "researcher",
       backend: "opencode-serve", cwd: "D:/evil",
     });
@@ -818,15 +819,15 @@ test("R18-MET-1: 篡改探针 — 外 run 尾条不再污染 runs metrics 的 st
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 外 run 伪造尾条：伪 failed 终态 + 伪 tokens/cost + 远期 ts（修复前分别
     // 赢得 findState 末条、findLatest 末条、events.at(-1) 的 duration 终点）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.state_change", runId: "run_evil", agentId: "coder_low",
       from: "completed", to: "failed", reason: "evil",
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.metrics", runId: "run_evil", agentId: "coder_low",
       tokens: { input: 99999 }, costUsd: 99,
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "coder_low",
       ts: "2026-08-18T00:20:00.000Z",
     });
@@ -874,7 +875,7 @@ test("R18-SC-1: 篡改探针 — 本 run 无 scorecard.checked 时，外 run 尾
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 修复前 events.find 采信外 run 尾条 → 报告出一份本 run 不存在的 passed scorecard。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "scorecard.checked", runId: "run_evil", agentId: "coder_low",
       passed: true, checks: [{ name: "forge", passed: true, evidence: "forged" }],
     });
@@ -895,7 +896,7 @@ test("R18-SC-2: 篡改探针 — reason 推断的外 run 伪 run.started 不再�
       { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.started", runId: "run_evil", agentId: "coder_low", scorecardConfigured: true,
     });
 
@@ -915,7 +916,7 @@ test("R18-SC-3: 合法路径回归 — 本 run 绑定 scorecard.checked 照常�
       { type: "scorecard.checked", runId, agentId: "coder_low", passed: false, checks: [{ name: "commandsPassed", passed: false, evidence: "no command evidence" }], ts: "2026-08-18T00:00:02.000Z", seq: 2 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "scorecard.checked", runId: "run_evil", agentId: "coder_low",
       passed: true, checks: [],
     });
@@ -1039,7 +1040,7 @@ test("R18-AW-1: 篡改探针 — 外 run 伪 terminal 尾条不再把 await 点�
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 修复前 findState 末条胜出 → 读到外 run 伪 completed → terminal 提前成立、
     // compact collect 在伪终态上执行。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.state_change", runId: "run_evil", agentId: "coder_low",
       from: "running", to: "completed", reason: "evil",
     });
@@ -1140,7 +1141,7 @@ test("R18-AW-5: SSOT 序语义钉 — compact 的 session 反查取末条【绑�
       { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-07-28T00:10:01.000Z", seq: 7 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "session.created", runId: "run_evil", agentId: "coder_low",
       backend: "opencode-serve", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
     });
@@ -1201,11 +1202,11 @@ test("R18-RES-1: 篡改探针 — 外 run 伪 running 尾条不再把 terminal r
     assert.equal(prompts.length, 1, "start spawn 一次");
     // 驱动到终态：本 run 绑定 terminal state_change（first-terminal-wins 之外
     // 的读取面只有 resume 终态门——此处手写终态行避免动 active run）。
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "test-agent" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "test-agent" });
     await t.transitionState("submitted", "completed", "done");
     // 外 run 伪 running 尾条：修复前 findState 末条胜出 → 非终态 → 过终态门 →
     // 绑定 session/run.started 都在 → RESUME（终态 run 被接续，TD-128 W3 注册危害）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.state_change", runId: "run_evil", agentId: "test-agent",
       from: "completed", to: "running", reason: "evil",
     });
@@ -1224,7 +1225,7 @@ test("R18-RES-2: 反向篡改 + 合法回归 — 在飞 run 的 resume 不再被
     const runIdA = "run_r18_res2a";
     const managerA = makeManager(dir, makeReplayBackend().backend);
     await managerA.start("proc_agent", { prompt: "original prompt", runId: runIdA });
-    appendForeignLine(join(dir, `${runIdA}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runIdA), {
       type: "run.state_change", runId: "run_evil", agentId: "test-agent",
       from: "running", to: "completed", reason: "evil",
     });
@@ -1248,7 +1249,7 @@ test("R18-STOP-1: 篡改探针 + 合法回归 — stop 落盘的 state_change.fr
   const dir = mkdtempSync(join(tmpdir(), "wao-r18-stop1-"));
   try {
     const seed = async (runId, withTail) => {
-      const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "test-agent" });
+      const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "test-agent" });
       await t.append("run.started", { backend: "claude-code" });
       await t.append("session.created", { backend: "process", backendSessionId: "proc_7777" });
       await t.transitionState(null, "pending", "created");
@@ -1445,15 +1446,15 @@ test("R19-SUM-1: 篡改探针 — 单文件内外 run 尾条不再污染 --summa
     // 外 run 伪造尾条三连（R18-MET-1 同形状）：伪 failed 终态 + 伪 tokens +
     // 远期 ts——修复前分别赢得逐文件聚合的 findState 末条 / findLatest 末条 /
     // duration 终点。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.state_change", runId: "run_evil", agentId: "coder_low",
       from: "completed", to: "failed", reason: "evil",
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.metrics", runId: "run_evil", agentId: "coder_low",
       tokens: { input: 99999 }, costUsd: 99,
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "coder_low",
       ts: "2026-08-18T00:20:00.000Z",
     });
@@ -1569,10 +1570,10 @@ test("R20-ST-1: 篡改探针 — 外 run 伪终态/伪活动尾条不再翻转 r
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 外 run 尾条两连：伪 completed 终态 + 伪活动行（修复前分别赢得 findState
     // 末条语义与 last/lastActivity 反查）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "coder_low",
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.event", kind: "message", role: "assistant", parts: [], runId: "run_evil", agentId: "coder_low",
     });
 
@@ -1666,7 +1667,7 @@ test("R23-B-1: 篡改探针 — 外 run 尾条 file_written 不灌进重复写�
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 外 run 伪造尾条：同 path 的 file_written（若计数读裸 events，该行既是
     // lastActivity 供给者又把计数灌成 ×4）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.event", kind: "file_written", path: A, runId: "run_evil", agentId: "coder_hq",
     });
 
@@ -1690,7 +1691,7 @@ test("R20-LST-1: 篡改探针 — runs list 每行 state/terminal 只由本 run 
       { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "coder_low",
     });
 
@@ -1746,10 +1747,10 @@ test("R20-SUM-1: 篡改探针 — runs summary 的 byState/latest 不再被外 r
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 外 run 尾条两连：伪 failed 终态 + 远期 ts（修复前分别赢得 findState 末条
     // 胜出与 latest 末事件 ts 比较）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.error", phase: "wait", error: "x", runId: "run_evil", agentId: "coder_low",
     });
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "coder_low",
       ts: "2026-08-19T00:20:00.000Z",
     });
@@ -1844,7 +1845,7 @@ test("R20-DIAG-1: 篡改探针 — 外 run 尾条不再抢诊断分类/翻转终
       { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-19T00:00:03.000Z", seq: 3 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.error", phase: "wait", error: "401 Unauthorized", runId: "run_evil", agentId: "coder_low",
     });
     const a = await getRunDiagnosis({ runId, runDir: dir });
@@ -1942,12 +1943,12 @@ test("R20-EXT-1: 篡改探针 — 流后外部终态采纳绑定本 run：外 ru
     // 外 run 伪终态 fact 尾条（本 run 自身最后一条 state_change 之后）：修复前
     // :2080 的无绑定 findState 经 legacy 反查读到 aborted → 采纳 → loser aborted
     // （backend 的 done(completed) 诚实完成被伪尾条劫持）。
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.aborted", runId: "run_evil", agentId: "test-agent",
     });
     const result = await run.waitForCompletion({ waitTimeout: 2000, pollInterval: 10 });
     assert.equal(result.completed, true, "本 run 自身完成路径照常（修复前采纳外 run aborted → completed:false/aborted:true）");
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     assert.equal(findState(events), "completed", "落盘终态 = 本 run 自身 completed");
   } finally { cleanupDir(dir); }
 });
@@ -1966,7 +1967,7 @@ test("R20-DM-1: 篡改探针 + 合法回归 — scanResumableRuns 终态判定�
       { type: "run.state_change", runId, agentId: "test_agent", from: "submitted", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "test_agent",
     });
     const resumable = scanResumableRuns(dir, 10_000, 60_000);
@@ -1998,7 +1999,7 @@ test("R20-DM-2: 篡改探针 + 合法回归 — scanAllRuns 行 state/agentId �
       { type: "run.state_change", runId, from: "submitted", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
-    appendForeignLine(join(dir, `${runId}.jsonl`), {
+    appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "run.completed", runId: "run_evil", agentId: "evil_agent",
     });
 
@@ -2035,7 +2036,7 @@ test("R20-BR-1: 篡改探针 — 启动失败落盘不被外 run 伪终态尾条
   try {
     const runId = "run_r20_br1";
     // CLI 派发形状的既有 transcript（绑定 background_submitted + pending）。
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" });
     await t.append("run.background_submitted", { background: true, cwd: dir });
     await t.transitionState(null, "pending", "background_spawned");
     // 外 run 伪终态尾条（fact 形状——修复前 findState legacy 反查读到 completed
@@ -2065,7 +2066,7 @@ test("R20-BR-2: 合法回归 + runMain 解析失败车道同款绑定 — 无尾
     // (a) runMain 的 delivery-json 解析失败车道（:297）：外 run 伪终态尾条下
     //     run.error(delivery_parse) + failed 照常落盘。
     const runId = "run_r20_br2a";
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" });
     await t.append("run.background_submitted", { background: true, cwd: dir });
     await t.transitionState(null, "pending", "background_spawned");
     appendForeignLine(t.filePath, { type: "run.completed", runId: "run_evil", agentId: "coder_hq" });

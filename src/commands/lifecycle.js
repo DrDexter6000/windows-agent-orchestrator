@@ -21,7 +21,8 @@ import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES, transcriptPathFor } from "../transcript.js";
+import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { parseOptions, loadRun, newRunManager, resolveIsolateFlag } from "./shared.js";
 // ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
 import { printObservationDeadlineNotice } from "./run.js";
@@ -271,7 +272,7 @@ export async function resumeCommand(args, config) {
     const dir = resolve(options.runDir ?? config.runDir);
     let events = [];
     try {
-      events = await readTranscript(transcriptPathFor(dir, runId));
+      events = await readTranscript(resolveTranscriptPath(dir, runId));
     } catch {
       events = []; // 不可读 → 按 not found 拒绝（fail-closed，不 fork）
     }

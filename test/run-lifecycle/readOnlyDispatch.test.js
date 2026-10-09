@@ -30,6 +30,7 @@
 // projection surfaces writes_observed for the Lead's final judgment.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -676,7 +677,7 @@ test("RO-C4: foreground `run --read-only` forces isolation and persists the decl
     const runIdSeen = runLine.match(/run_\d+[a-z0-9]+/)?.[0];
     assert.ok(runIdSeen, "runId captured");
 
-    const events = await readTranscript(join(dir, "runs", `${runIdSeen}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(join(dir, "runs"), runIdSeen));
     const started = events.find((e) => e.type === "run.started");
     assert.ok(started.worktreePath, "foreground readOnly run started inside a REAL worktree");
     assert.ok(started.worktreePath.includes(".wao-worktrees"), "worktree under the repo's worktree root");

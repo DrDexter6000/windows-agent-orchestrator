@@ -38,6 +38,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
+import { resolveTranscriptPath, listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -294,7 +295,7 @@ test("M11-11C KEY-1: deriveReuseKeyHash is a stable sha256 hex, isolated", () =>
 
 async function seedTranscript(runDir, runId, agentId, { terminal, sessionCreated } = {}) {
   const { JsonlTranscript } = await import("../../src/transcript.js");
-  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
+  const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId });
   await t.transitionState(null, "pending", "seed");
   await t.append("run.started", { backend: "claude-code" });
   if (sessionCreated) {
@@ -520,7 +521,7 @@ test("§3.6 RESOLVE-1: resolvePriorProviderSessionId 按 runId 绑定读取器�
   try {
     const { JsonlTranscript } = await import("../../src/transcript.js");
     const runId = "run_prior_resolve";
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "researcher" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "researcher" });
     await t.transitionState(null, "pending", "seed");
     await t.append("session.created", { backend: "deepseek-acp", backendSessionId: "acp-uuid-1" });
     await t.transitionState("pending", "completed", "seed_done");
@@ -599,7 +600,7 @@ test("M11-11C DISP-1: reusable first turn threads --session-reuse-json (turn:fir
     assert.match(routing.opaqueUuid, UUID_V4);
 
     // run.session_reuse audit event persisted (bounded routing fact only).
-    const events = await readTranscript(join(runDir, `${result.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, result.runId));
     const reuseEvent = findLatest(events, "run.session_reuse");
     assert.ok(reuseEvent, "run.session_reuse audit event written");
     assert.equal(reuseEvent.mode, "lead_workspace");
@@ -644,8 +645,8 @@ test("M11-11C DISP-2: second turn same triple ⇒ resume (turn:resume), NEW runI
     // (dispatchRun writes background_submitted/pending/run.session_reuse; the
     // detached runner writes prompt.sent — faked out here, so we assert on the
     // durable envelope + routing event each turn produced.)
-    const ev1 = await readTranscript(join(runDir, `${r1.runId}.jsonl`));
-    const ev2 = await readTranscript(join(runDir, `${r2.runId}.jsonl`));
+    const ev1 = await readTranscript(resolveTranscriptPath(runDir, r1.runId));
+    const ev2 = await readTranscript(resolveTranscriptPath(runDir, r2.runId));
     assert.ok(ev1.every((e) => e.runId === r1.runId), "turn-1 transcript stamped with turn-1 runId only");
     assert.ok(ev2.every((e) => e.runId === r2.runId), "turn-2 transcript stamped with turn-2 runId only");
     assert.ok(!ev1.some((e) => e.runId === r2.runId), "turn-2 was NOT appended into turn-1's transcript");
@@ -730,9 +731,10 @@ test("M11-11C DISP-6: busy — second dispatch while first non-terminal fails BE
     assert.ok(caught instanceof ReuseBusyError, "second concurrent dispatch throws ReuseBusyError");
     assert.equal(calls.length, before, "no spawn for the busy dispatch (spawn count unchanged)");
     // No second transcript file appeared.
-    const transcripts = readdirSync(runDir).filter((f) => f.endsWith(".jsonl"));
+    // D2-②b：经深层枚举（turn-1 转录在 projects/<slug>/ 桶内）。
+    const transcripts = listTranscriptsDeep(runDir);
     assert.equal(transcripts.length, 1, "only the first turn's transcript exists");
-    assert.ok(transcripts[0].startsWith(r1.runId), "the surviving transcript is turn-1's");
+    assert.ok(transcripts[0].name.startsWith(r1.runId), "the surviving transcript is turn-1's");
   } finally { cleanupDir(dir); }
 });
 
@@ -966,7 +968,7 @@ test("M12-Claude TRANSCRIPT-1: latest stream activity and cache metrics persist 
     });
     assert.equal(result.completed, true);
 
-    const events = await readTranscript(join(dir, `${result.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, result.runId));
     const statuses = events
       .filter((event) => event.type === "run.event" && event.kind === "runtime_activity")
       .map((event) => event.status);
@@ -981,7 +983,7 @@ test("M12-Claude TRANSCRIPT-1: latest stream activity and cache metrics persist 
     });
     assert.equal(metrics.tokens.reasoning, undefined, "cache creation is not reasoning");
 
-    const transcriptText = readFileSync(join(dir, `${result.runId}.jsonl`), "utf8");
+    const transcriptText = readFileSync(resolveTranscriptPath(dir, result.runId), "utf8");
     for (const secret of rawSecrets) {
       assert.equal(transcriptText.includes(secret), false, `raw provider payload is not persisted: ${secret}`);
     }
@@ -1173,7 +1175,7 @@ test("TD188 CHAIN-3: kimi delivery 续谱根（真实 parser 帧）→ 晚绑定
     });
 
     // 转录事实：唯一 session.created（proc 身份，M12-19 恢复不变）+ 恰一条绑定事实。
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     const created = events.filter((e) => e.type === "session.created" && e.runId === runId);
     assert.equal(created.length, 1, "delivery run 不补第二条 session.created");
     assert.equal(created[0].backend, "process");
@@ -1190,7 +1192,7 @@ test("TD188 CHAIN-3: kimi delivery 续谱根（真实 parser 帧）→ 晚绑定
     // dispatch 侧 durable lineage 事实（runDispatch.js 在派发时写入本形状；这里直接
     // 驱动 RunManager，按同一形状补记，continueRun 的 lineage 门读它）。
     const { JsonlTranscript } = await import("../../src/transcript.js");
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" })
     await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: runId });
 
     // 端到端：continuable 交付续接被接受，runner 携带 resume 路由 fork。
@@ -1228,7 +1230,7 @@ test("TD188 CHAIN-4: codex delivery 续谱根（真实 parser 帧）→ 同一�
         // 不发 turn.completed：进程 exit 1 → done(failed)，避免真实 delivery 打包。
       ],
     });
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     const created = events.filter((e) => e.type === "session.created" && e.runId === runId);
     assert.equal(created.length, 1);
     assert.equal(created[0].backendSessionId, "proc_51007");
@@ -1273,7 +1275,7 @@ function makeReuseResumeManager({ runDir, backend, backendName }) {
 
 async function seedReusePrior(runDir, runId, { backendName, spawnSessionId, binding = null }) {
   const { JsonlTranscript } = await import("../../src/transcript.js");
-  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+  const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId: "coder_hq" });
   await t.append("run.started", { backend: backendName });
   await t.transitionState(null, "pending", "created");
   await t.append("session.created", { backend: "process", backendSessionId: spawnSessionId, serveUrl: null });

@@ -26,6 +26,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,14 +56,14 @@ test("R13C-STOP-1: 尾部外 run 伪造 session.created(proc_2222) 不夺走 kil
   const dir = tempDir("wao-r13c-stop1-");
   try {
     const runId = "run_r13c_stop1";
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "test-agent" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "test-agent" });
     await t.append("run.started", { backend: "claude-code" });
     await t.append("session.created", { backend: "process", backendSessionId: "proc_1111" });
     await t.transitionState(null, "pending", "created");
     await t.transitionState("pending", "running", "first_event");
     // auditor P1-2 探针形状：同文件尾部追加一条外 runId 信封的伪造
     // session.created——修复前无绑定 findLatest 取末条 → proc_2222 胜出被杀。
-    await appendForeignEvent(join(dir, `${runId}.jsonl`), "run_r13c_other", "session.created",
+    await appendForeignEvent(resolveTranscriptPath(dir, runId), "run_r13c_other", "session.created",
       { backend: "process", backendSessionId: "proc_2222" });
 
     const killedPids = [];
@@ -88,12 +89,12 @@ test("R13C-STOP-2: 尾部外 run 伪造 run.started 不供给写句柄 agentId�
   const dir = tempDir("wao-r13c-stop2-");
   try {
     const runId = "run_r13c_stop2";
-    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "real-agent" });
+    const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "real-agent" });
     await t.append("run.started", { backend: "claude-code" });
     await t.append("session.created", { backend: "process", backendSessionId: "proc_3333" });
     await t.transitionState(null, "pending", "created");
     await t.transitionState("pending", "running", "first_event");
-    await appendForeignEvent(join(dir, `${runId}.jsonl`), "run_r13c_other", "run.started",
+    await appendForeignEvent(resolveTranscriptPath(dir, runId), "run_r13c_other", "run.started",
       { backend: "claude-code" });
 
     let alive = true;
@@ -109,7 +110,7 @@ test("R13C-STOP-2: 尾部外 run 伪造 run.started 不供给写句柄 agentId�
     // 写句柄的 agentId 来自【绑定】run.started 的信封（旧代码 findLatest 取
     // 末条 → 外 run 伪造行信封的 agentId "forger" 会进写句柄）；绑定后落盘
     // 的 stop 事件信封仍是本 run 的真实 agentId。
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     const stopEvents = events.filter((e) => e.type.startsWith("run.stop"));
     assert.ok(stopEvents.length >= 1, "winner 落盘 stop 事实");
     for (const e of stopEvents) {
@@ -133,7 +134,7 @@ test("R13C-STOP-3: legacy 无信封 transcript → 既有 no-session 拒绝路�
       { agentId: "legacy-agent", type: "run.state_change", seq: 3, ts: "2026-08-18T00:00:00.002Z", from: null, to: "pending", reason: "created" },
       { agentId: "legacy-agent", type: "run.state_change", seq: 4, ts: "2026-08-18T00:00:00.003Z", from: "pending", to: "running", reason: "first_event" },
     ];
-    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+    writeFileSync(resolveTranscriptPath(dir, runId), `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
 
     let killCalls = 0;
     await assert.rejects(
@@ -201,7 +202,7 @@ test("R13C-RESUME-1: 跨 runId 伪造 prompt 尾条不被 RESPAWN——重放本
     assert.equal(prompts.length, 1, "start spawn 一次");
     // auditor P2-1 探针形状：同文件尾部外 runId 伪造 prompt——修复前无绑定
     // findLatest 取末条 → resume 原样 RESPAWN 伪造文本。
-    await appendForeignEvent(join(dir, `${runId}.jsonl`), "run_r13c_other", "prompt.sent",
+    await appendForeignEvent(resolveTranscriptPath(dir, runId), "run_r13c_other", "prompt.sent",
       { prompt: "FORGED cross-run task text" });
 
     const resumed = await manager.resume(runId);
@@ -209,7 +210,7 @@ test("R13C-RESUME-1: 跨 runId 伪造 prompt 尾条不被 RESPAWN——重放本
     assert.equal(prompts.length, 2, "replay 分支 respawn 一次");
     assert.equal(prompts[1], "original prompt",
       "重放本 run 绑定的合法 prompt（修复前恰重放 FORGED cross-run task text）");
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     const rerun = events.find((e) => e.type === "run.rerun");
     assert.ok(rerun, "落盘 run.rerun（replay 事实）");
     assert.equal(rerun.runId, runId, "rerun 事件信封绑定本 run");
@@ -241,12 +242,12 @@ test("R13C-RESUME-3: 尾部外 run 伪造 session.created 不劫持 attach/repla
     const { backend, prompts } = makeReplayBackend();
     const manager = makeManager(dir, backend);
     await manager.start("proc_agent", { prompt: "original prompt", runId });
-    await appendForeignEvent(join(dir, `${runId}.jsonl`), "run_r13c_other", "session.created",
+    await appendForeignEvent(resolveTranscriptPath(dir, runId), "run_r13c_other", "session.created",
       { backend: "process", backendSessionId: "proc_9999" });
 
     const resumed = await manager.resume(runId);
     assert.ok(resumed, "仍可 resume");
-    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(dir, runId));
     const rerun = events.find((e) => e.type === "run.rerun");
     assert.ok(rerun, "replay 落盘");
     // originalSessionId 取【首条绑定】session.created——外 run 伪造 proc_9999
@@ -279,7 +280,7 @@ test("R13C-RESUME-4: HTTP attach 面 messageId/admittedSeq 绑定——外 run �
       { runId, agentId: "http_agent", type: "session.created", seq: 5, ts: "2026-08-18T00:00:00.004Z", backend: "opencode-serve", backendSessionId: "ses_attach" },
       { runId, agentId: "http_agent", type: "run.state_change", seq: 6, ts: "2026-08-18T00:00:00.005Z", from: "pending", to: "submitted", reason: "spawned" },
     ];
-    const tp = join(dir, `${runId}.jsonl`);
+    const tp = resolveTranscriptPath(dir, runId);
     writeFileSync(tp, `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
     // 尾部外 runId 伪造 prompt.sent（带自己的 messageId）——修复前无绑定
     // findLatest 取末条 → attach 句柄拿到 m_forged。
@@ -312,7 +313,7 @@ test("R13C-RESUME-5: legacy 无信封 transcript → resume 拒绝（return null
       { agentId: "legacy_agent", type: "session.created", seq: 4, ts: "2026-08-18T00:00:00.003Z", backend: "process", backendSessionId: "proc_legacy" },
       { agentId: "legacy_agent", type: "run.state_change", seq: 5, ts: "2026-08-18T00:00:00.004Z", from: "pending", to: "submitted", reason: "spawned" },
     ];
-    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+    writeFileSync(resolveTranscriptPath(dir, runId), `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
 
     const resumed = await manager.resume(runId);
     assert.equal(resumed, null, "legacy 无信封 → 绑定读取无匹配 → 既有 null 拒绝");

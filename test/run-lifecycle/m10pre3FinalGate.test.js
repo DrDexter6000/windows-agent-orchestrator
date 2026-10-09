@@ -13,6 +13,7 @@
 // No real model calls. No real daemon spawn (the CLI test injects a spawn stub).
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -212,7 +213,7 @@ test("GATE-F2-01: daemon shutdown → exactly one aborted terminal, controllers 
     // Barrier: let the abort path settle (deterministic short wait, not the assertion).
     await new Promise((r) => setTimeout(r, 250));
 
-    const events = await readTranscript(join(runDir, `${startRes.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, startRes.runId));
     // 1. Final terminal state is aborted.
     assert.equal(findState(events), "aborted", "final state must be aborted");
     // 2. Exactly one aborted terminal state change.
@@ -240,7 +241,7 @@ test("GATE-F2-01: daemon shutdown → exactly one aborted terminal, controllers 
 // ============================================================
 
 async function seedRunning(runDir, runId, wsDir) {
-  const tp = join(runDir, `${runId}.jsonl`);
+  const tp = resolveTranscriptPath(runDir, runId);
   const t = new JsonlTranscript(tp, { runId, agentId: "coder_low" });
   await t.append("run.started", { backend: "claude-code" });
   await t.append("run.background_submitted", { background: true, cwd: wsDir });

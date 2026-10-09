@@ -40,7 +40,8 @@ import {
   extractCanonicalAgentId,
   TERMINAL_STATES,
   STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
-import { projectFactFromCwd } from "../projectIdentity.js";
+import { identifyProjectFromCwd, productionProjectIo } from "../projectIdentity.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath } from "../projectBuckets.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
@@ -338,7 +339,8 @@ export async function continueRun({
   //    runId + one canonical agentId. A single cross-run/corrupt event invalidates
   //    identity rather than donating another run's worker/session lineage.
   const resolvedRunDir = resolve(runDir);
-  const parentTranscriptPath = transcriptPathFor(resolvedRunDir, parentRunId);
+  // D2-②b：父转录读侧解析链（桶/平铺/有界扫描——父 run 可能是旧平铺档）。
+  const parentTranscriptPath = resolveTranscriptPath(resolvedRunDir, parentRunId);
   let parentEvents;
   try {
     parentEvents = await readTranscript(parentTranscriptPath);
@@ -708,7 +710,12 @@ export async function continueRun({
   }
   runnerArgs[runnerArgs.indexOf("--session-reuse-json") + 1] = JSON.stringify(contTurn.routing);
   const claim = contTurn.claim;
-  const transcriptPath = transcriptPathFor(resolvedRunDir, childRunId);
+  // D2-②b decide-once：continuation 子转录桶在此决定一次（identity 源=授权
+  // 工作区根，与下方首事件事实同源），经 --transcript-dir 显式传 runner。
+  const continueIdentity = identifyProjectFromCwd(authorizedWorkspaceRoot, productionProjectIo());
+  const continueWrite = resolveRunDirForWrite(resolvedRunDir, continueIdentity);
+  runnerArgs.push("--transcript-dir", continueWrite.transcriptDir);
+  const transcriptPath = transcriptPathFor(continueWrite.transcriptDir, childRunId);
 
   // 14. Worktree transition: re-pin the retained worktree to base on the CHILD
   //     branch, preserving the parent delivery/candidate bytes as unstaged
@@ -740,7 +747,7 @@ export async function continueRun({
       rootRunId,
       // 终审 F1（sol）：续接子 run 的首事件同款落档桶归属事实——与
       // dispatch/runManager 同一构造器（口径不分叉）。
-      project: projectFactFromCwd(authorizedWorkspaceRoot),
+      project: projectFactForWrite(continueIdentity, continueWrite),
     });
 
     const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.background_spawned);

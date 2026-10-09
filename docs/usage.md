@@ -590,7 +590,7 @@ npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run
 
 1. **分类（只读，双证）**：
    - 分界：`git branch --merged main --list "wao/run_*"`（并入=删标签零丢失）vs `--no-merged`。
-   - 台账交叉：runId = 分支名去 `wao/` 前缀（**含** `run_`）；转录查两处——`runs/<runId>.jsonl` 与 `runs-archive/<yyyy-mm>/<runId>.jsonl`。
+   - 台账交叉：runId = 分支名去 `wao/` 前缀（**含** `run_`）；转录查三处——`runs/projects/*/<runId>.jsonl`（分桶新档）、`runs/<runId>.jsonl`（旧平铺）与 `runs-archive/<yyyy-mm>/<runId>.jsonl`（归档，决定 0050）。
    - **交付判定取"最后一个"决定事件**（转录存在多轮 repackage/correction/reverify——先拒后收的 run 按首事件判会错分类）；无决定事件但有 `delivery_created` → 悬空。
    - **已接受 ≠ 已并入**：squash 落地使 `--no-merged` 误报——用 `git cherry main <分支>` 验 patch 等价性（`+` 行数为 0 = 内容已在 main）。
    - 承重引用：未并入分支 tip SHA 前 7 位 grep `docs/ .wao/decisions/ README.md`；引用是冻结文本不改写，SHA 靠 bundle 备份。
@@ -655,7 +655,7 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 > 本表**投影自 `docs/02-architecture.md` §3.2**，是同一事件 spec 的人读运维视图；architecture 是真值源。
 > `test/isolation-infra/docs-consistency.test.js` 的事件行集关系守卫保证两表事件名集合相等。其它文档（SKILL.md 等）只指向本投影或 spec，不维护第三份清单。
 
-每个 run 的事件流存在 `runs/<runId>.jsonl`，每行一个 JSON 事件。完整事件类型：
+每个 run 的事件流存在该 run 的转录文件（D2-②b 起**新 run 写 `runs/projects/<slug>/<runId>.jsonl`**，旧平铺 `runs/<runId>.jsonl` 只读兼容长期共存；定位一律经 `src/projectBuckets.js` 的解析链），每行一个 JSON 事件。完整事件类型：
 
 | 事件 | 含义 | 阶段 |
 |------|------|------|

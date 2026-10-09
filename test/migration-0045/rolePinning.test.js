@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -88,9 +89,9 @@ test("PIN-1: start 钉 rolePin{systemPrompt,sha256} 进 run.started；无角色�
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
 
     const runDir = join(dir, "runs");
-    const started = readdirSync(runDir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => readFileSync(join(runDir, f), "utf8").split("\n"))
+    // D2-②b：深层枚举（新 run 转录在 projects/<slug>/ 桶内）。
+    const started = listTranscriptsDeep(runDir)
+      .map((e) => readFileSync(e.path, "utf8").split("\n"))
       .flat()
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .find((o) => o?.type === "run.started");

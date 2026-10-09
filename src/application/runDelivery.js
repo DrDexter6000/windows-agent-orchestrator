@@ -29,6 +29,7 @@ import {
   RUN_STATES,
   DELIVERY_DECISION_POLICY_CODES,
   DeliveryDecisionPolicyError, transcriptPathFor } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
@@ -686,7 +687,7 @@ export async function getRunDelivery({
   if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const events = await _readTranscript(filePath);
 
   // R20 (TD-128 M5)：point-in-time 查询的 terminalState 绑定到请求 runId
@@ -931,7 +932,7 @@ export async function getRunDeliveryReadiness({
   const _now = nowFn ?? (() => Date.now());
   const pollInterval = pollIntervalMs ?? DELIVERY_WAIT_POLL_INTERVAL_MS;
 
-  const filePath = transcriptPathFor(resolve(runDir), runId);
+  const filePath = resolveTranscriptPath(resolve(runDir), runId);
 
   let events = await _readTranscript(filePath);
   if (authorizedWorkspaceRoot !== undefined) {
@@ -1074,7 +1075,7 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
   const trimmedReason = typeof reason === "string" ? reason.trim() : "";
   if (trimmedReason.length === 0) throw new Error("reason must be non-empty after trimming");
 
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const _readTranscript = readTranscriptFn ?? readTranscript;
 
   // Lock-external read: initialize transcript context/seq only.

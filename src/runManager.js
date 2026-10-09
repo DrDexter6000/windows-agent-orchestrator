@@ -4,7 +4,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
-import { projectFactFromCwd } from "./projectIdentity.js";
+import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
+import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath } from "./projectBuckets.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -578,6 +579,11 @@ export class RunManager {
       registry,
       runId,
       runDir,
+      // D2-②b decide-once：显式已定桶目录（runDispatch 决定、runner 透传）。
+      transcriptDir,
+      // 旧父进程（无 --transcript-dir 的旧 runDispatch）+ 新 runner：按旧方式
+      // 写平铺——旧父在平铺路径轮询，写桶=孤儿形态（规格 §6.11-1，opus 会审）。
+      transcriptLegacyFlat,
       tags,
       isolate,
       scorecard,
@@ -1098,7 +1104,30 @@ export class RunManager {
     const dir = resolve(runDir ?? this.config.runDir);
     await mkdir(dir, { recursive: true });
 
-    const transcript = new JsonlTranscript(transcriptPathFor(dir, finalRunId), {
+    // TD-190 D2-②b 桶目录 decide-once（写侧四点之二）：①显式 transcriptDir
+    // （父进程已定）→ 用；②旧父进程标记（transcriptLegacyFlat）→ 旧平铺形状；
+    // ③前台 CLI / daemon IPC（无提示）→ 此处决定一次（identity 源=agent.cwd，
+    // 与下方 run.started 归属事实同源——桶与事实永不分叉）。
+    // runId 跨层唯一性（与 runDispatch 同款合同）：已有转录（旧平铺/既有桶）
+    // → 写原位；显式 transcriptDir（父进程已定）仍优先——父进程已做同款检查，
+    // 两者一致；仅在前台/daemon 自决且无既有档时才开新桶。
+    let resolvedTranscriptPath = null;
+    if (typeof transcriptDir === "string" && transcriptDir.length > 0) {
+      resolvedTranscriptPath = transcriptPathFor(resolve(transcriptDir), finalRunId);
+    } else {
+      try {
+        resolvedTranscriptPath = resolveTranscriptPath(dir, finalRunId, { forAppend: true });
+      } catch (e) {
+        if (e?.code !== "transcript-not-found") throw e;
+        if (transcriptLegacyFlat === true) {
+          resolvedTranscriptPath = transcriptPathFor(dir, finalRunId);
+        } else {
+          const startIdentity = identifyProjectFromCwd(agent?.cwd ?? process.cwd(), productionProjectIo());
+          resolvedTranscriptPath = transcriptPathFor(resolveRunDirForWrite(dir, startIdentity).transcriptDir, finalRunId);
+        }
+      }
+    }
+    const transcript = new JsonlTranscript(resolvedTranscriptPath, {
       runId: finalRunId,
       agentId,
     });
@@ -1321,7 +1350,10 @@ export class RunManager {
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       // TD-190 D2-②a：首事件落档有界桶归属事实（与 run.background_submitted
       // 同款；worktree 派发的 cwd 经 R4 回溯到所属仓根）。
-      project: projectFactFromCwd(agent.cwd),
+      // D2-②b：后台 run 首事件（background_submitted）已带权威归属事实且与
+      // 桶位置一致——沿用同一事实（不二次推导造成同转录两份事实分叉）；
+      // 前台/daemon 新建转录无首事件事实 → 按本进程视角推导（与上方桶决定同源）。
+      project: readFirstProjectFact(transcript.filePath) ?? projectFactFromCwd(agent.cwd),
       ...(deliveryContext ? {
         delivery: {
           mode: deliveryContext.mode,
@@ -1544,7 +1576,9 @@ export class RunManager {
   async resume(runId, options = {}) {
     const { runDir } = options;
     const dir = resolve(runDir ?? this.config.runDir);
-    const transcript = new JsonlTranscript(transcriptPathFor(dir, runId), {
+    // D2-②b：读侧解析链（桶/平铺/有界扫描）；未命中回落平铺形状（readTranscript
+    // 空 → 上方既有 null 语义）。
+    const transcript = new JsonlTranscript(resolveTranscriptPath(dir, runId), {
       runId,
       agentId: "unknown",
     });

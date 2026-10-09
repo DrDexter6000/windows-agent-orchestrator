@@ -4,7 +4,7 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 
 ## Invariants
 
-1. WAO run state comes from `runs/<runId>.jsonl`; agent memory may provide context but never overrides transcript facts.
+1. WAO run state comes from the run's transcript (`runs/<runId>.jsonl` legacy flat, or `runs/projects/<slug>/<runId>.jsonl` since D2-②b — resolved via `src/projectBuckets.js`); agent memory may provide context but never overrides transcript facts.
 2. Workers receive a bounded task and role contract, not Lead orchestration context. The control plane owns dispatch, state, delivery, and handoff records.
 3. Runtime-specific behavior stays behind a Backend and parser. Shared orchestration code does not branch on runtime.
 4. The control plane stays deterministic. Semantic decomposition, failure response, and final acceptance belong to the Lead.

@@ -14,6 +14,7 @@
 // and the durability of the parent delivery commit across the transition.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
@@ -347,7 +348,7 @@ test("M12-7-RC-09: committed parent → child resumes in retained worktree; pare
 
     // Child transcript durable facts: continuation-marked background_submitted +
     // run.session_reuse (run_lineage resume) + pending.
-    const childEvents = await readTranscript(join(dir, `${result.runId}.jsonl`));
+    const childEvents = await readTranscript(resolveTranscriptPath(dir, result.runId));
     const submitted = findLatest(childEvents, "run.background_submitted");
     assert.equal(submitted.continuation, true);
     assert.equal(submitted.parentRunId, "run_parent_happy");

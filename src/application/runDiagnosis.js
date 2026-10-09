@@ -17,7 +17,8 @@
 
 import { join } from "node:path";
 
-import { readTranscript, findState, TERMINAL_STATES, transcriptPathFor } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { diagnoseFailure } from "../diagnosis.js";
@@ -58,7 +59,7 @@ export async function getRunDiagnosis({
   }
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const events = await _readTranscript(filePath);
 
   // R20 (TD-128 M4)：诊断的 state/terminal 投影绑定到请求 runId（与同文件

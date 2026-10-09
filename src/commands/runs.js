@@ -23,10 +23,11 @@
 
 import { unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 
-import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
+import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
 // R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
 // isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
@@ -296,7 +297,7 @@ async function runsWaitCommand(args, config, deps = {}) {
   // still unbound — the "same SSOT" claim above is true again) — no second
   // parser; a read failure degrades to state "unknown" rather than crashing
   // the interrupt path.
-  const transcriptPath = transcriptPathFor(runDir, runId);
+  const transcriptPath = resolveTranscriptPath(runDir, runId);
   const onSigint = () => {
     void (async () => {
       let state = "unknown";
@@ -496,8 +497,11 @@ export function sortRunFileNames(names) {
 
 async function loadRunFiles(runDir) {
   if (!existsSync(runDir)) return [];
-  const files = listTranscriptFiles(runDir);
-  return sortRunFileNames(files);
+  // D2-②b：深层枚举（根层 + projects/* 桶内）——返回绝对路径（决定 0050：
+  // 归档根仍从基础 runDir 推导，与桶内文件位置无关）。
+  const entries = listTranscriptsDeep(runDir);
+  const byName = new Map(entries.map((e) => [e.name, e.path]));
+  return sortRunFileNames([...byName.keys()]).map((name) => byName.get(name));
 }
 
 /**
@@ -508,7 +512,8 @@ async function loadRunFiles(runDir) {
  */
 async function loadRunOnlyFiles(runDir) {
   const files = await loadRunFiles(runDir);
-  return files.filter((f) => f.startsWith("run_"));
+  // D2-②b：files 现为绝对路径——run_ 前缀按 basename 判（TD-102 不变量不变）。
+  return files.filter((f) => basename(f).startsWith("run_"));
 }
 
 /**
@@ -713,12 +718,12 @@ async function runsSummaryCommand(args, config) {
   const counts = {};
   let latestTs = null;
   for (const file of jsonlFiles) {
-    const events = await readTranscript(join(runDir, file));
+    const events = await readTranscript(file);
     // R20 (TD-128 M3)：byState/latest 的每文件读取经 boundReportScope 收窄到
     // 【文件名 stem 即权威 runId】的信封绑定事件（与 runs metrics --summary
     // R19 同款）——外 run 伪终态/远期 ts 尾条不再污染 summary 计数与 latest。
     // legacy 全无信封文件保持历史读法照常计入（runs.test.js 既有契约）。
-    const runId = file.replace(/\.jsonl$/, "");
+    const runId = basename(file, ".jsonl");
     const scope = boundReportScope(events, runId) ?? events;
     const state = findState(scope);
     counts[state] = (counts[state] ?? 0) + 1;
@@ -797,7 +802,7 @@ async function runsPruneCommand(args, config) {
   let skipped = 0;
   let kept = 0;
   for (const file of jsonlFiles) {
-    const events = await readTranscript(join(runDir, file));
+    const events = await readTranscript(file);
     // R20-C（TD-128，双席终审会聚 P2）：cutoff 删除决策的年龄读取绑定到
     // 【文件名 stem 即权威 runId】的信封绑定事件（与上方 runs summary 的
     // boundReportScope 收窄同款）——只有本 run 自身事件喂年龄：外 run 旧 ts
@@ -806,30 +811,31 @@ async function runsPruneCommand(args, config) {
     // .jsonl，是最可能碰到 legacy 文件的清理面）。零绑定事件（整份只有外 run
     // 信封行）→ 无可归属年龄 → 沿既有"末事件无 ts 按最老处理"（ts 0）——与
     // 修复前无 ts 事件文件的行为一致。
-    const pruneRunId = file.replace(/\.jsonl$/, "");
+    const pruneRunId = basename(file, ".jsonl");
     const scope = boundReportScope(events, pruneRunId) ?? events;
     const last = scope.at(-1);
     const ts = last?.ts ? new Date(last.ts).getTime() : 0;
     if (ts < cutoff) {
       if (!archiveMode) {
-        await unlink(join(runDir, file));
-        console.log(`Pruned ${file}`);
+        await unlink(file);
+        console.log(`Pruned ${basename(file)}`);
         pruned += 1;
       } else {
         // R23-B1 归档：<dirname(runDir)>/runs-archive/<yyyy-mm>/<原文件名>。
         // 文件名原样保留（法医锚：大量 TD/friction 以 runId 文件名为证据锚，
         // 改名=锚灭失）。冲突 fail-safe：目标同名文件已存在 → 不移动、不覆盖，
         // 输出一行冲突报告并计入 skipped——宁可不动，不可丢数据。
-        const month = archiveMonthFromTs(ts) ?? await mtimeMonth(join(runDir, file));
+        const month = archiveMonthFromTs(ts) ?? await mtimeMonth(file);
+        // 决定 0050：归档根从基础 runDir 推导（file 现为绝对路径——目标名取 basename，原文件名锚不变）。
         const targetDir = join(dirname(runDir), "runs-archive", month);
-        const target = join(targetDir, file);
+        const target = join(targetDir, basename(file));
         if (existsSync(target)) {
-          console.log(`Skipped ${file} (conflict: runs-archive/${month}/${file} already exists)`);
+          console.log(`Skipped ${basename(file)} (conflict: runs-archive/${month}/${basename(file)} already exists)`);
           skipped += 1;
         } else {
           await mkdir(targetDir, { recursive: true });
-          await rename(join(runDir, file), target);
-          console.log(`Archived ${file} -> runs-archive/${month}/${file}`);
+          await rename(file, target);
+          console.log(`Archived ${basename(file)} -> runs-archive/${month}/${basename(file)}`);
           archived += 1;
         }
       }
@@ -866,8 +872,8 @@ async function runsGrepCommand(args, config) {
   // TD-86（D2 A1）：每 run 只记首个命中（与 text 路径的 break 语义一致——schema 不暗示全量）。
   const matchRows = [];
   for (const file of jsonlFiles) {
-    const runId = file.replace(/\.jsonl$/, "");
-    const events = await readTranscript(join(runDir, file));
+    const runId = basename(file, ".jsonl");
+    const events = await readTranscript(file);
     for (const event of events) {
       if (re.test(JSON.stringify(event))) {
         matchRows.push({ runId, type: event.type, ts: event.ts ?? null });
@@ -899,7 +905,7 @@ async function runsMetricsCommand(args, config) {
       return;
     }
     const allEvents = await Promise.all(
-      jsonlFiles.map((f) => readTranscript(join(runDir, f))),
+      jsonlFiles.map((f) => readTranscript(f)),
     );
     // R19 (TD-128 W1 报表污染类，会审补登；L1 勘误：原注释误标 W2——按 TD-128
     // 登记表真实编号，--summary 逐文件聚合属 R18 W1 报表污染类同族)：调用方逐
@@ -909,7 +915,7 @@ async function runsMetricsCommand(args, config) {
     // 伪造尾条不再污染 --summary 聚合；全无信封的 legacy 文件经 boundReportScope
     // 规则保持历史读法（合法路径零变化）。修正旧注释"无权威 runId"的不实措辞
     // （会审指出）。
-    const s = aggregateSummary(allEvents, jsonlFiles.map((f) => f.replace(/\.jsonl$/, "")));
+    const s = aggregateSummary(allEvents, jsonlFiles.map((f) => basename(f, ".jsonl")));
     if (options.format === "json") {
       console.log(JSON.stringify(s, null, 2));
       return;
@@ -940,7 +946,7 @@ async function runsMetricsCommand(args, config) {
   if (!isValidRunId(runId)) {
     throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const events = await readTranscript(filePath);
   // R18 (TD-128 W1)：聚合事实读取绑定到本 run 信封（boundReportScope 单一定
   // 义处）——外 run/伪造尾条不再污染 state/tokens/cost/duration。
@@ -975,7 +981,7 @@ async function runsScorecardCommand(args, config) {
   if (!isValidRunId(runId)) {
     throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const events = await readTranscript(filePath);
   // R18 (TD-128 W1)：scorecard 事实读取经 boundReportScope 收窄到本 run 信封
   // （首条纪律——与修复前 events.find 的首条序语义一致）：本 run 无自身
@@ -1092,8 +1098,8 @@ export async function runsDashboardCommand(args, config, injections = {}) {
     const jsonlFiles = await loadRunOnlyFiles(runDir);
     let runs = await Promise.all(
       jsonlFiles.map(async (f) => ({
-        runId: f.replace(/\.jsonl$/, ""),
-        events: await readTranscript(join(runDir, f)),
+        runId: basename(f, ".jsonl"),
+        events: await readTranscript(f),
       })),
     );
     if (agentFilter) runs = runs.filter((r) => r.events[0]?.agentId === agentFilter);

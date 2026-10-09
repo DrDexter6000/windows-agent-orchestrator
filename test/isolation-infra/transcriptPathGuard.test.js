@@ -76,7 +76,7 @@ function enumerationBypasses(source, rel) {
     const calls = structure.slice(start, end - 1);
     if (/\breaddir(?:Sync)?\s*\(/.test(calls)
         && /\.jsonl/.test(body)
-        && !/\blistTranscriptFiles\s*\(/.test(calls)) {
+        && !/\blistTranscriptFiles\s*\(|\blistTranscriptsDeep\s*\(/.test(calls)) {
       offenders.push(code.slice(0, match.index).split("\n").length);
     }
   }
@@ -181,4 +181,36 @@ test("TD-190 D0: transcriptPathFor 形状钉（与既有惯用法字节兼容）
     join("runs", "run_1.jsonl"),
     "行为与被替换的 join(dir, `${runId}.jsonl`) 惯用法一致（D0 行为零变化承诺）",
   );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TD-190 D2-②b 棘轮（规格 §6.11-7，opus 会审）：读侧消费面按文件批迁到
+// resolveTranscriptPath / listTranscriptsDeep 的过程中，白名单之外的**新增**
+// 裸 transcriptPathFor 读取点即红；某文件迁移完成后其配额**必须**下调（棘轮
+// 只紧不松）。配额含义：该文件内 `transcriptPathFor(` 的出现次数上限——
+// 写侧纯形状构造（transcriptPathFor(bucketDir, runId)）与旧平铺合法分支
+// 永久保留在写侧四点（runDispatch/runContinue/backgroundRunner/runManager）。
+// ─────────────────────────────────────────────────────────────────────────────
+const TRANSCRIPT_PATH_FOR_RATCHET = new Map(Object.entries({
+  "src/transcript.js": 1, // 唯一入口定义自身
+  "src/projectBuckets.js": 4, // 读侧解析权威（链内平铺层/孪生观测的合法构造）
+  "src/application/runDispatch.js": 1, // 写侧：桶内纯形状构造（decide-once 后）
+  "src/application/runContinue.js": 1, // 写侧：continuation 子转录桶内构造
+  "src/backgroundRunner.js": 3, // 旧平铺合法分支×2（fail-closed ternary）+runner 定位助手 O(1) 直取
+  "src/runManager.js": 3, // 显式 transcriptDir 直取 + 旧平铺合法分支 + 自决桶内构造
+}));
+
+test("TD-190 D2-②b 棘轮: transcriptPathFor 消费面只紧不松（白名单外禁新增）", () => {
+  const offenders = [];
+  for (const file of walk(SRC)) {
+    const rel = relative(REPO_ROOT, file).replace(/\\/g, "/");
+    const code = withoutComments(readFileSync(file, "utf8"));
+    const count = [...code.matchAll(/\btranscriptPathFor\s*\(/g)].length;
+    const quota = TRANSCRIPT_PATH_FOR_RATCHET.get(rel) ?? 0;
+    if (count !== quota) {
+      offenders.push(`${rel}: ${count} 处（配额 ${quota}——迁完下调配额，新增=违规）`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `transcriptPathFor 消费面棘轮（D2-②b 批迁守卫）：\n${offenders.join("\n")}`);
 });

@@ -250,6 +250,7 @@
       "isolation-infra/runListProjectFilter.test.js",
       "isolation-infra/runsMigrateProjects.test.js",
       "isolation-infra/transcriptPathGuard.test.js",
+      "isolation-infra/projectBuckets.test.js",
       "delivery/m11-12a-deliveryReviewPending.test.js",
       "delivery/m11-8c-closeout.test.js",
       "registry-roles/m11-9-capability.test.js",

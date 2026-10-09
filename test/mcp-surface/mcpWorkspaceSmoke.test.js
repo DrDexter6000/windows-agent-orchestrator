@@ -27,6 +27,7 @@
 // fixture is kept and reported as cleanup "unknown".
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -212,7 +213,7 @@ test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → d
     // ever shortened this wait — the exact assertions below still rejected a
     // missing delivery_created — but it could report a LATE delivery_created as
     // missing and mislabelled why we stopped waiting, so it is gone.
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
 
     // Phase 1: bounded wait for a terminal state. A non-terminal exhaustion or
     // a read failure is an immediate, classified failure with a fixed
@@ -372,7 +373,7 @@ test("WSB-HELP-A: readSmokeSample/waitForSmokeTerminal against REAL files (good 
   try {
     const runId = "run_helpAaaaaaaaaaaaaaaaaa1";
     const runDir = join(dir, "runs");
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
     mkdirSync(runDir, { recursive: true });
 
     // Missing file: a read failure, never a throw, never a success.

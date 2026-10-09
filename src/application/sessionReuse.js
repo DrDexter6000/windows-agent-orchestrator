@@ -49,7 +49,8 @@
 import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile, rename, open, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { TERMINAL_STATES, readTranscript, findState, findLatestBound, transcriptPathFor } from "../transcript.js";
+import { TERMINAL_STATES, readTranscript, findState, findLatestBound } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 
 /**
@@ -501,7 +502,7 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
 
     // A prior/other run claims this slot.
     if (entry && entry.runId && entry.runId !== runId) {
-      const priorPath = transcriptPathFor(runDir, entry.runId);
+      const priorPath = resolveTranscriptPath(runDir, entry.runId);
       let events = [];
       let exists = true;
       try {
@@ -736,7 +737,7 @@ export async function resolvePriorProviderSessionId({ runDir, priorRunId }) {
   }
   let events;
   try {
-    events = await readTranscript(transcriptPathFor(runDir, priorRunId));
+    events = await readTranscript(resolveTranscriptPath(runDir, priorRunId));
   } catch {
     throw new Error("sessionReuse: prior transcript for resume is missing or unparseable — refusing instead of silently starting a fresh provider conversation");
   }
@@ -861,7 +862,7 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
     if (entry) assertRoutingEntryUsable(entry, clock);
     if (entry && entry.runId && entry.runId !== runId) {
       // A prior owner exists for this lineage key. If non-terminal, refuse.
-      const priorPath = transcriptPathFor(runDir, entry.runId);
+      const priorPath = resolveTranscriptPath(runDir, entry.runId);
       let events = [];
       let exists = true;
       try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
@@ -947,7 +948,7 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
     // note in resolveLineageFirstTurn — unconditional temporal validation.
     if (entry) assertRoutingEntryUsable(entry, clock);
     if (entry && entry.runId && entry.runId !== runId) {
-      const priorPath = transcriptPathFor(runDir, entry.runId);
+      const priorPath = resolveTranscriptPath(runDir, entry.runId);
       let events = [];
       let exists = true;
       try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }

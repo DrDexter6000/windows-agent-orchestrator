@@ -33,7 +33,8 @@ import {
   findState,
   findLastEventSeq,
   JsonlTranscript,
-  TERMINAL_STATES, transcriptPathFor } from "../transcript.js";
+  TERMINAL_STATES } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 
 /** 审计事件类型：Lead 侧验收落盘（TD-219）。 */
@@ -226,7 +227,17 @@ export async function recordAcceptance({
     }
   }
 
-  const transcriptPath = transcriptPathFor(runsDir, runId);
+  // D2-②b：跨层未命中（transcript-not-found）映射回既有闭集拒绝；孪生冲突
+  // 等损坏形态如实上抛。
+  let transcriptPath;
+  try {
+    transcriptPath = resolveTranscriptPath(runsDir, runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      throw new AcceptanceRecordError("run_transcript_missing", `Run ${runId} 的 transcript 不存在（任何层均未命中），无法操作 acceptance.recorded`);
+    }
+    throw e;
+  }
   const events = await readTranscriptOrTyped(transcriptPath, runId);
   assertRunTerminal(events, runId);
 
@@ -266,7 +277,17 @@ export async function listAcceptance({ runsDir, runId }) {
     throw new AcceptanceRecordError("invalid_runs_dir", "runsDir is required");
   }
   assertValidRunId(runId);
-  const transcriptPath = transcriptPathFor(runsDir, runId);
+  // D2-②b：跨层未命中（transcript-not-found）映射回既有闭集拒绝；孪生冲突
+  // 等损坏形态如实上抛。
+  let transcriptPath;
+  try {
+    transcriptPath = resolveTranscriptPath(runsDir, runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      throw new AcceptanceRecordError("run_transcript_missing", `Run ${runId} 的 transcript 不存在（任何层均未命中），无法操作 acceptance.recorded`);
+    }
+    throw e;
+  }
   const events = await readTranscriptOrTyped(transcriptPath, runId);
   return events.filter(
     (e) => e && e.type === ACCEPTANCE_EVENT_TYPE && e.runId === runId,

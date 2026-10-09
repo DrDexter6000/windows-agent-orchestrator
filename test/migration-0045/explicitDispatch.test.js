@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -47,10 +48,10 @@ async function makeManager(dir, registryPath, spawnCapture) {
   });
 }
 function readStarted(dir, runDirName = "runs") {
+  // D2-②b：深层枚举（新 run 转录在 projects/<slug>/ 桶内）。
   const runDir = join(dir, runDirName);
-  for (const f of readdirSync(runDir)) {
-    if (!f.endsWith(".jsonl")) continue;
-    for (const line of readFileSync(join(runDir, f), "utf8").split("\n")) {
+  for (const entry of listTranscriptsDeep(runDir)) {
+    for (const line of readFileSync(entry.path, "utf8").split("\n")) {
       try { const o = JSON.parse(line); if (o.type === "run.started") return o; } catch { /* skip */ }
     }
   }

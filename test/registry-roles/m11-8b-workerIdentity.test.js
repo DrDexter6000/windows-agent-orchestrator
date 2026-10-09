@@ -30,6 +30,7 @@
 //   - prompt.sent keeps storing only the original task prompt (no identity header).
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -509,7 +510,7 @@ test("M11-8B-B5: RunManager.start injects composed identity once; prompt.sent ke
 
     // prompt.sent must contain ONLY the original task prompt — never the identity header.
     const { readTranscript, findLatest } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const promptSent = findLatest(events, "prompt.sent");
     assert.ok(promptSent, "prompt.sent event exists");
     assert.equal(promptSent.prompt, "do the bounded task", "prompt.sent stores ONLY the original task prompt");

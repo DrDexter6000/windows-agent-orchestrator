@@ -15,6 +15,7 @@
 // certification-gate refusal).
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
@@ -382,7 +383,7 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
     assert.ok(runId, "runId returned");
 
     // Transcript must already be readable and pending at return time.
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
     assert.ok(existsSync(transcriptPath), "transcript exists at MCP return");
     const earlyEvents = await readTranscript(transcriptPath);
     assert.equal(findState(earlyEvents), "pending", "transcript pending at return");
@@ -466,7 +467,7 @@ test("M9-2B-08: summary-less Fresh clone dispatches via real MCP + detached runn
 
     // The application/detached path ran: a transcript exists at MCP return and
     // the detached runner drove the nonexistent binary to a terminal failure.
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
     assert.ok(existsSync(transcriptPath), "transcript exists at MCP return (application path ran)");
     const earlyEvents = await readTranscript(transcriptPath);
     assert.equal(findState(earlyEvents), "pending", "transcript pending at return");
@@ -541,7 +542,8 @@ test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outc
 
     // Wait for both to reach terminal.
     async function waitForTerminal(rd, rid) {
-      const tp = join(rd, `${rid}.jsonl`);
+      // D2-②b：经解析链定位（分桶转录）。
+      const tp = resolveTranscriptPath(rd, rid);
       let evs = [];
       for (let i = 0; i < 80; i += 1) {
         if (existsSync(tp)) {

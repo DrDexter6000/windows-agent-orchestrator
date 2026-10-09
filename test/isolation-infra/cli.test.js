@@ -5,6 +5,7 @@
 // 重点：worker failed 时主控必须收到结构化失败结果（runId/failed/error），不能裸 crash。
 
 import { test } from "node:test";
+import { resolveTranscriptPath, listTranscriptsDeep } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
@@ -735,7 +736,7 @@ test("TD-54: run --background 默认透传 config.registry 且支持 --prompt-fi
     assert.equal(parsed.background, true);
     assert.ok(parsed.runId);
 
-    const transcriptPath = join(runDir, `${parsed.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, parsed.runId);
     let events = [];
     for (let i = 0; i < 50; i += 1) {
       if (existsSync(transcriptPath)) {
@@ -3595,9 +3596,10 @@ test("R10-A-CLI-1: run --model 前台 → start 收到合成 model（contextWind
     assert.match(out, /effective model: \{"id":"gpt-5\.6-sol-xhigh","contextWindow":1000000\}/,
       "text format echoes the effective model at dispatch success");
     // transcript 事实：run.started.model = 合成后策略 + 显式 modelOverride 字段。
-    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    // D2-②b：深层枚举（新 run 转录在 projects/<slug>/ 桶内）。
+    const files = listTranscriptsDeep(dir);
     assert.equal(files.length, 1, "one run transcript");
-    const events = await readTranscript(join(dir, files[0]));
+    const events = await readTranscript(files[0].path);
     const started = events.find((e) => e.type === "run.started");
     assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
       "run.started.model reflects the synthesized policy");
@@ -3635,8 +3637,8 @@ test("R10-A-CLI-3: 无 --model 的前台 run 字节不变（无回显行、无 m
       await runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir], config);
     });
     assert.doesNotMatch(out, /effective model/, "无覆盖时无回显行");
-    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-    const events = await readTranscript(join(dir, files[0]));
+    const files = listTranscriptsDeep(dir);
+    const events = await readTranscript(files[0].path);
     const started = events.find((e) => e.type === "run.started");
     assert.equal("modelOverride" in started, false, "run.started payload 保持原形状");
     assert.deepEqual(started.model, { id: "glm-5.3", contextWindow: 1000000 }, "registry 原策略原样落盘");
@@ -3762,7 +3764,7 @@ test("R10-A-CLI-8: run --background --model 全链 — CLI JSON 回显 + runner�
       "后台 JSON 回显 effective model（dispatch 时刻可见）");
 
     // 等 runner 把 run 推到终态（binary 不存在 → spawn_error → failed）。
-    const transcriptPath = join(runDir, `${parsed.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, parsed.runId);
     let events = [];
     for (let i = 0; i < 50; i += 1) {
       if (existsSync(transcriptPath)) {
@@ -3854,9 +3856,10 @@ test("R11-1-CLI-1: run --model + --reasoning 前台 → 双覆盖合成 + run.st
       /effective model: \{"id":"gpt-5\.6-sol-xhigh","contextWindow":1000000\}, reasoning: \{"effort":"xhigh"\}/,
       "text format echoes BOTH effective policies on one merged line");
     // transcript 事实：run.started 的四个字段（双静态 + 双显式覆盖）。
-    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    // D2-②b：深层枚举（新 run 转录在 projects/<slug>/ 桶内）。
+    const files = listTranscriptsDeep(dir);
     assert.equal(files.length, 1, "one run transcript");
-    const events = await readTranscript(join(dir, files[0]));
+    const events = await readTranscript(files[0].path);
     const started = events.find((e) => e.type === "run.started");
     assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 });
     assert.deepEqual(started.reasoning, { effort: "xhigh" },
@@ -3896,8 +3899,8 @@ test("R11-1-CLI-3: 无 --reasoning 的前台 run 字节不变（无回显行、r
       await runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir], config);
     });
     assert.doesNotMatch(out, /effective /, "无覆盖时无回显行");
-    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-    const events = await readTranscript(join(dir, files[0]));
+    const files = listTranscriptsDeep(dir);
+    const events = await readTranscript(files[0].path);
     const started = events.find((e) => e.type === "run.started");
     assert.equal("reasoningOverride" in started, false, "run.started 不携带覆盖事实（保持原形状）");
     assert.deepEqual(started.reasoning, { effort: "medium" },
@@ -4015,7 +4018,7 @@ test("R11-1-CLI-8: run --background --reasoning 全链 — CLI JSON 回显 + run
       "后台 JSON 回显 effective reasoning（dispatch 时刻可见）");
 
     // 等 runner 把 run 推到终态（binary 不存在 → spawn_error → failed）。
-    const transcriptPath = join(runDir, `${parsed.runId}.jsonl`);
+    const transcriptPath = resolveTranscriptPath(runDir, parsed.runId);
     let events = [];
     for (let i = 0; i < 50; i += 1) {
       if (existsSync(transcriptPath)) {

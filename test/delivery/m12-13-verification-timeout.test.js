@@ -27,6 +27,7 @@
 // run_wait observation window.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import {
   mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, existsSync, readFileSync,
@@ -80,7 +81,7 @@ function writeTranscript(runDir, runId, lines) {
 
 async function readWorktreeFromTranscript(runDir, runId) {
   const { readTranscript } = await import("../../src/transcript.js");
-  const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+  const events = await readTranscript(resolveTranscriptPath(runDir, runId));
   const started = events.find((e) => e.type === "run.started");
   return started?.worktreePath ?? null;
 }
@@ -285,7 +286,7 @@ test("VT-05: declared verificationTimeoutMs → persisted + forwarded to the ver
     assert.equal(spawnCount(), 1, "spawned exactly once");
 
     const { readTranscript } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     const started = events.find((e) => e.type === "run.started");
     assert.equal(started.delivery.verificationTimeoutMs, 600000, "run.started persists the declared timeout");
     const created = events.find((e) => e.type === "run.delivery_created");
@@ -337,7 +338,7 @@ test("VT-06: absent verificationTimeoutMs → zero drift end-to-end; verifier ca
     assert.equal(result.completed, true, "absent timeout must not change the completion flow");
 
     const { readTranscript } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     for (const e of events) {
       if (e.type === "run.started") {
         assert.equal(
@@ -409,7 +410,7 @@ test("VT-07: resume forwards the persisted verificationTimeoutMs (valid)", async
     assert.equal(verifyCalls[0].opts.timeoutMs, 700000,
       "resumed run forwards the persisted per-command execution budget to the verifier");
     const { readTranscript } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     const created = events.find((e) => e.type === "run.delivery_created");
     assert.ok(created, "resumed run packages + writes delivery_created");
     assert.equal(created.delivery.verification.verificationTimeoutMs, 700000,

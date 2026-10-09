@@ -145,6 +145,7 @@ const CORE_TOP = Object.freeze(new Set([
   "src/scorecard.js",
   "src/smoke.js",
   "src/transcript.js",
+  "src/projectBuckets.js", // D2-②b：转录路径/分桶权威对（解析链消费 transcriptPathFor，同层 core）
   // R23-F/B 登记（2026-08-22）：同机全量验证串行化闸（verification lease）。
   // 零相对出边除一条 core 同层边：./machineGatePaths.js（2→2，机器级闸路径
   // SSOT）；其余 node:fs/path/crypto。消费方 deliveryVerification/runManager/

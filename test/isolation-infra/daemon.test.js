@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync, spawnSync as _ss } from "node:child_process";
@@ -511,7 +512,7 @@ test("daemon server: start 派发 run 并推进到终态（mock fetch）", async
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 100));
       try {
-        const raw = readFileSync(join(runDir, `${res.runId}.jsonl`), "utf8");
+        const raw = readFileSync(resolveTranscriptPath(runDir, res.runId), "utf8");
         const events = raw.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
         state = findState(events);
         if (["completed", "failed", "aborted", "timed_out"].includes(state)) break;

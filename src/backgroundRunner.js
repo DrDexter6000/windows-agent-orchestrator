@@ -26,7 +26,9 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
+import { resolveTranscriptPath } from "./projectBuckets.js";
 import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
+
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
@@ -100,8 +102,17 @@ function makeObjectRegistry(registryObj) {
  */
 
 /** 0045 W3c：解析/校验类失败的具名收口（W2b 形状提炼）——run.error + failed 终态，零 spawn。 */
-async function failClosedResolution(runDir, runId, agentId, code, message) {
-  const transcriptPath = transcriptPathFor(runDir, runId);
+// D2-②b：runner 侧转录定位——已决定桶目录（--transcript-dir）时 O(1) 直取；
+// 无提示（旧父进程/旧档）走读侧解析链（平铺→有界扫描）。
+function runnerTranscriptPath(runDir, transcriptDir, runId) {
+  return transcriptDir ? transcriptPathFor(transcriptDir, runId) : resolveTranscriptPath(runDir, runId);
+}
+
+async function failClosedResolution(runDir, runId, agentId, code, message, transcriptDir = null) {
+  // D2-②b：有已决定桶目录则写桶内（与父进程事实同址）；无则旧平铺形状。
+  const transcriptPath = transcriptDir
+    ? transcriptPathFor(transcriptDir, runId)
+    : transcriptPathFor(runDir, runId);
   try {
     const t = new JsonlTranscript(transcriptPath, { runId, agentId: agentId ?? "unknown", initialSeq: 0 });
     await t.append("run.error", { phase: "dispatch_resolution", error: code, message });
@@ -112,6 +123,9 @@ async function failClosedResolution(runDir, runId, agentId, code, message) {
 
 export async function runBackground(opts = {}) {
   const { agentId, prompt, runDir } = opts;
+  // D2-②b decide-once：父进程（runDispatch）已定的转录桶目录——收到即用，
+  // 不重推（缺参=旧代码父进程 → 按旧方式写平铺，规格 §6.11-1）。
+  const transcriptDir = typeof opts.transcriptDir === "string" && opts.transcriptDir.length > 0 ? opts.transcriptDir : null;
   const runId = opts.runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
   if (!agentId) throw new Error("runBackground: agentId required");
   if (!prompt) throw new Error("runBackground: prompt required");
@@ -152,7 +166,6 @@ export async function runBackground(opts = {}) {
       retries: 0,
     },
     readRegistry: registryResolver,
-    transcriptDir: runDir,
     // M11-11C: test seam — an injected backendFor overrides the default
     // runtime construction (used by the causal chain test to capture the
     // compiled claude argv). Production leaves this unset.
@@ -171,7 +184,7 @@ export async function runBackground(opts = {}) {
       const agentEntry = typeof regM.getAgent === "function" && agentId ? regM.getAgent(agentId) : null;
       if (!frozenMaterial || !agentEntry) {
         return await failClosedResolution(runDir, runId, agentId,
-          "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent");
+          "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent", transcriptDir);
       }
       const recomputed = {
         laneFingerprint: laneFingerprintOf({
@@ -188,7 +201,7 @@ export async function runBackground(opts = {}) {
         || recomputed.roleSha256 !== frozenMaterial.roleSha256) {
         return await failClosedResolution(runDir, runId, agentId,
           "reuse_material_mismatch",
-          "registry wiring changed between dispatch and runner start (lane fingerprint or role content sha mismatch)");
+          "registry wiring changed between dispatch and runner start (lane fingerprint or role content sha mismatch)", transcriptDir);
       }
     }
     let run;
@@ -213,7 +226,7 @@ export async function runBackground(opts = {}) {
         lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
       });
       if (resolution.kind === "error") {
-        const transcriptPath = transcriptPathFor(runDir, runId);
+        const transcriptPath = runnerTranscriptPath(runDir, transcriptDir, runId);
         try {
           const t = new JsonlTranscript(transcriptPath, {
             runId, agentId: agentId ?? "unknown", initialSeq: 0,
@@ -233,6 +246,12 @@ export async function runBackground(opts = {}) {
       prompt,
       registry: registryPath,
       runDir,
+      // D2-②b：显式传入已决定桶目录（decide-once；RunManager 不重推）。
+      ...(transcriptDir
+        ? { transcriptDir }
+        // 旧 runDispatch 父进程没给 --transcript-dir：显式声明旧平铺模式
+        //（防"旧父在平铺轮询、新 runner 写桶"的孤儿形态）。
+        : { transcriptLegacyFlat: true }),
       cwd: opts.cwd,
       // fireAndForget=false：runner 自己驱动 waitForCompletion，不触发护栏，不是孤儿。
       fireAndForget: false,
@@ -288,7 +307,7 @@ export async function runBackground(opts = {}) {
         : {}),
     });
   } catch (error) {
-    await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
+    await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir });
     // P2′：入口起拍的心跳在此路径必须回收（失败也是终态——owner 不再存活）。
     clearInterval(heartbeatTimer);
     clearOwner(runDir, runId);
@@ -430,8 +449,8 @@ export async function runResumeBackground(opts = {}) {
   };
 }
 
-async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error }) {
-  const transcriptPath = transcriptPathFor(runDir, runId);
+async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir = null }) {
+  const transcriptPath = runnerTranscriptPath(runDir, transcriptDir, runId);
   let events = [];
   try {
     events = await readTranscript(transcriptPath);
@@ -519,7 +538,7 @@ export async function runMain(argv = process.argv.slice(2)) {
       const runDir = opts["run-dir"];
       const runId = opts["run-id"];
       if (runDir && runId) {
-        const transcriptPath = transcriptPathFor(runDir, runId);
+        const transcriptPath = runnerTranscriptPath(runDir, opts["transcript-dir"], runId);
         try {
           let events = [];
           try { events = await readTranscript(transcriptPath); } catch { events = []; }
@@ -562,7 +581,7 @@ export async function runMain(argv = process.argv.slice(2)) {
       const runDir = opts["run-dir"];
       const runId = opts["run-id"];
       if (runDir && runId) {
-        const transcriptPath = transcriptPathFor(runDir, runId);
+        const transcriptPath = runnerTranscriptPath(runDir, opts["transcript-dir"], runId);
         try {
           let events = [];
           try { events = await readTranscript(transcriptPath); } catch { events = []; }
@@ -595,6 +614,7 @@ export async function runMain(argv = process.argv.slice(2)) {
     runDir: opts["run-dir"],
     runId: opts["run-id"],
     cwd: opts.cwd,
+    transcriptDir: opts["transcript-dir"],
     waitTimeout: opts["wait-timeout"] !== undefined ? Number(opts["wait-timeout"]) : undefined,
     // M10-pre closeout: server-owned global config.waitTimeout (from --global-wait-timeout).
     // Never disguised as --wait-timeout — RunManager resolves precedence internally.
@@ -682,7 +702,7 @@ async function appendDurableResumeFailure(runId, runDir, reasonText) {
     const { JsonlTranscript } = await import("./transcript.js");
     // 终审修正：签名为 (filePath, context)——此前误传 (runId, runDir) 把事实写到
     // 工作目录裸文件。规范形状对齐 runManager（join(runDir, runId.jsonl) + 绑定上下文）。
-    const t = new JsonlTranscript(transcriptPathFor(runDir, runId), { runId, agentId: "resume-runner" });
+    const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId: "resume-runner" });
     await t.append("run.error", { phase: "resume", error: reasonText });
   } catch (e) {
     process.stderr.write(`backgroundRunner: durable resume-failure fact unwritable: ${e.message}

@@ -12,6 +12,7 @@
 // reporting a final commit SHA, regardless of what the task prompt says.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -122,7 +123,7 @@ test("PA-RED1: delivery mode injects the delivery contract even WITHOUT a system
 
     // The contract must NOT be persisted into prompt.sent.
     const { readTranscript, findLatest } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const promptSent = findLatest(events, "prompt.sent");
     assert.ok(promptSent, "prompt.sent exists");
     assert.equal(promptSent.prompt, "Produce the final commit SHA.",

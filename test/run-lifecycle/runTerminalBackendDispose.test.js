@@ -19,6 +19,7 @@
 // 全部用假 backend（含 dispose 计数器），零真实进程、零真实凭据。
 
 import { mkdtempSync, rmSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import fsPromisesDefault from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -160,7 +161,7 @@ test("TD-223: submitted-rejected（spawn 期间外部终态）→ dispose 执行
     await spawnEntered; // pending 已 accepted，start 停在 spawn
 
     // 第二 writer 在 spawn resolve 前 claim aborted（确定性，无 sleep 竞速）。
-    const externalWriter = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "w" });
+    const externalWriter = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "w" });
     await externalWriter.transitionState("pending", "aborted", "external_stop");
     resolveSpawn();
 
@@ -317,7 +318,6 @@ test("TD-234 R1: terminal write failing mid-read-error still runs backend.dispos
   try {
     // astra R1 复现形态：done 事件【之后】、终态写入【之前】武装读故障——
     // 终态 CAS 锁内读失败 → 上抛；finally 兜底 cleanup。
-    const filePath = join(dir, "run_td234_r1.jsonl");
     const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
     const real = fsPromisesDefault.readFile;
     const { backend: armingBackend, calls } = makeDisposeBackend(() => ({
@@ -326,6 +326,8 @@ test("TD-234 R1: terminal write failing mid-read-error still runs backend.dispos
       events: async function* () {
         yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }] };
         // 此刻流转尚未消费 done——先武装，再交出 done。
+        // D2-②b：generator 内解析（此刻转录已建成、位于桶内）。
+        const filePath = resolveTranscriptPath(dir, "run_td234_r1");
         fsPromisesDefault.readFile = async (p, ...rest) => {
           if (p === filePath) throw fault;
           return real(p, ...rest);

@@ -103,16 +103,18 @@ test("TD-239-R1: budget 告警落转录目录——config.runDir ≠ 实际转�
 
     const run = await manager.start("a", { prompt: "go", runDir: transcriptDir });
     // 形状自检：转录确实落在 override 目录（与 config.runDir 分离的形态成立）。
-    assert.equal(dirname(run.transcript.filePath), resolve(transcriptDir),
-      "形状前提：转录必须实际落在 override 目录");
+// D2-②b：manager 自决写桶——转录在 transcriptDir 下 projects/<slug>/ 内，
+    // 目录关系断言从"恰好等于 runDir"放宽为"仍在 transcriptDir 树内且不在 configDir"
+    assert.ok(resolve(dirname(run.transcript.filePath)).startsWith(resolve(transcriptDir)),
+      "形状前提：转录必须实际落在 override 目录树内（D2-②b 分桶子目录）");
 
     const result = await run.waitForCompletion({ pollInterval: 5 });
     assert.equal(result.budgetExceeded, true, "预算闸门必须触发（否则告警不会发）");
     assert.equal(run.state, "failed");
 
-    const alertPath = join(transcriptDir, "ALERTS.log");
+    const alertPath = join(dirname(run.transcript.filePath), "ALERTS.log");
     assert.ok(await waitForFile(alertPath), "ALERTS.log 必须落在转录目录");
-    assert.match(readAlerts(transcriptDir), /\[budget\]/, "落盘内容必须是 budget 告警");
+    assert.match(readAlerts(dirname(run.transcript.filePath)), /\[budget\]/, "落盘内容必须是 budget 告警");
     assert.equal(existsSync(join(configDir, "ALERTS.log")), false,
       "config.runDir 目录不得出现 ALERTS.log（修前 bug 形态）");
   } finally {
@@ -163,9 +165,10 @@ test("TD-239-R2: stop_unverified（probe 成功仍活）告警落转录目录（
     const run = await manager.start("a", { prompt: "x", runDir: dirs.transcriptDir, runId: "td239_r2" });
     await assert.rejects(() => run.waitForCompletion({ waitTimeout: 5000, pollInterval: 10 }), /natural failure/);
 
-    const alertPath = join(dirs.transcriptDir, "ALERTS.log");
+    // D2-②b：告警随转录实际目录（分桶子目录），真合同=不在 configDir。
+    const alertPath = join(dirname(run.transcript.filePath), "ALERTS.log");
     assert.ok(await waitForFile(alertPath, { timeoutMs: 8000 }), "ALERTS.log 必须落在转录目录");
-    const content = readAlerts(dirs.transcriptDir);
+    const content = readAlerts(dirname(run.transcript.filePath));
     assert.match(content, /\[stop_unverified\]/);
     assert.match(content, /may still be running/, "必须是 probe 成功仍活形态的文案");
     assert.equal(existsSync(join(dirs.configDir, "ALERTS.log")), false,
@@ -183,9 +186,9 @@ test("TD-239-R3: stop_unverified（probe 抛错）告警落转录目录（overri
     const run = await manager.start("a", { prompt: "x", runDir: dirs.transcriptDir, runId: "td239_r3" });
     await assert.rejects(() => run.waitForCompletion({ waitTimeout: 5000, pollInterval: 10 }), /natural failure/);
 
-    const alertPath = join(dirs.transcriptDir, "ALERTS.log");
+    const alertPath = join(dirname(run.transcript.filePath), "ALERTS.log");
     assert.ok(await waitForFile(alertPath), "ALERTS.log 必须落在转录目录");
-    const content = readAlerts(dirs.transcriptDir);
+    const content = readAlerts(dirname(run.transcript.filePath));
     assert.match(content, /\[stop_unverified\]/);
     assert.match(content, /probe error/, "必须是 probe 抛错形态的文案");
     assert.equal(existsSync(join(dirs.configDir, "ALERTS.log")), false,
@@ -233,9 +236,9 @@ test("TD-239-R4: no_effect 告警落转录目录——config.runDir ≠ 实际�
 
     run._raiseNoEffectAlert("completed_empty", "td239-r4 no_effect landing pin");
 
-    const alertPath = join(transcriptDir, "ALERTS.log");
+    const alertPath = join(dirname(run.transcript.filePath), "ALERTS.log");
     assert.ok(await waitForFile(alertPath), "ALERTS.log 必须落在转录目录");
-    const content = readAlerts(transcriptDir);
+    const content = readAlerts(dirname(run.transcript.filePath));
     assert.match(content, /\[no_effect\]/);
     assert.match(content, /td239-r4 no_effect landing pin/);
     assert.equal(existsSync(join(configDir, "ALERTS.log")), false,

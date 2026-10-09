@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -360,7 +361,8 @@ test("3C1-05: background delivery produces delivery_created + verification + ter
     assert.ok(runId, "background delivery returns runId");
 
     // Poll transcript to terminal.
-    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    // D2-②b：经解析链定位（分桶转录）。
+    const transcriptPath = resolveTranscriptPath(runDir, runId);
     let events = [];
     for (let i = 0; i < 120; i += 1) {
       if (existsSync(transcriptPath)) {

@@ -48,6 +48,7 @@
 // which is REFUSED before any spawn.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
@@ -269,7 +270,7 @@ test("RCE-4: legit registry cwd → start proceeds, run.started.cwd recorded (re
     assert.equal(spawns.length, 1, "backend spawned exactly once");
     assert.equal(spawns[0].agent.cwd, dir, "effective cwd is the (existing) registry cwd");
     const { readTranscript } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const started = events.find((e) => e.type === "run.started");
     assert.equal(started.cwd, dir, "run.started.cwd still recorded from the resolved agent cwd");
   } finally {
@@ -579,7 +580,7 @@ test("RCE-13: resume, non-delivery run whose started cwd no longer exists → ty
     assert.equal(spawns.length, 0, "zero re-spawns for the refused resume");
     // Transcript bytes unchanged: no run.rerun append happened before the refusal.
     const { readTranscript } = await import("../../src/transcript.js");
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
     assert.equal(events.length, lines.length, "no events appended by the refused resume");
     assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
   } finally {
@@ -604,7 +605,7 @@ test("TD198-1: registry cwd \".\" → run.started.cwd is ABSOLUTE and the spawn 
     const manager = makeManager({ registryPath, runDir, backend });
     const run = await manager.start("coder_low", { prompt: "x" });
 
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const started = events.find((e) => e.type === "run.started");
     assert.ok(started, "run.started recorded");
     assert.equal(started.cwd, resolve("."), "run.started.cwd is the resolved ABSOLUTE path");
@@ -625,7 +626,7 @@ test("TD198-2: explicit RELATIVE --cwd → both the fact and the spawn carry the
     const manager = makeManager({ registryPath, runDir, backend });
     const run = await manager.start("coder_low", { prompt: "x", cwd: "." });
 
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const started = events.find((e) => e.type === "run.started");
     assert.equal(started.cwd, resolve("."), "explicit relative --cwd resolves against process.cwd()");
     assert.equal(spawns[0].agent.cwd, resolve("."), "spawn cwd matches the fact");
@@ -643,7 +644,7 @@ test("TD198-3: explicit ABSOLUTE --cwd → recorded byte-identically (normalizat
     const manager = makeManager({ registryPath, runDir, backend });
     const run = await manager.start("coder_low", { prompt: "x", cwd: dir });
 
-    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, run.runId));
     const started = events.find((e) => e.type === "run.started");
     assert.equal(started.cwd, dir, "absolute cwd threads byte-identically");
     assert.equal(spawns[0].agent.cwd, dir, "spawn cwd unchanged for absolute input");

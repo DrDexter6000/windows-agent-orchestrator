@@ -14,6 +14,7 @@
 // wait). No real model calls.
 
 import { test } from "node:test";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,7 +100,7 @@ test("PRE3C-01: daemon omitted waitTimeout → RunManager wait_policy disabled/n
     assert.equal(startRes.ok, true);
     // wait for the run to reach terminal
     await new Promise((r) => setTimeout(r, 400));
-    const events = await readTranscript(join(runDir, `${startRes.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, startRes.runId));
     const policy = events.find((e) => e.type === "run.wait_policy");
     assert.ok(policy, "run.wait_policy must be recorded");
     assert.equal(policy.waitTimeoutMs, null, "omitted daemon timeout must produce disabled policy (null), not 120000");
@@ -117,7 +118,7 @@ test("PRE3C-02: daemon explicit valid waitTimeout survives exactly", async () =>
   try {
     const startRes = await connectDaemon(pipe, { cmd: "start", agentId: "worker_a", prompt: "do it" });
     await new Promise((r) => setTimeout(r, 400));
-    const events = await readTranscript(join(runDir, `${startRes.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, startRes.runId));
     const policy = events.find((e) => e.type === "run.wait_policy");
     assert.ok(policy);
     assert.equal(policy.waitTimeoutMs, 240000, "explicit valid timeout must survive exactly");
@@ -232,7 +233,7 @@ test("PRE3C-06: daemon IPC stop → exactly one aborted, zero timed_out", async 
     // give the daemon's waitForCompletion path a moment to terminalize
     await new Promise((r) => setTimeout(r, 250));
 
-    const events = await readTranscript(join(runDir, `${startRes.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, startRes.runId));
     const state = findState(events);
     const timedOut = events.filter((e) => e.type === "run.timed_out");
     const abortedTerm = events.filter((e) => e.type === "run.state_change" && e.to === "aborted");
@@ -258,7 +259,7 @@ test("PRE3C-07: daemon shutdown with active run → no timed_out lie", async () 
     await daemon.stop();
     await new Promise((r) => setTimeout(r, 250));
 
-    const events = await readTranscript(join(runDir, `${startRes.runId}.jsonl`));
+    const events = await readTranscript(resolveTranscriptPath(runDir, startRes.runId));
     const timedOut = events.filter((e) => e.type === "run.timed_out");
     assert.equal(timedOut.length, 0, "daemon shutdown must NOT produce run.timed_out for active run");
   } finally {

@@ -66,7 +66,8 @@ import {
   PROCESS_MISSING_RECOVERY_REASON,
   PROCESS_MISSING_CONFIRMED_TYPE,
   RepackageCasPolicyError,
-  REPACKAGE_CAS_POLICY_CODES, transcriptPathFor } from "../transcript.js";
+  REPACKAGE_CAS_POLICY_CODES } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import {
   assertCommittedDeliveryRef,
   isValidRunId,
@@ -910,7 +911,17 @@ export async function runDeliveryRepackage({
   const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
-  const filePath = transcriptPathFor(runDir, runId);
+  // D2-②b：跨层未命中映射回既有 run_not_found 闭集拒绝（不误建平铺）；孪生
+  // 冲突等损坏形态如实上抛。
+  let filePath;
+  try {
+    filePath = resolveTranscriptPath(runDir, runId, { forAppend: true });
+  } catch (e) {
+    if (e?.code === "transcript-not-found") {
+      throw new RepackageRejectionError("run_not_found", "runDeliveryRepackage: run transcript missing in any layer");
+    }
+    throw e;
+  }
 
   // TD-226: a well-formed runId with no transcript is a closed-set rejection
   // (not an unexpected error) — and records NO audit event, because appending

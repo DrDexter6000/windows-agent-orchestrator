@@ -15,7 +15,8 @@ import { resolve, join } from "node:path";
 import { readRegistry } from "../registry.js";
 import { RunManager } from "../runManager.js";
 import { backendFor as sharedBackendFor } from "../backends/factory.js";
-import { readTranscript, findLastEventSeq, JsonlTranscript, transcriptPathFor } from "../transcript.js";
+import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 // R14 (TD-128c): loadRun input validation reuses the delivery.js isValidRunId
 // SSOT (the same validator runManager/isolation already share). Import
 // direction: delivery.js is a bottom-level module (node:child_process +
@@ -153,7 +154,7 @@ export async function loadRun(runId, options, config) {
     throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
   const runDir = resolve(options.runDir ?? config.runDir);
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   const events = await readTranscript(filePath);
   const transcript = new JsonlTranscript(filePath, {
     runId,

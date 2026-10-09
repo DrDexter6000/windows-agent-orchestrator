@@ -44,7 +44,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
-import { readTranscript, transcriptPathFor } from "../transcript.js";
+import { readTranscript } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 import { validateDeliveryFacts } from "../transcript.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -115,7 +116,7 @@ export async function resolveRunDeliveryReviewTarget({
 
   // 2. Read the host-owned transcript.
   const { join } = await import("node:path");
-  const filePath = transcriptPathFor(runDir, runId);
+  const filePath = resolveTranscriptPath(runDir, runId);
   let events;
   try {
     events = await _readTranscript(filePath);
@@ -562,7 +563,7 @@ export async function getRunDeliveryReview(
     throw new Error("authorizedWorkspaceRoot must be a non-empty string");
   }
   const _readTranscriptForGate = hostDependencies.readTranscriptFn ?? readTranscript;
-  const _gateFilePath = transcriptPathFor(runDir, runId);
+  const _gateFilePath = resolveTranscriptPath(runDir, runId);
   let _gateEvents;
   try {
     _gateEvents = await _readTranscriptForGate(_gateFilePath);
