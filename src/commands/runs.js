@@ -601,6 +601,12 @@ async function runsListCommand(args, config) {
   // runs FRESH within it.
   const sinceMs = options.since !== undefined ? parseDuration(options.since) : undefined;
 
+  // TD-190 D3：--project 只读过滤（@sandbox/@scratch/@unattributed 选择器或
+  // 项目路径/裸名——语义权威在 listRuns 服务侧）。裸旗拒绝同 --state 惯例。
+  if (options.project === true) {
+    throw new Error("--project requires a value (a project path/name, or @sandbox/@scratch/@unattributed)");
+  }
+
   // CLI is human/ops — no workspace authorization.
   // knownAgentIds = [] so raw agentId is preserved (CLI doesn't validate).
   const result = await listRuns({
@@ -621,6 +627,7 @@ async function runsListCommand(args, config) {
     // see above). Orthogonal to --agent/--latest and to each other.
     stateFilter: options.state,
     sinceMs,
+    projectFilter: options.project,
   });
 
   // TD-137①：裸 `runs list` 不再恢复文件名升序——直接沿用 listRuns 的默认

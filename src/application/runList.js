@@ -16,9 +16,11 @@
 //     query-scoped workspace verifier SSOT.
 
 import { basename, join, resolve } from "node:path";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, realpathSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES, transcriptPathFor, listTranscriptFiles } from "../transcript.js";
+import { identifyProjectFromCwd, deriveProjectBucketSlug } from "../projectIdentity.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
@@ -272,6 +274,11 @@ export async function listRuns(input) {
     livenessThresholdMs,
     scanScope,
     historyRange,
+    // TD-190 D3 只读过滤（2026-10-09）：按项目身份过滤候选——@sandbox/@scratch/
+    // @unattributed 三选择器按身份类别；其它值按 projectIdentity 归一（完整路径
+    // → 项目键精确匹配；裸名 → displayName/slug 大小写不敏感匹配）。零布局
+    // 变化：只过滤查询结果，不移动/不改写任何转录。
+    projectFilter,
   } = input;
   const _readTranscript = input.readTranscriptFn ?? readTranscript;
   // M12-15: one nowMs snapshot per call (truthful "is it active RIGHT NOW").
@@ -342,6 +349,37 @@ export async function listRuns(input) {
   } else {
     candidates = scanRunFiles(resolvedRunDir)
       .map((file) => ({ runId: file.replace(/\.jsonl$/, ""), file }));
+  }
+
+  // TD-190 projectFilter（只读、前置——过滤只花每候选一行的首事件读取）。
+  if (projectFilter !== undefined && projectFilter !== null && String(projectFilter).length > 0) {
+    const sel = String(projectFilter).startsWith("@")
+      ? String(projectFilter).slice(1).toLowerCase()
+      : null;
+    const argIdentity = sel === null
+      ? identifyProjectFromCwd(String(projectFilter), { realpath: realpathSync, tmpdir: tmpdir() })
+      : null;
+    const argName = sel === null ? String(projectFilter).toLowerCase() : null;
+    const argKey = argIdentity?.kind === "project" ? argIdentity.key : null;
+    const argSlug = argIdentity?.kind === "project" ? deriveProjectBucketSlug(argIdentity).toLowerCase() : null;
+    const classify = (file) => {
+      try {
+        const first = JSON.parse(readFileSync(join(resolvedRunDir, file), "utf8").trim().split("\n")[0]);
+        return identifyProjectFromCwd(first?.cwd, { realpath: realpathSync, tmpdir: tmpdir() });
+      } catch {
+        return { kind: "unattributed", reason: "first event unreadable" };
+      }
+    };
+    candidates = candidates.filter(({ file }) => {
+      const id = classify(file);
+      if (sel !== null) {
+        return id.kind === sel;
+      }
+      if (id.kind !== "project") return false;
+      if (argKey !== null && id.key === argKey) return true;
+      return id.displayName.toLowerCase() === argName
+        || deriveProjectBucketSlug(id).toLowerCase() === argSlug;
+    });
   }
 
   const summaries = [];

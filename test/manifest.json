@@ -246,6 +246,7 @@
       "isolation-infra/gitLocalExclude.test.js",
       "isolation-infra/isolation.test.js",
       "isolation-infra/projectIdentity.test.js",
+      "isolation-infra/runListProjectFilter.test.js",
       "isolation-infra/transcriptPathGuard.test.js",
       "delivery/m11-12a-deliveryReviewPending.test.js",
       "delivery/m11-8c-closeout.test.js",
