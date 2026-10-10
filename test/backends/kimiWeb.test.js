@@ -872,11 +872,13 @@ test("kimi-web ⑤ ③: running→completed 两拍转移——首拍等待（非
   for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
     events.push(ev);
   }
-  assert.deepEqual(events.map((e) => e.kind), ["message", "message", "metrics", "done"]);
+  // 问2 在途呈现（2026-10-10）：首见 running（签名建立）发射一条 streaming 事实。
+  assert.deepEqual(events.map((e) => e.kind), ["runtime_activity", "message", "message", "metrics", "done"]);
+  assert.equal(events[0].status, "streaming");
   assert.equal(events.at(-1).reason, "completed");
-  assert.deepEqual(events[1].parts, [{ type: "text", text: "slow answer" }]);
-  assert.equal(events[2].kind, "metrics");
-  assert.equal(polls(), 2, "恰两拍：拍 1 running（等待）、拍 2 completed（终态发射）");
+  assert.deepEqual(events[2].parts, [{ type: "text", text: "slow answer" }]);
+  assert.equal(events[3].kind, "metrics");
+  assert.equal(polls(), 2, "恰两拍：拍 1 running（等待+在途事实）、拍 2 completed（终态发射）");
 });
 
 test("kimi-web ⑤ ④: 提交滞后——首拍无本轮 turn（他人 turn 在场也不误领）、silentTimeout 到期仍无 → silent fail（相对提交时刻）", async () => {
@@ -941,8 +943,11 @@ test("kimi-web ⑤ ⑤a (TD-197①): queued/慢启动静默不再被 8 拍门误
   for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: clock })) {
     events.push(ev);
   }
-  assert.equal(events.length, 1, "停滞轮恰一个 done 事件（零 message）");
-  const done = events[0];
+  // 问2 在途呈现：首拍 turn 现身（签名基线）发射一条 streaming——停滞轮
+  // 此后签名不变不再发射。事件序列=[streaming, done(failed)]。
+  assert.equal(events.length, 2, "在途事实一条 + done 事件（零 message）");
+  assert.equal(events[0].kind, "runtime_activity");
+  const done = events[1];
   assert.equal(done.reason, "failed");
   assert.match(done.error, /turn stalled \(no progress\)/);
   assert.match(done.error, /adaptive budget/);
@@ -1206,7 +1211,7 @@ test("kimi-web ⑤: signal.aborted → 静默结束（不 emit done）", async (
   })) {
     events.push(ev);
   }
-  assert.equal(events.length, 0, "abort 时流静默结束（终态归 RunManager）");
+  assert.ok(events.every((e) => e.kind === "runtime_activity"), "abort 前只可能在途事实（问2），绝无 message/done——终态归 RunManager");
 });
 
 test("kimi-web ⑤: 闭集外未知 state 值 → 一律非终态（fail-closed 等待，绝不猜终态），由 R9 F4 unsupported-state 有界出口收口", async () => {
@@ -2083,10 +2088,11 @@ test("kimi-web R9 ⑬: queued state 单列用例——与 running 分支行为�
   for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
     events.push(ev);
   }
-  assert.deepEqual(events.map((e) => e.kind), ["message", "message", "metrics", "done"]);
+  // 问2 在途呈现（2026-10-10）：首见 queued（签名基线）发射一条 streaming。
+  assert.deepEqual(events.map((e) => e.kind), ["runtime_activity", "message", "message", "metrics", "done"]);
   assert.equal(events.at(-1).reason, "completed", "queued 是受支持的非终态——等待后正常完成");
-  assert.deepEqual(events[1].parts, [{ type: "text", text: "queued then done" }]);
-  assert.equal(polls(), 3, "拍 1-2 queued（等待）、拍 3 终态");
+  assert.deepEqual(events[2].parts, [{ type: "text", text: "queued then done" }]);
+  assert.equal(polls(), 3, "拍 1-2 queued（等待+在途事实）、拍 3 终态");
 });
 
 test("kimi-web R9 ⑭: 提交前静默门 busy 持续至上界 → 固定错误 + 零提交（门未过不读 transcript、不发 prompt）", async () => {
@@ -2178,10 +2184,12 @@ test("kimi-web R9 ⑯: 先见 running 后请求连续失败 → done(failed)（�
   for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
     events.push(ev);
   }
-  assert.equal(events.length, 1, "恰一个 done 事件");
-  assert.equal(events[0].kind, "done");
-  assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /fetch failed/);
+  assert.equal(events.length, 2, "在途事实一条（问2：首见 running）+ 恰一个 done 事件");
+  assert.equal(events[0].kind, "runtime_activity");
+  assert.equal(events[0].status, "streaming");
+  assert.equal(events[1].kind, "done");
+  assert.equal(events[1].reason, "failed");
+  assert.match(events[1].error, /fetch failed/);
   assert.equal(polls, 2, "拍 1 见 running、拍 2 请求失败即收口");
   assert.ok(!events.some((e) => e.kind === "message"), "绝不复用旧 turn 发射内容");
 });
@@ -2507,4 +2515,55 @@ test("kimi-web B5④: 健康长跑（墙钟>30min 持续产出）后的收尾静
   assert.equal(done.reason, "completed", "健康长跑后的收尾思考不被墙钟顶斩杀（累计静默语义）");
   assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走停滞出口");
   assert.ok(detailCalls() >= 1, "收尾静默段吃到至少一次证词续命");
+});
+// ===== Owner 2026-10-10 问2：在途进度呈现（kimi 诊断会审 opus/sol 方案） =====
+// 声称：归属 turn 的结构增长 → 节流发射 runtime_activity("streaming")；
+// 完成路径的正文/证据发射不变；同签名/节流窗内不重复。
+
+test("kimi-web 问2: 归属 turn 增长 → 在途 runtime_activity(streaming)；完成正文/证据照旧", async () => {
+  // 三拍脚本：running(1 step) → running(2 steps，签名增长) → completed。
+  const growing = (n) => turnItem({
+    state: "running",
+    steps: Array.from({ length: n }, (_, i) => ({ id: `s${i}`, frames: [{ id: `f${i}`, kind: "text", role: "assistant", text: "chunk" }] })),
+  });
+  const done = turnItem({
+    state: "completed",
+    steps: [{ id: "s0", frames: [{ id: "f0", kind: "text", role: "assistant", text: "最终答案" }] }],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_prog", { script: [[growing(1)], [growing(2)], [done]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const streaming = events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming");
+  assert.equal(streaming.length >= 1, true, "增长拍至少发射一条在途事实");
+  // 完成路径不受影响：assistant 正文 + done(completed) 原样在场。
+  const finalText = events.find((e) => e.kind === "message" && e.role === "assistant");
+  assert.ok(finalText, "完成正文照旧发射");
+  const doneEv = events.at(-1);
+  assert.equal(doneEv.kind, "done");
+  assert.equal(doneEv.reason, "completed");
+  // 在途事实先于最终正文（进度=运行中可见）。
+  assert.ok(events.indexOf(streaming[0]) < events.indexOf(finalText), "在途事实先于完成正文");
+});
+
+test("kimi-web 问2: 签名不变/节流窗内不重复发射（静态 running 拍零在途新增）", async () => {
+  // 两拍同签名 running（无增长）+完成——增长只发生一次（首见）。
+  const running = turnItem({ state: "running", steps: [{ id: "s0", frames: [] }] });
+  const done = turnItem({ state: "completed", steps: [{ id: "s0", frames: [{ id: "f0", kind: "text", role: "assistant", text: "ok" }] }] });
+  const { handler, markSpawned } = turnScriptServer("session_quiet", { script: [[running], [running], [done]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const streaming = events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming");
+  assert.equal(streaming.length, 1, "首见+无增长=恰一条（节流与同签名去重）");
 });

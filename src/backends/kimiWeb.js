@@ -106,6 +106,7 @@ import {
   fileWrittenEvent,
   toolUseEvent,
   toolResultEvent,
+  runtimeActivityEvent,
 } from "../runEvent.js";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
 import { createStallTracker } from "./stallBudget.js";
@@ -130,6 +131,8 @@ const TRANSCRIPT_AGENT_ID = "main";
 // F4 = 闭集外 state 的连续拍界（等待增长无意义，形状问题不是进度问题）。两者
 // 都不是"进度停滞"检测，维持 8 拍紧界——TD-197① 拆分（auditor Q5）。
 const SHAPE_DRIFT_POLL_LIMIT = 8;
+// 在途进度呈现的最小发射间隔（防刷屏：1s 轮询 × 快速增长帧也至多 12 次/分钟）。
+const KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS = 5000;
 
 // TD-197①（2026-10-03，双席会审 v2）：无进展停滞门（turn 在场、state 在受支持
 // 闭集内、signature 连续不变）改观测自适应时间预算。原 8 拍（≈8s）门当日三次
@@ -663,6 +666,11 @@ export class KimiWebBackend {
     });
     let attestedSilentMs = 0;
     let livenessAttestations = 0;
+    // Owner 2026-10-10 问2 修复（kimi 诊断会审 opus/sol 方案）：在途进度呈现。
+    // 归属 turn 的结构投影增长节气流发射 runtime_activity("streaming")——
+    // 闭集状态、零 payload、不算证据、不碰完成路径；历史 turn 不重放（只看
+    // 归属 turn 的 signature 变化）。节流=同签名天然不重复 + 最小发射间隔。
+    let lastProgressEmitAt = -Infinity;
     // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
     // **连续**拍数（turn 消失或 state 回闭集内即清零）。steps/frames 增长**不**
     // 清零此计数（与普通停滞门分工：那守"受支持的非终态停滞"，这守"状态本身
@@ -798,6 +806,12 @@ export class KimiWebBackend {
         lastSignature = signature;
         noProgressPolls = 0;
         stallTracker.noteProgress();
+        // 在途进度呈现（见声明处注释）：增长即节流发射 streaming 事实。
+        const nowMs = Date.now();
+        if (nowMs - lastProgressEmitAt >= KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS) {
+          lastProgressEmitAt = nowMs;
+          yield runtimeActivityEvent("streaming");
+        }
       } else {
         noProgressPolls += 1;
         if (stallTracker.stallMs() >= stallTracker.budgetMs()) {
