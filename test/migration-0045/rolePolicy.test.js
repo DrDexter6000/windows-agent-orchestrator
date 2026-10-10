@@ -96,10 +96,11 @@ test("POL-3: dispatchRun——researcher 别名（角色政策）进复用路由
       assert.equal(material.roleSha256, roleContractSha256(loadRoleContract("config/roles/researcher.md")),
         "roleSha256 = 本次派发角色正文的 sha（非席位字段、非恒 none）");
     }
-    // ②b explicit 换帽（角色无政策）→ 不进（分级：coder/tester/auditor 未入表）
-    const explicitNoPolicy = await argvOf({ resolvedLane: "x-lane", resolvedRole: "coder", resolvedRoleId: "coder" });
+    // ②b explicit 换帽（角色无政策）→ 不进（0053 后 coder/tester 已入册——负
+    // 对照改用 auditor：0052 分级裁定永不入册，验收独立性=岗位职责）。
+    const explicitNoPolicy = await argvOf({ resolvedLane: "x-lane", resolvedRole: "auditor", resolvedRoleId: "auditor" });
     assert.equal(explicitNoPolicy.res.providerSessionRouting, "not_used",
-      "0052 分级：角色未登记政策 → explicit 也不进（auditor/tester/coder 暂不在册）");
+      "0052 分级：角色未登记政策 → explicit 也不进（auditor 永不在册）");
     // ③ 无 resolvedRoleId（legacy 调用，席位无字段）→ 不进复用
     const legacy = await argvOf({});
     assert.equal(legacy.res.providerSessionRouting, "not_used", "无角色无席位政策 → 不复用");
