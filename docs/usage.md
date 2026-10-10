@@ -560,6 +560,16 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 注：审计席位同样跑在 PATH v24 上，定向测试请用 `npm run test:one`（三件套
 一次到位，见 package.json scripts）。
 
+**kimi 专用 worker serve 运维配方（2026-10-10 起，决定见 0047 附录 B）**：kimi
+车道指向独立 serve——`powershell` 会话置 `$env:WAO_IN_WORKER='1'` 后
+`Start-Process kimi -ArgumentList 'web','--no-open','--port','58628'`
+（工作区=稳定目录 `D:\projects\.kimi-serve-worker-ws`，**勿用可删临时目录**
+——40409 粘滞教训）。serve 会把 env 传给其 MCP 子进程与工具 shell：worker
+自助派发被 0047 env 臂拒绝（验收判据=席位内 run_dispatch 被拒且
+`Detected worker context: env-marker`；工具 shell `WAO_IN_WORKER` 非空）。
+主 serve（默认端口 58627，无标记）留给 Owner 人类使用。重启机器后需要重新
+拉起 worker serve 并核实 kimi 车道 serveUrl 指向 58628（agents.json，不入库）。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell
