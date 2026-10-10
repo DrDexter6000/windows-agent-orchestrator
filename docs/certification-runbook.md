@@ -154,7 +154,7 @@ conditional 状态沿用（0046 §5 步⑦ 七道实证）。
 
 上表判定词只管 **WAO 接线层**，所以「不支持」会掩盖三种截然不同的成因。本节把「上游到底有没有」的事实单独立表——2026-09-21 就是这么误读的：codex / kimi-code 的 headless 复用被读成「不存在」。
 
-> **基线日（as-of）：2026-10-05**；**刷新期限：30 天**（Owner 2026-10-02 决定，自 90 天收紧；超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
+> **基线日（as-of）：2026-10-10**；**刷新期限：30 天**（Owner 2026-10-02 决定，自 90 天收紧；超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
 
 | backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 | 官方渠道（变更信息源） |
 |---|---|---|---|---|---|
@@ -165,7 +165,7 @@ conditional 状态沿用（0046 §5 步⑦ 七道实证）。
 | deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 | npm `@deepseek-ai/dsh`（dist-tag latest 本身是 rc 系） |
 | opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） | npm `opencode-ai`（参照渠道；部署对象无在册） |
 | kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；REST 无会话级中止端点，8 个动作名实测阴性 2026-09-30） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） | 宿主同 kimi-code（同二进制同渠道；服务身份证据走执行检查单的认证探针脚本，不占本列） |
-| zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；live 未逐测） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"） | 协议未见在途注入原语（未实测到 steer 类方法） | 上游无此能力 | 官网 changelog（zcode.z.ai，产品版本锚）＋应用内更新通道；捆绑 CLI 0.16.9 为内部序列，随桌面走 |
+| zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；**live 逐测 2026-10-10**：跨进程 resume 真跑实证——B′ 探针 turn3 + 生产冒烟两轮 + 桥验证派发，bundle b816e386/15647 行〔3.15.1，当日桌面自更〕，消息/part 身份原语同日实证） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"） | 协议未见在途注入原语（未实测到 steer 类方法） | 上游无此能力 | 官网 changelog（zcode.z.ai，产品版本锚）＋应用内更新通道；捆绑 CLI 0.16.9 为内部序列，随桌面走 |
 
 **读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②**复用只在 MCP 通道可用**：CLI 后台通道刻意每次派发用一次性 leadSession（`src/commands/run.js` 注释：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 
@@ -549,3 +549,5 @@ registry certification 是 **advisory 证据，不是 permission gate**：`regis
 
 （conditional worker 边界，原 §lead_preflight 迁出）Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
 
+
+> **刷新注记（2026-10-10，Owner 指令整轮〔触发词"harness 版本巡检"〕+ 事件触发两起：zcode 桌面当日 08:02 自更、WAO 适配层 B′ 根修改动）**：本轮范围 = 前置盘点 ①②③ 全八行 + 渠道列核验 + **zcode 行原语面 live 重测**（当日 B′ 探针跨进程 resume 真跑 + 生产冒烟两轮 + 桥验证派发——行内"live 未逐测"注记就此撤销，消息/part 身份原语同日实证，证据 .dev/bprime-evidence/）。三档结果：**已确认 latest 2**（kimi-code 2.1.1 = npm latest；deepseek-acp dsh 0.2.0-rc.2 = npm latest〔alpha tag 0.2.1-alpha.2 领先，按 rc-follow 语义注记〕）。**非 latest 4**：claude-code〔本地 2.1.289——**10-05 注记的"本地 2.1.285"已过时**，升级发生在上周（Owner 2026-10-10 确认）；stable tag 2.1.287 / latest tag 2.1.296，本地不匹配任一 tag 头；**2.1.288 --bare 重定义的暴露面已在库内解决**：OAuth 原生通道改空配置目录纯净法（三连差分实测比 bare 更纯——claudeCode.js:21-25 依据链，替代方案本体 ad0efa6 + TD-229 4f1b7fd 长命令牌/临时目录回收修其 bug），provider-wrapper 通道保留 bare 但现无现行席位暴露——"升级必须重验 bare"的旧建议已被替代方案消化，296 通道头升级建议维持低优先（升则 delta 重取证）〕；codex〔0.159.2 vs latest 0.162.1；0.160–0.162.1 差异重读：无 resume/queue/instant_interrupt 原语面变化（0.162.0 MCP 修复组、0.162.1 纯 bugfix），维持〕；opencode-serve〔1.18.18 vs 渠道 1.18.35（+1），Owner 暂停投入裁定维持〕；zcode〔本地产品 3.15.1.8093 **领先**公开渠道索引头（homebrew 3.14.5；3.15 未公开索引）——应用内更新通道先行、渠道未及，不判 latest 与否如实注记；捆绑 CLI 自报 0.16.9 不变（内部序列）〕。**不可判 1**（deepseek-harness：where.exe dsh-jsonrpc-agent 未发现——已查渠道 PATH，候选渠道未确认，维持）。**本轮处置**：zcode 环境桥随桌面更新改指 3.15.1 端点（原 3.14.4 端点配置与新 bundle 混跑当日验证可用，但旧版本目录存在被桌面回收风险；改指后微型派发验证 BRIDGEOK——spawn+跨进程 resume 全通）；kimi-web serve 当日由 Lead 重启（ Owner 令清进程后），服务身份复探 ③ 档（200/docVersion 2.1.1 与宿主一致/pathCount 105）。**升级建议报 Owner**：claude-code 无需行动（289 在用、当日双席咨询真跑正常；296 升级维持低优先）；codex/opencode 维持（无新论据/Owner 裁定）；zcode 无动作（更新通道自动、桥已对齐）；kimi/dsh latest 无动作。基线日随本轮翻为 2026-10-10。
