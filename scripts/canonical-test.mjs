@@ -466,7 +466,16 @@ export function classifyAutoAdjudication({ firstRoundStatus, isolationClassifica
   const detail = failureDetail && typeof failureDetail === "object" ? failureDetail : null;
   if (!detail || detail.status !== "collected") failedGates.push("detail-collected");
   if (detail && detail.failingTestsDropped > 0) failedGates.push("detail-dropped");
+  // P4 会审 B2（opus）：文件级失败必须在场检查——挂死的子测不进 tests[]、
+  // 唯一信号是文件级 test:fail（reporter.mjs:36-41）；不检查则同文件里
+  // "命中签名的子测 + 未登记的挂死子测"可被搭车洗白。
+  if (detail && detail.fileFailure !== null && typeof detail.fileFailure === "object") failedGates.push("file-failure-present");
+  if (detail && detail.fileFailureDropped === true) failedGates.push("file-failure-dropped");
   if (detail && (Array.isArray(detail.failingTests) ? detail.failingTests : []).some((t) => t && typeof t === "object" && Object.values(t).some((v) => typeof v === "string" && v.includes("[TRUNCATED")))) {
+    failedGates.push("detail-truncated");
+  }
+  if (detail && detail.fileFailure && typeof detail.fileFailure === "object"
+    && Object.values(detail.fileFailure).some((v) => typeof v === "string" && v.includes("[TRUNCATED"))) {
     failedGates.push("detail-truncated");
   }
   const subtests = detail && Array.isArray(detail.failingTests) ? detail.failingTests : [];

@@ -2698,6 +2698,11 @@ test("TD-248: classifyAutoAdjudication 资格闭集——happy 全过；逐门�
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [] } }, "no-failing-subtests"],
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "别的子测试", stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n at x" }] } }, "signature-match"],
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "flaky subtest", stack: "AssertionError [ERR_ASSERTION]: 不同错误 <另>一种\n at x" }] } }, "signature-match"],
+    // P4 会审 B2（opus）反例：文件级失败在场（挂死子测不进 tests[]，唯一信号=
+    // fileFailure）——即使所有可见失败子测都命中签名，也不得裁定（防搭车洗白）。
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { code: "ERR_TEST_RT_FAILURE", failureType: "testCodeFailure", stack: "at hung" } } }, "file-failure-present"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailureDropped: true } }, "file-failure-dropped"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { stack: "AssertionError [ERR_ASSERTION]: f…[TRUNCATED: first 5 of 99 chars]\n  at y" } } }, "file-failure-present"],
   ];
   for (const [input, gate] of gateCases) {
     const v = classifyAutoAdjudication(input);
