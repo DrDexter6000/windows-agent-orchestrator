@@ -217,6 +217,10 @@ async function runsCommand(args, config, deps) {
 // typo'd flag cannot silently produce wrong output (same discipline as
 // runs delivery review / reverify).
 const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir"]);
+// F-④（2026-10-10 摩擦处置批）：`runs wait --run-id X` 连续两报错且都不含正确
+// 用法（runId 是位置参数、没有 --run-id 旗标）。所有 argv 解析错误附本行——
+// 报错即教学，用户不需要去翻 help。
+const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [--wait-ms <ms>] [--format json|text] [--run-dir <dir>]（runId 为位置参数，无 --run-id 旗标）";
 
 /**
  * TD-109: `runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]`
@@ -251,12 +255,12 @@ async function runsWaitCommand(args, config, deps = {}) {
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a.startsWith("--")) {
-      if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw new Error(`unknown flag for runs wait: ${a}`);
-      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
+      if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw new Error(`unknown flag for runs wait: ${a}\n${RUNS_WAIT_USAGE}`);
+      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times\n${RUNS_WAIT_USAGE}`);
       seenFlags.add(a);
       const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
-      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value\n${RUNS_WAIT_USAGE}`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty\n${RUNS_WAIT_USAGE}`);
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       flags[key] = v;
       i += 1;
@@ -265,7 +269,7 @@ async function runsWaitCommand(args, config, deps = {}) {
     }
   }
   if (positionals.length !== 1) {
-    throw new Error("runs wait requires exactly one <runId>");
+    throw new Error(`runs wait requires exactly one <runId>\n${RUNS_WAIT_USAGE}`);
   }
   const runId = positionals[0];
   if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {

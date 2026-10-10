@@ -259,7 +259,13 @@ async function daemonStatusCommand(args, config) {
   const positional = args.filter((a) => !a.startsWith("--"));
   const runId = options.runId ?? positional[0];
   if (!runId) {
-    console.log(JSON.stringify({ ok: false, error: "status requires --run-id <id>" }, null, 2));
+    // F-④（2026-10-10 摩擦处置批）：`daemon status` 查的是单个 run 的守护状态，
+    // 与直觉的"守护进程自身状态"不符（那是 ping/list）——报错里直接讲清两者。
+    console.log(JSON.stringify({
+      ok: false,
+      error: "status requires --run-id <id>",
+      hint: "daemon status 按 runId 查单个 run 的守护状态；守护进程自身健康/清单用 `daemon ping` / `daemon list`",
+    }, null, 2));
     process.exitCode = 1;
     return;
   }

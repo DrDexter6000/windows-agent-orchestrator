@@ -5555,3 +5555,41 @@ test("TD-191④: WAO_SUBCOMMANDS 与 waoCommand dispatch 保持同步", async ()
     assert.ok(src.includes(`sub === "${sub}"`), `WAO_SUBCOMMANDS 成员 ${sub} 在 waoCommand dispatch 中不存在（闭集与分派漂移）`);
   }
 });
+
+// F-④（2026-10-10 摩擦处置批）：CLI 报错附正确用法行——`runs wait --run-id X`
+// 连续两报错且都不含用法（runId 是位置参数、无 --run-id 旗标）；`daemon status`
+// 是按 runId 查单个 run，与"守护进程自身状态"直觉相反（那是 ping/list）。
+test("F-④: runs wait 参数错误附正确用法行（报错即教学）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  await assert.rejects(
+    () => runsCommand(["wait", "--run-id", "run_x"], {}, { runWaitFn: async () => ({}) }),
+    (err) => {
+      assert.match(err.message, /unknown flag for runs wait: --run-id/);
+      assert.match(err.message, /用法：wao runs wait <runId>/, "必须给出正确命令形态");
+      assert.match(err.message, /位置参数/, "必须点破 runId 是位置参数");
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => runsCommand(["wait"], {}, { runWaitFn: async () => ({}) }),
+    (err) => {
+      assert.match(err.message, /requires exactly one <runId>/);
+      assert.match(err.message, /用法：wao runs wait/);
+      return true;
+    },
+  );
+});
+
+test("F-④: daemon status 缺 runId 时讲清与 ping/list 的分工", async () => {
+  const { daemonCommand } = await import("../../src/commands/daemon.js");
+  // daemonStatusCommand 失败路径设 process.exitCode=1——这是 CLI 契约，但会渗进
+  // 本测试进程造成文件级假红（子测全绿仍 exit 1）。保存/恢复隔离之。
+  const prevExitCode = process.exitCode;
+  const out = await captureLog(() => daemonCommand(["status"], { runDir: "runs" }));
+  process.exitCode = prevExitCode;
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error, "status requires --run-id <id>");
+  assert.match(parsed.hint, /daemon ping/, "指路守护进程自身健康检查");
+  assert.match(parsed.hint, /daemon list/, "指路守护进程清单");
+});
