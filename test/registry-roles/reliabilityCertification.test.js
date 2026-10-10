@@ -18,6 +18,7 @@ import {
   sweepStaleDrillTranscripts,
   DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS,
 } from "../../scripts/reliability/drillEvidence.mjs";
+import { PROJECTS_DIRNAME } from "../../src/projectBuckets.js";
 
 function check(name, pass, category, extra = {}) {
   return { name, pass, category, ...extra };
@@ -850,6 +851,79 @@ test("TD-186 复核 FAIL-B + 审计收口: sweepStaleDrillTranscripts——被�
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
+
+// ===== D2-②b 残留修复（2026-10-10）：钻探转录桶化布局（runs/reliability/projects/<slug>/）=====
+// 首现实证：astra medium 取证——钻探全绿但写盘守卫查平铺路径 fail-closed 拒写
+// summary（转录实际落 projects/reliability-tmp-<hash>/ 桶）。存在性/清理必须
+// 走 projectBuckets 解析链/布局 SSOT，两态（平铺+桶）都在回查与清理面内。
+
+test("D2-②b 桶化修复: 桶内转录=可回查（missing 守卫不误报、悬空置 null 不误置）；平铺仍按旧规工作", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-d22b-de-bucket-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    const bucketDir = join(transcriptsDir, PROJECTS_DIRNAME, "reliability-tmp-3722d901");
+    mkdirSync(bucketDir, { recursive: true });
+    writeFileSync(join(bucketDir, "run_b1.jsonl"), "{}\n", "utf8");
+    // 平铺层照常：run_t1 在平铺、run_t2 不存在。
+    mkdirSync(transcriptsDir, { recursive: true });
+    writeFileSync(join(transcriptsDir, "run_t1.jsonl"), "{}\n", "utf8");
+
+    assert.deepEqual(
+      missingDrillTranscripts(["run_b1", "run_t1", "run_t2"], transcriptsDir),
+      ["run_t2"],
+      "桶内 run_b1 与平铺 run_t1 都可解析；只有真缺席的 run_t2 被点名",
+    );
+
+    const prior = {
+      caseId: "prior case",
+      executionProfile: { drillRunIds: { sentinel: "run_b1", scorecard: "run_t1", isolation: "run_dead" } },
+    };
+    const { cases, nulled } = nullUnresolvableDrillRunIds([prior], { transcriptsDir });
+    assert.deepEqual(nulled, [{ caseId: "prior case", drill: "isolation", runId: "run_dead" }],
+      "桶内/平铺 id 都保留，只有缺席 id 置 null");
+    assert.deepEqual(cases[0].executionProfile.drillRunIds,
+      { sentinel: "run_b1", scorecard: "run_t1", isolation: null });
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("D2-②b 桶化修复: sweep 清理面覆盖桶内 run_*.jsonl（被引用保留/超龄未引用删/新鲜保留；桶枚举失败不误删平铺）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-d22b-de-sweep-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    const bucketDir = join(transcriptsDir, PROJECTS_DIRNAME, "reliability-tmp-3722d901");
+    mkdirSync(bucketDir, { recursive: true });
+    mkdirSync(transcriptsDir, { recursive: true });
+    const summaryPath = join(dir, "reliability-summary.json");
+    const now = Date.now();
+    const old = new Date(now - DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS - 24 * 3600 * 1000);
+    // 桶内三件：被引用 run_bref / 超龄未引用 run_bstale / 新鲜 run_bfresh。
+    for (const name of ["run_bref.jsonl", "run_bstale.jsonl", "run_bfresh.jsonl", "notes.txt"]) {
+      writeFileSync(join(bucketDir, name), "{}\n", "utf8");
+    }
+    utimesSync(join(bucketDir, "run_bref.jsonl"), old, old);
+    utimesSync(join(bucketDir, "run_bstale.jsonl"), old, old);
+    writeFileSync(summaryPath, JSON.stringify({
+      cases: [{ caseId: "a", executionProfile: { drillRunIds: { sentinel: "run_bref" } } }],
+    }), "utf8");
+
+    const plan = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now, dryRun: true });
+    assert.deepEqual(plan.wouldRemove, ["run_bstale"], "桶内只有「未引用+超龄」进入待删清单");
+    const result = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now });
+    assert.equal(result.removed, 1, "桶内超龄未引用转录删除");
+    assert.equal(result.keptReferenced, 1, "桶内被引用转录保留");
+    assert.equal(result.keptYoung, 1, "桶内新鲜转录保留（TOCTOU 兜底）");
+    assert.ok(!existsSync(join(bucketDir, "run_bstale.jsonl")), "待删件真删了");
+    assert.ok(existsSync(join(bucketDir, "notes.txt")), "非 runId 形状不动");
+    // projects/ 不存在（纯平铺目录）→ 平铺层照常、无桶可清不抛。
+    const flatOnly = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now });
+    assert.equal(flatOnly.status, "pruned", "projects/ 缺席不是错误");
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 
 test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘守卫 + 悬空置 null + 发布零删除（清理只在维护步骤）", () => {
   const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");

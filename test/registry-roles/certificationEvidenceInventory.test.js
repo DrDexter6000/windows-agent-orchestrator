@@ -460,6 +460,40 @@ test("TD-186 复核 FAIL-B（方案 1）: 转录在场 → id 可解析、无悬
   }
 });
 
+test("D2-②b 桶化修复（2026-10-10）: 桶内转录（runs/reliability/projects/<slug>/）可解析——不浮出 drill-evidence-unresolvable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-bucket-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({
+        executionProfile: {
+          ...matchedWorkerRecord().executionProfile,
+          drillRunIds: { sentinel: "run_b1", scorecard: "run_b2", isolation: null },
+        },
+      }),
+    });
+    // D2-②b 起钻探转录落 projects/<slug>/ 桶（首现实证：astra medium 取证守卫误拒）。
+    const bucketDir = join(runDir, "reliability", "projects", "reliability-tmp-3722d901");
+    mkdirSync(bucketDir, { recursive: true });
+    writeFileSync(join(bucketDir, "run_b1.jsonl"), '{"type":"run.started"}\n', "utf8");
+    writeFileSync(join(bucketDir, "run_b2.jsonl"), '{"type":"run.started"}\n', "utf8");
+
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "matched");
+    assert.ok(
+      !rows[0].limitationsAndSources.limitations.some((l) => l.startsWith("drill-evidence-unresolvable")),
+      "桶内 id 可解析（平铺/桶两态走同一解析链）→ 无悬空限制项",
+    );
+    // 桶内被删 → 限制项照常浮出（读侧观测面不因布局放宽）。
+    rmSync(join(bucketDir, "run_b2.jsonl"), { force: true });
+    const broken = await runEvidence({ registryPath, runDir });
+    assert.match(broken[0].limitationsAndSources.limitations.join(" "), /drill-evidence-unresolvable:scorecard/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 // ===== 过期（30 天审阅提醒；提醒不是门，也不替代适用性判断）=====
 
 test("TD-186 B 过期: 全绿时间戳 40 天前 → matched 但带审阅提醒限制项（提醒 ≠ 绿）", async () => {

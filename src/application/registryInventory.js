@@ -26,6 +26,9 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 // summary 里的越界码/非 ISO 日期绝不透出（否则 MCP outputSchema 的 enum parse 会把
 // 整个 registry_list 打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
 import { CERTIFICATION_REASON_CODES } from "./certificationReasons.js";
+// D2-②b 残留修复（2026-10-10）：drill 转录回查走 projectBuckets 解析链 SSOT
+// （平铺→桶扫描），与写侧 scripts/reliability/drillEvidence.mjs 同一布局事实。
+import { resolveTranscriptPath } from "../projectBuckets.js";
 // TD-131: 认证身份匹配 SSOT 从 core 下向复用（../runManager.js 的
 // matchedCertRecord——与 runDispatch.js 消费 R10-A/R11-1 覆盖校验器同一
 // application→core 下向纪律）。显示层投影与 P1-1 派发门共用同一判定，
@@ -890,14 +893,16 @@ const DRILL_RUN_ID_SHAPE_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
  * TD-186 复核 FAIL-B：drillRunIds 逐 id 回查性核对（只读观测，不改三态——
- * 不可回查浮出为限制项）。id 的转录按约定位于
- * `<runDir>/<CERT_DRILL_TRANSCRIPTS_SUBDIR>/<runId>.jsonl`（写入侧
- * scripts/run-reliability.mjs 落账 + 写盘守卫 + 引用集清理）。
+ * 不可回查浮出为限制项）。id 的转录按写入侧约定位于
+ * `<runDir>/<CERT_DRILL_TRANSCRIPTS_SUBDIR>/`（D2-②b 起平铺与 projects/<slug>/
+ * 桶两态——经 projectBuckets 解析链定位；写入侧 scripts/run-reliability.mjs
+ * 落账 + 写盘守卫 + 引用集清理）。
  * 状态枚举（WQ-02）：
  *   - 无 runDir / 记录无画像 / 无 drillRunIds / 某 drill 的 id 为 null → 无限制项
  *     （null = 如实"未记录 id"，设计内状态，不是缺陷）；
- *   - id 非字符串/空/形状外（含 "unknown" 占位）或转录文件不在场 → 该 drill 计入
- *     drill-evidence-unresolvable 限制项（取证链断裂的可见面）。
+ *   - id 非字符串/空/形状外（含 "unknown" 占位）、转录文件不在场、或解析抛错
+ *     （多副本冲突/扫描超限）→ 该 drill 计入 drill-evidence-unresolvable
+ *     限制项（取证链断裂的可见面）。
  * @private
  */
 function drillEvidenceLimitations(runDir, workerRecord, existsFn) {
@@ -907,14 +912,20 @@ function drillEvidenceLimitations(runDir, workerRecord, existsFn) {
   const unresolvable = [];
   for (const [drill, runId] of Object.entries(ids)) {
     if (runId === null || runId === undefined) continue;
-    const resolvable = typeof runId === "string" && DRILL_RUN_ID_SHAPE_RE.test(runId)
-      && existsFn(join(runDir, CERT_DRILL_TRANSCRIPTS_SUBDIR, `${runId}.jsonl`));
+    let resolvable = false;
+    if (typeof runId === "string" && DRILL_RUN_ID_SHAPE_RE.test(runId)) {
+      try {
+        resolvable = existsFn(resolveTranscriptPath(join(runDir, CERT_DRILL_TRANSCRIPTS_SUBDIR), runId, { cwdHint: null }));
+      } catch { // 多副本哈希冲突 / 桶扫描超限 → fail-closed：不可回查
+        resolvable = false;
+      }
+    }
     if (!resolvable) unresolvable.push(drill);
   }
   if (unresolvable.length === 0) return [];
   const shown = unresolvable.slice(0, 8).join("+");
   return [
-    `drill-evidence-unresolvable:${shown}${unresolvable.length > 8 ? "+…" : ""}（drillRunIds 记录了 id 但转录不在 runs/${CERT_DRILL_TRANSCRIPTS_SUBDIR}/<runId>.jsonl——取证链断裂；硬禁令状态：不得存在"摘要里有 id、磁盘上没有该转录"）`,
+    `drill-evidence-unresolvable:${shown}${unresolvable.length > 8 ? "+…" : ""}（drillRunIds 记录了 id 但转录在 runs/${CERT_DRILL_TRANSCRIPTS_SUBDIR}/ 不可解析（平铺或 projects/<slug>/ 桶两态）——取证链断裂；硬禁令状态：不得存在"摘要里有 id、磁盘上没有该转录"）`,
   ];
 }
 

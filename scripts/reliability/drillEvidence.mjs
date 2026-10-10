@@ -41,6 +41,16 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CERT_DRILL_TRANSCRIPTS_SUBDIR } from "../../src/application/registryInventory.js";
+// D2-②b 残留修复（2026-10-10，Owner 调整批顺带发现）：钻探转录随 runDir 分桶落
+// `runs/reliability/projects/<slug>/<runId>.jsonl`，存在性/清理只拼平铺路径会让
+// 写盘守卫 fail-closed 拒写 summary（astra medium 取证首现实证）。回查与枚举
+// 一律走 projectBuckets 解析链/布局 SSOT，本模块不再自带第二份布局知识。
+import {
+  PROJECTS_DIRNAME,
+  PROJECT_INDEX_NAME,
+  TRANSCRIPT_SCAN_BUCKET_LIMIT,
+  resolveTranscriptPath,
+} from "../../src/projectBuckets.js";
 
 // runManager 默认 runId 文件名形状（run_ + 数字时间戳 + base36 随机）。
 // 清理面只认这个形状——防误删目录里任何非 runId 命名的文件。
@@ -55,6 +65,21 @@ export const DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function drillTranscriptsDir(runsDir) {
   return join(runsDir, CERT_DRILL_TRANSCRIPTS_SUBDIR);
+}
+
+/**
+ * drill 转录是否可回查（D2-②b 后平铺与 projects/<slug>/ 桶两态）：经
+ * projectBuckets 三级解析链（hint 缺席=平铺→桶扫描）定位后判存在。解析抛错
+ * （多副本哈希冲突 / 扫描超限）按 fail-closed 处理=不可回查——守卫侧后果是
+ * 拒写 summary，与"宁丢结果不记悬空 id"同纪律。可注入 existsFn/resolveFn
+ * 供测试（与本模块其余函数同款注入面）。
+ */
+export function drillTranscriptExists(transcriptsDir, runId, { existsFn = existsSync, resolveFn = resolveTranscriptPath } = {}) {
+  try {
+    return existsFn(resolveFn(transcriptsDir, runId, { cwdHint: null }));
+  } catch {
+    return false;
+  }
 }
 
 export function drillTranscriptPath(transcriptsDir, runId) {
@@ -84,9 +109,10 @@ export function collectReferencedDrillRunIds(summary) {
 
 /**
  * 守卫：哪些 id 的转录不在场（fail-closed 检测；可注入 existsFn 供测试）。
+ * D2-②b 后转录可落桶——存在性经 drillTranscriptExists 解析链，不限于平铺。
  */
 export function missingDrillTranscripts(runIds, transcriptsDir, existsFn = existsSync) {
-  return runIds.filter((id) => !existsFn(drillTranscriptPath(transcriptsDir, id)));
+  return runIds.filter((id) => !drillTranscriptExists(transcriptsDir, id, { existsFn }));
 }
 
 /**
@@ -104,8 +130,8 @@ export function nullUnresolvableDrillRunIds(cases, { transcriptsDir, existsFn = 
     let changed = false;
     const next = {};
     for (const [drill, runId] of Object.entries(map)) {
-      const resolvable = typeof runId === "string" && runId.length > 0
-        && existsFn(drillTranscriptPath(transcriptsDir, runId));
+    const resolvable = typeof runId === "string" && runId.length > 0
+      && drillTranscriptExists(transcriptsDir, runId, { existsFn });
       if (!resolvable && runId !== null && runId !== undefined) {
         next[drill] = null;
         changed = true;
@@ -157,27 +183,57 @@ export function sweepStaleDrillTranscripts(transcriptsDir, summaryPath, {
     return { ...empty, status: `summary-${summaryRead.reason}` };
   }
   const referenced = new Set(collectReferencedDrillRunIds(summaryRead.summary));
-  let entries;
+  // 清理面枚举（D2-②b 两态）：平铺 + projects/<slug>/ 桶内 run_*.jsonl。桶数超
+  // 解析链同款上限 → 整个桶层跳过（少删不误删；平铺层照常）。任何桶的枚举失败
+  // （竞态删除/锁）只跳过该桶——删除决策必须建立在完整可见的候选集上。
+  let flatEntries;
   try {
-    entries = readdirFn(transcriptsDir);
+    flatEntries = readdirFn(transcriptsDir);
   } catch {
     return { ...empty, status: "transcripts-dir-unreadable" };
   }
+  const candidates = [];
+  for (const name of flatEntries) {
+    if (typeof name === "string" && DRILL_TRANSCRIPT_FILENAME_RE.test(name)) {
+      const runId = name.replace(/\.jsonl$/, "");
+      candidates.push({ runId, path: join(transcriptsDir, name) });
+    }
+  }
+  let bucketSweepSkipped = false;
+  try {
+    const bucketRoot = join(transcriptsDir, PROJECTS_DIRNAME);
+    const bucketNames = readdirFn(bucketRoot)
+      .filter((n) => typeof n === "string" && n !== PROJECT_INDEX_NAME);
+    if (bucketNames.length > TRANSCRIPT_SCAN_BUCKET_LIMIT) {
+      bucketSweepSkipped = true;
+    } else {
+      for (const bucketName of bucketNames) {
+        try {
+          const bucketDir = join(bucketRoot, bucketName);
+          if (!statFn(bucketDir).isDirectory()) continue;
+          for (const name of readdirFn(bucketDir)) {
+            if (typeof name === "string" && DRILL_TRANSCRIPT_FILENAME_RE.test(name)) {
+              const runId = name.replace(/\.jsonl$/, "");
+              candidates.push({ runId, path: join(bucketDir, name) });
+            }
+          }
+        } catch { /* 桶枚举失败：跳过该桶（少删不误删） */ }
+      }
+    }
+  } catch { /* projects/ 不存在或不可读：无桶可清，平铺层照常 */ }
   let removed = 0;
   let keptReferenced = 0;
   let keptYoung = 0;
   let skipped = 0;
   const wouldRemove = [];
-  for (const name of entries) {
-    if (typeof name !== "string" || !DRILL_TRANSCRIPT_FILENAME_RE.test(name)) continue;
-    const runId = name.replace(/\.jsonl$/, "");
+  for (const { runId, path } of candidates) {
     if (referenced.has(runId)) {
       keptReferenced += 1;
       continue;
     }
     let mtimeMs;
     try {
-      mtimeMs = statFn(join(transcriptsDir, name)).mtimeMs;
+      mtimeMs = statFn(path).mtimeMs;
     } catch {
       skipped += 1; // stat 不可得（正被写/锁）→ 不删，下轮再看。
       continue;
@@ -191,13 +247,15 @@ export function sweepStaleDrillTranscripts(transcriptsDir, summaryPath, {
       continue;
     }
     try {
-      rmFn(join(transcriptsDir, name), { force: true });
+      rmFn(path, { force: true });
       removed += 1;
     } catch {
       skipped += 1; // 文件锁：跳过，下轮再清。
     }
   }
-  return { status: "pruned", removed, keptReferenced, keptYoung, skipped, wouldRemove };
+  const out = { status: "pruned", removed, keptReferenced, keptYoung, skipped, wouldRemove };
+  if (bucketSweepSkipped) out.bucketSweepSkipped = true;
+  return out;
 }
 
 /**
