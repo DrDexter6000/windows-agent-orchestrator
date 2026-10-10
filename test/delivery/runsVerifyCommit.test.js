@@ -126,6 +126,11 @@ function makeRepo(dir) {
   writeFileSync(join(dir, "README.md"), "# base\n", "utf8");
   writeFileSync(join(dir, "stallShort.js"),
     "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4000);\n", "utf8");
+  // ⑤治根（2026-10-10 F-⑤，opus P1 会审意见吸收）：超时反例改用固定 20s 的
+  // stallLong.js（写死时长，不取 argv/env——零参数面）。stallShort.js 保持
+  // 原样：:810 的清理反例依赖它 4s 自然退出。
+  writeFileSync(join(dir, "stallLong.js"),
+    "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000);\n", "utf8");
   writeFileSync(join(dir, "fail.js"),
     "console.error('boom-tail-marker'); process.exit(3);\n", "utf8");
   writeFileSync(join(dir, "mutate.js"),
@@ -629,21 +634,62 @@ test("TD-240 反例：命令超时——timedOut+failed+fail-fast+子进程树�
     const repo = makeRepo(join(scratch, "repo"));
     const runDir = join(scratch, "runs");
     await writeRunTranscript(runDir, "run_vc_target", repo.path, repo.commitA);
-    const startedAt = Date.now();
     const result = await runVerifyCommit(baseInput({
       runDir, runId: "run_vc_target", repo, commit: repo.commitA,
-      commands: ["node stallShort.js", "echo never-reached"],
+      commands: ["node stallLong.js", "echo never-reached"],
     }, { timeoutMs: 1000 }));
-    const elapsed = Date.now() - startedAt;
     assert.equal(result.status, "failed");
     assert.equal(result.results.length, 1, "fail-fast：超时后不再执行后续命令");
     assert.equal(result.results[0].timedOut, true);
     assert.equal(result.results[0].exitCode, null);
-    // 子进程树被收束（_killProcessTree）——总时长远小于 stall 的 4s
-    assert.ok(elapsed < 3800, `command should be killed at ~1s (elapsed ${elapsed}ms)`);
+    // ⑤治根（2026-10-10 F-⑤，Owner 批准；opus P1 会审修订）：原断言
+    // `elapsed < 3800`（test 级计时）负载敏感——4060ms 假红（tech-debt.md:291
+    // 在册干扰形）的大头是 worktree 创建/清理与 git 操作开销，不是命令本身。
+    // 改两件负载不敏感的声称：
+    //   (1) durationMs（单命令耗时）< 10s——stall 自然退出在 20s，既证"未等
+    //       自然退出"又留 9s 收束余量；
+    //   (2) 子进程树收束不需要额外探针——runVerificationCommand 用管道 stdio，
+    //       close 事件要等所有持有管道的进程退出才触发（deliveryVerification.js
+    //       :100-106/:122）：孙进程漏杀则 close 拖到 20s 自然退出，本断言必红。
+    //       管道持有即存活证明（会审 Q2 结论：ESRCH 探针的 PID 复用假红风险
+    //       大于其证明力，弃用）。
+    assert.ok(result.results[0].durationMs < 10000,
+      `command should be killed well before the 20s stall (durationMs ${result.results[0].durationMs}ms)`);
     const events = await readTranscript(join(runDir, "run_vc_target.jsonl"));
     const outcome = findEvent(events, LEAD_COMMIT_CHECK_OUTCOME_TYPE)[0];
     assert.equal(outcome.results[0].timedOut, true);
+  } finally {
+    cleanupDir(scratch);
+  }
+}));
+
+// ⑤治根反例自证（纪律五：负载不敏感声称必须能被证伪）：注入每次调用慢 ~700ms
+// 的 git 包装器模拟负载——git/worktree 开销被放大后，旧断言形态（test 级
+// elapsed<3800）必红（本测试里 elapsed 实测 >3800 并断言之），新断言形态
+// （单命令 durationMs<10000）仍绿。同一负载下红旧绿新=负载不敏感的直接证据。
+test("⑤治根反例：git 慢包装负载下——旧 elapsed 形态必红，新 durationMs 形态仍绿", withLeadExemptionEnv(async () => {
+  const scratch = makeScratch("vc-load-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const runDir = join(scratch, "runs");
+    await writeRunTranscript(runDir, "run_vc_target", repo.path, repo.commitA);
+    const slowGit = (args, opts = {}) => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+      return gitOf(opts.cwd ?? repo.path, args);
+    };
+    const startedAt = Date.now();
+    const result = await runVerifyCommit(baseInput({
+      runDir, runId: "run_vc_target", repo, commit: repo.commitA,
+      commands: ["node stallLong.js"],
+    }, { timeoutMs: 1000, gitFn: slowGit }));
+    const elapsed = Date.now() - startedAt;
+    assert.equal(result.status, "failed");
+    assert.equal(result.results[0].timedOut, true);
+    // 旧形态在此负载下必红（worktree/git 侧 ~8+ 次调用 × 700ms > 3800ms）
+    assert.ok(elapsed > 3800, `负载下 test 级 elapsed 应超过旧阈值 3800ms（实测 ${elapsed}ms）——证明旧断言形态负载敏感`);
+    // 新形态仍绿：单命令耗时不受 git 开销影响
+    assert.ok(result.results[0].durationMs < 10000,
+      `单命令 durationMs 应保持在 10s 内（实测 ${result.results[0].durationMs}ms）——新断言形态负载不敏感`);
   } finally {
     cleanupDir(scratch);
   }
