@@ -172,6 +172,7 @@ import { availableParallelism, cpus, tmpdir } from "node:os";
 // re-exports the constant + resolver below so its pinned public surface stays
 // byte-stable for the meta-tests.
 import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGatePaths.js";
+import { PROJECTS_DIRNAME } from "../src/projectBuckets.js";
 
 // R23-F/B Round B (TD-130): the machine-level verification lease gate. main()
 // wraps ONE canonical invocation (the same granularity as a verifyDelivery
@@ -632,6 +633,18 @@ export function takeRunsSnapshot(listDir) {
       for (const child of sub) {
         const childName = typeof child === "string" ? child : child?.name;
         if (typeof childName === "string") out.add(`${entry.name}/${childName}`);
+        // TD-249（2026-10-10，Owner 批准；sol 实证 takeRunsSnapshot 前后全同）：
+        // D2-②b 后转录路径为 projects/<slug>/<runId>.jsonl（两层深）——单层递归
+        // 看不见已有桶内新增。项目桶根（PROJECTS_DIRNAME，单一来源 import）
+        // 额外下钻一层：列桶目录内容。成本=每桶一次 readdir（当前 7 桶）。
+        if (entry.name === PROJECTS_DIRNAME && child && typeof child === "object" && child.isDirectory) {
+          const bucketEntries = listDir(`${entry.name}/${childName}`);
+          if (!bucketEntries) continue; // 桶在两次列举间消失 ⇒ 删除（不监管）
+          for (const be of bucketEntries) {
+            const beName = typeof be === "string" ? be : be?.name;
+            if (typeof beName === "string") out.add(`${entry.name}/${childName}/${beName}`);
+          }
+        }
       }
     }
   }
@@ -796,6 +809,8 @@ export function runsEntryAttribution(runsDir, entry) {
     const parts = normalized.split("/");
     if (parts.some((p) => !p || p === "." || p === ".." || p.includes("\\"))) return [unmapped];
     if (/^run_.+\.jsonl$/.test(parts.at(-1))) return [fromFile(normalized)];
+    // TD-249 后已有桶内文件以三段形态进新增列表（projects/<slug>/<file>）。
+    if (parts.length === 3 && parts[0] === PROJECTS_DIRNAME && /^run_.+\.jsonl$/.test(parts[2])) return [fromFile(normalized)];
     if (parts.length === 2 && parts[0] === "projects") {
       const files = readdirSync(join(runsDir, normalized), { withFileTypes: true })
         .filter((d) => d.isFile() && d.name.endsWith(".jsonl"))

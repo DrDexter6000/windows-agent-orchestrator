@@ -613,6 +613,58 @@ test("takeRunsSnapshot: subdirectory names AND one level of their contents are g
   ], "子目录名本身 + 一层内容（sub/ 前缀）入集；深度恰一层（wf_1/nested 的内容不展开）");
 });
 
+// TD-249（2026-10-10，Owner 批准；sol 实证单层快照对已有桶内新增全盲）：
+// 项目桶根额外下钻一层——projects/<slug>/ 的内容入集；非 projects 顶层目录
+// 仍恰一层（成本与旧边界不变）。
+test("TD-249: takeRunsSnapshot 对 projects/<slug>/ 下钻第二层，其余顶层目录仍恰一层", () => {
+  const top = [
+    { name: "run_flat.jsonl", isDirectory: false },
+    { name: ".claims", isDirectory: true },
+    { name: "projects", isDirectory: true },
+  ];
+  const subdirs = new Map([
+    [".claims", [{ name: "run_x.g0", isDirectory: false }]],
+    ["projects", [
+      { name: "demo-abc12345", isDirectory: true },
+      { name: "other-def67890", isDirectory: true },
+    ]],
+    ["projects/demo-abc12345", [{ name: "run_bucket1.jsonl", isDirectory: false }]],
+    ["projects/other-def67890", [{ name: "run_bucket2.jsonl", isDirectory: false }, { name: "deep", isDirectory: true }]],
+  ]);
+  const snap = takeRunsSnapshot((sub) => (sub === "" ? top : (subdirs.get(sub) ?? null)));
+  assert.deepEqual(snap, [
+    ".claims",
+    ".claims/run_x.g0",
+    "projects",
+    "projects/demo-abc12345",
+    "projects/demo-abc12345/run_bucket1.jsonl",
+    "projects/other-def67890",
+    "projects/other-def67890/deep",
+    "projects/other-def67890/run_bucket2.jsonl",
+    "run_flat.jsonl",
+  ], "projects 桶根第二层入集；桶内子目录名本身入集但不再下钻（恰两层）");
+});
+
+test("TD-249 端到端: 已有桶内新增 run 在赛中被守卫抓到（RED 不再漏）", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    // 基线时刻桶与桶内文件已在（模拟"已有桶"）；赛中再往桶里加新转录
+    // （基线在 mutate 前快照，mutate 内的写入=赛中新增）。
+    mkdirSync(join(root, "runs", "projects", "demo-abc12345"), { recursive: true });
+    writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_pre_existing.jsonl"),
+      '{"type":"run.started","runId":"run_pre_existing","cwd":"D:\\\\pre","ts":"2026-10-10T18:00:00.000Z"}\n', "utf8");
+    writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_inflight_add.jsonl"),
+      '{"type":"run.started","runId":"run_inflight_add","cwd":"D:\\\\side","agentId":"side-agent","ts":"2026-10-10T18:00:30.000Z"}\n', "utf8");
+  });
+  assert.equal(result.exitCode, 1, "赛中桶内新增必须染红（TD-249 修复前此路径全盲）");
+  const attr = result.report.runsDirGuard.attribution.find((a) => a.entry === "projects/demo-abc12345/run_inflight_add.jsonl");
+  assert.ok(attr, "归属行覆盖桶内新增文件");
+  assert.equal(attr.runId, "run_inflight_add");
+  assert.equal(attr.agentId, "side-agent");
+  // 既有文件不在新增列表（基线已含——"已有桶"语义）
+  assert.ok(!result.report.runsDirGuard.additions.some((a) => a.file.includes("run_pre_existing")),
+    "基线内文件不重复报新增");
+});
+
 test("takeRunsSnapshot: a vanished subdirectory (listDir(sub) → null) is just no entries — not an error", () => {
   const snap = takeRunsSnapshot((sub) => (sub === "" ? [{ name: "gone", isDirectory: true }] : null));
   assert.deepEqual(snap, ["gone"], "子目录在两次列举之间消失 = 删除（守卫不管清理），只剩目录名本身");
@@ -857,7 +909,7 @@ test("TD-247 ① happy: 首事件四字段落 stdout 与实际 JSON，测试全�
   console.log("[TD-247 actual test-results.json] " + JSON.stringify(result.report.runsDirGuard.attribution[0]));
 });
 
-test("TD-247 ② 新建桶: 两个转录各一行，守卫原有单层新增列表不变", async () => {
+test("TD-247 ② 新建桶: 两个转录各一行（TD-249 后桶内文件也在新增列表）", async () => {
   const result = await attributionSuiteFixture((root) => {
     const bucket = join(root, "runs", "projects", "foo-abc12345");
     mkdirSync(bucket, { recursive: true });
@@ -866,18 +918,28 @@ test("TD-247 ② 新建桶: 两个转录各一行，守卫原有单层新增列�
     writeFileSync(join(bucket, "notes.txt"), "not a transcript");
     mkdirSync(join(bucket, "run_directory.jsonl"));
   });
+  // TD-249（2026-10-10 Owner 批准）：projects 桶根下钻第二层——新建桶时桶内
+  // 文件也入新增列表（旧合同"恰一层"钉按决定废弃）。归属行顺序=additions 排序。
   const attribution = [
     { entry: "projects", parseStatus: "unattributable" },
     { entry: "projects/foo-abc12345", runId: "run_a", parseStatus: "parsed", cwd: "D:/foo", ts: ATTRIBUTION_EVENT.ts },
     { entry: "projects/foo-abc12345", runId: "run_b", parseStatus: "parsed", agentId: "b", project: { displayName: "Foo" } },
+    { entry: "projects/foo-abc12345/notes.txt", parseStatus: "unattributable" },
+    { entry: "projects/foo-abc12345/run_a.jsonl", runId: "run_a", parseStatus: "parsed", cwd: "D:/foo", ts: ATTRIBUTION_EVENT.ts },
+    { entry: "projects/foo-abc12345/run_b.jsonl", runId: "run_b", parseStatus: "parsed", agentId: "b", project: { displayName: "Foo" } },
+    { entry: "projects/foo-abc12345/run_directory.jsonl", runId: "run_directory", parseStatus: "unknown" },
   ];
   assert.equal(result.exitCode, 1);
   assert.deepEqual(result.report.runsDirGuard.additions, [
     { file: "projects", phase: "pure" }, { file: "projects/foo-abc12345", phase: "pure" },
-  ], "TD-249 scan-depth change is explicitly excluded");
+    { file: "projects/foo-abc12345/notes.txt", phase: "pure" },
+    { file: "projects/foo-abc12345/run_a.jsonl", phase: "pure" },
+    { file: "projects/foo-abc12345/run_b.jsonl", phase: "pure" },
+    { file: "projects/foo-abc12345/run_directory.jsonl", phase: "pure" },
+  ], "TD-249：桶内文件入新增列表");
   assert.deepEqual(result.report.runsDirGuard.attribution, attribution);
   assert.deepEqual(result.stdout, attribution.map(runsAttributionLine));
-  assert.equal(result.stdout.filter((line) => line.includes('"runId"')).length, 2);
+  assert.equal(result.stdout.filter((line) => line.includes('"runId"')).length, 5);
 });
 
 test("TD-247 ③ 坏首行/非法 UTF-8/8KB 截断/读取失败: unknown，RED 与退出码不变", async () => {
