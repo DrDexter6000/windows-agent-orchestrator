@@ -51,6 +51,9 @@ import {
   realWaveObservers, defaultCountNodeProcesses, parseTasklistSample,
   // TD-233：worker 上下文自知（横幅）与验证租约的 worktree runId 归因。
   workerBannerLine, runIdFromWorktreeCwd,
+  // TD-248 / 决定 0054：干扰形登记册与自动裁定。
+  normalizeSignatureText, signatureSourceLine, validateInterferenceRegistry, entryUsableOn,
+  classifyAutoAdjudication,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -2605,4 +2608,187 @@ test("TD-233: runIdFromWorktreeCwd — 末次出现优先 + Windows 大小写 + 
     "超 64 帽的候选整体丢弃（验收会审 astra：截断会冒充另一个 runId，禁止）");
   assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".WAO-WORKTREES", "run_case1")), "run_case1",
     "Windows 大小写变体同样归因（验收会审 astra 反例）");
+});
+
+// ── TD-248 / 决定 0054：干扰形登记册与自动裁定（资格闭集双向钉）──────────────
+// 纪律：测试瞄准声称。声称=「唯一能把首轮 fail 翻绿的路径是登记册资格闭集全部
+// 满足」，每一条资格都有独立反例钉；worker 上下文与过期回 fail 有集成钉。
+
+const IF_ENTRY = () => ({
+  id: "IF-T", file: "flake.test.js", subtest: "flaky subtest",
+  signature: "AssertionError [ERR_ASSERTION]: elapsed <n>ms",
+  isolationRequired: true, registeredAt: "2026-10-01", expiresOn: "2099-01-01",
+  owner: "test", note: "meta-test fixture entry", status: "active",
+});
+
+test("TD-248: normalizeSignatureText——数字串折叠为 <n>，无 RegExp，非字符串归空", () => {
+  assert.equal(normalizeSignatureText("elapsed 4060ms vs 7 ms"), "elapsed <n>ms vs <n> ms");
+  assert.equal(normalizeSignatureText("no digits here!"), "no digits here!");
+  assert.equal(normalizeSignatureText(""), "");
+  assert.equal(normalizeSignatureText(null), "");
+  assert.equal(normalizeSignatureText(123), "");
+});
+
+test("TD-248: signatureSourceLine——取 stack 首行；空/非字符串归空", () => {
+  assert.equal(signatureSourceLine("AssertionError [ERR_ASSERTION]: boom\n    at x\n    at y"), "AssertionError [ERR_ASSERTION]: boom");
+  assert.equal(signatureSourceLine("single line"), "single line");
+  assert.equal(signatureSourceLine(""), "");
+  assert.equal(signatureSourceLine(undefined), "");
+});
+
+test("TD-248: validateInterferenceRegistry——合法通过；逐类违约具名报错（fail-closed）", () => {
+  const ok = validateInterferenceRegistry({ schemaVersion: 1, entries: [IF_ENTRY()] });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  for (const [mutate, expect] of [
+    [(r) => { r.schemaVersion = 2; }, "schemaVersion"],
+    [(r) => { r.entries = null; }, "entries"],
+    [(r) => { delete r.entries[0].subtest; }, "subtest"],
+    [(r) => { r.entries[0].isolationRequired = false; }, "isolationRequired"],
+    [(r) => { r.entries[0].status = "live"; }, "status"],
+    [(r) => { r.entries[0].registeredAt = "2026/10/01"; }, "registeredAt"],
+    [(r) => { r.entries[0].expiresOn = "2025-01-01"; }, "precedes"],
+    [(r) => { r.entries.push({ ...IF_ENTRY() }); }, "duplicated"],
+    [(r) => { r.entries[0] = "x"; }, "must be an object"],
+  ]) {
+    const registry = { schemaVersion: 1, entries: [IF_ENTRY()] };
+    mutate(registry);
+    const v = validateInterferenceRegistry(registry);
+    assert.equal(v.ok, false);
+    assert.ok(v.errors.some((e) => e.includes(expect)), `${expect} 违约应具名（得到 ${v.errors.join(";")}）`);
+  }
+});
+
+test("TD-248: entryUsableOn——active 且 expiresOn≥当日才可用", () => {
+  const e = IF_ENTRY();
+  assert.equal(entryUsableOn(e, "2026-10-10"), true);
+  assert.equal(entryUsableOn({ ...e, expiresOn: "2026-10-09" }, "2026-10-10"), false, "过期不可用");
+  assert.equal(entryUsableOn({ ...e, status: "superseded" }, "2026-10-10"), false, "superseded 不可用");
+  assert.equal(entryUsableOn({ ...e, status: "expired" }, "2026-10-10"), false, "expired 不可用");
+});
+
+function adjudicationInput(overrides = {}) {
+  return {
+    firstRoundStatus: "fail",
+    isolationClassification: "isolation_pass",
+    failureDetail: {
+      status: "collected", failingTestsTotal: 1, failingTestsDropped: 0,
+      failingTests: [{ name: "flaky subtest", operator: "ok", expected: true, actual: false, diff: null, stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n    at x" }],
+      fileFailure: null,
+    },
+    file: "flake.test.js",
+    registryEntries: [IF_ENTRY()],
+    workerContext: false,
+    today: "2026-10-10",
+    ...overrides,
+  };
+}
+
+test("TD-248: classifyAutoAdjudication 资格闭集——happy 全过；逐门反例回 fail", () => {
+  const happy = classifyAutoAdjudication(adjudicationInput());
+  assert.equal(happy.adjudicated, true);
+  assert.deepEqual(happy.matches, [{ id: "IF-T", subtest: "flaky subtest" }]);
+  assert.deepEqual(happy.failedGates, []);
+
+  const gateCases = [
+    [{ ...adjudicationInput(), firstRoundStatus: "crash" }, "first-round-status"],
+    [{ ...adjudicationInput(), isolationClassification: "stable_fail" }, "isolation-classification"],
+    [{ ...adjudicationInput(), failureDetail: { status: "unknown", reason: "x" } }, "detail-collected"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTestsDropped: 2 } }, "detail-dropped"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "t", stack: "AssertionError [ERR_ASSERTION]: x…[TRUNCATED: first 5 of 99 chars]\n  at y" }] } }, "detail-truncated"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [] } }, "no-failing-subtests"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "别的子测试", stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n at x" }] } }, "signature-match"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "flaky subtest", stack: "AssertionError [ERR_ASSERTION]: 不同错误 <另>一种\n at x" }] } }, "signature-match"],
+  ];
+  for (const [input, gate] of gateCases) {
+    const v = classifyAutoAdjudication(input);
+    assert.equal(v.adjudicated, false, `门 ${gate} 未过不得裁定`);
+    assert.ok(v.failedGates.includes(gate), `门 ${gate} 应具名（得到 ${v.failedGates.join(",")}）`);
+  }
+
+  // 搭车洗白反例：同文件两个失败子测，登记册只覆盖一个——整文件回 fail。
+  const hitchhike = classifyAutoAdjudication(adjudicationInput({
+    failureDetail: {
+      status: "collected", failingTestsTotal: 2, failingTestsDropped: 0,
+      failingTests: [
+        { name: "flaky subtest", stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n at x" },
+        { name: "真缺陷子测试", stack: "AssertionError [ERR_ASSERTION]: real bug\n at y" },
+      ],
+      fileFailure: null,
+    },
+  }));
+  assert.equal(hitchhike.adjudicated, false, "未全覆盖不得裁定（防搭车洗白）");
+  assert.ok(hitchhike.failedGates.includes("signature-match"));
+
+  // 条目不可用（过期）：签名命中但衰减回 fail，notUsable 可溯源。
+  const expired = classifyAutoAdjudication(adjudicationInput({
+    registryEntries: [{ ...IF_ENTRY(), expiresOn: "2026-10-01" }],
+  }));
+  assert.equal(expired.adjudicated, false);
+  assert.ok(expired.failedGates.includes("entry-not-usable"));
+  assert.deepEqual(expired.notUsable.map((n) => n.id), ["IF-T"]);
+
+  // worker 上下文：matched 但禁用，保留 matches 供 advisory。
+  const worker = classifyAutoAdjudication(adjudicationInput({ workerContext: true }));
+  assert.equal(worker.matched, true);
+  assert.equal(worker.adjudicated, false);
+  assert.ok(worker.failedGates.includes("worker-context"));
+  assert.equal(worker.matches.length, 1);
+});
+
+function flakeWaveSpec() {
+  const files = waveFiles(["flake.test.js"], "worktree");
+  return { waveSpecs: [{ name: "filesystem", concurrency: 8, categories: ["worktree"], files }] };
+}
+
+function flakeFailReport() {
+  return {
+    suites: [{
+      name: "test/flake.test.js", status: "fail",
+      tests: [{ name: "flaky subtest", status: "fail", error: { operator: "ok", expected: true, actual: false, stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n    at x" } }],
+    }],
+  };
+}
+
+test("TD-248 集成: 资格闭集全过——finalVerdict=pass 但 firstRound 事实与首红记录不变", async () => {
+  const runChild = async () => ({ exitCode: 1, stdout: "", stderr: "" });
+  const isolator = async () => ({ status: "pass", exitCode: 0, tail: "alone-pass" });
+  const out = await runCanonical({
+    ...flakeWaveSpec(), reporterArg: "R", runChild,
+    readReport: async () => flakeFailReport(), deleteReport: noopDelete, isolator,
+    registryEntries: [IF_ENTRY()], workerContext: false, today: "2026-10-10",
+  });
+  assert.equal(out.finalVerdict, "pass", "资格闭集全过=唯一翻绿路径（0054）");
+  assert.equal(out.firstRound.verdict, "fail", "首轮事实不变——裁定不重写历史");
+  assert.equal(out.firstRound.failures.length, 1, "首红原始记录永不删除");
+  assert.equal(out.autoAdjudicated.length, 1);
+  assert.deepEqual(out.autoAdjudicated[0].matches, [{ id: "IF-T", subtest: "flaky subtest" }]);
+  assert.deepEqual(out.adjudicationAdvisories, []);
+});
+
+test("TD-248 集成: worker 上下文——matched 也恒 fail，advisory 溯源条目", async () => {
+  const runChild = async () => ({ exitCode: 1, stdout: "", stderr: "" });
+  const isolator = async () => ({ status: "pass", exitCode: 0, tail: "alone-pass" });
+  const out = await runCanonical({
+    ...flakeWaveSpec(), reporterArg: "R", runChild,
+    readReport: async () => flakeFailReport(), deleteReport: noopDelete, isolator,
+    registryEntries: [IF_ENTRY()], workerContext: true, today: "2026-10-10",
+  });
+  assert.equal(out.finalVerdict, "fail", "worker 上下文禁用自动裁定（防自我洗白）");
+  assert.equal(out.autoAdjudicated.length, 0);
+  assert.equal(out.adjudicationAdvisories.length, 1);
+  assert.equal(out.adjudicationAdvisories[0].kind, "worker-context-suppressed");
+  assert.deepEqual(out.adjudicationAdvisories[0].entryIds, ["IF-T"]);
+});
+
+test("TD-248 集成: 条目过期——衰减回 fail，advisory 提示重新裁定", async () => {
+  const runChild = async () => ({ exitCode: 1, stdout: "", stderr: "" });
+  const isolator = async () => ({ status: "pass", exitCode: 0, tail: "alone-pass" });
+  const out = await runCanonical({
+    ...flakeWaveSpec(), reporterArg: "R", runChild,
+    readReport: async () => flakeFailReport(), deleteReport: noopDelete, isolator,
+    registryEntries: [{ ...IF_ENTRY(), expiresOn: "2026-10-01" }], workerContext: false, today: "2026-10-10",
+  });
+  assert.equal(out.finalVerdict, "fail", "expiresOn 衰减=自动回 fail");
+  assert.equal(out.adjudicationAdvisories.length, 1);
+  assert.equal(out.adjudicationAdvisories[0].kind, "entry-not-usable");
 });

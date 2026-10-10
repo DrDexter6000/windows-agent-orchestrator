@@ -367,6 +367,136 @@ export function classifyIsolation(firstRoundStatus, isolationStatus, isolationCr
   return "stable_fail"; // isolationStatus === "fail"
 }
 
+// ── TD-248 / 决定 0054: interference-registry auto-adjudication ──────────────
+// Owner 2026-10-10 批准的 verdict 派生合同修订（kimi 派形态 pass+标记+衰减；
+// opus 必改项全采纳）。资格闭集（缺一即整文件回 fail）：
+//   首轮 fail + 隔离复跑 pass + failureDetail 完整（status=collected、无
+//   dropped、无 TRUNCATED 标记、失败子测>0）+ 每一个失败子测都命中可用条目
+//   （active 且未过期）+ 非 worker 上下文。
+// 红线：套件只读登记册（test/interference-registry.json，committed）、绝不写
+// 仓库文件；首红原始记录永不删除；worker 上下文恒 fail（防自我洗白）；衰减=
+// expiresOn 日期（verdict 依赖时钟——0054 §2 显式记录的确定性让步）。
+export const INTERFERENCE_REGISTRY_NAME = "interference-registry.json";
+export const INTERFERENCE_STATUSES = Object.freeze(["active", "expired", "superseded"]);
+
+// 固定归一化：数字串→<n>。禁用 RegExp（套件禁令 no runtime regex
+// classification 对失败分类面生效；本归一化是测试钉死的字符变换，非分类）。
+export function normalizeSignatureText(text) {
+  if (typeof text !== "string") return "";
+  let out = "";
+  let inDigits = false;
+  for (const ch of text) {
+    if (ch >= "0" && ch <= "9") {
+      if (!inDigits) { out += "<n>"; inDigits = true; }
+    } else {
+      inDigits = false;
+      out += ch;
+    }
+  }
+  return out;
+}
+
+// 签名源=stack 首行（含 AssertionError 前缀与断言消息——跨运行稳定）。
+export function signatureSourceLine(stack) {
+  if (typeof stack !== "string" || stack.length === 0) return "";
+  const nl = stack.indexOf("\n");
+  return nl < 0 ? stack : stack.slice(0, nl);
+}
+
+function isValidIsoDate(value) {
+  if (typeof value !== "string" || value.length !== 10) return false;
+  for (let i = 0; i < 10; i += 1) {
+    const c = value[i];
+    const ok = i === 4 || i === 7 ? c === "-" : c >= "0" && c <= "9";
+    if (!ok) return false;
+  }
+  const m = Number(value.slice(5, 7));
+  const d = Number(value.slice(8, 10));
+  return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+// 登记册 schema 校验（fail-closed：committed 合同破损=套件级错误，不静默降级）。
+export function validateInterferenceRegistry(parsed) {
+  const errors = [];
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, errors: ["registry root must be an object"] };
+  }
+  if (parsed.schemaVersion !== 1) errors.push(`schemaVersion must be 1 (got ${JSON.stringify(parsed.schemaVersion)})`);
+  const entries = Array.isArray(parsed.entries) ? parsed.entries : null;
+  if (!entries) {
+    errors.push("entries must be an array");
+    return { ok: false, errors };
+  }
+  const seen = new Set();
+  entries.forEach((e, i) => {
+    const at = `entries[${i}]`;
+    if (!e || typeof e !== "object" || Array.isArray(e)) { errors.push(`${at} must be an object`); return; }
+    for (const k of ["id", "file", "subtest", "signature", "registeredAt", "expiresOn", "owner", "note"]) {
+      if (typeof e[k] !== "string" || e[k].length === 0) errors.push(`${at}.${k} must be a non-empty string`);
+    }
+    if (e.isolationRequired !== true) errors.push(`${at}.isolationRequired must be true`);
+    if (!INTERFERENCE_STATUSES.includes(e.status)) errors.push(`${at}.status must be one of ${INTERFERENCE_STATUSES.join("|")}`);
+    if (!isValidIsoDate(e.registeredAt)) errors.push(`${at}.registeredAt must be YYYY-MM-DD`);
+    if (!isValidIsoDate(e.expiresOn)) errors.push(`${at}.expiresOn must be YYYY-MM-DD`);
+    if (isValidIsoDate(e.registeredAt) && isValidIsoDate(e.expiresOn) && e.expiresOn < e.registeredAt) {
+      errors.push(`${at}.expiresOn precedes registeredAt`);
+    }
+    if (typeof e.id === "string" && seen.has(e.id)) errors.push(`${at}.id duplicated`);
+    if (typeof e.id === "string") seen.add(e.id);
+  });
+  return { ok: errors.length === 0, errors };
+}
+
+// 条目当日可用：active 且未过期（字符串日期比较=确定性，只依赖 committed 输入+当日）。
+export function entryUsableOn(entry, today) {
+  return entry.status === "active" && typeof entry.expiresOn === "string" && entry.expiresOn >= today;
+}
+
+/**
+ * 资格闭集判定（纯函数，元测试双向钉）。返回：
+ *   matched      —— 签名面成功（所有门+所有失败子测命中可用条目）
+ *   adjudicated  —— matched 且非 worker 上下文（verdict 允许 wash）
+ *   matches      —— [{id, subtest}] 逐子测条目引用（worker 抑制时也保留供 advisory）
+ *   failedGates  —— 未过的门名列表（诊断用，永远如实）
+ */
+export function classifyAutoAdjudication({ firstRoundStatus, isolationClassification, failureDetail, file, registryEntries, workerContext, today }) {
+  const failedGates = [];
+  if (firstRoundStatus !== "fail") failedGates.push("first-round-status");
+  if (isolationClassification !== "isolation_pass") failedGates.push("isolation-classification");
+  const detail = failureDetail && typeof failureDetail === "object" ? failureDetail : null;
+  if (!detail || detail.status !== "collected") failedGates.push("detail-collected");
+  if (detail && detail.failingTestsDropped > 0) failedGates.push("detail-dropped");
+  if (detail && (Array.isArray(detail.failingTests) ? detail.failingTests : []).some((t) => t && typeof t === "object" && Object.values(t).some((v) => typeof v === "string" && v.includes("[TRUNCATED")))) {
+    failedGates.push("detail-truncated");
+  }
+  const subtests = detail && Array.isArray(detail.failingTests) ? detail.failingTests : [];
+  if (subtests.length === 0) failedGates.push("no-failing-subtests");
+  const matches = [];
+  const notUsable = [];
+  if (failedGates.length === 0) {
+    for (const t of subtests) {
+      const signature = normalizeSignatureText(signatureSourceLine(t.stack));
+      const candidates = (registryEntries ?? []).filter(
+        (e) => e && e.file === file && e.subtest === t.name && e.signature === signature,
+      );
+      const hit = candidates.find((e) => entryUsableOn(e, today));
+      if (hit) { matches.push({ id: hit.id, subtest: t.name }); continue; }
+      if (candidates.length > 0) {
+        // 签名命中但条目不可用（expired/superseded）——衰减机制回 fail，可溯源。
+        for (const c of candidates) notUsable.push({ id: c.id, status: c.status, expiresOn: c.expiresOn });
+        failedGates.push("entry-not-usable");
+      } else {
+        failedGates.push("signature-match");
+      }
+      break;
+    }
+  }
+  const matched = failedGates.length === 0;
+  const adjudicated = matched && workerContext !== true;
+  if (matched && workerContext === true) failedGates.push("worker-context");
+  return { matched, adjudicated, matches, notUsable, failedGates };
+}
+
 // ── Structured-report → manifest-file mapping (pure, unit-tested) ────────────
 // The reporter writes suite.name as a cwd-relative, forward-slashed path
 // ("test/<rel>"). Strip the leading "test/" to recover the manifest rel path.
@@ -1100,7 +1230,7 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
 // TD-165 R2.4: the ONE no-early-abort exception — when a wave dies to the
 // watchdog and cleanup is UNCONFIRMED (possible residue), later waves are NOT
 // started and isolation reruns are skipped; the verdict is fail either way.
-export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd, testTimeoutMs = TEST_TIMEOUT_MS, observers = null }) {
+export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd, testTimeoutMs = TEST_TIMEOUT_MS, observers = null, registryEntries = [], workerContext = null, today = null }) {
   const wavesReport = [];
   const firstRound = [];
   let suiteError = false;
@@ -1195,6 +1325,44 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
   const crashed = firstRound.filter((r) => r.status === "crash").length;
   const firstRoundVerdict = (failures.length === 0 && !suiteError) ? "pass" : "fail";
 
+  // TD-248 / 决定 0054：干扰形自动裁定（资格闭集见 classifyAutoAdjudication）。
+  // worker 上下文/当日为套件级一次判定（确定性：同日同输入同结论）；
+  // 可注入供元测试。matched-but-suppressed 与过期命中保留为 advisory——
+  // 永不静默，也永不改变 fail。firstRoundVerdict 恒为首轮事实（fail），
+  // 裁定只作用于 finalVerdict——不重写历史。
+  const effectiveWorkerContext = workerContext ?? (process.env.WAO_IN_WORKER === "1" || runIdFromWorktreeCwd(process.cwd()) !== null);
+  const effectiveToday = today ?? new Date().toISOString().slice(0, 10);
+  const autoAdjudicated = [];
+  const adjudicationAdvisories = [];
+  if (!suiteAborted) {
+    for (const iso of isolation) {
+      if (iso.classification !== "isolation_pass") continue;
+      const failure = failures.find((r) => r.path === iso.path);
+      const verdict0054 = classifyAutoAdjudication({
+        firstRoundStatus: failure?.status ?? null,
+        isolationClassification: iso.classification,
+        failureDetail: failure?.failureDetail,
+        file: iso.path,
+        registryEntries,
+        workerContext: effectiveWorkerContext,
+        today: effectiveToday,
+      });
+      iso.autoAdjudication = { matched: verdict0054.matched, adjudicated: verdict0054.adjudicated, failedGates: verdict0054.failedGates };
+      if (verdict0054.adjudicated) {
+        autoAdjudicated.push({ path: iso.path, matches: verdict0054.matches });
+      } else if (verdict0054.matched && effectiveWorkerContext) {
+        adjudicationAdvisories.push({ path: iso.path, kind: "worker-context-suppressed", entryIds: verdict0054.matches.map((m) => m.id) });
+      } else if (verdict0054.failedGates.includes("entry-not-usable")) {
+        adjudicationAdvisories.push({ path: iso.path, kind: "entry-not-usable", entryIds: verdict0054.notUsable.map((m) => m.id) });
+      }
+    }
+  }
+  // finalVerdict 派生：被裁定文件不计入有效失败（首红原始记录仍在
+  // firstRound.failures——永不删除）；其余一切不变（groupError/suiteError 同旧）。
+  const adjudicatedPaths = new Set(autoAdjudicated.map((a) => a.path));
+  const effectiveFailures = failures.filter((r) => !adjudicatedPaths.has(r.path));
+  const finalVerdict = (effectiveFailures.length === 0 && !suiteError) ? "pass" : "fail";
+
   return {
     waves: wavesReport,
     firstRound: {
@@ -1208,7 +1376,9 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
       failures: failures.map((r) => ({ path: r.path, status: r.status, crashReason: r.crashReason ?? null, failureDetail: r.failureDetail ?? unknownFailureDetail("no first-round detail collected") })),
     },
     isolation,
-    finalVerdict: firstRoundVerdict, // isolation never changes the verdict
+    finalVerdict, // 首轮事实之外唯一翻绿路径=登记册资格闭集自动裁定（TD-248/0054）；firstRound.verdict 恒为首轮事实
+    autoAdjudicated, // TD-248：[{path, matches:[{id, subtest}]}]——verdict=pass 的例外来源，逐条可溯源
+    adjudicationAdvisories, // TD-248：matched-but-suppressed（worker 上下文）等观察事实，不改变 verdict
     suiteError,
     suiteAborted, // TD-165 R2.4: true ⇒ waves after the abort point did NOT run
     abortOrigin, // TD-165 F6: "wave" | "isolation" | null — which leg aborted
@@ -1869,6 +2039,27 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
       return [];
     }
   };
+  // TD-248 / 决定 0054：登记册加载（套件只读）。缺文件=空登记册+stderr 注记
+  // （方向=更严，安全）；存在但解析/校验失败=套件级错误（committed 合同破损
+  // 不得静默降级——fail-closed）。
+  let registryEntries = [];
+  const registryPath = join(testDir, INTERFERENCE_REGISTRY_NAME);
+  let registryParsed = null;
+  try {
+    registryParsed = JSON.parse(readFileSync(registryPath, "utf8"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      console.error(`[canonical] interference-registry 不存在（${registryPath}）——按空登记册运行（自动裁定关闭，方向=更严）`);
+    } else {
+      throw new Error(`interference-registry 解析失败（fail-closed）: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  if (registryParsed !== null) {
+    const validation = validateInterferenceRegistry(registryParsed);
+    if (!validation.ok) throw new Error(`interference-registry schema 违约（fail-closed）: ${validation.errors.join("; ")}`);
+    registryEntries = registryParsed.entries;
+  }
+
   const outcome = await runCanonicalImpl({
     waveSpecs,
     reporterArg,
@@ -1876,6 +2067,8 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     readReport: realReadReport(reportPath),
     deleteReport: realDeleteReport(reportPath),
     isolator: realIsolator(nodeExe, repoRoot, childEnv),
+    // TD-248：登记册经 runSuite 单点加载后注入（套件对登记册的全部读取=此处一次）。
+    registryEntries,
     // TD-181 (a): advisory per-wave secondary observations (read-only, bounded,
     // failure-degrades-to-unknown, never verdict-affecting).
     observers: realWaveObservers(),
@@ -1905,6 +2098,19 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   for (const iso of outcome.isolation) {
     console.error(`[canonical] isolation ${iso.path} [${iso.resourceCategory}/${iso.executionWave}] firstRound=${iso.firstRoundStatus} alone=${iso.isolationStatus} ⇒ ${iso.classification}`);
   }
+  // TD-248 / 0054：自动裁定输出——绿灯来源必须响亮可溯源；advisory 永不静默。
+  for (const adj of outcome.autoAdjudicated ?? []) {
+    console.error(`[canonical] AUTO-ADJUDICATED（登记册）：${adj.path} 的 pass 来自条目 ${adj.matches.map((m) => m.id).join(",")}——非代码正确性证明；首红原始记录保留在 firstRound.failures。`);
+  }
+  for (const adv of outcome.adjudicationAdvisories ?? []) {
+    if (adv.kind === "worker-context-suppressed") {
+      console.error(`[canonical] ADVISORY：${adv.path} 本应命中登记册条目 ${adv.entryIds.join(",")}，但 worker 上下文禁用自动裁定（0054 §1 防自我洗白）——verdict 保持 fail。`);
+    } else if (adv.kind === "entry-not-usable") {
+      console.error(`[canonical] ADVISORY：${adv.path} 签名命中登记册条目 ${adv.entryIds.join(",")} 但条目已过期/非 active（衰减机制）——verdict 保持 fail；若干扰形仍真实发生，请人工重新裁定登记。`);
+    } else {
+      console.error(`[canonical] ADVISORY：${adv.path} 裁定观察（kind=${adv.kind}）——不改变 verdict。`);
+    }
+  }
   // Isolation rechecks spawn children OUTSIDE any wave — sweep them too so a
   // leak during a diagnostic rerun is caught and attributed to this phase.
   const isoFresh = guardRecord("isolation");
@@ -1915,11 +2121,11 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   const runsAdditions = runsGuard.additions();
   const attribution = runsAdditions.flatMap((a) => runsEntryAttribution(join(repoRoot, "runs"), a.file));
   const report = {
-    // schemaVersion 4 (TD-181, 2026-09-25): ADDITIVE over 3 — every non-pass
-    // firstRound.failures[] entry now carries bounded `failureDetail` (or an
-    // honest unknown), and each executionWaves[] entry carries the advisory
-    // `observation` annotation. Existing fields are unchanged.
-    schemaVersion: 4,
+    // schemaVersion 5 (TD-248, 2026-10-10): ADDITIVE over 4 — autoAdjudicated[]
+    // (verdict=pass 的例外来源，逐条登记册引用) 与 adjudicationAdvisories[]
+    // （worker 上下文抑制等观察事实）。isolation[] 各项增 advisory 级
+    // autoAdjudication 子对象。既有字段语义不变。
+    schemaVersion: 5,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version, hardwareParallelism: HW, mode: "one-node-test-child-per-wave" },
     discoveredCount: discovered.length,
@@ -1928,6 +2134,8 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     firstRound: outcome.firstRound,
     isolation: outcome.isolation,
     finalVerdict: outcome.finalVerdict,
+    autoAdjudicated: outcome.autoAdjudicated ?? [],
+    adjudicationAdvisories: outcome.adjudicationAdvisories ?? [],
     suiteError: outcome.suiteError,
     // TD-165 R2.4: true ⇒ a watchdog kill with UNCONFIRMED cleanup stopped the
     // suite; waves after the abort point did NOT run.
@@ -1965,7 +2173,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   // R8-C C-5: the exit decision is the pinned pure function — precedence
   // report_write_failed > guard_error > runs_additions > verdict.
   const final = finalRunnerOutcome({ verdict: outcome.finalVerdict, runsAdditions, runsGuardError, reportWritten });
-  console.error(`[canonical] verdict=${outcome.finalVerdict} discovered=${discovered.length} executed=${report.executedCount} passed=${passed} failed=${failed} missing=${missing} crashed=${crashed} isolation=${outcome.isolation.length} waves=${outcome.waves.length} runsGuard=${runsAdditions.length === 0 && !runsGuardError ? "clean" : `RED(+${runsAdditions.length})`} total=${totalMs}ms ⇒ ${reportPath}`);
+  console.error(`[canonical] verdict=${outcome.finalVerdict} discovered=${discovered.length} executed=${report.executedCount} passed=${passed} failed=${failed} missing=${missing} crashed=${crashed} isolation=${outcome.isolation.length} auto_adjudicated=${(outcome.autoAdjudicated ?? []).length} waves=${outcome.waves.length} runsGuard=${runsAdditions.length === 0 && !runsGuardError ? "clean" : `RED(+${runsAdditions.length})`} total=${totalMs}ms ⇒ ${reportPath}`);
 
   // R8-3 red lights: tests writing the REAL runs/ is a suite-hygiene violation
   // that must not survive a green test verdict (non-zero exit even when every
@@ -2003,7 +2211,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
 function failInvalidEnvironment(reportPath, message) {
   console.error(`[canonical] INVALID ENVIRONMENT (no tests run): ${message}`);
   const report = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version },
     finalVerdict: "environment_invalid",

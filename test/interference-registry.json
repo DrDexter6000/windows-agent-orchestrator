@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "note": "已登记干扰形登记册（TD-248，决定 0054）。套件【只读】、Lead 独占编辑权：新增条目=人工裁定后提交；失效=expiresOn 到期（衰减=只往严的方向变）或显式 status 改动。签名口径=file+subtest+归一化错误文本（数字串→<n>）字符串全等，禁 regex（套件禁令：no runtime regex classification）。worker 上下文（WAO_IN_WORKER=1 或 worktree cwd）下自动裁定关闭——防自我洗白。资格闭集与派生规则实现见 scripts/canonical-test.mjs classifyAutoAdjudication。",
+  "entries": [
+    {
+      "id": "IF-001",
+      "file": "delivery/runsVerifyCommit.test.js",
+      "subtest": "TD-240 反例：命令超时——timedOut+failed+fail-fast+子进程树收束",
+      "signature": "AssertionError [ERR_ASSERTION]: command should be killed at ~1s (elapsed <n>ms)",
+      "isolationRequired": true,
+      "registeredAt": "2026-10-09",
+      "expiresOn": "2026-10-23",
+      "owner": "Lead",
+      "note": "tech-debt.md:291 原散文条目迁入。sol 席套件内实测 4060ms（kill-at-~1s 时序断言在负载下收束时序放大），单跑 30/30 绿（本日三次复跑）。已由 F-⑤ 治根根治（928a51a：stallLong 20s + 单命令 durationMs 断言）——本条目保留为形状参考，status=superseded，不应再自然命中；若再命中=治根失败或新变异，必须人工重裁。",
+      "status": "superseded"
+    }
+  ]
+}
