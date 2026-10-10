@@ -270,6 +270,7 @@
     ],
     "process": [
       "isolation-infra/canonicalRunner.test.js",
+      "isolation-infra/testOneShim.test.js",
       "isolation-infra/backgroundRunner.test.js",
       "isolation-infra/backgroundRunnerDeadline.test.js",
       "isolation-infra/cli.test.js",

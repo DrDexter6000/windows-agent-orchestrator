@@ -1562,6 +1562,27 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
 }
 
 /**
+ * TD-223（2026-10-07）+ F-②（2026-10-10 摩擦处置批）：一次性 TEMP 隔离。
+ * 套件内多数测试文件构造 ClaudeCodeBackend（只有 1 个注入 fixture 凭据源）——
+ * native OAuth 通道的 prepare 会把真实 ~/.claude/.credentials.json 复制进
+ * os.tmpdir()，每跑一次就往用户真实 %TEMP% 撒凭据副本（实测 24/24 字节同源）。
+ * 本重定向把本进程 os.tmpdir() 与全部子进程 env（TMP/TEMP/TMPDIR）指到一次性
+ * 目录，退出时删除；被 watchdog 强杀的残留目录由 wao sweep-claude-config 清扫
+ * 兜底。canonical 全量（main）与定向入口（scripts/test-one.mjs）共用本函数——
+ * TD-223 的保护不因入口不同而缺席（opus P1 会审必改项）。
+ * 必须在任何 childEnv 派生之前调用（childEnv 从 process.env 展开）。
+ */
+export function isolateSuiteTemp() {
+  const realTmp = tmpdir(); // 捕获真实值——重定向后再调 tmpdir() 会拿到套件目录
+  const suiteTempRoot = mkdtempSync(join(realTmp, "wao-canonical-temp-"));
+  for (const name of ["TMP", "TEMP", "TMPDIR"]) process.env[name] = suiteTempRoot;
+  process.on("exit", () => {
+    try { rmSync(suiteTempRoot, { recursive: true, force: true }); } catch { /* 强杀/占用残留交 sweep */ }
+  });
+  return suiteTempRoot;
+}
+
+/**
  * R23-F/B Round B: ONE canonical invocation under the machine lease — the same
  * granularity as a whole verifyDelivery command sequence. Hard order:
  *
@@ -1669,20 +1690,10 @@ async function main() {
   const reportPath = join(repoRoot, "test-results.json");
   const nodeExe = process.execPath;
 
-  // TD-223 尾项（2026-10-07 opus 验收发现）：套件一次性 TEMP 隔离。16 个测试
-  // 文件构造 ClaudeCodeBackend（只有 1 个注入 fixture 凭据源）——native OAuth
-  // 通道的 prepare 会把真实 ~/.claude/.credentials.json 复制进 os.tmpdir()，
-  // 每跑一次全量就往用户真实 %TEMP% 撒约 24 份凭据副本（实测 00:24Z 批 24/24
-  // 字节同源）。本重定向把整套件（本进程 os.tmpdir() 与全部子进程 env）指到
-  // 一次性目录，退出时删除；被 watchdog 强杀的残留目录带 owner 标记（pid=测试
-  // 子进程），由 wao sweep-claude-config 清扫兜底。设 env 必须在 startCanonical
-  // Suite 之前——childEnv 从 process.env 派生。
-  const realTmp = tmpdir(); // 捕获真实值——重定向后再调 tmpdir() 会拿到套件目录
-  const suiteTempRoot = mkdtempSync(join(realTmp, "wao-canonical-temp-"));
-  for (const name of ["TMP", "TEMP", "TMPDIR"]) process.env[name] = suiteTempRoot;
-  process.on("exit", () => {
-    try { rmSync(suiteTempRoot, { recursive: true, force: true }); } catch { /* 强杀/占用残留交 sweep */ }
-  });
+  // TD-223 尾项（2026-10-07 opus 验收发现）：套件一次性 TEMP 隔离——具体背景
+  // 与纪律见 isolateSuiteTemp() 头注（F-② 抽取共享：定向入口同享此保护）。
+  // 必须在 startCanonicalSuite 之前——childEnv 从 process.env 派生。
+  isolateSuiteTemp();
 
   // Decision 0047 self-awareness: say up front that a worker-context suite's
   // red dispatch-family files are by-design (see workerBannerLine). Advisory
