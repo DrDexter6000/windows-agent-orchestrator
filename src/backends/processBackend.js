@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { doneEvent, DONE_MARKERS, runEventIsUsableEffect } from "../runEvent.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
-import { NESTED_DISPATCH_BYPASS_ENV } from "../nestedDispatchGuard.js";
+import { NESTED_DISPATCH_BYPASS_ENV } from "../envPolicy.js";
 
 const SAFE_INHERITED_ENV = new Set([
   "ALL_PROXY", "APPDATA", "COLORTERM", "COMSPEC", "HOMEDRIVE", "HOMEPATH",

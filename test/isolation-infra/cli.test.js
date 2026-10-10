@@ -5585,7 +5585,7 @@ test("F-④: daemon status 缺 runId 时讲清与 ping/list 的分工", async ()
   // daemonStatusCommand 失败路径设 process.exitCode=1——这是 CLI 契约，但会渗进
   // 本测试进程造成文件级假红（子测全绿仍 exit 1）。保存/恢复隔离之。
   const prevExitCode = process.exitCode;
-  const out = await captureLog(() => daemonCommand(["status"], { runDir: "runs" }));
+  const out = await captureLog(() => daemonCommand(["status"], { runDir: "runs-none" }));
   process.exitCode = prevExitCode;
   const parsed = JSON.parse(out);
   assert.equal(parsed.ok, false);

@@ -304,8 +304,9 @@ test("D1-D3-Bug2: 非数字 --wait-ms → CLI 固定错误 --wait-ms must be a n
         ),
         (err) => {
           // CLI 固定安全文本——不是 service 的 got:null 文案，也不回显原值。
-          assert.equal(err.message, "--wait-ms must be a number",
-            `--wait-ms ${JSON.stringify(bad)}: expected the fixed CLI error`);
+          // F-④（2026-10-10）：报错追加用法行——首行仍逐字固定，用 startsWith 钉。
+          assert.ok(err.message.startsWith("--wait-ms must be a number\n用法：wao runs wait"),
+            `--wait-ms ${JSON.stringify(bad)}: expected the fixed CLI error + usage line`);
           return true;
         },
         `--wait-ms ${JSON.stringify(bad)} must be rejected`,

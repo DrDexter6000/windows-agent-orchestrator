@@ -29,9 +29,13 @@
 //   runVerifyCommit.js）——env 准备之前先过本门，防本 CLI 成为 worker 获取
 //   净化环境/嵌套豁免的入口（Lead 主检出语境正常放行）。
 import { resolve as resolvePath } from "node:path";
+// P4 分层修（2026-10-10 摩擦处置批）：豁免变量名常量的 SSOT 迁 envPolicy.js
+// （shared 内核——backends 层消费该名字做注入拒收时不再产生 core 上向边；
+// 本守卫 re-export，既有消费方零改动）。判定语义零变更。
+import { NESTED_DISPATCH_BYPASS_ENV } from "./envPolicy.js";
 
 export const NESTED_DISPATCH_ENV_MARKER = "WAO_IN_WORKER";
-export const NESTED_DISPATCH_BYPASS_ENV = "WAO_ALLOW_NESTED_DISPATCH";
+export { NESTED_DISPATCH_BYPASS_ENV };
 export const WORKTREE_ROOT_DIR_NAME = ".wao-worktrees";
 
 /**

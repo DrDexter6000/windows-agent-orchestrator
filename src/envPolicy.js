@@ -83,6 +83,12 @@ export function requiredCredentialNames(agent) {
 // 凭据 env（provider.apiKeyEnv），此变量混入可能抢走 provider key 的认证优先级。
 export const CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
+// 0047 嵌套派发豁免变量名（Lead 命令级授权，审计协议见 docs/usage.md 场景 4e）。
+// P4 分层修（2026-10-10 摩擦处置批）：SSOT 从 nestedDispatchGuard.js（core 层）
+// 迁此——backends 层（processBackend 注入拒收）消费该名字不再产生上向依赖边；
+// 守卫侧 re-export 保持既有消费方零改动。名字单一来源：改名必须两处语义同步。
+export const NESTED_DISPATCH_BYPASS_ENV = "WAO_ALLOW_NESTED_DISPATCH";
+
 /**
  * All env names a backend MAY inherit into the worker child process: required
  * credential names plus optional backend-wide names. Used by ProcessBackend for
