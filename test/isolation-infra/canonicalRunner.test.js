@@ -37,6 +37,7 @@ import {
   runWave, runCanonical, mapReportToFiles, suiteRelToManifest,
   WAVE_PLAN, validateWavePlan,
   takeRunsSnapshot, addedRunsFiles, createRunsDirGuard, realListRunsDir,
+  runsEntryAttribution, runsAttributionLine, RUNS_ATTRIBUTION_BYTE_CAP,
   finalRunnerOutcome,
   createInflightMarker, realInflightAdapter, inflightMarkerPath, INFLIGHT_MARKER_FILENAME,
   // TD-165：三层看门狗的常量与真实适配器（预算全部注入 1-5s 小值，绝不用生产默认值）。
@@ -783,6 +784,178 @@ test("finalRunnerOutcome: report write failure ⇒ red regardless of everything 
     { kind: "report_write_failed", exitCode: 1 },
     "precedence: report_write_failed > guard_error > runs_additions > verdict",
   );
+});
+
+// Synthetic roots only; the real report/output adapters run, no suite is spawned.
+async function attributionSuiteFixture(mutate) {
+  const root = synthWorkspace("wao-td247-", {
+    "a.test.js": SYNTH_OK,
+    "manifest.json": JSON.stringify({ groups: { pure: ["a.test.js"], git: [], worktree: [], process: [], lock: [], timeout: [], mcp: [] } }),
+  });
+  const previousExitCode = process.exitCode;
+  const originalLog = console.log;
+  const originalError = console.error;
+  const stdout = [];
+  const stderr = [];
+  console.log = (line) => stdout.push(String(line));
+  console.error = (line) => stderr.push(String(line));
+  try {
+    const reportPath = join(root, "test-results.json");
+    await runSuite({
+      repoRoot: root, testDir: join(root, "test"), manifestPath: join(root, "test", "manifest.json"),
+      reportPath, nodeExe: process.execPath, childEnv: {},
+      exitFn: () => assert.fail("a completed fixture must not hard-exit"),
+      runCanonicalImpl: async ({ onWaveEnd }) => {
+        mutate(root);
+        const wave = { name: "pure", exitCode: 0, passed: 1, failed: 0, crashed: 0, missing: 0, durationMs: 0 };
+        onWaveEnd(wave);
+        return {
+          waves: [wave], firstRound: { verdict: "pass", passed: 1, failed: 0, missing: 0, crashed: 0, failures: [] },
+          isolation: [], finalVerdict: "pass", suiteError: false, suiteAborted: false,
+        };
+      },
+    });
+    return { stdout, stderr, exitCode: process.exitCode, report: JSON.parse(readFileSync(reportPath, "utf8")) };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    process.exitCode = previousExitCode;
+    assert.ok(root.startsWith(tmpdir() + sep), "cleanup stays within the suite's isolated temp directory");
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const ATTRIBUTION_EVENT = {
+  type: "run.started", runId: "run_x", cwd: "D:\\projects\\example",
+  project: { bucket: "example-abc12345", key: "d:/projects/example" },
+  agentId: "coder_test", ts: "2026-10-10T18:08:34.179Z",
+};
+const ATTRIBUTION_X = {
+  entry: "run_x.jsonl", runId: "run_x", parseStatus: "parsed",
+  cwd: ATTRIBUTION_EVENT.cwd, agentId: ATTRIBUTION_EVENT.agentId, ts: ATTRIBUTION_EVENT.ts,
+  project: ATTRIBUTION_EVENT.project,
+};
+
+test("TD-247 ① happy: 首事件四字段落 stdout 与实际 JSON，测试全绿仍 RED/exit 1", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    mkdirSync(join(root, "runs"));
+    writeFileSync(join(root, "runs", "run_x.jsonl"), JSON.stringify(ATTRIBUTION_EVENT) + "\r\n" +
+      JSON.stringify({ cwd: "later event must not win", agentId: "later_agent" }) + "\n");
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.report.finalVerdict, "pass", "the original test verdict stays green; the guard stays red");
+  assert.deepEqual(result.report.runsDirGuard, {
+    additions: [{ file: "run_x.jsonl", phase: "pure" }], error: null, attribution: [ATTRIBUTION_X],
+  });
+  assert.deepEqual(result.stdout, ['[canonical] 仍然 RED，以下是归属证据：' + JSON.stringify(ATTRIBUTION_X)]);
+  assert.ok(result.stderr.some((line) => line.includes("runsGuard=RED(+1)")));
+  assert.ok(result.stderr.includes("  - runs/run_x.jsonl (first seen: pure)"), "existing RED list is retained");
+  console.log(result.stdout[0]);
+  console.log("[TD-247 actual test-results.json] " + JSON.stringify(result.report.runsDirGuard.attribution[0]));
+});
+
+test("TD-247 ② 新建桶: 两个转录各一行，守卫原有单层新增列表不变", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    const bucket = join(root, "runs", "projects", "foo-abc12345");
+    mkdirSync(bucket, { recursive: true });
+    writeFileSync(join(bucket, "run_b.jsonl"), JSON.stringify({ agentId: "b", project: { displayName: "Foo" } }) + "\n");
+    writeFileSync(join(bucket, "run_a.jsonl"), JSON.stringify({ cwd: "D:/foo", ts: ATTRIBUTION_EVENT.ts }) + "\n");
+    writeFileSync(join(bucket, "notes.txt"), "not a transcript");
+    mkdirSync(join(bucket, "run_directory.jsonl"));
+  });
+  const attribution = [
+    { entry: "projects", parseStatus: "unattributable" },
+    { entry: "projects/foo-abc12345", runId: "run_a", parseStatus: "parsed", cwd: "D:/foo", ts: ATTRIBUTION_EVENT.ts },
+    { entry: "projects/foo-abc12345", runId: "run_b", parseStatus: "parsed", agentId: "b", project: { displayName: "Foo" } },
+  ];
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.report.runsDirGuard.additions, [
+    { file: "projects", phase: "pure" }, { file: "projects/foo-abc12345", phase: "pure" },
+  ], "TD-249 scan-depth change is explicitly excluded");
+  assert.deepEqual(result.report.runsDirGuard.attribution, attribution);
+  assert.deepEqual(result.stdout, attribution.map(runsAttributionLine));
+  assert.equal(result.stdout.filter((line) => line.includes('"runId"')).length, 2);
+});
+
+test("TD-247 ③ 坏首行/非法 UTF-8/8KB 截断/读取失败: unknown，RED 与退出码不变", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    const runs = join(root, "runs");
+    mkdirSync(runs);
+    writeFileSync(join(runs, "run_garbage.jsonl"), "garbage\n" + JSON.stringify(ATTRIBUTION_EVENT));
+    writeFileSync(join(runs, "run_utf8.jsonl"), Buffer.from([123, 34, 99, 119, 100, 34, 58, 34, 255, 34, 125, 10]));
+    writeFileSync(join(runs, "run_large.jsonl"), JSON.stringify({ cwd: "中".repeat(3000) }) + "\n");
+  });
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.report.runsDirGuard.attribution, [
+    { entry: "run_garbage.jsonl", runId: "run_garbage", parseStatus: "unknown" },
+    { entry: "run_large.jsonl", runId: "run_large", parseStatus: "unknown" },
+    { entry: "run_utf8.jsonl", runId: "run_utf8", parseStatus: "unknown" },
+  ]);
+  assert.deepEqual(result.stdout, result.report.runsDirGuard.attribution.map(runsAttributionLine));
+  assert.ok(result.stderr.some((line) => line.includes("runsGuard=RED(+3)")));
+  const dir = mkdtempSync(join(tmpdir(), "wao-td247-read-"));
+  try {
+    assert.deepEqual(runsEntryAttribution(dir, "run_vanished.jsonl"), [
+      { entry: "run_vanished.jsonl", runId: "run_vanished", parseStatus: "unknown" },
+    ]);
+    assert.deepEqual(runsEntryAttribution(dir, "projects/vanished/"), [{ entry: "projects/vanished/", parseStatus: "unknown" }]);
+    assert.equal(RUNS_ATTRIBUTION_BYTE_CAP, 8192, "byte budget, not a character budget");
+    const atCap = JSON.stringify({ cwd: "x".repeat(8181) }) + "\n";
+    assert.equal(Buffer.byteLength(atCap), 8192);
+    writeFileSync(join(dir, "run_cap.jsonl"), atCap + "invalid later data".repeat(10000));
+    assert.equal(runsEntryAttribution(dir, "run_cap.jsonl")[0].cwd, "x".repeat(8181), "complete first line at byte cap parses");
+    writeFileSync(join(dir, "run_cap.jsonl"), JSON.stringify({ cwd: "x".repeat(8182) }) + "\n");
+    assert.deepEqual(runsEntryAttribution(dir, "run_cap.jsonl"), [{ entry: "run_cap.jsonl", runId: "run_cap", parseStatus: "unknown" }]);
+    for (const text of ["", "null\n", "[]\n", "42\n"]) {
+      writeFileSync(join(dir, "run_cap.jsonl"), text);
+      assert.equal(runsEntryAttribution(dir, "run_cap.jsonl")[0].parseStatus, "unknown");
+    }
+  } finally {
+    assert.ok(dir.startsWith(tmpdir() + sep));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-247 ④ 无法归属形态: 如实标注，不伪造 runId 或事实字段", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    mkdirSync(join(root, "runs", ".session-reuse-x"), { recursive: true });
+  });
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.report.runsDirGuard.attribution, [{ entry: ".session-reuse-x", parseStatus: "unattributable" }]);
+  assert.deepEqual(result.stdout, ['[canonical] 仍然 RED，以下是归属证据：无法归属（形态：".session-reuse-x"）']);
+});
+
+test("TD-247 ⑤ 措辞钉: 成功/unknown/无法归属均逐字声明仍然 RED，控制字符不造第二行", () => {
+  for (const evidence of [ATTRIBUTION_X, { entry: "run_x.jsonl", parseStatus: "unknown" },
+    { entry: ".session-reuse-x", parseStatus: "unattributable" },
+    { entry: "run_x.jsonl", cwd: "a\nb\r\u001b", parseStatus: "parsed" }]) {
+    const line = runsAttributionLine(evidence);
+    assert.ok(line.startsWith("[canonical] 仍然 RED，以下是归属证据："));
+    assert.ok(!/[\r\n\u001b]/.test(line), "one physical evidence line");
+  }
+});
+
+test("TD-247 ⑥ 归属不参与退出判定: clean 不输出，映射/失败/无法归属均同原判定", async () => {
+  const clean = await attributionSuiteFixture(() => {});
+  assert.equal(clean.exitCode, 0);
+  assert.deepEqual(clean.stdout, []);
+  assert.deepEqual(clean.report.runsDirGuard, { additions: [], error: null, attribution: [] });
+  const cases = [
+    (root) => { mkdirSync(join(root, "runs")); writeFileSync(join(root, "runs", "run_x.jsonl"), JSON.stringify(ATTRIBUTION_EVENT)); },
+    (root) => { mkdirSync(join(root, "runs")); writeFileSync(join(root, "runs", "run_x.jsonl"), "broken"); },
+    (root) => { mkdirSync(join(root, "runs", ".session-reuse-x"), { recursive: true }); },
+    (root) => { writeFileSync(join(root, "runs"), "not a directory"); },
+  ];
+  for (const mutate of cases) {
+    const result = await attributionSuiteFixture(mutate);
+    const originalDecision = finalRunnerOutcome({
+      verdict: result.report.finalVerdict,
+      runsAdditions: result.report.runsDirGuard.additions,
+      runsGuardError: result.report.runsDirGuard.error,
+    });
+    assert.equal(result.exitCode, 1, "all original guard RED shapes still fail");
+    assert.equal(result.exitCode, originalDecision.exitCode, "annotations cannot change the original pure exit decision");
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────

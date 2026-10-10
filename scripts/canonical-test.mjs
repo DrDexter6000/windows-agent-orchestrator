@@ -158,7 +158,7 @@
 // verdict), no timeout inflation, no skipped failures, no new deps.
 
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, mkdtempSync, rmSync, openSync, readSync, closeSync } from "node:fs";
 import { join, resolve, dirname, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { availableParallelism, cpus, tmpdir } from "node:os";
@@ -541,6 +541,79 @@ export function realListRunsDir(runsDir) {
     }
   };
   return (sub = "") => list(sub ? join(runsDir, sub) : runsDir);
+}
+
+// Advisory only: read at most 8KB, never the full transcript or later events.
+export const RUNS_ATTRIBUTION_BYTE_CAP = 8 * 1024;
+
+function firstRunsEvent(filePath) {
+  const fd = openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(RUNS_ATTRIBUTION_BYTE_CAP);
+    let used = 0;
+    let newline = -1;
+    while (used < buffer.length && newline < 0) {
+      const count = readSync(fd, buffer, used, buffer.length - used, null);
+      if (count === 0) break;
+      used += count;
+      newline = buffer.subarray(0, used).indexOf(10);
+    }
+    if (newline < 0 && used === buffer.length) throw new Error("first event exceeds byte cap");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline < 0 ? used : newline));
+    const event = JSON.parse(text);
+    if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("first event is not an object");
+    return event;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Shape mapping does not expand the guard's snapshot depth or change its diff.
+// Every I/O/parse failure is an unknown annotation, never a guard decision.
+export function runsEntryAttribution(runsDir, entry) {
+  const unknown = { entry, parseStatus: "unknown" };
+  const unmapped = { entry, parseStatus: "unattributable" };
+  const fromFile = (file) => {
+    const result = { entry, runId: file.split("/").at(-1).slice(0, -6), parseStatus: "unknown" };
+    try {
+      const event = firstRunsEvent(join(runsDir, file));
+      for (const key of ["cwd", "agentId", "ts"]) {
+        if (typeof event[key] === "string") result[key] = event[key];
+      }
+      if (typeof event.project === "string") result.project = event.project;
+      else if (event.project && typeof event.project === "object" && !Array.isArray(event.project)) {
+        const project = {};
+        for (const key of ["bucket", "key", "displayName"]) {
+          if (typeof event.project[key] === "string") project[key] = event.project[key];
+        }
+        if (Object.keys(project).length > 0) result.project = project;
+      }
+      result.parseStatus = "parsed";
+    } catch { /* Unknown evidence never changes RED or the exit code. */ }
+    return result;
+  };
+  try {
+    if (typeof entry !== "string") return [unmapped];
+    const normalized = entry.replace(/\/$/, "");
+    const parts = normalized.split("/");
+    if (parts.some((p) => !p || p === "." || p === ".." || p.includes("\\"))) return [unmapped];
+    if (/^run_.+\.jsonl$/.test(parts.at(-1))) return [fromFile(normalized)];
+    if (parts.length === 2 && parts[0] === "projects") {
+      const files = readdirSync(join(runsDir, normalized), { withFileTypes: true })
+        .filter((d) => d.isFile() && d.name.endsWith(".jsonl"))
+        .map((d) => `${normalized}/${d.name}`).sort();
+      return files.length > 0 ? files.map(fromFile) : [unmapped];
+    }
+    return [unmapped];
+  } catch { return [unknown]; }
+}
+
+export function runsAttributionLine(attribution) {
+  const prefix = "[canonical] 仍然 RED，以下是归属证据：";
+  if (attribution.parseStatus === "unattributable") {
+    return `${prefix}无法归属（形态：${JSON.stringify(attribution.entry)}）`;
+  }
+  return prefix + JSON.stringify(attribution);
 }
 
 // ── TD-181 (a): first-round failure-detail retention (bounded, additive) ─────
@@ -1839,6 +1912,8 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     console.error(`[canonical] runs-guard phase=isolation NEW runs/ entries: ${isoFresh.map((f) => f.file).join(", ")}`);
   }
 
+  const runsAdditions = runsGuard.additions();
+  const attribution = runsAdditions.flatMap((a) => runsEntryAttribution(join(repoRoot, "runs"), a.file));
   const report = {
     // schemaVersion 4 (TD-181, 2026-09-25): ADDITIVE over 3 — every non-pass
     // firstRound.failures[] entry now carries bounded `failureDetail` (or an
@@ -1865,7 +1940,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     // during the suite (any name/shape — transcripts, dot entries, state
     // files, subdirectory slots), with the wave/phase that first saw it.
     // Empty on a clean run; non-empty ALWAYS pairs with a non-zero exit below.
-    runsDirGuard: { additions: runsGuard.additions(), error: runsGuardError },
+    runsDirGuard: { additions: runsAdditions, error: runsGuardError, attribution },
     totalDurationMs: totalMs,
   };
 
@@ -1887,7 +1962,6 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   }
 
   const { passed, failed, missing, crashed } = outcome.firstRound;
-  const runsAdditions = runsGuard.additions();
   // R8-C C-5: the exit decision is the pinned pure function — precedence
   // report_write_failed > guard_error > runs_additions > verdict.
   const final = finalRunnerOutcome({ verdict: outcome.finalVerdict, runsAdditions, runsGuardError, reportWritten });
@@ -1911,6 +1985,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     console.error("  测试不得向真实 runs/ 写入——测试必须用 tmpdir 作为自己的 run-dir/工作目录（写死仓库 runs/ 即违规）。");
     console.error("  若本机同时有另一会话在用 WAO 派发（新转录即新增条目），可能是并发撞车而非测试写入——所有新增都会如实红灯（.owner- 心跳豁免曾评估并被否决，见本文件头注），排水规程见 docs/troubleshooting.md §8.2。");
   }
+  for (const evidence of attribution) console.log(runsAttributionLine(evidence));
   process.exitCode = final.exitCode;
   // TD-165 F2b: 报告已写盘，这里必须有界退出——未确认残留的管道句柄会阻止自然退出。
   // (The hard exit skips startCanonicalSuite's finally: the inflight marker is
