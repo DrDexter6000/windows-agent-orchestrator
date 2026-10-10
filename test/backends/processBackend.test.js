@@ -1022,3 +1022,44 @@ test("R14-W3: 真实契约哨兵 — ProcessBackend 家族 spawn 结果 messageI
     assert.equal(JSON.stringify(familyHandle).includes("messageId"), false, `${name} 序列化产物不含 messageId 键`);
   }
 });
+
+// ── TD-246（2026-10-10 摩擦处置批）：嵌套派发豁免标记注入拒收 ──────────────
+// 豁免是 Lead 命令级授权（0047 语义），worker 的任何配置面不得携带：车道配置
+// 携带=拒绝；继承/凭据解析路径=大小写不敏感剔除；控制面 waoEnv 段不受限。
+import { buildChildEnv } from "../../src/backends/processBackend.js";
+
+test("TD-246: agent.env 携带豁免标记（精确名）→ 具名拒绝", () => {
+  assert.throws(
+    () => buildChildEnv([], { WAO_ALLOW_NESTED_DISPATCH: "1" }, {}),
+    (err) => err.message.includes("WAO_ALLOW_NESTED_DISPATCH") && err.message.includes("not allowed"),
+  );
+});
+
+test("TD-246: agent.env 小写变体同样拒绝（Windows env 名大小写不敏感）", () => {
+  assert.throws(
+    () => buildChildEnv([], { wao_allow_nested_dispatch: "1" }, {}),
+    (err) => err.message.includes("wao_allow_nested_dispatch"),
+  );
+});
+
+test("TD-246: 继承路径剔除——即便名字进了继承白名单也不透传", () => {
+  const saved = process.env.WAO_ALLOW_NESTED_DISPATCH;
+  process.env.WAO_ALLOW_NESTED_DISPATCH = "1";
+  try {
+    const env = buildChildEnv(["WAO_ALLOW_NESTED_DISPATCH"], {}, {});
+    assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, undefined, "豁免标记不走继承");
+  } finally {
+    if (saved === undefined) delete process.env.WAO_ALLOW_NESTED_DISPATCH;
+    else process.env.WAO_ALLOW_NESTED_DISPATCH = saved;
+  }
+});
+
+test("TD-246: 凭据解析路径剔除（注册表把凭据名配成豁免标记的情形）", () => {
+  const env = buildChildEnv(["WAO_ALLOW_NESTED_DISPATCH"], {}, {}, { WAO_ALLOW_NESTED_DISPATCH: "1" });
+  assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, undefined, "豁免标记不解析为凭据");
+});
+
+test("TD-246: 控制面 waoEnv 段仍是权威来源（控制面自持，不在拒收范围）", () => {
+  const env = buildChildEnv([], {}, { WAO_ALLOW_NESTED_DISPATCH: "1" });
+  assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, "1", "waoEnv 段=控制面自持段，语义不变");
+});

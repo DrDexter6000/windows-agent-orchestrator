@@ -519,6 +519,37 @@ wrapper 形取 `provider.baseUrl`），不做族系归类判断（判断权在 L
 独立性 r1 如实显示"未提供"。`--wait-timeout` 总预算默认 600000ms、范围同
 `runs wait`。
 
+### 场景 4e：审计席测试协议（WAO_ALLOW_NESTED_DISPATCH 命令级授权，TD-246 / F-①）
+
+背景：决定 0047 的防向下派发门会让 **worker 上下文里的派发族测试**（runDispatch/
+runManager 等直接构造 RunManager 的测试）整片变红——审计席位（验收会审席、复核
+席）因此长期"无法复现 118/118，只能采信报告"，独立复核被系统性削弱（friction-log
+2026-10-10 F-①，八轮会审实证）。既有豁免口
+`WAO_ALLOW_NESTED_DISPATCH=1`（`src/nestedDispatchGuard.js:46`，0047 设计内行为，
+**两臂全免**）从本节起成为正式的审计通道，约束如下：
+
+**授权纪律（全部是协议要求，机器面已配合加固）**：
+
+1. **Lead 授权、命令级作用域**：豁免只出现在审计任务 prompt 里的具体命令行
+   （`WAO_ALLOW_NESTED_DISPATCH=1 npm run test:one -- test/run-lifecycle/runManager.test.js`
+   形态），**绝不 setx、绝不进任何默认 env、绝不写进车道配置**——车道配置
+   携带它会被 `buildChildEnv` 具名拒绝（processBackend.js 注入拒收，大小写
+   不敏感），继承/凭据路径同名键一律剔除。
+2. **审计回执最小证据块（四元组）**，缺一不可、可机查：
+   - 命令原文 + brief 文件 SHA256（派发前 Lead 侧留档）；
+   - worker 横幅行（`[canonical] NOTE: … Lead 豁免 …`——证明豁免确实生效且
+     被如实报告）；
+   - verdict 行（`# pass N / # fail M` 汇总行原文）；
+   - 报告路径（必须 `os.tmpdir()` 之下，**禁止写进 worktree**——审计是只读
+     角色，worktree 里落文件=越界写入）。
+3. **豁免不旁路 busy/隔离**：席位仍是只读 run + 强制隔离，豁免只作用于
+   0047 守卫的判定。
+4. **协议外使用即事故**：任何在协议外观察到豁免被使用的场合（例如 worker
+   自助启用），按安全事件上报 Owner——横幅行会如实打出豁免在场事实。
+
+注：审计席位同样跑在 PATH v24 上，定向测试请用 `npm run test:one`（三件套
+一次到位，见 package.json scripts）。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

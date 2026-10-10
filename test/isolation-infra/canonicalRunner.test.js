@@ -2403,6 +2403,12 @@ test("TD-233: workerBannerLine — 已有 Lead 豁免时只报上下文事实，
   assert.ok(!line.includes("非回归"), "无预判则无非回归声明");
 });
 
+test("TD-246: workerBannerLine 豁免分支如实——两臂均不拦截（旧文案与守卫事实矛盾，已修）", () => {
+  const line = workerBannerLine({ WAO_IN_WORKER: "1", WAO_ALLOW_NESTED_DISPATCH: "1" });
+  assert.ok(line.includes("均不拦截"), "豁免=0047 语义内的整体旁路（守卫在豁免口即返回），横幅必须如实");
+  assert.ok(!line.includes("cwd 臂仍按原样生效"), "与守卫事实矛盾的旧措辞必须清除（kimi P1 会审发现）");
+});
+
 test("TD-233: runIdFromWorktreeCwd — 从 .wao-worktrees/<runId> 形态解析 runId", () => {
   const worktreeCwd = join(tmpdir(), "host", "repo", ".wao-worktrees", "run_20261008140227412zt6oi1");
   assert.equal(runIdFromWorktreeCwd(worktreeCwd), "run_20261008140227412zt6oi1", "join 形态（平台分隔符）");

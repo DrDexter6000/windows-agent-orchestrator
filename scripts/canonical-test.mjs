@@ -1677,7 +1677,10 @@ export function workerBannerLine(env = process.env) {
   if (env.WAO_IN_WORKER !== "1") return null;
   const prefix = "[canonical] NOTE: 本进程处于 worker 上下文（WAO_IN_WORKER=1）";
   if (env.WAO_ALLOW_NESTED_DISPATCH === "1") {
-    return `${prefix}，且检测到 Lead 豁免（WAO_ALLOW_NESTED_DISPATCH=1）——env 标记臂不拦截派发族测试（豁免是 0047 语义，cwd 臂仍按原样生效）；仅报告上下文事实，不预判红绿；未做任何 env 剥除或注入。`;
+    // TD-246（2026-10-10 摩擦处置批）：旧文案"cwd 臂仍按原样生效"与守卫事实矛盾
+    // ——nestedDispatchGuard 在豁免口即 return null（:46），env 标记臂与 cwd 臂
+    // 【均】不拦截。豁免=0047 语义内的整体旁路，横幅如实报告。
+    return `${prefix}，且检测到 Lead 豁免（WAO_ALLOW_NESTED_DISPATCH=1）——0047 语义内的整体旁路：env 标记臂与 cwd 臂均不拦截（守卫在豁免口即返回）；仅报告上下文事实，不预判红绿；未做任何 env 剥除或注入。`;
   }
   return `${prefix}——派发族测试受决定 0047（防向下派发门）约束会变红，属预期行为非回归；未做任何 env 豁免。`;
 }

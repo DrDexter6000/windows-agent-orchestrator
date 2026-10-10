@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { doneEvent, DONE_MARKERS, runEventIsUsableEffect } from "../runEvent.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
+import { NESTED_DISPATCH_BYPASS_ENV } from "../nestedDispatchGuard.js";
 
 const SAFE_INHERITED_ENV = new Set([
   "ALL_PROXY", "APPDATA", "COLORTERM", "COMSPEC", "HOMEDRIVE", "HOMEPATH",
@@ -622,6 +623,22 @@ export class ProcessBackend {
 }
 
 export function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredentials = {}) {
+  // TD-246（2026-10-10 摩擦处置批，opus P1 会审意见）：嵌套派发豁免标记注入拒收。
+  // WAO_ALLOW_NESTED_DISPATCH 是 Lead 命令级授权（0047 语义，经审计协议的命令行
+  // env 进入），不属于任何 worker 可携带的配置面：
+  //   · agentEnv（车道配置）携带 → 拒绝（镜像 secret-like 拒收，具名报错）；
+  //   · 继承/凭据解析路径若混入（含注册表把凭据名配成它的情形）→ 大小写不敏感
+  //     剔除（Windows env 名大小写不敏感，小写变体在子进程同样生效）；
+  //   · waoEnv 段是控制面自持段（WAO_IN_WORKER 等），不在拒收范围。
+  // 常量单一来源：nestedDispatchGuard.js（守卫判定与拒收用同一个名字）。
+  const bypassUpper = NESTED_DISPATCH_BYPASS_ENV.toUpperCase();
+  const forbiddenBypassKey = Object.keys(agentEnv ?? {}).find((k) => k.toUpperCase() === bypassUpper);
+  if (forbiddenBypassKey) {
+    throw new Error(
+      `nested-dispatch bypass marker in agent.env is not allowed: ${forbiddenBypassKey}` +
+      "（豁免仅 Lead 命令级授权，见 docs/usage.md 审计测试协议节）",
+    );
+  }
   const requested = new Set(
     [...SAFE_INHERITED_ENV, ...(inheritedNames ?? [])]
       .filter((name) => typeof name === "string" && name.length > 0)
@@ -629,6 +646,7 @@ export function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredenti
   );
   const inherited = {};
   for (const [name, value] of Object.entries(process.env)) {
+    if (name.toUpperCase() === bypassUpper) continue; // 豁免标记不走继承（TD-246）
     if (requested.has(name.toUpperCase())) inherited[name] = value;
   }
   // M11-7: merge registry-declared credentials resolved from the Windows user
@@ -637,6 +655,7 @@ export function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredenti
   // redactor below so they are scrubbed from worker stdout/stderr/transcript.
   const credEnv = {};
   for (const [name, value] of Object.entries(resolvedCredentials ?? {})) {
+    if (name.toUpperCase() === bypassUpper) continue; // 豁免标记不解析为凭据（TD-246）
     if (requested.has(name.toUpperCase()) && typeof value === "string") {
       credEnv[name] = value;
     }
