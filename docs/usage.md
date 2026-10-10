@@ -527,7 +527,10 @@ runId → 对该席 `runs wait --run-id`（或查 serve 日志 `~/.kimi-code/ser
 （迟到读取按当前转录重新推导，零派发）。若要求窗口内交付，在任务书里限制
 工作量（不跑测试/限命令数）——代价是损失席位自查深度，取舍归 Lead。每席
 prompt 尾部始终带**席位级固定会审合同**（禁实现/禁建文件/禁派发——裸车道
-席位同样收到；2026-10-10 起生效）。
+席位同样收到；2026-10-10 起生效）。**只读席位违规自动判 FAIL（决定 0055）**：
+席位 transcript 出现 `file_written` 事件即该席意见判 FAIL（`readOnlyViolation`
+字段，记录与 `consult show` 可见）；不改写席位 run 的自然终态；未上报写入
+（如 shell 重定向）不计数——worktree 隔离仍是兜底。
 
 ### 场景 4e：审计席测试协议（WAO_ALLOW_NESTED_DISPATCH 命令级授权，TD-246 / F-①）
 
