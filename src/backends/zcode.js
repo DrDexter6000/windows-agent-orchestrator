@@ -79,23 +79,26 @@
 //   - 无头 CLI 另有 `-p --json`（返回 sessionId/turnId/response/usage）与
 //     `--resume sess_<id>`——v1 不用（无模型选择 flag），仅作参照。
 //
-// 完成判定（v1）：每拍一次 `session/messages`，本轮归属 = 提交前基线快照之后的
-// parts（fresh 会话基线 0；resume 会话基线 = 历史长度）。完成判据的归属守卫
-// （step-finish 序号 >= baselineParts）**仅在「历史 parts 稳定尾部追加」前提下
-// 正确**：追加语义下历史 stop 的序号必 < 基线，新轮 prompt 已发但新轮 parts
-// 未现时不以历史 stop 判完成——test ⑨c 反例钉住该前提内的不变量（其驱动形状
-// 是恒定历史，不含插入）。终态 = 本轮出现 step-finish(reason stop|error) 且其
-// 后无新 part（= 当前快照的最后一位）。**排序假定（B′ 声明的残余；v4 撤回
-// 「绝不误报完成」类绝对化措辞——第四轮 auditor P1）**：基线切片仅在 parts
-// **稳定尾部追加**前提下成立——messages/parts 按时间追加、既有 part 的序号
-// 稳定（该语义未在上游文档化）。若上游向历史**头部插入** parts（非追加变更：
-// resume 装载后重排、去重、rewind 修剪等），旧 stop 的序号整体右移、可落入
-// >= baselineParts 区间 → **可能误报完成**：判据命中旧 stop，提前发射旧答案并
-// done(completed)；且插入使 parts 总数增长、被计为「新 part 进展」，无进展兜底
-// **不拦此分支**（完成判据先于兜底检查、当拍即发射）。此为已知算法限制，按
-// B′ 声明为残余而非阻断；翻转条件 = 上游提供轮次身份原语（turn/message id）
-// 或事件订阅（session/subscribe）后，按身份而非序号切片重写判据。判据不命中
-// 的纯错位形状由无进展兜底（**已有产出后**连续 60 拍无新 part → done(failed,
+// 完成判定（B′ 根修 2026-10-10 起为【身份切片】；v1-v4 的位置式判据退役）：
+// 每拍一次 `session/messages`，本轮 = 基线消息 id 集**之外**的消息；锚点 U =
+// 本轮新 user 消息（多条时以 sentContent 精确等值回显消歧，live 实证 echo
+// t≈1s 在场）；完成 = 存在新 assistant 消息 A（A.parentID === U.id）且 A 的
+// 末位 part 是 step-finish(stop|error)。历史变异（基线消息 id 有序序列不再是
+// 当前快照前缀——头部插入/重排/删除/compaction 改写都会击穿）→ 具名失败
+// "history mutated non-append"，绝不静默续用错位快照。resume 历史缺 info.id
+// → 发送之前拒绝（session/send 帧数为 0，零 token）。依据链：live 探针实证
+// （2026-10-10，glm-flash 真机三轮 fresh→同进程→跨进程 resume，消息
+// info.id/role/parentID、part id/messageID/sessionID 全数在场且跨快照稳定，
+// assistant info 另带 anchor.turnId——上游原生轮次身份原语在场；证据
+// .dev/bprime-evidence/）+ 双席方案会审（consult_20261010134035145ef1yzp，
+// opus 席 bundle 源码预警 + kimi 席观测面清单）+ 验收反例组（test
+// ⑨h 头插假完成/⑨i 头插+真新轮/⑨j 合法同文/⑨k 错 parent/⑨l 缺 id 拒派/
+// ⑫f 旧证据不重发；⑨h/⑨i/⑨k/⑨l/⑫f 在旧位置判据上实证红）。旧判据
+// （全局尾部 step-finish 且序号 ≥ 基线）的缺陷：头部插入使旧 stop 右移入
+// 区间 → 假 completed + 发射旧答案，连带击穿 0052 失败即弃（假 completed 让
+// 下一轮照常 resume 半死会话）与 run_lineage 交付链（finish 杀死真在跑的
+// 续接轮）——B′ 残余就此关闭。判据不命中的等待形状由无进展兜底
+// （**已有产出后**连续 60 拍无新 part → done(failed,
 // "turn stalled")；60 = 60s @ 1s 轮询——GLM-5.3 步间静默实测 8-14s ×4 余量，
 // 首轮 8 拍门被步间 reasoning 误杀，第二轮 live 诊断 run_20261001203009794bb6add
 // 在案，取值依据见 NO_PROGRESS_POLL_LIMIT 注释）有界收口；零 part 阶段（正常
@@ -233,6 +236,60 @@ function flattenParts(messages) {
   return parts;
 }
 
+// ===== B′ 根修（2026-10-10，双席方案会审 consult_20261010134035145ef1yzp 的 D 项
+// + live 探针实证）：消息/part 身份切片 =====
+//
+// 探针（.dev/bprime-evidence/，glm-flash 真机三轮：fresh→同进程→跨进程 resume，
+// sessionId sess_bd596853-e563-4a03-9e08-5e61d2815011）实证上游 shape：
+//   - 消息：info.id（msg_*）、info.role、assistant 的 info.parentID 指向其宿主
+//     user 消息（=轮次锚点）；assistant info 另带 anchor.turnId/orderedMessageIds
+//     与 time.created/completed（上游原生轮次身份原语——B′ 关闭条件满足）。
+//   - part：id（part_*）+ messageID（宿主回指）+ sessionID 全数在场。
+//   - 跨快照稳定：生成中途连拍 ⊆ 终拍、顺序保持（追加语义下的 id 稳定）。
+// 完成判据/证据台账自本批起按【身份】归属：本轮 = 宿主 user 消息不在基线 id 集
+// 且 parent 指向它的 assistant 消息；历史变异（基线 id 序列不再前缀）具名失败。
+// 旧位置式判据（「尾部 step-finish 且序号 ≥ 基线」）在头部插入下可被旧 stop 右
+// 移击穿（发射旧答案并假 completed，还会连带击穿 0052 失败即弃——假 completed
+// 让下一轮照常 resume 半死会话）——身份切片从构造上关死该窗口。
+
+/** 消息身份（info.id/role/parentID；缺 id → null——调用方决定语义：历史缺 id
+ * =派发前拒，新消息缺 id =本轮锚点不可解由有界收口兜底）。 */
+function messageIdent(m) {
+  const info = m?.info;
+  if (!info || typeof info.id !== "string" || info.id.length === 0) return null;
+  return {
+    id: info.id,
+    role: typeof info.role === "string" ? info.role : null,
+    parentID: typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : null,
+  };
+}
+
+/** part 身份（id 非空字符串才可用；缺 id 的 part 在台账面保守跳过——完成判据
+ * 只依赖消息级身份，不依赖 part id）。 */
+function partIdOf(part) {
+  return typeof part?.id === "string" && part.id.length > 0 ? part.id : null;
+}
+
+/**
+ * 本轮锚点解析（纯函数）：newMsgs = 基线之后的消息（含 ident 与宿主 parts 文本）。
+ * 锚点 U = 新 user 消息；多条时优先取 parts 含 sentContent 精确等值回显者
+ * （live 实证 echo t≈1s 在场；上游偶发不回显时唯一候选即锚点，零候选=null 续
+ * 等、多候选无回显=歧义 null 续等——两者均由既有有界收口兜底，绝不猜）。
+ * @returns {{ id:string } | null}
+ */
+function resolveTurnAnchor(newMsgs, sentContent) {
+  const users = newMsgs.filter((x) => x.ident?.role === "user");
+  if (users.length === 0) return null;
+  if (users.length === 1) return { id: users[0].ident.id };
+  if (typeof sentContent === "string" && sentContent.length > 0) {
+    const echoed = users.filter((u) => (u.message?.parts ?? []).some(
+      (p) => p?.type === "text" && p.text === sentContent,
+    ));
+    if (echoed.length === 1) return { id: echoed[0].ident.id };
+  }
+  return null;
+}
+
 // session/usage 分量 → metrics 轴的 1:1 映射。字段名 = 上游 CRn 实现的实际形状
 // （bundle 核证 zcode.cjs:15259：cacheReadTokens/cacheCreationTokens 带 Tokens
 // 后缀；kimi 系的无后缀形状不是 zcode 形状——第三轮 auditor #2）。totalTokens 是
@@ -295,12 +352,10 @@ function metricsEventFromUsage(usage) {
 // {identitySent, resultSent}，首见发主事件、首见终态发 tool_result，各恰一次。
 // 为什么不能"只看新增切片"：同一 tool part 会 pending/running→completed/error
 // **原位更新且 parts.length 不变**——纯切片会永久漏发 tool_result（比双发更糟的
-// 证据缺失）。为什么键用 part 序号而非 id：live 转录实证 callId 缺席（tool_result
-// 的 toolCallId 去重后只剩工具名——名字 fallback 每次触发，callId 去重会把同名
-// 多次调用坍缩成一键，不可用）；partId 的跨快照稳定性未 live 证实。序号键 rides
-// 追加语义——与完成判据**同一 B′ 假设**（上游向历史头部插入 parts 时序号漂移；
-// 可检测的缩短已 fail-closed，见 _streamEvents；不可检测的头插与完成判据同风险
-// 等级，文件头 B′ 段一并覆盖）。扫描成本 O(轮内 parts)，每拍可忽略。
+// 证据缺失）。台账键 = part id（B′ 根修 2026-10-10：探针实证 id 跨快照稳定——
+// 原注释"partId 稳定性未 live 证实"的阻塞项已解除；callId 仍作事件内
+// toolCallId，缺席时回落工具名）。身份键下头部插入天然免疫：旧轮 part 因宿主
+// 消息在基线 id 集内而不进扫描面。扫描成本 O(本轮 parts)，每拍可忽略。
 function zcodeToolCallKey(part, tool) {
   return typeof part?.callId === "string" && part.callId.length > 0
     ? part.callId
@@ -353,32 +408,40 @@ function zcodeToolResultEvents(part) {
 
 // 台账扫描：对 parts 的本轮区间逐 tool part 补投未发事件（轮询每拍与终态收口
 // 复用同一台账——天然防双发且覆盖原位突变）。ledger: Map<partIndex, entry>。
-function projectTurnToolEvents(parts, baselineParts, ledger) {
+// B′ 根修（2026-10-10）：投影区间从【位置区间 [baselineParts, len)】改为【本轮
+// 消息（基线 id 集之外）的 parts】；台账键从 part 序号改为 part id（探针实证
+// id 跨快照稳定——原注释"partId 稳定性未 live 证实"的阻塞项已由探针解除）。
+// 头部插入不再错位：旧轮 part 因宿主消息在基线 id 集内而不进扫描面。缺 id 的
+// tool part 保守跳过（证据缺失好过错位归属）；callId 仍作事件内 toolCallId。
+function projectTurnToolEvents(newMsgs, ledger) {
   const events = [];
-  for (let i = baselineParts; i < parts.length; i += 1) {
-    const part = parts[i];
-    if (part?.type !== "tool") continue;
-    let entry = ledger.get(i);
-    if (!entry) {
-      entry = { identitySent: false, resultSent: false };
-      ledger.set(i, entry);
-    }
-    if (!entry.identitySent) {
-      const identity = zcodeToolIdentityEvents(part);
-      if (identity.length > 0) {
-        events.push(...identity);
-        entry.identitySent = true;
-      } else if (isTerminalZcodeToolStatus(part?.state?.status)) {
-        // 终态仍无主事件（如 write 缺 path / 未 completed）——不会再有，标记收口
-        // 免重复求值（pending write 的空主事件保持未标记，completed 时补发）。
-        entry.identitySent = true;
+  for (const { message } of newMsgs) {
+    for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+      if (part?.type !== "tool") continue;
+      const partKey = partIdOf(part);
+      if (partKey === null) continue;
+      let entry = ledger.get(partKey);
+      if (!entry) {
+        entry = { identitySent: false, resultSent: false };
+        ledger.set(partKey, entry);
       }
-    }
-    if (!entry.resultSent) {
-      const result = zcodeToolResultEvents(part);
-      if (result.length > 0) {
-        events.push(...result);
-        entry.resultSent = true;
+      if (!entry.identitySent) {
+        const identity = zcodeToolIdentityEvents(part);
+        if (identity.length > 0) {
+          events.push(...identity);
+          entry.identitySent = true;
+        } else if (isTerminalZcodeToolStatus(part?.state?.status)) {
+          // 终态仍无主事件（如 write 缺 path / 未 completed）——不会再有，标记收口
+          // 免重复求值（pending write 的空主事件保持未标记，completed 时补发）。
+          entry.identitySent = true;
+        }
+      }
+      if (!entry.resultSent) {
+        const result = zcodeToolResultEvents(part);
+        if (result.length > 0) {
+          events.push(...result);
+          entry.resultSent = true;
+        }
       }
     }
   }
@@ -846,6 +909,7 @@ export class ZcodeBackend {
     // ===== 握手 + 提交（任何失败：杀进程 + 上抛——绝不留半握手进程）=====
     let content;
     let baselineParts;
+    let baselineMessageIds;
     let sentAt;
     let terminalEmitted = false;
     let sessionId;
@@ -920,10 +984,10 @@ export class ZcodeBackend {
           + "than a failed dispatch)",
         );
       }
-      // 提交前基线快照：展平 parts 数。本轮归属 = 序号 >= baselineParts（fresh
-      // 会话为 0；resume 会话为历史长度——「历史 stop 不误判」依赖头部不插入的
-      // 追加语义：头部插入可使旧 stop 序号右移入本轮区间，B′ 残余见文件头完成
-      // 判定段）。响应形状 fail-closed：缺 messages 数组即拒，绝不回落猜测。
+      // 提交前基线快照：展平 parts 数 + 消息身份序列。本轮归属自 B′ 根修
+      // （2026-10-10）起按【身份】判定：基线消息 id 有序集（前缀校验锚）+ 基线
+      // id 集（本轮=集合之外的消息）。响应形状 fail-closed：缺 messages 数组即
+      // 拒，绝不回落猜测。
       const baseline = await request("session/messages", { sessionId });
       if (!baseline || !Array.isArray(baseline.messages)) {
         throw new Error(
@@ -931,6 +995,14 @@ export class ZcodeBackend {
         );
       }
       baselineParts = flattenParts(baseline.messages).length;
+      baselineMessageIds = baseline.messages.map((m) => messageIdent(m)?.id ?? null);
+      if (baselineMessageIds.some((id) => id === null)) {
+        // ⑨l（会审验收项）：历史消息缺 info.id = 身份归属不可解——resume 轮的
+        // 完成/证据归属都靠它。发送之前拒绝（session/send 帧数为 0，零 token）。
+        throw new Error(
+          "zcode resume history lacks message identity (info.id) — attribution would be positional-only and exposed to non-append history mutation; refusing to dispatch (B′ guard)",
+        );
+      }
       // 角色合同拼前缀恰好一次（prompt 级通道——见 supportsRoleContract 注释）。
       content = task.roleContract
         ? task.roleContract + ZCODE_ROLE_TASK_SEPARATOR + task.prompt
@@ -1000,6 +1072,7 @@ export class ZcodeBackend {
         child,
         sessionId,
         baselineParts,
+        baselineMessageIds,
         sentAt,
         sentContent: content,
         signal,
@@ -1038,17 +1111,19 @@ export class ZcodeBackend {
    *     无 HTTP 重试面：通信失败 = 进程死）。
    */
   async *_streamEvents({
-    wire, child, sessionId, baselineParts, sentAt, sentContent,
+    wire, child, sessionId, baselineParts, baselineMessageIds, sentAt, sentContent,
     signal, interval, silentTimeout, onPollTick, markTerminal, stallClock,
   }) {
     const pollInterval = Number.isFinite(interval) && interval > 0
       ? interval
       : DEFAULT_POLL_INTERVAL_MS;
+    const baselineIds = Array.isArray(baselineMessageIds) ? baselineMessageIds : [];
+    const baselineIdSet = new Set(baselineIds);
     let lastPartsCount = baselineParts;
     let noProgressPolls = 0;
     let anyNewPart = false;
     // TD-197①：no-progress 门的时间化（shared stallBudget 纯算法）。noProgressPolls
-    // 仍保留——零 part 思考预算（ZERO_PART_POLL_LIMIT 拍）继续按拍计；turn 内
+    // 仍保留——零 part 思考预算（ZERO_PART_POLL_LIMIT 拍）继续按拍计；轮内
     // 停滞改按"静默段时长 ≥ 自适应预算"判（单调钟，与 pollInterval 解耦；
     // stallClock 为测试注入缝，缺省 performance.now()）。
     const stallTracker = createStallTracker({
@@ -1057,8 +1132,8 @@ export class ZcodeBackend {
       factor: NO_PROGRESS_FACTOR,
       ...(typeof stallClock === "function" ? { now: stallClock } : {}),
     });
-    // TD-199 增量投影状态：台账（partIndex → 双状态）+ 已见 parts 高水位（缩短
-    // 检测——追加语义被破坏时 fail-closed，绝不静默把错位序号当本轮证据）。
+    // TD-199 增量投影状态：台账（partId → 双状态）+ 已见 parts 高水位（缩短
+    // 检测——计数回退仍 fail-closed；身份前缀检测另在下方，两者独立并存）。
     const toolLedger = new Map();
     let highWaterParts = baselineParts;
     const finish = () => {
@@ -1106,7 +1181,8 @@ export class ZcodeBackend {
           );
           return;
         }
-        const parts = flattenParts(result.messages);
+        const msgs = result.messages;
+        const parts = flattenParts(msgs);
         if (parts.length < highWaterParts) {
           finish();
           yield doneEvent(
@@ -1116,11 +1192,34 @@ export class ZcodeBackend {
           return;
         }
         highWaterParts = Math.max(highWaterParts, parts.length);
-        // TD-199：每拍台账扫描——工具证据在轮询期即落盘（原实现全部证据积压到
-        // 终态 _completeTurn 一次性投影，长 run 运行期转录零事件、liveness 只有
-        // process_only，Lead 无法区分"在干活"与"挂死"）。纯文本/思考段仍零
+        // ===== B′ 根修（2026-10-10 身份切片）：历史变异检测 + 本轮归属 =====
+        // 变异 = 基线消息 id 有序序列不再是当前快照的前缀（头部插入/重排/删除/
+        // compaction 改写历史都会击穿前缀）——一旦确认，完成与证据归属都不再
+        // 可信，具名失败（与"快照缩短即失败"同一纪律），绝不静默续用错位快照。
+        const idents = msgs.map((m) => messageIdent(m));
+        let historyMutated = false;
+        for (let i = 0; i < baselineIds.length; i += 1) {
+          if (idents[i]?.id !== baselineIds[i]) { historyMutated = true; break; }
+        }
+        if (historyMutated) {
+          finish();
+          yield doneEvent(
+            "failed",
+            "zcode history mutated non-append (baseline message ids are no longer a prefix of the snapshot — turn attribution is unreliable, refusing to guess)",
+          );
+          return;
+        }
+        // 本轮消息 = 基线 id 集之外的消息（缺 id 的新消息不可归属，保守跳过——
+        // 锚点不成立由有界收口兜底）。
+        const newMsgs = [];
+        for (let i = 0; i < msgs.length; i += 1) {
+          if (!idents[i] || baselineIdSet.has(idents[i].id)) continue;
+          newMsgs.push({ ident: idents[i], message: msgs[i] });
+        }
+        // TD-199：每拍台账扫描——工具证据在轮询期即落盘（身份键去重；头部插入
+        // 下旧轮 part 因宿主消息在基线集内而不进扫描面）。纯文本/思考段仍零
         // run.event（诚实边界：本修复只治愈工具活跃期）。
-        for (const event of projectTurnToolEvents(parts, baselineParts, toolLedger)) {
+        for (const event of projectTurnToolEvents(newMsgs, toolLedger)) {
           yield event;
         }
         if (parts.length > lastPartsCount) {
@@ -1131,19 +1230,28 @@ export class ZcodeBackend {
         } else {
           noProgressPolls += 1;
         }
-        // 完成判据：快照最后一位是本轮的 step-finish(stop|error)。历史轮的
-        // step-finish 序号 < baselineParts 仅在追加语义下成立（上游向历史头部
-        // 插入 parts 时旧 stop 序号可右移入本轮区间——B′ 残余，见文件头完成
-        // 判定段）。
-        const last = parts.length > 0 ? parts[parts.length - 1] : null;
-        const finishReason = last !== null && last?.type === "step-finish"
-          && parts.length - 1 >= baselineParts
-          && (last.reason === "stop" || last.reason === "error")
-          ? last.reason
-          : null;
+        // 完成判据（身份式）：锚点 U = 本轮新 user 消息（回显优先消歧）；完成 =
+        // 存在新 assistant 消息 A（A.parentID === U.id）且 A 的末位 part 是
+        // step-finish(stop|error)。旧位置式判据（全局尾部 + 序号 ≥ 基线）在头部
+        // 插入下可被旧 stop 右移击穿——B′ 关闭；parent 不匹配的新 assistant
+        // （⑨k）不构成完成，续等由有界收口兜底。
+        const anchor = resolveTurnAnchor(newMsgs, sentContent);
+        let finishReason = null;
+        if (anchor !== null) {
+          for (const { ident, message } of newMsgs) {
+            if (ident.role !== "assistant" || ident.parentID !== anchor.id) continue;
+            const own = Array.isArray(message?.parts) ? message.parts : [];
+            const lastOwn = own.length > 0 ? own[own.length - 1] : null;
+            if (lastOwn?.type === "step-finish"
+              && (lastOwn.reason === "stop" || lastOwn.reason === "error")) {
+              finishReason = lastOwn.reason;
+              break;
+            }
+          }
+        }
         if (finishReason === "stop") {
           yield* this._completeTurn({
-            wire, child, sessionId, parts, baselineParts, sentContent, finish, toolLedger,
+            wire, child, sessionId, newMsgs, anchor, sentContent, finish, toolLedger,
           });
           return;
         }
@@ -1204,33 +1312,28 @@ export class ZcodeBackend {
 
   /**
    * completed 轮发射序列：usage（session/usage——reportsTokenUsage=true 的通道；
-   * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮 type:"tool" 帧逐帧投影
-   * ——evidenceEventsFromZcodeParts，证据先行，opencode/kimi-web 同惯例）→
-   * 台账补漏（TD-199：终态先补未发证据）→ user echo → assistant text（发射前
-   * 非空复检，N1 教训——空文本失败仅不伪造 echo/assistant，已发证据保留）→
-   * metrics（分量在场才发）→ done(completed)。
+   * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮消息的 type:"tool"
+   * 帧逐帧投影——身份键台账，证据先行，opencode/kimi-web 同惯例）→ 台账补漏
+   * （TD-199：终态先补未发证据）→ user echo → assistant text（身份切片：只取
+   * parentID===锚点 U 的新 assistant 消息的 text parts——回显启发式退役：echo
+   * 是 user 消息自己的 part，parent 过滤天然排除；发射前非空复检，N1 教训）
+   * → metrics（分量在场才发）→ done(completed)。
    */
-  async *_completeTurn({ wire, child, sessionId, parts, baselineParts, sentContent, finish, toolLedger }) {
-    const slice = parts.slice(baselineParts);
-    // 剔除我们自己的 user 回显（上游未实证 role 标注——见文件头诚实边界声明）：
-    // 首个与发送内容精确等值的 text part 之前的切片全部跳过；找不到回显则全量。
-    let echoIndex = -1;
-    for (let i = 0; i < slice.length; i += 1) {
-      if (slice[i]?.type === "text" && slice[i].text === sentContent) {
-        echoIndex = i;
-        break;
-      }
-    }
-    const textSlice = echoIndex >= 0 ? slice.slice(echoIndex + 1) : slice;
+  async *_completeTurn({ wire, child, sessionId, newMsgs, anchor, sentContent, finish, toolLedger }) {
+    // 身份切片：本轮 assistant 文本 = 宿主为锚点 U 的新 assistant 消息的全部
+    // text parts（多个 assistant 消息按快照顺序拼接）。
     const textParts = [];
-    for (const part of textSlice) {
-      if (part?.type === "text" && typeof part.text === "string") textParts.push(part.text);
+    for (const { ident, message } of newMsgs) {
+      if (ident.role !== "assistant" || ident.parentID !== anchor.id) continue;
+      for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+        if (part?.type === "text" && typeof part.text === "string") textParts.push(part.text);
+      }
     }
     const text = textParts.join("");
     // TD-199（双席会审修正）：终态先跑台账补漏扫描再判失败——空文本/usage 失败
     // 路径下，已发生的工具事实必须保留（原实现空文本会压掉全部证据，已记录的
     // 真实工具活动随失败丢失）；轮询期已增量发过的事件由台账天然去重。
-    for (const event of projectTurnToolEvents(parts, baselineParts, toolLedger)) {
+    for (const event of projectTurnToolEvents(newMsgs, toolLedger)) {
       yield event;
     }
     if (text.trim().length === 0) {

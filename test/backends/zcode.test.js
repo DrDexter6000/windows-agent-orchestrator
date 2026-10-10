@@ -267,16 +267,70 @@ async function waitUntil(predicate, timeoutMs = 2000) {
   return Boolean(predicate());
 }
 
-const userMsg = (text) => ({ role: "user", parts: [{ type: "text", text }] });
-const assistantMsg = (text, reason = "stop") => ({
-  role: "assistant",
-  parts: [{ type: "text", text }, { type: "step-finish", reason, tokens: { input: 60, output: 30 } }],
-});
+// B′ 根修（2026-10-10）夹具形状 = live 探针实证（.dev/bprime-evidence/）：
+// 消息带 info:{id, role}，assistant 另带 info.parentID 指向其宿主 user 消息
+// （=完成判据的轮次锚点）；parts 带 id + messageID（宿主回指）。身份经模块级
+// 序列生成；assistantMsg/stepStartMsg 的 parent 默认挂最近一条 userMsg
+// （__lastUserId）；需要错 parent/无 id 的反例（⑨k/⑨l）手写 info 覆盖。
+let __fixtureSeq = 0;
+let __lastUserId = null;
+const fixtureId = (pfx) => `${pfx}_fx_${String(++__fixtureSeq).padStart(4, "0")}`;
+const userMsg = (text) => {
+  const id = fixtureId("msg");
+  __lastUserId = id;
+  return { role: "user", info: { id, role: "user" }, parts: [{ type: "text", text, id: fixtureId("part"), messageID: id }] };
+};
+const assistantMsg = (text, reason = "stop") => {
+  const id = fixtureId("msg");
+  return {
+    role: "assistant",
+    info: { id, role: "assistant", ...(__lastUserId !== null ? { parentID: __lastUserId } : {}) },
+    parts: [
+      { type: "text", text, id: fixtureId("part"), messageID: id },
+      { type: "step-finish", reason, tokens: { input: 60, output: 30 }, id: fixtureId("part"), messageID: id },
+    ],
+  };
+};
 // 步开始 part（本轮 live 实测形状：GLM-5.3 工具任务产出顺序 echo → step-start →
 // 步间 reasoning 静默 → step-finish，run_20261001203009794bb6add 时间线）。完成
 // 判定只认末位 step-finish，其余 part 类型一律按「新 part 进展」计（zcode.js
 // _streamEvents）——step-start 正是该语义的实测载体。
-const stepStartMsg = () => ({ role: "assistant", parts: [{ type: "step-start" }] });
+const stepStartMsg = () => {
+  const id = fixtureId("msg");
+  return {
+    role: "assistant",
+    info: { id, role: "assistant", ...(__lastUserId !== null ? { parentID: __lastUserId } : {}) },
+    parts: [{ type: "step-start", id: fixtureId("part"), messageID: id }],
+  };
+};
+// 手写字面量夹具的一次性身份注入（按书写顺序：首条 user 为锚点宿主、assistant
+// 挂最近 user；显式 info 字段最后合入——反例用例可用手写 info 覆盖默认身份）。
+const withIdentity = (messages) => {
+  let lastUser = null;
+  return messages.map((m) => {
+    const id = fixtureId("msg");
+    const role = m?.info?.role ?? m?.role ?? null;
+    if (role === "user") lastUser = id;
+    const info = {
+      id,
+      role,
+      ...(role === "assistant" && lastUser !== null ? { parentID: lastUser } : {}),
+      ...(m?.info ?? {}),
+    };
+    const parts = (m?.parts ?? []).map((p) => ({ id: fixtureId("part"), messageID: id, ...p }));
+    return { ...m, info, parts };
+  });
+};
+// 内联 parts 字面量的 assistant 消息（parent 挂最近 userMsg——与 assistantMsg 同语义，
+// parts 可任意组合）。
+const assistantPartsMsg = (parts) => {
+  const id = fixtureId("msg");
+  return {
+    role: "assistant",
+    info: { id, role: "assistant", ...(__lastUserId !== null ? { parentID: __lastUserId } : {}) },
+    parts: parts.map((p) => ({ id: fixtureId("part"), messageID: id, ...p })),
+  };
+};
 
 // 上游 zod 结果 schema 的最小复刻（bundle 核证 zcode.cjs:72，第三轮 auditor #5）
 // ——只复刻"必填字段在场/枚举成员"这一层校验（上游 resolveClientRequest 对 client
@@ -550,7 +604,7 @@ test("zcode ④: step-finish(stop) → user echo + assistant text + metrics + do
     peerOptions: {
       messages: (n) => (n <= 1
         ? []
-        : [userMsg("do the task"), assistantMsg("chunk one "), { role: "assistant", parts: [{ type: "text", text: "chunk two" }, { type: "step-finish", reason: "stop", tokens: {} }] }]),
+        : [userMsg("do the task"), assistantMsg("chunk one "), assistantPartsMsg([{ type: "text", text: "chunk two" }, { type: "step-finish", reason: "stop", tokens: {} }])]),
     },
   });
   const events = await collect(handle);
@@ -578,10 +632,10 @@ test("zcode ④b: 中间 step-finish(非 stop|error) 不算完成；step-finish(
   // 轮内多 step：中间 step-finish（如 tool 轮）reason 不在闭集 → 继续等。
   const progressing = (n) => {
     if (n <= 1) return [];
-    if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [{ type: "text", text: "partial" }, { type: "step-finish", reason: "tool-use", tokens: {} }] }];
+    if (n === 2) return [userMsg("do the task"), assistantPartsMsg([{ type: "text", text: "partial" }, { type: "step-finish", reason: "tool-use", tokens: {} }])];
     return [
       userMsg("do the task"),
-      { role: "assistant", parts: [{ type: "text", text: "partial" }, { type: "step-finish", reason: "tool-use", tokens: {} }] },
+      assistantPartsMsg([{ type: "text", text: "partial" }, { type: "step-finish", reason: "tool-use", tokens: {} }]),
       assistantMsg("final", "stop"),
     ];
   };
@@ -610,10 +664,12 @@ test("zcode ④b: 中间 step-finish(非 stop|error) 不算完成；step-finish(
 
 // bundle qZe tool 臂 + nor state 联合的形状复刻（.strict() 字段集）：
 // {partId, sessionId, messageId, type:"tool", callId, tool, state:{status, input, …}}。
+// B′ 根修（2026-10-10 探针实证 live 形状）：part 身份键 = id（part_*）；同一
+// 逻辑工具调用的状态翻转（running→completed）跨拍【同 id】——身份台账据此去重。
 const toolPart = ({ callId, tool, status, input, output, error, raw }) => ({
-  partId: `part_${callId}`,
-  sessionId: SESSION_ID,
-  messageId: "msg_tool_1",
+  id: `part_${callId}`,
+  sessionID: SESSION_ID,
+  messageID: "msg_tool_1",
   type: "tool",
   callId,
   tool,
@@ -640,7 +696,7 @@ test("zcode ④c: completed 轮 tool(write) part → file_written + tool_result�
         userMsg("do the task"),
         // live 形状：tool part 与 text part 同轮混排（tool → text → step-finish，
         // 完成判据要求 step-finish 收尾）——证据先行与 part 排布位置无关。
-        { role: "assistant", parts: [writePart, { type: "text", text: "wrote the probe file" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([writePart, { type: "text", text: "wrote the probe file" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -697,7 +753,7 @@ test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工
     peerOptions: {
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [bashDone, readDone, bashError, { type: "text", text: "done" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([bashDone, readDone, bashError, { type: "text", text: "done" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -731,7 +787,7 @@ test("zcode ④e: 非终态 status（pending|running）只投影主事件不追�
     peerOptions: {
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [pending, running, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([pending, running, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -759,7 +815,7 @@ test("zcode ④e: 非终态 status（pending|running）只投影主事件不追�
     peerOptions: {
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [noPath, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([noPath, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -805,7 +861,7 @@ test("zcode ④g: completed 轮只有 tool part 无 assistant 文本 → done(fa
     peerOptions: {
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [writePart, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([writePart, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -830,7 +886,7 @@ test("zcode ⑤: completed 轮无 assistant 文本 → done(failed)，绝不伪�
   // 只有 user 回显 + step-finish(stop)：回显剔除后为空 → N1 收口。
   const { handle, child } = await runScenario({
     peerOptions: {
-      messages: (n) => (n <= 1 ? [] : [userMsg("do the task"), { role: "assistant", parts: [{ type: "step-finish", reason: "stop", tokens: {} }] }]),
+      messages: (n) => (n <= 1 ? [] : [userMsg("do the task"), assistantPartsMsg([{ type: "step-finish", reason: "stop", tokens: {} }])]),
     },
   });
   const events = await collect(handle);
@@ -1030,8 +1086,10 @@ test("zcode ⑥f: 反例④——echo+step-start 后步间静默 20 拍再 step-
 // ===== ⑦ 通信失败 = 进程死 =====
 
 test("zcode ⑦: 轮询中进程死 → done(failed, transport closed)", async () => {
+  // B′ 根修：夹具一次性构造（跨拍同 id——每拍重建会在身份前缀校验下被读成历史变异）。
+  const msgs = [userMsg("do the task")];
   const { child, handle } = await runScenario({
-    peerOptions: { messages: () => [userMsg("do the task")] },
+    peerOptions: { messages: () => msgs },
   });
   const collectPromise = collect(handle);
   child.end(1);
@@ -1081,8 +1139,9 @@ test("zcode ⑦c: session/messages 响应缺 messages 数组 → fail-closed（s
 });
 
 test("zcode ⑦d: stdout 非 JSON 行 → 协议破裂 done(failed)（fail-closed，不静默吞）", async () => {
+  const msgs = [userMsg("do the task")];
   const { child, handle } = await runScenario({
-    peerOptions: { messages: () => [userMsg("do the task")] },
+    peerOptions: { messages: () => msgs },
   });
   const collectPromise = collect(handle);
   child.stdout.write("this is not json\n");
@@ -1297,6 +1356,137 @@ test("zcode ⑨c: 反例——历史尾部 step-finish(stop) + 新轮无新 part
   child.kill();
 });
 
+// ===== ⑨h-⑨l/⑫f B′ 根修验收（2026-10-10，双席方案会审 consult_20261010134035145ef1yzp
+// + live 探针 .dev/bprime-evidence/）：身份切片反例组 =====
+// 旧位置式判据（全局尾部 step-finish 且序号 ≥ 基线）在头部插入下被旧 stop 右移
+// 击穿：假 completed + 发射旧答案，并连带击穿 0052 失败即弃（假 completed 让下一
+// 轮照常 resume 半死会话）、run_lineage 交付链同暴露（finish 会杀死真在跑的续接
+// 轮）。身份切片（锚点 U=新 user 消息；完成=parent 指向 U 的新 assistant 末位
+// step-finish；变异=基线 id 序列不再前缀）从构造上关死该窗口。
+
+test("⑨h B′: 头部插入+无新轮 → 具名 history mutated 失败、零消息（旧位置判据=假 completed+发射旧答案）", async () => {
+  const history = [userMsg("old question"), assistantMsg("old answer")];
+  const inserted = [
+    { role: "user", info: { id: fixtureId("msg"), role: "user" }, parts: [{ type: "text", text: "head inserted", id: fixtureId("part") }] },
+    ...history,
+  ];
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" },
+    peerOptions: { messages: (n) => (n <= 1 ? history : inserted) },
+  });
+  const events = await collect(handle);
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /history mutated non-append/, "变异具名（前缀击穿），绝不静默续用错位快照");
+  assert.equal(events.filter((e) => e.kind === "message").length, 0, "旧答案绝不发射");
+  child.kill();
+});
+
+test("⑨i B′: 头部插入+真新轮完成 → v1 保守仍具名失败（变异已确认，归属不可信）", async () => {
+  const history = [userMsg("old question"), assistantMsg("old answer")];
+  const u1 = userMsg("continue");
+  const a1 = assistantMsg("new answer");
+  const inserted = [
+    { role: "user", info: { id: fixtureId("msg"), role: "user" }, parts: [{ type: "text", text: "head inserted", id: fixtureId("part") }] },
+    ...history, u1, a1,
+  ];
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" },
+    peerOptions: { messages: (n) => (n <= 1 ? history : inserted) },
+  });
+  const events = await collect(handle);
+  assert.equal(events.at(-1).reason, "failed");
+  assert.match(events.at(-1).error, /history mutated non-append/);
+  assert.equal(events.filter((e) => e.kind === "message").length, 0, "即使随后出现真新轮，变异确认后归属不可信（v1 保守；放宽需 live 证据）");
+  child.kill();
+});
+
+test("⑨j B′: 合法相同答案（不同轮 id、同文本）→ 照常 completed（防未来指纹护栏误伤）", async () => {
+  const history = [userMsg("run the suite"), assistantMsg("PASS")];
+  const u1 = userMsg("run the suite");
+  const a1 = assistantMsg("PASS");
+  const { handle, child } = await runScenario({
+    task: { prompt: "run the suite", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" },
+    peerOptions: { messages: (n) => (n <= 1 ? history : [...history, u1, a1]) },
+  });
+  const events = await collect(handle);
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "不同轮的相同文本是合法完成（tester 重跑同套件常态）");
+  const assistantMsgs = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistantMsgs.length, 1);
+  assert.equal(assistantMsgs[0].parts[0].text, "PASS");
+  child.kill();
+});
+
+test("⑨k B′: 新 assistant parent 错挂旧轮（parentID 指向 U0）→ 不构成完成，停滞门有界收口", async () => {
+  const history = [userMsg("old question"), assistantMsg("old answer")];
+  const u1 = userMsg("continue");
+  const aWrong = (() => {
+    const id = fixtureId("msg");
+    return {
+      role: "assistant",
+      info: { id, role: "assistant", parentID: history[0].info.id },
+      parts: [
+        { type: "text", text: "stale reply", id: fixtureId("part"), messageID: id },
+        { type: "step-finish", reason: "stop", tokens: {}, id: fixtureId("part"), messageID: id },
+      ],
+    };
+  })();
+  const steady = [...history, u1, aWrong];
+  let fakeNow = 1_000;
+  const clock = () => fakeNow;
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" },
+    peerOptions: { messages: (n) => (n <= 1 ? history : steady) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: clock,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed", "parent 不匹配的新 assistant 绝不构成完成");
+  assert.match(done.error, /turn stalled/, "由停滞门有界收口");
+  assert.equal(events.filter((e) => e.kind === "message").length, 0);
+  child.kill();
+});
+
+test("⑨l B′: resume 历史缺 info.id → 派发前拒绝（session/send 帧数为 0，零 token）", async () => {
+  const child = makeFakeChild();
+  const kill = fakeKill();
+  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn });
+  const peer = fakeZcodePeer(child, {
+    // 旧形状历史（无 info）——身份归属不可解。
+    messages: () => [{ role: "user", parts: [{ type: "text", text: "legacy" }] }],
+  });
+  await assert.rejects(
+    () => backend.spawn(makeAgent(), { prompt: "x", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" }),
+    /lacks message identity/,
+    "历史缺 id = 位置式归属 = B′ 暴露面——发送之前拒绝",
+  );
+  assert.equal(peer.framesOf("session/send").length, 0, "零发送、零 token");
+});
+
+test("⑫f B′: 头部插入下旧轮 tool part 不重发（变异即拒，零 command/tool_result）", async () => {
+  const oldTool = toolPart({ callId: "call_old", tool: "Bash", status: "completed", input: { command: "node old.mjs" }, output: "old ok" });
+  const history = [userMsg("old question"), assistantPartsMsg([oldTool, { type: "text", text: "old answer" }, { type: "step-finish", reason: "stop", tokens: {} }])];
+  const inserted = [
+    { role: "user", info: { id: fixtureId("msg"), role: "user" }, parts: [{ type: "text", text: "head inserted", id: fixtureId("part") }] },
+    ...history,
+  ];
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" },
+    peerOptions: { messages: (n) => (n <= 1 ? history : inserted) },
+  });
+  const events = await collect(handle);
+  assert.match(events.at(-1).error, /history mutated non-append/);
+  assert.equal(events.filter((e) => e.kind === "command").length, 0, "旧轮命令证据不重发");
+  assert.equal(events.filter((e) => e.kind === "tool_result").length, 0, "旧轮工具结果不重发");
+  assert.equal(events.filter((e) => e.kind === "file_written").length, 0, "旧轮文件写入证据不重发");
+  child.kill();
+});
+
 // auditor #1 的直接钉：fake 对端有状态——未经 create/resume 注册的 sessionId 上
 // setModel 必失败（"Session is not active"，zcode.cjs:15245 形状）。v2 的（错误的）
 // "复用 id 直发 setModel" 序列撞上真上游就是这个形状——本测试用不经 backend 的
@@ -1465,12 +1655,12 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 12 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
-  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b。加/删构造必须同步更新此数字——不更新即红。
+  // P2②b：严格相等。当前实际 = 13 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
+  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l。加/删构造必须同步更新此数字——不更新即红。
   assert.equal(
     constructions.length,
-    12,
-    `守卫扫描应找到恰 12 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    13,
+    `守卫扫描应找到恰 13 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,
@@ -1524,14 +1714,18 @@ test("zcode ⑫a: 轮询期增量落盘——running bash 的 command 事件在�
   // 时拉到 command（批式实现的第一事件要等到终态投影——本用例对它是红的）。
   const running = toolPart({ callId: "call_inc1", tool: "Bash", status: "running", input: { command: "node long.mjs" } });
   const doneTool = toolPart({ callId: "call_inc1", tool: "Bash", status: "completed", input: { command: "node long.mjs" }, output: "long ok" });
+  // B′ 根修：阶段数组一次性构造（跨拍同消息/同 part id——回调内每拍重建会被
+  // 身份台账当成新 part 重复发射）。
+  const phaseRunning = [userMsg("do the task"), assistantPartsMsg([running])];
+  const phaseFinal = [userMsg("do the task"), assistantPartsMsg([doneTool, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
   let maxPoll = 0;
   const { handle, child } = await runScenario({
     peerOptions: {
       messages: (n) => {
         maxPoll = Math.max(maxPoll, n);
         if (n <= 1) return [];
-        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
-        return [userMsg("do the task"), { role: "assistant", parts: [doneTool, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+        if (n === 2) return phaseRunning;
+        return phaseFinal;
       },
     },
   });
@@ -1560,17 +1754,22 @@ test("zcode ⑫a: 轮询期增量落盘——running bash 的 command 事件在�
 test("zcode ⑫b: 同 part 原位终态（parts.length 不变）→ tool_result 恰一次补发（纯新增切片方案会永久漏发的杀伤用例）", async () => {
   const running = toolPart({ callId: "call_flip", tool: "Bash", status: "running", input: { command: "node flip.mjs" } });
   const flipped = toolPart({ callId: "call_flip", tool: "Bash", status: "completed", input: { command: "node flip.mjs" }, output: "flip ok" });
+  // B′ 根修：阶段数组一次性构造；running/flipped 经 toolPart 同 callId → 同
+  // part id（身份台账跨拍识别为同一逻辑 part 的状态翻转，恰一次主事件+恰一次补发）。
+  const phaseRunning = [userMsg("do the task"), assistantPartsMsg([running])];
+  const phaseFlipped = [userMsg("do the task"), assistantPartsMsg([flipped])];
+  const phaseFinal = [userMsg("do the task"), assistantPartsMsg([flipped, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
   let sawSameLengthFlip = false;
   const { handle, child } = await runScenario({
     peerOptions: {
       messages: (n) => {
         if (n <= 1) return [];
-        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
+        if (n === 2) return phaseRunning;
         if (n === 3) {
           sawSameLengthFlip = true;
-          return [userMsg("do the task"), { role: "assistant", parts: [flipped] }];
+          return phaseFlipped;
         }
-        return [userMsg("do the task"), { role: "assistant", parts: [flipped, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+        return phaseFinal;
       },
     },
   });
@@ -1592,7 +1791,7 @@ test("zcode ⑫c: live 形状（callId 缺席，toolCallId 回落工具名）—
     peerOptions: {
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [b1, b2, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([b1, b2, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -1613,7 +1812,7 @@ test("zcode ⑫d: 快照缩短（parts.length 回退）→ fail-closed done(fail
     peerOptions: {
       messages: (n) => {
         if (n <= 1) return [];
-        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
+        if (n === 2) return [userMsg("do the task"), assistantPartsMsg([running])];
         return [userMsg("do the task")];
       },
     },
@@ -1637,12 +1836,12 @@ test("zcode ⑫e: pending write（path 在场）零 file_written——completed 
         // 检查点 400ms 落在 pending 期内，"pending 期零事件"可确定断言。
         if (n <= 400) {
           const fillers = Array.from({ length: n }, (_, i) => ({ type: "text", text: `wip ${i}` }));
-          return [userMsg("do the task"), { role: "assistant", parts: [writePending, ...fillers] }];
+          return [userMsg("do the task"), assistantPartsMsg([writePending, ...fillers])];
         }
         // 翻转快照必须 ≥ filler 撑大的长度（否则触发缩短守卫 done(shrank)）：
         // write 原位转 completed + 400 fillers + ok + step-finish。
         const fillers = Array.from({ length: 400 }, (_, i) => ({ type: "text", text: `wip ${i}` }));
-        return [userMsg("do the task"), { role: "assistant", parts: [writeDone, ...fillers, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+        return [userMsg("do the task"), assistantPartsMsg([writeDone, ...fillers, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
       },
     },
   });
@@ -1675,9 +1874,9 @@ test("zcode ⑫f: 证据已落后进程死（通信失败）→ done(failed) 且
     peerOptions: {
       messages: (n) => {
         if (n <= 1) return [];
-        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [bashDone] }];
+        if (n === 2) return [userMsg("do the task"), assistantPartsMsg([bashDone])];
         // 拍 3 起：不给终态，外部杀进程（wire closed → done(failed)）
-        return [userMsg("do the task"), { role: "assistant", parts: [bashDone] }];
+        return [userMsg("do the task"), assistantPartsMsg([bashDone])];
       },
     },
   });
@@ -1705,7 +1904,7 @@ test("zcode ⑫g: 终态后 session/usage 失败 → done(failed) 且已发证�
       usageError: { code: -32000, message: "usage backend exploded" },
       messages: (n) => (n <= 1 ? [] : [
         userMsg("do the task"),
-        { role: "assistant", parts: [bashDone, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+        assistantPartsMsg([bashDone, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }]),
       ]),
     },
   });
@@ -1727,8 +1926,8 @@ test("zcode ⑫h: 输入晚来——Bash 首拍 input 空壳不投占位/不锁�
     peerOptions: {
       messages: (n) => {
         if (n <= 1) return [];
-        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [shellEmpty] }];
-        return [userMsg("do the task"), { role: "assistant", parts: [shellFilled, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+        if (n === 2) return [userMsg("do the task"), assistantPartsMsg([shellEmpty])];
+        return [userMsg("do the task"), assistantPartsMsg([shellFilled, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
       },
     },
   });
