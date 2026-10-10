@@ -928,6 +928,48 @@ test("TD-247 ④ 无法归属形态: 如实标注，不伪造 runId 或事实字
   assert.deepEqual(result.stdout, ['[canonical] 仍然 RED，以下是归属证据：无法归属（形态：".session-reuse-x"）']);
 });
 
+// P4 会审 Q2（opus 中高）：并行会话最常见的守卫新增=控制面副产物——
+// .owner-<runId> 心跳与 .claims/<runId>.g<N>[.released] 代文件。条目名带
+// runId，必须映射到真转录（顶层平铺或 projects 桶内）读首事件，不得"无法归属"。
+test("TD-247 ④b 控制面副产物形态: .owner-/.claims/ 条目映射 runId 解析桶内真转录", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    mkdirSync(join(root, "runs", "projects", "demo-abc12345"), { recursive: true });
+    writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_side1.jsonl"),
+      '{"type":"run.background_submitted","runId":"run_side1","cwd":"D:\\\\other\\\\ws","agentId":"side-agent","ts":"2026-10-10T19:00:00.000Z","project":{"kind":"project","key":"d:/other/ws","bucket":"demo-abc12345"}}\n', "utf8");
+    writeFileSync(join(root, "runs", ".owner-run_side1"), "1", "utf8");
+    mkdirSync(join(root, "runs", ".claims"), { recursive: true });
+    writeFileSync(join(root, "runs", ".claims", "run_side2.g0.released"), "", "utf8");
+    writeFileSync(join(root, "runs", "run_side2.jsonl"),
+      '{"type":"run.background_submitted","runId":"run_side2","cwd":"D:\\\\flat\\\\ws","agentId":"flat-agent","ts":"2026-10-10T19:01:00.000Z"}\n', "utf8");
+  });
+  assert.equal(result.exitCode, 1);
+  const byEntry = new Map(result.report.runsDirGuard.attribution.map((a) => [a.entry, a]));
+  const owner = byEntry.get(".owner-run_side1");
+  assert.equal(owner.runId, "run_side1");
+  assert.equal(owner.parseStatus, "parsed");
+  assert.equal(owner.agentId, "side-agent");
+  assert.equal(owner.project?.bucket, "demo-abc12345");
+  const claim = byEntry.get(".claims/run_side2.g0.released");
+  assert.equal(claim.runId, "run_side2");
+  assert.equal(claim.parseStatus, "parsed");
+  assert.equal(claim.agentId, "flat-agent");
+  // 新桶条目与桶内转录也各自有归属行（原有 ② 形态不受影响）
+  assert.ok(byEntry.has("projects/demo-abc12345"));
+  assert.ok(result.stdout.some((l) => l.includes(".owner-run_side1") && l.includes("side-agent")));
+});
+
+test("TD-247 ④c 控制面副产物: runId 找不到真转录时如实 unknown（不伪造字段）", async () => {
+  const result = await attributionSuiteFixture((root) => {
+    mkdirSync(join(root, "runs"), { recursive: true });
+    writeFileSync(join(root, "runs", ".owner-run_ghost1"), "1", "utf8");
+  });
+  assert.equal(result.exitCode, 1);
+  const ghost = result.report.runsDirGuard.attribution.find((a) => a.entry === ".owner-run_ghost1");
+  assert.equal(ghost.parseStatus, "unknown");
+  assert.equal(ghost.runId, "run_ghost1");
+  assert.equal(ghost.cwd, undefined);
+});
+
 test("TD-247 ⑤ 措辞钉: 成功/unknown/无法归属均逐字声明仍然 RED，控制字符不造第二行", () => {
   for (const evidence of [ATTRIBUTION_X, { entry: "run_x.jsonl", parseStatus: "unknown" },
     { entry: ".session-reuse-x", parseStatus: "unattributable" },
@@ -2615,9 +2657,9 @@ test("TD-233: runIdFromWorktreeCwd — 末次出现优先 + Windows 大小写 + 
 // 满足」，每一条资格都有独立反例钉；worker 上下文与过期回 fail 有集成钉。
 
 const IF_ENTRY = () => ({
-  id: "IF-T", file: "flake.test.js", subtest: "flaky subtest",
+  id: "IF-T", file: "flake.test.js", subtest: "flaky subtest", operator: "ok",
   signature: "AssertionError [ERR_ASSERTION]: elapsed <n>ms",
-  isolationRequired: true, registeredAt: "2026-10-01", expiresOn: "2099-01-01",
+  isolationRequired: true, registeredAt: "2026-10-01", expiresOn: "2026-10-14",
   owner: "test", note: "meta-test fixture entry", status: "active",
 });
 
@@ -2643,16 +2685,21 @@ test("TD-248: validateInterferenceRegistry——合法通过；逐类违约具�
     [(r) => { r.schemaVersion = 2; }, "schemaVersion"],
     [(r) => { r.entries = null; }, "entries"],
     [(r) => { delete r.entries[0].subtest; }, "subtest"],
+    [(r) => { delete r.entries[0].operator; }, "operator"],
     [(r) => { r.entries[0].isolationRequired = false; }, "isolationRequired"],
     [(r) => { r.entries[0].status = "live"; }, "status"],
     [(r) => { r.entries[0].registeredAt = "2026/10/01"; }, "registeredAt"],
     [(r) => { r.entries[0].expiresOn = "2025-01-01"; }, "precedes"],
+    // P4 会审收紧：14 天衰减帽（长期条目绕开衰减=违约）
+    [(r) => { r.entries[0].expiresOn = "2026-12-31"; }, "decay cap"],
+    // P4 会审收紧：未来登记日（today 显式传入时）
+    [(r) => { r.entries[0].registeredAt = "2026-10-20"; r.entries[0].expiresOn = "2026-10-30"; }, "future"],
     [(r) => { r.entries.push({ ...IF_ENTRY() }); }, "duplicated"],
     [(r) => { r.entries[0] = "x"; }, "must be an object"],
   ]) {
     const registry = { schemaVersion: 1, entries: [IF_ENTRY()] };
     mutate(registry);
-    const v = validateInterferenceRegistry(registry);
+    const v = validateInterferenceRegistry(registry, "2026-10-10");
     assert.equal(v.ok, false);
     assert.ok(v.errors.some((e) => e.includes(expect)), `${expect} 违约应具名（得到 ${v.errors.join(";")}）`);
   }

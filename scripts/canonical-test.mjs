@@ -36,9 +36,11 @@
 //     never be carried forward into more spawns).
 //   - First-round verdict: any non-pass file (fail / missing suite / crash) OR a
 //     nonzero wave exit OR a missing/malformed wave report OR a spawn error ⇒
-//     non-green, and that can NEVER be washed green. Each non-pass file gets at
-//     most ONE isolation recheck (a single process per failed file — diagnostic,
-//     bounded) that only APPENDS a classification
+//     non-green, and that can NEVER be washed green EXCEPT via the TD-248/0054
+//     interference-registry closed eligibility set (committed registry + every
+//     failing sub-test matched + non-worker context + unexpired). Each non-pass
+//     file gets at most ONE isolation recheck (a single process per failed file
+//     — diagnostic, bounded) that only APPENDS a classification
 //     (stable_fail / isolation_pass / environment_invalid) — never a pass.
 //   - R8-3 runs/ hygiene, TWO layers (R8-C two-layer split, Owner-approved
 //     2026-08-17). The invariant "tests must NEVER use the repo's real runs/
@@ -158,7 +160,7 @@
 // verdict), no timeout inflation, no skipped failures, no new deps.
 
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, mkdtempSync, rmSync, openSync, readSync, closeSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, mkdtempSync, rmSync, openSync, readSync, closeSync, existsSync } from "node:fs";
 import { join, resolve, dirname, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { availableParallelism, cpus, tmpdir } from "node:os";
@@ -285,8 +287,9 @@ export function validateWavePlan(wavePlan, categories) {
 //   - WHAT THIS DOES AND DOES NOT CHANGE (audit correction, 2026-09-21): it
 //     changes only the TIME BOUNDARY. Functional assertions, required file
 //     coverage, and the fail/missing/crash verdict rules are untouched, and a
-//     first-round failure is never washed green by an isolation re-run (see the
-//     isolation-pass handling below). So this is NOT "stricter verification" —
+//     first-round failure is never washed green by an isolation re-run ALONE
+//     (TD-248/0054 registry adjudication is the sole exception — see
+//     classifyAutoAdjudication). So this is NOT "stricter verification" —
 //     it removes a boundary that sat below the suite's legitimate need. The cost
 //     is real and must be stated: hang-detection latency doubles, bounded as
 //     before by R2.
@@ -351,7 +354,8 @@ export function validateManifest(manifest, discovered) {
 
 // ── Isolation classification (pure, tested in canonicalRunner.test.js) ───────
 // A first-round PASS is never rechecked. A non-pass first round gets ONE isolation
-// run; its outcome only labels the failure — it can NEVER produce PASS.
+// run; its outcome only labels the failure — it can NEVER produce PASS by itself
+// (TD-248/0054: registry adjudication happens later, on top of isolation_pass).
 // TD-165 R5: an isolation rerun killed by the wave watchdog
 // (crashReason "watchdog_timeout") means the file hangs ALONE — a TRUE test
 // hang, not a broken environment — so it classifies stable_fail like any
@@ -416,7 +420,10 @@ function isValidIsoDate(value) {
 }
 
 // 登记册 schema 校验（fail-closed：committed 合同破损=套件级错误，不静默降级）。
-export function validateInterferenceRegistry(parsed) {
+// P4 会审收紧（opus Q1-2/Q1-1）：expiresOn ≤ registeredAt+14 天（衰减机制不得被
+// "长期条目"绕开）；registeredAt 不得晚于当日（防未来登记）；签名必须声明
+// operator（粗签名洗白通道收窄——见 classifyAutoAdjudication 匹配侧）。
+export function validateInterferenceRegistry(parsed, today = null) {
   const errors = [];
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, errors: ["registry root must be an object"] };
@@ -431,20 +438,33 @@ export function validateInterferenceRegistry(parsed) {
   entries.forEach((e, i) => {
     const at = `entries[${i}]`;
     if (!e || typeof e !== "object" || Array.isArray(e)) { errors.push(`${at} must be an object`); return; }
-    for (const k of ["id", "file", "subtest", "signature", "registeredAt", "expiresOn", "owner", "note"]) {
+    for (const k of ["id", "file", "subtest", "operator", "signature", "registeredAt", "expiresOn", "owner", "note"]) {
       if (typeof e[k] !== "string" || e[k].length === 0) errors.push(`${at}.${k} must be a non-empty string`);
     }
     if (e.isolationRequired !== true) errors.push(`${at}.isolationRequired must be true`);
     if (!INTERFERENCE_STATUSES.includes(e.status)) errors.push(`${at}.status must be one of ${INTERFERENCE_STATUSES.join("|")}`);
     if (!isValidIsoDate(e.registeredAt)) errors.push(`${at}.registeredAt must be YYYY-MM-DD`);
     if (!isValidIsoDate(e.expiresOn)) errors.push(`${at}.expiresOn must be YYYY-MM-DD`);
-    if (isValidIsoDate(e.registeredAt) && isValidIsoDate(e.expiresOn) && e.expiresOn < e.registeredAt) {
-      errors.push(`${at}.expiresOn precedes registeredAt`);
+    if (isValidIsoDate(e.registeredAt) && isValidIsoDate(e.expiresOn)) {
+      if (e.expiresOn < e.registeredAt) errors.push(`${at}.expiresOn precedes registeredAt`);
+      const maxExpiry = shiftIsoDate(e.registeredAt, 14);
+      if (e.expiresOn > maxExpiry) errors.push(`${at}.expiresOn exceeds registeredAt+14d (decay cap)`);
+    }
+    if (today !== null && isValidIsoDate(e.registeredAt) && e.registeredAt > today) {
+      errors.push(`${at}.registeredAt is in the future (today=${today})`);
     }
     if (typeof e.id === "string" && seen.has(e.id)) errors.push(`${at}.id duplicated`);
     if (typeof e.id === "string") seen.add(e.id);
   });
   return { ok: errors.length === 0, errors };
+}
+
+// YYYY-MM-DD + N 天（纯算术，无 Date 时区面）。
+function shiftIsoDate(iso, days) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const utc = Date.UTC(y, m - 1, d) + days * 86400000;
+  const dt = new Date(utc);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
 }
 
 // 条目当日可用：active 且未过期（字符串日期比较=确定性，只依赖 committed 输入+当日）。
@@ -486,7 +506,7 @@ export function classifyAutoAdjudication({ firstRoundStatus, isolationClassifica
     for (const t of subtests) {
       const signature = normalizeSignatureText(signatureSourceLine(t.stack));
       const candidates = (registryEntries ?? []).filter(
-        (e) => e && e.file === file && e.subtest === t.name && e.signature === signature,
+        (e) => e && e.file === file && e.subtest === t.name && e.operator === (t.operator ?? null) && e.signature === signature,
       );
       const hit = candidates.find((e) => entryUsableOn(e, today));
       if (hit) { matches.push({ id: hit.id, subtest: t.name }); continue; }
@@ -731,6 +751,45 @@ export function runsEntryAttribution(runsDir, entry) {
     } catch { /* Unknown evidence never changes RED or the exit code. */ }
     return result;
   };
+  // P4 会审 Q2（opus）：并行会话派发最常见的守卫新增形态是控制面副产物——
+  // `.owner-<runId>` 心跳与 `.claims/<runId>.g<N>[.released]` 代文件（D2-②b 后
+  // 转录本身进项目桶、守卫看不见，见 TD-249）。从条目名提取 runId 后按
+  // "顶层平铺 → projects/*/<runId>.jsonl" 的有界顺序解析真转录首事件。
+  const fromRunId = (runId) => {
+    const result = { entry, runId, parseStatus: "unknown" };
+    try {
+      let transcript = `${runId}.jsonl`;
+      if (!existsSync(join(runsDir, transcript))) {
+        // 桶路径是两层深（runs/projects/<slug>/<runId>.jsonl）——有界列出
+        // projects/ 下的桶目录逐个探测，不递归整树。
+        const projectsDir = join(runsDir, "projects");
+        let hit = null;
+        for (const d of readdirSync(projectsDir, { withFileTypes: true })) {
+          if (d.isDirectory() && existsSync(join(projectsDir, d.name, `${runId}.jsonl`))) {
+            hit = `projects/${d.name}`;
+            break;
+          }
+        }
+        if (!hit) return [result];
+        transcript = `${hit}/${runId}.jsonl`;
+      }
+      const event = firstRunsEvent(join(runsDir, transcript));
+      for (const key of ["cwd", "agentId", "ts"]) {
+        if (typeof event[key] === "string") result[key] = event[key];
+      }
+      if (event.project && typeof event.project === "object" && !Array.isArray(event.project)) {
+        const project = {};
+        for (const key of ["bucket", "key", "displayName"]) {
+          if (typeof event.project[key] === "string") project[key] = event.project[key];
+        }
+        if (Object.keys(project).length > 0) result.project = project;
+      } else if (typeof event.project === "string") {
+        result.project = event.project;
+      }
+      result.parseStatus = "parsed";
+    } catch { /* unknown 不改变 RED 与退出码 */ }
+    return [result];
+  };
   try {
     if (typeof entry !== "string") return [unmapped];
     const normalized = entry.replace(/\/$/, "");
@@ -743,6 +802,11 @@ export function runsEntryAttribution(runsDir, entry) {
         .map((d) => `${normalized}/${d.name}`).sort();
       return files.length > 0 ? files.map(fromFile) : [unmapped];
     }
+    const ownerMatch = /^\.owner-(run_\S+)$/.exec(parts.at(-1));
+    if (parts.length === 1 && ownerMatch) return fromRunId(ownerMatch[1]);
+    const claimMatch = parts.length === 2 && parts[0] === ".claims"
+      ? /^((run_\S+)\.g\d+(?:\.released)?)$/.exec(parts[1]) : null;
+    if (claimMatch) return fromRunId(claimMatch[2]);
     return [unmapped];
   } catch { return [unknown]; }
 }
@@ -1233,7 +1297,8 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
 
 // ── Orchestration: waves serially, then ≤1 isolation rerun per failed file. ──
 // Adapters are injectable for deterministic causal tests. The verdict is derived
-// ONLY from first-round results (isolation never washes green); any groupError
+// ONLY from first-round results (isolation alone never washes green — TD-248/0054
+// registry adjudication is the sole, closed-eligibility exception); any groupError
 // also forces non-green. Each wave spec carries its pooled categories so the
 // bounded report can attribute every file to category + wave.
 // TD-165 R2.4: the ONE no-early-abort exception — when a wave dies to the
@@ -2064,7 +2129,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     }
   }
   if (registryParsed !== null) {
-    const validation = validateInterferenceRegistry(registryParsed);
+    const validation = validateInterferenceRegistry(registryParsed, new Date().toISOString().slice(0, 10));
     if (!validation.ok) throw new Error(`interference-registry schema 违约（fail-closed）: ${validation.errors.join("; ")}`);
     registryEntries = registryParsed.entries;
   }
@@ -2113,7 +2178,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   }
   for (const adv of outcome.adjudicationAdvisories ?? []) {
     if (adv.kind === "worker-context-suppressed") {
-      console.error(`[canonical] ADVISORY：${adv.path} 本应命中登记册条目 ${adv.entryIds.join(",")}，但 worker 上下文禁用自动裁定（0054 §1 防自我洗白）——verdict 保持 fail。`);
+      console.error(`[canonical] ADVISORY：${adv.path} 本应命中登记册条目 ${adv.entryIds.join(",")}，但本 run 处于 worker 上下文（WAO_IN_WORKER 或 worktree cwd——含 Lead 的验证租约/worktree），自动裁定按 0054 §1 关闭——verdict 保持 fail（此处措辞中性：规则同时覆盖 worker 自助与 Lead 验证两类场景）。`);
     } else if (adv.kind === "entry-not-usable") {
       console.error(`[canonical] ADVISORY：${adv.path} 签名命中登记册条目 ${adv.entryIds.join(",")} 但条目已过期/非 active（衰减机制）——verdict 保持 fail；若干扰形仍真实发生，请人工重新裁定登记。`);
     } else {

@@ -175,7 +175,7 @@ function formatDuration(ms) {
 
 // ── TD-181 (a) consumer-side compatibility ───────────────────────────────────
 // `npm test` (canonical runner) overwrites test-results.json with its OWN
-// aggregate schema (schemaVersion 4: executionWaves/firstRound/isolation…),
+// aggregate schema (schemaVersion 4/5: executionWaves/firstRound/isolation…；v5 增 autoAdjudicated/adjudicationAdvisories),
 // which previously made this tool crash (no data.summary). Projection below is
 // ADDITIVE compatibility + failure-detail rendering only:
 //   - a reporter-shaped report ({summary, suites}) passes through UNCHANGED;
@@ -325,6 +325,22 @@ function adaptForRender(data) {
       status: "fail",
       duration: 0,
       tests: suiteLevel.map((name) => ({ name, status: "fail", duration: 0 })),
+    });
+  }
+  // P4 会审 Q5（opus）：0054 的"绿灯来自登记册必须响亮"不能只在控制台——
+  // HTML 报告里每个被裁定文件渲染一行携带警示文本的可见行（不进 summary
+  // 文件计数，纯展示层）。
+  const adjudicated = Array.isArray(data.autoAdjudicated) ? data.autoAdjudicated : [];
+  if (adjudicated.length > 0) {
+    suites.push({
+      name: "canonical/auto-adjudicated（pass 来自登记册——见行内警示）",
+      status: "pass",
+      duration: 0,
+      tests: adjudicated.map((adj) => ({
+        name: `AUTO-ADJUDICATED：${adj.path} 的 pass 来自登记册条目 ${(adj.matches ?? []).map((m) => m.id).join(",")}——非代码正确性证明（0054）`,
+        status: "pass",
+        duration: 0,
+      })),
     });
   }
   return {

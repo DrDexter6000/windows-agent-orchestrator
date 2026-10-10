@@ -91,3 +91,10 @@ test("test:one：worker 上下文 + Lead 豁免时横幅如实报告（豁免形
   assert.equal(r.status, 0);
   assert.match(r.stderr, /Lead 豁免/);
 });
+
+test("test:one：全 skip 文件=零通过静默绿防护（exit 3 + 警报）", () => {
+  const r = runShim(["test/fixtures/test-one/skip.target.js"]);
+  assert.equal(r.status, 3, "pass=0 且退出 0 不得伪装成功（P4 会审 Q3-2）");
+  assert.match(r.stderr, /通过数为 0/);
+  assert.match(`${r.stdout}${r.stderr}`, /skipped 1/);
+});

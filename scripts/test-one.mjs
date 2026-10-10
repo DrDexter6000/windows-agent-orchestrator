@@ -109,6 +109,12 @@ for (const arg of rawArgs) {
 
 // TEMP 隔离必须先于 childEnv 派生（TD-223——见 isolateSuiteTemp 头注）。
 isolateSuiteTemp();
+// P4 会审 Q3-1（opus）：SIGINT/SIGBREAK 默认直接终止进程、exit 清理不触发，
+// 凭据副本会残留在真实 %TEMP% 且 sweep 只扫顶层扫不到嵌套——注册空处理器
+// 让本进程撑过 spawnSync（Ctrl+C 时子进程同组收到信号先行退出），随后 exit
+// 清理照常执行。
+process.on("SIGINT", () => {});
+process.on("SIGBREAK", () => {});
 
 // worker 上下文提示与全量套件同一来源、同一措辞（决策 0047 self-awareness）。
 const banner = workerBannerLine();
@@ -126,11 +132,23 @@ const childEnv = buildCanonicalChildEnv(process.env, { gateHeld: false });
 const { NODE_TEST_CONTEXT: _enclosingRunnerMarker, ...freshRunEnv } = childEnv;
 
 // --test-timeout 与全量同一常量（单一来源 import）：单文件挂死也会被收割。
+// stdio 改 pipe 以便做"零通过防护"（P4 会审 Q3-2：显式传入非测试文件或全
+// skip 的文件会 # pass 0 + exit 0 = 静默绿——glob 零匹配防护覆盖不到这一层），
+// 捕获后原样透传到本进程 stdio。
 const r = spawnSync(process.execPath, ["--test", `--test-timeout=${TEST_TIMEOUT_MS}`, ...files], {
-  stdio: "inherit",
+  stdio: ["ignore", "pipe", "pipe"],
+  encoding: "utf8",
   env: freshRunEnv,
 });
 if (r.error) {
   fail(`无法启动 node --test：${r.error.message}`);
+}
+if (typeof r.stdout === "string" && r.stdout.length > 0) process.stdout.write(r.stdout);
+if (typeof r.stderr === "string" && r.stderr.length > 0) process.stderr.write(r.stderr);
+const passMatch = /(?:^|\n)# pass (\d+)/.exec(`${r.stdout ?? ""}${r.stderr ?? ""}`);
+const passCount = passMatch ? Number(passMatch[1]) : null;
+if (r.status === 0 && (passCount === null || passCount === 0)) {
+  process.stderr.write(`[test:one] 警报：node --test 退出 0 但通过数为 ${passCount}——传入的文件不含测试或全被跳过（静默绿防护，P4 会审 Q3-2）\n${USAGE}\n`);
+  process.exit(3);
 }
 process.exit(r.status ?? (r.signal ? 124 : 1));

@@ -273,7 +273,8 @@ async function runsWaitCommand(args, config, deps = {}) {
   }
   const runId = positionals[0];
   if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {
-    throw new Error("--format only supports json|text");
+    throw new Error(`--format only supports json
+${RUNS_WAIT_USAGE}`);
   }
   const asJson = flags.format === "json";
   const runDir = resolve(flags.runDir ?? config.runDir);
@@ -288,7 +289,8 @@ async function runsWaitCommand(args, config, deps = {}) {
   let waitMs = RUN_WAIT_DEFAULT_MS;
   if (flags.waitMs !== undefined) {
     waitMs = Number(flags.waitMs);
-    if (Number.isNaN(waitMs)) throw new Error("--wait-ms must be a number");
+    if (Number.isNaN(waitMs)) throw new Error(`--wait-ms must be a number
+${RUNS_WAIT_USAGE}`);
   }
 
   const service = deps.runWaitFn ?? runWait;

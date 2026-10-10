@@ -6,6 +6,7 @@
       "id": "IF-001",
       "file": "delivery/runsVerifyCommit.test.js",
       "subtest": "TD-240 反例：命令超时——timedOut+failed+fail-fast+子进程树收束",
+      "operator": "ok",
       "signature": "AssertionError [ERR_ASSERTION]: command should be killed at ~1s (elapsed <n>ms)",
       "isolationRequired": true,
       "registeredAt": "2026-10-09",
