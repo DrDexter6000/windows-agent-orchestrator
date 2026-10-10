@@ -646,14 +646,14 @@ test("TD-249: takeRunsSnapshot 对 projects/<slug>/ 下钻第二层，其余顶�
 });
 
 test("TD-249 端到端: 已有桶内新增 run 在赛中被守卫抓到（RED 不再漏）", async () => {
+  // preMutate=基线前的"已有桶"；mutate=赛中的桶内新增。
   const result = await attributionSuiteFixture((root) => {
-    // 基线时刻桶与桶内文件已在（模拟"已有桶"）；赛中再往桶里加新转录
-    // （基线在 mutate 前快照，mutate 内的写入=赛中新增）。
+    writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_inflight_add.jsonl"),
+      '{"type":"run.started","runId":"run_inflight_add","cwd":"D:\\\\side","agentId":"side-agent","ts":"2026-10-10T18:00:30.000Z"}\n', "utf8");
+  }, (root) => {
     mkdirSync(join(root, "runs", "projects", "demo-abc12345"), { recursive: true });
     writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_pre_existing.jsonl"),
       '{"type":"run.started","runId":"run_pre_existing","cwd":"D:\\\\pre","ts":"2026-10-10T18:00:00.000Z"}\n', "utf8");
-    writeFileSync(join(root, "runs", "projects", "demo-abc12345", "run_inflight_add.jsonl"),
-      '{"type":"run.started","runId":"run_inflight_add","cwd":"D:\\\\side","agentId":"side-agent","ts":"2026-10-10T18:00:30.000Z"}\n', "utf8");
   });
   assert.equal(result.exitCode, 1, "赛中桶内新增必须染红（TD-249 修复前此路径全盲）");
   const attr = result.report.runsDirGuard.attribution.find((a) => a.entry === "projects/demo-abc12345/run_inflight_add.jsonl");
@@ -842,11 +842,14 @@ test("finalRunnerOutcome: report write failure ⇒ red regardless of everything 
 });
 
 // Synthetic roots only; the real report/output adapters run, no suite is spawned.
-async function attributionSuiteFixture(mutate) {
+async function attributionSuiteFixture(mutate, preMutate = null) {
   const root = synthWorkspace("wao-td247-", {
     "a.test.js": SYNTH_OK,
-    "manifest.json": JSON.stringify({ groups: { pure: ["a.test.js"], git: [], worktree: [], process: [], lock: [], timeout: [], mcp: [] } }),
+    "manifest.json": JSON.stringify({ groups: { pure: ["a.test.js"], git: [], worktree: [], lock: [], timeout: [], mcp: [] } }),
   });
+  // TD-249 端到端用前钩子：preMutate 在 runSuite（含守卫基线快照）之前落盘
+  // ——建模"已有桶"（基线内文件不报新增）。
+  if (preMutate) preMutate(root);
   const previousExitCode = process.exitCode;
   const originalLog = console.log;
   const originalError = console.error;
