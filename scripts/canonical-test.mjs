@@ -1404,7 +1404,12 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
   // 可注入供元测试。matched-but-suppressed 与过期命中保留为 advisory——
   // 永不静默，也永不改变 fail。firstRoundVerdict 恒为首轮事实（fail），
   // 裁定只作用于 finalVerdict——不重写历史。
-  const effectiveWorkerContext = workerContext ?? (process.env.WAO_IN_WORKER === "1" || runIdFromWorktreeCwd(process.cwd()) !== null);
+  // P4 会审 kimi 席 Q1-(a) 加固：cwd 臂之外，本脚本自身的路径也判一次——
+  // worker 在 worktree 外的 cwd 直接 `node <worktree>/scripts/canonical-test.mjs`
+  // （env 标记可剥）时，脚本路径仍暴露 worktree 归属，cwd 洗白失效。
+  const effectiveWorkerContext = workerContext ?? (process.env.WAO_IN_WORKER === "1"
+    || runIdFromWorktreeCwd(process.cwd()) !== null
+    || runIdFromWorktreeCwd(fileURLToPath(import.meta.url)) !== null);
   const effectiveToday = today ?? new Date().toISOString().slice(0, 10);
   const autoAdjudicated = [];
   const adjudicationAdvisories = [];
@@ -2116,6 +2121,10 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   // TD-248 / 决定 0054：登记册加载（套件只读）。缺文件=空登记册+stderr 注记
   // （方向=更严，安全）；存在但解析/校验失败=套件级错误（committed 合同破损
   // 不得静默降级——fail-closed）。
+  // P4 会审 kimi 席发现 1：裸 throw 会绕过 failInvalidEnvironment 的
+  // "覆写陈旧报告"契约——盘上可能残留上一次的绿报告被后续消费者误读
+  // （:2078 头注自己写明"绝不可逃逸"的失误形态）。与 manifest 漂移/守卫
+  // 基线同路：environment_invalid 覆写 + 非零退出。
   let registryEntries = [];
   const registryPath = join(testDir, INTERFERENCE_REGISTRY_NAME);
   let registryParsed = null;
@@ -2125,12 +2134,12 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     if (err && err.code === "ENOENT") {
       console.error(`[canonical] interference-registry 不存在（${registryPath}）——按空登记册运行（自动裁定关闭，方向=更严）`);
     } else {
-      throw new Error(`interference-registry 解析失败（fail-closed）: ${err instanceof Error ? err.message : err}`);
+      return failInvalidEnvironment(reportPath, `interference-registry 解析失败（fail-closed）: ${err instanceof Error ? err.message : err}`);
     }
   }
   if (registryParsed !== null) {
     const validation = validateInterferenceRegistry(registryParsed, new Date().toISOString().slice(0, 10));
-    if (!validation.ok) throw new Error(`interference-registry schema 违约（fail-closed）: ${validation.errors.join("; ")}`);
+    if (!validation.ok) return failInvalidEnvironment(reportPath, `interference-registry schema 违约（fail-closed）: ${validation.errors.join("; ")}`);
     registryEntries = registryParsed.entries;
   }
 
@@ -2199,6 +2208,9 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     // (verdict=pass 的例外来源，逐条登记册引用) 与 adjudicationAdvisories[]
     // （worker 上下文抑制等观察事实）。isolation[] 各项增 advisory 级
     // autoAdjudication 子对象。既有字段语义不变。
+    // 注（P4 会审 kimi 席）：runsDirGuard.attribution 字段系 TD-247 在 v4 期
+    // 引入（4fbfdd0，当时未升版）——v5 一并归档说明，避免字段引入与版本号
+    // 不同步的契约漂移观感。
     schemaVersion: 5,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version, hardwareParallelism: HW, mode: "one-node-test-child-per-wave" },

@@ -273,7 +273,7 @@ async function runsWaitCommand(args, config, deps = {}) {
   }
   const runId = positionals[0];
   if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {
-    throw new Error(`--format only supports json
+    throw new Error(`--format only supports json|text
 ${RUNS_WAIT_USAGE}`);
   }
   const asJson = flags.format === "json";
