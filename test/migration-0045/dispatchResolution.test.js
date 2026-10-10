@@ -77,7 +77,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
   })).sort((a, b) => (a.id < b.id ? -1 : 1));
   assert.deepEqual(snapshot, [
-    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "high", aliases: {} },
+    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "medium", aliases: {} },
     { id: "deepseek-flash", backend: "deepseek-acp", modelId: "deepseek-flash", effort: "max", aliases: {} },
     { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
     { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: {} },
@@ -94,6 +94,8 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
   // 双字段 model 形状，flash 无历史别名=空表）。
   // 0046 §5 步⑤⑥：角色库合并（coder_hq/coder_low/coder_mm→coder）+别名表全清空。
   // 0046 §5 步⑧：gpt-sol-56 车道删除（sol 全量认证绿后执行）。
+  // 2026-10-10 Owner 裁定：astra effort high→medium（medium 档认证取证待重跑；
+  // 派发门禁不受影响——TD-186：effort 不进门禁身份，仅认证证据适用性视图暂 mismatched）。
 });
 
 test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {
