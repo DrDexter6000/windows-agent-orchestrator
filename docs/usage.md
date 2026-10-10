@@ -519,6 +519,16 @@ wrapper 形取 `provider.baseUrl`），不做族系归类判断（判断权在 L
 独立性 r1 如实显示"未提供"。`--wait-timeout` 总预算默认 600000ms、范围同
 `runs wait`。
 
+**迟到收取 SOP（kimi 诊断会审 2026-10-10，opus+sol）**：kimi-web 席位的回合
+普遍长于会审预算（当日实录 8-67 分钟，自我升格的席位最长）——`budgetExpired`
+或空回执**不等于零输出**，禁止据此误诊。正确姿势：保留 `consultId`/席位
+runId → 对该席 `runs wait --run-id`（或查 serve 日志 `~/.kimi-code/server/events/`
+确认 `turn.started`）→ 终态后重调 `run_consult {consultId}` 或 `consult show`
+（迟到读取按当前转录重新推导，零派发）。若要求窗口内交付，在任务书里限制
+工作量（不跑测试/限命令数）——代价是损失席位自查深度，取舍归 Lead。每席
+prompt 尾部始终带**席位级固定会审合同**（禁实现/禁建文件/禁派发——裸车道
+席位同样收到；2026-10-10 起生效）。
+
 ### 场景 4e：审计席测试协议（WAO_ALLOW_NESTED_DISPATCH 命令级授权，TD-246 / F-①）
 
 背景：决定 0047 的防向下派发门会让 **worker 上下文里的派发族测试**（runDispatch/

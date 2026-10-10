@@ -481,12 +481,18 @@ export async function runConsult({
   });
 
   // 扇出：逐席后台只读 run（共享内核=brief 逐字节；视角片段原样拼在尾部）。
+  // kimi 诊断会审（2026-10-10，opus+sol）：裸车道（无角色）会审席此前完全收不到
+  // 角色合同的 WQ-03 禁令（角色装配条件不满足→prompt 裸奔），P1 kimi 席自我
+  // 升格（自组内层会审+自己实现+24 文件写入）的前提之一。固定会审合同始终
+  // 追加在每席 prompt 尾部（不依赖车道有没有角色；有角色合同时 WQ-03 已在——
+  // 本段不重复禁令语义，只钉会审边界）。
   const dispatchStates = [];
   const seatPolicies = new Map(); // agentId → {laneId, roleId, resolvedTarget}（W4d 别名解析缓存）
   for (const seat of seats) {
-    const prompt = typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
+    const seatBody = typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
       ? `${text}\n\n${seat.perspectiveText}`
       : text;
+    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、创建或修改文件、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
     try {
       // 0045 W4d：席位名可能是车道别名（auditor→gpt-astra）——经解析层取车道键
       // （别名=执行；未入别名表的 legacy 键原样透传）。

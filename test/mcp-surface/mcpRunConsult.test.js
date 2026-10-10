@@ -186,8 +186,11 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
       assert.ok(aCall && bCall, "both seats dispatched");
       assert.equal(aCall.readOnly, true, "seat_a sub-run is read-only");
       assert.equal(bCall.readOnly, true, "seat_b sub-run is read-only");
-      assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。`, "brief 逐字节 + 视角尾巴");
-      assert.equal(bCall.prompt, BRIEF, "无视角席 = 纯 brief 内核");
+      // kimi 诊断会审（2026-10-10）：席位级固定会审合同始终追加（裸车道
+      // 席位此前收不到任何禁令）；brief 与视角仍逐字节保留在前。
+      const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、创建或修改文件、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
+      assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。${CONTRACT}`, "brief 逐字节 + 视角尾巴 + 固定合同");
+      assert.equal(bCall.prompt, `${BRIEF}${CONTRACT}`, "无视角席 = 纯 brief 内核 + 固定合同");
 
       const p = res.structuredContent;
       assert.equal(p.view, "receipt", "0051：create 成功 → 机械回执");

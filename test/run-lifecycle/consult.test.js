@@ -425,7 +425,7 @@ test("FLOW-3: 组记录落 consultsDir 单 JSON（席位-runId 映射 + fieldDif
   }
 });
 
-test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=brief 逐字节）", async () => {
+test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=brief 逐字节；席位级固定合同始终追加）", async () => {
   const briefText = "共享任务书\n\n## Q1 可行吗\n";
   const perspective = "你是成本视角：先自测预算是否闭合。\n";
   const { dispatchFn, calls } = makeDispatchStub();
@@ -441,8 +441,16 @@ test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=bri
     writeFileFn: async () => {},
     mkdirFn: async () => {},
   }));
-  assert.equal(calls[0].prompt, briefText, "无视角席的 prompt = brief 逐字节");
-  assert.equal(calls[1].prompt, `${briefText}\n\n${perspective}`, "视角片段原样拼接在尾部");
+  // kimi 诊断会审（2026-10-10）：裸车道席位此前收不到 WQ-03——固定会审合同
+  // 始终追加（不依赖角色装配）；brief/视角仍逐字节保留在合同段之前。
+  const CONTRACT_MARK = "---\n【会审席边界（固定合同，席位级）】";
+  for (const c of calls) {
+    assert.ok(c.prompt.includes(CONTRACT_MARK), "每席 prompt 都带固定会审合同");
+    assert.equal(c.prompt.indexOf(CONTRACT_MARK), c.prompt.lastIndexOf(CONTRACT_MARK), "合同恰一次");
+    assert.ok(c.prompt.startsWith(briefText), "brief 逐字节内核在前");
+  }
+  assert.ok(calls[0].prompt.endsWith("缺证据时报告缺口。"), "无视角席：合同在尾部");
+  assert.ok(calls[1].prompt.includes(`\n\n${perspective}\n\n${CONTRACT_MARK}`), "视角片段原样拼接在 brief 与合同之间");
 });
 
 test("FLOW-5: 非作者砖——被审 run 作者 ∈ 席位清单 → authorInSeats=true（advisory）", async () => {
