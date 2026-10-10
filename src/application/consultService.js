@@ -338,10 +338,16 @@ export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTra
   const events = await readTranscriptFn(resolveTranscriptPath(resolve(runDir), runId));
   const scope = boundReportScope(events, runId) ?? events;
   const state = findState(scope);
+  // kimi 诊断批（2026-10-10，Owner 批准的合同变更）：只读席位违规自动判 FAIL。
+  // 写入证据=transcript 里的 file_written 事件（工具上报；shell 重定向类未上报
+  // 写入是已知盲区，记录在案——worktree 隔离仍是实际兜底）。只计数+叠加判定，
+  // 不改写 runState 自然终态。
+  const fileWrittenCount = events.filter((e) => e && e.type === "file_written").length;
   return {
     runState: typeof state === "string" ? state : "unknown",
     terminal: TERMINAL_STATES.includes(state),
     finalText: extractFinalAssistantText(events, { runId, env }),
+    fileWrittenCount,
   };
 }
 
@@ -561,10 +567,10 @@ export async function runConsult({
     let runState;
     let finalText = null;
     let budgetExpired = false;
+    let observation = null;
     if (dispatchState.runId === null) {
       runState = "dispatch_failed"; // 派发即拒（零 transcript）——观察事实
     } else {
-      let observation = null;
       try {
         observation = await observeSeatRun({ runId: dispatchState.runId, runDir: resolvedRunDir, readTranscriptFn, env });
       } catch {
@@ -584,6 +590,9 @@ export async function runConsult({
       : attributeReply(finalText);
     perSeatAttribution[seat.agentId] = attribution;
     const { formatState } = deriveSeatStates({ runState, questions, attribution });
+    // 只读违规自动 FAIL（Owner 2026-10-10）：有写入证据即席位判 FAIL（叠加判定，
+    // runState 保持观察值）。缺席/派发失败无 transcript 事实——如实 null。
+    const fileWrittenCount = observation !== null && observation.fileWrittenCount > 0 ? observation.fileWrittenCount : null;
     seatResults.push({
       agentId: seat.agentId,
       runId: dispatchState.runId,
@@ -595,6 +604,7 @@ export async function runConsult({
         ? { perspectiveSnippet: seat.perspectiveText }
         : {}),
       budgetExpired,
+      ...(fileWrittenCount !== null ? { readOnlyViolation: { verdict: "FAIL", fileWrittenCount } } : {}),
       // result 层字段（不进组记录）：
       attribution,
       ...(finalText !== null ? { finalText } : {}),
@@ -771,6 +781,8 @@ export async function rerenderConsultFromRecord({
       : { ordered: [], unclassified: "", preamble: "" };
     perSeatAttribution[seat.agentId] = attribution;
     const { formatState } = deriveSeatStates({ runState, questions: record.questions ?? [], attribution });
+    // 迟到收取路径同样判只读违规（与 runConsult 收集层同一投影零漂移）。
+    const fileWrittenCount = observation !== null && observation.fileWrittenCount > 0 ? observation.fileWrittenCount : null;
     seatResults.push({
       agentId: seat.agentId,
       runId: seat.runId,
@@ -780,6 +792,7 @@ export async function rerenderConsultFromRecord({
       provider: seat.provider ?? null,
       ...(seat.perspectiveSnippet ? { perspectiveSnippet: seat.perspectiveSnippet } : {}),
       budgetExpired: observation ? !observation.terminal : true,
+      ...(fileWrittenCount !== null ? { readOnlyViolation: { verdict: "FAIL", fileWrittenCount } } : {}),
       attribution,
       ...(observation ? { finalText: observation.finalText } : {}),
     });

@@ -61,10 +61,14 @@ function attrOf(text) {
 }
 
 /** transcript 事件桩：state_change + assistant 终稿。 */
-function makeTranscript(runId, { state = "completed", finalText = "" } = {}) {
+function makeTranscript(runId, { state = "completed", finalText = "", fileWrittenCount = 0 } = {}) {
   const events = [{ type: "run.state_change", to: state, reason: "stub", runId, seq: 1 }];
   if (finalText.length > 0) {
     events.push({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: finalText }], runId, seq: 2 });
+  }
+  // 决定 0055：只读席位违规证据=file_written 事件计数。
+  for (let i = 0; i < fileWrittenCount; i += 1) {
+    events.push({ type: "file_written", path: `C:\\fake\\wt\\f${i}.txt`, runId, seq: 3 + i });
   }
   return events;
 }
@@ -736,4 +740,26 @@ test("CLI-4: consult show 从组记录重渲染（只读；问题原序 + 席位
   } finally {
     cleanupDir(dir);
   }
+});
+
+// 决定 0055（Owner 2026-10-10 批准）：只读席位违规自动判 FAIL。
+test("0055: 席位转录含 file_written → readOnlyViolation FAIL（不改写 runState）", async () => {
+  const { dispatchFn } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: 可行\n", fileWrittenCount: 3 })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: 可行\n" })],
+  ]));
+  const result = await runConsult(baseInput({
+    briefText: "b\n",
+    seats: [{ agentId: "seat_a" }, { agentId: "seat_b" }],
+    dispatchFn,
+    readTranscriptFn,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+  }));
+  const seatA = result.seats.find((s) => s.agentId === "seat_a");
+  const seatB = result.seats.find((s) => s.agentId === "seat_b");
+  assert.deepEqual(seatA.readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 3 }, "写入席位判 FAIL");
+  assert.equal(seatA.runState, "completed", "runState 保持自然终态（不改写）");
+  assert.equal(seatB.readOnlyViolation, undefined, "零写入席位无该字段");
 });
