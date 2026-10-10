@@ -1056,19 +1056,32 @@ payload——它们只停留在 dispatch 进程内。Host/MCP 重启会产生新
 run。被复用的对象只有 backend 原生会话本身。
 
 **严格非 delivery**：delivery 派发**总是**开全新 provider 会话，不复用 delivery
-worktree/session。`reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery`。
+worktree/session。`reuseEligible = effectiveReuse === "lead_workspace" && !publicDelivery`
+（0052：显式 lane/role 派发不再被排除——生效政策经 `effectiveSessionReuse`（显式 role 读
+`config/roles.json[role]`；lane-only/裸派读席位兼容来源）即分级开关；未登记角色不复用）。
 
 **SSOT**：`src/application/sessionReuse.js`（纯计算 + 有限路由事实落盘）。决策矩阵
-（`resolveReuseTurn`）：无历史→`first`；路由条目**损坏**（存在但不可解析/形状坏）→**拒绝**
-（ADR-0031 §3.6：绝不静默 first）；prior run 非 terminal→`busy`；prior terminal 且有绑定
-`session.created`（backendSessionId 为非空字符串）→`resume`（信封携带前任 runId）；prior
-terminal 且绑定 `session.created` 但 backendSessionId 缺失/空/非字符串→**拒绝**（§3.6）；
-prior terminal 但无 `session.created`（崩溃）→`first`；prior
-transcript 缺失且新鲜（<5min）→`busy`；缺失且陈旧→`first`。`first`/`resume` 在 per-key 文件锁
-内 claim slot，关闭并发竞态——同一身份绝不并发驱动同一 provider 会话。resume 信封
-`{mode, opaqueUuid, turn, priorRunId}` 只携带前任 **WAO runId**（内部标识，非凭据）；provider
-session id 由 spawn 权威经 `resolvePriorProviderSessionId`（runId 绑定读取器）从前任何
-转录取回、in-process 送达 backend——**绝不进 argv**（ADR-0031 §3.6/R2）。
+（`resolveReuseTurn`；0052 失败即弃修订）：无历史→`first`；路由条目**损坏**（存在但不可解析/
+形状坏，含 epoch 在场但非非负整数）→**拒绝**（ADR-0031 §3.6：绝不静默 first）；prior run
+非 terminal→`busy`（`fresh` 不旁路 busy——Contract 6 无例外）；prior terminal **严格 ===
+completed** 且绑定 `session.created`（backendSessionId 非空字符串）→`resume`（信封携带前任
+runId）；prior terminal 为 failed/aborted/timed_out（或不可投影）→**弃档**：槽位覆写 `first`
+且 epoch+1（换代数 uuid——中毒会话绝不接着用；对 uuid 即 provider 会话 id 的通道，坏会话
+结构性不可达）；绑定 `session.created` 但 backendSessionId 缺失/空/非字符串→**拒绝**（§3.6）；
+terminal（completed）无 `session.created`（崩溃）→`first`（epoch 保持）；prior transcript
+缺失且新鲜（<5min）→`busy`；缺失且陈旧→`first`+epoch+1（不可知=可能已中毒）。**fresh 逃生口**
+（0052 P0-3）：per-dispatch `fresh:true`（MCP 参数；CLI 一次性 leadSession 本就永远 fresh）强制
+`first`+epoch+1。`first`/`resume` 在 per-key 文件锁内 claim slot（条目
+`{runId, updatedAt[, epoch]}`，epoch 缺席=0）；resume 信封 `{mode, opaqueUuid, turn, priorRunId}`
+只携带前任 **WAO runId**；provider session id 由 spawn 权威经 `resolvePriorProviderSessionId`
+从前任何转录取回、in-process 送达——**绝不进 argv**（ADR-0031 §3.6/R2）。
+
+**epoch（会话代数，0052）**：派生材料在 epoch ≥ 1 时追加代数行（epoch 0/缺席与旧 uuid 逐
+字节相同——存量会话零迁移）；keyHash **绝不**携带 epoch（槽位=身份锚点，跨代数稳定）。换代
+数=换 provider 会话；epoch 只活在路由条目与派生材料，不进转录审计事件。材料中的 roleSha
+（0045 §1.6）自 0052 P0-2 起取**本次派发角色**正文 sha（派发侧与 runner 复核块同公式：
+roleId→`config/roles/<roleId>.md`，无角色=`"none"`；席位 `systemPrompt` 仅 legacy 兜底）——
+同车道换帽必换键、必 first。
 
 **TD188（2026-09-27）交付续接的 native id 绑定与缺证据 fail-closed**：delivery+
 sessionReuse run 的 spawn 时刻 `session.created` 保持唯一进程身份（`proc_<pid>`——M12-19

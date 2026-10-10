@@ -105,7 +105,7 @@ test("HOLE-A: continue 臂——父 rolePin sha 与当前角色文件不符 → 
   }
 });
 
-test("HOLE-B: dispatchRun——explicit（resolvedLane/Role）× lead_workspace 席 → 不进复用路由（真门）", async () => {
+test("HOLE-B（0052 修订）: dispatchRun——explicit（resolvedLane/Role）× lead_workspace 席 → 进复用路由（洞②开门，护栏在 resolveReuseTurn）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb-"));
   try {
     makeGitRepo(dir);
@@ -123,9 +123,11 @@ test("HOLE-B: dispatchRun——explicit（resolvedLane/Role）× lead_workspace 
       spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
       runnerPath: join(dir, "fake-runner.mjs"),
     });
-    assert.equal(result.providerSessionRouting, "not_used", "explicit 派发路由=not_used（真门，不再靠一次性 leadSession 巧合）");
-    assert.ok(!argv.includes("--session-reuse-json"), "argv 无复用路由信封");
-    assert.ok(!argv.includes("--reuse-material-json"), "无材料件");
+    // 0052 洞②修订：explicit 派发不再被真门排除——生效政策（席位/角色）即分级
+    // 开关；失败即弃/epoch/fresh 护栏在 resolveReuseTurn（0045 旧钉"永不进"反转）。
+    assert.equal(result.providerSessionRouting !== "not_used" || argv.includes("--session-reuse-json"), true,
+      "explicit 派发 × 生效 lead_workspace → 复用路由进入");
+    assert.ok(argv.includes("--reuse-material-json"), "材料件随行（roleSha256 取本次派发角色，无角色=none）");
   } finally { cleanupDir(dir); }
 });
 

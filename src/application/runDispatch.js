@@ -400,6 +400,10 @@ export async function dispatchRun({
   resolvedRole = null,
   // 0045 W4b：别名/显式派发的解析角色（生效复用策略按角色取——R4 裁定归角色）。
   resolvedRoleId = null,
+  // 0052 P0-3：fresh 逃生口——Lead 裁量的会话重置（强制 first + epoch+1）。
+  // 只作用于 lead_workspace 复用决策；delivery 本就永远 fresh（无操作语义）；
+  // 不旁路 busy（Contract 6）。对 continuable 谱系无操作（谱系代数=谱系自辖）。
+  fresh = false,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -530,16 +534,25 @@ export async function dispatchRun({
   // defense-in-depth.
   // 0045 R4/W4b："终局复用策略归角色"——生效政策经 effectiveSessionReuse（角色
   // 政策优先；席位字段仅在派发角色=席位原生角色时兼容生效；跨帽/显式绝不继承）。
-  // 洞②真门保持：explicit（车道+角色组合）派发永不进复用路由。
+  // 0052 洞②修订：显式派发（lane 与/或 role）不再被排除出复用路由——生效政策
+  // 本身就是分级开关（显式 role 派发读 roles.json[roleId]，lane-only/裸派对齐
+  // 席位兼容语义）。delivery 永远 fresh 不变；护栏（失败即弃/epoch/fresh）在
+  // resolveReuseTurn 内。
   const effectiveReuse = effectiveSessionReuse({
     roleId: resolvedRoleId,
     agent,
   });
-  const reuseEligible = effectiveReuse === "lead_workspace" && !publicDelivery
-    && resolvedLane === null && resolvedRole === null;
+  const reuseEligible = effectiveReuse === "lead_workspace" && !publicDelivery;
   // 0045 §1.6/R4 键材料升维（只增不减）：可复用/可续接的新 run，键材料追加
   // 车道内容指纹 + 角色正文指纹（无角色="none" 显式标记）。派发时刻从注册表
   // 冻结（run.started 尚未写）——角色文件不可载在此具名失败（零转录零 fork）。
+  // 0052 P0-2：角色指纹改取【本次派发的角色】正文（resolvedRoleId → 角色库），
+  // 席位 systemPrompt 降为 legacy 兜底——席位已无 systemPrompt，旧公式恒
+  // "none"，开门后同车道不同角色帽会共用 provider 会话（红队实证）。
+  // runner 侧（backgroundRunner 复核块）同公式重算比对。
+  const roleShaSource = resolvedRoleId !== null && resolvedRoleId !== undefined
+    ? `config/roles/${resolvedRoleId}.md`
+    : (agent.systemPrompt || null);
   const reuseIdentityMaterial = (reuseEligible || continuable)
     ? {
         laneFingerprint: laneFingerprintOf({
@@ -548,8 +561,8 @@ export async function dispatchRun({
           providerID: agent.model?.providerID ?? null,
           providerKey: providerKeyFor(agent.provider),
         }),
-        roleSha256: agent.systemPrompt
-          ? roleContractSha256(loadRoleContract(agent.systemPrompt))
+        roleSha256: roleShaSource
+          ? roleContractSha256(loadRoleContract(roleShaSource))
           : "none",
       }
     : {};
@@ -666,6 +679,7 @@ export async function dispatchRun({
       leadSession,
       workspace: cwd,
       agentId,
+      fresh,
       ...reuseIdentityMaterial,
     });
     if (reuseDecision.kind === "busy") {

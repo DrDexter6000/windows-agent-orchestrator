@@ -192,7 +192,7 @@ function canonicalizeWorkspacePath(p) {
 const LANE_FP_RE = /^lane:[0-9a-f]{16}$/;
 const ROLE_SHA_RE = /^(?:[0-9a-f]{64}|none)$/;
 
-function canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256 }) {
+function canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256, epoch }) {
   if (typeof leadSession !== "string" || leadSession.length === 0) {
     throw new Error("sessionReuse: leadSession is required (server-owned Lead session identity)");
   }
@@ -201,6 +201,13 @@ function canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint,
   }
   if (!isValidCanonicalAgentId(agentId)) {
     throw new Error("sessionReuse: agentId must be a valid canonical id");
+  }
+  // 0052 epoch：会话代数（整数 ≥ 0；缺席=0）。只进 uuid 派生材料（epoch ≥ 1 时），
+  // 绝不进路由 keyHash——路由槽是身份锚点，跨代数稳定；换代数=换 provider 会话。
+  if (epoch !== undefined) {
+    if (!Number.isInteger(epoch) || epoch < 0) {
+      throw new Error("sessionReuse: epoch must be a non-negative integer (session generation)");
+    }
   }
   const out = {
     leadSession,
@@ -219,6 +226,7 @@ function canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint,
     }
     out.roleSha256 = roleSha256;
   }
+  if (epoch !== undefined && epoch >= 1) out.epoch = epoch;
   return out;
 }
 
@@ -227,6 +235,7 @@ function identityMaterialLines(c) {
   let lines = "";
   if (c.laneFingerprint !== undefined) lines += `\nlaneFp=${c.laneFingerprint}`;
   if (c.roleSha256 !== undefined) lines += `\nroleSha=${c.roleSha256}`;
+  if (c.epoch !== undefined) lines += `\nepoch=${c.epoch}`;
   return lines;
 }
 
@@ -238,11 +247,18 @@ function identityMaterialLines(c) {
  * the same (Lead session, workspace, agent) triple and isolated across
  * triples. It does NOT reveal the raw Lead id, workspace path, or agentId.
  *
- * @param {{leadSession:string, workspace:string, agentId:string}} input
+ * 0052 epoch: `epoch` (session generation, integer ≥ 0; default 0) is part of
+ * the derivation material ONLY when ≥ 1 — epoch 0 / absent is byte-identical
+ * to the pre-0052 uuid, so live sessions survive the upgrade unmigrated.
+ * Bumping the epoch derives a NEW uuid: for backends where the uuid IS the
+ * provider session id (claude-code --session-id), an abandoned (failed/
+ * poisoned) conversation is thereby structurally unrecoverable.
+ *
+ * @param {{leadSession:string, workspace:string, agentId:string, epoch?:number}} input
  * @returns {string} a well-formed RFC 4122 v4 UUID
  */
-export function deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256 }) {
-  const c = canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
+export function deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256, epoch }) {
+  const c = canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256, epoch });
   // Delimiter-tagged material prevents cross-field collision ambiguity.
   const material = `lead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}` + identityMaterialLines(c);
   const digest = createHash("sha256").update(material, "utf8").digest();
@@ -261,8 +277,10 @@ export function deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerpr
  * @param {{leadSession:string, workspace:string, agentId:string}} input
  * @returns {string} 64-char hex
  */
-export function deriveReuseKeyHash(input) {
-  const opaque = deriveOpaqueUuid(input);
+export function deriveReuseKeyHash({ leadSession, workspace, agentId, laneFingerprint, roleSha256 }) {
+  // 0052：keyHash 绝不携带 epoch——epoch 属于 uuid 派生（换会话），路由槽必须
+  // 跨代数稳定（否则失败弃档后槽位漂移，busy 门与代数记忆全部失效）。
+  const opaque = deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
   return createHash("sha256").update(opaque, "utf8").digest("hex");
 }
 
@@ -338,6 +356,12 @@ async function readRoutingEntryFile(filePath) {
   // anything else is damage rather than an implied "very old" (re-check
   // finding R1 [高], 2026-09-21: a negative value used to read as long-stale).
   if (!Number.isFinite(parsed.updatedAt) || parsed.updatedAt < 0) {
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+  // 0052 epoch（可选第三字段）：在场必须是有限非负整数——路由槽事实的形状纪律
+  // 同 runId/updatedAt（present-but-invalid = damage，绝不静默读成 0）。
+  if (parsed.epoch !== undefined
+    && (!Number.isInteger(parsed.epoch) || parsed.epoch < 0)) {
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
   }
   return parsed;
@@ -452,25 +476,39 @@ async function withKeyLock(store, keyHash, fn) {
  * Decide a reuse turn for (Lead session, workspace, agent): first / resume /
  * busy. Provider-neutral; reads only the transcript SSOT for prior state.
  *
- * Decision matrix (transcript is the source of truth):
+ * Decision matrix (transcript is the source of truth; 0052 失败即弃修订):
  *   - no prior routing entry                                    ⇒ first
  *   - routing entry PRESENT but damaged (unparseable/malformed) ⇒ REFUSE (§3.6)
  *   - prior run non-terminal (in-flight)                        ⇒ busy
- *   - prior run terminal + bound session.created with a
- *     non-empty string backendSessionId                         ⇒ resume
- *     (envelope carries priorRunId; the provider session id is
- *     re-read from the prior transcript at runner time)
+ *     (fresh does NOT bypass busy — Contract 6 forbids concurrently
+ *     driving one reuse identity, escape hatch included)
+ *   - prior run terminal === "completed" + bound session.created
+ *     with a non-empty string backendSessionId                  ⇒ resume
+ *     (0052: completed-ONLY. failed/aborted/timed_out/unknown
+ *     terminal states NEVER resume — a poisoned conversation is
+ *     abandoned, not continued)
+ *   - prior run terminal !== "completed"                        ⇒ first +
+ *     epoch+1 (0052 失败即弃: the routing slot is reclaimed as a fresh
+ *     first turn under a NEW generation uuid, so even backends where
+ *     the uuid IS the provider session id start a clean conversation)
  *   - prior run terminal + bound session.created whose
  *     backendSessionId is missing/empty/non-string             ⇒ REFUSE (§3.6)
- *   - prior run terminal but NO session.created (crashed pre-   ⇒ first
- *     conversation; no provider session to resume)
+ *   - prior run terminal (completed) but NO session.created
+ *     (crashed pre-conversation)                                ⇒ first, epoch kept
  *   - prior transcript missing + entry recent                   ⇒ busy (in-flight)
- *   - prior transcript missing + entry stale                    ⇒ first (crashed)
+ *   - prior transcript missing + entry stale                    ⇒ first +
+ *     epoch+1 (0052: state unknowable = possibly poisoned — same
+ *     abandon discipline as a known-bad terminal state)
+ *   - fresh:true (0052 escape hatch) + terminal prior / stale    ⇒ first +
+ *     epoch+1 (Lead-declared session reset); fresh with no entry  ⇒ first
  *
  * On first/resume, the routing slot is CLAIMED under the lock for the new
- * `runId` (updatedAt = now), so a concurrent dispatch for the same identity
- * observes the new run as in-flight and returns busy instead of forking a
- * second provider turn concurrently.
+ * `runId` (updatedAt = now, epoch preserved/bumped per the matrix above), so a
+ * concurrent dispatch for the same identity observes the new run as in-flight
+ * and returns busy instead of forking a second provider turn concurrently.
+ * The epoch lives ONLY here and in the uuid derivation — never in the
+ * transcript audit event ({mode, turn} unchanged); forensics stay
+ * priorRunId-chain based.
  *
  * @param {object} input
  * @param {string} input.runDir
@@ -478,16 +516,19 @@ async function withKeyLock(store, keyHash, fn) {
  * @param {string} input.leadSession
  * @param {string} input.workspace
  * @param {string} input.agentId
+ * @param {boolean} [input.fresh=false] — 0052 escape hatch: force a fresh
+ *   conversation (first + epoch+1) instead of resuming; never bypasses busy.
  * @param {object} [input.reuseStore] — injectable for tests
  * @param {number} [input.now=Date.now()] — injectable clock for tests
  * @returns {Promise<{kind:"first", routing:{mode, opaqueUuid, turn:"first"}} | {kind:"resume", routing:{mode, opaqueUuid, turn:"resume", priorRunId:string}} | {kind:"busy", activeRunId:string}>}
  */
-export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, agentId, laneFingerprint, roleSha256, reuseStore, now }) {
+export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, agentId, laneFingerprint, roleSha256, fresh = false, reuseStore, now }) {
   const store = reuseStore ?? defaultReuseStore(runDir);
   const clock = typeof now === "number" ? now : Date.now();
-  const keyHash = deriveReuseKeyHash({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
-  const opaqueUuid = deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
-  const routing = { mode: "lead_workspace", opaqueUuid };
+  const baseIdentity = { leadSession, workspace, agentId, laneFingerprint, roleSha256 };
+  const keyHash = deriveReuseKeyHash(baseIdentity);
+  const uuidFor = (epoch) => deriveOpaqueUuid(epoch >= 1 ? { ...baseIdentity, epoch } : baseIdentity);
+  const entryFor = (epoch) => (epoch >= 1 ? { runId, updatedAt: clock, epoch } : { runId, updatedAt: clock });
 
   return withKeyLock(store, keyHash, async () => {
     const entry = await store.readEntry(keyHash);
@@ -499,6 +540,7 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
     // the entry UNCONDITIONALLY, once, right after the read — no branch can skip
     // it, whether the store is the real one or an injected test double.
     if (entry) assertRoutingEntryUsable(entry, clock);
+    let epoch = Number.isInteger(entry?.epoch) ? entry.epoch : 0;
 
     // A prior/other run claims this slot.
     if (entry && entry.runId && entry.runId !== runId) {
@@ -525,8 +567,8 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // computed ONLY from the prior run's own events; foreign lines are
         // invisible, not fatal — the gate degrades instead of failing the
         // routing closed. A FULLY pre-envelope prior transcript (zero bound
-        // events) now projects "pending" → busy here: a prior whose state
-        // cannot be attributed is treated as in-flight and never concurrently
+        // events) projects "pending" → busy here: a prior whose state cannot
+        // be attributed is treated as in-flight and never concurrently
         // driven (envelope-era transcripts always carry bound state_changes;
         // pre-envelope priors measure ≈0 on this install, TD-129b).
         const state = findState(events.filter((e) => e && e.runId === entry.runId));
@@ -534,6 +576,13 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
           // Contract 6: never concurrently drive the same provider session.
           return { kind: "busy", activeRunId: entry.runId };
         }
+        let poisoned = false;
+        // 0052 失败即弃：resume 的唯一入场券是 prior 终态严格 === "completed"。
+        // failed/aborted/timed_out（以及状态不可投影的 null）一律弃档——epoch+1
+        // 换新代数 uuid，槽位覆写为 first。一次幻觉/死循环会话从此不会被原样
+        // 接着用；对"uuid 即 provider 会话 id"的通道（claude-code --session-id），
+        // 换 uuid = 坏会话结构性不可达。
+        if (!fresh && state === "completed") {
         // Terminal. Resumable only after a valid session.created BOUND to this
         // prior run (contract 6). R14 (TD-128a): the read goes through the
         // shared findLatestBound reader — the unbound findLatest let a
@@ -541,7 +590,7 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // decision (a crashed-pre-conversation prior run read as resumable).
         // This function has NO upstream identity gate (no
         // extractCanonicalAgentId here — findState + this read are all that
-        // run), so unlike the runCorrection/runContinue lanes the binding is a
+        // runs), so unlike the runCorrection/runContinue lanes the binding is a
         // LIVE behavior change, not just discipline consistency.
         //
         // §3.6 association (ADR-0031, R3): the bound session.created must carry
@@ -569,25 +618,34 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // the Lead's dispatch over unattributable history would be
         // disproportionate. (An EXISTING-but-unusable session.created does NOT
         // land here — that is the §3.6 refusal above, not this degrade.)
-        const priorSession = findLatestBound(events, "session.created", entry.runId);
-        if (priorSession) {
-          const priorBackendSessionId = priorSession.backendSessionId;
-          if (typeof priorBackendSessionId !== "string" || priorBackendSessionId.length === 0) {
-            throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+          const priorSession = findLatestBound(events, "session.created", entry.runId);
+          if (priorSession) {
+            const priorBackendSessionId = priorSession.backendSessionId;
+            if (typeof priorBackendSessionId !== "string" || priorBackendSessionId.length === 0) {
+              throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+            }
+            await store.writeEntry(keyHash, entryFor(epoch));
+            // §3.6/R2: the resume envelope carries the PRIOR WAO runId — the
+            // association handle. The provider session id itself is recovered at
+            // runner time from the prior transcript (resolvePriorProviderSessionId),
+            // never from the envelope/argv.
+            return {
+              kind: "resume",
+              routing: { mode: "lead_workspace", opaqueUuid: uuidFor(epoch), turn: "resume", priorRunId: entry.runId },
+            };
           }
-          await store.writeEntry(keyHash, { runId, updatedAt: clock });
-          // §3.6/R2: the resume envelope carries the PRIOR WAO runId — the
-          // association handle. The provider session id itself is recovered at
-          // runner time from the prior transcript (resolvePriorProviderSessionId),
-          // never from the envelope/argv.
-          return {
-            kind: "resume",
-            routing: { ...routing, turn: "resume", priorRunId: entry.runId },
-          };
+          // Terminal(completed) without session.created — crashed before the
+          // backend conversation started. No provider session exists to resume
+          // → fall through to claim the slot as a fresh first turn (epoch kept:
+          // nothing was ever said to the provider under this generation).
+        } else if (state !== "completed") {
+          // 失败/中止/超时/不可投影 —— 弃档换新代数。
+          epoch += 1;
+          poisoned = true;
         }
-        // Terminal without session.created — crashed before the backend
-        // conversation started. No provider session exists to resume → fall
-        // through to claim the slot as a fresh first turn.
+        // fresh 且未被上面弃档逻辑换代（如 fresh×completed）→ 逃生口统一点换代；
+        // fresh×非完成已换代，不重复 +1（代数只需单调，不跳号）。
+        if (fresh && !poisoned) epoch += 1;
       } else {
         // Transcript missing. Recent entry → assume in-flight (busy); stale →
         // assume crashed (first), reusing the slot.
@@ -604,13 +662,18 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         if (age < STALE_MS) {
           return { kind: "busy", activeRunId: entry.runId };
         }
-        // stale + missing → first (fall through).
+        // stale + missing → first (0052: 状态不可知 = 可能已中毒，换代数).
+        epoch += 1;
       }
+    } else if (fresh && entry) {
+      // fresh 且槽位已属本 runId（重试同 id）或无前任差异面：统一点换代数，
+      // 确保逃生口在任何"存在 entry"形态下都真正换到新会话。
+      epoch += 1;
     }
 
     // Claim the slot for this new first turn.
-    await store.writeEntry(keyHash, { runId, updatedAt: clock });
-    return { kind: "first", routing: { ...routing, turn: "first" } };
+    await store.writeEntry(keyHash, entryFor(epoch));
+    return { kind: "first", routing: { mode: "lead_workspace", opaqueUuid: uuidFor(epoch), turn: "first" } };
   });
 }
 

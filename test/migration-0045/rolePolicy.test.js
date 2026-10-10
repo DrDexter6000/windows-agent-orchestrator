@@ -60,12 +60,16 @@ test("POL-3: dispatchRun——researcher 别名（角色政策）进复用路由
       researcher: { backend: "claude-code", cwd: dir }, // 注意：席位不再自带 sessionReuse——政策在角色
     } }), "utf8");
     const { dispatchRun } = await import("../../src/application/runDispatch.js");
+    let leadSeq = 0;
     const argvOf = async (over) => {
       let argv = null;
+      leadSeq += 1;
       const res = await dispatchRun({
         agentId: "researcher", prompt: "t",
         registryPath, runDir: join(dir, "runs"), runId: `run_${Math.random().toString(36).slice(2, 8)}`,
-        leadSession: "stable-lead-session", cwd: dir,
+        // 每次调用独立 leadSession：假 spawn 不写转录，同身份连发会被 busy 门
+        // 拒（transcript missing + entry recent ⇒ in-flight）——这不是本测试的主题。
+        leadSession: `stable-lead-session-${leadSeq}`, cwd: dir,
         spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
         runnerPath: join(dir, "fake-runner.mjs"),
         ...over,
@@ -76,9 +80,26 @@ test("POL-3: dispatchRun——researcher 别名（角色政策）进复用路由
     const alias = await argvOf({ resolvedRoleId: "researcher" });
     assert.equal(alias.res.providerSessionRouting !== "not_used" || alias.argv.includes("--session-reuse-json"), true,
       "角色政策 lead_workspace → 复用路由进入");
-    // ② explicit（lane/role 在场）同角色 → 洞②真门拒（不因角色政策放行）
+    // ② explicit（lane/role 在场）同角色 → 0052 洞②修订：进复用路由（生效政策
+    // =分级开关本体；护栏在 resolveReuseTurn——失败即弃/epoch/fresh）。旧钉
+    // （0045 洞②"explicit 永不进"）随 0052 修订反转。
     const explicit = await argvOf({ resolvedLane: "x-lane", resolvedRole: "researcher", resolvedRoleId: "researcher" });
-    assert.equal(explicit.res.providerSessionRouting, "not_used", "explicit 派发永不复用（真门优先于角色政策）");
+    assert.equal(explicit.res.providerSessionRouting !== "not_used" || explicit.argv.includes("--session-reuse-json"), true,
+      "0052：explicit 派发 × 角色政策 lead_workspace → 复用路由进入（roles.json=真实开关）");
+    // 0052 P0-2：角色指纹必须取【本次派发的角色】正文（旧公式取席位 systemPrompt，
+    // 席位无 systemPrompt ⇒ 恒 "none" ⇒ 同车道换帽共用会话——红队实证的缺陷）。
+    {
+      const { loadRoleContract, roleContractSha256 } = await import("../../src/application/roleContract.js");
+      const matIdx = explicit.argv.indexOf("--reuse-material-json");
+      assert.ok(matIdx >= 0, "材料件在场");
+      const material = JSON.parse(explicit.argv[matIdx + 1]);
+      assert.equal(material.roleSha256, roleContractSha256(loadRoleContract("config/roles/researcher.md")),
+        "roleSha256 = 本次派发角色正文的 sha（非席位字段、非恒 none）");
+    }
+    // ②b explicit 换帽（角色无政策）→ 不进（分级：coder/tester/auditor 未入表）
+    const explicitNoPolicy = await argvOf({ resolvedLane: "x-lane", resolvedRole: "coder", resolvedRoleId: "coder" });
+    assert.equal(explicitNoPolicy.res.providerSessionRouting, "not_used",
+      "0052 分级：角色未登记政策 → explicit 也不进（auditor/tester/coder 暂不在册）");
     // ③ 无 resolvedRoleId（legacy 调用，席位无字段）→ 不进复用
     const legacy = await argvOf({});
     assert.equal(legacy.res.providerSessionRouting, "not_used", "无角色无席位政策 → 不复用");

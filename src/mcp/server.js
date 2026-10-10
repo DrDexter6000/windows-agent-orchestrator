@@ -845,6 +845,15 @@ const RUN_DISPATCH_INPUT = z.object({
   // code — NOT a top-level .refine(), which breaks tools/list JSON-schema
   // serialization per M9-2B-01). Default absent/false = byte-compatible.
   readOnly: z.boolean().optional(),
+  // 0052 P0-3: optional Lead session-reset escape hatch for provider-session
+  // reuse (lead_workspace). true forces a FRESH provider conversation (first
+  // turn + generation bump) instead of resuming — the Lead's discretionary
+  // poison-pill reset. Never bypasses busy (one active run per reuse identity
+  // is Contract 6); no-op for delivery dispatches (always fresh by contract)
+  // and continuable lineages (generation is lineage-scoped). Wire-surface
+  // addition is deliberate (0052): the reuse turn decision changed shape, so
+  // the Lead must be able to force a reset without waiting for a failed run.
+  fresh: z.boolean().optional(),
   // M12-9 Package B: optional Lead-selected execution profile id. When set, the
   // delivery's verification (setup + assertion commands) comes from the frozen
   // trusted catalog (src/application/executionProfiles.js) instead of the inline
@@ -4109,7 +4118,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model, reasoning }) => {
+    async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, fresh, model, reasoning }) => {
       // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
       // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
       try {
@@ -4345,6 +4354,8 @@ export function createWaoMcpServer({
           ...(resolvedLane !== undefined ? { resolvedLane } : {}),
           ...(resolvedRole !== undefined ? { resolvedRole } : {}),
           ...(resolvedRoleId !== undefined ? { resolvedRoleId } : {}),
+          // 0052 P0-3：fresh 逃生口透传（lead_workspace 复用会话重置）。
+          ...(fresh === true ? { fresh: true } : {}),
           // M10-pre2: server-owned canonical workspace root as cwd.
           // The model cannot provide this — it comes from host-authorized binding.
           cwd: workspaceCwd,

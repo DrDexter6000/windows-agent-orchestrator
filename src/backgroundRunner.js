@@ -186,6 +186,22 @@ export async function runBackground(opts = {}) {
         return await failClosedResolution(runDir, runId, agentId,
           "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent", transcriptDir);
       }
+      // 0052 P0-2：与派发侧同公式——角色指纹取【本次派发的角色】（--role →
+      // 角色库），席位 systemPrompt 仅 legacy 兜底。角色文件在读侧缺失/不可载
+      // 同样是 wiring 漂移（fail-closed，不静默当 "none" 比对）。
+      const roleShaSource = opts.role !== undefined && typeof opts.role === "string"
+        ? `config/roles/${opts.role}.md`
+        : (agentEntry.systemPrompt || null);
+      let recomputedRoleSha;
+      try {
+        recomputedRoleSha = roleShaSource
+          ? roleContractSha256(loadRoleContract(roleShaSource))
+          : "none";
+      } catch {
+        return await failClosedResolution(runDir, runId, agentId,
+          "reuse_material_mismatch",
+          "role contract unresolvable at runner start (dispatch-time role file changed or removed)", transcriptDir);
+      }
       const recomputed = {
         laneFingerprint: laneFingerprintOf({
           backend: agentEntry.backend,
@@ -193,9 +209,7 @@ export async function runBackground(opts = {}) {
           providerID: agentEntry.model?.providerID ?? null,
           providerKey: providerKeyFor(agentEntry.provider),
         }),
-        roleSha256: agentEntry.systemPrompt
-          ? roleContractSha256(loadRoleContract(agentEntry.systemPrompt))
-          : "none",
+        roleSha256: recomputedRoleSha,
       };
       if (recomputed.laneFingerprint !== frozenMaterial.laneFingerprint
         || recomputed.roleSha256 !== frozenMaterial.roleSha256) {

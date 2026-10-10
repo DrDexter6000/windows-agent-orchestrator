@@ -121,6 +121,7 @@ Input:
 | continuable | boolean | no |  |
 | correctable | boolean | no |  |
 | readOnly | boolean | no |  |
+| fresh | boolean | no |  |
 | executionProfileId | string | no |  |
 | model | string | no |  |
 | reasoning | string | no | enum: minimal \| low \| medium \| high \| xhigh \| max |
@@ -157,6 +158,7 @@ Input:
 | continuable | boolean | no |  |
 | correctable | boolean | no |  |
 | readOnly | boolean | no |  |
+| fresh | boolean | no |  |
 | executionProfileId | string | no |  |
 | model | string | no |  |
 | reasoning | string | no | enum: minimal \| low \| medium \| high \| xhigh \| max |

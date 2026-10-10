@@ -1424,7 +1424,7 @@ test("M11-11C MCP-1: server injects a stable leadSession into the dispatcher (se
     const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
     let captured = null;
     const fakeDispatch = async (input) => { captured = input; return { accepted: true, runId: "run_mcp1", agentId: "researcher", state: "pending" }; };
-    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch });
+    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "hi" } });
@@ -1448,7 +1448,7 @@ test("M11-11C MCP-2: leadSession is STABLE across calls in one server (same Lead
     const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
     const seen = [];
     const fakeDispatch = async (input) => { seen.push(input.leadSession); return { accepted: true, runId: `r${seen.length}`, agentId: "researcher", state: "pending" }; };
-    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch });
+    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "a" } });
@@ -1484,7 +1484,7 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       workspace: dir,
       argv: ["--session-id", OPAQUE],
     });
-    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch });
+    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "secret-prompt" } });
@@ -1552,7 +1552,7 @@ test("M11-11C MCP-4: busy dispatch → fixed actionable text, no runId/opaqueUui
     const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
     const ACTIVE_RUN = "run_still_active_mcp4";
     const fakeDispatch = async () => { const e = new ReuseBusyError(ACTIVE_RUN); throw e; };
-    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch });
+    const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "again" } });
@@ -1613,4 +1613,168 @@ test("M11-11C MCP-6: run_dispatch input schema does NOT accept leadSession/works
     await server2.close();
     await server.close();
   }
+});
+
+// =====================================================================
+// 0052 Hole ② revision: fail-and-drop + epoch + fresh escape hatch (2026-10-10)
+// Red team = consult_20261010102629908o3cfxj (opus + kimi): resume doesn't ask whether the
+// predecessor succeeded, uuid deterministic derivation makes "dropping a session" structurally impossible,
+// no escape hatch. This batch's re-pins: only completed gets resume; abandoning swaps the generation;
+// fresh is a Lead discretionary reset; busy is never bypassed.
+// =====================================================================
+
+async function seedTerminalTranscript(runDir, runId, agentId, terminalState, { sessionCreated = true } = {}) {
+  const { JsonlTranscript } = await import("../../src/transcript.js");
+  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
+  await t.transitionState(null, "pending", "seed");
+  await t.append("run.started", { backend: "claude-code" });
+  if (sessionCreated) {
+    await t.append("session.created", { backend: "process", backendSessionId: "sess_native_1" });
+  }
+  await t.transitionState("pending", "submitted", "seed");
+  await t.transitionState("submitted", terminalState, "seed_done");
+  return t;
+}
+
+test("0052 ABANDON-1: failed/aborted/timed_out + session.created ⇒ abandon (first + epoch+1 + new uuid); when generation-1 completes it resumes with the current-generation uuid and epoch no longer increments", async () => {
+  for (const badState of ["failed", "aborted", "timed_out"]) {
+    const dir = mkdtempSync(join(tmpdir(), "wao-0052-ab1-"));
+    try {
+      const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+      const uuid0 = deriveOpaqueUuid(id);
+      const key = deriveReuseKeyHash(id);
+      await resolveReuseTurn({ ...id, runDir: dir, runId: "run_bad_1" });
+      await seedTerminalTranscript(dir, "run_bad_1", "researcher", badState);
+
+      const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_1" });
+      assert.equal(d.kind, "first", `${badState} ⇒ abandon（first，绝不 resume）`);
+      assert.notEqual(d.routing.opaqueUuid, uuid0,
+        `${badState} ⇒ new generation uuid (the poisoned old session is structurally unreachable)`);
+      const entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+      assert.equal(entry.runId, "run_next_1", `${badState} ⇒ slot overwritten`);
+      assert.equal(entry.epoch, 1, `${badState} ⇒ epoch+1 recorded in slot`);
+
+      await seedTerminalTranscript(dir, "run_next_1", "researcher", "completed");
+      const r = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_resume_1" });
+      assert.equal(r.kind, "resume", "generation-1 completes ⇒ resumable");
+      assert.equal(r.routing.opaqueUuid, d.routing.opaqueUuid, "resume uses the current-generation uuid");
+      const entry2 = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+      assert.equal(entry2.epoch, 1, "epoch not incremented on resume");
+    } finally { cleanupDir(dir); }
+  }
+});
+
+test("0052 ABANDON-2: completed with no session.created ⇒ first and epoch kept (old degrade semantics unchanged; conversation never started, nothing to poison)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-ab2-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    const key = deriveReuseKeyHash(id);
+    await resolveReuseTurn({ ...id, runDir: dir, runId: "run_crash_2" });
+    await seedTerminalTranscript(dir, "run_crash_2", "researcher", "completed", { sessionCreated: false });
+    const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_2" });
+    assert.equal(d.kind, "first");
+    assert.equal(d.routing.opaqueUuid, deriveOpaqueUuid(id), "epoch unchanged ⇒ same-generation uuid");
+    const entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+    assert.equal(entry.epoch, undefined, "no epoch in slot (old shape is byte-compatible)");
+  } finally { cleanupDir(dir); }
+});
+
+test("0052 FRESH-1: fresh=true × completed predecessor ⇒ abandon per Lead's order (first + epoch+1); without fresh the same scenario resumes (control group)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-f1-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    const uuid0 = deriveOpaqueUuid(id);
+    await resolveReuseTurn({ ...id, runDir: dir, runId: "run_ok_1" });
+    await seedTerminalTranscript(dir, "run_ok_1", "researcher", "completed");
+
+    const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_1", fresh: true });
+    assert.equal(d.kind, "first", "fresh forces abandonment even if predecessor completed");
+    assert.notEqual(d.routing.opaqueUuid, uuid0, "fresh switches the generation");
+    const key = deriveReuseKeyHash(id);
+    let entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+    assert.equal(entry.epoch, 1, "fresh increments generation");
+
+    // Control group: after generation-1 completes, dispatching without fresh resumes normally.
+    await seedTerminalTranscript(dir, "run_next_1", "researcher", "completed");
+    const r = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_resume_1" });
+    assert.equal(r.kind, "resume");
+    assert.equal(r.routing.opaqueUuid, d.routing.opaqueUuid, "resume uses the current-generation uuid (fresh doesn't break the chain)");
+    entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+    assert.equal(entry.epoch, 1);
+  } finally { cleanupDir(dir); }
+});
+
+test("0052 FRESH-2: fresh=true does not bypass busy (Contract 6 is not exempted by the escape hatch)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-f2-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    await resolveReuseTurn({ ...id, runDir: dir, runId: "run_active_1" });
+    await seedTerminalTranscript(dir, "run_active_1", "researcher", "submitted");
+    const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_1", fresh: true });
+    assert.equal(d.kind, "busy", "in-flight predecessor + fresh ⇒ still busy");
+    assert.equal(d.activeRunId, "run_active_1");
+  } finally { cleanupDir(dir); }
+});
+
+test("0052 FRESH-3: fresh=true with no entry ⇒ plain first (epoch 0, nothing to abandon)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-f3-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_first_1", fresh: true });
+    assert.equal(d.kind, "first");
+    assert.equal(d.routing.opaqueUuid, deriveOpaqueUuid(id), "no predecessor ⇒ generation-0 uuid");
+    const key = deriveReuseKeyHash(id);
+    const entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+    assert.equal(entry.epoch, undefined, "no epoch field (old shape)");
+  } finally { cleanupDir(dir); }
+});
+
+test("0052 EPOCH-1: uuid generation compatibility—epoch 0/absent same as legacy school, ≥1 differs and is monotonic; keyHash ignores epoch entirely (slots don't drift across generations)", () => {
+  const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+  const legacy = deriveOpaqueUuid(id);
+  assert.equal(deriveOpaqueUuid({ ...id, epoch: 0 }), legacy, "epoch 0 = no field added ⇒ byte-identical (zero migration for live sessions)");
+  const e1 = deriveOpaqueUuid({ ...id, epoch: 1 });
+  const e2 = deriveOpaqueUuid({ ...id, epoch: 2 });
+  assert.notEqual(e1, legacy);
+  assert.notEqual(e1, e2, "generation numbers strictly monotonic and distinguishable");
+  for (const v of [e1, e2]) assert.match(v, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "still a legal RFC4122 v4");
+  assert.equal(deriveReuseKeyHash({ ...id, epoch: 5 }), deriveReuseKeyHash(id),
+    "keyHash 从不消费 epoch（路由槽=身份锚点，不随代数漂移）");
+  assert.throws(() => deriveOpaqueUuid({ ...id, epoch: -1 }), /epoch/);
+  assert.throws(() => deriveOpaqueUuid({ ...id, epoch: 1.5 }), /epoch/);
+});
+
+test("0052 EPOCH-2: 槽内 epoch 在场但非法（负/小数/字符串/null）⇒ damage 拒绝（形状纪律不因新字段放松）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-ep2-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    const key = deriveReuseKeyHash(id);
+    mkdirSync(join(dir, ".session-reuse"), { recursive: true });
+    for (const bad of [-1, 1.5, "1", null]) {
+      writeFileSync(join(dir, ".session-reuse", `${key}.json`),
+        JSON.stringify({ runId: "run_x_1", updatedAt: Date.now() - 60_000, epoch: bad }), "utf8");
+      await assert.rejects(
+        () => resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_1" }),
+        /damaged.*refusing instead of silently starting a fresh provider conversation/s,
+        `epoch=${JSON.stringify(bad)} must be treated as damage`,
+      );
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("0052 STALE-1: 转录缺失且条目过期 ⇒ first + epoch+1（不可知=可能已中毒，同弃档纪律）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0052-st1-"));
+  try {
+    const id = { leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" };
+    const key = deriveReuseKeyHash(id);
+    const uuid0 = deriveOpaqueUuid(id);
+    const t0 = Date.now();
+    await resolveReuseTurn({ ...id, runDir: dir, runId: "run_ghost_1", now: t0 });
+    // 不写转录；条目已过期（注入 24h 后的时钟）。
+    const d = await resolveReuseTurn({ ...id, runDir: dir, runId: "run_next_1", now: t0 + 24 * 3600 * 1000 });
+    assert.equal(d.kind, "first", "stale 崩溃收回槽位");
+    assert.notEqual(d.routing.opaqueUuid, uuid0, "stale 崩溃换代（状态不可知按可能已中毒处理）");
+    const entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${key}.json`), "utf8"));
+    assert.equal(entry.epoch, 1);
+  } finally { cleanupDir(dir); }
 });

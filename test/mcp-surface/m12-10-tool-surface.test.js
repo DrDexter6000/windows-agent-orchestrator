@@ -882,7 +882,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 镜像），描述扩写分页语义；SHA 与 desc 顶均如实翻新（Owner 批准的三工作批）。
 // 0051 验收批（同日）：回执再剥离 perspectiveSnippet（视角全文=破帽项），回执
 // 帽 6→8KiB；SHA 再翻新（描述字节未变，desc 顶不动）。
-"d23f0ed18565aed6721b1ebd7f1bd521961df0418bc8f041e3f3762c0329cfe9";
+// 0052（2026-10-10）：run_dispatch/run_dispatch_contract_check 共享入参增可选
+// fresh 布尔（复用会话逃生口：强制 first+epoch+1）——inputSchema 在 stripped
+// 载荷内，SHA 如实翻新；无描述字节变化。
+"6c528767503e94cfcaf22ab45ab993e31863aeb115585e6a77c15a517486b8c2";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "_comment": "0045 R4/W4b：角色政策登记（复用策略归角色——'终局复用策略归角色'裁定）。sessionReuse 闭集 {lead_workspace}；缺席=该角色不复用。席位（agents.json）上的同名字段自本批起降级为兼容来源：仅当派发角色=席位原生角色（systemPrompt stem 相同）时生效，跨帽/显式组合派发绝不继承席位策略。键集=角色库文件名 stem。",
+  "_comment": "0045 R4/W4b：角色政策登记（复用策略归角色——'终局复用策略归角色'裁定）。sessionReuse 闭集 {lead_workspace}；缺席=该角色不复用。席位（agents.json）上的同名字段自本批起降级为兼容来源：仅当派发角色=席位原生角色（systemPrompt stem 相同）时生效，跨帽/显式组合派发绝不继承席位策略。键集=角色库文件名 stem。0052（2026-10-10 Owner 批准，洞②修订）：显式派发复用开门后本表成为真实分级开关（显式 role 派发生效政策=本表条目）。分级启用现状：researcher=在册（唯一已验证档）；tester/coder=暂缓（zcode B′ resume 残余未清，防 PASS/FAIL 证据受损）；auditor=不入册（验收独立性=岗位职责，复用腐蚀独立性；advisory 模式复用列为未来选项）。护栏（失败即弃/epoch/fresh 逃生口）在 resolveReuseTurn，与本表无关。",
   "roles": {
     "researcher": { "sessionReuse": "lead_workspace" }
   }

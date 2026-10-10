@@ -28,9 +28,10 @@ export const RUN_STATUS_OUTPUT_KEYS = Object.freeze([
 // reasoning). run_dispatch_contract_check SHARES this schema (M12-9 SSOT).
 // 0045 §1.4 第 5 步（2026-10-05）：+lane/+role（agentId 转可选——{agentId} 或
 // {lane, role} 二选一闭集，选择器校验在 handler 经 dispatchResolution）。
+// 0052（2026-10-10）：+fresh（复用会话逃生口——强制 first+epoch+1，Lead 裁量）。
 export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
   "agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty",
-  "expectedGitHead", "expectedWorkspaceRoot", "lane", "model", "prompt", "readOnly",
+  "expectedGitHead", "expectedWorkspaceRoot", "fresh", "lane", "model", "prompt", "readOnly",
   "reasoning", "role",
 ]);
 
