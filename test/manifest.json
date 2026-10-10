@@ -73,6 +73,7 @@
       "mcp-surface/mcpRegistryCertEvidence.test.js",
       "mcp-surface/mcpRunCollect.test.js",
       "mcp-surface/mcpRunConsult.test.js",
+      "mcp-surface/parentImage.test.js",
       "mcp-surface/mcpRunContinue.test.js",
       "mcp-surface/mcpRunCorrection.test.js",
       "mcp-surface/mcpRunDiagnose.test.js",

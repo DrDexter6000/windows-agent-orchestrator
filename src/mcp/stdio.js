@@ -28,6 +28,7 @@ import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createWaoMcpServer } from "./server.js";
+import { armMcpParentImage } from "./parentImage.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
@@ -159,6 +160,8 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  // B 审计臂（kimi 诊断批）：父进程镜像名解析（best-effort，失败缺席）。
+  armMcpParentImage();
   const { registryPath, runDir, workspaceRoot } = parsed;
   // M10-pre2: workspaceRoot has already been validated by parseMcpArgs
   // (absolute, non-empty, non-duplicate). Resolve it for canonical form.

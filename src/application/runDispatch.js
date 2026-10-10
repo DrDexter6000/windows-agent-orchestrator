@@ -924,6 +924,14 @@ export async function dispatchRun({
   try {
     await transcript.append("run.background_submitted", {
     background: true,
+    // B 审计臂（kimi 诊断批 2026-10-10，Owner 批准）：MCP 实例启动时解析的父进程
+    // 镜像名（stdio.js 置于本进程 env；经 buildChildEnv 白名单不进 worker）。
+    // 只记录不拦截——MCP-launched 派发的溯源事实（如 kimi.exe 拉起的 MCP 实例）。
+    // CLI/runner 等非 MCP 进程无此变量=字段缺席（byte-compatible）。
+    ...(typeof process.env.WAO_MCP_PARENT_IMAGE === "string" && process.env.WAO_MCP_PARENT_IMAGE.length > 0
+      && process.env.WAO_MCP_PARENT_IMAGE.length <= 64
+      ? { mcpParentImage: process.env.WAO_MCP_PARENT_IMAGE }
+      : {}),
     // TD-198: the ABSOLUTE resolved ownership cwd (explicit --cwd or the
     // registry entry, resolved) — a relative fact is unprovable workspace
     // identity. ownershipCwd is null only in the defensive no-prediction
