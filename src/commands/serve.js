@@ -26,7 +26,9 @@ import {
   serveMaintenanceDir,
 } from "../application/serveMaintenance.js";
 
-/** 解析目标 serve（url/token/agentId）与 kimi 席位集合。固定错误点名缺席面。 */
+/** 解析目标 serve（url/token/agentId）与 kimi 席位集合。固定错误点名缺席面。
+ * TD-253（决定 0058，双席修正）：--registry 显式消费；--url 未命中席位 → **拒绝**
+ * （旧静默回落 kimiAgents[0] 会把 58630 的回收打到 58628——opus/sol 同发现）。 */
 async function resolveServeTarget(config, urlOverride) {
   const registryPath = resolve(config.registry ?? "config/agents.json");
   const registry = await readRegistry(registryPath);
@@ -34,9 +36,18 @@ async function resolveServeTarget(config, urlOverride) {
   if (kimiAgents.length === 0) {
     throw new Error("no kimi-web agent in registry — wao serve requires a kimi-web lane entry (serveUrl/tokenEnv)");
   }
-  const target = urlOverride
-    ? kimiAgents.find((a) => a.serveUrl === urlOverride) ?? kimiAgents[0]
-    : kimiAgents[0];
+  let target;
+  if (urlOverride) {
+    target = kimiAgents.find((a) => a.serveUrl === urlOverride);
+    if (!target) {
+      throw new Error(
+        `--url ${urlOverride} matches no kimi-web agent in ${registryPath} `
+        + `(available: ${kimiAgents.map((a) => a.serveUrl).join(", ")}) — refusing instead of silently falling back`,
+      );
+    }
+  } else {
+    target = kimiAgents[0];
+  }
   const token = process.env[target.tokenEnv];
   if (typeof token !== "string" || token.length === 0) {
     throw new Error(`serve auth env is absent: set ${target.tokenEnv} (value is never echoed)`);
@@ -48,7 +59,7 @@ async function resolveServeTarget(config, urlOverride) {
   };
 }
 
-function printSweepPlan(plan) {
+function printSweepPlan(plan, kimiHomeInUse = false) {
   console.log(`Claims (WAO transcripts, all project buckets): ${plan.claims} kimi-web sessions`);
   console.log(`Workspace table entries: ${plan.workspaces}`);
   console.log(`Deletable (worktree root dead): ${plan.deletable.length}`);
@@ -63,19 +74,27 @@ function printSweepPlan(plan) {
     console.log(`Probe failed (kept, no action): ${plan.probeFailed.length}`);
     for (const p of plan.probeFailed) console.log(`  PROBEFAIL ${p.sessionId} ${p.reason}`);
   }
-  console.log("NOTE: the kimi session store is SHARED across serve instances — this sweep");
-  console.log("deletes WAO-claimed sessions via the target serve regardless of which instance ran them.");
+  if (kimiHomeInUse) {
+    console.log("NOTE: target serve uses a PRIVATE kimi home (KIMI_CODE_HOME) — the sweep only");
+    console.log("sees that home's session store. Claims from other homes are skipped as foreign_home.");
+  } else {
+    console.log("NOTE: the kimi session store is SHARED across serve instances of the SAME home — this sweep");
+    console.log("deletes WAO-claimed sessions via the target serve regardless of which instance ran them.");
+  }
 }
 
 async function serveCommand(args, config) {
   const [sub, ...tail] = args;
   const options = parseOptions(tail);
+  // TD-253（决定 0058）：--registry 显式消费（sol：试点走注册表副本时 serve 也要读同一份）。
+  if (typeof options.registry === "string" && options.registry.length > 0) config = { ...config, registry: options.registry };
   if (sub === "status") {
     const target = await resolveServeTarget(config, options.url);
     const report = await serveStatusReport({
       port: Number(new URL(target.serveUrl).port),
       serveUrl: target.serveUrl,
       token: target.token,
+      kimiHome: options.kimiHome,
     });
     console.log(JSON.stringify(report, null, 2));
     return;
@@ -83,9 +102,9 @@ async function serveCommand(args, config) {
   if (sub === "sweep") {
     const target = await resolveServeTarget(config, options.url);
     const runDir = resolve(options.runDir ?? config.runDir);
-    const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token });
+    const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token, kimiHome: options.kimiHome });
     if (plan.error) throw new Error(plan.error);
-    printSweepPlan(plan);
+    printSweepPlan(plan, typeof options.kimiHome === "string" && options.kimiHome.length > 0);
     if (options.apply) {
       const ledger = resolve(serveMaintenanceDir(resolve(runDir, "..")), "sweep-ledger.jsonl");
       const summary = await applySessionSweep({ plan, serveUrl: target.serveUrl, token: target.token, ledgerPath: ledger });
@@ -110,6 +129,7 @@ async function serveCommand(args, config) {
       kimiAgentIds: target.kimiAgentIds,
       soakMs: Number.isFinite(soakMs) && soakMs >= 1000 ? soakMs : 12_000,
       lockRootDir: resolve(runDir, ".."),
+      kimiHome: options.kimiHome,
     });
     console.log(JSON.stringify(result, null, 2));
     if (result.refused) {

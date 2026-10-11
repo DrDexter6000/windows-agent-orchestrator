@@ -108,7 +108,7 @@ import { readRegistry } from "../registry.js";
 // 集成后终验执行；不满足独立审计证据规格，见 docs/usage.md 采纳协议节）。
 export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
-  "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit",
+  "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit", "lineage-close",
   "migrate-projects",
 ];
 
@@ -148,6 +148,11 @@ async function runsCommand(args, config, deps) {
   }
   if (sub === "delivery") {
     await runsDeliveryCommand(tail, config);
+    return;
+  }
+  // TD-254（决定 0058）：线系闭合出口（Lead 显式放弃；dry-run 默认，--apply 执行）。
+  if (sub === "lineage-close") {
+    await runsLineageCloseCommand(tail, config);
     return;
   }
   if (sub === "wait") {
@@ -2038,4 +2043,42 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       console.log(`Decision not recorded: existing ${result.existing.status} for ${result.existing.deliveryCommit}`);
     }
   }
+}
+
+/**
+ * TD-254（决定 0058）：runs lineage-close --run-id <id> --reason-file <f> [--apply]
+ * 线系闭合出口——枚举成员+门+（--apply）写闭合事实+按门释放保留 worktree（分支
+ * 永不删）。数据逻辑全部在 ../application/lineageClose.js；本函数只做 argv/输出。
+ */
+async function runsLineageCloseCommand(args, config) {
+  const options = parseOptions(args);
+  if (!options.runId) throw new Error("--run-id is required");
+  if (!options.reasonFile) throw new Error("--reason-file is required");
+  const { readFile } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  let reasonText;
+  try {
+    reasonText = await readFile(resolve(options.reasonFile), "utf8");
+  } catch {
+    throw new Error(`--reason-file could not be read: ${options.reasonFile}`);
+  }
+  if (reasonText.trim().length === 0) throw new Error("--reason-file must contain non-empty text");
+  const { closeRunLineage } = await import("../application/lineageClose.js");
+  const runDir = resolve(options.runDir ?? config.runDir);
+  const result = await closeRunLineage({
+    runId: options.runId,
+    runDir,
+    reasonText,
+    apply: options.apply === true,
+  });
+  if (result?.refuse) {
+    console.log(JSON.stringify({
+      refused: result.refuse,
+      ...(result.members ? { nonTerminalMembers: result.members } : {}),
+      ...(result.busyRunId ? { busyRunId: result.busyRunId } : {}),
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(JSON.stringify(result, null, 2));
 }

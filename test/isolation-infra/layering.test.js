@@ -195,6 +195,11 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/runManager.js -> src/application/timeoutPolicy.js",
   "src/commands/lifecycle.js -> src/application/timeoutPolicy.js",
   "src/backgroundRunner.js -> src/transcript.js",
+  // 0058（TD-254）：lineageClose 的转录/桶动态导入+runContinue 闭态检查+CLI 接线（全下向）。
+  "src/application/lineageClose.js -> src/projectBuckets.js",
+  "src/application/lineageClose.js -> src/transcript.js",
+  "src/application/runContinue.js -> src/application/lineageClose.js",
+  "src/commands/runs.js -> src/application/lineageClose.js",
   // 0045 W4c：workflow agentHandler 经解析层（workflow→core 下向，同其 RunManager 直调平级）。
   "src/workflow/handlers.js -> src/dispatchResolution.js",
   // 0045 门5：consultService 别名解析（runtimeFacts 同步缓存包装，application→core 下向）。

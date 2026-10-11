@@ -25,7 +25,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { spawn as nodeSpawn, execFile as nodeExecFile } from "node:child_process";
+import { spawn as nodeSpawn, execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
 import { readTranscript } from "../transcript.js";
 import { listRuns } from "./runList.js";
@@ -99,6 +99,7 @@ export async function planSessionSweep({
   runDir,
   serveUrl,
   token,
+  kimiHome = null,
   io = null,
   readTranscriptFn = readTranscript,
   ops = defaultOps,
@@ -137,7 +138,15 @@ export async function planSessionSweep({
   const deletable = [];
   const retained = [];
   const probeFailed = [];
+  const foreignHome = [];
   for (const [sessionId, claim] of claims) {
+    // TD-253（决定 0058，opus）：分家后按 claim.serveUrl 过滤——跨家会话在目标
+    // serve 上 404 会被误记 already_gone 污染台账。legacy 无 serveUrl 认领仅
+    // 默认家（kimiHome 缺席）纳入。
+    if (kimiHome ? claim.serveUrl !== serveUrl : (claim.serveUrl !== null && claim.serveUrl !== serveUrl)) {
+      foreignHome.push({ sessionId, runId: claim.runId, serveUrl: claim.serveUrl });
+      continue;
+    }
     const p = await probe({ baseUrl: serveUrl, token, sessionId, fetchImpl, timeoutMs });
     if (!p.ok) {
       probeFailed.push({ sessionId, runId: claim.runId, reason: p.reason });
@@ -168,6 +177,7 @@ export async function planSessionSweep({
     deletable,
     retained,
     probeFailed,
+    foreignHome,
     workspaces: workspaces.items.length,
   };
 }
@@ -249,7 +259,7 @@ export function acquireMaintenanceLock({ lockPath, pid = process.pid, nowMs = Da
   _mkdir(dirname(lockPath), { recursive: true });
   try {
     _write(lockPath, JSON.stringify({ pid, ts: nowMs }), { flag: "wx" });
-    return { held: true };
+    return { held: true, lockPath };
   } catch (error) {
     if (error?.code !== "EEXIST") return { refused: true, reason: "lock_io_error" };
   }
@@ -258,7 +268,7 @@ export function acquireMaintenanceLock({ lockPath, pid = process.pid, nowMs = Da
     const age = nowMs - (Number.isFinite(prev?.ts) ? prev.ts : 0);
     if (age > staleMs) {
       _write(lockPath, JSON.stringify({ pid, ts: nowMs }));
-      return { held: true, staleTaken: true, previousPid: prev?.pid ?? null };
+      return { held: true, staleTaken: true, previousPid: prev?.pid ?? null, lockPath };
     }
     return { refused: true, pid: prev?.pid ?? null, ageMs: age };
   } catch {
@@ -312,6 +322,7 @@ export async function recycleServe({
   kimiAgentIds,
   soakMs = 12_000,
   lockRootDir,
+  kimiHome = null,
   ops = defaultOps,
   fetchImpl = globalThis.fetch,
   timeoutMs,
@@ -324,14 +335,25 @@ export async function recycleServe({
   if (typeof workspaceDir !== "string" || workspaceDir.length === 0) {
     return { refused: "workspace_dir_required" };
   }
-  const lock = acquireMaintenanceLock({
-    lockPath: join(serveMaintenanceDir(lockRootDir), "recycle.lock"),
-    nowMs: nowMs(),
-  });
+  // TD-253（opus Q5）：serve cwd 三拒——cwd 句柄钉目录（W1c 实证）+项目发现面+家内污染。
+  const wsNorm = workspaceDir.replace(/[\\]/g, "/").toLowerCase().replace(/\/+$/, "");
+  if (wsNorm.includes("/.wao-worktrees/")) return { refused: "workspace_dir_inside_worktrees" };
+  if (typeof kimiHome === "string" && kimiHome.length > 0) {
+    const khNorm = kimiHome.replace(/[\\]/g, "/").toLowerCase().replace(/\/+$/, "");
+    if (wsNorm === khNorm || wsNorm.startsWith(khNorm + "/")) return { refused: "workspace_dir_inside_kimi_home" };
+  }
+  try {
+    execFileSync("git", ["-C", workspaceDir, "rev-parse", "--is-inside-work-tree"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000 });
+    return { refused: "workspace_dir_inside_git_worktree" };
+  } catch { /* 不在 git 工作树内=通过 */ }
+  const recycleLockPath = join(serveMaintenanceDir(lockRootDir), "recycle.lock");
+  const lock = acquireMaintenanceLock({ lockPath: recycleLockPath, nowMs: nowMs() });
   if (lock.refused) return { refused: "lock_held", lock };
-  const instances = ops.readServeInstances();
+  // dogfood 修正：拒绝/完成路径都释放锁（旧实现只靠 600s 陈旧回收——神秘占锁者来源）。
+  const releaseRecycleLock = () => { try { (io?.unlinkSync ?? require("node:fs").unlinkSync)(recycleLockPath); } catch { /* 已不在场 */ } };
+  const instances = ops.readServeInstances({ kimiHome });
   const instance = instances.find((i) => i.port === port) ?? null;
-  if (!instance) return { refused: "no_instance", port };
+  if (!instance) { releaseRecycleLock(); return { refused: "no_instance", port }; }
 
   // WAO 侧门：全部项目桶、active-only（新鲜 owner 心跳的非终态 run）。unresolved
   // （非终态但心跳死）不堵门——其上游活轮由 serve 侧 busy/集合 soak 兜底。
@@ -339,17 +361,19 @@ export async function recycleServe({
   const activeKimi = (active?.runs ?? active?.items ?? [])
     .filter((r) => Array.isArray(kimiAgentIds) && kimiAgentIds.includes(r.agentId));
   if (activeKimi.length > 0) {
+    releaseRecycleLock();
     return { refused: "active_runs", runs: activeKimi.map((r) => ({ runId: r.runId, agentId: r.agentId })) };
   }
 
   // serve 侧门：快照 → soak → 集合比对复探。
   const before = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-  if (!before.ok) return { refused: "serve_unobservable", reason: before.reason };
+  if (!before.ok) { releaseRecycleLock(); return { refused: "serve_unobservable", reason: before.reason }; }
   await sleepFn(soakMs);
   const after = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-  if (!after.ok) return { refused: "serve_unobservable", reason: after.reason };
+  if (!after.ok) { releaseRecycleLock(); return { refused: "serve_unobservable", reason: after.reason }; }
   const verdict = soakVerdict(before, after);
   if (verdict !== "clear") {
+    releaseRecycleLock();
     return {
       refused: verdict,
       sessionsBefore: before.items.length,
@@ -360,6 +384,7 @@ export async function recycleServe({
   // 杀：优雅 shutdown 优先；完成由端口死亡证实，超时回退 taskkill /T /F。
   const shutdown = await ops.shutdownServe({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
   if (shutdown.outcome !== "requested") {
+    releaseRecycleLock();
     return { refused: "shutdown_rejected", reason: shutdown.reason, ...(shutdown.code !== undefined ? { code: shutdown.code } : {}) };
   }
   let portDown = false;
@@ -389,9 +414,16 @@ export async function recycleServe({
   // 重启：env 由命令显式组装——WAO_IN_WORKER=1 恒注入（0047 env 臂），绝不继承
   // 操作员 shell 的偶然值；detached + ignore stdio（长命 serve 不挂 CLI 生命周期）。
   const spawn = spawnFn ?? nodeSpawn;
+  // TD-253（决定 0058，双席修正）：effective home 纪律——kimiHome 在场显式注入
+  // KIMI_CODE_HOME；缺席则**删除**继承来的 KIMI_CODE_HOME（旧实现 {...process.env}
+  // 实际继承操作员 shell，与注释相反：试点 shell 里设了新家再回收 58628 会把
+  // Owner serve 在新家重启——opus/sol 同发现）。
+  const childEnv = { ...process.env, WAO_IN_WORKER: "1" };
+  if (typeof kimiHome === "string" && kimiHome.length > 0) childEnv.KIMI_CODE_HOME = kimiHome;
+  else delete childEnv.KIMI_CODE_HOME;
   const child = spawn(kimiExe, ["web", "--no-open", "--port", String(port)], {
     cwd: workspaceDir,
-    env: { ...process.env, WAO_IN_WORKER: "1" },
+    env: childEnv,
     detached: true,
     stdio: "ignore",
   });
@@ -404,11 +436,12 @@ export async function recycleServe({
     const check = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs: 4000 });
     if (check.ok) { ready = true; break; }
   }
-  const newInstance = (ops.readServeInstances()).find((i) => i.port === port) ?? null;
+  const newInstance = (ops.readServeInstances({ kimiHome })).find((i) => i.port === port) ?? null;
   const children = newInstance ? await ops.countServeChildren({ pid: newInstance.pid, execFileFn }) : -1;
   // TD-251 W1c：荚已死、句柄已释——补扫本工作区的空 worktree 壳（dogfood 实证
   // 的 still_present 残渣在此闭环）。
   const husksSwept = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
+  releaseRecycleLock();
   return {
     recycled: true,
     ready,
@@ -422,8 +455,8 @@ export async function recycleServe({
 }
 
 /** status：实例元数据 + 荚规模 + 会话面（零副作用观察）。 */
-export async function serveStatusReport({ port, serveUrl, token, ops = defaultOps, fetchImpl = globalThis.fetch, timeoutMs, nowMs = Date.now, execFileFn = null }) {
-  const instances = ops.readServeInstances();
+export async function serveStatusReport({ port, serveUrl, token, ops = defaultOps, fetchImpl = globalThis.fetch, timeoutMs, nowMs = Date.now, execFileFn = null, kimiHome = null }) {
+  const instances = ops.readServeInstances({ kimiHome });
   const instance = instances.find((i) => i.port === port) ?? null;
   const children = instance ? await ops.countServeChildren({ pid: instance.pid, execFileFn }) : null;
   const sessions = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });

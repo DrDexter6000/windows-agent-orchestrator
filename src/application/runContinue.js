@@ -109,6 +109,7 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "parent_not_found", // no parent transcript / no agentId envelope
   "parent_not_terminal", // parent is not in a terminal state
   "parent_accepted", // accepted delivery is immutable; Lead starts a new run instead
+  "lineage_closed", // TD-254（决定 0058）：根转录 run.lineage_closed 在场——Lead 已显式放弃该线系
   "not_continuable", // parent has no run_lineage session_reuse root (legacy)
   "no_provider_session", // parent never established a provider conversation to resume
   "workspace_mismatch", // parent ownership != authorized workspace
@@ -435,6 +436,21 @@ export async function continueRun({
     return refuse("not_continuable");
   }
   const rootRunId = lineageEvent.rootRunId;
+
+  // TD-254（决定 0058）：线系闭合拒绝——根转录 bound run.lineage_closed 在场。
+  // 根不可读/被 prune → 不拒绝（维持现状；成功闭合后树已删，续接会撞 missing_worktree
+  // ——残余仅"释放失败且根后被 prune"形态，0058 在案）。锁侧封口归 lineage-close
+  // 的根锁+槽新鲜度门；此处 check→claim 微窗残余显式记录（0058）。
+  try {
+    const rootPathForClose = resolveTranscriptPath(resolvedRunDir, rootRunId);
+    if (existsSync(rootPathForClose)) {
+      const rootEventsForClose = await readTranscript(rootPathForClose);
+      const { lineageClosedIn } = await import("./lineageClose.js");
+      if (lineageClosedIn(rootEventsForClose, rootRunId)) return refuse("lineage_closed");
+    }
+  } catch {
+    // 读取故障不阻断（闭态检查是增强门，非授权门——授权门在 decide/闭合侧）。
+  }
 
   if (!parentEvents.some((e) => e.type === "session.created" && e.runId === parentRunId)) {
     return refuse("no_provider_session");

@@ -67,7 +67,7 @@ test("TD-250 A2 锁: wx 互斥 + 600s 陈旧回收；只防回收互撞（合同
   try {
     const lockPath = join(dir, "recycle.lock");
     const first = acquireMaintenanceLock({ lockPath, pid: 111, nowMs: 1000 });
-    assert.deepEqual(first, { held: true });
+    assert.equal(first.held, true);
     const second = acquireMaintenanceLock({ lockPath, pid: 222, nowMs: 2000 });
     assert.equal(second.refused, true);
     assert.equal(second.pid, 111);

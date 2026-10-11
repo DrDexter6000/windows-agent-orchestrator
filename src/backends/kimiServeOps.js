@@ -185,8 +185,10 @@ export async function shutdownServe({ baseUrl, token, fetchImpl = globalThis.fet
  * 实例元数据（~/.kimi-code/server/instances/*.json——serve 优雅退出时自清）。
  * 返回 [{serverId, pid, port, startedAt, heartbeatAt}]；目录缺席=空数组。
  */
-export function readServeInstances({ kimiHome = join(homedir(), ".kimi-code"), io } = {}) {
-  const dir = join(kimiHome, "server", "instances");
+export function readServeInstances({ kimiHome = null, io } = {}) {
+  // TD-253：显式 null（调用侧缺省透传）与 undefined 同义——默认家。
+  const home = typeof kimiHome === "string" && kimiHome.length > 0 ? kimiHome : join(homedir(), ".kimi-code");
+  const dir = join(home, "server", "instances");
   const out = [];
   if (io ? !io.existsSync(dir) : !existsSync(dir)) return out;
   const names = io ? io.readdirSync(dir) : readdirSync(dir);

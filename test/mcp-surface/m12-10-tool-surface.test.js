@@ -894,7 +894,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 服务端 ENVELOPE_TYPE_TO_LABEL 增四映射的镜像，W1a 延迟释放+W1b 验收放树
 // 共用）——outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；
 // M12-10-H wire 帽复验通过（additive）。
-"e5b46588214e21d6dfd1dbfe8abc2afd9e3d6fa40e74d0bad3457954a5ea5690";
+// 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
+// lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
+// outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
+"1cf8a4c9fd21a3335070dd803d92e96bc829bbf86e577032452d644626f096c4";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
