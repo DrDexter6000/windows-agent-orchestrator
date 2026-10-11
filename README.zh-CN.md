@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.2.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-01-v0.2.0.md)
+[![version](https://img.shields.io/badge/version-v0.4.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-11-v0.4.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -31,7 +31,7 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   Kimi 桌面 web 通道、Codex CLI、DeepSeek over ACP。参考机队的全部 8 个席位都运行在
   原厂 harness 上；共支持 8 个 backend 适配器——逐轴事实见生成的
   [能力矩阵](docs/surface/certification.md)。
-- **Transcript 即事实来源**——每个 run 都可以从其转录完整重建（新档在 `runs/projects/*/<runId>.jsonl`，旧档平铺 `runs/<runId>.jsonl`）；
+- **Transcript 即事实来源**——每个 run 都可以从其转录完整重建（新档在 `runs/projects/<slug>/<runId>.jsonl`，旧档平铺 `runs/<runId>.jsonl`）；
   交付审查是有界且脱敏的投影，永远不是裸 diff。
 - **监测，不监督**——WAO 观察、封装、呈现证据；语义裁定（接受/拒绝/返工）永远归 Lead。
 - **Windows 原生，体积极小**——纯 Node ESM；仅两个直接生产依赖
@@ -51,14 +51,16 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.2.0 新增（2026-10-01）
+## v0.4.0 新增（2026-10-11）
 
-- 全部 8 个 worker 席位运行在原厂第一方 harness 上（新增 backend：zcode、kimi-web、
-  deepseek-acp）。
-- 六轴 backend 能力矩阵与两层认证作为生成面发布：
-  [`docs/surface/certification.md`](docs/surface/certification.md)。
-- 采纳 semver；发版门槛证据（251/251 测试全绿，2026-10-01 实测）见
-  [`docs/changelog-2026-10-01-v0.2.0.md`](docs/changelog-2026-10-01-v0.2.0.md)。
+- **生命周期与卫生收口**——serve 会话荚与 worktree 生命周期在终态回收/释放；转录存储按
+  项目分桶（`runs/projects/<slug>/`），并提供旧平铺文件的迁移命令（决定 0056–0058、0060）。
+- **正确性门**——测试套件干扰自动裁定登记册（0054/0059）、咨询 capped 回执 + 无损分页
+  合同（0051）、会审席位只读违规自动 FAIL（0055）。
+- **交付收口**——lineage-close 出口对已决非交付线系记账并门控证据化释放 worktree，分支
+  永不删；doctor 新增认证门可见性 advisory（决定 0058/0060）。
+- 发版门槛证据（打标提交上全量测试绿，2026-10-11）与 v0.3.0/v0.3.1 指针见
+  [`docs/changelog-2026-10-11-v0.4.0.md`](docs/changelog-2026-10-11-v0.4.0.md)。
 
 ## 当前状态
 
@@ -111,14 +113,15 @@ Copy-Item config/agents.example.json config/agents.json
 #    你复制出的 agents.json 是 gitignored 的、由你裁剪：只保留你真有 runtime/认证
 #    路径的 worker，其余删掉。一个 runtime 就够用 WAO。
 #    各 runtime 的认证方式选择表见 AGENT_ONBOARDING.md。
-#    把保留 worker 的 cwd 改成它该操作的项目。
+#    保留 worker 的 cwd 可留模板值 `.`——目标项目由每次派发的 `--cwd`（CLI）或
+#    host 授权 workspace（MCP）决定；见 AGENT_ONBOARDING.md §4c。
 
 # 2. 校验 registry（此步不需要任何 runtime）
 # registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
-#    registry check 探测活的 opencode-serve backend（维护档 lane）——仅当你保留了
-#    opencode fallback worker 并启动了 scripts/serve.ps1 时才适用。
+#    registry check 探测活的 opencode-serve backend（维护档 lane）——入库模板
+#    默认不含 opencode 车道，通常直接跳过。
 
 # 3. 接入 MCP Host（主控制面——决定 0017）
 #    在 WAO 安装根目录（你 clone 的仓库）里跑。把任意 MCP host（Claude Desktop /
@@ -130,10 +133,12 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 # 4. 用 CLI fallback 跑第一次只读 canary（一个保留的 worker）
 #    把 <agentId> 换成第 2 步 `registry list` 里的任意 worker id——
-#    canary 对任何保留的 process worker 都可用：
-npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <目标项目> --registry config/agents.json --format json
+#    canary 对任何保留的进程式车道都可用（如 zcode / codex / claude-code；
+#    deepseek-acp 亦进程式，需 `dsh` + containment 资产；kimi 车道需先起 serve）。
+#    --read-only 声明只读观察 run（advisory、强制隔离、不带 delivery）：
+npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <目标项目> --registry config/agents.json --format json --read-only
 #    <目标项目> 必须是本机已存在的目录——全新机器可以临时用 WAO 仓库本身
-#    （只读 canary 对它无副作用）；见 AGENT_ONBOARDING.md §4f。
+#    （带 --read-only 的 canary 对它无副作用）；见 AGENT_ONBOARDING.md §4f。
 ```
 
 步骤 1–4 的完整展开（含各 runtime 认证）在
@@ -155,7 +160,7 @@ AGENT_ONBOARDING.md §3。
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.2.0](docs/changelog-2026-10-01-v0.2.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.4.0](docs/changelog-2026-10-11-v0.4.0.md)） |
 | **跑真实 smoke 测试**（claude/codex/opencode） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |

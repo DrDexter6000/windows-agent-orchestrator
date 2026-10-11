@@ -1523,6 +1523,65 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
     "architecture server.js 注释 roster 必须与 toolSurface TOOLS 同名同序（单边漂移即红）");
 });
 
+// ── TD-257（2026-10-11 onboarding 面漂移批）：版本面与计数声称守卫 ──
+// README 版本徽章曾钉死 v0.2.0 漂移三个版本无人抓——版本单一来源是 package.json
+// （0038），徽章/What's new 是用户面的"当前版本"声称。本守卫把三处声称钉到
+// package.json：徽章版本、徽章链接目标（在场 + 文件名含 -v<版本>，即 0038 的
+// 发版快照纪律被机械化）、What's new 节标题版本。双语 README 同规；删除该节
+// 须同步删守卫（有意识的动作，不是静默漂移）。
+test("TD-257: README 版本徽章/What's new 与 package.json 单一来源一致（双语）", () => {
+  const v = JSON.parse(read("package.json")).version;
+  for (const rel of ["README.md", "README.zh-CN.md"]) {
+    const txt = read(rel);
+    const badges = [...txt.matchAll(/img\.shields\.io\/badge\/version-v([\w.]+)-/g)].map((m) => m[1]);
+    assert.ok(badges.length >= 1, `${rel} 缺版本徽章`);
+    for (const b of badges) assert.equal(b, v, `${rel} 版本徽章 ${b} ≠ package.json ${v}——发版未同步徽章`);
+    const link = txt.match(/\[!\[version\]\([^)]*\)\]\(([^)]+)\)/)?.[1] ?? "";
+    // 0038 快照义务=MINOR/MAJOR——PATCH（0.4.x）允许徽章继续指向当前 MINOR 线最新快照，
+    // 不新增 PATCH 快照义务（sol 验收发现：按完整版本匹配会变相强制 PATCH 快照）。
+    const minorV = v.split(".").slice(0, 2).join(".");
+    assert.ok(link.includes(`-v${minorV}.`), `${rel} 徽章链接须指向 docs/changelog-*-v${minorV}.*.md（MINOR 线快照）`);
+    assert.ok(existsSync(join(ROOT, link)), `${rel} 徽章链接目标不存在：${link}`);
+    const whatsNew = txt.match(/^## (?:What's new in )?v([\w.]+) /m)?.[1];
+    assert.equal(whatsNew, v,
+      `${rel} What's new 节标题版本须等于 package.json ${v}（删节须同步删本断言——首页新鲜度声称不静默退场）`);
+  }
+});
+
+// TD-257：连字符计数形态（"N-tool"）补盲——上方 TD-120 守卫只盯 "N tools"/"N 个"
+// 形态，AGENT_ONBOARDING §10.1 的 "22-tool 冻结工具面" 曾从缝里漏过多个版本。
+// 只校验连字符形态（当前面声称）；带日期的实测记录（如"加载全部 23 个工具"）
+// 不是本守卫对象——日期钉住的历史事实不随工具面升级改写（方案会审双席裁定）。
+test("TD-257: 连字符工具计数（N-tool）与 toolSurface SSOT 一致", () => {
+  const n = TOOLS.length;
+  for (const rel of ["AGENT_ONBOARDING.md", "SKILL.md", "README.md", "README.zh-CN.md", "llms.txt"]) {
+    for (const m of read(rel).matchAll(/\b(\d+)-tool\b/g)) {
+      assert.equal(Number(m[1]), n,
+        `${rel} 含陈旧/超前连字符计数 "${m[1]}-tool"（toolSurface TOOLS.length=${n}）`);
+    }
+  }
+});
+
+// TD-257：README 的 backend 适配器计数声称与生成面 certification.md 六轴表行数
+// 一致（计数权威链：src/backends → npm run gen:certification 生成面 → README
+// 声称）。第九个 backend 入仓时若只改代码/生成面不改 README，本守卫抓红。
+test("TD-257: README backend 适配器计数与生成面六轴表一致", () => {
+  const cert = read("docs/surface/certification.md");
+  const axis = cert.slice(cert.indexOf("## 一、"), cert.indexOf("## 二、"));
+  const rows = axis.split(/\r?\n/)
+    .filter((l) => /^\| \S/.test(l) && !/^\| backend \|/.test(l) && !/^\| ---/.test(l));
+  const n = rows.length;
+  assert.ok(n >= 1, "certification.md 六轴表解析失败（生成面措辞变了——同步更新本守卫）");
+  for (const rel of ["README.md", "README.zh-CN.md"]) {
+    const claims = [...read(rel).matchAll(/(\d+)\s+backend\s+adapters?\s+are\s+supported|共支持\s*(\d+)\s*个\s+backend/g)];
+    assert.ok(claims.length >= 1, `${rel} 缺 backend 计数声称或措辞已改——同步更新本守卫正则`);
+    for (const m of claims) {
+      assert.equal(Number(m[1] ?? m[2]), n,
+        `${rel} backend 计数 ${m[1] ?? m[2]} ≠ 生成面六轴表 ${n} 行`);
+    }
+  }
+});
+
 test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（TD-120 关系型守卫，doc↔test）", () => {
   // 会审返工（2026-08-15，coder_low/auditor 双席点名）：五桶清单与白名单在
   // docs 与 layering.test.js 是两份手工拷贝——本守卫把 test 冻结集合当代码
@@ -2535,8 +2594,8 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
   const canary = ob.slice(ob.indexOf("### 4f"), ob.indexOf("## 5"));
   assert.ok(/run <agentId>/.test(canary) && !/run coder_/.test(canary),
     "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
-  assert.ok(/claude-code \/ codex \/ kimi-code/.test(canary),
-    "canary 的进程式 worker 必须并列 claude-code / codex / kimi-code");
+  assert.ok(/zcode \/ codex \/ claude-code/.test(canary),
+    "canary 的进程式车道必须并列 zcode / codex / claude-code（模板进程式车道代表；deepseek-acp 亦为进程式但需 dsh+containment 资产，§4f 句另行列入；TD-257 起 kimi-code 非模板车道，旧 trio 钉随之更新）");
   assert.ok(/入库/.test(ob) && /车道/.test(ob) && /seatRole/.test(ob) && /gitignored/.test(ob),
     "onboarding 必须区分入库模板（0046 车道键形状+全员显式 seatRole）与 gitignored 私人 agents.json 副本");
 });

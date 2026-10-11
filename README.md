@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.2.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-01-v0.2.0.md)
+[![version](https://img.shields.io/badge/version-v0.4.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-11-v0.4.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -35,7 +35,7 @@ you.
   adapters are supported in total — per-axis facts in the generated
   [capability matrix](docs/surface/certification.md).
 - **Transcript is the source of truth** — every run reconstructable from
-  the run's transcript (bucketed `runs/projects/*/<runId>.jsonl` or legacy flat); delivery review is bounded and redacted, never a raw diff.
+  the run's transcript (bucketed `runs/projects/<slug>/<runId>.jsonl` or legacy flat); delivery review is bounded and redacted, never a raw diff.
 - **Monitors, never supervises** — WAO observes, packages, and presents evidence; the
   semantic call (accept, reject, rework) always belongs to the Lead.
 - **Windows-native, minimal footprint** — plain Node ESM; two direct production
@@ -58,14 +58,21 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.2.0 (2026-10-01)
+## What's new in v0.4.0 (2026-10-11)
 
-- All 8 worker seats now run on first-party vendor harnesses (new backends: zcode,
-  kimi-web, deepseek-acp).
-- Six-axis backend capability matrix and two-tier certification published as a generated
-  surface: [`docs/surface/certification.md`](docs/surface/certification.md).
-- Semver adopted; release-gate evidence (251/251 tests green, dated 2026-10-01) in
-  [`docs/changelog-2026-10-01-v0.2.0.md`](docs/changelog-2026-10-01-v0.2.0.md).
+- **Lifecycle & hygiene closed out** — serve session pods and worktree lifecycle are
+  recycled/released on terminal states; the transcript store is bucketed under
+  `runs/projects/<slug>/` with a migration command for legacy flat files (decisions
+  0056–0058, 0060).
+- **Correctness gates** — an interference auto-adjudication registry for the test
+  suite (0054/0059), the consult capped-receipt + lossless paging contract (0051),
+  and automatic FAIL on read-only panel-rule violations (0055).
+- **Delivery closeout** — the lineage-close exit records settled non-delivery
+  lineages and gates evidence-based worktree release; branches are never deleted;
+  doctor gained a cert-gate visibility advisory (decisions 0058/0060).
+- Release-gate evidence (full-suite green on the tagged commit, dated 2026-10-11) plus
+  v0.3.0/v0.3.1 pointers:
+  [`docs/changelog-2026-10-11-v0.4.0.md`](docs/changelog-2026-10-11-v0.4.0.md).
 
 ## Current status
 
@@ -132,14 +139,16 @@ Copy-Item config/agents.example.json config/agents.json
 #    gitignored and yours to prune: keep only the workers whose runtime/auth
 #    path you actually have, delete the rest. One runtime is enough to use WAO.
 #    The per-runtime auth choice table is in AGENT_ONBOARDING.md.
-#    Edit each kept worker's cwd to the project it should operate on.
+#    Each kept worker's cwd can stay the template value `.` — the target project is
+#    decided per dispatch by `--cwd` (CLI) or the host-authorized workspace (MCP);
+#    see AGENT_ONBOARDING.md §4c.
 
 # 2. Verify the registry (no runtime needed for this)
 # registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
 #    registry check probes a live opencode-serve backend (maintenance lane) —
-#    it only applies if you kept the opencode fallback worker and started scripts/serve.ps1.
+#    the tracked template ships no opencode lane, so it is usually skipped.
 
 # 3. Connect an MCP Host (primary control surface — Decision 0017)
 #    Run this from the WAO install root (the repo you cloned). Point any MCP
@@ -151,10 +160,12 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 # 4. First read-only canary via the CLI fallback (one retained worker)
 #    Replace <agentId> with one worker id from `registry list` in step 2 — the
-#    canary works for ANY retained process worker:
-npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <target-project> --registry config/agents.json --format json
+#    canary works for any retained process lane (such as zcode / codex / claude-code;
+#    deepseek-acp likewise, needing `dsh` + containment assets; the kimi lane needs
+#    a running serve first). --read-only declares the advisory read-only run:
+npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <target-project> --registry config/agents.json --format json --read-only
 #    <target-project> must be an existing directory on this machine — a brand-new
-#    machine can temporarily use the WAO repo itself (the read-only canary has
+#    machine can temporarily use the WAO repo itself (the --read-only canary has
 #    no side effects on it); see AGENT_ONBOARDING.md §4f.
 ```
 
@@ -178,7 +189,7 @@ is set); see AGENT_ONBOARDING.md §3.
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **Check live per-worker dispatch certification** | `npm run cli -- registry list` (data: `runs/reliability-summary.json`, gitignored, generated by `npm run reliability`) |
-| **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.2.0](docs/changelog-2026-10-01-v0.2.0.md)) |
+| **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.4.0](docs/changelog-2026-10-11-v0.4.0.md)) |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **See requirements / non-goals / acceptance** | [`docs/01-prd.md`](docs/01-prd.md) |

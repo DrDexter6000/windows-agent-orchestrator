@@ -158,8 +158,8 @@ function validateHostGuideOption(host) {
   }
   if (!findHostDescriptor(host)) {
     throw new Error(
-      `wao onboarding --host: "${host}" is not in the verified host table (known hosts: ${HOST_DESCRIPTOR_IDS.join(", ")}). ` +
-        `Unverified hosts (e.g. zcode) follow the real-host admission checklist in AGENT_ONBOARDING.md — ` +
+        `wao onboarding --host: "${host}" is not in the verified host table (known hosts: ${HOST_DESCRIPTOR_IDS.join(", ")}). ` +
+        `Hosts not yet in the table follow the real-host admission checklist in AGENT_ONBOARDING.md — ` +
         `the host-neutral snippet above works with any MCP host in the meantime.`,
     );
   }
@@ -193,9 +193,10 @@ export function renderHostGuideBlock(hostId, result) {
     lines.push(`(then restart ${d.id} / open a new ${d.label} task in that project)`);
   } else {
     lines.push(`${d.id} is a snippet-only host — WAO never writes its config:`);
-    lines.push(`  1. Paste the host-neutral snippet above into ${d.id}'s MCP config (mcpServers JSON), or run:`);
+    lines.push(`  1. Register via the host's own command (the verified route):`);
     if (guide.example) lines.push(`     ${guide.example.command}${guide.example.stability === "stable" ? "" : `   [${guide.example.stability}]`}`);
-    lines.push(`  2. Restart ${d.id}.`);
+    lines.push(`  2. Only for hosts without a verified command: paste the host-neutral snippet above into the MCP config (mcpServers JSON) — format-level fallback, load not verified for every host.`);
+    lines.push(`  3. Restart ${d.id}.`);
   }
   lines.push(`hostVerified=${d.hostVerified} — ${d.hostVerified ? "load verified on the real host (evidence in hostDescriptors.js)" : "format-level admission only; real-host load NOT yet verified"}.`);
   lines.push("");
@@ -384,7 +385,7 @@ function panelReadinessLines(r) {
     lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）`);
     lines.push(`  建议席位组合（展示建议，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
     if (p.missingAdversarial) {
-      lines.push("  无对抗席候选（auditor/coder_mm）——两席分配语义要求对抗视角，建议补配");
+      lines.push("  当前无可用对抗席（ready 面）——两席分配语义要求对抗视角，建议补配");
     }
     if (p.insufficientFamilyDiversity) {
       lines.push("  跨族系提示：可用副审的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");

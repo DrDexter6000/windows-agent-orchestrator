@@ -181,6 +181,7 @@ milestone 标记 ✅ 前必须满足：
 
 ## 8. 决策与收尾卫生（ADR 0034，2026-09-29）
 
+- 发版（MINOR/MAJOR）收尾配一份 `docs/changelog-<date>-vX.Y.Z.md` 过程快照（范围汇总 + 证据指针，只追加不回改）——决定 0038 既有纪律的执行入口；README 版本徽章与 What's new 节版本由 `docs-consistency` 守卫钉到 package.json 单一来源（TD-257 落地，防漂移复发）。
 - 重大取舍（Mainline(3)/ADR 级）的方案对比必须含"重建/重写"行并附长期沉默成本；以成本/工作量为由删除该行越权——成本否决权只在 Owner。
 - 已决（accepted/rejected）且无承重引用的交付 run，验收收尾时 worktree remove 与 `wao/run_*` 分支删除连体执行；SKILL.md 受瘦身上限约束不承载正文（**当前帽值与变更记录以 docs-consistency 的 SKILL 帽守卫为唯一权威**——2026-09-19 Owner 重置 17000→12000；2026-10-02 Owner 授权 +15%→13800；本条不重复数值，防第二份陈述漂移。本次落位时被该守卫拦截后改道，属防税设计正常生效）。
 - 工作流/阶段闭合时跑 `npm run hygiene`（ADR 0035 守卫库存 W1–W5）并把结果贴进闭合记录；红灯未处理不得宣告闭合。

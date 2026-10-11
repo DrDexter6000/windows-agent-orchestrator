@@ -1752,7 +1752,7 @@ test("R9 需求 5: 同族提示——≥2 可用但推断族系单一 → 跨族
     assert.ok(text.includes("跨族系提示"), "同族提示行在场");
     assert.ok(text.includes("跨族系是更强推荐"), "跨族系推荐措辞");
     assert.ok(text.includes("未知族系不参与判定"), "未知族系不参与判定的括注随提示行在场");
-    assert.ok(text.includes("无对抗席候选（auditor/coder_mm）——两席分配语义要求对抗视角，建议补配"),
+    assert.ok(text.includes("当前无可用对抗席（ready 面）——两席分配语义要求对抗视角，建议补配"),
       "C-1：零对抗席的补配提示行在场");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });

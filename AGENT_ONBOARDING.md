@@ -1,6 +1,6 @@
 # Agent Onboarding — WAO 安装与上手指南
 
-> 你是一个 agent runtime（codex / claude-code / kimi-code / 其它），被要求把 WAO（Windows Agent Orchestrator）当作技能安装并使用。
+> 你是一个 agent runtime / MCP 宿主（在册宿主与验证态见 §4e；任意宿主均可走 host-neutral 片段），被要求把 WAO（Windows Agent Orchestrator）当作技能安装并使用。
 > 本文档是你的入职手册。读完它，你就知道：WAO 是什么、怎么装、怎么自检、怎么安全地开始调度 worker。
 >
 > **如果你已经是 WAO 主控（已装好）**：跳到 §4 开始用。本文档是首次安装时读的。
@@ -9,7 +9,7 @@
 
 ## 1. WAO 是什么
 
-WAO 是一个 **Windows 原生、headless 的 agent 编排控制平面**。它不自己推理，而是调度其它 agent runtime（claude-code / codex / kimi-code / opencode-serve）作为 worker 干活，自己负责：dispatch、transcript 记录、worktree 隔离、resume、metrics、scorecard 门控、workflow DAG、状态外化。
+WAO 是一个 **Windows 原生、headless 的 agent 编排控制平面**。它不自己推理，而是调度其它 agent runtime（如 claude-code / codex / zcode——支持的 backend 适配器闭集见生成的 `docs/surface/certification.md`）作为 worker 干活，自己负责：dispatch、transcript 记录、worktree 隔离、resume、metrics、scorecard 门控、workflow DAG、状态外化。
 
 **你的角色**：你是主控（lead）。你用 WAO 的命令派发任务给 worker，监控、验收、整合。你不直接干全程——你编排。
 
@@ -42,10 +42,10 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
 
-- **Node.js >= 22**（WAO 是 Node ESM，依赖 `@modelcontextprotocol/sdk` + `zod`，用 `npm install` 安装）
+- **Node.js v22**（`engines` 收紧为 `>=22 <23`；v24 的 libuv Windows Job Object 回归会被 WAO 版本守卫拒绝，见 §4 开头的调用纪律）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
-- **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi）——**一个 runtime 就够**，不需要全部装齐
-- **认证任选其一**：官方 Claude OAuth（`claude login`）、provider key（`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）、`codex login`、或 Kimi Code 登录态——选你有的那一种即可，见 §4c 选择表
+- **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage.md` 场景 4e 的「kimi 专用 worker serve 运维配方」）
+- **认证任选其一**（车道对应关系见 §4c 选择表）：zcode 桌面登录态（glm-pro/glm-flash）、官方 Claude OAuth `claude login`（opus）、`codex login`（sol/astra）、`KIMI_WEB_TOKEN`（kimi，kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（deepseek-pro/deepseek-flash，ACP 通道）；kimi-code backend 的 CLI 登录态仍是合法接入方式（模板未含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth trap 已隔离**（0045 前历史配置；0046 后 opus=原生 claude-code 通道）：provider-wrapped claude-code worker 用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证；`opus` 不走 wrapper，使用官方 Claude OAuth。
 
@@ -91,9 +91,10 @@ npm link           # 可选，每台机器一次：暴露顶层 `wao` 命令（�
 
 WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill 发现机制不同：
 
-- **codex**：按你的 plugin/skill 系统注册（通常是 `~/.codex/skills/wao-orchestrator/SKILL.md` 或等价机制）
-- **claude-code**：复制 SKILL.md 到 `~/.claude/skills/wao-orchestrator/SKILL.md`
+- **codex**：按你的 plugin/skill 系统注册（发现槽位以你的 codex 版本文档为准，如 `~/.codex/skills/` 或等价机制）
+- **claude-code**：注册 SKILL.md 到 `~/.claude/skills/wao-orchestrator/SKILL.md`——按决定 0049 应为**指向唯一物理检出的 junction**而非物理拷贝（注意：doctor 的技能槽位探测只覆盖 `~/.agents/skills`；junction 的删除必须用非递归 `rmdir`，`Remove-Item -Recurse` 会穿透删掉目标检出）
 - **kimi-code**：`~/.kimi-code/config.toml` 的 `extra_skill_dirs` 指向含 SKILL.md 的目录
+- **zcode**：本机观察到技能从用户级目录 `~/.agents/skills/wao-orchestrator/` 发现（宿主行为观察，非 hostVerified 覆盖面；按决定 0049 同样应为指向唯一检出的 junction）。MCP 接入走插件系统，见 §4e
 - **其它**：按你的 runtime 文档
 
 **不要把 WAO skill 装到被开发项目目录**（如 `<目标项目>`）——那是目标项目，不是 runtime 目录。装错位置会污染项目。
@@ -117,11 +118,14 @@ Copy-Item config/agents.example.json config/agents.json
 
 | 你有的 runtime/认证 | 保留的 worker | 认证方式 |
 |---|---|---|
-| zcode app-server（0046 原生通道） | glm-pro / glm-flash | 无需 API key（桌面登录态共享） |
-| claude-code + 官方 Claude OAuth（无 provider 直连） | 任一 claude-code worker | `claude login`（原生 OAuth，不走 provider wrapper） |
-| claude-code + DeepSeek key（可选替代 provider） | 任一 claude-code worker（改 provider 块） | `DEEPSEEK_API_KEY`（Windows User 环境变量） |
-| codex | tester / auditor | `codex login` |
-| Kimi web（0046 原生通道） | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer） |
+| zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；但 zcode 车道有**承重 env 桥**——`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析（ZCode 桌面安装时通常已写 User 作用域；registry `env` 块可显式覆盖，模板 glm-pro 带占位路径示例，须换真实路径或删除；**该桥适用于全部 zcode 车道，模板 glm-flash 条目未带 env 块、只依赖 User 作用域解析——模板补桥已立案待 Owner（TD-259）**）。`wao doctor` 承重 env 检查（advisory）会如实报告 |
+| codex | sol / astra | `codex login` |
+| claude-code + 官方 Claude OAuth（无 provider 直连） | opus | `claude login`（原生 OAuth，不走 provider wrapper） |
+| Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；serve 启动与端口见 `docs/usage.md` 场景 4e「kimi 专用 worker serve 运维配方」） |
+| DeepSeek key | deepseek-pro / deepseek-flash | `DEEPSEEK_API_KEY`（deepseek-acp 通道，Windows User 环境变量）；另需 `dsh` 在 PATH 与 containment 资产（见 `docs/certification-runbook.md`） |
+| claude-code + provider key（替代路径） | 自建 claude-code provider 车道（新车道键——**勿复用 opus 键改 provider**，会撞 lanes.json 身份断言；新增车道属 Owner 组合权，需自行认证） | `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`（provider wrapper 通道；DeepSeek 用户优先上一行 ACP 原生车道） |
+
+> 探测面诚实声明：`wao onboarding` 裸跑的自动推荐当前只探测 provider key 面（`provider.apiKeyEnv`）；kimi/deepseek 车道的 `tokenEnv`/`credentialEnv` 不在推荐探测面（已立案 TD-258）。`wao doctor` 不受此限——它按 registry 声明的凭据名如实检查所有车道。
 
 > 接入新模型 / 新运行时（改 provider/model 字段 vs 换 backend 的分叉）见 docs/usage.md「接入新模型 / 新运行时」节。
 
@@ -141,7 +145,7 @@ npm run cli -- wao doctor --cwd <目标项目>                        # 环境�
 
 Registry command split: registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health.
 
-`registry check` 只适用于 opencode-serve 后端（需要先起 `scripts/serve.ps1` 注入 provider key）；没保留 opencode fallback worker 就跳过它。
+`registry check` 只适用于 opencode-serve 后端（需要先起 serve 注入 provider key）；当前入库模板默认不含 opencode 车道——通常直接跳过它。
 
 **doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置（opencode worker 有没有配 tokenBudget——06-18 事故防线）、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 
@@ -155,24 +159,24 @@ Registry command split: registry list = inventory + certification status; regist
 npm run mcp -- --registry config/agents.json --run-dir runs
 ```
 
-- 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤，决定 0043 宿主表：当前 claude-code=codex 两席）。无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage.md` §MCP stdio + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
-- **CLI `--cwd` 只控制 workspace 观察/过滤**（哪些路径算改动、canary 在哪个项目里跑）。
+- 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤）。在册宿主及其验证态以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威——表内宿主均经真机验证加载（hostVerified），但验证态≠自动绑定能力（zcode 走插件系统、无 autoBind）；无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage.md` §MCP stdio + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
+- **CLI `--cwd` 指定派发目标项目**（run 族：worker 的工作目录，须是已存在目录；workspace 观察/过滤面随之）。
 - **MCP 派发的 workspace 来自 host 授权的绑定**：`--workspace-root` / `roots/list` / `workspace_select` 协商出 host 批准的目录，与 CLI `--cwd` 是两回事，别混。
 - 完整的 host 配置示例见 `docs/usage.md` §MCP stdio。
 
-**未验证宿主（如 zcode）的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收格式已核实的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
+**未验证宿主的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收真机验证过加载的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
 
 **zcode 接入（2026-10-03 真机验证完成，hostVerified=true）**：ZCode 的 MCP 唯一实证通路是**插件系统**（`mcp.servers` 直配与手写注册表均无效——会话工具面只从在册插件装配）。官方接入两步：`zcode plugins marketplace add <本地名录目录>`（名录 `source` 的 kind 用 `directory`、路径写**绝对路径**）→ `zcode plugins install wao@wao-local`。名录与插件包源在 `~/.zcode/wao-local-marketplace/`（机器级资产；内容 = `.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射，`mcp bind --host zcode` emit 同款）。验证证据：新会话加载全部 23 个工具（前缀 `mcp__plugin_wao_wao__`），initialize 握手返回 `wao-mcp 0.2.0`。宿主版本记录：ZCode 桌面 3.14.4.7912 / zcode CLI 0.16.9。排坑记录在 gitignored friction log（F14-F20）：插件注册是四件套（缺 marketplace 名录被静默跳过）、`.mcp.json` 路径须实测 spawn、查询会话工具注意插件命名空间前缀、`.dev` 不可当唯一备份位。
 
 ### 4f. 首次只读 canary
 
-用一个**进程式 worker**（claude-code / codex / kimi-code 都行，不是 opencode）跑一个最小只读任务，验证端到端。`<agentId>` 填你在 §4c 保留的那个 worker——从 `registry list` 的输出里挑它的 id 复制过来：
+用一个**进程式 worker**（模板车道里 zcode / codex / claude-code / deepseek-acp 都是进程式——deepseek 需 `dsh` 与 containment 资产，见 §4c；kimi-web 车道需先起 serve，见 §4c）跑一个最小只读任务，验证端到端。`<agentId>` 填你在 §4c 保留的那个 worker——从 `registry list` 的输出里挑它的 id 复制过来：
 
 ```
-npm run cli -- run <agentId> --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
+npm run cli -- run <agentId> --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json --read-only
 ```
 
-进程式 worker 进程死即会话死，适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这两个参数。新机器上还没有别的项目时，可以暂时用 WAO 仓自身作 `<目标项目>`（上面的只读 canary 对它无副作用）。
+进程式 worker 进程死即会话死（OS 进程语义；任何停止的验证仍以 `stop_verified` 为准，见 §6），适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--read-only` 声明只读观察 run（advisory、强制隔离、不带 delivery）。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这三个参数。新机器上还没有别的项目时，可以暂时用 WAO 仓自身作 `<目标项目>`（上面带 `--read-only` 的 canary 对它无副作用）。
 
 ---
 
@@ -208,9 +212,9 @@ npm run cli -- wao state read
 这些来自真实事故（烧掉上亿 token 的教训），详见 `references/safety-incidents.md`：
 
 1. **opencode worker 必须配 `tokenBudget`，否则不要派发。** 没配 budget 的 opencode worker = 06-18 事故配置。
-2. **默认用进程式 worker（claude-code / kimi-code），不是 opencode。** 进程死即会话死，OS 保证。
+2. **默认用进程式车道（模板 zcode / codex / claude-code / deepseek-acp），不是 opencode。** 进程式车道没有 opencode 的 stop 虚假成功风险面（06-18 事故形态），但进程类别不替代停止验证——任何停止仍看第 3 条的 `stop_verified`。
 3. **`stop` 之后看 `stop_verified`，不只看命令返回。** abort 返回 200 ≠ 后台停了。
-4. **任务结束后检查残余进程：** `tasklist | grep opencode`。看不见的后台进程曾烧了一夜 token。
+4. **任务结束后检查残余进程**（按所用 backend）：opencode serve 用 `tasklist` 查；kimi-web 车道的会话进程群（kimi.exe 及子进程，形态见决定 0056）用 `wao serve status` 检查、必要时按 `docs/usage.md` 的 serve 维护配方处置——进程名在场本身不等于泄漏。看不见的后台进程曾烧了一夜 token。
 5. **用 `.wao/` 记录，不新建文档，不把上下文塞 session。**
 
 **核心**：token 拿来用是投资，可接受；无人值守的无用循环 + 不清理残余，绝对不可接受。
@@ -229,7 +233,7 @@ workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节�
 
 - **worker 401**：provider key 没配（`wao doctor` 会查出 FAIL 并给 `run:` 修复提示）
 - **opencode worker 卡住**：serve 没起 或 key 没注入 serve 进程（用 `scripts/serve.ps1` 起 serve）
-- **run 失控（烧 token）**：立即 `npm run cli -- stop <runId>`，看 `stop_verified`；未验证则 `taskkill /IM opencode.exe /F`
+- **run 失控（烧 token）**：立即 `npm run cli -- stop <runId>`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置——全局 `/IM` 扫杀只作为 opencode 事故的最后手段（先见 `docs/troubleshooting.md`）
 - **不确定环境**：跑 `wao doctor`（advisory——HEALTHY/DEGRADED 可直接继续，BROKEN 项按 `run:` 提示处理后由 owner 裁决）
 
 详细排障：`docs/troubleshooting.md`。
@@ -291,7 +295,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 |---|---|
 | `delivery/` | 交付投影、验证、审查 |
 | `run-lifecycle/` | run 生命周期、续谱、sessionReuse |
-| `mcp-surface/` | 22-tool 冻结工具面与 MCP wire 契约 |
+| `mcp-surface/` | 23-tool 冻结工具面与 MCP wire 契约 |
 | `transcript/` | 事件解析、summary、collect 投影 |
 | `registry-roles/` | registry schema、角色矩阵 |
 | `backends/` | 各 backend 适配 |
@@ -323,7 +327,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 
 ### 10.5 首次贡献建议路径
 
-从修一个 open TD 的小尾巴起步（open 清单见 `docs/tech-debt.md`，例如 TD-114：`runs wait` 窗口到期 exit 0 缺子进程级断言）：
+从修一个 open TD 的小尾巴起步（open 清单见 `docs/tech-debt.md`——从带 🟡/🟢 状态标记的行里挑与你要动的面相邻的条目）：
 
 1. 读 TD 条目，按 §10.1 找到对应测试目录与源码
 2. 按 `docs/usage.md` 场景 4b 测试分层规则跑 **T0 focused 基线**（目标测试文件 + 直接消费回归，带 `--test-timeout`），确认起点对要动的面全绿——不必先跑全量
