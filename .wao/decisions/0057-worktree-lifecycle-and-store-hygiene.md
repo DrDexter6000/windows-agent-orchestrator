@@ -99,3 +99,31 @@ Owner 家实例注册表与会话集合（483）前后不变、token 矩阵（�
 真业务 dogfood：单席会审（真评审 0057 草稿、24 工具调用、零写入）→ stop_verified→
 树内容+git 元数据即删→`_release_failed{still_present}`（壳被荚占——诚实上报）→
 recycle 扫壳闭环 `emptyWorktreeHusksSwept:1`。全量 canonical 见提交信息。
+
+## 修订（2026-10-11，决定 0062 丙′——分支回收）
+
+W1a 的"此处不做分支清理"（opus Q2-7 accepted commit 可达性理由）收窄为**"有独有提交
+才保留"**：ephemeral 只读 run 的 worktree 释放成功后，`wao/<runId>` 分支零独有提交
+（`git rev-list --count <branch> ^<其余全部本地 refs>` === 0，`git branch -d` 拒绝即
+保留）则回收，有独有提交则保留+记事件 `run.worktree_branch_kept{uniqueCommits}`。
+一致性链：0058"分支永不删"的合同对象始终是**交付线系分支**（0060 已明文）；只读/
+非交付零独有分支例外在 0060 由 Owner 追认；本修订把该例外机制化到自然释放点
+（_releaseDeferredWorktree——stop 确认门+删后 existsSync 复检+事件四件套已在场，
+第四道门=零独有判定在 isolation.recycleRunBranch）。运行期形态零变化（vs 甲案
+--detach：分支照建、worker 无感知、无新行为面——kimi 席从 worker 体验确认
+detached 无可感知差异，但丙′ 保留违规提交证据的纵深更优）。rejected/undecided
+交付分支仍永不删（语义判断归 Lead，席位 Q3 否决按龄淘汰不变）。
+
+### 修订补记（同日，0062 审核轮——判据差异与文案修正）
+
+- **判据差异明示（opus/sol 审核条款）**：上方修订的运行期判据（零独有=被**其余全部
+  本地分支与本地 tag** 覆盖，`--not --exclude=<self> --branches/--tags`）是 0060 例外
+  证据形（tip==main）的**放宽**，不是同一证据形：被任何其他本地 ref 覆盖的零独有
+  分支亦可回收；仅由 tag/remote 保住的提交会被保守计为独有（remote-tracking 不在
+  排除集）。提交零丢失性质不变。存量手工清理脚本（.dev）用的是"包含于 main"判据
+  ——三套判据并存以本节为现行运行期权威。
+- **覆盖面修正（opus 实锤）**：kimi-web 车道只读轮常止于 `release_failed{still_present}`
+  （荚占句柄壳）而非 released——回收挂在 released/already_gone 两臂（停止确认后），
+  still_present 臂不回收（分支多半仍被该 worktree 检出，-d 自拒），留待荚清扫+普查
+  （TD-262）。spawn 失败轮此前整棵泄漏（Run 未构造、deferredWorktreeRelease 无人
+  认领）——已在 0062 审核轮修复（spawn catch 补树清理+回收）。

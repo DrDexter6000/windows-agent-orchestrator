@@ -72,7 +72,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
 | `docs/troubleshooting.md` | 诊断手册（provider/cwd/runs/completion/进程/backend） |
-| `docs/milestone-discipline.md` | 发版/审计纪律（how-to 性质） |
+| `docs/milestone-discipline.md` | 发版（§9 检查单，0038 的操作入口）/审计纪律（how-to 性质） |
 | `docs/isolation.md` `docs/port-allocator.md` | 单模块操作说明 |
 
 **铁律**：坑/故障的"现象+做法"写这里；根因分析/教训写过程类别（事故复盘）。运维文档可指向事故，但**不复制事故正文**。

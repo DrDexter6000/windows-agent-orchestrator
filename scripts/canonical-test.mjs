@@ -69,12 +69,15 @@
 //          transcript AFTER the final isolation sweep lands unobserved. The
 //          guarantee is "survived across a sweep boundary ⇒ recorded", never
 //          "every write leaves a trace".
-//       2. Recursion depth: exactly ONE level of subdirectory contents is
-//          snapshotted. A new file at depth ≥2 under a pre-existing
-//          subdirectory escapes; every known writer (transcripts, .owner-*,
-//          daemon*.json, .session-reuse/*, .lineage-reuse/*, workflow
-//          subdirectories) is flat at depth 0/1, and a NEW subdirectory at any
-//          observed level is itself an entry.
+//       2. Recursion depth: ONE level of subdirectory contents is snapshotted,
+//          EXCEPT the projects/ bucket root which goes one level deeper (TD-249,
+//          c3047e2: transcripts live at projects/<slug>/<runId>.jsonl = depth 2).
+//          A new file at depth ≥3 under a pre-existing bucket, or ≥2 under any
+//          other pre-existing subdirectory, still escapes; every known writer
+//          (transcripts, .owner-*, daemon*.json, .session-reuse/*,
+//          .lineage-reuse/*, workflow subdirectories) is flat at depth 0/1/2
+//          (transcripts only), and a NEW subdirectory at any observed level is
+//          itself an entry.
 //       3. Concurrent NON-suite writers: while `npm test` runs in the MAIN
 //          repo, any non-suite writer (an active daemon appending
 //          daemon-health.json, an MCP dispatch, a manual `wao run`) adds a
@@ -635,6 +638,7 @@ export function mapReportToFiles(report, expectedRels) {
 // every test owns its transcripts via a tmpdir run-dir. The guard snapshots
 // the ENTIRE runs/ directory ENTRY SET before the suite starts (dot entries,
 // every suffix, subdirectory names, plus ONE level of subdirectory contents —
+// projects/ bucket root goes one deeper (TD-249, depth 2 for transcripts) —
 // R8-C C-1: the old *.jsonl-top-level-only set let real writer shapes escape:
 // `.owner-*` heartbeats, daemon.json/daemon-health.json/daemon-supervisor.json,
 // `.session-reuse/`+`.lineage-reuse/` slots, workflow transcript subdirectories)
@@ -646,8 +650,9 @@ export function mapReportToFiles(report, expectedRels) {
 /**
  * Snapshot a runs directory listing into the guarded set: EVERY top-level
  * entry (dot entries, every suffix, subdirectory names) plus the entries of
- * each top-level subdirectory prefixed `<sub>/` (exactly ONE level of
- * recursion — see header boundary 2). Deduplicated and sorted. `listDir(sub)`
+ * each top-level subdirectory prefixed `<sub>/` (ONE level of recursion —
+ * header boundary 2; projects/ bucket root additionally one level deeper,
+ * TD-249). Deduplicated and sorted. `listDir(sub)`
  * returns an array of entry descriptors — plain strings (never recursed) or
  * `{name, isDirectory}` objects — or null when that directory does not exist
  * (the normal pre-first-run state — treated as the EMPTY set, not an error;

@@ -106,7 +106,9 @@ milestone 标记 ✅ 前必须满足：
 - `npm test`（mock）只验证逻辑对；`npm run reliability`（真实 provider）验证"系统能跑 + 输出对 + 真完成"，并输出 runtime+model certification。
 - reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model；`--profile strict` 额外确保 command/file scorecard drill，避免只凭 sentinel 把 worker 误标为 strict-dispatch capable。
 - **规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的 PR，
-  收尾必须跑 `npm run reliability`（三 provider 全绿），不能只靠 npm test 报绿就声称完成。**
+  收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配
+  为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二陈述漂移；单席增量重认证
+  的保留语义见下），不能只靠 npm test 报绿就声称完成。**
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
 - **单 worker 重认证不覆盖全量**：`npm run reliability -- --agent X` 跑完会增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
 - 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 含 scorecard+isolation+workflow 多 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
@@ -181,7 +183,24 @@ milestone 标记 ✅ 前必须满足：
 
 ## 8. 决策与收尾卫生（ADR 0034，2026-09-29）
 
-- 发版（MINOR/MAJOR）收尾配一份 `docs/changelog-<date>-vX.Y.Z.md` 过程快照（范围汇总 + 证据指针，只追加不回改）——决定 0038 既有纪律的执行入口；README 版本徽章与 What's new 节版本由 `docs-consistency` 守卫钉到 package.json 单一来源（TD-257 落地，防漂移复发）。
+- 发版（含 PATCH）按 §9 发版检查单执行——0038 既有纪律的操作入口（changelog 快照义务、README 版本守卫、tag 规矩的指针都在彼处，本条不承载流程正文，防同文件第二份陈述漂移）。
 - 重大取舍（Mainline(3)/ADR 级）的方案对比必须含"重建/重写"行并附长期沉默成本；以成本/工作量为由删除该行越权——成本否决权只在 Owner。
-- 已决（accepted/rejected）且无承重引用的交付 run，验收收尾时 worktree remove 与 `wao/run_*` 分支删除连体执行；SKILL.md 受瘦身上限约束不承载正文（**当前帽值与变更记录以 docs-consistency 的 SKILL 帽守卫为唯一权威**——2026-09-19 Owner 重置 17000→12000；2026-10-02 Owner 授权 +15%→13800；本条不重复数值，防第二份陈述漂移。本次落位时被该守卫拦截后改道，属防税设计正常生效）。
+- run 的树/分支收尾以决定 0057（W1b 验收放树）/0058（lineage-close 记账+证据门控释放）为权威：交付分支 `wao/<runId>` 永不删（accepted/违规 commit 可达性——0057 opus Q2-7）；ephemeral 只读轮的零独有分支在树释放成功后回收、有独有提交则保留+记事件（0062 丙′）；非交付残留分支按 0060 例外证据形（零独有+tip==main+run 只读）处置。本条只收拢边界指针，流程细节以各决定档为权威。SKILL.md 受瘦身上限约束不承载正文（**当前帽值与变更记录以 docs-consistency 的 SKILL 帽守卫为唯一权威**——2026-09-19 Owner 重置 17000→12000；2026-10-02 Owner 授权 +15%→13800；本条不重复数值，防第二份陈述漂移。本次落位时被该守卫拦截后改道，属防税设计正常生效）。
 - 工作流/阶段闭合时跑 `npm run hygiene`（ADR 0035 守卫库存 W1–W5）并把结果贴进闭合记录；红灯未处理不得宣告闭合。
+
+## 9. 发版检查单（0062，2026-10-11；同日双席审核修订顺序）
+
+> 定位：决定 0038 的**操作入口**——有序动作+证据落点；规则语义以 0038 各条为权威，
+> 本节只写动作与证据要求，不复述规则正文。ssot.md §1.3 定位本文件为发版纪律唯一
+> 权威家；其余文档提及发版只指回本节。每步执行后留证据记录（命令/日期/结果指针，
+> 落在当次 changelog 或发版收尾记录里）——空着即未执行（kimi 席条款）。
+
+1. **改版本号**：仓库根 `package.json` 的 `version`（唯一手写处——其余消费者全派生，0038）。**先改号、后跑全量、最后打 tag**：版本前缀类测试在改号后才会翻红（`d564d78` 先例）。
+2. **版本面手改同步（全量之前！）**：README 双语徽章/What's new 标题/快照链接是**手写字段被守卫钉到 package.json**（TD-257 三钉），不是生成物——升号后必须先手改同步，否则下一步全量必红；MINOR/MAJOR 同时建立 changelog 快照文件（第 6 步只做追加定稿）。
+3. **surface 再生成**：本轮 MCP surface / CLI help 有变动 → `npm run gen:surface` 并提交 `docs/surface/*` 生成物（ssot.md §1.3 生成参考层纪律）；wire 冻结面（m12-10 字节 SSOT）变动走既有重冻流程并附变更注记。
+4. **全量 `npm test` 绿**（§4 第 3 条）。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 TD-194 行与 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
+5. **`npm run reliability`（真实 token）通过**——发版门槛**无条件**（0038 第 5 条；§6.7 的 PR 级触发条件不能反向取消发版义务）。如实区分三种状态：**通过 / 未完成（缺项登记——v0.4.0 changelog 先例，不得勾成通过、不得成为下一版先例）/ 豁免**。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。唯一开口 = **Owner 逐次具名豁免**：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带（kimi/opus/sol 审核合订条款）。
+6. **changelog 快照定稿（MINOR/MAJOR）**：`docs/changelog-<date>-vX.Y.Z.md`——只追加不回改，勘误以追加节补（v0.4.0 勘误先例）；PATCH 不强制快照（v0.3.1 先例，豁免记录除外）。
+7. **1.0.0 额外门槛判定（打 tag 之前）**：TD-194 关闭（白天首过稳定）——0038 第 4 条可验证线。
+8. **最终候选提交**：全部证据（第 4/5 步）必须落在 tag 将指向的那个提交上——tag 只指向已验证工件。
+9. **打 tag 并推送**：annotated（`git tag -a vX.Y.Z`，0038 Consequences）→ **先推 main 再推 tag**（v0.4.0 "main 同步"先例）。轻量 tag 违规先例 v0.3.0/v0.3.1——只登记（v0.4.0 changelog 勘误节）不重打：重打会改变已发布的 tag 对象。

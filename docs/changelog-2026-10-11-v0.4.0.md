@@ -58,3 +58,8 @@
 ## 发版记录
 
 - tag：`v0.4.0`（annotated → d564d78）→ 已推远端（main 同步）。
+
+## 勘误（2026-10-11 晚追加，0062 批；本文件只追加不回改，以上原文保留原样）
+
+- **"发版门槛证据"节的这句陈述不实**：原文称"本发版周期无 completion 判定/provider 错误处理类改动，未触发 milestone-discipline §6.7 类硬门槛"。核对 `git log v0.3.1..v0.4.0`：`77efe1b`（zcode 完成判据/证据台账改身份切片——完成判定类改动）在周期内，`src/backends/` 六文件增删 +636/−105 行。**事实是：§6.7 的 PR 级触发条件当时已触发；规定的 `npm run reliability` 未执行；当时实际做的是 live 探针验证（`.dev/bprime-evidence/`），§6.7 不承认探针可以替代 reliability；没有具名 Owner 豁免——缺项始终未满足**。缺项登记的结论（reliability 未跑）不变，"未触发"归因撤回。（初版勘误曾把 `ccdaadd` 也列为完成判定改动——该提交标题明写"完成路径正文/证据发射**不变**"，属节流 streaming 呈现改动，此引不实，双席审核抓出后于提交前修正。）发版检查单（milestone-discipline §9，0062）此后要求如实区分"通过/未完成/豁免"三态。
+- **v0.3.0/v0.3.1 为轻量 tag**（`git cat-file -t` 返回 `commit`，非 `tag` 对象），违反 0038 Consequences 的 annotated 要求（v0.1.0/v0.2.0/v0.4.0 均合规）。只登记不重打——重打会改变已发布的 tag 对象。发版检查单（0062 §9 第 9 步）以此为先例钉死 annotated 形。

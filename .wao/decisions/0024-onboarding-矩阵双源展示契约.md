@@ -55,3 +55,17 @@ config/agents.json 在场且可读时），矩阵本体仍只显示模板行—�
 - **对消费者的行为变化**：已有私有 registry 的用户裸跑 onboarding 会在矩阵同时看到自己的
   真实配置行（含 drift 标注）与未配置的模板候选；模板候选行尾标 + 表尾句"（--apply 仅适用
   模板候选行）"指明 --apply 的适用范围；无私有 registry 的新消费者输出逐字不变。
+
+## 修订（2026-10-11，决定 0062 B9 乙′——drift 闭集扩 seatRole）
+
+条款 4 的 drift 比对闭集在 backend + model.id（0024 原文）+ reasoning.effort 与认证
+矩阵行 modelId（0044 d′ 扩员）之上，再增 **seatRole**（2026-10-11 实锤：模板 0045/W4d
+全员显式 seatRole 后私有副本 8 席中 7 席未刷新——席位面板退回命名惯例兜底，车道键名
+不匹配惯例即按 non_seat 从席位面消失）。**比较语义（0062 审核修订，opus 条款）**：
+**模板声明了 seatRole 才可比**——与矩阵 modelId 轴"双侧在场才比"同律；模板未声明
+（含私有声明而模板未声明的反向不对称）不判，"形状差异 ≠ drift"原则保持；模板声明
+且私有缺席或值不同 = drift。模板不携带的私有席位不比（私有裁剪合法——sol 定界）。
+单一比较器 seatRoleDriftBetween/seatRoleDriftRows（application/onboarding.js）供矩阵
+与 doctor 指针行共用，不造第二比对权威（opus 条款）。人读文案不对值不匹配行断言
+"命名惯例兜底"（该措辞只对私有侧未声明行成立——sol 审核条款）；JSON 面区分
+privateSeatRole（缺席=null）与值不匹配两种事实。
