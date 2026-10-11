@@ -21,7 +21,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, sep, isAbsolute, dirname, basename } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,6 +54,8 @@ import {
   // TD-248 / 决定 0054：干扰形登记册与自动裁定。
   normalizeSignatureText, signatureSourceLine, validateInterferenceRegistry, entryUsableOn,
   classifyAutoAdjudication,
+  // TD-255 / 决定 0059：文件级根失败回响判定。
+  fileFailureEchoOfSubtests, INTERFERENCE_REGISTRY_NAME,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -2344,6 +2346,20 @@ test("TD-181(a) 纯函数钉：boundDetailString 截断标识 / firstRoundFailur
   assert.equal(unknownFailureDetail("r").status, "unknown");
 });
 
+// TD-255（案 A）：missing 分支的 reason 消费 reporter 的 fileLevelOnly 事实——
+// 事实在场=可判定（顶层脚本形状），事实缺席=按可能成因列表措辞（sol：不得
+// 把一切 missing 归因单一形态）。
+test("TD-255: firstRoundFailureDetail missing 分支——fileLevelOnly 事实→可判定 reason；缺事实→possible-causes 措辞", () => {
+  const withFact = firstRoundFailureDetail({ suites: [], fileLevelOnly: ["test/scripty.test.js"] }, "scripty.test.js");
+  assert.equal(withFact.status, "unknown");
+  assert.ok(withFact.reason.includes("top-level-script"), `事实在场时 reason 点名形状（实际 ${withFact.reason}）`);
+  assert.ok(withFact.reason.includes("ZERO subtest events"), "可判定措辞携带事实关键词");
+  const noFact = firstRoundFailureDetail({ suites: [] }, "scripty.test.js");
+  assert.equal(noFact.status, "unknown");
+  assert.ok(noFact.reason.includes("possible causes"), `缺事实时按可能成因列表（实际 ${noFact.reason}）`);
+  assert.ok(!noFact.reason.includes("recorded with ZERO"), "缺事实不得用断言式措辞（列表可提及形状，但不得断言）");
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // TD-181 (b, 2026-09-26, audit22 修复钉)：三个可复现缺陷的回归——
 //   ① 预算按「实际 JSON 序列化长度」收敛：单条失败子测试 + fileFailure、含 JSON
@@ -2573,6 +2589,7 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
   const prevExitCode = process.exitCode;
   const stderrLines = [];
   const origError = console.error;
+  let keepRoot = false; // TD-255：失败时保留合成根目录（取证），通过则照常清理
   console.error = (line) => { stderrLines.push(String(line)); };
   try {
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
@@ -2609,19 +2626,48 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
     writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
 
     const exitCalls = [];
+    // TD-255（案 B 取证面，opus a′ 方案）：波内间歇翻红时 groupError 原文 +
+    // 子进程退出事实 + 读报告瞬态必须全部可辨。双包装记录：
+    //   runChild  —— 每个子进程的 argv 摘要/exitCode/signal/stderr 尾部/watchdog
+    //   readReport—— 读前文件存在性+大小、原始结果（解析成功/缺失/抛错），
+    //                并把当次中间报告字节快照到 forensic-report-<n>.json
+    //                （聚合报告同路径覆盖前保现场——opus 指出的取证缺口）。
+    const forensics = [];
+    let forensicSeq = 0;
     await runSuite({
       repoRoot: root, testDir: join(root, "test"), manifestPath, reportPath,
       nodeExe: process.execPath, childEnv: synthChildEnv(),
       exitFn: (code) => exitCalls.push(code),
       runCanonicalImpl: (options) => runCanonical({
         ...options,
-        runChild: (...args) => {
+        runChild: async (...args) => {
           writeFileSync(phasePath, "first", "utf8");
-          return options.runChild(...args);
+          const argv = args[0] ?? [];
+          const result = await options.runChild(...args);
+          forensics.push({ kind: "child", leg: "wave", argSummary: argv.filter((a) => a.startsWith("--test-")).join(" ") || argv.slice(0, 2).join(" "), exitCode: result.exitCode ?? null, signal: result.signal ?? null, watchdog: result.watchdog ? { fired: result.watchdog.fired, confirmed: result.watchdog.confirmed } : null, stderrTail: String(result.stderr ?? "").slice(-1200) });
+          return result;
         },
-        isolator: (...args) => {
+        readReport: async () => {
+          const seq = (forensicSeq += 1);
+          let pre;
+          try { pre = { exists: true, size: statSync(reportPath).size }; }
+          catch (preErr) { pre = { exists: false, err: preErr.code ?? preErr.message }; }
+          let outcome;
+          let value;
+          try { value = await options.readReport(); outcome = value == null ? "null" : "parsed"; }
+          catch (readErr) { outcome = `threw: ${readErr.message}`; }
+          if (pre.exists) {
+            try { copyFileSync(reportPath, join(root, `forensic-report-${seq}.json`)); } catch { /* 快照尽力而为 */ }
+          }
+          forensics.push({ kind: "readReport", seq, pre, outcome });
+          if (outcome.startsWith("threw")) throw new Error(outcome);
+          return value;
+        },
+        isolator: async (...args) => {
           writeFileSync(phasePath, "isolation", "utf8");
-          return options.isolator(...args);
+          const result = await options.isolator(...args);
+          forensics.push({ kind: "child", leg: "isolation", exitCode: result.exitCode ?? null, signal: result.signal ?? null, stderrTail: String(result.stderr ?? result.tail ?? "").slice(-1200) });
+          return result;
         },
       }),
     });
@@ -2631,7 +2677,12 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
     // failureDetail）必须红掉的断言面。
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
     assert.equal(report.finalVerdict, "fail", "首轮 fail + 隔离 pass ⇒ 最终仍 fail（绝不洗绿）");
-    assert.equal(report.suiteError, false, "干净波（无波级错误）——失败全部归因到文件");
+    // 断言消息自带波级错误证据（本批修复：波内翻红时无诊断面——groupError 只进
+    // 落盘报告，而夹具根目录在 finally 里被删，事后无法回看）。
+    const waveErrors = (report.executionWaves || [])
+      .filter((w) => w.groupError)
+      .map((w) => `${w.name}(exit=${w.exitCode}): ${w.groupError}`);
+    assert.equal(report.suiteError, false, `干净波（无波级错误）——失败全部归因到文件；实际波级错误：${waveErrors.length ? waveErrors.join(" | ") : "(报告未记 groupError，但 suiteError=true——不可达形态)"}`);
     assert.equal(report.firstRound.verdict, "fail");
     assert.equal(report.firstRound.passed, 1, "partner 波内通过");
     assert.equal(report.firstRound.failed, 1, "explicit first-round fixture failure");
@@ -2656,10 +2707,19 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
     // stderr verdict 行如实（runSuite 打印，非内存）。
     assert.ok(stderrLines.some((l) => /verdict=fail /.test(l)), `verdict 行必须如实为 fail（实际首行：${stderrLines.find((l) => l.includes("verdict=")) ?? "(无)"}）`);
     assert.ok(stderrLines.some((l) => /isolation cofail\.test\.js .* ⇒ isolation_pass/.test(l)), "isolation 分类行如实");
+  } catch (err) {
+    // TD-255：波内间歇干扰取证——失败时保留合成根目录与落盘报告（诊断面：
+    // groupError 原文在断言消息里，合成报告在 <root>/test-results.json，
+    // 中间报告快照在 <root>/forensic-report-*.json，子进程/读盘取证在下）。
+    origError(`[td181-e2e] 断言失败——保留夹具根目录供诊断: ${root}（报告: ${join(root, "test-results.json")}）`);
+    origError(`[td181-e2e] 取证记录（${forensics.length} 条）: ${JSON.stringify(forensics)}`);
+    origError(err && err.stack ? err.stack : String(err));
+    keepRoot = true;
+    throw err;
   } finally {
     console.error = origError;
     process.exitCode = prevExitCode; // runSuite 置 process.exitCode=1——恢复宿主 runner 状态
-    rmSync(root, { recursive: true, force: true });
+    if (!keepRoot) rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -2778,6 +2838,205 @@ test("TD-248: entryUsableOn——active 且 expiresOn≥当日才可用", () => 
   assert.equal(entryUsableOn({ ...e, status: "expired" }, "2026-10-10"), false, "expired 不可用");
 });
 
+// ── TD-255 / 决定 0059：回响判定 fileFailureEchoOfSubtests 双向钉 ─────────────
+// 事实基线（node v22.23.1 四形态事件流实测，%TEMP%\evprobe）：
+//   纯回响       = "test failed"/ERR_TEST_FAILURE/subtestsFailed + 逐文件 summary
+//                  在场（counts.cancelled=0）+ 零 file 级 diagnostic + exit 1 无 signal
+//   提前 exit    = 同 message/code/failureType 但【缺】逐文件 summary（sol/opus 反例一）
+//   迟到异步错误 = 逐文件 summary 在场但带 file 的 diagnostic ≥1（sol 反例二）
+//   超时击杀     = message/failureType 双异（testTimeoutFailure）且缺 summary
+test("TD-255: fileFailureEchoOfSubtests——纯回响全过；四类反例与缺字段全拒", () => {
+  const echoInput = (over = {}) => ({
+    fileFailure: { message: "test failed", code: "ERR_TEST_FAILURE", failureType: "subtestsFailed", stack: "" },
+    fileSummary: { tests: 1, failed: 1, passed: 0, cancelled: 0, skipped: 0, todo: 0 },
+    fileDiagnostics: 0,
+    failingSubtests: 1,
+    childExitCode: 1,
+    childSignal: null,
+    ...over,
+  });
+  assert.equal(fileFailureEchoOfSubtests(echoInput()), true, "纯回响形态判真");
+
+  const rejects = [
+    ["超时击杀：failureType 异", echoInput({ fileFailure: { message: "test timed out after <n>ms", code: "ERR_TEST_FAILURE", failureType: "testTimeoutFailure" } })],
+    ["超时击杀：message 异", echoInput({ fileFailure: { message: "test timed out after 1200ms", code: "ERR_TEST_FAILURE", failureType: "subtestsFailed" } })],
+    ["提前 exit：缺逐文件 summary（sol/opus 反例一）", echoInput({ fileSummary: null })],
+    ["迟到异步错误：file 级 diagnostic 在场（sol 反例二）", echoInput({ fileDiagnostics: 1 })],
+    ["退出码异：exit(7)", echoInput({ childExitCode: 7 })],
+    ["被杀：signal 在场", echoInput({ childSignal: "SIGKILL" })],
+    ["取消计数>0", echoInput({ fileSummary: { tests: 2, failed: 0, passed: 1, cancelled: 1 } })],
+    ["零失败子测（无归属内容）", echoInput({ failingSubtests: 0 })],
+    ["旧报告：fileFailure 缺 code/failureType", echoInput({ fileFailure: { message: "test failed", stack: "" } })],
+    ["旧报告：缺 fileDiagnostics 字段", echoInput({ fileDiagnostics: undefined })],
+    ["无 fileFailure", echoInput({ fileFailure: null })],
+    ["code 异形", echoInput({ fileFailure: { message: "test failed", code: "ERR_TEST_RT_FAILURE", failureType: "subtestsFailed" } })],
+  ];
+  for (const [label, input] of rejects) {
+    assert.equal(fileFailureEchoOfSubtests(input), false, label);
+  }
+});
+
+// ── TD-255 / 决定 0059：登记册解死的端到端钉（真实子进程全链）─────────────────
+// 正例：纯回响形态 + 全子测签名命中 + 单跑过 ⇒ 自动裁定翻绿（旧 B2 门下
+// 永不可达——死机制解除的直接证据）。反例（sol 会审双反例）：已登记失败 +
+// 提前 exit / 迟到异步错误 ⇒ 不得洗白。
+function td255IsoDate(plusDays) {
+  const d = new Date(Date.now() + plusDays * 86400000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+async function runTd255RegistryCase({ fixtureSource, fixtureRel }) {
+  const root = mkdtempSync(join(E2E_SCRATCH_ROOT, "td255-reg-"));
+  const prevExitCode = process.exitCode; // runSuite 尾部会置 process.exitCode（TD-181(b)④ 同款恢复纪律）
+  try {
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
+    mkdirSync(join(root, "test"), { recursive: true });
+    writeFileSync(join(root, "test", "reporter.mjs"), readFileSync(join(synthRepoRoot, "test", "reporter.mjs"), "utf8"), "utf8");
+    const phasePath = join(root, "td255-phase.txt");
+    writeFileSync(phasePath, "first", "utf8");
+    writeFileSync(join(root, "test", fixtureRel), fixtureSource, "utf8");
+    const manifest = { groups: { pure: [fixtureRel], git: [], worktree: [], process: [], lock: [], timeout: [], mcp: [] } };
+    const manifestPath = join(root, "test", "manifest.json");
+    const reportPath = join(root, "test-results.json");
+    writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+    // 登记册：与 fixture 的失败签名严格全等（file+subtest+operator+归一化签名）。
+    const registry = {
+      schemaVersion: 1,
+      note: "TD-255 e2e synthetic registry",
+      entries: [{
+        id: "IF-TD255", file: fixtureRel, subtest: "registered fail", operator: "==", // assert.ok 的 cause.operator 实测为 "=="（探针定形，非文档臆断）
+        signature: "AssertionError [ERR_ASSERTION]: registered marker",
+        isolationRequired: true, registeredAt: td255IsoDate(0), expiresOn: td255IsoDate(7),
+        owner: "Lead", note: "e2e 合成条目", status: "active",
+      }],
+    };
+    writeFileSync(join(root, "test", INTERFERENCE_REGISTRY_NAME), JSON.stringify(registry), "utf8");
+
+    await runSuite({
+      repoRoot: root, testDir: join(root, "test"), manifestPath, reportPath,
+      nodeExe: process.execPath, childEnv: synthChildEnv(),
+      exitFn: () => {},
+      runCanonicalImpl: (options) => runCanonical({
+        ...options,
+        runChild: async (...args) => {
+          writeFileSync(phasePath, "first", "utf8");
+          return options.runChild(...args);
+        },
+        isolator: async (...args) => {
+          writeFileSync(phasePath, "isolation", "utf8");
+          return options.isolator(...args);
+        },
+      }),
+    });
+    return JSON.parse(readFileSync(reportPath, "utf8"));
+  } finally {
+    process.exitCode = prevExitCode;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("TD-255/0059 端到端：纯回响 + 登记册命中 ⇒ 自动裁定翻绿（死机制解除）", async () => {
+  await mkdirSync(E2E_SCRATCH_ROOT, { recursive: true });
+  const rel = "echofail.test.js";
+  const src = [
+    'import { test } from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { readFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'test("registered fail", () => {',
+    '  const phase = readFileSync(join(process.cwd(), "td255-phase.txt"), "utf8");',
+    '  if (phase === "first") assert.ok(false, "registered marker");',
+    '});',
+    "",
+  ].join("\n");
+  const report = await runTd255RegistryCase({ fixtureSource: src, fixtureRel: rel });
+  assert.equal(report.firstRound.verdict, "fail", "首轮事实恒 fail（不重写历史）");
+  const f = report.firstRound.failures.find((x) => x.path === rel);
+  assert.ok(f, "首红原始记录在场");
+  assert.equal(f.status, "fail");
+  assert.equal(f.failureDetail.fileFailureEcho, true, "真实管线的纯回响形态必须被判定为回响");
+  assert.ok(f.failureDetail.fileFailure && f.failureDetail.fileFailure.message === "test failed", "回响 fileFailure 在场（可证冗余）");
+  const iso = report.isolation.find((x) => x.path === rel);
+  assert.equal(iso.classification, "isolation_pass");
+  assert.deepEqual(report.autoAdjudicated, [{ path: rel, matches: [{ id: "IF-TD255", subtest: "registered fail" }] }], "唯一翻绿路径=登记册自动裁定（可溯源）");
+  assert.equal(report.finalVerdict, "pass", "0059 之前此路径永不可达——死机制解除的直接证据");
+});
+
+test("TD-255/0059 端到端反例一（sol）：已登记失败 + 提前 process.exit(1)（缺逐文件 summary）⇒ 不洗白", async () => {
+  await mkdirSync(E2E_SCRATCH_ROOT, { recursive: true });
+  const rel = "exit1late.test.js";
+  const src = [
+    'import { test } from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { readFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'const phase = () => readFileSync(join(process.cwd(), "td255-phase.txt"), "utf8");',
+    'test("registered fail", () => {',
+    '  if (phase() === "first") assert.ok(false, "registered marker");',
+    '});',
+    'test("passes too", () => {});',
+    'if (phase() === "first") setTimeout(() => process.exit(1), 400);',
+    "",
+  ].join("\n");
+  const report = await runTd255RegistryCase({ fixtureSource: src, fixtureRel: rel });
+  const iso = report.isolation.find((x) => x.path === rel);
+  assert.equal(iso.classification, "isolation_pass", "单跑过（间歇形态）");
+  assert.equal(iso.autoAdjudication.adjudicated, false, "不得裁定");
+  assert.ok(iso.autoAdjudication.failedGates.includes("file-failure-unattributed"), `未归属文件级失败必须具名（得到 ${iso.autoAdjudication.failedGates.join(",")}）`);
+  assert.equal(iso.autoAdjudication.fileFailureEcho, false, "缺逐文件 summary 的提前退出形态不判回响");
+  assert.equal(report.finalVerdict, "fail", "已登记子测命中也不能搭车洗白未归属的退出");
+});
+
+test("TD-255/0059 端到端反例二（sol）：已登记失败 + 迟到异步错误（file 级 diagnostic）⇒ 不洗白", async () => {
+  await mkdirSync(E2E_SCRATCH_ROOT, { recursive: true });
+  const rel = "asyncthrow.test.js";
+  const src = [
+    'import { test } from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { readFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'const phase = () => readFileSync(join(process.cwd(), "td255-phase.txt"), "utf8");',
+    'test("registered fail", () => {',
+    '  if (phase() === "first") assert.ok(false, "registered marker");',
+    '});',
+    'test("passes too", () => {});',
+    'if (phase() === "first") setTimeout(() => { throw new Error("late async regression"); }, 300);',
+    "",
+  ].join("\n");
+  const report = await runTd255RegistryCase({ fixtureSource: src, fixtureRel: rel });
+  const iso = report.isolation.find((x) => x.path === rel);
+  assert.equal(iso.classification, "isolation_pass", "单跑过（间歇形态）");
+  assert.equal(iso.autoAdjudication.adjudicated, false, "不得裁定");
+  assert.ok(iso.autoAdjudication.failedGates.includes("file-failure-unattributed"), `未归属 diagnostic 必须具名（得到 ${iso.autoAdjudication.failedGates.join(",")}）`);
+  assert.equal(iso.autoAdjudication.fileFailureEcho, false, "file 级 diagnostic>0 不判回响");
+  assert.equal(report.finalVerdict, "fail");
+});
+// ENOENT=null（正常缺失）；其他读错误与解析失败必须抛（原始错误码可见——
+// 原实现三者一律吞成 null 的诊断黑洞不可再回退）。
+// ── TD-255（0059，案 B 取证面）：realReadReport 三臂分类 ─────────────────────
+// ENOENT=null（正常缺失）；其他读错误与解析失败必须抛（原始错误码可见——
+// 原实现三者一律吞成 null 的诊断黑洞不可再回退）。
+test("TD-255: realReadReport——ENOENT→null；目录读错→抛带码；坏 JSON→抛 unparseable；好 JSON→解析", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td255-read-"));
+  try {
+    const missing = realReadReport(join(dir, "no-such-report.json"));
+    assert.equal(await missing(), null, "ENOENT 是正常缺失形态");
+
+    const dirRead = realReadReport(dir);
+    await assert.rejects(dirRead(), /read report failed: /, "目录/占用等读错误必须抛出且带原始错误面");
+
+    const badPath = join(dir, "bad.json");
+    writeFileSync(badPath, "{ not json", "utf8");
+    const bad = realReadReport(badPath);
+    await assert.rejects(bad(), /report unparseable: /, "半截报告≠缺失，解析失败单独具名");
+
+    const goodPath = join(dir, "good.json");
+    writeFileSync(goodPath, JSON.stringify({ suites: [] }), "utf8");
+    const good = realReadReport(goodPath);
+    assert.deepEqual(await good(), { suites: [] });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 function adjudicationInput(overrides = {}) {
   return {
     firstRoundStatus: "fail",
@@ -2810,17 +3069,35 @@ test("TD-248: classifyAutoAdjudication 资格闭集——happy 全过；逐门�
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [] } }, "no-failing-subtests"],
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "别的子测试", stack: "AssertionError [ERR_ASSERTION]: elapsed 4060ms\n at x" }] } }, "signature-match"],
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, failingTests: [{ name: "flaky subtest", stack: "AssertionError [ERR_ASSERTION]: 不同错误 <另>一种\n at x" }] } }, "signature-match"],
-    // P4 会审 B2（opus）反例：文件级失败在场（挂死子测不进 tests[]，唯一信号=
-    // fileFailure）——即使所有可见失败子测都命中签名，也不得裁定（防搭车洗白）。
-    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { code: "ERR_TEST_RT_FAILURE", failureType: "testCodeFailure", stack: "at hung" } } }, "file-failure-present"],
+    // P4 会审 B2（opus）反例 → TD-255/0059 门改名收窄："未归属文件级失败"
+    // 在场才拒。无 fileFailureEcho 标志（旧报告/未知来源/未证回响）一律按
+    // 未归属处理=拒（fail-safe 方向，双席 Q4 布尔边界）。
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { code: "ERR_TEST_RT_FAILURE", failureType: "testCodeFailure", stack: "at hung" } } }, "file-failure-unattributed"],
     [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailureDropped: true } }, "file-failure-dropped"],
-    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { stack: "AssertionError [ERR_ASSERTION]: f…[TRUNCATED: first 5 of 99 chars]\n  at y" } } }, "file-failure-present"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { stack: "AssertionError [ERR_ASSERTION]: f…[TRUNCATED: first 5 of 99 chars]\n  at y" } } }, "file-failure-unattributed"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { message: "test failed", code: "ERR_TEST_FAILURE", failureType: "subtestsFailed", stack: "" } } }, "file-failure-unattributed"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { message: "test failed", code: "ERR_TEST_FAILURE", failureType: "subtestsFailed", stack: "" }, fileFailureEcho: false } }, "file-failure-unattributed"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { message: "test failed" }, fileFailureEcho: "true" } }, "file-failure-unattributed"],
+    [{ ...adjudicationInput(), failureDetail: { ...adjudicationInput().failureDetail, fileFailure: { message: "test failed" }, fileFailureDropped: true, fileFailureEcho: "true" } }, "file-failure-dropped"],
   ];
   for (const [input, gate] of gateCases) {
     const v = classifyAutoAdjudication(input);
     assert.equal(v.adjudicated, false, `门 ${gate} 未过不得裁定`);
     assert.ok(v.failedGates.includes(gate), `门 ${gate} 应具名（得到 ${v.failedGates.join(",")}）`);
   }
+
+  // TD-255/0059：已证回响（fileFailureEcho===true，布尔严格）⇒ fileFailure
+  // 在场/被预算丢弃都不再拒（内容可证冗余）——登记册死机制解除的判定面。
+  const echoCase = classifyAutoAdjudication(adjudicationInput({
+    failureDetail: {
+      ...adjudicationInput().failureDetail,
+      fileFailure: { message: "test failed", stack: "" },
+      fileFailureDropped: true,
+      fileFailureEcho: true,
+    },
+  }));
+  assert.equal(echoCase.adjudicated, true, "回响已证 + 全子测命中 ⇒ 可裁定（0059 解除死机制）");
+  assert.deepEqual(echoCase.failedGates, [], "回响在场时 file-failure 两门均放行");
 
   // 搭车洗白反例：同文件两个失败子测，登记册只覆盖一个——整文件回 fail。
   const hitchhike = classifyAutoAdjudication(adjudicationInput({

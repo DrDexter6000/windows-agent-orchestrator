@@ -188,6 +188,7 @@
       "workflow/schema.test.js"
     ],
     "git": [
+      "application/lineageClose.test.js",
       "registry-roles/candidateInventory.test.js",
       "isolation-infra/hygieneGitState.test.js",
       "isolation-infra/desensitization.test.js",
@@ -305,7 +306,6 @@
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",
-      "application/lineageClose.test.js",
       "migration-0045/backgroundExplicit.test.js",
       "migration-0045/rolePinning.test.js",
       "migration-0045/sessionKeyUpgrade.test.js",

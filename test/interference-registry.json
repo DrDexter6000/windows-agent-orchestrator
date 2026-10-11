@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "已登记干扰形登记册（TD-248，决定 0054）。套件【只读】、Lead 独占编辑权：新增条目=人工裁定后提交；失效=expiresOn 到期（衰减=只往严的方向变）或显式 status 改动。签名口径=file+subtest+归一化错误文本（数字串→<n>）字符串全等，禁 regex（套件禁令：no runtime regex classification）。worker 上下文（WAO_IN_WORKER=1 或 worktree cwd）下自动裁定关闭——防自我洗白。资格闭集与派生规则实现见 scripts/canonical-test.mjs classifyAutoAdjudication。",
+  "note": "已登记干扰形登记册（TD-248，决定 0054；B2 门经决定 0059 修订：文件级失败仅'未归属'时才拒——'回响'（fileFailureEchoOfSubtests 结构化判定）不再阻塞，登记册由此恢复可用）。套件【只读】、Lead 独占编辑权：新增条目=人工裁定后提交；失效=expiresOn 到期（衰减=只往严的方向变）或显式 status 改动。签名口径=file+subtest+operator+归一化错误文本（数字串→<n>）字符串全等，禁 regex（套件禁令：no runtime regex classification）。worker 上下文（WAO_IN_WORKER=1 或 worktree cwd）下自动裁定关闭——防自我洗白。资格闭集与派生规则实现见 scripts/canonical-test.mjs classifyAutoAdjudication。",
   "entries": [
     {
       "id": "IF-001",

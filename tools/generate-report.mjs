@@ -175,7 +175,7 @@ function formatDuration(ms) {
 
 // ── TD-181 (a) consumer-side compatibility ───────────────────────────────────
 // `npm test` (canonical runner) overwrites test-results.json with its OWN
-// aggregate schema (schemaVersion 4/5: executionWaves/firstRound/isolation…；v5 增 autoAdjudicated/adjudicationAdvisories),
+// aggregate schema (schemaVersion 4/5/6: executionWaves/firstRound/isolation…；v5 增 autoAdjudicated/adjudicationAdvisories；v6 增 childStderrTail/fileFailureEcho——TD-255/0059),
 // which previously made this tool crash (no data.summary). Projection below is
 // ADDITIVE compatibility + failure-detail rendering only:
 //   - a reporter-shaped report ({summary, suites}) passes through UNCHANGED;
@@ -236,8 +236,11 @@ function canonicalSuites(data) {
             tests.push({ name: t.name ?? "(unnamed)", status: "fail", duration: 0, error: detailError(t) });
           }
           if (d.fileFailure && (d.fileFailure.message || d.fileFailure.stack)) {
+            // TD-255/0059：已证回响（fileFailureEcho===true）的 fileFailure 行加
+            // 标注——它是子测失败的冗余回响（可裁定的登记册事实），渲染上仍保留
+            // 首红原文，但读者不得把它当成一个额外的独立失败计数。
             tests.push({
-              name: `fileFailure: ${d.fileFailure.message ?? ""}`,
+              name: `fileFailure${d.fileFailureEcho === true ? " (echo of subtest failures — redundant, adjudicable fact per 0059)" : ""}: ${d.fileFailure.message ?? ""}`,
               status: "fail", duration: 0,
               error: { actual: "", expected: "", operator: "fail", stack: d.fileFailure.stack ?? "", diff: null },
             });

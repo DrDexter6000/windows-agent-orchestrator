@@ -736,3 +736,86 @@ test("TD-181(b) 渲染r2 安全: 恶意错误文本/未知 verdict ⇒ 无注入
   assert.ok(!legacyPayload.includes(closeTag));
   assert.equal(JSON.parse(legacyPayload).suites[0].tests[0].name, evil, "旧形状恶意内容无损还原");
 });
+
+// ── TD-255（决定 0059）：回响判定的事实面（reporter 只记事实，判定在
+// canonical-test.mjs 的纯函数 fileFailureEchoOfSubtests——本组钉事实记录形状）──
+
+function makeSummaryEvent(file, counts) {
+  return { type: "test:summary", data: { file, counts } };
+}
+
+function makeDiagnosticEvent(file) {
+  return { type: "test:diagnostic", data: { file } };
+}
+
+function makeFileLevelEchoFail(file) {
+  // node v22.23.1 实测：任何子测失败时文件级根失败的回响形状。
+  const err = new Error("test failed");
+  err.code = "ERR_TEST_FAILURE";
+  err.failureType = "subtestsFailed";
+  return { type: "test:fail", data: { name: file, file, details: { error: err } } };
+}
+
+test("TD-255 事实面：逐文件 test:summary 挂到对应 suite；根级 summary（无 file）不挂", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+    const filePath = join(dir, "test", "a.test.js");
+    reporter.write(makeCompleteEvent("passes", filePath, true, 3));
+    reporter.write(makeSummaryEvent(filePath, { tests: 1, failed: 0, passed: 1, cancelled: 0, skipped: 0, todo: 0 }));
+    reporter.write(makeSummaryEvent(null, { tests: 99, failed: 9, passed: 90, cancelled: 0, skipped: 0, todo: 0 }));
+    await new Promise((resolve, reject) => { reporter.on("finish", resolve); reporter.on("error", reject); reporter.end(); });
+    const data = JSON.parse(await readFile(join(dir, "test-results.json"), "utf8"));
+    assert.deepEqual(data.suites[0].fileSummary, { tests: 1, failed: 0, passed: 1, cancelled: 0, skipped: 0, todo: 0 }, "逐文件 summary 计数挂到 suite");
+  });
+});
+
+test("TD-255 事实面：带 file 的 test:diagnostic 计数；根级诊断（无 file）不计", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+    const filePath = join(dir, "test", "a.test.js");
+    reporter.write(makeCompleteEvent("passes", filePath, true, 3));
+    reporter.write(makeDiagnosticEvent(filePath));
+    reporter.write(makeDiagnosticEvent(filePath));
+    reporter.write(makeDiagnosticEvent(null));
+    await new Promise((resolve, reject) => { reporter.on("finish", resolve); reporter.on("error", reject); reporter.end(); });
+    const data = JSON.parse(await readFile(join(dir, "test-results.json"), "utf8"));
+    assert.equal(data.suites[0].fileDiagnostics, 2, "只数带 file 的诊断（迟到异步错误防线的事实源）");
+  });
+});
+
+test("TD-255 事实面：fileFailure 保留 code/failureType（超时击杀形态可判非回响）", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+    const filePath = join(dir, "test", "a.test.js");
+    reporter.write(makeCompleteEvent("fails", filePath, false, 3, { actual: "1", expected: "2", operator: "strictEqual", stack: "AssertionError: x" }));
+    reporter.write(makeSummaryEvent(filePath, { tests: 1, failed: 1, passed: 0, cancelled: 0, skipped: 0, todo: 0 }));
+    reporter.write(makeFileLevelEchoFail(filePath));
+    await new Promise((resolve, reject) => { reporter.on("finish", resolve); reporter.on("error", reject); reporter.end(); });
+    const data = JSON.parse(await readFile(join(dir, "test-results.json"), "utf8"));
+    const ff = data.suites[0].fileFailure;
+    assert.ok(ff, "fileFailure 在场");
+    assert.equal(ff.message, "test failed");
+    assert.equal(ff.code, "ERR_TEST_FAILURE");
+    assert.equal(ff.failureType, "subtestsFailed");
+  });
+});
+
+test("TD-255 事实面：零子测事件的文件级 pass 记入 fileLevelOnly；有子测的正常文件不记", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+    const scripty = join(dir, "test", "scripty.test.js");
+    const normal = join(dir, "test", "normal.test.js");
+    // 顶层脚本形状：只有文件级 complete(passed=true)，零子测事件。
+    reporter.write({ type: "test:complete", data: { name: scripty, file: scripty, details: { passed: true, duration_ms: 5 } } });
+    reporter.write(makeCompleteEvent("real subtest", normal, true, 2));
+    await new Promise((resolve, reject) => { reporter.on("finish", resolve); reporter.on("error", reject); reporter.end(); });
+    const data = JSON.parse(await readFile(join(dir, "test-results.json"), "utf8"));
+    assert.deepEqual(data.fileLevelOnly, ["test/scripty.test.js"], "文件级完成且零子测=可判定事实（状态仍 missing，由 runner 侧 reason 引用）");
+    assert.equal(data.suites.length, 1, "fileLevelOnly 不建 suite（不得翻 pass）");
+    assert.equal(data.suites[0].name, "test/normal.test.js");
+  });
+});

@@ -487,11 +487,15 @@ export function classifyAutoAdjudication({ firstRoundStatus, isolationClassifica
   const detail = failureDetail && typeof failureDetail === "object" ? failureDetail : null;
   if (!detail || detail.status !== "collected") failedGates.push("detail-collected");
   if (detail && detail.failingTestsDropped > 0) failedGates.push("detail-dropped");
-  // P4 会审 B2（opus）：文件级失败必须在场检查——挂死的子测不进 tests[]、
-  // 唯一信号是文件级 test:fail（reporter.mjs:36-41）；不检查则同文件里
-  // "命中签名的子测 + 未登记的挂死子测"可被搭车洗白。
-  if (detail && detail.fileFailure !== null && typeof detail.fileFailure === "object") failedGates.push("file-failure-present");
-  if (detail && detail.fileFailureDropped === true) failedGates.push("file-failure-dropped");
+  // P4 会审 B2（opus）→ TD-255/0059 修订：原门"文件级失败在场即拒"对回响
+  // 形态恒拒（node 在任何子测失败时都回响 fileFailure="test failed"——登记册
+  // 因此死机制）。现门=未归属文件级失败在场才拒：fileFailure 在场且未被
+  // fileFailureEchoOfSubtests 证为回响（detail.fileFailureEcho===true，双席
+  // 反例防线的结构化判据）⇒ 拒；已证回响 ⇒ fileFailure 内容可证冗余，
+  // 连带 dropped 门也放行（被预算丢弃的内容可证冗余，opus Q4.1）。
+  // 布尔边界（sol Q4）：仅 ===true 放行；缺失/false/字符串一律按未证处理。
+  if (detail && detail.fileFailure !== null && typeof detail.fileFailure === "object" && detail.fileFailureEcho !== true) failedGates.push("file-failure-unattributed");
+  if (detail && detail.fileFailureDropped === true && detail.fileFailureEcho !== true) failedGates.push("file-failure-dropped");
   if (detail && (Array.isArray(detail.failingTests) ? detail.failingTests : []).some((t) => t && typeof t === "object" && Object.values(t).some((v) => typeof v === "string" && v.includes("[TRUNCATED")))) {
     failedGates.push("detail-truncated");
   }
@@ -525,6 +529,39 @@ export function classifyAutoAdjudication({ firstRoundStatus, isolationClassifica
   const adjudicated = matched && workerContext !== true;
   if (matched && workerContext === true) failedGates.push("worker-context");
   return { matched, adjudicated, matches, notUsable, failedGates };
+}
+
+// ── TD-255 / 决定 0059：文件级根失败的"回响"判定（纯函数，元测试双向钉）──
+// 事实依据（node v22.23.1 四形态事件流实测，.dev/td255-b2-probe-evidence.md
+// 与 %TEMP%\evprobe）：文件级根失败在任何子测失败时都回响
+// {"message":"test failed"}——旧 B2 门"在场即拒"因此对一切有失败子测的文件
+// 恒拒（登记册死机制，上线零洗白）。本判定把"回响"收窄到可证的完全归属
+// 形态；判据全部来自 reporter 记录的结构化事实（opus 结构化判据 + sol 双
+// 反例防线，双席独立构造的反例都必须被挡下）：
+//   1. fileFailure：message==="test failed" && code==="ERR_TEST_FAILURE"
+//      && failureType==="subtestsFailed"（超时击杀=testTimeoutFailure≠此值）
+//   2. 逐文件 test:summary 在场（提前 exit / 被杀 / 超时击杀形态都缺——
+//      "子进程跑完了"的完成性证明）且 counts.cancelled===0
+//   3. 带 file 的 diagnostic 计数===0（迟到异步错误只进 diagnostic，
+//      tests[] 看不见——sol 反例二）
+//   4. tests[] 有 ≥1 条失败子测（失败内容真的被归属）
+//   5. 子进程 exitCode===1 且无 signal（exit(7)/taskkill 形态挡下——
+//      opus/sol 反例一）
+// 旧报告缺任何字段 ⇒ 判非回响（fail-safe：node 改文案 ⇒ 拒；方向永不放松）。
+export function fileFailureEchoOfSubtests({
+  fileFailure, fileSummary, fileDiagnostics, failingSubtests, childExitCode, childSignal,
+}) {
+  if (!fileFailure || typeof fileFailure !== "object") return false;
+  if (fileFailure.message !== "test failed") return false;
+  if (fileFailure.code !== "ERR_TEST_FAILURE") return false;
+  if (fileFailure.failureType !== "subtestsFailed") return false;
+  if (!fileSummary || typeof fileSummary !== "object") return false;
+  if (fileSummary.cancelled !== 0) return false;
+  if (fileDiagnostics !== 0) return false;
+  if (!(Number.isInteger(failingSubtests) && failingSubtests >= 1)) return false;
+  if (childExitCode !== 1) return false;
+  if (childSignal != null) return false;
+  return true;
 }
 
 // ── Structured-report → manifest-file mapping (pure, unit-tested) ────────────
@@ -906,7 +943,7 @@ export function staleReportInfo(report, waveStartMs) {
 //      (markers restate the smaller cap against the original length);
 //   4. cap 0 leaves marker-only strings — if even that cannot fit
 //      (pathological), degrade to an honest unknown rather than exceed.
-export function firstRoundFailureDetail(report, rel) {
+export function firstRoundFailureDetail(report, rel, childInfo = {}) {
   try {
     let suite = null;
     const suites = report && Array.isArray(report.suites) ? report.suites : [];
@@ -915,7 +952,17 @@ export function firstRoundFailureDetail(report, rel) {
       if (suiteRelToManifest(s.name) !== rel) continue;
       if (!suite || s.status === "fail") suite = s;
     }
-    if (!suite) return unknownFailureDetail("no suite for this file in the wave report");
+    if (!suite) {
+      // TD-255（案 A）：零 test() 块的顶层脚本形状是可判定事实（reporter 的
+      // fileLevelOnly 记录文件级完成且零子测事件），不是猜测；无此事实时
+      // 按可能成因列表措辞（sol 会审：不得把一切 missing 归因单一形态）。
+      const fileLevelOnly = Array.isArray(report && report.fileLevelOnly) ? report.fileLevelOnly : [];
+      const knownShape = fileLevelOnly.some((entry) => suiteRelToManifest(entry) === rel || entry === "test/" + rel);
+      if (knownShape) {
+        return unknownFailureDetail("no suite for this file in the wave report — file-level completion recorded with ZERO subtest events (top-level-script shape: assertions ran at module scope; the file must register subtests via test()/describe())");
+      }
+      return unknownFailureDetail("no suite for this file in the wave report; possible causes: the file registered no subtests (top-level-script shape), or its events were lost before the report was flushed");
+    }
     if (suite.status !== "fail") return unknownFailureDetail(`suite status '${suite.status}' — no failure content to retain`);
     const allFailing = (Array.isArray(suite.tests) ? suite.tests : [])
       .filter((t) => t && typeof t === "object" && t.status === "fail");
@@ -933,6 +980,18 @@ export function firstRoundFailureDetail(report, rel) {
     }
     const rawFileFailure = suite.fileFailure && typeof suite.fileFailure === "object"
       ? suite.fileFailure : null;
+    // TD-255/0059：回响判定在采集时算一次（纯函数，消费侧唯一判据），
+    // 结果放 detail 顶层——预算阶梯第 2 步会丢 fileFailure，判定不能跟着丢
+    // （opus 会审 Q4.1）；已证回响时被丢的 fileFailure 内容可证冗余，
+    // classifyAutoAdjudication 的 dropped 门联动放行。
+    const echo = fileFailureEchoOfSubtests({
+      fileFailure: rawFileFailure,
+      fileSummary: suite.fileSummary && typeof suite.fileSummary === "object" ? suite.fileSummary : null,
+      fileDiagnostics: typeof suite.fileDiagnostics === "number" ? suite.fileDiagnostics : Number.NaN, // 缺字段≠0：判据按拒
+      failingSubtests: allFailing.length,
+      childExitCode: typeof childInfo.childExitCode === "number" ? childInfo.childExitCode : null,
+      childSignal: childInfo.childSignal ?? null,
+    });
     let kept = rawTests.length;
     let dropped = Math.max(0, allFailing.length - FAILURE_DETAIL_TEST_CAP);
     let cap = FAILURE_DETAIL_TEXT_CAP;
@@ -945,6 +1004,7 @@ export function firstRoundFailureDetail(report, rel) {
         failingTestsDropped: dropped,
         failingTests: [],
         fileFailure: null,
+        fileFailureEcho: echo, // TD-255/0059：回响判定（顶层，不随 fileFailure 丢弃）
       };
       for (const rt of rawTests.slice(0, kept)) {
         detail.failingTests.push({
@@ -1288,7 +1348,11 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
     const status = perFile.get(f.path) || "missing";
     const r = { path: f.path, status, resourceCategory: f.resourceCategory, executionWave: name, durationMs: perFileDurationMs.get(f.path) ?? null };
     if (status !== "pass") {
-      r.failureDetail = reportValid ? firstRoundFailureDetail(report, f.path) : unknownFailureDetail(reportError);
+      // TD-255/0059：回响判据需要子进程退出事实（exitCode===1、无 signal）——
+      // reporter 在子进程内拿不到自己的退出码，只有本侧（父进程）知道。
+      r.failureDetail = reportValid
+        ? firstRoundFailureDetail(report, f.path, { childExitCode: child.exitCode ?? null, childSignal: child.signal ?? null })
+        : unknownFailureDetail(reportError);
     }
     return r;
   });
@@ -1350,6 +1414,9 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
       missing: w.results.filter((r) => r.status === "missing").length,
       crashed: w.results.filter((r) => r.status === "crash").length,
       groupError: w.groupError,
+      // TD-255（0059，案 B 取证面）：波级错误在场时，有界保留子进程 stderr
+      // 尾部——真实波里的读写瞬态/reporter 栈由此可辨（无 groupError 不记）。
+      ...(w.groupError ? { childStderrTail: String(w.childStderr ?? "").slice(-TAIL_CHARS) } : {}),
       // TD-181 (a): advisory annotations (startedAt / concurrency / gate /
       // concurrent-suite marker / node-process count with sampling time).
       // Additive; never verdict-affecting; separate from failure content.
@@ -1441,7 +1508,7 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
         workerContext: effectiveWorkerContext,
         today: effectiveToday,
       });
-      iso.autoAdjudication = { matched: verdict0054.matched, adjudicated: verdict0054.adjudicated, failedGates: verdict0054.failedGates };
+      iso.autoAdjudication = { matched: verdict0054.matched, adjudicated: verdict0054.adjudicated, failedGates: verdict0054.failedGates, fileFailureEcho: failure?.failureDetail?.fileFailureEcho ?? null };
       if (verdict0054.adjudicated) {
         autoAdjudicated.push({ path: iso.path, matches: verdict0054.matches });
       } else if (verdict0054.matched && effectiveWorkerContext) {
@@ -1636,7 +1703,9 @@ export function realRunChild(nodeExe, repoRoot, env, watchOpts = {}, spawnImpl =
     const supervisor = createChildSupervisor({ label: opts.waveName ?? "wave", ...watchOpts });
     supervisor.arm(child);
     child.on("error", (e) => { if (!supervisor.fired()) { supervisor.dispose(); reject(e); } });
-    child.on("close", (code) => { if (!supervisor.fired()) { supervisor.dispose(); resolve({ exitCode: code, stdout: out, stderr: err }); } });
+    // TD-255/0059：signal 一并捕获（回响判据要求 exitCode===1 且无 signal——
+    // 被杀形态挡下；fake child 的 close 不带 signal 参数 → null）。
+    child.on("close", (code, signal) => { if (!supervisor.fired()) { supervisor.dispose(); resolve({ exitCode: code, signal: signal ?? null, stdout: out, stderr: err }); } });
     supervisor.watchdogOutcome.then((wd) => {
       if (wd) {
         // TD-165 F2a: release the pipe handles of a possibly-still-alive child
@@ -1646,17 +1715,36 @@ export function realRunChild(nodeExe, repoRoot, env, watchOpts = {}, spawnImpl =
           child.stderr?.destroy();
           child.unref();
         }
-        resolve({ exitCode: null, stdout: out, stderr: err, watchdog: wd });
+        resolve({ exitCode: null, signal: null, stdout: out, stderr: err, watchdog: wd });
       }
     });
   });
 }
 
-// Read+parse the intermediate structured report; null if missing or unparseable.
+// Read+parse the intermediate structured report. TD-255（0059，案 B 取证面）：
+//   ENOENT（报告未写=正常缺失形态）→ null；
+//   其他读错误（EBUSY/EPERM/…）→ 抛出（runWave 的 "read report failed"
+//     groupError 路径本就存在——原始错误码由此进报告，机制可辨）；
+//   JSON 解析失败 → 抛出（"report unparseable"——半截报告≠缺失）。
+// 原实现把三者一律吞成 null（"report missing or not an object"），读写瞬态/
+// 残缺/未写不可区分（诊断黑洞，opus 会审 Q2）。fail-closed 方向不变：
+// 抛出仍走波级非绿，只是不再匿名。
 export function realReadReport(reportPath) {
   return async () => {
-    try { return JSON.parse(readFileSync(reportPath, "utf8")); }
-    catch { return null; }
+    let text;
+    try { text = readFileSync(reportPath, "utf8"); }
+    catch (err) {
+      if (err && err.code === "ENOENT") return null;
+      const wrapped = new Error(`read report failed: ${err && err.code ? err.code : err && err.message ? err.message : String(err)}`);
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    try { return JSON.parse(text); }
+    catch (err) {
+      const wrapped = new Error(`report unparseable: ${err && err.message ? err.message : String(err)}`);
+      wrapped.cause = err;
+      throw wrapped;
+    }
   };
 }
 
@@ -2219,6 +2307,10 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   const runsAdditions = runsGuard.additions();
   const attribution = runsAdditions.flatMap((a) => runsEntryAttribution(join(repoRoot, "runs"), a.file));
   const report = {
+    // schemaVersion 6 (TD-255/0059, 2026-10-11): ADDITIVE over 5 —
+    //   executionWaves[] 增 childStderrTail（仅 groupError 波）；
+    //   firstRound.failures[].failureDetail 增 fileFailureEcho（回响判定）；
+    //   isolation[].autoAdjudication 增 fileFailureEcho。
     // schemaVersion 5 (TD-248, 2026-10-10): ADDITIVE over 4 — autoAdjudicated[]
     // (verdict=pass 的例外来源，逐条登记册引用) 与 adjudicationAdvisories[]
     // （worker 上下文抑制等观察事实）。isolation[] 各项增 advisory 级
@@ -2226,7 +2318,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     // 注（P4 会审 kimi 席）：runsDirGuard.attribution 字段系 TD-247 在 v4 期
     // 引入（4fbfdd0，当时未升版）——v5 一并归档说明，避免字段引入与版本号
     // 不同步的契约漂移观感。
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version, hardwareParallelism: HW, mode: "one-node-test-child-per-wave" },
     discoveredCount: discovered.length,
@@ -2312,7 +2404,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
 function failInvalidEnvironment(reportPath, message) {
   console.error(`[canonical] INVALID ENVIRONMENT (no tests run): ${message}`);
   const report = {
-    schemaVersion: 5,
+    schemaVersion: 6, // v6=TD-255/0059 加性字段（见主报告处归档注释）
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version },
     finalVerdict: "environment_invalid",
