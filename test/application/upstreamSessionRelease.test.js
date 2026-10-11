@@ -66,7 +66,7 @@ test("TD-250 A1b: makeAcceptedSessionRelease——能力在场+有会话 → 恰
     events: [{ type: "session.created", backend: "kimi-web", backendSessionId: "session_lin", agentId: "kimi", seq: 1 }],
     transcript,
   });
-  assert.equal(fired, true);
+  assert.equal(fired.session, true);
   assert.deepEqual(released, [{ a: "kimi", sid: "session_lin" }]);
   assert.equal(appended.length, 1);
   assert.equal(appended[0].type, "run.upstream_session_deleted");
@@ -84,22 +84,22 @@ test("TD-250 A1b: 能力缺席/无会话/未知 agent/注册表故障 → 零事
   });
   // 能力缺席
   let fired = await mk({ backend: {} })({ agentId: "kimi", events, transcript });
-  assert.equal(fired, false);
+  assert.equal(fired.session, false);
   // 无会话（pre-spawn 形态）
   fired = await mk({
     backend: { supportsSessionRelease: true, async releaseSession() { throw new Error("must not"); } },
     registryFn: fakeRegistryFn({ id: "kimi" }),
   })({ agentId: "kimi", events: [], transcript });
-  assert.equal(fired, false);
+  assert.equal(fired.session, false);
   // agentId unknown 哨兵
   fired = await mk({ backend: { supportsSessionRelease: true } })({ agentId: "unknown", events, transcript });
-  assert.equal(fired, false);
+  assert.equal(fired.session, false);
   // 注册表抛错
   fired = await mk({
     backend: { supportsSessionRelease: true },
     registryFn: async () => { throw new Error("registry io"); },
   })({ agentId: "kimi", events, transcript });
-  assert.equal(fired, false);
+  assert.equal(fired.session, false);
   assert.equal(appended.length, 0);
 });
 

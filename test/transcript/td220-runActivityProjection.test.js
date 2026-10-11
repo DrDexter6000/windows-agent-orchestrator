@@ -90,11 +90,16 @@ test("TD-220: thinking is count-only; envelope labels fixed; collect audits skip
     "run.cleanup_done", "run.session_reuse", "run.provider_session_bound",
     // 0056（TD-250）：终态上游会话卫生事件族（additive）。
     "run.upstream_session_deleted", "run.upstream_session_already_gone",
-    "run.upstream_session_delete_skipped", "run.upstream_session_delete_failed"];
+    "run.upstream_session_delete_skipped", "run.upstream_session_delete_failed",
+    // 0057（TD-251）：worktree 释放事件族（additive）。
+    "run.worktree_released", "run.worktree_already_gone",
+    "run.worktree_release_skipped", "run.worktree_release_failed"];
   const labels = ["prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
     "cleanup_done", "session_reuse", "provider_session_bound",
     "upstream_session_deleted", "upstream_session_already_gone",
-    "upstream_session_delete_skipped", "upstream_session_delete_failed"];
+    "upstream_session_delete_skipped", "upstream_session_delete_failed",
+    "worktree_released", "worktree_already_gone",
+    "worktree_release_skipped", "worktree_release_failed"];
   assert.deepEqual([...ENVELOPE_ACTIVITY_LABELS], labels);
   const payload = { text: "SECRET", payload: "SECRET", prompt: "SECRET", parts: [{ text: "SECRET" }], kind: "SECRET" };
   for (const audience of ["lead", "owner"]) {

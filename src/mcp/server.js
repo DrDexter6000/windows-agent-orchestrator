@@ -837,7 +837,8 @@ const RUN_DISPATCH_INPUT = z.object({
   // the selected backend cannot. Default false = byte-compatible ordinary run.
   correctable: z.boolean().optional(),
   // Round 4 Bundle B: optional Lead read-only DECLARATION (advisory
-  // observation, never a gate). true forces persistent worktree isolation
+  // observation, never a gate). true forces worktree isolation (TD-251 W1a:
+  // non-reuse=ephemeral deferred release, reuse=persistent — usage.md 0057)
   // (a worktree-creation failure refuses the dispatch fail-closed), persists
   // exactly one run.read_only_declared durable fact, and makes run_activity
   // attach the advisory readOnlyObservation (tool-reported file_written

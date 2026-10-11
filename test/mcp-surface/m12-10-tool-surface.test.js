@@ -889,7 +889,12 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 四标签（upstream_session_deleted/already_gone/delete_skipped/delete_failed，
 // 服务端 ENVELOPE_TYPE_TO_LABEL 增四映射的镜像）——outputSchema 在 stripped
 // 载荷内，SHA 如实翻新；无描述字节变化；M12-10-H wire 帽复验通过（additive）。
-"379e8f0bf8eb61a54cc37fbd9e1e17f8ab114a6fe1f14c0a99fc33ab63ba1f6e";
+// 0057（2026-10-11，TD-251）：run_activity 出参 envelope enum 再增 worktree 释放
+// 四标签（worktree_released/already_gone/release_skipped/release_failed——
+// 服务端 ENVELOPE_TYPE_TO_LABEL 增四映射的镜像，W1a 延迟释放+W1b 验收放树
+// 共用）——outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；
+// M12-10-H wire 帽复验通过（additive）。
+"e5b46588214e21d6dfd1dbfe8abc2afd9e3d6fa40e74d0bad3457954a5ea5690";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

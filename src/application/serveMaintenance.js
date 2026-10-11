@@ -23,7 +23,7 @@
 // 分层：kimi 专有 REST/机器事实全部在 backends/kimiServeOps.js（注入 ops）；
 // 本模块只含编排/门/台账，不含 kimi 协议细节（不变量 3）。
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn as nodeSpawn, execFile as nodeExecFile } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
@@ -33,7 +33,9 @@ import * as defaultOps from "../backends/kimiServeOps.js";
 
 /** 清扫/回收的共享落点（.dev 语义之外的运维事实面，入 .wao/）。 */
 export function serveMaintenanceDir(rootDir) {
-  return join(rootDir, ".wao", "serve-maintenance");
+  // TD-251/0057：落 .wao/runs/ 槽内（WAO_TOP_LEVEL_SLOTS 锁死顶层——waoLayout 守卫；
+// // consults/ 同款先例：运行期操作记录归 runs 槽）。
+return join(rootDir, ".wao", "runs", "serve-maintenance");
 }
 
 /**
@@ -189,9 +191,19 @@ export async function applySessionSweep({
   const results = [];
   mkdirSync(dirname(ledgerPath), { recursive: true });
   for (const item of plan.deletable) {
-    const res = await ops.deleteServeSession({ baseUrl: serveUrl, token, sessionId: item.sessionId, fetchImpl, timeoutMs });
-    const outcome = res?.outcome === "deleted" || res?.outcome === "already_gone"
-      ? res.outcome : `failed:${res?.reason ?? "unknown"}`;
+    // TD-251 批 sol 会审修正：apply 时逐项复探（planning 到 apply 的窗口里会话
+    // 可能转忙——冷会话跨实例活性探针覆盖不了的残余，至少本实例视角复验）。
+    const reprobe = await ops.probeServeSession({ baseUrl: serveUrl, token, sessionId: item.sessionId, fetchImpl, timeoutMs });
+    let outcome;
+    if (!reprobe.ok) {
+      outcome = `failed:reprobe_${reprobe.reason ?? "unknown"}`;
+    } else if (reprobe.busy) {
+      outcome = "skipped_busy";
+    } else {
+      const res = await ops.deleteServeSession({ baseUrl: serveUrl, token, sessionId: item.sessionId, fetchImpl, timeoutMs });
+      outcome = res?.outcome === "deleted" || res?.outcome === "already_gone"
+        ? res.outcome : `failed:${res?.reason ?? "unknown"}`;
+    }
     const line = {
       ts: nowFn(),
       sessionId: item.sessionId,
@@ -206,6 +218,7 @@ export async function applySessionSweep({
   return {
     deleted: results.filter((r) => r.outcome === "deleted").length,
     alreadyGone: results.filter((r) => r.outcome === "already_gone").length,
+    skippedBusy: results.filter((r) => r.outcome === "skipped_busy").length,
     failed: results.filter((r) => r.outcome.startsWith("failed:")).length,
     results,
   };
@@ -251,6 +264,36 @@ export function acquireMaintenanceLock({ lockPath, pid = process.pid, nowMs = Da
   } catch {
     return { refused: true, reason: "lock_unreadable" };
   }
+}
+
+/**
+ * TD-251 W1c（决定 0057）：回收后空壳清扫。真实 dogfood 发现：readOnly 席位树
+ * 的内容与 git 元数据在终态清理时即被删净，但**空目录壳**会被泄漏荚的工具壳
+ * （cmd.exe 以会话 worktree 为 cwd）占住句柄（Windows EPERM）——荚不死句柄不
+ * 释。recycle 杀荚后句柄释放，此刻补扫即可闭环。门（保守）：目录名 /^run_/ +
+ * **完全为空**（readdir 零条目——真 worktree 恒有文件；recycle 双门已保证无
+ * 活跃 run，不存在"创建中"竞争）。
+ * @returns {number} 清掉的壳数
+ */
+export function sweepEmptyWorktreeHusks(worktreesDir, { io = null } = {}) {
+  const _readdir = io?.readdirSync ?? readdirSync;
+  const _rm = io?.rmSync ?? rmSync;
+  const _exists = io?.existsSync ?? existsSync;
+  if (typeof worktreesDir !== "string" || !_exists(worktreesDir)) return 0;
+  let removed = 0;
+  for (const name of _readdir(worktreesDir)) {
+    if (!/^run_/.test(name)) continue;
+    const p = join(worktreesDir, name);
+    try {
+      if (_readdir(p).length === 0) {
+        _rm(p, { recursive: true, force: true });
+        if (!_exists(p)) removed += 1;
+      }
+    } catch {
+      // 单壳失败跳过（下次回收再试）。
+    }
+  }
+  return removed;
 }
 
 /**
@@ -363,6 +406,9 @@ export async function recycleServe({
   }
   const newInstance = (ops.readServeInstances()).find((i) => i.port === port) ?? null;
   const children = newInstance ? await ops.countServeChildren({ pid: newInstance.pid, execFileFn }) : -1;
+  // TD-251 W1c：荚已死、句柄已释——补扫本工作区的空 worktree 壳（dogfood 实证
+  // 的 still_present 残渣在此闭环）。
+  const husksSwept = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
   return {
     recycled: true,
     ready,
@@ -371,6 +417,7 @@ export async function recycleServe({
     portDownVerified: portDown,
     killFallback,
     newServeChildren: children,
+    ...(husksSwept > 0 ? { emptyWorktreeHusksSwept: husksSwept } : {}),
   };
 }
 

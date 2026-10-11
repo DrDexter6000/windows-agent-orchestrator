@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -92,7 +92,7 @@ function fakeOps({ probeResults, workspaceItems, deleteResults }) {
   return {
     deletes,
     async listServeWorkspaces() { return { ok: true, items: workspaceItems }; },
-    async probeServeSession({ sessionId }) { return probeResults[sessionId] ?? { ok: false, reason: "http_error" }; },
+    async probeServeSession({ sessionId }) { return probeResults[sessionId] ?? { ok: true, gone: false, workspaceId: "wd_1", busy: false }; },
     async deleteServeSession({ sessionId }) {
       deletes.push(sessionId);
       return deleteResults?.[sessionId] ?? { outcome: "deleted" };
@@ -218,7 +218,7 @@ test("TD-250 A3: applySessionSweep 逐会话删 + 独立台账（不写 run 转�
 
 test("TD-250: serveMaintenanceDir 落 .wao/serve-maintenance（独立台账面，不碰 run 转录）", () => {
   const p = serveMaintenanceDir("D:\\repo");
-  assert.ok(p.endsWith(join(".wao", "serve-maintenance")), p);
+  assert.ok(p.endsWith(join(".wao", "runs", "serve-maintenance")), p);
 });
 
 // ===== recycle（注入零真进程）=====
@@ -290,8 +290,8 @@ test("TD-250 A2: recycle 拒绝闭集——无实例/active run/busy/集合变�
     assert.equal(r.refused, "sessions_changed");
     // 锁互斥（持锁方 pid 如实上报）
     const locked = base();
-    mkdirSync(join(locked.lockRootDir, ".wao", "serve-maintenance"), { recursive: true });
-    writeFileSync(join(locked.lockRootDir, ".wao", "serve-maintenance", "recycle.lock"), JSON.stringify({ pid: 999, ts: Date.now() }), "utf8");
+    mkdirSync(join(locked.lockRootDir, ".wao", "runs", "serve-maintenance"), { recursive: true });
+    writeFileSync(join(locked.lockRootDir, ".wao", "runs", "serve-maintenance", "recycle.lock"), JSON.stringify({ pid: 999, ts: Date.now() }), "utf8");
     r = await recycleServe({
       ...locked,
       ops: recycleOps({ sessionsScript: [{ ok: true, items: [] }] }),
@@ -344,4 +344,26 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
     assert.equal(spawns[0].opts.env.WAO_IN_WORKER, "1", "env 组装权归命令——0047 env 臂恒在场");
     assert.equal(spawns[0].opts.detached, true);
   } finally { cleanupDir(lockRoot); }
+});
+
+// ===== TD-251 W1c：回收后空壳清扫 =====
+
+import { sweepEmptyWorktreeHusks } from "../../src/application/serveMaintenance.js";
+
+test("TD-251 W1c: sweepEmptyWorktreeHusks 只删空目录壳（run_ 前缀+零条目）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td251-husk-"));
+  try {
+    mkdirSync(join(dir, "run_husk1"));
+    mkdirSync(join(dir, "run_husk2"));
+    mkdirSync(join(dir, "run_real"));
+    writeFileSync(join(dir, "run_real", "a.txt"), "x", "utf8");
+    mkdirSync(join(dir, "not_run_shape"));
+    const n = sweepEmptyWorktreeHusks(dir);
+    assert.equal(n, 2);
+    assert.ok(!existsSync(join(dir, "run_husk1")));
+    assert.ok(!existsSync(join(dir, "run_husk2")));
+    assert.ok(existsSync(join(dir, "run_real")), "非空 worktree 不动");
+    assert.ok(existsSync(join(dir, "not_run_shape")), "非 run_ 前缀不动");
+    assert.equal(sweepEmptyWorktreeHusks(join(dir, "no-such")), 0);
+  } finally { cleanupDir(dir); }
 });

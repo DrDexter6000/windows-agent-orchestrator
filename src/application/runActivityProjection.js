@@ -147,6 +147,12 @@ const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
   "run.upstream_session_already_gone": "upstream_session_already_gone",
   "run.upstream_session_delete_skipped": "upstream_session_delete_skipped",
   "run.upstream_session_delete_failed": "upstream_session_delete_failed",
+  // TD-251（决定 0057）：worktree 释放事件族（readOnly 延迟释放 W1a + 验收放树
+  // W1b 共用；一果一名，无路径载荷——删除目标回链 run.started 绑定事实）。
+  "run.worktree_released": "worktree_released",
+  "run.worktree_already_gone": "worktree_already_gone",
+  "run.worktree_release_skipped": "worktree_release_skipped",
+  "run.worktree_release_failed": "worktree_release_failed",
 });
 export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
 

@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -639,7 +639,9 @@ export class RunManager {
     // supportsInFlightCorrection (gated below). Default false = byte-compatible.
     correctable = false,
     // Round 4 Bundle B: Lead read-only DECLARATION (advisory observation, never
-    // a gate). readOnly forces persistent worktree isolation (overriding the
+    // a gate). readOnly forces worktree isolation (TD-251 W1a: non-reuse runs get
+    // ephemeral + stop-confirmed deferred release; reuse runs stay persistent —
+    // usage.md 决定 0057). The declaration overrides the
     // isolate flag — the CLI rejects the contradictory --no-isolate up front),
     // fails closed when the worktree cannot be created (no source-cwd fallback,
     // typed ReadOnlyWorktreeRequiredError, zero transcript side effects), and
@@ -867,15 +869,25 @@ export class RunManager {
         + "(read_only_delivery_conflict) — a read-only run is advisory observation, never a delivery",
       );
     }
-    // Round 4 Bundle B: readOnly FORCES persistent worktree isolation — the
-    // declaration overrides the caller's isolate flag (the CLI rejects the
-    // contradictory --no-isolate declaration up front; programmatic callers
-    // get the forced-isolation semantics documented on the option).
-    const isolationConfig = resolveIsolation(
-      readOnly ? true : isolate,
-      agent.isolation,
-      this.config.defaultIsolation,
-    );
+    // Round 4 Bundle B: readOnly FORCES worktree isolation — the declaration
+    // overrides the caller's isolate flag (the CLI rejects the contradictory
+    // --no-isolate declaration up front; programmatic callers get the
+    // forced-isolation semantics documented on the option).
+    // TD-251 W1a（决定 0057，2026-10-11，会审 consult_202610110709306023ro7zi
+    // opus+sol 双席修正案）：非复用 readOnly run 的强制隔离改 **ephemeral**——
+    // 终态且停止验证确认后回收树（席位/只读 run 是 152 棵存量积累的主力生成源）。
+    // 两道门（双席各一道反例）：①sessionReuse routing 在场（lead_workspace 复用
+    // 轮/线系）→ 保持 persistent——kimi 会话的 server 侧 cwd 钉在首轮树，删了
+    // 续接轮的工具调用会落到不存在的目录；②删除动作不在 start 组装 cleanupFn
+    // （那里停止验证还没跑——WAO 终态≠worker 已停，sol 反例），改为 _runCleanup
+    // 里停止验证之后的延迟释放（_deferredWorktreeRelease）。
+    const isolationConfig = readOnly && !sessionReuse
+      ? { type: "worktree", strategy: "ephemeral" }
+      : resolveIsolation(
+        readOnly ? true : isolate,
+        agent.isolation,
+        this.config.defaultIsolation,
+      );
     let deliveryPrepared = null;
     if (delivery) {
       deliveryPrepared = prepareDeliveryRequest(delivery);
@@ -1176,6 +1188,8 @@ export class RunManager {
     let worktreeInfo = null;
     let effectiveCwd = agent.cwd;
     let cleanupFn = null;
+    // TD-251 W1a：readOnly ephemeral 树的延迟释放路径（停止验证之后处置）。
+    let deferredWorktreeRelease = null;
 
     // M12-6 (P1-A): frozen-base TOCTOU revalidation. When a server-proven
     // frozenGitHead was threaded (MCP dispatch), re-prove the source HEAD equals
@@ -1225,7 +1239,14 @@ export class RunManager {
         );
         effectiveCwd = worktreeInfo.path;
         if (isolationConfig.strategy === "ephemeral") {
-          cleanupFn = () => removeWorktree(worktreeInfo.path);
+          if (readOnly) {
+            // TD-251 W1a：readOnly ephemeral 的删除**不在此组装**——此刻停止验证
+            // 还没跑（sol 反例：WAO 终态≠worker 已停）。路径交给 Run 的
+            // _deferredWorktreeRelease，在 _runCleanup 的停止验证之后处置。
+            deferredWorktreeRelease = worktreeInfo.path;
+          } else {
+            cleanupFn = () => removeWorktree(worktreeInfo.path);
+          }
         }
       } catch (error) {
         if (delivery) {
@@ -1597,6 +1618,8 @@ export class RunManager {
       verifyDeliveryFn: this.verifyDeliveryFn,
       correctable,
       readOnlyDeclared: readOnly,
+      // TD-251 W1a：readOnly ephemeral 树延迟释放（_runCleanup 停止验证之后）。
+      deferredWorktreeRelease,
       // provider 会话复用（2026-09-21）：复用 run 需要把 wire 上观察到的运行时
       // 会话 id 在终态前补记成绑定的 session.created（见 Run 内 late-bind 段）。
       sessionReuse,
@@ -2245,6 +2268,8 @@ export class Run {
     verifyDeliveryFn = defaultVerifyDelivery,
     correctable = false,
     readOnlyDeclared = false,
+    deferredWorktreeRelease = null,
+    removeWorktreeForRelease = removeWorktree,
     sessionReuse = null,
   }) {
     this.runId = runId;
@@ -2283,6 +2308,15 @@ export class Run {
     // TD-250（A1，决定 0056）：上游会话卫生的单发防重标志——_runCleanup 可能被
     // 多条终态路径重复进入，release 恰好评估一次（与 _sessionKilled 同款纪律）。
     this._upstreamSessionReleased = false;
+    // TD-251 W1a（决定 0057）：readOnly ephemeral 树的延迟释放路径 + 单发防重
+    // 标志 + 停止确认旗（_verifyStopQuietIfCapable 写 run.stop_verified 时置真）。
+    this.deferredWorktreeRelease = typeof deferredWorktreeRelease === "string" && deferredWorktreeRelease.length > 0
+      ? deferredWorktreeRelease : null;
+    this._deferredWorktreeHandled = false;
+    this._stopQuietConfirmed = false;
+    // 删除原语可注入（still_present 违约钉的测试缝）；默认真 isolation.removeWorktree。
+    this.removeWorktreeForRelease = typeof removeWorktreeForRelease === "function"
+      ? removeWorktreeForRelease : removeWorktree;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
@@ -3256,6 +3290,10 @@ export class Run {
     // 停止验证之后（先删会话会让 verifyStopQuiet 的探针 404，虚报
     // stop_unverified）、_cleanup 段之前（与进程/工件回收无耦合，次序无偏好）。
     await this._releaseUpstreamSession();
+    // TD-251 W1a（决定 0057）：readOnly ephemeral 树的延迟释放——同样在停止验证
+    // 之后、best-effort、幂等。停止未确认（stop_unverified/probe 缺席）→ 留树
+    // （迟到收取窗口），周期普查兜底。
+    await this._releaseDeferredWorktree();
     if (this._cleaned || !this._cleanup) return;
     this._cleaned = true;
     try {
@@ -3329,6 +3367,53 @@ export class Run {
       await this.transcript.append(eventType, payload);
     } catch {
       // best-effort：卫生失败绝不影响终态、绝不阻断后续 _cleanup。
+    }
+  }
+
+  /**
+   * TD-251 W1a（决定 0057）：readOnly ephemeral 树的延迟释放。门（双席会审
+   * consult_202610110709306023ro7zi 修正案）：
+   *   - 停止确认（sol 反例：WAO 终态≠worker 已停）——_stopQuietConfirmed 由
+   *     _verifyStopQuietIfCapable 的 stop_verified 腿置真；未确认（含 probe
+   *     缺席/失败）→ 留树（迟到收取窗口），周期普查（.dev 脚本）兜底。
+   *   - 单发防重（_deferredWorktreeHandled，_runCleanup 多路径进入同 A1 纪律）。
+   *   - best-effort：removeWorktree 自吞错且恒 resolve——成功判定 = 事后
+   *     existsSync 为假（opus Q2-3 同款"不抛错≠已删除"纪律）。
+   *   - 事件族与 W1b（验收放树）共用 run.worktree_* 四件套（一果一名；读侧
+   *     只读 run.started 的绑定事实，观察投影不依赖实体树——sol 核）。
+   *   - 分支保留（git worktree remove 不删分支；accepted commit 可达性靠
+   *     wao/<runId> 分支维持——opus Q2-7）：此处不做分支清理。
+   */
+  async _releaseDeferredWorktree() {
+    if (this._deferredWorktreeHandled) return;
+    this._deferredWorktreeHandled = true;
+    if (!this.deferredWorktreeRelease) return;
+    try {
+      let eventType = null;
+      let payload = {};
+      if (!this._stopQuietConfirmed) {
+        eventType = "run.worktree_release_skipped";
+        payload = { reason: "stop_unconfirmed" };
+      } else if (!existsSync(this.deferredWorktreeRelease)) {
+        eventType = "run.worktree_already_gone";
+      } else {
+        await this.removeWorktreeForRelease(this.deferredWorktreeRelease);
+        if (existsSync(this.deferredWorktreeRelease)) {
+          eventType = "run.worktree_release_failed";
+          payload = { reason: "still_present" };
+        } else {
+          eventType = "run.worktree_released";
+        }
+      }
+      if (eventType) await this.transcript.append(eventType, payload);
+    } catch {
+      // best-effort：意外抛错路径统一 existsSync 复检收口（席位评审附评 3——
+      // "抛错≠完好如初"，可能已半删；与 still_present 同型上报，普查按可疑处理）。
+      try {
+        if (existsSync(this.deferredWorktreeRelease)) {
+          await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
+        }
+      } catch { /* 双重失败：吞掉，绝不影响终态 */ }
     }
   }
 
@@ -3445,6 +3530,7 @@ export class Run {
         // Probe succeeded: process is quiet. Write stop_verified.
         // Write failure here is an evidence-write failure, NOT a probe error —
         // do not fall through to the probe_error branch.
+        this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
         try {
           await this.transcript.append("run.stop_verified", {
             backend: this.result?.backend ?? "process",
@@ -3492,6 +3578,7 @@ export class Run {
       cwd: this.result?.cwd, rounds: 3, intervalMs: 2000,
     });
     if (result.quiet) {
+      this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
       await this.transcript.append("run.stop_verified", { backendSessionId: sessionId, path: "_runCleanup" });
     } else {
       await this.transcript.append("run.stop_unverified", {

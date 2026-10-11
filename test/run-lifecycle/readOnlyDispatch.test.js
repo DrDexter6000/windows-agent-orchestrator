@@ -9,8 +9,9 @@
 //      (ReadOnlyDeliveryConflictError) before ANY side effect; readOnly ×
 //      continuable is naturally refused by the existing delivery-only gate;
 //      readOnly × correctable coexists (a correction is a Lead instruction).
-//   2. RunManager.start      — readOnly FORCES persistent worktree isolation
-//      (overriding an explicit isolate:false), fails CLOSED on worktree
+//   2. RunManager.start      — readOnly FORCES worktree isolation (TD-251 W1a:
+//      non-reuse=ephemeral deferred release, reuse=persistent; overrides
+//      isolate:false), fails CLOSED on worktree
 //      creation failure (typed ReadOnlyWorktreeRequiredError, zero transcript
 //      side effects — the legacy degrade-to-source-cwd stays readOnly-free),
 //      and persists the exactly-once run.read_only_declared durable fact with

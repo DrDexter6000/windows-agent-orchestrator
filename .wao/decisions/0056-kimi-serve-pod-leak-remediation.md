@@ -28,7 +28,7 @@ TD-250 立案的"MCP 实例泄漏"（Owner 资源管理器实地观察）根因�
 **A2 手动 serve 维护族（`wao serve status|sweep|recycle`；不挂 daemon、无自动触发——双席一致，理由=worker serve 全机共享的归属权含糊+自动重启 env 组装事故会静默失效 0047 env 臂防线）**：
 - `serve status`：实例元数据/荚规模/会话计数（零副作用）。
 - `serve recycle`：门=WAO 全项目桶 active-only（心跳新鲜；unresolved 不堵——runner 死 run 不永堵回收）+ serve 会话集合 soak（快照→等 12s→复探集合**逐 id 相同**且全 !busy——busy-only 复探有 createSession→sendPrompt 间新会话 idle 的洞，集合比对把窗口压到构造上不可命中）→ 优雅 shutdown（端口/进程死亡证实，超时回退 taskkill /T /F）→ 重启（**env 组装权归命令**：WAO_IN_WORKER=1 恒注入、--workspace-dir 显式必填无隐藏默认、detached）→ 就绪轮询 ≤30s → 后验证（新 pid/荚计数）。recycle-vs-recycle 互斥=wx 锁 600s 陈旧回收；**只防回收互撞不声称防新派发**（残余=秒级窗口内新派发显式红）。
-- `serve sweep`：**按会话认领**（WAO 转录 `session.created.backendSessionId`，扫全部项目桶——不按 wd_* 命名启发式）+ "worktree 已亡"门三条件（形状=父目录名 .wao-worktrees 大小写折叠；干净 ENOENT；父目录在场可读否则 suspect 整批放弃）。默认 dry-run，`--apply` 才删；台账=独立 JSONL（`.wao/serve-maintenance/sweep-ledger.jsonl`，不写 run 转录——ADR 0034 归档/哈希纪律不触碰）。**跨 serve 生效**（F4 共享仓）——命令输出明示。
+- `serve sweep`：**按会话认领**（WAO 转录 `session.created.backendSessionId`，扫全部项目桶——不按 wd_* 命名启发式）+ "worktree 已亡"门三条件（形状=父目录名 .wao-worktrees 大小写折叠；干净 ENOENT；父目录在场可读否则 suspect 整批放弃）。默认 dry-run，`--apply` 才删；台账=独立 JSONL（`.wao/runs/serve-maintenance/sweep-ledger.jsonl`，不写 run 转录——ADR 0034 归档/哈希纪律不触碰）。**跨 serve 生效**（F4 共享仓）——命令输出明示。
 
 **A4 上游反馈**：kimi 2.1.1 serve 不拆助手进程=上游缺陷；建议 Owner 反馈 Moonshot，点名要"idle 荚 GC 或 :delete 连带拆荚"——上游修复后 A2 recycle 退役（A1/A1b 保留：会话仓卫生独立有价值）。
 

@@ -594,7 +594,7 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
    ```
    - `sweep` 按 WAO 转录 `session.created` 认领（扫全部项目桶），只删
      "worktree 已亡"（形状+干净 ENOENT+父目录在场三条件）的会话；台账在
-     `.wao/serve-maintenance/sweep-ledger.jsonl`。**跨 serve 生效**（kimi 会话
+     `.wao/runs/serve-maintenance/sweep-ledger.jsonl`。**跨 serve 生效**（kimi 会话
      仓实例间共享）——58627 上由 WAO 历史派发产生的会话同样会被认领。
    - `recycle` 双门（WAO 全项目桶无 active run + serve 会话集合 soak 比对
      全 idle）→ 优雅 shutdown 全量拆荚 → 按上方配方重启（env 由命令组装，
@@ -604,6 +604,16 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
      修复（Owner 反馈 Moonshot：要求 idle 荚 GC 或 :delete 连带拆荚）后
      recycle 退役。
 3. **上报上游（A4）**：serve 永不拆助手进程是 kimi 2.1.1 的上游缺陷。
+4. **TD-251/决定 0057 增补（2026-10-11）**：readOnly 非复用 run 的强制隔离改
+   ephemeral——终态且停止验证确认后自动回收树（未确认留树保迟到收取）；
+   delivery 验收后线系树按四道门释放（分支 wao/<runId> 永不删）。真实条件下的
+   两段式：树内容+git 元数据在终态清理即删，**空目录壳**可能被泄漏荚的工具壳
+   占住句柄（Windows EPERM）——`serve recycle` 杀荚后自动清扫（输出
+   emptyWorktreeHusksSwept）。sweep 探针含 busy/main_turn_active 双字段且 apply
+   逐项复探；存量卫生补充 v2 sessions:archive 批量归档路线（归档态转录仍可读、
+   restore 可逆；台账 .wao/runs/serve-maintenance/archive-ledger.jsonl）。私有主目录
+   （KIMI_CODE_HOME）阶梯①已验证通过（数据家分离+新家空会话零子进程），②登录
+   ③试点④运维闭环待 Owner 排期（TD-253）。
 
 ### 场景 5：重试 / 恢复
 
@@ -1000,7 +1010,7 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 
 **资格与拒绝文案（2026-10-04）**：`continuable` 的后端资格以后端类声明（`supportsSessionReuse`）为准——人读投影见生成层 `docs/surface/certification.md` 能力列（registry 的 `sessionReuse` 条目是路由配置，**不是**能力证明）。资格拒绝携带固定原因码 `continuable_backend_unsupported`，缺 delivery 拒绝携带 `continuable_delivery_only`（MCP 固定文案，不回显席位/workspace/backend 名）。事故背景：`docs/incidents/2026-10-04-continuable-resolver-drift.md`。
 
-**R4 只读声明（可选，`readOnly`）**：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`），把这次 run 声明为**只读**。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制 persistent worktree 隔离（worktree 创建失败时 fail-closed 拒绝派发——typed `read_only_worktree_required`，**不走**普通 run 的降级原 cwd 路径），start 时恰一次写入 `run.read_only_declared` durable 事实（见 §三事件表），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见 `run_activity` 节）。`readOnly` 与 `delivery` 块互斥（固定拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。**诚实上限（三句）**：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，**不是**"没写"），不是全知监控；② 强制隔离与越界侦测是**侦测机制**，不是 OS 沙箱——隔离降低误写面，但不能物理阻止越界写；③ 观察是 **advisory 非门**——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。另注意与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）区分：那是**不可验证、无持久事实**的 prompt 约定；控制面 `readOnly` 声明则有 durable 事实事件 + 基于上报证据的观察投影。
+**R4 只读声明（可选，`readOnly`）**：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`），把这次 run 声明为**只读**。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制 worktree 隔离（TD-251/决定 0057：非复用轮=ephemeral——终态且停止验证确认后回收树，停止未确认则留树保迟到收取；sessionReuse 复用轮=persistent——kimi 会话 server 侧 cwd 钉在首轮树；worktree 创建失败时 fail-closed 拒绝派发——typed `read_only_worktree_required`，**不走**普通 run 的降级原 cwd 路径），start 时恰一次写入 `run.read_only_declared` durable 事实（见 §三事件表），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见 `run_activity` 节）。`readOnly` 与 `delivery` 块互斥（固定拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。**诚实上限（三句）**：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，**不是**"没写"），不是全知监控；② 强制隔离与越界侦测是**侦测机制**，不是 OS 沙箱——隔离降低误写面，但不能物理阻止越界写；③ 观察是 **advisory 非门**——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。另注意与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）区分：那是**不可验证、无持久事实**的 prompt 约定；控制面 `readOnly` 声明则有 durable 事实事件 + 基于上报证据的观察投影。
 
 **R10-A 单次模型覆盖（可选，`model`）**的 MCP 特有规则已并入 `docs/certification-runbook.md` §场景 1b（与 CLI 覆盖正文合并维护；单向链接；唯一权威）。
 

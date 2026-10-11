@@ -109,8 +109,9 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
 
 /**
  * 单会话 detail 探针（sweep 对每个认领会话的存活/归属判定）。
- * 40401 → {ok:true, gone:true}；busy 折叠只作只读事实返回（清扫不删忙会话由
- * 调用方门控；这里不替调用方做删除决策）。
+ * 40401 → {ok:true, gone:true}；busy 投影返回**双字段原值**（TD-251 批 sol 会审
+ * 修正：只留 busy===true 会遗漏 main_turn_active 且把字段缺席折叠成 false——
+ * 冷会话跨实例可能仍在别的实例跑，双字段任一真即视为忙）。
  */
 export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl = globalThis.fetch, timeoutMs }) {
   const r = await serveRequest({
@@ -128,7 +129,7 @@ export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl =
     ok: true,
     gone: false,
     workspaceId: typeof r.data.workspace_id === "string" ? r.data.workspace_id : null,
-    busy: r.data.busy === true,
+    busy: r.data.busy === true || r.data.main_turn_active === true,
   };
 }
 

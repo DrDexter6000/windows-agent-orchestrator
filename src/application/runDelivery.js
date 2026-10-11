@@ -1098,12 +1098,19 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
   }
 
   const decisionResult = await transcript.tryAppendDecision({ decision, reason: trimmedReason });
-  // TD-250（A1b，决定 0056）：accepted = 线系不可变的持久事实（parent_accepted
-  // 拒续）→ 此刻线系会话可证不可续，best-effort 释放。能力门/事件合同在
-  // makeAcceptedSessionRelease 内部；此处只做触发与吞错——绝不影响验收结果。
+  // TD-250（A1b，决定 0056）+ TD-251（W1b，决定 0057）：accepted = 线系不可变的
+  // 持久事实（parent_accepted 拒续）→ 此刻线系会话可证不可续、线系树可按 tip 门
+  // 释放（makeAcceptedSessionRelease 两件独立）。能力门/事件合同在那边；此处只
+  // 做触发与吞错——绝不影响验收结果。
   if (decisionResult?.accepted === true && decision === "accepted" && typeof sessionRelease === "function") {
     try {
-      await sessionRelease({ agentId: context.agentId, events, transcript });
+      await sessionRelease({
+        runId,
+        agentId: context.agentId,
+        events,
+        transcript,
+        deliveryCommit: decisionResult?.event?.deliveryCommit ?? null,
+      });
     } catch {
       // best-effort：释放失败（网络/事件追加）不改写已落盘的验收事实。
     }

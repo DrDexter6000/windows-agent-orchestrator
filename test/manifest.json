@@ -157,6 +157,7 @@
       "run-lifecycle/runsWait.test.js",
       "run-lifecycle/stopSideEffect.test.js",
       "run-lifecycle/td250-upstreamSessionRelease.test.js",
+      "run-lifecycle/td251-worktree-release.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "run-lifecycle/waoAcceptCli.test.js",
       "transcript/acceptanceRecord.test.js",
