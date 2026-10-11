@@ -146,6 +146,17 @@ export async function planSessionSweep({
   }
   const rootById = new Map(workspaces.items.map((w) => [w.id, w.root]));
 
+  // 信封纪律（验收 sol#4）：session.created 必须绑定文件 runId（文件名 stem 是
+  // 权威 runId——R20-C 同款）；事件自带 runId 且≠文件 runId=外 run 信封行，跳过
+  // 并计数（legacy 无 runId 字段的事件按既有兼容接受）。认领归属不能被外 run
+  // 事件冒名。
+  const foreignEnvelopeEvents = [];
+  const claimOf = (e, runId) => {
+    if (typeof e?.runId === "string" && e.runId !== runId) { foreignEnvelopeEvents.push({ file: runId, eventRunId: e.runId, type: e.type }); return null; }
+    if (!(e && e.type === "session.created" && e.backend === "kimi-web"
+      && typeof e.backendSessionId === "string" && e.backendSessionId.length > 0)) return null;
+    return e;
+  };
   const claims = new Map(); // sessionId -> { runId, serveUrl, fromArchive? }
   for (const t of listTranscriptsDeep(runDir, io ? { io } : {})) {
     let events;
@@ -156,12 +167,11 @@ export async function planSessionSweep({
     }
     const runId = t.name.replace(/\.jsonl$/, "");
     for (const e of events) {
-      if (e && e.type === "session.created" && e.backend === "kimi-web"
-        && typeof e.backendSessionId === "string" && e.backendSessionId.length > 0
-        && !claims.has(e.backendSessionId)) {
-        claims.set(e.backendSessionId, {
+      const ev = claimOf(e, runId);
+      if (ev && !claims.has(ev.backendSessionId)) {
+        claims.set(ev.backendSessionId, {
           runId,
-          serveUrl: typeof e.serveUrl === "string" ? e.serveUrl : null,
+          serveUrl: typeof ev.serveUrl === "string" ? ev.serveUrl : null,
         });
       }
     }
@@ -170,8 +180,10 @@ export async function planSessionSweep({
   // TD-252③（TD-256 批）：认领面扩到磁盘归档——runs prune --archive 移走的 run
   // 其会话仍活在 serve 上，认领面丢了就永远扫不到。字节级预筛（不含
   // kimi-web 字串的文件不进解析——认领面只多不少方向）；live 位（runDir）优先于
-  // 归档位；同会话跨 run 归属冲突保留首个并如实上报。
+  // 归档位；同会话跨 run 归属冲突**保留并退出删除候选**（验收 sol#5：冲突会话
+  // 的归属不可证，靠首见决定删除=未证先删）。
   const claimConflicts = [];
+  const conflictedSessionIds = new Set();
   const archiveReadFailures = [];
   const archive = listArchiveTranscriptFiles(runDir);
   for (const f of archive.files) {
@@ -182,19 +194,21 @@ export async function planSessionSweep({
     try { events = await readTranscriptFn(f.path); } catch { archiveReadFailures.push({ file: f.path, reason: "parse_failed" }); continue; }
     const runId = f.name.replace(/\.jsonl$/, "");
     for (const e of events) {
-      if (e && e.type === "session.created" && e.backend === "kimi-web"
-        && typeof e.backendSessionId === "string" && e.backendSessionId.length > 0) {
-        const prior = claims.get(e.backendSessionId);
-        if (prior) {
-          if (prior.runId !== runId) claimConflicts.push({ sessionId: e.backendSessionId, runIds: [prior.runId, runId] });
-          continue;
+      const ev = claimOf(e, runId);
+      if (!ev) continue;
+      const prior = claims.get(ev.backendSessionId);
+      if (prior) {
+        if (prior.runId !== runId) {
+          claimConflicts.push({ sessionId: ev.backendSessionId, runIds: [prior.runId, runId] });
+          conflictedSessionIds.add(ev.backendSessionId);
         }
-        claims.set(e.backendSessionId, {
-          runId,
-          serveUrl: typeof e.serveUrl === "string" ? e.serveUrl : null,
-          fromArchive: true,
-        });
+        continue;
       }
+      claims.set(ev.backendSessionId, {
+        runId,
+        serveUrl: typeof ev.serveUrl === "string" ? ev.serveUrl : null,
+        fromArchive: true,
+      });
     }
   }
 
@@ -203,6 +217,11 @@ export async function planSessionSweep({
   const probeFailed = [];
   const foreignHome = [];
   for (const [sessionId, claim] of claims) {
+    // 冲突会话：归属不可证 → 永远保留侧，绝不进入删除候选（sol#5 必改）。
+    if (conflictedSessionIds.has(sessionId)) {
+      retained.push({ sessionId, runId: claim.runId, reason: "claim_conflict" });
+      continue;
+    }
     // TD-253（决定 0058，opus）：分家后按 claim.serveUrl 过滤——跨家会话在目标
     // serve 上 404 会被误记 already_gone 污染台账。legacy 无 serveUrl 认领仅
     // 默认家（kimiHome 缺席）纳入。
@@ -246,6 +265,7 @@ export async function planSessionSweep({
     archiveSkipped: archive.skipped,
     archiveReadFailures,
     claimConflicts,
+    foreignEnvelopeEvents,
   };
 }
 
@@ -428,7 +448,7 @@ export async function recycleServe({
 
   // WAO 侧门：全部项目桶、active-only（新鲜 owner 心跳的非终态 run）。unresolved
   // （非终态但心跳死）不堵门——其上游活轮由 serve 侧 busy/集合 soak 兜底。
-  const active = await listRunsFn({ runDir, activeOnly: true, authorizedWorkspaceRoot: null });
+  const active = await listRunsFn({ runDir, activeOnly: true });
   const activeKimi = (active?.runs ?? active?.items ?? [])
     .filter((r) => Array.isArray(kimiAgentIds) && kimiAgentIds.includes(r.agentId));
   if (activeKimi.length > 0) {

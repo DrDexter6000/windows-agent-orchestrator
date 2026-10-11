@@ -111,14 +111,17 @@ export function planProjectsMigration({ runDir, io = {} }) {
 
     // 终态检测：最后一条 run.state_change 的 to 在终态闭集才算可迁（非终态=
     // 可能在追加，搬家撕裂转录——跳过并点名）。读失败按非终态处理
-    // （fail-closed：不可证的绝不迁）。
+    // （fail-closed：不可证的绝不迁）。信封绑定（验收 sol#4，与 apply 同款）：
+    // 只认本文件 runId 的 state_change（legacy 无 runId 字段行兼容）。
     let state = null;
     try {
       const lines = readFileSync(joinPath(runDir, file), "utf8").trim().split("\n");
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const fileRunId = file.replace(/\.jsonl$/, "");
+      for (let li = lines.length - 1; li >= 0; li -= 1) {
         let ev;
-        try { ev = JSON.parse(lines[i]); } catch { continue; }
-        if (ev?.type === "run.state_change" && typeof ev.to === "string") { state = ev.to; break; }
+        try { ev = JSON.parse(lines[li]); } catch { continue; }
+        if (ev?.type === "run.state_change" && typeof ev.to === "string"
+          && (typeof ev.runId !== "string" || ev.runId === fileRunId)) { state = ev.to; break; }
       }
     } catch { /* 读取失败按非终态处理（fail-closed：不可证的绝不迁） */ }
 
@@ -234,14 +237,21 @@ function identityForResolver(identity) {
   return { ...identity, displayName: basenameOf(identity.key) };
 }
 
-/** 读既往 manifest 构建 runId → 已知迁移事实（intent/result 各行，last-wins）。 */
+/**
+ * 读既往 manifest 构建 runId → 已知迁移事实（intent/result 各行，last-wins）。
+ * 验收 sol#6：读取失败与"确认无台账"分开记账（manifestUnreadable）——不可观测
+ * ≠空集；单行坏 JSON 计 badLines（少证明不少伤害，但可见）。
+ * @returns {{prior: Map, manifestUnreadable: number, badLines: number}}
+ */
 function loadPriorManifests(readdirSync, readFileSync, manifestDir) {
   const prior = new Map();
+  let manifestUnreadable = 0;
+  let badLines = 0;
   let names = [];
-  try { names = readdirSync(manifestDir); } catch { return prior; }
+  try { names = readdirSync(manifestDir); } catch { return { prior, manifestUnreadable: 1, badLines }; }
   for (const name of names.filter((n) => n.startsWith("apply-") && n.endsWith(MANIFEST_EXT)).sort()) {
     let text = "";
-    try { text = readFileSync(join(manifestDir, name), "utf8"); } catch { continue; }
+    try { text = readFileSync(join(manifestDir, name), "utf8"); } catch { manifestUnreadable += 1; continue; }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try {
@@ -250,18 +260,21 @@ function loadPriorManifests(readdirSync, readFileSync, manifestDir) {
           const prev = prior.get(e.runId);
           if (!prev || (e.phase === "result") || prev.phase !== "result") prior.set(e.runId, e);
         }
-      } catch { /* 单行坏 JSON 跳过（少证明不少伤害） */ }
+      } catch { badLines += 1; /* 单行坏 JSON 跳过（少证明不少伤害——计数可见） */ }
     }
   }
-  return prior;
+  return { prior, manifestUnreadable, badLines };
 }
 
 /**
  * TD-190 D3 实迁（TD-256 批）。对 runDir 根层全部可迁转录执行 link→sha 核对→
  * unlink 移动；manifest 台账 intent/result 双行；幂等可续跑。环境门（active run、
  * daemon、路径合法性）由 CLI 层持有，本函数只做文件系统事实。
+ * 验收补强（sol#2）：根层扫描后对"既往台账里已无源文件在场"的项逐一补判
+ * （仅 dst=already_migrated/anomaly、双缺=anomaly）——四态续跑合同在 apply 自身
+ * 成立，不依赖 --verify 补位。
  *
- * @returns {{manifestPath: string, totals: Object, items: Array<Object>}}
+ * @returns {{manifestPath: string, totals: Object, items: Array<Object>, manifestUnreadable: number, badLines: number}}
  */
 export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = null }) {
   const i = defaultIoApply(io);
@@ -269,7 +282,8 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
   i.mkdirSync(manifestDir, { recursive: true });
   const manifestPath = manifestDir.replace(/[\\/]+$/, "") + "/apply-" + (stamp ?? Date.now()) + MANIFEST_EXT;
   const appendManifest = (obj) => i.appendFileSync(manifestPath, `${JSON.stringify(obj)}\n`, "utf8");
-  const prior = loadPriorManifests(i.readdirSync, readFileSync, manifestDir);
+  const loaded = loadPriorManifests(i.readdirSync, readFileSync, manifestDir);
+  const prior = loaded.prior;
 
   const totals = {
     scanned: 0, migrated: 0, alreadyMigrated: 0, droppedFlatTwin: 0,
@@ -277,9 +291,12 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     failures: 0, anomalies: 0,
   };
   const items = [];
+  const scannedIds = new Set();
 
   let entries = [];
-  try { entries = i.readdirSync(runDir); } catch { return { manifestPath, totals, items }; }
+  try { entries = i.readdirSync(runDir); } catch {
+    return { manifestPath, totals, items, manifestUnreadable: loaded.manifestUnreadable, badLines: loaded.badLines };
+  }
   for (const name of entries) {
     let isDir = false;
     try { isDir = i.statSync(joinPath(runDir, name)).isDirectory?.() ?? false; } catch { /* 按文件处理 */ }
@@ -287,6 +304,7 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     if (!name.endsWith(".jsonl")) continue;
     totals.scanned += 1;
     const runId = name.replace(/\.jsonl$/, "");
+    scannedIds.add(runId);
     const src = transcriptPathFor(runDir, runId);
 
     // 归类（与计划器同 SSOT 原语；fail-closed：不可证终态=不动）。
@@ -297,12 +315,16 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     if (!FIRST_EVENT_TYPES.has(first?.type)) {
       totals.failures += 1; items.push({ runId, status: "failed:not_first_event", detail: String(first?.type) }); continue;
     }
+    // 终态推导绑定信封（验收 sol#4）：只认本文件 runId 的 state_change（或
+    // legacy 无 runId 字段行）——外 run 的 completed 尾条不得把 running 文件
+    // 翻成可迁（R20-C boundReportScope 同款纪律）。
     let state = null;
     try {
       const lines = readFileSync(src, "utf8").trim().split("\n");
       for (let k = lines.length - 1; k >= 0; k -= 1) {
         let ev; try { ev = JSON.parse(lines[k]); } catch { continue; }
-        if (ev?.type === "run.state_change" && typeof ev.to === "string") { state = ev.to; break; }
+        if (ev?.type === "run.state_change" && typeof ev.to === "string"
+          && (typeof ev.runId !== "string" || ev.runId === runId)) { state = ev.to; break; }
       }
     } catch { /* 读取失败按非终态处理 */ }
     if (!TERMINAL_STATES.includes(state)) {
@@ -386,7 +408,32 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     appendManifest({ ts: new Date().toISOString(), phase: "result", op: "migrate", ...base });
     totals.migrated += 1; items.push({ runId, status: "migrated", dst, slug: resolved.bucket });
   }
-  return { manifestPath, totals, items };
+
+  // 验收 sol#2 必改：台账补判——既往 manifest 里有记录、但根层扫描没见到的项
+  // （已迁走的文件不再进 readdir），逐一给出四态续跑的明确判定，apply 自身
+  // 闭环（不再依赖 --verify 补位证明合同）。
+  for (const [runId, known] of prior) {
+    if (scannedIds.has(runId)) continue;
+    const srcKnown = transcriptPathFor(runDir, runId);
+    const srcExists = i.existsSync(srcKnown);
+    const dstExists = i.existsSync(known.dst);
+    if (srcExists && !dstExists) continue; // 罕见：根层又出现但本轮循环已处理过？循环按名处理——此处不可达，保守跳过
+    if (!srcExists && dstExists) {
+      let shaNow = null;
+      try { shaNow = sha256OfFile(readFileSync, known.dst); } catch { /* 下面按不可证处理 */ }
+      if (shaNow === known.sha256) {
+        totals.alreadyMigrated += 1; items.push({ runId, status: "already_migrated", dst: known.dst, fromPriorManifest: true });
+      } else {
+        totals.anomalies += 1;
+        items.push({ runId, status: "anomaly:dst_modified_after_migration", dst: known.dst, fromPriorManifest: true });
+      }
+      continue;
+    }
+    if (!srcExists && !dstExists) {
+      totals.anomalies += 1; items.push({ runId, status: "anomaly:both_missing", fromPriorManifest: true });
+    }
+  }
+  return { manifestPath, totals, items, manifestUnreadable: loaded.manifestUnreadable, badLines: loaded.badLines };
 }
 
 /**
@@ -397,8 +444,9 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
 export function verifyProjectsMigration({ runDir, manifestDir, io = {} }) {
   const i = defaultIoApply(io);
   const readFileSync = i.readFileSync;
-  const prior = loadPriorManifests(i.readdirSync, readFileSync, manifestDir);
-  const checked = { dstTotal: prior.size, dstMissing: [], shaMismatch: [], rootRemainder: [], reappeared: [] };
+  const loaded = loadPriorManifests(i.readdirSync, readFileSync, manifestDir);
+  const prior = loaded.prior;
+  const checked = { dstTotal: prior.size, dstMissing: [], shaMismatch: [], rootRemainder: [], reappeared: [], manifestUnreadable: loaded.manifestUnreadable, badLines: loaded.badLines };
   for (const [runId, e] of prior) {
     if (!i.existsSync(e.dst)) { checked.dstMissing.push({ runId, dst: e.dst }); continue; }
     try {

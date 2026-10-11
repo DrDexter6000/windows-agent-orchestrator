@@ -46,6 +46,17 @@ lineageClose 占用门原查 `join(runDir,".wao","session-reuse")`——目录�
 - 真实业务 dogfood：①真收账（6 reject+10 线系闭合，worktree 11→1，分支 187→185=只删零提交会审席 2 棵）；②doctor 真机输出（门禁关/双作用域未设置/三 warn 均存量）；③D3 真迁移：761 迁移/4 非终态保留/零冲突零失败零再现，--verify 761 dst 全在场零 sha 漂移，claims 91 守恒、总数 843 守恒、根层 765→4，26/26 抽样解析链命中桶内新址，9 桶落成（6 项目+_sandbox/_scratch/_unattributed）。
 - 限制如实记录：serve 归档面（①）真机 GET 因 serve 未拉起未执行（合同锚定 0057 live 探针+夹具证明）；sweep 归档臂（③）真实命中 0（夹具证明）。
 
+## 验收会审修正（consult_20261011162041197kru5ln，opus+sol 双席；必改全采纳）
+- **active 门死形状修复**（双席同发现）：`authorizedWorkspaceRoot: null` 会使 listRuns 走 fail-closed 返回空集——migrate-projects --apply 与 serve recycle 的 active 门此前恒空（同源旧缺陷在 recycle=0056 期）。修法=省略该键；行为钉+扫源钉（src/ 零处 null 形状）入 runsList.test.js。
+- **列表层三形状拒判**（sol#3）：listServeSessions 对缺 has_more/缺 id/双忙碌字段全缺 → shape_unknown（"未知→空闲/完整"折叠全部消除；detail 探针同款纪律补齐列表面）。
+- **apply 四态闭环**（sol#2）：根层扫描后对既往台账项逐一补判（仅 dst=already_migrated/anomaly、双缺=anomaly）——四态合同在 apply 自身成立。
+- **信封绑定**（sol#4）：sweep 认领（live+归档）与迁移终态推导都绑定文件 runId（legacy 无 runId 兼容；外 run 事件计数可见/不认）。
+- **冲突保留**（sol#5）：认领冲突会话永远保留侧（claim_conflict），绝不进删除候选；serve sweep 输出面新增冲突/归档面/信封外事件/读取失败可见行。
+- **可观测性**（sol#6）：台账读取失败/坏行计数（manifestUnreadable/badLines——不可观测≠空集）；CLI 退出条件补 factBucketMismatches（明确拒绝≠成功）。
+- 登记不阻断：事实桶拒绝发生在 resolver 副作用（可能已建桶）之后（真实数据 0 例）；双 --apply 并发无互斥锁（link EEXIST/unlink ENOENT 响亮失败不静默）。
+- **TD-252 状态头修正**（opus V3）：②=限制保留非已修，待 Owner 接受。
+- **分支例外明示**：0058"分支永不删"合同的对象是交付线系分支；**只读会审席分支例外**——零独有提交且 tip==main 时可删（本批两轮会审共 4 棵，证据=git log main..branch 空+tips 记录在案）。
+
 ## 后果
 - 根层 runs/ 只剩 4 份非终态（陈年孤儿，终态后可再跑 --apply 清走）；"平铺=legacy 异常态"语义从此成立（新写全在桶内）。
 - 会话仓卫生三死角：两修一登记（②限制保留，Owner 接受或上游修复前不动）。

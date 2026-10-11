@@ -132,6 +132,7 @@ test("TD-256 apply: 迁移全链（project+unattributed+非终态不动）+ 新�
     assert.equal(r2.totals.failures, 0);
     assert.equal(r2.totals.anomalies, 0);
     assert.equal(r2.totals.keptNonTerminal, 1);
+    assert.equal(r2.totals.alreadyMigrated, 2, "验收 sol#2：台账补判在 apply 自身闭环（仅 dst 由既往 manifest 证明）");
     const v = verifyProjectsMigration({ runDir, manifestDir, io });
     assert.equal(v.dstTotal, 2, "manifest 台账两项已迁");
     assert.equal(v.dstMissing.length, 0);
@@ -174,6 +175,25 @@ test("TD-256 apply: 幂等孪生态——双在同 hash 删平铺侧；双在异
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("TD-256 验收 sol#4: 终态推导信封绑定——外 run 的 completed 尾条不把 running 文件翻成可迁", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-mf-"));
+  try {
+    const runDir = join(root, "runs");
+    const manifestDir = join(root, ".wao", "migration", "td190-d3");
+    mkdirSync(runDir, { recursive: true });
+    const projCwd = join(root, "proj-f").split("\\").join("/");
+    const lines = [
+      JSON.stringify({ type: "run.started", runId: "run_stuck", agentId: "tester", cwd: projCwd, ts: "x", seq: 0 }),
+      JSON.stringify({ type: "run.state_change", runId: "run_stuck", to: "running", ts: "x", seq: 1 }),
+      JSON.stringify({ type: "run.state_change", runId: "run_OTHER", to: "completed", ts: "x", seq: 2 }),
+    ];
+    writeFileSync(join(runDir, "run_stuck.jsonl"), lines.join("\n") + "\n", "utf8");
+    const r = applyProjectsMigration({ runDir, manifestDir, io: { realpath: (pp) => pp }, stamp: "t1" });
+    assert.equal(r.totals.keptNonTerminal, 1, "外 run completed 不认——本文件仍 running");
+    assert.equal(r.totals.migrated, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("TD-256 apply: 在档事实适配——缺 displayName 补 basename；畸形事实入口拒；事实桶≠权威冻结桶拒绝", () => {

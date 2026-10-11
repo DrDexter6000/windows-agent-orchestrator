@@ -74,6 +74,19 @@ function printSweepPlan(plan, kimiHomeInUse = false) {
     console.log(`Probe failed (kept, no action): ${plan.probeFailed.length}`);
     for (const p of plan.probeFailed) console.log(`  PROBEFAIL ${p.sessionId} ${p.reason}`);
   }
+  // TD-256 验收（sol#5）：冲突/归档面/信封外事件/读取失败全部进操作面——
+  // 认领归属不可证的会话永远保留侧，操作员必须能看见为什么。
+  if (plan.claimConflicts?.length > 0) {
+    console.log(`Claim conflicts (kept as claim_conflict, never deleted): ${plan.claimConflicts.length}`);
+    for (const c of plan.claimConflicts) console.log(`  CONFLICT ${c.sessionId}: ${c.runIds.join(" vs ")}`);
+  }
+  if (plan.archiveScanned !== undefined) {
+    console.log(`Archive face scanned: ${plan.archiveScanned} transcripts (skipped: ${plan.archiveSkipped?.length ?? 0}, read failures: ${plan.archiveReadFailures?.length ?? 0})`);
+    for (const f of (plan.archiveReadFailures ?? []).slice(0, 5)) console.log(`  ARCHREADFAIL ${f.file} ${f.reason}`);
+  }
+  if (plan.foreignEnvelopeEvents?.length > 0) {
+    console.log(`Foreign-envelope events skipped (claim binding): ${plan.foreignEnvelopeEvents.length}`);
+  }
   if (kimiHomeInUse) {
     console.log("NOTE: target serve uses a PRIVATE kimi home (KIMI_CODE_HOME) — the sweep only");
     console.log("sees that home's session store. Claims from other homes are skipped as foreign_home.");

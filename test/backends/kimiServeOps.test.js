@@ -67,3 +67,17 @@ test("TD-252①: listServeSessions archivedOnly=true——URL 带 archived_only 
   });
   assert.ok(!p2[0].includes("archived_only"), "默认面不带归档参数");
 });
+
+test("TD-256 验收 sol#3: 列表层三形状拒判——缺 has_more/缺 id/双忙碌字段全缺 → shape_unknown", async () => {
+  const call = (data) => listServeSessions({
+    baseUrl: "http://x", token: "t",
+    fetchImpl: async () => jsonResponse(data),
+  });
+  let r = await call({ code: 0, data: { items: [{ id: "s1", busy: false }] } }); // 无 has_more
+  assert.equal(r.ok, false); assert.equal(r.reason, "shape_unknown");
+  r = await call({ code: 0, data: { items: [{ id: "s1", busy: false }], has_more: false, extra: [{ noId: true }] } });
+  r = await call({ code: 0, data: { items: [{ busy: false }], has_more: false } }); // 条目缺 id
+  assert.equal(r.ok, false); assert.equal(r.reason, "shape_unknown");
+  r = await call({ code: 0, data: { items: [{ id: "s1", workspace_id: "w" }], has_more: false } }); // 双忙碌字段全缺
+  assert.equal(r.ok, false); assert.equal(r.reason, "shape_unknown");
+});

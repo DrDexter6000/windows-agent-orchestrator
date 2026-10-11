@@ -759,7 +759,7 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 `.wao/migration/td190-d3/apply-<ts>.jsonl`（intent/result 双行，幂等可续跑）；门=active run 为空
 +拒绝在 worktree 内执行+操作员确保无并发 WAO 写操作）；`--verify` 迁移后核对（只读：dst 在场/
 sha 漂移/根层剩余/**根层再现**点名——并发追加者持旧路径会在迁移后复活平铺文件，按 `--verify` 
-点名后手工合并再重跑）。非终态转录一律不动（fail-closed）；无法归因存量迁入 `_unattributed` 桶。
+点名后手工合并再重跑）。非终态转录一律不动（fail-closed）；无法归因存量迁入 `_unattributed` 桶。**回滚边界**：无自动回滚工具——反向移动须人工按 manifest 台账核对（仅当台账 sha 是当前内容前缀时才可反向；迁移后的合法追加不盲搬）。
 每个 run 的事件流存在该 run 的转录文件（D2-②b 起**新 run 写 `runs/projects/<slug>/<runId>.jsonl`**，旧平铺 `runs/<runId>.jsonl` 只读兼容长期共存；定位一律经 `src/projectBuckets.js` 的解析链），每行一个 JSON 事件。完整事件类型：
 
 | 事件 | 含义 | 阶段 |

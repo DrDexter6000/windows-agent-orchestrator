@@ -180,12 +180,12 @@ async function runsCommand(args, config, deps) {
     if (mopts.verify === true) {
       const manifestDir = join(dirname(runDir), ".wao", "migration", "td190-d3");
       const checked = verifyProjectsMigration({ runDir, manifestDir, io: productionProjectIo() });
-      console.log(`[migrate-projects --verify] manifest 台账项 ${checked.dstTotal}；dst 缺席 ${checked.dstMissing.length}；sha 漂移 ${checked.shaMismatch.length}；根层剩余 ${checked.rootRemainder.length}；根层再现 ${checked.reappeared.length}`);
+      console.log(`[migrate-projects --verify] manifest 台账项 ${checked.dstTotal}；dst 缺席 ${checked.dstMissing.length}；sha 漂移 ${checked.shaMismatch.length}；根层剩余 ${checked.rootRemainder.length}；根层再现 ${checked.reappeared.length}；台账不可读 ${checked.manifestUnreadable ?? 0}/坏行 ${checked.badLines ?? 0}`);
       for (const x of checked.dstMissing.slice(0, 5)) console.log(`  dst 缺席: ${x.runId} -> ${x.dst}`);
       for (const x of checked.shaMismatch.slice(0, 5)) console.log(`  sha 漂移: ${x.runId}（迁移后有追加或损坏——只报告不回滚）`);
       for (const x of checked.reappeared.slice(0, 5)) console.log(`  根层再现: ${x.runId}（并发追加复活平铺文件——手工合并后重跑 apply）`);
       for (const n of checked.rootRemainder.slice(0, 10)) console.log(`  根层剩余: ${n}`);
-      if (checked.dstMissing.length > 0 || checked.reappeared.length > 0) process.exitCode = 1;
+      if (checked.dstMissing.length > 0 || checked.reappeared.length > 0 || (checked.manifestUnreadable ?? 0) > 0) process.exitCode = 1;
       return;
     }
     if (mopts.apply !== true) {
@@ -223,7 +223,7 @@ async function runsCommand(args, config, deps) {
     }
     // --apply：环境门 + 实迁。
     const { listRuns } = await import("../application/runList.js");
-    const active = await listRuns({ runDir, activeOnly: true, authorizedWorkspaceRoot: null });
+    const active = await listRuns({ runDir, activeOnly: true });
     const activeRuns = (active?.runs ?? active?.items ?? []);
     if (activeRuns.length > 0) {
       console.error(`[migrate-projects --apply] 拒绝：存在 active run（${activeRuns.map((r) => r.runId).slice(0, 5).join(", ")}）——等全部终态后再迁`);
@@ -236,11 +236,16 @@ async function runsCommand(args, config, deps) {
     const result = applyProjectsMigration({ runDir, manifestDir, io: productionProjectIo() });
     const t = result.totals;
     console.log(`  manifest: ${result.manifestPath}`);
+    if (result.manifestUnreadable > 0 || result.badLines > 0) {
+      console.log(`  **台账可观测性警告：manifestUnreadable=${result.manifestUnreadable} badLines=${result.badLines}（既往台账不可读=续跑证明面受损，人工核对后再继续）**`);
+    }
     console.log(`  实迁完成：scanned=${t.scanned} migrated=${t.migrated} already=${t.alreadyMigrated} droppedFlatTwin=${t.droppedFlatTwin} keptNonTerminal=${t.keptNonTerminal} twinConflicts=${t.twinConflicts} factBucketMismatches=${t.factBucketMismatches} failures=${t.failures} anomalies=${t.anomalies}`);
     for (const it of result.items.filter((x) => x.status.startsWith("refused") || x.status.startsWith("failed") || x.status.startsWith("anomaly")).slice(0, 10)) {
       console.log(`    ${it.status}: ${it.runId}${it.detail ? `（${it.detail}）` : ""}`);
     }
-    if (t.failures > 0 || t.anomalies > 0 || t.twinConflicts > 0) process.exitCode = 1;
+    // 验收 sol#6：明确拒绝（factBucketMismatches/twinConflicts）也是失败退出——
+    // 拒绝返回 0 会把"有项未处理"伪装成成功。
+    if (t.failures > 0 || t.anomalies > 0 || t.twinConflicts > 0 || t.factBucketMismatches > 0) process.exitCode = 1;
     return;
   }
   if (sub === "forecast") {

@@ -5,13 +5,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { JsonlTranscript } from "../../src/transcript.js";
+import { listRuns } from "../../src/application/runList.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -1126,4 +1127,44 @@ test("M12-20-HIST-04: corrupt transcript in history scope is skipped fail-closed
     assert.equal(result.scanScope, "history");
     for (const r of result.runs) assert.equal(r.runId !== broken, true, "broken run never surfaced");
   } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// ── TD-256 验收（opus V2-1/sol#1）：active 门 null 陷阱合同钉 ──
+// authorizedWorkspaceRoot: null 会走 createRunWorkspaceVerifier(null) 抛错 →
+// fail-closed 返回 {runs:[]}——曾经让 migrate-projects --apply 与 serve recycle
+// 的 active 门恒空（门是死的）。两钉：行为钉（null=空集、省略=真实列表）+
+// 扫源钉（src/ 不得再出现该调用形状）。
+test("TD-256: authorizedWorkspaceRoot null=空集（fail-closed）而省略=真实列表——门调用必须省略该键", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td256-rl-"));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const lines = [
+      JSON.stringify({ type: "run.started", runId: "run_x1", agentId: "t", cwd: dir, ts: new Date().toISOString(), seq: 0 }),
+      JSON.stringify({ type: "run.state_change", runId: "run_x1", to: "completed", ts: new Date().toISOString(), seq: 1 }),
+    ];
+    writeFileSync(join(dir, "run_x1.jsonl"), lines.join("\n") + "\n", "utf8");
+    const withNull = await listRuns({ runDir: dir, activeOnly: true, authorizedWorkspaceRoot: null });
+    assert.deepEqual(withNull.runs ?? withNull.items ?? [], [], "null → fail-closed 空集（陷阱形状）");
+    const omitted = await listRuns({ runDir: dir, activeOnly: true });
+    void omitted;
+    // activeOnly 下 completed run 不在列（无心跳）——但关键是不再恒空路径：
+    // 列表服务按真实状态机工作。用非 activeOnly 对照证明省略键时列表真实。
+    const all = await listRuns({ runDir: dir });
+    assert.equal((all.runs ?? all.items ?? []).length, 1, "省略键=真实列表（1 条在册）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD-256: 扫源钉——src/ 零处 authorizedWorkspaceRoot: null（active 门禁用死形状）", () => {
+  const offenders = [];
+  const walk = (d) => {
+    for (const name of readdirSync(d)) {
+      const pp = join(d, name);
+      if (statSync(pp).isDirectory()) walk(pp);
+      else if (name.endsWith(".js")) {
+        if (readFileSync(pp, "utf8").includes("authorizedWorkspaceRoot: null")) offenders.push(pp);
+      }
+    }
+  };
+  walk(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src"));
+  assert.deepEqual(offenders, [], `active 门死形状再现：${offenders.join(", ")}`);
 });

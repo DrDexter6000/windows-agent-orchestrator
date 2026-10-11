@@ -87,9 +87,15 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
     if (r.code !== 0 || !Array.isArray(r.data?.items)) {
       return { ok: false, reason: "upstream_rejected", ...(Number.isInteger(r.code) ? { code: r.code } : {}) };
     }
+    // TD-256 验收（sol#3/opus V2-2，注入响应复现）：列表层三种"未知→已知"折叠
+    // 全部改为拒判——has_more 非 boolean（不能证明分页完整）、条目缺 id（静默
+    // 跳过=集合可能不全）、双忙碌字段全缺（活性不可证≠空闲）。soak/认领门
+    // 的前提是全量视图与可证活性，"查不到"不得变成"没问题"。
+    if (typeof r.data.has_more !== "boolean") return { ok: false, reason: "shape_unknown" };
     let advanced = false;
     for (const it of r.data.items) {
-      if (typeof it?.id !== "string" || it.id.length === 0) continue;
+      if (typeof it?.id !== "string" || it.id.length === 0) return { ok: false, reason: "shape_unknown" };
+      if (typeof it?.busy !== "boolean" && typeof it?.main_turn_active !== "boolean") return { ok: false, reason: "shape_unknown" };
       if (seen.has(it.id)) continue;
       seen.add(it.id);
       advanced = true;

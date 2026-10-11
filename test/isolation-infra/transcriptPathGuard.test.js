@@ -202,7 +202,7 @@ const TRANSCRIPT_PATH_FOR_RATCHET = new Map(Object.entries({
   // 即平铺形状）、桶内目标位（resolved.transcriptDir 直取）、verify 根层再现复检。
   // 迁移是"把平铺形状搬到桶内形状"的写侧操作，构造两端都是纯形状（不经解析链
   // ——解析链面向读侧定位，迁移源/目标由枚举与写侧权威各自决定）。
-  "src/application/runsMigrateProjects.js": 3,
+  "src/application/runsMigrateProjects.js": 4, // +1=验收 sol#2 台账补判的根层复检
 }));
 
 test("TD-190 D2-②b 棘轮: transcriptPathFor 消费面只紧不松（白名单外禁新增）", () => {

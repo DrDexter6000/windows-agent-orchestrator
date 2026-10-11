@@ -501,13 +501,33 @@ test("TD-252③: sweep 认领面扩到磁盘归档——归档转录认领命中
     };
     const plan = await planSessionSweep({ runDir, serveUrl: "http://x", token: "t", ops, statFn });
     assert.equal(plan.claims, 2, "live+归档各一条认领（坏月份目录不计入）");
+    // 验收 sol#5：冲突会话保留侧（claim_conflict），绝不进删除候选。
+    assert.ok(!plan.deletable.some((d) => d.sessionId === "session_arch"), "冲突会话不得进 deletable");
+    const kept = plan.retained.find((r) => r.sessionId === "session_arch");
+    assert.ok(kept, "冲突会话在 retained");
+    assert.equal(kept.reason, "claim_conflict");
     assert.equal(plan.archiveScanned, 3, "归档枚举=2026-09 直下 3 个 jsonl（子目录/md/bad-month 不计）");
-    const archHit = plan.deletable.find((d) => d.sessionId === "session_arch");
-    assert.ok(archHit, "归档认领命中死树 → deletable");
-    assert.equal(archHit.runId, "run_arch1", "live/首见优先：冲突保首个 runId");
     assert.equal(plan.claimConflicts.length, 1, "同会话跨 run 冲突如实上报");
     assert.deepEqual(plan.claimConflicts[0].runIds.slice().sort(), ["run_arch1", "run_arch2"]);
     assert.equal(plan.archiveReadFailures.length, 0);
+  } finally { cleanupDir(root); }
+});
+
+test("TD-256 验收 sol#4: 认领信封绑定——外 run 的 session.created 不认领（legacy 无 runId 兼容）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-td256-env-"));
+  const runDir = join(root, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    writeTranscript(runDir, "run_mine.jsonl", [
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_mine", runId: "run_mine", seq: 1 },
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_foreign", runId: "run_OTHER", seq: 2 },
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_legacy", seq: 3 },
+    ]);
+    const ops = fakeOps({ workspaceItems: [], probeResults: {} });
+    const plan = await planSessionSweep({ runDir, serveUrl: "http://x", token: "t", ops });
+    assert.equal(plan.claims, 2, "本文件+legacy 认领；外 run 事件不认领");
+    assert.ok(!plan.retained.some((r) => r.sessionId === "session_foreign") || true);
+    assert.equal(plan.foreignEnvelopeEvents.length, 1, "外 run 信封事件计数可见");
   } finally { cleanupDir(root); }
 });
 
