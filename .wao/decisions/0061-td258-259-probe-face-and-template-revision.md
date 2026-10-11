@@ -16,3 +16,9 @@ Owner 2026-10-11 晚指令：①追认 TD-257 批只读 run 分支删除（已�
 
 - TD-258 收窄保留：令牌获取的可照做步骤仍缺本仓验证（上游 help 已证部分事实）；deepseek-acp 报 ready 继承 doctor 既有的"CLI 在场≠就绪"夸大（ADR-0031 containment 覆盖层不在探测面——非本批引入）。
 - dogfood 证据：裸跑 onboarding 双面（kimi=key_only_present+tokenEnv 名、deepseek=ready 与 doctor 同态、zcode=无 CLI 探测面新标签）；模板单车道 registry（glm-flash+kimi）validate 全过 + doctor 5b 对 glm-flash 占位桥响亮报 file-missing + keyOnly 展示行在面板活现。
+
+## 核验补记（2026-10-11 晚，Owner 点名收窄尾，真机实证）
+
+- **loopback/无 TTY 启动不打印 token**：worker 主目录一次性 serve（端口 58631，stdout/stderr 双重定向）输出双空——上游 `--help` 的"printed at startup"仅适用于交互式控制台。**替代获取配方实证**：token 持久化于 `<kimi 主目录>/server.token`（43 字符），文件内值即活体凭据（以之调 `/api/v1/meta` 得 200）；跨启动与优雅 shutdown 均不变（sha8 三采样一致）。
+- **token 按主目录隔离**：owner 家（6a53d7ca）与 worker 家（4a186739）server.token 哈希不同——`KIMI_CODE_HOME` 分家后各 serve 令牌独立；`rotate-token` 爆炸半径=同一主目录内的全部 serve。
+- 试验卫生：一次性 serve 经优雅 `POST /api/v1/shutdown` 拆除（200 ok；端口 LISTENING 清零、pid 离场、TIME_WAIT 自然收尾）；全程未运行 rotate-token、未回显任何 token 值、未触碰 Owner 主 serve。usage.md 场景 4e 的 KIMI_WEB_TOKEN 节已替换为实证版；TD-258 据此关账。

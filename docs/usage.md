@@ -575,11 +575,15 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 
 **KIMI_WEB_TOKEN（kimi 车道凭据面，TD-258 补档）**：
 
-- **是什么/从哪来**：`kimi web` serve 的持久 Bearer token，由上游 serve 签发
-  （`kimi web --help`：token 在启动时打印；`rotate-token` 子命令生成新持久
-  token 且旧 token **立即失效**——共用同一 kimi 主目录的 serve 会一起受影响，
-  轮换前先想清楚）。本仓未复验的边界：绑定 loopback 时启动是否始终打印、
-  `KIMI_CODE_HOME` 分家后各 serve 的 token 是否独立——按上游实际输出为准。
+- **是什么/从哪来**：`kimi web` serve 的持久 Bearer token，由上游 serve 签发，
+  **持久化在 `<kimi 主目录>/server.token`**（2026-10-11 实测：43 字符文件；文件内
+  值即活体凭据——用它调 `/api/v1/meta` 得 200；跨启动与优雅 shutdown 均不变）。
+  **headless 获取配方=读该文件**，不依赖启动打印——实测重定向/无 TTY 启动**不打印**
+  token（一次性 serve 于 worker 家核验，stdout/stderr 双空；上游 `--help` 的
+  "printed at startup"适用于交互式控制台启动）。`rotate-token` 子命令生成新持久
+  token 且旧 token **立即失效**——实测 token 按主目录隔离（`KIMI_CODE_HOME` 分家后
+  两家 server.token 哈希不同、互不相通），轮换的爆炸半径=同一主目录内的全部 serve，
+  轮换前先想清楚。
 - **怎么注入**：Windows User 作用域（`setx KIMI_WEB_TOKEN <值>`）。**派发链
   不要求新开终端**——WAO 派发链有 env→HKCU 两级回退（TD-208 实证）；需要
   新终端（或 `[Environment]::GetEnvironmentVariable(...,'User')` 读取）的只有
