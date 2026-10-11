@@ -39,6 +39,9 @@ import { TERMINAL_STATES, transcriptPathFor } from "../transcript.js";
 import { resolveRunDirForWrite } from "../projectBuckets.js";
 
 // 首事件类型闭集（实测：run.started / run.background_submitted，两者都带 cwd）。
+// TD-256：迁移台账文件族后缀（非转录 jsonl——与 runId 转录不同的自命名空间，
+// 构造不共享 transcriptPathFor 域）。
+const MANIFEST_EXT = ".jsonl";
 const FIRST_EVENT_TYPES = new Set(["run.started", "run.background_submitted"]);
 
 /**
@@ -236,7 +239,7 @@ function loadPriorManifests(readdirSync, readFileSync, manifestDir) {
   const prior = new Map();
   let names = [];
   try { names = readdirSync(manifestDir); } catch { return prior; }
-  for (const name of names.filter((n) => n.startsWith("apply-") && n.endsWith(".jsonl")).sort()) {
+  for (const name of names.filter((n) => n.startsWith("apply-") && n.endsWith(MANIFEST_EXT)).sort()) {
     let text = "";
     try { text = readFileSync(join(manifestDir, name), "utf8"); } catch { continue; }
     for (const line of text.split("\n")) {
@@ -264,7 +267,7 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
   const i = defaultIoApply(io);
   const readFileSync = i.readFileSync;
   i.mkdirSync(manifestDir, { recursive: true });
-  const manifestPath = join(manifestDir, `apply-${stamp ?? Date.now()}.jsonl`);
+  const manifestPath = manifestDir.replace(/[\\/]+$/, "") + "/apply-" + (stamp ?? Date.now()) + MANIFEST_EXT;
   const appendManifest = (obj) => i.appendFileSync(manifestPath, `${JSON.stringify(obj)}\n`, "utf8");
   const prior = loadPriorManifests(i.readdirSync, readFileSync, manifestDir);
 
@@ -284,7 +287,7 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     if (!name.endsWith(".jsonl")) continue;
     totals.scanned += 1;
     const runId = name.replace(/\.jsonl$/, "");
-    const src = joinPath(runDir, name);
+    const src = transcriptPathFor(runDir, runId);
 
     // 归类（与计划器同 SSOT 原语；fail-closed：不可证终态=不动）。
     let first;
@@ -401,7 +404,7 @@ export function verifyProjectsMigration({ runDir, manifestDir, io = {} }) {
     try {
       if (sha256OfFile(readFileSync, e.dst) !== e.sha256) checked.shaMismatch.push({ runId, dst: e.dst });
     } catch { checked.shaMismatch.push({ runId, dst: e.dst, reason: "unreadable" }); }
-    if (i.existsSync(joinPath(runDir, `${runId}.jsonl`))) checked.reappeared.push({ runId });
+    if (i.existsSync(transcriptPathFor(runDir, runId))) checked.reappeared.push({ runId });
   }
   let entries = [];
   try { entries = i.readdirSync(runDir); } catch { return checked; }

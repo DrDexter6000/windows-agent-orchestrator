@@ -23,11 +23,11 @@
 // 分层：kimi 专有 REST/机器事实全部在 backends/kimiServeOps.js（注入 ops）；
 // 本模块只含编排/门/台账，不含 kimi 协议细节（不变量 3）。
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, lstatSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn as nodeSpawn, execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
-import { readTranscript } from "../transcript.js";
+import { readTranscript, listTranscriptFiles } from "../transcript.js";
 import { listRuns } from "./runList.js";
 import * as defaultOps from "../backends/kimiServeOps.js";
 
@@ -101,9 +101,9 @@ const ARCHIVE_MONTH_DIR_RE = /^\d{4}-\d{2}$/;
  * TD-252③（TD-256 批）：磁盘归档面的有界转录枚举。归档根从 runDir 推导
  * （决定 0050：dirname(runDir)/runs-archive——不从桶内 dirname 反推）；只取
  * <yyyy-mm>/ 直下 *.jsonl（月份目录形状校验 /^\d{4}-\d{2}$/；不进子目录——
- * 归档树里有取证目录/bundle/md 等非转录资产；Dirent 形状判定天然不跟随
- * symlink/junction）；枚举失败如实上报（skipped），不静默。根缺席=空集
- * （未归档过的安装形态）。
+ * 归档树里有取证目录/bundle/md 等非转录资产；逐文件 lstat 拒 symlink/junction；
+ * 枚举失败如实上报（skipped），不静默。根缺席=空集（未归档过的安装形态）。
+ * 逐目录文件名枚举经 listTranscriptFiles 唯一入口（TD-190 D0 守卫域内合规）。
  */
 export function listArchiveTranscriptFiles(runDir) {
   const out = { files: [], skipped: [] };
@@ -113,12 +113,15 @@ export function listArchiveTranscriptFiles(runDir) {
   for (const m of months) {
     if (!m.isDirectory() || !ARCHIVE_MONTH_DIR_RE.test(m.name)) continue;
     const dir = join(root, m.name);
-    let entries = [];
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { out.skipped.push({ dir, reason: "readdir_failed" }); continue; }
-    for (const e of entries) {
-      if (e.isSymbolicLink()) { out.skipped.push({ file: join(dir, e.name), reason: "symlink_not_followed" }); continue; }
-      if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
-      out.files.push({ path: join(dir, e.name), name: e.name, month: m.name });
+    let names = [];
+    try { names = listTranscriptFiles(dir); } catch { out.skipped.push({ dir, reason: "readdir_failed" }); continue; }
+    for (const name of names) {
+      const pf = join(dir, name);
+      let st = null;
+      try { st = lstatSync(pf); } catch { out.skipped.push({ file: pf, reason: "lstat_failed" }); continue; }
+      if (st.isSymbolicLink()) { out.skipped.push({ file: pf, reason: "symlink_not_followed" }); continue; }
+      if (!st.isFile()) continue; // 名字长得像转录的目录——跳过
+      out.files.push({ path: pf, name, month: m.name });
     }
   }
   return out;
@@ -166,7 +169,7 @@ export async function planSessionSweep({
 
   // TD-252③（TD-256 批）：认领面扩到磁盘归档——runs prune --archive 移走的 run
   // 其会话仍活在 serve 上，认领面丢了就永远扫不到。字节级预筛（不含
-  // "kimi-web" 的文件不进解析——认领面只多不少方向）；live 位（runDir）优先于
+  // kimi-web 字串的文件不进解析——认领面只多不少方向）；live 位（runDir）优先于
   // 归档位；同会话跨 run 归属冲突保留首个并如实上报。
   const claimConflicts = [];
   const archiveReadFailures = [];

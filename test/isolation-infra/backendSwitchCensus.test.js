@@ -105,7 +105,9 @@ const REGISTERED_CENSUS = {
   // 0056（TD-250，2026-10-11）：serveMaintenance 的清扫认领门——只认领
   // session.created 里 backend==="kimi-web" 的会话（轴向=会话归属声明消费，
   // 不选 backend、不分叉运行时行为；能力面由 supportsSessionRelease 承载）。
-  "application/serveMaintenance.js": { "kimi-web": 1 },
+  // TD-256（2026-10-11）：③归档面扩容加 2——认领过滤（live 位）+字节级预筛
+  // （同一认领键的读侧快路径，不新增语义分叉）。
+  "application/serveMaintenance.js": { "kimi-web": 3 },
   // 0056（TD-250）：serve CLI 的目标解析——筛注册表里 kimi-web 席位取
   // serveUrl/tokenEnv（轴向=维护命令的目标定位，非编排分叉）。
   "commands/serve.js": { "kimi-web": 1 },

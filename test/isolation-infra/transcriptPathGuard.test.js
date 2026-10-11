@@ -198,6 +198,11 @@ const TRANSCRIPT_PATH_FOR_RATCHET = new Map(Object.entries({
   "src/application/runContinue.js": 1, // 写侧：continuation 子转录桶内构造
   "src/backgroundRunner.js": 3, // 旧平铺合法分支×2（fail-closed ternary）+runner 定位助手 O(1) 直取
   "src/runManager.js": 3, // 显式 transcriptDir 直取 + 旧平铺合法分支 + 自决桶内构造
+  // TD-256（2026-10-11，D3 apply）：迁移写侧三构造——平铺源位（transcriptPathFor
+  // 即平铺形状）、桶内目标位（resolved.transcriptDir 直取）、verify 根层再现复检。
+  // 迁移是"把平铺形状搬到桶内形状"的写侧操作，构造两端都是纯形状（不经解析链
+  // ——解析链面向读侧定位，迁移源/目标由枚举与写侧权威各自决定）。
+  "src/application/runsMigrateProjects.js": 3,
 }));
 
 test("TD-190 D2-②b 棘轮: transcriptPathFor 消费面只紧不松（白名单外禁新增）", () => {
