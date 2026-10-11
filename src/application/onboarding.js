@@ -712,8 +712,9 @@ async function buildTemplateFaceRecommendations(candidates, template, probeEnv) 
  * 已配置有效行（私有 registry 顺序稳定、私有胜显示）在前 + 模板未配置候选
  * （id 不在私有 registry 的模板行；组内沿用 ready-first 既有排序）在后。
  * 行携带 source（"configured"|"template"）；与模板同 id 的已配置行做 drift
- * 比对（闭集仅 backend + model.id——两侧读 .model?.id，opencode legacy 形状的
- * providerID/variant/contextWindow 不比：形状差异 ≠ drift）。总行数 ≤
+ * 比对（闭集 = backend + model.id + reasoning.effort（0044 d′）+ 认证矩阵行
+ * modelId（0044 d′，双侧在场才比）+ seatRole（0062 B9 乙′，0024 修订）——
+ * 两侧一律 ?? null 读，形状差异 ≠ drift）。总行数 ≤
  * MAX_CANDIDATES（私有先占帽），溢出事实进有界字段（configuredCount/
  * templateCandidateCount/templateOmitted/privateOmitted），展示层只投影。
  *
@@ -734,6 +735,33 @@ function rowEffortOf(row, privAgents) {
   if (typeof row?.effort === "string" && row.effort.length > 0) return row.effort;
   const seat = privAgents?.[row?.id];
   return isPlainObject(seat) ? seat.reasoning?.effort ?? null : null;
+}
+
+// 0062（B9 乙′，0024 修订闭集成员；审核修订）：seatRole drift 轴。单席位比较
+// 器——**模板声明了 seatRole 才可比**（模板未声明=不可比事实，不判 drift——与
+// 矩阵 modelId 轴"双侧在场才比"同律，opus 审核条款；反向不对称[私有声明而模板
+// 未声明]亦不判，"形状差异 ≠ drift"原则保持）；模板声明且私有缺席或值不同 =
+// drift。矩阵逐行比较与 doctor 指针计数共用此器（单一语义两个投影，不造第二
+// 比对权威——opus 会审 SSOT 条款）。
+export function seatRoleDriftBetween(privAgent, tplAgent) {
+  const b = isPlainObject(tplAgent) ? tplAgent.seatRole ?? null : null;
+  if (b === null) return null; // 模板未声明 → 不可比（不判 drift）
+  const a = isPlainObject(privAgent) ? privAgent.seatRole ?? null : null;
+  return a === b ? null : { privateSeatRole: a, templateSeatRole: b };
+}
+
+// doctor 指针行的计数面：只比模板同 id 席位（模板不携带的私有席位=私有裁剪，
+// 合法状态不在此报——sol 会审定界）。返回 [{id, privateSeatRole, templateSeatRole}]。
+export function seatRoleDriftRows({ template, privateRegistry }) {
+  const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
+  const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
+  const out = [];
+  for (const [id, priv] of Object.entries(privAgents)) {
+    if (!Object.prototype.hasOwnProperty.call(tplAgents, id)) continue;
+    const d = seatRoleDriftBetween(priv, tplAgents[id]);
+    if (d) out.push({ id, ...d });
+  }
+  return out;
 }
 async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv }) {
   const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
@@ -771,12 +799,16 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
       const privMatrixModel = privMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
       const tplMatrixModel = tplMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
       const effortDrift = rowEffortOf(out, privAgents) !== templateEffort;
+      // 0062（B9 乙′）：seatRole 轴——模板声明而私有缺席时席位面板退回命名惯例
+      // 兜底（车道键名不匹配惯例即从席位面消失——2026-10-11 会审叙事实锤）。
+      const seatDrift = seatRoleDriftBetween(privAgents[row.id], tpl);
       const matrixDrift = privMatrixModel !== null && tplMatrixModel !== null && privMatrixModel !== tplMatrixModel;
-      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || matrixDrift) {
+      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || seatDrift || matrixDrift) {
         out.drift = {
           templateBackend,
           templateModel,
           ...(effortDrift ? { templateEffort } : {}),
+          ...(seatDrift ? { templateSeatRole: seatDrift.templateSeatRole } : {}),
           ...(matrixDrift ? { matrix: { liveModelId: privMatrixModel, templateModelId: tplMatrixModel } } : {}),
         };
       }

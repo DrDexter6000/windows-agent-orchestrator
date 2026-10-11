@@ -34,6 +34,9 @@ import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
 import { onboardingCommand } from "./onboarding.js";
+// TD-260（0062 B8）：反向 Unknown 提示的数据源——顶层命令名闭集（cliHelp 是
+// 共享叶子，did-you-mean 同源；单向指路 TD-191④ 的对称补全）。
+import { COMMAND_NAMES } from "../cliHelp.js";
 // TD-219 第一步：Lead 侧验收落盘（非 delivery run 的 acceptance 审计事件追加进
 // run transcript）。数据逻辑委托 ../application/acceptanceRecord.js，本命令只做
 // argv/console 适配——与 consult/playbook 同款分层。
@@ -506,6 +509,17 @@ export async function waoCommand(args, config, deps = {}) {
   if (sub === "accept") {
     await waoAcceptCommand(tail, config);
     return;
+  }
+  // TD-260（0062 B8）：反向指路——sub 命中顶层命令名（serve/run/registry/…）时
+  // 给出两种完整调用形，与 TD-191④ 的正向指路（顶层 Unknown 命中 wao 族）对称。
+  // 根因是"wao X"一种写法两义（shim+顶层 vs 命名空间子命令），会审（opus 席）
+  // 否决 serve 别名案：只治一族、留五族不对称且膨胀入口闭集。"wao" 自身排除
+  // （`wao wao` 需要的是子命令名，反向提示会指向用户刚输入的形式——opus 审核）。
+  if (sub !== "wao" && COMMAND_NAMES.includes(sub)) {
+    throw new Error(
+      `Unknown wao subcommand: ${sub} — it is a top-level command. ` +
+        `Use "npm run cli -- ${sub} ..." (global shim form: "wao ${sub} ...").`
+    );
   }
   throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding | wao sweep-claude-config | wao accept`);
 }

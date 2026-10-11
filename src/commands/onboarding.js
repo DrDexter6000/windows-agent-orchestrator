@@ -212,14 +212,19 @@ export function renderHuman(r) {
   lines.push(`wao onboarding: ${tag}`);
 
   if (r.needsSelection) {
-    lines.push("No --agent selected — mutation requires an explicit selection.");
+    // TD-260（0062 B10①）：needs-selection 是正常交互出口（exit 0、零写入——
+    // 0023 双出口设计），人读首行不得像报错；--json 的 outcome 枚举不动。
+    lines.push("No --agent selected — this is a normal preview exit (no error, nothing written).");
+    lines.push("Mutation requires an explicit selection.");
     lines.push("Candidates from the tracked template:");
     for (const c of r.candidates) {
       lines.push(`  - ${c.id}  (backend: ${c.backend ?? "?"}, model: ${c.model ?? "?"})`);
     }
     lines.push("");
-    lines.push("Re-run with: wao onboarding --agent <id>            # preview");
-    lines.push("            wao onboarding --agent <id> --apply      # write config/agents.json");
+    // TD-260（0062 B8 记法）：规范形统一 npm run cli --（shim 形第二行注明）。
+    lines.push("Re-run with: npm run cli -- wao onboarding --agent <id>          # preview");
+    lines.push("            npm run cli -- wao onboarding --agent <id> --apply    # write config/agents.json");
+    lines.push("            (global shim form: wao wao onboarding --agent <id>)");
 
     // R6-C: role matrix + current-environment fit (advisory). Rows are derived
     // from the template rows and the injected probe; the engine already sorted
@@ -268,6 +273,13 @@ export function renderHuman(r) {
           // 认证矩阵行 modelId 维各占一段——10-05 两起漏面的对应可见面。
           const eff = row.drift.templateEffort !== undefined ? `/effort=${row.drift.templateEffort}` : "";
           lines.push(`  drift: ${row.id} 私有 model=${row.model ?? "?"}/backend=${row.backend ?? "?"} ≠ 模板 ${row.drift.templateModel ?? "?"}/${row.drift.templateBackend ?? "?"}${eff}`);
+          // 0062（B9 乙′，审核修订）：seatRole 维独立一行（模板侧值展示——值展示
+          // 纪律与 backend/model/effort 先例一致）。措辞按 privateSeatRole 区分
+          // "未声明（面板按命名惯例兜底）"与"值不匹配（面板用显式值，无兜底）"——
+          // sol 审核条款：不得对值不匹配行断言兜底原因。
+          if (row.drift.templateSeatRole !== undefined) {
+            lines.push(`  drift(seatRole): ${row.id} 模板 seatRole=${row.drift.templateSeatRole ?? "未声明"}（私有侧未声明或与模板不同）`);
+          }
           if (row.drift.matrix) {
             lines.push(`  drift(矩阵): ${row.id} 认证矩阵 modelId=${row.drift.matrix.liveModelId} ≠ 模板矩阵 ${row.drift.matrix.templateModelId}`);
           }

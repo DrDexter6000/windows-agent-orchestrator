@@ -97,11 +97,13 @@ Notes:
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 18 名（M13-r1 增 consult）；
+// （如 `run status ...`）做 did-you-mean 提示。恰 20 名（M13-r1 增 consult；
+// TD-260/0062 补 serve——TD-250 落地时 HELP_TEXT 加了用法行但本闭集漏了成员，
+// 单向关系守卫看不见此缺员，本次守卫已改双向）；
 // 不含 help（HELP_TEXT 无 help 命令行且字节冻结——评审裁定 (a)）。
 export const COMMAND_NAMES = Object.freeze([
   "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
-  "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook",
+  "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
 ]);
 
 // A-2（friction 2026-08-15 #2）：`run --help` 用法页。顶层 HELP_TEXT 字节冻结

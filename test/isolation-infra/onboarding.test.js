@@ -40,6 +40,8 @@ import {
   runOnboarding,
   MAX_CANDIDATES,
   displayWidth,
+  seatRoleDriftBetween,
+  seatRoleDriftRows,
 } from "../../src/application/onboarding.js";
 
 // The human renderer lives in the (thin) command layer; importing it does NOT
@@ -1316,7 +1318,11 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
     "authNote 行 = 结构化基座在前 + 模板注释进括号（复核 R3 56 格截断预算下的稳定形状）");
   // The existing candidate list / re-run hints are untouched.
   assert.ok(text.includes("Candidates from the tracked template:"));
-  assert.ok(text.includes("Re-run with: wao onboarding --agent <id>"));
+  // TD-260（0062 B8 记法+B10①）：调用形改规范形 npm run cli --（带 shim 形注），
+  // needs-selection 首段明示"正常预览出口非错误"。
+  assert.ok(text.includes("Re-run with: npm run cli -- wao onboarding --agent <id>"));
+  assert.ok(text.includes("(global shim form: wao wao onboarding --agent <id>)"));
+  assert.ok(text.includes("normal preview exit (no error, nothing written)"));
 
   // Missing-probe scenario: human brackets name what is missing.
   const nothing = await (await memRun({
@@ -2245,7 +2251,9 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
       // d′（决定 0044）：effort 入 drift 闭集——"同值不判"的夹具须在新闭集上真同值
       //（模板 coder_low reasoning.effort=max，私有侧补齐；无 effort 的私有席位对
       // 有 effort 的模板行现在如实判 drift，这正是 10-05 漏面要的可见性）。
-      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { seatRole: "implementation", reasoning: { effort: "max" } }),
+      // 0062（B9 乙′）同律：seatRole 入闭集——模板 coder_low 无声明，私有侧也
+      // 不声明（真同值；coder_hq 模板不携带、不进比对）。
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { reasoning: { effort: "max" } }),
     },
   };
   const { result } = await memRun({
@@ -2279,6 +2287,67 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
   assert.ok(!text.includes("drift: "), "无 drift 明细");
   assert.equal(r.panelFace, "configured");
   assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq", "coder_low"], "已配置面分级块同屏");
+});
+
+// 0062（B9 乙′，审核修订）：seatRole 入 drift 闭集（0024 修订）。背景实锤
+// （2026-10-11）：私有 registry 8 席中 7 席缺 seatRole——模板 0045/W4d 加声明后
+// 私有副本从未刷新，席位面板退回命名惯例兜底，车道键名不匹配惯例即从席位面消失。
+// 审核修订（opus）：模板未声明 = 不可比不判（与矩阵 modelId 轴"双侧在场才比"同律，
+// 反向不对称亦不判）。
+test("0062 B9 乙′: seatRoleDriftBetween/Rows 单一语义（模板未声明不判；模板声明而私有缺席/值不同=drift；模板不携带不比）", () => {
+  assert.equal(seatRoleDriftBetween(null, null), null, "双缺 = 形状差异 ≠ drift");
+  assert.equal(seatRoleDriftBetween({}, {}), null, "双未声明不判");
+  assert.equal(
+    seatRoleDriftBetween({ seatRole: "implementation" }, {}),
+    null,
+    "模板未声明 = 不可比（反向不对称不判——审核修订）",
+  );
+  assert.equal(seatRoleDriftBetween({ seatRole: "implementation" }, { seatRole: "implementation" }), null, "同值不判");
+  assert.deepEqual(
+    seatRoleDriftBetween({}, { seatRole: "adversarial" }),
+    { privateSeatRole: null, templateSeatRole: "adversarial" },
+    "模板声明而私有缺席 = drift（本批病灶形状）",
+  );
+  assert.deepEqual(
+    seatRoleDriftBetween({ seatRole: "non_seat" }, { seatRole: "implementation" }),
+    { privateSeatRole: "non_seat", templateSeatRole: "implementation" },
+    "显式 non_seat 是合法语义选择——值不同如实判 drift，不擅自推定（sol 定界）",
+  );
+  const rows = seatRoleDriftRows({
+    template: { agents: { kimi: { seatRole: "implementation" }, astra: { seatRole: "adversarial" } } },
+    privateRegistry: { agents: { kimi: {}, private_only: {}, astra: { seatRole: "adversarial" } } },
+  });
+  assert.deepEqual(rows, [{ id: "kimi", privateSeatRole: null, templateSeatRole: "implementation" }],
+    "模板不携带的私有席位（裁剪合法）不进比对；同值不进");
+});
+
+test("0062 B9 乙′: 矩阵 seatRole drift 可见——行挂 ·drift + 明细带 templateSeatRole（模板声明形）", async () => {
+  // 模板覆盖：coder_low 声明 seatRole（drift 需要"模板声明了才可比"——审核修订）。
+  const tplDeclared = structuredClone(TEMPLATE);
+  tplDeclared.agents.coder_low.seatRole = "implementation";
+  const priv = {
+    agents: {
+      // 私有侧未声明 → 病灶形状 drift。
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { reasoning: { effort: "max" } }),
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: {
+      "D:/wao/config/agents.example.json": JSON.stringify(tplDeclared),
+      "D:/wao/config/agents.json": JSON.stringify(priv),
+    },
+  });
+  const r = await result;
+  const row = r.recommendations.rows.find((x) => x.id === "coder_low");
+  assert.ok(row.drift, "seatRole 轴触发 drift 旗标");
+  assert.equal(row.drift.templateSeatRole, "implementation", "drift 明细携带模板侧值（私有侧值在行上）");
+  const text = renderHuman(r);
+  const lowLine = text.split("\n").find((l) => l.startsWith("  coder_low "));
+  assert.ok(lowLine.includes("·drift"), "行挂 ·drift 旗标");
+  assert.ok(text.includes("drift(seatRole): coder_low 模板 seatRole=implementation（私有侧未声明或与模板不同）"),
+    "drift 明细含 seatRole 轴独立一行（模板侧值展示，不断言兜底原因——sol 审核条款）");
 });
 
 test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + 私有独有行省略适合段 + C-2 提示共存 + 行宽 ≤120", async () => {

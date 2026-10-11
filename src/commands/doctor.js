@@ -83,6 +83,8 @@ import { readWindowsUserEnv as readWindowsUserEnvValue } from "../application/cr
 // TD-223（2026-10-07）：OAuth 临时目录报数复用 sweep 模块 dry-run（判定规则单一
 // 实现；doctor 只报数，永不执行删除）。
 import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
+// 0062（B9 乙′）：seatRole 漂移指针行——计数与 onboarding 矩阵同一比较器。
+import { seatRoleDriftRows } from "../application/onboarding.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -656,7 +658,24 @@ export async function waoDoctorCommand(args, config) {
         fix,
       });
     }
-    pushCheck(checks, { name: "registry_loads", pass: true, detail: `${agents.length} agents` });
+    // 0062（B9 乙′）：私有 registry ↔ 模板 seatRole 漂移指针行——计数与
+    // onboarding 矩阵走同一比较器（seatRoleDriftRows，单一语义不造第二权威；
+    // opus 会审条款）。模板缺席/不可读 → 静默跳过（advisory fail-open）。
+    let registryLoadsDetail = `${agents.length} agents`;
+    try {
+      const templateRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+      const template = JSON.parse(await readFile(join(templateRoot, "config", "agents.example.json"), "utf8"));
+      const seatDriftRows = seatRoleDriftRows({ template, privateRegistry: { agents: registryAgents } });
+      if (seatDriftRows.length > 0) {
+        // 审核修订（sol）："命名惯例兜底"只对私有侧未声明的行成立——值不匹配行
+        // 面板用显式值，无兜底可言；计数分开报，不推断原因。
+        const undeclared = seatDriftRows.filter((r) => r.privateSeatRole === null).length;
+        registryLoadsDetail
+          += `；${seatDriftRows.length} 席 seatRole 与模板不一致（其中 ${undeclared} 席未声明——席位面板按命名惯例兜底）`
+            + `——npm run cli -- wao onboarding 查看 drift 明细`;
+      }
+    } catch { /* 模板缺席/不可读 → 指针行跳过（不改变 registry_loads 基线事实） */ }
+    pushCheck(checks, { name: "registry_loads", pass: true, detail: registryLoadsDetail });
   }
 
   // 7. .wao/ 四态：已初始化(OK) / fresh-clone 缺槽位无多余(WARN，正常初态)

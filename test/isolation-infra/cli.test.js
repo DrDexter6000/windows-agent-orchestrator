@@ -3429,6 +3429,27 @@ test("A-1/TD-120: COMMAND_NAMES 每个成员在 HELP_TEXT 有行锚定条目（�
       `HELP_TEXT must contain a line starting with two spaces + "${name}"`,
     );
   }
+  // TD-260（0062 B8）：双向关系——HELP_TEXT 的每个两空格命令行首词（完整 token，
+  // 审核修订：`^  (\S+)` 捕全词——数字/下划线/大写等非 [a-z-] 首词的旧行正则会
+  // 静默漏掉）必须在本闭集（TD-250 加 serve 用法行时漏了成员，单向守卫对此
+  // 失明——与 TD-257 backend 计数派生守卫同型教训：双向关系派生守卫必须双向钉）。
+  // 例外：`  - ` 起头的列表项行（HELP_TEXT 的子弹行）不是命令行。
+  for (const m of HELP_TEXT.matchAll(/^  (\S+)(\s|$)/gm)) {
+    if (/^-(\s|$)/.test(m[1])) continue;
+    assert.ok(
+      COMMAND_NAMES.includes(m[1]),
+      `HELP_TEXT command line "${m[1]}" missing from COMMAND_NAMES (bidirectional guard)`,
+    );
+  }
+  // 形状钉（sol/opus 审核条款）：缩进漂移（1/3 空格、tab）会让两个方向的守卫
+  // 都失明——命令区每个缩进行的形状必须是"恰两空格+内容"或"4+ 空格续行"。
+  for (const line of HELP_TEXT.split("\n")) {
+    if (line.trim() === "" || /^\S/.test(line)) continue;
+    assert.ok(
+      /^  \S/.test(line) || /^ {4,}\S/.test(line),
+      `HELP_TEXT indentation anomaly (not 2-space command or 4+ continuation): ${JSON.stringify(line.slice(0, 50))}`,
+    );
+  }
 });
 
 test("A-2: run --help 进程内打印用法页（不抛，含 --delivery-spec-file 与 INNER）", async () => {
@@ -5545,6 +5566,40 @@ test("TD-191④: non-namespace unknown command keeps exit 1 + gains a generic po
   assert.notEqual(status, 0);
   assert.match(stderr, /Unknown command: definitely-not-a-command/);
   assert.match(stderr, /wao <sub>/, "通用指路必须提到 wao 命名空间两段式形态");
+});
+
+// TD-260（0062 B9 乙′）：doctor registry_loads 指针行——私有席位 seatRole 与真实
+// 模板不一致时给一行计数+onboarding 指路（计数与矩阵同一比较器，不造第二权威）。
+// 夹具用真实模板携带的 id（kimi=implementation）且不带 seatRole → 病灶形状。
+test("TD-260 B9: doctor registry_loads 报 seatRole 漂移指针行（与模板同 id 席位）", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-seatdrift-", {
+    kimi: { backend: "kimi-web", serveUrl: "http://127.0.0.1:58628", model: { id: "kimi-code/k3-256k" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const loads = parsed.checks.find((c) => c.name === "registry_loads");
+    assert.ok(loads, "registry_loads 恒在场（P2-1）");
+    assert.match(loads.detail, /1 agents；1 席 seatRole 与模板不一致/,
+      "指针行 = 基线计数 + seatRole 漂移计数");
+    assert.match(loads.detail, /npm run cli -- wao onboarding 查看 drift 明细/, "指路 onboarding");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// TD-260（0062 B8）：反向指路——`npm run cli -- wao serve status` 这类"顶层
+// 命令误入 wao 命名空间"给出两种完整调用形（与 TD-191④ 正向指路对称）。
+// 会审否决 serve 别名案（opus：只治一族留五族不对称+入口闭集膨胀）。
+test("TD-260 B8: top-level command under wao namespace gets reverse invocation forms", () => {
+  for (const cmd of ["serve", "runs", "registry"]) {
+    const { status, stderr } = runCliExpectFail(`wao ${cmd}`);
+    assert.notEqual(status, 0, `${cmd} 必须仍以非零退出（不加别名、语义不变）`);
+    assert.match(stderr, new RegExp(`Unknown wao subcommand: ${cmd}`), `${cmd} 保留 Unknown wao subcommand 事实前缀`);
+    assert.match(stderr, /it is a top-level command/, `${cmd} 指明这是顶层命令`);
+    assert.match(stderr, new RegExp(`npm run cli -- ${cmd} `), `${cmd} 必须给出 npm 完整调用形`);
+    assert.match(stderr, new RegExp(`wao ${cmd} `), `${cmd} 必须给出全局 shim 完整调用形`);
+  }
 });
 
 test("TD-191④: WAO_SUBCOMMANDS 与 waoCommand dispatch 保持同步", async () => {
