@@ -751,6 +751,15 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 > 本表**投影自 `docs/02-architecture.md` §3.2**，是同一事件 spec 的人读运维视图；architecture 是真值源。
 > `test/isolation-infra/docs-consistency.test.js` 的事件行集关系守卫保证两表事件名集合相等。其它文档（SKILL.md 等）只指向本投影或 spec，不维护第三份清单。
 
+
+**存量平铺→分桶实迁（TD-190 D3，TD-256 批 Owner 点名执行）**：`runs migrate-projects` 三形态——
+默认 dry-run（只读预览：桶分布/字节数/无法归因原因分布，`--run-dir` 生效）；`--apply` 实迁
+（归宿判定走写侧权威 `resolveRunDirForWrite`——冻结桶/.project.json/索引全复用；移动原语=同卷
+`link`（EEXIST 原子拒，防 Windows rename 静默覆盖）→ dst sha256 核对 → unlink 源；台账落
+`.wao/migration/td190-d3/apply-<ts>.jsonl`（intent/result 双行，幂等可续跑）；门=active run 为空
++拒绝在 worktree 内执行+操作员确保无并发 WAO 写操作）；`--verify` 迁移后核对（只读：dst 在场/
+sha 漂移/根层剩余/**根层再现**点名——并发追加者持旧路径会在迁移后复活平铺文件，按 `--verify` 
+点名后手工合并再重跑）。非终态转录一律不动（fail-closed）；无法归因存量迁入 `_unattributed` 桶。
 每个 run 的事件流存在该 run 的转录文件（D2-②b 起**新 run 写 `runs/projects/<slug>/<runId>.jsonl`**，旧平铺 `runs/<runId>.jsonl` 只读兼容长期共存；定位一律经 `src/projectBuckets.js` 的解析链），每行一个 JSON 事件。完整事件类型：
 
 | 事件 | 含义 | 阶段 |

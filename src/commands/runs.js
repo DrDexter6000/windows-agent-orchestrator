@@ -36,7 +36,7 @@ import { isValidRunId } from "../delivery.js";
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
-import { planProjectsMigration } from "../application/runsMigrateProjects.js";
+import { planProjectsMigration, applyProjectsMigration, verifyProjectsMigration } from "../application/runsMigrateProjects.js";
 // TD-250（A1b，决定 0056）：验收后线系上游会话卫生（kimi-web 能力位门控）。
 import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import { productionProjectIo } from "../projectIdentity.js";
@@ -168,38 +168,79 @@ async function runsCommand(args, config, deps) {
     return;
   }
   if (sub === "migrate-projects") {
-    // TD-190 D3：存量分桶迁移计划——dry-run 唯一形态（物理迁移须 Owner 显式
-    // 点名后另窗执行，本命令不提供 --execute）。
-    const plan = planProjectsMigration({ runDir: resolve(config.runDir ?? "runs"), io: productionProjectIo() });
-    console.log(`[migrate-projects] rules=${plan.rulesVersion} DRY-RUN（只读，零写入；实迁须 Owner 显式点名）`);
-    console.log(`  扫描根层转录 ${plan.scanned} 个；保留目录跳过：${plan.reservedDirsSkipped.join(", ") || "无"}`);
-    for (const b of plan.buckets) {
-      console.log(`  桶 ${b.slug}  项目键 ${b.projectKey}  ${b.fileCount} 文件 / ${(b.bytes / 1024).toFixed(1)} KB${b.skippedNonTerminal.length ? `  （非终态跳过 ${b.skippedNonTerminal.length}：${b.skippedNonTerminal.slice(0, 3).join(", ")}${b.skippedNonTerminal.length > 3 ? "…" : ""}）` : ""}`);
+    // TD-190 D3：存量分桶迁移。dry-run 默认（只读预览）；--apply 实迁（TD-256 批，
+    // Owner 2026-10-11 goal 点名）；--verify 迁移后核对（只读）。
+    // TD-256 修复（opus 会审 Q5-5）：--run-dir 生效（旧代码只认 config.runDir——
+    // 在 worktree 里执行会对着空目录跑）。
+    const mopts = parseOptions(tail);
+    const runDir = resolve(mopts.runDir ?? config.runDir ?? "runs");
+    if (runDir.toLowerCase().includes(".wao-worktrees")) {
+      throw new Error(`migrate-projects 拒绝在 worktree 内执行（runDir=${runDir}）——请用受信安装根的中心 runs/`);
     }
-    console.log(`  scratch 桶 ${plan.scratchFileCount} 文件 / ${(plan.scratchBytes / 1024).toFixed(1)} KB`);
-    console.log(`  sandbox 桶 ${plan.sandboxFileCount} 文件 / ${(plan.sandboxBytes / 1024).toFixed(1)} KB${plan.sandboxHarnesses.length ? `（${plan.sandboxHarnesses.join("、")}）` : ""}`);
-    console.log(`  无法归因 ${plan.unattributed.length} 个${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
-    // opus 终审 A 条件：按原因分类计数（D3 执行窗前必须摸清规模才能裁定）
-    const byReason = {};
-    for (const u of plan.unattributed) {
-      const cat = /bare relative '\.'/.test(u.reason) ? "dot"
-        : /cwd missing/.test(u.reason) ? "missing"
-        : /realpath failed/.test(u.reason) ? "realpath-dead"
-        : /relative path/.test(u.reason) ? "relative"
-        : /worktrees/.test(u.reason) ? "bare-worktree"
-        : "other";
-      byReason[cat] = (byReason[cat] ?? 0) + 1;
+    if (mopts.verify === true) {
+      const manifestDir = join(dirname(runDir), ".wao", "migration", "td190-d3");
+      const checked = verifyProjectsMigration({ runDir, manifestDir, io: productionProjectIo() });
+      console.log(`[migrate-projects --verify] manifest 台账项 ${checked.dstTotal}；dst 缺席 ${checked.dstMissing.length}；sha 漂移 ${checked.shaMismatch.length}；根层剩余 ${checked.rootRemainder.length}；根层再现 ${checked.reappeared.length}`);
+      for (const x of checked.dstMissing.slice(0, 5)) console.log(`  dst 缺席: ${x.runId} -> ${x.dst}`);
+      for (const x of checked.shaMismatch.slice(0, 5)) console.log(`  sha 漂移: ${x.runId}（迁移后有追加或损坏——只报告不回滚）`);
+      for (const x of checked.reappeared.slice(0, 5)) console.log(`  根层再现: ${x.runId}（并发追加复活平铺文件——手工合并后重跑 apply）`);
+      for (const n of checked.rootRemainder.slice(0, 10)) console.log(`  根层剩余: ${n}`);
+      if (checked.dstMissing.length > 0 || checked.reappeared.length > 0) process.exitCode = 1;
+      return;
     }
-    const cats = Object.entries(byReason).map(([k, v]) => `${k}=${v}`).join(" ");
-    if (cats) console.log(`    原因分布：${cats}`);
-    if (plan.slugConflicts?.length) {
-      console.log(`  **slug 冲突 ${plan.slugConflicts.length} 处（同 key 不同在档桶名——如实上报不合并）：**`);
-      for (const c of plan.slugConflicts.slice(0, 5)) console.log(`    ${c.key}: ${c.bucketSlug} vs ${c.conflictingSlug}（${c.file}）`);
+    if (mopts.apply !== true) {
+      const plan = planProjectsMigration({ runDir, io: productionProjectIo() });
+      console.log(`[migrate-projects] rules=${plan.rulesVersion} DRY-RUN（只读，零写入；实迁须 --apply）`);
+      console.log(`  扫描根层转录 ${plan.scanned} 个（runDir=${runDir}）；保留目录跳过：${plan.reservedDirsSkipped.join(", ") || "无"}`);
+      for (const b of plan.buckets) {
+        console.log(`  桶 ${b.slug}  项目键 ${b.projectKey}  ${b.fileCount} 文件 / ${(b.bytes / 1024).toFixed(1)} KB${b.skippedNonTerminal.length ? `  （非终态跳过 ${b.skippedNonTerminal.length}：${b.skippedNonTerminal.slice(0, 3).join(", ")}${b.skippedNonTerminal.length > 3 ? "…" : ""}）` : ""}`);
+      }
+      console.log(`  scratch 桶 ${plan.scratchFileCount} 文件 / ${(plan.scratchBytes / 1024).toFixed(1)} KB`);
+      console.log(`  sandbox 桶 ${plan.sandboxFileCount} 文件 / ${(plan.sandboxBytes / 1024).toFixed(1)} KB${plan.sandboxHarnesses.length ? `（${plan.sandboxHarnesses.join("、")}）` : ""}`);
+      console.log(`  无法归因 ${plan.unattributed.length} 个（--apply 时迁入 _unattributed 桶）${plan.unattributed.length ? `，例：${plan.unattributed[0].file}` : ""}`);
+      // opus 终审 A 条件：按原因分类计数（D3 执行窗前必须摸清规模才能裁定）
+      const byReason = {};
+      for (const u of plan.unattributed) {
+        const cat = /bare relative '\.'/.test(u.reason) ? "dot"
+          : /cwd missing/.test(u.reason) ? "missing"
+          : /realpath failed/.test(u.reason) ? "realpath-dead"
+          : /relative path/.test(u.reason) ? "relative"
+          : /worktrees/.test(u.reason) ? "bare-worktree"
+          : "other";
+        byReason[cat] = (byReason[cat] ?? 0) + 1;
+      }
+      const cats = Object.entries(byReason).map(([k, v]) => `${k}=${v}`).join(" ");
+      if (cats) console.log(`    原因分布：${cats}`);
+      if (plan.slugConflicts?.length) {
+        console.log(`  **slug 冲突 ${plan.slugConflicts.length} 处（同 key 不同在档桶名——如实上报不合并）：**`);
+        for (const c of plan.slugConflicts.slice(0, 5)) console.log(`    ${c.key}: ${c.bucketSlug} vs ${c.conflictingSlug}（${c.file}）`);
+      }
+      if (plan.parseFailures.length) {
+        console.log(`  解析失败 ${plan.parseFailures.length} 个（首事件形状异常，如实列出）：`);
+        for (const f of plan.parseFailures.slice(0, 5)) console.log(`    ${f.file}: ${f.reason}`);
+      }
+      return;
     }
-    if (plan.parseFailures.length) {
-      console.log(`  解析失败 ${plan.parseFailures.length} 个（首事件形状异常，如实列出）：`);
-      for (const f of plan.parseFailures.slice(0, 5)) console.log(`    ${f.file}: ${f.reason}`);
+    // --apply：环境门 + 实迁。
+    const { listRuns } = await import("../application/runList.js");
+    const active = await listRuns({ runDir, activeOnly: true, authorizedWorkspaceRoot: null });
+    const activeRuns = (active?.runs ?? active?.items ?? []);
+    if (activeRuns.length > 0) {
+      console.error(`[migrate-projects --apply] 拒绝：存在 active run（${activeRuns.map((r) => r.runId).slice(0, 5).join(", ")}）——等全部终态后再迁`);
+      process.exitCode = 1;
+      return;
     }
+    console.log(`[migrate-projects --apply] runDir=${runDir}`);
+    console.log("  操作员前置条件：无并发 WAO 写操作（decide/reverify/lineage-close/daemon 追加）进行中——追加者持旧路径会在迁移后复活平铺文件（响亮失败，可由 --verify 点名）。");
+    const manifestDir = join(dirname(runDir), ".wao", "migration", "td190-d3");
+    const result = applyProjectsMigration({ runDir, manifestDir, io: productionProjectIo() });
+    const t = result.totals;
+    console.log(`  manifest: ${result.manifestPath}`);
+    console.log(`  实迁完成：scanned=${t.scanned} migrated=${t.migrated} already=${t.alreadyMigrated} droppedFlatTwin=${t.droppedFlatTwin} keptNonTerminal=${t.keptNonTerminal} twinConflicts=${t.twinConflicts} factBucketMismatches=${t.factBucketMismatches} failures=${t.failures} anomalies=${t.anomalies}`);
+    for (const it of result.items.filter((x) => x.status.startsWith("refused") || x.status.startsWith("failed") || x.status.startsWith("anomaly")).slice(0, 10)) {
+      console.log(`    ${it.status}: ${it.runId}${it.detail ? `（${it.detail}）` : ""}`);
+    }
+    if (t.failures > 0 || t.anomalies > 0 || t.twinConflicts > 0) process.exitCode = 1;
     return;
   }
   if (sub === "forecast") {

@@ -176,15 +176,19 @@ export async function closeRunLineage({
   if (nonTerminal.length > 0) return { refuse: "member_not_terminal", members: nonTerminal.map((m) => ({ runId: m.runId, state: m.state })) };
 
   // 占用门：线系成员名下的槽条目新鲜 → busy（覆盖 continue claim→转录窗口）。
-  const slotDir = join(runDir, ".wao", "session-reuse");
+  // TD-256 修复（opus/sol 会审双实锤）：旧代码查 join(runDir, ".wao",
+  // "session-reuse")——该目录不存在（真实槽位是 runDir/.session-reuse 与
+  // runDir/.lineage-reuse，条目形状同款 {runId, updatedAt}），门从未触发过
+  //（0058 宣称的并发封口实际未生效）。修法：两个真实槽位目录都查。
   const memberIds = new Set(members.map((m) => m.runId));
-  if (existsFn(slotDir)) {
+  for (const slotDir of [join(runDir, ".session-reuse"), join(runDir, ".lineage-reuse")]) {
+    if (!existsFn(slotDir)) continue;
     for (const name of readdirSync(slotDir)) {
       if (!name.endsWith(".json")) continue;
       try {
         const entry = JSON.parse(await readFile(join(slotDir, name), "utf8"));
         if (memberIds.has(entry?.runId) && nowMs() - Number(entry?.updatedAt ?? 0) < SLOT_RECENT_MS) {
-          return { refuse: "lineage_busy", busyRunId: entry.runId };
+          return { refuse: "lineage_busy", busyRunId: entry.runId, slotDir };
         }
       } catch { /* 单条不可读跳过（观察门，非权威） */ }
     }

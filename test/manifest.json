@@ -10,6 +10,7 @@
       "backends/integration.test.js",
       "backends/kimiCode.test.js",
       "backends/kimiWeb.test.js",
+      "backends/kimiServeOps.test.js",
       "backends/m12-14-claudeContextIsolation.test.js",
       "backends/opencodeRequalification.test.js",
       "backends/opencodeServe.test.js",
@@ -302,7 +303,8 @@
       "backends/oauthDirSweep.test.js",
       "run-lifecycle/claudeOauthDoctorCheck.test.js",
       "backends/claudeOauthTokenMode.test.js",
-      "run-lifecycle/claudeOauthTokenModeDoctor.test.js"
+      "run-lifecycle/claudeOauthTokenModeDoctor.test.js",
+      "run-lifecycle/certGateDoctorCheck.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",

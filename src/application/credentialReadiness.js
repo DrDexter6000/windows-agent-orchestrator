@@ -44,6 +44,44 @@ import { requiredCredentialNames, inheritedEnvNames } from "../envPolicy.js";
 export { requiredCredentialNames, inheritedEnvNames };
 
 /**
+ * TD-256（2026-10-11）：三态、分作用域的 Windows env 读器（registry env 读取的
+ * 单一实现——doctor 门禁可见性检查用）。
+ *
+ * 与 readWindowsUserEnv 的契约差异（为什么需要第二个形态）：旧读器把"读取失败"
+ * 与"确认缺席"都折叠成 undefined——对凭据面这是刻意的 fail-safe（不回显、不放大），
+ * 但可见性检查必须区分三态（在值/确认缺席/读取失败），否则"查不到"会被误读成
+ * "没设置"。scope 参数复用 PowerShell 同一原语：'User'（HKCU\Environment）或
+ * 'Machine'（HKLM Session Manager\Environment）。
+ *
+ * 值纪律不变：返回形状只带 status 与派生语义（isOn：值==="1"——与 MCP 门禁
+ * 判定同款），绝不含原始值。
+ * @param {string} name
+ * @param {"User"|"Machine"} scope
+ * @returns {Promise<{status:"value",isOn:boolean}|{status:"absent"}|{status:"failed"}|{status:"unsupported"}>}
+ */
+export function readWindowsEnvScoped(name, scope = "User") {
+  if (process.platform !== "win32") return Promise.resolve({ status: "unsupported" });
+  if (typeof name !== "string" || name.length === 0) return Promise.resolve({ status: "failed" });
+  if (scope !== "User" && scope !== "Machine") return Promise.resolve({ status: "failed" });
+  return new Promise((resolve) => {
+    const safeName = name.replace(/'/g, "''");
+    const script = `[System.Environment]::GetEnvironmentVariable('${safeName}', '${scope}')`;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+      { windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        if (err) return resolve({ status: "failed" });
+        const value = (stdout ?? "").replace(/\r?\n$/, "");
+        if (value.length === 0) return resolve({ status: "absent" });
+        resolve({ status: "value", isOn: value === "1" });
+      },
+    );
+  });
+}
+
+/**
  * Default Windows user-env reader. Reads ONE exact name from the Current-User
  * scope via PowerShell `[System.Environment]::GetEnvironmentVariable`. Structured
  * argv (no shell string). On non-Windows or any failure → undefined.

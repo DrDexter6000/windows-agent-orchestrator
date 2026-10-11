@@ -63,7 +63,7 @@ import { backendFor } from "../backends/factory.js";
 // M11-7：Windows User 作用域 env 读取复用 credentialReadiness（HKCU\Environment 精确
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
-import { resolveCredentialEnv, requiredCredentialNames } from "../application/credentialReadiness.js";
+import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped } from "../application/credentialReadiness.js";
 // TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
 // 值不回显）。
 import { CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
@@ -340,6 +340,22 @@ export async function waoDoctorCommand(args, config) {
   //     spawn 期死）的配置期前移诊断面。
   if (registryOk) {
     const existsSyncFn = (await import("node:fs")).existsSync;
+    // TD-256 修复（opus 会审必改 C）：readWindowsUserEnv 返回 Promise，而
+    // resolveLoadBearingEnv 是同步消费——旧代码把 Promise 喂给同步 reader，
+    // typeof !== "string" 恒不命中 → 5b 的 User 作用域臂从未生效（setx 过但
+    // shell 还旧时会误报"三级解析均缺失"）。修法：循环前把全部名字的 User
+    // 作用域值预解析进 Map（经 config.userEnvReader 注入缝——与 5d 同款，
+    // 测试不起 powershell），同步 reader 只查 Map。
+    const userEnvReaderAsync = config.userEnvReader ?? readWindowsUserEnvValue;
+    const userEnvValues = new Map();
+    for (const agent of Object.values(registryAgents)) {
+      const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
+      const envBlockNames = Object.keys(agent?.env ?? {});
+      for (const n of new Set([...declaredList.map((d) => d.name), ...envBlockNames])) {
+        if (userEnvValues.has(n)) continue;
+        try { userEnvValues.set(n, await userEnvReaderAsync(n)); } catch { userEnvValues.set(n, undefined); }
+      }
+    }
     for (const [id, agent] of Object.entries(registryAgents)) {
       const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
       // 注册表 env 块声明的变量同样承重（无论 backend 是否声明表在册）。
@@ -354,11 +370,7 @@ export async function waoDoctorCommand(args, config) {
           declared,
           agentEnv: agent?.env ?? {},
           processEnv: process.env,
-          // 补席审计修正：User 作用域真读（readWindowsUserEnv，与凭据面同实现），
-          // 不再复读 process.env（setx 后旧 shell 也能如实报"User 作用域已设置"）。
-          userEnvReader: (name) => {
-            try { return readWindowsUserEnvValue(name); } catch { return null; }
-          },
+          userEnvReader: (name) => userEnvValues.get(name) ?? null,
           existsFn: existsSyncFn,
         });
         const label = `env_${id}_${declared.name}`;
@@ -433,6 +445,39 @@ export async function waoDoctorCommand(args, config) {
           : {}),
       });
     }
+  }
+
+  // 5e. TD-256（2026-10-11）：WAO 控制面门禁开关可见性（advisory，恒 INFO）。
+  //     背景：2026-10-11 考古证实用户级 WAO_MCP_REQUIRE_CERTIFIED 曾被设置而来源
+  //     不明（已清）——本检查把这扇门变成 doctor 的常设可见面（防"不明不白"）。
+  //     形状（opus/sol 会审收敛）：
+  //     - 恒 INFO：开与关都是 Owner 可合法选择的部署形态（0046 合同），WARN 会让
+  //       合法开启常态 DEGRADED、--warn-as-error 常态 exit 1（5c/5d 同纪律）。
+  //     - 报派生语义不报原始值：MCP 判定是 === "1"（server.js），"在场≠门开"。
+  //     - 三作用域分开：doctor 自身进程（MCP 同款判定）/ User / Machine（经
+  //       readWindowsEnvScoped 三态：在值/确认缺席/读取失败——失败≠缺席）。
+  //     - 配置面边界：doctor 看不到运行中 MCP 宿主 spawn 时定格的值——detail
+  //       显式声明"不能代表运行中宿主"，宿主自报=已登记缺口（本批不改 MCP 面）。
+  {
+    const GATE_NAME = "WAO_MCP_REQUIRE_CERTIFIED";
+    const scopedReader = config.scopedEnvReader ?? readWindowsEnvScoped;
+    const readScope = async (scope) => {
+      try { return await scopedReader(GATE_NAME, scope); } catch { return { status: "failed" }; }
+    };
+    const [userScope, machineScope] = [await readScope("User"), await readScope("Machine")];
+    const scopeText = (r) => (r?.status === "value"
+      ? (r.isOn ? "开" : "已设置但非开启值")
+      : r?.status === "absent" ? "未设置"
+      : r?.status === "unsupported" ? "不适用（非 Windows）"
+      : "读取失败（≠确认未设置）");
+    const processPresent = typeof process.env[GATE_NAME] === "string";
+    const processText = process.env[GATE_NAME] === "1"
+      ? "开" : (processPresent ? "已设置但非开启值" : "关（默认）");
+    const detail = "WAO_MCP_REQUIRE_CERTIFIED 门禁可见性（0046 合同：默认关；翻转=Owner 拍板 + setx + 重启宿主 + 决定档记录）"
+      + `——doctor 进程：${processText}；User 作用域：${scopeText(userScope)}；Machine 作用域：${scopeText(machineScope)}。`
+      + "本检查是配置面观察：doctor 看的是自身进程与持久作用域，运行中 MCP 宿主的门禁值在其 spawn 时定格，此处不能代表（宿主自报=已登记缺口）。"
+      + "若任一作用域显示开而无拍板记录，按 0046 立案排查（值不回显）。";
+    pushCheck(checks, { name: "wao_mcp_cert_gate_visibility", pass: true, level: "info", detail });
   }
 
   // 6. registry 完整性：opencode worker 必须配 tokenBudget；OAuth + provider worker 组合 WARN。

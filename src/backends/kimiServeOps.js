@@ -67,8 +67,11 @@ export async function serveRequest({ baseUrl, token, method, path, body, fetchIm
  * fail-closed：单页请求非 0 码/形状不符 → upstream_rejected；翻页超帽
  * （20 页=2000 会话，远超本机规模）→ page_overflow 拒绝——不能证明集合完整
  * 就不回收（soak 集合比对的前提是全量视图）。
+ * TD-252①（TD-256 批）：archivedOnly=true 走同一端点的归档视图——0057 W2
+ * 实测 `sessions:archive` 归档的会话默认列表隐藏、archived_only=true 可见
+ * （归档≠不可运行），recycle soak 快照必须两面都拉。
  */
-export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis.fetch, timeoutMs, pageSize = 100, maxPages = 20 }) {
+export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis.fetch, timeoutMs, pageSize = 100, maxPages = 20, archivedOnly = false }) {
   const size = Math.min(Number.isInteger(pageSize) && pageSize > 0 ? pageSize : 100, 100);
   const items = [];
   const seen = new Set();
@@ -76,7 +79,7 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
   for (let page = 0; page < maxPages; page += 1) {
     const r = await serveRequest({
       baseUrl, token, method: "GET",
-      path: `/api/v1/sessions?page_size=${size}${beforeId !== undefined ? `&before_id=${encodeURIComponent(beforeId)}` : ""}`,
+      path: `/api/v1/sessions?page_size=${size}${beforeId !== undefined ? `&before_id=${encodeURIComponent(beforeId)}` : ""}${archivedOnly ? "&archived_only=true" : ""}`,
       fetchImpl, timeoutMs,
     });
     if (r.aborted) return { ok: false, reason: "timeout" };
@@ -112,6 +115,9 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
  * 40401 → {ok:true, gone:true}；busy 投影返回**双字段原值**（TD-251 批 sol 会审
  * 修正：只留 busy===true 会遗漏 main_turn_active 且把字段缺席折叠成 false——
  * 冷会话跨实例可能仍在别的实例跑，双字段任一真即视为忙）。
+ * TD-256 批（sol 会审，注入响应实证）：code 0 但双字段**全部缺席**时旧实现仍
+ * 折叠成 busy:false——"未知"不得变成"空闲"（sweep 会据此删会话）。修法：
+ * 双字段无一为 boolean → shape_unknown 拒判（落 probeFailed=retained 方向）。
  */
 export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl = globalThis.fetch, timeoutMs }) {
   const r = await serveRequest({
@@ -124,6 +130,9 @@ export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl =
   if (r.code === SERVE_SESSION_GONE_CODE) return { ok: true, gone: true };
   if (r.code !== 0 || !r.data || typeof r.data !== "object") {
     return { ok: false, reason: "upstream_rejected", ...(Number.isInteger(r.code) ? { code: r.code } : {}) };
+  }
+  if (typeof r.data.busy !== "boolean" && typeof r.data.main_turn_active !== "boolean") {
+    return { ok: false, reason: "shape_unknown" };
   }
   return {
     ok: true,

@@ -16,6 +16,7 @@ import {
   planSessionSweep,
   applySessionSweep,
   serveMaintenanceDir,
+  listArchiveTranscriptFiles,
 } from "../../src/application/serveMaintenance.js";
 
 function cleanupDir(dir) { rmSync(dir, { recursive: true, force: true }); }
@@ -225,12 +226,15 @@ test("TD-250: serveMaintenanceDir 落 .wao/serve-maintenance（独立台账面�
 
 import { recycleServe } from "../../src/application/serveMaintenance.js";
 
-function recycleOps({ sessionsScript, shutdownOutcome = { outcome: "requested" }, instances = [{ serverId: "s1", pid: 4242, port: 58628 }] } = {}) {
+function recycleOps({ sessionsScript, archivedScript = null, shutdownOutcome = { outcome: "requested" }, instances = [{ serverId: "s1", pid: 4242, port: 58628 }] } = {}) {
   let sessionCalls = 0;
   return {
     sessionCalls: () => sessionCalls,
     readServeInstances: () => instances,
-    async listServeSessions() {
+    // TD-256：recycle soak 双面（默认 + archived_only）——archivedScript 缺席时
+    // 归档面为空集 ok（既有脚本的语义保持不变，只多拉一面）。
+    async listServeSessions({ archivedOnly } = {}) {
+      if (archivedOnly) return archivedScript ?? { ok: true, items: [] };
       sessionCalls += 1;
       const r = sessionsScript[Math.min(sessionCalls - 1, sessionsScript.length - 1)];
       return r;
@@ -366,4 +370,163 @@ test("TD-251 W1c: sweepEmptyWorktreeHusks 只删空目录壳（run_ 前缀+零�
     assert.ok(existsSync(join(dir, "not_run_shape")), "非 run_ 前缀不动");
     assert.equal(sweepEmptyWorktreeHusks(join(dir, "no-such")), 0);
   } finally { cleanupDir(dir); }
+});
+
+// ===== TD-256 批（TD-252 收口 + 0058 缺陷修复）=====
+
+test("TD-256: releaseRecycleLock 修复回归——拒绝后立即重跑不得 lock_held（旧 io/require ReferenceError 整段失效）", async () => {
+  const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-lock-"));
+  try {
+    const base = {
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"],
+      lockRootDir, soakMs: 1,
+      sleepFn: async () => {},
+      fetchImpl: async () => { throw new Error("down"); },
+      spawnFn: () => { throw new Error("must not spawn on refusal"); },
+      execFileFn: () => { throw new Error("must not kill on refusal"); },
+    };
+    const r1 = await recycleServe({ ...base, ops: recycleOps({ sessionsScript: [{ ok: true, items: [] }] }), listRunsFn: async () => ({ runs: [{ runId: "run_live", agentId: "kimi" }] }) });
+    assert.equal(r1.refused, "active_runs", "首次=业务拒绝（active run）");
+    // 锁若未释放（旧缺陷：io/require ReferenceError 被 catch 吞），第二次会得到
+    // lock_held 而非业务拒绝。
+    const r2 = await recycleServe({ ...base, ops: recycleOps({ sessionsScript: [{ ok: true, items: [] }] }), listRunsFn: async () => ({ runs: [{ runId: "run_live", agentId: "kimi" }] }) });
+    assert.equal(r2.refused, "active_runs", `拒绝路径必须释放锁（got ${r2.refused}）`);
+  } finally { cleanupDir(lockRootDir); }
+});
+
+test("TD-252①: recycle soak 归档面不可观测 → refused archived_unobservable（不能证明集合完整就不回收）", async () => {
+  const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-arch-"));
+  try {
+    const r = await recycleServe({
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1,
+      sleepFn: async () => {}, fetchImpl: async () => { throw new Error("down"); },
+      spawnFn: () => { throw new Error("must not spawn on refusal"); },
+      execFileFn: () => { throw new Error("must not kill on refusal"); },
+      listRunsFn: async () => ({ runs: [] }),
+      ops: recycleOps({ sessionsScript: [{ ok: true, items: [] }], archivedScript: { ok: false, reason: "http_error" } }),
+    });
+    assert.equal(r.refused, "archived_unobservable");
+    assert.equal(r.reason, "http_error");
+  } finally { cleanupDir(lockRootDir); }
+});
+
+test("TD-252①: 归档会话参与 soak——同 id 双面合并 busy 取或；归档面稳定独有会话不堵；归档面集合变化 → sessions_changed", async () => {
+  const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-soak-"));
+  try {
+    const base = {
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1,
+      sleepFn: async () => {}, fetchImpl: async () => { throw new Error("down"); },
+      execFileFn: () => { throw new Error("must not kill on refusal"); },
+      listRunsFn: async () => ({ runs: [] }),
+    };
+    // 默认面 idle + 归档面同 id busy → 合并后 busy_sessions 拒绝。
+    let r = await recycleServe({
+      ...base,
+      ops: recycleOps({
+        sessionsScript: [{ ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] }],
+        archivedScript: { ok: true, items: [{ id: "s1", busy: true, mainTurnActive: false }] },
+      }),
+      spawnFn: () => { throw new Error("must not spawn on refusal"); },
+    });
+    assert.equal(r.refused, "busy_sessions", `归档面 busy 必须堵门（got ${r.refused}）`);
+    // 两面都稳定 idle + 归档面独有会话 → 集合稳定 clear（进入重启序列）。
+    r = await recycleServe({
+      ...base,
+      ops: recycleOps({
+        sessionsScript: [{ ok: true, items: [] }],
+        archivedScript: { ok: true, items: [{ id: "arch1", busy: false, mainTurnActive: false }] },
+      }),
+      spawnFn: () => ({ unref: () => {} }),
+    });
+    assert.equal(r.recycled, true, "归档面稳定独有会话不堵回收");
+    // 归档面 soak 窗内集合变化 → sessions_changed（拒绝载荷带归档面计数）。
+    const opsSeq = recycleOps({ sessionsScript: [{ ok: true, items: [] }] });
+    let archFrame = 0;
+    opsSeq.listServeSessions = async ({ archivedOnly } = {}) => {
+      if (!archivedOnly) return { ok: true, items: [] };
+      archFrame += 1;
+      return archFrame === 1
+        ? { ok: true, items: [{ id: "arch1", busy: false, mainTurnActive: false }] }
+        : { ok: true, items: [{ id: "arch1", busy: false, mainTurnActive: false }, { id: "arch_new", busy: false, mainTurnActive: false }] };
+    };
+    r = await recycleServe({ ...base, ops: opsSeq, spawnFn: () => { throw new Error("must not spawn on refusal"); } });
+    assert.equal(r.refused, "sessions_changed", `归档面集合变化必须拒绝（got ${r.refused}）`);
+    assert.equal(r.archivedAfter, 2, "拒绝载荷带归档面计数");
+  } finally { cleanupDir(lockRootDir); }
+});
+
+test("TD-252③: sweep 认领面扩到磁盘归档——归档转录认领命中死树 → deletable；冲突上报；枚举有界", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-td256-sweep-"));
+  const runDir = join(root, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    writeTranscript(runDir, "run_live.jsonl", [
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_live", serveUrl: "http://x", runId: "run_live", seq: 1 },
+    ]);
+    const archDir = join(root, "runs-archive", "2026-09");
+    mkdirSync(archDir, { recursive: true });
+    writeFileSync(join(archDir, "run_arch1.jsonl"), [
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_arch", serveUrl: "http://x", runId: "run_arch1", seq: 1 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    // 形状边界：坏月份名目录、子目录、非 .jsonl 资产、同会话冲突件、预筛件。
+    mkdirSync(join(root, "runs-archive", "notes"), { recursive: true });
+    writeFileSync(join(root, "runs-archive", "notes", "run_x.jsonl"), JSON.stringify({ type: "session.created", backend: "kimi-web", backendSessionId: "session_badmonth", runId: "run_x" }) + "\n", "utf8");
+    mkdirSync(join(archDir, "evidence-pkg"), { recursive: true });
+    writeFileSync(join(archDir, "evidence-pkg", "inner.jsonl"), "garbage", "utf8");
+    writeFileSync(join(archDir, "forensics.md"), "notes", "utf8");
+    writeFileSync(join(archDir, "run_arch2.jsonl"), [
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_arch", serveUrl: "http://x", runId: "run_arch2", seq: 1 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    writeFileSync(join(archDir, "run_other.jsonl"), JSON.stringify({ type: "run.started", backend: "codex" }) + "\n", "utf8");
+
+    const ops = fakeOps({
+      workspaceItems: [
+        { id: "wd_live", root: "D:\\projects\\main" },
+        { id: "wd_arch", root: "D:\\p\\.wao-worktrees\\run_arch1" },
+      ],
+      probeResults: {
+        session_live: { ok: true, gone: false, workspaceId: "wd_live", busy: false },
+        session_arch: { ok: true, gone: false, workspaceId: "wd_arch", busy: false },
+      },
+    });
+    const statFn = (s) => {
+      const key = String(s).toLowerCase();
+      if (key.endsWith("d:\\p\\.wao-worktrees")) return { isDirectory: () => true };
+      if (key.endsWith("run_arch1")) throw Object.assign(new Error("nope"), { code: "ENOENT" });
+      if (key.endsWith("d:\\projects\\main")) return { isDirectory: () => true };
+      throw Object.assign(new Error("unexpected"), { code: "ENOENT" });
+    };
+    const plan = await planSessionSweep({ runDir, serveUrl: "http://x", token: "t", ops, statFn });
+    assert.equal(plan.claims, 2, "live+归档各一条认领（坏月份目录不计入）");
+    assert.equal(plan.archiveScanned, 3, "归档枚举=2026-09 直下 3 个 jsonl（子目录/md/bad-month 不计）");
+    const archHit = plan.deletable.find((d) => d.sessionId === "session_arch");
+    assert.ok(archHit, "归档认领命中死树 → deletable");
+    assert.equal(archHit.runId, "run_arch1", "live/首见优先：冲突保首个 runId");
+    assert.equal(plan.claimConflicts.length, 1, "同会话跨 run 冲突如实上报");
+    assert.deepEqual(plan.claimConflicts[0].runIds.slice().sort(), ["run_arch1", "run_arch2"]);
+    assert.equal(plan.archiveReadFailures.length, 0);
+  } finally { cleanupDir(root); }
+});
+
+test("TD-252③: listArchiveTranscriptFiles——月份目录形状校验、不进子目录、根缺席=空集", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-td256-enum-"));
+  try {
+    const runDir = join(root, "runs");
+    mkdirSync(join(root, "runs-archive", "2026-10"), { recursive: true });
+    writeFileSync(join(root, "runs-archive", "2026-10", "a.jsonl"), "x", "utf8");
+    mkdirSync(join(root, "runs-archive", "2026-1"), { recursive: true }); // 坏形状月份
+    writeFileSync(join(root, "runs-archive", "2026-1", "b.jsonl"), "x", "utf8");
+    const r = listArchiveTranscriptFiles(runDir);
+    assert.equal(r.files.length, 1);
+    assert.equal(r.files[0].name, "a.jsonl");
+    assert.equal(r.files[0].month, "2026-10");
+    // 归档根缺席（未归档过的安装形态）=空集——用全新 tmp 根。
+    const bare = mkdtempSync(join(tmpdir(), "wao-td256-bare-"));
+    try {
+      assert.equal(listArchiveTranscriptFiles(join(bare, "runs")).files.length, 0, "归档根缺席=空集");
+    } finally { cleanupDir(bare); }
+  } finally { cleanupDir(root); }
 });

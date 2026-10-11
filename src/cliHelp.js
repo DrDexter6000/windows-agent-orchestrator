@@ -33,7 +33,10 @@ Commands:
   resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑（存活）；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker — by design，见 docs/usage.md 场景 1）
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--active] [--state <state>] [--since <duration>] [--project <path|name|@sandbox|@scratch|@unattributed>] [--format json]
   runs summary [--run-dir DIR] [--format json]
-  runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 超龄 run 移动到 runs-archive/<yyyy-mm>/（原文件名，不删除；冲突不覆盖）
+  runs prune --older-than <duration> [--archive] [--run-dir DIR]
+  runs migrate-projects [--run-dir DIR]   # TD-190 D3：存量分桶迁移 dry-run（只读预览：桶分布/字节/无法归因原因分布）
+  runs migrate-projects --apply [--run-dir DIR]   # TD-256 批实迁：resolveRunDirForWrite 权威归宿+link→sha→unlink 原语+manifest 台账（.wao/migration/td190-d3/）幂等可续跑；门=active run 空+拒绝 worktree 内执行
+  runs migrate-projects --verify [--run-dir DIR]   # 迁移后核对（只读）：dst 在场/sha 漂移/根层剩余/根层再现（并发追加复活平铺）点名   # --archive 超龄 run 移动到 runs-archive/<yyyy-mm>/（原文件名，不删除；冲突不覆盖）
   runs grep <pattern> [--run-dir DIR] [--format json]
   runs metrics <runId> [--run-dir DIR] [--format json]
   runs metrics --summary [--run-dir DIR] [--format json]

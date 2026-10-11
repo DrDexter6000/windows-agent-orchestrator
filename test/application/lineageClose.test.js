@@ -53,3 +53,41 @@ test("TD-254 冒烟：合成线系 dry-run→apply→补偿重试全链（真 gi
 });
 
 // continueRun 的 lineage_closed 拒绝由真业务 dogfood 验证（合成夹具过不了 claim 信封）。
+
+// TD-256 修复钉（opus/sol 会审双实锤）：占用门旧查 join(runDir,".wao","session-reuse")
+// ——不存在的目录，门从未触发。真槽位是 runDir/.session-reuse 与 runDir/.lineage-reuse。
+test("TD-256: 占用门真路径——新鲜槽条目（.session-reuse/.lineage-reuse）拒 lineage_busy；陈旧不堵", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "lc-slot-"));
+  try {
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const events = [
+      { type: "run.started", runId: "run_slot1", agentId: "sol", backend: "codex", worktreePath: join(repo, "wt"), cwd: repo, seq: 1 },
+      { type: "run.state_change", runId: "run_slot1", to: "completed", seq: 2 },
+      { type: "run.cleanup_done", runId: "run_slot1", seq: 3 },
+    ];
+    writeFileSync(join(runDir, "run_slot1.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const writeSlot = (dir, entry) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "abc123.json"), JSON.stringify(entry), "utf8");
+    };
+    // 新鲜 .session-reuse 槽 → 拒
+    writeSlot(join(runDir, ".session-reuse"), { runId: "run_slot1", updatedAt: Date.now() });
+    let r = await closeRunLineage({ runId: "run_slot1", runDir, reasonText: "占用门钉", apply: false });
+    assert.equal(r.refuse, "lineage_busy");
+    assert.equal(r.busyRunId, "run_slot1");
+    assert.ok(String(r.slotDir).endsWith(".session-reuse"), `slotDir 如实上报：${r.slotDir}`);
+    // 换 .lineage-reuse 新鲜槽 → 同样拒
+    rmSync(join(runDir, ".session-reuse"), { recursive: true, force: true });
+    writeSlot(join(runDir, ".lineage-reuse"), { runId: "run_slot1", updatedAt: Date.now() });
+    r = await closeRunLineage({ runId: "run_slot1", runDir, reasonText: "占用门钉", apply: false });
+    assert.equal(r.refuse, "lineage_busy", ".lineage-reuse 同款占用");
+    // 陈旧槽（>SLOT_RECENT_MS=300s）→ 不堵（观察门只罩新鲜窗口）
+    writeSlot(join(runDir, ".lineage-reuse"), { runId: "run_slot1", updatedAt: Date.now() - 400_000 });
+    r = await closeRunLineage({ runId: "run_slot1", runDir, reasonText: "占用门钉", apply: false });
+    assert.equal(r.refuse, undefined, `陈旧槽不堵（got ${JSON.stringify(r).slice(0, 120)}）`);
+    assert.equal(r.rootRunId, "run_slot1");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

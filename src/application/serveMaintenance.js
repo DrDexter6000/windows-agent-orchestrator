@@ -23,7 +23,7 @@
 // 分层：kimi 专有 REST/机器事实全部在 backends/kimiServeOps.js（注入 ops）；
 // 本模块只含编排/门/台账，不含 kimi 协议细节（不变量 3）。
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn as nodeSpawn, execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
@@ -95,6 +95,35 @@ export function worktreeRootVerdict(root, { statFn = statSync } = {}) {
  * kimi-web 会话；对仍在 serve 的会话按工作区 root 已亡门分类。
  * 返回 { claims, uniqueSessions, deletable[], retained[], probeFailed[] }。
  */
+const ARCHIVE_MONTH_DIR_RE = /^\d{4}-\d{2}$/;
+
+/**
+ * TD-252③（TD-256 批）：磁盘归档面的有界转录枚举。归档根从 runDir 推导
+ * （决定 0050：dirname(runDir)/runs-archive——不从桶内 dirname 反推）；只取
+ * <yyyy-mm>/ 直下 *.jsonl（月份目录形状校验 /^\d{4}-\d{2}$/；不进子目录——
+ * 归档树里有取证目录/bundle/md 等非转录资产；Dirent 形状判定天然不跟随
+ * symlink/junction）；枚举失败如实上报（skipped），不静默。根缺席=空集
+ * （未归档过的安装形态）。
+ */
+export function listArchiveTranscriptFiles(runDir) {
+  const out = { files: [], skipped: [] };
+  const root = join(dirname(String(runDir).replace(/[\\/]+$/, "")), "runs-archive");
+  let months = [];
+  try { months = readdirSync(root, { withFileTypes: true }); } catch { return out; }
+  for (const m of months) {
+    if (!m.isDirectory() || !ARCHIVE_MONTH_DIR_RE.test(m.name)) continue;
+    const dir = join(root, m.name);
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { out.skipped.push({ dir, reason: "readdir_failed" }); continue; }
+    for (const e of entries) {
+      if (e.isSymbolicLink()) { out.skipped.push({ file: join(dir, e.name), reason: "symlink_not_followed" }); continue; }
+      if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
+      out.files.push({ path: join(dir, e.name), name: e.name, month: m.name });
+    }
+  }
+  return out;
+}
+
 export async function planSessionSweep({
   runDir,
   serveUrl,
@@ -114,7 +143,7 @@ export async function planSessionSweep({
   }
   const rootById = new Map(workspaces.items.map((w) => [w.id, w.root]));
 
-  const claims = new Map(); // sessionId -> { runId, serveUrl }
+  const claims = new Map(); // sessionId -> { runId, serveUrl, fromArchive? }
   for (const t of listTranscriptsDeep(runDir, io ? { io } : {})) {
     let events;
     try {
@@ -130,6 +159,37 @@ export async function planSessionSweep({
         claims.set(e.backendSessionId, {
           runId,
           serveUrl: typeof e.serveUrl === "string" ? e.serveUrl : null,
+        });
+      }
+    }
+  }
+
+  // TD-252③（TD-256 批）：认领面扩到磁盘归档——runs prune --archive 移走的 run
+  // 其会话仍活在 serve 上，认领面丢了就永远扫不到。字节级预筛（不含
+  // "kimi-web" 的文件不进解析——认领面只多不少方向）；live 位（runDir）优先于
+  // 归档位；同会话跨 run 归属冲突保留首个并如实上报。
+  const claimConflicts = [];
+  const archiveReadFailures = [];
+  const archive = listArchiveTranscriptFiles(runDir);
+  for (const f of archive.files) {
+    let raw;
+    try { raw = readFileSync(f.path, "utf8"); } catch { archiveReadFailures.push({ file: f.path, reason: "read_failed" }); continue; }
+    if (!raw.includes("kimi-web")) continue; // 预筛：认领键只可能出现在含该串的文件里
+    let events;
+    try { events = await readTranscriptFn(f.path); } catch { archiveReadFailures.push({ file: f.path, reason: "parse_failed" }); continue; }
+    const runId = f.name.replace(/\.jsonl$/, "");
+    for (const e of events) {
+      if (e && e.type === "session.created" && e.backend === "kimi-web"
+        && typeof e.backendSessionId === "string" && e.backendSessionId.length > 0) {
+        const prior = claims.get(e.backendSessionId);
+        if (prior) {
+          if (prior.runId !== runId) claimConflicts.push({ sessionId: e.backendSessionId, runIds: [prior.runId, runId] });
+          continue;
+        }
+        claims.set(e.backendSessionId, {
+          runId,
+          serveUrl: typeof e.serveUrl === "string" ? e.serveUrl : null,
+          fromArchive: true,
         });
       }
     }
@@ -179,6 +239,10 @@ export async function planSessionSweep({
     probeFailed,
     foreignHome,
     workspaces: workspaces.items.length,
+    archiveScanned: archive.files.length,
+    archiveSkipped: archive.skipped,
+    archiveReadFailures,
+    claimConflicts,
   };
 }
 
@@ -350,7 +414,11 @@ export async function recycleServe({
   const lock = acquireMaintenanceLock({ lockPath: recycleLockPath, nowMs: nowMs() });
   if (lock.refused) return { refused: "lock_held", lock };
   // dogfood 修正：拒绝/完成路径都释放锁（旧实现只靠 600s 陈旧回收——神秘占锁者来源）。
-  const releaseRecycleLock = () => { try { (io?.unlinkSync ?? require("node:fs").unlinkSync)(recycleLockPath); } catch { /* 已不在场 */ } };
+  // TD-256 修复（opus 会审实锤）：旧实现写 `io?.unlinkSync ?? require("node:fs").unlinkSync`——
+  // 本函数作用域无 io、ESM 无 require → ReferenceError 被 catch 吞掉，"拒绝/完成
+  // 都释放锁"整段失效（锁只能等 600s 陈旧回收）。修法：直接用顶部具名导入的
+  // unlinkSync；回归形状=拒绝后立即重跑不得 lock_held。
+  const releaseRecycleLock = () => { try { unlinkSync(recycleLockPath); } catch { /* 已不在场 */ } };
   const instances = ops.readServeInstances({ kimiHome });
   const instance = instances.find((i) => i.port === port) ?? null;
   if (!instance) { releaseRecycleLock(); return { refused: "no_instance", port }; }
@@ -365,12 +433,30 @@ export async function recycleServe({
     return { refused: "active_runs", runs: activeKimi.map((r) => ({ runId: r.runId, agentId: r.agentId })) };
   }
 
-  // serve 侧门：快照 → soak → 集合比对复探。
-  const before = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-  if (!before.ok) { releaseRecycleLock(); return { refused: "serve_unobservable", reason: before.reason }; }
+  // serve 侧门：快照 → soak → 集合比对复探。TD-252①（TD-256 批）：快照面
+  // 同时覆盖默认列表与归档列表——0057 W2 用 `sessions:archive` 归档的会话在
+  // 默认列表隐藏（归档≠不可运行），只拉默认面的 soak 看不见它们。两面任一
+  // 不可观测即拒绝（不能证明集合完整就不回收）；按 id 合并去重，同 id 双面
+  // 出现时 busy 取或（保守方向）。
+  const snapshotBothFaces = async () => {
+    const normal = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
+    if (!normal.ok) return { refused: "serve_unobservable", reason: normal.reason };
+    const archived = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs, archivedOnly: true });
+    if (!archived.ok) return { refused: "archived_unobservable", reason: archived.reason };
+    const byId = new Map();
+    for (const it of [...normal.items, ...archived.items]) {
+      const prev = byId.get(it.id);
+      byId.set(it.id, prev
+        ? { ...prev, busy: prev.busy || it.busy, mainTurnActive: prev.mainTurnActive || it.mainTurnActive }
+        : it);
+    }
+    return { items: [...byId.values()], normalCount: normal.items.length, archivedCount: archived.items.length };
+  };
+  const before = await snapshotBothFaces();
+  if (before.refused) { releaseRecycleLock(); return { refused: before.refused, reason: before.reason }; }
   await sleepFn(soakMs);
-  const after = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-  if (!after.ok) { releaseRecycleLock(); return { refused: "serve_unobservable", reason: after.reason }; }
+  const after = await snapshotBothFaces();
+  if (after.refused) { releaseRecycleLock(); return { refused: after.refused, reason: after.reason }; }
   const verdict = soakVerdict(before, after);
   if (verdict !== "clear") {
     releaseRecycleLock();
@@ -378,6 +464,8 @@ export async function recycleServe({
       refused: verdict,
       sessionsBefore: before.items.length,
       sessionsAfter: after.items.length,
+      archivedBefore: before.archivedCount,
+      archivedAfter: after.archivedCount,
     };
   }
 
