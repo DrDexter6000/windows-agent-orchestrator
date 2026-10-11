@@ -7,12 +7,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { RunManager, Run } from "../../src/runManager.js";
 import { JsonlTranscript } from "../../src/transcript.js";
+import { recycleRunBranch } from "../../src/isolation.js";
 import {
   worktreeReleaseVerdict,
   worktreeFactsFromEvents,
@@ -27,6 +28,12 @@ const WT_EVENT_TYPES = [
   "run.worktree_already_gone",
   "run.worktree_release_skipped",
   "run.worktree_release_failed",
+];
+
+// TD-260（0062 丙′）：分支回收事件族（树释放成功之后追加）。
+const BRANCH_EVENT_TYPES = [
+  "run.worktree_branch_recycled",
+  "run.worktree_branch_kept",
 ];
 
 // ===== W1a：readOnly ephemeral 延迟释放 =====
@@ -84,6 +91,13 @@ test("TD-251 W1a: readOnly 非复用 run → ephemeral，completed+停止确认�
     const wt = events.filter((e) => WT_EVENT_TYPES.includes(e.type));
     assert.deepEqual(wt.map((e) => e.type), ["run.worktree_released"]);
     assert.ok(events.some((e) => e.type === "run.stop_verified"), "停止确认事实在树释放之前");
+    // TD-260（0062 丙′）：零独有分支随树释放回收（棘轮不再被会审/只读轮顶红）。
+    const br = events.filter((e) => BRANCH_EVENT_TYPES.includes(e.type));
+    assert.deepEqual(br.map((e) => e.type), ["run.worktree_branch_recycled"]);
+    let branchMissing = false;
+    try { execSync("git rev-parse refs/heads/wao/run_td251_ro1", { cwd: dir, stdio: "pipe" }); }
+    catch { branchMissing = true; }
+    assert.ok(branchMissing, "分支已删（rev-parse 对缺失 ref 退出非零）");
   } finally { cleanupDir(dir); }
 });
 
@@ -284,4 +298,193 @@ test("TD-251 W1b: worktreeFactsFromEvents 取绑定 run.started 的树路径与�
   assert.equal(repoCwd, "D:\\p");
   assert.deepEqual(worktreeFactsFromEvents([]), { worktreePath: null, repoCwd: null });
   assert.deepEqual(worktreeFactsFromEvents(null), { worktreePath: null, repoCwd: null });
+});
+
+// ===== TD-260（决定 0062 丙′，审核修订）：ephemeral 只读轮零独有分支回收 =====
+
+test("TD-260 丙′: recycleRunBranch 形状（真 git 仓：absent/recycled/kept_unique + 注入 probe/delete 失败）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td260-unit-"));
+  try {
+    makeGitRepo(dir);
+    // absent：分支不存在（rev-parse exit 1）
+    assert.deepEqual(recycleRunBranch(dir, "run_nobranch"), { outcome: "absent" });
+
+    // probe 失败（git 不可用等非 exit-1 错误）→ kept{probe_failed}，不得折叠为 absent（sol 审核条款）
+    const probeGone = recycleRunBranch(dir, "run_nobranch", {
+      execFn: () => { const e = new Error("spawn ENOENT"); return (() => { throw e; })(); },
+    });
+    assert.deepEqual(probeGone, { outcome: "kept", reason: "probe_failed" });
+
+    // zero-unique：分支=HEAD 同点（无 worker 提交）→ recycled + 分支消失
+    execSync("git branch wao/run_z1", { cwd: dir, stdio: "ignore" });
+    assert.deepEqual(recycleRunBranch(dir, "run_z1"), { outcome: "recycled" });
+    let z1Gone = false;
+    try { execSync("git rev-parse refs/heads/wao/run_z1", { cwd: dir, stdio: "ignore" }); }
+    catch { z1Gone = true; }
+    assert.ok(z1Gone, "零独有分支已物理删除");
+
+    // kept_unique：分支上有一个 worker 提交 → kept{uniqueCommits:1} + 分支保留
+    execSync("git checkout -q -b wao/run_u1", { cwd: dir, stdio: "ignore" });
+    writeFileSync(join(dir, "u.txt"), "u\n", "utf8");
+    execSync("git add . && git commit -qm u1", { cwd: dir, stdio: "ignore" });
+    execSync("git checkout -q -", { cwd: dir, stdio: "ignore" }); // 回默认分支（main/master）
+    const kept = recycleRunBranch(dir, "run_u1");
+    assert.deepEqual(kept, { outcome: "kept", uniqueCommits: 1 });
+    execSync("git rev-parse refs/heads/wao/run_u1", { cwd: dir, stdio: "ignore" });
+    // 违规提交的证据可达性必须保留（readOnly 声明不强制——0057 Q2-7 边界收窄）。
+
+    // 同名 tag 遮蔽钉（判别形）：分支 wao/run_u1 带独有提交 B；同名 tag 指向
+    // main 基点——短名解析 tag 优先会数成 0（灾难性误删），正向 revision 用
+    // 全名 refs/heads/… 必须仍判 kept（opus 审核条款）。
+    const mainTip = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
+    execSync("git tag wao/run_u1 " + mainTip, { cwd: dir, stdio: "ignore" });
+    assert.deepEqual(recycleRunBranch(dir, "run_u1"), { outcome: "kept", uniqueCommits: 1 },
+      "同名 tag 遮蔽下按全名判定——独有提交不可因 tag 解析优先而误删");
+    execSync("git tag -d wao/run_u1", { cwd: dir, stdio: "ignore" });
+
+    // 计数解析拒绝空输出（注入缝不得伪造 0——sol 审核条款）
+    execSync("git branch wao/run_e1", { cwd: dir, stdio: "ignore" });
+    const emptyCount = recycleRunBranch(dir, "run_e1", {
+      execFn: (cmd, args) => {
+        if (args[0] === "rev-list") return "";
+        return execFileSync(cmd, args, { cwd: dir, windowsHide: true });
+      },
+    });
+    assert.deepEqual(emptyCount, { outcome: "kept", reason: "probe_failed" });
+
+    // 零独有 + 同名 tag 正例：tag 与分支同在 HEAD → 全名计数 0 → recycled
+    //（tag 不在排除集，不挡零独有分支回收——tag 覆盖的提交仍在）。
+    execSync("git tag wao/run_t1", { cwd: dir, stdio: "ignore" });
+    execSync("git branch wao/run_t1", { cwd: dir, stdio: "ignore" });
+    assert.deepEqual(recycleRunBranch(dir, "run_t1"), { outcome: "recycled" });
+    execSync("git tag -d wao/run_t1", { cwd: dir, stdio: "ignore" });
+
+    // delete 失败：branch -d 抛错 → kept{reason:"delete_failed"}
+    execSync("git branch wao/run_d1", { cwd: dir, stdio: "ignore" });
+    const deleteFail = recycleRunBranch(dir, "run_d1", {
+      execFn: (cmd, args) => {
+        if (args[0] === "branch") throw new Error("delete refused");
+        return execFileSync(cmd, args, { cwd: dir, windowsHide: true });
+      },
+    });
+    assert.deepEqual(deleteFail, { outcome: "kept", reason: "delete_failed" });
+
+    // 非法 runId → absent（不触 git）
+    assert.deepEqual(recycleRunBranch(dir, "../escape"), { outcome: "absent" });
+  } finally { cleanupDir(dir); }
+});
+
+test("TD-260 丙′: 直接构造 Run——树释放成功后 kept{uniqueCommits}（独有提交保留+事件）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td260-run-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_k1";
+    const wt = join(dir, ".wao-worktrees", runId);
+    execSync(`git worktree add -b wao/${runId} "${wt}"`, { cwd: dir, stdio: "ignore" });
+    writeFileSync(join(wt, "k.txt"), "k\n", "utf8");
+    execSync("git add . && git commit -qm k1", { cwd: wt, stdio: "ignore" }); // 分支 1 个独有提交
+    const filePath = join(dir, `${runId}.jsonl`);
+    const transcript = new JsonlTranscript(filePath, { runId, agentId: "kimi", initialSeq: 0 });
+    writeFileSync(filePath, "", "utf8");
+    const handle = { backend: "kimi-web", backendSessionId: "s", events: async function* () {}, abort: async () => {}, isAlive: () => false };
+    const run = new Run({
+      runId, agentId: "kimi", agent: { id: "kimi", backend: "kimi-web", cwd: dir },
+      backend: {}, handle, transcript, result: handle, config: {},
+      onRemove: () => {}, initialState: "completed",
+      deferredWorktreeRelease: wt,
+    });
+    run._stopQuietConfirmed = true;
+    await run._runCleanup();
+    const events = readFileSync(filePath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(
+      events.filter((e) => [...WT_EVENT_TYPES, ...BRANCH_EVENT_TYPES].includes(e.type)).map((e) => [e.type, e.uniqueCommits ?? e.reason]),
+      [["run.worktree_released", undefined], ["run.worktree_branch_kept", 1]],
+      "先放树、后保留独有分支并记数",
+    );
+    execSync(`git rev-parse refs/heads/wao/${runId}`, { cwd: dir, stdio: "ignore" });
+    assert.ok(!existsSync(wt), "树已删");
+  } finally { cleanupDir(dir); }
+});
+
+test("TD-260 丙′（审核修订）: skipped/still_present 臂不调分支回收；already_gone 臂调（spy 钉）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td260-spy-"));
+  try {
+    makeGitRepo(dir);
+    const mk = (extra) => {
+      const filePath = join(dir, `run_${Math.random().toString(36).slice(2)}.jsonl`);
+      const transcript = new JsonlTranscript(filePath, { runId: "run_x", agentId: "kimi", initialSeq: 0 });
+      writeFileSync(filePath, "", "utf8");
+      const handle = { backend: "kimi-web", backendSessionId: "s", events: async function* () {}, abort: async () => {} };
+      const calls = [];
+      const run = new Run({
+        runId: "run_x", agentId: "kimi", agent: { id: "kimi", backend: "kimi-web", cwd: dir },
+        backend: {}, handle, transcript, result: handle, config: {},
+        onRemove: () => {}, initialState: "completed",
+        ...(extra.deferredWorktreeRelease ? { deferredWorktreeRelease: extra.deferredWorktreeRelease } : {}),
+        ...(extra.removeWorktreeForRelease ? { removeWorktreeForRelease: extra.removeWorktreeForRelease } : {}),
+        recycleBranchForRelease: (...a) => { calls.push(a); return { outcome: "absent" }; },
+      });
+      return { run, calls };
+    };
+    // skipped（停止未确认）：不回收。
+    const wtPath = join(dir, "wt-skipped");
+    mkdirSync(wtPath, { recursive: true });
+    const skipped = mk({ deferredWorktreeRelease: wtPath });
+    await skipped.run._runCleanup();
+    assert.equal(skipped.calls.length, 0, "stop_unconfirmed 臂不得触发分支回收（迟到收取窗）");
+
+    // still_present（removeWorktree 违约）：不回收（树在，分支多半被检出）。
+    const stuckPath = join(dir, "wt-stuck");
+    mkdirSync(stuckPath, { recursive: true });
+    const stuck = mk({ deferredWorktreeRelease: stuckPath, removeWorktreeForRelease: async () => {} });
+    stuck.run._stopQuietConfirmed = true;
+    await stuck.run._runCleanup();
+    assert.equal(stuck.calls.length, 0, "still_present 臂不回收——留待荚清扫/普查（TD-262）");
+
+    // already_gone（树已不在）：回收开放（opus 审核条款）。
+    const gone = mk({ deferredWorktreeRelease: join(dir, "no-such-wt") });
+    gone.run._stopQuietConfirmed = true;
+    await gone.run._runCleanup();
+    assert.equal(gone.calls.length, 1, "already_gone 臂（停止确认后）开放分支回收");
+  } finally { cleanupDir(dir); }
+});
+
+test("TD-262（0062 审核轮）: readOnly 轮 spawn 失败 → 树清理+零独有分支回收（不再泄漏）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td262-spawn-"));
+  try {
+    makeGitRepo(dir);
+    const backend = {
+      supportsRoleContract: true,
+      validateAgentPolicy() {},
+      async spawn() { throw new Error("serve down"); },
+    };
+    const mgr = makeManager(dir, backend);
+    await assert.rejects(
+      mgr.start("kimi", { prompt: "hi", readOnly: true, runId: "run_td262_s1" }),
+      /serve down/,
+      "spawn 失败照常上抛（语义不变）",
+    );
+    // D2-②b 分桶布局：转录落在 <dir>/projects/<slug>/ 下——递归定位。
+    let tPath = null;
+    const find = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) find(p);
+        else if (e.name === "run_td262_s1.jsonl") tPath = p;
+      }
+    };
+    find(dir);
+    assert.ok(tPath, "spawn 失败轮转录在场");
+    const events = readFileSync(tPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(!existsSync(join(dir, ".wao-worktrees", "run_td262_s1")), "spawn 失败后树已清理");
+    assert.deepEqual(
+      events.filter((e) => [...WT_EVENT_TYPES, ...BRANCH_EVENT_TYPES].includes(e.type)).map((e) => e.type),
+      ["run.worktree_released", "run.worktree_branch_recycled"],
+      "spawn 失败轮：released+recycled 事件入账（树/分支不再泄漏——opus 实锤修复）",
+    );
+    let branchGone = false;
+    try { execSync("git rev-parse refs/heads/wao/run_td262_s1", { cwd: dir, stdio: "pipe" }); }
+    catch { branchGone = true; }
+    assert.ok(branchGone, "spawn 失败轮分支已回收");
+  } finally { cleanupDir(dir); }
 });

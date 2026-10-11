@@ -128,6 +128,72 @@ export function listWorktrees(cwd) {
   return Promise.resolve(parseWorktreeList(out));
 }
 
+/**
+ * TD-260（决定 0062 丙′，审核修订版）：回收 ephemeral 只读 run 的 `wao/<runId>` 分支。
+ *
+ * 前置：调用点（RunManager._releaseDeferredWorktree）只在停止确认后的释放路径调用
+ * ——ephemeral 只读（结构性门=deferredWorktreeRelease 赋值点，0057 W1a）与停止确认
+ * 两道门已在彼处成立。本函数做第四道门：分支零独有提交——判据=分支可达集减去
+ * **其余全部本地分支与本地 tag**（`--not --exclude=<self> --branches/--tags`，参数长度
+ * 固定、无命令行长度帽；remote-tracking 不在排除集=仅由 remote 保住的提交会被保守计为
+ * 独有——readOnly 只是声明不强制，违规 worker 的独有提交是必须保留的证据）。
+ * 这是 0060 例外证据形（tip==main）的**放宽**：被任何其他本地 ref 覆盖的零独有分支
+ * 也可回收（0057 修订节明文此差异；提交零丢失性质不变——sol 审核口径统一）。
+ *
+ * 删除用 `git branch -d`（非 -D）：-d 要求分支已合并进 HEAD（主 checkout 检出处）或
+ * 上游——主 checkout 在非 main 分支/detached 时 -d 常态拒绝 → kept{delete_failed}
+ * （保守保留；分支仍被在册 worktree 检出时同样拒绝）。
+ * 全程 best-effort：探测/删除失败 → 保留 + 闭集 reason，绝不抛出。
+ *
+ * @param {string} sourceCwd 源仓库（主工作树）路径——worktree 可能已删，git 操作
+ *   落在源仓（refs 在 common git dir，仓库级一致）。
+ * @param {string} runId 合法 runId（分支名 = wao/<runId>，创建侧同款校验）。
+ * @param {{execFn?: Function}} [opts] 测试缝（默认 execFileSync）。
+ * @returns {{outcome: "absent"|"recycled"|"kept", uniqueCommits?: number, reason?: "probe_failed"|"delete_failed"}}
+ */
+export function recycleRunBranch(sourceCwd, runId, { execFn = execFileSync } = {}) {
+  if (!isValidRunId(runId)) return { outcome: "absent" };
+  const branch = `wao/${runId}`;
+  const cwd = resolve(sourceCwd);
+  const git = (args) => execFn("git", args, {
+    cwd,
+    // TD-236 同款：refs 遍历/删除禁用 replace objects（gitChildEnv SSOT）。
+    env: gitChildEnv(),
+    stdio: "pipe",
+    windowsHide: true,
+  });
+  // 分支存在性：exit 1 = 确定不存在（absent）；其它失败（含 git 不可用）= 探测失败
+  // 保留（sol 审核条款：未知不得折叠为 absent）。
+  try {
+    git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+  } catch (err) {
+    if (err && err.status === 1) return { outcome: "absent" };
+    return { outcome: "kept", reason: "probe_failed" };
+  }
+  // 零独有判定：正向 revision 用全名（同名 tag 优先于短名解析——opus 审核条款）；
+  // 计数解析拒绝非数字/空输出（注入缝不得伪造 0）。--exclude 匹配去前缀名，须在
+  // 每个 ref-glob 前重复（git rev-list 语义）。
+  let unique;
+  try {
+    const out = String(git([
+      "rev-list", "--count", `refs/heads/${branch}`,
+      "--not", `--exclude=${branch}`, "--branches",
+      "--exclude=${branch}", "--tags",
+    ])).trim();
+    if (!/^\d+$/.test(out)) return { outcome: "kept", reason: "probe_failed" };
+    unique = Number(out);
+  } catch {
+    return { outcome: "kept", reason: "probe_failed" };
+  }
+  if (unique > 0) return { outcome: "kept", uniqueCommits: unique };
+  try {
+    git(["branch", "-d", branch]);
+  } catch {
+    return { outcome: "kept", reason: "delete_failed" };
+  }
+  return { outcome: "recycled" };
+}
+
 function parseWorktreeList(porcelain) {
   const entries = [];
   let current = null;

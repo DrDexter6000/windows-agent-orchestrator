@@ -56,7 +56,13 @@ export const ADVISORY_GIT_TIMEOUT_MS = 2000;
  * wao/run_* 分支帽（决定 0042 起 SSOT 在此；hygiene.mjs re-export）。
  * 只降不升——上调须 Owner 明示 + 同步 hygieneGitState 只降钉。
  */
-export const BRANCH_CAP = 185; // 2026-09-30 baseline 151 + headroom（2026-10-02 抬至 185——最后一次抬升）
+// 0062（2026-10-11）：185→60（只降方向，0042 允许）。存量清理 190→33 后下调——
+// 回收机制（丙′）实地验证期保留棘轮报警灵敏度：kimi 车道 still_present/spawn_error
+// 泄漏路径已修或登记（TD-262），但 resume 路径仍在册，宽帽会让棘轮在泄漏复发时
+// 失去报警作用（opus 审核意见+sol 附议"帽值取舍要明示"）。变更记录=本注释+
+// hygieneGitState/dispatchResourceAdvisory 只降钉+决定 0062。
+export const BRANCH_CAP = 60;
+
 
 /** ADR 0035 S3 固定行文案（两个计数是仅有的动态内容；无其他动态载荷）。
  * 2026-10-02 指路扩展（Owner 指示）：行尾加清退 SOP 短指路——Lead agent 依此

@@ -51,8 +51,10 @@ test("classifyBranchCount: ratchet boundary", () => {
 });
 
 test("BRANCH_CAP and external roots carry ADR 0035 values", () => {
-  // 2026-10-02 175→185（declare 在案：M13-r1 交付分支顶帽 176；已决分支清退另立）。
-  assert.equal(BRANCH_CAP, 185);
+  // 2026-10-02 175→185（历史：M13-r1 交付分支顶帽 176）；2026-10-11
+  // 0062 批 185→60（存量清理 190→33 后下调，回收机制实地验证期
+  // 保留棘轮报警灵敏度——只降方向，0042 允许，opus 审核意见；记录=注释+本钉+0062）。
+  assert.equal(BRANCH_CAP, 60);
   // 决定 0042（Owner 2026-10-02）：帽只降不升——SSOT 已迁 src/dispatchResourceAdvisory.js
   //（本文件经 hygiene re-export 消费，值不变）；上调须 Owner 明示并同步 dispatchResourceAdvisory.test.js 的只降钉。
   assert.ok(BRANCH_CAP <= 185, "BRANCH_CAP 只降不升（决定 0042）");

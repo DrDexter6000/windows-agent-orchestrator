@@ -897,7 +897,12 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
 // lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
 // outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
-"1cf8a4c9fd21a3335070dd803d92e96bc829bbf86e577032452d644626f096c4";
+  "b54c4212ce8beb267cc3f23ab42931b47adc82299ee63d7bc5fae973b7b5632d";
+  // 0062（2026-10-11，TD-260 丙′）：run_activity 出参 envelope enum 再增分支回收
+  // 两标签（worktree_branch_recycled/kept——服务端 ENVELOPE_TYPE_TO_LABEL 增两
+  // 映射的镜像，ephemeral 只读轮树释放成功之后追加）——outputSchema 在 stripped
+  // 载荷内，SHA 如实翻新；无描述字节变化；M12-10-H wire 帽复验通过（additive）。
+
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
 import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
-import { createWorktree, removeWorktree } from "./isolation.js";
+import { createWorktree, removeWorktree, recycleRunBranch } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
@@ -1576,6 +1576,28 @@ export class RunManager {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
       await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.spawn_error);
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+      // TD-262（0062 审核轮，opus 实锤）：readOnly ephemeral 轮 spawn 失败时 Run
+      // 未构造、deferredWorktreeRelease 无人认领——树与分支永久泄漏（2026-10-11
+      // kimi serve 死亡两连失败实锤）。此处补清理：树删+零独有分支回收（与
+      // _releaseDeferredWorktree 同款事件与判定）；交付轮不动（spawn 失败的交付
+      // 树按既有语义保留取证）。best-effort：清理失败不改变 spawn 失败事实。
+      if (deferredWorktreeRelease) {
+        try {
+          await removeWorktree(deferredWorktreeRelease);
+          if (!existsSync(deferredWorktreeRelease)) {
+            await transcript.append("run.worktree_released", {});
+            const r = recycleRunBranch(agent.cwd, finalRunId);
+            if (r.outcome === "recycled") {
+              await transcript.append("run.worktree_branch_recycled", {});
+            } else if (r.outcome === "kept") {
+              await transcript.append("run.worktree_branch_kept",
+                r.uniqueCommits != null ? { uniqueCommits: r.uniqueCommits } : { reason: r.reason });
+            }
+          } else {
+            await transcript.append("run.worktree_release_failed", { reason: "still_present" });
+          }
+        } catch { /* 树清理失败如实留给普查（.dev 脚本兜底） */ }
+      }
       throw error;
     }
     await transcript.append("session.created", {
@@ -2270,6 +2292,7 @@ export class Run {
     readOnlyDeclared = false,
     deferredWorktreeRelease = null,
     removeWorktreeForRelease = removeWorktree,
+    recycleBranchForRelease = recycleRunBranch,
     sessionReuse = null,
   }) {
     this.runId = runId;
@@ -2317,6 +2340,9 @@ export class Run {
     // 删除原语可注入（still_present 违约钉的测试缝）；默认真 isolation.removeWorktree。
     this.removeWorktreeForRelease = typeof removeWorktreeForRelease === "function"
       ? removeWorktreeForRelease : removeWorktree;
+    // TD-260（决定 0062 丙′）：分支回收原语同款测试缝；默认真 isolation.recycleRunBranch。
+    this.recycleBranchForRelease = typeof recycleBranchForRelease === "function"
+      ? recycleBranchForRelease : recycleRunBranch;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
@@ -3381,13 +3407,17 @@ export class Run {
    *     existsSync 为假（opus Q2-3 同款"不抛错≠已删除"纪律）。
    *   - 事件族与 W1b（验收放树）共用 run.worktree_* 四件套（一果一名；读侧
    *     只读 run.started 的绑定事实，观察投影不依赖实体树——sol 核）。
-   *   - 分支保留（git worktree remove 不删分支；accepted commit 可达性靠
-   *     wao/<runId> 分支维持——opus Q2-7）：此处不做分支清理。
+   *   - 分支（TD-260 / 0062 丙′修订）：树释放成功后回收零独有分支——
+   *     accepted/违规 commit 可达性靠"有独有提交则保留"维持（opus Q2-7 边界
+   *     收窄；readOnly 只是声明不强制，独有提交=必须保留的证据）。删除判定
+   *     在 isolation.recycleRunBranch（第四道门），交付分支不走此路径
+   *     （deferredWorktreeRelease 只在 readOnly && !sessionReuse 赋值）。
    */
   async _releaseDeferredWorktree() {
     if (this._deferredWorktreeHandled) return;
     this._deferredWorktreeHandled = true;
     if (!this.deferredWorktreeRelease) return;
+    let released = false;
     try {
       let eventType = null;
       let payload = {};
@@ -3405,15 +3435,38 @@ export class Run {
           eventType = "run.worktree_released";
         }
       }
-      if (eventType) await this.transcript.append(eventType, payload);
+      if (eventType) {
+        await this.transcript.append(eventType, payload);
+        // sol 审核条款：released 事实以 append 成功为准（写盘失败被吞后不得
+        // 进入分支删除——"released 事实后才回收"才真正成立）。already_gone 同为
+        // 停止确认后的回收开放路径（opus 审核条款）。
+        released = eventType === "run.worktree_released" || eventType === "run.worktree_already_gone";
+      }
     } catch {
       // best-effort：意外抛错路径统一 existsSync 复检收口（席位评审附评 3——
       // "抛错≠完好如初"，可能已半删；与 still_present 同型上报，普查按可疑处理）。
+      released = false;
       try {
         if (existsSync(this.deferredWorktreeRelease)) {
           await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
         }
       } catch { /* 双重失败：吞掉，绝不影响终态 */ }
+    }
+    if (released) {
+      // TD-260（0062 丙′，审核修订）：停止确认后的释放路径（released/already_gone）
+      // 之后追加分支回收。still_present 不在此列——树还在（分支多半仍被该 worktree
+      // 检出，-d 自会拒绝），留待荚清扫/普查处置（TD-262）。分支回收的任何失败都
+      // 不得反过来污染释放结果（独立 try，事件即事实）。
+      try {
+        const r = this.recycleBranchForRelease(this.agent.cwd, this.runId);
+        if (r.outcome === "recycled") {
+          await this.transcript.append("run.worktree_branch_recycled", {});
+        } else if (r.outcome === "kept") {
+          await this.transcript.append("run.worktree_branch_kept",
+            r.uniqueCommits != null ? { uniqueCommits: r.uniqueCommits } : { reason: r.reason });
+        }
+        // absent → 无事件（分支本不存在，释放事实自足）。
+      } catch { /* best-effort：吞掉，绝不影响终态 */ }
     }
   }
 

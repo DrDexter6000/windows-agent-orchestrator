@@ -153,6 +153,10 @@ const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
   "run.worktree_already_gone": "worktree_already_gone",
   "run.worktree_release_skipped": "worktree_release_skipped",
   "run.worktree_release_failed": "worktree_release_failed",
+  // TD-260（决定 0062 丙′）：ephemeral 只读轮零独有分支回收事件族（树释放成功
+  // 之后追加；kept 载荷 uniqueCommits/reason 闭集，分支名回链 wao/<runId> 约定）。
+  "run.worktree_branch_recycled": "worktree_branch_recycled",
+  "run.worktree_branch_kept": "worktree_branch_kept",
 });
 export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
 
