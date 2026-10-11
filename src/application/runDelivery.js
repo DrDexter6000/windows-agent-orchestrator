@@ -1063,9 +1063,12 @@ export async function getRunDeliveryReadiness({
  * @param {string} input.reason — trimmed non-empty
  * @param {Function} [input.readTranscriptFn] — for lock-external context init only
  * @param {Function} [input.transcriptFactory] — injectable for testing (async (filePath, context) => transcript)
+ * @param {Function} [input.sessionRelease] — TD-250 A1b（决定 0056）：accepted 落盘后的
+ *   best-effort 线系上游会话释放（makeAcceptedSessionRelease 构造；缺省 null=禁用——
+ *   MCP/CLI 装配层各自注入）。rejected 永不触发。任何抛错在此吞掉。
  * @returns {Promise<{accepted:true, event} | {accepted:false, existing}>}
  */
-export async function decideRunDelivery({ runId, runDir, decision, reason, readTranscriptFn, transcriptFactory }) {
+export async function decideRunDelivery({ runId, runDir, decision, reason, readTranscriptFn, transcriptFactory, sessionRelease }) {
   if (!runId || typeof runId !== "string") throw new Error("decideRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("decideRunDelivery: runDir is required");
   if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
@@ -1094,7 +1097,18 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
     transcript = new JsonlTranscript(filePath, context);
   }
 
-  return transcript.tryAppendDecision({ decision, reason: trimmedReason });
+  const decisionResult = await transcript.tryAppendDecision({ decision, reason: trimmedReason });
+  // TD-250（A1b，决定 0056）：accepted = 线系不可变的持久事实（parent_accepted
+  // 拒续）→ 此刻线系会话可证不可续，best-effort 释放。能力门/事件合同在
+  // makeAcceptedSessionRelease 内部；此处只做触发与吞错——绝不影响验收结果。
+  if (decisionResult?.accepted === true && decision === "accepted" && typeof sessionRelease === "function") {
+    try {
+      await sessionRelease({ agentId: context.agentId, events, transcript });
+    } catch {
+      // best-effort：释放失败（网络/事件追加）不改写已落盘的验收事实。
+    }
+  }
+  return decisionResult;
 }
 
 // ===== M12-6 Package 3B2a + M12-9: decision-rejection classification (single authority) =====

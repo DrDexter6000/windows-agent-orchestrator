@@ -37,6 +37,8 @@ import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { planProjectsMigration } from "../application/runsMigrateProjects.js";
+// TD-250（A1b，决定 0056）：验收后线系上游会话卫生（kimi-web 能力位门控）。
+import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import { productionProjectIo } from "../projectIdentity.js";
 // M9-6A: delivery query/decision delegated to shared application services.
 // M11-10: readiness/wait delegated to the SAME shared service the MCP tool uses.
@@ -2003,7 +2005,17 @@ async function runsDeliveryCommand(args, config, hostDeps) {
   }
 
   // Delegate to shared service — tryAppendDecision does in-lock validation.
-  const result = await decideRunDelivery({ runId, runDir, decision, reason });
+  // TD-250（A1b，决定 0056）：accepted 后 best-effort 释放线系上游会话——注册表
+  // 路径与同文件其它读点同源（config.registry ?? config/agents.json）。
+  const result = await decideRunDelivery({
+    runId,
+    runDir,
+    decision,
+    reason,
+    sessionRelease: makeAcceptedSessionRelease({
+      registryPath: resolve(config.registry ?? "config/agents.json"),
+    }),
+  });
 
   if (options.format === "json") {
     if (result.accepted) {

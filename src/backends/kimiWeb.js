@@ -49,6 +49,15 @@
 //     8 个候选动作名全部 40001 "unsupported action"）。存在 POST /api/v1/shutdown
 //     （服务器级，杀全部会话）——backend 的 abort() 绝不允许调它：共享服务器上
 //     会误杀无关会话。
+//   - **TD-250 会话生命周期面（2026-10-10 live 探针，决定 0056 依据）**：
+//     `POST /api/v1/sessions/{id}:delete`（body {}）→ code 0 {deleted:true}，
+//     连带删 serve events 文件；对已不存在会话 → HTTP 200 + code 40401
+//     "session … does not exist"。`DELETE /api/v1/workspaces/{id}` 同样有效。
+//     v2 面只有 `sessions:archive`/`:restore`（bulk）。**两者都不拆进程荚**：
+//     serve 为每会话在创建时（空会话即拉）启动一组助手进程（datasource/
+//     analyzer/officecli/mcp.json 条目），无空闲 GC、删除不回收——唯一全量
+//     拆除原语 = 优雅 `POST /api/v1/shutdown`（实测：serve+荚+实例元数据全清，
+//     零孤儿；重启 ~2s 重绑、token 不变、旧会话转录内容可读、不回荚）。
 //
 // v8 完成判定（第八轮结构性重写）：**原厂 transcript 轮次终态原语**取代全部
 // 旧启发式。events 每拍 GET transcript?agent_id=main，找 triggerPromptId ===
@@ -119,6 +128,10 @@ const ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 // "default" 返回空）——客户端恒发 "main"，绝不缺省。
 const TRANSCRIPT_AGENT_ID = "main";
 
+// TD-250（2026-10-10 live 探针）：会话级 40401 = "session … does not exist"——
+// releaseSession 把它分派为 already_gone（HTTP 200 + code 40401 信封，非路由 404）。
+const KIMI_SESSION_GONE_CODE = 40401;
+
 // 无进展出口阈值（named const；v8 语义收窄到 turn 归属）：归属 turn 连续 ≥8 拍
 // state 不变且 steps/frames 无增长（首见拍建立基线——turn 出现即进展，提交滞后
 // 的解除不算停滞）→ done(failed, "turn stalled (no progress)")。R9 分工：
@@ -187,6 +200,12 @@ export class KimiWebBackend {
   // （spawn 权威从转录取回、in-process 送达），缺失/占位（proc_<pid>）在**派发前**
   // 抛错——绝不静默开一段全新会话。
   supportsSessionReuse = true;
+
+  // TD-250（A1/A1b，决定 0056）：终态上游会话卫生能力位。声明 true 的 backend
+  // 提供 releaseSession(agent, sessionId)——控制面（RunManager 清理路径 / delivery
+  // 验收路径）在门全过时 best-effort 调 serve 会话删除 API。共享编排只读此位与
+  // 方法形状，不按 runtime 名分支（不变量 3）。
+  supportsSessionRelease = true;
 
   // 在途纠偏 = 先 POST prompts 排队拿 prompt_id，再 POST prompts:steer 转入活动轮。
   // delivered（steered===true）证明纠偏已转入活动轮，**不证明模型截断了当轮生成**
@@ -594,6 +613,93 @@ export class KimiWebBackend {
     // 投影，绝不 null（isKnownStatus(null)===true 会把不可观察虚记 stop_verified，
     // 见方法注释的事实依据），也绝不 else-推断-idle。
     return { type: "busy" };
+  }
+
+  /**
+   * TD-250（A1/A1b，决定 0056）：终态上游会话卫生。best-effort 调
+   * `POST /api/v1/sessions/{id}:delete`（API 事实见文件头 TD-250 节）。**声明：
+   * 这不拆任何进程**——kimi 2.1.1 serve 永不回收每会话助手进程组（删除/归档均
+   * 不触发、无空闲 GC），进程面归 serve 回收配方（usage.md）；本方法只治会话仓
+   * 与 serve events 文件的堆积。
+   *
+   * 语义（闭集结果，载荷绝不含 token/上游回显文本）：
+   *   - 删前探针一次（非 sessionStatus——它把 40401 已亡折叠成 null 不可观，
+   *     这里必须区分）：GET detail code 40401 → {outcome:"already_gone"}；
+   *     busy/main_turn_active 任一严格 true，或值形状非严格布尔（sessionStatus
+   *     F5/R9 F1 同款保守折叠——宁可当忙、不当闲）→ {outcome:"skipped_busy"}
+   *     （纠偏排队-未 steer 的不对称：上游可能另开轮消费，idle 是删除的必要
+   *     非充分条件，busy 是充分拒绝条件）。
+   *   - POST :delete：code 0 → {outcome:"deleted"}；40401 → already_gone；其他
+   *     code → {outcome:"failed", reason:"upstream_rejected", code}。
+   *   - 传输层失败/超时 → failed(http_error|timeout)；参数形状不符 →
+   *     failed(bad_request)。
+   * 本方法绝不抛错、绝不重试（POST 非幂等，每 run 恰一枪；调用方清理路径
+   * 吞错，但结构化结果直接可消费）。
+   */
+  async releaseSession(agent, sessionId) {
+    if (typeof agent?.serveUrl !== "string" || agent.serveUrl.trim().length === 0
+      || typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return { outcome: "failed", reason: "bad_request" };
+    }
+    let token;
+    try {
+      token = resolveBearerToken(agent);
+    } catch {
+      return { outcome: "failed", reason: "bad_request" };
+    }
+    // 原始一枪请求：不复用 request()（它在 code!==0 时抛含 msg 的错误——release
+    // 需要原始 code 数值做闭集分派，且绝不回显 msg）。永不重试；超时经
+    // AbortController 有界。正文只取 code/data 字段，其余丢弃（脱敏面最小化）。
+    const rawJson = async (method, path, body) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeout);
+      try {
+        const response = await this.fetch(`${trimSlash(agent.serveUrl)}${path}`, {
+          method,
+          signal: controller.signal,
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            authorization: `Bearer ${token}`,
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        });
+        const text = await response.text();
+        let parsed = null;
+        if (text.length > 0) {
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            parsed = null;
+          }
+        }
+        return { httpStatus: response.status, code: parsed?.code, data: parsed?.data };
+      } catch (error) {
+        if (error?.name === "AbortError") return { aborted: true };
+        return { transportError: true };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const enc = encodeURIComponent(sessionId);
+    const detail = await rawJson("GET", `/api/v1/sessions/${enc}`);
+    if (detail.aborted) return { outcome: "failed", reason: "timeout" };
+    if (detail.transportError) return { outcome: "failed", reason: "http_error" };
+    if (detail.code === KIMI_SESSION_GONE_CODE) return { outcome: "already_gone" };
+    if (detail.code !== 0 || !detail.data || typeof detail.data !== "object") {
+      return { outcome: "failed", reason: "upstream_rejected", ...(Number.isInteger(detail.code) ? { code: detail.code } : {}) };
+    }
+    if (detail.data.busy !== false || detail.data.main_turn_active !== false) {
+      // 严格 false 双证才放行：任一 true、任一非布尔（保守折叠）、字段缺席
+      // （sessionDetail 在场门的宽松版——缺席同样当忙）都拒绝删除。
+      return { outcome: "skipped_busy" };
+    }
+    const del = await rawJson("POST", `/api/v1/sessions/${enc}:delete`, {});
+    if (del.aborted) return { outcome: "failed", reason: "timeout" };
+    if (del.transportError) return { outcome: "failed", reason: "http_error" };
+    if (del.code === KIMI_SESSION_GONE_CODE) return { outcome: "already_gone" };
+    if (del.code === 0) return { outcome: "deleted" };
+    return { outcome: "failed", reason: "upstream_rejected", ...(Number.isInteger(del.code) ? { code: del.code } : {}) };
   }
 
   /**

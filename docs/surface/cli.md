@@ -12,6 +12,9 @@ Commands:
   version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审（M13-r1/决定 0039：机械扇出+收集+council-diff 并列呈现；不做语义合成）
   consult show <consultId> [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/）
+  serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（TD-250/决定 0056，零副作用）
+  serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删；跨 serve 生效——会话仓实例间共享）
+  serve recycle --workspace-dir <dir> [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：WAO active 门+会话集合 soak 双门 → 优雅 shutdown 全量拆荚 → 显式 env 重启（WAO_IN_WORKER=1 命令组装）
   registry list --registry config/agents.json
   registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]

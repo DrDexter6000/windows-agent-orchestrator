@@ -2567,3 +2567,116 @@ test("kimi-web 问2: 签名不变/节流窗内不重复发射（静态 running �
   const streaming = events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming");
   assert.equal(streaming.length, 1, "首见+无增长=恰一条（节流与同签名去重）");
 });
+
+// ===== TD-250（决定 0056）：releaseSession——终态上游会话卫生（A1/A1b 的 backend 原语）=====
+
+test("TD-250: releaseSession 全绿腿——detail 双严格 false → POST :delete {} → deleted；删除恰一枪", async () => {
+  const urls = [];
+  const { fetchImpl } = kimiServer((url) => {
+    urls.push(url);
+    if (url.endsWith("/api/v1/sessions/session_r1")) {
+      return envelope({ id: "session_r1", busy: false, main_turn_active: false });
+    }
+    if (url.endsWith("/api/v1/sessions/session_r1:delete")) {
+      return envelope({ deleted: true });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const res = await backend.releaseSession(makeAgent(), "session_r1");
+  assert.deepEqual(res, { outcome: "deleted" });
+  assert.equal(urls.filter((u) => u.endsWith(":delete")).length, 1, "删除恰一枪（POST 非幂等，绝不重试）");
+});
+
+test("TD-250: 删前探针 40401（会话不存在，HTTP 200 信封码）→ already_gone，且不 POST :delete", async () => {
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url.endsWith("/api/v1/sessions/session_gone")) {
+      return envelope(null, { code: 40401, msg: "session session_gone does not exist" });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const res = await backend.releaseSession(makeAgent(), "session_gone");
+  assert.deepEqual(res, { outcome: "already_gone" });
+  assert.equal(calls.filter((c) => c.url.endsWith(":delete")).length, 0, "已亡会话零删除请求");
+});
+
+test("TD-250: busy/main_turn_active 任一严格 true → skipped_busy（纠偏不对称的充分拒绝条件）", async () => {
+  for (const [busy, main] of [[true, false], [false, true], [true, true]]) {
+    const { calls, fetchImpl } = kimiServer((url) => {
+      if (url.endsWith("/api/v1/sessions/session_b")) {
+        return envelope({ id: "session_b", busy, main_turn_active: main });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const res = await backend.releaseSession(makeAgent(), "session_b");
+    assert.deepEqual(res, { outcome: "skipped_busy" }, `busy=${busy} main=${main}`);
+    assert.equal(calls.filter((c) => c.url.endsWith(":delete")).length, 0);
+  }
+});
+
+test("TD-250: 字段值非严格布尔（sessionStatus F5/R9 F1 同款保守折叠）→ skipped_busy", async () => {
+  const { fetchImpl } = kimiServer((url) => {
+    if (url.endsWith("/api/v1/sessions/session_mb")) {
+      // busy 缺席 / 非布尔——一律不可证 idle，保守当忙。
+      return envelope({ id: "session_mb", busy: "nope", main_turn_active: false });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  assert.deepEqual(await backend.releaseSession(makeAgent(), "session_mb"), { outcome: "skipped_busy" });
+});
+
+test("TD-250: :delete 回 40401 → already_gone；回其他 code → failed/upstream_rejected（带数值 code，无 msg 回显）", async () => {
+  const mk = (code) => kimiServer((url) => {
+    if (url.endsWith("/api/v1/sessions/session_d")) {
+      return envelope({ id: "session_d", busy: false, main_turn_active: false });
+    }
+    if (url.endsWith("/api/v1/sessions/session_d:delete")) {
+      return envelope(null, { code, msg: `SECRET upstream echo ${TOKEN_VALUE}` });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  let { fetchImpl } = mk(40401);
+  let backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  assert.deepEqual(await backend.releaseSession(makeAgent(), "session_d"), { outcome: "already_gone" });
+  ({ fetchImpl } = mk(50001));
+  backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const res = await backend.releaseSession(makeAgent(), "session_d");
+  assert.deepEqual(res, { outcome: "failed", reason: "upstream_rejected", code: 50001 });
+  assert.ok(!JSON.stringify(res).includes("SECRET") && !JSON.stringify(res).includes(TOKEN_VALUE),
+    "闭集结果绝不回显上游 msg/token");
+});
+
+test("TD-250: 传输失败 → failed/http_error；超时 → failed/timeout（有界，不重试不抛错）", async () => {
+  const { fetchImpl: errFetch } = kimiServer(() => { throw new Error("fetch failed ECONNRESET"); });
+  const errBackend = new KimiWebBackend({ fetchImpl: errFetch, timeout: 5000, retries: 0 });
+  assert.deepEqual(await errBackend.releaseSession(makeAgent(), "session_t1"), { outcome: "failed", reason: "http_error" });
+
+  // 挂起 fetch：尊重 abort 信号（真 fetch 形状——假实现必须转发 signal，否则
+  // releaseSession 的 AbortController 超时无法打断挂起正文）。
+  const hangFetch = (_url, init = {}) => new Promise((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => {
+      reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    });
+  });
+  const hangBackend = new KimiWebBackend({ fetchImpl: hangFetch, timeout: 40, retries: 0 });
+  assert.deepEqual(await hangBackend.releaseSession(makeAgent(), "session_t2"), { outcome: "failed", reason: "timeout" });
+});
+
+test("TD-250: 参数形状不符（缺 serveUrl / 空 sessionId / token 缺席）→ failed/bad_request，零网络请求", async () => {
+  const { calls, fetchImpl } = kimiServer(() => { throw new Error("must not be called"); });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  assert.deepEqual(await backend.releaseSession({ ...makeAgent(), serveUrl: "" }, "session_x"), { outcome: "failed", reason: "bad_request" });
+  assert.deepEqual(await backend.releaseSession(makeAgent(), ""), { outcome: "failed", reason: "bad_request" });
+  const saved = process.env[TOKEN_ENV];
+  delete process.env[TOKEN_ENV];
+  try {
+    const noTokBackend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    assert.deepEqual(await noTokBackend.releaseSession(makeAgent(), "session_y"), { outcome: "failed", reason: "bad_request" });
+  } finally {
+    process.env[TOKEN_ENV] = saved;
+  }
+  assert.equal(calls.length, 0, "形状/凭据缺席=零网络请求");
+});

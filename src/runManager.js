@@ -2280,6 +2280,9 @@ export class Run {
     // _runCleanup 必须兜底调一次 handle.abort，此 flag 保证只调一次（user-abort 路径
     // 已通过 _abortInternal 调过，不重复）。注意：这只证明已发送 abort，不证明后台静默。
     this._sessionKilled = false;
+    // TD-250（A1，决定 0056）：上游会话卫生的单发防重标志——_runCleanup 可能被
+    // 多条终态路径重复进入，release 恰好评估一次（与 _sessionKilled 同款纪律）。
+    this._upstreamSessionReleased = false;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
@@ -3248,6 +3251,11 @@ export class Run {
       // abort 是 no-op 且进程已死，跳过验证。
       await this._verifyStopQuietIfCapable().catch(() => { /* 验证失败不影响终态 */ });
     }
+    // TD-250（A1，决定 0056）：能力声明 backend 的终态上游会话卫生——best-effort、
+    // 幂等（_upstreamSessionReleased 单发）、任何失败吞掉绝不影响已定终态。放在
+    // 停止验证之后（先删会话会让 verifyStopQuiet 的探针 404，虚报
+    // stop_unverified）、_cleanup 段之前（与进程/工件回收无耦合，次序无偏好）。
+    await this._releaseUpstreamSession();
     if (this._cleaned || !this._cleanup) return;
     this._cleaned = true;
     try {
@@ -3255,6 +3263,72 @@ export class Run {
       await this.transcript.append("run.cleanup_done", {});
     } catch (error) {
       await this.transcript.append("run.cleanup_error", { error: error.message });
+    }
+  }
+
+  /**
+   * TD-250（A1，决定 0056）：终态上游会话卫生（kimi-web 首个声明者，能力位
+   * supportsSessionRelease + backend.releaseSession；共享编排只读能力，不按
+   * runtime 名分支——不变量 3）。门与事件合同（双席会审 consult_20261010220638436s4gchx）：
+   *   - 门1（routing）：sessionReuse routing 在场（lead_workspace 复用轮 /
+   *     continuable 线系根 / resume 轮）→ 跳过——线系可能续接，事件
+   *     run.upstream_session_delete_skipped {reason:"routing"}。谓词与
+   *     provider-session 绑定事实的写侧（上方 this.sessionReuse &&）同源。
+   *   - 门2（completed-only）：this.state !== "completed" → 跳过
+   *     {reason:"not_completed"}。this.state 是转录仲裁已接受的终态（非本地
+   *     分支意见——被拒迁移回落 tResult.state）；failed/aborted 的上游轮可能
+   *     仍在跑或已跑完未收，serve events 文件是迟到收取 SOP 的取证源，删了
+   *     即毁证（Owner 亲自纠正过的场景：久等≠失败）。
+   *   - busy 预探针在 backend 内部（releaseSession 闭集结果 skipped_busy）。
+   *   - 事件族一果一名（库内惯用法 run.stop_verified/run.cleanup_done 同款，
+   *     投影图是 type→label 盲载荷——outcome 字段上不了面）：deleted /
+   *     already_gone / delete_skipped{reason} / delete_failed{reason[,code]}。
+   *     恰好一条（能力在场且有 backendSessionId 的 run；pre-spawn 终态路径
+   *     无会话，零事件——合同）。backendSessionId 是审计锚（回链 serve events
+   *     文件与清扫器）；载荷绝无 token/上游回显。
+   *   - 崩溃窗口（删完、事件未落盘）接受零条事实——清扫器遇 40401 记
+   *     already_gone，合同内闭环。
+   */
+  async _releaseUpstreamSession() {
+    if (this._upstreamSessionReleased) return;
+    this._upstreamSessionReleased = true;
+    try {
+      if (this.backend?.supportsSessionRelease !== true
+        || typeof this.backend?.releaseSession !== "function") {
+        return;
+      }
+      const sessionId = this.result?.backendSessionId ?? this.handle?.backendSessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) return;
+      let eventType;
+      let payload;
+      if (this.sessionReuse) {
+        eventType = "run.upstream_session_delete_skipped";
+        payload = { backendSessionId: sessionId, reason: "routing" };
+      } else if (this.state !== "completed") {
+        eventType = "run.upstream_session_delete_skipped";
+        payload = { backendSessionId: sessionId, reason: "not_completed" };
+      } else {
+        const res = await this.backend.releaseSession(this.agent, sessionId);
+        if (res?.outcome === "deleted") {
+          eventType = "run.upstream_session_deleted";
+          payload = { backendSessionId: sessionId };
+        } else if (res?.outcome === "already_gone") {
+          eventType = "run.upstream_session_already_gone";
+          payload = { backendSessionId: sessionId };
+        } else if (res?.outcome === "skipped_busy") {
+          eventType = "run.upstream_session_delete_skipped";
+          payload = { backendSessionId: sessionId, reason: "busy" };
+        } else {
+          const reason = ["bad_request", "timeout", "http_error", "upstream_rejected"]
+            .includes(res?.reason) ? res.reason : "http_error";
+          payload = { backendSessionId: sessionId, reason };
+          if (Number.isInteger(res?.code)) payload.code = res.code;
+          eventType = "run.upstream_session_delete_failed";
+        }
+      }
+      await this.transcript.append(eventType, payload);
+    } catch {
+      // best-effort：卫生失败绝不影响终态、绝不阻断后续 _cleanup。
     }
   }
 

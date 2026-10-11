@@ -92,6 +92,8 @@ import { EXECUTION_STAGES } from "../application/runStageProjection.js";
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
+// TD-250（A1b，决定 0056）：验收后的线系上游会话卫生（kimi-web 能力位门控）。
+import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import {
   getRunDelivery,
   decideRunDelivery,
@@ -5497,7 +5499,15 @@ export function createWaoMcpServer({
     },
     async ({ runId, decision, reason }) => {
       try {
-        const result = await deliveryDecideService({ runId, runDir, decision, reason });
+        // TD-250（A1b，决定 0056）：accepted 落盘后 best-effort 释放线系上游会话
+        //（kimi-web 首个能力声明者；能力门/事件合同在 makeAcceptedSessionRelease）。
+        const result = await deliveryDecideService({
+          runId,
+          runDir,
+          decision,
+          reason,
+          sessionRelease: makeAcceptedSessionRelease({ registryPath }),
+        });
         // Strict validation: every scalar must pass closed-set checks.
         // Malformed service result → throw → fixed safe error.
         if (typeof result.accepted !== "boolean") throw new Error("accepted not boolean");

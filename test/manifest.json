@@ -77,7 +77,6 @@
       "mcp-surface/mcpRunContinue.test.js",
       "mcp-surface/mcpRunCorrection.test.js",
       "mcp-surface/mcpRunDiagnose.test.js",
-      "migration-0045/backgroundExplicit.test.js",
       "migration-0045/consultIndependence.test.js",
       "migration-0045/dispatchResolution.test.js",
       "migration-0045/explicitDispatch.test.js",
@@ -93,6 +92,8 @@
       "parsers/codex.test.js",
       "parsers/kimiCode.test.js",
       "parsers/lineStream.test.js",
+      "application/serveMaintenance.test.js",
+      "application/upstreamSessionRelease.test.js",
       "registry-roles/applicationRegistryInventory.test.js",
       "registry-roles/backendCapabilityValidate.test.js",
       "registry-roles/certificationReasons.test.js",
@@ -155,6 +156,7 @@
       "run-lifecycle/runs.test.js",
       "run-lifecycle/runsWait.test.js",
       "run-lifecycle/stopSideEffect.test.js",
+      "run-lifecycle/td250-upstreamSessionRelease.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "run-lifecycle/waoAcceptCli.test.js",
       "transcript/acceptanceRecord.test.js",
@@ -302,6 +304,7 @@
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",
+      "migration-0045/backgroundExplicit.test.js",
       "migration-0045/rolePinning.test.js",
       "migration-0045/sessionKeyUpgrade.test.js",
       "run-lifecycle/terminalArbitration.test.js"

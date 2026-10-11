@@ -102,6 +102,13 @@ const REGISTERED_CENSUS = {
   "application/panelReadiness.js": { "opencode-serve": 1 },
   "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
   "application/runStop.js": { "opencode-serve": 3 },
+  // 0056（TD-250，2026-10-11）：serveMaintenance 的清扫认领门——只认领
+  // session.created 里 backend==="kimi-web" 的会话（轴向=会话归属声明消费，
+  // 不选 backend、不分叉运行时行为；能力面由 supportsSessionRelease 承载）。
+  "application/serveMaintenance.js": { "kimi-web": 1 },
+  // 0056（TD-250）：serve CLI 的目标解析——筛注册表里 kimi-web 席位取
+  // serveUrl/tokenEnv（轴向=维护命令的目标定位，非编排分叉）。
+  "commands/serve.js": { "kimi-web": 1 },
   // TD-190 R7（2026-10-09）：外国 harness 沙箱闭表条目的 harness 标签——轴向=
   // 沙箱身份标注（桶归属 fact），不选 backend、不分叉运行时行为。
   "projectIdentity.js": { codex: 1 },

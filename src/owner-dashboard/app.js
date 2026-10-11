@@ -45,9 +45,13 @@ export const CATEGORIES = Object.freeze([
 ]);
 
 // TD-220（2026-10-07）：浏览器独立校验固定标签，未知标签不回显载荷。
+// TD-250（决定 0056）：+终态上游会话卫生事件族四标签（镜像服务端
+// ENVELOPE_TYPE_TO_LABEL 的值闭集——两端由 ownerDashboard 一致性测试钉住）。
 const ENVELOPE_LABELS = Object.freeze([
   "prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
   "cleanup_done", "session_reuse", "provider_session_bound",
+  "upstream_session_deleted", "upstream_session_already_gone",
+  "upstream_session_delete_skipped", "upstream_session_delete_failed",
 ]);
 
 // TD-228②：correction 生命周期状态的客户端闭集（镜像服务端

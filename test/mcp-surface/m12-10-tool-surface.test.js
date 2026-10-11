@@ -885,7 +885,11 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0052（2026-10-10）：run_dispatch/run_dispatch_contract_check 共享入参增可选
 // fresh 布尔（复用会话逃生口：强制 first+epoch+1）——inputSchema 在 stripped
 // 载荷内，SHA 如实翻新；无描述字节变化。
-"6c528767503e94cfcaf22ab45ab993e31863aeb115585e6a77c15a517486b8c2";
+// 0056（2026-10-10，TD-250）：run_activity 出参 envelope enum 增上游会话卫生
+// 四标签（upstream_session_deleted/already_gone/delete_skipped/delete_failed，
+// 服务端 ENVELOPE_TYPE_TO_LABEL 增四映射的镜像）——outputSchema 在 stripped
+// 载荷内，SHA 如实翻新；无描述字节变化；M12-10-H wire 帽复验通过（additive）。
+"379e8f0bf8eb61a54cc37fbd9e1e17f8ab114a6fe1f14c0a99fc33ab63ba1f6e";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

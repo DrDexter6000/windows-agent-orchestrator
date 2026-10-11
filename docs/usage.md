@@ -573,6 +573,38 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 主 serve（默认端口 58627，无标记）留给 Owner 人类使用。重启机器后需要重新
 拉起 worker serve 并核实 kimi 车道 serveUrl 指向 58628（agents.json，不入库）。
 
+**TD-250 进程荚治理（决定 0056，2026-10-10）**：kimi serve 为每会话在创建时
+拉起 6-8 个助手进程（datasource/analyzer/officecli/mcp.json 条目）且**永不拆
+除**（无空闲 GC；会话/工作区删除均不触发；上游无停荚端点）——唯一全量拆除
+原语是优雅 `POST /api/v1/shutdown`。三层治理已落地：
+
+1. **终态会话卫生（自动，A1+A1b）**：kimi-web run 以 completed 收口后，
+   WAO 自动调 serve 会话删除 API（门=routing 缺席+completed-only+删前 busy
+   预探针；失败仅记事件不影响 run 结果）。failed/aborted 的会话**故意保留**
+   （迟到收取 SOP 的取证源）。delivery 被 accept 时线系会话同样自动释放
+   （验收=线系不可变）。转录事件族：`run.upstream_session_deleted` /
+   `_already_gone` / `_delete_skipped` / `_delete_failed`。**这不拆进程**——
+   只治会话仓/events 文件堆积。
+2. **`wao serve status|sweep|recycle`（手动维护族，A2/A3）**：
+   ```powershell
+   npm run cli -- serve status                    # 实例元数据/荚规模/会话计数
+   npm run cli -- serve sweep                     # 清扫规划（默认 dry-run）
+   npm run cli -- serve sweep --apply             # 删"worktree 已亡"的 WAO 认领会话
+   npm run cli -- serve recycle --workspace-dir D:\projects\.kimi-serve-worker-ws
+   ```
+   - `sweep` 按 WAO 转录 `session.created` 认领（扫全部项目桶），只删
+     "worktree 已亡"（形状+干净 ENOENT+父目录在场三条件）的会话；台账在
+     `.wao/serve-maintenance/sweep-ledger.jsonl`。**跨 serve 生效**（kimi 会话
+     仓实例间共享）——58627 上由 WAO 历史派发产生的会话同样会被认领。
+   - `recycle` 双门（WAO 全项目桶无 active run + serve 会话集合 soak 比对
+     全 idle）→ 优雅 shutdown 全量拆荚 → 按上方配方重启（env 由命令组装，
+     `WAO_IN_WORKER=1` 恒注入）→ 就绪验证。**只动 kimi 车道 serveUrl 指向的
+     worker 实例**；Owner 主 serve（58627）名下存量荚由 Owner 自行重启解决。
+   - 时机：跑批间隙手动调用即可；忘了的后果=荚多攒几天（有界烦恼），上游
+     修复（Owner 反馈 Moonshot：要求 idle 荚 GC 或 :delete 连带拆荚）后
+     recycle 退役。
+3. **上报上游（A4）**：serve 永不拆助手进程是 kimi 2.1.1 的上游缺陷。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

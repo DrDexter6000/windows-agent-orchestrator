@@ -45,8 +45,11 @@ import { mcpCommand } from "./commands/mcp.js";
 // 纯 CLI 适配：argv/format/console，数据逻辑委托 ../application/playbookCatalog.js。
 import { playbookCommand } from "./commands/playbook.js";
 // M13-r1（决定 0039）：consult run/show 命令族（多席只读会审 CLI 适配）。
-// 纯 CLI 适配，数据逻辑委托 ../application/consultService.js。
+// 纯 CLI 适配：数据逻辑委托 ../application/consultService.js。
 import { consultCommand } from "./commands/consult.js";
+// TD-250（决定 0056）：serve status/sweep/recycle 命令族（kimi-web worker serve
+// 维护；数据逻辑委托 application/serveMaintenance.js + backends/kimiServeOps.js）。
+import { serveCommand } from "./commands/serve.js";
 // P4-乙 Phase 1a：help 文本抽到 src/cliHelp.js（命名导出 HELP_TEXT，字节不变）。
 // cli.js 底部自执行 main()，生成器（scripts/gen-surface.mjs）不能 import 本文件——
 // 它改 import 无副作用的 cliHelp.js，CLI 打印的仍是同一份 SSOT。
@@ -223,6 +226,12 @@ async function main(argv) {
   }
   if (command === "consult") {
     await consultCommand(rest, config);
+    return;
+  }
+  // TD-250（决定 0056）：kimi-web worker serve 维护命令族（手动；详见
+  // src/commands/serve.js 头注释与 docs/usage.md TD-250 配方节）。
+  if (command === "serve") {
+    await serveCommand(rest, config);
     return;
   }
   // TD-191④：顶层 Unknown 裸报是"幻影命令"误诊两次的根因——命中 wao 命名空间

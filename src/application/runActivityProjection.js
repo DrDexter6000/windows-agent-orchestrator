@@ -141,6 +141,12 @@ const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
   "run.cleanup_done": "cleanup_done",
   "run.session_reuse": "session_reuse",
   "run.provider_session_bound": "provider_session_bound",
+  // TD-250（决定 0056）：终态上游会话卫生事件族（一果一名；载荷含 backendSessionId
+  // ——信封只投影标签，会话 id 不进活动页）。
+  "run.upstream_session_deleted": "upstream_session_deleted",
+  "run.upstream_session_already_gone": "upstream_session_already_gone",
+  "run.upstream_session_delete_skipped": "upstream_session_delete_skipped",
+  "run.upstream_session_delete_failed": "upstream_session_delete_failed",
 });
 export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
 

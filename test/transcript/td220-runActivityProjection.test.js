@@ -87,9 +87,14 @@ test("TD-220 验收修: inference gated to proven backends — kimi-web tool_don
 
 test("TD-220: thinking is count-only; envelope labels fixed; collect audits skipped; unknown remains opaque", () => {
   const types = ["prompt.sent", "run.wait_policy", "run.metrics", "scorecard.checked", "run.stop_verified",
-    "run.cleanup_done", "run.session_reuse", "run.provider_session_bound"];
+    "run.cleanup_done", "run.session_reuse", "run.provider_session_bound",
+    // 0056（TD-250）：终态上游会话卫生事件族（additive）。
+    "run.upstream_session_deleted", "run.upstream_session_already_gone",
+    "run.upstream_session_delete_skipped", "run.upstream_session_delete_failed"];
   const labels = ["prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
-    "cleanup_done", "session_reuse", "provider_session_bound"];
+    "cleanup_done", "session_reuse", "provider_session_bound",
+    "upstream_session_deleted", "upstream_session_already_gone",
+    "upstream_session_delete_skipped", "upstream_session_delete_failed"];
   assert.deepEqual([...ENVELOPE_ACTIVITY_LABELS], labels);
   const payload = { text: "SECRET", payload: "SECRET", prompt: "SECRET", parts: [{ text: "SECRET" }], kind: "SECRET" };
   for (const audience of ["lead", "owner"]) {
@@ -102,13 +107,13 @@ test("TD-220: thinking is count-only; envelope labels fixed; collect audits skip
       { type: "toString", ...payload },
     ], { audience });
     assert.deepEqual(r.entries[0], { category: "thinking", ts, seq: 1 });
-    assert.deepEqual(r.entries.slice(1, 9).map((e) => e.kind), labels);
-    for (const e of r.entries.slice(1, 9)) assert.deepEqual(Object.keys(e).sort(), ["category", "kind", "seq", "ts"]);
+    assert.deepEqual(r.entries.slice(1, types.length + 1).map((e) => e.kind), labels);
+    for (const e of r.entries.slice(1, types.length + 1)) assert.deepEqual(Object.keys(e).sort(), ["category", "kind", "seq", "ts"]);
     assert.equal(r.counts.thinking, 1);
-    assert.equal(r.counts.envelope, 8);
+    assert.equal(r.counts.envelope, types.length);
     assert.equal(r.counts.other, 3);
-    assert.equal(r.total, 12);
+    assert.equal(r.total, 1 + types.length + 3);
     assert.equal(JSON.stringify(r).includes("SECRET"), false);
-    for (const e of r.entries.slice(9)) assert.equal(e.label, "[unknown_event]");
+    for (const e of r.entries.slice(types.length + 1)) assert.equal(e.label, "[unknown_event]");
   }
 });
