@@ -221,7 +221,10 @@ test("W1 绊线（W4d 结构化版）：lanes.json 永不含 wiringAgent（含�
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(!LIVE.lanes.some((l) => typeof l.wiringAgent === "string"),
     "活体 lanes.json 无 wiringAgent（W4d：接线归注册表车道键——结构禁用，非版本条件）");
-  assert.ok(pkg.version.startsWith("0.3"), `包版本 ${pkg.version}（0.3.0 已发布——结构禁用即终身守卫）`);
+  // 0.4.0 发版修正：原实现字面 startsWith("0.3") 在 0.4 断裂——绊线意图是
+  // "0.3.0 已发布=发布后终身守卫"，任何 ≥0.3.0 的版本同样适用。语义化比较。
+  const [major, minor] = pkg.version.split(".").map(Number);
+  assert.ok(major === 0 && minor >= 3, `包版本 ${pkg.version}（0.3.0 已发布——结构禁用即终身守卫，≥0.3.0 恒适用）`);
 });
 
 test("W1 census：wiringAgent 字面量只许出现在解析器/配置/测试（防扩散钉）", () => {
