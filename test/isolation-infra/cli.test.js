@@ -2392,7 +2392,7 @@ test("R9-C C-1.4（auditor 实跑病灶）: 零对抗席 three_seat → doctor �
     const panel = parsed.checks.find((c) => c.name === "panel_readiness");
     assert.ok(panel, "≥2 席位候选但 0 对抗席 → 必须打印（消除假全清——实跑病灶）");
     assert.equal(panel.status, "info");
-    assert.match(panel.detail, /物理上可配三席，但无对抗席候选（auditor\/coder_mm）/,
+    assert.match(panel.detail, /物理上可配三席，但无可用对抗席（ready 面，seatRole=adversarial）/,
       "C-1 裁定文案：无对抗席候选提示行");
     assert.match(panel.detail, /两席分配语义要求对抗视角/, "0019/0023 分配语义引用");
     assert.match(panel.detail, /coder_hq、coder_low/, "席位候选点名");

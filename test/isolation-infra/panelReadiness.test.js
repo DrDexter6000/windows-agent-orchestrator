@@ -41,6 +41,45 @@ test("R9-C C-1: seatRoleOf 席位分类——对抗席/实现席/非席位（001
   assert.equal(seatRoleOf(undefined), "non_seat", "缺失 id 防御归非席位");
 });
 
+// ── TD-258（2026-10-11 双席会审综合）：key_only_* 两态合同 ─────────────────────
+// 无 CLI 探测面（kimi-web=serve 通道）但声明凭据名的车道：key 名可解析且非空=
+// key_only_present（**不是就绪**——未验证令牌有效性/serve 可达性）；缺失=
+// key_only_missing；探测异常=unknown。无凭据声明的无 CLI 车道（zcode 承重桥）
+// 恒 unknown。两态不计可用、不抬 tier、不无声消失（keyOnly 桶）。
+test("TD-258: deriveReadyState 无 CLI 面——key_only 两态 + zcode 形状恒 unknown", () => {
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "KIMI_WEB_TOKEN", key: "process_env" }),
+    "key_only_present", "key 名解析（process）= key_only_present");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "KIMI_WEB_TOKEN", key: "user_env" }),
+    "key_only_present", "key 名解析（user）= key_only_present");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "KIMI_WEB_TOKEN", key: "missing" }),
+    "key_only_missing");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "KIMI_WEB_TOKEN", key: "unknown" }),
+    "unknown", "探测异常保持 unknown");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "KIMI_WEB_TOKEN", key: undefined }),
+    "unknown", "key 未探=unknown");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: null, key: "process_env" }),
+    "unknown", "zcode 形状：无 CLI 无凭据声明——承重桥不是凭据，恒 unknown");
+  // CLI 面车道六态不受本批影响（回归钉）。
+  assert.equal(deriveReadyState({ requiresCli: "dsh", requiresKeyEnv: "DEEPSEEK_API_KEY", cli: true, key: "missing" }),
+    "missing_key");
+  assert.equal(deriveReadyState({ requiresCli: "dsh", requiresKeyEnv: "DEEPSEEK_API_KEY", cli: true, key: "user_env" }),
+    "ready");
+});
+
+test("TD-258: key_only_* 不计可用/不抬 tier，且进 keyOnly 桶不无声消失", () => {
+  const p = assessPanelReadiness([
+    row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),
+    { id: "coder_mm", backend: null, model: "kimi-code/k3", readyState: "key_only_present", seatRole: "adversarial" },
+    { id: "kimi", backend: null, model: "kimi-code/k3-256k", readyState: "key_only_missing", seatRole: "implementation" },
+    row("glm-pro", { model: "bigmodel-api/GLM-5.3" }, "unknown"),
+  ]);
+  assert.equal(p.tier, "two_seat", "key_only_present 不当 ready 计——仅 1 名真 ready=two_seat");
+  assert.deepEqual(p.available.map((e) => e.id), ["coder_hq"]);
+  assert.ok(p.keyOnly.includes("coder_mm") && p.keyOnly.includes("kimi"),
+    "key_only 两态都进 keyOnly 桶（叙事里可见）");
+  assert.ok(!p.keyOnly.includes("glm-pro"), "unknown 不进 keyOnly 桶（有 probeUnknown 位）");
+});
+
 test("R9-C C-1: 分级三档按席位候选计数——≥2 → three_seat；恰 1 → two_seat；0 → none", () => {
   const three = assessPanelReadiness([
     row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),
@@ -213,8 +252,10 @@ test("R9-C C-1: 建议席位组合——对抗席优先 + 实现席，避同族�
 });
 
 test("R9: deriveReadyState 六态象限（onboarding/doctor 共用的单一映射实现）", () => {
-  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "X", cli: true, key: "process_env" }),
-    "unknown", "backend 无 CLI 映射 → 无法验证");
+  // TD-258 修订：无 CLI 映射 + 有凭据声明 → key_only_*（详见上方 TD-258 专测）；
+  // 此行保留无凭据声明的无 CLI 形状（zcode）——恒 unknown。
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: null, cli: true, key: "process_env" }),
+    "unknown", "backend 无 CLI 映射且无凭据声明 → 无法验证");
   assert.equal(deriveReadyState({ requiresCli: "claude", requiresKeyEnv: null, cli: true }), "login_based");
   assert.equal(deriveReadyState({ requiresCli: "claude", requiresKeyEnv: null, cli: false }), "missing_cli");
   assert.equal(deriveReadyState({ requiresCli: "claude", requiresKeyEnv: null, cli: undefined }), "unknown");

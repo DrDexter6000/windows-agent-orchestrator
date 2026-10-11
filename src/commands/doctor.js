@@ -63,7 +63,7 @@ import { backendFor } from "../backends/factory.js";
 // M11-7：Windows User 作用域 env 读取复用 credentialReadiness（HKCU\Environment 精确
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
-import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped } from "../application/credentialReadiness.js";
+import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, aggregateCredentialSources } from "../application/credentialReadiness.js";
 // TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
 // 值不回显）。
 import { CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
@@ -583,14 +583,10 @@ export async function waoDoctorCommand(args, config) {
     const panelRows = Object.entries(registryAgents).map(([id, agent]) => {
       const requiresCli = BACKEND_CLI[agent?.backend] ?? null;
       const names = requiredCredentialNames(agent);
-      let key;
-      if (names.length > 0) {
-        const sources = names.map((n) => keySource.get(n));
-        key = sources.every((s) => s === "process_env") ? "process_env"
-          : sources.includes("missing") ? "missing"
-          : sources.every((s) => s === "process_env" || s === "user_env") ? "user_env"
-          : "unknown";
-      }
+      // TD-258：多名聚合成单一 key 态走共享函数（onboarding 同源），不再本文件内联。
+      const key = names.length > 0
+        ? aggregateCredentialSources(names.map((n) => keySource.get(n)))
+        : undefined;
       return {
         id,
         backend: agent?.backend ?? null,
@@ -615,9 +611,9 @@ export async function waoDoctorCommand(args, config) {
       let detail;
       let fix;
       if (panel.tier === "three_seat") {
-        detail = `已配置面：会审席位候选 ≥2（${seatList}）——物理上可配三席，但无对抗席候选（auditor/coder_mm），`
+        detail = `已配置面：会审席位候选 ≥2（${seatList}）——物理上可配三席，但无可用对抗席（ready 面，seatRole=adversarial），`
           + `两席分配语义要求对抗视角（0019/0023），建议补配；跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
-        fix = "增配对抗席通道 auditor（或替补 coder_mm）（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
+        fix = "增配对抗席车道（seatRole=adversarial）（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       } else if (panel.tier === "two_seat" && panel.singleWorkerVacuous) {
         // C-16：单 worker 场景以空转事实为主句直给（先建议后撤回的话术废除）。
         detail = `已配置面：registry 仅一名 worker（${seatList}），它通常即被审产出作者（0019 §3 作者回避）`
@@ -646,6 +642,11 @@ export async function waoDoctorCommand(args, config) {
       // C-12：探测未知如实展示（docblock 承诺兑现）。
       if (panel.probeUnknown.length > 0) {
         detail += `；探测未知（不计入可用）：${panel.probeUnknown.join("、")}`;
+      }
+      // TD-258：key_only_* 不计可用、不抬 tier，但如实展示（无 CLI 探测面的
+      // 凭据声明车道——未验证令牌有效性/serve 可达性）。
+      if (panel.keyOnly.length > 0) {
+        detail += `；key 名已解析但无 CLI 探测面（未验证令牌/serve 可达性，不计入可用）：${panel.keyOnly.join("、")}`;
       }
       pushCheck(checks, {
         name: "panel_readiness",

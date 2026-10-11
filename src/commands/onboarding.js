@@ -415,6 +415,11 @@ function panelReadinessLines(r) {
   if (p.probeUnknown?.length > 0) {
     lines.push(`  探测未知（如实展示，不计入可用）: ${p.probeUnknown.join("、")}`);
   }
+  // TD-258：无 CLI 探测面的凭据声明车道（key_only_*）——不计入可用、不抬 tier，
+  // 但绝不无声消失（key 检查细节见 wao doctor）。
+  if (p.keyOnly?.length > 0) {
+    lines.push(`  key 名已解析但无 CLI 探测面（未验证令牌/serve 可达性，不计入可用）: ${p.keyOnly.join("、")}`);
+  }
   // 席位惯例句（0019 §3 保留）：候选 id 全部从输入面行派生（不在面的 worker
   // 不点名），零候选时整句不打印（shape-derived，0022 契约 (6)）。拆两行控制
   // 显示宽 ≤120。分类复用 panelReadiness.seatRoleOf 的单一语义（declared
@@ -504,9 +509,15 @@ function recommendationReadyLabel(row) {
   // opencode CLI ≠ serve 已注入 key——不再误标 [CLI 登录态]。仅改显示，
   // 引擎 readyState 值不变。
   if (row.backend === "opencode-serve") return "serve 探测未覆盖";
+  // TD-258（opus 显示修正）：zcode 无 CLI 探测面（binary 绝对路径直连）——
+  // "探测失败"对从未探测的车道是错标；kimi-web 探测异常时同理。
+  if (row.backend === "zcode") return "无 CLI 探测面（binary 直连）";
+  if (row.backend === "kimi-web" && row.readyState === "unknown") return "serve 探测未覆盖";
   switch (row.readyState) {
     case "ready": return "ready";
     case "login_based": return "CLI 登录态";
+    case "key_only_present": return "key 名已解析（无 CLI 探测面，未验 serve/令牌）";
+    case "key_only_missing": return `缺 ${row.requiresKeyEnv}（无 CLI 探测面）`;
     case "missing_cli": return `缺 ${row.requiresCli} CLI`;
     case "missing_key": return `缺 ${row.requiresKeyEnv}`;
     case "missing_both": return `缺 ${row.requiresCli} CLI + 缺 ${row.requiresKeyEnv}`;

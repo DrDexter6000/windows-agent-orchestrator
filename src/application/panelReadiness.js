@@ -74,17 +74,27 @@ export function seatRoleOf(id, declared, facts) {
 }
 
 /**
- * 六态 readyState 的单一映射实现（onboarding computeReadyState 与 doctor 共用）。
+ * 八态 readyState 的单一映射实现（onboarding computeReadyState 与 doctor 共用）。
+ * TD-258（2026-10-11 双席会审综合）：无 CLI 探测面但声明了凭据名的车道（kimi-web
+ * 的 tokenEnv）新增 key_only_* 两态——语义收窄为"声明的凭据变量可解析且非空"，
+ * **未验证令牌有效性、serve 可达性或运行时可用性**，命名不带 ready 防夸大；
+ * 无凭据声明的无 CLI 车道（zcode：承重 env 桥不是凭据）保持 unknown。
  *
  * @param {object} input
  * @param {string|null} input.requiresCli — backend 映射的 CLI 名（null = 无 CLI 可探）
  * @param {string|null} input.requiresKeyEnv — 声明的 provider key env 名（null = 登录态型）
  * @param {true|false|"unknown"|undefined} input.cli — CLI 探测结果（undefined 视为 unknown）
  * @param {"process_env"|"user_env"|"missing"|"unknown"|undefined} input.key — key 探测结果
- * @returns {"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown"}
+ * @returns {"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"key_only_present"|"key_only_missing"|"unknown"}
  */
 export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
-  if (!requiresCli) return "unknown"; // backend 无 CLI 映射：无法验证
+  if (!requiresCli) {
+    // 无 CLI 探测面：有凭据声明时只探 key 名可解析性（不是就绪声称）。
+    if (!requiresKeyEnv) return "unknown"; // backend 无 CLI 映射且无凭据声明：无法验证
+    const k0 = key === "process_env" || key === "user_env" || key === "missing" ? key : "unknown";
+    if (k0 === "unknown") return "unknown";
+    return k0 === "missing" ? "key_only_missing" : "key_only_present";
+  }
   const c = cli === true || cli === false ? cli : "unknown";
   if (!requiresKeyEnv) {
     // 登录态型（官方 OAuth / CLI 登录）：只探 CLI，登录态本身无法远程验证。
@@ -157,6 +167,11 @@ export function assessPanelReadiness(rows) {
     loginUnverified,
     injectedAuth,
     probeUnknown,
+    // TD-258：key_only_* 不计入可用席位、不抬 tier，但绝不从叙事里无声消失
+    // （无 CLI 探测面的凭据声明车道——如 kimi-web——的如实展示位）。
+    keyOnly: seatEntries
+      .filter((e) => e.readyState === "key_only_present" || e.readyState === "key_only_missing")
+      .map((e) => e.id),
     missingAdversarial:
       readySeats.length >= 2 && !readySeats.some((e) => e.role === "adversarial"),
     insufficientFamilyDiversity: readySeats.length >= 2 && new Set(knownFamilies).size < 2,

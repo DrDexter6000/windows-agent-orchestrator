@@ -118,14 +118,14 @@ Copy-Item config/agents.example.json config/agents.json
 
 | 你有的 runtime/认证 | 保留的 worker | 认证方式 |
 |---|---|---|
-| zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；但 zcode 车道有**承重 env 桥**——`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析（ZCode 桌面安装时通常已写 User 作用域；registry `env` 块可显式覆盖，模板 glm-pro 带占位路径示例，须换真实路径或删除；**该桥适用于全部 zcode 车道，模板 glm-flash 条目未带 env 块、只依赖 User 作用域解析——模板补桥已立案待 Owner（TD-259）**）。`wao doctor` 承重 env 检查（advisory）会如实报告 |
+| zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；但 zcode 车道有**承重 env 桥**——`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析。模板两条 zcode 车道均带占位 env 桥：宿主无 ZCode 桌面上下文时须换成真实路径；**若桌面安装已在 User 作用域写入且可解析，删掉整个 env 块**（agent-env 先于 User 作用域，占位值会盖掉有效配置=spawn 必死）。`wao doctor` 承重 env 检查（advisory）会如实报告 |
 | codex | sol / astra | `codex login` |
 | claude-code + 官方 Claude OAuth（无 provider 直连） | opus | `claude login`（原生 OAuth，不走 provider wrapper） |
-| Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；serve 启动与端口见 `docs/usage.md` 场景 4e「kimi 专用 worker serve 运维配方」） |
+| Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；token 来源/注入/引号纪律与 serve 启动见 `docs/usage.md` 场景 4e「kimi 专用 worker serve 运维配方」的 KIMI_WEB_TOKEN 节） |
 | DeepSeek key | deepseek-pro / deepseek-flash | `DEEPSEEK_API_KEY`（deepseek-acp 通道，Windows User 环境变量）；另需 `dsh` 在 PATH 与 containment 资产（见 `docs/certification-runbook.md`） |
 | claude-code + provider key（替代路径） | 自建 claude-code provider 车道（新车道键——**勿复用 opus 键改 provider**，会撞 lanes.json 身份断言；新增车道属 Owner 组合权，需自行认证） | `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`（provider wrapper 通道；DeepSeek 用户优先上一行 ACP 原生车道） |
 
-> 探测面诚实声明：`wao onboarding` 裸跑的自动推荐当前只探测 provider key 面（`provider.apiKeyEnv`）；kimi/deepseek 车道的 `tokenEnv`/`credentialEnv` 不在推荐探测面（已立案 TD-258）。`wao doctor` 不受此限——它按 registry 声明的凭据名如实检查所有车道。
+> 探测面说明：`wao onboarding` 裸跑的凭据探测覆盖三类声明名（`provider.apiKeyEnv`/`tokenEnv`/`credentialEnv`，与 doctor 同一权威）。**无 CLI 探测面的车道（kimi-web、zcode）只探 key 名可解析性**——`key 名已解析` **不是就绪声称**（未验证令牌有效性/serve 可达性；zcode 无凭据声明恒为"探测未知"）。深度体检仍以 `wao doctor` 为准。
 
 > 接入新模型 / 新运行时（改 provider/model 字段 vs 换 backend 的分叉）见 docs/usage.md「接入新模型 / 新运行时」节。
 

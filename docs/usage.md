@@ -573,6 +573,22 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 主 serve（默认端口 58627，无标记）留给 Owner 人类使用。重启机器后需要重新
 拉起 worker serve 并核实 kimi 车道 serveUrl 指向 58628（agents.json，不入库）。
 
+**KIMI_WEB_TOKEN（kimi 车道凭据面，TD-258 补档）**：
+
+- **是什么/从哪来**：`kimi web` serve 的持久 Bearer token，由上游 serve 签发
+  （`kimi web --help`：token 在启动时打印；`rotate-token` 子命令生成新持久
+  token 且旧 token **立即失效**——共用同一 kimi 主目录的 serve 会一起受影响，
+  轮换前先想清楚）。本仓未复验的边界：绑定 loopback 时启动是否始终打印、
+  `KIMI_CODE_HOME` 分家后各 serve 的 token 是否独立——按上游实际输出为准。
+- **怎么注入**：Windows User 作用域（`setx KIMI_WEB_TOKEN <值>`）。**派发链
+  不要求新开终端**——WAO 派发链有 env→HKCU 两级回退（TD-208 实证）；需要
+  新终端（或 `[Environment]::GetEnvironmentVariable(...,'User')` 读取）的只有
+  直接读进程 env 的工具（如身份探针）。值不回显；registry 只声明名
+  （`tokenEnv: "KIMI_WEB_TOKEN"`）。Git Bash 下的引号纪律见
+  `docs/certification-runbook.md` 代跑取证段。
+- **WAO 的边界**：WAO 从 registry 的 `tokenEnv` 指定环境变量读取 Bearer
+  凭据，不负责令牌发放。
+
 **TD-250 进程荚治理（决定 0056，2026-10-10）**：kimi serve 为每会话在创建时
 拉起 6-8 个助手进程（datasource/analyzer/officecli/mcp.json 条目）且**永不拆
 除**（无空闲 GC；会话/工作区删除均不触发；上游无停荚端点）——唯一全量拆除

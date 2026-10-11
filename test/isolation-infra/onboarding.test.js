@@ -1380,10 +1380,13 @@ test("R6-C: recommendations over the REAL tracked template derive all rows from 
   });
   assert.equal(rec.rows.length, 8);
   const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
-  // 0046：原生通道无 provider 块——requiresKeyEnv 全空（凭据走 credentialEnv/tokenEnv，
-  // 推荐矩阵层尚未建模，与 doctor 对 kimi-web/zcode 无就绪映射的在册缺口同族）。
-  for (const id of ["glm-pro", "glm-flash", "kimi", "sol", "astra", "opus", "deepseek-pro", "deepseek-flash"]) {
-    assert.equal(byId[id]?.requiresKeyEnv, null, `${id} 无 provider 块（0046 原生通道）`);
+  // TD-258：凭据名改从 requiredCredentialNames 派生（doctor 同一权威）——tokenEnv/
+  // credentialEnv 车道如实携带声明的名；无凭据声明车道（zcode=承重桥非凭据）仍 null。
+  assert.equal(byId.kimi.requiresKeyEnv, "KIMI_WEB_TOKEN", "kimi 行携带 tokenEnv 声明名");
+  assert.equal(byId["deepseek-pro"].requiresKeyEnv, "DEEPSEEK_API_KEY", "deepseek-pro 行携带 credentialEnv 声明名");
+  assert.equal(byId["deepseek-flash"].requiresKeyEnv, "DEEPSEEK_API_KEY", "deepseek-flash 行携带 credentialEnv 声明名");
+  for (const id of ["glm-pro", "glm-flash", "sol", "astra", "opus"]) {
+    assert.equal(byId[id]?.requiresKeyEnv, null, `${id} 无凭据声明（登录态/承重桥面）`);
   }
   // CLI 探测映射（BACKEND_CLI SSOT）：codex→codex、claude-code→claude、deepseek-acp→dsh；
   // zcode/kimi-web 未映射=无 CLI 面（HTTP attach/app-server 由 binary/serveUrl 直连）。
@@ -1394,13 +1397,15 @@ test("R6-C: recommendations over the REAL tracked template derive all rows from 
   assert.equal(byId["deepseek-flash"].requiresCli, "dsh");
   assert.equal(byId["glm-pro"].requiresCli, null);
   assert.equal(byId.kimi.requiresCli, null, "kimi-web is HTTP attach — no CLI to probe");
-  // readyState：登录态通道（codex/claude/dsh）CLI 在场=login_based（登录态不可探，
-  // 与 ready 区分）；无 CLI 面不可验证=unknown。
+  // readyState（TD-258 后合同）：登录态通道（codex/claude 无凭据声明）CLI 在场
+  // =login_based；deepseek 声明 credentialEnv=DEEPSEEK_API_KEY（本夹具 probe=
+  // missing）→ missing_key；kimi 无 CLI 面但声明 tokenEnv → key_only_missing；
+  // zcode 无 CLI 面且无凭据声明=unknown（承重桥不是凭据）。
   assert.equal(byId.sol.readyState, "login_based");
   assert.equal(byId.opus.readyState, "login_based");
-  assert.equal(byId["deepseek-flash"].readyState, "login_based");
-  assert.equal(byId["glm-pro"].readyState, "unknown", "zcode 无 CLI 映射=无法验证（不假装已覆盖）");
-  assert.equal(byId.kimi.readyState, "unknown");
+  assert.equal(byId["deepseek-flash"].readyState, "missing_key", "deepseek 声明 DEEPSEEK_API_KEY 且夹具 missing");
+  assert.equal(byId["glm-pro"].readyState, "unknown", "zcode 无 CLI 映射且无凭据声明=无法验证（不假装已覆盖）");
+  assert.equal(byId.kimi.readyState, "key_only_missing", "kimi 无 CLI 面+tokenEnv 声明+夹具 missing");
   // The serialized recommendation never carries a credential VALUE.
   assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(rec)));
 });

@@ -44,6 +44,23 @@ import { requiredCredentialNames, inheritedEnvNames } from "../envPolicy.js";
 export { requiredCredentialNames, inheritedEnvNames };
 
 /**
+ * 多凭据名探测源聚合为单一 key 态（TD-258：doctor 与 onboarding 共用的唯一
+ * 实现——claude-code 的 provider.apiKeyEnv 加 --api-key-env prependArgs 可能
+ * 出现多名，聚合语义不得在两个消费面各写一份）。
+ *
+ * @param {Array<"process_env"|"user_env"|"missing"|"unknown">} sources — 非空数组
+ * @returns {"process_env"|"user_env"|"missing"|"unknown"} 全 process_env=process_env；
+ *   任一 missing=missing；其余 process/user 混合=user_env；否则 unknown。
+ */
+export function aggregateCredentialSources(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) return "unknown";
+  if (sources.every((s) => s === "process_env")) return "process_env";
+  if (sources.includes("missing")) return "missing";
+  if (sources.every((s) => s === "process_env" || s === "user_env")) return "user_env";
+  return "unknown";
+}
+
+/**
  * TD-256（2026-10-11）：三态、分作用域的 Windows env 读器（registry env 读取的
  * 单一实现——doctor 门禁可见性检查用）。
  *

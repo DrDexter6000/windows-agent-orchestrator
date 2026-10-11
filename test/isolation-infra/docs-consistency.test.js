@@ -164,17 +164,20 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
     "docs/smoke-guide.md",
     "README.md",
   ];
-  // 0046（2026-10-06）：端口权威按通道分化——kimi-web 文档默认 58627（kimi web CLI
-  // 默认），opencode-serve 文档默认 4297。原则不变：面向用户文档只写文档默认端口，
-  // 本机真实端口属配置私事，不进文档。
-  const PORT_BY_FILE = { "config/agents.example.json": "58627" };
+  // 0046（2026-10-06）：端口权威按通道分化——opencode-serve 文档默认 4297。
+  // TD-259（2026-10-11 双席会审修订）：kimi-web 模板端口=docs/usage.md 场景 4e
+  // worker serve 配方端口（58628）——原 58627 是 kimi web CLI 裸默认端口，照抄会把
+  // worker 派到无 WAO_IN_WORKER 标记的人用 serve（0047 env 臂静默失效）；模板指 58628
+  // 时误配=连接被拒大声失败，用户被引去看 4e 配方。原则修订：面向用户文档写**通道
+  // 配方的 worker 端口**，本机真实端口仍属配置私事，不进文档。
+  const PORT_BY_FILE = { "config/agents.example.json": "58628" };
   for (const f of FILES) {
     const allowed = PORT_BY_FILE[f] ?? "4297";
     const ports = collectServePorts(read(f));
     for (const p of ports) {
       assert.equal(
         p, allowed,
-        `${f} 出现非 ${allowed} 的 serveUrl 端口（${p}）。面向用户文档统一写通道文档默认端口（kimi-web=58627，opencode=4297）；本机真实端口属配置私事，不进文档。`
+        `${f} 出现非 ${allowed} 的 serveUrl 端口（${p}）。面向用户文档统一写通道配方端口（kimi-web=58628[场景 4e worker serve]，opencode=4297）；本机真实端口属配置私事，不进文档。`
       );
     }
   }

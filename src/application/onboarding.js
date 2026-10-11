@@ -41,6 +41,8 @@ import { BACKEND_CLI } from "./backendCliMap.js";
 // 模板面的 rows，分级推导与六态映射都在 panelReadiness（doctor 共用，禁止
 // 两处各算）。computeReadyState 探测归一后委托 deriveReadyState（单一实现）。
 import { assessPanelReadiness, deriveReadyState, seatRoleOf } from "./panelReadiness.js";
+// TD-258：凭据名权威=requiredCredentialNames（doctor 同源），多名聚合走共享函数。
+import { requiredCredentialNames, aggregateCredentialSources } from "./credentialReadiness.js";
 // TD-191① / 决定 0043：宿主示例行从 hostDescriptors 唯一权威派生（消灭此前
 // 硬编码 claude-code/codex 两条的第二份宿主清单——会审指认的既有漂移点）。
 import { HOST_DESCRIPTORS } from "../hostAdapters/hostDescriptors.js";
@@ -202,10 +204,12 @@ export function displayWidth(value) {
 const READY_RANK = {
   ready: 0,
   login_based: 1,
-  missing_cli: 2,
-  missing_key: 3,
-  missing_both: 4,
-  unknown: 5,
+  key_only_present: 2, // TD-258：无 CLI 探测面的 key 名已解析（非就绪声称）
+  missing_cli: 3,
+  missing_key: 4,
+  missing_both: 5,
+  key_only_missing: 6,
+  unknown: 7,
 };
 
 /**
@@ -246,22 +250,36 @@ function normalizeKey(v) {
  * Compute one row's readyState from the injected probes.
  * @param {object} input
  * @param {string|null} input.requiresCli
- * @param {string|null} input.requiresKeyEnv
+ * @param {string[]|null} input.requiresKeyEnvNames — 全部必需凭据名（TD-258：消费全部
+ *   名而非只取首个；display 字段 requiresKeyEnv 仍为首名）
  * @param {(name: string) => Promise<true|false|"unknown">} input.probeCli
  * @param {(name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">} input.probeKey
- * @returns {Promise<"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown">}
+ * @returns {Promise<"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"key_only_present"|"key_only_missing"|"unknown">}
  */
-async function computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }) {
-  if (!requiresCli) return "unknown"; // backend maps to no CLI: cannot verify
-  // 六态映射的单一实现在 panelReadiness.deriveReadyState（R9：doctor 共用）；
+async function computeReadyState({ requiresCli, requiresKeyEnvNames, probeCli, probeKey }) {
+  // 八态映射的单一实现在 panelReadiness.deriveReadyState（R9：doctor 共用）；
   // 这里只做探测 + 归一，不重复映射逻辑。
-  const cli = normalizeCli(await probeCli(requiresCli));
-  if (!requiresKeyEnv) {
-    // 无 key 依赖项（官方 OAuth / CLI 登录态类）：仅探 CLI。
-    return deriveReadyState({ requiresCli, requiresKeyEnv, cli });
+  const names = Array.isArray(requiresKeyEnvNames) && requiresKeyEnvNames.length > 0
+    ? requiresKeyEnvNames
+    : null;
+  // 无 CLI 探测面但有凭据声明：只探 key（key_only_* 语义见 deriveReadyState）。
+  // 每名先 normalizeKey（原始 null/undefined=missing）再聚合，防聚合层吞原始形状。
+  if (!requiresCli && names) {
+    const key = aggregateCredentialSources(await Promise.all(
+      names.map(async (n) => normalizeKey(await probeKey(n))),
+    ));
+    return deriveReadyState({ requiresCli, requiresKeyEnv: names[0], key });
   }
-  const key = normalizeKey(await probeKey(requiresKeyEnv));
-  return deriveReadyState({ requiresCli, requiresKeyEnv, cli, key });
+  if (!requiresCli) return "unknown"; // backend maps to no CLI: cannot verify
+  const cli = normalizeCli(await probeCli(requiresCli));
+  if (!names) {
+    // 无 key 依赖项（官方 OAuth / CLI 登录态类）：仅探 CLI。
+    return deriveReadyState({ requiresCli, requiresKeyEnv: null, cli });
+  }
+  const key = aggregateCredentialSources(await Promise.all(
+    names.map(async (n) => normalizeKey(await probeKey(n))),
+  ));
+  return deriveReadyState({ requiresCli, requiresKeyEnv: names[0], cli, key });
 }
 
 /**
@@ -321,8 +339,12 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
   for (const c of list.slice(0, MAX_CANDIDATES)) {
     const agent = isPlainObject(agents[c.id]) ? agents[c.id] : {};
     const requiresCli = BACKEND_CLI[c.backend] ?? null;
-    const apiKeyEnv = agent.provider?.apiKeyEnv;
-    const requiresKeyEnv = typeof apiKeyEnv === "string" && apiKeyEnv.length > 0 ? apiKeyEnv : null;
+    // TD-258：凭据名从 requiredCredentialNames 派生（doctor 同一权威——覆盖
+    // provider.apiKeyEnv / tokenEnv / credentialEnv 三类），消费全部名；display
+    // 字段 requiresKeyEnv 保持首名（形状不变）。已配置面的 agent 可能缺
+    // backend 字段，用候选行车道值兜底。
+    const credNames = requiredCredentialNames({ ...agent, backend: agent.backend ?? c.backend });
+    const requiresKeyEnv = credNames.length > 0 ? credNames[0] : null;
     rows.push({
       id: c.id,
       backend: c.backend ?? null,
@@ -331,7 +353,7 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
       requiresKeyEnv,
       duty: truncateNote(agent._comment_task, DUTY_MAX),
       authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
-      readyState: await computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }),
+      readyState: await computeReadyState({ requiresCli, requiresKeyEnvNames: credNames.length > 0 ? credNames : null, probeCli, probeKey }),
       // R10-B：显式席位声明（两个行生产方都带 declared——doctor 同形）。
       // 非字符串一律 undefined（坏值由 normalizeAgent 拒绝，探测行不复制）。
       seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,

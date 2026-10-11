@@ -128,7 +128,10 @@ const REGISTERED_CENSUS = {
   // TD-229（2026-10-07）：doctor 5d 认证模式检查按 backend==="claude-code" &&
   // !provider 筛 native worker（轴向=native OAuth 通道识别，非全后端分叉）。
   "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1 },
-  "commands/onboarding.js": { "opencode-serve": 2 },
+  // TD-258（2026-10-11）：recommendationReadyLabel 加 zcode/kimi-web 显示覆盖
+  // （"无 CLI 探测面"/"serve 探测未覆盖"——轴向=无 CLI 面车道的错标修正，非
+  // runtime 分叉）。
+  "commands/onboarding.js": { "opencode-serve": 2, zcode: 1, "kimi-web": 1 },
   "commands/registry.js": { "opencode-serve": 2, "claude-code": 1 },
   // TD-229（2026-10-07）：inheritedEnvNames 对 native 通道（backend==="claude-code"
   // && !provider）追加长期令牌继承名——通道条件派生，非新分叉轴。
