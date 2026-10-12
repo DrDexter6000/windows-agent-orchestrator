@@ -219,6 +219,9 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 // 硬顶是**自上一个 part 落地以来被续命的静默**（非墙钟）：有新 part 落地即清零
 // ——它只约束"流活着但一直落不了 part"这一种形态，不给带持续产出的长轮设总量
 // （与上方否决"总静默预算"同一理由：多个各自合法的长思考步会累计击穿）。
+// 诚实边界：part 偶尔落地、却始终等不到完成信号的轮次不受本顶约束（每次落地即
+// 清零）——与停滞门同一进度定义（parts 个数增长，不问该 part 是否代表有效进展），
+// 整轮没有总量上界；本顶只保证"单段不落 part 的续命静默"有界。
 //
 // 取值 120min（Owner 2026-10-12 裁定：glm-pro 额度视为不受限，凡它能完成的任务
 // 都让它完成，车道要求放宽）。原口径是每 turn 累计 30min、落 part 不清零：同日
@@ -1346,8 +1349,8 @@ export class ZcodeBackend {
         //     在场 → 只以 silentTimeout 为界；缺席 → 宽松思考预算
         //     ZERO_PART_POLL_LIMIT 拍有界，绝不无限等待。
         //   - 已有产出后的停滞（anyNewPart=true）——TD-197① 观测自适应时间门：
-        //     静默段 ≥ budgetMs 才收口。budget = min(300s, max(120s, 3 × 本轮已
-        //     恢复的最大静默间隙))——首段静默由 120s floor 直接保护（一周四次
+        //     静默段 ≥ budgetMs 才收口。budget = min(600s, max(300s, 3 × 本轮已
+        //     恢复的最大静默间隙))——首段静默由 300s floor 直接保护（一周四次
         //     误杀实录见常量注释），轮内批间节奏自放大，硬顶保有界性（顶约束
         //     静默段而非墙钟）。真停滞仍收口。
         const stalled = anyNewPart && stallTracker.stallMs() >= stallTracker.budgetMs();

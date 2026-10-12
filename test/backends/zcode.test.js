@@ -1133,6 +1133,38 @@ test("zcode ⑥g: 流一直活着但 part 始终不落 → 被证词续命的静
   child.kill();
 });
 
+test("zcode ⑥g: 落 part 清零之后流停了 → 照旧判停滞，续命计数已随之清零", async () => {
+  // n=13 续命一次（静默 300s、流在收）；n=15 落一个 part（清零）；n=20 之后不再有
+  // 流分片。此后静默从 n=15 起算，n=25 满 300s 预算，最近一个分片在 150s 前
+  // （> 60s 新鲜度窗）⇒ 停滞收口；文案里不带"prior stream attestation"（已清零）。
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 15) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), stepStartMsg()];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick <= 20) peer.notify(...streamChunk());
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled \(20 model stream chunk\(s\) seen this turn, none in the last 60s; silent stretch/,
+    "清零不关掉停滞门；续命计数随落 part 清零，文案不带 prior attestation");
+  assert.equal(peer.polls(), 25);
+  child.kill();
+});
+
 test("zcode ⑥g: 有 part 落地即清零——两段各自未到顶的续命静默合计超过硬顶，仍正常完成", async () => {
   // 第一段 n=3→203 无新 part（约 100min，续命 19 次 × 300s = 95min）；n=203 落一个
   // part；第二段 n=203→403 无新 part（落 part 后预算自放大到 600s 硬顶，续命 9 次
