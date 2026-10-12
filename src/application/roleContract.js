@@ -350,9 +350,9 @@ export const WORKER_DECLARED_SCOPE_EXPANSION = "scope_expansion_required";
  * worker 的**最终**回复是否按合同上报了越界停手。合同形状是
  * `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`：行首（容许引用/
  * 列表/反引号修饰）出现标记，其后必须有非空路径、破折号分隔、非空理由。
- * 不算上报的情形（会审 sol 席反例）：只有标记没有路径/理由的空声明；合同模板
- * 原文（路径是 `<…>` 占位符）；围栏代码块里的内容（多为复述合同条款）；句中
- * 提及。只回布尔事实——路径与理由是 worker 的自由文本，不进控制面事件，Lead 经
+ * 不算上报的情形（会审 sol 席两轮反例）：只有标记没有路径/理由的空声明；合同
+ * 模板原文（路径或理由是 `<…>` 占位符，含被反引号/引号包裹的）；围栏代码块
+ * （``` 或 ~~~）里的内容（多为复述合同条款）；句中提及。只回布尔事实——路径与理由是 worker 的自由文本，不进控制面事件，Lead 经
  * collect 读原文。只看最后一条 assistant 消息。漏判的代价是退回原有的 empty_diff
  * 表述（安全方向），所以判据从严。
  *
@@ -370,15 +370,18 @@ export function declaredScopeExpansion(messages) {
   const text = Array.isArray(last.parts)
     ? last.parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n")
     : typeof last.content === "string" ? last.content : "";
-  const outsideFences = text.replace(/```[\s\S]*?(?:```|$)/g, "");
+  const outsideFences = text.replace(/(```|~~~)[\s\S]*?(?:\1|$)/g, "");
   const lineRe = new RegExp(`(?:^|\\n)[\\s>*\\-\`]*${SCOPE_EXPANSION_MARKER}:[ \\t]*([^\\n]*)`, "g");
   for (const match of outsideFences.matchAll(lineRe)) {
     const body = match[1].replace(/[`\s]+$/, "");
     const sep = body.match(/\s[—–-]+\s/);
     if (!sep) continue;
-    const path = body.slice(0, sep.index).trim();
-    const reason = body.slice(sep.index + sep[0].length).trim();
-    if (path.length === 0 || reason.length === 0 || path.startsWith("<")) continue;
+    // 去掉路径/理由两侧的反引号与引号再判占位符（`<repo-relative-path>` 也是模板原文）。
+    const unquote = (v) => v.trim().replace(/^[`'"]+|[`'"]+$/g, "").trim();
+    const path = unquote(body.slice(0, sep.index));
+    const reason = unquote(body.slice(sep.index + sep[0].length));
+    if (path.length === 0 || reason.length === 0) continue;
+    if (/^<[^>]*>$/.test(path) || /^<[^>]*>$/.test(reason)) continue;
     return true;
   }
   return false;

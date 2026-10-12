@@ -395,6 +395,10 @@ test("declaredScopeExpansion: 合同指令携带同一标记；只认最终 assi
   assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>")]), false, "合同模板占位符原文");
   assert.equal(declaredScopeExpansion([asst("Done.\n```\nSCOPE_EXPANSION_REQUIRED: docs/x.md — need it\n```")]), false, "围栏代码块内不算");
   assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: docs/x.md - need to edit docs")]), true, "连字符分隔也接受");
+  // 复审 sol 席残留反例：~~~ 围栏、反引号包裹的模板占位符
+  assert.equal(declaredScopeExpansion([asst("Done.\n~~~text\nSCOPE_EXPANSION_REQUIRED: docs/x.md — need it\n~~~")]), false, "~~~ 围栏内不算");
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: `<repo-relative-path>` — <reason>")]), false, "反引号包裹的模板占位符");
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: `docs/x.md` — need to edit docs")]), true, "反引号包裹的真实路径照常算");
   assert.equal(declaredScopeExpansion([]), false);
   assert.equal(declaredScopeExpansion(undefined), false);
 });

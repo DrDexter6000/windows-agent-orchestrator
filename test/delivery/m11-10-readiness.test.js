@@ -1186,7 +1186,8 @@ test("runs delivery: verification pending → 输出带验证闸租约事实（�
 
     const text = (await run([], heldByOther)).text;
     assert.match(text, /Verification: pending/);
-    assert.match(text, /Verification gate: lease held by canonical-test \/ run_someone_else, started 1791802020000, heartbeat age 12000 ms/);
+    assert.ok(text.includes(`Verification gate: lease held by canonical-test / run_someone_else, started ${new Date(1791802020000).toISOString()}, heartbeat age 12000 ms`),
+      "文本行把毫秒时间戳写成 ISO 时间（JSON 保留原值）");
     assert.ok(!/queued|in progress|not started/.test(text), "只报租约事实，不断言排队/在跑/未开始");
 
     const mine = JSON.parse((await run(["--format", "json"], { free: false, holder: { owner: "runner", runId, ageMs: 400000 } })).text);

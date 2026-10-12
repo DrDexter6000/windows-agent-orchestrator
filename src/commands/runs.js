@@ -2017,7 +2017,9 @@ function pendingVerificationGateLine(gate) {
   const age = Number.isFinite(h.heartbeatAgeMs) ? `, heartbeat age ${h.heartbeatAgeMs} ms` : "";
   if (gate.lease === "held_by_this_run") return `Verification gate: lease held by this run${age} (see: runs gate)`;
   const who = [h.owner, h.runId, h.agentId].filter(Boolean).join(" / ") || "(unidentified)";
-  const since = h.startedAt !== undefined ? `, started ${h.startedAt}` : "";
+  // 真实租约的 startedAt 是毫秒时间戳——文本行换成 ISO 时间（JSON 输出保留原值）。
+  const startedText = Number.isFinite(h.startedAt) ? new Date(h.startedAt).toISOString() : h.startedAt;
+  const since = startedText !== undefined ? `, started ${startedText}` : "";
   return `Verification gate: lease held by ${who}${since}${age} — verifications on this machine run one at a time behind this lease (see: runs gate)`;
 }
 

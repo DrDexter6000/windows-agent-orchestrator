@@ -781,11 +781,14 @@ export function detectHostFromEnv(env = process.env) {
  * WAO 的 MCP 没注册时，给一行 stderr 提示——Lead 被明确告知 MCP 工具在这个宿主
  * 上不可用（命令行是合法通道，这不是违规告警）。
  *
- * 警报疲劳纪律（0042 教训；会审 sol/kimi 两席均点名）：**每个宿主会话只判一次**
- * ——会话键取描述符 sessionEnv 的值（没有则按 UTC 日），判过即记入状态文件，同
- * 一会话后续派发不再探测也不再出行（故意长期走 CLI 的 Lead 每会话至多见一次）。
- * fail-open：识别不出宿主/探测抛错/状态 unknown → null 且不记状态（下次再判）；
- * 状态读失败=未判过，写失败=下次重判。状态文件只存宿主 id → 会话键的短哈希。
+ * 警报疲劳纪律（0042 教训）：**每个宿主会话、每个项目目录只判一次**。去重键 =
+ * 宿主 + 会话（描述符 sessionEnv 的值，没有则按 UTC 日）+ 派发目录；每个键一个
+ * 标记文件，用独占创建（wx）落盘——并发派发里只有抢到标记的那个进程出行，多个
+ * 会话交替派发互不覆盖（复审 sol 席：单文件"最近一个会话键"的做法在这两种情形
+ * 下都会重复提示）。换项目目录会重新判定（注册状态可能因 local/项目级配置而不同）。
+ * fail-open：识别不出宿主/探测抛错/状态 unknown → null 且不落标记（下次再判）；
+ * 标记写不了（非 EEXIST）→ 不去重、照常判定。标记文件名是哈希，不含会话 id；
+ * 7 天前的标记在落新标记时顺手清掉。
  * @returns {string|null}
  */
 export function renderMcpHostAdvisory({ env = process.env, cwd, probe, stateDir, now = () => new Date() } = {}) {
@@ -793,25 +796,41 @@ export function renderMcpHostAdvisory({ env = process.env, cwd, probe, stateDir,
     const host = detectHostFromEnv(env);
     if (!host) return null;
     const sessionVar = (findHostDescriptor(host)?.sessionEnv ?? []).find((n) => typeof env[n] === "string" && env[n].length > 0);
-    const sessionKey = createHash("sha256")
-      .update(sessionVar ? `${sessionVar}=${env[sessionVar]}` : `day=${now().toISOString().slice(0, 10)}`)
-      .digest("hex").slice(0, 16);
-    const dir = stateDir ?? join(env.LOCALAPPDATA ?? tmpdir(), "wao");
-    const statePath = join(dir, "mcp-host-advisory.json");
-    let judged = {};
-    try { judged = JSON.parse(readFileSync(statePath, "utf8")) ?? {}; } catch { /* 无状态=未判过 */ }
-    if (judged[host] === sessionKey) return null;
+    const session = sessionVar ? `${sessionVar}=${env[sessionVar]}` : `day=${now().toISOString().slice(0, 10)}`;
+    const project = String(cwd ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const key = createHash("sha256").update(`${host}\n${session}\n${project}`).digest("hex").slice(0, 24);
+    const dir = join(stateDir ?? join(env.LOCALAPPDATA ?? tmpdir(), "wao"), "mcp-host-advisory");
+    const marker = join(dir, `${key}.seen`);
+    if (existsSync(marker)) return null;
     const probed = probeHostRegistration(host, { expectedStdio: stdioPath(), cwd, env, ...probe });
     if (!probed || probed.state === "unknown") return null;
     try {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(statePath, JSON.stringify({ ...judged, [host]: sessionKey }));
-    } catch { /* 写失败：下次重判（保守可见） */ }
+      writeFileSync(marker, "", { flag: "wx" });
+      pruneAdvisoryMarkers(dir, now().getTime());
+    } catch (err) {
+      if (err?.code === "EEXIST") return null; // 另一个并发派发刚判过——由它出行
+    }
     if (probed.state !== "not_registered") return null;
-    return `[wao] advisory: this is a ${host} session and WAO's MCP is not registered for it — MCP tools are unavailable here (the CLI works). Register: wao mcp bind --host ${host} · check: wao mcp status --host ${host} (shown once per session)`;
+    return `[wao] advisory: this is a ${host} session and WAO's MCP is not registered for it — MCP tools are unavailable here (the CLI works). Register: wao mcp bind --host ${host} · check: wao mcp status --host ${host} (shown once per session and project)`;
   } catch {
     return null;
   }
+}
+
+const ADVISORY_MARKER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 清掉过期的去重标记（best-effort；任何失败都忽略）。 */
+function pruneAdvisoryMarkers(dir, nowMs) {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".seen")) continue;
+      const file = join(dir, name);
+      try {
+        if (nowMs - lstatSync(file).mtimeMs > ADVISORY_MARKER_MAX_AGE_MS) unlinkSync(file);
+      } catch { /* 并发清理/占用：忽略 */ }
+    }
+  } catch { /* 目录读不了：忽略 */ }
 }
 
 /**

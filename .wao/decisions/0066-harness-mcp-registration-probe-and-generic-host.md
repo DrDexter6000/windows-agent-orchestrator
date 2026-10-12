@@ -1,8 +1,9 @@
 # 0066 MCP 宿主适配：注册状态只读探测 + 六宿主入表 + 表外宿主通用片段（TD-191 续，修订 0043 第 2/3 条）
 
 - 日期：2026-10-12
-- 状态：proposed（实现与真机验证已完成，待 Owner 审阅合入）
-- 会审：Owner 当日指示"最终交付物发给 kimi 和 sol 看一下"——consult_202610121557386770ygr68（kimi `run_202610121557387053debaf` / sol `run_20261012155738775le77bw`，审的是提交 243da09）。两席均为 MERGE_AFTER_FIXES：sol 七条必改、kimi 一条必改，全部采纳，见文末"会审必改"。
+- 状态：accepted（Owner 2026-10-12 授权合入，见下"合入授权"）
+- 会审：Owner 当日指示"最终交付物发给 kimi 和 sol 看一下"。第一轮 consult_202610121557386770ygr68（审提交 243da09）：两席均为 MERGE_AFTER_FIXES，sol 七条必改、kimi 一条必改，全部采纳。第二轮 consult_20261012171106194ew6nn1（审修复增量 243da09..b6fb5d6）：sol 判 FIX_FIRST，指出四处残留/新引入缺陷，全部采纳；修复后未再送第三轮。两轮明细见文末。
+- 合入授权：Owner 2026-10-12——"经过 kimi、sol 复审，或者综合复审建议后已完成优化调整的项目，允许 commit & push"。
 - 来源：Owner 点名"MCP 必须适配所有 agent harness，现在只适配 codex 是不对的"（经 2026-10-12 Carloha 宿主项目消费者侧反馈任务书转达）；范围由 Owner 当日四项裁定：① 宿主清单 = claude-code、codex、zcode、kimi-code、opencode + Claude 桌面聊天端；② 产品面"出命令 + 只读探测"，不扩 autoBind，本机注册与真机验证由执行会话代办；③ 全局入口指向开发工作树一事本批只登记、不动 0049；④ 第三节另行处置（见 tech-debt）。
 
 ## 背景（2026-10-12 实测）
@@ -16,13 +17,13 @@
 ## 决定
 
 1. **宿主表扩到六个**：新增 `kimi-code`、`opencode`、`claude-desktop`（均 snippet-only）。opencode 片段形态 = 顶层 `mcp.wao {type:"local", command:[argv…], enabled:true}`；另两者 = mcpServers。文件式注册的宿主带 `configHint`（要并入的配置文件），`mcp bind` 输出为 `configFile`。
-2. **修订 0043 第 3 条**：snippet-only 宿主的 `mcp status` 不再返回 `not_applicable`，改为**只读探测宿主自己的配置**，四态闭集 `registered` / `registered_other_target` / `not_registered` / `unknown`，并列出看过的每个来源。边界写死：**读面新开、写面不动**——WAO 从"不碰其他宿主配置"变为"读但绝不写"，只提取 wao 条目，配置内容不进输出（`sources` 只回显路径与状态）。纪律：只读、不 spawn；只有文件确实不存在（ENOENT/ENOTDIR）才算没有，其余读取失败、解析失败一律 `unknown`，绝不折算成未注册；多来源按宿主自己的覆盖优先级取**生效条目**（高优先级来源读不了 → unknown），被禁用的条目记 `not_registered`；`registered` ≠ 已加载。新宿主入表须同批提供探测（测试守卫）。
+2. **修订 0043 第 3 条**：snippet-only 宿主的 `mcp status` 不再返回 `not_applicable`，改为**只读探测宿主自己的配置**，四态闭集 `registered` / `registered_other_target` / `not_registered` / `unknown`，并列出看过的每个来源。边界写死：**读面新开、写面不动**——WAO 从"不碰其他宿主配置"变为"读但绝不写"，只提取 wao 条目，配置内容不进输出（`sources` 只回显路径与状态）。纪律：只读、不 spawn；只有文件确实不存在（ENOENT/ENOTDIR）才算没有，其余读取失败、解析失败一律 `unknown`，绝不折算成未注册；多来源按宿主自己的覆盖语义取**生效条目**（Claude Code 高优先级整条覆盖、读不了即 unknown；opencode 各来源按键合并、任一来源读不了即 unknown），被禁用的条目记 `not_registered`；`registered` ≠ 已加载。新宿主入表须同批提供探测（测试守卫）。
 3. **codex 两层**：`mcp status --host codex` 在项目级绑定状态之外附 `userRegistration`（经 `codex mcp list --json` 读用户级，不解析 TOML）。项目未绑定但用户级已注册时 Lead 在 codex 里照样有工具。
 4. **`mcp status` 不带 `--host` = 全宿主一览**（原为报错）。
 5. **修订 0043 第 2 条的 bind 面**：表外宿主 `mcp bind` 不再只报错，emit 通用 stdio 片段并明说 `GENERIC SNIPPET — NOT BOUND, FORMAT NOT VERIFIED`。command/args 是宿主中立事实，不构成格式猜测；该宿主的配置语法与加载结果一概不声称。`status` 对表外宿主仍是 `unsupported_host`（附"WAO 对它没有探测"的说明），`unbind` 仍报错。
 6. **`onboarding --host`**：宿主指引块排第一屏；表外宿主给通用指引，不再非零退出。
 7. **帮助文本**：`MCP host registration` 节列全表内宿主与三条命令的真实语义（测试守卫：表内宿主必须都出现在帮助里）。
-8. **派发 advisory**：`run` 派发发生在可识别的宿主会话里、而该宿主未注册 WAO MCP 时，stderr 一行提示 Lead 自己走的是命令行通道。识别只用描述符表 `detectEnv` 里**真机核实过**的环境标记（claude-code `CLAUDECODE`；codex `CODEX_THREAD_ID`；opencode `OPENCODE`；kimi-code、zcode、claude-desktop 无可靠标记，不识别）。fail-open；**每个宿主会话只判一次**（会话键取描述符 `sessionEnv` 的值，缺席按 UTC 日；状态文件只存键的短哈希）——命令行是合法通道，这不是违规告警，不套用 0042 ③ 的"超帽恒弹"（初稿是每次派发都出，两席会审均点名警报疲劳，已改）。codex 不出此行（其注册状态要 spawn CLI 才知，派发路径不付这个代价）。
+8. **派发 advisory**：`run` 派发发生在可识别的宿主会话里、而该宿主未注册 WAO MCP 时，stderr 一行提示 Lead 自己走的是命令行通道。识别只用描述符表 `detectEnv` 里**真机核实过**的环境标记（claude-code `CLAUDECODE`；codex `CODEX_THREAD_ID`；opencode `OPENCODE`；kimi-code、zcode、claude-desktop 无可靠标记，不识别）。fail-open；**每个宿主会话、每个项目目录只判一次**（去重键 = 宿主 + 描述符 `sessionEnv` 的值（缺席按 UTC 日）+ 派发目录；每键一个哈希命名的标记文件，独占创建，并发派发里只有一个进程出行）——命令行是合法通道，这不是违规告警，不套用 0042 ③ 的"超帽恒弹"（初稿是每次派发都出，两席会审均点名警报疲劳，已改）。codex 不出此行（其注册状态要 spawn CLI 才知，派发路径不付这个代价）。
 9. **不变**：autoBind 闭集仍 = {codex}；WAO 仍不写任何其他宿主的配置；MCP 工具面零触碰（无 wire refreeze）。
 
 ## 真机验证记录（2026-10-12，本机）
@@ -62,3 +63,18 @@
 同批采纳的非阻断建议：zcode 缓存多版本不一致报 unknown；被禁用条目不算注册；路径做词法归一；流分片只认 `chunkLength > 0`；零 part 门不看证词的说明；advisory 改每会话一次；测试套件子进程环境剔除宿主识别标记（套件结果不随启动它的 harness 变化）。
 未采纳/留待 Owner：`~/.claude.json` 读取的尺寸上限（现每会话至多读一次，未加上限）；junction/8.3 短名等文件系统级路径别名不解析（会如实报成 other_target）。
 会审收据的字段抽取把两席的 `MERGE_AFTER_FIXES` 都记成了 `MERGE`（选项互为前缀时的抽取缺陷，登记 TD-268）——以席位正文为准。
+
+## 第二轮复审（consult_20261012171106194ew6nn1，sol 席 FIX_FIRST，全部已改并补测试）
+
+sol 逐条核对第一轮八条必改：五条已解决（权限错误、opencode 两个环境来源、验证闸租约事实、onboarding/SKILL、architecture），三条部分解决，另指出一处新回归。
+
+| 问题 | 处置 |
+|---|---|
+| opencode 的多来源是**按键合并**，不是整条替换：高优先级只写 `{enabled:true}` 时被误报成 other_target；此时低优先级读不了应为 unknown | 改为合并各来源的 wao 条目后再判；任一来源读不了 → unknown |
+| advisory 去重只记"最近一个会话键"、读改写无保护：A/B 两会话交替派发四次都提示，并发时重复提示；同会话换到未注册的项目不再判 | 改为每个（宿主, 会话, 项目目录）一个标记文件，独占创建；换项目重新判定 |
+| `workerDeclared` 仍误认 `~~~` 围栏里的复述与反引号包裹的模板占位符 | 两种围栏都剔除；路径/理由去掉引号后再判占位符 |
+| JSONC 去注释会把两侧拼成合法 token（`tr/*x*/ue` → true） | 注释替换为空白 |
+
+sol 同时确认：剔除宿主识别标记未使既有测试失真（已补专门断言）；claude-desktop 凭"握手 + tools/list 返回"置 hostVerified=true 在"加载级"口径下站得住，但 AGENT_ONBOARDING 入表清单里的"调用一次只读工具"一步未做——对话内调用留待 Owner 在桌面端实际用一次时确认。
+kimi 席第二轮判 PASS（八条必改逐条确认已解决，另做了 JSONC、优先级组合、声明识别共 39 个行为用例的独立抽查），指出三处非阻断项，均已处理：决策索引的 0066 行状态自相矛盾（已改）；`runs delivery` 把数值型租约开始时间原样打成毫秒数（文本行改为 ISO 时间）；opencode 的项目级配置官方会从当前目录向上找到最近的 Git 目录，探测只看派发目录一层（登记 TD-191 残余）。
+第二轮派发时 MCP `run_consult` 把席位派进了 `C:\Windows\system32`（桌面端重启后服务进程的 cwd），改走命令行才成功——登记 TD-269。

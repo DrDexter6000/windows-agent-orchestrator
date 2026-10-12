@@ -11,9 +11,10 @@
 //   · 读不到 ≠ 没有：只有 ENOENT/ENOTDIR 才算"文件不存在"；权限错误等一切
 //     其他读取失败、解析失败、未闭合注释/字符串 → "unknown"，绝不折算成
 //     not_registered（不用 existsSync——它把访问错误也报成 false）。
-//   · 覆盖关系按宿主自己的优先级取**生效条目**：高优先级来源里有 wao 条目
-//     （含被禁用的）即定论；高优先级来源读不了 → unknown（无从知道它是否
-//     覆盖了低优先级来源）。不做"任一来源命中即 registered"的合并。
+//   · 覆盖关系按宿主自己的语义取**生效条目**：整条覆盖的宿主（Claude Code）
+//     里高优先级来源有 wao 条目（含被禁用的）即定论，高优先级来源读不了 →
+//     unknown；按键合并的宿主（opencode）取各来源合并后的条目，任一来源读不了
+//     → unknown。不做"任一来源命中即 registered"的合并。
 //   · registered ≠ loaded：配置里有生效条目只说明注册了；宿主是否已加载要开
 //     新会话由宿主侧确认（与 codex "configured ≠ loaded" 同一诚实边界）。
 //   · 共享叶子：不 import application/commands/mcp/SDK/zod；codex 用户级注册走
@@ -66,7 +67,12 @@ function stripJsonc(text) {
       continue;
     }
     const afterComment = skipComment(i);
-    if (afterComment !== -1) { i = afterComment; continue; }
+    if (afterComment !== -1) {
+      // 注释换成一个空白：`tr/*x*/ue`、`1/*x*/2` 不得被拼成合法 token（复审 sol 席）。
+      out += " ";
+      i = afterComment;
+      continue;
+    }
     if (ch === ",") {
       // 尾逗号：其后（越过空白与注释）第一个有效字符是 } 或 ] → 丢弃该逗号。
       let j = i + 1;
@@ -143,17 +149,24 @@ function fileSource(io, ctx, scope, path, pick) {
   return sourceFromValue(ctx, scope, path, read.value, pick);
 }
 
-/** 同一来源的候选文件名（如 .jsonc 优先于 .json）：取第一个存在的。 */
-function firstExistingFileSource(io, ctx, scope, paths, pick) {
-  let last;
-  for (const p of paths) {
-    last = fileSource(io, ctx, scope, p, pick);
-    if (last.detail !== "absent") return last;
-  }
-  return last;
+function detailOf(...parts) {
+  const text = parts.filter(Boolean).join("; ");
+  return text ? { detail: text } : {};
 }
 
-// 每个 probe 返回的 sources **按该宿主的优先级从高到低排列**。
+/** 配置值按键深合并：对象逐键合并，标量与数组由高优先级整体替换。 */
+function mergeConfigValue(low, high) {
+  if (high === undefined) return low;
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(low) || !isObject(high)) return high;
+  const out = { ...low };
+  for (const [k, v] of Object.entries(high)) out[k] = mergeConfigValue(low[k], v);
+  return out;
+}
+
+// 每个 probe 返回的 sources **按该宿主的优先级从高到低排列**。返回数组的宿主是
+// "高优先级整条覆盖"语义，由 resolveEffectiveRegistration 取生效来源；返回
+// {state, sources} 的宿主（opencode）自己按其合并语义算好了结果。
 const PROBES = {
   // Claude Code：local > project > user（官方 scope 优先级）。~/.claude.json 的
   // user 级 mcpServers 与 local 级 projects[<cwd>].mcpServers（2026-10-12 本机
@@ -174,26 +187,73 @@ const PROBES = {
   "kimi-code": (io, ctx) => [
     fileSource(io, ctx, "user", join(ctx.home, ".kimi-code", "mcp.json"), (j) => j?.mcpServers?.wao),
   ],
-  // opencode：后加载的来源覆盖先加载的（官方配置文档的顺序：全局 → OPENCODE_CONFIG
-  // 指定文件 → 项目 opencode.json → OPENCODE_CONFIG_CONTENT 内联）。本机实读核实过
-  // 的只有全局文件的形状（{type:"local", command:[...]}）；其余三个来源按官方文档
-  // 纳入——不纳入会把"注册在别处"误报成未注册。`.opencode/` 目录与远程配置不探测。
+  // opencode：多个配置来源**按键深合并**，后加载的覆盖先加载的同名字段、其余字段
+  // 保留（官方配置文档；加载顺序：全局 → OPENCODE_CONFIG 指定文件 → 项目
+  // opencode.json → OPENCODE_CONFIG_CONTENT 内联）。所以生效的 wao 条目是各来源
+  // 条目合并后的结果——高优先级来源只写 {enabled:true} 时，命令仍来自低优先级
+  // 来源（复审 sol 席：整条替换的判法会把它误报成 other_target）。任何一个来源
+  // 读不了都可能改变合并结果 → unknown。本机实读核实过的只有全局文件的形状
+  // （{type:"local", command:[...]}）；其余来源按官方文档纳入。不探测的部分：
+  // `.opencode/` 目录、远程配置、以及项目配置的向上查找（官方会从当前目录一路
+  // 找到最近的 Git 目录，这里只看派发目录一层——注册在父目录的会被报成没有）。
+  // 同目录 .jsonc 与 .json 并存时先取 .jsonc，官方未记载两者的先后。
   opencode: (io, ctx) => {
     const pick = (j) => j?.mcp?.wao;
     const names = (dir) => [join(dir, "opencode.jsonc"), join(dir, "opencode.json")];
-    const sources = [];
+    const items = []; // 按优先级从高到低
+    const fromValue = (scope, path, value) => {
+      let entry;
+      try { entry = pick(value); } catch { entry = undefined; }
+      const present = Boolean(entry) && typeof entry === "object";
+      items.push({ scope, path, present, entry: present ? entry : undefined });
+    };
+    const unreadable = (scope, path, reason) => items.push({ scope, path, present: false, unknown: true, detail: reason });
+    const fromFiles = (scope, paths) => {
+      let read;
+      let used;
+      for (const p of paths) {
+        used = p;
+        read = readJsonFile(io, p);
+        if (read.ok || read.reason !== "absent") break;
+      }
+      if (read.ok) fromValue(scope, used, read.value);
+      else if (read.reason === "absent") items.push({ scope, path: used, present: false, detail: "absent" });
+      else unreadable(scope, used, read.reason);
+    };
     if (typeof ctx.env.OPENCODE_CONFIG_CONTENT === "string" && ctx.env.OPENCODE_CONFIG_CONTENT.length > 0) {
       const parsed = parseJsonLoose(ctx.env.OPENCODE_CONFIG_CONTENT);
-      sources.push(parsed.ok
-        ? sourceFromValue(ctx, "inline", "env:OPENCODE_CONFIG_CONTENT", parsed.value, pick)
-        : { scope: "inline", path: "env:OPENCODE_CONFIG_CONTENT", state: "unknown", entryPresent: false, detail: parsed.reason });
+      if (parsed.ok) fromValue("inline", "env:OPENCODE_CONFIG_CONTENT", parsed.value);
+      else unreadable("inline", "env:OPENCODE_CONFIG_CONTENT", parsed.reason);
     }
-    if (ctx.cwd) sources.push(firstExistingFileSource(io, ctx, "project", names(ctx.cwd), pick));
+    if (ctx.cwd) fromFiles("project", names(ctx.cwd));
     if (typeof ctx.env.OPENCODE_CONFIG === "string" && ctx.env.OPENCODE_CONFIG.length > 0) {
-      sources.push(fileSource(io, ctx, "custom", ctx.env.OPENCODE_CONFIG, pick));
+      fromFiles("custom", [ctx.env.OPENCODE_CONFIG]);
     }
-    sources.push(firstExistingFileSource(io, ctx, "user", names(join(ctx.home, ".config", "opencode")), pick));
-    return sources;
+    fromFiles("user", names(join(ctx.home, ".config", "opencode")));
+
+    const anyUnknown = items.some((it) => it.unknown);
+    let merged;
+    for (const it of [...items].reverse()) {
+      if (it.present) merged = mergeConfigValue(merged, it.entry);
+    }
+    const effectiveEntry = describeStdioEntry(merged, ctx.expectedStdio, ctx.platform);
+    const state = anyUnknown ? "unknown" : effectiveEntry.state;
+    const contributors = items.filter((it) => it.present).length;
+    return {
+      state,
+      sources: items.map((it) => ({
+        scope: it.scope,
+        path: it.path,
+        // 单个来源的状态：读不了=unknown；没有条目=not_registered；有条目的来源
+        // 共同构成合并结果，标合并后的状态（单看某一个来源的片段没有意义）。
+        state: it.unknown ? "unknown" : it.present ? effectiveEntry.state : "not_registered",
+        entryPresent: it.present,
+        effective: anyUnknown ? Boolean(it.unknown) : it.present,
+        ...(it.detail ? { detail: it.detail }
+          : it.present ? detailOf(contributors > 1 ? "merged by key with the other sources" : null, effectiveEntry.detail)
+            : {}),
+      })),
+    };
   },
   // 插件通路（2026-10-03 真机验证的形态）：~/.zcode/cli/config.json 的
   // plugins.enabledPlugins["wao@<名录>"] === true 即启用；目标比对读已安装副本
@@ -281,12 +341,13 @@ export function probeHostRegistration(hostId, { expectedStdio, cwd, io = {}, env
     readFileSync: io.readFileSync ?? readFileSync,
     readdirSync: io.readdirSync ?? readdirSync,
   };
-  let sources;
+  let probed;
   try {
-    sources = probe(fsIo, { expectedStdio, cwd, env, home, platform });
+    probed = probe(fsIo, { expectedStdio, cwd, env, home, platform });
   } catch (err) {
-    sources = [{ scope: "user", path: null, state: "unknown", entryPresent: false, detail: String(err?.message ?? err) }];
+    probed = [{ scope: "user", path: null, state: "unknown", entryPresent: false, detail: String(err?.message ?? err) }];
   }
-  const { state, effectiveIndex } = resolveEffectiveRegistration(sources);
-  return { host: hostId, state, sources: sources.map((s, i) => ({ ...s, effective: i === effectiveIndex })) };
+  if (!Array.isArray(probed)) return { host: hostId, state: probed.state, sources: probed.sources };
+  const { state, effectiveIndex } = resolveEffectiveRegistration(probed);
+  return { host: hostId, state, sources: probed.map((s, i) => ({ ...s, effective: i === effectiveIndex })) };
 }

@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -1385,6 +1385,19 @@ test("决定 0066: kimi-code / opencode(JSONC) / zcode 插件 / claude-desktop �
     const inline = JSON.stringify({ mcp: { wao: { type: "local", command: ["node", "Z:/other/src/mcp/stdio.js"] } } });
     assert.equal(state("opencode", { env: { OPENCODE_CONFIG: custom, OPENCODE_CONFIG_CONTENT: inline } }), "registered_other_target", "内联配置优先级最高");
     assert.equal(state("opencode", { env: { OPENCODE_CONFIG_CONTENT: "{ broken" } }), "unknown");
+    // 复审 sol 席：opencode 是按键合并，不是整条替换——高优先级只写 enabled 时命令仍来自低优先级
+    const partialOn = JSON.stringify({ mcp: { wao: { enabled: true } } });
+    const partialOff = JSON.stringify({ mcp: { wao: { enabled: false } } });
+    assert.equal(state("opencode", { env: { OPENCODE_CONFIG: custom, OPENCODE_CONFIG_CONTENT: partialOn } }), "registered", "部分覆盖与低优先级的完整条目合并");
+    assert.equal(state("opencode", { env: { OPENCODE_CONFIG: custom, OPENCODE_CONFIG_CONTENT: partialOff } }), "not_registered", "高优先级只关掉 enabled");
+    const eaccesOc = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    assert.equal(
+      probeHostRegistration("opencode", { expectedStdio, home, env: { OPENCODE_CONFIG_CONTENT: partialOn }, io: { readFileSync: () => { throw eaccesOc; } } }).state,
+      "unknown", "部分覆盖 + 低优先级来源读不了：合并结果不可知");
+    // 复审 sol 席：去掉注释不得把两侧拼成合法 token
+    writeJson(ocPath, `{ "mcp": { "wao": { "type": "local", "command": ["node", ${JSON.stringify(expectedStdio)}], "enabled": tr/*x*/ue } } }`);
+    assert.equal(state("opencode"), "unknown", "tr/*x*/ue 不是 true");
+    writeJson(ocPath, { mcp: {} });
     const ocProject = mkdtempSync(join(tmpdir(), "wao-probe-oc-project-"));
     writeJson(join(ocProject, "opencode.json"), { mcp: { wao: { type: "local", command: ["node", expectedStdio], enabled: false } } });
     const disabled = probeHostRegistration("opencode", { expectedStdio, home, cwd: ocProject, env: { OPENCODE_CONFIG: custom } });
@@ -1458,32 +1471,55 @@ test("决定 0066: 派发 advisory——识别到宿主且未注册才出行；�
     let n = 0;
     const freshState = () => join(home, `state-${n += 1}`);
     const session = (id) => ({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id });
+    const projA = join(home, "proj-a");
+    const projB = join(home, "proj-b");
     const stateDir = freshState();
-    const line = renderMcpHostAdvisory({ env: session("s1"), probe: { home }, stateDir });
+    const call = (env, cwd, extra = {}) => renderMcpHostAdvisory({ env, cwd, probe: { home }, stateDir, ...extra });
+    const line = call(session("s1"), projA);
     assert.match(line, /^\[wao\] advisory: this is a claude-code session and WAO's MCP is not registered for it/);
     assert.match(line, /wao mcp bind --host claude-code/);
     assert.match(line, /the CLI works/, "命令行是合法通道——措辞不是违规告警");
-    // 警报疲劳纪律：同一宿主会话只判一次；换会话再判
-    assert.equal(renderMcpHostAdvisory({ env: session("s1"), probe: { home }, stateDir }), null, "同会话第二次派发静默");
-    assert.match(renderMcpHostAdvisory({ env: session("s2"), probe: { home }, stateDir }), /not registered/, "新会话再告知一次");
-    assert.ok(!readFileSync(join(stateDir, "mcp-host-advisory.json"), "utf8").includes("s2"), "状态文件不存会话 id 原文");
+    // 警报疲劳纪律：同一宿主会话、同一项目只判一次
+    assert.equal(call(session("s1"), projA), null, "同会话同项目第二次派发静默");
+    // 复审 sol 席：多会话交替派发互不覆盖（A、B、A、B 各只出一次）
+    assert.match(call(session("s2"), projA), /not registered/, "另一个会话各自告知一次");
+    assert.equal(call(session("s1"), projA), null, "A 不因 B 判过而重新出行");
+    assert.equal(call(session("s2"), projA), null);
+    // 换项目目录重新判定（注册状态可能因 local/项目级配置而不同）
+    assert.match(call(session("s1"), projB), /not registered/, "同会话换项目再判一次");
+    assert.equal(call(session("s1"), projB), null);
+    const markers = readdirSync(join(stateDir, "mcp-host-advisory"));
+    assert.equal(markers.length, 3, "每个（会话, 项目）一个标记");
+    assert.ok(markers.every((m) => /^[0-9a-f]{24}\.seen$/.test(m)), "标记文件名是哈希，不含会话 id");
+    // 并发：标记用独占创建——已被别的进程抢先落盘（EEXIST）时本进程静默
+    const raceDir = freshState();
+    let rival = null;
+    const raced = renderMcpHostAdvisory({ env: session("race"), cwd: projA, stateDir: raceDir,
+      probe: { home, io: { readFileSync: (...a) => {
+        // 本进程探测进行中，另一个并发派发先判完并落了标记（只模拟一次）
+        if (rival === null) rival = renderMcpHostAdvisory({ env: session("race"), cwd: projA, stateDir: raceDir, probe: { home } });
+        return readFileSync(...a);
+      } } } });
+    assert.match(rival, /not registered/, "抢到标记的那个进程出行");
+    assert.equal(raced, null, "没抢到标记的并发派发静默——同一键恰好出一行");
     // 无会话变量 → 按 UTC 日去重
     const day1 = () => new Date("2026-10-12T10:00:00Z");
     const day2 = () => new Date("2026-10-13T10:00:00Z");
     const dayDir = freshState();
-    assert.match(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day1 }), /not registered/);
-    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day1 }), null);
-    assert.match(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day2 }), /not registered/);
-    assert.equal(renderMcpHostAdvisory({ env: {}, probe: { home }, stateDir: freshState() }), null, "识别不出宿主=静默");
+    const noSession = (now) => renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, cwd: projA, probe: { home }, stateDir: dayDir, now });
+    assert.match(noSession(day1), /not registered/);
+    assert.equal(noSession(day1), null);
+    assert.match(noSession(day2), /not registered/);
+    assert.equal(renderMcpHostAdvisory({ env: {}, cwd: projA, probe: { home }, stateDir: freshState() }), null, "识别不出宿主=静默");
 
     writeJson(join(home, ".claude.json"), "{ not json");
     const unknownDir = freshState();
-    assert.equal(renderMcpHostAdvisory({ env: session("s3"), probe: { home }, stateDir: unknownDir }), null, "读不了=unknown=静默（不误报未注册）");
-    assert.equal(existsSync(join(unknownDir, "mcp-host-advisory.json")), false, "判不了不记状态——下次再判");
+    assert.equal(renderMcpHostAdvisory({ env: session("s3"), cwd: projA, probe: { home }, stateDir: unknownDir }), null, "读不了=unknown=静默（不误报未注册）");
+    assert.equal(existsSync(join(unknownDir, "mcp-host-advisory")), false, "判不了不落标记——下次再判");
     writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry(stdioOfThisRepo()) } });
-    assert.equal(renderMcpHostAdvisory({ env: session("s4"), probe: { home }, stateDir: freshState() }), null, "已注册=静默");
+    assert.equal(renderMcpHostAdvisory({ env: session("s4"), cwd: projA, probe: { home }, stateDir: freshState() }), null, "已注册=静默");
     writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry("Z:/other/src/mcp/stdio.js") } });
-    assert.equal(renderMcpHostAdvisory({ env: session("s5"), probe: { home }, stateDir: freshState() }), null, "注册到另一份安装也算有工具=静默");
+    assert.equal(renderMcpHostAdvisory({ env: session("s5"), cwd: projA, probe: { home }, stateDir: freshState() }), null, "注册到另一份安装也算有工具=静默");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

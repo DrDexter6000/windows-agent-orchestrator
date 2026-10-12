@@ -3186,3 +3186,18 @@ test("TD-248 集成: 条目过期——衰减回 fail，advisory 提示重新裁
   assert.equal(out.adjudicationAdvisories.length, 1);
   assert.equal(out.adjudicationAdvisories[0].kind, "entry-not-usable");
 });
+
+// 决定 0066：套件子进程环境剔除宿主识别标记——套件结果不随启动它的 agent harness 变化。
+test("buildCanonicalChildEnv: 宿主识别标记被剔除，其余变量原样，入参不被改动", async () => {
+  const { buildCanonicalChildEnv } = await import("../../scripts/canonical-test.mjs");
+  const { HOST_DESCRIPTORS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const markers = HOST_DESCRIPTORS.flatMap((d) => d.detectEnv ?? []);
+  assert.ok(markers.length >= 1, "描述符表至少登记一个识别标记");
+  const base = { KEEP_ME: "x", WAO_IN_WORKER: "1", ...Object.fromEntries(markers.map((m) => [m, "1"])) };
+  const frozen = JSON.stringify(base);
+  const env = buildCanonicalChildEnv(base, { gateHeld: false });
+  for (const m of markers) assert.equal(m in env, false, `${m} 必须被剔除`);
+  assert.equal(env.KEEP_ME, "x");
+  assert.equal(env.WAO_IN_WORKER, "1", "worker 禁派发标记不在剔除之列");
+  assert.equal(JSON.stringify(base), frozen, "不修改传入的环境对象");
+});
