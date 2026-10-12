@@ -22,10 +22,33 @@
 //                 装入；新会话实测加载全部 23 个工具（前缀 mcp__plugin_wao_wao__），
 //                 initialize 握手返回 wao-mcp 0.2.0。名录与插件包源在
 //                 ~/.zcode/wao-local-marketplace/（机器级资产，不进仓库）。
+//   kimi-code   — 真机验证（2026-10-12，kimi 2.1.1）：中立仓库里 `kimi -p` 无头会话
+//                 列出全部 23 个工具并调用 workspace_status 成功返回（该宿主不
+//                 提供 MCP roots，返回 bound=false——Lead 需 workspace_select）。
+//   opencode    — 真机验证（2026-10-12）：`opencode mcp list` 报 wao connected；
+//                 中立仓库里 `opencode run` 无头会话列出 23 个工具（前缀 wao_）
+//                 并调用 workspace_status 返回 bound=true。
+//   claude-desktop — 格式级入表（2026-10-12 已写入本机配置，加载需重启桌面端后
+//                 由 Owner 确认——在此之前 hostVerified=false）。
+//   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话 23 工具；
+//   codex 0.159.2 `codex exec` 调用 wao.workspace_status completed。详见决定 0066。）
+//
+// 决定 0066 附加轴（不属三能力矩阵，纯事实字段）：
+//   configHint — 无注册子命令的宿主（文件式注册）要并入片段的配置文件位置；
+//   detectEnv  — "本 CLI 进程正运行在该宿主会话里"的环境变量标记，仅收录真机
+//                核实过的（派发 advisory 用；未核实的宿主不猜，留空）。
 
 /** host-neutral stdio entry → 该宿主形态的注册片段（纯映射，零 I/O）。 */
 function mcpServersShape(entry) {
   return { configShape: "mcpServers", mcpServers: { wao: entry } };
+}
+
+/** opencode 形态：顶层 mcp 段，本地 server 的 command 是 argv 数组。 */
+function opencodeShape(entry) {
+  return {
+    configShape: "opencode-mcp",
+    mcp: { wao: { type: "local", command: [entry.command, ...entry.args], enabled: true } },
+  };
 }
 
 // zcode 对单个 MCP 工具调用的默认超时是 30000ms（zcode-guide diagnosing-mcp；
@@ -65,6 +88,7 @@ export const HOST_DESCRIPTORS = [
     stability: "stable",
     renderSnippet: mcpServersShape,
     example: (argv) => `claude mcp add wao --scope user -- ${argv}`,
+    detectEnv: ["CLAUDECODE"],
   },
   {
     id: "codex",
@@ -75,6 +99,7 @@ export const HOST_DESCRIPTORS = [
     stability: "experimental", // codex mcp 命令族为 [experimental]——如实随行
     renderSnippet: mcpServersShape,
     example: (argv) => `codex mcp add wao -- ${argv}`,
+    detectEnv: ["CODEX_THREAD_ID"], // codex exec 0.159.2 的 shell 环境实见
   },
   {
     id: "zcode",
@@ -86,6 +111,43 @@ export const HOST_DESCRIPTORS = [
     renderSnippet: zcodePluginShape,
     example: () =>
       "zcode plugins marketplace add <本地名录目录> && zcode plugins install wao@wao-local —— 名录与插件包内容见 mcp bind --host zcode 的 emit（接入步骤见 AGENT_ONBOARDING）",
+  },
+  {
+    id: "kimi-code",
+    label: "Kimi Code",
+    snippet: true,
+    autoBind: false,
+    hostVerified: true, // 2026-10-12 真机验证（见文件头证据锚点）
+    stability: "stable",
+    renderSnippet: mcpServersShape,
+    configHint: "~/.kimi-code/mcp.json",
+    example: () =>
+      "把 mcp bind --host kimi-code emit 的 mcpServers.wao 条目并入 ~/.kimi-code/mcp.json（kimi 无 mcp 注册子命令），开新会话后用 mcp status --host kimi-code 核对",
+  },
+  {
+    id: "opencode",
+    label: "opencode",
+    snippet: true,
+    autoBind: false,
+    hostVerified: true, // 2026-10-12 真机验证（见文件头证据锚点）
+    stability: "stable",
+    renderSnippet: opencodeShape,
+    configHint: "~/.config/opencode/opencode.json",
+    detectEnv: ["OPENCODE"], // opencode run 的 shell 环境实见
+    example: () =>
+      "把 mcp bind --host opencode emit 的 mcp.wao 条目并入 ~/.config/opencode/opencode.json 的 mcp 段（opencode mcp add 是交互式向导），再跑 opencode mcp list 核对",
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop (chat app)",
+    snippet: true,
+    autoBind: false,
+    hostVerified: false,
+    stability: "unverified-host-load",
+    renderSnippet: mcpServersShape,
+    configHint: "%APPDATA%\\Claude\\claude_desktop_config.json",
+    example: () =>
+      "把 mcp bind --host claude-desktop emit 的 mcpServers.wao 条目并入 %APPDATA%\\Claude\\claude_desktop_config.json，完全退出并重启 Claude 桌面端",
   },
 ];
 

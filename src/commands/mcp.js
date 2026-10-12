@@ -2,10 +2,12 @@
 //
 // M10 P0-1: CLI command for project-scoped workspace activation.
 //
-// Routes: mcp bind/status/unbind --host codex --cwd <git-root>
+// Routes: mcp bind/status/unbind --host <host> --cwd <git-root>
 //
-// This is a Human Owner ops command, not an MCP tool. It generates, reads, and
-// removes a WAO-managed block in the target project's .codex/config.toml.
+// This is a Human Owner ops command, not an MCP tool. For codex it generates,
+// reads, and removes a WAO-managed block in the target project's
+// .codex/config.toml; for every other host it emits the registration snippet and
+// probes the host's own config read-only (decisions 0043 / 0066).
 //
 // Architectural contract:
 //   - Imports src/application/mcpWorkspaceActivation.js (the service layer).
@@ -14,7 +16,7 @@
 //   - CLI only does argv parsing + output formatting.
 
 import { parseOptions, resolveTargetCwd } from "./shared.js";
-import { bindWorkspace, statusWorkspace, unbindWorkspace, SUPPORTED_HOSTS } from "../application/mcpWorkspaceActivation.js";
+import { bindWorkspace, statusWorkspace, statusAllHosts, unbindWorkspace, SUPPORTED_HOSTS } from "../application/mcpWorkspaceActivation.js";
 
 /**
  * mcp command dispatcher.
@@ -71,7 +73,7 @@ async function mcpBindCommand(args, config) {
   console.log("");
   // TD-191①：snippet-only 宿主 emit 片段——banner 必须明说"未绑定"，不得沿用
   // codex 的"configured"成功文案（会审裁定：输出片段 ≠ 绑定成功）。
-  if (result.mode === "snippet") {
+  if (result.mode === "snippet" || result.mode === "generic-snippet") {
     console.log(result.note);
     if (result.example) {
       console.log(`Example (${result.example.stability}): ${result.example.command}`);
@@ -97,13 +99,13 @@ async function mcpBindCommand(args, config) {
 async function mcpStatusCommand(args, config) {
   const options = parseOptions(args);
   const host = options.host;
-  if (!host) {
-    throw new Error(
-      `mcp status requires --host (supported: ${SUPPORTED_HOSTS.join(", ")})`,
-    );
-  }
   const cwd = resolveTargetCwd(options);
-  const result = await statusWorkspace({ host, cwd });
+  // 决定 0066：不带 --host = 全宿主一览（"WAO 的 MCP 在哪些 harness 上注册了"）。
+  if (!host) {
+    console.log(JSON.stringify(await statusAllHosts({ cwd }), null, 2));
+    return;
+  }
+  const result = await statusWorkspace({ host, cwd, includeUserRegistration: true });
   console.log(JSON.stringify(result, null, 2));
 }
 

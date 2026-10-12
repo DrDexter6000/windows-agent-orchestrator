@@ -1039,9 +1039,54 @@ test("3A2-09: empty diff produces run.delivery_failed, run.error phase=delivery,
     const deliveryFailed = events.find((e) => e.type === "run.delivery_failed");
     assert.ok(deliveryFailed, "must have run.delivery_failed event");
     assert.equal(deliveryFailed.deliveryCode, "empty_diff");
+    assert.equal(deliveryFailed.workerDeclared, undefined, "普通空 diff（worker 没上报停手）不带 workerDeclared");
     const runError = events.find((e) => e.type === "run.error" && e.phase === "delivery");
     assert.ok(runError, "must have run.error phase=delivery");
     assert.equal(run.state, "failed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// 2026-10-12 消费者侧反馈（run_20261012103335551tyb6kp）：worker 因任务书自相矛盾
+// 按交付合同停手并上报 SCOPE_EXPANSION_REQUIRED，控制面只记成 empty_diff——
+// 诊断面看不出"明确拒绝并说明了原因"与"什么都没做"的区别。
+test("3A2-09b: empty diff + worker reported SCOPE_EXPANSION_REQUIRED → closed-set workerDeclared on both events, extra diagnosis fact, no free text", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-09b-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg09b-"));
+  try {
+    const refusal = "`SCOPE_EXPANSION_REQUIRED: Temp — fixtures must live outside the authorized paths`\n\n- changed files: none";
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch({ replies: [refusal] }),
+      (input) => packageDelivery(input), // real packager — empty diff
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p09b",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const result = await run.waitForCompletion({});
+    assert.equal(result.failed, true);
+    assert.equal(result.deliveryError.code, "empty_diff", "失败码闭集不变");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const deliveryFailed = events.find((e) => e.type === "run.delivery_failed");
+    const runError = events.find((e) => e.type === "run.error" && e.phase === "delivery");
+    assert.equal(deliveryFailed.deliveryCode, "empty_diff");
+    assert.equal(deliveryFailed.workerDeclared, "scope_expansion_required");
+    assert.equal(runError.workerDeclared, "scope_expansion_required");
+    assert.match(deliveryFailed.message, /stopped on purpose and reported SCOPE_EXPANSION_REQUIRED/);
+    assert.ok(!JSON.stringify([deliveryFailed, runError]).includes("fixtures must live"),
+      "worker 的路径/理由自由文本不进控制面事件");
+
+    const { diagnoseFailure } = await import("../../src/diagnosis.js");
+    const facts = diagnoseFailure(events, "run_delivtest_p09b").evidence.map((x) => x.fact);
+    assert.equal(facts.length, 2);
+    assert.match(facts[1], /worker stopped on purpose and reported SCOPE_EXPANSION_REQUIRED/);
+    // 未绑定调用方不消费（既有 fail-closed 绑定纪律不变）；未知标记值不出第二条事实
+    assert.notEqual(diagnoseFailure(events).category, "delivery_packaging_failed");
+    const forged = events.map((e) => (e.type === "run.delivery_failed" ? { ...e, workerDeclared: "something_else" } : e));
+    assert.equal(diagnoseFailure(forged, "run_delivtest_p09b").evidence.length, 1);
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

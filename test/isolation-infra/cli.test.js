@@ -2899,6 +2899,32 @@ test("M12-17-C1: status 输出 executionStage（无 runId 信封的 legacy 种�
   }
 });
 
+// 2026-10-12 消费者侧反馈：末事件是一次文件读取的 tool_result 时，`last` 把整份
+// 文件正文回显出来刷满终端。显示层截断超长字符串叶子，结构与合法 JSON 不变。
+test("status: last 里的超长字符串被截到有界长度并标出省略量（短字段与结构原样）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-last-"));
+  try {
+    const big = "x".repeat(5000);
+    writeFileSync(join(dir, "run_biglast.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-06-28T18:40:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "running", ts: "2026-06-28T18:40:01.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_result", tool: "Read", output: big, nested: { parts: [{ text: big }, { text: "short" }] }, ts: "2026-06-28T18:44:53.000Z" }) + "\n");
+    const out = await captureLog(async () => {
+      await statusCommand(["run_biglast", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = JSON.parse(out);
+    assert.ok(out.length < 2500, `整份输出有界（实际 ${out.length} 字符；截断前 >10000）`);
+    assert.equal(parsed.last.type, "run.event");
+    assert.equal(parsed.last.tool, "Read", "短字段原样");
+    assert.match(parsed.last.output, /^x{300}… \[\+4700 chars; full text: tail\/collect\]$/);
+    assert.match(parsed.last.nested.parts[0].text, /\[\+4700 chars/, "嵌套叶子同样截断");
+    assert.equal(parsed.last.nested.parts[1].text, "short");
+    assert.equal(parsed.state, "running", "状态字段不受影响");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("TD-75 补全: lastActivityKind 按事件 kind 映射成 Lead 可读活动类型", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb-kind-"));
   try {

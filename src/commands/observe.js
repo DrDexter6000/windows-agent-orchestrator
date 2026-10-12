@@ -43,6 +43,25 @@ import { projectCollectResult } from "../application/runCollectProjection.js";
 // statusCommand now delegates to getRunStatus; the local copies are removed to
 // prevent drift (no second algorithm).
 
+// 2026-10-12 消费者侧反馈：`last` 原样回显末事件——末事件是一次文件读取的
+// tool_result 时，整份文件正文刷满终端，真正要看的 state/lastActivity 被淹没。
+// 显示层把超长字符串叶子截到有界长度并标出省略量：键与结构不变、仍是合法 JSON；
+// 全文仍在转录里（tail / collect）。
+const LAST_STRING_LIMIT = 300;
+
+function boundLongStrings(value) {
+  if (typeof value === "string") {
+    return value.length > LAST_STRING_LIMIT
+      ? `${value.slice(0, LAST_STRING_LIMIT)}… [+${value.length - LAST_STRING_LIMIT} chars; full text: tail/collect]`
+      : value;
+  }
+  if (Array.isArray(value)) return value.map(boundLongStrings);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, boundLongStrings(v)]));
+  }
+  return value;
+}
+
 export async function statusCommand(args, config) {
   const [runId, ...tail] = args;
   const options = parseOptions(tail);
@@ -76,7 +95,7 @@ export async function statusCommand(args, config) {
     // M12-17: submitted-stage execution semantics — printed via the service's
     // additive executionStage projection (never re-derived in the CLI).
     executionStage: status.executionStage,
-    last: lastDisplay,
+    last: boundLongStrings(lastDisplay),
     lastActivityTs: status.lastActivityTs,
     secondsSinceActivity: status.secondsSinceActivity,
     lastActivityKind: status.lastActivityKind,

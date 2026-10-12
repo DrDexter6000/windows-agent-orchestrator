@@ -513,15 +513,17 @@ test("REJECT-03: relative path rejected", async () => {
   );
 });
 
-test("REJECT-04: unsupported host rejected", async () => {
+test("REJECT-04: unsupported host is never bound — generic snippet, zero writes (decision 0066)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-reject-host-"));
   try {
     makeGitRepo(dir);
     const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
-    await assert.rejects(
-      () => bindWorkspace({ host: "claude", cwd: dir, hooks: fakeCodexHooks() }),
-      (err) => err.message.includes("host"),
-    );
+    const fk = fakeCodexHooks();
+    const result = await bindWorkspace({ host: "claude", cwd: dir, hooks: fk });
+    assert.equal(result.bound, false, "表外宿主绝不绑定");
+    assert.equal(result.mode, "generic-snippet");
+    assert.deepEqual(fk.calls, [], "不触达任何宿主适配器");
+    assert.equal(existsSync(join(dir, ".codex")), false, "零写入");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1169,30 +1171,50 @@ test("TD-191①: bind claude-code = snippet emit，零写入、明说 NOT BOUND"
   }
 });
 
-test("TD-191①: status/unbind 对 snippet-only 宿主显式 not_applicable / nothing_to_unbind", async () => {
+test("TD-191① + 决定 0066: snippet-only 宿主 status=只读探测注册状态（不再 not_applicable）；unbind 仍 nothing_to_unbind", async () => {
   const { statusWorkspace, unbindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-snippet-status-"));
+  const home = mkdtempSync(join(tmpdir(), "wao-snippet-home-"));
   makeGitRepo(dir);
   try {
-    const st = await statusWorkspace({ host: "claude-code", cwd: dir });
+    // 探测面注入临时 home（绝不读开发者真实的 ~/.claude.json）
+    const st = await statusWorkspace({ host: "claude-code", cwd: dir, probe: { home, env: {} } });
     assert.equal(st.mode, "snippet-only");
-    assert.equal(st.status, "not_applicable");
-    assert.equal(st.bound, false);
+    assert.equal(st.status, "not_registered", "空 home：宿主配置里没有 wao 条目");
+    assert.equal(st.registered, false);
+    assert.equal(st.bound, false, "bound 仍只表示 WAO 自己写的绑定——snippet-only 恒 false");
+    assert.match(st.note, /mcp bind --host claude-code/, "未注册时给出注册指路");
     const ub = await unbindWorkspace({ host: "claude-code", cwd: dir });
     assert.equal(ub.mode, "snippet-only");
     assert.equal(ub.status, "nothing_to_unbind");
     assert.equal(ub.bound, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("TD-191①: 未知宿主 fail-closed——bind/unbind 报错文案给 known hosts", async () => {
-  const { bindWorkspace, unbindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+test("决定 0066: 表外宿主 bind=通用 stdio 片段（零写入、明说未核实）；unbind 仍拒绝并给 known hosts", async () => {
+  const { bindWorkspace, unbindWorkspace, statusWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const { HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-unknown-host-"));
   makeGitRepo(dir);
   try {
-    await assert.rejects(() => bindWorkspace({ host: "not-a-host", cwd: dir }), /unsupported host: not-a-host \(known hosts: claude-code, codex, zcode\)/);
+    const generic = await bindWorkspace({ host: "not-a-host", cwd: dir });
+    assert.equal(generic.bound, false);
+    assert.equal(generic.mode, "generic-snippet");
+    assert.equal(generic.hostKnown, false);
+    assert.equal(generic.hostVerified, false);
+    assert.match(generic.note, /NOT BOUND, FORMAT NOT VERIFIED FOR not-a-host/, "必须明说未绑定且格式未核实");
+    assert.deepEqual(generic.knownHosts, HOST_DESCRIPTOR_IDS);
+    assert.equal(generic.stdio.command, "node");
+    assert.ok(generic.stdio.args.some((a) => a.endsWith("src/mcp/stdio.js")), "通用片段携带 stdio 入口");
+    assert.deepEqual(generic.snippet.mcpServers.wao, generic.stdio, "mcpServers 形态与裸 stdio 同源");
+    assert.equal(existsSync(join(dir, ".codex")), false, "零写入");
+    await assert.rejects(() => bindWorkspace({ host: "", cwd: dir }), /unsupported host/);
+    const st = await statusWorkspace({ host: "not-a-host", cwd: dir });
+    assert.equal(st.status, "unsupported_host");
+    assert.match(st.note, /no probe/, "表外宿主 status 如实说查不了");
     await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }), /known hosts: claude-code, codex, zcode/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1236,6 +1258,192 @@ test("TD-191②: zcode 描述符=格式级入表（hostVerified=false 如实）+
       "claude-code/codex 片段不带 timeoutMs（其配置是否支持该字段未核实——不猜测格式，fail-closed）");
     assert.match(result.note, /NOT BOUND/i);
     assert.equal(existsSync(join(dir, ".zcode")), false, "零写入");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 决定 0066：宿主注册只读探测 / 全宿主一览 / 派发 advisory ─────────────────────
+// 一律注入临时 home/env——探测面绝不读开发者真实的宿主配置。
+
+function stdioOfThisRepo() {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  return join(resolve(moduleDir, "..", ".."), "src", "mcp", "stdio.js");
+}
+
+function waoEntry(stdio) {
+  return { command: "node", args: ["x/wao-node.cjs", stdio, "--registry", "r.json", "--run-dir", "runs"] };
+}
+
+function writeJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value));
+}
+
+test("决定 0066: 表内每个 snippet-only 宿主都有文件式探测（表内宿主不许查不了）", async () => {
+  const { HOST_DESCRIPTORS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const { FILE_PROBED_HOST_IDS, REGISTRATION_STATES, probeHostRegistration } = await import("../../src/hostAdapters/hostRegistrationProbe.js");
+  for (const d of HOST_DESCRIPTORS.filter((x) => !x.autoBind)) {
+    assert.ok(FILE_PROBED_HOST_IDS.includes(d.id), `${d.id} 缺探测——新宿主入表须同批提供注册状态探测`);
+  }
+  assert.deepEqual(REGISTRATION_STATES, ["registered", "registered_other_target", "not_registered", "unknown"]);
+  assert.equal(probeHostRegistration("not-a-host", { expectedStdio: "x" }), null, "表外宿主无探测");
+});
+
+test("决定 0066: claude-code 探测——三层来源与四态（读不了=unknown，绝不折算成未注册）", async () => {
+  const { probeHostRegistration } = await import("../../src/hostAdapters/hostRegistrationProbe.js");
+  const home = mkdtempSync(join(tmpdir(), "wao-probe-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "wao-probe-cwd-"));
+  const expectedStdio = stdioOfThisRepo();
+  const probe = (extra = {}) => probeHostRegistration("claude-code", { expectedStdio, cwd, home, env: {}, ...extra });
+  const scope = (r, name) => r.sources.find((s) => s.scope === name).state;
+  try {
+    assert.equal(probe().state, "not_registered", "无配置文件=未注册");
+
+    writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry("Z:/elsewhere/src/mcp/stdio.js") } });
+    assert.equal(probe().state, "registered_other_target", "有 wao 条目但指向另一份安装");
+
+    // local 级：键是正斜杠绝对路径；值里的 stdio 用正斜杠——与本机反斜杠路径等价比对
+    writeJson(join(home, ".claude.json"), {
+      mcpServers: {},
+      projects: { [cwd.replace(/\\/g, "/")]: { mcpServers: { wao: waoEntry(expectedStdio.replace(/\\/g, "/")) } } },
+    });
+    let r = probe();
+    assert.equal(r.state, "registered");
+    assert.equal(scope(r, "user"), "not_registered");
+    assert.equal(scope(r, "local"), "registered");
+    assert.equal(probe({ cwd: undefined }).state, "not_registered", "不给 cwd 只看用户级——local 级注册对别的目录不生效");
+
+    writeJson(join(home, ".claude.json"), { mcpServers: {} });
+    writeJson(join(cwd, ".mcp.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
+    assert.equal(scope(probe(), "project"), "registered", "项目级 .mcp.json");
+    rmSync(join(cwd, ".mcp.json"));
+
+    writeJson(join(home, ".claude.json"), "{ not json");
+    r = probe();
+    assert.equal(r.state, "unknown", "解析不了=unknown");
+    assert.equal(scope(r, "user"), "unknown");
+
+    // CLAUDE_CONFIG_DIR 覆盖全局配置位置
+    const altDir = join(home, "alt");
+    writeJson(join(altDir, ".claude.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
+    assert.equal(probe({ env: { CLAUDE_CONFIG_DIR: altDir } }).state, "registered");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("决定 0066: kimi-code / opencode(JSONC) / zcode 插件 / claude-desktop 的探测形状", async () => {
+  const { probeHostRegistration } = await import("../../src/hostAdapters/hostRegistrationProbe.js");
+  const home = mkdtempSync(join(tmpdir(), "wao-probe-hosts-"));
+  const expectedStdio = stdioOfThisRepo();
+  const state = (host, extra = {}) => probeHostRegistration(host, { expectedStdio, home, env: {}, ...extra }).state;
+  try {
+    assert.equal(state("kimi-code"), "not_registered");
+    writeJson(join(home, ".kimi-code", "mcp.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
+    assert.equal(state("kimi-code"), "registered");
+
+    // opencode：JSONC（注释 + 尾逗号）、command 是 argv 数组
+    writeJson(join(home, ".config", "opencode", "opencode.jsonc"),
+      `{\n  // comment with "quotes" and // slashes\n  "mcp": { /* block */ "wao": { "type": "local", "command": ["node", "x.cjs", ${JSON.stringify(expectedStdio)}], "enabled": true, }, },\n}\n`);
+    assert.equal(state("opencode"), "registered");
+
+    // zcode：启用标记在 cli/config.json，目标比对读已安装副本
+    assert.equal(state("zcode"), "not_registered");
+    writeJson(join(home, ".zcode", "cli", "config.json"), { plugins: { enabledPlugins: { "wao@wao-local": true } } });
+    assert.equal(state("zcode"), "unknown", "已启用但读不到已安装副本——目标不可证");
+    writeJson(join(home, ".zcode", "cli", "plugins", "cache", "wao-local", "wao", "0.3.1", ".mcp.json"), { wao: waoEntry(expectedStdio) });
+    assert.equal(state("zcode"), "registered");
+    writeJson(join(home, ".zcode", "cli", "config.json"), { plugins: { enabledPlugins: { "wao@wao-local": false } } });
+    assert.equal(state("zcode"), "not_registered", "插件装了但没启用=未注册");
+
+    // claude-desktop：仅 win32 位置核实过
+    const appData = join(home, "AppData", "Roaming");
+    writeJson(join(appData, "Claude", "claude_desktop_config.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
+    assert.equal(state("claude-desktop", { platform: "win32", env: { APPDATA: appData } }), "registered");
+    assert.equal(state("claude-desktop", { platform: "linux", env: {} }), "unknown", "未核实平台不猜");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决定 0066: statusAllHosts 一览——codex 用户级注册并入 registered（项目未绑定也算有工具）", async () => {
+  const { statusAllHosts } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const { HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-all-"));
+  const home = mkdtempSync(join(tmpdir(), "wao-status-all-home-"));
+  makeGitRepo(dir);
+  try {
+    const userServer = { name: "wao", enabled: true, transport: { type: "stdio", ...waoEntry(stdioOfThisRepo()) } };
+    const hooks = { ...fakeCodexHooks(), codexUserList: async () => [userServer] };
+    const all = await statusAllHosts({ cwd: dir, hooks, probe: { home, env: {} }, env: {} });
+    assert.deepEqual(all.hosts.map((h) => h.host), HOST_DESCRIPTOR_IDS, "一览顺序=描述符表");
+    assert.equal(all.detectedHost, null);
+    const row = (id) => all.hosts.find((h) => h.host === id);
+    assert.equal(row("codex").status, "not_configured", "项目级未绑定");
+    assert.equal(row("codex").userRegistration, "registered");
+    assert.equal(row("codex").registered, true, "用户级已注册 → Lead 在 codex 里有工具");
+    assert.equal(row("claude-code").registered, false);
+    assert.equal(row("kimi-code").status, "not_registered");
+    const none = await statusAllHosts({ cwd: dir, hooks: { ...fakeCodexHooks(), codexUserList: async () => [] }, probe: { home, env: {} }, env: {} });
+    assert.equal(none.hosts.find((h) => h.host === "codex").registered, false);
+    const down = await statusAllHosts({ cwd: dir, hooks: { ...fakeCodexHooks(), codexUserList: async () => { throw new Error("boom"); } }, probe: { home, env: {} }, env: {} });
+    assert.equal(down.hosts.find((h) => h.host === "codex").registered, null, "codex CLI 不可用=unknown，不折算成未注册");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决定 0066: 派发 advisory——识别到宿主且未注册才出行；已注册/识别不出/读不了一律静默", async () => {
+  const { renderMcpHostAdvisory, detectHostFromEnv } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const home = mkdtempSync(join(tmpdir(), "wao-advisory-home-"));
+  try {
+    assert.equal(detectHostFromEnv({}), null);
+    assert.equal(detectHostFromEnv({ CLAUDECODE: "1" }), "claude-code");
+    assert.equal(detectHostFromEnv({ CODEX_THREAD_ID: "t" }), "codex");
+    assert.equal(detectHostFromEnv({ OPENCODE: "1" }), "opencode");
+
+    const line = renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } });
+    assert.match(line, /^\[wao\] advisory: this is a claude-code session and WAO's MCP is not registered there/);
+    assert.match(line, /wao mcp bind --host claude-code/);
+    assert.equal(renderMcpHostAdvisory({ env: {}, probe: { home } }), null, "识别不出宿主=静默");
+
+    writeJson(join(home, ".claude.json"), "{ not json");
+    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "读不了=unknown=静默（不误报未注册）");
+    writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry(stdioOfThisRepo()) } });
+    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "已注册=静默");
+    writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry("Z:/other/src/mcp/stdio.js") } });
+    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "注册到另一份安装也算有工具=静默");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决定 0066: opencode 片段形态 + 文件式宿主带 configFile；帮助文本列全表内宿主", async () => {
+  const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const { HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const { HELP_TEXT } = await import("../../src/cliHelp.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-0066-emit-"));
+  try {
+    const oc = await bindWorkspace({ host: "opencode", cwd: dir });
+    assert.equal(oc.mode, "snippet");
+    assert.equal(oc.snippet.configShape, "opencode-mcp");
+    assert.equal(oc.snippet.mcp.wao.type, "local");
+    assert.equal(oc.snippet.mcp.wao.command[0], "node");
+    assert.ok(oc.snippet.mcp.wao.command.some((a) => a.endsWith("src/mcp/stdio.js")), "opencode 的 command 是整条 argv 数组");
+    assert.equal(oc.configFile, "~/.config/opencode/opencode.json");
+    const kimi = await bindWorkspace({ host: "kimi-code", cwd: dir });
+    assert.equal(kimi.snippet.configShape, "mcpServers");
+    assert.equal(kimi.configFile, "~/.kimi-code/mcp.json");
+    assert.match(kimi.note, /mcp status --host kimi-code/);
+    const cc = await bindWorkspace({ host: "claude-code", cwd: dir });
+    assert.equal(cc.configFile, undefined, "有注册子命令的宿主不带 configFile");
+    for (const id of HOST_DESCRIPTOR_IDS) {
+      assert.ok(HELP_TEXT.includes(id), `--help 的 MCP host registration 节必须列出 ${id}（2026-10-12 反馈：只列 codex 让 Lead 以为别的宿主不支持）`);
+    }
+    assert.match(HELP_TEXT, /mcp status \[--host <host>\]/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

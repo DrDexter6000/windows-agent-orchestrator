@@ -14,7 +14,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256 } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
 import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
@@ -2947,9 +2947,17 @@ export class Run {
           // （absent 非 null，仓库惯例），且 delivery_failed 的 message 升级为
           // 区分性文案——打包失败且 worker 未产生模型工作。PACKAGING_FAILURE_CODES
           // 与诊断码闭集零变更；result.deliveryError 仍透传 sanitized 原文。
+          // 空 diff 且 worker 的最终回复按合同上报了越界停手：这是"明确拒绝并说明了
+          // 原因"，不是"什么都没做"——事件携带闭集标记 workerDeclared（absent 非
+          // null；不带路径/理由自由文本），诊断面据此区分。失败码闭集零变更。
+          const workerDeclared = errCode === "empty_diff" && declaredScopeExpansion(messages)
+            ? WORKER_DECLARED_SCOPE_EXPANSION
+            : null;
           const failedMessage = doneMarker
             ? `${errMsg} — packaging failed and the worker produced no model work`
-            : errMsg;
+            : workerDeclared
+              ? `${errMsg} — the worker stopped on purpose and reported SCOPE_EXPANSION_REQUIRED (its final message states the path and reason)`
+              : errMsg;
           const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.delivery_failed, {
             attemptEvents: [
               {
@@ -2958,6 +2966,7 @@ export class Run {
                   deliveryCode: errCode,
                   message: failedMessage,
                   ...(doneMarker ? { completionMarker: doneMarker } : {}),
+                  ...(workerDeclared ? { workerDeclared } : {}),
                 },
               },
             ],
@@ -2967,6 +2976,7 @@ export class Run {
                 phase: "delivery",
                 deliveryCode: errCode,
                 ...(doneMarker ? { completionMarker: doneMarker } : {}),
+                ...(workerDeclared ? { workerDeclared } : {}),
               },
             }],
           });

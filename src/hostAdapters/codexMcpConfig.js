@@ -15,8 +15,10 @@
 //   - Never runs `codex exec` or any model-invoking command.
 //
 // Isolation contract:
-//   - codexHome is always provided by the caller (child-scoped to a project's .codex/).
-//   - This module never reads or writes ~/.codex/config.toml.
+//   - codexHome is always provided by the caller. bind/unbind pass a project's
+//     .codex/ (child-scoped); this module never WRITES ~/.codex/config.toml.
+//   - The one user-level use is read-only: the registration probe (decision 0066)
+//     passes the user-level home to codexMcpList to answer "is wao registered".
 //   - stderr is captured (not mixed into errors) to avoid leaking internal paths.
 
 import { execFileSync } from "node:child_process";

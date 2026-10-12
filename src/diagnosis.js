@@ -369,9 +369,18 @@ function diagnoseFailureInner(events, expectedRunId) {
     ? evs.find((e) => e.type === "run.delivery_failed" && e.runId === expectedRunId)
     : undefined;
   if (deliveryFailed) {
+    // 闭集标记 workerDeclared（runManager 在空 diff + worker 按角色合同上报越界
+    // 停手时写入）：追加一条静态事实——"明确拒绝并说明了原因"≠"什么都没做"。
+    // 只认闭集值、只出固定文案（路径与理由仍不回显，Lead 经 collect 读原文）。
+    const declaredStop = deliveryFailed.workerDeclared === "scope_expansion_required";
     return {
       category: "delivery_packaging_failed",
-      evidence: [{ eventType: "run.delivery_failed", fact: "delivery packaging failed (control-plane-owned commit could not be created)" }],
+      evidence: [
+        { eventType: "run.delivery_failed", fact: "delivery packaging failed (control-plane-owned commit could not be created)" },
+        ...(declaredStop
+          ? [{ eventType: "run.delivery_failed", fact: "worker stopped on purpose and reported SCOPE_EXPANSION_REQUIRED (role-contract stop, not an idle run) — read its final message for the path and reason" }]
+          : []),
+      ],
     };
   }
 

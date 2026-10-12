@@ -367,3 +367,28 @@ test("M11-5-C3: resume spawn call passes roleContract (no bypass)", () => {
   assert.ok(/backend\.spawn\([^)]*roleContract:\s*resumeRoleContract/s.test(src),
     "resume backend.spawn passes roleContract");
 });
+
+// ── 2026-10-12：越界停手上报语的识别（控制面与合同指令同一字面量）──────────────
+
+test("declaredScopeExpansion: 合同指令携带同一标记；只认最终 assistant 回复里行首的上报语", async () => {
+  const { composeDeliveryExecutionContract, declaredScopeExpansion, SCOPE_EXPANSION_MARKER } =
+    await import("../../src/application/roleContract.js");
+  assert.ok(
+    composeDeliveryExecutionContract({ allowedPaths: ["src"] }).includes(`${SCOPE_EXPANSION_MARKER}: <repo-relative-path>`),
+    "合同指令与识别用同一个标记字面量",
+  );
+  const text = (t) => [{ type: "text", text: t }];
+  const asst = (t) => ({ role: "assistant", parts: text(t) });
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: Temp — reason")]), true);
+  assert.equal(declaredScopeExpansion([asst("`SCOPE_EXPANSION_REQUIRED: Temp — reason`\n- files: none")]), true, "反引号包裹");
+  assert.equal(declaredScopeExpansion([asst("Summary:\n- SCOPE_EXPANSION_REQUIRED: docs/x.md — reason")]), true, "列表项行首");
+  // RunManager 收集形状：role 在 info.role
+  assert.equal(declaredScopeExpansion([{ info: { role: "assistant" }, parts: text("SCOPE_EXPANSION_REQUIRED: a — b") }]), true);
+  // 只看最后一条 assistant：前面的复述不算
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: a — b"), asst("Done. Changed files: src/a.js")]), false);
+  // 句中提及不算上报
+  assert.equal(declaredScopeExpansion([asst("I would report SCOPE_EXPANSION_REQUIRED: only if needed.")]), false);
+  assert.equal(declaredScopeExpansion([{ role: "user", parts: text("SCOPE_EXPANSION_REQUIRED: a — b") }]), false, "user 消息不算");
+  assert.equal(declaredScopeExpansion([]), false);
+  assert.equal(declaredScopeExpansion(undefined), false);
+});

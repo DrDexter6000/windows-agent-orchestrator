@@ -95,8 +95,9 @@ export async function onboardingCommand(args, config) {
   const agentId = options.agent; // undefined ⇒ needs-selection
   const apply = options.apply === true;
   const json = options.json === true;
-  // TD-191②：--host <id> —— 第三方宿主一站式注册指引；表外宿主 fail-closed
-  // （不猜测格式；未验证宿主的入表路径见 AGENT_ONBOARDING.md Owner 清单）。
+  // TD-191②：--host <id> —— 第三方宿主一站式注册指引。决定 0066：表外宿主不再
+  // 报错退出——给通用 stdio 指引（不猜测该宿主的配置语法；入表路径见
+  // AGENT_ONBOARDING.md Owner 清单），且指引块排在第一屏、先于 worker 选择。
   if (options.host !== undefined) {
     validateHostGuideOption(options.host);
   }
@@ -138,8 +139,11 @@ export async function onboardingCommand(args, config) {
     if (guideHostId) console.log(JSON.stringify({ ...result, hostGuide: buildHostGuide(guideHostId, result) }, null, 2));
     else console.log(JSON.stringify(result, null, 2));
   } else {
-    let human = renderHuman(result);
-    if (guideHostId) human += renderHostGuideBlock(guideHostId, result);
+    // 决定 0066：--host 是在问"这个宿主怎么注册"——答案放第一屏（2026-10-12 反馈：
+    // 原先排在 worker 选择矩阵之后，Lead 看到的第一屏是 NEEDS-SELECTION）。
+    const human = guideHostId
+      ? renderHostGuideBlock(guideHostId, result).replace(/^\n/, "") + "\n" + renderHuman(result)
+      : renderHuman(result);
     process.stdout.write(human);
   }
 
@@ -152,24 +156,26 @@ export async function onboardingCommand(args, config) {
 
 // ── TD-191②：--host 宿主一站式注册指引（决定 0043）─────────────────────────────
 
-/** 表外宿主 fail-closed；表内返回描述符。 */
+/** --host 必须带 id；表内表外都接受（表外走通用指引，决定 0066）。 */
 function validateHostGuideOption(host) {
-  const { findHostDescriptor, HOST_DESCRIPTOR_IDS } = hostDescriptors;
   if (typeof host !== "string" || host.length === 0) {
-    throw new Error(`wao onboarding --host requires a host id (known hosts: ${HOST_DESCRIPTOR_IDS.join(", ")})`);
-  }
-  if (!findHostDescriptor(host)) {
-    throw new Error(
-        `wao onboarding --host: "${host}" is not in the verified host table (known hosts: ${HOST_DESCRIPTOR_IDS.join(", ")}). ` +
-        `Hosts not yet in the table follow the real-host admission checklist in AGENT_ONBOARDING.md — ` +
-        `the host-neutral snippet above works with any MCP host in the meantime.`,
-    );
+    throw new Error(`wao onboarding --host requires a host id (known hosts: ${hostDescriptors.HOST_DESCRIPTOR_IDS.join(", ")})`);
   }
 }
 
-/** 组装宿主指引对象（--json 的 hostGuide 字段）。 */
+/** 组装宿主指引对象（--json 的 hostGuide 字段）。表外宿主 = 通用指引（known:false）。 */
 export function buildHostGuide(hostId, result) {
   const d = hostDescriptors.findHostDescriptor(hostId);
+  if (!d) {
+    return {
+      host: hostId,
+      known: false,
+      knownHosts: hostDescriptors.HOST_DESCRIPTOR_IDS,
+      capabilities: { snippet: false, autoBind: false, hostVerified: false },
+      example: null,
+      bindCommand: null,
+    };
+  }
   const example = (result.hostExamples ?? []).find((e) => e.host === hostId) ?? null;
   return {
     host: d.id,
@@ -177,12 +183,25 @@ export function buildHostGuide(hostId, result) {
     capabilities: { snippet: d.snippet, autoBind: d.autoBind, hostVerified: d.hostVerified },
     example,
     bindCommand: d.autoBind ? `mcp bind --host ${d.id} --cwd <git-root>` : null,
+    ...(d.configHint ? { configFile: d.configHint } : {}),
   };
 }
 
-/** 人读宿主指引块（追加在 renderHuman 之后）。 */
+/** 人读宿主指引块（决定 0066 起排在 renderHuman 之前——第一屏）。 */
 export function renderHostGuideBlock(hostId, result) {
   const d = hostDescriptors.findHostDescriptor(hostId);
+  if (!d) {
+    return [
+      "",
+      `── Host registration (host: ${hostId} — not in the verified host table) ──`,
+      `Known hosts: ${hostDescriptors.HOST_DESCRIPTOR_IDS.join(", ")}.`,
+      `${hostId} gets the generic route — WAO has not verified its config syntax or that it loads WAO:`,
+      `  1. Register a stdio MCP server named "wao" using the host-neutral snippet below (or: npm run cli -- mcp bind --host ${hostId}).`,
+      `  2. Start a new ${hostId} session and confirm the WAO tools are listed.`,
+      `  3. WAO cannot probe ${hostId}; to add it to the table follow the real-host admission checklist in AGENT_ONBOARDING.md.`,
+      "",
+    ].join("\n");
+  }
   const guide = buildHostGuide(hostId, result);
   const lines = [
     "",
@@ -195,12 +214,13 @@ export function renderHostGuideBlock(hostId, result) {
     lines.push(`(then restart ${d.id} / open a new ${d.label} task in that project)`);
   } else {
     lines.push(`${d.id} is a snippet-only host — WAO never writes its config:`);
-    lines.push(`  1. Register via the host's own command (the verified route):`);
+    lines.push(`  1. Register via the host's own route (exact snippet: npm run cli -- mcp bind --host ${d.id}):`);
     if (guide.example) lines.push(`     ${guide.example.command}${guide.example.stability === "stable" ? "" : `   [${guide.example.stability}]`}`);
-    lines.push(`  2. Only for hosts without a verified command: paste the host-neutral snippet above into the MCP config (mcpServers JSON) — format-level fallback, load not verified for every host.`);
+    lines.push(`  2. Only for hosts without a verified command: paste the host-neutral snippet below into the MCP config (mcpServers JSON) — format-level fallback, load not verified for every host.`);
     lines.push(`  3. Restart ${d.id}.`);
   }
-  lines.push(`hostVerified=${d.hostVerified} — ${d.hostVerified ? "load verified on the real host (evidence in hostDescriptors.js)" : "format-level admission only; real-host load NOT yet verified"}.`);
+  lines.push(`Is it registered? npm run cli -- mcp status --host ${d.id}   (read-only probe of ${d.id}'s own config)`);
+  lines.push(`hostVerified=${d.hostVerified} — ${d.hostVerified ? "load verified on the real host (evidence in hostDescriptors.js)" : "format-level admission only; real-host load NOT yet verified (admission checklist: AGENT_ONBOARDING.md)"}.`);
   lines.push("");
   return lines.join("\n");
 }

@@ -63,9 +63,9 @@ Commands:
   daemon supervisor status|stop [--run-dir DIR]
   daemon health [--run-dir DIR]
 
-Workspace activation (host project binding):
-  mcp bind --host codex --cwd <git-root>
-  mcp status --host codex --cwd <git-root>
+MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code, codex, zcode, kimi-code, opencode, claude-desktop):
+  mcp status [--host <host>] [--cwd <git-root>]   # read-only: is WAO's MCP registered on this harness? no --host = every known host
+  mcp bind --host <host> [--cwd <git-root>]   # codex: writes the project's .codex/config.toml (needs --cwd); every other host: prints the exact registration command/snippet (WAO never writes their config); a host outside the table gets a generic stdio snippet
   mcp unbind --host codex --cwd <git-root>
 
 Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wao <sub>", global shim form "wao wao <sub>":

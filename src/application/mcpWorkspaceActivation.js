@@ -31,6 +31,7 @@ import {
   readdirSync, rmdirSync, lstatSync, realpathSync,
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -46,7 +47,9 @@ import {
 // TD-191① / 决定 0043：宿主闭集从 hostDescriptors 派生（唯一权威），不再手写字面量。
 // 含义随三能力矩阵分化：autoBind 宿主（codex）真写配置；snippet-only 宿主
 // （claude-code 等）mcp bind emit 精确片段而非拒绝——"输出片段"不等于"绑定成功"。
-import { HOST_DESCRIPTOR_IDS, findHostDescriptor } from "../hostAdapters/hostDescriptors.js";
+import { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS, findHostDescriptor } from "../hostAdapters/hostDescriptors.js";
+// 决定 0066：宿主注册状态只读探测（snippet-only 宿主的 status 不再是 not_applicable）。
+import { probeHostRegistration, classifyStdioEntry } from "../hostAdapters/hostRegistrationProbe.js";
 // 片段构造与宿主示例行复用 onboarding 的单一派生（TD-191① 验收判据：消灭第二清单）。
 import { buildMcpSnippet, buildHostExamples } from "./onboarding.js";
 
@@ -454,8 +457,29 @@ async function classifyState(h, canonicalRoot, expected) {
  *   6. failure → rollback both
  */
 export async function bindWorkspace({ host, cwd, hooks }) {
-  if (!SUPPORTED_HOSTS.includes(host)) {
+  if (typeof host !== "string" || host.length === 0) {
     throw new Error(`unsupported host: ${host} (known hosts: ${SUPPORTED_HOSTS.join(", ")})`);
+  }
+  // 决定 0066（修订 0043 第 2 条的 bind 面）：表外宿主不再只得到拒绝——emit 通用
+  // stdio 片段。command/args 是宿主中立事实，不是格式猜测；该宿主的配置语法与
+  // 是否加载 WAO 一概未核实，输出必须明说（零写入，同 snippet 模式）。
+  if (!SUPPORTED_HOSTS.includes(host)) {
+    const generic = buildMcpSnippet({ installRoot: REPO_ROOT });
+    return {
+      bound: false,
+      mode: "generic-snippet",
+      host,
+      hostKnown: false,
+      hostVerified: false,
+      knownHosts: SUPPORTED_HOSTS,
+      stdio: generic.mcpServers.wao,
+      snippet: { configShape: "mcpServers", ...generic },
+      note:
+        `GENERIC SNIPPET — NOT BOUND, FORMAT NOT VERIFIED FOR ${host}: ${host} is not in WAO's host table ` +
+        `(known hosts: ${SUPPORTED_HOSTS.join(", ")}). Register a stdio MCP server named "wao" with the command/args above ` +
+        `in ${host}'s own MCP config syntax (the mcpServers JSON shape is the common one), then start a new session. ` +
+        `WAO cannot probe this host: mcp status will not be able to confirm the registration.`,
+    };
   }
   // snippet-only 宿主：emit 精确注册片段，零写入（TD-191①）。cwd 不参与——
   // 片段只含安装根路径，与目标项目无关；不做 workspace 证明、不碰任何配置。
@@ -473,9 +497,12 @@ export async function bindWorkspace({ host, cwd, hooks }) {
       hostVerified: descriptor.hostVerified,
       snippet,
       example,
+      // 决定 0066：文件式注册的宿主给出要并入的配置文件位置（有注册子命令的宿主无此字段）。
+      ...(descriptor.configHint ? { configFile: descriptor.configHint } : {}),
       note:
         `SNIPPET GENERATED — NOT BOUND: WAO never writes ${host} config. ` +
-        `Paste the snippet into ${host}'s MCP config (or run the example command), then restart ${host}.`,
+        `Paste the snippet into ${host}'s MCP config (or run the example command), then restart ${host}. ` +
+        `Check the result with: mcp status --host ${host}`,
     };
   }
   if (typeof cwd !== "string" || cwd.length === 0) {
@@ -616,39 +643,56 @@ export async function bindWorkspace({ host, cwd, hooks }) {
  * Query the workspace binding status.
  * Runs proveWorkspace (canonical proof, not just string matching).
  */
-export async function statusWorkspace({ host, cwd, hooks }) {
+export async function statusWorkspace({ host, cwd, hooks, probe, includeUserRegistration = false }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
-    return { bound: false, host, status: "unsupported_host" };
+    return {
+      bound: false,
+      host,
+      status: "unsupported_host",
+      // 决定 0066：表外宿主如实说明"查不了"与去哪看，而不是只给一个状态码。
+      note: `${host} is not in WAO's host table (known hosts: ${SUPPORTED_HOSTS.join(", ")}); WAO has no probe for it. Look for a "wao" entry in ${host}'s own MCP config. mcp bind --host ${host} prints a generic stdio snippet.`,
+    };
   }
-  // snippet-only 宿主（TD-191①）：WAO 从不写其配置——没有 WAO 绑定可查询。
+  // snippet-only 宿主：WAO 从不写其配置（bound 恒 false），但决定 0066 起只读探测
+  // 宿主自己的配置，如实回答注册状态（0043 第 3 条的 not_applicable 由此取代）。
   const statusDescriptor = findHostDescriptor(host);
   if (statusDescriptor && !statusDescriptor.autoBind) {
+    const probed = probeHostRegistration(host, { expectedStdio: stdioPath(), cwd, ...probe });
+    const state = probed?.state ?? "unknown";
     return {
       bound: false,
       host,
       mode: "snippet-only",
-      status: "not_applicable",
-      note: `${host} is a snippet-only host: WAO never writes its config, so there is no WAO binding to status. Registration state lives in ${host}'s own config.`,
+      status: state,
+      registered: state === "unknown" ? null : state !== "not_registered",
+      hostVerified: statusDescriptor.hostVerified,
+      sources: probed?.sources ?? [],
+      note: registrationNote(host, state),
     };
   }
 
   const h = { ...defaultHooks(), ...hooks };
+  // 决定 0066：codex 的用户级注册（~/.codex 或 $CODEX_HOME）与项目级绑定是两层——
+  // 项目未绑定但用户级已注册时，Lead 在 codex 里照样有 WAO 工具。仅在调用方显式
+  // 要求时探测（CLI 面要；库调用默认不碰用户家目录）。只读：codex mcp list --json。
+  const userRegistration = includeUserRegistration ? await codexUserRegistration(h) : undefined;
+  const withUser = (result) => (userRegistration ? { ...result, userRegistration } : result);
 
   let canonicalRoot;
   try {
     const proof = proveWorkspace(cwd);
     canonicalRoot = proof.root;
   } catch (err) {
-    return { bound: false, host, status: "invalid_workspace", error: err.message };
+    return withUser({ bound: false, host, status: "invalid_workspace", error: err.message });
   }
   try {
     assertLocalCodexPaths(canonicalRoot);
   } catch (err) {
-    return { bound: false, host, status: "unsafe_codex_home", error: err.message };
+    return withUser({ bound: false, host, status: "unsafe_codex_home", error: err.message });
   }
 
   if (isConfigTracked(canonicalRoot)) {
-    return { bound: false, host, status: "tracked_config" };
+    return withUser({ bound: false, host, status: "tracked_config" });
   }
 
   const expected = expectedServerContract(canonicalRoot);
@@ -656,16 +700,99 @@ export async function statusWorkspace({ host, cwd, hooks }) {
   try {
     state = await classifyState(h, canonicalRoot, expected);
   } catch (err) {
-    return { bound: false, host, status: "unsafe_codex_home", error: err.message };
+    return withUser({ bound: false, host, status: "unsafe_codex_home", error: err.message });
   }
 
-  return {
+  return withUser({
     bound: state.status === "configured",
     host,
     status: state.status,
     workspaceRoot: state.status === "configured" ? canonicalRoot : undefined,
     configPath: state.status === "configured" ? codexConfigPath(canonicalRoot) : undefined,
-  };
+  });
+}
+
+// ── 决定 0066：宿主注册状态（只读）────────────────────────────────────────────
+
+function registrationNote(host, state) {
+  if (state === "registered") {
+    return `A "wao" MCP entry pointing at this WAO install is present in ${host}'s config. Registered is not the same as loaded: ${host} picks it up in a new session.`;
+  }
+  if (state === "registered_other_target") {
+    return `A "wao" MCP entry exists in ${host}'s config but points at a different WAO install than this one (${REPO_ROOT}).`;
+  }
+  if (state === "not_registered") {
+    return `No "wao" MCP entry in ${host}'s config — a Lead running in ${host} has no WAO MCP tools. Register with: mcp bind --host ${host}`;
+  }
+  return `Could not read ${host}'s MCP config (see sources) — registration state unknown, not assumed.`;
+}
+
+/** codex 用户级注册（$CODEX_HOME 或 ~/.codex）：经 codex CLI 只读列出，不解析 TOML。 */
+async function codexUserRegistration(h) {
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+  let servers;
+  try {
+    servers = await (h.codexUserList ?? h.codexList)({ codexHome });
+  } catch {
+    return { state: "unknown", sources: [{ scope: "user", path: codexHome, state: "unknown", detail: "codex_cli_unavailable" }] };
+  }
+  const wao = servers.find((s) => s.name === "wao");
+  const state = wao
+    ? classifyStdioEntry({ command: wao.transport?.command, args: wao.transport?.args }, stdioPath())
+    : "not_registered";
+  return { state, sources: [{ scope: "user", path: codexHome, state }] };
+}
+
+/**
+ * 全宿主一览（`mcp status` 不带 --host）：逐个描述符给出注册状态。codex 行的
+ * registered 取"项目级绑定 或 用户级注册"——任一成立 Lead 在 codex 里就有工具。
+ */
+export async function statusAllHosts({ cwd, hooks, probe, env = process.env }) {
+  const hosts = [];
+  for (const d of HOST_DESCRIPTORS) {
+    const st = await statusWorkspace({ host: d.id, cwd, hooks, probe, includeUserRegistration: true });
+    let registered = st.registered ?? null;
+    if (d.autoBind) {
+      const user = st.userRegistration?.state;
+      registered = st.bound || user === "registered" || user === "registered_other_target"
+        ? true
+        : user === "not_registered" ? false : null;
+    }
+    hosts.push({
+      host: d.id,
+      label: d.label,
+      hostVerified: d.hostVerified,
+      registered,
+      status: st.status,
+      ...(st.userRegistration ? { userRegistration: st.userRegistration.state } : {}),
+    });
+  }
+  return { installRoot: REPO_ROOT, detectedHost: detectHostFromEnv(env), hosts };
+}
+
+/** 本 CLI 进程是否运行在某个宿主会话里（仅按描述符里真机核实过的 detectEnv 判）。 */
+export function detectHostFromEnv(env = process.env) {
+  const hit = HOST_DESCRIPTORS.find((d) => (d.detectEnv ?? []).some((name) => env[name]));
+  return hit ? hit.id : null;
+}
+
+/**
+ * 派发 advisory（决定 0066）：CLI 派发发生在某个可识别的宿主会话里、而该宿主上
+ * WAO 的 MCP 没注册时，给一行 stderr 提示——Lead 被明确告知自己走的是命令行通道，
+ * 不是悄悄退回。fail-open：探测抛错/状态 unknown/识别不出宿主 → null（不出行）。
+ * 已注册即静默；未注册期间每次派发都出（常驻可修复的缺口保持可见，同 0042 ③）。
+ * @returns {string|null}
+ */
+export function renderMcpHostAdvisory({ env = process.env, cwd, probe } = {}) {
+  try {
+    const host = detectHostFromEnv(env);
+    if (!host) return null;
+    const probed = probeHostRegistration(host, { expectedStdio: stdioPath(), cwd, env, ...probe });
+    if (probed?.state !== "not_registered") return null;
+    return `[wao] advisory: this is a ${host} session and WAO's MCP is not registered there — you are on the CLI channel. Register: wao mcp bind --host ${host} (check: wao mcp status --host ${host})`;
+  } catch {
+    return null;
+  }
 }
 
 /**

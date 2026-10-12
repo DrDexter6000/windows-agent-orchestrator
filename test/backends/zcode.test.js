@@ -1033,6 +1033,105 @@ test("zcode ⑥d TD-197① 自放大存活（2026-10-02 误杀形态回归钉）
   child.kill();
 });
 
+// ⑥g 流活性证词（2026-10-12，Carloha 反馈 run_20261012102243802j45ncc /
+// run_20261012104046786m8kann + 三轮 glm-pro 真机探针）：长思考步在
+// session/messages 快照里完全不可见（step-start 之后整步完成才一次性落 part），
+// 但 app-server 持续推送 `v4/telemetry/event` kind=stream.chunk 通知帧。停滞门
+// 预算击发时取该证词：最近 60s 内有分片 ⇒ 续命；没有 ⇒ 照旧判停滞；累计被
+// 续命的静默有 30min 硬顶。夹具：假钟 +30s/拍，prime 在 n=3（t=90s）。
+const streamChunk = (sessionId = SESSION_ID, channel = "thought") => [
+  "v4/telemetry/event",
+  { kind: "stream.chunk", channel, chunkLength: 12, sessionId },
+];
+
+test("zcode ⑥g: 静默段越过预算但模型流分片持续在收 → 证词续命到正常完成（旧门 n=13 必杀）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; peer.notify(...streamChunk()); },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "持续收流分片的长思考步不是停滞");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "绝不 turn stalled");
+  assert.ok(peer.polls() >= 30, "越过了旧门的 n=13 杀点");
+  child.kill();
+});
+
+test("zcode ⑥g: 流分片停了 → 照旧在预算处判停滞，诊断带分片事实（流断/真挂死不被证词掩护）", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick >= 3 && tick <= 6) peer.notify(...streamChunk()); // 只在前四拍有流，随后静默
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled/);
+  assert.match(done.error, /4 model stream chunk\(s\) seen this turn, none in the last 60s/, "分片早已停止（距今 210s > 60s 新鲜度窗）");
+  assert.match(done.error, /300000ms floor/, "预算合同不变");
+  assert.equal(peer.polls(), 13, "杀点与修复前一致（n=13）——证词只放宽、不收紧");
+  child.kill();
+});
+
+test("zcode ⑥g: 别的会话的流分片不作证；从未见过分片时诊断如实写明", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      peer.notify(...streamChunk("sess_some_other_session"));
+      peer.notify("v4/telemetry/event", { kind: "usage.delta", sessionId: SESSION_ID }); // 非分片遥测不算
+      peer.notify("v4/telemetry/event", { kind: "stream.chunk", sessionId: SESSION_ID }); // 缺 chunkLength 不算
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled \(no model stream chunk observed this turn/);
+  assert.equal(peer.polls(), 13);
+  child.kill();
+});
+
+test("zcode ⑥g: 流一直活着但 part 始终不落 → 累计被证词续命的静默满 30min 有界收口", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 1,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; peer.notify(...streamChunk()); },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /cumulative stream-attested silence exceeded the 30min cap/);
+  assert.match(done.error, /across 6 attestation\(s\)/, "每次续命计入 300s 静默，第 6 次到顶");
+  // prime n=3；每 10 拍（300s）击发一次：n=13,23,33,43,53 续命，n=63 到顶收口。
+  assert.equal(peer.polls(), 63);
+  child.kill();
+});
+
 // 反例③的在场分支见 ⑥b（补强）；此处钉思考预算本身的界：silentTimeout 缺席、
 // 零 part 恒持续 → 120 拍有界收口（第二轮起与 NO_PROGRESS_POLL_LIMIT 解耦的
 // 固定值，取值沿用上轮裁定）——绝不无限等待、也绝不在停滞门抢先。

@@ -142,6 +142,7 @@ import {
 import { inheritedEnvNames } from "../envPolicy.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { buildChildEnv, compileInvocation, isProcessPlaceholderSessionId } from "./processBackend.js";
+import { performance } from "node:perf_hooks";
 import { createStallTracker } from "./stallBudget.js";
 
 const BACKEND_NAME = "zcode";
@@ -187,6 +188,38 @@ export const ZCODE_ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 const NO_PROGRESS_FLOOR_MS = 300_000;
 const NO_PROGRESS_FACTOR = 3;
 const NO_PROGRESS_CEILING_MS = 600_000;
+
+// 流活性证词（2026-10-12，Carloha 消费者侧反馈 + 三轮 glm-pro 真机探针）。
+//
+// 事故形态：run_20261012102243802j45ncc / run_20261012104046786m8kann——整文件
+// 重写类任务上 GLM-5.3（max/high）单个模型请求连续思考数分钟，被停滞门判
+// "turn stalled" 零产出收掉。zcode 自身日志实证模型没有卡死：被杀前的那次请求
+// 237s 内收了 11,419 个 reasoning 分片（约 4.4 万字符）。
+//
+// 探针实证的上游行为（zcode CLI 0.16.9，glm-pro max）：
+//   - `session/messages` 快照在一步完成之前**完全不暴露**该步的 reasoning：
+//     探针里 step-start 之后 35-45s 快照零变化，随后 reasoning/text/step-finish
+//     三个 part 一次性出现——"part 个数增长"这个进展定义对长思考步天然失明，
+//     内容长度也无从观察（part 根本不在）。
+//   - 同一时段 app-server 在 stdout 上持续推送通知帧 `v4/telemetry/event`，
+//     其中 `params.kind === "stream.chunk"`（`channel`: thought/text，带数值
+//     `chunkLength` 与 `sessionId`）逐分片一帧（一次 27s 的思考 2725 帧）。
+//     此前 wire 对一切通知帧一律忽略。
+//
+// 用法（与 kimiWeb 0046 B5 的 serve 证词同一纪律，只是证词来源不同）：停滞门
+// 预算击发时才看证词——该会话在最近 STREAM_ATTEST_RECENCY_MS 内收到过流分片
+// ⇒ 上游正在出 token，是"零 part 的活"不是停滞：resetSilent 续命（不喂自适应
+// 学习），并把这段静默计入累计；累计被证词续命的静默 ≥ 硬顶 ⇒ 照样有界收口
+// （活着但永远落不了 part 的轮次不会无限续命）。最近没有分片 ⇒ 照旧判停滞
+// （流断了/真挂死：j45ncc 的重试段若确实无流即属此类）。
+//
+// 只放宽、永不收紧：证词只在"原本要杀"的那一刻参与；上游改名/改形状/不再推送
+// ⇒ 识别不到分片 ⇒ 行为退回本修复之前的停滞门。这是上游内部遥测通道，形状
+// 仅在上述版本实测过——诚实边界写在这里，不宣称稳定合同。
+const STREAM_TELEMETRY_METHOD = "v4/telemetry/event";
+const STREAM_CHUNK_KIND = "stream.chunk";
+const STREAM_ATTEST_RECENCY_MS = 60_000;
+const STREAM_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
 
 // 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
 // done(failed)。取值沿用上轮裁定（首轮 live 证据 run_20261001195259045cle1ft：
@@ -850,10 +883,21 @@ export class ZcodeBackend {
       writeLine(response).catch(() => { /* best-effort 应答：传输已关，服务端等待由其超时收口 */ });
     };
 
+    const streamChunkCounts = new Map();
     const handleFrame = (frame) => {
       if (frame && typeof frame === "object" && typeof frame.method === "string") {
-        if (Object.prototype.hasOwnProperty.call(frame, "id")) answerServerRequest(frame);
-        return; // 通知（无 id）：startup/storageState 等——v1 忽略。
+        if (Object.prototype.hasOwnProperty.call(frame, "id")) {
+          answerServerRequest(frame);
+          return;
+        }
+        // 通知（无 id）：只认流分片遥测（按会话计数，供停滞门取活性证词）；
+        // startup/storageState 等其余通知一律忽略。
+        const p = frame.params;
+        if (frame.method === STREAM_TELEMETRY_METHOD && p && p.kind === STREAM_CHUNK_KIND
+          && typeof p.sessionId === "string" && Number.isFinite(p.chunkLength)) {
+          streamChunkCounts.set(p.sessionId, (streamChunkCounts.get(p.sessionId) ?? 0) + 1);
+        }
+        return;
       }
       if (frame && typeof frame === "object" && Object.prototype.hasOwnProperty.call(frame, "id")) {
         const waiter = pending.get(frame.id);
@@ -897,6 +941,8 @@ export class ZcodeBackend {
     const wire = {
       request,
       isClosed: () => closedFact !== null,
+      // 该会话迄今收到的流分片通知数（单调增；未见过 = 0）。
+      streamChunkCount: (id) => streamChunkCounts.get(id) ?? 0,
       fatal: () => fatalError,
       closedError: transportClosedError,
       // 进程死亡即时唤醒轮询等待（否则最长相邻两拍的死区）。
@@ -1136,6 +1182,14 @@ export class ZcodeBackend {
     // 检测——计数回退仍 fail-closed；身份前缀检测另在下方，两者独立并存）。
     const toolLedger = new Map();
     let highWaterParts = baselineParts;
+    // 流活性证词状态：分片计数的上次读数、最近一次见到新分片的时刻（与停滞门
+    // 同一只钟）、证词续命次数与累计被续命的静默时长。
+    const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
+    const streamChunksOf = () => (typeof wire.streamChunkCount === "function" ? wire.streamChunkCount(sessionId) : 0);
+    let lastStreamChunks = streamChunksOf();
+    let lastStreamChunkAt = null;
+    let streamAttestations = 0;
+    let attestedSilentMs = 0;
     const finish = () => {
       // 终态后回收进程（一个 WAO run 一个 app-server 进程；会话本体常驻上游
       // storage，进程回收不影响 resume lane）。幂等。
@@ -1183,6 +1237,11 @@ export class ZcodeBackend {
         }
         const msgs = result.messages;
         const parts = flattenParts(msgs);
+        const streamChunks = streamChunksOf();
+        if (streamChunks > lastStreamChunks) {
+          lastStreamChunks = streamChunks;
+          lastStreamChunkAt = stallNow();
+        }
         if (parts.length < highWaterParts) {
           finish();
           yield doneEvent(
@@ -1291,12 +1350,33 @@ export class ZcodeBackend {
           );
           return;
         }
-        if (stalled) {
+        // 流活性证词：预算击发的这一刻，最近是否还在收流分片。
+        const streamActive = stalled && lastStreamChunkAt !== null
+          && (stallNow() - lastStreamChunkAt) <= STREAM_ATTEST_RECENCY_MS;
+        if (streamActive) {
+          streamAttestations += 1;
+          attestedSilentMs += stallTracker.stallMs();
+          if (attestedSilentMs >= STREAM_ATTESTED_SILENT_CAP_MS) {
+            finish();
+            yield doneEvent(
+              "failed",
+              `zcode turn stalled: cumulative stream-attested silence exceeded the ${Math.round(STREAM_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+                + `(${Math.round(attestedSilentMs)}ms across ${streamAttestations} attestation(s); ${lastStreamChunks} stream chunk(s) observed, `
+                + "bounded exit: the model stream is active but parts are not landing)",
+            );
+            return;
+          }
+          // 证词续命：清静默段、不喂自适应学习（kimiWeb 0046 B5② 同款）。
+          stallTracker.resetSilent();
+        } else if (stalled) {
           finish();
           const d = stallTracker.diagnostics();
           yield doneEvent(
             "failed",
-            `zcode turn stalled (silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+            `zcode turn stalled (${lastStreamChunks > 0
+              ? `${lastStreamChunks} model stream chunk(s) seen this turn, none in the last ${Math.round(STREAM_ATTEST_RECENCY_MS / 1000)}s${streamAttestations > 0 ? `, ${streamAttestations} prior stream attestation(s)` : ""}`
+              : "no model stream chunk observed this turn"}; `
+              + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
               + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
               + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — bounded exit)`,
           );

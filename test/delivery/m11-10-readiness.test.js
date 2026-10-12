@@ -1152,6 +1152,58 @@ test("M11-10-CLI-02: without --wait-ms the query keeps the old shape (no readine
   } finally { cleanupDir(runDir); }
 });
 
+// 2026-10-12 消费者侧反馈：验证排队时 runs delivery 只显示 pending（一条运行等了约
+// 11 分钟，要另跑 runs gate 才知道在等谁）。pending 时并入验证闸的只读快照。
+test("runs delivery: verification pending → 输出带验证闸快照（排队点名持有者 / 本 run 在跑 / free）；非 pending 不带", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-cli-gate-"));
+  try {
+    const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+    const runId = "run_cligate";
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: makeRef(runId) },
+      ...terminal(runId),
+    ]);
+    const run = async (args, lease) => {
+      const lines = [];
+      const orig = console.log;
+      console.log = (...a) => { lines.push(a.map(String).join(" ")); };
+      let statusCalls = 0;
+      try {
+        await runsDeliveryCommand([runId, ...args, "--run-dir", runDir], { runDir },
+          { createGate: () => ({ status: async () => { statusCalls += 1; return lease; } }) });
+      } finally { console.log = orig; }
+      return { text: lines.join("\n"), statusCalls };
+    };
+    const heldByOther = { free: false, holder: { owner: "canonical-test", runId: "run_someone_else", startedAt: "2026-10-12T10:47:00.000Z", pid: 4242 } };
+
+    const queued = JSON.parse((await run(["--format", "json"], heldByOther)).text);
+    assert.equal(queued.verification.status, "pending", "夹具前提：验证尚未有结果");
+    assert.equal(queued.verificationGate.state, "queued");
+    assert.deepEqual(queued.verificationGate.holder, { owner: "canonical-test", runId: "run_someone_else", startedAt: "2026-10-12T10:47:00.000Z" },
+      "持有者只带身份字段（不带 pid 等）");
+
+    const text = (await run([], heldByOther)).text;
+    assert.match(text, /Verification: pending/);
+    assert.match(text, /Verification gate: held by canonical-test \/ run_someone_else since 2026-10-12T10:47:00\.000Z — this run is queued behind it/);
+
+    const running = JSON.parse((await run(["--format", "json"], { free: false, holder: { owner: "runner", runId } })).text);
+    assert.equal(running.verificationGate.state, "running", "闸由本 run 持有=验证在跑");
+    assert.equal(JSON.parse((await run(["--format", "json"], { free: true })).text).verificationGate.state, "gate_free");
+
+    // 非 pending：不查闸、不加字段（既有形状不变）
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: makeRef(runId) },
+      { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") },
+      ...terminal(runId),
+    ]);
+    const settled = await run(["--format", "json"], heldByOther);
+    assert.equal("verificationGate" in JSON.parse(settled.text), false);
+    assert.equal(settled.statusCalls, 0, "非 pending 不触达闸");
+  } finally { cleanupDir(runDir); }
+});
+
 test("M11-10-CLI-03: invalid --wait-ms is rejected before the service is called", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m1110-cli-03-"));
   try {

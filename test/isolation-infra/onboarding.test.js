@@ -2532,7 +2532,7 @@ test("TD-191②: --host 表内宿主给出能力事实 + 一站式步骤（rende
   assert.equal(guide.bindCommand, null, "snippet-only 宿主无 bind 命令");
 });
 
-test("TD-191②: --host zcode（格式级入表）给指引且如实标注 hostVerified 未验证；真表外宿主仍 fail-closed", () => {
+test("TD-191② + 决定 0066: --host 指引排第一屏；表外宿主给通用指引（不再报错退出）", () => {
   const runHost = (h) => spawnSync(
     process.execPath, ["src/cli.js", "wao", "onboarding", "--host", h],
     { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" }, stdio: ["ignore", "pipe", "pipe"] },
@@ -2544,12 +2544,17 @@ test("TD-191②: --host zcode（格式级入表）给指引且如实标注 hostV
   assert.match(zcOut, /host: zcode/, "应给 zcode 宿主指引块");
   assert.match(zcOut, /hostVerified=true/, "zcode 已真机验证（2026-10-03）——能力事实必须如实为 true");
   assert.match(zcOut, /AGENT_ONBOARDING/, "未验证宿主应指向 Owner 入表清单");
-  // 真表外宿主：fail-closed + 指路
+  // 决定 0066：宿主指引排在 worker 选择之前（2026-10-12 反馈：第一屏只见 NEEDS-SELECTION）
+  assert.ok(zc.stdout.indexOf("host: zcode") < zc.stdout.indexOf("wao onboarding:"), "宿主指引块必须先于 onboarding 主体");
+  assert.match(zcOut, /mcp status --host zcode/, "指引块给出注册状态查询命令");
+  // 表外宿主：通用指引 + 正常退出（决定 0066 取代原 fail-closed 报错）
   const bad = runHost("not-a-host");
-  assert.notEqual(bad.status, 0, "表外宿主必须非零退出");
+  assert.equal(bad.status, 0, "表外宿主给通用指引，不再非零退出");
   const badOut = ((bad.stderr || "") + (bad.stdout || "")).toString();
   assert.match(badOut, /not in the verified host table/);
   assert.match(badOut, /host-neutral snippet/);
+  assert.match(badOut, /mcp bind --host not-a-host/, "通用路线指向 mcp bind 的通用片段");
+  assert.ok(bad.stdout.indexOf("not in the verified host table") < bad.stdout.indexOf("wao onboarding:"), "通用指引同样排第一屏");
 });
 
 test("TD-191②: host-neutral 片段的 argv 能真启动 stdio server（scratch spawn 冒烟）", async () => {

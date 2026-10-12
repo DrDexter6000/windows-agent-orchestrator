@@ -50,6 +50,7 @@ import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assert
 // ADR 0035 S3: dispatch-startup advisory line renderer (repo resource counts;
 // fail-open — any git failure/timeout omits the line entirely).
 import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
+import { renderMcpHostAdvisory } from "../application/mcpWorkspaceActivation.js";
 import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
 
 function parseAgentList(args) {
@@ -592,6 +593,12 @@ export async function runCommand(args, config) {
     options.cwd ? resolve(options.cwd) : process.cwd(),
   );
   if (advisoryLine) console.error(advisoryLine);
+  // 决定 0066：派发发生在可识别的宿主会话里而该宿主未注册 WAO MCP 时，明确告知
+  // Lead 自己走的是命令行通道（同为 fail-open advisory：stderr 一行，不阻塞）。
+  const mcpHostAdvisory = renderMcpHostAdvisory({
+    cwd: options.cwd ? resolve(options.cwd) : process.cwd(),
+  });
+  if (mcpHostAdvisory) console.error(mcpHostAdvisory);
   // M9-7A: background delivery is now supported — the delivery request is
   // forwarded through the shared dispatchRun service to the detached runner.
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。
