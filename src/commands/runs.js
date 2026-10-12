@@ -396,6 +396,7 @@ ${RUNS_WAIT_USAGE}`);
       outcome: result.observation?.outcome,
       terminal: result.terminal,
       terminationSource: result.termination?.source ?? null,
+      transcriptQuiet: result.transcriptQuiet === true,
     });
     console.log(JSON.stringify({ ...result, semanticNotes }, null, 2));
     return;

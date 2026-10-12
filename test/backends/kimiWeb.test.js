@@ -2418,7 +2418,7 @@ test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续�
   assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
 });
 
-test("kimi-web B5②: 证词活着但累计被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
+test("kimi-web B5②: 证词活着但自上次进度以来被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
   const frozen = [turnItem({
     state: "running",
     endedAt: null,
@@ -2443,8 +2443,48 @@ test("kimi-web B5②: 证词活着但累计被续命静默 ≥30min → 收口 f
   }
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /cumulative serve-attested silence exceeded the 30min cap/);
+  assert.match(done.error, /serve-attested silence since the last progress exceeded the 30min cap/);
   assert.match(done.error, /never lands output/);
+});
+
+test("kimi-web B5②b（决定 0068）: 中途有进度 → 硬顶清零重计；两段静默合计超 30min 也不收口", async () => {
+  const frozen = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [] })],
+  })];
+  // 落了一帧（签名变化 = 进度），之后再次冻结。
+  const frozenAfterProgress = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "partial", role: "assistant" }] })],
+  })];
+  const completed = [turnItem({
+    steps: [stepItem({ frames: [{ kind: "text", text: "final-answer", role: "assistant" }] })],
+  })];
+  // 每拍 +310s。第 1 拍建基线；第 2–5 拍 4 次证词续命（1240s）；第 6 拍签名变化
+  // （清零）；第 7–11 拍 5 次证词续命（1550s）；第 12 拍完成。两段合计 2790s >
+  // 1800s——按整 turn 累计的旧口径会在第 6 次证词（第 8 拍）收口。
+  const script = [...Array(5).fill(frozen), ...Array(6).fill(frozenAfterProgress), completed];
+  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5b2", { script, detailMode: "active" });
+  const fakeNow = { v: 0 };
+  const clockedHandler = (url, init, n) => {
+    if (url.includes("/transcript")) fakeNow.v += 310_000;
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  assert.equal(events.at(-1).reason, "completed", "进度之后硬顶重新起算");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.ok(detailCalls() >= 7, `两段静默里的证词合计超过旧口径的收口点（实际 ${detailCalls()}）`);
 });
 
 test("kimi-web B5③: 预算击发 + 证词请求失败 → 照杀（fail-closed：无证词=无续命）", async () => {

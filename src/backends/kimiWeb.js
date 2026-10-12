@@ -163,10 +163,12 @@ const NO_PROGRESS_CEILING_MS = 240_000;
 // serve 活体证词（sessionDetail 的 main_turn_active/busy）——K3 长 dense brief 首
 // 拍重思考零帧是活轮不是停滞（当日四杀实证），证词为真 = noteProgress 重置静默
 // 段继续观察；证词为假/取不到 = 照杀（fail-closed 防真挂死）。证词续命的硬顶=
-// **累计被证词续命的静默时间**（每次续命把该段静默计入累计；产出/流式时间不
-// 计数）——kimi 席验收轮咬出的边界修正：按 turn 墙钟计顶会精确斩杀"健康长跑
-// 后的收尾思考"（越有产出越晚遇到首个静默段）；累计静默语义下真锁死（活着但
-// 永远沉默）照样在此值收口，健康长 turn 的产出时间不受罚。
+// **自上次进度以来被证词续命的静默时间**（每次续命把该段静默计入；产出/流式
+// 时间不计数；有进度即清零——决定 0068，Owner 2026-10-12）。此前按整 turn 累计、
+// 有进度也不清零：一个每隔几分钟落一次产出、合计静默超 30 分钟的健康长 turn 会
+// 被它收掉（zcode 同形状的硬顶已先于此被改掉）。保留硬顶本身的理由：serve 的
+// main_turn_active / busy 是服务端的自我声明，工具挂死时它同样报 active——没有
+// 别的体征可以交叉印证，所以单段静默仍在此值收口。
 const LIVENESS_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
 
 // completed 轮 usage 求和的字段映射（kimi usage 四计数 → metrics 轴）：
@@ -912,6 +914,9 @@ export class KimiWebBackend {
         lastSignature = signature;
         noProgressPolls = 0;
         stallTracker.noteProgress();
+        // 进度清零证词续命的计数与累计静默（硬顶只约束自上次进度以来的静默）。
+        attestedSilentMs = 0;
+        livenessAttestations = 0;
         // 在途进度呈现（见声明处注释）：增长即节流发射 streaming 事实。
         const nowMs = Date.now();
         if (nowMs - lastProgressEmitAt >= KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS) {
@@ -945,7 +950,7 @@ export class KimiWebBackend {
               `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
                 + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
                 + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
-                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s)` : ""}; `
+                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s) since the last progress` : ""}; `
                 + `attestation: ${attestationState} — ${attestationState === "inactive"
                   ? "the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)"
                   : "the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)"})`,
@@ -957,7 +962,7 @@ export class KimiWebBackend {
           if (attestedSilentMs >= LIVENESS_ATTESTED_SILENT_CAP_MS) {
             yield doneEvent(
               "failed",
-              `turn stalled: cumulative serve-attested silence exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+              `turn stalled: serve-attested silence since the last progress exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
                 + `(${Math.round(attestedSilentMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
                 + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness `
                 + "(the serve keeps attesting an active turn that never lands output)",

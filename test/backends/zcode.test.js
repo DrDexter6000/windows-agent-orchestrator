@@ -1215,7 +1215,11 @@ test("zcode ⑥h: 没有流分片但工具子进程在耗 CPU → 进程证词�
   assert.ok(!JSON.stringify(events).includes("turn stalled"));
   // n=13 预算击发取基线、n=14 比对（+5000ms CPU / 30s）续命；n=24 / n=25 再来一轮。
   assert.equal(probes, 4);
-  assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 0, "进程证词不冒充 streaming");
+  // 决定 0068：每次凭进程活动续命落一条事实（Lead 下钻时看得见），不冒充 streaming。
+  assert.deepEqual(
+    events.filter((e) => e.kind === "runtime_activity").map((e) => e.status),
+    ["process_active", "process_active"],
+  );
   child.kill();
 });
 
@@ -1366,6 +1370,9 @@ test("zcode ⑥h: 子进程不动但工作树有文件变化 → 续命；两项
     onPollTick: () => { fakeNow += 30_000; },
   });
   assert.equal(alive.at(-1).reason, "completed", "窗内指纹变了就是有产出");
+  // 决定 0068：凭文件变化续命落 files_changed；进程没动，不落 process_active。
+  const signs = alive.filter((e) => e.kind === "runtime_activity").map((e) => e.status);
+  assert.ok(signs.length >= 1 && signs.every((s) => s === "files_changed"), `实际 ${JSON.stringify(signs)}`);
   writing.child.kill();
 
   fakeNow = 0;

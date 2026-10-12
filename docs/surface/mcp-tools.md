@@ -302,6 +302,7 @@ Output:
 | lastEvent | object\|null | yes |  |
 | lastActivity | object\|null | yes |  |
 | scorecardSummary | object | no |  |
+| leadAdvisory | string | no |  |
 | availableDrilldowns | array<object> | yes |  |
 
 ## run_collect

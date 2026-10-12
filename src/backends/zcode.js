@@ -248,6 +248,9 @@ const STREAM_ATTEST_RECENCY_MS = 60_000;
 // 类命令最短观察窗 180s，流活着时窗内必有至少一条。
 const STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS = 60_000;
 const PROCESS_ACTIVITY_WINDOW_MS = 30_000;
+// 收口门凭进程活动 / 文件变化续命时落转录事实的最小间隔（零 part 两道门到点后
+// 每个观察窗都会续命一次，不节流会每 30s 一条）。
+const VITAL_SIGN_EMIT_MIN_INTERVAL_MS = 60_000;
 const PROCESS_PROBE_MAX_FAILURES = 3;
 
 // 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
@@ -1240,6 +1243,9 @@ export class ZcodeBackend {
     let windowBaseline = null;
     let probeFailures = 0;
     let closeEvidence = null;
+    // 最近一次观察窗比对读到的体征（闭集 runtime status），与上次落事实的时刻。
+    let observedSigns = [];
+    let lastVitalSignEmitAt = null;
     const resetObservation = () => {
       windowBaseline = null;
       probeFailures = 0;
@@ -1270,19 +1276,19 @@ export class ZcodeBackend {
         return "pending";
       }
       const facts = [];
-      let alive = false;
+      observedSigns = [];
       if (tree !== null && windowBaseline.tree !== null) {
         const activity = describeProcessActivity(windowBaseline.tree, tree, stallNow() - windowBaseline.at);
-        alive = activity.active;
+        if (activity.active) observedSigns.push("process_active");
         facts.push(`no process activity in the last ${Math.round(activity.windowMs / 1000)}s (cpu +${activity.cpuMs}ms, io +${activity.ioBytes}B across ${tree.size} descendant process(es))`);
       } else {
         facts.push(treeNote);
       }
       if (files !== null && windowBaseline.files !== null) {
-        if (files !== windowBaseline.files) alive = true;
+        if (files !== windowBaseline.files) observedSigns.push("files_changed");
         else facts.push("no file change in the working tree");
       }
-      return alive ? "alive" : facts.join("; ");
+      return observedSigns.length > 0 ? "alive" : facts.join("; ");
     };
     const finish = () => {
       // 终态后回收进程（一个 WAO run 一个 app-server 进程；会话本体常驻上游
@@ -1473,6 +1479,14 @@ export class ZcodeBackend {
           }
         }
         if (outcome === "alive") {
+          // 凭进程活动 / 文件变化续命时，把读到的体征落成转录事实——这段时间转录
+          // 里没有别的东西，Lead 下钻时靠它知道控制面看到了什么（流在收时已有
+          // streaming 事实）。
+          if (!streamRecent && (lastVitalSignEmitAt === null
+            || stallNow() - lastVitalSignEmitAt >= VITAL_SIGN_EMIT_MIN_INTERVAL_MS)) {
+            lastVitalSignEmitAt = stallNow();
+            for (const status of observedSigns) yield runtimeActivityEvent(status);
+          }
           lifeAttestations += 1;
           resetObservation();
           // 清静默段、不喂自适应学习（kimiWeb 0046 B5② 同款）。零 part 的两道门

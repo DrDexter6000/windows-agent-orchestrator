@@ -185,7 +185,7 @@ type RunEvent =
   | { kind: "file_written", path: string, toolCallId?: string } // runtime 已确认成功的写入（证据链用）
   | { kind: "thinking" }                                      // payload-free reasoning heartbeat
   | { kind: "runtime_activity",
-      status: "initialized"|"streaming"|"provider_retry" }    // payload-free provider status
+      status: "initialized"|"streaming"|"provider_retry"|"process_active"|"files_changed" } // payload-free
   | { kind: "metrics", tokens?: TokenUsage, durationMs?: number }
   | { kind: "done", reason: "completed"|"aborted"|"failed", error?: string };
 ```

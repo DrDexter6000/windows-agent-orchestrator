@@ -175,7 +175,8 @@ test("MD-02: run_status returns availableDrilldowns; legacy fields unchanged", a
       // Legacy fields preserved exactly (M12-17 added executionStage — the
       // closed-set submitted-stage projection, additive).
       // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
-      assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS);
+      // 决定 0068：夹具未终态且时间戳久远 → 可选的 leadAdvisory 在场，其余键不变。
+      assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort());
       assert.equal(parsed.runId, "run_s");
       assert.equal(parsed.state, "running");
       assert.equal(parsed.terminal, false);

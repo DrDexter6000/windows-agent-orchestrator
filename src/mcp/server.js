@@ -204,6 +204,7 @@ import { projectReviewResult } from "../application/deliveryReviewProjection.js"
 import { REVIEW_UNAVAILABLE_REASONS, REVIEW_PENDING_REASON } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
+import { LEAD_ADVISORY_WIRE_MAX_LEN } from "../application/runQuietAdvisory.js";
 import {
   projectRunActivity,
   ACTIVITY_CATEGORIES,
@@ -1573,6 +1574,11 @@ const RUN_STATUS_OUTPUT = z.object({
     passed: z.boolean(),
     failedChecks: z.array(z.enum([...SCORECARD_CHECK_NAMES])).max(SCORECARD_CHECK_NAMES.length),
   }).strict().optional(),
+  // 决定 0068（Owner 2026-10-12）：OPTIONAL advisory——未到终态且转录里 ≥30 分钟
+  // 没有新的动作或正文时在场，其余缺席（既有形状逐字节不变）。固定英文模板 +
+  // 整数 + 闭集标签（runQuietAdvisory.js），不含转录文本。只陈述事实与出口：
+  // 去留由 Lead 决定，WAO 不据此做任何动作。
+  leadAdvisory: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
@@ -5196,6 +5202,7 @@ export function createWaoMcpServer({
           lastEvent,
           lastActivity,
           ...(scorecardSummary ? { scorecardSummary } : {}),
+          ...(isStringField(status.leadAdvisoryWire) ? { leadAdvisory: status.leadAdvisoryWire } : {}),
         };
         // M12-8B: bounded progressive-disclosure metadata — a pure function of
         // the already-projected machine facts (no extra reads, no semantics).
@@ -5812,6 +5819,7 @@ export function createWaoMcpServer({
           outcome: payload.observation?.outcome,
           terminal: payload.terminal,
           terminationSource: payload.termination?.source ?? null,
+          transcriptQuiet: result.transcriptQuiet === true,
         });
 
         // M11-8B closeout: return the PARSED safe object.
@@ -5966,6 +5974,7 @@ export function createWaoMcpServer({
           deliveryVerificationStatus: payload.outcome?.delivery?.verificationStatus ?? null,
           deliveryFailureCode: payload.outcome?.delivery?.failureCode ?? null,
           deliveryRequested: payload.outcome?.delivery?.requested ?? null,
+          transcriptQuiet: result.transcriptQuiet === true,
         });
 
         const parsed = RUN_AWAIT_RESULT_OUTPUT.parse(payload);

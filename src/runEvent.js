@@ -28,6 +28,10 @@ export const RUNTIME_ACTIVITY_STATUSES = Object.freeze([
   "initialized",
   "streaming",
   "provider_retry",
+  // 决定 0068：收口门到点、控制面凭这项体征继续等时落的事实——worker 运行时的
+  // 后代进程在干活 / 工作目录里有文件变化。
+  "process_active",
+  "files_changed",
 ]);
 
 const RUNTIME_ACTIVITY_STATUS_VALUES = new Set(RUNTIME_ACTIVITY_STATUSES);

@@ -33,6 +33,7 @@ import { checkOwnerLiveness } from "./ownerLiveness.js";
 // run_wait and run_await_result is built from one closed set, with no import
 // cycle (runAwaitResult already imports summarizeLiveness from here).
 import { projectObservation, READ_FAILURE_REASONS } from "./runObservationProjection.js";
+import { isTranscriptQuiet } from "./runQuietAdvisory.js";
 
 export const RUN_WAIT_MIN_MS = 180000;
 export const RUN_WAIT_DEFAULT_MS = 270000;
@@ -480,6 +481,8 @@ export async function runWait(input) {
     ownerHeartbeat: liv.ownerHeartbeat,
     // TD-137②：窗口到期（非终态）附带上限交叉提示；终态/提前返回不带。
     waitWindowHint: buildWaitWindowHint(RUN_WAIT_MAX_MS),
+    // 决定 0068：转录里是否已到 advisory 门限没有新的动作或正文（语义注记的事实）。
+    transcriptQuiet: isTranscriptQuiet(currentEvents, runId, _now()),
     observation,
     termination,
   };

@@ -90,6 +90,7 @@ import { diagnoseFailure, DIAGNOSIS_CATEGORIES, isValidDiagnosisCode, ISOLATION_
 // projector so the MCP schema (run_wait + run_await_result) is built from ONE
 // closed set, with no import cycle (runWait imports it from the projector too).
 import { projectObservation } from "./runObservationProjection.js";
+import { isTranscriptQuiet } from "./runQuietAdvisory.js";
 import {
   gatherDeliveryView,
   projectDeliveryReadiness,
@@ -650,6 +651,8 @@ export async function runAwaitResult(input) {
       outcome: null,
       // M12-14: non-terminal → no terminal settlement reason exists.
       isolationFailureReason: null,
+      // 决定 0068：转录静默事实（语义注记用；不进合同形状的其余字段）。
+      transcriptQuiet: isTranscriptQuiet(events, runId, _now()),
       observation,
       termination,
     };
@@ -807,6 +810,7 @@ export async function runAwaitResult(input) {
     // TD-137②：窗口到期（非终态）附带上限交叉提示；终态/读失败不带。MCP 适配层
     // 以显式键集合构造 wire payload，该字段不进入合同形状。
     waitWindowHint: buildWaitWindowHint(RUN_AWAIT_RESULT_MAX_MS),
+    transcriptQuiet: isTranscriptQuiet(currentEvents, runId, _now()),
     observation,
     termination,
   };

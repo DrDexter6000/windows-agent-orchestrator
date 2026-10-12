@@ -176,8 +176,12 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       // availableDrilldowns — bounded progressive-disclosure metadata;
       // M12-17 added executionStage — submitted-stage closed-set projection).
       // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
-      assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS,
-        "only runId/agentId/state/terminal/executionStage/lastEvent/lastActivity/availableDrilldowns");
+      // 决定 0068：夹具是一个未终态、时间戳久远的 run——转录静默事实成立，多一个
+      // 可选键 leadAdvisory（固定模板，下方的泄漏扫描同样覆盖它）。
+      assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
+        "only runId/agentId/state/terminal/executionStage/lastEvent/lastActivity/availableDrilldowns (+ leadAdvisory on a quiet non-terminal run)");
+      assert.match(parsed.leadAdvisory,
+        /^No new worker action or text in the transcript for \d+ min \(last activity: file_written, \d+s ago\)\. Whether to keep waiting is the Lead's decision\. Inspect: run_activity\. Stop: run_stop\.$/);
       // M11-8B: the durable agentId from the envelope, not worker text.
       assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
 
@@ -635,8 +639,9 @@ test("TD150B-M3: 无 scorecard 事件的 run —— scorecardSummary 字段 abse
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal("scorecardSummary" in parsed, false, "absent，不是 null 占位");
       // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
-      assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS,
-        "既有输出键集合逐字节不变（纯 additive）");
+      // 夹具未终态且时间戳久远 → 0068 的可选 leadAdvisory 在场；其余键集合不变。
+      assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
+        "既有输出键集合不变（纯 additive）");
     } finally {
       await client.close();
       await server.close();
@@ -899,6 +904,43 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
     assert.ok(!existsSync(ownerFile), "ownership heartbeat cleared");
   } finally {
     if (client) await client.close();
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// 决定 0068：leadAdvisory 只在未终态且转录静默 ≥30 分钟时在场。
+// ---------------------------------------------------------------------
+
+test("0068-M1: 刚有动作的 run / 已终态的 run —— leadAdvisory 缺席，键集合与此前逐键相同", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0068-m1-"));
+  try {
+    const runDir = join(dir, "runs");
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    const fresh = "run_fresh_0068";
+    writeTranscript(runDir, fresh, [
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: recent, runId: fresh, agentId: "w", seq: 1 }),
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: recent, runId: fresh, agentId: "w", seq: 2 }),
+    ].join(""));
+    const ended = "run_ended_0068";
+    writeTranscript(runDir, ended, [
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-07-14T00:00:02.000Z", runId: ended, agentId: "w", seq: 1 }),
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:03.000Z", runId: ended, agentId: "w", seq: 2 }),
+    ].join(""));
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      for (const runId of [fresh, ended]) {
+        const res = await client.callTool({ name: "run_status", arguments: { runId } });
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS, runId);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
     cleanupDir(dir);
   }
 });

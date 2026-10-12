@@ -108,6 +108,16 @@ const CATALOG = Object.freeze({
       "No termination note is emitted on a read failure.",
     ],
   }),
+  // 决定 0068：非终态观察的附加事实——门限与 runQuietAdvisory.js 的
+  // LEAD_ADVISORY_QUIET_SECONDS 一致（本模块不 import，由测试钉住两处同值）。
+  "observation.transcript_quiet": Object.freeze({
+    id: "observation.transcript_quiet",
+    meaning: "The run is not terminal and no worker action or text has landed in the transcript for at least 30 minutes.",
+    doesNotMean: [
+      "It does not mean the worker is dead or stalled; a long tool call or long thinking leaves the transcript quiet.",
+      "It does not mean WAO will stop the run; to keep waiting or call run_stop is the Lead's decision.",
+    ],
+  }),
   "observation.unknown": Object.freeze({
     id: "observation.unknown",
     meaning: "The current observation outcome could not be classified into a known state.",
@@ -397,14 +407,19 @@ function deliveryKey(f) {
 
 // ===== Per-tool selectors (return catalog ids in deterministic priority) =====
 
+// 非终态的干净观察上，转录静默事实成立时追加 observation.transcript_quiet。
+function withTranscriptQuiet(ids, f) {
+  return f.transcriptQuiet === true && f.terminal !== true ? [...ids, "observation.transcript_quiet"] : ids;
+}
+
 function selectForRunWait(f) {
   const o = f.outcome;
   if (o === "read_failure") return ["observation.read_failure"];
   if (o === "terminal") {
     return ["observation.terminal", terminationId(f.terminationSource)];
   }
-  if (o === "window_expired") return ["observation.window_expired"];
-  if (o === "point_in_time") return ["observation.point_in_time"];
+  if (o === "window_expired") return withTranscriptQuiet(["observation.window_expired"], f);
+  if (o === "point_in_time") return withTranscriptQuiet(["observation.point_in_time"], f);
   // Unknown/future/missing outcome: fail closed to the safe observation.unknown note.
   // NEVER observation.point_in_time (which would falsely claim no window elapsed),
   // and never echo the unknown value.
@@ -419,9 +434,9 @@ function selectForRunAwaitResult(f) {
   if (isTerminal) {
     out.push("observation.terminal", terminationId(f.terminationSource));
   } else if (o === "window_expired") {
-    out.push("observation.window_expired");
+    out.push(...withTranscriptQuiet(["observation.window_expired"], f));
   } else if (o === "point_in_time") {
-    out.push("observation.point_in_time");
+    out.push(...withTranscriptQuiet(["observation.point_in_time"], f));
   } else {
     // Unknown/future/missing outcome → safe observation.unknown (never point_in_time).
     out.push("observation.unknown");

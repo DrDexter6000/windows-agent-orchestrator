@@ -32,10 +32,7 @@ import { projectExecutionStage } from "./runStageProjection.js";
 // 不变式、MCP wire enum 同源，三层不可能漂移）。scorecard.js 是横切层叶模块，
 // 无反向依赖，不破坏本模块的 application 分层契约。
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
-import { runEventIsUsableEffect } from "../runEvent.js";
-
-// 多久没有新的动作/正文产出才附 Lead advisory（决定 0067）。
-const LEAD_ADVISORY_QUIET_SECONDS = 30 * 60;
+import { LEAD_ADVISORY_QUIET_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText } from "./runQuietAdvisory.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -152,6 +149,8 @@ function describeActivity(ev, { priorEvents } = {}) {
         initialized: "provider 已初始化",
         streaming: "provider 正在输出",
         provider_retry: "provider 正在重试",
+        process_active: "工具子进程在干活",
+        files_changed: "工作目录有文件变化",
       };
       return {
         lastActivityKind: "运行时状态",
@@ -310,17 +309,22 @@ export async function getRunStatus({
 
   // 决定 0067：控制面不替 Lead 放弃一个还在跑的运行，只把事实摆出来——未到终态
   // 且转录里已很久没有新的动作或正文时附一句 advisory（闭集模板 + 数值；纯读时
-  // 推导，转录零写入）。"动作或正文"与 completed_empty 判定同一口径
-  // （runEventIsUsableEffect）；runtime_activity / thinking 只说明运行时还活着。
-  // 陈述的是转录可见的事实：有的后端到轮末才落正文，工具在途的输出也不进转录
-  // ——"转录里没有"不等于 worker 没在产出。
-  const lastEffect = [...scope].reverse().find((e) => e.type === "run.event" && runEventIsUsableEffect(e)) ?? null;
-  const effectBaseTs = lastEffect?.ts ?? scope.find((e) => e.type === "run.submitted")?.ts ?? null;
-  const secondsSinceEffect = effectBaseTs
-    ? Math.round((_now() - new Date(effectBaseTs).getTime()) / 1000)
+  // 推导，转录零写入；口径与边界见 runQuietAdvisory.js）。最近活动是运行时状态
+  // 时写出是哪一种（闭集文案）：那正是"还活着的凭据是什么"。
+  const secondsSinceEffect = secondsSinceLastEffect(scope, _now());
+  const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
+  const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
+  const leadAdvisory = quiet
+    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
     : null;
-  const leadAdvisory = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS
-    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityKind ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
+  // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）。
+  const leadAdvisoryWire = quiet
+    ? leadAdvisoryWireText({
+        secondsSinceEffect,
+        lastActivityEventKind: lastActivity?.kind ?? null,
+        lastRuntimeStatus: lastActivity?.status ?? null,
+        secondsSinceActivity,
+      })
     : null;
 
   return {
@@ -348,7 +352,7 @@ export async function getRunStatus({
     lastActivityEventKind: lastActivity?.kind ?? null,
     ...(scorecardSummary ? { scorecardSummary } : {}),
     // 条件展开：没有 advisory 的 run 字段 absent，既有消费者的形状逐字节不变。
-    ...(leadAdvisory ? { secondsSinceEffect, leadAdvisory } : {}),
+    ...(leadAdvisory ? { secondsSinceEffect, leadAdvisory, leadAdvisoryWire } : {}),
   };
 }
 
