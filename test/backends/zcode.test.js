@@ -1184,9 +1184,11 @@ test("zcode ⑥g: 落 part 清零之后流停了 → 照旧判停滞，续命计
   child.kill();
 });
 
-// ⑥h 进程活动证词（决定 0067）：流不在收时，预算击发即取后代进程快照作基线，
-// 30s 后再取一次比对——工具命令在跑（CPU 在涨）就不是停滞。夹具注入
-// processProbe（缺省在假 child 下恒为"取不到"）。
+// ⑥h 观察窗取证（决定 0067）：门到点且流不在收时取后代进程快照与工作树指纹作
+// 基线，30s 后再取一次比对——工具命令在跑（CPU 在涨）或工作树有文件变化就不是
+// 停滞。比对得出"没有活动"后不当拍收口，下一拍照常轮询一遍仍无进展才收（取样
+// 占用时间，其间可能来了流分片或落了 part）。夹具注入 processProbe /
+// deliverableProbe（缺省在假 child 下恒为"不适用"）。
 const treeSnapshot = (cpuMs, ioBytes = 0, pids = [5001]) => new Map(
   pids.map((pid) => [pid, { cpu100ns: cpuMs * 10_000, ioBytes }]),
 );
@@ -1230,9 +1232,9 @@ test("zcode ⑥h: 没有流分片、子进程也不动 → 观察窗满即判停
   });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /turn stalled \(no model stream chunk observed this turn; no process activity in the last 30s \(cpu \+0ms, io \+0B across 2 descendant process\(es\)\); silent stretch 330000ms/);
+  assert.match(done.error, /turn stalled \(no model stream chunk observed this turn; no process activity in the last 30s \(cpu \+0ms, io \+0B across 2 descendant process\(es\)\); silent stretch 360000ms/);
   assert.match(done.error, /no vital signs, bounded exit\)$/);
-  assert.equal(peer.polls(), 14, "比无证词时晚一拍（30s 观察窗）");
+  assert.equal(peer.polls(), 15, "n=13 基线、n=14 比对、n=15 再看一拍后收口");
   child.kill();
 });
 
@@ -1275,9 +1277,177 @@ test("zcode ⑥h: 快照命令瞬时失败不收口——下一拍重取；连�
     stallClock: () => fakeNow,
     onPollTick: () => { fakeNow += 30_000; },
   });
-  assert.match(closed.at(-1).error, /process activity unavailable \(3 consecutive snapshot failures\); silent stretch 360000ms/);
-  assert.equal(broken.peer.polls(), 15, "n=13、14、15 三次失败后收口");
+  assert.match(closed.at(-1).error, /process activity unavailable \(3 consecutive snapshot failures\); silent stretch 390000ms/);
+  assert.equal(broken.peer.polls(), 16, "n=13、14、15 三次失败，n=16 再看一拍后收口");
   broken.child.kill();
+});
+
+test("zcode ⑥h: 比对取样期间来了流分片 → 不收口（收口前再看一拍，会审 sol 席的竞态）", async () => {
+  // n=14 的比对取样返回"没有活动"，但取样进行中上游推来一个流分片：当拍不收口，
+  // n=15 的轮询看到流在收 ⇒ 续命。此前比对一返回就按旧读数收口并写"没有流分片"。
+  let fakeNow = 0;
+  let probes = 0;
+  let scenario = null;
+  scenario = await runScenario({
+    backendOptions: {
+      processProbe: async () => {
+        probes += 1;
+        if (probes === 2) scenario.peer.notify(...streamChunk());
+        return treeSnapshot(1200);
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 20) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(scenario.handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "取样期间到达的流分片没有被旧读数盖掉");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 1);
+  scenario.child.kill();
+});
+
+test("zcode ⑥h: 比对阶段快照瞬时失败 → 下一拍重取，不沿用失败下结论", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processProbe: async () => {
+        probes += 1;
+        if (probes === 2) throw new Error("snapshot timed out"); // 基线已在，比对这次失败
+        return treeSnapshot(probes * 5000);
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 20) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(probes, 3, "n=13 基线、n=14 失败、n=15 重取比对续命");
+  child.kill();
+});
+
+test("zcode ⑥h: 子进程不动但工作树有文件变化 → 续命；两项都不动 → 收口文案两项读数都在", async () => {
+  let fakeNow = 0;
+  let prints = 0;
+  const writing = await runScenario({
+    backendOptions: {
+      processProbe: async () => treeSnapshot(1200),
+      deliverableProbe: async () => `fp-${prints += 1}`,
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 20) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const alive = await collect(writing.handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(alive.at(-1).reason, "completed", "窗内指纹变了就是有产出");
+  writing.child.kill();
+
+  fakeNow = 0;
+  const still = await runScenario({
+    backendOptions: {
+      processProbe: async () => treeSnapshot(1200),
+      deliverableProbe: async () => "fp-constant",
+    },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const closed = await collect(still.handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.match(closed.at(-1).error, /no process activity in the last 30s \(cpu \+0ms, io \+0B across 1 descendant process\(es\)\); no file change in the working tree; silent stretch/);
+  still.child.kill();
+});
+
+test("zcode ⑥h: 零 part 阶段也取证——子进程在干活就不被思考预算收掉；不动才收，文案带读数", async () => {
+  // 思考预算（120 拍）到点后每拍都"到点"：忙碌的后代让它一直续命到外部中止。
+  let fakeNow = 0;
+  let probes = 0;
+  const controller = new AbortController();
+  const busy = await runScenario({
+    backendOptions: { processProbe: async () => treeSnapshot((probes += 1) * 5000) },
+    peerOptions: { messages: () => [] },
+  });
+  const seen = [];
+  for await (const event of busy.handle.events(controller.signal, {
+    pollInterval: 1,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      if (busy.peer.polls() >= 140) controller.abort();
+    },
+  })) {
+    seen.push(event);
+  }
+  assert.ok(busy.peer.polls() >= 140, "越过了第 121 拍的思考预算杀点");
+  assert.ok(!JSON.stringify(seen).includes("thinking budget exceeded"));
+  assert.ok(probes >= 4, "到点后反复开窗取证");
+  busy.child.kill();
+
+  fakeNow = 0;
+  const idle = await runScenario({
+    backendOptions: { processProbe: async () => treeSnapshot(1200) },
+    peerOptions: { messages: () => [] },
+  });
+  const closed = await collect(idle.handle, {
+    pollInterval: 1,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.match(
+    closed.at(-1).error,
+    /^zcode thinking budget exceeded \(no turn parts observed for 120 consecutive polls, silentTimeout absent — bounded exit\) — no vital signs: no model stream chunk observed this turn; no process activity in the last 30s/,
+  );
+  idle.child.kill();
+});
+
+test("zcode ⑥h: silentTimeout 到点但流在收 → 不收口；流停了照旧以 silent timeout 收口", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({ peerOptions: { messages: () => [] } });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    silentTimeout: 30,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick <= 60) peer.notify(...streamChunk());
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /^silent timeout: no turn parts observed within 30ms/);
+  // 30ms 的 silentTimeout 在头十几拍内就到点；流一直收到第 61 次轮询，第 64 次
+  // 轮询距最后分片 90s > 60s 新鲜度窗 ⇒ 收口。
+  assert.equal(peer.polls(), 64);
+  child.kill();
 });
 
 test("zcode ⑥h: 观察窗内来了流分片 → 按流证词续命，不等进程比对", async () => {

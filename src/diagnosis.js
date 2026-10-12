@@ -680,7 +680,7 @@ function diagnoseFailureInner(events, expectedRunId) {
     // 进程退出前一条 worker 事件都没有时，把这一点单列出来。本模块只给事实
     // （铁律：不给处方）——看不到事件不等于没有副作用；"同形故障此前怎么处置"
     // 属于知识，放在 docs/troubleshooting.md，这里只留指针。
-    if (!evs.some((e) => e.type === "run.event")) {
+    if (!evs.slice(0, evs.indexOf(exitCrash)).some((e) => e.type === "run.event")) {
       const sessionAt = Date.parse(evs.find((e) => e.type === "session.created")?.ts);
       const exitAt = Date.parse(exitCrash.ts);
       const life = Number.isFinite(sessionAt) && Number.isFinite(exitAt)
@@ -688,7 +688,7 @@ function diagnoseFailureInner(events, expectedRunId) {
         : "";
       evidence.push({
         eventType: "run.error",
-        fact: `进程退出前未观察到任何 worker 事件${life}；未观察到事件不等于没有副作用（既往同形案例见 docs/troubleshooting.md「启动期退出」）`,
+        fact: `进程退出前未观察到任何 worker 事件${life}；未观察到事件不等于没有副作用（零 worker 事件退出的既往案例见 docs/troubleshooting.md §7.15）`,
       });
     }
     return { category: "crash", evidence };

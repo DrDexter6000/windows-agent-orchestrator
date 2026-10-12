@@ -313,6 +313,64 @@ test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("TD265-04: resume 重放之后 stop 的目标是重放记录的新进程，不是 session.created 里的旧进程", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td265-04-"));
+  try {
+    makeGitRepo(dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const killedOf = async (runId, session, rerun) => {
+      await seedSessionRun(dir, runId, dir, session);
+      const prior = await readTranscript(join(dir, `${runId}.jsonl`));
+      const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "a", initialSeq: prior.at(-1).seq });
+      await t.append("run.rerun", rerun);
+      const alive = new Set([1111, 2222]);
+      const killed = [];
+      const result = await stopRun({
+        runId, runDir: dir, authorizedWorkspaceRoot: dir,
+        deps: defaultDeps({
+          kill: (pid) => { killed.push(pid); alive.delete(pid); return { called: true, exitCode: 0 }; },
+          isAlive: (pid) => alive.has(pid),
+        }),
+      });
+      return { killed, result };
+    };
+    // 原生会话 id + hostPid 的后端：重放记录带新 hostPid
+    const native = await killedOf("run_td265_04a",
+      { backend: "zcode", backendSessionId: "sess_native", hostPid: 1111 },
+      { originalSessionId: "sess_native", newSessionId: "sess_native", reason: "replay", hostPid: 2222 });
+    assert.deepEqual(native.killed, [2222]);
+    assert.equal(native.result.pid, 2222);
+    assert.equal(native.result.backend, "zcode");
+    // proc_<pid> 占位 id 的后端：重放记录的新会话 id 自带新 pid（此前同样指向旧进程）
+    const placeholder = await killedOf("run_td265_04b",
+      { backend: "process", backendSessionId: "proc_1111" },
+      { originalSessionId: "proc_1111", newSessionId: "proc_2222", reason: "replay" });
+    assert.deepEqual(placeholder.killed, [2222]);
+    assert.equal(placeholder.result.pid, 2222);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD265-05: 重放记录没带 hostPid（原生会话 id）→ 不沿用旧 pid，拒绝并零副作用", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td265-05-"));
+  try {
+    makeGitRepo(dir);
+    await seedSessionRun(dir, "run_td265_05", dir, { backend: "zcode", backendSessionId: "sess_native", hostPid: 1111 });
+    const prior = await readTranscript(join(dir, "run_td265_05.jsonl"));
+    const t = new JsonlTranscript(join(dir, "run_td265_05.jsonl"), { runId: "run_td265_05", agentId: "a", initialSeq: prior.at(-1).seq });
+    await t.append("run.rerun", { originalSessionId: "sess_native", newSessionId: "sess_native", reason: "replay" });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let killCalls = 0;
+    await assert.rejects(
+      () => stopRun({
+        runId: "run_td265_05", runDir: dir, authorizedWorkspaceRoot: dir,
+        deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; }, isAlive: () => true }),
+      }),
+      /has no stop route/,
+    );
+    assert.equal(killCalls, 0, "旧进程的 pid 不再代表这次运行");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── MCP concurrency ──────────────────────────────────────────────────────────
 
 test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winner, one loser, one side effect", async () => {

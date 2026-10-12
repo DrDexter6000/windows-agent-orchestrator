@@ -757,7 +757,7 @@ test("0067-S1: 未终态且 ≥30 分钟没有新动作/正文 → 附 advisory�
     assert.equal(status.secondsSinceActivity, 20, "运行时还在动——最近活动 20s 前");
     assert.equal(
       status.leadAdvisory,
-      `已 31 分钟没有新的动作或正文产出（最近活动：运行时状态，20s 前）。是否继续等待由 Lead 决定；中止：wao stop ${ADV_RUN}`,
+      `转录里已 31 分钟没有新的动作或正文（最近活动：运行时状态，20s 前）。是否继续等待由 Lead 决定；中止：wao stop ${ADV_RUN}`,
     );
   } finally { cleanupDir(dir); }
 });
@@ -786,6 +786,18 @@ test("0067-S3: 从未有过动作 → 从 run.submitted 起算", async () => {
       { type: "run.event", kind: "thinking", ts: "2026-10-12T10:00:03.000Z", seq: 3, ...base },
     ].map(ev).join(""));
     const status = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:45:00.000Z") });
-    assert.match(status.leadAdvisory, /^已 45 分钟没有新的动作或正文产出（最近活动：在思考，2697s 前）/);
+    assert.match(status.leadAdvisory, /^转录里已 45 分钟没有新的动作或正文（最近活动：在思考，2697s 前）/);
+  } finally { cleanupDir(dir); }
+});
+
+test("0067-S4: 恰满 30 分钟出现、差 1 秒不出现", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-adv-"));
+  try {
+    writeTranscript(dir, ADV_RUN, advisoryTranscript());
+    const at = (iso) => getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse(iso) });
+    assert.equal("leadAdvisory" in (await at("2026-10-12T10:34:59.000Z")), false);
+    const edge = await at("2026-10-12T10:35:00.000Z");
+    assert.equal(edge.secondsSinceEffect, 1800);
+    assert.match(edge.leadAdvisory, /^转录里已 30 分钟没有新的动作或正文/);
   } finally { cleanupDir(dir); }
 });

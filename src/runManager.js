@@ -2049,6 +2049,8 @@ export class RunManager {
         originalSessionId,
         newSessionId: newResult.backendSessionId,
         reason: "replay",
+        // 重放换了进程：stop 的击杀目标随之更新（TD-265；见 runStop 的目标解析）。
+        ...(Number.isInteger(newResult.hostPid) && newResult.hostPid > 0 ? { hostPid: newResult.hostPid } : {}),
       });
       await this._transition(transcript, state, "submitted", STATE_CHANGE_REASON.replay_respawned);
       const run = new Run({

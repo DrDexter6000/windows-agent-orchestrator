@@ -9,6 +9,7 @@ import {
   descendantsOf,
   snapshotDescendants,
   describeProcessActivity,
+  fingerprintWorkingTree,
   PROCESS_ACTIVE_CPU_MS_PER_S,
   PROCESS_ACTIVE_IO_BYTES_PER_S,
 } from "../../src/backends/processActivity.js";
@@ -46,16 +47,18 @@ test("descendantsOf: 父子环不会死循环", () => {
   assert.deepEqual([...descendantsOf(table, 10).keys()].sort(), [20, 30]);
 });
 
-test("snapshotDescendants: 不适用（非 Windows / 非法 pid / 宿主缺席）→ null；快照命令失败 → 抛错（瞬时，可重取）", async () => {
+test("snapshotDescendants: 不适用（非 Windows / 非法 pid）→ null；命令失败或结果里找不到宿主 → 抛错（瞬时，可重取）", async () => {
   const run = async () => TABLE;
   assert.equal(await snapshotDescendants(100, { run, platform: "linux" }), null);
   assert.equal(await snapshotDescendants(0, { run, platform: "win32" }), null);
   assert.equal(await snapshotDescendants(undefined, { run, platform: "win32" }), null);
-  assert.equal(await snapshotDescendants(777, { run, platform: "win32" }), null);
   await assert.rejects(
     () => snapshotDescendants(100, { run: async () => { throw new Error("boom"); }, platform: "win32" }),
     /boom/,
   );
+  // 宿主进程明明在跑（调用方正在轮询它）却不在表里 = 这次快照不可信，不是"不适用"
+  await assert.rejects(() => snapshotDescendants(777, { run, platform: "win32" }), /host process not found/);
+  await assert.rejects(() => snapshotDescendants(100, { run: async () => "", platform: "win32" }), /host process not found/);
   const ok = await snapshotDescendants(100, { run, platform: "win32" });
   assert.deepEqual([...ok.keys()].sort(), [200, 300]);
 });
@@ -82,7 +85,33 @@ test("describeProcessActivity: 空闲基线不算活动，CPU / I/O / 进程生�
   assert.deepEqual([exited.active, exited.born, exited.exited], [true, 0, 1], "进程退出即变化");
 });
 
-test("describeProcessActivity: 计数回退（pid 复用）不产生负增量", () => {
+test("describeProcessActivity: 累计读数回退 = 该 pid 换了进程——计一次退出加一次新生，不产生负增量", () => {
   const a = describeProcessActivity(snap([[200, 5000, 900_000]]), snap([[200, 10, 10]]), 30_000);
-  assert.deepEqual([a.cpuMs, a.ioBytes, a.active], [0, 0, false]);
+  assert.deepEqual(a, { active: true, cpuMs: 10, ioBytes: 10, born: 1, exited: 1, windowMs: 30_000 });
+});
+
+test("fingerprintWorkingTree: 清单、mtime、大小任一变化即指纹不同；列不出清单 → null", async () => {
+  const stats = { "a.txt": { mtimeMs: 1000, size: 10 }, "new.txt": { mtimeMs: 2000, size: 5 } };
+  const statFile = async (full) => {
+    const rel = full.replace(/\\/g, "/").split("/").pop();
+    if (!stats[rel]) throw new Error("ENOENT");
+    return stats[rel];
+  };
+  const listing = (...names) => async () => names.map((n) => `${n}\0`).join("");
+  const print = (names) => fingerprintWorkingTree("X:/tree", { listChanged: listing(...names), statFile });
+
+  const base = await print(["a.txt"]);
+  assert.match(base, /^[0-9a-f]{64}$/);
+  assert.equal(await print(["a.txt"]), base, "没有变化 = 指纹相同");
+  stats["a.txt"] = { mtimeMs: 1500, size: 10 };
+  const touched = await print(["a.txt"]);
+  assert.notEqual(touched, base, "同一文件被重写（mtime 变）");
+  stats["a.txt"] = { mtimeMs: 1500, size: 11 };
+  assert.notEqual(await print(["a.txt"]), touched, "大小变");
+  assert.notEqual(await print(["a.txt", "new.txt"]), await print(["a.txt"]), "多了一个未跟踪文件");
+  assert.match(await print(["gone.txt"]), /^[0-9a-f]{64}$/, "清单里的文件 stat 不到不抛错");
+
+  assert.equal(await fingerprintWorkingTree("X:/tree", { listChanged: async () => { throw new Error("not a git repository"); }, statFile }), null);
+  assert.equal(await fingerprintWorkingTree("", { listChanged: listing("a.txt"), statFile }), null);
+  assert.equal(await fingerprintWorkingTree(undefined, { listChanged: listing("a.txt"), statFile }), null);
 });

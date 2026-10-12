@@ -309,16 +309,18 @@ export async function getRunStatus({
   const scorecardSummary = projectScorecardSummary(scope);
 
   // 决定 0067：控制面不替 Lead 放弃一个还在跑的运行，只把事实摆出来——未到终态
-  // 且已很久没有新的动作或正文产出时附一句 advisory（闭集模板 + 数值；纯读时
+  // 且转录里已很久没有新的动作或正文时附一句 advisory（闭集模板 + 数值；纯读时
   // 推导，转录零写入）。"动作或正文"与 completed_empty 判定同一口径
   // （runEventIsUsableEffect）；runtime_activity / thinking 只说明运行时还活着。
+  // 陈述的是转录可见的事实：有的后端到轮末才落正文，工具在途的输出也不进转录
+  // ——"转录里没有"不等于 worker 没在产出。
   const lastEffect = [...scope].reverse().find((e) => e.type === "run.event" && runEventIsUsableEffect(e)) ?? null;
   const effectBaseTs = lastEffect?.ts ?? scope.find((e) => e.type === "run.submitted")?.ts ?? null;
   const secondsSinceEffect = effectBaseTs
     ? Math.round((_now() - new Date(effectBaseTs).getTime()) / 1000)
     : null;
   const leadAdvisory = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS
-    ? `已 ${Math.round(secondsSinceEffect / 60)} 分钟没有新的动作或正文产出（最近活动：${lastActivityKind ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
+    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityKind ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
     : null;
 
   return {

@@ -834,6 +834,49 @@ function createMockProcessBackend() {
   };
 }
 
+test("TD-265: resume 重放把新进程记进 run.rerun（hostPid）", async () => {
+  const dir = await makeTempDir();
+  try {
+    let spawns = 0;
+    const backend = {
+      async spawn() {
+        spawns += 1;
+        return {
+          backend: "process",
+          backendSessionId: "sess_native_replay",
+          hostPid: 5000 + spawns,
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "replayed" }] };
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const config = {
+      registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 2000,
+      timeout: 5000, retries: 0, defaultIsolation: "none",
+    };
+    const readRegistry = async () => ({
+      getAgent(id, overrides = {}) {
+        const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
+        return { id, backend: "claude-code", cwd: dir, ...defined };
+      },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({ config, readRegistry, backendFor: () => backend });
+    const run1 = await manager.start("proc_agent", { prompt: "original prompt", runId: "replay_host_pid" });
+    const resumed = await manager.resume("replay_host_pid");
+    await resumed.waitForCompletion({});
+    const events = await readTranscript(run1.transcript.filePath);
+    assert.equal(events.find((e) => e.type === "session.created").hostPid, 5001);
+    assert.equal(events.find((e) => e.type === "run.rerun").hostPid, 5002);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("M3-5: 进程式 resume 重放 prompt，产生新 session + run.rerun 事件", async () => {
   const dir = await makeTempDir();
   try {

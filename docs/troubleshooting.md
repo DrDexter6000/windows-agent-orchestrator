@@ -383,17 +383,21 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 6.9 zcode 运行什么时候会被控制面自动收口（生命体征口径，决定 0067）
 
-- **口径**（Owner 2026-10-12）：控制面只在运行**完全没有生命体征**时自动收口；只要有生命体征就继续等，放弃与否由 Lead 决定，WAO 只提供事实与建议。取证时机：本轮已有产出之后，静默满自适应预算（300–600s）。
+- **口径**（Owner 2026-10-12）：控制面只在运行**完全没有生命体征**时自动收口；只要有生命体征就继续等，放弃与否由 Lead 决定，WAO 只提供事实与建议。取证时机：三道"等不到进展"的门到点时——零 part 阶段的 silentTimeout 与 120 拍思考预算、已有产出后的停滞预算（300–600s 自适应）。
 - **算生命体征的**（任一成立即不收口）：
   - **进度**：快照里落了新 part，或既有工具调用落了新证据（开始 / 结束）。
   - **模型流在收**：最近 60s 内收到过流分片。长思考期间转录里每分钟一条 `runtime_activity`（status `streaming`），`run_wait` 显示 `liveness=progress`、`lastActivityKind=runtime_status`。
-  - **工具子进程在干活**：app-server 的后代进程在 30s 观察窗内 CPU ≥20 ms/s，或 I/O ≥64 KB/s，或有进程新生 / 退出（测试、构建、后台任务属此类）。这一项不产生转录事件：`run_wait` 显示 `process_only`，CLI `status` 的最近活动停在那条命令上。
-- **不算的**：工具挂着但不耗 CPU（`sleep`、等远端且无流量）、流断了且没有子进程在动。满预算再过 30s 观察窗收口，错误文案写明取到的读数（`no model stream chunk…` / `no process activity in the last 30s (cpu +…ms, io +…B across N descendant process(es))`），结尾 `no vital signs, bounded exit`。进程快照不适用（非 Windows）时写 `process activity unavailable` 并立即收口；快照命令瞬时失败会在下一拍重取，连续三次失败才收口。
-- **有生命体征的运行没有任何自动上限**：没人看着它，就会一直跑到自己结束或生命体征消失，期间占着工作树。
-- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且 ≥30 分钟没有新的动作或正文产出时附 `advisory` 一行（多久没产出、最近活动是什么、中止命令）；MCP 面看 `run_wait` 的 `liveness` / `lastActivityKind` 与 `run_activity`。
-- **中止**：`wao stop <runId>` / MCP `run_stop`——会话记录带 `hostPid` 的运行走进程树击杀并核验。**此前派发的 zcode 运行**（会话记录里没有 `hostPid`）仍报 `has no stop route`：核实其 app-server 进程后手动结束进程树，转录会以 `transport closed` 落 failed。
+  - **工具子进程在干活**：app-server 的后代进程在 30s 观察窗内 CPU ≥20 ms/s，或 I/O ≥64 KB/s，或有进程新生 / 退出（测试、构建、后台任务属此类）。
+  - **工作目录里有文件变化**：同一观察窗内，已改动 / 未跟踪（未被忽略）文件的清单、mtime 或大小变了。
+
+  后两项不产生转录事件：`run_wait` 显示 `process_only`，CLI `status` 的最近活动停在那条命令上。
+- **不算的**：工具挂着但不耗 CPU 也不写文件（`sleep`、等远端且无流量）、流断了且没有子进程在动。观察窗比对得出"没有活动"后再多看一拍，仍无进展才收口；错误文案写明取到的读数（`no model stream chunk…` / `no process activity in the last 30s (cpu +…ms, io +…B across N descendant process(es))` / `no file change in the working tree`），停滞门以 `no vital signs, bounded exit` 结尾，零 part 两道门在原文案后附 `— no vital signs: …`。进程快照瞬时失败会在下一拍重取，连续三次失败按取不到处理；非 Windows 且非 git 目录时两项都不适用，立即收口。
+- **"没有自动上限"只指这三道门**：有生命体征的运行不会因"等不到进展"被收掉——没人看着它，就会一直跑到自己结束或生命体征消失，期间占着工作树。协议错误、传输关闭、快照缩短、历史变异等"证据不可信"的失败照旧立即收口。
+- **证词会看错**：与任务无关的插件进程在耗 CPU、反复崩溃重启的 helper、别人在同一个未隔离的工作目录里写文件，都会让一个其实没在推进的运行一直"活着"；被 `.gitignore` 排除的写入、宿主进程内部的工作、低 CPU 的等待，则读不出活动。所以去留要 Lead 自己看。
+- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且转录里 ≥30 分钟没有新的动作或正文时附 `advisory` 一行（多久没有、最近活动是什么、中止命令）——它陈述的是转录可见的事实，zcode 的正文到轮末才落转录；MCP 面看 `run_wait` 的 `liveness` / `lastActivityKind` 与 `run_activity`。
+- **中止**：`wao stop <runId>` / MCP `run_stop`——会话记录带 `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。**此前派发的 zcode 运行**（会话记录里没有 `hostPid`）仍报 `has no stop route`：核实其 app-server 进程后手动结束进程树，转录会以 `transport closed` 落 failed。
 - **诚实边界**：流分片是上游内部遥测，只在 zcode CLI 0.16.9 实测过；进程活跃度阈值来自一次真机探针（空闲：CPU 0–2.5 ms/s、I/O 4–9 KB/s），不是长期统计。读数与来由见决定 0067。
-- **状态**：已实现（决定 0067）；同类的 kimi-web 证词硬顶未改。
+- **状态**：已实现（决定 0067）；同类的 kimi-web 证词硬顶未改，待 Owner 裁定。
 
 ---
 
@@ -510,7 +514,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 7.15 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
 
-- **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"。
+- **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
 - **已知案例**（均为 codex 后端，sol / astra 车道）：2026-09-21 三例、2026-10-12 一例。10-12 那例（`run_20261012123408529e9ri5d`，会话建立 14s 后退出，零 worker 事件）stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时。09-21 三例退出前已有 3 / 5 / 17 条 worker 事件，原因未明。四例 stderr 都以 `Reading additional input from stdin...` 开头，疑为 codex 的常规提示而非故障签名。
 - **既往处置**：四例把原任务原样再派一次均成功。
 - **WAO 不自动重试**（Owner 2026-10-12 裁定：失败之后怎么办由 Lead 决定）。零 worker 事件的那一类，既往都是原样重派即成；但未观察到事件不等于没有副作用（输出缓冲、事件尚未落盘的窗口存在），重派前看一眼工作树。已有 worker 事件后才退出的，按普通中途失败处理：先看 retained worktree 里有没有半成品（§7.10 / §4.4）。

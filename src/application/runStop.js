@@ -174,10 +174,21 @@ export async function stopRun(input) {
   // way. Legacy no-envelope transcripts (events without a runId field) now
   // fall into the existing "no session metadata" refusal right below — the
   // same error face a transcript with no session.created at all gets.
-  const session = findLatestBound(events, "session.created", runId);
-  if (!session?.backendSessionId) {
+  const created = findLatestBound(events, "session.created", runId);
+  if (!created?.backendSessionId) {
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
+  // resume 以新进程重放之后（run.rerun 晚于 session.created），承载运行的是重放
+  // 记录的新会话与新进程——停止目标取它，不取 session.created 里已被替换的旧
+  // 进程（此前重放后的 stop 仍指向旧 pid：旧进程已退出时会报"已核验停止"而新
+  // worker 还在跑）。重放记录没带 hostPid 时该字段置空，不沿用旧值。同为 runId
+  // 绑定读取。
+  const rerun = findLatestBound(events, "run.rerun", runId);
+  const replayed = typeof rerun?.newSessionId === "string" && rerun.newSessionId.length > 0
+    && Number.isInteger(rerun.seq) && Number.isInteger(created.seq) && rerun.seq > created.seq;
+  const session = replayed
+    ? { ...created, backendSessionId: rerun.newSessionId, hostPid: rerun.hostPid }
+    : created;
 
   // R18 (TD-128 W3)：fromState 投影绑定到请求 runId（R15 范式——
   // `findState(events.filter(bound))`）。fromState 落进 transitionState 写出的

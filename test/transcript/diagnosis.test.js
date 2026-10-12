@@ -196,6 +196,9 @@ test("TD-180: 进程退出前零 worker 事件 → crash 另列一条观察事�
     ...events.slice(2),
   ];
   assert.equal(diagnoseFailure(withActivity).evidence.length, 1);
+  // 退出之后才落盘的 worker 事件不抹掉这条事实（判据只看退出事件之前）
+  const lateEvent = [...events, { type: "run.event", kind: "thinking", ts: "2026-10-12T12:34:40.000Z" }];
+  assert.equal(diagnoseFailure(lateEvent).evidence.length, 2);
   // 时间戳缺席时不编造存活时长
   const noTs = events.map(({ ts, ...rest }) => rest);
   assert.match(diagnoseFailure(noTs).evidence[1].fact, /^进程退出前未观察到任何 worker 事件；/);
