@@ -347,10 +347,14 @@ export const SCOPE_EXPANSION_MARKER = "SCOPE_EXPANSION_REQUIRED";
 export const WORKER_DECLARED_SCOPE_EXPANSION = "scope_expansion_required";
 
 /**
- * worker 的**最终**回复是否按合同上报了越界停手（某行以 `SCOPE_EXPANSION_REQUIRED:`
- * 起头，容许行首的引用/列表/反引号修饰）。只回布尔事实——路径与理由是 worker
- * 的自由文本，不进控制面事件，Lead 经 collect 读原文。只看最后一条 assistant
- * 消息：前面的消息可能只是在复述合同条款。
+ * worker 的**最终**回复是否按合同上报了越界停手。合同形状是
+ * `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`：行首（容许引用/
+ * 列表/反引号修饰）出现标记，其后必须有非空路径、破折号分隔、非空理由。
+ * 不算上报的情形（会审 sol 席反例）：只有标记没有路径/理由的空声明；合同模板
+ * 原文（路径是 `<…>` 占位符）；围栏代码块里的内容（多为复述合同条款）；句中
+ * 提及。只回布尔事实——路径与理由是 worker 的自由文本，不进控制面事件，Lead 经
+ * collect 读原文。只看最后一条 assistant 消息。漏判的代价是退回原有的 empty_diff
+ * 表述（安全方向），所以判据从严。
  *
  * 2026-10-12 消费者侧反馈（run_20261012103335551tyb6kp）：worker 因任务书自相
  * 矛盾按合同停手并上报，控制面记成 empty_diff 打包失败——诊断面看不出"明确拒绝
@@ -366,7 +370,18 @@ export function declaredScopeExpansion(messages) {
   const text = Array.isArray(last.parts)
     ? last.parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n")
     : typeof last.content === "string" ? last.content : "";
-  return new RegExp(`(?:^|\\n)[\\s>*\\-\`]*${SCOPE_EXPANSION_MARKER}:`).test(text);
+  const outsideFences = text.replace(/```[\s\S]*?(?:```|$)/g, "");
+  const lineRe = new RegExp(`(?:^|\\n)[\\s>*\\-\`]*${SCOPE_EXPANSION_MARKER}:[ \\t]*([^\\n]*)`, "g");
+  for (const match of outsideFences.matchAll(lineRe)) {
+    const body = match[1].replace(/[`\s]+$/, "");
+    const sep = body.match(/\s[—–-]+\s/);
+    if (!sep) continue;
+    const path = body.slice(0, sep.index).trim();
+    const reason = body.slice(sep.index + sep[0].length).trim();
+    if (path.length === 0 || reason.length === 0 || path.startsWith("<")) continue;
+    return true;
+  }
+  return false;
 }
 
 export function composeDeliveryExecutionContract({ allowedPaths } = {}) {

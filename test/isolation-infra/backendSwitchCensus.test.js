@@ -91,8 +91,12 @@ function walkJs(dir, out) {
 //   commands/onboarding.js     — opencode-serve 差异化指引轴。
 //   envPolicy.js               — env 允许清单轴（各后端凭据/环境变量策略）。
 //   hostAdapters/codexMcpConfig.js — codex 宿主适配轴。
-//   hostAdapters/hostDescriptors.js — 宿主描述符示例命令轴（claude-code/codex/
-//                               zcode 三宿主，非后端全集）。
+//   hostAdapters/hostDescriptors.js — 宿主描述符示例命令轴（宿主 id，非后端全集；
+//                               决定 0066 入表 kimi-code——与后端名同字面，
+//                               此处是 MCP 宿主身份而非 worker 后端分叉）。
+//   hostAdapters/hostRegistrationProbe.js — 决定 0066 宿主注册只读探测表的键
+//                               （claude-code / kimi-code 两个带引号的宿主 id；
+//                               同上，宿主身份轴，不参与 worker 后端分派）。
 //   smoke.js                   — 刻意最小探测面（factory.js 头注先例：无 kimi-
 //                               code 等亦然，kimi-web/zcode 不入最小面）。
 //   owner-dashboard/*          — （当前零身份串；如未来出现按登记）。
@@ -140,7 +144,8 @@ const REGISTERED_CENSUS = {
   // && !provider）追加长期令牌继承名——通道条件派生，非新分叉轴。
   "envPolicy.js": { "claude-code": 4, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 1 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
-  "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1 },
+  "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1, "kimi-code": 1 },
+  "hostAdapters/hostRegistrationProbe.js": { "claude-code": 1, "kimi-code": 1 },
   "smoke.js": { "opencode-serve": 4, "claude-code": 4, codex: 6, "deepseek-harness": 1 },
 };
 

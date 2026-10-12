@@ -213,6 +213,12 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 // （活着但永远落不了 part 的轮次不会无限续命）。最近没有分片 ⇒ 照旧判停滞
 // （流断了/真挂死：j45ncc 的重试段若确实无流即属此类）。
 //
+// 证词只接已有产出后的停滞门；零 part 阶段的两道门（silentTimeout /
+// ZERO_PART_POLL_LIMIT）不看证词——探针里 echo 与 step-start 在 10s 内落 part，
+// 长思考发生在其后；若上游将来先推流分片后落首个 part，零 part 门仍照旧收口。
+// 硬顶是**累计被续命的静默**（非墙钟）：每个 turn 至多 30min 的无 part 续命，
+// 多 turn 运行的最坏情形按 turn 累加。
+//
 // 只放宽、永不收紧：证词只在"原本要杀"的那一刻参与；上游改名/改形状/不再推送
 // ⇒ 识别不到分片 ⇒ 行为退回本修复之前的停滞门。这是上游内部遥测通道，形状
 // 仅在上述版本实测过——诚实边界写在这里，不宣称稳定合同。
@@ -894,7 +900,7 @@ export class ZcodeBackend {
         // startup/storageState 等其余通知一律忽略。
         const p = frame.params;
         if (frame.method === STREAM_TELEMETRY_METHOD && p && p.kind === STREAM_CHUNK_KIND
-          && typeof p.sessionId === "string" && Number.isFinite(p.chunkLength)) {
+          && typeof p.sessionId === "string" && Number.isFinite(p.chunkLength) && p.chunkLength > 0) {
           streamChunkCounts.set(p.sessionId, (streamChunkCounts.get(p.sessionId) ?? 0) + 1);
         }
         return;

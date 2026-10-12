@@ -37,6 +37,8 @@
 //   configHint — 无注册子命令的宿主（文件式注册）要并入片段的配置文件位置；
 //   detectEnv  — "本 CLI 进程正运行在该宿主会话里"的环境变量标记，仅收录真机
 //                核实过的（派发 advisory 用；未核实的宿主不猜，留空）。
+//   sessionEnv — 该宿主会话内取值稳定、跨会话不同的环境变量（advisory 按它
+//                "每会话只判一次"；缺席时退化为按日）。同样只收录实见过的。
 
 /** host-neutral stdio entry → 该宿主形态的注册片段（纯映射，零 I/O）。 */
 function mcpServersShape(entry) {
@@ -89,6 +91,7 @@ export const HOST_DESCRIPTORS = [
     renderSnippet: mcpServersShape,
     example: (argv) => `claude mcp add wao --scope user -- ${argv}`,
     detectEnv: ["CLAUDECODE"],
+    sessionEnv: ["CLAUDE_CODE_SESSION_ID"], // 桌面端内置 Claude Code 的 shell 环境实见（独立 CLI 未核，缺席则按日）
   },
   {
     id: "codex",
@@ -100,6 +103,7 @@ export const HOST_DESCRIPTORS = [
     renderSnippet: mcpServersShape,
     example: (argv) => `codex mcp add wao -- ${argv}`,
     detectEnv: ["CODEX_THREAD_ID"], // codex exec 0.159.2 的 shell 环境实见
+    sessionEnv: ["CODEX_THREAD_ID"],
   },
   {
     id: "zcode",
@@ -134,6 +138,7 @@ export const HOST_DESCRIPTORS = [
     renderSnippet: opencodeShape,
     configHint: "~/.config/opencode/opencode.json",
     detectEnv: ["OPENCODE"], // opencode run 的 shell 环境实见
+    sessionEnv: ["OPENCODE_PID"], // 同上实见
     example: () =>
       "把 mcp bind --host opencode emit 的 mcp.wao 条目并入 ~/.config/opencode/opencode.json 的 mcp 段（opencode mcp add 是交互式向导），再跑 opencode mcp list 核对",
   },

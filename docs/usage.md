@@ -429,9 +429,10 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 语义、不新增失败码。`npm run cli -- runs gate` 只读查询当前持有者/free/corrupt 与 kill
 switch 状态；`--release` 是文档在案的人工破锁通道（仅限确认没有验证在跑而租约残留时）。
 交付验证停在 pending 时，CLI `runs delivery <runId>`（含 `--wait-ms`）会把同一份只读闸快照
-并入输出（文本多一行 `Verification gate: …`，JSON 多 `verificationGate`）：本 run 持有 = 验证
-在跑；别的持有者 = 在排队并点名在等谁；free = 尚未开始——不必再另跑 `runs gate` 才知道
-pending 的原因（MCP `run_delivery` 输出面未变）。
+并入输出（文本多一行 `Verification gate: …`，JSON 多 `verificationGate`）。只报**租约事实**——
+谁持有（本 run / 别的持有者，点名）、开始时间、心跳年龄，或无租约——不推断执行状态：租约可能
+陈旧（看心跳年龄），别人持有不能证明本 run 正在排队，无租约也不能证明验证尚未开始
+（MCP `run_delivery` 输出面未变）。
 `WAO_VERIFICATION_GATE=off` 整体停用（降级为 R22 inflight marker 告警层）。
 
 **行为变更（2026-08-22，R23-F/B）**：并发发起多个交付验证时，后到者会排队而不是并发
@@ -1161,20 +1162,20 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 `mcp bind/status/unbind` 命令是各 agent harness 接入 WAO MCP 的操作面（Human Owner 面，不是 MCP 工具）：`bind` 给出或写入注册，`status` 回答"这个 harness 上 WAO 的 MCP 注册了没有"。宿主闭集与能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表派生（决定 0043，三能力轴：snippet / autoBind / hostVerified；决定 0066 增补注册状态只读探测、表外宿主通用片段与派发 advisory）：
 
 - **autoBind 宿主（当前 = codex）**：`bind` 真写目标项目 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root），提供持久项目级默认——但不是正常使用的前置条件。
-- **snippet-only 宿主（当前 = claude-code、zcode、kimi-code、opencode、claude-desktop）**：`bind` **emit 精确注册片段而非写配置**——零写入，输出明说 `SNIPPET GENERATED — NOT BOUND`（输出片段 ≠ 绑定成功）；文件式注册的宿主另带 `configFile`（要并入片段的配置文件位置）。`status` **只读探测该宿主自己的配置**（决定 0066，取代原 `not_applicable`），返回四态之一：`registered`（有 wao 条目且指向本安装）/ `registered_other_target`（有 wao 条目但指向另一份 WAO 安装）/ `not_registered` / `unknown`（配置读不到或解析不了——绝不折算成未注册），并在 `sources` 里列出看过的每个配置位置。`registered` 只说明配置里有条目，宿主要开新会话才加载。`unbind` 返回 `nothing_to_unbind`（WAO 从未写其配置）。claude-code 片段 = mcpServers JSON + 一行命令；**zcode 片段 = 本地插件包形态**（`.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射 + 本地名录），官方接入命令 `zcode plugins marketplace add <名录目录> && zcode plugins install wao@wao-local`——2026-10-03 真机验证：新会话加载 WAO 全部工具（前缀 `mcp__plugin_wao_wao__`；计数见生成层 docs/surface/mcp-tools.md）。`.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把 >30s 的等待族调用（run_wait / run_await_result / run_consult）掐成假失败（2026-10-04 跨项目会话实测）；600s 最大阻塞预算 + 60s 余量，透传与执行均已实证（3000ms 负探针掐断 + 660000 下 50.6s 阻塞正常返回）。旧装机需重装/更新插件（或按片段手改 `.mcp.json`）才得到该字段。
+- **snippet-only 宿主（当前 = claude-code、zcode、kimi-code、opencode、claude-desktop）**：`bind` **emit 精确注册片段而非写配置**——零写入，输出明说 `SNIPPET GENERATED — NOT BOUND`（输出片段 ≠ 绑定成功）；文件式注册的宿主另带 `configFile`（要并入片段的配置文件位置）。`status` **只读探测该宿主自己的配置**（决定 0066，取代原 `not_applicable`），返回四态之一：`registered`（生效的 wao 条目指向本安装）/ `registered_other_target`（生效条目指向另一份 WAO 安装）/ `not_registered`（没有条目，或条目被禁用）/ `unknown`（配置读不了或解析不了——只有文件确实不存在才算"没有"，权限错误、损坏的 JSON 一律 unknown，绝不折算成未注册）。多个配置来源按**该宿主自己的覆盖优先级**取生效条目（高优先级来源读不了时整体 unknown），`sources` 按优先级从高到低列出看过的每个位置并标出 `effective`。`registered` 只说明配置里有条目，宿主要开新会话才加载。`unbind` 返回 `nothing_to_unbind`（WAO 从未写其配置）。claude-code 片段 = mcpServers JSON + 一行命令；**zcode 片段 = 本地插件包形态**（`.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射 + 本地名录），官方接入命令 `zcode plugins marketplace add <名录目录> && zcode plugins install wao@wao-local`——2026-10-03 真机验证：新会话加载 WAO 全部工具（前缀 `mcp__plugin_wao_wao__`；计数见生成层 docs/surface/mcp-tools.md）。`.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把 >30s 的等待族调用（run_wait / run_await_result / run_consult）掐成假失败（2026-10-04 跨项目会话实测）；600s 最大阻塞预算 + 60s 余量，透传与执行均已实证（3000ms 负探针掐断 + 660000 下 50.6s 阻塞正常返回）。旧装机需重装/更新插件（或按片段手改 `.mcp.json`）才得到该字段。
 - **表外宿主**（决定 0066）：`bind --host <任意名>` emit 通用 stdio 片段并明说 `GENERIC SNIPPET — NOT BOUND, FORMAT NOT VERIFIED`（command/args 是宿主中立事实，该宿主的配置语法自理）；`status` 返回 `unsupported_host` 并说明 WAO 对它没有探测；`unbind` 报错给出 known hosts 闭集。
 - **`mcp status` 不带 `--host`** = 全宿主一览：逐个表内宿主给出 `registered`（true / false / null=查不了）与状态；codex 行把项目级绑定与用户级注册（`userRegistration`）合并判定。`detectedHost` 报出本次命令是否运行在某个可识别的宿主会话里。
-- **派发 advisory**（决定 0066）：`run` 派发发生在可识别的宿主会话里（按描述符表里真机核实过的环境标记识别），而该宿主上 WAO 的 MCP 未注册时，stderr 输出一行 `[wao] advisory: this is a <host> session and WAO's MCP is not registered there — you are on the CLI channel…`。已注册、识别不出宿主、配置读不了时都不出行；不阻塞派发。
+- **派发 advisory**（决定 0066）：`run` 派发发生在可识别的宿主会话里（按描述符表里真机核实过的环境标记识别），而该宿主上 WAO 的 MCP 未注册时，stderr 输出一行 `[wao] advisory: this is a <host> session and WAO's MCP is not registered there — you are on the CLI channel…`。命令行是合法通道，这一行只是告知 MCP 工具在该宿主上不可用：**每个宿主会话只判一次**（会话键取宿主的会话变量，没有则按日），已注册、识别不出宿主、配置读不了时都不出行；不阻塞派发。
 
 各宿主的注册方式（`<argv>` 与片段以 `mcp bind --host <host>` 的输出为准；注册后用 `mcp status --host <host>` 核对）：
 
 | 宿主 | 注册 | `status` 探测的位置 | 真机加载验证 |
 |---|---|---|---|
-| claude-code | `claude mcp add wao --scope user -- <argv>` | `~/.claude.json` 的 user 级与当前目录的 local 级、项目 `.mcp.json` | 2026-10-12：中立仓库无头会话加载全部工具并调用成功 |
+| claude-code | `claude mcp add wao --scope user -- <argv>` | 按 Claude Code 的优先级：当前目录的 local 级 > 项目 `.mcp.json` > user 级（前后两项在 `~/.claude.json`，随 `CLAUDE_CONFIG_DIR` 迁移） | 2026-10-12：中立仓库无头会话加载全部工具并调用成功 |
 | codex | 项目级 `mcp bind --host codex --cwd <git-root>`；用户级 `codex mcp add wao -- <argv>` | 项目 `.codex/config.toml` 与用户级（经 `codex mcp list --json`，不解析 TOML） | 2026-10-12：`codex exec` 调用 `workspace_status` 成功（三次里有一次会话未见工具，见 TD-191） |
-| zcode | 本地插件包（见下） | `~/.zcode/cli/config.json` 的启用标记 + 已安装插件副本 | 2026-10-03 新会话；2026-10-12 宿主日志在场 |
+| zcode | 本地插件包（见下） | `~/.zcode/cli/config.json` 的启用标记 + 已安装插件副本（缓存里多个版本指向不一致时报 unknown） | 2026-10-03 新会话；2026-10-12 宿主日志在场 |
 | kimi-code | 把片段的 `mcpServers.wao` 并入 `~/.kimi-code/mcp.json`（无注册子命令） | 同一文件 | 2026-10-12：无头会话加载全部工具（该宿主不提供 MCP roots，需 `workspace_select`） |
-| opencode | 把片段的 `mcp.wao` 并入 `~/.config/opencode/opencode.json`（`opencode mcp add` 是交互式向导） | 同一文件（或 `.jsonc`）与项目根 `opencode.json` | 2026-10-12：`opencode mcp list` connected + 无头会话调用成功 |
+| opencode | 把片段的 `mcp.wao` 并入 `~/.config/opencode/opencode.json`（`opencode mcp add` 是交互式向导） | 按 opencode 的覆盖顺序：`OPENCODE_CONFIG_CONTENT` 内联 > 项目根 `opencode.json(c)` > `OPENCODE_CONFIG` 指定文件 > 全局文件（后三项按官方文档纳入，本机只核实过全局文件的形状） | 2026-10-12：`opencode mcp list` connected + 无头会话调用成功 |
 | claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件（仅 Windows 位置核实过） | 未验证（`hostVerified=false`，重启后由 Owner 确认） |
 
 **前置条件**（仅 autoBind/codex 路径）：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。

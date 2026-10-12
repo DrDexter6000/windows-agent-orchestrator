@@ -31,7 +31,7 @@ import {
   readdirSync, rmdirSync, lstatSync, realpathSync,
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -49,7 +49,7 @@ import {
 // （claude-code 等）mcp bind emit 精确片段而非拒绝——"输出片段"不等于"绑定成功"。
 import { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS, findHostDescriptor } from "../hostAdapters/hostDescriptors.js";
 // 决定 0066：宿主注册状态只读探测（snippet-only 宿主的 status 不再是 not_applicable）。
-import { probeHostRegistration, classifyStdioEntry } from "../hostAdapters/hostRegistrationProbe.js";
+import { probeHostRegistration, describeStdioEntry } from "../hostAdapters/hostRegistrationProbe.js";
 // 片段构造与宿主示例行复用 onboarding 的单一派生（TD-191① 验收判据：消灭第二清单）。
 import { buildMcpSnippet, buildHostExamples } from "./onboarding.js";
 
@@ -737,10 +737,10 @@ async function codexUserRegistration(h) {
     return { state: "unknown", sources: [{ scope: "user", path: codexHome, state: "unknown", detail: "codex_cli_unavailable" }] };
   }
   const wao = servers.find((s) => s.name === "wao");
-  const state = wao
-    ? classifyStdioEntry({ command: wao.transport?.command, args: wao.transport?.args }, stdioPath())
-    : "not_registered";
-  return { state, sources: [{ scope: "user", path: codexHome, state }] };
+  const { state, detail } = wao
+    ? describeStdioEntry({ command: wao.transport?.command, args: wao.transport?.args, enabled: wao.enabled }, stdioPath())
+    : { state: "not_registered" };
+  return { state, sources: [{ scope: "user", path: codexHome, state, entryPresent: Boolean(wao), effective: true, ...(detail ? { detail } : {}) }] };
 }
 
 /**
@@ -778,18 +778,37 @@ export function detectHostFromEnv(env = process.env) {
 
 /**
  * 派发 advisory（决定 0066）：CLI 派发发生在某个可识别的宿主会话里、而该宿主上
- * WAO 的 MCP 没注册时，给一行 stderr 提示——Lead 被明确告知自己走的是命令行通道，
- * 不是悄悄退回。fail-open：探测抛错/状态 unknown/识别不出宿主 → null（不出行）。
- * 已注册即静默；未注册期间每次派发都出（常驻可修复的缺口保持可见，同 0042 ③）。
+ * WAO 的 MCP 没注册时，给一行 stderr 提示——Lead 被明确告知 MCP 工具在这个宿主
+ * 上不可用（命令行是合法通道，这不是违规告警）。
+ *
+ * 警报疲劳纪律（0042 教训；会审 sol/kimi 两席均点名）：**每个宿主会话只判一次**
+ * ——会话键取描述符 sessionEnv 的值（没有则按 UTC 日），判过即记入状态文件，同
+ * 一会话后续派发不再探测也不再出行（故意长期走 CLI 的 Lead 每会话至多见一次）。
+ * fail-open：识别不出宿主/探测抛错/状态 unknown → null 且不记状态（下次再判）；
+ * 状态读失败=未判过，写失败=下次重判。状态文件只存宿主 id → 会话键的短哈希。
  * @returns {string|null}
  */
-export function renderMcpHostAdvisory({ env = process.env, cwd, probe } = {}) {
+export function renderMcpHostAdvisory({ env = process.env, cwd, probe, stateDir, now = () => new Date() } = {}) {
   try {
     const host = detectHostFromEnv(env);
     if (!host) return null;
+    const sessionVar = (findHostDescriptor(host)?.sessionEnv ?? []).find((n) => typeof env[n] === "string" && env[n].length > 0);
+    const sessionKey = createHash("sha256")
+      .update(sessionVar ? `${sessionVar}=${env[sessionVar]}` : `day=${now().toISOString().slice(0, 10)}`)
+      .digest("hex").slice(0, 16);
+    const dir = stateDir ?? join(env.LOCALAPPDATA ?? tmpdir(), "wao");
+    const statePath = join(dir, "mcp-host-advisory.json");
+    let judged = {};
+    try { judged = JSON.parse(readFileSync(statePath, "utf8")) ?? {}; } catch { /* 无状态=未判过 */ }
+    if (judged[host] === sessionKey) return null;
     const probed = probeHostRegistration(host, { expectedStdio: stdioPath(), cwd, env, ...probe });
-    if (probed?.state !== "not_registered") return null;
-    return `[wao] advisory: this is a ${host} session and WAO's MCP is not registered there — you are on the CLI channel. Register: wao mcp bind --host ${host} (check: wao mcp status --host ${host})`;
+    if (!probed || probed.state === "unknown") return null;
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(statePath, JSON.stringify({ ...judged, [host]: sessionKey }));
+    } catch { /* 写失败：下次重判（保守可见） */ }
+    if (probed.state !== "not_registered") return null;
+    return `[wao] advisory: this is a ${host} session and WAO's MCP is not registered for it — MCP tools are unavailable here (the CLI works). Register: wao mcp bind --host ${host} · check: wao mcp status --host ${host} (shown once per session)`;
   } catch {
     return null;
   }

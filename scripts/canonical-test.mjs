@@ -176,6 +176,7 @@ import { availableParallelism, cpus, tmpdir } from "node:os";
 // byte-stable for the meta-tests.
 import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGatePaths.js";
 import { PROJECTS_DIRNAME } from "../src/projectBuckets.js";
+import { HOST_DESCRIPTORS } from "../src/hostAdapters/hostDescriptors.js";
 
 // R23-F/B Round B (TD-130): the machine-level verification lease gate. main()
 // wraps ONE canonical invocation (the same granularity as a verifyDelivery
@@ -1977,7 +1978,7 @@ export function realWaveObservers({
  * @param {{gateHeld: boolean}} opts
  */
 export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
-  return {
+  const env = {
     ...baseEnv,
     WAO_SKIP_VERSION_GUARD: "1",
     // TD-229（2026-10-07，全量实战暴露）：MCP 认证门禁是部署级开关（User 作用域
@@ -1989,6 +1990,14 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
     WAO_MCP_REQUIRE_CERTIFIED: "0",
     ...(gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {}),
   };
+  // 决定 0066（会审 consult_202610121557386770ygr68 sol 席）：套件由哪个 agent
+  // harness 启动不得影响结果。宿主识别标记若随环境继承，CLI 派发类测试会触发
+  // MCP 宿主 advisory——去读开发者真实的宿主配置、往真实状态目录记账。子进程
+  // 环境里去掉这些标记（名单派生自描述符表，不另抄）。
+  for (const d of HOST_DESCRIPTORS) {
+    for (const name of d.detectEnv ?? []) delete env[name];
+  }
+  return env;
 }
 
 /**

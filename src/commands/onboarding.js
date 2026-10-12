@@ -214,10 +214,17 @@ export function renderHostGuideBlock(hostId, result) {
     lines.push(`(then restart ${d.id} / open a new ${d.label} task in that project)`);
   } else {
     lines.push(`${d.id} is a snippet-only host — WAO never writes its config:`);
-    lines.push(`  1. Register via the host's own route (exact snippet: npm run cli -- mcp bind --host ${d.id}):`);
-    if (guide.example) lines.push(`     ${guide.example.command}${guide.example.stability === "stable" ? "" : `   [${guide.example.stability}]`}`);
-    lines.push(`  2. Only for hosts without a verified command: paste the host-neutral snippet below into the MCP config (mcpServers JSON) — format-level fallback, load not verified for every host.`);
-    lines.push(`  3. Restart ${d.id}.`);
+    if (d.configHint) {
+      // 文件式注册的宿主：片段必须是该宿主自己的配置形态（如 opencode 的顶层 mcp
+      // 段），不是下方的 host-neutral mcpServers JSON——会审 sol 席指出的格式矛盾。
+      lines.push(`  1. Print the entry in ${d.id}'s own config shape: npm run cli -- mcp bind --host ${d.id}`);
+      lines.push(`  2. Merge that entry into ${d.configHint} (${d.id} has no registration command; do not paste the host-neutral snippet below — its shape may differ).`);
+      lines.push(`  3. Restart ${d.id}.`);
+    } else {
+      lines.push(`  1. Register via the host's own route (exact command/snippet: npm run cli -- mcp bind --host ${d.id}):`);
+      if (guide.example) lines.push(`     ${guide.example.command}${guide.example.stability === "stable" ? "" : `   [${guide.example.stability}]`}`);
+      lines.push(`  2. Restart ${d.id}.`);
+    }
   }
   lines.push(`Is it registered? npm run cli -- mcp status --host ${d.id}   (read-only probe of ${d.id}'s own config)`);
   lines.push(`hostVerified=${d.hostVerified} — ${d.hostVerified ? "load verified on the real host (evidence in hostDescriptors.js)" : "format-level admission only; real-host load NOT yet verified (admission checklist: AGENT_ONBOARDING.md)"}.`);

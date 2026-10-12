@@ -1215,7 +1215,8 @@ test("决定 0066: 表外宿主 bind=通用 stdio 片段（零写入、明说未
     const st = await statusWorkspace({ host: "not-a-host", cwd: dir });
     assert.equal(st.status, "unsupported_host");
     assert.match(st.note, /no probe/, "表外宿主 status 如实说查不了");
-    await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }), /known hosts: claude-code, codex, zcode/);
+    await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }),
+      (err) => err.message.includes(`known hosts: ${HOST_DESCRIPTOR_IDS.join(", ")})`));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1272,7 +1273,7 @@ function stdioOfThisRepo() {
 }
 
 function waoEntry(stdio) {
-  return { command: "node", args: ["x/wao-node.cjs", stdio, "--registry", "r.json", "--run-dir", "runs"] };
+  return { command: "node", args: ["x/wao-node.cjs", stdio, "--registry", "r.json", "--run-dir", "rd"] };
 }
 
 function writeJson(path, value) {
@@ -1312,17 +1313,37 @@ test("决定 0066: claude-code 探测——三层来源与四态（读不了=unk
     assert.equal(r.state, "registered");
     assert.equal(scope(r, "user"), "not_registered");
     assert.equal(scope(r, "local"), "registered");
+    assert.deepEqual(r.sources.map((s) => s.scope), ["local", "project", "user"], "来源按 Claude Code 的优先级从高到低");
+    assert.deepEqual(r.sources.map((s) => s.effective), [true, false, false], "local 级条目是生效来源");
     assert.equal(probe({ cwd: undefined }).state, "not_registered", "不给 cwd 只看用户级——local 级注册对别的目录不生效");
 
     writeJson(join(home, ".claude.json"), { mcpServers: {} });
     writeJson(join(cwd, ".mcp.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
     assert.equal(scope(probe(), "project"), "registered", "项目级 .mcp.json");
+    // 覆盖关系（会审 sol 必改 3）：用户级指向本安装、项目级覆盖成另一份 → 生效的是项目级
+    writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry(expectedStdio) } });
+    writeJson(join(cwd, ".mcp.json"), { mcpServers: { wao: waoEntry("Z:/elsewhere/src/mcp/stdio.js") } });
+    r = probe();
+    assert.equal(r.state, "registered_other_target", "高优先级来源覆盖低优先级——不做'任一命中即 registered'的合并");
+    assert.equal(r.sources.find((s) => s.effective).scope, "project");
+    // 高优先级来源读不了 → unknown（无从知道它是否覆盖了用户级）
+    writeJson(join(cwd, ".mcp.json"), "{ not json");
+    assert.equal(probe().state, "unknown");
     rmSync(join(cwd, ".mcp.json"));
+    // 词法等价路径（. / ..）算同一安装
+    writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry(join(expectedStdio, "..", ".", "stdio.js")) } });
+    assert.equal(probe().state, "registered");
 
     writeJson(join(home, ".claude.json"), "{ not json");
     r = probe();
     assert.equal(r.state, "unknown", "解析不了=unknown");
     assert.equal(scope(r, "user"), "unknown");
+
+    // 读取失败 ≠ 文件不存在（会审 sol 必改 1）：只有 ENOENT/ENOTDIR 算缺失
+    const eacces = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    assert.equal(probe({ io: { readFileSync: () => { throw eacces; } } }).state, "unknown", "权限错误=unknown，绝不折算成未注册");
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    assert.equal(probe({ io: { readFileSync: () => { throw enoent; } } }).state, "not_registered");
 
     // CLAUDE_CONFIG_DIR 覆盖全局配置位置
     const altDir = join(home, "alt");
@@ -1348,6 +1369,28 @@ test("决定 0066: kimi-code / opencode(JSONC) / zcode 插件 / claude-desktop �
     writeJson(join(home, ".config", "opencode", "opencode.jsonc"),
       `{\n  // comment with "quotes" and // slashes\n  "mcp": { /* block */ "wao": { "type": "local", "command": ["node", "x.cjs", ${JSON.stringify(expectedStdio)}], "enabled": true, }, },\n}\n`);
     assert.equal(state("opencode"), "registered");
+    // JSONC 回退不得改写字符串、不得放过损坏输入（会审 sol 必改 2）
+    const ocPath = join(home, ".config", "opencode", "opencode.jsonc");
+    const trickyStdio = "D:/wao/a,}.js";
+    writeJson(ocPath, `{ /* c */ "mcp": { "wao": { "type": "local", "command": ["node", "${trickyStdio}"], }, }, }`);
+    assert.equal(probeHostRegistration("opencode", { expectedStdio: trickyStdio, home, env: {} }).state, "registered", "字符串里的 ',}' 原样保留");
+    writeJson(ocPath, `{ "mcp": { "wao": { "command": ["node", ${JSON.stringify(expectedStdio)}] } } /* never closed`);
+    assert.equal(state("opencode"), "unknown", "未闭合块注释=解析失败=unknown");
+    // 覆盖关系与额外来源（会审 sol 必改 3/4）：全局 < OPENCODE_CONFIG < 项目 < OPENCODE_CONFIG_CONTENT
+    writeJson(ocPath, { mcp: {} });
+    const custom = join(home, "custom-opencode.json");
+    writeJson(custom, { mcp: { wao: { type: "local", command: ["node", expectedStdio] } } });
+    assert.equal(state("opencode"), "not_registered", "默认文件里没有");
+    assert.equal(state("opencode", { env: { OPENCODE_CONFIG: custom } }), "registered", "OPENCODE_CONFIG 指定的文件里有");
+    const inline = JSON.stringify({ mcp: { wao: { type: "local", command: ["node", "Z:/other/src/mcp/stdio.js"] } } });
+    assert.equal(state("opencode", { env: { OPENCODE_CONFIG: custom, OPENCODE_CONFIG_CONTENT: inline } }), "registered_other_target", "内联配置优先级最高");
+    assert.equal(state("opencode", { env: { OPENCODE_CONFIG_CONTENT: "{ broken" } }), "unknown");
+    const ocProject = mkdtempSync(join(tmpdir(), "wao-probe-oc-project-"));
+    writeJson(join(ocProject, "opencode.json"), { mcp: { wao: { type: "local", command: ["node", expectedStdio], enabled: false } } });
+    const disabled = probeHostRegistration("opencode", { expectedStdio, home, cwd: ocProject, env: { OPENCODE_CONFIG: custom } });
+    assert.equal(disabled.state, "not_registered", "项目级把 wao 禁用了：高优先级的禁用条目定论");
+    assert.match(disabled.sources.find((s) => s.effective).detail, /disabled/);
+    rmSync(ocProject, { recursive: true, force: true });
 
     // zcode：启用标记在 cli/config.json，目标比对读已安装副本
     assert.equal(state("zcode"), "not_registered");
@@ -1355,6 +1398,12 @@ test("决定 0066: kimi-code / opencode(JSONC) / zcode 插件 / claude-desktop �
     assert.equal(state("zcode"), "unknown", "已启用但读不到已安装副本——目标不可证");
     writeJson(join(home, ".zcode", "cli", "plugins", "cache", "wao-local", "wao", "0.3.1", ".mcp.json"), { wao: waoEntry(expectedStdio) });
     assert.equal(state("zcode"), "registered");
+    // 多个缓存版本指向不一致：无从得知宿主选用哪个 → unknown，并列出读到的副本
+    writeJson(join(home, ".zcode", "cli", "plugins", "cache", "wao-local", "wao", "0.0.0", ".mcp.json"), { wao: waoEntry("Z:/old/src/mcp/stdio.js") });
+    const mixed = probeHostRegistration("zcode", { expectedStdio, home, env: {} });
+    assert.equal(mixed.state, "unknown");
+    assert.match(mixed.sources[0].detail, /0\.0\.0=registered_other_target, 0\.3\.1=registered/);
+    rmSync(join(home, ".zcode", "cli", "plugins", "cache", "wao-local", "wao", "0.0.0"), { recursive: true, force: true });
     writeJson(join(home, ".zcode", "cli", "config.json"), { plugins: { enabledPlugins: { "wao@wao-local": false } } });
     assert.equal(state("zcode"), "not_registered", "插件装了但没启用=未注册");
 
@@ -1405,17 +1454,36 @@ test("决定 0066: 派发 advisory——识别到宿主且未注册才出行；�
     assert.equal(detectHostFromEnv({ CODEX_THREAD_ID: "t" }), "codex");
     assert.equal(detectHostFromEnv({ OPENCODE: "1" }), "opencode");
 
-    const line = renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } });
-    assert.match(line, /^\[wao\] advisory: this is a claude-code session and WAO's MCP is not registered there/);
+    // 状态目录一律注入临时目录（绝不写开发者真实的 %LOCALAPPDATA%\wao）
+    let n = 0;
+    const freshState = () => join(home, `state-${n += 1}`);
+    const session = (id) => ({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id });
+    const stateDir = freshState();
+    const line = renderMcpHostAdvisory({ env: session("s1"), probe: { home }, stateDir });
+    assert.match(line, /^\[wao\] advisory: this is a claude-code session and WAO's MCP is not registered for it/);
     assert.match(line, /wao mcp bind --host claude-code/);
-    assert.equal(renderMcpHostAdvisory({ env: {}, probe: { home } }), null, "识别不出宿主=静默");
+    assert.match(line, /the CLI works/, "命令行是合法通道——措辞不是违规告警");
+    // 警报疲劳纪律：同一宿主会话只判一次；换会话再判
+    assert.equal(renderMcpHostAdvisory({ env: session("s1"), probe: { home }, stateDir }), null, "同会话第二次派发静默");
+    assert.match(renderMcpHostAdvisory({ env: session("s2"), probe: { home }, stateDir }), /not registered/, "新会话再告知一次");
+    assert.ok(!readFileSync(join(stateDir, "mcp-host-advisory.json"), "utf8").includes("s2"), "状态文件不存会话 id 原文");
+    // 无会话变量 → 按 UTC 日去重
+    const day1 = () => new Date("2026-10-12T10:00:00Z");
+    const day2 = () => new Date("2026-10-13T10:00:00Z");
+    const dayDir = freshState();
+    assert.match(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day1 }), /not registered/);
+    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day1 }), null);
+    assert.match(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home }, stateDir: dayDir, now: day2 }), /not registered/);
+    assert.equal(renderMcpHostAdvisory({ env: {}, probe: { home }, stateDir: freshState() }), null, "识别不出宿主=静默");
 
     writeJson(join(home, ".claude.json"), "{ not json");
-    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "读不了=unknown=静默（不误报未注册）");
+    const unknownDir = freshState();
+    assert.equal(renderMcpHostAdvisory({ env: session("s3"), probe: { home }, stateDir: unknownDir }), null, "读不了=unknown=静默（不误报未注册）");
+    assert.equal(existsSync(join(unknownDir, "mcp-host-advisory.json")), false, "判不了不记状态——下次再判");
     writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry(stdioOfThisRepo()) } });
-    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "已注册=静默");
+    assert.equal(renderMcpHostAdvisory({ env: session("s4"), probe: { home }, stateDir: freshState() }), null, "已注册=静默");
     writeJson(join(home, ".claude.json"), { mcpServers: { wao: waoEntry("Z:/other/src/mcp/stdio.js") } });
-    assert.equal(renderMcpHostAdvisory({ env: { CLAUDECODE: "1" }, probe: { home } }), null, "注册到另一份安装也算有工具=静默");
+    assert.equal(renderMcpHostAdvisory({ env: session("s5"), probe: { home }, stateDir: freshState() }), null, "注册到另一份安装也算有工具=静默");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

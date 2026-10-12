@@ -389,6 +389,12 @@ test("declaredScopeExpansion: 合同指令携带同一标记；只认最终 assi
   // 句中提及不算上报
   assert.equal(declaredScopeExpansion([asst("I would report SCOPE_EXPANSION_REQUIRED: only if needed.")]), false);
   assert.equal(declaredScopeExpansion([{ role: "user", parts: text("SCOPE_EXPANSION_REQUIRED: a — b") }]), false, "user 消息不算");
+  // 会审 sol 必改 5：空声明、合同模板原文、围栏代码块里的复述都不算上报
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED:")]), false, "只有标记没有路径与理由");
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: docs/x.md —")]), false, "缺理由");
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>")]), false, "合同模板占位符原文");
+  assert.equal(declaredScopeExpansion([asst("Done.\n```\nSCOPE_EXPANSION_REQUIRED: docs/x.md — need it\n```")]), false, "围栏代码块内不算");
+  assert.equal(declaredScopeExpansion([asst("SCOPE_EXPANSION_REQUIRED: docs/x.md - need to edit docs")]), true, "连字符分隔也接受");
   assert.equal(declaredScopeExpansion([]), false);
   assert.equal(declaredScopeExpansion(undefined), false);
 });

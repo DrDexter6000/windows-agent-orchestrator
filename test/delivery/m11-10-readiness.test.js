@@ -1154,7 +1154,7 @@ test("M11-10-CLI-02: without --wait-ms the query keeps the old shape (no readine
 
 // 2026-10-12 消费者侧反馈：验证排队时 runs delivery 只显示 pending（一条运行等了约
 // 11 分钟，要另跑 runs gate 才知道在等谁）。pending 时并入验证闸的只读快照。
-test("runs delivery: verification pending → 输出带验证闸快照（排队点名持有者 / 本 run 在跑 / free）；非 pending 不带", async () => {
+test("runs delivery: verification pending → 输出带验证闸租约事实（谁持有/心跳年龄/无租约），不推断执行状态；非 pending 不带", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "m1110-cli-gate-"));
   try {
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
@@ -1175,21 +1175,25 @@ test("runs delivery: verification pending → 输出带验证闸快照（排队�
       } finally { console.log = orig; }
       return { text: lines.join("\n"), statusCalls };
     };
-    const heldByOther = { free: false, holder: { owner: "canonical-test", runId: "run_someone_else", startedAt: "2026-10-12T10:47:00.000Z", pid: 4242 } };
+    // 真实租约的 startedAt 是数值（毫秒时间戳），ageMs 是心跳年龄
+    const heldByOther = { free: false, holder: { owner: "canonical-test", runId: "run_someone_else", startedAt: 1791802020000, ageMs: 12000, pid: 4242 } };
 
-    const queued = JSON.parse((await run(["--format", "json"], heldByOther)).text);
-    assert.equal(queued.verification.status, "pending", "夹具前提：验证尚未有结果");
-    assert.equal(queued.verificationGate.state, "queued");
-    assert.deepEqual(queued.verificationGate.holder, { owner: "canonical-test", runId: "run_someone_else", startedAt: "2026-10-12T10:47:00.000Z" },
-      "持有者只带身份字段（不带 pid 等）");
+    const other = JSON.parse((await run(["--format", "json"], heldByOther)).text);
+    assert.equal(other.verification.status, "pending", "夹具前提：验证尚未有结果");
+    assert.equal(other.verificationGate.lease, "held_by_other");
+    assert.deepEqual(other.verificationGate.holder, { owner: "canonical-test", runId: "run_someone_else", startedAt: 1791802020000, heartbeatAgeMs: 12000 },
+      "持有者只带身份字段、开始时间与心跳年龄（不带 pid 等）");
 
     const text = (await run([], heldByOther)).text;
     assert.match(text, /Verification: pending/);
-    assert.match(text, /Verification gate: held by canonical-test \/ run_someone_else since 2026-10-12T10:47:00\.000Z — this run is queued behind it/);
+    assert.match(text, /Verification gate: lease held by canonical-test \/ run_someone_else, started 1791802020000, heartbeat age 12000 ms/);
+    assert.ok(!/queued|in progress|not started/.test(text), "只报租约事实，不断言排队/在跑/未开始");
 
-    const running = JSON.parse((await run(["--format", "json"], { free: false, holder: { owner: "runner", runId } })).text);
-    assert.equal(running.verificationGate.state, "running", "闸由本 run 持有=验证在跑");
-    assert.equal(JSON.parse((await run(["--format", "json"], { free: true })).text).verificationGate.state, "gate_free");
+    const mine = JSON.parse((await run(["--format", "json"], { free: false, holder: { owner: "runner", runId, ageMs: 400000 } })).text);
+    assert.equal(mine.verificationGate.lease, "held_by_this_run");
+    assert.equal(mine.verificationGate.holder.heartbeatAgeMs, 400000, "陈旧与否由心跳年龄如实暴露，交给 Lead 判断");
+    assert.equal(JSON.parse((await run(["--format", "json"], { free: true })).text).verificationGate.lease, "free");
+    assert.equal(JSON.parse((await run(["--format", "json"], { corrupt: true })).text).verificationGate.lease, "corrupt");
 
     // 非 pending：不查闸、不加字段（既有形状不变）
     writeTranscript(runDir, runId, [

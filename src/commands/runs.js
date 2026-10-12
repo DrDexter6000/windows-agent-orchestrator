@@ -1978,25 +1978,32 @@ function _printReadinessText(result) {
 
 /**
  * 2026-10-12 消费者侧反馈：交付验证停在 pending 时，runs delivery 只显示 pending——
- * Lead 看不出是在跑还是在排队、在等谁（当日一条运行等了约 11 分钟，要另跑
- * runs gate 才知道闸被别的验证占着）。pending 时并入验证闸的只读快照：与
- * runs gate 同一个 status() 查询，绝不认领、绝不释放；查询失败则整段省略
- * （显示面附加信息，fail-open，不影响既有输出）。
- * @returns {Promise<{state: "running"|"queued"|"gate_free"|"gate_corrupt", holder?: object}|null>}
+ * Lead 要另跑 runs gate 才知道闸被谁占着（当日一条运行等了约 11 分钟）。pending
+ * 且尚未裁决时并入验证闸**租约事实**的只读快照：与 runs gate 同一个 status()
+ * 查询，绝不认领、绝不释放；查询失败则整段省略（显示面附加信息，fail-open）。
+ *
+ * 只报租约事实，不推断执行状态（会审 sol 席）：租约可能陈旧（附心跳年龄让 Lead
+ * 自己判断）；"别人持有"不能证明本 run 正在排队（验证也可能已中断，或 fail-open
+ * 无闸运行）；"无租约"不能证明验证尚未开始。措辞因此只说持有情况。
+ * @returns {Promise<{lease: "held_by_this_run"|"held_by_other"|"free"|"corrupt", holder?: object}|null>}
  */
 async function describePendingVerificationGate(view, runId, hostDeps) {
   if (!view?.deliveryAvailable || view.verification?.status !== "pending") return null;
+  if (view.acceptance?.status === "accepted" || view.acceptance?.status === "rejected") return null;
   try {
     const createGate = hostDeps?.createGate
       ?? (() => createVerificationGate({ identity: { owner: "cli/runs-delivery" } }));
     const lease = await createGate().status();
-    if (lease.free) return { state: "gate_free" };
-    if (lease.corrupt) return { state: "gate_corrupt" };
+    if (lease.free) return { lease: "free" };
+    if (lease.corrupt) return { lease: "corrupt" };
     const h = lease.holder ?? {};
-    const holder = Object.fromEntries(["owner", "runId", "agentId", "startedAt"]
-      .filter((k) => typeof h[k] === "string" && h[k].length > 0)
-      .map((k) => [k, h[k]]));
-    return { state: h.runId === runId ? "running" : "queued", holder };
+    const holder = {};
+    for (const k of ["owner", "runId", "agentId"]) {
+      if (typeof h[k] === "string" && h[k].length > 0) holder[k] = h[k];
+    }
+    if (typeof h.startedAt === "string" || Number.isFinite(h.startedAt)) holder.startedAt = h.startedAt;
+    if (Number.isFinite(h.ageMs)) holder.heartbeatAgeMs = h.ageMs;
+    return { lease: h.runId === runId ? "held_by_this_run" : "held_by_other", holder };
   } catch {
     return null;
   }
@@ -2004,14 +2011,14 @@ async function describePendingVerificationGate(view, runId, hostDeps) {
 
 function pendingVerificationGateLine(gate) {
   if (!gate) return null;
-  if (gate.state === "running") return "Verification gate: held by this run — verification is in progress";
-  if (gate.state === "queued") {
-    const who = [gate.holder.owner, gate.holder.runId, gate.holder.agentId].filter(Boolean).join(" / ") || "(unidentified)";
-    const since = gate.holder.startedAt ? ` since ${gate.holder.startedAt}` : "";
-    return `Verification gate: held by ${who}${since} — this run is queued behind it (details: runs gate)`;
-  }
-  if (gate.state === "gate_free") return "Verification gate: free — verification has not started yet";
-  return "Verification gate: lease corrupt (see: runs gate)";
+  if (gate.lease === "free") return "Verification gate: no lease held (the gate does not explain this pending state; see: runs gate)";
+  if (gate.lease === "corrupt") return "Verification gate: lease record corrupt (see: runs gate)";
+  const h = gate.holder ?? {};
+  const age = Number.isFinite(h.heartbeatAgeMs) ? `, heartbeat age ${h.heartbeatAgeMs} ms` : "";
+  if (gate.lease === "held_by_this_run") return `Verification gate: lease held by this run${age} (see: runs gate)`;
+  const who = [h.owner, h.runId, h.agentId].filter(Boolean).join(" / ") || "(unidentified)";
+  const since = h.startedAt !== undefined ? `, started ${h.startedAt}` : "";
+  return `Verification gate: lease held by ${who}${since}${age} — verifications on this machine run one at a time behind this lease (see: runs gate)`;
 }
 
 async function runsDeliveryCommand(args, config, hostDeps) {

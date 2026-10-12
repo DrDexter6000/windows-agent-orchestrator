@@ -1035,7 +1035,9 @@ test("R5-D: buildHostExamples derives one-liners from the snippet with stable/ex
   const { buildHostExamples, HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
   const snippet = buildMcpSnippet({ installRoot: "D:/my projects/wao" });
   const examples = buildHostExamples(snippet);
-  assert.equal(examples.length, 3, "exactly three host examples (derived from hostDescriptors: claude-code/codex/zcode)");
+  const { HOST_DESCRIPTORS: R5D_HOSTS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const snippetHostCount = R5D_HOSTS.filter((d) => d.snippet).length;
+  assert.equal(examples.length, snippetHostCount, "one example per snippet-capable host in hostDescriptors (count derives from the table)");
   const [claude, codex] = examples;
   assert.equal(claude.host, "claude-code");
   assert.equal(claude.stability, "stable");
@@ -1056,8 +1058,10 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
   const { HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
   const mem = await memRun({ agentId: "coder_low" });
   const r = await mem.result;
-  assert.ok(Array.isArray(r.hostExamples) && r.hostExamples.length === 3,
-    "structured result carries hostExamples (derived from hostDescriptors, now 3)");
+  const { HOST_DESCRIPTORS: R5D_TABLE } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const r5dCount = R5D_TABLE.filter((d) => d.snippet).length;
+  assert.ok(Array.isArray(r.hostExamples) && r.hostExamples.length === r5dCount,
+    "structured result carries hostExamples (one per snippet-capable host in hostDescriptors)");
   // Refused outcome carries them too (same baseResult merge point).
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-refused-"));
   const root = join(dir, "wao");
@@ -1076,7 +1080,7 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
       mkdir: (p) => import("node:fs/promises").then((m) => m.mkdir(p, { recursive: true })) },
   });
   assert.equal(refused.outcome, "refused");
-  assert.equal(refused.hostExamples.length, 3, "refused outcome still carries hostExamples");
+  assert.equal(refused.hostExamples.length, r5dCount, "refused outcome still carries hostExamples");
   // Human rendering shows the one-liners + authority sentence.
   const text = renderHuman(r);
   assert.ok(text.includes("One-line registration examples"), "human output renders the examples block");
