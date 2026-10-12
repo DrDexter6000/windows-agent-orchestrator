@@ -209,15 +209,23 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 // 用法（与 kimiWeb 0046 B5 的 serve 证词同一纪律，只是证词来源不同）：停滞门
 // 预算击发时才看证词——该会话在最近 STREAM_ATTEST_RECENCY_MS 内收到过流分片
 // ⇒ 上游正在出 token，是"零 part 的活"不是停滞：resetSilent 续命（不喂自适应
-// 学习），并把这段静默计入累计；累计被证词续命的静默 ≥ 硬顶 ⇒ 照样有界收口
-// （活着但永远落不了 part 的轮次不会无限续命）。最近没有分片 ⇒ 照旧判停滞
+// 学习），并把这段静默计入累计；自上一个 part 落地以来被证词续命的静默 ≥ 硬顶
+// ⇒ 照样有界收口（活着但永远落不了 part 的轮次不会无限续命）。最近没有分片 ⇒ 照旧判停滞
 // （流断了/真挂死：j45ncc 的重试段若确实无流即属此类）。
 //
 // 证词只接已有产出后的停滞门；零 part 阶段的两道门（silentTimeout /
 // ZERO_PART_POLL_LIMIT）不看证词——探针里 echo 与 step-start 在 10s 内落 part，
 // 长思考发生在其后；若上游将来先推流分片后落首个 part，零 part 门仍照旧收口。
-// 硬顶是**累计被续命的静默**（非墙钟）：每个 turn 至多 30min 的无 part 续命，
-// 多 turn 运行的最坏情形按 turn 累加。
+// 硬顶是**自上一个 part 落地以来被续命的静默**（非墙钟）：有新 part 落地即清零
+// ——它只约束"流活着但一直落不了 part"这一种形态，不给带持续产出的长轮设总量
+// （与上方否决"总静默预算"同一理由：多个各自合法的长思考步会累计击穿）。
+//
+// 取值 120min（Owner 2026-10-12 裁定：glm-pro 额度视为不受限，凡它能完成的任务
+// 都让它完成，车道要求放宽）。原口径是每 turn 累计 30min、落 part 不清零：同日
+// 真机 run_20261012154649496i7i832 的一步（一次断流重来）就用掉约 1200s——再断
+// 一次，或同一 turn 内再来两步同样的长写入，即被收掉。上游断流后从零重来、单
+// 请求 10 分钟量级 ⇒ 120min 约等于连续十次整段重来都落不了 part 才收口。流真断
+// 了仍由停滞门在 300-600s 内收口，本顶不参与。
 //
 // 只放宽、永不收紧：证词只在"原本要杀"的那一刻参与；上游改名/改形状/不再推送
 // ⇒ 识别不到分片 ⇒ 行为退回本修复之前的停滞门。这是上游内部遥测通道，形状
@@ -225,7 +233,7 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 const STREAM_TELEMETRY_METHOD = "v4/telemetry/event";
 const STREAM_CHUNK_KIND = "stream.chunk";
 const STREAM_ATTEST_RECENCY_MS = 60_000;
-const STREAM_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
+const STREAM_ATTESTED_SILENT_CAP_MS = 120 * 60_000;
 
 // 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
 // done(failed)。取值沿用上轮裁定（首轮 live 证据 run_20261001195259045cle1ft：
@@ -1189,7 +1197,7 @@ export class ZcodeBackend {
     const toolLedger = new Map();
     let highWaterParts = baselineParts;
     // 流活性证词状态：分片计数的上次读数、最近一次见到新分片的时刻（与停滞门
-    // 同一只钟）、证词续命次数与累计被续命的静默时长。
+    // 同一只钟）、自上一个 part 落地以来的证词续命次数与被续命的静默时长。
     const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
     const streamChunksOf = () => (typeof wire.streamChunkCount === "function" ? wire.streamChunkCount(sessionId) : 0);
     let lastStreamChunks = streamChunksOf();
@@ -1292,6 +1300,9 @@ export class ZcodeBackend {
           anyNewPart = true;
           noProgressPolls = 0;
           stallTracker.noteProgress();
+          // 有 part 落地：被证词续命的静默从头计（硬顶只约束"一直落不了 part"）。
+          streamAttestations = 0;
+          attestedSilentMs = 0;
         } else {
           noProgressPolls += 1;
         }
@@ -1366,7 +1377,7 @@ export class ZcodeBackend {
             finish();
             yield doneEvent(
               "failed",
-              `zcode turn stalled: cumulative stream-attested silence exceeded the ${Math.round(STREAM_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+              `zcode turn stalled: stream-attested silence since the last landed part exceeded the ${Math.round(STREAM_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
                 + `(${Math.round(attestedSilentMs)}ms across ${streamAttestations} attestation(s); ${lastStreamChunks} stream chunk(s) observed, `
                 + "bounded exit: the model stream is active but parts are not landing)",
             );
@@ -1380,7 +1391,7 @@ export class ZcodeBackend {
           yield doneEvent(
             "failed",
             `zcode turn stalled (${lastStreamChunks > 0
-              ? `${lastStreamChunks} model stream chunk(s) seen this turn, none in the last ${Math.round(STREAM_ATTEST_RECENCY_MS / 1000)}s${streamAttestations > 0 ? `, ${streamAttestations} prior stream attestation(s)` : ""}`
+              ? `${lastStreamChunks} model stream chunk(s) seen this turn, none in the last ${Math.round(STREAM_ATTEST_RECENCY_MS / 1000)}s${streamAttestations > 0 ? `, ${streamAttestations} prior stream attestation(s) since the last part` : ""}`
               : "no model stream chunk observed this turn"}; `
               + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
               + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `

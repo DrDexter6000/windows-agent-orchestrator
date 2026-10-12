@@ -1037,8 +1037,9 @@ test("zcode ⑥d TD-197① 自放大存活（2026-10-02 误杀形态回归钉）
 // run_20261012104046786m8kann + 三轮 glm-pro 真机探针）：长思考步在
 // session/messages 快照里完全不可见（step-start 之后整步完成才一次性落 part），
 // 但 app-server 持续推送 `v4/telemetry/event` kind=stream.chunk 通知帧。停滞门
-// 预算击发时取该证词：最近 60s 内有分片 ⇒ 续命；没有 ⇒ 照旧判停滞；累计被
-// 续命的静默有 30min 硬顶。夹具：假钟 +30s/拍，prime 在 n=3（t=90s）。
+// 预算击发时取该证词：最近 60s 内有分片 ⇒ 续命；没有 ⇒ 照旧判停滞；自上一个
+// part 落地以来被续命的静默有 120min 硬顶（Owner 2026-10-12 放宽：原为每 turn
+// 累计 30min、落 part 不清零）。夹具：假钟 +30s/拍，prime 在 n=3（t=90s）。
 const streamChunk = (sessionId = SESSION_ID, channel = "thought") => [
   "v4/telemetry/event",
   { kind: "stream.chunk", channel, chunkLength: 12, sessionId },
@@ -1113,7 +1114,7 @@ test("zcode ⑥g: 别的会话的流分片不作证；从未见过分片时诊�
   child.kill();
 });
 
-test("zcode ⑥g: 流一直活着但 part 始终不落 → 累计被证词续命的静默满 30min 有界收口", async () => {
+test("zcode ⑥g: 流一直活着但 part 始终不落 → 被证词续命的静默满 120min 有界收口", async () => {
   let fakeNow = 0;
   const { handle, child, peer } = await runScenario({
     peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
@@ -1125,10 +1126,38 @@ test("zcode ⑥g: 流一直活着但 part 始终不落 → 累计被证词续命
   });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /cumulative stream-attested silence exceeded the 30min cap/);
-  assert.match(done.error, /across 6 attestation\(s\)/, "每次续命计入 300s 静默，第 6 次到顶");
-  // prime n=3；每 10 拍（300s）击发一次：n=13,23,33,43,53 续命，n=63 到顶收口。
-  assert.equal(peer.polls(), 63);
+  assert.match(done.error, /stream-attested silence since the last landed part exceeded the 120min cap/);
+  assert.match(done.error, /across 24 attestation\(s\)/, "每次续命计入 300s 静默，第 24 次到顶");
+  // prime n=3；每 10 拍（300s）击发一次：n=13,23,…,233 续命，n=243 到顶收口。
+  assert.equal(peer.polls(), 243);
+  child.kill();
+});
+
+test("zcode ⑥g: 有 part 落地即清零——两段各自未到顶的续命静默合计超过硬顶，仍正常完成", async () => {
+  // 第一段 n=3→203 无新 part（约 100min，续命 19 次 × 300s = 95min）；n=203 落一个
+  // part；第二段 n=203→403 无新 part（落 part 后预算自放大到 600s 硬顶，续命 9 次
+  // × 600s = 90min）；n=403 完成。两段合计 185min > 120min：按 turn 累计的旧口径
+  // 必杀，按"自上一个 part 落地以来"的口径两段都未到顶。
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 203) return [userMsg("do the task"), stepStartMsg()];
+        if (n < 403) return [userMsg("do the task"), stepStartMsg(), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 1,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; peer.notify(...streamChunk()); },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "带持续产出的长轮不被续命总量收掉");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.equal(peer.polls(), 403);
   child.kill();
 });
 
