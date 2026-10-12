@@ -978,6 +978,9 @@ export class KimiWebBackend {
             );
             return;
           }
+          // 续命凭的是 serve 的证词——落成转录事实，Lead 下钻时看得见（决定 0069：
+          // 让收口门续命的体征一律留痕；复核周期即当前预算，≥60s 一次）。
+          yield runtimeActivityEvent("serve_active");
           // 证词续命：resetSilent 清静默段但不喂自适应学习（opus 补席审计：noteProgress
           // 会把续命段记成已恢复间隙，预算自放大后真挂死发现退到 180-240s）。不重置
           // signature 基线——后续拍若仍零帧会再次走本门、再次取证词；复核周期=

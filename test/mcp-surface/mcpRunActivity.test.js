@@ -139,7 +139,9 @@ test("MAA-02: input schema — runId required, categories enum, afterSeq int≥0
       assert.ok(props.afterSeq, "afterSeq present");
       assert.ok(props.cursor, "cursor present");
       assert.ok(props.pageSize, "pageSize present");
-      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "categories", "cursor", "pageSize", "runId"].sort());
+      // 决定 0069：+order（缺省最新在前，asc 按时间顺读）。
+      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "categories", "cursor", "order", "pageSize", "runId"].sort());
+      assert.deepEqual(props.order.enum, ["desc", "asc"]);
       // categories is a closed set matching ACTIVITY_CATEGORIES.
       const catEnum = props.categories.items?.enum ?? props.categories.enum ?? [];
       assert.deepEqual([...catEnum].sort(),
@@ -305,7 +307,7 @@ test("MAA-07: terminal run → ordered activity + cursor replay walks the whole 
       while (true) {
         const res = await client.callTool({
           name: "run_activity",
-          arguments: { runId: "run_int", pageSize: 10, ...(cursor ? { cursor } : {}) },
+          arguments: { runId: "run_int", pageSize: 10, order: "asc", ...(cursor ? { cursor } : {}) },
         });
         assert.equal(res.isError, undefined, `page ok (cursor=${cursor})`);
         const parsed = res.structuredContent;
@@ -373,7 +375,7 @@ test("MAA-09: malformed service result → fixed safe text, no SDK leak", async 
 // =====================================================================
 // #10 No-leak: malicious transcript → no secret/path/command/session leak.
 // =====================================================================
-test("MAA-10: malicious transcript → no secret/path/command/session leak across MCP", async () => {
+test("MAA-10: malicious transcript → no secret/path/session leak across MCP; command text crosses with the key redacted (0069)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa10-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-maa10-rd-"));
   try {
@@ -403,7 +405,9 @@ test("MAA-10: malicious transcript → no secret/path/command/session leak acros
       assert.ok(!dumped.toLowerCase().includes("c:\\\\users\\\\secret"), "no windows path");
       assert.ok(!dumped.includes("/bin/sh"), "no posix path/command");
       assert.ok(!dumped.includes("4242"), "no PID/session id");
-      assert.ok(!dumped.includes("rm -rf"), "no command string");
+      // 决定 0069：命令原文给出——其中 AWS key 形状的串已按形状遮掉（它不在环境里）。
+      const cmd = res.structuredContent.entries.find((e) => e.category === "command");
+      assert.equal(cmd.text, "rm -rf / && cat [REDACTED]");
       assert.ok(!dumped.includes("proc_act"), "no backend session id");
       assert.ok(dumped.includes("Done: result is 42."), "benign assistant text returned");
     } finally { await client.close(); await server.close(); }
@@ -621,7 +625,7 @@ test("MAA-CORR: correction lifecycle → closed-set status over MCP; NEVER promp
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_activity", arguments: { runId: id } });
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: id, order: "asc" } });
       assert.equal(res.isError, undefined, "call succeeds");
       const sc = res.structuredContent;
       assert.equal(sc.counts.correction, 5, "five correction lifecycle events counted");

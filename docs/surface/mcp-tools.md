@@ -435,7 +435,7 @@ Output:
 
 ## run_stop
 
-Stop only runs owned by the bound workspace (Lead-triggered). first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill or backend abort); concurrent/late callers rejected with zero side effects. Not idempotent — a second call after terminal writes a rejection audit fact. Returns safe machine fields only.
+Stop only runs owned by the bound workspace (Lead-triggered). Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded. Worker events after observedSeq older than 5 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill or backend abort); concurrent/late callers rejected with zero side effects. Not idempotent — a second call after terminal writes a rejection audit fact. Returns safe machine fields only.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=false
 
@@ -444,6 +444,8 @@ Input:
 | name | type | required | notes |
 | --- | --- | --- | --- |
 | runId | string | yes |  |
+| reason | string | yes |  |
+| observedSeq | integer | yes |  |
 
 Output:
 
@@ -553,7 +555,7 @@ Output:
 
 ## run_activity
 
-Read-only run activity timeline from one transcript snapshot (zero append): closed-set safe facts only — raw argv/tool I/O and absolute/traversal paths withheld, secrets redacted, no semantic summary or progress estimate. scopeObservation states facts only (file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures stay the fixed generic error. pageSize default 8. Idempotent; workspace-bound.
+Read-only run activity timeline from one transcript snapshot (zero append), newest first (order asc = chronological): message excerpts, command text (redacted, bounded), tool names, written paths, runtime vital signs. Tool I/O and absolute/traversal paths withheld, no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only (file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures stay the fixed generic error. pageSize default 8. Idempotent; workspace-bound.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -566,6 +568,7 @@ Input:
 | afterSeq | integer | no |  |
 | cursor | string | no |  |
 | pageSize | integer | no |  |
+| order | string | no | enum: desc \| asc |
 
 Output:
 

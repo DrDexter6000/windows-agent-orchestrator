@@ -252,7 +252,7 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 | 派发 | `run_dispatch` | `run <agentId> …` | MCP 无前台阻塞语义，CLI run 前台等待 |
 | 验收/交付查询与决策 | `run_delivery` / `run_delivery_decide` | `runs delivery <runId> [--accept/--reject]` | CLI 覆盖查询与 accept/reject；review 见下行 |
 | 交付审查（diff/review） | `run_delivery_review` / `run_delivery_review_bundle` | —（无 CLI 等价，MCP 独有） | CLI 侧用 `runs delivery` 查询 + 本地只读 Git 兜底 |
-| 停止 | `run_stop` | `stop <runId>` | 等价 |
+| 停止 | `run_stop` | `stop <runId> --observed-seq <n> --reason "<理由>"` | 等价（都要先看最新状态、写明理由，决定 0069） |
 | 台账诊断 | `run_diagnose` | `runs diagnose` | 等价（MCP 返回含 state/terminal；CLI JSON 分支刻意不含） |
 
 <a id="lead-quiet-supervision"></a>
@@ -268,7 +268,12 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
   - **kimi-web**：turn 结构有变化算进度；没有变化时等 60–240 秒问 serve 这一轮是否还活着，不活跃或问不到就收口，活着就继续等。但**自上次产出增长以来**这样续命的静默满 30 分钟仍会收口（只有 steps / 帧 / 文本变多才清零，state 来回变不算）：serve 的"还活着"是它的自我声明，工具挂死时同样报 active，没有别的体征可以交叉印证。一条超过 30 分钟、期间不落任何帧的命令在这条车道上会被收掉。
   - **进程式后端**（codex / claude-code / kimi-code / deepseek-*）：没有"轮内等不到进展"这类自动收口门——运行到进程自己退出或 Lead 中止为止（可选的 `silentTimeout` 只管"启动后一条事件都没有"，默认关；deepseek 另有请求级的 15s 超时）。崩溃、协议错误等失败照常收口。
 
-  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你：CLI `status` 附一行 `advisory`；MCP `run_status` 带 `leadAdvisory`；`run_wait` / `run_await_result` 的 `semanticNotes` 带 `observation.transcript_quiet`。想看它在做什么用 `run_activity`（MCP 面只给事件类别与结果，不给命令原文；CLI `status` 给最近一条命令的摘要）。停不停由 Lead 决定，停用 `run_stop` / `wao stop <runId>`。
+  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你：CLI `status` 附一行 `advisory`；MCP `run_status` 带 `leadAdvisory`；`run_wait` / `run_await_result` 的 `semanticNotes` 带 `observation.transcript_quiet`。停不停由 Lead 决定。
+- **中止一个运行之前**（决定 0069，对所有车道相同）：
+  1. **先看它在做什么**：MCP `run_activity`（缺省最新在前——最近的发言、命令原文、工具名、写了哪些文件、生命体征）；CLI `status <runId>`（最近一条活动的摘要）。
+  2. **最近 10 分钟内有生命体征（任何一条 worker 事件，含 `runtime_activity`）就不要随意中止**。这是建议，不拦你：长测试、长思考、等后台任务都是这副样子。
+  3. **写明理由，并带上你看到的位置**：MCP `run_stop({ runId, observedSeq, reason })`，`observedSeq` 取 `run_activity` 最新一条的 `seq`（没有条目填 0）；CLI `stop <runId> --observed-seq <n> --reason "<理由>"`，`n` 取 `status` 输出的 `observedSeq`。两项都记进 `run.stop_requested`，连同"最近一次生命体征距今多久"。
+  4. 你看到的位置之后 worker 又有了动作、且那已经是 5 分钟以前的事——说明决定是照着过时的状态做的，stop 会被拒（零副作用）：重新看一遍再决定。刚落下的事件不算过时。
 - **宿主例外**：Owner 可明确要求固定频率更新；若宿主的更高优先级指令要求更短等待或更频繁更新，应遵守并简要说明限制，将无变化更新压缩到最低必要程度。不要把某一宿主的频率限制变成 WAO 通用规则，也不要承诺本手册能覆盖宿主指令。
 - **跨会话续接**：经 Owner 要求或批准，在项目本地工作笔记保留目标、已授权范围、已确认事实/待证假设、证据路径、当前断点、下一步和停止条件，并给后续 Lead 留可发现的入口。只在这些事实或决策变化时更新，不抄录轮询流水。compaction 摘要是线索，续接前应重读笔记并核对 Git、WAO 查询和原始报告；笔记不能冒充运行台账、验收结果或新授权。
 
@@ -301,6 +306,8 @@ npm run cli -- run glm-flash --prompt "..." --format json
 > **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
 
 > **行为变更（决定 0067，2026-10-12）：zcode 运行只在没有生命体征时自动收口**——此前已有产出后静默满 300–600s 即判 `turn stalled`（一周多里 12 次，其中 7 次死时有工具命令在跑）。现在收口门到点时（含零 part 阶段的 silentTimeout / 思考预算）先看生命体征：模型流在收、app-server 的后代进程在干活，或工作目录里有文件变化，就继续等且这一项没有任何自动上限；都没有才收口。模型流在收时转录每分钟落一条 `runtime_activity`（`streaming`），等待类命令据此显示有活动；CLI `status` 在转录里 ≥30 分钟没有新的动作或正文时附 `advisory`。`stop` / `run_stop` 同批对 zcode 运行生效。判据、读数与边界见 [troubleshooting §6.9](troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)。
+
+> **行为变更（决定 0069，2026-10-13）**：`run_stop` / `stop` 新增两个必填项——看到的转录位置与理由，缺了不执行；`run_activity` 的 command 条目给出命令原文，条目缺省最新在前；kimi-web 凭 serve 证词续命时转录落 `runtime_activity`（`serve_active`）；每个后端在认证面登记自己的生命体征与收口方式（`docs/surface/certification.md`）。
 
 > **行为变更（决定 0068，2026-10-12）**：kimi-web 的 30 分钟证词硬顶改为自上次产出增长起算（此前按整 turn 累计、有增长也不清零）；zcode 凭进程活动 / 文件变化续命时转录落 `runtime_activity`（`process_active` / `files_changed`，每种至多每分钟一条）；MCP `run_status` 新增可选 `leadAdvisory`，`run_wait` / `run_await_result` 新增注记 `observation.transcript_quiet`。
 
@@ -1315,8 +1322,8 @@ CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` �
 `run_activity` 是 workspace-bound、只读、幂等的活动下钻工具。它从**同一份 transcript 快照**投影一页事实，不追加 audit，不直接返回 JSONL，也不做进度估计、总结、建议或下一步裁决。
 
 - 输入：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`categories` 闭集（含 M12-16 的 `correction`）与 `afterSeq`/`cursor` 形状以生成层为准；`pageSize` 为 1..50；`cursor` 是由上一页返回的 opaque token。
-- 输出：当前 state/terminal、各类别总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。message 只给脱敏后的有界文本；command 只给 `ok|failed|unknown`，不返回 argv；tool 只给名称/错误布尔；文件只给安全 repo-relative path；`runtime_status` 只给 `initialized|streaming|provider_retry|unknown`，不返回 stream delta/retry error/session/model；未知事件只用固定 sentinel。
-- 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 raw command、tool input/output、error text、credential、PID、provider session 或绝对路径。
+- 输出：当前 state/terminal、各类别总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。条目缺省**最新在前**（`order:"asc"` 按时间顺读；cursor 往更早翻）。message 只给脱敏后的有界文本；command 给命令原文（`text`，脱敏、清控制字符、截到 400 字符保留开头，`truncated` 标记是否截过）与 `ok|failed|unknown`；tool 只给名称/错误布尔；文件只给安全 repo-relative path；`runtime_status` 只给闭集状态（`initialized|streaming|provider_retry|process_active|files_changed|serve_active|unknown`），不返回 stream delta/retry error/session/model；未知事件只用固定 sentinel。
+- 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 tool input/output、error text、credential、PID、provider session；路径字段不给绝对路径。命令原文自决定 0069 起给出（此前不给，Lead 因此分不清 worker 是在跑测试还是在 `sleep`）：命令原文多过一层形状兜底（名字像密钥的内联赋值、`Bearer …`、AWS access key id、`sk-…` / `gh?_…` 令牌、JWT）；没有形状的秘密不在覆盖范围内，命令里出现的绝对路径也照原样给出。
 - cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续。历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor（M12-19）**不再仅返回通用错误**，而是返回一个**有界结构化恢复结果**：闭集事实 `status:"cursor_rejected"` + 静态 `choices`（`isError:true` 且携带 `structuredContent`）。WAO 只呈现事实与选择——**绝不自动重试、自动重启分页、停止、改写或替 Lead 决策**，也不回显 raw cursor、不匹配子类型、run/workspace 路径或动态错误文本；恢复结果只含 `status`+`choices`，**不含任何首页 entries/counts/nextCursor**（Lead 须显式重新请求）。恢复选择：**重新请求无 cursor 的第一页**（全新 cursor 链），或用已知 wait/activity 序列中的 `afterSeq`（如来自 `run_wait`/`run_await_result` 的数值 cursor）重入。跨 workspace 访问、无效 transcript envelope、畸形 snapshot/output、输出校验失败及未预期内部错误仍保持固定通用错误（`run_activity failed`，**无 structuredContent**）。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
 - `scopeObservation`（M12-14，advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`，`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`outsidePathCount`/`outsidePathsTruncated`。`complete:true` 的准确语义：观察到的 transcript 快照已是**终态**，且该快照中每一条确认的 `file_written` 路径都能在**恰好一个有效合同权威**（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它**不**证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也**不**表示 worker 仍在运行（`complete` 的前提是快照终态）。快照未终态或任一确认路径无法求值 → `unknown`（`complete:false`）。
 - `readOnlyObservation`（R4，advisory、additive、**仅声明过只读的 run 才出现**）：闭集 `no_writes_observed | writes_observed | unknown`，`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`writtenPaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`writtenPathCount`/`writtenPathsTruncated`。权威 = 恰好一条绑定的 `run.started`（绝对 worktreePath）+ 恰好一条绑定的 `run.read_only_declared`；任一 file_written 路径无法在 worktree 下求值、权威缺失/歧义、声明缺失/重复/跨 run → 整体 `unknown`（fail-closed）。**诚实口径**：status 报**当前快照观察**——非终态快照也可 `writes_observed`（运行中告警，呈现≠动作）；`no_writes_observed` 是"未观察到写"（基于工具上报证据），**不是**"没写"；`complete:true` 仅当快照终态且全部可求值。**Owner 约束**：观察到越界写**不**自动停止、**不**失败、**不**改写自然终态——纯 advisory，终审归 Lead。cursor 续页从冻结前缀投影（append-only 稳定），新读第一页可观察后追加的写。
@@ -1481,7 +1488,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-
 
 `run_stop` 让 MCP host 停止一个失控的 worker run。它直接复用与 CLI `stop` 相同的 application service（`runStop.js`），不 shell-out CLI。**destructive，workspace-bound**——只允许停止 host-authorized workspace 绑定范围内的 run。
 
-`run_stop` tool：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。输入只接受 `runId`——`runDir`、`force`、registry、timeout 等控制参数是 server-owned 配置。安全输出只返回机器标识 + 终态事实，不含路径/PID/session。
+`run_stop` tool：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。输入：`runId`、`observedSeq`、`reason`（决定 0069：先 `run_activity` 看最新状态，`observedSeq` 取其最新一条的 `seq`，`reason` 写为什么要停；观察过时或 `observedSeq` 不是该运行转录里的位置时以固定文案拒绝，零副作用）——`runDir`、`force`、registry、timeout 等控制参数是 server-owned 配置。安全输出只返回机器标识 + 终态事实，不含路径/PID/session。
 
 `terminalAccepted`（first-terminal-wins 仲裁是否认领 `aborted`）、`terminalState`（终态）、`sideEffectAttempted`（是否执行了 taskkill/abort 等破坏性副作用——rejected loser 为 false）、`stopVerified`（进程式 worker 已退出，或 OpenCode session 已由 status + token/message 稳定性确认静默）。OpenCode 观察面不可读时返回 unverified，不能把网络/endpoint 失败当作已停止；观察到 session 仍 active 时也只报告并告警，WAO 不自动执行会杀死其他 session 的全局 `taskkill /IM opencode.exe`。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量或异常 message/stack。失败返回固定安全文案 `run_stop failed`。
 
@@ -1491,7 +1498,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-
 
 **路由（TD-265 / 决定 0067）**：停止走哪条路由由会话记录的事实决定——`proc_<pid>` 占位会话 id，或会话记录带 `hostPid`（会话 id 是 provider 原生 id 的本机进程式后端，如 zcode），走进程树击杀并核验；会话记录带 `serveUrl` 的走服务端中止。resume 以新进程重放过的运行，目标取重放记录（`run.rerun`）里的新会话与新进程，不取已被替换的旧进程。皆无时报 `has no stop route` 并点名后端（`hostPid` 落盘之前派发的运行属此类，需手动结束进程树）。
 
-CLI fallback：`npm run cli -- stop <runId>`。
+CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 取 `status <runId>` 输出的 `observedSeq`；缺任一项即报错并给出这两步）。
 
 ### MCP `runs_list`（project-bound run 列表，M10 P0-3）
 

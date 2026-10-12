@@ -77,6 +77,64 @@ async function waitForPidExit(pid, isAliveFn, sleep, pollConfig = {}) {
 // Re-export for backward compatibility with existing test imports.
 
 
+// ── Lead justification (决定 0069) ───────────────────────────────────────────
+//
+// Owner 2026-10-13：要中止一个运行，Lead 必须先探明 worker 的最新状态，并说明
+// 理由。两个 Lead 面（MCP run_stop、CLI stop）都带 justification 调本服务：
+//   - reason：为什么要停（记进 run.stop_requested，不做语义判断）；
+//   - observedSeq：Lead 做决定时看到的转录位置（run_activity 最新一条的 seq /
+//     CLI status 的 observedSeq）。在它之后落下的 worker 事件若已超过
+//     STOP_OBSERVATION_MAX_AGE_SECONDS，说明这个决定是照着过时的状态做的——
+//     拒绝，零事件、零副作用，让 Lead 重新看过再决定。刚落下的事件不算过时
+//     （否则话多的 worker 永远停不掉）。
+// 不带 justification 的调用是内部 / 机制测试路径，不做这项检查。
+export const STOP_REASON_MIN_LEN = 6;
+export const STOP_REASON_MAX_LEN = 400;
+export const STOP_OBSERVATION_MAX_AGE_SECONDS = 5 * 60;
+export const STOP_PRECONDITION_CODES = Object.freeze([
+  "reason_required",
+  "observation_required",
+  "observation_unknown",
+  "observation_stale",
+]);
+
+function checkStopJustification(justification, scope, nowMs) {
+  const reason = typeof justification?.reason === "string"
+    ? justification.reason.replace(/[\x00-\x1f\x7f-\x9f]+/g, " ").replace(/\s+/g, " ").trim()
+    : "";
+  if (reason.length < STOP_REASON_MIN_LEN || reason.length > STOP_REASON_MAX_LEN) {
+    return { ok: false, code: "reason_required" };
+  }
+  const observedSeq = justification?.observedSeq;
+  if (!Number.isInteger(observedSeq) || observedSeq < 0) {
+    return { ok: false, code: "observation_required" };
+  }
+  let lastSeq = 0;
+  for (const e of scope) if (Number.isInteger(e.seq) && e.seq > lastSeq) lastSeq = e.seq;
+  if (observedSeq > lastSeq) return { ok: false, code: "observation_unknown" };
+  const workerEvents = scope.filter((e) => e.type === "run.event");
+  const newer = workerEvents.filter((e) => Number.isInteger(e.seq) && e.seq > observedSeq);
+  if (newer.length > 0) {
+    const oldestNewerMs = new Date(newer[0].ts).getTime();
+    const ageSeconds = Number.isFinite(oldestNewerMs) ? Math.round((nowMs - oldestNewerMs) / 1000) : Infinity;
+    if (ageSeconds > STOP_OBSERVATION_MAX_AGE_SECONDS) {
+      return { ok: false, code: "observation_stale", newerEventCount: newer.length };
+    }
+  }
+  const lastWorkerMs = workerEvents.length > 0 ? new Date(workerEvents.at(-1).ts).getTime() : NaN;
+  return {
+    ok: true,
+    facts: {
+      statedReason: reason,
+      observedSeq,
+      newerEventCount: newer.length,
+      // 最近一条 worker 事件（含 runtime_activity）距今多久——"有生命体征的 10
+      // 分钟内不建议中止"这条建议的事实侧；没有任何 worker 事件时为 null。
+      secondsSinceVitalSign: Number.isFinite(lastWorkerMs) ? Math.round((nowMs - lastWorkerMs) / 1000) : null,
+    },
+  };
+}
+
 // ── Main service ─────────────────────────────────────────────────────────────
 
 /**
@@ -86,6 +144,9 @@ async function waitForPidExit(pid, isAliveFn, sleep, pollConfig = {}) {
  * @param {string} input.runId
  * @param {string} input.runDir
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding (optional)
+ * @param {{reason: string, observedSeq: number}} [input.justification] — Lead 面必带
+ *   （决定 0069）；不满足时返回 { preconditionFailed: <STOP_PRECONDITION_CODES> }，
+ *   零事件、零副作用
  * @param {object} [input.deps] — test injection (kill, isAlive, executeStop, alert, etc.)
  * @returns {Promise<object>} structured result (see below)
  *
@@ -196,7 +257,27 @@ export async function stopRun(input) {
   // legacy 无信封 transcript 到达不了这里——上方 session 查找（findLatestBound）
   // 已按 "no session metadata" 拒绝（R13-C），故本处无需 legacy 分支（空绑定集
   // → findState([]) = "pending" 的保守默认仅在理论形状可达）。
-  const fromState = findState(events.filter((e) => e && e.runId === runId));
+  const boundScope = events.filter((e) => e && e.runId === runId);
+  const fromState = findState(boundScope);
+  // 决定 0069：Lead 面的 stop 先过理由 + 观察位置这一关（在任何终态认领、事件
+  // 追加、击杀之前；不通过 = 零事件、零副作用）。
+  let leadFacts = {};
+  if (input.justification !== undefined) {
+    const nowFn = deps.nowFn ?? Date.now;
+    const verdict = checkStopJustification(input.justification, boundScope, nowFn());
+    if (!verdict.ok) {
+      return {
+        runId,
+        preconditionFailed: verdict.code,
+        ...(verdict.newerEventCount !== undefined ? { newerEventCount: verdict.newerEventCount } : {}),
+        terminalAccepted: false,
+        terminalState: fromState,
+        sideEffectAttempted: false,
+        stopVerified: null,
+      };
+    }
+    leadFacts = verdict.facts;
+  }
   // TD-265：停止走哪条路由由会话记录的事实决定，不按后端名分支——proc_<pid>
   // 占位 id，以及"provider 原生会话 id + session.created.hostPid（承载会话的本机
   // 进程）"，都走进程树击杀；有 serveUrl 的走服务端中止。此前非 proc_ 一律被当
@@ -213,6 +294,7 @@ export async function stopRun(input) {
       backendSessionId: session.backendSessionId,
       ...(isProcPlaceholder ? { backend: "process" } : hostPid !== null ? { backend: hostBackend } : {}),
       reason: "user",
+      ...leadFacts,
     },
   };
 
@@ -461,11 +543,8 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
 
   // Does NOT claim terminal state — records stop_requested + stop_unverified
-  await transcript.append("run.stop_requested", {
-    backendSessionId: session.backendSessionId,
-    backend: "process",
-    reason: "user",
-  });
+  // 与认领路径同一份载荷（含 Lead 的理由与观察位置，决定 0069）。
+  await transcript.append("run.stop_requested", { ...stopRequestedAttempt.payload });
   await transcript.append("run.stop_unverified", {
     backendSessionId: session.backendSessionId,
     backend: "process",

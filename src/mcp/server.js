@@ -129,7 +129,9 @@ import {
 } from "../application/runDeliveryReverify.js";
 import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT, validateProjectedPath } from "../application/deliveryReview.js";
 import { computeCandidateInventory, INVENTORY_PATHS_LIMIT } from "../application/candidateInventory.js";
-import { stopRun } from "../application/runStop.js";
+import {
+  stopRun, STOP_REASON_MIN_LEN, STOP_REASON_MAX_LEN, STOP_OBSERVATION_MAX_AGE_SECONDS,
+} from "../application/runStop.js";
 import { listRuns, ACTIVITY_STATUSES, ACTIVITY_BASES } from "../application/runList.js";
 import { createRunSummaryCache } from "../application/runSummaryCache.js";
 import {
@@ -217,6 +219,7 @@ import {
   ACTIVITY_LABEL_CAP,
   ACTIVITY_TOOL_NAME_CAP,
   ACTIVITY_PATH_CAP,
+  ACTIVITY_COMMAND_CAP,
   ACTIVITY_TS_CAP,
   ACTIVITY_CURSOR_MAX_CHARS,
   // M12-19: typed cursor-rejection signal + bounded recovery SSOT. The handler
@@ -2730,8 +2733,12 @@ const LEAD_PREFLIGHT_DESCRIPTION =
 
 const RUN_STOP_ERROR_TEXT = "run_stop failed";
 
+// 决定 0069（Owner 2026-10-13）：中止前必须先探明 worker 的最新状态并说明理由。
+// reason = 为什么要停；observedSeq = run_activity 最新一条的 seq（没有条目填 0）。
 const RUN_STOP_INPUT = z.object({
   runId: z.string().min(1),
+  reason: z.string().min(STOP_REASON_MIN_LEN).max(STOP_REASON_MAX_LEN),
+  observedSeq: z.number().int().nonnegative(),
 }).strict();
 
 const RUN_STOP_OUTPUT = z.object({
@@ -2740,6 +2747,19 @@ const RUN_STOP_OUTPUT = z.object({
   terminalState: z.enum(RUN_STATES),
   sideEffectAttempted: z.boolean(),
   stopVerified: z.boolean().nullable(),
+});
+
+// 固定文案（不含转录内容、不含理由原文）。reason_required / observation_required
+// 由入参 schema 先行拦下，这里的两条是 schema 判不了的。
+const RUN_STOP_PRECONDITION_TEXT = Object.freeze({
+  observation_unknown:
+    "run_stop rejected, no side effect: observedSeq is not a position in this run's transcript. "
+    + "Read run_activity and pass the seq of its newest entry (0 if it lists none).",
+  observation_stale:
+    "run_stop rejected, no side effect: the worker produced events after your observation more than "
+    + `${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} minutes ago. Re-read run_activity, decide again, and pass the seq of its newest entry.`,
+  reason_required: "run_stop rejected, no side effect: reason is required.",
+  observation_required: "run_stop rejected, no side effect: observedSeq is required.",
 });
 
 const RUN_STOP_ANNOTATIONS = {
@@ -2751,7 +2771,11 @@ const RUN_STOP_ANNOTATIONS = {
 
 const RUN_STOP_DESCRIPTION =
   // Post-M12 全量铺开（2026-10-03；钉：destructive + first-terminal-wins）。
-  "Stop only runs owned by the bound workspace (Lead-triggered). first-terminal-wins: the " +
+  "Stop only runs owned by the bound workspace (Lead-triggered). Read run_activity first; " +
+  "pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded. " +
+  `Worker events after observedSeq older than ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} min reject the call, no side effect. ` +
+  "Advice: do not stop within 10 min of a vital sign (any worker event) without a specific " +
+  "reason. first-terminal-wins: the " +
   "first caller claims terminal 'aborted' and runs the destructive side effect (process kill " +
   "or backend abort); concurrent/late callers rejected with zero side effects. Not idempotent " +
   "— a second call after terminal writes a rejection audit fact. Returns safe machine fields " +
@@ -3055,6 +3079,8 @@ const RUN_ACTIVITY_INPUT = z.object({
   afterSeq: z.number().int().nonnegative().optional(),
   cursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).optional(),
   pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP).optional(),
+  // 决定 0069：缺省最新在前（Lead 要看的是 worker 现在在做什么）；asc = 按时间顺读。
+  order: z.enum(["desc", "asc"]).optional(),
 }).strict();
 
 // Entry variants — a discriminated union on `category`. Each variant carries
@@ -3071,10 +3097,13 @@ const RUN_ACTIVITY_ENTRY_MESSAGE = z.object({
   truncated: z.boolean(),
 }).strict();
 
+// 决定 0069：command 条目带命令原文（脱敏、有界；truncated = 被截断过）。
 const RUN_ACTIVITY_ENTRY_COMMAND = z.object({
   category: z.literal("command"),
   ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
+  text: z.string().max(ACTIVITY_COMMAND_CAP),
+  truncated: z.boolean(),
   exitStatus: z.enum(["ok", "failed", "unknown"]),
   exitStatusSource: z.enum(["wire", "inferred"]).optional(),
 }).strict();
@@ -3268,9 +3297,10 @@ const RUN_ACTIVITY_ANNOTATIONS = {
 const RUN_ACTIVITY_DESCRIPTION =
   // Post-M12 试点（pilot-only）：三句式紧凑形——保闭集安全事实 / facts-only 边界 /
   // cursor 拒绝恢复路径 / pageSize 默认。
-  "Read-only run activity timeline from one transcript snapshot (zero append): closed-set " +
-  "safe facts only — raw argv/tool I/O and absolute/traversal paths withheld, secrets " +
-  "redacted, no semantic summary or progress estimate. scopeObservation states facts only " +
+  "Read-only run activity timeline from one transcript snapshot (zero append), newest first " +
+  "(order asc = chronological): message excerpts, command text (redacted, bounded), tool " +
+  "names, written paths, runtime vital signs. Tool I/O and absolute/traversal paths withheld, " +
+  "no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only " +
   "(file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. " +
   "Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) " +
   "means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures " +
@@ -5589,7 +5619,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_STOP_OUTPUT,
       annotations: RUN_STOP_ANNOTATIONS,
     },
-    async ({ runId }) => {
+    async ({ runId, reason, observedSeq }) => {
       try {
         // FIX-A: validate runId before calling service — prevents path escape
         // at the MCP layer so the service is never invoked for malicious runIds.
@@ -5612,6 +5642,7 @@ export function createWaoMcpServer({
           runId,
           runDir,
           authorizedWorkspaceRoot: binding.root,
+          justification: { reason, observedSeq },
         });
         // Build safe output payload — use the request runId, not service return.
         // Collapse authorization failure to fixed error (don't leak ownership details).
@@ -5619,6 +5650,16 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
+          };
+        }
+        // 决定 0069：理由 / 观察位置不满足——固定文案的拒绝，零副作用。
+        if (result.preconditionFailed) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: RUN_STOP_PRECONDITION_TEXT[result.preconditionFailed] ?? RUN_STOP_PRECONDITION_TEXT.observation_unknown,
+            }],
           };
         }
         const payload = {
@@ -6024,6 +6065,7 @@ export function createWaoMcpServer({
         const page = projectRunActivity(snapshot, {
           runId,
           audience: "lead",
+          order: input?.order ?? "desc",
           ...(input?.categories ? { categories: input.categories } : {}),
           ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
           ...(input?.cursor ? { cursor: input.cursor } : {}),

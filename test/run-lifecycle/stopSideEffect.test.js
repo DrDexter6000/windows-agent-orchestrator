@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { stopProofFlags } from "../fixtures/stopProof.js";
 
 import { JsonlTranscript, readTranscript, findState, findLatest } from "../../src/transcript.js";
 import { diagnoseFailure } from "../../src/diagnosis.js";
@@ -74,7 +75,7 @@ test("TD-100.1: completed run stop → rejected, taskkill 调用次数=0", async
     let killCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100_done", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100_done", "--run-dir", dir, ...stopProofFlags(dir, "run_td100_done")], { runDir: dir }, {
         kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
         isAlive: () => false,
         alert: async () => {},
@@ -110,8 +111,8 @@ test("TD-100.2: 两个并发 process stop → 只有 winner 调 taskkill", async
     console.log = () => {};
     try {
       await Promise.all([
-        stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, deps),
-        stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, deps),
+        stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, deps),
+        stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, deps),
       ]);
     } finally {
       console.log = origLog;
@@ -136,7 +137,7 @@ test("TD-100.3: rejected → stopped=false, sideEffectAttempted=false", async ()
     await seedCompletedTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100_done", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100_done", "--run-dir", dir, ...stopProofFlags(dir, "run_td100_done")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -161,7 +162,7 @@ test("TD-100.4: taskkill exit=0 但 PID 仍活 → stop_unverified + alert + sto
     let alertCalled = false;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => true,  // PID 仍活
         waitForExit: async () => true,  // 注入：轮询后仍活（不真实等待）
@@ -192,7 +193,7 @@ test("TD-100.5: PID 调用前已退出 → 不调 taskkill, outcome=already_exit
     let killCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
         isAlive: () => false,  // 调用前已死
         alert: async () => {},
@@ -225,7 +226,7 @@ test("TD-100.6: taskkill 非零但 PID 最终已死 → verified=true, outcome=a
     let aliveCallCount = 0;
     const aliveSeq = [true, false];
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => { killCalls++; killExitCode = 128; return { called: true, exitCode: 128 }; },
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
         waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
@@ -254,7 +255,7 @@ test("TD-100.7: taskkill 后 PID 已死 → outcome=killed + stop_verified", asy
     // isAlive: 第一次调用（aliveBefore）返回 true，第二次（aliveAfter）返回 false。
     let aliveCallCount = 0;
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => { aliveCallCount++; return aliveCallCount === 1; },
         waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
@@ -293,7 +294,7 @@ test("TD-100.8: opencode loser 不调用 executeStopWithVerification", async () 
     let execStopCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_opencode_done", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_opencode_done", "--run-dir", dir, ...stopProofFlags(dir, "run_opencode_done")], { runDir: dir }, {
         executeStop: async () => { execStopCalls++; return { verified: true, abortCalled: true, taskkillCalled: false }; },
         alert: async () => {},
       });
@@ -323,7 +324,7 @@ test("TD-100.9a: opencode winner verified → stop_verified + stopped=true", asy
 
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_oc_v", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_oc_v", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_v")], { runDir: dir }, {
         executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false }),
         alert: async () => {},
       });
@@ -354,7 +355,7 @@ test("TD-100.9b: opencode winner unverified → stop_unverified + alert + stoppe
     let alertCalled = false;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_oc_uv", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_oc_uv", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_uv")], { runDir: dir }, {
         executeStop: async () => ({ verified: false, abortCalled: true, taskkillCalled: true }),
         alert: async () => { alertCalled = true; },
       });
@@ -381,7 +382,7 @@ test("TD-100.10: rejected 不写 stop_verified/stop_unverified", async () => {
     await seedCompletedTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_td100_done", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100_done", "--run-dir", dir, ...stopProofFlags(dir, "run_td100_done")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -406,7 +407,7 @@ test("TD-100.11: stop_requested 含 reason=user, diagnosis 不显示 unknown", a
     await seedRunningTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -434,7 +435,7 @@ test("TD-100.12: run.aborted 与 aborted state_change seq 连续", async () => {
     await seedRunningTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -483,7 +484,7 @@ test("TD-100.16: taskkill 后有界轮询 true,true,false → verified=true, out
     let aliveCallCount = 0;
     const aliveSeq = [true, true, false];
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
         sleep: async () => {},  // 注入 no-op sleep，测试不真实等待
@@ -507,7 +508,7 @@ test("TD-100.17: 轮询耗尽仍 alive → unverified + alert + stopped=false", 
     let alertCalled = false;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => true,  // 永远 alive → 轮询耗尽
         sleep: async () => {},
@@ -537,7 +538,7 @@ test("TD-100.18: stop_verified 写 outcome/taskkillCalled/taskkillExitCode/proce
     let aliveCallCount = 0;
     const aliveSeq = [true, false]; // aliveBefore=true, 轮询后=false
     await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
         sleep: async () => {},
@@ -564,7 +565,7 @@ test("TD-100.19: stop winner 事件顺序 stop_requested → run.aborted → sta
     await seedRunningTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -600,7 +601,7 @@ test("TD-100.20: stop loser 事件顺序 stop_requested → state_change_rejecte
     await seedCompletedTranscript(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_td100_done", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_td100_done", "--run-dir", dir, ...stopProofFlags(dir, "run_td100_done")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => false,
         alert: async () => {},
@@ -639,7 +640,7 @@ test("TD-100.21: opencode stop_verified 写 backend/method/taskkillCalled", asyn
 
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_oc_v2", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_oc_v2", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_v2")], { runDir: dir }, {
         executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false, backend: "opencode-serve", method: "abort+verify" }),
         alert: async () => {},
       });
@@ -679,7 +680,7 @@ test("TD-100.22: invalid PID (proc_not-a-number) → stopped=false, outcome=inva
     let alertMsg = null;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_invalid", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_invalid", "--run-dir", dir, ...stopProofFlags(dir, "run_invalid")], { runDir: dir }, {
         kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
         isAlive: () => false,
         alert: async (level, msg) => { alertMsg = msg; },
@@ -722,7 +723,7 @@ test("TD-100.23: proc_0 → stopped=false, outcome=invalid_pid, 不 claim", asyn
     let killCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_zero", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_zero", "--run-dir", dir, ...stopProofFlags(dir, "run_zero")], { runDir: dir }, {
         kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
         isAlive: () => false,
         alert: async () => {},
@@ -750,7 +751,7 @@ test("TD-100.24: proc_-1 → stopped=false, outcome=invalid_pid, 不 claim", asy
     let killCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_neg", "--run-dir", dir], { runDir: dir }, {
+      await stopCommand(["run_neg", "--run-dir", dir, ...stopProofFlags(dir, "run_neg")], { runDir: dir }, {
         kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
         isAlive: () => false,
         alert: async () => {},

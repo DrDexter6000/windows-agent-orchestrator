@@ -32,6 +32,8 @@ export const RUNTIME_ACTIVITY_STATUSES = Object.freeze([
   // 后代进程在干活 / 工作目录里有文件变化。
   "process_active",
   "files_changed",
+  // 决定 0069：服务端证词（"这一轮还在跑"）让收口门续命时落的事实。
+  "serve_active",
 ]);
 
 const RUNTIME_ACTIVITY_STATUS_VALUES = new Set(RUNTIME_ACTIVITY_STATUSES);

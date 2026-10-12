@@ -757,13 +757,15 @@ test("0067-S1: 未终态且 ≥30 分钟没有新动作/正文 → 附 advisory�
     assert.equal(status.secondsSinceActivity, 20, "运行时还在动——最近活动 20s 前");
     assert.equal(
       status.leadAdvisory,
-      `转录里已 31 分钟没有新的动作或正文（最近活动：provider 正在输出，20s 前）。是否继续等待由 Lead 决定；中止：wao stop ${ADV_RUN}`,
+      // 决定 0069：10 分钟内有生命体征 → 多一句"建议不要随意中止"；出口带上看到的位置与理由两项。
+      `转录里已 31 分钟没有新的动作或正文（最近活动：provider 正在输出，20s 前）。最近 10 分钟内有生命体征，建议不要随意中止。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${ADV_RUN} --observed-seq 4 --reason "<理由>"`,
     );
     // 决定 0068：同一条 advisory 的 MCP 面文本（固定英文模板 + 整数 + 闭集标签）。
     assert.equal(
       status.leadAdvisoryWire,
       "No new worker action or text in the transcript for 31 min (last activity: runtime_activity/streaming, 20s ago). "
-        + "Whether to keep waiting is the Lead's decision. Inspect: run_activity. Stop: run_stop.",
+        + "A vital sign was seen within the last 10 min: WAO advises against stopping now without a specific reason. "
+        + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.",
     );
   } finally { cleanupDir(dir); }
 });
@@ -884,5 +886,34 @@ test("0068-Q5: 卡在 pending、连 run.submitted 都没有的运行 → 从第�
     const late = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T11:00:00.000Z") });
     assert.match(late.leadAdvisory, /^转录里已 60 分钟没有新的动作或正文（最近活动：无）。/);
     assert.match(late.leadAdvisoryWire, /for 60 min \(last activity: none\)\./);
+  } finally { cleanupDir(dir); }
+});
+
+// ===== 决定 0069：10 分钟内有生命体征的建议 + 看到的转录位置 =====
+
+test("0069-A1: 最近一次生命体征已过 10 分钟 → advisory 不带\"建议不要随意中止\"那一句；observedSeq 始终在场", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-adv-"));
+  try {
+    const base = { runId: ADV_RUN, agentId: "glm-pro" };
+    writeTranscript(dir, ADV_RUN, [
+      { type: "run.submitted", ts: "2026-10-12T10:00:00.000Z", seq: 1, ...base },
+      { type: "run.event", kind: "command", command: "npm test", ts: "2026-10-12T10:05:00.000Z", seq: 2, ...base },
+      { type: "run.event", kind: "runtime_activity", status: "process_active", ts: "2026-10-12T10:30:00.000Z", seq: 3, ...base },
+    ].map(ev).join(""));
+    // 10:39:59 —— 体征 9 分 59 秒前：带建议。
+    const recent = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:39:59.000Z") });
+    assert.equal(recent.observedSeq, 3);
+    assert.ok(recent.leadAdvisory.includes("最近 10 分钟内有生命体征，建议不要随意中止。"));
+    assert.ok(recent.leadAdvisoryWire.includes("A vital sign was seen within the last 10 min"));
+    assert.ok(recent.leadAdvisory.includes(`wao stop ${ADV_RUN} --observed-seq 3 --reason`));
+    // 10:40:00 —— 恰满 10 分钟：不带。
+    const old = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:40:00.000Z") });
+    assert.ok(!old.leadAdvisory.includes("建议不要随意中止"));
+    assert.ok(!old.leadAdvisoryWire.includes("vital sign was seen"));
+    assert.ok(old.leadAdvisoryWire.endsWith("Before stopping: read run_activity, then run_stop with observedSeq and a reason."));
+    // 没到 advisory 门限的运行也给 observedSeq（stop 要用）。
+    const early = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:06:00.000Z") });
+    assert.equal(early.observedSeq, 3);
+    assert.equal("leadAdvisory" in early, false);
   } finally { cleanupDir(dir); }
 });

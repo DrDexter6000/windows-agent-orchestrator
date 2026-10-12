@@ -402,7 +402,7 @@ test("HTTP /api/activity redacts a server-owned env secret end-to-end (real hand
 // full trust boundary in one end-to-end read: secret redacted before bound, every
 // sensitive artifact withheld, and the read is non-mutating on transcript + Git.
 // =====================================================================
-test("HTTP /api/activity real-chain: redacts secret, withholds prompt/command/path/PID/session, read-only on transcript+git", async () => {
+test("HTTP /api/activity real-chain: redacts secret, withholds prompt/path/PID/session, shows command text (0069), read-only on transcript+git", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-od-realchain-ws-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-od-realchain-rd-"));
   try {
@@ -471,7 +471,8 @@ test("HTTP /api/activity real-chain: redacts secret, withholds prompt/command/pa
     assert.ok(!r.body.includes("/super/secret"), "no owner session path");
     assert.ok(!r.body.includes("PROVSID_xyz_456"), "no provider session id");
     assert.ok(!r.body.includes("PROMPT_MARKER_xyz"), "no prompt");
-    assert.ok(!r.body.includes("RAWCMD_xyz_123"), "no raw command");
+    // 决定 0069：命令原文随 command 条目给出（与 Lead 视图同一投影）。
+    assert.ok(r.body.includes("RAWCMD_xyz_123"), "command text shown");
 
     // --- Real projection actually ran (not a fake): a command entry exists and
     //     carries NO text/command field; a message entry exists and was redacted. ---
@@ -479,7 +480,9 @@ test("HTTP /api/activity real-chain: redacts secret, withholds prompt/command/pa
     const cmd = entries.find((e) => e.category === "command");
     const msg = entries.find((e) => e.category === "message");
     assert.ok(cmd, "real projection produced a command entry");
-    assert.ok(!("command" in cmd) && !("text" in cmd) && !("args" in cmd), "command entry carries no raw command text");
+    // 决定 0069：command 条目带有界的命令原文（text），仍不带原始 command / args 字段。
+    assert.ok(!("command" in cmd) && !("args" in cmd), "command entry carries no raw command/args field");
+    assert.equal(cmd.text, "rm -rf / && echo RAWCMD_xyz_123");
     assert.ok(msg, "real projection produced a message entry");
     assert.ok(msg.text.includes("[REDACTED"), "real redactor ran on real message text");
     assert.ok(!msg.text.includes(SECRET), "raw secret absent from projected message");

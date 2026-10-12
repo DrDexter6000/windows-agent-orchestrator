@@ -19,8 +19,13 @@ import { boundReportScope } from "../metrics.js";
 // 多久没有新的动作/正文才附 Lead advisory。
 export const LEAD_ADVISORY_QUIET_SECONDS = 30 * 60;
 
+// 决定 0069（Owner 2026-10-13）：worker 有明显生命体征（任何一条 worker 事件，
+// 含 runtime_activity）的这段时间内，建议不要随意中止。只是建议——stop 不因此
+// 被拒，体征距今多久会记进 run.stop_requested。
+export const VITAL_SIGN_RECENT_SECONDS = 10 * 60;
+
 // MCP 面 leadAdvisory 的长度上界（模板 + 整数 + 闭集标签；schema 取同一常量）。
-export const LEAD_ADVISORY_WIRE_MAX_LEN = 320;
+export const LEAD_ADVISORY_WIRE_MAX_LEN = 480;
 
 /**
  * 距最近一次动作或正文过了多少秒。从未有过动作时从 run.submitted 起算；连
@@ -81,6 +86,10 @@ export function leadAdvisoryWireText({ secondsSinceEffect, lastActivityEventKind
     : "";
   const age = Number.isFinite(secondsSinceActivity) ? `, ${secondsSinceActivity}s ago` : "";
   const last = kind ? `${kind}${status}${age}` : "none";
+  const recent = Number.isFinite(secondsSinceActivity) && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS
+    ? `A vital sign was seen within the last ${VITAL_SIGN_RECENT_SECONDS / 60} min: WAO advises against stopping now without a specific reason. `
+    : "";
   return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
-    + "Whether to keep waiting is the Lead's decision. Inspect: run_activity. Stop: run_stop.";
+    + recent
+    + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
 }

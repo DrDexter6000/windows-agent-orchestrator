@@ -685,7 +685,14 @@ const RED_23_WIRE = 75492;
 // 与 run_delivery_reverify 出参 schema 各增可选闭集 guidance 数组（pending 回执
 // 指引进 structuredContent——claude 成功面只读 structuredContent 的探针实证）。
 // 纯 schema 增量 +328 字节，描述字节零变化（M12-16-B 仍绿）。
-const FROZEN_23_WIRE_CEILING = 85698;
+// 0069 重冻（2026-10-13，Owner 当日裁定的需求批："MCP 上看不到命令原文是严重的
+// 产品缺陷"；"要杀死进程必须第一 run_activity 探明最新状态、第二必须说明理由"）：
+// run_activity command 条目增 text / truncated、入参增 order、runtime_status 的
+// status enum 增 serve_active；run_stop 入参增必填 reason / observedSeq；两条工具
+// 描述改写（协议与"10 分钟内有生命体征不建议中止"须到 Lead 眼前）。实测
+// 85221 → 85912（+691B：schema +279，描述 +412）。Owner 硬顶 85939 不变，余 27B
+// ——下一次再给 MCP 加字段须先由 Owner 抬硬顶或在别处瘦身。
+const FROZEN_23_WIRE_CEILING = 85912;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -897,7 +904,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
 // lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
 // outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
-  "de36e9e89509fc47cc7790f13340390d1a694a336dc84ad3abacf08573b53809";
+  "3f1d9db399bea03e37075a1adbbef4b057cb0dc44165e4e1108487619e6c072c";
+  // 0069（2026-10-13）：run_activity command 条目增 text / truncated、入参增 order、
+  // status enum 增 serve_active；run_stop 入参增必填 reason / observedSeq——
+  // inputSchema / outputSchema 都在 stripped 载荷内，SHA 如实翻新。
   // 0062（2026-10-11，TD-260 丙′）：run_activity 出参 envelope enum 再增分支回收
   // 两标签（worktree_branch_recycled/kept——服务端 ENVELOPE_TYPE_TO_LABEL 增两
   // 映射的镜像，ephemeral 只读轮树释放成功之后追加）——outputSchema 在 stripped
@@ -949,7 +959,11 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 即红，需要 Owner 逐次裁定。
 // 0051 重冻（2026-10-09）：run_consult 描述扩写分页语义（receipt/页帽/版本锚/
 // 拒绝面），10442 → 10976，实测重冻（Owner 批准的三工作批；防 creep 语义不变）。
-const FROZEN_23_DESC_CEILING = 10976;
+// 0069 重冻（2026-10-13，Owner 当日裁定的需求批）：run_stop 描述写入中止协议
+// （先 run_activity、带 observedSeq 与 reason、观察过时即拒）与"10 分钟内有生命体征
+// 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11388（+412），
+// 实测重冻。防 creep 语义不变。
+const FROZEN_23_DESC_CEILING = 11388;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

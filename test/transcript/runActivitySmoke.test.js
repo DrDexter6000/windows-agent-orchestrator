@@ -95,8 +95,9 @@ test("SMOKE: real mixed transcript — ordering, redaction, cursor replay, zero 
     const lastMsg = collected.filter((e) => e.category === "message").at(-1);
     assert.ok(lastMsg.text.includes("[REDACTED"), "secret in assistant text redacted");
 
-    // No raw payloads crossed.
-    assert.ok(!dump.includes("leak "), "no raw command argv");
+    // 决定 0069：命令原文随 command 条目给出——其中的密钥值已被替换。
+    const cmdEntry = collected.find((e) => e.category === "command");
+    assert.ok(cmdEntry.text.startsWith("leak [REDACTED"), `command text redacted, got ${JSON.stringify(cmdEntry.text)}`);
     assert.ok(!dump.toLowerCase().includes("c:\\\\secrets"), "no absolute path");
     assert.ok(!dump.includes("proc_smoke"), "no backend session id");
 

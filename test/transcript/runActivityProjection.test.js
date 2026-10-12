@@ -370,11 +370,11 @@ test("#9 control chars neutralized; LF and TAB preserved", () => {
 // =====================================================================
 // #10 command/tool/file/error raw payloads + absolute paths do not cross
 // =====================================================================
-test("#10 raw command/tool/file payloads and absolute paths never cross the lead schema", () => {
+test("#10 tool/file payloads and absolute paths never cross the lead schema; command text crosses redacted and bounded (0069)", () => {
   resetSeq();
   const SECRET = "test-secret-payload-m128c";
   const events = [
-    cmdEvent(0), // raw command text + secret in argv must NOT cross
+    cmdEvent(0), // command text crosses (决定 0069); the secret in argv must NOT
     toolUseEvent("Bash", { command: "echo " + SECRET }), // input must NOT cross
     toolResultEvent(true, "stderr " + SECRET), // output must NOT cross
     fileWrittenEvent("C:\\Users\\leak\\secret.txt"), // absolute path must NOT cross
@@ -386,16 +386,17 @@ test("#10 raw command/tool/file payloads and absolute paths never cross the lead
   const r = project(events, { env: { LEAK_TOKEN: SECRET } });
   const json = JSON.stringify(r.entries);
   // none of the raw payloads may appear.
-  assert.ok(!json.includes("rm -rf"), "no raw command text");
   assert.ok(!json.includes(SECRET), "no secret anywhere");
   assert.ok(!json.includes("C:\\"), "no absolute windows path");
   assert.ok(!json.includes("/etc/passwd"), "no absolute posix path");
   assert.ok(!json.includes(".."), "no traversal path");
   assert.ok(!json.includes("raw error"), "no raw error text");
-  // command entry only carries a closed-set exitStatus.
+  // 决定 0069：command 条目带命令原文——脱敏、有界；其余仍是闭集 exitStatus。
   const cmd = r.entries.find((e) => e.category === "command");
-  assert.deepEqual(Object.keys(cmd).sort(), ["category", "exitStatus", "exitStatusSource", "seq", "ts"]);
+  assert.deepEqual(Object.keys(cmd).sort(), ["category", "exitStatus", "exitStatusSource", "seq", "text", "truncated", "ts"]);
   assert.ok(["ok", "failed", "unknown"].includes(cmd.exitStatus));
+  assert.ok(cmd.text.includes("rm -rf"), "command text is what the Lead reads to tell a test run from a sleep");
+  assert.equal(cmd.truncated, false);
   // tool_use carries only a bounded tool name (no input).
   const tu = r.entries.find((e) => e.category === "tool_use");
   assert.equal(tu.tool, "Bash");
@@ -1101,4 +1102,63 @@ test("M12-19 proj: buildCursorRecovery is a bounded closed-set payload (status +
   // the recovery payload carries NOTHING but the closed-set fact + choices — no
   // cursor, no subtype, no path, no dynamic text.
   assert.deepEqual(Object.keys(r).sort(), ["choices", "status"]);
+});
+
+// ===== 决定 0069：command 条目的命令原文 =====
+
+test("0069-P1: command text is bounded to ACTIVITY_COMMAND_CAP keeping the head; truncated says so", async () => {
+  const { ACTIVITY_COMMAND_CAP } = await import("../../src/application/runActivityProjection.js");
+  resetSeq();
+  const long = `node -e "${"x".repeat(ACTIVITY_COMMAND_CAP)}"`;
+  const short = "npm test 2>&1 | tail -20";
+  const r = project([
+    cmdEvent(0, { command: long }),
+    cmdEvent(undefined, { command: short }),
+    ev({ kind: "command" }),
+  ]);
+  const [a, b, c] = r.entries.filter((e) => e.category === "command");
+  assert.equal(a.text.length, ACTIVITY_COMMAND_CAP);
+  assert.ok(a.text.startsWith('node -e "xxx'), "the head is what identifies the command");
+  assert.equal(a.truncated, true);
+  assert.deepEqual([b.text, b.truncated], [short, false]);
+  assert.deepEqual([c.text, c.truncated], ["", false], "no command field → empty text, never undefined");
+});
+
+test("0069-P2: secrets written into a command are redacted by env value and by shape; ordinary commands are untouched", async () => {
+  const { redactSecretShapes } = await import("../../src/secretRedaction.js");
+  resetSeq();
+  // 运行时拼出来——仓库的脱敏门不允许出现形似凭证的字面量。
+  const fromEnv = ["env", "held", "value", "0069"].join("-");
+  const r = project([
+    cmdEvent(undefined, { command: `curl -H "X-Key: ${fromEnv}" https://example.test` }),
+    cmdEvent(undefined, { command: "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' https://example.test" }),
+    cmdEvent(undefined, { command: "DEEPSEEK_API_KEY=abcdefgh12345678 node run.js" }),
+    cmdEvent(undefined, { command: "aws s3 ls --profile AKIAIOSFODNN7EXAMPLE" }),
+    cmdEvent(undefined, { command: "git push https://ghp_abcdefghijklmnopqrstuvwxyz0123@github.com/o/r.git" }),
+  ], { env: { MY_API_KEY: fromEnv } });
+  const texts = r.entries.filter((e) => e.category === "command").map((e) => e.text);
+  assert.ok(texts[0].includes("[REDACTED") && !texts[0].includes(fromEnv), "env value");
+  assert.equal(texts[1], "curl -H 'Authorization: Bearer [REDACTED]' https://example.test");
+  assert.equal(texts[2], "DEEPSEEK_API_KEY=[REDACTED] node run.js");
+  assert.equal(texts[3], "aws s3 ls --profile [REDACTED]");
+  assert.equal(texts[4], "git push https://[REDACTED]@github.com/o/r.git");
+  // 形状兜底不碰普通命令。
+  for (const plain of [
+    "npm test 2>&1 | tail -20",
+    "sleep 420",
+    "node --test --test-name-pattern token test/a.test.js",
+    "git diff --stat main..feat/x -- src/mcp/server.js",
+    "rg -n \"secret\" src",
+  ]) {
+    assert.equal(redactSecretShapes(plain), plain, plain);
+  }
+});
+
+test("0069-P3: every backend registers its vital signs and closure gates (the standard item for a backend adaptation)", async () => {
+  const { CAPABILITY_NOTES } = await import("../../src/backends/factory.js");
+  const { KNOWN_BACKENDS } = await import("../../src/registry.js");
+  for (const backend of KNOWN_BACKENDS) {
+    const note = CAPABILITY_NOTES[backend]?.vitalSigns;
+    assert.ok(typeof note === "string" && note.trim().length >= 20, `${backend}: CAPABILITY_NOTES.vitalSigns is required`);
+  }
 });

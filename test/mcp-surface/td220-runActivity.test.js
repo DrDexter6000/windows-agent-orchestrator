@@ -47,7 +47,7 @@ test("TD-220: MCP discovery and response carry strict count-only categories and 
     assert.deepEqual(command.properties.exitStatusSource.enum, ["wire", "inferred"]);
     assert.equal(command.required.includes("exitStatusSource"), false);
 
-    const res = await client.callTool({ name: "run_activity", arguments: { runId, pageSize: 50 } });
+    const res = await client.callTool({ name: "run_activity", arguments: { runId, pageSize: 50, order: "asc" } });
     assert.equal(res.isError, undefined);
     const data = res.structuredContent;
     assert.ok(data, "handler passes strict emitted output validation");
@@ -60,7 +60,7 @@ test("TD-220: MCP discovery and response carry strict count-only categories and 
     assert.equal(data.counts.other, 1);
     assert.equal(data.total, 10);
     assert.equal(JSON.stringify(res).includes("SECRET"), false);
-    const filtered = await client.callTool({ name: "run_activity", arguments: { runId, categories: ["thinking", "envelope"] } });
+    const filtered = await client.callTool({ name: "run_activity", arguments: { runId, categories: ["thinking", "envelope"], order: "asc" } });
     assert.deepEqual(filtered.structuredContent.entries.map((e) => e.category), ["thinking", "envelope"]);
   } finally {
     await client.close();

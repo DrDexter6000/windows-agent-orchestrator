@@ -52,7 +52,7 @@
 import { createHash } from "node:crypto";
 import { withInferredCommandExitCode, EXIT_CODE_INFERENCE_PROVEN_BACKENDS } from "../scorecard.js";
 
-import { createSecretRedactor } from "../secretRedaction.js";
+import { createSecretRedactor, redactSecretShapes } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
 import { TERMINAL_STATES, assertEventsBoundToRunId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
@@ -194,6 +194,10 @@ export const ACTIVITY_ROLE_CAP = 32;
 export const ACTIVITY_LABEL_CAP = 64;
 export const ACTIVITY_TOOL_NAME_CAP = 64;
 export const ACTIVITY_PATH_CAP = 256;
+// 决定 0069：command 条目给出命令原文（脱敏 → 清控制字符 → 截到这个长度，保留
+// 开头——命令是什么看的是开头）。一条常见的带管道 / 重定向的 shell 命令在
+// 400 字符内放得下；内联脚本只留头部。
+export const ACTIVITY_COMMAND_CAP = 400;
 export const ACTIVITY_TS_CAP = 64;
 
 // ===== Cursor codec =====
@@ -539,13 +543,18 @@ function buildEntry(event, category, redactor, textCap, toolResultsById) {
       return { category, ts, seq, role, text: safe, truncated };
     }
     case "command": {
+      // 命令原文：先按形状兜底（内联赋值、常见令牌形状），再走与 message 文本
+      // 同一条 redact -> sanitize -> bound 路径。
+      const { text, truncated } = boundText(
+        typeof event.command === "string" ? redactSecretShapes(event.command) : "", redactor, ACTIVITY_COMMAND_CAP,
+      );
       if (event.exitCode !== undefined) {
-        return { category, ts, seq, exitStatus: commandExitStatus(event), exitStatusSource: "wire" };
+        return { category, ts, seq, text, truncated, exitStatus: commandExitStatus(event), exitStatusSource: "wire" };
       }
       const result = toolResultsById.get(event.toolCallId);
       const command = withInferredCommandExitCode(event, result ? [result] : []);
       return {
-        category, ts, seq, exitStatus: commandExitStatus(command),
+        category, ts, seq, text, truncated, exitStatus: commandExitStatus(command),
         ...(command.exitCode !== undefined ? { exitStatusSource: "inferred" } : {}),
       };
     }

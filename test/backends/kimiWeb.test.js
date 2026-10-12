@@ -2416,6 +2416,12 @@ test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续�
   // 自适应预算在证词续命后会放大（3×已恢复间隙），本脚本长度内可能只复核一次——
   // 断言语义：≥1 次证词 + 轮询越过原必死点（无证词时第 7 拍已死，16 拍完成）。
   assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
+  // 决定 0069：凭 serve 证词续命的每一次都落成转录事实（Lead 下钻时看得见）。
+  assert.equal(
+    events.filter((e) => e.kind === "runtime_activity" && e.status === "serve_active").length,
+    detailCalls(),
+    "一次证词续命一条 serve_active",
+  );
 });
 
 test("kimi-web B5②: 证词活着但自上次产出增长以来被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {

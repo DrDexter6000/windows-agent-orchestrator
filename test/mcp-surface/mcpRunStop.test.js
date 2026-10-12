@@ -4,6 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stopProof } from "../fixtures/stopProof.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,7 +103,7 @@ test("MCP-02: extra args rejected, service not called", async () => {
     const client = await buildClient(server);
     try {
       // Extra arg should be rejected by strict schema BEFORE service call
-      await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp02", force: true } });
+      await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp02", force: true, ...stopProof(dir, "run_mcp02") } });
       assert.equal(serviceCalls, 0, "service must not be called for extra args");
     } catch {
       // SDK may throw on validation — that's OK, service was not called
@@ -122,7 +123,7 @@ test("MCP-03: safe output — no PID/path/session/command/stderr", async () => {
     const { server } = createServerWithFakeStop({ runDir: dir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp03" } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp03", ...stopProof(dir, "run_mcp03") } });
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
       // Must contain only safe fields
@@ -154,7 +155,7 @@ test("MCP-04: other workspace → run_stop failed, zero side effect", async () =
     const { server, getKillCalls } = createServerWithFakeStop({ runDir: dirA, workspaceRoot: dirB });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp04" } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp04", ...stopProof(dirA, "run_mcp04") } });
       assert.ok(res.isError, "must be error");
       const text = res.content[0].text;
       assert.equal(text, "run_stop failed");
@@ -174,7 +175,7 @@ test("MCP-05: workspace not bound → fixed safe error", async () => {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp05" } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp05", ...stopProof(dir, "run_mcp05") } });
       assert.ok(res.isError, "must be error when workspace not bound");
     } finally {
       await client.close();

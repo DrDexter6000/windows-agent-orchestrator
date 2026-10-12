@@ -39,13 +39,30 @@ export async function stopCommand(args, config, deps = {}) {
   const options = parseOptions(tail);
   const runDir = options.runDir ?? config.runDir;
 
+  // 决定 0069：中止前先看最新状态、并说明理由——两项都是必填。
+  const observedSeq = /^\d+$/.test(String(options.observedSeq ?? "")) ? Number(options.observedSeq) : null;
+  const reason = typeof options.reason === "string" ? options.reason : "";
+  const protocol = `先看最新状态：status ${runId}（输出里的 observedSeq），再执行：stop ${runId} --observed-seq <observedSeq> --reason "<为什么要停>"`;
+  if (observedSeq === null || reason.trim().length === 0) {
+    throw new Error(`stop 需要 --observed-seq 与 --reason。${protocol}`);
+  }
+
   // Delegate to shared application service
-  const { stopRun } = await import("../application/runStop.js");
+  const { stopRun, STOP_REASON_MIN_LEN, STOP_REASON_MAX_LEN, STOP_OBSERVATION_MAX_AGE_SECONDS } = await import("../application/runStop.js");
   const result = await stopRun({
     runId,
     runDir,
+    justification: { reason, observedSeq },
     deps: { ...deps, config },
   });
+  if (result.preconditionFailed) {
+    const why = {
+      reason_required: `--reason 需要 ${STOP_REASON_MIN_LEN}–${STOP_REASON_MAX_LEN} 个字符`,
+      observation_unknown: "--observed-seq 不是这个运行转录里的位置",
+      observation_stale: `worker 在你看到的位置之后又有了动作，且已过去超过 ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} 分钟（${result.newerEventCount} 条新事件）`,
+    }[result.preconditionFailed] ?? result.preconditionFailed;
+    throw new Error(`stop 未执行（零副作用）：${why}。${protocol}`);
+  }
 
   // Convert structured result to backward-compatible CLI JSON
   console.log(JSON.stringify(stopResultToCliJson(result), null, 2));

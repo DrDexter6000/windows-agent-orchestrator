@@ -181,7 +181,7 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
         "only runId/agentId/state/terminal/executionStage/lastEvent/lastActivity/availableDrilldowns (+ leadAdvisory on a quiet non-terminal run)");
       assert.match(parsed.leadAdvisory,
-        /^No new worker action or text in the transcript for \d+ min \(last activity: file_written, \d+s ago\)\. Whether to keep waiting is the Lead's decision\. Inspect: run_activity\. Stop: run_stop\.$/);
+        /^No new worker action or text in the transcript for \d+ min \(last activity: file_written, \d+s ago\)\. Whether to keep waiting is the Lead's decision\. Before stopping: read run_activity, then run_stop with observedSeq and a reason\.$/);
       // M11-8B: the durable agentId from the envelope, not worker text.
       assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
 

@@ -273,6 +273,7 @@ export function describeEntry(entry) {
         provider_retry: "provider retry",
         process_active: "process active",
         files_changed: "files changed",
+        serve_active: "serve active",
       };
       body = `runtime · ${labels[e.status] ?? "unknown"}`;
       break;

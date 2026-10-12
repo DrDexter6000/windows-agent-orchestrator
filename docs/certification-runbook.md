@@ -87,6 +87,7 @@ metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-
 
 - **只换模型** = 改既有 backend 的 `provider`/`model` 字段——lane 内操作（组合权在 Owner：
   写 registry + 付认证费，见 docs/team-roles.md §Lane）。
+- **新 backend 的标准登记项——生命体征与收口**（决定 0069）：口径只有一条，没有生命体征才由控制面收口，有生命体征去留归 Lead；适配层逐个落地。入册时写明并登记到 `src/backends/factory.js` 的 `CAPABILITY_NOTES.<backend>.vitalSigns`（缺项生成即红）：①控制面在这条后端上读得到哪些体征；②每道"等不到进展"的收口门到点时先看这些体征，全无才收口；③让收口门续命的体征落成 `runtime_activity` 事实（Lead 下钻时看得见）；④做不到的地方如实登记为例外。
 - **明确要求另一 CLI/runtime 驱动** = 新 backend = Owner 决策（backend 闭集成员增补属
   Owner 裁量；曾评估未纳入的 runtime 先例见 ADR-0028）。provider 替代方案是否可接受由
   Owner 判断，**不得当成等价解**——provider lane 只解模型面（backend 不变），不构成

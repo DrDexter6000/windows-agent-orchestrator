@@ -503,7 +503,8 @@ test("stop on process-type run: 不报 'no OpenCode session'，走 taskkill 路�
     // 修复前：抛 "no OpenCode session metadata"。
     // 修复后：进程型走 taskkill（PID 999999 不存在，taskkill 返回非零但 stop 不抛错，
     // 写 stop_requested + state_change→aborted + 提示进程型）。
-    const output = cli(["stop", "run_proc_stop"], dir);
+    // 决定 0069：stop 必带看到的转录位置与理由（夹具无 seq → 位置为 0；经 shell 拼接，理由不带空格）。
+    const output = cli(["stop", "run_proc_stop", "--observed-seq", "0", "--reason", "test-process-stop-path"], dir);
     // 不抛错即通过；进程型 stop 应有明确提示而非 opencode session 报错
     assert.ok(!/no OpenCode session/i.test(output), "进程型 run 不应报 opencode session 错误");
     assert.match(output, /process|进程|taskkill|proc_/i, "应提示走进程型 kill 路径");

@@ -98,6 +98,8 @@ export async function statusCommand(args, config) {
     last: boundLongStrings(lastDisplay),
     lastActivityTs: status.lastActivityTs,
     secondsSinceActivity: status.secondsSinceActivity,
+    // 决定 0069：这次读取看到的转录位置——stop 的 --observed-seq 取它。
+    observedSeq: status.observedSeq,
     lastActivityKind: status.lastActivityKind,
     lastActivitySummary: status.lastActivitySummary,
     // TD-150 批B + 审计修正：摘要折叠进 JSON 对象（纯 JSON 可解析契约不破），

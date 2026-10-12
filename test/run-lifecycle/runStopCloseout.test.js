@@ -6,6 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stopProof, TEST_STOP_REASON } from "../fixtures/stopProof.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,7 +119,7 @@ test("RUNID-05: MCP run_stop rejects malicious runId — service count=0", async
     try {
       // The zod schema z.string().min(1) accepts "../victim", but the service
       // validates isValidRunId and throws → catch → "run_stop failed"
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "../victim" } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "../victim", reason: TEST_STOP_REASON, observedSeq: 0 } });
       assert.ok(res.isError, "must be error");
       assert.equal(res.content[0].text, "run_stop failed");
       assert.equal(serviceCalls, 0, "service must not be called for invalid runId");
@@ -403,8 +404,8 @@ test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winne
     const client = await buildClient(server);
     try {
       const [r1, r2] = await Promise.all([
-        client.callTool({ name: "run_stop", arguments: { runId: "run_conc" } }),
-        client.callTool({ name: "run_stop", arguments: { runId: "run_conc" } }),
+        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", ...stopProof(dir, "run_conc") } }),
+        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", ...stopProof(dir, "run_conc") } }),
       ]);
       const p1 = JSON.parse(r1.content[0].text);
       const p2 = JSON.parse(r2.content[0].text);
@@ -518,4 +519,209 @@ test("ARCH-CLOSEOUT: runStop.js does not have hand-written pathsMatch/gitTopLeve
   // Must not have dead imports
   assert.ok(!src.includes("execFileSync"), "no dead execFileSync import");
   assert.ok(!src.includes("realpathSync"), "no dead realpathSync import");
+});
+
+// ===== 决定 0069：Lead 面的 stop 先过"理由 + 看到的转录位置"这一关 =====
+
+// 会话记录带 hostPid 的运行，外加一条刚落下的 worker 命令事件。返回这条命令之前
+// 的位置（Lead "看到"的位置）与全部事件数。
+async function seedRunWithLateCommand(runDir, runId, workspaceCwd) {
+  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "a" });
+  await t.append("run.started", { backend: "zcode" });
+  await t.append("run.background_submitted", { background: true, cwd: workspaceCwd });
+  await t.append("session.created", { backend: "zcode", backendSessionId: "sess_0069", hostPid: 4321 });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  await t.append("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "starting" }] });
+  const before = await readTranscript(join(runDir, `${runId}.jsonl`));
+  const observedSeq = before.at(-1).seq;
+  await t.append("run.event", { kind: "command", command: "npm test" });
+  return { observedSeq, eventCount: before.length + 1 };
+}
+
+function killSpy() {
+  const killed = [];
+  let alive = true;
+  return {
+    killed,
+    deps: (extra = {}) => defaultDeps({
+      kill: (pid) => { killed.push(pid); alive = false; return { called: true, exitCode: 0 }; },
+      isAlive: () => alive,
+      ...extra,
+    }),
+  };
+}
+
+test("0069-S1: 看到的位置之后 worker 又有了动作、且已过 5 分钟 → 拒绝，零事件、零击杀", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s1-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq, eventCount } = await seedRunWithLateCommand(dir, "run_0069_s1", dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const result = await stopRun({
+      runId: "run_0069_s1", runDir: dir, authorizedWorkspaceRoot: dir,
+      justification: { reason: "worker looks stuck on the first step", observedSeq },
+      deps: spy.deps({ nowFn: () => Date.now() + 6 * 60_000 }),
+    });
+    assert.equal(result.preconditionFailed, "observation_stale");
+    assert.equal(result.newerEventCount, 1);
+    assert.equal(result.terminalAccepted, false);
+    assert.equal(result.sideEffectAttempted, false);
+    assert.equal(result.terminalState, "running");
+    assert.deepEqual(spy.killed, []);
+    const events = await readTranscript(join(dir, "run_0069_s1.jsonl"));
+    assert.equal(events.length, eventCount, "转录一条不多");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-S2: 之后的事件是刚落下的（<5 分钟）→ 照常停；理由、位置、新增事件数、体征距今都记进 run.stop_requested", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s2-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq } = await seedRunWithLateCommand(dir, "run_0069_s2", dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const result = await stopRun({
+      runId: "run_0069_s2", runDir: dir, authorizedWorkspaceRoot: dir,
+      justification: { reason: "  task was cancelled\tby the owner\n", observedSeq },
+      deps: spy.deps({ nowFn: () => Date.now() + 60_000 }),
+    });
+    assert.equal(result.preconditionFailed, undefined);
+    assert.equal(result.terminalAccepted, true);
+    assert.deepEqual(spy.killed, [4321]);
+    const events = await readTranscript(join(dir, "run_0069_s2.jsonl"));
+    const requested = events.find((e) => e.type === "run.stop_requested");
+    assert.equal(requested.reason, "user");
+    assert.equal(requested.statedReason, "task was cancelled by the owner", "理由去掉控制字符并收拢空白");
+    assert.equal(requested.observedSeq, observedSeq);
+    assert.equal(requested.newerEventCount, 1);
+    assert.ok(requested.secondsSinceVitalSign >= 55 && requested.secondsSinceVitalSign <= 70, `实际 ${requested.secondsSinceVitalSign}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-S3: 理由太短 / 位置缺失 / 位置不在转录里 → 各自的拒绝码，零副作用", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s3-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq, eventCount } = await seedRunWithLateCommand(dir, "run_0069_s3", dir);
+    const { stopRun, STOP_PRECONDITION_CODES } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const attempt = (justification) => stopRun({
+      runId: "run_0069_s3", runDir: dir, authorizedWorkspaceRoot: dir, justification, deps: spy.deps(),
+    });
+    const cases = [
+      [{ reason: "stop", observedSeq }, "reason_required"],
+      [{ reason: " \t \n ", observedSeq }, "reason_required"],
+      [{ reason: "x".repeat(401), observedSeq }, "reason_required"],
+      [{ reason: "a real reason for stopping" }, "observation_required"],
+      [{ reason: "a real reason for stopping", observedSeq: -1 }, "observation_required"],
+      [{ reason: "a real reason for stopping", observedSeq: 1.5 }, "observation_required"],
+      [{ reason: "a real reason for stopping", observedSeq: 9999 }, "observation_unknown"],
+    ];
+    for (const [justification, code] of cases) {
+      const result = await attempt(justification);
+      assert.equal(result.preconditionFailed, code, JSON.stringify(justification).slice(0, 60));
+      assert.ok(STOP_PRECONDITION_CODES.includes(result.preconditionFailed));
+      assert.equal(result.sideEffectAttempted, false);
+    }
+    assert.deepEqual(spy.killed, []);
+    assert.equal((await readTranscript(join(dir, "run_0069_s3.jsonl"))).length, eventCount);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-S4: 不带 justification 的服务层调用（内部 / 机制测试路径）不做这项检查，也不写理由字段", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s4-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunWithLateCommand(dir, "run_0069_s4", dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const result = await stopRun({ runId: "run_0069_s4", runDir: dir, authorizedWorkspaceRoot: dir, deps: spy.deps() });
+    assert.equal(result.terminalAccepted, true);
+    const requested = (await readTranscript(join(dir, "run_0069_s4.jsonl"))).find((e) => e.type === "run.stop_requested");
+    assert.equal("statedReason" in requested, false);
+    assert.equal("observedSeq" in requested, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-M1: MCP run_stop —— 两项必填由 schema 拦；观察过时返回固定文案、零击杀；看过最新状态后通过", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-m1-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq } = await seedRunWithLateCommand(dir, "run_0069_m1", dir);
+    const spy = killSpy();
+    let clockSkewMs = 6 * 60_000;
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
+      stopRunFn: async (input) => {
+        const { stopRun } = await import("../../src/application/runStop.js");
+        return stopRun({ ...input, deps: spy.deps({ nowFn: () => Date.now() + clockSkewMs }) });
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const tool = (await client.listTools()).tools.find((t) => t.name === "run_stop");
+      assert.deepEqual([...tool.inputSchema.required].sort(), ["observedSeq", "reason", "runId"]);
+
+      const missing = await client.callTool({ name: "run_stop", arguments: { runId: "run_0069_m1" } });
+      assert.ok(missing.isError, "缺理由与位置 → schema 拒绝");
+
+      const stale = await client.callTool({
+        name: "run_stop",
+        arguments: { runId: "run_0069_m1", reason: "the worker has been silent for too long", observedSeq },
+      });
+      assert.ok(stale.isError);
+      assert.match(stale.content[0].text, /^run_stop rejected, no side effect: the worker produced events after your observation more than 5 minutes ago\. Re-read run_activity/);
+      assert.ok(!stale.content[0].text.includes("npm test"), "固定文案，不带转录内容");
+      assert.deepEqual(spy.killed, []);
+
+      // Lead 重新看过：run_activity 最新一条的 seq 就是新的 observedSeq。
+      const activity = await client.callTool({ name: "run_activity", arguments: { runId: "run_0069_m1" } });
+      const newest = activity.structuredContent.entries[0];
+      assert.equal(newest.category, "command", "缺省最新在前");
+      assert.equal(newest.text, "npm test");
+      clockSkewMs = 0;
+      const ok = await client.callTool({
+        name: "run_stop",
+        arguments: { runId: "run_0069_m1", reason: "owner cancelled the task; npm test no longer needed", observedSeq: newest.seq },
+      });
+      assert.equal(ok.isError, undefined);
+      assert.equal(ok.structuredContent.terminalAccepted, true);
+      assert.deepEqual(spy.killed, [4321]);
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-C1: CLI stop —— 缺 --reason / --observed-seq 即报错并给出两步；带齐后执行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-c1-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunWithLateCommand(dir, "run_0069_c1", dir);
+    const { stopCommand } = await import("../../src/commands/stop.js");
+    const spy = killSpy();
+    await assert.rejects(
+      () => stopCommand(["run_0069_c1", "--run-dir", dir], { runDir: dir }, spy.deps()),
+      /stop 需要 --observed-seq 与 --reason。先看最新状态：status run_0069_c1/,
+    );
+    await assert.rejects(
+      () => stopCommand(["run_0069_c1", "--run-dir", dir, "--observed-seq", "9999", "--reason", "cancelled by the owner"], { runDir: dir }, spy.deps()),
+      /stop 未执行（零副作用）：--observed-seq 不是这个运行转录里的位置/,
+    );
+    assert.deepEqual(spy.killed, []);
+    const { getRunStatus } = await import("../../src/application/runStatus.js");
+    const status = await getRunStatus({ runId: "run_0069_c1", runDir: dir });
+    const originalLog = console.log;
+    const printed = [];
+    console.log = (line) => printed.push(String(line));
+    try {
+      await stopCommand(
+        ["run_0069_c1", "--run-dir", dir, "--observed-seq", String(status.observedSeq), "--reason", "cancelled by the owner"],
+        { runDir: dir }, spy.deps(),
+      );
+    } finally { console.log = originalLog; }
+    assert.deepEqual(spy.killed, [4321]);
+    assert.match(printed.join("\n"), /"terminalState": "aborted"/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

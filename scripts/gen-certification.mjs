@@ -170,6 +170,8 @@ const POLICY_NOTE_ORDER = [
   ["reasoning", "reasoning effort"],
   ["contextWindow", "model.contextWindow"],
   ["provider", "provider 块"],
+  // 决定 0069：每个 backend 的必填项（缺项即生成失败，见下方守卫）。
+  ["vitalSigns", "生命体征与收口"],
 ];
 const AXIS_LABELS = {
   supportsRoleContract: "supportsRoleContract（角色合同）",
@@ -209,6 +211,17 @@ export function renderCertification() {
     throw new Error(
       "gen-certification: CAPABILITY_NOTES key set must equal KNOWN_BACKENDS exactly "
       + `(notes: [${noteKeys.join(", ")}] vs backends: [${backendKeys.join(", ")}]) — 新 backend 增补属 Owner 决策，落库时同步登记条件说明`,
+    );
+  }
+  // 决定 0069：生命体征与收口方式是每个 backend 适配的标准登记项。
+  const missingVitalSigns = backendKeys.filter((key) => {
+    const note = CAPABILITY_NOTES[key]?.vitalSigns;
+    return typeof note !== "string" || note.trim().length === 0;
+  });
+  if (missingVitalSigns.length > 0) {
+    throw new Error(
+      `gen-certification: CAPABILITY_NOTES.vitalSigns is required for every backend (missing: ${missingVitalSigns.join(", ")}) `
+      + "— 写明读得到哪些生命体征、哪些落成转录事实、有哪些收口门（决定 0069）",
     );
   }
   const opencodeRoleNote = CAPABILITY_NOTES["opencode-serve"]?.supportsRoleContract ?? "";

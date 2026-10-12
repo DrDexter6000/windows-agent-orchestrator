@@ -12,7 +12,7 @@ function project(items, opts = {}) {
   });
 }
 
-test("TD-220: wire wins; inferred success/failure; unresolved commands omit source and raw data", () => {
+test("TD-220: wire wins; inferred success/failure; unresolved commands omit source (command text per 0069)", () => {
   const r = project([
     { kind: "command", exitCode: 0, toolCallId: "wire", command: "SECRET" },
     { kind: "command", exitCode: 7 },
@@ -27,8 +27,10 @@ test("TD-220: wire wins; inferred success/failure; unresolved commands omit sour
     ["ok", "wire"], ["failed", "wire"], ["ok", "inferred"], ["failed", "inferred"], ["unknown", undefined],
   ]);
   for (const e of r.entries) {
-    assert.deepEqual(Object.keys(e).sort(), ["category", "exitStatus", ...(e.exitStatusSource ? ["exitStatusSource"] : []), "seq", "ts"]);
+    assert.deepEqual(Object.keys(e).sort(), ["category", "exitStatus", ...(e.exitStatusSource ? ["exitStatusSource"] : []), "seq", "text", "truncated", "ts"]);
   }
+  // 决定 0069：命令原文随条目给出；事件里没有 command 字段时为空串。
+  assert.deepEqual(r.entries.map((e) => e.text), ["SECRET", "", "", "", ""]);
   assert.equal(r.counts.tool_result, 0, "pre-scan includes results outside the category filter");
 });
 

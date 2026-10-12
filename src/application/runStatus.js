@@ -32,7 +32,9 @@ import { projectExecutionStage } from "./runStageProjection.js";
 // 不变式、MCP wire enum 同源，三层不可能漂移）。scorecard.js 是横切层叶模块，
 // 无反向依赖，不破坏本模块的 application 分层契约。
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
-import { LEAD_ADVISORY_QUIET_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText } from "./runQuietAdvisory.js";
+import {
+  LEAD_ADVISORY_QUIET_SECONDS, VITAL_SIGN_RECENT_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText,
+} from "./runQuietAdvisory.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -151,6 +153,7 @@ function describeActivity(ev, { priorEvents } = {}) {
         provider_retry: "provider 正在重试",
         process_active: "工具子进程在干活",
         files_changed: "工作目录有文件变化",
+        serve_active: "serve 报告本轮仍在跑",
       };
       return {
         lastActivityKind: "运行时状态",
@@ -312,10 +315,12 @@ export async function getRunStatus({
   // 推导，转录零写入；口径与边界见 runQuietAdvisory.js）。最近活动是运行时状态
   // 时写出是哪一种（闭集文案）：那正是"还活着的凭据是什么"。
   const secondsSinceEffect = secondsSinceLastEffect(scope, _now());
+  // 决定 0069：这次读取看到的转录位置（stop 的 --observed-seq / observedSeq 取它）。
+  const observedSeq = Number.isInteger(last?.seq) ? last.seq : 0;
   const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
   const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
   const leadAdvisory = quiet
-    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
+    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`
     : null;
   // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）。
   const leadAdvisoryWire = quiet
@@ -350,6 +355,7 @@ export async function getRunStatus({
     // Lead stop. The stable meaning is only that the worker runtime is quiet.
     lastEventMeaning: describeLastEventMeaning(last?.type),
     lastActivityEventKind: lastActivity?.kind ?? null,
+    observedSeq,
     ...(scorecardSummary ? { scorecardSummary } : {}),
     // 条件展开：没有 advisory 的 run 字段 absent，既有消费者的形状逐字节不变。
     ...(leadAdvisory ? { secondsSinceEffect, leadAdvisory, leadAdvisoryWire } : {}),
