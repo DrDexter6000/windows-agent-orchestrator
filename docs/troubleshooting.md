@@ -20,6 +20,8 @@
 | `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7 TD-188](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-runtd-188) |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态2026-10-04) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死td-113--round4-f-2-关单) |
+| zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
+| 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.15](#715-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
 | opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
@@ -379,6 +381,20 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   - **时间维度**：CLI `secondsSinceActivity` / MCP `run_status` 的 `lastActivity.secondsSince`（同一事实的两种字段名）——即"当前活动已持续 X 秒"，**不要等摘要变化**；静默超过阈值再结合 heartbeat 判停（判停永远 Lead 决定）。
 - **边界**：计数饱和（真实交错形状有效上限约 20-30 次写）不影响判读——×20 与 ×30 都是"在推进"；"卡死"判定归时间维度。
 
+### 6.9 zcode 运行什么时候会被控制面自动收口（生命体征口径，决定 0067）
+
+- **口径**（Owner 2026-10-12）：控制面只在运行**完全没有生命体征**时自动收口；只要有生命体征就继续等，放弃与否由 Lead 决定，WAO 只提供事实与建议。取证时机：本轮已有产出之后，静默满自适应预算（300–600s）。
+- **算生命体征的**（任一成立即不收口）：
+  - **进度**：快照里落了新 part，或既有工具调用落了新证据（开始 / 结束）。
+  - **模型流在收**：最近 60s 内收到过流分片。长思考期间转录里每分钟一条 `runtime_activity`（status `streaming`），`run_wait` 显示 `liveness=progress`、`lastActivityKind=runtime_status`。
+  - **工具子进程在干活**：app-server 的后代进程在 30s 观察窗内 CPU ≥20 ms/s，或 I/O ≥64 KB/s，或有进程新生 / 退出（测试、构建、后台任务属此类）。这一项不产生转录事件：`run_wait` 显示 `process_only`，CLI `status` 的最近活动停在那条命令上。
+- **不算的**：工具挂着但不耗 CPU（`sleep`、等远端且无流量）、流断了且没有子进程在动。满预算再过 30s 观察窗收口，错误文案写明取到的读数（`no model stream chunk…` / `no process activity in the last 30s (cpu +…ms, io +…B across N descendant process(es))`），结尾 `no vital signs, bounded exit`。进程快照不适用（非 Windows）时写 `process activity unavailable` 并立即收口；快照命令瞬时失败会在下一拍重取，连续三次失败才收口。
+- **有生命体征的运行没有任何自动上限**：没人看着它，就会一直跑到自己结束或生命体征消失，期间占着工作树。
+- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且 ≥30 分钟没有新的动作或正文产出时附 `advisory` 一行（多久没产出、最近活动是什么、中止命令）；MCP 面看 `run_wait` 的 `liveness` / `lastActivityKind` 与 `run_activity`。
+- **中止**：`wao stop <runId>` / MCP `run_stop`——会话记录带 `hostPid` 的运行走进程树击杀并核验。**此前派发的 zcode 运行**（会话记录里没有 `hostPid`）仍报 `has no stop route`：核实其 app-server 进程后手动结束进程树，转录会以 `transport closed` 落 failed。
+- **诚实边界**：流分片是上游内部遥测，只在 zcode CLI 0.16.9 实测过；进程活跃度阈值来自一次真机探针（空闲：CPU 0–2.5 ms/s、I/O 4–9 KB/s），不是长期统计。读数与来由见决定 0067。
+- **状态**：已实现（决定 0067）；同类的 kimi-web 证词硬顶未改。
+
 ---
 
 ## 7. 进程式 backend + 部署（claude-code/kimi-code/codex）
@@ -491,6 +507,14 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录（机制与物证时间线见 TD-229 台账行）。
 - **修复（2026-10-07 已落）**：`CLAUDE_CODE_OAUTH_TOKEN` 可解析（进程 env 或 Windows 用户环境，无需重启服务器）时目录保持空、不拷贝凭据、认证走 env（实测 2.1.289 空配置目录认此变量）；缺席回退旧拷贝路径（轮换缺陷仍在）。空值视为缺席（若 CLI 把空串当已设置是可见 401，非静默毁登录）。token 值不进 argv/转录（名字经 inheritedNames 进脱敏器）。
 - **迁移（Owner 一次性）**：`claude setup-token` 生成长期令牌 → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`；`wao doctor` 的 `claude_oauth_token_mode` 显示"长期令牌模式"即生效；迁移后跑一次全量 `npm test` 复验。迁移前勿派 native run——副本内续期会作废当前登录。
+
+### 7.15 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
+
+- **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"。
+- **已知案例**（均为 codex 后端，sol / astra 车道）：2026-09-21 三例、2026-10-12 一例。10-12 那例（`run_20261012123408529e9ri5d`，会话建立 14s 后退出，零 worker 事件）stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时。09-21 三例退出前已有 3 / 5 / 17 条 worker 事件，原因未明。四例 stderr 都以 `Reading additional input from stdin...` 开头，疑为 codex 的常规提示而非故障签名。
+- **既往处置**：四例把原任务原样再派一次均成功。
+- **WAO 不自动重试**（Owner 2026-10-12 裁定：失败之后怎么办由 Lead 决定）。零 worker 事件的那一类，既往都是原样重派即成；但未观察到事件不等于没有副作用（输出缓冲、事件尚未落盘的窗口存在），重派前看一眼工作树。已有 worker 事件后才退出的，按普通中途失败处理：先看 retained worktree 里有没有半成品（§7.10 / §4.4）。
+- **状态**：根因未明（TD-180 ①）；诊断事实已补。
 
 ---
 

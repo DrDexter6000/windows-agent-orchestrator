@@ -186,11 +186,21 @@ export async function stopRun(input) {
   // 已按 "no session metadata" 拒绝（R13-C），故本处无需 legacy 分支（空绑定集
   // → findState([]) = "pending" 的保守默认仅在理论形状可达）。
   const fromState = findState(events.filter((e) => e && e.runId === runId));
+  // TD-265：停止走哪条路由由会话记录的事实决定，不按后端名分支——proc_<pid>
+  // 占位 id，以及"provider 原生会话 id + session.created.hostPid（承载会话的本机
+  // 进程）"，都走进程树击杀；有 serveUrl 的走服务端中止。此前非 proc_ 一律被当
+  // 成 serveUrl 路由，原生会话 id 的进程式后端因此停不掉。
+  const isProcPlaceholder = session.backendSessionId.startsWith("proc_");
+  const hostPid = !isProcPlaceholder && !session.serveUrl
+    && Number.isInteger(session.hostPid) && session.hostPid > 0
+    ? session.hostPid
+    : null;
+  const hostBackend = typeof session.backend === "string" && session.backend.length > 0 ? session.backend : "process";
   const stopRequestedAttempt = {
     type: "run.stop_requested",
     payload: {
       backendSessionId: session.backendSessionId,
-      ...(session.backendSessionId.startsWith("proc_") ? { backend: "process" } : {}),
+      ...(isProcPlaceholder ? { backend: "process" } : hostPid !== null ? { backend: hostBackend } : {}),
       reason: "user",
     },
   };
@@ -224,9 +234,20 @@ export async function stopRun(input) {
     });
   }
 
+  // ── Host-process path ─────────────────────────────────────────────────────
+  if (hostPid !== null) {
+    return await processStop({
+      transcript, session, fromState, runId, pid: hostPid, deps, stopRequestedAttempt,
+      runDir: resolvedRunDir, backend: hostBackend,
+    });
+  }
+
   // ── Opencode path ─────────────────────────────────────────────────────────
   if (!session?.serveUrl) {
-    throw new Error(`Run ${runId} session has no serveUrl (opencode path needs one)`);
+    throw new Error(
+      `Run ${runId} has no stop route: its session (backend ${session.backend ?? "unknown"}) records neither a host process id nor a serveUrl — `
+      + "the worker process has to be ended manually (runs dispatched before the host process was recorded are in this state)",
+    );
   }
   return await opencodeStop({
     transcript, session, fromState, runId, deps, stopRequestedAttempt,
@@ -236,7 +257,7 @@ export async function stopRun(input) {
 
 // ── processStop (extracted from stop.js) ─────────────────────────────────────
 
-async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt, runDir }) {
+async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt, runDir, backend = "process" }) {
   const kill = deps.kill ?? ((p) => killProcessTree(p));
   const isAlive = deps.isAlive ?? ((p) => isPidAlive(p));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
@@ -248,7 +269,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
       type: "run.aborted",
       payload: {
         backendSessionId: session.backendSessionId,
-        backend: "process",
+        backend,
         reason: "stop_requested",
         verification: "pending",
       },
@@ -262,7 +283,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
       terminalState: termResult.state,
       sideEffectAttempted: false,
       stopVerified: null,
-      backend: "process",
+      backend,
       pid,
     };
   }
@@ -300,7 +321,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
   if (verified) {
     await transcript.append("run.stop_verified", {
       backendSessionId: session.backendSessionId,
-      backend: "process",
+      backend,
       outcome,
       taskkillCalled: killResult.called,
       taskkillExitCode: killResult.exitCode,
@@ -310,7 +331,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
   } else {
     await transcript.append("run.stop_unverified", {
       backendSessionId: session.backendSessionId,
-      backend: "process",
+      backend,
       outcome,
       taskkillCalled: killResult.called,
       taskkillExitCode: killResult.exitCode,
@@ -334,7 +355,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     // kill was attempted — report false. Only report true when kill was called.
     sideEffectAttempted: killResult.called,
     stopVerified: verified,
-    backend: "process",
+    backend,
     pid,
     outcome,
     taskkillCalled: killResult.called,

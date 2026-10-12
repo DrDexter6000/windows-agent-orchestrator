@@ -231,7 +231,7 @@ function fakeZcodePeer(child, {
 }
 
 /** 跑一个场景：注入 fake spawn/kill → spawn handle（不收事件）。 */
-async function runScenario({ agent = makeAgent(), task = { prompt: "do the task" }, peerOptions = {} } = {}) {
+async function runScenario({ agent = makeAgent(), task = { prompt: "do the task" }, peerOptions = {}, backendOptions = {} } = {}) {
   const child = makeFakeChild();
   const spawnCalls = [];
   const kill = fakeKill();
@@ -241,6 +241,7 @@ async function runScenario({ agent = makeAgent(), task = { prompt: "do the task"
       return child;
     },
     killFn: kill.killFn,
+    ...backendOptions,
   });
   const peer = fakeZcodePeer(child, peerOptions);
   const handle = await backend.spawn(agent, task);
@@ -1037,9 +1038,9 @@ test("zcode ⑥d TD-197① 自放大存活（2026-10-02 误杀形态回归钉）
 // run_20261012104046786m8kann + 三轮 glm-pro 真机探针）：长思考步在
 // session/messages 快照里完全不可见（step-start 之后整步完成才一次性落 part），
 // 但 app-server 持续推送 `v4/telemetry/event` kind=stream.chunk 通知帧。停滞门
-// 预算击发时取该证词：最近 60s 内有分片 ⇒ 续命；没有 ⇒ 照旧判停滞；自上一个
-// part 落地以来被续命的静默有 120min 硬顶（Owner 2026-10-12 放宽：原为每 turn
-// 累计 30min、落 part 不清零）。夹具：假钟 +30s/拍，prime 在 n=3（t=90s）。
+// 预算击发时取该证词：最近 60s 内有分片 ⇒ 续命；没有 ⇒ 再看进程活动（⑥h）；
+// 都没有才判停滞。决定 0067（Owner 2026-10-12）：有生命体征的运行没有任何自动
+// 上限，去留由 Lead 决定。夹具：假钟 +30s/拍，prime 在 n=3（t=90s）。
 const streamChunk = (sessionId = SESSION_ID, channel = "thought") => [
   "v4/telemetry/event",
   { kind: "stream.chunk", channel, chunkLength: 12, sessionId },
@@ -1065,6 +1066,11 @@ test("zcode ⑥g: 静默段越过预算但模型流分片持续在收 → 证词
   assert.equal(done.reason, "completed", "持续收流分片的长思考步不是停滞");
   assert.ok(!JSON.stringify(events).includes("turn stalled"), "绝不 turn stalled");
   assert.ok(peer.polls() >= 30, "越过了旧门的 n=13 杀点");
+  // 让 Lead 看得见：流在收时节流发射零载荷的 streaming 事实（60s 一条；本夹具
+  // 每 30s 一拍、29 拍有流 ⇒ 15 条）。
+  const streaming = events.filter((e) => e.kind === "runtime_activity");
+  assert.equal(streaming.length, 15);
+  assert.deepEqual(streaming[0], { kind: "runtime_activity", status: "streaming" });
   child.kill();
 });
 
@@ -1114,22 +1120,34 @@ test("zcode ⑥g: 别的会话的流分片不作证；从未见过分片时诊�
   child.kill();
 });
 
-test("zcode ⑥g: 流一直活着但 part 始终不落 → 被证词续命的静默满 120min 有界收口", async () => {
+test("zcode ⑥g: 流一直活着但 part 始终不落 → 不自动收口（没有任何上限），Lead 中止才结束", async () => {
+  // 决定 0067：有生命体征的运行由 Lead 决定去留。跑过此前两代硬顶的杀点
+  // （累计 30min 的 n=63、连续 120min 的 n=243）仍在等；外部 abort 才结束。
   let fakeNow = 0;
-  const { handle, child, peer } = await runScenario({
+  const controller = new AbortController();
+  const { handle, child, peer, killCalls } = await runScenario({
     peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
   });
-  const events = await collect(handle, {
+  const events = [];
+  for await (const event of handle.events(controller.signal, {
     pollInterval: 1,
     stallClock: () => fakeNow,
-    onPollTick: () => { fakeNow += 30_000; peer.notify(...streamChunk()); },
-  });
-  const done = events.at(-1);
-  assert.equal(done.reason, "failed");
-  assert.match(done.error, /stream-attested silence since the last landed part exceeded the 120min cap/);
-  assert.match(done.error, /across 24 attestation\(s\)/, "每次续命计入 300s 静默，第 24 次到顶");
-  // prime n=3；每 10 拍（300s）击发一次：n=13,23,…,233 续命，n=243 到顶收口。
-  assert.equal(peer.polls(), 243);
+    onPollTick: () => {
+      fakeNow += 30_000;
+      peer.notify(...streamChunk());
+      if (peer.polls() >= 260) controller.abort();
+    },
+  })) {
+    events.push(event);
+  }
+  assert.ok(peer.polls() >= 260, "越过了 n=63 与 n=243 两个旧杀点");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "控制面从未判停滞");
+  assert.ok(killCalls.length >= 1, "中止即击杀进程树");
+  // 中止发生在一拍之内时，这一拍的轮询会撞上已关闭的传输并如实报出——那是
+  // 中止的后果，不是控制面的收口裁定（RunManager 在 abort 后不再消费事件）。
+  for (const done of events.filter((e) => e.kind === "done")) {
+    assert.match(done.error, /transport closed/);
+  }
   child.kill();
 });
 
@@ -1159,37 +1177,187 @@ test("zcode ⑥g: 落 part 清零之后流停了 → 照旧判停滞，续命计
   });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /turn stalled \(20 model stream chunk\(s\) seen this turn, none in the last 60s; silent stretch/,
-    "清零不关掉停滞门；续命计数随落 part 清零，文案不带 prior attestation");
+  assert.match(done.error, /turn stalled \(20 model stream chunk\(s\) seen this turn, none in the last 60s; process activity unavailable; silent stretch/,
+    "清零不关掉停滞门；续命计数随落 part 清零，文案不带 earlier attestation");
+  assert.match(done.error, /no vital signs, bounded exit\)$/);
   assert.equal(peer.polls(), 25);
   child.kill();
 });
 
-test("zcode ⑥g: 有 part 落地即清零——两段各自未到顶的续命静默合计超过硬顶，仍正常完成", async () => {
-  // 第一段 n=3→203 无新 part（约 100min，续命 19 次 × 300s = 95min）；n=203 落一个
-  // part；第二段 n=203→403 无新 part（落 part 后预算自放大到 600s 硬顶，续命 9 次
-  // × 600s = 90min）；n=403 完成。两段合计 185min > 120min：按 turn 累计的旧口径
-  // 必杀，按"自上一个 part 落地以来"的口径两段都未到顶。
+// ⑥h 进程活动证词（决定 0067）：流不在收时，预算击发即取后代进程快照作基线，
+// 30s 后再取一次比对——工具命令在跑（CPU 在涨）就不是停滞。夹具注入
+// processProbe（缺省在假 child 下恒为"取不到"）。
+const treeSnapshot = (cpuMs, ioBytes = 0, pids = [5001]) => new Map(
+  pids.map((pid) => [pid, { cpu100ns: cpuMs * 10_000, ioBytes }]),
+);
+
+test("zcode ⑥h: 没有流分片但工具子进程在耗 CPU → 进程证词续命到正常完成（旧门 n=13 必杀）", async () => {
   let fakeNow = 0;
+  let probes = 0;
   const { handle, child, peer } = await runScenario({
+    backendOptions: { processProbe: async () => treeSnapshot((probes += 1) * 5000) },
     peerOptions: {
       messages: (n) => {
         if (n <= 2) return [];
-        if (n < 203) return [userMsg("do the task"), stepStartMsg()];
-        if (n < 403) return [userMsg("do the task"), stepStartMsg(), stepStartMsg()];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
         return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
       },
     },
   });
   const events = await collect(handle, {
-    pollInterval: 1,
+    pollInterval: 2,
     stallClock: () => fakeNow,
-    onPollTick: () => { fakeNow += 30_000; peer.notify(...streamChunk()); },
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "子进程在干活的长工具调用不是停滞");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  // n=13 预算击发取基线、n=14 比对（+5000ms CPU / 30s）续命；n=24 / n=25 再来一轮。
+  assert.equal(probes, 4);
+  assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 0, "进程证词不冒充 streaming");
+  child.kill();
+});
+
+test("zcode ⑥h: 没有流分片、子进程也不动 → 观察窗满即判停滞，诊断带进程读数", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    backendOptions: { processProbe: async () => treeSnapshot(1200, 4096, [5001, 5002]) },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
   });
   const done = events.at(-1);
-  assert.equal(done.reason, "completed", "带持续产出的长轮不被续命总量收掉");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"));
-  assert.equal(peer.polls(), 403);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled \(no model stream chunk observed this turn; no process activity in the last 30s \(cpu \+0ms, io \+0B across 2 descendant process\(es\)\); silent stretch 330000ms/);
+  assert.match(done.error, /no vital signs, bounded exit\)$/);
+  assert.equal(peer.polls(), 14, "比无证词时晚一拍（30s 观察窗）");
+  child.kill();
+});
+
+test("zcode ⑥h: 快照命令瞬时失败不收口——下一拍重取；连续三次失败才按取不到收口", async () => {
+  // 前两次取样抛错（n=13、n=14），第三次起正常：n=15 取到基线、n=16 比对续命。
+  let fakeNow = 0;
+  let probes = 0;
+  const flaky = await runScenario({
+    backendOptions: {
+      processProbe: async () => {
+        probes += 1;
+        if (probes <= 2) throw new Error("snapshot timed out");
+        return treeSnapshot(probes * 5000);
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 20) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const survived = await collect(flaky.handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(survived.at(-1).reason, "completed", "两次瞬时失败没有收掉运行");
+  assert.equal(probes, 4);
+  flaky.child.kill();
+
+  fakeNow = 0;
+  const broken = await runScenario({
+    backendOptions: { processProbe: async () => { throw new Error("snapshot timed out"); } },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const closed = await collect(broken.handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.match(closed.at(-1).error, /process activity unavailable \(3 consecutive snapshot failures\); silent stretch 360000ms/);
+  assert.equal(broken.peer.polls(), 15, "n=13、14、15 三次失败后收口");
+  broken.child.kill();
+});
+
+test("zcode ⑥h: 观察窗内来了流分片 → 按流证词续命，不等进程比对", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  let probes = 0;
+  const { handle, child, peer } = await runScenario({
+    backendOptions: { processProbe: async () => { probes += 1; return treeSnapshot(1200); } },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 20) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      // 第 k 次 onPollTick 对应第 k+1 次轮询（第 1 次轮询是 spawn 取基线）：
+      // 进程基线在 n=13 取，流从 n=14 那一拍才来。
+      if (tick >= 13) peer.notify(...streamChunk());
+    },
+  });
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(probes, 1, "只取了基线；流一来即续命，未做第二次比对");
+  child.kill();
+});
+
+test("zcode ⑥h: 既有 tool part 原位落了新证据（个数不变）也算进度", async () => {
+  // n=10 工具调用原位完成（part 个数不变）→ 静默从 n=10 重新起算且预算自放大；
+  // 只认"个数增长"的旧口径会在 n=13 收掉。
+  let fakeNow = 0;
+  const running = { type: "tool", id: "part_call_inplace", callId: "call_inplace", tool: "Bash", state: { status: "running", input: { command: "node build.mjs" } } };
+  const completed = toolPart({ callId: "call_inplace", tool: "Bash", status: "completed", input: { command: "node build.mjs" }, output: "built" });
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 10) return [userMsg("do the task"), assistantPartsMsg([running])];
+        if (n < 19) return [userMsg("do the task"), assistantPartsMsg([completed])];
+        return [userMsg("do the task"), assistantPartsMsg([completed, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(events.filter((e) => e.kind === "tool_result").length, 1);
+  assert.equal(peer.polls(), 19);
+  child.kill();
+});
+
+test("zcode ⑥h: 零 part 阶段流在收 → 思考预算让位；流一停照旧收口", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 1,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick <= 140) peer.notify(...streamChunk());
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /thinking budget exceeded/);
+  // 120 拍思考预算早已用完，但流在收（最后一个分片随第 141 次轮询到达）；
+  // 第 144 次轮询距最后分片 90s > 60s 新鲜度窗 ⇒ 收口。
+  assert.equal(peer.polls(), 144);
   child.kill();
 });
 

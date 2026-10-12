@@ -65,12 +65,15 @@ function stopResultToCliJson(r) {
       terminalState: r.terminalState,
     };
   }
+  // 进程树击杀路由的结果带 pid（proc_<pid> 占位 id 或 session.created.hostPid，
+  // TD-265）——按结果形状区分路由，不按后端名；backend 如实回显会话记录的值。
+  const viaProcess = typeof r.pid === "number";
   // Process winner
-  if (r.terminalAccepted && r.backend === "process") {
+  if (r.terminalAccepted && viaProcess) {
     return {
       runId: r.runId,
       stopped: r.stopVerified,
-      backend: "process",
+      backend: r.backend,
       pid: r.pid,
       sideEffectAttempted: r.sideEffectAttempted,
       terminalAccepted: true,
@@ -84,11 +87,11 @@ function stopResultToCliJson(r) {
     };
   }
   // Process loser
-  if (r.rejected && r.backend === "process") {
+  if (r.rejected && viaProcess) {
     return {
       runId: r.runId,
       stopped: false,
-      backend: "process",
+      backend: r.backend,
       pid: r.pid,
       sideEffectAttempted: false,
       terminalAccepted: false,
@@ -96,7 +99,7 @@ function stopResultToCliJson(r) {
     };
   }
   // Opencode winner
-  if (r.terminalAccepted && r.backend !== "process") {
+  if (r.terminalAccepted && !viaProcess) {
     return {
       runId: r.runId,
       stopped: r.stopVerified,

@@ -226,6 +226,93 @@ test("HONEST-02: process alive → kill called → sideEffectAttempted=true", as
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── TD-265: host-process stop route ──────────────────────────────────────────
+// 会话 id 是 provider 原生 id 的进程式后端在 session.created 里另记 hostPid；
+// stop 据此走进程树击杀（此前非 proc_ 一律被当成 serveUrl 路由而报错）。
+
+async function seedSessionRun(runDir, runId, workspaceCwd, session) {
+  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "a" });
+  await t.append("run.started", { backend: session.backend });
+  await t.append("run.background_submitted", { background: true, cwd: workspaceCwd });
+  await t.append("session.created", session);
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+}
+
+test("TD265-01: 原生会话 id + hostPid → 击杀该进程树并核验，事实带后端名", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td265-01-"));
+  try {
+    makeGitRepo(dir);
+    await seedSessionRun(dir, "run_td265_01", dir, { backend: "zcode", backendSessionId: "sess_native_1", hostPid: 4321 });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let alive = true;
+    const killed = [];
+    const result = await stopRun({
+      runId: "run_td265_01", runDir: dir, authorizedWorkspaceRoot: dir,
+      deps: defaultDeps({
+        kill: (pid) => { killed.push(pid); alive = false; return { called: true, exitCode: 0 }; },
+        isAlive: () => alive,
+        executeStop: async () => { throw new Error("serveUrl route must not be taken"); },
+      }),
+    });
+    assert.deepEqual(killed, [4321]);
+    assert.equal(result.terminalAccepted, true);
+    assert.equal(result.terminalState, "aborted");
+    assert.equal(result.stopVerified, true);
+    assert.equal(result.backend, "zcode");
+    assert.equal(result.pid, 4321);
+    const events = await readTranscript(join(dir, "run_td265_01.jsonl"));
+    assert.equal(events.find((e) => e.type === "run.stop_requested").backend, "zcode");
+    assert.equal(events.find((e) => e.type === "run.aborted").backend, "zcode");
+    assert.equal(events.find((e) => e.type === "run.stop_verified").backend, "zcode");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD265-02: 既无 hostPid 也无 serveUrl → 拒绝并点名后端，零事件零副作用", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td265-02-"));
+  try {
+    makeGitRepo(dir);
+    await seedSessionRun(dir, "run_td265_02", dir, { backend: "zcode", backendSessionId: "sess_native_2" });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let killCalls = 0;
+    const before = (await readTranscript(join(dir, "run_td265_02.jsonl"))).length;
+    await assert.rejects(
+      () => stopRun({
+        runId: "run_td265_02", runDir: dir, authorizedWorkspaceRoot: dir,
+        deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; } }),
+      }),
+      /has no stop route: its session \(backend zcode\) records neither a host process id nor a serveUrl/,
+    );
+    assert.equal(killCalls, 0);
+    assert.equal((await readTranscript(join(dir, "run_td265_02.jsonl"))).length, before, "拒绝早于任何写入");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非法 hostPid 不被采信", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td265-03-"));
+  try {
+    makeGitRepo(dir);
+    await seedSessionRun(dir, "run_td265_03a", dir, { backend: "opencode-serve", backendSessionId: "ses_serve", serveUrl: "http://127.0.0.1:9", hostPid: 4321 });
+    await seedSessionRun(dir, "run_td265_03b", dir, { backend: "zcode", backendSessionId: "sess_native_3", hostPid: "4321" });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let killCalls = 0;
+    let serveStops = 0;
+    const deps = defaultDeps({
+      kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; },
+      executeStop: async () => { serveStops += 1; return { verified: true, abortCalled: true, taskkillCalled: false }; },
+    });
+    const viaServe = await stopRun({ runId: "run_td265_03a", runDir: dir, authorizedWorkspaceRoot: dir, deps });
+    assert.equal(serveStops, 1);
+    assert.equal(viaServe.terminalState, "aborted");
+    await assert.rejects(
+      () => stopRun({ runId: "run_td265_03b", runDir: dir, authorizedWorkspaceRoot: dir, deps }),
+      /has no stop route/,
+    );
+    assert.equal(killCalls, 0, "字符串形的 hostPid 不是整数，不采信");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── MCP concurrency ──────────────────────────────────────────────────────────
 
 test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winner, one loser, one side effect", async () => {

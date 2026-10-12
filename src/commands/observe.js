@@ -103,6 +103,8 @@ export async function statusCommand(args, config) {
     // TD-150 批B + 审计修正：摘要折叠进 JSON 对象（纯 JSON 可解析契约不破），
     // 不再在 JSON 块后追加行。无 scorecard.checked 的 run 字段 absent。
     ...(scorecard ? { scorecard } : {}),
+    // 决定 0067：很久没有新动作/正文的未终态 run 附一句 advisory（去留由 Lead 定）。
+    ...(status.leadAdvisory ? { advisory: status.leadAdvisory } : {}),
   }, null, 2));
 }
 

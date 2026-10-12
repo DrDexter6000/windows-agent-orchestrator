@@ -175,6 +175,32 @@ test("C1: 进程被信号杀死（exit code 143 = SIGTERM）→ crash（非 unkn
   assert.match(d.evidence[0].fact, /143|exit|signal|SIGTERM/i, "证据应陈述退出码/信号事实");
 });
 
+test("TD-180: 进程退出前零 worker 事件 → crash 另列一条观察事实（只陈述事实，不给处方）", () => {
+  // 真实样本形状：run_20261012123408529e9ri5d（会话建立 13.7s 后退出码 1，零 run.event）
+  const events = [
+    { type: "session.created", backend: "process", backendSessionId: "proc_36288", ts: "2026-10-12T12:34:18.034Z" },
+    { type: "run.submitted", ts: "2026-10-12T12:34:18.038Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1; stderr: Reading additional input from stdin...", ts: "2026-10-12T12:34:31.743Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-10-12T12:34:31.746Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "crash");
+  assert.equal(d.evidence.length, 2);
+  assert.match(d.evidence[1].fact, /^进程退出前未观察到任何 worker 事件（会话建立后 14s 退出）；未观察到事件不等于没有副作用/);
+  assert.doesNotMatch(JSON.stringify(d), /建议|应该|重试|重派|安全/, "只陈述观察到的事实");
+
+  // 已有 worker 事件的退出不附这条（那不是"还没开始"）
+  const withActivity = [
+    ...events.slice(0, 2),
+    { type: "run.event", kind: "thinking", ts: "2026-10-12T12:34:20.000Z" },
+    ...events.slice(2),
+  ];
+  assert.equal(diagnoseFailure(withActivity).evidence.length, 1);
+  // 时间戳缺席时不编造存活时长
+  const noTs = events.map(({ ts, ...rest }) => rest);
+  assert.match(diagnoseFailure(noTs).evidence[1].fact, /^进程退出前未观察到任何 worker 事件；/);
+});
+
 test("C1: 进程 exit code 1（通用非 0）→ 仍 crash（不归 unknown）", () => {
   // 非 0 退出码都算 crash 候选（OOM/被杀/异常退出），但纯 401 仍优先 provider_auth
   const events = [

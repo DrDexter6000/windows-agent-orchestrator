@@ -732,6 +732,44 @@ test("TD-95 #5: backend done(failed) 但证据通过 → transcript 含 run.evid
   }
 });
 
+test("TD-265: 后端 spawn 结果带 hostPid → 记入 session.created；不带则字段缺席", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = { registry: "config/agents.json", runDir: dir, pollInterval: 10, waitTimeout: 1000, timeout: 5000, retries: 0 };
+    const backendWith = (extra) => ({
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "sess_native_host",
+          ...extra,
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }] };
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+      sessionOutlivesProcess: false,
+    });
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "process", cwd: dir }; },
+      listAgents() { return []; },
+    });
+    const sessionOf = async (extra) => {
+      const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor: () => backendWith(extra) });
+      const run = await manager.start("test_agent", { prompt: "x" });
+      await run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 });
+      return (await readTranscript(run.transcript.filePath)).find((e) => e.type === "session.created");
+    };
+    assert.equal((await sessionOf({ hostPid: 4321 })).hostPid, 4321);
+    assert.equal("hostPid" in (await sessionOf({})), false);
+    assert.equal("hostPid" in (await sessionOf({ hostPid: -1 })), false, "非正整数不落盘");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("TD-95 #5: backend done(failed) 且无证据 → 不写 evidence_audit（真的失败了）", async () => {
   const dir = await makeTempDir();
   try {

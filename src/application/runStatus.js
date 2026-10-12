@@ -32,6 +32,10 @@ import { projectExecutionStage } from "./runStageProjection.js";
 // 不变式、MCP wire enum 同源，三层不可能漂移）。scorecard.js 是横切层叶模块，
 // 无反向依赖，不破坏本模块的 application 分层契约。
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
+import { runEventIsUsableEffect } from "../runEvent.js";
+
+// 多久没有新的动作/正文产出才附 Lead advisory（决定 0067）。
+const LEAD_ADVISORY_QUIET_SECONDS = 30 * 60;
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -304,6 +308,19 @@ export async function getRunStatus({
   // conditional spread keeps every existing consumer's shape byte-identical.
   const scorecardSummary = projectScorecardSummary(scope);
 
+  // 决定 0067：控制面不替 Lead 放弃一个还在跑的运行，只把事实摆出来——未到终态
+  // 且已很久没有新的动作或正文产出时附一句 advisory（闭集模板 + 数值；纯读时
+  // 推导，转录零写入）。"动作或正文"与 completed_empty 判定同一口径
+  // （runEventIsUsableEffect）；runtime_activity / thinking 只说明运行时还活着。
+  const lastEffect = [...scope].reverse().find((e) => e.type === "run.event" && runEventIsUsableEffect(e)) ?? null;
+  const effectBaseTs = lastEffect?.ts ?? scope.find((e) => e.type === "run.submitted")?.ts ?? null;
+  const secondsSinceEffect = effectBaseTs
+    ? Math.round((_now() - new Date(effectBaseTs).getTime()) / 1000)
+    : null;
+  const leadAdvisory = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS
+    ? `已 ${Math.round(secondsSinceEffect / 60)} 分钟没有新的动作或正文产出（最近活动：${lastActivityKind ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。是否继续等待由 Lead 决定；中止：wao stop ${runId}`
+    : null;
+
   return {
     runId,
     agentId,
@@ -328,6 +345,8 @@ export async function getRunStatus({
     lastEventMeaning: describeLastEventMeaning(last?.type),
     lastActivityEventKind: lastActivity?.kind ?? null,
     ...(scorecardSummary ? { scorecardSummary } : {}),
+    // 条件展开：没有 advisory 的 run 字段 absent，既有消费者的形状逐字节不变。
+    ...(leadAdvisory ? { secondsSinceEffect, leadAdvisory } : {}),
   };
 }
 

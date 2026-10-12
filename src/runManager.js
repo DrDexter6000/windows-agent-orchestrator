@@ -1611,6 +1611,9 @@ export class RunManager {
       backend: result.backend,
       backendSessionId: result.backendSessionId,
       serveUrl: agent.serveUrl,
+      // TD-265：会话 id 是 provider 原生 id 的本机进程式后端另报承载会话的进程，
+      // stop 据此找到要击杀的进程树（proc_<pid> 占位 id 的后端不需要）。
+      ...(Number.isInteger(result.hostPid) && result.hostPid > 0 ? { hostPid: result.hostPid } : {}),
     });
     // spawn 成功后补写带 messageId/admittedSeq 的 prompt.sent（resume opencode-serve 流需要 messageId）。
     // 此时已过 spawn 失败分支，不会产生"terminal 先于 prompt.sent"的 race。

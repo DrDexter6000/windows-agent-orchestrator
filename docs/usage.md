@@ -263,6 +263,7 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 - **按事件汇报**：派发前说明本轮目标和边界；之后在完成、失败、实质进展、风险/阻塞变化、需要 Owner 决策或 Owner 主动询问时汇报。没有新事实、新判断或新决策时，不反复输出“仍在运行”“继续等待”，不重复计划、数字和已有结论。正常长任务可保持数十分钟乃至更久的安静；不能隐瞒已观察到的重大事项。
 - **少查询、长等待**：优先 `run_await_result` 等会在终态提前返回的等待工具，使用工具和宿主允许的较长观察窗口。窗口到期而状态无实质变化时，继续等待或逐步拉长查询间隔；不要每隔几秒点查，也不要为同一状态串联 status/activity/collect/diagnose。只有明确需要快速决策或验证新异常时才缩短窗口。查询完成不等于必须发一条用户消息；详细证据只在需要时展开。
 - **安静不等于失去监督**：按观察窗口检查终态、Owner 输入及新的活性/异常信号。工具断连或观察超时只代表本次观察不完整，不代表任务停止；恢复后先点查原 run，不重复派发。长等待、沉默和耗时都不是自动 stop/retry、提高执行超时或接受交付的理由。
+- **WAO 什么时候自己收口、什么时候等你决定**（决定 0067）：控制面只在运行**完全没有生命体征**时自动收口（判据因后端而异，zcode 见 [troubleshooting §6.9](troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)）。只要还有生命体征——新的动作或正文、模型流在收（转录里的 `runtime_activity`）、工具子进程在干活——WAO 不会替你放弃，也没有任何自动上限。很久不出新的动作或正文时，CLI `status` 附一行 `advisory`（多久没产出、最近活动、中止命令）；停不停由 Lead 决定，停用 `run_stop` / `wao stop <runId>`。
 - **宿主例外**：Owner 可明确要求固定频率更新；若宿主的更高优先级指令要求更短等待或更频繁更新，应遵守并简要说明限制，将无变化更新压缩到最低必要程度。不要把某一宿主的频率限制变成 WAO 通用规则，也不要承诺本手册能覆盖宿主指令。
 - **跨会话续接**：经 Owner 要求或批准，在项目本地工作笔记保留目标、已授权范围、已确认事实/待证假设、证据路径、当前断点、下一步和停止条件，并给后续 Lead 留可发现的入口。只在这些事实或决策变化时更新，不抄录轮询流水。compaction 摘要是线索，续接前应重读笔记并核对 Git、WAO 查询和原始报告；笔记不能冒充运行台账、验收结果或新授权。
 
@@ -293,6 +294,8 @@ npm run cli -- run glm-flash --prompt "..." --format json
 ```
 
 > **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
+
+> **行为变更（决定 0067，2026-10-12）：zcode 运行只在没有生命体征时自动收口**——此前已有产出后静默满 300–600s 即判 `turn stalled`（一周多里 12 次，其中 7 次死时有工具命令在跑）。现在预算击发时先看生命体征：模型流在收，或 app-server 的后代进程在干活，就继续等且没有任何自动上限；两项都没有才收口。模型流在收时转录每分钟落一条 `runtime_activity`（`streaming`），等待类命令据此显示有活动；CLI `status` 在 ≥30 分钟没有新的动作或正文时附 `advisory`。`stop` / `run_stop` 同批对 zcode 运行生效。判据、读数与边界见 [troubleshooting §6.9](troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)。
 
 > **行为变更（TD-199，2026-10-02）：zcode 工具证据改轮询期增量落盘**——此前 zcode 的全部工具证据（command/tool_use/file_written/tool_result）积压到轮末一次性进转录，长 run 运行期转录零事件、`runs wait` liveness 只有 process_only；现在工具证据随轮询节拍（CLI 缺省 5s）增量落盘。两个连带语义：① zcode delivery run 的**包容门从轮末批审变为写后即拦**——越界写的 `file_written` 证据一经轮询观察到，即在运行中段触发 `workdir_escape` 转 failed（**写后侦测拦截，非写前阻止**——包容是侦测不是沙箱；adversarialEscape 对 zcode 的拦截链从"轮末事后"变为真实在飞）；② 纯文本/纯思考段（无工具活动）仍零 run.event——增量投影只治愈工具活跃期的可见性，长文本段在途监督仍靠 liveness 观察与终态事实。
 
@@ -1478,6 +1481,8 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-
 **安全契约**：workspace-bound——run 必须属于当前 host-authorized workspace，否则拒绝。不返回 PID/path/session 等可被用于跨 workspace 探测的标识。stop verification 以后置 PID 存活检查为准，不假验证（ESRCH=已退出，EPERM/未知=保守 alive）。
 
 **行为变更（R13-C / TD-127，补录）**：stop 杀进程 lane 的会话查找（`session.created`）与 agentId 读取（`run.started`）自 R13-C 起为 **runId 绑定读取**（末条绑定——尾部追加的外 run 伪造 `session.created` 不再能夺走 kill 目标进程）。由此，**信封时代之前的 legacy transcript（事件无 `runId` 字段）的 stop 从"去杀"变"拒绝"**——绑定读取无匹配，落入既有 `no session metadata`（无 `session.created`）拒绝面。本机 pre-envelope transcript 存量为 0（TD-129b 实测），实际影响 ≈0。
+
+**路由（TD-265 / 决定 0067）**：停止走哪条路由由会话记录的事实决定——`proc_<pid>` 占位会话 id，或会话记录带 `hostPid`（会话 id 是 provider 原生 id 的本机进程式后端，如 zcode），走进程树击杀并核验；会话记录带 `serveUrl` 的走服务端中止。两者皆无时报 `has no stop route` 并点名后端（`hostPid` 落盘之前派发的运行属此类，需手动结束进程树）。
 
 CLI fallback：`npm run cli -- stop <runId>`。
 

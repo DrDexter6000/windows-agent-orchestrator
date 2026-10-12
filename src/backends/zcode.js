@@ -136,6 +136,7 @@ import {
   fileWrittenEvent,
   messageEvent,
   metricsEvent,
+  runtimeActivityEvent,
   toolResultEvent,
   toolUseEvent,
 } from "../runEvent.js";
@@ -144,6 +145,7 @@ import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { buildChildEnv, compileInvocation, isProcessPlaceholderSessionId } from "./processBackend.js";
 import { performance } from "node:perf_hooks";
 import { createStallTracker } from "./stallBudget.js";
+import { describeProcessActivity, snapshotDescendants } from "./processActivity.js";
 
 const BACKEND_NAME = "zcode";
 
@@ -206,37 +208,42 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 //     `chunkLength` 与 `sessionId`）逐分片一帧（一次 27s 的思考 2725 帧）。
 //     此前 wire 对一切通知帧一律忽略。
 //
-// 用法（与 kimiWeb 0046 B5 的 serve 证词同一纪律，只是证词来源不同）：停滞门
-// 预算击发时才看证词——该会话在最近 STREAM_ATTEST_RECENCY_MS 内收到过流分片
-// ⇒ 上游正在出 token，是"零 part 的活"不是停滞：resetSilent 续命（不喂自适应
-// 学习），并把这段静默计入累计；自上一个 part 落地以来被证词续命的静默 ≥ 硬顶
-// ⇒ 照样有界收口（活着但永远落不了 part 的轮次不会无限续命）。最近没有分片 ⇒ 照旧判停滞
-// （流断了/真挂死：j45ncc 的重试段若确实无流即属此类）。
+// 用法（决定 0067，Owner 2026-10-12："没有任何生命体征才由控制面收口；只要有
+// 生命体征就不轻易放弃，放弃与否由 Lead 决定，WAO 只做建议"）：停滞门预算击发
+// 时先看生命体征，有任何一项就 resetSilent 续命（不喂自适应学习）、不收口：
+//   ① 流分片——该会话在最近 STREAM_ATTEST_RECENCY_MS 内收到过流分片：上游正在
+//      出 token，是"零 part 的活"不是停滞；
+//   ② 进程活动——宿主进程的后代在 PROCESS_ACTIVITY_WINDOW_MS 的观察窗内有 CPU /
+//      I/O / 进程生灭（判据与读数见 processActivity.js）：工具命令在跑（测试、
+//      构建、后台任务）时模型不出 token、快照不长 part，唯一在动的是这些子
+//      进程。真实转录普查：12 次被停滞门收掉的运行里 7 次死时有工具调用在途。
+// 两项都没有 ⇒ 照旧在预算处判停滞（流断了 / 工具挂着但不耗 CPU / 真挂死）。
 //
-// 证词只接已有产出后的停滞门；零 part 阶段的两道门（silentTimeout /
-// ZERO_PART_POLL_LIMIT）不看证词——探针里 echo 与 step-start 在 10s 内落 part，
-// 长思考发生在其后；若上游将来先推流分片后落首个 part，零 part 门仍照旧收口。
-// 硬顶是**自上一个 part 落地以来被续命的静默**（非墙钟）：有新 part 落地即清零
-// ——它只约束"流活着但一直落不了 part"这一种形态，不给带持续产出的长轮设总量
-// （与上方否决"总静默预算"同一理由：多个各自合法的长思考步会累计击穿）。
-// 诚实边界：part 偶尔落地、却始终等不到完成信号的轮次不受本顶约束（每次落地即
-// 清零）——与停滞门同一进度定义（parts 个数增长，不问该 part 是否代表有效进展），
-// 整轮没有总量上界；本顶只保证"单段不落 part 的续命静默"有界。
+// **有生命体征的运行没有任何自动上限**（同日早些时候的"续命静默满 120min 收口"
+// 硬顶已删）：活着但迟迟不收尾的运行由 Lead 决定去留。控制面的职责是让 Lead
+// 看得见（流在收时节流发射 runtime_activity("streaming")，等待类命令据此显示
+// 有活动）并且停得掉（stop 经 session.created.hostPid 击杀本进程树，同批修通）。
+// 零 part 阶段的两道门（silentTimeout / ZERO_PART_POLL_LIMIT）同样让位于流分片：
+// 流在收就不是"provider 静默拒绝"；流一停，照旧收口。
 //
-// 取值 120min（Owner 2026-10-12 裁定：glm-pro 额度视为不受限，凡它能完成的任务
-// 都让它完成，车道要求放宽）。原口径是每 turn 累计 30min、落 part 不清零：同日
-// 真机 run_20261012154649496i7i832 的一步（一次断流重来）就用掉约 1200s——再断
-// 一次，或同一 turn 内再来两步同样的长写入，即被收掉。上游断流后从零重来、单
-// 请求 10 分钟量级 ⇒ 120min 约等于连续十次整段重来都落不了 part 才收口。流真断
-// 了仍由停滞门在 300-600s 内收口，本顶不参与。
+// 进程活动只在"原本要收口"的那一刻取证：预算击发且流不在收 ⇒ 取一次后代快照
+// 作基线，PROCESS_ACTIVITY_WINDOW_MS 之后再取一次比对（一次快照约 1s，不进常规
+// 轮询）；窗内若落了 part 或来了流分片，按各自的路径处理。快照不适用（非
+// Windows / 宿主进程不在表里）= 没有这项证词 = 立即按停滞收口，与此前一致；
+// 快照命令瞬时失败则下一拍重取，连续 PROCESS_PROBE_MAX_FAILURES 次才按取不到
+// 收口——一次取样失败不该收掉一个可能还活着的运行。
 //
 // 只放宽、永不收紧：证词只在"原本要杀"的那一刻参与；上游改名/改形状/不再推送
-// ⇒ 识别不到分片 ⇒ 行为退回本修复之前的停滞门。这是上游内部遥测通道，形状
+// ⇒ 识别不到分片 ⇒ 行为退回流证词之前的停滞门。流分片是上游内部遥测通道，形状
 // 仅在上述版本实测过——诚实边界写在这里，不宣称稳定合同。
 const STREAM_TELEMETRY_METHOD = "v4/telemetry/event";
 const STREAM_CHUNK_KIND = "stream.chunk";
 const STREAM_ATTEST_RECENCY_MS = 60_000;
-const STREAM_ATTESTED_SILENT_CAP_MS = 120 * 60_000;
+// 流在收时向转录发 runtime_activity("streaming") 的最小间隔：一分钟一条——等待
+// 类命令最短观察窗 180s，流活着时窗内必有至少一条。
+const STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS = 60_000;
+const PROCESS_ACTIVITY_WINDOW_MS = 30_000;
+const PROCESS_PROBE_MAX_FAILURES = 3;
 
 // 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
 // done(failed)。取值沿用上轮裁定（首轮 live 证据 run_20261001195259045cle1ft：
@@ -592,7 +599,7 @@ export class ZcodeBackend {
   // 退出码通道，不产出该证据（翻转条件 = 实测到携带退出码的 part 形状并接线）。
   reportsCommandExitCode = false;
 
-  constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform } = {}) {
+  constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null } = {}) {
     // 可注入 spawn（测试检查 child env/argv 而不启动真实进程——M11-7 同款缝）。
     this._spawnFn = spawnFn;
     // 可注入击杀（测试确定性观察"进程树兜底"被触发；缺省 taskkill 树杀，生产行为
@@ -603,6 +610,14 @@ export class ZcodeBackend {
     // platform 注入缝（测试用）：compileInvocation 的 win32 包裹行为可在任意宿主
     // 上确定性钉住（deepSeekAcp 同款）。
     this._platform = platform ?? process.platform;
+    // 进程活动取证（决定 0067）：(pid) → 该进程后代的快照；不适用返回 null，
+    // 快照命令瞬时失败抛错（processActivity.js 的合同）。
+    // 缺省只在真实 spawn 下接真实快照——注入了 spawnFn 的测试里 child 是假的，
+    // 其 pid 不指向任何真实进程树，缺省即"取不到"；要测进程证词的用例显式注入。
+    this._processProbe = processProbe
+      ?? (spawnFn === spawn
+        ? (pid) => snapshotDescendants(pid, { platform: this._platform })
+        : async () => null);
   }
 
   /**
@@ -1125,6 +1140,9 @@ export class ZcodeBackend {
       // 运行期补记两段式）——session.created.backendSessionId 直接就是 resume 轮
       // 可用的 provider 会话 id（deepSeekAcp 同款形状）。
       backendSessionId: sessionId,
+      // 承载本会话的本机进程（session.created.hostPid）：会话 id 是上游原生 id、
+      // 不含 pid，stop 靠这个字段找到要击杀的进程树（TD-265）。
+      ...(Number.isInteger(child.pid) && child.pid > 0 ? { hostPid: child.pid } : {}),
       redact: (value) => redactor.redact(value),
       // 事件流工厂：RunManager 传 signal（abort 静默退出——终态判定不依赖它，
       // 有界性由无进展兜底 + silentTimeout/零 part 思考预算家族保证）、pollInterval/
@@ -1199,14 +1217,18 @@ export class ZcodeBackend {
     // 检测——计数回退仍 fail-closed；身份前缀检测另在下方，两者独立并存）。
     const toolLedger = new Map();
     let highWaterParts = baselineParts;
-    // 流活性证词状态：分片计数的上次读数、最近一次见到新分片的时刻（与停滞门
-    // 同一只钟）、自上一个 part 落地以来的证词续命次数与被续命的静默时长。
+    // 生命体征状态：分片计数的上次读数、最近一次见到新分片的时刻（与停滞门同
+    // 一只钟）、上次发 streaming 事实的时刻、自上一次进度以来的续命次数、进程
+    // 活动取证的挂起基线（后代快照 + 取样时刻）。
     const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
     const streamChunksOf = () => (typeof wire.streamChunkCount === "function" ? wire.streamChunkCount(sessionId) : 0);
     let lastStreamChunks = streamChunksOf();
     let lastStreamChunkAt = null;
-    let streamAttestations = 0;
-    let attestedSilentMs = 0;
+    let lastStreamEmitAt = null;
+    let lifeAttestations = 0;
+    let processBaseline = null;
+    let processBaselineAt = null;
+    let processProbeFailures = 0;
     const finish = () => {
       // 终态后回收进程（一个 WAO run 一个 app-server 进程；会话本体常驻上游
       // storage，进程回收不影响 resume lane）。幂等。
@@ -1258,6 +1280,12 @@ export class ZcodeBackend {
         if (streamChunks > lastStreamChunks) {
           lastStreamChunks = streamChunks;
           lastStreamChunkAt = stallNow();
+          // 让 Lead 看得见：流在收即节流发射一条零载荷的 streaming 事实。
+          if (lastStreamEmitAt === null
+            || lastStreamChunkAt - lastStreamEmitAt >= STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS) {
+            lastStreamEmitAt = lastStreamChunkAt;
+            yield runtimeActivityEvent("streaming");
+          }
         }
         if (parts.length < highWaterParts) {
           finish();
@@ -1295,17 +1323,23 @@ export class ZcodeBackend {
         // TD-199：每拍台账扫描——工具证据在轮询期即落盘（身份键去重；头部插入
         // 下旧轮 part 因宿主消息在基线集内而不进扫描面）。纯文本/思考段仍零
         // run.event（诚实边界：本修复只治愈工具活跃期）。
-        for (const event of projectTurnToolEvents(newMsgs, toolLedger)) {
+        const toolEvents = projectTurnToolEvents(newMsgs, toolLedger);
+        for (const event of toolEvents) {
           yield event;
         }
-        if (parts.length > lastPartsCount) {
+        const partsGrew = parts.length > lastPartsCount;
+        if (partsGrew) {
           lastPartsCount = parts.length;
           anyNewPart = true;
+        }
+        // 进度 = 新 part 落地，或既有 tool part 原位落了新证据（工具调用的开始 /
+        // 结束是状态原位变化，不一定改变 part 个数）。
+        if (partsGrew || toolEvents.length > 0) {
           noProgressPolls = 0;
           stallTracker.noteProgress();
-          // 有 part 落地：被证词续命的静默从头计（硬顶只约束"一直落不了 part"）。
-          streamAttestations = 0;
-          attestedSilentMs = 0;
+          lifeAttestations = 0;
+          processBaseline = null;
+          processProbeFailures = 0;
         } else {
           noProgressPolls += 1;
         }
@@ -1354,7 +1388,10 @@ export class ZcodeBackend {
         //     误杀实录见常量注释），轮内批间节奏自放大，硬顶保有界性（顶约束
         //     静默段而非墙钟）。真停滞仍收口。
         const stalled = anyNewPart && stallTracker.stallMs() >= stallTracker.budgetMs();
-        if (!anyNewPart && silentTimeout && (Date.now() - sentAt) > silentTimeout) {
+        // 生命体征①：最近是否还在收流分片（零 part 的两道门与停滞门共用）。
+        const streamRecent = lastStreamChunkAt !== null
+          && (stallNow() - lastStreamChunkAt) <= STREAM_ATTEST_RECENCY_MS;
+        if (!anyNewPart && !streamRecent && silentTimeout && (Date.now() - sentAt) > silentTimeout) {
           finish();
           yield doneEvent(
             "failed",
@@ -1362,7 +1399,7 @@ export class ZcodeBackend {
           );
           return;
         }
-        if (!anyNewPart && !silentTimeout && noProgressPolls >= ZERO_PART_POLL_LIMIT) {
+        if (!anyNewPart && !streamRecent && !silentTimeout && noProgressPolls >= ZERO_PART_POLL_LIMIT) {
           finish();
           yield doneEvent(
             "failed",
@@ -1370,37 +1407,59 @@ export class ZcodeBackend {
           );
           return;
         }
-        // 流活性证词：预算击发的这一刻，最近是否还在收流分片。
-        const streamActive = stalled && lastStreamChunkAt !== null
-          && (stallNow() - lastStreamChunkAt) <= STREAM_ATTEST_RECENCY_MS;
-        if (streamActive) {
-          streamAttestations += 1;
-          attestedSilentMs += stallTracker.stallMs();
-          if (attestedSilentMs >= STREAM_ATTESTED_SILENT_CAP_MS) {
+        if (stalled && streamRecent) {
+          // 流在收：续命（清静默段、不喂自适应学习——kimiWeb 0046 B5② 同款）。
+          lifeAttestations += 1;
+          processBaseline = null;
+          processProbeFailures = 0;
+          stallTracker.resetSilent();
+        } else if (stalled) {
+          // 生命体征②：进程活动。verdict = "pending"（观察窗未满，继续轮询）/
+          // "alive"（续命）/ 其余为收口时写进诊断的事实。
+          let verdict = "pending";
+          const needBaseline = processBaseline === null;
+          if (needBaseline || stallNow() - processBaselineAt >= PROCESS_ACTIVITY_WINDOW_MS) {
+            let snapshot;
+            try {
+              snapshot = await this._processProbe(child.pid);
+              processProbeFailures = 0;
+            } catch {
+              processProbeFailures += 1;
+            }
+            if (snapshot === undefined) {
+              if (processProbeFailures >= PROCESS_PROBE_MAX_FAILURES) {
+                verdict = `process activity unavailable (${processProbeFailures} consecutive snapshot failures)`;
+              }
+            } else if (snapshot === null) {
+              verdict = "process activity unavailable";
+            } else if (needBaseline) {
+              processBaseline = snapshot;
+              processBaselineAt = stallNow();
+            } else {
+              const activity = describeProcessActivity(processBaseline, snapshot, stallNow() - processBaselineAt);
+              verdict = activity.active
+                ? "alive"
+                : `no process activity in the last ${Math.round(activity.windowMs / 1000)}s (cpu +${activity.cpuMs}ms, io +${activity.ioBytes}B across ${snapshot.size} descendant process(es))`;
+            }
+          }
+          if (verdict === "alive") {
+            lifeAttestations += 1;
+            processBaseline = null;
+            stallTracker.resetSilent();
+          } else if (verdict !== "pending") {
             finish();
+            const d = stallTracker.diagnostics();
             yield doneEvent(
               "failed",
-              `zcode turn stalled: stream-attested silence since the last landed part exceeded the ${Math.round(STREAM_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
-                + `(${Math.round(attestedSilentMs)}ms across ${streamAttestations} attestation(s); ${lastStreamChunks} stream chunk(s) observed, `
-                + "bounded exit: the model stream is active but parts are not landing)",
+              `zcode turn stalled (${lastStreamChunks > 0
+                ? `${lastStreamChunks} model stream chunk(s) seen this turn, none in the last ${Math.round(STREAM_ATTEST_RECENCY_MS / 1000)}s`
+                : "no model stream chunk observed this turn"}; ${verdict}${lifeAttestations > 0 ? `; ${lifeAttestations} earlier attestation(s) since the last progress` : ""}; `
+                + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+                + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
+                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — no vital signs, bounded exit)`,
             );
             return;
           }
-          // 证词续命：清静默段、不喂自适应学习（kimiWeb 0046 B5② 同款）。
-          stallTracker.resetSilent();
-        } else if (stalled) {
-          finish();
-          const d = stallTracker.diagnostics();
-          yield doneEvent(
-            "failed",
-            `zcode turn stalled (${lastStreamChunks > 0
-              ? `${lastStreamChunks} model stream chunk(s) seen this turn, none in the last ${Math.round(STREAM_ATTEST_RECENCY_MS / 1000)}s${streamAttestations > 0 ? `, ${streamAttestations} prior stream attestation(s) since the last part` : ""}`
-              : "no model stream chunk observed this turn"}; `
-              + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
-              + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
-              + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — bounded exit)`,
-          );
-          return;
         }
         // 等待下一拍：interval 上界 + 进程死亡即时唤醒。
         await Promise.race([sleep(pollInterval), wire.waitClosed()]);

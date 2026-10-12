@@ -732,3 +732,60 @@ import { existsSync } from "node:fs";
 function existsSyncSafe(p) {
   try { return existsSync(p); } catch { return false; }
 }
+
+// ===== 决定 0067：很久没有新动作/正文的未终态 run 附 Lead advisory =====
+
+const ADV_RUN = "run_adv_0067";
+function advisoryTranscript({ terminal = false } = {}) {
+  const base = { runId: ADV_RUN, agentId: "glm-pro" };
+  const lines = [
+    { type: "run.submitted", ts: "2026-10-12T10:00:00.000Z", seq: 1, ...base },
+    { type: "run.state_change", to: "running", reason: "first_event", ts: "2026-10-12T10:00:02.000Z", seq: 2, ...base },
+    { type: "run.event", kind: "command", command: "npm test", ts: "2026-10-12T10:05:00.000Z", seq: 3, ...base },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", ts: "2026-10-12T10:35:40.000Z", seq: 4, ...base },
+  ];
+  if (terminal) lines.push({ type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-10-12T10:35:50.000Z", seq: 5, ...base });
+  return lines.map(ev).join("");
+}
+
+test("0067-S1: 未终态且 ≥30 分钟没有新动作/正文 → 附 advisory（事实 + 去留由 Lead 定 + stop 命令）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-adv-"));
+  try {
+    writeTranscript(dir, ADV_RUN, advisoryTranscript());
+    const status = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:36:00.000Z") });
+    assert.equal(status.secondsSinceEffect, 31 * 60);
+    assert.equal(status.secondsSinceActivity, 20, "运行时还在动——最近活动 20s 前");
+    assert.equal(
+      status.leadAdvisory,
+      `已 31 分钟没有新的动作或正文产出（最近活动：运行时状态，20s 前）。是否继续等待由 Lead 决定；中止：wao stop ${ADV_RUN}`,
+    );
+  } finally { cleanupDir(dir); }
+});
+
+test("0067-S2: 不满 30 分钟 / 已到终态 → 字段缺席（既有形状不变）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-adv-"));
+  try {
+    writeTranscript(dir, ADV_RUN, advisoryTranscript());
+    const early = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:34:59.000Z") });
+    assert.equal("leadAdvisory" in early, false);
+    assert.equal("secondsSinceEffect" in early, false);
+    writeTranscript(dir, ADV_RUN, advisoryTranscript({ terminal: true }));
+    const done = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T12:00:00.000Z") });
+    assert.equal(done.terminal, true);
+    assert.equal("leadAdvisory" in done, false);
+  } finally { cleanupDir(dir); }
+});
+
+test("0067-S3: 从未有过动作 → 从 run.submitted 起算", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-status-adv-"));
+  try {
+    const base = { runId: ADV_RUN, agentId: "glm-pro" };
+    writeTranscript(dir, ADV_RUN, [
+      { type: "run.submitted", ts: "2026-10-12T10:00:00.000Z", seq: 1, ...base },
+      { type: "run.state_change", to: "running", reason: "first_event", ts: "2026-10-12T10:00:02.000Z", seq: 2, ...base },
+      { type: "run.event", kind: "thinking", ts: "2026-10-12T10:00:03.000Z", seq: 3, ...base },
+    ].map(ev).join(""));
+    const status = await getRunStatus({ runId: ADV_RUN, runDir: dir, nowFn: () => Date.parse("2026-10-12T10:45:00.000Z") });
+    assert.match(status.leadAdvisory, /^已 45 分钟没有新的动作或正文产出（最近活动：在思考，2697s 前）/);
+  } finally { cleanupDir(dir); }
+});

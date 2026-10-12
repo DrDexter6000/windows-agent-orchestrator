@@ -980,7 +980,9 @@ test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
     "docs/02-architecture.md": 133845, // baseline 121677
     "docs/roadmap.md": 119468,        // baseline 108607
     "docs/usage.md": 259019,          // baseline 235471
-    "docs/troubleshooting.md": 65430, // baseline 59481
+    // Owner 2026-10-12 许可提升上限（"允许文档提升上限"）：排障手册离 +10% 帽只剩
+    // 1 字节，决定 0067 的两条排障条目加不进去——本条提到基线 +20%。其余三份未动。
+    "docs/troubleshooting.md": 71377, // baseline 59481
   };
   for (const [rel, cap] of Object.entries(caps)) {
     const bytes = Buffer.byteLength(read(rel), "utf8");

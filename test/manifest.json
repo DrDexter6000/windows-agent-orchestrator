@@ -20,6 +20,7 @@
       "backends/opencodeRequalification.test.js",
       "backends/opencodeServe.test.js",
       "backends/opencodeStopVerify.test.js",
+      "backends/processActivity.test.js",
       "backends/processBackend.test.js",
       "backends/providerSessionReuse.test.js",
       "backends/stallBudget.test.js",
