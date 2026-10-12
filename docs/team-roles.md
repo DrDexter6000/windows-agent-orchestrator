@@ -92,11 +92,11 @@ WAO 是"装一次，开发多个项目"的工具：
 
 1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
 2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按 `Low`/`HQ` 名称、prompt 长度、文件数量或预计耗时机械路由。
-3. **默认实现通道偏好（0046 车道版）**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `glm-pro`（质量优先）；预算敏感、可独立并行的批量小包与视觉/探索优先 `glm-flash` 或 `deepseek-flash`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。
+3. **默认实现通道偏好（0046 车道版）**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `glm-pro`（质量优先）；预算敏感、可独立并行的批量小包与视觉/探索优先 `glm-flash` 或 `deepseek-flash`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。选车道前可用 `npm run cli -- wao lanes` 一屏查看各车道接线 / Owner 画像 / 认证 / 就绪（0064 只读参考面；画像=config/lane-traits.json Owner 手拟，事实陈列零推荐）。
 4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `glm-pro`（次选 `sol`）。
 5. **多模态与创意**：视觉、前端、创意和多模态任务优先 `kimi`（文案/头脑风暴）或 `glm-flash`/`deepseek-flash`（视觉理解）；`opus` 承担高要求前端设计与备胎审计。
 6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
-7. **顾问/审计与三席会审**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。三席会审是推荐标准（决策 0023，2026-08-17 起产品化；supersedes 0019 "默认不审"）：方案（stage 2）与交付物验收（stage 4）强烈建议 Lead 主审 + 两名副审（席位避同族、避被审产出作者——0019 §3 席位回避保留），配不齐两副审则以 Lead + 一副审两席为次之推荐。强烈推荐但非强制：跳过需 `--panel-skip-reason` 显式登记理由；跨族系大模型会审是更强推荐。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。新配置建议在 registry 里显式声明 `seatRole`（adversarial/implementation/non_seat，省略按命名惯例回退——见 docs/usage.md registry 配置详解）。
+7. **顾问/审计与三席会审**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。三席会审是推荐标准（决策 0023，2026-08-17 起产品化；supersedes 0019 "默认不审"）：方案（stage 2）与交付物验收（stage 4）强烈建议 Lead 主审 + 两名副审（席位避同族、避被审产出作者——0019 §3 席位回避保留），配不齐两副审则以 Lead + 一副审两席为次之推荐。强烈推荐但非强制：跳过需 `--panel-skip-reason` 显式登记理由；跨族系大模型会审是更强推荐。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。新配置建议在 registry 里显式声明 `seatRole`（adversarial/implementation/non_seat，省略按命名惯例回退——见 docs/usage.md registry 配置详解）。**语义澄清（0064）**：seatRole 是会审体检（onboarding/doctor 就绪分级）的**默认视角归类**——无派发上下文时的分类输入，不是车道能力声明、不约束实际选席；车道临场戴哪顶帽子由派发时的 `role` 决定，车道画像与建议用途见 `wao lanes`。终局方向（0045 §1.2，已批准未落地）：对抗性从审者×作者车道关系派生，取代人工声明（见 tech-debt TD-264）。
 
 ## 标准开发流（角色协作）
 
@@ -104,7 +104,7 @@ WAO 是"装一次，开发多个项目"的工具：
 Lead 收到需求
   → 必要时派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
-  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席车道取一避同族 + 对抗席车道（astra/opus）取一；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
+  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席车道取一避同族 + 对抗席车道取一（当前=astra/opus，按 registry seatRole=adversarial 声明——0064 语义澄清见派工策略第 7 条）；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
   → Lead 独立裁定方案并选择 Coder-HQ/Low/MM
   → 必要时派 Tester 提供独立执行证据
   → 交付物验收前默认推荐召集副审会审（audit 模式；决策 0023：组合同上；跳过需 --panel-skip-reason 登记理由，wao stage 4 留痕；auditor 同会话连审两阶段的独立性侵蚀见 ADR 0019 §3）

@@ -53,7 +53,9 @@ import { familyLabel } from "../application/modelFamily.js";
 
 const CLI_PROBE_TIMEOUT_MS = 5000; // per CLI probe (matches credentialReadiness 5s)
 
-async function probeCliOnPath(name) {
+// 0064：探测实现共享导出——wao lanes 复用同一份探测（会审 P1：不得复制出
+// 第二套实现）。仅新增 export，函数本体零改动。
+export async function probeCliOnPath(name) {
   const { execSync } = await import("node:child_process");
   try {
     execSync(process.platform === "win32" ? `where ${name}` : `which ${name}`, {
@@ -69,7 +71,7 @@ async function probeCliOnPath(name) {
   }
 }
 
-async function probeKeyEnvSource(name) {
+export async function probeKeyEnvSource(name) {
   const r = await resolveCredentialEnv(name);
   return r.source; // "process_env" | "user_env" | "missing"
 }

@@ -73,6 +73,8 @@ const TOP_KEYS = new Set(["schema", "lanes", "_comment"]);
 
 function isBlank(v) { return v === undefined || v === null || (typeof v === "string" && v.trim() === ""); }
 
+// 0064：三函数自本批起导出——wao lanes 读取面复用同一 G4 轴判定（接线漂移
+// 展示与 explicit 派发拒绝同语义，不造第二份比较规则）。逻辑零改动。
 function laneAxes(lane) {
   return {
     backend: lane.backend ?? null,
@@ -93,6 +95,7 @@ function axesEqual(a, b) {
   return a.backend === b.backend && a.modelId === b.modelId
     && a.providerID === b.providerID && a.effort === b.effort;
 }
+export { laneAxes, agentAxes, axesEqual };
 
 /**
  * 0045 R4/W4b："终局复用策略归角色"落地——config/roles.json（git 跟踪、键白名单、

@@ -3,7 +3,7 @@
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
 // 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor |
-//         onboarding | sweep-claude-config | accept
+//         onboarding | sweep-claude-config | accept | lanes
 //
 // 依赖：
 //   - 外部模块：../waoDir.js、../waoState.js、../waoDecisions.js、../waoDeclare.js、
@@ -34,6 +34,8 @@ import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
 import { onboardingCommand } from "./onboarding.js";
+// 0064：车道画像只读查询面（application/lanesView.js 纯投影 + 本命令薄渲染）。
+import { lanesCommand } from "./lanes.js";
 // TD-260（0062 B8）：反向 Unknown 提示的数据源——顶层命令名闭集（cliHelp 是
 // 共享叶子，did-you-mean 同源；单向指路 TD-191④ 的对称补全）。
 import { COMMAND_NAMES } from "../cliHelp.js";
@@ -456,9 +458,10 @@ async function waoSweepClaudeConfigCommand(args) {
  */
 // TD-191④：wao 命名空间子命令闭集——顶层 Unknown 报错指路的数据源。
 // 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
+// 0064：+lanes（车道画像只读查询面）。
 export const WAO_SUBCOMMANDS = [
   "init", "state", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
-  "sweep-claude-config", "accept",
+  "sweep-claude-config", "accept", "lanes",
 ];
 
 export async function waoCommand(args, config, deps = {}) {
@@ -510,6 +513,10 @@ export async function waoCommand(args, config, deps = {}) {
     await waoAcceptCommand(tail, config);
     return;
   }
+  if (sub === "lanes") {
+    await lanesCommand(tail, config);
+    return;
+  }
   // TD-260（0062 B8）：反向指路——sub 命中顶层命令名（serve/run/registry/…）时
   // 给出两种完整调用形，与 TD-191④ 的正向指路（顶层 Unknown 命中 wao 族）对称。
   // 根因是"wao X"一种写法两义（shim+顶层 vs 命名空间子命令），会审（opus 席）
@@ -521,5 +528,9 @@ export async function waoCommand(args, config, deps = {}) {
         `Use "npm run cli -- ${sub} ..." (global shim form: "wao ${sub} ...").`
     );
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding | wao sweep-claude-config | wao accept`);
+  // 0064：Try: 行从闭集数组生成（此前手抄串曾漏成员——会审 P2：守卫只查
+  // dispatch 方向，提示行漏写不报红；生成式消手抄面）。
+  throw new Error(
+    `Unknown wao subcommand: ${sub ?? "(none)"}. Try: ${WAO_SUBCOMMANDS.map((s) => `wao ${s}`).join(" | ")}`
+  );
 }

@@ -199,7 +199,7 @@ schema、就绪分级引擎与展示层共用同一词表（`registry validate` 
 错误信息不回显坏值）。**省略该字段合法**（0045 前历史惯例，0046 后旧席位名已不存在——显式声明是唯一判据）：席位角色回退命名惯例（旧 `auditor`/`coder_mm` = 对抗席、
 `coder_` 前缀 = 实现席、其余非席位），老 registry 零迁移。新配置建议显式声明——惯例对
 `coder_opencode_fallback` 这类"名字像实现席、实为 fallback 非席位"的 worker 会误分类，
-显式 `"non_seat"` 才能把它从席位候选剔除。
+显式 `"non_seat"` 才能把它从席位候选剔除。**语义澄清（0064）**：seatRole 只是会审体检（onboarding/doctor 就绪分级与 drift 轴）的默认视角归类，不是车道能力声明、不约束实际选席（车道临场帽子=派发时 `role`）；车道画像/认证/就绪一屏见 `npm run cli -- wao lanes`（只读参考面，事实陈列零推荐——非默认 `--registry` 须与 `--lanes-file` 成对，防跨绑规则同 run 命令）。
 
 **deepseek-harness / deepseek-acp 通道适用限制、`registry validate` 能力交叉 `⚠` 警告与 metrics 判读**正文已完整迁移至 `docs/certification-runbook.md` §DSH 通道适用限制与能力交叉警告（单向链接；唯一权威；含 TD-87 metrics 行为的五态化勘误注记）。
 
@@ -223,6 +223,8 @@ npm run cli -- registry list --registry config/agents.json
 # 检查 opencode serve 是否可达（只对 opencode-serve backend）
 npm run cli -- registry check --registry config/agents.json
 
+# 车道一屏参考（0064，只读）：接线轴 + Owner 画像 + 认证简表 + 就绪探测 + seatRole 原始声明
+npm run cli -- wao lanes
 ```
 
 smoke / runtime certification（`npm run reliability`）/ drill 转录维护命令正文已完整迁移至 `docs/certification-runbook.md` §认证与转录维护命令（单向链接；唯一权威）。
