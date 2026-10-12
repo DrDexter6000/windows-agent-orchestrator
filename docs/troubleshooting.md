@@ -390,11 +390,11 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   - **工具子进程在干活**：app-server 的后代进程在 30s 观察窗内 CPU ≥20 ms/s，或 I/O ≥64 KB/s，或有进程新生 / 退出（测试、构建、后台任务属此类）。
   - **工作目录里有文件变化**：同一观察窗内，已改动 / 未跟踪（未被忽略）文件的清单、mtime 或大小变了。
 
-  凭后两项续命时转录各落一条 `runtime_activity`（`process_active` / `files_changed`，至多每分钟一条）。
+  凭后两项续命时转录各落一条 `runtime_activity`（`process_active` / `files_changed`，每种至多每分钟一条）。
 - **不算的**：工具挂着但不耗 CPU 也不写文件（`sleep`、等远端且无流量）、流断了且没有子进程在动。观察窗比对得出"没有活动"后再多看一拍，仍无进展才收口；错误文案写明取到的读数（`no model stream chunk…` / `no process activity in the last 30s (cpu +…ms, io +…B across N descendant process(es))` / `no file change in the working tree`），停滞门以 `no vital signs, bounded exit` 结尾，零 part 两道门在原文案后附 `— no vital signs: …`。进程快照瞬时失败会在下一拍重取，连续三次失败按取不到处理；非 Windows 且非 git 目录时两项都不适用，立即收口。
 - **"没有自动上限"只指这三道门**：有生命体征的运行不会因"等不到进展"被收掉——没人看着它，就会一直跑到自己结束或生命体征消失，期间占着工作树。协议错误、传输关闭、快照缩短、历史变异等"证据不可信"的失败照旧立即收口。
 - **证词会看错**：与任务无关的插件进程在耗 CPU、反复崩溃重启的 helper、别人在同一个未隔离的工作目录里写文件，都会让一个其实没在推进的运行一直"活着"；被 `.gitignore` 排除的写入、宿主进程内部的工作、低 CPU 的等待，则读不出活动。所以去留要 Lead 自己看。
-- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且转录里 ≥30 分钟没有新的动作或正文时附 `advisory` 一行（多久没有、最近活动是什么、中止命令）——它陈述的是转录可见的事实，zcode 的正文到轮末才落转录；MCP 面 `run_status` 带同文的 `leadAdvisory`，`run_wait` 带注记 `observation.transcript_quiet`。
+- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且转录里 ≥30 分钟没有新的动作或正文时附 `advisory` 一行（多久没有、最近活动是什么、中止命令）——它陈述的是转录可见的事实，zcode 的正文到轮末才落转录；MCP 面 `run_status` 带同一事实的 `leadAdvisory`，`run_wait` 带注记 `observation.transcript_quiet`。
 - **中止**：`wao stop <runId>` / MCP `run_stop`——会话记录带 `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。**此前派发的 zcode 运行**（会话记录里没有 `hostPid`）仍报 `has no stop route`：核实其 app-server 进程后手动结束进程树，转录会以 `transport closed` 落 failed。
 - **诚实边界**：流分片是上游内部遥测，只在 zcode CLI 0.16.9 实测过；进程活跃度阈值来自一次真机探针（空闲：CPU 0–2.5 ms/s、I/O 4–9 KB/s），不是长期统计。读数与来由见决定 0067。
 - **状态**：已实现（决定 0067）；各车道的落点见决定 0068。

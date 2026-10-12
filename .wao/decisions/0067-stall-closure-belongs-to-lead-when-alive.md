@@ -55,7 +55,7 @@
 
 ## 未做
 
-- **kimi-web 的同类硬顶**（`LIVENESS_ATTESTED_SILENT_CAP_MS`：serve 证词续命累计 30min 收口，且按整 turn 累计、有进度也不清零）当时未改、留待 Owner 裁定（→ 决定 0068：保留硬顶，改为自上次进度起算）。会审两席意见相反：sol 认为应同样处理——代码既已认 serve 证词为生命体征，就不该仅凭耗时替 Lead 放弃；kimi 认为可以保留——serve 的 `main_turn_active` / `busy` 是服务端的自我声明，不是 Owner 列举的那几类直接体征，一个 serve 可以永远声称 active 而零产出；但它的累计口径正是 zcode 硬顶先被改掉的那种误杀形状，若保留也应先改成"自上次进度以来"。
+- **kimi-web 的同类硬顶**（`LIVENESS_ATTESTED_SILENT_CAP_MS`：serve 证词续命累计 30min 收口，且按整 turn 累计、有进度也不清零）当时未改、留待 Owner 裁定（→ 决定 0068：保留硬顶，改为自上次产出增长起算）。会审两席意见相反：sol 认为应同样处理——代码既已认 serve 证词为生命体征，就不该仅凭耗时替 Lead 放弃；kimi 认为可以保留——serve 的 `main_turn_active` / `busy` 是服务端的自我声明，不是 Owner 列举的那几类直接体征，一个 serve 可以永远声称 active 而零产出；但它的累计口径正是 zcode 硬顶先被改掉的那种误杀形状，若保留也应先改成"自上次进度以来"。
 - MCP 面没有 advisory 字段：MCP 上的 Lead 靠 `liveness` / `lastActivityKind` / `run_activity` 判断。让它直接看到 advisory 需要改 `run_status` 的输出形状并重冻结 wire，留作后续单独一批。
 - 文档上限：`docs/troubleshooting.md` 原先离冻结字节上限只剩 1 字节，Owner 当日许可提升上限（"允许文档提升上限"），本批把该文档的帽由基线 +10% 提到 +20%；`docs/02-architecture.md`（剩 29 字节）与 `SKILL.md`（剩 16 字节）本批用不到，未动。
 

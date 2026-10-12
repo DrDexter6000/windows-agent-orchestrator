@@ -2418,7 +2418,7 @@ test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续�
   assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
 });
 
-test("kimi-web B5②: 证词活着但自上次进度以来被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
+test("kimi-web B5②: 证词活着但自上次产出增长以来被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
   const frozen = [turnItem({
     state: "running",
     endedAt: null,
@@ -2443,8 +2443,35 @@ test("kimi-web B5②: 证词活着但自上次进度以来被续命静默 ≥30m
   }
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /serve-attested silence since the last progress exceeded the 30min cap/);
+  assert.match(done.error, /serve-attested silence since the last output growth exceeded the 30min cap/);
   assert.match(done.error, /never lands output/);
+});
+
+test("kimi-web B5②c（会审 sol）: 零产出的 turn 靠 state 往返改签名 → 不清硬顶，照样在 30min 收口", async () => {
+  // 始终零 steps、零帧；state 每三拍在 running / queued 之间往返；serve 始终报 active。
+  // 签名每三拍变一次（停滞门的进度），但产出量没有超过最高水位——硬顶不清零。
+  const snapshot = (state) => [turnItem({ state, endedAt: null, durationMs: null, steps: [] })];
+  const script = Array.from({ length: 40 }, (_, i) => snapshot(Math.floor(i / 3) % 2 === 0 ? "running" : "queued"));
+  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5c2", { script, detailMode: "active" });
+  const fakeNow = { v: 0 };
+  let polls = 0;
+  const clockedHandler = (url, init, n) => {
+    if (url.includes("/transcript")) { fakeNow.v += 310_000; polls += 1; }
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed", "签名抖动不能让零产出的 turn 无限续命");
+  assert.match(done.error, /serve-attested silence since the last output growth exceeded the 30min cap/);
+  assert.ok(polls < 40, `在脚本耗尽之前收口（实际第 ${polls} 拍）`);
+  assert.ok(detailCalls() >= 6, `至少 6 次证词才累计满 30min（实际 ${detailCalls()}）`);
 });
 
 test("kimi-web B5②b（决定 0068）: 中途有进度 → 硬顶清零重计；两段静默合计超 30min 也不收口", async () => {

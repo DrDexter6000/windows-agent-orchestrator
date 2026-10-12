@@ -163,9 +163,11 @@ const NO_PROGRESS_CEILING_MS = 240_000;
 // serve 活体证词（sessionDetail 的 main_turn_active/busy）——K3 长 dense brief 首
 // 拍重思考零帧是活轮不是停滞（当日四杀实证），证词为真 = noteProgress 重置静默
 // 段继续观察；证词为假/取不到 = 照杀（fail-closed 防真挂死）。证词续命的硬顶=
-// **自上次进度以来被证词续命的静默时间**（每次续命把该段静默计入；产出/流式
-// 时间不计数；有进度即清零——决定 0068，Owner 2026-10-12）。此前按整 turn 累计、
-// 有进度也不清零：一个每隔几分钟落一次产出、合计静默超 30 分钟的健康长 turn 会
+// **自上次产出增长以来被证词续命的静默时间**（每次续命把该段静默计入；产出/
+// 流式时间不计数；产出增长即清零——决定 0068，Owner 2026-10-12）。"增长"按
+// turnVolume 的最高水位判，不按签名变化判：state 在 running / queued 之间往返、
+// 帧被改写都会改签名，但一个零产出的 turn 不能靠这种抖动无限清零（会审 sol 用
+// 假快照复核到的路径）。此前按整 turn 累计、有进度也不清零：一个每隔几分钟落一次产出、合计静默超 30 分钟的健康长 turn 会
 // 被它收掉（zcode 同形状的硬顶已先于此被改掉）。保留硬顶本身的理由：serve 的
 // main_turn_active / busy 是服务端的自我声明，工具挂死时它同样报 active——没有
 // 别的体征可以交叉印证，所以单段静默仍在此值收口。
@@ -774,6 +776,8 @@ export class KimiWebBackend {
     });
     let attestedSilentMs = 0;
     let livenessAttestations = 0;
+    // 本轮已见过的产出量最高水位（硬顶清零的判据，见常量注释）。
+    let volumeHighWater = -1;
     // Owner 2026-10-10 问2 修复（kimi 诊断会审 opus/sol 方案）：在途进度呈现。
     // 归属 turn 的结构投影增长节气流发射 runtime_activity("streaming")——
     // 闭集状态、零 payload、不算证据、不碰完成路径；历史 turn 不重放（只看
@@ -914,9 +918,14 @@ export class KimiWebBackend {
         lastSignature = signature;
         noProgressPolls = 0;
         stallTracker.noteProgress();
-        // 进度清零证词续命的计数与累计静默（硬顶只约束自上次进度以来的静默）。
-        attestedSilentMs = 0;
-        livenessAttestations = 0;
+        // 产出增长才清零证词续命的计数与累计静默。签名变化但产出没有超过最高
+        // 水位（state 往返、改写）仍是停滞门的进度，不清硬顶。
+        const volume = turnVolume(turn);
+        if (volume > volumeHighWater) {
+          volumeHighWater = volume;
+          attestedSilentMs = 0;
+          livenessAttestations = 0;
+        }
         // 在途进度呈现（见声明处注释）：增长即节流发射 streaming 事实。
         const nowMs = Date.now();
         if (nowMs - lastProgressEmitAt >= KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS) {
@@ -950,7 +959,7 @@ export class KimiWebBackend {
               `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
                 + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
                 + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
-                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s) since the last progress` : ""}; `
+                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s) since the last output growth` : ""}; `
                 + `attestation: ${attestationState} — ${attestationState === "inactive"
                   ? "the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)"
                   : "the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)"})`,
@@ -962,7 +971,7 @@ export class KimiWebBackend {
           if (attestedSilentMs >= LIVENESS_ATTESTED_SILENT_CAP_MS) {
             yield doneEvent(
               "failed",
-              `turn stalled: serve-attested silence since the last progress exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+              `turn stalled: serve-attested silence since the last output growth exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
                 + `(${Math.round(attestedSilentMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
                 + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness `
                 + "(the serve keeps attesting an active turn that never lands output)",
@@ -1228,6 +1237,22 @@ function turnFailureText(turn, token) {
 // frames 数与文本总量）。steps/frames 增长、frame 文本增长或 state 变化都会改变
 // signature（= 进展，计数清零）；usage 不入 signature（无进展判据钉死在
 // "state 不变且 steps/frames 无增长"）。
+// turn 的产出量：steps 数 + 各 step 的帧数 + 帧文本总量。只增不减地看它的最高
+// 水位，用来判"产出有没有增长"（硬顶清零的判据；与 signature 取同一批字段，但
+// 不含 state / stepId——那些会变却不代表多了产出）。
+function turnVolume(turn) {
+  const steps = Array.isArray(turn?.steps) ? turn.steps : [];
+  let volume = steps.length;
+  for (const step of steps) {
+    const frames = Array.isArray(step?.frames) ? step.frames : [];
+    volume += frames.length;
+    for (const frame of frames) {
+      if (typeof frame?.text === "string") volume += frame.text.length;
+    }
+  }
+  return volume;
+}
+
 function turnSignature(turn) {
   const steps = Array.isArray(turn?.steps) ? turn.steps : [];
   const parts = [];

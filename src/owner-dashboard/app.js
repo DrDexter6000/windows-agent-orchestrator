@@ -271,6 +271,8 @@ export function describeEntry(entry) {
         initialized: "initialized",
         streaming: "streaming",
         provider_retry: "provider retry",
+        process_active: "process active",
+        files_changed: "files changed",
       };
       body = `runtime · ${labels[e.status] ?? "unknown"}`;
       break;
