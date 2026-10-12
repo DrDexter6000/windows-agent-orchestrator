@@ -34,7 +34,7 @@
 | kimi-code 2.1.1 | 原已注册（2026-09-07），未改 | 中立仓库 `kimi -p` 无头会话 | 列出 23 个工具，`workspace_status` 返回 bound=false / root=null（该宿主不提供 MCP roots） |
 | opencode | 并入 `~/.config/opencode/opencode.json`（新增，原文件已备份） | `opencode mcp list`；中立仓库 `opencode run` | wao connected；列出 23 个工具（前缀 `wao_`），`workspace_status` 返回 bound=true |
 | zcode | 2026-10-03 插件包，未改 | 宿主自身当日日志 | `plugin:wao:wao` 当日 3 次 connected、toolCount=23（均为 WAO 派发的 worker 会话，非 Lead 交互会话） |
-| claude-desktop | 并入 `%APPDATA%\Claude\claude_desktop_config.json`（新增，原文件已备份） | **未验证**——需重启桌面端 | `hostVerified=false`，待 Owner 重启后确认并置位 |
+| claude-desktop | 并入 `%APPDATA%\Claude\claude_desktop_config.json`（新增，原文件已备份） | Owner 重启桌面端后读宿主自己的 MCP 日志（`%LOCALAPPDATA%\Claude\Logs\mcp-server-wao.log`） | server 启动；`initialize` 握手完成；`tools/list`、`resources/list` 均收到返回。日志不含消息体，工具个数未从宿主侧读到；对话内调用未演练 |
 
 注册全部指向开发工作树路径（0049 现状）；将来若切发布快照，每个宿主重跑一次注册即可，`mcp status` 的 `registered_other_target` 会如实指出指向不一致的宿主。
 

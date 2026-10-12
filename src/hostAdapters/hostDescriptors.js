@@ -28,8 +28,10 @@
 //   opencode    — 真机验证（2026-10-12）：`opencode mcp list` 报 wao connected；
 //                 中立仓库里 `opencode run` 无头会话列出 23 个工具（前缀 wao_）
 //                 并调用 workspace_status 返回 bound=true。
-//   claude-desktop — 格式级入表（2026-10-12 已写入本机配置，加载需重启桌面端后
-//                 由 Owner 确认——在此之前 hostVerified=false）。
+//   claude-desktop — 真机验证（2026-10-12，Owner 重启桌面端后）：宿主自己的 MCP
+//                 日志（%LOCALAPPDATA%\Claude\Logs\mcp-server-wao.log）记录 server
+//                 启动、initialize 握手、tools/list 与 resources/list 均收到返回。
+//                 日志不含消息体——工具个数未从宿主侧读到，对话内调用未演练。
 //   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话 23 工具；
 //   codex 0.159.2 `codex exec` 调用 wao.workspace_status completed。详见决定 0066。）
 //
@@ -147,8 +149,8 @@ export const HOST_DESCRIPTORS = [
     label: "Claude Desktop (chat app)",
     snippet: true,
     autoBind: false,
-    hostVerified: false,
-    stability: "unverified-host-load",
+    hostVerified: true, // 2026-10-12 真机验证（见文件头证据锚点）
+    stability: "stable",
     renderSnippet: mcpServersShape,
     configHint: "%APPDATA%\\Claude\\claude_desktop_config.json",
     example: () =>

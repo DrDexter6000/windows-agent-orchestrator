@@ -1176,7 +1176,7 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 | zcode | 本地插件包（见下） | `~/.zcode/cli/config.json` 的启用标记 + 已安装插件副本（缓存里多个版本指向不一致时报 unknown） | 2026-10-03 新会话；2026-10-12 宿主日志在场 |
 | kimi-code | 把片段的 `mcpServers.wao` 并入 `~/.kimi-code/mcp.json`（无注册子命令） | 同一文件 | 2026-10-12：无头会话加载全部工具（该宿主不提供 MCP roots，需 `workspace_select`） |
 | opencode | 把片段的 `mcp.wao` 并入 `~/.config/opencode/opencode.json`（`opencode mcp add` 是交互式向导） | 按 opencode 的覆盖顺序：`OPENCODE_CONFIG_CONTENT` 内联 > 项目根 `opencode.json(c)` > `OPENCODE_CONFIG` 指定文件 > 全局文件（后三项按官方文档纳入，本机只核实过全局文件的形状） | 2026-10-12：`opencode mcp list` connected + 无头会话调用成功 |
-| claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件（仅 Windows 位置核实过） | 未验证（`hostVerified=false`，重启后由 Owner 确认） |
+| claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件（仅 Windows 位置核实过） | 2026-10-12：重启后宿主日志记录握手完成、`tools/list` 收到返回（对话内调用未演练） |
 
 **前置条件**（仅 autoBind/codex 路径）：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
 
