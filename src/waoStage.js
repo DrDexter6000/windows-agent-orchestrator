@@ -113,6 +113,7 @@ export async function addStage(waoDir, { stage, task, artifacts, note, panel }) 
     `task: ${JSON.stringify(task)}`,
     panel?.seats ? `panel_seats: ${JSON.stringify(panel.seats)}` : "",
     panel?.skipReason ? `panel_skip_reason: ${panel.skipReason}` : "",
+    panel?.derived ? `panel_derived_json: ${JSON.stringify(panel.derived)}` : "",
     `date: ${new Date().toISOString().slice(0, 10)}`,
     `---`,
     ``,
@@ -127,6 +128,13 @@ export async function addStage(waoDir, { stage, task, artifacts, note, panel }) 
     panel?.seats
       ? `## Panel（三席会审记录，决策 0023）\n副审席位（自报、未验证）: ${panel.seats.join(" + ")}。` +
         `评审旁证（transcript 路径）走上方 Artifacts；席位记录是证据不是验收。`
+      : "",
+    // 0065：派生事实来源与结果（frontmatter 结构化 + 正文人读各一份；map 行
+    // 第 5 列 parsePanelSummary 不动——derived 不进索引摘要）。
+    panel?.derived
+      ? `### 派生事实（0045 §1.2，对抗前提=车道不同）\n来源: ${panel.derived.basis}\n` +
+        `作者上下文: ${panel.derived.authorContext}${panel.derived.reviewedRunIds?.length ? `（${panel.derived.reviewedRunIds.join(", ")}）` : ""}\n` +
+        `${panel.derived.authorAvoidanceViolations?.length ? `⚠ 回避违反（席位与作者同车道）: ${panel.derived.authorAvoidanceViolations.join("、")}` : "回避违反: 无（探测可比面内）"}`
       : "",
     panel?.skipReason
       ? `## Panel（会审跳过登记，决策 0023）\nskip 理由码: \`${panel.skipReason}\`（闭集值）。`
@@ -180,6 +188,34 @@ function assertPanelShape(stage, panel) {
     for (const seat of panel.seats) {
       if (typeof seat !== "string" || !seat.trim()) {
         throw new Error("--panel-seats 的每个席位必须是 registry 里的 worker id（非空字符串）。");
+      }
+    }
+  }
+  // 0065（0045 §1.2 终局）：panel.derived——对抗性派生事实（纯数据，由命令层
+  // 经 application/panelDerivation.js 算好传入——core 不 import application，
+  // L4 分层纪律）。闭集成员：authorContext/reviewedRunIds/authors/seats/pairwise/
+  // authorAvoidanceViolations/basis。形状坏=拒绝（派生事实不静默丢）。
+  if (panel.derived !== undefined) {
+    const d = panel.derived;
+    if (!d || typeof d !== "object" || Array.isArray(d)) {
+      throw new Error("panel.derived 必须是对象（panelDerivation.derivePanelFacts 输出）。");
+    }
+    if (!hasSeats) {
+      throw new Error("panel.derived 只与 --panel-seats 同给（无席位即无派生对象）。");
+    }
+    const closed = new Set(["authorContext", "reviewedRunIds", "authors", "seats", "pairwise", "authorAvoidanceViolations", "basis"]);
+    for (const k of Object.keys(d)) {
+      if (!closed.has(k)) throw new Error(`panel.derived 未知键 "${k}"（闭集 ${[...closed].join("/")}）。`);
+    }
+    if (typeof d.authorContext !== "string" || !["not_provided", "derived", "partial", "unreadable_or_missing"].includes(d.authorContext)) {
+      throw new Error("panel.derived.authorContext 必须在闭集 [not_provided/derived/partial/unreadable_or_missing] 内。");
+    }
+    if (typeof d.basis !== "string" || d.basis.length === 0) {
+      throw new Error("panel.derived.basis 必须是非空字符串（来源声明——sol 条款）。");
+    }
+    for (const key of ["reviewedRunIds", "authors", "seats", "pairwise", "authorAvoidanceViolations"]) {
+      if (d[key] !== undefined && !Array.isArray(d[key])) {
+        throw new Error(`panel.derived.${key} 必须是数组。`);
       }
     }
   }

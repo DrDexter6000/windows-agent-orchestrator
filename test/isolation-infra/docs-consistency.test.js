@@ -743,22 +743,13 @@ test("agents.example.json 车道条目的 backend/model/effort 完整且落在 r
   }
 });
 
-test("agents.example.json 全部车道条目显式声明 seatRole（R10-B 闭集；0046 模板全员显式）", () => {
-  // R10-B B-1：模板全员显式声明席位角色。0046 后命名惯例回退已死（旧席位名不存在），
-  // 显式声明是唯一判据。
+test("0065：agents.example.json 零 seatRole 声明（0045 §1.2 终局——对抗性改派生；恢复声明即红）", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
-  const CLOSED = ["adversarial", "implementation", "non_seat"];
-  const EXPECTED = {
-    "glm-pro": "implementation", "glm-flash": "implementation", kimi: "implementation",
-    sol: "implementation", astra: "adversarial", opus: "adversarial",
-    "deepseek-pro": "implementation", "deepseek-flash": "implementation",
-  };
-  for (const id of Object.keys(parsed.agents ?? {})) {
-    assert.ok(CLOSED.includes(parsed.agents[id]?.seatRole), `${id}.seatRole 必须落在闭集内（schema/引擎/展示同一词表）`);
-    if (EXPECTED[id] !== undefined) {
-      assert.equal(parsed.agents[id]?.seatRole, EXPECTED[id], `模板 ${id}.seatRole 必须显式 = ${EXPECTED[id]}`);
-    }
-  }
+  const declared = Object.entries(parsed.agents ?? {})
+    .filter(([, w]) => w && typeof w === "object" && "seatRole" in w)
+    .map(([id]) => id);
+  assert.deepEqual(declared, [],
+    "0065：模板零席位声明（席位角色维退役——对抗性从审者×作者车道派生，wao stage --reviewed-run）");
 });
 
 test("SSOT 分类标准存在：docs/ssot.md 是文档体系的权威类别定义", () => {
@@ -2599,8 +2590,8 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
     "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
   assert.ok(/zcode \/ codex \/ claude-code/.test(canary),
     "canary 的进程式车道必须并列 zcode / codex / claude-code（模板进程式车道代表；deepseek-acp 亦为进程式但需 dsh+containment 资产，§4f 句另行列入；TD-257 起 kimi-code 非模板车道，旧 trio 钉随之更新）");
-  assert.ok(/入库/.test(ob) && /车道/.test(ob) && /seatRole/.test(ob) && /gitignored/.test(ob),
-    "onboarding 必须区分入库模板（0046 车道键形状+全员显式 seatRole）与 gitignored 私人 agents.json 副本");
+  assert.ok(/入库/.test(ob) && /车道/.test(ob) && /gitignored/.test(ob),
+    "onboarding 必须区分入库模板（0046 车道键形状）与 gitignored 私人 agents.json 副本（0065：seatRole 声明已退役）");
 });
 
 test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / doctor HEALTHY 硬门 / CLI --cwd vs MCP workspace）", () => {
@@ -2652,7 +2643,7 @@ test("onboarding closeout: usage.md claude-code registry 示例为 0046 原生�
   assert.ok(/"reasoning"[\s\S]{0,200}"effort"/.test(ex), "sibling reasoning {effort}");
   assert.ok(!/"protocol": "anthropic-compatible"/.test(ex) && !/apiKeyEnv/.test(ex),
     "0046：原生 claude-code 无 provider wrapper 块");
-  assert.ok(/seatRole/.test(ex), "0046：示例显式声明 seatRole");
+  assert.ok(!/seatRole/.test(ex), "0065：示例不再声明 seatRole（席位角色维退役）");
 });
 
 test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {
@@ -3029,12 +3020,14 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
 //   - panelAdvisory：wao stage 成功输出的加性 JSON 字段名。
 //   - panel_readiness：doctor 条件 INFO 检查名。
 //   - login_based：readyState 六态闭集成员（application/onboarding.js 引擎域）。
+//   - key_only_*：readyState TD-258 两态族的通配写法（0065 分级句如实展示面）。
 export const USAGE_PANEL_ALLOWLIST = Object.freeze([
   "PANEL_SKIP_REASONS",
   "run_delivery_decide",
   "panelAdvisory",
   "panel_readiness",
   "login_based",
+  "key_only_*",
 ]);
 
 test("ADR 0023 关系型守卫: usage.md panel 节 skip 码与 waoStage SSOT 一致（前向覆盖 + 反向对账）", async () => {
@@ -3127,11 +3120,13 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
     "方案会审行不得保留'高风险信号才召集'旧姿态（0023 默认推荐）");
   assert.ok(!roles.includes("高风险或 Lead 低信心时，派 auditor"),
     "验收会审行不得保留'高风险/低信心才召集'旧姿态（0023 默认推荐）");
-  // AGENT_ONBOARDING.md 的副审配置建议（两席最佳 = auditor 专职 + coder 系替补）。
+  // AGENT_ONBOARDING.md 的副审配置建议（0065 多样性口径：任何车道可任副审，
+  // 对抗性按审者×作者车道派生——0046 的"对抗席+实现席车道"组合措辞已退役）。
   const ob = read("AGENT_ONBOARDING.md");
-  assert.ok(/对抗席车道/.test(ob) && /实现席车道/.test(ob),
-    "onboarding 副审建议必须给出对抗席车道 + 实现席车道的最佳组合（0046 措辞）");
-  assert.ok(/不同大模型族系|不同族系/.test(ob), "onboarding 副审建议必须含跨族系建议");
+  assert.ok(!/对抗席车道/.test(ob) && !/实现席车道/.test(ob),
+    "0065：onboarding 副审建议不得再用对抗席/实现席车道组合措辞（席位角色维退役）");
+  assert.ok(/不同族系/.test(ob), "onboarding 副审建议必须含跨族系建议");
+  assert.ok(/审者×作者车道派生|--reviewed-run/.test(ob), "0065：副审建议须指向派生机制（--reviewed-run）");
   assert.ok(ob.includes("决策 0023"), "onboarding 副审建议必须指向决策 0023");
   assert.ok(ob.includes("--panel-skip-reason"), "onboarding 副审建议必须提及 skip 登记出口");
 });

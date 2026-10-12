@@ -53,7 +53,7 @@ function makeEnv() {
   return dir;
 }
 
-test("wao lanes：成对面渲染——drift 判定/seatRole 原始声明/cert null 语义/readyState 闭集", async () => {
+test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 闭集（0065：seatRole 列退役）", async () => {
   const dir = makeEnv();
   try {
     const lines = [];
@@ -69,8 +69,7 @@ test("wao lanes：成对面渲染——drift 判定/seatRole 原始声明/cert n
     assert.ok(text.includes("显式拼接面"), "成对放行有横幅注记");
     assert.ok(text.includes("lane l1"), "l1 在场");
     assert.ok(/接线: 漂移——explicit 派发将拒绝/.test(text), "l2 drift 判定与拒绝语义");
-    assert.ok(text.includes("seatRole: adversarial"), "l1 显式声明透传");
-    assert.ok(text.includes("seatRole: 未声明"), "l2 未声明=未声明（非 non_seat）");
+    assert.ok(!text.includes("seatRole:"), "seatRole 列已退役（0065）");
     assert.ok(text.includes("certification: certified"), "台账匹配记录显示");
     assert.ok(text.includes("未取得匹配认证"), "l2 身份不匹配→null 语义文案");
     assert.equal(process.exitCode, undefined, "正常面不改退出码");
@@ -91,7 +90,6 @@ test("wao lanes --json：白名单投影——不泄漏 cwd/sessionReuse/missing
     } finally { console.log = origLog; }
     const l1 = payload.lanes.find((r) => r.id === "l1");
     assert.equal(l1.wiring, "wired");
-    assert.equal(l1.seatRole, "adversarial");
     assert.equal(l1.certification, "certified");
     assert.ok(READY_STATES.has(l1.readyState), `readyState 闭集成员（got ${l1.readyState}）`);
     const serialized = JSON.stringify(payload);

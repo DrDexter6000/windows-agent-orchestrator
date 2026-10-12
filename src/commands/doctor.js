@@ -15,9 +15,9 @@
 // worker 区分实际先发的拒因（SessionReuseWorkspaceRequiredError）。
 // R9（决策 0023）：新增条件 INFO panel_readiness（已配置面的三席会审就绪，
 // 三席齐备静默；registry 缺位沿 U1 INFO 跳过模式）——advisory，不计 DEGRADED。
-// R9-C C-1 返工：分级只统计席位候选（对抗席 auditor/coder_mm + 实现席 coder 系；
-// researcher 等非席位角色不进计数）；静默条件收窄为 three_seat 且含对抗席——
-// ≥2 席位候选但 0 对抗席时仍打印补配提示（消除假全清）。
+// 0065（0045 §1.2 终局）：席位角色维退役——分级改车道多样性口径（候选=全部
+// 归一化有效条目；族系多样性为主提示）；静默条件=three_seat 且已知族系 ≥2
+// ——三席全同族仍打印（假全清防线从"零对抗席"平移到"零跨族"）。
 //
 // 命令族：wao doctor [--strict] [--warn-as-error] [--format json] [--registry FILE] [--cwd DIR]
 //
@@ -55,6 +55,8 @@ import { gitChildEnv } from "../delivery.js";
 
 import { validateWaoDir } from "../waoDir.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
+// 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
+import { normalizeAgent } from "../registry.js";
 // R8-2：cwd 存在性判定复用 R7-AB 的 runManager SSOT（adapters→core 下向边）。
 import { probePredictedDispatchCwd } from "../runManager.js";
 // R8-2：与 R7 两层派发门同一能力键收窄——backendFor 构造无副作用
@@ -73,8 +75,7 @@ import { BACKEND_CLI } from "../application/backendCliMap.js";
 // R9（决策 0023）：三席会审就绪分级（已配置面）。分级推导与六态映射的单一实现
 // 在 application/panelReadiness.js（onboarding 的模板面共用同一份）——本文件只
 // 包装输入行（registry agents + 本命令既有的 CLI/key 探测事实），禁止在此重算分级。
-// R10-B：输入行带显式 seatRole 声明（与 onboarding 行生产方同形），declared
-// 优先于命名惯例（seatRoleOf 单一分类）。
+// 0065：panelReadiness 多样性口径（席位角色维已退役——行不再带 seatRole）。
 import { assessPanelReadiness, deriveReadyState } from "../application/panelReadiness.js";
 // R9：doctor INFO 文案与 waoStage 的 skip 码闭集对账（同一 SSOT import，禁值指纹）。
 import { PANEL_SKIP_REASONS } from "../waoStage.js";
@@ -83,8 +84,8 @@ import { readWindowsUserEnv as readWindowsUserEnvValue } from "../application/cr
 // TD-223（2026-10-07）：OAuth 临时目录报数复用 sweep 模块 dry-run（判定规则单一
 // 实现；doctor 只报数，永不执行删除）。
 import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
-// 0062（B9 乙′）：seatRole 漂移指针行——计数与 onboarding 矩阵同一比较器。
-import { seatRoleDriftRows } from "../application/onboarding.js";
+// 0065（0045 §1.2 终局）：0062 B9 乙′的 seatRole 漂移指针行整段删除（席位声明
+// 退役，无可比对对象——0065 决定档 supersession 记录）。
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -150,10 +151,14 @@ const CLI_INSTALL_HINT = {
   codex: "npm install -g @openai/codex",
   kimi: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
   opencode: "npm install -g opencode-ai",
+  dsh: "安装 dsh CLI（deepseek-acp 线驱动上游 dsh --profile acp；见 docs/certification-runbook.md §DSH 通道）",
 };
 
-// 固定的四个 CLI 探测名（scoped：无 worker 需要时 INFO 跳过，不再无条件探测）。
-const KNOWN_CLIS = ["claude", "codex", "kimi", "opencode"];
+// 0065（口径一致收口）：CLI 探测清单从 BACKEND_CLI 值域派生（去 null + 排序
+// 确定性）——此前手抄四名漏 dsh，deepseek-acp 车道在 doctor 面恒"探测未知"
+// （onboarding/lanes 面却正常探测——两面口径分叉，sol 会审"有效条目口径一致"
+// 原则的探测侧补齐）。scoped 语义不变：无 worker 需要时 INFO 跳过。
+const KNOWN_CLIS = [...new Set(Object.values(BACKEND_CLI).filter((c) => typeof c === "string"))].sort();
 
 /**
  * 构造一条 doctor 检查项。既有字段（name/pass/detail/level）兼容保留；
@@ -579,43 +584,47 @@ export async function waoDoctorCommand(args, config) {
     }
     // R9（决策 0023，三席会审就绪·已配置面）：输入 = 本命令既有的 registry
     // 读取 + CLI/key 探测事实（不新增探测）；分级推导在 application/
-    // panelReadiness.js（单一实现，onboarding 模板面共用）。仅当可用席位候选
-    // ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默）；INFO 不计
+    // panelReadiness.js（单一实现，onboarding 模板面共用）。0065：多样性口径
+    // ——行=归一化有效条目（sol P1：与 onboarding 已配置面同口径，残缺条目不
+    // 进计数）；仅当探测候选 ≤1 或已知族系不足两族时打印 INFO；INFO 不计
     // DEGRADED/退出码——advisory。
-    const panelRows = Object.entries(registryAgents).map(([id, agent]) => {
-      const requiresCli = BACKEND_CLI[agent?.backend] ?? null;
-      const names = requiredCredentialNames(agent);
+    const panelRows = [];
+    for (const [id, agent] of Object.entries(registryAgents)) {
+      // 归一化门（口径一致）：无效条目不进行（其修复出口是既有 per-agent 检查）。
+      let normalized = null;
+      try {
+        normalized = normalizeAgent(id, agent);
+      } catch { continue; }
+      const requiresCli = BACKEND_CLI[normalized.backend] ?? null;
+      const names = requiredCredentialNames(normalized);
       // TD-258：多名聚合成单一 key 态走共享函数（onboarding 同源），不再本文件内联。
       const key = names.length > 0
         ? aggregateCredentialSources(names.map((n) => keySource.get(n)))
         : undefined;
-      return {
+      panelRows.push({
         id,
-        backend: agent?.backend ?? null,
-        model: agent?.model?.id ?? null,
+        backend: normalized.backend ?? null,
+        model: normalized.model?.id ?? null,
         readyState: deriveReadyState({
           requiresCli,
           requiresKeyEnv: names.length > 0 ? names[0] : null,
           cli: requiresCli ? cliFound.get(requiresCli) : undefined,
           key,
         }),
-        // R10-B：显式席位声明（与 onboarding 行生产方同形）。非字符串一律
-        // undefined（坏值由 normalizeAgent 拒绝，探测行不复制）；absent 回退
-        // 命名惯例（panelReadiness.seatRoleOf 单一分类）。
-        seatRole: typeof agent?.seatRole === "string" ? agent.seatRole : undefined,
-      };
-    });
+      });
+    }
     const panel = assessPanelReadiness(panelRows);
-    // R9-C C-1.4：静默条件收窄为 three_seat 且含对抗席——≥2 席位候选但 0 对抗席
-    // 时仍打印（附补配提示行），消除"零对抗席 registry 假全清"（auditor 实跑病灶）。
-    if (panel.tier !== "three_seat" || panel.missingAdversarial) {
+    // 0065（opus P1-3）：静默条件=three_seat 且已知族系 ≥2——三席全同族仍打印
+    // （假全清防线从"零对抗席"平移到"零跨族"；R9-C C-1.4 同病预防）。
+    if (panel.tier !== "three_seat" || panel.insufficientFamilyDiversity) {
       const seatList = panel.available.map((e) => e.id).join("、");
       let detail;
       let fix;
-      if (panel.tier === "three_seat") {
-        detail = `已配置面：会审席位候选 ≥2（${seatList}）——物理上可配三席，但无可用对抗席（ready 面，seatRole=adversarial），`
-          + `两席分配语义要求对抗视角（0019/0023），建议补配；跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
-        fix = "增配对抗席车道（seatRole=adversarial）（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
+      if (panel.tier === "three_seat" && panel.insufficientFamilyDiversity) {
+        detail = `已配置面：会审探测候选 ≥2（${seatList}）——但已知族系不足两族（跨族系是更强推荐，0019/0023；`
+          + `对抗性按车道派生，0045 §1.2/wao stage --reviewed-run），建议补配跨族系车道；`
+          + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
+        fix = "增配跨族系可用车道（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       } else if (panel.tier === "two_seat" && panel.singleWorkerVacuous) {
         // C-16：单 worker 场景以空转事实为主句直给（先建议后撤回的话术废除）。
         detail = `已配置面：registry 仅一名 worker（${seatList}），它通常即被审产出作者（0019 §3 作者回避）`
@@ -623,14 +632,14 @@ export async function waoDoctorCommand(args, config) {
           + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
         fix = "增配第二名不同族系 worker（npm run cli -- wao onboarding --agent <id> --apply）后两席/三席建议才不空转；或用 --panel-skip-reason 登记（advisory，非门禁）";
       } else if (panel.tier === "two_seat") {
-        detail = `已配置面：会审副审仅 1 名可用（${seatList}）——三席会审（决策 0023）为推荐标准，`
+        detail = `已配置面：会审探测候选仅 1 名可用（${seatList}）——三席会审（决策 0023）为推荐标准，`
           + `可先两席（Lead 主审 + 一副审，次之推荐），补齐第二副审（建议不同族系）可升级三席；`
           + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
         fix = "按认证增配另一族系的可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐三席"
           + "——补配不同族系的第二副审可同时升级跨族系多样性；"
           + "或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       } else {
-        detail = "已配置面：会审副审 0 名可用——三席/两席会审暂不可配（决策 0023：强烈推荐但非强制）；"
+        detail = "已配置面：会审探测候选 0 名可用——三席/两席会审暂不可配（决策 0023：强烈推荐但非强制）；"
           + `有意跳过在 wao stage 2/4 用 --panel-skip-reason 登记（闭集码：${PANEL_SKIP_REASONS.join(" | ")}）`;
         fix = "按认证增配可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐会审席位；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       }
@@ -658,23 +667,8 @@ export async function waoDoctorCommand(args, config) {
         fix,
       });
     }
-    // 0062（B9 乙′）：私有 registry ↔ 模板 seatRole 漂移指针行——计数与
-    // onboarding 矩阵走同一比较器（seatRoleDriftRows，单一语义不造第二权威；
-    // opus 会审条款）。模板缺席/不可读 → 静默跳过（advisory fail-open）。
+    // 0062（B9 乙′→0065 supersede）：seatRole 漂移指针行已随席位声明退役删除。
     let registryLoadsDetail = `${agents.length} agents`;
-    try {
-      const templateRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-      const template = JSON.parse(await readFile(join(templateRoot, "config", "agents.example.json"), "utf8"));
-      const seatDriftRows = seatRoleDriftRows({ template, privateRegistry: { agents: registryAgents } });
-      if (seatDriftRows.length > 0) {
-        // 审核修订（sol）："命名惯例兜底"只对私有侧未声明的行成立——值不匹配行
-        // 面板用显式值，无兜底可言；计数分开报，不推断原因。
-        const undeclared = seatDriftRows.filter((r) => r.privateSeatRole === null).length;
-        registryLoadsDetail
-          += `；${seatDriftRows.length} 席 seatRole 与模板不一致（其中 ${undeclared} 席未声明——席位面板按命名惯例兜底）`
-            + `——npm run cli -- wao onboarding 查看 drift 明细`;
-      }
-    } catch { /* 模板缺席/不可读 → 指针行跳过（不改变 registry_loads 基线事实） */ }
     pushCheck(checks, { name: "registry_loads", pass: true, detail: registryLoadsDetail });
   }
 

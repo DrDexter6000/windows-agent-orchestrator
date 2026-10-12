@@ -15,13 +15,10 @@ export const REASONING_EFFORTS = Object.freeze([
   "minimal", "low", "medium", "high", "xhigh", "max",
 ]);
 
-// R10-B: seat role closed set (decision 0023 seat vocabulary — registry schema、
-// panelReadiness 引擎、展示层共用一个词汇表)。SEAT_ROLES 的家在 registry.js
-// (core)：panelReadiness.js（application）下向 import 它合法；反过来
-// registry→application 是上向边，触犯 L4 分层（TD-122 白名单已归零）。
-export const SEAT_ROLES = Object.freeze([
-  "adversarial", "implementation", "non_seat",
-]);
+// 0065（0045 §1.2 终局执行）：SEAT_ROLES 闭集随席位角色维退役删除——对抗性
+// 改派生事实（application/panelDerivation.js，审者×作者车道指纹）。历史：
+// R10-B 引入的闭集校验为 0023 三席会审服务；0065 起 seatRole 在场=弃用
+// advisory（validate 层，不拒载），归一化结果不再携带该字段（零消费面保证）。
 
 // TD-161: backend closed set SSOT — the complete list of runtimes WAO can
 // dispatch to. EXPORTED so every consumer validates against THIS array with
@@ -335,24 +332,14 @@ export function normalizeAgent(id, agent) {
       throw new Error(`Agent ${id}: sessionReuse must be one of the supported modes (got an unsupported value)`);
     }
   }
-  // R10-B: seatRole uses OWN-PROPERTY semantics like systemPrompt.
-  //   - property ABSENT → legitimate：席位角色回退既有命名惯例
-  //     （panelReadiness.seatRoleOf 的 adversarial/implementation/non_seat 分类，
-  //     老 registry 零迁移）。
-  //   - own property present, value non-string / outside the SEAT_ROLES closed
-  //     set → REJECT（显式声明必须落在闭集内；非席位用 "non_seat" 显式声明）。
-  // The error is a FIXED SAFE SHAPE: it never echoes the supplied value
-  // （坏值本身可能敏感或带注入载荷）。
-  if (Object.prototype.hasOwnProperty.call(agent, "seatRole")) {
-    if (typeof agent.seatRole !== "string" || !SEAT_ROLES.includes(agent.seatRole)) {
-      throw new Error(`Agent ${id}: seatRole must be one of the supported seat roles (adversarial/implementation/non_seat)`);
-    }
-  }
+  // 0065（0045 §1.2 终局）：seatRole 校验删除——字段废弃，归一化结果 strip
+  // （不原地删输入对象——raw 供 validate 层出弃用 advisory；sol 条款）。
   // M11-9: canonical model/reasoning/provider policy validation + legacy normalization.
   normalizeModelPolicy(id, agent);
+  const { seatRole: _retiredSeatRole, ...rest } = agent ?? {};
   return {
     id,
-    ...agent,
+    ...rest,
   };
 }
 

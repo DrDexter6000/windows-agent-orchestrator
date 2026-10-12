@@ -127,7 +127,10 @@ const REGISTERED_CENSUS = {
   "scorecard.js": { "claude-code": 1 },
   // TD-229（2026-10-07）：doctor 5d 认证模式检查按 backend==="claude-code" &&
   // !provider 筛 native worker（轴向=native OAuth 通道识别，非全后端分叉）。
-  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1 },
+  // 0065（2026-10-12）：KNOWN_CLIS 改从 BACKEND_CLI 值域派生（修手抄漏 dsh 的
+  // 两面口径分叉）——原数组字面里的 CLI 名 "codex" 随之离开本文件（doctor 的
+  // 后端身份串轴不变）。
+  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, "kimi-code": 1, "opencode-serve": 1 },
   // TD-258（2026-10-11）：recommendationReadyLabel 加 zcode/kimi-web 显示覆盖
   // （"无 CLI 探测面"/"serve 探测未覆盖"——轴向=无 CLI 面车道的错标修正，非
   // runtime 分叉）。

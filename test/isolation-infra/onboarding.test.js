@@ -40,8 +40,6 @@ import {
   runOnboarding,
   MAX_CANDIDATES,
   displayWidth,
-  seatRoleDriftBetween,
-  seatRoleDriftRows,
 } from "../../src/application/onboarding.js";
 
 // The human renderer lives in the (thin) command layer; importing it does NOT
@@ -1452,25 +1450,17 @@ test("R6-C2/R9: 矩阵渲染含 backend 列、登录态行写明具体 CLI、分
   // 登录态行写明具体 CLI（第二行布局）。
   assert.match(text, /认证: codex CLI 登录态/, "登录态行的认证标签必须写明具体 CLI 名");
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 型行标签不变");
-  // R9-C C-1 分级块：席位候选只有 coder_hq（w_key/tester 非席位角色）→ 两席。
+  // R9/0065 分级块：候选=全部行（角色维退役）——w_key/coder_hq 是 ready（key 型）、
+  // tester 是 login_based（codex 无 key 声明）→ 两名可用 → 三席。
   assert.ok(text.includes("会审就绪（模板面"), "分级块头部标注模板面数据源");
-  assert.ok(text.includes("两席可用——次之推荐（Lead 主审 + 一名副审）"),
-    "仅一名可用席位候选 → 两席分级措辞（非席位角色不进计数）");
+  assert.ok(text.includes("三席可配——探测候选 ≥2"),
+    "两名 ready 候选 → 三席分级措辞（0065：全部行计数，不再有非席位过滤）");
   assert.ok(text.includes("决策 0023"), "分级块指向决策 0023");
-  assert.ok(/可用副审: coder_hq（推断族系：Claude）——补齐第二个副审（建议不同族系）可升级三席/.test(text),
-    "可用副审枚举席位候选并带推断族系标签（C-9 推断 hedging；w_key/tester 不进）");
-  assert.ok(!text.includes("建议席位组合"), "不足两名席位候选 → 无建议组合行");
-  // tester 是 login_based 但非席位角色：其登录态只进矩阵行（[CLI 登录态] 括号），
-  // 不进分级块的"登录态未验证"席位叙事。
-  assert.ok(!text.includes("登录态未验证"), "非席位角色的登录态不进分级块席位叙事");
-  // 席位惯例句从矩阵行派生：枚举实际存在的 coder 通道（此处恰为 coder_hq），
-  // 对抗席候选同样从行派生（此处无 auditor/coder_mm 行 → 不点名）。
-  assert.ok(text.includes("实现席从 coder 通道取（避同族/避被审产出作者）"),
-    "席位惯例句保留 0019 §3 回避语义");
-  assert.ok(/在场候选（从上表模板行派生）: 实现席 coder_hq/.test(text),
-    "在场候选枚举矩阵中实际存在的 coder 通道 id");
-  assert.ok(!text.includes("对抗席"), "不在模板中的对抗席 worker 不点名（shape-derived）");
-  assert.ok(text.includes("0019 §3"), "席位回避规则指向 0019 §3（0023 保留条款）");
+  assert.ok(/建议配对（族系最大化展示，选位权在 Lead）/.test(text) && text.includes("推断族系"),
+    "三席时建议配对行在场并带推断族系标签");
+  // 0065：席位惯例句（实现席/对抗席清单）已随角色维退役删除。
+  assert.ok(!text.includes("在场候选"), "席位惯例句不再打印（角色维退役）");
+  assert.ok(!text.includes("对抗席"), "对抗席词汇从分级块退役");
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1502,15 +1492,15 @@ test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-d
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 2, "矩阵本身照常渲染（前置条件）");
   assert.ok(text.includes("角色矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
-  assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 席位惯例句整句不打印");
+  assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 旧席位惯例句不打印（0065 已整体退役）");
   assert.ok(!text.includes("coder_hq") && !text.includes("coder_low") && !text.includes("coder_mm"),
     "不得打印模板里没有的 worker id");
-  // R9-C C-1：分级块照常（两行均 ready 但都非席位角色 → 无可用席位候选），
-  // 且不点名缺席的对抗席候选。
+  // 0065：角色维退役——w_key（ready）计入 → 两席（旧语义因 w_key/tester 非席位
+  // 而判 none；终局不再有非席位过滤，分级按 ready 候选计数）。
   assert.ok(text.includes("会审就绪（模板面"), "分级块不受 coder 通道缺失影响");
-  assert.ok(text.includes("当前无可用席位候选（对抗席/实现席）"), "零席位候选 → none 分级措辞");
-  assert.ok(!text.includes("对抗席候选"), "无 auditor/coder_mm 行时对抗席候选不点名");
-  // 尾行选位提示仍在（与席位惯例句是两句话）。
+  assert.ok(text.includes("两席可配——探测候选恰 1"), "一名 ready 候选 → 两席分级措辞（0065 口径）");
+  assert.ok(!text.includes("在场候选"), "席位惯例句已退役（0065）");
+  // 尾行选位提示仍在。
   assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply"), "选位提示行不受影响");
   rmSync(dir, { recursive: true, force: true });
 });
@@ -1680,13 +1670,13 @@ test("R9 需求 1: no-args 与 selected/--apply 两出口都打印分级块（�
     assert.equal(r2.panelFace, "configured", "--apply 成功后分级块数据面 = 已配置面");
     assert.equal(r2.panelConfiguredCount, 1, "生成的 registry 恰 1 名 worker");
     assert.ok(text2.includes("会审就绪（已配置面"), "selected/--apply 出口打印分级块（已配置面）");
-    assert.ok(text2.includes("两席可用——次之推荐"), "单 worker 已配置面 → 两席（不是模板三席）");
-    assert.ok(!text2.includes("三席可用"), "不得显示模板面多 worker 矩阵的'三席可用'（谎言修复核心）");
+    assert.ok(text2.includes("两席可配——探测候选恰 1"), "单 worker 已配置面 → 两席（不是模板三席）");
+    assert.ok(!text2.includes("三席可配"), "不得显示模板面多 worker 矩阵的'三席可配'（谎言修复核心）");
     assert.ok(text2.includes("registry 仅一名 worker"), "单 worker 注脚面感知（registry 措辞而非模板措辞）");
     assert.ok(!text2.includes("模板仅一名 worker"), "已配置面不得出现模板措辞注脚");
     assert.ok(text2.includes("已配置 1 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"),
       "指针行在场（1 名 worker 计数 + 完整体检指向 doctor）");
-    assert.ok(text2.includes("在场候选（从已配置 registry 派生）"), "惯例句来源标签切到已配置面");
+    assert.ok(!text2.includes("在场候选"), "席位惯例句已退役（0065）");
     assert.ok(!text2.includes("按你有的认证"), "selected 分支不带 no-args 的选位尾行（两出口形状不同）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
@@ -1707,9 +1697,9 @@ test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说
     });
     assert.equal(r.panelReadiness.tier, "two_seat");
     const text = renderHuman(r);
-    assert.ok(text.includes("两席可用——次之推荐（Lead 主审 + 一名副审）"), "两席分级措辞");
-    assert.ok(/可用副审: coder_hq（推断族系：GLM）——补齐第二个副审（建议不同族系）可升级三席/.test(text),
-      "补齐第二副审升级句在场（C-9 推断族系 hedging）");
+    assert.ok(text.includes("两席可配——探测候选恰 1（次之推荐：Lead 主审 + 一名副审）"), "两席分级措辞（0065）");
+    assert.ok(/可用候选: coder_hq（推断族系：GLM）——补齐第二个候选（建议不同族系）可升级三席/.test(text),
+      "补齐第二候选升级句在场（C-9 推断族系 hedging）");
     assert.ok(!text.includes("单 worker"), "多 worker 时单 worker 注脚不出现");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
@@ -1722,7 +1712,7 @@ test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说
     const r = await runWithTemplate(solo, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
     assert.equal(r.panelReadiness.tier, "two_seat");
     const text = renderHuman(r);
-    assert.ok(text.includes("两席可用——次之推荐"), "单可用副审仍按两席分级（前置条件）");
+    assert.ok(text.includes("两席可配——探测候选恰 1"), "单可用候选仍按两席分级（前置条件）");
     assert.ok(text.includes("它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转"),
       "单 worker 注脚必须明说空转");
   } finally {
@@ -1730,7 +1720,7 @@ test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说
   }
 });
 
-test("R9 需求 2/4: 无可用副审 → 跳过提示（--panel-skip-reason 登记句在场）", async () => {
+test("R9 需求 2/4: 无可用候选 → 跳过提示（--panel-skip-reason 登记句在场）", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
     coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
@@ -1740,7 +1730,7 @@ test("R9 需求 2/4: 无可用副审 → 跳过提示（--panel-skip-reason 登�
     const r = await runWithTemplate(root, { hasCli: async () => false, hasKeyEnv: async () => "missing" });
     assert.equal(r.panelReadiness.tier, "none");
     const text = renderHuman(r);
-    assert.ok(text.includes("当前无可用席位候选"), "none 分级措辞");
+    assert.ok(text.includes("当前零可用候选（探测口径）"), "none 分级措辞（0065）");
     assert.ok(text.includes("--panel-skip-reason"), "跳过需登记理由的提示在场");
     assert.ok(text.includes("强烈推荐但非强制"), "非强制定位明示");
   } finally {
@@ -1748,7 +1738,7 @@ test("R9 需求 2/4: 无可用副审 → 跳过提示（--panel-skip-reason 登�
   }
 });
 
-test("R9 需求 5: 同族提示——≥2 可用但推断族系单一 → 跨族系是更强推荐一行", async () => {
+test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系单一 → 跨族系是更强推荐一行", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
     coder_g1: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
@@ -1758,13 +1748,11 @@ test("R9 需求 5: 同族提示——≥2 可用但推断族系单一 → 跨族
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
     assert.equal(r.panelReadiness.tier, "three_seat");
     assert.equal(r.panelReadiness.insufficientFamilyDiversity, true);
-    assert.equal(r.panelReadiness.missingAdversarial, true, "双实现席零对抗席（前置条件）");
+    assert.ok(!("missingAdversarial" in r.panelReadiness), "missingAdversarial 已随 seatRole 退役删除");
     const text = renderHuman(r);
-    assert.ok(text.includes("跨族系提示"), "同族提示行在场");
+    assert.ok(text.includes("跨族系提示"), "同族提示行在场（0065 起主提示）");
     assert.ok(text.includes("跨族系是更强推荐"), "跨族系推荐措辞");
     assert.ok(text.includes("未知族系不参与判定"), "未知族系不参与判定的括注随提示行在场");
-    assert.ok(text.includes("当前无可用对抗席（ready 面）——两席分配语义要求对抗视角，建议补配"),
-      "C-1：零对抗席的补配提示行在场");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -1813,12 +1801,13 @@ test("R9: panelReadiness 是加性字段——既有键全保留、JSON 可序�
     for (const e of [...json.panelReadiness.available, ...json.panelReadiness.seats]) {
       assert.ok(typeof e.id === "string" && typeof e.family === "string");
     }
-    // R9-C C-1/C-5/C-6：新投影字段形状（injectedAuth/probeUnknown/missingAdversarial/
-    // insufficientFamilyDiversity）都是加性可序列化成员。
-    for (const key of ["injectedAuth", "probeUnknown", "missingAdversarial", "insufficientFamilyDiversity"]) {
+    // R9-C C-5/C-6/0065：新投影字段形状（injectedAuth/probeUnknown/keyOnly/
+    // insufficientFamilyDiversity/duplicateModelKeys）都是加性可序列化成员。
+    for (const key of ["injectedAuth", "probeUnknown", "keyOnly", "insufficientFamilyDiversity", "duplicateModelKeys"]) {
       assert.ok(key in json.panelReadiness, `panelReadiness 投影缺加性字段：${key}`);
     }
     assert.ok(!("sameFamily" in json.panelReadiness), "旧字段名 sameFamily 不再投影（C-6 改名）");
+    assert.ok(!("missingAdversarial" in json.panelReadiness), "missingAdversarial 已随 seatRole 退役删除");
     assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(json.panelReadiness)), "不携带凭证值");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
@@ -1869,25 +1858,23 @@ test("R9: 分级块每行显示宽 ≤120（与矩阵块同纪律）", async () 
 
 // ── 18c. R9-C 返工（auditor 实跑病灶 + C-5/C-12 展示归类）──────────────────────
 
-test("R9-C C-1（auditor 实跑病灶）: researcher 进建议被修复——非席位角色永不进建议组合", async () => {
+test("0065 语义翻转钉（R9-C C-1 历史病灶位）: 角色名键照常计入候选——researcher 不再被排除", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
-  // 实跑失败形状：researcher（DeepSeek key 在）+ coder_hq（GLM key 在）双 ready，
-  // 旧引擎曾建议 "researcher + coder_hq"（调研角色进建议 + 零对抗席）。
+  // 历史形状：researcher（DeepSeek key 在）+ coder_hq（GLM key 在）双 ready。
+  // R9-C C-1 旧语义：researcher=非席位不进计数/建议；0065 终局（0045"角色是
+  // 帽子"）：任何车道键都可能任副审——本测试钉死语义翻转，防悄悄退回角色过滤。
   const root = tmpTemplate({
     researcher: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
     coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
-    assert.equal(r.panelReadiness.tier, "two_seat", "仅 coder_hq 是席位候选 → 两席");
-    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq"],
-      "researcher（ready）不进可用席位候选");
-    assert.equal(r.panelReadiness.seats, null, "无建议组合（不足两名席位候选）");
-    const text = renderHuman(r);
-    assert.ok(!text.includes("建议席位组合"), "不输出建议组合行");
-    assert.ok(!/researcher[^\n]{0,20}(副审|席位组合)/.test(text),
-      "researcher 不得被讲成副审/建议组合成员");
-    assert.ok(/可用副审: coder_hq（推断族系：GLM）/.test(text), "可用副审只点名席位候选");
+    assert.equal(r.panelReadiness.tier, "three_seat", "两名 ready 候选 → 三席（角色维退役）");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["researcher", "coder_hq"],
+      "researcher（ready）照常进可用候选（0045 角色是帽子）");
+    assert.ok(r.panelReadiness.seats !== null, "有建议配对（跨族对：DeepSeek×GLM）");
+    assert.deepEqual(r.panelReadiness.seats.map((e) => e.id), ["researcher", "coder_hq"],
+      "建议配对=族系最大化（跨族对胜出）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -1943,7 +1930,7 @@ test("R9-C C-12: 探测未知如实展示一行（docblock 承诺的展示面兑
 // 切换（同一 panelReadiness 引擎、同一探测实现——只是输入行换了）。全部探测仍是
 // 注入式 probeEnv，绝无真实探测/真实派发。
 
-test("R10-B B-1: 模板面 declared 优先——my_reviewer+adversarial 计入对抗席（未声明同 id 回退非席位）", async () => {
+test("0065: 模板面计数与 declared 无关——任何 ready 行都计入候选（seatRole 字段已废弃为惰性）", async () => {
   const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
   const root = tmpTemplate({
     my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
@@ -1951,28 +1938,27 @@ test("R10-B B-1: 模板面 declared 优先——my_reviewer+adversarial 计入�
   }, "wao-onb-decl-");
   try {
     const r = await runWithTemplate(root, probeAll);
-    assert.equal(r.panelReadiness.tier, "three_seat", "declared 对抗席 + 实现席 → 三席（模板面）");
+    assert.equal(r.panelReadiness.tier, "three_seat", "两名 ready 候选 → 三席（角色维退役）");
     assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["my_reviewer", "coder_hq"],
-      "declared 席位都计入可用");
-    assert.equal(r.panelReadiness.missingAdversarial, false, "declared 对抗席满足对抗视角");
+      "自定义 id 照常计入（不再有 non_seat 回退）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
-  // 同 id 未声明 → 回退非席位：只剩 coder_hq → 两席。
+  // 同 id 无声明：与带声明同输入同结果（字段惰性——0065 终局钉）。
   const undeclRoot = tmpTemplate({
     my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" } },
     coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
   }, "wao-onb-undecl-");
   try {
     const r = await runWithTemplate(undeclRoot, probeAll);
-    assert.equal(r.panelReadiness.tier, "two_seat", "未声明的自定义 id 回退非席位（既有行为）");
-    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq"]);
+    assert.equal(r.panelReadiness.tier, "three_seat", "无声明同输入 → 同分级（seatRole 惰性）");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["my_reviewer", "coder_hq"]);
   } finally {
     rmSync(join(undeclRoot, ".."), { recursive: true, force: true });
   }
 });
 
-test("R10-B B-1: 已配置面 declared 优先——私有 registry 的 my_reviewer+adversarial 计入对抗席", async () => {
+test("0065: 已配置面计数与 declared 无关——私有 registry 行照常计入（席位声明惰性）", async () => {
   const root = tmpTemplate({ ghost_tpl: { backend: "codex" } }, "wao-onb-cfgdecl-");
   // R10-C C-2 起已配置面逐条过 normalizeAgent——fixture 用完整 provider 形状
   // （protocol/baseUrl/apiKeyEnv 三字段齐全），与真实可派发 registry 一致。
@@ -1986,10 +1972,9 @@ test("R10-B B-1: 已配置面 declared 优先——私有 registry 的 my_review
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" },
       { privateRegistryPath: join(root, "config", "agents.json") });
     assert.equal(r.panelFace, "configured");
-    assert.equal(r.panelReadiness.tier, "three_seat", "declared 对抗席 + 实现席 → 三席（已配置面）");
+    assert.equal(r.panelReadiness.tier, "three_seat", "两名 ready → 三席（已配置面，角色维退役）");
     assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["my_reviewer", "coder_hq"],
       "已配置面输入行来自私有 registry（模板行 ghost_tpl 不进场）");
-    assert.equal(r.panelReadiness.missingAdversarial, false);
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -2029,7 +2014,9 @@ test("R10-B B-2: readiness 块双面切换——absent 模板面；present+reada
     assert.ok(tCfg.includes("会审就绪（已配置面·按当前环境探测，决策 0023）"), "已配置面标题");
     assert.ok(tCfg.includes("已配置 2 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"),
       "指针行在场（计数 = 私有 registry worker 数）");
-    assert.ok(tCfg.includes("在场候选（从已配置 registry 派生）"), "惯例句来源标签切到已配置面");
+    // 0065：席位惯例句（实现席/对抗席清单）已随角色维退役删除。
+    assert.ok(!tCfg.includes("在场候选"), "席位惯例句不再打印（角色维退役）");
+    assert.ok(!tCfg.includes("对抗席"), "对抗席词汇从就绪块退役");
     // (3) corrupt（不可解析 JSON）→ 降级模板面 + 来源不可读标注；主流程不报错。
     writeFileSync(privPath, "{ not valid json");
     const rBad = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
@@ -2053,22 +2040,23 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
   }, "wao-onb-invalid-");
   const privPath = join(root, "config", "agents.json");
   try {
-    // (1) 混合：2 条合法 + 1 条 seatRole 闭集外（auditor 的注入形状——
-    // validate/getAgent 双拒，修复前却被渲染成席位候选并声称真实状态以它为准）。
+    // (1) 混合：2 条合法 + 1 条未知 backend（0065 前 fixture 用 seatRole 闭集外
+    // 制造无效条目——字段废弃后改用坏 backend 形状，语义不变：validate/getAgent
+    // 双拒的条目不得进已配置面渲染）。
     writeFileSync(privPath, JSON.stringify({
       agents: {
         coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
         auditor: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "claude-opus-5" }, seatRole: "adversarial" },
-        bad_seat: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "bogus" },
+        bad_seat: { backend: "not-a-real-backend", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" } },
       },
     }));
     const r = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
     assert.equal(r.panelFace, "configured", "可读 → 仍是已配置面（第四态不降级）");
     assert.equal(r.panelConfiguredCount, 3, "计数仍是私有 registry 的真实 worker 数");
-    assert.equal(r.panelInvalidEntryCount, 1, "无效条目计数 = 1（seatRole 闭集外）");
+    assert.equal(r.panelInvalidEntryCount, 1, "无效条目计数 = 1（未知 backend）");
     assert.equal(r.panelReadiness.rowCount, 2, "行渲染只含过 normalizeAgent 的条目");
     assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq", "auditor"],
-      "被拒条目不进席位候选（不再以真实状态口径渲染坏数据）");
+      "被拒条目不进候选（不再以真实状态口径渲染坏数据）");
     const text = renderHuman(r);
     assert.ok(text.includes("私有 registry 有 1 条无效条目已剔除——run: npm run cli -- registry validate"),
       "有界提示行在场并指向共享校验权威");
@@ -2076,7 +2064,7 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
 
     // (2) 全无效：不得被"零行整块不打印"吞掉——提示行仍必须在场。
     writeFileSync(privPath, JSON.stringify({
-      agents: { bad_seat: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", seatRole: "bogus" } },
+      agents: { bad_seat: { backend: "not-a-real-backend", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." } },
     }));
     const rAll = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
     assert.equal(rAll.panelFace, "configured");
@@ -2101,49 +2089,50 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
   }
 });
 
-test("R10-B B-1: 0046 模板 seatRole 全员显式——对抗席=auditor 家族落点车道（移除字段即红）", async () => {
-  // 0046：旧席位名命名惯例回退已死（席位名不存在），显式 seatRole 是唯一判据。
+test("0065: 0046 模板 seatRole 声明已全数删除（退役钉——恢复声明即红）+ 投影无席位清单字段", async () => {
   const raw = readFileSync(join("config", "agents.example.json"), "utf8");
+  const template = JSON.parse(raw);
+  const declared = Object.entries(template.agents)
+    .filter(([, a]) => a && typeof a === "object" && "seatRole" in a)
+    .map(([id]) => id);
+  assert.deepEqual(declared, [], "0065：模板零席位声明（0045 §1.2 终局——对抗性改派生）");
   const { result } = await memRun({
     initial: { "D:/wao/config/agents.example.json": raw },
     probeEnv: { hasCli: async () => true, hasKeyEnv: async () => "missing" },
   });
   const r = await result;
   assert.equal(r.outcome, "needs-selection");
-  assert.deepEqual(r.panelReadiness.implementationIds.slice().sort(),
-    ["deepseek-flash", "deepseek-pro", "glm-flash", "glm-pro", "kimi", "sol"],
-    "实现席清单 = 模板显式 implementation 的六条车道");
-  assert.deepEqual(r.panelReadiness.adversarialIds.slice().sort(), ["astra", "opus"],
-    "对抗席清单 = 模板显式 adversarial 的 auditor 家族落点（astra+opus）");
+  assert.ok(!("adversarialIds" in r.panelReadiness), "adversarialIds 已随角色维退役删除");
+  assert.ok(!("implementationIds" in r.panelReadiness), "implementationIds 已删除");
+  assert.ok(!("missingAdversarial" in r.panelReadiness), "missingAdversarial 已删除");
 });
 
-test("R10-B B-1: --apply 生成物逐字携带 seatRole（buildMinimalRegistry 注释剥离不动业务字段）", () => {
+test("0065: --apply 生成物不含 seatRole（模板已零声明；字段退役钉）", () => {
   const template = JSON.parse(readFileSync(join("config", "agents.example.json"), "utf8"));
   const fl = buildMinimalRegistry({ template, agentId: "deepseek-flash" });
-  assert.equal(fl.agents["deepseek-flash"].seatRole, "implementation",
-    "生成物携带显式 seatRole（逐字拷贝模板条目）");
+  assert.ok(!("seatRole" in fl.agents["deepseek-flash"]), "生成物不含 seatRole（0065 终局）");
   const ad = buildMinimalRegistry({ template, agentId: "astra" });
-  assert.equal(ad.agents.astra.seatRole, "adversarial");
+  assert.ok(!("seatRole" in ad.agents.astra));
 });
 
-test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry 同一探测事实 → 同一分级", async () => {
-  const { deriveReadyState, assessPanelReadiness, seatRoleOf } = await import("../../src/application/panelReadiness.js");
+test("R10-B B-2/0065: doctor/onboarding 已配置面数字对账——同一 registry 同一探测事实 → 同一分级", async () => {
+  const { deriveReadyState, assessPanelReadiness } = await import("../../src/application/panelReadiness.js");
   const registry = {
     agents: {
       // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 provider 形状。
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
-      coder_low: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "implementation" },
-      researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" }, seatRole: "non_seat" },
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" } },
+      coder_low: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" } },
+      researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" } },
     },
   };
   const probeFacts = { hasCli: async () => true, hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing") };
   // doctor 形状的行生产：同一 readyState 映射（deriveReadyState = 两生产方共用的
   // 单一实现）+ 同一探测事实。doctor 与 onboarding 都是同一引擎的输入包装。
+  // 0065：行不再携带 seatRole（角色维退役）。
   const doctorRows = Object.entries(registry.agents).map(([id, agent]) => ({
     id,
     backend: agent.backend,
     model: agent.model?.id ?? null,
-    seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,
     readyState: deriveReadyState({
       requiresCli: BACKEND_CLI[agent.backend] ?? null,
       requiresKeyEnv: agent.provider?.apiKeyEnv ?? null,
@@ -2159,14 +2148,9 @@ test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry
     assert.equal(r.panelFace, "configured");
     assert.equal(r.panelReadiness.tier, doctorAssessed.tier, "同输入同引擎 → 同分级");
     assert.deepEqual(r.panelReadiness.available.map((e) => e.id), doctorAssessed.available.map((e) => e.id),
-      "可用席位 id 列表对账");
-    assert.equal(r.panelReadiness.missingAdversarial, doctorAssessed.missingAdversarial);
+      "可用候选 id 列表对账");
     assert.equal(r.panelReadiness.insufficientFamilyDiversity, doctorAssessed.insufficientFamilyDiversity);
     assert.equal(r.panelReadiness.singleWorkerVacuous, doctorAssessed.singleWorkerVacuous);
-    assert.deepEqual(
-      r.panelReadiness.implementationIds,
-      doctorRows.filter((row) => seatRoleOf(row.id, row.seatRole) === "implementation").map((row) => row.id),
-      "实现席候选清单与 doctor 行同源对账（两生产方同一 seatRoleOf）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -2214,11 +2198,9 @@ const GOLDEN_TEMPLATE_MATRIX = `角色矩阵与当前环境适配（推荐按你
     认证: claude CLI 登录态（官方 Claude OAuth（claude logi… · 适合: 前置方案审计/后置独立复核/PASS-FAIL 判定
 `;
 const GOLDEN_TEMPLATE_BLOCK = `${GOLDEN_TEMPLATE_MATRIX}
-会审就绪（模板面·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）
-  可用副审: coder_low（推断族系：DeepSeek）——补齐第二个副审（建议不同族系）可升级三席
-  登录态未验证（如实展示，不计入可用）: coder_mm、auditor
-  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定
-  在场候选（从上表模板行派生）: 实现席 coder_low；对抗席 coder_mm、auditor`;
+会审就绪（模板面·按当前环境探测，决策 0023）: 两席可配——探测候选恰 1（次之推荐：Lead 主审 + 一名副审）
+  可用候选: coder_low（推断族系：DeepSeek）——补齐第二个候选（建议不同族系）可升级三席
+  登录态未验证（如实展示，不计入可用）: coder_mm、auditor`;
 
 // 不可读回退面只比矩阵部分前缀（分级块尾部多一条 sourceUnreadable 标注行）。
 function matrixBlock(text) {
@@ -2294,68 +2276,14 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
 // 私有副本从未刷新，席位面板退回命名惯例兜底，车道键名不匹配惯例即从席位面消失。
 // 审核修订（opus）：模板未声明 = 不可比不判（与矩阵 modelId 轴"双侧在场才比"同律，
 // 反向不对称亦不判）。
-test("0062 B9 乙′: seatRoleDriftBetween/Rows 单一语义（模板未声明不判；模板声明而私有缺席/值不同=drift；模板不携带不比）", () => {
-  assert.equal(seatRoleDriftBetween(null, null), null, "双缺 = 形状差异 ≠ drift");
-  assert.equal(seatRoleDriftBetween({}, {}), null, "双未声明不判");
-  assert.equal(
-    seatRoleDriftBetween({ seatRole: "implementation" }, {}),
-    null,
-    "模板未声明 = 不可比（反向不对称不判——审核修订）",
-  );
-  assert.equal(seatRoleDriftBetween({ seatRole: "implementation" }, { seatRole: "implementation" }), null, "同值不判");
-  assert.deepEqual(
-    seatRoleDriftBetween({}, { seatRole: "adversarial" }),
-    { privateSeatRole: null, templateSeatRole: "adversarial" },
-    "模板声明而私有缺席 = drift（本批病灶形状）",
-  );
-  assert.deepEqual(
-    seatRoleDriftBetween({ seatRole: "non_seat" }, { seatRole: "implementation" }),
-    { privateSeatRole: "non_seat", templateSeatRole: "implementation" },
-    "显式 non_seat 是合法语义选择——值不同如实判 drift，不擅自推定（sol 定界）",
-  );
-  const rows = seatRoleDriftRows({
-    template: { agents: { kimi: { seatRole: "implementation" }, astra: { seatRole: "adversarial" } } },
-    privateRegistry: { agents: { kimi: {}, private_only: {}, astra: { seatRole: "adversarial" } } },
-  });
-  assert.deepEqual(rows, [{ id: "kimi", privateSeatRole: null, templateSeatRole: "implementation" }],
-    "模板不携带的私有席位（裁剪合法）不进比对；同值不进");
-});
 
-test("0062 B9 乙′: 矩阵 seatRole drift 可见——行挂 ·drift + 明细带 templateSeatRole（模板声明形）", async () => {
-  // 模板覆盖：coder_low 声明 seatRole（drift 需要"模板声明了才可比"——审核修订）。
-  const tplDeclared = structuredClone(TEMPLATE);
-  tplDeclared.agents.coder_low.seatRole = "implementation";
-  const priv = {
-    agents: {
-      // 私有侧未声明 → 病灶形状 drift。
-      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { reasoning: { effort: "max" } }),
-    },
-  };
-  const { result } = await memRun({
-    probeEnv: PROBE_ALL_READY,
-    privateRegistryPath: "D:/wao/config/agents.json",
-    initial: {
-      "D:/wao/config/agents.example.json": JSON.stringify(tplDeclared),
-      "D:/wao/config/agents.json": JSON.stringify(priv),
-    },
-  });
-  const r = await result;
-  const row = r.recommendations.rows.find((x) => x.id === "coder_low");
-  assert.ok(row.drift, "seatRole 轴触发 drift 旗标");
-  assert.equal(row.drift.templateSeatRole, "implementation", "drift 明细携带模板侧值（私有侧值在行上）");
-  const text = renderHuman(r);
-  const lowLine = text.split("\n").find((l) => l.startsWith("  coder_low "));
-  assert.ok(lowLine.includes("·drift"), "行挂 ·drift 旗标");
-  assert.ok(text.includes("drift(seatRole): coder_low 模板 seatRole=implementation（私有侧未声明或与模板不同）"),
-    "drift 明细含 seatRole 轴独立一行（模板侧值展示，不断言兜底原因——sol 审核条款）");
-});
 
 test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + 私有独有行省略适合段 + C-2 提示共存 + 行宽 ≤120", async () => {
   const priv = {
     agents: {
       coder_low: privEntry("claude-code", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
       my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有（无 _comment_task）
-      bad_seat: privEntry("claude-code", "deepseek-v4-flash", "ZHIPU_API_KEY", { seatRole: "bogus" }), // 无效 → 剔除
+      bad_seat: privEntry("not-a-real-backend", "deepseek-v4-flash", "ZHIPU_API_KEY"), // 无效 → 剔除
     },
   };
   const { result } = await memRun({
@@ -2399,7 +2327,7 @@ test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + dr
 });
 
 test("R11-2 0024 私有 0 有效行：表头 N=0 措辞如实 + 全模板候选打标 + 混合面不因行内容退化", async () => {
-  const priv = { agents: { bad_seat: privEntry("claude-code", "deepseek-v4-flash", "ZHIPU_API_KEY", { seatRole: "bogus" }) } };
+  const priv = { agents: { bad_seat: privEntry("not-a-real-backend", "deepseek-v4-flash", "ZHIPU_API_KEY") } };
   const { result } = await memRun({
     probeEnv: PROBE_ALL_READY,
     privateRegistryPath: "D:/wao/config/agents.json",

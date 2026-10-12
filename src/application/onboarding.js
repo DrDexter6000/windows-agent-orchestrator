@@ -40,7 +40,7 @@ import { BACKEND_CLI } from "./backendCliMap.js";
 // R9（决策 0023）：三席会审就绪分级（panelReadiness 单一实现）——本模块算
 // 模板面的 rows，分级推导与六态映射都在 panelReadiness（doctor 共用，禁止
 // 两处各算）。computeReadyState 探测归一后委托 deriveReadyState（单一实现）。
-import { assessPanelReadiness, deriveReadyState, seatRoleOf } from "./panelReadiness.js";
+import { assessPanelReadiness, deriveReadyState } from "./panelReadiness.js";
 // TD-258：凭据名权威=requiredCredentialNames（doctor 同源），多名聚合走共享函数。
 import { requiredCredentialNames, aggregateCredentialSources } from "./credentialReadiness.js";
 // TD-191① / 决定 0043：宿主示例行从 hostDescriptors 唯一权威派生（消灭此前
@@ -303,12 +303,10 @@ async function computeReadyState({ requiresCli, requiresKeyEnvNames, probeCli, p
  *   requiresCli: string|null, requiresKeyEnv: string|null,
  *   duty: string|null, authNote: string|null,
  *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown",
- *   seatRole: "adversarial"|"implementation"|"non_seat"|undefined,
  *   source: "template"|"configured"
  * }[]>}>
- *   seatRole（R10-B）：模板/registry 条目上的显式席位声明；absent → undefined
- *   （panelReadiness.seatRoleOf 回退命名惯例）。非字符串一律不带上（闭集外的
- *   声明由 normalizeAgent 拒绝，探测行不复制坏值）。
+ *   0065：行不再携带 seatRole（0045 §1.2 终局——席位角色退役，会审对抗性改
+ *   派生事实，见 application/panelDerivation.js）。
  */
 export async function buildRecommendations(candidates, template, probeEnv, opts = {}) {
   const agents = isPlainObject(template?.agents) ? template.agents : {};
@@ -354,9 +352,6 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
       duty: truncateNote(agent._comment_task, DUTY_MAX),
       authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
       readyState: await computeReadyState({ requiresCli, requiresKeyEnvNames: credNames.length > 0 ? credNames : null, probeCli, probeKey }),
-      // R10-B：显式席位声明（两个行生产方都带 declared——doctor 同形）。
-      // 非字符串一律 undefined（坏值由 normalizeAgent 拒绝，探测行不复制）。
-      seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,
       // R11-2（决策 0024）：结构化来源字段（两态闭集）——JSON 消费者拿得到双源事实。
       source,
     });
@@ -713,8 +708,8 @@ async function buildTemplateFaceRecommendations(candidates, template, probeEnv) 
  * （id 不在私有 registry 的模板行；组内沿用 ready-first 既有排序）在后。
  * 行携带 source（"configured"|"template"）；与模板同 id 的已配置行做 drift
  * 比对（闭集 = backend + model.id + reasoning.effort（0044 d′）+ 认证矩阵行
- * modelId（0044 d′，双侧在场才比）+ seatRole（0062 B9 乙′，0024 修订）——
- * 两侧一律 ?? null 读，形状差异 ≠ drift）。总行数 ≤
+ * modelId（0044 d′，双侧在场才比）——两侧一律 ?? null 读，形状差异 ≠ drift；
+ * 0065：seatRole 轴随 0045 §1.2 终局退役——模板/私有声明均不再比对）。总行数 ≤
  * MAX_CANDIDATES（私有先占帽），溢出事实进有界字段（configuredCount/
  * templateCandidateCount/templateOmitted/privateOmitted），展示层只投影。
  *
@@ -737,32 +732,9 @@ function rowEffortOf(row, privAgents) {
   return isPlainObject(seat) ? seat.reasoning?.effort ?? null : null;
 }
 
-// 0062（B9 乙′，0024 修订闭集成员；审核修订）：seatRole drift 轴。单席位比较
-// 器——**模板声明了 seatRole 才可比**（模板未声明=不可比事实，不判 drift——与
-// 矩阵 modelId 轴"双侧在场才比"同律，opus 审核条款；反向不对称[私有声明而模板
-// 未声明]亦不判，"形状差异 ≠ drift"原则保持）；模板声明且私有缺席或值不同 =
-// drift。矩阵逐行比较与 doctor 指针计数共用此器（单一语义两个投影，不造第二
-// 比对权威——opus 会审 SSOT 条款）。
-export function seatRoleDriftBetween(privAgent, tplAgent) {
-  const b = isPlainObject(tplAgent) ? tplAgent.seatRole ?? null : null;
-  if (b === null) return null; // 模板未声明 → 不可比（不判 drift）
-  const a = isPlainObject(privAgent) ? privAgent.seatRole ?? null : null;
-  return a === b ? null : { privateSeatRole: a, templateSeatRole: b };
-}
-
-// doctor 指针行的计数面：只比模板同 id 席位（模板不携带的私有席位=私有裁剪，
-// 合法状态不在此报——sol 会审定界）。返回 [{id, privateSeatRole, templateSeatRole}]。
-export function seatRoleDriftRows({ template, privateRegistry }) {
-  const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
-  const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
-  const out = [];
-  for (const [id, priv] of Object.entries(privAgents)) {
-    if (!Object.prototype.hasOwnProperty.call(tplAgents, id)) continue;
-    const d = seatRoleDriftBetween(priv, tplAgents[id]);
-    if (d) out.push({ id, ...d });
-  }
-  return out;
-}
+// 0065（0045 §1.2 终局执行）：0062 B9 乙′引入的 seatRoleDriftBetween/
+// seatRoleDriftRows 整轴删除（supersede——模板与私有副本的席位声明均已随
+// seatRole 机制退役，无可比对对象；0024 修订节同步）。
 async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv }) {
   const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
   const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
@@ -799,16 +771,12 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
       const privMatrixModel = privMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
       const tplMatrixModel = tplMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
       const effortDrift = rowEffortOf(out, privAgents) !== templateEffort;
-      // 0062（B9 乙′）：seatRole 轴——模板声明而私有缺席时席位面板退回命名惯例
-      // 兜底（车道键名不匹配惯例即从席位面消失——2026-10-11 会审叙事实锤）。
-      const seatDrift = seatRoleDriftBetween(privAgents[row.id], tpl);
       const matrixDrift = privMatrixModel !== null && tplMatrixModel !== null && privMatrixModel !== tplMatrixModel;
-      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || seatDrift || matrixDrift) {
+      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || matrixDrift) {
         out.drift = {
           templateBackend,
           templateModel,
           ...(effortDrift ? { templateEffort } : {}),
-          ...(seatDrift ? { templateSeatRole: seatDrift.templateSeatRole } : {}),
           ...(matrixDrift ? { matrix: { liveModelId: privMatrixModel, templateModelId: tplMatrixModel } } : {}),
         };
       }
@@ -1139,13 +1107,12 @@ export async function runOnboarding({
 /**
  * R9（决策 0023；R9-C C-1/C-5/C-6）：把 panelReadiness 分级投影成有界的加性
  * 结果字段（与人类输出同源）。族系经 modelFamily 推断，是展示标签不是契约。
- * available/seats 只含席位候选（对抗席 auditor/coder_mm + 实现席 coder 系）；
- * sameFamily 已更名 insufficientFamilyDiversity（R9-C C-6，零消费者改名）。
  *
  * R10-B：入参从 recommendations 改为 rows 数组（模板面/已配置面共用同一条
- * 投影——单一来源）。加性字段：rowCount（渲染层行数守卫）、adversarialIds /
- * implementationIds（席位惯例句候选清单，含 declared 席位角色，分类复用
- * seatRoleOf 单一实现；未就绪候选也在列——句义是"在场候选"不是"可用"）。
+ * 投影——单一来源）。加性字段：rowCount（渲染层行数守卫）。
+ * 0065（0045 §1.2 终局）：adversarialIds/implementationIds/missingAdversarial
+ * 随席位角色维退役删除；新增 keyOnly 透传与 duplicateModelKeys（同 backend+
+ * modelId 多键点名——tier 按行计数时的虚高提示）。
  */
 function projectPanelReadiness(rows) {
   const list = Array.isArray(rows) ? rows : [];
@@ -1157,16 +1124,11 @@ function projectPanelReadiness(rows) {
     loginUnverified: a.loginUnverified,
     injectedAuth: a.injectedAuth,
     probeUnknown: a.probeUnknown,
-    missingAdversarial: a.missingAdversarial,
+    keyOnly: a.keyOnly,
     insufficientFamilyDiversity: a.insufficientFamilyDiversity,
+    duplicateModelKeys: a.duplicateModelKeys,
     singleWorkerVacuous: a.singleWorkerVacuous,
     rowCount: list.length,
-    adversarialIds: list
-      .filter((row) => seatRoleOf(row?.id, row?.seatRole) === "adversarial")
-      .map((row) => row.id),
-    implementationIds: list
-      .filter((row) => seatRoleOf(row?.id, row?.seatRole) === "implementation")
-      .map((row) => row.id),
   };
 }
 

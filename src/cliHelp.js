@@ -81,7 +81,7 @@ Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wa
   wao decision show <id>
   wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
   wao declare                                       # 列出已有声明 + 理由分布
-  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] | --panel-skip-reason <code>]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记：seats=自报副审、skip=跳过理由闭集码）
+  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记：seats=自报副审、skip=跳过理由闭集码；--reviewed-run=对抗性派生——席位×作者车道指纹比对、回避违反大声提示，0045 §1.2/0065）
   wao stage                                            # 列出已声明阶段 + 缺口 + panel/skip 分布（pipeline 自省）
   wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
@@ -91,7 +91,7 @@ Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wa
   wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # Lead 侧验收落盘（TD-219）：非 delivery run 的 acceptance 审计事件追加进该 run transcript（只对终态 run；多笔以最新一笔为当前结论）
   wao accept --run <runId> --show [--run-dir DIR]  # 只读：列出该 run 既有 acceptance.recorded 事件（不追加）
   wao sweep-claude-config [--apply]  # claude-code OAuth 临时配置目录（%TEMP%\wao-claude-oauth-*，含凭据副本）存量清扫：默认 dry-run 只报清单，--apply 才真删（带 owner 标记的按创建进程存活判定；无标记遗留目录按 >24h 判龄；TD-223）
-  wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读，0064）：lanes.json 接线轴 + Owner 画像 + 认证简表 + 就绪探测 + seatRole 原始声明；事实陈列零推荐；非默认 --registry 须与 --lanes-file 成对（防跨绑，规则同 run）
+  wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读，0064）：lanes.json 接线轴 + Owner 画像 + 认证简表 + 就绪探测；事实陈列零推荐；非默认 --registry 须与 --lanes-file 成对（防跨绑，规则同 run）
 
 Notes:
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。

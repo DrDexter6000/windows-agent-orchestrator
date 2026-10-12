@@ -484,6 +484,112 @@ test("registry validate: prependArgs 必须是数组", () => {
   }
 });
 
+// ── 0065（0045 §1.2 终局）：seatRole 弃用 advisory + 对抗性派生 ────────────────
+
+test("0065: registry validate 对在场 seatRole 出弃用 advisory——不拒载、不回显值", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-registry-seatrole-dep-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        legacy_seat: { backend: "claude-code", cwd: ".", seatRole: "adversarial" },
+        legacy_bad_value: { backend: "claude-code", cwd: ".", seatRole: 42 },
+        clean_seat: { backend: "claude-code", cwd: "." },
+      },
+    }), "utf8");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "registry", "validate", "--run-dir", join(dir, "runs-none"),
+      "--registry", registryPath,
+    ], { cwd: process.cwd(), encoding: "utf8" });
+    assert.equal(result.status, 0, "字段在场不拒载（迁移期兼容——validate 仍 valid）");
+    assert.match(result.stdout, /legacy_seat: seatRole 已废弃（0045 §1\.2 终局：对抗性按审者×作者车道派生；读取面忽略）/,
+      "弃用 advisory 固定文案");
+    assert.match(result.stdout, /legacy_bad_value: seatRole 已废弃/, "坏值同样 advisory（闭集校验已删除）");
+    assert.ok(!result.stdout.includes("legacy_seat: seatRole 已废弃（0045 §1.2 终局：对抗性按审者×作者车道派生；读取面忽略）——adversarial"),
+      "不回显字段值（固定安全形状）");
+    assert.ok(!/clean_seat[^\n]*seatRole/.test(result.stdout), "无字段的席位无 advisory");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("0065: wao stage --reviewed-run 对抗性派生——同车道回避违反大声提示（advisory 不阻断）+ 跨车道通过", () => {
+  const { dir, registry } = makePanelFixture("wao-stage-derived-");
+  // 派生用 registry：coder_hq 与被审作者同车道（claude-code + glm-5.3 同轴）；
+  // auditor=跨车道（claude-code + claude-opus-5）。
+  writeFileSync(registry, JSON.stringify({
+    agents: {
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3" } },
+      auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
+    },
+  }), "utf8");
+  // 被审 run 转录：作者=coder_hq 的车道（claude-code + glm-5.3 模型轴；providerKey
+  // =该车道 provider 块的规范指纹——真实派发的 run.started 携带它，R23-C 四元组
+  // 的第 4 维；夹具用同值保证与席位侧 registry 四元组可比）。
+  const runDir = join(dir, "runs");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "run_author1.jsonl"), JSON.stringify({
+    type: "run.started", backend: "claude-code", model: { id: "glm-5.3" },
+    reasoning: { effort: "high" }, providerKey: "https://open.bigmodel.cn/api/anthropic|ZHIPU_API_KEY",
+    runId: "run_author1", agentId: "coder_hq", seq: 1, ts: "2026-10-12T00:00:00.000Z", cwd: dir,
+  }) + "\n", "utf8");
+  try {
+    // (1) 席位与作者同车道（作者自审反例）——指纹比对（非 agentId 字符串）。
+    const viol = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "交付验收（作者自审反例）",
+      "--panel-seats", "coder_hq",
+      "--reviewed-run", "run_author1",
+      "--registry", registry, "--cwd", dir, "--run-dir", runDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(viol.status, 0, "回避违反是 advisory——登记成功（不阻断）");
+    const outV = JSON.parse(viol.stdout);
+    assert.equal(outV.panel.derived.authorContext, "derived");
+    assert.equal(outV.panel.derived.seats[0].authorRelation, "same_lane", "同 registry 轴=同车道（指纹比对）");
+    assert.deepEqual(outV.panel.derived.authorAvoidanceViolations, ["coder_hq"]);
+    assert.match(viol.stderr, /⚠ 回避违反（0019 §3）：席位 coder_hq 与被审产出作者同车道/, "大声提示");
+    assert.match(outV.panel.derived.basis, /registry 当前配置事实/, "来源声明（sol 条款）");
+    // (2) 跨车道席位（auditor 模型轴 claude-opus-5 ≠ 作者 glm-5.3）。
+    const ok = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "交付验收（跨车道正例）",
+      "--panel-seats", "auditor",
+      "--reviewed-run", "run_author1",
+      "--registry", registry, "--cwd", dir, "--run-dir", runDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(ok.status, 0);
+    const outO = JSON.parse(ok.stdout);
+    assert.equal(outO.panel.derived.seats[0].authorRelation, "different_lane", "模型轴不同=不同车道指纹");
+    assert.equal(outO.panel.derived.seats[0].familyVsAuthors, "cross", "GLM×Claude 跨族附注");
+    assert.deepEqual(outO.panel.derived.authorAvoidanceViolations, []);
+    assert.ok(!/回避违反/.test(ok.stderr), "无违反不提示");
+    // (3) 门：--reviewed-run 必须与 --panel-seats 同给。
+    const bare = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "x", "--reviewed-run", "run_author1",
+      "--registry", registry, "--cwd", dir, "--run-dir", runDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.notEqual(bare.status, 0);
+    assert.match(bare.stderr, /--reviewed-run 只与 --panel-seats 同给/);
+    // (4) 作者不可读 → not_provided 三态如实。
+    const ghost = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "y", "--panel-seats", "auditor",
+      "--reviewed-run", "run_nonexistent",
+      "--registry", registry, "--cwd", dir, "--run-dir", runDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(ghost.status, 0);
+    assert.equal(JSON.parse(ghost.stdout).panel.derived.authorContext, "unreadable_or_missing");
+    // 正文/frontmatter 留痕：派生事实段落写进 stage 文件。
+    const stageFiles = readdirSync(join(dir, ".wao", "pipeline"));
+    const withDerived = stageFiles.filter((f) => f.endsWith(".md")).find((f) =>
+      readFileSync(join(dir, ".wao", "pipeline", f), "utf8").includes("panel_derived_json"));
+    assert.ok(withDerived, "frontmatter 含 panel_derived_json");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── TD-79（Python 环境隔离：registry env 字段校验）─────────────────────────
 test("TD-79: registry validate 拒绝非对象的 env 字段", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-registry-env-"));
@@ -1467,9 +1573,11 @@ function makePanelFixture(name) {
   spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
     { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
   const registry = join(dir, "agents.json");
+  // 0065：--reviewed-run 派生路径走归一化（readRegistry.listAgents）——provider
+  // 用完整合法形状（protocol/baseUrl/apiKeyEnv 三字段）。
   writeFileSync(registry, JSON.stringify({
     agents: {
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." },
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." },
       auditor: { backend: "claude-code", cwd: "." },
     },
   }), "utf8");
@@ -2197,7 +2305,7 @@ test("R5-B: doctor scoped key——只查保留 worker 声明的 env 名；缺�
       agents: {
         coder_low: {
           backend: "claude-code",
-          provider: { baseUrl: "https://example.invalid/anthropic", apiKeyEnv: "WAO_TEST_NO_SUCH_KEY_R5B" },
+          provider: { protocol: "anthropic-compatible", baseUrl: "https://example.invalid/anthropic", apiKeyEnv: "WAO_TEST_NO_SUCH_KEY_R5B" },
           cwd: dir,
         },
       },
@@ -2234,7 +2342,7 @@ test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 k
         coder_mm: { backend: "kimi-code", cwd: dir },
         coder_hq: {
           backend: "claude-code",
-          provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "KIMI_API_KEY" },
+          provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "KIMI_API_KEY" },
           cwd: dir,
         },
       },
@@ -2317,8 +2425,8 @@ function doctorPanelRun(dir, registryPath) {
 
 test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（无条目）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-silent-", {
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
-    coder_mm: { backend: "claude-code", provider: { baseUrl: "https://api.moonshot.cn/anthropic", apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-k3" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_mm: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.moonshot.cn/anthropic", apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-k3" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2334,7 +2442,7 @@ test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（
 
 test("R9-C C-3: doctor 两席 → panel_readiness INFO 打印、不计 DEGRADED、exit 0（advisory 红线）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-two-", {
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
   });
   try {
@@ -2359,7 +2467,9 @@ test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展�
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-none-", {
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
     coder_mm: { backend: "kimi-code", model: { id: "kimi-code/k3" }, cwd: "." },
-    coder_dsh: { backend: "deepseek-harness", model: { id: "deepseek-v4-pro" }, cwd: "." },
+    // deepseek-harness 归一化必填 dshConfigPath+credentialEnv（0065 起 doctor
+    // panel 行过归一化门——夹具用合法形状）。
+    coder_dsh: { backend: "deepseek-harness", model: { id: "deepseek-v4-pro" }, cwd: ".", dshConfigPath: "C:/wao-test/dsh.json", credentialEnv: "DEEPSEEK_API_KEY" },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2371,8 +2481,10 @@ test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展�
     assert.match(panel.detail, /no_reviewer_available/, "闭集码列在提示内");
     assert.match(panel.detail, /登录态未验证（不计入可用）：auditor、coder_mm/,
       "login_based 席位如实展示（auditor+coder_mm）");
-    assert.match(panel.detail, /探测未知（不计入可用）：coder_dsh/,
-      "C-12：探测未知行如实展示（deepseek-harness 无 CLI 映射 → unknown）");
+    // 0065/TD-258：deepseek-harness 无 CLI 映射但声明 credentialEnv → key_only 面
+    // （不是探测未知——key 名可解析是如实展示位，两者不同桶）。
+    assert.match(panel.detail, /key 名已解析但无 CLI 探测面（未验证令牌\/serve 可达性，不计入可用）：coder_dsh/,
+      "C-12：key_only 面如实展示（deepseek-harness 无 CLI 映射+凭据声明）");
     // deepseek-harness 触发 backend_map WARN → verdict DEGRADED，但无 FAIL：
     // WARN/INFO 都不改 advisory 退出码。
     assert.equal(r.status, 0, "WARN/INFO 面不改退出码（无 FAIL）");
@@ -2381,39 +2493,37 @@ test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展�
   }
 });
 
-test("R9-C C-1.4（auditor 实跑病灶）: 零对抗席 three_seat → doctor 不静默，附补配提示", () => {
-  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-noadv-", {
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
-    coder_low: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-flash" }, cwd: "." },
+test("R9-C C-1.4→0065（假全清防线平移）: 三席全同族 → doctor 不静默，附跨族系补配提示", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-nofam-", {
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_g2: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "bigmodel-api/GLM-5.3" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
     const parsed = JSON.parse(r.stdout);
     const panel = parsed.checks.find((c) => c.name === "panel_readiness");
-    assert.ok(panel, "≥2 席位候选但 0 对抗席 → 必须打印（消除假全清——实跑病灶）");
+    assert.ok(panel, "≥2 候选但已知族系不足两族 → 必须打印（消除假全清——0065 平移防线）");
     assert.equal(panel.status, "info");
-    assert.match(panel.detail, /物理上可配三席，但无可用对抗席（ready 面，seatRole=adversarial）/,
-      "C-1 裁定文案：无对抗席候选提示行");
-    assert.match(panel.detail, /两席分配语义要求对抗视角/, "0019/0023 分配语义引用");
-    assert.match(panel.detail, /coder_hq、coder_low/, "席位候选点名");
+    assert.match(panel.detail, /已知族系不足两族/, "0065 文案：族系多样性主提示");
+    assert.match(panel.detail, /coder_hq、coder_g2/, "候选点名");
     assert.equal(r.status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("R9-C C-1（auditor 实跑病灶）: researcher+coder_hq registry → 两席打印，researcher 不进可用席位", () => {
+test("0065 语义翻转钉（R9-C C-1 历史病灶位）: researcher 角色名键照常计入 → 跨族三席静默", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-researcher-", {
-    researcher: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
     const parsed = JSON.parse(r.stdout);
-    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
-    assert.ok(panel, "researcher（ready 但非席位）只剩 1 名席位候选 → 两席必须打印（旧代码此处假全清）");
-    assert.match(panel.detail, /仅 1 名可用（coder_hq）/, "可用席位只点名 coder_hq");
-    assert.ok(!panel.detail.includes("researcher"), "非席位角色不进可用副审叙事");
+    // 0065：角色维退役——researcher 计入候选；DeepSeek×GLM 跨族 → 三席全清静默。
+    // （旧语义：researcher 非席位 → 两席打印；语义翻转在此钉死，防悄悄退回过滤。）
+    assert.ok(!parsed.checks.some((c) => c.name === "panel_readiness"),
+      "researcher 计入 + 跨族 → 三席静默（0065 多样性口径）");
     assert.equal(r.status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2422,7 +2532,7 @@ test("R9-C C-1（auditor 实跑病灶）: researcher+coder_hq registry → 两�
 
 test("R9-C C-16: 单 worker registry → 空转事实为主句直给（先建议后撤回的话术废除）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-solo-", {
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2456,35 +2566,28 @@ test("R9-C C-3: registry 缺位 → panel_readiness 沿 U1 INFO 跳过模式", (
   }
 });
 
-test("R10-B B-1: doctor declared seatRole 优先——my_reviewer 显式对抗席使三席静默；未声明同 id 回退非席位", () => {
-  // 显式对抗席 + 实现席：三席齐备且含对抗席 → 静默。若 declared 被忽略，
-  // my_reviewer 回退非席位 → 只剩 coder_hq → 两席必打印（红测语义）。
-  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-declared-", {
-    my_reviewer: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: ".", seatRole: "adversarial" },
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: ".", seatRole: "implementation" },
+test("0065: doctor 分级与 seatRole 声明无关——带声明与不带声明同输入同结果（字段惰性钉）", () => {
+  // 旧语义：declared 对抗席计入 vs 未声明回退非席位，两输入分级不同。
+  // 0065 终局：字段废弃为惰性——同 registry 形状（my_reviewer+coder_hq 双 ready、
+  // DeepSeek×GLM 跨族）无论带不带 seatRole 声明都是三席静默。
+  const withDeclared = makeDoctorPanelFixture("wao-doctor-panel-declared-", {
+    my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: ".", seatRole: "adversarial" },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: ".", seatRole: "implementation" },
   });
-  try {
-    const r = doctorPanelRun(dir, registryPath);
-    const parsed = JSON.parse(r.stdout);
-    assert.ok(!parsed.checks.some((c) => c.name === "panel_readiness"),
-      "declared 对抗席计入 → 三席齐备且含对抗席 → 静默（无 panel_readiness 条目）");
-    assert.equal(r.status, 0);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  // 未声明的同 id → 回退非席位：只剩 coder_hq → 两席打印（既有 fallback 行为）。
   const undecl = makeDoctorPanelFixture("wao-doctor-panel-undeclared-", {
-    my_reviewer: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
-    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
-    const r = doctorPanelRun(undecl.dir, undecl.registryPath);
-    const parsed = JSON.parse(r.stdout);
-    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
-    assert.ok(panel, "未声明 my_reviewer 回退非席位 → 只剩 1 名席位候选 → 打印");
-    assert.match(panel.detail, /仅 1 名可用（coder_hq）/, "可用席位只点名 coder_hq（my_reviewer 不进）");
-    assert.equal(r.status, 0);
+    for (const fx of [withDeclared, undecl]) {
+      const r = doctorPanelRun(fx.dir, fx.registryPath);
+      const parsed = JSON.parse(r.stdout);
+      assert.ok(!parsed.checks.some((c) => c.name === "panel_readiness"),
+        "双 ready + 跨族 → 三席静默（seatRole 在场与否不影响分级——字段惰性）");
+      assert.equal(r.status, 0);
+    }
   } finally {
+    rmSync(withDeclared.dir, { recursive: true, force: true });
     rmSync(undecl.dir, { recursive: true, force: true });
   }
 });
@@ -5568,10 +5671,9 @@ test("TD-191④: non-namespace unknown command keeps exit 1 + gains a generic po
   assert.match(stderr, /wao <sub>/, "通用指路必须提到 wao 命名空间两段式形态");
 });
 
-// TD-260（0062 B9 乙′）：doctor registry_loads 指针行——私有席位 seatRole 与真实
-// 模板不一致时给一行计数+onboarding 指路（计数与矩阵同一比较器，不造第二权威）。
-// 夹具用真实模板携带的 id（kimi=implementation）且不带 seatRole → 病灶形状。
-test("TD-260 B9: doctor registry_loads 报 seatRole 漂移指针行（与模板同 id 席位）", () => {
+// TD-260（0062 B9 乙′）→0065 supersede：seatRole 漂移指针行已随席位声明退役删除；
+// registry_loads 恒回基线计数形态（模板声明比对不复存在）。
+test("0065: doctor registry_loads 基线形态——seatRole 漂移指针行已删除", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-seatdrift-", {
     kimi: { backend: "kimi-web", serveUrl: "http://127.0.0.1:58628", model: { id: "kimi-code/k3-256k" }, cwd: "." },
   });
@@ -5580,9 +5682,8 @@ test("TD-260 B9: doctor registry_loads 报 seatRole 漂移指针行（与模板�
     const parsed = JSON.parse(r.stdout);
     const loads = parsed.checks.find((c) => c.name === "registry_loads");
     assert.ok(loads, "registry_loads 恒在场（P2-1）");
-    assert.match(loads.detail, /1 agents；1 席 seatRole 与模板不一致/,
-      "指针行 = 基线计数 + seatRole 漂移计数");
-    assert.match(loads.detail, /npm run cli -- wao onboarding 查看 drift 明细/, "指路 onboarding");
+    assert.match(loads.detail, /^1 agents$/, "0065：基线计数形态（无 seatRole 漂移指针段）");
+    assert.ok(!loads.detail.includes("seatRole"), "seatRole 指针行已删除（0065 supersede）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

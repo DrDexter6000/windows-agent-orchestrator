@@ -1,13 +1,14 @@
 // src/commands/lanes.js
 //
 // 0064（2026-10-12）：`wao lanes` —— 车道画像只读查询面（Owner 初心四组件的
-// "暴露面"落地：接线轴 + Owner 画像 + 认证简表 + 就绪探测 + seatRole 原始声明
-// 一屏，各栏带来源；事实陈列、零排序零推荐——语义判断归 Lead，不变量 4/6）。
+// "暴露面"落地：接线轴 + Owner 画像 + 认证简表 + 就绪探测一屏，各栏带来源；
+// 事实陈列、零排序零推荐——语义判断归 Lead，不变量 4/6）。
+// 0065（0045 §1.2 终局）：seatRole 声明列删除（席位角色维退役）。
 //
 // 会审裁定（consult_202610121021490657ur8lp 双席 P1 全采纳）：
 //   - 探测复用 commands/onboarding.js 导出的同一份 probeCliOnPath/probeKeyEnvSource
 //     （不复制第二套实现）；就绪口径=buildRecommendations 同引擎（onboarding 面同源）。
-//   - registry 单次读取：inventory（认证）/探测输入/接线轴/seatRole 全部同源
+//   - registry 单次读取：inventory（认证）/探测输入/接线轴全部同源
 //     （readRegistryFn 注入记忆化结果），防两次读取拼出前后不一致的状态。
 //   - --registry 防跨绑（同 run 命令规则）：单独非默认 --registry 拒绝（仓库
 //     车道表 × 外来 registry 的静默混拼是本规则要防的形状）；与 --lanes-file
@@ -74,8 +75,8 @@ function renderLane(row, width) {
   if (row.wiring === "wired") lines.push("  接线: 一致（lanes.json 声明与 registry 接线四轴相符）");
   else if (row.wiring === "drift") {
     emit("接线", `漂移——explicit 派发将拒绝：declared(${axesLabel(row.wiringDetail.declared)}) ≠ registry(${axesLabel(row.wiringDetail.registry)})`);
-  } else if (row.wiring === "invalid") lines.push("  接线: 条目无效（registry 条目无法解析——认证/就绪/seatRole 跳过；见尾部 issues）");
-  else lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪/seatRole 跳过）`);
+  } else if (row.wiring === "invalid") lines.push("  接线: 条目无效（registry 条目无法解析——认证/就绪跳过；见尾部 issues）");
+  else lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪跳过）`);
 
   if (row.traitsState === "present") {
     const t = row.traits;
@@ -95,7 +96,6 @@ function renderLane(row, width) {
       lines.push(`  certification: ${row.certification}${row.certificationLastHealthyAt ? `（lastHealthy ${row.certificationLastHealthyAt}）` : ""}`);
     }
     lines.push(`  readyState: ${row.readyState ?? "—（无探测行）"}`);
-    lines.push(`  seatRole: ${row.seatRole ?? "未声明"}${row.seatRole ? "（registry 显式声明；会审体检默认视角，非能力声明，不约束选席）" : ""}`);
   }
   return lines;
 }
@@ -115,7 +115,7 @@ export async function lanesCommand(args, config) {
     );
   }
 
-  // registry 单次读取：inventory / 探测输入 / 接线轴 / seatRole 同源。
+  // registry 单次读取：inventory / 探测输入 / 接线轴同源。
   const reg = await readRegistry(registryPath);
   const registryAgents = Object.fromEntries(reg.listAgents().map((a) => [a.id, a]));
   const rawAgents = Object.fromEntries(reg.rawEntries());

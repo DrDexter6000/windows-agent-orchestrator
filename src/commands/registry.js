@@ -329,6 +329,11 @@ async function registryValidateCommand(args, config) {
       // spawn、不联网），validate 保持纯静态。
       // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
       const warnings = capabilityCrossCheckWarnings(agent, backendCapabilitySnapshot(agent));
+      // 0065（0045 §1.2 终局）：seatRole 弃用 advisory——raw 在场即提示（不回显值，
+      // 固定安全形状；不拒载不改变 valid/退出码）。归一化已 strip 该字段。
+      if (agent && typeof agent === "object" && Object.prototype.hasOwnProperty.call(agent, "seatRole")) {
+        warnings.push("seatRole 已废弃（0045 §1.2 终局：对抗性按审者×作者车道派生；读取面忽略）——可从 registry 删除该字段");
+      }
       // R23-C §5: half-migration visibility — a registered lane whose summary
       // worker record predates the R23-C schema (missing providerKey /
       // lastFullHealthyRunAt) gets NON-BLOCKING advisories. certMigrationAdvisories

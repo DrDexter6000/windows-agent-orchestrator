@@ -3,7 +3,8 @@
 // 0064：wao lanes 读取面的纯投影钉（会审 consult_202610121021490657ur8lp
 // 双席 P1 全采纳的可证伪面）：
 //   - 行序恒=lanes.json 声明序（零排序零推荐——不按 readyState 重排）；
-//   - seatRole 只透传 registry 显式声明（未声明=null，绝不 seatRoleOf 推导）；
+//   - 0065（0045 §1.2 终局）：seatRole 声明列已删除（席位角色维退役——对抗性
+//     改派生事实；registry 归一化 strip 该字段）；行不再携带 seatRole 键。
 //   - certification=null 语义="未取得匹配认证（原因未区分）"，状态原样透传；
 //   - 接线四态：wired/drift（axesEqual 同 explicit 派发 G4 判定）/unwired
 //     （键不存在）/invalid（键在、条目无法解析）严格分开；
@@ -131,16 +132,16 @@ test("buildLanesView：四接线态 + 行序钉（lanes.json 声明序，不按 
   assert.equal(unwiredView.lanes[2].wiring, "unwired");
   assert.equal(unwiredView.lanes[2].readyState, null, "未接线=跳过探测");
   assert.equal(unwiredView.lanes[2].certification, null);
-  assert.equal(unwiredView.lanes[2].seatRole, null);
 });
 
-test("buildLanesView：seatRole 只透传显式声明（未声明=null——不经 seatRoleOf 补 non_seat）", () => {
+test("buildLanesView：行不再携带 seatRole 键（0065 列退役钉——恢复即红）", () => {
   const input = baseInputs();
+  // registry 侧带旧声明（迁移期形状）——归一化已 strip，视图行也不得再出现该键。
   input.registryAgents.l1.seatRole = "adversarial";
-  // l2 无声明——若经 seatRoleOf 命名惯例会得到 "non_seat"（推导值），必须保持 null。
   const view = buildLanesView(input);
-  assert.equal(view.lanes[0].seatRole, "adversarial");
-  assert.equal(view.lanes[1].seatRole, null, "未声明=null（原始事实），绝不显示推导的 non_seat");
+  for (const row of view.lanes) {
+    assert.ok(!("seatRole" in row), `行 ${row.id} 不得携带 seatRole（0065 退役）`);
+  }
 });
 
 test("buildLanesView：certification null 语义收窄 + 状态原样透传", () => {

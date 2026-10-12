@@ -1,77 +1,36 @@
 // src/application/panelReadiness.js
 //
-// 三席会审就绪分级推导（R9 / 决策 0023；R9-C 返工 C-1 引入席位角色）——
-// 单一实现（SSOT）。
+// 三席会审就绪分级推导（R9 / 决策 0023）——单一实现（SSOT）。
+//
+// 0065（2026-10-12，0045 §1.2 终局执行）：席位角色维整体退役——对抗性改为
+// 派生事实（application/panelDerivation.js，审者×作者车道指纹比对），本模块
+// 的分级改**车道多样性**口径：候选=全部行（0045"角色是帽子"——每条车道都
+// 可能当副审，没有 non_seat 属性）；有意义的多样性维度=模型族系（W4d 后每键
+// =唯一车道，跨车道恒真）。missingAdversarial 语义（≥2 候选但 0 对抗席）随
+// seatRole 退役废止，族系多样性（insufficientFamilyDiversity）升为主提示；
+// tier 语义收窄为**探测候选数量**（不声称已配齐可派发副审——sol P1）。
 //
 // onboarding（模板面：入库模板 + 环境探测）与 doctor（已配置面：私人
 // config/agents.json + 环境探测）各自包装输入行调用本模块；两处禁止各算
 // 分级（测试钉住）。输出是纯展示建议（advisory）：不门禁任何派发/验收，
 // 不自动派发副审，选位权在 Lead（席位回避规则见 0019 §3，0023 保留）。
 //
-// 输入行形状（两个面对齐）：{ id, backend, model, readyState, seatRole? }。
-// seatRole 是可选的显式席位声明（R10-B）：present 时优先于命名惯例；absent
-// 回退命名惯例（老 registry 零迁移）。值域与 registry.SEAT_ROLES 同闭集
-// （registry 校验先行，此处按契约再守一道：非闭集 declared 视为未声明）。
-// readyState 六态闭集与 application/onboarding.js 的引擎值同域；本模块的
-// deriveReadyState 是六态映射的单一实现（onboarding 的 computeReadyState
+// 输入行形状（两个面对齐）：{ id, backend, model, readyState }。
+// readyState 八态闭集与 application/onboarding.js 的引擎值同域；本模块的
+// deriveReadyState 是映射的单一实现（onboarding 的 computeReadyState
 // 探测归一后委托到这里，doctor 用自己的探测事实构造后也委托到这里）。
-//
-// 席位角色（R9-C C-1，0019/0023 保留的两席分配语义；分类规则是角色惯例，
-// 候选清单从输入行生——不在行里的 worker 不点名，0022 纪律）：
-//   adversarial（对抗席候选）   auditor（专职）+ coder_mm（轮换替补）
-//   implementation（实现席候选）coder 系通道（coder_ 前缀；coder_mm 归对抗席）
-//   其余（researcher/tester 等调研/工具角色）非席位角色——不进席位计数与建议。
-// R10-B：显式 seatRole 声明优先于命名惯例——例如 coder_opencode_fallback 按
-// 惯例归实现席，但显式 "non_seat" 时从席位候选剔除（模板已显式声明）。
-//
-// 分级语义（0023，按可用席位候选计数）：
-//   three_seat  ≥2 名可用席位候选（readyState=ready）。含对抗席时静默全清；
-//               零对抗席时仍 three_seat（物理可配）但 missingAdversarial=true，
-//               展示面必附"无对抗席候选——建议补配"提示行，doctor 不静默。
-//   two_seat    恰 1 名可用席位候选 → 两席次之推荐
-//   none        0 名可用席位候选 → 跳过提示（--panel-skip-reason 登记）
 // login_based/unknown 不计入"可用"但如实展示：登录态型展示"登录态未验证"
-// （文案不得把登录态当已验证讲——auditor 即此形）；serve 注入型（backend=
-// opencode-serve）的 login_based 原值是基线遗留，它不是登录态型认证——展示层
-// 单列 injectedAuth（注入式认证，serve 探测不覆盖）；unknown 展示"探测未知"。
+// （文案不得把登录态当已验证讲）；serve 注入型（backend=opencode-serve）的
+// login_based 原值是基线遗留——展示层单列 injectedAuth（注入式认证，serve
+// 探测不覆盖）；unknown 展示"探测未知"。
 // 未知族系 ≠ 同族：跨族系判断只统计已知族系（modelFamily UNKNOWN_FAMILY
 // 不参与多样性判定）。
 
 import { modelFamilyOf, UNKNOWN_FAMILY } from "./modelFamily.js";
-// R10-B：SEAT_ROLES 的家在 registry.js（core，L4 分层下向 import 合法——
-// 反向上向边违例已由 layering 守卫钉住）；panelReadiness 不持值副本。
-import { SEAT_ROLES } from "../registry.js";
 
 // R9-C C-14：PANEL_STAGES 的单一 SSOT 在 waoStage.js——此处 re-export 保住
 // 既有消费面引用（本模块不再持值副本）；对账测试继续双向钉住。
 export { PANEL_STAGES } from "../waoStage.js";
-
-/**
- * 席位角色分类（0019/0023 两席分配语义的单一实现，渲染层复用不另写一份）。
- * 对抗席判定先于 coder_ 前缀——coder_mm 是对抗席替补，不是实现席。
- * R10-B：显式 declared 在闭集内时优先（registry.normalizeAgent 已校验，
- * 此处按契约再守一道：非字符串/闭集外一律视为未声明）；absent 回退命名惯例。
- * @param {unknown} id
- * @param {unknown} [declared] 显式 seatRole 声明（闭集外视为未声明）
- * @returns {"adversarial"|"implementation"|"non_seat"}
- */
-export function seatRoleOf(id, declared, facts) {
-  // 0045 W4c（R5 裁定）：分类依据从"席位名字模式"改为"角色事实"——facts.roleStem
-  // （席位 systemPrompt 文件名 stem，或派发解析的 roleId）优先：auditor 族角色=
-  // 对抗席，coder 族=实现席。名字模式（auditor/coder_mm/^coder_）降为 legacy
-  // 回退（无 facts 的历史调用面）。declared 显式声明仍最优先（闭集内）。
-  if (typeof declared === "string" && SEAT_ROLES.includes(declared)) return declared;
-  const stem = typeof facts?.roleStem === "string" ? facts.roleStem : null;
-  if (stem !== null) {
-    if (stem === "auditor" || stem.startsWith("auditor")) return "adversarial";
-    if (stem.startsWith("coder")) return "implementation";
-    return "non_seat";
-  }
-  const s = String(id ?? "");
-  if (s === "auditor" || s === "coder_mm") return "adversarial";
-  if (/^coder_/.test(s)) return "implementation";
-  return "non_seat";
-}
 
 /**
  * 八态 readyState 的单一映射实现（onboarding computeReadyState 与 doctor 共用）。
@@ -113,6 +72,7 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
 
 /**
  * 三席会审就绪分级（单一推导；两个展示面共用的唯一实现）。
+ * 0065：多样性口径——候选=全部行（角色维退役）；tier=探测候选数量。
  *
  * @param {Array<{id: string, backend: string|null, model: string|null, readyState: string}>} rows
  * @returns {{
@@ -121,88 +81,94 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  *   loginUnverified: string[],
  *   injectedAuth: string[],
  *   probeUnknown: string[],
- *   missingAdversarial: boolean,
  *   insufficientFamilyDiversity: boolean,
+ *   duplicateModelKeys: Array<{backend: string|null, modelId: string|null, ids: string[]}>,
  *   singleWorkerVacuous: boolean,
  *   seats: Array<{id: string, family: string}>|null,
  * }}
- *   available：可用席位候选（ready 且席位角色；researcher/tester 等非席位
- *     角色不进席位计数与建议——R9-C C-1）。
- *   loginUnverified / injectedAuth / probeUnknown：席位角色的如实展示清单
- *     （登录态型 / serve 注入型 / 探测未知；非席位角色不进本叙事）。
- *   missingAdversarial：≥2 席位候选但 0 对抗席——仍 three_seat 物理可用，
- *     但两席分配语义要求对抗视角，展示面必附补配提示（doctor 不静默）。
- *   insufficientFamilyDiversity：≥2 可用席位候选且已知族系不足两族（未知
- *     族系不参与判定 ⇒ 含"一已知 + 一未知"、"全未知"——无法确认跨族系，
- *     同样提示）。
- *   singleWorkerVacuous：仅 1 名 worker——它通常就是被审产出的作者
- *     （0019 §3 作者回避），两席建议事实空转，文案必须明说。
- *   seats：建议席位组合（对抗席优先 + 实现席，避同族优先；永不推荐非席位
- *     角色）。不足两名可用席位候选 → null。
+ *   available：可用（探测 ready）候选——探测口径数量，不声称已配齐可派发副审。
+ *   loginUnverified / injectedAuth / probeUnknown：如实展示清单（登录态型 /
+ *     serve 注入型 / 探测未知）。
+ *   insufficientFamilyDiversity：≥2 可用候选且已知族系不足两族（未知族系不
+ *     参与判定 ⇒ 含"一已知+一未知"、"全未知"——无法确认跨族系，同样提示）。
+ *     0065 起为主提示（原 missingAdversarial 随 seatRole 退役废止）。
+ *   duplicateModelKeys：同 backend+modelId 多键配置（车道指纹不含 effort——
+ *     同四元组改 effort 可注册双键；tier 按行计数会虚高，如实点名——opus P2 轻量版）。
+ *   singleWorkerVacuous：仅 1 名候选——它通常就是被审产出的作者（0019 §3
+ *     作者回避），两席建议事实空转，文案必须明说。
+ *   seats：建议配对（纯族系最大化：全候选中找已知跨族对——sol P1 修复
+ *     "首席未知吞掉后续跨族对"反例；找不到跨族对退化为前两名如实展示，
+ *     由 insufficientFamilyDiversity 提示）。永不排序推荐非候选（Lead 拥有选位权）。
  */
 export function assessPanelReadiness(rows) {
   const list = Array.isArray(rows) ? rows : [];
   const entries = list.map((row) => ({
     id: String(row?.id ?? "?"),
     family: modelFamilyOf({ modelId: row?.model, backend: row?.backend }),
+    backend: typeof row?.backend === "string" ? row.backend : null,
+    modelId: typeof row?.model === "string" ? row.model : null,
     readyState: typeof row?.readyState === "string" ? row.readyState : "unknown",
-    // R10-B：显式 seatRole 声明优先（两个行生产方都会带上 declared 字段）。
-    role: seatRoleOf(row?.id, row?.seatRole),
     serveInjected: row?.backend === "opencode-serve",
   }));
-  // R9-C C-1：席位计数与建议只在席位角色上做；非席位角色不进任何席位面。
-  const seatEntries = entries.filter((e) => e.role !== "non_seat");
-  const readySeats = seatEntries.filter((e) => e.readyState === "ready");
-  const loginUnverified = seatEntries
+  const readySeats = entries.filter((e) => e.readyState === "ready");
+  const loginUnverified = entries
     .filter((e) => e.readyState === "login_based" && !e.serveInjected)
     .map((e) => e.id);
-  const injectedAuth = seatEntries
+  const injectedAuth = entries
     .filter((e) => e.readyState === "login_based" && e.serveInjected)
     .map((e) => e.id);
-  const probeUnknown = seatEntries.filter((e) => e.readyState === "unknown").map((e) => e.id);
+  const probeUnknown = entries.filter((e) => e.readyState === "unknown").map((e) => e.id);
   const knownFamilies = readySeats.map((e) => e.family).filter((f) => f !== UNKNOWN_FAMILY);
+  // 同 backend+modelId 多键（近似指纹去重——指纹需 provider 块，行形状不携带；
+  // 展示事实用，不作硬判定）。
+  const byAxes = new Map();
+  for (const e of readySeats) {
+    const key = `${e.backend ?? "?"}|${e.modelId ?? "?"}`;
+    if (!byAxes.has(key)) byAxes.set(key, { backend: e.backend, modelId: e.modelId, ids: [] });
+    byAxes.get(key).ids.push(e.id);
+  }
+  const duplicateModelKeys = [...byAxes.values()].filter((g) => g.ids.length > 1);
   return {
     tier: readySeats.length >= 2 ? "three_seat" : readySeats.length === 1 ? "two_seat" : "none",
     available: readySeats.map((e) => ({ id: e.id, family: e.family })),
     loginUnverified,
     injectedAuth,
     probeUnknown,
-    // TD-258：key_only_* 不计入可用席位、不抬 tier，但绝不从叙事里无声消失
-    // （无 CLI 探测面的凭据声明车道——如 kimi-web——的如实展示位）。
-    keyOnly: seatEntries
+    // TD-258：key_only_* 不计入可用、不抬 tier，但绝不从叙事里无声消失。
+    keyOnly: entries
       .filter((e) => e.readyState === "key_only_present" || e.readyState === "key_only_missing")
       .map((e) => e.id),
-    missingAdversarial:
-      readySeats.length >= 2 && !readySeats.some((e) => e.role === "adversarial"),
     insufficientFamilyDiversity: readySeats.length >= 2 && new Set(knownFamilies).size < 2,
+    duplicateModelKeys,
     singleWorkerVacuous: list.length === 1,
     seats: suggestSeatPair(readySeats),
   };
 }
 
 /**
- * 建议席位组合（纯展示建议，选位权在 Lead）：从席位候选池取——有对抗席时
- * 必含一名对抗席（0019/0023 两席分配语义），另一席优先实现席且避同族；
- * 单一类席位（全对抗/全实现）时优先跨已知族系对，找不到退化为前两名
- * （同族/含未知也如实展示，由 insufficientFamilyDiversity 提示）。
- * 永不推荐非席位角色（assessPanelReadiness 已过滤，此处按契约再守一道）。
- * @param {Array<{id: string, family: string, role: string}>} readySeats
- * @returns {Array<{id: string, family: string}>|null}
+ * 建议配对（纯展示建议，选位权在 Lead）。0065：全候选中找**已知跨族对**
+ * （sol P1：旧算法首席未知时会吞掉后续存在的跨族对——反例实测废除）；
+ * 找不到已知跨族对才退化为前两名（同族/含未知如实展示，由
+ * insufficientFamilyDiversity 提示兜底）。确定性：候选序扫描，首个跨族对胜。
  */
 function suggestSeatPair(readySeats) {
   if (readySeats.length < 2) return null;
-  const adversarial = readySeats.filter((e) => e.role === "adversarial");
-  const implementation = readySeats.filter((e) => e.role === "implementation");
-  if (adversarial.length > 0 && implementation.length > 0) {
-    const adv = adversarial[0];
-    const partner = implementation.find((e) => isDiverseFamily(adv.family, e.family))
-      ?? implementation[0];
-    return [{ id: adv.id, family: adv.family }, { id: partner.id, family: partner.family }];
+  for (let i = 0; i < readySeats.length; i++) {
+    for (let j = i + 1; j < readySeats.length; j++) {
+      if (isDiverseFamily(readySeats[i].family, readySeats[j].family)) {
+        return [
+          { id: readySeats[i].id, family: readySeats[i].family },
+          { id: readySeats[j].id, family: readySeats[j].family },
+        ];
+      }
+    }
   }
   const first = readySeats[0];
-  const diverse = readySeats.find((e) => e !== first && isDiverseFamily(first.family, e.family));
-  const second = diverse ?? readySeats.find((e) => e !== first);
-  return [{ id: first.id, family: first.family }, { id: second.id, family: second.family }];
+  const second = readySeats.find((e) => e !== first);
+  return [
+    { id: first.id, family: first.family },
+    { id: second.id, family: second.family },
+  ];
 }
 
 /** 两族系均已知且不同（未知族系不参与多样性判定）。 */

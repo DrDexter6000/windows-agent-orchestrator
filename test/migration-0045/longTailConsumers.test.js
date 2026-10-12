@@ -3,14 +3,13 @@
 // 0045 W4c（R5 点名三处旁路）：
 //   WF-1 workflow agentHandler 经解析层（alias → resolvedTarget 注记入 start）。
 //   CR-2 会审厂族砖：注册表解析失败如实标注（渲染区分"席位不在册"与"确无 provider"）。
-//   PR-3 seatRoleOf 按角色事实分类（名字模式降为 legacy 回退）。
+//   PR-3 seatRoleOf 按角色事实分类——0065 随 seatRoleOf 宿主删除（TD-263 随关）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { seatRoleOf } from "../../src/application/panelReadiness.js";
 import { renderCouncilDiffText } from "../../src/commands/consult.js";
 
 function makeGitRepo(dir) {
@@ -80,16 +79,3 @@ test("CR-2: 厂族砖渲染——解析失败/注册表不可读如实标注（�
   assert.match(text, /noreg=注册表不可读（不按独立计）/);
 });
 
-test("PR-3: seatRoleOf 按角色事实——auditor 族角色=对抗（含 auditor_claude 名字盲区）；名字模式降为回退", () => {
-  // 事实优先
-  assert.equal(seatRoleOf("auditor_claude", undefined, { roleStem: "auditor" }), "adversarial",
-    "auditor_claude 名字旧模式判 non_seat（精确等值才对抗）——角色事实修正");
-  assert.equal(seatRoleOf("anything", undefined, { roleStem: "coder_low" }), "implementation");
-  assert.equal(seatRoleOf("anything", undefined, { roleStem: "researcher" }), "non_seat", "非对抗/实现角色=non_seat");
-  // declared 显式最优先（闭集内）
-  assert.equal(seatRoleOf("x", "adversarial", { roleStem: "coder_low" }), "adversarial");
-  // 无 facts：legacy 名字回退不回归
-  assert.equal(seatRoleOf("auditor", undefined), "adversarial");
-  assert.equal(seatRoleOf("coder_hq", undefined), "implementation");
-  assert.equal(seatRoleOf("auditor_claude", undefined), "non_seat", "legacy 回退保持旧形状（该盲区正是事实修复对象）");
-});

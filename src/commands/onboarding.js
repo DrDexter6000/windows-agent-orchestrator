@@ -275,13 +275,6 @@ export function renderHuman(r) {
           // 认证矩阵行 modelId 维各占一段——10-05 两起漏面的对应可见面。
           const eff = row.drift.templateEffort !== undefined ? `/effort=${row.drift.templateEffort}` : "";
           lines.push(`  drift: ${row.id} 私有 model=${row.model ?? "?"}/backend=${row.backend ?? "?"} ≠ 模板 ${row.drift.templateModel ?? "?"}/${row.drift.templateBackend ?? "?"}${eff}`);
-          // 0062（B9 乙′，审核修订）：seatRole 维独立一行（模板侧值展示——值展示
-          // 纪律与 backend/model/effort 先例一致）。措辞按 privateSeatRole 区分
-          // "未声明（面板按命名惯例兜底）"与"值不匹配（面板用显式值，无兜底）"——
-          // sol 审核条款：不得对值不匹配行断言兜底原因。
-          if (row.drift.templateSeatRole !== undefined) {
-            lines.push(`  drift(seatRole): ${row.id} 模板 seatRole=${row.drift.templateSeatRole ?? "未声明"}（私有侧未声明或与模板不同）`);
-          }
           if (row.drift.matrix) {
             lines.push(`  drift(矩阵): ${row.id} 认证矩阵 modelId=${row.drift.matrix.liveModelId} ≠ 模板矩阵 ${row.drift.matrix.templateModelId}`);
           }
@@ -396,17 +389,14 @@ function panelReadinessLines(r) {
   const seat = (e) => `${e.id}（推断族系：${familyLabel(e.family)}）`;
   const lines = [];
   if (p.tier === "three_seat") {
-    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）`);
-    lines.push(`  建议席位组合（展示建议，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
-    if (p.missingAdversarial) {
-      lines.push("  当前无可用对抗席（ready 面）——两席分配语义要求对抗视角，建议补配");
-    }
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 三席可配——探测候选 ≥2（推荐标准：Lead 主审 + 两名副审；候选计数是探测口径，不声称已配齐可派发副审）`);
+    lines.push(`  建议配对（族系最大化展示，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
     if (p.insufficientFamilyDiversity) {
-      lines.push("  跨族系提示：可用副审的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
+      lines.push("  跨族系提示：可用候选的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
     }
   } else if (p.tier === "two_seat") {
-    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）`);
-    lines.push(`  可用副审: ${p.available.map(seat).join("、")}——补齐第二个副审（建议不同族系）可升级三席`);
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 两席可配——探测候选恰 1（次之推荐：Lead 主审 + 一名副审）`);
+    lines.push(`  可用候选: ${p.available.map(seat).join("、")}——补齐第二个候选（建议不同族系）可升级三席`);
     if (p.singleWorkerVacuous) {
       // R10-B：单 worker 注脚面感知——已配置面讲"registry 仅一名 worker"，
       // 模板面维持既有措辞。
@@ -414,7 +404,7 @@ function panelReadinessLines(r) {
       lines.push(`  注：${subject}，它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转`);
     }
   } else {
-    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 当前无可用席位候选（对抗席/实现席）`);
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 当前零可用候选（探测口径）`);
     lines.push("  有意跳过会审时，在 wao stage 2/4 用 --panel-skip-reason 登记显式理由（强烈推荐但非强制）");
   }
   if (p.loginUnverified?.length > 0) {
@@ -434,18 +424,15 @@ function panelReadinessLines(r) {
   if (p.keyOnly?.length > 0) {
     lines.push(`  key 名已解析但无 CLI 探测面（未验证令牌/serve 可达性，不计入可用）: ${p.keyOnly.join("、")}`);
   }
-  // 席位惯例句（0019 §3 保留）：候选 id 全部从输入面行派生（不在面的 worker
-  // 不点名），零候选时整句不打印（shape-derived，0022 契约 (6)）。拆两行控制
-  // 显示宽 ≤120。分类复用 panelReadiness.seatRoleOf 的单一语义（declared
-  // seatRole 优先——R10-B），清单由 application 层投影（p.implementationIds /
-  // p.adversarialIds）——渲染层不写第二份分类。
-  if (p.implementationIds.length > 0 || p.adversarialIds.length > 0) {
-    lines.push("  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定");
-    const parts = [];
-    if (p.implementationIds.length > 0) parts.push(`实现席 ${p.implementationIds.join("、")}`);
-    if (p.adversarialIds.length > 0) parts.push(`对抗席 ${p.adversarialIds.join("、")}`);
-    const sourceLabel = r.panelFace === "configured" ? "从已配置 registry 派生" : "从上表模板行派生";
-    lines.push(`  在场候选（${sourceLabel}）: ${parts.join("；")}`);
+  // 0065（0045 §1.2 终局）：0019 §3 席位惯例句（实现席/对抗席清单）随席位
+  // 角色维退役删除——车道均可任副审（角色=派发时帽子），回避/组合由 Lead 按派生
+  // 事实判断（wao stage 2/4 --reviewed-run 的作者车道派生）。
+  // 同模型多键如实点名（tier 按行计数的虚高提示——opus P2 轻量版）。
+  if (p.duplicateModelKeys?.length > 0) {
+    const dup = p.duplicateModelKeys
+      .map((g) => `${g.ids.join("+")}（同 ${g.backend ?? "?"}/${g.modelId ?? "?"}）`)
+      .join("；");
+    lines.push(`  注：同模型多键配置——${dup}——tier 按行计数时此类键会虚高候选数`);
   }
   // R10-B：私有 registry 存在但不可读 → 降级模板面 + 来源标注（不阻塞主流程）。
   if (r.panelSourceUnreadable) {

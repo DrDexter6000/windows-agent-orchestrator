@@ -69,3 +69,9 @@ config/agents.json 在场且可读时），矩阵本体仍只显示模板行—�
 与 doctor 指针行共用，不造第二比对权威（opus 条款）。人读文案不对值不匹配行断言
 "命名惯例兜底"（该措辞只对私有侧未声明行成立——sol 审核条款）；JSON 面区分
 privateSeatRole（缺席=null）与值不匹配两种事实。
+
+---
+
+## 修订节（0065，2026-10-12）：drift 闭集的 seatRole 轴删除
+
+0062 B9 乙′为本决定 drift 闭集新增的 seatRole 轴（seatRoleDriftBetween/Rows）随 0045 §1.2 终局执行（决定 0065）整体删除——模板与私有副本的席位声明均已退役（模板 8 席删除、私有副本字段弃用为惰性），无可比对对象。drift 闭集回到 backend + model.id + reasoning.effort（0044 d′）+ 认证矩阵行 modelId（0044 d′）。

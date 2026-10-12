@@ -26,7 +26,7 @@ WAO 是"装一次，开发多个项目"的工具：
 1. 角色与车道解绑（0046）：车道键=模型家族短名（glm-pro/glm-flash/kimi/sol/astra/opus/deepseek-pro/deepseek-flash），角色是派发时按任务显式选择的帽子（`--role`，库=config/roles/*.md：auditor/coder/researcher/tester）。
 2. **新旧 harness 用独立 agentId 并存，禁止原位换**（认证历史隔离可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness）。**适用面（ADR-0029 修订）**：本禁令针对新旧 harness 双活的切换；旧通道已死（订阅取消/停服）时 Owner 可裁定原位迁移（会话复用机制随迁移重估、认证历史作废重跑）。"换 harness 驱动同一模型" = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。**模型面 vs runtime 面分叉**：接入新模型 = lane 内操作（改既有 backend 的 provider/model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 docs/usage.md「接入新模型 / 新运行时」节。
 3. **组合权 = Owner，选择权 = Lead**：Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane（纪律修订见 ADR-0029 两段式：供应商死亡类突发允许入册先行 + 切换当刻 smoke 首跑 + 承重前补 delta）。这是集合边界与纪律，不是 MCP 门禁（ADR 0018 的"认证非 permission gate"不变）。
-4. lane 备用条目（id ≠ 角色名原 id）**必须显式声明 `seatRole`**——防后缀命名被 `/^coder_/` 惯例误判席位、稀释三席会审候选统计（决策 0023）。
+4. lane 备用条目（id ≠ 角色名原 id）不再需要任何席位声明（0065：seatRole 机制整体退役——对抗性从审者×作者车道关系派生，决策 0045 §1.2；历史规则"必须显式 seatRole 防命名惯例误判"随分类器一并废止）。
 5. 新 lane 的认证走 delta 子集（sentinel + scorecard + 越界写对抗断言）→ `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`——见决策 0025 §5 与批次 3。
 
 ## 角色清单
@@ -96,7 +96,7 @@ WAO 是"装一次，开发多个项目"的工具：
 4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `glm-pro`（次选 `sol`）。
 5. **多模态与创意**：视觉、前端、创意和多模态任务优先 `kimi`（文案/头脑风暴）或 `glm-flash`/`deepseek-flash`（视觉理解）；`opus` 承担高要求前端设计与备胎审计。
 6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
-7. **顾问/审计与三席会审**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。三席会审是推荐标准（决策 0023，2026-08-17 起产品化；supersedes 0019 "默认不审"）：方案（stage 2）与交付物验收（stage 4）强烈建议 Lead 主审 + 两名副审（席位避同族、避被审产出作者——0019 §3 席位回避保留），配不齐两副审则以 Lead + 一副审两席为次之推荐。强烈推荐但非强制：跳过需 `--panel-skip-reason` 显式登记理由；跨族系大模型会审是更强推荐。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。新配置建议在 registry 里显式声明 `seatRole`（adversarial/implementation/non_seat，省略按命名惯例回退——见 docs/usage.md registry 配置详解）。**语义澄清（0064）**：seatRole 是会审体检（onboarding/doctor 就绪分级）的**默认视角归类**——无派发上下文时的分类输入，不是车道能力声明、不约束实际选席；车道临场戴哪顶帽子由派发时的 `role` 决定，车道画像与建议用途见 `wao lanes`。终局方向（0045 §1.2，已批准未落地）：对抗性从审者×作者车道关系派生，取代人工声明（见 tech-debt TD-264）。
+7. **顾问/审计与三席会审**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。三席会审是推荐标准（决策 0023，2026-08-17 起产品化；supersedes 0019 "默认不审"）：方案（stage 2）与交付物验收（stage 4）强烈建议 Lead 主审 + 两名副审（席位避同族、避被审产出作者——0019 §3 席位回避保留），配不齐两副审则以 Lead + 一副审两席为次之推荐。强烈推荐但非强制：跳过需 `--panel-skip-reason` 显式登记理由；跨族系大模型会审是更强推荐。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。**0065（0045 §1.2 终局）**：席位角色人工声明（seatRole）已退役——对抗性是**派生事实**：`wao stage 2/4 --panel-seats <a,b> --reviewed-run <runId>` 按审者车道 × 被审产出作者车道（车道指纹比对）派生，席位与作者同车道=回避违反大声提示（advisory 不阻断）；车道画像与建议用途见 `wao lanes`。终局依据：0045 §1.2"对抗性从审者车道×作者车道关系派生（取代人工 seatRole 声明）"。
 
 ## 标准开发流（角色协作）
 
@@ -104,7 +104,7 @@ WAO 是"装一次，开发多个项目"的工具：
 Lead 收到需求
   → 必要时派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
-  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席车道取一避同族 + 对抗席车道取一（当前=astra/opus，按 registry seatRole=adversarial 声明——0064 语义澄清见派工策略第 7 条）；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
+  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现视角车道取一避同族 + 对抗视角车道取一（跨族系更强推荐；对抗性按审者×作者车道派生——0045 §1.2/0065，wao stage --reviewed-run）；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
   → Lead 独立裁定方案并选择 Coder-HQ/Low/MM
   → 必要时派 Tester 提供独立执行证据
   → 交付物验收前默认推荐召集副审会审（audit 模式；决策 0023：组合同上；跳过需 --panel-skip-reason 登记理由，wao stage 4 留痕；auditor 同会话连审两阶段的独立性侵蚀见 ADR 0019 §3）

@@ -3,6 +3,7 @@
   "groups": {
     "pure": [
       "application/lanesView.test.js",
+      "application/panelDerivation.test.js",
       "application/serveMaintenance.test.js",
       "application/serveReviveAndHusk.test.js",
       "application/upstreamSessionRelease.test.js",

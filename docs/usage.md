@@ -133,7 +133,6 @@ Copy-Item config/agents.example.json config/agents.json
     // ── claude-code（0046 原生通道：官方 OAuth 订阅）──
     "opus": {
       "backend": "claude-code",
-      "seatRole": "adversarial",
       "model": { "id": "claude-opus-5-5" },
       "reasoning": { "effort": "high" },
       "cwd": ".",
@@ -193,13 +192,7 @@ Copy-Item config/agents.example.json config/agents.json
 }
 ```
 
-`seatRole`（R10-B）是三席会审（决策 0023）的显式席位声明，闭集为
-`"adversarial"`（对抗席）/ `"implementation"`（实现席）/ `"non_seat"`（非席位）——registry
-schema、就绪分级引擎与展示层共用同一词表（`registry validate` 对闭集外或非字符串值固定拒绝，
-错误信息不回显坏值）。**省略该字段合法**（0045 前历史惯例，0046 后旧席位名已不存在——显式声明是唯一判据）：席位角色回退命名惯例（旧 `auditor`/`coder_mm` = 对抗席、
-`coder_` 前缀 = 实现席、其余非席位），老 registry 零迁移。新配置建议显式声明——惯例对
-`coder_opencode_fallback` 这类"名字像实现席、实为 fallback 非席位"的 worker 会误分类，
-显式 `"non_seat"` 才能把它从席位候选剔除。**语义澄清（0064）**：seatRole 只是会审体检（onboarding/doctor 就绪分级与 drift 轴）的默认视角归类，不是车道能力声明、不约束实际选席（车道临场帽子=派发时 `role`）；车道画像/认证/就绪一屏见 `npm run cli -- wao lanes`（只读参考面，事实陈列零推荐——非默认 `--registry` 须与 `--lanes-file` 成对，防跨绑规则同 run 命令）。
+`seatRole`（R10-B）**已废弃（0065，0045 §1.2 终局）**：席位角色的显式声明机制整体退役——对抗性改为**派生事实**（审者车道 × 被审产出作者车道的关系，车道指纹比对）：`wao stage 2/4 --panel-seats <a,b> [--reviewed-run <runId>[,<runId>]]` 在登记会审席位时按 registry 当前车道配置 × 被审 run 的 `run.started` 钉住作者事实派生（车道不同=对抗前提成立；席位与作者同车道=回避违反大声提示，advisory 不阻断——0019 §3 作者回避机械化）。多值 `--reviewed-run` 支持共同作者；作者不可读/缺 `run.started` 时如实输出 unknown（不折叠成"无违反"）。迁移期兼容：老 registry 里的 seatRole 字段不会被拒载——归一化直接忽略（读取面零消费），`registry validate` 对在场字段出弃用 advisory（可删除）。车道画像/认证/就绪一屏见 `npm run cli -- wao lanes`（只读参考面——非默认 `--registry` 须与 `--lanes-file` 成对，防跨绑规则同 run 命令）。
 
 **deepseek-harness / deepseek-acp 通道适用限制、`registry validate` 能力交叉 `⚠` 警告与 metrics 判读**正文已完整迁移至 `docs/certification-runbook.md` §DSH 通道适用限制与能力交叉警告（单向链接；唯一权威；含 TD-87 metrics 行为的五态化勘误注记）。
 
@@ -223,7 +216,7 @@ npm run cli -- registry list --registry config/agents.json
 # 检查 opencode serve 是否可达（只对 opencode-serve backend）
 npm run cli -- registry check --registry config/agents.json
 
-# 车道一屏参考（0064，只读）：接线轴 + Owner 画像 + 认证简表 + 就绪探测 + seatRole 原始声明
+# 车道一屏参考（0064，只读）：接线轴 + Owner 画像 + 认证简表 + 就绪探测
 npm run cli -- wao lanes
 ```
 
@@ -917,7 +910,7 @@ npm run cli -- wao stage --cwd <目标项目>
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（"panel 字段只在方案（2）/交付物验收（4）登记"——不写成"会审仅发生在两节点"，同一 stage 允许多条记录，返工/窄复核照常再登记）。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
-- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块**按面切换**（R10-B）——私有 `config/agents.json` 不存在时是**模板面**（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到**已配置面**（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）；`wao doctor` 的 `panel_readiness` 检查恒为**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（0046：按 seatRole 声明——对抗席 = adversarial 车道如 astra/opus；实现席 = implementation 车道；未声明/非席位不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。席位角色的判定顺序：显式 `seatRole` 声明优先，省略回退命名惯例（见上文 registry 配置详解）。
+- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块**按面切换**（R10-B）——私有 `config/agents.json` 不存在时是**模板面**（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到**已配置面**（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）；`wao doctor` 的 `panel_readiness` 检查恒为**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导（0065 起行过归一化门，无效条目不进计数），仅当探测候选 ≤1 或已知族系不足两族时打印 INFO（三席且跨族才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。**0065 分级语义（0045 §1.2 终局，多样性口径）**：候选=全部有效行（角色维退役——任何车道都可能任副审，临场帽子=派发时 role）；tier 按 ready 候选计数（探测口径，不声称已配齐可派发副审）：三席（≥2，推荐标准）/两席（恰 1，次之推荐）/零候选（跳过提示）；已知族系不足两族时仍判三席但必附跨族系提示（doctor 不静默——假全清防线从"零对抗席"平移到"零跨族"）；对抗性本身不再事前预判——由 `wao stage --reviewed-run` 按审者×作者车道指纹派生。`login_based`/`unknown`/`key_only_*` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"，无 CLI 面凭据车道展示 key_only 面）；跨族系（推断族系标签，展示专用非契约）是更强推荐。
 
 ### MCP stdio 接口（agent-facing primary，M9）
 

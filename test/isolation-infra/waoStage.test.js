@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, mkdir } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,6 +148,39 @@ test("TD-83/TD-91: STAGE-/DECL- 在 pipeline/，ADR 在 decisions/，三者独�
     // ADR 编号连续不受 STAGE/DECL 干扰
     assert.ok(adrFiles.some((f) => f.startsWith("0001-")), "ADR 0001 存在");
     assert.ok(adrFiles.some((f) => f.startsWith("0002-")), "ADR 0002 存在（编号未被打断）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 0065（0045 §1.2 终局）：panel.derived 形状闭集（core 只收纯数据）──────────
+test("0065: panel.derived 形状校验——合法通过；未知键/坏 authorContext/缺 basis/无 seats 拒绝", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-stage-derived-shape-"));
+  try {
+    await mkdir(join(dir, "pipeline"), { recursive: true });
+    const good = {
+      seats: ["auditor"],
+      derived: {
+        authorContext: "derived", reviewedRunIds: ["run_x"], authors: [], seats: [],
+        pairwise: [], authorAvoidanceViolations: [], basis: "seats=registry 当前配置事实；authors=run.started",
+      },
+    };
+    await addStage(dir, { stage: 4, task: "合法派生形状", panel: good });
+
+    const badKey = { seats: ["auditor"], derived: { ...good.derived, bogus: 1 } };
+    await assert.rejects(addStage(dir, { stage: 4, task: "x", panel: badKey }), /panel\.derived 未知键 "bogus"/);
+
+    const badCtx = { seats: ["auditor"], derived: { ...good.derived, authorContext: "maybe" } };
+    await assert.rejects(addStage(dir, { stage: 4, task: "x", panel: badCtx }), /authorContext 必须在闭集/);
+
+    const noBasis = { seats: ["auditor"], derived: { ...good.derived, basis: "" } };
+    await assert.rejects(addStage(dir, { stage: 4, task: "x", panel: noBasis }), /basis 必须是非空字符串/);
+
+    // 无 seats 的派生对象=错用（skip 分支无派生面）。
+    await assert.rejects(
+      addStage(dir, { stage: 4, task: "x", panel: { skipReason: "low_risk_small_task", derived: good.derived } }),
+      /panel\.derived 只与 --panel-seats 同给/,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -1,14 +1,12 @@
 {
   "_comment": "Worker lane registry 模板（0046 席位矩阵模型名化：车道键=模型家族短名，模型绑定原厂 harness「原汤化原食」）。本文件是入库的完整示例（complete example，可裁剪）：复制为 config/agents.json（gitignored，不入库）后按可用认证删减，删到只剩一个 worker 也行。角色权威=docs/team-roles.md，角色库 config/roles/*.md 与之一一对应；条目不携带 systemPrompt（角色是派发时按任务显式选择的帽子，--role），画像元数据（特征描述/建议任务类别）仅对 Lead 暴露（config/lane-traits.json，0046 §1）。",
   "_comment_ssot": "⚠ 修改本文件=模板改版蓄意事件（决策 0044/0046）。车道身份=四元组 {backend, model.id, providerID, providerKey} 内容指纹（effort=参数不进身份）；席位升级（模型 id/harness 升级）走 harness 版本巡检 SOP+重认证（0046 §1.4：派发只派认证清单中的）。新增车道=Owner 组合权；同 backend 多 model 车道合法（如 deepseek-pro/deepseek-flash）。G4 断言面：本表轴须与 config/lanes.json 一致（不一致即拒）。",
-  "_comment_seatRole": "R10-B：seatRole 是三席会审（决策 0023）的显式席位声明，闭集 [adversarial/implementation/non_seat]（registry.js SEAT_ROLES）。模板全员显式声明；对抗席=auditor 家族任务的默认落点。",
   "_comment_example_axes": "轴示例与 docs/surface/certification.md 一致；zcode binary 为桌面捆绑路径占位（换机改真实路径）；effort 值域按官方：codex/claude 五档 low/medium/high/xhigh/max、GLM/ACP 三档 low/high/max、kimi-web 通道不表达（缺省合法）。",
   "_comment_safe": "安全：全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，06-18 事故后弃 opencode；如需 token 闸门精确控成本的 opencode fallback 见 docs/troubleshooting.md）。",
   "agents": {
     "glm-pro": {
       "_comment": "主力代码执行（GLM-5.3 via zcode app-server，原厂 harness 驱动原厂 LLM）。",
       "backend": "zcode",
-      "seatRole": "implementation",
       "cwd": ".",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
       "model": {
@@ -26,7 +24,6 @@
     "glm-flash": {
       "_comment": "副代码执行/探索研究/视觉理解（GLM-5.3-Flash，GLM-5 系首个原生多模态）；researcher 复用政策的历史承载车道（0046 §4：席位字段保活）。",
       "backend": "zcode",
-      "seatRole": "implementation",
       "cwd": ".",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
       "model": {
@@ -45,7 +42,6 @@
     "kimi": {
       "_comment": "方案 advisor/创意头脑风暴（kimi-code/k3-256k via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。serveUrl 指向本地 kimi worker serve——启动/端口/WAO_IN_WORKER 标记见 docs/usage.md 场景 4e「kimi 专用 worker serve 运维配方」（端口号本身不证明标记已生效）。",
       "backend": "kimi-web",
-      "seatRole": "implementation",
       "cwd": ".",
       "serveUrl": "http://127.0.0.1:58628",
       "tokenEnv": "KIMI_WEB_TOKEN",
@@ -56,7 +52,6 @@
     "sol": {
       "_comment": "方案 advisor/交付物 auditor/高难度代码执行（gpt-6.1-sol via codex）。",
       "backend": "codex",
-      "seatRole": "implementation",
       "cwd": ".",
       "model": {
         "id": "gpt-6.1-sol"
@@ -68,7 +63,6 @@
     "astra": {
       "_comment": "方案 advisor/交付物 auditor/高难度 bug 挖掘（gpt-6-astra via codex）；auditor 家族对抗席。",
       "backend": "codex",
-      "seatRole": "adversarial",
       "cwd": ".",
       "model": {
         "id": "gpt-6-astra"
@@ -80,7 +74,6 @@
     "opus": {
       "_comment": "方案 auditor/创意/高要求前端设计（claude-opus-5-5 via claude-code，原厂订阅 OAuth）；auditor 家族对抗席（Claude 系）。",
       "backend": "claude-code",
-      "seatRole": "adversarial",
       "cwd": ".",
       "model": {
         "id": "claude-opus-5-5"
@@ -95,7 +88,6 @@
     "deepseek-pro": {
       "_comment": "主力/副代码执行（deepseek-v4-pro via ACP stdio 通道；model=双字段 {id, providerID} 形状，0046 §3 wire 实证）。",
       "backend": "deepseek-acp",
-      "seatRole": "implementation",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",
       "model": {
@@ -109,7 +101,6 @@
     "deepseek-flash": {
       "_comment": "副代码执行/视觉理解/快速探索（deepseek-flash 视觉档——勿与默认档 deepseek-v4-flash 混淆，0046 §1 裁定钉死）。",
       "backend": "deepseek-acp",
-      "seatRole": "implementation",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",
       "model": {
@@ -211,5 +202,6 @@
         ]
       }
     ]
-  }
+  },
+  "_comment_panel_derivation": "0065（0045 §1.2 终局）：席位角色声明已退役——对抗性从审者×作者车道关系派生（wao stage 2/4 --panel-seats --reviewed-run），不再人工声明。历史 seatRole 字段在场时 registry 归一化忽略（validate 出弃用 advisory）。"
 }

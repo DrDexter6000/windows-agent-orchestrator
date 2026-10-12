@@ -103,7 +103,7 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 
 先分清两个文件的作用域，不要混淆：
 
-- **`config/agents.example.json`（入库的模板）**：0046 车道键形状——模型家族短名车道（glm-pro / glm-flash / kimi / sol / astra / opus / deepseek-pro / deepseek-flash）+ 全员显式 seatRole；角色与车道解绑（角色库 auditor/coder/researcher/tester 经 `--role` 显式选择）——它是上游样例，不需要编辑它本身。
+- **`config/agents.example.json`（入库的模板）**：0046 车道键形状——模型家族短名车道（glm-pro / glm-flash / kimi / sol / astra / opus / deepseek-pro / deepseek-flash）；角色与车道解绑（角色库 auditor/coder/researcher/tester 经 `--role` 显式选择；0065：席位角色声明已退役，对抗性按审者×作者车道派生）——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
 > **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印角色矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
@@ -131,7 +131,7 @@ Copy-Item config/agents.example.json config/agents.json
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板自 R8-1 起统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
-> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是对抗席车道（`astra`/`opus` 取一）+ 一名实现席车道（如 `glm-pro`/`sol`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。强烈推荐两名副审来自不同大模型族系（跨族系会审是更强推荐）。你有多种认证时按此优先级裁剪：先保一个对抗席车道 + 一个实现席车道，再保族系差异。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
+> **副审（会审席位）配置建议（决策 0023，advisory；0065 多样性口径）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是两名**不同族系**车道（跨族系是更强推荐；任何车道都可任副审，席位角色不设人工声明——对抗性在登记席位时按审者×作者车道派生，见 `wao stage --reviewed-run`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。你有多种认证时按此优先级裁剪：先保两条不同族系车道，再保族系差异面。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
 
 ### 4d. 自检 registry 与环境（必做）
 

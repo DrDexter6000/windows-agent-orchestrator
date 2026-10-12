@@ -9,8 +9,8 @@
 //
 // 契约（会审 consult_202610121021490657ur8lp 双席 P1 全采纳）：
 //   - 事实陈列，零排序零推荐：行序恒=lanes.json 声明序（不按 readyState 重排）。
-//   - seatRole 只透传 registry 显式声明值（string|null；null=未声明）——绝不
-//     经 seatRoleOf 推导（命名惯例回退会把车道键误标 non_seat，是推导值非事实）。
+//   - 0065（0045 §1.2 终局）：seatRole 声明列删除（席位角色维退役——对抗性改
+//     派生事实，wao stage --reviewed-run；registry 归一化已 strip 该字段）。
 //   - certification=null 不等于"无记录"——无记录/身份不匹配/台账缺失或不可读
 //     三种原因未区分，展示层如实标注（sol P1-3）；状态值原样透传（不止
 //     certified/conditional 两态）。
@@ -116,7 +116,7 @@ const DERIVED_ISSUE_CAP = 16;
  * @param {object} input.traitsResult   readLaneTraits() 结果
  * @param {object} input.inventory      getRegistryInventoryWithIssues() 结果
  * @param {Object<string, object>} input.registryAgents 同一次 readRegistry 的
- *   listAgents() 归一映射（接线轴/seatRole 原始声明来源）
+ *   listAgents() 归一映射（接线轴来源——0065 起归一化不含 seatRole）
  * @param {object[]} input.readyRows    buildRecommendations(...).rows（就绪轴；
  *   未接线/无效车道无行=readyState null）
  * @returns {object} 视图对象（--json 白名单投影的同源单对象）
@@ -206,8 +206,6 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
         ? "unmatched_reason_unspecified" : null,
       // 就绪轴：探测权威只吃 registry 有效条目（未接线/无效=无探测行）
       readyState: wiredForAxes ? (readyMap.get(id)?.readyState ?? null) : null,
-      // seatRole：registry 显式声明原始值（string|null）；不经 seatRoleOf。
-      seatRole: wiredForAxes && typeof agent?.seatRole === "string" ? agent.seatRole : null,
     });
   }
 
@@ -243,7 +241,7 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       profile: "画像=Owner 手拟矩阵（config 内画像文件；初次落库 2026-10-06，其后有 Owner 修订；无新鲜度机制——模型升级以重认证为准）",
       certification: "认证=reliability 台账简表口径（不比较 effort，非当前执行画像适用性结论）",
       readyState: "就绪=环境探测（口径同 wao onboarding；未接线/条目无效=跳过探测）",
-      seatRole: "seatRole=registry 显式声明（会审体检默认视角，非能力声明，不约束选席）",
+      panel: "会审对抗性=派生事实（0045 §1.2/0065：wao stage 2/4 --panel-seats --reviewed-run 按审者×作者车道指纹派生——本面不预判）",
     },
   };
 }

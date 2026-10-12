@@ -43,6 +43,31 @@ import { COMMAND_NAMES } from "../cliHelp.js";
 // run transcript）。数据逻辑委托 ../application/acceptanceRecord.js，本命令只做
 // argv/console 适配——与 consult/playbook 同款分层。
 import { recordAcceptance, listAcceptance } from "../application/acceptanceRecord.js";
+// 0065（0045 §1.2 终局）：--reviewed-run 的对抗性派生（application 层编排，
+// 复用 deriveIndependenceRelations 指纹比对——core 命令层只做装配）。
+import { derivePanelFacts, seatFactsFromRegistry } from "../application/panelDerivation.js";
+import { readRegistry } from "../registry.js";
+import { readTranscript } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
+
+/**
+ * 0065：stage 侧派生装配——席位事实=registry 归一化条目（登记时配置事实），
+ * 作者事实=各被审 run 的 run.started（panelDerivation 内读取）。IO 走生产
+ * 读取器（readTranscript/resolveTranscriptPath——R13-C 事件绑定读由
+ * panelDerivation.observeAuthor 逐事件带 runId 核）。
+ */
+async function derivePanelFactsForStage({ seatIds, reviewedRunIds, options, config }) {
+  const registryPath = resolve(options.registry ?? config.registry);
+  const reg = await readRegistry(registryPath);
+  const agentsById = new Map(reg.listAgents().map((a) => [a.id, a]));
+  return derivePanelFacts({
+    seatFacts: seatFactsFromRegistry(seatIds, agentsById),
+    reviewedRunIds,
+    runDir: resolve(options.runDir ?? config.runDir),
+    readEventsFn: readTranscript,
+    resolvePathFn: resolveTranscriptPath,
+  });
+}
 
 /**
  * TD-95 #7：解析 stage artifact 路径（随 wao stage 搬迁）。
@@ -214,6 +239,29 @@ async function waoStageCommand(args, config) {
     }
     // R9：panel 参数解析 + fail-fast 校验（互斥 / 两节点限定 / 闭集 / registry 存在性）。
     const panel = await parsePanelOptions(stage, options, config);
+    // 0065（0045 §1.2 终局）：--reviewed-run——对抗性派生（席位车道指纹 × 被审
+    // run.run.started 钉住的作者车道）。门：必须与 --panel-seats 同给（skip/无
+    // panel=错用，fail-fast 不静默）；多值逗号分隔（0019 §3 "作者或共同作者"）。
+    if (options.reviewedRun !== undefined) {
+      if (!panel || !panel.seats) {
+        throw new Error("--reviewed-run 只与 --panel-seats 同给（无席位即无派生对象；skip 登记无派生面）。");
+      }
+      const reviewedRunIds = String(options.reviewedRun).split(",").map((s) => s.trim()).filter(Boolean);
+      if (reviewedRunIds.length === 0) {
+        throw new Error("--reviewed-run 需要至少一个 runId（逗号分隔支持共同作者）。");
+      }
+      panel.derived = await derivePanelFactsForStage({
+        seatIds: panel.seats,
+        reviewedRunIds,
+        options, config,
+      });
+      if (panel.derived.authorAvoidanceViolations.length > 0) {
+        // 0019 §3 回避机械化：事实大声说，不拒（0023 advisory 性质）。
+        console.error(
+          `⚠ 回避违反（0019 §3）：席位 ${panel.derived.authorAvoidanceViolations.join("、")} 与被审产出作者同车道（车道指纹相同）——建议换席；已如实入 panel 记录（advisory，不阻断登记）。`,
+        );
+      }
+    }
     const rawArtifacts = options.artifacts
       ? options.artifacts.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined;
@@ -234,7 +282,12 @@ async function waoStageCommand(args, config) {
     const out = { staged: true, stage, path };
     if (panel) {
       out.panel = panel.seats
-        ? { seats: panel.seats, note: "自报、未验证（registry 存在性已校验；不校验 ready 态/族系；评审旁证走 --artifacts 的 runs/<runId>.jsonl）" }
+        ? {
+          seats: panel.seats,
+          note: "自报、未验证（registry 存在性已校验；评审旁证走 --artifacts 的 runs/<runId>.jsonl；"
+            + "对抗性派生事实（--reviewed-run）在 derived 字段——车道不同=对抗前提成立，非对抗成立）",
+          ...(panel.derived ? { derived: panel.derived } : {}),
+        }
         : { skipReason: panel.skipReason };
     } else if (PANEL_STAGES.includes(stage)) {
       out.panelAdvisory =

@@ -95,9 +95,10 @@ test("R9 守卫: 消费面闭集——dispatch/delivery 路径不得 import mode
     }
   };
   walk(join(ROOT, "src"));
-  // 展示面闭集：panelReadiness（共享推导）、onboarding 命令层（族系展示标签）。
-  // dispatch/delivery/runManager 等控制面路径出现即红（决策 0023 定位红线）。
-  assert.deepEqual(consumers.sort(), ["application/panelReadiness.js", "commands/onboarding.js"],
+  // 展示面闭集：panelReadiness（共享推导）、onboarding 命令层（族系展示标签）、
+  // panelDerivation（0065：对抗性派生的族系维——advisory 事实输出进 panel 记录，
+  // 同为展示级非门控；dispatch/delivery/runManager 等控制面路径出现即红）。
+  assert.deepEqual(consumers.sort(), ["application/panelDerivation.js", "application/panelReadiness.js", "commands/onboarding.js"],
     `modelFamily 消费面必须是展示闭集，实际：${consumers.join(", ")}`);
 });
 
