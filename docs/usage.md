@@ -622,6 +622,13 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
      全 idle）→ 优雅 shutdown 全量拆荚 → 按上方配方重启（env 由命令组装，
      `WAO_IN_WORKER=1` 恒注入）→ 就绪验证。**只动 kimi 车道 serveUrl 指向的
      worker 实例**；Owner 主 serve（58627）名下存量荚由 Owner 自行重启解决。
+     **死实例复活（TD-261，0063）**：serve 已死（双面连接拒绝×两探 + 实例 pid
+     已死）时 recycle 直接跳过杀步重启（`revived: true`）；pid 活着但端口拒绝
+     =可能正在启动 → 拒绝（`serve_not_listening_pid_alive`）。**重启失败语义
+     （TD-261b）**：exe 在一切副作用之前解析（显式 `--kimi-exe` 缺席即拒、默认
+     链 kimiHome/bin → PATH → `%USERPROFILE%\.kimi-code\bin`）；重启失败/未就绪
+     退出码非零并附手动配方指路——shutdown 后 kimi 自清实例文件，重跑 recycle
+     会 no_instance 拒绝，须按配方手动拉起。
    - 时机：跑批间隙手动调用即可；忘了的后果=荚多攒几天（有界烦恼），上游
      修复（Owner 反馈 Moonshot：要求 idle 荚 GC 或 :delete 连带拆荚）后
      recycle 退役。

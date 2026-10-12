@@ -145,7 +145,10 @@ async function serveCommand(args, config) {
       kimiHome: options.kimiHome,
     });
     console.log(JSON.stringify(result, null, 2));
-    if (result.refused) {
+    // TD-261（0063，opus/sol 合订）：结构化失败与"未就绪"都要非零退出——旧实现
+    // 只认 refused，spawn 成功但没就绪（端口被抢/exe 起来即退）会以 exit 0 收场
+    // =留下死 serve 却不报。restart:failed 额外带手动配方指路。
+    if (result.refused || result.restart === "failed" || result.ready === false) {
       process.exitCode = 1;
     }
     return;

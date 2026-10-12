@@ -54,10 +54,30 @@ export async function serveRequest({ baseUrl, token, method, path, body, fetchIm
     return { httpStatus: response.status, code: parsed?.code, data: parsed?.data };
   } catch (error) {
     if (error?.name === "AbortError") return { aborted: true };
+    // TD-261（0063）：连接拒绝单列——"主动拒绝"是唯一可证"此端点无监听"的传输
+    // 信号（DNS 失败/超时/其它一律归 http_error 不可证死）。undici 的 OS 错误在
+    // error.cause；多地址族失败可能包成 AggregateError（cause.errors[*].code——
+    // 全员 ECONNREFUSED 才算，混有其它即不可证死——sol 会审条款）。
+    if (isConnectionRefused(error)) return { connectionRefused: true };
     return { transportError: true };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// 连接拒绝判定（闭集提取，绝不回显错误文本）：
+//   · error.code === "ECONNREFUSED"（直抛形状）
+//   · error.cause.code === "ECONNREFUSED"（undici 包装形状）
+//   · error.cause 是 AggregateError 且 errors[*].code 全员 ECONNREFUSED
+//     （happy-eyeballs 多地址形状——localhost 常见）
+function isConnectionRefused(error) {
+  const codes = [error?.code, error?.cause?.code];
+  if (error?.cause && Array.isArray(error.cause.errors) && error.cause.errors.length > 0) {
+    codes.push(...error.cause.errors.map((e) => e?.code));
+    // AggregateError 混有非 ECONNREFUSED 子错误 → 整体不可证死。
+    if (error.cause.errors.some((e) => e?.code !== "ECONNREFUSED")) return false;
+  }
+  return codes.some((c) => c === "ECONNREFUSED");
 }
 
 /**
@@ -83,6 +103,7 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
       fetchImpl, timeoutMs,
     });
     if (r.aborted) return { ok: false, reason: "timeout" };
+    if (r.connectionRefused) return { ok: false, reason: "connection_refused" };
     if (r.transportError) return { ok: false, reason: "http_error" };
     if (r.code !== 0 || !Array.isArray(r.data?.items)) {
       return { ok: false, reason: "upstream_rejected", ...(Number.isInteger(r.code) ? { code: r.code } : {}) };

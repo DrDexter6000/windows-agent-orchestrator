@@ -1331,6 +1331,13 @@ export class RunManager {
       backend: agent.backend,
       cwd: agent.cwd,
       ...(worktreeInfo ? { worktreePath: worktreeInfo.path, worktreeBranch: worktreeInfo.branch } : {}),
+      // TD-262（0063，opus 会审条款）：持久化隔离策略事实——resume 只认此字段
+      // 恢复 deferredWorktreeRelease（旧转录缺席 → 不恢复，交普查）；"ephemeral"
+      // 由构造保证 = readOnly && 非 sessionReuse（0057 W1a），复用轮/交付轮恒
+      // "persistent"。非 worktree 隔离缺席（字节兼容）。
+      ...(worktreeInfo && (isolationConfig.strategy === "ephemeral" || isolationConfig.strategy === "persistent")
+        ? { worktreeStrategy: isolationConfig.strategy }
+        : {}),
       serveUrl: agent.serveUrl,
       model: agent.model,
       // R11-1: the STATIC reasoning policy, recorded unconditionally like
@@ -1742,7 +1749,26 @@ export class RunManager {
     // TD-103 audit: for delivery runs, the agent cwd must be the worktree path,
     // NOT the source repo (runStarted.cwd is the source repo). Non-delivery runs
     // keep using runStarted.cwd as before.
+    // TD-262（0063，opus/sol 会审合订）：ephemeral 只读轮的 resume 恢复——资格只认
+    // run.started 持久化的 worktreeStrategy 事实（"ephemeral" 由构造保证=readOnly
+    // && 非 sessionReuse；复用轮/交付轮恒 persistent——旧转录无此字段不恢复，交
+    // 普查）。树缺失即拒绝 resume：只读隔离合同不可在源仓兑现（fail-closed，零
+    // 转录写入）。执行位置=隔离树（修"resume 后 worker 跑在源仓"旧缺陷）；Run 的
+    // agent 保持源仓解析（agent.cwd 供分支回收 git 操作）。
+    const ephemeralWorktree = !deliveryContext && runStarted.worktreeStrategy === "ephemeral"
+      && typeof runStarted.worktreePath === "string" && runStarted.worktreePath.length > 0
+      ? runStarted.worktreePath : null;
+    if (ephemeralWorktree && !existsSync(ephemeralWorktree)) {
+      throw new Error(
+        `resume_refused: ephemeral worktree missing (${runStarted.worktreePath}) — `
+          + `the read-only isolation contract cannot be honored in the source checkout; `
+          + `collect late output then prune this run instead of resuming`,
+      );
+    }
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
+    // 执行位置（attach 轮询 cwd / replay spawn 的 agent.cwd 覆写）：ephemeral 轮
+    // =隔离树；其余沿既有语义。getAgent/Run.agent 仍按 resumeCwd（源仓）解析。
+    const executionCwd = ephemeralWorktree ?? resumeCwd;
     // 0045 W4d（R5 §1.3）：重键前档案的 envelope agentId=席位名，注册表已无此键——
     // getAgent 的 Unknown 信号转固定文案具名拒绝（不裸抛、不静默换道）。mock 注册
     // 表可无 listAgents——以 getAgent 本身为准（诚实信号），不做前置键扫描。
@@ -2001,9 +2027,12 @@ export class RunManager {
       // TD-223：spawn 失败（ENOENT 等）时 backend 已创建的临时文件工件（native
       // OAuth 隔离目录在 super.spawn 之前落盘）就地 dispose——resume 路径此时还没
       // 有 Run/cleanupFn 兜底，不回收即泄漏。
+      // TD-262（0063）：ephemeral 轮的执行 cwd=隔离树——spawnAgent 只覆写 cwd，
+      // Run 收到的 agent 保持源仓解析（分支回收的 git 操作落在源仓）。
+      const spawnAgent = ephemeralWorktree ? { ...agent, cwd: ephemeralWorktree } : agent;
       let newResult;
       try {
-        newResult = await backend.spawn(agent, {
+        newResult = await backend.spawn(spawnAgent, {
           prompt: promptEvent.prompt,
           roleContract: resumeRoleContract,
           resolvedCredentials: resumeResolvedCredentials,
@@ -2034,6 +2063,9 @@ export class RunManager {
         // 组合 dispose 包装，让重放 run 终态同样回收 backend 临时文件工件。
         cleanup: composeBackendDispose(null, backend),
         ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
+        // TD-262（0063）：ephemeral 只读轮的延迟释放恢复（终态停止确认后放树+
+        // 零独有分支回收——与 start 路径同款语义）。
+        ...(ephemeralWorktree ? { deferredWorktreeRelease: ephemeralWorktree, effectiveCwd: ephemeralWorktree } : {}),
         scorecardRules: resumeScorecardRules,
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
@@ -2048,7 +2080,12 @@ export class RunManager {
     const serveUrl = agent.serveUrl;
     const sessionId = session.backendSessionId;
     // TD-103 audit: delivery runs use worktree cwd for streamEvents polling.
-    const cwd = resumeCwd;
+    // TD-262（0063）：ephemeral 轮的轮询/探针 cwd = 隔离树（executionCwd）。
+    const cwd = executionCwd;
+    // TD-262（0063，sol 会审条款）：attach 重建的 handle 此前缺停止探针——
+    // 终态清理恒 stop_unconfirmed。按 backend 能力位接线（不变量 3，不按
+    // runtime 名分支）：backend 自带 (serveUrl, sessionId, opts) 形探针则透传。
+    const probeCapable = typeof backend.session === "function" && typeof backend.messages === "function";
     // TD-54 修复：prompt.sent 现在可能写两条（spawn 前 {prompt} + spawn 后 {messageId,...}），
     // resume 取最后一条才有 messageId（opencode-serve resume 流需要）。
     // R13-C：读取带 runId 绑定——外 run 尾条不得供给 attach 的
@@ -2061,6 +2098,10 @@ export class RunManager {
       admittedSeq: boundPromptEvent?.admittedSeq,
       events: (signal, opts) => backend.streamEvents(serveUrl, sessionId, { cwd, signal, interval: opts?.pollInterval }),
       abort: async () => backend.abort(serveUrl, sessionId),
+      ...(probeCapable ? {
+        session: (u, i, o) => backend.session(u, i, o),
+        messages: (u, i, o) => backend.messages(u, i, o),
+      } : {}),
     };
 
     const run = new Run({
@@ -2075,6 +2116,9 @@ export class RunManager {
       onRemove: () => this.activeRuns.delete(runId),
       initialState: state,
       ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
+      // TD-262（0063）：attach 路径同款恢复（sol 会审条款：两条 Run 构造路径
+      // 都要恢复参数）。
+      ...(ephemeralWorktree ? { deferredWorktreeRelease: ephemeralWorktree, effectiveCwd: ephemeralWorktree } : {}),
       scorecardRules: resumeScorecardRules,
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
@@ -3583,13 +3627,15 @@ export class Run {
         // Probe succeeded: process is quiet. Write stop_verified.
         // Write failure here is an evidence-write failure, NOT a probe error —
         // do not fall through to the probe_error branch.
-        this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
+        // TD-262（sol 会审实锤）：确认旗以 append 成功为准——0057 合同是"停止
+        // 事实成功写盘后才确认"；写盘失败仍删树=违约。旧实现先置旗再 append。
         try {
           await this.transcript.append("run.stop_verified", {
             backend: this.result?.backend ?? "process",
             path: "_runCleanup",
             roundsUsed: probeResult.roundsUsed,
           });
+          this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
         } catch {
           raiseAlert("stop_unverified",
             `_runCleanup evidence write failed (run ${this.runId}): stop_verified unrecordable`,
@@ -3631,8 +3677,9 @@ export class Run {
       cwd: this.result?.cwd, rounds: 3, intervalMs: 2000,
     });
     if (result.quiet) {
-      this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
+      // TD-262（sol 会审实锤）：确认旗以 append 成功为准（与 process 臂同律）。
       await this.transcript.append("run.stop_verified", { backendSessionId: sessionId, path: "_runCleanup" });
+      this._stopQuietConfirmed = true; // TD-251 W1a：延迟树释放的停止确认旗
     } else {
       await this.transcript.append("run.stop_unverified", {
         backendSessionId: sessionId, path: "_runCleanup", delta: result.delta, metric: result.metric,

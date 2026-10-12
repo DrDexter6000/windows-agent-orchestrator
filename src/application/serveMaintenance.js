@@ -23,12 +23,15 @@
 // 分层：kimi 专有 REST/机器事实全部在 backends/kimiServeOps.js（注入 ops）；
 // 本模块只含编排/门/台账，不含 kimi 协议细节（不变量 3）。
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, lstatSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync, unlinkSync, lstatSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
+import { homedir } from "node:os";
 import { spawn as nodeSpawn, execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
-import { readTranscript, listTranscriptFiles } from "../transcript.js";
+import { readTranscript, listTranscriptFiles, findState, TERMINAL_STATES } from "../transcript.js";
 import { listRuns } from "./runList.js";
+import { recycleRunBranch } from "../isolation.js";
+import { gitChildEnv } from "../delivery.js";
 import * as defaultOps from "../backends/kimiServeOps.js";
 
 /** 清扫/回收的共享落点（.dev 语义之外的运维事实面，入 .wao/）。 */
@@ -372,25 +375,142 @@ export function acquireMaintenanceLock({ lockPath, pid = process.pid, nowMs = Da
  * 活跃 run，不存在"创建中"竞争）。
  * @returns {number} 清掉的壳数
  */
+// TD-251 W1c / TD-262（0063 审核修订）：空壳清扫。返回**已删壳名数组**（旧返回
+// count——消费方取 length 同值）；删除改 rmdirSync **非递归**（目录变非空即拒绝，
+// 不吞新文件——sol 会审条款）+ lstat 防符号链接/junction（rmSync 递归会穿透目标）。
 export function sweepEmptyWorktreeHusks(worktreesDir, { io = null } = {}) {
   const _readdir = io?.readdirSync ?? readdirSync;
-  const _rm = io?.rmSync ?? rmSync;
+  const _rmdir = io?.rmdirSync ?? rmdirSync;
   const _exists = io?.existsSync ?? existsSync;
-  if (typeof worktreesDir !== "string" || !_exists(worktreesDir)) return 0;
-  let removed = 0;
+  const _lstat = io?.lstatSync ?? lstatSync;
+  if (typeof worktreesDir !== "string" || !_exists(worktreesDir)) return [];
+  const removed = [];
   for (const name of _readdir(worktreesDir)) {
     if (!/^run_/.test(name)) continue;
     const p = join(worktreesDir, name);
     try {
+      if (_lstat(p).isSymbolicLink()) continue; // junction/symlink 壳不碰（穿透风险）
       if (_readdir(p).length === 0) {
-        _rm(p, { recursive: true, force: true });
-        if (!_exists(p)) removed += 1;
+        _rmdir(p); // 非递归：检查为空后出现新文件 → ENOTEMPTY 拒绝，下次再试
+        if (!_exists(p)) removed.push(name);
       }
     } catch {
       // 单壳失败跳过（下次回收再试）。
     }
   }
   return removed;
+}
+
+// ── TD-261/262（0063）辅助 ────────────────────────────────────────────────────
+
+/** pid 判活（Windows 下 process.kill(pid,0)：ESRCH=死；EPERM=活着但无权限=活）。 */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; }
+}
+
+/**
+ * TD-261a（opus 会审条款）：同端口多实例记录（复活后新旧 json 并存是常态）——
+ * 取"pid 存活者中最新心跳"，无存活者取最新心跳（杀路径对死者核验镜像名后才动手）。
+ */
+export function pickInstanceByPort(instances, port) {
+  const c = (Array.isArray(instances) ? instances : []).filter((i) => i && i.port === port);
+  if (c.length === 0) return null;
+  const freshest = (a, b) => (b.heartbeatAt ?? b.startedAt ?? 0) - (a.heartbeatAt ?? a.startedAt ?? 0);
+  const alive = c.filter((i) => pidAlive(i.pid)).sort(freshest);
+  return alive[0] ?? c.sort(freshest)[0];
+}
+
+/**
+ * TD-261b（0063，opus/sol 会审合订）：重启 exe 的**前置**解析（shutdown 之前——
+ * 杀了旧 serve 才发现没 exe 是最糟形状）。返回 { exe, candidates } 或
+ * { refused: "kimi_exe_unresolvable", tried }。
+ * 显式路径（含分隔符/.exe 后缀）= 指定执行器：existsSync 不过即拒，不降级（sol）；
+ * 默认短名 "kimi" = 候选链降级：kimiHome/bin → PATH 扫描（.exe/.com，libuv 规则
+ * 不认 .cmd——opus）→ homedir/.kimi-code/bin/kimi.exe。
+ */
+export function resolveKimiExe({ kimiExe = "kimi", kimiHome = null, env = process.env, existsFn = existsSync, homeDirFn = homedir }) {
+  const isExplicitPath = typeof kimiExe === "string" && (/[\\/]/.test(kimiExe) || kimiExe.toLowerCase().endsWith(".exe"));
+  if (isExplicitPath) {
+    if (existsFn(kimiExe)) return { exe: kimiExe, candidates: [kimiExe] };
+    return { refused: "kimi_exe_unresolvable", tried: [kimiExe] };
+  }
+  const tried = [];
+  const candidates = [];
+  if (typeof kimiHome === "string" && kimiHome.length > 0) {
+    const p = join(kimiHome, "bin", "kimi.exe");
+    tried.push(p);
+    if (existsFn(p)) candidates.push(p);
+  }
+  const pathDirs = String(env?.PATH ?? "").split(";").filter(Boolean);
+  for (const ext of [".exe", ".com"]) {
+    for (const dir of pathDirs) {
+      const p = join(dir, `kimi${ext}`);
+      if (!tried.includes(p)) {
+        tried.push(p);
+        if (existsFn(p)) candidates.push(p);
+      }
+    }
+  }
+  const fallback = join(homeDirFn(), ".kimi-code", "bin", "kimi.exe");
+  tried.push(fallback);
+  if (existsFn(fallback)) candidates.push(fallback);
+  if (candidates.length > 0) return { exe: candidates[0], candidates };
+  return { refused: "kimi_exe_unresolvable", tried };
+}
+
+/**
+ * TD-262a（0063，opus/sol 会审合订）：已删壳名的**转录门控**分支回收。资格全链
+ * 从绑定转录证明（sol 反例：accepted 交付轮同样留空壳且分支须保留——空目录不是
+ * 资格证据）：转录在场+终态+run.read_only_declared+无 delivery+worktreePath
+ * basename===壳名。runId=壳名原样（含 run_ 前缀——opus 纠错：finalRunId 本就带
+ * 前缀）。git worktree prune 先行（壳目录已删但 .git/worktrees 残留会让 -d 恒拒）。
+ * 每壳一行台账（tipSha 删除前取——`git branch wao/<id> <sha>` 可机器复原）。
+ * 无 run 转录可写事件（run 已终态）——台账 JSONL 即证据落点（与 sweep 台账同先例）。
+ */
+export async function recycleHuskBranches(huskNames, { lockRootDir, runDir, execFn = execFileSync, appendFn = appendFileSync, ledgerDir = null }) {
+  const results = [];
+  if (!Array.isArray(huskNames) || huskNames.length === 0) return results;
+  const git = (args) => execFn("git", args, { cwd: lockRootDir, env: gitChildEnv(), stdio: "pipe", windowsHide: true });
+  const ledger = ledgerDir ?? serveMaintenanceDir(lockRootDir);
+  const appendLedger = (entry) => {
+    try {
+      mkdirSync(ledger, { recursive: true });
+      appendFn(join(ledger, "husk-branch-ledger.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n", "utf8");
+    } catch { /* 台账失败不阻断回收（输出面仍携带逐壳结果） */ }
+  };
+  // 转录索引：runId -> 路径（listTranscriptsDeep 覆盖项目桶；根层平铺由
+  // listTranscriptsDeep 的既有语义覆盖）。
+  let transcripts = [];
+  try { transcripts = listTranscriptsDeep(runDir) ?? []; } catch { transcripts = []; }
+  const byRunId = new Map(transcripts.map((t) => [basename(String(t?.path ?? "")).replace(/\.jsonl$/, ""), t.path]));
+  for (const name of huskNames) {
+    const entry = { runId: name, huskPath: join(lockRootDir, ".wao-worktrees", name), sourceCwd: lockRootDir, branch: `wao/${name}` };
+    try {
+      const tPath = byRunId.get(name);
+      if (!tPath) { entry.outcome = "skip"; entry.reason = "no_transcript"; results.push(entry); appendLedger(entry); continue; }
+      const events = await readTranscript(tPath);
+      const state = findState(events);
+      if (!TERMINAL_STATES.includes(state)) { entry.outcome = "skip"; entry.reason = "not_terminal"; results.push(entry); appendLedger(entry); continue; }
+      const started = events.find((e) => e && e.type === "run.started");
+      if (!events.some((e) => e && e.type === "run.read_only_declared")) { entry.outcome = "skip"; entry.reason = "not_read_only"; results.push(entry); appendLedger(entry); continue; }
+      if (started?.delivery?.mode != null || started?.deliveryRequested === true) { entry.outcome = "skip"; entry.reason = "delivery_run"; results.push(entry); appendLedger(entry); continue; }
+      if (basename(String(started?.worktreePath ?? "")) !== name) { entry.outcome = "skip"; entry.reason = "worktree_path_mismatch"; results.push(entry); appendLedger(entry); continue; }
+      // prune 先行（opus 条款）：壳目录已删，.git/worktrees 残留会让 -d 恒拒。
+      try { git(["worktree", "prune"]); } catch { /* prune 失败不阻断——-d 自会拒 */ }
+      try { entry.tipSha = String(git(["rev-parse", `refs/heads/${entry.branch}`])).trim() || null; } catch { entry.tipSha = null; }
+      const r = recycleRunBranch(lockRootDir, name);
+      entry.outcome = r.outcome;
+      if (r.uniqueCommits != null) entry.uniqueCommits = r.uniqueCommits;
+      if (r.reason != null) entry.reason = r.reason;
+    } catch {
+      entry.outcome = "skip";
+      entry.reason = "error";
+    }
+    results.push(entry);
+    appendLedger(entry);
+  }
+  return results;
 }
 
 /**
@@ -422,6 +542,17 @@ export async function recycleServe({
   if (typeof workspaceDir !== "string" || workspaceDir.length === 0) {
     return { refused: "workspace_dir_required" };
   }
+  // TD-261b（0063，opus 实锤）：workspaceDir 缺失会让下方 git -C 失败被误读为
+  // "不在工作树内=通过"，spawn 的 ENOENT 再被误归因于 exe——显式 isDirectory 门。
+  try {
+    if (!statSync(workspaceDir).isDirectory()) return { refused: "workspace_dir_invalid" };
+  } catch { return { refused: "workspace_dir_invalid" }; }
+  // TD-261b（0063，opus/sol 合订）：exe 解析**前移到一切副作用之前**（锁/杀/探
+  // 测都不碰）——解析不到=零副作用拒绝，绝不出现"杀了旧的才发现没 exe"。
+  const exeResolution = resolveKimiExe({ kimiExe, kimiHome });
+  if (exeResolution.refused) {
+    return { refused: exeResolution.refused, tried: exeResolution.tried };
+  }
   // TD-253（opus Q5）：serve cwd 三拒——cwd 句柄钉目录（W1c 实证）+项目发现面+家内污染。
   const wsNorm = workspaceDir.replace(/[\\]/g, "/").toLowerCase().replace(/\/+$/, "");
   if (wsNorm.includes("/.wao-worktrees/")) return { refused: "workspace_dir_inside_worktrees" };
@@ -443,7 +574,9 @@ export async function recycleServe({
   // unlinkSync；回归形状=拒绝后立即重跑不得 lock_held。
   const releaseRecycleLock = () => { try { unlinkSync(recycleLockPath); } catch { /* 已不在场 */ } };
   const instances = ops.readServeInstances({ kimiHome });
-  const instance = instances.find((i) => i.port === port) ?? null;
+  // TD-261a（0063，opus 条款）：同端口多实例记录（复活后新旧并存是常态）——取
+  // pid 存活者中最新心跳（否则最新心跳）；taskkill 回退前再核验镜像名。
+  const instance = pickInstanceByPort(instances, port);
   if (!instance) { releaseRecycleLock(); return { refused: "no_instance", port }; }
 
   // WAO 侧门：全部项目桶、active-only（新鲜 owner 心跳的非终态 run）。unresolved
@@ -461,11 +594,22 @@ export async function recycleServe({
   // 默认列表隐藏（归档≠不可运行），只拉默认面的 soak 看不见它们。两面任一
   // 不可观测即拒绝（不能证明集合完整就不回收）；按 id 合并去重，同 id 双面
   // 出现时 busy 取或（保守方向）。
-  const snapshotBothFaces = async () => {
+  // TD-261a（0063）：双面**都实际探测**（旧实现 normal 面失败即早退，拿不到
+  // 归档面证据——sol 条款）；首探无拒即**复用为 before 快照**（调用次序与旧
+  // 代码逐调用一致——脚本化测试的帧语义保持）；连接拒绝单列分类。
+  const probeFaces = async () => {
     const normal = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-    if (!normal.ok) return { refused: "serve_unobservable", reason: normal.reason };
     const archived = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs, archivedOnly: true });
+    return { normal, archived };
+  };
+  const facesRefusal = ({ normal, archived }) => {
+    // 拒绝名保持既有闭集（serve_unobservable/archived_unobservable）——连接拒绝
+    // 细节 ride 在 reason 上（revive 判定读 faces.*.reason 原值，不改拒绝身份）。
+    if (!normal.ok) return { refused: "serve_unobservable", reason: normal.reason };
     if (!archived.ok) return { refused: "archived_unobservable", reason: archived.reason };
+    return null;
+  };
+  const mergeFaces = ({ normal, archived }) => {
     const byId = new Map();
     for (const it of [...normal.items, ...archived.items]) {
       const prev = byId.get(it.id);
@@ -475,12 +619,44 @@ export async function recycleServe({
     }
     return { items: [...byId.values()], normalCount: normal.items.length, archivedCount: archived.items.length };
   };
-  const before = await snapshotBothFaces();
-  if (before.refused) { releaseRecycleLock(); return { refused: before.refused, reason: before.reason }; }
+  // TD-261a（0063，opus/sol 合订）：**死实例复活路径**——首探双面均 connection_
+  // refused（主动拒绝=唯一可证"此端点无监听"的传输信号）+ 实例 pid 已死（区分
+  // "serve 已死"与"正在启动未 bind"）+ 隔数秒复探仍双拒 → 保护前提（活会话）为
+  // 空，跳过 soak/shutdown/杀步直接重启。混合结果/其它 reason 维持既有拒绝。
+  let revived = false;
+  let before = null;
+  {
+    const faces1 = await probeFaces();
+    const refusal1 = facesRefusal(faces1);
+    if (refusal1) {
+      const bothRefused = faces1.normal.reason === "connection_refused" && faces1.archived.reason === "connection_refused";
+      if (!bothRefused) { releaseRecycleLock(); return { refused: refusal1.refused, reason: refusal1.reason }; }
+      if (pidAlive(instance.pid)) {
+        releaseRecycleLock();
+        return { refused: "serve_not_listening_pid_alive", reason: "connection refused but instance pid is alive (serve may be starting or port taken)", pid: instance.pid };
+      }
+      await sleepFn(3000); // 两次探测隔开（opus 条款——双面同刻打同一死端口不是独立证据）
+      const faces2 = await probeFaces();
+      const refusal2 = facesRefusal(faces2);
+      const stillBothRefused = faces2.normal.reason === "connection_refused" && faces2.archived.reason === "connection_refused";
+      if (!stillBothRefused) {
+        releaseRecycleLock();
+        return { refused: refusal2 ? refusal2.refused : "serve_recovered_mid_probe", reason: refusal2?.reason ?? "second probe no longer connection-refused" };
+      }
+      revived = true;
+    } else {
+      before = mergeFaces(faces1);
+    }
+  }
   await sleepFn(soakMs);
-  const after = await snapshotBothFaces();
-  if (after.refused) { releaseRecycleLock(); return { refused: after.refused, reason: after.reason }; }
-  const verdict = soakVerdict(before, after);
+  let after = null;
+  if (!revived) {
+    const facesA = await probeFaces();
+    const refusalA = facesRefusal(facesA);
+    if (refusalA) { releaseRecycleLock(); return { refused: refusalA.refused, reason: refusalA.reason }; }
+    after = mergeFaces(facesA);
+  }
+  const verdict = revived ? "clear" : soakVerdict(before, after);
   if (verdict !== "clear") {
     releaseRecycleLock();
     return {
@@ -493,37 +669,56 @@ export async function recycleServe({
   }
 
   // 杀：优雅 shutdown 优先；完成由端口死亡证实，超时回退 taskkill /T /F。
-  const shutdown = await ops.shutdownServe({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
-  if (shutdown.outcome !== "requested") {
-    releaseRecycleLock();
-    return { refused: "shutdown_rejected", reason: shutdown.reason, ...(shutdown.code !== undefined ? { code: shutdown.code } : {}) };
-  }
-  let portDown = false;
-  for (let i = 0; i < 15; i += 1) {
-    await sleepFn(1000);
-    // 探活只看传输层生死（连接拒绝=已死；任何 HTTP 应答=还活着——含 401）。
-    // 3s 有界：挂起连接不能拖住回收序列。
-    portDown = await Promise.race([
-      fetchFn(fetchImpl, `${serveUrl}/api/v1/sessions`, 3000).then(() => false, () => true),
-      sleepFn(3500).then(() => true),
-    ]);
-    if (portDown) break;
-  }
+  // 复活路径跳过（无可杀者；且不得凭陈旧实例 pid 调 taskkill——sol 条款）。
+  let portDown = revived;
   let killFallback = null;
-  if (!portDown) {
-    killFallback = await new Promise((resolve) => {
-      const exec = execFileFn ?? nodeExecFile;
-      exec(
-        "taskkill", ["/PID", String(instance.pid), "/T", "/F"],
-        { timeout: 15_000, windowsHide: true },
-        (error) => resolve(error ? { ok: false } : { ok: true }),
-      );
-    });
-    await sleepFn(3000);
+  if (!revived) {
+    const shutdown = await ops.shutdownServe({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
+    if (shutdown.outcome !== "requested") {
+      releaseRecycleLock();
+      return { refused: "shutdown_rejected", reason: shutdown.reason, ...(shutdown.code !== undefined ? { code: shutdown.code } : {}) };
+    }
+    for (let i = 0; i < 15; i += 1) {
+      await sleepFn(1000);
+      // 探活只看传输层生死（连接拒绝=已死；任何 HTTP 应答=还活着——含 401）。
+      // 3s 有界：挂起连接不能拖住回收序列。（此探针语义=杀后死亡证实，与复活
+      // 资格判定的严格双面 connection_refused 不同——sol 条款。）
+      portDown = await Promise.race([
+        fetchFn(fetchImpl, `${serveUrl}/api/v1/sessions`, 3000).then(() => false, () => true),
+        sleepFn(3500).then(() => true),
+      ]);
+      if (portDown) break;
+    }
+    if (!portDown) {
+      // TD-261a（0063，opus 条款）：taskkill 前核验镜像名——pid 复用会打到无关
+      // 进程树；非 kimi 镜像即放弃强杀（如实上报，端口仍活=后续门自会拒）。
+      killFallback = await new Promise((resolve) => {
+        const exec = execFileFn ?? nodeExecFile;
+        exec(
+          "tasklist", ["/FI", `PID eq ${instance.pid}`, "/FO", "CSV", "/NH"],
+          { timeout: 10_000, windowsHide: true },
+          (err, stdout) => {
+            if (err) return resolve({ ok: false, reason: "image_check_failed" });
+            const image = String(stdout ?? "").split(",")[0]?.replace(/"/g, "").toLowerCase() ?? "";
+            if (!image.includes("kimi")) return resolve({ ok: false, reason: "pid_image_mismatch", image });
+            exec(
+              "taskkill", ["/PID", String(instance.pid), "/T", "/F"],
+              { timeout: 15_000, windowsHide: true },
+              (error) => resolve(error ? { ok: false } : { ok: true }),
+            );
+          },
+        );
+      });
+      await sleepFn(3000);
+    }
   }
 
   // 重启：env 由命令显式组装——WAO_IN_WORKER=1 恒注入（0047 env 臂），绝不继承
   // 操作员 shell 的偶然值；detached + ignore stdio（长命 serve 不挂 CLI 生命周期）。
+  // TD-261b（0063，opus/sol 合订）：spawn 的 'error' 事件**同步挂上并仲裁**
+  //（unhandled 'error' event 是当日进程崩根因）；ENOENT 按候选链降级重试；全部
+  // 候选失败=结构化失败+台账行——绝不崩、绝不静默留死 serve。exe 已在一切副作用
+  // 之前解析（exeResolution），运行期失败（文件被删等）走候选降级兜底。
   const spawn = spawnFn ?? nodeSpawn;
   // TD-253（决定 0058，双席修正）：effective home 纪律——kimiHome 在场显式注入
   // KIMI_CODE_HOME；缺席则**删除**继承来的 KIMI_CODE_HOME（旧实现 {...process.env}
@@ -532,12 +727,54 @@ export async function recycleServe({
   const childEnv = { ...process.env, WAO_IN_WORKER: "1" };
   if (typeof kimiHome === "string" && kimiHome.length > 0) childEnv.KIMI_CODE_HOME = kimiHome;
   else delete childEnv.KIMI_CODE_HOME;
-  const child = spawn(kimiExe, ["web", "--no-open", "--port", String(port)], {
-    cwd: workspaceDir,
-    env: childEnv,
-    detached: true,
-    stdio: "ignore",
+  const spawnArgs = ["web", "--no-open", "--port", String(port)];
+  const spawnDetached = (exe) => new Promise((resolveSpawn) => {
+    let child = null;
+    let spawnErr = null;
+    try {
+      child = spawn(exe, spawnArgs, { cwd: workspaceDir, env: childEnv, detached: true, stdio: "ignore" });
+    } catch (e) { spawnErr = e; }
+    if (spawnErr) return resolveSpawn({ err: spawnErr });
+    if (typeof child?.once !== "function") return resolveSpawn({ child }); // 注入缝（测试假 spawn）：无事件面=按旧语义视为已发
+    let settled = false;
+    const settle = (err) => { if (settled) return; settled = true; resolveSpawn({ child, err: err ?? null }); };
+    child.once("error", (e) => settle(e));
+    child.once("spawn", () => settle(null));
+    sleepFn(2000).then(() => settle(null)); // 仲裁有界：2s 内无 error 即放行进就绪轮询
   });
+  let child = null;
+  let restartError = null;
+  const triedCandidates = [];
+  for (const cand of exeResolution.candidates) {
+    triedCandidates.push(cand);
+    const r = await spawnDetached(cand);
+    if (!r.err) { child = r.child; restartError = null; break; }
+    restartError = r.err;
+    if (r.err?.code !== "ENOENT") break; // 非 ENOENT（权限/损坏等）不降级（sol 条款）
+  }
+  if (!child) {
+    // 全候选失败：台账+锁释放+结构化失败（CLI 侧非零退出）。
+    try {
+      const ledgerDir = serveMaintenanceDir(lockRootDir);
+      mkdirSync(ledgerDir, { recursive: true });
+      appendFileSync(join(ledgerDir, "recycle-ledger.jsonl"), JSON.stringify({
+        ts: new Date().toISOString(), event: "restart_failed", oldPid: instance.pid, revived,
+        triedCandidates, errorCode: restartError?.code ?? null,
+      }) + "\n", "utf8");
+    } catch { /* 台账失败不掩盖主结果 */ }
+    releaseRecycleLock();
+    return {
+      recycled: false,
+      restart: "failed",
+      reason: "kimi_spawn_failed",
+      errorCode: restartError?.code ?? null,
+      triedCandidates,
+      oldPid: instance.pid,
+      revived,
+      manualRecipe: "docs/usage.md TD-250 节（手动配方：PowerShell Start-Process 全路径 + --port <port> + worker ws + WAO_IN_WORKER=1）",
+      note: "shutdown 已执行——kimi 自清实例文件，重跑 recycle 将 no_instance 拒绝；按 manualRecipe 手动拉起",
+    };
+  }
   child.unref?.();
 
   // 就绪：轮询会话面 code===0，有界 30s。
@@ -547,21 +784,24 @@ export async function recycleServe({
     const check = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs: 4000 });
     if (check.ok) { ready = true; break; }
   }
-  const newInstance = (ops.readServeInstances({ kimiHome })).find((i) => i.port === port) ?? null;
+  const newInstance = pickInstanceByPort(ops.readServeInstances({ kimiHome }), port);
   const children = newInstance ? await ops.countServeChildren({ pid: newInstance.pid, execFileFn }) : -1;
-  // TD-251 W1c：荚已死、句柄已释——补扫本工作区的空 worktree 壳（dogfood 实证
-  // 的 still_present 残渣在此闭环）。
-  const husksSwept = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
+  // TD-251 W1c + TD-262a（0063）：荚已死、句柄已释——补扫本工作区的空 worktree 壳，
+  // 已删壳走**转录门控**分支回收（accepted 交付壳/非只读壳保留——sol 反例条款）。
+  const husks = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
+  const huskBranches = await recycleHuskBranches(husks, { lockRootDir, runDir });
   releaseRecycleLock();
   return {
     recycled: true,
     ready,
+    ...(revived && ready ? { revived: true } : {}),
     oldPid: instance.pid,
     newPid: newInstance?.pid ?? null,
     portDownVerified: portDown,
     killFallback,
     newServeChildren: children,
-    ...(husksSwept > 0 ? { emptyWorktreeHusksSwept: husksSwept } : {}),
+    ...(husks.length > 0 ? { emptyWorktreeHusksSwept: husks.length } : {}),
+    ...(huskBranches.length > 0 ? { huskBranches } : {}),
   };
 }
 

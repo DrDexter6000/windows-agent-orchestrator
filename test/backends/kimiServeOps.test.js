@@ -81,3 +81,53 @@ test("TD-256 验收 sol#3: 列表层三形状拒判——缺 has_more/缺 id/双
   r = await call({ code: 0, data: { items: [{ id: "s1", workspace_id: "w" }], has_more: false } }); // 双忙碌字段全缺
   assert.equal(r.ok, false); assert.equal(r.reason, "shape_unknown");
 });
+
+// ===== TD-261a（0063）：连接拒绝单列分类 =====
+
+import { serveRequest } from "../../src/backends/kimiServeOps.js";
+
+test("TD-261a: serveRequest 连接拒绝分类——直抛/cause 包装/AggregateError 全员 ECONNREFUSED 才算；混合即不可证死", async () => {
+  const call = (error) => serveRequest({ baseUrl: "http://127.0.0.1:1", token: "t", method: "GET", path: "/x", fetchImpl: async () => { throw error; } });
+  // 直抛形状
+  let r = await call(Object.assign(new Error("refused"), { code: "ECONNREFUSED" }));
+  assert.deepEqual(r, { connectionRefused: true }, "error.code 直判");
+  // undici 包装形状（cause）
+  r = await call(Object.assign(new Error("fetch failed"), { cause: Object.assign(new Error("inner"), { code: "ECONNREFUSED" }) }));
+  assert.deepEqual(r, { connectionRefused: true }, "cause.code 判");
+  // AggregateError：happy-eyeballs 多地址全拒（localhost 常见——opus 实测点）
+  r = await call(Object.assign(new Error("agg"), {
+    cause: Object.assign(new AggregateError([
+      Object.assign(new Error("a"), { code: "ECONNREFUSED" }),
+      Object.assign(new Error("b"), { code: "ECONNREFUSED" }),
+    ]), { code: undefined }),
+  }));
+  assert.deepEqual(r, { connectionRefused: true }, "子错误全员拒绝才算");
+  // AggregateError 混合（含超时形状）→ 不可证死
+  r = await call(Object.assign(new Error("agg-mixed"), {
+    cause: new AggregateError([
+      Object.assign(new Error("a"), { code: "ECONNREFUSED" }),
+      Object.assign(new Error("b"), { code: "ETIMEDOUT" }),
+    ]),
+  }));
+  assert.deepEqual(r, { transportError: true }, "混合子错误→http_error（不可证死）");
+  // 其它传输错误 → http_error
+  r = await call(Object.assign(new Error("dns"), { code: "ENOTFOUND" }));
+  assert.deepEqual(r, { transportError: true });
+  // AbortError → timeout（既有语义不变）
+  const abortErr = new Error("abort"); abortErr.name = "AbortError";
+  r = await call(abortErr);
+  assert.deepEqual(r, { aborted: true });
+});
+
+test("TD-261a: listServeSessions 把 connection_refused 映射为新 reason（http_error 不变）", async () => {
+  let r = await listServeSessions({
+    baseUrl: "http://x", token: "t",
+    fetchImpl: async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); },
+  });
+  assert.equal(r.ok, false); assert.equal(r.reason, "connection_refused");
+  r = await listServeSessions({
+    baseUrl: "http://x", token: "t",
+    fetchImpl: async () => { throw Object.assign(new Error("dns"), { code: "ENOTFOUND" }); },
+  });
+  assert.equal(r.ok, false); assert.equal(r.reason, "http_error");
+});

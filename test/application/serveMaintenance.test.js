@@ -21,6 +21,18 @@ import {
 
 function cleanupDir(dir) { rmSync(dir, { recursive: true, force: true }); }
 
+// TD-261b（0063）：recycle 的前置校验升级后，夹具需要真实 workspaceDir（目录
+// 存在且不在 git 工作树内）与可解析的 kimiExe（真实文件——spawnFn 注入不真跑）。
+function makeRecycleEnv(roots) {
+  const root = mkdtempSync(join(tmpdir(), "wao-rec-env-"));
+  roots.push(root);
+  const wsDir = join(root, "ws");
+  mkdirSync(wsDir, { recursive: true });
+  const kimiExe = join(root, "kimi.exe");
+  writeFileSync(kimiExe, "", "utf8");
+  return { workspaceDir: wsDir, kimiExe };
+}
+
 // ===== 纯门 =====
 
 test("TD-250 A3 门: isWorktreeShapedRoot——父目录名 .wao-worktrees（大小写折叠、双分隔符）", () => {
@@ -256,7 +268,7 @@ test("TD-250 A2: recycle 拒绝闭集——无实例/active run/busy/集合变�
       port: 58628,
       serveUrl: "http://127.0.0.1:58628",
       token: "t",
-      workspaceDir: "D:\\ws",
+      ...makeRecycleEnv(roots),
       runDir: join(tmpdir(), "wao-td250-fake-rundir"),
       kimiAgentIds: ["kimi"],
       lockRootDir,
@@ -308,8 +320,10 @@ test("TD-250 A2: recycle 拒绝闭集——无实例/active run/busy/集合变�
 
 test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + 显式 env 重启（WAO_IN_WORKER=1 恒注入）+ 就绪", async () => {
   const lockRoot = mkdtempSync(join(tmpdir(), "wao-td250-rec2-"));
+  const roots = [lockRoot];
   const spawns = [];
   try {
+    const env = makeRecycleEnv(roots);
     const ops = recycleOps({
       sessionsScript: [{ ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] }],
       instances: [{ serverId: "old", pid: 111, port: 58628 }, { serverId: "new", pid: 222, port: 58628 }],
@@ -323,8 +337,7 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
       port: 58628,
       serveUrl: "http://127.0.0.1:58628",
       token: "t",
-      workspaceDir: "D:\\stable-ws",
-      kimiExe: "C:\\kimi\\kimi.exe",
+      ...env,
       runDir: join(tmpdir(), "wao-td250-fake-rundir"),
       kimiAgentIds: ["kimi"],
       lockRootDir: lockRoot,
@@ -342,12 +355,12 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
     assert.equal(result.portDownVerified, true);
     assert.equal(result.killFallback, null);
     assert.equal(spawns.length, 1);
-    assert.equal(spawns[0].exe, "C:\\kimi\\kimi.exe");
+    assert.equal(spawns[0].exe, env.kimiExe);
     assert.deepEqual(spawns[0].args, ["web", "--no-open", "--port", "58628"]);
-    assert.equal(spawns[0].opts.cwd, "D:\\stable-ws");
+    assert.equal(spawns[0].opts.cwd, env.workspaceDir);
     assert.equal(spawns[0].opts.env.WAO_IN_WORKER, "1", "env 组装权归命令——0047 env 臂恒在场");
     assert.equal(spawns[0].opts.detached, true);
-  } finally { cleanupDir(lockRoot); }
+  } finally { for (const d of roots) cleanupDir(d); }
 });
 
 // ===== TD-251 W1c：回收后空壳清扫 =====
@@ -362,13 +375,14 @@ test("TD-251 W1c: sweepEmptyWorktreeHusks 只删空目录壳（run_ 前缀+零�
     mkdirSync(join(dir, "run_real"));
     writeFileSync(join(dir, "run_real", "a.txt"), "x", "utf8");
     mkdirSync(join(dir, "not_run_shape"));
-    const n = sweepEmptyWorktreeHusks(dir);
-    assert.equal(n, 2);
+    // TD-262（0063）：返回值从 count 改为已删壳名数组（消费方取 length 同值）。
+    const removed = sweepEmptyWorktreeHusks(dir);
+    assert.deepEqual(removed.sort(), ["run_husk1", "run_husk2"]);
     assert.ok(!existsSync(join(dir, "run_husk1")));
     assert.ok(!existsSync(join(dir, "run_husk2")));
     assert.ok(existsSync(join(dir, "run_real")), "非空 worktree 不动");
     assert.ok(existsSync(join(dir, "not_run_shape")), "非 run_ 前缀不动");
-    assert.equal(sweepEmptyWorktreeHusks(join(dir, "no-such")), 0);
+    assert.deepEqual(sweepEmptyWorktreeHusks(join(dir, "no-such")), []);
   } finally { cleanupDir(dir); }
 });
 
@@ -376,9 +390,10 @@ test("TD-251 W1c: sweepEmptyWorktreeHusks 只删空目录壳（run_ 前缀+零�
 
 test("TD-256: releaseRecycleLock 修复回归——拒绝后立即重跑不得 lock_held（旧 io/require ReferenceError 整段失效）", async () => {
   const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-lock-"));
+  const roots = [lockRootDir];
   try {
     const base = {
-      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...makeRecycleEnv(roots),
       runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"],
       lockRootDir, soakMs: 1,
       sleepFn: async () => {},
@@ -392,14 +407,15 @@ test("TD-256: releaseRecycleLock 修复回归——拒绝后立即重跑不得 l
     // lock_held 而非业务拒绝。
     const r2 = await recycleServe({ ...base, ops: recycleOps({ sessionsScript: [{ ok: true, items: [] }] }), listRunsFn: async () => ({ runs: [{ runId: "run_live", agentId: "kimi" }] }) });
     assert.equal(r2.refused, "active_runs", `拒绝路径必须释放锁（got ${r2.refused}）`);
-  } finally { cleanupDir(lockRootDir); }
+  } finally { for (const d of roots) cleanupDir(d); }
 });
 
 test("TD-252①: recycle soak 归档面不可观测 → refused archived_unobservable（不能证明集合完整就不回收）", async () => {
   const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-arch-"));
+  const roots = [lockRootDir];
   try {
     const r = await recycleServe({
-      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...makeRecycleEnv(roots),
       runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1,
       sleepFn: async () => {}, fetchImpl: async () => { throw new Error("down"); },
       spawnFn: () => { throw new Error("must not spawn on refusal"); },
@@ -409,14 +425,15 @@ test("TD-252①: recycle soak 归档面不可观测 → refused archived_unobser
     });
     assert.equal(r.refused, "archived_unobservable");
     assert.equal(r.reason, "http_error");
-  } finally { cleanupDir(lockRootDir); }
+  } finally { for (const d of roots) cleanupDir(d); }
 });
 
 test("TD-252①: 归档会话参与 soak——同 id 双面合并 busy 取或；归档面稳定独有会话不堵；归档面集合变化 → sessions_changed", async () => {
   const lockRootDir = mkdtempSync(join(tmpdir(), "wao-td256-soak-"));
+  const roots = [lockRootDir];
   try {
     const base = {
-      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", workspaceDir: "D:\\ws",
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...makeRecycleEnv(roots),
       runDir: join(tmpdir(), "wao-td256-fake-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1,
       sleepFn: async () => {}, fetchImpl: async () => { throw new Error("down"); },
       execFileFn: () => { throw new Error("must not kill on refusal"); },
@@ -455,7 +472,7 @@ test("TD-252①: 归档会话参与 soak——同 id 双面合并 busy 取或；
     r = await recycleServe({ ...base, ops: opsSeq, spawnFn: () => { throw new Error("must not spawn on refusal"); } });
     assert.equal(r.refused, "sessions_changed", `归档面集合变化必须拒绝（got ${r.refused}）`);
     assert.equal(r.archivedAfter, 2, "拒绝载荷带归档面计数");
-  } finally { cleanupDir(lockRootDir); }
+  } finally { for (const d of roots) cleanupDir(d); }
 });
 
 test("TD-252③: sweep 认领面扩到磁盘归档——归档转录认领命中死树 → deletable；冲突上报；枚举有界", async () => {

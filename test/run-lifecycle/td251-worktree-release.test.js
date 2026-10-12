@@ -87,6 +87,8 @@ test("TD-251 W1a: readOnly 非复用 run → ephemeral，completed+停止确认�
     const events = readFileSync(run.transcript.filePath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const started = events.find((e) => e.type === "run.started");
     assert.ok(started?.worktreePath, "readOnly 强制隔离在场");
+    // TD-262（0063）：策略事实持久化——resume 恢复只认此字段（opus 条款）。
+    assert.equal(started.worktreeStrategy, "ephemeral", "readOnly 非复用轮=ephemeral（resume 资格事实）");
     assert.ok(!existsSync(started.worktreePath), "停止确认后树已回收（延迟释放）");
     const wt = events.filter((e) => WT_EVENT_TYPES.includes(e.type));
     assert.deepEqual(wt.map((e) => e.type), ["run.worktree_released"]);
@@ -133,6 +135,7 @@ test("TD-251 W1a: sessionReuse 复用轮 → persistent（树保留、零 worktr
     const events = readFileSync(run.transcript.filePath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const started = events.find((e) => e.type === "run.started");
     assert.ok(started?.worktreePath, "复用轮仍有强制隔离");
+    assert.equal(started.worktreeStrategy, "persistent", "复用轮=persistent（resume 不得误删——opus 反例）");
     assert.ok(existsSync(started.worktreePath), "复用轮树保留（kimi 会话 cwd 钉首轮树——opus 反例）");
     assert.equal(events.filter((e) => WT_EVENT_TYPES.includes(e.type)).length, 0, "零 worktree 事件");
   } finally { cleanupDir(dir); }
