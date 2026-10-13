@@ -598,14 +598,14 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 一次到位，见 package.json scripts）。
 
 **kimi 专用 worker serve 运维配方（2026-10-10 起，决定见 0047 附录 B）**：kimi
-车道指向独立 serve——`powershell` 会话置 `$env:WAO_IN_WORKER='1'` 后
-`Start-Process kimi -ArgumentList 'web','--no-open','--port','58628'`
-（工作区=稳定目录 `D:\projects\.kimi-serve-worker-ws`，**勿用可删临时目录**
+车道指向独立 serve——`pwsh -File scripts/kimi-serve.ps1 -KimiHome <主目录> -Port 58628 -WorkspaceDir <工作区>`
+（实测 pwsh 7.6.6；主目录=车道的 `kimiHome`，缺省 `~/.kimi-code`；脚本置 `WAO_IN_WORKER`、`KIMI_CODE_HOME`，不带密钥类变量；
+工作区=稳定目录 `D:\projects\.kimi-serve-worker-ws`，**勿用可删临时目录**
 ——40409 粘滞教训）。serve 会把 env 传给其 MCP 子进程与工具 shell：worker
 自助派发被 0047 env 臂拒绝（验收判据=席位内 run_dispatch 被拒且
 `Detected worker context: env-marker`；工具 shell `WAO_IN_WORKER` 非空）。
 主 serve（默认端口 58627，无标记）留给 Owner 人类使用。重启机器后需要重新
-拉起 worker serve 并核实 kimi 车道 serveUrl 指向 58628（agents.json，不入库）。
+拉起 worker serve，用 `wao serve status` 核实，并核实 kimi 车道 serveUrl 的端口（agents.json，不入库）。
 
 **KIMI_WEB_TOKEN（kimi 车道凭据面，TD-258 补档）**：
 
@@ -680,7 +680,7 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
    （不读环境变量），`serve status|sweep|recycle` 以它为缺省主目录。**换主目录要换端口**（清扫按
    `serveUrl` 分家）；旧主目录的会话不会跟过来。私有主目录要先单独
    登录一次（`kimi login`，勿复制 credentials）；serve 首次在该主目录下启动、以及机器重启
-   之后，仍须按上面的手动配方拉起（加 `KIMI_CODE_HOME`）。
+   之后，仍须按上面的配方手动拉起。
 
 ### 场景 5：重试 / 恢复
 

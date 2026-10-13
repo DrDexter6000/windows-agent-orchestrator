@@ -122,18 +122,14 @@ consult_202610131442063798n7a2g（kimi + sol，审提交 7e3faaf）。两席都�
 1. **旧 serve 关闭**：58628 上的实例（Owner 主目录）先经 `serve status` 确认无会话在忙，再用 `POST /api/v1/shutdown` 优雅关闭；进程与端口确认消失，名字带 kimi 的进程由 33 个降到 2 个（剩下的是测试用的临时 serve——随后同样优雅关闭——和 Kimi 电脑操控插件自己的一个后台进程；后者不是 serve 的子进程，没有动）。
 2. **车道配置**（`config/agents.json`，备份放在仓库之外）：deepseek-pro、deepseek-flash 加 `env.DSH_PERMISSION_MODE = danger-full-access`；kimi 加 `kimiHome`，`serveUrl` 改到 58630。`registry validate` 八条全过。
 3. **私有主目录的 serve 启动**在 58630，实例登记在私有主目录。启动时从环境里去掉了 8 个名字像密钥的变量，以及这次 Lead 会话自己的变量。
-4. **一次启动失误**：第一次用 `Start-Process -UseNewEnvironment -Environment …` 启动。pwsh 7.6.6 下这个组合会丢掉 `-Environment` 追加的变量（事后用标记变量实测确认）——那个实例落在了 Owner 主目录，带着完整的用户环境。约两分钟后由 `serve status`（鉴权被拒、私有主目录里没有实例登记）发现，优雅关闭，改为"继承当前环境、把不要的变量逐个置空"重启。期间没有运行经过那个实例：两次 kimi 派发都在鉴权处被拒，没有建立会话。
+4. **一次启动失误**：第一次用 `Start-Process -UseNewEnvironment -Environment …` 启动。pwsh 7.6.6 下这个组合会丢掉 `-Environment` 追加的变量（事后用标记变量实测确认）——那个实例落在了 Owner 主目录，环境是按注册表重建的用户级与系统级变量（其中有用户级的密钥类变量），不含当前会话的变量，也不含追加的那两个。约两分钟后由 `serve status`（鉴权被拒、私有主目录里没有实例登记）发现，优雅关闭，改为"继承当前环境、把不要的变量逐个置空"重启。期间没有运行经过那个实例：两次 kimi 派发都在鉴权处被拒，没有建立会话。
 5. **验证**（真实注册表、主干代码；这四条运行的转录写在仓库之外的临时运行目录里，不在 `runs/` 下，没有保留——运行号只是当时的记录）：
    - kimi：`run_202610131531390143gzyum` 完成；在 kimi worker 里列出名字含 KEY / TOKEN / SECRET / PASSWORD 的环境变量——没有（`run_20261013153200591ieujv0`，命令只输出变量名）；`serve status` 显示后代进程 1 个，是隐藏窗口的控制台宿主，没有助手进程。
    - deepseek-flash `run_20261013152907950rw0uqq`、deepseek-pro `run_20261013152921675uqxbmo`：在 D: 盘主检出目录里命令直接跑成，转录里有模式说明。
 6. **还需要 Owner 做的**：重启各 Lead 宿主（没重启的宿主跑旧代码，仍按 `tokenEnv` 取 token，对新 serve 会鉴权失败）；轮换 `KIMI_API_KEY`（会审期间的事故）以及此前待轮换的密钥。机器重启后要重新拉起这个 serve（见"如实边界"）。
 
-   重启机器后拉起 serve 的命令（PowerShell 7；`usage` 里的手动配方本身不剔密钥类变量，只有 `serve recycle` 剔，所以这里显式剔）：
-
-   ```powershell
-   $e = @{ KIMI_CODE_HOME = 'D:\projects\.kimi-worker-kimihome'; WAO_IN_WORKER = '1' }
-   Get-ChildItem Env: | Where-Object { $_.Name -match '(API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?TOKEN|(^|[_-])TOKEN($|[_-])|SECRET|PASSWORD|PRIVATE[_-]?KEY|CREDENTIAL)' -and $_.Name -notmatch '_PROXY$' } | ForEach-Object { $e[$_.Name] = $null }
-   Start-Process "$env:USERPROFILE\.kimi-code\bin\kimi.exe" -ArgumentList 'web','--no-open','--port','58630' -WorkingDirectory 'D:\projects\.kimi-serve-worker-ws' -WindowStyle Hidden -Environment $e
-   ```
-
-   这是本次迁移实际用的启动方式（名字规则与 `src/secretRedaction.js` 相同；当时另外去掉了 Lead 会话自己的变量，从普通终端执行时没有这一类）。不要加 `-UseNewEnvironment`（见第 4 条）。起来之后用 `wao serve status --workspace-dir D:\projects\.kimi-serve-worker-ws` 确认实例登记在私有主目录。
+   拉起办法的权威在 `docs/usage.md` 的"kimi 专用 worker serve 运维配方"（脚本 `scripts/kimi-serve.ps1`，本机实测版本 pwsh 7.6.6）。本机的参数是私有主目录 `D:\projects\.kimi-worker-kimihome`、端口 58630、工作区 `D:\projects\.kimi-serve-worker-ws`。起来之后用 `wao serve status` 确认（目标由注册表里 kimi 车道的 `kimiHome` 与 `serveUrl` 决定）。脚本返回不等于 serve 已就绪。
+7. **重启演练**（同日，会审之后；用的是仓库里的脚本）：优雅关闭在跑的实例，再用脚本拉起，跑两条真实任务。
+   - 第一版脚本沿用第 3 条的启动方式（`Start-Process -Environment`）。serve 起来了，但从带管道的命令行调用时，serve 继承了调用方的输出管道，调用方一直不返回（单独用休眠子进程复现：子进程活多久，管道就开多久；加输出重定向也一样）。这对"由 agent 的命令行工具拉起"是实际缺陷。
+   - 改成现在的写法：先在脚本自己的进程里去掉不要的变量、设上要加的，用不带 `-Environment` 的 `Start-Process` 启动（子进程继承环境、不继承句柄），再把环境恢复。实测调用方 2 秒返回。去变量要用 `Remove-Item Env:`——实测用 `[Environment]::SetEnvironmentVariable(名, $null)` 时变量名仍留在子进程环境里。这个写法不用 `-Environment`，所以没有 PowerShell 7.4 的版本前提；只在 7.6.6 上跑过。
+   - 结果（转录在 `runs/` 下）：车道检查 `run_20261013160015622kellvp` 完成；在 worker 里列名字像密钥的环境变量 `run_202610131600322027udfaw`——没有；`serve status` 后代进程 1 个；名字带 kimi 的进程 2 个（serve 本身，和第 1 条说的那个插件后台进程）。会审期间 kimi 席的那条运行（`run_20261013153905420p1ipvj`，十几分钟、多次工具调用）结束后，后代进程同样是 1 个。
