@@ -3066,8 +3066,10 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 // branching), redacts secrets BEFORE sanitization/excerpt/pagination, and
 // exposes closed-set safe facts plus the redacted, bounded command text of command
 // entries (decision 0069) and of tool input summaries / output tails (decision 0070).
-// NEVER the full tool input/output,
-// error text, credentials, PID/session id, absolute path, or unknown payload;
+// Those free-text fields can carry an absolute path or an error's text as the
+// worker wrote it. NEVER the full tool input/output, the run.error text,
+// credentials, PID/session id, an absolute path in the file_written path field,
+// or unknown payload;
 // NO semantic summary/recommendation/progress estimate. Workspace-bound and
 // idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
 
@@ -3312,8 +3314,8 @@ const RUN_ACTIVITY_DESCRIPTION =
   // cursor 拒绝恢复路径 / pageSize 默认。
   "Read-only run activity timeline from one transcript snapshot (zero append), newest first " +
   "(order asc = chronological): message excerpts, command text, tool input summaries and " +
-  "output tails (all redacted, bounded), written paths (never absolute), runtime vital signs. " +
-  "no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only " +
+  "output tails (all redacted, bounded), file_written paths (never absolute), runtime vital " +
+  "signs. No semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only " +
   "(file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. " +
   "Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) " +
   "means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures " +

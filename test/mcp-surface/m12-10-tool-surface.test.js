@@ -695,9 +695,9 @@ const RED_23_WIRE = 75492;
 // 0070 重冻（2026-10-13）：Owner 当日"允许抬高 MCP 硬上限"，并追认上面 0069 的重冻。
 // 硬顶未给数值，沿用 2026-09-22 的 10% 口径：85939 → 94532（×1.1 向下取整；授权记录
 // 见 ADR-0032 修订节）。本批 run_activity 的 tool_use 条目增可选 detail（输入摘要）、
-// tool_result 条目增 tail / truncated（输出尾部），描述 +12。实测 85915 → 86061
-// （+146B），按实测重冻；Owner 硬顶 94532，余 8471B。
-const FROZEN_23_WIRE_CEILING = 86061;
+// tool_result 条目增 tail / truncated（输出尾部），描述 +17。实测 85915 → 86066
+// （+151B），按实测重冻；Owner 硬顶 94532，余 8466B。
+const FROZEN_23_WIRE_CEILING = 86066;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -970,9 +970,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （先 run_activity、带 observedSeq 与 reason、观察过时即拒）与"10 分钟内有生命体征
 // 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11391（+415），
 // 实测重冻。防 creep 语义不变。
-// 0070 重冻（2026-10-13）：run_activity 描述加上"工具输入摘要与输出尾部"，11391 → 11403
-// （+12）；Owner 授权的描述上限 12347（ADR-0032 修订节）不动。
-const FROZEN_23_DESC_CEILING = 11403;
+// 0070 重冻（2026-10-13）：run_activity 描述加上"工具输入摘要与输出尾部"，11391 → 11408
+// （+17）；Owner 授权的描述上限 12347（ADR-0032 修订节）不动。
+const FROZEN_23_DESC_CEILING = 11408;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

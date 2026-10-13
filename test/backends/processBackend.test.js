@@ -1168,3 +1168,29 @@ test("0070-B4: 注入假 spawn 而不给探针 → 不建取样器（既有测�
   assert.equal(typeof real._processProbe, "function");
   assert.equal(typeof real._deliverableProbe, "function");
 });
+
+test("0070-B5（会审 sol）: 取样探针还在跑的时候进程退出了 → 探针一返回就收尾，不等下一个取样定时器", async () => {
+  const cap = makeCapturingChild();
+  let probing = null;
+  const backend = new ClaudeCodeBackend({
+    spawnFn: () => cap.child,
+    // 探针要跑 400ms；基线之后的下一个定时器是 60s。
+    processProbe: () => {
+      probing ??= Date.now();
+      return new Promise((r) => setTimeout(() => r(new Map([[5001, { cpu100ns: 0, ioBytes: 0 }]])), 400));
+    },
+    deliverableProbe: async () => null,
+    quietSampleAfterMs: 200,
+    quietSampleWindowMs: 60_000,
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "wait" });
+  const events = [];
+  const consume = (async () => { for await (const ev of handle.events()) events.push(ev); })();
+  assert.ok(await waitUntil(() => probing !== null), "基线探针开始了");
+  // 探针在途时进程退出：这次唤醒发生在没有等待器的时候。
+  closeChild(cap);
+  const closedAt = Date.now();
+  await consume;
+  assert.ok(Date.now() - closedAt < 3000, `收尾用了 ${Date.now() - closedAt}ms——不是等 60s 的取样定时器`);
+  assert.equal(events.at(-1).kind, "done");
+});

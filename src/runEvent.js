@@ -38,6 +38,13 @@ export const RUNTIME_ACTIVITY_STATUSES = Object.freeze([
 
 const RUNTIME_ACTIVITY_STATUS_VALUES = new Set(RUNTIME_ACTIVITY_STATUSES);
 
+// 控制面自己观察到的体征（本机进程、工作目录、服务端自述）——它们说明"还活着"，
+// 但不是 worker / provider 流里出来的东西：不能当作 provider 曾在正常出流的证据。
+export const OBSERVED_VITAL_SIGN_STATUSES = Object.freeze(["process_active", "files_changed", "serve_active"]);
+export function isObservedVitalSign(ev) {
+  return ev?.kind === "runtime_activity" && OBSERVED_VITAL_SIGN_STATUSES.includes(ev.status);
+}
+
 export const WRITE_INTENT_CORRELATION_STATUS = Object.freeze({
   TRACKED: "tracked",
   MISSING_TOOL_CALL_ID: "missing_tool_call_id",

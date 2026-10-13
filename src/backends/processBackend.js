@@ -505,7 +505,10 @@ export class ProcessBackend {
     const startTime = Date.now();
     // 决定 0070：只供观察的静默期取样——转录静默满 5 分钟后，看这个 worker 的后代
     // 进程是否在干活、工作目录是否有文件变化，读到就落一条 runtime_activity。它不
-    // 是收口门：进程式后端不因静默被控制面收掉，取样读到什么都不改变这一点。两个
+    // 是收口门：进程式后端不因静默被控制面收掉，取样读到什么都不改变这一点。落下的
+    // 事实仍是 run.event：下游照常把它当活动（first_event、run_wait 的 liveness、
+    // advisory 的最近活动、stop 的新鲜度校验）；只是不参与本后端的 silentTimeout
+    // 与 completed_empty 判据，诊断里也不当作 provider 在出流的证据。两个
     // 探针都不在场（测试注入的假 spawn）时不建取样器，等待节奏与此前相同。
     const sampler = (this._processProbe || this._deliverableProbe) && Number.isInteger(child?.pid) && child.pid > 0
       ? createQuietSampler({
@@ -590,7 +593,12 @@ export class ProcessBackend {
         // 取样读到的体征落成事实。它们不是 worker 事件：不动 anyEventSeen（silentTimeout
         // 的"启动后零事件"语义不变），也不算可用产出。
         if (sampler && !emittedDone) {
-          for (const status of await sampler.poll()) yield runtimeActivityEvent(status);
+          const signs = await sampler.poll();
+          // 取样期间 worker 落了事件：这一轮的读数作废（事件自己就是体征，也免得把
+          // 取样事实排到先到的 worker 事件前面）。
+          if (!queue.hasItems() && !queue.closed) {
+            for (const status of signs) yield runtimeActivityEvent(status);
+          }
         }
         const silentRemain = silentTimeout && !anyEventSeen
           ? Math.max(0, silentTimeout - (Date.now() - startTime))
@@ -601,6 +609,10 @@ export class ProcessBackend {
         const baseWaitMs = (typeof onPollTick === "function" && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0)
           ? Math.min(silentRemain, pollIntervalMs)
           : silentRemain;
+        // 上面的 await（onPollTick、取样探针）期间到达的事件或进程退出，是在没有等待
+        // 器的时候发生的——那次唤醒已经丢了。不查这一下，就要等定时器到点（取样器在
+        // 场时最长可达数分钟）才交付它们。
+        if (queue.hasItems() || queue.closed) continue;
         // 取样器在场时，等待另以它下一次到点为界（至少 250ms，防空转）。
         const waitMs = sampler ? Math.min(baseWaitMs, Math.max(250, sampler.nextWakeMs())) : baseWaitMs;
         await new Promise((r) => {

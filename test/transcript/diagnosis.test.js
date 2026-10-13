@@ -984,3 +984,35 @@ test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail clos
   assert.equal(isValidDiagnosisCode(null, "unauthorized"), false);
   assert.equal(isValidDiagnosisCode("not_a_category", "unauthorized"), false);
 });
+
+test("0070（会审 sol）: 控制面自己观察到的体征事实不当作 provider 曾在出流的证据，也不算 worker 事件", () => {
+  const base = [
+    { type: "session.created", backend: "process", backendSessionId: "proc_4321", ts: "2026-10-13T06:00:00.000Z" },
+    { type: "run.submitted", ts: "2026-10-13T06:00:00.100Z" },
+  ];
+  const observed = (status, ts) => ({ type: "run.event", kind: "runtime_activity", status, ts });
+  const exit = [
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-10-13T06:30:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-10-13T06:30:00.010Z" },
+  ];
+  // 只有三条取样事实，之后静默超过 120s 退出码 1：此前会被读成 provider_disconnect（"≥3 条 run.event + 静默 + 崩溃"）。
+  const onlyObserved = [
+    ...base,
+    observed("process_active", "2026-10-13T06:05:30.000Z"),
+    observed("files_changed", "2026-10-13T06:11:00.000Z"),
+    observed("process_active", "2026-10-13T06:16:30.000Z"),
+    ...exit,
+  ];
+  const d = diagnoseFailure(onlyObserved);
+  assert.equal(d.category, "crash", "本机活动不能证明 provider 曾正常出流");
+  assert.ok(d.evidence.some((e) => /^进程退出前未观察到任何 worker 事件/.test(e.fact)), "零 worker 事件的事实照旧附上");
+  // provider 流里出来的事件照旧算：三条 streaming + 静默 + 崩溃 → provider_disconnect。
+  const streamed = [
+    ...base,
+    observed("streaming", "2026-10-13T06:05:30.000Z"),
+    observed("streaming", "2026-10-13T06:06:30.000Z"),
+    observed("streaming", "2026-10-13T06:07:30.000Z"),
+    ...exit,
+  ];
+  assert.equal(diagnoseFailure(streamed).category, "provider_disconnect");
+});

@@ -1273,3 +1273,43 @@ test("0070-P2: tool_result carries the tail of its output (bounded, redacted); t
     assert.deepEqual(Object.keys(res).sort(), ["category", "isError", "seq", "tail", "truncated", "ts"]);
   }
 });
+
+test("0070-P3（会审 sol）: a secret whose marker lies far before the tail is still redacted; the tail never starts inside a surrogate pair", async () => {
+  const { ACTIVITY_OUTPUT_TAIL_CAP } = await import("../../src/application/runActivityProjection.js");
+  resetSeq();
+  const body = "MIIEabcdefghijklmnopqrstuv\n".repeat(400); // > 4000 chars of key body
+  const longValue = "v".repeat(5000);
+  const r = project([
+    // 没闭合的 PEM 块：BEGIN 在很前面，输出到结尾都没有 END。
+    toolResultEvent(false, `-----BEGIN RSA PRIVATE KEY-----\n${body}`),
+    // 超长的带名赋值：名字和开引号离尾部 5000 字符。
+    toolResultEvent(false, `PASSWORD="${longValue}"`),
+    // 截断点落在代理对中间。
+    toolResultEvent(false, "\u{1F600}" + "x".repeat(ACTIVITY_OUTPUT_TAIL_CAP - 1)),
+    toolResultEvent(false, "y".repeat(ACTIVITY_OUTPUT_TAIL_CAP)),
+  ]);
+  const [pem, assigned, emoji, exact] = r.entries.filter((e) => e.category === "tool_result");
+  assert.equal(pem.tail, "[REDACTED]", "an unclosed key block is redacted to the end of the text");
+  assert.equal(pem.truncated, false);
+  assert.equal(assigned.tail, "PASSWORD=[REDACTED]");
+  assert.ok(!assigned.tail.includes("vvvv"));
+  const first = emoji.tail.charCodeAt(0);
+  assert.ok(!(first >= 0xDC00 && first <= 0xDFFF), "no lone low surrogate at the start");
+  assert.equal(emoji.tail, "x".repeat(ACTIVITY_OUTPUT_TAIL_CAP - 1));
+  assert.equal(emoji.truncated, true);
+  assert.deepEqual([exact.tail.length, exact.truncated], [ACTIVITY_OUTPUT_TAIL_CAP, false], "exactly at the cap: nothing came before");
+});
+
+test("0070-P4: tails are computed for the page's entries only, and shape redaction stays linear on a long alphanumeric blob", async () => {
+  const { redactSecretShapes } = await import("../../src/secretRedaction.js");
+  resetSeq();
+  const blob = "A1b2C3d4".repeat(40_000); // 320 KB, one unbroken alphanumeric run
+  const startedAt = Date.now();
+  assert.equal(redactSecretShapes(blob), blob);
+  assert.ok(Date.now() - startedAt < 2000, `shape redaction took ${Date.now() - startedAt}ms on 320KB`);
+  const events = [];
+  for (let i = 0; i < 30; i += 1) events.push(toolResultEvent(false, `${blob}\nresult ${i}`));
+  const page = project(events, { pageSize: 2, order: "desc" });
+  assert.deepEqual(page.entries.map((e) => e.tail.slice(-9)), ["result 29", "result 28"]);
+  assert.equal(page.total, 30);
+});

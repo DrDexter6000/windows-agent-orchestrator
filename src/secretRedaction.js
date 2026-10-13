@@ -11,12 +11,13 @@ export function isSecretEnvName(name) {
 // 兜一层形状——命令行里的内联赋值（名字命中密钥名规则、值不短于 8 字符）与几种
 // 常见令牌形状。只是兜底：没有形状的秘密不在覆盖范围内。
 // 密钥名规则命中的赋值：NAME=值 / NAME: 值 / "name": "值" / $env:NAME="值"。引号内
-// 允许转义引号——整段值被替换，不留尾巴。
+// 允许转义引号——整段值被替换，不留尾巴。名字两侧的字符数有上界（{0,40}）：这些规则
+// 现在也作用在几百 KB 的工具输出上，无界的 * 在一长串字母数字（base64 块）上是平方级。
 const INLINE_SECRET_ASSIGNMENT =
-  /((?:\$env:)?["']?[A-Za-z0-9_.-]*(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*["']?\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|,}]{8,})/gi;
+  /((?:\$env:)?["']?[A-Za-z0-9_.-]{0,40}(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]{0,40}["']?\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|,}]{8,})/gi;
 // 命令行参数：--api-key 值 / --token=值（空格或等号分隔）。
 const FLAG_SECRET =
-  /(--?[A-Za-z0-9-]*(?:api-?key|access-?key|private-?key|token|secret|password|passwd|credential)[A-Za-z0-9-]*(?:\s+|=))("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|]{8,})/gi;
+  /(--?[A-Za-z0-9-]{0,40}(?:api-?key|access-?key|private-?key|token|secret|password|passwd|credential)[A-Za-z0-9-]{0,40}(?:\s+|=))("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|]{8,})/gi;
 // Authorization 头里方案词后面的凭证；Bearer 单独出现也算（大小写不敏感）。Basic /
 // Token 只在 Authorization 语境里算——否则 "token <某个词>" 这样的普通文字会被误伤。
 const AUTH_SCHEME = /\b(Authorization["']?\s*[:=]\s*["']?(?:Bearer|Basic|Token)\s+|Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
@@ -36,17 +37,36 @@ const SECRET_TOKEN_SHAPES = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, // JWT
 ];
 
+const PEM_END_LINE = /-----END [A-Z ]*PRIVATE KEY-----/;
+const BASE64_LINE = /^[A-Za-z0-9+/=]{16,}$/;
+
+// 只见 END 不见 BEGIN（文本是私钥块的后半段，例如 tail 出来的）：把 END 行之前连续
+// 的 base64 行连同 END 行一起遮掉。逐行扫描，线性。
+function redactOrphanPemTails(text) {
+  if (!text.includes("PRIVATE KEY-----")) return text;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!PEM_END_LINE.test(lines[i])) continue;
+    let from = i;
+    while (from > 0 && BASE64_LINE.test(lines[from - 1].trim())) from -= 1;
+    if (from === i) continue;
+    lines.splice(from, i - from + 1, "[REDACTED]");
+    i = from;
+  }
+  return lines.join("\n");
+}
+
 // 调用方先做环境密钥值的整段替换，再过这一层——反过来的话，形状替换会把环境值
 // 切碎，整段匹配随之失效，尾巴漏出（会审 sol 的反例）。
 export function redactSecretShapes(text) {
   if (typeof text !== "string" || text.length === 0) return text;
-  let out = text
+  let out = redactOrphanPemTails(text
     .replace(INLINE_SECRET_ASSIGNMENT, "$1[REDACTED]")
     .replace(FLAG_SECRET, "$1[REDACTED]")
     .replace(AUTH_SCHEME, "$1[REDACTED]")
     .replace(URL_USERINFO, "$1[REDACTED]$2")
     .replace(CURL_USER, "$1[REDACTED]")
-    .replace(PEM_PRIVATE_KEY, "[REDACTED]");
+    .replace(PEM_PRIVATE_KEY, "[REDACTED]"));
   for (const shape of SECRET_TOKEN_SHAPES) out = out.replace(shape, "[REDACTED]");
   return out;
 }

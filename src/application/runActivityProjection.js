@@ -24,9 +24,11 @@
 //   - closed-set safe activity facts — plus, since decision 0069, the command
 //     text of command entries and, since decision 0070, a one-field summary of
 //     a tool call's input and the tail of a tool result's output (all redacted,
-//     sanitized, bounded); never the full tool input,
-//     tool output, error text, credentials, PID/session id, absolute path, or
-//     unknown payload; NO semantic summary/recommendation/progress estimate;
+//     sanitized, bounded) — these free-text fields can carry an absolute path
+//     or the text of an error, as the worker wrote it. Never the full tool
+//     input or output, the run.error text, credentials, PID/session id, an
+//     absolute path in the file_written path field, or unknown payload; NO
+//     semantic summary/recommendation/progress estimate;
 //   - per-page caps (entries + text excerpt) bounded per audience; an
 //     explicitly provided invalid pageSize is REJECTED, never silently clamped;
 //   - opaque base64url cursor codec binding runId digest + frozen raw-snapshot
@@ -205,14 +207,11 @@ export const ACTIVITY_COMMAND_CAP = 400;
 // 输出的尾部（最近吐出的是什么）。
 export const ACTIVITY_TOOL_DETAIL_CAP = 200;
 export const ACTIVITY_OUTPUT_TAIL_CAP = 400;
-// 取尾之前先在这么长的窗口里做形状脱敏：一条输出可达数百 KB，逐条全量过正则太贵。
-const OUTPUT_TAIL_REDACTION_WINDOW = 4000;
 // 按这个顺序取第一个非空字符串字段（真实转录里各后端工具输入的常见键）。
 const TOOL_DETAIL_KEYS = Object.freeze([
   "command", "file_path", "pattern", "query", "url", "task_id", "skill", "path", "description",
 ]);
-const PEM_END_MARKER = /-----END [A-Z ]*PRIVATE KEY-----/;
-const PEM_BEGIN_MARKER = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
 export const ACTIVITY_TS_CAP = 64;
 
 // ===== Cursor codec =====
@@ -475,23 +474,19 @@ function toolInputDetail(input, redactor) {
   return null;
 }
 
-// tool_result 输出的尾部。环境密钥值对整段替换；形状兜底只过尾部窗口——窗口
-// 开头若落在一个 PEM 私钥块中间（只见 END 不见 BEGIN），把 END 之前整段遮掉。
+// tool_result 输出的尾部。两层脱敏都作用在完整输出上，然后才取尾：先切窗再脱敏
+// 会丢掉识别秘密所需的上下文——没闭合的 PEM 块、超长的带名赋值，名字和起始标记
+// 都在窗口之外（会审 sol 的两个反例）。一条输出可达数百 KB，所以只对落在当前页
+// 的条目做（见 projectRunActivity 的收尾）。truncated = 脱敏清洗后的文本长于上限，
+// 即尾部之前还有内容。
 function outputTail(output, redactor) {
   if (typeof output !== "string" || output.length === 0) return { tail: "", truncated: false };
-  const exact = redactor.redactString(output);
-  const windowed = exact.length > OUTPUT_TAIL_REDACTION_WINDOW;
-  let window = windowed ? exact.slice(-OUTPUT_TAIL_REDACTION_WINDOW) : exact;
-  const end = window.search(PEM_END_MARKER);
-  if (end !== -1 && !PEM_BEGIN_MARKER.test(window.slice(0, end))) {
-    window = "[REDACTED]" + window.slice(end).replace(PEM_END_MARKER, "");
-  }
-  const safe = sanitizeControls(redactSecretShapes(window)).trimEnd();
-  const cut = safe.length > ACTIVITY_OUTPUT_TAIL_CAP;
-  return {
-    tail: cut ? safeSliceUtf16(safe, safe.length - ACTIVITY_OUTPUT_TAIL_CAP, safe.length) : safe,
-    truncated: windowed || cut,
-  };
+  const safe = sanitizeControls(redactSecretShapes(redactor.redactString(output))).trimEnd();
+  if (safe.length <= ACTIVITY_OUTPUT_TAIL_CAP) return { tail: safe, truncated: false };
+  let start = safe.length - ACTIVITY_OUTPUT_TAIL_CAP;
+  const first = safe.charCodeAt(start);
+  if (first >= 0xDC00 && first <= 0xDFFF) start += 1; // 不从代理对的后半个开始
+  return { tail: safe.slice(start), truncated: true };
 }
 
 function commandExitStatus(event) {
@@ -573,7 +568,7 @@ function classifyEvent(event) {
  * Every transcript-derived dynamic string uses the uniform
  * safeDynamicText path or a stricter closed-set/sentinel.
  */
-function buildEntry(event, category, redactor, textCap, toolResultsById) {
+function buildEntry(event, category, redactor, textCap, toolResultsById, pendingTails) {
   const ts = safeDynamicText(event.ts ?? "", redactor, ACTIVITY_TS_CAP);
   const seq = Number.isInteger(event.seq) ? event.seq : 0;
   switch (category) {
@@ -619,8 +614,10 @@ function buildEntry(event, category, redactor, textCap, toolResultsById) {
     }
     case "tool_result": {
       // tool_result.tool is often an opaque callId (unreliable) — never emitted.
-      const { tail, truncated } = outputTail(event.output, redactor);
-      return { category, ts, seq, isError: Boolean(event.isError), tail, truncated };
+      // 尾部留到分页之后再算（只算落在当前页的条目）。
+      const entry = { category, ts, seq, isError: Boolean(event.isError), tail: "", truncated: false };
+      pendingTails.set(entry, event);
+      return entry;
     }
     case "file_written":
       return { category, ts, seq, path: safeFilePath(event.path, redactor) };
@@ -793,6 +790,7 @@ export function projectRunActivity(rawSnapshot, {
     String(rawSnapshot.backend ?? ""),
   );
   const toolResultsById = new Map();
+  const pendingTails = new Map();
   if (inferenceTrusted) {
     for (const event of frozenEvents) {
       if (event?.type === "run.event" && event.kind === "tool_result"
@@ -811,7 +809,7 @@ export function projectRunActivity(rawSnapshot, {
       const s = Number.isInteger(event?.seq) ? event.seq : 0;
       if (!(s > afterSeq)) continue;
     }
-    allEntries.push(buildEntry(event, category, redactor, textCap, toolResultsById));
+    allEntries.push(buildEntry(event, category, redactor, textCap, toolResultsById, pendingTails));
     counts[category] += 1;
   }
   const total = allEntries.length;
@@ -833,6 +831,11 @@ export function projectRunActivity(rawSnapshot, {
   }
   const end = Math.min(start + size, total);
   const pageEntries = orderedEntries.slice(start, end);
+  // tool_result 的输出尾部只为当前页的条目计算（完整输出过两层脱敏，开销随页大小而不随转录长度）。
+  for (const entry of pageEntries) {
+    const source = pendingTails.get(entry);
+    if (source !== undefined) Object.assign(entry, outputTail(source.output, redactor));
+  }
   const truncated = end < total;
 
   let nextCursor = null;

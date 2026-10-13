@@ -32,6 +32,7 @@
 import { findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
+import { isObservedVitalSign } from "./runEvent.js";
 
 /**
  * Frozen category enum SSOT — the complete set of diagnosis categories.
@@ -613,7 +614,9 @@ function diagnoseFailureInner(events, expectedRunId) {
     (e) => e.type === "run.error" && typeof e.error === "string" && CRASH_EXIT_SIGNAL.test(e.error),
   );
   if (state === "failed" && exitCrashForPd && !evs.some((e) => e.type === "run.completed")) {
-    const activityEvents = evs.filter((e) => e.type === "run.event");
+    // 控制面自己观察到的体征（进程在干活 / 文件有变化 / 服务端自述）不是 provider
+    // 流里出来的事件——不计入"曾在出流"的条数，也不当作最后活动。
+    const activityEvents = evs.filter((e) => e.type === "run.event" && !isObservedVitalSign(e));
     const lastActivity = activityEvents.at(-1);
     if (lastActivity && activityEvents.length >= PROVIDER_DISCONNECT_MIN_EVENTS) {
       const silenceMs = new Date(exitCrashForPd.ts).getTime() - new Date(lastActivity.ts).getTime();
@@ -680,7 +683,7 @@ function diagnoseFailureInner(events, expectedRunId) {
     // 进程退出前一条 worker 事件都没有时，把这一点单列出来。本模块只给事实
     // （铁律：不给处方）——看不到事件不等于没有副作用；"同形故障此前怎么处置"
     // 属于知识，放在 docs/troubleshooting.md，这里只留指针。
-    if (!evs.slice(0, evs.indexOf(exitCrash)).some((e) => e.type === "run.event")) {
+    if (!evs.slice(0, evs.indexOf(exitCrash)).some((e) => e.type === "run.event" && !isObservedVitalSign(e))) {
       const sessionAt = Date.parse(evs.find((e) => e.type === "session.created")?.ts);
       const exitAt = Date.parse(exitCrash.ts);
       const life = Number.isFinite(sessionAt) && Number.isFinite(exitAt)
