@@ -25,15 +25,24 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync, unlinkSync, lstatSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { homedir } from "node:os";
-import { spawn as nodeSpawn, execFile as nodeExecFile, execFileSync } from "node:child_process";
+import { execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
 import { readTranscript, listTranscriptFiles, findState, TERMINAL_STATES } from "../transcript.js";
 import { listRuns } from "./runList.js";
 import { recycleRunBranch } from "../isolation.js";
 import { gitChildEnv } from "../delivery.js";
 import * as defaultOps from "../backends/kimiServeOps.js";
-import { isSecretEnvName } from "../secretRedaction.js";
+import {
+  resolveKimiExe,
+  serveWorkspaceShapeRefusal,
+  serveWorkspacePlacementRefusal,
+  kimiServeChildEnv,
+  spawnServeDetached,
+} from "../backends/kimiServeStart.js";
+
+// 决定 0075：exe 解析随启动原语迁到 backends/kimiServeStart.js（kimi-web backend 的
+// 按需拉起共用同一份）；这里原名再导出，既有消费方不动。
+export { resolveKimiExe };
 
 /** 清扫/回收的共享落点（.dev 语义之外的运维事实面，入 .wao/）。 */
 export function serveMaintenanceDir(rootDir) {
@@ -423,44 +432,6 @@ export function pickInstanceByPort(instances, port) {
 }
 
 /**
- * TD-261b（0063，opus/sol 会审合订）：重启 exe 的**前置**解析（shutdown 之前——
- * 杀了旧 serve 才发现没 exe 是最糟形状）。返回 { exe, candidates } 或
- * { refused: "kimi_exe_unresolvable", tried }。
- * 显式路径（含分隔符/.exe 后缀）= 指定执行器：existsSync 不过即拒，不降级（sol）；
- * 默认短名 "kimi" = 候选链降级：kimiHome/bin → PATH 扫描（.exe/.com，libuv 规则
- * 不认 .cmd——opus）→ homedir/.kimi-code/bin/kimi.exe。
- */
-export function resolveKimiExe({ kimiExe = "kimi", kimiHome = null, env = process.env, existsFn = existsSync, homeDirFn = homedir }) {
-  const isExplicitPath = typeof kimiExe === "string" && (/[\\/]/.test(kimiExe) || kimiExe.toLowerCase().endsWith(".exe"));
-  if (isExplicitPath) {
-    if (existsFn(kimiExe)) return { exe: kimiExe, candidates: [kimiExe] };
-    return { refused: "kimi_exe_unresolvable", tried: [kimiExe] };
-  }
-  const tried = [];
-  const candidates = [];
-  if (typeof kimiHome === "string" && kimiHome.length > 0) {
-    const p = join(kimiHome, "bin", "kimi.exe");
-    tried.push(p);
-    if (existsFn(p)) candidates.push(p);
-  }
-  const pathDirs = String(env?.PATH ?? "").split(";").filter(Boolean);
-  for (const ext of [".exe", ".com"]) {
-    for (const dir of pathDirs) {
-      const p = join(dir, `kimi${ext}`);
-      if (!tried.includes(p)) {
-        tried.push(p);
-        if (existsFn(p)) candidates.push(p);
-      }
-    }
-  }
-  const fallback = join(homeDirFn(), ".kimi-code", "bin", "kimi.exe");
-  tried.push(fallback);
-  if (existsFn(fallback)) candidates.push(fallback);
-  if (candidates.length > 0) return { exe: candidates[0], candidates };
-  return { refused: "kimi_exe_unresolvable", tried };
-}
-
-/**
  * TD-262a（0063，opus/sol 会审合订）：已删壳名的**转录门控**分支回收。资格全链
  * 从绑定转录证明（sol 反例：accepted 交付轮同样留空壳且分支须保留——空目录不是
  * 资格证据）：转录在场+终态+run.read_only_declared+无 delivery+worktreePath
@@ -540,14 +511,10 @@ export async function recycleServe({
   sleepFn = (ms) => new Promise((r) => { setTimeout(r, ms); }),
   nowMs = Date.now,
 }) {
-  if (typeof workspaceDir !== "string" || workspaceDir.length === 0) {
-    return { refused: "workspace_dir_required" };
-  }
-  // TD-261b（0063，opus 实锤）：workspaceDir 缺失会让下方 git -C 失败被误读为
-  // "不在工作树内=通过"，spawn 的 ENOENT 再被误归因于 exe——显式 isDirectory 门。
-  try {
-    if (!statSync(workspaceDir).isDirectory()) return { refused: "workspace_dir_invalid" };
-  } catch { return { refused: "workspace_dir_invalid" }; }
+  // 工作目录的形状门与放置门、exe 解析：与按需拉起共用（backends/kimiServeStart.js），
+  // 次序不变——形状门 → exe → 放置门。
+  const shapeRefusal = serveWorkspaceShapeRefusal(workspaceDir);
+  if (shapeRefusal) return { refused: shapeRefusal };
   // TD-261b（0063，opus/sol 合订）：exe 解析**前移到一切副作用之前**（锁/杀/探
   // 测都不碰）——解析不到=零副作用拒绝，绝不出现"杀了旧的才发现没 exe"。
   const exeResolution = resolveKimiExe({ kimiExe, kimiHome });
@@ -555,16 +522,8 @@ export async function recycleServe({
     return { refused: exeResolution.refused, tried: exeResolution.tried };
   }
   // TD-253（opus Q5）：serve cwd 三拒——cwd 句柄钉目录（W1c 实证）+项目发现面+家内污染。
-  const wsNorm = workspaceDir.replace(/[\\]/g, "/").toLowerCase().replace(/\/+$/, "");
-  if (wsNorm.includes("/.wao-worktrees/")) return { refused: "workspace_dir_inside_worktrees" };
-  if (typeof kimiHome === "string" && kimiHome.length > 0) {
-    const khNorm = kimiHome.replace(/[\\]/g, "/").toLowerCase().replace(/\/+$/, "");
-    if (wsNorm === khNorm || wsNorm.startsWith(khNorm + "/")) return { refused: "workspace_dir_inside_kimi_home" };
-  }
-  try {
-    execFileSync("git", ["-C", workspaceDir, "rev-parse", "--is-inside-work-tree"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000 });
-    return { refused: "workspace_dir_inside_git_worktree" };
-  } catch { /* 不在 git 工作树内=通过 */ }
+  const placementRefusal = serveWorkspacePlacementRefusal(workspaceDir, kimiHome);
+  if (placementRefusal) return { refused: placementRefusal };
   const recycleLockPath = join(serveMaintenanceDir(lockRootDir), "recycle.lock");
   const lock = acquireMaintenanceLock({ lockPath: recycleLockPath, nowMs: nowMs() });
   if (lock.refused) return { refused: "lock_held", lock };
@@ -720,45 +679,16 @@ export async function recycleServe({
   //（unhandled 'error' event 是当日进程崩根因）；ENOENT 按候选链降级重试；全部
   // 候选失败=结构化失败+台账行——绝不崩、绝不静默留死 serve。exe 已在一切副作用
   // 之前解析（exeResolution），运行期失败（文件被删等）走候选降级兜底。
-  const spawn = spawnFn ?? nodeSpawn;
-  // TD-253（决定 0058，双席修正）：effective home 纪律——kimiHome 在场显式注入
-  // KIMI_CODE_HOME；缺席则**删除**继承来的 KIMI_CODE_HOME（旧实现 {...process.env}
-  // 实际继承操作员 shell，与注释相反：试点 shell 里设了新家再回收 58628 会把
-  // Owner serve 在新家重启——opus/sol 同发现）。
-  const childEnv = { ...process.env, WAO_IN_WORKER: "1" };
-  if (typeof kimiHome === "string" && kimiHome.length > 0) childEnv.KIMI_CODE_HOME = kimiHome;
-  else delete childEnv.KIMI_CODE_HOME;
-  // 决定 0074：serve 把自己的环境传给工具 shell 与 MCP 子进程，worker 读得到——会审期间
-  // 就有一个 kimi 席位在 worker 里列环境，把两个密钥值发给了模型方。serve 用的是主目录里
-  // 的登录态，不需要操作员环境里的密钥：按名字规则剔除（代理变量保留，联网要用）。
-  for (const name of Object.keys(childEnv)) {
-    if (isSecretEnvName(name) && !/_PROXY$/i.test(name)) delete childEnv[name];
-  }
-  const spawnArgs = ["web", "--no-open", "--port", String(port)];
-  const spawnDetached = (exe) => new Promise((resolveSpawn) => {
-    let child = null;
-    let spawnErr = null;
-    try {
-      child = spawn(exe, spawnArgs, { cwd: workspaceDir, env: childEnv, detached: true, stdio: "ignore" });
-    } catch (e) { spawnErr = e; }
-    if (spawnErr) return resolveSpawn({ err: spawnErr });
-    if (typeof child?.once !== "function") return resolveSpawn({ child }); // 注入缝（测试假 spawn）：无事件面=按旧语义视为已发
-    let settled = false;
-    const settle = (err) => { if (settled) return; settled = true; resolveSpawn({ child, err: err ?? null }); };
-    child.once("error", (e) => settle(e));
-    child.once("spawn", () => settle(null));
-    sleepFn(2000).then(() => settle(null)); // 仲裁有界：2s 内无 error 即放行进就绪轮询
+  // 环境组装（WAO_IN_WORKER、effective home 纪律、剔密钥类变量——决定 0058 / 0074）与
+  // detached spawn 仲裁都在 backends/kimiServeStart.js，与按需拉起共用一份。
+  const { child, error: restartError, triedCandidates } = await spawnServeDetached({
+    candidates: exeResolution.candidates,
+    port,
+    workspaceDir,
+    env: kimiServeChildEnv(process.env, kimiHome),
+    spawnFn,
+    sleepFn,
   });
-  let child = null;
-  let restartError = null;
-  const triedCandidates = [];
-  for (const cand of exeResolution.candidates) {
-    triedCandidates.push(cand);
-    const r = await spawnDetached(cand);
-    if (!r.err) { child = r.child; restartError = null; break; }
-    restartError = r.err;
-    if (r.err?.code !== "ENOENT") break; // 非 ENOENT（权限/损坏等）不降级（sol 条款）
-  }
   if (!child) {
     // 全候选失败：台账+锁释放+结构化失败（CLI 侧非零退出）。
     try {

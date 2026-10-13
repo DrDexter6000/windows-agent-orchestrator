@@ -11,7 +11,9 @@
 // 目标 serve 解析：--url 显式 > 注册表里第一个 kimi-web 席位的 serveUrl。
 // token 取该席位 tokenEnv 指名的 env（缺席=固定错误点名变量名，值绝不回显）。
 //
-// 边界（会审定案）：不挂 daemon、无自动触发；recycle 必须显式
+// 边界（会审定案）：不挂 daemon、无自动触发（决定 0075 只放开了一件——派发时端口上
+// 没有监听就把 serve 拉起来，在 backends/kimiServeStart.js；关/重启/清扫仍只有这里的
+// 手动命令）；recycle 必须显式
 // --workspace-dir（重启 cwd，无隐藏默认——env 由命令组装 WAO_IN_WORKER=1）；
 // sweep 默认 dry-run，--apply 才执行。
 

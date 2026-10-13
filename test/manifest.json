@@ -15,6 +15,7 @@
       "backends/integration.test.js",
       "backends/kimiCode.test.js",
       "backends/kimiServeOps.test.js",
+      "backends/kimiServeStart.test.js",
       "backends/kimiWeb.test.js",
       "backends/m12-14-claudeContextIsolation.test.js",
       "backends/opencodeRequalification.test.js",

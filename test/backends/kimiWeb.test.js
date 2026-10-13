@@ -3030,3 +3030,81 @@ test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.to
     rm(home, { recursive: true, force: true });
   }
 });
+
+// ===== 决定 0075：车道声明 serveWorkspaceDir → 派发前保证 worker serve 在场 =====
+
+test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 → 派发前调一次在场保证，拉起过就给 Lead 留一条 system 说明；拉不起来派发即失败", async () => {
+  const ws = process.platform === "win32" ? "D:\\wao-serve-ws" : "/wao-serve-ws";
+  const oneTurn = () => ({
+    script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+  });
+  const runWith = async (sessionId, agentOverrides, ensureResult) => {
+    const ensureCalls = [];
+    const lane = turnScriptServer(sessionId, oneTurn());
+    const { fetchImpl, calls } = kimiServer(lane.handler);
+    const backend = new KimiWebBackend({
+      fetchImpl, timeout: 5000, retries: 0,
+      ensureServeFn: async (args) => {
+        ensureCalls.push({ ...args, fetchCallsBefore: calls.length });
+        if (ensureResult instanceof Error) throw ensureResult;
+        return ensureResult;
+      },
+    });
+    const handle = await backend.spawn(makeAgent(agentOverrides), { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } });
+    lane.markSpawned();
+    const events = [];
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) events.push(ev);
+    return { ensureCalls, events, calls };
+  };
+  const systemTexts = (events) => events
+    .filter((ev) => ev.kind === "message" && ev.role === "system")
+    .map((ev) => ev.parts.map((p) => p.text).join(""));
+
+  // 没声明：不调在场保证，事件流里没有 system 说明。
+  const plain = await runWith("session_0075a", {}, { started: true, pid: 1, waitedMs: 1 });
+  assert.equal(plain.ensureCalls.length, 0);
+  assert.deepEqual(systemTexts(plain.events), []);
+
+  // 声明了、serve 本来就在：调一次（在建会话之前），没有说明。
+  const present = await runWith("session_0075b", { serveWorkspaceDir: ws }, null);
+  assert.equal(present.ensureCalls.length, 1);
+  assert.equal(present.ensureCalls[0].serveUrl, makeAgent().serveUrl);
+  assert.equal(present.ensureCalls[0].workspaceDir, ws);
+  assert.equal(present.ensureCalls[0].kimiHome, null);
+  assert.equal(present.ensureCalls[0].token, TOKEN_VALUE, "探测用的是这条车道解析到的 token");
+  assert.equal(present.ensureCalls[0].fetchCallsBefore, 0, "在任何会话请求之前");
+  assert.deepEqual(systemTexts(present.events), []);
+
+  // 声明了、本次派发把 serve 拉了起来：events 的第一条是给 Lead 的说明。
+  const started = await runWith("session_0075c", { serveWorkspaceDir: ws }, { started: true, pid: 777, waitedMs: 4200 });
+  assert.equal(started.events[0].kind, "message");
+  assert.equal(started.events[0].role, "system");
+  assert.match(systemTexts(started.events)[0], /worker serve at .* was not running; started it \(pid 777, answering after 4 s; the lane declares serveWorkspaceDir\)/);
+  assert.equal(systemTexts(started.events).length, 1);
+  assert.ok(!JSON.stringify(started.events).includes(TOKEN_VALUE));
+
+  // 别的运行在拉，本次只等。
+  const waited = await runWith("session_0075d", { serveWorkspaceDir: ws }, { started: false, pid: null, waitedMs: 3000 });
+  assert.match(systemTexts(waited.events)[0], /was not running; another run was starting it, waited 3 s for it to answer/);
+
+  // 拉不起来：派发在建会话之前失败，错误原样上抛。
+  const lane = turnScriptServer("session_0075e", oneTurn());
+  const { fetchImpl, calls } = kimiServer(lane.handler);
+  const failing = new KimiWebBackend({
+    fetchImpl, timeout: 5000, retries: 0,
+    ensureServeFn: async () => { throw new Error("kimi-web backend: the worker serve at http://x is not running and could not be started (workspace_dir_invalid)"); },
+  });
+  await assert.rejects(
+    () => failing.spawn(makeAgent({ serveWorkspaceDir: ws }), { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } }),
+    /could not be started \(workspace_dir_invalid\)/,
+  );
+  assert.equal(calls.length, 0, "没有 serve 就不发会话请求");
+
+  // 形状：绝对路径、首尾不带空白——registry 与 backend 同一判据；归一化保留该字段。
+  const shapeBackend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  for (const bad of [" ", "relative/ws", ` ${ws}`, `${ws} `, 5, ""]) {
+    assert.throws(() => shapeBackend.validateAgentPolicy(makeAgent({ serveWorkspaceDir: bad })), /serveWorkspaceDir must be an absolute path \(no surrounding whitespace\)/, JSON.stringify(bad));
+    assert.throws(() => normalizeAgent("kimi", { ...makeAgent(), serveWorkspaceDir: bad }), /serveWorkspaceDir must be an absolute path \(no surrounding whitespace\)/, JSON.stringify(bad));
+  }
+  assert.equal(normalizeAgent("kimi", { ...makeAgent(), serveWorkspaceDir: ws }).serveWorkspaceDir, ws);
+});

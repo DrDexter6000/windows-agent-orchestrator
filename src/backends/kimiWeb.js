@@ -122,7 +122,8 @@ import {
 } from "../runEvent.js";
 import { readFileSync } from "node:fs";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
-import { kimiServerTokenFile, isValidKimiHome } from "../envPolicy.js";
+import { kimiServerTokenFile, isValidKimiHome, isValidServeWorkspaceDir } from "../envPolicy.js";
+import { ensureServeRunning } from "./kimiServeStart.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { createStallTracker } from "./stallBudget.js";
 
@@ -290,16 +291,22 @@ export class KimiWebBackend {
     if (agent?.kimiHome !== undefined && !isValidKimiHome(agent.kimiHome)) {
       throw new Error("kimi-web backend: kimiHome must be an absolute path (no surrounding whitespace) when present");
     }
+    // 决定 0075：serveWorkspaceDir 可选（worker serve 的工作目录，绝对路径）；形状不对即拒。
+    if (agent?.serveWorkspaceDir !== undefined && !isValidServeWorkspaceDir(agent.serveWorkspaceDir)) {
+      throw new Error("kimi-web backend: serveWorkspaceDir must be an absolute path (no surrounding whitespace) when present");
+    }
   }
 
   // 构造零副作用（registry validate 会静态构造——backendCapabilitySnapshot 同款要求）。
-  constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2 } = {}) {
+  constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2, ensureServeFn = ensureServeRunning } = {}) {
     if (!fetchImpl) {
       throw new Error("fetch is required");
     }
     this.fetch = fetchImpl;
     this.timeout = timeout;
     this.retries = retries;
+    // 决定 0075：派发前的 serve 在场保证（注入缝——单测不起真进程）。
+    this.ensureServeFn = ensureServeFn;
   }
 
   async spawn(agent, task, opts = {}) {
@@ -312,6 +319,10 @@ export class KimiWebBackend {
     if (typeof bridgedToken === "string" && bridgedToken.trim().length > 0) {
       SPAWN_BRIDGED_BEARER.set(agent, bridgedToken);
     }
+    // 决定 0075：车道声明了 serveWorkspaceDir 时，serve 没在跑就先把它拉起来（resume 轮
+    // 同样需要 serve 在场——会话存在主目录里，重启后的 serve 仍能续接）。拉不起来在这里抛错，
+    // 派发以固定文案失败；拉起或等待过，就给 Lead 留一条说明（events 的第一条）。
+    const serveStartNote = await this.ensureServe(agent);
     let sessionId;
     if (task.sessionReuse?.turn === "resume") {
       // 镜像 kimiCode.js 的 resume 轮实现：前任 provider session id 缺失/空/占位
@@ -403,6 +414,7 @@ export class KimiWebBackend {
         turnAnchor,
         // TD-197① test seam: injectable monotonic clock for the stall budget.
         stallClock: opts?.stallClock,
+        serveStartNote,
       }),
       // 上游无会话级中止通道（见文件头停止杠杆声明）：抛固定错误（原因由控制面
       // 记入 run.aborted.error；cleanup 的停止验证对 kimi-web 形状不可观察 → 记
@@ -442,6 +454,29 @@ export class KimiWebBackend {
    * 或默认 60s）到界抛固定错误 "session busy at dispatch"。detail 请求失败 /
    * 形状不符（A4 在场门）原样上抛（fail-closed，不吞、不猜）。
    */
+  /**
+   * 决定 0075：派发前的 serve 在场保证。车道没声明 serveWorkspaceDir → 不做任何事（null）。
+   * 声明了 → 交给 ensureServeRunning：serve 有应答即返回 null；连接被拒则拉起（或等别的
+   * 运行拉起），返回给 Lead 看的一句说明。拉不起来的错误原样上抛。
+   */
+  async ensureServe(agent) {
+    if (typeof agent?.serveWorkspaceDir !== "string") return null;
+    const result = await this.ensureServeFn({
+      serveUrl: agent.serveUrl,
+      token: resolveBearerToken(agent),
+      workspaceDir: agent.serveWorkspaceDir,
+      kimiHome: agent.kimiHome ?? null,
+      fetchImpl: this.fetch,
+    });
+    if (!result) return null;
+    const seconds = Math.round((Number(result.waitedMs) || 0) / 1000);
+    return result.started
+      ? `kimi-web backend: the worker serve at ${agent.serveUrl} was not running; started it `
+        + `(pid ${result.pid ?? "unknown"}, answering after ${seconds} s; the lane declares serveWorkspaceDir)`
+      : `kimi-web backend: the worker serve at ${agent.serveUrl} was not running; another run was starting it, `
+        + `waited ${seconds} s for it to answer`;
+  }
+
   async awaitSessionIdle(agent, sessionId, { silentTimeout = 60_000, interval = 1000 } = {}) {
     const deadline = Date.now() + silentTimeout;
     for (;;) {
@@ -769,8 +804,12 @@ export class KimiWebBackend {
    * assistant text → metrics → done(completed)。
    */
   async *streamEvents(agent, sessionId, {
-    signal, interval = 1000, silentTimeout, onPollTick, turnAnchor, stallClock,
+    signal, interval = 1000, silentTimeout, onPollTick, turnAnchor, stallClock, serveStartNote,
   } = {}) {
+    // 决定 0075：本次派发拉起过（或等过）worker serve——告诉 Lead。
+    if (typeof serveStartNote === "string" && serveStartNote.length > 0) {
+      yield messageEvent("system", [{ type: "text", text: serveStartNote }]);
+    }
     // 归属键：spawn 传入的 promptId（非空字符串才可匹配；缺失/直调防御形状
     // 匹配不到任何 turn ⇒ 由 silentTimeout / 无进展出口有界收口，绝不发明归属
     // 启发式）。anchorTime = 提交时刻（silentTimeout 的计时原点）。

@@ -41,6 +41,12 @@ export function isValidKimiHome(value) {
 }
 
 /**
+ * serveWorkspaceDir 的形状（决定 0075）：与 kimiHome 同一判据——绝对路径、首尾不带空白。
+ * registry 与 backend 的校验共用。
+ */
+export const isValidServeWorkspaceDir = isValidKimiHome;
+
+/**
  * 决定 0074：kimi-web 车道声明 kimiHome（worker serve 的私有 KIMI_CODE_HOME）时，
  * 服务器 bearer token 取自该主目录的 server.token 文件，不经环境变量。返回该文件
  * 路径；未声明 → null。路径拼接不用 node:path（本模块零 import）：kimi 主目录是

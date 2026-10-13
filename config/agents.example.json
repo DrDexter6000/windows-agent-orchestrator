@@ -45,6 +45,7 @@
       "cwd": ".",
       "serveUrl": "http://127.0.0.1:58628",
       "tokenEnv": "KIMI_WEB_TOKEN",
+      "_comment_serveWorkspaceDir": "可选 serveWorkspaceDir（绝对路径，稳定目录，不在任何 git 工作树内）：worker serve 的工作目录。声明后，派发时发现 serve 没在跑（连接被拒）WAO 会以它为工作目录把 serve 拉起来并等它应答；不声明则 serve 须事先手动拉起（决定 0075，docs/usage.md 场景 4e）。",
       "_comment_kimiHome": "可选 kimiHome（绝对路径）：worker serve 的私有 KIMI_CODE_HOME。声明后 token 取自 <kimiHome>/server.token、不读 tokenEnv；不装插件的私有主目录下 serve 不拉助手进程（决定 0074，docs/usage.md TD-250 节）。",
       "model": {
         "id": "kimi-code/k3-256k"
