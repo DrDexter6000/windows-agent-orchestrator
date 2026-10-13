@@ -520,14 +520,20 @@ npm run cli -- consult run brief.md --seats astra,kimi,glm-flash
 # 带每席视角片段（答题姿势 2-3 句：差异化资产 + 自测问题；原样拼在该席 prompt 尾部）
 npm run cli -- consult run brief.md --seats a,b --perspective a=persp-a.md --perspective b=persp-b.md
 
-# 闭集字段比对（只标"字段值不同"，字面等值比较、大小写敏感、不出结论词）
+# 闭集字段比对（只标"字段值不同"；声明值按整词匹配、大小写敏感，不出结论词）
 npm run cli -- consult run brief.md --seats a,b --fields Q1=A,B
 
 # 黄牌核查：被审 run 的作者是否在席位清单（advisory，不拦截）
 npm run cli -- consult run brief.md --seats a,b --reviewed-run <runId>
 
-# 从组记录重渲染（只读）
+# 从组记录重渲染（只读；扇出后即可读）
 npm run cli -- consult show <consultId> --format json
+
+# 等待预算到期后接着等（可反复调用）
+npm run cli -- consult wait <consultId>
+
+# 取一席的完整原文写进文件
+npm run cli -- consult show <consultId> --seat kimi --out kimi.md
 ```
 
 **状态两维独立**：每席 `runState`（transcript 真值：pending/running/completed/
@@ -542,8 +548,8 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 工具永不输出"一致/分歧"类结论；③ malformed 零自动重发——格式不合格只是观察
 事实，WAO 绝不替 Lead 重问。
 
-**组记录**：每次会审在 `<项目根>/.wao/runs/consults/<consultId>.json` 落一份
-组记录（席位-runId 映射 = 意见-决策回链锚点，供 decisions/declare 引用）。
+**组记录**：每次会审扇出后即在 `<项目根>/.wao/runs/consults/<consultId>.json` 落一份
+组记录（席位-runId 映射 = 意见-决策回链锚点，供 decisions/declare 引用），收集结束后覆盖为完整观察。
 组记录不写 `runs/`（防 metrics 聚合双计）、不写认证台账、不产生任何 delivery
 事件；席位子 run 本身是普通只读 run（`readOnly` 声明 + 强制隔离），回复正文的
 唯一权威在各 run transcript，经 runId 回链。呈现尾部附独立性三块砖事实表
@@ -553,18 +559,16 @@ wrapper 形取 `provider.baseUrl`），不做族系归类判断（判断权在 L
 独立性 r1 如实显示"未提供"。`--wait-timeout` 总预算默认 600000ms、范围同
 `runs wait`。
 
-**迟到收取 SOP（kimi 诊断会审 2026-10-10，opus+sol）**：kimi-web 席位的回合
-普遍长于会审预算（当日实录 8-67 分钟，自我升格的席位最长）——`budgetExpired`
-或空回执**不等于零输出**，禁止据此误诊。正确姿势：保留 `consultId`/席位
-runId → 对该席 `runs wait --run-id`（或查 serve 日志 `~/.kimi-code/server/events/`
-确认 `turn.started`）→ 终态后重调 `run_consult {consultId}` 或 `consult show`
-（迟到读取按当前转录重新推导，零派发）。若要求窗口内交付，在任务书里限制
-工作量（不跑测试/限命令数）——代价是损失席位自查深度，取舍归 Lead。每席
-prompt 尾部始终带**席位级固定会审合同**（禁实现/禁建文件/禁派发——裸车道
-席位同样收到；2026-10-10 起生效）。**只读席位违规自动判 FAIL（决定 0055）**：
-席位 transcript 出现 `file_written` 事件即该席意见判 FAIL（`readOnlyViolation`
-字段，记录与 `consult show` 可见）；不改写席位 run 的自然终态；未上报写入
-（如 shell 重定向）不计数——worktree 隔离仍是兜底。
+**席位比预算慢时**：等待预算最长 10 分钟，席位常常更久（kimi 车道尤其）。预算到期只是
+不再等，席位照跑——`budgetExpired` 或空回执**不等于零输出**。扇出一完成，`consult run`
+就在 stderr 报出 `consultId` 与各席 runId：`consult wait <consultId>` 接着等（各席到终态
+或窗口到期即返回，可反复调用），`consult show <consultId>`（MCP：`run_consult {consultId}`）
+按当前转录重新推导，零派发。要求窗口内交付，就在任务书里限制工作量（不跑测试、限命令
+数），代价是席位自查深度，取舍归 Lead。每席 prompt 尾部始终带**席位级固定会审合同**
+（禁实现、禁建文件、禁派发）。**只读席位违规自动判 FAIL**：席位 transcript 出现
+`file_written` 事件即该席意见判 FAIL（`readOnlyViolation` 字段，记录与 `consult show`
+可见）；不改写席位 run 的自然终态；未上报的写入（如 shell 重定向）不计数——worktree
+隔离仍是兜底。
 
 ### 场景 4e：审计席测试协议（WAO_ALLOW_NESTED_DISPATCH 命令级授权，TD-246 / F-①）
 
@@ -1145,15 +1149,15 @@ runner 以 requested → claimed → delivered/delivery_failed 的 durable 事�
 
 ### MCP `run_consult`（多席只读会审，M13-r2 / 决定 0039）
 
-`run_consult` 把"召集多席只读咨询"产品化为一个动作：**机械扇出 + 收集 + council-diff 并列呈现**——不做语义合成、不自动重发、零截断（0039 契约 v0.2 三不变式不放松）。单工具双模式：
+`run_consult` 把"召集多席只读咨询"产品化为一个动作：**机械扇出 + 收集 + council-diff 并列呈现**——不做语义合成、不自动重发、零截断。单工具双模式：
 
-- **创建模式** `{brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}`：`brief` 是**内联文本**（编号问题 Q1..Qn + 输出格式契约）——MCP 面不接受文件路径（与 `run_dispatch` 的 prompt 同纪律）；`perspectives` 同理内联（每席 `{agentId, text}`，0039：只写"答题姿势"，禁止列期望结论）。扇出走 `src/application/consultService.js` 现有逻辑：每席一个 **readOnly 子 run**（席位 prompt = brief 逐字节 + 该席视角尾巴）。服务端有界等待 `waitMs`：**闭集 0..600000，默认 270000**——`0` 合法（扇出后立即取当下观察快照）；到期 = **观察截止**（席位照跑、状态如实 running、`budgetExpired:true`），永不杀进程、永不重发（同 `run_wait`/`run_await_result` 到期语义）。**返回机械回执（决定 0051；TD-241 C3 截断实证后 MCP 面收窄）**：`view:"receipt"`——`consultId`/`recordPath` + 每席 `{runId, runState, formatState, chars, pages, textFinal}`（**零正文、零摘要、零预览**；视角全文与组记录在 recordPath）+ `fieldDiff`/`fieldValues` 闭集标记 + 三块砖独立性事实（registry 原始字段直读）+ 席位-runId 回链；回执帽 8KiB（成立边界与正文无关性见决定 0051 / 测试 MRC-F1）。`fields` 闭集声明字段（`{"Q1":["A","B"]}`）只产生"字段值不同"标记，**永不出一致/分歧结论**。席位 malformed（纯散文）= 观察事实（`formatState:unstructured`），零惩罚、零重发。malformed/缺席/派发失败/到期任一混合都组装**降级视图**（部分成功），不中断其余席位。
-- **读取模式** `{consultId}`：从组记录（`.wao/runs/consults/<consultId>.json`，与 CLI 同一落点）重渲染**同一回执形状**，**零派发**——读取路径不触碰 dispatch 通道（MCP 层不变式，测试钉住）；runState/formatState 按当前 transcript 真值重导出。
-- **按席分页** `{consultId, seat, page?}`（决定 0051）：返回该席最终正文**单页**（`view:"seatPage"`；`page` 默认 1）——每整页响应 ≤12KiB（**序列化 UTF-8 字节，含外壳与转义**）；行边界优先切页、单行超帽按码点硬切（不拆代理对）；**各页按序拼接逐字节等于该席最终正文**；每页携带全文 `textSha256` 版本锚（跨页不一致=正文在读取间隙变化，从第 1 页重读，不跨版本拼接）；`textFinal:false`（非终态席）标记分页边界会漂移。CLI `wao consult show` 仍是**全量渲染**（同一重渲染内核；0051 只是 MCP 面加投影层，0039 不变式作用域澄清见决定 0051）。
+- **创建模式** `{brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}`：`brief` 是**内联文本**（编号问题 Q1..Qn + 输出格式契约）——MCP 面不接受文件路径；`perspectives` 同理内联（每席 `{agentId, text}`，0039：只写"答题姿势"，禁止列期望结论）。扇出走 `src/application/consultService.js` 现有逻辑：每席一个 **readOnly 子 run**（席位 prompt = brief 逐字节 + 该席视角尾巴）。服务端有界等待 `waitMs`：**闭集 0..600000，默认 270000**——`0` 合法（扇出后立即取当下观察快照）；到期 = **观察截止**（席位照跑、状态如实 running、`budgetExpired:true`），永不杀进程、永不重发。**返回机械回执**：`view:"receipt"`——`consultId`/`recordPath` + 每席 `{runId, runState, formatState, chars, pages, textFinal}`（**零正文、零摘要、零预览**；视角全文与组记录在 recordPath）+ `fieldDiff`/`fieldValues` 闭集标记 + 三块砖独立性事实（registry 原始字段直读）+ 席位-runId 回链；回执帽 8KiB。`fields` 闭集声明字段（`{"Q1":["A","B"]}`）只产生"字段值不同"标记，**永不出一致/分歧结论**。席位 malformed（纯散文）= 观察事实（`formatState:unstructured`），零惩罚、零重发。malformed/缺席/派发失败/到期任一混合都组装**降级视图**（部分成功），不中断其余席位。
+- **读取模式** `{consultId}`：从组记录（绑定工作区下的 `.wao/runs/consults/<consultId>.json`，与 CLI `--cwd <工作区>` 同一落点；扇出后即可读）重渲染**同一回执形状**，**零派发**——读取路径不触碰 dispatch 通道（MCP 层不变式，测试钉住）；runState/formatState 按当前 transcript 真值重导出。
+- **按席分页** `{consultId, seat, page?}`：返回该席最终正文**单页**（`view:"seatPage"`；`page` 默认 1）——每整页响应 ≤12KiB（**序列化 UTF-8 字节，含外壳与转义**）；行边界优先切页、单行超帽按码点硬切（不拆代理对）；**各页按序拼接逐字节等于该席最终正文**；每页携带全文 `textSha256` 版本锚（跨页不一致=正文在读取间隙变化，从第 1 页重读，不跨版本拼接）；`textFinal:false`（非终态席）标记分页边界会漂移。
 
-输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席**指名**拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。一切拒绝发生在任何派发之前（派发计数为 0）。
+输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席**指名**拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。创建模式要求工作区已绑定（与 `run_dispatch` 同一权威），未绑定即拒；席位的工作目录是绑定的工作区，不取服务进程的当前目录。未绑定、也没有显式给定记录目录时，两种模式都拒绝。以上输入拒绝都发生在任何派发之前（派发计数为 0）。之后的失败只回固定文案：创建模式是 `…before any seat was dispatched` 或 `…after seats were dispatched`（席位 run 可能在跑，用 `runs_list` 找）；读取模式区分找不到记录与记录在但渲染失败。
 
-**与 CLI 的对应关系**：`wao consult run <briefFile> --seats a,b …`（brief 走文件、`--wait-timeout` 走 run_wait 域 180000..600000 默认 600000）与创建模式同 service；`wao consult show <consultId>` 与读取模式同一重渲染内核但**保持全量渲染**（0051：CLI 面不收窄）。组记录、席位只读子 run、`council-diff` 文本渲染的进一步语义见 §场景 4d；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。CLI/面差异：MCP 的 brief/perspectives 恒为内联文本；MCP 的 `waitMs` 闭集是 0..600000（CLI `--wait-timeout` 下限 180000）；MCP 返回机械回执+按席分页、CLI 全量（0051）。
+**与 CLI 的对应关系**：`wao consult run <briefFile> --seats a,b …`（brief 走文件、`--wait-timeout` 走 run_wait 域 180000..600000 默认 600000）与创建模式同 service；`wao consult show <consultId>` 与读取模式同一重渲染内核但**保持全量渲染**（0051：CLI 面不收窄）。组记录、席位只读子 run、`council-diff` 文本渲染的进一步语义见 §场景 4d；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。
 
 `run_consult` 是 **advisory 动作工具**（会派出真实只读子 run 并写组记录），不是观察工具——不进 `availableDrilldowns`/`semanticNotes` 目录；扇出成功 ≠ 验收成功（0039 边界：判断权在 Lead）。
 
@@ -1284,7 +1288,7 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 
 - `available`（最后一条 assistant 文本 ≤4000 字符）→ stdout 恰为**消毒后**的最终 assistant 文本（secret redaction + C0/C1/DEL 清洗之后，不承诺逐字节等于原文），exit 0；
 - `empty`（无 assistant 文本）→ 固定标记 `[final: no assistant message]`，exit 0；
-- `too_large`（最后一条 >4000 字符）→ 固定指引 `final message exceeds bounded projection; re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)`（不给部分文本、不给 cursor；`<runId>` 是占位描述，不插值真实 runId——指引明确要求去掉 `--final` 重跑才能拿到 JSON 全量，并注明 full 模式的分块拼接与消息边界语义（TD-119），不再让长消息消费者误以为指引是死路），exit 0。
+- `too_large`（最后一条 >4000 字符）→ stdout 是一行固定指引（不给部分文本、不给 cursor），exit 0。加 `--out FILE` 把最终回答写进文件：写的是脱敏与控制字符清理之后的完整文本，单条消息不超过一百万字符（超过则报固定文案、不写文件）；或去掉 `--final`，用 `--format json` 分页读（同一条消息的切片首尾相接，`truncated:false` 的切片是这条消息的末尾，跟着 `nextCursor` 翻页）。
 
 `--final` 是布尔 flag（不接受值），与 `--cursor` 互斥（沿用 compact 的既有互斥拒绝，非零退出）；`--final` 与 `--format json`/`--mode` 同用时由 `--final` 的四态渲染接管输出。成功调用与 collect 一致追加恰好一条 `messages.collected` 审计事件（`--final` 不豁免——collect 本就非只读）；任何输入/投影失败零追加。
 

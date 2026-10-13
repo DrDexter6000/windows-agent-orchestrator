@@ -1043,7 +1043,16 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
 // CLI/r1 policy injected as the service's budgetFloorMs default, NOT this face's
 // domain). Expiry = observation cutoff ONLY: seats keep running, states stay
 // truthful (running/budgetExpired), never killed, never re-dispatched.
-const RUN_CONSULT_ERROR_TEXT = "run_consult failed";
+const RUN_CONSULT_ERROR_TEXT = "run_consult failed before any seat was dispatched";
+const RUN_CONSULT_READ_ERROR_TEXT =
+  "run_consult read failed: no readable consult record with this consultId — records live in " +
+  "<bound workspace>/.wao/runs/consults; check workspace_status and the id";
+const RUN_CONSULT_RENDER_ERROR_TEXT =
+  "run_consult read failed: the consult record was found, but rendering it failed — " +
+  "read the seats directly: run_collect with each seat runId (runs_list shows them)";
+const RUN_CONSULT_ERROR_AFTER_DISPATCH_TEXT =
+  "run_consult failed after seats were dispatched: seat runs may be running — find them with runs_list; " +
+  "the consult record may not have been written";
 const RUN_CONSULT_MODE_TEXT =
   "run_consult refused: exactly one mode — consultId (read, zero dispatch) or " +
   "brief+seats (create); the create fields and consultId are mutually exclusive.";
@@ -1112,6 +1121,12 @@ const RUN_CONSULT_RECEIPT_SEAT = z.object({
   formatState: RUN_CONSULT_FORMAT_STATES,
   budgetExpired: z.boolean(),
   dispatchError: z.string().optional(),
+  // 只读席位写了文件：该席意见判 FAIL。服务层会带出这个字段，回执必须认得它，
+  // 否则带违规席位的会审在本面一律读取失败。
+  readOnlyViolation: z.object({
+    verdict: z.literal("FAIL"),
+    fileWrittenCount: z.number().int().positive(),
+  }).strict().optional(),
   // 0045 W3d（独立性三枚举）：读/写两路径均携带；缺事实=unknown/null。
   // backend/provider/perspectiveSnippet 不在此（回执去重/瘦身——bricks.
   // runtimeFacts 与 recordPath 已分别携带；视角全文是回执帽主要破帽项）。
@@ -3575,9 +3590,9 @@ export function createWaoMcpServer({
   // the real read-only service; threaded for transport tests.
   runDispatchContractCheckFn,
   // M13-r2: injectable council-consult service (create mode; read mode re-renders
-  // from the group record with ZERO dispatch). consultsDir mirrors the CLI default
-  // anchor .wao/runs/consults resolved against the process cwd — exactly how the
-  // default runDir "runs" resolves — so CLI and MCP agree on the record location.
+  // from the group record with ZERO dispatch). consultsDir is a test seam: when it
+  // is not given, records live in <bound workspace>/.wao/runs/consults — the same
+  // place the CLI uses with --cwd <workspace> — and an unbound server refuses.
   runConsultFn,
   consultsDir,
   // M12-18: injectable bounded in-memory run-transcript cache. Defaults to a
@@ -3727,7 +3742,6 @@ export function createWaoMcpServer({
   // (the SAME injectable dispatchRunFn seam every dispatch-bearing tool uses);
   // the READ mode below never threads it — zero dispatch is structural there.
   const consultService = runConsultFn ?? runConsult;
-  const consultRecordsDir = consultsDir ?? ".wao/runs/consults";
 
   // M12-7: backend capability resolver for the continuation service's
   // supportsSessionReuse gate (and M12-16 correctable). 2026-10-04 drift fix:
@@ -4723,13 +4737,33 @@ export function createWaoMcpServer({
       // branch never touches consultService/dispatcher (invariant, pinned by
       // test). CLI `consult show` keeps the FULL render via the same kernel;
       // this MCP face projects it (0051: receipt, or one seat page).
+      // 会审记录与席位工作目录以绑定的 workspace 为准（与 run_dispatch 同一权威），
+      // 不取服务进程的当前目录——宿主从哪里拉起服务进程不该决定会审落在哪里。
+      let consultBinding = { bound: false };
+      try {
+        consultBinding = await resolveWorkspaceBinding();
+      } catch {
+        consultBinding = { bound: false };
+      }
+      // 没有绑定工作区、也没有显式给定记录目录：两种模式都拒绝，不退回进程当前目录。
+      if (!consultBinding.bound && consultsDir === undefined) {
+        return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+      }
+      const recordsDir = consultsDir ?? join(consultBinding.root, ".wao", "runs", "consults");
+
       if (readMode) {
+        // 找不到 / 读不了记录，与记录读到了但重渲染或投影失败，是两回事，分开报。
+        let record;
         try {
-          const record = await loadConsultRecord({ consultId: input.consultId, consultsDir: consultRecordsDir });
+          record = await loadConsultRecord({ consultId: input.consultId, consultsDir: recordsDir });
+        } catch {
+          return { isError: true, content: [{ type: "text", text: RUN_CONSULT_READ_ERROR_TEXT }] };
+        }
+        try {
           const result = await rerenderConsultFromRecord({
             record,
             runDir,
-            consultsDir: consultRecordsDir,
+            consultsDir: recordsDir,
             env: process.env,
           });
           if (input.seat !== undefined) {
@@ -4798,7 +4832,7 @@ export function createWaoMcpServer({
         } catch {
           return {
             isError: true,
-            content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }],
+            content: [{ type: "text", text: RUN_CONSULT_RENDER_ERROR_TEXT }],
           };
         }
       }
@@ -4806,6 +4840,9 @@ export function createWaoMcpServer({
       // ---- Create mode: closed-set input checks BEFORE any dispatch. Seat ids
       // are model-supplied bounded strings (safe to name back — they are not
       // secrets); every refusal below leaves the dispatch count at 0.
+      if (!consultBinding.bound) {
+        return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+      }
       const seatIds = input.seats;
       const duplicates = [...new Set(seatIds.filter((id, i) => seatIds.indexOf(id) !== i))];
       if (duplicates.length > 0) {
@@ -4891,6 +4928,14 @@ export function createWaoMcpServer({
       const perspectivesBySeat = new Map(
         (input.perspectives ?? []).map((p) => [p.agentId, p.text]),
       );
+      // 失败时要能说清席位派出去了没有：数派发通道真正交回 runId 的次数（调用了但
+      // 抛错、或没交回 runId 的不算）。
+      let seatsDispatched = 0;
+      const countingDispatcher = async (request) => {
+        const dispatched = await dispatcher(request);
+        if (typeof dispatched?.runId === "string" && dispatched.runId.length > 0) seatsDispatched += 1;
+        return dispatched;
+      };
       try {
         const result = await consultService({
           briefText: input.brief,
@@ -4909,9 +4954,10 @@ export function createWaoMcpServer({
           budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
           registryPath,
           runDir,
-          consultsDir: consultRecordsDir,
+          consultsDir: recordsDir,
+          cwd: consultBinding.root,
           env: process.env,
-          dispatchFn: dispatcher,
+          dispatchFn: countingDispatcher,
         });
         // 0051：create 成功 → 机械回执（正文零携带；分页经读模式按席取）。
         const parsed = RUN_CONSULT_OUTPUT.parse(projectConsultReceipt(result, {
@@ -4923,11 +4969,12 @@ export function createWaoMcpServer({
         };
       } catch {
         // Any service/output failure (including an oversized or malformed
-        // result object) collapses to the fixed safe text — never an
-        // unstructured error, never dynamic content.
+        // result object) collapses to one of two fixed safe texts — never an
+        // unstructured error, never dynamic content. Which one says whether
+        // seat runs may already exist.
         return {
           isError: true,
-          content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }],
+          content: [{ type: "text", text: seatsDispatched === 0 ? RUN_CONSULT_ERROR_TEXT : RUN_CONSULT_ERROR_AFTER_DISPATCH_TEXT }],
         };
       }
     },

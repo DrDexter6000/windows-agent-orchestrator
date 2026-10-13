@@ -26,7 +26,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
@@ -37,9 +37,45 @@ import {
   deriveSeatStates,
   seatRuntimeFacts,
   runConsult,
+  waitForConsult,
+  rerenderConsultFromRecord,
+  loadConsultRecord,
   generateConsultId,
   isValidConsultId,
 } from "../../src/application/consultService.js";
+
+test("会审还在等待预算之内被读取时，没到终态的席位不标预算到期；预算过了才标", async () => {
+  const record = {
+    consultId: "consult_20261013000000000within",
+    createdAt: "2026-10-13T00:00:00.000Z",
+    budgetMs: 600000,
+    questions: [{ q: 1, heading: "Q1" }],
+    seats: [
+      { agentId: "seat_a", runId: "run_stub_seat_a", runState: "pending", formatState: "empty" },
+      { agentId: "seat_b", runId: "run_stub_seat_b", runState: "pending", formatState: "empty" },
+    ],
+    fieldDiff: [],
+  };
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { state: "running" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { state: "completed", finalText: "Q1: OK\n" })],
+  ]));
+  const created = Date.parse(record.createdAt);
+  // 转录读取是桩，这两个目录不会被真的读写；仍用临时目录下的绝对路径，不指向仓库。
+  const base = join(tmpdir(), "wao-consult-within-budget");
+  const dirs = { runDir: join(base, "r"), consultsDir: join(base, "c") };
+  const flags = async (nowFn) => {
+    const result = await rerenderConsultFromRecord({ record, ...dirs, readTranscriptFn, env: {}, nowFn });
+    return Object.fromEntries(result.seats.map((seat) => [seat.agentId, seat.budgetExpired]));
+  };
+  assert.deepEqual(await flags(() => created + 60000), { seat_a: false, seat_b: false });
+  assert.deepEqual(await flags(() => created + 600001), { seat_a: true, seat_b: false });
+  // 旧记录没有 createdAt / budgetMs：按已到期处理。
+  const legacy = await rerenderConsultFromRecord({
+    record: { ...record, createdAt: undefined, budgetMs: undefined }, ...dirs, readTranscriptFn, env: {},
+  });
+  assert.equal(legacy.seats.find((seat) => seat.agentId === "seat_a").budgetExpired, true);
+});
 import { consultCommand, renderCouncilDiffText } from "../../src/commands/consult.js";
 
 // ===== Helpers =====
@@ -143,6 +179,18 @@ function baseInput(overrides = {}) {
   };
 }
 
+/** 真实转录文件（waitForConsult / consult show 走真实 resolveTranscriptPath + readTranscript）。 */
+function writeRealTranscript(runDir, runId, events) {
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, `${runId}.jsonl`), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+}
+
+/** 真实组记录文件（loadConsultRecord 经真实 readFile 读取）。 */
+function writeConsultRecord(consultsDir, record) {
+  mkdirSync(consultsDir, { recursive: true });
+  writeFileSync(join(consultsDir, `${record.consultId}.json`), JSON.stringify(record), "utf8");
+}
+
 // ===== INV-1：零信息损失 =====
 
 test("INV-1a: attributeReply 三块拼接逐字节等于原文（全结构化）", () => {
@@ -244,6 +292,33 @@ test("INV-2d: 输出永不携带结论词；比对零改动输入内容（标记
   assert.deepEqual(before, beforeSnapshot, "比对不得改动归组内容");
   // 标记只是提示：有/无 declaredFields 两个世界里的归组文本完全相同。
   assert.deepEqual(before.seat_a.ordered[0].text, "Q1: 采纳 A\n理由甲。\n");
+});
+
+test("INV-2e: 声明值按整词匹配——MERGE 不误领 MERGE_AFTER_FIXES 前缀；PASS 不命中 PASSED；中文标点紧邻算边界；长词先出现不遮蔽后文整词", () => {
+  // 声明 ["MERGE","MERGE_AFTER_FIXES","REJECT"]、正文写 MERGE_AFTER_FIXES：
+  // 取值必须是 MERGE_AFTER_FIXES（整词命中），两席同值 → fieldDiff 不含 Q1。
+  const both = compareFields(
+    {
+      seat_a: attrOf("Q1: MERGE_AFTER_FIXES\n理由甲。\n"),
+      seat_b: attrOf("Q1: MERGE_AFTER_FIXES\n理由乙。\n"),
+    },
+    { Q1: ["MERGE", "MERGE_AFTER_FIXES", "REJECT"] },
+  );
+  assert.equal(both.fieldValues.Q1.seat_a, "MERGE_AFTER_FIXES");
+  assert.equal(both.fieldValues.Q1.seat_b, "MERGE_AFTER_FIXES");
+  assert.deepEqual(both.fieldDiff, [], "两席同值 → 不标");
+  // 后缀也是词边界违例：声明 PASS 不命中 PASSED。
+  const pass = compareFields({ a: attrOf("Q1: PASSED\n") }, { Q1: ["PASS"] });
+  assert.equal(pass.fieldValues.Q1.a, null);
+  // 中文标点紧邻（"："与"。"）都是词边界——Q1：PASS。 取到 PASS。
+  const cn = compareFields({ a: attrOf("Q1：PASS。\n") }, { Q1: ["PASS"] });
+  assert.equal(cn.fieldValues.Q1.a, "PASS");
+  // 声明值先作为更长单词的一部分出现（非整词）、之后才作为整词出现 → 仍取得到。
+  const later = compareFields(
+    { a: attrOf("Q1: 首先排除 MERGE_AFTER_FIXES，最终建议 MERGE。\n") },
+    { Q1: ["MERGE"] },
+  );
+  assert.equal(later.fieldValues.Q1.a, "MERGE");
 });
 
 // ===== INV-3：malformed 零自动重发 =====
@@ -406,7 +481,12 @@ test("FLOW-3: 组记录落 consultsDir 单 JSON（席位-runId 映射 + fieldDif
       writeFileFn: async (p, data) => { writePaths.push(p); mkdirSync(consultsDir, { recursive: true }); writeFileSync(p, data, "utf8"); },
       mkdirFn: async () => {},
     }));
-    assert.equal(writePaths.length, 1);
+    // 组记录写两次、同一个文件：扇出后先落席位-runId 映射，收集结束再覆盖成完整观察。
+    assert.equal(writePaths.length, 2);
+    // 第二次不就地覆盖：写同目录的临时文件，再改名换上去（读者不会读到半截内容）。
+    assert.ok(writePaths[1].startsWith(`${writePaths[0]}.`) && writePaths[1].endsWith(".tmp"),
+      "收尾写的是记录旁边的临时文件");
+    assert.deepEqual(readdirSync(consultsDir), [`${fixedId}.json`], "改名之后目录里只剩记录本身");
     assert.equal(basename(writePaths[0]), `${fixedId}.json`);
     assert.ok(writePaths[0].startsWith(consultsDir), "组记录只写 consultsDir");
     assert.ok(!writePaths[0].startsWith(runDir), "组记录绝不写 runs/（防 metrics 双计）");
@@ -489,6 +569,171 @@ test("FLOW-6: budgetMs 范围校验（同 run_wait 域），越界拒绝", async
     () => runConsult(baseInput({ budgetMs: 600001, writeFileFn: async () => {}, mkdirFn: async () => {} })),
     /budgetMs must be an integer/,
   );
+});
+
+test("FLOW-7: 扇出后立刻落组记录并回调 onFanOut——回调时记录已在盘上（pending/dispatch_failed 映射），收集后同路径覆盖为完整观察", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-fanout-"));
+  try {
+    const consultsDir = join(dir, "consults");
+    const runDir = join(dir, "runs");
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnPartial = async (input) => {
+      if (input.agentId === "seat_b") throw new Error("credential missing: X_KEY");
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const fixedId = "consult_20261002120000000abc123";
+    const fanOutCalls = [];
+    let earlyRecord = null;
+    const result = await runConsult(baseInput({
+      runDir,
+      consultsDir,
+      dispatchFn: dispatchFnPartial,
+      readTranscriptFn,
+      idFn: () => fixedId,
+      onFanOut: (info) => {
+        fanOutCalls.push(info);
+        // 回调发生时组记录文件已经在盘上（早期记录：席位-runId 映射 + 扇出时刻观察）。
+        earlyRecord = JSON.parse(readFileSync(info.recordPath, "utf8"));
+      },
+    }));
+    assert.equal(fanOutCalls.length, 1, "onFanOut 恰被调用一次");
+    const info = fanOutCalls[0];
+    assert.equal(info.consultId, fixedId);
+    assert.equal(info.recordPath, join(consultsDir, `${fixedId}.json`));
+    assert.deepEqual(info.seats, [
+      { agentId: "seat_a", runId: "run_stub_seat_a" },
+      { agentId: "seat_b", runId: null },
+    ]);
+    // 早期记录：席位到 runId 的映射在场；成功席 pending、派发失败席 dispatch_failed + runId null。
+    const earlyMapping = Object.fromEntries(earlyRecord.seats.map((s) => [s.agentId, s.runId]));
+    assert.equal(earlyMapping.seat_a, "run_stub_seat_a");
+    assert.equal(earlyMapping.seat_b, null);
+    assert.equal(earlyRecord.seats.find((s) => s.agentId === "seat_a").runState, "pending");
+    const earlyB = earlyRecord.seats.find((s) => s.agentId === "seat_b");
+    assert.equal(earlyB.runState, "dispatch_failed");
+    assert.equal(earlyB.runId, null);
+    // 收集结束后：同一路径被完整观察覆盖。
+    assert.equal(result.recordPath, info.recordPath);
+    const finalRecord = JSON.parse(readFileSync(info.recordPath, "utf8"));
+    assert.equal(finalRecord.seats.find((s) => s.agentId === "seat_a").runState, "completed");
+    assert.equal(finalRecord.seats.find((s) => s.agentId === "seat_b").runState, "dispatch_failed");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== waitForConsult：等一场已扇出的会审（各席终态或观察窗到期）=====
+
+test("WAIT-1: 各席转录都到终态 → allTerminal=true", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-wait1-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, "consults");
+    writeRealTranscript(runDir, "run_wait_a", makeTranscript("run_wait_a", { finalText: "Q1: A\n" }));
+    writeRealTranscript(runDir, "run_wait_b", makeTranscript("run_wait_b", { state: "failed" }));
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, {
+      consultId,
+      seats: [
+        { agentId: "seat_a", runId: "run_wait_a", runState: "running" },
+        { agentId: "seat_b", runId: "run_wait_b", runState: "running" },
+      ],
+    });
+    const clock = makeFakeClock();
+    const waited = await waitForConsult({
+      consultId,
+      consultsDir,
+      runDir,
+      nowFn: clock.nowFn,
+      sleepFn: clock.sleepFn,
+    });
+    assert.equal(waited.allTerminal, true, "两席转录均已终态");
+    assert.equal(waited.record.consultId, consultId);
+    assert.equal(waited.windowMs, 270000, "缺省观察窗与 runs wait 相同");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("WAIT-2: 观察窗到期仍有席位在跑 → allTerminal=false（注入时钟推进，不真睡）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-wait2-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, "consults");
+    writeRealTranscript(runDir, "run_wait_c", makeTranscript("run_wait_c", { state: "running", finalText: "Q1: 还在想\n" }));
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, {
+      consultId,
+      seats: [{ agentId: "seat_c", runId: "run_wait_c", runState: "running" }],
+    });
+    const clock = makeFakeClock();
+    const waited = await waitForConsult({
+      consultId,
+      consultsDir,
+      runDir,
+      waitMs: 180000,
+      pollIntervalMs: 60000,
+      nowFn: clock.nowFn,
+      sleepFn: clock.sleepFn,
+    });
+    assert.equal(waited.allTerminal, false, "窗口到期席位仍在跑——如实 false");
+    assert.equal(waited.windowMs, 180000);
+    assert.equal(waited.waitedMs, 180000, "观察窗完整耗尽");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("WAIT-3: waitMs 超出 [180000, 600000] 抛错", async () => {
+  const base = {
+    consultId: "consult_20261002120000000abc123",
+    consultsDir: "C:/stub/consults",
+    runDir: "C:/stub/runs",
+  };
+  await assert.rejects(
+    () => waitForConsult({ ...base, waitMs: 179999 }),
+    /waitMs must be an integer/,
+  );
+  await assert.rejects(
+    () => waitForConsult({ ...base, waitMs: 600001 }),
+    /waitMs must be an integer/,
+  );
+});
+
+test("WAIT-4: runId=null 的席位不参与等待（只等真实 run，不为其读转录）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-wait4-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, "consults");
+    writeRealTranscript(runDir, "run_wait_d", makeTranscript("run_wait_d", { finalText: "Q1: A\n" }));
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, {
+      consultId,
+      seats: [
+        { agentId: "seat_a", runId: null, runState: "dispatch_failed" },
+        { agentId: "seat_b", runId: "run_wait_d", runState: "running" },
+      ],
+    });
+    const { readTranscriptFn, reads } = makeTranscriptStub(new Map([
+      ["run_wait_d", makeTranscript("run_wait_d", { finalText: "Q1: A\n" })],
+    ]));
+    const clock = makeFakeClock();
+    const waited = await waitForConsult({
+      consultId,
+      consultsDir,
+      runDir,
+      readTranscriptFn,
+      nowFn: clock.nowFn,
+      sleepFn: clock.sleepFn,
+    });
+    assert.equal(waited.allTerminal, true, "只有真实 run 参与等待且已终态");
+    assert.deepEqual(reads, ["run_wait_d"], "不为 runId=null 的席位读转录");
+  } finally {
+    cleanupDir(dir);
+  }
 });
 
 // ===== 三块砖①厂族：registry 原始字段直读（R9——r1.1 必改①）=====
@@ -742,6 +987,138 @@ test("CLI-4: consult show 从组记录重渲染（只读；问题原序 + 席位
   }
 });
 
+test("CLI-5: 无子命令与 --help 打印用法（含 consult wait）；未知子命令抛错且错误信息带用法", async () => {
+  const lines = [];
+  const origLog = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try {
+    await consultCommand([], {});
+    await consultCommand(["--help"], {});
+  } finally {
+    console.log = origLog;
+  }
+  assert.equal(lines.length, 2, "两次调用各打印一次用法");
+  for (const text of lines) {
+    assert.ok(text.includes("consult run"), "用法含 consult run");
+    assert.ok(text.includes("consult show"), "用法含 consult show");
+    assert.ok(text.includes("consult wait"), "用法含 consult wait");
+    assert.ok(text.includes("--seat"), "用法解释 --seat/--out");
+  }
+  await assert.rejects(
+    () => consultCommand(["frobnicate"], {}),
+    (err) => {
+      assert.match(err.message, /unknown subcommand "frobnicate"/);
+      assert.ok(err.message.includes("consult wait"), "错误信息附带用法（含 consult wait）");
+      return true;
+    },
+  );
+});
+
+test("CLI-6: consult show --seat --out 把该席完整最终文本（>4000 字符）原样写进文件；未知席点名现有席位；只给 --out 不给 --seat 抛错", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-seatout-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const longText = `Q1: 采纳 A\n${"席位完整原文，逐字节不截断。".repeat(600)}\n`;
+    assert.ok(longText.length > 4000, "测试前提：正文超过 4000 字符");
+    writeRealTranscript(runDir, "run_seat_out_a", makeTranscript("run_seat_out_a", { finalText: longText }));
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, {
+      consultId,
+      createdAt: "2026-10-02T12:00:00.000Z",
+      brief: { path: join(dir, "brief.md"), sha256: "ab".repeat(32) },
+      budgetMs: 600000,
+      elapsedMs: 100,
+      questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+      seats: [{ agentId: "seat_a", runId: "run_seat_out_a", runState: "completed", formatState: "structured" }],
+      fieldDiff: [],
+    });
+    const outFile = join(dir, "seat-a.txt");
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await consultCommand(
+        ["show", consultId, "--seat", "seat_a", "--out", outFile, "--cwd", dir, "--run-dir", runDir],
+        {},
+      );
+    } finally {
+      console.log = origLog;
+    }
+    assert.equal(readFileSync(outFile, "utf8"), longText, "文件=该席完整最终文本（零截断）");
+    assert.equal(lines.length, 1, "stdout 恰一行");
+    assert.ok(lines[0].includes(`): ${longText.length} chars written to `), "stdout 报字符数");
+    assert.ok(lines[0].includes(outFile), "stdout 报文件路径");
+    // --seat 给了不存在的席位 → 抛错并点名现有席位。
+    await assert.rejects(
+      () => consultCommand(["show", consultId, "--seat", "ghost", "--cwd", dir, "--run-dir", runDir], {}),
+      /seat "ghost" is not in this consult \(seats: seat_a\)/,
+    );
+    // 只给 --out 不给 --seat → 抛错。
+    await assert.rejects(
+      () => consultCommand(["show", consultId, "--out", join(dir, "x.txt"), "--cwd", dir, "--run-dir", runDir], {}),
+      /--out goes with --seat/,
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("CLI-7: consult wait 经 deps.waitForConsult 注入后被调用；--format json 输出带 wait.allTerminal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-waitcmd-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const consultId = "consult_20261002120000000abc123";
+    const record = {
+      consultId,
+      createdAt: "2026-10-02T12:00:00.000Z",
+      brief: { path: null, sha256: "ab".repeat(32) },
+      budgetMs: 600000,
+      elapsedMs: 100,
+      questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+      seats: [{ agentId: "seat_a", runId: null, runState: "dispatch_failed", formatState: "empty" }],
+      fieldDiff: [],
+    };
+    writeConsultRecord(consultsDir, record);
+    const seen = [];
+    const lines = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...a) => lines.push(a.join(" "));
+    console.error = () => {};
+    try {
+      await consultCommand(
+        ["wait", consultId, "--format", "json", "--cwd", dir, "--run-dir", runDir],
+        {},
+        {
+          waitForConsult: async (input) => {
+            seen.push(input);
+            return { record, allTerminal: false, waitedMs: 4321, windowMs: 600000 };
+          },
+          readTranscript: async () => [],
+        },
+      );
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    assert.equal(seen.length, 1, "deps.waitForConsult 恰被调用一次");
+    assert.equal(seen[0].consultId, consultId);
+    assert.equal(seen[0].consultsDir, consultsDir);
+    assert.equal(seen[0].runDir, runDir);
+    const parsed = JSON.parse(lines.join("\n"));
+    assert.deepEqual(
+      parsed.wait,
+      { allTerminal: false, waitedMs: 4321, windowMs: 600000 },
+      "json 输出携带 wait 块",
+    );
+    assert.equal(parsed.consultId, consultId);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 // 决定 0055（Owner 2026-10-10 批准）：只读席位违规自动判 FAIL。
 test("0055: 席位转录含 file_written → readOnlyViolation FAIL（不改写 runState）", async () => {
   const { dispatchFn } = makeDispatchStub();
@@ -762,4 +1139,82 @@ test("0055: 席位转录含 file_written → readOnlyViolation FAIL（不改写 
   assert.deepEqual(seatA.readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 3 }, "写入席位判 FAIL");
   assert.equal(seatA.runState, "completed", "runState 保持自然终态（不改写）");
   assert.equal(seatB.readOnlyViolation, undefined, "零写入席位无该字段");
+});
+
+// ===== 整词匹配的两个边角；组记录被替换时的读取 =====
+
+test("字段值：同一位置取最长的声明值；多个归组块时取第一个有命中的块", () => {
+  const hyphen = compareFields({ a: attributeReply("Q1: PASS-WITH-NOTES\n") }, { Q1: ["PASS", "PASS-WITH-NOTES"] });
+  assert.equal(hyphen.fieldValues.Q1.a, "PASS-WITH-NOTES", "连字符后缀不让较短的前缀抢先");
+  const reversed = compareFields({ a: attributeReply("Q1: PASS-WITH-NOTES\n") }, { Q1: ["PASS-WITH-NOTES", "PASS"] });
+  assert.equal(reversed.fieldValues.Q1.a, "PASS-WITH-NOTES", "与声明顺序无关");
+  const blocks = compareFields({ a: attributeReply("Q1:              PASS\nQ1: FAIL\n") }, { Q1: ["PASS", "FAIL"] });
+  assert.equal(blocks.fieldValues.Q1.a, "PASS", "后一块里更靠左的值不覆盖先出现的块");
+});
+
+test("loadConsultRecord：读到替换中的半截内容时重试；文件不存在不重试；一直解析不了才报错", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const good = JSON.stringify({ consultId, seats: [] });
+  const sequence = ["", "{\"consultId\":", good];
+  let reads = 0;
+  const record = await loadConsultRecord({
+    consultId, consultsDir: "consults", sleepFn: async () => {},
+    readFileFn: async () => sequence[reads++],
+  });
+  assert.equal(record.consultId, consultId);
+  assert.equal(reads, 3);
+
+  let missingReads = 0;
+  await assert.rejects(loadConsultRecord({
+    consultId, consultsDir: "consults", sleepFn: async () => {},
+    readFileFn: async () => { missingReads += 1; throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+  }), /ENOENT/);
+  assert.equal(missingReads, 1);
+
+  let badReads = 0;
+  await assert.rejects(loadConsultRecord({
+    consultId, consultsDir: "consults", sleepFn: async () => {},
+    readFileFn: async () => { badReads += 1; return "{not json"; },
+  }), /unreadable after 5 attempts/);
+  assert.equal(badReads, 5);
+});
+
+test("组记录收尾：改名换不上去时退回就地覆盖并清掉临时文件；读取重试的间隔是 100ms", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-rename-"));
+  try {
+    const consultsDir = join(dir, "consults");
+    const { dispatchFn } = makeDispatchStub();
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+      ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: A\n" })],
+    ]));
+    const fixedId = "consult_20261002120000000rename";
+    const removed = [];
+    await runConsult(baseInput({
+      briefPath: join(dir, "brief.md"),
+      dispatchFn,
+      readTranscriptFn,
+      consultsDir,
+      idFn: () => fixedId,
+      renameFn: async () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); },
+      rmFn: async (path) => { removed.push(path); rmSync(path, { force: true }); },
+    }));
+    assert.deepEqual(readdirSync(consultsDir), [`${fixedId}.json`], "临时文件被清掉，只剩记录");
+    assert.equal(removed.length, 1);
+    const record = JSON.parse(readFileSync(join(consultsDir, `${fixedId}.json`), "utf8"));
+    assert.equal(record.seats.every((seat) => seat.runState === "completed"), true, "记录是收尾后的完整观察，不是扇出时那份");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const sleeps = [];
+  const consultId = "consult_20261002120000000abc123";
+  const sequence = ["", JSON.stringify({ consultId, seats: [] })];
+  let reads = 0;
+  await loadConsultRecord({
+    consultId, consultsDir: join(tmpdir(), "wao-consult-retry-interval"),
+    sleepFn: async (ms) => { sleeps.push(ms); },
+    readFileFn: async () => sequence[reads++],
+  });
+  assert.deepEqual(sleeps, [100]);
 });

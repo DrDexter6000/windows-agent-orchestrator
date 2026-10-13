@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +32,7 @@ const FINAL_EMPTY_MARKER = "[final: no assistant message]";
 // 照抄的用户仍是死路（--final 接管输出，永远拿不到 JSON）。新文案指明去掉
 // --final 的完整命令形状（<runId> 是占位描述，绝不插值真实 runId）。
 const FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
+  "final message exceeds bounded projection; write it to a file: collect <runId> --final --out FILE - or re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -139,6 +139,194 @@ test("TD-112 守卫: collect --final --cursor 组合沿用 compact 既有互斥�
     assert.notEqual(r.status, 0, "--final 与 --cursor 互斥，非零退出");
     assert.match(r.stderr, /--final/, "拒绝信息点名 --final");
     assert.match(r.stderr, /--cursor/, "拒绝信息点名 --cursor");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== --out：把最终 assistant 消息完整写进文件（长短都写，零截断） =====
+
+test("TD-112 --out（too_large 正文跨多页）: 文件=完整文本（零截断），stdout 一行含字符数与路径，恰追加一条 messages.collected", () => {
+  const dir = makeTempDir("wao-final-out-big-");
+  try {
+    const text = "零截断长文。".repeat(5000); // 30000 字符，远超 4000，跨多页
+    assert.ok(text.length > 4000, "测试前提：正文远超 4000 字符");
+    writeTranscript(dir, "run_final_out_big", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text }] },
+      { type: "run.completed" },
+    ]);
+
+    const outFile = join(dir, "final.txt");
+    const r = runCollectFinal(dir, "run_final_out_big", ["--out", outFile]);
+    assert.equal(r.status, 0, `--out 是正常结果，exit 0（stderr: ${r.stderr}）`);
+    assert.equal(readFileSync(outFile, "utf8"), text, "文件内容 = 完整文本（逐页取回拼齐，零截断）");
+    assert.match(
+      r.stdout.trim(),
+      new RegExp(`^final message: ${text.length} chars written to .+$`),
+      "stdout 恰一行：字符数 + 文件路径",
+    );
+    assert.ok(r.stdout.trim().includes(outFile), "stdout 带文件路径");
+    // 一次成功调用仍然只追加一条 messages.collected（逐页取回不追加审计）。
+    const after = readFileSync(join(dir, "run_final_out_big.jsonl"), "utf8");
+    const collected = after.split(/\r?\n/).filter((l) => l.includes('"type":"messages.collected"'));
+    assert.equal(collected.length, 1, "恰一条 messages.collected");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-112 --out（available 短文本）: 文件 = 该文本（长短都写）", () => {
+  const dir = makeTempDir("wao-final-out-short-");
+  try {
+    writeTranscript(dir, "run_final_out_short", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "简短最终答复" }] },
+      { type: "run.completed" },
+    ]);
+
+    const outFile = join(dir, "final.txt");
+    const r = runCollectFinal(dir, "run_final_out_short", ["--out", outFile]);
+    assert.equal(r.status, 0, `exit 0（stderr: ${r.stderr}）`);
+    assert.equal(readFileSync(outFile, "utf8"), "简短最终答复", "短文本原样写文件");
+    assert.match(r.stdout.trim(), /^final message: 6 chars written to .+$/, "stdout 报字符数");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-112 --out（empty，无 assistant 文本）: 写出空文件并打印空标记", () => {
+  const dir = makeTempDir("wao-final-out-empty-");
+  try {
+    writeTranscript(dir, "run_final_out_empty", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "tool_use", tool: "Read", input: { file_path: "a.txt" } },
+      { type: "run.completed" },
+    ]);
+
+    const outFile = join(dir, "final.txt");
+    const r = runCollectFinal(dir, "run_final_out_empty", ["--out", outFile]);
+    assert.equal(r.status, 0, "empty 是合法结果，exit 0");
+    assert.equal(readFileSync(outFile, "utf8"), "", "空文件");
+    assert.equal(
+      r.stdout.trim(),
+      `${FINAL_EMPTY_MARKER} (empty file written to ${outFile})`,
+      "打印空标记 + 文件路径",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-112 守卫: 只给 --out 不给 --final 抛错（非零退出，点名两旗标）", () => {
+  const dir = makeTempDir("wao-final-outonly-");
+  try {
+    writeTranscript(dir, "run_final_outonly", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "run.submitted" },
+      { type: "run.completed" },
+    ]);
+
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "collect", "run_final_outonly", "--run-dir", dir, "--out", join(dir, "no.txt"),
+    ], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+      timeout: 60_000,
+    });
+    assert.notEqual(r.status, 0, "--out 必须与 --final 同现，非零退出");
+    assert.match(r.stderr, /--out goes with --final/, "拒绝信息说明 --out 伴随 --final");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("--out：单条消息超出分页可寻址范围（一百万字符）时报固定文案、不写文件、不追加审计事件", () => {
+  const dir = makeTempDir("wao-final-out-limit-");
+  try {
+    const text = "超出分页寻址范围的长文。".repeat(84100); // 约 100.9 万字符
+    assert.ok(text.length > 1_000_000, "测试前提：单条消息超过一百万字符");
+    writeTranscript(dir, "run_final_out_limit", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text }] },
+      { type: "run.completed" },
+    ]);
+    const outFile = join(dir, "final.txt");
+    const r = runCollectFinal(dir, "run_final_out_limit", ["--out", outFile]);
+    assert.notEqual(r.status, 0, "读不全就失败，不写出半截文件");
+    assert.match(r.stderr, /longer than 1,000,000 characters, the most this command reads — nothing was written/);
+    assert.equal(existsSync(outFile), false, "没有写出文件");
+    const after = readFileSync(join(dir, "run_final_out_limit.jsonl"), "utf8");
+    assert.equal(after.split(/\r?\n/).filter((l) => l.includes('"type":"messages.collected"')).length, 0,
+      "失败的调用零审计追加");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("--out：长度上限恰好是一百万字符——一百万整写得出，多一个字符就拒绝", () => {
+  const dir = makeTempDir("wao-final-out-edge-");
+  try {
+    const events = (text) => [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text }] },
+      { type: "run.completed" },
+    ];
+    const exact = "甲".repeat(1_000_000);
+    writeTranscript(dir, "run_final_out_exact", events(exact));
+    const exactFile = join(dir, "exact.txt");
+    const ok = runCollectFinal(dir, "run_final_out_exact", ["--out", exactFile]);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(readFileSync(exactFile, "utf8").length, 1_000_000);
+
+    writeTranscript(dir, "run_final_out_over", events(`${exact}乙`));
+    const overFile = join(dir, "over.txt");
+    const over = runCollectFinal(dir, "run_final_out_over", ["--out", overFile]);
+    assert.notEqual(over.status, 0);
+    assert.match(over.stderr, /longer than 1,000,000 characters/);
+    assert.equal(existsSync(overFile), false);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("--out：文件写不进去时非零退出、零审计追加；与 --format json 同用时不再提示 stdout 是四态文本", () => {
+  const dir = makeTempDir("wao-final-out-write-");
+  try {
+    writeTranscript(dir, "run_final_out_write", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "短答案" }] },
+      { type: "run.completed" },
+    ]);
+    const collected = () => readFileSync(join(dir, "run_final_out_write.jsonl"), "utf8")
+      .split(/\r?\n/).filter((l) => l.includes('"type":"messages.collected"')).length;
+    const bad = runCollectFinal(dir, "run_final_out_write", ["--out", join(dir, "no-such-dir", "final.txt")]);
+    assert.notEqual(bad.status, 0, "目标目录不存在，写不进去");
+    assert.equal(collected(), 0, "写文件失败的调用零审计追加");
+
+    const good = runCollectFinal(dir, "run_final_out_write", ["--out", join(dir, "final.txt"), "--format", "json"]);
+    assert.equal(good.status, 0, good.stderr);
+    assert.doesNotMatch(good.stderr, /four-state text/, "答案进了文件，不再提示 stdout 是四态文本");
+    assert.equal(collected(), 1);
   } finally {
     cleanupDir(dir);
   }

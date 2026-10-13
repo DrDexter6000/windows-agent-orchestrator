@@ -6,7 +6,8 @@
 //   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]...
 //            [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS]
 //            [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]
-//   consult show <consultId> [--format json|text] [--cwd DIR] [--run-dir DIR]
+//   consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]
+//   consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]
 //
 // 纯 CLI 适配：argv 解析、视角片段文件读取、console 渲染；数据逻辑全部委托
 // ../application/consultService.js。文本渲染 = council-diff 并列呈现（按 brief
@@ -16,14 +17,16 @@
 // 渲染零截断：text 视图逐行缩进展示每席全部归组文本；--format json 输出
 // 结构化全量（含每席完整原文）。
 
+import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import {
   runConsult,
   loadConsultRecord,
   rerenderConsultFromRecord,
+  waitForConsult,
 } from "../application/consultService.js";
 
 // 可重复旗标收集（--perspective/--fields 可出现多次；parseOptions 只留末值，
@@ -248,12 +251,37 @@ async function consultRunCommand(args, config, deps = {}) {
     consultsDir: resolveConsultsDir(options, config),
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: process.env,
+    // 扇出一完成就在 stderr 报出 consultId（stdout 留给最终结果）：等待预算到期
+    // 之前就能另起命令 `consult show` / `consult wait`。
+    onFanOut: ({ consultId, seats }) => {
+      // 提示里带上本次用到的 --cwd / --run-dir：照抄到另一个终端也能找到同一份记录。
+      const where = [
+        options.cwd ? ` --cwd ${JSON.stringify(options.cwd)}` : "",
+        options.runDir ? ` --run-dir ${JSON.stringify(options.runDir)}` : "",
+      ].join("");
+      console.error(`[consult] ${consultId} started — seats: ${seats.map((s) => `${s.agentId}=${s.runId ?? "dispatch_failed"}`).join(" ")}`);
+      console.error(`[consult] read now: consult show ${consultId}${where} · keep waiting after the budget: consult wait ${consultId}${where}`);
+    },
   });
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
   console.log(renderCouncilDiffText(result));
+}
+
+function writeSeatText(result, options, deps) {
+  const seat = result.seats.find((s) => s.agentId === options.seat);
+  if (!seat) {
+    throw new Error(`consult show: seat "${options.seat}" is not in this consult (seats: ${result.seats.map((s) => s.agentId).join(", ")})`);
+  }
+  const text = typeof seat.finalText === "string" ? seat.finalText : "";
+  if (typeof options.out === "string") {
+    (deps.writeFileSync ?? writeFileSync)(resolve(options.out), text, "utf8");
+    console.log(`${seat.agentId} (${seat.runId ?? "no run"} · ${seat.runState}): ${text.length} chars written to ${resolve(options.out)}`);
+    return;
+  }
+  console.log(text);
 }
 
 async function consultShowCommand(args, config, deps = {}) {
@@ -281,6 +309,15 @@ async function consultShowCommand(args, config, deps = {}) {
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
+  if (options.seat !== undefined) {
+    if (typeof options.seat !== "string") throw new Error("consult show: --seat requires an agentId");
+    if (options.out === true) throw new Error("consult show: --out requires a file path");
+    writeSeatText(result, options, deps);
+    return;
+  }
+  if (options.out !== undefined) {
+    throw new Error("consult show: --out goes with --seat <agentId> (one seat's complete final text)");
+  }
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -288,9 +325,60 @@ async function consultShowCommand(args, config, deps = {}) {
   console.log(renderCouncilDiffText(result));
 }
 
+async function consultWaitCommand(args, config, deps = {}) {
+  const consultId = args.find((a) => !a.startsWith("--"));
+  if (!consultId) {
+    throw new Error("consult wait requires <consultId>");
+  }
+  const options = parseOptions(args);
+  const format = options.format ?? "text";
+  if (format !== "text" && format !== "json") {
+    throw new Error("--format must be json or text");
+  }
+  const consultsDir = resolveConsultsDir(options, config);
+  const runDir = options.runDir ?? config?.runDir ?? "runs";
+  const waited = await (deps.waitForConsult ?? waitForConsult)({
+    consultId,
+    consultsDir,
+    runDir,
+    ...(options.waitMs !== undefined ? { waitMs: Number(options.waitMs) } : {}),
+    ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
+  });
+  const result = await rerenderConsultFromRecord({
+    record: waited.record,
+    runDir,
+    consultsDir,
+    ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
+    env: process.env,
+  });
+  console.error(`[consult] ${consultId}: ${waited.allTerminal
+    ? "every dispatched seat reached a terminal state"
+    : "the window expired with seats still running — run consult wait again"} after ${Math.round(waited.waitedMs / 1000)}s`);
+  if (format === "json") {
+    console.log(JSON.stringify({ ...result, wait: { allTerminal: waited.allTerminal, waitedMs: waited.waitedMs, windowMs: waited.windowMs } }, null, 2));
+    return;
+  }
+  console.log(renderCouncilDiffText(result));
+}
+
+export const CONSULT_USAGE = [
+  "consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]",
+  "consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]",
+  "consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]",
+  "",
+  "  --fields        key is Q<n>, the question number in the brief; a declared value matches only as a whole token",
+  "                  (letters, digits and _ are word characters; at the same position the longest declared value wins).",
+  "                  CJK text has no word boundaries: do not declare a value that is part of another word a seat may write.",
+  "  --wait-timeout  how long `run` waits for the seats, 180000-600000 ms (default 600000). When it expires the seats",
+  "                  keep running. The consult id is printed on stderr as soon as the seats are dispatched:",
+  "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",
+  "                  `consult show <id>` reads the current state.",
+  "  --seat --out    write one seat's complete final text to a file (without --out: print it)",
+].join("\n");
+
 /**
  * `wao consult` 派遣器。deps 参数仅供测试注入（runConsult/loadConsultRecord/
- * readTranscript），生产调用（cli.js）不传。
+ * waitForConsult/readTranscript/writeFileSync），生产调用（cli.js）不传。
  */
 export async function consultCommand(args, config, deps = {}) {
   const [sub, ...rest] = args;
@@ -302,5 +390,13 @@ export async function consultCommand(args, config, deps = {}) {
     await consultShowCommand(rest, config, deps);
     return;
   }
-  throw new Error("consult requires a subcommand: run | show");
+  if (sub === "wait") {
+    await consultWaitCommand(rest, config, deps);
+    return;
+  }
+  if (sub === undefined || sub === "--help" || sub === "-h" || sub === "help") {
+    console.log(CONSULT_USAGE);
+    return;
+  }
+  throw new Error(`consult: unknown subcommand "${sub}"\n${CONSULT_USAGE}`);
 }

@@ -19,7 +19,7 @@
 //   - 共享投影：../application/runCollectProjection.js（M11-4 collect continuation）
 //   - node built-in：fs/promises（readFile）、fs（watchFile/unwatchFile）、path（resolve）
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
 import { resolve } from "node:path";
 
@@ -173,7 +173,7 @@ export async function tailCommand(args, config) {
 // TD-112 (D2 A4): "final" is a BOOLEAN flag (never takes a value — it must NOT
 // enter the knownValueFlags walk below, or it would swallow the next token).
 const COLLECT_PROJECTION_KNOWN_FLAGS = new Set([
-  "cursor", "format", "mode", "runDir", "cwd", "final",
+  "cursor", "format", "mode", "runDir", "cwd", "final", "out",
 ]);
 
 // base64url, no padding, ≤192 chars — same alphabet as the MCP cursor field.
@@ -199,7 +199,52 @@ const COLLECT_CURSOR_REJECTED_TEXT =
 // distinct messages together (an entry with truncated:false ends a message).
 const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
 const COLLECT_FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
+  "final message exceeds bounded projection; write it to a file: collect <runId> --final --out FILE - or re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
+
+const COLLECT_OUT_MAX_CHARS = 1_000_000;
+const COLLECT_OUT_CHANGED_TEXT =
+  "collect --final --out: the transcript changed while it was being read (the run is still producing " +
+  "output) — nothing was written; run it again once the run is terminal";
+const COLLECT_OUT_LIMIT_TEXT =
+  "collect --final --out: a message in this transcript is longer than 1,000,000 characters, " +
+  "the most this command reads — nothing was written";
+
+/**
+ * 逐页读完全量投影，拼出最后一条 assistant 消息的完整文本。同一条消息的切片
+ * 首尾相接，`truncated: false` 的切片是这条消息的末尾。只读：这些翻页不追加审计
+ * 事件。单条消息最多读 COLLECT_OUT_MAX_CHARS 个字符（分页游标能寻址的范围略大于
+ * 此数，这里取整并明确执行）：读到的内容一超过就报固定文案、不写文件。读取途中
+ * 游标被拒，说明转录在读的过程中变了，报另一句固定文案。
+ */
+async function readFinalMessageByPages({ runId, runDir }) {
+  let cursor;
+  let current = "";
+  let currentRole = null;
+  let last = "";
+  for (let page = 0; page < 2000; page += 1) {
+    const raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
+    let payload;
+    try {
+      payload = projectCollectResult(raw, { runId, cursor, mode: "full" });
+    } catch (error) {
+      if (error instanceof CursorRejectedError) throw new Error(COLLECT_OUT_CHANGED_TEXT);
+      throw error;
+    }
+    for (const entry of payload.messages ?? []) {
+      if (entry.role !== currentRole) { current = ""; currentRole = entry.role; }
+      current += entry.text ?? "";
+      if (current.length > COLLECT_OUT_MAX_CHARS) throw new Error(COLLECT_OUT_LIMIT_TEXT);
+      if (entry.truncated !== true) {
+        if (entry.role === "assistant") last = current;
+        current = "";
+        currentRole = null;
+      }
+    }
+    cursor = payload.nextCursor ?? undefined;
+    if (!cursor) return last;
+  }
+  throw new Error(COLLECT_OUT_LIMIT_TEXT);
+}
 
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;
@@ -234,6 +279,13 @@ export async function collectCommand(args, config) {
   const hasCursor = typeof options.cursor === "string" && options.cursor.length > 0;
   const hasMode = options.mode !== undefined;
   const hasFinal = options.final !== undefined;
+  const hasOut = options.out !== undefined;
+  if (hasOut && (typeof options.out !== "string" || options.out.length === 0)) {
+    throw new Error("collect: --out requires a file path");
+  }
+  if (hasOut && !hasFinal) {
+    throw new Error("collect: --out goes with --final (write the complete final message to a file)");
+  }
   const isProjectionMode = hasCursor || options.format === "json" || hasMode || hasFinal;
 
   if (!isProjectionMode) {
@@ -269,7 +321,7 @@ export async function collectCommand(args, config) {
   // positional. Only bare positionals (not preceded by a value-expecting
   // flag) count.
   let extraPositionals = 0;
-  const knownValueFlags = new Set(["--cursor", "--format", "--limit", "--mode", "--run-dir", "--cwd"]);
+  const knownValueFlags = new Set(["--cursor", "--format", "--limit", "--mode", "--run-dir", "--cwd", "--out"]);
   for (let i = 0; i < tail.length; i += 1) {
     const a = tail[i];
     if (a.startsWith("--")) {
@@ -379,6 +431,20 @@ export async function collectCommand(args, config) {
     }
     throw error;
   }
+  // --out：先把要写的全文取齐、写进文件，再追加审计事件——逐页读取或写文件失败时
+  // 与其它投影失败一样零追加。文本经同一套投影逐页取回，脱敏与控制字符清理与分页
+  // 读取完全相同（写进文件的是清理后的文本，不是转录里的原始字节）。
+  let outReport = null;
+  if (hasOut) {
+    const text = payload.compactStatus === "available"
+      ? payload.messages[0].text
+      : payload.compactStatus === "empty" ? "" : await readFinalMessageByPages({ runId, runDir });
+    const target = resolve(options.out);
+    await writeFile(target, text, "utf8");
+    outReport = payload.compactStatus === "empty"
+      ? `${COLLECT_FINAL_EMPTY_MARKER} (empty file written to ${target})`
+      : `final message: ${text.length} chars written to ${target}`;
+  }
   // Projection succeeded → safe to commit the audit.
   if (typeof raw.commitAppend === "function") {
     await raw.commitAppend();
@@ -391,11 +457,15 @@ export async function collectCommand(args, config) {
     // now warns ONCE on stderr (stdout stays byte-identical) and points at
     // the paged projection as the machine-readable path: drop --final,
     // follow nextCursor across pages.
-    if (options.format === "json") {
+    if (options.format === "json" && !hasOut) {
       console.error(
         "[collect] warning: --final does not emit the --format json envelope — stdout stays the four-state text; "
         + "for machine-readable output drop --final and page through collect <runId> --format json (follow nextCursor across pages)",
       );
+    }
+    if (outReport !== null) {
+      console.log(outReport);
+      return;
     }
     if (payload.compactStatus === "available") {
       console.log(payload.messages[0].text);

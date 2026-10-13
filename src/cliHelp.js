@@ -15,7 +15,8 @@ export const HELP_TEXT = `Windows Agent Orchestrator PoC
 Commands:
   version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审（M13-r1/决定 0039：机械扇出+收集+council-diff 并列呈现；不做语义合成）
-  consult show <consultId> [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/）
+  consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/，扇出后即可读）；--seat 取一席的完整原文，--out 写进文件
+  consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 接着等一场已扇出的会审（各席到终态或观察窗到期即返回，可反复调用；180000-600000，缺省 270000）
   serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（TD-250/决定 0056，零副作用）
   serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删；跨 serve 生效——会话仓实例间共享）
   runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # TD-254/决定 0058：显式放弃一条交付线系——枚举成员+门+写 run.lineage_closed+按门释放保留 worktree（分支永不删；closed≠released 重入=补偿重试；默认 dry-run）
@@ -27,7 +28,7 @@ Commands:
   run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
-  collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
+  collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final [--out FILE]] [--format json] [--run-dir DIR]   # --final --out 把最终回答完整写进文件（多长都写）
   stop <runId> --observed-seq N --reason TEXT [--run-dir DIR]   # N = status 输出的 observedSeq；先看最新状态、写明理由（决定 0069）
   retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
   resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑（存活）；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker — by design，见 docs/usage.md 场景 1）

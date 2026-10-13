@@ -27,6 +27,11 @@
 //       no-text seat / out-of-range page), per-seat registry existence, duplicate
 //       seats, stray perspectives, waitMs schema bounds — every refusal leaves
 //       the dispatch count at 0.
+//   W — workspace binding: create mode dispatches with cwd = the BOUND
+//       workspace root; without an injected consultsDir the records dir is
+//       <root>/.wao/runs/consults. No workspace authority at all → fixed
+//       "workspace not bound:" refusal, zero dispatches. Service failures
+//       distinguish before/after any seat was dispatched (fixed texts).
 //   E — surface truth: roster slot, dispatch-family annotations, description
 //       semantic guards, NOT a drilldown carrier.
 //   F — receipt capacity boundary: metadata-max shape ≤ receipt cap (8KiB,
@@ -55,6 +60,7 @@ import {
   CONSULT_PAGE_CAP_BYTES,
   CONSULT_RECEIPT_CAP_BYTES,
 } from "../../src/application/consultService.js";
+import { canonicalizeWorkspacePath } from "../../src/application/workspaceBinding.js";
 import { DRILLDOWN_TOOLS } from "../../src/application/runDrilldowns.js";
 
 // ---- harness ----
@@ -104,7 +110,7 @@ function writeTranscript(runDir, runId, events) {
  * （扇出与零派发断言的事实源）；runId 形状确定性（run_consult_stub_<agentId>）
  * 以便预置 transcript 文件。
  */
-async function buildConsultClient({ dir, registryPath, runDir, consultsDir, failSeat } = {}) {
+async function buildConsultClient({ dir, registryPath, runDir, consultsDir, failSeat, runConsultFn, noWorkspace } = {}) {
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -112,8 +118,11 @@ async function buildConsultClient({ dir, registryPath, runDir, consultsDir, fail
   const server = createWaoMcpServer({
     registryPath,
     runDir,
-    workspaceRoot: dir,
+    // noWorkspace：构造"服务端无任何工作区权威"的形状（无 lead 选择、客户端无
+    // roots 能力、无 startup workspaceRoot）。
+    ...(noWorkspace ? {} : { workspaceRoot: dir }),
     consultsDir,
+    ...(runConsultFn ? { runConsultFn } : {}),
     dispatchRunFn: async (input) => {
       dispatchCalls.push(input);
       if (failSeat && input.agentId === failSeat) {
@@ -396,7 +405,9 @@ test("MRC-C1: read mode re-renders the group record as the SAME receipt shape wi
       const unknown = await callConsult(client, { consultId: "consult_20990101000000000nonexist" });
       assert.equal(unknown.threw, false);
       assert.equal(unknown.res.isError, true);
-      assert.equal(errText(unknown.res), "run_consult failed");
+      assert.equal(errText(unknown.res),
+        "run_consult read failed: no readable consult record with this consultId — records live in "
+        + "<bound workspace>/.wao/runs/consults; check workspace_status and the id");
       assert.equal(dispatchCalls.length, dispatchesAfterCreate, "unknown consultId never dispatches");
     } finally {
       await client.close();
@@ -620,6 +631,117 @@ test("MRC-D2: waitMs and fields are wire-validated closed sets (600001 / bad fie
 });
 
 // =====================================================================
+// W — workspace binding + failure-text discrimination
+// =====================================================================
+
+test("MRC-W1: create mode binds to the workspace — dispatch cwd = bound root; without injected consultsDir the records dir is <root>/.wao/runs/consults", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w1-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: A\n\nQ2: B\n" }));
+    // 不注入 consultsDir：记录目录取绑定工作区根下的 .wao/runs/consults。
+    const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir });
+    try {
+      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(threw, false);
+      assert.notEqual(res.isError, true, errText(res));
+      assert.equal(dispatchCalls.length, 1);
+      // cwd = 绑定的工作区根（canonicalizeWorkspacePath 与 proveWorkspace 同一 SSOT）。
+      const root = canonicalizeWorkspacePath(dir);
+      assert.equal(dispatchCalls[0].cwd, root, "每席派发 cwd = 绑定工作区根（不取服务进程当前目录）");
+      const p = res.structuredContent;
+      assert.equal(p.recordPath, join(root, ".wao", "runs", "consults", `${p.consultId}.json`),
+        "记录目录 = <工作区根>/.wao/runs/consults");
+      assert.ok(existsSync(p.recordPath), "组记录实际落在该目录");
+      assert.equal(JSON.parse(readFileSync(p.recordPath, "utf8")).consultId, p.consultId);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-W2: no workspace authority — create mode refuses with the fixed workspace-not-bound text and zero dispatches", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w2-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    // noWorkspace：无 startup workspaceRoot；测试客户端也不声明 roots 能力
+    // → 服务端无任何工作区权威。
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir, registryPath, runDir: join(dir, "runs"), noWorkspace: true,
+    });
+    try {
+      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(threw, false);
+      assert.equal(res.isError, true, "未绑定 → isError");
+      assert.ok(
+        errText(res).startsWith("workspace not bound:"),
+        `文案以 "workspace not bound:" 开头（实测：${errText(res)}）`,
+      );
+      assert.equal(dispatchCalls.length, 0, "派发次数为 0");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-W3: service failure texts distinguish before/after any seat was dispatched (fixed texts, no dynamic content)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    // 会审服务在调用派发通道之前抛错（dispatchFn 从未被调）。
+    const before = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir,
+      runConsultFn: async () => { throw new Error("stub: service failed before dispatch"); },
+    });
+    try {
+      const { res, threw } = await callConsult(before.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(threw, false);
+      assert.equal(res.isError, true);
+      assert.equal(errText(res), "run_consult failed before any seat was dispatched");
+      assert.equal(before.dispatchCalls.length, 0, "派发通道零调用");
+    } finally {
+      await before.client.close();
+      await before.server.close();
+    }
+    // 会审服务在调用过派发通道之后抛错。
+    const after = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir,
+      runConsultFn: async (input) => {
+        await input.dispatchFn({ agentId: "seat_a", prompt: "x", readOnly: true });
+        throw new Error("stub: service failed after dispatch");
+      },
+    });
+    try {
+      const { res, threw } = await callConsult(after.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(threw, false);
+      assert.equal(res.isError, true);
+      assert.ok(
+        errText(res).startsWith("run_consult failed after seats were dispatched"),
+        `以 after-dispatch 固定句开头（实测：${errText(res)}）`,
+      );
+      assert.equal(after.dispatchCalls.length, 1, "派发通道被调用过一次");
+    } finally {
+      await after.client.close();
+      await after.server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
 // E — surface truth: roster slot, annotations, description guards, no drilldowns
 // =====================================================================
 
@@ -781,4 +903,101 @@ test("MRC-G1: pure pager — empty text yields zero pages; envelope-over-cap thr
   const fixed = paginateConsultText(threeRocket, { capBytes: 6, measure: jsonMeasure });
   assert.equal(fixed.pages.length, 3, "cap=6 时每页恰一个完整 emoji（非单调反例修复）");
   assert.equal(fixed.pages.join(""), threeRocket, "修复后仍无损");
+});
+
+// ===== 读取模式：不退回进程当前目录；找不到记录与渲染失败分开报；违规席位的回执能读 =====
+
+test("MRC-W4: read mode with no workspace authority and no injected records directory refuses instead of reading the process directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w4-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir, registryPath, runDir: join(dir, "runs"), noWorkspace: true,
+    });
+    try {
+      const { res, threw } = await callConsult(client, { consultId: "consult_20261002120000000abc123" });
+      assert.equal(threw, false);
+      assert.equal(res.isError, true);
+      assert.ok(errText(res).startsWith("workspace not bound:"), errText(res));
+      assert.equal(dispatchCalls.length, 0);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-W5: a seat that wrote a file (readOnlyViolation) still yields a readable receipt; a record that cannot be rendered is reported as found-but-unrenderable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w5-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    mkdirSync(consultsDir, { recursive: true });
+    const events = makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: 可行\n" });
+    events.push({ type: "file_written", path: "C:\\fake\\wt\\x.txt", runId: "run_consult_stub_seat_a", seq: 99 });
+    writeTranscript(runDir, "run_consult_stub_seat_a", events);
+    const violationId = "consult_20261002120000000violat";
+    writeFileSync(join(consultsDir, `${violationId}.json`), JSON.stringify({
+      consultId: violationId,
+      createdAt: "2026-10-02T12:00:00.000Z",
+      brief: { path: null, sha256: sha256(BRIEF) },
+      budgetMs: 180000,
+      elapsedMs: 5,
+      questions: [{ q: 1, heading: "Q1 方案可行吗" }],
+      seats: [{ agentId: "seat_a", runId: "run_consult_stub_seat_a", runState: "completed", formatState: "partial", backend: null, provider: null }],
+      fieldDiff: [],
+    }), "utf8");
+    const brokenId = "consult_20261002120000000broken";
+    writeFileSync(join(consultsDir, `${brokenId}.json`), JSON.stringify({ consultId: brokenId, seats: 5 }), "utf8");
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const ok = await callConsult(client, { consultId: violationId });
+      assert.equal(ok.threw, false);
+      assert.notEqual(ok.res.isError, true, `带违规席位的记录应当读得出来（实测：${errText(ok.res)}）`);
+      assert.deepEqual(ok.res.structuredContent.seats[0].readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 1 });
+      const broken = await callConsult(client, { consultId: brokenId });
+      assert.equal(broken.res.isError, true);
+      assert.ok(errText(broken.res).startsWith("run_consult read failed: the consult record was found, but rendering it failed"), errText(broken.res));
+      const missing = await callConsult(client, { consultId: "consult_20990101000000000nonexist" });
+      assert.ok(errText(missing.res).startsWith("run_consult read failed: no readable consult record"), errText(missing.res));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-W6: dispatch attempts that produced no run do not count as dispatched seats", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w6-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir, failSeat: "seat_a",
+      runConsultFn: async (input) => {
+        try { await input.dispatchFn({ agentId: "seat_a", prompt: "x" }); } catch { /* the seat never got a run */ }
+        throw new Error("stub: record write failed");
+      },
+    });
+    try {
+      const { res } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(res.isError, true);
+      assert.equal(dispatchCalls.length, 1, "派发通道被调用过一次");
+      assert.equal(errText(res), "run_consult failed before any seat was dispatched", "但没有任何席位真正派出");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

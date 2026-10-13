@@ -623,8 +623,8 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   assert.equal(events[9].role, "assistant");
   assert.deepEqual(
     events[9].parts,
-    [{ type: "text", text: "Hello world" }],
-    "两 step 的 text 帧按序拼接为单条 assistant text",
+    [{ type: "text", text: "Hello\n\n world" }],
+    "两 step 的 text 帧按序拼接为单条 assistant text，不同 step 之间隔一个空行",
   );
   assert.ok(!JSON.stringify(events).includes("internal reasoning"), "thinking 帧内容不进事件流");
   // ⑩ reportsTokenUsage=true 的 metrics 事件形状：steps[].usage 求和（1:1 映射
@@ -3148,4 +3148,197 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
     assert.throws(() => normalizeAgent("kimi", { ...makeAgent(), serveWorkspaceDir: bad }), /serveWorkspaceDir must be an absolute path \(no surrounding whitespace\)/, JSON.stringify(bad));
   }
   assert.equal(normalizeAgent("kimi", { ...makeAgent(), serveWorkspaceDir: ws }).serveWorkspaceDir, ws);
+});
+
+// ===== 分步拼接：同一步的文本帧首尾相接，不同步之间隔一个空行 =====
+
+test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同 step → 答案里行首的 Q1: 仍在行首；同一步的帧首尾相接", async () => {
+  const turn = turnItem({
+    steps: [
+      stepItem({ stepId: "s0", frames: [{ kind: "text", text: "Now let me check the files.", role: "assistant" }] }),
+      stepItem({ stepId: "s1", frames: [
+        { kind: "text", text: "Q1: FIX_", role: "assistant" },
+        { kind: "text", text: "FIRST\n理由。", role: "assistant" },
+      ] }),
+    ],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_steps1", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].parts[0].text, "Now let me check the files.\n\nQ1: FIX_FIRST\n理由。");
+  assert.ok(assistant[0].parts[0].text.split("\n").includes("Q1: FIX_FIRST"), "答案的锚点行独占一行");
+});
+
+// ===== 重复文本帧（会审链路）：serve 偶发把同一段答案连发两帧——只保留一次 =====
+
+test("kimi-web 重复帧①: completed 轮同段长文本（≥200 字符）连发两帧 → assistant 消息只出现一次，其前有一条 system 消息说明略去 1 帧", async () => {
+  const dup = "同一段不短的答案文本，逐字相同。".repeat(20); // ≥200 字符
+  assert.ok(dup.length >= 200, "测试前提：重复段不短于 200 字符");
+  const turn = turnItem({
+    steps: [stepItem({
+      stepId: "s0",
+      frames: [
+        { kind: "text", text: dup, role: "assistant" },
+        { kind: "text", text: dup, role: "assistant" },
+      ],
+    })],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_dup1", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1, "恰一条 assistant 消息");
+  assert.deepEqual(assistant[0].parts, [{ type: "text", text: dup }], "正文只含一次（重复帧不拼入）");
+  // system 消息（说明略去 1 帧）在 assistant 消息之前。
+  const assistantIdx = events.indexOf(assistant[0]);
+  const systemIdx = events.findIndex((e) => e.kind === "message" && e.role === "system");
+  assert.ok(systemIdx !== -1, "有一条 system 消息");
+  assert.ok(systemIdx < assistantIdx, "system 消息在 assistant 消息之前");
+  assert.match(events[systemIdx].parts[0].text, /1 text frame\(s\) identical to the one before/);
+  // 完成路径收尾照旧。
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed");
+});
+
+test("kimi-web 重复帧②: 两段相同短文本（<200 字符）都保留、无 system 说明", async () => {
+  const short = "好的，就这样。";
+  const turn = turnItem({
+    steps: [stepItem({
+      stepId: "s0",
+      frames: [
+        { kind: "text", text: short, role: "assistant" },
+        { kind: "text", text: short, role: "assistant" },
+      ],
+    })],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_dup2", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].parts[0].text, short + short, "短帧重复原样保留（不猜）");
+  assert.equal(
+    events.some((e) => e.kind === "message" && e.role === "system"),
+    false,
+    "无 system 说明",
+  );
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed");
+});
+
+test("kimi-web 重复帧③: 两段相同长文本中间隔着另一帧不同文本 → 都保留（去重只认紧邻重复），无 system 说明", async () => {
+  const long = "很长但只是一段的答案文本。".repeat(30); // ≥200 字符
+  assert.ok(long.length >= 200);
+  const middle = "中间一帧不同文本。";
+  const turn = turnItem({
+    steps: [stepItem({
+      stepId: "s0",
+      frames: [
+        { kind: "text", text: long, role: "assistant" },
+        { kind: "text", text: middle, role: "assistant" },
+        { kind: "text", text: long, role: "assistant" },
+      ],
+    })],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_dup3", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].parts[0].text, long + middle + long, "两段相同长文本都保留（非紧邻不去重）");
+  assert.equal(
+    events.some((e) => e.kind === "message" && e.role === "system"),
+    false,
+    "无 system 说明（零帧被略去）",
+  );
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed");
+});
+
+test("kimi-web 重复帧④: 同样的长文本中间隔着工具帧、或分在不同 step → 都保留（只认同一步里紧挨着的重复）", async () => {
+  const dup = "同一段不短的答案文本，逐字相同。".repeat(20);
+  const toolFrame = { kind: "tool", name: "Read", state: "done", frameId: "f_tool", toolCallId: "tc_1", input: { file_path: "a.txt" }, output: "ok" };
+  const sameStep = turnItem({
+    steps: [stepItem({ stepId: "s0", frames: [
+      { kind: "text", text: dup, role: "assistant" },
+      toolFrame,
+      { kind: "text", text: dup, role: "assistant" },
+    ] })],
+  });
+  const acrossSteps = turnItem({
+    steps: [
+      stepItem({ stepId: "s0", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
+      stepItem({ stepId: "s1", frames: [{ ...toolFrame, frameId: "f_tool2", toolCallId: "tc_2" }] }),
+      stepItem({ stepId: "s2", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
+    ],
+  });
+  for (const [label, turn, expected] of [
+    ["同一步隔着工具帧", sameStep, dup + dup],
+    ["不同 step", acrossSteps, `${dup}\n\n${dup}`],
+  ]) {
+    const { handler, markSpawned } = turnScriptServer(`session_dup4_${label.length}`, { script: [[turn]] });
+    const { fetchImpl } = kimiServer(handler);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    markSpawned();
+    const events = [];
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+      events.push(ev);
+    }
+    const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+    assert.equal(assistant.length, 1, label);
+    assert.equal(assistant[0].parts[0].text, expected, `${label}：两段都保留`);
+    assert.equal(events.filter((e) => e.kind === "message" && e.role === "system" && /identical to the one before/.test(e.parts[0].text)).length, 0, `${label}：没有略去帧的说明`);
+  }
+});
+
+test("kimi-web 重复帧⑤: 相邻两个 step 各只有一帧同样的长文本（中间没有别的帧）→ 都保留——换一步就不算重复", async () => {
+  const dup = "同一段不短的答案文本，逐字相同。".repeat(20);
+  const turn = turnItem({
+    steps: [
+      stepItem({ stepId: "s0", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
+      stepItem({ stepId: "s1", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
+    ],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_dup5", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant[0].parts[0].text, `${dup}\n\n${dup}`);
+  assert.equal(events.filter((e) => e.kind === "message" && e.role === "system" && /identical to the one before/.test(e.parts[0].text)).length, 0);
 });

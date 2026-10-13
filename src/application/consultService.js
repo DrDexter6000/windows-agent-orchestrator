@@ -45,7 +45,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
@@ -68,7 +68,7 @@ import { dispatchRun } from "./runDispatch.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
 import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
 // 预算范围与 run_wait 同域（0039 r1：--wait-timeout 默认 600000，范围同 run_wait）。
-import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS } from "./runWait.js";
+import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS, RUN_WAIT_DEFAULT_MS } from "./runWait.js";
 // R9（决定 0023）：modelFamily 是展示闭集模块，本文件（dispatch/delivery 控制
 // 面路径）不得 import——三块砖①厂族改为 registry 原始字段直读（seatRuntimeFacts）。
 
@@ -156,8 +156,9 @@ export function attributeReply(replyText) {
  * 闭集声明字段值的字面提取 + "字段值不同"标记（纯函数，不变式②）。
  *
  * declaredFields 形如 {"Q1":["A","B"]}（Lead 声明的闭集候选值）。字段值
- * 提取 = 该席 Qn 各归组块中**首个字面匹配**某个声明值的 token（大小写敏感、
- * indexOf 字面匹配、位置最早者胜、同位置声明序靠前者胜；不猜）。缺席 = 未填
+ * 提取 = 该席 Qn 第一个有命中的归组块里**首个整词匹配**某个声明值的 token
+ * （大小写敏感、字面匹配且前后不紧邻字母/数字/下划线；位置最早者胜，同位置取
+ * 最长的声明值；不猜）。缺席 = 未填
  * （null）。fieldDiff 只在"≥2 席有值 且 值不全同"时收该 Qn——标记即提示，
  * 本函数及其输出永不携带"一致/分歧/agree/disagree"类结论词（测试钉住）。
  *
@@ -196,21 +197,44 @@ export function compareFields(perSeatAttribution, declaredFields) {
   return { fieldDiff, fieldValues };
 }
 
-/** Qn 归组块内首个字面命中声明值（位置最早胜；同位置声明序靠前胜）。 */
+const WORD_CHAR = /[A-Za-z0-9_]/;
+
+/**
+ * value 在 text 里第一次作为整词出现的位置（没有则 -1）。整词 = 前后紧邻的字符
+ * 都不是字母、数字或下划线——声明值 `MERGE` 不会命中 `MERGE_AFTER_FIXES` 的前缀，
+ * `PASS` 不会命中 `PASSED`。汉字、标点、空白、行首行尾都算边界。
+ */
+function indexOfWholeToken(text, value) {
+  for (let from = 0; ; ) {
+    const at = text.indexOf(value, from);
+    if (at === -1) return -1;
+    const before = at === 0 ? "" : text[at - 1];
+    const after = text[at + value.length] ?? "";
+    if (!WORD_CHAR.test(before) && !WORD_CHAR.test(after)) return at;
+    from = at + 1;
+  }
+}
+
+/**
+ * Qn 的归组块按文档顺序看，取第一个有命中的块；块内位置最早者胜，同一位置取最长的
+ * 声明值（`PASS-WITH-NOTES` 胜过它的前缀 `PASS`），长度也相同才看声明顺序。
+ */
 function firstLiteralMatch(attribution, qn, candidates) {
-  let bestValue = null;
-  let bestIndex = Infinity;
   for (const entry of attribution?.ordered ?? []) {
     if (entry?.q !== qn) continue;
+    let bestValue = null;
+    let bestIndex = Infinity;
     for (const value of candidates) {
-      const at = String(entry.text ?? "").indexOf(value);
-      if (at !== -1 && at < bestIndex) {
+      const at = indexOfWholeToken(String(entry.text ?? ""), value);
+      if (at === -1) continue;
+      if (at < bestIndex || (at === bestIndex && value.length > bestValue.length)) {
         bestIndex = at;
         bestValue = value;
       }
     }
+    if (bestValue !== null) return bestValue;
   }
-  return bestValue;
+  return null;
 }
 
 /**
@@ -379,6 +403,8 @@ export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTra
  * @param {Function} [input.readTranscriptFn] 可注入 transcript 读取
  * @param {Function} [input.readFileFn] / [input.writeFileFn] / [input.mkdirFn]
  * @param {Function} [input.nowFn] / [input.sleepFn] / [input.idFn]
+ * @param {Function} [input.onFanOut] 扇出完成、组记录已落盘时调用一次：
+ *   ({consultId, recordPath, seats: [{agentId, runId}]})。调用面用它提前报出 consultId。
  * @returns {Promise<object>} council-diff 结果（含 record 与 render 所需全量事实）
  */
 export async function runConsult({
@@ -403,10 +429,13 @@ export async function runConsult({
   readTranscriptFn = readTranscript,
   readFileFn = readFile,
   writeFileFn = writeFile,
+  renameFn = rename,
+  rmFn = rm,
   mkdirFn = mkdir,
   nowFn = Date.now,
   sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
   idFn = generateConsultId,
+  onFanOut,
 }) {
   if (!Array.isArray(seats) || seats.length === 0) {
     throw new Error("runConsult: seats is required (at least one seat)");
@@ -534,6 +563,38 @@ export async function runConsult({
     }
   }
 
+  // 组记录在扇出后立刻落盘（席位-runId 映射）：会审还在跑时，按 consultId 的
+  // `consult show` / `consult wait` 与 MCP 读取模式就能读到当下观察。收集结束后
+  // 用完整观察覆盖同一文件。
+  await mkdirFn(resolvedConsultsDir, { recursive: true });
+  const recordPath = join(resolvedConsultsDir, `${consultId}.json`);
+  await writeFileFn(recordPath, JSON.stringify({
+    consultId,
+    createdAt,
+    brief: { path: briefPath ? resolve(briefPath) : null, sha256: briefSha256 },
+    budgetMs,
+    elapsedMs: nowFn() - startNow,
+    questions,
+    ...(declaredFields && Object.keys(declaredFields).length > 0 ? { declaredFields } : {}),
+    seats: seats.map((seat, i) => ({
+      agentId: seat.agentId,
+      runId: dispatchStates[i].runId,
+      runState: dispatchStates[i].runId === null ? "dispatch_failed" : "pending",
+      formatState: "empty",
+      backend: runtimeFacts[i].backend,
+      provider: runtimeFacts[i].provider,
+      ...(typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
+        ? { perspectiveSnippet: seat.perspectiveText }
+        : {}),
+      budgetExpired: false,
+    })),
+    fieldDiff: [],
+    ...(typeof reviewedRunId === "string" && reviewedRunId.length > 0 ? { reviewedRunId } : {}),
+  }, null, 2), "utf8");
+  if (typeof onFanOut === "function") {
+    onFanOut({ consultId, recordPath, seats: dispatchStates.map((s) => ({ agentId: s.agentId, runId: s.runId })) });
+  }
+
   // 轮询：各 run transcript 至终态或总预算。读失败按瞬时处理（下轮重试），
   // 预算耗尽后席位保持最后观察状态（超时是观察事实，不改写为失败）。
   const live = dispatchStates.filter((s) => s.runId !== null);
@@ -653,10 +714,19 @@ export async function runConsult({
     ...(typeof reviewedRunId === "string" && reviewedRunId.length > 0 ? { reviewedRunId } : {}),
   };
 
-  // 持久写组记录（目录不存在则建；绝不写 runs/、不写认证台账、零 delivery 事件）。
-  await mkdirFn(resolvedConsultsDir, { recursive: true });
-  const recordPath = join(resolvedConsultsDir, `${consultId}.json`);
-  await writeFileFn(recordPath, JSON.stringify(record, null, 2), "utf8");
+  // 持久写组记录（替换扇出时落的那一份；绝不写 runs/、不写认证台账、零 delivery 事件）。
+  // 扇出之后这份文件随时可能被 show / wait / MCP 读取模式读到，所以不就地覆盖（就地
+  // 写会先把文件截空）：写到同目录的临时文件再改名换上去。改名被读者占住时退回就地
+  // 覆盖——读的一侧对半截内容有重试。
+  const finalJson = JSON.stringify(record, null, 2);
+  const tempPath = `${recordPath}.${randomUUID()}.tmp`;
+  await writeFileFn(tempPath, finalJson, "utf8");
+  try {
+    await renameFn(tempPath, recordPath);
+  } catch {
+    await writeFileFn(recordPath, finalJson, "utf8");
+    await rmFn(tempPath, { force: true }).catch(() => {});
+  }
 
   return {
     consultId,
@@ -723,19 +793,91 @@ export function deriveIndependenceRelations({ seatFacts, authorFacts = null }) {
   return { seats, authorLaneInSeats: authorLaneInSeats === null ? null : Boolean(authorLaneInSeats) };
 }
 
-export async function loadConsultRecord({ consultId, consultsDir, readFileFn = readFile }) {
+const RECORD_READ_ATTEMPTS = 5;
+const RECORD_READ_RETRY_MS = 100;
+
+export async function loadConsultRecord({
+  consultId,
+  consultsDir,
+  readFileFn = readFile,
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+}) {
   if (!isValidConsultId(consultId)) {
     throw new Error(`invalid consultId: ${JSON.stringify(consultId)}`);
   }
   if (!consultsDir || typeof consultsDir !== "string") {
     throw new Error("loadConsultRecord: consultsDir is required");
   }
-  const raw = await readFileFn(join(resolve(consultsDir), `${consultId}.json`), "utf8");
-  const record = JSON.parse(raw);
-  if (!record || typeof record !== "object" || record.consultId !== consultId) {
-    throw new Error("consult record malformed: consultId mismatch");
+  // 记录在会审收尾时会被替换一次；恰好读到替换中的半截内容时等一下再读，几次都
+  // 解析不了才算记录坏了。文件不存在等读取错误不重试，原样抛出。
+  const path = join(resolve(consultsDir), `${consultId}.json`);
+  let parseError = null;
+  for (let attempt = 0; attempt < RECORD_READ_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await sleepFn(RECORD_READ_RETRY_MS);
+    const raw = await readFileFn(path, "utf8");
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch (error) {
+      parseError = error;
+      continue;
+    }
+    if (!record || typeof record !== "object" || record.consultId !== consultId) {
+      throw new Error("consult record malformed: consultId mismatch");
+    }
+    return record;
   }
-  return record;
+  throw new Error(`consult record unreadable after ${RECORD_READ_ATTEMPTS} attempts: ${parseError?.message ?? "not JSON"}`);
+}
+
+/**
+ * 等一场已经扇出的会审：各席都到终态或观察窗到期即返回（零派发、只读转录）。
+ * 会审的等待预算到期之后，用它接着等；可以反复调用。
+ * @param {object} input
+ * @param {string} input.consultId
+ * @param {string} input.consultsDir
+ * @param {string} input.runDir
+ * @param {number} [input.waitMs] 观察窗，[CONSULT_WAIT_MIN_MS, CONSULT_WAIT_MAX_MS]；缺省与 `runs wait` 相同
+ *   （RUN_WAIT_DEFAULT_MS）——调用方自己的命令超时往往只有几分钟，缺省不取上限
+ * @returns {Promise<{record: object, allTerminal: boolean, waitedMs: number, windowMs: number}>}
+ */
+export async function waitForConsult({
+  consultId,
+  consultsDir,
+  runDir,
+  waitMs = RUN_WAIT_DEFAULT_MS,
+  pollIntervalMs = 2000,
+  readFileFn = readFile,
+  readTranscriptFn = readTranscript,
+  nowFn = Date.now,
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+}) {
+  if (!Number.isInteger(waitMs) || waitMs < CONSULT_WAIT_MIN_MS || waitMs > CONSULT_WAIT_MAX_MS) {
+    throw new Error(`waitMs must be an integer in [${CONSULT_WAIT_MIN_MS}, ${CONSULT_WAIT_MAX_MS}], got: ${JSON.stringify(waitMs)}`);
+  }
+  const record = await loadConsultRecord({ consultId, consultsDir, readFileFn });
+  const resolvedRunDir = resolve(runDir);
+  const started = nowFn();
+  const deadline = started + waitMs;
+  let pending = (record.seats ?? []).filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
+  for (;;) {
+    const still = [];
+    for (const seat of pending) {
+      let terminal = false;
+      try {
+        const events = await readTranscriptFn(resolveTranscriptPath(resolvedRunDir, seat.runId));
+        terminal = TERMINAL_STATES.includes(findState(boundReportScope(events, seat.runId) ?? events));
+      } catch {
+        terminal = false; // 瞬时读失败：下一轮再读
+      }
+      if (!terminal) still.push(seat);
+    }
+    pending = still;
+    const remaining = deadline - nowFn();
+    if (pending.length === 0 || remaining <= 0) break;
+    await sleepFn(Math.min(pollIntervalMs, remaining));
+  }
+  return { record, allTerminal: pending.length === 0, waitedMs: nowFn() - started, windowMs: waitMs };
 }
 
 /**
@@ -763,7 +905,14 @@ export async function rerenderConsultFromRecord({
   consultsDir,
   readTranscriptFn = readTranscript,
   env = process.env,
+  nowFn = Date.now,
 }) {
+  // 组记录在扇出时就落盘，所以这里可能读到一场还在等待预算之内的会审：席位没到终态
+  // 只有在预算确实过了之后才算"预算到期"。记录缺 createdAt / budgetMs（旧记录）时按
+  // 已到期处理，与此前的读法一致。
+  const createdMs = Date.parse(record.createdAt ?? "");
+  const withinBudget = Number.isFinite(createdMs) && Number.isFinite(record.budgetMs)
+    && nowFn() < createdMs + record.budgetMs;
   const seatResults = [];
   const perSeatAttribution = {};
   for (const seat of record.seats ?? []) {
@@ -791,7 +940,7 @@ export async function rerenderConsultFromRecord({
       backend: seat.backend ?? null,
       provider: seat.provider ?? null,
       ...(seat.perspectiveSnippet ? { perspectiveSnippet: seat.perspectiveSnippet } : {}),
-      budgetExpired: observation ? !observation.terminal : true,
+      budgetExpired: observation ? !observation.terminal && !withinBudget : !withinBudget,
       ...(fileWrittenCount !== null ? { readOnlyViolation: { verdict: "FAIL", fileWrittenCount } } : {}),
       attribution,
       ...(observation ? { finalText: observation.finalText } : {}),

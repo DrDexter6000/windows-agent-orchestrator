@@ -963,6 +963,13 @@ export class KimiWebBackend {
         if (typeof turn.prompt === "string" && turn.prompt.length > 0) {
           yield messageEvent("user", [{ type: "text", text: turn.prompt }]);
         }
+        const duplicateFrames = duplicateTextFramesOfTurn(turn);
+        if (duplicateFrames > 0) {
+          yield messageEvent("system", [{
+            type: "text",
+            text: `kimi-web backend: the serve sent ${duplicateFrames} text frame(s) identical to the one before; the repeat is left out of the answer below`,
+          }]);
+        }
         yield messageEvent("assistant", [{ type: "text", text }]);
         const metrics = metricsEventFromTurn(turn);
         if (metrics !== null) {
@@ -1246,17 +1253,50 @@ function findTurnByPromptId(items, promptId) {
 // 投影为证据事件（2026-10-01 live 实测：frames 并非 thinking|text 闭集）；非
 // 字符串 text 的帧跳过（形状不可用，不计入拼接——空结果由调用侧的发射前复检
 // 收口）。
-function assistantTextOfTurn(turn) {
-  const parts = [];
+//
+// 重复帧：serve 偶发把同一段答案连发两帧（实测见于并发派发）。与上一帧逐字相同、
+// 且不短于 DUPLICATE_FRAME_MIN_CHARS 的文本帧不再拼进答案；短帧（"好的"之类）原样
+// 保留，不猜。丢掉了几帧由 duplicateTextFramesOfTurn 报给调用侧写进事件流。
+const DUPLICATE_FRAME_MIN_CHARS = 200;
+
+//
+// 分步：一个 step 是一次模型调用。同一步里的文本帧首尾相接；不同步的文本之间隔一个
+// 空行——模型在两次工具调用之间说的话和最后的答案是分开说的，粘成一行会让答案里
+// 行首的 `Q1:` 这类锚点落到上一句话的句尾。
+function assistantTextFramesOfTurn(turn) {
+  const stepTexts = [];
+  let dropped = 0;
   for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
+    const kept = [];
+    // 只认"紧挨着的上一帧"：同一步里、中间没有隔着任何别的帧（工具帧、思考帧、别的
+    // 角色的文本帧）。隔了别的帧或换了一步之后再说一遍同样的话，是模型自己说的，保留。
+    let previous = null;
     for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
-      if (frame?.kind !== "text") continue;
-      if (frame.role !== undefined && frame.role !== null && frame.role !== "assistant") continue;
-      if (typeof frame.text !== "string") continue;
-      parts.push(frame.text);
+      const isAssistantText = frame?.kind === "text"
+        && (frame.role === undefined || frame.role === null || frame.role === "assistant")
+        && typeof frame.text === "string";
+      if (!isAssistantText) {
+        previous = null;
+        continue;
+      }
+      if (frame.text.length >= DUPLICATE_FRAME_MIN_CHARS && previous === frame.text) {
+        dropped += 1;
+        continue;
+      }
+      previous = frame.text;
+      kept.push(frame.text);
     }
+    if (kept.length > 0) stepTexts.push(kept.join(""));
   }
-  return parts.join("");
+  return { stepTexts, dropped };
+}
+
+function assistantTextOfTurn(turn) {
+  return assistantTextFramesOfTurn(turn).stepTexts.join("\n\n");
+}
+
+function duplicateTextFramesOfTurn(turn) {
+  return assistantTextFramesOfTurn(turn).dropped;
 }
 
 // tool 帧证据的增量投影（决定 0071；2026-10-01 的整轮投影是它的 final 形态）：
