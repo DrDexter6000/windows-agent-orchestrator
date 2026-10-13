@@ -2836,3 +2836,72 @@ test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的�
   ]);
   assert.deepEqual(neverSeen.map((e) => e.kind), ["done"]);
 });
+
+test("kimi-web 0071③（会审 sol）: 帧的身份靠 toolCallId / frameId——后补、插入、重排都不重复不漏；两者都没有的帧在途不投影", async () => {
+  const text = { kind: "text", text: "all done", role: "assistant" };
+  // 身份后补：首拍只有 toolCallId，下一拍才有 frameId——仍是同一帧，只落一次。
+  const bashCallOnly = { kind: "tool", toolCallId: "tc_b", name: "Bash", state: "running", input: { command: "npm test" } };
+  const bashBoth = { ...bashCallOnly, frameId: "f_b" };
+  const bashDone = { ...bashBoth, state: "done", output: "# pass 3" };
+  const lateId = await collectKimiEvents0071("session_0071e", [
+    runningTurn0071([bashCallOnly]),
+    runningTurn0071([bashBoth]),
+    [turnItem({ steps: [stepItem({ frames: [bashDone, text] })] })],
+  ]);
+  assert.deepEqual(lateId.filter((e) => e.kind === "command").map((e) => e.command), ["npm test"]);
+  assert.equal(lateId.filter((e) => e.kind === "tool_result").length, 1);
+  // 插入与重排：完成拍在已落的 Bash 前面插入一个 Write，再把顺序打乱——各自只落自己的。
+  const readDone = { kind: "tool", frameId: "f_r", toolCallId: "tc_r", name: "Read", state: "done", input: { path: "a.txt" }, output: "A" };
+  const writeDone = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "done", input: { path: "out.txt", content: "x" }, output: "Wrote 1 bytes" };
+  const reordered = await collectKimiEvents0071("session_0071f", [
+    runningTurn0071([bashBoth, readDone]),
+    [turnItem({ steps: [stepItem({ frames: [writeDone, readDone, bashDone, text] })] })],
+  ]);
+  assert.deepEqual(
+    reordered.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
+    [
+      "command", "tool_use", "tool_result:tc_r", // 在途：Bash 的命令、Read 的调用与结果
+      // 完成拍：按帧序补还没落过的——Write 的两条排在在途已落的命令之后（跨帧先后不再等于帧序），Bash 只补结果。
+      "file_written", "tool_result:tc_w", "tool_result:tc_b",
+      "message", "message", "metrics", "done",
+    ],
+  );
+  // 没有任何身份的帧：在途跳过（下标不是身份），整轮带着正文完成时才落。
+  const anonymous = { kind: "tool", name: "Bash", state: "running", input: { command: "ls" } };
+  const anonDone = { ...anonymous, state: "done", output: "a.txt" };
+  const noId = await collectKimiEvents0071("session_0071g", [
+    runningTurn0071([anonymous]),
+    runningTurn0071([readDone, anonymous]),
+    [turnItem({ steps: [stepItem({ frames: [readDone, anonDone, text] })] })],
+  ]);
+  assert.deepEqual(noId.filter((e) => e.kind === "command").map((e) => e.command), ["ls"], "只在完成拍落一次");
+  assert.deepEqual(
+    noId.map((e) => e.kind).slice(0, 4),
+    ["tool_use", "tool_result", "command", "tool_result"],
+    "Read 在途已落；无身份的 Bash 等到完成拍",
+  );
+});
+
+test("kimi-web 0071④（会审 sol）: 就绪是形状判据——空对象 / 数组 / 空命令不算就绪，帧到终态时照旧投影", async () => {
+  const text = { kind: "text", text: "all done", role: "assistant" };
+  const notReady = [
+    { kind: "tool", frameId: "f_1", toolCallId: "tc_1", name: "Read", state: "running", input: {} },
+    { kind: "tool", frameId: "f_2", toolCallId: "tc_2", name: "Grep", state: "running", input: ["x"] },
+    { kind: "tool", frameId: "f_3", toolCallId: "tc_3", name: "Bash", state: "running", input: { command: "   " } },
+  ];
+  const settled = [
+    { ...notReady[0], state: "done", input: { path: "README.md" }, output: "hello" },
+    { ...notReady[1], state: "done", input: { pattern: "x" }, output: "1 match" },
+    { ...notReady[2], state: "done", input: { command: "echo final" }, output: "final" },
+  ];
+  const events = await collectKimiEvents0071("session_0071h", [
+    runningTurn0071(notReady),
+    runningTurn0071(notReady),
+    [turnItem({ steps: [stepItem({ frames: [...settled, text] })] })],
+  ]);
+  const projections = events.filter((e) => e.kind === "tool_use" || e.kind === "command");
+  assert.equal(projections.length, 3, "在途两拍都没落；完成拍各落一次");
+  assert.deepEqual(projections[0].input, { path: "README.md" }, "落下的是就绪之后的输入，不是空对象");
+  assert.deepEqual(projections[1].input, { pattern: "x" });
+  assert.equal(projections[2].command, "echo final");
+});

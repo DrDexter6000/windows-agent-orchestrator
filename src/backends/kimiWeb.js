@@ -912,8 +912,8 @@ export class KimiWebBackend {
         continue;
       }
       unsupportedStatePolls = 0;
-      // 决定 0071：在途的 tool 帧就绪即落证据（命令 / 工具调用在输入完整时，结果在
-      // 帧到终态时）。
+      // 决定 0071：在途的 tool 帧就绪即落证据（命令 / 工具调用在输入对象就绪时，
+      // 结果在帧到终态时）。
       for (const ev of projectKimiToolFrames(turn, toolLedger)) yield ev;
       // queued | running（受支持的非终态）：等（绝不猜终态）。无进展兜底
       // （TD-197① 观测自适应时间门）：signature（state + steps/frames 结构
@@ -1173,20 +1173,27 @@ function assistantTextOfTurn(turn) {
 // tool_use），"结果事件"等终态才发。写文件类的帧在途不投影：file_written 是交付
 // 相关的证据，维持"只在这一轮带着正文完成时才落"的既有保证（N1：没有正文的
 // completed 轮、失败的轮不落写文件证据）。final=true（整轮带着正文完成）时把还没
-// 落过的全部补齐，与此前的整轮投影同形。失败路径不调用 final——那里只留下在途时
-// 已经看到的命令 / 工具调用。
+// 落过的全部补齐：每个事件的形状与此前的整轮投影相同，但跨帧的先后不再等于帧
+// 序——在途已落的命令会排在更早的写文件帧之前（台账为空时两者逐字节相同）。
+// 失败路径不调用 final——那里只留下在途时已经落过的命令 / 工具调用及其结果。
+// 去重靠帧的身份（toolCallId / frameId）；两者都没有的帧在途不投影。
 function projectKimiToolFrames(turn, ledger, { final = false } = {}) {
   const events = [];
-  const steps = Array.isArray(turn?.steps) ? turn.steps : [];
-  for (let s = 0; s < steps.length; s += 1) {
-    const frames = Array.isArray(steps[s]?.frames) ? steps[s].frames : [];
-    for (let f = 0; f < frames.length; f += 1) {
-      const frame = frames[f];
+  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
+    for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
       if (frame?.kind !== "tool") continue;
-      const key = typeof frame.frameId === "string" && frame.frameId.length > 0 ? frame.frameId : `${s}:${f}`;
       if (!final && isFileWriteToolKey(String(frame.name ?? "").toLowerCase())) continue;
-      const entry = ledger.get(key) ?? { projected: false, resulted: false };
       const terminal = isTerminalKimiToolState(frame.state);
+      const entry = kimiLedgerEntry(ledger, frame);
+      if (entry === null) {
+        // 没有任何身份的帧在途不投影——下标不是身份，帧被插入 / 重排时会把一个帧
+        // 的发射状态套到另一个帧上（会审 sol 的反例）。整轮带着正文完成时照此前
+        // 的整轮投影落。
+        if (!final) continue;
+        events.push(...kimiToolProjectionEvents(frame));
+        if (terminal) events.push(kimiToolResultEvent(frame));
+        continue;
+      }
       if (!entry.projected && (final || terminal || kimiToolInputReady(frame))) {
         events.push(...kimiToolProjectionEvents(frame));
         entry.projected = true;
@@ -1195,20 +1202,36 @@ function projectKimiToolFrames(turn, ledger, { final = false } = {}) {
         events.push(kimiToolResultEvent(frame));
         entry.resulted = true;
       }
-      ledger.set(key, entry);
     }
   }
   return events;
 }
 
-// 在途帧的输入是否已经就绪到可以定下投影事件的形状：要求 input 对象在场，
-// shell 类另要求 command 已是字符串。（写文件类的帧在途不投影，走不到这里。）
+// 帧在台账里的条目：toolCallId 与 frameId 都登记到同一个条目上，哪个先到、哪个
+// 后补都认得出是同一帧。两个都没有 → null（调用方在途跳过）。
+function kimiLedgerEntry(ledger, frame) {
+  const ids = [];
+  if (typeof frame.toolCallId === "string" && frame.toolCallId.length > 0) ids.push(`c:${frame.toolCallId}`);
+  if (typeof frame.frameId === "string" && frame.frameId.length > 0) ids.push(`f:${frame.frameId}`);
+  if (ids.length === 0) return null;
+  let entry = null;
+  for (const id of ids) entry = ledger.get(id) ?? entry;
+  entry ??= { projected: false, resulted: false };
+  for (const id of ids) ledger.set(id, entry);
+  return entry;
+}
+
+// 在途帧的输入是否已经到了可以定下投影事件形状的地步：input 是非空对象；shell 类
+// 另要求 command 是非空字符串。这是形状判据，不是"参数已经完整、此后不再变"的
+// 证明——探针里只见过"先没有 input、之后一次到齐"，没有见过分段到齐或就绪后
+// 改写；真发生的话，落下的是当时看到的那一版。（写文件类的帧在途不投影，走不到
+// 这里；帧到终态时不看这个判据，没有输入的终态帧照此前的规则投影。）
 function kimiToolInputReady(frame) {
   const toolKey = String(frame?.name ?? "").toLowerCase();
   const input = frame?.input;
-  if (!input || typeof input !== "object") return false;
-  if (toolKey === "bash" || toolKey === "shell") return typeof input.command === "string";
-  return true;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  if (toolKey === "bash" || toolKey === "shell") return typeof input.command === "string" && input.command.trim().length > 0;
+  return Object.keys(input).length > 0;
 }
 
 // 单个 tool 帧的投影规则——**镜像 src/backends/opencodeServe.js 的
