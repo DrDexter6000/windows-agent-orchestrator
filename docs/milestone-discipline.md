@@ -29,10 +29,7 @@ gate 类型按 task 性质选：
 
 milestone 完成后，必须审计以下技术债类别。**发现的技术债要么当场修，要么记入 backlog 并标明不修的理由和触发条件。**
 
-> **全局登记表**：所有技术债的单一权威清单是 [`docs/tech-debt.md`](./tech-debt.md)。
-> 各 `docs/archive/mX-audit.md` 只记本里程碑的**动态**（新登记 / 偿还）+ 指向 tech-debt.md；
-> tech-debt.md 负责全局汇总（编号、状态、触发条件）。收尾时必须同步更新两处，
-> 确保任何文档引用 TD-XX 都能在 tech-debt.md 查到对应条目。
+> 记入的地方只有一处：[`docs/tech-debt.md`](./tech-debt.md)，一条一行，格式与增删规则见该表表头。
 
 | 类别 | 检查内容 |
 |------|---------|
@@ -50,7 +47,7 @@ milestone 标记 ✅ 前必须满足：
 2. 技术债审计完成（已修或已登记）
 3. `npm test` 全绿
 4. **涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿**
-5. 更新 `docs/roadmap.md` 进度表，附测试数
+5. 更新 `docs/roadmap.md` 进度表
 6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（ADR 0034）
 
 ## 5. 不留技术债的原则

@@ -7,11 +7,14 @@
 // 规则（与 milestone-discipline.md §6.3 一致）：审计要逐文件，
 // 这些断言把"逐文件核对"固化为可执行检查，防止回归。
 //
-// 失败含义：某份文档与权威来源不一致 → 修文档（不是修测试）。
+// 这里的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
+// 指针可达）；读者离不开的少数操作说明，在它的唯一权威处检查。
+// 被保护的文字退役时，对应的测试一起退役（AGENTS.md §Documentation）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 // TD-120 (2026-08-15): relationship guards derive counts from the code SSOT
@@ -183,14 +186,6 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
   }
 });
 
-test("技术债有唯一登记表 docs/tech-debt.md", () => {
-  // SSOT 要求：TD-XX 只允许一个权威清单。
-  assert.ok(
-    read("docs/tech-debt.md").length > 0,
-    "缺少 docs/tech-debt.md（统一技术债登记表）"
-  );
-});
-
 test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`，不得出现裸 `node .../src/cli.js <真命令>`", () => {
   // SSOT 铁律补维：命令调用形式这一维此前从未被铁律或测试覆盖，
   // 导致权威源自己都漂（fresh-agent 照抄 onboarding 的 `node <WAO>/src/cli.js`
@@ -227,22 +222,6 @@ test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`�
       `面向 agent 的文档命令必须统一用 \`npm run cli -- <command>\`（v22 shim）：` +
       `系统默认 node 常是 v24，裸 \`node .../src/cli.js <真命令>\` 会被 version guard 拒。`
     );
-  }
-});
-
-test("docs/tech-debt.md 覆盖所有仍开放的技术债编号", () => {
-  const td = read("docs/tech-debt.md");
-  // 这些是从 m0~m6 audit 里 findstr 出的、当前仍开放（未偿还）的编号。
-  // 偿还后再登记/标 ✅ 即可；本断言只要求"存在该编号条目"。
-  for (const id of ["TD-22", "TD-23", "TD-24", "TD-27", "TD-28", "TD-29", "TD-30", "TD-31", "TD-32", "TD-33"]) {
-    assert.ok(td.includes(id), `docs/tech-debt.md 缺少 ${id}`);
-  }
-});
-
-test("docs/tech-debt.md 记录二次 dogfood 暴露的 TD-54~TD-58", () => {
-  const td = read("docs/tech-debt.md");
-  for (const id of ["TD-54", "TD-55", "TD-56", "TD-57", "TD-58"]) {
-    assert.ok(td.includes(id), `docs/tech-debt.md 缺少 ${id}`);
   }
 });
 
@@ -666,20 +645,6 @@ test("M7/M8/M9 当前状态不得在活文档里回退为未开始或旧测试�
     assert.ok(!ssot.includes(stale), `docs/ssot.md 仍保留旧审计基线：${stale}`);
   }
 
-  const techDebt = read("docs/tech-debt.md");
-  const openSection = (techDebt.split("## 开放")[1] ?? "").split("## 设计性约束")[0] ?? "";
-  assert.ok(!/TD-52|TD-53/.test(openSection),
-    "tech-debt.md 仍把 TD-52/TD-53 留在开放区，但条目语义已是已偿还");
-  // TD-106 is an Owner-declared WAO non-goal: it belongs in design constraints,
-  // not in the repaid or open debt sections.
-  const repaidSection = (techDebt.split("## 已偿还")[1] ?? "").split("## 开放")[0] ?? "";
-  const designSection = techDebt.split("## 设计性约束")[1] ?? "";
-  assert.ok(!/TD-106/.test(repaidSection),
-    "tech-debt.md TD-106 must not be in repaid section (no WAO code debt was repaid)");
-  assert.ok(!/TD-106/.test(openSection),
-    "tech-debt.md TD-106 must not remain open after Owner declared it a Codex product concern");
-  assert.ok(/TD-106/.test(designSection),
-    "tech-debt.md TD-106 must be recorded exactly as a WAO non-goal/design constraint");
 });
 
 test("历史 SSOT 审计和 M7 phase 文档必须归档，不得继续作为 docs 根目录活文档", () => {
@@ -780,8 +745,7 @@ test("AGENTS.md 必须在写新文档前指向 SSOT 分类标准", () => {
   // AGENTS.md 只保留入口和默认动作；分类与铁律正文只在 docs/ssot.md 定义。
   const a = read("AGENTS.md");
   assert.ok(/docs\/ssot\.md/.test(a), "AGENTS.md 未指向 docs/ssot.md（文档分类标准）");
-  assert.ok(/Before adding or editing documentation/.test(a), "AGENTS.md 缺文档变更入口");
-  assert.ok(/update the existing authority by default/.test(a), "AGENTS.md 缺默认更新现有权威源的动作");
+  assert.ok(/^## Documentation$/m.test(a), "AGENTS.md 缺文档规则一节（一次改动写哪里）");
   for (const copiedRule of ["一处定义，处处指针", "类别不可混放", "过程文档只追加"]) {
     assert.ok(!a.includes(copiedRule), `AGENTS.md 不应复制 docs/ssot.md 铁律：${copiedRule}`);
   }
@@ -866,75 +830,6 @@ test("registry list/check/validate 三命令分工必须在入口文档一致", 
   for (const file of ["README.md", "SKILL.md", "AGENT_ONBOARDING.md"]) {
     assert.ok(read(file).includes(marker),
       `${file} 缺少 registry 三命令一致分工说明：${marker}`);
-  }
-});
-
-test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还声明一致性机器守卫）", () => {
-  // 元发现（2026-07-02 核实 friction log 时挖出）：TD 表"已偿还"声明 vs 代码事实之间
-  // 没有机器守卫。本仓是 snapshot（原始 commit 在私有仓库，无 hash 可溯），某条 TD 标 ✅
-  // 但偿还信息空/残缺时，没有测试会红。本断言守住最低底线：凡是进了"## 已偿还"区的
-  // 条目，"偿还于"列必须非空且含可识别的偿还标记（里程碑/日期/已落地语）。
-  //
-  // 这是"偿还声明自身一致性"守卫，不是"代码事实"守卫——后者需对每条 TD 手写源文件映射，
-  // 成本高且 TD 描述非结构化。本守卫只抓"误标已偿还但忘填偿还信息"类漂移，是有意收窄。
-  // 真实代码回退漂移仍需人工核对（见 06-28 friction log 二次核实表的做法）。
-  //
-  // 偿还标记：里程碑(M\d)、日期(2026-)、或显式偿还语(当场修/修复/落地/已解/清零/偿还)。
-  //
-  // R23-A（2026-08-20）空转修复：原正则 /^\|(TD-\d+)\|/ 要求管道后无空格，而真实表
-  // 行是 "| TD-1 | ..."（带空格）——实测 78 行 0 命中，本守卫自 2026-07-02 落地起
-  // 从未真正执行过。两处修复：
-  //   (a) 行首改 /^\|\s*(TD-\d+)\s*\|/；
-  //   (b) "偿还于"列改取**行内最后一个非空单元格**——本区混列宽（4 格 / 5 格并存），
-  //       固定索引 m[4] 对 5 格行读到的是内容列。分格用 splitRowCells（code span 内
-  //       管道不算分隔符）。词表补 🟢/✅：取最后单元格后，TD-79 偿还列的完成语是
-  //       emoji 图标（"🟢 工具域"），如实扩表。
-  const td = read("docs/tech-debt.md");
-  const repaidStart = td.indexOf("## 已偿还");
-  const repaidEnd = td.indexOf("\n---", repaidStart);
-  assert.ok(repaidStart !== -1, "docs/tech-debt.md 缺少 '## 已偿还' 区块");
-  const repaidSection = td.slice(repaidStart, repaidEnd === -1 ? undefined : repaidEnd);
-
-  // 命中：已偿还表的 TD 行。列分隔 = | TD-XX | 登记于 | 内容 | 偿还于 |
-  const tdRow = /^\|\s*(TD-\d+)\s*\|/;
-
-  // F1 回归钉（R23-A 补全，auditor）：空"偿还于"列必须被取到——修复前的
-  // while-pop + filter 组合会把空单元格弹光/滤掉，守卫永远读到内容列（10/91 漏红）。
-  const f1Synthetic = "| TD-90004 | 2026-08-20 合成 | 某问题描述，2026 年修过 | |";
-  assert.equal(splitRowCells(f1Synthetic).at(-1).trim(), "",
-    "F1 回归：空'偿还于'列应被提取为空串（读到内容列 = 守卫失明）");
-
-  const sectionLines = repaidSection.split("\n");
-  const parsedRows = [];
-  for (const line of sectionLines) {
-    const m = line.match(tdRow);
-    if (m) parsedRows.push({ id: m[1], line });
-  }
-
-  // 非空性断言（R23-A，防空转复刻）：解析命中数 > 0，且等于区内 "^| TD-" 形状行数。
-  const shapeCount = sectionLines.filter((l) => /^\| TD-/.test(l)).length;
-  assert.ok(parsedRows.length > 0,
-    "已偿还区解析到 0 条 TD 行——守卫空转（区块结构或行首正则又漂了）");
-  assert.equal(parsedRows.length, shapeCount,
-    `已偿还区解析 ${parsedRows.length} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
-
-  for (const { id, line } of parsedRows) {
-    // R23-A 补全（auditor F1）：不再 filter 空单元格——空"偿还于"列必须被取到，
-    // 由下方"非空"断言抓红（filter 后取最后非空格会读到内容列，10/91 行漏红）。
-    const cells = splitRowCells(line);
-    assert.ok(cells.length > 0, `${id} 整行无内容单元格`);
-    const repaidCol = cells[cells.length - 1].trim();
-
-    // 偿还列不能为空或仅标点。
-    assert.ok(
-      repaidCol.length > 2 && /\S/.test(repaidCol),
-      `${id} 进了"已偿还"区但"偿还于"列为空——标了已偿还却没填偿还信息。`
-    );
-    // 偿还列必须含可识别的偿还标记。
-    assert.ok(
-      /M\d|2026|当场修|修复|落地|已解|清零|偿还|已实现|修正|闭环|🟢|✅/.test(repaidCol),
-      `${id} 的"偿还于"列缺少可识别的偿还标记（里程碑/日期/偿还语/完成图标）：\n  "${repaidCol.slice(0, 60)}..."`
-    );
   }
 });
 
@@ -1070,25 +965,6 @@ test("M10 closeout: PRD 不声称 Adaptive Playbooks 当前已经提供（属 M1
     "PRD Skill 描述必须用'承载/将逐步提供'，不得声称 Adaptive Playbooks 已交付");
   assert.ok(!/SKILL.*提供.*可选工作流模板.*已|Skill-guided.*提供成熟的工程思维、角色合同与可选工作流模板，告诉/.test(prd),
     "PRD 不得声称 Skill 已提供可选工作流模板（Adaptive Playbooks 属 M11）");
-});
-
-test("post-M12 closeout: TD-106 恰好存在一次且归档为 WAO 非目标", () => {
-  const td = read("docs/tech-debt.md");
-  // 切出"已偿还"、"开放"与"设计性约束"三区。
-  const repaidIdx = td.indexOf("## 已偿还");
-  const openIdx = td.indexOf("## 开放");
-  const designIdx = td.indexOf("## 设计性约束");
-  assert.ok(repaidIdx >= 0 && openIdx > repaidIdx && designIdx > openIdx,
-    "tech-debt.md 必须有 已偿还、开放与设计性约束三区");
-  const repaidSection = td.slice(repaidIdx, openIdx);
-  const openSection = td.slice(openIdx, designIdx);
-  const designSection = td.slice(designIdx);
-  // TD-106 不得出现在已偿还区
-  assert.ok(!/^\|\s*TD-106\b/m.test(repaidSection), "TD-106 不得进入已偿还区");
-  assert.ok(!/^\|\s*TD-106\b/m.test(openSection), "TD-106 不得继续留在开放区");
-  const designMatches = designSection.match(/^\|\s*TD-106\b/gm) || [];
-  assert.equal(designMatches.length, 1,
-    `TD-106 必须在设计性约束区恰好一次；实际 ${designMatches.length}`);
 });
 
 test("M10 closeout: roadmap 当前总览/完成定义不再用'无人值守'作为 M7 产品目标", () => {
@@ -1866,48 +1742,8 @@ test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood completed", () => {
   // not repeated here.
 });
 
-test("M11-4-DOC-05: TD-106 records M11-3/M11-4 capabilities as resolved, old open gaps gone", () => {
-  const td = read("docs/tech-debt.md");
-  const td106Row = td.split("\n").find((l) => /^\|\s*TD-106\s*\|/.test(l)) || "";
-  assert.ok(td106Row, "TD-106 row present");
-  // M11-3 safe delivery diff review recorded as resolved.
-  assert.ok(/run_delivery_review.*M11-3|M11-3.*run_delivery_review|安全.*delivery.*diff.*review.*M11-3|M11-3.*安全.*delivery.*diff.*review/i.test(td106Row),
-    "TD-106 records M11-3 safe delivery diff review as resolved");
-  // M11-4 run_collect continuation recorded as resolved.
-  assert.ok(/run_collect.*continuation.*M11-4|M11-4.*run_collect.*continuation|cursor.*continuation.*M11-4/i.test(td106Row),
-    "TD-106 records M11-4 run_collect cursor continuation as resolved");
-  // The old open-gap phrasings must NOT remain as unresolved capability gaps.
-  assert.ok(!/raw artifact\/diff review 仍开放/.test(td106Row),
-    "TD-106 no longer lists raw artifact/diff review as open (M11-3 resolved it)");
-  assert.ok(!/run_collect.*截断时.*可能回退|run_collect.*截断时.*Lead 可能/.test(td106Row),
-    "TD-106 no longer declares run_collect truncation raw-transcript fallback as an open gap (M11-4 resolved it)");
-  // TD-106 uniqueness + design-constraint placement are pinned by the post-M12
-  // closeout guards — not repeated here.
-});
-
 test("post-M12 runtime reliability closeout: TD-48/71/80 resolved, TD-106 non-goal, roadmap facts pinned", () => {
-  const td = read("docs/tech-debt.md");
   const roadmap = read("docs/roadmap.md");
-  const repaidSection = (td.split("## 已偿还")[1] ?? "").split("## 开放")[0] ?? "";
-  const openSection = (td.split("## 开放")[1] ?? "").split("## 设计性约束")[0] ?? "";
-  const designSection = td.split("## 设计性约束")[1] ?? "";
-
-  for (const id of ["TD-48", "TD-71", "TD-80"]) {
-    assert.match(repaidSection, new RegExp(`^\\|\\s*${id}\\b`, "m"), `${id} must be in repaid section`);
-    assert.doesNotMatch(openSection, new RegExp(`^\\|\\s*${id}\\b`, "m"), `${id} must not remain open`);
-  }
-  assert.match(designSection, /^\|\s*TD-106\b/m, "TD-106 must be a WAO non-goal/design constraint");
-  // TD-192 归档（2026-10-02）：已偿还叙事行迁 docs/archive/tech-debt-repaid.md，
-  // 主表留索引行——叙事级事实断言改为联合读取（主表索引 + 归档原文），
-  // 行存在性断言仍钉主表（上方 repaidSection ^| 锚）。
-  const tdAll = td + "\n" + read("docs/archive/tech-debt-repaid.md");
-  assert.match(tdAll, /TD-48[^\n]*(diagnose[^\n]*single|single[^\n]*diagnose|单[^\n]*run)[^\n]*(dashboard|1\.8)/i,
-    "TD-48 must record current CLI diagnose/dashboard measurement truth");
-  assert.match(tdAll, /TD-71[^\n]*EPERM[^\n]*EBUSY[^\n]*(bounded|有界)/i,
-    "TD-71 must record bounded Windows append-lock retry");
-  assert.match(tdAll, /TD-80[^\n]*legacy[^\n]*evidence_passed_backend_failed/i,
-    "TD-80 must record the legacy transcript projection fix");
-
   assert.match(roadmap, /M12-23[^\n]*runtime reliability truth/i,
     "roadmap must record the post-M12 runtime reliability package");
   assert.match(roadmap, /run_20260813121845752xjmrki[^\n]*run_20260813121903407dgqn1a/,
@@ -3422,78 +3258,120 @@ test("R12-C C-1/C-2/C-3/C-5: 认证 runbook retry 继承节诚实化锚（继承
 });
 
 // ---------------------------------------------------------------------------
-// R23-A（2026-08-20）登记簿库卫生轮次新增守卫：开放区结构不变量、TD 编号唯一、
-// SKILL P6 诚实锚点。
+// 技术债台账与决定索引的形状。这两张表历史上都被写成流水（文字规范无人守），
+// 所以守形状：一条一行、列数固定、行长有上限。内容不在这里钉。
 // ---------------------------------------------------------------------------
 
-test("TD-81 结构守卫：开放区不得有'带完成标记且整行无残留子句'的行（R23-A）", () => {
-  // 不变量：开放（🟡）区的登记行，要么不带完成标记（还在欠着），要么带完成标记的
-  // 同时显式写明残余部分。R23-A 起因：11 行"🟢 已修复/已偿还"滞留开放区且行内无任
-  // 何残余表述——登记簿与代码事实漂移，靠人工逐行符号核对才发现。本守卫把该不变
-  // 量机器化，命中即红，二选一处置：已全部落地 → 销账移入"## 已偿还"区（列映射：
-  // 类别列以【】前缀并入内容列）；仍有残余 → 补一句显式残留子句（还剩什么/何时处理）。
-  //
-  // 扫描方式 = 整行子串扫描，不按列索引实现：开放区列宽混乱（5 格 / 4 格并存，
-  // TD-116 正文含裸管道成 15 格），按列读取必错。两词族都是闭集（下方字面量）。
-  const td = read("docs/tech-debt.md");
-  const openStart = td.indexOf("## 开放");
-  const openEnd = td.indexOf("## 设计性约束", openStart);
-  assert.ok(openStart !== -1 && openEnd !== -1,
-    "docs/tech-debt.md 缺少 '## 开放'/'## 设计性约束' 区块边界");
-  const openSection = td.slice(openStart, openEnd);
+const LEDGER_DOC = "docs/tech-debt.md";
+const LEDGER_CLOSED_DOC = "docs/archive/tech-debt-closed.md";
+const LEDGER_REPAID_DOC = "docs/archive/tech-debt-repaid.md";
+const LEDGER_FROZEN_DOC = "docs/archive/tech-debt-2026-10-13.md";
+const LEDGER_STATES = ["开放", "等待裁定", "设计性约束"];
+const LEDGER_ROW_MAX_BYTES = 700;
+const LEDGER_CLOSED_ROW_MAX_BYTES = 500;
+const DECISION_MAX_BYTES_FROM = 76;
+const DECISION_MAX_BYTES = 8192;
+const DECISION_MAP_ROW_MAX_BYTES = 240;
 
-  const COMPLETION_MARKERS = ["🟢", "✅", "已偿还", "已修复", "已解", "已落地"];
-  const RESIDUAL_CLAUSES = [
-    "残留", "残余", "未覆盖", "不覆盖", "未做", "仍开放", "保持开放", "留后", "留待",
-    "未完全", "明确不做", "维持登记", "登记维持", "留观察", "待真实", "待真需求",
-    "待触发", "根因未定位", "保持分开登记", "验证靠真实 dogfood", "验证靠 dogfood",
-  ];
+/** 一份台账类文件里的 TD 定义行：[{ id, cells, line }]（表头与分隔行不算）。 */
+function ledgerRows(rel) {
+  return read(rel).split(/\r?\n/)
+    .filter((line) => /^\|\s*TD-\d+\s*\|/.test(line))
+    .map((line) => ({ id: line.match(/TD-\d+/)[0], cells: splitRowCells(line).map((c) => c.trim()), line }));
+}
 
-  const violation = (line) => {
-    const m = line.match(/^\|\s*(TD-\d+)\s*\|/);
-    if (!m) return null;
-    if (!COMPLETION_MARKERS.some((w) => line.includes(w))) return null;
-    return RESIDUAL_CLAUSES.some((w) => line.includes(w)) ? null : m[1];
-  };
-
-  const sectionLines = openSection.split("\n");
-  // 非空性断言（R23-A，防空转复刻）：解析行数 > 0 且等于区内 "^| TD-" 形状行数。
-  const parsedCount = sectionLines.filter((l) => /^\|\s*TD-\d+\s*\|/.test(l)).length;
-  const shapeCount = sectionLines.filter((l) => /^\| TD-/.test(l)).length;
-  assert.ok(parsedCount > 0, "开放区解析到 0 条 TD 行——守卫空转（区块结构变了？）");
-  assert.equal(parsedCount, shapeCount,
-    `开放区解析 ${parsedCount} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
-
-  // 合成夹具双向钉（防词族或判定逻辑写反导致守卫空转复刻——TD-81 旧守卫的教训）。
-  // R23-A 补全（auditor）：夹具放在真实行扫描**之前**——首红即抛的旧结构里，文件一红
-  // 夹具就永不执行，红的时候恰恰最需要它们证明守卫本身没写反。
-  const syntheticClean = "| TD-90001 | 2026-08-20 合成正夹具 | 测试 | 主体已落地 | **残留**：收尾未做，留待下轮。 |";
-  const syntheticDirty = "| TD-90002 | 2026-08-20 合成负夹具 | 测试 | 全部完成 | **🟢 已修复**：一步到位，别无他事。 |";
-  const syntheticPlain = "| TD-90003 | 2026-08-20 合成无标记夹具 | 测试 | 问题描述 | 触发条件。 |";
-  assert.equal(violation(syntheticClean), null, "正夹具（完成标记+残留词）不应判红");
-  assert.equal(violation(syntheticDirty), "TD-90002", "负夹具（完成标记+无残留词）必须判红");
-  assert.equal(violation(syntheticPlain), null, "无完成标记的普通开放行不受影响");
-
-  // R23-A 补全（auditor"没问但该问"）：聚合全部违规后一次断言——首红即抛只报一行，
-  // 11 行违规要 11 次 ~14.5 分钟的全量才能看全（TD-138 放大器的又一级）。
-  const violations = [];
-  for (const line of sectionLines) {
-    const id = violation(line);
-    if (id !== null) violations.push(`${id}（标记：${COMPLETION_MARKERS.find((w) => line.includes(w))}）`);
+test("技术债台账：一条一行、五列、状态闭集、行长上限、指针可达", () => {
+  const rows = ledgerRows(LEDGER_DOC);
+  assert.ok(rows.length > 0, "台账解析到 0 行——守卫空转");
+  const text = read(LEDGER_DOC);
+  const tableLines = text.split(/\r?\n/).filter((line) => line.startsWith("|"));
+  assert.equal(tableLines.length, rows.length + 2,
+    "台账里的表格行只能是表头、分隔行和 TD 行（一条债一行，不换行续写）");
+  const decisionIds = new Set(readdirSync(join(ROOT, ".wao/decisions")).map((name) => name.match(/^(\d{4})-/)?.[1]).filter(Boolean));
+  let previous = 0;
+  for (const { id, cells, line } of rows) {
+    assert.equal(cells.length, 5, `${id}：必须是五列（编号 | 问题 | 状态 | 何时处理 | 指针）`);
+    const [, problem, state, when, pointers] = cells;
+    assert.ok(problem.length > 0 && when.length > 0, `${id}：「问题」「何时处理」不能为空`);
+    assert.ok(LEDGER_STATES.includes(state),
+      `${id}：状态只能是 ${LEDGER_STATES.join(" / ")}（实际「${state}」）。已了结的条目移到 ${LEDGER_CLOSED_DOC}`);
+    const bytes = Buffer.byteLength(line, "utf8");
+    assert.ok(bytes <= LEDGER_ROW_MAX_BYTES,
+      `${id}：这一行 ${bytes} 字节，超过 ${LEDGER_ROW_MAX_BYTES}。改写成一句话，细节放进它所属的决定或事故记录并在「指针」列指过去`);
+    for (const pointer of pointers.split(/\s+/).filter(Boolean)) {
+      const resolves = /^\d{4}$/.test(pointer) ? decisionIds.has(pointer) : existsSync(join(ROOT, pointer));
+      assert.ok(resolves, `${id}：指针 ${pointer} 既不是存在的决定编号，也不是仓库里存在的路径`);
+    }
+    const number = Number(id.slice(3));
+    assert.ok(number > previous, `${id}：台账按编号升序排列`);
+    previous = number;
   }
-  assert.equal(violations.length, 0,
-    `开放区 ${violations.length} 行带完成标记但整行无残留子句（词族：${RESIDUAL_CLAUSES.join(" / ")}）：\n` +
-    `  ${violations.join("\n  ")}\n` +
-    `逐行二选一：已全部落地 → 移入"## 已偿还"区（列映射：类别列以【】前缀并入内容列）；` +
-    `仍有残余 → 补显式残留子句（还剩什么/何时处理）。`);
 });
 
-test("TD 编号全文件唯一（防并行会话编号竞态合流出双号，R23-A）", () => {
-  const ids = [...read("docs/tech-debt.md").matchAll(/^\|\s*(TD-\d+)\s*\|/gm)].map((m) => m[1]);
-  assert.ok(ids.length > 0, "解析到 0 条 TD 行——守卫空转");
-  assert.equal(new Set(ids).size, ids.length,
-    `TD 编号重复（并行会话编号竞态合流？）：${ids.filter((x, i) => ids.indexOf(x) !== i).join(", ")}`);
+test("技术债编号只定义一次，文档与代码里引用的编号都有定义", () => {
+  const open = ledgerRows(LEDGER_DOC);
+  const closed = ledgerRows(LEDGER_CLOSED_DOC);
+  const repaid = ledgerRows(LEDGER_REPAID_DOC);
+  for (const { id, cells, line } of closed) {
+    assert.equal(cells.length, 3, `${LEDGER_CLOSED_DOC} ${id}：必须是三列（编号 | 问题 | 了结依据）`);
+    assert.ok(cells[1].length > 0 && cells[2].length > 0, `${LEDGER_CLOSED_DOC} ${id}：「问题」「了结依据」不能为空`);
+    assert.ok(Buffer.byteLength(line, "utf8") <= LEDGER_CLOSED_ROW_MAX_BYTES,
+      `${LEDGER_CLOSED_DOC} ${id}：一行不超过 ${LEDGER_CLOSED_ROW_MAX_BYTES} 字节`);
+  }
+  const all = [...open, ...closed, ...repaid].map((row) => row.id);
+  const duplicated = all.filter((id, index) => all.indexOf(id) !== index);
+  assert.deepEqual(duplicated, [],
+    "同一个 TD 编号只能定义在一处（台账、已了结清单、已偿还归档三者互斥）");
+  const defined = new Set(all);
+
+  // 引用解析：查定义行，不查「文本里出现过」。冻结的历史与测试夹具不在扫描面。
+  const scanned = [];
+  const walk = (rel) => {
+    for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) { if (child !== "docs/archive") walk(child); continue; }
+      if (/\.(md|js|mjs|cjs|json|ps1|txt)$/.test(entry.name)) scanned.push(child);
+    }
+  };
+  for (const top of ["docs", ".wao/decisions", "src", "config", "scripts"]) walk(top);
+  for (const name of readdirSync(ROOT)) if (name.endsWith(".md")) scanned.push(name);
+  const undefinedRefs = new Map();
+  for (const rel of scanned) {
+    for (const match of read(rel).matchAll(/TD-(\d+)/g)) {
+      const id = `TD-${match[1]}`;
+      if (!defined.has(id)) undefinedRefs.set(id, rel);
+    }
+  }
+  assert.deepEqual([...undefinedRefs].map(([id, rel]) => `${id} (${rel})`), [],
+    "引用了没有定义行的 TD 编号（笔误，或关闭时把行删了而没有移到已了结清单）");
 });
+
+test("旧台账的冻结快照不被改写", () => {
+  assert.equal(createHash("sha256").update(readFileSync(join(ROOT, LEDGER_FROZEN_DOC))).digest("hex"),
+    "87721dffba83fceb04ffcb13b1e9700bfecffc92b26b4e142a4fbd55fcfc10c0",
+    `${LEDGER_FROZEN_DOC} 是冻结的历史，不回写。现状写在 ${LEDGER_DOC}`);
+});
+
+test("决定索引一行只放编号和标题；新决定档有体量上限", () => {
+  const rows = read(".wao/decisions/map.md").split(/\r?\n/).filter((line) => /^\d{4}\s*\|/.test(line));
+  assert.ok(rows.length > 0, "决定索引解析到 0 行——守卫空转");
+  for (const row of rows) {
+    const id = row.slice(0, 4);
+    assert.equal(row.split("|").length, 2, `map.md ${id}：一行只放「编号 | 标题」，摘要写在决定档里`);
+    assert.ok(Buffer.byteLength(row, "utf8") <= DECISION_MAP_ROW_MAX_BYTES,
+      `map.md ${id}：一行不超过 ${DECISION_MAP_ROW_MAX_BYTES} 字节`);
+  }
+  for (const name of readdirSync(join(ROOT, ".wao/decisions"))) {
+    const number = Number(name.match(/^(\d{4})-/)?.[1] ?? 0);
+    if (number < DECISION_MAX_BYTES_FROM) continue;
+    const bytes = readFileSync(join(ROOT, ".wao/decisions", name)).length;
+    assert.ok(bytes <= DECISION_MAX_BYTES,
+      `${name} ${bytes} 字节，超过 ${DECISION_MAX_BYTES}。决定档只写背景、决定、否决的备选、已知边界；` +
+      `验证记录、会审往来、测试计数写进提交说明`);
+  }
+});
+
+// SKILL P6 诚实锚点（R23-A）。
 
 test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificationTimeoutMs 下限（R23-A）", () => {
   // 本测试守的是**文档在场**，不是行为——两句都是规程条款（Lead 手动执行），无机器

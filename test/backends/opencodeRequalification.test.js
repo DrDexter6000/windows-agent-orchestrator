@@ -304,11 +304,9 @@ test("OpenCode requalification: dynamic role transport refusal happens before tr
 
 test("OpenCode requalification: current safety references do not restore obsolete taskkill claims", async () => {
   const safety = await readFile(new URL("../../references/safety-incidents.md", import.meta.url), "utf8");
-  const debt = await readFile(new URL("../../docs/tech-debt.md", import.meta.url), "utf8");
 
   assert.doesNotMatch(safety, /未停则强制 taskkill \+ 告警/);
   assert.doesNotMatch(safety, /_runCleanup[^\n]*静默验证未做/);
-  assert.doesNotMatch(debt, /TD-37[^\n]*quiet=false 强制 taskkill/);
 });
 
 function stopBackend({ status = null, unavailable = false } = {}) {

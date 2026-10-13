@@ -17,9 +17,17 @@ Use the action-matched tier-1 row in `docs/ssot.md` §0.1. That table is the onl
 file list: read the union of rows your action matches, including each stated
 condition. `SKILL.md` remains conditional on actually operating WAO.
 
-Before adding or editing documentation, follow `docs/ssot.md`: update the existing authority by default and point to it instead of copying its content.
-
 For aggregation, parsing, or classification changes, green unit tests are not enough; smoke the result against real transcripts before declaring completion.
+
+## Documentation
+
+One fact has one editable home; everything else links to it. Document categories are defined in `docs/ssot.md`.
+
+- **What a change writes.** Code and tests; the one reference page whose reader is affected; a decision record only when you chose between alternatives (`.wao/decisions/`, at most 8 KB: background, decision, rejected alternatives, known limits); one ledger line when a debt item opens or closes. The story of the batch — what changed, how it was verified, who reviewed it, run and consult ids — goes in the commit message, not in a document.
+- **Reference documents describe the present.** Replace the text that is no longer true; do not append what changed, when, or in which batch.
+- **Debt ledger** (`docs/tech-debt.md`): one line per open item, format in its header. Updating a row rewrites it; closing a row moves it to the archive list.
+- **Tests on documents** check agreement with code, that a retired claim stays gone, shape, and the few operating instructions a reader cannot work without — in the one place that is authoritative for them, never as the same sentence required in several files. When the text a test protects is retired, the test is retired with it.
+- **A red size limit means move or delete content.** Raising a limit is the Owner's decision.
 
 ## Commands
 
