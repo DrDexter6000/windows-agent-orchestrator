@@ -1606,6 +1606,16 @@ test("kernel【证伪】: stop 判定不受缺 serveUrl 干扰——进程形断
   assert.doesNotMatch(kernelSrc, /serveUrl/, "backendStopChecks 判定内核不得消费 serveUrl（缺 serveUrl 非判负理由）");
 });
 
+test("结构钉（决定 0072）: 角色合同探针的 requireCommands 按 reportsCommandExitCode 声明条件化——未声明的 backend 不带这条通不过的规则", () => {
+  // 未声明的 backend 评分时拿不到退出码、也不推断：带着 requireCommands 的探针 run
+  // 会被评分门判 failed，角色合同那一格随之变成"未评估"（完成事实是它的前置）。
+  const src = readFileSync(join(REPO_ROOT, "scripts", "reliability", "componentDrills.mjs"), "utf8");
+  const probeSrc = src.slice(src.indexOf("const probeScorecardRules"), src.indexOf("roleProbeCompletion = roleProbeRunCompletion("));
+  assert.match(probeSrc, /declared\.reportsCommandExitCode === true\s*\?\s*\{ requireCommands: \["node --version"\], requireEvidence: true \}\s*:\s*\{ requireEvidence: true \}/);
+  assert.match(probeSrc, /"--scorecard-rules", JSON\.stringify\(probeScorecardRules\)/);
+  assert.doesNotMatch(probeSrc, /JSON\.stringify\(\{ requireCommands/, "探针不再无条件带 requireCommands");
+});
+
 test("kernel【证伪】: 显式失败探针——unexpectedly completed → 红；显式 CLI 拒绝 → 绿", () => {
   const completed = explicitFailureCheck({ name: "startupFailureExplicit", ok: true, result: { completed: true }, error: null, capability: "startupFailure" });
   assert.equal(completed[0].pass, false);

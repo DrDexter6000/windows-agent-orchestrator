@@ -121,6 +121,25 @@ test("DSH drains a terminal fact queued while the event iterator is paused", asy
   assert.deepEqual(await iterator.next(), { done: true, value: undefined });
 });
 
+test("DSH 0072: an event queued while the iterator is paused is delivered without waiting for the next push", async () => {
+  const backend = new DeepSeekHarnessBackend();
+  const queue = new DeepSeekHarnessEventQueue();
+  const iterator = backend._events(queue, { exitCode: null, signalCode: null });
+  queue.push({ kind: "runtime_activity", status: "streaming" });
+  assert.equal((await iterator.next()).value.status, "streaming");
+  // The consumer is still busy with the event above; the queue stays open and nothing else is pushed.
+  const command = { kind: "command", command: "sleep 600", toolCallId: "call_1" };
+  queue.push(command);
+  const step = await Promise.race([
+    iterator.next(),
+    new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+  ]);
+  assert.ok(step !== null, "the queued command must not wait for a later push");
+  assert.deepEqual(step, { done: false, value: command });
+  queue.close();
+  assert.deepEqual(await iterator.next(), { done: true, value: undefined });
+});
+
 test("DSH coalesces streaming chunks into one bounded runtime activity fact", async () => {
   const backend = new DeepSeekHarnessBackend();
   const handle = await backend.spawn(agent({ env: { FAKE_DSH_MODE: "streaming" } }), {

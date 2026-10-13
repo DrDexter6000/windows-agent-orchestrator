@@ -123,7 +123,8 @@ export const DENIED_ORCHESTRATION_TOOLS = Object.freeze(["subagent", "subagent_f
 // -32602 负对照直接证据）。只放行交集——无证据支持映射，不发明映射。
 export const SETTABLE_REASONING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
-// shell 类工具（与旧线 projectDshEvent 同集）：投影为 command 证据而非 tool_use。
+// shell 类工具（与旧线 projectDshEvent 同集）：终态时投影为 command 证据；调用到达
+// 时先落一条 tool_use，让在途的命令看得见（决定 0072）。
 const SHELL_TOOL_NAMES = Object.freeze(["pwsh", "powershell", "bash", "shell"]);
 // 文件写类工具（与旧线同集）：tool_use + write_intent（关联成功才 file_written）。
 const WRITE_TOOL_NAMES = Object.freeze(["str_replace_editor", "write", "edit", "multiedit"]);
@@ -644,6 +645,10 @@ export class DeepSeekAcpBackend {
       if (SHELL_TOOL_NAMES.includes(key) && typeof input.command === "string" && input.command.length > 0) {
         // shell 类 → command 证据；退出码在终态更新到达时提取（无法提取则不伪造）。
         pendingCommands.set(toolCallId, input.command);
+        // 决定 0072：调用到达即落一条 tool_use——命令还在跑时 Lead 就看得到它跑的是
+        // 什么（此前要等终态更新才落 command，长命令期间转录里没有它）。command
+        // 证据仍在终态落，命令条数不变。
+        queue.push(redactor.redact(toolUseEvent(tool, input)));
         return;
       }
       const events = [toolUseEvent(tool, input)];
@@ -1092,7 +1097,10 @@ export class DeepSeekAcpBackend {
           }
           yield event;
         }
-        if (queue.closed && queue.hasItems()) continue;
+        // 决定 0072：上一批还在被消费方处理（yield 挂起）时到达的事件没有等待者可
+        // 唤醒——等之前必须先看队列，否则它会滞留到下一次推送才放出来（长命令期间
+        // 下一次推送就是命令结束，在途的调用因此看不见）。
+        if (queue.hasItems()) continue;
         if (queue.closed) return;
         await new Promise((resolve) => {
           queue.resolveWait = resolve;

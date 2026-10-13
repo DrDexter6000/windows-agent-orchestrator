@@ -516,6 +516,70 @@ test("ACP 投影表：message/thinking/write_intent/file_written/tool_result/com
   assert.deepEqual(events.at(-1), { kind: "done", reason: "completed" });
 });
 
+test("ACP 0072: shell 命令在调用到达时先落 tool_use（在途可见），command 证据仍在终态落、条数不变", async () => {
+  const { events } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s1", title: "bash", kind: "execute", status: "pending", rawInput: { command: "npm test", description: "run the suite" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s1", status: "in_progress" });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s1", status: "completed", content: [{ type: "text", text: "# pass 3" }] });
+      // 从未到终态的命令：只有在途那一条，没有 command、没有 tool_result。
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s2", title: "bash", kind: "execute", rawInput: { command: "sleep 600" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s2", status: "in_progress" });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const kinds = events
+    .filter((e) => ["tool_use", "command", "tool_result"].includes(e.kind))
+    .map((e) => (e.kind === "command" ? `command:${e.command}` : `${e.kind}:${e.tool}`));
+  assert.deepEqual(kinds, [
+    "tool_use:bash", // call_s1 到达
+    "command:npm test", "tool_result:bash", // call_s1 终态
+    "tool_use:bash", // call_s2 到达，之后再没有终态
+  ]);
+  const announced = events.filter((e) => e.kind === "tool_use" && e.tool === "bash");
+  assert.equal(announced[0].input.command, "npm test", "在途那一条带着命令原文");
+  assert.equal(announced[1].input.command, "sleep 600");
+  const commands = events.filter((e) => e.kind === "command");
+  assert.equal(commands.length, 1, "command 条数不变：到了终态的才有");
+  assert.equal(commands[0].toolCallId, "call_s1");
+  assert.equal(commands[0].exitCode, undefined, "退出码照旧：提取不到就不伪造");
+});
+
+test("ACP 0072: 消费方还在处理上一条事件时到达的调用不滞留——在途的命令当即可见，不必等它结束", async () => {
+  // 真机形态（2026-10-13，deepseek-flash 跑 sleep 40）：tool_call 帧在命令开始时就到
+  // 了，但紧跟在一条思考分片之后——消费方还挂在上一条事件上，队列没有等待者可唤醒，
+  // 这条调用就滞留到下一次推送（命令结束）才和结果一起放出来。
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-test-"));
+  const containmentPath = join(dir, "wao-contain.patch.yml");
+  writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+  const child = makeFakeChild();
+  const backend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath, spawnFn: () => child });
+  const peer = fakeAcpPeer(child);
+  try {
+    const handle = await backend.spawn(agent(), { prompt: "do the task" });
+    const iterator = handle.events(new AbortController().signal)[Symbol.asyncIterator]();
+    const nextEvent = async () => {
+      const step = await Promise.race([iterator.next(), delay(1000).then(() => null)]);
+      assert.ok(step !== null, "事件滞留：没有新的推送就取不到已经在队列里的事件");
+      assert.equal(step.done, false);
+      return step.value;
+    };
+    peer.notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
+    let event;
+    do { event = await nextEvent(); } while (event.kind !== "thinking");
+    // 生成器此刻挂在"思考"这条事件的 yield 上（消费方还没来要下一条）。
+    peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s1", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "sleep 600" } });
+    await delay(50); // 让这一帧在消费方"忙"的时候进队列
+    const inFlight = await nextEvent(); // 此后没有任何新的推送
+    assert.equal(inFlight.kind, "tool_use");
+    assert.equal(inFlight.tool, "pwsh");
+    assert.equal(inFlight.input.command, "sleep 600");
+  } finally {
+    peer.closeTransport();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取首个并留痕", async () => {
   const { events, handle } = await runAcpScenario({
     drive: ({ peer, promptRequest }) => {

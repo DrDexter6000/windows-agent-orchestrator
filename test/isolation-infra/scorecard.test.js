@@ -10,6 +10,7 @@ import {
   SCORECARD_CHECK_NAMES,
   assertScorecardCheckNames,
 } from "../../src/scorecard.js";
+import { scorecardCommandFailureIsCredible } from "../../scripts/reliability/scorecardEvidence.mjs";
 // TD-153 防线②：runManager 的 evidence_audit 名闭集（构造文件之二）。
 import { EVIDENCE_AUDIT_CHECK_NAMES } from "../../src/runManager.js";
 
@@ -62,6 +63,7 @@ test("M6-5: Claude Bash command 无 exitCode 但关联 tool_result 成功 → �
   const result = await checkScorecard({
     events, cwd: ".",
     rules: { requireCommands: ["node --version"], requireEvidence: true },
+    inferCommandExitCode: true, // 决定 0072：claude-code 声明能产出退出码证据，RunManager 据此传 true
   });
   assert.equal(result.passed, true);
   const cmdCheck = result.checks.find((c) => c.name === "commandsPassed");
@@ -77,11 +79,12 @@ test("M6-5: Claude Bash command 关联 tool_result 失败 → requireCommands �
   const result = await checkScorecard({
     events, cwd: ".",
     rules: { requireCommands: ["node --version"] },
+    inferCommandExitCode: true,
   });
   assert.equal(result.passed, false);
   const cmdCheck = result.checks.find((c) => c.name === "commandsPassed");
   assert.equal(cmdCheck.passed, false);
-  assert.match(cmdCheck.detail, /exitCode/);
+  assert.match(cmdCheck.detail, /exitCode=1/);
 });
 
 test("M6-5: requireCommands 命令没跑 → 失败，detail 标注缺哪个", async () => {
@@ -475,6 +478,7 @@ test("TD-32: tool_result 乱序到达时 exitCode 推断仍正确（按 toolCall
   const result = await checkScorecard({
     events, cwd: ".",
     rules: { requireCommands: ["npm test"] },
+    inferCommandExitCode: true, // 决定 0072：推断要调用方声明可信才启用
   });
   assert.equal(result.passed, true, "tool_result isError=false 应推断 exit=0 → 通过");
 });
@@ -488,8 +492,62 @@ test("TD-32: tool_result isError=true 推断为失败 → commandsPassed 拦截"
   const result = await checkScorecard({
     events, cwd: ".",
     rules: { requireCommands: ["npm test"] },
+    inferCommandExitCode: true,
   });
   assert.equal(result.passed, false, "tool_result isError=true 应推断 exit=1 → 拦截");
+  assert.ok(result.checks.find((c) => c.name === "commandsPassed").detail.includes("exitCode=1"), "失败来自推断出的 exit=1，不是未知");
+});
+
+// ============================================================
+// 决定 0072：退出码推断按调用方声明门控（默认关）
+// ============================================================
+
+test("0072①: 推断默认关——没有退出码的命令不会因为 tool_result 成功被当成 exit 0", async () => {
+  const events = [
+    { type: "run.completed" },
+    ev("command", { command: "npm test", toolCallId: "tool_1" }),
+    ev("tool_result", { tool: "tool_1", isError: false }),
+  ];
+  const rules = { requireCommands: ["npm test"] };
+  const gated = await checkScorecard({ events, cwd: ".", rules });
+  assert.equal(gated.passed, false, "默认不推断：退出码未知 → 不通过");
+  const check = gated.checks.find((c) => c.name === "commandsPassed");
+  assert.ok(check.detail.includes("exitCode=undefined"), "保留机器可读的未知形状");
+  assert.ok(check.detail.includes("requireAcceptance"), "给 Lead 出口");
+  assert.ok(check.detail.includes("reportsCommandExitCode"), "说明原因是 backend 不产出退出码证据");
+  assert.equal(
+    scorecardCommandFailureIsCredible(check), false,
+    "认证层把这种失败读作证据不可得，不读作观察到的非零退出",
+  );
+  const explicitOff = await checkScorecard({ events, cwd: ".", rules, inferCommandExitCode: false });
+  assert.equal(explicitOff.passed, false);
+  const trusted = await checkScorecard({ events, cwd: ".", rules, inferCommandExitCode: true });
+  assert.equal(trusted.passed, true, "调用方声明可信时照旧推断");
+});
+
+test("0072②: 自带数值退出码的命令不受门控影响；真失败不带'证据不可得'的说明", async () => {
+  const rules = { requireCommands: ["npm test"] };
+  const ok = await checkScorecard({
+    events: [{ type: "run.completed" }, ev("command", { command: "npm test", exitCode: 0 })],
+    cwd: ".", rules,
+  });
+  assert.equal(ok.passed, true);
+  const bad = await checkScorecard({
+    events: [{ type: "run.completed" }, ev("command", { command: "npm test", exitCode: 1 })],
+    cwd: ".", rules,
+  });
+  assert.equal(bad.passed, false);
+  const check = bad.checks.find((c) => c.name === "commandsPassed");
+  assert.ok(check.detail.includes("exitCode=1"));
+  assert.ok(!check.detail.includes("requireAcceptance"), "观察到的非零退出就是失败，不附证据不可得的说明");
+  assert.equal(scorecardCommandFailureIsCredible(check), true);
+  // 推断开着、但这条命令关联不到结果：仍是未知，不附"backend 不产出"的说明（那不是原因）。
+  const orphan = await checkScorecard({
+    events: [{ type: "run.completed" }, ev("command", { command: "npm test", toolCallId: "tool_9" })],
+    cwd: ".", rules, inferCommandExitCode: true,
+  });
+  assert.equal(orphan.passed, false);
+  assert.ok(!orphan.checks.find((c) => c.name === "commandsPassed").detail.includes("requireAcceptance"));
 });
 
 // ============================================================

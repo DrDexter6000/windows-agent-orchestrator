@@ -95,6 +95,35 @@ test("ADR25-B2-F2: 伪造 supportsSessionReuse=false × sessionReuse 配置 → 
   assert.deepEqual(capabilityCrossCheckWarnings(fakeAgent, null), [], "capabilities=null → 无能力 warning");
 });
 
+test("0072: requireCommands × backend 不产出命令退出码证据 → ⚠（评分不推断，这条规则通不过）", () => {
+  const fakeAgent = { backend: "fake-harness", cwd: "D:/x", scorecard: { rules: { requireCommands: ["npm test"] } } };
+  const warnings = capabilityCrossCheckWarnings(fakeAgent, {
+    reportsTokenUsage: true,
+    supportsSessionReuse: true,
+    reportsCommandExitCode: false,
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /fake-harness.*requireCommands/);
+  assert.match(warnings[0], /reportsCommandExitCode/);
+  assert.match(warnings[0], /requireAcceptance/, "给出口");
+  // 未声明按 false 读（fail-closed）。
+  assert.equal(
+    capabilityCrossCheckWarnings(fakeAgent, { reportsTokenUsage: true, supportsSessionReuse: true }).length, 1,
+  );
+  // 正向对照：声明 true、或没配 / 配了空的 requireCommands → 无 warning。
+  assert.deepEqual(
+    capabilityCrossCheckWarnings(fakeAgent, { reportsTokenUsage: true, supportsSessionReuse: true, reportsCommandExitCode: true }),
+    [],
+  );
+  assert.deepEqual(
+    capabilityCrossCheckWarnings(
+      { backend: "fake-harness", cwd: "D:/x", scorecard: { rules: { requireCommands: [], requireEvidence: true } } },
+      { reportsTokenUsage: true, supportsSessionReuse: true, reportsCommandExitCode: false },
+    ),
+    [],
+  );
+});
+
 // =====================================================================
 // FC: fail-closed 默认语义钉住——"未声明"绝不读成"支持"
 // =====================================================================

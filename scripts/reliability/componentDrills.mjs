@@ -2461,13 +2461,19 @@ export function createComponentDrills(deps) {
           ...entry, systemPrompt: roleFile,
         }))
         : registry; // 无角色合同声明时不注入 systemPrompt（该配置面留给拒绝探针）
+      // 决定 0072：requireCommands 只在声明能产出命令退出码证据的 backend 上带——
+      // 未声明的 backend 评分时不再推断退出码，命令事件不带数值退出码这条规则就通不过，会把
+      // 探针 run 判成 failed，连带让角色合同那一格变成"未评估"。
+      const probeScorecardRules = declared.reportsCommandExitCode === true
+        ? { requireCommands: ["node --version"], requireEvidence: true }
+        : { requireEvidence: true };
       const r = runCli([
         "run", agentId,
         "--prompt", "Run this command: node --version. Then state your role marker exactly as defined in your role contract, and nothing else.",
         "--wait-timeout", waitTimeout, "--poll-interval", pollInterval,
         "--registry", probeRegistry,
         "--cwd", tmpDir, "--format", "json",
-        "--scorecard-rules", JSON.stringify({ requireCommands: ["node --version"], requireEvidence: true }),
+        "--scorecard-rules", JSON.stringify(probeScorecardRules),
       ]);
       const result = extractJson(r.stdout || "") ?? null;
       if (declared.supportsRoleContract === true) {

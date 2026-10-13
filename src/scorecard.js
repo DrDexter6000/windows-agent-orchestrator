@@ -75,15 +75,21 @@ export function assertScorecardCheckNames(checks) {
 
 /**
  * 执行 scorecard 检查。
- * @param {{events: Array, cwd: string, rules: ScorecardRules}} ctx
+ * @param {{events: Array, cwd: string, rules: ScorecardRules, inferCommandExitCode?: boolean}} ctx
+ *   inferCommandExitCode：是否允许用 tool_result 的成败推断命令退出码（默认 false）。
  * @returns {Promise<ScorecardResult>}
  */
-export async function checkScorecard({ events, cwd, rules }) {
+export async function checkScorecard({ events, cwd, rules, inferCommandExitCode = false }) {
   const evidenceEvents = (events ?? []).filter((e) => e.type === "run.event");
   const toolResults = evidenceEvents.filter((e) => e.kind === "tool_result");
+  // 决定 0072：推断只在调用方声明可信时启用（默认关）。RunManager 按 backend 类的
+  // reportsCommandExitCode 声明传入——该轴的含义正是"WAO 今天能否为这个 backend
+  // 产出命令退出码证据（含本推断通道）"。此前这里对所有 backend 无条件推断：
+  // zcode 的真实转录里 1335 条命令全部被推成 exit 0、从未推出过失败，kimi-web 的
+  // "工具结束"同样被当成 exit 0。
   const commands = evidenceEvents
     .filter((e) => e.kind === "command")
-    .map((cmd) => withInferredCommandExitCode(cmd, toolResults));
+    .map((cmd) => (inferCommandExitCode ? withInferredCommandExitCode(cmd, toolResults) : cmd));
   const files = evidenceEvents.filter((e) => e.kind === "file_written");
   const hasDone = (events ?? []).some((e) => e.type === "run.completed");
   const readOnlyDeclared = (events ?? []).some((e) => e.type === "run.read_only_declared");
@@ -100,7 +106,7 @@ export async function checkScorecard({ events, cwd, rules }) {
 
   // 2. commandsPassed：requireCommands 里每个命令必须出现且 exitCode=0
   if (Array.isArray(rules?.requireCommands) && rules.requireCommands.length > 0) {
-    checks.push(checkCommandsPassed(rules.requireCommands, commands));
+    checks.push(checkCommandsPassed(rules.requireCommands, commands, { inferCommandExitCode }));
   }
 
   // 3. filesExist：requireFiles 里每个文件必须 file_written + fs 真实存在
@@ -200,6 +206,10 @@ async function checkAcceptance(scriptPath, cwd) {
 // kimi-web 的 tool done ≠ exit 0（kimiWeb.js 声明无已证退出码通道）——对它推断
 // 会把「工具完成」伪造成「exit 0」。消费方（runActivityProjection）以本闭集门控
 // 推断；这不是 runtime 编排分支，是数据来源可靠性声明（单一真相在本模块）。
+// 决定 0072：checkScorecard 自己的推断另由调用方按 backend 类的
+// reportsCommandExitCode 声明门控（见 checkScorecard）——两道门的口径不同：本闭集
+// 是"逐条证明过"，那条声明是"认证层按正向证据核过"（kimi-code、deepseek-harness
+// 声明 true 的依据就是这条推断通道）。活动投影仍用本闭集，未并轨。
 export const EXIT_CODE_INFERENCE_PROVEN_BACKENDS = Object.freeze(
   new Set(["claude-code"]),
 );
@@ -216,9 +226,10 @@ export function withInferredCommandExitCode(command, toolResults) {
  * 检查 requireCommands：每个命令必须在 command 证据里出现且 exitCode===0。
  * 包含匹配（因 runtime 可能包装命令，如 "npm test --verbose"）。
  */
-function checkCommandsPassed(requireCommands, commands) {
+function checkCommandsPassed(requireCommands, commands, { inferCommandExitCode = false } = {}) {
   const missing = [];
   const failed = [];
+  let unknownExit = false;
   for (const required of requireCommands) {
     const matched = commands.find((c) =>
       typeof c.command === "string" && c.command.includes(required),
@@ -227,12 +238,19 @@ function checkCommandsPassed(requireCommands, commands) {
       missing.push(required);
     } else if (matched.exitCode !== 0) {
       failed.push(`${required} (exitCode=${matched.exitCode ?? "undefined"})`);
+      if (typeof matched.exitCode !== "number") unknownExit = true;
     }
   }
   const passed = missing.length === 0 && failed.length === 0;
   const details = [];
   if (missing.length > 0) details.push(`not executed: ${missing.join(", ")}`);
   if (failed.length > 0) details.push(`failed (exitCode!=0): ${failed.join(", ")}`);
+  // 决定 0072：命令跑过、但这个 backend 给不出退出码（也不允许推断）——"没通过"
+  // 的原因是证据拿不到，不是命令失败。把这句话和出口写给 Lead。措辞里不出现
+  // "exitCode=<数字>"：认证脚本靠那个形状区分"观察到的非零退出"与"证据不可得"。
+  if (unknownExit && !inferCommandExitCode) {
+    details.push("the command ran, but no exit code was recorded for it and this backend's tool results are not accepted as exit-code evidence (reportsCommandExitCode is not true), so it cannot be confirmed here: verify the outcome with requireAcceptance, or set mode \"warn\"");
+  }
   return {
     name: CHECK_NAME.COMMANDS_PASSED,
     passed,

@@ -142,8 +142,8 @@ async function registryCheckCommand(args, config) {
  * 纯函数（不构造 backend、不 spawn）——加载路径在调用方，每个 agent 构造一次
  * backend 实例、两条校验共用同一快照。
  *
- * @param {object} agent — registry 原始条目（只读 backend/tokenBudget/sessionReuse）
- * @param {{reportsTokenUsage:boolean, supportsSessionReuse:boolean}|null} capabilities
+ * @param {object} agent — registry 原始条目（只读 backend/tokenBudget/sessionReuse/scorecard）
+ * @param {{reportsTokenUsage:boolean, supportsSessionReuse:boolean, reportsCommandExitCode?:boolean}|null} capabilities
  * @returns {string[]} warnings（空数组 = 无交叉不符）
  */
 export function capabilityCrossCheckWarnings(agent, capabilities) {
@@ -163,6 +163,15 @@ export function capabilityCrossCheckWarnings(agent, capabilities) {
   if (agent?.sessionReuse != null && capabilities.supportsSessionReuse !== true) {
     warnings.push(
       `${agent.backend} 配了 sessionReuse 但该 backend 类未声明 supportsSessionReuse（未声明按 false 读）——派发会在 spawn 前被运行时 fail-closed 门拒绝（TD-117 形状）；换声明支持的 backend 或移除 sessionReuse 配置`,
+    );
+  }
+  // 决定 0072：scorecard.rules.requireCommands × backend 类未声明能产出命令退出码
+  // 证据（reportsCommandExitCode 非 true）→ 命令事件不带数值退出码时评分不推断，这条
+  // 规则通不过。把失败提前到 validate 静态阶段。
+  const requireCommands = agent?.scorecard?.rules?.requireCommands;
+  if (Array.isArray(requireCommands) && requireCommands.length > 0 && capabilities.reportsCommandExitCode !== true) {
+    warnings.push(
+      `${agent.backend} 配了 scorecard.rules.requireCommands，但该 backend 类不产出命令退出码证据（reportsCommandExitCode 非 true）——命令事件不带数值退出码时评分不再推断，这条规则通不过（命令跑没跑看得到，过没过看不到）；改用 requireAcceptance 由独立脚本验收，或把 mode 设为 "warn"`,
     );
   }
   return warnings;

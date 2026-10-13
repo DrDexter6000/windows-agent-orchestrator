@@ -2802,7 +2802,8 @@ test("kimi-web 0071①: 命令在输入就绪时落、结果在帧到终态时�
       "tool_use", "tool_result:tc_r", // Read 首见即终态：投影 + 结果
       "command", // Bash：输入就绪才落（首见那一拍没有 input → 不落，也不被错分成 tool_use）
       "tool_result:tc_b", // Bash 到终态
-      "file_written", "tool_result:tc_w", // Write：在途不落，终态（这里是整轮结束时）才落
+      "tool_use", // Write：在途只预告路径（决定 0072）
+      "file_written", "tool_result:tc_w", // Write 的证据与结果：整轮带着正文完成时才落
       "message", "message", "metrics", "done",
     ],
   );
@@ -2827,7 +2828,7 @@ test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的�
     runningTurn0071([writeDone, bashReady]),
     [turnItem({ steps: [stepItem({ frames: [writeDone, bashDone] })] })],
   ]);
-  assert.deepEqual(emptyAfterWrite.map((e) => e.kind), ["command", "done"], "没有正文的 completed 轮：不补证据、不落 file_written");
+  assert.deepEqual(emptyAfterWrite.map((e) => e.kind), ["tool_use", "command", "done"], "没有正文的 completed 轮：只有在途的预告与命令，不补证据、不落 file_written");
   assert.equal(emptyAfterWrite.at(-1).reason, "failed");
   assert.match(emptyAfterWrite.at(-1).error, /completed without assistant text/);
   // 只在最后一拍才看到的轮（从未在途观察过）：与此前完全相同——零证据。
@@ -2904,4 +2905,55 @@ test("kimi-web 0071④（会审 sol）: 就绪是形状判据——空对象 / �
   assert.deepEqual(projections[0].input, { path: "README.md" }, "落下的是就绪之后的输入，不是空对象");
   assert.deepEqual(projections[1].input, { pattern: "x" });
   assert.equal(projections[2].command, "echo final");
+});
+
+// ===== 决定 0072：写文件类的帧在途预告 =====
+
+test("kimi-web 0072: 写文件帧在途只预告路径（一条 tool_use，不带内容）；file_written 仍只在带正文完成时落", async () => {
+  const text = { kind: "text", text: "all done", role: "assistant" };
+  const writeStart = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "running", inputText: '{"pa' };
+  const writeReady = { ...writeStart, input: { path: "src/out.txt", content: "FILE-BODY-0072" } };
+  const writeDone = { ...writeReady, state: "done", output: "Wrote 14 bytes" };
+  const completed = await collectKimiEvents0071("session_0072a", [
+    runningTurn0071([writeStart]), // 路径还没到：不预告
+    runningTurn0071([writeReady]),
+    runningTurn0071([writeReady]), // 同一帧不重复预告
+    runningTurn0071([writeDone]), // 帧到终态、这一轮还没完：仍不落 file_written / 结果
+    [turnItem({ steps: [stepItem({ frames: [writeDone, text] })] })],
+  ]);
+  assert.deepEqual(
+    completed.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
+    ["tool_use", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
+  );
+  const announced = completed.find((e) => e.kind === "tool_use");
+  assert.equal(announced.tool, "Write");
+  assert.deepEqual(announced.input, { path: "src/out.txt" }, "只带路径");
+  assert.ok(!JSON.stringify(announced).includes("FILE-BODY-0072"), "文件内容不进预告");
+  assert.equal(completed.find((e) => e.kind === "file_written").path, "src/out.txt");
+
+  // 失败的轮：预告留下，写文件证据与结果都不落（N1 不变）。
+  const failed = await collectKimiEvents0071("session_0072b", [
+    runningTurn0071([writeDone]),
+    [turnItem({ state: "failed", error: "upstream exploded", steps: [stepItem({ frames: [writeDone] })] })],
+  ]);
+  assert.deepEqual(failed.map((e) => e.kind), ["tool_use", "done"]);
+  assert.equal(failed.at(-1).reason, "failed");
+
+  // 没有身份的写文件帧在途不预告（与 0071 的身份规则一致）；没有路径的也不预告。
+  const anonymous = { kind: "tool", name: "Edit", state: "running", input: { file_path: "a.js", old_string: "x", new_string: "y" } };
+  const noPath = { kind: "tool", frameId: "f_n", toolCallId: "tc_n", name: "Write", state: "running", input: { content: "x" } };
+  const skipped = await collectKimiEvents0071("session_0072c", [
+    runningTurn0071([anonymous, noPath]),
+    [turnItem({ state: "failed", error: "boom", steps: [stepItem({ frames: [anonymous, noPath] })] })],
+  ]);
+  assert.deepEqual(skipped.map((e) => e.kind), ["done"]);
+
+  // 只在最后一拍才看到的轮：与此前完全相同（没有预告）。
+  const neverSeen = await collectKimiEvents0071("session_0072d", [
+    [turnItem({ steps: [stepItem({ frames: [writeDone, text] })] })],
+  ]);
+  assert.deepEqual(
+    neverSeen.map((e) => e.kind),
+    ["file_written", "tool_result", "message", "message", "metrics", "done"],
+  );
 });

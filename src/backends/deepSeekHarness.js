@@ -357,7 +357,10 @@ export class DeepSeekHarnessBackend {
           }
           yield event;
         }
-        if (queue.closed && queue.hasItems()) continue;
+        // 决定 0072：上一批还在被消费方处理（yield 挂起）时到达的事件没有等待者可
+        // 唤醒——等之前必须先看队列，否则它会滞留到下一次推送才放出来（长命令期间
+        // 下一次推送就是命令结束，在途的调用因此看不见）。
+        if (queue.hasItems()) continue;
         if (queue.closed) return;
         await new Promise((resolve) => {
           queue.resolveWait = resolve;

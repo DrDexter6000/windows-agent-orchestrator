@@ -2869,6 +2869,8 @@ export class Run {
           events: scorecardEvents,
           cwd: this.effectiveCwd,
           rules: this.scorecardRules,
+          // 决定 0072：退出码推断只对声明"能产出命令退出码证据"的 backend 启用。
+          inferCommandExitCode: this.backend?.reportsCommandExitCode === true,
         });
         await this.transcript.append("scorecard.checked", {
           passed: scResult.passed,

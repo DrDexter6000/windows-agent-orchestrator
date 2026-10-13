@@ -318,7 +318,7 @@ opencode-serve（wire 原生数值）、claude-code / kimi-code / deepseek-harne
 dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，退出码只以
 `[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
 `commandsPassed` 类检查在证据不可取得时记 **N/A + 原因**（不置绿、也不算失败）；
-若 scorecard 已明确观察到非零退出则保留真实 fail。必需 strict 轴为 N/A 的 case 保持
+若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。必需 strict 轴为 N/A 的 case 保持
 `draft-only`，不能仅靠能力声明进入可派发集合；任何放宽都须 Owner 另行显式裁定。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个

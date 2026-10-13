@@ -1332,6 +1332,48 @@ test("M6-6: scorecard rules 在 options 传入，证据满足 → completed", as
   }
 });
 
+test("0072: 退出码推断按 backend 的 reportsCommandExitCode 声明门控——未声明的 backend 上 requireCommands 不再靠推断通过", async () => {
+  const events = [
+    { kind: "message", role: "assistant", parts: [{ type: "text", text: "go" }] },
+    { kind: "command", command: "npm test", toolCallId: "call_1" },
+    { kind: "tool_result", tool: "call_1", output: "ok", isError: false },
+    { kind: "done", reason: "completed" },
+  ];
+  const commandsCheckOf = async (run) => {
+    const transcript = await readTranscript(run.transcript.filePath);
+    return transcript.find((e) => e.type === "scorecard.checked").checks.find((c) => c.name === "commandsPassed");
+  };
+  const dirUndeclared = await makeTempDir();
+  try {
+    const manager = makeProcessManager(dirUndeclared, createMockEvidenceBackend(events));
+    const run = await manager.start("test", {
+      prompt: "go",
+      scorecard: { rules: { requireCommands: ["npm test"] } },
+    });
+    await run.waitForCompletion({});
+    assert.equal(run.state, "failed", "工具结束 ≠ exit 0：未声明的 backend 不推断");
+    const check = await commandsCheckOf(run);
+    assert.equal(check.passed, false);
+    assert.ok(check.detail.includes("requireAcceptance"));
+  } finally {
+    rmSync(dirUndeclared, { recursive: true, force: true });
+  }
+  const dirDeclared = await makeTempDir();
+  try {
+    const backend = { ...createMockEvidenceBackend(events), reportsCommandExitCode: true };
+    const manager = makeProcessManager(dirDeclared, backend);
+    const run = await manager.start("test", {
+      prompt: "go",
+      scorecard: { rules: { requireCommands: ["npm test"] } },
+    });
+    await run.waitForCompletion({});
+    assert.equal(run.state, "completed", "声明能产出退出码证据的 backend 照旧推断");
+    assert.equal((await commandsCheckOf(run)).passed, true);
+  } finally {
+    rmSync(dirDeclared, { recursive: true, force: true });
+  }
+});
+
 test("M6-6: scorecard requireCommands 不满足 → failed + scorecard.checked passed:false", async () => {
   const dir = await makeTempDir();
   try {

@@ -26,7 +26,8 @@
 //         kimiToolProjectionEvents 投影为证据事件（镜像 opencodeServe
 //         evidenceEventsFromOpenCodeToolPart），证据先于 assistant 文本发射；
 //         决定 0071 起命令 / 工具调用在轮询期即落（projectKimiToolFrames），
-//         写文件证据仍等整轮带着正文完成。
+//         写文件证据仍等整轮带着正文完成（决定 0072 起在途先预告一条只带路径
+//         的 tool_use）。
 //       · **state 闭集：queued|running|completed|failed|cancelled**（终态 = 后
 //         三个）。
 //       · **triggerPromptId === POST prompts 返回的 prompt_id**（live 双验证：
@@ -1170,7 +1171,7 @@ function assistantTextOfTurn(turn) {
 //   约 2s 后：input 就绪（{command, timeout}），state 仍是 "running"；
 //   结束：state:"done"，output 在场。
 // 所以"投影事件"等输入就绪才发（否则 Bash 会因为还没有 input.command 被错分成
-// tool_use），"结果事件"等终态才发。写文件类的帧在途不投影：file_written 是交付
+// tool_use），"结果事件"等终态才发。写文件类的帧在途只预告、不落证据：file_written 是交付
 // 相关的证据，维持"只在这一轮带着正文完成时才落"的既有保证（N1：没有正文的
 // completed 轮、失败的轮不落写文件证据）。final=true（整轮带着正文完成）时把还没
 // 落过的全部补齐：每个事件的形状与此前的整轮投影相同，但跨帧的先后不再等于帧
@@ -1182,7 +1183,18 @@ function projectKimiToolFrames(turn, ledger, { final = false } = {}) {
   for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
     for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
       if (frame?.kind !== "tool") continue;
-      if (!final && isFileWriteToolKey(String(frame.name ?? "").toLowerCase())) continue;
+      if (!final && isFileWriteToolKey(String(frame.name ?? "").toLowerCase())) {
+        // 写文件类的帧在途只预告"在写哪个文件"（决定 0072）：一条只带路径的
+        // tool_use，不带内容、不落 file_written、不落结果——写文件证据的落盘时机
+        // 不变。没有身份或路径还没到的帧照旧跳过。
+        const writeEntry = kimiLedgerEntry(ledger, frame);
+        const writePath = kimiWritePath(frame);
+        if (writeEntry !== null && !writeEntry.announced && writePath !== null) {
+          events.push(toolUseEvent(String(frame.name), { path: writePath }));
+          writeEntry.announced = true;
+        }
+        continue;
+      }
       const terminal = isTerminalKimiToolState(frame.state);
       const entry = kimiLedgerEntry(ledger, frame);
       if (entry === null) {
@@ -1216,7 +1228,7 @@ function kimiLedgerEntry(ledger, frame) {
   if (ids.length === 0) return null;
   let entry = null;
   for (const id of ids) entry = ledger.get(id) ?? entry;
-  entry ??= { projected: false, resulted: false };
+  entry ??= { projected: false, resulted: false, announced: false };
   for (const id of ids) ledger.set(id, entry);
   return entry;
 }
@@ -1224,7 +1236,7 @@ function kimiLedgerEntry(ledger, frame) {
 // 在途帧的输入是否已经到了可以定下投影事件形状的地步：input 是非空对象；shell 类
 // 另要求 command 是非空字符串。这是形状判据，不是"参数已经完整、此后不再变"的
 // 证明——探针里只见过"先没有 input、之后一次到齐"，没有见过分段到齐或就绪后
-// 改写；真发生的话，落下的是当时看到的那一版。（写文件类的帧在途不投影，走不到
+// 改写；真发生的话，落下的是当时看到的那一版。（写文件类的帧在途只预告路径，走不到
 // 这里；帧到终态时不看这个判据，没有输入的终态帧照此前的规则投影。）
 function kimiToolInputReady(frame) {
   const toolKey = String(frame?.name ?? "").toLowerCase();
@@ -1232,6 +1244,15 @@ function kimiToolInputReady(frame) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
   if (toolKey === "bash" || toolKey === "shell") return typeof input.command === "string" && input.command.trim().length > 0;
   return Object.keys(input).length > 0;
+}
+
+// 写文件类帧的目标路径（与 kimiToolProjectionEvents 取同一组键）；输入还没到或
+// 没有路径 → null。
+function kimiWritePath(frame) {
+  const input = frame?.input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const filePath = input.filePath ?? input.file_path ?? input.path;
+  return typeof filePath === "string" && filePath.length > 0 ? filePath : null;
 }
 
 // 单个 tool 帧的投影规则——**镜像 src/backends/opencodeServe.js 的
