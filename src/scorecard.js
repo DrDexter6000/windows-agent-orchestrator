@@ -84,8 +84,7 @@ export async function checkScorecard({ events, cwd, rules, inferCommandExitCode 
   const toolResults = evidenceEvents.filter((e) => e.kind === "tool_result");
   // 决定 0072：推断只在调用方声明可信时启用（默认关）。RunManager 按 backend 类的
   // reportsCommandExitCode 声明传入——该轴的含义是"WAO 今天能否为这个 backend
-  // 产出命令退出码证据（含本推断通道）"；声明本身站不站得住由各 backend 负责，
-  // 见下方闭集处的说明。此前这里对所有 backend 无条件推断：
+  // 产出命令退出码证据（含本推断通道）"。此前这里对所有 backend 无条件推断：
   // zcode 的真实转录里 1335 条命令全部被推成 exit 0、从未推出过失败，kimi-web 的
   // "工具结束"同样被当成 exit 0。
   const commands = evidenceEvents
@@ -208,13 +207,11 @@ async function checkAcceptance(scriptPath, cwd) {
 // 会把「工具完成」伪造成「exit 0」。消费方（runActivityProjection）以本闭集门控
 // 推断；这不是 runtime 编排分支，是数据来源可靠性声明（单一真相在本模块）。
 // 决定 0072：checkScorecard 自己的推断另由调用方按 backend 类的
-// reportsCommandExitCode 声明门控（见 checkScorecard）。那条声明是门，不是证明：
-// 本闭集只收逐条证明过的 backend；声明 true 而不在本闭集里的（kimi-code、
-// deepseek-harness）评分仍会推断，可靠性没有证明——kimi-code 的 isError 来自对
-// 输出文本的关键词匹配（parsers/kimiCode.js），不等于退出码（会审反例：输出
-// "Process exited with code 7" 被推成 exit 0）；deepseek-harness 缺"非零退出必置
-// error"的证据。这两条声明是否翻转待 Owner 裁定（TD-197）。活动投影仍用本闭集，
-// 未并轨。
+// reportsCommandExitCode 声明门控（见 checkScorecard）。决定 0073 起两道门在效果上
+// 一致：kimi-code（isError 是对输出文本的关键词匹配）与 deepseek-harness（缺"非零
+// 退出必置 error"的证据）的声明已翻为 false，声明 true 的只剩自带数值退出码的
+// codex / opencode-serve（推断不触发）和本闭集里的 claude-code。两处实现没有并轨：
+// 活动投影按转录里的 backend 名查本闭集，评分按 backend 实例读声明。
 export const EXIT_CODE_INFERENCE_PROVEN_BACKENDS = Object.freeze(
   new Set(["claude-code"]),
 );

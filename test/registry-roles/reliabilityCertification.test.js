@@ -92,7 +92,7 @@ test("certifyCase: core passes but strict evidence fails -> draft-only", () => {
   assert.equal(result.capabilities.commandEvidence, false);
 });
 
-test("certifyCase F1: required strict N/A stays draft-only without becoming a quality failure", () => {
+test("certifyCase 0073: the declared command exit-code gap is conditional (Owner ruling 2026-10-13); it never reaches certified", () => {
   const result = certifyCase({
     caseId: "deepseek-acp delta",
     checks: [
@@ -103,16 +103,104 @@ test("certifyCase F1: required strict N/A stays draft-only without becoming a qu
         "strict",
         { capability: "commandEvidence" },
       ),
+      check("filesExist", true, "strict", { capability: "fileEvidence" }),
       check("isolation", true, "operational", { capability: "isolation" }),
       check("metricsNonZero", true, "observability", { capability: "metrics" }),
     ],
   });
 
-  assert.equal(result.status, "draft-only");
-  assert.equal(result.recommendedUse, "draft-only");
+  assert.equal(result.status, "conditional");
+  assert.equal(result.recommendedUse, "supervised-dispatch");
   assert.deepEqual(result.failedChecks, [], "N/A is an unavailable qualification axis, not a judged failure");
   assert.equal(result.capabilities.commandEvidence, undefined, "N/A must not create a green or red capability claim");
-  assert.match(result.reason, /strict certification evidence is not applicable/i);
+  assert.match(result.reason, /command exit-code evidence is not applicable/i);
+  assert.match(result.reason, /decision 0073/);
+});
+
+test("certifyCase 0073: the ruling covers that one axis only — any other required strict N/A stays draft-only", () => {
+  const otherAxis = certifyCase({
+    caseId: "some other strict axis unavailable",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      naCheck("filesExist", "file evidence unavailable", "strict", { capability: "fileEvidence" }),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(otherAxis.status, "draft-only");
+  assert.match(otherAxis.reason, /strict certification evidence is not applicable/i);
+
+  // 退出码轴之外再有一条 strict N/A：仍是 draft-only（裁定不因为沾了这条轴就扩大）。
+  const mixed = certifyCase({
+    caseId: "exit-code gap plus another strict gap",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      naCheck("commandsPassed", "backend declares reportsCommandExitCode=false", "strict", { capability: "commandEvidence" }),
+      naCheck("filesExist", "file evidence unavailable", "strict", { capability: "fileEvidence" }),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(mixed.status, "draft-only");
+
+  // 没有 capability 标记的 strict N/A 不算这条轴。
+  const untagged = certifyCase({
+    caseId: "untagged strict N/A",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      naCheck("commandsPassed", "unavailable", "strict"),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(untagged.status, "draft-only");
+});
+
+test("certifyCase 0073: the exit-code gap does not soften a real failure or missing evidence next to it", () => {
+  const gap = naCheck("commandsPassed", "backend declares reportsCommandExitCode=false", "strict", { capability: "commandEvidence" });
+  const strictFailed = certifyCase({
+    caseId: "gap + strict failure",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      gap,
+      check("filesExist", false, "strict", { capability: "fileEvidence" }),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(strictFailed.status, "draft-only");
+  assert.match(strictFailed.reason, /strict evidence checks failed/);
+
+  const coreFailed = certifyCase({
+    caseId: "gap + core failure",
+    checks: [check("completed", false, "core", { capability: "complete" }), gap],
+  });
+  assert.equal(coreFailed.status, "rejected");
+
+  const strictInconclusive = certifyCase({
+    caseId: "gap + inconclusive strict",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      gap,
+      inconclusiveCheck("filesExist", "evidence missing", "strict", { capability: "fileEvidence" }),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(strictInconclusive.status, "draft-only");
+  assert.match(strictInconclusive.reason, /inconclusive/);
+
+  // 观察到的非零退出（认证层保留真实 fail）照旧是 strict 失败，不是"不适用"。
+  const observedFailure = certifyCase({
+    caseId: "observed non-zero exit on a backend that declares the gap",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      check("commandsPassed", false, "strict", { capability: "commandEvidence" }),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+  assert.equal(observedFailure.status, "draft-only");
 });
 
 test("certifyCase G2: required strict inconclusive stays draft-only and does not become a judged failure", () => {

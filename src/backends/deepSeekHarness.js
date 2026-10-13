@@ -81,11 +81,12 @@ export class DeepSeekHarnessBackend {
   // 投影为 metrics token 事实）——tokenBudget 闸门对该 backend 有效。
   reportsTokenUsage = true;
 
-  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——command 事件本身不带
-  // 数值退出码（commandEvent(command, undefined)），但 tool_result 以 callId 为
-  // 关联键（toolResultEvent(callId, ...)，与 command 的 toolCallId 同键），
-  // scorecard 的 withInferredCommandExitCode 据此可靠推断 0/1。
-  reportsCommandExitCode = true;
+  // 命令退出码证据不可产出（决定 0073，2026-10-13 由 true 翻为 false）：command
+  // 事件不带数值退出码；tool_result 以 callId 关联、isError 取自结果帧的 error
+  // 字段，但"shell 非零退出必然置 error"没有任何实测证据（真实转录里没有本后端的
+  // 运行，决定 0072 会审 sol 指出）。没有证据就不声明。翻转条件 = 一次失败命令的
+  // 真机负向实测证明 error 字段与退出码一致。
+  reportsCommandExitCode = false;
 
   constructor({ spawnFn = spawn } = {}) {
     this._spawnFn = spawnFn;

@@ -480,13 +480,31 @@ function toolInputDetail(input, redactor) {
 // 的条目做（见 projectRunActivity 的收尾）。truncated = 脱敏清洗后的文本长于上限，
 // 即尾部之前还有内容。
 function outputTail(output, redactor) {
-  if (typeof output !== "string" || output.length === 0) return { tail: "", truncated: false };
-  const safe = sanitizeControls(redactSecretShapes(redactor.redactString(output))).trimEnd();
+  const text = outputText(output);
+  if (text.length === 0) return { tail: "", truncated: false };
+  const safe = sanitizeControls(redactSecretShapes(redactor.redactString(text))).trimEnd();
   if (safe.length <= ACTIVITY_OUTPUT_TAIL_CAP) return { tail: safe, truncated: false };
   let start = safe.length - ACTIVITY_OUTPUT_TAIL_CAP;
   const first = safe.charCodeAt(start);
   if (first >= 0xDC00 && first <= 0xDFFF) start += 1; // 不从代理对的后半个开始
   return { tail: safe.slice(start), truncated: true };
+}
+
+// 工具输出里可展示的文本（决定 0073）：字符串原样；文本块数组按序拼接——平铺的
+// {type:"text", text} 与 ACP 的嵌套块 {type:"content", content:{type:"text", text}}
+// 都认；其它形状（图片、引用等）没有可展示的文本。此前只认字符串：deepseek-acp 的
+// 工具结果全是嵌套块（真实转录 314 条无一例外），它的输出尾部一直是空的。
+function outputText(output) {
+  if (typeof output === "string") return output;
+  if (!Array.isArray(output)) return "";
+  const parts = [];
+  for (const block of output) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
+    else if (block.type === "content" && block.content && typeof block.content === "object"
+      && block.content.type === "text" && typeof block.content.text === "string") parts.push(block.content.text);
+  }
+  return parts.join("\n");
 }
 
 function commandExitStatus(event) {

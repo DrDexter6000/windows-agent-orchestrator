@@ -87,11 +87,20 @@ export function certifyCase(caseResult = {}) {
   // A required strict N/A is not a quality failure, but it is also insufficient
   // for a dispatchable qualification. Any future relaxation must be an explicit
   // Owner decision, not an indirect consequence of a backend capability boolean.
-  const requiredStrictNotApplicable = requiredCategories.includes("strict")
-    && checks.some((c) =>
+  const requiredStrictNaChecks = requiredCategories.includes("strict")
+    ? checks.filter((c) =>
       c.optional !== true
       && c.category === "strict"
-      && checkStateOf(c) === "not-applicable");
+      && checkStateOf(c) === "not-applicable")
+    : [];
+  const requiredStrictNotApplicable = requiredStrictNaChecks.length > 0;
+  // 决定 0073（Owner 2026-10-13："我可以接受部分车道的能力评价是 conditional，但要能
+  // 正常被 lead agent 通过 wao 来调用"）——上面那句注释等的那次明示裁定。范围只有
+  // 一条轴：命令退出码证据（capability=commandEvidence）因 backend 如实声明不产出而
+  // 不适用的 case 评 conditional（监督派发），封顶 conditional、拿不到 certified。
+  // 其它必需 strict 检查的 N/A 不在这次裁定之内，仍是 draft-only。
+  const strictNaIsDeclaredExitCodeGap = requiredStrictNotApplicable
+    && requiredStrictNaChecks.every((c) => c.capability === "commandEvidence");
   // G2: inconclusive 不是已证实失败，但也不能绕过 F1 的 strict 承重边界升到
   // conditional/supervised-dispatch。保留 requiredStrictNotApplicable 的既有行为，
   // 对“关键 strict 证据不足”给出并列的 draft-only 分支。
@@ -112,12 +121,15 @@ export function certifyCase(caseResult = {}) {
   } else if (hasFailedCategory(failedChecks, "strict")) {
     status = "draft-only";
     reason = "strict evidence checks failed";
-  } else if (requiredStrictNotApplicable) {
+  } else if (requiredStrictNotApplicable && !strictNaIsDeclaredExitCodeGap) {
     status = "draft-only";
     reason = "required strict certification evidence is not applicable; explicit Owner qualification is required before dispatchable use";
   } else if (requiredStrictInconclusive) {
     status = "draft-only";
     reason = "required strict certification evidence is inconclusive; explicit Owner qualification is required before dispatchable use";
+  } else if (strictNaIsDeclaredExitCodeGap) {
+    status = "conditional";
+    reason = "command exit-code evidence is not applicable for this backend (declared capability gap); conditional by Owner ruling 2026-10-13 (decision 0073)";
   } else if (
     hasFailedCategory(failedChecks, "operational") ||
     hasFailedCategory(failedChecks, "observability")

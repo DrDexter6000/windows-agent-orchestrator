@@ -39,15 +39,14 @@ export class KimiCodeBackend extends ProcessBackend {
   // registry validate 据此对 tokenBudget 配置输出 ⚠（不阻塞）。
   reportsTokenUsage = false;
 
-  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——kimi stream-json 的
-  // command 事件本身不带数值退出码（parser 投影 commandEvent(command, undefined)），
-  // 但 tool_result 以 tool_call id 为关联键（parser toolResultEvent(id, ...)），
-  // scorecard 的 withInferredCommandExitCode 据此可靠推断 0/1（reliability 记录
-  // coder_mm commandEvidence 绿即此通道）。
-  // 决定 0072 会审（sol）：parser 的 isError 实为对输出文本的关键词匹配
-  // （parsers/kimiCode.js），不等于退出码——上面的"可靠"只有正向样本、没有负向
-  // 证据。本声明是否翻转待 Owner 裁定（TD-197）；评分的推断以本声明为门。
-  reportsCommandExitCode = true;
+  // 命令退出码证据不可产出（决定 0073，2026-10-13 由 true 翻为 false）：kimi
+  // stream-json 的 command 事件不带数值退出码；tool_result 虽以 tool_call id 关联，
+  // 但 parser 的 isError 是对输出文本的关键词匹配（parsers/kimiCode.js 的
+  // /error|failed/i），不等于退出码——输出 "Process exited with code 7" 会被读成
+  // 成功，"0 failed; no errors" 会被读成失败（决定 0072 会审 sol 的反例）。此前
+  // 声明 true 的依据（2026-09-21，coder_mm commandEvidence 绿）只有正向样本。
+  // 翻转条件 = 上游给出可结构化读取的退出码或成败字段，并有负向实测。
+  reportsCommandExitCode = false;
 
   /**
    * Kimi Code 0.29.1 exposes KIMI_MODEL_THINKING_EFFORT as a process-scoped

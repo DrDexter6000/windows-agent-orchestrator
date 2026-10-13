@@ -1274,6 +1274,28 @@ test("0070-P2: tool_result carries the tail of its output (bounded, redacted); t
   }
 });
 
+test("0073: tool_result tail reads text blocks too — flat and ACP-nested — and stays empty for blocks with no text", async () => {
+  resetSeq();
+  const fromEnv = ["env", "held", "value", "0073"].join("-");
+  const nested = (text) => ({ type: "content", content: { type: "text", text } });
+  const r = project([
+    // deepseek-acp 线上的真实形状：嵌套块（真实转录 314 条无一例外）。
+    toolResultEvent(true, [nested("Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\work)")]),
+    toolResultEvent(false, [nested("line one"), nested("line two\n")]),
+    toolResultEvent(false, [{ type: "text", text: "flat block" }, { type: "image_url", image_url: { url: "data:..." } }]),
+    toolResultEvent(false, [nested(`token=${fromEnv}`)]),
+    toolResultEvent(false, [{ type: "content", content: { type: "image", data: "AAAA" } }, { type: "tool_reference", id: "x" }]),
+    toolResultEvent(false, []),
+  ], { env: { MY_API_KEY: fromEnv } });
+  const results = r.entries.filter((e) => e.category === "tool_result");
+  assert.equal(results[0].tail, "Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\work)", "the Lead sees why the command failed");
+  assert.equal(results[1].tail, "line one\nline two", "blocks are joined in order");
+  assert.equal(results[2].tail, "flat block", "non-text blocks contribute nothing");
+  assert.ok(results[3].tail.includes("[REDACTED") && !results[3].tail.includes(fromEnv), "redaction applies to block text");
+  assert.deepEqual([results[4].tail, results[4].truncated], ["", false]);
+  assert.deepEqual([results[5].tail, results[5].truncated], ["", false]);
+});
+
 test("0070-P3（会审 sol）: a secret whose marker lies far before the tail is still redacted; the tail never starts inside a surrogate pair", async () => {
   const { ACTIVITY_OUTPUT_TAIL_CAP } = await import("../../src/application/runActivityProjection.js");
   resetSeq();

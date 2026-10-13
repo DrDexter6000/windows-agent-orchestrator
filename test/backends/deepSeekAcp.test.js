@@ -580,6 +580,42 @@ test("ACP 0072: 消费方还在处理上一条事件时到达的调用不滞留�
   }
 });
 
+test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ 每个运行提示一次原因与修法；别的失败不提示", async () => {
+  // 线上真实形状：嵌套块；真机上每一条沙箱内命令都以同一句失败（2026-10-13，D: 盘项目目录）。
+  const denied = [{ type: "content", content: { type: "text", text: "Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\projects\\demo)" } }];
+  const { events, handle } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s1", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "node --version" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s1", status: "failed", content: denied });
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s2", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "node --version" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s2", status: "failed", content: denied });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const notes = events.filter((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => p.text.includes("could not set up its command sandbox")));
+  assert.equal(notes.length, 1, "两条命令同样失败，只提示一次");
+  const text = notes[0].parts[0].text;
+  assert.ok(text.includes("full control of the workspace directory"), "说清原因");
+  assert.ok(text.includes("diagnose-windows-sandbox-acl.ps1"), "给出修法");
+  // 提示排在触发它的那条结果之后；命令与结果照常落。
+  const kinds = events.filter((e) => ["command", "tool_result", "message"].includes(e.kind) && (e.kind !== "message" || notes.includes(e)))
+    .map((e) => e.kind);
+  assert.deepEqual(kinds, ["command", "tool_result", "message", "command", "tool_result"]);
+  assert.ok(handle.anomalies.some((a) => a.note.includes("grantWrite denied")));
+
+  // 别的失败（含平铺形状的普通报错）不提示。
+  const other = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s1", title: "pwsh", kind: "other", rawInput: { command: "npm test" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s1", status: "failed", content: [{ type: "text", text: "1 test failed" }] });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  assert.ok(!other.events.some((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => p.text.includes("command sandbox"))));
+});
+
 test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取首个并留痕", async () => {
   const { events, handle } = await runAcpScenario({
     drive: ({ peer, promptRequest }) => {

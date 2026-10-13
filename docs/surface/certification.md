@@ -18,8 +18,8 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | opencode-serve | ✅ | — | — | — | ✅ | ✅ |
 | claude-code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | codex | ✅ | ✅ | — | ✅ | ✅ | ✅ |
-| kimi-code | ✅ | ✅ | — | ✅ | — | ✅ |
-| deepseek-harness | ✅ | — | — | ✅ | ✅ | ✅ |
+| kimi-code | ✅ | ✅ | — | ✅ | — | — |
+| deepseek-harness | ✅ | — | — | ✅ | ✅ | — |
 | deepseek-acp | ✅ | ✅ | — | — | — | — |
 | kimi-web | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | zcode | ✅ | ✅ | — | ✅ | ✅ | — |

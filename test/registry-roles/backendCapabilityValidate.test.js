@@ -183,15 +183,16 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
   //   replayByRespawn —— ProcessBackend 基类 true（进程族 resume = 重放进新进程）；
   //     opencode-serve（HTTP 附着）与 deepseek-acp（resume 走 session/resume）为 false。
   //   supportsInFlightCorrection —— 仅 claude-code（stdin stream-json 在途排队）。
-  //   reportsCommandExitCode —— codex/opencode wire 原生数值；claude-code/kimi/
-  //     deepseek-harness 经 toolCallId↔tool_result 推断通道（scorecard 金丝雀绿）；
+  //   reportsCommandExitCode —— codex/opencode wire 原生数值；claude-code 经
+  //     toolCallId↔tool_result 推断通道（逐条证明过）；kimi-code / deepseek-harness
+  //     决定 0073 起 false（前者 isError 是关键词匹配，后者缺负向证据）；
   //     deepseek-acp false（evidence/phase7-exit-code-wire.json：tool_call_update
   //     不填 rawOutput、退出码只在非零退出的自由文本标记里）。
   const expected = {
     "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
     "codex": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
-    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: true },
-    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
+    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: false },
+    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
     // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
     // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
     // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。

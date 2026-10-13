@@ -316,14 +316,18 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 **`reportsCommandExitCode` 诚实声明（只声明，不放行）**：backend 类新增第六个能力
 声明成员，语义 = **WAO 今天能否产出命令退出码证据**（含 scorecard 的
 toolCallId↔tool_result 0/1 推断通道，非仅 wire 原生数值）。当前声明：codex /
-opencode-serve（wire 原生数值）、claude-code / kimi-code / deepseek-harness（可靠
-推断通道）为 true；**deepseek-acp 为 false**——静态核查
+opencode-serve（wire 原生数值）、claude-code（逐条证明过的推断通道）为 true；zcode / kimi-web /
+kimi-code / deepseek-harness / deepseek-acp 为 false。kimi-code 与 deepseek-harness 由决定 0073 从 true
+翻转：前者的 `isError` 是对输出文本的关键词匹配（输出 `Process exited with code 7` 会被读成成功），后者没有
+"非零退出必置 error"的实测。**deepseek-acp 的依据**——静态核查
 （`scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json`，零 token）证明
 dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，退出码只以
 `[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
 `commandsPassed` 类检查在证据不可取得时记 **N/A + 原因**（不置绿、也不算失败）；
-若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。声明是门，不是证明：kimi-code 的 `isError` 来自对输出文本的关键词匹配，deepseek-harness 缺"非零退出必置 error"的证据——这两条声明是否翻转待 Owner 裁定（TD-197）。必需 strict 轴为 N/A 的 case 保持
-`draft-only`，不能仅靠能力声明进入可派发集合；任何放宽都须 Owner 另行显式裁定。
+若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。必需 strict 轴为 N/A 的 case 保持
+`draft-only`，不能仅靠能力声明进入可派发集合——**例外只有一条**（决定 0073，Owner 2026-10-13 明示裁定）：命令退出码证据这一轴
+（`capability=commandEvidence`）因 backend 如实声明不产出而不适用的 case 评 `conditional`（监督派发，封顶 conditional）。其它 strict 轴的
+N/A、strict 证据不足（inconclusive）与 strict 失败仍是 `draft-only`；再有放宽须 Owner 另行显式裁定。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
 backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先，保留
