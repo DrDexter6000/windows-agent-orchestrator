@@ -59,6 +59,7 @@ export async function stopCommand(args, config, deps = {}) {
     const why = {
       reason_required: `--reason 需要 ${STOP_REASON_MIN_LEN}–${STOP_REASON_MAX_LEN} 个字符`,
       observation_unknown: "--observed-seq 不是这个运行转录里的位置",
+      target_changed: "你看到的位置之后这个运行被重放过，停止目标已经换成新的进程",
       observation_stale: `worker 在你看到的位置之后又有了动作，且已过去超过 ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} 分钟（${result.newerEventCount} 条新事件）`,
     }[result.preconditionFailed] ?? result.preconditionFailed;
     throw new Error(`stop 未执行（零副作用）：${why}。${protocol}`);

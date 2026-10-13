@@ -2758,6 +2758,9 @@ const RUN_STOP_PRECONDITION_TEXT = Object.freeze({
   observation_stale:
     "run_stop rejected, no side effect: the worker produced events after your observation more than "
     + `${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} minutes ago. Re-read run_activity, decide again, and pass the seq of its newest entry.`,
+  target_changed:
+    "run_stop rejected, no side effect: the run was re-spawned after your observation, so the stop target is a "
+    + "process you have not looked at. Re-read run_activity, decide again, and pass the seq of its newest entry.",
   reason_required: "run_stop rejected, no side effect: reason is required.",
   observation_required: "run_stop rejected, no side effect: observedSeq is required.",
 });
@@ -2778,7 +2781,7 @@ const RUN_STOP_DESCRIPTION =
   "reason. first-terminal-wins: the " +
   "first caller claims terminal 'aborted' and runs the destructive side effect (process kill " +
   "or backend abort); concurrent/late callers rejected with zero side effects. Not idempotent " +
-  "— a second call after terminal writes a rejection audit fact. Returns safe machine fields " +
+  "— after terminal, a call passing these checks writes a rejection audit fact. Returns safe machine fields " +
   "only.";
 
 // ===== runs_list (workspace-bound read-only run inventory) constants =====
@@ -3059,7 +3062,8 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 // Reads ONE transcript snapshot (zero append), classifies every event into a
 // closed set of safe activity categories (shape-driven, no backend/runtime
 // branching), redacts secrets BEFORE sanitization/excerpt/pagination, and
-// exposes ONLY closed-set safe facts. NEVER raw command text, tool input/output,
+// exposes closed-set safe facts plus the redacted, bounded command text of command
+// entries (decision 0069). NEVER tool input/output,
 // error text, credentials, PID/session id, absolute path, or unknown payload;
 // NO semantic summary/recommendation/progress estimate. Workspace-bound and
 // idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
@@ -3084,7 +3088,8 @@ const RUN_ACTIVITY_INPUT = z.object({
 }).strict();
 
 // Entry variants — a discriminated union on `category`. Each variant carries
-// ONLY closed-set safe fields. No variant exposes raw command text, tool
+// ONLY closed-set safe fields (the command variant also carries the redacted,
+// bounded command text — decision 0069). No variant exposes tool
 // input/output, error text, exit code, callId, or absolute path. Every dynamic
 // string bound matches the projector's exported *_CAP constant (parity, no
 // drift): the projector caps AFTER redaction, so these maxima are exact.
@@ -3299,7 +3304,7 @@ const RUN_ACTIVITY_DESCRIPTION =
   // cursor 拒绝恢复路径 / pageSize 默认。
   "Read-only run activity timeline from one transcript snapshot (zero append), newest first " +
   "(order asc = chronological): message excerpts, command text (redacted, bounded), tool " +
-  "names, written paths, runtime vital signs. Tool I/O and absolute/traversal paths withheld, " +
+  "names, written paths (never absolute), runtime vital signs. Tool I/O withheld, " +
   "no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only " +
   "(file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. " +
   "Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) " +

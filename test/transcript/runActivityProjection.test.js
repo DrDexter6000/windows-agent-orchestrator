@@ -389,7 +389,7 @@ test("#10 tool/file payloads and absolute paths never cross the lead schema; com
   assert.ok(!json.includes(SECRET), "no secret anywhere");
   assert.ok(!json.includes("C:\\"), "no absolute windows path");
   assert.ok(!json.includes("/etc/passwd"), "no absolute posix path");
-  assert.ok(!json.includes(".."), "no traversal path");
+  assert.ok(!json.includes(".."), "no traversal path in this fixture's path fields (a command may legitimately contain '..')");
   assert.ok(!json.includes("raw error"), "no raw error text");
   // 决定 0069：command 条目带命令原文——脱敏、有界；其余仍是闭集 exitStatus。
   const cmd = r.entries.find((e) => e.category === "command");
@@ -1160,5 +1160,50 @@ test("0069-P3: every backend registers its vital signs and closure gates (the st
   for (const backend of KNOWN_BACKENDS) {
     const note = CAPABILITY_NOTES[backend]?.vitalSigns;
     assert.ok(typeof note === "string" && note.trim().length >= 20, `${backend}: CAPABILITY_NOTES.vitalSigns is required`);
+  }
+});
+
+test("0069-P4（会审 sol）: common ways a key is written into a command are all redacted; env values are replaced whole before shapes", () => {
+  resetSeq();
+  const pat = "github_pat_" + "a1B2c3D4e5".repeat(3);
+  // 环境值本身含一段有形状的子串：先整段替换，尾巴不漏。
+  const composite = ["alpha:sk-", "a".repeat(20), ":suffixTail"].join("");
+  const r = project([
+    cmdEvent(undefined, { command: 'curl -d \'{"api_key":"abcdefgh12345678"}\' https://example.test' }),
+    cmdEvent(undefined, { command: "tool --api-key abcdefgh12345678 --verbose" }),
+    cmdEvent(undefined, { command: 'curl -H "Authorization: bearer abcdefgh12345678" https://example.test' }),
+    cmdEvent(undefined, { command: '$env:PRIVATE_KEY="abcdefgh12345678"; node run.js' }),
+    cmdEvent(undefined, { command: `git push https://${pat}@github.com/o/r.git` }),
+    cmdEvent(undefined, { command: 'TOKEN="abcdefgh\\"suffixSECRET" node run.js' }),
+    cmdEvent(undefined, { command: `echo ${composite}` }),
+  ], { env: { MY_API_KEY: composite } });
+  const texts = r.entries.filter((e) => e.category === "command").map((e) => e.text);
+  assert.equal(texts[0], 'curl -d \'{"api_key":[REDACTED]}\' https://example.test');
+  assert.equal(texts[1], "tool --api-key [REDACTED] --verbose");
+  assert.equal(texts[2], 'curl -H "Authorization: bearer [REDACTED]" https://example.test');
+  assert.equal(texts[3], "$env:PRIVATE_KEY=[REDACTED]; node run.js");
+  assert.equal(texts[4], "git push https://[REDACTED]@github.com/o/r.git");
+  assert.equal(texts[5], "TOKEN=[REDACTED] node run.js", "an escaped quote inside the value leaves no tail");
+  assert.ok(!texts[6].includes("suffixTail") && !texts[6].includes("alpha"), `env value replaced whole, got ${JSON.stringify(texts[6])}`);
+  for (const t of texts) assert.ok(!t.includes("abcdefgh12345678") && !t.includes("suffixSECRET"), t);
+});
+
+test("0069-P5（会审 kimi）: URL / curl 的口令、Google / npm 令牌、PEM 私钥块被遮掉；不含口令的 URL 与 host:port 不被误改", async () => {
+  const { redactSecretShapes } = await import("../../src/secretRedaction.js");
+  const google = "AIza" + "b".repeat(30);
+  const npmToken = "npm_" + "c".repeat(30);
+  const pem = ["-----BEGIN RSA PRIVATE KEY-----", "MIIEabc", "-----END RSA PRIVATE KEY-----"].join("\n");
+  assert.equal(redactSecretShapes("curl -u alice:Passw0rd123 https://example.test"), "curl -u alice:[REDACTED] https://example.test");
+  assert.equal(redactSecretShapes("git clone https://bob:hunter2pass@host.test/r.git"), "git clone https://bob:[REDACTED]@host.test/r.git");
+  assert.equal(redactSecretShapes(`curl "https://maps.test/api?key=${google}"`), 'curl "https://maps.test/api?key=[REDACTED]"');
+  assert.equal(redactSecretShapes(`npm publish --//registry.test/:_authToken=${npmToken}`), "npm publish --//registry.test/:_authToken=[REDACTED]");
+  assert.equal(redactSecretShapes(`echo "${pem}" > key.pem`), 'echo "[REDACTED]" > key.pem');
+  for (const plain of [
+    "curl http://localhost:8080/health",
+    "git clone https://github.com/o/r.git",
+    "git remote add origin git@github.com:o/r.git",
+    "scp build.zip deploy@host.test:/srv/app",
+  ]) {
+    assert.equal(redactSecretShapes(plain), plain, plain);
   }
 });

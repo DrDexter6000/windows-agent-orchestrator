@@ -76,7 +76,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - **deepseek-harness**
   - reasoning effort：可省略（未配置不拒）
   - provider 块：组合由 `dshConfigPath` / `dshProvider` 表达，配 provider 块即拒
-  - 生命体征与收口：可读体征：协议帧。没有轮内"等不到进展"的收口门（请求级 15s 超时除外）；不落体征事实
+  - 生命体征与收口：可读体征：协议帧（握手落 `initialized`，assistant 分片落 `streaming`）。没有轮内"等不到进展"的收口门（请求级 15s 超时除外）；长工具调用期间不落体征事实
   - supportsRoleContract（角色合同）：`DSH_SYSTEM_PROMPT`
   - reportsTokenUsage（token usage）：assistant/message 帧 usage
 - **deepseek-acp**
@@ -84,7 +84,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - reasoning effort：经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒
   - model.contextWindow：同 model 块——无可验证设置通道，配了即拒
   - provider 块：组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒
-  - 生命体征与收口：可读体征：协议帧。没有轮内"等不到进展"的收口门（请求级 15s 超时除外）；不落体征事实
+  - 生命体征与收口：可读体征：协议帧（握手落 `initialized`）。没有轮内"等不到进展"的收口门——握手等非 prompt 请求有 15s 超时，prompt 请求本身不设时限；轮内不落体征事实
   - supportsRoleContract（角色合同）：per-dispatch `--patch` personaPrefix（结构化序列化）
   - supportsSessionReuse（会话复用）：ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh
   - reportsTokenUsage（token usage）：`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道
@@ -92,11 +92,11 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - model override：`model.id` 必填（空白/纯空白串同拒）并原样直传 prompts body（上游缺 model 时接口返 success 但轮次静默秒败——fail-closed 硬拒于派发前）；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填——裸 model 探针形状因缺连接字段被拒（§二判定词按探针机械派生，非模型通道不存在）
   - reasoning effort：prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒
   - provider 块：kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒
-  - 生命体征与收口：可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）
+  - 生命体征与收口：可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）
   - supportsRoleContract（角色合同）：拼进 prompt 正文前缀，role/task 以 `\n\n---\n\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）
   - supportsSessionReuse（会话复用）：resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）
   - supportsInFlightCorrection（在途纠偏）：`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性（**形状未实测**，仅标注）：steered 的消费据说可见于 transcript prompts[].steeredAt / turn 结构；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称
-  - reportsTokenUsage（token usage）：transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（归属 turn 连续 8 拍 state 不变且 steps/frames 无增长即 done(failed)，两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）
+  - reportsTokenUsage（token usage）：transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（60–240s 自适应预算 + serve 证词，见本后端的 `vitalSigns`），两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）
 - **zcode**
   - model override：`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；live 验证例 `bigmodel-api/GLM-5.3`——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）
   - reasoning effort：effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options

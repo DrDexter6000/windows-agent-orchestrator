@@ -233,7 +233,7 @@ workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节�
 
 - **worker 401**：provider key 没配（`wao doctor` 会查出 FAIL 并给 `run:` 修复提示）
 - **opencode worker 卡住**：serve 没起 或 key 没注入 serve 进程（用 `scripts/serve.ps1` 起 serve）
-- **run 失控（烧 token）**：立即 `npm run cli -- stop <runId>`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置——全局 `/IM` 扫杀只作为 opencode 事故的最后手段（先见 `docs/troubleshooting.md`）
+- **run 失控（烧 token）**：先 `npm run cli -- status <runId>` 看它在做什么（记下输出里的 `observedSeq`），再 `npm run cli -- stop <runId> --observed-seq <n> --reason "<为什么要停>"`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置——全局 `/IM` 扫杀只作为 opencode 事故的最后手段（先见 `docs/troubleshooting.md`）
 - **不确定环境**：跑 `wao doctor`（advisory——HEALTHY/DEGRADED 可直接继续，BROKEN 项按 `run:` 提示处理后由 owner 裁决）
 
 详细排障：`docs/troubleshooting.md`。

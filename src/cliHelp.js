@@ -28,7 +28,7 @@ Commands:
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
-  stop <runId> [--run-dir DIR]
+  stop <runId> --observed-seq N --reason TEXT [--run-dir DIR]   # N = status 输出的 observedSeq；先看最新状态、写明理由（决定 0069）
   retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
   resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑（存活）；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker — by design，见 docs/usage.md 场景 1）
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--active] [--state <state>] [--since <duration>] [--project <path|name|@sandbox|@scratch|@unattributed>] [--format json]

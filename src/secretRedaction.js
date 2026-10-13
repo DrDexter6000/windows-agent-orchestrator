@@ -10,19 +10,43 @@ export function isSecretEnvName(name) {
 // 决定 0069：命令原文面向 Lead 给出之后，在"环境里按名字识别出的密钥值"之外再
 // 兜一层形状——命令行里的内联赋值（名字命中密钥名规则、值不短于 8 字符）与几种
 // 常见令牌形状。只是兜底：没有形状的秘密不在覆盖范围内。
+// 密钥名规则命中的赋值：NAME=值 / NAME: 值 / "name": "值" / $env:NAME="值"。引号内
+// 允许转义引号——整段值被替换，不留尾巴。
+const INLINE_SECRET_ASSIGNMENT =
+  /((?:\$env:)?["']?[A-Za-z0-9_.-]*(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*["']?\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|,}]{8,})/gi;
+// 命令行参数：--api-key 值 / --token=值（空格或等号分隔）。
+const FLAG_SECRET =
+  /(--?[A-Za-z0-9-]*(?:api-?key|access-?key|private-?key|token|secret|password|passwd|credential)[A-Za-z0-9-]*(?:\s+|=))("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"';&|]{8,})/gi;
+// Authorization 头里方案词后面的凭证；Bearer 单独出现也算（大小写不敏感）。Basic /
+// Token 只在 Authorization 语境里算——否则 "token <某个词>" 这样的普通文字会被误伤。
+const AUTH_SCHEME = /\b(Authorization["']?\s*[:=]\s*["']?(?:Bearer|Basic|Token)\s+|Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
+// URL 里的 user:pass@、curl 的 -u user:pass——只遮口令那一段。
+const URL_USERINFO = /(:\/\/[^\s\/:@]+:)[^\s\/@]+(@)/g;
+const CURL_USER = /((?:-u|--user)\s+["']?[^\s:"']+:)[^\s"']+/g;
+// PEM 私钥块（到 END 行或文本结尾）。
+const PEM_PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
 const SECRET_TOKEN_SHAPES = [
+  /\bAIza[0-9A-Za-z_-]{30,}/g, // Google API key
+  /\bnpm_[A-Za-z0-9]{30,}/g, // npm token
   /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key id
   /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}/g, // sk-… 风格的 API key
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, // GitHub token
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained token
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, // Slack token
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, // JWT
 ];
-const BEARER_SHAPE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/g;
-const INLINE_SECRET_ASSIGNMENT =
-  /\b([A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)("[^"]{8,}"|'[^']{8,}'|[^\s"';&|]{8,})/gi;
 
+// 调用方先做环境密钥值的整段替换，再过这一层——反过来的话，形状替换会把环境值
+// 切碎，整段匹配随之失效，尾巴漏出（会审 sol 的反例）。
 export function redactSecretShapes(text) {
   if (typeof text !== "string" || text.length === 0) return text;
-  let out = text.replace(INLINE_SECRET_ASSIGNMENT, "$1[REDACTED]").replace(BEARER_SHAPE, "$1[REDACTED]");
+  let out = text
+    .replace(INLINE_SECRET_ASSIGNMENT, "$1[REDACTED]")
+    .replace(FLAG_SECRET, "$1[REDACTED]")
+    .replace(AUTH_SCHEME, "$1[REDACTED]")
+    .replace(URL_USERINFO, "$1[REDACTED]$2")
+    .replace(CURL_USER, "$1[REDACTED]")
+    .replace(PEM_PRIVATE_KEY, "[REDACTED]");
   for (const shape of SECRET_TOKEN_SHAPES) out = out.replace(shape, "[REDACTED]");
   return out;
 }

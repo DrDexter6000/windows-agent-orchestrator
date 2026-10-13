@@ -86,16 +86,20 @@ async function waitForPidExit(pid, isAliveFn, sleep, pollConfig = {}) {
 //     CLI status 的 observedSeq）。在它之后落下的 worker 事件若已超过
 //     STOP_OBSERVATION_MAX_AGE_SECONDS，说明这个决定是照着过时的状态做的——
 //     拒绝，零事件、零副作用，让 Lead 重新看过再决定。刚落下的事件不算过时
-//     （否则话多的 worker 永远停不掉）。
+//     （否则话多的 worker 永远停不掉）；位置之后运行被重放过（停止目标换了）
+//     则不论多久都拒绝。
+//   这是"决定不能照着过时的状态做"的校验，不是"调用过 run_activity"的证明：
+//   run_activity 零写入，控制面无从得知；一个刚派发两分钟的运行，位置填 0 也过。
 // 不带 justification 的调用是内部 / 机制测试路径，不做这项检查。
 export const STOP_REASON_MIN_LEN = 6;
 export const STOP_REASON_MAX_LEN = 400;
-export const STOP_OBSERVATION_MAX_AGE_SECONDS = 5 * 60;
+export const STOP_OBSERVATION_MAX_AGE_SECONDS = 2 * 60;
 export const STOP_PRECONDITION_CODES = Object.freeze([
   "reason_required",
   "observation_required",
   "observation_unknown",
   "observation_stale",
+  "target_changed",
 ]);
 
 function checkStopJustification(justification, scope, nowMs) {
@@ -109,14 +113,21 @@ function checkStopJustification(justification, scope, nowMs) {
   if (!Number.isInteger(observedSeq) || observedSeq < 0) {
     return { ok: false, code: "observation_required" };
   }
-  let lastSeq = 0;
-  for (const e of scope) if (Number.isInteger(e.seq) && e.seq > lastSeq) lastSeq = e.seq;
-  if (observedSeq > lastSeq) return { ok: false, code: "observation_unknown" };
+  // 位置必须真的是这个运行转录里的一条（0 = 还没有任何条目时的起点）。
+  if (observedSeq !== 0 && !scope.some((e) => e.seq === observedSeq)) {
+    return { ok: false, code: "observation_unknown" };
+  }
+  // 看到的位置之后运行被重放过（run.rerun）——停止目标已经换成 Lead 没看过的
+  // 进程，不论过去多久都得重新看。
+  if (scope.some((e) => e.type === "run.rerun" && Number.isInteger(e.seq) && e.seq > observedSeq)) {
+    return { ok: false, code: "target_changed" };
+  }
   const workerEvents = scope.filter((e) => e.type === "run.event");
   const newer = workerEvents.filter((e) => Number.isInteger(e.seq) && e.seq > observedSeq);
   if (newer.length > 0) {
     const oldestNewerMs = new Date(newer[0].ts).getTime();
-    const ageSeconds = Number.isFinite(oldestNewerMs) ? Math.round((nowMs - oldestNewerMs) / 1000) : Infinity;
+    // 时间戳在未来（时钟回拨）按刚落下处理；读不出时间戳的按过时处理。
+    const ageSeconds = Number.isFinite(oldestNewerMs) ? Math.max(0, Math.round((nowMs - oldestNewerMs) / 1000)) : Infinity;
     if (ageSeconds > STOP_OBSERVATION_MAX_AGE_SECONDS) {
       return { ok: false, code: "observation_stale", newerEventCount: newer.length };
     }
@@ -130,7 +141,8 @@ function checkStopJustification(justification, scope, nowMs) {
       newerEventCount: newer.length,
       // 最近一条 worker 事件（含 runtime_activity）距今多久——"有生命体征的 10
       // 分钟内不建议中止"这条建议的事实侧；没有任何 worker 事件时为 null。
-      secondsSinceVitalSign: Number.isFinite(lastWorkerMs) ? Math.round((nowMs - lastWorkerMs) / 1000) : null,
+      // 这几项取自认领之前读到的快照：并发增长时不保证覆盖到落盘那一刻。
+      secondsSinceVitalSign: Number.isFinite(lastWorkerMs) ? Math.max(0, Math.round((nowMs - lastWorkerMs) / 1000)) : null,
     },
   };
 }

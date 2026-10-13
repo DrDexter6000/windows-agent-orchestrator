@@ -553,7 +553,7 @@ function killSpy() {
   };
 }
 
-test("0069-S1: 看到的位置之后 worker 又有了动作、且已过 5 分钟 → 拒绝，零事件、零击杀", async () => {
+test("0069-S1: 看到的位置之后 worker 又有了动作、且已过新鲜度窗口 → 拒绝，零事件、零击杀", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-0069-s1-"));
   try {
     makeGitRepo(dir);
@@ -576,7 +576,7 @@ test("0069-S1: 看到的位置之后 worker 又有了动作、且已过 5 分钟
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("0069-S2: 之后的事件是刚落下的（<5 分钟）→ 照常停；理由、位置、新增事件数、体征距今都记进 run.stop_requested", async () => {
+test("0069-S2: 之后的事件是刚落下的（窗口内）→ 照常停；理由、位置、新增事件数、体征距今都记进 run.stop_requested", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-0069-s2-"));
   try {
     makeGitRepo(dir);
@@ -673,7 +673,7 @@ test("0069-M1: MCP run_stop —— 两项必填由 schema 拦；观察过时返�
         arguments: { runId: "run_0069_m1", reason: "the worker has been silent for too long", observedSeq },
       });
       assert.ok(stale.isError);
-      assert.match(stale.content[0].text, /^run_stop rejected, no side effect: the worker produced events after your observation more than 5 minutes ago\. Re-read run_activity/);
+      assert.match(stale.content[0].text, /^run_stop rejected, no side effect: the worker produced events after your observation more than 2 minutes ago\. Re-read run_activity/);
       assert.ok(!stale.content[0].text.includes("npm test"), "固定文案，不带转录内容");
       assert.deepEqual(spy.killed, []);
 
@@ -723,5 +723,83 @@ test("0069-C1: CLI stop —— 缺 --reason / --observed-seq 即报错并给出�
     } finally { console.log = originalLog; }
     assert.deepEqual(spy.killed, [4321]);
     assert.match(printed.join("\n"), /"terminalState": "aborted"/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 会审 sol 的反例 ──────────────────────────────────────────────────────────
+
+test("0069-S5（会审 sol）: 位置在范围内但不是该运行的任何一条 → observation_unknown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s5-"));
+  try {
+    makeGitRepo(dir);
+    // 绑定事件的 seq 只有 10 与 20；15 落在范围内却不存在。
+    const lines = [
+      { type: "run.started", backend: "zcode", seq: 5 },
+      { type: "run.background_submitted", background: true, cwd: dir, seq: 6 },
+      { type: "session.created", backend: "zcode", backendSessionId: "sess_gap", hostPid: 4321, seq: 7 },
+      { type: "run.state_change", to: "running", reason: "first_event", seq: 8 },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "a" }], seq: 10 },
+      { type: "run.event", kind: "command", command: "npm test", seq: 20 },
+    ].map((e) => JSON.stringify({ runId: "run_0069_s5", agentId: "a", ts: new Date().toISOString(), ...e }) + "\n");
+    writeFileSync(join(dir, "run_0069_s5.jsonl"), lines.join(""), "utf8");
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const attempt = (observedSeq) => stopRun({
+      runId: "run_0069_s5", runDir: dir, authorizedWorkspaceRoot: dir,
+      justification: { reason: "a real reason for stopping", observedSeq }, deps: spy.deps(),
+    });
+    assert.equal((await attempt(15)).preconditionFailed, "observation_unknown");
+    assert.equal((await attempt(21)).preconditionFailed, "observation_unknown");
+    assert.deepEqual(spy.killed, []);
+    assert.equal((await attempt(20)).terminalAccepted, true, "真实存在的最新位置通过");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-S6（会审 sol）: 看到的位置之后运行被重放过 → target_changed，不论过去多久；重新看过后通过并击杀新进程", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s6-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq } = await seedRunWithLateCommand(dir, "run_0069_s6", dir);
+    const before = await readTranscript(join(dir, "run_0069_s6.jsonl"));
+    const t = new JsonlTranscript(join(dir, "run_0069_s6.jsonl"), { runId: "run_0069_s6", agentId: "a", initialSeq: before.at(-1).seq });
+    const sawCommand = before.at(-1).seq;
+    await t.append("run.rerun", { originalSessionId: "sess_0069", newSessionId: "sess_0069_b", reason: "replay", hostPid: 8765 });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const spy = killSpy();
+    const attempt = (seq) => stopRun({
+      runId: "run_0069_s6", runDir: dir, authorizedWorkspaceRoot: dir,
+      justification: { reason: "a real reason for stopping", observedSeq: seq }, deps: spy.deps(),
+    });
+    for (const stale of [observedSeq, sawCommand]) {
+      const result = await attempt(stale);
+      assert.equal(result.preconditionFailed, "target_changed", `observedSeq ${stale}`);
+      assert.equal(result.sideEffectAttempted, false);
+    }
+    assert.deepEqual(spy.killed, []);
+    const after = await readTranscript(join(dir, "run_0069_s6.jsonl"));
+    const ok = await attempt(after.at(-1).seq);
+    assert.equal(ok.terminalAccepted, true);
+    assert.deepEqual(spy.killed, [8765], "停止目标是重放记录的新进程");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("0069-S7（会审 sol）: 新鲜度窗口是 2 分钟；事件时间戳在未来（时钟回拨）按刚落下处理，体征距今不为负", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0069-s7-"));
+  try {
+    makeGitRepo(dir);
+    const { observedSeq } = await seedRunWithLateCommand(dir, "run_0069_s7", dir);
+    const { stopRun, STOP_OBSERVATION_MAX_AGE_SECONDS } = await import("../../src/application/runStop.js");
+    assert.equal(STOP_OBSERVATION_MAX_AGE_SECONDS, 120);
+    const spy = killSpy();
+    const attempt = (skewMs) => stopRun({
+      runId: "run_0069_s7", runDir: dir, authorizedWorkspaceRoot: dir,
+      justification: { reason: "a real reason for stopping", observedSeq },
+      deps: spy.deps({ nowFn: () => Date.now() + skewMs }),
+    });
+    assert.equal((await attempt(3 * 60_000)).preconditionFailed, "observation_stale", "3 分钟前的未见事件：过时");
+    const rolledBack = await attempt(-10 * 60_000);
+    assert.equal(rolledBack.terminalAccepted, true, "未来时间戳不放大年龄，也不挡住 stop");
+    const requested = (await readTranscript(join(dir, "run_0069_s7.jsonl"))).find((e) => e.type === "run.stop_requested");
+    assert.equal(requested.secondsSinceVitalSign, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

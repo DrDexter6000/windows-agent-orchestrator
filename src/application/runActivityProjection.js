@@ -21,7 +21,8 @@
 //     excerpt, and pagination (a secret spanning an excerpt or page boundary is
 //     already [REDACTED] before any slice);
 //   - C0/C1/DEL control sanitization (LF/TAB preserved);
-//   - closed-set safe activity facts ONLY — never raw command text, tool input,
+//   - closed-set safe activity facts — plus, since decision 0069, the command
+//     text of command entries (redacted, sanitized, bounded); never tool input,
 //     tool output, error text, credentials, PID/session id, absolute path, or
 //     unknown payload; NO semantic summary/recommendation/progress estimate;
 //   - per-page caps (entries + text excerpt) bounded per audience; an
@@ -208,7 +209,7 @@ export const ACTIVITY_TS_CAP = 64;
 //     "r": "<runIdDigest>",   // sha256(runId).slice(0,16) base64url — 16 bytes
 //     "s": "<snapDigest>",    // raw-event snapshot prefix digest
 //     "n": <eventCount>,      // raw-event count of the frozen prefix
-//     "f": "<viewDigest>",    // digest of the view (audience + filter set + afterSeq)
+//     "f": "<viewDigest>",    // digest of the view (audience + filter set + afterSeq + order)
 //     "p": <position>         // index into the filtered+ordered entry list
 //   }
 //
@@ -543,10 +544,11 @@ function buildEntry(event, category, redactor, textCap, toolResultsById) {
       return { category, ts, seq, role, text: safe, truncated };
     }
     case "command": {
-      // 命令原文：先按形状兜底（内联赋值、常见令牌形状），再走与 message 文本
-      // 同一条 redact -> sanitize -> bound 路径。
+      // 命令原文：先做环境密钥值的整段替换，再按形状兜底（顺序反过来，形状替换会
+      // 把环境值切碎、尾巴漏出），最后清控制字符并截断。
       const { text, truncated } = boundText(
-        typeof event.command === "string" ? redactSecretShapes(event.command) : "", redactor, ACTIVITY_COMMAND_CAP,
+        typeof event.command === "string" ? redactSecretShapes(redactor.redactString(event.command)) : "",
+        redactor, ACTIVITY_COMMAND_CAP,
       );
       if (event.exitCode !== undefined) {
         return { category, ts, seq, text, truncated, exitStatus: commandExitStatus(event), exitStatusSource: "wire" };
@@ -618,14 +620,14 @@ function buildEntry(event, category, redactor, textCap, toolResultsById) {
  * @param {"lead"|"owner"} [opts.audience] — caps selector (default "lead")
  * @param {number} [opts.pageSize] — entries per page (default per audience;
  *        an explicitly provided invalid pageSize is REJECTED, never clamped)
- * @param {"asc"|"desc"} [opts.order] — closed-set entry order (default "asc").
- *        asc preserves every existing Lead behavior AND old asc cursor digest
- *        compatibility; desc gives latest-first Owner bootstrap. desc is
- *        cursor-bound, stable on an append-only frozen snapshot, and rejects
- *        cross-order/cross-audience/cross-run/filter cursors. desc NEVER changes
- *        the classifier, redaction-before-bound, caps, counts, or total — it
- *        only reverses the filtered safe-entry list before pagination. NOT
- *        exposed on the MCP run_activity tool (Lead view stays asc-only).
+ * @param {"asc"|"desc"} [opts.order] — closed-set entry order (projector default
+ *        "asc": chronological, and compatible with old asc cursor digests; desc =
+ *        newest first). desc is cursor-bound, stable on an append-only frozen
+ *        snapshot, and rejects cross-order/cross-audience/cross-run/filter
+ *        cursors. desc NEVER changes the classifier, redaction-before-bound,
+ *        caps, counts, or total — it only reverses the filtered safe-entry list
+ *        before pagination. The MCP run_activity tool exposes `order` and passes
+ *        desc by default since decision 0069 (the Lead asks "what is it doing now").
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
  *                   scopeObservation (M12-14 advisory, from the frozen prefix),

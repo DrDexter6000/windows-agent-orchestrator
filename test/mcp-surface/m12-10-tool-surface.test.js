@@ -690,9 +690,9 @@ const RED_23_WIRE = 75492;
 // run_activity command 条目增 text / truncated、入参增 order、runtime_status 的
 // status enum 增 serve_active；run_stop 入参增必填 reason / observedSeq；两条工具
 // 描述改写（协议与"10 分钟内有生命体征不建议中止"须到 Lead 眼前）。实测
-// 85221 → 85912（+691B：schema +279，描述 +412）。Owner 硬顶 85939 不变，余 27B
+// 85221 → 85915（+694B：schema +279，描述 +415）。Owner 硬顶 85939 不变，余 24B
 // ——下一次再给 MCP 加字段须先由 Owner 抬硬顶或在别处瘦身。
-const FROZEN_23_WIRE_CEILING = 85912;
+const FROZEN_23_WIRE_CEILING = 85915;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -961,9 +961,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 拒绝面），10442 → 10976，实测重冻（Owner 批准的三工作批；防 creep 语义不变）。
 // 0069 重冻（2026-10-13，Owner 当日裁定的需求批）：run_stop 描述写入中止协议
 // （先 run_activity、带 observedSeq 与 reason、观察过时即拒）与"10 分钟内有生命体征
-// 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11388（+412），
+// 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11391（+415），
 // 实测重冻。防 creep 语义不变。
-const FROZEN_23_DESC_CEILING = 11388;
+const FROZEN_23_DESC_CEILING = 11391;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new
