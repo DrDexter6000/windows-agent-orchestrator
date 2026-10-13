@@ -321,8 +321,25 @@ export class KimiWebBackend {
     }
     // 决定 0075：车道声明了 serveWorkspaceDir 时，serve 没在跑就先把它拉起来（resume 轮
     // 同样需要 serve 在场——会话存在主目录里，重启后的 serve 仍能续接）。拉不起来在这里抛错，
-    // 派发以固定文案失败；拉起或等待过，就给 Lead 留一条说明（events 的第一条）。
-    const serveStartNote = await this.ensureServe(agent);
+    // 派发以固定文案失败；拉起或等待过，就给 Lead 留一条说明（handle 交出后 events 的第一条；
+    // 后续步骤失败则附在错误消息末尾）。
+    // 会审（kimi）：畸形的续接轮（前任会话 id 缺失 / 占位）会在 spawnSession 里被拒——别先为
+    // 它把 serve 拉起来。
+    const malformedResume = task.sessionReuse?.turn === "resume"
+      && (typeof task.priorProviderSessionId !== "string" || task.priorProviderSessionId.length === 0
+        || isProcessPlaceholderSessionId(task.priorProviderSessionId));
+    const serveStartNote = malformedResume ? null : await this.ensureServe(agent);
+    try {
+      return await this.spawnSession(agent, task, opts, serveStartNote);
+    } catch (error) {
+      // 拉起过 serve 而后续步骤失败：说明跟着错误走（否则 Lead 不知道这次派发留下了一个 serve）。
+      if (serveStartNote !== null && error instanceof Error) error.message = `${error.message} [${serveStartNote}]`;
+      throw error;
+    }
+  }
+
+  // spawn 的后半段：会话（新建或续接）→ 静默门 → 提交 → handle。serve 在场保证已在 spawn 里做完。
+  async spawnSession(agent, task, opts, serveStartNote) {
     let sessionId;
     if (task.sessionReuse?.turn === "resume") {
       // 镜像 kimiCode.js 的 resume 轮实现：前任 provider session id 缺失/空/占位
@@ -470,11 +487,21 @@ export class KimiWebBackend {
     });
     if (!result) return null;
     const seconds = Math.round((Number(result.waitedMs) || 0) / 1000);
-    return result.started
-      ? `kimi-web backend: the worker serve at ${agent.serveUrl} was not running; started it `
-        + `(pid ${result.pid ?? "unknown"}, answering after ${seconds} s; the lane declares serveWorkspaceDir)`
-      : `kimi-web backend: the worker serve at ${agent.serveUrl} was not running; another run was starting it, `
-        + `waited ${seconds} s for it to answer`;
+    // 说明里只写端口，不写 serveUrl 原文（配置里的 URL 不保证不带别的东西）。
+    let port = "unknown";
+    try { port = new URL(agent.serveUrl).port || "unknown"; } catch { /* 形状不对的 URL 走不到这里 */ }
+    const displaced = result.displaced;
+    const what = displaced
+      // 目标端口在拉起期间被别人占了：kimi 不退出而是改绑别的端口——那一个已被请走（或请不动）。
+      ? `a serve this dispatch started (pid ${displaced.pid}) landed on port ${displaced.port} because port ${port} was taken meanwhile; `
+        + (displaced.shutdown === "requested" ? "it was asked to exit" : "asking it to exit failed — stop it by hand")
+      : result.started
+        ? `started it (pid ${result.pid ?? "unknown"}; the lane declares serveWorkspaceDir)`
+        : "it was started by another process (another dispatch or a recycle)";
+    const outcome = result.answer === "ok"
+      ? `answering after ${seconds} s`
+      : `after ${seconds} s the port answers but not with success for this lane's token — the request that follows reports the reason`;
+    return `kimi-web backend: the worker serve on port ${port} was not running; ${what}; ${outcome}`;
   }
 
   async awaitSessionIdle(agent, sessionId, { silentTimeout = 60_000, interval = 1000 } = {}) {

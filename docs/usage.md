@@ -313,7 +313,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 > **行为变更（决定 0073，2026-10-13）**：① kimi-code、deepseek-harness 两个后端不再声明"能产出命令退出码证据"（前者靠输出里的关键词猜成败，后者没有实测）。② 认证：命令退出码这一轴因后端如实声明不产出而不适用的车道评 `conditional`，不再停在 `draft-only`（其它 strict 轴不适用、要求的命令根本没跑，仍是 `draft-only`）。③ `run_activity` 的工具输出尾部（`tail`）也读文本块数组——deepseek-acp 的工具结果此前一直显示为空。④ deepseek-acp 运行在沙箱建不起来时，转录里落一条 system 消息，写明症状、harness 文档给出的常见原因与修法（每次启动后端进程一次）。
 
-> **行为变更（决定 0074，2026-10-13）**：① deepseek-acp 车道的 `env.DSH_PERMISSION_MODE` 现在校验取值（三个预设名之外即拒）；沙箱建不起来时的 system 提示改为先给车道级修法。② kimi-web 车道可声明 `kimiHome`：token 取自该主目录的 `server.token`，这条车道在 `registry_list` 里显示 `not_required`（没有环境凭据；token 文件仍必需）。③ `wao lanes` 多一行 `concurrency`。④ kimi-code、deepseek-harness 两个后端暂停使用。⑤ `serve recycle` 重启的 serve 不带密钥类环境变量。⑥（决定 0075）kimi-web 车道可声明 `serveWorkspaceDir`：派发时 serve 没在跑即自动拉起。
+> **行为变更（决定 0074，2026-10-13）**：① deepseek-acp 车道的 `env.DSH_PERMISSION_MODE` 现在校验取值；沙箱建不起来时的 system 提示改为先给车道级修法。② kimi-web 车道可声明 `kimiHome`：token 取自该主目录的 `server.token`，这条车道在 `registry_list` 里显示 `not_required`（token 文件仍必需）。③ `wao lanes` 多一行 `concurrency`。④ kimi-code、deepseek-harness 两个后端暂停使用。⑤ `serve recycle` 重启的 serve 不带密钥类环境变量。⑥（决定 0075）kimi-web 车道可声明 `serveWorkspaceDir`：派发时 serve 没在跑即自动拉起。
 
 > **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 缺省给命令套一层 Windows 沙箱（`workspace-write`），它要求工作目录**由当前用户拥有并且有完全控制**。只有"修改"权限的目录上（非系统盘的项目目录常见），沙箱内的命令在执行之前就以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败。两种做法，WAO 都不替你选：
 >
@@ -605,7 +605,7 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
 自助派发被 0047 env 臂拒绝（验收判据=席位内 run_dispatch 被拒且
 `Detected worker context: env-marker`；工具 shell `WAO_IN_WORKER` 非空）。
 主 serve（默认端口 58627，无标记）留给 Owner 人类使用。车道写了
-`serveWorkspaceDir`（工作区）时，派发发现 serve 没在跑会自动拉起（决定 0075）；没写就手动拉起。
+`serveWorkspaceDir` 时，派发发现 serve 没在跑会自动拉起（决定 0075）；没写就手动拉起。
 
 **KIMI_WEB_TOKEN（kimi 车道凭据面，TD-258 补档）**：
 
@@ -679,8 +679,8 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
    `"kimiHome": "<私有主目录绝对路径>"` 即指向它：token 取自 `<kimiHome>/server.token`
    （不读环境变量），`serve status|sweep|recycle` 以它为缺省主目录。**换主目录要换端口**（清扫按
    `serveUrl` 分家）；旧主目录的会话不会跟过来。私有主目录要先单独
-   登录一次（`kimi login`，勿复制 credentials）；serve 没在跑时由派发自动拉起
-   （车道写了 `serveWorkspaceDir`），否则手动拉起。
+   登录一次（`kimi login`，勿复制 credentials），并用上面的脚本拉起一次（生成 `server.token`）；此后 serve
+   没在跑由派发自动拉起（车道写了 `serveWorkspaceDir`），否则手动拉起。
 
 ### 场景 5：重试 / 恢复
 

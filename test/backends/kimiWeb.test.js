@@ -3046,7 +3046,6 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
       fetchImpl, timeout: 5000, retries: 0,
       ensureServeFn: async (args) => {
         ensureCalls.push({ ...args, fetchCallsBefore: calls.length });
-        if (ensureResult instanceof Error) throw ensureResult;
         return ensureResult;
       },
     });
@@ -3059,9 +3058,10 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
   const systemTexts = (events) => events
     .filter((ev) => ev.kind === "message" && ev.role === "system")
     .map((ev) => ev.parts.map((p) => p.text).join(""));
+  const port = new URL(makeAgent().serveUrl).port;
 
   // 没声明：不调在场保证，事件流里没有 system 说明。
-  const plain = await runWith("session_0075a", {}, { started: true, pid: 1, waitedMs: 1 });
+  const plain = await runWith("session_0075a", {}, { started: true, pid: 1, waitedMs: 1, answer: "ok" });
   assert.equal(plain.ensureCalls.length, 0);
   assert.deepEqual(systemTexts(plain.events), []);
 
@@ -3075,30 +3075,71 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
   assert.equal(present.ensureCalls[0].fetchCallsBefore, 0, "在任何会话请求之前");
   assert.deepEqual(systemTexts(present.events), []);
 
-  // 声明了、本次派发把 serve 拉了起来：events 的第一条是给 Lead 的说明。
-  const started = await runWith("session_0075c", { serveWorkspaceDir: ws }, { started: true, pid: 777, waitedMs: 4200 });
+  // 声明了、本次派发把 serve 拉了起来：events 的第一条是给 Lead 的说明（只写端口，不写 URL 原文）。
+  const started = await runWith("session_0075c", { serveWorkspaceDir: ws }, { started: true, pid: 777, waitedMs: 4200, answer: "ok" });
   assert.equal(started.events[0].kind, "message");
   assert.equal(started.events[0].role, "system");
-  assert.match(systemTexts(started.events)[0], /worker serve at .* was not running; started it \(pid 777, answering after 4 s; the lane declares serveWorkspaceDir\)/);
+  assert.equal(
+    systemTexts(started.events)[0],
+    `kimi-web backend: the worker serve on port ${port} was not running; started it (pid 777; the lane declares serveWorkspaceDir); answering after 4 s`,
+  );
   assert.equal(systemTexts(started.events).length, 1);
   assert.ok(!JSON.stringify(started.events).includes(TOKEN_VALUE));
+  assert.ok(!systemTexts(started.events)[0].includes(makeAgent().serveUrl));
 
-  // 别的运行在拉，本次只等。
-  const waited = await runWith("session_0075d", { serveWorkspaceDir: ws }, { started: false, pid: null, waitedMs: 3000 });
-  assert.match(systemTexts(waited.events)[0], /was not running; another run was starting it, waited 3 s for it to answer/);
+  // 别的进程在拉，本次只等。
+  const waited = await runWith("session_0075d", { serveWorkspaceDir: ws }, { started: false, pid: null, waitedMs: 3000, answer: "ok" });
+  assert.match(systemTexts(waited.events)[0], /was not running; it was started by another process \(another dispatch or a recycle\); answering after 3 s$/);
+
+  // 端口有应答但不认这条车道的 token：说明如实写，原因由随后的请求报。
+  const rejected = await runWith("session_0075f", { serveWorkspaceDir: ws }, { started: true, pid: 9, waitedMs: 6000, answer: "rejected" });
+  assert.match(systemTexts(rejected.events)[0], /started it \(pid 9; .*\); after 6 s the port answers but not with success for this lane's token/);
 
   // 拉不起来：派发在建会话之前失败，错误原样上抛。
   const lane = turnScriptServer("session_0075e", oneTurn());
   const { fetchImpl, calls } = kimiServer(lane.handler);
   const failing = new KimiWebBackend({
     fetchImpl, timeout: 5000, retries: 0,
-    ensureServeFn: async () => { throw new Error("kimi-web backend: the worker serve at http://x is not running and could not be started (workspace_dir_invalid)"); },
+    ensureServeFn: async () => { throw new Error("kimi-web backend: the worker serve is not running and could not be started (workspace_dir_invalid)"); },
   });
   await assert.rejects(
     () => failing.spawn(makeAgent({ serveWorkspaceDir: ws }), { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } }),
     /could not be started \(workspace_dir_invalid\)/,
   );
   assert.equal(calls.length, 0, "没有 serve 就不发会话请求");
+
+  // 会审（sol）：serve 拉起来了、但随后的建会话失败——说明跟着错误走（events 这时还没有交出去）。
+  const afterStart = new KimiWebBackend({
+    fetchImpl: async () => { throw new Error("network down"); }, timeout: 5000, retries: 0,
+    ensureServeFn: async () => ({ started: true, pid: 778, waitedMs: 2000, answer: "ok" }),
+  });
+  await assert.rejects(
+    () => afterStart.spawn(makeAgent({ serveWorkspaceDir: ws }), { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } }),
+    (err) => err.message.includes("network down")
+      && err.message.endsWith(`[kimi-web backend: the worker serve on port ${port} was not running; started it (pid 778; the lane declares serveWorkspaceDir); answering after 2 s]`)
+      && !err.message.includes(TOKEN_VALUE),
+  );
+
+  // 会审（kimi）：畸形的续接轮在建会话之前就会被拒——不为它拉起 serve。
+  let resumeEnsureCalls = 0;
+  const resumeBackend = new KimiWebBackend({
+    fetchImpl, timeout: 5000, retries: 0, ensureServeFn: async () => { resumeEnsureCalls += 1; return null; },
+  });
+  await assert.rejects(
+    () => resumeBackend.spawn(makeAgent({ serveWorkspaceDir: ws }), { prompt: "hi", sessionReuse: { turn: "resume" }, resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } }),
+    /requires the prior provider session id/,
+  );
+  assert.equal(resumeEnsureCalls, 0);
+
+  // 自己拉起的那个落在了别的端口（目标端口期间被占）：说明里写明它的去向。
+  const moved = { started: false, pid: null, waitedMs: 5000, answer: "ok", displaced: { pid: 31, port: 59000, shutdown: "requested" } };
+  const displaced = await runWith("session_0075g", { serveWorkspaceDir: ws }, moved);
+  assert.equal(
+    systemTexts(displaced.events)[0],
+    `kimi-web backend: the worker serve on port ${port} was not running; a serve this dispatch started (pid 31) landed on port 59000 because port ${port} was taken meanwhile; it was asked to exit; answering after 5 s`,
+  );
+  const stuck = await runWith("session_0075h", { serveWorkspaceDir: ws }, { ...moved, displaced: { ...moved.displaced, shutdown: "failed" } });
+  assert.match(systemTexts(stuck.events)[0], /asking it to exit failed — stop it by hand; answering after 5 s$/);
 
   // 形状：绝对路径、首尾不带空白——registry 与 backend 同一判据；归一化保留该字段。
   const shapeBackend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });

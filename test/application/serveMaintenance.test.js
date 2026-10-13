@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serveStartLockPath } from "../../src/backends/kimiServeStart.js";
 import {
   isWorktreeShapedRoot,
   worktreeRootVerdict,
@@ -326,11 +327,13 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
     const env = makeRecycleEnv(roots);
     // 决定 0074：重启出来的 serve 不带操作员环境里的密钥（worker 读得到 serve 的环境）。
     const planted = {
-      [["WAO", "TEST", "API", "KEY"].join("_")]: "planted-a",
-      [["WAO", "TEST", "WEB", "TOKEN"].join("_")]: "planted-b",
-      [["WAO", "TEST", "CLIENT", "SECRET"].join("_")]: "planted-c",
+      [["ZZ", "TEST", "API", "KEY"].join("_")]: "planted-a",
+      [["ZZ", "TEST", "WEB", "TOKEN"].join("_")]: "planted-b",
+      [["ZZ", "TEST", "CLIENT", "SECRET"].join("_")]: "planted-c",
       HTTPS_PROXY: "http://127.0.0.1:9",
-      WAO_TEST_PLAIN_SETTING: "kept",
+      ZZ_TEST_PLAIN_SETTING: "kept",
+      WAO_ALLOW_NESTED_DISPATCH: "1",
+      WAO_TARGET_CWD: "D:\\lead-workspace",
     };
     const savedPlanted = Object.fromEntries(Object.keys(planted).map((k) => [k, process.env[k]]));
     Object.assign(process.env, planted);
@@ -359,10 +362,13 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
       listRunsFn: async () => ({ runs: [] }),
       sleepFn: async () => {},
       fetchImpl: async () => { throw new Error("connection refused = port down"); },
-      spawnFn: (exe, args, opts) => { spawns.push({ exe, args, opts }); return { unref() {} }; },
+      spawnFn: (exe, args, opts) => { spawns.push({ exe, args, opts, startLockHeld: existsSync(serveStartLockPath(58628)) }); return { unref() {} }; },
       execFileFn: () => { throw new Error("graceful path must not taskkill"); },
     });
     assert.equal(result.recycled, true);
+    // 决定 0075 会审：关旧起新的窗口里占着按需拉起的启动锁（同时到来的派发只等），完事放掉。
+    assert.equal(spawns[0].startLockHeld, true);
+    assert.equal(existsSync(serveStartLockPath(58628)), false);
     assert.equal(result.oldPid, 111);
     assert.equal(result.newPid, 222);
     assert.equal(result.portDownVerified, true);
@@ -378,7 +384,10 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
       assert.ok(!/API_KEY|TOKEN|SECRET|PASSWORD/i.test(name), `密钥类变量不进 serve 的环境：${name}`);
     }
     assert.equal(childEnv.HTTPS_PROXY, "http://127.0.0.1:9", "代理变量保留（联网要用）");
-    assert.equal(childEnv.WAO_TEST_PLAIN_SETTING, "kept", "普通变量照旧继承");
+    assert.equal(childEnv.ZZ_TEST_PLAIN_SETTING, "kept", "普通变量照旧继承");
+    // 决定 0075 会审：WAO 自己的变量不进长命 serve（嵌套派发的命令级豁免、目标工作区指向等），
+    // worker 标记除外——它是组装时注入的。
+    assert.deepEqual(Object.keys(childEnv).filter((n) => /^WAO_/i.test(n)), ["WAO_IN_WORKER"]);
   } finally { roots.restoreEnv?.(); for (const d of roots) cleanupDir(d); }
 });
 

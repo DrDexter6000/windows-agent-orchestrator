@@ -38,6 +38,8 @@ import {
   serveWorkspacePlacementRefusal,
   kimiServeChildEnv,
   spawnServeDetached,
+  holdServeStartLock,
+  releaseServeStartLock,
 } from "../backends/kimiServeStart.js";
 
 // 决定 0075：exe 解析随启动原语迁到 backends/kimiServeStart.js（kimi-web backend 的
@@ -630,11 +632,15 @@ export async function recycleServe({
 
   // 杀：优雅 shutdown 优先；完成由端口死亡证实，超时回退 taskkill /T /F。
   // 复活路径跳过（无可杀者；且不得凭陈旧实例 pid 调 taskkill——sol 条款）。
+  // 决定 0075 会审（sol）：从这里到重启就绪，端口上会有一段没有监听——占住按需拉起用的
+  // 启动锁，让这段窗口里到来的派发只等、不抢着拉第二个。放锁点：下方三个出口。
+  const startLock = holdServeStartLock({ port, now: nowMs() });
   let portDown = revived;
   let killFallback = null;
   if (!revived) {
     const shutdown = await ops.shutdownServe({ baseUrl: serveUrl, token, fetchImpl, timeoutMs });
     if (shutdown.outcome !== "requested") {
+      releaseServeStartLock(startLock);
       releaseRecycleLock();
       return { refused: "shutdown_rejected", reason: shutdown.reason, ...(shutdown.code !== undefined ? { code: shutdown.code } : {}) };
     }
@@ -699,6 +705,7 @@ export async function recycleServe({
         triedCandidates, errorCode: restartError?.code ?? null,
       }) + "\n", "utf8");
     } catch { /* 台账失败不掩盖主结果 */ }
+    releaseServeStartLock(startLock);
     releaseRecycleLock();
     return {
       recycled: false,
@@ -727,6 +734,7 @@ export async function recycleServe({
   // 已删壳走**转录门控**分支回收（accepted 交付壳/非只读壳保留——sol 反例条款）。
   const husks = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
   const huskBranches = await recycleHuskBranches(husks, { lockRootDir, runDir });
+  releaseServeStartLock(startLock);
   releaseRecycleLock();
   return {
     recycled: true,

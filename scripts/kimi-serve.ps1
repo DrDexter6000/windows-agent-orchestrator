@@ -4,9 +4,10 @@
 #
 # The serve hands its own environment to every worker shell. It is therefore started without the
 # operator's secret-looking variables (the name rule `wao serve recycle` applies; proxy variables are
-# kept, the serve needs the network) and without the variables of an agent session that launches it
-# (CLAUDE* / ANTHROPIC*). It adds KIMI_CODE_HOME (the home) and WAO_IN_WORKER=1. The serve uses the
-# login stored in the home, so it does not need the dropped variables.
+# kept, the serve needs the network), without the variables of an agent session that launches it
+# (CLAUDE* / ANTHROPIC*) and without WAO's own variables (WAO_*: a nested-dispatch exemption set in this
+# shell must not become a standing exemption for every worker). It adds KIMI_CODE_HOME (the home) and
+# WAO_IN_WORKER=1. The serve uses the login stored in the home, so it does not need the dropped variables.
 #
 # How the child gets that environment: this process's environment is trimmed, the serve is started
 # through the plain form of Start-Process (the child inherits the environment but none of the caller's
@@ -29,17 +30,19 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $KimiExe)) { throw "kimi exe not found: $KimiExe" }
-if (-not (Test-Path -LiteralPath (Join-Path $KimiHome 'server.token'))) { throw "kimi home has no server.token: $KimiHome" }
+# The home directory must exist (a mistyped path would otherwise start a serve in a brand-new home).
+# server.token is not required: the first `kimi web` start in a home creates it (measured, kimi 2.1.1).
+if (-not (Test-Path -LiteralPath $KimiHome -PathType Container)) { throw "kimi home directory not found: $KimiHome" }
 if (-not (Test-Path -LiteralPath $WorkspaceDir)) { throw "workspace dir missing: $WorkspaceDir" }
 $listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listening) { throw "port $Port is already listening (pid $($listening.OwningProcess)); not starting a second serve" }
 
 $secretName = '(API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?TOKEN|(^|[_-])TOKEN($|[_-])|SECRET|PASSWORD|PRIVATE[_-]?KEY|CREDENTIAL)'
 $dropSecrets = @(Get-ChildItem Env: | Where-Object { $_.Name -match $secretName -and $_.Name -notmatch '_PROXY$' } | ForEach-Object Name)
-$dropSession = @(Get-ChildItem Env: | Where-Object { $_.Name -match '^(CLAUDE|ANTHROPIC)' -and $dropSecrets -notcontains $_.Name } | ForEach-Object Name)
+$dropSession = @(Get-ChildItem Env: | Where-Object { $_.Name -match '^(CLAUDE|ANTHROPIC|WAO_)' -and $dropSecrets -notcontains $_.Name } | ForEach-Object Name)
 $set = @{ KIMI_CODE_HOME = $KimiHome; WAO_IN_WORKER = '1' }
 "dropping $($dropSecrets.Count) secret-looking variable name(s): $($dropSecrets -join ', ')"
-"dropping $($dropSession.Count) agent-session variable(s) (CLAUDE* / ANTHROPIC*)"
+"dropping $($dropSession.Count) agent-session / WAO control variable(s) (CLAUDE* / ANTHROPIC* / WAO_*)"
 
 $saved = @{}
 foreach ($n in $dropSecrets + $dropSession + @($set.Keys)) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
