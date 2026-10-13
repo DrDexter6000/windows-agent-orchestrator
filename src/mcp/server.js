@@ -220,6 +220,8 @@ import {
   ACTIVITY_TOOL_NAME_CAP,
   ACTIVITY_PATH_CAP,
   ACTIVITY_COMMAND_CAP,
+  ACTIVITY_TOOL_DETAIL_CAP,
+  ACTIVITY_OUTPUT_TAIL_CAP,
   ACTIVITY_TS_CAP,
   ACTIVITY_CURSOR_MAX_CHARS,
   // M12-19: typed cursor-rejection signal + bounded recovery SSOT. The handler
@@ -3063,7 +3065,8 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 // closed set of safe activity categories (shape-driven, no backend/runtime
 // branching), redacts secrets BEFORE sanitization/excerpt/pagination, and
 // exposes closed-set safe facts plus the redacted, bounded command text of command
-// entries (decision 0069). NEVER tool input/output,
+// entries (decision 0069) and of tool input summaries / output tails (decision 0070).
+// NEVER the full tool input/output,
 // error text, credentials, PID/session id, absolute path, or unknown payload;
 // NO semantic summary/recommendation/progress estimate. Workspace-bound and
 // idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
@@ -3118,6 +3121,8 @@ const RUN_ACTIVITY_ENTRY_TOOL_USE = z.object({
   ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
   tool: z.string().max(ACTIVITY_TOOL_NAME_CAP),
+  // 决定 0070：输入里最能说明"在对什么动手"的那个字段（脱敏、有界）；没有则缺席。
+  detail: z.string().max(ACTIVITY_TOOL_DETAIL_CAP).optional(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_TOOL_RESULT = z.object({
@@ -3125,6 +3130,9 @@ const RUN_ACTIVITY_ENTRY_TOOL_RESULT = z.object({
   ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
   isError: z.boolean(),
+  // 决定 0070：输出的尾部（脱敏、有界；truncated = 前面还有）。
+  tail: z.string().max(ACTIVITY_OUTPUT_TAIL_CAP),
+  truncated: z.boolean(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_FILE_WRITTEN = z.object({
@@ -3303,8 +3311,8 @@ const RUN_ACTIVITY_DESCRIPTION =
   // Post-M12 试点（pilot-only）：三句式紧凑形——保闭集安全事实 / facts-only 边界 /
   // cursor 拒绝恢复路径 / pageSize 默认。
   "Read-only run activity timeline from one transcript snapshot (zero append), newest first " +
-  "(order asc = chronological): message excerpts, command text (redacted, bounded), tool " +
-  "names, written paths (never absolute), runtime vital signs. Tool I/O withheld, " +
+  "(order asc = chronological): message excerpts, command text, tool input summaries and " +
+  "output tails (all redacted, bounded), written paths (never absolute), runtime vital signs. " +
   "no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only " +
   "(file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. " +
   "Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) " +

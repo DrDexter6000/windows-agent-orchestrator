@@ -115,3 +115,102 @@ test("fingerprintWorkingTree: 清单、mtime、大小任一变化即指纹不同
   assert.equal(await fingerprintWorkingTree("", { listChanged: listing("a.txt"), statFile }), null);
   assert.equal(await fingerprintWorkingTree(undefined, { listChanged: listing("a.txt"), statFile }), null);
 });
+
+// ===== 决定 0070：静默期取样器（只供观察） =====
+
+test("createQuietSampler: 静默满 quietMs 才取基线，窗口满再比对；CPU 在涨落 process_active，指纹变了落 files_changed", async () => {
+  const { createQuietSampler } = await import("../../src/backends/processActivity.js");
+  let clock = 0;
+  let cpu = 0;
+  let print = "fp-0";
+  let probes = 0;
+  const sampler = createQuietSampler({
+    rootPid: 4321,
+    cwd: "/work",
+    processProbe: async () => { probes += 1; return snap([[5001, cpu, 0]]); },
+    deliverableProbe: async () => print,
+    now: () => clock,
+    quietMs: 300_000,
+    windowMs: 30_000,
+  });
+  assert.equal(sampler.nextWakeMs(), 300_000);
+  clock = 299_000;
+  assert.deepEqual(await sampler.poll(), [], "没到静默门限，不取样");
+  assert.equal(probes, 0);
+  clock = 300_000;
+  assert.deepEqual(await sampler.poll(), [], "取基线这一拍不出事实");
+  assert.equal(probes, 1);
+  assert.equal(sampler.nextWakeMs(), 30_000);
+  clock = 315_000;
+  assert.deepEqual(await sampler.poll(), [], "窗口没满");
+  assert.equal(probes, 1);
+  // 窗口满：CPU +5000ms / 30s，指纹不变 → 只有 process_active。
+  cpu = 5000;
+  clock = 330_000;
+  assert.deepEqual(await sampler.poll(), ["process_active"]);
+  // 下一轮从现在起再等 quietMs。
+  assert.equal(sampler.nextWakeMs(), 300_000);
+  clock = 630_000;
+  await sampler.poll();
+  print = "fp-1";
+  clock = 660_000;
+  assert.deepEqual(await sampler.poll(), ["files_changed"], "进程没动（累计读数不变），文件变了");
+  // 两项都动。
+  clock = 960_000;
+  await sampler.poll();
+  cpu = 9000;
+  print = "fp-2";
+  clock = 990_000;
+  assert.deepEqual(await sampler.poll(), ["process_active", "files_changed"]);
+});
+
+test("createQuietSampler: worker 落了事件 → 静默重新起算，取到一半的基线作废", async () => {
+  const { createQuietSampler } = await import("../../src/backends/processActivity.js");
+  let clock = 0;
+  let cpu = 0;
+  const sampler = createQuietSampler({
+    rootPid: 4321, cwd: "/work",
+    processProbe: async () => snap([[5001, cpu, 0]]),
+    deliverableProbe: async () => null,
+    now: () => clock, quietMs: 300_000, windowMs: 30_000,
+  });
+  clock = 300_000;
+  await sampler.poll();
+  clock = 310_000;
+  sampler.noteEvent();
+  cpu = 99_000;
+  clock = 330_000;
+  assert.deepEqual(await sampler.poll(), [], "基线已作废——不拿事件之前的读数比对");
+  assert.equal(sampler.nextWakeMs(), 280_000, "从事件时刻起再等 quietMs");
+});
+
+test("createQuietSampler: 探针抛错 / 不适用 → 这一轮不出事实，下一个周期再试，绝不抛出", async () => {
+  const { createQuietSampler } = await import("../../src/backends/processActivity.js");
+  let clock = 0;
+  let mode = "throw";
+  let cpu = 0;
+  const sampler = createQuietSampler({
+    rootPid: 4321, cwd: "/work",
+    processProbe: async () => {
+      if (mode === "throw") throw new Error("snapshot failed");
+      return snap([[5001, cpu, 0]]);
+    },
+    deliverableProbe: async () => null,
+    now: () => clock, quietMs: 300_000, windowMs: 30_000,
+  });
+  clock = 300_000;
+  assert.deepEqual(await sampler.poll(), [], "两项都取不到");
+  assert.equal(sampler.nextWakeMs(), 300_000, "等下一个周期，不空转");
+  mode = "ok";
+  clock = 600_000;
+  await sampler.poll();
+  mode = "throw";
+  clock = 630_000;
+  assert.deepEqual(await sampler.poll(), [], "比对时取不到 → 这一轮没有读数");
+  mode = "ok";
+  clock = 930_000;
+  await sampler.poll();
+  cpu = 5000;
+  clock = 960_000;
+  assert.deepEqual(await sampler.poll(), ["process_active"], "之后恢复正常");
+});

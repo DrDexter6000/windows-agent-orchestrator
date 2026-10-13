@@ -17,21 +17,23 @@ const CODEX_SAMPLE = [
   '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}',
 ].join("\n");
 
-test("codex 样本：跳过 ERROR 行，emit message + command + metrics + done(completed)", () => {
+test("codex 样本：跳过 ERROR 行，emit message + command + tool_result + metrics + done(completed)", () => {
   const p = new CodexStreamParser();
   const events = p.feed(CODEX_SAMPLE + "\n");
-  // message + command(from command_execution) + metrics(from turn.completed usage) + done
-  assert.equal(events.length, 4);
+  // message + command(from command_execution) + tool_result(its aggregated_output, 决定 0070)
+  // + metrics(from turn.completed usage) + done
+  assert.equal(events.length, 5);
   assert.equal(events[0].kind, "message");
   assert.equal(events[0].role, "assistant");
   assert.equal(events[0].parts[0].text, "Hello from codex!");
   assert.equal(events[1].kind, "command");
   assert.equal(events[1].command, "npm test");
   assert.equal(events[1].exitCode, 1);
-  assert.equal(events[2].kind, "metrics");
-  assert.equal(events[2].tokens.input, 10);
-  assert.equal(events[3].kind, "done");
-  assert.equal(events[3].reason, "completed");
+  assert.deepEqual([events[2].kind, events[2].tool, events[2].output, events[2].isError], ["tool_result", "shell", "test failed", true]);
+  assert.equal(events[3].kind, "metrics");
+  assert.equal(events[3].tokens.input, 10);
+  assert.equal(events[4].kind, "done");
+  assert.equal(events[4].reason, "completed");
 });
 
 test("command_execution failed 不触发 done(failed)", () => {
@@ -52,7 +54,31 @@ test("turn.completed → done(completed)", () => {
   assert.equal(events[0].reason, "completed");
 });
 
-test("item.started 被忽略", () => {
+test("决定 0070: 命令开始帧带 command → 落 tool_use(shell)；结束帧的 aggregated_output 随 tool_result 落盘，command 仍只落一次", () => {
+  const p = new CodexStreamParser();
+  const started = p.feed(
+    '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"npm test","aggregated_output":"","exit_code":null,"status":"in_progress"}}\n',
+  );
+  assert.deepEqual(started, [{ kind: "tool_use", tool: "shell", input: { command: "npm test" } }]);
+  const ok = p.feed(
+    '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"npm test","aggregated_output":"# pass 3\\n# fail 0\\n","exit_code":0,"status":"completed"}}\n',
+  );
+  assert.deepEqual(ok.map((e) => e.kind), ["command", "tool_result"]);
+  assert.equal(ok[0].exitCode, 0);
+  assert.deepEqual([ok[1].tool, ok[1].output, ok[1].isError], ["shell", "# pass 3\n# fail 0\n", false]);
+  const failed = p.feed(
+    '{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"false","aggregated_output":"boom","exit_code":2,"status":"failed"}}\n',
+  );
+  assert.equal(failed[0].exitCode, 2);
+  assert.equal(failed[1].isError, true);
+  // 没有 aggregated_output 的结束帧：只落 command（与此前相同）。
+  const bare = p.feed('{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"ls","exit_code":0}}\n');
+  assert.deepEqual(bare.map((e) => e.kind), ["command"]);
+  // 其它类型的开始帧仍忽略。
+  assert.deepEqual(p.feed('{"type":"item.started","item":{"id":"m","type":"agent_message","text":""}}\n'), []);
+});
+
+test("item.started 不带 command 时被忽略", () => {
   const p = new CodexStreamParser();
   const events = p.feed(
     '{"type":"item.started","item":{"id":"x","type":"command_execution","status":"in_progress"}}\n',

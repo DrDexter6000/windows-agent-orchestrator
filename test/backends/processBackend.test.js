@@ -1063,3 +1063,108 @@ test("TD-246: 控制面 waoEnv 段仍是权威来源（控制面自持，不在�
   const env = buildChildEnv([], {}, { WAO_ALLOW_NESTED_DISPATCH: "1" });
   assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, "1", "waoEnv 段=控制面自持段，语义不变");
 });
+
+// ===== 决定 0070：进程式后端的静默期取样（只供观察，不收口） =====
+
+// 假 child 正常退出（关队列）。测试无论成败都要调，否则事件流永远等下去。
+function closeChild(cap, code = 0) {
+  cap.child.exitCode = code;
+  cap.child.emit("exit", code, null);
+  cap.child.emit("close", code, null);
+}
+
+async function waitUntil(predicate, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
+
+test("0070-B1: 转录静默期间，取样读到后代进程在干活 → 落 runtime_activity(process_active)；不影响完成路径", async () => {
+  const cap = makeCapturingChild();
+  let cpuMs = 0;
+  const backend = new ClaudeCodeBackend({
+    spawnFn: () => cap.child,
+    // 每次取样累计 CPU 都多 400ms：任何一个观察窗比对都读得到活动。
+    processProbe: async () => new Map([[5001, { cpu100ns: (cpuMs += 400) * 10_000, ioBytes: 0 }]]),
+    deliverableProbe: async () => null,
+    quietSampleAfterMs: 300,
+    quietSampleWindowMs: 300,
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "run the suite" });
+  const events = [];
+  const consume = (async () => { for await (const ev of handle.events()) events.push(ev); })();
+  try {
+    assert.ok(await waitUntil(() => events.some((e) => e.kind === "runtime_activity")), "静默期内落了体征事实");
+    assert.ok(events.every((e) => e.kind === "runtime_activity" && e.status === "process_active"), JSON.stringify(events));
+  } finally {
+    closeChild(cap);
+    await consume;
+  }
+  // 取样事实不改变完成判定：进程 exit 0 且没有可用产出 → completed_empty（与没有取样时相同）。
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed");
+  assert.equal(done.marker, "completed_empty", "runtime_activity 不算可用产出");
+});
+
+test("0070-B2: 取样读不到任何体征 → 不落事实，也绝不收口（进程式后端没有静默收口门）", async () => {
+  const cap = makeCapturingChild();
+  let probes = 0;
+  const backend = new ClaudeCodeBackend({
+    spawnFn: () => cap.child,
+    processProbe: async () => { probes += 1; return new Map([[5001, { cpu100ns: 0, ioBytes: 0 }]]); },
+    deliverableProbe: async () => "fp-constant",
+    quietSampleAfterMs: 300,
+    quietSampleWindowMs: 300,
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "wait" });
+  const events = [];
+  const consume = (async () => { for await (const ev of handle.events()) events.push(ev); })();
+  try {
+    // 至少走完一轮（基线 + 比对 = 两次取样）。
+    assert.ok(await waitUntil(() => probes >= 2), `取样发生过（实际 ${probes} 次）`);
+    assert.deepEqual(events, [], "没读到体征：零事件，流仍在等，没有被收口");
+  } finally {
+    closeChild(cap);
+    await consume;
+  }
+  assert.equal(events.at(-1).kind, "done");
+});
+
+test("0070-B3: silentTimeout 的\"启动后零事件\"语义不被取样事实改变（体征事实不是 worker 事件）", async () => {
+  const cap = makeCapturingChild();
+  let probes = 0;
+  const backend = new ClaudeCodeBackend({
+    spawnFn: () => cap.child,
+    processProbe: async () => { probes += 1; return new Map([[5001, { cpu100ns: probes * 4_000_000, ioBytes: 0 }]]); },
+    deliverableProbe: async () => null,
+    quietSampleAfterMs: 200,
+    quietSampleWindowMs: 200,
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "wait" });
+  const events = [];
+  // silentTimeout 900ms：期间取样会落体征事实，但它们不是 worker 事件——到点照样判静默。
+  const consume = (async () => { for await (const ev of handle.events(undefined, { silentTimeout: 900 })) events.push(ev); })();
+  try {
+    await consume;
+  } finally {
+    closeChild(cap);
+  }
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /^silent timeout: no events within 900ms/);
+  assert.ok(events.some((e) => e.kind === "runtime_activity" && e.status === "process_active"), "取样事实在静默判定之前落过");
+});
+
+test("0070-B4: 注入假 spawn 而不给探针 → 不建取样器（既有测试的等待节奏不变）；真 spawn 下缺省为真探针", async () => {
+  const fake = new ClaudeCodeBackend({ spawnFn: () => makeCapturingChild().child });
+  assert.equal(fake._processProbe, null);
+  assert.equal(fake._deliverableProbe, null);
+  const real = new ClaudeCodeBackend({});
+  assert.equal(typeof real._processProbe, "function");
+  assert.equal(typeof real._deliverableProbe, "function");
+});

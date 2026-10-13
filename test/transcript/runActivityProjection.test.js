@@ -370,13 +370,13 @@ test("#9 control chars neutralized; LF and TAB preserved", () => {
 // =====================================================================
 // #10 command/tool/file/error raw payloads + absolute paths do not cross
 // =====================================================================
-test("#10 tool/file payloads and absolute paths never cross the lead schema; command text crosses redacted and bounded (0069)", () => {
+test("#10 full tool payloads and absolute file paths never cross the lead schema; command text (0069), input summary and output tail (0070) cross redacted and bounded", () => {
   resetSeq();
   const SECRET = "test-secret-payload-m128c";
   const events = [
     cmdEvent(0), // command text crosses (决定 0069); the secret in argv must NOT
-    toolUseEvent("Bash", { command: "echo " + SECRET }), // input must NOT cross
-    toolResultEvent(true, "stderr " + SECRET), // output must NOT cross
+    toolUseEvent("Bash", { command: "echo " + SECRET }), // the summary crosses (决定 0070); the secret must NOT
+    toolResultEvent(true, "stderr " + SECRET), // the tail crosses (决定 0070); the secret must NOT
     fileWrittenEvent("C:\\Users\\leak\\secret.txt"), // absolute path must NOT cross
     fileWrittenEvent("/etc/passwd"), // posix absolute must NOT cross
     fileWrittenEvent("src/../etc/escape.txt"), // traversal must NOT cross
@@ -397,13 +397,15 @@ test("#10 tool/file payloads and absolute paths never cross the lead schema; com
   assert.ok(["ok", "failed", "unknown"].includes(cmd.exitStatus));
   assert.ok(cmd.text.includes("rm -rf"), "command text is what the Lead reads to tell a test run from a sleep");
   assert.equal(cmd.truncated, false);
-  // tool_use carries only a bounded tool name (no input).
+  // tool_use carries a bounded tool name and, since 0070, one redacted input field — never the input object.
   const tu = r.entries.find((e) => e.category === "tool_use");
   assert.equal(tu.tool, "Bash");
   assert.ok(!("input" in tu), "no tool input field");
-  // tool_result carries only isError (no output, no opaque callId as tool name).
+  assert.ok(tu.detail.startsWith("echo [REDACTED"), tu.detail);
+  // tool_result carries isError and, since 0070, the redacted tail of its output (no opaque callId as tool name).
   const tr = r.entries.find((e) => e.category === "tool_result");
-  assert.deepEqual(Object.keys(tr).sort(), ["category", "isError", "seq", "ts"]);
+  assert.deepEqual(Object.keys(tr).sort(), ["category", "isError", "seq", "tail", "truncated", "ts"]);
+  assert.ok(tr.tail.startsWith("stderr [REDACTED"), tr.tail);
   // file_written paths are withheld markers (never the absolute/traversal raw).
   // Tightened: the ONLY emitted alternative for an unsafe path is the exact
   // "[path_withheld]" marker — the "[REDACTED]" alternative was dead code
@@ -1205,5 +1207,69 @@ test("0069-P5（会审 kimi）: URL / curl 的口令、Google / npm 令牌、PEM
     "scp build.zip deploy@host.test:/srv/app",
   ]) {
     assert.equal(redactSecretShapes(plain), plain, plain);
+  }
+});
+
+// ===== 决定 0070：tool_use 的输入摘要与 tool_result 的输出尾部 =====
+
+test("0070-P1: tool_use carries one identifying input field (bounded, redacted); absent when the input has none", async () => {
+  const { ACTIVITY_TOOL_DETAIL_CAP } = await import("../../src/application/runActivityProjection.js");
+  resetSeq();
+  const fromEnv = ["env", "held", "value", "0070"].join("-");
+  const r = project([
+    toolUseEvent("Read", { file_path: "D:/work/src/app.js", limit: 50 }),
+    toolUseEvent("Grep", { pattern: "createServer", path: "src", output_mode: "content" }),
+    toolUseEvent("TaskOutput", { task_id: "bg_42", block: true, timeout: 600000 }),
+    toolUseEvent("WebFetch", { url: `https://example.test/?k=${fromEnv}`, prompt: "summarize" }),
+    toolUseEvent("Read", { path: "x".repeat(ACTIVITY_TOOL_DETAIL_CAP + 50) }),
+    toolUseEvent("TodoWrite", { todos: [{ content: "a" }] }),
+    toolUseEvent("Bash", { command: "API_KEY=abcdefgh12345678 npm test" }),
+    toolUseEvent("Odd", "not-an-object"),
+  ], { env: { MY_API_KEY: fromEnv } });
+  const uses = r.entries.filter((e) => e.category === "tool_use");
+  assert.equal(uses[0].detail, "D:/work/src/app.js", "a path the worker is touching is shown as is");
+  assert.equal(uses[1].detail, "createServer", "pattern wins over path");
+  assert.equal(uses[2].detail, "bg_42");
+  assert.ok(uses[3].detail.startsWith("https://example.test/?k=[REDACTED") && !uses[3].detail.includes(fromEnv));
+  assert.equal(uses[4].detail.length, ACTIVITY_TOOL_DETAIL_CAP);
+  assert.equal("detail" in uses[5], false, "no identifying string field → no detail");
+  assert.equal(uses[6].detail, "API_KEY=[REDACTED] npm test");
+  assert.equal("detail" in uses[7], false);
+  for (const u of uses) {
+    assert.ok(!("input" in u), "the full input never crosses");
+    assert.deepEqual(Object.keys(u).filter((k) => k !== "detail").sort(), ["category", "seq", "tool", "ts"]);
+  }
+});
+
+test("0070-P2: tool_result carries the tail of its output (bounded, redacted); truncated says whether more came before", async () => {
+  const { ACTIVITY_OUTPUT_TAIL_CAP } = await import("../../src/application/runActivityProjection.js");
+  resetSeq();
+  const fromEnv = ["env", "held", "value", "0070"].join("-");
+  const long = Array.from({ length: 400 }, (_, i) => `line ${i} ok`).join("\n") + "\n# pass 400\n# fail 0\n";
+  const pemTail = "MIIEabcdefghijklmnop\n".repeat(300) + "-----END RSA PRIVATE KEY-----\nwrote key.pem\n";
+  const r = project([
+    toolResultEvent(false, "# pass 3\n# fail 0\n"),
+    toolResultEvent(false, long),
+    toolResultEvent(true, `request failed: token=${fromEnv}`),
+    toolResultEvent(false, "Authorization: Bearer abcdefghijklmnopqrstuvwx\nok"),
+    toolResultEvent(false, pemTail),
+    toolResultEvent(false, ""),
+    toolResultEvent(false, { not: "a string" }),
+  ], { env: { MY_API_KEY: fromEnv } });
+  const results = r.entries.filter((e) => e.category === "tool_result");
+  assert.deepEqual([results[0].tail, results[0].truncated], ["# pass 3\n# fail 0", false]);
+  assert.equal(results[1].tail.length, ACTIVITY_OUTPUT_TAIL_CAP);
+  assert.ok(results[1].tail.endsWith("# pass 400\n# fail 0"), "the newest lines are what the Lead sees");
+  assert.equal(results[1].truncated, true);
+  assert.ok(results[2].tail.includes("[REDACTED") && !results[2].tail.includes(fromEnv));
+  assert.equal(results[2].isError, true);
+  assert.equal(results[3].tail, "Authorization: Bearer [REDACTED]\nok");
+  // 窗口开头落在 PEM 私钥块中间：END 之前整段遮掉，块体不漏。
+  assert.ok(!results[4].tail.includes("MIIE"), results[4].tail.slice(0, 80));
+  assert.ok(results[4].tail.endsWith("wrote key.pem"));
+  assert.deepEqual([results[5].tail, results[5].truncated], ["", false]);
+  assert.deepEqual([results[6].tail, results[6].truncated], ["", false], "non-string output → empty tail");
+  for (const res of results) {
+    assert.deepEqual(Object.keys(res).sort(), ["category", "isError", "seq", "tail", "truncated", "ts"]);
   }
 });

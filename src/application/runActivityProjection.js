@@ -22,7 +22,9 @@
 //     already [REDACTED] before any slice);
 //   - C0/C1/DEL control sanitization (LF/TAB preserved);
 //   - closed-set safe activity facts — plus, since decision 0069, the command
-//     text of command entries (redacted, sanitized, bounded); never tool input,
+//     text of command entries and, since decision 0070, a one-field summary of
+//     a tool call's input and the tail of a tool result's output (all redacted,
+//     sanitized, bounded); never the full tool input,
 //     tool output, error text, credentials, PID/session id, absolute path, or
 //     unknown payload; NO semantic summary/recommendation/progress estimate;
 //   - per-page caps (entries + text excerpt) bounded per audience; an
@@ -199,6 +201,18 @@ export const ACTIVITY_PATH_CAP = 256;
 // 开头——命令是什么看的是开头）。一条常见的带管道 / 重定向的 shell 命令在
 // 400 字符内放得下；内联脚本只留头部。
 export const ACTIVITY_COMMAND_CAP = 400;
+// 决定 0070：tool_use 给输入里最能说明"在对什么动手"的那个字段；tool_result 给
+// 输出的尾部（最近吐出的是什么）。
+export const ACTIVITY_TOOL_DETAIL_CAP = 200;
+export const ACTIVITY_OUTPUT_TAIL_CAP = 400;
+// 取尾之前先在这么长的窗口里做形状脱敏：一条输出可达数百 KB，逐条全量过正则太贵。
+const OUTPUT_TAIL_REDACTION_WINDOW = 4000;
+// 按这个顺序取第一个非空字符串字段（真实转录里各后端工具输入的常见键）。
+const TOOL_DETAIL_KEYS = Object.freeze([
+  "command", "file_path", "pattern", "query", "url", "task_id", "skill", "path", "description",
+]);
+const PEM_END_MARKER = /-----END [A-Z ]*PRIVATE KEY-----/;
+const PEM_BEGIN_MARKER = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 export const ACTIVITY_TS_CAP = 64;
 
 // ===== Cursor codec =====
@@ -449,6 +463,37 @@ function boundText(raw, redactor, max) {
 
 // ===== Closed-set safe field derivations =====
 
+// tool_use 的输入摘要：没有可用字段时返回 null（条目不带 detail）。
+function toolInputDetail(input, redactor) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  for (const key of TOOL_DETAIL_KEYS) {
+    const value = input[key];
+    if (typeof value === "string" && value.length > 0) {
+      return boundText(redactSecretShapes(redactor.redactString(value)), redactor, ACTIVITY_TOOL_DETAIL_CAP).text;
+    }
+  }
+  return null;
+}
+
+// tool_result 输出的尾部。环境密钥值对整段替换；形状兜底只过尾部窗口——窗口
+// 开头若落在一个 PEM 私钥块中间（只见 END 不见 BEGIN），把 END 之前整段遮掉。
+function outputTail(output, redactor) {
+  if (typeof output !== "string" || output.length === 0) return { tail: "", truncated: false };
+  const exact = redactor.redactString(output);
+  const windowed = exact.length > OUTPUT_TAIL_REDACTION_WINDOW;
+  let window = windowed ? exact.slice(-OUTPUT_TAIL_REDACTION_WINDOW) : exact;
+  const end = window.search(PEM_END_MARKER);
+  if (end !== -1 && !PEM_BEGIN_MARKER.test(window.slice(0, end))) {
+    window = "[REDACTED]" + window.slice(end).replace(PEM_END_MARKER, "");
+  }
+  const safe = sanitizeControls(redactSecretShapes(window)).trimEnd();
+  const cut = safe.length > ACTIVITY_OUTPUT_TAIL_CAP;
+  return {
+    tail: cut ? safeSliceUtf16(safe, safe.length - ACTIVITY_OUTPUT_TAIL_CAP, safe.length) : safe,
+    truncated: windowed || cut,
+  };
+}
+
 function commandExitStatus(event) {
   const c = event.exitCode;
   if (c === 0) return "ok";
@@ -564,14 +609,19 @@ function buildEntry(event, category, redactor, textCap, toolResultsById) {
       return { category, ts, seq };
     case "envelope":
       return { category, ts, seq, kind: ENVELOPE_TYPE_TO_LABEL[event.type] };
-    case "tool_use":
+    case "tool_use": {
+      const detail = toolInputDetail(event.input, redactor);
       return {
         category, ts, seq,
         tool: safeDynamicText(event.tool ?? event.name ?? "unknown", redactor, ACTIVITY_TOOL_NAME_CAP),
+        ...(detail !== null ? { detail } : {}),
       };
-    case "tool_result":
-      // tool_result.tool is often an opaque callId (unreliable) — emit isError only.
-      return { category, ts, seq, isError: Boolean(event.isError) };
+    }
+    case "tool_result": {
+      // tool_result.tool is often an opaque callId (unreliable) — never emitted.
+      const { tail, truncated } = outputTail(event.output, redactor);
+      return { category, ts, seq, isError: Boolean(event.isError), tail, truncated };
+    }
     case "file_written":
       return { category, ts, seq, path: safeFilePath(event.path, redactor) };
     case "runtime_status": {

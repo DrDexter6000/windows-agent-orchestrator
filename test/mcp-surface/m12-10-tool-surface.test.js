@@ -692,7 +692,12 @@ const RED_23_WIRE = 75492;
 // 描述改写（协议与"10 分钟内有生命体征不建议中止"须到 Lead 眼前）。实测
 // 85221 → 85915（+694B：schema +279，描述 +415）。Owner 硬顶 85939 不变，余 24B
 // ——下一次再给 MCP 加字段须先由 Owner 抬硬顶或在别处瘦身。
-const FROZEN_23_WIRE_CEILING = 85915;
+// 0070 重冻（2026-10-13）：Owner 当日"允许抬高 MCP 硬上限"，并追认上面 0069 的重冻。
+// 硬顶未给数值，沿用 2026-09-22 的 10% 口径：85939 → 94532（×1.1 向下取整；授权记录
+// 见 ADR-0032 修订节）。本批 run_activity 的 tool_use 条目增可选 detail（输入摘要）、
+// tool_result 条目增 tail / truncated（输出尾部），描述 +12。实测 85915 → 86061
+// （+146B），按实测重冻；Owner 硬顶 94532，余 8471B。
+const FROZEN_23_WIRE_CEILING = 86061;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -904,7 +909,9 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
 // lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
 // outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
-  "3f1d9db399bea03e37075a1adbbef4b057cb0dc44165e4e1108487619e6c072c";
+  "073e1b2484bd6dc0af553abec8bdfcbb61bdbeb21223fb2ed594325a8af702d1";
+  // 0070（2026-10-13）：run_activity 的 tool_use 条目增可选 detail、tool_result 条目增
+  // tail / truncated——outputSchema 在 stripped 载荷内，SHA 如实翻新。
   // 0069（2026-10-13）：run_activity command 条目增 text / truncated、入参增 order、
   // status enum 增 serve_active；run_stop 入参增必填 reason / observedSeq——
   // inputSchema / outputSchema 都在 stripped 载荷内，SHA 如实翻新。
@@ -963,7 +970,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （先 run_activity、带 observedSeq 与 reason、观察过时即拒）与"10 分钟内有生命体征
 // 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11391（+415），
 // 实测重冻。防 creep 语义不变。
-const FROZEN_23_DESC_CEILING = 11391;
+// 0070 重冻（2026-10-13）：run_activity 描述加上"工具输入摘要与输出尾部"，11391 → 11403
+// （+12）；Owner 授权的描述上限 12347（ADR-0032 修订节）不动。
+const FROZEN_23_DESC_CEILING = 11403;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

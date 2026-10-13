@@ -167,3 +167,74 @@ export async function fingerprintWorkingTree(cwd, { listChanged = defaultListCha
   }
   return hash.digest("hex");
 }
+
+// ── 静默期取样器（决定 0070）────────────────────────────────────────────────
+//
+// 只供观察：进程式后端没有"等不到进展"的收口门，但长工具调用 / 长思考期间转录
+// 是空的，Lead 下钻看不到"进程在干活"。转录静默满 quietMs 之后取一次基线（后代
+// 进程快照 + 工作树指纹），windowMs 后再取一次比对，读到体征就返回对应的
+// runtime status；然后从头再等 quietMs。任何一步取不到都只是这一轮不出事实——
+// 取样器绝不影响运行的去留。
+export const QUIET_SAMPLE_AFTER_MS = 5 * 60_000;
+export const QUIET_SAMPLE_WINDOW_MS = 30_000;
+
+/**
+ * @param {object} opts
+ * @param {number} opts.rootPid — worker 运行时进程（只看它的后代）
+ * @param {string} opts.cwd — worker 的工作目录
+ * @param {(pid: number) => Promise<Map|null>} opts.processProbe — 不适用返回 null，失败可抛
+ * @param {(cwd: string) => Promise<string|null>} opts.deliverableProbe — 不适用返回 null
+ * @param {() => number} opts.now — 单调钟（ms）
+ * @returns {{ noteEvent(): void, nextWakeMs(): number, poll(): Promise<string[]> }}
+ */
+export function createQuietSampler({
+  rootPid, cwd, processProbe, deliverableProbe, now,
+  quietMs = QUIET_SAMPLE_AFTER_MS, windowMs = QUIET_SAMPLE_WINDOW_MS,
+}) {
+  let quietSince = now();
+  let baseline = null;
+  const probe = async (fn, arg) => {
+    try { return await fn(arg); } catch { return null; }
+  };
+  return {
+    // worker 落了事件：静默重新起算，丢掉取到一半的基线。
+    noteEvent() {
+      quietSince = now();
+      baseline = null;
+    },
+    // 距下一次需要醒来还有多久。
+    nextWakeMs() {
+      const due = baseline === null ? quietSince + quietMs : baseline.at + windowMs;
+      return Math.max(0, due - now());
+    },
+    // 到点才取样；返回这次读到的体征（闭集 runtime status，常为空数组）。
+    async poll() {
+      if (baseline === null) {
+        if (now() - quietSince < quietMs) return [];
+        const tree = await probe(processProbe, rootPid);
+        const files = await probe(deliverableProbe, cwd);
+        if (tree === null && files === null) {
+          quietSince = now();
+          return [];
+        }
+        baseline = { at: now(), tree, files };
+        return [];
+      }
+      if (now() - baseline.at < windowMs) return [];
+      const signs = [];
+      if (baseline.tree !== null) {
+        const tree = await probe(processProbe, rootPid);
+        if (tree !== null && describeProcessActivity(baseline.tree, tree, now() - baseline.at).active) {
+          signs.push("process_active");
+        }
+      }
+      if (baseline.files !== null) {
+        const files = await probe(deliverableProbe, cwd);
+        if (files !== null && files !== baseline.files) signs.push("files_changed");
+      }
+      baseline = null;
+      quietSince = now();
+      return signs;
+    },
+  };
+}

@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
-import { doneEvent, DONE_MARKERS, runEventIsUsableEffect } from "../runEvent.js";
+import { doneEvent, DONE_MARKERS, runEventIsUsableEffect, runtimeActivityEvent } from "../runEvent.js";
+import {
+  createQuietSampler, snapshotDescendants, fingerprintWorkingTree, QUIET_SAMPLE_AFTER_MS, QUIET_SAMPLE_WINDOW_MS,
+} from "./processActivity.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { NESTED_DISPATCH_BYPASS_ENV } from "../envPolicy.js";
 
@@ -101,6 +104,13 @@ export class ProcessBackend {
     // for that provider. The base ProcessBackend has no provider wire format,
     // so this defaults to null (non-correctable byte-compatible behavior).
     encodeUserMessage = null,
+    // 决定 0070：静默期取样的两个探针与时钟（测试注入缝）。真 spawn 下缺省为真探针；
+    // 注入了假 spawn 而没给探针 → 不取样。
+    processProbe = null,
+    deliverableProbe = null,
+    quietClock = null,
+    quietSampleAfterMs = QUIET_SAMPLE_AFTER_MS,
+    quietSampleWindowMs = QUIET_SAMPLE_WINDOW_MS,
   } = {}) {
     if (!parserClass) throw new Error("parserClass is required");
     if (!buildArgs) throw new Error("buildArgs is required");
@@ -126,6 +136,12 @@ export class ProcessBackend {
     // M12-16: in-flight correction wire encoder (provider-specific). null on the
     // base class → correctable tasks are rejected by capability, never by name.
     this.encodeUserMessage = typeof encodeUserMessage === "function" ? encodeUserMessage : null;
+    const realSpawn = this._spawnFn === spawn;
+    this._processProbe = processProbe ?? (realSpawn ? (pid) => snapshotDescendants(pid) : null);
+    this._deliverableProbe = deliverableProbe ?? (realSpawn ? (dir) => fingerprintWorkingTree(dir) : null);
+    this._quietClock = typeof quietClock === "function" ? quietClock : () => performance.now();
+    this._quietSampleAfterMs = quietSampleAfterMs;
+    this._quietSampleWindowMs = quietSampleWindowMs;
   }
 
   // M12-16: provider-neutral in-flight correction capability. The base
@@ -401,6 +417,7 @@ export class ProcessBackend {
       events: (signal, opts = {}) => this._streamEvents({
         queue,
         child,
+        cwd: agent.cwd,
         signal,
         silentTimeout: opts.silentTimeout,
         onPollTick: opts.onPollTick,
@@ -474,7 +491,7 @@ export class ProcessBackend {
     }
   }
 
-  async *_streamEvents({ queue, child, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
+  async *_streamEvents({ queue, child, cwd = null, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
     let emittedDone = false;
     let anyEventSeen = false;
     // M12-21: track whether the stream produced any USABLE model effect before
@@ -486,6 +503,21 @@ export class ProcessBackend {
     let hasUsableEffect = false;
     const completedEmptyMarker = DONE_MARKERS[0];
     const startTime = Date.now();
+    // 决定 0070：只供观察的静默期取样——转录静默满 5 分钟后，看这个 worker 的后代
+    // 进程是否在干活、工作目录是否有文件变化，读到就落一条 runtime_activity。它不
+    // 是收口门：进程式后端不因静默被控制面收掉，取样读到什么都不改变这一点。两个
+    // 探针都不在场（测试注入的假 spawn）时不建取样器，等待节奏与此前相同。
+    const sampler = (this._processProbe || this._deliverableProbe) && Number.isInteger(child?.pid) && child.pid > 0
+      ? createQuietSampler({
+          rootPid: child.pid,
+          cwd,
+          processProbe: this._processProbe ?? (async () => null),
+          deliverableProbe: this._deliverableProbe ?? (async () => null),
+          now: this._quietClock,
+          quietMs: this._quietSampleAfterMs,
+          windowMs: this._quietSampleWindowMs,
+        })
+      : null;
     const onAbort = () => this._kill(child);
     if (signal) signal.addEventListener("abort", onAbort);
 
@@ -493,6 +525,7 @@ export class ProcessBackend {
       while (true) {
         // 排空队列
         for (const ev of queue.drain()) {
+          sampler?.noteEvent();
           if (ev.kind === "done") {
             emittedDone = true;
             // M12-21: a successful completion that did no model work carries the
@@ -554,18 +587,32 @@ export class ProcessBackend {
         if (typeof onPollTick === "function") {
           try { await onPollTick(); } catch { /* best-effort: never kill the event stream */ }
         }
+        // 取样读到的体征落成事实。它们不是 worker 事件：不动 anyEventSeen（silentTimeout
+        // 的"启动后零事件"语义不变），也不算可用产出。
+        if (sampler && !emittedDone) {
+          for (const status of await sampler.poll()) yield runtimeActivityEvent(status);
+        }
         const silentRemain = silentTimeout && !anyEventSeen
           ? Math.max(0, silentTimeout - (Date.now() - startTime))
           : Infinity;
         // When polling, bound the wait by pollIntervalMs (min with silentRemain)
         // so we wake to poll even without a backend event. Otherwise the legacy
         // indefinite/ silent-bounded wait is unchanged.
-        const waitMs = (typeof onPollTick === "function" && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0)
+        const baseWaitMs = (typeof onPollTick === "function" && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0)
           ? Math.min(silentRemain, pollIntervalMs)
           : silentRemain;
+        // 取样器在场时，等待另以它下一次到点为界（至少 250ms，防空转）。
+        const waitMs = sampler ? Math.min(baseWaitMs, Math.max(250, sampler.nextWakeMs())) : baseWaitMs;
         await new Promise((r) => {
-          queue.resolveWait = r;
-          if (Number.isFinite(waitMs)) setTimeout(r, waitMs);
+          // 被事件唤醒时清掉定时器：取样间隔以分钟计，留着会让承载运行的进程在流结束
+          // 之后迟迟不退。
+          let timer = null;
+          const wake = () => {
+            if (timer !== null) clearTimeout(timer);
+            r();
+          };
+          queue.resolveWait = wake;
+          if (Number.isFinite(waitMs)) timer = setTimeout(wake, waitMs);
         });
       }
     } finally {

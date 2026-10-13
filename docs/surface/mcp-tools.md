@@ -555,7 +555,7 @@ Output:
 
 ## run_activity
 
-Read-only run activity timeline from one transcript snapshot (zero append), newest first (order asc = chronological): message excerpts, command text (redacted, bounded), tool names, written paths (never absolute), runtime vital signs. Tool I/O withheld, no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only (file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures stay the fixed generic error. pageSize default 8. Idempotent; workspace-bound.
+Read-only run activity timeline from one transcript snapshot (zero append), newest first (order asc = chronological): message excerpts, command text, tool input summaries and output tails (all redacted, bounded), written paths (never absolute), runtime vital signs. no semantic summary or progress estimate. Read before any stop decision. scopeObservation states facts only (file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. Opaque-cursor pagination: cursor_rejected (stale, cross-run, cross-view, or out-of-range) means re-request page 1 without a cursor or use afterSeq — no auto-retry; other failures stay the fixed generic error. pageSize default 8. Idempotent; workspace-bound.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 

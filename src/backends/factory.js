@@ -131,7 +131,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsRoleContract: "`--append-system-prompt`（内容直传，恰好一次）",
     supportsInFlightCorrection: "stdin stream-json 排队（同一活进程；delivered 证明字节被接受，不证明模型执行了该轮）",
     reportsTokenUsage: "result 帧 usage",
-    vitalSigns: "可读体征：stdout 事件。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）；长工具调用 / 长思考期间不落体征事实",
+    vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   codex: Object.freeze({
     contextWindow: "无 CLI flag 可表达，配了即拒",
@@ -139,7 +139,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）",
     reportsTokenUsage: "turn.completed 帧 usage",
-    vitalSigns: "可读体征：stdout 事件。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）；长工具调用 / 长思考期间不落体征事实",
+    vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   "kimi-code": Object.freeze({
     reasoning: "effort 编译为 `KIMI_MODEL_THINKING_EFFORT` 子进程 env；`agent.env` 自设同名被拒；档位与模型绑定见判定表（探针派生）",
@@ -147,7 +147,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "`kimi -r <session_id>`；id 来自轮末 `session.resume_hint`、runner 运行期补记；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "拼进同一条 prompt（非系统级通道，prompt 级引导）",
     reportsTokenUsage: "stream-json 无 usage——tokenBudget 不生效（TD-87）",
-    vitalSigns: "可读体征：stdout 事件。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）；长工具调用 / 长思考期间不落体征事实",
+    vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   "deepseek-harness": Object.freeze({
     reasoning: "可省略（未配置不拒）",
