@@ -3287,6 +3287,8 @@ function assertSingleTableFile(rel, rowCount, preambleMaxBytes) {
   const preambleBytes = Buffer.byteLength(lines.slice(0, header).join("\n"), "utf8");
   assert.ok(preambleBytes <= preambleMaxBytes,
     `${rel}：表格之前的说明 ${preambleBytes} 字节，超过 ${preambleMaxBytes}。这里只放格式说明，不放正文`);
+  assert.deepEqual(lines.slice(0, header).filter((line) => line.trimStart().startsWith("|")).map((line) => line.slice(0, 60)), [],
+    `${rel}：表头之前不能有表格行（本文件只有一张表）`);
   const after = lines.slice(header + 1).filter((line) => line.trim().length > 0);
   assert.match(after[0] ?? "", /^\|[-\s|]+\|$/, `${rel}：表头下一行必须是分隔行`);
   const stray = after.slice(1).filter((line) => !/^\|\s*TD-\d+\s*\|/.test(line));
@@ -3376,9 +3378,12 @@ test("旧台账的冻结快照不被改写", () => {
 });
 
 test("决定索引一行只放编号和标题；新决定档有体量上限", () => {
-  // 索引里除了标题行、空行和 HTML 注释，每一行都必须是「编号 | 标题」。
-  const rows = read(".wao/decisions/map.md").split(/\r?\n/)
-    .filter((line) => line.trim().length > 0 && !line.startsWith("#") && !line.startsWith("<!--"));
+  // 索引文件 = 第一行的标题 + 空行 + 单行 HTML 注释 + 索引行。其余任何行（第二个标题、
+  // 注释后面跟着正文、跨行注释）都按索引行检查，因而通不过。
+  const mapLines = read(".wao/decisions/map.md").split(/\r?\n/);
+  assert.equal(mapLines[0], "# Decisions Map", "map.md 第一行是标题 `# Decisions Map`");
+  const rows = mapLines.slice(1)
+    .filter((line) => line.trim().length > 0 && !/^<!--(?:(?!-->).)*-->$/.test(line));
   assert.ok(rows.length > 0, "决定索引解析到 0 行——守卫空转");
   for (const row of rows) {
     assert.match(row, /^\d{4} \| \S/, `map.md 这一行不是「编号 | 标题」：${row.slice(0, 60)}`);
