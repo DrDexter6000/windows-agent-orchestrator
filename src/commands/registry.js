@@ -167,7 +167,7 @@ export function capabilityCrossCheckWarnings(agent, capabilities) {
   }
   // 决定 0072：scorecard.rules.requireCommands × backend 类未声明能产出命令退出码
   // 证据（reportsCommandExitCode 非 true）→ 命令事件不带数值退出码时评分不推断，这条
-  // 规则通不过。把失败提前到 validate 静态阶段。
+  // 规则通不过。validate 在静态阶段先给出提示（⚠，不改变 ok 与退出码）。
   const requireCommands = agent?.scorecard?.rules?.requireCommands;
   if (Array.isArray(requireCommands) && requireCommands.length > 0 && capabilities.reportsCommandExitCode !== true) {
     warnings.push(

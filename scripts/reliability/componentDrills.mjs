@@ -2497,7 +2497,12 @@ export function createComponentDrills(deps) {
         : null;
       commandExitCodeEvidence = scorecardCommands
         ? { passed: scorecardCommands.passed === true, detail: scorecardCommands.detail ?? scorecardCommands.evidence ?? null }
-        : { passed: false, detail: "probe run produced no scorecard commandsPassed check" };
+        : {
+          passed: false,
+          detail: declared.reportsCommandExitCode === true
+            ? "probe run produced no scorecard commandsPassed check"
+            : "probe carried no requireCommands rule: the backend does not declare exit-code evidence",
+        };
     }
     if (declared.supportsRoleContract !== true) {
       // 声明不支持角色合同：systemPrompt 配置的派发必须被明确拒绝（spawn 前

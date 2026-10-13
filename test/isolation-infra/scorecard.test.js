@@ -548,6 +548,21 @@ test("0072②: 自带数值退出码的命令不受门控影响；真失败不�
   });
   assert.equal(orphan.passed, false);
   assert.ok(!orphan.checks.find((c) => c.name === "commandsPassed").detail.includes("requireAcceptance"));
+  // 混合（会审 kimi）：同一条规则里一条真失败、一条退出码未知——解释句限定到未知的
+  // 那条，真失败照旧被认证层读作观察到的非零退出。
+  const mixed = await checkScorecard({
+    events: [
+      { type: "run.completed" },
+      ev("command", { command: "npm test", exitCode: 1 }),
+      ev("command", { command: "npm run lint", toolCallId: "tool_2" }),
+      ev("tool_result", { tool: "tool_2", isError: false }),
+    ],
+    cwd: ".", rules: { requireCommands: ["npm test", "npm run lint"] },
+  });
+  const mixedCheck = mixed.checks.find((c) => c.name === "commandsPassed");
+  assert.ok(mixedCheck.detail.includes("npm test (exitCode=1)"));
+  assert.ok(mixedCheck.detail.includes("where exitCode=undefined: the command ran"));
+  assert.equal(scorecardCommandFailureIsCredible(mixedCheck), true);
 });
 
 // ============================================================

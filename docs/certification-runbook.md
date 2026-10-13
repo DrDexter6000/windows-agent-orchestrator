@@ -53,7 +53,7 @@ ADR-0031 §4），经 `npm run reliability -- --agent <lane>` 认证前 registry
 
 `registry validate` 的能力交叉 `⚠` warning（ADR-0025 批次 2，均不阻塞派发、不影响 exit code）：
 validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校验（只读类声明，不为校验启动任何
-进程或网络请求）。配置 × 声明不符时两条提示：
+进程或网络请求）。配置 × 声明不符时三条提示：
 
 - `tokenBudget` 配置 × 该 backend 类未声明 usage/token 上报（`reportsTokenUsage` 非 true，
   未声明按 false 读）→ `⚠` "配了 tokenBudget 但不生效"（TD-87：kimi-code stream-json 无
@@ -62,9 +62,13 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 - `sessionReuse` 配置 × backend 类未声明 `supportsSessionReuse`（未声明同样按 false 读，
   fail-closed）→ `⚠` 提示该派发会在 spawn 前被运行时硬门拒绝（TD-117 形状）；换声明支持的
   backend 或移除该配置。
+- `scorecard.rules.requireCommands` 配置 × backend 类未声明 `reportsCommandExitCode`（未声明
+  同样按 false 读）→ `⚠` 提示命令事件不带数值退出码时评分不推断、这条规则通不过（决定 0072）；
+  改用 `requireAcceptance` 或把 `mode` 设为 `"warn"`。只查 agent 级配置，`--scorecard-rules`
+  临时规则不在 validate 的视野内。
 
-两条都是提示层：tokenBudget 的运行时闸门与 sessionReuse 的 spawn 前 fail-closed 门
-（`src/runManager.js`）语义不变——validate 只把不符提前到静态阶段并让它可见，不替代运行时拒绝。
+三条都是提示层：tokenBudget 的运行时闸门、sessionReuse 的 spawn 前 fail-closed 门与 scorecard
+在运行结束时的评分（`src/runManager.js`）语义不变——validate 只把不符提前到静态阶段并让它可见，不替代运行时判定。
 
 > **勘误注记（2026-09-26 迁移时按 ADR-0032 §8 现行行为纠正）**：下段"pass + detail 明示 `not applicable`"是 2026-08-20（TD-87）时点的落地行为，**已被五态规则取代**——现行实现中 `metricsNonZeroCheck()` 不适用改记 **N/A + 原因**（`state:"not-applicable"`：不置绿、不算失败、满足必需类目的覆盖语义），kimi 形状 lane 不再因此落 `conditional`。原文保留为历史记录，不构成第二份当前规则；现行规则见下文「认证检查结果五态与能力轴分层」节。
 
@@ -318,7 +322,7 @@ opencode-serve（wire 原生数值）、claude-code / kimi-code / deepseek-harne
 dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，退出码只以
 `[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
 `commandsPassed` 类检查在证据不可取得时记 **N/A + 原因**（不置绿、也不算失败）；
-若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。必需 strict 轴为 N/A 的 case 保持
+若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。声明是门，不是证明：kimi-code 的 `isError` 来自对输出文本的关键词匹配，deepseek-harness 缺"非零退出必置 error"的证据——这两条声明是否翻转待 Owner 裁定（TD-197）。必需 strict 轴为 N/A 的 case 保持
 `draft-only`，不能仅靠能力声明进入可派发集合；任何放宽都须 Owner 另行显式裁定。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个

@@ -44,6 +44,9 @@ export class KimiCodeBackend extends ProcessBackend {
   // 但 tool_result 以 tool_call id 为关联键（parser toolResultEvent(id, ...)），
   // scorecard 的 withInferredCommandExitCode 据此可靠推断 0/1（reliability 记录
   // coder_mm commandEvidence 绿即此通道）。
+  // 决定 0072 会审（sol）：parser 的 isError 实为对输出文本的关键词匹配
+  // （parsers/kimiCode.js），不等于退出码——上面的"可靠"只有正向样本、没有负向
+  // 证据。本声明是否翻转待 Owner 裁定（TD-197）；评分的推断以本声明为门。
   reportsCommandExitCode = true;
 
   /**

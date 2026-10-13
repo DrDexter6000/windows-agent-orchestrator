@@ -83,8 +83,9 @@ export async function checkScorecard({ events, cwd, rules, inferCommandExitCode 
   const evidenceEvents = (events ?? []).filter((e) => e.type === "run.event");
   const toolResults = evidenceEvents.filter((e) => e.kind === "tool_result");
   // 决定 0072：推断只在调用方声明可信时启用（默认关）。RunManager 按 backend 类的
-  // reportsCommandExitCode 声明传入——该轴的含义正是"WAO 今天能否为这个 backend
-  // 产出命令退出码证据（含本推断通道）"。此前这里对所有 backend 无条件推断：
+  // reportsCommandExitCode 声明传入——该轴的含义是"WAO 今天能否为这个 backend
+  // 产出命令退出码证据（含本推断通道）"；声明本身站不站得住由各 backend 负责，
+  // 见下方闭集处的说明。此前这里对所有 backend 无条件推断：
   // zcode 的真实转录里 1335 条命令全部被推成 exit 0、从未推出过失败，kimi-web 的
   // "工具结束"同样被当成 exit 0。
   const commands = evidenceEvents
@@ -207,9 +208,13 @@ async function checkAcceptance(scriptPath, cwd) {
 // 会把「工具完成」伪造成「exit 0」。消费方（runActivityProjection）以本闭集门控
 // 推断；这不是 runtime 编排分支，是数据来源可靠性声明（单一真相在本模块）。
 // 决定 0072：checkScorecard 自己的推断另由调用方按 backend 类的
-// reportsCommandExitCode 声明门控（见 checkScorecard）——两道门的口径不同：本闭集
-// 是"逐条证明过"，那条声明是"认证层按正向证据核过"（kimi-code、deepseek-harness
-// 声明 true 的依据就是这条推断通道）。活动投影仍用本闭集，未并轨。
+// reportsCommandExitCode 声明门控（见 checkScorecard）。那条声明是门，不是证明：
+// 本闭集只收逐条证明过的 backend；声明 true 而不在本闭集里的（kimi-code、
+// deepseek-harness）评分仍会推断，可靠性没有证明——kimi-code 的 isError 来自对
+// 输出文本的关键词匹配（parsers/kimiCode.js），不等于退出码（会审反例：输出
+// "Process exited with code 7" 被推成 exit 0）；deepseek-harness 缺"非零退出必置
+// error"的证据。这两条声明是否翻转待 Owner 裁定（TD-197）。活动投影仍用本闭集，
+// 未并轨。
 export const EXIT_CODE_INFERENCE_PROVEN_BACKENDS = Object.freeze(
   new Set(["claude-code"]),
 );
@@ -246,10 +251,11 @@ function checkCommandsPassed(requireCommands, commands, { inferCommandExitCode =
   if (missing.length > 0) details.push(`not executed: ${missing.join(", ")}`);
   if (failed.length > 0) details.push(`failed (exitCode!=0): ${failed.join(", ")}`);
   // 决定 0072：命令跑过、但这个 backend 给不出退出码（也不允许推断）——"没通过"
-  // 的原因是证据拿不到，不是命令失败。把这句话和出口写给 Lead。措辞里不出现
+  // 的原因是证据拿不到，不是命令失败。把这句话和出口写给 Lead，并限定到退出码
+  // 未知的那些命令（同一条规则里可能还有观察到非零退出的真失败）。措辞里不出现
   // "exitCode=<数字>"：认证脚本靠那个形状区分"观察到的非零退出"与"证据不可得"。
   if (unknownExit && !inferCommandExitCode) {
-    details.push("the command ran, but no exit code was recorded for it and this backend's tool results are not accepted as exit-code evidence (reportsCommandExitCode is not true), so it cannot be confirmed here: verify the outcome with requireAcceptance, or set mode \"warn\"");
+    details.push("where exitCode=undefined: the command ran, but no exit code was recorded for it and this backend's tool results are not accepted as exit-code evidence (reportsCommandExitCode is not true), so it cannot be confirmed here: verify the outcome with requireAcceptance, or set mode \"warn\"");
   }
   return {
     name: CHECK_NAME.COMMANDS_PASSED,
