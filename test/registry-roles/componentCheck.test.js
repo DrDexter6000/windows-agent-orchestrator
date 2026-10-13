@@ -742,6 +742,77 @@ test("kernel: commandsPassed 按 reportsCommandExitCode 声明条件化——dec
   assert.equal(judgedCommands.state, undefined);
 });
 
+test("0073（会审 sol）: 声明不产出退出码的后端上，\"命令没执行\"经生产者仍是 strict 失败（draft-only）；\"命令跑了、退出码未知\"才是不适用（conditional）", async () => {
+  // 整条链路：产品评分（checkScorecard）→ 认证脚本的生产者（llmScorecardEvidenceChecks）
+  // → certifyCase。此前生产者把声明为否的后端上一切"没观察到非零退出"的 commandsPassed
+  // 失败都记成不适用，连命令没跑也在内。
+  const { checkScorecard } = await import("../../src/scorecard.js");
+  const { certifyCase } = await import("../../scripts/reliability/certification.mjs");
+  const check = (name, pass, category, detail, extra = {}) => ({ name, pass, category, detail, ...extra });
+  const rules = { requireCommands: ["node --version"], requireEvidence: true };
+  const ev = (kind, extra = {}) => ({ type: "run.event", kind, ...extra });
+  const judge = async (events) => {
+    const scorecard = await checkScorecard({ events, cwd: ".", rules }); // 声明为否 → 不推断
+    const strictChecks = llmScorecardEvidenceChecks({
+      result: { completed: true, scorecard },
+      fileExists: true,
+      fileContentMatches: true,
+      declared: { reportsCommandExitCode: false },
+    });
+    const commands = strictChecks.find((c) => c.name === "commandsPassed");
+    const verdict = certifyCase({
+      caseId: "declared-gap lane",
+      checks: [
+        check("completed", true, "core", "ok", { capability: "complete" }),
+        ...strictChecks.filter((c) => c.name !== "filesExist"),
+        check("isolation", true, "operational", "ok", { capability: "isolation" }),
+        check("metricsNonZero", true, "observability", "ok", { capability: "metrics" }),
+      ],
+    });
+    return { scorecard, commands, verdict };
+  };
+
+  // 命令根本没执行（worker 只读了个文件）。
+  const neverRan = await judge([
+    { type: "run.completed" },
+    ev("tool_use", { tool: "read", input: { path: "README.md" } }),
+    ev("tool_result", { tool: "read", output: "hello", isError: false }),
+  ]);
+  assert.match(neverRan.scorecard.checks.find((c) => c.name === "commandsPassed").detail, /not executed: node --version/);
+  assert.equal(neverRan.commands.state, undefined, "不是不适用");
+  assert.equal(neverRan.commands.pass, false, "是真失败");
+  assert.equal(neverRan.verdict.status, "draft-only");
+  assert.match(neverRan.verdict.reason, /strict evidence checks failed/);
+
+  // 命令跑了，这个后端给不出退出码。
+  const ranUnknown = await judge([
+    { type: "run.completed" },
+    ev("command", { command: "node --version", toolCallId: "call_1" }),
+    ev("tool_result", { tool: "call_1", output: "v22", isError: false }),
+  ]);
+  assert.equal(ranUnknown.commands.state, "not-applicable");
+  assert.equal(ranUnknown.verdict.status, "conditional");
+  assert.match(ranUnknown.verdict.reason, /decision 0073/);
+
+  // 两条要求里一条没跑、一条退出码未知：没跑的那条让整项保持真失败。
+  const mixedScorecard = await checkScorecard({
+    events: [
+      { type: "run.completed" },
+      ev("command", { command: "node --version", toolCallId: "call_1" }),
+      ev("tool_result", { tool: "call_1", output: "v22", isError: false }),
+    ],
+    cwd: ".",
+    rules: { requireCommands: ["node --version", "npm test"] },
+  });
+  const mixedChecks = llmScorecardEvidenceChecks({
+    result: { completed: true, scorecard: mixedScorecard },
+    fileExists: true,
+    fileContentMatches: true,
+    declared: { reportsCommandExitCode: false },
+  });
+  assert.equal(mixedChecks.find((c) => c.name === "commandsPassed").state, undefined);
+});
+
 test("kernel F3: reportsCommandExitCode=false cannot erase a credible observed command failure", () => {
   for (const detail of [
     "failed (exitCode!=0): node --version (exitCode=7)",

@@ -20,7 +20,8 @@
 // 纯模块：零 import、零 I/O，模块加载期自检（闭集去重）。
 
 // 五个码与 certifyCase 的五条失败分支（scripts/reliability/certification.mjs
-// :38-56 的 if-else 顺序）一一对应：
+// 的 if-else 顺序）一一对应。没有专用码、wire 上为 null 的 conditional 分支有三条：
+// delta 范围全过、零正向证据、命令退出码证据轴不适用（决定 0073）。
 //   case_blocked                        ← blocked===true || blockerReason（分支 1）
 //   core_checks_failed                  ← core 类失败（分支 2，rejected）
 //   strict_evidence_failed              ← strict 类失败（分支 3，draft-only）

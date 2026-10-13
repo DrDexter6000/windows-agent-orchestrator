@@ -94,11 +94,13 @@ export function certifyCase(caseResult = {}) {
       && checkStateOf(c) === "not-applicable")
     : [];
   const requiredStrictNotApplicable = requiredStrictNaChecks.length > 0;
-  // 决定 0073（Owner 2026-10-13："我可以接受部分车道的能力评价是 conditional，但要能
-  // 正常被 lead agent 通过 wao 来调用"）——上面那句注释等的那次明示裁定。范围只有
-  // 一条轴：命令退出码证据（capability=commandEvidence）因 backend 如实声明不产出而
-  // 不适用的 case 评 conditional（监督派发），封顶 conditional、拿不到 certified。
-  // 其它必需 strict 检查的 N/A 不在这次裁定之内，仍是 draft-only。
+  // 决定 0073：Owner 2026-10-13 给出目标（"我可以接受部分车道的能力评价是
+  // conditional，但要能正常被 lead agent 通过 wao 来调用"）并授权 Lead 决断；下面
+  // 的判据是 Lead 在这份授权下定的、经联合会审。范围只有一条轴：命令退出码证据
+  // （capability=commandEvidence）因 backend 如实声明不产出而不适用的 case 评
+  // conditional（监督派发），封顶 conditional、拿不到 certified。其它必需 strict
+  // 检查的 N/A 仍是 draft-only。"命令没跑"不走这条路：生产者把它保留为 strict
+  // 失败（scorecardEvidence.mjs）。
   const strictNaIsDeclaredExitCodeGap = requiredStrictNotApplicable
     && requiredStrictNaChecks.every((c) => c.capability === "commandEvidence");
   // G2: inconclusive 不是已证实失败，但也不能绕过 F1 的 strict 承重边界升到
@@ -129,7 +131,7 @@ export function certifyCase(caseResult = {}) {
     reason = "required strict certification evidence is inconclusive; explicit Owner qualification is required before dispatchable use";
   } else if (strictNaIsDeclaredExitCodeGap) {
     status = "conditional";
-    reason = "command exit-code evidence is not applicable for this backend (declared capability gap); conditional by Owner ruling 2026-10-13 (decision 0073)";
+    reason = "command exit-code evidence is not applicable for this backend (declared capability gap); conditional per decision 0073 (Lead's criterion under the Owner's 2026-10-13 delegation)";
   } else if (
     hasFailedCategory(failedChecks, "operational") ||
     hasFailedCategory(failedChecks, "observability")
@@ -157,6 +159,8 @@ export function certifyCase(caseResult = {}) {
   }
 
   // TD-111: 闭集机器码（经 SSOT 映射，与上面 if-else 同优先级）。certified → null。
+  // 0073 的退出码缺口分支没有专用码：旁边有 operational / observability 失败时取
+  // 那个码（自由文本 reason 说的是缺口），否则为 null（与 delta 分支同样的处理）。
   // 与自由文本 reason 并列新增；reason 原文一个字节不动（磁盘契约）。
   const reasonCode = reasonCodeFor({ status, failedChecks, blockerReason, missingCategories });
 

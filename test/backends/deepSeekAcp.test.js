@@ -580,7 +580,7 @@ test("ACP 0072: 消费方还在处理上一条事件时到达的调用不滞留�
   }
 });
 
-test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ 每个运行提示一次原因与修法；别的失败不提示", async () => {
+test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ 每次启动提示一次症状、常见原因与修法；别的失败不提示", async () => {
   // 线上真实形状：嵌套块；真机上每一条沙箱内命令都以同一句失败（2026-10-13，D: 盘项目目录）。
   const denied = [{ type: "content", content: { type: "text", text: "Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\projects\\demo)" } }];
   const { events, handle } = await runAcpScenario({
@@ -593,11 +593,13 @@ test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ �
     },
   });
   const notes = events.filter((e) => e.kind === "message" && e.role === "system"
-    && e.parts.some((p) => p.text.includes("could not set up its command sandbox")));
+    && e.parts.some((p) => p.text.includes("setting up its sandbox")));
   assert.equal(notes.length, 1, "两条命令同样失败，只提示一次");
   const text = notes[0].parts[0].text;
-  assert.ok(text.includes("full control of the workspace directory"), "说清原因");
+  assert.ok(text.includes("does not own the workspace directory or lacks full control of it"), "给出 harness 文档里的常见原因");
   assert.ok(text.includes("diagnose-windows-sandbox-acl.ps1"), "给出修法");
+  assert.ok(text.includes("It changes file permissions"), "提醒修法会改权限、先读说明");
+  assert.ok(!text.includes("D:\\projects"), "固定文案，不带路径");
   // 提示排在触发它的那条结果之后；命令与结果照常落。
   const kinds = events.filter((e) => ["command", "tool_result", "message"].includes(e.kind) && (e.kind !== "message" || notes.includes(e)))
     .map((e) => e.kind);
@@ -613,7 +615,7 @@ test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ �
     },
   });
   assert.ok(!other.events.some((e) => e.kind === "message" && e.role === "system"
-    && e.parts.some((p) => p.text.includes("command sandbox"))));
+    && e.parts.some((p) => p.text.includes("setting up its sandbox"))));
 });
 
 test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取首个并留痕", async () => {

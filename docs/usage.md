@@ -311,13 +311,13 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 > **行为变更（决定 0072，2026-10-13）**：① deepseek-acp 运行的 shell 命令在调用到达时多落一条 `tool_use`（此前命令要到结束才出现）；两个 deepseek 后端此前会把"上一条事件还在落盘时到达的事件"压到下一条事件到来才放出，现在不再等下一条事件。② kimi-web 的写文件调用在途先落一条 `tool_use`，输入只带 `path`；`file_written` 的落盘时机不变。③ scorecard 的 `requireCommands` 不再用"工具调用成功"推断命令退出码，除非后端声明能产出退出码证据（`reportsCommandExitCode`，见 [surface/certification.md](surface/certification.md)）：在 zcode / kimi-web / deepseek-acp 上，命令事件不带数值退出码时这条规则此后**通不过**（这三个后端实测都不带；此前在 zcode 上跑过就通过——1335 条命令全被推成退出码 0，一次失败都没推出过）。kimi-code、deepseek-harness 自决定 0073 起同样不再推断。要验证这些车道上的命令结果，用 `requireAcceptance`（独立脚本验收）或把 `mode` 设为 `"warn"`；`wao registry validate` 会对 agent 级的这种配置给出 ⚠（`--scorecard-rules` 临时规则不在它的视野内）。
 
-> **行为变更（决定 0073，2026-10-13）**：① kimi-code、deepseek-harness 两个后端不再声明"能产出命令退出码证据"（前者靠输出里的关键词猜成败，后者没有实测）。② 认证：命令退出码这一轴因后端如实声明不产出而不适用的车道评 `conditional`，不再停在 `draft-only`（Owner 裁定；其它 strict 轴不适用仍是 `draft-only`）。③ `run_activity` 的工具输出尾部（`tail`）也读文本块数组——deepseek-acp 的工具结果此前一直显示为空。④ deepseek-acp 运行在沙箱建不起来时，转录里落一条 system 消息写明原因与修法（每个运行一次）。
+> **行为变更（决定 0073，2026-10-13）**：① kimi-code、deepseek-harness 两个后端不再声明"能产出命令退出码证据"（前者靠输出里的关键词猜成败，后者没有实测）。② 认证：命令退出码这一轴因后端如实声明不产出而不适用的车道评 `conditional`，不再停在 `draft-only`（其它 strict 轴不适用、要求的命令根本没跑，仍是 `draft-only`）。③ `run_activity` 的工具输出尾部（`tail`）也读文本块数组——deepseek-acp 的工具结果此前一直显示为空。④ deepseek-acp 运行在沙箱建不起来时，转录里落一条 system 消息，写明症状、harness 文档给出的常见原因与修法（每次启动后端进程一次）。
 
-> **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 在 Windows 上给命令套的沙箱要求当前用户对工作目录有**完全控制**。目录只有"修改"权限时（非系统盘上的项目目录常见：用户是所有者，权限来自 Authenticated Users），沙箱内的每条命令都以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败，与命令本身无关；模型可能改为申请完全权限（WAO 按既有规则应答放行，命令在沙箱外执行），也可能直接放弃。每个项目目录修一次，由操作者执行 harness 自带的修复脚本——它给该目录补上当前用户的完全控制项，每处改动有备份和恢复命令；WAO 不代为修改目录权限：
+> **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 在 Windows 上给命令套的沙箱，要求工作目录**由当前用户拥有并且有完全控制**。只有"修改"权限的目录上（本机非系统盘的项目目录即是：权限来自 Authenticated Users），沙箱内的命令在执行之前就以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败；模型可能改为申请完全权限（WAO 按既有规则应答放行，命令在沙箱外执行），也可能放弃。WAO 只报告、不修改目录权限。修复由操作者执行 harness 自带的脚本，**执行前要知道它会改什么**：① 给这条目录链上缺权限的目录补上当前用户的完全控制项；② 扫描该项目目录的子树，**移除其中应用包（AppContainer）的显式允许项——那些应用会失去对这些对象的访问**。文件内容与所有者不变，每处改动先备份并打印恢复命令：
 >
 > `pwsh -NoProfile -File "<npm 全局目录>\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-sandbox-windows-acl\assets\diagnose-windows-sandbox-acl\scripts\diagnose-windows-sandbox-acl.ps1" -Path "<项目目录>" -AllowRoot "<项目目录>" -Out "<存放恢复文件的目录>"`
 >
-> 不要用管理员身份运行；`-Out` 选一个长期保留、属于自己的目录。修完后重派一次带命令的任务确认。
+> 不要用管理员身份运行，不要手工改权限；`-Out` 选一个长期保留、属于自己的目录。结果以脚本末尾的 `RECAP` / `nextAction` 为准：`verify_original_confined_operation` 才算修好（再重派一次带命令的任务确认）；`stop` 或 `restore_pending_then_stop` 就停下，按它打印的恢复命令处理，不要重复执行。本机观察到的情形是每个项目目录修一次；更深的路径仍被拒时，对那条路径再执行一次。
 
 > **行为变更（决定 0070，2026-10-13）**：`run_activity` 的 tool_use 条目多一个 `detail`（输入摘要），tool_result 条目多 `tail` / `truncated`（输出尾部）；codex 运行的转录在命令开始时多一条 tool_use（此前命令要到结束才出现）、结束时多一条带输出的 tool_result；codex / claude-code / kimi-code 的运行在转录静默满 5 分钟后会落 `runtime_activity`（`process_active` / `files_changed`）——此前这些后端在长命令期间转录是空的。
 

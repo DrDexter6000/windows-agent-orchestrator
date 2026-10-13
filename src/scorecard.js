@@ -245,6 +245,8 @@ function checkCommandsPassed(requireCommands, commands, { inferCommandExitCode =
   }
   const passed = missing.length === 0 && failed.length === 0;
   const details = [];
+  // "not executed:" 也是机器读的形状（scripts/reliability/scorecardEvidence.mjs）：
+  // 认证层据此把"命令没跑"保留为真失败，不归到"退出码证据不可得"。
   if (missing.length > 0) details.push(`not executed: ${missing.join(", ")}`);
   if (failed.length > 0) details.push(`failed (exitCode!=0): ${failed.join(", ")}`);
   // 决定 0072：命令跑过、但这个 backend 给不出退出码（也不允许推断）——"没通过"

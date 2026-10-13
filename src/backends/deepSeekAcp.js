@@ -278,14 +278,15 @@ function advertisedSelectValues(option) {
 
 // dsh 的 Windows 沙箱在工作目录上建不起来时的固定报错（决定 0073）。dsh 的
 // dsh-sandbox-windows-acl 要求调用者对工作目录有完全控制（标签在 SACL，需要
-// WRITE_OWNER）；目录只给了"修改"权限时，每一条沙箱内的命令都以这一句失败——
-// 与命令本身无关。本机 19 次真实运行里 10 次出现过，此前没有任何提示。
+// WRITE_OWNER）；目录只给了"修改"权限时，沙箱内的命令在执行之前就以这一句失败。
+// 本机 19 次真实运行里 10 次出现过，此前没有任何提示。命中这句报错只说明症状
+// （沙箱授权被拒），目录的所有者 / 权限是 harness 文档给出的常见原因，WAO 没有核实。
 const SANDBOX_GRANT_DENIED_RE = /SetNamedSecurityInfoW failed \(Win32 5\): grantWrite\(/;
-const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: the harness could not set up its command sandbox in this workspace. "
-  + "Windows file permissions give the signed-in user less than full control of the workspace directory, "
-  + "so every sandboxed command fails the same way; the command itself is not at fault. "
-  + "Fix once per project directory: the operator runs the harness's own repair script "
-  + "(diagnose-windows-sandbox-acl.ps1; see docs/usage.md, deepseek lane prerequisites).";
+const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: a command failed while the harness was setting up its sandbox in this workspace "
+  + "(grantWrite denied), before the command could run. The harness documents the usual cause: the signed-in user "
+  + "does not own the workspace directory or lacks full control of it; other sandboxed commands here are likely "
+  + "to fail the same way. The operator can repair the directory with the harness's own script "
+  + "(diagnose-windows-sandbox-acl.ps1). It changes file permissions: read docs/usage.md, deepseek lane prerequisites, first.";
 
 // 工具结果里的全部文本：ACP 线上的真实形状是嵌套块
 // （{type:"content", content:{type:"text", text}}），平铺的 {type:"text", text} 也认。
@@ -734,8 +735,9 @@ export class DeepSeekAcpBackend {
         // 关联成功才发 file_written；failed 绝不发。
         if (!isError) events.push(fileWrittenEvent(pendingPath, { toolCallId }));
       }
-      // 决定 0073：沙箱在工作目录上建不起来——每个运行提示一次，把原因和修法写给
-      // Lead（system 消息不是 usable effect，不进证据链）。
+      // 决定 0073：沙箱在工作目录上建不起来——每次启动后端进程提示一次（同一个运行
+      // 被恢复重启时会再提示一次），把症状、常见原因和修法写给 Lead（system 消息
+      // 不是 usable effect，不进证据链）。
       if (isError && !sandboxGrantDeniedNoted && SANDBOX_GRANT_DENIED_RE.test(toolResultText(output))) {
         sandboxGrantDeniedNoted = true;
         recordAnomaly("harness command sandbox could not be set up in the workspace (directory permissions; grantWrite denied)");

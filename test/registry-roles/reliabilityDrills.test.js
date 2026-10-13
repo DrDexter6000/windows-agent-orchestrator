@@ -267,6 +267,17 @@ test("F11: command capability declaration preserves credible fail and only N/A-m
   assert.equal(scorecardCommandFailureIsCredible({
     name: "commandsPassed", passed: false, detail: "failed (exitCode!=0): npm test (exitCode=undefined)",
   }), false, "missing exit-code evidence remains unavailable rather than a quality failure");
+  // 决定 0073 会审（sol）：要求的命令根本没执行是真失败，声明不能把它抹成"证据不可得"。
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: false, evidence: "0 command(s) recorded", detail: "not executed: npm test",
+  }), true, "a required command that never ran is a real failure");
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: false,
+    detail: "not executed: npm test; failed (exitCode!=0): node --version (exitCode=undefined)",
+  }), true, "one missing command keeps the whole check a real failure");
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: true, detail: "not executed: npm test",
+  }), false, "a passed check is never a failure");
   assert.equal(scorecardCommandFailureIsCredible(null), false);
 });
 

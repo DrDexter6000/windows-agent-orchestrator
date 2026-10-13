@@ -325,9 +325,10 @@ dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，�
 `[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
 `commandsPassed` 类检查在证据不可取得时记 **N/A + 原因**（不置绿、也不算失败）；
 若 scorecard 已明确观察到非零退出则保留真实 fail。决定 0072 起产品侧的 scorecard 也按这条声明门控推断：声明非 true 的 backend 上，命令事件不带数值退出码时 `requireCommands` 通不过（此前 zcode / kimi-web 会把"工具调用成功"推成退出码 0），组件层的角色合同探针因此只对声明 true 的 backend 带这条规则。必需 strict 轴为 N/A 的 case 保持
-`draft-only`，不能仅靠能力声明进入可派发集合——**例外只有一条**（决定 0073，Owner 2026-10-13 明示裁定）：命令退出码证据这一轴
+`draft-only`，不能仅靠能力声明进入可派发集合——**例外只有一条**（决定 0073：Owner 2026-10-13 给出目标并授权，判据由 Lead 在授权下确定、经联合会审）：命令退出码证据这一轴
 （`capability=commandEvidence`）因 backend 如实声明不产出而不适用的 case 评 `conditional`（监督派发，封顶 conditional）。其它 strict 轴的
-N/A、strict 证据不足（inconclusive）与 strict 失败仍是 `draft-only`；再有放宽须 Owner 另行显式裁定。
+N/A、strict 证据不足（inconclusive）与 strict 失败仍是 `draft-only`——**要求的命令根本没执行属于 strict 失败**，不归入"退出码证据不可得"
+（`scorecardCommandFailureIsCredible` 保留它与观察到的非零退出）；再有放宽须 Owner 另行显式裁定。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
 backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先，保留
