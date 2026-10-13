@@ -265,7 +265,7 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 - **安静不等于失去监督**：按观察窗口检查终态、Owner 输入及新的活性/异常信号。工具断连或观察超时只代表本次观察不完整，不代表任务停止；恢复后先点查原 run，不重复派发。长等待、沉默和耗时都不是自动 stop/retry、提高执行超时或接受交付的理由。
 - **WAO 什么时候自己收口、什么时候等你决定**（决定 0067 / 0068）：口径是同一条——控制面只在运行**没有生命体征**时因"等不到进展"自动收口，有生命体征就不替你放弃；但各车道读得到的体征不同，落点也不同，kimi-web 有一处例外：
   - **zcode**：新的动作或正文、模型流在收、工具子进程在干活、工作目录里有文件变化，任一成立就继续等，这一项没有自动上限；都没有才收口，约 5–10 分钟（判据见 [troubleshooting §6.9](troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)）。模型流在收时转录每分钟落一条 `runtime_activity`（`streaming`）；凭后两项续命时落 `process_active` / `files_changed`（每种至多每分钟一条）。
-  - **kimi-web**：turn 结构有变化算进度；没有变化时等 60–240 秒问 serve 这一轮是否还活着，不活跃或问不到就收口，活着就继续等。但**自上次产出增长以来**这样续命的静默满 30 分钟仍会收口（只有 steps / 帧 / 文本变多才清零，state 来回变不算）：serve 的"还活着"是它的自我声明，工具挂死时同样报 active，没有别的体征可以交叉印证。一条超过 30 分钟、期间不落任何帧的命令在这条车道上会被收掉。
+  - **kimi-web**：命令与工具调用在途即落转录（决定 0071；写文件证据仍等整轮完成）；turn 结构有变化算进度；没有变化时等 60–240 秒问 serve 这一轮是否还活着，不活跃或问不到就收口，活着就继续等。但**自上次产出增长以来**这样续命的静默满 30 分钟仍会收口（只有 steps / 帧 / 文本变多才清零，state 来回变不算）：serve 的"还活着"是它的自我声明，工具挂死时同样报 active，没有别的体征可以交叉印证。一条超过 30 分钟、期间不落任何帧的命令在这条车道上会被收掉。
   - **进程式后端**（codex / claude-code / kimi-code / deepseek-*）：没有"轮内等不到进展"这类自动收口门——运行到进程自己退出或 Lead 中止为止（可选的 `silentTimeout` 只管"启动后一条事件都没有"，默认关；deepseek 另有请求级的 15s 超时）。崩溃、协议错误等失败照常收口。codex / claude-code / kimi-code 在转录静默满 5 分钟后取一次基线、30 秒后再取一次比对（决定 0070）：读到后代进程在干活落 `process_active`、读到工作目录有文件变化落 `files_changed`，没读到就什么都不落，约每 5.5 分钟一轮——只是给 Lead 看的事实，读到什么都不收口；模型长思考期间读不到体征，deepseek 两个后端没有接这项取样。codex 在等命令时会自己隔一两分钟发一句话，取样很少轮到它。
 
   运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你：CLI `status` 附一行 `advisory`；MCP `run_status` 带 `leadAdvisory`；`run_wait` / `run_await_result` 的 `semanticNotes` 带 `observation.transcript_quiet`。停不停由 Lead 决定。
@@ -306,6 +306,8 @@ npm run cli -- run glm-flash --prompt "..." --format json
 > **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
 
 > **行为变更（决定 0067，2026-10-12）：zcode 运行只在没有生命体征时自动收口**——此前已有产出后静默满 300–600s 即判 `turn stalled`（一周多里 12 次，其中 7 次死时有工具命令在跑）。现在收口门到点时（含零 part 阶段的 silentTimeout / 思考预算）先看生命体征：模型流在收、app-server 的后代进程在干活，或工作目录里有文件变化，就继续等且这一项没有任何自动上限；都没有才收口。模型流在收时转录每分钟落一条 `runtime_activity`（`streaming`），等待类命令据此显示有活动；CLI `status` 在转录里 ≥30 分钟没有新的动作或正文时附 `advisory`。`stop` / `run_stop` 同批对 zcode 运行生效。判据、读数与边界见 [troubleshooting §6.9](troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)。
+
+> **行为变更（决定 0071，2026-10-13）**：kimi-web 运行的命令与工具调用在途即落转录（此前要到整轮带着正文完成才出现）——`run_activity` 在命令还在跑时就看得到它；失败的轮里因此会留下在途时已看到的命令（此前零证据），写文件证据的落盘时机不变。
 
 > **行为变更（决定 0070，2026-10-13）**：`run_activity` 的 tool_use 条目多一个 `detail`（输入摘要），tool_result 条目多 `tail` / `truncated`（输出尾部）；codex 运行的转录在命令开始时多一条 tool_use（此前命令要到结束才出现）、结束时多一条带输出的 tool_result；codex / claude-code / kimi-code 的运行在转录静默满 5 分钟后会落 `runtime_activity`（`process_active` / `files_changed`）——此前这些后端在长命令期间转录是空的。
 

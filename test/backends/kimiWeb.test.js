@@ -2753,3 +2753,86 @@ test("TD-250: 参数形状不符（缺 serveUrl / 空 sessionId / token 缺席�
   }
   assert.equal(calls.length, 0, "形状/凭据缺席=零网络请求");
 });
+
+// ===== 决定 0071：tool 帧证据在轮询期即落盘 =====
+
+function runningTurn0071(frames) {
+  return [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", usage: undefined, frames })],
+  })];
+}
+
+async function collectKimiEvents0071(sessionId, script) {
+  const { handler, markSpawned } = turnScriptServer(sessionId, { script });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) events.push(ev);
+  // streaming 事实按节流发射，与本组断言无关。
+  return events.filter((e) => e.kind !== "runtime_activity");
+}
+
+test("kimi-web 0071①: 命令在输入就绪时落、结果在帧到终态时落、写文件只在终态落；整轮结束不重复", async () => {
+  // 帧形状取自 2026-10-13 live 探针：首见没有 input（参数还在流式拼装），约 2s 后
+  // input 就绪而 state 仍是 running，结束时 state:"done" 且 output 在场。
+  const readDone = { kind: "tool", frameId: "f_r", toolCallId: "tc_r", name: "Read", state: "done", input: { path: "README.md" }, output: "hello" };
+  const bashStart = { kind: "tool", frameId: "f_b", toolCallId: "tc_b", name: "Bash", state: "running", inputText: '{"comm' };
+  const bashReady = { ...bashStart, input: { command: "npm test", timeout: 600 } };
+  const bashDone = { ...bashReady, state: "done", output: "# pass 3" };
+  const writeRunning = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "running", input: { path: "out.txt", content: "x" } };
+  const writeDone = { ...writeRunning, state: "done", output: "Wrote 1 bytes" };
+  const perPoll = [];
+  const script = [
+    runningTurn0071([readDone, bashStart]),
+    runningTurn0071([readDone, bashReady]),
+    runningTurn0071([readDone, bashReady]),
+    runningTurn0071([readDone, bashDone, writeRunning]),
+    [turnItem({ steps: [stepItem({ frames: [readDone, bashDone, writeDone, { kind: "text", text: "all done", role: "assistant" }] })] })],
+  ];
+  void perPoll;
+  const events = await collectKimiEvents0071("session_0071a", script);
+  assert.deepEqual(
+    events.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
+    [
+      "tool_use", "tool_result:tc_r", // Read 首见即终态：投影 + 结果
+      "command", // Bash：输入就绪才落（首见那一拍没有 input → 不落，也不被错分成 tool_use）
+      "tool_result:tc_b", // Bash 到终态
+      "file_written", "tool_result:tc_w", // Write：在途不落，终态（这里是整轮结束时）才落
+      "message", "message", "metrics", "done",
+    ],
+  );
+  assert.equal(events.find((e) => e.kind === "command").command, "npm test");
+  assert.equal(events.filter((e) => e.kind === "command").length, 1, "同一帧不重复发射");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的命令；写文件证据仍只在带正文完成时落（N1 不变）", async () => {
+  const bashReady = { kind: "tool", frameId: "f_b", toolCallId: "tc_b", name: "Bash", state: "running", input: { command: "npm test" } };
+  const bashDone = { ...bashReady, state: "done", output: "# fail 1" };
+  const writeDone = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "done", input: { path: "out.txt", content: "x" }, output: "Wrote 1 bytes" };
+  // 失败轮：在途时落了命令；失败那一拍什么都不补，直接报 failed。
+  const failed = await collectKimiEvents0071("session_0071b", [
+    runningTurn0071([bashReady]),
+    [turnItem({ state: "failed", error: "upstream exploded", steps: [stepItem({ frames: [bashDone, writeDone] })] })],
+  ]);
+  assert.deepEqual(failed.map((e) => e.kind), ["command", "done"]);
+  assert.equal(failed.at(-1).reason, "failed");
+  // 在途时写文件帧已经 done：仍不落 file_written（等这一轮带着正文完成）。
+  const emptyAfterWrite = await collectKimiEvents0071("session_0071c", [
+    runningTurn0071([writeDone, bashReady]),
+    [turnItem({ steps: [stepItem({ frames: [writeDone, bashDone] })] })],
+  ]);
+  assert.deepEqual(emptyAfterWrite.map((e) => e.kind), ["command", "done"], "没有正文的 completed 轮：不补证据、不落 file_written");
+  assert.equal(emptyAfterWrite.at(-1).reason, "failed");
+  assert.match(emptyAfterWrite.at(-1).error, /completed without assistant text/);
+  // 只在最后一拍才看到的轮（从未在途观察过）：与此前完全相同——零证据。
+  const neverSeen = await collectKimiEvents0071("session_0071d", [
+    [turnItem({ steps: [stepItem({ frames: [bashDone] })] })],
+  ]);
+  assert.deepEqual(neverSeen.map((e) => e.kind), ["done"]);
+});

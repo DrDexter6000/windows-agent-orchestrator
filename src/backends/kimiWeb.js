@@ -22,9 +22,11 @@
 //     {kind:"tool", frameId, toolCallId, name, state, input, output}]}]}。
 //       · **tool 帧形状 = 2026-10-01 live 探针（delta 认证证据链）**：v1 曾误以为
 //         frames 是 thinking|text 闭集——实测另有 kind:"tool"（name=工具名；
-//         input 形状随工具变化；state 有 done 等终态）。completed 轮按
-//         evidenceEventsFromKimiToolFrame 投影为证据事件（镜像 opencodeServe
-//         evidenceEventsFromOpenCodeToolPart），证据先于 assistant 文本发射。
+//         input 形状随工具变化；state 有 done 等终态）。按
+//         kimiToolProjectionEvents 投影为证据事件（镜像 opencodeServe
+//         evidenceEventsFromOpenCodeToolPart），证据先于 assistant 文本发射；
+//         决定 0071 起命令 / 工具调用在轮询期即落（projectKimiToolFrames），
+//         写文件证据仍等整轮带着正文完成。
 //       · **state 闭集：queued|running|completed|failed|cancelled**（终态 = 后
 //         三个）。
 //       · **triggerPromptId === POST prompts 返回的 prompt_id**（live 双验证：
@@ -729,7 +731,7 @@ export class KimiWebBackend {
    *     （或无 role 的 text 帧，按实测宽容）按序拼接；**发射前复检非空**——
    *     空/纯空白 ⇒ done(failed) 收口（N1 教训：传输成功不是可用答案，绝不
    *     伪造完成）；先发射 tool 帧证据（kind:"tool" 帧逐帧投影——
-   *     evidenceEventsFromKimiTurn，证据先行），再发射 user echo（turn.prompt，
+   *     projectKimiToolFrames，证据先行），再发射 user echo（turn.prompt，
    *     在场且非空才发）+ assistant text + usage（steps[].usage 求和 → metrics
    *     事件）+ done(completed)。**只发射该 turn 的内容**。
    *   - state=failed|cancelled → done(failed, turn.error 字段或固定文案；R9 F2：
@@ -788,6 +790,9 @@ export class KimiWebBackend {
     // 清零此计数（与普通停滞门分工：那守"受支持的非终态停滞"，这守"状态本身
     // 不受支持"——等待增长没有意义）。
     let unsupportedStatePolls = 0;
+    // 决定 0071：tool 帧证据的台账（帧身份 → 已落的部分）。证据在轮询期即落盘——
+    // 此前要到整轮结束才投影，一条跑几分钟的命令在途时 Lead 看不到它。
+    const toolLedger = new Map();
     while (!signal?.aborted) {
       // onPollTick 每拍恰一次，置于轮询观察之前；best-effort——钩子抛错绝不
       // 杀死事件流。
@@ -855,7 +860,8 @@ export class KimiWebBackend {
         const text = assistantTextOfTurn(turn);
         if (text.trim().length === 0) {
           // 发射前复检非空（N1 教训）：completed 轮无 assistant text ⇒ 不伪造
-          // 完成，按 failed 收口。
+          // 完成，按 failed 收口。这里不补发证据（决定 0071 之后，在途时看到的命令 /
+          // 工具调用已经落过；写文件证据仍只在成功路径投影）。
           yield doneEvent(
             "failed",
             "kimi turn completed without assistant text (state=completed, no text frames — refusing to fabricate completion)",
@@ -866,9 +872,9 @@ export class KimiWebBackend {
         // 事件先于消息投影）：归属 turn 的 steps[].frames 里 kind==="tool" 的帧
         // 逐帧投影为证据事件。delta 证据链动机：v1 误以为 frames 是 thinking|text
         // 闭集，模型真写了文件但 WAO 无 file_written 事件——delta scorecard 的
-        // hasEvidence/filesExist 误红。空文本门在先：completed 轮无 assistant
-        // text 时按 failed 收口、零发射（含证据），维持 N1 语义。
-        for (const ev of evidenceEventsFromKimiTurn(turn)) {
+        // hasEvidence/filesExist 误红。决定 0071 起证据在轮询期即落盘，这里只
+        // 补还没落过的部分（台账去重，同一帧不重复发射）。
+        for (const ev of projectKimiToolFrames(turn, toolLedger, { final: true })) {
           yield ev;
         }
         if (typeof turn.prompt === "string" && turn.prompt.length > 0) {
@@ -906,6 +912,9 @@ export class KimiWebBackend {
         continue;
       }
       unsupportedStatePolls = 0;
+      // 决定 0071：在途的 tool 帧就绪即落证据（命令 / 工具调用在输入完整时，结果在
+      // 帧到终态时）。
+      for (const ev of projectKimiToolFrames(turn, toolLedger)) yield ev;
       // queued | running（受支持的非终态）：等（绝不猜终态）。无进展兜底
       // （TD-197① 观测自适应时间门）：signature（state + steps/frames 结构
       // 投影）变化/首见 = 进度（tracker.noteProgress + 计数清零）；静默段 ≥
@@ -1134,7 +1143,7 @@ function findTurnByPromptId(items, promptId) {
 // completed 轮答案切片：该 turn 全部 steps（按序）的全部 frames（按序）里
 // kind==="text" 且（role==="assistant" 或无 role——实测宽容，两形状都见过）的
 // text 直接拼接为单条 assistant text。thinking 帧不投影（v8 无 thinking 投影
-// 需求）；kind==="tool" 帧不入文本拼接，由 evidenceEventsFromKimiTurn 单独
+// 需求）；kind==="tool" 帧不入文本拼接，由 projectKimiToolFrames 单独
 // 投影为证据事件（2026-10-01 live 实测：frames 并非 thinking|text 闭集）；非
 // 字符串 text 的帧跳过（形状不可用，不计入拼接——空结果由调用侧的发射前复检
 // 收口）。
@@ -1151,18 +1160,55 @@ function assistantTextOfTurn(turn) {
   return parts.join("");
 }
 
-// completed 轮 tool 帧证据投影（2026-10-01 补齐，delta 认证证据链）：该 turn
-// 全部 steps（按序）的全部 frames（按序）里 kind==="tool" 的帧逐帧投影为证据
-// 事件——只吃本轮 frames，历史轮按构造不可能混入。
-function evidenceEventsFromKimiTurn(turn) {
+// tool 帧证据的增量投影（决定 0071；2026-10-01 的整轮投影是它的 final 形态）：
+// 该 turn 全部 steps（按序）的全部 frames（按序）里 kind==="tool" 的帧，按台账
+// 只发射还没落过的部分——只吃本轮 frames，历史轮按构造不可能混入。
+//
+// 在途帧的形状（2026-10-13 live 探针，Bash 跑 sleep 45）：
+//   首见：{frameId, toolCallId, name, state:"running", inputText}——没有 input，
+//         参数还在流式拼装；
+//   约 2s 后：input 就绪（{command, timeout}），state 仍是 "running"；
+//   结束：state:"done"，output 在场。
+// 所以"投影事件"等输入就绪才发（否则 Bash 会因为还没有 input.command 被错分成
+// tool_use），"结果事件"等终态才发。写文件类的帧在途不投影：file_written 是交付
+// 相关的证据，维持"只在这一轮带着正文完成时才落"的既有保证（N1：没有正文的
+// completed 轮、失败的轮不落写文件证据）。final=true（整轮带着正文完成）时把还没
+// 落过的全部补齐，与此前的整轮投影同形。失败路径不调用 final——那里只留下在途时
+// 已经看到的命令 / 工具调用。
+function projectKimiToolFrames(turn, ledger, { final = false } = {}) {
   const events = [];
-  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
-    for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
+  const steps = Array.isArray(turn?.steps) ? turn.steps : [];
+  for (let s = 0; s < steps.length; s += 1) {
+    const frames = Array.isArray(steps[s]?.frames) ? steps[s].frames : [];
+    for (let f = 0; f < frames.length; f += 1) {
+      const frame = frames[f];
       if (frame?.kind !== "tool") continue;
-      events.push(...evidenceEventsFromKimiToolFrame(frame));
+      const key = typeof frame.frameId === "string" && frame.frameId.length > 0 ? frame.frameId : `${s}:${f}`;
+      if (!final && isFileWriteToolKey(String(frame.name ?? "").toLowerCase())) continue;
+      const entry = ledger.get(key) ?? { projected: false, resulted: false };
+      const terminal = isTerminalKimiToolState(frame.state);
+      if (!entry.projected && (final || terminal || kimiToolInputReady(frame))) {
+        events.push(...kimiToolProjectionEvents(frame));
+        entry.projected = true;
+      }
+      if (terminal && !entry.resulted) {
+        events.push(kimiToolResultEvent(frame));
+        entry.resulted = true;
+      }
+      ledger.set(key, entry);
     }
   }
   return events;
+}
+
+// 在途帧的输入是否已经就绪到可以定下投影事件的形状：要求 input 对象在场，
+// shell 类另要求 command 已是字符串。（写文件类的帧在途不投影，走不到这里。）
+function kimiToolInputReady(frame) {
+  const toolKey = String(frame?.name ?? "").toLowerCase();
+  const input = frame?.input;
+  if (!input || typeof input !== "object") return false;
+  if (toolKey === "bash" || toolKey === "shell") return typeof input.command === "string";
+  return true;
 }
 
 // 单个 tool 帧的投影规则——**镜像 src/backends/opencodeServe.js 的
@@ -1179,15 +1225,23 @@ function evidenceEventsFromKimiTurn(turn) {
 //   - 其余 → toolUseEvent(name, input)；
 //   - state 终态（done|error|failed）再追加 toolResultEvent(toolCallId, output,
 //     isError 按 state 判)——投影事件在前、结果事件在后，与 opencode 逐 part 的
-//     双事件形状一致。
-function evidenceEventsFromKimiToolFrame(frame) {
+//     双事件形状一致（结果事件由 kimiToolResultEvent 单独构造；两者何时发射
+//     见 projectKimiToolFrames）。
+function kimiToolCallId(frame) {
+  return typeof frame?.toolCallId === "string" && frame.toolCallId.length > 0
+    ? frame.toolCallId
+    : String(frame?.name ?? "unknown");
+}
+
+function kimiToolResultEvent(frame) {
+  return toolResultEvent(kimiToolCallId(frame), frame?.output, frame?.state === "error" || frame?.state === "failed");
+}
+
+function kimiToolProjectionEvents(frame) {
   const tool = String(frame?.name ?? "unknown");
   const toolKey = tool.toLowerCase();
   const input = frame?.input ?? {};
-  const callId = typeof frame?.toolCallId === "string" && frame.toolCallId.length > 0
-    ? frame.toolCallId
-    : tool;
-  const state = frame?.state;
+  const callId = kimiToolCallId(frame);
   const events = [];
   if ((toolKey === "bash" || toolKey === "shell") && typeof input.command === "string") {
     events.push(commandEvent(input.command, undefined, { toolCallId: callId }));
@@ -1198,9 +1252,6 @@ function evidenceEventsFromKimiToolFrame(frame) {
     }
   } else {
     events.push(toolUseEvent(tool, input));
-  }
-  if (isTerminalKimiToolState(state)) {
-    events.push(toolResultEvent(callId, frame?.output, state === "error" || state === "failed"));
   }
   return events;
 }
