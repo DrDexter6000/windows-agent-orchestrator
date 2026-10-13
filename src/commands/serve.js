@@ -31,7 +31,7 @@ import {
 /** 解析目标 serve（url/token/agentId）与 kimi 席位集合。固定错误点名缺席面。
  * TD-253（决定 0058，双席修正）：--registry 显式消费；--url 未命中席位 → **拒绝**
  * （旧静默回落 kimiAgents[0] 会把 58630 的回收打到 58628——opus/sol 同发现）。 */
-async function resolveServeTarget(config, urlOverride) {
+async function resolveServeTarget(config, urlOverride, kimiHomeOverride) {
   const registryPath = resolve(config.registry ?? "config/agents.json");
   const registry = await readRegistry(registryPath);
   const kimiAgents = registry.listAgents().filter((a) => a.backend === "kimi-web");
@@ -53,6 +53,16 @@ async function resolveServeTarget(config, urlOverride) {
   // 决定 0074：车道声明了 kimiHome → token 取自该主目录的 server.token，主目录同时是
   // status / sweep / recycle 的缺省 --kimi-home（显式 flag 仍然优先）。
   const tokenFile = kimiServerTokenFile(target);
+  // 会审（sol）：token 与实例表必须属于同一个主目录。车道声明了 kimiHome、命令行又
+  // 显式给了另一个 --kimi-home → 拒绝（否则会拿这家的 token 去操作那家的实例）。
+  const normHome = (p) => String(p).replace(/[\\]/g, "/").replace(/\/+$/, "").toLowerCase();
+  if (tokenFile !== null && typeof kimiHomeOverride === "string" && kimiHomeOverride.length > 0
+    && normHome(kimiHomeOverride) !== normHome(target.kimiHome)) {
+    throw new Error(
+      `--kimi-home ${kimiHomeOverride} differs from the lane's kimiHome ${target.kimiHome} — `
+      + "refusing to mix two homes (the token and the instance table must belong to the same home)",
+    );
+  }
   let token;
   if (tokenFile !== null) {
     try { token = readFileSync(tokenFile, "utf8").trim(); } catch { token = ""; }
@@ -116,7 +126,7 @@ async function serveCommand(args, config) {
   // TD-253（决定 0058）：--registry 显式消费（sol：试点走注册表副本时 serve 也要读同一份）。
   if (typeof options.registry === "string" && options.registry.length > 0) config = { ...config, registry: options.registry };
   if (sub === "status") {
-    const target = await resolveServeTarget(config, options.url);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome);
     const report = await serveStatusReport({
       port: Number(new URL(target.serveUrl).port),
       serveUrl: target.serveUrl,
@@ -127,7 +137,7 @@ async function serveCommand(args, config) {
     return;
   }
   if (sub === "sweep") {
-    const target = await resolveServeTarget(config, options.url);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome);
     const runDir = resolve(options.runDir ?? config.runDir);
     const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token, kimiHome: options.kimiHome ?? target.kimiHome });
     if (plan.error) throw new Error(plan.error);
@@ -143,7 +153,7 @@ async function serveCommand(args, config) {
     return;
   }
   if (sub === "recycle") {
-    const target = await resolveServeTarget(config, options.url);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome);
     const runDir = resolve(options.runDir ?? config.runDir);
     const soakMs = Number.parseInt(String(options.soakMs ?? ""), 10);
     const result = await recycleServe({

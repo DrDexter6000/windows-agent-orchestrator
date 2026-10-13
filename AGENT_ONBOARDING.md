@@ -45,7 +45,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **Node.js v22**（`engines` 收紧为 `>=22 <23`；v24 的 libuv Windows Job Object 回归会被 WAO 版本守卫拒绝，见 §4 开头的调用纪律）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
 - **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage.md` 场景 4e 的「kimi 专用 worker serve 运维配方」）
-- **认证任选其一**（车道对应关系见 §4c 选择表）：zcode 桌面登录态（glm-pro/glm-flash）、官方 Claude OAuth `claude login`（opus）、`codex login`（sol/astra）、`KIMI_WEB_TOKEN`（kimi，kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（deepseek-pro/deepseek-flash，ACP 通道）；kimi-code backend 的 CLI 登录态仍是合法接入方式（模板未含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
+- **认证任选其一**（车道对应关系见 §4c 选择表）：zcode 桌面登录态（glm-pro/glm-flash）、官方 Claude OAuth `claude login`（opus）、`codex login`（sol/astra）、`KIMI_WEB_TOKEN`（kimi，kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（deepseek-pro/deepseek-flash，ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth trap 已隔离**（0045 前历史配置；0046 后 opus=原生 claude-code 通道）：provider-wrapped claude-code worker 用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证；`opus` 不走 wrapper，使用官方 Claude OAuth。
 

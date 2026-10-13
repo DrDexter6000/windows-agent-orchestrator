@@ -3003,9 +3003,28 @@ test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.to
       assert.equal(call.headers.authorization, `Bearer ${fileToken}`, "每个请求都用主目录的 token");
     }
 
-    // 形状：kimiHome 必须是非空绝对路径。
-    assert.throws(() => backend.validateAgentPolicy(makeAgent({ kimiHome: " " })), /kimiHome must be a non-empty absolute path/);
-    assert.throws(() => normalizeAgent("kimi", { ...makeAgent(), kimiHome: "relative/home" }), /kimiHome must be an absolute path/);
+    // 会审（sol）：本次运行用的 bearer 进入转录的精确值脱敏——主目录文件里的 token 不在
+    // 进程环境里，缺省脱敏器认不出它。
+    assert.equal(typeof handle.redact, "function");
+    const scrubbed = handle.redact({ kind: "message", role: "assistant", parts: [{ type: "text", text: `the server said ${fileToken} ok` }] });
+    assert.ok(!JSON.stringify(scrubbed).includes(fileToken), "成功路径上的 worker 输出里出现该值也会被遮掉");
+    assert.ok(JSON.stringify(scrubbed).includes("[REDACTED:"));
+    // 没声明 kimiHome 的车道：经桥解析到的环境 token 同样进脱敏。
+    const envLane = turnScriptServer("session_0074b", {
+      script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+    });
+    const envServer = kimiServer(envLane.handler);
+    const envBackend = new KimiWebBackend({ fetchImpl: envServer.fetchImpl, timeout: 5000, retries: 0 });
+    const envHandle = await envBackend.spawn(makeAgent(), { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } });
+    envLane.markSpawned();
+    for await (const ev of envHandle.events(undefined, { pollInterval: 5 })) void ev;
+    assert.ok(!JSON.stringify(envHandle.redact({ text: `echo ${TOKEN_VALUE}` })).includes(TOKEN_VALUE));
+
+    // 形状（会审 sol）：绝对路径、首尾不带空白——registry 与 backend 同一判据。
+    for (const bad of [" ", "relative/home", ` ${home}`, `${home} `, 5, ""]) {
+      assert.throws(() => backend.validateAgentPolicy(makeAgent({ kimiHome: bad })), /kimiHome must be an absolute path \(no surrounding whitespace\)/, JSON.stringify(bad));
+      assert.throws(() => normalizeAgent("kimi", { ...makeAgent(), kimiHome: bad }), /kimiHome must be an absolute path \(no surrounding whitespace\)/, JSON.stringify(bad));
+    }
     assert.equal(normalizeAgent("kimi", { ...makeAgent(), kimiHome: home }).kimiHome, home, "归一化保留该字段");
   } finally {
     rm(home, { recursive: true, force: true });

@@ -125,12 +125,30 @@ export const SETTABLE_REASONING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
 // dsh 的权限模式（决定 0074）：harness 启动时读环境变量 DSH_PERMISSION_MODE 定沙箱
 // 与审批策略（acp profile 的 sandbox-policy / approval / permission 三项；缺省
-// workspace-write）。车道在 registry 的 env 里声明它；这里只校验取值并把生效值写进
-// 转录——WAO 不替车道选模式。danger-full-access = 命令不进 harness 沙箱、不再请求
+// workspace-write）。车道在 registry 的 env 里声明它；这里只校验键名与取值，并在车道
+// 声明了它时把本次启动用的值写进转录——WAO 不替车道选模式。danger-full-access = 命令不进 harness 沙箱、不再请求
 // 审批；workspace-write 的沙箱要求当前用户对工作目录有完全控制（见下方
 // SANDBOX_GRANT_DENIED_RE）。
 export const DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
 export const DSH_PERMISSION_MODES = Object.freeze(["read-only", "workspace-write", "danger-full-access"]);
+
+// env 里的 DSH_PERMISSION_MODE：键名必须是规范写法（Windows 的环境变量名不分大小写——
+// 别的大小写写法同样会被 harness 读到，却绕过取值校验；会审 sol），取值只接受三个预设名
+// （拼错的值会被 harness 当成未知模式，不做静默放行）。
+function assertPermissionModeEnv(agent) {
+  const miscased = Object.keys(agent?.env ?? {}).find(
+    (name) => name !== DSH_PERMISSION_MODE_ENV && name.toUpperCase() === DSH_PERMISSION_MODE_ENV,
+  );
+  if (miscased !== undefined) {
+    throw new Error(`deepseek-acp env key ${miscased} must be spelled exactly ${DSH_PERMISSION_MODE_ENV}`);
+  }
+  const permissionMode = agent?.env?.[DSH_PERMISSION_MODE_ENV];
+  if (permissionMode !== undefined && !DSH_PERMISSION_MODES.includes(permissionMode)) {
+    throw new Error(
+      `deepseek-acp env.${DSH_PERMISSION_MODE_ENV} must be one of: ${DSH_PERMISSION_MODES.join(", ")}`,
+    );
+  }
+}
 
 // shell 类工具（与旧线 projectDshEvent 同集）：终态时投影为 command 证据；调用到达
 // 时先落一条 tool_use，让在途的命令看得见（决定 0072）。
@@ -416,14 +434,7 @@ export class DeepSeekAcpBackend {
     if (agent?.provider) {
       throw new Error("deepseek-acp cannot express provider policy; the composition is fixed via --profile acp and operator-installed patches");
     }
-    // 决定 0074：env 里的 DSH_PERMISSION_MODE 只接受 harness 的三个预设名——拼错的值
-    // 会被 harness 当成未知模式，不做静默放行。
-    const permissionMode = agent?.env?.[DSH_PERMISSION_MODE_ENV];
-    if (permissionMode !== undefined && !DSH_PERMISSION_MODES.includes(permissionMode)) {
-      throw new Error(
-        `deepseek-acp env.${DSH_PERMISSION_MODE_ENV} must be one of: ${DSH_PERMISSION_MODES.join(", ")}`,
-      );
-    }
+    assertPermissionModeEnv(agent);
     // model 块（0046 §3/§5 第④步起接线）：ACP 的 model 选项 value 是
     // provider/model 二元组（JSON.stringify([providerID, id])，provider 段实测
     // "deepseek-official"——原样透传，不做任何缩写/映射转换）——只接受
@@ -508,6 +519,9 @@ export class DeepSeekAcpBackend {
   }
 
   async spawn(agent, task) {
+    // 会审（kimi）：runManager 只在车道带结构化策略（model / reasoning / provider）时才调
+    // validateAgentPolicy——没有这些块的车道会带着拼错的模式直达 harness。启动前无条件再查一次。
+    assertPermissionModeEnv(agent);
     // preflight：containment detect + resume fail-closed + argv 预算预检
     // （representative role patch 路径，transcript/worktree 之前）。
     await this.preflightInvocation(agent, task);
@@ -900,6 +914,15 @@ export class DeepSeekAcpBackend {
         throw new Error("deepseek-acp runtime identity mismatch");
       }
       queue.push(runtimeActivityEvent("initialized"));
+      // 决定 0074：车道声明了权限模式 → 把本次启动用的模式写进转录（Lead 在
+      // run_activity 里看得到这次运行有没有 harness 沙箱；full-access 下不再有
+      // "permission answered"记录可循）。
+      if (typeof agentEnv[DSH_PERMISSION_MODE_ENV] === "string") {
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: `deepseek-acp harness permission mode: ${agentEnv[DSH_PERMISSION_MODE_ENV]} (declared by the lane: env ${DSH_PERMISSION_MODE_ENV})`,
+        }])));
+      }
       // §3.6 会话建立（两分支，绝不互为回退）：
       //   - resume 轮：session/resume {sessionId, cwd, mcpServers: []}（wire 形状取自
       //     evidence/phase2-resume.json）。上游拒绝（会话已消失、canonical workspace

@@ -33,6 +33,7 @@ import { listRuns } from "./runList.js";
 import { recycleRunBranch } from "../isolation.js";
 import { gitChildEnv } from "../delivery.js";
 import * as defaultOps from "../backends/kimiServeOps.js";
+import { isSecretEnvName } from "../secretRedaction.js";
 
 /** 清扫/回收的共享落点（.dev 语义之外的运维事实面，入 .wao/）。 */
 export function serveMaintenanceDir(rootDir) {
@@ -727,6 +728,12 @@ export async function recycleServe({
   const childEnv = { ...process.env, WAO_IN_WORKER: "1" };
   if (typeof kimiHome === "string" && kimiHome.length > 0) childEnv.KIMI_CODE_HOME = kimiHome;
   else delete childEnv.KIMI_CODE_HOME;
+  // 决定 0074：serve 把自己的环境传给工具 shell 与 MCP 子进程，worker 读得到——会审期间
+  // 就有一个 kimi 席位在 worker 里列环境，把两个密钥值发给了模型方。serve 用的是主目录里
+  // 的登录态，不需要操作员环境里的密钥：按名字规则剔除（代理变量保留，联网要用）。
+  for (const name of Object.keys(childEnv)) {
+    if (isSecretEnvName(name) && !/_PROXY$/i.test(name)) delete childEnv[name];
+  }
   const spawnArgs = ["web", "--no-open", "--port", String(port)];
   const spawnDetached = (exe) => new Promise((resolveSpawn) => {
     let child = null;

@@ -635,8 +635,24 @@ test("ACP 0074: 车道 env 里的 DSH_PERMISSION_MODE 只接受三个预设名�
     );
   }
 
-  // 声明的模式进 harness 子进程的环境。
-  const { spawnCalls } = await runAcpScenario({
+  // 会审（sol）：Windows 环境变量名不分大小写——别的大小写写法会被 harness 读到，却绕过取值校验。
+  for (const name of ["dsh_permission_mode", "Dsh_Permission_Mode"]) {
+    assert.throws(
+      () => backend.validateAgentPolicy(agent({ env: { [name]: "danger-full-access" } })),
+      /must be spelled exactly DSH_PERMISSION_MODE/,
+      name,
+    );
+  }
+
+  // 会审（kimi）：没有 model / reasoning 块的车道不过 runManager 的策略门——spawn 自己再查一次。
+  await assert.rejects(
+    () => new DeepSeekAcpBackend({ spawnFn: () => { throw new Error("must not spawn"); } })
+      .spawn(agent({ model: undefined, reasoning: undefined, env: { [DSH_PERMISSION_MODE_ENV]: "yolo" } }), { prompt: "x" }),
+    /env\.DSH_PERMISSION_MODE must be one of/,
+  );
+
+  // 声明的模式进 harness 子进程的环境，并写进转录。
+  const { spawnCalls, events: declaredEvents } = await runAcpScenario({
     agentOverrides: { env: { [DSH_PERMISSION_MODE_ENV]: "danger-full-access" } },
     drive: ({ peer, promptRequest }) => {
       peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
@@ -644,6 +660,9 @@ test("ACP 0074: 车道 env 里的 DSH_PERMISSION_MODE 只接受三个预设名�
     },
   });
   assert.equal(spawnCalls[0].opts.env[DSH_PERMISSION_MODE_ENV], "danger-full-access");
+  const modeNotes = declaredEvents.filter((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => p.text.includes("harness permission mode: danger-full-access")));
+  assert.equal(modeNotes.length, 1, "声明了模式的运行在转录里说明本次启动用的模式");
 
   // 沙箱建不起来时的提示：先说一次设好、所有项目通用的车道级修法。
   const denied = [{ type: "content", content: { type: "text", text: "Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\projects\\demo)" } }];
@@ -657,6 +676,8 @@ test("ACP 0074: 车道 env 里的 DSH_PERMISSION_MODE 只接受三个预设名�
   const note = events.find((e) => e.kind === "message" && e.role === "system"
     && e.parts.some((p) => p.text.includes("setting up its sandbox")));
   assert.ok(note, "提示在场");
+  assert.ok(!events.some((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => p.text.includes("harness permission mode:"))), "没声明模式的车道不落模式说明");
   assert.ok(note.parts[0].text.includes("env DSH_PERMISSION_MODE=danger-full-access"));
   assert.ok(note.parts[0].text.includes("set once for all projects"));
 });

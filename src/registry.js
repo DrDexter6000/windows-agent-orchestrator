@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import { isValidSessionReuseMode } from "./application/sessionReuse.js";
+import { isValidKimiHome } from "./envPolicy.js";
 
 // M11-9: canonical model/reasoning/provider policy.
 // Closed-set effort enum — the complete set of reasoning effort values WAO
@@ -260,9 +261,8 @@ export function normalizeAgent(id, agent) {
     }
     // 决定 0074：kimiHome 可选——worker serve 的私有 KIMI_CODE_HOME（绝对路径）。声明后
     // bearer token 取自 <kimiHome>/server.token，tokenEnv 只作名字保留、不再读取。
-    if (Object.prototype.hasOwnProperty.call(agent, "kimiHome")
-      && (typeof agent.kimiHome !== "string" || !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(agent.kimiHome.trim()))) {
-      throw new Error(`Agent ${id}: kimiHome must be an absolute path when present`);
+    if (Object.prototype.hasOwnProperty.call(agent, "kimiHome") && !isValidKimiHome(agent.kimiHome)) {
+      throw new Error(`Agent ${id}: kimiHome must be an absolute path (no surrounding whitespace) when present`);
     }
   } else if (agent.backend === "claude-code" || agent.backend === "codex" || agent.backend === "kimi-code") {
     // 进程式 backend：serveUrl/model 非必填（进程自带模型配置）。

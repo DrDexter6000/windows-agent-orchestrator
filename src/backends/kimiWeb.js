@@ -122,7 +122,8 @@ import {
 } from "../runEvent.js";
 import { readFileSync } from "node:fs";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
-import { kimiServerTokenFile } from "../envPolicy.js";
+import { kimiServerTokenFile, isValidKimiHome } from "../envPolicy.js";
+import { createSecretRedactor } from "../secretRedaction.js";
 import { createStallTracker } from "./stallBudget.js";
 
 // role/task 分隔符对齐 kimiCode.js 的 ROLE_TASK_SEPARATOR（"\n\n---\n\n"）——
@@ -286,8 +287,8 @@ export class KimiWebBackend {
       );
     }
     // 决定 0074：kimiHome 可选（私有 KIMI_CODE_HOME 的绝对路径）；形状不对即拒。
-    if (agent?.kimiHome !== undefined && kimiServerTokenFile(agent) === null) {
-      throw new Error("kimi-web backend: kimiHome must be a non-empty absolute path when present");
+    if (agent?.kimiHome !== undefined && !isValidKimiHome(agent.kimiHome)) {
+      throw new Error("kimi-web backend: kimiHome must be an absolute path (no surrounding whitespace) when present");
     }
   }
 
@@ -374,11 +375,20 @@ export class KimiWebBackend {
     // 轮次归属锚：随 events 工厂透传给 streamEvents（完成判定唯一事实源）。
     const turnAnchor = { promptId, submitAt: Date.now(), preSubmitTurnIds };
     const cwd = agent.cwd;
+    // 决定 0074 会审（sol）：本次运行实际使用的 bearer 进入转录的精确值脱敏——主目录
+    // 文件里的 token 不在进程环境里，按环境名构造的缺省脱敏器认不出它；经 user-env 桥
+    // 解析到的环境 token 同理。请求错误出口另有 redactToken，这里管的是成功路径上
+    // worker 输出里出现该值的情形。
+    const runRedactor = createSecretRedactor(
+      { ...process.env, WAO_KIMI_SERVER_TOKEN: resolveBearerToken(agent) },
+      ["WAO_KIMI_SERVER_TOKEN"],
+    );
     return {
       backend: "kimi-web",
       backendSessionId: sessionId,
       serveUrl: agent.serveUrl,
       cwd,
+      redact: (value) => runRedactor.redact(value),
       // events 工厂：RunManager 传 signal（仅作 abort 静默退出——终态判定不依赖
       // 它，事件流自身的有界性由 silentTimeout 家族 + 无进展出口保证）、
       // pollInterval / silentTimeout 控制轮询（职责划分镜像 opencodeServe.streamEvents）；

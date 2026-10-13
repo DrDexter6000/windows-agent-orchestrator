@@ -324,6 +324,19 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
   const spawns = [];
   try {
     const env = makeRecycleEnv(roots);
+    // 决定 0074：重启出来的 serve 不带操作员环境里的密钥（worker 读得到 serve 的环境）。
+    const planted = {
+      [["WAO", "TEST", "API", "KEY"].join("_")]: "planted-a",
+      [["WAO", "TEST", "WEB", "TOKEN"].join("_")]: "planted-b",
+      [["WAO", "TEST", "CLIENT", "SECRET"].join("_")]: "planted-c",
+      HTTPS_PROXY: "http://127.0.0.1:9",
+      WAO_TEST_PLAIN_SETTING: "kept",
+    };
+    const savedPlanted = Object.fromEntries(Object.keys(planted).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, planted);
+    roots.restoreEnv = () => {
+      for (const [k, v] of Object.entries(savedPlanted)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    };
     const ops = recycleOps({
       sessionsScript: [{ ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] }],
       instances: [{ serverId: "old", pid: 111, port: 58628 }, { serverId: "new", pid: 222, port: 58628 }],
@@ -360,7 +373,13 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
     assert.equal(spawns[0].opts.cwd, env.workspaceDir);
     assert.equal(spawns[0].opts.env.WAO_IN_WORKER, "1", "env 组装权归命令——0047 env 臂恒在场");
     assert.equal(spawns[0].opts.detached, true);
-  } finally { for (const d of roots) cleanupDir(d); }
+    const childEnv = spawns[0].opts.env;
+    for (const name of Object.keys(childEnv)) {
+      assert.ok(!/API_KEY|TOKEN|SECRET|PASSWORD/i.test(name), `密钥类变量不进 serve 的环境：${name}`);
+    }
+    assert.equal(childEnv.HTTPS_PROXY, "http://127.0.0.1:9", "代理变量保留（联网要用）");
+    assert.equal(childEnv.WAO_TEST_PLAIN_SETTING, "kept", "普通变量照旧继承");
+  } finally { roots.restoreEnv?.(); for (const d of roots) cleanupDir(d); }
 });
 
 // ===== TD-251 W1c：回收后空壳清扫 =====
@@ -601,10 +620,19 @@ test("serve 0074: 车道声明 kimiHome → 维护命令用该主目录的 serve
     assert.equal(target.token, fileToken);
     assert.equal(target.kimiHome, home, "车道的主目录是 status / sweep / recycle 的缺省 --kimi-home");
     assert.equal(target.serveUrl, "http://127.0.0.1:58628");
+    // 会审（sol）：显式 --kimi-home 与车道主目录不同 → 拒绝（token 与实例表不能分属两家）；相同（忽略大小写与斜杠方向）→ 通过。
+    await assert.rejects(
+      () => resolveServeTarget({ registry: withHome }, undefined, joinPath(dir, "another-home")),
+      /differs from the lane's kimiHome .* refusing to mix two homes/,
+    );
+    const same = await resolveServeTarget({ registry: withHome }, undefined, `${home.replace(/\\/g, "/").toUpperCase()}/`);
+    assert.equal(same.token, fileToken);
 
     const legacy = await resolveServeTarget({ registry: withoutHome });
     assert.equal(legacy.token, envToken);
     assert.equal(legacy.kimiHome, undefined);
+    // 没声明主目录的车道：显式 --kimi-home 照旧可用（试点走注册表副本 + 进程环境 token 的老用法）。
+    assert.equal((await resolveServeTarget({ registry: withoutHome }, undefined, joinPath(dir, "another-home"))).token, envToken);
     delete process.env[envName];
     await assert.rejects(() => resolveServeTarget({ registry: withoutHome }), /serve auth env is absent/);
   } finally {

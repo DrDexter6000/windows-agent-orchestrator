@@ -30,6 +30,17 @@
 // inheritedEnvNames — not a static list), so it has no static list here (null).
 // opencode-serve is HTTP-backed (no process creds).
 /**
+ * kimiHome 的形状（决定 0074 会审）：绝对路径（盘符或根起头），首尾不带空白——带
+ * 空白的路径会被原样拿去拼 token 文件位置。registry 与 backend 的校验共用这一个判据。
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidKimiHome(value) {
+  return typeof value === "string" && value.length > 0 && value === value.trim()
+    && /^(?:[A-Za-z]:[\\/]|[\\/])/.test(value);
+}
+
+/**
  * 决定 0074：kimi-web 车道声明 kimiHome（worker serve 的私有 KIMI_CODE_HOME）时，
  * 服务器 bearer token 取自该主目录的 server.token 文件，不经环境变量。返回该文件
  * 路径；未声明 → null。路径拼接不用 node:path（本模块零 import）：kimi 主目录是
@@ -40,7 +51,7 @@
 export function kimiServerTokenFile(agent) {
   if (agent?.backend !== "kimi-web") return null;
   const home = agent.kimiHome;
-  if (typeof home !== "string" || home.trim().length === 0) return null;
+  if (!isValidKimiHome(home)) return null;
   const sep = home.includes("\\") && !home.includes("/") ? "\\" : "/";
   return `${home.replace(/[\\/]+$/, "")}${sep}server.token`;
 }

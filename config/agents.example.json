@@ -108,6 +108,7 @@
       "backend": "deepseek-acp",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",
+      "_comment_permission": "同 deepseek-pro：env.DSH_PERMISSION_MODE=danger-full-access = 命令不进 harness 沙箱、不请求审批；想保留沙箱就删掉这一项（docs/usage.md 的 deepseek 车道目录权限前提）。",
       "env": {
         "DSH_PERMISSION_MODE": "danger-full-access"
       },

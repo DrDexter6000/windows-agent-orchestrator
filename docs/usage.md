@@ -148,7 +148,7 @@ Copy-Item config/agents.example.json config/agents.json
       "cwd": "."
     },
 
-    // ── deepseek-harness（实验性；不要从 GUI preset/TUI 抓输出）──
+    // ── deepseek-harness（暂停使用，决定 0074；实验性；不要从 GUI preset/TUI 抓输出）──
     "coder_dsh_experimental": {
       "backend": "deepseek-harness",
       "binary": "C:/path/to/dsh-jsonrpc-agent.cmd",
@@ -313,11 +313,11 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 > **行为变更（决定 0073，2026-10-13）**：① kimi-code、deepseek-harness 两个后端不再声明"能产出命令退出码证据"（前者靠输出里的关键词猜成败，后者没有实测）。② 认证：命令退出码这一轴因后端如实声明不产出而不适用的车道评 `conditional`，不再停在 `draft-only`（其它 strict 轴不适用、要求的命令根本没跑，仍是 `draft-only`）。③ `run_activity` 的工具输出尾部（`tail`）也读文本块数组——deepseek-acp 的工具结果此前一直显示为空。④ deepseek-acp 运行在沙箱建不起来时，转录里落一条 system 消息，写明症状、harness 文档给出的常见原因与修法（每次启动后端进程一次）。
 
-> **行为变更（决定 0074，2026-10-13）**：① deepseek-acp 车道的 `env.DSH_PERMISSION_MODE` 现在校验取值（三个预设名之外即拒）；沙箱建不起来时的 system 提示改为先给车道级修法。② kimi-web 车道可声明 `kimiHome`：token 取自该主目录的 `server.token`，这条车道在 `registry_list` 里显示为不需要凭据。③ `wao lanes` 多一行 `concurrency`（同车道并发的实测记录）。④ kimi-code、deepseek-harness 两个后端暂停使用。
+> **行为变更（决定 0074，2026-10-13）**：① deepseek-acp 车道的 `env.DSH_PERMISSION_MODE` 现在校验取值（三个预设名之外即拒）；沙箱建不起来时的 system 提示改为先给车道级修法。② kimi-web 车道可声明 `kimiHome`：token 取自该主目录的 `server.token`，这条车道在 `registry_list` 里显示 `not_required`（没有环境凭据；token 文件仍必需）。③ `wao lanes` 多一行 `concurrency`（同车道并发的实测记录）。④ kimi-code、deepseek-harness 两个后端暂停使用。⑤ `serve recycle` 重启的 serve 不再带操作员环境里的密钥类变量。
 
 > **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 缺省给命令套一层 Windows 沙箱（`workspace-write`），它要求工作目录**由当前用户拥有并且有完全控制**。只有"修改"权限的目录上（非系统盘的项目目录常见），沙箱内的命令在执行之前就以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败。两种做法，WAO 都不替你选：
 >
-> 1. **按车道声明权限模式（一次设好，所有项目通用；决定 0074）**：在 registry 的车道条目里写 `"env": { "DSH_PERMISSION_MODE": "danger-full-access" }`（取值只能是 `read-only` / `workspace-write` / `danger-full-access`，拼错即拒）。此后命令不进 harness 的沙箱、也不再请求审批——与其它车道的无人值守模式一致；WAO 的工作树隔离与交付范围审计不变。
+> 1. **按车道声明权限模式（一次设好，所有项目通用；决定 0074）**：在 registry 的车道条目里写 `"env": { "DSH_PERMISSION_MODE": "danger-full-access" }`（取值只能是 `read-only` / `workspace-write` / `danger-full-access`，拼错即拒）。此后少了两样：harness 的写入沙箱（命令可以写到工作目录之外）和审批请求。WAO 的工作树隔离与交付范围审计还在，但它们是事后检测，拦不住 shell 的副作用。
 > 2. **保留沙箱、修目录权限**：由操作者对每个项目目录执行 harness 自带的修复脚本。它会改权限：给目录链上缺权限的目录补上当前用户的完全控制项，并扫描项目目录的子树、**移除其中应用包（AppContainer）的显式允许项**（那些应用会失去对这些对象的访问）；文件内容与所有者不变，每处改动先备份并打印恢复命令。`pwsh -NoProfile -File "<npm 全局目录>\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-sandbox-windows-acl\assets\diagnose-windows-sandbox-acl\scripts\diagnose-windows-sandbox-acl.ps1" -Path "<项目目录>" -AllowRoot "<项目目录>" -Out "<存放恢复文件的目录>"`；不要用管理员身份运行。结果以末尾的 `nextAction` 为准：`verify_original_confined_operation` 才算修好，`stop` / `restore_pending_then_stop` 就停下按它打印的恢复命令处理。
 
 > **行为变更（决定 0070，2026-10-13）**：`run_activity` 的 tool_use 条目多一个 `detail`（输入摘要），tool_result 条目多 `tail` / `truncated`（输出尾部）；codex 运行的转录在命令开始时多一条 tool_use（此前命令要到结束才出现）、结束时多一条带输出的 tool_result；codex / claude-code / kimi-code 的运行在转录静默满 5 分钟后会落 `runtime_activity`（`process_active` / `files_changed`）——此前这些后端在长命令期间转录是空的。
@@ -625,7 +625,8 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
   （`tokenEnv: "KIMI_WEB_TOKEN"`）。Git Bash 下的引号纪律见
   `docs/certification-runbook.md` 代跑取证段。
 - **WAO 的边界**：WAO 从 registry 的 `tokenEnv` 指定环境变量读取 Bearer
-  凭据，不负责令牌发放。
+  凭据，不负责令牌发放。声明了 `kimiHome` 的车道不读它，直接读主目录的
+  `server.token`（决定 0074）。
 
 **TD-250 进程荚治理（决定 0056，2026-10-10）**：kimi serve 为每会话在创建时
 拉起 6-8 个助手进程（datasource/analyzer/officecli/mcp.json 条目）且**永不拆
@@ -676,7 +677,8 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
    （决定 0074）：助手进程是主目录里的插件与 `mcp.json` 拉起的，不装它们的私有主目录
    （`KIMI_CODE_HOME`）下 serve 不拉任何助手进程（实测二十多个任务后仍为 0）。车道条目写
    `"kimiHome": "<私有主目录绝对路径>"` 即指向它：token 取自 `<kimiHome>/server.token`
-   （不读环境变量），`serve status|sweep|recycle` 以它为缺省主目录。私有主目录要先单独
+   （不读环境变量），`serve status|sweep|recycle` 以它为缺省主目录。**换主目录要换端口**（清扫按
+   `serveUrl` 分家）；旧主目录的会话不会跟过来。私有主目录要先单独
    登录一次（`kimi login`，勿复制 credentials）；serve 首次在该主目录下启动、以及机器重启
    之后，仍须按上面的手动配方拉起（加 `KIMI_CODE_HOME`）。
 
