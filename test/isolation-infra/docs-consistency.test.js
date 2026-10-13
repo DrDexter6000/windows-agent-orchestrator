@@ -7,9 +7,10 @@
 // 规则（与 milestone-discipline.md §6.3 一致）：审计要逐文件，
 // 这些断言把"逐文件核对"固化为可执行检查，防止回归。
 //
-// 这里的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
+// 新增的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
 // 指针可达）；读者离不开的少数操作说明，在它的唯一权威处检查。
 // 被保护的文字退役时，对应的测试一起退役（AGENTS.md §Documentation）。
+// 本文件里早于这条规则的历史收尾类测试尚未清理（台账 TD-34）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -401,7 +402,8 @@ test("troubleshooting.md 存在且 SKILL.md 指向它（运维诊断层）", () 
 test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority 从同表派生", () => {
   const a = read("AGENTS.md");
   assert.ok(!/## Project structure/.test(a), "AGENTS.md 不应维护 Project structure 副本");
-  const readSection = a.slice(a.indexOf("## Read Before Changes"), a.indexOf("## Commands"));
+  const readStart = a.indexOf("## Read Before Changes");
+  const readSection = a.slice(readStart, a.indexOf("\n## ", readStart + 1));
   assert.match(readSection, /docs\/ssot\.md.*§0\.1/s, "AGENTS.md Read Before Changes 必须指向 ssot §0.1");
   for (const copied of ["docs/02-architecture.md", "docs/roadmap.md", "docs/milestone-discipline.md", "docs/usage.md", "docs/troubleshooting.md"]) {
     assert.ok(!readSection.includes(copied), `AGENTS.md 不得复制 tier-1 清单成员 ${copied}`);
@@ -3272,6 +3274,26 @@ const LEDGER_CLOSED_ROW_MAX_BYTES = 500;
 const DECISION_MAX_BYTES_FROM = 76;
 const DECISION_MAX_BYTES = 8192;
 const DECISION_MAP_ROW_MAX_BYTES = 240;
+const LEDGER_PREAMBLE_MAX_BYTES = 1600;
+
+/**
+ * 台账类文件只有一段说明和一张表：表头之前的说明有体量上限，表头之后只能是分隔行
+ * 与 TD 行（不换行续写，表后不追加正文）。
+ */
+function assertSingleTableFile(rel, rowCount, preambleMaxBytes) {
+  const lines = read(rel).split(/\r?\n/);
+  const header = lines.findIndex((line) => /^\|\s*编号\s*\|/.test(line));
+  assert.ok(header > 0, `${rel}：找不到表头行`);
+  const preambleBytes = Buffer.byteLength(lines.slice(0, header).join("\n"), "utf8");
+  assert.ok(preambleBytes <= preambleMaxBytes,
+    `${rel}：表格之前的说明 ${preambleBytes} 字节，超过 ${preambleMaxBytes}。这里只放格式说明，不放正文`);
+  const after = lines.slice(header + 1).filter((line) => line.trim().length > 0);
+  assert.match(after[0] ?? "", /^\|[-\s|]+\|$/, `${rel}：表头下一行必须是分隔行`);
+  const stray = after.slice(1).filter((line) => !/^\|\s*TD-\d+\s*\|/.test(line));
+  assert.deepEqual(stray.map((line) => line.slice(0, 60)), [],
+    `${rel}：表头之后只能是 TD 行（一条一行，不换行续写，表后不追加正文）`);
+  assert.equal(after.length - 1, rowCount, `${rel}：TD 行数与解析结果不符`);
+}
 
 /** 一份台账类文件里的 TD 定义行：[{ id, cells, line }]（表头与分隔行不算）。 */
 function ledgerRows(rel) {
@@ -3283,10 +3305,7 @@ function ledgerRows(rel) {
 test("技术债台账：一条一行、五列、状态闭集、行长上限、指针可达", () => {
   const rows = ledgerRows(LEDGER_DOC);
   assert.ok(rows.length > 0, "台账解析到 0 行——守卫空转");
-  const text = read(LEDGER_DOC);
-  const tableLines = text.split(/\r?\n/).filter((line) => line.startsWith("|"));
-  assert.equal(tableLines.length, rows.length + 2,
-    "台账里的表格行只能是表头、分隔行和 TD 行（一条债一行，不换行续写）");
+  assertSingleTableFile(LEDGER_DOC, rows.length, LEDGER_PREAMBLE_MAX_BYTES);
   const decisionIds = new Set(readdirSync(join(ROOT, ".wao/decisions")).map((name) => name.match(/^(\d{4})-/)?.[1]).filter(Boolean));
   let previous = 0;
   for (const { id, cells, line } of rows) {
@@ -3312,6 +3331,7 @@ test("技术债编号只定义一次，文档与代码里引用的编号都有�
   const open = ledgerRows(LEDGER_DOC);
   const closed = ledgerRows(LEDGER_CLOSED_DOC);
   const repaid = ledgerRows(LEDGER_REPAID_DOC);
+  assertSingleTableFile(LEDGER_CLOSED_DOC, closed.length, LEDGER_PREAMBLE_MAX_BYTES);
   for (const { id, cells, line } of closed) {
     assert.equal(cells.length, 3, `${LEDGER_CLOSED_DOC} ${id}：必须是三列（编号 | 问题 | 了结依据）`);
     assert.ok(cells[1].length > 0 && cells[2].length > 0, `${LEDGER_CLOSED_DOC} ${id}：「问题」「了结依据」不能为空`);
@@ -3324,7 +3344,8 @@ test("技术债编号只定义一次，文档与代码里引用的编号都有�
     "同一个 TD 编号只能定义在一处（台账、已了结清单、已偿还归档三者互斥）");
   const defined = new Set(all);
 
-  // 引用解析：查定义行，不查「文本里出现过」。冻结的历史与测试夹具不在扫描面。
+  // 引用解析：查定义行，不查「文本里出现过」。扫描面 = 文档、决定、源码、配置、脚本、
+  // 工作流与参考资料；测试目录（含合成编号的夹具）与冻结的 docs/archive 不扫。
   const scanned = [];
   const walk = (rel) => {
     for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
@@ -3333,8 +3354,10 @@ test("技术债编号只定义一次，文档与代码里引用的编号都有�
       if (/\.(md|js|mjs|cjs|json|ps1|txt)$/.test(entry.name)) scanned.push(child);
     }
   };
-  for (const top of ["docs", ".wao/decisions", "src", "config", "scripts"]) walk(top);
-  for (const name of readdirSync(ROOT)) if (name.endsWith(".md")) scanned.push(name);
+  for (const top of ["docs", ".wao/decisions", "src", "config", "scripts", "workflows", "references", "playbooks", "tools", "bin"]) {
+    if (existsSync(join(ROOT, top))) walk(top);
+  }
+  for (const name of readdirSync(ROOT)) if (/\.(md|txt)$/.test(name)) scanned.push(name);
   const undefinedRefs = new Map();
   for (const rel of scanned) {
     for (const match of read(rel).matchAll(/TD-(\d+)/g)) {
@@ -3353,16 +3376,19 @@ test("旧台账的冻结快照不被改写", () => {
 });
 
 test("决定索引一行只放编号和标题；新决定档有体量上限", () => {
-  const rows = read(".wao/decisions/map.md").split(/\r?\n/).filter((line) => /^\d{4}\s*\|/.test(line));
+  // 索引里除了标题行、空行和 HTML 注释，每一行都必须是「编号 | 标题」。
+  const rows = read(".wao/decisions/map.md").split(/\r?\n/)
+    .filter((line) => line.trim().length > 0 && !line.startsWith("#") && !line.startsWith("<!--"));
   assert.ok(rows.length > 0, "决定索引解析到 0 行——守卫空转");
   for (const row of rows) {
+    assert.match(row, /^\d{4} \| \S/, `map.md 这一行不是「编号 | 标题」：${row.slice(0, 60)}`);
     const id = row.slice(0, 4);
     assert.equal(row.split("|").length, 2, `map.md ${id}：一行只放「编号 | 标题」，摘要写在决定档里`);
     assert.ok(Buffer.byteLength(row, "utf8") <= DECISION_MAP_ROW_MAX_BYTES,
       `map.md ${id}：一行不超过 ${DECISION_MAP_ROW_MAX_BYTES} 字节`);
   }
   for (const name of readdirSync(join(ROOT, ".wao/decisions"))) {
-    const number = Number(name.match(/^(\d{4})-/)?.[1] ?? 0);
+    const number = Number(name.match(/^(\d{4})/)?.[1] ?? 0);
     if (number < DECISION_MAX_BYTES_FROM) continue;
     const bytes = readFileSync(join(ROOT, ".wao/decisions", name)).length;
     assert.ok(bytes <= DECISION_MAX_BYTES,

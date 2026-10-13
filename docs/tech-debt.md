@@ -1,6 +1,6 @@
 # 技术债台账
 
-还没了结的事项，一条一行。
+还没了结的事项，一条一行，一行不超过 700 字节。本文件只有这段说明和下面这张表。
 
 - 状态只有三种：`开放`（有明确的剩余工作）、`等待裁定`（要 Owner 先定）、`设计性约束`（刻意的边界，记下来免得重复讨论）。
 - 更新一条就是改写它，不往后追加；经过写在提交说明里。一行写不下的细节放进它所属的决定或事故记录，在「指针」列指过去。
@@ -22,6 +22,7 @@
 | TD-47 | daemon IPC 仅请求-响应，tail 依赖文件轮询，无流式推送 | 开放 | 真实需求驱动时再加（SSE 式推送或保留文件轮询） |  |
 | TD-50 | 失败分类是启发式信号匹配，边缘 case 降级 unknown，刻意只给证据不给处方 | 设计性约束 | 新增 provider 错误格式时扩充 AUTH_SIGNAL 即可 | src/diagnosis.js |
 | TD-84 | 目标项目未 init 时 `wao declare` / `wao stage` 以 ENOENT 崩溃 | 开放 | 跨项目派工再次撞到时 | src/cli.js |
+| TD-96 | `wao stage` 每个阶段要手拼 task、artifacts、cwd；按 run 自动填充（`--from-run`）登记了没做 | 开放 | 真实使用里再次需要自动填充时 |  |
 | TD-97 | scorecard 的 requireCommands/requireFiles 证据判定仍独立，未并入统一评估模块 | 开放 | 未定 | src/runEvidenceAssessment.js |
 | TD-104 | 同一 OS identity 下 worker 仍可读取分配的凭据文件，credential broker 未落地 | 开放 | 无人值守、多租户或强隔离发布前需 credential broker 或独立身份 | 0016 docs/incidents/2026-07-12-worker-credential-exposure.md |
 | TD-106 | Tester 上下文效率属 Codex 产品与订阅配额问题，WAO 刻意不吸收该职责 | 设计性约束 | 未定 |  |
@@ -34,11 +35,13 @@
 | TD-125 | prune 归档有 TOCTOU 覆盖窗、无逐文件容错，子目录语料与顶层日志不在清扫面 | 开放 | TOCTOU 根修待首次真实冲突实证；子目录策略 Owner 需要时另立 | docs/usage.md |
 | TD-128 | 读绑定清扫大部分已修，但维持清单仍有约十处无绑定读面：写侧 CAS 三门、seq 水位族、events[0] 类等，外 run 伪造行仍可污染观测或锁死交付决策 | 开放 | 触发条件入册后重看：非人调用方、输出被程序化消费、pre-envelope 存量变非零等 | src/transcript.js src/runManager.js src/backgroundRunner.js |
 | TD-130 | 全量测试套件存在多文件多波环境性 isolation_pass 假失败，根因未定位，靠串行闸与复跑缓解 | 开放 | T1/T2/T3 重开触发，如闸独占下再现 isolation_pass | docs/research/td130-root-cause.md src/verificationGate.js src/machineGatePaths.js |
+| TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 根修（进程归属或隔离 run-dir）待真实痛点再立项 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 首次语义组合冲突致集成后回归实证时；并行成常态时加必做步骤 |  |
 | TD-138 | 全量测试耗时只涨不跌，现约 17–19 分钟，接近当初定的重开线（约 20 分钟） | 开放 | 全量超过约 20 分钟；届时只拆最长的两三个测试文件 | docs/usage.md |
 | TD-139 | MCP 的 run_status 不返回最近活动摘要（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 下一次 MCP 状态面改动 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 每季度核对 v24 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
+| TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 首次再撞见同类漂移 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
 | TD-142 | workflow / DAG 层利用率低，裁定保留现状不退役 | 设计性约束 | 连续一个季度零 workflow 运行，或该层需要实质改动 | 0027 |
 | TD-143 | 证据链层依赖 runtime 厂商 transcript 访问政策，且治理方法论无第二读者与操作者 | 开放 | backend 收紧 transcript 政策时；对外分享或第二操作者加入前补交接文档 |  |
 | TD-144 | 宿主进程 env 块不随注册表刷新，setx 后启动的宿主派发报凭据缺失，且无标准补救文档 | 开放 | 第二次撞见同类断层即立项承载 | docs/usage.md |
@@ -46,13 +49,15 @@
 | TD-149 | repackage 的 allowedPaths 仍硬拒目录/尾斜杠条目，dispatch 收而 repackage 拒；waitWindowHint 缺 MCP 非泄漏钉 | 开放 | 下次触碰 delivery/repackage 面或实际被拒收目录清单时立项 | src/application/runDeliveryRepackage.js docs/02-architecture.md |
 | TD-153 | `runs list --since` 不走历史扫描通道；unknown 展示态不能作为过滤条件 | 开放 | 下一次 CLI 查询面改动 | src/scorecard.js src/transcript.js docs/usage.md |
 | TD-156 | runs/无保留策略，全量扫描随文件数增长变慢，当前约2-4秒逼近阈值 | 开放 | 扫描耗时破5s阈值即转按年龄归档不删除 | scripts/canonical-test.mjs |
+| TD-158 | 上游空窗期的派发重试脚本已收编，还没有在真实的空窗连败里用过 | 开放 | 下次空窗连败时启用，并评估是否转正 | scripts/dispatch-with-liveness.mjs |
 | TD-160 | 任务书硬化规则部分落地，绑定断言未见记录，措辞过宽仍可触发workdir_escape | 开放 | 未定 | SKILL.md docs/usage.md |
 | TD-161 | `registry check` 只查 opencode serve，命名和帮助文字容易让人当成车道健康检查；各车道的就绪检查没有 | 开放 | 车道就绪检查落地时一并处理 | 0028 src/commands/registry.js docs/usage.md |
 | TD-163 | 自然清理时进程仍活或探测抛错的证停告警路径缺自然路径等价测试 | 开放 | 下次触碰processStopVerify/cleanup证停面时顺带补 | 0030 |
+| TD-164 | 结构化信封试点获 Owner 批准后只跑了首臂，判死条件还没评估（跨模型 KV 直传已裁定不适用） | 开放 | 试点随主线批次；三个重看条件任一满足即重评 |  |
 | TD-168 | 测试冗余清扫主体已落地，35 个删并候选仍待人工逐条定谳 | 开放 | 候选低优先逐条定谳；cli.test.js 下次大改时顺带整理 | test/fixtures/mcpWireKeySets.js test/isolation-infra/reporter.test.js |
 | TD-169 | 认证通道零 case 仍报 ALL PASS 且 exit 0，缺执行计数；strict drill 覆盖不足可归为 full | 开放 | 阶段 2 处理 | scripts/run-reliability.mjs |
 | TD-170 | 全量测试各波的时长没有基线和漂移告警（上次靠人工比对才发现 390s 涨到 600s） | 开放 | 再次出现环境漂移污染验证结论 |  |
-| TD-171 | 环境抖动致全量测试间歇失败且另有成因未查清，一次性 reverify 杠杆过脆 | 开放 | 待办三项；环境性失败第二杠杆需提请 Owner 裁定 |  |
+| TD-171 | 交付验证遇到环境抖动时，仅有的一次 reverify 机会会被烧掉；deliveryVerification.test.js 在并发下由约 246 秒膨胀到约 600 秒，原因没查清 | 开放 | 是否给环境性失败第二次重验机会，待提请 Owner 裁定；膨胀原因在下次复现时查 | test/delivery/deliveryVerification.test.js |
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | 开放 | 未定 | 0062 |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 未定 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
@@ -66,13 +71,14 @@
 | TD-184 | 复用证据已还清；遗留 dsh drill 路由键重算失效待修、codex 转录照不到部分工具调用等小项 | 开放 | dsh drill 修复待排期；原语表 30 天期限钟持续刷新 | 0045 scripts/reliability/session-reuse-drill.mjs |
 | TD-185 | 入口判定修复已落地；测试夹具清理仍留空外层目录、构造失败可能残留 staging，早期 22.x 未实测 | 开放 | 下次修改该夹具时收回清理所有权并覆盖构造失败清理 | test/process/genSurfaceEntry.test.js scripts/gen-surface.mjs |
 | TD-186 | 认证证据适用性与取证闭环已修多轮；组件层台账历史死指针、过时注释等残留仍未处理 | 开放 | 旧画像不明时不得宣称当前已验证 | src/application/registryInventory.js scripts/reliability/prune-drill-transcripts.mjs |
-| TD-190 | 各项目的运行记录集中存放在 WAO 安装根，能读该根的本机会话可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 出现需要按项目隔离读取的宿主 | 0060 src/projectBuckets.js src/projectIdentity.js |
+| TD-190 | 各项目的运行记录已按项目分桶，但都放在 WAO 安装根下，能读该根的本机会话仍可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 出现需要按项目隔离读取的宿主 | 0060 |
 | TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查、机器安装权威三份并存待收敛 | 开放 | 各残余自带触发；安装权威收敛待 Owner 择期议发布快照方案 | 0066 0049 0043 |
 | TD-193 | kimi-web 后端的 WS 事件流、seq 游标重放与按提示中止能力已静态确认但未接线，REST 通道无会话级中止 | 开放 | kimi-web 席位转正或 abort 需求出现时优先做 | docs/incidents/2026-09-30-kimi-web-wiring.md |
 | TD-194 | 白天并发跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除 | 开放 | 下次白天验证 flake 时逐案直跑复现加机器态取证，累计 3 例后立专案 |  |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
 | TD-196 | 对抗逃逸演练依赖模型配合，守约模型即无靶；拦截链端到端仅有单测未实测，例外席被全量认证机械降级需脚本手工恢复 | 开放 | 任一触发即关闭：真实越界尝试、复证前跑夹具化变体、抗钓鱼探针触发拦截 | 0036 0037 |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 下次交付隔离演练 | 0067 0074 0075 |
+| TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 下次受督的长运行或 zcode 交付运行 | docs/usage.md |
 | TD-201 | dsh 组件层在册证据基于 0.1.5-rc.2 旧指纹，现装 0.2.0-rc.2 后旧证据 inconclusive 且不可由 component-check 重建 | 开放 | coder_low_dsh 席位承重前，或 dsh 0.2.0 正式发布时 | scripts/reliability/dsh-acp/evidence/ scripts/reliability/dsh-acp/wao-reuse-drill.mjs |
 | TD-204 | 认证 caseId 仍以 label 为合并键，改名即换键，仅 warn-only 护栏在线未解耦 | 开放 | 下次触碰认证台账 schema 时一并评估 |  |
 | TD-206 | kimiWeb 失败 run 的部分产出不落盘，中途失败后已产出文本不可恢复 | 开放 | 下次受督 kimiWeb 长 run 需中途产出可恢复时 |  |

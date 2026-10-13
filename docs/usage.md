@@ -761,7 +761,7 @@ npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run
 2. **Owner 批准**：分类清单 + 建议处置（并入→删 / 已拒绝→bundle 删 / 悬空→Owner 裁 / 引用→Owner 裁）报批；未裁定项**保守保留**。
 3. **保全（先于一切删除）**：`git bundle create <runs-archive/<yyyy-mm>/hygiene-cleanup-<date>.bundle> <全部待删引用>`（显式清单，含引用 SHA）→ `git bundle verify` → sha256 入记录。
 4. **执行（顺序不可换）**：摘工作树（**嵌套深度降序、最深先**——套娃树先内后外；脏树先 `git status --porcelain` 快照留痕再 `--force`）→ 删分支（已并入 `-d`（git 保险丝，拒未并入）；未并入 `-D`（仅 bundle 之后）；**显式名单循环，禁 glob**）→ `git worktree prune`。
-5. **收口**：计数闭合（前后分支/树数对账）→ `npm run hygiene` 5/5 → 清退记录落 `runs-archive/<yyyy-mm>/`（record.md + bundle + 脏树快照，磁盘档）→ 台账指针（TD 行注记）提交。
+5. **收口**：计数闭合（前后分支/树数对账）→ `npm run hygiene` 5/5 → 清退记录落 `runs-archive/<yyyy-mm>/`（record.md + bundle + 脏树快照，磁盘档）→ 提交，经过写进提交说明。
 
 **踩坑备忘**：非时间戳命名 runId（dogfood 系）别按时间戳规则批量误伤；"已并入但台账已拒绝/悬空"的反常行单独标注不阻塞（内容在 main 即零丢失）；`git bundle create` 的 `--version` flag 在部分 git 版本不认（省略即可）；runs/ 转录不动（清扫走场景 7 的 prune --archive 通道，两套清退互不越界）。
 

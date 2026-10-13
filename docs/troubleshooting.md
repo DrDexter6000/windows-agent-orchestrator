@@ -502,13 +502,13 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR，TD-221）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
-- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为；详见 claudeCode.js 头注释与 TD-221 台账行）。
+- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为；详见 claudeCode.js 头注释与 TD-221）。
 - **逃生门（2026-10-07 Owner 裁定合法形态）**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能（实测）。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
 
 ### 7.14 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥，TD-229）
 
 - **症状**：native 车道启动即 `OAuth session expired and could not be refreshed`，重新登录只管几小时；`~/.claude/.credentials.json` 周期性被清空。
-- **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录（机制与物证时间线见 TD-229 台账行）。
+- **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录（机制与物证时间线见 TD-229）。
 - **修复（2026-10-07 已落）**：`CLAUDE_CODE_OAUTH_TOKEN` 可解析（进程 env 或 Windows 用户环境，无需重启服务器）时目录保持空、不拷贝凭据、认证走 env（实测 2.1.289 空配置目录认此变量）；缺席回退旧拷贝路径（轮换缺陷仍在）。空值视为缺席（若 CLI 把空串当已设置是可见 401，非静默毁登录）。token 值不进 argv/转录（名字经 inheritedNames 进脱敏器）。
 - **迁移（Owner 一次性）**：`claude setup-token` 生成长期令牌 → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`；`wao doctor` 的 `claude_oauth_token_mode` 显示"长期令牌模式"即生效；迁移后跑一次全量 `npm test` 复验。迁移前勿派 native run——副本内续期会作废当前登录。
 

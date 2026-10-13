@@ -23,9 +23,9 @@ For aggregation, parsing, or classification changes, green unit tests are not en
 
 One fact has one editable home; everything else links to it. Document categories are defined in `docs/ssot.md`.
 
-- **What a change writes.** Code and tests; the one reference page whose reader is affected; a decision record only when you chose between alternatives (`.wao/decisions/`, at most 8 KB: background, decision, rejected alternatives, known limits); one ledger line when a debt item opens or closes. The story of the batch — what changed, how it was verified, who reviewed it, run and consult ids — goes in the commit message, not in a document.
+- **What a change writes.** Code and tests; for each fact that changed, the reference text that is its home (a change may touch several facts, each in its own place); a decision record only when you chose between alternatives (`.wao/decisions/`, at most 8 KB: background, decision, rejected alternatives, known limits); one ledger line when a debt item opens or closes. For an ordinary development batch, the story of the batch — what changed, how it was verified, who reviewed it, run and consult ids — goes in the commit message, not in a document. Releases, incidents and workstream close-outs keep the records `docs/milestone-discipline.md` and `docs/incidents/` ask for.
 - **Reference documents describe the present.** Replace the text that is no longer true; do not append what changed, when, or in which batch.
-- **Debt ledger** (`docs/tech-debt.md`): one line per open item, format in its header. Updating a row rewrites it; closing a row moves it to the archive list.
+- **Debt ledger** (`docs/tech-debt.md`): one line per unresolved item, format and limits in its header. Updating a row rewrites it; closing a row moves it to `docs/archive/tech-debt-closed.md`.
 - **Tests on documents** check agreement with code, that a retired claim stays gone, shape, and the few operating instructions a reader cannot work without — in the one place that is authoritative for them, never as the same sentence required in several files. When the text a test protects is retired, the test is retired with it.
 - **A red size limit means move or delete content.** Raising a limit is the Owner's decision.
 
