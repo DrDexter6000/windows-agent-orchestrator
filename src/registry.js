@@ -258,6 +258,12 @@ export function normalizeAgent(id, agent) {
     if (typeof agent.tokenEnv !== "string" || agent.tokenEnv.trim().length === 0) {
       throw new Error(`Agent ${id}: tokenEnv is required and must be a non-blank string`);
     }
+    // 决定 0074：kimiHome 可选——worker serve 的私有 KIMI_CODE_HOME（绝对路径）。声明后
+    // bearer token 取自 <kimiHome>/server.token，tokenEnv 只作名字保留、不再读取。
+    if (Object.prototype.hasOwnProperty.call(agent, "kimiHome")
+      && (typeof agent.kimiHome !== "string" || !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(agent.kimiHome.trim()))) {
+      throw new Error(`Agent ${id}: kimiHome must be an absolute path when present`);
+    }
   } else if (agent.backend === "claude-code" || agent.backend === "codex" || agent.backend === "kimi-code") {
     // 进程式 backend：serveUrl/model 非必填（进程自带模型配置）。
     // binary 可选（默认走 PATH 里的 claude/codex/kimi）。

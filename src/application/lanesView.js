@@ -31,7 +31,8 @@ import { axesEqual, laneAxes, agentAxes } from "../dispatchResolution.js";
 const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** traits 单车道形状校验（与 test/registry-roles/laneTraits.test.js 的结构钉
- *  同一形状——profile/suggestedUses/contextWindow/multimodal 必填，effortNote
+ *  同一形状——profile/suggestedUses/contextWindow/multimodal 必填，effortNote /
+ *  concurrencyNote
  *  可选；来源标注必为字符串）。不合规=整车道降级 invalid（不造默认值）。
  *  纯函数：返回 {ok:true, entry} 或 {ok:false, fields:[...]}。 */
 export function validateTraitEntry(id, entry) {
@@ -50,6 +51,8 @@ export function validateTraitEntry(id, entry) {
   if (!mm || typeof mm !== "object" || typeof mm.image !== "boolean"
     || typeof mm.video !== "boolean" || typeof mm.source !== "string") bad.push("multimodal");
   if (entry.effortNote !== undefined && typeof entry.effortNote !== "string") bad.push("effortNote");
+  // 决定 0074：同车道并发的实测记录（可选；自由文本，写明并发数、日期与取样条件）。
+  if (entry.concurrencyNote !== undefined && typeof entry.concurrencyNote !== "string") bad.push("concurrencyNote");
   if (bad.length > 0) return { ok: false, fields: bad };
   return {
     ok: true,
@@ -59,6 +62,7 @@ export function validateTraitEntry(id, entry) {
       contextWindow: { tokens: cw.tokens, source: cw.source, ...(typeof cw.shape === "string" ? { shape: cw.shape } : {}) },
       multimodal: { image: mm.image, video: mm.video, source: mm.source },
       ...(entry.effortNote !== undefined ? { effortNote: entry.effortNote } : {}),
+      ...(entry.concurrencyNote !== undefined ? { concurrencyNote: entry.concurrencyNote } : {}),
     },
   };
 }

@@ -51,8 +51,8 @@ cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自�
 | opencode | `npm install -g opencode-ai` | HTTP 类 backend（需先 `opencode serve`）；也可作为 MCP Lead host（见 §MCP stdio OpenCode 项目级配置） |
 | claude code | 见 [anthropic 官方](https://docs.anthropic.com/en/docs/claude-code) | 进程式 backend（需登录：`claude login`） |
 | codex | `npm i -g @openai/codex` | 进程式 backend（需登录：`codex login`） |
-| kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | 进程式 backend，多模态（需过 Kimi 白名单，无需登录命令） |
-| DeepSeek Harness | 见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | **实验性** stdio JSON-RPC backend；需用户自行准备 dedicated `dsh-jsonrpc-agent` composition 与 `DEEPSEEK_API_KEY`，WAO 不安装或修复 runtime |
+| kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | 进程式 backend，多模态（需过 Kimi 白名单，无需登录命令）。**暂停使用**（决定 0074）：kimi 车道走 kimi-web；本后端不支持在途纠偏、不上报 token 用量 |
+| DeepSeek Harness | 见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | **暂停使用**（TD-117、决定 0074；由下一行的 ACP 面接替）。实验性 stdio JSON-RPC backend；需用户自行准备 dedicated `dsh-jsonrpc-agent` composition 与 `DEEPSEEK_API_KEY`，WAO 不安装或修复 runtime |
 | DeepSeek Harness（ACP 面） | `dsh` CLI ≥ 0.1.5-rc（见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)） | `deepseek-acp` backend（ADR-0031）：`dsh --profile acp` + 操作员安装的 containment 覆盖层 + `DEEPSEEK_API_KEY`；WAO 只 detect / invoke / report（安装步骤见下文「deepseek-acp」段） |
 
 **你不需要全装。** 装一个就能用。不同 agent 可以用不同 backend。
@@ -313,11 +313,12 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 > **行为变更（决定 0073，2026-10-13）**：① kimi-code、deepseek-harness 两个后端不再声明"能产出命令退出码证据"（前者靠输出里的关键词猜成败，后者没有实测）。② 认证：命令退出码这一轴因后端如实声明不产出而不适用的车道评 `conditional`，不再停在 `draft-only`（其它 strict 轴不适用、要求的命令根本没跑，仍是 `draft-only`）。③ `run_activity` 的工具输出尾部（`tail`）也读文本块数组——deepseek-acp 的工具结果此前一直显示为空。④ deepseek-acp 运行在沙箱建不起来时，转录里落一条 system 消息，写明症状、harness 文档给出的常见原因与修法（每次启动后端进程一次）。
 
-> **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 在 Windows 上给命令套的沙箱，要求工作目录**由当前用户拥有并且有完全控制**。只有"修改"权限的目录上（本机非系统盘的项目目录即是：权限来自 Authenticated Users），沙箱内的命令在执行之前就以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败；模型可能改为申请完全权限（WAO 按既有规则应答放行，命令在沙箱外执行），也可能放弃。WAO 只报告、不修改目录权限。修复由操作者执行 harness 自带的脚本，**执行前要知道它会改什么**：① 给这条目录链上缺权限的目录补上当前用户的完全控制项；② 扫描该项目目录的子树，**移除其中应用包（AppContainer）的显式允许项——那些应用会失去对这些对象的访问**。文件内容与所有者不变，每处改动先备份并打印恢复命令：
+> **行为变更（决定 0074，2026-10-13）**：① deepseek-acp 车道的 `env.DSH_PERMISSION_MODE` 现在校验取值（三个预设名之外即拒）；沙箱建不起来时的 system 提示改为先给车道级修法。② kimi-web 车道可声明 `kimiHome`：token 取自该主目录的 `server.token`，这条车道在 `registry_list` 里显示为不需要凭据。③ `wao lanes` 多一行 `concurrency`（同车道并发的实测记录）。④ kimi-code、deepseek-harness 两个后端暂停使用。
+
+> **deepseek 车道的目录权限前提（deepseek lane prerequisites）**：DeepSeek Harness 缺省给命令套一层 Windows 沙箱（`workspace-write`），它要求工作目录**由当前用户拥有并且有完全控制**。只有"修改"权限的目录上（非系统盘的项目目录常见），沙箱内的命令在执行之前就以 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)` 失败。两种做法，WAO 都不替你选：
 >
-> `pwsh -NoProfile -File "<npm 全局目录>\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-sandbox-windows-acl\assets\diagnose-windows-sandbox-acl\scripts\diagnose-windows-sandbox-acl.ps1" -Path "<项目目录>" -AllowRoot "<项目目录>" -Out "<存放恢复文件的目录>"`
->
-> 不要用管理员身份运行，不要手工改权限；`-Out` 选一个长期保留、属于自己的目录。结果以脚本末尾的 `RECAP` / `nextAction` 为准：`verify_original_confined_operation` 才算修好（再重派一次带命令的任务确认）；`stop` 或 `restore_pending_then_stop` 就停下，按它打印的恢复命令处理，不要重复执行。本机观察到的情形是每个项目目录修一次；更深的路径仍被拒时，对那条路径再执行一次。
+> 1. **按车道声明权限模式（一次设好，所有项目通用；决定 0074）**：在 registry 的车道条目里写 `"env": { "DSH_PERMISSION_MODE": "danger-full-access" }`（取值只能是 `read-only` / `workspace-write` / `danger-full-access`，拼错即拒）。此后命令不进 harness 的沙箱、也不再请求审批——与其它车道的无人值守模式一致；WAO 的工作树隔离与交付范围审计不变。
+> 2. **保留沙箱、修目录权限**：由操作者对每个项目目录执行 harness 自带的修复脚本。它会改权限：给目录链上缺权限的目录补上当前用户的完全控制项，并扫描项目目录的子树、**移除其中应用包（AppContainer）的显式允许项**（那些应用会失去对这些对象的访问）；文件内容与所有者不变，每处改动先备份并打印恢复命令。`pwsh -NoProfile -File "<npm 全局目录>\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-sandbox-windows-acl\assets\diagnose-windows-sandbox-acl\scripts\diagnose-windows-sandbox-acl.ps1" -Path "<项目目录>" -AllowRoot "<项目目录>" -Out "<存放恢复文件的目录>"`；不要用管理员身份运行。结果以末尾的 `nextAction` 为准：`verify_original_confined_operation` 才算修好，`stop` / `restore_pending_then_stop` 就停下按它打印的恢复命令处理。
 
 > **行为变更（决定 0070，2026-10-13）**：`run_activity` 的 tool_use 条目多一个 `detail`（输入摘要），tool_result 条目多 `tail` / `truncated`（输出尾部）；codex 运行的转录在命令开始时多一条 tool_use（此前命令要到结束才出现）、结束时多一条带输出的 tool_result；codex / claude-code / kimi-code 的运行在转录静默满 5 分钟后会落 `runtime_activity`（`process_active` / `files_changed`）——此前这些后端在长命令期间转录是空的。
 
@@ -671,9 +672,13 @@ runManager 等直接构造 RunManager 的测试）整片变红——审计席位
    占住句柄（Windows EPERM）——`serve recycle` 杀荚后自动清扫（输出
    emptyWorktreeHusksSwept）。sweep 探针含 busy/main_turn_active 双字段且 apply
    逐项复探；存量卫生补充 v2 sessions:archive 批量归档路线（归档态转录仍可读、
-   restore 可逆；台账 .wao/runs/serve-maintenance/archive-ledger.jsonl）。私有主目录
-   （KIMI_CODE_HOME）阶梯①已验证通过（数据家分离+新家空会话零子进程），②登录
-   ③试点④运维闭环待 Owner 排期（TD-253）。
+   restore 可逆；台账 .wao/runs/serve-maintenance/archive-ledger.jsonl）。**根治办法 = 私有主目录**
+   （决定 0074）：助手进程是主目录里的插件与 `mcp.json` 拉起的，不装它们的私有主目录
+   （`KIMI_CODE_HOME`）下 serve 不拉任何助手进程（实测二十多个任务后仍为 0）。车道条目写
+   `"kimiHome": "<私有主目录绝对路径>"` 即指向它：token 取自 `<kimiHome>/server.token`
+   （不读环境变量），`serve status|sweep|recycle` 以它为缺省主目录。私有主目录要先单独
+   登录一次（`kimi login`，勿复制 credentials）；serve 首次在该主目录下启动、以及机器重启
+   之后，仍须按上面的手动配方拉起（加 `KIMI_CODE_HOME`）。
 
 ### 场景 5：重试 / 恢复
 

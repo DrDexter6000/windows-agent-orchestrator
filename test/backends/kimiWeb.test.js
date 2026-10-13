@@ -2957,3 +2957,57 @@ test("kimi-web 0072: 写文件帧在途只预告路径（一条 tool_use，不�
     ["file_written", "tool_result", "message", "message", "metrics", "done"],
   );
 });
+
+// ===== 决定 0074：车道声明 kimiHome → 服务器 token 取自该主目录的 server.token =====
+
+test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.token，环境变量不读；文件缺失即拒（只点名路径）", async () => {
+  const { mkdtempSync, writeFileSync: writeFile, rmSync: rm } = await import("node:fs");
+  const { tmpdir: osTmp } = await import("node:os");
+  const { join: joinPath } = await import("node:path");
+  const { kimiServerTokenFile, requiredCredentialNames, inheritedEnvNames } = await import("../../src/envPolicy.js");
+  const home = mkdtempSync(joinPath(osTmp(), "wao-kimihome-"));
+  const fileToken = ["home", "file", "tok", "0074"].join("-");
+  try {
+    // 策略面：声明了 kimiHome 的车道，token 不是环境凭据。
+    const withHome = makeAgent({ kimiHome: home });
+    assert.equal(kimiServerTokenFile(withHome), `${home}${home.includes("\\") && !home.includes("/") ? "\\" : "/"}server.token`);
+    assert.deepEqual(requiredCredentialNames(withHome), []);
+    assert.deepEqual(inheritedEnvNames(withHome), []);
+    assert.deepEqual(requiredCredentialNames(makeAgent()), [TOKEN_ENV], "未声明 kimiHome 的车道照旧");
+    assert.equal(kimiServerTokenFile(makeAgent()), null);
+    assert.equal(kimiServerTokenFile({ backend: "codex", kimiHome: home }), null, "只对 kimi-web 生效");
+
+    // 文件缺失：固定错误，点名文件路径，不回落到环境变量（那是别的主目录的 token）。
+    const { fetchImpl: neverCalled, calls: noCalls } = kimiServer(() => envelope({}));
+    const missing = new KimiWebBackend({ fetchImpl: neverCalled, timeout: 5000, retries: 0 });
+    await assert.rejects(
+      () => missing.spawn(withHome, { prompt: "hi" }),
+      (err) => err.message.includes("server token file") && err.message.includes("server.token")
+        && err.message.includes("missing or empty") && !err.message.includes(TOKEN_VALUE),
+    );
+    assert.equal(noCalls.length, 0, "没有 token 就不发请求");
+
+    // 文件在场：请求带的是文件里的 token（去掉首尾空白），不是环境变量的值。
+    writeFile(joinPath(home, "server.token"), `${fileToken}\r\n`, "utf8");
+    const { handler, markSpawned } = turnScriptServer("session_0074a", {
+      script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+    });
+    const { fetchImpl, calls } = kimiServer(handler);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const agent = makeAgent({ kimiHome: home });
+    const handle = await backend.spawn(agent, { prompt: "hi", resolvedCredentials: { [TOKEN_ENV]: TOKEN_VALUE } });
+    markSpawned();
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) void ev;
+    assert.ok(calls.length > 0);
+    for (const call of calls) {
+      assert.equal(call.headers.authorization, `Bearer ${fileToken}`, "每个请求都用主目录的 token");
+    }
+
+    // 形状：kimiHome 必须是非空绝对路径。
+    assert.throws(() => backend.validateAgentPolicy(makeAgent({ kimiHome: " " })), /kimiHome must be a non-empty absolute path/);
+    assert.throws(() => normalizeAgent("kimi", { ...makeAgent(), kimiHome: "relative/home" }), /kimiHome must be an absolute path/);
+    assert.equal(normalizeAgent("kimi", { ...makeAgent(), kimiHome: home }).kimiHome, home, "归一化保留该字段");
+  } finally {
+    rm(home, { recursive: true, force: true });
+  }
+});

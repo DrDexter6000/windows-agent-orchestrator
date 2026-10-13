@@ -29,6 +29,22 @@
 // native-OAuth long-term token name (TD-229, added channel-conditionally inside
 // inheritedEnvNames — not a static list), so it has no static list here (null).
 // opencode-serve is HTTP-backed (no process creds).
+/**
+ * 决定 0074：kimi-web 车道声明 kimiHome（worker serve 的私有 KIMI_CODE_HOME）时，
+ * 服务器 bearer token 取自该主目录的 server.token 文件，不经环境变量。返回该文件
+ * 路径；未声明 → null。路径拼接不用 node:path（本模块零 import）：kimi 主目录是
+ * 平铺布局，token 文件就在根下。
+ * @param {object} agent — normalized agent from registry
+ * @returns {string|null}
+ */
+export function kimiServerTokenFile(agent) {
+  if (agent?.backend !== "kimi-web") return null;
+  const home = agent.kimiHome;
+  if (typeof home !== "string" || home.trim().length === 0) return null;
+  const sep = home.includes("\\") && !home.includes("/") ? "\\" : "/";
+  return `${home.replace(/[\\/]+$/, "")}${sep}server.token`;
+}
+
 const INHERITED_ENV_NAMES = {
   "claude-code": null,
   codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
@@ -60,7 +76,8 @@ export function requiredCredentialNames(agent) {
   const configured = agent.backend === "deepseek-harness" || agent.backend === "deepseek-acp"
     ? agent.credentialEnv
     : agent.backend === "kimi-web"
-      ? agent.tokenEnv
+      // 决定 0074：声明了 kimiHome 的车道，token 来自文件——不是环境凭据，不进这张表。
+      ? (kimiServerTokenFile(agent) === null ? agent.tokenEnv : undefined)
       : agent.backend === "claude-code"
         ? agent.provider?.apiKeyEnv
         : undefined;

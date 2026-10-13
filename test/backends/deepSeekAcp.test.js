@@ -30,6 +30,8 @@ import {
   parseContainmentOverlay,
   serializeRoleContractPatch,
   SETTABLE_REASONING_EFFORTS,
+  DSH_PERMISSION_MODES,
+  DSH_PERMISSION_MODE_ENV,
 } from "../../src/backends/deepSeekAcp.js";
 import { compileInvocation } from "../../src/backends/processBackend.js";
 import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factory.js";
@@ -597,8 +599,8 @@ test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ �
   assert.equal(notes.length, 1, "两条命令同样失败，只提示一次");
   const text = notes[0].parts[0].text;
   assert.ok(text.includes("does not own the workspace directory or lacks full control of it"), "给出 harness 文档里的常见原因");
-  assert.ok(text.includes("diagnose-windows-sandbox-acl.ps1"), "给出修法");
-  assert.ok(text.includes("It changes file permissions"), "提醒修法会改权限、先读说明");
+  assert.ok(text.includes("env DSH_PERMISSION_MODE=danger-full-access"), "给出车道级修法（决定 0074）");
+  assert.ok(text.includes("docs/usage.md, deepseek lane prerequisites"), "指到说明（含保留沙箱的做法）");
   assert.ok(!text.includes("D:\\projects"), "固定文案，不带路径");
   // 提示排在触发它的那条结果之后；命令与结果照常落。
   const kinds = events.filter((e) => ["command", "tool_result", "message"].includes(e.kind) && (e.kind !== "message" || notes.includes(e)))
@@ -616,6 +618,47 @@ test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ �
   });
   assert.ok(!other.events.some((e) => e.kind === "message" && e.role === "system"
     && e.parts.some((p) => p.text.includes("setting up its sandbox"))));
+});
+
+test("ACP 0074: 车道 env 里的 DSH_PERMISSION_MODE 只接受三个预设名、原样传给 harness 进程；沙箱失败的提示先给车道级修法", async () => {
+  const backend = new DeepSeekAcpBackend();
+  assert.deepEqual([...DSH_PERMISSION_MODES], ["read-only", "workspace-write", "danger-full-access"]);
+  for (const mode of DSH_PERMISSION_MODES) {
+    assert.doesNotThrow(() => backend.validateAgentPolicy(agent({ env: { [DSH_PERMISSION_MODE_ENV]: mode } })), mode);
+  }
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent()), "未声明 = harness 缺省，不拒");
+  for (const bad of ["full-access", "yolo", "", "Danger-Full-Access"]) {
+    assert.throws(
+      () => backend.validateAgentPolicy(agent({ env: { [DSH_PERMISSION_MODE_ENV]: bad } })),
+      /env\.DSH_PERMISSION_MODE must be one of: read-only, workspace-write, danger-full-access/,
+      JSON.stringify(bad),
+    );
+  }
+
+  // 声明的模式进 harness 子进程的环境。
+  const { spawnCalls } = await runAcpScenario({
+    agentOverrides: { env: { [DSH_PERMISSION_MODE_ENV]: "danger-full-access" } },
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  assert.equal(spawnCalls[0].opts.env[DSH_PERMISSION_MODE_ENV], "danger-full-access");
+
+  // 沙箱建不起来时的提示：先说一次设好、所有项目通用的车道级修法。
+  const denied = [{ type: "content", content: { type: "text", text: "Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\\projects\\demo)" } }];
+  const { events } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_s1", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "node --version" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_s1", status: "failed", content: denied });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const note = events.find((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => p.text.includes("setting up its sandbox")));
+  assert.ok(note, "提示在场");
+  assert.ok(note.parts[0].text.includes("env DSH_PERMISSION_MODE=danger-full-access"));
+  assert.ok(note.parts[0].text.includes("set once for all projects"));
 });
 
 test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取首个并留痕", async () => {

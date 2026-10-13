@@ -120,7 +120,9 @@ import {
   toolResultEvent,
   runtimeActivityEvent,
 } from "../runEvent.js";
+import { readFileSync } from "node:fs";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
+import { kimiServerTokenFile } from "../envPolicy.js";
 import { createStallTracker } from "./stallBudget.js";
 
 // role/task 分隔符对齐 kimiCode.js 的 ROLE_TASK_SEPARATOR（"\n\n---\n\n"）——
@@ -282,6 +284,10 @@ export class KimiWebBackend {
       throw new Error(
         "kimi-web backend requires tokenEnv (non-empty string; the bearer token env var name)",
       );
+    }
+    // 决定 0074：kimiHome 可选（私有 KIMI_CODE_HOME 的绝对路径）；形状不对即拒。
+    if (agent?.kimiHome !== undefined && kimiServerTokenFile(agent) === null) {
+      throw new Error("kimi-web backend: kimiHome must be a non-empty absolute path when present");
     }
   }
 
@@ -1109,8 +1115,24 @@ export class KimiWebBackend {
 // user-env 桥——2026-10-02 坑修）→ process.env[agent.tokenEnv]。字段缺失或两处
 // 均未设 → 固定安全形状错误（只点名 env 变量名，绝不回显 env 内容——token 值
 // 永不进错误消息/transcript/日志）。
+// 决定 0074：车道声明了 kimiHome 时 token 取自 <kimiHome>/server.token（每个 agent
+// 对象读一次并缓存），环境变量不读——别的主目录的 token 在这个 serve 上只会换来
+// 40101，不做静默回落。错误只点名文件路径，不回显内容。
 const SPAWN_BRIDGED_BEARER = new WeakMap();
+const HOME_FILE_BEARER = new WeakMap();
 function resolveBearerToken(agent) {
+  const tokenFile = kimiServerTokenFile(agent);
+  if (tokenFile !== null) {
+    const cached = HOME_FILE_BEARER.get(agent);
+    if (typeof cached === "string") return cached;
+    let value = "";
+    try { value = readFileSync(tokenFile, "utf8").trim(); } catch { value = ""; }
+    if (value.length === 0) {
+      throw new Error(`kimi-web backend: server token file ${tokenFile} is missing or empty (refusing dispatch)`);
+    }
+    HOME_FILE_BEARER.set(agent, value);
+    return value;
+  }
   const name = agent?.tokenEnv;
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error(

@@ -142,7 +142,9 @@ const REGISTERED_CENSUS = {
   "commands/registry.js": { "opencode-serve": 2, "claude-code": 1 },
   // TD-229（2026-10-07）：inheritedEnvNames 对 native 通道（backend==="claude-code"
   // && !provider）追加长期令牌继承名——通道条件派生，非新分叉轴。
-  "envPolicy.js": { "claude-code": 4, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 1 },
+  // 决定 0074（2026-10-13）：kimiServerTokenFile 按 backend==="kimi-web" 认领 kimiHome
+  // 字段（凭据来源声明——同一文件既有的 per-backend 凭据名表的延伸，非运行时分叉）。
+  "envPolicy.js": { "claude-code": 4, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 2 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
   "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1, "kimi-code": 1 },
   "hostAdapters/hostRegistrationProbe.js": { "claude-code": 1, "kimi-code": 1 },

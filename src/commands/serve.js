@@ -17,7 +17,9 @@
 
 import { resolve } from "node:path";
 import { parseOptions } from "./shared.js";
+import { readFileSync } from "node:fs";
 import { readRegistry } from "../registry.js";
+import { kimiServerTokenFile } from "../envPolicy.js";
 import {
   serveStatusReport,
   planSessionSweep,
@@ -48,13 +50,25 @@ async function resolveServeTarget(config, urlOverride) {
   } else {
     target = kimiAgents[0];
   }
-  const token = process.env[target.tokenEnv];
-  if (typeof token !== "string" || token.length === 0) {
-    throw new Error(`serve auth env is absent: set ${target.tokenEnv} (value is never echoed)`);
+  // 决定 0074：车道声明了 kimiHome → token 取自该主目录的 server.token，主目录同时是
+  // status / sweep / recycle 的缺省 --kimi-home（显式 flag 仍然优先）。
+  const tokenFile = kimiServerTokenFile(target);
+  let token;
+  if (tokenFile !== null) {
+    try { token = readFileSync(tokenFile, "utf8").trim(); } catch { token = ""; }
+    if (token.length === 0) {
+      throw new Error(`serve auth token file is missing or empty: ${tokenFile} (value is never echoed)`);
+    }
+  } else {
+    token = process.env[target.tokenEnv];
+    if (typeof token !== "string" || token.length === 0) {
+      throw new Error(`serve auth env is absent: set ${target.tokenEnv} (value is never echoed)`);
+    }
   }
   return {
     serveUrl: target.serveUrl,
     token,
+    kimiHome: tokenFile !== null ? target.kimiHome : undefined,
     kimiAgentIds: kimiAgents.map((a) => a.id),
   };
 }
@@ -107,7 +121,7 @@ async function serveCommand(args, config) {
       port: Number(new URL(target.serveUrl).port),
       serveUrl: target.serveUrl,
       token: target.token,
-      kimiHome: options.kimiHome,
+      kimiHome: options.kimiHome ?? target.kimiHome,
     });
     console.log(JSON.stringify(report, null, 2));
     return;
@@ -115,9 +129,9 @@ async function serveCommand(args, config) {
   if (sub === "sweep") {
     const target = await resolveServeTarget(config, options.url);
     const runDir = resolve(options.runDir ?? config.runDir);
-    const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token, kimiHome: options.kimiHome });
+    const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token, kimiHome: options.kimiHome ?? target.kimiHome });
     if (plan.error) throw new Error(plan.error);
-    printSweepPlan(plan, typeof options.kimiHome === "string" && options.kimiHome.length > 0);
+    printSweepPlan(plan, typeof (options.kimiHome ?? target.kimiHome) === "string" && (options.kimiHome ?? target.kimiHome).length > 0);
     if (options.apply) {
       const ledger = resolve(serveMaintenanceDir(resolve(runDir, "..")), "sweep-ledger.jsonl");
       const summary = await applySessionSweep({ plan, serveUrl: target.serveUrl, token: target.token, ledgerPath: ledger });
@@ -142,7 +156,7 @@ async function serveCommand(args, config) {
       kimiAgentIds: target.kimiAgentIds,
       soakMs: Number.isFinite(soakMs) && soakMs >= 1000 ? soakMs : 12_000,
       lockRootDir: resolve(runDir, ".."),
-      kimiHome: options.kimiHome,
+      kimiHome: options.kimiHome ?? target.kimiHome,
     });
     console.log(JSON.stringify(result, null, 2));
     // TD-261（0063，opus/sol 合订）：结构化失败与"未就绪"都要非零退出——旧实现
@@ -158,4 +172,4 @@ async function serveCommand(args, config) {
   );
 }
 
-export { serveCommand };
+export { serveCommand, resolveServeTarget };

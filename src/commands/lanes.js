@@ -85,6 +85,7 @@ function renderLane(row, width) {
     emit("context", `${t.contextWindow.tokens} tokens${t.contextWindow.shape ? `（${t.contextWindow.shape}）` : ""} [source: ${t.contextWindow.source}]`);
     emit("multimodal", `image=${t.multimodal.image ? "是" : "否"} video=${t.multimodal.video ? "是" : "否"} [source: ${t.multimodal.source}]`);
     if (t.effortNote) emit("effortNote", t.effortNote);
+    if (t.concurrencyNote) emit("concurrency", t.concurrencyNote);
   } else if (row.traitsState === "absent") lines.push("  画像: 未提供（画像文件无该车道键）");
   else if (row.traitsState === "invalid") lines.push("  画像: 形状错误（见尾部 issues）");
   else lines.push("  画像: 文件不可读");

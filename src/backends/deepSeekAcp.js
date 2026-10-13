@@ -123,6 +123,15 @@ export const DENIED_ORCHESTRATION_TOOLS = Object.freeze(["subagent", "subagent_f
 // -32602 负对照直接证据）。只放行交集——无证据支持映射，不发明映射。
 export const SETTABLE_REASONING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
+// dsh 的权限模式（决定 0074）：harness 启动时读环境变量 DSH_PERMISSION_MODE 定沙箱
+// 与审批策略（acp profile 的 sandbox-policy / approval / permission 三项；缺省
+// workspace-write）。车道在 registry 的 env 里声明它；这里只校验取值并把生效值写进
+// 转录——WAO 不替车道选模式。danger-full-access = 命令不进 harness 沙箱、不再请求
+// 审批；workspace-write 的沙箱要求当前用户对工作目录有完全控制（见下方
+// SANDBOX_GRANT_DENIED_RE）。
+export const DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
+export const DSH_PERMISSION_MODES = Object.freeze(["read-only", "workspace-write", "danger-full-access"]);
+
 // shell 类工具（与旧线 projectDshEvent 同集）：终态时投影为 command 证据；调用到达
 // 时先落一条 tool_use，让在途的命令看得见（决定 0072）。
 const SHELL_TOOL_NAMES = Object.freeze(["pwsh", "powershell", "bash", "shell"]);
@@ -285,8 +294,9 @@ const SANDBOX_GRANT_DENIED_RE = /SetNamedSecurityInfoW failed \(Win32 5\): grant
 const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: a command failed while the harness was setting up its sandbox in this workspace "
   + "(grantWrite denied), before the command could run. The harness documents the usual cause: the signed-in user "
   + "does not own the workspace directory or lacks full control of it; other sandboxed commands here are likely "
-  + "to fail the same way. The operator can repair the directory with the harness's own script "
-  + "(diagnose-windows-sandbox-acl.ps1). It changes file permissions: read docs/usage.md, deepseek lane prerequisites, first.";
+  + "to fail the same way. Lane-level fix, set once for all projects: declare the harness permission mode in the "
+  + "registry entry (env DSH_PERMISSION_MODE=danger-full-access; commands then run outside the harness sandbox). "
+  + "See docs/usage.md, deepseek lane prerequisites, for this and for keeping the sandbox instead.";
 
 // 工具结果里的全部文本：ACP 线上的真实形状是嵌套块
 // （{type:"content", content:{type:"text", text}}），平铺的 {type:"text", text} 也认。
@@ -405,6 +415,14 @@ export class DeepSeekAcpBackend {
   validateAgentPolicy(agent) {
     if (agent?.provider) {
       throw new Error("deepseek-acp cannot express provider policy; the composition is fixed via --profile acp and operator-installed patches");
+    }
+    // 决定 0074：env 里的 DSH_PERMISSION_MODE 只接受 harness 的三个预设名——拼错的值
+    // 会被 harness 当成未知模式，不做静默放行。
+    const permissionMode = agent?.env?.[DSH_PERMISSION_MODE_ENV];
+    if (permissionMode !== undefined && !DSH_PERMISSION_MODES.includes(permissionMode)) {
+      throw new Error(
+        `deepseek-acp env.${DSH_PERMISSION_MODE_ENV} must be one of: ${DSH_PERMISSION_MODES.join(", ")}`,
+      );
     }
     // model 块（0046 §3/§5 第④步起接线）：ACP 的 model 选项 value 是
     // provider/model 二元组（JSON.stringify([providerID, id])，provider 段实测

@@ -567,3 +567,48 @@ test("TD-252③: listArchiveTranscriptFiles——月份目录形状校验、不�
     } finally { cleanupDir(bare); }
   } finally { cleanupDir(root); }
 });
+
+// ===== 决定 0074：serve 维护族对声明了 kimiHome 的车道 =====
+
+test("serve 0074: 车道声明 kimiHome → 维护命令用该主目录的 server.token 鉴权并把它当作缺省主目录；未声明照旧读环境变量", async () => {
+  const { mkdtempSync, writeFileSync: writeFile, rmSync: rm } = await import("node:fs");
+  const { tmpdir: osTmp } = await import("node:os");
+  const { join: joinPath } = await import("node:path");
+  const { resolveServeTarget } = await import("../../src/commands/serve.js");
+  const dir = mkdtempSync(joinPath(osTmp(), "wao-serve-0074-"));
+  const envName = "WAO_TEST_KIMI_TOKEN_0074";
+  const saved = process.env[envName];
+  const fileToken = ["home", "tok", "0074"].join("-");
+  const envToken = ["env", "tok", "0074"].join("-");
+  try {
+    const home = joinPath(dir, "kimi-home");
+    (await import("node:fs")).mkdirSync(home);
+    const lane = { backend: "kimi-web", cwd: ".", serveUrl: "http://127.0.0.1:58628", tokenEnv: envName, model: { id: "kimi-code/k3-256k" } };
+    const withHome = joinPath(dir, "with-home.json");
+    const withoutHome = joinPath(dir, "without-home.json");
+    writeFile(withHome, JSON.stringify({ agents: { kimi: { ...lane, kimiHome: home } } }), "utf8");
+    writeFile(withoutHome, JSON.stringify({ agents: { kimi: lane } }), "utf8");
+    process.env[envName] = envToken;
+
+    // 声明了主目录、token 文件还不在：固定错误点名文件，不回落到环境变量。
+    await assert.rejects(
+      () => resolveServeTarget({ registry: withHome }),
+      (err) => err.message.includes("serve auth token file is missing or empty") && err.message.includes("server.token")
+        && !err.message.includes(envToken),
+    );
+    writeFile(joinPath(home, "server.token"), `${fileToken}\n`, "utf8");
+    const target = await resolveServeTarget({ registry: withHome });
+    assert.equal(target.token, fileToken);
+    assert.equal(target.kimiHome, home, "车道的主目录是 status / sweep / recycle 的缺省 --kimi-home");
+    assert.equal(target.serveUrl, "http://127.0.0.1:58628");
+
+    const legacy = await resolveServeTarget({ registry: withoutHome });
+    assert.equal(legacy.token, envToken);
+    assert.equal(legacy.kimiHome, undefined);
+    delete process.env[envName];
+    await assert.rejects(() => resolveServeTarget({ registry: withoutHome }), /serve auth env is absent/);
+  } finally {
+    if (saved === undefined) delete process.env[envName]; else process.env[envName] = saved;
+    rm(dir, { recursive: true, force: true });
+  }
+});

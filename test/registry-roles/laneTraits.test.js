@@ -3,7 +3,8 @@
 // 0046 §1/⑤：车道画像元数据守卫。
 //   ① 结构：config/lane-traits.json 可解析，traits 键 ⊆ lanes.json 车道键（不要求
 //      全覆盖——新车道可暂无画像），字段形状闭集（profile/suggestedUses/
-//      contextWindow/multimodal/effortNote），来源标注必填（official/owner/wire）。
+//      contextWindow/multimodal/effortNote/concurrencyNote），来源标注必填
+//      （official/owner/wire；concurrencyNote 写 measured + 日期）。
 //   ② 隔离铁律（0046 §1.5 "特性字段不进派发/门禁文件"）——0064 读取面落地后的
 //      双钉形态：字面引用白名单（仅 src/application/lanesView.js——展示层投影）
 //      + 导入边守卫（lanesView 只准被 commands/lanes.js 引用、lanes.js 只准被
@@ -45,6 +46,13 @@ test("0046 ⑤：lane-traits 结构——键⊆车道键、字段闭集、来源
   assert.equal(doc.traits.kimi.contextWindow.tokens, 262144, "kimi=262144（Owner 钉正，非 1m）");
   assert.equal(doc.traits.kimi.multimodal.video, false, "kimi 无视频（视频需 kimi-for-coding 另车道）");
   assert.ok(/通道不表达/.test(doc.traits.kimi.effortNote ?? ""), "kimi effortNote=通道不表达");
+  // 决定 0074：同车道并发的实测记录——可选字段；在场必须是字符串并写明是实测、哪天测的。
+  for (const id of ids) {
+    const note = doc.traits[id].concurrencyNote;
+    if (note === undefined) continue;
+    assert.equal(typeof note, "string", `${id}.concurrencyNote 必须是字符串`);
+    assert.match(note, /measured \d{4}-\d{2}-\d{2}/, `${id}.concurrencyNote 须写明实测日期`);
+  }
 });
 
 // ── 0064：隔离守卫（纯函数化——walk 逻辑可被夹具反例复用）──────────────────────
