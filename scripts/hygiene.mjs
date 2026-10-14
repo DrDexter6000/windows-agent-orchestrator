@@ -73,7 +73,7 @@ export function countRunBranches(cwd) {
     .split("\n").filter((s) => s.trim()).length;
 }
 
-// ---- B-class checks (main-repo filesystem state only; NOT suite-safe per R23-D §7) ----
+// ---- B-class checks (main-repo filesystem state only; NOT suite-safe per docs/milestone-discipline.md §7) ----
 export function checkRootWhitelist(runsDir, whitelist = ROOT_WHITELIST) {
   const actual = fs.readdirSync(runsDir);
   const problems = [];

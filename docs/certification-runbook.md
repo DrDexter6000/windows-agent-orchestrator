@@ -421,14 +421,14 @@ advisory-only，`requireCertified=false` 与 CLI 门禁语义原样）。
 
 ## 场景 1b：单次派发换模型（--model）
 
-"这一次任务的会审选用 codex CLI 驱动的 gpt-5.6-sol-xhigh" 这类**单次生效、不落配置**的模型覆盖：
+"这一次派发换一个模型跑" 这类**单次生效、不落配置**的模型覆盖：
 
 ```powershell
 # 前台：立即回显 effective model，然后照常等待并打印摘要
-npm run cli -- run coder_low --prompt "..." --model gpt-5.6-sol-xhigh
+npm run cli -- run sol --prompt "..." --model <modelId>
 
 # 后台：JSON 里带 model 字段（派发时刻即见，不必等 provider）
-npm run cli -- run coder_low --prompt "..." --background --model gpt-5.6-sol-xhigh
+npm run cli -- run sol --prompt "..." --background --model <modelId>
 ```
 
 语义要点：
@@ -447,17 +447,17 @@ npm run cli -- run coder_low --prompt "..." --background --model gpt-5.6-sol-xhi
 
 ## 场景 1c：单次派发换推理力度（--reasoning）
 
-"这一次会审用 gpt-5.6-sol 配 xhigh 推理力度" 这类**单次生效、不落配置**的推理力度覆盖（与 `--model` 可同用）：
+"这一次派发用 xhigh 推理力度" 这类**单次生效、不落配置**的推理力度覆盖（与 `--model` 可同用）：
 
 ```powershell
 # 前台：立即回显 effective reasoning（与 --model 同用时合并为一行 effective 回显）
-npm run cli -- run coder_low --prompt "..." --reasoning xhigh
+npm run cli -- run sol --prompt "..." --reasoning xhigh
 
-# 与 --model 同用（组合示例 "gpt-5.6-sol + xhigh"）
-npm run cli -- run coder_low --prompt "..." --model gpt-5.6-sol-xhigh --reasoning xhigh
+# 与 --model 同用
+npm run cli -- run sol --prompt "..." --model <modelId> --reasoning xhigh
 
 # 后台：JSON 里带 reasoning 字段（派发时刻即见，不必等 provider）
-npm run cli -- run coder_low --prompt "..." --background --reasoning xhigh
+npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 ```
 
 语义要点：

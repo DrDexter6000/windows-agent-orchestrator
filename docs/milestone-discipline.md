@@ -1,13 +1,13 @@
 # Milestone 工作纪律
 
-> 状态：✅ 强制执行。
+> 状态：强制执行。
 > 每个 milestone 必须按此纪律执行，不允许跳过 gate 或遗留技术债。
 
 ## 1. Task 拆分要求
 
 每个 milestone 在动工前必须拆成独立 task。每个 task 必须有：
 
-- **task ID 和标题**（如 M0-1: transcript.js 扩展）
+- **task ID 和标题**（形如 `M<milestone>-<序号>: 标题`）
 - **输入**：依赖哪些前置 task 或文件
 - **输出**：产出哪些文件、改动哪些函数
 - **验收 checklist**：可逐条勾选的检查项（不是"做好了"，是"验证了什么"）
@@ -15,10 +15,10 @@
 
 ## 2. 验收 gate 的形式
 
-gate 必须是**可执行验证**，不能是主观判断：
+gate 必须是可执行验证，不能是主观判断：
 
-- ✅ 好："`node --test test/transcript/transcript.test.js` 全绿，且含 seq 单调递增的断言"
-- ❌ 坏："transcript 扩展完成"
+- 好："`node --test test/transcript/transcript.test.js` 全绿，且含 seq 单调递增的断言"
+- 坏："transcript 扩展完成"
 
 gate 类型按 task 性质选：
 - 代码 task：测试通过 + lint/类型检查（若有）
@@ -27,7 +27,7 @@ gate 类型按 task 性质选：
 
 ## 3. 技术债审计（每个 milestone 收尾必做）
 
-milestone 完成后，必须审计以下技术债类别。**发现的技术债要么当场修，要么记入 backlog 并标明不修的理由和触发条件。**
+milestone 完成后，必须审计以下技术债类别。发现的技术债要么当场修，要么记入 backlog 并标明不修的理由和触发条件。
 
 > 记入的地方只有一处：[`docs/tech-debt.md`](./tech-debt.md)，一条一行，格式与增删规则见该表表头。
 
@@ -42,162 +42,135 @@ milestone 完成后，必须审计以下技术债类别。**发现的技术债�
 
 ## 4. 完成定义（milestone 级）
 
-milestone 标记 ✅ 前必须满足：
+milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 1. 所有 task 的验收 gate 全绿
 2. 技术债审计完成（已修或已登记）
 3. `npm test` 全绿
-4. **涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿**
+4. 涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿
 5. 更新 `docs/roadmap.md` 里程碑表
-6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（ADR 0034）
+6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（边界与流程见决定 0034）
 
 ## 5. 不留技术债的原则
 
-- 发现即处置：当场修，或经源头判断（含同类问题史检索）后按 Owner 批准的取舍延后并登记触发条件；同类问题第二次出现补丁前必须先写源头归因，不原地打第三个补丁（ADR 0034）
-- 每个临时桥接代码必须标注"何时拆除"（如 M0 的 waitForCompletion 桥接标注 M1 拆除）
+- 发现即处置：当场修，或经源头判断（含同类问题史检索）后按 Owner 批准的取舍延后并登记触发条件；同类问题第二次出现补丁前必须先写源头归因，不原地打第三个补丁（决定 0034）
+- 每个临时桥接代码必须标注"何时拆除"
 - 不允许"先跑起来再说"的未测代码合入
 
-## 6. 实战经验（M0–M2 沉淀）
+## 6. 实战经验
 
-以下经验由真实踩坑验证，后续 milestone 必须遵守：
+以下规则每个 milestone 必须遵守。
 
 ### 6.1 mock 证明"逻辑对"，真实 smoke 证明"系统能跑"
 
-- M2 的 TD-17（codex.cmd spawn EINVAL）和 TD-18（opencode 流式 parts 竞态）都是 mock 永远抓不到的。
-- mock 用 `process.execPath`（真 exe），mock 消息一次性完整返回——永远不会碰到 .cmd 包装器或流式追加。
-- **规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑 `npm run smoke`。**
+- mock 抓不到的缺陷真实存在：`.cmd` 包装器导致的 spawn 参数问题、流式输出 parts 追加的竞态。mock 派发用 `process.execPath`（真 exe），mock 消息一次性完整返回——碰不到包装器与流式追加这两个面。
+- 规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑 `npm run smoke`。
 
 ### 6.2 红绿测试纪律
 
 - 先写测试（红）→ 确认失败原因正确（是"模块不存在"不是"别的错"）→ 再实现（绿）。
-- M2 parser 层 4 个 sub-task 全程红绿，零返工。
-- **规则：新模块必须红绿。重构（改现有代码）可用"旧测试全绿 + 新测试补充"替代。**
-- **环境状态读取面（runs/ 台账、.wao/pipeline 等 gitignored 状态）的测试另有专门纪律，见 §7（R23-D）。**
+- 规则：新模块必须红绿。重构（改现有代码）可用"旧测试全绿 + 新测试补充"替代。
+- 环境状态读取面（runs/ 台账、.wao/pipeline 等 gitignored 状态）的测试另有专门纪律，见 §7。
 
 ### 6.3 技术债审计要逐文件，不只全局 grep
 
-- M0 的 TD-1 和 M1 的 TD-8 是同一个"动态 import"模式的两处。全局 grep 只找到第一处，逐文件审查才找到第二处。
-- **规则：审计时打开每个改动过的文件通读，不靠关键词搜索偷懒。**
+- 同一个异味（如"动态 import 本可静态"）可能在多个文件各出现一处；全局 grep 只找到第一处，逐文件审查才找得全。
+- 规则：审计时打开每个改动过的文件通读，不靠关键词搜索偷懒。
 
 ### 6.4 "禁做"边界和"必做"清单同等重要
 
-- M2 plan 明确"不做证据链事件（留 M6）""不做 message 去重（留 M6）"——这些禁做项防止了范围蔓延。
-- **规则：每个 sub-task 必须写"禁做"清单，和"必做"清单成对出现。**
+- 每个 sub-task 写明本轮不做什么（留待后续里程碑的项），防止范围蔓延。
+- 规则：每个 sub-task 必须写"禁做"清单，和"必做"清单成对出现。
 
 ### 6.5 主动审计，不等用户要求
 
-- M0 审计是用户要求后才做的（回溯），抓出 3 个真实 bug。
-- M1/M2 审计在收尾时主动执行，抓出 TD-11（作用域 bug）。
-- **规则：milestone 收尾时主动走审计流程，不等用户要求。**
+- 规则：milestone 收尾时主动走 §3 审计流程，不等用户要求。
 
 ### 6.6 修一处必须验证所有同类路径（跨完成模式/跨 provider）
 
-- 2026-06-17 事故：修了 first-stable 的 text 完成判据，没同步到 snapshot-stable（GLM 伪完成）；
-  修了 snapshot-stable 的 session-endpoint metrics，没同步到 first-stable（metrics 偏小）。
-  两次都是"局部修复"，被独立 reliability 测试（codex）打脸。
-- **规则：涉及完成判定 / provider / metrics 的修改，必须问"同类路径（另一个 completionMode、其它 provider）有没有同样问题"，
-  全部验证才算完成。npm test 全绿 ≠ 实测可用。**
-- **规则（ADR 0034 扩展）**：补丁交付说明须自声明治标/治本；同类问题第二次出现 → 先检索 tech-debt/事故记录、写一段共同原因归因再动手，不打无归因的第三个补丁。
+- 完成判定、provider、metrics 相关代码在每条完成模式（first-stable / snapshot-stable）、每个 provider 各有一条路径。只修打红的那条、不同步其余同类路径，这种局部修复会被独立 reliability 测试（真实 provider）再次打红。
+- 规则：涉及完成判定 / provider / metrics 的修改，必须问"同类路径（另一个 completionMode、其它 provider）有没有同样问题"，全部验证才算完成。npm test 全绿 ≠ 实测可用。
+- 规则（决定 0034 扩展）：补丁交付说明须自声明治标/治本；同类问题第二次出现 → 先检索 tech-debt/事故记录、写一段共同原因归因再动手，不打无归因的第三个补丁。
 
 ### 6.7 reliability 套件：完成判定/provider 路径修改的硬门槛
 
 - `npm test`（mock）只验证逻辑对；`npm run reliability`（真实 provider）验证"系统能跑 + 输出对 + 真完成"，并输出 runtime+model certification。
-- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model；`--profile strict` 额外确保 command/file scorecard drill，避免只凭 sentinel 把 worker 误标为 strict-dispatch capable。
-- **规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的 PR，
-  收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配
-  为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二陈述漂移；单席增量重认证
-  的保留语义见下），不能只靠 npm test 报绿就声称完成。**
+- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model。`--profile strict` 额外确保 command/file scorecard drill（矩阵行未显式声明 drills 时也会加上），避免只凭 sentinel 把 worker 误标为 strict-dispatch capable；`--profile delta` 跑 delta 子集（sentinel + scorecard + 越界写对抗）；矩阵行可显式声明更多 drill（isolation / adversarialEscape / workflowRunDir / stop）。解析出 0 个认证 case 时显式失败退出，不空转报全绿。
+- 规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的交付，收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二份陈述漂移；单席增量重认证的保留语义见下），不能只靠 npm test 报绿就声称完成。
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
-- **单 worker 重认证不覆盖全量**：`npm run reliability -- --agent X` 跑完会增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
-- 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 含 scorecard+isolation+workflow 多 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
+- 单 worker 重认证不覆盖全量：`npm run reliability -- --agent X` 跑完增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
+- 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 的 case 含 scorecard/isolation/workflow 多个 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
 
-## 7. 交付验证环境盲区纪律（R23-D，2026-08-21）
+## 7. 交付验证环境盲区纪律
 
 > 背景：交付验证在 git worktree 跑 `npm test`，而 gitignored 环境状态（runs/ 台账、
 > .wao/pipeline、真实 registry）在 worktree 不存在。读这些状态的生产代码对交付
-> 验证不可见——2026-08-21 实锤：`registry validate` 的迁移 advisory 读
-> `runs/reliability-summary.json`，worktree 验证全绿、main 集成终验两处 stable_fail。
-> 闭合手段 = **合成夹具双形状测试 + 读侧机械守卫 + 存量清扫**，三件缺一不可。
+> 验证不可见——裸调测试读到的是"碰巧在场"的真实台账，只覆盖到环境的半边形状，
+> worktree 验证全绿、main 集成终验才暴露未覆盖的形状（`registry validate` 的迁移
+> advisory 读 `runs/reliability-summary.json` 即此形态）。闭合手段 = 合成夹具双形状
+> 测试 + 读侧机械守卫 + 存量清扫，三件缺一不可。
 
 ### 7.1 双形状钉规则（与 §6.2 红绿纪律互指）
 
-- 读环境状态的代码路径，测试必须用**合成夹具把环境的两个形状都钉住**：
-  - **有状态形状**：temp 写入合成状态文件（如 temp run-dir 写 reliability-summary.json），
-    断言读到的行为；
-  - **无/坏状态形状**：空目录或垃圾内容，断言 fail-silent（零输出、不崩、exit 语义不变）；
-  - 有阴性对照时加第三腿（如 R23-C 后形状记录 → 零 advisory，证伪"有记录就报"）。
-- 夹具一律写 **temp 目录**（`mkdtemp` + `--run-dir`/`--cwd` 显式注入），禁止指向仓库
-  真实 runs/（静态守卫 staticRunsGuard.test.js 是主层，canonical-test.mjs 动态快照是兜底层）。
-- **规则：新增任何读 gitignored 环境状态的接线，必须同 PR 交付双形状测试；只测
-  "worktree 里看得到的那半边"（无状态形状）不算覆盖。**
+- 读环境状态的代码路径，测试必须用合成夹具把环境的两个形状都钉住：
+  - 有状态形状：temp 写入合成状态文件（如 temp run-dir 写 reliability-summary.json），断言读到的行为；
+  - 无/坏状态形状：空目录或垃圾内容，断言 fail-silent（零输出、不崩、exit 语义不变）；
+  - 有阴性对照时加第三腿（新身份形状记录 → 零 advisory，证伪"有记录就报"）。
+- 夹具一律写 temp 目录（`mkdtemp` + `--run-dir`/`--cwd` 显式注入），禁止指向仓库真实 runs/（静态守卫 `test/isolation-infra/staticRunsGuard.test.js` 是主层，`scripts/canonical-test.mjs` 动态快照是兜底层）。
+- 规则：新增任何读 gitignored 环境状态的接线，必须同 PR 交付双形状测试；只测"worktree 里看得到的那半边"（无状态形状）不算覆盖。
 
 ### 7.2 断言精确匹配（防退化牙）
 
-- 环境形状测试的断言必须**精确匹配**：`deepEqual` 逐字、恰 N 条——禁止裸 `match`
-  放过额外输出。advisory/warning 类文案逐字取生产代码现行字符串（如
-  `src/registry.js` certMigrationAdvisories），生产文案一改测试即红，文案漂移被
-  强制过人眼。
-- 自带防退化牙：谁把夹具改回默认路径（删掉 `--run-dir`/`--cwd`），测试在任何环境
-  （main/worktree/CI）都红——因为合成台账不再可见，精确断言立即失配。
-- **规则：环境读取面测试禁止"至少包含一条"式软断言。**
+- 环境形状测试的断言必须精确匹配：`deepEqual` 逐字、恰 N 条——禁止裸 `match` 放过额外输出。advisory/warning 类文案逐字取生产代码现行字符串（如 `src/registry.js` certMigrationAdvisories），生产文案一改测试即红，文案漂移被强制过人眼。
+- 自带防退化牙：谁把夹具改回默认路径（删掉 `--run-dir`/`--cwd`），测试在任何环境（main/worktree/CI）都红——因为合成台账不再可见，精确断言立即失配。
+- 规则：环境读取面测试禁止"至少包含一条"式软断言。
 
-### 7.3 环境读取面枚举表（2026-08-21 全量盘点，可补不可漏）
+### 7.3 环境读取面枚举表（可补不可漏）
 
 | # | 面 | 读什么 | 测试现状 | 锚点 |
 |---|-----|--------|----------|------|
-| ① | `registry validate` 迁移 advisory | `<runDir>/reliability-summary.json` | **本轮修**：双形状矩阵钉（text+JSON：legacy/corrupt/阴性对照；无台账由既有 runs-none 用例覆盖）+ 10 处存量裸调加 `--run-dir` + staticRunsGuard `validate-no-run-dir` 机械规则 | `src/commands/registry.js:185`（接线）；`src/registry.js:288`（certMigrationAdvisories） |
-| ② | `registryInventory.buildCertMap` | `<runDir>/reliability-summary.json` | **已钉**（服务层缺失/损坏/存在三形状 + R23-C F6 providerKey 透传钉）——勿重复造轮子 | `src/application/registryInventory.js:116`；`test/registry-roles/applicationRegistryInventory.test.js` |
-| ③ | `onboarding --endorse-worker` 读台账 | `reliabilitySummaryPath = <config.runDir>/reliability-summary.json` | **已隔离**（服务层测试注入路径） | `src/commands/onboarding.js:108-109` |
-| ④ | 认证门 `--require-certified` 读 summary  生产锚点 `src/runManager.js:1182-1210`（auditor F1 补）| `<runDir>/reliability-summary.json` | **已隔离**（cli.test.js 认证门用例全部注入 `--run-dir`） | `test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
-| ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()` → `<cwd>/.wao/pipeline/`（DECL-/STAGE- 曝光注入） | **本轮隔离**（cli.test.js 四处 runsDashboardCommand 加 `--cwd <temp>`；boundReadSweep.test.js 两处同款裸 `--cwd` 登记为后续触发） | `src/commands/runs.js:831-842`；`src/commands/shared.js:77` |
-| ⑥ | daemon 读 `.wao-worktrees` | worktree 残留计数（健康信号，默认相对路径） | **低风险标注**（只读计数、非测试路径依赖；本轮不钉） | `src/daemon.js:40` |
-| ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | **确认无测试裸用默认**（registry 用例全部显式 `--registry`） | `config/default.json`；`src/cli.js:69` |
-| ⑧ | **写面边界声明** | `frictionLog.js` 写 `<runDir>/../.dev/friction-log/` 及同类写面 | **本轮不测**（写污染风险，已否决 junction/复制真实 runs/ 方案）——表内明写一行防静默漏 | `src/frictionLog.js:34` |
-| ⑨ | **半 .wao 形状注记** | `.wao/decisions/` 被 git 跟踪；worktree 实际是"有 decisions、无 pipeline/state"的半形状 | 环境差异以此为准——worktree 并非无 `.wao`，`.wao` 读取面的环境差异按此解读 | `.gitignore`（`.wao/*` + `!.wao/decisions/` 例外） |
+| ① | `registry validate` 迁移 advisory | `<runDir>/reliability-summary.json` | 双形状矩阵钉（text+JSON：legacy/corrupt/阴性对照；无台账由 runs-none 用例覆盖）+ staticRunsGuard `validate-no-run-dir` 机械规则 | `src/commands/registry.js` 的 `registryValidateCommand`（接线）；`src/registry.js` 的 `certMigrationAdvisories`；`test/registry-roles/backendCapabilityValidate.test.js` + `test/isolation-infra/cliFormatJson.test.js` |
+| ② | `registryInventory.buildCertMap` | `<runDir>/reliability-summary.json` | 已钉（服务层缺失/损坏/存在三形状 + providerKey 透传钉）——勿重复造轮子 | `src/application/registryInventory.js` 的 `buildCertMap`；`test/registry-roles/applicationRegistryInventory.test.js` |
+| ③ | `onboarding --endorse-worker` 读台账 | `reliabilitySummaryPath = <config.runDir>/reliability-summary.json` | 已隔离（服务层测试注入路径） | `src/commands/onboarding.js` 的 `reliabilitySummaryPath` |
+| ④ | 认证门 `--require-certified` 读 summary | `<runDir>/reliability-summary.json` | 已隔离（cli.test.js 认证门用例全部注入 `--run-dir`） | `src/runManager.js` 的 `RunManager.start`（`requireCertified` 分支）；`test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
+| ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()` → `<cwd>/.wao/pipeline/`（DECL-/STAGE- 曝光注入） | 已隔离（cli.test.js 的 runsDashboardCommand 用例与 `test/run-lifecycle/boundReadSweep.test.js` 的两处调用都注入 `--cwd <temp>`）；这一面还没有机械守卫，见 7.5 | `src/commands/runs.js` 的 `runsDashboardCommand`；`src/commands/shared.js` 的 `resolveTargetCwd` |
+| ⑥ | daemon 读 `.wao-worktrees` | worktree 残留计数（健康信号，默认相对路径） | 低风险标注（只读计数、非测试路径依赖；不钉） | `src/daemon.js` 的 `countWorktrees` |
+| ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | 确认无测试裸用默认（registry 用例全部显式 `--registry`） | `config/default.json` 的 `registry`；`src/cli.js` 的 `hardcodedDefaults.registry` |
+| ⑧ | 写面边界声明 | `frictionLog.js` 写 `<runDir>/../.dev/friction-log/` 及同类写面 | 不测（写污染风险高于盲区收益；向真实环境做写注入的方案已否决）——表内明写一行防静默漏 | `src/frictionLog.js` 的 `frictionLogDirFromRunDir` |
+| ⑨ | 半 .wao 形状注记 | `.wao/decisions/` 被 git 跟踪；worktree 实际是"有 decisions、无 pipeline/state"的半形状 | 环境差异以此为准——worktree 并非无 `.wao`，`.wao` 读取面的环境差异按此解读 | `.gitignore` 的 `.wao/*` 与 `!.wao/decisions/` 两行 |
 
-- **规则：每轮触碰环境读取面的 milestone，先重跑四个盘点 grep（reliability-summary /
-  runDir 回落 / .wao 路径 / process.cwd()），枚举表可补不可漏；新面必须落行。**
+- 规则：每轮触碰环境读取面的 milestone，先重跑四个盘点 grep（reliability-summary / runDir 回落 / .wao 路径 / process.cwd()），枚举表可补不可漏；新面必须落行。
 
 ### 7.4 写面边界
 
-- 测试**只隔离读面，不测写面**：向真实环境写（friction-log、runs/ 台账）的路径
-  不做环境注入测试——写污染风险高于盲区收益。写面正确性由服务层纯函数测试 +
-  smoke 覆盖。若未来某写面出现与 ①同款的环境盲区实证（worktree 绿 / main 红），
-  先在枚举表登记，再按 7.1 双形状规则立项。
+- 测试只隔离读面，不测写面：向真实环境写（friction-log、runs/ 台账）的路径不做环境注入测试——写污染风险高于盲区收益。写面正确性由服务层纯函数测试 + smoke 覆盖。若某写面出现与 ① 同款的环境盲区实证（worktree 绿 / main 红），先在枚举表登记，再按 7.1 双形状规则立项。
 
 ### 7.5 机械守卫与后续触发
 
-- 读侧守卫落在 `test/isolation-infra/staticRunsGuard.test.js`（静态主层，零时间窗）：
-  单行出现 `"registry", "validate"` argv 形状而同行无 `--run-dir` → 红，失败消息带
-  文件：行与修法指引。**变异自证**纪律：新规则落地必须临时造一处违规证明规则红、
-  复原后绿（过程留报告）。
-- 本轮只钉 validate 一族。**后续触发登记**（出现下述任一情况时扩规则，不提前扩）：
-  runs/dashboard 族裸 `--cwd`（boundReadSweep.test.js 两处已知）、`registry list`
-  裸默认 run-dir、execSync 字符串形 spawn 的机械识别。
-- **规则：机械守卫规则必须配合成源单元测试（规则红/合法形状不触发）+ 变异自证，
-  白名单逐条带理由、失效即删。**
+- 守卫落在 `test/isolation-infra/staticRunsGuard.test.js`（静态主层，零时间窗），规则闭集以该文件的 `RULES` 为准：五条拦测试把路径指向仓库真实的 `runs/`，两条管 registry validate/list 的读取面：
+  - argv 形：单行出现 `"registry", "validate"` argv 形状而同行无 `--run-dir` → 红（`--run-dir` 须在 validate token 之后），失败消息带文件：行与修法指引；
+  - 字符串形：模板串内 `registry validate` / `registry list` 后紧跟 flag 或插值而串内无 `--run-dir` → 红。
+- 变异自证纪律：新规则落地必须临时造一处违规证明规则红、复原后绿。
+- 读取面的规则只覆盖 registry validate/list。后续触发登记（出现下述任一情况时扩规则，不提前扩）：runs/dashboard 族出现不带 `--cwd` 的裸调用（单行 argv 规则认不出这一形状）、`registry list` 裸默认 run-dir（argv 形）、execSync 字符串形 spawn 的机械识别。
+- 规则：机械守卫规则必须配合成源单元测试（规则红/合法形状不触发）+ 变异自证，白名单逐条带理由、失效即删。
 
-**R23-D Lead 补全（2026-08-21，stage 4 审计后）**：守卫规则族扩至字符串形（模板串内 registry validate/list 无 --run-dir 即红——auditor F2/coder_mm 没问但该问）；argv 形收紧为 --run-dir 须在 validate token 之后（F4）；dashboard 面（表 ⑤）现役实例已隔离（boundReadSweep 两处 --cwd），该面机械守卫为后续触发（单行 argv 规则不覆盖 --cwd 形状）。
+## 8. 决策与收尾卫生（ADR 0034）
 
-## 8. 决策与收尾卫生（ADR 0034，2026-09-29）
+- 发版（含 PATCH）按 §9 发版检查单执行——决定 0038 既有纪律的操作入口（changelog 快照义务、README 版本守卫、tag 规矩的指针都在彼处，本条不承载流程正文，防同文件第二份陈述漂移）。
+- 重大取舍（需立决定档级别的）方案对比必须含"重建/重写"行并附长期沉默成本；以成本/工作量为由删除该行越权——成本否决权只在 Owner。
+- run 的树/分支收尾边界：交付分支 `wao/<runId>` 永不删（accepted/违规 commit 可达性）；ephemeral 只读轮的零独有分支在树释放成功后回收、有独有提交则保留+记事件；非交付残留分支按例外证据形（零独有+tip==main+run 只读）处置。流程细节以决定 0057（验收放树）/0058（lineage-close 记账+证据门控释放）/0062（只读轮分支回收）/0060（例外证据形）各档为权威，本条只收拢边界指针。
+- SKILL.md 受瘦身上限约束不承载正文；当前帽值与变更记录以 docs-consistency 的 SKILL 帽守卫为唯一权威，本条不重复数值，防第二份陈述漂移。
+- 工作流/阶段闭合时跑 `npm run hygiene`（决定 0035 守卫库存 W1–W5）并把结果贴进闭合记录；红灯未处理不得宣告闭合。
 
-- 发版（含 PATCH）按 §9 发版检查单执行——0038 既有纪律的操作入口（changelog 快照义务、README 版本守卫、tag 规矩的指针都在彼处，本条不承载流程正文，防同文件第二份陈述漂移）。
-- 重大取舍（Mainline(3)/ADR 级）的方案对比必须含"重建/重写"行并附长期沉默成本；以成本/工作量为由删除该行越权——成本否决权只在 Owner。
-- run 的树/分支收尾以决定 0057（W1b 验收放树）/0058（lineage-close 记账+证据门控释放）为权威：交付分支 `wao/<runId>` 永不删（accepted/违规 commit 可达性——0057 opus Q2-7）；ephemeral 只读轮的零独有分支在树释放成功后回收、有独有提交则保留+记事件（0062 丙′）；非交付残留分支按 0060 例外证据形（零独有+tip==main+run 只读）处置。本条只收拢边界指针，流程细节以各决定档为权威。SKILL.md 受瘦身上限约束不承载正文（**当前帽值与变更记录以 docs-consistency 的 SKILL 帽守卫为唯一权威**——2026-09-19 Owner 重置 17000→12000；2026-10-02 Owner 授权 +15%→13800；本条不重复数值，防第二份陈述漂移。本次落位时被该守卫拦截后改道，属防税设计正常生效）。
-- 工作流/阶段闭合时跑 `npm run hygiene`（ADR 0035 守卫库存 W1–W5）并把结果贴进闭合记录；红灯未处理不得宣告闭合。
+## 9. 发版检查单（决定 0062）
 
-## 9. 发版检查单（0062，2026-10-11；同日双席审核修订顺序）
+> 定位：决定 0038 的操作入口——有序动作+证据落点；规则语义以 0038 各条为权威，本节只写动作与证据要求，不复述规则正文。ssot.md §1.3 定位本文件为发版纪律唯一权威家；其余文档提及发版只指回本节。每步执行后留证据记录（命令/日期/结果指针，落在当次 changelog 或发版收尾记录里）——空着即未执行。
 
-> 定位：决定 0038 的**操作入口**——有序动作+证据落点；规则语义以 0038 各条为权威，
-> 本节只写动作与证据要求，不复述规则正文。ssot.md §1.3 定位本文件为发版纪律唯一
-> 权威家；其余文档提及发版只指回本节。每步执行后留证据记录（命令/日期/结果指针，
-> 落在当次 changelog 或发版收尾记录里）——空着即未执行（kimi 席条款）。
-
-1. **改版本号**：仓库根 `package.json` 的 `version`（唯一手写处——其余消费者全派生，0038）。**先改号、后跑全量、最后打 tag**：版本前缀类测试在改号后才会翻红（`d564d78` 先例）。
-2. **版本面手改同步（全量之前！）**：README 双语徽章/What's new 标题/快照链接是**手写字段被守卫钉到 package.json**（TD-257 三钉），不是生成物——升号后必须先手改同步，否则下一步全量必红；MINOR/MAJOR 同时建立 changelog 快照文件（第 6 步只做追加定稿）。
-3. **surface 再生成**：本轮 MCP surface / CLI help 有变动 → `npm run gen:surface` 并提交 `docs/surface/*` 生成物（ssot.md §1.3 生成参考层纪律）；wire 冻结面（m12-10 字节 SSOT）变动走既有重冻流程并附变更注记。
-4. **全量 `npm test` 绿**（§4 第 3 条）。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 TD-194 行与 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
-5. **`npm run reliability`（真实 token）通过**——发版门槛**无条件**（0038 第 5 条；§6.7 的 PR 级触发条件不能反向取消发版义务）。如实区分三种状态：**通过 / 未完成（缺项登记——v0.4.0 changelog 先例，不得勾成通过、不得成为下一版先例）/ 豁免**。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。唯一开口 = **Owner 逐次具名豁免**：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带（kimi/opus/sol 审核合订条款）。
-6. **changelog 快照定稿（MINOR/MAJOR）**：`docs/changelog-<date>-vX.Y.Z.md`——只追加不回改，勘误以追加节补（v0.4.0 勘误先例）；PATCH 不强制快照（v0.3.1 先例，豁免记录除外）。
-7. **1.0.0 额外门槛判定（打 tag 之前）**：TD-194 关闭（白天首过稳定）——0038 第 4 条可验证线。
-8. **最终候选提交**：全部证据（第 4/5 步）必须落在 tag 将指向的那个提交上——tag 只指向已验证工件。
-9. **打 tag 并推送**：annotated（`git tag -a vX.Y.Z`，0038 Consequences）→ **先推 main 再推 tag**（v0.4.0 "main 同步"先例）。轻量 tag 违规先例 v0.3.0/v0.3.1——只登记（v0.4.0 changelog 勘误节）不重打：重打会改变已发布的 tag 对象。
+1. 改版本号：仓库根 `package.json` 的 `version`（唯一手写处——其余消费者全派生）。先改号、后跑全量、最后打 tag：版本前缀类测试在改号后才会翻红。
+2. 版本面手改同步（全量之前）：README 双语徽章/What's new 标题/快照链接是手写字段被守卫钉到 package.json，不是生成物——升号后必须先手改同步，否则下一步全量必红；MINOR/MAJOR 同时建立 changelog 快照文件（第 6 步只做追加定稿）。
+3. surface 再生成：本轮 MCP surface / CLI help 有变动 → `npm run gen:surface` 并提交 `docs/surface/*` 生成物（ssot.md §1.3 生成参考层纪律）；MCP tool-surface 的 wire 冻结面（字节 SSOT）变动走既有重冻流程并附变更注记。
+4. 全量 `npm test` 绿（§4 第 3 条）。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
+5. `npm run reliability`（真实 token）通过——发版门槛无条件（决定 0038 第 5 条；§6.7 的交付级触发条件不能反向取消发版义务）。如实区分三种状态：通过 / 未完成（缺项登记，不得勾成通过、不得成为下一版先例）/ 豁免。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。唯一开口 = Owner 逐次具名豁免：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带。
+6. changelog 快照定稿（MINOR/MAJOR）：`docs/changelog-<date>-vX.Y.Z.md`——只追加不回改，勘误以追加节补。PATCH 不强制快照（豁免记录除外）。
+7. 1.0.0 额外门槛判定（打 tag 之前）：TD-194 关闭，即全量套件在白天首过稳定（决定 0038 第 4 条可验证线）。0.x 阶段白天套件波动不阻塞发版（由 0038 第 5 条的复跑流程兜底），但阻塞 1.0.0。
+8. 最终候选提交：全部证据（第 4/5 步）必须落在 tag 将指向的那个提交上——tag 只指向已验证工件。
+9. 打 tag 并推送：annotated（`git tag -a vX.Y.Z`）→ 先推 main 再推 tag。轻量 tag 违规不重打（重打会改变已发布的 tag 对象），只在 changelog 勘误节登记。

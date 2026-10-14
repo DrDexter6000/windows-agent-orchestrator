@@ -15,14 +15,14 @@
 | 症状 | 去哪看 |
 |------|--------|
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
-| worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key-401) |
+| worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key401) |
 | worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
-| `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-runtd-188) |
-| run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态2026-10-04) |
-| 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死td-113--round4-f-2-关单) |
+| `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-run) |
+| run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
+| 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
 | zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
 | 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.15](#715-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
-| opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
+| opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
 | 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
@@ -32,7 +32,7 @@
 | claude-code wrapper 401 / worker 连不上 provider | [§7.1](#71-claude-code-wrapper-401worker-连不上-provider) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
 | agents.json 配置过时/缺 tokenBudget | [§7.5](#75-agentsjson-配置漂移) |
-| claude-code worker 看不到用户级 skills | [§7.13](#713-claude-code-worker-看不到用户级-skills临时-claude_config_dirtd-221) |
+| claude-code worker 看不到用户级 skills | [§7.13](#713-claude-code-worker-看不到用户级-skills临时-claude_config_dir) |
 | 不确定环境是否就绪 | [§7.6 wao doctor](#76-wao-doctor-体检) |
 | run completed 但 messages 空 / 无 assistant text | [§7.7 证据链断链](#77-worker-输出证据为空但-run-completed证据链断链高危) |
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
@@ -43,7 +43,7 @@
 | 交付验证报 `command_timeout` 但单独复跑很快（原因未明，处置见 §8.1） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明) |
 | 验证在排队等待 / 想查同机验证闸持有者或残留租约 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明)（`runs gate` 只读查询） |
 | 主仓根全量尾部 runs-guard RED（套件期间出现新 runs/ 条目） | [§8.2](#82-主仓根跑全量前确认无活跃-workerdaemonruns-guard-红灯td-134) |
-| `npm test` 某波长时间不动 / 尾部 `watchdog backstop fired` 或 crashReason=watchdog_timeout | [§8.3](#83-npm-test-波次挂死或长滞td-165-看门狗分诊) |
+| `npm test` 某波长时间不动 / 尾部 `watchdog backstop fired` 或 crashReason=watchdog_timeout | [§8.3](#83-npm-test-波次挂死或长滞看门狗分诊) |
 
 ## delivery 失败模式 → 正确工具（闭集查表）
 
@@ -167,7 +167,7 @@ serve 后台进程不一定。
   ```
 - **修复**：把值写进 User 作用域（或当前进程 env）并核对名字与 registry 声明一致，然后直接重派。只有宿主进程自身直接消费该 env 的场景（不经控制面桥接拉起的进程）才需要重启宿主或写进 shell profile。
 
-### 1.7 `run_continue` 返回 `no_provider_session`（Kimi/Codex continuable 父 run；TD-188）
+### 1.7 `run_continue` 返回 `no_provider_session`（Kimi/Codex continuable 父 run）
 
 - **症状**：对一个 kimi-code/codex 后端的终态 continuable delivery 调 `run_continue`，被 `no_provider_session` 拒绝；或复用 resume 派发在 runner 侧以固定文案拒绝（"recorded only the process placeholder identity (proc_<pid>)"）。
 - **根因（按形状分）**：
@@ -269,7 +269,7 @@ serve 后台进程不一定。
 
 ---
 
-### 4.4 worker 中途死亡，worktree 半成品抢救（手工配方，Owner 2026-09-18 裁定 4C）
+### 4.4 worker 中途死亡，worktree 半成品抢救（手工配方）
 
 worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktree 可能留有有价值 WIP。**先分两类**：
 
@@ -288,7 +288,7 @@ git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
 
 边界：本配方是**人工采纳**，不自动接受任何 WIP；价值判断完全归 Lead。**归档/清理历史 runs 前的固定步骤 = 确认无可抢救 WIP**。
 
-### 4.5 run 无声悬置后被宿主 +3600s 收尸（短命宿主派发形态，2026-10-04）
+### 4.5 run 无声悬置后被宿主 +3600s 收尸（短命宿主派发形态）
 
 - **症状**：从**短命宿主会话**（headless `zcode -p`、一次性脚本）经插件 MCP 派发后，run
   停在早期事件零进展；转录 mtime 恰好停在**派发+3600s**；无 run.error、无 .owner 心跳
@@ -394,7 +394,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   usage 稳定（serve 在 abort 后可能延迟一小段时间才回填，单次读会出现假 0），取累计
   metrics；读不到回退 message.info.tokens
 
-### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"（TD-113 + round4 F-2 关单）
+### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"
 
 - **症状**：worker 长时间写同一文件时，状态摘要停留在同一文件名；长静默 CPU 段零新事件，
   无法区分"在算"与"断了"。
@@ -460,9 +460,9 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 7.1 claude-code wrapper 401（worker 连不上 provider）
 
-- **症状**：coder_hq/coder_low/researcher（claude-code wrapper 路径）报 `401 Invalid authentication credentials` / `身份验证失败`
+- **症状**：走 claude-code provider wrapper 的车道（模板里没有这种车道，自建时才会遇到）报 `401 Invalid authentication credentials` / `身份验证失败`
 - **根因 A：provider key 没进 Lead runtime env**。wrapper 用 `ANTHROPIC_AUTH_TOKEN` 注入认证，它读的是 `process.env.<KEY_ENV>`（如 ZHIPU_API_KEY）。如果 Lead runtime 进程没继承这个 env（key 在 User registry 但没进 runtime 的 env），wrapper 拿不到 key → 401。
-- **根因 B：claude-code OAuth 登录态覆盖 provider key**。当 `~/.claude/.credentials.json` 含 `claudeAiOauth` 时，claude-code 可能优先用 OAuth accessToken，忽略 wrapper 注入的 `ANTHROPIC_AUTH_TOKEN`，把 Claude OAuth token 发到 DeepSeek/ZHIPU base URL → 401。wrapper 给 provider worker 设置独立的 `CLAUDE_CONFIG_DIR`（`.wao-worker-claude-config/`），隔离用户 `~/.claude`，provider worker 读不到 Claude OAuth 凭证；auditor 不走 wrapper，仍使用官方 Claude OAuth。
+- **根因 B：claude-code OAuth 登录态覆盖 provider key**。当 `~/.claude/.credentials.json` 含 `claudeAiOauth` 时，claude-code 可能优先用 OAuth accessToken，忽略 wrapper 注入的 `ANTHROPIC_AUTH_TOKEN`，把 Claude OAuth token 发到 DeepSeek/ZHIPU base URL → 401。wrapper 给 provider worker 设置独立的 `CLAUDE_CONFIG_DIR`（`.wao-worker-claude-config/`），隔离用户 `~/.claude`，provider worker 读不到 Claude OAuth 凭证；`opus` 车道不走 wrapper，使用官方 Claude OAuth。
 - **验证**：`npm run cli -- wao doctor` 会查 key 是否在 env。或手动 `echo $ZHIPU_API_KEY`。若 key 存在但 provider worker 仍 401，检查 transcript 的 provider error；OAuth 覆盖类问题通常表现为 token tail 与 provider key tail 不一致。
 - **修复**：确保 key 在 User registry（`[System.Environment]::SetEnvironmentVariable('ZHIPU_API_KEY','<val>','User')`），重启 runtime 让它继承。不要把 `~/.claude/.credentials.json` 复制到 `.wao-worker-claude-config/`。
 
@@ -472,10 +472,10 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **根因**：DeepSeek anthropic 端点只认 `deepseek-v4-flash` / `deepseek-v4-pro`，variant 不是 model id 的一部分
 - **修复**：variant=max 用 `--effort max`（映射到 `CLAUDE_CODE_EFFORT_LEVEL` env），**不要**塞进 model id
 
-### 7.3 auditor（claude-code Opus）401
+### 7.3 opus 车道（claude-code 官方通道）401
 
-- **症状**：auditor worker 报 401
-- **根因**：auditor 用官方 Claude（不走 wrapper），需要 claude-code 自己的认证（`claude login` 或 API key），不是 provider key
+- **症状**：`opus` 车道的运行报 401
+- **根因**：`opus` 车道用官方 Claude（不走 wrapper），需要 claude-code 自己的认证（`claude login` 或 API key），不是 provider key
 - **修复**：`claude login` 完成官方认证
 
 ### 7.4 worker 在错误目录干活
@@ -487,9 +487,9 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.5 agents.json 配置漂移
 
 - **症状**：worker 用了过时的配置（旧 worker 名、缺 tokenBudget、backend 不认）
-- **根因**：agents.json 没和 team-roles.md 同步，或用了旧版配置
+- **根因**：agents.json 没跟上入库模板 `config/agents.example.json`，或沿用了旧版配置
 - **验证**：`npm run cli -- registry validate --registry config/agents.json` 检查所有 worker。opencode worker 必须有 tokenBudget
-- **修复**：对照 `docs/team-roles.md` 更新 agents.json，重跑 registry validate
+- **修复**：对照 `config/agents.example.json` 更新 agents.json，重跑 registry validate
 
 ### 7.6 wao doctor 体检
 
@@ -547,13 +547,13 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
 - **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。
 
-### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR，TD-221）
+### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
 - **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为（实现与动机见 src/backends/claudeCode.js 头注释）。
 - **逃生门**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
 
-### 7.14 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥，TD-229）
+### 7.14 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥）
 
 - **症状**：native 车道启动即 `OAuth session expired and could not be refreshed`，重新登录只管几小时；`~/.claude/.credentials.json` 周期性被清空。
 - **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录。
@@ -595,7 +595,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **前置确认（运维规程）**：**主仓根跑全量前确认无活跃 worker/daemon**（`runs dashboard` / 活跃 run 检查）。交付 worktree 管道天然免疫（worktree 无 `runs/` ⇒ 空基线）。
 - **状态**：根修（进程归属或隔离 run-dir）待真实痛点再立项。
 
-### 8.3 `npm test` 波次挂死或长滞（TD-165 看门狗分诊）
+### 8.3 `npm test` 波次挂死或长滞（看门狗分诊）
 
 - **症状**：全量在某波长时间无进展；stderr 每 5 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。三层看门狗把无限等待变成有界等待，并指名肇事文件/波。
 - **三层防线（预算：per-test 1200s / 波级兜底 1800s / 告警 900s）**：
@@ -612,7 +612,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **kill 环节自身挂住**：看门狗对 `killTreeFn` 设 10s 期限竞速（`KILL_TREE_DEADLINE_MS`）——taskkill 异常不返回时到期放弃等待、照常进探针环节（stderr 出现 `killTree did not return within ...ms — proceeding to liveness probes`），探针决定死活，看门狗自己绝不做无限等待。
 - **后备：手工二分（适用于单文件复跑）**：拿到肇事文件后 `node scripts/wao-node.cjs --test test/<file>` 单发复跑确认仍挂；再在该文件内二分（注释后半部测试）定位具体挂死用例。
 
-### 8.4 session reuse 关联面拒绝时的运维处置（ADR-0031 §3.6 / TD-175，2026-09-21）
+### 8.4 session reuse 关联面拒绝时的运维处置（ADR-0031 §3.6）
 
 - **症状**：一次本应"复用上次会话"的派发被**拒**，文案属于固定四类（槽位存在但损坏 / 前任无可寻址 session id / 前任转录不可读 / runner 未拿到 id——四类全文与判定细则的单一权威是 `src/application/sessionReuse.js` 常量，ADR-0031 §3.6）。
 - **这是刻意的 fail-closed**：ADR-0031 §3.6 要求"缺失/损坏时**拒绝**恢复，绝不静默新建会话"。看到拒绝**不要**当成故障去绕——静默新会话正是这条契约要防的。

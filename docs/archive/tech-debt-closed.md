@@ -90,3 +90,4 @@
 | TD-275 | kimi 偶发把最终答案发成两段相同的文本帧，WAO 按帧拼接后答案重复 | kimi-web 后端略去与上一帧逐字相同的长文本帧，并在事件流里说明略去了几帧（会审链路批次）。真实的重复帧是偶发的，修复后还没有再遇到 |
 | TD-282 | 会审或运行超过等待窗口（上限 10 分钟）后没有「继续等」的出口；席位全文和过长的最终回答要调用方自己分页拼接 | 扇出后即落组记录并报出 consultId；新增 `consult wait`；`consult show --seat --out` 与 `collect --final --out` 把全文写进文件（会审链路批次）。等待上限仍是 10 分钟，改为可反复等待 |
 | TD-269 | MCP 的 run_consult 改为使用绑定的工作区后，还没有在不提供 roots 的宿主上做过真实调用 | 按桌面端的注册方式在项目外启动服务、客户端不提供 roots：未绑定时派发前拒绝；workspace_select 后一席会审完成，记录落在项目的 .wao/runs/consults，席位在项目的工作树里运行（consult_20261014045643074g0h222） |
+| TD-177 | 使用手册以外的现行文档正文仍夹着过程历史 | architecture、certification-runbook、troubleshooting、ssot、team-roles、milestone-discipline、AGENT_ONBOARDING、smoke-guide 与模块页逐份改写为现状描述（两个文档批次），architecture 与 troubleshooting 的字节上限随体量下调；配置注释的同类问题见 TD-295 |

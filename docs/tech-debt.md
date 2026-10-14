@@ -15,7 +15,7 @@
 | TD-16 | 真实 CLI smoke 依赖真实 API、登录与费用，刻意不进 npm test、CI 不跑 | 设计性约束 | 涉及外部系统的 milestone 收尾必跑 smoke | docs/milestone-discipline.md |
 | TD-29 | 大 DAG 的 completedResults Map 占用内存，无流式或分页机制 | 开放 | 实际遇到大 DAG 时做流式/分页 |  |
 | TD-31 | workflow 脚本具备完全 JS 能力，风险与 npm script 同级，属刻意接受 | 设计性约束 | 文档标注即可，无需代码修复 |  |
-| TD-34 | 文档守卫里还有一批只钉历史收尾文字的测试（某文档必须出现某句话），被钉的文字因此删不掉、挪不动 | 开放 | 文档体系下一步：按清单逐条退役，写明由什么接续保护 | 0076 test/isolation-infra/docs-consistency.test.js |
+| TD-34 | 文档守卫有两类遗留：一批测试只钉历史收尾文字（某文档必须出现某句话），被钉的文字因此删不掉、挪不动；使用手册的检查读地图加全部页的拼接，不知道自己保护的是哪一页 | 开放 | 文档体系下一步：按清单逐条退役钉历史的断言，写明由什么接续保护；手册检查改为只读它保护的那一页 | 0076 test/isolation-infra/docs-consistency.test.js |
 | TD-41 | abort 测试在全量高负载下偶发失败，缺确定性的子进程退出因果判定 | 开放 | 再次稳定复现时改用 child exit 事件建立因果 |  |
 | TD-45 | daemon 自愈已落地，但 supervisor 自身被杀后无法自动重启 | 开放 | supervisor 重生引导（Windows 服务/计划任务）留 v2 | src/daemonSupervisor.js |
 | TD-46 | daemon 长跑累积子进程残留与句柄泄漏的根因未修，仅监控告警就位 | 开放 | 更长时长/更高负载触发 health warn 后针对性修 |  |
@@ -61,7 +61,6 @@
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | 开放 | 未定 | 0062 |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 未定 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
-| TD-177 | 使用手册已改写为现状描述（约 222KB）；architecture（约 134KB，顶在字节上限上）、certification-runbook、troubleshooting、ssot 的正文仍夹着过程历史 | 开放 | 文档体系下一步：同样逐份改写为现状描述，再按新体量下调上限 | 0076 |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
 | TD-180 | codex 后端间歇性启动期死亡、零写入零 verdict，根因仍未查明；Owner 已裁定不做自动重试 | 开放 | 未定 | 0067 docs/troubleshooting.md |
@@ -118,9 +117,11 @@
 | TD-285 | 用分支代码对真实车道做验证没有成文做法，注册表和运行目录各自临时处理，证据容易落在临时目录 | 开放 | 版本可见性批次 |  |
 | TD-286 | MCP 工具面的 hostVisible（约 22KB）没有测试守着，description 与 wire 只有冻结线和硬顶；不支持延迟加载工具的宿主每个会话都付这笔上下文 | 开放 | 版本可见性批次：给 hostVisible 加冻结线，按决定 0078 的手段减量 | 0078 test/mcp-surface/m12-10-tool-surface.test.js |
 | TD-287 | 三个偶发失败的测试：mcpBind 的 P0-1R-TXN-04、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时 | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js |
-| TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号 | 开放 | 小摩擦批次 | src/cliHelp.js |
+| TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号；`run` 的帮助行漏了 `--lane` / `--role` / `--explain` / `--tag` 等实际可用的参数，生成层 `docs/surface/cli.md` 因此也没有 | 开放 | 小摩擦批次 | src/cliHelp.js src/commands/run.js |
 | TD-289 | MCP 工具 run_delivery_review_bundle 的描述写 waitMs「省略 = 即时快照」，实际省略时等 270 秒（DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS） | 开放 | 版本可见性批次，与工具描述瘦身（TD-286）同做 | src/mcp/server.js docs/surface/mcp-tools.md |
 | TD-290 | 配置键 portRange（config/default.json 与 src/cli.js 的缺省值）没有任何消费者，端口分配器从未接入（已了结的 TD-23） | 开放 | 小摩擦批次：删键，或接入后写明用途 | config/default.json src/cli.js |
 | TD-291 | zcode 车道额度耗尽时 transcript 里没有任何额度或限流信号，WAO 只报 turn stalled，诊断落成 no_effect 或 provider_auth；Lead 看不出该等额度恢复还是该重派 | 开放 | 车道批次：查 zcode 侧能否拿到额度错误，拿不到就在诊断里如实写"上游无响应" | src/backends/zcode.js src/diagnosis.js |
-| TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境 | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
+| TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境。已见两次（run_20261014092633812jgm07h、run_20261014100010561p9ukkz）；Lead 事后在原工作树用同一输入重做打包检查都通过，但没有留下记录，原因未查明（疑为 worker 收尾时的 git 命令还占着 index.lock） | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
 | TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |
+| TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
+| TD-295 | 配置文件的 `_comment` 字段仍夹着决定号、批次号、TD 号与日期，入库模板 `config/agents.example.json` 会被用户整份复制；其中部分措辞被文档守卫钉着 | 开放 | 文档体系下一步：逐个文件改写为现状描述，钉历史措辞的断言随之退役 | 0076 config/ |

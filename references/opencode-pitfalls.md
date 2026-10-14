@@ -1,8 +1,7 @@
 # opencode-serve Pitfalls（可选 lane，按需读）
 
-> opencode 已全线降级为可选 lane（06-18 事故后，主力切进程式 claude-code/kimi-code）。
-> 本文件只在你要用 opencode worker 时读。主力路径（claude-code/kimi-code 进程式）不涉及这些坑。
-> 来自 SKILL.md 原文（2026-06-24 移出，progressive disclosure）。
+> opencode 是可选 lane，入库模板里没有 opencode 车道。
+> 本文件只在你要用 opencode worker 时读；进程式车道不涉及这些坑。
 
 ## 1. providerID 必须匹配 opencode 注册的 provider 名
 
@@ -20,7 +19,7 @@ Wrong: `"providerID": "deepseek-coding-plan"` → 401。Correct: `"providerID": 
 
 DeepSeek-v4-flash 回答后无限生成确认轮（不设 time.completed）。默认 snapshot-stable 模式下 WAO 轮询到 waitTimeout，期间 serve 端无限烧 token。配 `completionMode: "first-stable"`：首条含非空 text 的 assistant message 即完成 + abort。
 
-**Abort verification**：stop 与 `_runCleanup` 都会在 abort 后联合观察 session status 与 token/message 稳定性（TD-37/TD-38）。观察不可用或仍 active 都只报告 unverified + 告警；WAO 不自动全局 taskkill 其他 OpenCode session，必要的整机止血由 Human Owner 明确执行。
+**Abort verification**：stop 与 `_runCleanup` 都会在 abort 后联合观察 session status 与 token/message 稳定性。观察不可用或仍 active 都只报告 unverified + 告警；WAO 不自动全局 taskkill 其他 OpenCode session，必要的整机止血由 Human Owner 明确执行。
 
 **必配 tokenBudget**：opencode agent 加 `"tokenBudget": <number>` + `"tokenBudgetMultiplier": <number>`（默认 100）。超限即 failed + abort + 告警。唯一不依赖 abort 生效的防线。
 

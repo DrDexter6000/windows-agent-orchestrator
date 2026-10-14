@@ -1,6 +1,6 @@
 # isolation.js 使用说明
 
-> 对应源码：`src/isolation.js`（里程碑 M3-1）
+> 对应源码：`src/isolation.js`
 
 ## 模块职责
 

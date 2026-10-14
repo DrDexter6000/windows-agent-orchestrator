@@ -2,7 +2,7 @@
 // Fixture unit tests for the classifiers + real-state assertions for this repo.
 // Class-A facts (branch refs, worktree registry) live in the common git dir, so
 // these checks observe identical state from the main repo and any worktree —
-// unlike class-B filesystem state which stays in `npm run hygiene` (R23-D §7).
+// unlike class-B filesystem state which stays in `npm run hygiene` (docs/milestone-discipline.md §7).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";

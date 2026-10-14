@@ -11,7 +11,7 @@
 
 ### Node 为什么必须 v22
 
-WAO 进程式 backend（claude-code / codex / kimi-code / deepseek-harness / deepseek-acp）的"进程死即会话死"隔离，依赖 Node 自 v18+ 内置的 Windows Job Object：父进程退出，OS 自动杀掉全部子进程树。Node v24 上这个内置机制回归（会误杀长进程），v23 非 LTS，其余 major 未经认证，所以守卫只放行 v22。cli / daemon / background-runner 入口在启动时硬拒绝 v22 以外的一切版本（`help` / `version` 例外），并指引切 v22。为什么见决定 0013。
+WAO 进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）的"进程死即会话死"隔离，依赖 Node 自 v18+ 内置的 Windows Job Object：父进程退出，OS 自动杀掉全部子进程树。Node v24 上这个内置机制回归（会误杀长进程），v23 非 LTS，其余 major 未经认证，所以守卫只放行 v22。cli / daemon / background-runner 入口在启动时硬拒绝 v22 以外的一切版本（`help` / `version` 例外），并指引切 v22。为什么见决定 0013。
 
 - v24 上启动会看到 `WAO 拒绝启动：Node v24.x 被拒绝：v24 has a libuv Windows Job Object regression ... 请用 v22`，exit 1。
 - `npm test`、`npm run cli` 等 npm scripts 经 `scripts/wao-node.cjs` 启动器自动选 v22：先看 env `WAO_NODE`，再找共享安装 `%LOCALAPPDATA%\Programs\nodejs-v22\node.exe`，最后探测 PATH 上的 node 并经守卫判定。开发 WAO 时怎么跑测试见 `docs/testing.md`。

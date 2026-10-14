@@ -68,14 +68,14 @@ runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
 `runs wait` 与 MCP `run_wait` 工具共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附 `semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；等待期间 Ctrl-C 会打印中断时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）；非数字值（如 `--wait-ms abc`）在 CLI 层即以固定文案 `--wait-ms must be a number` 拒绝（不回显原值，service 不被调用）。`runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
-工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve，cwd 是远端目录提示）两层一致豁免。两层都拦：前台执行通道（`run` 前台、workflow agent 节点、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
+工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve、kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、workflow agent 节点、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
 ## 场景 2b：上游空窗期的派发活性重试
 
 上游间歇空窗期派发会秒败空跑（约 30s 零产出）；`scripts/dispatch-with-liveness.mjs` 把"派发→观察→查活性→退避重派"循环脚本化：
 
 ```powershell
-node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent glm-pro --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
+node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent glm-pro --prompt-file task.md --cwd D:\proj\x -- --isolate
 ```
 
 重派谓词三条件同时满足才重派；退出码如实：真完成（completed 且非空跑）=0，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：
@@ -137,7 +137,7 @@ retry 的 per-dispatch 覆盖继承（任务文本 runId 绑定取法、继承�
 
 参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。输入是 strict schema（拒绝额外字段）；schema 未列的一切（`registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout、`isolate` 等）都是 server-owned 配置，模型不能传。
 
-角色合同自动注入：Lead 只写具体任务 prompt，无需复制角色说明，也无需切换到 WAO 仓库目录。WAO 根据 registry 中 agent 声明的 `systemPrompt`（指向 `config/roles/*.md` 角色契约），用共享加载器（`roleContract.js`）验证并以 runtime-native 方式恰好一次注入 worker——claude-code 用 `--append-system-prompt <内容>`，codex 用 `-c developer_instructions`，kimi-code 用固定分隔组合 role+task，OpenCode 1.18+ 用 message API 原生 `system` 字段且 task 仍只在 user text part 出现一次。相对 `systemPrompt` 由加载器相对 WAO 安装根解析（不依赖调用者 cwd），从外部项目目录调用也能找到全局角色文件。是否支持注入由 backend 能力声明（`supportsRoleContract === true`）严格判定；能力值非严格 true 时，配了 `systemPrompt` 会在 start（创建 transcript 前）/ resume（读取既有 transcript 后、append/spawn 前）fail-closed。WAO 不把角色合同保存为 `prompt.sent` / 控制面输入——transcript 只持久化原始 task prompt（worker 输出可能在回答中引用或复述角色，这由模型决定）。Lead/model 不能通过 `run_dispatch` 覆盖角色（strict schema 不接受 `systemPrompt` / `roleContract` / `rolePath`）。
+角色合同自动注入：Lead 只写具体任务 prompt，无需复制角色说明，也无需切换到 WAO 仓库目录。角色在派发时选择：CLI 写 `run --lane <车道> --role <角色>`，MCP `run_dispatch` 给 `lane` + `role`；这一形式与 `agentId` 二选一，混用以 `dispatch_selector_invalid` 拒绝。合同取自角色库 `config/roles/<角色>.md`。只给 `agentId` 时：它若是车道别名（`config/lanes.json` 的 `aliases`），按别名声明的角色取合同；否则沿用该 registry 条目的 `systemPrompt`。入库的别名表为空，模板条目也不带 `systemPrompt`，所以按车道名派发不注入角色合同。WAO 用共享加载器（`roleContract.js`）验证合同，按各 backend 的原生通道恰好一次注入 worker；各 backend 的注入方式见生成层 `docs/surface/certification.md`（supportsRoleContract 一列与条件说明）。相对路径由加载器相对 WAO 安装根解析（不依赖调用者 cwd），从外部项目目录调用也能找到角色文件。是否支持注入由 backend 能力声明（`supportsRoleContract === true`）严格判定；能力值非严格 true 时，请求了角色或配了 `systemPrompt` 的派发会在 start（创建 transcript 前）/ resume（读取既有 transcript 后、append/spawn 前）fail-closed。WAO 不把角色合同保存为 `prompt.sent` / 控制面输入——transcript 只持久化原始 task prompt（worker 输出可能在回答中引用或复述角色，这由模型决定）。Lead/model 不能通过 `run_dispatch` 覆盖角色（strict schema 不接受 `systemPrompt` / `roleContract` / `rolePath`）。
 
 Kimi K3 模型策略：registry 用结构化 `model.id` 与 `reasoning.effort` 表达每个 worker 的模型策略。`kimi-code/k3` 的 `low` / `high` / `max` effort 由 backend 编译为仅对子进程生效的 `KIMI_MODEL_THINKING_EFFORT`；WAO 不修改全局 Kimi 配置，也不接受同名 `agent.env` 作为第二权威。K3 的上下文上限来自 Kimi Code 模型目录（当前 1M），不是 WAO 的进程级 override，因此 registry 不重复声明 `model.contextWindow`。
 

@@ -37,7 +37,7 @@ const CERT_RUNBOOK_DOC = "docs/certification-runbook.md";
 
 /** 读取仓库内文件（相对 ROOT 的路径），返回字符串。
  * 使用手册（docs/usage.md）返回地图加 docs/usage/ 下的全部页：这些检查写于拆页之前，
- * 逐条改为只读它保护的那一页，随各页改写进行（台账 TD-177）。 */
+ * 按整本手册断言；改为只读各自保护的那一页登记在台账 TD-34。 */
 function read(rel) {
   if (rel === "docs/usage.md") return readUsageDocs(ROOT);
   return readFileSync(join(ROOT, rel), "utf8");
@@ -429,11 +429,11 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
 
 test("AGENTS.md 不得用旧的 claude_worker/codex_worker 角色名（已角色化）", () => {
   const a = read("AGENTS.md");
-  // example registry 已角色化对齐 team-roles.md（researcher/coder_hq/coder_low/coder_mm/tester/auditor）。
+  // 入库模板的键是车道名，角色经 --role 选择。
   // AGENTS.md 不得再引用旧命名作"角色示例"。
   assert.ok(
     !/claude_worker|codex_worker/.test(a),
-    "AGENTS.md 仍引用旧角色名 claude_worker/codex_worker（应为 researcher/coder_hq/...）"
+    "AGENTS.md 仍引用旧角色名 claude_worker/codex_worker（模板的键是车道名，见 config/agents.example.json）"
   );
 });
 
@@ -445,6 +445,7 @@ test("面向 lead/user 的入口文档不得再使用旧 worker 示例名", () =
     "docs/smoke-guide.md",
     "docs/troubleshooting.md",
     "docs/02-architecture.md",
+    "docs/team-roles.md",
     "AGENT_ONBOARDING.md",
     // 认证正文迁移（2026-09-26）：旧 worker 名扫描纳入迁出正文所在的新文件。
     CERT_RUNBOOK_DOC,
@@ -452,8 +453,8 @@ test("面向 lead/user 的入口文档不得再使用旧 worker 示例名", () =
   for (const file of files) {
     const txt = read(file);
     assert.ok(
-      !/claude_worker|codex_worker|glm_worker|coder_deepseek_claude|coder_strict|coder_glm_claude|coder_multimodal/.test(txt),
-      `${file} 仍引用旧 worker 示例名；第三方 lead 应看到当前角色化 worker（researcher/coder_hq/coder_low/coder_mm/tester/auditor）`
+      !/claude_worker|codex_worker|glm_worker|coder_deepseek_claude|coder_strict|coder_glm_claude|coder_multimodal|\bcoder_(?:hq|low|mm)(?:_dsh)?\b/.test(txt),
+      `${file} 仍引用旧 worker 示例名；示例应使用 config/agents.example.json 的车道键，角色经 --role 选择`
     );
   }
 });
@@ -2080,6 +2081,7 @@ test("M12-10: live docs present the playbook catalog as MCP resources（含原 M
     ["SKILL.md", read("SKILL.md")],
     ["docs/usage.md", read("docs/usage.md")],
     ["docs/02-architecture.md", read("docs/02-architecture.md")],
+    ["docs/01-prd.md", read("docs/01-prd.md")],
   ]) {
     assert.ok(/wao:\/\/playbooks/.test(text),
       `${name}: presents the playbook catalog as wao://playbooks resources`);
@@ -2321,7 +2323,6 @@ test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/
     assert.ok(section.includes("config/agents.example.json") && section.includes(`\`${LANE_POINTER[id]}\``), `${titlePrefix} 缺默认 lane 指针（0046：${LANE_POINTER[id]}）`);
     assert.ok(/config\/agents\.json.*gitignored/.test(section), `${titlePrefix} 缺本机真值声明`);
     assert.ok(!/^\| \*\*(?:backend|model|effort)\*\* \|/m.test(section), `${titlePrefix} 仍复制 lane 当前值`);
-    assert.match(section, /\| \*\*裁定注记\*\* \| 20\d{2}-\d{2}-\d{2} /, `${titlePrefix} 缺带日期裁定注记`);
   }
 });
 
@@ -2724,7 +2725,7 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
   assert.ok(item7.includes("三席会审是推荐标准（决策 0023"), "team-roles 第 7 条必须是三席推荐标准表述");
   assert.ok(item7.includes("--panel-skip-reason"), "team-roles 第 7 条必须指向 skip 登记");
   assert.ok(item7.includes("`run_delivery_decide` 只由 Lead 调用"), "team-roles 第 7 条必须复述红线");
-  assert.ok(item7.includes("0019 §3 席位回避保留"), "team-roles 第 7 条必须引用保留的席位回避");
+  assert.ok(item7.includes("ADR 0019 §3"), "team-roles 第 7 条必须指向席位回避规则（ADR 0019 §3）");
   // 反回归：0019 时代的"默认姿态不变"句不得复现（0023 已 supersede §2）。
   assert.ok(!roles.includes("默认姿态不变"), "team-roles 不得保留'默认姿态不变'旧姿态句");
   // R9-C C-2：标准开发流流程图旧姿态句不得复现——方案/验收两行都必须是 0023

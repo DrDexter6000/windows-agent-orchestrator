@@ -1,6 +1,6 @@
 # PortAllocator
 
-> 模块：`src/portAllocator.js` · 里程碑：M3-2 · 状态：仅分配记账，不探测 bind
+> 模块：`src/portAllocator.js` · 状态：仅分配记账，不探测 bind
 
 ## 模块职责
 

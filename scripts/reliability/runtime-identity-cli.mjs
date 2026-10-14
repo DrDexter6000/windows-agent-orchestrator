@@ -10,7 +10,7 @@
 // 语义：
 //   - 结果恒 JSON 打到 stdout；unknown 是合法结果，exit 0（与组件层 honest unknown
 //     同纪律——探测失败是要记录的事实，不是命令失败）。
-//   - 不读默认 registry（环境读取面纪律 R23-D：读 live 配置必须显式 --registry）。
+//   - 不读默认 registry（环境读取面纪律见 docs/milestone-discipline.md §7：读 live 配置必须显式 --registry）。
 //     无 --registry 时 agent=null，走描述符 fallback（PATH 级身份）。
 //   - --registry 时取该 backend 的首个席位作 anchor，并消费 backend 的
 //     resolveInvocationPrefix（与 component-check 同源——探测与真实 run 同入口）。
