@@ -29,5 +29,5 @@
 - [docs/certification-runbook.md](docs/certification-runbook.md): certification operations authority (two-tier verification, delta procedure, upstream-primitive refresh SOP).
 - [docs/smoke-guide.md](docs/smoke-guide.md): real smoke-test operations (consumes tokens).
 - [docs/milestone-discipline.md](docs/milestone-discipline.md): milestone/release gate discipline (how work is verified and closed).
-- [docs/roadmap.md](docs/roadmap.md): milestones, progress, governance triggers.
+- [docs/roadmap.md](docs/roadmap.md): milestones and their status; the full roadmap before 2026-10-14 is archived under docs/archive/.
 - [docs/tech-debt.md](docs/tech-debt.md): registered tech debt with revisit triggers.

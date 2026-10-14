@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/measure-mcp-surface.mjs
 //
-// Post-M12 candidate 测量轮（roadmap「MCP Host-visible 上下文测量与渐进披露审计」，
+// Post-M12 candidate 测量轮（预算与红线见决定 0078「MCP 工具面的上下文预算、扩面前提与红线」，
 // 2026-10-03 Owner 批准激活）：对生产 stdio server 做**无损测量**，产出三类预算的
 // 确定性基线数据——零面变更、零依赖新增（AGENTS 不变式 5）。
 //
@@ -13,7 +13,7 @@
 //   enumDuplication —— 跨 schema 重复枚举数组的字节量（候选 3 的靶子）
 //
 // token 估算方法声明：repo 历史冻结基线 75,965 bytes ≈ 18,372 o200k tokens
-// （roadmap M12-16 轮），隐含比率 ≈ 4.14 bytes/token——本脚本沿用同一比率外推，
+// （M12-16 轮，见 docs/archive/roadmap-2026-10-14.md），隐含比率 ≈ 4.14 bytes/token——本脚本沿用同一比率外推，
 // 估算值仅供排序参考；真实分词器计数留给宿主活探针轮。
 //
 // 用法：node scripts/wao-node.cjs scripts/measure-mcp-surface.mjs [--json]

@@ -1,7 +1,7 @@
 # PRD：Windows Agent Orchestrator
 
 > 状态：✅ 目标与边界已确认。本文定义 WAO 的产品目标、非目标和验收语义。
-> 当前实现进度与测试数的权威来源是 `docs/roadmap.md`；runtime/model 可派发性以 `runs/reliability-summary.json` 为准。
+> 里程碑进度的权威来源是 `docs/roadmap.md`；runtime/model 可派发性以 `runs/reliability-summary.json` 为准。
 > 技术实现细节见 `docs/02-architecture.md`。
 
 ## 0. 产品定义
@@ -72,7 +72,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 | **次要** | 想要可脚本化/CI 驱动的 agent 编排、且排斥重 GUI 的 power user；任意 MCP-capable Agent Runtime 可作为 Lead host 接入 WAO |
 | **非目标** | 企业团队、云用户、GUI-first 用户、需要细粒度多人协作的场景 |
 
-> 企业/团队部署是**带明确前置条件的潜在第二阶段**（前置条件：credential broker / 强隔离，见 `docs/tech-debt.md` TD-104），当前不是目标用户；Windows-native 定位表述见 `docs/roadmap.md` 治理触发条件节（与本文共同构成契约层口径）。
+> 企业/团队部署是**带明确前置条件的潜在第二阶段**（前置条件：credential broker / 强隔离，见 `docs/tech-debt.md` TD-104），当前不是目标用户；Windows-native 定位与不排期 POSIX lane 见本文 §4。
 
 ## 3. 目标（成功长什么样）
 
@@ -85,6 +85,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 ## 4. 非目标（明确不做）
 
 - ❌ GUI / kanban 看板（headless 优先，未来可由独立 client 叠加）
+- ❌ POSIX lane：Windows-native 是差异化定位，不是待偿还的移植债。重看的条件是出现明确的外部 POSIX 需求或第二位需要 POSIX 的贡献者，且 Windows 侧的差异化体验已经固化；改判由 Owner 定。
 - ❌ 云服务 / 远程调度
 - ❌ agent reasoning framework（不实现推理循环、不自己做 LLM 调用、不自动做语义任务分解）
 - ❌ 接管 host runtime 的全局 MCP 配置、provider 配置或认证系统
@@ -206,7 +207,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 4. **隔离**：不同 run 用不同 worktree，进程互不残留（有 cleanup 钩子）。
 5. **可观测**：`runs metrics` 能给出 token / 时长 / 成功率聚合。
 6. **测试全绿**：`npm test` 通过，覆盖状态机、恢复、多 backend。
-7. **实际跑通**：在真实外部项目上完成至少一次真实的多 agent 并行开发任务（完成事实与具体 runId/commit 见 `docs/roadmap.md` M10 行；delivery 仅在 WAO 侧验证，未集成进目标项目）。
+7. **实际跑通**：在真实外部项目上完成至少一次真实的多 agent 并行开发任务（完成事实与具体 runId/commit 见 `docs/archive/roadmap-2026-10-14.md` 的 M10 行；delivery 仅在 WAO 侧验证，未集成进目标项目）。
 
 ## 9. 风险与缓解
 

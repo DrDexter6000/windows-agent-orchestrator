@@ -47,7 +47,7 @@ milestone 标记 ✅ 前必须满足：
 2. 技术债审计完成（已修或已登记）
 3. `npm test` 全绿
 4. **涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿**
-5. 更新 `docs/roadmap.md` 进度表
+5. 更新 `docs/roadmap.md` 里程碑表
 6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（ADR 0034）
 
 ## 5. 不留技术债的原则

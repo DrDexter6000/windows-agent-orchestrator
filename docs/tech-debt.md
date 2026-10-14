@@ -61,7 +61,7 @@
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | 开放 | 未定 | 0062 |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 未定 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
-| TD-177 | 使用手册已改写为现状描述（约 222KB）；architecture（约 134KB，顶在字节上限上）、roadmap、certification-runbook、troubleshooting、ssot 的正文仍夹着过程历史 | 开放 | 文档体系下一步：同样逐份改写为现状描述，再按新体量下调上限 | 0076 |
+| TD-177 | 使用手册已改写为现状描述（约 222KB）；architecture（约 134KB，顶在字节上限上）、certification-runbook、troubleshooting、ssot 的正文仍夹着过程历史 | 开放 | 文档体系下一步：同样逐份改写为现状描述，再按新体量下调上限 | 0076 |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
 | TD-180 | codex 后端间歇性启动期死亡、零写入零 verdict，根因仍未查明；Owner 已裁定不做自动重试 | 开放 | 未定 | 0067 docs/troubleshooting.md |
@@ -116,7 +116,7 @@
 | TD-283 | 车道画像里的「暂勿派发」只是展示文字，派发和会审选席时不出现 | 开放 | 车道批次 | config/lane-traits.json |
 | TD-284 | Lead 看不出 MCP 服务进程加载的是哪一版代码：合入后派发进程用新代码，服务进程仍是旧的，要重启宿主才一致 | 开放 | 版本可见性批次 |  |
 | TD-285 | 用分支代码对真实车道做验证没有成文做法，注册表和运行目录各自临时处理，证据容易落在临时目录 | 开放 | 版本可见性批次 |  |
-| TD-286 | MCP 工具描述约 86KB 且每批在涨；不支持延迟加载工具的宿主每个会话都要付这笔上下文 | 开放 | 版本可见性批次 | test/mcp-surface/m12-10-tool-surface.test.js |
+| TD-286 | MCP 工具面的 hostVisible（约 22KB）没有测试守着，description 与 wire 只有冻结线和硬顶；不支持延迟加载工具的宿主每个会话都付这笔上下文 | 开放 | 版本可见性批次：给 hostVisible 加冻结线，按决定 0078 的手段减量 | 0078 test/mcp-surface/m12-10-tool-surface.test.js |
 | TD-287 | 三个偶发失败的测试：mcpBind 的 P0-1R-TXN-04、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时 | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js |
 | TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号 | 开放 | 小摩擦批次 | src/cliHelp.js |
 | TD-289 | MCP 工具 run_delivery_review_bundle 的描述写 waitMs「省略 = 即时快照」，实际省略时等 270 秒（DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS） | 开放 | 版本可见性批次，与工具描述瘦身（TD-286）同做 | src/mcp/server.js docs/surface/mcp-tools.md |

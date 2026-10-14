@@ -17,7 +17,7 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 | action id | 行动面 | 必读文件 / 入口 |
 |---|---|---|
 | `repo-change` | 开发 agent 修改代码或文档 | `docs/02-architecture.md`、`docs/roadmap.md`、`docs/ssot.md`、`docs/milestone-discipline.md`、`docs/testing.md`、`docs/usage.md`、`docs/troubleshooting.md`、`docs/surface/`、`SKILL.md`（后四项只在影响对应操作/surface/WAO 操作时读） |
-| `m12-containment` | 改 mechanical-containment 产品边界 | `docs/01-prd.md`、`docs/02-architecture.md`、`docs/roadmap.md`、`README.md`、`SKILL.md`、`.wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md` |
+| `m12-containment` | 改 mechanical-containment 产品边界 | `docs/01-prd.md`、`docs/02-architecture.md`、`README.md`、`SKILL.md`、`.wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md` |
 | `contract-edit` | 写当前接口、模型、状态、角色、技术债或进度 | `docs/01-prd.md`、`docs/02-architecture.md`、`docs/team-roles.md`、`docs/tech-debt.md`、`docs/roadmap.md`、`AGENTS.md`、`SKILL.md` |
 | `user-first-use` | 第三方 / 用户 agent 首次接入 | `README.md`、`AGENT_ONBOARDING.md`、`llms.txt`、`mcp bind` 输出 |
 | `user-config` | 第三方 / 用户 agent 配置 | `AGENT_ONBOARDING.md`、`config/agents.example.json`、`wao doctor` 输出、`mcp bind` 输出 |

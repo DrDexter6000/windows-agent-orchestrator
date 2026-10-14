@@ -102,7 +102,6 @@ function assertRequiredTranscriptEvents(archEvents, usageEvents) {
 const EXPECTED_M12_AUTHORITY_PATHS = Object.freeze([
   "docs/01-prd.md",
   "docs/02-architecture.md",
-  "docs/roadmap.md",
   "README.md",
   "SKILL.md",
   ".wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md",
@@ -425,7 +424,7 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
   for (const rel of tier1Paths("m12-containment"))
     assert.ok(existsSync(join(ROOT, rel)), `m12-containment tier-1 路径不存在：${rel}`);
   assert.deepEqual(M12_AUTHORITY_PATHS, EXPECTED_M12_AUTHORITY_PATHS,
-    "m12-containment tier-1 行必须精确保留五份 live authority + ADR-0018；删、增、换序都应红");
+    "m12-containment tier-1 行必须精确保留四份 live authority + ADR-0018；删、增、换序都应红");
 });
 
 test("AGENTS.md 不得用旧的 claude_worker/codex_worker 角色名（已角色化）", () => {
@@ -628,17 +627,14 @@ test("opencode stop 安全边界不得保留 TD-37/TD-38 修复前的陈旧文�
   );
 });
 
-test("M7/M8/M9 当前状态不得在活文档里回退为未开始或旧测试基线", () => {
+test("已完成的里程碑（M0–M13）在 roadmap 里不回退；ssot 不留旧测试基线", () => {
   const roadmap = read("docs/roadmap.md");
-  const progress = roadmap.split("## 进度跟踪")[1] ?? "";
-  assert.ok(/\| M7 \| ✅/.test(progress),
-    "roadmap.md 进度跟踪里的 M7 行必须显示已完成");
-  assert.ok(/archive\/m7-phases\.md/.test(progress),
-    "roadmap.md M7 行必须指向已归档的 docs/archive/m7-phases.md");
-  assert.ok(/M8/.test(roadmap) && /✅/.test(roadmap),
-    "roadmap.md 必须反映 M8 已完成的当前状态");
-  assert.ok(/\| M9 \| ✅ 完成/.test(progress),
-    "roadmap.md M9 行必须显示已完成");
+  const table = roadmap.split("## 里程碑")[1] ?? "";
+  // 已完成的里程碑不回退：M0–M13 每一行都必须在表里且显示已完成。
+  for (let i = 0; i <= 13; i += 1) {
+    const row = table.split("\n").find((l) => l.startsWith(`| M${i} |`)) ?? "";
+    assert.ok(/✅ 完成 \|$/.test(row), `roadmap.md 里程碑表的 M${i} 行必须显示已完成`);
+  }
 
   const ssot = read("docs/ssot.md");
   for (const stale of ["当前 39 个 md", "npm test 372", "15 条断言", "15 assertions"]) {
@@ -873,7 +869,7 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
 test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
   const caps = {
     "docs/02-architecture.md": 133845, // baseline 121677
-    "docs/roadmap.md": 119468,        // baseline 108607
+    "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
     "docs/usage.md": 226300,          // 地图加 docs/usage/ 全部页的合计；改写为现状描述后约 222KB，上限留约 2%
     // Owner 2026-10-12 许可提升上限（"允许文档提升上限"）：排障手册离 +10% 帽只剩
     // 1 字节，决定 0067 的两条排障条目加不进去——本条提到基线 +20%。其余三份未动。
@@ -952,7 +948,7 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
 test("M10 closeout: roadmap 中 M10 恰好一个 ✅ 完成", () => {
   const roadmap = read("docs/roadmap.md");
   const lines = roadmap.split("\n");
-  // 进度跟踪表里 | M10 | 行必须标 ✅ 完成
+  // 里程碑表里 | M10 | 行必须标 ✅ 完成
   const m10Rows = lines.filter((l) => /^\|\s*M10\b/.test(l));
   assert.ok(m10Rows.length >= 1, "roadmap 必须有 M10 进度行");
   const completedM10 = m10Rows.filter((l) => /✅\s*完成/.test(l));
@@ -1010,15 +1006,11 @@ test("M10 closeout: PRD 不声称 Adaptive Playbooks 当前已经提供（属 M1
 
 test("M10 closeout: roadmap 当前总览/完成定义不再用'无人值守'作为 M7 产品目标", () => {
   const roadmap = read("docs/roadmap.md");
-  // 总览行 M7 不得用"无人值守"作为标题
-  const m7Overview = roadmap.split("\n").find((l) => /^M7\s/.test(l));
-  assert.ok(m7Overview, "roadmap 总览必须有 M7 行");
-  assert.ok(!/无人值守/.test(m7Overview), "roadmap M7 总览行不得再用'无人值守'作产品目标标题");
-  // 完成定义表 M7 行不得承诺"无人值守工作流跑数小时失败自动处理"
+  // 里程碑表 M7 行不得用"无人值守"作产品目标，也不得承诺"无人值守工作流跑数小时失败自动处理"
   const m7Def = roadmap.split("\n").filter((l) => /^\|\s*M7\b/.test(l));
-  assert.ok(m7Def.length >= 1, "roadmap 完成定义必须有 M7 行");
+  assert.ok(m7Def.length >= 1, "roadmap 里程碑表必须有 M7 行");
   for (const l of m7Def) {
-    assert.ok(!/无人值守工作流跑数小时|失败自动处理或通知/.test(l),
+    assert.ok(!/无人值守/.test(l) && !/失败自动处理或通知/.test(l),
       "roadmap M7 完成定义不得承诺'无人值守工作流/失败自动处理'");
   }
 });
@@ -1042,7 +1034,7 @@ test("M10 closeout: roadmap 不出现 'unattended or multi-tenant release' / cre
 test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adaptive Playbooks 行，标为已完成（M12-0 关闭 M11）", () => {
   const roadmap = read("docs/roadmap.md");
   const lines = roadmap.split("\n");
-  // 进度跟踪表里 | M11 | 行
+  // 里程碑表里 | M11 | 行
   const m11Rows = lines.filter((l) => /^\|\s*M11\b/.test(l));
   assert.equal(m11Rows.length, 1, `roadmap 必须恰好一个 M11 进度行；实际 ${m11Rows.length}`);
   const m11Row = m11Rows[0];
@@ -1052,17 +1044,6 @@ test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adapt
   // 名称必须含两个核心（Lead Experience + Adaptive Playbooks 或同义）
   assert.ok(/Lead Experience/.test(m11Row) && /Adaptive Playbooks|playbook|template/i.test(m11Row),
     "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
-});
-
-test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary (M11 now closed complete by M12-0)", () => {
-  const roadmap = read("docs/roadmap.md");
-  const m11Row = roadmap.split("\n").find((line) => /^\| M11 \|/.test(line));
-  assert.ok(m11Row, "roadmap has an M11 row");
-  assert.match(m11Row, /M11-10 Delivery Readiness Handshake 已交付并通过 fresh Lead canary/);
-  assert.match(m11Row, /run_20260726093455485nl8l84/);
-  assert.match(m11Row, /delivery `df8bf65`/);
-  assert.match(m11Row, /唯一一次 `run_delivery\(waitMs\)` 返回 `reviewable` \+ verification passed，acceptance accepted/);
-  assert.match(m11Row, /\| M11 \| ✅ 完成 \|/);
 });
 
 test("M11-11A-RED-03: Lead identity states the full human-owned operating contract", () => {
@@ -1287,37 +1268,13 @@ test("M11-2C-06: architecture 明确 Catalog ≠ WorkflowEngine（分离）", ()
     "architecture 明确 Catalog 与 WorkflowEngine 分离");
 });
 
-test("M11-2C-07/M12 closeout: roadmap 标 M11-2 complete，M11/M12 均已关闭", () => {
-  const roadmap = read("docs/roadmap.md");
-  // M11-2 必须被标记为完成（或已交付）。
-  assert.ok(/M11-2.*完成|M11-2.*complete|M11-2.*✅|M11-2.*已交付|M11-2.*done/i.test(roadmap),
-    "roadmap 标记 M11-2 完成");
-  // M12-0 关闭 M11：M11 整体行已标 ✅ 完成（不再要求进行中）。
-  const m11RowPattern = /\|\s*M11\s*\|[^|]*\|/g;
-  const m11Rows = roadmap.match(m11RowPattern) || [];
-  const m11Aggregate = m11Rows.join(" ");
-  assert.ok(/M11.*✅\s*完成/.test(m11Aggregate),
-    "roadmap M11 整体行已标 ✅ 完成（M12-0 关闭 M11）");
-  // M12 进度行必须存在且已关闭；不要误取完成定义表中的 M12 行。
-  const m12Row = roadmap.split("\n").find((l) =>
-    /^\|\s*M12\s*\|/.test(l) && /Lead Token Efficiency/.test(l)) || "";
-  assert.ok(m12Row, "roadmap 必须有 M12 行（M12-0 产品合同重置）");
-  assert.ok(/✅.*完成/.test(m12Row), "roadmap M12 行必须标为 ✅ 完成");
-});
-
-test("M12-1 S1/S2: roadmap and README record implemented inventory + model-free repackage truth", () => {
-  const roadmap = read("docs/roadmap.md");
+test("M12-1 S1/S2: README records implemented inventory + model-free repackage truth", () => {
   const readme = read("README.md");
-  for (const [name, text] of [["roadmap", roadmap], ["README", readme]]) {
+  for (const [name, text] of [["README", readme]]) {
     assert.ok(/candidateInventory/.test(text), `${name} 必须记录 candidateInventory 已实现`);
     assert.ok(/run_delivery_repackage/.test(text), `${name} 必须记录 model-free repackage 已实现`);
     assert.ok(/不重调模型|model-free/i.test(text), `${name} 必须说明不重新调用 worker model`);
   }
-  const m12Row = roadmap.split("\n").find((line) =>
-    /^\|\s*M12\s*\|/.test(line) && /Lead Token Efficiency/.test(line)) || "";
-  assert.ok(/M12-1 S1\/S2 已实现/.test(m12Row), "roadmap M12 行必须标记 S1/S2 已实现");
-  assert.ok(!/planned\/unimplemented slices only/.test(m12Row),
-    "roadmap 不得再把全部 M12 slice 描述为未实现");
 });
 
 test("M11-2C-08: usage 含 playbook 的 MCP resources 与 CLI 两种只读入口", () => {
@@ -1545,8 +1502,7 @@ test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（
 test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
   const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
-  const roadmap = read("docs/roadmap.md");
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
     // The NONEXISTENT nested shape (delivery.verification.executionProfileId) must
     // never be documented — it does not exist in the run_dispatch input schema.
     assert.ok(!/verification\.executionProfileId/i.test(text),
@@ -1554,8 +1510,8 @@ test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline v
   }
   // TD-166（2026-09-19）守卫迁移：SKILL.md 重构为路由+指针后，executionProfileId
   // 顶层形状 / verificationCommands / contractValid 不预评清单属字段 schema 细节——
-  // 权威承载改为 usage.md + roadmap.md（SKILL 经指针指路，不再复制 schema 正文）。
-  for (const [name, text] of [["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
+  // 权威承载是使用手册（SKILL 经指针指路，不再复制 schema 正文）。
+  for (const [name, text] of [["docs/usage.md", usage]]) {
     // executionProfileId is a top-level run_dispatch input, sibling of delivery.
     assert.ok(/top-level|顶层|同级/i.test(text),
       `${name} 必须把 executionProfileId 记为顶层（与 delivery 同级）`);
@@ -1572,43 +1528,9 @@ test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline v
   // The contract check shares the INPUT SCHEMA (not "Zod"), and the service does
   // not import a validation library. Regression guard for the stale "共享输入 Zod"
   // wording that wrongly attributed a Zod import to the service.
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
     assert.ok(!/共享输入 Zod/.test(text), `${name} 不得再用过时的"共享输入 Zod"措辞`);
   }
-});
-
-test("M12-9 roadmap records durable decisions, exact-artifact truth, and Fresh Host release acceptance", () => {
-  const roadmap = read("docs/roadmap.md");
-  assert.ok(!/M12-9 已实现（本地，待 Lead 验收）/.test(roadmap),
-    "roadmap 不得保留已经过时的待 Lead 验收状态");
-  assert.ok(/run_20260802214029613xyobfm/.test(roadmap)
-    && /run_20260802221931019rlzegp/.test(roadmap)
-    && /run_20260802230308130x7tuh1/.test(roadmap),
-    "roadmap 必须绑定最终 M12-9 root/child/reviewer runId");
-  assert.ok(/a58aa73376044a167d2776a4f3bc33b44b4ed75a/.test(roadmap)
-    && /durable accepted/.test(roadmap)
-    && /durable rejected/.test(roadmap),
-    "roadmap 必须记录最终 child delivery 与 Lead 的 accepted/rejected 决策");
-  // Old attempts are historical implementation inputs, not the final acceptance
-  // truth. The roadmap must pin both original and effective verification facts:
-  // the 300-second timeout remains visible, and the unchanged artifact's audited
-  // tooling-invalid reverify is the effective passed outcome.
-  assert.ok(!/BLOCKED_CANONICAL_GATE/.test(roadmap)
-    && !/175 pass/.test(roadmap)
-    && !/17\/17/.test(roadmap),
-    "roadmap 不得保留旧的非绿 canonical 尝试作为当前验收事实");
-  assert.ok(!/本地隔离候选|发布门待修复|隔离集成为|主 checkout 的并发修改/.test(roadmap),
-    "roadmap 不得保留旧候选/base 隔离或'发布门待修复'作为当前事实（已按 Lead 修正重集成到当前 main）");
-  assert.ok(/originalVerificationStatus:failed/.test(roadmap)
-    && /effectiveVerificationStatus:passed/.test(roadmap)
-    && /tooling_invalid/.test(roadmap)
-    && /同一已提交 artifact/.test(roadmap),
-    "roadmap 必须同时保留原超时与同一 artifact 审计重验通过的真相");
-  assert.ok(/c3e9e5304a26515086ea9fad3f2b6e6f1f6a7654/.test(roadmap)
-    && /23 个 MCP tools/.test(roadmap)
-    && /profile_inline_conflict/.test(roadmap)
-    && /PASS_M12_9_FRESH_HOST_CONTRACT_AND_OUTCOME_ACCEPTANCE/.test(roadmap),
-    "roadmap 必须记录精确发布 SHA、Fresh Host 工具面、合同冲突证据与最终 verdict");
 });
 
 // ============================================================
@@ -1665,45 +1587,10 @@ test("M11-3D1: Lead 在 decision 前逐文件逐页 review，并把 fragment 当
     "usage 记录 artifact trust marker 与 prompt injection 边界");
 });
 
-test("M11-3D: 本地 Git fallback 只用于不可用 review，roadmap 记录 fresh Lead dogfood PASS", () => {
+test("M11-3D: 本地 Git fallback 只用于不可用 review", () => {
   const skill = read("SKILL.md");
-  const roadmap = read("docs/roadmap.md");
   assert.ok(/fallback only when review returns `available:false`.*`binary` or `diff_too_large`/i.test(skill),
     "SKILL 将本地只读 Git fallback 限于 binary/diff_too_large");
-  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
-  assert.ok(/M11-3.*A\/B\/C.*完成|M11-3A\/B\/C.*完成/i.test(m11Row),
-    "roadmap 标记 M11-3A/B/C 完成");
-  assert.ok(/M11-3D.*fresh Codex CLI Lead dogfood.*(PASS|已完成|已通过)/i.test(m11Row),
-    "roadmap 标记 M11-3D fresh Codex CLI Lead dogfood 已通过");
-  assert.ok(/run_20260721225501254ly42og|76039be/i.test(m11Row),
-    "roadmap 保留 M11-3D 最小证据锚点");
-  assert.ok(!/M11-3D.*dogfood.*(待完成|未完成|pending)/i.test(m11Row),
-    "roadmap 不再把 M11-3D dogfood 标为待完成");
-});
-
-// ============================================================
-// M11-2 real Lead dogfood SSOT guard (de-bloated).
-// One narrow guard: the M11-2 fresh Codex CLI Lead dogfood is recorded as
-// complete in the M11 row, with a durable evidence anchor, and the old "still
-// open" phrasing is gone. M11-overall-in-progress is already pinned by the
-// existing M11 mainline + M11-2C-07 guards, so it is not repeated here.
-// ============================================================
-
-test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, removed from open list", () => {
-  const roadmap = read("docs/roadmap.md");
-  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
-  assert.ok(m11Row, "roadmap 含 M11 行");
-  // (1) dogfood 标记为完成/PASS，并说明是 fresh Codex CLI Lead。
-  assert.ok(/dogfood.*(完成|PASS|通过).*fresh Codex CLI|fresh Codex CLI.*dogfood.*(完成|PASS|通过)/i.test(m11Row),
-    "roadmap 标记 fresh Codex CLI Lead dogfood 已完成/PASS");
-  // (2) 含一个最小证据锚点（runId 或短 delivery commit）。
-  assert.ok(/run_202607192128556114jk5v4|cc4bfda/i.test(m11Row),
-    "roadmap 含 runId 或短 delivery commit 作为证据锚点");
-  // (3) 旧开放项短语已从"仍开放"清单消失。
-  const openMatch = m11Row.match(/仍开放[^。]*。/);
-  const openList = openMatch ? openMatch[0] : "";
-  assert.ok(!/M11-2.*真实.*Lead.*dogfood|真实.*Lead.*dogfood/i.test(openList),
-    "roadmap '仍开放' 清单不再含旧短语 'M11-2 真实 Lead dogfood'");
 });
 
 // ============================================================
@@ -1712,9 +1599,6 @@ test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, r
 //   1. usage.md documents the cursor input + nextCursor output + safety.
 //   2. SKILL.md tells the Lead to follow nextCursor to null.
 //   3. architecture.md lists runCollectProjection.js as shared ownership.
-//   4. roadmap records M11-4 fresh Lead dogfood completed (this package's fact).
-// M11-overall-in-progress + TD-106 open/unique are pinned by existing
-// M11 mainline and M10 closeout guards — not repeated here.
 // ============================================================
 
 test("M11-4-DOC-01: usage 保留 run_collect 续读语义与零追加合同（cursor/nextCursor 字段由生成层承载）", () => {
@@ -1760,39 +1644,6 @@ test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownersh
   // and MCP delegate to the same algorithm (no second projection).
   assert.ok(/runCollectProjection\.js[^。\n]*共享安全投影[^。\n]*无第二算法/.test(arch),
     "architecture states runCollectProjection.js is the single shared projection (CLI+MCP, no second algorithm)");
-});
-
-test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood completed", () => {
-  const roadmap = read("docs/roadmap.md");
-  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
-  assert.ok(m11Row, "roadmap 含 M11 行");
-  // M11-4 fresh Lead dogfood is recorded as complete.
-  assert.ok(/M11-4.*fresh.*Lead.*dogfood.*(完成|PASS|通过)|fresh.*Codex.*CLI.*Lead.*M11-4.*dogfood.*(完成|PASS|通过)/i.test(m11Row)
-    || /M11-4.*dogfood.*(PASS_WITH_HOST_FRICTION|完成|已通过)/i.test(m11Row),
-    "roadmap marks M11-4 fresh Lead dogfood complete");
-  // Verdict is PASS_WITH_HOST_FRICTION (not plain PASS — friction preserved).
-  assert.ok(/PASS_WITH_HOST_FRICTION/.test(m11Row),
-    "roadmap records M11-4 verdict as PASS_WITH_HOST_FRICTION (friction preserved)");
-  // Durable evidence anchor (runId).
-  assert.ok(/run_m114_fresh_lead_20260722/.test(m11Row),
-    "roadmap carries the M11-4 dogfood runId anchor");
-  // No stale "pending" / "待授权" / "待执行" phrasing for M11-4 dogfood.
-  assert.ok(!/M11-4.*dogfood.*待|M11-4.*fresh Lead dogfood.*待(授权|执行|验收)|fresh Lead dogfood.*待.*M11-4/i.test(m11Row),
-    "roadmap no longer marks M11-4 dogfood as pending");
-  // M11-overall-in-progress is pinned by the existing M11 mainline guard —
-  // not repeated here.
-});
-
-test("post-M12 runtime reliability closeout: TD-48/71/80 resolved, TD-106 non-goal, roadmap facts pinned", () => {
-  const roadmap = read("docs/roadmap.md");
-  assert.match(roadmap, /M12-23[^\n]*runtime reliability truth/i,
-    "roadmap must record the post-M12 runtime reliability package");
-  assert.match(roadmap, /run_20260813121845752xjmrki[^\n]*run_20260813121903407dgqn1a/,
-    "roadmap must pin the Auditor fresh/resume canary runIds");
-  assert.match(roadmap, /run_20260702142549160dfqmrt[^\n]*evidence_passed_backend_failed/,
-    "roadmap must pin the real legacy transcript replay result");
-  assert.match(roadmap, /run_20260813123526210jd19dv[^\n]*(rejected|拒绝)[^\n]*run_20260813130405682nt4f6t/,
-    "roadmap must preserve the rejected root delivery and continuation correction lineage");
 });
 
 // ===== M11-5 Package C: documentation truthfulness guards =====
@@ -1902,7 +1753,7 @@ const M12_EN = "WAO monitors, never supervises; packages, never accepts; present
 // sentence in both Chinese and English. This is the single canonical statement of
 // the reset; paraphrases drift, so the exact strings are pinned.
 test("M12-0-01: tier-1 表声明的 authority paths 携带精确机械 containment 句（中+英逐字）", () => {
-  assert.equal(M12_AUTHORITY_PATHS.length, 6, "m12-containment 行应含五份 live authority docs + ADR-0018");
+  assert.equal(M12_AUTHORITY_PATHS.length, 5, "m12-containment 行应含四份 live authority docs + ADR-0018");
   for (const rel of M12_AUTHORITY_PATHS) {
     const text = read(rel);
     assert.ok(text.includes(M12_CN), `${rel} 缺精确中文 containment 句`);
@@ -1973,53 +1824,6 @@ test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 per
     "SKILL 不得再要求 Use only workers whose certification is certified");
   assert.ok(!/strict-dispatch|strict dispatch/i.test(skill),
     "SKILL 不得再使用 strict-dispatch 硬门框架");
-});
-
-// M12 closeout: M11 stays closed complete (Tester token efficiency retired/deferred
-// out of M11); M12's implemented slices remain recorded while unvalidated broader
-// cross-run aggregation is an explicit non-blocking candidate, not a completion gate.
-test("M12 closeout: roadmap 标 M11/M12 ✅ 完成；已实现 slices 保留且跨 run 聚合非阻塞", () => {
-  const roadmap = read("docs/roadmap.md");
-  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
-  assert.ok(m11Row, "roadmap 含 M11 行");
-  assert.ok(/✅\s*完成/.test(m11Row), "M11 行必须标为 ✅ 完成");
-  assert.ok(/Tester.*(?:token|context).*efficiency.*(退役|retire|defer|延后)/i.test(m11Row)
-    || /Tester.*efficiency.*(退役|retire|defer|延后)/i.test(m11Row),
-    "M11 行必须记录 Tester token efficiency retire/defer");
-  const m12Row = roadmap.split("\n").find((l) =>
-    /^\|\s*M12\s*\|/.test(l) && /Lead Token Efficiency/.test(l)) || "";
-  assert.ok(m12Row, "roadmap 必须有 M12 行");
-  assert.ok(/✅.*完成/.test(m12Row), "M12 行必须标为 ✅ 完成");
-  assert.ok(/M12-1 S1\/S2 已实现/.test(m12Row), "M12-1 S1/S2 必须标为已实现");
-  assert.ok(/candidateInventory/.test(m12Row), "M12-1 S1 candidateInventory 必须记录");
-  assert.ok(/run_delivery_repackage/.test(m12Row), "M12-1 S2 run_delivery_repackage 必须记录");
-  assert.ok(/M12-2A 已实现/.test(m12Row) && /run_collect/.test(m12Row),
-    "M12-2A compact run_collect 必须标为已实现");
-  assert.ok(/M12-3A\/B 已实现/.test(m12Row)
-    && /run_await_result/.test(m12Row)
-    && /run_delivery_review_bundle/.test(m12Row),
-  "M12-3A/B 两个组合工具必须标为已实现");
-  assert.ok(/M12-4A 已实现/.test(m12Row)
-    && /backend_failed/.test(m12Row)
-    && /run_delivery_repackage/.test(m12Row),
-  "M12-4A backend failure retained-candidate recovery 必须标为已实现");
-  // The deferred candidate is NARROWED (M12-9 closeout): bounded actionable
-  // failure facts (run_diagnose) and factual readiness projection (run_delivery)
-  // were already delivered, and M12-9 closes the single-snapshot bounded terminal
-  // outcome/handoff projection. Only the broader cross-run / historical
-  // evidence/handoff aggregation remains outside the completion definition. The
-  // stale wording that listed readiness/history projection as unimplemented must
-  // NOT reappear.
-  assert.ok(/evidence\/handoff aggregation/i.test(m12Row),
-    "M12 非阻塞候选：仅更广的 evidence/handoff aggregation");
-  assert.ok(/run_diagnose/.test(m12Row) && /bounded actionable failure facts/i.test(m12Row),
-    "M12 必须把 bounded actionable failure facts 归于已交付（run_diagnose）");
-  assert.ok(/run_delivery/.test(m12Row) && /readiness\s*投影|readiness\s*projection/i.test(m12Row),
-    "M12 必须把 factual readiness 投影归于已交付（run_delivery）");
-  assert.ok(/bounded terminal outcome\/handoff\s*投影|terminal outcome\/handoff\s*projection/i.test(m12Row),
-    "M12-9 收口单快照 bounded terminal outcome/handoff 投影");
-  assert.ok(/移出 M12 完成定义|非阻塞候选/.test(m12Row),
-    "M12 必须明确跨 run 聚合不是完成门槛");
 });
 
 test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decision authority", () => {
@@ -2333,71 +2137,6 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
     "SKILL frames availableDrilldowns as progressive disclosure");
   assert.ok(/never auto-call|does not auto-call|不自动调用|不自动 call/i.test(skill),
     "SKILL states drilldowns never auto-call");
-});
-
-test("M12-10 closeout: roadmap records the released 21-tool Fresh Host truth", () => {
-  const roadmap = read("docs/roadmap.md");
-  const m12Row = roadmap.split("\n").find((line) =>
-    line.startsWith("| M12 |") && /Lead Token Efficiency/.test(line)) ?? "";
-  assert.match(m12Row, /M12-10.*Fresh Host.*21/s,
-    "M12 row must include the M12-10 Fresh Host release and current 21-tool truth");
-  assert.doesNotMatch(m12Row, /当前 MCP 工具数升至 23/,
-    "M12 row must not retain the pre-M12-10 current tool-count claim");
-  assert.match(roadmap, /PASS_M12_10_FRESH_HOST_PROGRESSIVE_DISCLOSURE/,
-    "roadmap must record the M12-10 Fresh Host verdict");
-});
-
-test("M12-11 closeout: roadmap records local unified wait and termination truth", () => {
-  const roadmap = read("docs/roadmap.md");
-  assert.match(roadmap, /PASS_M12_11_LOCAL_UNIFIED_WAIT_TERMINATION_SEMANTICS/,
-    "roadmap must record the M12-11 local-candidate verdict");
-  assert.match(roadmap, /PASS_M12_11_12_FRESH_HOST_SELF_DESCRIBING_WAIT_RESULTS/,
-    "roadmap must record the superseding M12-11/12 Fresh Host verdict");
-  assert.match(roadmap, /run_20260803180538526wqiofq/,
-    "roadmap records the M12-11 root run");
-  assert.match(roadmap, /run_20260803191330702am48mx/,
-    "roadmap records the accepted correction run");
-  assert.match(roadmap, /canonical `181\/181`/,
-    "roadmap records the frozen-candidate canonical result");
-  assert.match(roadmap, /durable `run\.timed_out`[^;；]*才投影 `execution_deadline`/,
-    "roadmap binds execution_deadline to a durable same-run timeout event");
-});
-
-test("M12-12 closeout: roadmap records local self-describing result truth", () => {
-  const roadmap = read("docs/roadmap.md");
-  assert.match(roadmap, /PASS_M12_12_LOCAL_SELF_DESCRIBING_RESULTS/,
-    "roadmap must record the M12-12 local-candidate verdict");
-  assert.match(roadmap, /`run_wait`、`run_await_result`、`run_delivery`、`run_diagnose`[\s\S]*`semanticNotes`/,
-    "roadmap records the four self-describing result surfaces");
-  assert.match(roadmap, /工具面仍为 \*\*21\*\*[\s\S]*69031 bytes[\s\S]*71495 bytes[\s\S]*75492 bytes/,
-    "roadmap records the honest wire-size comparison without changing the tool count");
-  assert.match(roadmap, /run_20260803200250648hhmiex[\s\S]*durable rejected[\s\S]*run_20260803205951066j3txpq[\s\S]*durable accepted/,
-    "roadmap records the rejected root and accepted same-session correction");
-  assert.match(roadmap, /本段只记录本地候选，尚未发布或完成 Fresh Host 验收/,
-    "roadmap retains the frozen local-candidate evidence as history");
-  assert.match(roadmap, /main@dc981ca3e4088ad2bbc1e00040d37ad61fa0f95f[\s\S]*精确 \*\*21 个 MCP tools\*\*[\s\S]*wao:\/\/semantics\/delivery\.verification_passed/,
-    "roadmap records the released SHA, Fresh Host tool count, and semantic detail resource proof");
-  assert.match(roadmap, /canonical `182\/182` files、0 fail/,
-    "roadmap records the frozen-candidate canonical result");
-});
-
-test("M12 closeout: roadmap marks the milestone complete and records the current Fresh Host truth", () => {
-  const roadmap = read("docs/roadmap.md");
-  const overviewRows = roadmap.split("\n").filter((line) => /^M12 Lead Token Efficiency/.test(line));
-  const progressRows = roadmap.split("\n").filter((line) =>
-    /^\| M12 \|/.test(line) && /Lead Token Efficiency/.test(line));
-
-  assert.equal(overviewRows.length, 1, "roadmap has exactly one M12 overview row");
-  assert.match(overviewRows[0], /✅ complete/, "M12 overview is complete");
-  assert.equal(progressRows.length, 1, "roadmap has exactly one M12 progress row");
-  assert.match(progressRows[0], /^\| M12 \| ✅ 完成 \|/, "M12 progress row is complete");
-  assert.doesNotMatch(progressRows[0], /🔧 进行中|planned\/unimplemented slices only/,
-    "M12 progress row has no stale in-progress wording");
-  assert.match(progressRows[0], /跨 run \/ 历史 evidence\/handoff aggregation.*移出 M12 完成定义/,
-    "unvalidated cross-run aggregation remains a non-blocking candidate");
-  assert.match(roadmap, /main@8a4f5335479cabdc77f046f86971a6b75ebed956/,
-    "roadmap records the current published Fresh Host SHA");
-  assert.match(roadmap, /PASS_M12_COMPLETE/, "roadmap records the M12 closeout verdict");
 });
 
 // ============================================================

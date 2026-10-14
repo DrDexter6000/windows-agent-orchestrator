@@ -89,7 +89,7 @@ worktree、base 与验证声明原地重检重验，不再调用 worker 模型�
 
 认证是关于 worker 已记录可靠性的 advisory 证据，不是派发许可门。两层验证、delta 认证
 规程与上游原语复核 SOP 见 [`docs/certification-runbook.md`](docs/certification-runbook.md)；
-每席实时状态：`npm run cli -- registry list`。里程碑史：[`docs/roadmap.md`](docs/roadmap.md)；
+每席实时状态：`npm run cli -- registry list`。里程碑：[`docs/roadmap.md`](docs/roadmap.md)；
 在册技术债：[`docs/tech-debt.md`](docs/tech-debt.md)。
 
 ## 快速开始
