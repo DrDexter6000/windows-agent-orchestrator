@@ -61,7 +61,7 @@
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | 开放 | 未定 | 0062 |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 未定 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
-| TD-177 | 使用手册已按任务拆成 docs/usage/ 下的十页，但各页正文仍夹着大量过程历史（行为变更日期、批次与编号），合计仍约 255KB；architecture 也顶在字节上限上 | 开放 | 文档体系下一步：逐页改写为现状描述，同时退役钉历史句子的测试（TD-34），再按新体量下调上限 | 0076 docs/usage.md |
+| TD-177 | 使用手册已改写为现状描述（约 222KB）；architecture（约 134KB，顶在字节上限上）、roadmap、certification-runbook、troubleshooting、ssot 的正文仍夹着过程历史 | 开放 | 文档体系下一步：同样逐份改写为现状描述，再按新体量下调上限 | 0076 |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
 | TD-180 | codex 后端间歇性启动期死亡、零写入零 verdict，根因仍未查明；Owner 已裁定不做自动重试 | 开放 | 未定 | 0067 docs/troubleshooting.md |
@@ -119,3 +119,5 @@
 | TD-286 | MCP 工具描述约 86KB 且每批在涨；不支持延迟加载工具的宿主每个会话都要付这笔上下文 | 开放 | 版本可见性批次 | test/mcp-surface/m12-10-tool-surface.test.js |
 | TD-287 | 三个偶发失败的测试：mcpBind 的 P0-1R-TXN-04、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时 | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js |
 | TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号 | 开放 | 小摩擦批次 | src/cliHelp.js |
+| TD-289 | MCP 工具 run_delivery_review_bundle 的描述写 waitMs「省略 = 即时快照」，实际省略时等 270 秒（DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS） | 开放 | 版本可见性批次，与工具描述瘦身（TD-286）同做 | src/mcp/server.js docs/surface/mcp-tools.md |
+| TD-290 | 配置键 portRange（config/default.json 与 src/cli.js 的缺省值）没有任何消费者，端口分配器从未接入（已了结的 TD-23） | 开放 | 小摩擦批次：删键，或接入后写明用途 | config/default.json src/cli.js |

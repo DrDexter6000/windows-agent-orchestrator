@@ -10,11 +10,11 @@ async function makeTempDir() {
   return mkdtemp(join(tmpdir(), "wao-dir-"));
 }
 
-test("S3-1: initWaoDir 创建 6 槽位 + 各 map.md（TD-91 加 pipeline）", async () => {
+test("S3-1: initWaoDir 创建 7 槽位 + 各 map.md（TD-91 加 pipeline）", async () => {
   const dir = await makeTempDir();
   try {
     await initWaoDir(dir);
-    // 6 个顶层槽位都存在
+    // 7 个顶层槽位都存在
     assert.ok(existsSync(join(dir, ".wao", "project.md")), "project.md 应存在");
     assert.ok(existsSync(join(dir, ".wao", "state")), "state/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "decisions")), "decisions/ 应存在");

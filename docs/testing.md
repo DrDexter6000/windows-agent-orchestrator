@@ -4,7 +4,7 @@
 
 ## 两种跑法
 
-- **全量**：`npm test`。`scripts/canonical-test.mjs` 按 `test/manifest.json` 把全部测试文件分波跑完，再把失败文件单独重跑一次做隔离判定。约 14 分钟。同一台机器上的全量与交付验证共用一把串行化闸，后到者排队，排队不计入任何预算（见[交付与验收](usage/delivery.md)场景 4b）。
+- **全量**：`npm test`。`scripts/canonical-test.mjs` 按 `test/manifest.json` 把全部测试文件分波跑完，再把失败文件单独重跑一次做隔离判定。约 14 分钟。每个测试文件在 manifest 里恰好归入一个资源组（pure / git / worktree / process / lock / timeout / mcp），运行器按组分波；单跑复核只给首轮失败加上 `stable_fail` / `isolation_pass` / `environment_invalid` 分类，不会把它改判为通过。结果写在 `test-results.json`：每个文件的 `durationMs`（文件内各测试耗时之和，不含模块加载）和复核条目的 `isolationDurationMs` 只作观测，缺失时为 `null`，不影响结论。同一台机器上的全量与交付验证共用一把串行化闸，后到者排队，排队不计入任何预算（见[交付与验收](usage/delivery.md)场景 4b）。
 - **定向**：`npm run test:one -- <测试文件…>`。它与全量用同一套子进程环境与超时，文件名拼错或匹配不到会直接失败。不用它而直接调 `node --test` 时，必须带 `--test-timeout=600000`，否则挂死的测试没有上限；子进程被版本守卫拒绝时设 `WAO_SKIP_VERSION_GUARD=1`。大批定向测试不要与全量同时在一台机器上跑。
 
 `npm run test:report` 是裸 `node --test`，不是验收证据。

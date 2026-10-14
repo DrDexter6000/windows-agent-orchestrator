@@ -2,11 +2,11 @@
  * .wao/ 目录管理（S3-1，阶段 3）。
  *
  * 定位：项目状态外化的物理基础。每个被 WAO 管理的项目有一个 .wao/ 目录，
- * 结构锁死为 6 个槽位（project/state/decisions/pipeline/handoff/runs，TD-91 起 pipeline 为第 6 槽）。
+ * 结构锁死为 7 个槽位（project.md/state/decisions/pipeline/handoff/runs/migration）。
  * agent 不直接建文件，通过 wao 命令读写，本模块提供底层目录操作。
  *
  * 三条铁律的物理保障：
- *   1. 只有 6 个顶层槽位（validateWaoDir 负向断言多余文件）
+ *   1. 只有这 7 个顶层槽位（validateWaoDir 负向断言多余文件）
  *   2. map.md 只放索引（waoDecisions/waoState 的写入命令保证）
  *   3. .wao/ 进 .gitignore（过程性，不进版本控制）
  */
@@ -14,8 +14,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// 锁死的 6 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
-// TD-91：pipeline/ 是第 6 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
+// 锁死的 7 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
+// TD-91：pipeline/ 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
 // 原先 STAGE/DECL 写进 decisions/（被 git 跟踪），实验声明和真实 ADR 混在一起污染版本库。
 // 0045 §4.2：migration=台账迁移证据包槽（.wao/migration/0045-ledger/，证据文件入库）。
 export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"];

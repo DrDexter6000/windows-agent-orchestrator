@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 // instead of hardcoding drifting literals.
 import { TOOLS } from "../../src/mcp/toolSurface.js";
 import { readUsageDocs, usagePageFiles } from "../_usageDocs.mjs";
+import { CONTINUE_REJECTION_REASONS } from "../../src/application/runContinue.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -873,7 +874,7 @@ test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
   const caps = {
     "docs/02-architecture.md": 133845, // baseline 121677
     "docs/roadmap.md": 119468,        // baseline 108607
-    "docs/usage.md": 259019,          // baseline 235471；地图加 docs/usage/ 全部页的合计
+    "docs/usage.md": 226300,          // 地图加 docs/usage/ 全部页的合计；改写为现状描述后约 222KB，上限留约 2%
     // Owner 2026-10-12 许可提升上限（"允许文档提升上限"）：排障手册离 +10% 帽只剩
     // 1 字节，决定 0067 的两条排障条目加不进去——本条提到基线 +20%。其余三份未动。
     "docs/troubleshooting.md": 71377, // baseline 59481
@@ -913,6 +914,16 @@ test("使用手册地图列出 docs/usage/ 下的每一页，列出的页都存�
       }
     }
   }
+});
+
+test("派发页列出的 run_continue 拒绝原因与代码闭集 CONTINUE_REJECTION_REASONS 一致", () => {
+  const line = readFileSync(join(ROOT, "docs/usage/dispatch.md"), "utf8").split("\n")
+    .find((l) => l.startsWith("资格检查（read-only"));
+  assert.ok(line, "docs/usage/dispatch.md 缺 run_continue 资格检查段");
+  for (const code of CONTINUE_REJECTION_REASONS) assert.ok(line.includes(`\`${code}\``), `派发页缺拒绝原因 ${code}`);
+  const snakeCodes = [...line.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map((m) => m[1]);
+  const unknown = snakeCodes.filter((code) => !CONTINUE_REJECTION_REASONS.includes(code));
+  assert.deepEqual(unknown, [], "派发页列了代码闭集里没有的拒绝原因");
 });
 
 test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () => {
@@ -2772,7 +2783,8 @@ test("ADR 0021: 冻结工具面五字段句已改分层表述（usage + architec
       !text.includes("`outputSchema`/`annotations` 固定且逐字节稳定"),
       `${rel} 不得再含旧五字段"固定且逐字节稳定"活契约句（ADR 0021 已改为分层表述）`
     );
-    // 正向锚：分层表述与减面指针必须在场。
+    // 正向锚只在权威处（architecture）检查：分层表述与减面指针必须在场。
+    if (rel !== "docs/02-architecture.md") continue;
     assert.ok(
       text.includes("字节稳定性**分层**（ADR 0021）"),
       `${rel} 缺正向锚"字节稳定性**分层**（ADR 0021）"`
@@ -3103,7 +3115,7 @@ test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（
   assert.ok(ob.includes("`·模板候选`"), "AGENT_ONBOARDING.md 必须点名模板候选尾标");
   assert.ok(ob.includes("`--apply` 仅适用模板候选行"), "AGENT_ONBOARDING.md 必须含 --apply 适用范围句");
   const usage = read("docs/usage.md");
-  assert.ok(usage.includes("双源展示（决策 0024）"), "docs/usage.md 配置节必须追加双源说明");
+  assert.ok(usage.includes("角色矩阵按双源展示"), "使用手册的配置说明必须写明角色矩阵按双源展示");
   assert.ok(usage.includes("`--apply` 仅适用模板候选行"), "docs/usage.md 必须含 --apply 适用范围句");
 });
 
@@ -3900,12 +3912,9 @@ const CERT_MIGRATION_IN_PLACE_HEADINGS = Object.freeze([
 
 /** usage §四 迁出段的具名导语（历史引用落点）——所在行必须同行携带单向链接。 */
 const CERT_MIGRATION_IN_PLACE_LEADS = Object.freeze([
-  "TD-111 certification advisory context",
-  "M11-7 凭据可用性",
-  "M12-6 FR-02 provider readiness 真相",
-  "行为变更（TD-131/TD-132 认证门收口",
-  "R10-A 单次模型覆盖（可选，`model`）",
-  "R11-1 单次推理力度覆盖（可选，`reasoning`）",
+  "认证与就绪字段的语义（`certificationReasonCode`",
+  "只派已认证车道（`--require-certified`）的完整门合同",
+  "单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则",
 ]);
 
 /** 纯函数：usage 原位标题段的链接可达性（0 命中/歧义/缺链接/目标节缺失必红）。 */
@@ -3979,7 +3988,7 @@ test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 us
   assert.throws(() => assertInPlaceCertPointer(usage, renamed, "delta 认证规程"),
     /0 命中/, "runbook 目标节改名必须红（单向链接悬空）");
   // 负对照 3——usage 原位标题被删（历史引用落点失联）→ 必红。
-  const noHeading = usage.replace("## delta 认证规程（lane 架构，ADR-0025 批次 3）\n", "");
+  const noHeading = usage.replace("## delta 认证规程\n", "");
   assert.notEqual(noHeading, usage, "夹具失效：删标题变异未生效");
   assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程"),
     /0 命中|歧义/, "usage 原位标题删除必须红（历史引用落点失联）");

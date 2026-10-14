@@ -66,7 +66,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | 文件 | 内容 |
 |------|------|
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
-| `docs/usage.md`、`docs/usage/*.md` | 使用手册：`docs/usage.md` 是页面地图，`docs/usage/` 下每页对应一项操作任务（部署、车道、宿主、派发、监督、取结果、交付、会审、维护）；`docs/usage/transcript.md` 是 architecture §3.2 事件 spec 的人读投影；命令/参数参考在生成层；认证操作正文在下一行的文件，手册里只留具名标题与单向链接 |
+| `docs/usage.md`、`docs/usage/*.md` | 使用手册：`docs/usage.md` 是页面地图，`docs/usage/` 下每页对应一项操作任务（部署、车道、宿主、派发、监督、取结果、交付、会审、维护）；`docs/usage/transcript.md` 是 architecture §3.2 事件 spec 的人读投影；`docs/usage/results.md` 维护尚无生成层的 CLI 查询命令 JSON 输出形状；命令/参数参考在生成层；认证操作正文在下一行的文件，手册里只留具名标题与单向链接 |
 | `docs/testing.md` | 开发 WAO 时何时跑全量、何时跑定向测试，worker 交付的验证命令怎么写 |
 | `docs/certification-runbook.md` | 认证操作正文唯一权威（`seat-certify` 阅读集合成员）：2026-09-26 自 `docs/usage.md` 文件级全文迁移——认证结果用于派发选择的边界、DSH 通道适用限制与能力交叉警告、接入新模型/新运行时、backend 能力对照表（TD-162 指针）、上游 harness 原语对照、认证与转录维护命令、delta 认证规程、五态与能力轴分层、单次派发覆盖（场景 1b/1c 含 MCP 特有规则）、retry 覆盖继承、认证与当前就绪；`docs/usage.md` 不保留第二份当前正文 |
 | `docs/surface/mcp-tools.md` `docs/surface/cli.md` `docs/surface/certification.md` | **生成参考层**：`mcp-tools.md`/`cli.md`（MCP 工具与 CLI 命令的参数/形状）权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；`certification.md`（backend 六轴能力与配置表达力四轴判定）权威源是 `src/backends/*.js` 类声明与 `validateAgentPolicy` 行为探针，由 `npm run gen:certification` 再生成。三者一律禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改对应权威源后须再生成并提交 |
