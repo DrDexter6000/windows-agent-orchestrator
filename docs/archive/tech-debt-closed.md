@@ -104,3 +104,7 @@
 | TD-285 | 用分支代码对真实车道做验证没有成文做法，证据容易落在临时目录 | `docs/testing.md`「用真实车道试用分支代码」写明做法：注册表指向主检出的私有注册表，运行目录用主检出的 `runs/`，MCP 面在工作树里起分支的服务 |
 | TD-286 | MCP 工具面的 hostVisible 没有测试守着 | `m12-10-tool-surface.test.js` 加了 hostVisible 冻结线（口径同测量脚本，决定 0078 修订）；23 条描述改为紧凑形，description 11510 → 10125 B，hostVisible 22084 → 20699 B |
 | TD-289 | run_delivery_review_bundle 的描述把省略 waitMs 写成即时快照，实际等 270 秒 | 描述写明省略时的默认等待，数值由常量插值；测试从描述取数，再与不带 waitMs 调用时的实际等待比对 |
+| TD-287 | 四处偶发失败的测试（mcpBind TXN-03/04、genSurfaceEntry、3B-C4、runManager TD-5） | mcpBind 是回滚时替换或删除文件遇 Windows 占用报 EPERM，改用 `src/atomicWriteSync.js` 有界重试（同 TD-71）；runManager 等待退出前汇合到期事实的写入；3B-C4 等子进程写完的信号；genSurfaceEntry 去掉整目录改名（未复现） |
+| TD-288 | 全局命令要写 `wao wao doctor`，帮助页一整屏夹内部编号，`run` 帮助行漏参数 | 顶层裸写的 wao 子命令直接执行（两侧名字不相交有测试）；帮助文本去掉内部编号、一条命令一行，`run` / `spawn` 列出实际参数 |
+| TD-290 | 配置键 portRange 没有任何消费者 | 从 `config/default.json` 与 `src/cli.js` 的缺省值里删掉 |
+| TD-300 | 安装根提示 `WAO_INSTALL_ROOT` 进了交付验证命令 | 交付验证（含 verify-commit）与验收脚本的环境剥掉它；worker 子进程环境是白名单，本来不含它；WAO 自己重新拉起的 runner、daemon 保留 |

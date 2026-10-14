@@ -76,7 +76,7 @@ cd D:\projects\windows-agent-orchestrator
 npm link
 ```
 
-此后顶层命令可直接运行，如 `wao dashboard`（见[维护](maintenance.md)的「Owner 本地只读看板」），不必 `cd` 进 WAO 仓库。只有顶层命令可用 `wao <command>` 形式；命令族下的嵌套命令（如 `wao doctor`）仍需 `npm run cli -- wao doctor`。
+此后可以从任意目录用全局 `wao <command>` 代替 `npm run cli -- <command>`（写法见[派发](dispatch.md)），例如 `wao dashboard`（见[维护](maintenance.md)的「Owner 本地只读看板」），不必 `cd` 进 WAO 仓库。
 
 经全局 `wao` 命令调用时，`config/default.json`、run 目录（`runs/`）与 agent registry（`config/`）从受信安装根（`npm link` 链接的这份 checkout）解析，而非当前目录。安装根由 `bin/wao.js` 自身位置（`import.meta.url`）派生，作为子进程 env（`WAO_INSTALL_ROOT`）传给 CLI 子进程：不经 argv、不拼 shell 字符串，并覆盖调用方任何同名值。因此 `--cwd` 仍只决定命令观察/过滤哪个 Git 项目；显式 `--run-dir` / `--registry` 覆盖照原样使用、不被重定位；`npm run cli -- ...`（不带该 env）保持从当前目录解析。
 

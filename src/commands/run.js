@@ -341,9 +341,10 @@ export async function spawnCommand(args, config) {
     }
     return;
   }
+  const prompt = await loadPrompt(options);
   const spawned = await Promise.all(agents.map((id) =>
     manager.start(id, {
-      prompt: options.prompt,
+      prompt,
       registry: options.registry,
       runDir: options.runDir,
       tags: options.tag,

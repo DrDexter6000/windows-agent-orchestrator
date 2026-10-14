@@ -260,10 +260,10 @@ export function renderHuman(r) {
       lines.push(`  - ${c.id}  (backend: ${c.backend ?? "?"}, model: ${c.model ?? "?"})`);
     }
     lines.push("");
-    // TD-260（0062 B8 记法）：规范形统一 npm run cli --（shim 形第二行注明）。
+    // TD-260（0062 B8 记法）：规范形统一 npm run cli --，第三行给全局 wao 的写法。
     lines.push("Re-run with: npm run cli -- wao onboarding --agent <id>          # preview");
     lines.push("            npm run cli -- wao onboarding --agent <id> --apply    # write config/agents.json");
-    lines.push("            (global shim form: wao wao onboarding --agent <id>)");
+    lines.push("            (global form: wao onboarding --agent <id>)");
 
     // R6-C: role matrix + current-environment fit (advisory). Rows are derived
     // from the template rows and the injected probe; the engine already sorted

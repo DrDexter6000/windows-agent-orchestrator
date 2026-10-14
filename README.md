@@ -125,7 +125,7 @@ upstream-primitive refresh SOP live in
 git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
 cd D:\projects\windows-agent-orchestrator
 npm ci            # install from the tracked package-lock (npm install works as a fallback)
-npm link          # optional, once per machine: exposes the top-level `wao` command (e.g. `wao dashboard`)
+npm link          # optional, once per machine: exposes the global `wao` command (e.g. `wao dashboard`)
 
 # 1. Configure the agent registry — start with ONE worker
 #    Automated path (recommended): generates a single-worker config/agents.json

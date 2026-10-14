@@ -592,6 +592,24 @@ test("P4-T4: requireAcceptance 脚本 exit 0 → passed（验收脚本通过）"
   }
 });
 
+test("requireAcceptance：验收脚本的环境不带安装根提示 WAO_INSTALL_ROOT", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-acceptance-env-"));
+  const saved = process.env.WAO_INSTALL_ROOT;
+  process.env.WAO_INSTALL_ROOT = dir;
+  try {
+    await writeFile(join(dir, "verify.mjs"), "process.exit(process.env.WAO_INSTALL_ROOT === undefined ? 0 : 1);\n");
+    const result = await checkScorecard({
+      events: [{ type: "run.completed" }], cwd: dir,
+      rules: { requireAcceptance: "verify.mjs" },
+    });
+    assert.equal(result.checks.find((c) => c.name === "acceptance").passed, true, "脚本看不到 WAO_INSTALL_ROOT");
+  } finally {
+    if (saved === undefined) delete process.env.WAO_INSTALL_ROOT;
+    else process.env.WAO_INSTALL_ROOT = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("P4-T4: requireAcceptance 脚本 exit≠0 → failed + detail 透传 stderr", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-acceptance-"));
   try {

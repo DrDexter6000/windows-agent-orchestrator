@@ -5,6 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertCommittedDeliveryRef, DeliveryError } from "./delivery.js";
+// 安装根提示的 env 名（bin/wao.js → CLI 子进程）；验证环境剥离它时不另抄字符串。
+import { INSTALL_ROOT_ENV } from "./installRoot.js";
 // R23-F/B Round B（TD-130）：同机验证串行化闸的 env 标记名 SSOT。verifyDelivery
 // 自身不进闸——只提供 opts.gate 缝与 HELD 注入；是否创建闸由调用方裁决
 // （createCallerGate）。
@@ -250,8 +252,12 @@ const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
   // （纵深防御：现消费方 nestedDispatchGuard 认 WAO_ALLOW_NESTED_DISPATCH
   // 逃生口，但未来新增消费方未必——verifier 是控制面工具，其测试子进程不该
   // 被当 worker 对待）。
+  // ③剥 WAO_INSTALL_ROOT 安装根提示。经全局 `wao` 派发的运行
+  // 会把它一路带进验证命令的环境；验证命令里起的 CLI 会因此读主检出的配置，
+  // 而不是交付工作树的。验证在 worktree 里跑，必须按 worktree 解析。
   const {
     [NESTED_WORKER_MARKER_ENV]: _strippedWorkerMarker,
+    [INSTALL_ROOT_ENV]: _strippedInstallRoot,
     ...envBase
   } = process.env;
   const deterministicEnv = {

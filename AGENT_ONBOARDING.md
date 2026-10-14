@@ -78,10 +78,10 @@ powershell -NoProfile -File install.ps1 -Uninstall   # runs/ .wao/ agents.json �
 git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git <WAO目录>
 cd <WAO目录>
 npm ci             # 按入库的 package-lock 精确安装；`npm install` 只在需要放宽版本时作回退
-npm link           # 可选，每台机器一次：暴露顶层 `wao` 命令（如 `wao dashboard`）
+npm link           # 可选，每台机器一次：暴露全局 `wao` 命令（如 `wao dashboard`）
 ```
 
-`npm link` 的作用范围：只提供**顶层** `wao` 命令（`wao dashboard` 这类单个词命令）；**嵌套命令族**（如 `npm run cli -- wao doctor`、`npm run cli -- registry list`）仍用 `npm run cli --` 调——npm link 不是它们的全局拼写替代。不 link 时全部命令都用 `npm run cli -- <command>`。
+`npm link` 之后可以从任意目录用全局 `wao <command>` 代替 `npm run cli -- <command>`（如 `wao dashboard`、`wao doctor`），写法见 `docs/usage/dispatch.md`。不 link 时全部命令都用 `npm run cli -- <command>`。
 
 预期内的安装期告警（不是装坏了）：`npm ci` 尾部可能显示 `N vulnerabilities`——全部来自 `@modelcontextprotocol/sdk` 的传递依赖（hono/fast-uri/ip-address 等 HTTP 库）；WAO 以 stdio server 运行、不暴露这些库的网络面，不阻塞上手。若你的默认 node 是 v23/v24，`npm ci` 还会先给一条 `EBADENGINE` 警告（engines 已收紧为仅 v22；npm 默认只警告不阻断）——随后所有 WAO 命令经 `npm run` 走 v22 shim，不受影响。
 

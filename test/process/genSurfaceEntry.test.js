@@ -13,7 +13,7 @@
 //     写出两份；恰好 --check ＝只读比对（CRLF/LF 归一化相同，缺失/过期非零且
 //     不改文件）；其他任何参数＝非零退出且不生成、不写入、不检查。
 //
-// 夹具纪律：os.tmpdir() 下建最小仓库副本——cpSync 整个 src/、两个
+// 夹具纪律：os.tmpdir() 下逐字节复制最小仓库副本——整个 src/、两个
 // scripts/gen-surface*.mjs、建 docs/surface/、最小 package.json（type:module +
 // 与真仓一致的 name/version，使 src/mcp/server.js 的
 // createRequire("../../package.json").version 解析同形）＋ node_modules junction
@@ -27,12 +27,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  renameSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -85,29 +84,39 @@ function buildWeirdHome() {
  * 建 tmp 夹具：src/ + 两个 gen-surface 脚本 + docs/surface/ + 最小 package.json +
  * node_modules junction。
  *
- * 实现注：cpSync 在 Windows Node 22 上对**非 ASCII 目标路径**会把目标根做一次
- * 有损重编码（实测生成「鐩綍 …」乱码孪生目录且不报错），因此复制一律先落在
- * ASCII staging 目录，再用 renameSync 整体搬进含空格 + 非 ASCII 的家目录
- * （mkdirSync/writeFileSync/rmSync/symlinkSync/junction/spawn 对该路径形状均正常）。
+ * 用 readFileSync/writeFileSync 直接写最终路径：绕开 cpSync 的非 ASCII 路径
+ * 重编码问题，也不再改名刚复制完、可能正被 Windows 扫描器打开的目录。
  */
+function copyFixtureTree(source, destination) {
+  mkdirSync(destination, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(destination, entry.name);
+    if (entry.isDirectory()) copyFixtureTree(from, to);
+    else {
+      assert.ok(entry.isFile(), `fixture source must be a regular file: ${entry.name}`);
+      writeFileSync(to, readFileSync(from));
+    }
+  }
+}
+
 function buildFixture(home) {
-  const stage = mkdtempSync(join(tmpdir(), "wao-surface-stage-"));
-  cpSync(join(REPO_ROOT, "src"), join(stage, "src"), { recursive: true });
+  const root = join(home, "fixture-repo with spaces");
+  copyFixtureTree(join(REPO_ROOT, "src"), join(root, "src"));
   // playbooks/lead 是 src/application/playbookCatalog.js 的加载期必读目录
   // （src/mcp/server.js 的 import 链在模块加载时就校验闭集目录）。
-  cpSync(join(REPO_ROOT, "playbooks"), join(stage, "playbooks"), { recursive: true });
-  mkdirSync(join(stage, "scripts"), { recursive: true });
-  cpSync(join(REPO_ROOT, "scripts", "gen-surface.mjs"), join(stage, "scripts", "gen-surface.mjs"));
-  cpSync(join(REPO_ROOT, "scripts", "gen-surface-cli.mjs"), join(stage, "scripts", "gen-surface-cli.mjs"));
-  mkdirSync(join(stage, "docs", "surface"), { recursive: true });
+  copyFixtureTree(join(REPO_ROOT, "playbooks"), join(root, "playbooks"));
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  for (const name of ["gen-surface.mjs", "gen-surface-cli.mjs"]) {
+    writeFileSync(join(root, "scripts", name), readFileSync(join(REPO_ROOT, "scripts", name)));
+  }
+  mkdirSync(join(root, "docs", "surface"), { recursive: true });
   const repoPkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   writeFileSync(
-    join(stage, "package.json"),
+    join(root, "package.json"),
     `${JSON.stringify({ name: repoPkg.name, version: repoPkg.version, private: true, type: "module" }, null, 2)}\n`,
     "utf8",
   );
-  const root = join(home, "fixture-repo with spaces");
-  renameSync(stage, root);
   symlinkSync(findSdkNodeModules(), join(root, "node_modules"), "junction");
   return root;
 }

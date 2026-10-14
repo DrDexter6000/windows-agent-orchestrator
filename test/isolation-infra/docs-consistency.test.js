@@ -2402,7 +2402,7 @@ test("onboarding closeout: README 是新读者入口——23-tool / M12 complete
   assert.ok(/MCP host|MCP Host/.test(readme),
     "README 必须指向 MCP Host 配置路径");
   // Correction review (Lead): npm ci canonical (package-lock tracked);
-  // generic <agentId> canary; npm-link bounded to top-level wao; MCP stdio
+  // generic <agentId> canary; the npm-link sentence names a global wao command; MCP stdio
   // command executes from the WAO install root.
   assert.ok(/npm ci/.test(readme),
     "README 必须以 npm ci 为克隆/安装规范命令（package-lock 已入库）");
@@ -2411,7 +2411,7 @@ test("onboarding closeout: README 是新读者入口——23-tool / M12 complete
   assert.ok(!/run (coder_low|coder_hq|researcher|auditor|tester|coder_mm)/.test(readme),
     "README 不得把 canary/命令示例硬编码到具体 worker（首个 canary 对任意保留 worker 可用）");
   assert.ok(/wao dashboard/.test(readme),
-    "README npm link 说明必须落在顶层 wao 命令（如 wao dashboard）");
+    "README npm link 说明必须举出全局 wao 命令（如 wao dashboard）");
   assert.ok(/install root/.test(readme),
     "README MCP 步骤必须说明 stdio 命令在 WAO 安装根目录执行");
 });
@@ -2455,9 +2455,9 @@ test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / 
     "onboarding 必须包含依赖安装步骤");
   // Top-level `wao` via the documented one-time npm link.
   assert.ok(!/别 `?npm link`?|不要 `?npm link`?/.test(ob),
-    "onboarding 不得再禁止 npm link（M12-8F 已文档化一次性 npm link 暴露顶层 wao）");
+    "onboarding 不得再禁止 npm link（一次性 npm link 暴露全局 wao）");
   assert.ok(/npm link/.test(ob),
-    "onboarding 必须说明一次性 npm link 暴露顶层 wao 的路径");
+    "onboarding 必须说明一次性 npm link 暴露全局 wao 的路径");
   // Doctor is advisory, not a HEALTHY hard gate.
   assert.ok(!/doctor 必须报 HEALTHY 才能开始用/.test(ob),
     "onboarding 不得再把 doctor 写成 HEALTHY 硬门");
@@ -2468,16 +2468,13 @@ test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / 
     "onboarding 必须同时出现 CLI --cwd 与 workspace binding");
   assert.ok(/--workspace-root|roots\/list|workspace_select/.test(ob),
     "onboarding 必须指向 MCP workspace binding 来源");
-  // Correction review (Lead): npm ci canonical; npm-link wording bounded to
-  // top-level `wao` (not a blanket replacement for `npm run cli --` nested
-  // families, doctor invocation preserved); .wao init optional — not a
+  // npm ci canonical; the npm-link sentence names a global `wao` command; the
+  // doctor invocation stays documented; .wao init optional — not a
   // MCP-workspace-binding / run_dispatch prerequisite.
   assert.ok(/npm ci/.test(ob),
     "onboarding 必须以 npm ci 为规范安装命令（package-lock 已入库）");
   assert.ok(/wao dashboard/.test(ob),
-    "npm link 说明必须落在顶层 wao 命令（如 wao dashboard）");
-  assert.ok(/不是[^。]{0,80}拼写替代/.test(ob),
-    "npm link 必须被限定为顶层命令，不得声称整体替代 npm run cli -- 嵌套命令族");
+    "npm link 说明必须举出全局 wao 命令（如 wao dashboard）");
   assert.ok(/npm run cli -- wao doctor/.test(ob),
     "必须保留现行 doctor 调用形式 npm run cli -- wao doctor");
   assert.ok(/可选[\s\S]{0,60}wao init/.test(ob) && /wao init[^。]{0,120}不是[^。]{0,80}前提/.test(ob),

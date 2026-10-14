@@ -38,7 +38,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 根修（进程归属或隔离 run-dir）待真实痛点再立项 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 首次语义组合冲突致集成后回归实证时；并行成常态时加必做步骤 |  |
-| TD-138 | 全量测试约 14 分钟，每个批次的合入都要等它；还没量过哪些文件最慢 | 开放 | 测试相关的批次：先量出最慢的文件，再决定拆分或提速 | docs/testing.md 0077 |
+| TD-138 | 全量测试约 15–18 分钟。2026-10-14 两次全量实测：pure 波约 5.4 分钟，几乎全由 `backends/zcode.test.js` 一个文件撑着（324 秒，次慢的 34 秒）；filesystem 波约 6–9 分钟，由交付类测试的总量决定（82 个文件合计约 3360 秒、并发 8，最慢的是 runDeliveryRepackage 391 秒、deliveryVerification 332 秒） | 开放 | 测试批次：先查 zcode.test.js 为什么要 5 分钟，能改成假时钟就能把 pure 波降到约 2 分钟；filesystem 波要提速交付类夹具或提高并发，拆文件帮助不大 | docs/testing.md test/backends/zcode.test.js |
 | TD-139 | MCP 的 run_status 不返回最近活动摘要（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 下一次 MCP 状态面改动 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 每季度核对 v24 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 首次再撞见同类漂移 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
@@ -107,13 +107,10 @@
 | TD-274 | kimi 车道出现过上游 `Request timed out`（发生时只有一个任务在跑），原因未查明 | 开放 | 再次出现时带现场归因 | 0073 0074 |
 | TD-280 | zcode / kimi-web 的严格评分演练以 failed 收尾（认证判定仍是不适用），认证演练没有重跑 | 开放 | 下次例行认证 | 0072 |
 | TD-281 | 评分规则写了 requireCommands 而车道不产出退出码时，派发时没有提示，要到评分才知道通不过 | 开放 | 下次改动派发前检查 | 0072 |
-| TD-287 | 偶发失败的测试：mcpBind 的 P0-1R-TXN-03 / P0-1R-TXN-04（事务回滚后文件内容不符）、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时、runManager 的 TD-5 多 run 并发（高并发下慢 run 的等待窗到期事实未及落盘） | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js test/run-lifecycle/runManager.test.js |
-| TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号；`run` 的帮助行漏了 `--lane` / `--role` / `--explain` / `--tag` 等实际可用的参数，生成层 `docs/surface/cli.md` 因此也没有 | 开放 | 小摩擦批次 | src/cliHelp.js src/commands/run.js |
-| TD-290 | 配置键 portRange（config/default.json 与 src/cli.js 的缺省值）没有任何消费者，端口分配器从未接入（已了结的 TD-23） | 开放 | 小摩擦批次：删键，或接入后写明用途 | config/default.json src/cli.js |
 | TD-291 | zcode 车道额度耗尽时转录里看不到上游的错误或额度信号：zcode 自己的事件流（`session/events`）里有 `model.request.status`（`model_request_failed` / `model_retry_scheduled` / `model_stream_stalled`），但 zcode backend 只轮询 `session/messages`。诊断现在把静默收口判为 `provider_disconnect`，并写明收口本身不带上游原因 | 开放 | 车道批次：静默期间读 `session/events` 的 `model.request.status`，把失败与重试的有界事实投影进转录（不回显正文） | src/backends/zcode.js src/diagnosis.js |
 | TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境。已见两次（run_20261014092633812jgm07h、run_20261014100010561p9ukkz）；Lead 事后在原工作树用同一输入重做打包检查都通过，但没有留下记录，原因未查明（疑为 worker 收尾时的 git 命令还占着 index.lock） | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
 | TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-295 | 配置文件的 `_comment` 字段仍夹着决定号、批次号、TD 号与日期，入库模板 `config/agents.example.json` 会被用户整份复制；其中部分措辞被文档守卫钉着 | 开放 | 文档体系下一步：逐个文件改写为现状描述，钉历史措辞的断言随之退役 | 0076 config/ |
 | TD-298 | kimi-web 的静默收口（turn 未被观察到、有产出后的停滞、serve 自称在跑但长时间无输出增长）仍按旧规则落 `no_effect` / `crash`，没有像 zcode 那样按收口类型如实分类 | 开放 | 诊断批次：逐种收口判定它说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |
-| TD-300 | 安装根提示 `WAO_INSTALL_ROOT` 设计上只从全局 wao 传给它的 CLI 子进程，实际随 runner 一路传进 worker 与交付验证命令：验证命令里起 CLI 会去读主检出的配置。测试套件一侧已由 `buildCanonicalChildEnv` 去掉 | 开放 | 下次改派发或交付验证的子进程环境时，让 CLI 用过之后不再往下传 | src/installRoot.js src/deliveryVerification.js |
+| TD-301 | 后台派发不传 `--isolate` / `--no-isolate` / `--tag`：`run --background` 和不带 `--wait` 的单 agent `spawn` 走 `dispatchRun`，它只在交付或只读运行时给 runner 加 `--isolate`，标签也不带；前台运行不受影响 | 开放 | 下次改派发参数时：把隔离与标签穿到后台 runner，并加测试 | src/commands/run.js src/application/runDispatch.js |

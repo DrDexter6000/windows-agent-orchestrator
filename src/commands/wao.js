@@ -509,7 +509,7 @@ async function waoSweepClaudeConfigCommand(args) {
  *   ask 子命令依赖注入——cli.js 注入 waoAskCommand（它内部调 commands/run.js 的 runCommand）。
  *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入，保持依赖方向。
  */
-// TD-191④：wao 命名空间子命令闭集——顶层 Unknown 报错指路的数据源。
+// wao 命名空间子命令闭集：顶层命令名命中它时直接按 `wao <sub>` 执行（src/cli.js）。
 // 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
 // 0064：+lanes（车道画像只读查询面）。
 export const WAO_SUBCOMMANDS = [
@@ -571,10 +571,10 @@ export async function waoCommand(args, config, deps = {}) {
     return;
   }
   // TD-260（0062 B8）：反向指路——sub 命中顶层命令名（serve/run/registry/…）时
-  // 给出两种完整调用形，与 TD-191④ 的正向指路（顶层 Unknown 命中 wao 族）对称。
+  // 给出两种完整调用形（顶层命令不在命名空间里）。
   // 根因是"wao X"一种写法两义（shim+顶层 vs 命名空间子命令），会审（opus 席）
   // 否决 serve 别名案：只治一族、留五族不对称且膨胀入口闭集。"wao" 自身排除
-  // （`wao wao` 需要的是子命令名，反向提示会指向用户刚输入的形式——opus 审核）。
+  // （子命令位上的 "wao" 需要的是子命令名，反向提示会指向用户刚输入的形式——opus 审核）。
   if (sub !== "wao" && COMMAND_NAMES.includes(sub)) {
     throw new Error(
       `Unknown wao subcommand: ${sub} — it is a top-level command. ` +

@@ -2370,6 +2370,7 @@ export class Run {
     // ADR-0030（TD-151）：等待窗到期事实的内存镜像。到期只置 true（供 CLI/runner
     // 结果投影），不改变终态语义——timed_out 不再由定时器产生，监督继续到自然终态。
     this.observationDeadlineReached = false;
+    this._observationDeadlineWrite = null;
     this._cleanup = cleanup;
     this._cleaned = false;
     // 会话兜底 abort 标志（事故修复 2026-06-17）：HTTP 类 backend 的 serve session
@@ -2483,10 +2484,12 @@ export class Run {
     // 审计修正：终态检查先行——自然 completed 后 run.abort() 时仲裁保留 completed，
     // _aborted 单看会误报 aborted；已落盘终态是更高权威。
     if (TERMINAL_STATES.includes(this.state)) {
+      await this._observationDeadlineWrite;
       await this._runCleanup();
       return _loserResult(this.state, { messages: [], evidence: [], metrics: null });
     }
     if (this._aborted) {
+      await this._observationDeadlineWrite;
       await this._runCleanup();
       return _loserResult("aborted", { messages: [], evidence: [], metrics: null });
     }
@@ -2517,7 +2520,7 @@ export class Run {
         this.observationDeadlineReached = true;
         // 事实落盘失败不改变监督语义（advisory）：自然终态路径仍写各自事实。
         // append 自带跨进程 append lock，与主循环的并发 append 安全交错。
-        void this.transcript.append("run.observation_deadline_reached", {
+        this._observationDeadlineWrite = this.transcript.append("run.observation_deadline_reached", {
           waitTimeoutMs: waitTimeout,
           source: waitTimeoutSource,
         }).catch(() => {});
@@ -2719,6 +2722,9 @@ export class Run {
     } finally {
       this._waitControllers.delete(controller);
       clearTimeout(timer);
+      // A fired timer owns an asynchronous append. Join it before terminal
+      // cleanup/return; another waiter may have started the same run-level write.
+      await this._observationDeadlineWrite;
     }
 
     // provider 会话复用，运行时自产 id 的运行期补记（2026-09-21，ADR-0031 §3.6 形状；

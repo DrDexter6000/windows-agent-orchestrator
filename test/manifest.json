@@ -41,6 +41,7 @@
       "delivery/runsDeliveryReverifyCli.test.js",
       "delivery/runsDeliveryReviewCli.test.js",
       "isolation-infra/alerts.test.js",
+      "isolation-infra/atomicWriteSync.test.js",
       "isolation-infra/backendCapabilityMatrix.test.js",
       "isolation-infra/backendSwitchCensus.test.js",
       "isolation-infra/cliFormatJson.test.js",

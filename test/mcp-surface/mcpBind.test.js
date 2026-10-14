@@ -377,7 +377,7 @@ test("ROLLBACK-REMOVE-01: codexRemove fails → rollback", async () => {
 
     await assert.rejects(
       () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
-      (err) => err.message.includes("remove failed"),
+      { message: "codex mcp remove failed: simulated remove failure" },
     );
     // Exclude must be unchanged (rollback restores it)
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
@@ -405,7 +405,7 @@ test("ROLLBACK-REMOVE-VERIFY-01: remove succeeds but verify shows server still p
 
     await assert.rejects(
       () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
-      (err) => err.message.includes("still present"),
+      { message: "server still present after remove — rolled back" },
     );
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {
@@ -710,7 +710,7 @@ test("P0-1R-TXN-02: unbind verification failure restores config and exclude byte
 
     await assert.rejects(
       () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
-      /still present/,
+      { message: "server still present after remove — rolled back" },
     );
     assert.deepEqual(readFileSync(configPath), configBefore);
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
@@ -736,7 +736,9 @@ test("P0-1R-TXN-03: add that mutates config then throws restores both resources"
     };
 
     const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
-    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /add failed/);
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), {
+      message: "codex mcp add failed: simulated add failure after write",
+    });
     assert.deepEqual(readFileSync(configPath), configBefore);
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {
@@ -759,7 +761,9 @@ test("P0-1R-TXN-04: get that throws after add restores both resources", async ()
     fk.codexGet = async () => { throw new Error("simulated get failure"); };
 
     const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
-    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /verify failed/);
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), {
+      message: "verify failed after add: simulated get failure",
+    });
     assert.deepEqual(readFileSync(configPath), configBefore);
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {
@@ -787,7 +791,9 @@ test("P0-1R-TXN-05: remove that mutates config then throws restores both resourc
       throw new Error("simulated remove failure after write");
     };
 
-    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /remove failed/);
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), {
+      message: "codex mcp remove failed: simulated remove failure after write",
+    });
     assert.deepEqual(readFileSync(configPath), configBefore);
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {
@@ -819,7 +825,9 @@ test("P0-1R-TXN-06: post-remove list failure restores both resources", async () 
     };
     fk.codexRemove = async () => rmSync(configPath, { force: true });
 
-    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /verify failed/);
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), {
+      message: "post-remove verify failed: simulated post-remove list failure",
+    });
     assert.deepEqual(readFileSync(configPath), configBefore);
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {

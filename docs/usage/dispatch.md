@@ -10,7 +10,7 @@ npm run cli -- <command> [options]
 
 不要直接 `node src/cli.js <command>`：系统默认 `node` 常是 v24，会被 WAO 硬拒；`npm run cli` 走 v22 shim，是可靠入口。下面为简洁省略前缀。
 
-执行过一次性 `npm link` 后，优先用全局 `wao` 命令：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 等价（同一个 CLI、同一个 v22 shim），可从任意目录调用；嵌套形式仍完整保留。本文写 `wao X` 时 `wao` 指全局 shim。顶层命令（serve/run/registry/consult/…）的 shim 形就是 `wao X`；wao 命名空间子命令（doctor/onboarding/state/…）的规范形是 `npm run cli -- wao X`，shim 形为 `wao wao X`（两层 wao）。两种误敲（顶层裸 `doctor`、命名空间内 `wao serve`）都会收到 Unknown 指路。
+执行过一次性 `npm link` 后，优先用全局 `wao` 命令：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 写法等价（同一个 CLI、同一个 v22 shim；全局 `wao` 从安装根解析配置与 `runs/`，见[安装](install.md)），可从任意目录调用。本文写 `wao X` 时 `wao` 指全局 shim。顶层命令（serve/run/registry/consult/…）的写法就是 `wao X`；wao 命名空间子命令（doctor/onboarding/state/…）可以直接裸写——全局 `wao doctor` 与 `npm run cli -- doctor` 都能执行，两段式 `wao wao doctor` 也照旧可用。把顶层命令写进命名空间（如 `wao wao serve`）会收到 Unknown 指路。
 
 脚本化消费（管道/jq）：`npm run cli --` 的 stdout 带 npm 横幅行，直接 `| jq` 会炸——加 `-s`（silent）得干净输出：`npm run cli -s -- <command> --format json | jq`。`--format json` 的诊断输出含 `state` 与 `terminal`（非终态与"无失败事实"不再混淆）。读结果优先用 projection JSON（`collect --format json`）——那是路径无关形状；直读转录（`runs/<runId>.jsonl`）或 raw collect 才需要按 kind 解析。转录事件是平铺形状：载荷字段合并进信封顶层（`{kind, role, parts, ts, seq, runId, agentId, type}` 一层平铺），没有嵌套的 `payload` 键；信封字段（ts/seq/runId/agentId/type）权威、载荷不得覆盖；`run.error` 的 `error`/`phase` 同样在顶层。
 

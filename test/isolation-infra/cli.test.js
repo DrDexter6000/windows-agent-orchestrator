@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
 import { readTranscript, findState, findLatestBound, findFirstBound } from "../../src/transcript.js";
 import { spawnCommand } from "../../src/commands/run.js";
+import { readRegistry as readRegistryFile } from "../../src/registry.js";
 // R12: retry 的 per-dispatch 覆盖继承（同形重试）——直接 import 命令实现（lifecycle
 // 不是 public export 面，无 re-export 需求；与 spawnCommand 同一 import 纪律）。
 import { retryCommand } from "../../src/commands/lifecycle.js";
@@ -3867,6 +3868,59 @@ test("R10-A-CLI-6: spawn --model → 明确拒绝（--model 是 run 专属表面
   );
 });
 
+// 多 agent spawn 与单 agent 同样经 loadPrompt 读 --prompt / --prompt-file：每个 worker
+// 收到同一份任务；两者都没给时报错，不派出没有任务的 worker。
+test("spawn 多 agent：--prompt-file 的内容送到每个 worker；没有任务时拒绝派发", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-spawn-multi-prompt-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      a: { backend: "claude-code", cwd: dir },
+      b: { backend: "claude-code", cwd: dir },
+    } }), "utf8");
+    const promptPath = join(dir, "task.txt");
+    writeFileSync(promptPath, "line one\nfrom the prompt file", "utf8");
+    const prompts = [];
+    const backend = {
+      supportsRoleContract: true, sessionOutlivesProcess: false,
+      async spawn(agent, task) {
+        prompts.push(task.prompt);
+        return {
+          backend: "zcode", backendSessionId: `s-${agent.id}`, messageId: "m1", admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+        };
+      },
+      defaultBinary() { return "node"; }, credentialEnvNames: () => [],
+    };
+    const cfg = {
+      registry: registryPath,
+      runDir: join(dir, "runs"),
+      readRegistry: async () => readRegistryFile(registryPath),
+      backendFor: () => backend,
+      loadLanesConfigFn: () => ({ lanes: [], sha256: null, issues: [], rolesHint: [] }),
+    };
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await spawnCommand(["a", "b", "--prompt-file", promptPath, "--wait"], cfg);
+    } finally {
+      console.log = origLog;
+    }
+    assert.equal(prompts.length, 2, "两个 worker 都派出");
+    for (const p of prompts) {
+      assert.ok(String(p).includes("from the prompt file"), `worker 收到 prompt 文件内容（实得 ${JSON.stringify(p)}）`);
+    }
+    await assert.rejects(
+      () => spawnCommand(["a", "b", "--wait"], cfg),
+      /Provide --prompt or --prompt-file/,
+    );
+    assert.equal(prompts.length, 2, "没有任务时零派发");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 test("R10-A-CLI-7: run --help 用法页含 --model（形状门 + 两道互斥 + 失败模式）", async () => {
   const out = await captureLog(() => runCommand(["--help"], {}));
   assert.match(out, /--model ID/, "flag 行存在");
@@ -5662,9 +5716,9 @@ test("TD-153 runs list --state/--since 过滤与组合正交：行集叠加、JS
   }
 });
 // test/cli.test.js
-// ===== TD-191④：顶层 Unknown 报错指路（wao 命名空间两段式陷阱）=====
-// 历史事实：裸 `onboarding`/`doctor` 顶层调用只有 "Unknown command" 裸报，
-// 两次把审计会话误诊成"幻影命令"（TD-191）。指路文案必须给出两种完整调用形。
+// ===== 顶层裸写的 wao 命名空间子命令直接执行 =====
+// 裸 `doctor` / `onboarding` 等按 `wao <sub>` 执行；`wao wao <sub>` 与
+// `npm run cli -- wao <sub>` 两种完整调用形照旧可用。
 
 function runCliExpectFail(cmd) {
   try {
@@ -5680,14 +5734,42 @@ function runCliExpectFail(cmd) {
   return { status: 0, stderr: "" };
 }
 
-test("TD-191④: bare wao-namespace subcommand at top level gets both full invocation forms", () => {
-  for (const sub of ["onboarding", "doctor", "declare"]) {
-    const { status, stderr } = runCliExpectFail(sub);
-    assert.notEqual(status, 0, `${sub} 必须仍以非零退出（语义不变）`);
-    assert.match(stderr, new RegExp(`npm run cli -- wao ${sub}`), `${sub} 必须给出 npm 完整调用形`);
-    assert.match(stderr, new RegExp(`wao wao ${sub}`), `${sub} 必须给出全局 shim 完整调用形`);
-    assert.match(stderr, new RegExp(`Unknown command: ${sub}`), `${sub} 保留 Unknown command 事实前缀`);
+function runCliCapture(cmd) {
+  try {
+    const stdout = execSync(`node src/cli.js ${cmd}`, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { status: 0, stdout, stderr: "" };
+  } catch (e) {
+    return { status: e.status ?? -1, stdout: (e.stdout ?? "").toString(), stderr: (e.stderr ?? "").toString() };
   }
+}
+
+test("bare wao-namespace subcommand at top level executes as `wao <sub>` (exit 0)", () => {
+  // state read 指向一个空的临时目录：没有 .wao 状态时固定输出 initialized:false，
+  // 结果不随运行它的检出变化。
+  const dir = mkdtempSync(join(tmpdir(), "wao-bare-sub-"));
+  try {
+    const cwdArg = `--cwd "${dir}"`;
+    const bare = runCliCapture(`state read --format json ${cwdArg}`);
+    assert.equal(bare.status, 0, `裸顶层子命令必须执行成功而非报 Unknown（stderr: ${bare.stderr}）`);
+    const namespaced = runCliCapture(`wao state read --format json ${cwdArg}`);
+    assert.equal(namespaced.status, 0, `wao <sub> 两段式照旧可用（stderr: ${namespaced.stderr}）`);
+    assert.equal(JSON.parse(bare.stdout).initialized, false, "空目录没有 .wao 状态");
+    assert.deepEqual(JSON.parse(bare.stdout), JSON.parse(namespaced.stdout), "两种写法输出相同");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("WAO_SUBCOMMANDS 与顶层 COMMAND_NAMES 不相交（撞名时子命令会被顶层命令遮住）", async () => {
+  const { WAO_SUBCOMMANDS } = await import("../../src/commands/wao.js");
+  const overlap = WAO_SUBCOMMANDS.filter((sub) => COMMAND_NAMES.includes(sub));
+  assert.deepEqual(overlap, [],
+    `两侧撞名会让顶层分派先命中自身、命名空间兜底永远接不到：${overlap.join(", ")}`);
 });
 
 test("TD-191④: non-namespace unknown command keeps exit 1 + gains a generic pointer", () => {

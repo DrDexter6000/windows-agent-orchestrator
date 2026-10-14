@@ -1322,8 +1322,9 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   assert.ok(text.includes("Candidates from the tracked template:"));
   // TD-260（0062 B8 记法+B10①）：调用形改规范形 npm run cli --（带 shim 形注），
   // needs-selection 首段明示"正常预览出口非错误"。
+  // 裸子命令可直接在顶层执行，全局形提示只写一层 wao。
   assert.ok(text.includes("Re-run with: npm run cli -- wao onboarding --agent <id>"));
-  assert.ok(text.includes("(global shim form: wao wao onboarding --agent <id>)"));
+  assert.ok(text.includes("(global form: wao onboarding --agent <id>)"));
   assert.ok(text.includes("normal preview exit (no error, nothing written)"));
 
   // Missing-probe scenario: human brackets name what is missing.

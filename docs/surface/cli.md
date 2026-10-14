@@ -9,56 +9,52 @@ Verbatim `wao help` output (`HELP_TEXT` in `src/cliHelp.js` — the same SSOT th
 Windows Agent Orchestrator PoC
 
 Commands:
-  version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
-  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审（M13-r1/决定 0039：机械扇出+收集+council-diff 并列呈现；不做语义合成）
-  consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/，扇出后即可读）；--seat 取一席的完整原文，--out 写进文件
-  consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 接着等一场已扇出的会审（各席到终态或观察窗到期即返回，可反复调用；180000-600000，缺省 270000）
-  serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（TD-250/决定 0056，零副作用）
-  serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删；跨 serve 生效——会话仓实例间共享）
-  runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # TD-254/决定 0058：显式放弃一条交付线系——枚举成员+门+写 run.lineage_closed+按门释放保留 worktree（分支永不删；closed≠released 重入=补偿重试；默认 dry-run）
-  serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：WAO active 门+会话集合 soak 双门 → 优雅 shutdown 全量拆荚 → 显式 env 重启（WAO_IN_WORKER=1 命令组装）→ 端口核对+空闲看护；--workspace-dir 缺省取车道声明的 serveWorkspaceDir，车道没声明才必填
-  registry list --registry config/agents.json
-  registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only; other lanes: readiness via 'wao lanes', environment via 'wao doctor'
+  version   # print the WAO version (bare semver from package.json; --version also works)
+  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审：扇出+收集，各席原文并列呈现，不做语义合成
+  consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 重渲染一场会审；--seat 取一席完整原文（--out 写进文件）
+  consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 继续等一场已扇出的会审（各席到终态或观察窗到期即返回，可反复调用）
+  serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（零副作用）
+  serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删）
+  serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：双门判定后优雅 shutdown 并显式重启；--workspace-dir 缺省取车道声明值
+  registry list [--registry FILE]
+  registry check [--registry FILE] [--format json]   # live opencode-serve 健康探测；其他车道的就绪看 `wao lanes`，环境看 `wao doctor`
   registry validate [--registry FILE] [--format json]
-  spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
-  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
+  spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE]
+  run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final [--out FILE]] [--format json] [--run-dir DIR]   # --final --out 把最终回答完整写进文件（多长都写）
-  stop <runId> --observed-seq N --reason TEXT [--run-dir DIR]   # N = status 输出的 observedSeq；先看最新状态、写明理由（决定 0069）
+  stop <runId> --observed-seq N --reason TEXT [--run-dir DIR]   # N = status 输出的 observedSeq；先看最新状态再停
   retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
-  resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑（存活）；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker — by design，见 docs/usage/dispatch.md 场景 1）
+  resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker）
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--active] [--state <state>] [--since <duration>] [--project <path|name|@sandbox|@scratch|@unattributed>] [--format json]
   runs summary [--run-dir DIR] [--format json]
-  runs prune --older-than <duration> [--archive] [--run-dir DIR]
-  runs migrate-projects [--run-dir DIR]   # TD-190 D3：存量分桶迁移 dry-run（只读预览：桶分布/字节/无法归因原因分布）
-  runs migrate-projects --apply [--run-dir DIR]   # TD-256 批实迁：resolveRunDirForWrite 权威归宿+link→sha→unlink 原语+manifest 台账（.wao/migration/td190-d3/）幂等可续跑；门=active run 空+拒绝 worktree 内执行
-  runs migrate-projects --verify [--run-dir DIR]   # 迁移后核对（只读）：dst 在场/sha 漂移/根层剩余/根层再现（并发追加复活平铺）点名   # --archive 超龄 run 移动到 runs-archive/<yyyy-mm>/（原文件名，不删除；冲突不覆盖）
+  runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 把超龄 run 移到 runs-archive/（不删除，冲突不覆盖）
+  runs migrate-projects [--apply|--verify] [--run-dir DIR]   # 存量分桶迁移：默认 dry-run 预览；--apply 实迁（幂等可续跑）；--verify 迁后核对
   runs grep <pattern> [--run-dir DIR] [--format json]
-  runs metrics <runId> [--run-dir DIR] [--format json]
-  runs metrics --summary [--run-dir DIR] [--format json]
+  runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 显式放弃一条交付线系：按门释放保留 worktree（分支永不删；默认 dry-run）
+  runs metrics <runId>|--summary [--run-dir DIR] [--format json]
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
   runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard
   dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
   runs diagnose <runId> [--run-dir DIR] [--format json]
-  runs delivery <runId> [--run-dir DIR] [--format json]
-  runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]
-  runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
-  runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（默认 text；窗口到期 exit 0）
-  runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt + kill switch（只读）；--release 人工破锁（破除失败 fail-closed）
-  runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # TD-240 采纳协议承载：临时 worktree 检出提交→执行命令→lead_commit_check 事件族落证→清理（Lead 侧自检，非独立审计证据；outcome 不当受审对象替代品）
+  runs delivery <runId> [--run-dir DIR] [--format json]   # 交付状态查询（只读）
+  runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
+  runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）
+  runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
+  runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
-  workflow list                  # 列出可用模板（workflows/templates/）
-  playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）
-  playbook show <id> [--format json]         # 展示一个完整 Lead playbook（只读）
+  workflow list   # 列出可用模板（workflows/templates/）
+  playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
+  playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
   daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--resume-on-start]
   daemon run <agentId> --prompt "..." [--run-dir DIR] [--registry FILE] [--prompt-file FILE]
   daemon stop [--run-dir DIR]
   daemon ping [--run-dir DIR] [--pipe PIPE]
-  daemon status <runId> [--run-dir DIR] [--pipe PIPE]
+  daemon status <runId> [--run-dir DIR] [--pipe PIPE]   # 按 runId 查单个 run；守护进程自身健康用 ping/list
   daemon list [--run-dir DIR] [--pipe PIPE]
   daemon supervise [--run-dir DIR] [--registry FILE] [--idle-exit-ms MS]
   daemon supervisor status|stop [--run-dir DIR]
@@ -66,30 +62,29 @@ Commands:
 
 MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code, codex, zcode, kimi-code, opencode, claude-desktop):
   mcp status [--host <host>] [--cwd <git-root>]   # read-only: is WAO's MCP registered on this harness? no --host = every known host
-  mcp bind --host <host> [--cwd <git-root>]   # codex: writes the project's .codex/config.toml (needs --cwd); every other host: prints the exact registration command/snippet (WAO never writes their config); a host outside the table gets a generic stdio snippet
+  mcp bind --host <host> [--cwd <git-root>]   # codex: writes the project's .codex/config.toml (needs --cwd); every other host: prints the exact registration command/snippet (WAO never writes their config)
   mcp unbind --host codex --cwd <git-root>
 
-Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wao <sub>", global shim form "wao wao <sub>":
+Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor), namespaced (wao wao doctor), or npm form (npm run cli -- wao doctor):
   wao init [--cwd DIR] [--state-dir DIR]
   wao state read [--format text|json]
   wao state snapshot --workflow-id ID [--cwd DIR]
   wao decision add --title T [--body B | --body-file F] [--context C]
   wao decision list [--format json]
   wao decision show <id>
-  wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
-  wao declare                                       # 列出已有声明 + 理由分布
-  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记：seats=自报副审、skip=跳过理由闭集码；--reviewed-run=对抗性派生——席位×作者车道指纹比对、回避违反大声提示，0045 §1.2/0065）
-  wao stage                                            # 列出已声明阶段 + 缺口 + panel/skip 分布（pipeline 自省）
-  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
+  wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason 为闭集码）；裸 wao declare 列出现有声明
+  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>]  # 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记）；裸 wao stage 列出进度与缺口
+  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（默认只读并注入边界声明；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
-  wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
-  wao doctor [--cwd DIR] [--format json] [--warn-as-error]
-  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet; --host adds per-host registration guide, verified hosts only)
-  wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # Lead 侧验收落盘（TD-219）：非 delivery run 的 acceptance 审计事件追加进该 run transcript（只对终态 run；多笔以最新一笔为当前结论）
-  wao accept --run <runId> --show [--run-dir DIR]  # 只读：列出该 run 既有 acceptance.recorded 事件（不追加）
-  wao sweep-claude-config [--apply]  # claude-code OAuth 临时配置目录（%TEMP%wao-claude-oauth-*，含凭据副本）存量清扫：默认 dry-run 只报清单，--apply 才真删（带 owner 标记的按创建进程存活判定；无标记遗留目录按 >24h 判龄；TD-223）
-  wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读，0064）：lanes.json 接线轴 + Owner 画像 + 认证简表 + 就绪探测；事实陈列零推荐；非默认 --registry 须与 --lanes-file 成对（防跨绑，规则同 run）
+  wao handoff read <role> [--format json]   # 最新一份写给该角色的 handoff
+  wao doctor [--cwd DIR] [--format json] [--warn-as-error]   # 环境体检（车道/凭据/工具链）
+  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # 从入库模板生成最小私有 registry；--host 给该宿主的注册指引；不带 --agent = 预览出口
+  wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # 验收落盘（只对终态 run）；--show 只读列出既有记录
+  wao sweep-claude-config [--apply]  # 清扫 claude-code OAuth 临时配置目录（默认 dry-run，--apply 才删）
+  wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读）：接线轴+画像+认证简表+就绪探测
 
 Notes:
+  - 完整用法与场景说明见 docs/usage.md 与 docs/usage/ 各专页。
+  - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
 ```

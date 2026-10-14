@@ -703,7 +703,7 @@ test("3B-C3: exit-1 command modifies tracked file -> artifact_mutated (CTO RED #
 /**
  * CTO RED #2 variant: timeout command modifies tracked file -> artifact_mutated.
  */
-test("3B-C4: timeout command modifies tracked file -> artifact_mutated (CTO RED #2)", async () => {
+test("3B-C4: timeout command modifies tracked file -> artifact_mutated (CTO RED #2)", async (t) => {
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c4-");
   // Fixture-owned dir outside the worktree for the script itself; the script
   // mutates a TRACKED file relative to the verification cwd (the worktree).
@@ -718,22 +718,50 @@ test("3B-C4: timeout command modifies tracked file -> artifact_mutated (CTO RED 
     await writeFile(script, [
       "const fs = require('node:fs');",
       "fs.writeFileSync('src/a.js', 'corrupted\\n');", // cwd = delivery worktree
-      "setTimeout(() => {}, 99000);", // hold past every bound in this test
+      "process.stdout.write('mutation-closed\\n');",
+      "setTimeout(() => process.stdout.write('natural-expiry\\n'), 99000);",
       "",
     ].join("\n"));
     const cmd = `"${process.execPath}" "${script}"`;
     const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: [cmd] });
 
-    const result = await verifyDelivery(ref, { timeoutMs: 500 });
+    // Advance the runner's clock only after the real child has closed the
+    // mutation. Process startup under load must not consume this proof window.
+    // Spawn, file mutation, timeout callback and process-tree kill stay real.
+    const cp = createRequire(import.meta.url)("node:child_process");
+    const realSpawn = cp.spawn;
+    let mutationClosed = false;
+    const runCommand = async (command, cwd, opts) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const spawnMock = t.mock.method(cp, "spawn", (...args) => {
+        const child = realSpawn(...args);
+        let output = "";
+        child.stdout.on("data", (chunk) => {
+          output += chunk;
+          if (!mutationClosed && output.includes("mutation-closed\n")) {
+            mutationClosed = true;
+            t.mock.timers.tick(opts.timeoutMs);
+          }
+        });
+        return child;
+      });
+      syncBuiltinESMExports();
+      try {
+        return await runVerificationCommand(command, cwd, opts);
+      } finally {
+        spawnMock.mock.restore();
+        syncBuiltinESMExports();
+        t.mock.timers.reset();
+      }
+    };
+    const result = await verifyDelivery(ref, { timeoutMs: 500, runCommand });
+    assert.equal(mutationClosed, true, "real child must close its mutation before timeout");
     assert.equal(result.delivery.verification.results[0].timedOut, true,
       "must be a real timeout — an early non-zero exit must not satisfy this proof");
-    // NOTE on scope: this bound is evaluated AFTER the result resolves, so a
-    // broken kill still costs the ~99s natural hold before failing here —
-    // bounded-TIME failure is proven by 3B-05's concurrent observation, not
-    // here. This bound only prevents a slow natural-expiry run from counting
-    // as a green pass.
-    assert.ok(result.delivery.verification.results[0].durationMs < 10000,
-      "command must be killed near the 500ms timeout, not run to natural expiry");
+    assert.equal(result.delivery.verification.results[0].durationMs, 500,
+      "the runner must observe exactly the advanced timeout window");
+    assert.ok(!result.delivery.verification.results[0].stdoutTail.includes("natural-expiry"),
+      "the child must be killed, not exit on its natural hold timer");
     assert.equal(result.outcome, "failed");
     assert.equal(result.failureCode, "artifact_mutated",
       "timeout + file mutation must be artifact_mutated, NOT command_timeout");
@@ -1350,9 +1378,13 @@ test("TD-230: attempt env pins the deployment gate off and strips the worker lin
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-td230-");
   const savedGate = process.env.WAO_MCP_REQUIRE_CERTIFIED;
   const savedWorker = process.env.WAO_IN_WORKER;
-  // 宿主呈污染态（模拟 User 作用域 setx + worker 宿主两种实证形态）。
+  // 安装根提示同样剥掉：经全局 `wao` 派发的运行会带着它进
+  // 验证命令环境，使验证里起的 CLI 读主检出配置而非交付工作树的。
+  const savedInstallRoot = process.env.WAO_INSTALL_ROOT;
+  // 宿主呈污染态（模拟 User 作用域 setx + worker 宿主 + 全局 wao 派发三种实证形态）。
   process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
   process.env.WAO_IN_WORKER = "1";
+  process.env.WAO_INSTALL_ROOT = process.platform === "win32" ? "D:\\wao\\main-checkout" : "/wao/main-checkout";
   try {
     await writeFile(join(wtPath, "src", "a.js"), "td230\n");
     const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
@@ -1366,6 +1398,8 @@ test("TD-230: attempt env pins the deployment gate off and strips the worker lin
         "部署级认证门禁在 verifier 子进程里强制关闭（MCP 边界策略不适用于验证子进程）");
       assert.equal(env.WAO_IN_WORKER, undefined,
         "worker 血统标记被剥除（verifier 是控制面工具，其测试子进程不是 worker）");
+      assert.equal(env.WAO_INSTALL_ROOT, undefined,
+        "安装根提示被剥除（验证命令在交付 worktree 内执行，CLI 必须按 worktree 解析配置，不读主检出）");
       assert.equal(env.WAO_ALLOW_NESTED_DISPATCH, "1",
         "0047 嵌套派发豁免保持不变");
       assert.equal(env.TMP !== process.env.TMP || env.TEMP !== process.env.TEMP, true,
@@ -1376,6 +1410,8 @@ test("TD-230: attempt env pins the deployment gate off and strips the worker lin
     else process.env.WAO_MCP_REQUIRE_CERTIFIED = savedGate;
     if (savedWorker === undefined) delete process.env.WAO_IN_WORKER;
     else process.env.WAO_IN_WORKER = savedWorker;
+    if (savedInstallRoot === undefined) delete process.env.WAO_INSTALL_ROOT;
+    else process.env.WAO_INSTALL_ROOT = savedInstallRoot;
     await cleanupDir(repo);
   }
 });

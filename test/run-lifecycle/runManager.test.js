@@ -2192,22 +2192,45 @@ test("TD-5: 多 run 并发 wait 时交叉 abort 不互相干扰", async () => {
   }
 });
 
-// TD-151（ADR-0030）迁移：slow 原以 waitTimeout=1 到期收尾（timed_out）；到期不再
-// 终态化——slow 的 assistant（50ms）跨过 deadline(1ms) 后自然 completed，恰是
-// "慢 worker 活过小等待窗"的并发版钉。验证到期不串扰、activeRuns 正确移除。
+// 到期通知后才释放 slow 的事件流；到期写入等流结束才放行，确定性制造
+// append 与收尾的交错。完成前必须收齐写入，不能靠响应/磁盘耗时碰巧排序。
 test("TD-5: 同一 manager 内多 run 并发，一个小等待窗慢 run 另一个正常完成（TD-151 迁移）", async () => {
-  // 同一 manager 内并发两个 run：slow 的 waitTimeout(1ms) 远小于其 assistantDelay(50ms)。
   const dir = await makeTempDir();
   try {
-    const fetchImpl = createMockFetch({ assistantDelay: 50 });
+    const fetchImpl = createMockFetch();
     const manager = createManager(dir, fetchImpl);
     const runFast = await manager.start("test_agent", { prompt: "fast", runId: "concurrent_fast" });
     const runSlow = await manager.start("test_agent", { prompt: "slow", runId: "concurrent_slow" });
     assert.equal(manager.activeRuns.size, 2);
 
+    const observed = Promise.withResolvers();
+    const streamEnded = Promise.withResolvers();
+    let deadlinePersisted = false;
+    const append = runSlow.transcript.append.bind(runSlow.transcript);
+    runSlow.transcript.append = async (type, payload) => {
+      if (type !== "run.observation_deadline_reached") return append(type, payload);
+      await streamEnded.promise;
+      const event = await append(type, payload);
+      deadlinePersisted = true;
+      return event;
+    };
+    const events = runSlow.handle.events;
+    runSlow.handle.events = async function* (...args) {
+      await observed.promise;
+      try { yield* events(...args); }
+      finally { streamEnded.resolve(); }
+    };
+    const remove = runSlow._removeFromManager.bind(runSlow);
+    runSlow._removeFromManager = () => {
+      assert.equal(deadlinePersisted, true, "到期写入必须先于完成收尾");
+      return remove();
+    };
+
     // fast 给充足时间完成；slow 给极短等待窗（到期只通知）
     const waitFast = runFast.waitForCompletion({ waitTimeout: 2000, pollInterval: 10 });
-    const waitSlow = runSlow.waitForCompletion({ waitTimeout: 1, pollInterval: 5 });
+    const waitSlow = runSlow.waitForCompletion({
+      waitTimeout: 1, pollInterval: 5, onObservationDeadline: observed.resolve,
+    });
     const [resFast, resSlow] = await Promise.all([waitFast, waitSlow]);
 
     assert.equal(resFast.completed, true, "fast 应正常完成");

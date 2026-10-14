@@ -369,7 +369,7 @@ function Write-WaoNextSteps {
     Write-Host '  npm run cli -- registry validate --registry config/agents.json      # §4d 静态 schema 校验'
     Write-Host '  npm run cli -- wao doctor --cwd <目标项目>                            # §4d 环境自检'
     Write-Host ''
-    Write-Host '可选：npm link（每台机器一次，暴露顶层 wao 命令）——本脚本不执行它，见 AGENT_ONBOARDING.md §4a。'
+    Write-Host '可选：npm link（每台机器一次，暴露全局 wao 命令）——本脚本不执行它，见 AGENT_ONBOARDING.md §4a。'
     Write-Host "首次使用前必读：SKILL.md 与 references/safety-incidents.md（$WaoDocOnboarding §4）。"
 }
 

@@ -27,7 +27,7 @@
 //     — WAO never auto-claims or deletes it.
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync,
   readdirSync, rmdirSync, lstatSync, realpathSync,
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import { proveWorkspace } from "./workspaceBinding.js";
+import { atomicWriteFileSync, removeFileSync } from "../atomicWriteSync.js";
 import {
   codexMcpList,
   codexMcpGet,
@@ -240,24 +241,6 @@ function assertLocalCodexPaths(canonicalRoot) {
   }
 }
 
-// ── Atomic file write ────────────────────────────────────────────────────────
-
-/**
- * Atomically write a file: temp in same dir + renameSync.
- * Temp file is cleaned up on failure.
- */
-function atomicWriteFile(filePath, content) {
-  const dir = dirname(filePath);
-  const tmp = join(dir, `.wao-tmp-${Date.now()}-${process.pid}`);
-  try {
-    writeFileSync(tmp, content, "utf8");
-    renameSync(tmp, filePath);
-  } catch (err) {
-    try { unlinkSync(tmp); } catch { /* best effort */ }
-    throw err;
-  }
-}
-
 // ── Exclude block management (byte-offset operations) ────────────────────────
 
 /**
@@ -313,21 +296,16 @@ function snapshotFile(filePath) {
 }
 
 /**
- * Restore a file from snapshot using atomic write.
- * Only ignores ENOENT on delete — never swallows EACCES/EPERM.
+ * Restore a file from snapshot: an originally absent file is removed, an existing one
+ * atomically rewritten. A file already gone counts as removed; every other error throws.
  */
 function restoreFile(snap) {
   if (!snap.exists) {
-    try {
-      unlinkSync(snap.path);
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-      // ENOENT = already gone, that's fine
-    }
+    removeFileSync(snap.path);
     return;
   }
   // Atomic restore: write to temp + rename
-  atomicWriteFile(snap.path, snap.bytes);
+  atomicWriteFileSync(snap.path, snap.bytes);
 }
 
 /**
@@ -368,7 +346,7 @@ function defaultHooks() {
     writeExclude: (gitDir, content) => {
       const infoDir = join(gitDir, "info");
       if (!existsSync(infoDir)) mkdirSync(infoDir, { recursive: true });
-      atomicWriteFile(excludePath(gitDir), content);
+      atomicWriteFileSync(excludePath(gitDir), content);
     },
     readExclude: (gitDir) => readExcludeStr(gitDir),
   };

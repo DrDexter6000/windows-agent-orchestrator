@@ -82,7 +82,6 @@ const hardcodedDefaults = {
   retries: 2,
   defaultIsolation: "none",
   worktreeDir: null,
-  portRange: [30000, 31000],
   stateDir: ".wao",
 };
 
@@ -234,13 +233,11 @@ async function main(argv) {
     await serveCommand(rest, config);
     return;
   }
-  // TD-191④：顶层 Unknown 裸报是"幻影命令"误诊两次的根因——命中 wao 命名空间
-  // 子命令名时给出两种完整调用形；其余给通用指路。退出码与分派语义不变。
+  // 顶层命令名命中 wao 命名空间子命令时按 `wao <sub>` 执行。顶层命令的分支在前，
+  // 两侧名字不相交由测试钉住。
   if (WAO_SUBCOMMANDS.includes(command)) {
-    throw new Error(
-      `Unknown command: ${command} — it is a wao-namespace subcommand. ` +
-        `Use "npm run cli -- wao ${command}" (global shim form: "wao wao ${command}").`
-    );
+    await waoCommand([command, ...rest], config);
+    return;
   }
   throw new Error(
     `Unknown command: ${command}. See --help for available commands; ` +

@@ -3,6 +3,8 @@ import { resolve, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { DONE_MARKERS } from "./runEvent.js";
+// 验收脚本按验证命令对待：剥离安装根提示，env 名取自安装根模块，不另抄。
+import { INSTALL_ROOT_ENV } from "./installRoot.js";
 
 /**
  * scorecard：证据链门控（M6-5，spec §6.1）。
@@ -184,9 +186,17 @@ export async function checkScorecard({ events, cwd, rules, inferCommandExitCode 
  */
 async function checkAcceptance(scriptPath, cwd) {
   const absPath = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);
+  // 剥安装根提示（env 名在 installRoot.js）。经全局 `wao`
+  // 派发的运行带着 WAO_INSTALL_ROOT 进本进程；验收脚本在 run 的 worktree 内执行，
+  // 它里面起的 CLI 必须按 worktree 解析配置，不能被引去读主检出。除此之外
+  // 环境原样继承（不构造第二套 env 面）。
+  const {
+    [INSTALL_ROOT_ENV]: _strippedInstallRoot,
+    ...acceptanceEnv
+  } = process.env;
   try {
     // node 跑脚本：统一入口，跨平台稳（不需 .mjs 在 PATH 或 shebang）。
-    execFileSync(process.execPath, [absPath], { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 60000 });
+    execFileSync(process.execPath, [absPath], { cwd, env: acceptanceEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 60000 });
     return { name: CHECK_NAME.ACCEPTANCE, passed: true, evidence: `exit 0: ${scriptPath}` };
   } catch (e) {
     // exit≠0、超时、脚本抛错都进 catch。

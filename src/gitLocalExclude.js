@@ -40,10 +40,11 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
-  existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, statSync,
+  existsSync, readFileSync, mkdirSync, statSync,
 } from "node:fs";
 import { open, unlink, readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute, dirname } from "node:path";
+import { atomicWriteFileSync, removeFileSync } from "./atomicWriteSync.js";
 
 /** The single exact root rule WAO owns in .git/info/exclude. */
 export const WAO_WORKTREE_EXCLUDE_RULE = "/.wao-worktrees/";
@@ -91,25 +92,10 @@ function defaultGitExec(args, opts) {
   return execFileSync("git", args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, ...opts });
 }
 
-/**
- * Atomic write: temp in same dir + rename. Temp removed on failure.
- */
-function atomicWrite(filePath, content) {
-  const infoDir = dirname(filePath);
-  const tmp = join(infoDir, `.wao-tmp-${Date.now()}-${process.pid}`);
-  try {
-    writeFileSync(tmp, content, "utf8");
-    renameSync(tmp, filePath);
-  } catch (err) {
-    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
-    throw err;
-  }
-}
-
 function defaultWriteExclude(excludeFilePath, content) {
   const infoDir = dirname(excludeFilePath);
   if (!existsSync(infoDir)) mkdirSync(infoDir, { recursive: true });
-  atomicWrite(excludeFilePath, content);
+  atomicWriteFileSync(excludeFilePath, content);
 }
 
 function defaultReadExclude(filePath) {
@@ -169,7 +155,7 @@ function prepareExcludedContent(content) {
 
 function restoreSnapshot(excludeFile, snapExists, snapBytes, writeExclude) {
   if (!snapExists) {
-    try { unlinkSync(excludeFile); } catch (err) { if (err.code !== "ENOENT") throw err; }
+    removeFileSync(excludeFile);
     return;
   }
   writeExclude(excludeFile, snapBytes.toString("utf8"));

@@ -99,6 +99,10 @@ const ADAPTER_TOP = Object.freeze(new Set([
 // 清单 = fail-closed 红，强迫清单的有意识维护）。
 const CORE_TOP = Object.freeze(new Set([
   "src/alerts.js",
+  // 小文件原子替换与删除（Windows 共享冲突 EPERM/EBUSY 有界重试，同 TD-71）。
+  // 零相对出边（node:crypto/fs/path only）；消费方 src/gitLocalExclude.js（core 同层）与
+  // src/application/mcpWorkspaceActivation.js（下向）。
+  "src/atomicWriteSync.js",
   "src/cliRunSummary.js",
   "src/daemonHealth.js",
   "src/delivery.js",

@@ -101,7 +101,7 @@ worktree、base 与验证声明原地重检重验，不再调用 worker 模型�
 git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
 cd D:\projects\windows-agent-orchestrator
 npm ci            # 按入库的 package-lock 安装（npm install 可作回退）
-npm link          # 可选，每机一次：暴露顶层 `wao` 命令（如 `wao dashboard`）
+npm link          # 可选，每机一次：暴露全局 `wao` 命令（如 `wao dashboard`）
 
 # 1. 配置 agent registry——从一个 worker 起步
 #    推荐自动化路径：从入库模板生成单 worker 的 config/agents.json 并打印 MCP 片段：

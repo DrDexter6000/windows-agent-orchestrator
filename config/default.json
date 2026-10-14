@@ -7,7 +7,6 @@
   "retries": 2,
   "defaultIsolation": "none",
   "worktreeDir": null,
-  "portRange": [30000, 31000],
   "silentTimeout": null,
   "debugMode": false
 }

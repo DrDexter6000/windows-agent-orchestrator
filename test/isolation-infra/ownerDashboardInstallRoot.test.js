@@ -131,7 +131,7 @@ test("RESOLVER: rebaseConfigPaths rebases WAO-owned runDir+registry, leaves abso
     registry: "config/agents.json",
     stateDir: ".wao", // per-project workspace state — must NOT be rebased
     pollInterval: 5000,
-    portRange: [30000, 31000],
+    sampleArray: [30000, 31000], // neutral fixture key — rebaseConfigPaths must leave array values untouched
   };
   const same = rebaseConfigPaths(input, null);
   assert.equal(same, input, "no root → exact same object reference (legacy preserved)");
@@ -144,7 +144,7 @@ test("RESOLVER: rebaseConfigPaths rebases WAO-owned runDir+registry, leaves abso
   assert.equal(out.registry, resolve(join(root, "config/agents.json")), "registry rebased under root");
   assert.equal(out.stateDir, ".wao", "per-project stateDir NOT rebased");
   assert.equal(out.pollInterval, 5000, "scalar keys untouched");
-  assert.deepEqual(out.portRange, [30000, 31000], "array keys untouched");
+  assert.deepEqual(out.sampleArray, [30000, 31000], "array keys untouched");
 
   // Absolute paths pass through unchanged even with a root present.
   const absIn = { runDir: resolve("/abs/runs"), registry: "config/agents.json" };
