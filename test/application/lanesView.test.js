@@ -189,3 +189,31 @@ test("buildLanesView：车道表权威失败≠成功的空面；合法空表≠
   assert.equal(empty.state, "ok");
   assert.equal(empty.lanesStateNote, "车道表为空（lanes.json 合法但零车道）", "合法空表=正常面+注记");
 });
+
+// ── TD-283：dispatchHold 行投影 ──────────────────────────────────────────────
+
+test("buildLanesView：dispatchHold=车道表事实（与接线状态无关）；坏形状/无说明 → null", () => {
+  const input = baseInputs();
+  input.lanesDoc = laneDoc([
+    { ...L1, dispatchHold: "夹具：暂停说明" },
+    L2,
+    { ...L3, dispatchHold: "  " },
+  ]);
+  const view = viewWithInvalidL3(input);
+  assert.equal(view.lanes[0].dispatchHold, "夹具：暂停说明", "有说明车道原文透出");
+  assert.equal(view.lanes[1].dispatchHold, null, "无说明车道 → null");
+  // l3 接线态=invalid，但 dispatchHold 是车道表事实，读取不因接线状态折叠——
+  // 本例值本身形状不合法 → null（fail-to-null，不猜）。
+  assert.equal(view.lanes[2].dispatchHold, null, "形状不合法 → null");
+
+  // invalid 接线 + 合法说明：仍透出（车道表事实与 registry 接线状态无关）。
+  const input2 = baseInputs();
+  input2.lanesDoc = laneDoc([{ ...L1, dispatchHold: "暂停" }, L2, { ...L3, dispatchHold: "也暂停" }]);
+  const view2 = viewWithInvalidL3(input2);
+  assert.equal(view2.lanes[2].dispatchHold, "也暂停", "接线 invalid 的车道照样带车道表说明");
+
+  const plain = buildLanesView(baseInputs());
+  assert.equal(plain.lanes[0].dispatchHold, null, "无说明 → null");
+  assert.ok(plain.sourceNotes.dispatchHold, "头部来源注记在场");
+  assert.ok(plain.sourceNotes.dispatchHold.includes("不拦截"), "注记明示只告知不拦截");
+});

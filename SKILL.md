@@ -45,7 +45,7 @@ A delivery task prompt must NOT ask the worker to commit, run `git add/commit/..
 
 ## Safety Preflight
 
-Before dispatch: `registry_list` for inventory + required-credential presence + recorded certification (advisory, not a gate). Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
+Before dispatch: `registry_list` for inventory + required-credential presence + recorded certification (advisory, not a gate) + any lane `dispatchHold` pause note (Owner's words, advisory only — the dispatch decision stays with the Lead). Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
 
 **Before unattended/stop-sensitive work**: read `references/safety-incidents.md`. **Only when using opencode**: read `references/opencode-pitfalls.md`.
 

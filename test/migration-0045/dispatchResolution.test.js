@@ -5,11 +5,13 @@
 // 过渡绊线。R3 会审（consult_20261005185623675eln792）裁定语义的机器钉。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   ID_RE, RESOLVED_FROM, DISPATCH_ERROR_CODES,
   loadLanesConfig, validateLanesStructure, validateLanesAgainstRegistry, resolveDispatchTarget,
+  laneDispatchHold, validDispatchHold, dispatchHoldAdvisoryLine, DISPATCH_HOLD_MAX_CHARS,
 } from "../../src/dispatchResolution.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
@@ -215,6 +217,77 @@ test("W1 守卫：未知键/重复 lane id/别名双挂/wiringAgent 双引用/�
   assert.ok(v({ schema: 2, lanes: [{ ...base, aliases: { x: { role: "r", extra: 1 } } }] }).length > 0, "别名值只允许 {role}（G3）");
   assert.ok(v({ schema: 1, lanes: [] }).length > 0, "schema 版本拒（须 2）");
   assert.deepEqual(v({ schema: 2, lanes: [base] }), [], "合法形状零 issue");
+});
+
+// ── TD-283：dispatchHold（Owner 的车道暂停派发说明，只告知不拦截） ──────────
+
+test("TD-283 结构校验：dispatchHold 合法放行；空白/空串/超长/类型不对/控制字符 → 整文件拒", () => {
+  const v = (doc) => validateLanesStructure(doc);
+  const base = { id: "t1", backend: "zcode", model: { id: "m" }, reasoning: { effort: "high" }, aliases: {} };
+  const base2 = { ...base, id: "t2", model: { id: "m2" } };
+  assert.deepEqual(
+    v({ schema: 2, lanes: [{ ...base, dispatchHold: "夹具：暂停说明" }, base2] }),
+    [],
+    "合法 dispatchHold 零 issue",
+  );
+  assert.deepEqual(
+    v({ schema: 2, lanes: [{ ...base, dispatchHold: "暂".repeat(DISPATCH_HOLD_MAX_CHARS) }, base2] }),
+    [],
+    "恰 200 字符（边界值）放行",
+  );
+  assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: "" }] }).length > 0, "空串拒");
+  assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: "   " }] }).length > 0, "纯空白拒（去空白后须非空）");
+  assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: "x".repeat(DISPATCH_HOLD_MAX_CHARS + 1) }] }).length > 0, "超 200 字符拒");
+  assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: 42 }] }).length > 0, "非字符串拒");
+  assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: "a\u0007b" }] }).length > 0, "控制字符拒");
+  for (const ch of ["\u0085", "\u009b", "\u2028", "\u2029"]) {
+    const code = `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+    assert.ok(v({ schema: 2, lanes: [{ ...base, dispatchHold: `a${ch}b` }] }).length > 0, `${code} 拒（C1 控制字符与行分隔符）`);
+  }
+});
+
+test("TD-283 helper 三态与夹具数据：带说明/无说明/表不可用；查表/文案共用面", () => {
+  // 夹具车道表（不读真实 config/lanes.json——解除暂停改表后这里不红，Owner
+  // 原话不抄第二份）：一条带 dispatchHold 的车道 + 一条无说明车道。
+  const FIX = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
+    lanes: [
+      { id: "held-lane", backend: "zcode", model: { id: "m" }, reasoning: { effort: "high" }, aliases: {}, dispatchHold: "夹具：暂停说明" },
+      { id: "plain-lane", backend: "zcode", model: { id: "m2" }, reasoning: { effort: "high" }, aliases: {} },
+    ],
+  };
+  assert.equal(laneDispatchHold(FIX, "held-lane"), "夹具：暂停说明", "带说明车道 → 原文");
+  assert.equal(laneDispatchHold(FIX, "plain-lane"), null, "无说明车道 → null");
+  assert.equal(laneDispatchHold({ ...FIX, ok: false }, "held-lane"), null, "表不可用（结构红）→ null");
+  assert.equal(laneDispatchHold(null, "held-lane"), null, "无表 → null");
+  assert.equal(laneDispatchHold(FIX, 123), null, "非字符串 laneId → null");
+  assert.equal(validDispatchHold(undefined), null);
+  assert.equal(validDispatchHold("  x  "), "  x  ", "原文照录不 trim");
+  assert.equal(validDispatchHold("\t"), null, "纯空白无效");
+  const line = dispatchHoldAdvisoryLine("held-lane", "夹具：暂停说明");
+  assert.match(line, /^\[wao\] advisory: lane held-lane dispatchHold="夹具：暂停说明"/, "advisory 行形制同资源计数行");
+  assert.ok(line.includes("不拦截"), "文案明示不拦截");
+  assert.ok(line.includes("照常进行"), "文案明示派发照常");
+  assert.equal(dispatchHoldAdvisoryLine("x", null), null, "无说明 → 不出 advisory 行");
+  assert.equal(dispatchHoldAdvisoryLine("x", "   "), null, "坏形状 → 不出 advisory 行");
+});
+
+test("loadLanesConfig：顶层不是对象、lanes 不是数组或条目为 null → ok:false，不抛", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanes-shape-"));
+  try {
+    for (const [name, body] of [["null", "null"], ["lanes-object", '{"schema":2,"lanes":{}}'], ["lane-null", '{"schema":2,"lanes":[null]}']]) {
+      const path = join(dir, `${name}.json`);
+      writeFileSync(path, body, "utf8");
+      const doc = loadLanesConfig(path);
+      assert.equal(doc.ok, false, `${name}：结构红`);
+      assert.equal(laneDispatchHold(doc, "x"), null, `${name}：读取面得 null`);
+      assert.doesNotThrow(() => validateLanesAgainstRegistry(doc, {}), `${name}：绑定校验不抛`);
+      assert.doesNotThrow(
+        () => resolveDispatchTarget({ agentId: "x", lanesDoc: doc, registryAgents: {}, roleLibrary: [] }),
+        `${name}：派发解析不抛`,
+      );
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("W1 绊线（W4d 结构化版）：lanes.json 永不含 wiringAgent（含即结构红，14 号钉）；包版本前置观察", () => {

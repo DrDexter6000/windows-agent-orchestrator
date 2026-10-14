@@ -16,6 +16,7 @@ import {
   getRegistryInventoryWithIssues,
   projectRegistryIssues,
   normalizeInventoryResult,
+  laneDispatchHoldIndex,
   REGISTRY_ISSUES_CAP,
   REGISTRY_ISSUE_CODES,
 } from "../../src/application/registryInventory.js";
@@ -667,4 +668,78 @@ test("R23-C-F6: buildCertMap 透传 providerKey——换接入方/null 对有 pr
   } finally {
     cleanupDir(dir);
   }
+});
+
+// ===== TD-283: dispatchHold join（CLI registry list 与 MCP registry_list 同源） =====
+//
+// join 规则：按条目 id（车道键条目=车道 id）从车道表取 Owner 的暂停说明；
+// 无该车道、无说明、表不可用（结构红/文件缺失）一律 null。lanesDocFn 可注入。
+
+test("TD-283-inventory: 条目按车道 id 带 dispatchHold；无说明/非车道 → null", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td283-inv-"));
+  try {
+    const registryPath = makeRegistry(dir, {
+      "held-lane": { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
+      "plain-lane": { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
+    });
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const lanesDocFn = () => ({
+      ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [],
+      lanes: [
+        { id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" },
+        { id: "plain-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {} },
+      ],
+    });
+    const result = await getRegistryInventory({ registryPath, runDir, lanesDocFn });
+    const held = result.find((a) => a.id === "held-lane");
+    const plain = result.find((a) => a.id === "plain-lane");
+    assert.equal(held.dispatchHold, "夹具：暂停说明", "车道表有说明 → 原话透出");
+    assert.equal(plain.dispatchHold, null, "无说明车道 → null");
+
+    const partial = await getRegistryInventoryWithIssues({ registryPath, runDir, lanesDocFn });
+    assert.equal(partial.agents.find((a) => a.id === "held-lane").dispatchHold, "夹具：暂停说明", "partial 投影同一 join");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-283-inventory: 车道表不可用（结构红/缺失）→ 全部 null，不猜", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td283-inv2-"));
+  try {
+    const registryPath = makeRegistry(dir, {
+      "held-lane": { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
+    });
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const structurallyInvalid = {
+      ok: false, path: "fixture", sha256: "cd".repeat(32),
+      issues: ["lane \"x\" dispatchHold 形状不合法"],
+      lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" }],
+    };
+    const r1 = await getRegistryInventory({ registryPath, runDir, lanesDocFn: () => structurallyInvalid });
+    assert.equal(r1[0].dispatchHold, null, "结构红表（即使含该车道）→ null");
+    const missing = { ok: true, path: "fixture", sha256: null, issues: [], lanes: [] };
+    const r2 = await getRegistryInventory({ registryPath, runDir, lanesDocFn: () => missing });
+    assert.equal(r2[0].dispatchHold, null, "文件缺失形（空表）→ null");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-283-inventory: laneDispatchHoldIndex 跳过形状不合法的说明（fail-to-null）", () => {
+  const doc = {
+    ok: true, sha256: "ef".repeat(32), issues: [],
+    lanes: [
+      { id: "ok-lane", dispatchHold: "暂停" },
+      { id: "bad-blank", dispatchHold: "   " },
+      { id: "bad-type", dispatchHold: 7 },
+      {},
+    ],
+  };
+  const index = laneDispatchHoldIndex(doc);
+  assert.equal(index.size, 1);
+  assert.equal(index.get("ok-lane"), "暂停");
+  assert.equal(laneDispatchHoldIndex(null).size, 0, "无表 → 空索引");
+  assert.equal(laneDispatchHoldIndex({ ok: false, lanes: doc.lanes }).size, 0, "结构红 → 空索引");
 });

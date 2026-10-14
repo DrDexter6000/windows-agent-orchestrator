@@ -46,8 +46,8 @@
       "concurrencyNote": "同车道 3 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "deepseek-pro": {
-      "profile": "调试中，暂勿派发（Owner 2026-10-10 裁定；模型=deepseek-v4-pro）",
-      "suggestedUses": ["暂勿派发（模型调试中，Owner 2026-10-10）"],
+      "profile": "（Owner 画像待撰写）",
+      "suggestedUses": ["（Owner 未撰写）"],
       "contextWindow": { "tokens": 1000000, "source": "official" },
       "multimodal": { "image": false, "video": false, "source": "official（无视觉证据）" },
       "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"

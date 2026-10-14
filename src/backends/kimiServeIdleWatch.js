@@ -214,6 +214,10 @@ export function startServeIdleWatch({ port, pid, kimiHome = null, env = process.
       stdio: "ignore",
       windowsHide: true,
       env: stripServeEnvVars(env),
+      // 中立工作目录：不继承拉起者的 cwd——Windows 不允许删除某进程正用作
+      // 工作目录的目录，看护若占住派发工作树，该树要等看护退出（至少空闲
+      // 阈值那半小时）才能删。tmpdir 恒在、恒可写，且与任何工作树无关。
+      cwd: tmpdir(),
     });
   } catch {
     return { started: false, reason: "spawn_failed" };

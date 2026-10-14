@@ -220,3 +220,49 @@ test("wao lanes：kimiHome 车道就绪按 token 文件推导（不探 tokenEnv�
     }
   } finally { cleanupDir(dir); }
 });
+
+// ── TD-283：wao lanes 显示车道的 Owner 暂停派发说明 ──────────────────────────
+
+test("wao lanes：车道带 dispatchHold → 人读行与 --json 都显示；无说明不出现该行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-hold-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+    schema: 2,
+    lanes: [
+      { id: "h1", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, dispatchHold: "夹具：暂停说明", aliases: {} },
+      { id: "h2", backend: "codex", model: { id: "gpt-6-astra" }, reasoning: { effort: "high" }, aliases: {} },
+    ],
+  }), "utf8");
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    agents: {
+      h1: { backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir },
+      h2: { backend: "codex", model: { id: "gpt-6-astra" }, reasoning: { effort: "high" }, cwd: dir },
+    },
+  }), "utf8");
+  try {
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      await lanesCommand(
+        ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: "config/agents.json", runDir: join(dir, "runs") },
+      );
+      await lanesCommand(
+        ["--json", "--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: "config/agents.json", runDir: join(dir, "runs") },
+      );
+    } finally { console.log = origLog; }
+    const text = lines.join("\n");
+    assert.ok(text.includes('dispatchHold: 夹具：暂停说明'), "人读面显示 Owner 原话");
+    assert.ok(/dispatchHold[^\n]*不拦截/.test(text), "人读行明示只告知不拦截");
+    assert.ok(!/lane h2[\s\S]*?dispatchHold:/.test(text.split("lane h2")[1]?.split("lane ")[0] ?? ""), "无说明车道不带该行");
+    const jsonStart = lines.findIndex((l) => l.trim().startsWith("{"));
+    const payload = JSON.parse(lines.slice(jsonStart).join("\n"));
+    const h1 = payload.lanes.find((r) => r.id === "h1");
+    const h2 = payload.lanes.find((r) => r.id === "h2");
+    assert.equal(h1.dispatchHold, "夹具：暂停说明");
+    assert.equal(h2.dispatchHold, null);
+    assert.ok(payload.sourceNotes.dispatchHold, "--json 同源带来源注记");
+  } finally { cleanupDir(dir); }
+});

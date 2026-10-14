@@ -25,8 +25,24 @@ import { isValidRunId } from "../delivery.js";
 // M9-0: displayModel SSOT lives in application/registryInventory.js;
 // this re-export preserves the existing shared.js/cli.js public contract.
 import { displayModel } from "../application/registryInventory.js";
+import { loadLanesConfig } from "../dispatchResolution.js";
 
 export { displayModel };
+
+/**
+ * 本次 CLI 调用适用的车道表（防跨绑）：调用给了非默认 --registry 时，本仓库
+ * 车道表不描述那份注册表——返回停用的空表，解析、暂停提示与 `registry list`
+ * 的 dispatchHold 都不读它。run / spawn / consult run / registry list 共用。
+ * @param {object} options 解析后的 CLI 选项（读 options.registry）
+ * @param {object} config CLI 配置（config.registry 是默认注册表）
+ * @param {Function} [loadFn] 车道表读取（测试缝；缺省 loadLanesConfig）
+ */
+export function lanesDocForCall(options, config, loadFn = loadLanesConfig) {
+  const enabled = options.registry === undefined
+    || (typeof options.registry === "string"
+      && resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"));
+  return enabled ? loadFn() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
+}
 
 export function parseOptions(args) {
   const options = {};

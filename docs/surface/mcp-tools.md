@@ -7,7 +7,7 @@ Rendered from the live `tools/list` of a real `createWaoMcpServer` over an SDK I
 
 ## registry_list
 
-List configured worker agents: backend, model, certification. Read-only; optional detail='certificationEvidence' adds per-seat advisory evidence (never a gate); registry/run dir are server-owned.
+List configured worker agents: backend, model, certification. Read-only; optional detail='certificationEvidence' adds per-seat advisory evidence (never a gate); registry/run dir are server-owned. Entries may carry dispatchHold — the Owner's pause note for that lane, advisory only, never blocks.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 

@@ -33,8 +33,8 @@ import { renderRunSummary } from "../cliRunSummary.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
 import { boundReportScope } from "../metrics.js";
-import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag } from "./shared.js";
-import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
+import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall } from "./shared.js";
+import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 import { readRegistry } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
@@ -301,6 +301,17 @@ export async function spawnCommand(args, config) {
     );
   }
   const manager = newRunManager(config);
+  // TD-283：spawn 按裸 agentId 派发（无解析块）——目标本身是带 Owner 暂停说明
+  // 的车道键时，同样给 stderr 一行 advisory（只提示不拦截）。非默认 --registry
+  // 时车道表停用（lanesDocForCall），不提示。
+  {
+    // loadLanesConfigFn：测试缝（夹具车道表注入；生产路径缺省真实表）。
+    const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
+    for (const id of agents) {
+      const line = dispatchHoldAdvisoryLine(id, laneDispatchHold(lanesDoc, id));
+      if (line) console.error(line);
+    }
+  }
   // P2（M7）：单 agent spawn 不带 --wait = 后台托管（detached runner）。
   // 替代旧 TD-39 "拒绝裸 spawn"——现在不拒，而是托管：runner 拥有 handle 驱动 wait+gate+abort，
   // 不再产生孤儿会话（06-18 事故架构洞的正解）。多 agent spawn 仍要求 --wait（并行 background 留 P3 daemon）。
@@ -471,6 +482,9 @@ export async function runCommand(args, config) {
   // =W2b）；--explain 只打印解析结果零副作用；错误=闭集码+received+完整合法
   // 全集+修正例（auditor R3 文案基准）。
   let resolvedTarget = null;
+  // TD-283：目标车道的 Owner 暂停派发说明——解析块内取（lanesDoc 已在作用域），
+  // 块外打印。--explain 在块内早退，不受影响。
+  let dispatchHoldLine = null;
   const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
   // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名）。原 A-1 顺序
   // （prompt 校验先于注册表解析）保持：无 prompt 时先拒绝，不触发解析。
@@ -515,8 +529,9 @@ export async function runCommand(args, config) {
   }
   if (true) {
     const registryPath = resolve(options.registry ?? config?.registry ?? "config/agents.json");
-    const lanesEnabled = !options.registry || registryPath === resolve(config?.registry ?? "config/agents.json");
-    const lanesDoc = lanesEnabled ? loadLanesConfig() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
+    // 非默认 --registry 时车道表停用（防跨绑，lanesDocForCall）；loadLanesConfigFn
+    // 是测试缝（夹具车道表注入；生产路径缺省真实表）。
+    const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
     // readRegistry 返回方法对象（getAgent/listAgents）；解析器要纯映射
     // {id: 条目}——listAgents 的 normalizeAgent 产物自带 id 字段。
     // 注入优先（测试/嵌入面）：config.readRegistry 存在则不经磁盘。
@@ -560,6 +575,10 @@ export async function runCommand(args, config) {
       if (typeof resolution.roleId === "string") options.resolvedRoleId = resolution.roleId; // 后台政策语义
     }
     // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
+    // TD-283：按最终派发目标（解析所得 laneId，或裸键=车道键本身）取暂停说明。
+    // 目标不是带说明的车道 → null（不打印）。仅提示，不改任何派发决策与退出码。
+    const holdLaneId = resolution.kind === "resolved" && typeof resolution.laneId === "string" ? resolution.laneId : agentId;
+    dispatchHoldLine = dispatchHoldAdvisoryLine(holdLaneId, laneDispatchHold(lanesDoc, holdLaneId));
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
@@ -593,6 +612,9 @@ export async function runCommand(args, config) {
     options.cwd ? resolve(options.cwd) : process.cwd(),
   );
   if (advisoryLine) console.error(advisoryLine);
+  // TD-283：目标车道带 Owner 暂停说明 → stderr 一行 advisory（dispatchResource-
+  // Advisory 同款纪律：只提示、不拦截、不改退出码、不污染 stdout 管道）。
+  if (dispatchHoldLine) console.error(dispatchHoldLine);
   // 决定 0066：派发发生在可识别的宿主会话里而该宿主未注册 WAO MCP 时，明确告知
   // Lead 自己走的是命令行通道（同为 fail-open advisory：stderr 一行，不阻塞）。
   const mcpHostAdvisory = renderMcpHostAdvisory({

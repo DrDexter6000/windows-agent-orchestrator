@@ -97,3 +97,5 @@
 | TD-161 | `registry check` 只查 opencode serve，命名和帮助文字容易让人当成车道健康检查；各车道的就绪检查没有 | `registry check` 对非 opencode-serve 车道写明它只探 opencode-serve，车道就绪看 `wao lanes`、环境看 `wao doctor`；帮助行同样指路 |
 | TD-276 | 声明了 kimiHome 的车道，token 文件是否就绪在 registry_list / doctor 里看不出来 | kimiHome 车道以 token 文件为凭据：`registry_list` 的 `credentialAvailability`、`wao lanes` 的 `readyState`、`wao doctor` 都按文件给出 |
 | TD-297 | zcode backend 声明不支持在途纠偏，依据是 0.16.9 的方法表；本机更新后的 bundle 已有 steer 事件与 steerable 活动轮 | 真机（GLM-5.3-Flash）：活动轮里再发 `session/send` 返回 -32010「A prompt is already running for this session」，协议方法表里没有注入活动轮的方法；声明维持 false，翻转条件写在 zcode.js 与 factory.js 的说明里 |
+| TD-283 | 车道暂停说明只写在画像展示文字里，派发和会审选席时不出现 | 车道表 `config/lanes.json` 的 `dispatchHold` 是暂停说明唯一的家；`registry_list`、`registry list`、`wao lanes` 与 CLI 派发、会审席位的提示都由它现算，只提示不拦截；画像里的原话移除（决定 0080） |
+| TD-296 | canonicalRunner 的 TD-255 端到端用例在 worker 语境里必红（runner 在 worker 语境按决定 0054 关闭自动裁定） | `runTd255RegistryCase` 显式传 `workerContext: false`，不再依赖运行环境；worker 语境下不裁定另有专门用例 |

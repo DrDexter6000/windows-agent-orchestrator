@@ -50,14 +50,6 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 
-// 0045 W4d：runtimeFacts 的同步解析缓存（模块级一次）。
-let _registryAgentsCache = null;
-function registryAgentsForFacts(registry) {
-  if (_registryAgentsCache) return _registryAgentsCache;
-  _registryAgentsCache = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
-  return _registryAgentsCache;
-}
-function loadLanesConfigForFacts() { return loadLanesConfig(); }
 function listRoleLibrarySync() { return listRoleLibrary(); }
 
 
@@ -65,7 +57,7 @@ import { readRegistry } from "../registry.js";
 import { boundReportScope } from "../metrics.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { dispatchRun } from "./runDispatch.js";
-import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
 // 预算范围与 run_wait 同域（0039 r1：--wait-timeout 默认 600000，范围同 run_wait）。
 import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS, RUN_WAIT_DEFAULT_MS } from "./runWait.js";
@@ -436,6 +428,12 @@ export async function runConsult({
   sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
   idFn = generateConsultId,
   onFanOut,
+  // TD-283：席位派发 advisory 下沉（服务层零 console——CLI 注入 console.error，
+  // MCP 面缺省 no-op）。每席目标车道带 Owner 暂停说明时恰一行，只提示不拦截。
+  advisorySink = () => {},
+  // 车道表读取面：席位别名解析与 TD-283 暂停提示共用。CLI 在非默认 --registry
+  // 时传入停用的空表（防跨绑，规则同 run 命令）；测试注入夹具；缺省真实表。
+  lanesDocFn = loadLanesConfig,
 }) {
   if (!Array.isArray(seats) || seats.length === 0) {
     throw new Error("runConsult: seats is required (at least one seat)");
@@ -494,19 +492,41 @@ export async function runConsult({
   // 0045 W4c（R5 点名）：getAgent 抛错不再静默吞成 null——如实标注
   // registryResolution（"ok" | "failed" | "registry-unreadable"），渲染层区分
   // "席位已不在注册表"与"确无 provider 标识"，独立性判断不因此静默塌成 unknown。
-  const runtimeFacts = seats.map((seat) => {
-    if (!registry) return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "registry-unreadable" };
-    // 0045 W4d：先直查；Unknown 则经别名解析取车道键（席位名可能是别名）。
-    const lookupId = (() => {
-      try { registry.getAgent(seat.agentId); return seat.agentId; } catch { /* fallthrough */ }
+  // 车道表与注册表映射本次会审各取一次：身份事实、席位别名解析与暂停提示共用，
+  // 组记录写的车道与实际派发的目标同源。CLI 在非默认 --registry 时传入停用的
+  // 空表（防跨绑，规则同 run 命令）；读不到 = null（解析透传、无提示）。
+  let consultLanesDoc = null;
+  try { consultLanesDoc = lanesDocFn(); } catch { consultLanesDoc = null; }
+  let consultRegistryAgents = {};
+  try {
+    consultRegistryAgents = registry ? Object.fromEntries(registry.listAgents().map((a) => [a.id, a])) : {};
+  } catch { consultRegistryAgents = {}; }
+  // 0045 W4d：席位名可能是车道别名（别名=执行；未入别名表的键原样透传）。每席的
+  // 派发目标只解析一次，身份事实与派发共用——注册表键与别名同名时两边同样按
+  // 解析器的别名优先。注册表读不到时不解析，原样透传。
+  const seatTargets = new Map(); // agentId → {dispatchAgentId, policy}
+  for (const seat of seats) {
+    if (seatTargets.has(seat.agentId)) continue;
+    let target = { dispatchAgentId: seat.agentId, policy: null };
+    if (registry) {
       try {
         const resolution = resolveDispatchTarget({
-          agentId: seat.agentId, lanesDoc: loadLanesConfigForFacts(),
-          registryAgents: registryAgentsForFacts(registry), roleLibrary: listRoleLibrarySync(),
+          agentId: seat.agentId, lanesDoc: consultLanesDoc,
+          registryAgents: consultRegistryAgents, roleLibrary: listRoleLibrarySync(),
         });
-        return resolution.kind === "resolved" ? resolution.agentId : seat.agentId;
-      } catch { return seat.agentId; }
-    })();
+        if (resolution.kind === "resolved" && resolution.source === "alias") {
+          target = {
+            dispatchAgentId: resolution.agentId,
+            policy: { laneId: resolution.laneId, roleId: resolution.roleId, resolvedTarget: resolution },
+          };
+        }
+      } catch { /* 解析面不可用=照旧透传 */ }
+    }
+    seatTargets.set(seat.agentId, target);
+  }
+  const runtimeFacts = seats.map((seat) => {
+    if (!registry) return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "registry-unreadable" };
+    const lookupId = seatTargets.get(seat.agentId).dispatchAgentId;
     try {
       const agent = registry.getAgent(lookupId);
       return { agentId: seat.agentId, ...seatRuntimeFacts(agent), registryResolution: "ok" };
@@ -529,21 +549,15 @@ export async function runConsult({
       : text;
     const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、创建或修改文件、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
     try {
-      // 0045 W4d：席位名可能是车道别名（auditor→gpt-astra）——经解析层取车道键
-      // （别名=执行；未入别名表的 legacy 键原样透传）。
-      let dispatchAgentId = seat.agentId;
-      try {
-        const { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } = await import("../dispatchResolution.js");
-        const lanesDoc = loadLanesConfig();
-        const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
-        const resolution = resolveDispatchTarget({
-          agentId: seat.agentId, lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
-        });
-        if (resolution.kind === "resolved" && resolution.source === "alias") {
-          dispatchAgentId = resolution.agentId;
-          seatPolicies.set(seat.agentId, { laneId: resolution.laneId, roleId: resolution.roleId, resolvedTarget: resolution });
-        }
-      } catch { /* 解析面不可用=照旧透传 */ }
+      // 派发目标取扇出前的那次解析（seatTargets），与身份事实同源。
+      const { dispatchAgentId, policy } = seatTargets.get(seat.agentId);
+      if (policy) seatPolicies.set(seat.agentId, policy);
+      // TD-283：席位目标（别名解析后的车道键，或裸键本身）带 Owner 暂停说明 →
+      // 一行 advisory。车道表不可用（ok:false、停用或读取失败）= null，静默。
+      {
+        const holdLine = dispatchHoldAdvisoryLine(dispatchAgentId, laneDispatchHold(consultLanesDoc, dispatchAgentId));
+        if (holdLine) advisorySink(holdLine);
+      }
       const seatPolicy = seatPolicies.get(seat.agentId);
       const result = await dispatchFn({
         agentId: dispatchAgentId,

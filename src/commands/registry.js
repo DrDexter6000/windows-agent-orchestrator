@@ -15,7 +15,7 @@ import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
-import { parseOptions } from "./shared.js";
+import { parseOptions, lanesDocForCall } from "./shared.js";
 // M9-0: registry list data logic delegated to shared application service.
 import { getRegistryInventory, getCertificationEvidenceInventory } from "../application/registryInventory.js";
 import { loadRoleContract } from "../application/roleContract.js";
@@ -68,7 +68,13 @@ async function registryCommand(args, config) {
   // parsing, path resolution, and text/JSON output formatting.
   const registryPath = resolve(options.registry ?? config.registry);
   const runDir = resolve(options.runDir ?? config.runDir);
-  const agents = await getRegistryInventory({ registryPath, runDir });
+  // 车道表：非默认 --registry 时停用（防跨绑，规则同 run 命令；dispatchHold 全为
+  // null）。config.lanesDocFn 是测试缝（夹具车道表注入），生产缺省真实表。
+  const agents = await getRegistryInventory({
+    registryPath,
+    runDir,
+    lanesDocFn: () => lanesDocForCall(options, config, config?.lanesDocFn),
+  });
   // TD-186: opt-in 只读证据详情（默认路径零改动——简表/JSON 契约保持不变）。
   const certEvidence = options.certEvidence === true
     ? await getCertificationEvidenceInventory({ registryPath, runDir })
@@ -79,9 +85,12 @@ async function registryCommand(args, config) {
     return;
   }
   // R5-B：人类输出加表头行（保持 tab 分隔；--format json 不变）。
-  console.log("id\tbackend\tmodel\tcertification\tcwd");
+  // TD-283：dispatchHold 列条件出现——任一车道带 Owner 暂停说明才加列（无暂停
+  // 时输出与旧表逐字节一致）；JSON 面恒带该字段（null=无）。
+  const anyHold = agents.some((a) => typeof a.dispatchHold === "string");
+  console.log(`id\tbackend\tmodel\tcertification\tcwd${anyHold ? "\tdispatchHold" : ""}`);
   for (const agent of agents) {
-    console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}`);
+    console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}${anyHold ? `\t${agent.dispatchHold ?? "-"}` : ""}`);
   }
   if (certEvidence) renderCertEvidence(certEvidence);
 }

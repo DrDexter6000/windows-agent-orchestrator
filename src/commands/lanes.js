@@ -72,6 +72,8 @@ function renderLane(row, width) {
     for (const seg of wrapLines(value, body - 2)) lines.push(`    ${seg}`);
   };
   lines.push(`lane ${row.id} — ${row.backend ?? "?"} · ${row.modelId ?? "?"} · effort ${row.effort ?? "null"}`);
+  // TD-283：Owner 的暂停派发说明（车道表自带，与接线状态无关）——只告知不拦截。
+  if (row.dispatchHold) emit("dispatchHold", `${row.dispatchHold}（Owner 暂停说明，仅提示不拦截——派发决定权在 Lead）`);
   if (row.wiring === "wired") lines.push("  接线: 一致（lanes.json 声明与 registry 接线四轴相符）");
   else if (row.wiring === "drift") {
     emit("接线", `漂移——explicit 派发将拒绝：declared(${axesLabel(row.wiringDetail.declared)}) ≠ registry(${axesLabel(row.wiringDetail.registry)})`);

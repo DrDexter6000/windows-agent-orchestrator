@@ -33,6 +33,8 @@ npm run cli -- run glm-flash --prompt "..." --format json
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
 - `resume` 不带 `--wait` 是 detached runner 托管续跑；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见[安装与配置](install.md)的 Node v22 一节），要存活走后台托管。
 
+派发前看目标车道有没有 `dispatchHold`：那是 Owner 的暂停派发原话，只提示、不拦截，派不派由 Lead 决定；在哪里看得到见[车道](lanes.md)。
+
 各后端什么时候会被控制面自动收口，判据、读数与边界见[监督](supervise.md)与 [troubleshooting §6.9](../troubleshooting.md#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067)。要点：zcode 运行只在没有任何生命体征（模型流在收、app-server 的后代进程在干活、工作目录里有文件变化）时自动收口，任一成立就继续等且没有自动上限；转录 ≥30 分钟没有新的动作或正文时，CLI `status` 附 `advisory`、MCP `run_status` 附 `leadAdvisory`、`run_wait` / `run_await_result` 附 `observation.transcript_quiet`，停不停由 Lead 决定。工具证据随轮询节拍增量落盘（CLI 缺省 5s）；纯文本/纯思考段（无工具活动）仍零事件，在途监督靠生命体征观察与终态事实。kimi-web 失败的轮会留下在途已落的命令、工具调用及其结果，诊断可能因此是 `no_effect` 而非 `crash`；写文件证据仍只在整轮带着正文完成时落。
 
 ## 场景 1b：单次派发换模型（--model）

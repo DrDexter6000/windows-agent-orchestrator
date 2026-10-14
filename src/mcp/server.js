@@ -189,7 +189,7 @@ import {
   projectConsultReceipt,
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
-import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { selectCertRecord } from "../runManager.js";
@@ -441,6 +441,11 @@ const AGENT_ENTRY = z.object({
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
   missingCredentialEnvNames: z.array(z.string()).max(32),
   providerReadiness: PROVIDER_READINESS,
+  // TD-283: the lane's Owner pause note (dispatchHold in config/lanes.json),
+  // joined by lane id in the shared inventory service. null when the lane has
+  // no hold or the lane table is unavailable. Bounded to the lanes.json
+  // validation limit; advisory only — informs, never blocks.
+  dispatchHold: z.string().max(DISPATCH_HOLD_MAX_CHARS).nullable().default(null),
 });
 
 // M12-25 (Outcome 1): bounded safe per-entry issue for the PARTIAL inventory.
@@ -513,7 +518,8 @@ const REGISTRY_LIST_ANNOTATIONS = {
 const REGISTRY_LIST_DESCRIPTION =
   "List configured worker agents: backend, model, certification. Read-only; " +
   "optional detail='certificationEvidence' adds per-seat advisory evidence " +
-  "(never a gate); registry/run dir are server-owned.";
+  "(never a gate); registry/run dir are server-owned. Entries may carry " +
+  "dispatchHold — the Owner's pause note for that lane, advisory only, never blocks.";
 
 // ===== ADR-0032 修订（2026-09-22）：certificationEvidence 行投影（纯函数） =====
 //

@@ -21,7 +21,7 @@ import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { parseOptions, resolveTargetCwd } from "./shared.js";
+import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
 import {
   runConsult,
   loadConsultRecord,
@@ -251,6 +251,12 @@ async function consultRunCommand(args, config, deps = {}) {
     consultsDir: resolveConsultsDir(options, config),
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: process.env,
+    // TD-283：席位目标车道带 Owner 暂停说明 → 每席一行 stderr advisory（只提示
+    // 不拦截，派发照常进行）。
+    advisorySink: (line) => console.error(line),
+    // 车道表：非默认 --registry 时停用（防跨绑，规则同 run 命令），席位解析与
+    // 暂停提示都不读它；config.lanesDocFn 是测试缝。
+    lanesDocFn: () => lanesDocForCall(options, config, config?.lanesDocFn),
     // 扇出一完成就在 stderr 报出 consultId（stdout 留给最终结果）：等待预算到期
     // 之前就能另起命令 `consult show` / `consult wait`。
     onFanOut: ({ consultId, seats }) => {

@@ -699,7 +699,7 @@ const RED_23_WIRE = 75492;
 // tool_result 条目增 tail / truncated（输出尾部），描述 +17。实测 85915 → 86066
 // （+151B），按实测重冻；Owner 硬顶 94532，余 8466B。
 // 当前实测值（Owner 硬顶 94532）。每次变化的经过写在提交说明里，不再往上面追加。
-const FROZEN_23_WIRE_CEILING = 86292;
+const FROZEN_23_WIRE_CEILING = 86486;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -911,7 +911,7 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
 // lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
 // outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
-  "f8eeaaed5c08b7fb13de79ce43c44bb34c98f8fdf08a846e72a952aa5a07e3ba";
+  "7fa75c7525b98023712f30a2bfc2e19ccbc6ac4cb6f4823ba4779efddd56941d";
   // 0070（2026-10-13）：run_activity 的 tool_use 条目增可选 detail、tool_result 条目增
   // tail / truncated——outputSchema 在 stripped 载荷内，SHA 如实翻新。
   // 0069（2026-10-13）：run_activity command 条目增 text / truncated、入参增 order、
@@ -974,7 +974,8 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 实测重冻。防 creep 语义不变。
 // 0070 重冻（2026-10-13）：run_activity 描述加上"工具输入摘要与输出尾部"，11391 → 11408
 // （+17）；Owner 授权的描述上限 12347（ADR-0032 修订节）不动。
-const FROZEN_23_DESC_CEILING = 11408;
+// 当前实测值（Owner 授权的描述上限 12347）。每次变化的经过写在提交说明里，不再往上面追加。
+const FROZEN_23_DESC_CEILING = 11510;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

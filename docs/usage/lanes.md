@@ -84,6 +84,8 @@
 
 车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
 
+车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截——它进 `wao lanes`、`registry list` / `registry_list` 的条目与派发 stderr 提示；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。它不是接线轴，不参与派发解析的任何裁定。
+
 声明了 `kimiHome` 的 kimi-web 车道，凭据是 `<kimiHome>/server.token` 文件（serve 拉起时生成，见下文「kimi 车道的 worker serve」一节）；这个文件是否就绪在三处可见：
 
 - MCP `registry_list` 的 `credentialAvailability` 按它取值：在且非空 = `available`，缺失或为空 = `missing`（输出不携带文件路径；没有环境变量参与，`missingCredentialEnvNames` 恒为空表）。

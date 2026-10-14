@@ -26,7 +26,8 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 // axesEqual/laneAxes/agentAxes（explicit 派发 G4 同一判定，0064 起导出）。
-import { axesEqual, laneAxes, agentAxes } from "../dispatchResolution.js";
+// validDispatchHold（TD-283）：dispatchHold 的形状校验与车道表同一纪律。
+import { axesEqual, laneAxes, agentAxes, validDispatchHold } from "../dispatchResolution.js";
 
 const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -213,6 +214,9 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       // 决定 0074：kimiHome 车道就绪按 token 文件推导——就绪输入事实点名路径
       //（人读面与 --json 同源；未接线/无效/非 kimiHome 车道=null）。
       readyTokenFile: wiredForAxes ? (readyMap.get(id)?.requiresTokenFile ?? null) : null,
+      // TD-283：车道表自带的 Owner 暂停派发说明（车道表事实，与接线状态无关；
+      // 无该字段/形状不合法=null）。只告知不拦截。
+      dispatchHold: validDispatchHold(lane.dispatchHold),
     });
   }
 
@@ -248,6 +252,7 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       profile: "画像=Owner 手拟矩阵（config 内画像文件；初次落库 2026-10-06，其后有 Owner 修订；无新鲜度机制——模型升级以重认证为准）",
       certification: "认证=reliability 台账简表口径（不比较 effort，非当前执行画像适用性结论）",
       readyState: "就绪=环境探测（口径同 wao onboarding；未接线/条目无效=跳过探测）",
+      dispatchHold: "暂停说明=车道表 dispatchHold（Owner 原话；只告知不拦截，派发决定权在 Lead）",
       panel: "会审对抗性=派生事实（0045 §1.2/0065：wao stage 2/4 --panel-seats --reviewed-run 按审者×作者车道指纹派生——本面不预判）",
     },
   };

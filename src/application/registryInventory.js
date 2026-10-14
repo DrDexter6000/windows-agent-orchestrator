@@ -37,6 +37,10 @@ import { matchedCertRecord, selectCertRecord } from "../runManager.js";
 // TD-186：声明侧 providerKey 派生与 matchedCertRecord 记录侧同一 SSOT
 // （src/providerFingerprint.js 单一实现，无第二套归一化）。
 import { providerKeyFor } from "../providerFingerprint.js";
+// TD-283：车道表 dispatchHold（Owner 的暂停派发说明）按车道 id 从
+// config/lanes.json 取——CLI `registry list` 与 MCP `registry_list` 共用本
+// 服务，同一处计算（无第二套 join）。只告知、不拦截。
+import { loadLanesConfig, validDispatchHold } from "../dispatchResolution.js";
 
 // ===== M12-6 FR-02: provider readiness truth SSOT =====
 //
@@ -115,6 +119,24 @@ export function displayModel(agent) {
     ?? (["claude-code", "codex", "kimi-code", "deepseek-harness", "deepseek-acp"].includes(agent.backend) ? "(default)" : "-");
 }
 
+/**
+ * Build the laneId → dispatchHold map from a lanes config result (TD-283).
+ * Pure: an unavailable table (ok:false — structurally invalid — or a missing
+ * lanes array) yields an EMPTY map, so every agent projects dispatchHold:null
+ * ("车道表不可用时为 null"，不猜)。Lanes whose dispatchHold fails the shape
+ * check are skipped (same fail-to-null discipline as the read side).
+ */
+export function laneDispatchHoldIndex(lanesDoc) {
+  const map = new Map();
+  if (!lanesDoc || lanesDoc.ok !== true || !Array.isArray(lanesDoc.lanes)) return map;
+  for (const lane of lanesDoc.lanes) {
+    if (!lane || typeof lane.id !== "string") continue;
+    const hold = validDispatchHold(lane.dispatchHold);
+    if (hold !== null) map.set(lane.id, hold);
+  }
+  return map;
+}
+
 // ===== Service implementation =====
 
 /**
@@ -165,6 +187,8 @@ async function buildCertMap(runDir, customReadFile) {
  * @param {Function} [input.readRegistryFn] — injectable readRegistry for testing
  * @param {Function} [input.readFileFn] — injectable readFile for testing
  * @param {Function} [input.userEnvReader] — injectable Windows user-env reader (M11-7)
+ * @param {Function} [input.lanesDocFn] — injectable lanes config loader (TD-283;
+ *   default loadLanesConfig). The returned doc feeds laneDispatchHoldIndex.
  * @returns {Promise<Array<{id, backend, model, certification, cwd, credentialAvailability, missingCredentialEnvNames, providerReadiness}>>}
  *   providerReadiness — M12-6 FR-02 strict truth object (configurationStatus
  *   "configured"; authenticationStatus/entitlementStatus "unknown";
@@ -178,10 +202,12 @@ export async function getRegistryInventory({
   readRegistryFn,
   readFileFn,
   userEnvReader,
+  lanesDocFn,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
   const registry = await _readRegistry(registryPath);
   const certMap = await buildCertMap(runDir, readFileFn);
+  const dispatchHoldByLane = laneDispatchHoldIndex((lanesDocFn ?? loadLanesConfig)());
 
   // M11-7 (operation closeout): ONE operation-scoped resolver shared across all
   // workers, and resolve ONLY the required credential names (registry_list shows
@@ -199,7 +225,7 @@ export async function getRegistryInventory({
       await assessWorkerReadiness({ agent, resolver }),
       readFileFn,
     );
-    results.push(projectInventoryEntry(agent, certMap, readiness));
+    results.push(projectInventoryEntry(agent, certMap, readiness, dispatchHoldByLane.get(agent.id) ?? null));
   }
   return results;
 }
@@ -328,6 +354,7 @@ export async function getRegistryInventoryWithIssues({
   readRegistryFn,
   readFileFn,
   userEnvReader,
+  lanesDocFn,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
   // Read/parse the registry source ONCE. readRegistry throws on a missing file
@@ -336,6 +363,7 @@ export async function getRegistryInventoryWithIssues({
   const registry = await _readRegistry(registryPath);
   const certMap = await buildCertMap(runDir, readFileFn);
   const resolver = createEnvResolver(userEnvReader);
+  const dispatchHoldByLane = laneDispatchHoldIndex((lanesDocFn ?? loadLanesConfig)());
 
   const agents = [];
   const rawIssues = [];
@@ -349,7 +377,7 @@ export async function getRegistryInventoryWithIssues({
         await assessWorkerReadiness({ agent, resolver }),
         readFileFn,
       );
-      agents.push(projectInventoryEntry(agent, certMap, readiness));
+      agents.push(projectInventoryEntry(agent, certMap, readiness, dispatchHoldByLane.get(agent.id) ?? null));
     } catch {
       // One malformed/unsupported entry must NOT abort the list. Record a raw
       // safe issue; the shared projector (single SSOT) bounds + truncates +
@@ -371,7 +399,7 @@ export async function getRegistryInventoryWithIssues({
  * is preserved — the MCP agents array deep-equals the strict service output for
  * an all-valid registry).
  */
-function projectInventoryEntry(agent, certMap, readiness) {
+function projectInventoryEntry(agent, certMap, readiness, dispatchHold = null) {
   // TD-111: certification 与两新 advisory 字段共用同一 identity 匹配规则
   // （backend/modelId 不一致 → 认证不可继承，新字段同样不继承）。
   // 0045 R5（W4a）：车道键台账双空间——certMap 含两种键（指纹键记录 + legacy
@@ -407,6 +435,10 @@ function projectInventoryEntry(agent, certMap, readiness) {
     missingCredentialEnvNames: readiness.missingCredentialEnvNames,
     // M12-6 FR-02: strict truth — never claims authenticated/entitled/live.
     providerReadiness: buildProviderReadiness(readiness.credentialAvailability),
+    // TD-283: the lane's Owner pause note, joined by agent id (= lane id for
+    // lane-keyed entries). null when the lane has no hold or the lane table is
+    // unavailable — advisory only, never a gate.
+    dispatchHold: dispatchHold ?? null,
   };
 }
 

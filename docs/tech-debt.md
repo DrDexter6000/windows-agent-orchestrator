@@ -107,11 +107,10 @@
 | TD-274 | kimi 车道出现过上游 `Request timed out`（发生时只有一个任务在跑），原因未查明 | 开放 | 再次出现时带现场归因 | 0073 0074 |
 | TD-280 | zcode / kimi-web 的严格评分演练以 failed 收尾（认证判定仍是不适用），认证演练没有重跑 | 开放 | 下次例行认证 | 0072 |
 | TD-281 | 评分规则写了 requireCommands 而车道不产出退出码时，派发时没有提示，要到评分才知道通不过 | 开放 | 下次改动派发前检查 | 0072 |
-| TD-283 | 车道画像里的「暂勿派发」只是展示文字，派发和会审选席时不出现 | 开放 | 车道批次 | config/lane-traits.json |
 | TD-284 | Lead 看不出 MCP 服务进程加载的是哪一版代码：合入后派发进程用新代码，服务进程仍是旧的，要重启宿主才一致 | 开放 | 版本可见性批次 |  |
 | TD-285 | 用分支代码对真实车道做验证没有成文做法，注册表和运行目录各自临时处理，证据容易落在临时目录 | 开放 | 版本可见性批次 |  |
 | TD-286 | MCP 工具面的 hostVisible（约 22KB）没有测试守着，description 与 wire 只有冻结线和硬顶；不支持延迟加载工具的宿主每个会话都付这笔上下文 | 开放 | 版本可见性批次：给 hostVisible 加冻结线，按决定 0078 的手段减量 | 0078 test/mcp-surface/m12-10-tool-surface.test.js |
-| TD-287 | 三个偶发失败的测试：mcpBind 的 P0-1R-TXN-04、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时 | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js |
+| TD-287 | 偶发失败的测试：mcpBind 的 P0-1R-TXN-03 / P0-1R-TXN-04（事务回滚后文件内容不符）、genSurfaceEntry 的 EPERM 改名、deliveryVerification 的 3B-C4 计时 | 开放 | 测试批次 | test/mcp-surface/mcpBind.test.js test/process/genSurfaceEntry.test.js test/delivery/deliveryVerification.test.js |
 | TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号；`run` 的帮助行漏了 `--lane` / `--role` / `--explain` / `--tag` 等实际可用的参数，生成层 `docs/surface/cli.md` 因此也没有 | 开放 | 小摩擦批次 | src/cliHelp.js src/commands/run.js |
 | TD-289 | MCP 工具 run_delivery_review_bundle 的描述写 waitMs「省略 = 即时快照」，实际省略时等 270 秒（DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS） | 开放 | 版本可见性批次，与工具描述瘦身（TD-286）同做 | src/mcp/server.js docs/surface/mcp-tools.md |
 | TD-290 | 配置键 portRange（config/default.json 与 src/cli.js 的缺省值）没有任何消费者，端口分配器从未接入（已了结的 TD-23） | 开放 | 小摩擦批次：删键，或接入后写明用途 | config/default.json src/cli.js |
@@ -120,5 +119,5 @@
 | TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-295 | 配置文件的 `_comment` 字段仍夹着决定号、批次号、TD 号与日期，入库模板 `config/agents.example.json` 会被用户整份复制；其中部分措辞被文档守卫钉着 | 开放 | 文档体系下一步：逐个文件改写为现状描述，钉历史措辞的断言随之退役 | 0076 config/ |
-| TD-296 | `test/isolation-infra/canonicalRunner.test.js` 的「TD-255/0059 端到端：登记册命中 ⇒ 自动裁定翻绿」在 worker 语境里必红：canonical runner 在 worker 语境（`WAO_IN_WORKER=1` 或 cwd 在 `.wao-worktrees/` 下）按决定 0054 关闭自动裁定，这条用例却假定裁定可用；交付验证命令带上这个文件的 worker 交付因此验证失败 | 开放 | 下次动 canonical runner 或这组用例时：用例显式声明非 worker 语境，或断言 worker 语境下不裁定 | test/isolation-infra/canonicalRunner.test.js 0054 |
 | TD-298 | kimi-web 的静默收口（turn 未被观察到、有产出后的停滞、serve 自称在跑但长时间无输出增长）仍按旧规则落 `no_effect` / `crash`，没有像 zcode 那样按收口类型如实分类 | 开放 | 诊断批次：逐种收口判定它说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |
+| TD-299 | 车道当前型号在配置之外还有没人核对的副本：现行文档、模板注释、测试字面值。升级型号后它们悄悄过时；模板与车道表的型号也不比值 | 开放 | 型号副本批次：现行文档与模板注释不得出现当前车道型号（由 `config/lanes.json` 现算，与车道名同名的跳过；写某个具体型号的材料用就地标记放行）；改写现有命中；型号字面值钉改为模板、车道表、认证矩阵之间的关系检查 | config/lanes.json config/agents.example.json |

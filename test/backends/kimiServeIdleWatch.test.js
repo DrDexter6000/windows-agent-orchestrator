@@ -312,6 +312,9 @@ test("startServeIdleWatch: 用 process.execPath 跑本模块（detached / ignore
   assert.equal(spawns[0].opts.detached, true);
   assert.equal(spawns[0].opts.stdio, "ignore");
   assert.equal(spawns[0].opts.windowsHide, true);
+  // 中立工作目录：不继承拉起者的 cwd——Windows 不删正被某进程用作工作目录的
+  // 目录，看护若占住派发工作树，该树要等看护退出（≥空闲阈值）才能删。
+  assert.equal(spawns[0].opts.cwd, tmpdir(), "spawn cwd = os.tmpdir()（不占拉起者的工作树）");
   // 环境剔除与 serve 同一套：不带密钥、WAO_*、CLAUDE*、ANTHROPIC*；普通变量保留。
   const childEnv = spawns[0].opts.env;
   for (const gone of ["CLAUDECODE", "Claude_Code_Session", "ANTHROPICBASE", "anthropic_any", "ZZ_TEST_API_KEY", "WAO_TARGET_CWD"]) {

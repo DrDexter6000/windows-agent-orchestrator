@@ -1218,3 +1218,120 @@ test("组记录收尾：改名换不上去时退回就地覆盖并清掉临时�
   });
   assert.deepEqual(sleeps, [100]);
 });
+
+// ── TD-283：席位目标车道带 Owner 暂停说明 → 每席一行 advisory（不拦截） ────────
+
+test("TD-283: 会审席位目标是带 dispatchHold 的车道 → advisorySink 每席一行；其余席位零行", async () => {
+  const { laneDispatchHold } = await import("../../src/dispatchResolution.js");
+  // 夹具车道表（lanesDocFn 测试缝注入——不读真实 config/lanes.json，解除暂停
+  // 改表后这里不红；Owner 原话不抄第二份）。
+  const lanesDoc = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
+    lanes: [
+      { id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" },
+      { id: "plain-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {} },
+    ],
+  };
+  const heldLane = lanesDoc.lanes[0];
+  const advisories = [];
+  let now = 0;
+  const { dispatchFn, calls } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    [`run_stub_${heldLane.id}`, makeTranscript(`run_stub_${heldLane.id}`, { finalText: "Q1: 意见\n" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: 意见\n" })],
+  ]));
+  const result = await runConsult(baseInput({
+    seats: [{ agentId: heldLane.id }, { agentId: "seat_b" }],
+    dispatchFn,
+    readTranscriptFn,
+    nowFn: () => now,
+    sleepFn: async (ms) => { now += ms; },
+    pollIntervalMs: 600000,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+    lanesDocFn: () => lanesDoc,
+    advisorySink: (line) => advisories.push(line),
+  }));
+  assert.equal(calls.length, 2, "两席都照常派发（advisory 不拦截）");
+  assert.equal(result.seats.filter((s) => s.runState === "completed").length, 2, "派发照常完成");
+  assert.equal(advisories.length, 1, "恰一行（只有带说明的席位）");
+  assert.ok(advisories[0].startsWith(`[wao] advisory: lane ${heldLane.id} dispatchHold=`), "advisory 行形制同资源计数行");
+  assert.ok(advisories[0].includes(laneDispatchHold(lanesDoc, heldLane.id)), "夹具说明原文入行");
+  assert.ok(advisories[0].includes("照常进行"), "文案明示派发照常进行");
+});
+
+test("TD-283 consult run：默认注册表 → 服务拿到车道表；非默认 --registry → 停用的空表", async () => {
+  const { laneDispatchHold } = await import("../../src/dispatchResolution.js");
+  const lanesDoc = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
+    lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" }],
+  };
+  const seen = [];
+  const deps = { runConsult: async (input) => { seen.push(input.lanesDocFn()); return craftedResult(); } };
+  const config = { registry: "C:/wao/config/agents.json", lanesDocFn: () => lanesDoc };
+  await consultCommand(["run", "brief.md", "--seats", "a", "--cwd", "C:/tmp/x"], config, deps);
+  await consultCommand(["run", "brief.md", "--seats", "a", "--cwd", "C:/tmp/x", "--registry", "C:/elsewhere/agents.json"], config, deps);
+  assert.equal(seen[0], lanesDoc, "默认注册表 → 车道表");
+  assert.equal(laneDispatchHold(seen[1], "held-lane"), null, "非默认注册表 → 停用的空表");
+});
+
+test("会审的身份事实与席位派发共用同一张车道表：别名两边一致解析；停用的空表下两边都不解析", async () => {
+  const laneEntry = { id: "lane-a", backend: "claude-code", cwd: ".", model: { id: "fixture-m" } };
+  const registryReadFn = async () => ({
+    getAgent: (id) => { if (id === "lane-a") return laneEntry; throw new Error(`Unknown agent: ${id}`); },
+    listAgents: () => [laneEntry],
+  });
+  const aliasTable = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: ["coder"],
+    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: { "alias-seat": { role: "coder" } } }],
+  };
+  const inactiveTable = { lanes: [], sha256: null, issues: [], rolesHint: [] };
+  for (const [name, table, expectTarget, expectBackend] of [
+    ["别名表", aliasTable, "lane-a", "claude-code"],
+    ["停用的空表", inactiveTable, "alias-seat", null],
+  ]) {
+    const { dispatchFn, calls } = makeDispatchStub();
+    const result = await runConsult(baseInput({
+      seats: [{ agentId: "alias-seat" }],
+      registryReadFn,
+      dispatchFn,
+      readTranscriptFn: makeTranscriptStub(new Map()).readTranscriptFn,
+      pollIntervalMs: 600000,
+      writeFileFn: async () => {},
+      mkdirFn: async () => {},
+      lanesDocFn: () => table,
+    }));
+    assert.equal(calls[0].agentId, expectTarget, `${name}：派发目标`);
+    assert.equal(result.record.seats[0].backend, expectBackend, `${name}：组记录的 backend 与派发目标同源`);
+  }
+});
+
+test("会审：注册表键与车道别名同名时，组记录与派发都按别名优先（同一次解析）", async () => {
+  const laneEntry = { id: "lane-a", backend: "claude-code", cwd: ".", model: { id: "fixture-m" } };
+  const sameName = { id: "alias-seat", backend: "codex", cwd: ".", model: { id: "other-m" } };
+  const registryReadFn = async () => ({
+    getAgent: (id) => {
+      if (id === "lane-a") return laneEntry;
+      if (id === "alias-seat") return sameName;
+      throw new Error(`Unknown agent: ${id}`);
+    },
+    listAgents: () => [laneEntry, sameName],
+  });
+  const aliasTable = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: ["coder"],
+    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: { "alias-seat": { role: "coder" } } }],
+  };
+  const { dispatchFn, calls } = makeDispatchStub();
+  const result = await runConsult(baseInput({
+    seats: [{ agentId: "alias-seat" }],
+    registryReadFn,
+    dispatchFn,
+    readTranscriptFn: makeTranscriptStub(new Map()).readTranscriptFn,
+    pollIntervalMs: 600000,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+    lanesDocFn: () => aliasTable,
+  }));
+  assert.equal(calls[0].agentId, "lane-a", "别名优先：派发车道键");
+  assert.equal(result.record.seats[0].backend, "claude-code", "组记录与派发目标同源，不取同名注册表条目");
+});

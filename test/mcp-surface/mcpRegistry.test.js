@@ -1565,3 +1565,51 @@ test("R11-1-MCP-4: typed reuse conflict from the service collapses to the fixed 
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// TD-283: registry_list wire carries the lane dispatchHold (Owner's pause
+// note, advisory only). The field joins by lane id in the shared inventory
+// service; the schema validates+bounds it and defaults legacy service-shaped
+// entries (no field) to null instead of failing the whole tool.
+// =====================================================================
+
+test("TD-283: registry_list passes dispatchHold through the output schema; legacy shape defaults to null", async () => {
+  const mkEntry = (id, extra) => ({
+    id, backend: "claude-code", model: "glm-5.2", reasoningEffort: null, certification: null,
+    cwd: "/repo", sessionReuse: null, credentialAvailability: "available",
+    missingCredentialEnvNames: [],
+    providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" },
+    ...extra,
+  });
+  let call = 0;
+  const fakeService = async () => {
+    call += 1;
+    if (call === 1) {
+      return { agents: [mkEntry("held-lane", { dispatchHold: "夹具：暂停说明" }), mkEntry("plain-lane")], issues: [], issuesTruncated: false };
+    }
+    // Legacy service shape: no dispatchHold key anywhere → must default to null.
+    return { agents: [mkEntry("legacy-lane")], issues: [], issuesTruncated: false };
+  };
+
+  const server = createWaoMcpServer({
+    registryPath: "/config/agents.json",
+    runDir: "/runs",
+    getRegistryInventoryFn: fakeService,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    const held = parsed.agents.find((a) => a.id === "held-lane");
+    const plain = parsed.agents.find((a) => a.id === "plain-lane");
+    assert.equal(held.dispatchHold, "夹具：暂停说明", "wire carries the Owner note verbatim");
+    assert.equal(plain.dispatchHold, null, "lane without a hold projects null");
+
+    const res2 = await client.callTool({ name: "registry_list", arguments: {} });
+    const parsed2 = JSON.parse(res2.content.find((b) => b.type === "text").text);
+    assert.equal(parsed2.agents[0].dispatchHold, null, "legacy service shape (no field) defaults to null, tool still succeeds");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

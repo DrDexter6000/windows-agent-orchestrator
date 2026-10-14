@@ -67,11 +67,50 @@ export const DISPATCH_ERROR_CODES = Object.freeze([
 ]);
 
 /** lanes.json 键白名单（G1：未知键整文件拒——防 schema 蔓延与 smuggle）。 */
-const LANE_KEYS = new Set(["id", "backend", "model", "reasoning", "aliases"]);
+const LANE_KEYS = new Set(["id", "backend", "model", "reasoning", "aliases", "dispatchHold"]);
 const ALIAS_KEYS = new Set(["role"]);
 const TOP_KEYS = new Set(["schema", "lanes", "_comment"]);
 
 function isBlank(v) { return v === undefined || v === null || (typeof v === "string" && v.trim() === ""); }
+
+// ===== dispatchHold（Owner 的车道暂停派发说明，TD-283 语义合同） =====
+//
+// 它是结构化事实，不是接线轴：laneAxes 不含它，解析器不因它改变任何裁定
+//（WAO 只告知、不拦截，决定权在 Lead）。形状约束 = 可选字符串，去首尾空白后
+// 非空、不超过 200 字符、不含控制字符或行分隔符；不合法时 validateLanesStructure 出
+// issue，整文件拒（与其它键同一纪律）。
+
+/** dispatchHold 的长度上限（字符）。 */
+export const DISPATCH_HOLD_MAX_CHARS = 200;
+
+/** 形状校验（纯函数）：合法返回原值（原话照录，不 trim），否则 null。 */
+export function validDispatchHold(value) {
+  if (typeof value !== "string") return null;
+  if (value.trim() === "" || value.length > DISPATCH_HOLD_MAX_CHARS) return null;
+  if (/[\p{Cc}\u2028\u2029]/u.test(value)) return null;
+  return value;
+}
+
+/**
+ * 从 lanesDoc 取某车道的 dispatchHold（纯函数）：表不可用（ok:false 或缺
+ * lanes 数组）、无该车道、形状不合法 → null。CLI run/spawn 与会审席位的
+ * 派发 advisory 共用本读取面。
+ */
+export function laneDispatchHold(lanesDoc, laneId) {
+  if (typeof laneId !== "string" || !lanesDoc || lanesDoc.ok !== true || !Array.isArray(lanesDoc.lanes)) return null;
+  const lane = lanesDoc.lanes.find((l) => l && l.id === laneId);
+  return lane ? validDispatchHold(lane.dispatchHold) : null;
+}
+
+/**
+ * 派发面的 stderr advisory 行（run/spawn/consult 席位共用同一文案；形制同
+ * dispatchResourceAdvisory 的 `[wao] advisory:` 行）。只提示，永不拦截。
+ */
+export function dispatchHoldAdvisoryLine(laneId, hold) {
+  const text = validDispatchHold(hold);
+  if (text === null || typeof laneId !== "string") return null;
+  return `[wao] advisory: lane ${laneId} dispatchHold="${text}" — Owner 的暂停派发说明，仅提示不拦截；派发照常进行，决定权在 Lead`;
+}
 
 // 0064：三函数自本批起导出——wao lanes 读取面复用同一 G4 轴判定（接线漂移
 // 展示与 explicit 派发拒绝同语义，不造第二份比较规则）。逻辑零改动。
@@ -176,6 +215,7 @@ export function validateLanesStructure(doc) {
   for (const k of Object.keys(doc)) {
     if (!TOP_KEYS.has(k)) issues.push(`未知顶层键 "${k}"（白名单 ${[...TOP_KEYS].join("/")}）`);
   }
+  if (doc.lanes !== undefined && !Array.isArray(doc.lanes)) issues.push("lanes 必须是数组");
   const lanes = Array.isArray(doc.lanes) ? doc.lanes : [];
   const seenLaneIds = new Set();
   const seenAliases = new Map();
@@ -189,6 +229,13 @@ export function validateLanesStructure(doc) {
     if (typeof lane.id !== "string" || !ID_RE.test(lane.id)) issues.push(`lane id "${String(lane.id)}" 不合字母表`);
     else if (seenLaneIds.has(lane.id)) issues.push(`lane id "${lane.id}" 重复`);
     else seenLaneIds.add(lane.id);
+    // TD-283：dispatchHold 可选；在场必须是"去空白非空、≤200 字符、无控制
+    // 字符或行分隔符"的字符串——不合法即整文件拒（与其它键同一纪律）。
+    if (lane.dispatchHold !== undefined && validDispatchHold(lane.dispatchHold) === null) {
+      issues.push(
+        `lane "${lane.id ?? "?"}" dispatchHold 形状不合法（须为去首尾空白后非空、≤${DISPATCH_HOLD_MAX_CHARS} 字符、无控制字符或行分隔符的字符串）`,
+      );
+    }
     if (lane.wiringAgent !== undefined) {
       issues.push(`lane "${lane.id}" 含 wiringAgent——W4d 终局本表禁用该过渡字段（接线=注册表车道键）`);
     }
@@ -236,13 +283,19 @@ export function loadLanesConfig(explicitPath) {
     return { ok: false, path, sha256, lanes: [], issues: [`lanes.json 不可解析：${e.message}`], rolesHint: [] };
   }
   const issues = validateLanesStructure(doc);
+  // 顶层不是对象（如文件内容为 null）、lanes 不是数组或条目不是对象时，结构校验
+  // 已出 issue（ok:false）。返回的 lanes 只含对象条目：本函数与下游的绑定校验、
+  // 解析器都不因坏条目抛错。
+  const lanes = doc && typeof doc === "object" && Array.isArray(doc.lanes)
+    ? doc.lanes.filter((l) => l !== null && typeof l === "object")
+    : [];
   const rolesHint = [];
-  for (const lane of doc.lanes ?? []) {
+  for (const lane of lanes) {
     for (const spec of Object.values(lane.aliases ?? {})) {
       if (spec && typeof spec.role === "string") rolesHint.push(spec.role);
     }
   }
-  return { ok: issues.length === 0, path, sha256, lanes: Array.isArray(doc.lanes) ? doc.lanes : [], issues, rolesHint: [...new Set(rolesHint)].sort() };
+  return { ok: issues.length === 0, path, sha256, lanes, issues, rolesHint: [...new Set(rolesHint)].sort() };
 }
 
 /**

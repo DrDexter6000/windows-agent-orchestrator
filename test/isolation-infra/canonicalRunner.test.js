@@ -2918,6 +2918,11 @@ async function runTd255RegistryCase({ fixtureSource, fixtureRel }) {
       exitFn: () => {},
       runCanonicalImpl: (options) => runCanonical({
         ...options,
+        // 本组用例断言的是"自动裁定翻绿"本身，必须不依赖运行环境——worker
+        // 工作树里（cwd/脚本路径在 .wao-worktrees/ 下）环境自动判定为 worker
+        // 语境会按决定 0054 关闭裁定，用例就红了。显式注入非 worker 语境。
+        // （worker 语境下不裁定的行为另有专门用例钉住。）
+        workerContext: false,
         runChild: async (...args) => {
           writeFileSync(phasePath, "first", "utf8");
           return options.runChild(...args);
@@ -2960,6 +2965,37 @@ test("TD-255/0059 端到端：纯回响 + 登记册命中 ⇒ 自动裁定翻绿
   assert.equal(iso.classification, "isolation_pass");
   assert.deepEqual(report.autoAdjudicated, [{ path: rel, matches: [{ id: "IF-TD255", subtest: "registered fail" }] }], "唯一翻绿路径=登记册自动裁定（可溯源）");
   assert.equal(report.finalVerdict, "pass", "0059 之前此路径永不可达——死机制解除的直接证据");
+});
+
+// TD-296：TD-255 端到端用例在 worker 语境的环境变量下也必须通过——
+// runTd255RegistryCase 显式传 workerContext:false，环境自动判定（WAO_IN_WORKER /
+// worktree cwd）不再影响这组用例。worker 语境下"不裁定"的行为另有专门用例钉住。
+test("TD-255/0059 端到端：WAO_IN_WORKER=1 环境下用例不受影响（workerContext 显式注入优先于环境判定）", async () => {
+  await mkdirSync(E2E_SCRATCH_ROOT, { recursive: true });
+  const prev = process.env.WAO_IN_WORKER;
+  process.env.WAO_IN_WORKER = "1";
+  try {
+    const rel = "echofail-env.test.js";
+    const src = [
+      'import { test } from "node:test";',
+      'import assert from "node:assert/strict";',
+      'import { readFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'test("registered fail", () => {',
+      '  const phase = readFileSync(join(process.cwd(), "td255-phase.txt"), "utf8");',
+      '  if (phase === "first") assert.ok(false, "registered marker");',
+      '});',
+      "",
+    ].join("\n");
+    const report = await runTd255RegistryCase({ fixtureSource: src, fixtureRel: rel });
+    assert.equal(report.firstRound.verdict, "fail", "首轮事实恒 fail");
+    assert.deepEqual(report.autoAdjudicated, [{ path: rel, matches: [{ id: "IF-TD255", subtest: "registered fail" }] }],
+      "显式 workerContext:false 压过 WAO_IN_WORKER=1 的环境自动判定——裁定仍发生");
+    assert.equal(report.finalVerdict, "pass");
+  } finally {
+    if (prev === undefined) delete process.env.WAO_IN_WORKER;
+    else process.env.WAO_IN_WORKER = prev;
+  }
 });
 
 test("TD-255/0059 端到端反例一（sol）：已登记失败 + 提前 process.exit(1)（缺逐文件 summary）⇒ 不洗白", async () => {
