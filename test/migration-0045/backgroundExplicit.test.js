@@ -12,8 +12,11 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
+// 在库车道表 opus 的接线轴：注册表夹具照它写，不写当前型号字面值（升级型号时跟着走）。
+const OPUS_LANE = loadLanesConfig().lanes.find((l) => l.id === "opus");
 
 function makeGitRepo(dir) {
   execSync("git init", { cwd: dir, stdio: "pipe" });
@@ -85,7 +88,7 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
     const runDir = join(dir, "runs");
     // W4d：注册表键=车道键——explicit 解析直取接线条目。0046 步②：claude-opus→opus。
     const registry = { agents: {
-      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
+      "opus": { backend: OPUS_LANE.backend, model: OPUS_LANE.model, reasoning: OPUS_LANE.reasoning, cwd: dir },
     } };
     const { mkdirSync } = await import("node:fs");
     mkdirSync(runDir, { recursive: true });

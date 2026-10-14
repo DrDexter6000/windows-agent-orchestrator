@@ -468,8 +468,10 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 7.2 DeepSeek variant=max 不能用 model 后缀
 
+<!-- model-specific -->
 - **症状**：`--model deepseek-v4-flash:max` 报 `400 The supported API model names are deepseek-v4-pro or deepseek-v4-flash`
 - **根因**：DeepSeek anthropic 端点只认 `deepseek-v4-flash` / `deepseek-v4-pro`，variant 不是 model id 的一部分
+<!-- /model-specific -->
 - **修复**：variant=max 用 `--effort max`（映射到 `CLAUDE_CODE_EFFORT_LEVEL` env），**不要**塞进 model id
 
 ### 7.3 opus 车道（claude-code 官方通道）401

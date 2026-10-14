@@ -10,6 +10,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
+
+// 在库车道表 opus 的接线轴：注册表夹具照它写，不写当前型号字面值（升级型号时跟着走）。
+const OPUS_LANE = loadLanesConfig().lanes.find((l) => l.id === "opus");
 
 const { createWaoMcpServer } = await import("../../src/mcp/server.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -32,7 +36,7 @@ async function withServer(fn) {
     // 注册表与在库车道表 opus 轴一致（公开轴=backend/model/effort；0046 步②重键）
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
+      "opus": { backend: OPUS_LANE.backend, model: OPUS_LANE.model, reasoning: OPUS_LANE.reasoning, cwd: dir },
       legacy_seat: { backend: "claude-code", cwd: dir },
     } }), "utf8");
     const dispatches = [];

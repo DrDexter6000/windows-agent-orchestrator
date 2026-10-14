@@ -132,7 +132,9 @@ const R = (over = {}) => resolveDispatchTarget({
 });
 
 test("W1 解析：alias 命中（机制钉，注入夹具车道表；0046 步⑥ 活体别名表已清空）", () => {
-  const doc = { lanes: [{ id: "glm-flash", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3-Flash" }, reasoning: { effort: "max" }, aliases: { researcher: { role: "researcher" } } }], sha256: "fixture-alias" };
+  // 车道接线取自在库车道表（不写当前型号字面值，升级型号时这里跟着走）。
+  const flash = LIVE.lanes.find((l) => l.id === "glm-flash");
+  const doc = { lanes: [{ id: flash.id, backend: flash.backend, model: flash.model, reasoning: flash.reasoning, aliases: { researcher: { role: "researcher" } } }], sha256: "fixture-alias" };
   const r = R({ agentId: "researcher", lanesDoc: doc });
   assert.equal(r.kind, "resolved");
   assert.equal(r.source, "alias");
@@ -189,8 +191,10 @@ test("W1 错误：unknown_lane/unknown_role/unknown_agent——码+received 回�
 });
 
 test("W1 错误：lane_wiring_mismatch——改 lanes.json 模型/力度（G4 注册表赢即拒）", () => {
+  // 改写值由在库接线变形而来，保证与实际接线不同（不写当前型号或档位字面值）。
+  const flash = LIVE.lanes.find((l) => l.id === "glm-flash");
   const doctored = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
-  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: "bigmodel-api/GLM-5.3" }; // 降智攻击形
+  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: `${flash.model.id}-swapped` }; // 降智攻击形：换成别的型号
   const doc = { ...LIVE, lanes: doctored.lanes };
   const r = R({ lanesDoc: doc, lane: "glm-flash", role: "researcher" });
   assert.equal(r.kind, "error");
@@ -198,7 +202,7 @@ test("W1 错误：lane_wiring_mismatch——改 lanes.json 模型/力度（G4 �
   assert.match(r.message, /注册表为准/);
   // effort 维同拒（auditor R3：不许展示一值执行另一值）
   const doctored2 = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
-  doctored2.lanes.find((l) => l.id === "glm-flash").reasoning = { effort: "xhigh" };
+  doctored2.lanes.find((l) => l.id === "glm-flash").reasoning = { effort: flash.reasoning?.effort === "xhigh" ? "high" : "xhigh" };
   const r2 = R({ lanesDoc: { ...LIVE, lanes: doctored2.lanes }, lane: "glm-flash", role: "researcher" });
   assert.equal(r2.code, "lane_wiring_mismatch");
 });

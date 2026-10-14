@@ -5,7 +5,7 @@
   "_comment_safe": "安全：全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，06-18 事故后弃 opencode；如需 token 闸门精确控成本的 opencode fallback 见 docs/troubleshooting.md）。",
   "agents": {
     "glm-pro": {
-      "_comment": "主力代码执行（GLM-5.3 via zcode app-server，原厂 harness 驱动原厂 LLM）。",
+      "_comment": "主力代码执行（via zcode app-server，原厂 harness 驱动原厂 LLM；型号见 wao lanes）。",
       "backend": "zcode",
       "cwd": ".",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
@@ -22,7 +22,7 @@
       }
     },
     "glm-flash": {
-      "_comment": "副代码执行/探索研究/视觉理解（GLM-5.3-Flash，GLM-5 系首个原生多模态）；researcher 复用政策的历史承载车道（0046 §4：席位字段保活）。",
+      "_comment": "副代码执行/探索研究/视觉理解（型号见 wao lanes）；researcher 复用政策的历史承载车道（0046 §4：席位字段保活）。",
       "backend": "zcode",
       "cwd": ".",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
@@ -40,7 +40,7 @@
       }
     },
     "kimi": {
-      "_comment": "方案 advisor/创意头脑风暴（kimi-code/k3-256k via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。serveUrl 指向本地 kimi worker serve——启动/端口/WAO_IN_WORKER 标记见 docs/usage/lanes.md「kimi 车道的 worker serve」（端口号本身不证明标记已生效）。",
+      "_comment": "方案 advisor/创意头脑风暴（via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。serveUrl 指向本地 kimi worker serve——启动/端口/WAO_IN_WORKER 标记见 docs/usage/lanes.md「kimi 车道的 worker serve」（端口号本身不证明标记已生效）。",
       "backend": "kimi-web",
       "cwd": ".",
       "serveUrl": "http://127.0.0.1:58628",
@@ -52,7 +52,7 @@
       }
     },
     "sol": {
-      "_comment": "方案 advisor/交付物 auditor/高难度代码执行（gpt-6.1-sol via codex）。",
+      "_comment": "方案 advisor/交付物 auditor/高难度代码执行（via codex）。",
       "backend": "codex",
       "cwd": ".",
       "model": {
@@ -63,7 +63,7 @@
       }
     },
     "astra": {
-      "_comment": "方案 advisor/交付物 auditor/高难度 bug 挖掘（gpt-6-astra via codex）；auditor 家族对抗席。",
+      "_comment": "方案 advisor/交付物 auditor/高难度 bug 挖掘（via codex）；auditor 家族对抗席。",
       "backend": "codex",
       "cwd": ".",
       "model": {
@@ -74,7 +74,7 @@
       }
     },
     "opus": {
-      "_comment": "方案 auditor/创意/高要求前端设计（claude-opus-5-5 via claude-code，原厂订阅 OAuth）；auditor 家族对抗席（Claude 系）。",
+      "_comment": "方案 auditor/创意/高要求前端设计（via claude-code，原厂订阅 OAuth）；auditor 家族对抗席（Claude 系）。",
       "backend": "claude-code",
       "cwd": ".",
       "model": {
@@ -88,7 +88,7 @@
       ]
     },
     "deepseek-pro": {
-      "_comment": "主力/副代码执行（deepseek-v4-pro via ACP stdio 通道；model=双字段 {id, providerID} 形状，0046 §3 wire 实证）。",
+      "_comment": "主力/副代码执行（via ACP stdio 通道；model=双字段 {id, providerID} 形状，0046 §3 wire 实证）。",
       "backend": "deepseek-acp",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",

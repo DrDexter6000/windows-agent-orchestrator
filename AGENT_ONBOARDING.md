@@ -186,7 +186,7 @@ npm run cli -- run <agentId> --prompt "Read package.json and report the package 
 npm run cli -- run glm-pro --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-`glm-pro` 是 GLM-5.3 via zcode app-server（原厂 harness 驱动原厂 LLM），适合较重编码任务；轻量/探索任务用 `glm-flash`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
+`glm-pro` 跑 zcode app-server（原厂 harness 驱动原厂 LLM），型号见 `wao lanes`，适合较重编码任务；轻量/探索任务用 `glm-flash`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
 
 ### 记录状态（每次任务后）
 

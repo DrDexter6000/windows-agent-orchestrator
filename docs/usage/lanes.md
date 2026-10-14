@@ -22,7 +22,7 @@
     // ── claude-code（官方 OAuth 订阅）──
     "opus": {
       "backend": "claude-code",
-      "model": { "id": "claude-opus-5-5" },
+      "model": { "id": "<modelId>" },
       "reasoning": { "effort": "high" },
       "cwd": ".",
       "args": ["--dangerously-skip-permissions"]
@@ -32,7 +32,7 @@
     "glm-flash": {
       "backend": "zcode",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
-      "model": { "id": "bigmodel-api/GLM-5.3-Flash" },
+      "model": { "id": "bigmodel-api/<modelId>" },
       "reasoning": { "effort": "max" },
       "cwd": "."
     },
@@ -54,7 +54,7 @@
       "backend": "deepseek-acp",
       "binary": "C:/path/to/dsh.cmd",        // 可选，缺省 PATH 上的 dsh
       "credentialEnv": "DEEPSEEK_API_KEY",
-      "model": { "id": "deepseek-v4-pro", "providerID": "deepseek-official" },  // 可选；配则 id 与 providerID 都必填
+      "model": { "id": "<modelId>", "providerID": "deepseek-official" },  // 可选；配则 id 与 providerID 都必填
       "reasoning": { "effort": "low" },      // 可选，仅 low/high/max（见生成层 docs/surface/certification.md 能力表；其余值被拒）
       "cwd": "D:/projects/my-app"
       // 不配 provider 块：组合面固定，配了被拒。model 块只接受 { id, providerID }
@@ -79,6 +79,8 @@
   }
 }
 ```
+
+示例里的 `<modelId>` 是占位：各车道当前型号见 `config/agents.example.json` 与 `npm run cli -- wao lanes`（车道当前型号只写在配置里）。
 
 席位角色（`seatRole` 字段）已退役，不要再声明。对抗性是派生事实：登记会审席位时，按审者车道与被审产出作者车道的关系（车道指纹比对）判定。登记命令 `npm run cli -- wao stage 2/4 --task <T> --panel-seats <a,b> [--reviewed-run <runId>[,<runId>]]`（panel 字段只在 stage 2 与 4 登记），登记时按当时的 registry 车道配置 × 被审 run 的 `run.started` 钉住作者事实：车道不同 = 对抗前提成立；席位与作者同车道 = 回避违反，大声提示（advisory，不阻断）。`--reviewed-run` 支持多值（共同作者）。作者不可读或缺 `run.started` 时如实输出 unknown，不折叠成"无违反"。老 registry 里遗留的 seatRole 字段不会被拒载：归一化直接忽略（读取面零消费），`registry validate` 对在场字段出弃用 advisory，可以删掉。
 

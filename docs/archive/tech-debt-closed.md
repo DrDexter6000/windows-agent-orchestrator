@@ -99,3 +99,4 @@
 | TD-297 | zcode backend 声明不支持在途纠偏，依据是 0.16.9 的方法表；本机更新后的 bundle 已有 steer 事件与 steerable 活动轮 | 真机（GLM-5.3-Flash）：活动轮里再发 `session/send` 返回 -32010「A prompt is already running for this session」，协议方法表里没有注入活动轮的方法；声明维持 false，翻转条件写在 zcode.js 与 factory.js 的说明里 |
 | TD-283 | 车道暂停说明只写在画像展示文字里，派发和会审选席时不出现 | 车道表 `config/lanes.json` 的 `dispatchHold` 是暂停说明唯一的家；`registry_list`、`registry list`、`wao lanes` 与 CLI 派发、会审席位的提示都由它现算，只提示不拦截；画像里的原话移除（决定 0080） |
 | TD-296 | canonicalRunner 的 TD-255 端到端用例在 worker 语境里必红（runner 在 worker 语境按决定 0054 关闭自动裁定） | `runTd255RegistryCase` 显式传 `workerContext: false`，不再依赖运行环境；worker 语境下不裁定另有专门用例 |
+| TD-299 | 车道当前型号在配置之外有没人核对的副本（文档、模板注释、测试字面值），升级后悄悄过时 | 现行文档与模板注释不写当前车道型号，`docs-consistency.test.js` 按 `config/lanes.json` 现算核对（具体型号的事实用就地标记）；测试字面值钉改为关系检查，W3a 快照与 W1 夹具照旧同 diff 改（决定 0081） |

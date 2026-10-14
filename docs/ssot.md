@@ -138,6 +138,7 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - 认证正文迁出处：使用手册保留具名标题与指向 `docs/certification-runbook.md` 的单向链接，目标节必须真实存在；摘链接、改目标节名、删标题都会红。
 - 使用手册：`docs/usage.md` 的页表与 `docs/usage/` 下的文件一一对应，每页开头指回地图，页内相对链接都能解析到文件；派发页的续跑拒绝原因与代码闭集双向一致。
 - roadmap：里程碑表里已完成的里程碑不回退；字节上限把它限在一张表的体量。
+- 车道当前型号只写在配置里（`config/lanes.json` 与 `config/agents.example.json` 的 `model.id`、认证矩阵的 `modelId`/`label`）：现行文档与模板注释写车道绑定用车道名或 `<modelId>` 占位；描述具体型号的事实放进成对的 `<!-- model-specific -->` … `<!-- /model-specific -->` 就地标记（文档里提及标记语法须成对写出）。
 - 字节上限：几份大的活文档各有字节上限；上限红了就搬走或删去内容，抬高上限由 Owner 决定。
 
 历史审计矩阵不在本文维护；需要查当时发现和收束过程时读 `docs/archive/docs-ssot-audit.md`。当前项目状态以 `docs/roadmap.md`、`docs/tech-debt.md`、`docs/02-architecture.md` 和代码/测试为准。

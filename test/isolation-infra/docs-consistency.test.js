@@ -1332,22 +1332,259 @@ test("M12 canonical value pins: 0046 车道键模板（原厂通道+effort 档�
   const parsed = JSON.parse(read("config/agents.example.json"));
   const flash = parsed.agents?.["glm-flash"];
   assert.equal(flash?.backend, "zcode");
-  assert.equal(flash?.model?.id, "bigmodel-api/GLM-5.3-Flash");
   assert.equal(flash?.reasoning?.effort, "max");
   assert.equal(flash?.provider, undefined, "0046：原生通道无 provider wrapper 块");
   assert.equal(flash?.sessionReuse, "lead_workspace", "researcher 复用政策的席位承载（0046 §4）");
-  assert.equal(parsed.agents?.sol?.model?.id, "gpt-6.1-sol");
   assert.equal(parsed.agents?.sol?.reasoning?.effort, "high");
   // Owner 2026-10-06 批复：astra/opus xhigh→high（0046 §2 官方五档内降档）。
-  assert.equal(parsed.agents?.astra?.model?.id, "gpt-6-astra");
   assert.equal(parsed.agents?.astra?.reasoning?.effort, "high");
-  assert.equal(parsed.agents?.opus?.model?.id, "claude-opus-5-5");
   assert.equal(parsed.agents?.opus?.reasoning?.effort, "high");
   const dsp = parsed.agents?.["deepseek-pro"];
-  assert.equal(dsp?.model?.id, "deepseek-v4-pro");
   assert.equal(dsp?.model?.providerID, "deepseek-official", "ACP 双字段 model 形状（0046 §3）");
-  assert.equal(parsed.agents?.["deepseek-flash"]?.model?.id, "deepseek-flash", "flash 钉视觉档（勿配 deepseek-v4-flash）");
+  // 各车道 model.id 的字面值断言已退役（车道升级型号即成漂移欠条）：模板与
+  // config/lanes.json 的一致由「车道当前型号只在配置里」关系检查承担。唯一例外：
+  assert.equal(parsed.agents?.["deepseek-flash"]?.model?.id, "deepseek-flash",
+    "0046 §1 策略钉：deepseek-flash 车道用视觉档 deepseek-flash（勿配默认档 deepseek-v4-flash）——这是 Owner 裁定的档位事实，不是会随升级漂移的当前值");
 });
+// ── 车道当前型号只在配置里（守卫 + 关系检查）──
+// 车道升级型号时，接手的 Lead 会改私有注册表与 config/lanes.json，但文档、模板
+// 注释与测试字面值里写着的旧型号没有任何东西提醒，会悄悄过时。规则：车道当前
+// 型号只写在配置里（config/lanes.json 与 config/agents.example.json 的 model.id、
+// 认证矩阵的 modelId/label）；别处写车道名或 <modelId> 占位；描述某个具体型号的
+// 事实（上游报错原文、某型号的行为）放进 <!-- model-specific --> 就地标记。
+
+/** 从 config/lanes.json 现算当前型号写法集合：每条车道的 model.id 取完整 id 与
+ * 末段（最后一个 `/` 之后）两种写法；与任一车道 id 相同的写法跳过（如
+ * deepseek-flash 既是车道名也是型号——写车道名永远合法）。 */
+function currentModelWritings(lanes) {
+  const laneIds = new Set(lanes.map((lane) => lane.id));
+  const writings = new Set();
+  for (const lane of lanes) {
+    const id = lane?.model?.id;
+    if (typeof id !== "string" || id === "") continue;
+    for (const writing of [id, id.slice(id.lastIndexOf("/") + 1)]) {
+      if (!laneIds.has(writing)) writings.add(writing);
+    }
+  }
+  return [...writings];
+}
+
+/** 完整 token 匹配（纯函数）：writing 在 text 里的全部出现起点。
+ * 大小写不敏感；边界=前一字符不是字母/数字/`_`/`-`/`.`，后一字符不是
+ * 字母/数字/`_`/`-`，也不是"后面紧跟字母或数字的 `.`"。 */
+function findModelTokenMatches(text, writing) {
+  const needle = writing.toLowerCase();
+  const hay = text.toLowerCase();
+  const out = [];
+  let from = 0;
+  for (;;) {
+    const i = hay.indexOf(needle, from);
+    if (i === -1) return out;
+    from = i + 1;
+    const prev = i > 0 ? text[i - 1] : "";
+    if (prev !== "" && /[A-Za-z0-9_.-]/.test(prev)) continue;
+    const after = i + needle.length;
+    const next = after < text.length ? text[after] : "";
+    if (next !== "" && (/[-_A-Za-z0-9]/.test(next) ||
+      (next === "." && after + 1 < text.length && /[A-Za-z0-9]/.test(text[after + 1])))) continue;
+    out.push(i);
+  }
+}
+
+/** 就地标记掩码（纯函数）：`<!-- model-specific -->`…`<!-- /model-specific -->`
+ * 区间（含标记本身）替换为等长空格，行号/列号不变。标记必须成对且不嵌套，
+ * 违例记入 errors（守卫断言为空）。 */
+function maskModelSpecificSpans(text) {
+  const OPEN = "<!-- model-specific -->";
+  const CLOSE = "<!-- /model-specific -->";
+  const chars = text.split("");
+  const errors = [];
+  let i = 0;
+  let openEnd = -1;
+  for (;;) {
+    const o = text.indexOf(OPEN, i);
+    const c = text.indexOf(CLOSE, i);
+    if (o === -1 && c === -1) break;
+    if (c !== -1 && (o === -1 || c < o)) {
+      if (openEnd === -1) {
+        errors.push(`孤立的 ${CLOSE}`);
+        i = c + CLOSE.length;
+        continue;
+      }
+      for (let k = openEnd; k < c + CLOSE.length; k++) chars[k] = " ";
+      openEnd = -1;
+      i = c + CLOSE.length;
+    } else {
+      if (openEnd !== -1) {
+        errors.push(`嵌套的 ${OPEN}`);
+        i = o + OPEN.length;
+        continue;
+      }
+      for (let k = o; k < o + OPEN.length; k++) chars[k] = " ";
+      openEnd = o + OPEN.length;
+      i = o + OPEN.length;
+    }
+  }
+  if (openEnd !== -1) errors.push(`未闭合的 ${OPEN}`);
+  return { masked: chars.join(""), errors };
+}
+
+/** 模板注释提取（纯函数）：解析 JSON 后递归取键名以 `_comment` 开头的字符串值，
+ * 返回 {path, value}（path 形如 agents.glm-pro._comment）。按解析结果遍历，不依赖
+ * 排版：同一行多个属性、整份写在一行、转义的键名都照样取到。 */
+function jsonCommentStrings(jsonText) {
+  const out = [];
+  const walk = (node, path) => {
+    if (Array.isArray(node)) {
+      node.forEach((v, i) => walk(v, `${path}[${i}]`));
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    for (const [key, value] of Object.entries(node)) {
+      const p = path === "" ? key : `${path}.${key}`;
+      if (key.startsWith("_comment") && typeof value === "string") out.push({ path: p, value });
+      else walk(value, p);
+    }
+  };
+  walk(JSON.parse(jsonText), "");
+  return out;
+}
+
+/** 守卫扫描面：根目录六件；docs/ 的 .md（archive/research/incidents 与
+ * changelog-* 冻结文档除外）；references/ 与 config/roles/ 的 .md；scripts/
+ * 各处的 README.md；config/agents.example.json 里键名以 _comment 开头的字符串
+ * 值（解析后递归取，位置报键路径，见 jsonCommentStrings）。 */
+function collectModelScanTargets() {
+  const targets = [];
+  const lineOfWholeText = (text) => (pos) => text.slice(0, pos).split(/\r?\n/).length;
+  const pushText = (rel, label, text, lineOf) => targets.push({ rel, label, text, lineOf });
+  // 逐文件直读：read("docs/usage.md") 返回地图加全部用法页的拼接，用它会把用法页
+  // 扫两遍且行号错位。
+  const raw = (rel) => readFileSync(join(ROOT, rel), "utf8");
+  for (const rel of ["README.md", "README.zh-CN.md", "AGENTS.md", "AGENT_ONBOARDING.md", "SKILL.md", "llms.txt"]) {
+    const text = raw(rel);
+    pushText(rel, rel, text, lineOfWholeText(text));
+  }
+  const mdUnder = (top) => {
+    const out = [];
+    const walk = (rel) => {
+      for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+        const child = `${rel}/${entry.name}`;
+        if (entry.isDirectory()) walk(child);
+        else if (entry.name.endsWith(".md")) out.push(child);
+      }
+    };
+    if (existsSync(join(ROOT, top))) walk(top);
+    return out;
+  };
+  const frozen = (rel) => rel.startsWith("docs/archive/") || rel.startsWith("docs/research/") ||
+    rel.startsWith("docs/incidents/") || /^docs\/changelog-[^/]+\.md$/.test(rel);
+  for (const rel of mdUnder("docs")) {
+    if (frozen(rel)) continue;
+    const text = raw(rel);
+    pushText(rel, rel, text, lineOfWholeText(text));
+  }
+  for (const top of ["references", "config/roles"]) {
+    for (const rel of mdUnder(top)) {
+      const text = raw(rel);
+      pushText(rel, rel, text, lineOfWholeText(text));
+    }
+  }
+  for (const rel of mdUnder("scripts")) {
+    if (!rel.endsWith("/README.md")) continue;
+    const text = raw(rel);
+    pushText(rel, rel, text, lineOfWholeText(text));
+  }
+  const rel = "config/agents.example.json";
+  for (const { path, value } of jsonCommentStrings(raw(rel))) {
+    pushText(rel, `${rel} 的 ${path}`, value, () => path);
+  }
+  return targets;
+}
+
+test("纯函数 findModelTokenMatches：完整 token 匹配边界（大小写不敏感）", () => {
+  const hits = (text) => findModelTokenMatches(text, "GLM-5.3");
+  // 应命中 GLM-5.3 这个写法的：
+  assert.deepEqual(hits("GLM-5.3"), [0], "裸型号");
+  assert.deepEqual(hits("glm-5.3"), [0], "大小写不敏感");
+  assert.deepEqual(hits("bigmodel-api/GLM-5.3"), [13], "完整 id 中的末段（前导 / 是合法边界）");
+  assert.deepEqual(hits("`GLM-5.3`"), [1], "code span 反引号");
+  assert.deepEqual(hits("GLM-5.3。"), [0], "中文句号后随");
+  assert.deepEqual(hits("句末的 GLM-5.3."), [4], "句末英文句点（后面没有字母/数字）");
+  assert.deepEqual(hits("（GLM-5.3）"), [1], "全角括号");
+  // 不应命中 GLM-5.3 这个写法的：
+  assert.deepEqual(hits("GLM-5.3-Flash"), [], "后随 -（更长型号名的一部分）");
+  assert.deepEqual(hits("GLM-5.30"), [], "后随数字");
+  assert.deepEqual(hits("glm-5.3.1"), [], "后随 .1（点后紧跟数字）");
+  assert.deepEqual(hits("xglm-5.3"), [], "前导字母");
+});
+
+test("纯函数 maskModelSpecificSpans：标记区间跳过；不成对/嵌套报错", () => {
+  const raw = "a<!-- model-specific -->GLM-5.3<!-- /model-specific -->b";
+  const ok = maskModelSpecificSpans(raw);
+  assert.deepEqual(ok.errors, []);
+  assert.ok(!ok.masked.includes("GLM-5.3"), "标记区间内的型号被跳过");
+  assert.equal(ok.masked.replace(/ /g, ""), "ab", "区间外文字不受影响");
+  assert.equal(ok.masked.length, raw.length, "等长掩码，行号不变");
+  assert.ok(maskModelSpecificSpans("<!-- model-specific -->GLM-5.3").errors.length > 0, "未闭合的开启标记");
+  assert.ok(maskModelSpecificSpans("GLM-5.3<!-- /model-specific -->").errors.length > 0, "孤立的闭合标记");
+  assert.ok(maskModelSpecificSpans("<!-- model-specific --><!-- model-specific --><!-- /model-specific -->").errors.length > 0, "嵌套");
+});
+
+test("纯函数 jsonCommentStrings：解析后递归取 _comment* 字符串，不依赖排版", () => {
+  const got = jsonCommentStrings('{"_comment":"a","x":{"_comment_b":"b","y":[{"_comm\\u0065nt":"c"}]},"_commentNot":1}');
+  assert.deepEqual(got, [
+    { path: "_comment", value: "a" },
+    { path: "x._comment_b", value: "b" },
+    { path: "x.y[0]._comment", value: "c" },
+  ], "整份一行、嵌套、数组、转义键名都取到；非字符串值不算");
+});
+
+test("车道当前型号只在配置里：现行文档与模板注释不得出现当前车道型号", () => {
+  const writings = currentModelWritings(JSON.parse(read("config/lanes.json")).lanes ?? []);
+  assert.ok(writings.length > 0, "config/lanes.json 现算的当前型号写法集合为空——守卫空转");
+  const hits = [];
+  const markerErrors = [];
+  for (const target of collectModelScanTargets()) {
+    const { masked, errors } = maskModelSpecificSpans(target.text);
+    if (errors.length > 0) markerErrors.push(`${target.label}: ${errors.join("；")}`);
+    // 长写法先占位（按起点升序、同起点长写法优先），完整 id 内含的末段写法
+    // 不重复报同一处。
+    const matches = [];
+    for (const writing of writings) {
+      for (const start of findModelTokenMatches(masked, writing)) {
+        matches.push({ start, end: start + writing.length, writing });
+      }
+    }
+    matches.sort((a, b) => a.start - b.start || b.end - a.end);
+    let coveredUntil = -1;
+    for (const m of matches) {
+      if (m.start < coveredUntil) continue;
+      hits.push(`${target.rel}:${target.lineOf(m.start)} 命中当前型号写法「${m.writing}」`);
+      coveredUntil = Math.max(coveredUntil, m.end);
+    }
+  }
+  assert.deepEqual(markerErrors, [],
+    "model-specific 就地标记必须成对且不嵌套：<!-- model-specific --> 与 <!-- /model-specific --> 交替出现");
+  assert.deepEqual(hits, [],
+    `车道当前型号只允许写在配置里（config/lanes.json 与 config/agents.example.json 的 model.id、认证矩阵的 modelId/label）。两种合法改法：写的是车道当前绑定 → 改成车道名或 <modelId> 占位；写的是某个具体型号的事实 → 放进 <!-- model-specific --> 就地标记。命中清单：\n${hits.join("\n")}`);
+});
+
+test("车道当前型号只在配置里：lanes.json 车道与 agents.example.json 同 id 条目接线一致（关系检查）", () => {
+  const lanes = JSON.parse(read("config/lanes.json")).lanes ?? [];
+  const parsed = JSON.parse(read("config/agents.example.json"));
+  for (const lane of lanes) {
+    const agent = parsed.agents?.[lane.id];
+    assert.ok(agent, `agents.example.json 缺与车道同 id 的条目：${lane.id}`);
+    assert.equal(agent?.model?.id, lane.model?.id,
+      `${lane.id}：agents.example.json 的 model.id 必须等于 config/lanes.json 的 model.id（当前型号只写在配置里，升级时两处同改）`);
+    if (lane.model?.providerID !== undefined || agent?.model?.providerID !== undefined) {
+      assert.equal(agent?.model?.providerID, lane.model?.providerID,
+        `${lane.id}：providerID 必须与 config/lanes.json 一致（任一侧写了，两侧都要有且相等）`);
+    }
+  }
+});
+
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
   // TD-120 (2026-08-15): the count is DERIVED from the code SSOT (toolSurface.js
   // TOOLS, load-time self-checked) instead of a hardcoded literal — a legitimate
@@ -2254,7 +2491,7 @@ test("onboarding closeout: usage.md claude-code registry 示例为 0046 原生�
   assert.ok(start !== -1 && end > start, "usage.md 必须保留 claude-code 配置示例块");
   const ex = usage.slice(start, end);
   assert.ok(/"backend": "claude-code"/.test(ex), "0046：claude-code 示例=原生通道条目");
-  assert.ok(/"model"[\s\S]{0,200}"id": "claude-opus-5-5"/.test(ex), "sibling model {id}");
+  assert.ok(/"model"[\s\S]{0,200}"id": "/.test(ex), "sibling model {id}（示例型号是 <modelId> 占位，不钉值——各车道当前型号见 config/agents.example.json 与 wao lanes）");
   assert.ok(/"reasoning"[\s\S]{0,200}"effort"/.test(ex), "sibling reasoning {effort}");
   assert.ok(!/"protocol": "anthropic-compatible"/.test(ex) && !/apiKeyEnv/.test(ex),
     "0046：原生 claude-code 无 provider wrapper 块");
@@ -2267,18 +2504,21 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     assert.ok(!/prependArgs[^。\n]*向后兼容|手拼 prependArgs[^。\n]*兼容/.test(read(rel)),
       `${rel} 不得再声称手拼 managed model/effort flags（args/prependArgs）向后兼容（provider 一等字段编译）`);
   }
-  // TD-120 (2026-08-15) relationship guard: every matrix entry resolves an
-  // effective modelId (entry.modelId ?? the agent's declared model.id — closes
-  // the "delete modelId to skip the guard" escape) and its label must carry it
-  // — internal self-consistency, not a value fingerprint. (The old
-  // exact-string assert froze "GLM-5.2" and blocked the legitimate
-  // 2026-08-15 drift fix.)
+  // TD-120 (2026-08-15) relationship guard, agent-authoritative（决定
+  // 0081）：真相源=agent 条目的 model.id。显式 modelId 必须等于 agent 的
+  // model.id；label 必须包含 agent 的 model.id（大小写不敏感）。旧写法
+  // `entry.modelId ?? agent.model.id` 的自洽检查会让陈旧 modelId 与陈旧 label
+  // 互相证明而一直绿——关系以 agent 为准后，矩阵行任何一侧落单即红。
   const parsed = JSON.parse(read("config/agents.example.json"));
   for (const entry of parsed.certification?.matrix ?? []) {
-    const effectiveModelId = entry.modelId ?? parsed.agents?.[entry.agentId]?.model?.id;
-    if (!effectiveModelId) continue;
-    assert.ok(typeof entry.label === "string" && entry.label.toLowerCase().includes(effectiveModelId.toLowerCase()),
-      `agents.example.json 认证 label 必须包含生效 modelId（${entry.agentId}: ${effectiveModelId}，大小写不敏感）— doc 内部自洽（TD-120）`);
+    const agentModelId = parsed.agents?.[entry.agentId]?.model?.id;
+    if (entry.modelId !== undefined) {
+      assert.equal(entry.modelId, agentModelId,
+        `认证矩阵 ${entry.agentId} 的 modelId 必须等于 agents.${entry.agentId}.model.id（agent 条目是真相源）`);
+    }
+    if (!agentModelId) continue;
+    assert.ok(typeof entry.label === "string" && entry.label.toLowerCase().includes(agentModelId.toLowerCase()),
+      `认证矩阵 ${entry.agentId} 的 label 必须包含 agents.${entry.agentId}.model.id（${agentModelId}，大小写不敏感）— doc 内部自洽（TD-120）`);
   }
   // 0046：旧席位名钉退役——模板矩阵行键=车道键且不含旧席位名。
   const matrixIds = (parsed.certification?.matrix ?? []).map((m) => m.agentId);

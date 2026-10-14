@@ -183,7 +183,7 @@ export const CAPABILITY_NOTES = Object.freeze({
   // zcode 0.16.9 捆绑 CLI app-server（ZCode Protocol v1）的 live 实测（详见
   // src/backends/zcode.js 文件头）。
   "zcode": Object.freeze({
-    model: "`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；live 验证例 `bigmodel-api/GLM-5.3`——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）",
+    model: "`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）",
     reasoning: "effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options",
     provider: "登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒",
     supportsRoleContract: "拼进 `session/send` content 前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）",
