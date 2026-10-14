@@ -11,7 +11,7 @@ const KIMI_REASONING_EFFORT_ENV = "KIMI_MODEL_THINKING_EFFORT";
  * 薄封装：ProcessBackend + KimiStreamParser + 参数构造。
  *
  * 调用：kimi -p "<prompt>" --output-format stream-json
- * agent.args 可追加额外参数（如 ["--yolo"]，自动化场景自动批准所有动作）。
+ * agent.args 可追加额外参数；`--yolo` / `--auto` 不能与 -p 同用（kimi 以 "Cannot combine --prompt with ..." 退出）。
  *
  * 进程式 backend：进程死即会话死，不存在 opencode 的 stop 虚假成功问题（TD-37）。
  * kimi 自带循环控制（max_steps_per_turn=100）+ 任务超时（agent_task_timeout_s=900），

@@ -287,5 +287,5 @@ test("M12-24-DOC1: Lead guidance distinguishes static readiness from live capaci
   ]);
   assert.match(skill, /does \*\*not\*\* probe current provider authentication, entitlement, quota, or rate limits/i);
   assert.match(runbook, /complete.*not.*provider.*quota/i);
-  assert.match(architecture, /provider-capacity.*no-effect/i);
+  assert.match(architecture, /provider[-_]capacity.*no[-_]effect/i);
 });

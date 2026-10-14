@@ -21,7 +21,7 @@
       "suggestedUses": ["主力代码执行"],
       "contextWindow": { "tokens": 1000000, "source": "official" },
       "multimodal": { "image": false, "video": false, "source": "official（GLM-5 系首个原生多模态是 Flash；本体无视觉）" },
-      "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
+      "concurrencyNote": "订阅额度按无限对待；要避开的只有 GLM 高峰（北京时间 9:00–18:00，即 UTC 01:00–10:00），高峰消耗 ×3，批量派发会在几十分钟内用尽 5 小时窗口，之后新会话在 WAO 里表现为 zcode turn stalled（没有首个流块，或流静默 60 秒以上）。同时 8 个并发的长文档改写都完成了，停滞与并发无关（measured 2026-10-14）"
     },
     "glm-flash": {
       "profile": "三星智力，代码能力不如 glm-pro，价格极其低廉（Owner 撰写）",

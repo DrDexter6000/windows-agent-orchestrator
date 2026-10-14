@@ -121,3 +121,6 @@
 | TD-288 | 全局命令下 doctor / lanes 要写成 `wao wao doctor`；`wao --help` 是一整屏并夹着内部编号 | 开放 | 小摩擦批次 | src/cliHelp.js |
 | TD-289 | MCP 工具 run_delivery_review_bundle 的描述写 waitMs「省略 = 即时快照」，实际省略时等 270 秒（DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS） | 开放 | 版本可见性批次，与工具描述瘦身（TD-286）同做 | src/mcp/server.js docs/surface/mcp-tools.md |
 | TD-290 | 配置键 portRange（config/default.json 与 src/cli.js 的缺省值）没有任何消费者，端口分配器从未接入（已了结的 TD-23） | 开放 | 小摩擦批次：删键，或接入后写明用途 | config/default.json src/cli.js |
+| TD-291 | zcode 车道额度耗尽时 transcript 里没有任何额度或限流信号，WAO 只报 turn stalled，诊断落成 no_effect 或 provider_auth；Lead 看不出该等额度恢复还是该重派 | 开放 | 车道批次：查 zcode 侧能否拿到额度错误，拿不到就在诊断里如实写"上游无响应" | src/backends/zcode.js src/diagnosis.js |
+| TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境 | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
+| TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |

@@ -474,7 +474,7 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
   // ===== R23-F/B Round B (TD-130): machine-level serialization gate seam =====
   //
   // 默认关：opts.gate 缺席 ⇒ 行为与历史版本逐字节一致（33 处注入式测试与单文件
-  // 跑零漂移）。开启时（三条生产路径经 createCallerGate 显式传入）：
+  // 跑零漂移）。开启时（run 内验证、reverify、repackage、verify-commit 四条生产路径经 createCallerGate 显式传入）：
   //   · acquire 先于第一条命令——排队等待发生在任何 spawn 之前，而 per-command
   //     计时器在 spawn 时才武装，因此排队绝不消耗 verificationTimeoutMs；
   //   · 持闸期间每个 attempt env 注入 WAO_VERIFICATION_GATE_HELD=1（子进程见即

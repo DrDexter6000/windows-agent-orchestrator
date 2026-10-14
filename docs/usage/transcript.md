@@ -48,7 +48,7 @@
 
 `run.message` 不是落盘事件类型：RunManager 把 message 的 role/parts 传给 scorecard 供 `requireAssistantText` 检查，不写进 transcript。
 
-状态机的完整定义见 `docs/02-architecture.md` §3.1，本文不复制状态列表。
+状态机的完整定义见 `docs/02-architecture.md` §4.1，本文不复制状态列表。
 
 交付类 run 的终态语义：
 

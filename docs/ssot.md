@@ -4,12 +4,9 @@
 > 适用对象：所有人类协作者 + 所有 coding agent（含 Lead / worker / 审计 agent）。
 > 关联：`AGENTS.md §Read Before Changes` 是本文件的执行入口。
 
-## 0. 为什么需要这份文件
+## 0. 这份文件管什么
 
-WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.md`），建立了"单一权威 + 指针"原则和一致性断言。但那次审计解决的是**文档间内容矛盾**（端口不一致、进度表漂移），没有解决两个更深的问题：
-
-1. **分类边界缺失** —— 没有规定"哪类信息只能放在哪类文件里"。结果是同一事实（如状态机定义）被全文复制到 5 个文件，任何一处改动其余 4 处就 stale。06-18 事故复盘头部至今仍写"未修复"而代码已修，就是这种结构的必然产物。
-2. **过程文档与契约文档混放** —— `research/` 草稿、`m0~m6-audit.md` 快照、`changelog` 与现行契约（PRD/spec/tech-debt）平级存在，读者（尤其 agent）分不清哪份是当前真相。
+两件事：每类信息只能写在哪类文件里（§1–§3），以及每类行动者动手前必须读哪些文件（§0.1）。同一事实写在几处，改一处其余就过时；过程记录和现行契约混在一起，读者分不清哪份是当前真相。这两种漂移都由这里的分类与 `test/isolation-infra/docs-consistency.test.js` 的守卫挡住。
 
 ---
 ### 0.1 tier-1 行动面阅读表——定义：某类行动者行动前不读就会产生错误行为的文档集合；它回答读时必要性，与回答写时归属的五类别正交
@@ -68,7 +65,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
 | `docs/usage.md`、`docs/usage/*.md` | 使用手册：`docs/usage.md` 是页面地图，`docs/usage/` 下每页对应一项操作任务（部署、车道、宿主、派发、监督、取结果、交付、会审、维护）；`docs/usage/transcript.md` 是 architecture §3.2 事件 spec 的人读投影；`docs/usage/results.md` 维护尚无生成层的 CLI 查询命令 JSON 输出形状；命令/参数参考在生成层；认证操作正文在下一行的文件，手册里只留具名标题与单向链接 |
 | `docs/testing.md` | 开发 WAO 时何时跑全量、何时跑定向测试，worker 交付的验证命令怎么写 |
-| `docs/certification-runbook.md` | 认证操作正文唯一权威（`seat-certify` 阅读集合成员）：2026-09-26 自 `docs/usage.md` 文件级全文迁移——认证结果用于派发选择的边界、DSH 通道适用限制与能力交叉警告、接入新模型/新运行时、backend 能力对照表（TD-162 指针）、上游 harness 原语对照、认证与转录维护命令、delta 认证规程、五态与能力轴分层、单次派发覆盖（场景 1b/1c 含 MCP 特有规则）、retry 覆盖继承、认证与当前就绪；`docs/usage.md` 不保留第二份当前正文 |
+| `docs/certification-runbook.md` | 认证操作正文唯一权威（`seat-certify` 阅读集合成员）：认证结果用于派发选择的边界、DSH 通道适用限制与能力交叉警告、接入新模型/新运行时、backend 能力对照表（指向生成层）、上游 harness 原语对照、认证与转录维护命令、delta 认证规程、五态与能力轴分层、单次派发覆盖（场景 1b/1c 含 MCP 特有规则）、retry 覆盖继承、认证与当前就绪；使用手册不保留第二份当前正文 |
 | `docs/surface/mcp-tools.md` `docs/surface/cli.md` `docs/surface/certification.md` | **生成参考层**：`mcp-tools.md`/`cli.md`（MCP 工具与 CLI 命令的参数/形状）权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；`certification.md`（backend 六轴能力与配置表达力四轴判定）权威源是 `src/backends/*.js` 类声明与 `validateAgentPolicy` 行为探针，由 `npm run gen:certification` 再生成。三者一律禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改对应权威源后须再生成并提交 |
 | `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
@@ -90,7 +87,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | `docs/archive/docs-ssot-audit.md` | 历史 SSOT 审计快照 |
 | `docs/archive/m7-phases.md` | M7 完成后的 phase plan 历史快照 |
 
-**铁律**：事故复盘**不维护修复进度**——修复状态用一行指针指向 `tech-debt.md` 的 TD 编号。这是 06-18 复盘 stale 的直接修复点。`docs/archive/` 是过程类别的归档子目录（mN-audit 等冻结快照），头部由 `archive/README.md` 统一标注"非现行契约源"。
+**铁律**：事故复盘**不维护修复进度**——修复状态用一行指针指向 `tech-debt.md` 的 TD 编号。`docs/archive/` 是过程类别的归档子目录（里程碑审计、整份旧台账与旧 roadmap 等冻结快照），头部由 `archive/README.md` 统一标注"非现行契约源"。
 
 ### 1.5 调研 (Research) —— 当时是怎么想的
 
@@ -107,7 +104,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 2. 三条铁律
 
-1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（生成层 `docs/surface/certification.md`——由 `scripts/gen-certification.mjs` 从 `src/backends/*.js` 闭集能力成员与 `validateAgentPolicy` 行为探针派生、字节钉守卫，TD-162；手写副本已退场）与 `transcript-events-human`（`docs/02-architecture.md` §3.2，事件行集守卫）。
+1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（生成层 `docs/surface/certification.md`——由 `scripts/gen-certification.mjs` 从 `src/backends/*.js` 闭集能力成员与 `validateAgentPolicy` 行为探针派生、字节钉守卫）与 `transcript-events-human`（`docs/usage/transcript.md`，投影自 `docs/02-architecture.md` §3.2，事件行集守卫）。
 2. **类别不可混放**。根因分析进事故复盘（过程），现象+做法进 troubleshooting（运维），接口定义进 architecture（契约）。跨类别只指针不复制。
 3. **过程文档只追加**。事故复盘/mN-audit/research 定格后不改写事实；修复状态、被取代状态一律用指针，不回改正文叙述。
 
@@ -123,7 +120,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 **默认答案是"不新建"**。新建 .md 的合理场景：新的事故复盘（过程类别，按日期命名）；新的 ADR（决策类别，按编号命名）；一份参考文档大到读者无法整读时，按读者要完成的操作任务拆成各自完整的专题页。
 
-**具名例外（2026-09-26，认证正文集中迁移；非普遍放宽）**：`docs/certification-runbook.md` 是 Owner 授权的一次性**文件级全文迁移**产物——认证操作正文自 `docs/usage.md` 原文完整移动（原文迁移，非摘要/节选/索引替代），旧位置只保留原具名标题与指向新文件的单向链接，不保留第二份当前正文。这不是 TD-187 已回退的索引路线的复活（迁移单位是完整正文，不是锚点清单），也不构成其它拆分提议的先例——任何后续拆分仍须按上述三问与 TD-177 前置收敛另行评估。
+认证操作正文单独成文件（`docs/certification-runbook.md`），是因为 `seat-certify` 要求无条件全文阅读一份自足的正文；使用手册在原位置只留具名标题与指向它的单向链接，不保留第二份正文。拆页的单位是完整正文，不是锚点清单或节选。
 
 ---
 
@@ -137,6 +134,10 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - 技术债台账 `docs/tech-debt.md` 一条一行、列数与状态固定、行长有上限；每个技术债编号只在台账、已了结清单（`docs/archive/tech-debt-closed.md`）、已偿还归档三者之一有定义行，文档与代码里引用的编号都要有定义（测试夹具与冻结的归档不在检查面）。
 - 决定索引一行只放编号和标题；新决定档有体量上限。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
-- seat-certify 文件级入口（TD-187 索引试点已于 2026-09-25 回退，不保留可选索引路线）：§0.1 主表行无条件全文必读恰五文件（2026-09-26 起 `docs/usage.md` 换为 `docs/certification-runbook.md`——认证操作正文完整迁移，`docs/usage.md` 原位置留具名标题与单向链接）；多行动面并集、正文显式依赖跟进、截断补读三义务在场；adversarialEscape → architecture §4.6/§4.1 为追加依赖指针（非独立入口）；恢复索引 / 节选替代全文 / 裁量收窄必红。旧索引守卫族（锚解析 / 公共项 / 依赖 / 回退 / 4096 帽）与 §0.1.1 冻结夹具**已不再执行**：TD-187 回退包（`f9c1fbe`，2026-09-25）曾将其落库，2026-09-26 的测试边界修正（`3304f71`）已整体移除——历史查 Git（`f9c1fbe` 引入、`3304f71` 移除），测试文件内不再保留其冻结副本。现行实际执行的是：文件级入口守卫族（B3-③ 追加依赖指针、B3-⑥ 恰五文件全集、B3-⑦ 无条件全文与三义务，负反例固化——恢复索引 / 节选 / 裁量收窄形状喂入必红）与认证迁移链接可达性守卫（原位具名标题 + 单向链接 + 目标节真实存在，摘链接 / 改目标节名 / 删标题必红）。
+- seat-certify 入口：§0.1 的行无条件全文必读恰五个文件；多行动面取并集、正文显式依赖跟进、截断补读三项义务在场；adversarialEscape 连读 architecture §4.6/§4.1 是追加依赖指针，不是独立入口；改成索引、节选替代全文或按裁量收窄都会红。
+- 认证正文迁出处：使用手册保留具名标题与指向 `docs/certification-runbook.md` 的单向链接，目标节必须真实存在；摘链接、改目标节名、删标题都会红。
+- 使用手册：`docs/usage.md` 的页表与 `docs/usage/` 下的文件一一对应，每页开头指回地图，页内相对链接都能解析到文件；派发页的续跑拒绝原因与代码闭集双向一致。
+- roadmap：里程碑表里已完成的里程碑不回退；字节上限把它限在一张表的体量。
+- 字节上限：几份大的活文档各有字节上限；上限红了就搬走或删去内容，抬高上限由 Owner 决定。
 
 历史审计矩阵不在本文维护；需要查当时发现和收束过程时读 `docs/archive/docs-ssot-audit.md`。当前项目状态以 `docs/roadmap.md`、`docs/tech-debt.md`、`docs/02-architecture.md` 和代码/测试为准。

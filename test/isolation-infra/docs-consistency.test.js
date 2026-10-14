@@ -571,12 +571,8 @@ test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SS
     `docs/usage.md 必须按 runtime 默认值记录告警日志路径 \`${alertLog}\``);
 });
 
-test("architecture 页首状态反映 M0-M10 当前能力，不得停留在 M0-M9 或更早；使用手册不把 daemon 写成 M5", () => {
+test("使用手册不把 daemon 写成 M5（daemon 属 M7）", () => {
   const usage = read("docs/usage.md");
-  const arch = read("docs/02-architecture.md");
-  const archHead = arch.slice(0, 1200);
-  assert.ok(/M0.M10|M0–M10|M0-M10/.test(archHead), "02-architecture.md 顶部未说明当前 M0-M10 能力");
-  assert.ok(!/M0.M9|M0–M9|M0-M9/.test(archHead), "02-architecture.md 顶部仍自称 M0-M9 能力（应为 M0-M10）");
   assert.ok(!/M5 daemon/.test(usage), "usage.md 仍把 daemon 误写成 M5，roadmap 中 daemon 属 M7");
 });
 
@@ -868,12 +864,10 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
 
 test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
   const caps = {
-    "docs/02-architecture.md": 133845, // baseline 121677
+    "docs/02-architecture.md": 133000, // 改写为现状描述后约 130.3KB，上限留约 2%
     "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
     "docs/usage.md": 226300,          // 地图加 docs/usage/ 全部页的合计；改写为现状描述后约 222KB，上限留约 2%
-    // Owner 2026-10-12 许可提升上限（"允许文档提升上限"）：排障手册离 +10% 帽只剩
-    // 1 字节，决定 0067 的两条排障条目加不进去——本条提到基线 +20%。其余三份未动。
-    "docs/troubleshooting.md": 71377, // baseline 59481
+    "docs/troubleshooting.md": 69000, // 改写为现状描述后约 67.6KB，上限留约 2%
   };
   for (const [rel, cap] of Object.entries(caps)) {
     const bytes = Buffer.byteLength(read(rel), "utf8");
@@ -3722,7 +3716,7 @@ test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 us
   assert.throws(() => assertInPlaceCertPointer(stripped, runbook, "delta 认证规程"),
     /缺指向/, "原位段链接丢失必须红（防空标题假绿）");
   // 负对照 2——runbook 目标节改名（链接悬空）→ 必红。
-  const renamed = runbook.replace("## delta 认证规程（lane 架构，ADR-0025 批次 3）", "## 已改名的认证规程节");
+  const renamed = runbook.replace("## delta 认证规程", "## 已改名的认证规程节");
   assert.notEqual(renamed, runbook, "夹具失效：目标节改名变异未生效");
   assert.throws(() => assertInPlaceCertPointer(usage, renamed, "delta 认证规程"),
     /0 命中/, "runbook 目标节改名必须红（单向链接悬空）");

@@ -36,7 +36,7 @@
 
 | 交付改动的范围 | 验证命令 |
 |---|---|
-| 只改测试文件或文档（`*.md`、`docs/**`），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
+| 只改测试文件或文档（`*.md`、`docs/**`），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组，以及直接读这份文档的测试文件（`git grep -l '<文档路径>' -- test` 列出）；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
 | 触及共享核心：测试与文档以外的一切改动（`src/**`、`config/**`、`scripts/**` 等），以及公共夹具 | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
 
 - 任务书把 worker 自检命令与 `verificationCommands` 分开写。worker 自检一律定向，汇报写明"这些文件通过，其余未测"。
