@@ -100,3 +100,7 @@
 | TD-283 | 车道暂停说明只写在画像展示文字里，派发和会审选席时不出现 | 车道表 `config/lanes.json` 的 `dispatchHold` 是暂停说明唯一的家；`registry_list`、`registry list`、`wao lanes` 与 CLI 派发、会审席位的提示都由它现算，只提示不拦截；画像里的原话移除（决定 0080） |
 | TD-296 | canonicalRunner 的 TD-255 端到端用例在 worker 语境里必红（runner 在 worker 语境按决定 0054 关闭自动裁定） | `runTd255RegistryCase` 显式传 `workerContext: false`，不再依赖运行环境；worker 语境下不裁定另有专门用例 |
 | TD-299 | 车道当前型号在配置之外有没人核对的副本（文档、模板注释、测试字面值），升级后悄悄过时 | 现行文档与模板注释不写当前车道型号，`docs-consistency.test.js` 按 `config/lanes.json` 现算核对（具体型号的事实用就地标记）；测试字面值钉改为关系检查，W3a 快照与 W1 夹具照旧同 diff 改（决定 0081） |
+| TD-284 | Lead 看不出 MCP 服务进程加载的是哪一版代码 | `lead_preflight` 已有的 server build 一行给出服务进程启动时的 HEAD 与检出是否变化，变了出 warning 提示重启宿主；缺的是说明，已写进 `docs/usage/host.md` 的 `lead_preflight` 一节 |
+| TD-285 | 用分支代码对真实车道做验证没有成文做法，证据容易落在临时目录 | `docs/testing.md`「用真实车道试用分支代码」写明做法：注册表指向主检出的私有注册表，运行目录用主检出的 `runs/`，MCP 面在工作树里起分支的服务 |
+| TD-286 | MCP 工具面的 hostVisible 没有测试守着 | `m12-10-tool-surface.test.js` 加了 hostVisible 冻结线（口径同测量脚本，决定 0078 修订）；23 条描述改为紧凑形，description 11510 → 10125 B，hostVisible 22084 → 20699 B |
+| TD-289 | run_delivery_review_bundle 的描述把省略 waitMs 写成即时快照，实际等 270 秒 | 描述写明省略时的默认等待，数值由常量插值；测试从描述取数，再与不带 waitMs 调用时的实际等待比对 |

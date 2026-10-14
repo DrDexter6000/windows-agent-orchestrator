@@ -1,6 +1,6 @@
 # 运行 WAO 自己的测试
 
-本页是开发 WAO 时"何时跑全量、何时跑定向测试"的唯一权威。失败的判读与处置见 `docs/troubleshooting.md` §8，为什么这样定见决定 0077。
+本页是开发 WAO 时"何时跑全量、何时跑定向测试"以及"怎样用真实车道试用分支代码"的唯一权威。失败的判读与处置见 `docs/troubleshooting.md` §8，为什么这样定见决定 0077。
 
 ## 两种跑法
 
@@ -22,6 +22,16 @@
 **最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量。
 
 全局 `wao` 与宿主的 MCP 注册常常直接指向开发检出（本仓库的维护机器就是这样），main 上的错误会立刻影响正在用 WAO 的会话，所以合入前这一次全量不能省。
+
+## 用真实车道试用分支代码
+
+测试之外要看分支代码在真实车道上的表现时，在分支工作树里这样跑：
+
+- **CLI**：用 `npm run cli -- …`。全局 `wao` 跑的是 `npm link` 链接的那份检出（通常是主检出），不是分支。
+- **注册表**：工作树里没有私有注册表。用 `--registry <主检出>/config/agents.json` 指过去，不要复制一份。注册表不是默认那份时车道表停用（见[车道](usage/lanes.md)），这时只能按 agent id 派发。要看分支的车道表，用 `npm run cli -- wao lanes --registry <主检出>/config/agents.json --lanes-file config/lanes.json`。
+- **运行目录**：用 `--run-dir <主检出>/runs`。不给时 run 写进工作树自己的 `runs/`，删工作树时一起没了，提交说明里引用的 run id 就查不到。
+- **目标项目**：会写文件的试验，`--cwd` 指向一个临时 Git 仓库；只读观察可以指向 WAO 仓库本身。
+- **MCP**：宿主注册的 MCP 服务跑主检出的代码。要试分支的 MCP 面，在工作树里起分支的服务（`npm run mcp -- --registry <主检出>/config/agents.json --run-dir <主检出>/runs --workspace-root <目标项目>`）并经 stdio 发 JSON-RPC；或者在工作树的 `.dev/`（已被忽略）里写脚本，用 `createWaoMcpServer` 加 SDK 的 `InMemoryTransport` 直接调。合入并重启宿主后，用 `lead_preflight` 的 server build 一行确认服务进程已经加载新代码（见[宿主](usage/host.md)的 `lead_preflight` 一节）。
 
 ## 全量里出现失败时
 

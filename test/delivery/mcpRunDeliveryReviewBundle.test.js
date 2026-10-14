@@ -857,21 +857,64 @@ test("M12-3B-TD179: settled pending rejection composes the pending advisory safe
 
 // ===== M12-19: recovery-truth description contract =====
 
-// M12-3B-12: run_delivery_review_bundle's description states the same waitMs
-// contract as run_delivery: valid range 1000..300000, waitMs=0 invalid,
-// point-in-time alternative, detached-run truth.
-test("M12-3B-12: bundle description states waitMs range, 0 invalid, point-in-time, detached-run truth", async () => {
-  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
-  const client = await buildClient(server);
+// M12-3B-12: the bundle description's wait contract must match the tool's
+// behavior. The waitMs range, 0-invalid, and transport-loss sentences are the
+// same run_delivery contract; the omission default is bundle-specific — the
+// description states a default wait (interpolated from
+// DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS at build time, never a literal here)
+// and an omitted waitMs must wait EXACTLY that stated value. For an immediate
+// read the description points at run_delivery + run_delivery_review.
+test("M12-3B-12: bundle description states waitMs range, 0 invalid, transport-loss truth; stated default equals the actual omitted-waitMs wait", async () => {
+  const dir = makeGitDir("m123b-default-wait-");
   try {
-    const { tools } = await client.listTools();
-    const t = tools.find((x) => x.name === "run_delivery_review_bundle");
-    assert.ok(t, "run_delivery_review_bundle present");
-    const desc = t.description ?? "";
-    assert.match(desc, /1000\.\.300000/, "waitMs range 1000..300000 stated");
-    assert.match(desc, /waitMs=0 is invalid/, "waitMs=0 explicitly invalid");
-    assert.match(desc, /point-in-time/, "point-in-time alternative named");
-    assert.match(desc, /Host transport loss\/cancellation does not stop the detached run/, "detached-run truth");
-    assert.match(desc, /re-read point-in-time/, "recovery: re-read point-in-time");
-  } finally { await client.close(); await server.close(); }
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    let desc;
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "run_delivery_review_bundle");
+      assert.ok(t, "run_delivery_review_bundle present");
+      desc = t.description ?? "";
+      assert.match(desc, /1000\.\.300000/, "waitMs range 1000..300000 stated");
+      assert.match(desc, /waitMs=0 is invalid/, "waitMs=0 explicitly invalid");
+      assert.match(desc, /Host transport loss\/cancellation does not stop the detached run/, "detached-run truth");
+      assert.match(desc, /re-read point-in-time/, "recovery: re-read point-in-time");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    // The default wait the description states for an OMITTED waitMs (extracted
+    // from the omission clause, never a hard-coded literal) must equal the
+    // waitMs the handler applies when waitMs is omitted — the same injection
+    // pattern as M12-3B-RED-03. The retired point-in-time claim stays gone.
+    assert.doesNotMatch(desc, /omit = point-in-time/, "omission is a default wait, not a point-in-time read");
+    const stated = Number(/omit = default (\d+) ms wait/.exec(desc)?.[1]);
+    assert.ok(Number.isInteger(stated) && stated > 0,
+      `description states a parseable default wait in ms (got ${String(stated)})`);
+    let observedWaitMs = null;
+    const server2 = createWaoMcpServer({
+      registryPath: "/r.json",
+      runDir: dir,
+      workspaceRoot: dir,
+      getRunDeliveryReadinessFn: async (input) => {
+        observedWaitMs = input.waitMs;
+        return successfulDelivery(input.runId);
+      },
+      getRunDeliveryReviewFn: async (input) => reviewPage(input.runId, { fileIndex: 0, changedPath: "src/a.js" }),
+    });
+    const client2 = await buildClient(server2);
+    try {
+      const result = await client2.callTool({
+        name: "run_delivery_review_bundle",
+        arguments: { runId: "run_default_desc", fileIndex: 0 },
+      });
+      assert.equal(result.isError, undefined);
+      assert.equal(observedWaitMs, stated, "omitted waitMs waits exactly the default the description states");
+    } finally {
+      await client2.close();
+      await server2.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

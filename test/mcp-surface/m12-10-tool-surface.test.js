@@ -420,286 +420,11 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
 // H — no-model wire measurement: deterministic 21-tool wire, bounded + honest
 // =====================================================================
 
-// Recorded BEFORE this change (the 23-tool HEAD baseline) for the regression
-// narrative: the surface dropped playbook_list/playbook_get, so the 21-tool wire
-// is materially smaller than the 23-tool baseline.
+// Historical 2026-08 23-tool wire baseline (documented reference only; see M12-10-H).
 const RED_23_WIRE = 75492;
 
-// Frozen deterministic ceiling — frozen at the achieved GREEN value, to prevent
-// wire regression creep. The measurement is deterministic (same code ⇒ identical
-// bytes), so freezing at the achieved value gives full regression protection:
-// any further description growth or tool-schema bloat trips the ceiling.
-//
-// Re-baselined for M12-11: run_wait and run_await_result gained the bounded,
-// closed-set `observation`/`termination` nested facts (additive; no arrays or
-// dynamic payloads) and Host-neutral transport-recovery description text.
-// Ceiling re-frozen to the new achieved value (69031 bytes: 21 tools, desc total
-// 11958). Prior M12-10 value was 65625 (desc total 10642); the ~3.4k delta is
-// the sanctioned M12-11 addition, still well under the 23-tool baseline below.
-//
-// Re-baselined for M12-12 (Self-Describing Results): the four standalone
-// observation/delivery/diagnosis tools (run_wait, run_await_result, run_delivery,
-// run_diagnose) gained the REQUIRED `semanticNotes` array — a 1..4-entry array of
-// three-key notes plus a concise description sentence on each. No new tools, no
-// validation removed, no hidden tools.
-//
-// M12-12 wire correction: the note `id` is a BOUNDED SHAPE in the output schema —
-// the frozen namespace pattern + max length derived from the SSOT — NOT the full
-// catalog enum. Serializing a 33+-element zod enum once per output schema had
-// pushed the wire to 74559; the bounded shape (zod `.regex()` → JSON-Schema
-// `pattern`, no enum) drops it back to 71495 while keeping exact three-key strict
-// response parsing and the application SSOT as the catalog-membership authority.
-// Ceiling re-frozen to the new achieved value (71495 bytes: 21 tools). The 21-tool
-// wire (71495) remains below the 23-tool baseline (75492) with comfortable margin.
-//
-// Follow-up UX correction: run_wait now self-describes its accepted waitMs range
-// and the point-in-time alternative. This adds 138 description bytes and no
-// schema/tool/runtime behavior. Ceiling re-frozen at the measured 71633 bytes.
-//
-// M12-13 re-baseline: run_dispatch, run_continue, run_reverify and the profile
-// paths gained the shared per-command execution timeout/budget —
-// delivery.verificationTimeoutMs [1000, 7200000] — and run_delivery/run_await_result
-// gained the nullable isolationFailure / isolationFailureCode projection fields.
-// No new tools, no validation removed. The measured wire grew +602 bytes over
-// M12-12; ceiling re-frozen at the achieved value, still comfortably below the
-// 23-tool baseline.
-//
-// M12-15 re-baseline: runs_list gained two closed-set per-run activity facts and
-// unresolvedCount; lead_preflight gained unresolvedRunCount. These additive,
-// bounded fields distinguish proven-active runs from historical non-terminal
-// transcripts without hiding evidence or inferring failure. No new tools or
-// validation were removed. Ceiling re-frozen at the measured 72739 bytes, still
-// below the 23-tool baseline.
-//
-// M12-16 re-baseline (Package A — lossless context slimming): every tool's
-// human-language description was materially shortened to drop tools/list context
-// cost. The same 21 tools, the exact same wire schema/annotations/names/order —
-// proven by M12-16-A's description-stripped SHA-256 contract, which is unchanged.
-// Description bytes fell 11812 -> 8873 (-2939, -25%); the wire fell by the same
-// 2939 bytes (description is the only variable field) to 69800. No schema,
-// handler, annotation, name, order, or behavior change. Ceiling re-frozen at the
-// measured 69800 bytes, still well below the 23-tool baseline.
-//
-// M12-16 re-baseline (queued in-flight correction — run_correct added): the
-// surface grew from 21 to 22 tools. run_correct carries its own
-// input/output schemas + annotations + a 517-byte description, and run_dispatch
-// gained a one-sentence correctable clause. The description-stripped SHA-256
-// therefore changed (a new tool's schema is in the stripped payload) and was
-// re-measured truthfully (see DESC_STRIPPED_CONTRACT_SHA). Description bytes rose
-// 8873 -> 9576 (+703); the wire rose by the same description delta plus run_correct's
-// schema bytes to 71677. Ceiling re-frozen at the measured 71677 bytes, STILL below
-// the 23-tool baseline (75492) — 22 tools now vs 23 then, with more function.
-//
-// M12-16 re-baseline (correction lifecycle visibility in run_activity): the
-// run_activity output schema gained the closed-set `correction` activity variant
-// (status enum over requested/claimed/delivered/delivery_failed/rejected + a
-// bounded correctionId) and a `correction` counts key, so the correction lifecycle
-// is visible as meaningful safe labels WITHOUT ever exposing correction
-// prompt/body/reason/provider session/path. No new tools, no validation removed,
-// no description change (M12-16-B still passes). The wire grew +451 bytes
-// (schema-only); ceiling re-frozen at 72128, still well below the 23-tool baseline.
-//
-// M12-17 re-baseline (submitted-stage execution semantics): the run_status
-// OUTPUT schema gained the REQUIRED closed-set `executionStage` object
-// ({ phase, sinceTs, secondsSince } — phases from the runStageProjection.js SSOT
-// enum, nullable sinceTs/secondsSince). No new tools, no validation removed, no
-// description text change (M12-16-B still passes — desc bytes unchanged). The
-// wire grew +307 bytes (schema-only); ceiling re-frozen at the measured 72435,
-// still well below the 23-tool baseline (75492).
-//
-// M12-19 re-baseline (supervision recovery truth): workspace_status AND the
-// lead_preflight workspace projection gained the REQUIRED closed-set
-// `unboundReason` nullable enum (zod enum derived from the WORKSPACE_UNBOUND_REASONS
-// application SSOT) — additive schema on two output schemas, plus sanctioned
-// recovery-truth description text on workspace_status/lead_preflight/run_wait/
-// run_await_result/run_activity/run_delivery/run_delivery_review_bundle (waitMs
-// range + 0-invalid + point-in-time alternative + cursor-rejection recovery +
-// Host transport-loss truth; NO wait ranges, defaults, or behavior changed).
-// No new tools, no validation removed. The wire grew +1512 bytes; ceiling
-// re-frozen at the measured 73947, still well below the 23-tool baseline (75492).
-//
-// M12-19 re-baseline (process-missing delivery recovery): RECOVERY_CANDIDATE_KINDS
-// gained the REQUIRED closed-set member `process_missing` — the wire
-// RECOVERY_CANDIDATE_KIND_SCHEMA (zod enum derived from that application SSOT,
-// auto-extending with the array) now serializes three members instead of two in
-// the run_delivery / run_delivery_repackage / run_delivery_decide output schemas
-// (+54 bytes, part of the stripped payload — see DESC_STRIPPED_CONTRACT_SHA),
-// plus sanctioned host-neutral advisory/settlement description text on
-// run_delivery and run_delivery_repackage (candidateKind=process_missing means the
-// detached runner/provider process is provably gone and retained work is
-// recoverable but not accepted; settlement is a first-terminal-wins failed with a
-// safe confirmation fact; NO PID/path/error leakage, no auto-accept). No new
-// tools, no validation removed. Description bytes rose 10734 -> 11225 (+491); the
-// wire rose by the same description delta plus the enum bytes (+545 total).
-// Ceiling re-frozen at the measured 74492, still well below the 23-tool baseline
-// (75492).
-//
-// M12-22 re-baseline (continuation cumulative-scope truth): the run_continue
-// output schema (RUN_CONTINUE_OUTPUT) gained six nullable-optional cumulative-
-// scope fields (inheritedChangedPaths/Count/Truncated +
-// uncoveredInheritedPaths/Count/Truncated), populated ONLY on the new closed-set
-// `continuation_scope_incomplete` eligibility refusal — additive optional schema,
-// so success and every other refusal stay byte-identical (zero drift). No new
-// tools (count stays 22), no validation removed, no description text changed
-// (FROZEN_22_DESC_CEILING unchanged at 11225). The output schema is part of the
-// stripped payload, so DESC_STRIPPED_CONTRACT_SHA changed truthfully (see below).
-// The wire grew +583 bytes; ceiling re-frozen at the measured 75075, still well
-// below the 23-tool baseline (75492).
-// M12-24 adds the provider_capacity category and two safe diagnosis codes to
-// existing output enums. The surface remains 22 tools; the intentional schema
-// change adds 106 bytes, so the ceiling is re-frozen at the exact 75181.
-// M12-25 adds the bounded registry-issue projection (issues/issuesTruncated on
-// registry_list, registryIssues/registryIssuesTruncated on lead_preflight) and
-// the providerSessionRouting closed set on run_dispatch. The surface remains 22
-// tools; the intentional additive output schemas add 786 bytes (75181 → 75967),
-// which crosses the historical 75492 23-tool baseline (the "leaner than 23 tools"
-// narrative no longer holds — see M12-10-H). The regression guard is this frozen
-// ceiling, re-frozen at the exact measured 75967.
-// TD-111 adds the certification advisory context fields (certificationReasonCode
-// enum derived from the CERTIFICATION_REASON_CODES SSOT + nullable
-// certificationLastHealthyAt) to AGENT_ENTRY and the lead_preflight workers
-// entries. The surface remains 22 tools; the additive output schemas add 617
-// bytes (75967 → 76584). Ceiling re-frozen at the exact measured 76584.
-// Round 4 Bundle B (read-only runs — advisory observation, no hard gate) adds
-// TWO sanctioned additive schema members and NO tools: run_dispatch's
-// RUN_DISPATCH_INPUT gains the optional `readOnly` boolean declaration, and
-// run_activity's RUN_ACTIVITY_OUTPUT gains the OPTIONAL `readOnlyObservation`
-// object (closed status enum + source literal + counts + the bounded
-// writtenPaths array, all derived from the runReadOnlyObservation.js SSOT
-// constants). No description bytes changed (FROZEN_22_DESC_CEILING unchanged);
-// the wire grew +671 bytes (schema-only, 76584 → 77255). Ceiling re-frozen at
-// the exact measured 77255.
-// R10-A additive model param: run_dispatch + run_dispatch_contract_check's
-// shared RUN_DISPATCH_INPUT gains the optional `model` string (per-dispatch
-// model-id override, wire-validated). No description bytes changed
-// (FROZEN_22_DESC_CEILING unchanged); the wire grew +200 bytes (77255 → 77455,
-// the serialized property rides both schemas). Ceiling re-frozen at the exact
-// measured 77455.
-// R11-1 additive reasoning param: the same shared RUN_DISPATCH_INPUT gains the
-// optional `reasoning` closed-set enum (per-dispatch reasoning effort override
-// — the six REASONING_EFFORTS members serialized as a zod enum, riding both
-// schemas). No description bytes changed (FROZEN_22_DESC_CEILING unchanged,
-// measured desc total 11174); the wire grew +170 bytes (77455 → 77625).
-// Ceiling re-frozen at the exact measured 77625.
-// TD-150 批B scorecard visibility: run_status's RUN_STATUS_OUTPUT gains the
-// OPTIONAL `scorecardSummary` object ({passed:boolean, failedChecks:string[]} —
-// names of failing checks only, never evidence/detail free text), absent-not-null
-// for runs without scorecard events. Additive optional schema on one output;
-// no description bytes changed (FROZEN_22_DESC_CEILING unchanged, measured
-// desc total 11174); the wire grew +204 bytes (77625 → 77829).
-// Ceiling re-frozen at the exact measured 77829.
-// TD-157 contract-check advisory probe: CONTRACT_CHECK_ISSUE_CODES gains the
-// section-level code referenced_path_probe_miss (NEVER in CONTRACT_LEVEL_CODES —
-// fail-open by design, contractValid unaffected). run_dispatch_contract_check
-// output schema enum grows +29 bytes (77829 → 77858). desc unchanged
-// (FROZEN_22_DESC_CEILING untouched).
-// Ceiling re-frozen at the exact measured 77858.
-// TD-159 adoption-protocol batch: VERIFICATION_FAILURE_SUMMARY gains the
-// OPTIONAL nullable boolean stderrTailInTranscript (advisory pointer — tails'
-// CONTENT never crosses; presence only). run_delivery output schema grows
-// +156 bytes (77858 → 78014). desc unchanged.
-// Ceiling re-frozen at the exact measured 78014.
-// TD-153 residual batch (scorecard check-name SSOT + failedChecks bounded,
-// 2026-09-18): run_status's scorecardSummary.failedChecks narrowed from a
-// plain z.array(z.string()) to the FULL closed-set enum derived from the
-// scorecard.js SCORECARD_CHECK_NAMES SSOT plus the catalog-derived .max
-// ceiling (CONTRACT_CHECK_ISSUE_CODES-shape precedent, NOT shape-only) —
-// fail-closed: a non-member name or oversized list collapses the whole call
-// to the fixed safe text, never truncated/filtered-then-"complete".
-// Schema-only; no description bytes changed (FROZEN_22_DESC_CEILING
-// untouched). Sanctioned by the Owner 2026-09-18 directive on the two-seat
-// consult (auditor run_202609180757006603nxdsx + coder_mm
-// run_20260918075704956eh790g). The wire grew +113 bytes (78014 → 78127).
-// Ceiling re-frozen at the exact measured 78127.
-// ADR-0032 修订（2026-09-22，Owner 裁定：认证证据详情按需进入 MCP 只读面）：
-// registry_list 的 INPUT 增加可选闭集 detail 枚举（单值
-// "certificationEvidence"，+59 B），OUTPUT 增加可选 certificationEvidence
-// 数组（按席位五列：声明/组件观测/组合结果/适用性三态/限制与来源——含两本
-// 台账各自的来源状态枚举，"限制与来源"未为控体积丢弃，+766 B）。纯 additive
-// 可选成员（ADR-0021 第一档仪式）；默认调用投影一字不变（详情缺席 ⇔ 未请求）。
-// 不新增工具（22 不变）、不动认证门禁。描述仅 registry_list 一条改写
-// （"takes no arguments" 已不真实）：152 → 195 B（+43 B，desc total
-// 11174 → 11217，FROZEN_22_DESC_CEILING 11225 未动）。合计 wire +868 B
-// （78127 → 78995，+1.11%），必要增量如上逐项列明。
-// **Owner 2026-09-22 现场授权：体积上限可提高 10%。** 据此整体上限由 78127 调整为
-// 85939（=78127×1.1 向下取整）；描述上限 11225 未动（实测 11217 未破）。本次落在
-// 授权额度内（富余 6944 B）。上一条"不得为转绿放宽上限"的禁令仍然有效——放宽只能
-// 由 Owner 逐次裁定且须有实测增量与逐项说明，本次即为该裁定（授权记录见 ADR-0032 修订节）。
-//
-// M13-r2 re-baseline (council consult — run_consult added): the surface grew
-// from 22 to 23 tools (decision 0039). run_consult carries its own input schema
-// (840 B: dual-mode inline-brief contract), output schema (3824 B: the strict
-// council-diff snapshot mirror — text fields deliberately UNBOUNDED, the 0039
-// zero-truncation red line), annotations, and a 620-byte description. The
-// description-stripped SHA-256 therefore changed truthfully (a new tool's
-// schema is in the stripped payload; see DESC_STRIPPED_CONTRACT_SHA). The wire
-// measured 84494 (+5499 over the prior measured 78995: run_consult's schema +
-// description bytes), still BELOW the Owner-authorized 85939 ceiling — no new
-// ceiling authorization was needed; per the re-freeze-at-measured regime the
-// frozen ceiling is re-frozen at the exact measured 84494.
-// 0045 清账批 CB-1 重冻（2026-10-05）：10-03 delivery 族描述三句式瘦身后未重冻，
-// 顶（84494）对实测（83099）静默松弛 1395 B。按 re-freeze-at-measured 在册制度
-// 重冻于实测值；Owner 授权顶（78127×1.1=85939，2026-09-22 裁定）不变，扩限仍须
-// 逐次裁定+实测增量+逐项说明（决定 0045 §1.7）。
-// 0045 §1.4 第 5 步重冻（2026-10-05）：run_dispatch/run_dispatch_contract_check
-// 共享入参新增可选 lane/role（regex 形，非 enum——每机车道配置不进 wire），
-// agentId 转可选（二选一闭集在 handler 校验）。实测 83099 → 83361（+262B =
-// 两工具的 lane/role schema 条目），按 re-freeze-at-measured 制度重冻。
-// Owner 2026-10-05 授权（"改扩展就扩展"+0045 签署）覆盖本增量；距授权顶
-// 85939 余 2578B。
-// 0045 窗口门重冻（2026-10-05）：run_consult 出参镜像补 W3d/W4c 成员（seats 四
-// 枚举/runtimeFacts registryResolution/bricks authorLaneInSeats——strict 镜像同步），
-// 实测 83403 → 84111（+708B）。
-// TD-215 重冻（2026-10-06，三方会审批准"调用方契约只多一个枚举值"）：repackage/
-// reverify 出参 schema 增 status 枚举（ok|pending）+既有字段 .optional 化（pending
-// 时缺席；ok 形状仍由 handler 侧逐字段强校验守门）。实测 84111 → 84060（**-51B**
-// ——optional 化的 schema 序列化略小于原必填形）。距 Owner 授权顶 85939 余 1879B。
-// TD-220（2026-10-07）：run_activity 新增来源字段、thinking/envelope 严格条目及计数，
-// 实测 84060 → 84827（+767B），按实测重冻；Owner 硬顶 85939 不变，余 1112B。
-// TD-226（2026-10-08）：run_delivery_repackage 出参新增 REQUIRED 闭集
-// rejectionReason（z.enum(REPACKAGE_REJECTION_CODES).nullable()——13 成员应用层
-// SSOT 的 wire 镜像，zod nullable 序列化为 anyOf 枚举×2）。纯 schema 增量，无工具
-// 增减、无校验移除、无描述字节变化（FROZEN_23_DESC_CEILING 实测 10442 不动）。
-// 实测 84827 → 85222（+395B），按实测重冻；Owner 硬顶 85939 不变，余 717B。
-// 集成重冻（Lead，2026-10-08）：TD-227 contract_check issueCodes 扩两枚举（+55B，
-// 交付 48b3534）与 TD-226 并行交付、各自重冻互不包含对方——集成 main 实测叠加
-// 85277（85222+55）。按实测重冻；Owner 硬顶 85939 不变，余 662B。
-// TD-224（2026-10-08，run_collect 可用性双修）：①run_collect 出参 messages entries
-// 增可选 const-true 续接标记 continuation（z.literal(true).optional()——仅续接切片
-// 携带，缺席 ≡ 消息开头；schema 序列化为 {type:boolean,const:true}）；②顶层增可选
-// compactFallback（仅 compactStatus==="too_large" 时 handler 附静态降级指引文本）。
-// 纯 additive 可选 schema 成员，无工具增减、无校验移除、无描述字节变化
-// （FROZEN_23_DESC_CEILING 实测 10442 不动）。实测 85277 → 85360（+83B，两条
-// schema 条目），按实测重冻；Owner 硬顶 85939 不变，余 579B。
-// TD-232 重冻（Lead，2026-10-08）：run_await_result result 子 schema 增可选
-// compactFallback（too_large 降级指引，+36B；Owner 硬顶 85939 余 543B）。
-// F3 重冻（Lead，2026-10-08 friction batch）：run_dispatch/run_dispatch_contract_check
-// 共享入参 expectedGitHead 的 wire 正则由 /^[0-9a-f]{40}$|^[0-9a-f]{64}$/ 放宽为
-// /^[0-9a-f]{7,64}$/（EXPECTED_GIT_HEAD_RE SSOT，短哈希前缀匹配——弱化断言语义
-// 在 workspaceExpectation.js；两工具的 inputSchema pattern 各序列化一次，正则
-// 内容 31→17 字符）。实测 85396 → 85370（**-26B**，负向增量）。同批 F5（坏 cursor
-// 专属文案）为运行时 handler 文案——零 wire、零 schema 变化，不占本顶。无描述
-// 字节变化（FROZEN_23_DESC_CEILING 实测 10442 不动）。按实测重冻；Owner 硬顶
-// 85939 不变，余 569B。
-// TD-241 C2b 重冻（Lead，2026-10-09，Owner 批准小幅重冻）：run_delivery_repackage
-// 与 run_delivery_reverify 出参 schema 各增可选闭集 guidance 数组（pending 回执
-// 指引进 structuredContent——claude 成功面只读 structuredContent 的探针实证）。
-// 纯 schema 增量 +328 字节，描述字节零变化（M12-16-B 仍绿）。
-// 0069 重冻（2026-10-13，Owner 当日裁定的需求批："MCP 上看不到命令原文是严重的
-// 产品缺陷"；"要杀死进程必须第一 run_activity 探明最新状态、第二必须说明理由"）：
-// run_activity command 条目增 text / truncated、入参增 order、runtime_status 的
-// status enum 增 serve_active；run_stop 入参增必填 reason / observedSeq；两条工具
-// 描述改写（协议与"10 分钟内有生命体征不建议中止"须到 Lead 眼前）。实测
-// 85221 → 85915（+694B：schema +279，描述 +415）。Owner 硬顶 85939 不变，余 24B
-// ——下一次再给 MCP 加字段须先由 Owner 抬硬顶或在别处瘦身。
-// 0070 重冻（2026-10-13）：Owner 当日"允许抬高 MCP 硬上限"，并追认上面 0069 的重冻。
-// 硬顶未给数值，沿用 2026-09-22 的 10% 口径：85939 → 94532（×1.1 向下取整；Owner 随后
-// 明示"确认94532"；授权记录
-// 见 ADR-0032 修订节）。本批 run_activity 的 tool_use 条目增可选 detail（输入摘要）、
-// tool_result 条目增 tail / truncated（输出尾部），描述 +17。实测 85915 → 86066
-// （+151B），按实测重冻；Owner 硬顶 94532，余 8466B。
-// 当前实测值（Owner 硬顶 94532）。每次变化的经过写在提交说明里，不再往上面追加。
-const FROZEN_23_WIRE_CEILING = 86486;
+// 冻结线 = 实测值，只在 Owner 批准的批次里重冻；硬顶与规则见决定 0078。
+const FROZEN_23_WIRE_CEILING = 85101;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -948,34 +673,11 @@ const PRE_M12_16_DESC_BASELINE = 11812;
 // intent with headroom while acknowledging the sanctioned process_missing
 // addition.
 const M12_16_DESC_REDUCTION_MIN = 500;
-// Frozen at the achieved GREEN value AFTER run_correct was added. Prevents creep.
-// Re-baselined for M12-19 (recovery-truth descriptions, +1158 bytes over the
-// M12-17 value); re-frozen at the measured 10734.
-// Re-baselined again for the M12-19 process-missing delivery recovery (the
-// sanctioned advisory/settlement description text, +491 bytes over the
-// supervision-recovery-truth value); re-frozen at the measured 11225.
-// ADR-0032 修订（2026-09-22）：本次 registry_list 描述改写（"takes no
-// arguments" 因新增可选 detail 选择器不再真实）控制在 +43 B（152 → 195，
-// desc total 11174 → 11217）——天花板未动、未突破。
-// M13-r2 re-baseline (run_consult added, decision 0039): the 23rd tool carries
-// a 620-byte description (dual-mode contract + waitMs closed set + zero-
-// truncation + zero-dispatch-read guards). desc total measured 11837
-// (11217 + 620); ceiling re-frozen at the exact measured value — a NEW TOOL's
-// description is sanctioned additive growth (same precedent as run_correct's
-// 517-byte description at 21→22), not description creep on existing tools.
-// 0045 清账批 CB-1 重冻（2026-10-05）：同上 wire 重冻批——desc 顶（11837）对实测
-// （10442）静默松弛 1395 B，重冻于实测值。防 creep 语义不变：新增/改写描述超顶
-// 即红，需要 Owner 逐次裁定。
-// 0051 重冻（2026-10-09）：run_consult 描述扩写分页语义（receipt/页帽/版本锚/
-// 拒绝面），10442 → 10976，实测重冻（Owner 批准的三工作批；防 creep 语义不变）。
-// 0069 重冻（2026-10-13，Owner 当日裁定的需求批）：run_stop 描述写入中止协议
-// （先 run_activity、带 observedSeq 与 reason、观察过时即拒）与"10 分钟内有生命体征
-// 不建议中止"；run_activity 描述改写为最新在前 + 命令原文。10976 → 11391（+415），
-// 实测重冻。防 creep 语义不变。
-// 0070 重冻（2026-10-13）：run_activity 描述加上"工具输入摘要与输出尾部"，11391 → 11408
-// （+17）；Owner 授权的描述上限 12347（ADR-0032 修订节）不动。
-// 当前实测值（Owner 授权的描述上限 12347）。每次变化的经过写在提交说明里，不再往上面追加。
-const FROZEN_23_DESC_CEILING = 11510;
+// 冻结线 = 实测值，只在 Owner 批准的批次里重冻；硬顶与规则见决定 0078。
+const FROZEN_23_DESC_CEILING = 10125;
+
+// 冻结线 = 实测值，只在 Owner 批准的批次里重冻；口径见 measureSurface()，规则见决定 0078。
+const FROZEN_23_HOSTVISIBLE_CEILING = 20699;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new
@@ -1004,6 +706,12 @@ async function measureSurface() {
       const tools = (await client.listTools()).tools;
       const wire = JSON.stringify({ tools });
       const descTotal = tools.reduce((s, t) => s + byteLen(t.description), 0);
+      // hostVisible = 逐工具 name + description + inputSchema 字节之和——与
+      // scripts/measure-mcp-surface.mjs 的 hostVisibleB 同口径（决定 0078）。
+      const hostVisible = tools.reduce(
+        (s, t) => s + byteLen(t.name) + byteLen(t.description ?? "") + byteLen(JSON.stringify(t.inputSchema ?? {})),
+        0,
+      );
       // The frozen contract hash is over the tools ARRAY with every `description`
       // key recursively removed (the 21 top-level tool descriptions; there are no
       // nested schema descriptions today), then JSON.stringify'd. Hashing the
@@ -1014,6 +722,7 @@ async function measureSurface() {
         count: tools.length,
         wireBytes: byteLen(wire),
         descBytes: descTotal,
+        hostVisibleBytes: hostVisible,
         names: tools.map((t) => t.name),
         schemaSha,
         stripped,
@@ -1065,4 +774,14 @@ test("M12-16-B: descriptions stay under the frozen ceiling (prevents description
   // tools grew. The meaningful guards are the frozen ceiling above and the
   // M12-16-A stripped-SHA losslessness proof. The two historical consts are
   // retained below as documented references, not active assertions.
+});
+
+test("M12-16-C: hostVisible (name + description + inputSchema) at or below the frozen ceiling", async () => {
+  const m = await measureSurface();
+  // Frozen ceiling at the achieved value — prevents hostVisible creep (the
+  // projection every host pays per session; decision 0078 / TD-286).
+  assert.ok(
+    m.hostVisibleBytes <= FROZEN_23_HOSTVISIBLE_CEILING,
+    `hostVisible bytes (${m.hostVisibleBytes}) <= frozen ceiling (${FROZEN_23_HOSTVISIBLE_CEILING})`,
+  );
 });

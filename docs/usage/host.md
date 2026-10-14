@@ -127,6 +127,8 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 `activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，但也绝不据此推断它 failed/dead/stopped——它仍可能在长时间运行或休眠。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描，无需重新扫描），并在 `unresolvedRunCount > 0` 时追加一条 advisory observation（说明这些 run 被排除出 `activeRuns`、不证明失败或停止，请用 `runs_list` 独立查看）。`activeRunCount=0` 不应被误读为"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
 
+`observations` 里的 server build 一行说明服务进程跑的是哪一版代码。宿主的 MCP 服务进程只在启动时加载 WAO 代码；它派发出去的 runner 是新进程，加载的是当下检出的代码，所以合入新提交后两者可能不一致。`server build: started <启动时间> at HEAD <提交>, checkout unchanged since start` 表示启动以来 HEAD 没变、`src/` 前后都干净。HEAD 变了或 `src/` 的干净状态变了，这一行换成 warning `server code checkout differs from server start…`，重启宿主（开新会话）才会加载新代码；判定只看 HEAD 与 `src/` 的干净状态，只改文档的提交也会触发。HEAD 读不出时只给启动时间与包版本，其余无法确认的情形行里照实写明。这一行不影响 `complete`。
+
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 
 正常使用不要求先 bind：Lead 可在当前会话用 `workspace_select` 选择 Git 项目（见上文），无需 Human Owner bind、无需项目配置、无需重启。`mcp bind` 只是**可选的持久项目级默认**，为希望冷启动即自动绑定某项目的场景提供便利——它写入的 `--workspace-root` 属 `server_config` 来源（优先级最低，见 `workspace_status`）。

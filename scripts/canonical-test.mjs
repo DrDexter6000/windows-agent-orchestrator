@@ -177,6 +177,7 @@ import { availableParallelism, cpus, tmpdir } from "node:os";
 import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGatePaths.js";
 import { PROJECTS_DIRNAME } from "../src/projectBuckets.js";
 import { HOST_DESCRIPTORS } from "../src/hostAdapters/hostDescriptors.js";
+import { INSTALL_ROOT_ENV } from "../src/installRoot.js";
 
 // R23-F/B Round B (TD-130): the machine-level verification lease gate. main()
 // wraps ONE canonical invocation (the same granularity as a verifyDelivery
@@ -1997,6 +1998,10 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
   for (const d of HOST_DESCRIPTORS) {
     for (const name of d.detectEnv ?? []) delete env[name];
   }
+  // 安装根提示（WAO_INSTALL_ROOT）只该从全局 wao 传给它的 CLI 子进程。经全局 wao
+  // 派发的运行会把它一路带进交付验证，起 CLI 子进程的测试便去读主检出的配置；
+  // 套件测的是它所在的检出，同样去掉。
+  delete env[INSTALL_ROOT_ENV];
   return env;
 }
 

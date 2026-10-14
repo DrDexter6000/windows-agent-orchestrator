@@ -30,3 +30,7 @@
 - 第 23 个工具（`run_consult`）加入时，第 5 条的模块化前提没有执行；这条前提对下一次扩面仍然有效。
 - token 数按 4.14 字节/token 估算；Claude Code 与 Kimi Code 的真实投影形状没有实测。
 - 脚本口径与测试口径的 wire 数值略有差异（2026-10-14：86,326 B 对 86,292 B）。
+
+## 修订（2026-10-14，TD-286）
+
+hostVisible 也有了冻结线：`test/mcp-surface/m12-10-tool-surface.test.js` 的 `FROZEN_23_HOSTVISIBLE_CEILING`，口径同 `scripts/measure-mcp-surface.mjs`，按第 1 条只在 Owner 批准的批次里重冻。它没有单独的 Owner 硬顶：hostVisible 是 wire 的一部分，已在 wire 硬顶之内。

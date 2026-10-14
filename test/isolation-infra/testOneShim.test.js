@@ -77,6 +77,9 @@ test("test:one：缺文件参数明确失败", () => {
 test("test:one：worker 上下文横幅与全量同源同措辞（无豁免形态）", () => {
   const r = runShim(["test/fixtures/test-one/env-echo.target.js"], {
     WAO_IN_WORKER: "1",
+    // 无豁免形态要显式去掉豁免：交付验证的环境总带着 WAO_ALLOW_NESTED_DISPATCH=1
+    // （spawnSync 跳过值为 undefined 的键）。
+    WAO_ALLOW_NESTED_DISPATCH: undefined,
   });
   assert.equal(r.status, 0);
   assert.match(r.stderr, /worker 上下文（WAO_IN_WORKER=1）/);
