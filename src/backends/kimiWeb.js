@@ -124,6 +124,7 @@ import { readFileSync } from "node:fs";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
 import { kimiServerTokenFile, isValidKimiHome, isValidServeWorkspaceDir } from "../envPolicy.js";
 import { ensureServeRunning } from "./kimiServeStart.js";
+import { IDLE_WATCH_IDLE_THRESHOLD_MS, startServeIdleWatch } from "./kimiServeIdleWatch.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { createStallTracker } from "./stallBudget.js";
 
@@ -484,6 +485,7 @@ export class KimiWebBackend {
       workspaceDir: agent.serveWorkspaceDir,
       kimiHome: agent.kimiHome ?? null,
       fetchImpl: this.fetch,
+      startWatchFn: startServeIdleWatch,
     });
     if (!result) return null;
     const seconds = Math.round((Number(result.waitedMs) || 0) / 1000);
@@ -491,12 +493,19 @@ export class KimiWebBackend {
     let port = "unknown";
     try { port = new URL(agent.serveUrl).port || "unknown"; } catch { /* 形状不对的 URL 走不到这里 */ }
     const displaced = result.displaced;
+    // 空闲看护的结果（决定 0079：WAO 拉起的 serve 空闲自己退出）。只有本
+    // 次派发自己拉起的 serve 才带看护结果；起来了写 pid 与阈值，没起来如实写。
+    const watch = result.idleWatch;
+    const watchNote = !watch ? ""
+      : watch.started
+        ? `; an idle watcher (pid ${watch.pid ?? "unknown"}) will ask it to exit after ${Math.round(IDLE_WATCH_IDLE_THRESHOLD_MS / 60_000)} idle minutes`
+        : "; the idle watcher could not be started — the serve keeps running until stopped by hand";
     const what = displaced
       // 目标端口在拉起期间被别人占了：kimi 不退出而是改绑别的端口——那一个已被请走（或请不动）。
       ? `a serve this dispatch started (pid ${displaced.pid}) landed on port ${displaced.port} because port ${port} was taken meanwhile; `
         + (displaced.shutdown === "requested" ? "it was asked to exit" : "asking it to exit failed — stop it by hand")
       : result.started
-        ? `started it (pid ${result.pid ?? "unknown"}; the lane declares serveWorkspaceDir)`
+        ? `started it (pid ${result.pid ?? "unknown"}; the lane declares serveWorkspaceDir)${watchNote}`
         : "it was started by another process (another dispatch or a recycle)";
     const outcome = result.answer === "ok"
       ? `answering after ${seconds} s`

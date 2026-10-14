@@ -25,6 +25,7 @@ import {
   kimiServeChildEnv,
   releaseServeStartLock,
   serveStartLockPath,
+  settleOwnServeChild,
 } from "../../src/backends/kimiServeStart.js";
 
 const PORT = 58999;
@@ -79,6 +80,8 @@ function harness({ clockStepMs = 500 } = {}) {
     spawnFn: (exe, args, opts) => { h.spawns.push({ exe, args, opts }); serve.state.mode = "ok"; return { pid: 4242, unref() {} }; },
     sleepFn: h.sleepFn, nowMs: h.nowMs, lockDir,
     readInstancesFn: () => [], childAliveFn: () => false,
+    // 空闲看护的启动缝：既有用例不真拉看护进程；什么时候启动由专用用例断言。
+    startWatchFn: () => ({ started: true, pid: 31337 }),
     ...overrides,
   });
   return h;
@@ -98,6 +101,14 @@ const BASE_ENV = Object.freeze({
   WAO_TARGET_CWD: "D:\\lead-workspace",
   Wao_Verification_Gate: "1",
   WAO_IN_WORKER: "0",
+  // Lead 宿主的会话变量（剔除——与手动脚本 ^(CLAUDE|ANTHROPIC|WAO_) 对齐），
+  // 大小写混用要覆盖；CLARENCE / ANTHOLOGY 是近似前缀的反例（不剔）。
+  CLAUDECODE: "1",
+  Claude_Code_MaxThinking: "1",
+  ANTHROPICBASE: "x",
+  anthropic_any_var: "y",
+  CLARENCE: "keep-a",
+  ANTHOLOGY: "keep-b",
 });
 
 test("0075: 首探不是连接被拒 → null，不拉起、不留锁；没声明工作目录或非回环地址 → 连探测都不发", async () => {
@@ -149,6 +160,13 @@ test("0075: 连接被拒 → 拉起一次（args / cwd / env / detached），等
     // worker 的常驻豁免）、验证闸门、目标工作区指向；名字不分大小写。worker 标记是注入的，
     // 不取继承来的值。
     assert.deepEqual(Object.keys(s.opts.env).filter((n) => /^WAO_/i.test(n)), ["WAO_IN_WORKER"]);
+    // Lead 宿主的会话变量（CLAUDE* / ANTHROPIC*，不分大小写）也不进——
+    // 它们会跟进 serve 与此后所有 worker 的工具进程；近似前缀（CLARENCE / ANTHOLOGY）保留。
+    for (const gone of ["CLAUDECODE", "Claude_Code_MaxThinking", "ANTHROPICBASE", "anthropic_any_var"]) {
+      assert.equal(gone in s.opts.env, false, gone);
+    }
+    assert.equal(s.opts.env.CLARENCE, "keep-a");
+    assert.equal(s.opts.env.ANTHOLOGY, "keep-b");
     assert.equal(existsSync(h.lockPath), false, "锁已释放");
 
     // 没声明 kimiHome 的车道：继承来的 KIMI_CODE_HOME 被删（不把默认家的 serve 起到别处）。
@@ -393,4 +411,100 @@ test("0075 会审: 自己拉起的 serve 落在了别的端口（目标端口期
     }));
     assert.deepEqual({ started: r3.started, pid: r3.pid, displaced: r3.displaced }, { started: true, pid: 4242, displaced: undefined });
   } finally { h.cleanup(); }
+});
+
+test("idle watch: ensureServeRunning 只在自己拉起、应答 ok、未被挤走时启动看护；看护起不来不让派发失败", async () => {
+  const h = harness();
+  try {
+    const watchCalls = [];
+    const watchFn = (args) => { watchCalls.push(args); return { started: true, pid: 7777 }; };
+
+    // 自己拉起 + 应答 ok → 启动看护，参数与结果进返回值。
+    const serve = fakeServe("refused");
+    const r = await ensureServeRunning(h.args(serve, { startWatchFn: watchFn }));
+    assert.deepEqual(watchCalls, [{ port: PORT, pid: 4242, kimiHome: h.kimiHome }]);
+    assert.deepEqual(r.idleWatch, { started: true, pid: 7777 });
+
+    // 看护启动抛错 → 派发照常成功，失败结果如实带回。
+    const serve2 = fakeServe("refused");
+    const r2 = await ensureServeRunning(h.args(serve2, { startWatchFn: () => { throw new Error("boom"); } }));
+    assert.equal(r2.started, true);
+    assert.equal(r2.answer, "ok");
+    assert.deepEqual(r2.idleWatch, { started: false, reason: "start_failed" });
+    assert.equal(watchCalls.length, 1);
+
+    // 应答 rejected（端口被别家的 serve 占着）→ 不配看护。
+    const serve3 = fakeServe("refused");
+    const r3 = await ensureServeRunning(h.args(serve3, {
+      spawnFn: () => { serve3.state.mode = "unauthorized"; return { pid: 7, unref() {} }; },
+      startWatchFn: watchFn,
+    }));
+    assert.equal(r3.answer, "rejected");
+    assert.equal("idleWatch" in r3, false);
+
+    // 别的进程拉的（本次只等）→ 不配看护。
+    writeFileSync(h.lockPath, JSON.stringify({ pid: 1, nonce: "other", ts: h.nowMs() }));
+    const serve4 = fakeServe("refused");
+    let sleeps = 0;
+    const r4 = await ensureServeRunning(h.args(serve4, {
+      spawnFn: NO_SPAWN,
+      startWatchFn: watchFn,
+      sleepFn: async () => { sleeps += 1; if (sleeps >= 2) serve4.state.mode = "ok"; },
+    }));
+    assert.equal(r4.started, false);
+    assert.equal(r4.answer, "ok");
+    assert.equal("idleWatch" in r4, false);
+    rmSync(h.lockPath, { force: true }); // 模拟持锁的另一方放锁（等待者不动别人的锁）
+
+    // 被挤走的（自己拉的那个落在了别的端口）→ 不配看护。
+    const serve5 = fakeServe("refused");
+    const r5 = await ensureServeRunning(h.args(serve5, {
+      readInstancesFn: () => (h.spawns.length > 0 ? [{ serverId: "dup", pid: 4242, port: PORT + 1, startedAt: 1, heartbeatAt: 1 }] : []),
+      shutdownFn: async () => ({ outcome: "requested" }),
+      startWatchFn: watchFn,
+    }));
+    assert.ok(r5.displaced, "前置：被挤走");
+    assert.equal("idleWatch" in r5, false);
+    assert.equal(watchCalls.length, 1, "只有第一个（自己拉起且 ok）情形启动过看护");
+  } finally { h.cleanup(); }
+});
+
+test("端口核对 settleOwnServeChild（按需拉起与 recycle 共用）：在目标端口不动；别的端口请它优雅退出；请不动如实 failed；无记录/pid 不可知 → null", async () => {
+  const sleepFn = async () => {};
+  const shutdowns = [];
+  const shutdownFn = async (args) => { shutdowns.push(args); return { outcome: "requested" }; };
+  const base = { port: PORT, token: TOKEN, kimiHome: "X:/fake-home", shutdownFn, sleepFn };
+
+  // 子进程就在目标端口上 → 不发任何关停请求。
+  let instances = [{ serverId: "mine", pid: 4242, port: PORT, startedAt: 1, heartbeatAt: 1 }];
+  assert.equal(await settleOwnServeChild({ ...base, pid: 4242, readInstancesFn: () => instances }), null);
+  assert.equal(shutdowns.length, 0);
+
+  // 落在别的端口 → 用同一主目录的 token 请它退出（打它所在的端口）。
+  instances = [{ serverId: "dup", pid: 4242, port: PORT + 1, startedAt: 1, heartbeatAt: 1 }];
+  assert.deepEqual(
+    await settleOwnServeChild({ ...base, pid: 4242, readInstancesFn: () => instances }),
+    { pid: 4242, port: PORT + 1, shutdown: "requested" },
+  );
+  assert.equal(shutdowns.length, 1);
+  assert.equal(shutdowns[0].baseUrl, `http://127.0.0.1:${PORT + 1}`);
+  assert.equal(shutdowns[0].token, TOKEN);
+
+  // 请不动：如实带回 failed（不强杀——本函数没有任何杀进程的路径）。
+  const failing = async () => ({ outcome: "failed", reason: "timeout" });
+  assert.equal(
+    (await settleOwnServeChild({ ...base, pid: 4242, readInstancesFn: () => instances, shutdownFn: failing })).shutdown,
+    "failed",
+  );
+
+  // 实例记录一直没出现（没登记就退出了，或还没写）→ 轮询 polls 次后 null。
+  let reads = 0;
+  const readInstancesFn = () => { reads += 1; return []; };
+  assert.equal(await settleOwnServeChild({ ...base, pid: 4242, readInstancesFn, polls: 3 }), null);
+  assert.equal(reads, 3);
+
+  // pid 不可知（等待者 / 异常形状）→ 无从核对，零读表。
+  reads = 0;
+  assert.equal(await settleOwnServeChild({ ...base, pid: null, readInstancesFn }), null);
+  assert.equal(reads, 0);
 });

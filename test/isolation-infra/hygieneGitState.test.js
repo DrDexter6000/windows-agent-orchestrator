@@ -6,14 +6,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import {
-  BRANCH_CAP, REGISTRY_EXTERNAL_ROOTS,
+  BRANCH_CAP, REGISTRY_EXTERNAL_ROOTS, ROOT_WHITELIST,
   classifyRegistryEntries, classifyBranchCount,
   listWorktreePaths, countRunBranches, normPath,
   primaryWorktreePath,
 } from "../../scripts/hygiene.mjs";
 
 const repo = primaryWorktreePath(path.resolve(import.meta.dirname, "..", ".."));
+const thisTreeRoot = path.resolve(import.meta.dirname, "..", "..");
 const never = () => false;
 const always = () => true;
 
@@ -70,4 +72,24 @@ test("real state: registry drift is green and branch count under cap", () => {
   assert.deepEqual(bad, [], `unexpected drift (fix or extend allowlist with reason + declare): ${JSON.stringify(bad, null, 2)}`);
   const bc = classifyBranchCount(countRunBranches(repo));
   assert.equal(bc.ok, true, `branch ratchet exceeded: ${bc.count} > ${bc.cap} — close out decided deliveries or raise cap via declare`);
+});
+
+// W1（ADR 0035）：.wao/runs 根白名单 vs 写入侧交叉钉——控制面自己往根上写的目录
+// 改名而白名单没跟（或反之）在这里红。只校验映射本身，不触主检出文件系统
+//（checkRootWhitelist 是 class-B，归 npm run hygiene）。
+test("W1: ROOT_WHITELIST covers WAO-written live state and drill scratch with reasons", async () => {
+  const { serveMaintenanceDir } = await import("../../src/application/serveMaintenance.js");
+  // serve 清扫台账/回收锁/lineage 锁的目录名必须逐字在白名单（写入侧 SSOT：serveMaintenanceDir）
+  assert.equal(path.basename(serveMaintenanceDir("D:/proj")), "serve-maintenance");
+  assert.ok(ROOT_WHITELIST.has("serve-maintenance"), "serveMaintenanceDir 写入的目录必须列在 W1 白名单");
+  assert.ok(ROOT_WHITELIST.has("session-reuse-drill"), "TD-184 drill scratch 子目录必须列在 W1 白名单");
+  for (const name of ["serve-maintenance", "session-reuse-drill"]) {
+    assert.ok(ROOT_WHITELIST.get(name).length > 5, `白名单条目 ${name} 必须带理由`);
+  }
+  // drill 脚本顶层即执行（不可导入），用源文本钉 scratch 落点与白名单条目一致
+  const drillSrc = readFileSync(
+    path.join(thisTreeRoot, "scripts", "reliability", "session-reuse-drill.mjs"), "utf8",
+  );
+  assert.match(drillSrc, /join\(ROOT, "\.wao", "runs", "session-reuse-drill"\)/,
+    "drill 的 scratchDir 必须收在白名单子目录 .wao/runs/session-reuse-drill 内");
 });

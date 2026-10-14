@@ -43,6 +43,8 @@ import { BACKEND_CLI } from "./backendCliMap.js";
 import { assessPanelReadiness, deriveReadyState } from "./panelReadiness.js";
 // TD-258：凭据名权威=requiredCredentialNames（doctor 同源），多名聚合走共享函数。
 import { requiredCredentialNames, aggregateCredentialSources } from "./credentialReadiness.js";
+// 决定 0074：kimiHome 车道的凭据面=token 文件（路径权威在 envPolicy SSOT）。
+import { kimiServerTokenFile } from "../envPolicy.js";
 // TD-191① / 决定 0043：宿主示例行从 hostDescriptors 唯一权威派生（消灭此前
 // 硬编码 claude-code/codex 两条的第二份宿主清单——会审指认的既有漂移点）。
 import { HOST_DESCRIPTORS } from "../hostAdapters/hostDescriptors.js";
@@ -252,13 +254,26 @@ function normalizeKey(v) {
  * @param {string|null} input.requiresCli
  * @param {string[]|null} input.requiresKeyEnvNames — 全部必需凭据名（TD-258：消费全部
  *   名而非只取首个；display 字段 requiresKeyEnv 仍为首名）
+ * @param {string|null} input.requiresTokenFile — 决定 0074：kimiHome 车道的 token
+ *   文件路径（非 null 时凭据面=该文件，tokenEnv 不探）
  * @param {(name: string) => Promise<true|false|"unknown">} input.probeCli
  * @param {(name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">} input.probeKey
+ * @param {(p: string) => Promise<"present"|"missing"|"unknown">} [input.probeTokenFile]
  * @returns {Promise<"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"key_only_present"|"key_only_missing"|"unknown">}
  */
-async function computeReadyState({ requiresCli, requiresKeyEnvNames, probeCli, probeKey }) {
+async function computeReadyState({ requiresCli, requiresKeyEnvNames, requiresTokenFile, probeCli, probeKey, probeTokenFile }) {
   // 八态映射的单一实现在 panelReadiness.deriveReadyState（R9：doctor 共用）；
   // 这里只做探测 + 归一，不重复映射逻辑。
+  // 决定 0074：kimiHome 车道凭据=token 文件（无 env 参与）。文件态走 key 轴的
+  // "token_file" 值进现有闭集：在且非空=key_only_present（key_only_* 命名纪律——
+  // 只声称文件可读非空，不验证令牌有效性/serve 可达性）；缺失/空=key_only_missing；
+  // 探测失败/缺席=unknown。tokenEnv 不探（派发不读它）。
+  if (requiresTokenFile) {
+    const raw = await probeTokenFile(requiresTokenFile);
+    const key = raw === "present" ? "token_file" : raw === "missing" ? "missing" : "unknown";
+    const cli = requiresCli ? normalizeCli(await probeCli(requiresCli)) : undefined;
+    return deriveReadyState({ requiresCli, requiresKeyEnv: requiresTokenFile, cli, key });
+  }
   const names = Array.isArray(requiresKeyEnvNames) && requiresKeyEnvNames.length > 0
     ? requiresKeyEnvNames
     : null;
@@ -290,9 +305,11 @@ async function computeReadyState({ requiresCli, requiresKeyEnvNames, probeCli, p
  *
  * @param {{id: string, backend: string|null, model: string|null}[]} candidates
  * @param {{agents?: Record<string, any>}} template — parsed config/agents.example.json
- * @param {{hasCli: (name: string) => Promise<true|false|"unknown">, hasKeyEnv: (name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">}} [probeEnv]
+ * @param {{hasCli: (name: string) => Promise<true|false|"unknown">, hasKeyEnv: (name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">, hasKimiTokenFile?: (p: string) => Promise<"present"|"missing"|"unknown">}} [probeEnv]
  *   injected environment probe. Omitted ⇒ every probe reads as "unknown" (no
- *   probing of any kind — the module stays pure).
+ *   probing of any kind — the module stays pure). 决定 0074：hasKimiTokenFile
+ *   可选——声明 kimiHome 的 kimi-web 车道就绪按 token 文件推导（tokenEnv 不探）；
+ *   缺席或抛错按 unknown（探测未知），不猜。
  * @param {{sortReadyFirst?: boolean, source?: "template"|"configured"}} [opts]
  *   R11-2（决策 0024）：sortReadyFirst 默认 true（模板候选组/模板面的既有
  *   ready-first 排序）；已配置面行要求私有 registry 顺序稳定 → 传 false。
@@ -318,6 +335,7 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
   // onboarding invocation at ≤4 CLI probes + ≤N key probes by construction.
   const cliMemo = new Map();
   const keyMemo = new Map();
+  const tokenFileMemo = new Map();
   const probeOnce = async (memo, name, call) => {
     if (!memo.has(name)) {
       let value = "unknown";
@@ -332,26 +350,35 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
   };
   const probeCli = (name) => probeOnce(cliMemo, name, () => probeEnv.hasCli(name));
   const probeKey = (name) => probeOnce(keyMemo, name, () => probeEnv.hasKeyEnv(name));
+  // 决定 0074：kimiHome 车道 token 文件探测（probeEnv 未提供该方法时探针抛
+  // TypeError → probeOnce 归一为 unknown——缺席面如实"探测未知"，不猜）。
+  const probeTokenFile = (p) => probeOnce(tokenFileMemo, p, () => probeEnv.hasKimiTokenFile(p));
 
   const rows = [];
   for (const c of list.slice(0, MAX_CANDIDATES)) {
     const agent = isPlainObject(agents[c.id]) ? agents[c.id] : {};
     const requiresCli = BACKEND_CLI[c.backend] ?? null;
+    // 已配置面的 agent 可能缺 backend 字段，用候选行车道值兜底（TD-258 同款）。
+    const agentMerged = { ...agent, backend: agent.backend ?? c.backend };
     // TD-258：凭据名从 requiredCredentialNames 派生（doctor 同一权威——覆盖
     // provider.apiKeyEnv / tokenEnv / credentialEnv 三类），消费全部名；display
-    // 字段 requiresKeyEnv 保持首名（形状不变）。已配置面的 agent 可能缺
-    // backend 字段，用候选行车道值兜底。
-    const credNames = requiredCredentialNames({ ...agent, backend: agent.backend ?? c.backend });
+    // 字段 requiresKeyEnv 保持首名（形状不变）。
+    const credNames = requiredCredentialNames(agentMerged);
     const requiresKeyEnv = credNames.length > 0 ? credNames[0] : null;
+    // 决定 0074：声明 kimiHome 的 kimi-web 车道，凭据=token 文件（这种车道
+    // requiredCredentialNames 返回空表——tokenEnv 不进探测面）。行携带路径供
+    // 展示层点名（wao lanes 人读面），不进 MCP wire。
+    const requiresTokenFile = kimiServerTokenFile(agentMerged);
     rows.push({
       id: c.id,
       backend: c.backend ?? null,
       model: c.model ?? null,
       requiresCli,
       requiresKeyEnv,
+      ...(requiresTokenFile ? { requiresTokenFile } : {}),
       duty: truncateNote(agent._comment_task, DUTY_MAX),
       authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
-      readyState: await computeReadyState({ requiresCli, requiresKeyEnvNames: credNames.length > 0 ? credNames : null, probeCli, probeKey }),
+      readyState: await computeReadyState({ requiresCli, requiresKeyEnvNames: credNames.length > 0 ? credNames : null, requiresTokenFile, probeCli, probeKey, probeTokenFile }),
       // R11-2（决策 0024）：结构化来源字段（两态闭集）——JSON 消费者拿得到双源事实。
       source,
     });

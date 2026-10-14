@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
-import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
+import { assessWorkerReadiness, alignReadinessToKimiTokenFile, createEnvResolver } from "./credentialReadiness.js";
 // TD-111: certification advisory context 闭集 SSOT——投影层用它做 fail-closed 校验：
 // summary 里的越界码/非 ISO 日期绝不透出（否则 MCP outputSchema 的 enum parse 会把
 // 整个 registry_list 打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
@@ -192,7 +192,13 @@ export async function getRegistryInventory({
   const resolver = createEnvResolver(userEnvReader);
   const results = [];
   for (const agent of registry.listAgents()) {
-    const readiness = await assessWorkerReadiness({ agent, resolver });
+    // 决定 0074：kimiHome 车道的 credentialAvailability 按 token 文件取值
+    //（缺失/为空 → "missing"；missingCredentialEnvNames 保持空表）。
+    const readiness = await alignReadinessToKimiTokenFile(
+      agent,
+      await assessWorkerReadiness({ agent, resolver }),
+      readFileFn,
+    );
     results.push(projectInventoryEntry(agent, certMap, readiness));
   }
   return results;
@@ -336,7 +342,13 @@ export async function getRegistryInventoryWithIssues({
   for (const [id, raw] of registry.rawEntries()) {
     try {
       const agent = normalizeAgent(id, raw);
-      const readiness = await assessWorkerReadiness({ agent, resolver });
+      // 决定 0074：kimiHome 车道的 credentialAvailability 按 token 文件取值
+      //（与严格路径 getRegistryInventory 同一口径——CLI/MCP 两面一致）。
+      const readiness = await alignReadinessToKimiTokenFile(
+        agent,
+        await assessWorkerReadiness({ agent, resolver }),
+        readFileFn,
+      );
       agents.push(projectInventoryEntry(agent, certMap, readiness));
     } catch {
       // One malformed/unsupported entry must NOT abort the list. Record a raw

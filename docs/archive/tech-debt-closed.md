@@ -91,3 +91,9 @@
 | TD-282 | 会审或运行超过等待窗口（上限 10 分钟）后没有「继续等」的出口；席位全文和过长的最终回答要调用方自己分页拼接 | 扇出后即落组记录并报出 consultId；新增 `consult wait`；`consult show --seat --out` 与 `collect --final --out` 把全文写进文件（会审链路批次）。等待上限仍是 10 分钟，改为可反复等待 |
 | TD-269 | MCP 的 run_consult 改为使用绑定的工作区后，还没有在不提供 roots 的宿主上做过真实调用 | 按桌面端的注册方式在项目外启动服务、客户端不提供 roots：未绑定时派发前拒绝；workspace_select 后一席会审完成，记录落在项目的 .wao/runs/consults，席位在项目的工作树里运行（consult_20261014045643074g0h222） |
 | TD-177 | 使用手册以外的现行文档正文仍夹着过程历史 | architecture、certification-runbook、troubleshooting、ssot、team-roles、milestone-discipline、AGENT_ONBOARDING、smoke-guide 与模块页逐份改写为现状描述（两个文档批次），architecture 与 troubleshooting 的字节上限随体量下调；配置注释的同类问题见 TD-295 |
+| TD-277 | kimi worker serve 的环境仍带 Lead 宿主的会话变量（`CLAUDE*` 等） | serve 的环境剔除规则加上 `CLAUDE*` / `ANTHROPIC*`（不分大小写），按需拉起、recycle 与手动脚本同一套（`stripServeEnvVars`） |
+| TD-278 | kimi worker serve 拉起后一直运行到关机；Owner 已裁定改为空闲退出 | WAO 拉起的 serve 带空闲看护：两面会话列表连续 30 分钟空闲，抢启动锁复核后优雅关停，下一次派发重新拉起（决定 0079） |
+| TD-279 | `serve recycle` 不核对新 serve 落在哪个端口，也不取车道声明的工作区作默认值 | recycle 的 `--workspace-dir` 缺省取车道的 `serveWorkspaceDir`；重启后核对子进程落在哪个端口，被挤走就请它优雅退出并记 `ready:false`（与按需拉起共用 `settleOwnServeChild`） |
+| TD-161 | `registry check` 只查 opencode serve，命名和帮助文字容易让人当成车道健康检查；各车道的就绪检查没有 | `registry check` 对非 opencode-serve 车道写明它只探 opencode-serve，车道就绪看 `wao lanes`、环境看 `wao doctor`；帮助行同样指路 |
+| TD-276 | 声明了 kimiHome 的车道，token 文件是否就绪在 registry_list / doctor 里看不出来 | kimiHome 车道以 token 文件为凭据：`registry_list` 的 `credentialAvailability`、`wao lanes` 的 `readyState`、`wao doctor` 都按文件给出 |
+| TD-297 | zcode backend 声明不支持在途纠偏，依据是 0.16.9 的方法表；本机更新后的 bundle 已有 steer 事件与 steerable 活动轮 | 真机（GLM-5.3-Flash）：活动轮里再发 `session/send` 返回 -32010「A prompt is already running for this session」，协议方法表里没有注入活动轮的方法；声明维持 false，翻转条件写在 zcode.js 与 factory.js 的说明里 |

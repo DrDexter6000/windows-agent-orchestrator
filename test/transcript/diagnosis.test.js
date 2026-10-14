@@ -270,6 +270,148 @@ test("TD-74 回归: 死前<3 事件（启动即崩）→ 仍 crash（排除'刚�
   assert.equal(d.category, "crash", "死前<3 事件 → 仍 crash（启动即崩不判 provider_disconnect）");
 });
 
+// ---------------------------------------------------------------------------
+// 2026-10-14：zcode 静默收口 → provider_disconnect（+\b401\b 边界）
+//
+// zcode 车道上游额度窗口用尽时模型流停下来，转录里没有上游的错误或额度信号；
+// backend（src/backends/zcode.js）在无生命体征的静默后有界收口，done(failed) 的
+// 文案经 run.error(phase:wait) 落转录，以三道门之一开头。此前这类 run 落
+// no_effect/crash，且文案里的毫秒读数（401872ms / 14010ms）把 AUTH_SIGNAL 的
+// 裸 401 误触发成 provider_auth。契约：
+//   - 三种收口文案 → provider_disconnect，证据写明哪一道门 + 上游没发错误或
+//     额度信号 + 额度用尽/限流/网络中断在转录内无法区分（只给事实不给处方）；
+//   - 真 401（"401 Invalid authentication credentials"）仍 provider_auth；
+//   - 带额度错误文本的仍 provider_capacity（新规则排在 auth/config/capacity 后）。
+// ---------------------------------------------------------------------------
+
+test("zcode 静默收口: silent_timeout 门文案 → provider_disconnect（非 no_effect）", () => {
+  const runId = "run_zcode_closeout_st";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", runId, ts: "2026-10-14T09:00:05.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:00:30.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:15:05.000Z",
+      error: "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected) — no vital signs: no model stream chunk observed this turn; no process activity in the last 30s (cpu +1ms/s, io +0B across 3 descendant process(es))",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:15:05.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_disconnect", "silent_timeout 收口 → 上游流中断");
+  assert.equal(d.code, null, "provider_disconnect 不带 code");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /silent_timeout 门/, "证据说明是哪一道门收口");
+  assert.match(joined, /无法区分/, "证据如实写额度用尽/限流/网络中断不可区分");
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("zcode 静默收口: zero_part 门（thinking budget）文案 → provider_disconnect", () => {
+  const runId = "run_zcode_closeout_zp";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:00:30.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:06:00.000Z",
+      error: "zcode thinking budget exceeded (no turn parts observed for 120 consecutive polls, silentTimeout absent — bounded exit) — no vital signs: no model stream chunk observed this turn; no file change in the working tree",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:06:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_disconnect", "zero_part 收口 → 上游流中断（非 budget：那是 token 预算硬闸）");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /zero_part 门/, "证据说明是哪一道门收口");
+});
+
+test("zcode 静默收口: stalled 门文案含 401872ms/14010ms 读数 → provider_disconnect，不再误判 provider_auth", () => {
+  // 真实形状：文案里的毫秒读数含 "401" 子串——旧裸 /401/ 判成 provider_auth。
+  const runId = "run_zcode_closeout_stalled";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:01:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:05:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:12:00.000Z",
+      error: "zcode turn stalled (37 model stream chunk(s) seen this turn, none in the last 60s; no process activity in the last 30s (cpu +0ms/s, io +0B across 2 descendant process(es)); silent stretch 401872ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling; max recovered gap this turn 14010ms — no vital signs, bounded exit)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:12:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_disconnect", "stalled 收口 → 上游流中断");
+  assert.notEqual(d.category, "provider_auth", "毫秒读数里的 401 子串不得判成认证失败");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /stalled 门/, "证据说明是哪一道门收口");
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("zcode 静默收口排序: 上游真给了 401 文本 → 仍 provider_auth（新规则不抢）", () => {
+  const runId = "run_zcode_closeout_auth";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "401 Invalid authentication credentials", runId, ts: "2026-10-14T09:00:10.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:15:05.000Z",
+      error: "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:15:05.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_auth", "上游真发了认证错误文本 → provider_auth 先判");
+});
+
+test("zcode 静默收口排序: 终态错误带额度文本 → 仍 provider_capacity（额度文本在终态位）", () => {
+  // 容量规则按契约要 expectedRunId 绑定（findTerminalProviderError）——与
+  // m12-24-providerCapacityTruth.test.js 同形 fixture。
+  const runId = "run_zcode_closeout_quota";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:00:30.000Z" },
+    { type: "run.error", phase: "wait", error: "usage limit reached (5-hour window, resets at 2026-10-14T13:00Z)", runId, ts: "2026-10-14T09:05:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:05:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_capacity", "上游真发了额度错误文本 → provider_capacity 先判");
+  assert.equal(d.code, "quota_exhausted");
+});
+
+test("zcode 静默收口排序: 早前瞬时 429 + 终态收口文案 → provider_disconnect（capacity 只读终态位）", () => {
+  // 容量规则按契约只消费 failed 终态前最后一条 run.error（需 expectedRunId 绑定）；
+  // 早前瞬时 429 不得把静默收口抢成 provider_capacity（capacity 判据的既有
+  // terminal-only 设计）。
+  const runId = "run_zcode_closeout_429";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "HTTP 429: too many requests (transient, retried)", runId, ts: "2026-10-14T09:00:10.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:01:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:15:05.000Z",
+      error: "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:15:05.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_disconnect", "终态位是收口文案 → 静默收口判据接管");
+});
+
+test("401 边界: 读数里的 401 子串（非独立 401）不触发 provider_auth", () => {
+  const events = [
+    { type: "run.state_change", to: "running", ts: "2026-10-14T09:00:00.000Z" },
+    { type: "run.error", phase: "wait", error: "stream stalled after 401872ms of silence, kimi serve envelope code 40401", ts: "2026-10-14T09:07:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-10-14T09:07:00.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.notEqual(d.category, "provider_auth", "401872ms / 40401 里的 401 子串不是独立 401");
+});
+
+test("401 边界: 真实样本 401 Invalid authentication credentials 仍判 provider_auth", () => {
+  const events = [
+    { type: "run.state_change", to: "running", ts: "2026-10-14T09:00:00.000Z" },
+    { type: "run.error", phase: "wait", error: "401 Invalid authentication credentials", ts: "2026-10-14T09:00:05.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-10-14T09:00:05.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "provider_auth", "独立的 401 + 认证凭据文本 → provider_auth");
+});
+
 test("C2: 配置冲突（API key 与 claude.ai 登录打架）→ config_conflict（非 provider_auth）", () => {
   // B 冒烟真实样本：run_20260625083928248mlo78b
   // 关键：含 "auth"/"API_KEY" 但不是 401 认证失败，是配置层冲突
@@ -1015,4 +1157,26 @@ test("0070（会审 sol）: 控制面自己观察到的体征事实不当作 pro
     ...exit,
   ];
   assert.equal(diagnoseFailure(streamed).category, "provider_disconnect");
+});
+
+test("zcode 静默收口证据: 只写原文能证的事——无取样结论不写「无生命体征」，也不断言转录里没有上游信号（会审 sol / deepseek-flash Q5）", () => {
+  const runId = "run_zcode_closeout_facts";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-14T09:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "HTTP 429: too many requests (transient, retried)", runId, ts: "2026-10-14T09:00:10.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-14T09:01:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-14T09:06:00.000Z",
+      // 进程活动取样不可用时，零 part 门的文案不带取样结论。
+      error: "zcode thinking budget exceeded (no turn parts observed for 120 consecutive polls, silentTimeout absent — bounded exit)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-14T09:06:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.ok(!/无生命体征/.test(joined), "文案没有取样结论时不写无生命体征");
+  assert.match(joined, /静默到点后/);
+  assert.ok(!/没有上游|未发出/.test(joined), "转录里有过上游 429，证据不得断言没有上游信号");
+  assert.match(joined, /收口本身不带上游原因/);
 });

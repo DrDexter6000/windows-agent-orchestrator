@@ -414,6 +414,18 @@ session, messages, sessionStatus }`。`events(signal, opts)` 是 AsyncIterable�
 waitForCompletion）消费这条流直到 `done`，不是独立方法。`messages` 分页拉取历史
 消息，`healthCheck` 探测 serve 健康。
 
+### 2.7 KimiWebBackend 的 worker serve
+
+kimi-web 车道指向一个本机 `kimi web` serve（`serveUrl`）。WAO 对这个 serve 的生命周期只做两件事，其余（状态、清扫、回收）是 `wao serve` 的手动命令，操作见 `docs/usage/lanes.md`「kimi 车道的 worker serve」：
+
+- **按需拉起**（`src/backends/kimiServeStart.js` 的 `ensureServeRunning`）：车道声明了 `serveWorkspaceDir` 时，每次派发在建会话之前探一次回环端口；只有"连接被拒"才拉起。按端口的启动锁去重，有活着的 serve 进程就只等不拉，拉起后核对子进程落在哪个端口，落错就请它优雅退出。为什么见决定 0075。
+- **空闲退出**（`src/backends/kimiServeIdleWatch.js`）：WAO 自己拉起的 serve（按需拉起、`serve recycle` 重启）带一个看护进程。启动看护的函数由调用方注入：kimi-web backend 交给按需拉起，serve 命令交给 recycle；只给本次拉起、应答正常、落在目标端口上的那个子进程配。
+  - **判定：** 默认与归档两面会话列表都没有 busy / main_turn_active，且会话 id 集合不变，算空闲；读不到的拍不算空闲。
+  - **关停：** 连续空闲满 30 分钟，抢同一把启动锁并复核仍空闲；关停前再核对端口上的实例仍是被看护的 pid，才请 serve 优雅关停。陈旧的锁只在确认持锁进程已不在时接管，认不出持锁者也不接管。
+  - **退出：** 看护的退出原因是闭集 `IDLE_WATCH_EXIT_REASONS`。为什么见决定 0079。
+
+两者都不杀进程。serve 的子进程环境剔除密钥类变量、`WAO_*`、`CLAUDE*` / `ANTHROPIC*`，并注入 `WAO_IN_WORKER=1` 与有效主目录（`stripServeEnvVars` / `kimiServeChildEnv`）。
+
 ---
 
 ## 3. Transcript（数据持久化）
@@ -992,6 +1004,7 @@ src/
 │                              # code 闭集单一通用 SSOT：`DIAGNOSIS_CODES` = `PROVIDER_DIAGNOSIS_CODES` ∪ `PROVIDER_CAPACITY_DIAGNOSIS_CODES` ∪ `NO_EFFECT_DIAGNOSIS_CODES`（三组冻结码不互并，completed_empty 不并入 provider 集）；MCP run_diagnose/run_await_result 与内核真相共用同一 code 闭集，无第二份列表
 │                              # provider_auth 专属：entitlement 拒绝归 provider_auth；码表 = `PROVIDER_DIAGNOSIS_CODES`（5 值），code 永不回显原文
 │                              # provider_capacity：只有 failed 终态的持久 `run.error` 可归 `provider_capacity`（`rate_limited` / `quota_exhausted`），非终态 runtime rate-limit 活动不升级为失败；WAO 不据此自动重试或换 worker
+│                              # provider_disconnect：两判据——worker 活跃工作后静默≥120s 且 exit≠0；或 zcode 静默收口文案（silent_timeout / zero_part / stalled 三道门，锚定前缀匹配），收口本身不带上游原因，额度用尽、限流与网络中断在转录内无法区分；auth/config/capacity 先判，no_effect/crash 后判
 │                              # completed-empty 真相：进程 exit 0 是传输完成，不等于 worker 产出了可用结果——completed run 若仅有 transport 活动（runtime init/thinking/zero-usage metrics）而无 assistant 文本/命令活动/文件写入/工具调用，归 no_effect + 内核码 completed_empty（NO_EFFECT_DIAGNOSIS_CODES）
 │                              # 投影规则：经 `isValidDiagnosisCode(category, code)` 配对校验投影——provider_auth 携带 provider 码、provider_capacity 携带 rate_limited/quota_exhausted、no_effect 携带 completed_empty、其余类别恒为 null；failed no_effect 仍 null，正常 completed 仍 none/null；有效 tool-only/command-only/file-written run 仍判 none
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）

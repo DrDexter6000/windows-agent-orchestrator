@@ -38,19 +38,24 @@ export { PANEL_STAGES } from "../waoStage.js";
  * 的 tokenEnv）新增 key_only_* 两态——语义收窄为"声明的凭据变量可解析且非空"，
  * **未验证令牌有效性、serve 可达性或运行时可用性**，命名不带 ready 防夸大；
  * 无凭据声明的无 CLI 车道（zcode：承重 env 桥不是凭据）保持 unknown。
+ * 决定 0074：key 轴增加 "token_file" 输入值——声明 kimiHome 的 kimi-web 车道，
+ * 凭据是 <kimiHome>/server.token 文件（tokenEnv 不探）；文件在且非空与
+ * process_env/user_env 同为"已解析"（同样只是文件可读非空，不是就绪声称）。
+ * 输出闭集不变（不新增状态）。
  *
  * @param {object} input
  * @param {string|null} input.requiresCli — backend 映射的 CLI 名（null = 无 CLI 可探）
- * @param {string|null} input.requiresKeyEnv — 声明的 provider key env 名（null = 登录态型）
+ * @param {string|null} input.requiresKeyEnv — 声明的 provider key env 名（null = 登录态型；
+ *   kimiHome 车道传 token 文件路径——映射只看非空性，不消费其值）
  * @param {true|false|"unknown"|undefined} input.cli — CLI 探测结果（undefined 视为 unknown）
- * @param {"process_env"|"user_env"|"missing"|"unknown"|undefined} input.key — key 探测结果
+ * @param {"process_env"|"user_env"|"token_file"|"missing"|"unknown"|undefined} input.key — key 探测结果
  * @returns {"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"key_only_present"|"key_only_missing"|"unknown"}
  */
 export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
   if (!requiresCli) {
     // 无 CLI 探测面：有凭据声明时只探 key 名可解析性（不是就绪声称）。
     if (!requiresKeyEnv) return "unknown"; // backend 无 CLI 映射且无凭据声明：无法验证
-    const k0 = key === "process_env" || key === "user_env" || key === "missing" ? key : "unknown";
+    const k0 = key === "process_env" || key === "user_env" || key === "token_file" || key === "missing" ? key : "unknown";
     if (k0 === "unknown") return "unknown";
     return k0 === "missing" ? "key_only_missing" : "key_only_present";
   }
@@ -60,7 +65,7 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
     if (c === true) return "login_based";
     return c === false ? "missing_cli" : "unknown";
   }
-  const k = key === "process_env" || key === "user_env" || key === "missing" ? key : "unknown";
+  const k = key === "process_env" || key === "user_env" || key === "token_file" || key === "missing" ? key : "unknown";
   if (c === "unknown" || k === "unknown") return "unknown";
   const cliOk = c === true;
   const keyOk = k !== "missing";

@@ -114,7 +114,7 @@ Copy-Item config/agents.example.json config/agents.json
 # 列出所有配置的 agent
 npm run cli -- registry list --registry config/agents.json
 
-# 检查 opencode serve 是否可达（只对 opencode-serve backend）
+# 探 opencode-serve 的健康（registry check 只探它；其它车道：就绪看 wao lanes、环境看 wao doctor）
 npm run cli -- registry check --registry config/agents.json
 
 # 车道一屏参考（只读）：接线轴 + Owner 画像 + 认证简表 + 就绪探测

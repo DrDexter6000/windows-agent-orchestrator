@@ -7,6 +7,10 @@
 // environment, and bridges values from the Windows Current-User scope into the
 // worker child process when they are absent from process.env.
 //
+// 决定 0074 补充：kimi-web 车道声明 kimiHome 时，凭据面是 <kimiHome>/server.token
+// 文件而非环境变量——kimiHomeTokenFileState 是"文件在且非空"的单一判定，
+// alignReadinessToKimiTokenFile 把展示面取值对齐到它（详见两函数 docblock）。
+//
 // Env-name policy (which names are required vs optional-inherited) is the
 // runtime-neutral SSOT in src/envPolicy.js — this module delegates to it. There
 // is no mirrored algorithm here or in src/backends/*.
@@ -34,7 +38,8 @@
 // Architectural contract: no src/mcp/*, src/commands/*, MCP SDK, or zod imports.
 
 import { execFile } from "node:child_process";
-import { requiredCredentialNames, inheritedEnvNames } from "../envPolicy.js";
+import { readFile } from "node:fs/promises";
+import { requiredCredentialNames, inheritedEnvNames, kimiServerTokenFile } from "../envPolicy.js";
 
 /**
  * Re-export the env-name policy SSOT for convenience/compat.
@@ -237,4 +242,46 @@ export async function assessWorkerReadiness({ agent, resolver, names }) {
     ? "not_required"
     : (missing.length > 0 ? "missing" : "available");
   return { credentialAvailability, missingCredentialEnvNames: missing, resolvedEnv };
+}
+
+/**
+ * 决定 0074（车道就绪事实如实呈现）："token 文件在且去首尾空白后非空"的单一
+ * 判定。声明了 kimiHome 的 kimi-web 车道，凭据是 <kimiHome>/server.token 文件
+ * 而非环境变量——registry_list 的 credentialAvailability 取值、wao lanes /
+ * onboarding 的就绪探测、wao doctor 的体检都经本函数；派发侧
+ * kimiWeb.resolveBearerToken 同款语义（读失败按缺失处理——fail-closed，缺失或
+ * 为空在建会话之前拒绝派发）。只报状态，绝不回显文件内容。
+ *
+ * @param {string} tokenFile — kimiServerTokenFile(agent) 的返回值（非 null）
+ * @param {(p: string) => Promise<string>} [readFileFn] — 注入式读取器（测试用）
+ * @returns {Promise<"present"|"missing">}
+ */
+export async function kimiHomeTokenFileState(tokenFile, readFileFn) {
+  const read = readFileFn ?? ((p) => readFile(p, "utf8"));
+  let raw;
+  try {
+    raw = await read(tokenFile);
+  } catch {
+    return "missing";
+  }
+  return typeof raw === "string" && raw.trim().length > 0 ? "present" : "missing";
+}
+
+/**
+ * 把 assessWorkerReadiness 的结果对齐到决定 0074 的 token 文件事实（取值面专用）：
+ * 车道声明了 kimiHome 时，credentialAvailability 改由 token 文件是否在且非空决定
+ * （present→"available"，missing→"missing"）；missingCredentialEnvNames 保持空表
+ * （无环境变量涉及），resolvedEnv 原样保留。非 kimiHome 车道结果原样返回。
+ * 派发门不经此函数——派发侧由 kimiWeb backend 建会话前以同款判定拒绝。
+ *
+ * @param {object} agent — normalized/raw agent（backend+kimiHome 可判即可）
+ * @param {{ credentialAvailability: string, missingCredentialEnvNames: string[], resolvedEnv: object }} readiness
+ * @param {(p: string) => Promise<string>} [readFileFn]
+ * @returns {Promise<typeof readiness>}
+ */
+export async function alignReadinessToKimiTokenFile(agent, readiness, readFileFn) {
+  const tokenFile = kimiServerTokenFile(agent);
+  if (tokenFile === null) return readiness;
+  const state = await kimiHomeTokenFileState(tokenFile, readFileFn);
+  return { ...readiness, credentialAvailability: state === "present" ? "available" : "missing" };
 }

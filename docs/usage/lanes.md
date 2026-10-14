@@ -84,6 +84,14 @@
 
 车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
 
+声明了 `kimiHome` 的 kimi-web 车道，凭据是 `<kimiHome>/server.token` 文件（serve 拉起时生成，见下文「kimi 车道的 worker serve」一节）；这个文件是否就绪在三处可见：
+
+- MCP `registry_list` 的 `credentialAvailability` 按它取值：在且非空 = `available`，缺失或为空 = `missing`（输出不携带文件路径；没有环境变量参与，`missingCredentialEnvNames` 恒为空表）。
+- `wao lanes` 的就绪轴按它推导（不再探 `tokenEnv`——那个变量不会被读到）：文件在且非空 = `key_only_present`，缺失或为空 = `key_only_missing`，行内点名文件路径。
+- `wao doctor` 对缺失或为空的文件报 FAIL（派发必失败），提示里写文件路径与生成方式。
+
+没有声明 `kimiHome` 的 kimi-web 车道不受影响，仍按 `tokenEnv` 探测环境变量。
+
 deepseek-harness / deepseek-acp 通道的适用限制、`registry validate` 能力交叉 `⚠` 警告与 metrics 判读见 `docs/certification-runbook.md` §DSH 通道适用限制与能力交叉警告（唯一权威）。
 
 ## 认证正文总落点（certification runbook）
@@ -133,9 +141,10 @@ pwsh -File scripts/kimi-serve.ps1 -KimiHome <主目录> -Port 58628 -WorkspaceDi
 
 - 主目录 = 车道的 `kimiHome`，缺省 `~/.kimi-code`。
 - 工作区 = 稳定目录 `D:\projects\.kimi-serve-worker-ws`。不要用可删的临时目录。
-- 脚本给 serve 置 `KIMI_CODE_HOME` 与 `WAO_IN_WORKER=1`，并剔除密钥类和 agent 会话类（`CLAUDE*` / `ANTHROPIC*` / `WAO_*`）环境变量。serve 会把 env 传给它的 MCP 子进程与工具 shell，因此 worker 自助派发被拒：席位内 run_dispatch 被拒且报 `Detected worker context: env-marker`；工具 shell 里 `WAO_IN_WORKER` 非空。
+- serve 的环境剔除规则（WAO 拉起与手动脚本同一套）：密钥类、`WAO_*`（不分大小写）、Lead 宿主的会话变量（`CLAUDE*` / `ANTHROPIC*`，不分大小写）不进 serve 环境；`KIMI_CODE_HOME` 与 `WAO_IN_WORKER=1` 显式注入。serve 会把 env 传给它的 MCP 子进程与工具 shell，因此 worker 自助派发被拒：席位内 run_dispatch 被拒且报 `Detected worker context: env-marker`；工具 shell 里 `WAO_IN_WORKER` 非空。
 - Owner 人类用主 serve（默认端口 58627，不带 `WAO_IN_WORKER` 标记）。
 - 车道写了 `serveWorkspaceDir` 时，派发发现 serve 没在跑会自动拉起；没写就手动拉起。
+- WAO 拉起的 serve（按需拉起与 `serve recycle` 重启）空闲一段时间后由看护进程优雅关停，下一次派发会重新拉起；派发的第一条 system 说明写着看护的 pid，`serve recycle` 的结果带 `idleWatch`。判定与边界见 `docs/02-architecture.md` §2.7。手动脚本拉起的 serve 没有看护，一直运行到有人关掉；要让 serve 常驻就用脚本拉起。
 
 ### KIMI_WEB_TOKEN
 
@@ -160,7 +169,7 @@ serve 为每个会话在创建时拉起 6-8 个助手进程（datasource/analyze
    ```
 
    - `sweep` 按 WAO 转录的 `session.created` 认领（扫全部项目桶），只删"worktree 已亡"（形状 + 干净 ENOENT + 父目录在场三条件）的会话；台账在 `.wao/runs/serve-maintenance/sweep-ledger.jsonl`。跨 serve 生效（kimi 会话仓实例间共享）：58627 上由 WAO 历史派发产生的会话同样会被认领。
-   - `recycle` 双门（WAO 全项目桶无 active run + serve 会话集合 soak 比对全 idle）→ 优雅 shutdown 全量拆荚 → 按上面的配方重启（env 由命令组装，`WAO_IN_WORKER=1` 恒注入）→ 就绪验证。只动 kimi 车道 serveUrl 指向的 worker 实例；Owner 主 serve（58627）名下的存量荚由 Owner 自行重启解决。
+   - `recycle` 双门（WAO 全项目桶无 active run + serve 会话集合 soak 比对全 idle）→ 优雅 shutdown 全量拆荚 → 按上面的配方重启（env 由命令组装，`WAO_IN_WORKER=1` 恒注入）→ 就绪验证 → 端口核对。`--workspace-dir` 缺省取目标车道声明的 `serveWorkspaceDir`，车道没声明才要求显式给出。重启的子进程被挤到别的端口（目标端口被占、kimi 改绑下一个端口）时会被请优雅退出，结果带 `displaced` 指明去向、`ready: false`、退出码非零。就绪后的新 serve 由上面的空闲看护接管。只动 kimi 车道 serveUrl 指向的 worker 实例；Owner 主 serve（58627）名下的存量荚由 Owner 自行重启解决。
    - serve 已死（双面连接拒绝 × 两探 + 实例 pid 已死）时，recycle 跳过杀步直接重启（`revived: true`）；pid 活着但端口拒绝 = 可能正在启动，拒绝执行（`serve_not_listening_pid_alive`）。
    - exe 在一切副作用之前解析：显式 `--kimi-exe` 缺席即拒，缺省链 kimiHome/bin → PATH → `%USERPROFILE%\.kimi-code\bin`。重启失败或未就绪时退出码非零并附手动配方指路；shutdown 后 kimi 自清实例文件，重跑 recycle 会 `no_instance` 拒绝，须按配方手动拉起。
    - 时机：跑批间隙手动调用即可。忘了的后果是荚多攒几天（有界烦恼）；上游提供 idle 荚 GC 或 :delete 连带拆荚后，recycle 退役。

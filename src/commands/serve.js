@@ -13,9 +13,11 @@
 //
 // 边界（会审定案）：不挂 daemon、无自动触发（决定 0075 只放开了一件——派发时端口上
 // 没有监听、也没有活着的 serve 进程，就把 serve 拉起来，在 backends/kimiServeStart.js；
-// 关/重启/清扫仍只有这里的手动命令，recycle 在关旧起新的窗口里占着那边的启动锁）；
-// recycle 必须显式
-// --workspace-dir（重启 cwd，无隐藏默认——env 由命令组装 WAO_IN_WORKER=1）；
+// 关/重启/清扫仍只有这里的手动命令，recycle 在关旧起新的窗口里占着那边的启动锁）。WAO
+// 拉起的 serve 另带一个空闲看护：空闲 30 分钟抢锁复核后优雅退出（决定 0079，
+// backends/kimiServeIdleWatch.js），手动脚本拉起的没有；
+// recycle 的 --workspace-dir 缺省取目标车道声明的 serveWorkspaceDir（车道没声明才要求
+// 显式给出——重启 cwd 没有隐藏默认；env 由命令组装 WAO_IN_WORKER=1）；
 // sweep 默认 dry-run，--apply 才执行。
 
 import { resolve } from "node:path";
@@ -29,6 +31,7 @@ import {
   applySessionSweep,
   recycleServe,
   serveMaintenanceDir,
+  startServeIdleWatch,
 } from "../application/serveMaintenance.js";
 
 /** 解析目标 serve（url/token/agentId）与 kimi 席位集合。固定错误点名缺席面。
@@ -82,6 +85,8 @@ async function resolveServeTarget(config, urlOverride, kimiHomeOverride) {
     serveUrl: target.serveUrl,
     token,
     kimiHome: tokenFile !== null ? target.kimiHome : undefined,
+    // recycle 的 --workspace-dir 缺省（决定 0075 收尾）：目标车道声明的 serveWorkspaceDir。
+    serveWorkspaceDir: typeof target.serveWorkspaceDir === "string" ? target.serveWorkspaceDir : undefined,
     kimiAgentIds: kimiAgents.map((a) => a.id),
   };
 }
@@ -163,13 +168,17 @@ async function serveCommand(args, config) {
       port: Number(new URL(target.serveUrl).port),
       serveUrl: target.serveUrl,
       token: target.token,
-      workspaceDir: options.workspaceDir,
+      // 显式 flag 优先；缺省取目标车道声明的 serveWorkspaceDir；两者都没有 → 服务层仍以
+      // workspace_dir_required 拒绝（重启 cwd 没有隐藏默认）。
+      workspaceDir: options.workspaceDir ?? target.serveWorkspaceDir,
       kimiExe: options.kimiExe ?? "kimi",
       runDir,
       kimiAgentIds: target.kimiAgentIds,
       soakMs: Number.isFinite(soakMs) && soakMs >= 1000 ? soakMs : 12_000,
       lockRootDir: resolve(runDir, ".."),
       kimiHome: options.kimiHome ?? target.kimiHome,
+      // 就绪后的新 serve 由空闲看护接管（决定 0079）。
+      startWatchFn: startServeIdleWatch,
     });
     console.log(JSON.stringify(result, null, 2));
     // TD-261（0063，opus/sol 合订）：结构化失败与"未就绪"都要非零退出——旧实现
@@ -181,7 +190,7 @@ async function serveCommand(args, config) {
     return;
   }
   throw new Error(
-    `Unknown serve subcommand: ${sub ?? "(none)"}. Try: serve status | serve sweep [--apply] | serve recycle --workspace-dir <dir>`,
+    `Unknown serve subcommand: ${sub ?? "(none)"}. Try: serve status | serve sweep [--apply] | serve recycle [--workspace-dir <dir>]`,
   );
 }
 

@@ -70,6 +70,18 @@ test("TD-258: key_only_* 不计可用/不抬 tier，且进 keyOnly 桶不无声�
   assert.ok(!p.keyOnly.includes("glm-pro"), "unknown 不进 keyOnly 桶（有 probeUnknown 位）");
 });
 
+// 决定 0074（车道就绪事实如实呈现）：key 轴 "token_file"（kimiHome 车道的
+// server.token 在且非空）与 process_env/user_env 同为"已解析"——复用 key_only_*
+// 两态，输出闭集不新增；requiresKeyEnv 传文件路径（映射只看非空性）。
+test("决定 0074: deriveReadyState key 轴 token_file——kimiHome 车道复用 key_only_* 闭集", () => {
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "C:/kimi-home/server.token", key: "token_file" }),
+    "key_only_present", "文件在且非空 = key_only_present（key_only 纪律：不声称令牌有效）");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "C:/kimi-home/server.token", key: "missing" }),
+    "key_only_missing", "文件缺失/为空 = key_only_missing");
+  assert.equal(deriveReadyState({ requiresCli: null, requiresKeyEnv: "C:/kimi-home/server.token", key: undefined }),
+    "unknown", "探测失败/缺席 = unknown（如实未知，不猜）");
+});
+
 test("R9/0065: 分级三档按 ready 候选计数——≥2 → three_seat；恰 1 → two_seat；0 → none", () => {
   const three = assessPanelReadiness([
     row("glm-pro", { model: "bigmodel-api/GLM-5.3" }, "ready"),

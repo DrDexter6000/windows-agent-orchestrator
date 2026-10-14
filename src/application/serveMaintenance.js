@@ -38,13 +38,15 @@ import {
   serveWorkspacePlacementRefusal,
   kimiServeChildEnv,
   spawnServeDetached,
+  settleOwnServeChild,
   holdServeStartLock,
   releaseServeStartLock,
 } from "../backends/kimiServeStart.js";
+import { startServeIdleWatch } from "../backends/kimiServeIdleWatch.js";
 
 // 决定 0075：exe 解析随启动原语迁到 backends/kimiServeStart.js（kimi-web backend 的
-// 按需拉起共用同一份）；这里原名再导出，既有消费方不动。
-export { resolveKimiExe };
+// 按需拉起共用同一份）；这里原名再导出，既有消费方不动。空闲看护（决定 0079）同款：实现在 backends/kimiServeIdleWatch.js，命令层从这里拿。
+export { resolveKimiExe, startServeIdleWatch };
 
 /** 清扫/回收的共享落点（.dev 语义之外的运维事实面，入 .wao/）。 */
 export function serveMaintenanceDir(rootDir) {
@@ -490,7 +492,8 @@ export async function recycleHuskBranches(huskNames, { lockRootDir, runDir, exec
 /**
  * A2 回收（手动 CLI 专用；门不过=结构化拒绝，零副作用）。步骤：
  * 实例解析 → WAO active 门 → serve 快照 → soak → 复探 → shutdown → 端口/
- * 进程死亡验证（回退 taskkill /T /F）→ 显式 env 重启 → 就绪轮询 → 后验证。
+ * 进程死亡验证（回退 taskkill /T /F）→ 显式 env 重启 → 就绪轮询 → 端口核对
+ * （子进程被挤到别的端口 → 请它优雅退出，ready=false）→ 就绪后配空闲看护 → 后验证。
  * kill/spawn/时钟全注入（单测零真进程）。
  */
 export async function recycleServe({
@@ -512,6 +515,8 @@ export async function recycleServe({
   execFileFn = null,
   sleepFn = (ms) => new Promise((r) => { setTimeout(r, ms); }),
   nowMs = Date.now,
+  // 空闲看护的启动函数（命令层注入生产实现；不注入就不起——库层直调的既有测试不真拉进程）。
+  startWatchFn = null,
 }) {
   // 工作目录的形状门与放置门、exe 解析：与按需拉起共用（backends/kimiServeStart.js），
   // 次序不变——形状门 → exe → 放置门。
@@ -720,6 +725,7 @@ export async function recycleServe({
     };
   }
   child.unref?.();
+  const childPid = Number.isInteger(child.pid) ? child.pid : null;
 
   // 就绪：轮询会话面 code===0，有界 30s。
   let ready = false;
@@ -728,8 +734,31 @@ export async function recycleServe({
     const check = await ops.listServeSessions({ baseUrl: serveUrl, token, fetchImpl, timeoutMs: 4000 });
     if (check.ok) { ready = true; break; }
   }
+  // 事后核对（决定 0075 第 2 条，与按需拉起共用一份）：kimi 在端口被占时不退出、改绑
+  // 下一个端口。本次重启的子进程落在别的端口 = 目标端口被占 → 用同一主目录的 token 请
+  // 它优雅退出，ready 记 false（CLI 非零退出）。子进程 pid 不可知（注入缝/异常形状）→
+  // 无从核对，不动。
+  const displaced = await settleOwnServeChild({
+    pid: childPid, port, token, kimiHome,
+    readInstancesFn: ops.readServeInstances,
+    shutdownFn: ops.shutdownServe,
+    fetchImpl, sleepFn,
+  });
+  if (displaced) ready = false;
   const newInstance = pickInstanceByPort(ops.readServeInstances({ kimiHome }), port);
   const children = newInstance ? await ops.countServeChildren({ pid: newInstance.pid, execFileFn }) : -1;
+  // 就绪后的新 serve 配一个空闲看护（决定 0079——空闲自己退出）；看护起
+  // 不来不影响 recycle 的结果，结果如实放进返回值。被挤走（displaced）的不配。
+  let idleWatch = null;
+  // 只给本次重启的子进程配看护：端口上的实例记录必须就是它（记录还没出现、或属于别的进程，
+  // 都不配——看护按端口关停，配错实例就会关掉别人的 serve）。
+  if (ready && !displaced && typeof startWatchFn === "function") {
+    if (newInstance !== null && childPid !== null && newInstance.pid === childPid) {
+      try { idleWatch = startWatchFn({ port, pid: childPid, kimiHome }); } catch { idleWatch = { started: false, reason: "start_failed" }; }
+    } else {
+      idleWatch = { started: false, reason: "not_own_child" };
+    }
+  }
   // TD-251 W1c + TD-262a（0063）：荚已死、句柄已释——补扫本工作区的空 worktree 壳，
   // 已删壳走**转录门控**分支回收（accepted 交付壳/非只读壳保留——sol 反例条款）。
   const husks = sweepEmptyWorktreeHusks(join(lockRootDir, ".wao-worktrees"));
@@ -739,6 +768,8 @@ export async function recycleServe({
   return {
     recycled: true,
     ready,
+    ...(displaced ? { displaced } : {}),
+    ...(idleWatch ? { idleWatch } : {}),
     ...(revived && ready ? { revived: true } : {}),
     oldPid: instance.pid,
     newPid: newInstance?.pid ?? null,

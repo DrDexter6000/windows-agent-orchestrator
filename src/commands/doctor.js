@@ -65,10 +65,12 @@ import { backendFor } from "../backends/factory.js";
 // M11-7：Windows User 作用域 env 读取复用 credentialReadiness（HKCU\Environment 精确
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
-import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, aggregateCredentialSources } from "../application/credentialReadiness.js";
+// 决定 0074：kimiHome 车道 token 文件体检复用 credentialReadiness 的单一判定
+//（registry_list 取值 / wao lanes 探测 / 派发侧拒绝同源）。
+import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, aggregateCredentialSources, kimiHomeTokenFileState } from "../application/credentialReadiness.js";
 // TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
-// 值不回显）。
-import { CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
+// 值不回显）。kimiServerTokenFile：kimiHome 车道 token 文件路径（决定 0074 SSOT）。
+import { CLAUDE_OAUTH_TOKEN_ENV, kimiServerTokenFile } from "../envPolicy.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
 // 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
 import { BACKEND_CLI } from "../application/backendCliMap.js";
@@ -340,6 +342,29 @@ export async function waoDoctorCommand(args, config) {
     }
   }
 
+  // 5a. 决定 0074（车道就绪事实如实呈现）：声明 kimiHome 的 kimi-web 车道，派发
+  //     凭据=<kimiHome>/server.token（kimiWeb backend 建会话前读它）。与 budget_*
+  //     同口径：承重文件缺失或为空=FAIL（派发必失败）；存在时不产生条目（零 OK
+  //     噪音）。判定单一实现 credentialReadiness.kimiHomeTokenFileState（registry_list
+  //     的 credentialAvailability 取值与 wao lanes 的就绪探测同源）；detail 点名
+  //     文件路径与生成方式，值不回显。探测事实存 Map 供 panel 行复用（不二次读盘）。
+  const kimiTokenState = new Map();
+  if (registryOk) {
+    for (const [id, agent] of Object.entries(registryAgents)) {
+      const tokenFile = kimiServerTokenFile(agent);
+      if (tokenFile === null) continue;
+      const state = await kimiHomeTokenFileState(tokenFile);
+      kimiTokenState.set(id, state);
+      if (state === "present") continue;
+      pushCheck(checks, {
+        name: `kimi_token_file_${id}`,
+        pass: false,
+        detail: `kimi-web worker ${id} 的 token 文件缺失或为空: ${tokenFile}（kimiHome 车道的派发凭据=该文件，缺失或为空时派发在建会话之前即被拒）；run: 在该主目录拉起一次 kimi web serve 生成 server.token（第一次在该主目录拉起时自动生成——见 docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
+        fix: `在该 kimiHome 主目录拉起一次 kimi web serve 生成 ${tokenFile}（docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
+      });
+    }
+  }
+
   // 5b. TD-218：承重运行时 env（独立 advisory——不进 requiredCredentialNames、
   //     不改变派发阻断语义）。backend 声明表 + 注册表 env 块，按 spawn 解析序
   //     （agent.env → 进程 env → User 作用域）检查存在性；file 类查路径存在。
@@ -597,17 +622,23 @@ export async function waoDoctorCommand(args, config) {
       } catch { continue; }
       const requiresCli = BACKEND_CLI[normalized.backend] ?? null;
       const names = requiredCredentialNames(normalized);
+      // 决定 0074：kimiHome 车道凭据=token 文件——key 轴走 "token_file"/"missing"
+      //（与 wao lanes 的 key_only_* 同闭集；探测事实复用 5a 的 Map，不二次读盘）。
+      const tokenFile = kimiServerTokenFile(normalized);
       // TD-258：多名聚合成单一 key 态走共享函数（onboarding 同源），不再本文件内联。
-      const key = names.length > 0
-        ? aggregateCredentialSources(names.map((n) => keySource.get(n)))
-        : undefined;
+      const key = tokenFile !== null
+        ? (kimiTokenState.get(id) === "present" ? "token_file"
+          : kimiTokenState.get(id) === "missing" ? "missing" : "unknown")
+        : names.length > 0
+          ? aggregateCredentialSources(names.map((n) => keySource.get(n)))
+          : undefined;
       panelRows.push({
         id,
         backend: normalized.backend ?? null,
         model: normalized.model?.id ?? null,
         readyState: deriveReadyState({
           requiresCli,
-          requiresKeyEnv: names.length > 0 ? names[0] : null,
+          requiresKeyEnv: tokenFile !== null ? tokenFile : (names.length > 0 ? names[0] : null),
           cli: requiresCli ? cliFound.get(requiresCli) : undefined,
           key,
         }),

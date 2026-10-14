@@ -141,3 +141,82 @@ test("wao lanes：车道表权威失败（结构非法）→ exitCode 1 + 不渲
     process.exitCode = prevExit;
   } finally { cleanupDir(dir); }
 });
+
+// 决定 0074（车道就绪事实如实呈现）：声明 kimiHome 的 kimi-web 车道，就绪按
+// <kimiHome>/server.token 文件推导（key_only_present/key_only_missing——复用
+// 现有八态闭集，不新增状态），不探 tokenEnv（那个变量不会被派发读到）；人读
+// 输出点名文件路径。
+test("wao lanes：kimiHome 车道就绪按 token 文件推导（不探 tokenEnv）；人读面点名文件路径", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-kimi-"));
+  try {
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    mkdirSync(join(dir, "home"), { recursive: true });
+    const home = join(dir, "home");
+    writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+      schema: 2,
+      lanes: [{ id: "kimi_lane", backend: "kimi-web", model: { id: "kimi-code/k3-256k" }, reasoning: { effort: "high" }, aliases: {} }],
+    }), "utf8");
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({
+      agents: {
+        kimi_lane: {
+          backend: "kimi-web",
+          serveUrl: "http://127.0.0.1:58628",
+          model: { id: "kimi-code/k3-256k" },
+          reasoning: { effort: "high" },
+          tokenEnv: "TEST_LANES_KIMI_TOKEN",
+          cwd: dir,
+          kimiHome: home,
+        },
+      },
+    }), "utf8");
+    const runLanes = async (asJson) => {
+      const lines = [];
+      const origLog = console.log;
+      console.log = (...a) => { lines.push(a.join(" ")); };
+      try {
+        await lanesCommand(
+          [
+            ...(asJson ? ["--json"] : []),
+            "--registry", join(dir, "agents.json"),
+            "--lanes-file", join(dir, "lanes.json"),
+            "--run-dir", join(dir, "runs"),
+          ],
+          { registry: "config/agents.json", runDir: join(dir, "runs") },
+        );
+      } finally { console.log = origLog; }
+      return asJson ? JSON.parse(lines.join("\n")) : lines.join("\n");
+    };
+    // tokenEnv 已设置在环境里——若引擎仍探它，缺失文件也会得出 key_only_present；
+    // 断言 key_only_missing 即钉住"不探 tokenEnv，按文件推导"。
+    process.env.TEST_LANES_KIMI_TOKEN = "test-key-lanes-kimi";
+    try {
+      const tokenFile = join(home, "server.token");
+
+      let payload = await runLanes(true);
+      let row = payload.lanes.find((r) => r.id === "kimi_lane");
+      assert.equal(row.wiring, "wired", "四轴一致（就绪轴在场）");
+      assert.equal(row.readyState, "key_only_missing", "文件缺失 → key_only_missing（tokenEnv 在场也不探）");
+      assert.ok(String(row.readyTokenFile).endsWith("server.token"), "行携带 token 文件路径（--json 同源）");
+
+      writeFileSync(tokenFile, "   \n", "utf8");
+      payload = await runLanes(true);
+      row = payload.lanes.find((r) => r.id === "kimi_lane");
+      assert.equal(row.readyState, "key_only_missing", "文件为空（纯空白） → key_only_missing");
+
+      writeFileSync(tokenFile, "  tok-lanes-live  ", "utf8");
+      payload = await runLanes(true);
+      row = payload.lanes.find((r) => r.id === "kimi_lane");
+      assert.equal(row.readyState, "key_only_present", "文件在且非空 → key_only_present（key_only 纪律：不声称令牌有效）");
+
+      const text = await runLanes(false);
+      assert.ok(text.includes("readyState: key_only_present"), "人读面 readyState 在场");
+      assert.ok(
+        text.includes(`credential: token 文件 ${join(home, "server.token")}`),
+        "人读面点名 token 文件路径（操作员知道去哪看）",
+      );
+    } finally {
+      delete process.env.TEST_LANES_KIMI_TOKEN;
+      cleanupDir(dir);
+    }
+  } finally { cleanupDir(dir); }
+});

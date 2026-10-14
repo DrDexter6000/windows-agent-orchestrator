@@ -17,7 +17,9 @@
 //     去重，不是严格互斥——严格互斥是端口绑定。recycle 在关旧起新的窗口里占同一把锁；
 //   - 有活着的 serve 进程（心跳新鲜的实例记录，或上一次拉起后一直没应答的那个）就不再拉，
 //     只等，等不到就报错并点名 pid；绝不杀进程；
-//   - 只拉起，不关、不重启、不清扫——那些仍是 `wao serve` 的手动命令（决定 0056）。
+//   - 只拉起，不关、不重启、不清扫——那些仍是 `wao serve` 的手动命令（决定 0056）。唯一的
+//     例外是空闲看护：本进程拉起的 serve 会带一个看护进程，空闲满阈值时抢锁复核后**优雅**
+//     关停它（决定 0079；见 kimiServeIdleWatch.js）——绝不强杀。
 //
 // spawn 形状（2026-10-13 实测，kimi 2.1.1 / Node 22）：`detached: true, stdio: "ignore"`
 // 起的 serve 在拉起它的进程退出后继续运行，worker 跑命令时没有可见窗口；只给
@@ -103,28 +105,38 @@ export function serveWorkspacePlacementRefusal(workspaceDir, kimiHome) {
 }
 
 /**
+ * serve 及其看护进程共用的环境**剔除规则**（不注入任何东西——注入归各自的组装方）：
+ *   - WAO 自己的变量（`WAO_*`，不分大小写）与嵌套派发豁免变量：拉起者进程的控制面状态
+ *     不进长命子进程（决定 0075 会审——豁免跟进 serve 会成为此后所有 worker 的常驻豁免）；
+ *   - 密钥类变量（决定 0074；代理变量保留，联网要用）；
+ *   - Lead 宿主的会话变量（`CLAUDE*` / `ANTHROPIC*`，不分大小写）：拉起者是 Claude Code
+ *     等宿主时，宿主的会话变量会跟进 serve 与此后所有 worker 的工具进程——与手动脚本
+ *     scripts/kimi-serve.ps1 的规则 `^(CLAUDE|ANTHROPIC|WAO_)` 对齐。
+ * 其余变量原样继承。
+ */
+export function stripServeEnvVars(baseEnv) {
+  const out = { ...baseEnv };
+  const bypassUpper = NESTED_DISPATCH_BYPASS_ENV.toUpperCase();
+  for (const name of Object.keys(out)) {
+    const upper = name.toUpperCase();
+    if (upper.startsWith("WAO_") || upper === bypassUpper) delete out[name];
+    else if (upper.startsWith("CLAUDE") || upper.startsWith("ANTHROPIC")) delete out[name];
+    else if (isSecretEnvName(name) && !/_PROXY$/i.test(name)) delete out[name];
+  }
+  return out;
+}
+
+/**
  * serve 子进程的环境。WAO_IN_WORKER=1 恒注入（0047 env 臂）。
  * TD-253（决定 0058，双席修正）：effective home 纪律——kimiHome 在场显式注入
  * KIMI_CODE_HOME；缺席则**删除**继承来的 KIMI_CODE_HOME（否则在设了新家的 shell 里
  * 重启默认家的 serve，会把它起到新家去）。
  * 决定 0074：serve 把自己的环境传给工具 shell 与 MCP 子进程，worker 读得到——serve 用的
- * 是主目录里的登录态，不需要调用方环境里的密钥：按名字规则剔除（代理变量保留，联网要用）。
- * WAO 自己的变量（`WAO_*`）不继承。其余变量原样继承：serve 的环境因此仍取决于是谁把它
- * 拉起来的（登记在决定 0075）。
+ * 是主目录里的登录态，不需要调用方环境里的密钥（剔除规则见 stripServeEnvVars）。
+ * 其余变量原样继承：serve 的环境因此仍取决于是谁把它拉起来的（登记在决定 0075）。
  */
 export function kimiServeChildEnv(baseEnv, kimiHome) {
-  const childEnv = { ...baseEnv };
-  // 决定 0075 会审（sol / kimi）：WAO 自己名字空间里的变量一律不进 serve。它们是拉起者那
-  // 个进程的控制面状态——嵌套派发的命令级豁免（0047；守卫先看豁免、后看 worker 标记，进了
-  // 长命 serve 就成了此后所有 worker 的常驻豁免）、验证闸门标记、目标工作区指向等。按前缀
-  // 剔（Windows 环境变量名不分大小写），以后新增的控制面变量自动在内；豁免变量另按常量名
-  // 兜一层。worker 标记在剔除之后注入。
-  const bypassUpper = NESTED_DISPATCH_BYPASS_ENV.toUpperCase();
-  for (const name of Object.keys(childEnv)) {
-    const upper = name.toUpperCase();
-    if (upper.startsWith("WAO_") || upper === bypassUpper) delete childEnv[name];
-    else if (isSecretEnvName(name) && !/_PROXY$/i.test(name)) delete childEnv[name];
-  }
+  const childEnv = stripServeEnvVars(baseEnv);
   childEnv.WAO_IN_WORKER = "1";
   if (typeof kimiHome === "string" && kimiHome.length > 0) childEnv.KIMI_CODE_HOME = kimiHome;
   else delete childEnv.KIMI_CODE_HOME;
@@ -194,7 +206,7 @@ function lockBody(nonce, now, childPid) {
   return JSON.stringify({ pid: process.pid, nonce, ts: now, ...(Number.isInteger(childPid) ? { childPid } : {}) });
 }
 
-// 返回 null = 文件不在；否则 { raw, ts, nonce, childPid }（内容读不出来时 ts 取修改时间）。
+// 返回 null = 文件不在；否则 { raw, ts, pid, nonce, childPid }（内容读不出来时 ts 取修改时间）。
 function readStartLock(lockPath) {
   let raw;
   try { raw = readFileSync(lockPath, "utf8"); } catch (error) {
@@ -204,10 +216,16 @@ function readStartLock(lockPath) {
   try {
     const parsed = JSON.parse(raw);
     if (Number.isFinite(parsed?.ts)) {
-      return { raw, ts: parsed.ts, nonce: typeof parsed.nonce === "string" ? parsed.nonce : null, childPid: Number.isInteger(parsed.childPid) ? parsed.childPid : null };
+      return { raw, ts: parsed.ts, pid: Number.isInteger(parsed.pid) ? parsed.pid : null, nonce: typeof parsed.nonce === "string" ? parsed.nonce : null, childPid: Number.isInteger(parsed.childPid) ? parsed.childPid : null };
     }
   } catch { /* 走修改时间 */ }
-  try { return { raw, ts: statSync(lockPath).mtimeMs, nonce: null, childPid: null }; } catch { return null; }
+  try { return { raw, ts: statSync(lockPath).mtimeMs, pid: null, nonce: null, childPid: null }; } catch { return null; }
+}
+
+/** 某个 pid 是否还是一个活着的进程（不核镜像名；拿不到权限也算活着）。 */
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
 /**
@@ -229,8 +247,11 @@ export function isKimiProcessAlive(pid, { execFileSyncFn = execFileSync } = {}) 
  *   { held: false }                            —— 别人持有且未陈旧
  *   { held: false, unavailable: true }         —— 锁文件写不了
  *   { held: false, blockedByChildPid }         —— 上一次拉起的 kimi 进程还活着
+ * holderAliveFn（可选）：给了就只在确认持锁进程已不在时接管陈旧锁——空闲看护用它。持锁者
+ * 活着、或认不出来（锁里没有 pid、内容读不出来）都不删别人的锁；按需拉起不传，沿用「陈旧即
+ * 接管」（决定 0075）。
  */
-export function acquireServeStartLock({ lockPath, now, childAliveFn = isKimiProcessAlive, nonce = randomUUID() }) {
+export function acquireServeStartLock({ lockPath, now, childAliveFn = isKimiProcessAlive, holderAliveFn = null, nonce = randomUUID() }) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       writeFileSync(lockPath, lockBody(nonce, now), { flag: "wx" });
@@ -242,6 +263,7 @@ export function acquireServeStartLock({ lockPath, now, childAliveFn = isKimiProc
     if (prev === null) continue; // 刚被放掉：再抢一次
     if (prev.childPid !== null && childAliveFn(prev.childPid)) return { held: false, blockedByChildPid: prev.childPid };
     if (now - prev.ts <= START_LOCK_STALE_MS) return { held: false };
+    if (typeof holderAliveFn === "function" && (prev.pid === null || holderAliveFn(prev.pid))) return { held: false };
     // 陈旧：确认还是刚才读到的那一份再删，然后回到 wx 去抢。
     const again = readStartLock(lockPath);
     if (again !== null && again.raw === prev.raw) { try { unlinkSync(lockPath); } catch { /* 别人先删了 */ } }
@@ -296,11 +318,41 @@ function startError(reason) {
 }
 
 /**
+ * 核对本次拉起的子进程落在哪个端口（按需拉起与 recycle 共用的一份）。kimi 在端口被占时
+ * 不退出而是改绑下一个端口并照常登记实例（决定 0075 实测）——实例记录不在目标端口上 =
+ * 多拉了一个（目标端口在此期间被别人占了）→ 用同一主目录的 token 请它优雅退出。
+ * 只动本次拉起的这一个；没有它的记录（没登记就退出了，或还没写）→ 无从判断，不动。
+ * 返回 null（在目标端口 / 无从判断）或 displaced 事实 { pid, port, shutdown }。
+ */
+export async function settleOwnServeChild({
+  pid, port, token, kimiHome = null,
+  readInstancesFn = readServeInstances,
+  shutdownFn = shutdownServe,
+  fetchImpl = globalThis.fetch,
+  sleepFn,
+  pollMs = READY_POLL_MS,
+  polls = 5,
+}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  for (let i = 0; i < polls; i += 1) {
+    const record = readInstancesFn({ kimiHome }).find((x) => x.pid === pid);
+    if (record) {
+      if (record.port === port) return null;
+      const r = await shutdownFn({ baseUrl: `http://127.0.0.1:${record.port}`, token, fetchImpl, timeoutMs: 8000 });
+      return { pid, port: record.port, shutdown: r?.outcome === "requested" ? "requested" : "failed" };
+    }
+    if (i < polls - 1) await sleepFn(pollMs);
+  }
+  return null;
+}
+
+/**
  * 派发前的 serve 在场保证。
  * 返回 null = 什么都没做（车道没声明工作目录 / 非回环地址 / 首探不是"连接被拒"）。
  * 返回 { started, pid, waitedMs, answer } = 首探连接被拒，之后等到了应答。started=false
  * 表示是别的进程拉的；answer 为 "ok"（会话面 code 0）或 "rejected"（端口有 HTTP 应答但
- * 不是 code 0——交回请求路径去报）。
+ * 不是 code 0——交回请求路径去报）。本进程拉起且应答 ok 且未被挤走时，返回值另带
+ * idleWatch（空闲看护的启动结果——看护起不来不报错，结果如实带回）。
  * displaced 在场 = 本进程拉起的那个 serve 落在了别的端口（目标端口在此期间被别人占了），
  * 已请它优雅退出（shutdown: requested | failed）——此时 started 为 false。
  * 拉不起来或等不到应答 → 抛固定文案的错误：原因取自闭集，不含 token、serveUrl 与上游正文。
@@ -326,6 +378,8 @@ export async function ensureServeRunning({
   readInstancesFn = readServeInstances,
   childAliveFn = isKimiProcessAlive,
   shutdownFn = shutdownServe,
+  // 空闲看护的启动函数（调用方注入；不注入就不起——kimi-web 传 startServeIdleWatch）。
+  startWatchFn = null,
 }) {
   if (typeof workspaceDir !== "string" || workspaceDir.length === 0) return null;
   if (!isLoopbackUrl(serveUrl)) return null;
@@ -350,22 +404,6 @@ export async function ensureServeRunning({
   let waitingOn = "another_starter";
   let answeredNotOk = 0;
   let displaced = null;
-  // 自己拉起的子进程落在了哪个端口？它的实例记录不在目标端口上 = 多拉了一个（目标端口在
-  // 这期间被别人占了）→ 用同一主目录的 token 请它优雅退出。只动本进程刚拉起的这一个。
-  // 没有它的记录（没登记就退出了，或还没写）→ 无从判断，不动。
-  const settleOwnChild = async () => {
-    if (!started || pid === null) return null;
-    for (let i = 0; i < 5; i += 1) {
-      const record = readInstancesFn({ kimiHome }).find((x) => x.pid === pid);
-      if (record) {
-        if (record.port === port) return null;
-        const r = await shutdownFn({ baseUrl: `http://127.0.0.1:${record.port}`, token, fetchImpl, timeoutMs: 8000 });
-        return { pid, port: record.port, shutdown: r?.outcome === "requested" ? "requested" : "failed" };
-      }
-      await sleepFn(READY_POLL_MS);
-    }
-    return null;
-  };
   const liveInstancePid = () => {
     const now = nowMs();
     const live = readInstancesFn({ kimiHome })
@@ -419,18 +457,26 @@ export async function ensureServeRunning({
       }
       if (nowMs() - startedAt > readyTimeoutMs) {
         if (!started) throw startError(`not_ready_in_time waiting on ${waitingOn}`);
-        displaced = await settleOwnChild();
+        displaced = await settleOwnServeChild({ pid, port, token, kimiHome, readInstancesFn, shutdownFn, fetchImpl, sleepFn });
         throw startError(displaced
           ? `not_ready_in_time started pid ${displaced.pid} landed on port ${displaced.port}, exit ${displaced.shutdown}`
           : `not_ready_in_time started pid ${pid ?? "unknown"}, left running`);
       }
       await sleepFn(READY_POLL_MS);
     }
-    displaced = await settleOwnChild();
+    displaced = await settleOwnServeChild({ pid, port, token, kimiHome, readInstancesFn, shutdownFn, fetchImpl, sleepFn });
   } finally {
     // 起了进程、没等到应答、它也没落到别处：锁留下（里面记着那个进程）。其余情形放掉自己的锁。
     if (!(started && answer === null && displaced === null)) releaseServeStartLock(lock);
   }
   if (displaced) return { started: false, pid: null, waitedMs: nowMs() - startedAt, answer, displaced };
-  return { started, pid, waitedMs: nowMs() - startedAt, answer };
+  // 自己拉起、应答 ok、没被挤走：给它配一个空闲看护（决定 0079——WAO 拉起的
+  // serve 空闲时自己退出；kimi 无空闲超时选项，做法是跟着 serve 走的看护进程，见
+  // kimiServeIdleWatch.js）。别的进程拉起的、被挤走的，都不配。看护起不来不能让派发失败：
+  // 失败结果如实放进返回值。
+  let idleWatch = null;
+  if (started && answer === "ok" && Number.isInteger(pid) && typeof startWatchFn === "function") {
+    try { idleWatch = startWatchFn({ port, pid, kimiHome }); } catch { idleWatch = { started: false, reason: "start_failed" }; }
+  }
+  return { started, pid, waitedMs: nowMs() - startedAt, answer, ...(idleWatch ? { idleWatch } : {}) };
 }

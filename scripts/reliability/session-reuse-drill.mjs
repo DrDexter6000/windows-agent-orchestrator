@@ -85,8 +85,10 @@ const MARKER = `WAO_REUSE_P6_${Date.now().toString(36).toUpperCase()}_${Math.ran
 const WAIT_MS = 300_000;
 const POLL_MS = 2_000;
 
-// 夹具：复制 registry 到 <repo>/.wao/runs/（cwd 内；不改外层文件），注入 scratch 车道。
-const scratchDir = join(ROOT, ".wao", "runs");
+// 夹具：复制 registry 到 <repo>/.wao/runs/session-reuse-drill/（cwd 内；不改外层
+// 文件），注入 scratch 车道。W1 卫生：drill 的注册表复制件与 run 目录收进这一个
+// 子目录（hygiene ROOT_WHITELIST 只列该子目录一条），不落 .wao/runs 根。
+const scratchDir = join(ROOT, ".wao", "runs", "session-reuse-drill");
 const drillRegistry = join(scratchDir, `drill-agents-${backendName.replace(/-/g, "_")}.json`);
 const runDir = join(scratchDir, `phase6-reuse-runs-${backendName.replace(/-/g, "_")}`);
 mkdirSync(scratchDir, { recursive: true });
@@ -174,8 +176,8 @@ function nativeSessionId(events, runId) {
 // file_change 投影成 kind:"file_written"——只数 tool_use/tool_result/command 堵不住
 // "写 workspace 文件"那条泄漏路径）。已知边界如实记：codex parser 不投影
 // mcp_tool_call / web_search 类 item，此类调用在转录里不可见，计数照不到。
-// 暗号已在 workspace（本 drill 的转录就在 ROOT/.wao/runs/ 下、cwd=ROOT）——
-// 所以 run2/run3/fresh 也必须零工具，不能只断言 run1。
+// 暗号已在 workspace（本 drill 的转录就在 ROOT/.wao/runs/session-reuse-drill/ 下、
+// cwd=ROOT）——所以 run2/run3/fresh 也必须零工具，不能只断言 run1。
 function toolEventCount(events, runId) {
   return events.filter((e) => e?.type === "run.event" && e.runId === runId
     && (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "command" || e.kind === "file_written")).length;
@@ -247,8 +249,9 @@ evidence.steps.run2 = {
   },
 };
 if (t2.state !== "completed") fail(`run2 state=${t2.state}`);
-// 验收修 M2：run2 也必须零工具——暗号已随 run1 转录落在 ROOT/.wao/runs/ 下，
-// run2 若动工具即可从 workspace 读到，差分即失效。
+// 验收修 M2：run2 也必须零工具——暗号已随 run1 转录落在
+// ROOT/.wao/runs/session-reuse-drill/ 下，run2 若动工具即可从 workspace 读到，
+// 差分即失效。
 const run2ToolEvents = toolEventCount(t2.events, r2.runId);
 evidence.steps.run2.toolEventCount = run2ToolEvents;
 if (run2ToolEvents !== 0) fail(`run2 used ${run2ToolEvents} tool/command/file events — marker reachable from workspace, differential invalid`);

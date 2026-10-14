@@ -3073,6 +3073,7 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
   assert.equal(present.ensureCalls[0].kimiHome, null);
   assert.equal(present.ensureCalls[0].token, TOKEN_VALUE, "探测用的是这条车道解析到的 token");
   assert.equal(present.ensureCalls[0].fetchCallsBefore, 0, "在任何会话请求之前");
+  assert.equal(typeof present.ensureCalls[0].startWatchFn, "function", "kimi-web 把空闲看护的启动函数交给拉起流程");
   assert.deepEqual(systemTexts(present.events), []);
 
   // 声明了、本次派发把 serve 拉了起来：events 的第一条是给 Lead 的说明（只写端口，不写 URL 原文）。
@@ -3140,6 +3141,18 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
   );
   const stuck = await runWith("session_0075h", { serveWorkspaceDir: ws }, { ...moved, displaced: { ...moved.displaced, shutdown: "failed" } });
   assert.match(systemTexts(stuck.events)[0], /asking it to exit failed — stop it by hand; answering after 5 s$/);
+
+  // 空闲看护的结果写进说明（决定 0079：WAO 拉起的 serve 空闲自己退出）。
+  const watched = await runWith("session_0075i", { serveWorkspaceDir: ws }, { started: true, pid: 781, waitedMs: 800, answer: "ok", idleWatch: { started: true, pid: 555 } });
+  assert.equal(
+    systemTexts(watched.events)[0],
+    `kimi-web backend: the worker serve on port ${port} was not running; started it (pid 781; the lane declares serveWorkspaceDir); an idle watcher (pid 555) will ask it to exit after 30 idle minutes; answering after 1 s`,
+  );
+  const unwatched = await runWith("session_0075j", { serveWorkspaceDir: ws }, { started: true, pid: 782, waitedMs: 800, answer: "ok", idleWatch: { started: false, reason: "spawn_failed" } });
+  assert.match(systemTexts(unwatched.events)[0], /; the idle watcher could not be started — the serve keeps running until stopped by hand; answering after 1 s$/);
+  // 等待者/被挤走的说明不带看护句（看护归属拉起者）。
+  assert.ok(!systemTexts(waited.events)[0].includes("idle watcher"));
+  assert.ok(!systemTexts(displaced.events)[0].includes("idle watcher"));
 
   // 形状：绝对路径、首尾不带空白——registry 与 backend 同一判据；归一化保留该字段。
   const shapeBackend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });

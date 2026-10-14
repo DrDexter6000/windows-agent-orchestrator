@@ -20,7 +20,12 @@
 //   budget                      — run.state_change reason:budget_exceeded
 //   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
 //   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
-//   provider_disconnect         — worker 活跃工作后静默≥120s exit≠0（provider 流式中断，非真崩）
+//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据两条：
+//                                 ① worker 活跃工作后静默≥120s 且 exit≠0；
+//                                 ② zcode 静默收口文案（silent_timeout/zero_part/
+//                                   stalled 三道门）——zcode backend 在静默到点后有界
+//                                   收口；收口本身不带上游原因，额度用尽、限流与
+//                                   网络中断在转录内无法区分
 //   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
 //   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
 //   aborted_manual              — run.aborted 事件
@@ -213,7 +218,10 @@ function classifyProviderAuthCode(error) {
 // 真正的认证失败：HTTP 401 / 身份验证失败 / unauthorized / 无效 key。
 // C2 收紧：去掉宽泛的 "auth.*fail"/裸 "api_key"（会把配置冲突误判为 provider_auth）。
 // 真实 401 样本含 "401"/"unauthorized"/"身份验证失败"；配置冲突含 "precedence"/"connectors"。
-const AUTH_SIGNAL = /401|身份验证|unauthor|invalid.{0,12}(api[_\s-]?key|key)/i;
+// 401 只匹配独立数字（\b401\b，写法同 RATE_LIMIT_SIGNAL 的 429 边界）：zcode 静默收口
+// 文案里的毫秒读数（如 "silent stretch 401872ms"、"max recovered gap this turn
+// 14010ms"）与 kimi 信封码 40401 都不得判成认证失败。
+const AUTH_SIGNAL = /\b401\b|身份验证|unauthor|invalid.{0,12}(api[_\s-]?key|key)/i;
 
 // 配置冲突（C2 新增）：API key 与 claude.ai 登录打架等配置层问题。
 // 真实例："connectors are disabled because ANTHROPIC_API_KEY...takes precedence"。
@@ -259,6 +267,24 @@ const SIGNAL_NAMES = { 143: "SIGTERM", 137: "SIGKILL", 130: "SIGINT" };
 // 死前≥3 条 run.event（排除启动即崩）+ 末段静默≥120s（排除活动密集的真崩）。
 const PROVIDER_DISCONNECT_MIN_EVENTS = 3;
 const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
+
+// zcode 静默收口文案 → provider_disconnect。zcode 车道上游额度窗口用尽时模型流停下来，
+// 收口本身不带上游原因（zcode 自己的事件流 session/events 里有 model.request.status，
+// backend 不读，见台账 TD-291）；backend 在静默到点后有界收口，run.error(phase:wait)
+// 的文案由控制面自己写、以三道门之一开头
+//（src/backends/zcode.js closeGate 文案）。锚定前缀 = 只匹配这三道门的原文案，
+// 不匹配恰好引用这些句子的其它错误；gate 名沿用 backend 的 closeGate 闭集。
+const SILENT_CLOSEOUT_GATES = Object.freeze([
+  { gate: "silent_timeout", re: /^silent timeout: no turn parts observed within / },
+  { gate: "zero_part", re: /^zcode thinking budget exceeded \(no turn parts observed for / },
+  { gate: "stalled", re: /^zcode turn stalled \(/ },
+]);
+// 静态门名事实（闭集映射，无原文回显）。
+const SILENT_CLOSEOUT_GATE_FACTS = Object.freeze({
+  silent_timeout: "silent_timeout 门：silentTimeout 到点仍零 turn part",
+  zero_part: "zero_part 门：零 part 阶段思考预算拍数用尽（silentTimeout 缺席）",
+  stalled: "stalled 门：已有产出后的停滞预算到点",
+});
 
 /**
  * 诊断一个 run transcript 的失败原因。只给证据，不给处方。
@@ -602,9 +628,38 @@ function diagnoseFailureInner(events, expectedRunId) {
     }
   }
 
-  // 4.6) provider_disconnect：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0 →
-  //      provider 网关流式中断（非 runtime 真崩）。判据保守（Lead 定：静默阈值
-  //      120s、死前≥3 run.event、宁漏贴勿误贴）。
+  // 4.6) provider_disconnect：provider 侧流中断（非 runtime 真崩）。两条判据：
+  //      ① zcode 静默收口文案——上游额度窗口用尽时模型流停下来，backend 有界
+  //      收口（三道门之一），收口本身不带上游原因。这类 run 此前落
+  //      no_effect/crash，且文案里的毫秒读数曾把 AUTH_SIGNAL 的裸 401 误触发成
+  //      provider_auth（已改 \b401\b）。排序：真认证/配置冲突/额度规则之后
+  //      （上游真给了错误文本的仍按那些规则判），no_effect/crash 之前。证据只给
+  //      事实——哪一道门收的口、上游没发错误或额度信号、额度用尽/限流/网络中断
+  //      在转录内无法区分；不给处方、不回显原文。
+  if (state === "failed") {
+    const closeoutError = evs.find(
+      (e) => e.type === "run.error" && typeof e.error === "string"
+        && SILENT_CLOSEOUT_GATES.some((g) => g.re.test(e.error)),
+    );
+    if (closeoutError) {
+      const gate = SILENT_CLOSEOUT_GATES.find((g) => g.re.test(closeoutError.error));
+      // "无生命体征"只在收口文案自己带着取样结论时才写：进程活动取样不可用时，零 part 两道
+      // 门的文案不带这一句。
+      const silence = /no vital signs/.test(closeoutError.error) ? "无生命体征的静默后" : "静默到点后";
+      evidence.push({
+        eventType: "run.error",
+        fact: `zcode 有界收口（${SILENT_CLOSEOUT_GATE_FACTS[gate.gate]}）：${silence}由控制面收口，run 以 failed 终态`,
+      });
+      evidence.push({
+        eventType: "run.error",
+        fact: "静默收口本身不带上游原因——额度窗口用尽、限流与网络中断在本转录内无法区分（provider 流中断）",
+      });
+      return { category: "provider_disconnect", evidence };
+    }
+  }
+
+  //      ② TD-74 严格签名：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0。
+  //      判据保守（Lead 定：静默阈值 120s、死前≥3 run.event、宁漏贴勿误贴）。
   //      M9-5P 修复：此严格签名必须优先于通用 no_effect——否则一个同时满足
   //      "有活动无产出"（no_effect）和 "≥3 events + ≥120s 静默 + exit crash"
   //      （provider_disconnect）的 run 会被 no_effect 抢先误判。真实样本

@@ -210,6 +210,9 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
         ? "unmatched_reason_unspecified" : null,
       // 就绪轴：探测权威只吃 registry 有效条目（未接线/无效=无探测行）
       readyState: wiredForAxes ? (readyMap.get(id)?.readyState ?? null) : null,
+      // 决定 0074：kimiHome 车道就绪按 token 文件推导——就绪输入事实点名路径
+      //（人读面与 --json 同源；未接线/无效/非 kimiHome 车道=null）。
+      readyTokenFile: wiredForAxes ? (readyMap.get(id)?.requiresTokenFile ?? null) : null,
     });
   }
 

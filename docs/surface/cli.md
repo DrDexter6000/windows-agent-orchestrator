@@ -16,9 +16,9 @@ Commands:
   serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（TD-250/决定 0056，零副作用）
   serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删；跨 serve 生效——会话仓实例间共享）
   runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # TD-254/决定 0058：显式放弃一条交付线系——枚举成员+门+写 run.lineage_closed+按门释放保留 worktree（分支永不删；closed≠released 重入=补偿重试；默认 dry-run）
-  serve recycle --workspace-dir <dir> [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：WAO active 门+会话集合 soak 双门 → 优雅 shutdown 全量拆荚 → 显式 env 重启（WAO_IN_WORKER=1 命令组装）
+  serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：WAO active 门+会话集合 soak 双门 → 优雅 shutdown 全量拆荚 → 显式 env 重启（WAO_IN_WORKER=1 命令组装）→ 端口核对+空闲看护；--workspace-dir 缺省取车道声明的 serveWorkspaceDir，车道没声明才必填
   registry list --registry config/agents.json
-  registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
+  registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only; other lanes: readiness via 'wao lanes', environment via 'wao doctor'
   registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
   run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]

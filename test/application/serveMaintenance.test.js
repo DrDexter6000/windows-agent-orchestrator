@@ -649,3 +649,154 @@ test("serve 0074: 车道声明 kimiHome → 维护命令用该主目录的 serve
     rm(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 空闲看护与端口核对（决定 0079）=====
+
+test("recycle 端口核对: 重启的子进程被挤到别的端口 → 请它优雅退出，ready:false、displaced 如实带回，不配看护", async () => {
+  const lockRootDir = mkdtempSync(join(tmpdir(), "wao-rec-disp-"));
+  const roots = [lockRootDir];
+  try {
+    const env = makeRecycleEnv(roots);
+    // 会话面脚本：soak 前后两帧 ok；就绪轮询期间目标端口无人监听（连不上）。
+    const ops = recycleOps({
+      sessionsScript: [
+        { ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] },
+        { ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] },
+        { ok: false, reason: "connection_refused" },
+      ],
+    });
+    // 实例表：杀之前看 old；shutdown 之后（重启窗口起）只看被挤到 58629 的子进程。
+    let phase = 0;
+    ops.readServeInstances = () => (phase === 0 ? [{ serverId: "old", pid: 111, port: 58628 }] : [{ serverId: "dup", pid: 4242, port: 58629 }]);
+    const origShutdown = ops.shutdownServe;
+    const shutdowns = [];
+    ops.shutdownServe = async (args) => { phase = 1; shutdowns.push(args); return origShutdown(args); };
+    const watchCalls = [];
+    const result = await recycleServe({
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...env,
+      runDir: join(tmpdir(), "wao-rec-disp-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1,
+      ops, listRunsFn: async () => ({ runs: [] }),
+      sleepFn: async () => {},
+      fetchImpl: async () => { throw new Error("connection refused = port down"); },
+      spawnFn: () => ({ pid: 4242, unref() {} }),
+      startWatchFn: (args) => { watchCalls.push(args); return { started: true, pid: 9 }; },
+    });
+    assert.equal(result.recycled, true);
+    assert.equal(result.ready, false, "被挤走 = 未就绪（CLI 非零退出）");
+    assert.deepEqual(result.displaced, { pid: 4242, port: 58629, shutdown: "requested" });
+    assert.equal(shutdowns.length, 2, "旧 serve 一次（关停）+ 多拉的那个一次（请走）");
+    assert.equal(shutdowns[1].baseUrl, "http://127.0.0.1:58629", "请走打的是它实际所在的端口");
+    assert.equal(watchCalls.length, 0, "被挤走的不配看护");
+    assert.equal(result.newPid, null, "目标端口上没有新实例");
+  } finally { for (const d of roots) cleanupDir(d); }
+});
+
+test("recycle 空闲看护: 就绪后为新 serve 的 pid 启动看护（参数如实、结果进返回值）；看护起不来不影响 recycle 结果", async () => {
+  const makeReadyEnv = () => {
+    const lockRootDir = mkdtempSync(join(tmpdir(), "wao-rec-watch-"));
+    const env = makeRecycleEnv([lockRootDir]);
+    const ops = recycleOps({
+      sessionsScript: [{ ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] }],
+    });
+    // 杀前看 old（pid 111）；shutdown 之后看 new（pid 222）——与成功路径用例同一时序形状。
+    let phase = 0;
+    ops.readServeInstances = () => (phase === 0 ? [{ serverId: "old", pid: 111, port: 58628 }] : [{ serverId: "new", pid: 222, port: 58628 }]);
+    const origShutdown = ops.shutdownServe;
+    ops.shutdownServe = async (...a) => { phase = 1; return origShutdown(...a); };
+    return {
+      base: {
+        port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...env,
+        runDir: join(tmpdir(), "wao-rec-watch-rundir"), kimiAgentIds: ["kimi"],
+        lockRootDir, soakMs: 1, ops,
+        listRunsFn: async () => ({ runs: [] }),
+        sleepFn: async () => {},
+        fetchImpl: async () => { throw new Error("connection refused = port down"); },
+        spawnFn: () => ({ pid: 222, unref() {} }),
+        execFileFn: () => { throw new Error("graceful path must not taskkill"); },
+      },
+      lockRootDir,
+    };
+  };
+  const cleanups = [];
+  try {
+    // 起来了：参数 = 目标端口 + 新实例 pid + 主目录；结果进返回值。
+    const a = makeReadyEnv(); cleanups.push(a.lockRootDir);
+    const watchCalls = [];
+    const r = await recycleServe({ ...a.base, kimiHome: a.lockRootDir, startWatchFn: (args) => { watchCalls.push(args); return { started: true, pid: 31337 }; } });
+    assert.equal(r.ready, true);
+    assert.equal(r.newPid, 222);
+    assert.deepEqual(watchCalls, [{ port: 58628, pid: 222, kimiHome: a.lockRootDir }]);
+    assert.deepEqual(r.idleWatch, { started: true, pid: 31337 });
+
+    // 起不来（抛错）：recycle 结果不受影响，失败结果如实带回。
+    const b = makeReadyEnv(); cleanups.push(b.lockRootDir);
+    const r2 = await recycleServe({ ...b.base, startWatchFn: () => { throw new Error("boom"); } });
+    assert.equal(r2.recycled, true);
+    assert.equal(r2.ready, true);
+    assert.deepEqual(r2.idleWatch, { started: false, reason: "start_failed" });
+  } finally { for (const d of cleanups) cleanupDir(d); }
+});
+
+test("serve recycle 缺省: resolveServeTarget 带出车道的 serveWorkspaceDir（没声明 → undefined）；两者都没有时服务层仍以 workspace_dir_required 拒绝", async () => {
+  const { resolveServeTarget } = await import("../../src/commands/serve.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-serve-wsdef-"));
+  const envName = "WAO_TEST_KIMI_TOKEN_WSDEF";
+  const saved = process.env[envName];
+  try {
+    const ws = process.platform === "win32" ? "D:/wao-serve-ws" : "/wao-serve-ws";
+    const lane = { backend: "kimi-web", cwd: ".", serveUrl: "http://127.0.0.1:58628", tokenEnv: envName, model: { id: "kimi-code/k3-256k" } };
+    const withWs = join(dir, "with-ws.json");
+    const withoutWs = join(dir, "without-ws.json");
+    writeFileSync(withWs, JSON.stringify({ agents: { kimi: { ...lane, serveWorkspaceDir: ws } } }), "utf8");
+    writeFileSync(withoutWs, JSON.stringify({ agents: { kimi: lane } }), "utf8");
+    process.env[envName] = "wsdef-token";
+
+    const t1 = await resolveServeTarget({ registry: withWs });
+    assert.equal(t1.serveWorkspaceDir, ws, "声明了 → 带出（命令层用作 --workspace-dir 缺省）");
+    assert.equal(t1.serveUrl, "http://127.0.0.1:58628");
+    const t2 = await resolveServeTarget({ registry: withoutWs });
+    assert.equal(t2.serveWorkspaceDir, undefined, "没声明 → undefined（不虚构）");
+
+    // 服务层：显式与车道缺省都没有 → 重启 cwd 没有隐藏默认，结构化拒绝（零副作用）。
+    const lockRootDir = mkdtempSync(join(tmpdir(), "wao-serve-wsdef-lock-"));
+    try {
+      const r = await recycleServe({
+        port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t",
+        workspaceDir: undefined, kimiExe: "kimi",
+        runDir: join(dir, "fake-rundir"), kimiAgentIds: [], lockRootDir,
+      });
+      assert.deepEqual(r, { refused: "workspace_dir_required" });
+    } finally { cleanupDir(lockRootDir); }
+  } finally {
+    if (saved === undefined) delete process.env[envName]; else process.env[envName] = saved;
+    cleanupDir(dir);
+  }
+});
+
+test("recycle 空闲看护: 端口上的实例不是本次重启的子进程 → 不配看护，结果写 not_own_child（会审 sol Q3）", async () => {
+  const lockRootDir = mkdtempSync(join(tmpdir(), "wao-rec-owner-"));
+  try {
+    const env = makeRecycleEnv([lockRootDir]);
+    const ops = recycleOps({
+      sessionsScript: [{ ok: true, items: [{ id: "s1", busy: false, mainTurnActive: false }] }],
+    });
+    // 杀前看 old（pid 111）；之后端口上是 pid 222 的实例，而本次拉起的子进程是 pid 333。
+    let phase = 0;
+    ops.readServeInstances = () => (phase === 0 ? [{ serverId: "old", pid: 111, port: 58628 }] : [{ serverId: "other", pid: 222, port: 58628 }]);
+    const origShutdown = ops.shutdownServe;
+    ops.shutdownServe = async (...a) => { phase = 1; return origShutdown(...a); };
+    const watchCalls = [];
+    const r = await recycleServe({
+      port: 58628, serveUrl: "http://127.0.0.1:58628", token: "t", ...env,
+      runDir: join(tmpdir(), "wao-rec-owner-rundir"), kimiAgentIds: ["kimi"], lockRootDir, soakMs: 1, ops,
+      listRunsFn: async () => ({ runs: [] }),
+      sleepFn: async () => {},
+      fetchImpl: async () => { throw new Error("connection refused = port down"); },
+      spawnFn: () => ({ pid: 333, unref() {} }),
+      execFileFn: () => { throw new Error("graceful path must not taskkill"); },
+      startWatchFn: (args) => { watchCalls.push(args); return { started: true, pid: 9 }; },
+    });
+    assert.equal(watchCalls.length, 0, "看护只给本次拉起的子进程");
+    assert.deepEqual(r.idleWatch, { started: false, reason: "not_own_child" });
+  } finally { cleanupDir(lockRootDir); }
+});

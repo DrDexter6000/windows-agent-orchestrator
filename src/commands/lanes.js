@@ -25,7 +25,7 @@ import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth } from "../application/onboarding.js";
 import { buildLanesView, readLaneTraits } from "../application/lanesView.js";
-import { probeCliOnPath, probeKeyEnvSource } from "./onboarding.js";
+import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 
 function parseOptions(args) {
   const options = { json: false, registry: undefined, lanesFile: undefined, runDir: undefined };
@@ -97,6 +97,10 @@ function renderLane(row, width) {
       lines.push(`  certification: ${row.certification}${row.certificationLastHealthyAt ? `（lastHealthy ${row.certificationLastHealthyAt}）` : ""}`);
     }
     lines.push(`  readyState: ${row.readyState ?? "—（无探测行）"}`);
+    // 决定 0074：kimiHome 车道就绪按 token 文件推导——人读面点名路径（去哪看）。
+    if (row.readyTokenFile) {
+      lines.push(`  credential: token 文件 ${row.readyTokenFile}（kimiHome 车道凭据=server.token；缺失或为空=未就绪；doctor 同查此文件）`);
+    }
   }
   return lines;
 }
@@ -142,7 +146,7 @@ export async function lanesCommand(args, config) {
     .map((a) => ({ id: a.id, backend: a.backend, model: null }));
   const ready = await buildRecommendations(
     candidates, { agents: rawAgents },
-    { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource },
+    { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
     { source: "configured", sortReadyFirst: false },
   );
 

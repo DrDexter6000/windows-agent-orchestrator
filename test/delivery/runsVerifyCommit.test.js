@@ -11,10 +11,15 @@
 //
 // 真实面：本文件建真实 scratch git 仓（init+commits）+ 真实 JsonlTranscript 转录
 // + 真实 runVerificationCommand 执行（shell 边界）+ 真实 worktree add/remove。
-// scratch 依任务书纪律建在本 worktree 的 .wao/runs/ 下；因该路径含 .wao-worktrees
-// 组件（本仓交付 worktree 自身所在），happy 路径置 WAO_ALLOW_NESTED_DISPATCH=1
-// ——这正是 0047 文档化的"Lead 显式豁免（worktree 内合法测试场景）"；反例测试
-// 分别证无豁免时 env-marker / worktree-cwd 双通道拒绝。WAO_VERIFICATION_GATE=off
+// scratch 根建在 os.tmpdir() 的 mkdtemp 下（2026-10-14 起，W1 卫生：原建在本仓
+// .wao/runs/verify-commit-tests，主检出跑测试会在仓库里留目录）；`runs
+// verify-commit` 服务对 scratch 位置无要求（runDir/repo 路径全显式传入；唯一
+// 位置规则是服务内部的临时 worktree 恒建在 <repo>/.wao-worktrees/ 下〔严禁
+// os.tmpdir()——靠向上解析 node_modules〕，与本处 scratch 根无关）。happy 路径
+// 置 WAO_ALLOW_NESTED_DISPATCH=1——服务对 process.cwd() 与 invocationCwd 双通道
+// 探测 worker 语境，套件从交付 worktree 内跑时 process.cwd() 含 .wao-worktrees
+// 组件，这正是 0047 文档化的"Lead 显式豁免（worktree 内合法测试场景）"；反例
+// 测试分别证无豁免时 env-marker / worktree-cwd 双通道拒绝。WAO_VERIFICATION_GATE=off
 // 关掉机器租约（单测不入 T3/verifier 串行闸——kill switch 文档化机制）。
 
 import { test } from "node:test";
@@ -24,7 +29,7 @@ import {
   readFileSync, readdirSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 
@@ -42,9 +47,8 @@ import { nestedDispatchContext } from "../../src/nestedDispatchGuard.js";
 import { projectRunActivity } from "../../src/application/runActivityProjection.js";
 import { runsCommand, RUNS_SUBCOMMANDS } from "../../src/commands/runs.js";
 
-// ===== scratch 纪律：本 worktree 的 .wao/runs/ 下 =====
-const SCRATCH_ROOT = join(resolve(process.cwd()), ".wao", "runs", "verify-commit-tests");
-mkdirSync(SCRATCH_ROOT, { recursive: true });
+// ===== scratch 纪律：os.tmpdir() 下的 mkdtemp 临时根（见文件头） =====
+const SCRATCH_ROOT = mkdtempSync(join(tmpdir(), "wao-vc-tests-"));
 
 function makeScratch(prefix) {
   return mkdtempSync(join(SCRATCH_ROOT, prefix));
@@ -1246,4 +1250,11 @@ test("TD-240 CLI：SIGINT 注册/注销 + interrupt 透传（mock）", async () 
     process.exitCode = savedExitCode;
     cleanupDir(scratch);
   }
+});
+
+test("scratch 根清理：os.tmpdir() 临时根用后即清（W1——测试不在仓库 .wao/runs/ 留目录）", () => {
+  cleanupDir(SCRATCH_ROOT);
+  assert.ok(!existsSync(SCRATCH_ROOT), "SCRATCH_ROOT（tmpdir 下 mkdtemp）必须被清理");
+  assert.ok(!existsSync(join(process.cwd(), ".wao", "runs", "verify-commit-tests")),
+    "仓库内不得再出现 .wao/runs/verify-commit-tests（原 scratch 根位置）");
 });

@@ -590,8 +590,10 @@ export class ZcodeBackend {
   // 时刻即上游原生 sess_ id（无 proc_<pid> 占位中间态，ACP 同款形状）。
   supportsSessionReuse = true;
 
-  // 在途纠偏：协议未见在途注入原语（bundle 方法表未见证 steer 类方法）——如实
-  // 声明 false，不静默。翻转条件 = 上游出现 steer/queue 类方法且有 live 证据。
+  // 在途纠偏：bundle 的运行时有 steer 队列（turn.steerQueued / turn.steerDrained 事件），
+  // 但 app-server 协议不开放——活动轮里再发 session/send 返回 -32010 "A prompt is
+  // already running for this session"（GLM-5.3-Flash 真机），协议方法表里也没有注入
+  // 活动轮的方法。如实声明 false。翻转条件 = 协议出现注入活动轮的方法且有 live 证据。
   supportsInFlightCorrection = false;
 
   // fresh 派发 = 新会话 + 原 prompt 重放；跨 run 上下文续接走会话复用 lane。

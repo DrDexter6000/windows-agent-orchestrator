@@ -30,7 +30,9 @@ import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth, MAX_CANDIDATES } 
 import * as hostDescriptors from "../hostAdapters/hostDescriptors.js";
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
 // User scope) — no second registry read or env-name policy here.
-import { resolveCredentialEnv } from "../application/credentialReadiness.js";
+// 决定 0074：kimiHome 车道的 token 文件探测同样复用 credentialReadiness 的单一
+// 判定（registry_list 取值 / doctor 体检 / 派发侧拒绝同源）。
+import { resolveCredentialEnv, kimiHomeTokenFileState } from "../application/credentialReadiness.js";
 // R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
 import { familyLabel } from "../application/modelFamily.js";
 
@@ -74,6 +76,13 @@ export async function probeCliOnPath(name) {
 export async function probeKeyEnvSource(name) {
   const r = await resolveCredentialEnv(name);
   return r.source; // "process_env" | "user_env" | "missing"
+}
+
+// 0064/决定 0074：kimiHome 车道的 token 文件探测（wao lanes 复用同一份——探测
+// 实现共享导出，不复制第二套）。判定单一实现 credentialReadiness.kimiHomeTokenFileState；
+// 只报 present/missing，绝不回显文件内容。
+export async function probeKimiTokenFile(tokenFile) {
+  return kimiHomeTokenFileState(tokenFile);
 }
 
 // The trusted WAO installation root = where THIS command lives, three levels up
@@ -132,7 +141,8 @@ export async function onboardingCommand(args, config) {
     privateRegistryPath: targetRegistryPath,
     fs: { readFile, writeFile, rename, existsSync, unlink, mkdir },
     // R6-C: production environment probe (injected; the service stays pure).
-    probeEnv: { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource },
+    // 决定 0074：kimiHome 车道就绪按 token 文件推导（同一探测实现）。
+    probeEnv: { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
   });
 
   if (json) {

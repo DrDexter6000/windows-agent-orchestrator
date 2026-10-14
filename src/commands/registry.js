@@ -101,7 +101,11 @@ async function registryCheckCommand(args, config) {
   }
   // TD-86（D2 A1）：--format json 输出 {allOk, agents:[{id,status,serveUrl?,error?}]}。
   // 字段全部来自既有计算结果（healthCheck 返回 + agent 配置），exit code 契约不变。
+  // 非 opencode-serve 车道的 skip 原因是本命令的探测范围（只探 opencode-serve
+  // 健康），不是 WAO 不认识该 backend——固定文案指路 wao lanes（车道就绪）与
+  // wao doctor（环境），text/JSON 同值；字段名不变。
   const asJson = options.format === "json";
+  const SKIP_NOT_PROBED = "registry check probes opencode-serve health only; for lane readiness see 'wao lanes', for environment see 'wao doctor'";
   let allOk = true;
   const results = [];
   for (const agent of agents) {
@@ -118,9 +122,8 @@ async function registryCheckCommand(args, config) {
         allOk = false;
       }
     } else {
-      const error = `unknown backend: ${agent.backend}`;
-      results.push({ id: agent.id, status: "skip", error });
-      if (!asJson) console.log(`${agent.id}\tSKIP\t${error}`);
+      results.push({ id: agent.id, status: "skip", error: SKIP_NOT_PROBED });
+      if (!asJson) console.log(`${agent.id}\tSKIP\t${SKIP_NOT_PROBED}`);
     }
   }
   if (asJson) {
