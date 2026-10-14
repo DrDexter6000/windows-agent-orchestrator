@@ -214,7 +214,7 @@ test("TD-261b: 重启全候选 ENOENT → 结构化失败+台账+锁释放（绝
     assert.equal(r.reason, "kimi_spawn_failed");
     assert.equal(r.errorCode, "ENOENT");
     assert.ok(Array.isArray(r.triedCandidates) && r.triedCandidates.length >= 1);
-    assert.match(r.manualRecipe, /usage\.md TD-250/);
+    assert.match(r.manualRecipe, /docs\/usage\/lanes\.md「kimi 车道的 worker serve」/);
     assert.match(r.note, /no_instance/, "善后态说明：重跑救不回、走手动配方（opus 条款）");
     const ledger = readFileSync(join(serveMaintenanceDir(lockRoot), "recycle-ledger.jsonl"), "utf8").trim().split("\n");
     assert.equal(JSON.parse(ledger[ledger.length - 1]).event, "restart_failed");

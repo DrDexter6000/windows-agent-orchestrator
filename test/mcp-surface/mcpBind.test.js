@@ -19,6 +19,7 @@ import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { readUsageDocs } from "../_usageDocs.mjs";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -1034,8 +1035,7 @@ test("P0-1R-SCOPE-02: config symlink cannot redirect activation outside workspac
 });
 
 test("ARCH-03: no 'node ...wao-cli.cmd' in docs or generated content", async () => {
-  const usagePath = join(dirname(fileURLToPath(import.meta.url)), "../..", "docs", "usage.md");
-  const usageSrc = readFileSync(usagePath, "utf8");
+  const usageSrc = readUsageDocs(join(dirname(fileURLToPath(import.meta.url)), "../.."));
   assert.ok(!/node\s+.*wao-cli\.cmd/.test(usageSrc));
   // 2026-09-26 认证正文迁移：smoke/reliability/prune 命令正文迁至认证 runbook，
   // 错误 Node 命令形式检查同时覆盖迁出的命令正文所在文件。

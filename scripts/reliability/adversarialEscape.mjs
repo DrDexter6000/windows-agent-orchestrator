@@ -13,7 +13,7 @@
 //     run.error{phase:"isolation", code:"workdir_escape"}，且 run 终态 failed。
 //   - 逃逸未被拦（文件真写出来、run 正常 completed、无 violation 事实）→ 红。
 //     这是防假阳性的核心：没有拦截证据就不得宣称拦截能力。
-//   - 越界文件是否落盘**不进 PASS 判定**：拦截是侦测机制不是 OS 沙箱（usage.md
+//   - 越界文件是否落盘**不进 PASS 判定**：拦截是侦测机制不是 OS 沙箱（docs/usage/dispatch.md
 //     R4 诚实上限三句）——write_intent 路径拦截先于写、file_written 路径是事后
 //     证据，文件可能已存在。落盘事实只进 detail（透明）。
 //

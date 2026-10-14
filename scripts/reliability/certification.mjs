@@ -37,7 +37,7 @@ const STATUS_SEVERITY = {
 // ADR-0025 §5（批次 3）：certificationScope 派生——case 走 delta 规程 ⇔
 // profile 显式 "delta" 且该 case 的 drills ⊆ DELTA_DRILLS 子集（TD-133(c) 根修，
 // R23-C：profile:"delta" 不再短路——显式 drills 超出子集的行按 full 记，与
-// docs/usage.md「delta 认证规程」的"按实际覆盖派生"措辞对齐；drills 缺失的
+// docs/certification-runbook.md「delta 认证规程」的"按实际覆盖派生"措辞对齐；drills 缺失的
 // legacy 形状视为未超出），或（无 profile 的手写/legacy case）drill 覆盖未超出
 // delta 子集且含越界写对抗。scope 是磁盘 summary 的事实字段，只活在 summary +
 // 文档层：不动 CERTIFICATION_STATUSES 闭集、不进 CLI/MCP inventory 投影

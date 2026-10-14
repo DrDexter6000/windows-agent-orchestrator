@@ -5333,10 +5333,10 @@ test("TD-137④ candidateInventory 投影：目录契约下的界内/越界分�
     "尾斜杠契约在读侧仍非法（写路径已归一化，此为防御性钉子）");
 });
 
-test("TD-137③ runId UTC 说明双通道在场：usage.md 正文 + HELP_TEXT（再生 cli.md 同步）", async () => {
+test("TD-137③ runId UTC 说明双通道在场：使用手册派发页正文 + HELP_TEXT（再生 cli.md 同步）", async () => {
   const sentence = "runId 内嵌时间戳为 UTC；本地时间需自行换算";
-  const usage = readFileSync(resolve(import.meta.dirname, "../../docs/usage.md"), "utf8");
-  assert.ok(usage.includes(sentence), "usage.md 在 runId 首现附近补 UTC 说明");
+  const usage = readFileSync(resolve(import.meta.dirname, "../../docs/usage/dispatch.md"), "utf8");
+  assert.ok(usage.includes(sentence), "docs/usage/dispatch.md 在 runId 首现附近补 UTC 说明");
   const cliMd = readFileSync(resolve(import.meta.dirname, "../../docs/surface/cli.md"), "utf8");
   assert.ok(cliMd.includes(sentence), "cli.md 由 gen:surface 从 HELP_TEXT 再生，同步携带");
 });

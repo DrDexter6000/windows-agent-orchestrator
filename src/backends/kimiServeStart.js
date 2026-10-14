@@ -291,7 +291,7 @@ function isLoopbackUrl(serveUrl) {
 function startError(reason) {
   return new Error(
     `kimi-web backend: the worker serve is not running and could not be started (${reason}) `
-    + "— check the lane's serveWorkspaceDir / kimiHome, or start it by hand (docs/usage.md, kimi worker serve recipe)",
+    + "— check the lane's serveWorkspaceDir / kimiHome, or start it by hand (docs/usage/lanes.md, kimi worker serve)",
   );
 }
 

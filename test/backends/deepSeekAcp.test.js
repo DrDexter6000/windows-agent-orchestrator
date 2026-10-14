@@ -600,7 +600,7 @@ test("ACP 0073: 沙箱在工作目录上建不起来（grantWrite 被拒）→ �
   const text = notes[0].parts[0].text;
   assert.ok(text.includes("does not own the workspace directory or lacks full control of it"), "给出 harness 文档里的常见原因");
   assert.ok(text.includes("env DSH_PERMISSION_MODE=danger-full-access"), "给出车道级修法（决定 0074）");
-  assert.ok(text.includes("docs/usage.md, deepseek lane prerequisites"), "指到说明（含保留沙箱的做法）");
+  assert.ok(text.includes("docs/usage/lanes.md, deepseek lane prerequisites"), "指到说明（含保留沙箱的做法）");
   assert.ok(!text.includes("D:\\projects"), "固定文案，不带路径");
   // 提示排在触发它的那条结果之后；命令与结果照常落。
   const kinds = events.filter((e) => ["command", "tool_result", "message"].includes(e.kind) && (e.kind !== "message" || notes.includes(e)))

@@ -495,8 +495,8 @@ test("M12-6-FR02-E1: docs state the truth contract (no authenticated/entitled/li
   assert.ok(runbook.includes("authenticationStatus"), "certification-runbook.md documents authenticationStatus");
   assert.ok(runbook.includes("liveCheckStatus"), "certification-runbook.md documents liveCheckStatus");
   assert.ok(runbook.includes("not_checked"), "certification-runbook.md documents the not_checked closed value");
-  const usage = readFileSync(join(process.cwd(), "docs", "usage.md"), "utf8");
-  assert.ok(usage.includes("subscription_access_disabled"), "usage.md documents the diagnosis code closed set");
+  const usage = readFileSync(join(process.cwd(), "docs", "usage", "results.md"), "utf8");
+  assert.ok(usage.includes("subscription_access_disabled"), "docs/usage/results.md documents the diagnosis code closed set");
   const arch = readFileSync(join(process.cwd(), "docs", "02-architecture.md"), "utf8");
   assert.ok(arch.includes("providerReadiness"), "architecture.md documents providerReadiness");
 });

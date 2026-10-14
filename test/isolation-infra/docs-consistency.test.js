@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 // TD-120 (2026-08-15): relationship guards derive counts from the code SSOT
 // instead of hardcoding drifting literals.
 import { TOOLS } from "../../src/mcp/toolSurface.js";
+import { readUsageDocs, usagePageFiles } from "../_usageDocs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -33,8 +34,11 @@ const ROOT = join(__dirname, "..", "..");
 const USAGE_DOC = "docs/usage.md";
 const CERT_RUNBOOK_DOC = "docs/certification-runbook.md";
 
-/** 读取仓库内文件（相对 ROOT 的路径），返回字符串。 */
+/** 读取仓库内文件（相对 ROOT 的路径），返回字符串。
+ * 使用手册（docs/usage.md）返回地图加 docs/usage/ 下的全部页：这些检查写于拆页之前，
+ * 逐条改为只读它保护的那一页，随各页改写进行（台账 TD-177）。 */
 function read(rel) {
+  if (rel === "docs/usage.md") return readUsageDocs(ROOT);
   return readFileSync(join(ROOT, rel), "utf8");
 }
 
@@ -299,7 +303,7 @@ test("transcript 事件 spec 与人读投影行集相等，SKILL.md 不维护第
   const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
   const archEvents = eventTableNames("docs/02-architecture.md", "### 3.2 事件类型清单", "###");
-  const usageEvents = eventTableNames("docs/usage.md", "## 三、transcript 格式", "##");
+  const usageEvents = eventTableNames("docs/usage/transcript.md", "# transcript 格式", "##");
   assert.ok(/投影自 `docs\/02-architecture\.md` §3\.2/.test(usage),
     "usage.md §三必须显式声明投影自 architecture §3.2");
   assert.equal(new Set(archEvents).size, archEvents.length, "architecture §3.2 不得有重复事件行");
@@ -348,10 +352,10 @@ test("R4 只读 run：usage.md 事件投影必须含 run.read_only_declared 正�
 // 本身由上方"两表行集相等"守卫覆盖（架构表 + usage 投影两侧同步）。
 test("TD-240: usage.md 采纳协议节钉 runs verify-commit 承载边界句", () => {
   const usage = read("docs/usage.md");
-  const heading = "### 验证失败采纳协议";
+  const heading = "## 验证失败采纳协议";
   const start = usage.indexOf(heading);
   assert.ok(start !== -1, "docs/usage.md 缺验证失败采纳协议节");
-  const nextSection = usage.indexOf("\n### ", start + 1);
+  const nextSection = usage.indexOf("\n## ", start + 1);
   const section = usage.slice(start, nextSection === -1 ? undefined : nextSection);
   assert.ok(
     section.includes("runs verify-commit"),
@@ -567,19 +571,12 @@ test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SS
     `docs/usage.md 必须按 runtime 默认值记录告警日志路径 \`${alertLog}\``);
 });
 
-test("活文档页首状态必须反映 M0-M10 当前能力（usage + architecture），不得停留在 M0-M9 或更早", () => {
+test("architecture 页首状态反映 M0-M10 当前能力，不得停留在 M0-M9 或更早；使用手册不把 daemon 写成 M5", () => {
   const usage = read("docs/usage.md");
-  const usageHead = usage.slice(0, 1200);
   const arch = read("docs/02-architecture.md");
   const archHead = arch.slice(0, 1200);
-  // 两个活文档页首都必须说明当前 M0-M10 能力
-  assert.ok(/M0.M10|M0–M10|M0-M10/.test(usageHead), "usage.md 顶部未说明当前 M0-M10 能力");
   assert.ok(/M0.M10|M0–M10|M0-M10/.test(archHead), "02-architecture.md 顶部未说明当前 M0-M10 能力");
-  // 两个活文档页首都不得继续把当前能力写成 M0-M9（或更早 M0-M4/M0-M6/M0-M8）
-  assert.ok(!/M0.M9|M0–M9|M0-M9/.test(usageHead), "usage.md 顶部仍自称 M0-M9 能力（应为 M0-M10）");
   assert.ok(!/M0.M9|M0–M9|M0-M9/.test(archHead), "02-architecture.md 顶部仍自称 M0-M9 能力（应为 M0-M10）");
-  assert.ok(!/M0.M4|M0–M4|M0-M4|M0.M6|M0–M6|M0-M6|M0.M8|M0–M8|M0-M8/.test(usageHead),
-    "usage.md 顶部仍停留在 M0-M4/M0-M6/M0-M8");
   assert.ok(!/M5 daemon/.test(usage), "usage.md 仍把 daemon 误写成 M5，roadmap 中 daemon 属 M7");
 });
 
@@ -876,7 +873,7 @@ test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
   const caps = {
     "docs/02-architecture.md": 133845, // baseline 121677
     "docs/roadmap.md": 119468,        // baseline 108607
-    "docs/usage.md": 259019,          // baseline 235471
+    "docs/usage.md": 259019,          // baseline 235471；地图加 docs/usage/ 全部页的合计
     // Owner 2026-10-12 许可提升上限（"允许文档提升上限"）：排障手册离 +10% 帽只剩
     // 1 字节，决定 0067 的两条排障条目加不进去——本条提到基线 +20%。其余三份未动。
     "docs/troubleshooting.md": 71377, // baseline 59481
@@ -884,6 +881,37 @@ test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
   for (const [rel, cap] of Object.entries(caps)) {
     const bytes = Buffer.byteLength(read(rel), "utf8");
     assert.ok(bytes <= cap, `${rel} 超过冻结 byte cap ${cap}（实际 ${bytes}）；先指针化/删重复，不得续堆正文`);
+  }
+});
+
+test("使用手册地图列出 docs/usage/ 下的每一页，列出的页都存在，每页开头指回地图", () => {
+  const map = readFileSync(join(ROOT, "docs/usage.md"), "utf8");
+  const listed = [...map.matchAll(/\]\(usage\/([a-z-]+\.md)\)/g)].map((m) => m[1]);
+  const pages = usagePageFiles(ROOT);
+  assert.ok(pages.length >= 2, "docs/usage/ 下应有按任务拆出的页");
+  assert.equal(new Set(listed).size, listed.length, "地图里同一页只列一次");
+  assert.deepEqual([...listed].sort(), pages, "地图列出的页与 docs/usage/ 下的文件必须一一对应");
+  for (const page of pages) {
+    const head = readFileSync(join(ROOT, "docs/usage", page), "utf8").split("\n").slice(0, 4).join("\n");
+    assert.match(head, /^# \S/, `docs/usage/${page} 第一行应是页标题`);
+    assert.ok(head.includes("](../usage.md)"), `docs/usage/${page} 开头应指回地图 docs/usage.md`);
+  }
+  // 页面在 docs/usage/ 下，相对链接按页面所在目录解析；代码块里的不算链接。代码块由
+  // ``` 或 ~~~ 开栏，只有同一字符、长度不短于开栏的那一行才收栏。
+  for (const rel of ["docs/usage.md", ...pages.map((page) => `docs/usage/${page}`)]) {
+    let fence = null;
+    for (const line of readFileSync(join(ROOT, rel), "utf8").split("\n")) {
+      const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
+      if (fence === null && marker) { fence = marker; continue; }
+      if (fence !== null) {
+        if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+        continue;
+      }
+      for (const [, target] of line.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+        if (/^(https?:|mailto:|#)/.test(target)) continue;
+        assert.ok(existsSync(join(ROOT, dirname(rel), target.split("#")[0])), `${rel} 的链接 ${target} 指向不存在的文件`);
+      }
+    }
   }
 });
 
@@ -2199,16 +2227,17 @@ test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路�
     assert.ok(existsSync(join(ROOT, p)), `SKILL.md 指针目标不存在：${p}`);
   }
   // 2) 带节标签的指针锚点必须能在目标文件中命中（防止节名漂移后指针变死链）。
-  const usage = read("docs/usage.md");
-  for (const anchor of ["场景 4b", "场景 4c", "§四"]) {
-    assert.ok(usage.includes(anchor), `docs/usage.md 缺 SKILL.md 指针所引的锚点：${anchor}`);
+  const usage = read("docs/usage/delivery.md");
+  for (const anchor of ["场景 4b", "场景 4c", "## MCP `run_delivery_reverify`", "## MCP `run_delivery_repackage`"]) {
+    assert.ok(usage.includes(anchor), `docs/usage/delivery.md 缺 SKILL.md 指针所引的锚点：${anchor}`);
   }
+  assert.ok(read("docs/usage/dispatch.md").includes("## MCP `run_dispatch`"), "docs/usage/dispatch.md 缺 SKILL.md 指针所引的 MCP run_dispatch 小节");
   // 3) 节级内容绑定（审计复核补强 2026-09-19）：SKILL 指针所指的小节必须真的
   // 承载所指内容——全文关键词命中不证明"节存在且内容在节内"。reverify 指针所指
   // 的 §四 run_delivery_reverify 小节必须携带资格闭集与环境原因闭集。
   const reverifySection = usage.slice(
-    usage.indexOf("### MCP `run_delivery_reverify`"),
-    usage.indexOf("### MCP `run_delivery_decide`"),
+    usage.indexOf("## MCP `run_delivery_reverify`"),
+    usage.indexOf("## MCP `run_delivery_decide`"),
   );
   assert.ok(reverifySection.length > 200, "§四 run_delivery_reverify 小节缺失或为空（SKILL reverify 指针死链）");
   for (const content of ["tooling_invalid", "environment_contaminated", "dependency_setup_missing", "artifact_mutated"]) {
@@ -2873,11 +2902,11 @@ export const USAGE_PANEL_ALLOWLIST = Object.freeze([
 test("ADR 0023 关系型守卫: usage.md panel 节 skip 码与 waoStage SSOT 一致（前向覆盖 + 反向对账）", async () => {
   const { PANEL_SKIP_REASONS } = await import("../../src/waoStage.js");
   const usage = read("docs/usage.md");
-  const heading = "### 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）";
+  const heading = "## 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）";
   const start = usage.indexOf(heading);
   assert.ok(start !== -1, "docs/usage.md 缺 wao stage panel 节（ADR 0023）");
   const rest = usage.slice(start + heading.length);
-  const next = rest.indexOf("\n### ");
+  const next = rest.indexOf("\n## ");
   const slice = next === -1 ? rest : rest.slice(0, next);
   // 前向：闭集每个成员都在节内（doc 覆盖 SSOT 全集）。
   for (const code of PANEL_SKIP_REASONS) {
@@ -3408,8 +3437,10 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
   // 本测试守的是**文档在场**，不是行为——两句都是规程条款（Lead 手动执行），无机器
   // 面强制；与 TD-138"强制力现状 = 文档，无机器面"同一诚实口径。文档被误删时这里红。
   const skill = read("SKILL.md");
-  assert.match(skill, /集成后的.*main.*全量.*终验/s,
-    "SKILL.md ## Acceptance 必须在场：并行会话交错集成后，在集成后的 main 上跑一次全量 npm test 终验，绿了才可收口（mainline 行以此为前置）");
+  assert.match(read("docs/testing.md"), /合入 main 前[^\n]*最终候选上跑一次全量/,
+    "docs/testing.md 必须写明：合入 main 前在最终候选上跑一次全量");
+  assert.match(skill, /最终候选[^\n]*上跑一次全量 `npm test`[^\n]*`docs\/testing\.md`/,
+    "SKILL.md ## Acceptance 必须在场：合入或集成前在最终候选上跑一次全量，并指向 docs/testing.md");
   assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
     "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 1200000（默认 300000 对约 14.5 分钟全量必 command_timeout；2026-08-20 实测 869s）");
 });
@@ -3439,10 +3470,10 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
   const enumWindow = archLines.slice(enumIdx, enumIdx + 3).join("\n");
   assert.ok(/ADR-?0028/.test(enumWindow),
     "02-architecture.md backend enum 行（紧邻处）缺 ADR-0028 指针");
-  // (4) usage.md 含「接入新模型」节标题（TD-161 接入食谱落点）。
+  // (4) 认证 runbook 含「接入新模型」节标题（TD-161 接入食谱落点）。
   assert.ok(
-    /^###+ .*接入新模型/m.test(read("docs/usage.md")),
-    "docs/usage.md 缺「接入新模型 / 新运行时」节标题（TD-161 接入食谱落点）",
+    /^##+ .*接入新模型/m.test(read("docs/certification-runbook.md")),
+    "docs/certification-runbook.md 缺「接入新模型 / 新运行时」节标题（TD-161 接入食谱落点）",
   );
   // (5) team-roles.md §Lane 节含 ADR-0028 指针（模型面 vs runtime 面分叉定义）。
   const roles = read("docs/team-roles.md");
@@ -3452,12 +3483,12 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
   assert.ok(/ADR-?0028/.test(roles.slice(laneStart, laneEnd)),
     "team-roles.md §Lane 节缺 ADR-0028 指针（接新模型=lane 内操作；接新 runtime=Owner 裁定）");
   // (6) AGENT_ONBOARDING.md 含接入节指针（§4c 选择表后）。F4 收紧：两个关键词必须
-  // 同行共现——分立 includes 时删掉指针行里的目标路径仍能靠别处出现的 docs/usage.md
+  // 同行共现——分立 includes 时删掉指针行里的目标路径仍能靠别处出现的同一路径
   // 假通过（auditor 变异验证实证）。
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(
-    /^.*接入新模型.*docs\/usage\.md.*$/m.test(ob),
-    "AGENT_ONBOARDING.md 缺接入节指针行（同一行须同时含「接入新模型」与 docs/usage.md）",
+    /^.*docs\/certification-runbook\.md.*接入新模型.*$/m.test(ob),
+    "AGENT_ONBOARDING.md 缺接入节指针行（同一行须同时含 docs/certification-runbook.md 与「接入新模型」）",
   );
 });
 
@@ -3555,10 +3586,10 @@ test("派发策略指针钉: 认证结果用于派发选择的边界节不得写
 // （MCP 名 ∈ toolSurface TOOLS；`runs <sub>` ∈ RUNS_SUBCOMMANDS 导出）。
 test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/清空/静默腐烂）", async () => {
   const usage = read("docs/usage.md");
-  const heading = "### MCP 工具名 ↔ CLI 命令速查";
+  const heading = "## MCP 工具名 ↔ CLI 命令速查";
   const start = usage.indexOf(heading);
   assert.ok(start !== -1, "docs/usage.md 缺 MCP↔CLI 映射表");
-  const nextSection = usage.indexOf("\n### ", start + 1);
+  const nextSection = usage.indexOf("\n#", start + 1);
   const section = usage.slice(start, nextSection === -1 ? undefined : nextSection);
   const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
   const { TOOLS } = await import("../../src/mcp/toolSurface.js");
@@ -3901,8 +3932,8 @@ test("认证迁移: usage 原位具名标题携带单向链接且目标节在 ru
     assertInPlaceCertPointer(usage, runbook, anchor);
   }
   // 场景 5 内的 retry 覆盖继承迁出段（非独立标题）：原位置必须以指针可达。
-  const s5Start = usage.indexOf("### 场景 5：重试 / 恢复");
-  const s5End = usage.indexOf("### 场景 6");
+  const s5Start = usage.indexOf("## 场景 5：重试 / 恢复");
+  const s5End = usage.indexOf("\n## ", s5Start + 1);
   assert.ok(s5Start !== -1 && s5End > s5Start, `${USAGE_DOC} 必须有场景 5（重试/恢复）节`);
   const s5 = usage.slice(s5Start, s5End);
   assert.ok(s5.includes(CERT_RUNBOOK_DOC),
@@ -3948,7 +3979,7 @@ test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 us
   assert.throws(() => assertInPlaceCertPointer(usage, renamed, "delta 认证规程"),
     /0 命中/, "runbook 目标节改名必须红（单向链接悬空）");
   // 负对照 3——usage 原位标题被删（历史引用落点失联）→ 必红。
-  const noHeading = usage.replace("### delta 认证规程（lane 架构，ADR-0025 批次 3）\n", "");
+  const noHeading = usage.replace("## delta 认证规程（lane 架构，ADR-0025 批次 3）\n", "");
   assert.notEqual(noHeading, usage, "夹具失效：删标题变异未生效");
   assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程"),
     /0 命中|歧义/, "usage 原位标题删除必须红（历史引用落点失联）");

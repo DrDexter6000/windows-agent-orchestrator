@@ -89,7 +89,7 @@ export const LIVENESS_SIGNAL_KINDS = Object.freeze([
  * 本地进程式 backend 闭集（由 KNOWN_BACKENDS SSOT 派生，不手抄）：除
  * opencode-serve（唯一 sessionOutlivesProcess=true 的 HTTP serve backend）外，
  * claude-code / codex / kimi-code / deepseek-harness 的 worker 生命周期 = 进程
- * 生命周期，进程退出即无会话残留（usage.md 派发章节同款口径）。
+ * 生命周期，进程退出即无会话残留（docs/usage/dispatch.md 同款口径）。
  */
 export const PROCESS_BACKEND_IDS = Object.freeze(
   KNOWN_BACKENDS.filter((b) => b !== "opencode-serve"),

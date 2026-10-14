@@ -889,7 +889,7 @@ packageDelivery success → transitionState(completed)
 验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），且 `gateEngaged()`
 收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。排队/
 等待/降级永不改变验证结果语义、永不计入任何执行预算；`runs gate` 是只读查询 + 文档在案
-的人工破锁出口。运维语义见 `docs/usage.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
+的人工破锁出口。运维语义见 `docs/usage/delivery.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
 
 **Verification 的 proof 纪律**（`src/deliveryVerification.js`）：
 

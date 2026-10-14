@@ -23,7 +23,8 @@
 
 ## Operations
 
-- [docs/usage.md](docs/usage.md): deployment, operational recipes, behavioral contracts (pagination/delivery/closed sets), handwritten reference zones (transcript event table).
+- [docs/usage.md](docs/usage.md): map of the usage pages under docs/usage/ — install, lanes, host, dispatch, supervise, results, delivery, consult, maintenance, transcript.
+- [docs/testing.md](docs/testing.md): when to run the full suite and when targeted tests while developing WAO.
 - [docs/troubleshooting.md](docs/troubleshooting.md): failure diagnosis.
 - [docs/certification-runbook.md](docs/certification-runbook.md): certification operations authority (two-tier verification, delta procedure, upstream-primitive refresh SOP).
 - [docs/smoke-guide.md](docs/smoke-guide.md): real smoke-test operations (consumes tokens).

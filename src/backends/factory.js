@@ -85,7 +85,7 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
  * backend 类声明的能力轴闭集（ADR-0032 §2 声明闭集全量——组件层
  * backendCapabilityConsistencyChecks 的逐轴对账基准）。成员增补属 Owner 决策：
  * 新成员必须同时落（a）各 backend 类的诚实声明、（b）本闭集、（c）组件层
- * 双向对账判据、（d）docs/usage.md 认证节的能力轴分层骨架。
+ * 双向对账判据、（d）docs/certification-runbook.md 认证节的能力轴分层骨架。
  */
 export const BACKEND_CAPABILITY_AXES = Object.freeze([
   "supportsRoleContract",

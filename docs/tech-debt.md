@@ -38,7 +38,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 根修（进程归属或隔离 run-dir）待真实痛点再立项 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 首次语义组合冲突致集成后回归实证时；并行成常态时加必做步骤 |  |
-| TD-138 | 全量测试耗时只涨不跌，现约 17–19 分钟，接近当初定的重开线（约 20 分钟） | 开放 | 全量超过约 20 分钟；届时只拆最长的两三个测试文件 | docs/usage.md |
+| TD-138 | 全量测试约 14 分钟，每个批次的合入都要等它；还没量过哪些文件最慢 | 开放 | 测试相关的批次：先量出最慢的文件，再决定拆分或提速 | docs/testing.md 0077 |
 | TD-139 | MCP 的 run_status 不返回最近活动摘要（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 下一次 MCP 状态面改动 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 每季度核对 v24 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 首次再撞见同类漂移 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
@@ -61,7 +61,7 @@
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | 开放 | 未定 | 0062 |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 未定 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
-| TD-177 | docs/usage.md 约 259KB，读者无法整读；它和 architecture 都顶在字节上限上，正文里夹着大量过程历史 | 开放 | 文档体系下一步：先退役钉它字面的测试，再按操作任务拆成各自完整的专题页 | 0076 |
+| TD-177 | 使用手册已按任务拆成 docs/usage/ 下的十页，但各页正文仍夹着大量过程历史（行为变更日期、批次与编号），合计仍约 255KB；architecture 也顶在字节上限上 | 开放 | 文档体系下一步：逐页改写为现状描述，同时退役钉历史句子的测试（TD-34），再按新体量下调上限 | 0076 docs/usage.md |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
 | TD-180 | codex 后端间歇性启动期死亡、零写入零 verdict，根因仍未查明；Owner 已裁定不做自动重试 | 开放 | 未定 | 0067 docs/troubleshooting.md |
@@ -102,7 +102,6 @@
 | TD-260 | 若干收口项（红队补记、supersedes lineage 事实、交付收条等）登记未实施 | 开放 | 未定 | 0062 |
 | TD-266 | worker 会自行读取宿主仓库根的规则与概况文件并发给模型方，WAO 没有声明读取范围的手段；交付工作树不含未提交文件这件事也没写进使用文档 | 等待裁定 | 是否由控制面提供读取范围声明，待 Owner 裁定；含敏感内容的宿主接入前必须先处置 | AGENTS.md |
 | TD-267 | MCP 的 run_delivery 在验证排队时不带验证闸信息（CLI 已带） | 开放 | 走 MCP 的 Lead 再报同一盲区 | 0066 |
-| TD-269 | MCP 的 run_consult 已改为使用绑定的工作区（席位工作目录与组记录目录），还没有在不提供 roots 的宿主上做过真实调用 | 开放 | 合入后重启 Claude Code，在桌面端实际调用一次 | src/mcp/server.js |
 | TD-270 | deepseek 两个后端没有接静默取样，长命令期间 Lead 看不到进程是否在干活 | 开放 | 下次改动 deepseek 后端 | 0070 0072 |
 | TD-271 | 评分的退出码推断按后端声明门控，run_activity 的推断仍用自己的闭集，两处没有并成一个判据 | 开放 | 下次改动评分或活动投影 | 0072 0073 |
 | TD-272 | deepseek-acp 的 extractExitCode 读平铺文本块，线上数据是嵌套块，从不生效；候选删除 | 开放 | 下次改动 deepseek-acp | 0073 |

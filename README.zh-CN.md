@@ -126,7 +126,7 @@ npm run cli -- registry validate --registry config/agents.json
 # 3. 接入 MCP Host（主控制面——决定 0017）
 #    在 WAO 安装根目录（你 clone 的仓库）里跑。把任意 MCP host（Claude Desktop /
 #    Codex / OpenCode）指向这个 stdio 入口；各 host 的绝对命令/args 示例在
-#    docs/usage.md §MCP stdio：
+#    docs/usage/host.md：
 npm run mcp -- --registry config/agents.json --run-dir runs
 #    workspace 由 host 授权（roots/list / workspace_select）；
 #    下方的 --cwd 只影响 CLI 侧的 workspace 观察。
@@ -156,7 +156,7 @@ AGENT_ONBOARDING.md §3。
 |---|---|
 | **从零开始——安装、单 worker、校验、MCP host、首个 canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)——唯一的新用户上手路径 |
 | **作为 agent / 脚本使用编排器**（23 个 MCP 工具、命令、工作流、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
-| **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——完整部署与使用指南 |
+| **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——部署与使用各页的地图 |
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |

@@ -844,7 +844,7 @@ const RUN_DISPATCH_INPUT = z.object({
   correctable: z.boolean().optional(),
   // Round 4 Bundle B: optional Lead read-only DECLARATION (advisory
   // observation, never a gate). true forces worktree isolation (TD-251 W1a:
-  // non-reuse=ephemeral deferred release, reuse=persistent — usage.md 0057)
+  // non-reuse=ephemeral deferred release, reuse=persistent — decision 0057)
   // (a worktree-creation failure refuses the dispatch fail-closed), persists
   // exactly one run.read_only_declared durable fact, and makes run_activity
   // attach the advisory readOnlyObservation (tool-reported file_written
@@ -3364,7 +3364,7 @@ const PLAYBOOK_MIME = "application/json";
 // never concatenate dynamic content (no err.message, no id, no path, no catalog
 // content). Resource-oriented vocabulary (these are MCP resources, not tools):
 // the summary resource and the detail resource/template each carry a distinct
-// fixed text. docs/usage.md is bound to these exact values (docs-consistency
+// fixed text. docs/usage/results.md is bound to these exact values (docs-consistency
 // M12-10c), so the fail-closed vocabulary cannot drift back to removed-tool names.
 const PLAYBOOK_SUMMARY_ERROR_TEXT = "playbook summary failed";
 const PLAYBOOK_DETAIL_ERROR_TEXT = "playbook detail failed";

@@ -641,7 +641,7 @@ export class RunManager {
     // Round 4 Bundle B: Lead read-only DECLARATION (advisory observation, never
     // a gate). readOnly forces worktree isolation (TD-251 W1a: non-reuse runs get
     // ephemeral + stop-confirmed deferred release; reuse runs stay persistent —
-    // usage.md 决定 0057). The declaration overrides the
+    // decision 0057). The declaration overrides the
     // isolate flag — the CLI rejects the contradictory --no-isolate up front),
     // fails closed when the worktree cannot be created (no source-cwd fallback,
     // typed ReadOnlyWorktreeRequiredError, zero transcript side effects), and
@@ -2512,7 +2512,7 @@ export class Run {
     if (deadlineEnabled) {
       timer = setTimeout(() => {
         // 审计修正：多等待者各建定时器——run 级标志幂等去重，保证事实恰一条
-        // （usage.md"每 run 至多一条"承诺）。
+        // （使用手册"每 run 至多一条"承诺）。
         if (this.observationDeadlineReached) return;
         this.observationDeadlineReached = true;
         // 事实落盘失败不改变监督语义（advisory）：自然终态路径仍写各自事实。

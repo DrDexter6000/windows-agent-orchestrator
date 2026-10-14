@@ -384,7 +384,7 @@ export function renderHuman(r) {
   lines.push("```");
 
   // R5-D: per-host one-line registration EXAMPLES — conveniences derived from
-  // the snippet above; the snippet + docs/usage.md §MCP stdio stay authoritative.
+  // the snippet above; the snippet + docs/usage/host.md stay authoritative.
   if (Array.isArray(r.hostExamples) && r.hostExamples.length > 0) {
     lines.push("");
     lines.push(`One-line registration examples (${HOST_EXAMPLES_AUTHORITY}):`);
@@ -513,7 +513,7 @@ function recommendationAuthLabel(row) {
   if (row.requiresKeyEnv) return `认证: key ${row.requiresKeyEnv}`;
   let base;
   // R6-C3（P2-2）："注入"单独出现会被读成无需 key——补明仍需 provider key 且要
-  // 先起 serve（scripts/serve.ps1 注入；docs/usage.md §Provider key 是权威）。
+  // 先起 serve（scripts/serve.ps1 注入；docs/usage/install.md 的 Provider key 一节是权威）。
   if (row.backend === "opencode-serve") {
     base = "认证: opencode serve 注入（仍需 provider key，先起 scripts/serve.ps1）";
   } else if (row.requiresCli) {

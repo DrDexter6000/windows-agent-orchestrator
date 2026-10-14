@@ -699,7 +699,7 @@ export async function getRunDelivery({
   // 两个方向——绑定前外 run completed 尾条曾把真实 failed run 读成 completed、
   // 压制 backend_failed 候选分支（:863 的 failed 门），外 run failed 尾条曾为
   // 非 failed run 凭空打开该门；process_missing 非终态门（:883-884）同受保护
-  // ——候选投影自 R20 起只由本 run 自身事件门控（usage.md 行为变更条已列）。
+  // ——候选投影自 R20 起只由本 run 自身事件门控（使用手册已写明）。
   const terminalState = findState(events.filter((e) => e && e.runId === runId));
   const view = gatherDeliveryView(events, runId, terminalState);
   // M11-10 closeout: a durable conflict (cross-run injection / malformed bound

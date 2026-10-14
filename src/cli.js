@@ -229,7 +229,7 @@ async function main(argv) {
     return;
   }
   // TD-250（决定 0056）：kimi-web worker serve 维护命令族（手动；详见
-  // src/commands/serve.js 头注释与 docs/usage.md TD-250 配方节）。
+  // src/commands/serve.js 头注释与 docs/usage/lanes.md「kimi 车道的 worker serve」）。
   if (command === "serve") {
     await serveCommand(rest, config);
     return;

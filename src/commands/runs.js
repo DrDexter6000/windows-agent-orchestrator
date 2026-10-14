@@ -105,7 +105,7 @@ import { readRegistry } from "../registry.js";
 // TD-200③（2026-10-02）：导出供 docs-consistency 的 MCP↔CLI 映射表守卫派生核对
 // （docs/usage.md 映射表是手写值指纹——TD-120 家族，必须绑定断言防静默腐烂）。
 // TD-240（2026-10-08）：`verify-commit`——采纳协议承载命令（Lead 侧归因 +
-// 集成后终验执行；不满足独立审计证据规格，见 docs/usage.md 采纳协议节）。
+// 集成后终验执行；不满足独立审计证据规格，见 docs/usage/delivery.md 采纳协议节）。
 export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
   "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit", "lineage-close",

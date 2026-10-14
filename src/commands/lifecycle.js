@@ -214,7 +214,7 @@ export async function retryCommand(args, config) {
  * 旧行为（挂起脸）：CLI 进程内 respawn/attach worker（进程式 backend 的子进程
  * stdout/stderr 是 ref'd 管道）→ CLI 打印 JSON 后既不退出也不监督，被管道吊住
  * 静默挂起；事件流无人消费、transcript 不再推进。姊妹脸 (b)（父进程退出时
- * Job Object 连坐杀 worker）是进程隔离的设计行为（usage.md §Node v22 / ADR 0013），
+ * Job Object 连坐杀 worker）是进程隔离的设计行为（docs/usage/install.md Node v22 一节 / ADR 0013），
  * 不在本修复内——文案如实指引"要存活 → 后台托管"。
  *
  * 新行为：不带 --wait 时 fork 一个 detached background runner（--resume-run-id），
@@ -267,7 +267,7 @@ export async function resumeCommand(args, config) {
 
   // ADR-0030（TD-151）：不带 --wait = detached runner 托管接管（不挂起脸）；
   // 带 --wait = 前台等待（到期=通知不杀，继续等到自然终态；CLI 进程持有 worker，
-  // 进程退出会 Job Object 连坐——by design，见 usage.md 场景 1）。
+  // 进程退出会 Job Object 连坐——by design，见 docs/usage/dispatch.md 场景 1）。
   if (!options.wait) {
     const dir = resolve(options.runDir ?? config.runDir);
     let events = [];

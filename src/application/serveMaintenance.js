@@ -715,7 +715,7 @@ export async function recycleServe({
       triedCandidates,
       oldPid: instance.pid,
       revived,
-      manualRecipe: "docs/usage.md TD-250 节（手动配方：PowerShell Start-Process 全路径 + --port <port> + worker ws + WAO_IN_WORKER=1）",
+      manualRecipe: "docs/usage/lanes.md「kimi 车道的 worker serve」（手动配方：PowerShell Start-Process 全路径 + --port <port> + worker ws + WAO_IN_WORKER=1）",
       note: "shutdown 已执行——kimi 自清实例文件，重跑 recycle 将 no_instance 拒绝；按 manualRecipe 手动拉起",
     };
   }

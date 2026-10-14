@@ -7,7 +7,7 @@
 // 证据以独立事件族（run.lead_commit_check_started/_outcome）追加进指定 run 的
 // 转录 → 清理。义务定位：采纳协议第 1 步（Lead 侧归因）与第 4 步（集成后终验）
 // 的执行承载；**不满足第 3 步独立审计证据规格（HEAD+branch --contains+reflog），
-// outcome 不得当受审对象替代品**（⑥边界锁，docs/usage.md 采纳协议节钉句）。
+// outcome 不得当受审对象替代品**（⑥边界锁，docs/usage/delivery.md 采纳协议节钉句）。
 //
 // 裁定对照（偏离任何一条即回会审）：
 //   ① 事件落点 = CLI 指定 runId（不反推提交归属）；仅接受已终态（findState 落

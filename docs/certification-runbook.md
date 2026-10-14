@@ -236,7 +236,7 @@ conditional 状态沿用（0046 §5 步⑦ 七道实证）。
 
 ## 认证与转录维护命令（原 usage「验证安装」迁出部）
 
-原「验证安装」代码围栏中的 registry list / registry check 命令仍留在 `docs/usage.md`；以下为 smoke、runtime certification 与 drill 转录维护命令（围栏两侧在本文件与 usage 各自补齐）：
+原「验证安装」代码围栏中的 registry list / registry check 命令在 `docs/usage/install.md`；以下为 smoke、runtime certification 与 drill 转录维护命令（围栏两侧在本文件与 usage 各自补齐）：
 
 ```powershell
 # 跑一次真实 smoke（消耗真实 API token）

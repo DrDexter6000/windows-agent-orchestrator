@@ -454,7 +454,7 @@ export function buildMcpSnippet({ installRoot }) {
  * conveniences; this sentence states where the truth lives.
  */
 export const HOST_EXAMPLES_AUTHORITY =
-  "示例命令的 host flag 随 host 版本演进；权威形状 = docs/usage.md §MCP stdio，上方 host-neutral 片段永远是兜底";
+  "示例命令的 host flag 随 host 版本演进；权威形状 = docs/usage/host.md，上方 host-neutral 片段永远是兜底";
 
 function quoteIfSpaced(s) {
   return /\s/.test(s) ? `"${s}"` : s;
@@ -1144,7 +1144,7 @@ function baseResult(partial) {
     // R5-D: bounded per-host one-line registration EXAMPLES, derived purely
     // from mcpSnippet (single source). Examples, not authority — host flags
     // drift with host versions; the host-neutral snippet above and
-    // docs/usage.md §MCP stdio remain the authority and the fallback.
+    // docs/usage/host.md remain the authority and the fallback.
     hostExamples: buildHostExamples(partial.mcpSnippet),
     // Bounded Host-neutral advisory acceptance projection (see buildAcceptance).
     // Carried by EVERY outcome — including refused/error — so a Fresh Lead always

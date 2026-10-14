@@ -40,13 +40,13 @@
       }
     },
     "kimi": {
-      "_comment": "方案 advisor/创意头脑风暴（kimi-code/k3-256k via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。serveUrl 指向本地 kimi worker serve——启动/端口/WAO_IN_WORKER 标记见 docs/usage.md 场景 4e「kimi 专用 worker serve 运维配方」（端口号本身不证明标记已生效）。",
+      "_comment": "方案 advisor/创意头脑风暴（kimi-code/k3-256k via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。serveUrl 指向本地 kimi worker serve——启动/端口/WAO_IN_WORKER 标记见 docs/usage/lanes.md「kimi 车道的 worker serve」（端口号本身不证明标记已生效）。",
       "backend": "kimi-web",
       "cwd": ".",
       "serveUrl": "http://127.0.0.1:58628",
       "tokenEnv": "KIMI_WEB_TOKEN",
-      "_comment_serveWorkspaceDir": "可选 serveWorkspaceDir（绝对路径，稳定目录，不在任何 git 工作树内）：worker serve 的工作目录。声明后，派发时发现 serve 没在跑（回环地址上连接被拒）WAO 会以它为工作目录把 serve 拉起来并等它应答；前提是主目录里已有 server.token（首次启动用 scripts/kimi-serve.ps1）。不声明则 serve 须事先手动拉起（决定 0075，docs/usage.md「kimi 专用 worker serve 运维配方」）。",
-      "_comment_kimiHome": "可选 kimiHome（绝对路径）：worker serve 的私有 KIMI_CODE_HOME。声明后 token 取自 <kimiHome>/server.token、不读 tokenEnv；不装插件的私有主目录下 serve 不拉助手进程（决定 0074，docs/usage.md TD-250 节）。",
+      "_comment_serveWorkspaceDir": "可选 serveWorkspaceDir（绝对路径，稳定目录，不在任何 git 工作树内）：worker serve 的工作目录。声明后，派发时发现 serve 没在跑（回环地址上连接被拒）WAO 会以它为工作目录把 serve 拉起来并等它应答；前提是主目录里已有 server.token（首次启动用 scripts/kimi-serve.ps1）。不声明则 serve 须事先手动拉起（决定 0075，docs/usage/lanes.md「kimi 车道的 worker serve」）。",
+      "_comment_kimiHome": "可选 kimiHome（绝对路径）：worker serve 的私有 KIMI_CODE_HOME。声明后 token 取自 <kimiHome>/server.token、不读 tokenEnv；不装插件的私有主目录下 serve 不拉助手进程（决定 0074，docs/usage/lanes.md「kimi 车道的 worker serve」）。",
       "model": {
         "id": "kimi-code/k3-256k"
       }
@@ -92,7 +92,7 @@
       "backend": "deepseek-acp",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",
-      "_comment_permission": "env.DSH_PERMISSION_MODE=danger-full-access：命令不进 harness 的 Windows 沙箱、不请求审批（决定 0074）。harness 缺省的 workspace-write 沙箱要求当前用户对工作目录有完全控制，否则每条命令都失败；想保留沙箱就删掉这一项并按 docs/usage.md 的 deepseek 车道目录权限前提处理。",
+      "_comment_permission": "env.DSH_PERMISSION_MODE=danger-full-access：命令不进 harness 的 Windows 沙箱、不请求审批（决定 0074）。harness 缺省的 workspace-write 沙箱要求当前用户对工作目录有完全控制，否则每条命令都失败；想保留沙箱就删掉这一项并按 docs/usage/lanes.md 的 deepseek 车道目录权限前提处理。",
       "env": {
         "DSH_PERMISSION_MODE": "danger-full-access"
       },
@@ -109,7 +109,7 @@
       "backend": "deepseek-acp",
       "cwd": ".",
       "credentialEnv": "DEEPSEEK_API_KEY",
-      "_comment_permission": "同 deepseek-pro：env.DSH_PERMISSION_MODE=danger-full-access = 命令不进 harness 沙箱、不请求审批；想保留沙箱就删掉这一项（docs/usage.md 的 deepseek 车道目录权限前提）。",
+      "_comment_permission": "同 deepseek-pro：env.DSH_PERMISSION_MODE=danger-full-access = 命令不进 harness 沙箱、不请求审批；想保留沙箱就删掉这一项（docs/usage/lanes.md 的 deepseek 车道目录权限前提）。",
       "env": {
         "DSH_PERMISSION_MODE": "danger-full-access"
       },

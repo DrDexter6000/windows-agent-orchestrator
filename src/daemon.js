@@ -105,7 +105,7 @@ export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAUL
       // R20 (TD-128 M7)：终态判定绑定到【文件名 stem runId】（R15 范式）——
       // 外 run 伪终态尾条不再永久压制 resume 候选（孤儿恢复效应：真实在飞 +
       // 伪终态 + owner 死的 run，绑定前被本门永久压制，绑定后诚实放行给
-      // ②owner 心跳关；usage.md 行为变更条已列）。绑定不改变关卡序：仍是
+      // ②owner 心跳关；使用手册已写明）。绑定不改变关卡序：仍是
       // ①findState 终态跳过 → ②isRunOwned 心跳跳过。不可归属（全无信封
       // legacy）→ pending 非终态（≈0 存量；即便进入候选，manager.resume 的
       // R13-C/R18-W3 绑定门仍会拒绝无信封会话，fail-safe）。

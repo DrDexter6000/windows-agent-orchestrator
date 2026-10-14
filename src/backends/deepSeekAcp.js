@@ -314,7 +314,7 @@ const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: a command failed while the harn
   + "does not own the workspace directory or lacks full control of it; other sandboxed commands here are likely "
   + "to fail the same way. Lane-level fix, set once for all projects: declare the harness permission mode in the "
   + "registry entry (env DSH_PERMISSION_MODE=danger-full-access; commands then run outside the harness sandbox). "
-  + "See docs/usage.md, deepseek lane prerequisites, for this and for keeping the sandbox instead.";
+  + "See docs/usage/lanes.md, deepseek lane prerequisites, for this and for keeping the sandbox instead.";
 
 // 工具结果里的全部文本：ACP 线上的真实形状是嵌套块
 // （{type:"content", content:{type:"text", text}}），平铺的 {type:"text", text} 也认。
@@ -489,7 +489,7 @@ export class DeepSeekAcpBackend {
     } catch {
       throw new Error(
         "deepseek-acp containment overlay is not readable: " + containmentPath
-        + " — install it per docs/usage.md (operator-installed; WAO detects but never generates or upgrades it)",
+        + " — install it per docs/certification-runbook.md (operator-installed; WAO detects but never generates or upgrades it)",
       );
     }
     const parsed = parseContainmentOverlay(text);

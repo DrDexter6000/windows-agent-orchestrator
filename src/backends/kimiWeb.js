@@ -704,7 +704,7 @@ export class KimiWebBackend {
    * TD-250（A1/A1b，决定 0056）：终态上游会话卫生。best-effort 调
    * `POST /api/v1/sessions/{id}:delete`（API 事实见文件头 TD-250 节）。**声明：
    * 这不拆任何进程**——kimi 2.1.1 serve 永不回收每会话助手进程组（删除/归档均
-   * 不触发、无空闲 GC），进程面归 serve 回收配方（usage.md）；本方法只治会话仓
+   * 不触发、无空闲 GC），进程面归 serve 回收配方（docs/usage/lanes.md）；本方法只治会话仓
    * 与 serve events 文件的堆积。
    *
    * 语义（闭集结果，载荷绝不含 token/上游回显文本）：

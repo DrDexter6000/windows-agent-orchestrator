@@ -60,7 +60,7 @@ export const DRILL_TRANSCRIPT_FILENAME_RE = /^run_[0-9a-z]+\.jsonl$/;
 // 量级）。作用：① 慢一拍的消费/取证窗口（刚被取代的转录不至于立刻消失）；
 // ② 维护步骤 TOCTOU 窗口的兜底——并发发布者刚写出的转录必然年轻（单 worker
 // wait-timeout 量级），远小于该阈值，即使维护步骤与其交错也不会删到将要被
-// 引用的转录。超过它的删除决策才成立；增长有界的条件表述见 docs/usage.md。
+// 引用的转录。超过它的删除决策才成立；增长有界的条件表述见 docs/certification-runbook.md。
 export const DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function drillTranscriptsDir(runsDir) {
