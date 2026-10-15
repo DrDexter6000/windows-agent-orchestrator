@@ -210,7 +210,8 @@ export function toolUseEvent(tool, input) {
 
 /**
  * 工具执行结果（证据链用）。isError 强制必填——证据判定靠它区分成败。
- * @param {string} tool 工具名
+ * @param {string} tool 这次工具调用的 toolCallId（关联键，与 write_intent/file_written/command
+ *   的 toolCallId 相同；拿不到 id 时才退回工具名）。RunManager 按它关闭失败调用的写意图。
  * @param {unknown} output 工具输出
  * @param {boolean} isError 是否出错
  */

@@ -25,10 +25,10 @@
 // transcript is readable, appends exactly one bounded
 // `run.delivery_repackage_rejected` audit event (payload { rejectionReason }).
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -81,7 +81,44 @@ function gitWithIdentity(cwd, args) {
   }).trim();
 }
 
+// Worktrees checked out for a shared base repo, keyed by repo path. cleanupDir
+// consults this registry: cleaning a registered repo removes that scenario's
+// worktrees instead of deleting the base repo other scenarios still share.
+const scenarioWorktrees = new Map();
+
+function removeWorktreeBestEffort(repo, worktreePath) {
+  try {
+    git(["worktree", "remove", "--force", worktreePath], repo);
+    return;
+  } catch {
+    // Fall through: drop the directory, then prune the stale admin metadata.
+  }
+  try {
+    rmSync(worktreePath, { recursive: true, force: true });
+  } catch {
+    // A locked file keeps the directory — prune still clears it once gone.
+  }
+  try {
+    git(["worktree", "prune"], repo);
+  } catch {
+    // Best effort; addScenarioWorktree's recovery path retries removal.
+  }
+}
+
 async function cleanupDir(dir) {
+  const registered = scenarioWorktrees.get(dir);
+  if (registered) {
+    for (const worktreePath of registered) {
+      try {
+        removeWorktreeBestEffort(dir, worktreePath);
+      } catch {
+        // A worktree that refuses removal must not fail the test's cleanup —
+        // the next addScenarioWorktree reclaims the branch via its own recovery.
+      }
+    }
+    registered.clear();
+    return;
+  }
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
       await rm(dir, { recursive: true, force: true });
@@ -108,12 +145,62 @@ async function makeRepo(prefix = "m12s2-repo-") {
   return { repo, baseCommit };
 }
 
+// One shared base repo per process: scenarios check out their own worktree from
+// it instead of paying a full git init/config/add/commit each. Scenarios that
+// must not share repo-level state (git replace fixtures, foreign-repo ownership
+// proofs) keep a private repo via makeRepo.
+let sharedBase = null;
+let scenarioCounter = 0;
+
+async function sharedBaseRepo() {
+  if (!sharedBase) sharedBase = await makeRepo("m12s2-shared-base-");
+  return sharedBase;
+}
+
+/**
+ * Check out a fresh scenario worktree from the shared base on the SAME branch
+ * name every scenario uses (`wao/<RUN_ID>`): -B resets the branch to base HEAD,
+ * so one scenario's moved/dirty leftovers can never leak into the next.
+ */
+function addScenarioWorktree(repo) {
+  scenarioCounter += 1;
+  const worktreePath = join(repo, ".wao-worktrees", `${RUN_ID}-${scenarioCounter}`);
+  try {
+    git(["worktree", "add", "-B", `wao/${RUN_ID}`, worktreePath, "HEAD"], repo);
+  } catch {
+    // cleanupDir empties the registry at the end of every test, so a worktree
+    // still registered here belongs to a scenario the current test is still
+    // using. Removing it would break that scenario silently: fail instead.
+    const inUse = [...(scenarioWorktrees.get(repo) ?? [])];
+    if (inUse.length > 0) {
+      throw new Error(`addScenarioWorktree: wao/${RUN_ID} is held by a scenario still in use (${inUse.join(", ")}); a nested scenario needs { privateRepo: true }`);
+    }
+    // A worktree whose removal failed in an earlier test can still be
+    // registered with git: prune its stale entry and retry once.
+    git(["worktree", "prune"], repo);
+    git(["worktree", "add", "-B", `wao/${RUN_ID}`, worktreePath, "HEAD"], repo);
+  }
+  if (!scenarioWorktrees.has(repo)) scenarioWorktrees.set(repo, new Set());
+  scenarioWorktrees.get(repo).add(worktreePath);
+  return worktreePath;
+}
+
 /** Create a real persistent linked worktree on branch wao/<runId> at HEAD. */
 function makeLinkedWorktree(repo, runId = RUN_ID) {
   const worktreePath = join(repo, ".wao-worktrees", runId);
   git(["worktree", "add", worktreePath, "-b", `wao/${runId}`], repo);
   return worktreePath;
 }
+
+after(async () => {
+  if (!sharedBase) return;
+  const { repo } = sharedBase;
+  for (const worktreePath of scenarioWorktrees.get(repo) ?? []) {
+    try { removeWorktreeBestEffort(repo, worktreePath); } catch { /* best effort */ }
+  }
+  try { git(["worktree", "prune"], repo); } catch { /* best effort */ }
+  await rm(repo, { recursive: true, force: true });
+});
 
 function seedTranscript(runDir, runId, events) {
   const filePath = join(runDir, `${runId}.jsonl`);
@@ -218,10 +305,11 @@ async function setupDisallowedScenario({
   verificationCommands = ["npm test"],
   verificationUnavailableReason = null,
   verificationTimeoutMs = undefined,
+  privateRepo = false,
 } = {}) {
-  const { repo, baseCommit } = await makeRepo();
+  const { repo, baseCommit } = privateRepo ? await makeRepo() : await sharedBaseRepo();
   const runDir = await mkdtemp(join(tmpdir(), "m12s2-runs-"));
-  const worktreePath = makeLinkedWorktree(repo);
+  const worktreePath = privateRepo ? makeLinkedWorktree(repo) : addScenarioWorktree(repo);
   // A real disallowed change: a new file at the repo root (outside "src").
   await writeFile(join(worktreePath, "root.txt"), "root change\n");
   // Plus an allowed change so the diff is non-empty within scope too.
@@ -274,10 +362,11 @@ async function setupBackendFailureScenario({
   includeStopVerified = true,
   deliveryRequested = true,
   includeDeliveryContext = true,
+  privateRepo = false,
 } = {}) {
-  const { repo, baseCommit } = await makeRepo("m124a-repo-");
+  const { repo, baseCommit } = privateRepo ? await makeRepo("m124a-repo-") : await sharedBaseRepo();
   const runDir = await mkdtemp(join(tmpdir(), "m124a-runs-"));
-  const worktreePath = makeLinkedWorktree(repo);
+  const worktreePath = privateRepo ? makeLinkedWorktree(repo) : addScenarioWorktree(repo);
   await writeFile(join(worktreePath, "src", "a.js"), "const a = 42;\n");
   seedTranscript(runDir, RUN_ID, backendFailureEvents({
     repo,
@@ -1420,15 +1509,22 @@ test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verific
   // transcript interaction is the single bounded audit attempt (the injected
   // factory refuses to write, so the file bytes stay unchanged — proving the
   // audit is secondary and cannot mask the typed rejection).
-  for (const bad of ["600000", 600000.5, 999, 7200001, null, "oops"]) {
-    const { repo, runDir } = await setupDisallowedScenario({ verificationTimeoutMs: bad });
-    const filePath = join(runDir, `${RUN_ID}.jsonl`);
-    const bytesBefore = readFileSync(filePath, "utf8").length;
-    let inventoryCalls = 0;
-    let resolveCalls = 0;
-    let verifyCalls = 0;
-    let transcriptCalls = 0;
-    try {
+  // All six malformations reject in Phase 0 from persisted facts alone — the
+  // worktree stays untouched, so one scenario serves them all: reseed the
+  // transcript with the next bad value each iteration.
+  const { repo, baseCommit, runDir, worktreePath } = await setupDisallowedScenario();
+  try {
+    for (const bad of ["600000", 600000.5, 999, 7200001, null, "oops"]) {
+      seedTranscript(runDir, RUN_ID, disallowedPathEvents({
+        repo, worktreePath, baseCommit, allowedPaths: ["src"],
+        verificationCommands: ["npm test"], verificationTimeoutMs: bad,
+      }));
+      const filePath = join(runDir, `${RUN_ID}.jsonl`);
+      const bytesBefore = readFileSync(filePath, "utf8").length;
+      let inventoryCalls = 0;
+      let resolveCalls = 0;
+      let verifyCalls = 0;
+      let transcriptCalls = 0;
       await assert.rejects(
         () => runDeliveryRepackage({
           runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
@@ -1450,10 +1546,10 @@ test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verific
         bytesBefore,
         `transcript bytes unchanged for ${JSON.stringify(bad)}`,
       );
-    } finally {
-      await cleanupDir(repo);
-      await cleanupDir(runDir);
     }
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
   }
 });
 
@@ -1477,10 +1573,10 @@ function orphanSeedEvents({ repo, worktreePath, baseCommit, pid = 999999 }) {
   ];
 }
 
-async function setupOrphanScenario(prefix = "td226-orphan-") {
-  const { repo, baseCommit } = await makeRepo(prefix);
+async function setupOrphanScenario(prefix = "td226-orphan-", privateRepo = false) {
+  const { repo, baseCommit } = privateRepo ? await makeRepo(prefix) : await sharedBaseRepo();
   const runDir = await mkdtemp(join(tmpdir(), `${prefix}runs-`));
-  const worktreePath = makeLinkedWorktree(repo);
+  const worktreePath = privateRepo ? makeLinkedWorktree(repo) : addScenarioWorktree(repo);
   await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
   seedTranscript(runDir, RUN_ID, orphanSeedEvents({ repo, worktreePath, baseCommit }));
   return { repo, baseCommit, runDir, worktreePath };
@@ -2119,7 +2215,7 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
       [null, true, null],       // 无标记（注入/旧内核形态）→ 意外（失败安全默认）
       [null, false, null],
     ]) {
-      const s2 = await setupDisallowedScenario();
+      const s2 = await setupDisallowedScenario({ privateRepo: true });
       try {
         if (drift) git(["commit", "--allow-empty", "-m", "foreign"], s2.worktreePath);
         const fault = taggedResolveFault("artifact_mismatch", "TD-235 guard matrix fault", branch);
@@ -2139,7 +2235,7 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
     // 入口见 HEAD==base（package 分支），本方打包回退失败 → 不得按陈旧的
     // Phase 0 测值洗成可重试的 worktree_unusable（保持原错误可见、零审计）。
     {
-      const s2 = await setupDisallowedScenario();
+      const s2 = await setupDisallowedScenario({ privateRepo: true });
       try {
         git(["commit", "--allow-empty", "-m", "foreign intermediate"], s2.worktreePath);
         const fault = taggedResolveFault(
@@ -2243,7 +2339,8 @@ test("TD-233 B: merge-commit forgery (second parent smuggles changes past first-
 // ── TD-236：refs/replace 攻击面（会审 opus 实测形态的行为钉）──────────────────
 
 test("TD-236: refs/replace 整体替换洗白被 GIT_NO_REPLACE_OBJECTS 阻断", async () => {
-  const s = await setupBackendFailureScenario();
+  // git replace 写的是仓库级 refs/replace —— 私有仓，不进共享母仓。
+  const s = await setupBackendFailureScenario({ privateRepo: true });
   try {
     // 真身 M：走私改动 + 攻击者消息/身份（单父 base）。
     writeFileSync(join(s.worktreePath, "src", "evil.js"), "smuggled\n", "utf8");
@@ -2281,7 +2378,8 @@ test("TD-236: refs/replace 整体替换洗白被 GIT_NO_REPLACE_OBJECTS 阻断",
 });
 
 test("TD-236: --graft 伪造单父被禁用 replace 阻断（父链检查层独立钉）", async () => {
-  const s = await setupBackendFailureScenario();
+  // git replace --graft 同样写仓库级 refs/replace —— 私有仓。
+  const s = await setupBackendFailureScenario({ privateRepo: true });
   try {
     const main = git(["rev-parse", "--abbrev-ref", "HEAD"], s.worktreePath).trim() || "master";
     git(["add", "."], s.worktreePath);

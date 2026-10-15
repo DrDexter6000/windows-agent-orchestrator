@@ -109,3 +109,4 @@
 | TD-290 | 配置键 portRange 没有任何消费者 | 从 `config/default.json` 与 `src/cli.js` 的缺省值里删掉 |
 | TD-300 | 安装根提示 `WAO_INSTALL_ROOT` 进了交付验证命令 | 交付验证（含 verify-commit）与验收脚本的环境剥掉它；worker 子进程环境是白名单，本来不含它；WAO 自己重新拉起的 runner、daemon 保留 |
 | TD-301 | 后台派发不传 `--isolate` / `--no-isolate` / `--tag` | 后台路径复用前台的 `resolveIsolateFlag`，三态经 runner 原样传到 `RunManager.start`，交付与只读照旧强制隔离；多个 `--tag` 前后台都全部保留（前台原先也只留最后一个） |
+| TD-295 | 配置文件的 `_comment` 夹着决定号、批次号、TD 号与日期，入库模板会被用户整份复制 | 五份配置的 17 条 `_comment*` 改为现状描述；`docs-consistency.test.js` 守卫这五份文件的注释不得出现决定号、TD 号、日期 |

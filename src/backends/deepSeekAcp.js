@@ -409,8 +409,7 @@ export class DeepSeekAcpBackend {
   // evidence/phase7-exit-code-wire.json）：dsh-acp 0.1.5-rc.2 的 tool_call_update
   // 只携带 {toolCallId, status, content}（不填协议自带的 rawOutput 自由字段）；
   // 退出码只以自由文本标记 `[exit code: N]` 出现且仅在非零退出时（干净退出 0 无痕）；
-  // 本文件 handleToolCallUpdate 现只读 update.content 文本解析（extractExitCode），
-  // 且 tool_result 关联键是工具名而非 toolCallId（scorecard 的 0/1 推断通道也断）。
+  // 本文件 handleToolCallUpdate 现只读 update.content 文本解析（extractExitCode）。
   // 翻转条件 = 上游在 tool_call_update 提供可结构化解析的退出码字段（或 WAO 接线
   // 该通道并有实测证据）。声明 false ⇒ strict/scorecard 的 commandsPassed 类检查
   // 记 not-applicable + 原因（不置绿、不算失败）——是否允许缺该轴的 harness 拿
@@ -751,7 +750,6 @@ export class DeepSeekAcpBackend {
       if (!known) {
         recordAnomaly("terminal tool_call_update without a prior tool_call (toolCallId=" + toolCallId + ")");
       }
-      const tool = known?.tool ?? toolCallId;
       const isError = status === "failed";
       const output = Array.isArray(update.content) ? update.content : update.content ?? null;
       const events = [];
@@ -760,7 +758,9 @@ export class DeepSeekAcpBackend {
         pendingCommands.delete(toolCallId);
         events.push(commandEvent(command, extractExitCode(output), { toolCallId }));
       }
-      events.push(toolResultEvent(tool, output, isError));
+      // tool_result 以 toolCallId 为关联键（与其它后端同一约定）：失败的写调用不发
+      // file_written，控制面靠这条结果关闭同一调用的写意图。
+      events.push(toolResultEvent(toolCallId, output, isError));
       const pendingPath = pendingWrites.get(toolCallId);
       if (pendingPath !== undefined) {
         pendingWrites.delete(toolCallId);

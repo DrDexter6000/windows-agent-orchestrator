@@ -498,10 +498,11 @@ test("ACP 投影表：message/thinking/write_intent/file_written/tool_result/com
   // write：tool_use + write_intent（tracked）；关联成功 → tool_result + file_written
   assert.ok(events.some((e) => e.kind === "tool_use" && e.tool === "write" && e.input?.file_path === "proof.txt"));
   assert.ok(events.some((e) => e.kind === "write_intent" && e.path === "proof.txt" && e.toolCallId === "call_w1" && e.correlationStatus === "tracked"));
-  assert.ok(events.some((e) => e.kind === "tool_result" && e.tool === "write" && e.isError === false));
+  assert.ok(events.some((e) => e.kind === "tool_result" && e.tool === "call_w1" && e.isError === false));
   assert.ok(events.some((e) => e.kind === "file_written" && e.path === "proof.txt" && e.toolCallId === "call_w1"));
-  // failed write：tool_result isError，绝不发 file_written
-  assert.ok(events.some((e) => e.kind === "tool_result" && e.tool === "write" && e.isError === true));
+  // failed write：tool_result isError、以 toolCallId 为键（控制面据此关闭这次调用的
+  // 写意图），绝不发 file_written
+  assert.ok(events.some((e) => e.kind === "tool_result" && e.tool === "call_w2" && e.isError === true));
   assert.ok(!events.some((e) => e.kind === "file_written" && e.path === "bad.txt"));
   // shell：command 事件带 toolCallId；退出码可提取才带上，否则不伪造
   assert.ok(events.some((e) => e.kind === "command" && e.command === "Get-Content -LiteralPath ./proof.txt -Raw" && e.toolCallId === "call_s1" && e.exitCode === 0));
@@ -535,7 +536,7 @@ test("ACP 0072: shell 命令在调用到达时先落 tool_use（在途可见）�
     .map((e) => (e.kind === "command" ? `command:${e.command}` : `${e.kind}:${e.tool}`));
   assert.deepEqual(kinds, [
     "tool_use:bash", // call_s1 到达
-    "command:npm test", "tool_result:bash", // call_s1 终态
+    "command:npm test", "tool_result:call_s1", // call_s1 终态
     "tool_use:bash", // call_s2 到达，之后再没有终态
   ]);
   const announced = events.filter((e) => e.kind === "tool_use" && e.tool === "bash");
@@ -692,7 +693,7 @@ test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取�
       peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_d1", title: "write", rawInput: { file_path: "dup.txt" } });
       peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_d1", status: "completed", content: [{ type: "text", text: "ok" }] });
       peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_d1", status: "failed", content: [{ type: "text", text: "late failure" }] });
-      // 未知关联的终态：以 toolCallId 为 tool 名投影 + 留痕
+      // 未知关联的终态：以 toolCallId 为关联键投影 + 留痕
       peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_orphan", status: "completed" });
       peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
     },
@@ -701,7 +702,7 @@ test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取�
   assert.ok(events.some((e) => e.kind === "write_intent" && e.path === "pending.txt"));
   assert.ok(!events.some((e) => e.kind === "file_written" && e.path === "pending.txt"));
   // call_p1 从未到终态：没有它的 tool_result（唯一的 write tool_result 来自 call_d1）
-  const writeResults = events.filter((e) => e.kind === "tool_result" && e.tool === "write");
+  const writeResults = events.filter((e) => e.kind === "tool_result" && ["call_d1", "call_p1"].includes(e.tool));
   assert.equal(writeResults.length, 1);
   assert.equal(writeResults[0].isError, false);
   // 全部 tool_result 恰两条：call_d1（write，首个终态 completed）与 call_orphan

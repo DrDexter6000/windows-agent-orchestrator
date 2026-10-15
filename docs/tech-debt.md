@@ -111,5 +111,4 @@
 | TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境。已见两次（run_20261014092633812jgm07h、run_20261014100010561p9ukkz）；Lead 事后在原工作树用同一输入重做打包检查都通过，但没有留下记录，原因未查明（疑为 worker 收尾时的 git 命令还占着 index.lock） | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
 | TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
-| TD-295 | 配置文件的 `_comment` 字段仍夹着决定号、批次号、TD 号与日期，入库模板 `config/agents.example.json` 会被用户整份复制；其中部分措辞被文档守卫钉着 | 开放 | 文档体系下一步：逐个文件改写为现状描述，钉历史措辞的断言随之退役 | 0076 config/ |
 | TD-298 | kimi-web 的静默收口（turn 未被观察到、有产出后的停滞、serve 自称在跑但长时间无输出增长）仍按旧规则落 `no_effect` / `crash`，没有像 zcode 那样按收口类型如实分类 | 开放 | 诊断批次：逐种收口判定它说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |

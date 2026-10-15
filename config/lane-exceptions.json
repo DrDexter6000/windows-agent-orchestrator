@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "_comment": "0045 §4.3 例外条款登记（git 跟踪；消费方=scripts/reliability/certification.mjs summarizeWorkers）。语义：条款命中且 case 的全部红检查 ∈ 例外检查族 → status=conditional/supervised-dispatch（scope 取条款值）；红检查事实、drill 明细、时间戳一律保留不改写——判定修复不是事实改写（adjudicate-exceptions 同纪律）。四元组=车道身份（backend/providerID/modelId/providerKey，null 允许）。",
+  "_comment": "例外条款登记（git 跟踪；消费方=scripts/reliability/certification.mjs summarizeWorkers）。语义：条款命中且 case 的全部红检查 ∈ 例外检查族 → status=conditional/supervised-dispatch（scope 取条款值）；红检查事实、drill 明细、时间戳一律保留不改写——判定修复不是事实改写（adjudicate-exceptions 同纪律）。四元组=车道身份（backend/providerID/modelId/providerKey，null 允许）。",
   "exceptions": [
     {
       "axes": {

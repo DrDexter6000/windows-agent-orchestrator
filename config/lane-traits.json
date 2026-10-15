@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "0046 §1/⑤：车道画像元数据（特征描述+建议任务类别+上下文/多模态事实）——仅对 Lead agent 暴露、供选席参考。非路由规则、非身份成分、不进派发解析面（dispatchResolution 不读本文件）、不进 MCP wire（冻结面零字节）。来源标注：official=官方文档核实（2026-10-06 联网）、owner=Owner 实测口述（2026-10-06）、wire=dsh/ACP 会话广告值。描述性文字来自 Owner 手拟矩阵（含主观评价），与可核实事实分列。",
+  "_comment": "车道画像元数据（特征描述+建议任务类别+上下文/多模态事实）——仅对 Lead agent 暴露、供选席参考。非路由规则、非身份成分、不进派发解析面（dispatchResolution 不读本文件）、不进 MCP wire（冻结面零字节）。来源标注：official=官方文档核实、owner=Owner 实测口述、wire=dsh/ACP 会话广告值。描述性文字来自 Owner 手拟矩阵（含主观评价），与可核实事实分列。",
   "traits": {
     "sol": {
       "profile": "四星智力，相对严谨、保守、后端能力较强，容易钻牛角尖，价格中高（Owner 撰写）",

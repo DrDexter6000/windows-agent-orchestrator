@@ -1450,6 +1450,45 @@ function jsonCommentStrings(jsonText) {
   return out;
 }
 
+/** 只写现状的注释扫描面：这五份配置的 `_comment*` 是读者面向的现状说明，
+ * 不带决定号/TD 号/日期（为什么这样定写在决定记录里，注释不复述）。 */
+const PRESENT_ONLY_COMMENT_FILES = Object.freeze([
+  "config/agents.example.json",
+  "config/lanes.json",
+  "config/lane-exceptions.json",
+  "config/lane-traits.json",
+  "config/roles.json",
+]);
+
+/** 历史措辞命中（纯函数）：返回 text 里不得出现在注释中的片段（按出现顺序）——
+ * 决定号（`0045`/`决定 0080`）、TD 号（`TD-283`）、日期（`2026-10-14`）。重叠处
+ * 取长写法（同一次出现只报一次）。只认这三种形状：端口号 58630、版本号 22.1.0、
+ * 型号 k3-256k 这类普通数字不误报（决定号=四位且以 0 开头，或跟在"决定/决策"后）。 */
+function historyWordingHits(text) {
+  const PATTERNS = [
+    /\b0\d{3}\b/g,
+    /(?:决定|决策)\s*\d+/g,
+    /\bTD[-\s]?\d+\b/gi,
+    /\d{4}-\d{2}-\d{2}/g,
+    /(?<![\d.-])(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\d.-])/g,
+    /\bM\d{1,2}-\d{1,2}[A-Za-z]?\b/g,
+    /批次\s*\d+/g,
+  ];
+  const matches = [];
+  for (const re of PATTERNS) {
+    for (const m of text.matchAll(re)) matches.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
+  }
+  matches.sort((a, b) => a.start - b.start || b.end - a.end);
+  const out = [];
+  let coveredUntil = -1;
+  for (const m of matches) {
+    if (m.start < coveredUntil) continue;
+    out.push(m.text);
+    coveredUntil = m.end;
+  }
+  return out;
+}
+
 /** 守卫扫描面：根目录六件；docs/ 的 .md（archive/research/incidents 与
  * changelog-* 冻结文档除外）；references/ 与 config/roles/ 的 .md；scripts/
  * 各处的 README.md；config/agents.example.json 里键名以 _comment 开头的字符串
@@ -1538,6 +1577,30 @@ test("纯函数 jsonCommentStrings：解析后递归取 _comment* 字符串，�
     { path: "x._comment_b", value: "b" },
     { path: "x.y[0]._comment", value: "c" },
   ], "整份一行、嵌套、数组、转义键名都取到；非字符串值不算");
+});
+
+test("纯函数 historyWordingHits：决定号/TD 号/日期命中，普通数字不误报", () => {
+  for (const hit of ["决定 0080", "0045 §1.2", "TD-283", "2026-10-14", "06-18 事故后", "M12-14", "M12-8F", "批次 8"]) {
+    assert.ok(historyWordingHits(hit).length > 0, `必须命中：${hit}`);
+  }
+  for (const clean of ["端口号 58630", "版本号 22.1.0", "型号 k3-256k", "实测 8-14s"]) {
+    assert.deepEqual(historyWordingHits(clean), [], `不得命中普通数字：${clean}`);
+  }
+});
+
+test("注释只写现状：五份配置的 _comment* 字符串不得出现决定号、TD 号、日期", () => {
+  const hits = [];
+  for (const rel of PRESENT_ONLY_COMMENT_FILES) {
+    const comments = jsonCommentStrings(read(rel));
+    assert.ok(comments.length > 0, `${rel} 未取到任何 _comment* 字符串——守卫空转（文件改名/注释键改形？）`);
+    for (const { path, value } of comments) {
+      for (const hit of historyWordingHits(value)) {
+        hits.push(`${rel} 的 ${path} 命中「${hit}」`);
+      }
+    }
+  }
+  assert.deepEqual(hits, [],
+    `_comment* 只写现状（这个字段/文件是干什么的、读者要知道的约束）；为什么这样定写在决定记录里，注释不复述。命中清单：\n${hits.join("\n")}`);
 });
 
 test("车道当前型号只在配置里：现行文档与模板注释不得出现当前车道型号", () => {
