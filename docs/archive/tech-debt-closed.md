@@ -110,3 +110,5 @@
 | TD-300 | 安装根提示 `WAO_INSTALL_ROOT` 进了交付验证命令 | 交付验证（含 verify-commit）与验收脚本的环境剥掉它；worker 子进程环境是白名单，本来不含它；WAO 自己重新拉起的 runner、daemon 保留 |
 | TD-301 | 后台派发不传 `--isolate` / `--no-isolate` / `--tag` | 后台路径复用前台的 `resolveIsolateFlag`，三态经 runner 原样传到 `RunManager.start`，交付与只读照旧强制隔离；多个 `--tag` 前后台都全部保留（前台原先也只留最后一个） |
 | TD-295 | 配置文件的 `_comment` 夹着决定号、批次号、TD 号与日期，入库模板会被用户整份复制 | 五份配置的 17 条 `_comment*` 改为现状描述；`docs-consistency.test.js` 守卫这五份文件的注释不得出现决定号、TD 号、日期 |
+| TD-291 | zcode 车道额度耗尽时转录里看不到上游的失败与重试 | backend 读本轮主轮请求的 `model.request.status`：已安排的重试在退避窗内算第四种生命体征（零载荷 `provider_retry`）；收口文案带上游摘要，诊断按尝试链把 429 归 provider_capacity、401/403 归 provider_auth |
+| TD-298 | kimi-web 的静默收口在诊断里落 `unknown`，不说明是哪道门 | 诊断给 kimi-web 收口建门表（现行 5 种、历史 2 种文案），serve 不应答归 unknown，其余归 provider_disconnect；真实转录里 11 个历史停滞从 unknown 改归 provider_disconnect |

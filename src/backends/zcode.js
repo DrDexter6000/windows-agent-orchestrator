@@ -219,9 +219,21 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 //      快照不长 part，在动的是这些子进程。真实转录普查：12 次被停滞门收掉的运行
 //      里 7 次死时有工具调用在途；
 //   ③ 工作树变化——同一观察窗内，工作目录里已改动/未跟踪文件的清单、mtime 或
-//      大小变了（输出交付物）。
-// ②③ 的判据、读数与看不到的形态见 processActivity.js。三项都没有 ⇒ 收口，文案
-// 写明取到的读数。
+//      大小变了（输出交付物）；
+//   ④ 上游重试等待——本轮主轮请求（querySource=main_turn 且 turnId 是本轮）的
+//      model_retry_scheduled：上游在按 delayMs 退避，有效到到达时刻 + delayMs +
+//      余量；每个安排（同 requestId 同 attempt）只在首见时立窗、其重复通知一律
+//      不延长，链上其后出现
+//      started/completed（换 requestId 也算）、turn 结束或换轮即作废且**粘住**——
+//      作废前首见的安排连同其重复通知不再立窗，只有作废之后新出现的安排才能。
+//      续命落 runtime_activity("provider_retry")（零载荷、节流）。failed 与
+//      stream_stalled 本身不续命——只说明出过问题，不说明还在推进。时间边界
+//      （maxAttempts 数总尝试、单请求只有流空闲超时、退避有上限不重置、整轮
+//      总时长上界未知）见 createUpstreamRequestTracker 注释。
+// ②③ 的判据、读数与看不到的形态见 processActivity.js。四项都没有 ⇒ 收口，文案
+// 写明取到的读数；本轮主轮请求链的最后状态已知时，文案末尾追加有界上游摘要
+// （闭集 status + 整数 statusCode + attempt/maxAttempts，绝不带 reason）——诊断
+// 按这段摘要归因。
 //
 // **停滞续命没有任何自动上限**（同日早些时候的"续命静默满 120min 收口"硬顶已删）：
 // 活着但迟迟不收尾的运行由 Lead 决定去留。控制面的职责是让 Lead 看得见（流在收
@@ -244,6 +256,39 @@ const NO_PROGRESS_CEILING_MS = 600_000;
 const STREAM_TELEMETRY_METHOD = "v4/telemetry/event";
 const STREAM_CHUNK_KIND = "stream.chunk";
 const STREAM_ATTEST_RECENCY_MS = 60_000;
+
+// ===== 第四种生命体征：本轮主轮请求的重试等待（2026-10-15 探针事实） =====
+//
+// 额度耗尽时的长静默形态：zcode 在按 delayMs 退避重试本轮主轮请求。重试等待期
+// 上游不出流分片（①失明）、无本地计算（②失明）、无产出落盘（③失明）——三道
+// 收口门会把"上游在退避"误收成"已死"。数据源 = 同一路通知 `v4/telemetry/event`
+// 里 `kind === "model.request.status"`（schema Zms，strict；Lead 2026-10-15 实测
+// 事实记录 + 安装包只读核证，见 createUpstreamRequestTracker 注释）。
+const TURN_STARTED_KIND = "turn.started";
+const TURN_TERMINAL_KIND = "turn.terminal";
+const MODEL_REQUEST_STATUS_KIND = "model.request.status";
+const MAIN_TURN_QUERY_SOURCE = "main_turn";
+// status 闭集（安装包 Zms schema 的 enum literal，全部成员在此列出）。
+const MODEL_REQUEST_STATUSES = Object.freeze([
+  "model_request_started",
+  "model_request_completed",
+  "model_request_failed",
+  "model_retry_scheduled",
+  "model_stream_stalled",
+]);
+// 重试等待续命的余量：zcode 的退避睡眠恰好睡 delayMs（Noe(mt, signal)），睡醒后
+// 下一次尝试还要经排队、建连、首发事件才发 model_request_started，控制面轮询
+// （生产 5s/拍）再叠加观察延迟。30s 覆盖这些环节且小于流分片新鲜度窗（60s）
+// ——凭经验取值，无统计依据。
+const RETRY_GRACE_MARGIN_MS = 30_000;
+// 可采纳为续命窗的 delayMs 上界（具名 1 小时）。安装包事实（zcode.cjs ~2176）：
+// server retry-after 的采纳条件是「≤300s（tHs = 5×6e4）**或**小于未封顶的计算
+// 退避值」——缺省参数（baseDelayMs 2s、factor 2、attempt 从 1 起数）下未封顶的
+// 指数项第 11 次尝试已达 2s × 2^10 ≈ 2048s，ZCODE_MODEL_RETRY_* 环境变量还能
+// 放大 baseDelayMs/factor，故合法 delayMs 可远超 300s（缺省参数、第 9 次尝试、
+// retry-after 400000ms ⇒ 采纳 400000ms）。1 小时宽于一切已核证的缺省形状，只拒
+// 非有限值、负数与超过它的值（fail-closed）。
+const RETRY_DELAY_MAX_MS = 3_600_000;
 // 流在收时向转录发 runtime_activity("streaming") 的最小间隔：一分钟一条——等待
 // 类命令最短观察窗 180s，流活着时窗内必有至少一条。
 const STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS = 60_000;
@@ -380,6 +425,165 @@ function metricsEventFromUsage(usage) {
     }
   }
   return seen ? metricsEvent(sums) : null;
+}
+
+// ===== 本轮主轮请求链（第四种生命体征的读数面，2026-10-15） =====
+//
+// 上游事实（桌面捆绑安装包里的 app-server 实现 zcode.cjs——即 agent.binary 指向
+// 的那个文件，sha256 前缀 31965ce1d5d4a808，只读核证；行号按该 bundle）：
+//   - 通知 `v4/telemetry/event` 的 `model.request.status`（schema Zms，strict）带
+//     status 闭集（MODEL_REQUEST_STATUSES）、requestId、attempt、maxAttempts、
+//     querySource?（main_turn / session_title / subagent / compact …）、
+//     statusCode?、retryable?、delayMs?、reason?（自由文本）。
+//   - **requestId 每次尝试轮换**：约 2170 行 hut(attribution, attempt) 在
+//     attempt > 1 时换 crypto.randomUUID()——请求链不能按 requestId 分。
+//   - queryId 不用于细分：createQueryId（`query_${randomUUID()}`）仅在
+//     createCommand / steer / queue 三类**输入提交点**生成，子 traceContext 继承
+//     父链的 queryId——同一轮（同一用户输入）的全部主轮请求共享同一 queryId，
+//     分不开"同一轮里不同的主轮请求"。链 = 同 turnId 下 querySource ===
+//     "main_turn" 的全部状态按到达顺序，只记最后一条。
+//   - 时间边界（只读核证，供续命取舍参考）：
+//     · maxAttempts 数**总尝试次数**（尝试循环 attempt 从 1 起数；bundle 内部
+//       另有 maxRetries = max(0, maxAttempts-1) 的投影）。缺省 11，可被
+//       ZCODE_MODEL_RETRY_* 环境变量覆盖；retry budget 无界时上报 0。
+//     · 单次请求（每个 attempt）有**流空闲超时**：缺省 600s + 30s×重试序号
+//       （streamIdleTimeoutMs ?? 6e5），超时发 model_stream_stalled（带 idleMs/
+//       timeoutMs）。它只约束"流空闲"，不约束单次请求总时长——流持续滴落的
+//       请求没有时长上界。
+//     · 退避间隔**有上限、不重置**：计算退避 = min(2s × 2^(attempt-1), 60s)
+//       （缺省，jitter 再乘 [0.5,1)）；server retry-after 在「≤300s 或小于未封顶
+//       的计算值」时被整段采纳 ⇒ 单次 delayMs 可超 300s（缺省参数未封顶指数第
+//       11 次尝试约 2048s，ZCODE_MODEL_RETRY_* 环境变量可再放大；控制面只按自己
+//       的上界 RETRY_DELAY_MAX_MS 拒绝明显非 zcode 形状的值）。每次尝试自身
+//       时长无上界 ⇒ **整轮总时长上界未知**。续命期间运行可能明显变长是有意
+//       取舍（决定 0067：有体征的运行去留归 Lead）；不引入全局硬超时。
+//
+// 采纳条件（全部满足，缺一不采纳）：
+//   - tracker 自会话建立即武装（activate），但 send 帧写出之前（markSent，先于
+//     request 调用——写回调与 request 返回都可能晚于对端处理，PassThrough 级联
+//     下应答甚至会在 write 调用栈内同步折返）到达的 turn.started 只记入基线
+//     （seenTurnIds），不算本轮。「本次 send 之后」的判据 = 到达顺序 ∪ 基线
+//     排除：send 帧写出之后到达、且 turnId 从未见过的首条 turn.started 才算
+//     本轮（本运行一轮一 prompt，武装期的 turn.started 属于别的输入——如上一
+//     轮的残留或会话标题轮）；
+//   - sessionId 是本运行的会话；turnId 是本次 send 之后 turn.started 给出的本轮
+//     turnId——turnId 从未见过的 turn.started = 换轮，链清空重来。采纳单调：
+//     见过的 turnId（基线轮、当前轮、此前采纳过的轮）不再采纳，重复或迟到的
+//     旧轮通知换不回旧轮。拿不到本轮 turnId 时一概不采纳（绝不猜归属）；
+//   - querySource === "main_turn"（标题生成 session_title、subagent、compact 等
+//     一概不是本轮主轮）。
+// 数值与布尔字段经类型与范围校验后记录；reason 一律不读、不存、不回显。
+function createUpstreamRequestTracker() {
+  let sessionId = null;
+  let turnId = null;
+  let chain = null;
+  // 续命窗：{until}。一条重试安排（key = `${turnId}:${requestId}:${attempt}`）只在
+  // 首见时立窗：其后的重复通知一律不立窗、不延长——无论窗此刻属于它、已换给
+  // 别的安排，还是已被作废。新的安排（新 attempt 或新 requestId）首见即立窗，
+  // 覆盖当前窗。started/completed、turn.terminal、换轮作废当前窗；作废粘住由
+  // 「只认首见」保证：作废前见过的安排连同其重复通知不再立窗，作废之后新出现
+  // 的安排照常立窗。首见表在运行期内只增不清。delayMs 无效 / requestId 缺席时
+  // 不立窗（fail-closed）；无效的首见同样记入首见表。
+  let grace = null;
+  const seenScheduleKeys = new Set();
+  // send 武装状态：sendWritten = send 帧已进入写出（markSent 先于 request 调用）。
+  // seenTurnIds = 见过的全部 turnId：send 之前到达的（基线：别的输入的残留轮）
+  // 与此后采纳过的。
+  let sendWritten = false;
+  const seenTurnIds = new Set();
+  let now = () => performance.now();
+
+  const intIn = (value, min, max) => (Number.isInteger(value) && value >= min && value <= max ? value : null);
+  const numIn = (value, min, max) => (typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : null);
+
+  const handleTurnStarted = (p) => {
+    if (typeof p.turnId !== "string" || p.turnId.length === 0) return;
+    if (seenTurnIds.has(p.turnId)) return; // 采纳单调：见过的 turnId 不再采纳
+    seenTurnIds.add(p.turnId);
+    if (!sendWritten) return; // send 之前到达：只记入基线
+    // 首个 turn.started（拿到本轮）或换轮：链与续命资格一并作废（旧轮的安排
+    // 连同重复通知全部失效）。
+    turnId = p.turnId;
+    chain = null;
+    grace = null;
+  };
+  const handleTurnTerminal = (p) => {
+    if (turnId === null || p.turnId !== turnId) return;
+    // 轮已结束：续命资格立即失效（粘住）。链保留——收口摘要仍要用本轮最后状态。
+    grace = null;
+  };
+  const handleRequestStatus = (p) => {
+    if (turnId === null || p.turnId !== turnId) return;
+    if (p.querySource !== MAIN_TURN_QUERY_SOURCE) return;
+    if (!MODEL_REQUEST_STATUSES.includes(p.status)) return;
+    const attempt = intIn(p.attempt, 0, Number.MAX_SAFE_INTEGER);
+    const maxAttempts = intIn(p.maxAttempts, 0, Number.MAX_SAFE_INTEGER);
+    if (attempt === null || maxAttempts === null) return;
+    const statusCode = intIn(p.statusCode, 100, 599);
+    const delayMs = numIn(p.delayMs, 0, RETRY_DELAY_MAX_MS);
+    chain = {
+      status: p.status,
+      statusCode,
+      attempt,
+      maxAttempts,
+      retryable: typeof p.retryable === "boolean" ? p.retryable : null,
+      delayMs,
+      at: now(),
+    };
+    if (p.status === "model_request_started" || p.status === "model_request_completed") {
+      // 链上来了 started/completed（换了 requestId 也算）——重试等待结束，续命
+      // 资格立即失效（粘住）；之后是否再退避由新的 retry_scheduled 重新立窗。
+      grace = null;
+    } else if (p.status === "model_retry_scheduled"
+      && typeof p.requestId === "string" && p.requestId.length > 0) {
+      const key = `${turnId}:${p.requestId}:${attempt}`;
+      if (!seenScheduleKeys.has(key)) {
+        seenScheduleKeys.add(key);
+        if (delayMs !== null) grace = { until: chain.at + delayMs + RETRY_GRACE_MARGIN_MS };
+      }
+    }
+    // model_request_failed / model_stream_stalled 本身不续命（只说明出过问题，
+    // 不说明还在推进），也不作废在途的窗：紧随其后的新 retry_scheduled 才是
+    // 下一次续命；不再有则窗自然到期。
+  };
+
+  return {
+    // 会话建立即武装（一次）：此后本会话的 turn.started 先记基线，send 写完后
+    // 采纳本轮（见采纳条件注释）。
+    activate(id) {
+      if (typeof id === "string" && id.length > 0) sessionId = id;
+    },
+    // session/send 帧写出之前调用（写回调与 request 返回都可能晚于对端处理，
+    // PassThrough 级联下应答会在 write 调用栈内同步折返）：从此到达的
+    // turn.started 不再只记基线。
+    markSent() {
+      sendWritten = true;
+    },
+    // 与停滞门共用一只单调钟（stallClock 测试注入缝在 _streamEvents 采纳）。
+    adoptClock(clock) {
+      if (typeof clock === "function") now = clock;
+    },
+    handleNotification(p) {
+      if (sessionId === null || !p || typeof p !== "object") return;
+      if (p.sessionId !== sessionId) return;
+      if (p.kind === TURN_STARTED_KIND) handleTurnStarted(p);
+      else if (p.kind === TURN_TERMINAL_KIND) handleTurnTerminal(p);
+      else if (p.kind === MODEL_REQUEST_STATUS_KIND) handleRequestStatus(p);
+    },
+    // 时刻 at 仍有效的续命窗终点；无效返回 null。
+    retryGraceUntil(at) {
+      return grace !== null && grace.until > at ? grace.until : null;
+    },
+    // 收口文案末尾的有界上游摘要（状态未知返回 null——文案逐字不变）。只放
+    // 闭集 status、整数 statusCode、attempt/maxAttempts；attempt/max 经校验必在。
+    summarySuffix() {
+      if (chain === null) return null;
+      const parts = [];
+      if (chain.statusCode !== null) parts.push(`statusCode ${chain.statusCode}`);
+      parts.push(`attempt ${chain.attempt}/${chain.maxAttempts}`);
+      return `; upstream: last main-turn request ${chain.status} (${parts.join(", ")})`;
+    },
+  };
 }
 
 // ===== completed 轮 tool part 证据投影（2026-10-01 补齐，delta 认证证据链）=====
@@ -930,18 +1134,25 @@ export class ZcodeBackend {
     };
 
     const streamChunkCounts = new Map();
+    // 本轮主轮请求链（第四种生命体征的读数面）：handleFrame 写入（通知到达即
+    // 记），_streamEvents 读取（续命窗 + 收口摘要）。
+    const upstreamRequests = createUpstreamRequestTracker();
     const handleFrame = (frame) => {
       if (frame && typeof frame === "object" && typeof frame.method === "string") {
         if (Object.prototype.hasOwnProperty.call(frame, "id")) {
           answerServerRequest(frame);
           return;
         }
-        // 通知（无 id）：只认流分片遥测（按会话计数，供停滞门取活性证词）；
-        // startup/storageState 等其余通知一律忽略。
+        // 通知（无 id）：认两类遥测——流分片（按会话计数，供停滞门取活性证词）
+        // 与本轮主轮请求状态（upstreamRequests——采纳条件与诚实边界见其工厂
+        // 注释）；startup/storageState 等其余通知一律忽略。
         const p = frame.params;
-        if (frame.method === STREAM_TELEMETRY_METHOD && p && p.kind === STREAM_CHUNK_KIND
-          && typeof p.sessionId === "string" && Number.isFinite(p.chunkLength) && p.chunkLength > 0) {
-          streamChunkCounts.set(p.sessionId, (streamChunkCounts.get(p.sessionId) ?? 0) + 1);
+        if (frame.method === STREAM_TELEMETRY_METHOD && p && typeof p === "object") {
+          if (p.kind === STREAM_CHUNK_KIND
+            && typeof p.sessionId === "string" && Number.isFinite(p.chunkLength) && p.chunkLength > 0) {
+            streamChunkCounts.set(p.sessionId, (streamChunkCounts.get(p.sessionId) ?? 0) + 1);
+          }
+          upstreamRequests.handleNotification(p);
         }
         return;
       }
@@ -1040,6 +1251,11 @@ export class ZcodeBackend {
         }
         sessionId = createdId;
       }
+      // 请求链 tracker 自会话建立即武装：turn.started 可能先于 send 应答、或与
+      // 应答同一数据块到达——应答后才激活会把它们全丢掉，之后的 429 等状态就进
+      // 不了摘要。武装后、send 帧写完（markSent）前到达的 turn.started 只记基
+      // 线，不算本轮（判据见 createUpstreamRequestTracker 采纳条件注释）。
+      upstreamRequests.activate(sessionId);
       // setModel（fresh 与 resume 都发——配置的模型必须对每次派发生效，kimi/codex
       // 恒传 --model 的同款惯例；resume 轮在 session/resume 装载之后发，此时会话
       // 已注册进本进程表，requireSession 不会 miss）。effort 缺省不传 options
@@ -1099,6 +1315,12 @@ export class ZcodeBackend {
       content = task.roleContract
         ? task.roleContract + ZCODE_ROLE_TASK_SEPARATOR + task.prompt
         : task.prompt;
+      // send 帧发出之前推进武装边界。不能等写完成回调（流实现里写回调可能晚于
+      // 对端处理甚至应答往返），也不能等 request() 返回（PassThrough 级联下对端
+      // 的应答与同块通知会在 write 调用栈内同步折返）——markSent 必须先于帧的
+      // 写出，应答之前/同块到达的 turn.started 才划得进本轮（基线判据见
+      // createUpstreamRequestTracker 采纳条件注释）。
+      upstreamRequests.markSent();
       const sent = await request("session/send", { sessionId, content });
       if (sent?.accepted !== true) {
         throw new Error("zcode session/send did not accept the prompt (accepted !== true — refusing to guess)");
@@ -1171,6 +1393,7 @@ export class ZcodeBackend {
         baselineMessageIds,
         sentAt,
         sentContent: content,
+        upstreamRequests,
         signal,
         interval: opts.pollInterval,
         silentTimeout: opts.silentTimeout,
@@ -1208,7 +1431,7 @@ export class ZcodeBackend {
    */
   async *_streamEvents({
     wire, child, sessionId, cwd, baselineParts, baselineMessageIds, sentAt, sentContent,
-    signal, interval, silentTimeout, onPollTick, markTerminal, stallClock,
+    upstreamRequests, signal, interval, silentTimeout, onPollTick, markTerminal, stallClock,
   }) {
     const pollInterval = Number.isFinite(interval) && interval > 0
       ? interval
@@ -1235,11 +1458,18 @@ export class ZcodeBackend {
     // 生命体征状态：分片计数的上次读数、最近一次见到新分片的时刻（与停滞门同
     // 一只钟）、上次发 streaming 事实的时刻、自上一次进度以来的续命次数。
     const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
+    // 请求链的到达时刻与续命窗也用这只钟（通知到达即在 handleFrame 记时刻，
+    // 与停滞门同一时间系）。
+    upstreamRequests.adoptClock(stallNow);
     const streamChunksOf = () => (typeof wire.streamChunkCount === "function" ? wire.streamChunkCount(sessionId) : 0);
     let lastStreamChunks = streamChunksOf();
     let lastStreamChunkAt = null;
     let lastStreamEmitAt = null;
+    // 续命证词按「段」计：一段连续续命（流在收 / 退避窗内 / 观察窗判活）只计一
+    // 次，段间断开（门未到点、取证 pending、进度落地）后下一段重新计——收口文
+    // 案里的 "N earlier attestation(s)" 如此为真（按拍累计会把轮询拍数当证词数）。
     let lifeAttestations = 0;
+    let inGraceEpisode = false;
     // 观察窗取证状态：基线（时刻 + 后代快照 + 工作树指纹）、进程快照连续失败
     // 数、已取到但尚未执行的收口事实。
     let windowBaseline = null;
@@ -1401,6 +1631,7 @@ export class ZcodeBackend {
           noProgressPolls = 0;
           stallTracker.noteProgress();
           lifeAttestations = 0;
+          inGraceEpisode = false;
           resetObservation();
         } else {
           noProgressPolls += 1;
@@ -1432,9 +1663,13 @@ export class ZcodeBackend {
         }
         if (finishReason === "error") {
           finish();
+          // zcode 自己以失败结束本轮的路径：part 不带错误明细（不虚构），但本轮
+          // 主轮请求链的最后状态已知时照三道门同款追加有界上游摘要（同款格式，
+          // 诊断按它归因）。
           yield doneEvent(
             "failed",
-            "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one)",
+            "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one)"
+              + (upstreamRequests.summarySuffix() ?? ""),
           );
           return;
         }
@@ -1458,11 +1693,14 @@ export class ZcodeBackend {
         if (!anyNewPart && silentTimeout && (Date.now() - sentAt) > silentTimeout) closeGate = "silent_timeout";
         else if (!anyNewPart && !silentTimeout && noProgressPolls >= ZERO_PART_POLL_LIMIT) closeGate = "zero_part";
         else if (stalled) closeGate = "stalled";
-        // 到点不等于收口：先看生命体征。outcome = "alive"（续命）/ "pending"
-        // （取证中）/ 其余为写进收口文案的取证事实。
+        // 到点不等于收口：先看生命体征。outcome = "alive"（续命）/ "retry_wait"
+        // （上游重试等待续命——第四种体征）/ "pending"（取证中）/ 其余为写进
+        // 收口文案的取证事实。
         let outcome = null;
         if (closeGate === null) {
           resetObservation();
+        } else if (upstreamRequests.retryGraceUntil(stallNow()) !== null) {
+          outcome = "retry_wait";
         } else if (streamRecent) {
           outcome = "alive";
         } else if (closeEvidence !== null) {
@@ -1480,20 +1718,29 @@ export class ZcodeBackend {
             outcome = "pending";
           }
         }
-        if (outcome === "alive") {
-          // 凭进程活动 / 文件变化续命时，把读到的体征落成转录事实——这段时间转录
-          // 里没有别的东西，Lead 下钻时靠它知道控制面看到了什么（流在收时已有
-          // streaming 事实）。
-          if (!streamRecent && (lastVitalSignEmitAt === null
+        if (outcome === "alive" || outcome === "retry_wait") {
+          // 续命即落转录事实（决定 0069）：凭进程活动 / 文件变化续命落各自的
+          // status；重试等待续命落 provider_retry（上游 API 重试的既有闭集成员，
+          // claude-code 后端同款映射）——全部零载荷（architecture §3.2：不带
+          // 状态码、次数、延迟），共用 VITAL_SIGN_EMIT_MIN_INTERVAL_MS 节流。
+          // 流在收时不在此处落事实（分片到达时已有节流的 streaming）。
+          if (!inGraceEpisode) {
+            inGraceEpisode = true;
+            lifeAttestations += 1;
+          }
+          const retryWait = outcome === "retry_wait";
+          const signs = retryWait ? ["provider_retry"] : (streamRecent ? [] : observedSigns);
+          if (signs.length > 0 && (lastVitalSignEmitAt === null
             || stallNow() - lastVitalSignEmitAt >= VITAL_SIGN_EMIT_MIN_INTERVAL_MS)) {
             lastVitalSignEmitAt = stallNow();
-            for (const status of observedSigns) yield runtimeActivityEvent(status);
+            for (const status of signs) yield runtimeActivityEvent(status);
           }
-          lifeAttestations += 1;
           resetObservation();
           // 清静默段、不喂自适应学习（kimiWeb 0046 B5② 同款）。零 part 的两道门
-          // 没有可清的静默段：门仍到点，下一拍重新开窗取证。
-          if (closeGate === "stalled") stallTracker.resetSilent();
+          // 没有可清的静默段：门仍到点，下一拍重新开窗取证。重试等待续命**不**
+          // 清静默段：退避窗一过、仍无进展即在预算处收口——窗内续命、窗外照旧，
+          // 不为每次退避重置预算时钟（有体征的运行没有自动上限，决定 0067）。
+          if (closeGate === "stalled" && !retryWait) stallTracker.resetSilent();
         } else if (outcome !== null && outcome !== "pending") {
           finish();
           const streamFact = lastStreamChunks > 0
@@ -1503,15 +1750,19 @@ export class ZcodeBackend {
           const sampled = outcome === "process activity unavailable"
             ? ""
             : ` — no vital signs: ${streamFact}; ${outcome}`;
+          // 本轮主轮请求链的最后状态已知时，文案末尾追加有界上游摘要（闭集
+          // status + 整数 statusCode + attempt/maxAttempts；未知就不加，上面的
+          // 文案逐字不变）——诊断按这段摘要归因，额度耗尽不再写成"无法区分"。
+          const upstreamNote = upstreamRequests.summarySuffix() ?? "";
           if (closeGate === "silent_timeout") {
             yield doneEvent(
               "failed",
-              `silent timeout: no turn parts observed within ${silentTimeout}ms (provider may have silently rejected)${sampled}`,
+              `silent timeout: no turn parts observed within ${silentTimeout}ms (provider may have silently rejected)${sampled}${upstreamNote}`,
             );
           } else if (closeGate === "zero_part") {
             yield doneEvent(
               "failed",
-              `zcode thinking budget exceeded (no turn parts observed for ${ZERO_PART_POLL_LIMIT} consecutive polls, silentTimeout absent — bounded exit)${sampled}`,
+              `zcode thinking budget exceeded (no turn parts observed for ${ZERO_PART_POLL_LIMIT} consecutive polls, silentTimeout absent — bounded exit)${sampled}${upstreamNote}`,
             );
           } else {
             const d = stallTracker.diagnostics();
@@ -1520,10 +1771,13 @@ export class ZcodeBackend {
               `zcode turn stalled (${streamFact}; ${outcome}${lifeAttestations > 0 ? `; ${lifeAttestations} earlier attestation(s) since the last progress` : ""}; `
                 + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
                 + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
-                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — no vital signs, bounded exit)`,
+                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — no vital signs, bounded exit)${upstreamNote}`,
             );
           }
           return;
+        } else {
+          // 门未到点 / 取证中（pending）：本拍没有续命——续命段结束，下段重计。
+          inGraceEpisode = false;
         }
         // 等待下一拍：interval 上界 + 进程死亡即时唤醒。
         await Promise.race([sleep(pollInterval), wire.waitClosed()]);

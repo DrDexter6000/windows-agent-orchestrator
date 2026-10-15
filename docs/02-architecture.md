@@ -1004,7 +1004,7 @@ src/
 │                              # code 闭集单一通用 SSOT：`DIAGNOSIS_CODES` = `PROVIDER_DIAGNOSIS_CODES` ∪ `PROVIDER_CAPACITY_DIAGNOSIS_CODES` ∪ `NO_EFFECT_DIAGNOSIS_CODES`（三组冻结码不互并，completed_empty 不并入 provider 集）；MCP run_diagnose/run_await_result 与内核真相共用同一 code 闭集，无第二份列表
 │                              # provider_auth 专属：entitlement 拒绝归 provider_auth；码表 = `PROVIDER_DIAGNOSIS_CODES`（5 值），code 永不回显原文
 │                              # provider_capacity：只有 failed 终态的持久 `run.error` 可归 `provider_capacity`（`rate_limited` / `quota_exhausted`），非终态 runtime rate-limit 活动不升级为失败；WAO 不据此自动重试或换 worker
-│                              # provider_disconnect：两判据——worker 活跃工作后静默≥120s 且 exit≠0；或 zcode 静默收口文案（silent_timeout / zero_part / stalled 三道门，锚定前缀匹配），收口本身不带上游原因，额度用尽、限流与网络中断在转录内无法区分；auth/config/capacity 先判，no_effect/crash 后判
+│                              # provider_disconnect：worker 活跃工作后静默≥120s 且 exit≠0；或本运行最后一条 run.error 是 zcode / kimi-web 的静默收口文案（锚定前缀的门表；kimi-web 的 serve 不应答归 unknown）。zcode 文案带上游摘要、最后的主轮请求 failed 且状态码 429/401/403 时先归 provider_capacity / provider_auth；auth/config/capacity 先判，no_effect/crash 后判
 │                              # completed-empty 真相：进程 exit 0 是传输完成，不等于 worker 产出了可用结果——completed run 若仅有 transport 活动（runtime init/thinking/zero-usage metrics）而无 assistant 文本/命令活动/文件写入/工具调用，归 no_effect + 内核码 completed_empty（NO_EFFECT_DIAGNOSIS_CODES）
 │                              # 投影规则：经 `isValidDiagnosisCode(category, code)` 配对校验投影——provider_auth 携带 provider 码、provider_capacity 携带 rate_limited/quota_exhausted、no_effect 携带 completed_empty、其余类别恒为 null；failed no_effect 仍 null，正常 completed 仍 none/null；有效 tool-only/command-only/file-written run 仍判 none
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）

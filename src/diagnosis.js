@@ -20,12 +20,27 @@
 //   budget                      — run.state_change reason:budget_exceeded
 //   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
 //   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
-//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据两条：
+//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据三条：
 //                                 ① worker 活跃工作后静默≥120s 且 exit≠0；
-//                                 ② zcode 静默收口文案（silent_timeout/zero_part/
-//                                   stalled 三道门）——zcode backend 在静默到点后有界
-//                                   收口；收口本身不带上游原因，额度用尽、限流与
-//                                   网络中断在转录内无法区分
+//                                 ② zcode/kimi-web 静默收口文案——backend 在静默到点后
+//                                   有界收口。kimi-web 逐门判定（见
+//                                   KIMI_WEB_SILENT_CLOSEOUT_GATES）：serve 作证本轮
+//                                   不活跃 / 输出到封顶 → provider_disconnect；
+//                                   serve 不应答（状态未知）→ unknown。zcode 的文案
+//                                   不带摘要 → 本类（收口本身不带上游原因）；带摘要
+//                                   且链尾（本轮最后一个主轮请求）failed、状态码在
+//                                   认证/限流闭集（429/401/403）→ 先升级 provider_
+//                                   capacity/provider_auth（升级出的类别与通用规则
+//                                   同款优先级——先于 evidence_passed_backend_
+//                                   failed；转录里有通过的证据审计时补「有产出」
+//                                   静态事实）；带摘要但不升级 → 本类的「带摘要
+//                                   事实」变体（事实带链尾状态与次数）；
+//                                 ③ zcode 以失败结束本轮的文案（step-finish
+//                                   reason error）带摘要：链尾 failed/stream_stalled/
+//                                   retry_scheduled → 本类；链尾 started/completed
+//                                   （请求已完成、轮次却失败）→ 照原路径走
+//                                   （evidence_passed_backend_failed/no_effect/
+//                                   unknown 等），只附摘要事实
 //   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
 //   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
 //   aborted_manual              — run.aborted 事件
@@ -269,9 +284,10 @@ const PROVIDER_DISCONNECT_MIN_EVENTS = 3;
 const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
 
 // zcode 静默收口文案 → provider_disconnect。zcode 车道上游额度窗口用尽时模型流停下来，
-// 收口本身不带上游原因（zcode 自己的事件流 session/events 里有 model.request.status，
-// backend 不读，见台账 TD-291）；backend 在静默到点后有界收口，run.error(phase:wait)
-// 的文案由控制面自己写、以三道门之一开头
+// 收口本身不带上游原因；backend 自 2026-10-15 起消费 `v4/telemetry/event` 通知里的
+// model.request.status，链尾已知时在文案末尾追加有界上游摘要（见 parseUpstreamSummary
+// ——摘要的升级/归类规则见 diagnoseFailureInner 的 4.4/4.6 槽注释）。backend 在静默
+// 到点后有界收口，run.error(phase:wait) 的文案由控制面自己写、以三道门之一开头
 //（src/backends/zcode.js closeGate 文案）。锚定前缀 = 只匹配这三道门的原文案，
 // 不匹配恰好引用这些句子的其它错误；gate 名沿用 backend 的 closeGate 闭集。
 const SILENT_CLOSEOUT_GATES = Object.freeze([
@@ -285,6 +301,160 @@ const SILENT_CLOSEOUT_GATE_FACTS = Object.freeze({
   zero_part: "zero_part 门：零 part 阶段思考预算拍数用尽（silentTimeout 缺席）",
   stalled: "stalled 门：已有产出后的停滞预算到点",
 });
+
+// kimi-web 静默收口文案 → 逐门判定（src/backends/kimiWeb.js 的收口门文案）。kimi-web
+// 车道的 turn 迟迟没有进展时 backend 有界收口，run.error(phase:wait) 的文案由控制面
+// 自己写、以门表前缀开头。收口本身不带上游原因；收口时 serve 有没有被问到、当时怎么
+// 答，决定能写哪些事实、归哪一类：
+//   - turn 一直没出现（silentTimeout 到点 / silentTimeout 缺席时的拍数兜底）：收口时
+//     没有向 serve 取证——上游拒绝、serve 未受理与网络中断在转录内无法区分；
+//   - 停滞到点且 serve 作证本轮不活跃 → provider_disconnect（serve 的状态已知）；
+//   - 停滞到点且 serve 不应答 → unknown（真挂死与探针失败在转录内无法区分，不冒充
+//     已知的 provider 侧中断）；
+//   - serve 一直作证本轮在跑、输出不增长到封顶 → provider_disconnect；
+//   - 两道历史门（8 拍无增长 / 不带证词子句的自适应停滞）：收口时不问 serve。
+// 锚定前缀 = 只匹配这些收口文案的开头，不匹配恰好引用这些句子的其它错误；带
+// attestation 子句的两道停滞门必须排在历史兜底门之前（它们同以 silent stretch 开头）。
+// 静态事实句是闭集映射，无原文回显（毫秒读数与拍数不进证据）。
+const KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE = "收口本身不带上游原因";
+const KIMI_WEB_SILENT_CLOSEOUT_TURN_ABSENT_NO_CAUSE =
+  "收口本身不带上游原因——上游拒绝、serve 未受理与网络中断在本转录内无法区分";
+const KIMI_WEB_SILENT_CLOSEOUT_GATES = Object.freeze([
+  {
+    gate: "silent_timeout",
+    category: "provider_disconnect",
+    re: /^silent timeout: turn for this prompt not observed within /,
+    fact: "silentTimeout 到点仍未见本轮 turn（turn 一直没有出现）",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_TURN_ABSENT_NO_CAUSE,
+  },
+  {
+    gate: "turn_absent",
+    category: "provider_disconnect",
+    re: /^turn stalled \(no progress\): turn not observed for /,
+    fact: "silentTimeout 缺席时无进展拍数兜底到点仍未见本轮 turn",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_TURN_ABSENT_NO_CAUSE,
+  },
+  {
+    gate: "stalled_attestation_inactive",
+    category: "provider_disconnect",
+    re: /^turn stalled \(no progress\): silent stretch [^\r\n]*attestation: inactive\b/,
+    fact: "停滞到点时 serve 作证本轮已不活跃",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
+  },
+  {
+    gate: "stalled_attestation_unavailable",
+    category: "unknown",
+    re: /^turn stalled \(no progress\): silent stretch [^\r\n]*attestation: unavailable\b/,
+    fact: "停滞到点时 serve 不应答，serve 的状态未知",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
+  },
+  {
+    gate: "serve_attested_cap",
+    category: "provider_disconnect",
+    re: /^turn stalled: serve-attested silence since the last output growth exceeded the /,
+    fact: "serve 一直作证本轮在跑，但输出一直不增长，直到封顶",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
+  },
+  {
+    gate: "legacy_poll_no_growth",
+    category: "provider_disconnect",
+    re: /^turn stalled \(no progress\): turn state unchanged and no steps\/frames growth for /,
+    fact: "8 拍无增长的停滞到点（历史门，收口时没有向 serve 取证）",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
+  },
+  {
+    gate: "legacy_adaptive_budget",
+    category: "provider_disconnect",
+    re: /^turn stalled \(no progress\): silent stretch /,
+    fact: "自适应预算的停滞到点（历史门，文案不带证词子句，收口时没有向 serve 取证）",
+    causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
+  },
+]);
+
+// zcode 自己以失败结束本轮的文案（backend 固定句式，step-finish reason error
+// 的 part 不带错误明细）。
+const ZCODE_TURN_FAILED_SIGNAL = /^zcode turn failed \(step-finish reason error/;
+
+// zcode 收口/失败文案末尾的上游主轮请求摘要（backend summarySuffix 生成，格式
+// 锚定在句尾）：`; upstream: last main-turn request <status> (statusCode N,
+// attempt A/M)`——statusCode 段与 attempt 段按已知性取舍。解析只读这一段，只
+// 取闭集 status 与整数；解析不出 = 当作没有摘要，走既有路径。
+const UPSTREAM_SUMMARY_STATUS_SET = new Set([
+  "model_request_started",
+  "model_request_completed",
+  "model_request_failed",
+  "model_retry_scheduled",
+  "model_stream_stalled",
+]);
+const UPSTREAM_SUMMARY_RE = /; upstream: last main-turn request ([a-z_]+?)(?: \(([^()]*)\))?$/;
+
+/**
+ * 解析 zcode 收口文案末尾的上游摘要。只接受 backend 生成过的三种形状（带
+ * statusCode+attempt / 仅 attempt / 仅 status）；闭集外的 status、越界的
+ * statusCode、认不出的括号内容一律返回 null（fail-closed，不当摘要消费）。
+ * @param {string} error - run.error 文本
+ * @returns {{status: string, statusCode: number|null, attempt: number|null, maxAttempts: number|null}|null}
+ */
+function parseUpstreamSummary(error) {
+  if (typeof error !== "string") return null;
+  const m = error.match(UPSTREAM_SUMMARY_RE);
+  if (!m || !UPSTREAM_SUMMARY_STATUS_SET.has(m[1])) return null;
+  const summary = { status: m[1], statusCode: null, attempt: null, maxAttempts: null };
+  if (m[2] === undefined) return summary;
+  const codeMatch = m[2].match(/^statusCode (\d+)(?:, attempt (\d+)\/(\d+))?$/);
+  const attemptMatch = m[2].match(/^attempt (\d+)\/(\d+)$/);
+  if (codeMatch) {
+    const statusCode = Number(codeMatch[1]);
+    if (statusCode < 100 || statusCode > 599) return null;
+    summary.statusCode = statusCode;
+    if (codeMatch[2] !== undefined) {
+      summary.attempt = Number(codeMatch[2]);
+      summary.maxAttempts = Number(codeMatch[3]);
+    }
+    return summary;
+  }
+  if (attemptMatch) {
+    summary.attempt = Number(attemptMatch[1]);
+    summary.maxAttempts = Number(attemptMatch[2]);
+    return summary;
+  }
+  return null;
+}
+
+/**
+ * 剥掉 zcode 收口/失败文案末尾的上游摘要段。只剥 parseUpstreamSummary 认得出、
+ * 锚定在句尾的那一段（backend summarySuffix 生成）；标记子串之后不是合法摘要
+ * 时原文不动。通用文本规则（PROVIDER_DENIAL_SIGNALS / AUTH_SIGNAL / 终态额度
+ * 匹配）一律对剥离结果匹配——摘要里的 "statusCode 401" 是控制面自己的投影，
+ * 不是上游发来的错误文本；不是摘要的文本照常参与匹配。
+ * @param {string} text
+ * @returns {string}
+ */
+function stripUpstreamSummary(text) {
+  if (parseUpstreamSummary(text) === null) return text;
+  return text.slice(0, text.match(UPSTREAM_SUMMARY_RE).index);
+}
+
+// 摘要事实句（闭集字段拼接，无原文回显）。两副面孔：
+//   - disconnect 版：归 provider_disconnect 时用——剩余原因不可区分的收尾成立；
+//   - 中性版：链尾 started/completed、照原路径走时附加——只陈述链尾，不断言
+//     流中断（请求已完成、轮次却失败不是"流中断"）。
+function upstreamDetailText(u) {
+  return u.statusCode !== null
+    ? `（statusCode ${u.statusCode}${u.attempt !== null ? `，attempt ${u.attempt}/${u.maxAttempts}` : ""}）`
+    : u.attempt !== null ? `（attempt ${u.attempt}/${u.maxAttempts}）` : "";
+}
+function upstreamRecoveredNote(u) {
+  return u.status === "model_request_started" || u.status === "model_request_completed"
+    ? "（链尾已见 started/completed——此前的失败若有过即已恢复，不当根因）"
+    : "";
+}
+function upstreamDisconnectFact(u) {
+  return `上游主轮请求摘要：最后状态 ${u.status}${upstreamDetailText(u)}${upstreamRecoveredNote(u)}；剩余原因在本转录内无法进一步区分（provider 流中断）`;
+}
+function upstreamNeutralFact(u) {
+  return `上游主轮请求摘要：最后状态 ${u.status}${upstreamDetailText(u)}${upstreamRecoveredNote(u)}`;
+}
 
 /**
  * 诊断一个 run transcript 的失败原因。只给证据，不给处方。
@@ -524,28 +694,56 @@ function diagnoseFailureInner(events, expectedRunId) {
     return { category: "config_conflict", evidence };
   }
 
+  // 1.5) zcode 摘要的事实准备（只绑定真正终局的那条错误）：摘要只在**本运行
+  //      最后一条** run.error 是带摘要的 zcode 收口/失败文案时才算数——较早的
+  //      带摘要收口不抢其后真终局错误（认证/额度文本、进程退出等）的分类。升级
+  //      动作在 4.4 槽执行（后于通用文本规则与既有终局原因、先于
+  //      evidence_passed_backend_failed）；不升级的归类在 4.6 槽，4.6 的收口
+  //      门表规则（zcode、kimi-web）同样只认 lastErrorEvent。
+  //      通用文本规则（denial/auth/终态额度）一律对 stripUpstreamSummary 之后
+  //      的文本匹配——不靠排序防止摘要里的 401 被误抢。
+  let lastErrorEvent = null;
+  for (let i = evs.length - 1; i >= 0; i -= 1) {
+    const e = evs[i];
+    if (e.type === "run.error" && typeof e.error === "string") { lastErrorEvent = e; break; }
+  }
+  const lastUpstream = lastErrorEvent !== null
+    && (SILENT_CLOSEOUT_GATES.some((g) => g.re.test(lastErrorEvent.error))
+      || ZCODE_TURN_FAILED_SIGNAL.test(lastErrorEvent.error))
+    ? parseUpstreamSummary(lastErrorEvent.error)
+    : null;
+  // 未被升级/流中断消费的中性摘要事实：链尾 started/completed（请求已完成、轮次
+  // 却失败）时收口走原路径，结论只附这条事实——只陈述链尾，不断言流中断。
+  const pendingUpstreamFact = lastUpstream !== null
+    && (lastUpstream.status === "model_request_started" || lastUpstream.status === "model_request_completed")
+    ? { eventType: "run.error", fact: upstreamNeutralFact(lastUpstream) }
+    : null;
+
   // 2) provider_auth：真正的 401/身份验证/unauthorized/无效 key（最优先，常见且确定）。
   // M12-6 FR-02: subscription/org-policy/API-key denial FACTS also classify as
   // provider_auth even when they carry no 401/unauthorized token (production
   // fact: "Your organization has disabled Claude subscription access ...").
   // The code is a closed-set label from PROVIDER_DENIAL_SIGNALS — the evidence
   // fact carries the code, never the raw error message.
+  // 文本匹配对 stripUpstreamSummary 之后的文本做（zcode 收口文案末尾的上游摘要
+  // 不是上游错误文本——摘要里的 "statusCode 401" 不得触发认证规则）。
   const denialError = evs.find(
     (e) => e.type === "run.error" && typeof e.error === "string"
-      && PROVIDER_DENIAL_SIGNALS.some((s) => s.re.test(e.error)),
+      && PROVIDER_DENIAL_SIGNALS.some((s) => s.re.test(stripUpstreamSummary(e.error))),
   );
   if (denialError) {
-    const code = classifyProviderAuthCode(denialError.error);
+    const code = classifyProviderAuthCode(stripUpstreamSummary(denialError.error));
     evidence.push({ eventType: "run.error", fact: `provider access denied（${code}）` });
     return { category: "provider_auth", code, evidence };
   }
 
   const authError = evs.find(
-    (e) => e.type === "run.error" && typeof e.error === "string" && AUTH_SIGNAL.test(e.error),
+    (e) => e.type === "run.error" && typeof e.error === "string"
+      && AUTH_SIGNAL.test(stripUpstreamSummary(e.error)),
   );
   if (authError) {
     evidence.push({ eventType: "run.error", fact: `认证/身份验证类错误：${authError.error}` });
-    return { category: "provider_auth", code: classifyProviderAuthCode(authError.error), evidence };
+    return { category: "provider_auth", code: classifyProviderAuthCode(stripUpstreamSummary(authError.error)), evidence };
   }
 
   // A capacity limit is a bound terminal execution fact, not static registry
@@ -555,11 +753,11 @@ function diagnoseFailureInner(events, expectedRunId) {
   // actual terminal cause. Process backends report provider exits in phase=wait.
   const terminalError = findTerminalProviderError(evs, expectedRunId);
   const capacityError = terminalError
-    && classifyProviderCapacityCode(terminalError.error) !== null
+    && classifyProviderCapacityCode(stripUpstreamSummary(terminalError.error)) !== null
     ? terminalError
     : null;
   if (capacityError) {
-    const code = classifyProviderCapacityCode(capacityError.error);
+    const code = classifyProviderCapacityCode(stripUpstreamSummary(capacityError.error));
     evidence.push({ eventType: "run.error", fact: `provider capacity unavailable（${code}）` });
     return { category: "provider_capacity", code, evidence };
   }
@@ -598,6 +796,41 @@ function diagnoseFailureInner(events, expectedRunId) {
     return { category: "scorecard_fail", evidence };
   }
 
+  // 4.4) zcode 上游摘要升级：本运行最后一条 run.error 是带摘要的 zcode 收口/
+  //      失败文案，且链尾（本轮最后一个主轮请求）model_request_failed、状态码
+  //      在限流/认证闭集（429/401/403）→ 按状态码升级根因。排序：后于通用
+  //      auth/config/capacity 文本规则与 timeout/budget/scorecard（真错误文本与
+  //      既有终局原因先判——结论不被摘要覆盖），先于
+  //      evidence_passed_backend_failed（升级出的 provider_capacity/
+  //      provider_auth 与通用规则同款优先级：上游终态失败是更具体的根因）。
+  //      升级时转录里有通过的证据审计（run.evidence_audit passed:true）→ 补一条
+  //      静态事实「有产出」，Lead 不因升级漏看产出事实。
+  if (state === "failed" && lastUpstream !== null
+    && lastUpstream.status === "model_request_failed"
+    && (lastUpstream.statusCode === 429 || lastUpstream.statusCode === 401
+      || lastUpstream.statusCode === 403)) {
+    const detail = upstreamDetailText(lastUpstream);
+    const evidenceAudit = evs.find((e) => e.type === "run.evidence_audit" && e.passed === true);
+    if (lastUpstream.statusCode === 429) {
+      evidence.push({
+        eventType: "run.error",
+        fact: `zcode 上游摘要：本轮最后一个主轮请求以 model_request_failed 结束${detail}——限流类信号（rate_limited）；单凭 429 不能断言额度耗尽`,
+      });
+      if (evidenceAudit) {
+        evidence.push({ eventType: "run.evidence_audit", fact: "有产出（证据审计通过），需人工确认" });
+      }
+      return { category: "provider_capacity", code: "rate_limited", evidence };
+    }
+    evidence.push({
+      eventType: "run.error",
+      fact: `zcode 上游摘要：本轮最后一个主轮请求以 model_request_failed 结束${detail}——认证/授权类失败（unauthorized）`,
+    });
+    if (evidenceAudit) {
+      evidence.push({ eventType: "run.evidence_audit", fact: "有产出（证据审计通过），需人工确认" });
+    }
+    return { category: "provider_auth", code: "unauthorized", evidence };
+  }
+
   // 4.5) TD-95 #5 + TD-80 evidence_passed_backend_failed：backend 崩了但证据通过了。
   //   runManager 的 _auditEvidenceOnFailure 在 failed 路径写 run.evidence_audit {passed:true}。
   //   必须在 crash/provider_disconnect/no_effect 之前判——否则会被 exit code 抢归 crash。
@@ -624,6 +857,9 @@ function diagnoseFailureInner(events, expectedRunId) {
         eventType: hasEvidenceAudit ? "run.evidence_audit" : "run.event",
         fact: `backend 进程失败但证据通过：${a.fileWrittenCount} 个文件写入 + ${a.commandExit0Count} 个命令 exit0。任务可能做对了，需人工确认`,
       });
+      // 收口带 started/completed 链尾的摘要时（不升级、不归流中断）附中性摘要
+      // 事实——只陈述链尾，结论仍是「有产出需人工确认」。
+      if (pendingUpstreamFact !== null) evidence.push(pendingUpstreamFact);
       return { category: "evidence_passed_backend_failed", evidence };
     }
   }
@@ -659,33 +895,79 @@ function diagnoseFailureInner(events, expectedRunId) {
     }
   }
 
-  // 4.6) provider_disconnect：provider 侧流中断（非 runtime 真崩）。两条判据：
-  //      ① zcode 静默收口文案——上游额度窗口用尽时模型流停下来，backend 有界
-  //      收口（三道门之一），收口本身不带上游原因。这类 run 此前落
-  //      no_effect/crash，且文案里的毫秒读数曾把 AUTH_SIGNAL 的裸 401 误触发成
-  //      provider_auth（已改 \b401\b）。排序：真认证/配置冲突/额度规则之后
-  //      （上游真给了错误文本的仍按那些规则判），no_effect/crash 之前。证据只给
-  //      事实——哪一道门收的口、上游没发错误或额度信号、额度用尽/限流/网络中断
-  //      在转录内无法区分；不给处方、不回显原文。
+  // 4.6) provider_disconnect：provider 侧流中断（非 runtime 真崩）。判据：
+  //      ① 本运行最后一条 run.error 是 zcode 静默收口文案——上游额度窗口用尽时
+  //      模型流停下来，backend 有界收口（三道门之一）。无上游摘要的文案（历史
+  //      转录，或本轮主轮请求链状态
+  //      未知）：收口本身不带上游原因。带摘要但不升级的文案走本条的「带摘要
+  //      事实」变体——事实带链尾状态与次数，不再写「收口本身不带上游原因」。
+  //      这类 run 此前落 no_effect/crash，且文案里的毫秒读数曾把 AUTH_SIGNAL 的
+  //      裸 401 误触发成 provider_auth（已改 \b401\b）。排序：真认证/配置冲突/
+  //      额度规则之后（上游真给了错误文本的仍按那些规则判），
+  //      evidence_passed_backend_failed 之后（有产出的运行仍归后者），
+  //      no_effect/crash 之前。证据只给事实；不给处方、不回显原文。
   if (state === "failed") {
-    const closeoutError = evs.find(
-      (e) => e.type === "run.error" && typeof e.error === "string"
-        && SILENT_CLOSEOUT_GATES.some((g) => g.re.test(e.error)),
-    );
-    if (closeoutError) {
-      const gate = SILENT_CLOSEOUT_GATES.find((g) => g.re.test(closeoutError.error));
+    const gate = lastErrorEvent !== null
+      ? SILENT_CLOSEOUT_GATES.find((g) => g.re.test(lastErrorEvent.error))
+      : undefined;
+    if (gate) {
       // "无生命体征"只在收口文案自己带着取样结论时才写：进程活动取样不可用时，零 part 两道
       // 门的文案不带这一句。
-      const silence = /no vital signs/.test(closeoutError.error) ? "无生命体征的静默后" : "静默到点后";
+      const silence = /no vital signs/.test(lastErrorEvent.error) ? "无生命体征的静默后" : "静默到点后";
       evidence.push({
         eventType: "run.error",
         fact: `zcode 有界收口（${SILENT_CLOSEOUT_GATE_FACTS[gate.gate]}）：${silence}由控制面收口，run 以 failed 终态`,
       });
       evidence.push({
         eventType: "run.error",
-        fact: "静默收口本身不带上游原因——额度窗口用尽、限流与网络中断在本转录内无法区分（provider 流中断）",
+        fact: lastUpstream !== null
+          ? upstreamDisconnectFact(lastUpstream)
+          : "静默收口本身不带上游原因——额度窗口用尽、限流与网络中断在本转录内无法区分（provider 流中断）",
       });
       return { category: "provider_disconnect", evidence };
+    }
+    // ①' zcode 以失败结束本轮（step-finish reason error）的文案带摘要（绑定本
+    //    运行最后一条 run.error）：链尾 failed/stream_stalled/retry_scheduled →
+    //    provider_disconnect（轮次失败且请求没有成功完成——流中断仍是最诚实的
+    //    归因）；链尾 started/completed → 不归本类（请求已完成、轮次却失败，
+    //    不虚构「流中断」），照原路径走、只附 pendingUpstreamFact。
+    if (lastUpstream !== null && ZCODE_TURN_FAILED_SIGNAL.test(lastErrorEvent.error)
+      && (lastUpstream.status === "model_request_failed"
+        || lastUpstream.status === "model_stream_stalled"
+        || lastUpstream.status === "model_retry_scheduled")) {
+      evidence.push({
+        eventType: "run.error",
+        fact: "zcode 以失败结束本轮（step-finish reason error）",
+      });
+      evidence.push({
+        eventType: "run.error",
+        fact: upstreamDisconnectFact(lastUpstream),
+      });
+      return { category: "provider_disconnect", evidence };
+    }
+  }
+
+  // 4.6) 本运行最后一条 run.error 是 kimi-web 静默收口文案 → 逐门判定（与 zcode
+  //      同一槽位、同一绑定；门表见
+  //      KIMI_WEB_SILENT_CLOSEOUT_GATES）。kimi-web 车道的 turn 迟迟没有进展时
+  //      backend 有界收口，文案由控制面自己写。证据只写门表里的静态事实——哪道门
+  //      收的口、serve 当时怎么说（turn 未出现两道门与两道历史门没有问 serve；停滞门
+  //      记 serve 的作证状态），以及收口本身不带上游原因；毫秒读数与拍数不回显、不给
+  //      处方。排序与 zcode 相同：auth/config/capacity 之后（上游真给了错误文本的仍
+  //      按那些规则判，如 "kimi turn failed (… 429 …)" 归 provider_capacity），
+  //      no_effect/crash 之前；空答复收口（"kimi turn completed without assistant
+  //      text …"）不在门表内，照既有优先级走。
+  if (state === "failed") {
+    const gate = lastErrorEvent !== null
+      ? KIMI_WEB_SILENT_CLOSEOUT_GATES.find((g) => g.re.test(lastErrorEvent.error))
+      : undefined;
+    if (gate) {
+      evidence.push({
+        eventType: "run.error",
+        fact: `kimi-web 有界收口（${gate.gate} 门）：${gate.fact}；run 以 failed 终态`,
+      });
+      evidence.push({ eventType: "run.error", fact: gate.causeFact });
+      return { category: gate.category, evidence };
     }
   }
 
@@ -734,6 +1016,7 @@ function diagnoseFailureInner(events, expectedRunId) {
         eventType: "run.event",
         fact: `worker 有 ${a.activityEventCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
       });
+      if (pendingUpstreamFact !== null) evidence.push(pendingUpstreamFact);
       return { category: "no_effect", evidence };
     }
   }
@@ -783,9 +1066,10 @@ function diagnoseFailureInner(events, expectedRunId) {
     return { category: "crash", evidence };
   }
 
-  // 7) 有失败终态但无明确信号 → unknown（不强归类）。
+  // 7) 有失败终态但无明确信号 → unknown（不强归类）。zcode 收口带 started/
+  //    completed 链尾的摘要时仍附中性摘要事实（只陈述链尾）。
   if (state === "failed" || state === "aborted" || state === "timed_out") {
-    return { category: "unknown", evidence: [] };
+    return { category: "unknown", evidence: pendingUpstreamFact !== null ? [pendingUpstreamFact] : [] };
   }
 
   // 空输入 / 无状态（无法判断）→ unknown。仍在运行（非终态）→ none（无失败可诊断）。

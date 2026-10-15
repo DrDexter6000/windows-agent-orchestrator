@@ -392,6 +392,335 @@ test("zcode 静默收口排序: 早前瞬时 429 + 终态收口文案 → provid
   assert.equal(d.category, "provider_disconnect", "终态位是收口文案 → 静默收口判据接管");
 });
 
+// ---------------------------------------------------------------------------
+// 2026-10-15：zcode 收口文案的上游主轮请求摘要（backend 自本轮起追加）
+//
+// backend 消费 `v4/telemetry/event` 的 model.request.status（仅本会话、本轮
+// turnId、querySource=main_turn），链尾已知时在收口文案末尾追加
+// `; upstream: last main-turn request <status> (statusCode N, attempt A/M)`
+// （只含闭集 status 与整数，绝不带 reason）。诊断契约：
+//   - 摘要只绑定本运行**最后一条** run.error（必须是带摘要的 zcode 收口/失败
+//     文案）——较早的带摘要收口不抢其后真终局错误（认证/额度文本）的分类；
+//   - 链尾 model_request_failed + statusCode 429 → provider_capacity/rate_limited
+//     （单凭 429 不断言额度耗尽）；+ 401/403 → provider_auth/unauthorized。
+//     升级排在通用 auth/config/capacity 文本规则与 timeout/budget/scorecard 之后、
+//     evidence_passed_backend_failed 之前（真错误文本与既有终局原因先判）；
+//     升级时转录里有通过的证据审计 → 补「有产出（证据审计通过），需人工确认」；
+//   - 不升级的收口带摘要 → 4.6 槽 provider_disconnect 的「带摘要事实」变体
+//     （事实带链尾状态与次数；有产出的运行仍先归 evidence_passed_backend_failed）；
+//   - step-finish error 带摘要：链尾 failed/stream_stalled/retry_scheduled →
+//     provider_disconnect；链尾 started/completed → 照原路径走、只附中性摘要
+//     事实（不断言流中断）；
+//   - 通用文本规则对剥掉摘要后的文本匹配——摘要里的 "statusCode 401" 不会被
+//     AUTH_SIGNAL 抢走，不靠排序防误抢；
+//   - 无摘要的历史文案结论不变（上面的既有用例组即回归钉）。
+// ---------------------------------------------------------------------------
+function zcodeCloseoutFixture(runId, error) {
+  return [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-15T09:01:00.000Z" },
+    { type: "run.error", phase: "wait", error, runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+}
+
+// 有产出（file_written + 通过的证据审计）的 zcode 收口运行——升级与 4.6 都不得
+// 越过 evidence_passed_backend_failed。
+function zcodeEvidenceCloseoutFixture(runId, error) {
+  return [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "file_written", runId, ts: "2026-10-15T09:01:00.000Z" },
+    { type: "run.evidence_audit", passed: true, runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.error", phase: "wait", error, runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+}
+
+test("zcode 上游摘要: 链尾 model_request_failed + statusCode 429 → provider_capacity/rate_limited", () => {
+  const runId = "run_zcode_upstream_429";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 429, attempt 11/11)",
+  ), runId);
+  assert.equal(d.category, "provider_capacity", "链尾 failed + 429 → 限流类");
+  assert.equal(d.code, "rate_limited", "单凭 429 不断言额度耗尽");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /model_request_failed/);
+  assert.match(joined, /statusCode 429/);
+  assert.match(joined, /attempt 11\/11/);
+  assert.match(joined, /不能断言额度耗尽/);
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("zcode 上游摘要: 链尾 model_request_failed + statusCode 401 → provider_auth/unauthorized", () => {
+  const runId = "run_zcode_upstream_401";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected); upstream: last main-turn request model_request_failed (statusCode 401, attempt 2/11)",
+  ), runId);
+  assert.equal(d.category, "provider_auth", "链尾 failed + 401 → 认证类");
+  assert.equal(d.code, "unauthorized", "闭集兜底码——摘要里没有更具体的拒绝形状，不猜密钥/订阅/组织策略");
+  assert.ok(!JSON.stringify(d.evidence).includes("api_key"), "不一概说成密钥错误");
+});
+
+test("zcode 上游摘要: 链尾 retry_scheduled → provider_disconnect，事实带最后状态与次数", () => {
+  const runId = "run_zcode_upstream_retry";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_retry_scheduled (statusCode 429, attempt 6/11)",
+  ), runId);
+  assert.equal(d.category, "provider_disconnect", "重试安排不是终局失败——仍归流中断");
+  assert.equal(d.code, null);
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /最后状态 model_retry_scheduled/, "事实带链尾状态");
+  assert.match(joined, /attempt 6\/11/);
+  assert.match(joined, /stalled 门/, "门事实保留");
+  assert.notEqual(d.category, "provider_capacity", "退避中的 429 不是终局限流");
+});
+
+test("zcode 上游摘要: 已恢复链（链尾 completed）→ provider_disconnect，失败不当根因", () => {
+  const runId = "run_zcode_upstream_recovered";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_request_completed (attempt 2/11)",
+  ), runId);
+  assert.equal(d.category, "provider_disconnect", "失败后重试成功再静默——照旧归流中断");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /最后状态 model_request_completed/);
+  assert.match(joined, /已恢复/, "事实写明失败已恢复、不当根因");
+});
+
+test("zcode 上游摘要: zcode 以失败结束本轮的文案带摘要 → 同款归类（step-finish error 路径）", () => {
+  const runId = "run_zcode_upstream_turnfailed";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one); upstream: last main-turn request model_request_failed (statusCode 429, attempt 11/11)",
+  ), runId);
+  assert.equal(d.category, "provider_capacity", "失败结束本轮的路径同样按摘要升级");
+  assert.equal(d.code, "rate_limited");
+});
+
+test("zcode 上游摘要排序: 链尾非 failed 但摘要含 statusCode 401 → 不误判 provider_auth（剥离匹配）", () => {
+  // 摘要里 "statusCode 401" 的裸 401 会被 AUTH_SIGNAL 抢走；通用文本规则对剥掉
+  // 摘要后的文本匹配，按链尾（retry_scheduled，非终局）归 provider_disconnect。
+  const runId = "run_zcode_upstream_401_notfailed";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_retry_scheduled (statusCode 401, attempt 4/11)",
+  ), runId);
+  assert.equal(d.category, "provider_disconnect", "链尾非 failed：statusCode 401 不构成认证根因");
+  assert.notEqual(d.category, "provider_auth");
+});
+
+test("zcode 上游摘要排序: 转录里另有真 401 文本 → 仍 provider_auth（新规则不抢真错误文本）", () => {
+  const runId = "run_zcode_upstream_real401";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "401 Invalid authentication credentials", runId, ts: "2026-10-15T09:00:10.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:15:05.000Z",
+      error: "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected); upstream: last main-turn request model_retry_scheduled (statusCode 429, attempt 4/11)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:15:05.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_auth", "上游真发了认证错误文本 → 真文本规则先判");
+});
+
+test("zcode 上游摘要边界: 毫秒读数 401872ms + 摘要 statusCode 503 → provider_disconnect（读数与状态码互不误触发）", () => {
+  const runId = "run_zcode_upstream_503";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (12 model stream chunk(s) seen this turn, none in the last 60s; process activity unavailable; silent stretch 401872ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling; max recovered gap this turn 14010ms — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 503, attempt 5/11)",
+  ), runId);
+  assert.equal(d.category, "provider_disconnect", "503 不在认证/限流闭集 → 仍归流中断；401872ms 不触发认证");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /statusCode 503/, "事实如实带状态码");
+});
+
+test("zcode 上游摘要边界: 解析不出的伪摘要（闭集外 status / 越界状态码）当作没有摘要", () => {
+  const runId = "run_zcode_upstream_garbage";
+  const bad1 = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget — no vital signs, bounded exit); upstream: last main-turn request model_request_exploded (statusCode 429, attempt 1/11)",
+  ), runId);
+  assert.equal(bad1.category, "provider_disconnect", "闭集外 status → 无摘要路径");
+  assert.ok(!bad1.evidence.some((e) => e.fact.includes("model_request_exploded")), "闭集外值不进事实");
+
+  const bad2 = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 99999, attempt 1/11)",
+  ), runId);
+  assert.equal(bad2.category, "provider_disconnect", "越界 statusCode → 无摘要路径");
+});
+
+// ---------------------------------------------------------------------------
+// 会审修正（consult_202610151937394754iihpu sol/opus）：不升级的摘要分支回到
+// 4.6 槽——有产出的运行不再被带 completed / failed-500 摘要的收口抢成
+// provider_disconnect；摘要只绑定最后一条 run.error；升级时补「有产出」事实。
+// ---------------------------------------------------------------------------
+test("zcode 上游摘要×证据: evidence_audit passed + completed 摘要 → 仍归 evidence_passed_backend_failed（非 provider_disconnect）", () => {
+  const runId = "run_zcode_upstream_ev_completed";
+  const d = diagnoseFailure(zcodeEvidenceCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_request_completed (attempt 2/11)",
+  ), runId);
+  assert.equal(d.category, "evidence_passed_backend_failed", "有产出的运行：摘要（链尾 completed，不升级）不得越过证据审计槽");
+  assert.notEqual(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /最后状态 model_request_completed/, "中性摘要事实附在结论里（只陈述链尾，不断言流中断）");
+});
+
+test("zcode 上游摘要×证据: evidence_audit passed + failed 500 摘要 → 仍归 evidence_passed_backend_failed", () => {
+  const runId = "run_zcode_upstream_ev_500";
+  const d = diagnoseFailure(zcodeEvidenceCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 500, attempt 3/11)",
+  ), runId);
+  assert.equal(d.category, "evidence_passed_backend_failed", "500 不在升级闭集——有产出的运行仍归证据审计槽");
+  assert.notEqual(d.category, "provider_disconnect");
+});
+
+test("zcode 上游摘要×证据: failed 429 摘要升级 provider_capacity，且证据里有「有产出」静态事实", () => {
+  const runId = "run_zcode_upstream_ev_429";
+  const d = diagnoseFailure(zcodeEvidenceCloseoutFixture(
+    runId,
+    "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 429, attempt 11/11)",
+  ), runId);
+  assert.equal(d.category, "provider_capacity", "链尾 failed + 429 升级先于证据审计槽");
+  assert.equal(d.code, "rate_limited");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /有产出（证据审计通过），需人工确认/, "升级不吞掉产出事实");
+});
+
+test("zcode 上游摘要×step-finish: 链尾 completed（请求已完成、轮次却失败）→ 不归 provider_disconnect，照原路径走", () => {
+  const runId = "run_zcode_upstream_tf_completed";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "tool_use", runId, ts: "2026-10-15T09:01:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:12:00.000Z",
+      error: "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one); upstream: last main-turn request model_request_completed (attempt 2/11)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.notEqual(d.category, "provider_disconnect", "请求已成功完成、轮次却失败——不虚构流中断");
+  assert.equal(d.category, "no_effect", "照原路径走（有 tool_use 活动、无产出）");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /最后状态 model_request_completed/, "只附中性摘要事实");
+});
+
+test("zcode 上游摘要×step-finish: 链尾 stream_stalled → 仍归 provider_disconnect（轮次失败且请求未成功完成）", () => {
+  const runId = "run_zcode_upstream_tf_stalled";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one); upstream: last main-turn request model_stream_stalled (attempt 3/11)",
+  ), runId);
+  assert.equal(d.category, "provider_disconnect", "流停滞 + 轮次失败——流中断归因成立");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /zcode 以失败结束本轮/, "事实写明 step-finish error 路径");
+  assert.match(joined, /最后状态 model_stream_stalled/, "事实带链尾状态");
+});
+
+test("zcode 上游摘要×绑定: 较早的带 completed 摘要收口 + 终局 provider quota exhausted → provider_capacity", () => {
+  const runId = "run_zcode_upstream_lastbind";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-15T09:01:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:05:00.000Z",
+      error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget — no vital signs, bounded exit); upstream: last main-turn request model_request_completed (attempt 2/11)",
+    },
+    { type: "run.error", phase: "wait", error: "provider quota exhausted", runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_capacity", "摘要只绑定最后一条 run.error——终局额度文本先判");
+  assert.equal(d.code, "quota_exhausted");
+});
+
+test("zcode 上游摘要×绑定: 较早的带 completed 摘要收口 + 终局进程退出 → 与只有终局错误时同归 crash", () => {
+  const runId = "run_zcode_upstream_lastbind_exit";
+  const head = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-10-15T09:01:00.000Z" },
+  ];
+  const earlierCloseout = {
+    type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:05:00.000Z",
+    error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget — no vital signs, bounded exit); upstream: last main-turn request model_request_completed (attempt 2/11)",
+  };
+  const tail = [
+    { type: "run.error", phase: "wait", error: "process exited with code 1", runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  assert.equal(diagnoseFailure([...head, ...tail], runId).category, "crash", "只有终局错误时归 crash");
+  const d = diagnoseFailure([...head, earlierCloseout, ...tail], runId);
+  assert.equal(d.category, "crash", "较早的收口不抢终局进程退出的分类");
+  assert.ok(!d.evidence.some((e) => /上游主轮请求摘要/.test(e.fact)), "较早收口的摘要不进证据");
+});
+
+test("zcode 上游摘要×绑定: 较早的收口 + 终局 step-finish error（链尾 completed）→ 不虚构流中断，照原路径走", () => {
+  const runId = "run_zcode_upstream_lastbind_tf";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.event", kind: "tool_use", runId, ts: "2026-10-15T09:01:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:05:00.000Z",
+      error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget — no vital signs, bounded exit); upstream: last main-turn request model_request_failed (statusCode 500, attempt 3/11)",
+    },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:12:00.000Z",
+      error: "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one); upstream: last main-turn request model_request_completed (attempt 4/11)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.notEqual(d.category, "provider_disconnect", "终局是请求已完成、轮次却失败——不因较早的收口虚构流中断");
+  assert.equal(d.category, "no_effect", "照原路径走（有 tool_use 活动、无产出）");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /最后状态 model_request_completed（attempt 4\/11）/, "只附终局错误的中性摘要事实");
+  assert.doesNotMatch(joined, /statusCode 500/, "较早收口的摘要不进证据");
+});
+
+test("kimi-web 收口×绑定: 较早的收口 + 终局进程退出 → 与只有终局错误时同归 crash", () => {
+  const runId = "run_kimi_closeout_lastbind_exit";
+  const head = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+  ];
+  const earlierCloseout = {
+    type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:05:00.000Z",
+    error: "silent timeout: turn for this prompt not observed within 120000ms",
+  };
+  const tail = [
+    { type: "run.error", phase: "wait", error: "process exited with code 1", runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  assert.equal(diagnoseFailure([...head, ...tail], runId).category, "crash", "只有终局错误时归 crash");
+  assert.equal(diagnoseFailure([...head, earlierCloseout, ...tail], runId).category, "crash", "较早的收口不抢终局进程退出的分类");
+  assert.equal(diagnoseFailure([...head, earlierCloseout, tail[1]], runId).category, "provider_disconnect", "收口是最后一条 run.error 时照旧按门表归类");
+});
+
+test("zcode 上游摘要×剥离: 标记子串之后不是合法摘要时原文不动——真实认证信号照常归 provider_auth", () => {
+  const runId = "run_zcode_upstream_strip_invalid";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "provider error; upstream: last main-turn request invalid response; HTTP 401 unauthorized", runId, ts: "2026-10-15T09:12:00.000Z" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:12:00.000Z" },
+  ];
+  assert.equal(diagnoseFailure(events, runId).category, "provider_auth", "不是合法摘要——401 unauthorized 仍是上游错误文本");
+});
+
+test("zcode 上游摘要×剥离: 链尾 completed 且摘要含 statusCode 401 → AUTH_SIGNAL 不抢分类", () => {
+  const runId = "run_zcode_upstream_401_completed";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected); upstream: last main-turn request model_request_completed (statusCode 401, attempt 2/11)",
+  ), runId);
+  assert.notEqual(d.category, "provider_auth", "摘要里的 401 是控制面投影，不是上游认证错误文本");
+  assert.equal(d.category, "provider_disconnect", "剥离后按门表归流中断");
+});
+
 test("401 边界: 读数里的 401 子串（非独立 401）不触发 provider_auth", () => {
   const events = [
     { type: "run.state_change", to: "running", ts: "2026-10-14T09:00:00.000Z" },
@@ -1179,6 +1508,218 @@ test("zcode 静默收口证据: 只写原文能证的事——无取样结论不
   assert.match(joined, /静默到点后/);
   assert.ok(!/没有上游|未发出/.test(joined), "转录里有过上游 429，证据不得断言没有上游信号");
   assert.match(joined, /收口本身不带上游原因/);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-15：kimi-web 静默收口 → 逐门判定（与 zcode 门表同槽位 4.6）。
+//
+// kimi-web 车道（src/backends/kimiWeb.js）的 turn 迟迟没有进展时有界收口，
+// run.error(phase:wait) 的文案由控制面自己写、以门表前缀开头。收口本身不带上游原因；
+// 收口时 serve 有没有被问到、当时怎么答决定类别与事实：
+//   - turn 一直没出现（silentTimeout 到点 / silentTimeout 缺席时的拍数兜底）→
+//     provider_disconnect，证据写明收口没有向 serve 取证、三种上游原因不可区分；
+//   - 停滞到点 + serve 作证本轮不活跃 → provider_disconnect；
+//   - 停滞到点 + serve 不应答 → unknown（serve 状态未知，不冒充已知的 provider 中断）；
+//   - serve 一直作证在跑、输出不增长到封顶 → provider_disconnect；
+//   - 两道历史门（8 拍无增长 / 不带证词子句的自适应停滞）→ provider_disconnect，
+//     证据写明收口时没有向 serve 取证。
+// 锚定前缀只匹配这些收口文案的开头（恰好引用它们的其它错误不命中）；门表排在
+// auth/config/capacity 之后、no_effect/crash 之前；空答复收口不在门表内。
+// ---------------------------------------------------------------------------
+
+const KIMI_CLOSEOUT_RUN = "run_kimi_closeout";
+
+function kimiCloseoutEvents(runId, error, extra = []) {
+  return [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-15T09:00:01.000Z" },
+    ...extra,
+    { type: "run.error", phase: "wait", runId, ts: "2026-10-15T09:15:05.000Z", error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T09:15:05.000Z" },
+  ];
+}
+
+function kimiCloseoutDiagnosis(error, extra) {
+  return diagnoseFailure(kimiCloseoutEvents(KIMI_CLOSEOUT_RUN, error, extra), KIMI_CLOSEOUT_RUN);
+}
+
+test("kimi-web 静默收口: silent_timeout 门（turn 一直未出现）→ provider_disconnect + 三种原因不可区分", () => {
+  const d = kimiCloseoutDiagnosis(
+    "silent timeout: turn for this prompt not observed within 900000ms (provider may have silently rejected)",
+  );
+  assert.equal(d.category, "provider_disconnect", "turn 一直没出现的有界收口 → provider 流中断");
+  assert.equal(d.code, null, "provider_disconnect 不带 code");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /silent_timeout 门/, "证据说明是哪一道门收口");
+  assert.match(joined, /上游拒绝、serve 未受理与网络中断在本转录内无法区分/, "turn 未出现的门：收口不带原因，三种原因不可区分");
+  assert.match(joined, /收口本身不带上游原因/);
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("kimi-web 静默收口: silentTimeout 缺席时的拍数兜底门 → provider_disconnect", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): turn not observed for 8 consecutive polls (bounded exit, silentTimeout absent)",
+  );
+  assert.equal(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /turn_absent 门/, "证据说明是哪一道门收口");
+  assert.match(joined, /上游拒绝、serve 未受理与网络中断在本转录内无法区分/);
+  assert.match(joined, /收口本身不带上游原因/);
+});
+
+test("kimi-web 静默收口: 停滞到点 + serve 作证本轮不活跃 → provider_disconnect（14010ms 读数不误判 auth）", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit); attestation: inactive — the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)",
+  );
+  assert.equal(d.category, "provider_disconnect", "serve 明确作证本轮不活跃 → 已知的停滞");
+  assert.notEqual(d.category, "provider_auth", "毫秒读数里的 401 数字串不得判成认证失败");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /stalled_attestation_inactive 门/, "证据说明是哪一道门收口");
+  assert.match(joined, /serve 作证本轮已不活跃/);
+  assert.match(joined, /收口本身不带上游原因/);
+});
+
+test("kimi-web 静默收口: 停滞到点 + serve 不应答 → unknown（serve 状态未知），证词计数不混淆两态", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit; 3 prior liveness attestation(s) since the last output growth); attestation: unavailable — the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)",
+  );
+  assert.equal(d.category, "unknown", "serve 不应答 = 状态未知，不冒充已知的 provider 侧中断");
+  assert.equal(d.code, null);
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /stalled_attestation_unavailable 门/, "先前的证词计数不得把 unavailable 读成 inactive");
+  assert.match(joined, /serve 不应答，serve 的状态未知/);
+  assert.match(joined, /收口本身不带上游原因/);
+});
+
+test("kimi-web 静默收口: serve 一直作证在跑、输出不增长到封顶 → provider_disconnect", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled: serve-attested silence since the last output growth exceeded the 30min cap (1900000ms across 7 attestation(s); adaptive budget diagnostics: floor 60000ms / ×3 / ceiling 240000ms) — bounded exit despite liveness (the serve keeps attesting an active turn that never lands output)",
+  );
+  assert.equal(d.category, "provider_disconnect", "证词封顶门 → provider 流中断");
+  assert.notEqual(d.category, "provider_auth");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /serve_attested_cap 门/, "证据说明是哪一道门收口");
+  assert.match(joined, /serve 一直作证本轮在跑，但输出一直不增长/);
+  assert.match(joined, /收口本身不带上游原因/);
+});
+
+test("kimi-web 静默收口（历史门）: 8 拍无增长 → provider_disconnect + 收口时没有向 serve 取证", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): turn state unchanged and no steps/frames growth for 8 consecutive polls (bounded exit)",
+  );
+  assert.equal(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /legacy_poll_no_growth 门/, "证据说明是哪一种历史门");
+  assert.match(joined, /收口时没有向 serve 取证/);
+  assert.match(joined, /收口本身不带上游原因/);
+});
+
+test("kimi-web 静默收口（历史门）: 不带证词子句的自适应停滞 → provider_disconnect + 收口时没有向 serve 取证", () => {
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit)",
+  );
+  assert.equal(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /legacy_adaptive_budget 门/, "没有 attestation 子句的文案落到历史门");
+  assert.match(joined, /收口时没有向 serve 取证/);
+  assert.match(joined, /收口本身不带上游原因/);
+  assert.ok(!/stalled_attestation_/.test(joined), "历史门不得被读成带证词的现行门");
+});
+
+test("kimi-web 静默收口: 轮内有活动但无产出 → 门表先于 no_effect 判 provider_disconnect", () => {
+  // 收口 run 的轮内通常已有 tool_use / assistant text（读上下文），而无 file_written /
+  // command exit0——旧读法落到 no_effect，读不出"这是收口门杀的"。
+  const d = kimiCloseoutDiagnosis(
+    "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit); attestation: inactive — the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)",
+    [
+      { type: "run.event", kind: "tool_use", tool: "Read", input: {}, runId: KIMI_CLOSEOUT_RUN, ts: "2026-10-15T09:05:00.000Z" },
+      { type: "run.event", kind: "tool_result", tool: "Read", output: "redacted", runId: KIMI_CLOSEOUT_RUN, ts: "2026-10-15T09:05:01.000Z" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading…" }], runId: KIMI_CLOSEOUT_RUN, ts: "2026-10-15T09:06:00.000Z" },
+    ],
+  );
+  assert.equal(d.category, "provider_disconnect", "有活动无产出的收口 run：门表在 no_effect 之前");
+  assert.ok(!d.evidence.some((e) => /无 file_written/.test(e.fact)), "不得落 no_effect 的事实");
+});
+
+test("kimi-web 静默收口: 七种文案的门 → 类别映射（每条都带「哪道门 + 收口不带上游原因」两条事实）", () => {
+  const cases = [
+    { gate: "silent_timeout", category: "provider_disconnect", error: "silent timeout: turn for this prompt not observed within 60000ms (provider may have silently rejected)" },
+    { gate: "turn_absent", category: "provider_disconnect", error: "turn stalled (no progress): turn not observed for 8 consecutive polls (bounded exit, silentTimeout absent)" },
+    { gate: "stalled_attestation_inactive", category: "provider_disconnect", error: "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit); attestation: inactive — the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)" },
+    { gate: "stalled_attestation_unavailable", category: "unknown", error: "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit); attestation: unavailable — the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)" },
+    { gate: "serve_attested_cap", category: "provider_disconnect", error: "turn stalled: serve-attested silence since the last output growth exceeded the 30min cap (1900000ms across 7 attestation(s); adaptive budget diagnostics: floor 60000ms / ×3 / ceiling 240000ms) — bounded exit despite liveness (the serve keeps attesting an active turn that never lands output)" },
+    { gate: "legacy_poll_no_growth", category: "provider_disconnect", error: "turn stalled (no progress): turn state unchanged and no steps/frames growth for 8 consecutive polls (bounded exit)" },
+    { gate: "legacy_adaptive_budget", category: "provider_disconnect", error: "turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit)" },
+  ];
+  for (const c of cases) {
+    const d = kimiCloseoutDiagnosis(c.error);
+    assert.equal(d.category, c.category, `${c.gate} 门的类别`);
+    assert.equal(d.evidence.length, 2, `${c.gate} 门两条事实（哪道门 + 收口本身不带上游原因）`);
+    assert.ok(d.evidence.every((e) => e.eventType === "run.error"), `${c.gate} 门证据指向 run.error`);
+    const joined = d.evidence.map((e) => e.fact).join(" ");
+    assert.match(joined, new RegExp(`${c.gate} 门`), `${c.gate} 门：证据说明是哪道门`);
+    assert.match(joined, /收口本身不带上游原因/, `${c.gate} 门：证据写明收口不带上游原因`);
+  }
+});
+
+test("kimi-web 静默收口: 毫秒读数含 401/429 数字串 → 仍按门表归类（不误判 auth/capacity）", () => {
+  // 真实形状：读数只有独立数字边界（401872ms / 429140ms / 14010ms），没有独立 401/429。
+  const legs = [
+    {
+      gate: /stalled_attestation_inactive 门/,
+      error: "turn stalled (no progress): silent stretch 401872ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit); attestation: inactive — the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)",
+    },
+    {
+      gate: /legacy_adaptive_budget 门/,
+      error: "turn stalled (no progress): silent stretch 429140ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit)",
+    },
+    {
+      gate: /silent_timeout 门/,
+      error: "silent timeout: turn for this prompt not observed within 429401ms (provider may have silently rejected)",
+    },
+  ];
+  for (const leg of legs) {
+    const d = kimiCloseoutDiagnosis(leg.error);
+    assert.equal(d.category, "provider_disconnect", `读数里的 401/429 数字串不得改类别：${leg.error.slice(0, 40)}…`);
+    assert.match(d.evidence.map((e) => e.fact).join(" "), leg.gate);
+  }
+});
+
+test("kimi-web 静默收口: 只是引用收口文案的其它错误不命中门表", () => {
+  const quoted = [
+    'relayed upstream note: "silent timeout: turn for this prompt not observed within 60000ms (provider may have silently rejected)"',
+    "backend error before closeout: turn stalled (no progress): silent stretch 300544ms exceeded adaptive budget 60000ms floor / ×3 / 240000ms ceiling; max recovered gap this turn 14010ms (bounded exit)",
+  ];
+  for (const error of quoted) {
+    const d = kimiCloseoutDiagnosis(error);
+    assert.equal(d.category, "unknown", "引用不是收口本体：没有别的信号时落兜底 unknown");
+    assert.ok(!d.evidence.some((e) => /有界收口/.test(e.fact)), "不得带门表事实");
+  }
+});
+
+test("kimi-web 空答复收口: 不在门表内——照既有优先级走（命令证据 / 有活动无产出 / 兜底）", () => {
+  const closeout = "kimi turn completed without assistant text (state=completed, no text frames — refusing to fabricate completion)";
+  // ① 有通过的命令证据 → 既有 4.5 槽位先判 evidence_passed_backend_failed。
+  const withCommand = kimiCloseoutDiagnosis(closeout, [
+    { type: "run.event", kind: "command", command: "npm test", exitCode: 0, runId: KIMI_CLOSEOUT_RUN, ts: "2026-10-15T09:10:00.000Z" },
+  ]);
+  assert.equal(withCommand.category, "evidence_passed_backend_failed", "命令证据 → 既有提升规则不变");
+  // ② 有活动无产出 → no_effect。
+  const withActivity = kimiCloseoutDiagnosis(closeout, [
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading…" }], runId: KIMI_CLOSEOUT_RUN, ts: "2026-10-15T09:10:00.000Z" },
+  ]);
+  assert.equal(withActivity.category, "no_effect", "有活动无产出 → no_effect 不变");
+  // ③ 其余 → 兜底 unknown。
+  const bare = kimiCloseoutDiagnosis(closeout);
+  assert.equal(bare.category, "unknown", "无信号 → 终态兜底不搬新类别");
+  for (const d of [withCommand, withActivity, bare]) {
+    assert.ok(!d.evidence.some((e) => /kimi-web 有界收口/.test(e.fact)), "空答复收口不得带门表事实");
+  }
+});
+
+test("kimi-web 收口排序: 带上游错误正文的 kimi turn failed (… 429 …) → 仍 provider_capacity（门表不抢）", () => {
+  const d = kimiCloseoutDiagnosis("kimi turn failed (turn state=failed, error: 429 Too Many Requests)");
+  assert.equal(d.category, "provider_capacity", "上游真发了额度错误文本 → provider_capacity 先判");
+  assert.equal(d.code, "rate_limited");
 });
 
 // ---------------------------------------------------------------------------
