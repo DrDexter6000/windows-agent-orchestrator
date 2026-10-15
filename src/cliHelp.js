@@ -37,7 +37,7 @@ Commands:
   runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 把超龄 run 移到 runs-archive/（不删除，冲突不覆盖）
   runs migrate-projects [--apply|--verify] [--run-dir DIR]   # 存量分桶迁移：默认 dry-run 预览；--apply 实迁（幂等可续跑）；--verify 迁后核对
   runs grep <pattern> [--run-dir DIR] [--format json]
-  runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 显式放弃一条交付线系：按门释放保留 worktree（分支永不删；默认 dry-run）
+  runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 显式放弃一条交付线系：按门释放保留 worktree（本命令不删分支；默认 dry-run）
   runs settle [--run-dir DIR]   # 列出可结算的 runner 已死非终态运行（只读；各给闭集拒绝理由）
   runs settle --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 结算 runner 已死的非终态运行为 failed/process_missing（逐门事实 dry-run；--apply 才写）
   runs metrics <runId>|--summary [--run-dir DIR] [--format json]
@@ -57,6 +57,8 @@ Commands:
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
+  worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]   # 只读普查分类写清退计划，打印计划 sha256（Owner 按此批准）
+  worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]   # 执行已批准计划：分支先全量进 bundle，复核后摘树删分支，记录落 runs-archive/
   daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--resume-on-start]
   daemon run <agentId> --prompt "..." [--run-dir DIR] [--registry FILE] [--prompt-file FILE]
   daemon stop [--run-dir DIR]

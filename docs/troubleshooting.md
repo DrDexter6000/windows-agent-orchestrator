@@ -566,7 +566,11 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.15 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
 
 - **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
-- **已知案例**（均为 codex 后端）：一例退出前零 worker 事件，stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时；其余退出前已有若干 worker 事件，原因未明。多例 stderr 都以 `Reading additional input from stdin...` 开头，疑为 codex 的常规提示而非故障签名。把原任务原样再派一次，既往案例均成功。
+- **已知案例**（均为 codex 后端）：
+  - 用量到顶：codex 的 JSON 输出里有 `{"type":"error","message":"You've hit your usage limit … try again at <时刻>"}`，WAO 目前不读这一行，只看到 stderr。在任意目录跑 `codex exec --skip-git-repo-check --json "<一句无关的话>"` 就能看到原话和恢复时刻；到点之前重派都会失败。
+  - 一例退出前零 worker 事件，stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时。
+  - 其余退出前已有若干 worker 事件，原因未明。
+  - 多例 stderr 都以 `Reading additional input from stdin...` 开头，这是 codex 的常规提示，不是故障签名。除用量到顶外，把原任务原样再派一次，既往案例均成功。
 - **WAO 不自动重试**（失败之后怎么办由 Lead 决定）。零 worker 事件的那一类，既往都是原样重派即成；但未观察到事件不等于没有副作用（输出缓冲、事件尚未落盘的窗口存在），重派前看一眼工作树。已有 worker 事件后才退出的，按普通中途失败处理：先看 retained worktree 里有没有半成品（§7.10 / §4.4）。
 - **状态**：根因未明；诊断事实已补。
 

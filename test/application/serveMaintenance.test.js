@@ -237,7 +237,11 @@ test("TD-250: serveMaintenanceDir 落 .wao/serve-maintenance（独立台账面�
 
 // ===== recycle（注入零真进程）=====
 
-import { recycleServe } from "../../src/application/serveMaintenance.js";
+import { recycleServe as recycleServeImpl } from "../../src/application/serveMaintenance.js";
+
+// 启动锁按用例隔离：缺省借用例自己的 lockRootDir。生产缺省是系统临时目录，
+// 并行的测试文件用同一端口时会抢同一把锁文件。
+const recycleServe = (opts) => recycleServeImpl({ startLockDir: opts.lockRootDir, ...opts });
 
 function recycleOps({ sessionsScript, archivedScript = null, shutdownOutcome = { outcome: "requested" }, instances = [{ serverId: "s1", pid: 4242, port: 58628 }] } = {}) {
   let sessionCalls = 0;
@@ -362,13 +366,13 @@ test("TD-250 A2: recycle 成功路径——优雅 shutdown + 端口死证实 + �
       listRunsFn: async () => ({ runs: [] }),
       sleepFn: async () => {},
       fetchImpl: async () => { throw new Error("connection refused = port down"); },
-      spawnFn: (exe, args, opts) => { spawns.push({ exe, args, opts, startLockHeld: existsSync(serveStartLockPath(58628)) }); return { unref() {} }; },
+      spawnFn: (exe, args, opts) => { spawns.push({ exe, args, opts, startLockHeld: existsSync(serveStartLockPath(58628, lockRoot)) }); return { unref() {} }; },
       execFileFn: () => { throw new Error("graceful path must not taskkill"); },
     });
     assert.equal(result.recycled, true);
     // 决定 0075 会审：关旧起新的窗口里占着按需拉起的启动锁（同时到来的派发只等），完事放掉。
     assert.equal(spawns[0].startLockHeld, true);
-    assert.equal(existsSync(serveStartLockPath(58628)), false);
+    assert.equal(existsSync(serveStartLockPath(58628, lockRoot)), false);
     assert.equal(result.oldPid, 111);
     assert.equal(result.newPid, 222);
     assert.equal(result.portDownVerified, true);

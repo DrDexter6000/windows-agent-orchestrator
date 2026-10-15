@@ -34,3 +34,7 @@ Lead 显式放弃一条交付线系。要点（双席修正案）：
 - 分支 `wao/<runId>` 永久累积（保留纪律的可接受代价；hygiene 提示已有 waoRunBranches 计数）。
 - continueRun 的 lineage_closed 拒因：单测面=REASONS 闭集+插入点；live 拒绝验证留待新 MCP 宿主（当前宿主跑旧代码）。
 - 存量 6 棵 verification_failed 陈案：待 decide rejected 后按既有清理脚本收树（Lead 语义决定，随后执行）。
+
+## 修订
+
+- 2026-10-15：上文"分支永不删"（以及残余里的"分支永久累积"）改为"除按决定 0082 经 Owner 批准的清退外不删"；本决定其余部分不变。

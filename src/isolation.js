@@ -1,6 +1,6 @@
-import { execSync, execFileSync } from "node:child_process";
-import { join, resolve } from "node:path";
-import { existsSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { dirname, join, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { isValidRunId, gitChildEnv } from "./delivery.js";
 import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
@@ -67,19 +67,119 @@ export async function createWorktree(sourceCwd, name, opts = {}) {
 }
 
 /**
+ * 仍做仓库级 `git worktree prune` 的通用清扫路径（serve 维护、runs
+ * verify-commit）共用的 `--expire` 判龄窗。
+ *
+ * git 2.50 的 prune 语义（worktree.c 的 should_prune_worktree）：
+ *   - `locked` 文件在场的条目永不 prune；
+ *   - `--expire` 只对"gitdir 文件在、它指向的工作树目录已消失"的条目判龄，
+ *     判龄看的是管理目录里 `worktrees/<id>/index` 的 mtime：窗内（新鲜）即
+ *     保留，超窗或 index 不存在才清；
+ *   - "没有 locked、也没有 gitdir 文件"的条目（add 在建管理目录与写 locked
+ *     之间的微窗）git 无条件清掉，--expire 管不到。
+ *
+ * 最后一条是无法从调用方关闭的残余竞争：仓库级 prune 与别的会话正在进行的
+ * `git worktree add` 之间永远存在清掉其登记的窗口。因此删除路径
+ *（isolation.removeWorktree、worktree reclaim apply）不再做仓库级 prune，只
+ * 定向删自己刚删掉的那棵树的管理条目（removeWorktreeAdminEntry）；仓库级
+ * 清扫只保留给上面两条通用维护路径，它们接受该残余竞争（清扫时机与 add 并
+ * 发的概率低，且后果是对方 add 报错可重试）。
+ *
+ * 代价：目录刚消失但 index 还新鲜（十分钟内活跃过）的登记最长滞留一个窗，
+ * 由下一次通用清扫清掉。
+ */
+export const WORKTREE_PRUNE_EXPIRE = "10.minutes";
+
+/**
+ * 只删一棵树自己的 worktree 管理条目：在 <gitCommonDir>/worktrees/ 下找
+ * `gitdir` 文件内容指向 <wtPath>/.git 的那一项，核对 <wtPath> 目录确实已不
+ * 在盘上，才删那个管理目录。不碰其他条目、不做仓库级 prune（竞争说明见
+ * WORKTREE_PRUNE_EXPIRE）。
+ *
+ * @param {string} gitCommonDir 仓库 git common dir（绝对真实路径）
+ * @param {string} wtPath 刚删掉的树的真实路径
+ * @returns {boolean} 是否删掉了一个管理条目
+ */
+export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
+  try {
+    const path = resolve(wtPath);
+    if (existsSync(path)) return false; // 树还在：条目是活的，不删
+    const adminRoot = join(gitCommonDir, "worktrees");
+    let names;
+    try {
+      names = readdirSync(adminRoot);
+    } catch {
+      return false;
+    }
+    const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const want = norm(`${path}${sep}.git`);
+    for (const name of names) {
+      if (name.startsWith(".")) continue;
+      const entryDir = join(adminRoot, name);
+      let st;
+      try {
+        st = lstatSync(entryDir);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      let content;
+      try {
+        content = readFileSync(join(entryDir, "gitdir"), "utf8").trim();
+      } catch {
+        continue;
+      }
+      if (norm(content) !== want) continue;
+      rmSync(entryDir, { recursive: true, force: true });
+      return true;
+    }
+  } catch {
+    /* best-effort：清不掉留给通用清扫 */
+  }
+  return false;
+}
+
+/**
  * 删除 worktree（含目录）。
  * @param {string} wtPath worktree 路径
+ * @param {{execFn?: Function}} [opts] 测试缝（缺省 execFileSync；execFn 只用于
+ *   worktree remove 调用，源仓库自推与定向登记清理仍走真实 fs/git）
  *
- * Windows 上 git worktree remove 偶尔因文件锁 Permission denied（进程持有句柄）。
+ * git worktree remove 在**源仓库**执行（cwd=源仓库），不是待删目录：Windows 上
+ * 子进程以待删目录为 cwd 时，该目录因是进程自身 cwd 而锁死，git 自己的目录删除
+ * 必然失败、退回 rmSync 兜底。源仓库从目标树自己的 `git rev-parse
+ * --git-common-dir` 推出（common dir 的父目录即主工作树根），不依赖调用方传
+ * 入——转录里的 cwd 可能是相对路径或已删掉的外层树。
+ *
+ * 不做仓库级 prune（与并发 `git worktree add` 存在关不掉的竞争，见
+ * WORKTREE_PRUNE_EXPIRE）：树目录删掉后，只定向删这棵树自己的管理条目
+ * （removeWorktreeAdminEntry，按 gitdir 内容核对归属）；其他目录已缺失的
+ * stale 登记留给 serve 维护 / runs verify-commit 的通用清扫。
+ *
+ * Windows 上 git worktree remove 偶因文件锁 Permission denied（进程持有句柄）。
  * 解法：先试 git worktree remove，失败则 fallback 到 rmSync 强制删目录 +
- * git worktree prune 清理元数据。
+ * 定向清理本树管理条目。
  */
-export function removeWorktree(wtPath) {
+export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   const path = resolve(wtPath);
   if (!existsSync(path)) return Promise.resolve();
-  // TD-21：git worktree remove / rmSync 在 Windows 偶发 Permission denied（文件句柄延迟释放，
-  // 测试偶发 ~1%）。原实现单次失败即放弃。现改为最多 3 次重试 + 退避延迟，提高成功率。
-  // 重试内层：先试 git worktree remove，失败则 rmSync 强删 + prune。
+  // 源仓库自推：读不动 git 元数据（树已半死）时回退到以待删目录为 cwd 的旧
+  // 行为，保持 best-effort。
+  let realCommon = null;
+  try {
+    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: path,
+      // TD-236：refs/对象读取禁用 replace objects（gitChildEnv SSOT）。
+      env: gitChildEnv(),
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    }).toString().trim();
+    realCommon = realpathSync(resolve(path, commonDir));
+    if (!existsSync(dirname(realCommon))) realCommon = null;
+  } catch { /* 自推失败走旧 cwd */ }
+  const execCwd = realCommon ? dirname(realCommon) : path;
+  // 重试内层：git worktree remove 失败 → rmSync 强删（均落源仓库）。
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 100;
   let attempt = 0;
@@ -87,8 +187,8 @@ export function removeWorktree(wtPath) {
   while (attempt < MAX_RETRIES && !removed) {
     attempt += 1;
     try {
-      execFileSync("git", ["worktree", "remove", "--force", path], {
-        cwd: path,
+      execFn("git", ["worktree", "remove", "--force", path], {
+        cwd: execCwd,
         // TD-236：worktree 清理同样禁用 replace objects（gitChildEnv SSOT）。
         env: gitChildEnv(),
         stdio: "pipe",
@@ -96,14 +196,11 @@ export function removeWorktree(wtPath) {
       });
       removed = true;
     } catch {
-      // fallback：强制删目录 + prune 元数据
+      // fallback：强制删目录，登记走后面的定向清理
       try {
         rmSync(path, { recursive: true, force: true });
         removed = !existsSync(path);
       } catch { /* 尽力，下次重试 */ }
-      try {
-        execSync("git worktree prune", { cwd: path, stdio: "pipe", windowsHide: true });
-      } catch { /* prune 失败不阻塞 */ }
     }
     // 仍未删除且还有重试机会 → 退避等待（同步 sleep，worktree 删除非热路径，可接受）
     if (!removed && attempt < MAX_RETRIES) {
@@ -111,6 +208,10 @@ export function removeWorktree(wtPath) {
       while (Date.now() < end) { /* busy wait */ }
     }
   }
+  // 只删本树自己的管理条目：git worktree remove 成功时 git 已自清（这里是无害
+  // 的幂等核对）；rmSync 兜底后清残留。树目录仍在（删除失败）时条目是活的，
+  // 不清。
+  if (realCommon && !existsSync(path)) removeWorktreeAdminEntry(realCommon, path);
   return Promise.resolve();
 }
 
@@ -120,9 +221,11 @@ export function removeWorktree(wtPath) {
  * @returns {Promise<Array<{path: string, branch?: string, head?: string}>>}
  */
 export function listWorktrees(cwd) {
-  const out = execSync("git worktree list --porcelain", {
+  const out = execFileSync("git", ["worktree", "list", "--porcelain"], {
     cwd: resolve(cwd),
     encoding: "utf8",
+    env: gitChildEnv(),
+    stdio: "pipe",
     windowsHide: true,
   });
   return Promise.resolve(parseWorktreeList(out));
@@ -218,8 +321,9 @@ function parseWorktreeList(porcelain) {
 
 function isGitRepo(cwd) {
   try {
-    execSync("git rev-parse --git-dir", {
+    execFileSync("git", ["rev-parse", "--git-dir"], {
       cwd,
+      env: gitChildEnv(),
       stdio: "pipe",
       windowsHide: true,
     });

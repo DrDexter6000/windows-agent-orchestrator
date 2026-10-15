@@ -43,10 +43,23 @@
 
 - **内部行为**
   1. 若路径不存在，直接 resolve（幂等）。
-  2. 先尝试 `git worktree remove --force "<path>"`。
-  3. **Windows fallback**：上一步失败（常见为文件锁 `Permission denied`）时：
+  2. 从目标树自己的 `git rev-parse --git-common-dir` 推出源仓库（common dir
+     的父目录即主工作树根；推不出来时回退到以待删目录为 cwd 的旧行为，
+     best-effort）。git 调用不依赖调用方传入仓库路径——转录里的 `cwd`
+     可能是相对路径或已删掉的外层树。
+  3. 在**源仓库**执行 `git worktree remove --force "<path>"`：Windows 上
+     子进程以待删目录为 cwd 时，该目录因是进程自身 cwd 而锁死，git 自己的
+     删除必然失败、退回 rmSync 兜底。
+  4. **Windows fallback**：上一步失败（常见为文件锁 `Permission denied`）时：
      - 用 `rmSync(path, { recursive: true, force: true })` 强制删目录；
-     - 再 `git worktree prune` 清理元数据（失败不阻塞）。
+  5. 树目录删掉后，只**定向删这棵树自己的管理条目**（`removeWorktreeAdminEntry`：
+     在 `<git-common-dir>/worktrees/` 下找 `gitdir` 内容指向 `<path>/.git`
+     的那一项，核对无误才删）。不做仓库级 `git worktree prune`——git 2.50 的
+     prune 对"既没有 locked 也没有 gitdir"的条目（别的会话 `worktree add`
+     正在 mkdir 与写 locked 之间的微窗形态）无条件清掉，`--expire` 管不到，
+     仓库级 prune 与并发 add 之间关不掉这个竞争（见 `isolation.js` 的
+     `WORKTREE_PRUNE_EXPIRE` 注释）。其他目录已缺失的 stale 登记留给 serve
+     维护 / runs verify-commit 的通用清扫（它们保留 `--expire` 判龄窗）。
 - **返回**：`Promise<void>`
 - **不会抛错**：所有失败均被吞掉，确保删除操作不阻塞清理流程。
 

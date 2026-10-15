@@ -34,6 +34,7 @@ import { listTranscriptsDeep } from "../projectBuckets.js";
 import { readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { gitChildEnv } from "../delivery.js";
 import { removeWorktree } from "../isolation.js";
+import { listArchiveTranscriptFiles } from "./serveMaintenance.js";
 
 const LOCK_STALE_MS = 600_000;
 const LOCK_TIMEOUT_MS = 30_000;
@@ -65,14 +66,18 @@ export function lineageRootFromEvents(events, fileRunId) {
 }
 
 /**
- * 枚举线系成员（全部项目桶，bound 读）。孪生转录状态不一致 → refuse。
+ * 枚举线系成员（bound 读）。孪生转录状态不一致 → refuse。
+ * @param {string} rootRunId
+ * @param {Array<{name:string,path:string}>} files 候选文件集（调用方可传全量或
+ *   预筛后的子集——成员判据只依赖每个文件自身的事件，子集结果与全量一致）
+ * @param {Function} [readEventsFn] 读单个转录（测试/共享缓存缝；缺省 readEventsSafe）
  * @returns {{members:Array<{runId,state,worktreePath,deliveryCommit,baseCommit,sessionId,backend}>, refuse?:string}}
  */
-export async function enumerateLineageMembers(rootRunId, files) {
+export async function enumerateLineageMembers(rootRunId, files, readEventsFn = readEventsSafe) {
   const byRun = new Map();
   for (const f of files) {
     const fileRunId = f.name.replace(/\.jsonl$/, "");
-    const r = await readEventsSafe(f.path);
+    const r = await readEventsFn(f.path);
     if (!r.ok) return { members: [], refuse: `transcript_unreadable:${fileRunId}` };
     let inLineage = fileRunId === rootRunId;
     if (!inLineage) {
@@ -145,6 +150,39 @@ export function lineageClosedIn(events, fileRunId) {
   return events.some((e) => e && e.type === "run.lineage_closed" && e.runId === fileRunId);
 }
 
+/**
+ * 成员枚举文件集：runs/ 平铺 + projects/* 桶 + runs-archive/<yyyy-mm>/ 归档面。
+ * 归档转录是线系成员的合法所在（run 已按龄归档、线系未闭合），枚举面不含
+ * 归档会把成员错认缺席。归档枚举复用 listArchiveTranscriptFiles（同一实现）。
+ * 归档枚举的 skipped（目录/文件读不出、符号链接不跟随）不静默丢弃——返回给
+ * 调用方，由它保守处置（worktree reclaim 归 undeterminable）。
+ */
+export function lineageMemberFiles(runDir) {
+  const archive = listArchiveTranscriptFiles(runDir);
+  return { files: [...listTranscriptsDeep(runDir), ...archive.files], skipped: archive.skipped };
+}
+
+/**
+ * 槽目录占用门（close 与 reclaim 共用）：线系成员名下的复用/线系槽条目
+ * updatedAt 新鲜（recentMs 内）→ busy。条目形状 {runId, updatedAt}；陈旧或
+ * 不可读条目不堵（观察门，非权威）。
+ */
+export async function lineageSlotClaimBusy(runDir, memberIds, { existsFn = existsSync, nowMs = Date.now, recentMs = SLOT_RECENT_MS } = {}) {
+  for (const slotDir of [join(runDir, ".session-reuse"), join(runDir, ".lineage-reuse")]) {
+    if (!existsFn(slotDir)) continue;
+    for (const name of readdirSync(slotDir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const entry = JSON.parse(await readFile(join(slotDir, name), "utf8"));
+        if (memberIds.has(entry?.runId) && nowMs() - Number(entry?.updatedAt ?? 0) < recentMs) {
+          return { busy: true, busyRunId: entry.runId, slotDir };
+        }
+      } catch { /* 单条不可读跳过 */ }
+    }
+  }
+  return { busy: false };
+}
+
 const gitRevDefault = (path, args) => execFileSync("git", ["-C", path, ...args], {
   env: gitChildEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 10_000,
 }).toString().trim();
@@ -167,7 +205,7 @@ export async function closeRunLineage({
   const rootEvents = await readEventsSafe(rootPath);
   if (!rootEvents.ok) return { refuse: "root_missing" };
   const rootRunId = lineageRootFromEvents(rootEvents.events, runId) ?? runId;
-  const files = listTranscriptsDeep(runDir);
+  const files = lineageMemberFiles(runDir).files;
   const enum1 = await enumerateLineageMembers(rootRunId, files);
   if (enum1.refuse) return { refuse: enum1.refuse };
   const members = enum1.members;
@@ -176,22 +214,12 @@ export async function closeRunLineage({
   if (nonTerminal.length > 0) return { refuse: "member_not_terminal", members: nonTerminal.map((m) => ({ runId: m.runId, state: m.state })) };
 
   // 占用门：线系成员名下的槽条目新鲜 → busy（覆盖 continue claim→转录窗口）。
-  // TD-256 修复（opus/sol 会审双实锤）：旧代码查 join(runDir, ".wao",
-  // "session-reuse")——该目录不存在（真实槽位是 runDir/.session-reuse 与
-  // runDir/.lineage-reuse，条目形状同款 {runId, updatedAt}），门从未触发过
-  //（0058 宣称的并发封口实际未生效）。修法：两个真实槽位目录都查。
+  // 两个真实槽位目录（runDir/.session-reuse 与 runDir/.lineage-reuse）都查
+  //（lineageSlotClaimBusy 是 close 与 worktree reclaim 共用的同一判定）。
   const memberIds = new Set(members.map((m) => m.runId));
-  for (const slotDir of [join(runDir, ".session-reuse"), join(runDir, ".lineage-reuse")]) {
-    if (!existsFn(slotDir)) continue;
-    for (const name of readdirSync(slotDir)) {
-      if (!name.endsWith(".json")) continue;
-      try {
-        const entry = JSON.parse(await readFile(join(slotDir, name), "utf8"));
-        if (memberIds.has(entry?.runId) && nowMs() - Number(entry?.updatedAt ?? 0) < SLOT_RECENT_MS) {
-          return { refuse: "lineage_busy", busyRunId: entry.runId, slotDir };
-        }
-      } catch { /* 单条不可读跳过（观察门，非权威） */ }
-    }
+  const slotBusy = await lineageSlotClaimBusy(runDir, memberIds, { existsFn, nowMs });
+  if (slotBusy.busy) {
+    return { refuse: "lineage_busy", busyRunId: slotBusy.busyRunId, slotDir: slotBusy.slotDir };
   }
 
   // 快照纪律（opus）：成员集在 live git 读之前冻结；此后绝不按分支名反查扩充。

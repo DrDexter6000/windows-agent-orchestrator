@@ -10,17 +10,21 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import {
-  recycleServe,
+  recycleServe as recycleServeImpl,
   resolveKimiExe,
   pickInstanceByPort,
   recycleHuskBranches,
   serveMaintenanceDir,
 } from "../../src/application/serveMaintenance.js";
+
+// 启动锁按用例隔离：缺省借用例自己的 lockRootDir。生产缺省是系统临时目录，
+// 并行的测试文件用同一端口时会抢同一把锁文件。
+const recycleServe = (opts) => recycleServeImpl({ startLockDir: opts.lockRootDir, ...opts });
 
 function cleanupDir(dir) { rmSync(dir, { recursive: true, force: true }); }
 
@@ -312,8 +316,12 @@ test("TD-262a: git worktree 登记残留 → prune 先行后 -d 可过（opus �
       JSON.stringify({ type: "run.read_only_declared", runId: id, ts: "t", seq: 2 }),
       JSON.stringify({ type: "run.state_change", from: "running", to: "completed", reason: "natural", runId: id, ts: "t", seq: 3 }),
     ].join("\n") + "\n", "utf8");
-    // 模拟"壳目录已删、.git/worktrees 登记残留"（W1c 真实形态）
+    // 模拟"壳目录已删、.git/worktrees 登记残留"（W1c 真实形态）。prune 带
+    // --expire 判龄（admin index mtime）：刚删的登记仍新鲜，拨到窗外再回收。
     rmSync(wt, { recursive: true, force: true });
+    const adminIndex = join(root, ".git", "worktrees", id, "index");
+    const aged = new Date(Date.now() - 11 * 60_000);
+    utimesSync(adminIndex, aged, aged);
     const results = await recycleHuskBranches([id], { lockRootDir: root, runDir });
     assert.equal(results[0].outcome, "recycled", "prune 先行——登记残留不再让 -d 恒拒（opus 实测点闭合）");
     let gone = false;

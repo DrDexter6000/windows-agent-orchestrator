@@ -25,31 +25,24 @@ npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算�
 清扫 runbook（首次与例行）：
 
 1. 跑之前停 daemon，并确认无活跃 run（`runs list` 无非终态）。被归档 run 若仍有进程在写，`appendFile` 会在 runs/ 原地重建单事件 stub，法医链断裂且下轮清扫抓不到。
-2. 清扫前后各数一次 `ls runs/*.jsonl runs/projects/*/*.jsonl | wc -l`（顶层与项目桶都算），差值应与汇总行 `Archived` 数一致。库里没有超龄文件时 `Archived 0` 是正常结果，不是故障。
+2. 清扫前后各数一次 `ls runs/*.jsonl runs/projects/*/*.jsonl | wc -l`，差值应与汇总行 `Archived` 数一致。库里没有超龄文件时 `Archived 0` 是正常结果，不是故障。
 3. 关闭所有占用 runs/ 文件的编辑器和 tail——归档循环无逐文件容错，Windows 上文件被占用会让 rename EPERM 中断整批。已输出的 `Archived` 行即恢复痕迹，续跑即可。
 4. 逐条保留输出的 `Archived ... -> ...` 行，这是唯一的迁移审计轨迹。
 
-清扫面边界：runDir 顶层与 `projects/*` 桶内的 `.jsonl`；桶内文件归档后同样落在 `runs-archive/<yyyy-mm>/<原文件名>`，不保留桶目录。其它子目录语料（`smoke/`、`verify/`、`driver-comparison-*/`、`wao-prod-drill-*/` 等）、顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 都不在清扫面内。`runs/reliability/` 认证转录的删除走独立通道，见 `docs/certification-runbook.md`。
+清扫面边界：runDir 顶层与 `projects/*` 桶内的 `.jsonl`；桶内文件归档后同样落在 `runs-archive/<yyyy-mm>/<原文件名>`，不保留桶目录。其它子目录语料（`smoke/`、`verify/` 等）、顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 都不在清扫面内。`runs/reliability/` 认证转录的删除走独立通道，见 `docs/certification-runbook.md`。
 
-## 批量清退 worktree 与分支（卫生清退 SOP）
+## 批量清退 worktree 与分支（`wao worktree reclaim`）
 
-派发 advisory（worktrees/branches 计数）弹行，或 `npm run hygiene` 的 W4/W5 变红时，按本规程处置。销毁性纪律：分类清单须 Owner 点名批准后才执行删除。
+派发 advisory 弹行，或 `npm run hygiene` 的 W4/W5 变红时，按本规程处置。销毁性纪律：清退删 worktree 与 `wao/*` 分支（分支先全量进 bundle 保全，verify 过才动手），须 Owner 按计划 sha256 批准。
 
-五步流程：
+四步：
 
-1. 分类（只读，双证）：
-   - 分界：`git branch --merged main --list "wao/run_*"`（并入=删标签零丢失）vs `--no-merged`。
-   - 台账交叉：runId = 分支名去 `wao/` 前缀（含 `run_`）；转录查三处——`runs/projects/*/<runId>.jsonl`（分桶新档）、`runs/<runId>.jsonl`（旧平铺）与 `runs-archive/<yyyy-mm>/<runId>.jsonl`（归档，为什么见决定 0050）。
-   - 交付判定取最后一个决定事件。转录存在多轮 repackage/correction/reverify，先拒后收的 run 按首事件判会错分类。无决定事件但有 `delivery_created` → 悬空。
-   - 已接受 ≠ 已并入：squash 落地会使 `--no-merged` 误报，用 `git cherry main <分支>` 验 patch 等价性（`+` 行数为 0 = 内容已在 main）。
-   - 承重引用：未并入分支 tip SHA 前 7 位 grep `docs/ .wao/decisions/ README.md`；引用是冻结文本不改写，SHA 靠 bundle 备份。
-   - 双证：worker 全量扫描 + Lead 独立脚本复核，计数逐项吻合才继续。
-2. Owner 批准：分类清单 + 建议处置（并入→删 / 已拒绝→bundle 删 / 悬空→Owner 裁 / 引用→Owner 裁）报批；未裁定项保守保留。
-3. 保全（先于一切删除）：`git bundle create <runs-archive/<yyyy-mm>/hygiene-cleanup-<date>.bundle> <全部待删引用>`（显式清单，含引用 SHA）→ `git bundle verify` → sha256 入记录。
-4. 执行（顺序不可换）：摘工作树（嵌套深度降序、最深先——套娃树先内后外；脏树先 `git status --porcelain` 快照留痕再 `--force`）→ 删分支（已并入 `-d`，git 保险丝拒未并入；未并入 `-D`，仅 bundle 之后；显式名单循环，禁 glob）→ `git worktree prune`。
-5. 收口：计数闭合（前后分支/树数对账）→ `npm run hygiene` 5/5 → 清退记录落 `runs-archive/<yyyy-mm>/`（record.md + bundle + 脏树快照，磁盘档）→ 提交，经过写进提交说明。
+1. 生成计划（只读普查+分类，不动任何树/分支/转录/索引）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、分类计数与逐条回收项的审批事实。不传 `--run-dir` 时缺省 WAO 安装根下的运行目录（经全局 `wao` bin 调用时）。
+2. Owner 审阅计划文件并按该 sha256 批准（批准口径见决定 0082）；"需 Owner 点名"的保留项（分支 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用、只有分支没有树且三处无转录，且未并入 main）可用 `--include` 点名豁免。
+3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，并一律用计划里的运行目录（另传不同 `--run-dir` 整体拒绝）；分支先进一个 bundle（完整历史，list-heads 须含各计划 tip），树逐棵复核内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、脏树快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，无论成败都落盘；写失败、遇目录缺失的登记（不清、分支保守跳过）或删分支阶段实时登记读不出（分支全跳过）以非零退出码结束并如实列出已删除部分。
+4. 收口：`npm run hygiene`。
 
-踩坑备忘：非时间戳命名的 runId（dogfood 系）别按时间戳规则批量误伤；"已并入但台账已拒绝/悬空"的反常行单独标注、不阻塞（内容在 main 即零丢失）；`git bundle create` 的 `--version` flag 在部分 git 版本不认（省略即可）；runs/ 转录不动——清扫走「管理历史 run」的 prune --archive 通道，两套清退互不越界。
+一律保留的形态（闭集，细节见计划文件与命令输出）：事实读不出（含有树但三处找不到转录、登记指向的目录已不存在——转录库为空且普查到树目标时整体拒绝生成计划）；源工作树、仓外路径、符号链接/junction、外仓 worktree；运行中（非终态、15 分钟内有事件、新鲜心跳）；复用线系未闭合（成员在跑、槽目录新鲜认领、线系未关未收）；未裁决（已打包未决、未决且树有未提交/暂存/未跟踪/被忽略内容）；头指针漂移；嵌套保留。已并入 main 的分支不做引用检查（删掉后提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走「管理历史 run」的 prune --archive 通道，两套清退互不越界。
 
 ## daemon 与自愈（无人值守长跑）
 
@@ -127,9 +120,9 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 ## worktree 清理失败（Permission denied）
 
-Windows 文件锁问题。WAO 已内置 fallback（rmSync + git worktree prune）。若仍有残留：
+Windows 文件锁问题。WAO 已内置 fallback（rmSync + 定向清本树登记；无仓库级 prune——与并发 `worktree add` 有竞争）。若仍有残留：
 
 ```powershell
-git worktree prune
+git worktree prune --expire 10.minutes
 git worktree remove --force .wao-worktrees/<runId>
 ```

@@ -178,7 +178,7 @@ serve 为每个会话在创建时拉起 6-8 个助手进程（datasource/analyze
    - exe 在一切副作用之前解析：显式 `--kimi-exe` 缺席即拒，缺省链 kimiHome/bin → PATH → `%USERPROFILE%\.kimi-code\bin`。重启失败或未就绪时退出码非零并附手动配方指路；shutdown 后 kimi 自清实例文件，重跑 recycle 会 `no_instance` 拒绝，须按配方手动拉起。
    - 时机：跑批间隙手动调用即可。忘了的后果是荚多攒几天（有界烦恼）；上游提供 idle 荚 GC 或 :delete 连带拆荚后，recycle 退役。
 
-3. **会话隔离与树的回收**：readOnly 非复用 run 的强制隔离是 ephemeral——终态且停止验证确认后自动回收树，未确认的留树保迟到收取；delivery 验收后线系树按四道门释放（分支 `wao/<runId>` 永不删）。树内容与 git 元数据在终态清理时即删，但**空目录壳**可能被泄漏荚的工具壳占住句柄（Windows EPERM）——`serve recycle` 杀荚后自动清扫（输出 `emptyWorktreeHusksSwept`）。sweep 探针含 busy/main_turn_active 双字段，apply 逐项复探。存量会话可走 v2 `sessions:archive` 批量归档：归档态转录仍可读、restore 可逆，台账 `.wao/runs/serve-maintenance/archive-ledger.jsonl`。
+3. **会话隔离与树的回收**：readOnly 非复用 run 的强制隔离是 ephemeral——终态且停止验证确认后自动回收树，未确认的留树保迟到收取；delivery 验收后线系树按四道门释放（这条路径不删分支 `wao/<runId>`，分支的清退见[维护](maintenance.md)）。树内容与 git 元数据在终态清理时即删，但**空目录壳**可能被泄漏荚的工具壳占住句柄（Windows EPERM）——`serve recycle` 杀荚后自动清扫（输出 `emptyWorktreeHusksSwept`）。sweep 探针含 busy/main_turn_active 双字段，apply 逐项复探。存量会话可走 v2 `sessions:archive` 批量归档：归档态转录仍可读、restore 可逆，台账 `.wao/runs/serve-maintenance/archive-ledger.jsonl`。
 
 ### 私有主目录（根治助手进程堆积）
 

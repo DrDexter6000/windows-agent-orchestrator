@@ -91,3 +91,60 @@ test("TD-256: 占用门真路径——新鲜槽条目（.session-reuse/.lineage-
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// ── worktree reclaim 批扩展：成员枚举并进归档面 + 槽目录判定导出共用 ──
+
+test("成员枚举含归档面：runs-archive/<yyyy-mm>/ 里的线系成员被算进来（释放面覆盖它）", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "lc-arch-"));
+  try {
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+    execSync("git init -q && git config user.email t@t && git config user.name t", { cwd: repo, stdio: "ignore" });
+    writeFileSync(join(repo, "a.txt"), "a\n");
+    execSync("git add . && git commit -qm init", { cwd: repo, stdio: "ignore" });
+    const base = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    const wt = join(repo, ".wao-worktrees", "run_root9");
+    execSync(`git worktree add -b wao/run_root9 "${wt}" ${base}`, { cwd: repo, stdio: "ignore" });
+    // 根转录在 runs/；成员转录只在归档里（按龄归档、线系未闭合的形态）。
+    writeFileSync(join(runDir, "run_root9.jsonl"), [
+      { type: "run.started", runId: "run_root9", agentId: "sol", backend: "codex", worktreePath: wt, cwd: repo, delivery: { baseCommit: base }, seq: 1 },
+      { type: "run.state_change", runId: "run_root9", to: "completed", seq: 2 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const archiveDir = join(repo, "runs-archive", "2026-09");
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, "run_mem9.jsonl"), [
+      { type: "run.session_reuse", runId: "run_mem9", rootRunId: "run_root9", mode: "run_lineage", turn: "resume", seq: 1 },
+      { type: "run.state_change", runId: "run_mem9", to: "completed", seq: 2 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const dry = await closeRunLineage({ runId: "run_root9", runDir, reasonText: "归档成员钉", apply: false });
+    assert.deepEqual(
+      dry.members.map((m) => m.runId).sort(),
+      ["run_mem9", "run_root9"],
+      "归档转录里的成员必须被枚举（否则闭合面漏掉它）",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("lineageSlotClaimBusy 导出：成员新鲜认领 busy、非成员/陈旧不堵", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "lc-slotx-"));
+  try {
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const slotDir = join(runDir, ".lineage-reuse");
+    mkdirSync(slotDir, { recursive: true });
+    const now = 1_000_000;
+    writeFileSync(join(slotDir, "k.json"), JSON.stringify({ runId: "run_m", updatedAt: now - 1000 }), "utf8");
+    const { lineageSlotClaimBusy } = await import("../../src/application/lineageClose.js");
+    const busy = await lineageSlotClaimBusy(runDir, new Set(["run_m"]), { nowMs: () => now });
+    assert.equal(busy.busy, true);
+    assert.equal(busy.busyRunId, "run_m");
+    const otherMember = await lineageSlotClaimBusy(runDir, new Set(["run_z"]), { nowMs: () => now });
+    assert.equal(otherMember.busy, false, "非成员认领不堵");
+    const stale = await lineageSlotClaimBusy(runDir, new Set(["run_m"]), { nowMs: () => now + 400_000 });
+    assert.equal(stale.busy, false, "陈旧认领不堵");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

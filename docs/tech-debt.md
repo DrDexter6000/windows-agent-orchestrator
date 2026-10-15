@@ -45,7 +45,7 @@
 | TD-142 | workflow / DAG 层利用率低，裁定保留现状不退役 | 设计性约束 | 连续一个季度零 workflow 运行，或该层需要实质改动 | 0027 |
 | TD-143 | 证据链层依赖 runtime 厂商 transcript 访问政策，且治理方法论无第二读者与操作者 | 开放 | backend 收紧 transcript 政策时；对外分享或第二操作者加入前补交接文档 |  |
 | TD-144 | 宿主进程 env 块不随注册表刷新，setx 后启动的宿主派发报凭据缺失，且无标准补救文档 | 开放 | 第二次撞见同类断层即立项承载 | docs/usage.md |
-| TD-146 | failed/aborted 等非交付 run 的 worktree 终态后不自动回收，宿主侧累积垃圾目录与分支 | 开放 | 下次 CLI/资源类 friction 批次顺带承载；再累积到 advisory 阈值即升级 |  |
+| TD-146 | 非交付运行与未打包的交付运行，终态后即使树干净、没有新提交也不回收；存量可以用 `wao worktree reclaim` 按 Owner 批准的计划清退，但新的累积仍在发生 | 开放 | 存量按决定 0082 出计划，Owner 按 sha256 批准后执行；终态零丢失回收另起一批，范围、门与要改的决定条款（0057 W1a、0060）已经会审过，0082 已批准，任务书可以定稿 | 0082 |
 | TD-149 | repackage 的 allowedPaths 仍硬拒目录/尾斜杠条目，dispatch 收而 repackage 拒；waitWindowHint 缺 MCP 非泄漏钉 | 开放 | 下次触碰 delivery/repackage 面或实际被拒收目录清单时立项 | src/application/runDeliveryRepackage.js docs/02-architecture.md |
 | TD-153 | `runs list --since` 不走历史扫描通道；unknown 展示态不能作为过滤条件 | 开放 | 下一次 CLI 查询面改动 | src/scorecard.js src/transcript.js docs/usage.md |
 | TD-156 | runs/无保留策略，全量扫描随文件数增长变慢，当前约2-4秒逼近阈值 | 开放 | 扫描耗时破5s阈值即转按年龄归档不删除 | scripts/canonical-test.mjs |
@@ -62,7 +62,7 @@
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
-| TD-180 | codex 后端间歇性启动期死亡、零写入零 verdict，根因仍未查明；Owner 已裁定不做自动重试 | 开放 | 未定 | 0067 docs/troubleshooting.md |
+| TD-180 | codex 后端启动期退出、零写入零 verdict。已知一种原因是 codex 用量到顶：原话写在 codex 的 JSON 输出（`type:error`、`turn.failed`）里，`src/backends/parsers/codex.js` 不读这两种，WAO 只看到 stderr 的常规提示，诊断归 crash（2026-10-15 实测）；其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 下一批：解析器把这两种消息（有界、脱敏）带进 run.error，诊断按额度类归因 | 0067 docs/troubleshooting.md |
 | TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 归因闭合前按 §8.1 安静窗口单发复验；有界复现待做 |  |
 | TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 下一次真实恢复 drill 运行 |  |
 | TD-183 | 等待到期与 llm 侧各探针仍不校验探针 run 完成事实即判定，传输层失败仍可能记成假红 | 开放 | 下一次 provider 抖动打到未覆盖探针，或 Owner 裁定推广完成门 | scripts/reliability/componentDrills.mjs src/transcript.js |
@@ -70,7 +70,7 @@
 | TD-185 | 入口判定修复已落地；测试夹具清理仍留空外层目录、构造失败可能残留 staging，早期 22.x 未实测 | 开放 | 下次修改该夹具时收回清理所有权并覆盖构造失败清理 | test/process/genSurfaceEntry.test.js scripts/gen-surface.mjs |
 | TD-186 | 认证证据适用性与取证闭环已修多轮；组件层台账历史死指针、过时注释等残留仍未处理 | 开放 | 旧画像不明时不得宣称当前已验证 | src/application/registryInventory.js scripts/reliability/prune-drill-transcripts.mjs |
 | TD-190 | 各项目的运行记录已按项目分桶，但都放在 WAO 安装根下，能读该根的本机会话仍可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 出现需要按项目隔离读取的宿主 | 0060 |
-| TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查、机器安装权威三份并存待收敛 | 开放 | 各残余自带触发；安装权威收敛待 Owner 择期议发布快照方案 | 0066 0049 0043 |
+| TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查 | 开放 | 各残余自带触发 | 0066 0043 |
 | TD-193 | kimi-web 后端的 WS 事件流、seq 游标重放与按提示中止能力已静态确认但未接线，REST 通道无会话级中止 | 开放 | kimi-web 席位转正或 abort 需求出现时优先做 | docs/incidents/2026-09-30-kimi-web-wiring.md |
 | TD-194 | 白天并发跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除 | 开放 | 下次白天验证 flake 时逐案直跑复现加机器态取证，累计 3 例后立专案 |  |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
@@ -98,7 +98,7 @@
 | TD-250 | kimi 上游不回收会话的进程荚（车道迁到私有主目录后基本不再堆积）；failed 会话的清扫判据没做 | 开放 | 上游修复后 `serve recycle` 可退役 | 0056 |
 | TD-254 | readOnly×lead_workspace 错位与 resume 源仓两缺口仍未修 | 开放 | 随隔离边界崩溃恢复族另案观察 | 0058 |
 | TD-260 | 若干收口项（红队补记、supersedes lineage 事实、交付收条等）登记未实施 | 开放 | 未定 | 0062 |
-| TD-266 | worker 会自行读取宿主仓库根的规则与概况文件并发给模型方，WAO 没有声明读取范围的手段 | 等待裁定 | 是否由控制面提供读取范围声明，待 Owner 裁定；含敏感内容的宿主接入前必须先处置 | AGENTS.md |
+| TD-266 | worker 会读宿主仓库的规则与概况文件，连同任务需要读的内容一起发给车道背后的模型方 | 设计性约束 | Owner 2026-10-15 裁定：用户自己选了车道，就是同意把项目内容发给对应的模型方，要保密可以改用本地模型；WAO 不做读取范围声明，也不做按项目的车道白名单 | AGENTS.md |
 | TD-267 | MCP 的 run_delivery 在验证排队时不带验证闸信息（CLI 已带） | 开放 | 走 MCP 的 Lead 再报同一盲区 | 0066 |
 | TD-270 | deepseek 两个后端没有接静默取样，长命令期间 Lead 看不到进程是否在干活 | 开放 | 下次改动 deepseek 后端 | 0070 0072 |
 | TD-271 | 评分的退出码推断按后端声明门控，run_activity 的推断仍用自己的闭集，两处没有并成一个判据 | 开放 | 下次改动评分或活动投影 | 0072 0073 |
@@ -110,3 +110,5 @@
 | TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境。已见两次（run_20261014092633812jgm07h、run_20261014100010561p9ukkz）；Lead 事后在原工作树用同一输入重做打包检查都通过，但没有留下记录，原因未查明（疑为 worker 收尾时的 git 命令还占着 index.lock） | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
 | TD-293 | architecture §3.2 的事件清单（使用手册的事件表与它逐行相同）缺了代码写出的 27 种事件：`run.cleanup_error`、`run.process_missing_confirmed`、`run.lineage_closed`、`run.worktree_*`、`run.correction_*`、`run.upstream_session_*` 等（2026-10-15 按 `append("…")` 与 `type: "…"` 字面量普查）；没有守卫查代码写出的事件与清单是否一致 | 开放 | 文档批次：在代码里设事件登记表，清单由生成层产出，守卫查写出的每种事件都已登记；两份文档都已到字节上限，改生成层还是提上限由 Owner 定 | docs/02-architecture.md docs/usage/transcript.md |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
+| TD-302 | MCP 服务把会话选定的工作区存在进程内存里，一个服务进程一份；多个会话的调用落到同一进程时绑定会串。2026-10-15 一个宿主会话读到自己绑在另一个宿主项目上（来源 lead_session，它没选过）：在被串的会话里派发，worker 会进错项目；改绑会改走另一个会话的绑定 | 开放 | 批 10 合入后先修：派发时由 Lead 显式给出目标项目，与绑定不符即拒；查清两个会话怎么落到同一服务进程 | src/mcp/server.js |
+| TD-303 | 别的项目的 Lead 发现的 WAO 问题没有送到 WAO 开发侧的通道：反馈只能写进宿主自己的仓库，靠 Owner 转告。2026-10-15 一份宿主跟进反馈（含 TD-302 的发现）因此几小时后才被看到 | 开放 | TD-302 之后：wao 提供反馈入口，写进 WAO 安装根下只在本机的收件箱（不进 git；不用 GitHub Issues，仓库是公开的），WAO 开发 Lead 开工时能看到未处理的条目 | 0049 |

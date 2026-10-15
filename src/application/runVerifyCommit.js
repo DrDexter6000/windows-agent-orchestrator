@@ -98,6 +98,9 @@ import {
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { nestedDispatchContext, nestedDispatchRefusalText } from "../nestedDispatchGuard.js";
 import { ensureWaoWorktreeExclude } from "../gitLocalExclude.js";
+// prune --expire 判龄窗（isolation.WORKTREE_PRUNE_EXPIRE，SSOT 注释写明 git 2.50 语义
+// 与 --expire 护不到的 add 微窗）：避免清掉别的会话正在创建的登记。
+import { WORKTREE_PRUNE_EXPIRE } from "../isolation.js";
 
 // CLI 层复用的边界常量（service 是边界权威——no copied boundary constants）。
 export {
@@ -240,7 +243,7 @@ function _worktreeIntact(gitFn, wtPath, commit) {
  */
 export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
   try {
-    gitFn(["worktree", "prune"], { cwd: repoRoot });
+    gitFn(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE], { cwd: repoRoot });
   } catch { /* best-effort */ }
   // 会审验收修（F2，astra+opus）：只回收"可证明失活"的目录——仍在
   // `git worktree list` 注册中的 verify-* 属于可能活着的并发核验（或未及
@@ -298,12 +301,12 @@ async function _removeVerifyWorktree(gitFn, repoRoot, wtPath) {
         await rm(wtPath, { recursive: true, force: true });
       } catch { /* 尽力，走重试 */ }
       try {
-        gitFn(["worktree", "prune"], { cwd: repoRoot });
+        gitFn(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE], { cwd: repoRoot });
       } catch { /* prune 失败不阻塞 */ }
     }
     if (!existsSync(wtPath)) {
       try {
-        gitFn(["worktree", "prune"], { cwd: repoRoot });
+        gitFn(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE], { cwd: repoRoot });
       } catch { /* best-effort */ }
       return "ok";
     }

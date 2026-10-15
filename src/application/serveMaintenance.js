@@ -29,7 +29,7 @@ import { execFile as nodeExecFile, execFileSync } from "node:child_process";
 import { listTranscriptsDeep } from "../projectBuckets.js";
 import { readTranscript, listTranscriptFiles, findState, TERMINAL_STATES } from "../transcript.js";
 import { listRuns } from "./runList.js";
-import { recycleRunBranch } from "../isolation.js";
+import { recycleRunBranch, WORKTREE_PRUNE_EXPIRE } from "../isolation.js";
 import { gitChildEnv } from "../delivery.js";
 import * as defaultOps from "../backends/kimiServeOps.js";
 import {
@@ -126,7 +126,15 @@ export function listArchiveTranscriptFiles(runDir) {
   const out = { files: [], skipped: [] };
   const root = join(dirname(String(runDir).replace(/[\\/]+$/, "")), "runs-archive");
   let months = [];
-  try { months = readdirSync(root, { withFileTypes: true }); } catch { return out; }
+  try {
+    months = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    // 根缺席（ENOENT）= 未归档过的安装形态，是空集；在场却读不出（权限/占锁/
+    // 同名文件等）不是"归档为空"——归档面里可能有任何线系的成员转录，如实
+    // 上报 skipped，由调用方保守处置。
+    if (error?.code !== "ENOENT") out.skipped.push({ dir: root, reason: "root_readdir_failed" });
+    return out;
+  }
   for (const m of months) {
     if (!m.isDirectory() || !ARCHIVE_MONTH_DIR_RE.test(m.name)) continue;
     const dir = join(root, m.name);
@@ -473,7 +481,9 @@ export async function recycleHuskBranches(huskNames, { lockRootDir, runDir, exec
       if (started?.delivery?.mode != null || started?.deliveryRequested === true) { entry.outcome = "skip"; entry.reason = "delivery_run"; results.push(entry); appendLedger(entry); continue; }
       if (basename(String(started?.worktreePath ?? "")) !== name) { entry.outcome = "skip"; entry.reason = "worktree_path_mismatch"; results.push(entry); appendLedger(entry); continue; }
       // prune 先行（opus 条款）：壳目录已删，.git/worktrees 残留会让 -d 恒拒。
-      try { git(["worktree", "prune"]); } catch { /* prune 失败不阻断——-d 自会拒 */ }
+      // prune 带 --expire 判龄窗（isolation.WORKTREE_PRUNE_EXPIRE，SSOT 注释写明
+      // git 2.50 语义）：刚活跃过的 stale 登记滞留一个窗，-d 保守拒绝、下轮再收。
+      try { git(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE]); } catch { /* prune 失败不阻断——-d 自会拒 */ }
       try { entry.tipSha = String(git(["rev-parse", `refs/heads/${entry.branch}`])).trim() || null; } catch { entry.tipSha = null; }
       const r = recycleRunBranch(lockRootDir, name);
       entry.outcome = r.outcome;
@@ -506,6 +516,9 @@ export async function recycleServe({
   kimiAgentIds,
   soakMs = 12_000,
   lockRootDir,
+  // 按需拉起用的启动锁所在目录：缺省与按需拉起同一处（holdServeStartLock 的缺省，
+  // 系统临时目录），两边才能互相看见；测试注入各自的目录。
+  startLockDir,
   kimiHome = null,
   ops = defaultOps,
   fetchImpl = globalThis.fetch,
@@ -639,7 +652,7 @@ export async function recycleServe({
   // 复活路径跳过（无可杀者；且不得凭陈旧实例 pid 调 taskkill——sol 条款）。
   // 决定 0075 会审（sol）：从这里到重启就绪，端口上会有一段没有监听——占住按需拉起用的
   // 启动锁，让这段窗口里到来的派发只等、不抢着拉第二个。放锁点：下方三个出口。
-  const startLock = holdServeStartLock({ port, now: nowMs() });
+  const startLock = holdServeStartLock({ port, lockDir: startLockDir, now: nowMs() });
   let portDown = revived;
   let killFallback = null;
   if (!revived) {

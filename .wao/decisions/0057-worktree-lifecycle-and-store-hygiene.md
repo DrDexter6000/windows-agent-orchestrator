@@ -127,3 +127,7 @@ detached 无可感知差异，但丙′ 保留违规提交证据的纵深更优�
   still_present 臂不回收（分支多半仍被该 worktree 检出，-d 自拒），留待荚清扫+普查
   （TD-262）。spawn 失败轮此前整棵泄漏（Run 未构造、deferredWorktreeRelease 无人
   认领）——已在 0062 审核轮修复（spawn catch 补树清理+回收）。
+
+## 修订
+
+- 2026-10-15：上文"分支 `wao/<runId>` 永不删除"与修订节"rejected/undecided 交付分支仍永不删"改为"除按决定 0082 经 Owner 批准的清退外不删"；本决定其余部分不变。

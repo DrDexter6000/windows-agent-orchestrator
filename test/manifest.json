@@ -262,6 +262,9 @@
       "delivery/settleDeliveryRecovery.test.js"
     ],
     "worktree": [
+      "application/worktreeReclaim.test.js",
+      "application/worktreeReclaimApply.test.js",
+      "delivery/td146ReclaimedRunEntryPoints.test.js",
       "delivery/delivery.test.js",
       "delivery/deliveryReviewKernel.test.js",
       "delivery/deliveryReviewProjection.test.js",
@@ -270,6 +273,7 @@
       "isolation-infra/docs-consistency.test.js",
       "isolation-infra/gitLocalExclude.test.js",
       "isolation-infra/isolation.test.js",
+      "isolation-infra/removeWorktreeSourceRepo.test.js",
       "isolation-infra/projectIdentity.test.js",
       "isolation-infra/runListProjectFilter.test.js",
       "isolation-infra/runsMigrateProjects.test.js",
