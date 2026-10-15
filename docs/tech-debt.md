@@ -38,7 +38,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 根修（进程归属或隔离 run-dir）待真实痛点再立项 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 首次语义组合冲突致集成后回归实证时；并行成常态时加必做步骤 |  |
-| TD-138 | 全量测试约 15–18 分钟。2026-10-14 两次全量实测：pure 波约 5.4 分钟，几乎全由 `backends/zcode.test.js` 一个文件撑着（324 秒，次慢的 34 秒）；filesystem 波约 6–9 分钟，由交付类测试的总量决定（82 个文件合计约 3360 秒、并发 8，最慢的是 runDeliveryRepackage 391 秒、deliveryVerification 332 秒） | 开放 | 测试批次：先查 zcode.test.js 为什么要 5 分钟，能改成假时钟就能把 pure 波降到约 2 分钟；filesystem 波要提速交付类夹具或提高并发，拆文件帮助不大 | docs/testing.md test/backends/zcode.test.js |
+| TD-138 | 全量测试约 10 分钟，由 filesystem 波决定（2026-10-15 实测 364 秒，82 个文件并发 8）：最慢的是 `runDeliveryRepackage`（301 秒）与 `deliveryVerification`（272 秒），这一波在等这两个文件；pure 波已降到 52 秒 | 开放 | 测试批次：查这两个交付类测试为什么要 5 分钟，用假时钟或共用夹具压下来；拆文件帮助不大 | docs/testing.md test/delivery/runDeliveryRepackage.test.js test/delivery/deliveryVerification.test.js |
 | TD-139 | MCP 的 run_status 不返回最近活动摘要（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 下一次 MCP 状态面改动 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 每季度核对 v24 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 首次再撞见同类漂移 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
@@ -113,4 +113,3 @@
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-295 | 配置文件的 `_comment` 字段仍夹着决定号、批次号、TD 号与日期，入库模板 `config/agents.example.json` 会被用户整份复制；其中部分措辞被文档守卫钉着 | 开放 | 文档体系下一步：逐个文件改写为现状描述，钉历史措辞的断言随之退役 | 0076 config/ |
 | TD-298 | kimi-web 的静默收口（turn 未被观察到、有产出后的停滞、serve 自称在跑但长时间无输出增长）仍按旧规则落 `no_effect` / `crash`，没有像 zcode 那样按收口类型如实分类 | 开放 | 诊断批次：逐种收口判定它说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |
-| TD-301 | 后台派发不传 `--isolate` / `--no-isolate` / `--tag`：`run --background` 和不带 `--wait` 的单 agent `spawn` 走 `dispatchRun`，它只在交付或只读运行时给 runner 加 `--isolate`，标签也不带；前台运行不受影响 | 开放 | 下次改派发参数时：把隔离与标签穿到后台 runner，并加测试 | src/commands/run.js src/application/runDispatch.js |

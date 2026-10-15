@@ -57,7 +57,19 @@ export function parseOptions(args) {
       options[key] = true;
       continue;
     }
-    options[key] = next;
+    // --tag 可重复给出（--tag k=v --tag k2=v2）：全部收齐为字符串数组；只给一次
+    // 保持字符串（与单值 flag 字节兼容）。其余 flag 维持单值语义。
+    if (key === "tag") {
+      if (options.tag === undefined) {
+        options.tag = next;
+      } else if (Array.isArray(options.tag)) {
+        options.tag.push(next);
+      } else {
+        options.tag = [options.tag, next];
+      }
+    } else {
+      options[key] = next;
+    }
     index += 1;
   }
   return options;

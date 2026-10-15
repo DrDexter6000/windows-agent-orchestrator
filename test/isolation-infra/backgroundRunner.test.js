@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { runBackground } from "../../src/backgroundRunner.js";
+import { runBackground, parseSimpleFlags } from "../../src/backgroundRunner.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 
 // --- P2 后台生命周期接管（watchdog / detached runner）---
@@ -434,5 +434,131 @@ test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可�
       try { await rm(dir, { recursive: true, force: true }); break; }
       catch (e) { if (e.code !== "ENOTEMPTY" && e.code !== "EBUSY") throw e; await new Promise((r) => setTimeout(r, 50)); }
     }
+  }
+});
+
+// ===== 后台派发遵守 --isolate / --no-isolate / --tag（runner 侧）=====
+//
+// dispatchRun 把前台语义的隔离三态与标签穿进 runner argv；本组钉 runner 侧：
+// parseSimpleFlags 收齐多值 --tag；runBackground 把三态/标签原样传 RunManager.start
+//（隔离从 worker 实际 cwd 可观察，标签从 run.started 可观察）。
+
+test("parseSimpleFlags: 重复 --tag 按序收齐为数组，单条保持字符串，缺席为 undefined", () => {
+  const multi = parseSimpleFlags(["--prompt", "x", "--tag", "team=alpha", "--tag", "work=fix"]);
+  assert.equal(multi.prompt, "x", "普通单值 flag 语义不变");
+  assert.deepEqual(multi.tag, ["team=alpha", "work=fix"], "多条 --tag 全部收齐且保持顺序");
+  const single = parseSimpleFlags(["--tag", "solo=1"]);
+  assert.equal(single.tag, "solo=1", "单条 --tag 保持字符串（与前台单值形状一致）");
+  const absent = parseSimpleFlags(["--prompt", "x"]);
+  assert.equal(absent.tag, undefined, "无 --tag 时键缺席");
+});
+
+test("runBackground 隔离三态: true/false 覆盖 agent isolation 配置，缺席沿用配置", async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "wao-bg-iso3-repo-"));
+  const runDir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-iso3-runs-"));
+  try {
+    execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "t@t"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "t"', { cwd: repo, stdio: "ignore" });
+    await writeFile(path.join(repo, "README.md"), "# t\n");
+    execSync("git add .", { cwd: repo, stdio: "ignore" });
+    execSync("git commit -m init", { cwd: repo, stdio: "ignore" });
+
+    // agent 配置默认隔离（worktree）——三态的缺席分支因此可判别：
+    // 缺席 → worktree（配置生效）；false → 源仓（旗标压制配置）；true → worktree。
+    const spawnedCwds = [];
+    const fakeBackend = {
+      async spawn(agent) {
+        spawnedCwds.push(agent.cwd);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_iso",
+          messageId: "m_iso",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const runIso = (isolate) => runBackground({
+      agentId: "bg_iso",
+      prompt: "x",
+      registry: { agents: { bg_iso: { backend: "claude-code", cwd: repo, isolation: "worktree" } } },
+      runDir,
+      ...(isolate === undefined ? {} : { isolate }),
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+
+    const explicitTrue = await runIso(true);
+    assert.equal(explicitTrue.completed, true, "--isolate 路径自然完成");
+    assert.notEqual(spawnedCwds[0], repo, "--isolate: worker cwd 是 worktree 而非源仓");
+
+    const explicitFalse = await runIso(false);
+    assert.equal(explicitFalse.completed, true, "--no-isolate 路径自然完成");
+    assert.equal(spawnedCwds[1], repo, "--no-isolate: worker cwd 是源仓本身（false 传到了 RunManager.start 并压制 agent isolation 配置）");
+
+    const absent = await runIso(undefined);
+    assert.equal(absent.completed, true, "不给旗标路径自然完成");
+    assert.notEqual(spawnedCwds[2], repo, "不给旗标: agent isolation 配置照常生效（worktree）——缺席不是 false");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("runBackground 标签: 数组与字符串形状都进 run.started.tags（与前台同形）", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-tags-"));
+  try {
+    const fakeBackend = {
+      async spawn() {
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_tag",
+          messageId: "m_tag",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const registry = { agents: { bg_tag: { backend: "claude-code", cwd: dir } } };
+
+    const multi = await runBackground({
+      agentId: "bg_tag", prompt: "x", registry, runDir: dir,
+      tags: ["team=alpha", "work=fix"],
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000, pollInterval: 10,
+    });
+    assert.equal(multi.completed, true);
+    let events = await readTranscript(path.join(dir, `${multi.runId}.jsonl`));
+    let started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started?.tags, { team: "alpha", work: "fix" }, "多条标签全部进转录，形状=解析后的键值对象（与前台 run.started 同形）");
+
+    const single = await runBackground({
+      agentId: "bg_tag", prompt: "x", registry, runDir: dir,
+      tags: "solo=1",
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000, pollInterval: 10,
+    });
+    assert.equal(single.completed, true);
+    events = await readTranscript(path.join(dir, `${single.runId}.jsonl`));
+    started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started?.tags, { solo: "1" }, "单条字符串形状同样落地");
+
+    const none = await runBackground({
+      agentId: "bg_tag", prompt: "x", registry, runDir: dir,
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000, pollInterval: 10,
+    });
+    assert.equal(none.completed, true);
+    events = await readTranscript(path.join(dir, `${none.runId}.jsonl`));
+    started = events.find((e) => e.type === "run.started");
+    assert.equal(started?.tags, undefined, "不给标签 → run.started 无 tags 键");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -278,7 +278,13 @@ export async function runBackground(opts = {}) {
       // M9-2A：透传 --require-certified（CLI/MCP background 路径不再静默忽略认证门）。
       requireCertified: Boolean(opts.requireCertified),
       // M9-7A: delivery runs force persistent worktree isolation.
-      ...(opts.isolate ? { isolate: true } : {}),
+      // 隔离三态原样透传：--isolate→true / --no-isolate→false / 都不给→不传
+      //（RunManager 沿用 agent/config 隔离配置；delivery/readOnly 的强制隔离
+      // 由 RunManager.start 自行施加）。
+      ...(opts.isolate !== undefined && opts.isolate !== null ? { isolate: opts.isolate } : {}),
+      // 标签：string | string[]（"key=value"），与前台传 RunManager.start 的
+      // 形状一致（parseTags 两种都收）。
+      ...(opts.tags !== undefined && opts.tags !== null ? { tags: opts.tags } : {}),
       ...(opts.delivery ? { delivery: opts.delivery } : {}),
       // M11-11C: thread the resolved reuse routing (opaque {mode, opaqueUuid,
       // turn}) to RunManager. The capability check + argv compilation happen
@@ -642,7 +648,14 @@ export async function runMain(argv = process.argv.slice(2)) {
     lane: opts.lane,
     role: opts.role,
     delivery: parsedDelivery,
-    isolate: argv.includes("--isolate"),
+    // 隔离三态：--isolate→true / --no-isolate→false / 都不给→undefined（沿用
+    // 配置）。delivery/readOnly 的强制 --isolate 走 true 分支。
+    isolate: argv.includes("--isolate")
+      ? true
+      : (argv.includes("--no-isolate") ? false : undefined),
+    // 标签：--tag key=value 可重复，parseSimpleFlags 已收齐（单个=字符串，
+    // 多个=数组），按前台同形状传 RunManager.start。
+    tags: opts.tag,
     // M11-11C: opaque reuse routing threaded from dispatchRun. A malformed
     // internal envelope fails closed: requested reuse must never silently turn
     // into a fresh conversation.
@@ -677,7 +690,8 @@ export async function runMain(argv = process.argv.slice(2)) {
   process.stdout.write(JSON.stringify(result) + "\n");
 }
 
-function parseSimpleFlags(argv) {
+// 导出仅为测试探针位（进程内直测参数解析）；调用面只有本文件的 runMain。
+export function parseSimpleFlags(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -685,7 +699,19 @@ function parseSimpleFlags(argv) {
       const key = a.slice(2);
       const next = argv[i + 1];
       if (next && !next.startsWith("--")) {
-        opts[key] = next;
+        // --tag 可重复给出：全部收齐（单个=字符串，多个=数组）；其余 flag
+        // 维持单值语义。
+        if (key === "tag") {
+          if (opts.tag === undefined) {
+            opts.tag = next;
+          } else if (Array.isArray(opts.tag)) {
+            opts.tag.push(next);
+          } else {
+            opts.tag = [opts.tag, next];
+          }
+        } else {
+          opts[key] = next;
+        }
         i += 1;
       }
     }

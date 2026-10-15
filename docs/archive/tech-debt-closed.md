@@ -108,3 +108,4 @@
 | TD-288 | 全局命令要写 `wao wao doctor`，帮助页一整屏夹内部编号，`run` 帮助行漏参数 | 顶层裸写的 wao 子命令直接执行（两侧名字不相交有测试）；帮助文本去掉内部编号、一条命令一行，`run` / `spawn` 列出实际参数 |
 | TD-290 | 配置键 portRange 没有任何消费者 | 从 `config/default.json` 与 `src/cli.js` 的缺省值里删掉 |
 | TD-300 | 安装根提示 `WAO_INSTALL_ROOT` 进了交付验证命令 | 交付验证（含 verify-commit）与验收脚本的环境剥掉它；worker 子进程环境是白名单，本来不含它；WAO 自己重新拉起的 runner、daemon 保留 |
+| TD-301 | 后台派发不传 `--isolate` / `--no-isolate` / `--tag` | 后台路径复用前台的 `resolveIsolateFlag`，三态经 runner 原样传到 `RunManager.start`，交付与只读照旧强制隔离；多个 `--tag` 前后台都全部保留（前台原先也只留最后一个） |

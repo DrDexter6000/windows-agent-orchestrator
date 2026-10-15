@@ -5857,3 +5857,209 @@ test("F-④: daemon status 缺 runId 时讲清与 ping/list 的分工", async ()
   assert.match(parsed.hint, /daemon ping/, "指路守护进程自身健康检查");
   assert.match(parsed.hint, /daemon list/, "指路守护进程清单");
 });
+
+// ===== 后台派发遵守 --isolate / --no-isolate / --tag（CLI 全链）=====
+//
+// 后台派发（run --background、不带 --wait 的单 agent spawn）与前台一样遵守
+// --isolate/--no-isolate/--tag。全链钉法（R10-A-CLI-8 先例）：真实 CLI 子进程 + 不存在 binary（runner 快速
+// failed，零 provider），从 run.started 读 RunManager.start 实收的隔离/标签事实。
+
+// 等 runner 把 run 推到终态后返回事件列表（复用 TD-54/WF-6 轮询形状）。到终态即
+// 返回；30s 上限只在全量并发、建 worktree 偏慢时用得到。等终态而不是只等
+// run.started：清理临时目录时 runner 已经停下。
+async function awaitTerminalEvents(transcriptPath) {
+  const terminal = ["failed", "completed", "timed_out", "aborted"];
+  let events = [];
+  for (let i = 0; i < 300; i += 1) {
+    if (existsSync(transcriptPath)) {
+      events = await readTranscript(transcriptPath);
+      if (terminal.includes(findState(events))) return events;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.fail(`runner 30s 内没有把 run 推到终态（当前状态 ${findState(events) ?? "无转录"}）`);
+}
+
+// git 仓夹具（worktree 隔离需要真仓）。
+function makeGitRepo(dir) {
+  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
+  execSync('git config user.email "t@t"', { cwd: dir, stdio: "ignore" });
+  execSync('git config user.name "t"', { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "README.md"), "# t\n");
+  execSync("git add .", { cwd: dir, stdio: "ignore" });
+  execSync("git commit -m init", { cwd: dir, stdio: "ignore" });
+}
+
+test("CLI 全链: run --background --isolate 的非交付运行真隔离（run.started 带 worktreePath）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli-iso-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { bg_iso: { backend: "claude-code", binary: "nonexistent-binary-iso", cwd: dir } },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "run", "bg_iso",
+      "--prompt", "x",
+      "--background",
+      "--isolate",
+      "--registry", registryPath,
+      "--run-dir", runDir,
+      "--wait-timeout", "2000",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 0, `background dispatch 应立即返回: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout.slice(result.stdout.indexOf("{"), result.stdout.lastIndexOf("}") + 1));
+    assert.equal(parsed.background, true);
+
+    const events = await awaitTerminalEvents(resolveTranscriptPath(runDir, parsed.runId));
+    assert.ok(events.length > 0, "runner 必须写 transcript");
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started?.worktreePath, "--isolate 的非交付后台运行在 worktree 里跑（isolate:true 传到了 RunManager.start）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("CLI 全链: 不带 --wait 的单 agent spawn --isolate 同样在 worktree 里跑", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli-spawn-iso-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { sp_iso: { backend: "claude-code", binary: "nonexistent-binary-spawn-iso", cwd: dir } },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "spawn", "sp_iso",
+      "--prompt", "x",
+      "--isolate",
+      "--registry", registryPath,
+      "--run-dir", runDir,
+      "--wait-timeout", "2000",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 0, `不带 --wait 的 spawn 应立即返回: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout.slice(result.stdout.indexOf("{"), result.stdout.lastIndexOf("}") + 1));
+    assert.equal(parsed.background, true);
+
+    const events = await awaitTerminalEvents(resolveTranscriptPath(runDir, parsed.runId));
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started?.worktreePath, "不带 --wait 的 spawn 走后台路径，--isolate 同样生效");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("CLI 全链: run --background --no-isolate 压制 agent 隔离配置；不给旗标则配置生效", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli-noiso-"));
+  try {
+    makeGitRepo(dir);
+    // agent 默认 worktree 隔离——--no-isolate 是否真传到 start 由 cwd 形状判别。
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { bg_noiso: { backend: "claude-code", binary: "nonexistent-binary-noiso", cwd: dir, isolation: "worktree" } },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+
+    const runBg = (extra) => {
+      const res = spawnSync(process.execPath, [
+        "src/cli.js", "run", "bg_noiso",
+        "--prompt", "x",
+        "--background",
+        ...extra,
+        "--registry", registryPath,
+        "--run-dir", runDir,
+        "--wait-timeout", "2000",
+      ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+      assert.equal(res.status, 0, `background dispatch 应立即返回: ${res.stderr}`);
+      return JSON.parse(res.stdout.slice(res.stdout.indexOf("{"), res.stdout.lastIndexOf("}") + 1));
+    };
+
+    const noIso = runBg(["--no-isolate"]);
+    const eventsNo = await awaitTerminalEvents(resolveTranscriptPath(runDir, noIso.runId));
+    const startedNo = eventsNo.find((e) => e.type === "run.started");
+    assert.equal(startedNo?.worktreePath, undefined, "--no-isolate: 不建 worktree（false 传到 start 并压制 agent 隔离配置）");
+    assert.equal(startedNo?.cwd, dir, "--no-isolate: worker cwd 是源仓本身");
+
+    const noFlag = runBg([]);
+    const eventsCfg = await awaitTerminalEvents(resolveTranscriptPath(runDir, noFlag.runId));
+    const startedCfg = eventsCfg.find((e) => e.type === "run.started");
+    assert.ok(startedCfg?.worktreePath, "不给旗标: agent 隔离配置照常生效（缺席≠false）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("CLI 全链: 两个 --tag 都进后台 run.started.tags，形状与前台一致", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli-tags-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { bg_tag: { backend: "claude-code", binary: "nonexistent-binary-tag", cwd: dir } },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+
+    // 后台：真实 CLI 子进程全链（argv → runner 解析 → RunManager.start）。
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "run", "bg_tag",
+      "--prompt", "x",
+      "--background",
+      "--tag", "team=alpha",
+      "--tag", "work=fix",
+      "--registry", registryPath,
+      "--run-dir", runDir,
+      "--wait-timeout", "2000",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 0, `background dispatch 应立即返回: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout.slice(result.stdout.indexOf("{"), result.stdout.lastIndexOf("}") + 1));
+
+    const events = await awaitTerminalEvents(resolveTranscriptPath(runDir, parsed.runId));
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started?.tags, { team: "alpha", work: "fix" }, "两条 --tag 全部到达后台 run.started");
+
+    // 前台：同 flags 直跑（注入 backend，不 fork），钉"形状与前台一致"。
+    const fakeBackend = {
+      async spawn() {
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_fg_tag",
+          messageId: "m_fg_tag",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const cfg = {
+      registry: registryPath,
+      runDir,
+      readRegistry: async () => readRegistryFile(registryPath),
+      backendFor: () => fakeBackend,
+      loadLanesConfigFn: () => ({ lanes: [], sha256: null, issues: [], rolesHint: [] }),
+    };
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await runCommand(["bg_tag", "--prompt", "fg", "--tag", "team=alpha", "--tag", "work=fix"], cfg);
+    } finally {
+      console.log = origLog;
+    }
+    // 前台 runId 从最近转录取：找本 agent 最新含两条 tag 的 run.started。
+    const transcripts = listTranscriptsDeep(runDir).map((e) => e.path);
+    let fgStarted = null;
+    for (const t of transcripts) {
+      const evts = await readTranscript(t);
+      const s = evts.find((e) => e.type === "run.started");
+      if (s && !s.worktreePath && evts.some((e) => e.type === "prompt.sent" && e.prompt === "fg")) {
+        fgStarted = s;
+        break;
+      }
+    }
+    assert.deepEqual(fgStarted?.tags, { team: "alpha", work: "fix" }, "前台同 flags 产出同形状 tags（后台与前台的 start 形状一致）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});

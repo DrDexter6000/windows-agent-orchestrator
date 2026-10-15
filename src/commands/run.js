@@ -218,6 +218,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       // 0045 W4b：alias 派发的角色注记（生效复用策略按角色取；runCommand 在调用
       // 前把它放进 options.resolvedRoleId——本函数无 resolvedTarget 作用域）。
       ...(options.resolvedRoleId !== undefined ? { resolvedRoleId: options.resolvedRoleId } : {}),
+      // 隔离三态与标签按前台语义原样穿线（--isolate→true / --no-isolate→false /
+      // 都不给→undefined 沿用配置；--tag 可重复，parseOptions 已收齐）。
+      isolate: resolveIsolateFlag(options),
+      tags: options.tag,
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh

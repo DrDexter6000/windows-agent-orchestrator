@@ -913,13 +913,20 @@ test("zcode ⑤b: usage 全分量缺席 → 无 metrics 事件（绝不虚构零
 
 // ===== ⑥ stalled 兜底 / silentTimeout 分工 =====
 
-test("zcode ⑥: 已有产出后连续 60 拍无新 part → done(failed, turn stalled)", async () => {
-  // 第 2 拍出现 user 回显（进展一次），此后恒不变 → 60 拍无进展收口（第二轮
-  // 门限 8→60 放宽后的既有不变量：已有产出后的真停滞仍有界收口）。
+test("zcode ⑥: 已有产出后恒无新 part → done(failed, turn stalled)", async () => {
+  // 第 3 拍出现 user 回显（进展一次），此后恒不变 → 真停滞由 TD-197① 时间门
+  // 有界收口（预算 floor 的数值钉在 ⑥d；本钉只证形状：既有不变量"已有产出后
+  // 的真停滞仍有界收口"不变）。假钟 +30s/拍——与 ⑥d/⑥g/⑨k 同款夹具，缺省
+  // 真实单调钟会等满 300s floor。
+  let fakeNow = 0;
   const { handle, child } = await runScenario({
     peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task")]) },
   });
-  const events = await collect(handle);
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /turn stalled/);
@@ -2332,39 +2339,41 @@ test("zcode ⑫d: 快照缩短（parts.length 回退）→ fail-closed done(fail
 test("zcode ⑫e: pending write（path 在场）零 file_written——completed 收口才发（写意图不冒充成功，RunEvent 契约）", async () => {
   const writePending = toolPart({ callId: "call_w", tool: "Write", status: "running", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" } });
   const writeDone = toolPart({ callId: "call_w", tool: "Write", status: "completed", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" }, output: "Created" });
+  // 两个阶段数组各构造一次：同一阶段内跨拍 id 不变；翻转后是一条新的 assistant
+  // 消息（id 不同，callId 相同）。pending 保持 20 拍后翻转；停滞门是 TD-197① 时间门
+  // （300s floor，真钟），20 拍轮询远触不到，无需填充 part 撑进度。
+  const echo = userMsg("do the task");
+  const phasePending = [echo, assistantPartsMsg([writePending])];
+  const phaseFinal = [echo, assistantPartsMsg([writeDone, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
+  const FLIP_POLL = 21;
+  let maxPoll = 0;
   const { handle, child } = await runScenario({
     peerOptions: {
       messages: (n) => {
+        maxPoll = Math.max(maxPoll, n);
         if (n <= 1) return [];
-        // pending 拍保持 ~400 拍（@2ms ≈ 800ms）再翻转；每拍追加一个填充 text
-        // part 重置无进展计数（停滞门 60 拍不触发——纯 hold 会先 done(stalled)）。
-        // 检查点 400ms 落在 pending 期内，"pending 期零事件"可确定断言。
-        if (n <= 400) {
-          const fillers = Array.from({ length: n }, (_, i) => ({ type: "text", text: `wip ${i}` }));
-          return [userMsg("do the task"), assistantPartsMsg([writePending, ...fillers])];
-        }
-        // 翻转快照必须 ≥ filler 撑大的长度（否则触发缩短守卫 done(shrank)）：
-        // write 原位转 completed + 400 fillers + ok + step-finish。
-        const fillers = Array.from({ length: 400 }, (_, i) => ({ type: "text", text: `wip ${i}` }));
-        return [userMsg("do the task"), assistantPartsMsg([writeDone, ...fillers, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }])];
+        if (n < FLIP_POLL) return phasePending;
+        return phaseFinal;
       },
     },
   });
   // 验证会审补强（auditor）：只看终序列抓不住"running 拍提前发 file_written"。
-  // 后台泵持续收集（带时间戳）；400ms 检查点断言 pending 期零事件——提前
-  // file_written 会在检查点立刻红。
+  // 确定性首事件次序证明（⑫a 的镜像）：首事件到达的那一刻，peer 已在供 completed
+  // 快照——pending 拍（n < FLIP_POLL）若发过任何事件，它就会先于翻转到达（事件
+  // 流按拍序发射，届时 maxPoll < FLIP_POLL）。
   const gen = handle.events(new AbortController().signal, { pollInterval: 2 });
-  const collected = [];
-  const pump = (async () => {
-    for (;;) {
-      const r = await gen.next();
-      if (r.done) break;
-      collected.push(r.value);
-    }
-  })();
-  await delay(400);
-  assert.equal(collected.length, 0, `pending write 拍零事件（提前 file_written 立刻红；实得 ${collected.map((e) => e.kind).join(",")}）`);
-  await pump;
+  const first = await gen.next();
+  assert.equal(
+    first.value.kind, "file_written",
+    "首事件即 file_written 且此刻 peer 已送达 completed 快照（pending 期零事件——提前 file_written 会以更早的首事件立刻红）",
+  );
+  assert.ok(maxPoll >= FLIP_POLL, `file_written 只在翻转拍及之后到达（实得 maxPoll=${maxPoll}）`);
+  const collected = [first.value];
+  for (;;) {
+    const r = await gen.next();
+    if (r.done) break;
+    collected.push(r.value);
+  }
   assert.deepEqual(
     collected.map((e) => e.kind),
     ["file_written", "tool_result", "message", "message", "metrics", "done"],

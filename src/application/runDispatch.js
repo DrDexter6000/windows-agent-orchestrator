@@ -372,6 +372,15 @@ export async function dispatchRun({
   // --isolate --read-only so RunManager.start forces isolation and writes the
   // exactly-once run.read_only_declared fact. Default false = byte-compatible.
   readOnly = false,
+  // 隔离三态（前台 --isolate/--no-isolate 的原样穿线）：true → runner argv 得
+  // --isolate；false → --no-isolate；undefined（都不给）→ 不传，runner 沿用
+  // 配置。delivery 与 readOnly 的强制隔离不受它影响（冲突组合在 CLI 边界
+  // runCommand 已有拒绝）。
+  isolate,
+  // 标签（--tag key=value，可重复）：全部穿线到 runner argv（每个一条
+  // --tag），runner 收齐后按与前台相同的形状传 RunManager.start（parseTags
+  // 接受 string | string[]）。undefined（不给）= argv 无 --tag。
+  tags,
   // R10-A: per-dispatch model override (--model <modelId> on the CLI, `model`
   // on MCP run_dispatch) — ONE dispatch only, never persisted to the registry.
   // Validated against the core SSOT (assertValidModelOverride) BEFORE any
@@ -818,6 +827,23 @@ export async function dispatchRun({
   if (readOnly) {
     runnerArgs.push("--isolate");
     runnerArgs.push("--read-only");
+  }
+  // 隔离三态穿线（--isolate→true / --no-isolate→false / 都不给→不传）。
+  // delivery 与 readOnly 已在上方强制 --isolate，此时不再叠加用户旗标
+  //（它们与 --no-isolate 的冲突由 CLI 边界 runCommand 拒绝，这里保持 argv 干净）。
+  if (!publicDelivery && !readOnly) {
+    if (isolate === true) {
+      runnerArgs.push("--isolate");
+    } else if (isolate === false) {
+      runnerArgs.push("--no-isolate");
+    }
+  }
+  // 标签穿线：--tag key=value 可重复，全部进 argv（runner 侧收齐多值）。
+  if (tags !== undefined && tags !== null) {
+    const tagList = Array.isArray(tags) ? tags : [tags];
+    for (const tag of tagList) {
+      runnerArgs.push("--tag", tag);
+    }
   }
   // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
   // RunManager.start can revalidate/pin the base. Server-side argv only (never

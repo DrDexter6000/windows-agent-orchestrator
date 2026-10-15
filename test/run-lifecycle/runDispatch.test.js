@@ -886,3 +886,78 @@ test("D2-②b 三轮 sol⑥: 复用分支同样过最终 argv 门", async () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 隔离三态 + 标签穿线（后台派发遵守 --isolate / --no-isolate / --tag）=====
+//
+// 前台语义：--isolate→true / --no-isolate→false / 都不给→undefined（沿用配置）；
+// --tag key=value 可重复。dispatchRun 把它们原样穿进 detached runner argv。
+
+test("isolate tri-state: true→--isolate, false→--no-isolate, absent→两者都不传", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-iso3-argv-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, isolate: true, spawnFn: fakeSpawn });
+    let argv = calls[0].args;
+    assert.ok(argv.includes("--isolate"), "isolate:true → argv 带 --isolate");
+    assert.ok(!argv.includes("--no-isolate"), "isolate:true → 不带 --no-isolate");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, isolate: false, spawnFn: fakeSpawn });
+    argv = calls[1].args;
+    assert.ok(argv.includes("--no-isolate"), "isolate:false → argv 带 --no-isolate");
+    assert.ok(!argv.includes("--isolate"), "isolate:false → 不带 --isolate");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, spawnFn: fakeSpawn });
+    argv = calls[2].args;
+    assert.ok(!argv.includes("--isolate"), "isolate 缺席 → 不带 --isolate（沿用配置）");
+    assert.ok(!argv.includes("--no-isolate"), "isolate 缺席 → 不带 --no-isolate");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("tags: 每条 --tag 都进 argv（含键值对），单条与多条都原样", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-tags-argv-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, tags: ["team=alpha", "work=fix"], spawnFn: fakeSpawn });
+    let argv = calls[0].args;
+    let tagValues = argv.filter((_, i) => argv[i - 1] === "--tag");
+    assert.deepEqual(tagValues, ["team=alpha", "work=fix"], "两条 --tag 全部到达且保持顺序");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, tags: "solo=1", spawnFn: fakeSpawn });
+    argv = calls[1].args;
+    tagValues = argv.filter((_, i) => argv[i - 1] === "--tag");
+    assert.deepEqual(tagValues, ["solo=1"], "单条（字符串形状）也到达");
+
+    await dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, spawnFn: fakeSpawn });
+    argv = calls[2].args;
+    assert.ok(!argv.includes("--tag"), "不给 tags → argv 无 --tag");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("delivery 强制隔离不被用户 isolate:false 稀释：argv 只有 --isolate，无 --no-isolate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-iso3-deliv-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      isolate: false,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      spawnFn: fakeSpawn,
+    });
+    const argv = calls[0].args;
+    assert.ok(argv.includes("--isolate"), "delivery 仍强制 --isolate");
+    assert.ok(!argv.includes("--no-isolate"), "强制隔离时不叠加 --no-isolate（冲突面在 CLI 边界拒绝）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
