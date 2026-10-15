@@ -63,6 +63,7 @@ function createServerWithFakeStop({ runDir, workspaceRoot, initialAlive = true }
         deps: {
           kill: () => { killCalls++; alive = false; return { called: true, exitCode: 0 }; },
           isAlive: () => alive,
+          identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
           alert: async () => {},
         },
       });

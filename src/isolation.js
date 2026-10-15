@@ -178,7 +178,7 @@ export function recycleRunBranch(sourceCwd, runId, { execFn = execFileSync } = {
     const out = String(git([
       "rev-list", "--count", `refs/heads/${branch}`,
       "--not", `--exclude=${branch}`, "--branches",
-      "--exclude=${branch}", "--tags",
+      `--exclude=${branch}`, "--tags",
     ])).trim();
     if (!/^\d+$/.test(out)) return { outcome: "kept", reason: "probe_failed" };
     unique = Number(out);

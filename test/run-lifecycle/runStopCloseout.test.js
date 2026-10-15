@@ -50,6 +50,8 @@ function defaultDeps(overrides = {}) {
   return {
     kill: overrides.kill ?? (() => ({ called: true, exitCode: 0 })),
     isAlive: overrides.isAlive ?? (() => false),
+    // pid 身份门注入：假 pid 不触发真实 PowerShell 探测；"same" 保持击杀语义。
+    identify: overrides.identify ?? (async () => ({ verdict: "same", basis: "identity_confirmed" })),
     executeStop: overrides.executeStop ?? (async () => ({ verified: true, abortCalled: true, taskkillCalled: false })),
     alert: overrides.alert ?? (async () => {}),
     ...overrides,
@@ -396,6 +398,7 @@ test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winne
           deps: {
             kill: () => { killCalls++; alive = false; return { called: true, exitCode: 0 }; },
             isAlive: () => alive,
+            identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
             alert: async () => {},
           },
         });

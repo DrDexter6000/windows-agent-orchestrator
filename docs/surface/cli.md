@@ -33,6 +33,8 @@ Commands:
   runs migrate-projects [--apply|--verify] [--run-dir DIR]   # 存量分桶迁移：默认 dry-run 预览；--apply 实迁（幂等可续跑）；--verify 迁后核对
   runs grep <pattern> [--run-dir DIR] [--format json]
   runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 显式放弃一条交付线系：按门释放保留 worktree（分支永不删；默认 dry-run）
+  runs settle [--run-dir DIR]   # 列出可结算的 runner 已死非终态运行（只读；各给闭集拒绝理由）
+  runs settle --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 结算 runner 已死的非终态运行为 failed/process_missing（逐门事实 dry-run；--apply 才写）
   runs metrics <runId>|--summary [--run-dir DIR] [--format json]
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]

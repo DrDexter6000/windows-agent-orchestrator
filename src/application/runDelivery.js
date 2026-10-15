@@ -524,13 +524,28 @@ function _computeSafeCandidateInventory(events, runId, authorizedWorkspaceRoot, 
   }
 }
 
-function _computeSafeBackendCandidateInventory(
+/**
+ * Terminal-failed recovery candidate inventory, keyed on the durable
+ * classifyRecoveryCandidate kind ("backend_failed" | "process_missing" — the
+ * latter since `runs settle` can settle an orphan terminal before an explicit
+ * repackage). Same settled-delivery-fact exclusions + exact-base workspace +
+ * complete non-empty untruncated inventory proof as the disallowed_path path.
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {string} [authorizedWorkspaceRoot]
+ * @param {Function} [computeInventoryFn]
+ * @param {"backend_failed"|"process_missing"} [expectedKind]
+ * @returns {object|null}
+ * @private
+ */
+function _computeSafeTerminalRecoveryCandidateInventory(
   events,
   runId,
   authorizedWorkspaceRoot,
   computeInventoryFn,
+  expectedKind = "backend_failed",
 ) {
-  if (classifyRecoveryCandidate(events, runId) !== "backend_failed") return null;
+  if (classifyRecoveryCandidate(events, runId) !== expectedKind) return null;
   const boundEvents = events.filter((event) => event.runId === runId);
   if (boundEvents.some((event) => (
     event.type === "run.delivery_repackaged"
@@ -568,7 +583,7 @@ function _computeSafeBackendCandidateInventory(
  *
  * Unlike disallowed_scope/backend_failed (terminal-failed), process_missing is
  * the only NONTERMINAL recovery kind: the run is still "running" but the owning
- * process has disappeared. This mirrors _computeSafeBackendCandidateInventory's
+ * process has disappeared. This mirrors _computeSafeTerminalRecoveryCandidateInventory's
  * shape but gates on the runtime liveness proof (proveProcessMissing) instead of
  * a terminal durable classification. The same exact-base workspace + complete
  * non-empty untruncated inventory proof applies; a single "unknown" liveness
@@ -598,7 +613,7 @@ function _computeSafeProcessMissingCandidateInventory(
   if (proveProcessMissing(events, runId, livenessDeps).eligible !== true) return null;
   // A process_missing candidate must not coexist with any settled delivery fact
   // (the classifier's disqualifying durable-fact set already covers this, but
-  // the inventory gate mirrors _computeSafeBackendCandidateInventory's shape).
+  // the inventory gate mirrors _computeSafeTerminalRecoveryCandidateInventory's shape).
   const boundEvents = events.filter((event) => event && event.runId === runId);
   if (boundEvents.some((event) => (
     event.type === "run.delivery_repackaged"
@@ -723,12 +738,26 @@ export async function getRunDelivery({
     && view.deliveryRequested === true
     && view.terminalState === "failed"
   ) {
-    const candidateInventory = _computeSafeBackendCandidateInventory(
-      events, runId, authorizedWorkspaceRoot, computeInventoryFn,
+    // Terminal failed: backend_failed (backend crashed after a verified stop)
+    // or process_missing — the run may have been settled terminal by
+    // `runs settle` after its runner died; an explicit run_delivery_repackage
+    // still recovers it, so the settled run keeps its candidate projection
+    // (same exact-base + complete inventory proof, keyed on the durable
+    // classifyRecoveryCandidate kind).
+    const backendInventory = _computeSafeTerminalRecoveryCandidateInventory(
+      events, runId, authorizedWorkspaceRoot, computeInventoryFn, "backend_failed",
     );
-    if (candidateInventory) {
-      view.candidateInventory = candidateInventory;
+    if (backendInventory) {
+      view.candidateInventory = backendInventory;
       view.candidateKind = "backend_failed";
+    } else {
+      const settledInventory = _computeSafeTerminalRecoveryCandidateInventory(
+        events, runId, authorizedWorkspaceRoot, computeInventoryFn, "process_missing",
+      );
+      if (settledInventory) {
+        view.candidateInventory = settledInventory;
+        view.candidateKind = "process_missing";
+      }
     }
   } else if (
     // M12-19: a NONTERMINAL orphan whose detached runner/provider process is
@@ -839,12 +868,23 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     && result.deliveryRequested === true
     && result.terminalState === "failed"
   ) {
-    const candidateInventory = _computeSafeBackendCandidateInventory(
-      events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
+    // Same two durable kinds as the point-in-time query's terminal-failed
+    // branch: backend_failed, or process_missing settled terminal by
+    // `runs settle` (still explicitly repackage-recoverable).
+    const backendInventory = _computeSafeTerminalRecoveryCandidateInventory(
+      events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn, "backend_failed",
     );
-    if (candidateInventory) {
-      result.candidateInventory = candidateInventory;
+    if (backendInventory) {
+      result.candidateInventory = backendInventory;
       result.candidateKind = "backend_failed";
+    } else {
+      const settledInventory = _computeSafeTerminalRecoveryCandidateInventory(
+        events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn, "process_missing",
+      );
+      if (settledInventory) {
+        result.candidateInventory = settledInventory;
+        result.candidateKind = "process_missing";
+      }
     }
   } else if (
     // M12-19: advisory process_missing candidate on the wait path too — same

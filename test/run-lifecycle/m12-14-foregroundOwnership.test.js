@@ -171,6 +171,7 @@ function stopDeps() {
   return {
     kill: () => { alive = false; return { called: true, exitCode: 0 }; },
     isAlive: () => alive,
+    identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
     executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false }),
   };
 }

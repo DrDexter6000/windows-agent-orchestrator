@@ -31,7 +31,6 @@ npm run cli -- run glm-flash --prompt "..." --format json
 - 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期是通知，不是终止：WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后继续等到自然终态；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。
 - 终止 worker 只有两个来源：Lead 显式 `stop`；硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
-- `resume` 不带 `--wait` 是 detached runner 托管续跑；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见[安装与配置](install.md)的 Node v22 一节），要存活走后台托管。
 
 派发前看目标车道有没有 `dispatchHold`：那是 Owner 的暂停派发原话，只提示、不拦截，派不派由 Lead 决定；在哪里看得到见[车道](lanes.md)。
 
@@ -107,6 +106,8 @@ npm run cli -- run glm-flash --prompt "..." --isolate
 
 隔离后，agent 在 `<cwd>/.wao-worktrees/<runId>/` 里工作，不污染主工作树。
 
+工作树检出的是源仓库 HEAD 里已提交的版本（MCP 派发时是派发前证明过的那个提交）：已跟踪的文件以提交时的内容出现，Lead 工作区里未提交的改动和未跟踪的文件都不在里面。要 worker 看到，先提交。
+
 WAO 在创建首个 worktree 前，会在仓库本地 `.git/info/exclude` 写入恰好一条根忽略规则 `/.wao-worktrees/`，使持久 worktree 目录不出现在源工作树的普通 `git status --porcelain` 输出。这是一条稳定 repository-local hygiene 规则：不编辑 tracked `.gitignore`、不隐藏任意 worker 产出，worktree 删除后仍保留。WAO 保留既有 exclude 字节（含 BOM、CRLF/LF、用户规则），对已存在的精确规则幂等。`git worktree add` 失败时保留该稳定规则、不回滚——规则只在 exclude ensure 自身失败（write/read-back verify）时回滚到调用前字节。该规则与 host activation（如 Codex `mcp bind`）的 marker block 互相独立，移除一个不会影响另一个。
 
 ## 场景 5：重试 / 恢复
@@ -121,8 +122,6 @@ npm run cli -- retry <runId> --model <id> --reasoning <effort>
 # 恢复：接续一个未完成的 run
 #   opencode-serve：attach 到已有 session
 #   claude/codex：重放原 prompt（进程式无法 attach，只能重放）
-#   不带 --wait = detached runner 托管续跑（CLI 立即返回，worker 存活）；
-#   --wait = 前台等待（本进程退出会 Job Object 连坐杀 worker——隔离机制设计行为）
 npm run cli -- resume <runId> --wait
 ```
 

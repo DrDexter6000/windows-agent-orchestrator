@@ -87,6 +87,9 @@ import {
 } from "../verificationGate.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
+// runs settle 门 6 的 daemon 握手 SSOT：daemon.js 与本模块同属 adapters 层，
+// 静态导入合法；application 层的 runSettle.js 不得上向导入，由这里注入。
+import { readHandshake, isDaemonAlive } from "../daemon.js";
 // TD-109: `runs wait` delegates to the SAME liveness-aware wait service the
 // MCP run_wait tool uses, and attaches notes via the SAME semanticNotes
 // selector — no copied algorithm, no copied catalog.
@@ -109,6 +112,7 @@ import { readRegistry } from "../registry.js";
 export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
   "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit", "lineage-close",
+  "settle",
   "migrate-projects",
 ];
 
@@ -153,6 +157,11 @@ async function runsCommand(args, config, deps) {
   // TD-254（决定 0058）：线系闭合出口（Lead 显式放弃；dry-run 默认，--apply 执行）。
   if (sub === "lineage-close") {
     await runsLineageCloseCommand(tail, config);
+    return;
+  }
+  // runner 已死运行的结算出口（Lead 显式结算；dry-run 默认，--apply 执行）。
+  if (sub === "settle") {
+    await runsSettleCommand(tail, config, deps);
     return;
   }
   if (sub === "wait") {
@@ -2175,6 +2184,50 @@ async function runsLineageCloseCommand(args, config) {
       ...(result.members ? { nonTerminalMembers: result.members } : {}),
       ...(result.busyRunId ? { busyRunId: result.busyRunId } : {}),
     }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(JSON.stringify(result, null, 2));
+}
+
+/**
+ * `runs settle [--run-dir DIR]`（列候选）|
+ * `runs settle --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]`。
+ * 把 runner 已死的非终态运行结算成 failed（理由 process_missing + 确认事实）。
+ * 数据逻辑全部在 ../application/runSettle.js；本函数只做 argv/输出。
+ */
+async function runsSettleCommand(args, config, deps = {}) {
+  const options = parseOptions(args);
+  const { settleRun, listSettleCandidates } = await import("../application/runSettle.js");
+  const runDir = resolve(options.runDir ?? config.runDir ?? "runs");
+  // daemon 门读器默认给真实实现；调用方（测试）经 deps 覆写。
+  const settleDeps = { handshakeReader: readHandshake, daemonAliveFn: isDaemonAlive, ...deps };
+  if (!options.runId) {
+    const result = await listSettleCandidates({ runDir, deps: settleDeps });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (!options.reasonFile) {
+    throw new Error("--reason-file is required with --run-id");
+  }
+  let reasonText;
+  try {
+    reasonText = await readFile(resolve(options.reasonFile), "utf8");
+  } catch {
+    throw new Error(`--reason-file could not be read: ${options.reasonFile}`);
+  }
+  if (reasonText.trim().length === 0) {
+    throw new Error("--reason-file must contain non-empty UTF-8 text");
+  }
+  const result = await settleRun({
+    runId: options.runId,
+    runDir,
+    reasonText,
+    apply: options.apply === true,
+    deps: settleDeps,
+  });
+  if (result?.refused) {
+    console.log(JSON.stringify({ refused: result.refused, gates: result.gates ?? [] }, null, 2));
     process.exitCode = 1;
     return;
   }

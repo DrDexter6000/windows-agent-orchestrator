@@ -34,7 +34,7 @@
 //
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
-import { findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
+import { findState, TERMINAL_STATES, STATE_CHANGE_REASON, PROCESS_MISSING_CONFIRMED_TYPE } from "./transcript.js";
 import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { isObservedVitalSign } from "./runEvent.js";
@@ -625,6 +625,37 @@ function diagnoseFailureInner(events, expectedRunId) {
         fact: `backend 进程失败但证据通过：${a.fileWrittenCount} 个文件写入 + ${a.commandExit0Count} 个命令 exit0。任务可能做对了，需人工确认`,
       });
       return { category: "evidence_passed_backend_failed", evidence };
+    }
+  }
+
+  // 4.55) runs settle 结算的 process_missing 运行：终态 failed、理由
+  //      process_missing、带确认事实（与 classifyRecoveryCandidate 同一判据族，
+  //      与载荷字段无关）。排在 evidence_passed_backend_failed 之后——M12-19
+  //      交付恢复运行若带通过的证据审计仍归后者，不因本规则翻成 unknown；
+  //      排在 provider_disconnect/no_effect/crash 之前——结算运行没有终态
+  //      run.error 事实，不应被活动类规则抢归类。只在转录里没有 run.error
+  //      时适用：runner 写完 run.error、没来得及写终态就死了的运行，结算后
+  //      原因仍在转录里，交给下面按 run.error 归类的规则。
+  if (state === "failed" && !evs.some((e) => e.type === "run.error")) {
+    const settledChange = evs.find(
+      (e) => e.type === "run.state_change"
+        && e.to === "failed"
+        && e.reason === STATE_CHANGE_REASON.process_missing,
+    );
+    if (settledChange && evs.some((e) => e.type === PROCESS_MISSING_CONFIRMED_TYPE)) {
+      return {
+        category: "unknown",
+        evidence: [
+          {
+            eventType: PROCESS_MISSING_CONFIRMED_TYPE,
+            fact: "runner 与会话进程都已不在，转录里没有终态记录，由 Lead 事后结算",
+          },
+          {
+            eventType: PROCESS_MISSING_CONFIRMED_TYPE,
+            fact: "原因不在转录内",
+          },
+        ],
+      };
     }
   }
 

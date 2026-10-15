@@ -102,6 +102,7 @@ test("TD-100.2: 两个并发 process stop → 只有 winner 调 taskkill", async
     const deps = {
       kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
       isAlive: () => true,  // aliveBefore=true → winner 会调 kill；loser 在 claim 阶段就返回了
+      identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),  // 假 pid：身份注入，不跑真实探测
       waitForExit: async () => true,  // 注入：仍活（轮询不真实等待）
       alert: async () => {},
     };
@@ -165,6 +166,7 @@ test("TD-100.4: taskkill exit=0 但 PID 仍活 → stop_unverified + alert + sto
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => true,  // PID 仍活
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         waitForExit: async () => true,  // 注入：轮询后仍活（不真实等待）
         alert: async () => { alertCalled = true; },
       });
@@ -229,6 +231,7 @@ test("TD-100.6: taskkill 非零但 PID 最终已死 → verified=true, outcome=a
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => { killCalls++; killExitCode = 128; return { called: true, exitCode: 128 }; },
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
         alert: async () => {},
       });
@@ -258,6 +261,7 @@ test("TD-100.7: taskkill 后 PID 已死 → outcome=killed + stop_verified", asy
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => { aliveCallCount++; return aliveCallCount === 1; },
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
         alert: async () => {},
       });
@@ -487,6 +491,7 @@ test("TD-100.16: taskkill 后有界轮询 true,true,false → verified=true, out
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         sleep: async () => {},  // 注入 no-op sleep，测试不真实等待
         pollConfig: { rounds: 5, intervalMs: 1 },
         alert: async () => {},
@@ -511,6 +516,7 @@ test("TD-100.17: 轮询耗尽仍 alive → unverified + alert + stopped=false", 
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => true,  // 永远 alive → 轮询耗尽
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         sleep: async () => {},
         pollConfig: { rounds: 3, intervalMs: 1 },
         alert: async () => { alertCalled = true; },
@@ -541,6 +547,7 @@ test("TD-100.18: stop_verified 写 outcome/taskkillCalled/taskkillExitCode/proce
       await stopCommand(["run_td100", "--run-dir", dir, ...stopProofFlags(dir, "run_td100")], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         sleep: async () => {},
         pollConfig: { rounds: 3, intervalMs: 1 },
         alert: async () => {},

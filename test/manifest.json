@@ -2,6 +2,8 @@
   "schemaVersion": 1,
   "groups": {
     "pure": [
+      "application/ownerLivenessIdentity.test.js",
+      "application/runSettle.test.js",
       "application/lanesView.test.js",
       "application/panelDerivation.test.js",
       "application/serveMaintenance.test.js",
@@ -28,6 +30,7 @@
       "backends/stallBudget.test.js",
       "backends/zcode.test.js",
       "commands/lanesCommand.test.js",
+      "commands/runsSettleCli.test.js",
       "commands/registryListDispatchHold.test.js",
       "delivery/deliveryReview.test.js",
       "delivery/gitChildEnvGuard.test.js",
@@ -193,6 +196,7 @@
       "transcript/runEvent.test.js",
       "transcript/td220-runActivityProjection.test.js",
       "transcript/transcript.test.js",
+      "transcript/transitionExpectedLastSeq.test.js",
       "workflow/engine.test.js",
       "workflow/engineStateIntegration.test.js",
       "workflow/handlers.test.js",
@@ -254,7 +258,8 @@
       "isolation-infra/workspaceBinding.test.js",
       "registry-roles/leadPreflightObservability.test.js",
       "delivery/gitNoReplacePin.test.js",
-      "delivery/td235ResolveBranch.test.js"
+      "delivery/td235ResolveBranch.test.js",
+      "delivery/settleDeliveryRecovery.test.js"
     ],
     "worktree": [
       "delivery/delivery.test.js",

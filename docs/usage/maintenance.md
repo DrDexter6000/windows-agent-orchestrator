@@ -12,6 +12,8 @@ npm run cli -- runs summary                 # 状态统计
 npm run cli -- runs grep "error"            # 搜索 transcript
 npm run cli -- runs prune --older-than 7d   # 清理 7 天前的 run
 npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run（移动不删除）
+npm run cli -- runs settle                  # 列出没有新鲜心跳的非终态运行，逐道门给出能否结算（只读）
+npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算成 failed（process_missing）；不带 --apply 是 dry-run
 ```
 
 `runs prune --older-than` 的删除判龄只读本 run 自身信封绑定事件（transcript 文件名 stem 即权威 runId）的末条 `ts`。尾部追加的外 run 或伪造旧 `ts` 的行，不会把在役 run 翻成可修剪；unlink 前被阻断。全无信封的 legacy transcript 按末事件 `ts` 照常判龄、照常参与清理。

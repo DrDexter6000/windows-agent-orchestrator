@@ -204,6 +204,8 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/application/lineageClose.js -> src/transcript.js",
   "src/application/runContinue.js -> src/application/lineageClose.js",
   "src/commands/runs.js -> src/application/lineageClose.js",
+  // runs settle 结算出口：CLI 动态接线（adapters→application 下向）。
+  "src/commands/runs.js -> src/application/runSettle.js",
   // 0045 W4c：workflow agentHandler 经解析层（workflow→core 下向，同其 RunManager 直调平级）。
   "src/workflow/handlers.js -> src/dispatchResolution.js",
   "src/runManager.js -> src/backends/opencodeStopVerify.js",

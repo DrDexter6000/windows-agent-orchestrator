@@ -1180,3 +1180,96 @@ test("zcode 静默收口证据: 只写原文能证的事——无取样结论不
   assert.ok(!/没有上游|未发出/.test(joined), "转录里有过上游 429，证据不得断言没有上游信号");
   assert.match(joined, /收口本身不带上游原因/);
 });
+
+// ---------------------------------------------------------------------------
+// runs settle 结算的 process_missing 运行（终态 failed + 理由 process_missing
+// + 确认事实）：归 unknown，证据只给两条事实——结算的由来与原因不在转录内。
+// ---------------------------------------------------------------------------
+
+test("SETTLE-DX-1: 结算运行 → unknown + 两条事实（结算由来/原因不在转录内）", () => {
+  const runId = "run_settle_dx1";
+  const events = [
+    { type: "run.started", backend: "claude-code", runId, ts: "2026-09-01T00:00:00.000Z" },
+    { type: "run.background_submitted", background: true, runId, ts: "2026-09-01T00:00:01.000Z" },
+    { type: "run.state_change", from: null, to: "running", reason: "first_event", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.process_missing_confirmed", settledBy: "lead_settle", sessionShape: "process_session", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "unknown");
+  assert.equal(d.code, null);
+  assert.equal(d.evidence.length, 2);
+  assert.equal(d.evidence[0].eventType, "run.process_missing_confirmed");
+  assert.match(d.evidence[0].fact, /runner 与会话进程都已不在/);
+  assert.match(d.evidence[0].fact, /Lead 事后结算/);
+  assert.match(d.evidence[1].fact, /原因不在转录内/);
+});
+
+test("SETTLE-DX-2: 只有终态理由、无确认事实 → 不触发新规则（防御：不完整 durable 记录不强归类）", () => {
+  const runId = "run_settle_dx2";
+  const events = [
+    { type: "run.state_change", from: null, to: "running", reason: "first_event", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "unknown");
+  assert.deepEqual(d.evidence, [], "无确认事实 → 走终态兜底，不写结算事实");
+});
+
+test("SETTLE-DX-3 回归钉: M12-19 交付恢复运行带通过的证据审计 → 仍归 evidence_passed_backend_failed（新规则在后）", () => {
+  const runId = "run_settle_dx3";
+  const events = [
+    { type: "run.started", backend: "claude-code", runId, ts: "2026-09-01T00:00:00.000Z" },
+    { type: "run.background_submitted", background: true, runId, ts: "2026-09-01T00:00:01.000Z" },
+    { type: "run.state_change", from: null, to: "running", reason: "first_event", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.evidence_audit", passed: true, runId, ts: "2026-09-01T00:10:00.000Z" },
+    { type: "run.process_missing_confirmed", settledBy: "lead_settle", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "evidence_passed_backend_failed", "带通过审计的结算运行结论不变（不翻成 unknown）");
+});
+
+test("SETTLE-DX-4 回归钉: 已被重新打包恢复的运行（legacy 证据重建通过）结论不变", () => {
+  const runId = "run_settle_dx4";
+  const events = [
+    { type: "run.started", backend: "claude-code", runId, ts: "2026-09-01T00:00:00.000Z" },
+    { type: "run.state_change", from: null, to: "running", reason: "first_event", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.event", kind: "tool_result", runId, ts: "2026-09-01T00:05:00.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/a.js", runId, ts: "2026-09-01T00:06:00.000Z" },
+    { type: "run.process_missing_confirmed", settledBy: "lead_settle", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+    // 已恢复：交付已重封装 + 验证通过。
+    { type: "run.delivery_repackaged", runId, ts: "2026-10-15T01:00:00.000Z" },
+    { type: "run.delivery_created", runId, ts: "2026-10-15T01:00:00.000Z" },
+    { type: "run.delivery_verification_passed", runId, ts: "2026-10-15T01:05:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "evidence_passed_backend_failed", "文件写入证据在场 → 结论不变（新规则排在 4.5 之后）");
+});
+
+test("SETTLE-DX-5 回归钉: 已恢复但无证据的运行 → 结论仍是 unknown（类别不变；新规则只补充事实）", () => {
+  const runId = "run_settle_dx5";
+  const events = [
+    { type: "run.state_change", from: null, to: "running", reason: "first_event", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.process_missing_confirmed", settledBy: "lead_settle", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.delivery_created", runId, ts: "2026-10-15T01:00:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "unknown", "无证据的已恢复运行此前归 unknown，现在仍归 unknown");
+});
+
+test("SETTLE-DX-6: 结算运行转录里有 run.error → 不走结算规则，按 run.error 归类（原因在转录里）", () => {
+  const runId = "run_settle_dx6";
+  const events = [
+    { type: "run.started", backend: "claude-code", runId, ts: "2026-09-01T00:00:00.000Z" },
+    { type: "run.background_submitted", background: true, runId, ts: "2026-09-01T00:00:01.000Z" },
+    { type: "run.error", phase: "spawn", error: "spawn ENOENT", runId, ts: "2026-09-01T00:00:02.000Z" },
+    { type: "run.process_missing_confirmed", settledBy: "lead_settle", sessionShape: "no_session", runId, ts: "2026-10-15T00:00:00.000Z" },
+    { type: "run.state_change", from: "pending", to: "failed", reason: "process_missing", runId, ts: "2026-10-15T00:00:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "crash");
+  assert.ok(!d.evidence.some((e) => /原因不在转录内/.test(e.fact)), "有 run.error 时不得声称原因不在转录内");
+});

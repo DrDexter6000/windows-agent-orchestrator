@@ -1016,6 +1016,35 @@ export class JsonlTranscript {
         writtenAttempts.push(ev);
       }
 
+      // 证明之后的新事件守卫：调用方在开始证明前记下的最后 seq 与锁内实读不一致
+      // ——证明与写入之间转录长过（例如 daemon 在此期间重放了运行）。拒绝且不写
+      // 终态（attemptEvents 与审计事件照 first_terminal_wins 拒绝路径同批落盘），
+      // 调用方重新读、重新证明。先于既有终态检查：终态若也是新落的，陈旧的是
+      // 调用方的证明本身。不传该选项时本分支不可达——行为逐字节不变。
+      if (Number.isInteger(options.expectedLastSeq)) {
+        const observedLastSeq = findLastEventSeq(events);
+        if (observedLastSeq !== options.expectedLastSeq) {
+          const rejectionPayload = {
+            attemptedTo: to,
+            attemptedReason: safeReason,
+            expectedLastSeq: options.expectedLastSeq,
+            observedLastSeq,
+            reason: "observed_seq_changed",
+          };
+          seq += 1;
+          const rejectionEvent = { ts, seq, ...ctx, type: "run.state_change_rejected", ...rejectionPayload };
+          lines.push(JSON.stringify(rejectionEvent));
+          await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
+          this.seq = seq;
+          return {
+            accepted: false,
+            state: existing ?? findState(events),
+            rejection: rejectionPayload,
+            attempts: writtenAttempts,
+          };
+        }
+      }
+
       if (existing) {
         // 被拒：写审计事件（锁内，与判定原子）。rejected 不写任何 terminal fact。
         const rejectionPayload = {

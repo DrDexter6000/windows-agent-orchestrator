@@ -38,7 +38,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 根修（进程归属或隔离 run-dir）待真实痛点再立项 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 首次语义组合冲突致集成后回归实证时；并行成常态时加必做步骤 |  |
-| TD-138 | 全量测试约 10 分钟，由 filesystem 波决定（2026-10-15 实测 364 秒，82 个文件并发 8）：最慢的是 `runDeliveryRepackage`（301 秒）与 `deliveryVerification`（272 秒），这一波在等这两个文件；pure 波已降到 52 秒 | 开放 | 测试批次：查这两个交付类测试为什么要 5 分钟，用假时钟或共用夹具压下来；拆文件帮助不大 | docs/testing.md test/delivery/runDeliveryRepackage.test.js test/delivery/deliveryVerification.test.js |
+| TD-138 | 全量测试约 9 分钟（2026-10-15 实测 551 秒），由 filesystem 波决定（326 秒，82 个文件并发 8），这一波在等几个交付类测试文件 | 开放 | 测试批次：按 `test-results.json` 的 `durationMs` 找出这一波最慢的文件，用共用夹具或注入缝压下来；拆文件帮助不大 | docs/testing.md test/manifest.json |
 | TD-139 | MCP 的 run_status 不返回最近活动摘要（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 下一次 MCP 状态面改动 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 每季度核对 v24 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 首次再撞见同类漂移 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
@@ -98,7 +98,7 @@
 | TD-250 | kimi 上游不回收会话的进程荚（车道迁到私有主目录后基本不再堆积）；failed 会话的清扫判据没做 | 开放 | 上游修复后 `serve recycle` 可退役 | 0056 |
 | TD-254 | readOnly×lead_workspace 错位与 resume 源仓两缺口仍未修 | 开放 | 随隔离边界崩溃恢复族另案观察 | 0058 |
 | TD-260 | 若干收口项（红队补记、supersedes lineage 事实、交付收条等）登记未实施 | 开放 | 未定 | 0062 |
-| TD-266 | worker 会自行读取宿主仓库根的规则与概况文件并发给模型方，WAO 没有声明读取范围的手段；交付工作树不含未提交文件这件事也没写进使用文档 | 等待裁定 | 是否由控制面提供读取范围声明，待 Owner 裁定；含敏感内容的宿主接入前必须先处置 | AGENTS.md |
+| TD-266 | worker 会自行读取宿主仓库根的规则与概况文件并发给模型方，WAO 没有声明读取范围的手段 | 等待裁定 | 是否由控制面提供读取范围声明，待 Owner 裁定；含敏感内容的宿主接入前必须先处置 | AGENTS.md |
 | TD-267 | MCP 的 run_delivery 在验证排队时不带验证闸信息（CLI 已带） | 开放 | 走 MCP 的 Lead 再报同一盲区 | 0066 |
 | TD-270 | deepseek 两个后端没有接静默取样，长命令期间 Lead 看不到进程是否在干活 | 开放 | 下次改动 deepseek 后端 | 0070 0072 |
 | TD-271 | 评分的退出码推断按后端声明门控，run_activity 的推断仍用自己的闭集，两处没有并成一个判据 | 开放 | 下次改动评分或活动投影 | 0072 0073 |
@@ -107,8 +107,8 @@
 | TD-274 | kimi 车道出现过上游 `Request timed out`（发生时只有一个任务在跑），原因未查明 | 开放 | 再次出现时带现场归因 | 0073 0074 |
 | TD-280 | zcode / kimi-web 的严格评分演练以 failed 收尾（认证判定仍是不适用），认证演练没有重跑 | 开放 | 下次例行认证 | 0072 |
 | TD-281 | 评分规则写了 requireCommands 而车道不产出退出码时，派发时没有提示，要到评分才知道通不过 | 开放 | 下次改动派发前检查 | 0072 |
-| TD-291 | zcode 车道额度耗尽时转录里看不到上游的错误或额度信号：zcode 自己的事件流（`session/events`）里有 `model.request.status`（`model_request_failed` / `model_retry_scheduled` / `model_stream_stalled`），但 zcode backend 只轮询 `session/messages`。诊断现在把静默收口判为 `provider_disconnect`，并写明收口本身不带上游原因 | 开放 | 车道批次：静默期间读 `session/events` 的 `model.request.status`，把失败与重试的有界事实投影进转录（不回显正文） | src/backends/zcode.js src/diagnosis.js |
+| TD-291 | zcode 车道额度耗尽时转录里看不到上游的失败与重试：app-server 的 `v4/telemetry/event` 通知里有 `model.request.status`（含 turnId、attempt/maxAttempts、statusCode、retryable、delayMs），backend 只消费同一路通知里的 `stream.chunk`；`session/events` 里没有这些事件（2026-10-15 实测）。诊断把静默收口判为 `provider_disconnect` | 开放 | 车道批次：按本轮 turnId 投影有界字段（不回显 `reason`），诊断按本轮最后一个主轮请求的结局分类；重试期间算不算生命体征，在决定里取舍 | src/backends/zcode.js src/diagnosis.js |
 | TD-292 | 交付打包的异常信息匹配不上已知措辞时，transcript 只写 "delivery packaging error"，连安全的错误类别（如文件锁、git 启动失败）也不给，Lead 看不出该重打包还是该查环境。已见两次（run_20261014092633812jgm07h、run_20261014100010561p9ukkz）；Lead 事后在原工作树用同一输入重做打包检查都通过，但没有留下记录，原因未查明（疑为 worker 收尾时的 git 命令还占着 index.lock） | 开放 | 诊断批次：把错误类别（不含路径与原文）安全投影出来 | src/runManager.js |
-| TD-293 | `run.cleanup_error` 由代码发出，但 architecture §3.2 事件清单与使用手册的事件表都没有这一行 | 开放 | 下次改事件表时补上（两表行集由测试双向守着） | docs/02-architecture.md docs/usage/transcript.md |
+| TD-293 | architecture §3.2 的事件清单（使用手册的事件表与它逐行相同）缺了代码写出的 27 种事件：`run.cleanup_error`、`run.process_missing_confirmed`、`run.lineage_closed`、`run.worktree_*`、`run.correction_*`、`run.upstream_session_*` 等（2026-10-15 按 `append("…")` 与 `type: "…"` 字面量普查）；没有守卫查代码写出的事件与清单是否一致 | 开放 | 文档批次：在代码里设事件登记表，清单由生成层产出，守卫查写出的每种事件都已登记；两份文档都已到字节上限，改生成层还是提上限由 Owner 定 | docs/02-architecture.md docs/usage/transcript.md |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
-| TD-298 | kimi-web 的静默收口（turn 未被观察到、有产出后的停滞、serve 自称在跑但长时间无输出增长）仍按旧规则落 `no_effect` / `crash`，没有像 zcode 那样按收口类型如实分类 | 开放 | 诊断批次：逐种收口判定它说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |
+| TD-298 | kimi-web 的静默收口在诊断里落 `unknown`，不说明是哪道收口门、serve 怎么作证。真实转录里只有两种历史文案（8 拍无进展、不带证词子句的自适应停滞）；现行的 turn 未出现、带证词的停滞、证词封顶三种还没有真实样本（2026-10-15 普查） | 开放 | 诊断批次：门表同时覆盖历史与现行文案，逐门判定说明的是上游还是 serve 的状态，再定类别与证据 | src/diagnosis.js src/backends/kimiWeb.js |

@@ -64,6 +64,8 @@ function defaultDeps(overrides = {}) {
   return {
     kill: overrides.kill ?? (() => ({ called: true, exitCode: 0 })),
     isAlive: overrides.isAlive ?? (() => false),
+    // pid 身份门注入：假 pid 不触发真实 PowerShell 探测；"same" 保持击杀语义。
+    identify: overrides.identify ?? (async () => ({ verdict: "same", basis: "identity_confirmed" })),
     executeStop: overrides.executeStop ?? (async () => ({ verified: true, abortCalled: true, taskkillCalled: false })),
     alert: overrides.alert ?? (async () => {}),
     ...overrides,
@@ -439,4 +441,92 @@ test("ARCH-01: runStop.js does not import commands/mcp/SDK/zod", async () => {
   assert.ok(!src.includes('from "../mcp/'), "no mcp/");
   assert.ok(!src.includes("@modelcontextprotocol/sdk"), "no SDK");
   assert.ok(!src.includes('from "zod"'), "no zod");
+});
+
+// ── pid 身份门在 stop 通道上的三个分支（判定表本身由 ownerLivenessIdentity 钉）──
+
+test("SVC-ID-1: 身份判 gone（pid 被复用）→ 不调用 kill、不等待，按 already_exited 记，事实带依据", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-svc-id1-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunningProcessRun(dir, "run_svcid1", 77771, dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let killCalls = 0;
+    const result = await stopRun({
+      runId: "run_svcid1", runDir: dir,
+      deps: defaultDeps({
+        kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
+        isAlive: () => true, // 复用者占着这个 pid
+        identify: async () => ({ verdict: "gone", basis: "pid_reused" }),
+      }),
+    });
+    assert.equal(killCalls, 0, "复用者不得被杀");
+    assert.equal(result.outcome, "already_exited");
+    assert.equal(result.stopVerified, true);
+    assert.equal(result.sideEffectAttempted, false);
+    const events = await readTranscript(join(dir, "run_svcid1.jsonl"));
+    const verified = events.filter((e) => e.type === "run.stop_verified");
+    assert.equal(verified.length, 1);
+    assert.equal(verified[0].pidIdentity, "pid_reused");
+    assert.equal(events.filter((e) => e.type === "run.stop_unverified").length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SVC-ID-2: 身份判不出 → 不调用 kill，记未核验并告警说明跳过了击杀", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-svc-id2-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunningProcessRun(dir, "run_svcid2", 77772, dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    let killCalls = 0;
+    const alerts = [];
+    const result = await stopRun({
+      runId: "run_svcid2", runDir: dir,
+      deps: defaultDeps({
+        kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
+        isAlive: () => true,
+        identify: async () => ({ verdict: "unknown", basis: "identity_unknown" }),
+        alert: async (level, msg) => { alerts.push({ level, msg }); },
+      }),
+    });
+    assert.equal(killCalls, 0, "身份核不了就不强杀");
+    assert.equal(result.stopVerified, false, "进程仍活，不得报停止成功");
+    assert.equal(result.sideEffectAttempted, false);
+    const events = await readTranscript(join(dir, "run_svcid2.jsonl"));
+    const unverified = events.filter((e) => e.type === "run.stop_unverified");
+    assert.equal(unverified.length, 1);
+    assert.equal(unverified[0].pidIdentity, "identity_unknown");
+    assert.equal(events.filter((e) => e.type === "run.stop_verified").length, 0);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].msg, /kill skipped/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SVC-ID-3: 重放过的运行——身份门拿重放记录的 pid 与它自己的时刻锚", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-svc-id3-"));
+  try {
+    makeGitRepo(dir);
+    const tp = await seedRunningProcessRun(dir, "run_svcid3", 77773, dir);
+    const t = new JsonlTranscript(tp, { runId: "run_svcid3", agentId: "test-agent" });
+    await new Promise((r) => setTimeout(r, 20));
+    await t.append("run.rerun", { originalSessionId: "proc_77773", newSessionId: "proc_77774" });
+    const events = await readTranscript(tp);
+    const created = events.find((e) => e.type === "session.created");
+    const rerun = events.find((e) => e.type === "run.rerun");
+    assert.ok(Date.parse(rerun.ts) > Date.parse(created.ts), "夹具：重放晚于建会话");
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const seen = [];
+    let alive = true;
+    await stopRun({
+      runId: "run_svcid3", runDir: dir,
+      deps: defaultDeps({
+        kill: () => { alive = false; return { called: true, exitCode: 0 }; },
+        isAlive: () => alive,
+        identify: async (pid, anchorAt) => { seen.push({ pid, anchorAt }); return { verdict: "same", basis: "identity_confirmed" }; },
+      }),
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].pid, 77774, "停的是重放出来的新进程");
+    assert.equal(seen[0].anchorAt, Date.parse(rerun.ts), "时刻锚取重放那条记录的 ts，不取旧 session.created 的");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

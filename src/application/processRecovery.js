@@ -60,7 +60,8 @@ const CONFLICT_TYPES = new Set([
 
 // Parse backendSessionId "proc_<positive integer>" → positive integer pid.
 // Anything else (non-string, wrong prefix, zero/non-numeric) → null.
-function _parseProcPid(backendSessionId) {
+// Exported: runSettle resolves the session pid through the same parser.
+export function parseProcPid(backendSessionId) {
   if (typeof backendSessionId !== "string") return null;
   const m = /^proc_(\d+)$/.exec(backendSessionId);
   if (!m) return null;
@@ -136,7 +137,7 @@ export function classifyProcessMissingCandidate(events, runId) {
 
   const sessions = bound.filter((e) => e.type === "session.created");
   if (sessions.length !== 1) return { eligible: false };
-  const pid = _parseProcPid(sessions[0].backendSessionId);
+  const pid = parseProcPid(sessions[0].backendSessionId);
   if (pid === null) return { eligible: false };
 
   return { eligible: true, pid };

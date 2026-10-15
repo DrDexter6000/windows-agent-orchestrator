@@ -39,7 +39,9 @@ import { findRunWorkspaceOwnership, verifyRunWorkspaceOwnership } from "./runWor
 // M12-19: the conservative process-alive probe now lives in ownerLiveness (the
 // liveness SSOT), shared with the process_missing recovery proof. Imported here
 // and re-exported below so commands/stop.js and existing tests keep working.
-import { isPidAlive } from "./ownerLiveness.js";
+// The pid-identity judgment (is the pid still the process the session record
+// refers to?) lives there too — the kill lane consumes it below.
+import { isPidAlive, identifyProcessIdentity } from "./ownerLiveness.js";
 
 // ── Process primitives (owned here, not in commands/) ────────────────────────
 
@@ -262,6 +264,10 @@ export async function stopRun(input) {
   const session = replayed
     ? { ...created, backendSessionId: rerun.newSessionId, hostPid: rerun.hostPid }
     : created;
+  // pid 身份门的时刻锚：与 pid 同一条记录的 ts——重放过取 run.rerun 那条的 ts，
+  // 否则取 session.created 的 ts。上方合成的 session 对象沿用了旧 session.created
+  // 的其余字段，不能从它反推锚。
+  const identityAnchorAt = Date.parse(replayed ? rerun.ts : created.ts);
 
   // R18 (TD-128 W3)：fromState 投影绑定到请求 runId（R15 范式——
   // `findState(events.filter(bound))`）。fromState 落进 transitionState 写出的
@@ -335,7 +341,7 @@ export async function stopRun(input) {
     }
     return await processStop({
       transcript, session, fromState, runId, pid, deps, stopRequestedAttempt,
-      runDir: resolvedRunDir,
+      runDir: resolvedRunDir, anchorAt: identityAnchorAt,
     });
   }
 
@@ -343,7 +349,7 @@ export async function stopRun(input) {
   if (hostPid !== null) {
     return await processStop({
       transcript, session, fromState, runId, pid: hostPid, deps, stopRequestedAttempt,
-      runDir: resolvedRunDir, backend: hostBackend,
+      runDir: resolvedRunDir, backend: hostBackend, anchorAt: identityAnchorAt,
     });
   }
 
@@ -362,7 +368,7 @@ export async function stopRun(input) {
 
 // ── processStop (extracted from stop.js) ─────────────────────────────────────
 
-async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt, runDir, backend = "process" }) {
+async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt, runDir, backend = "process", anchorAt }) {
   const kill = deps.kill ?? ((p) => killProcessTree(p));
   const isAlive = deps.isAlive ?? ((p) => isPidAlive(p));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
@@ -393,19 +399,39 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     };
   }
 
+  // Winner: identity gate BEFORE any kill. The session record is often days
+  // old and the machine may have rebooted since — a bare signal-0 probe would
+  // happily taskkill an unrelated process tree that reused the pid. The
+  // judgment shares this lane's isAlive probe (one liveness truth); the
+  // posture mirrors the serve-recycle precedent: when the identity cannot be
+  // verified, give up the hard kill and report honestly rather than risk
+  // killing the wrong process.
+  const identify = deps.identify
+    ?? ((p, anchor) => identifyProcessIdentity(p, anchor, { isAliveFn: (q) => isAlive(q) }));
+  const identity = await identify(pid, anchorAt);
+
   // Winner: execute side effect
-  const aliveBefore = isAlive(pid);
+  const aliveBefore = identity.verdict === "gone" ? false : isAlive(pid);
   let killResult = { called: false, exitCode: null };
-  if (aliveBefore) {
+  if (aliveBefore && identity.verdict !== "unknown") {
     killResult = kill(pid);
   }
 
   const waitForExit = deps.waitForExit ?? ((p, ia, sl, pc) => waitForPidExit(p, ia, sl, pc));
   const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const pollConfig = deps.pollConfig ?? {};
-  const aliveAfter = aliveBefore
-    ? await waitForExit(pid, isAlive, sleepFn, pollConfig)
-    : isAlive(pid);
+  let aliveAfter;
+  if (identity.verdict === "gone") {
+    // The recorded process is provably gone — whatever holds the pid now (a
+    // reuser) is not this run's process and must not be waited on or killed.
+    aliveAfter = false;
+  } else if (aliveBefore) {
+    aliveAfter = killResult.called
+      ? await waitForExit(pid, isAlive, sleepFn, pollConfig)
+      : isAlive(pid);
+  } else {
+    aliveAfter = isAlive(pid);
+  }
   const verified = aliveAfter === false;
 
   // Determine outcome
@@ -428,6 +454,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
       backendSessionId: session.backendSessionId,
       backend,
       outcome,
+      pidIdentity: identity.basis,
       taskkillCalled: killResult.called,
       taskkillExitCode: killResult.exitCode,
       processAliveBefore: aliveBefore,
@@ -438,6 +465,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
       backendSessionId: session.backendSessionId,
       backend,
       outcome,
+      pidIdentity: identity.basis,
       taskkillCalled: killResult.called,
       taskkillExitCode: killResult.exitCode,
       processAliveBefore: aliveBefore,
@@ -445,8 +473,11 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     });
     // TD-233（告警落点收口）：告警跟随本调用实际解析出的 runDir（与转录同一
     // 来源，stopRun 传入的 resolvedRunDir），绝不回落到进程 cwd。
+    const identityNote = identity.verdict === "unknown"
+      ? ", pid identity could not be verified — kill skipped"
+      : "";
     await alert("stop_unverified",
-      `stop ${runId} not verified: process may still be running (pid=${pid}, outcome=${outcome})`,
+      `stop ${runId} not verified: process may still be running (pid=${pid}, outcome=${outcome}${identityNote})`,
       { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
@@ -463,6 +494,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     backend,
     pid,
     outcome,
+    pidIdentity: identity.basis,
     taskkillCalled: killResult.called,
     taskkillExitCode: killResult.exitCode,
     processAliveBefore: aliveBefore,

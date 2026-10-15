@@ -73,6 +73,7 @@ test("R13C-STOP-1: 尾部外 run 伪造 session.created(proc_2222) 不夺走 kil
       deps: {
         kill: (pid) => { killedPids.push(pid); alive = false; return { called: true, exitCode: 0 }; },
         isAlive: () => alive,
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         alert: async () => {},
       },
     });
@@ -103,6 +104,7 @@ test("R13C-STOP-2: 尾部外 run 伪造 run.started 不供给写句柄 agentId�
       deps: {
         kill: () => { alive = false; return { called: true, exitCode: 0 }; },
         isAlive: () => alive,
+        identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
         alert: async () => {},
       },
     });

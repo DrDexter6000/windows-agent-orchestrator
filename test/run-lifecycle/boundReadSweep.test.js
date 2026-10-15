@@ -1272,6 +1272,7 @@ test("R18-STOP-1: 篡改探针 + 合法回归 — stop 落盘的 state_change.fr
         deps: {
           kill: () => { alive = false; return { called: true, exitCode: 0 }; },
           isAlive: () => alive,
+          identify: async () => ({ verdict: "same", basis: "identity_confirmed" }),
           alert: async () => {},
         },
       });
