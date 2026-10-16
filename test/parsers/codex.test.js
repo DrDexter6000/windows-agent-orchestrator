@@ -202,3 +202,111 @@ test("file_change kind=delete 不 emit file_written（只记写入）", () => {
   );
   assert.ok(!events.some((e) => e.kind === "file_written"), "删除不应算 file_written");
 });
+
+// ===== 自报失败原话（可选接口 failureReason）=====
+// codex 失败时原因原话只在 stdout 的 JSON 里：type:"error" 的 message，或
+// turn.failed 的 error.message；stderr 往往只有 "Reading additional input from
+// stdin..." 这类常规提示。解析器把原话记下（不截断；本轮终局优先于过程报错），ProcessBackend
+// 在非零退出兜底时读出并拼进 run.error。两种帧都不 emit 事件——事件流形状不变
+// （现有 RunEvent 种类承载不了 provider 错误原文：message 会被读成 worker 产出）。
+
+test("自报失败: type:error 记下 message，不 emit 事件", () => {
+  const p = new CodexStreamParser();
+  assert.equal(p.failureReason(), null, "没有失败帧时没有原话");
+  const events = p.feed('{"type":"error","message":"You\'ve hit your usage limit. Try again at 1:38 AM."}\n');
+  assert.deepEqual(events, [], "失败帧不产事件");
+  assert.deepEqual(p.failureReason(), {
+    runtime: "codex",
+    message: "You've hit your usage limit. Try again at 1:38 AM.",
+  });
+});
+
+test("自报失败: turn.failed 记下 error.message，不 emit 事件", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed('{"type":"turn.failed","error":{"message":"stream error: upstream refused the turn"}}\n');
+  assert.deepEqual(events, [], "失败帧不产事件");
+  assert.deepEqual(p.failureReason(), {
+    runtime: "codex",
+    message: "stream error: upstream refused the turn",
+  });
+});
+
+test("自报失败: 两种帧都来时以本轮终局为准", () => {
+  const p = new CodexStreamParser();
+  p.feed('{"type":"error","message":"first failure"}\n');
+  assert.equal(p.failureReason().message, "first failure");
+  p.feed('{"type":"turn.failed","error":{"message":"second failure"}}\n');
+  assert.equal(p.failureReason().message, "second failure", "本轮终局优先于过程报错");
+  p.feed('{"type":"error","message":"late transient"}\n');
+  assert.equal(p.failureReason().message, "second failure", "终局之后的过程报错不覆盖终局");
+});
+
+test("自报失败: 解析器不按读者长度截短原话（脱敏需要完整密钥值）", () => {
+  const p = new CodexStreamParser();
+  const long = `head-marker ${"x".repeat(600)}`;
+  p.feed(`${JSON.stringify({ type: "error", message: long })}\n`);
+  const reason = p.failureReason();
+  assert.equal(reason.message, long, "远低于原始上限的原话原样保留（后端脱敏后才截）");
+  assert.ok(reason.message.startsWith("head-marker "), "原因在开头");
+});
+
+test("自报失败: 解析器不截断原话（70 KB 原样保留，截断只在脱敏之后）", () => {
+  const p = new CodexStreamParser();
+  const long = `head-marker ${"x".repeat(70 * 1024)}`;
+  p.feed(`${JSON.stringify({ type: "error", message: long })}\n`);
+  assert.equal(p.failureReason().message, long, "任何在脱敏之前的截断都可能切碎密钥值");
+});
+
+test("自报失败: 本轮终局只被新一轮或本轮完成清掉，轮内的 item.* 不清", () => {
+  // 失败收尾之后同一轮还可能到达 item.*（例如失败命令的完成帧），它们不推翻本轮终局。
+  for (const frame of [
+    '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"echo hi"}}',
+    '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"echo hi","exit_code":1}}',
+  ]) {
+    const p = new CodexStreamParser();
+    p.feed('{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit."}}\n');
+    p.feed(`${frame}\n`);
+    assert.equal(p.failureReason()?.message, "You've hit your usage limit.", `轮内帧不清终局：${frame}`);
+  }
+  for (const frame of ['{"type":"turn.started"}', '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}']) {
+    const p = new CodexStreamParser();
+    p.feed('{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit."}}\n');
+    p.feed(`${frame}\n`);
+    assert.equal(p.failureReason(), null, `新一轮或本轮完成清掉终局：${frame}`);
+  }
+});
+
+test("自报失败: 过程报错之后的推进帧清掉原话（陈旧错误不算终局原因）", () => {
+  // 运行又往前走说明之前的过程报错已陈旧（可能已重试恢复）：只有"报错之后再无进展
+  // 就退出"时，原话才是退出原因。
+  const progressFrames = [
+    '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"echo hi"}}',
+    '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"recovered"}}',
+    '{"type":"turn.started"}',
+    '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+  ];
+  for (const frame of progressFrames) {
+    const p = new CodexStreamParser();
+    p.feed('{"type":"error","message":"You\'ve hit your usage limit."}\n');
+    assert.ok(p.failureReason(), `失败帧先记下原话（${frame}）`);
+    p.feed(`${frame}\n`);
+    assert.equal(p.failureReason(), null, `推进帧清掉已陈旧的原话：${frame}`);
+  }
+});
+
+test("自报失败: 推进之后新的失败帧重新记下原话（清除不是单向闩锁）", () => {
+  const p = new CodexStreamParser();
+  p.feed('{"type":"error","message":"stale rate limit"}\n');
+  p.feed('{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"recovered"}}\n');
+  assert.equal(p.failureReason(), null);
+  p.feed('{"type":"turn.failed","error":{"message":"final failure"}}\n');
+  assert.equal(p.failureReason().message, "final failure", "新的失败帧重新成为退出原因");
+});
+
+test("自报失败: 缺 message 的失败帧与其它事件一样被忽略（不崩、无原话）", () => {
+  const p = new CodexStreamParser();
+  assert.deepEqual(p.feed('{"type":"error"}\n'), []);
+  assert.deepEqual(p.feed('{"type":"turn.failed","error":{}}\n'), []);
+  assert.deepEqual(p.feed('{"type":"error","message":"   "}\n'), []);
+  assert.equal(p.failureReason(), null, "空原话不算失败原话");
+});

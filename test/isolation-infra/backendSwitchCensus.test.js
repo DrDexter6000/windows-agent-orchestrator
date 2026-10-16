@@ -65,6 +65,8 @@ function walkJs(dir, out) {
 //
 // 轴向标注（文件 → 为什么这些名字出现在这里）：
 //   backends/<name>.js        — 各自的自身标识（错误前缀/自述），单名。
+//   backends/parsers/codex.js — 自报失败原话的运行时标签（failureReason().runtime），
+//                               单名自身标识；共享层只拼接、不比较。
 //   backends/factory.js       — full-set-SSOT：构造闭集（capabilityMatrix 交叉钉）
 //                               + SELF_REPORTED_TRANSCRIPT_BACKENDS 冻结集合
 //                               （transcript 自报来源轴，现单成员）。
@@ -123,6 +125,9 @@ const REGISTERED_CENSUS = {
   "backends/kimiWeb.js": { "kimi-web": 1 },
   "backends/opencodeServe.js": { "opencode-serve": 1 },
   "backends/zcode.js": { zcode: 1 },
+  // codex 解析器给自报失败原话打的运行时标签（ProcessBackend 拼进 run.error，
+  // 不据此分支——仓库不变量第 3 条）。
+  "backends/parsers/codex.js": { codex: 1 },
   // TD-218 承重 env 声明表（2026-10-06 批漏登，2026-10-07 全量 census 补登）：
   // zcode 车道 file 类承重变量声明的键——轴向=backend 承重配置面。
   "application/loadBearingEnv.js": { zcode: 1 },

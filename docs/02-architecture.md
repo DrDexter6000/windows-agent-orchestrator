@@ -308,6 +308,7 @@ run 失败——降级而非崩溃。
 interface StreamParser {
   feed(chunk: Buffer|string): RunEvent[];   // 喂入 stdout chunk，吐出解析出的事件
   flush(): RunEvent[];                        // 流结束时收尾
+  failureReason?(): { runtime, message } | null; // 可选：非零退出且没产出 done 时拼进报错的失败原话（先脱敏后截断）
 }
 ```
 

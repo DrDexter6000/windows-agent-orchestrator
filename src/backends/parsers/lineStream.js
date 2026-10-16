@@ -23,6 +23,18 @@ export class LineStreamParser {
     return this.providerSessionId;
   }
 
+  /**
+   * 可选接口：provider 自报的失败原话（取哪一条由子类定）。基类没有这个事实 → null。
+   * ProcessBackend 只在"非零退出且解析器没产出 done"的兜底路径读它，用来把运行时
+   * 给出的原因本身带进 run.error；返回 null 或未覆写时，退出报错文案逐字不变。
+   * 形状 { runtime, message }：runtime 是报这条原话的运行时标签，共享代码只拼接、
+   * 绝不据此分支；message 不在解析器里截断——脱敏按完整密钥值匹配，任何先截都会把
+   * 跨在截断点上的值切碎、前缀漏出；有界截断只由共享层在脱敏之后做（保留开头）。
+   */
+  failureReason() {
+    return null;
+  }
+
   feed(chunk) {
     const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     this.buffer += text;

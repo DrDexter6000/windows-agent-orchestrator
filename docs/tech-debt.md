@@ -62,7 +62,7 @@
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 四项独立触发：接线 model、改文档、auditor 无 verdict、排查断链时 | docs/troubleshooting.md |
 | TD-178 | live 文档仍有 fresh clone 必断指针，指向运行时状态与 gitignored 路径 | 开放 | 后续文档卫生包时 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 未定 | docs/02-architecture.md |
-| TD-180 | codex 后端启动期退出、零写入零 verdict。已知一种原因是 codex 用量到顶：原话写在 codex 的 JSON 输出（`type:error`、`turn.failed`）里，`src/backends/parsers/codex.js` 不读这两种，WAO 只看到 stderr 的常规提示，诊断归 crash（2026-10-15 实测）；其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 下一批：解析器把这两种消息（有界、脱敏）带进 run.error，诊断按额度类归因 | 0067 docs/troubleshooting.md |
+| TD-180 | codex 后端启动期退出、零写入零 verdict：用量到顶已能识别（codex 自报的原话进终局 run.error，诊断归 provider_capacity），其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 再撞到原因未明的样本时，先看 codex 的 JSON 输出有没有原话 | 0067 docs/troubleshooting.md |
 | TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 归因闭合前按 §8.1 安静窗口单发复验；有界复现待做 |  |
 | TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 下一次真实恢复 drill 运行 |  |
 | TD-183 | 等待到期与 llm 侧各探针仍不校验探针 run 完成事实即判定，传输层失败仍可能记成假红 | 开放 | 下一次 provider 抖动打到未覆盖探针，或 Owner 裁定推广完成门 | scripts/reliability/componentDrills.mjs src/transcript.js |
@@ -112,3 +112,5 @@
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-302 | MCP 服务把会话选定的工作区存在进程内存里，一个服务进程一份；多个会话的调用落到同一进程时绑定会串。2026-10-15 一个宿主会话读到自己绑在另一个宿主项目上（来源 lead_session，它没选过）：在被串的会话里派发，worker 会进错项目；改绑会改走另一个会话的绑定 | 开放 | 批 10 合入后先修：派发时由 Lead 显式给出目标项目，与绑定不符即拒；查清两个会话怎么落到同一服务进程 | src/mcp/server.js |
 | TD-303 | 别的项目的 Lead 发现的 WAO 问题没有送到 WAO 开发侧的通道：反馈只能写进宿主自己的仓库，靠 Owner 转告。2026-10-15 一份宿主跟进反馈（含 TD-302 的发现）因此几小时后才被看到 | 开放 | TD-302 之后：wao 提供反馈入口，写进 WAO 安装根下只在本机的收件箱（不进 git；不用 GitHub Issues，仓库是公开的），WAO 开发 Lead 开工时能看到未处理的条目 | 0049 |
+| TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 撞到真实误归样本时，按窗口长短区分限流与额度耗尽，配真实措辞的测试 | src/diagnosis.js |
+| TD-305 | 交付隔离门的写前位置检查对已存在的工作树内文件调 `realpathSync.native`，失败一律判 `write_intent_physical_unresolved` 并终止运行，不重试、也不记错误码。2026-10-16 deepseek-flash 一次返工在编辑工作树内的测试文件时被它终止，多半是 worker 正在写同一文件造成的瞬时共享冲突 | 开放 | 下一批：对 EBUSY/EPERM/EACCES 短暂重试后再判，违规事件记下错误码 | src/runManager.js |

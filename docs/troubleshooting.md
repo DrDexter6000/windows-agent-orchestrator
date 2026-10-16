@@ -565,9 +565,9 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 7.15 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
 
-- **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
+- **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`（用量到顶时归 `provider_capacity`，见下）；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
 - **已知案例**（均为 codex 后端）：
-  - 用量到顶：codex 的 JSON 输出里有 `{"type":"error","message":"You've hit your usage limit … try again at <时刻>"}`，WAO 目前不读这一行，只看到 stderr。在任意目录跑 `codex exec --skip-git-repo-check --json "<一句无关的话>"` 就能看到原话和恢复时刻；到点之前重派都会失败。
+  - 用量到顶：codex 的 JSON 输出里有 `{"type":"error","message":"You've hit your usage limit … try again at <时刻>"}`，WAO 读这一行——原话进终局 `run.error`，`runs diagnose` 据此归 `provider_capacity` / `quota_exhausted`，不再只报 crash。在任意目录跑 `codex exec --skip-git-repo-check --json "<一句无关的话>"` 就能看到原话和恢复时刻；到点之前重派都会失败。
   - 一例退出前零 worker 事件，stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时。
   - 其余退出前已有若干 worker 事件，原因未明。
   - 多例 stderr 都以 `Reading additional input from stdin...` 开头，这是 codex 的常规提示，不是故障签名。除用量到顶外，把原任务原样再派一次，既往案例均成功。

@@ -9,6 +9,8 @@ import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
 import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
+import { CodexStreamParser } from "../../src/backends/parsers/codex.js";
+import { diagnoseFailure } from "../../src/diagnosis.js";
 import {
   runEventIsUsableEffect,
   DONE_MARKERS,
@@ -242,6 +244,280 @@ test("TD-77B 回归: 进程 exit 非 0 + 有 stderr → 仍优先 stderr（stdou
   assert.match(done.error, /process exited with code 1/);
   assert.match(done.error, /provider 401 unauthorized/, "stderr 优先");
   assert.doesNotMatch(done.error, /stdout:/, "有 stderr 时不应掺 stdout 段");
+});
+
+// ── 解析器自报失败原话（可选接口 failureReason）─────────────────────────
+// 运行时把失败原因写在 stdout 的协议帧里（codex 的 error/turn.failed），stderr 只有
+// 常规提示。解析器记下原话，退出兜底把它拼进 done(failed).error → run.error(phase:wait)
+// → 诊断；没有原话（别的运行时、或运行时没吐失败帧）时文案逐字不变。
+
+// 跑一个 mock 子进程到事件流结束；parser 与后端选项按需注入。
+async function runMockProcess(script, { parserClass = ClaudeStreamParser, ...opts } = {}) {
+  const backend = new ProcessBackend({ parserClass, buildArgs: () => ["-e", script], ...opts });
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  return events;
+}
+
+function mockScriptWithStderr(lines, stderrText, exitCode) {
+  const payload = Buffer.from(lines.join("\n")).toString("base64");
+  return [
+    `process.stdout.write(Buffer.from("${payload}","base64").toString("utf8")+"\\n");`,
+    `process.stderr.write(${JSON.stringify(`${stderrText}\n`)});`,
+    `process.exit(${exitCode});`,
+  ].join("");
+}
+
+test("自报失败原话: codex 的 error/turn.failed 原话 + 常规 stderr + exit 1 → done.error 含 codex: 原话", async () => {
+  const quota = "You've hit your usage limit. Try again at 1:38 AM.";
+  const lines = [
+    '{"type":"thread.started","thread_id":"019e"}',
+    JSON.stringify({ type: "error", message: quota }),
+    JSON.stringify({ type: "turn.failed", error: { message: quota } }),
+  ];
+  const events = await runMockProcess(
+    mockScriptWithStderr(lines, "Reading additional input from stdin...", 1),
+    { parserClass: CodexStreamParser },
+  );
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "failed");
+  assert.equal(
+    done.error,
+    "process exited with code 1; codex: You've hit your usage limit. Try again at 1:38 AM.;"
+      + " stderr: Reading additional input from stdin...",
+  );
+  // 失败帧不产 worker 事件（事件流形状不变）
+  assert.ok(!events.some((e) => e.kind === "message" || e.kind === "tool_use"), "失败帧不产 worker 事件");
+});
+
+test("自报失败原话: 原话里的凭据值仍过脱敏", async () => {
+  const name = "WAO_FAIL_MSG_SECRET";
+  const secret = "fail-message-test-secret-value";
+  const previous = process.env[name];
+  process.env[name] = secret;
+  try {
+    const script = [
+      `const v=process.env.${name};`,
+      `process.stdout.write(JSON.stringify({type:"error",message:"auth failed for "+v})+"\\n");`,
+      "process.stderr.write('boom\\n');",
+      "process.exit(1);",
+    ].join("");
+    const events = await runMockProcess(script, {
+      parserClass: CodexStreamParser,
+      credentialEnvNames: () => [name],
+    });
+    const done = events.find((e) => e.kind === "done");
+    assert.equal(done?.reason, "failed");
+    assert.equal(done.error.includes(secret), false, "凭据值不得进 run.error");
+    assert.match(done.error, /codex: auth failed for \[REDACTED:WAO_FAIL_MSG_SECRET\]/);
+  } finally {
+    if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+  }
+});
+
+test("自报失败原话: 跨在原截断点的凭据值整段脱敏（前缀不泄露）", async () => {
+  // 原话长 525 字符、凭据值从第 461 个字符开始：若解析器先截到 500，脱敏器只看到
+  // 凭据的前半段、匹配不上整值，前缀就原样进 run.error。脱敏必须先看到完整原话。
+  const name = "WAO_FAIL_MSG_SPAN_SECRET";
+  const secret = `span-canary-${"A".repeat(48)}`;
+  const previous = process.env[name];
+  process.env[name] = secret;
+  try {
+    const prefix = "x".repeat(460);
+    const script = [
+      `const v=process.env.${name};`,
+      `process.stdout.write(JSON.stringify({type:"error",message:${JSON.stringify(prefix)}+v+" tail"})+"\\n");`,
+      "process.stderr.write('boom\\n');",
+      "process.exit(1);",
+    ].join("");
+    const events = await runMockProcess(script, {
+      parserClass: CodexStreamParser,
+      credentialEnvNames: () => [name],
+    });
+    const done = events.find((e) => e.kind === "done");
+    assert.equal(done?.reason, "failed");
+    assert.equal(done.error.includes(secret), false, "凭据整值不得进 run.error");
+    assert.equal(done.error.includes(secret.slice(0, 10)), false, "凭据前缀（截断残留）不得进 run.error");
+    assert.match(done.error, /\[REDACTED:WAO_FAIL_MSG_SPAN_SECRET\]/, "整值被替换标记取代");
+  } finally {
+    if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+  }
+});
+
+test("自报失败原话: 脱敏后超上限时保留开头 —— 额度原话仍能归 provider_capacity/quota_exhausted", async () => {
+  // 原话脱敏前 500 字符（解析器不截），替换标记比原值长 → 脱敏后 522 字符，由共享上限
+  // 截断。原因在开头，截断必须保留开头；按尾部截会把 "hit your usage limit" 开头的
+  // "hit" 砍掉，诊断随之落回 crash。
+  const name = "WAO_FAIL_MSG_QUOTA_SECRET";
+  const secret = "quota-canary-9";
+  const previous = process.env[name];
+  process.env[name] = secret;
+  try {
+    const head = "You've hit your usage limit.";
+    const filler = "Please try again later. ".repeat(19);
+    const message = `${head} ${secret} ${filler}`;
+    assert.equal(message.length, 500, "脱敏前原话正好在共享上限上（解析器不截短）");
+    const script = [
+      `const v=process.env.${name};`,
+      `const msg=${JSON.stringify(`${head} `)}+v+${JSON.stringify(` ${filler}`)};`,
+      `process.stdout.write(JSON.stringify({type:"error",message:msg})+"\\n");`,
+      "process.stderr.write('Reading additional input from stdin...\\n');",
+      "process.exit(1);",
+    ].join("");
+    const events = await runMockProcess(script, {
+      parserClass: CodexStreamParser,
+      credentialEnvNames: () => [name],
+    });
+    const done = events.find((e) => e.kind === "done");
+    assert.equal(done?.reason, "failed");
+    assert.equal(done.error.includes(secret), false, "凭据值不得进 run.error");
+    assert.ok(
+      done.error.startsWith(`process exited with code 1; codex: ${head} `),
+      "截断保留开头：原话仍以用量到顶那句开头",
+    );
+    assert.match(done.error, /\[REDACTED:WAO_FAIL_MSG_QUOTA_SECRET\]/, "凭据值被替换标记取代");
+    assert.match(
+      done.error,
+      /…; stderr: Reading additional input from stdin\.\.\.$/,
+      "超上限处以省略标记收尾，stderr 尾照旧附在后面",
+    );
+
+    // 诊断吃的是后端真正拼出的这条 run.error：有原话开头 → provider_capacity / quota_exhausted。
+    const runId = "run_codex_quota_truncated";
+    const d = diagnoseFailure([
+      { type: "run.submitted", runId, ts: "2026-10-15T01:38:00.000Z" },
+      { type: "run.error", phase: "wait", runId, error: done.error, ts: "2026-10-15T01:38:12.000Z" },
+      { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T01:38:12.003Z" },
+    ], runId);
+    assert.equal(d.category, "provider_capacity", "截断后开头仍在 → 归类不落回 crash");
+    assert.equal(d.code, "quota_exhausted");
+  } finally {
+    if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+  }
+});
+
+test("自报失败原话: 64 KB 之外跨界的凭据也整段脱敏（解析器不在脱敏前截断）", async () => {
+  // 前 8 段是同一个已登记的 8190 字符凭据（共 65520 字符），另一个已登记凭据从第 65520
+  // 字符开始、跨过 64 KB。若解析器在 64 KB 处先截，后一个凭据只剩前缀；前 8 段脱敏成短
+  // 标记后，残留前缀会挪进 500 字符的可见范围。
+  const big = "WAO_FAIL_MSG_BIG_A";
+  const edge = "WAO_FAIL_MSG_EDGE_B";
+  const bigValue = `big-a-${"A".repeat(8184)}`;
+  const edgeValue = `edge-b-canary-${"B".repeat(37)}`;
+  const saved = { [big]: process.env[big], [edge]: process.env[edge] };
+  process.env[big] = bigValue;
+  process.env[edge] = edgeValue;
+  try {
+    assert.equal(bigValue.length * 8, 65520);
+    const script = [
+      `const a=process.env.${big};const b=process.env.${edge};`,
+      'process.stdout.write(JSON.stringify({type:"error",message:a.repeat(8)+b+" tail"})+"\\n");',
+      "process.stderr.write('Reading additional input from stdin...\\n');",
+      "process.exit(1);",
+    ].join("");
+    const events = await runMockProcess(script, {
+      parserClass: CodexStreamParser,
+      credentialEnvNames: () => [big, edge],
+    });
+    const done = events.find((e) => e.kind === "done");
+    assert.equal(done?.reason, "failed");
+    assert.equal(done.error.includes(edgeValue.slice(0, 10)), false, "跨界凭据的前缀不得进 run.error");
+    assert.match(done.error, /\[REDACTED:WAO_FAIL_MSG_EDGE_B\]/, "跨界凭据被整段替换");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
+
+test("自报失败原话: turn.failed 之后同一轮的 item.completed 不清掉终局原话", async () => {
+  const quota = "You've hit your usage limit. Try again at 1:38 AM.";
+  const stderrTail = "Reading additional input from stdin...";
+  const script = mockScriptWithStderr([
+    '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"npm test"}}',
+    JSON.stringify({ type: "turn.failed", error: { message: quota } }),
+    '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"npm test","exit_code":1}}',
+  ], stderrTail, 1);
+  const done = (await runMockProcess(script, { parserClass: CodexStreamParser })).find((e) => e.kind === "done");
+  assert.equal(done?.reason, "failed");
+  assert.equal(done.error, `process exited with code 1; codex: ${quota}; stderr: ${stderrTail}`);
+});
+
+test("自报失败原话: 失败帧之后的推进帧清掉原话（陈旧错误不成为退出原因）", async () => {
+  const quota = "You've hit your usage limit. Try again at 1:38 AM.";
+  const stderrTail = "Reading additional input from stdin...";
+  const progressFrames = [
+    ["item.started", '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"echo hi"}}'],
+    ["item.completed", '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"working"}}'],
+    ["turn.started", '{"type":"turn.started"}'],
+  ];
+  for (const [label, frame] of progressFrames) {
+    const script = mockScriptWithStderr(
+      [JSON.stringify({ type: "error", message: quota }), frame],
+      stderrTail,
+      1,
+    );
+    const done = (await runMockProcess(script, { parserClass: CodexStreamParser })).find((e) => e.kind === "done");
+    assert.equal(done?.reason, "failed");
+    assert.equal(
+      done.error,
+      `process exited with code 1; stderr: ${stderrTail}`,
+      `推进帧（${label}）之后陈旧的失败原话不得进退出报错`,
+    );
+  }
+
+  // 失败之后再无进展就退出 → 原话才是退出原因（改前的行为，逐字保留）。
+  const direct = mockScriptWithStderr([JSON.stringify({ type: "error", message: quota })], stderrTail, 1);
+  const directDone = (await runMockProcess(direct, { parserClass: CodexStreamParser })).find((e) => e.kind === "done");
+  assert.equal(directDone.error, `process exited with code 1; codex: ${quota}; stderr: ${stderrTail}`);
+
+  // 推进之后又出现新的失败帧 → 新的原话重新进报错（清除不是单向闩锁）。
+  const refreshed = mockScriptWithStderr([
+    JSON.stringify({ type: "error", message: quota }),
+    '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"working"}}',
+    JSON.stringify({ type: "turn.failed", error: { message: "stream error: upstream refused the turn" } }),
+  ], stderrTail, 1);
+  const refreshedDone = (await runMockProcess(refreshed, { parserClass: CodexStreamParser }))
+    .find((e) => e.kind === "done");
+  assert.equal(
+    refreshedDone.error,
+    `process exited with code 1; codex: stream error: upstream refused the turn; stderr: ${stderrTail}`,
+  );
+});
+
+test("无失败原话: 退出报错逐字不变（stderr 优先 / 无 stderr 回落 stdout 尾）", async () => {
+  // 别的运行时（claude-code 解析器不覆写 failureReason）→ 老的 stderr 文案。
+  const withStderr = [
+    "process.stdout.write('some stdout noise\\n');",
+    "process.stderr.write('fatal: provider 401 unauthorized\\n');",
+    "process.exit(1);",
+  ].join("");
+  const stderrDone = (await runMockProcess(withStderr)).find((e) => e.kind === "done");
+  assert.equal(stderrDone?.reason, "failed");
+  assert.equal(stderrDone.error, "process exited with code 1; stderr: fatal: provider 401 unauthorized");
+
+  // 无 stderr → 回落 stdout 尾（逐字不变）。
+  const stdoutOnly = [
+    "process.stdout.write('investigating\\nboom\\n');",
+    "process.exit(1);",
+  ].join("");
+  const stdoutDone = (await runMockProcess(stdoutOnly)).find((e) => e.kind === "done");
+  assert.equal(stdoutDone?.reason, "failed");
+  assert.equal(stdoutDone.error, "process exited with code 1; stdout: investigating\nboom");
+
+  // codex 没吐失败帧 → 与别的运行时同一条老文案。
+  const codexNoFailure = mockScriptWithStderr(
+    ['{"type":"thread.started","thread_id":"019e"}'],
+    "Reading additional input from stdin...",
+    1,
+  );
+  const codexDone = (await runMockProcess(codexNoFailure, { parserClass: CodexStreamParser }))
+    .find((e) => e.kind === "done");
+  assert.equal(codexDone?.reason, "failed");
+  assert.equal(codexDone.error, "process exited with code 1; stderr: Reading additional input from stdin...");
 });
 
 test("abort 能杀掉长时进程", async () => {

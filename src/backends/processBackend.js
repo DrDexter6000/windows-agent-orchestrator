@@ -425,6 +425,10 @@ export class ProcessBackend {
         getExitCode: () => exitCode,
         getStderrTail: () => stderrTail,
         getStdoutTail: () => stdoutTail,
+        // 解析器的可选失败原话接口（如 codex 的 error/turn.failed 帧）：运行时专有的
+        // 识别在解析器里，共享层只读取、归一、脱敏、限长（先脱敏、后截断，保留开头）。
+        // 不实现/返回 null 时，退出报错文案与此前逐字相同。
+        getFailureReason: () => readFailureReason(parser, redactor),
       }),
       abort: async () => this._kill(child),
       isAlive: () => child.exitCode === null && child.signalCode === null,
@@ -491,7 +495,7 @@ export class ProcessBackend {
     }
   }
 
-  async *_streamEvents({ queue, child, cwd = null, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
+  async *_streamEvents({ queue, child, cwd = null, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "", getFailureReason = () => null }) {
     let emittedDone = false;
     let anyEventSeen = false;
     // M12-21: track whether the stream produced any USABLE model effect before
@@ -557,14 +561,17 @@ export class ProcessBackend {
               // TD-77 子项 B：stderr 优先；无 stderr 时回落到 stdout 尾部摘要。
               // 进程崩时往往没写 stderr（物理缺失），旧实现只给 exit code 让诊断黑盒化。
               // 现无 stderr 时用 stdout 尾，让 Lead 至少看到 worker 崩前吐了什么。
-              const stderr = getStderrTail();
-              const stdout = getStdoutTail();
-              const detail = stderr
-                ? `process exited with code ${code}; stderr: ${stderr}`
-                : (stdout
-                  ? `process exited with code ${code}; stdout: ${stdout}`
-                  : `process exited with code ${code}`);
-              yield doneEvent("failed", detail);
+              //
+              // 解析器自报的失败原话（可选接口）优先于两个尾部摘要：它才是运行时给出的
+              // 原因本身（如 codex 的额度原话），stderr 往往只是常规提示。原话先脱敏再截到
+              // 共享上限（保留开头）后成 "process exited with code N; <runtime>: <原话>"，
+              // stderr 尾附在其后；没有原话时文案逐字不变。
+              yield doneEvent("failed", formatExitDetail({
+                code,
+                reason: getFailureReason(),
+                stderr: getStderrTail(),
+                stdout: getStdoutTail(),
+              }));
             }
           }
           return;
@@ -877,4 +884,56 @@ function trimTail(text, maxChars = 4000) {
   const normalized = text.replace(/\r\n/g, "\n").trim();
   if (normalized.length <= maxChars) return normalized;
   return normalized.slice(normalized.length - maxChars);
+}
+
+// 解析器自报失败原话的共享长度上限。截断在**脱敏之后**做，且保留开头——失败原因在
+// 开头（"You've hit your usage limit…"），而替换标记通常比原值长，按尾部截会把开头砍掉、
+// 诊断随之落回 crash。stderr/stdout 尾巴语义相反（最新的一行在结尾），仍走 trimTail。
+const FAILURE_REASON_MAX_CHARS = 500;
+
+/** 保留开头的截断：超限时以 "…" 收尾，总长不超过 maxChars。 */
+function truncateHead(text, maxChars = FAILURE_REASON_MAX_CHARS) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1)}…`;
+}
+
+/**
+ * 读取解析器的可选失败原话接口（LineStreamParser#failureReason），归一成
+ * { runtime, message } 或 null。共享层只做形状归一、脱敏与长度上限——不认识任何
+ * 运行时：runtime 标签由解析器自报，仅用于拼接文案，不参与任何判断。解析器不
+ * 实现该接口、返回 null、或原话为空时都是 null（退出文案逐字不变）。
+ */
+function readFailureReason(parser, redactor) {
+  const raw = typeof parser.failureReason === "function" ? parser.failureReason() : null;
+  if (!raw || typeof raw !== "object" || typeof raw.message !== "string") return null;
+  if (raw.message.trim().length === 0) return null;
+  // 先整段脱敏、再截断：脱敏器按完整密钥值匹配，先截会把跨在边界上的值切碎、整段
+  // 替换随之失效，前缀原样漏出（stderr/stdout 尾巴也是先脱敏后截）。解析器不截断原话，
+  // 这里之前的任何一步都不截短。
+  const redacted = redactor.redactString(raw.message.replace(/\r\n/g, "\n")).trim();
+  const message = truncateHead(redacted);
+  if (message.length === 0) return null;
+  return {
+    runtime: typeof raw.runtime === "string" ? raw.runtime.trim() : "",
+    message,
+  };
+}
+
+/**
+ * 非零退出的兜底报错文案。有解析器自报的失败原话时以它为主——原话才是运行时给出的
+ * 原因本身（如 codex 的额度原话），stderr 往往只是常规提示，故附在其后。没有原话时
+ * 与旧文案逐字相同：stderr 优先，无 stderr 回落 stdout 尾，都无则只有退出码。
+ * reason 由 readFailureReason 归一（可以为 null）。
+ */
+function formatExitDetail({ code, reason, stderr, stdout }) {
+  const parts = [`process exited with code ${code}`];
+  if (reason) {
+    parts.push(reason.runtime ? `${reason.runtime}: ${reason.message}` : reason.message);
+    if (stderr) parts.push(`stderr: ${stderr}`);
+  } else if (stderr) {
+    parts.push(`stderr: ${stderr}`);
+  } else if (stdout) {
+    parts.push(`stdout: ${stdout}`);
+  }
+  return parts.join("; ");
 }

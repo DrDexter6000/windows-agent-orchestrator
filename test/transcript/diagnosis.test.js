@@ -204,6 +204,43 @@ test("TD-180: 进程退出前零 worker 事件 → crash 另列一条观察事�
   assert.match(diagnoseFailure(noTs).evidence[1].fact, /^进程退出前未观察到任何 worker 事件；/);
 });
 
+test("codex 自报额度原话进终态 run.error → provider_capacity / quota_exhausted（非 crash）", () => {
+  // 后端把解析器记下的原话拼进退出报错：run.error(phase:wait) =
+  // "process exited with code N; codex: <原话>[; stderr: <常规提示>]"。
+  // 终态额度规则先于 crash 判——原话进了终局错误，诊断就不再只报 crash。
+  const runId = "run_codex_quota";
+  const events = [
+    { type: "session.created", backend: "process", backendSessionId: "proc_36288", runId, ts: "2026-10-15T01:38:00.000Z" },
+    { type: "run.submitted", runId, ts: "2026-10-15T01:38:00.004Z" },
+    {
+      type: "run.error",
+      phase: "wait",
+      runId,
+      ts: "2026-10-15T01:38:12.000Z",
+      error: "process exited with code 1; codex: You've hit your usage limit. Try again at 1:38 AM.;"
+        + " stderr: Reading additional input from stdin...",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-15T01:38:12.003Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_capacity", "终局错误里是用量到顶原话 → provider_capacity");
+  assert.equal(d.code, "quota_exhausted");
+  assert.ok(d.evidence.some((e) => e.eventType === "run.error" && /quota_exhausted/.test(e.fact)));
+  // 同一形状没有原话（只有常规 stderr）时照旧是 crash——证明分类由原话决定。
+  const withoutReason = [
+    ...events.slice(0, 2),
+    {
+      type: "run.error",
+      phase: "wait",
+      runId,
+      ts: "2026-10-15T01:38:12.000Z",
+      error: "process exited with code 1; stderr: Reading additional input from stdin...",
+    },
+    ...events.slice(3),
+  ];
+  assert.equal(diagnoseFailure(withoutReason, runId).category, "crash");
+});
+
 test("C1: 进程 exit code 1（通用非 0）→ 仍 crash（不归 unknown）", () => {
   // 非 0 退出码都算 crash 候选（OOM/被杀/异常退出），但纯 401 仍优先 provider_auth
   const events = [
