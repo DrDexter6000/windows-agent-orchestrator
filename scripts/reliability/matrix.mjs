@@ -9,17 +9,42 @@ const LEGACY_MATRIX = [
   { agentId: "coder_multimodal", label: "Kimi first-stable", providerID: "kimi-for-coding", optional: true },
 ];
 
-// ADR-0025 §5（批次 3）：delta 认证子集的 drill 词汇 SSOT。
+// ADR-0025 §5 / 决定 0084：delta 认证子集的 drill 词汇 SSOT。
 // 新（harness × 模型）组合走 delta 认证：sentinel（core 能力）+ scorecard（strict 证据）
-// + adversarialEscape（越界写对抗——承担 isolation 语义，顾问一致要求 isolation 类
-// 不得省）。不含 workflowRunDir；通过 → conditional + certificationScope:"delta"。
+// + containmentEvidence（越界写拦截的活体取证——承担 isolation 语义，不得省）。
+// 不含 workflowRunDir；通过 → conditional + certificationScope:"delta"。
 // DELTA_DRILLS 同时是 scripts/reliability/certification.mjs scope 派生的比对基准
 // （单一清单，无第二份）。
-export const DELTA_DRILLS = ["sentinel", "scorecard", "adversarialEscape"];
+export const DELTA_DRILLS = ["sentinel", "scorecard", "containmentEvidence"];
+
+// 决定 0084 退役前的 delta 词汇（adversarialEscape 越界写对抗）。只服务历史
+// summary 的 scope 读侧派生——旧 case 的 drills 原样在盘上（历史数据不改写），
+// 派生必须保持其 scope 不变。现行矩阵行再声明退役 drill 会被显式拒绝（见
+// RETIRED_DRILLS），不会经此清单回流。
+export const LEGACY_DELTA_DRILLS = ["sentinel", "scorecard", "adversarialEscape"];
+
+// 已退役 drill 闭集：矩阵行显式声明即解析失败（决定 0084 退役，改用
+// containmentEvidence）。不得静默跳过——静默跳过会把 delta 子集的 isolation
+// 语义悄悄丢掉。
+const RETIRED_DRILLS = Object.freeze({
+  adversarialEscape: 'retired by decision 0084 — replace it with "containmentEvidence" (live containment-evidence drill; the adversarial out-of-bounds drill left the delta gate because a compliant model refuses the instruction, leaving nothing to intercept)',
+});
+
+function assertNoRetiredDrill(drills) {
+  for (const drill of drills ?? []) {
+    if (RETIRED_DRILLS[drill]) {
+      throw new Error(
+        `buildCertificationMatrix: matrix row declares retired drill "${drill}" — ${RETIRED_DRILLS[drill]}. Silent skip is forbidden; fix the matrix row.`,
+      );
+    }
+  }
+}
 
 export function defaultDrillsForProfile(profile = "basic") {
   if (profile === "strict" || profile === "certification") {
-    return ["sentinel", "scorecard"];
+    // 全量覆盖超出 delta 子集：另跑 isolation（写入落在工作树、源检出没被写），
+    // scope 按实际覆盖记 full；只改标签、drills 仍是 delta 子集的行仍记 delta。
+    return ["sentinel", "scorecard", "containmentEvidence", "isolation"];
   }
   if (profile === "delta") {
     return [...DELTA_DRILLS];
@@ -93,12 +118,17 @@ function mergeCategories(explicitCategories, impliedCategories) {
 }
 
 function normalizeDrills(drills, profile) {
+  assertNoRetiredDrill(drills);
   const out = [];
   for (const drill of drills ?? defaultDrillsForProfile(profile)) {
     if (!out.includes(drill)) out.push(drill);
   }
-  if ((profile === "strict" || profile === "certification") && !out.includes("scorecard")) {
-    out.push("scorecard");
+  if (profile === "strict" || profile === "certification") {
+    // 全量画像至少跑这三项：scorecard 的命令/文件证据，加越界写拦截的活体取证
+    // 与隔离（决定 0084）。行内显式 drills 少写了也在这里补齐。
+    for (const required of ["scorecard", "containmentEvidence", "isolation"]) {
+      if (!out.includes(required)) out.push(required);
+    }
   }
   return out;
 }
@@ -108,13 +138,13 @@ function requiredCategoriesForDrills(drills) {
   if (drills.includes("scorecard")) {
     categories.push("strict");
   }
-  // adversarialEscape 是 isolation 类检查（越界写拦截，ADR-0025 批次 3）：要求
-  // operational 类目——delta 子集不得把 isolation 语义降为可选。
+  // containmentEvidence 是 isolation 类检查（越界写拦截的活体取证，决定 0084）：
+  // 要求 operational 类目——delta 子集不得把 isolation 语义降为可选。
   if (
     drills.includes("isolation")
     || drills.includes("workflowRunDir")
     || drills.includes("stop")
-    || drills.includes("adversarialEscape")
+    || drills.includes("containmentEvidence")
   ) {
     categories.push("operational");
   }

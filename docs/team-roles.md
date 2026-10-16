@@ -27,7 +27,7 @@ WAO 是"装一次，开发多个项目"的工具：
 2. 新旧 harness 用独立 agentId 并存，禁止原位换。原因：认证历史要隔离、可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness。适用面：禁令针对新旧 harness 双活的切换；旧通道已死（订阅取消/停服）时 Owner 可裁定原位迁移（会话复用机制随迁移重估、认证历史作废重跑）。换 harness 驱动同一模型 = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。模型面 vs runtime 面分叉：接入新模型 = lane 内操作（改既有 backend 的 provider/model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。
 3. 组合权 = Owner，选择权 = Lead。Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane。供应商死亡类突发允许两段式：入册先行 + 切换当刻 smoke 首跑 + 承重前补 delta。这是集合边界与纪律，不是 MCP 门禁（认证不是 permission gate）。
 4. lane 备用条目（id ≠ 角色名原 id）不携带席位声明：席位角色声明（seatRole）机制已退役，对抗性从审者×作者车道关系派生（见「Lead 派工策略」第 7 条）。历史 seatRole 字段在场时，registry 归一化忽略并给弃用 advisory。
-5. 新 lane 的认证走 delta 子集（sentinel + scorecard + 越界写对抗断言）→ `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`。规程见 `docs/certification-runbook.md`「delta 认证规程」。
+5. 新 lane 的认证走 delta 子集（sentinel + scorecard + containmentEvidence 活体写入取证，决定 0084）→ `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`。规程见 `docs/certification-runbook.md`「delta 认证规程」。
 
 ## 角色清单
 

@@ -3719,26 +3719,26 @@ test("Current documentation heading resolver: missing or ambiguous anchors fail;
   assert.throws(() => resolveHeadingIn("### `Same`\n### Same\n", "fixture.md", "Same"), /歧义/);
 });
 
-test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加依赖指针（§4.6/§4.1，非独立入口），且依赖对真实正文成立", () => {
-  // (0)（现行）文件级入口的五文件之外，adversarialEscape 的追加依赖必须以简短指针
+test("B3-③: 依赖完整——现行主表行保留 containmentEvidence 追加依赖指针（§4.6/§4.1，非独立入口），且依赖对真实正文成立", () => {
+  // (0)（现行）文件级入口的五文件之外，containmentEvidence 的追加依赖必须以简短指针
   //     保留在 §0.1 主表 seat-certify 行内——表述为追加/连读依赖，不是另一条可选入口
   //     （入口唯一性由 B3-⑥/⑦ 钉住：五文件集合 + 拒绝索引/节选路线）。
   const entry = splitRowCells(seatCertifyMainRowFrom(read("docs/ssot.md")))[2];
-  assert.ok(entry.includes("adversarialEscape"), "主表 seat-certify 行缺 adversarialEscape 追加依赖触发词（越界写对抗判读）");
+  assert.ok(entry.includes("containmentEvidence"), "主表 seat-certify 行缺 containmentEvidence 追加依赖触发词（越界写拦截活体取证判读）");
   assert.ok(entry.includes("§4.6 Coder Delivery Contract"),
     "主表 seat-certify 行缺追加依赖指针 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同——必须连读）");
   assert.ok(entry.includes("§4.1 状态机"),
     "主表 seat-certify 行缺追加依赖指针 docs/02-architecture.md §4.1 状态机（状态机终态判定——必须连读）");
   assert.ok(/追加|连读/.test(entry),
-    "adversarialEscape 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
+    "containmentEvidence 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
   // (b) 依赖是**真实的**（TD-120 关系型，防指针凭空声明依赖）：
-  //     delta 规程节确实消费 workdir_escape / failed 词汇（2026-09-26 认证正文
-  //     迁移后正文在 docs/certification-runbook.md；usage 原位链接可达性由
+  //     delta 规程节确实消费 containment 事件合同词汇（run.isolation_violation /
+  //     failed 终态；正文在 docs/certification-runbook.md；usage 原位链接可达性由
   //     认证迁移链接守卫钉住）；
   //     architecture §4.6 确实定义 run.isolation_violation 事件合同；§4.1 确实定义 failed 终态。
   const delta = sectionText(CERT_RUNBOOK_DOC, "delta 认证规程");
-  assert.ok(delta.includes("workdir_escape"),
-    `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 workdir_escape——依赖声明与正文失联，须同步主表行指针`);
+  assert.ok(delta.includes("run.isolation_violation"),
+    `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 run.isolation_violation——依赖声明与正文失联，须同步主表行指针`);
   assert.ok(delta.includes("failed"),
     `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 failed 终态——依赖声明与正文失联，须同步主表行指针`);
   const containment = sectionText("docs/02-architecture.md", "4.6 Coder Delivery Contract");
@@ -3753,7 +3753,7 @@ test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加�
 // ============================================================
 // B3 回退后的现行守卫（2026-09-25，TD-187）：seat-certify 文件级入口。
 // §0.1 主表 seat-certify 行是唯一阅读入口：无条件全文必读恰五文件 + 三义务
-// （多行动面并集 / 正文显式依赖跟进 / 读取截断必须补齐）+ adversarialEscape
+// （多行动面并集 / 正文显式依赖跟进 / 读取截断必须补齐）+ containmentEvidence
 // 追加依赖指针（关系核对在 B3-③）。静态测试只证明规则文本在场，不证明
 // 执行者真读完全文——这是本守卫的固有边界，不是可修的缺口。
 //   ⑥ 入口恰为五文件闭集——缺行 / 漏文件 / 重复替代 / 节选锚替代必红；
@@ -3790,7 +3790,7 @@ function seatCertifyMainRowFrom(ssotText) {
 }
 
 /** ⑥+⑦ 核心：断言主表 seat-certify 行是"无条件全文必读恰五文件 + 三义务 +
- * adversarialEscape 追加依赖指针、无索引/裁量收窄路线"。纯函数（行文本输入），
+ * containmentEvidence 追加依赖指针、无索引/裁量收窄路线"。纯函数（行文本输入），
  * B3-⑥/⑦ 的负对照把变异行喂进来断言必抛——守卫被撤回 ⇒ 变异不再抛 ⇒ 红。 */
 function assertFileLevelSeatRow(row) {
   const cells = splitRowCells(row);
@@ -3820,13 +3820,13 @@ function assertFileLevelSeatRow(row) {
     "seat-certify 行缺『正文显式依赖继续跟进』义务（五文件正文写明的依赖不得断读）");
   assert.ok(entry.includes("截断") && entry.includes("补齐"),
     "seat-certify 行缺『读取输出被截断必须补齐』义务（截断不得当读毕）");
-  // —— ⑦d adversarialEscape 追加依赖指针在场（追加/连读表述，非独立入口；
+  // —— ⑦d containmentEvidence 追加依赖指针在场（追加/连读表述，非独立入口；
   //     关系对真实正文的核对在 B3-③）。
-  assert.ok(entry.includes("adversarialEscape"), "seat-certify 行缺 adversarialEscape 追加依赖触发词（见 B3-③）");
+  assert.ok(entry.includes("containmentEvidence"), "seat-certify 行缺 containmentEvidence 追加依赖触发词（见 B3-③）");
   assert.ok(/docs\/02-architecture\.md/.test(entry) && entry.includes("§4.6") && entry.includes("§4.1"),
     "seat-certify 行缺 docs/02-architecture.md §4.6/§4.1 追加依赖指针（五文件外的已知追加依赖）");
   assert.ok(/追加|连读/.test(entry),
-    "adversarialEscape 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
+    "containmentEvidence 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
 }
 
 test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重复替代/节选锚必红（找行不外包 tier1Paths）", () => {
@@ -3888,12 +3888,12 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
   const discretion = row.replace("也不得按 Lead 裁量收窄", "范围可由 Lead 当次界定收窄");
   assert.notEqual(discretion, row, "夹具失效：裁量收窄变异未生效");
   assert.throws(() => assertFileLevelSeatRow(discretion), /当次界定/, "Lead 裁量收窄回潮必须红（五文件全文必读不可裁量收窄）");
-  // 负对照——三义务逐个丢失 + adversarialEscape 追加依赖指针丢失。
+  // 负对照——三义务逐个丢失 + containmentEvidence 追加依赖指针丢失。
   const drops = [
     ["并集", row.replace("多行动面命中取并集；", ""), /并集/],
     ["依赖跟进", row.replace("正文显式依赖继续跟进；", ""), /显式依赖/],
     ["截断补读", row.replace("读取输出被截断必须补齐。", ""), /截断/],
-    ["追加依赖指针", row.replace("判读 adversarialEscape（越界写对抗）时连读", "另见"), /adversarialEscape/],
+    ["追加依赖指针", row.replace("判读 containmentEvidence（越界写拦截活体取证）时连读", "另见"), /containmentEvidence/],
   ];
   for (const [label, mutated, re] of drops) {
     assert.notEqual(mutated, row, `夹具失效：${label} 删除变异未生效`);

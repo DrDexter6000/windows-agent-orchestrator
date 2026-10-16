@@ -50,7 +50,7 @@ test("buildCertificationMatrix: reads top-level certification.matrix and enriche
     agentId: "researcher",
     label: "DeepSeek via opencode",
     profile: "strict",
-    drills: ["sentinel", "scorecard", "isolation"],
+    drills: ["sentinel", "scorecard", "isolation", "containmentEvidence"],
     requiredCategories: ["core", "strict", "observability", "operational"],
     optional: false,
     expectComplete: true,
@@ -84,7 +84,7 @@ test("buildCertificationMatrix: --agent filters configured cases", () => {
   assert.deepEqual(matrix.map((c) => c.agentId), ["coder_strict"]);
 });
 
-test("buildCertificationMatrix: CLI profile overrides configured profile and strict adds scorecard", () => {
+test("buildCertificationMatrix: CLI profile overrides configured profile; strict adds scorecard, containmentEvidence and isolation", () => {
   const matrix = buildCertificationMatrix({
     registry,
     profileOverride: "basic",
@@ -100,7 +100,7 @@ test("buildCertificationMatrix: CLI profile overrides configured profile and str
     },
     profileOverride: "strict",
   });
-  assert.deepEqual(strictMatrix[0].drills, ["sentinel", "scorecard"]);
+  assert.deepEqual(strictMatrix[0].drills, ["sentinel", "scorecard", "containmentEvidence", "isolation"]);
 });
 
 test("buildCertificationMatrix: falls back to legacy cases when no certification config exists", () => {
@@ -121,9 +121,9 @@ test("buildCertificationMatrix: falls back to legacy cases when no certification
   assert.equal(matrix[1].completionMode, "first-stable");
 });
 
-test("defaultDrillsForProfile: basic is sentinel-only, strict includes scorecard", () => {
+test("defaultDrillsForProfile: basic is sentinel-only, strict runs the full containment set", () => {
   assert.deepEqual(defaultDrillsForProfile("basic"), ["sentinel"]);
-  assert.deepEqual(defaultDrillsForProfile("strict"), ["sentinel", "scorecard"]);
+  assert.deepEqual(defaultDrillsForProfile("strict"), ["sentinel", "scorecard", "containmentEvidence", "isolation"]);
 });
 
 test("buildCertificationMatrix: operational drills require operational certification category", () => {

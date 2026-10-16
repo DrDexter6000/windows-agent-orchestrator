@@ -2,8 +2,10 @@
 // 并列；blockerReason 原文绝不进码）。certifyCase/summarizeWorkers 经它映射。
 import { reasonCodeFor } from "../../src/application/certificationReasons.js";
 import { laneLedgerKey } from "../../src/application/identityProjection.js";
-// ADR-0025 §5（批次 3）：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
-import { DELTA_DRILLS } from "./matrix.mjs";
+// ADR-0025 §5 / 决定 0084：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
+// LEGACY_DELTA_DRILLS 是退役前词汇（adversarialEscape）——只服务历史 summary 的
+// 读侧派生不改写（旧 case 的 drills 原样在盘上，scope 必须保持不变）。
+import { DELTA_DRILLS, LEGACY_DELTA_DRILLS } from "./matrix.mjs";
 // ADR-0032 §8：检查结果五态（checkStates 是两层共用的纯词汇模块，不是组件层
 // 专用——组合层消费的是"检查状态"这一中立概念，不 import 任何组件层代码）。
 import { assertCheckStateShape, checkStateOf } from "./checkStates.mjs";
@@ -34,25 +36,26 @@ const STATUS_SEVERITY = {
   rejected: 4,
 };
 
-// ADR-0025 §5（批次 3）：certificationScope 派生——case 走 delta 规程 ⇔
-// profile 显式 "delta" 且该 case 的 drills ⊆ DELTA_DRILLS 子集（TD-133(c) 根修，
-// R23-C：profile:"delta" 不再短路——显式 drills 超出子集的行按 full 记，与
-// docs/certification-runbook.md「delta 认证规程」的"按实际覆盖派生"措辞对齐；drills 缺失的
-// legacy 形状视为未超出），或（无 profile 的手写/legacy case）drill 覆盖未超出
-// delta 子集且含越界写对抗。scope 是磁盘 summary 的事实字段，只活在 summary +
-// 文档层：不动 CERTIFICATION_STATUSES 闭集、不进 CLI/MCP inventory 投影
+// ADR-0025 §5 / 决定 0084：certificationScope 派生——case 走 delta 规程 ⇔
+// profile 显式 "delta" 且该 case 的 drills ⊆ delta 子集（新旧两套词汇各自判
+// within-subset：新 case 用 containmentEvidence，历史 case 的 adversarialEscape
+// 形状同样成立——scope 是读侧派生，历史数据不改写、任何现有形状不得静默变
+// scope），或（无 profile 的手写/legacy case）drill 覆盖未超出 delta 子集且含
+// delta 承重 drill（containmentEvidence，或历史形状的 adversarialEscape）。
+// scope 是磁盘 summary 的事实字段，只活在 summary + 文档层：不动
+// CERTIFICATION_STATUSES 闭集、不进 CLI/MCP inventory 投影
 // （registryInventory.js 的 buildCertMap 按白名单字段取值，scope 不会被透出）。
 export function certificationScopeForCase(caseResult = {}) {
   const drills = Array.isArray(caseResult?.drills)
     ? caseResult.drills.filter((d) => typeof d === "string")
     : [];
-  const withinDeltaSubset = drills.every((d) => DELTA_DRILLS.includes(d));
+  const withinSubset = (subset) => drills.every((d) => subset.includes(d));
+  // 空 drills（legacy 形状）对任何子集都是 vacuous true——与既有行为一致。
+  const withinDeltaSubset = withinSubset(DELTA_DRILLS) || withinSubset(LEGACY_DELTA_DRILLS);
+  const carriesDeltaDrill = drills.includes("containmentEvidence")
+    || drills.includes("adversarialEscape");
   if (caseResult?.profile === "delta" && withinDeltaSubset) return "delta";
-  if (
-    drills.length > 0
-    && drills.includes("adversarialEscape")
-    && withinDeltaSubset
-  ) {
+  if (drills.length > 0 && carriesDeltaDrill && withinDeltaSubset) {
     return "delta";
   }
   return "full";
@@ -111,6 +114,13 @@ export function certifyCase(caseResult = {}) {
       c.optional !== true
       && c.category === "strict"
       && checkStateOf(c) === "inconclusive");
+  // 其余必需类目里的 inconclusive 检查：同类目别的检查通过也不算评估完整——
+  // 不得评 certified，也不得报 delta 通过。
+  const requiredOtherInconclusive = checks.filter((c) =>
+    c.optional !== true
+    && c.category !== "strict"
+    && requiredCategories.includes(c.category)
+    && checkStateOf(c) === "inconclusive");
 
   let status;
   let reason;
@@ -141,6 +151,9 @@ export function certifyCase(caseResult = {}) {
   } else if (missingCategories.length > 0) {
     status = "conditional";
     reason = `missing certification checks: ${missingCategories.join(", ")}`;
+  } else if (requiredOtherInconclusive.length > 0) {
+    status = "conditional";
+    reason = `required certification evidence is inconclusive: ${requiredOtherInconclusive.map((c) => c.name).join(", ")}`;
   } else if (positiveCheckCount === 0) {
     status = "conditional";
     reason = "no positive check evidence — every check is not-applicable/blocked/inconclusive (ADR-0032 §8: N/A never contributes green)";
@@ -161,6 +174,8 @@ export function certifyCase(caseResult = {}) {
   // TD-111: 闭集机器码（经 SSOT 映射，与上面 if-else 同优先级）。certified → null。
   // 0073 的退出码缺口分支没有专用码：旁边有 operational / observability 失败时取
   // 那个码（自由文本 reason 说的是缺口），否则为 null（与 delta 分支同样的处理）。
+  // strict 以外必需证据 inconclusive 的 conditional 分支排在缺类目分支之后，到这里
+  // 时没有缺失类目，码为 null（reason 列出那几项检查）。
   // 与自由文本 reason 并列新增；reason 原文一个字节不动（磁盘契约）。
   const reasonCode = reasonCodeFor({ status, failedChecks, blockerReason, missingCategories });
 
@@ -602,11 +617,18 @@ function findMissingRequiredCategories(checks, requiredCategories) {
 
 function aggregateCapabilities(checks) {
   const capabilities = {};
+  const unassessed = new Set();
   for (const check of checks) {
     if (!check.capability) continue;
     // ADR-0032 §8：N/A / blocked / inconclusive 不贡献能力绿——跳过（该轴
-    // 不被断言，capabilities 映射里不出现，绝不置 true）。
-    if (checkStateOf(check) !== "pass" && checkStateOf(check) !== "fail") continue;
+    // 不被断言，capabilities 映射里不出现，绝不置 true）。blocked / inconclusive
+    // 另记下：同一轴里其余检查即便通过，这条轴也没有评估完整。
+    const state = checkStateOf(check);
+    if (state === "blocked" || state === "inconclusive") {
+      unassessed.add(check.capability);
+      continue;
+    }
+    if (state !== "pass" && state !== "fail") continue;
     const value = check.optional && check.pass === false ? "unknown" : check.pass;
     if (!(check.capability in capabilities)) {
       capabilities[check.capability] = value;
@@ -616,6 +638,9 @@ function aggregateCapabilities(checks) {
       capabilities[check.capability],
       value,
     );
+  }
+  for (const capability of unassessed) {
+    if (capabilities[capability] === true) capabilities[capability] = "unknown";
   }
   return capabilities;
 }
@@ -642,7 +667,10 @@ function mergeCapabilities(left, right) {
   return merged;
 }
 
-function classifyExternalBlocker(error) {
+// 外部阻塞分类（单一实现）：case 级（certifyCase 读 caseResult.error）与检查级
+// （组合入口对 drill 派发错误先分类再记 blockedCheck）共用。导出供入口消费，
+// 不在 drill glue 里复制第二套正则。
+export function classifyExternalBlocker(error) {
   if (!error) return null;
   const text = String(error);
   if (

@@ -692,7 +692,23 @@ test("T8e lastFullHealthyRunAt 不可解析 → fail-closed（固定文案，不
   }
 });
 
-test("T8f §3 scope 派生收窄：profile:'delta' 不再短路——显式 drills 超出子集按 full 记", () => {
+test("T8f §3 scope 派生收窄：profile:'delta' 不再短路——显式 drills 超出子集按 full 记（新旧词汇对照）", () => {
+  // —— 新词汇（现行 delta 规程，决定 0084）——
+  assert.equal(
+    certificationScopeForCase({ profile: "delta", drills: ["sentinel", "scorecard", "containmentEvidence"] }),
+    "delta",
+  );
+  assert.equal(
+    certificationScopeForCase({ profile: "delta", drills: ["sentinel", "scorecard", "containmentEvidence", "stop"] }),
+    "full",
+    "新词汇超子集 → full（与旧词汇同语义）",
+  );
+  assert.equal(
+    certificationScopeForCase({ drills: ["sentinel", "scorecard", "containmentEvidence"] }),
+    "delta",
+    "无 profile 的新词汇手写 case：子集内且含 containmentEvidence → delta",
+  );
+  // —— 旧词汇（历史 summary 的 adversarialEscape 形状——读侧派生不改写）——
   // 恰为子集 → delta。
   assert.equal(
     certificationScopeForCase({ profile: "delta", drills: ["sentinel", "scorecard", "adversarialEscape"] }),

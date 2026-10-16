@@ -23,3 +23,7 @@ Owner 需求（2026-08-19）：同一大模型可被不同 coding agent harness 
 - team-roles.md 角色行的 backend/model 描述主 lane；lane 通道的实际组合以 registry 为准。
 - 旧条目 `coder_opencode_fallback` 追认为 lane 命名惯例的前身特例（pre-0025 名字，不改名——改名破坏认证历史与既有引用）。
 - 实施批次（Owner 2026-08-19 批准）：0 门卫修复（先行）→ 1 lane 命名规矩（本决策落地）∥ 2 backend 能力声明 → 3 delta 认证。coder_low 因 provider 欠费停用，不参与派工。
+
+## 修订条（0084，2026-10-16）
+
+第 5 条中 delta 认证的"越界写对抗断言"由决定 0084 取代：delta = sentinel + scorecard + containmentEvidence；越界写拦截的证据改为活体写入取证，加确定性链式测试。其余各条不变。

@@ -21,7 +21,7 @@
 | `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
 | `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/surface/certification.md`（生成层：backend 能力/配置表达力事实与台账指针；npm run gen:certification 再生成）、`docs/certification-runbook.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
-| `seat-certify` | 给某席位/车道装配做组合层认证（certified / conditional / draft-only；0045 起台账键=车道内容指纹，席位名仅 provenance） | 无条件全文必读：`docs/certification-runbook.md`、`.wao/decisions/0032-两层验证与认证.md`、`.wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md`、`docs/team-roles.md`、`docs/tech-debt.md`。五份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 adversarialEscape（越界写对抗）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定）；车道表事实（lane→轴/别名映射）以 config/lanes.json 为数据权威、席位接线模板以 config/agents.example.json 为模板权威（0045 §3） |
+| `seat-certify` | 给某席位/车道装配做组合层认证（certified / conditional / draft-only；0045 起台账键=车道内容指纹，席位名仅 provenance） | 无条件全文必读：`docs/certification-runbook.md`、`.wao/decisions/0032-两层验证与认证.md`、`.wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md`、`docs/team-roles.md`、`docs/tech-debt.md`。五份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 containmentEvidence（越界写拦截活体取证）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定）；车道表事实（lane→轴/别名映射）以 config/lanes.json 为数据权威、席位接线模板以 config/agents.example.json 为模板权威（0045 §3） |
 
 ## 1. 核心架构：五大类别
 
@@ -134,7 +134,7 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - 技术债台账 `docs/tech-debt.md` 一条一行、列数与状态固定、行长有上限；每个技术债编号只在台账、已了结清单（`docs/archive/tech-debt-closed.md`）、已偿还归档三者之一有定义行，文档与代码里引用的编号都要有定义（测试夹具与冻结的归档不在检查面）。
 - 决定索引一行只放编号和标题；新决定档有体量上限。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
-- seat-certify 入口：§0.1 的行无条件全文必读恰五个文件；多行动面取并集、正文显式依赖跟进、截断补读三项义务在场；adversarialEscape 连读 architecture §4.6/§4.1 是追加依赖指针，不是独立入口；改成索引、节选替代全文或按裁量收窄都会红。
+- seat-certify 入口：§0.1 的行无条件全文必读恰五个文件；多行动面取并集、正文显式依赖跟进、截断补读三项义务在场；containmentEvidence 连读 architecture §4.6/§4.1 是追加依赖指针，不是独立入口；改成索引、节选替代全文或按裁量收窄都会红。
 - 认证正文迁出处：使用手册保留具名标题与指向 `docs/certification-runbook.md` 的单向链接，目标节必须真实存在；摘链接、改目标节名、删标题都会红。
 - 使用手册：`docs/usage.md` 的页表与 `docs/usage/` 下的文件一一对应，每页开头指回地图，页内相对链接都能解析到文件；派发页的续跑拒绝原因与代码闭集双向一致。
 - roadmap：里程碑表里已完成的里程碑不回退；字节上限把它限在一张表的体量。

@@ -6,7 +6,7 @@
 // 实证事故：传 `--help` 查用法被当"无参数"直接跑全量认证矩阵，白烧真实
 // token。本内核是确定性判定（零 I/O、零副作用），供 run-reliability.mjs
 // 消费；dry 测试钉住行为（test/registry-roles/reliabilityArgs.test.js，
-// adversarialEscape.mjs ↔ reliabilityDelta.test.js 同款先例）。
+// containmentEvidence.mjs ↔ reliabilityDelta.test.js 同款先例）。
 //
 // 契约：
 //   - `--help`/`-h` → { help: true }，调用方须在任何 registry 加载/派发/
@@ -33,7 +33,7 @@ export const USAGE = `WAO Reliability Suite（真实 runtime 认证；消耗 tok
                 [--wait-timeout <ms>] [--poll-interval <ms>]
 
   --agent <id>        只认证该 agent（增量刷新常用形态）
-  --profile <name>    覆盖矩阵 profile（如 delta = sentinel+scorecard+越界写对抗）
+  --profile <name>    覆盖矩阵 profile（如 delta = sentinel+scorecard+containmentEvidence）
   --registry <file>   注册表路径（默认 config/agents.json）
   其余参数见 docs/certification-runbook.md。
 

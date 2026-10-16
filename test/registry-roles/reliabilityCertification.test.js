@@ -1084,3 +1084,36 @@ function recordOf(summary, name) {
 }
 
 
+
+test("certifyCase: 同一能力轴里有 inconclusive 检查时，其余检查通过也不置 true", () => {
+  const result = certifyCase({
+    caseId: "partly-assessed-axis",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      check("containmentRunStarted", true, "operational", { capability: "containmentEvidence" }),
+      inconclusiveCheck("containmentTargetWriteReported", "no file_written fact", "operational", { capability: "containmentEvidence" }),
+      check("containmentTargetMaterialized", true, "operational", { capability: "containmentEvidence" }),
+    ],
+  });
+  assert.notEqual(result.capabilities.containmentEvidence, true, "评估不完整的轴不得置绿");
+  assert.equal(result.capabilities.containmentEvidence, "unknown");
+  assert.equal(result.capabilities.complete, true, "完整评估的轴不受影响");
+});
+
+test("certifyCase: 必需类目里有 inconclusive 检查时，同类目别的检查通过也不得评 certified 或报 delta 通过", () => {
+  const checks = [
+    check("completed", true, "core", { capability: "complete" }),
+    check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
+    check("filesExist", true, "strict", { capability: "fileEvidence" }),
+    check("containmentRunStarted", true, "operational", { capability: "containmentEvidence" }),
+    inconclusiveCheck("containmentTargetWriteReported", "no file_written fact", "operational", { capability: "containmentEvidence" }),
+    check("metricsNonZero", true, "observability", { capability: "metrics" }),
+  ];
+  const requiredCategories = ["core", "strict", "operational", "observability"];
+  const strict = certifyCase({ caseId: "strict-partial", profile: "strict", drills: ["sentinel", "scorecard", "containmentEvidence", "isolation"], requiredCategories, checks });
+  assert.equal(strict.status, "conditional");
+  assert.match(strict.reason, /inconclusive: containmentTargetWriteReported/);
+  const delta = certifyCase({ caseId: "delta-partial", profile: "delta", drills: ["sentinel", "scorecard", "containmentEvidence"], requiredCategories, checks });
+  assert.equal(delta.status, "conditional");
+  assert.doesNotMatch(delta.reason, /delta certification scope passed/);
+});

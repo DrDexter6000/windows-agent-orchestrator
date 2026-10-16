@@ -123,7 +123,7 @@
     }
   },
   "certification": {
-    "_comment": "runtime+model 组合认证矩阵（与私人副本同构；drills: sentinel/scorecard/adversarialEscape）。effort 调整=delta 重取证；派发只派认证清单中的（certified/conditional 都算在册）。",
+    "_comment": "runtime+model 组合认证矩阵（与私人副本同构；drills: sentinel/scorecard/containmentEvidence）。effort 调整=delta 重取证；派发只派认证清单中的（certified/conditional 都算在册）。",
     "matrix": [
       {
         "agentId": "glm-pro",
@@ -133,7 +133,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       },
       {
@@ -144,7 +144,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       },
       {
@@ -155,7 +155,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       },
       {
@@ -165,7 +165,9 @@
         "modelId": "gpt-6.1-sol",
         "drills": [
           "sentinel",
-          "scorecard"
+          "scorecard",
+          "containmentEvidence",
+          "isolation"
         ]
       },
       {
@@ -175,7 +177,9 @@
         "modelId": "gpt-6-astra",
         "drills": [
           "sentinel",
-          "scorecard"
+          "scorecard",
+          "containmentEvidence",
+          "isolation"
         ]
       },
       {
@@ -186,7 +190,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       },
       {
@@ -197,7 +201,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       },
       {
@@ -208,7 +212,7 @@
         "drills": [
           "sentinel",
           "scorecard",
-          "adversarialEscape"
+          "containmentEvidence"
         ]
       }
     ]

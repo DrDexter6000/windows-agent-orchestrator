@@ -94,7 +94,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 ### 6.7 reliability 套件：完成判定/provider 路径修改的硬门槛
 
 - `npm test`（mock）只验证逻辑对；`npm run reliability`（真实 provider）验证"系统能跑 + 输出对 + 真完成"，并输出 runtime+model certification。
-- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model。`--profile strict` 额外确保 command/file scorecard drill（矩阵行未显式声明 drills 时也会加上），避免只凭 sentinel 把 worker 误标为 strict-dispatch capable；`--profile delta` 跑 delta 子集（sentinel + scorecard + 越界写对抗）；矩阵行可显式声明更多 drill（isolation / adversarialEscape / workflowRunDir / stop）。解析出 0 个认证 case 时显式失败退出，不空转报全绿。
+- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model。`--profile strict` 默认跑 sentinel + scorecard + containmentEvidence + isolation，并确保 command/file scorecard drill（矩阵行未显式声明 drills 时也会加上），避免只凭 sentinel 把 worker 误标为 strict-dispatch capable；`--profile delta` 跑 delta 子集（sentinel + scorecard + containmentEvidence 越界写拦截活体取证）；矩阵行可显式声明更多 drill（isolation / containmentEvidence / workflowRunDir / stop；已退役的 adversarialEscape 会被矩阵解析显式拒绝，决定 0084）。解析出 0 个认证 case 时显式失败退出，不空转报全绿。
 - 规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的交付，收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二份陈述漂移；单席增量重认证的保留语义见下），不能只靠 npm test 报绿就声称完成。
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
 - 单 worker 重认证不覆盖全量：`npm run reliability -- --agent X` 跑完增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
@@ -169,7 +169,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 2. 版本面手改同步（全量之前）：README 双语徽章/What's new 标题/快照链接是手写字段被守卫钉到 package.json，不是生成物——升号后必须先手改同步，否则下一步全量必红；MINOR/MAJOR 同时建立 changelog 快照文件（第 6 步只做追加定稿）。
 3. surface 再生成：本轮 MCP surface / CLI help 有变动 → `npm run gen:surface` 并提交 `docs/surface/*` 生成物（ssot.md §1.3 生成参考层纪律）；MCP tool-surface 的 wire 冻结面（字节 SSOT）变动走既有重冻流程并附变更注记。
 4. 全量 `npm test` 绿（§4 第 3 条）。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
-5. `npm run reliability`（真实 token）通过——发版门槛无条件（决定 0038 第 5 条；§6.7 的交付级触发条件不能反向取消发版义务）。如实区分三种状态：通过 / 未完成（缺项登记，不得勾成通过、不得成为下一版先例）/ 豁免。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。唯一开口 = Owner 逐次具名豁免：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带。
+5. `npm run reliability`（真实 token）通过——发版门槛无条件（决定 0038 第 5 条；§6.7 的交付级触发条件不能反向取消发版义务）。如实区分三种状态：通过 / 未完成（缺项登记，不得勾成通过、不得成为下一版先例）/ 豁免。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。越界写拦截的证据组成（决定 0084）：reliability 的 containmentEvidence 活体 drill，加 `npm test` 里的链式测试 `test/backends/containmentChain.test.js`。唯一开口 = Owner 逐次具名豁免：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带。
 6. changelog 快照定稿（MINOR/MAJOR）：`docs/changelog-<date>-vX.Y.Z.md`——只追加不回改，勘误以追加节补。PATCH 不强制快照（豁免记录除外）。
 7. 1.0.0 额外门槛判定（打 tag 之前）：TD-194 关闭，即全量套件在白天首过稳定（决定 0038 第 4 条可验证线）。0.x 阶段白天套件波动不阻塞发版（由 0038 第 5 条的复跑流程兜底），但阻塞 1.0.0。
 8. 最终候选提交：全部证据（第 4/5 步）必须落在 tag 将指向的那个提交上——tag 只指向已验证工件。

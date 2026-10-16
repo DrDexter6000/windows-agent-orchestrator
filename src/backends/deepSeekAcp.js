@@ -717,7 +717,9 @@ export class DeepSeekAcpBackend {
         const filePath = input.file_path ?? input.path ?? input.filePath;
         if (typeof filePath === "string" && filePath.length > 0) {
           pendingWrites.set(toolCallId, filePath);
-          events.push(writeIntentEvent(filePath, toolCallId, WRITE_INTENT_CORRELATION_STATUS.TRACKED));
+          // write_intent 先于 tool_use：拦截门判出越界即停止消费，被拒的路径不会
+          // 经这条 tool_use 证据落进 transcript（与其余后端一致）。
+          events.unshift(writeIntentEvent(filePath, toolCallId, WRITE_INTENT_CORRELATION_STATUS.TRACKED));
         }
       }
       queue.push(...events.map((event) => redactor.redact(event)));

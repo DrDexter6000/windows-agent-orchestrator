@@ -56,7 +56,7 @@ test("createDrills 返回全部环境依赖 drill glue（组合入口与将来�
     "runCli",
     "runStrictScorecardDrill",
     "runIsolationDrill",
-    "runAdversarialEscapeDrill",
+    "runContainmentEvidenceDrill",
     "runWorkflowRunDirDrill",
     "runStopDrill",
     "runFileScorecardTask",
@@ -85,7 +85,7 @@ const MOVED_GLUE_NAMES = [
   "check",
   "runStrictScorecardDrill",
   "runIsolationDrill",
-  "runAdversarialEscapeDrill",
+  "runContainmentEvidenceDrill",
   "runWorkflowRunDirDrill",
   "runStopDrill",
   "runFileScorecardTask",
@@ -107,7 +107,7 @@ test("源级钉: run-reliability.mjs 不再内联定义任何 drill glue（复�
     "组合入口必须从 ./reliability/drills.mjs import 工厂");
   const wiring = entry.match(/const\s*\{([^}]*)\}\s*=\s*createDrills\(/s);
   assert.ok(wiring, "组合入口必须解构装配 createDrills(...) 的返回值");
-  for (const name of ["runCli", "runStrictScorecardDrill", "runIsolationDrill", "runAdversarialEscapeDrill", "runWorkflowRunDirDrill", "runStopDrill"]) {
+  for (const name of ["runCli", "runStrictScorecardDrill", "runIsolationDrill", "runContainmentEvidenceDrill", "runWorkflowRunDirDrill", "runStopDrill"]) {
     assert.ok(new RegExp(`\\b${name}\\b`).test(wiring[1]), `组合入口必须接线 drill：${name}`);
   }
   // 主流程仍消费的纯 glue 也从共享模块 import（不留本地副本）。

@@ -4,7 +4,7 @@
 // 事故背景：旧 getArg 纯查表，传 --help 被静默当"无参数"直接跑全量认证
 // 矩阵（真实 token 损耗）。本文件钉住：帮助路径、未知/缺值/重复/裸位置
 // 参数全部拒绝、合法调用逐字段解析——不跑真实 provider（纯函数 dry 测试，
-// adversarialEscape.mjs ↔ reliabilityDelta.test.js 同款先例）。
+// containmentEvidence.mjs ↔ reliabilityDelta.test.js 同款先例）。
 
 import test from "node:test";
 import assert from "node:assert/strict";

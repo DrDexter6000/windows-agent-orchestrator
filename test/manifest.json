@@ -11,6 +11,7 @@
       "application/upstreamSessionRelease.test.js",
       "backends/claudeCodeProvider.test.js",
       "backends/claudeProviderWrapper.test.js",
+      "backends/containmentChain.test.js",
       "backends/deepSeekAcp.test.js",
       "backends/deepSeekAcpModelWiring.test.js",
       "backends/deepSeekHarness.test.js",

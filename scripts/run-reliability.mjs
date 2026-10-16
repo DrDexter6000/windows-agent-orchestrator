@@ -8,8 +8,9 @@
 //   3. metrics 来自 session endpoint（防 message-level 偏小值）
 //   4. silentTimeout 对静默失败有效、对正常响应不误杀
 //   5. strict profile 下 command/file evidence 能被 scorecard 验收
-//   6. adversarialEscape（TD-116/ADR-0025）：越界写指令被 delivery containment
-//      gate 拦截（workdir_escape transcript 事实），逃逸未被拦即红
+//   6. containmentEvidence（决定 0084）：带隔离与交付合同的 run 里正常写一个文件，
+//      上报的写入路径、磁盘文件、拦截门的"在内"判定三方一致（越界写拦截的活体
+//      取证；确定性一翼是 npm test 的 test/backends/containmentChain.test.js）
 //
 // 消耗真实 API token。不进 npm test。用 `npm run reliability` 手动触发。
 //
@@ -18,14 +19,14 @@
 //   npm run reliability -- --agent coder     # 只跑指定 agent（增量合并，不覆盖其他 worker）
 //   npm run reliability -- --serve-url http://127.0.0.1:4298
 //   npm run reliability -- --profile strict  # 额外跑 command/file scorecard drill
-//   npm run reliability -- --profile delta   # delta 子集（sentinel+scorecard+越界写对抗，ADR-0025）
+//   npm run reliability -- --profile delta   # delta 子集（sentinel+scorecard+containmentEvidence，决定 0084）
 //   npm run reliability -- --wait-timeout 300000  # 覆盖单 worker 超时（默认 300000）
 
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases, matrixScopeFromRegistry } from "./reliability/certification.mjs";
+import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases, matrixScopeFromRegistry, classifyExternalBlocker } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 // TD-186：认证证据绑定执行画像——运行时身份探测复用组件层既有探针（一次 spawn /
 // backend，零新指纹平台），探不到如实 verified:false，绝不猜。
@@ -35,12 +36,12 @@ import { providerKeyFor } from "../src/providerFingerprint.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 // reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
 import { backendCapabilitySnapshot, backendFor } from "../src/backends/factory.js";
-// ADR-0032 §8：检查结果五态（N/A 构造 + 状态派生）。
-import { naCheck, checkStateOf } from "./reliability/checkStates.mjs";
+// ADR-0032 §8：检查结果五态（N/A / blocked 构造 + 状态派生）。
+import { naCheck, blockedCheck, checkStateOf } from "./reliability/checkStates.mjs";
 import { scorecardCommandFailureIsCredible } from "./reliability/scorecardEvidence.mjs";
 // ADR-0032 §6：drill glue（runCli + 各 drill + 纯助手）抽至 ./reliability/drills.mjs，
 // 组合入口（本文件）与将来的组件入口（component-check）共用——防双轨漂移。
-// 纯判定内核仍在 adversarialEscape.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
+// 纯判定内核仍在 containmentEvidence.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
 import { extractJson, check, hasSentinel, createDrills } from "./reliability/drills.mjs";
 // TD-186 复核 FAIL-B：drillRunIds 取证闭环（守卫/悬空 prior id 置 null）。
 // 2026-09-22 审计收口（交错发布误删证据）：发布路径零删除——prune 类清理从本
@@ -102,7 +103,7 @@ const {
   runCli,
   runStrictScorecardDrill,
   runIsolationDrill,
-  runAdversarialEscapeDrill,
+  runContainmentEvidenceDrill,
   runWorkflowRunDirDrill,
   runStopDrill,
 } = createDrills({
@@ -453,10 +454,17 @@ for (const tc of MATRIX) {
     checks.push(...runIsolationDrill(tc));
   }
 
-  if (tc.drills.includes("adversarialEscape")) {
-    handledDrills.add("adversarialEscape");
-    console.log(`    [DRILL] adversarial escape interception...`);
-    checks.push(...runAdversarialEscapeDrill(tc));
+  if (tc.drills.includes("containmentEvidence")) {
+    handledDrills.add("containmentEvidence");
+    console.log(`    [DRILL] containment evidence live write...`);
+    const drill = await runContainmentEvidenceDrill(tc);
+    caseResult.containmentError = drill.error;
+    // 派发被外部因素阻塞（额度/鉴权/连接）：沿用 classifyExternalBlocker——整个
+    // 取证面不可用，记一条 blocked 检查（映射 case 级 blocked，ADR-0032 §8）。
+    const externalBlocker = classifyExternalBlocker(drill.error);
+    checks.push(...(externalBlocker
+      ? [blockedCheck("containmentEvidence", externalBlocker, "operational", { capability: "containmentEvidence" })]
+      : drill.checks));
   }
 
   if (tc.drills.includes("workflowRunDir")) {
@@ -475,7 +483,7 @@ for (const tc of MATRIX) {
 
   // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
   // 记实际 runId；drills.mjs 只回 checks、不上抛内部 runId 的 drill（isolation/
-  // adversarialEscape/workflowRunDir/stop）如实记 null。派发失败/无 runId 时的
+  // containmentEvidence/workflowRunDir/stop）如实记 null。派发失败/无 runId 时的
   // "unknown" 占位也如实归 null——它不是可回查 id，入账即悬空指针（复核 FAIL-B
   // 硬禁令：不得记录指向不存在证据的 id）。
   const resolvableRunId = (value) =>
