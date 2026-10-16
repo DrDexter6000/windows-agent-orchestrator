@@ -23,6 +23,8 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { adversarialEscapeChecks } from "./adversarialEscape.mjs";
+import { drillTranscriptExists } from "./drillEvidence.mjs";
+import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 
 // --- 纯 glue 助手（零环境依赖，顶层导出）---
 
@@ -62,14 +64,14 @@ function hasSentinel(result, sentinel) {
 
 // 同步等待 detached runner 写出 transcript 文件（spawn 是 fire-and-forget，文件异步出现）。
 // 用 Atomics.wait 做同步 sleep（node 原生，不 spawn 子进程）。超时即返回（后续 stop 会如实报错）。
+// 转录随 runDir 分桶落 projects/<slug>/（D2-②b），存在性走 projectBuckets 解析链。
 function waitForTranscript(runDir, runId, timeoutMs = 15000, intervalMs = 500) {
-  const file = join(runDir, `${runId}.jsonl`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync(file)) return true;
+    if (drillTranscriptExists(runDir, runId)) return true;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, intervalMs);
   }
-  return existsSync(file);
+  return drillTranscriptExists(runDir, runId);
 }
 
 function inferState(events) {
@@ -315,8 +317,8 @@ export function createDrills(deps) {
     const childRunId = result?.nodes?.agent?.runId;
     return [
       check("workflowCompleted", result?.completed === true, "operational", `completed=${result?.completed}`, { capability: "workflowRunDir" }),
-      check("workflowTranscriptInRunDir", Boolean(result?.workflowRunId && existsSync(join(workflowRunDir, `${result.workflowRunId}.jsonl`))), "operational", result?.workflowRunId ?? "missing workflowRunId", { capability: "workflowRunDir" }),
-      check("workflowChildTranscriptInRunDir", Boolean(childRunId && existsSync(join(workflowRunDir, `${childRunId}.jsonl`))), "operational", childRunId ?? "missing child runId", { capability: "workflowRunDir" }),
+      check("workflowTranscriptInRunDir", Boolean(result?.workflowRunId && drillTranscriptExists(workflowRunDir, result.workflowRunId)), "operational", result?.workflowRunId ?? "missing workflowRunId", { capability: "workflowRunDir" }),
+      check("workflowChildTranscriptInRunDir", Boolean(childRunId && drillTranscriptExists(workflowRunDir, childRunId)), "operational", childRunId ?? "missing child runId", { capability: "workflowRunDir" }),
       ...(ok ? [] : [check("workflowRunDirError", false, "operational", error, { capability: "workflowRunDir" })]),
     ];
   }
@@ -411,7 +413,9 @@ export function createDrills(deps) {
   }
 
   function readRunEvents(runId, runDir = join(tmpDir, "runs")) {
-    const file = join(runDir, `${runId}.jsonl`);
+    // 转录随 runDir 分桶落 projects/<slug>/（D2-②b）：经 projectBuckets 解析链定位；
+    // 全未命中时返回平铺路径，下面的缺失即 [] 语义不变。
+    const file = resolveTranscriptPath(runDir, runId);
     if (!existsSync(file)) return [];
     return readFileSync(file, "utf8")
       .split(/\r?\n/)

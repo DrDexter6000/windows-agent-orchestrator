@@ -230,6 +230,27 @@ test("readRunEvents: 默认 runDir 从注入的 tmpDir 派生；显式 runDir �
   }
 });
 
+test("readRunEvents / waitForTranscript：runDir 下分桶的转录（projects/<slug>/）可定位", () => {
+  // D2-②b 起转录随 runDir 分桶落盘。只拼平铺路径时读到 []，越界写对抗演练因此
+  // 记 "no run.started event" / state=pending（2026-10-16 发版 reliability 实测）。
+  const dir = mkdtempSync(join(tmpdir(), "wao-drills-bucket-"));
+  try {
+    const runsDir = join(dir, "runs");
+    const bucket = join(runsDir, "projects", "demo-1234abcd");
+    mkdirSync(bucket, { recursive: true });
+    writeFileSync(join(bucket, "run_b.jsonl"), '{"type":"run.started","seq":1}\n{"type":"run.state_change","to":"failed","seq":2}\n');
+    const drills = createDrills({
+      nodeBin: process.execPath, root: dir, tmpDir: dir,
+      waitTimeout: "1000", pollInterval: "10", registry: "fixture.json",
+    });
+    assert.deepEqual(drills.readRunEvents("run_b").map((e) => e.type), ["run.started", "run.state_change"]);
+    assert.equal(waitForTranscript(runsDir, "run_b", 0), true, "桶内转录在场 → true");
+    assert.equal(waitForTranscript(runsDir, "run_none", 0), false, "桶内与平铺都不在场 → false");
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 // ════ 6. ADR-0032 §8 五态批次源级钉（2026-09-21）════
 
 test("源级钉: runStrictScorecardDrill 文件证据 = 存在 + 内容承载 sentinel（不再只查存在）", () => {
