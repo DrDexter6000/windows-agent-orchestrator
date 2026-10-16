@@ -114,3 +114,4 @@
 | TD-298 | kimi-web 的静默收口在诊断里落 `unknown`，不说明是哪道门 | 诊断给 kimi-web 收口建门表（现行 5 种、历史 2 种文案），serve 不应答归 unknown，其余归 provider_disconnect；真实转录里 11 个历史停滞从 unknown 改归 provider_disconnect |
 | TD-302 | MCP 的工作区绑定存在服务进程内存里，多个会话落到同一进程时会串，可能派错项目 | 会动工作区的 9 个 MCP 工具只按本次调用给出的 `expectedWorkspaceRoot` 执行并当场核验，不读进程级选择；已有运行的工具核对运行归属；只读工具照旧跟随选择并标明范围（0021 修订，Owner 批准收窄） |
 | TD-305 | 交付隔离门对已存在的工作树内文件调 `realpathSync.native`，失败即判 `write_intent_physical_unresolved` 并终止运行，不重试、不记错误码 | 失败码为 EBUSY/EPERM/EACCES/ENOENT 时整段判定重做（最多 3 次，等 25/100/250 ms），仍无法证明才 fail closed；违规事件带闭集 `errorCode`，诊断事实附上 |
+| TD-303 | 别的项目的 Lead 发现的 WAO 问题没有送到 WAO 开发侧的通道，只能写进宿主仓库、靠 Owner 转告 | `wao feedback submit/list/show/close` 写进主检出下的本机收件箱 `.wao/inbox/`（不进 git；任何入口、任何工作树都落到同一处）；`npm run hygiene` 在有未处理条目时多一行提示；决定 0083 |

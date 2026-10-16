@@ -50,6 +50,9 @@ import { consultCommand } from "./commands/consult.js";
 // TD-250（决定 0056）：serve status/sweep/recycle 命令族（kimi-web worker serve
 // 维护；数据逻辑委托 application/serveMaintenance.js + backends/kimiServeOps.js）。
 import { serveCommand } from "./commands/serve.js";
+// 本机反馈收件箱（宿主项目 Lead 报 WAO 缺陷 → WAO 开发 Lead 收口）：纯 CLI 适配，
+// 数据逻辑委托 application/feedbackInbox.js（收件箱根从代码位置解析，不看 cwd）。
+import { feedbackCommand } from "./commands/feedback.js";
 // P4-乙 Phase 1a：help 文本抽到 src/cliHelp.js（命名导出 HELP_TEXT，字节不变）。
 // cli.js 底部自执行 main()，生成器（scripts/gen-surface.mjs）不能 import 本文件——
 // 它改 import 无副作用的 cliHelp.js，CLI 打印的仍是同一份 SSOT。
@@ -221,6 +224,10 @@ async function main(argv) {
   }
   if (command === "playbook") {
     await playbookCommand(rest, config);
+    return;
+  }
+  if (command === "feedback") {
+    await feedbackCommand(rest, config);
     return;
   }
   if (command === "consult") {

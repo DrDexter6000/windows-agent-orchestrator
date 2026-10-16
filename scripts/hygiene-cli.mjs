@@ -6,6 +6,9 @@ import {
   listWorktreePaths, countRunBranches, classifyRegistryEntries, classifyBranchCount,
   checkRootWhitelist, checkTombstones, checkContinuationEntry,
 } from "./hygiene.mjs";
+// 反馈收件箱提示：根用与 CLI 同一个解析函数（主检出，不看 cwd）；提示不是第六个
+// 检查项——不改变 W1-W5 判定、PASS 文案与退出码，异常整段吞掉。
+import { feedbackInboxHintLines, resolveFeedbackInboxDir } from "../src/application/feedbackInbox.js";
 
 const repo = path.resolve(import.meta.dirname, "..");
 const runsDir = path.join(repo, ".wao/runs");
@@ -37,4 +40,9 @@ for (const r of results) {
   if (!r.ok) fail++;
 }
 console.log(fail === 0 ? "hygiene: PASS (5/5)" : `hygiene: FAIL (${fail} red) — 每条红线上方有修复路径`);
+// W1-W5 之后的收件箱提示（只报计数，不报标题与正文；任何异常都不影响上面的判定与退出码）。
+try {
+  const lines = feedbackInboxHintLines({ inboxDir: resolveFeedbackInboxDir({ packageRoot: repo }) });
+  for (const line of lines) console.log(line);
+} catch { /* 提示不是检查项：吞掉，绝不让 hygiene 提前终止或变红 */ }
 process.exit(fail === 0 ? 0 : 1);

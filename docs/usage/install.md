@@ -18,26 +18,7 @@ WAO 进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harne
 
 ### 如何装 / 切到 v22
 
-仓库根 `.nvmrc` 声明 `22`。任选一种版本管理器（推荐 nvm-windows 或 fnm）：
-
-```powershell
-# 方式 A：nvm-windows（winget 装）
-winget install CoreyButler.NVMforWindows
-nvm install 22        # 装项目声明的 v22
-nvm use 22
-cd D:\projects\windows-agent-orchestrator   # nvm 会读 .nvmrc 自动切
-node --version        # 应 v22.x
-
-# 方式 B：fnm（winget 装）
-winget install Schniz.fnm
-# 给 PowerShell 加 fnm env（加到 $PROFILE）：fnm env --use-on-cd | Out-String | Invoke-Expression
-fnm install 22
-fnm use 22
-cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自动切
-
-# 方式 C：不用管理器——直装 v22 LTS 覆盖
-# 去 https://nodejs.org 下 v22 .msi 装即可（覆盖现有 node）
-```
+仓库根 `.nvmrc` 声明 `22`。用任意版本管理器（nvm-windows、fnm）或直接装 v22 LTS 都行，按 `.nvmrc` 切到 v22 即可——装法本身是这些工具自己的文档，本页不重抄。
 
 ## 可选的 agent runtime（按需装，不装也能用其它 backend）
 
@@ -114,10 +95,10 @@ Copy-Item config/agents.example.json config/agents.json
 # 列出所有配置的 agent
 npm run cli -- registry list --registry config/agents.json
 
-# 探 opencode-serve 的健康（registry check 只探它；其它车道：就绪看 wao lanes、环境看 wao doctor）
+# 探 opencode-serve 的健康（registry check 只探它）
 npm run cli -- registry check --registry config/agents.json
 
-# 车道一屏参考（只读）：接线轴 + Owner 画像 + 认证简表 + 就绪探测
+# 车道一屏参考（只读）
 npm run cli -- wao lanes
 ```
 

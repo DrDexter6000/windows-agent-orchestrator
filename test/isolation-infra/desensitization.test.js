@@ -110,7 +110,9 @@ test("脱敏门控: git 跟踪文件不得含本机绝对路径（真实 Windows
 // ──────────────────────────────────────────────────────────────────────────
 test("脱敏门控: 敏感文件（agents.json/.env/runs 等）绝不被 git 跟踪", () => {
   // 这些都该 gitignore，但 git add -f 能强制跟踪。门控守"它们绝不该进仓库"。
-  const FORBIDDEN = /^(config\/agents\.json$|\.env(\.|$)|runs\/|\.wao-worker-claude-config\/|config\/.*\/agents\.local\.json$)/;
+  // `.wao/inbox/` 是本机反馈收件箱（宿主项目名/路径/业务内容只在本机）——即使
+  // 被 git add -f 强推也必须红。
+  const FORBIDDEN = /^(config\/agents\.json$|\.env(\.|$)|runs\/|\.wao\/inbox\/|\.wao-worker-claude-config\/|config\/.*\/agents\.local\.json$)/;
 
   const tracked = trackedFiles();
   const leaked = tracked.filter((f) => FORBIDDEN.test(f));

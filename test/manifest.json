@@ -260,7 +260,8 @@
       "registry-roles/leadPreflightObservability.test.js",
       "delivery/gitNoReplacePin.test.js",
       "delivery/td235ResolveBranch.test.js",
-      "delivery/settleDeliveryRecovery.test.js"
+      "delivery/settleDeliveryRecovery.test.js",
+      "application/feedbackInbox.test.js"
     ],
     "worktree": [
       "application/worktreeReclaim.test.js",

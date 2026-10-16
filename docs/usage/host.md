@@ -4,7 +4,7 @@
 
 ## MCP stdio 接口
 
-WAO 是 MCP-first 控制面（为什么见决定 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用，CLI 是 fallback。每个工具直接调用共享 application service，不 shell-out CLI。工具计数、参数与形状不在本页维护，见生成层 docs/surface/mcp-tools.md；当前工具清单的权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（为什么见决定 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用，CLI 是 fallback。每个工具直接调用共享 application service，不 shell-out CLI。工具计数、参数与形状不在本页维护，见生成层 docs/surface/mcp-tools.md。
 
 常用 Lead 闭环：`registry_list`（inventory）→ `workspace_status` / `workspace_select`（或一次 `lead_preflight`）→ `run_dispatch` → `run_await_result`（等终态）→ `run_delivery_review_bundle`（审查）→ `run_delivery_decide`（验收）。原子观察工具（`run_status` / `run_wait` / `run_collect` / `run_activity` / `run_diagnose`）、delivery 查询与审查、`run_stop` / `runs_list` 恢复、Lead 授权的 `run_continue` / `run_correct`，各工具的完整语义按任务分页：[派发](dispatch.md)、[监督](supervise.md)、[取结果与查历史](results.md)、[交付与验收](delivery.md)、[会审](consult.md)。
 
@@ -14,35 +14,13 @@ built-in playbook catalog 不在工具面：它是按需读取的 MCP resources�
 
 **Host 注册说明**：
 
-- `npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。
+- `npm run mcp` 仅用于在 WAO repo 内手工 smoke。正式 host 注册必须用**绝对路径**指向 Node shim 与 stdio entrypoint，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。精确片段由 `mcp bind --host <host>` 生成（见下文），本页不再手抄第二份 stdio JSON：片段即权威，宿主配置语法由 host 自己负责。
 - 注册后若当前会话未发现工具，重启或重载 host。
 - Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供。不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
-在 WAO repo 内手工 smoke（所有生产入口走 Node v22 shim）：
-
-```bash
-npm run mcp
-```
-
-MCP host 的 stdio 配置（使用绝对路径占位符，替换为你的实际 WAO 安装路径）：
-
-```json
-{
-  "mcpServers": {
-    "wao": {
-      "command": "node",
-      "args": ["C:\\path\\to\\wao\\scripts\\wao-node.cjs",
-               "C:\\path\\to\\wao\\src\\mcp\\stdio.js",
-               "--registry", "C:\\path\\to\\wao\\config\\agents.json",
-               "--run-dir", "C:\\path\\to\\wao\\runs"]
-    }
-  }
-}
-```
-
 ### OpenCode 项目级配置（host-local）
 
-OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Lead host 时，**项目级配置写在目标项目根目录的 `opencode.json`（或 `opencode.jsonc`），不写在 WAO repo**。本地 MCP schema 与上面的通用 JSON 不同：`command` 是**单个字符串数组**（可执行文件 + 全部参数都在数组内）。
+OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Lead host 时，**项目级配置写在目标项目根目录的 `opencode.json`（或 `opencode.jsonc`），不写在 WAO repo**。本地 MCP schema 与 `mcpServers` 那类通用 JSON 不同：`command` 是**单个字符串数组**（可执行文件 + 全部参数都在数组内）。
 
 在**目标项目**根目录创建 `opencode.json`（路径用绝对占位符，替换为你的实际安装路径；不要写本机真实 credential 或用户目录）：
 
@@ -72,7 +50,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 要点：
 
 - `command` 必须是数组（`["node", "<wao-node.cjs 绝对路径>", "<stdio.js 绝对路径>", ...]`）。写成单个字符串会被拒绝。第一项是 `node`，第二项是 v22 shim `scripts/wao-node.cjs`（避免系统默认 node 是 v24 触发 WAO versionGuard），第三项起是 stdio entrypoint 与 server-owned 参数。
-- `enabled` 是 OpenCode **optional** 配置（官方 schema 不强制）。显式写 `"enabled": true` 可消除配置继承歧义、避免被父配置或全局默认覆盖；省略不必然导致禁用（实际行为取决于 OpenCode 版本与继承链）。
+- `enabled` 是官方 schema 的 optional 项；显式写 `"enabled": true` 消除配置继承歧义（省略不必然禁用，实际行为取决于 OpenCode 版本与继承链）。
 - `--workspace-root` 指向**目标项目**根（不是 WAO repo），是**只读工具的缺省范围**来源之一；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`。
 - 这是 host-local 配置，含绝对路径时**默认不建议 commit**；Owner 可把它放进 `.git/info/exclude`（本地忽略，不污染 `.gitignore`）。
 - **验证**：在**目标项目**根执行 `opencode --pure mcp list`，期待看到 `wao connected`。`--pure` 会禁用 OpenCode 插件（如 oh-my-openagent），用于排除插件干扰；它**不**保证禁用全局 MCP 配置，也不自动移除全局 MCP。
@@ -87,7 +65,7 @@ WAO 的 MCP 工具**全部始终注册**：没有 profile、没有启动 flag，
 
 `run_dispatch_contract_check` 是 advisory 只读预检，与 `run_dispatch` 共享输入 schema（service 复用同一 application 校验），返回闭集 workspace/registry/contract 视图与有界 issue 码。`contractValid` 只反映 delivery/profile 的机械合同，不预评 `expectedGitHead`/`expectedDirty`，也不预评 continuable/backend/session 资格或 worker 凭据；可选 `expectedWorkspaceRoot` 只选本次检查的项目（结果 `workspaceScope` 如实标注，省略即跟随绑定）。sections 独立 settle 为 `observed`/`unknown`，零副作用——不是门禁，`run_dispatch` 不依赖它，部分失败不影响派发。它同样**接受**顶层 `readOnly` 字段但**不评估**它（只读是派发声明，不是 delivery 合同维度）。`run_dispatch` 的可选顶层输入 `executionProfileId`（与 `delivery` 同级）取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands` / `delivery.verificationSetupCommands` / `delivery.verificationUnavailableReason` 互斥，派发前解析；未知或冲突的组合由共享 resolver 稳定拒绝。派发细节见[派发](dispatch.md)。
 
-legacy argv 兼容：stdio argv parser 把任何残留的旧 profile 参数视为**普通未知 flag** 忽略——不解析值、不出现在解析输出、不改变 server 面、不失败启动；`--registry`/`--run-dir`/`--workspace-root` 解析与 fail-closed 语义不变。既有 Host 配置无需任何迁移。
+legacy argv 兼容：旧 profile 参数当作普通未知 flag 忽略，既有 Host 配置无需迁移；`--registry`/`--run-dir`/`--workspace-root` 解析与 fail-closed 语义不变。
 
 ## MCP `registry_list`（worker 清单）
 
@@ -182,3 +160,14 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 - managed block 含 SHA-256 checksum，外部修改后 unbind fail-closed。
 
 **`configured` vs `active`**：`mcp status` 返回 `configured`（配置已正确写入），不返回 `active`。真实 Codex host 加载需要 trust + 重启/新任务——只有人在独立的 Codex Desktop 会话中才能验证 `active`。
+
+## 反馈收件箱（宿主 Lead → WAO 开发 Lead）
+
+宿主 Lead 发现 WAO 的缺陷或别扭之处时，写进 WAO 检出所在机器的本机收件箱——不用 GitHub Issues（仓库公开，宿主项目名、路径与业务内容不出本机）。收件箱在 `.wao/inbox/`（`.gitignore` 忽略面内，不进 git）；CLI 不联网、不调用任何模型。
+
+- 开发机（`npm link` 过、有全局 `wao`）：`wao feedback submit --file <md>`。
+- 第三方安装：`& "<WAO 安装根>\scripts\wao-cli.cmd" feedback submit --file <md>`（`.cmd` 由 PowerShell 直接执行，不能 `node xxx.cmd`）。
+
+写什么：最小复现（命令与输入）、预期与实际、WAO 版本或提交；提交前删掉凭据与业务数据（标题、正文、处理说明写盘前都过与转录同一套密钥脱敏）。
+
+回执给 `id` 与条目的相对位置 `open/<id>.json`。开发 Lead 用 `wao feedback list`（`--all` 含已处理）查看、`wao feedback show <id>` 看全文、`wao feedback close <id> --note <怎么处理的>` 收口。收件箱默认落在 WAO 代码所在检出的主检出（任何工作树里读到的都是同一份），`--inbox-dir DIR` 可覆盖。

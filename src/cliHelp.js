@@ -55,6 +55,10 @@ Commands:
   workflow list   # 列出可用模板（workflows/templates/）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
+  feedback submit --file <md> [--title <text>] [--inbox-dir DIR] [--format json]   # 宿主 Lead 报 WAO 缺陷/别扭到本机收件箱（不联网、不调用模型）
+  feedback list [--all] [--inbox-dir DIR] [--format json]   # WAO 开发 Lead：列出未处理反馈；--all 含已处理
+  feedback show <id> [--inbox-dir DIR] [--format json]   # 打印一条反馈全文（先找未处理，再找已处理）
+  feedback close <id> --note <text> [--inbox-dir DIR] [--format json]   # 标为已处理并写明怎么处理（不改写已有处理说明）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
   worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]   # 只读普查分类写清退计划，打印计划 sha256（Owner 按此批准）
@@ -99,12 +103,13 @@ Notes:
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 20 名；与 HELP_TEXT 的关系是
+// （如 `run status ...`）做 did-you-mean 提示。恰 21 名；与 HELP_TEXT 的关系是
 // 双向守卫（HELP_TEXT 每个两空格命令行首词必须在闭集内，闭集每个成员在
 // HELP_TEXT 有行锚定条目）；不含 help（HELP_TEXT 无 help 命令行）。
 export const COMMAND_NAMES = Object.freeze([
   "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
   "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
+  "feedback",
 ]);
 
 // A-2（friction 2026-08-15 #2）：`run --help` 用法页。顶层 HELP_TEXT 字节冻结

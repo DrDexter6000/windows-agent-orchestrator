@@ -50,6 +50,10 @@ Commands:
   workflow list   # 列出可用模板（workflows/templates/）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
+  feedback submit --file <md> [--title <text>] [--inbox-dir DIR] [--format json]   # 宿主 Lead 报 WAO 缺陷/别扭到本机收件箱（不联网、不调用模型）
+  feedback list [--all] [--inbox-dir DIR] [--format json]   # WAO 开发 Lead：列出未处理反馈；--all 含已处理
+  feedback show <id> [--inbox-dir DIR] [--format json]   # 打印一条反馈全文（先找未处理，再找已处理）
+  feedback close <id> --note <text> [--inbox-dir DIR] [--format json]   # 标为已处理并写明怎么处理（不改写已有处理说明）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
   worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]   # 只读普查分类写清退计划，打印计划 sha256（Owner 按此批准）

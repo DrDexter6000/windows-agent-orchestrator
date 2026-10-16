@@ -19,6 +19,8 @@ condition. `SKILL.md` remains conditional on actually operating WAO.
 
 For aggregation, parsing, or classification changes, green unit tests are not enough; smoke the result against real transcripts before declaring completion.
 
+**WAO development Lead only**: start work by checking `wao feedback list`; each open entry either enters the ledger or is closed with a written reason. Workers do not do this.
+
 ## Documentation
 
 One fact has one editable home; everything else links to it. Document categories are defined in `docs/ssot.md`.
