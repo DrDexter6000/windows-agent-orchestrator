@@ -150,6 +150,7 @@ function sensitiveReverifyResult() {
   return {
     runId: "run_x",
     deliveryCommit: "d".repeat(40),
+    attempt: 1,
     state: "created",
     reason: "tooling_invalid",
     verificationStatus: "passed",
@@ -193,13 +194,16 @@ test("3B2a-RV-01: exactly one run_delivery_reverify tool, strict bounded input +
       assert.equal(t.annotations.idempotentHint, true, "reentrant/crash-safe — converges in outcome");
       assert.equal(t.annotations.openWorldHint, false, "workspace-bound, no external network");
 
-      // Strict input: only runId + reason + bounded setupCommands/timeoutMs.
+      // Strict input: only runId + reason + attempt + bounded setupCommands/timeoutMs.
       const props = t.inputSchema.properties;
-      assert.deepEqual(Object.keys(props).sort(), ["expectedWorkspaceRoot", "reason", "runId", "setupCommands", "timeoutMs"]);
+      assert.deepEqual(Object.keys(props).sort(), ["attempt", "expectedWorkspaceRoot", "reason", "runId", "setupCommands", "timeoutMs"]);
       assert.equal(t.inputSchema.additionalProperties, false, "strict object");
       assert.equal(props.runId.type, "string");
       assert.deepEqual(props.reason.enum, REVERIFY_REASONS,
         "reason enum = exported REVERIFY_REASONS SSOT");
+      assert.equal(props.attempt.type, "integer");
+      assert.equal(props.attempt.minimum, 1, "attempt min 1");
+      assert.equal(props.attempt.maximum, 2, "attempt max 2 (two chains maximum)");
       assert.deepEqual(props.setupCommands.items.enum, undefined);
       assert.equal(props.setupCommands.maxItems, REVERIFY_SETUP_COMMANDS_LIMIT,
         "setupCommands capped by exported constant");
@@ -245,11 +249,12 @@ test("3B2a-RV-02: success — service called once with server-owned runDir + bou
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.deepEqual(
         new Set(Object.keys(parsed)),
-        new Set(["runId", "deliveryCommit", "state", "reason", "verificationStatus", "failureCode", "requested", "outcomeRecorded", "status"]),
-        "exact safe output key set (TD-215: status ok|pending 枚举加入)",
+        new Set(["runId", "deliveryCommit", "attempt", "state", "reason", "verificationStatus", "failureCode", "requested", "outcomeRecorded", "status"]),
+        "exact safe output key set (TD-215: status ok|pending 枚举加入; attempt = 本次收敛的链号)",
       );
       assert.equal(parsed.runId, "run_x");
       assert.equal(parsed.deliveryCommit, "d".repeat(40), "exact deliveryCommit");
+      assert.equal(parsed.attempt, 1);
       assert.equal(parsed.state, "created");
       assert.equal(parsed.reason, "tooling_invalid");
       assert.equal(parsed.verificationStatus, "passed");
@@ -551,4 +556,61 @@ test("3B2a-RV-10 (real service + real git): reverify over MCP records one audite
     try { git(["worktree", "remove", "--force", worktreePath], repo); } catch {}
     await cleanupDirAsync(repo);
   }
+});
+
+// ===== attempt (second reverify chance) wire contract =====
+
+test("3B2a-RV-11: attempt passes through to the service; settled output carries it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-rv-11-"));
+  try {
+    makeGitRepo(dir);
+    let captured = null;
+    const server = serverWith(async (input) => {
+      captured = input;
+      return { ...sensitiveReverifyResult(), attempt: 2, reason: "environment_contaminated" };
+    }, { runDir: "/server/runs", workspaceRoot: dir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_delivery_reverify",
+        arguments: { runId: "run_x", reason: "environment_contaminated", attempt: 2, expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined);
+      assert.equal(captured.attempt, 2, "attempt reaches the service as an integer");
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.attempt, 2, "settled output carries the attempt");
+      assert.equal(parsed.reason, "environment_contaminated");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("3B2a-RV-12: out-of-range / non-integer attempt is rejected by the schema (fixed error, service never called)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-rv-12-"));
+  try {
+    makeGitRepo(dir);
+    let calls = 0;
+    const server = serverWith(async () => { calls += 1; return sensitiveReverifyResult(); }, { runDir: "/server/runs", workspaceRoot: dir });
+    const client = await buildInMemoryClient(server);
+    try {
+      for (const bad of [3, 0, -1, 1.5, "2"]) {
+        let rejected = false;
+        let result = null;
+        try {
+          result = await client.callTool({
+            name: "run_delivery_reverify",
+            arguments: { runId: "run_x", reason: "tooling_invalid", attempt: bad, expectedWorkspaceRoot: dir },
+          });
+        } catch { rejected = true; }
+        if (!rejected) { assert.equal(result.isError, true); rejected = true; }
+        assert.ok(rejected, `attempt ${JSON.stringify(bad)} never produces a settled output`);
+      }
+      assert.equal(calls, 0, "the service is never called for a bad attempt");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally { cleanupDir(dir); }
 });

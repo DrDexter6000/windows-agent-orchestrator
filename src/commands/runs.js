@@ -1569,7 +1569,7 @@ async function parseCommandsFileBuffer(buf, flagName, echoValue, exceedLabel) {
 
 /**
  * M12-6 FR-07: `runs delivery reverify <runId> --reason <code>`
- * `[--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]`
+ * `[--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]`
  *
  * CLI fallback for the audited unchanged-artifact re-verification. Delegates to
  * the SAME runDeliveryReverify application service the MCP run_delivery_reverify
@@ -1578,6 +1578,9 @@ async function parseCommandsFileBuffer(buf, flagName, echoValue, exceedLabel) {
  *
  * The CLI owns only:
  *   - strict argv parsing (reverify recognized before ordinary delivery parsing)
+ *   - --attempt: strict integer (omitted = 1); the 1|2 closed set and the
+ *     two-chain cap (closed-set `reverify_attempts_exhausted`) are owned by the
+ *     service — an integer ≥ 3 reaches it and surfaces its refusal
  *   - --setup-commands-file: UTF-8 JSON string array; missing = empty array;
  *     rejects non-array / extra semantics / blank / oversize (service exports)
  *   - --timeout-ms: strict integer in the service [MIN, MAX] (service exports)
@@ -1598,7 +1601,7 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   // flag value must be non-empty / non-whitespace; no duplicates; exactly one
   // positional; unknown flags rejected (the ONLY way to reach the service).
   const KNOWN_FLAGS = new Set([
-    "--reason", "--setup-commands-file", "--timeout-ms",
+    "--reason", "--attempt", "--setup-commands-file", "--timeout-ms",
     "--run-dir", "--cwd", "--format",
   ]);
   const seenFlags = new Set();
@@ -1638,6 +1641,17 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   }
   if (!REVERIFY_REASONS.includes(flags.reason)) {
     throw new Error(`--reason must be one of: ${REVERIFY_REASONS.join(", ")}`);
+  }
+
+  // --attempt: strict integer; omitted = the service default (first chain).
+  // The 1|2 closed set and the two-chain cap live in the service — an integer
+  // ≥ 3 is passed through so the caller sees the service's closed-set refusal.
+  let attempt;
+  if (flags.attempt !== undefined) {
+    if (!/^\d+$/.test(flags.attempt)) {
+      throw new Error("--attempt must be an integer (1 = first reverify chain, 2 = the second and final chance)");
+    }
+    attempt = Number(flags.attempt);
   }
 
   // --setup-commands-file: UTF-8 JSON string array. Missing = empty array (the
@@ -1689,6 +1703,7 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
     runDir,
     authorizedWorkspaceRoot: cwd,
     reason: flags.reason,
+    ...(attempt !== undefined ? { attempt } : {}),
     ...(setupCommands !== undefined ? { setupCommands } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
@@ -1699,6 +1714,9 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   if (raw.runId !== runId) throw new Error("reverify runId mismatch");
   if (!/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(raw.deliveryCommit)) {
     throw new Error("reverify bad deliveryCommit");
+  }
+  if (!Number.isInteger(raw.attempt) || raw.attempt < 1 || raw.attempt > 2) {
+    throw new Error("reverify bad attempt");
   }
   if (!["created", "resumed", "idempotent"].includes(raw.state)) {
     throw new Error("reverify bad state");
@@ -1719,6 +1737,7 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   const result = {
     runId,
     deliveryCommit: raw.deliveryCommit,
+    attempt: raw.attempt,
     state: raw.state,
     reason: raw.reason,
     verificationStatus: raw.verificationStatus,

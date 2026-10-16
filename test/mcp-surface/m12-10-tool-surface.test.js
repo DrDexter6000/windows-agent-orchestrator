@@ -434,7 +434,10 @@ const RED_23_WIRE = 75492;
 // 94532 内）。同批会审修复：run_consult 读取/分页也可带 expectedWorkspaceRoot、
 // run_dispatch_contract_check 按调用目标检查并在出参增 workspaceScope、
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
-const FROZEN_23_WIRE_CEILING = 88048;
+const FROZEN_23_WIRE_CEILING = 88227;
+// 2026-10-16（Owner 批准小幅重冻）：run_delivery_reverify 入参/出参增可选
+// attempt（1|2，缺省 1——第二次显式重验机会），描述加一句第二次机会说明：
+// 88048→88227（实测；本批批准 wire+desc 合计涨幅 ≤300B，实测合计 +252B）。
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -619,7 +622,10 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // 同批会审修复：run_dispatch_contract_check 出参增 workspaceScope（source +
   // projectBucket；该工具改为可按调用目标检查），run_consult 读取/分页接受同一
   // 目标字段——均在 stripped 载荷内，SHA 再如实翻新。
-  "d221a599f101b4bf7df173ecdfd5834123ec9ec6544e9939c45d6e425b3b25ee";
+  "6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f";
+  // 2026-10-16（schema 改动，按实测更新）：run_delivery_reverify 的 input/
+  // output schema 各增可选 attempt（integer 1..2）——schema 在 stripped 载荷
+  // 内，SHA 如实翻新；描述句变化不进 stripped 载荷（desc 顶另行按实测重冻）。
   // TD-220（2026-10-07）：仅活动 schema 扩闭集，按实测更新无 description 合同 hash。
   // TD-226（2026-10-08）：run_delivery_repackage 出参 schema 增 REQUIRED 闭集
   // rejectionReason（nullable enum）——schema 在 stripped 载荷内，SHA 如实翻新；
@@ -702,13 +708,19 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
-const FROZEN_23_DESC_CEILING = 11783;
+const FROZEN_23_DESC_CEILING = 11856;
+// 2026-10-16（Owner 批准小幅重冻，与 wire 同批）：run_delivery_reverify 描述
+// 加一句 attempt:2 第二次机会说明：11783→11856（实测；wire+desc 合计涨幅
+// 批准 ≤300B，实测 +252B）。
 
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；口径见 measureSurface()，规则见决定 0078。
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 22941;
+const FROZEN_23_HOSTVISIBLE_CEILING = 23067;
+// 2026-10-16（Owner 批准小幅重冻，与 wire/desc 同批——同一 attempt 字段的
+// inputSchema 字节进 hostVisible）：22941→23067（实测；hostVisible 无独立硬顶，
+// 在 wire 硬顶内）。
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

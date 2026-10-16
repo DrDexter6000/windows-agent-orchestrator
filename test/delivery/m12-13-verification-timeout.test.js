@@ -799,6 +799,7 @@ test("VT-14: MCP run_delivery_reverify schema accepts the shared upper bound and
         return {
           runId: input.runId,
           deliveryCommit: "d".repeat(40),
+          attempt: 1,
           state: "created",
           reason: input.reason,
           verificationStatus: "passed",

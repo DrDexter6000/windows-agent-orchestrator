@@ -205,7 +205,8 @@
       "workflow/handoff.test.js",
       "workflow/loader.test.js",
       "workflow/nodeSummary.test.js",
-      "workflow/schema.test.js"
+      "workflow/schema.test.js",
+      "transcript/reverifyMultiChain.test.js"
     ],
     "git": [
       "application/lineageClose.test.js",
@@ -262,7 +263,8 @@
       "delivery/gitNoReplacePin.test.js",
       "delivery/td235ResolveBranch.test.js",
       "delivery/settleDeliveryRecovery.test.js",
-      "application/feedbackInbox.test.js"
+      "application/feedbackInbox.test.js",
+      "delivery/runDeliveryReverifyAttempt2.test.js"
     ],
     "worktree": [
       "application/worktreeReclaim.test.js",

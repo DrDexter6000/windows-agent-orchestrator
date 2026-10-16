@@ -4,11 +4,16 @@
 //
 // After a delivery's ORIGINAL verification FAILED with an environment/tooling-
 // invalid code (command_failed/command_timeout/execution_error/setup_failed/
-// setup_timeout/setup_environment_error), a Lead may request ONE audited
-// re-verification of the SAME immutable DeliveryRef. The Lead may ADD only setup
-// commands; the ORIGINAL assertion commands are re-run BYTE-FOR-BYTE against the
-// EXACT same delivery commit. No model is called. No worker is resumed. No
-// assertion command is replaced. Nothing is auto accepted/rejected.
+// setup_timeout/setup_environment_error), a Lead may request an audited
+// re-verification of the SAME immutable DeliveryRef. A delivery carries at
+// most TWO reverify chains: the first (attempt 1, the default) and — only
+// after the first chain completed FAILED with one of the same eligible codes —
+// one explicit second chance (attempt 2, the last; a third application is
+// refused with the closed-set `reverify_attempts_exhausted`; WAO never
+// auto-retries). On each attempt the Lead may ADD only setup commands; the
+// ORIGINAL assertion commands are re-run BYTE-FOR-BYTE against the EXACT same
+// delivery commit. No model is called. No worker is resumed. No assertion
+// command is replaced. Nothing is auto accepted/rejected.
 //
 // This is an EXCEPTIONAL Lead-declared recovery — NOT a retry, NOT command
 // replacement, NOT automatic acceptance. The reason records WHY the original
@@ -45,9 +50,11 @@ import {
   findLastEventSeq,
   JsonlTranscript,
   validateDeliveryFacts,
-  projectReverifyChain,
+  pairReverifyLinks,
   REVERIFY_REASONS,
   REVERIFY_FAILURE_CODES,
+  REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES,
+  REVERIFY_ATTEMPT_REJECTION_REASONS,
   REVERIFY_SETUP_COMMANDS_LIMIT,
   REVERIFY_SETUP_COMMAND_MAX_LENGTH,
   REVERIFY_TIMEOUT_MS_MIN,
@@ -60,6 +67,8 @@ import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 export {
   REVERIFY_REASONS,
+  REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES,
+  REVERIFY_ATTEMPT_REJECTION_REASONS,
   REVERIFY_SETUP_COMMANDS_LIMIT,
   REVERIFY_SETUP_COMMAND_MAX_LENGTH,
   REVERIFY_TIMEOUT_MS_MIN,
@@ -78,15 +87,11 @@ const ORIGINAL_VERIFICATION_OUTCOME_TYPES = new Set([
 // Eligible original verification failure codes — environment/tooling-invalid
 // failures a Lead may declare an exceptional reverify for. NEVER includes
 // artifact_mutated/artifact_mismatch (content-integrity failures) — those are
-// not recoverable by re-running the SAME immutable artifact.
-const ELIGIBLE_REVERIFY_FAILURE_CODES = new Set([
-  "command_failed",
-  "command_timeout",
-  "execution_error",
-  "setup_failed",
-  "setup_timeout",
-  "setup_environment_error",
-]);
+// not recoverable by re-running the SAME immutable artifact. Same six codes as
+// the second-attempt chain-shape authority: the shared
+// REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES SSOT (src/transcript.js) — no second
+// allowlist here.
+const ELIGIBLE_REVERIFY_FAILURE_CODES = new Set(REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES);
 
 // The safe-result echo reuses REVERIFY_FAILURE_CODES — the SINGLE closed set of
 // verification failure codes, shared with the transcript CAS projection/append
@@ -184,6 +189,34 @@ function resolveEffectiveTimeoutMs(explicitTimeoutMs, createdRef) {
 }
 
 /**
+ * Normalize + validate the optional explicit reverify attempt. Omitted
+ * (undefined/null) → 1 (the first chain; legacy callers see zero drift). The
+ * value must be the integer 1 or 2 — an integer of 3 or more is the THIRD
+ * application for a delivery capped at two chains and is refused with the
+ * closed-set reason `reverify_attempts_exhausted` (WAO never auto-retries; the
+ * second attempt is the last explicit chance). Anything else (0, negative,
+ * fractional, non-number) is an input-shape failure. Rejected BEFORE any
+ * transcript read.
+ * @param {number|undefined} attempt
+ * @returns {number} 1 or 2
+ */
+function _validateAttempt(attempt) {
+  if (attempt === undefined || attempt === null) return 1;
+  if (!Number.isInteger(attempt)) {
+    throw new Error("runDeliveryReverify: attempt must be the integer 1 or 2");
+  }
+  if (attempt >= 3) {
+    throw new Error(
+      `runDeliveryReverify: ${REVERIFY_ATTEMPT_REJECTION_REASONS[0]} — a delivery carries at most two reverify chains and the second is the last`,
+    );
+  }
+  if (attempt !== 1 && attempt !== 2) {
+    throw new Error("runDeliveryReverify: attempt must be the integer 1 or 2");
+  }
+  return attempt;
+}
+
+/**
  * Prove the reverify preconditions from the transcript. Fail-closed: any
  * violation throws BEFORE any Git read or transcript append (contract: the
  * verifier never executes for an ineligible original). Returns the created
@@ -260,6 +293,10 @@ function _proveReverifyPreconditions(events, runId, authorizedWorkspaceRoot) {
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding
  * @param {string} input.reason — closed-set reverify reason
+ * @param {number} [input.attempt] — explicit reverify attempt: 1 (default,
+ *   omitted/null → 1, legacy zero drift) or 2 (the second and FINAL chance —
+ *   requires a complete first chain that failed with an eligible code; an
+ *   integer ≥ 3 is refused with the closed-set `reverify_attempts_exhausted`)
  * @param {string[]} [input.setupCommands] — optional new setup (original assertions unchanged)
  * @param {number} [input.timeoutMs] — optional per-command execution budget
  *   (bounded integer). When omitted, the persisted budget on the delivery ref
@@ -268,7 +305,7 @@ function _proveReverifyPreconditions(events, runId, authorizedWorkspaceRoot) {
  * @param {Function} [input.verifyDeliveryFn] — injectable (default verifyDelivery)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
- * @returns {Promise<{runId, deliveryCommit, reason, state, requested, outcomeRecorded, verificationStatus, failureCode?}>}
+ * @returns {Promise<{runId, deliveryCommit, attempt, reason, state, requested, outcomeRecorded, verificationStatus, failureCode?}>}
  * @throws {Error} on any precondition / input / verification-append failure
  */
 export async function runDeliveryReverify({
@@ -276,6 +313,7 @@ export async function runDeliveryReverify({
   runDir,
   authorizedWorkspaceRoot,
   reason,
+  attempt,
   setupCommands,
   timeoutMs,
   verifyDeliveryFn,
@@ -289,6 +327,7 @@ export async function runDeliveryReverify({
   if (!REVERIFY_REASONS.includes(reason)) {
     throw new Error(`runDeliveryReverify: reason must be one of ${REVERIFY_REASONS.join(", ")}`);
   }
+  const normalizedAttempt = _validateAttempt(attempt);
   const setup = _normalizeSetup(setupCommands);
   const explicitTimeoutMs = _validateTimeout(timeoutMs);
 
@@ -305,15 +344,33 @@ export async function runDeliveryReverify({
     authorizedWorkspaceRoot,
   );
 
-  // M12-6 Package 3B1: the durable reverify chain must be CLEAN before this call
-  // extends it. A malformed chain — a foreign-envelope reverify event, an
-  // identity mismatch, or a persisted request with an unknown reason / invalid
-  // setup commands — is a durable conflict: fail closed BEFORE any verifier
-  // execution or transcript append. A garbage request must never reach
-  // verifyDeliveryFn, and a conflict must never be extended.
-  const chainBefore = projectReverifyChain(events, runId, createdRef);
-  if (chainBefore.status === "malformed") {
+  // The durable reverify chain must be CLEAN before this call extends it. A
+  // malformed chain — a foreign-envelope reverify event, an identity mismatch,
+  // or a persisted request with an unknown reason / invalid attempt / invalid
+  // setup commands / an unqualified second attempt — is a durable conflict:
+  // fail closed BEFORE any verifier execution or transcript append. A garbage
+  // request must never reach verifyDeliveryFn, and a conflict must never be
+  // extended.
+  const pairing = pairReverifyLinks(events, runId, createdRef);
+  if (!pairing.ok) {
     throw new Error("runDeliveryReverify: reverify chain is malformed — refusing to verify or extend it");
+  }
+  // The link THIS call targets (its attempt number). Every consumer takes the
+  // LATEST chain as the current reverify truth; a call only ever converges on
+  // or opens the chain of its OWN attempt — an attempt-1 (or legacy omitted)
+  // call never runs a second verification.
+  const targetBefore = pairing.links.find((link) => link.attempt === normalizedAttempt) ?? null;
+  if (normalizedAttempt === 2 && !targetBefore) {
+    const first = pairing.links[0] ?? null;
+    const firstCode = first?.outcomeEvent?.delivery?.verification?.failureCode;
+    if (!first
+      || first.status !== "complete"
+      || first.effectiveStatus !== "failed"
+      || !REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES.includes(firstCode)) {
+      throw new Error(
+        "runDeliveryReverify: attempt 2 requires a complete first reverify chain that FAILED with an eligible environment/tooling code (artifact_mutated / unavailable / pending / absent never qualify)",
+      );
+    }
   }
 
   // M12-13: resolve the effective per-command execution budget BEFORE any
@@ -323,7 +380,8 @@ export async function runDeliveryReverify({
   const effectiveTimeoutMs = resolveEffectiveTimeoutMs(explicitTimeoutMs, createdRef);
 
   // Phase 1: lock-scoped CAS append of the requested event. Yields to an existing
-  // request — a retry/competitor converges on the FIRST caller's recorded setup.
+  // request for THIS attempt — a retry/competitor converges on the FIRST
+  // caller's recorded setup.
   const context = {
     runId,
     agentId: events[0]?.agentId ?? "unknown",
@@ -336,6 +394,7 @@ export async function runDeliveryReverify({
     delivery: createdRef,
     reason,
     setupCommands: setup,
+    attempt: normalizedAttempt,
   });
   const requestedThisCall = requestedResult.requested;
   // The RECORDED setup governs verification (deterministic convergence on the
@@ -343,16 +402,18 @@ export async function runDeliveryReverify({
   const recordedSetup = requestedResult.setupCommands;
 
   // Phase 2 + 3: verify (outside the lock) + record the outcome (lock-scoped CAS).
-  // Idempotent short-circuit: if the chain was already COMPLETE before this call,
-  // the recorded outcome is authoritative — skip re-verification.
+  // Idempotent short-circuit: if the TARGET attempt's chain was already
+  // COMPLETE before this call, its recorded outcome is authoritative — skip
+  // re-verification. The outcome CAS binds the outcome to this attempt's own
+  // chain, so a late attempt-1 call can never close a second chain.
   let effectiveOutcome;
   let effectiveFailureCode;
   let effectiveRef;
   let outcomeThisCall = false;
 
-  if (!requestedThisCall && chainBefore.status === "complete" && chainBefore.outcomeEvent) {
-    effectiveRef = chainBefore.outcomeEvent.delivery;
-    effectiveOutcome = chainBefore.effectiveStatus;
+  if (!requestedThisCall && targetBefore?.status === "complete" && targetBefore.outcomeEvent) {
+    effectiveRef = targetBefore.outcomeEvent.delivery;
+    effectiveOutcome = targetBefore.effectiveStatus;
     effectiveFailureCode = effectiveOutcome === "failed"
       ? effectiveRef?.verification?.failureCode
       : undefined;
@@ -391,6 +452,7 @@ export async function runDeliveryReverify({
     const outcomeResult = await transcript.tryAppendReverifyOutcome({
       delivery: effectiveRef,
       outcome: effectiveOutcome,
+      attempt: normalizedAttempt,
     });
     outcomeThisCall = outcomeResult.recorded;
     // If a concurrent caller already recorded an outcome, the authoritative one
@@ -421,6 +483,7 @@ export async function runDeliveryReverify({
   return {
     runId,
     deliveryCommit: createdRef.deliveryCommit,
+    attempt: normalizedAttempt,
     reason: requestedResult.reason,
     state,
     requested: requestedThisCall,

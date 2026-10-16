@@ -48,6 +48,7 @@ Commands:
   runs diagnose <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> [--run-dir DIR] [--format json]   # 交付状态查询（只读）
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
+  runs delivery reverify <runId> --reason <code> [--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 未变工件审计式重验证；--attempt 2 为第二次（也是最后一次）机会，仅当第一次因环境/工具码失败
   runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
   runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）

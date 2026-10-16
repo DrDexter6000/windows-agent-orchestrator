@@ -50,6 +50,7 @@ function validServiceResult(overrides = {}) {
   return {
     runId: "run_reverify1",
     deliveryCommit: "a".repeat(40),
+    attempt: 1,
     state: "created",
     reason: "tooling_invalid",
     verificationStatus: "passed",
@@ -69,7 +70,7 @@ function countingService(result) {
 }
 
 const SAFE_FIELDS = [
-  "runId", "deliveryCommit", "state", "reason",
+  "runId", "deliveryCommit", "attempt", "state", "reason",
   "verificationStatus", "failureCode", "requested", "outcomeRecorded",
 ];
 
@@ -647,6 +648,126 @@ test("FR07-CLI-17: ordinary delivery query/accept/reject parsing is unaffected",
     });
     assert.ok(out.includes("run_fixture_evidence_passed"), "ordinary query still works");
     assert.equal(svc.calls.length, 0, "ordinary query never calls the reverify service");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// Group 10: the explicit --attempt flag (second reverify chance)
+// =====================================================================
+
+test("FR07-CLI-18: --attempt 2 is parsed as a strict integer and passed to the service; output carries the attempt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fr07-cli-18-"));
+  try {
+    const svc = countingService(validServiceResult({ attempt: 2, state: "created" }));
+    const out = await captureLog(async () => {
+      await runsDeliveryCommand(
+        ["reverify", "run_reverify1", "--reason", "environment_contaminated", "--attempt", "2", "--format", "json"],
+        { runDir: dir },
+        { runDeliveryReverifyFn: svc },
+      );
+    });
+    assert.equal(svc.calls.length, 1);
+    assert.equal(svc.calls[0].attempt, 2, "attempt reaches the service as an integer");
+    assert.equal(svc.calls[0].reason, "environment_contaminated");
+    const parsed = assertSafeJsonOnly(out);
+    assert.equal(parsed.attempt, 2);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FR07-CLI-19: omitted --attempt never sends an attempt key (legacy first-chain shape)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fr07-cli-19-"));
+  try {
+    const svc = countingService(validServiceResult());
+    await captureLog(async () => {
+      await runsDeliveryCommand(
+        ["reverify", "run_reverify1", "--reason", "tooling_invalid", "--format", "json"],
+        { runDir: dir },
+        { runDeliveryReverifyFn: svc },
+      );
+    });
+    assert.equal(svc.calls.length, 1);
+    assert.equal("attempt" in svc.calls[0], false, "no attempt key when the flag is omitted");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FR07-CLI-20: --attempt rejects non-integer values and duplicates before the service call; integers ≥3 reach the service (closed set owned there)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fr07-cli-20-"));
+  try {
+    for (const bad of ["abc", "1.5", "", "  ", "-1", "0x2"]) {
+      const svc = countingService(validServiceResult());
+      await assert.rejects(
+        () => runsDeliveryCommand(
+          ["reverify", "run_reverify1", "--reason", "tooling_invalid", "--attempt", bad],
+          { runDir: dir },
+          { runDeliveryReverifyFn: svc },
+        ),
+        /--attempt must be (non-empty|an integer)/,
+        `--attempt ${JSON.stringify(bad)} rejected`,
+      );
+      assert.equal(svc.calls.length, 0);
+    }
+    // Duplicate --attempt rejected.
+    {
+      const svc = countingService(validServiceResult());
+      await assert.rejects(
+        () => runsDeliveryCommand(
+          ["reverify", "run_reverify1", "--reason", "tooling_invalid", "--attempt", "1", "--attempt", "2"],
+          { runDir: dir },
+          { runDeliveryReverifyFn: svc },
+        ),
+        /specified multiple times/,
+      );
+      assert.equal(svc.calls.length, 0);
+    }
+    // An integer ≥ 3 is a THIRD application: the CLI passes it through and the
+    // SERVICE refuses it with the closed-set reason (one authority). The fake
+    // mirrors the service's closed-set refusal for the pass-through contract.
+    {
+      let captured = null;
+      const svc = async (input) => {
+        captured = input;
+        if (Number.isInteger(input.attempt) && input.attempt >= 3) {
+          throw new Error("runDeliveryReverify: reverify_attempts_exhausted — a delivery carries at most two reverify chains");
+        }
+        return validServiceResult();
+      };
+      await assert.rejects(
+        () => runsDeliveryCommand(
+          ["reverify", "run_reverify1", "--reason", "tooling_invalid", "--attempt", "3"],
+          { runDir: dir },
+          { runDeliveryReverifyFn: svc },
+        ),
+        /reverify_attempts_exhausted/,
+        "the service's closed-set third-application refusal surfaces through the CLI",
+      );
+      assert.equal(captured.attempt, 3, "the integer reached the service");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FR07-CLI-21: a service result without a valid attempt fails closed (no output)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fr07-cli-21-"));
+  try {
+    for (const bad of [undefined, 3, 0, 1.5]) {
+      const svc = countingService(validServiceResult({ attempt: bad }));
+      await assert.rejects(
+        () => runsDeliveryCommand(
+          ["reverify", "run_reverify1", "--reason", "tooling_invalid", "--format", "json"],
+          { runDir: dir },
+          { runDeliveryReverifyFn: svc },
+        ),
+        /reverify bad attempt/,
+        `service attempt ${JSON.stringify(bad)} fails closed`,
+      );
+    }
   } finally {
     cleanupDir(dir);
   }

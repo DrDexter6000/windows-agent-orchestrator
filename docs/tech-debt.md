@@ -55,7 +55,7 @@
 | TD-168 | 测试冗余清扫主体已落地，35 个删并候选仍待人工逐条定谳 | 开放 | 择机：候选逐条定谳；cli.test.js 下次大改时顺带整理 | test/fixtures/mcpWireKeySets.js test/isolation-infra/reporter.test.js |
 | TD-169 | 认证通道零 case 已改显式失败（拒跑 exit 2）；selected/executed 等执行计数与 strict drill 覆盖不足可归 full 两项未做 | 开放 | 择机：阶段 2 处理 | scripts/run-reliability.mjs |
 | TD-170 | 全量测试各波的时长没有基线和漂移告警（上次靠人工比对才发现 390s 涨到 600s） | 开放 | 等样本：环境漂移再次污染验证结论时建波时长基线与告警 |  |
-| TD-171 | 环境性验证失败会烧掉仅有的一次 reverify 机会；deliveryVerification.test.js 单文件已提速（0d306e6），并发下约 246s→600s 的膨胀原因没查清 | 等待裁定 | Owner 定：环境性失败是否给第二次重验机会；膨胀原因下次复现时查 | test/delivery/deliveryVerification.test.js |
+| TD-171 | deliveryVerification.test.js 在并发下从约 246 秒涨到约 600 秒，原因没查清 | 开放 | 等样本：下次复现时查 | test/delivery/deliveryVerification.test.js |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 择机：触碰派发任务书或 workdir_escape 提示面时做分类提示与诊断标注 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 等样本：四项独立触发（接线 model、改文档、auditor 无 verdict、排查断链） | docs/troubleshooting.md |
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |

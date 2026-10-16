@@ -2558,6 +2558,10 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   // Closed-set reverify reason — the exact REVERIFY_REASONS SSOT the
   // application service validates against. Never an arbitrary text field.
   reason: z.enum(REVERIFY_REASONS),
+  // Optional explicit attempt: 1 = the first chain (default), 2 = the second
+  // and final chance (requires a complete first chain failed with an eligible
+  // environment/tooling code; the service refuses anything else).
+  attempt: z.number().int().min(1).max(2).optional(),
   // Bounded optional setup commands (bound by the exported SSOT constants).
   setupCommands: z.array(
     z.string().min(1).max(REVERIFY_SETUP_COMMAND_MAX_LENGTH),
@@ -2586,6 +2590,8 @@ const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
   status: z.enum(["ok", "pending"]),
   runId: z.string().min(1),
   deliveryCommit: COMMIT_HASH_SCHEMA.optional(),
+  // The attempt this call converged on (1 or 2; absent on the pending envelope).
+  attempt: z.number().int().min(1).max(2).optional(),
   state: z.enum(["created", "resumed", "idempotent"]).optional(),
   reason: z.enum(REVERIFY_REASONS).optional(),
   verificationStatus: z.enum(["passed", "failed", "unavailable"]).optional(),
@@ -2610,7 +2616,8 @@ const RUN_DELIVERY_REVERIFY_DESCRIPTION =
   "Re-verify the committed delivery artifact after the original verification outcome was " +
   "invalidated (closed-set reason): re-runs the persisted verification commands against " +
   "the SAME committed artifact, records one audited reverify chain, returns the closed-set " +
-  "outcome. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the " +
+  "outcome. attempt:2 requests the final re-verification after an eligible failed first chain. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the " +
   "run must belong to it. Reentrant — retries converge on the same commit, at most one " +
   "outcome. The decision stays the Lead's (run_delivery_decide).";
 
@@ -6881,7 +6888,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DELIVERY_REVERIFY_OUTPUT,
       annotations: RUN_DELIVERY_REVERIFY_ANNOTATIONS,
     },
-    async ({ runId, reason, setupCommands, timeoutMs, expectedWorkspaceRoot }) => {
+    async ({ runId, reason, attempt, setupCommands, timeoutMs, expectedWorkspaceRoot }) => {
       try {
         // Pre-validate runId before workspace binding or any service call.
         if (!isValidRunId(runId)) {
@@ -6899,6 +6906,7 @@ export function createWaoMcpServer({
           runId,
           runDir,
           reason,
+          ...(attempt !== undefined ? { attempt } : {}),
           ...(setupCommands !== undefined ? { setupCommands } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           authorizedWorkspaceRoot: target.proof.root,
@@ -6925,6 +6933,9 @@ export function createWaoMcpServer({
         // structuredContent; no command/path/stderr/event/credential is echoed.
         if (result.runId !== runId) throw new Error("runId mismatch");
         const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.deliveryCommit);
+        if (!Number.isInteger(result.attempt) || result.attempt < 1 || result.attempt > 2) {
+          throw new Error("bad reverify attempt");
+        }
         if (!["created", "resumed", "idempotent"].includes(result.state)) {
           throw new Error("bad reverify state");
         }
@@ -6942,6 +6953,7 @@ export function createWaoMcpServer({
         const payload = {
           runId,
           deliveryCommit,
+          attempt: result.attempt,
           state: result.state,
           reason: result.reason,
           verificationStatus: result.verificationStatus,

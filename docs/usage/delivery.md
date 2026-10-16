@@ -146,25 +146,27 @@ npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --fo
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
 
-`run_delivery_reverify` 是 Lead 声明的一次性审计式重验证：仅当原始终态 verification failed 且 Lead 已判断为闭集环境/工具原因（`tooling_invalid` / `environment_contaminated` / `dependency_setup_missing`）时，对同一个未变 delivery commit 重跑验证。它委托共享 application service `runDeliveryReverify.js`（CLI fallback 同一份），不调用 model、不 resume worker、不解析 transcript。原始 assertion 命令逐字节重跑且不可修改；Lead 只能追加新的 setup 命令。任何 reverify 都不自动 accept/reject——decision 仍只由 Lead 经 `run_delivery_decide` 作出。
+`run_delivery_reverify` 是 Lead 声明的审计式重验证：仅当原始终态 verification failed 且 Lead 已判断为闭集环境/工具原因（`tooling_invalid` / `environment_contaminated` / `dependency_setup_missing`）时，对同一个未变 delivery commit 重跑验证。它委托共享 application service `runDeliveryReverify.js`（CLI fallback 同一份），不调用 model、不 resume worker、不解析 transcript。原始 assertion 命令逐字节重跑且不可修改；Lead 只能追加新的 setup 命令。任何 reverify 都不自动 accept/reject——decision 仍只由 Lead 经 `run_delivery_decide` 作出。
 
-- 输入（strict）：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`reason` 是闭集环境/工具原因（枚举见生成层）；`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数，与 `verificationTimeoutMs` 共享闭界 `[1000,7200000]`，zod 边界与 service 常量同源）——省略时继承该 delivery ref 上持久化的执行预算，ref 无持久值才用 service 默认 300000；持久值缺失/损坏/越界 fail-closed 拒绝（不自动回退默认值）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
-- eligible failure：原 verification 的失败 code 必须是环境/工具闭集（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`）；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）不可 reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
-- 幂等/并发：reentrant + crash-safe——重试/并发收敛到首个调用者记录的 setup 与同一个 commit，最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_outcome`）。
-- 原 vs effective verification：原始终态 verification 保留不改写；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（reverify 结果，含 `reverify: {status, reason}` 链事实）。只有完整 reverify 链（requested + outcome）存在时 effective 才可取，非完整链（none/pending/malformed）不允许改变 effective 状态（fail-closed）。
-- 安全输出：不返回 commands/worktree 路径/stderr/reason/env/raw events（字段形状与闭集见生成层）。
+一个交付至多两条 reverify 链，WAO 绝不自动重试：第一条链（`attempt` 缺省或 1）之后，Lead 可以显式申请第二次（`attempt: 2`，理由同样取自 `REVERIFY_REASONS` 闭集、可与第一次不同，setup 可重新声明），这是最后一次机会；第三次申请被拒绝：CLI 返回闭集原因 `reverify_attempts_exhausted`，MCP 的 `attempt` 只接受 1 或 2，越界由 schema 直接拒绝。第二条链的全部资格条件（缺一不可）：第一条链完整（请求 + 结果）且结果为 failed、失败码在可重验闭集内（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`——`artifact_mutated` 与 unavailable 不可）；尚无 Lead 决定（写入申请时在锁内复查）；同一个不可变交付提交；原断言命令逐字节不变。
+
+- 输入（strict）：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`reason` 是闭集环境/工具原因（枚举见生成层）；`attempt` 可选（整数 1 或 2，缺省 1；2 = 第二次也是最后一次机会，资格如上）；`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数，与 `verificationTimeoutMs` 共享闭界 `[1000,7200000]`，zod 边界与 service 常量同源）——省略时继承该 delivery ref 上持久化的执行预算，ref 无持久值才用 service 默认 300000；持久值缺失/损坏/越界 fail-closed 拒绝（不自动回退默认值）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
+- eligible failure：第一次链的原 verification 失败 code 必须是环境/工具闭集（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`）；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）不可 reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
+- 幂等/并发：每条链各自 reentrant + crash-safe——重试/并发收敛到该 attempt 首调用者记录的 setup 与同一个 commit，每条链最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_passed` / `_failed` / `_unavailable`；结果只写进本次 attempt 自己的那条链；`attempt` 字段只在值为 2 时落盘，缺省视为 1，旧 transcript 读取逐字节不变）。不带 attempt 或 `attempt: 1` 的重复调用绝不跑第二次验证（在第一条链上收敛）。
+- 原 vs effective verification：原始终态 verification 保留不改写，第二条链也不改写第一条链的事实；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（最新一条 reverify 链的结果，含 `reverify: {status, reason}` 链事实）。消费方一律以最新一条链为准：只有最新链完整（requested + outcome）时 effective 才取其结果，非完整链（none/pending/malformed）不改变 effective 状态（fail-closed）。决定门禁取"决定之前最近一条完整链"的结果作支撑，accept 仍须 passed；决定之后追加的请求不能事后给决定撑腰。
+- 安全输出：不返回 commands/worktree 路径/stderr/reason/env/raw events（字段形状与闭集见生成层；settled 输出含本次收敛的 `attempt`）。
 
 Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery_review_bundle`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
 
-规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；而 reverify 是一次性的（最多一条 durable outcome），错走这一步会静默烧掉唯一机器杠杆。派发前用 `run_dispatch_contract_check` 的 advisory 探针预检引用路径；验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
+规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。派发前用 `run_dispatch_contract_check` 的 advisory 探针预检引用路径；验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
 
 当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全输出投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw 通道，也不提供 assertion-command override：
 
 ```bash
-npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
+npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attempt 2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
 ```
 
-`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 解析（继承 ref 持久预算，否则默认 300000），提供时必须是共享闭界 `[1000,7200000]` 内严格整数；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
+`--attempt` 缺省为 1；`--attempt 2` 显式申请第二次（也是最后一次）重验，资格判定在 service（闭集，不足即拒），整数 ≥3 到达 service 后按 `reverify_attempts_exhausted` 拒绝。`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 解析（继承 ref 持久预算，否则默认 300000），提供时必须是共享闭界 `[1000,7200000]` 内严格整数；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
 
 ## 验证失败采纳协议
 

@@ -199,19 +199,19 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.delivery_reverification_requested",
-    description: "Lead 复核请求（reverify 链首事件，恰一条）：载荷含 DeliveryRef、deliveryCommit（canonical 且等于内嵌不可变 commit）、reason ∈ REVERIFY_REASONS 闭集（tooling_invalid/environment_contaminated/dependency_setup_missing）、可选 setupCommands（≤32 条、各非空 ≤512 字符——唯一允许 Lead 增补的内容，原断言命令不可变）。重试/并发收敛到首请求者的 reason+setup（确定性验证）。",
+    description: "Lead 复核请求（reverify 链首事件）：载荷含 DeliveryRef、deliveryCommit（canonical 且等于内嵌不可变 commit）、reason ∈ REVERIFY_REASONS 闭集（tooling_invalid/environment_contaminated/dependency_setup_missing）、可选 setupCommands（≤32 条、各非空 ≤512 字符——唯一允许 Lead 增补的内容，原断言命令不可变）、可选 attempt（恰 1 或 2；缺省视为 1，首条请求不落该字段）。同一交付至多两条链：attempt 2 仅当第一条链完整且以可重验闭集失败码收场才可开启（不满足的形状判 malformed）；第三次申请被拒（CLI 返回闭集原因 reverify_attempts_exhausted；MCP 的 attempt 越界由 schema 拒绝），WAO 绝不自动重试。重试/并发收敛到该 attempt 首请求者的 reason+setup（确定性验证）。",
   },
   {
     type: "run.delivery_reverification_passed",
-    description: "reverify 链 outcome：passed（恰一条；与恰一条请求构成 complete 链后才改写 effective 验证状态，否则原验证结果不变）。",
+    description: "reverify 链 outcome：passed（每链恰一条，按 transcript 顺序绑定其所属请求；与请求构成 complete 链后才改写 effective 验证状态，否则原验证结果不变。消费方一律以最新一条链为准）。",
   },
   {
     type: "run.delivery_reverification_failed",
-    description: "reverify 链 outcome：failed（恰一条；failureCode ∈ REVERIFY_FAILURE_CODES 闭集：command_failed/command_timeout/execution_error/setup_failed/setup_timeout/setup_environment_error/artifact_mutated）。",
+    description: "reverify 链 outcome：failed（每链恰一条，按 transcript 顺序绑定其所属请求；failureCode ∈ REVERIFY_FAILURE_CODES 闭集：command_failed/command_timeout/execution_error/setup_failed/setup_timeout/setup_environment_error/artifact_mutated。除 artifact_mutated 外的六个码使失败的第一条链具备开第二条链（attempt 2）的资格）。",
   },
   {
     type: "run.delivery_reverification_unavailable",
-    description: "reverify 链 outcome：unavailable（恰一条；非空 unavailableReason）。",
+    description: "reverify 链 outcome：unavailable（每链恰一条，按 transcript 顺序绑定其所属请求；非空 unavailableReason；不可作为第二条链的资格来源）。",
   },
   {
     type: "run.process_missing_confirmed",

@@ -682,7 +682,7 @@ Output:
 
 ## run_delivery_reverify
 
-Re-verify the committed delivery artifact after the original verification outcome was invalidated (closed-set reason): re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Reentrant — retries converge on the same commit, at most one outcome. The decision stays the Lead's (run_delivery_decide).
+Re-verify the committed delivery artifact after the original verification outcome was invalidated (closed-set reason): re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. attempt:2 requests the final re-verification after an eligible failed first chain. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Reentrant — retries converge on the same commit, at most one outcome. The decision stays the Lead's (run_delivery_decide).
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -692,6 +692,7 @@ Input:
 | --- | --- | --- | --- |
 | runId | string | yes |  |
 | reason | string | yes | enum: tooling_invalid \| environment_contaminated \| dependency_setup_missing |
+| attempt | integer | no |  |
 | setupCommands | array<string> | no |  |
 | timeoutMs | integer | no |  |
 | expectedWorkspaceRoot | string | no |  |
@@ -703,6 +704,7 @@ Output:
 | status | string | yes | enum: ok \| pending |
 | runId | string | yes |  |
 | deliveryCommit | string | no |  |
+| attempt | integer | no |  |
 | state | string | no | enum: created \| resumed \| idempotent |
 | reason | string | no | enum: tooling_invalid \| environment_contaminated \| dependency_setup_missing |
 | verificationStatus | string | no | enum: passed \| failed \| unavailable |

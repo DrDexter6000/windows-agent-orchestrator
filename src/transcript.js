@@ -127,16 +127,18 @@ const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
 ]);
 const DELIVERY_VERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
 
-// M12-6 Package 3B: the reverify audit chain. A Lead may request ONE audited
+// M12-6 Package 3B: the reverify audit chain. A Lead may request an audited
 // re-verification of the SAME immutable DeliveryRef after an environment/
-// tooling-invalid verification failure. The reverify chain is a SEPARATE audit
-// dimension from the original verification outcome: its event types are
+// tooling-invalid verification failure — at most TWO chains (an explicit
+// attempt:2 may open only after a complete first chain failed with an
+// eligible code). The reverify chain is a SEPARATE audit dimension from the
+// original verification outcome: its event types are
 // `run.delivery_reverification_*` (distinct from `run.delivery_verification_*`),
 // so validateDeliveryFacts's "exactly one verification outcome" counting is
 // unaffected (zero drift for every existing caller). The effective verification
-// truth is the reverify outcome ONLY when exactly one bound requested + one
-// bound outcome exist; otherwise the original verification status stands, and a
-// malformed chain is surfaced (reverifyStatus) — never hidden.
+// truth is the LATEST chain's reverify outcome when that chain is complete;
+// otherwise the original verification status stands, and a malformed chain is
+// surfaced (reverifyStatus) — never hidden.
 const DELIVERY_REVERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_reverification_passed",
   "run.delivery_reverification_failed",
@@ -160,6 +162,29 @@ export const REVERIFY_FAILURE_CODES = Object.freeze([
   "setup_timeout",
   "setup_environment_error",
   "artifact_mutated",
+]);
+
+// The closed subset of REVERIFY_FAILURE_CODES that qualifies a FAILED reverify
+// chain outcome for a SECOND reverify attempt: the environment/tooling-invalid
+// codes. Content-integrity failures (artifact_mutated) and non-failed outcomes
+// (passed/unavailable) never qualify — re-running the SAME immutable artifact
+// cannot fix either. Defined + frozen here so the chain projector, the CAS
+// append gate, and the application service share ONE authority (no second
+// allowlist; the original-verification eligibility set is the same six codes).
+export const REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES = Object.freeze([
+  "command_failed",
+  "command_timeout",
+  "execution_error",
+  "setup_failed",
+  "setup_timeout",
+  "setup_environment_error",
+]);
+
+// The closed set of Lead-facing reverify-ATTEMPT rejection reasons. Currently
+// one member: the two-chain cap — a third reverify application is refused with
+// it (WAO never auto-retries; the second attempt is the last explicit chance).
+export const REVERIFY_ATTEMPT_REJECTION_REASONS = Object.freeze([
+  "reverify_attempts_exhausted",
 ]);
 
 // M12-6 Package 3B: the frozen closed set of Lead-declared reverify reasons. A
@@ -577,7 +602,10 @@ function _lastBoundStateChangeIs(events, runId, expected) {
  *     (a later real outcome stays a legal display fact). A pending accepted
  *     can never be legalized — not even by a later pass;
  *   - a NONPENDING decision needs an earlier matching original outcome or a
- *     valid (complete) reverify backing in its transcript prefix; an accepted
+ *     valid (complete) reverify backing in its transcript prefix — the
+ *     NEAREST complete reverify chain before the decision is the backing
+ *     result (with at most two chains, a later pending chain never supports
+ *     an earlier decision and an earlier chain is superseded); an accepted
  *     must be passed. Legacy tolerance ONLY: a missing or "pending"
  *     acceptance stamp on such a backed nonpending snapshot.
  *
@@ -653,9 +681,17 @@ function _validateBoundDecisionEvent(decision, {
     }
   }
   // A request appended later cannot retroactively authorize this snapshot.
+  // With at most two chains, the backing reverify result is the NEAREST
+  // COMPLETE chain in the decision's prefix — a later (possibly still-pending)
+  // chain never supports an earlier decision, and an earlier chain's result is
+  // superseded by the nearest complete one.
   const priorReverify = projectReverifyChain(prefix, runId, createdRef);
-  if (!backed && priorReverify.status === "complete"
-    && priorReverify.effectiveStatus === claimed) backed = true;
+  if (!backed) {
+    const nearestComplete = [...priorReverify.links]
+      .reverse()
+      .find((link) => link.status === "complete");
+    if (nearestComplete && nearestComplete.effectiveStatus === claimed) backed = true;
+  }
   if (!backed) {
     return "decision event verification status has no earlier matching original outcome or valid reverify backing";
   }
@@ -687,6 +723,13 @@ function _isValidReverifyRequestedEvent(event, runId, createdRef) {
   if (!isCanonicalCommitId(event.deliveryCommit)) return false;
   if (event.deliveryCommit !== event.delivery.deliveryCommit) return false;
   if (!REVERIFY_REASONS.includes(event.reason)) return false;
+  // `attempt` is optional and defaults to 1 (a legacy request carries no
+  // attempt field). When PRESENT it must be exactly the integer 1 or 2 — any
+  // other value (3+, 0, fractional, non-number) is a durable conflict.
+  if (event.attempt !== undefined
+    && (!Number.isInteger(event.attempt) || event.attempt < 1 || event.attempt > 2)) {
+    return false;
+  }
   // setupCommands is optional (a reverify may re-run the original assertions
   // with no new setup); when present it must be a bounded list of non-empty
   // bounded strings — the same contract the appender enforces.
@@ -752,30 +795,117 @@ function _isValidReverifyOutcomeEvent(event, runId, createdRef) {
 }
 
 /**
+ * Pair the BOUND reverify events, in transcript order, into per-attempt links.
+ *
+ * Each requested event opens one link (its `attempt`, defaulting to 1); the
+ * NEXT bound outcome event closes it. The pairing rules are the durable chain
+ * shape — any violation returns `{ok:false}` (malformed, fail-closed):
+ *   - an outcome with no open request (orphan, or outcome before its request);
+ *   - a second request while the previous link is still open;
+ *   - a second attempt-1 request;
+ *   - an attempt-2 request without EXACTLY one prior COMPLETE link that FAILED
+ *     with a code in REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES;
+ *   - more than two links.
+ *
+ * Returns `{ok:true, links}` where each link is
+ * `{attempt, requestedEvent, outcomeEvent|null, reason, status, effectiveStatus}`
+ * (status "pending" while the link's outcome is not yet durable, "complete"
+ * once it is). `{ok:false}` otherwise. Pure; never reads Git.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {object} createdRef
+ * @returns {{ok:true, links: object[]}|{ok:false, reqBound: object[], outBound: object[]}}
+ */
+export function pairReverifyLinks(events, runId, createdRef) {
+  const requested = events.filter((e) => e && e.type === "run.delivery_reverification_requested");
+  const outcomes = events.filter((e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type));
+  const reqBound = requested.filter((e) => _isValidReverifyRequestedEvent(e, runId, createdRef));
+  const outBound = outcomes.filter((e) => _isValidReverifyOutcomeEvent(e, runId, createdRef));
+  // Any reverify event that is not fully bound + shape-valid is a durable
+  // conflict → malformed. The conflict is VISIBLE through the status, never
+  // filtered away by an envelope pre-filter.
+  if (requested.length !== reqBound.length || outcomes.length !== outBound.length) {
+    return { ok: false, reqBound, outBound };
+  }
+  const reqSet = new Set(reqBound);
+  const outSet = new Set(outBound);
+  const links = [];
+  let open = null;
+  for (const event of events) {
+    if (reqSet.has(event)) {
+      const attempt = event.attempt ?? 1;
+      if (open !== null) return { ok: false, reqBound, outBound };
+      if (attempt === 1) {
+        // A second attempt-1 request (after any prior link) is a conflict.
+        if (links.length !== 0) return { ok: false, reqBound, outBound };
+      } else {
+        // attempt === 2: requires exactly one prior COMPLETE link that FAILED
+        // with an eligible code — anything else is an unqualified second try.
+        if (links.length !== 1
+          || links[0].status !== "complete"
+          || links[0].effectiveStatus !== "failed"
+          || !REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES.includes(
+            links[0].outcomeEvent?.delivery?.verification?.failureCode,
+          )) {
+          return { ok: false, reqBound, outBound };
+        }
+      }
+      open = {
+        attempt,
+        requestedEvent: event,
+        outcomeEvent: null,
+        reason: event.reason ?? null,
+        status: "pending",
+        effectiveStatus: null,
+      };
+    } else if (outSet.has(event)) {
+      if (open === null) return { ok: false, reqBound, outBound };
+      open.outcomeEvent = event;
+      open.status = "complete";
+      open.effectiveStatus = _reverificationOutcomeFromType(event.type);
+      links.push(open);
+      open = null;
+    }
+  }
+  if (links.length > 2) return { ok: false, reqBound, outBound };
+  return { ok: true, links: open ? [...links, open] : links };
+}
+
+/**
  * M12-6 Package 3B (3B1 fail-closed): project the reverify audit chain for a
  * run/delivery.
  *
- * Strict closed set: "none" | "pending" | "complete" | "malformed". EVERY
- * durable reverify event counts — never pre-filtered by envelope runId first.
- * An event is part of the chain only when it is envelope-bound (runId === runId)
- * AND identity-bound (embedded DeliveryRef matches createdRef: runId/baseCommit/
- * deliveryCommit) AND top-level-commit-bound (canonical top-level deliveryCommit
- * equal to the embedded immutable commit) AND — for a requested event —
- * shape-valid (closed-set reason, bounded setupCommands), and — for an outcome
- * event — verification-contract-valid (type agrees EXACTLY with the embedded
- * delivery.verification.status; verifiedCommit canonical + equal to the
- * immutable deliveryCommit; closed-set failure/unavailable shape). A reverify
- * event in a FOREIGN envelope, or bound but identity/shape/contract-mismatched,
- * is a durable conflict → "malformed" (visible, never filtered away, never
- * echoed as a clean chain).
+ * Strict closed set: "none" | "pending" | "complete" | "malformed". The
+ * projection describes the LATEST chain (consumers take the latest link as the
+ * current reverify truth); `links` lists every chain in order as
+ * `{attempt, status, reason, effectiveStatus}` and `attempt` is the latest
+ * chain's attempt number. A delivery carries AT MOST two chains: the first
+ * request defaults to attempt 1 (a legacy request has no attempt field and
+ * projects identically), and an attempt-2 chain may open only after a complete
+ * first chain that failed with an eligible code. EVERY durable reverify event
+ * counts — never pre-filtered by envelope runId first. An event is part of the
+ * chain only when it is envelope-bound (runId === runId) AND identity-bound
+ * (embedded DeliveryRef matches createdRef: runId/baseCommit/deliveryCommit)
+ * AND top-level-commit-bound (canonical top-level deliveryCommit equal to the
+ * embedded immutable commit) AND — for a requested event — shape-valid
+ * (closed-set reason, attempt ∈ {1,2} when present, bounded setupCommands),
+ * and — for an outcome event — verification-contract-valid (type agrees
+ * EXACTLY with the embedded delivery.verification.status; verifiedCommit
+ * canonical + equal to the immutable deliveryCommit; closed-set failure/
+ * unavailable shape). A reverify event in a FOREIGN envelope, or bound but
+ * identity/shape/contract-mismatched, is a durable conflict → "malformed"
+ * (visible, never filtered away, never echoed as a clean chain).
  *
  *   none      — no valid requested, no valid outcome.
- *   pending   — exactly one valid requested, zero valid outcomes (crash-resumable).
- *   complete  — exactly one valid requested + exactly one valid outcome.
- *   malformed — any other combination (duplicate requested/outcome, orphan
- *               outcome, a foreign-envelope event, or an identity/shape/contract-
- *               mismatched event). effectiveStatus is null → the decision gate
- *               and the effective-pass projection stay at the ORIGINAL status.
+ *   pending   — the latest chain has a valid request and no outcome yet.
+ *   complete  — the latest chain has exactly one valid request + one outcome.
+ *   malformed — any other shape (duplicate requested/outcome, orphan outcome,
+ *               order violation, an attempt-2 request without a qualifying
+ *               failed first chain, more than two chains, a foreign-envelope
+ *               event, or an identity/shape/contract-mismatched event).
+ *               effectiveStatus is null → the decision gate and the
+ *               effective-pass projection stay at the ORIGINAL status.
  *
  * Pure transcript projection: never reads Git, never verifies, never decides.
  * The application layer adds workspace + eligibility proof before exposing a
@@ -784,7 +914,8 @@ function _isValidReverifyOutcomeEvent(event, runId, createdRef) {
  * @param {object[]} events
  * @param {string} runId
  * @param {object} createdRef
- * @returns {{status, requestedEvent, outcomeEvent, reason, effectiveStatus}}
+ * @returns {{status, requestedEvent, outcomeEvent, reason, effectiveStatus,
+ *   attempt, links}}
  */
 export function projectReverifyChain(events, runId, createdRef) {
   const empty = {
@@ -793,57 +924,42 @@ export function projectReverifyChain(events, runId, createdRef) {
     outcomeEvent: null,
     reason: null,
     effectiveStatus: null,
+    attempt: null,
+    links: [],
   };
   if (!Array.isArray(events) || !_sameDeliveryIdentity(createdRef, createdRef, runId)) {
     return empty;
   }
-  // M12-6 Package 3B1: consider ALL durable reverify events — a foreign-envelope
-  // event (e.g. a concatenated transcript) is a conflict, never silently ignored.
-  const requested = events.filter((e) => e && e.type === "run.delivery_reverification_requested");
-  const outcomes = events.filter((e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type));
-  const reqBound = requested.filter((e) => _isValidReverifyRequestedEvent(e, runId, createdRef));
-  const outBound = outcomes.filter((e) => _isValidReverifyOutcomeEvent(e, runId, createdRef));
-  // Any reverify event that is not fully bound + shape-valid is a durable
-  // conflict → malformed. The conflict is VISIBLE through the status, never
-  // filtered away by an envelope pre-filter.
-  const hasConflict = requested.length !== reqBound.length || outcomes.length !== outBound.length;
-  if (hasConflict) {
+  const pairing = pairReverifyLinks(events, runId, createdRef);
+  if (!pairing.ok) {
     return {
       status: "malformed",
-      requestedEvent: reqBound[0] ?? null,
-      outcomeEvent: outBound[0] ?? null,
-      reason: reqBound[0]?.reason ?? null,
+      requestedEvent: pairing.reqBound[0] ?? null,
+      outcomeEvent: pairing.outBound[0] ?? null,
+      reason: pairing.reqBound[0]?.reason ?? null,
       effectiveStatus: null,
+      attempt: null,
+      links: [],
     };
   }
-  if (reqBound.length === 0 && outBound.length === 0) {
-    // No conflict (above) and no bound events at all → a clean "none" chain.
+  if (pairing.links.length === 0) {
+    // No conflict and no bound events at all → a clean "none" chain.
     return empty;
   }
-  if (reqBound.length === 1 && outBound.length === 0) {
-    return {
-      status: "pending",
-      requestedEvent: reqBound[0],
-      outcomeEvent: null,
-      reason: reqBound[0].reason ?? null,
-      effectiveStatus: null,
-    };
-  }
-  if (reqBound.length === 1 && outBound.length === 1) {
-    return {
-      status: "complete",
-      requestedEvent: reqBound[0],
-      outcomeEvent: outBound[0],
-      reason: reqBound[0].reason ?? null,
-      effectiveStatus: _reverificationOutcomeFromType(outBound[0].type),
-    };
-  }
+  const latest = pairing.links[pairing.links.length - 1];
   return {
-    status: "malformed",
-    requestedEvent: reqBound[0] ?? null,
-    outcomeEvent: outBound[0] ?? null,
-    reason: reqBound[0]?.reason ?? null,
-    effectiveStatus: null,
+    status: latest.status,
+    requestedEvent: latest.requestedEvent,
+    outcomeEvent: latest.outcomeEvent,
+    reason: latest.reason,
+    effectiveStatus: latest.effectiveStatus,
+    attempt: latest.attempt,
+    links: pairing.links.map((link) => ({
+      attempt: link.attempt,
+      status: link.status,
+      reason: link.reason,
+      effectiveStatus: link.effectiveStatus,
+    })),
   };
 }
 
@@ -1513,32 +1629,41 @@ export class JsonlTranscript {
    * reverify REQUEST.
    *
    * Under the cross-process append lock: re-read events and project the FULL
-   * durable reverify chain (all envelopes, identity- and shape-validated). If a
-   * valid requested event already exists for this runId, yield {requested:false}
-   * with the RECORDED reason + setupCommands — so a retry / concurrent competitor
-   * converges on the FIRST caller's declared setup (deterministic verification).
-   * Any durable conflict — a foreign-envelope reverify event, an identity or
-   * shape mismatch, an existing outcome without its request, or duplicate
-   * events — is a malformed chain → throw (never append a second request, never
+   * durable reverify chain (all envelopes, identity- and shape-validated,
+   * paired into per-attempt links). If a valid requested event already exists
+   * for THIS call's attempt, yield {requested:false} with that link's RECORDED
+   * reason + setupCommands — so a retry / concurrent competitor converges on
+   * the FIRST caller's declared setup (deterministic verification; an
+   * attempt-1 call never touches an attempt-2 chain and vice versa). An
+   * attempt-2 request may be appended ONLY when exactly one prior COMPLETE
+   * link failed with a code in REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES — the
+   * in-lock re-check of the chain shape the projector enforces, so the CAS can
+   * never append a request that would immediately project malformed. Any other
+   * durable conflict — a foreign-envelope reverify event, an identity or shape
+   * mismatch, an existing outcome without its request, or duplicate events —
+   * is a malformed chain → throw (never append a second request, never
    * coalesce, never reuse garbage). Otherwise validate the inputs (canonical
    * delivery identity, closed-set reason, bounded setup commands) and append
-   * exactly one event.
+   * exactly one event (the attempt field is written ONLY for the value 2; a
+   * first request stays byte-identical to the legacy shape).
    *
    * Narrow primitive: it does NOT verify, decide, or check eligibility beyond
-   * delivery identity + input shape. Eligibility (eligible original failure
-   * code, no existing decision) is proved by the application service BEFORE this
-   * call; verification runs OUTSIDE this lock (contract #5). Never echoes the
-   * recorded command text back in a way that leaks — the returned setupCommands
-   * are consumed by the in-process service only (the safe result / MCP output
-   * never surfaces them).
+   * delivery identity + input shape + chain shape. Eligibility (eligible
+   * original failure code, no existing decision) is proved by the application
+   * service BEFORE this call; verification runs OUTSIDE this lock (contract
+   * #5). Never echoes the recorded command text back in a way that leaks — the
+   * returned setupCommands are consumed by the in-process service only (the
+   * safe result / MCP output never surfaces them).
    *
-   * @param {{delivery: object, reason: string, setupCommands?: string[]}} input
+   * @param {{delivery: object, reason: string, setupCommands?: string[],
+   *   attempt?: 1|2}} input — attempt omitted/null → 1
    * @returns {Promise<{requested:true, ref:object, reason:string, setupCommands:string[]}
    *           |{requested:false, ref:object, reason:string, setupCommands:string[]}>}
    * @throws {Error} if delivery identity is invalid, reason is not closed-set,
-   *   setupCommands is malformed, or the chain is already malformed.
+   *   setupCommands is malformed, attempt is not 1|2, the chain is already
+   *   malformed, or an attempt-2 append lacks a qualifying failed first chain.
    */
-  async tryAppendReverifyRequested({ delivery, reason, setupCommands = [] } = {}) {
+  async tryAppendReverifyRequested({ delivery, reason, setupCommands = [], attempt } = {}) {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
@@ -1557,20 +1682,24 @@ export class JsonlTranscript {
       if (!REVERIFY_REASONS.includes(reason)) {
         throw new Error("tryAppendReverifyRequested: reason must be a closed-set reverify reason");
       }
+      const normalizedAttempt = attempt === undefined || attempt === null ? 1 : attempt;
+      if (!Number.isInteger(normalizedAttempt) || normalizedAttempt < 1 || normalizedAttempt > 2) {
+        throw new Error("tryAppendReverifyRequested: attempt must be the integer 1 or 2");
+      }
       const setup = _normalizeReverifySetup(setupCommands);
 
-      // M12-6 Package 3B1: the durable chain — every reverify event in the file,
-      // validated for envelope/identity/shape — is the single authority. A
-      // malformed chain can never be extended; a valid one yields the RECORDED
-      // request (one chain maximum, no duplicate events).
-      const chain = projectReverifyChain(events, this.context.runId, delivery);
-      if (chain.status === "malformed") {
+      // The durable chain — every reverify event in the file, validated for
+      // envelope/identity/shape and paired into per-attempt links — is the
+      // single authority. A malformed chain can never be extended; a valid
+      // link for this attempt yields the RECORDED request (deterministic
+      // convergence), never the caller's.
+      const pairing = pairReverifyLinks(events, this.context.runId, delivery);
+      if (!pairing.ok) {
         throw new Error("tryAppendReverifyRequested: reverify chain is malformed (foreign envelope, identity, or shape conflict)");
       }
-      if (chain.status !== "none") {
-        // pending/complete: a valid requested event exists → yield the RECORDED
-        // reason + setup (deterministic convergence), never the caller's.
-        const rec = chain.requestedEvent;
+      const target = pairing.links.find((link) => link.attempt === normalizedAttempt) ?? null;
+      if (target) {
+        const rec = target.requestedEvent;
         return {
           requested: false,
           ref: rec.delivery,
@@ -1578,12 +1707,38 @@ export class JsonlTranscript {
           setupCommands: Array.isArray(rec.setupCommands) ? [...rec.setupCommands] : [],
         };
       }
-      // chain.status === "none": no valid requested event → append exactly one.
+      // Once the Lead decided, no new reverify chain may open. The service checks
+      // this before verifying; this lock-scoped recheck closes the window between
+      // that check and the append.
+      const decided = events.some((e) => e
+        && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected")
+        && e.runId === this.context.runId);
+      if (decided) {
+        throw new Error("tryAppendReverifyRequested: a Lead decision is already recorded; no new reverify chain may open");
+      }
+      // No link for this attempt yet. Attempt 1 may always open the FIRST
+      // chain (links empty); attempt 2 may open ONLY on a qualifying failed
+      // first chain — the projector would judge any other shape malformed, so
+      // the CAS must refuse to write it.
+      if (normalizedAttempt === 2) {
+        const first = pairing.links[0] ?? null;
+        if (!first
+          || first.status !== "complete"
+          || first.effectiveStatus !== "failed"
+          || !REVERIFY_SECOND_ATTEMPT_ELIGIBLE_CODES.includes(
+            first.outcomeEvent?.delivery?.verification?.failureCode,
+          )) {
+          throw new Error("tryAppendReverifyRequested: a second attempt requires a complete first reverify chain that failed with an eligible environment/tooling code");
+        }
+      } else if (pairing.links.length !== 0) {
+        throw new Error("tryAppendReverifyRequested: an attempt-1 request already has its chain");
+      }
 
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
       const ts = new Date().toISOString();
       const ctx = { runId: this.context.runId, agentId: this.context.agentId };
       const payload = { delivery, deliveryCommit: delivery.deliveryCommit, reason };
+      if (normalizedAttempt === 2) payload.attempt = 2;
       if (setup.length > 0) payload.setupCommands = setup;
       const event = {
         ...this.redact(payload),
@@ -1605,14 +1760,14 @@ export class JsonlTranscript {
    * reverify OUTCOME.
    *
    * Under the lock: project the FULL durable reverify chain (all envelopes,
-   * identity- and shape-validated). Requires exactly one valid
-   * run.delivery_reverification_requested for this runId, then appends exactly
-   * one outcome event (passed/failed/unavailable). Idempotent: an existing
-   * outcome wins — a retry resumes after a crash between request and outcome
-   * without recording a second outcome. Any durable conflict — a foreign-envelope
-   * reverify event, an identity/shape mismatch, an orphan outcome, or duplicates
-   * — is a malformed chain → throw (never append onto a conflict, never extend a
-   * garbage request).
+   * identity- and shape-validated, paired into per-attempt links). The outcome
+   * closes the LATEST link still awaiting one — with at most two chains, an
+   * attempt-2 outcome can only follow the attempt-2 request. Idempotent: an
+   * existing outcome for that link wins — a retry resumes after a crash
+   * between request and outcome without recording a second outcome. Any
+   * durable conflict — a foreign-envelope reverify event, an identity/shape
+   * mismatch, an orphan outcome, or duplicates — is a malformed chain → throw
+   * (never append onto a conflict, never extend a garbage request).
    *
    * Narrow primitive: the outcome is supplied by the caller (the reverify
    * service), which ran verifyDelivery OUTSIDE this lock against the exact same
@@ -1624,7 +1779,7 @@ export class JsonlTranscript {
    * @throws {Error} if delivery identity is invalid, outcome is not closed-set,
    *   there is no exactly-one valid request, or the chain is malformed.
    */
-  async tryAppendReverifyOutcome({ delivery, outcome } = {}) {
+  async tryAppendReverifyOutcome({ delivery, outcome, attempt } = {}) {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
@@ -1642,24 +1797,35 @@ export class JsonlTranscript {
       if (!DELIVERY_REVERIFICATION_OUTCOMES.has(outcome)) {
         throw new Error("tryAppendReverifyOutcome: outcome must be passed|failed|unavailable");
       }
+      const normalizedAttempt = attempt === undefined || attempt === null ? 1 : attempt;
+      if (!Number.isInteger(normalizedAttempt) || normalizedAttempt < 1 || normalizedAttempt > 2) {
+        throw new Error("tryAppendReverifyOutcome: attempt must be the integer 1 or 2");
+      }
 
-      // M12-6 Package 3B1: the durable chain — every reverify event in the file,
-      // validated for envelope/identity/shape — is the single authority.
-      // pending → append exactly one outcome; complete → yield the durable
-      // winner; none (orphan outcome) / malformed → throw.
-      const chain = projectReverifyChain(events, this.context.runId, delivery);
-      if (chain.status === "malformed") {
+      // The durable chain — every reverify event in the file, validated for
+      // envelope/identity/shape and paired — is the single authority. The
+      // outcome closes the link of the attempt that ran this verification, never
+      // another attempt's: a late attempt-1 verification whose chain is already
+      // complete yields the durable winner and can never close the second chain.
+      // Target pending (and latest) → append exactly one outcome; target complete
+      // → yield; no request for this attempt / malformed → throw.
+      const pairing = pairReverifyLinks(events, this.context.runId, delivery);
+      if (!pairing.ok) {
         throw new Error("tryAppendReverifyOutcome: reverify chain is malformed (foreign envelope, identity, top-level commit, or shape conflict)");
       }
-      if (chain.status === "none") {
-        throw new Error("tryAppendReverifyOutcome: expected exactly one delivery_reverification_requested event");
+      const target = pairing.links.find((link) => link.attempt === normalizedAttempt) ?? null;
+      if (!target) {
+        throw new Error("tryAppendReverifyOutcome: expected exactly one delivery_reverification_requested event for this attempt");
       }
-      if (chain.status === "complete") {
+      if (target.status === "complete") {
         return {
           recorded: false,
-          ref: chain.outcomeEvent.delivery,
-          outcome: chain.effectiveStatus,
+          ref: target.outcomeEvent.delivery,
+          outcome: target.effectiveStatus,
         };
+      }
+      if (pairing.links[pairing.links.length - 1] !== target) {
+        throw new Error("tryAppendReverifyOutcome: this attempt's open chain is not the latest chain");
       }
 
       const type = outcome === "passed"
