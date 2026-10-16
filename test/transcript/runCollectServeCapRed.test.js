@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM = join(REPO_ROOT, "scripts", "wao-node.cjs");
@@ -76,7 +77,7 @@ async function runCollectOverStdio({ runDir, runId, serveUrl }) {
   const registryPath = join(resolve(runDir, ".."), "agents.json");
   const handle = await buildStdioClient({ registryPath, runDir });
   try {
-    return await handle.client.callTool({ name: "run_collect", arguments: { runId } });
+    return await handle.client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
   } finally {
     await handle.client.close();
     await handle.transport.close();
@@ -89,7 +90,7 @@ function makeServeFixture(dir, runId) {
   writeFileSync(join(runDir, `${runId}.jsonl`), [
     JSON.stringify({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
     JSON.stringify({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_cap", serveUrl: "http://127.0.0.1:0", runId, agentId: "w" }),
-    JSON.stringify({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+    JSON.stringify({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
     JSON.stringify({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }),
   ].map((l) => l + "\n").join(""), "utf8");
   writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "opencode-serve", cwd: dir } } }), "utf8");
@@ -102,6 +103,19 @@ function countAudits(transcriptPath) {
       .filter((l) => l.includes('"messages.collected"')).length;
   } catch { return 0; }
 }
+
+// Shared per-call target for run_collect (the real service verifies
+// ownership; synthetic transcripts carry this root as run.started cwd).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m114-cap-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
 
 // ---------------------------------------------------------------------
 // CAP-9999: 9999 serve items → complete success, assistant message present.

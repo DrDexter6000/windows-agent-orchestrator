@@ -32,7 +32,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 **关键区分**：
 - WAO skill 本身**装在 runtime 目录，不装在被开发项目里**。装到项目目录会污染项目（owner 明确要求不污染）。
 - `.wao/` 建在**被开发的目标项目里**（因为它记的是那个项目的开发状态）。
-- worker 的 `cwd` 是**动态的**——CLI 派发时由 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时 workspace 来自 host 授权绑定（`--workspace-root` / `roots/list` / `workspace_select`）。agents.json 只配 backend/model/认证，不写死 cwd。
+- worker 的 `cwd` 是**动态的**——CLI 派发时由 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时由本次调用自带 `expectedWorkspaceRoot`（本项目 Git 顶层）决定，绑定只定只读工具的缺省范围。agents.json 只配 backend/model/认证，不写死 cwd。
 
 **安装形态与"我实际用的是哪份 WAO"**：执行权威=**唯一一份物理检出**。技能发现路径与全局入口应以目录链接（junction）指向它——链接同体，不存在同步义务；任一入口若是物理拷贝而非链接，它就是漂移源（`wao doctor` 如实报告），收敛方式=改为链接或删除，**不维护拷贝同步**。installer 根是**没有开发仓的机器**上的安装形态，不与开发仓在同一台机器上并存。`wao doctor` 的 `invocation_method` 检查项**只报事实不裁决**：PATH 上有无全局 `wao`、版本是否漂移、skills 槽位是链接还是拷贝（链接显示目标）、当前检出根在哪；链接目标恰为当前检出时附报分支与未提交改动数（advisory，不阻断）。多份并存时收敛为一份属 Owner 机器裁定；判断"刚才那条命令用了哪份"以 doctor 报告的检出根 + 实际调用形态为准。为什么这样定，见决定 0049。
 
@@ -159,7 +159,7 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 - 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤）。指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。**"这个 host 上注册了没有"用 `mcp status` 回答**（不带 `--host` 列出全部表内宿主；只读探测宿主自己的配置）；各宿主注册方式一览见 `docs/usage/host.md` 的项目级 Workspace Activation 一节。在册宿主及其验证态以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威——`hostVerified` 逐宿主如实标注（当前六个表内宿主均已真机验证加载，证据锚点在该文件头），验证态≠自动绑定能力（只有 codex 有 autoBind；zcode 走插件系统，kimi-code / opencode / claude-desktop 是把片段并入配置文件）；无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage/host.md` + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
 - **CLI `--cwd` 指定派发目标项目**（run 族：worker 的工作目录，须是已存在目录；workspace 观察/过滤面随之）。
-- **MCP 派发的 workspace 来自 host 授权的绑定**：`--workspace-root` / `roots/list` / `workspace_select` 协商出 host 批准的目录，与 CLI `--cwd` 是两回事，别混。
+- **MCP 派发的 workspace 来自本次调用**：会动工作区的工具必传 `expectedWorkspaceRoot`（本项目 Git 顶层）；`--workspace-root` / `roots/list` / `workspace_select` 只定只读工具的缺省范围，与 CLI `--cwd` 是两回事，别混。
 - 完整的 host 配置示例见 `docs/usage/host.md`。
 
 **未验证宿主的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收真机验证过加载的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。

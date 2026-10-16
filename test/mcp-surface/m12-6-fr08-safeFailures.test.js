@@ -544,6 +544,7 @@ test("FR-08-D4: injected missing readFailureReason → fixed opaque error (absen
 test("FR-08-C1 attachment: run_delivery_decide verification rejection is ALREADY structured (FR-07 closed)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-fr08-c1-"));
   try {
+    makeGitRepo(dir);
     // The durable gate throws the dedicated policy error type; the MCP adapter
     // must map it to a structured outcome with the closed-set rejectionReason —
     // never an MCP error, never raw gate text.
@@ -560,7 +561,7 @@ test("FR-08-C1 attachment: run_delivery_decide verification rejection is ALREADY
     try {
       const res = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: "run_x", decision: "accepted", reason: "looks good" },
+        arguments: { runId: "run_x", decision: "accepted", reason: "looks good", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, "policy rejection is NOT an MCP error");
       const parsed = res.structuredContent;
@@ -607,8 +608,8 @@ test("FR-08-C2 attachment: run_delivery packaging failure is ALREADY structured 
 
 test("FR-08-C3 attachment: unexpected internal exceptions stay fixed opaque MCP errors (no leak)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-fr08-c3-"));
-    makeGitRepo(dir);
   try {
+    makeGitRepo(dir);
     const secret = "AKIAIOSFODNN7EXAMPLE"; // AWS docs example, not a live key
     const server = createWaoMcpServer({
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
@@ -630,7 +631,7 @@ test("FR-08-C3 attachment: unexpected internal exceptions stay fixed opaque MCP 
 
       const decideRes = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: "run_x", decision: "accepted", reason: "r" },
+        arguments: { runId: "run_x", decision: "accepted", reason: "r", expectedWorkspaceRoot: dir },
       });
       const decideDump = JSON.stringify(decideRes);
       assert.ok(decideDump.includes("run_delivery_decide failed"), "fixed opaque text");

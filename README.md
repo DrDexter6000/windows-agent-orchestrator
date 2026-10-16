@@ -155,8 +155,9 @@ npm run cli -- registry validate --registry config/agents.json
 #    host (Claude Desktop / Codex / OpenCode) at this stdio entry; host-specific
 #    absolute command/args examples live in docs/usage/host.md:
 npm run mcp -- --registry config/agents.json --run-dir runs
-#    The host authorizes the workspace (roots/list / workspace_select);
-#    --cwd below only steers CLI-side workspace observation.
+#    Workspace-touching calls name their own target (expectedWorkspaceRoot);
+#    roots/list / workspace_select scope read-only tools only, and --cwd below
+#    steers CLI-side workspace observation.
 
 # 4. First read-only canary via the CLI fallback (one retained worker)
 #    Replace <agentId> with one worker id from `registry list` in step 2 — the

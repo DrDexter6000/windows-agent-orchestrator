@@ -110,7 +110,7 @@ test("M12-1S2-M1: run_delivery_repackage registered; total tools = 23; destructi
       assert.equal(t.annotations.readOnlyHint, false);
       assert.equal(t.annotations.openWorldHint, false);
       // Strict input: only runId + allowedPaths.
-      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["allowedPaths", "runId"]);
+      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["allowedPaths", "expectedWorkspaceRoot", "runId"]);
       assert.equal(t.inputSchema.additionalProperties, false);
       assert.equal(t.inputSchema.properties.allowedPaths.maxItems, 256);
       assert.equal(t.inputSchema.properties.allowedPaths.items.maxLength, 512);
@@ -172,7 +172,7 @@ test("M12-1S2-M3: unbound workspace → service never called, fixed error", asyn
     const { server, calls } = makeServer({ dir, serviceResult: goodServiceResult("run_x"), workspaceRoot: undefined });
     const client = await buildInMemoryClient(server);
     try {
-      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_x", allowedPaths: ["src"] } });
+      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_x", allowedPaths: ["src"], expectedWorkspaceRoot: dir } });
       assert.equal(r.isError, true);
       assert.equal(calls.length, 0, "service never called when unbound");
     } finally {
@@ -195,7 +195,7 @@ test("M12-1S2-M4: bound success → bounded structured output; authorizedWorkspa
     const { server, calls } = makeServer({ dir, serviceResult: goodServiceResult("run_m4") });
     const client = await buildInMemoryClient(server);
     try {
-      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_m4", allowedPaths: ["src", "root.txt"] } });
+      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_m4", allowedPaths: ["src", "root.txt"], expectedWorkspaceRoot: dir } });
       assert.equal(r.isError, undefined, "success");
       const sc = r.structuredContent;
       // Bounded field set — no worktreePath / commands / stderr / reason leak.
@@ -244,7 +244,7 @@ test("M12-1S2-M5: service throw → fixed text, no structuredContent, no leak", 
     const { server } = makeServer({ dir, serviceThrow: "boom: C:\\Users\\owner\\secret leak <script>" });
     const client = await buildInMemoryClient(server);
     try {
-      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_m5", allowedPaths: ["src"] } });
+      const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId: "run_m5", allowedPaths: ["src"], expectedWorkspaceRoot: dir } });
       assert.equal(r.isError, true);
       assert.equal(r.structuredContent, undefined, "no structuredContent on error");
       const text = r.content[0].text;
@@ -281,7 +281,7 @@ test("M12-1S2-M6: malformed service output collapses to fixed error (no leak)", 
       const { server } = makeServer({ dir, serviceResult: result });
       const client = await buildInMemoryClient(server);
       try {
-        const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"] } });
+        const r = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"], expectedWorkspaceRoot: dir } });
         assert.equal(r.isError, true, `${label} → error`);
         assert.equal(r.structuredContent, undefined, `${label} → no structuredContent`);
         assert.equal(r.content[0].text, "run_delivery_repackage failed", `${label} → fixed text`);
@@ -317,7 +317,7 @@ test("TD-226-MCP-1: every closed-set code maps to a structured outcome, not the 
       try {
         const r = await client.callTool({
           name: "run_delivery_repackage",
-          arguments: { runId: "run_td226", allowedPaths: ["src"] },
+          arguments: { runId: "run_td226", allowedPaths: ["src"], expectedWorkspaceRoot: dir },
         });
         assert.equal(r.isError, undefined, `${code} → normal structured outcome, not MCP error`);
         const sc = r.structuredContent;
@@ -362,7 +362,7 @@ test("TD-226-MCP-2: transport classification is TYPE-gated — plain Errors and 
       try {
         const r = await client.callTool({
           name: "run_delivery_repackage",
-          arguments: { runId: "run_td226b", allowedPaths: ["src"] },
+          arguments: { runId: "run_td226b", allowedPaths: ["src"], expectedWorkspaceRoot: dir },
         });
         assert.equal(r.isError, true, "plain Error with an old gate sentence stays the fixed error");
         assert.equal(r.structuredContent, undefined, "no structured rejection for a plain Error");
@@ -387,7 +387,7 @@ test("TD-226-MCP-2: transport classification is TYPE-gated — plain Errors and 
       try {
         const r = await client.callTool({
           name: "run_delivery_repackage",
-          arguments: { runId: "run_td226c", allowedPaths: ["src"] },
+          arguments: { runId: "run_td226c", allowedPaths: ["src"], expectedWorkspaceRoot: dir },
         });
         assert.equal(r.isError, true, "unknown code fails closed");
         assert.equal(r.structuredContent, undefined, "no structured rejection for an unknown code");
@@ -429,7 +429,7 @@ test("TD-231 MCP end-to-end: backend_failed staged worktree bridges to rejection
     const server = createWaoMcpServer({ registryPath: join(dir, "agents.json"), runDir, workspaceRoot: dir });
     const client = await buildInMemoryClient(server);
     try {
-      const result = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"] } });
+      const result = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"], expectedWorkspaceRoot: dir } });
       assert.equal(result.isError, undefined);
       assert.deepEqual(result.structuredContent, { status: "ok", runId, rejectionReason: "worktree_unusable" });
       const after = readFileSync(filePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));

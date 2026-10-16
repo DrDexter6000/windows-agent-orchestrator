@@ -407,8 +407,8 @@ test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winne
     const client = await buildClient(server);
     try {
       const [r1, r2] = await Promise.all([
-        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", ...stopProof(dir, "run_conc") } }),
-        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", ...stopProof(dir, "run_conc") } }),
+        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", expectedWorkspaceRoot: dir, ...stopProof(dir, "run_conc") } }),
+        client.callTool({ name: "run_stop", arguments: { runId: "run_conc", expectedWorkspaceRoot: dir, ...stopProof(dir, "run_conc") } }),
       ]);
       const p1 = JSON.parse(r1.content[0].text);
       const p2 = JSON.parse(r2.content[0].text);
@@ -673,7 +673,7 @@ test("0069-M1: MCP run_stop —— 两项必填由 schema 拦；观察过时返�
 
       const stale = await client.callTool({
         name: "run_stop",
-        arguments: { runId: "run_0069_m1", reason: "the worker has been silent for too long", observedSeq },
+        arguments: { runId: "run_0069_m1", reason: "the worker has been silent for too long", observedSeq, expectedWorkspaceRoot: dir },
       });
       assert.ok(stale.isError);
       assert.match(stale.content[0].text, /^run_stop rejected, no side effect: the worker produced events after your observation more than 2 minutes ago\. Re-read run_activity/);
@@ -688,7 +688,7 @@ test("0069-M1: MCP run_stop —— 两项必填由 schema 拦；观察过时返�
       clockSkewMs = 0;
       const ok = await client.callTool({
         name: "run_stop",
-        arguments: { runId: "run_0069_m1", reason: "owner cancelled the task; npm test no longer needed", observedSeq: newest.seq },
+        arguments: { runId: "run_0069_m1", reason: "owner cancelled the task; npm test no longer needed", observedSeq: newest.seq, expectedWorkspaceRoot: dir },
       });
       assert.equal(ok.isError, undefined);
       assert.equal(ok.structuredContent.terminalAccepted, true);

@@ -39,6 +39,7 @@ import {
   normalizeInventoryResult,
 } from "./registryInventory.js";
 import { createVerificationGate } from "../verificationGate.js";
+import { projectBucketLabel } from "../projectIdentity.js";
 
 /**
  * @typedef {Object} PreflightWorkspace
@@ -309,6 +310,10 @@ export async function aggregateLeadPreflight({
       gitHead: workspaceBinding.gitHead ?? null,
       dirty: workspaceBinding.dirty ?? null,
       unboundReason: null,
+      // 非绝对、确定性的项目标签（与写侧桶 slug 同派生式，来自
+      // projectIdentity SSOT）——在"preflight 不输出绝对路径"合同内让 Lead
+      // 看出本次结果按哪个项目取的范围。根不可识别 → null（绝不编造）。
+      projectBucket: projectBucketLabel(workspaceBinding.root),
     };
     checkStatus.workspace = "observed";
     if (workspace.dirty) {
@@ -330,6 +335,8 @@ export async function aggregateLeadPreflight({
       gitHead: null,
       dirty: null,
       unboundReason,
+      // 未绑定无可标识项目——null（不编造标签）。
+      projectBucket: null,
     };
     checkStatus.workspace = "observed";
     observations.push("workspace not bound — call workspace_select or lead_preflight with workspaceRoot");

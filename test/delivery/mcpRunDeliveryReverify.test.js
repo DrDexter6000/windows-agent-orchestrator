@@ -35,6 +35,19 @@ import { verifyDelivery } from "../../src/deliveryVerification.js";
 import { readTranscript } from "../../src/transcript.js";
 import { proveWorkspace } from "../../src/application/workspaceBinding.js";
 
+// Shared per-call target for run_delivery_reverify MCP tests (the injected
+// service ignores ownership; only a proven canonical Git root matters).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-rv-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
+
 // ===== real-git helpers (mirror runDeliveryReverify.test.js) =====
 
 function git(args, cwd) {
@@ -182,7 +195,7 @@ test("3B2a-RV-01: exactly one run_delivery_reverify tool, strict bounded input +
 
       // Strict input: only runId + reason + bounded setupCommands/timeoutMs.
       const props = t.inputSchema.properties;
-      assert.deepEqual(Object.keys(props).sort(), ["reason", "runId", "setupCommands", "timeoutMs"]);
+      assert.deepEqual(Object.keys(props).sort(), ["expectedWorkspaceRoot", "reason", "runId", "setupCommands", "timeoutMs"]);
       assert.equal(t.inputSchema.additionalProperties, false, "strict object");
       assert.equal(props.runId.type, "string");
       assert.deepEqual(props.reason.enum, REVERIFY_REASONS,
@@ -218,7 +231,7 @@ test("3B2a-RV-02: success — service called once with server-owned runDir + bou
     try {
       const res = await client.callTool({
         name: "run_delivery_reverify",
-        arguments: { runId: "run_x", reason: "tooling_invalid", setupCommands: ["npm ci"], timeoutMs: 5000 },
+        arguments: { runId: "run_x", reason: "tooling_invalid", setupCommands: ["npm ci"], timeoutMs: 5000, expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, "success is not an error");
       assert.equal(calls, 1);
@@ -257,7 +270,7 @@ test("3B2a-RV-03: strict output — sensitive internals stripped, never echoed",
   try {
     const res = await client.callTool({
       name: "run_delivery_reverify",
-      arguments: { runId: "run_x", reason: "environment_contaminated" },
+      arguments: { runId: "run_x", reason: "environment_contaminated", expectedWorkspaceRoot: TARGET },
     });
     const dumped = JSON.stringify(res);
     assert.ok(!dumped.includes("worktreePath"), "no worktreePath");
@@ -320,7 +333,7 @@ test("3B2a-RV-05: service throw → fixed safe error, no leak", async () => {
     try {
       const res = await client.callTool({
         name: "run_delivery_reverify",
-        arguments: { runId: "run_x", reason: "tooling_invalid" },
+        arguments: { runId: "run_x", reason: "tooling_invalid", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, true);
       const dumped = JSON.stringify(res);
@@ -355,7 +368,7 @@ test("3B2a-RV-06: invalid service values rejected — output rejection policy", 
       try {
         const res = await client.callTool({
           name: "run_delivery_reverify",
-          arguments: { runId: "run_x", reason: "tooling_invalid" },
+          arguments: { runId: "run_x", reason: "tooling_invalid", expectedWorkspaceRoot: dir },
         });
         assert.equal(res.isError, true, `${label}: invalid service value must collapse to fixed error`);
         const dumped = JSON.stringify(res);
@@ -375,14 +388,15 @@ test("3B2a-RV-07: workspace-bound — no binding → fixed error, service not ca
   const server = serverWith(async () => { calls += 1; return sensitiveReverifyResult(); });
   const client = await buildInMemoryClient(server);
   try {
+    // No target on the call → fixed refusal BEFORE the service.
     const res = await client.callTool({
       name: "run_delivery_reverify",
       arguments: { runId: "run_x", reason: "tooling_invalid" },
     });
-    assert.equal(res.isError, true, "no binding → error");
-    assert.equal(calls, 0, "service never called without workspace binding");
+    assert.equal(res.isError, true, "no target → error");
+    assert.equal(calls, 0, "service never called without a target");
     const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-    assert.ok(/workspace|bound/i.test(text), "error mentions workspace not bound");
+    assert.ok(/expectedWorkspaceRoot/.test(text), "refusal names the parameter");
   } finally {
     await client.close();
     await server.close();
@@ -487,7 +501,7 @@ test("3B2a-RV-10 (real service + real git): reverify over MCP records one audite
     try {
       const res = await client.callTool({
         name: "run_delivery_reverify",
-        arguments: { runId: RUN_ID, reason: "tooling_invalid", setupCommands: ["setup-prepare"], timeoutMs: 30000 },
+        arguments: { runId: RUN_ID, reason: "tooling_invalid", setupCommands: ["setup-prepare"], timeoutMs: 30000, expectedWorkspaceRoot: repo },
       });
       assert.equal(res.isError, undefined, "reverify succeeds");
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
@@ -520,7 +534,7 @@ test("3B2a-RV-10 (real service + real git): reverify over MCP records one audite
       // The Lead may then EXPLICITLY accept the effective-passed delivery.
       const dc = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: RUN_ID, decision: "accepted", reason: "reverify passed" },
+        arguments: { runId: RUN_ID, decision: "accepted", reason: "reverify passed", expectedWorkspaceRoot: repo },
       });
       assert.equal(dc.isError, undefined, "explicit accept after passed reverify is not an error");
       const dcParsed = JSON.parse(dc.content.find((b) => b.type === "text").text);

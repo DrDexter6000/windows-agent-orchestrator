@@ -128,8 +128,8 @@ npm run cli -- registry validate --registry config/agents.json
 #    Codex / OpenCode）指向这个 stdio 入口；各 host 的绝对命令/args 示例在
 #    docs/usage/host.md：
 npm run mcp -- --registry config/agents.json --run-dir runs
-#    workspace 由 host 授权（roots/list / workspace_select）；
-#    下方的 --cwd 只影响 CLI 侧的 workspace 观察。
+#    会动工作区的调用自带目标（expectedWorkspaceRoot）；roots/list /
+#    workspace_select 只定只读工具范围。下方的 --cwd 只影响 CLI 侧观察。
 
 # 4. 用 CLI fallback 跑第一次只读 canary（一个保留的 worker）
 #    把 <agentId> 换成第 2 步 `registry list` 里的任意 worker id——

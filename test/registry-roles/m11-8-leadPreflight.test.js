@@ -345,7 +345,7 @@ test("M11-8-ADV3: advisory warning does not block independent run_dispatch", asy
       const pf = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
       const parsed = JSON.parse(pf.content.find((b) => b.type === "text").text);
       // Even if there are warnings, run_dispatch must still be callable independently.
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do", expectedWorkspaceRoot: ws } });
       assert.equal(dispatchCalls, 1, "run_dispatch still callable despite preflight warnings");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(ws); }

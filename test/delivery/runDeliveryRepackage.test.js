@@ -1620,16 +1620,57 @@ test("TD-226-CODES: every REPACKAGE_REJECTION_CODES member is constructibly trig
     } finally { await cleanupDir(repo); await cleanupDir(runDir); }
   }
 
-  // 3. workspace_not_authorized — run belongs to another workspace.
+  // 3. workspace_not_authorized — run belongs to another workspace. The refusal
+  // must not write an audit fact into that other project's transcript.
   {
     const { repo, runDir } = await setupDisallowedScenario();
     const otherRepo = await makeRepo("td226-other-");
     try {
+      const tpath = join(runDir, `${RUN_ID}.jsonl`);
+      const before = readFileSync(tpath, "utf8");
       await assert.rejects(() => runDeliveryRepackage({
         runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: otherRepo,
         resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
         computeInventoryFn: computeCandidateInventory,
       }), isCode("workspace_not_authorized"));
+      assert.equal(readFileSync(tpath, "utf8"), before,
+        "no run.delivery_repackage_rejected audit is written into another project's transcript");
+      const after = await readEvents(runDir);
+      assert.equal(after.filter((e) => e.type === "run.delivery_repackage_rejected").length, 0,
+        "zero audit events for a workspace-ownership refusal");
+    } finally { await cleanupDir(repo); await cleanupDir(runDir); await cleanupDir(otherRepo); }
+  }
+
+  // 3b. Another project's run whose durable chain is ALSO inconsistent: the
+  // chain checks run before the phase proofs, so ownership must be proved
+  // first — the refusal is workspace_not_authorized and nothing is written.
+  for (const shape of ["orphan outcome", "two created"]) {
+    const { repo, worktreePath, baseCommit, runDir } = await setupDisallowedScenario();
+    const otherRepo = await makeRepo("td226-other-chain-");
+    try {
+      const ref = {
+        schemaVersion: 1, kind: "git_commit", runId: RUN_ID,
+        baseCommit, deliveryCommit: "d".repeat(40), branch: `wao/${RUN_ID}`,
+        worktreePath, changedFiles: ["src/a.js"],
+        verification: { status: "failed", commands: ["npm test"], verifiedCommit: "d".repeat(40), results: [] },
+        acceptance: { status: "pending", reviewerType: "lead_agent" },
+        integration: { status: "pending", targetCommit: null },
+      };
+      const tpath = join(runDir, `${RUN_ID}.jsonl`);
+      const t = new JsonlTranscript(tpath, { runId: RUN_ID, agentId: AGENT_ID });
+      if (shape === "orphan outcome") {
+        await t.append("run.delivery_verification_failed", { delivery: ref });
+      } else {
+        await t.append("run.delivery_created", { delivery: ref });
+        await t.append("run.delivery_created", { delivery: ref });
+      }
+      const before = readFileSync(tpath, "utf8");
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: otherRepo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }), isCode("workspace_not_authorized"), shape);
+      assert.equal(readFileSync(tpath, "utf8"), before, `${shape}: transcript byte-identical`);
     } finally { await cleanupDir(repo); await cleanupDir(runDir); await cleanupDir(otherRepo); }
   }
 

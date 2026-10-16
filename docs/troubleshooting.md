@@ -220,7 +220,7 @@ serve 后台进程不一定。
 - **边界（须知）**：不传 `--cwd` 时 worker **静默落在派发进程 cwd**——`.` 恒存在，不会早拒绝。各通道差别：
   - 后台 delivery 不受影响：CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接抛 `DeliveryCwdRequiredError` 早拒绝。
   - 前台 delivery 不设此门：其 worktree 源仓来自 registry cwd，`.` 时会从操作者当前 shell 所在仓切 worktree——同样必须显式 `--cwd` 指向目标仓。
-  - MCP 通道安全：host 绑定 workspace root 为 cwd；resume 同样安全。
+  - MCP 通道安全：会动工作区的调用必传 `expectedWorkspaceRoot`，worker 落在该目标；resume 同样安全。
   - 受影响的是 CLI 前台/后台/workflow 快起路径——这些路径的用法一律**显式带 `--cwd`**。
 - **提示**：`wao doctor` 对 cwd 为 `.` 的 worker 会出一条 INFO 落点提示（advisory，不计 DEGRADED）。
 - **修复**：

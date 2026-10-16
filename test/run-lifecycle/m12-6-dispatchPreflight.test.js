@@ -151,17 +151,27 @@ test("M12-6-FR03-A: omitted expectations preserve behavior and attach additive p
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({
+      // The workspace target now comes from THIS call (required); head/dirty
+      // stay optional assertions. Without the target the dispatch is refused
+      // before any side effect.
+      const refused = await client.callTool({
         name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it" },
       });
-      assert.equal(fake.count, 1, "dispatch happened exactly once (behavior preserved)");
+      assert.equal(refused.isError, true, "missing target refused");
+      assert.equal(fake.count, 0, "dispatcher never called without a target");
+      assert.match(textOf(refused), /expectedWorkspaceRoot/);
+      const res = await client.callTool({
+        name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: repo },
+      });
+      assert.equal(fake.count, 1, "dispatch happened exactly once with the target");
       const parsed = parseText(res);
       assert.equal(parsed.accepted, true);
-      // Additive proof; no expectations supplied → all match booleans null.
+      // Additive proof; head/dirty omitted → null; the root expectation is
+      // structurally satisfied (the target IS the requested root).
       assert.equal(parsed.workspaceProof.expectedGitHeadMatch, null);
       assert.equal(parsed.workspaceProof.expectedDirtyMatch, null);
-      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, null);
-      assert.equal(parsed.workspaceProof.source, "server_config");
+      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, true);
+      assert.equal(parsed.workspaceProof.source, "call_target");
       assert.equal(parsed.workspaceProof.gitHead, gitHead(repo));
       assert.equal(parsed.workspaceProof.dirty, false, "isolated workspace is clean");
       // The proof must NOT echo the absolute workspace root.
@@ -187,7 +197,7 @@ test("M12-6-FR03-B: matching expectedGitHead succeeds, expectedGitHeadMatch true
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: gitHead(repo) },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: gitHead(repo), expectedWorkspaceRoot: repo },
       });
       assert.equal(fake.count, 1, "dispatch once when head matches");
       const parsed = parseText(res);
@@ -222,7 +232,7 @@ test("M12-6-FR03-C: stale expectedGitHead (workspace moved) refused before dispa
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: staleHead },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: staleHead, expectedWorkspaceRoot: repo },
       });
       assert.equal(fake.count, 0, "dispatcher never called for stale head");
       assert.equal(res.isError, true, "mismatch is a tool error");
@@ -253,7 +263,7 @@ test("M12-6-FR03-D: matching expectedDirty true/false succeeds", async () => {
     try {
       const res = await clientClean.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false, expectedWorkspaceRoot: repo },
       });
       assert.equal(fakeClean.count, 1, "clean + expectedDirty:false dispatches");
       const parsed = parseText(res);
@@ -274,7 +284,7 @@ test("M12-6-FR03-D: matching expectedDirty true/false succeeds", async () => {
     try {
       const res = await clientDirty.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: true },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: true, expectedWorkspaceRoot: repo },
       });
       assert.equal(fakeDirty.count, 1, "dirty + expectedDirty:true dispatches");
       const parsed = parseText(res);
@@ -302,7 +312,7 @@ test("M12-6-FR03-E: mismatching expectedDirty refused before dispatch, count 0",
       // Clean repo but the Lead expects dirty — refuse.
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: true },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: true, expectedWorkspaceRoot: repo },
       });
       assert.equal(fake.count, 0, "dispatcher never called for dirty mismatch");
       assert.equal(res.isError, true);
@@ -356,17 +366,17 @@ test("M12-6-FR03-G: mismatching expectedWorkspaceRoot refused before dispatch, c
     });
     const client = await buildInMemoryClient(server);
     try {
-      // An absolute path that does not exist canonicalizes to nothing → mismatch.
+      // A nonexistent path cannot be PROVEN as the target → fixed refusal
+      // (the root is the dispatch target now, not an assertion).
       const wrongRoot = join(repo, "does-not-exist-m12-6");
       const res = await client.callTool({
         name: "run_dispatch",
         arguments: { agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: wrongRoot },
       });
-      assert.equal(fake.count, 0, "dispatcher never called for root mismatch");
+      assert.equal(fake.count, 0, "dispatcher never called for an unprovable target");
       assert.equal(res.isError, true);
       const text = textOf(res);
-      assert.match(text, /workspace_expectation_mismatch/);
-      assert.match(text, /workspaceRoot/);
+      assert.match(text, /workspace target invalid/, "fixed target-invalid refusal");
       // The offending path is never echoed.
       assert.ok(!text.includes(wrongRoot), "wrong root not echoed");
       assert.ok(!JSON.stringify(res).includes(wrongRoot.replace(/\\/g, "/")), "no root leak anywhere");
@@ -428,7 +438,7 @@ test("M12-6-FR03-I: 64-hex expectedGitHead accepted by schema, mismatches 40-hex
       const sha256Head = "a".repeat(64);
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: sha256Head },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: sha256Head, expectedWorkspaceRoot: repo },
       });
       assert.equal(fake.count, 0, "dispatcher never called for head mismatch");
       assert.equal(res.isError, true);
@@ -465,8 +475,8 @@ test("M12-6-FR03-J: malicious expectedWorkspaceRoot and prompt never leak in mis
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(EVIL_ROOT), "malicious root not echoed");
       assert.ok(!dumped.includes("alert(1)"), "script payload not echoed");
-      assert.ok(!dumped.includes(EVIL_PROMPT), "prompt not echoed in mismatch response");
-      assert.match(textOf(res), /workspace_expectation_mismatch/);
+      assert.ok(!dumped.includes(EVIL_PROMPT), "prompt not echoed in refusal response");
+      assert.match(textOf(res), /workspace target invalid/, "fixed target-invalid refusal");
     } finally {
       await client.close();
       await server.close();
@@ -542,7 +552,7 @@ test("M12-6-FR04-MCP: delivery with absolute verification path → closed-set in
       const res = await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "coder_low", prompt: "do it",
+          agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: repo,
           delivery: {
             mode: "git_commit_v1",
             allowedPaths: ["src"],
@@ -585,7 +595,7 @@ test("M12-6-FR04-MCP: portable verification commands (URL/relative) dispatch nor
       const res = await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "coder_low", prompt: "do it",
+          agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: repo,
           delivery: {
             mode: "git_commit_v1",
             allowedPaths: ["src"],
@@ -624,14 +634,14 @@ test("M12-6 P1-A: run_dispatch threads the server-proven frozenGitHead to the di
     try {
       // (1) Without an explicit freeze: the server STILL threads its proven head
       // internally (TOCTOU protection is on by default for MCP dispatch).
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "a" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "a", expectedWorkspaceRoot: repo } });
       assert.equal(fake.captured.frozenGitHead, gitHead(repo), "frozenGitHead threaded even without an explicit freeze");
       assert.equal(fake.captured.expectedGitHead, undefined, "expectedGitHead is a boundary-only model input");
 
       // (2) With a matching explicit freeze: the threaded frozen head equals the
       // proven head, and expectedGitHead is still NOT forwarded past the boundary.
       const head = gitHead(repo);
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "b", expectedGitHead: head } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "b", expectedGitHead: head, expectedWorkspaceRoot: repo } });
       assert.equal(fake.captured.frozenGitHead, head, "frozenGitHead = proven binding head");
       assert.equal(fake.captured.expectedGitHead, undefined, "expectedGitHead not forwarded past the boundary");
       assert.equal(fake.count, 2, "both dispatches reached the dispatcher");

@@ -107,7 +107,7 @@ test("M11-6-SMOKE: unbound → workspace_select → status → dispatch succeeds
       // 7. run_dispatch succeeds with the selected workspace as cwd.
       res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "fake_worker", prompt: "write the smoke output file" },
+        arguments: { agentId: "fake_worker", prompt: "write the smoke output file", expectedWorkspaceRoot: workspaceDir },
       });
       parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.accepted, true, "dispatch accepted");

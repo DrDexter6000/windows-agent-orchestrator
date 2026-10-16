@@ -44,7 +44,7 @@ test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、stru
       const client = await buildClient(server);
       const res = await client.callTool({
         name: "run_delivery_repackage",
-        arguments: { runId: "run_202610061200000000000000", allowedPaths: ["src"] },
+        arguments: { runId: "run_202610061200000000000000", allowedPaths: ["src"], expectedWorkspaceRoot: dir },
       });
       const text = res.content?.find((b) => b.type === "text")?.text ?? "";
       assert.notEqual(res.isError, true, "pending 不是错误");
@@ -100,7 +100,7 @@ test("TD-215 ②: 窗内完成 → 既有契约原样（payload 字段齐全）"
       const client = await buildClient(server);
       const res = await client.callTool({
         name: "run_delivery_repackage",
-        arguments: { runId: "run_202610061200000000000000", allowedPaths: ["src"] },
+        arguments: { runId: "run_202610061200000000000000", allowedPaths: ["src"], expectedWorkspaceRoot: dir },
       });
       assert.notEqual(res.isError, true);
       const sc = res.structuredContent ?? {};

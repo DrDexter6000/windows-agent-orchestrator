@@ -277,3 +277,28 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
 export function verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, requestedRunId) {
   return createRunWorkspaceVerifier(authorizedWorkspaceRoot)(events, requestedRunId);
 }
+
+/**
+ * Fail-closed ownership gate for the MCP write surfaces that must name WHY
+ * they refused (run_collect / run_delivery_decide). Same verifier and same
+ * refusals as verifyRunWorkspaceOwnership; the only difference is the closed
+ * error code `workspace_not_authorized` on the thrown Error, which the MCP
+ * adapter maps to a fixed refusal text. The message carries no path, cwd, or
+ * dynamic value.
+ *
+ * @param {object[]} events
+ * @param {string} authorizedWorkspaceRoot — per-call proved target root
+ * @param {string} [requestedRunId]
+ * @returns {{authorized: true, ownershipCwd: string}}
+ * @throws {Error} code="workspace_not_authorized" when ownership is missing,
+ *   malformed, ambiguous, cross-run, conflicting, unprovable, or mismatched
+ */
+export function assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, requestedRunId) {
+  try {
+    return verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, requestedRunId);
+  } catch {
+    const err = new Error("run workspace ownership does not authorize this project");
+    err.code = "workspace_not_authorized";
+    throw err;
+  }
+}

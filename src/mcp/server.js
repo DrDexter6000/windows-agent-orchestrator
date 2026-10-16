@@ -287,6 +287,9 @@ import {
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/workspaceExpectation.js";
+// 非绝对项目标签（只读范围显示——lead_preflight workspace.projectBucket
+// 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。
+import { projectBucketLabel } from "../projectIdentity.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP, WORKSPACE_UNBOUND_REASONS } from "../application/leadPreflight.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
@@ -436,7 +439,7 @@ const AGENT_ENTRY = z.object({
   cwd: z.string(),
   // M11-11C: configured expert-session-reuse mode, nullable. Projects which
   // experts retain a provider-native conversation across turns for the current
-  // Lead session + bound workspace. Closed set (today: "lead_workspace").
+  // Lead session + the call's target project. Closed set (today: "lead_workspace").
   sessionReuse: z.enum(["lead_workspace"]).nullable(),
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
   missingCredentialEnvNames: z.array(z.string()).max(32),
@@ -715,9 +718,9 @@ const DISPATCH_CORRECTABLE_BACKEND_UNSUPPORTED_TEXT =
   "certification.md). Dispatch a correction-capable seat or drop correctable.";
 
 // M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
-// expectation mismatches the freshly-proven binding at dispatch time. The ONLY
+// expectation mismatches the freshly-proven call target at dispatch time. The ONLY
 // dynamic content is a closed-set category label (gitHead | dirty | workspaceRoot)
-// — never the expected value, the bound absolute path, the head hash, or any
+// — never the expected value, the target's absolute path, the head hash, or any
 // arbitrary input. The literal token workspace_expectation_mismatch lets a Lead
 // recognize this category distinctly from not-bound / credential / busy /
 // generic dispatch failures, and the guidance is fixed.
@@ -733,11 +736,13 @@ function dispatchExpectationMismatchText(field) {
     : field === "dirty"
       ? "dirty counts untracked files too — re-check with git status --porcelain before freezing expectedDirty."
       : "";
+  // expectedWorkspaceRoot is now the dispatch TARGET (required), so the
+  // old "or omit the expectation" guidance is gone — omitting the target is a
+  // refusal, and only the optional head/dirty assertions may be dropped.
   return "run_dispatch refused: workspace_expectation_mismatch (" + label + "). " +
-    "The bound workspace, its HEAD, or its dirty state differs from the frozen " +
-    "expectation, or the expectation was not canonical. Re-read workspace_status " +
-    "for the current workspace, head, and dirty state, then retry with current " +
-    "values or omit the expectation." + (hint ? " " + hint : "");
+    "The target's HEAD or dirty state differs from the frozen expectation, or the " +
+    "expectation was not canonical. Re-read the target's current head and dirty state " +
+    "(workspace_status or git), then retry with current values." + (hint ? " " + hint : "");
 }
 
 // run_dispatch input: agentId + prompt required; optional delivery block.
@@ -826,9 +831,15 @@ const RUN_DISPATCH_INPUT = z.object({
   // shared expectation SSOT matches them by PREFIX against the proven head, a
   // deliberately weakened assertion vs the full 40/64-hex exact form; regex
   // serializes to JSON Schema and rides BOTH dispatch tools' inputSchema);
-  // expectedDirty is a boolean; expectedWorkspaceRoot is a bounded absolute path
-  // (absoluteness is enforced in the handler via the shared expectation SSOT).
-  // Omitted expectations are not checked (existing behavior preserved).
+  // expectedDirty is a boolean. expectedWorkspaceRoot is the dispatch
+  // TARGET — required by the run_dispatch HANDLER (not the schema: this schema
+  // is shared with run_dispatch_contract_check, where the field is optional,
+  // and a schema-level requirement would narrow both) — proved via proveWorkspace;
+  // the session/MCP-root/server-config binding is NOT consulted for the
+  // dispatch target. Absence or an unprovable value refuses with a fixed text
+  // before any side effect. run_dispatch_contract_check takes the field
+  // optionally: given, it checks against that proved project and reports
+  // workspaceScope; omitted, it follows the session binding.
   expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
@@ -915,8 +926,12 @@ const RUN_DISPATCH_INPUT = z.object({
 // absolute workspace path, prompt, argv, PID, credentials, or provider payload.
 // Always present on the success path (the binding is resolved before the
 // dispatcher runs); the match booleans are null for any omitted expectation.
+// source gains the closed-set member "call_target" — the dispatch
+// target proved from THIS call's expectedWorkspaceRoot argument. It is never
+// reported as one of the binding sources (the dispatch path no longer reads
+// the binding at all).
 const WORKSPACE_PROOF = z.object({
-  source: z.enum(["lead_session", "server_config", "mcp_root"]),
+  source: z.enum(["call_target", "lead_session", "server_config", "mcp_root"]),
   gitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
   dirty: z.boolean(),
   expectedGitHeadMatch: z.boolean().nullable(),
@@ -954,7 +969,10 @@ const RUN_DISPATCH_DESCRIPTION =
   // 必须保留：agentId（M12-10-G 钉）；continuable/correctable 语义与
   // never-infers 边界。参数表由 strict inputSchema 表达。
   "Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns " +
-  "runner/transcript and returns a runId. continuable roots a lineage run_continue can " +
+  "runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git " +
+  "worktree top-level) is REQUIRED and is this call's target — the session binding is " +
+  "not consulted; expectedGitHead/expectedDirty are optional assertions against it. " +
+  "continuable roots a lineage run_continue can " +
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
   "keeps one live process so run_correct can queue an in-flight turn. WAO never infers " +
   "continuation, correction delivery, scope, retry, or acceptance.";
@@ -1011,6 +1029,14 @@ const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
   observations: z.array(z.string()).max(CONTRACT_CHECK_SECTIONS.length),
   profile: CONTRACT_SELECTED_PROFILE.nullable(),
   availableProfiles: z.array(CONTRACT_AVAILABLE_PROFILE).max(EXECUTION_PROFILE_IDS.length).optional(),
+  // Which scope this check ran against: call_target when the call supplied
+  // expectedWorkspaceRoot (proved and used for the path probes), otherwise the
+  // resolved session binding. source + non-absolute project label only — never
+  // an absolute path (same contract as runs_list scope).
+  workspaceScope: z.object({
+    source: z.enum(["call_target", "lead_session", "server_config", "mcp_root"]).nullable(),
+    projectBucket: z.string().nullable(),
+  }).strict(),
 }).strict();
 
 const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
@@ -1023,9 +1049,11 @@ const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
 const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
   // 必须保留：ADVISORY、NOT a gate——contractValid 从不自动拦截。
   "Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract " +
-  "(inline verification or a frozen execution profile) and observes workspace binding + " +
-  "worker presence into one bounded closed-set result. NOT a gate — contractValid never " +
-  "auto-blocks; run_dispatch stays authoritative.";
+  "(inline verification or a frozen execution profile) and observes the workspace scope + " +
+  "worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot " +
+  "(absolute Git worktree top-level) checks against that proved project instead of the " +
+  "session binding; workspaceScope in the result names the scope actually used. NOT a gate " +
+  "— contractValid never auto-blocks; run_dispatch stays authoritative.";
 
 // ===== run_consult (M13-r2 multi-seat read-only council consult) constants =====
 //
@@ -1050,7 +1078,8 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
 const RUN_CONSULT_ERROR_TEXT = "run_consult failed before any seat was dispatched";
 const RUN_CONSULT_READ_ERROR_TEXT =
   "run_consult read failed: no readable consult record with this consultId — records live in " +
-  "<bound workspace>/.wao/runs/consults; check workspace_status and the id";
+  "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace); " +
+  "check workspace_status and the id";
 const RUN_CONSULT_RENDER_ERROR_TEXT =
   "run_consult read failed: the consult record was found, but rendering it failed — " +
   "read the seats directly: run_collect with each seat runId (runs_list shows them)";
@@ -1091,6 +1120,10 @@ const RUN_CONSULT_INPUT = z.object({
   // 仅 read 模式合法——create 模式携带任一 → 固定文案拒绝（派发计数为 0）。
   seat: z.string().min(1).max(128).optional(),
   page: z.number().int().min(1).optional(),
+  // 本次调用的目标（proveWorkspace 证明；handler 必传固定文案拒绝）。create
+  // 模式：席位 cwd、组记录、转录归属全取它；read 模式：可选，给了就按它定位
+  // 组记录，不给才跟随会话绑定缺省范围。create 字段与 consultId 互斥照旧。
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
   waitMs: z.number().int().min(RUN_CONSULT_WAIT_MIN_MS).max(CONSULT_WAIT_MAX_MS)
     .default(RUN_CONSULT_WAIT_DEFAULT_MS),
 }).strict();
@@ -1207,7 +1240,9 @@ const RUN_CONSULT_DESCRIPTION =
   // no per-seat body text, no excerpts / 12KiB serialized / reassemble byte-exact /
   // textSha256 / restart from page 1 / never synthesizes / ZERO dispatch。
   "Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE " +
-  "text (never a file path), one sub-run per seat; waitMs 0..600000 (default " +
+  "text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git " +
+  "worktree top-level) is required — every seat's cwd and the record live under it; " +
+  "waitMs 0..600000 (default " +
   "270000; expiry = observation cutoff only — seats keep running, never killed or " +
   "re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — " +
   "per-seat runId/state/pages, fieldDiff, independence facts). Facts only — " +
@@ -1215,7 +1250,9 @@ const RUN_CONSULT_DESCRIPTION =
   "ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's " +
   "final text (page default 1; each page ≤12KiB serialized; pages reassemble " +
   "byte-exact; every page carries textSha256 of the full text — a mismatch across pages " +
-  "means a mid-read change: restart from page 1). seat/page in create, page without " +
+  "means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot " +
+  "to locate the record under that project (default: the session binding). " +
+  "seat/page in create, page without " +
   "seat, unknown or out-of-range → fixed refusal text.";
 
 // 0051：seatPage 视图的唯一信封构造器——真实页与 measure 试算共用同一形状，
@@ -1307,6 +1344,11 @@ const RUN_CONTINUE_INPUT = z.object({
   parentRunId: z.string().min(1),
   prompt: z.string().min(1),
   delivery: DELIVERY_INPUT,
+  // the continuation target comes from THIS call (proved via
+  // proveWorkspace; required by the handler with a fixed refusal). The parent
+  // run must belong to this target (verifyRunWorkspaceOwnership inside the
+  // shared service) — the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // run_continue output: one strict object spanning the accepted and refused variants.
@@ -1402,9 +1444,9 @@ function safeProjectContinuationScope(raw) {
 }
 
 // run_continue spawns a worker that resumes a provider conversation and modifies the
-// retained worktree — destructive (not append-only). Workspace-bound (the parent must
-// belong to the bound workspace). Not idempotent (a continuation claims a lineage slot
-// and transitions the worktree), open world.
+// retained worktree — destructive (not append-only). Target-scoped (the parent must
+// belong to this call's expectedWorkspaceRoot). Not idempotent (a continuation claims a
+// lineage slot and transitions the worktree), open world.
 const RUN_CONTINUE_ANNOTATIONS = {
   readOnlyHint: false,
   destructiveHint: true,
@@ -1417,9 +1459,10 @@ const RUN_CONTINUE_DESCRIPTION =
   // 闭集 rejectionReason、never-infers 边界。
   "Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a " +
   "new run resumes the parent's provider conversation in the retained worktree (no fresh " +
-  "worktree/session), shipping a child delivery. Eligibility: read-only, closed-set " +
-  "rejectionReason, before any mutation. WAO never infers correction, scope, verification, " +
-  "retry, or acceptance — the Lead reviews and decides.";
+  "worktree/session), shipping a child delivery. expectedWorkspaceRoot (absolute Git " +
+  "worktree top-level) is required — the parent must belong to it. Eligibility: read-only, " +
+  "closed-set rejectionReason, before any mutation. WAO never infers correction, scope, " +
+  "verification, retry, or acceptance — the Lead reviews and decides.";
 
 // ===== run_correct (M12-16 queued in-flight correction) constants =====
 //
@@ -1442,6 +1485,9 @@ const RUN_CORRECT_INPUT = z.object({
   runId: z.string().min(1),
   correctionId: z.string().min(1).max(CORRECTION_ID_MAX_LEN).regex(CORRECTION_ID_PATTERN),
   prompt: z.string().min(1).max(CORRECTION_PROMPT_MAX_LEN),
+  // per-call target (proved; required by the handler). The run must
+  // belong to it — the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // run_correct output: one strict object with a closed-set outcome that spans the
@@ -1475,10 +1521,11 @@ const RUN_CORRECT_DESCRIPTION =
   // 必须保留：queued ≠ model-executed（run_activity 后见 delivered/
   // delivery_failed）、never auto-* 边界、prompt 永不回显。
   "Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, " +
-  "delivered to the live provider stdin. Closed-set outcome queued/pending/delivered/" +
-  "rejected; queued = durably appended, NOT model-executed — run_activity later shows " +
-  "delivered/delivery_failed. WAO never auto-stops/retries/re-scopes/accepts; the prompt " +
-  "is never returned.";
+  "delivered to the live provider stdin. expectedWorkspaceRoot (absolute Git worktree " +
+  "top-level) is required — the run must belong to it. Closed-set outcome " +
+  "queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — " +
+  "run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/" +
+  "re-scopes/accepts; the prompt is never returned.";
 
 // Fixed safe text for run_status failure. Never concatenates dynamic content.
 const STATUS_ERROR_TEXT = "run_status failed";
@@ -1629,6 +1676,14 @@ const RUN_STATUS_DESCRIPTION =
 // （静态后缀不破坏"绝不泄漏原始异常"契约；collect 取回失败 ≠ 运行失败——
 // run_diagnose 给的是已记录的运行状态与失败证据，不承诺解释取回故障本身）。
 const COLLECT_ERROR_TEXT = "run_collect failed — call run_diagnose for the recorded run state and failure evidence";
+// 归属拒绝专属固定文案：目标证明通过，但转录记录的归属不属于它（另一项目 /
+// 子目录或非 Git cwd / 无归属事实的旧转录）。核验在读之后、serve 取回与审计
+// 追加之前 fail-closed（零写入）。固定文案，不回显绝对路径或任何动态值。
+const COLLECT_WORKSPACE_MISMATCH_TEXT =
+  "run_collect refused: this run does not belong to the project given by "
+  + "expectedWorkspaceRoot — its transcript records a cwd in another project, a "
+  + "subdirectory or non-Git path, or no ownership fact at all (legacy transcript). "
+  + "Nothing was written; retry with the run's own project root.";
 // F5 (2026-10-08 friction batch): 坏 cursor 专属拒绝文案。解码/校验路径抛出的
 // CursorRejectedError（instanceof 分类，沿 run_activity M12-19 纪律——不透子类型：
 // 过期/跨 run/被改不区分）折叠为 isError + 这条固定文案：静态恢复指引（第 1 页
@@ -1670,6 +1725,10 @@ const RUN_COLLECT_INPUT = z.object({
   // service call). compact is NOT a semantic summary and does NOT decide
   // whether full output is needed.
   mode: z.enum(["full", "compact"]).optional(),
+  // per-call target (proved; required by the handler — run_collect
+  // appends an audit event to the run's transcript, so it is an A-class
+  // call). The run must belong to it; the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 const COLLECTED_MESSAGE = z.object({
@@ -1735,10 +1794,11 @@ const RUN_COLLECT_ANNOTATIONS = {
 
 const RUN_COLLECT_DESCRIPTION =
   // 必须保留：not idempotent（M12-10-G 钉，审计追加副作用）；compact 语义。
-  "Collect a run's worker output: bounded, redacted assistant text + evidence counts. Each " +
-  "call appends one messages.collected audit event (not idempotent); cursor = prior " +
-  "nextCursor. mode=compact returns the last assistant text verbatim (<=4000 chars) " +
-  "+ full evidence counts; no cursor, no semantic summary.";
+  "Collect a run's worker output: bounded, redacted assistant text + evidence counts. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "belong to it. Each call appends one messages.collected audit event (not idempotent); " +
+  "cursor = prior nextCursor. mode=compact returns the last assistant text verbatim " +
+  "(<=4000 chars) + full evidence counts; no cursor, no semantic summary.";
 
 // TD-121: page-level truncation must exactly mirror cursor presence (TD-119
 // withheld-only semantics: truncated === hasMore, and hasMore <=> nextCursor).
@@ -2427,11 +2487,22 @@ function buildRunDeliveryPayload(runId, view) {
 // ===== run_delivery_decide (durable decision) constants =====
 
 const DELIVERY_DECIDE_ERROR_TEXT = "run_delivery_decide failed";
+// 归属拒绝专属固定文案（同 run_collect）：目标证明通过但 run 不属于它——核验在
+// 锁内追加与会话释放之前 fail-closed（零写入、零释放）。固定文案，不回显绝对路径。
+const DELIVERY_DECIDE_WORKSPACE_MISMATCH_TEXT =
+  "run_delivery_decide refused: this run does not belong to the project given by "
+  + "expectedWorkspaceRoot — its transcript records a cwd in another project, a "
+  + "subdirectory or non-Git path, or no ownership fact at all (legacy transcript). "
+  + "No decision and no session release happened; retry with the run's own project root.";
 
 const RUN_DELIVERY_DECIDE_INPUT = z.object({
   runId: z.string().min(1),
   decision: z.enum(["accepted", "rejected"]),
   reason: z.string().trim().min(1).max(2000),
+  // per-call target (proved; required by the handler — the decision
+  // durably writes the transcript). The run must belong to it; the session
+  // binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // M12-6 Package 3B2a: EXPECTED policy rejections (verification not passed,
@@ -2461,11 +2532,12 @@ const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
 const RUN_DELIVERY_DECIDE_DESCRIPTION =
   // 必须保留：first decision wins（M12-10-G 钉 /first/）；expected-policy 拒绝
   // 走正常回执 + 闭集 rejectionReason；never decides（M9-6B-11 禁用词）。
-  "Record an explicit Lead decision (accepted/rejected) on a delivery. First durable " +
-  "decision wins; later attempts lose. Expected-policy rejections return a normal " +
-  "outcome with a closed-set rejectionReason — only unexpected internal failures are " +
-  "errors. Never decides correctness automatically; returns no decision reason or " +
-  "delivery details.";
+  "Record a Lead decision (accepted/rejected) on a delivery. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "belong to it. First durable decision wins. Expected-policy rejections return a " +
+  "normal outcome with a closed-set rejectionReason; a run of another project and " +
+  "unexpected internal failures are errors. Never decides correctness automatically; " +
+  "returns no decision reason or delivery details.";
 
 // ===== run_delivery_reverify (audited unchanged-artifact re-verification) constants =====
 // M12-6 Package 3B2a: the Lead invokes ONE audited re-verification of the SAME
@@ -2492,6 +2564,9 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   ).max(REVERIFY_SETUP_COMMANDS_LIMIT).optional(),
   // Bounded optional timeout (bound by the exported SSOT constants).
   timeoutMs: z.number().int().min(REVERIFY_TIMEOUT_MS_MIN).max(REVERIFY_TIMEOUT_MS_MAX).optional(),
+  // per-call target (proved; required by the handler). The run must
+  // belong to it; the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // ===== TD-241 C2b：pending 回执的闭集指引（kimi+opus 裁定会审
@@ -2535,8 +2610,9 @@ const RUN_DELIVERY_REVERIFY_DESCRIPTION =
   "Re-verify the committed delivery artifact after the original verification outcome was " +
   "invalidated (closed-set reason): re-runs the persisted verification commands against " +
   "the SAME committed artifact, records one audited reverify chain, returns the closed-set " +
-  "outcome. Reentrant — retries converge on the same commit, at most one outcome. The " +
-  "decision stays the Lead's (run_delivery_decide).";
+  "outcome. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the " +
+  "run must belong to it. Reentrant — retries converge on the same commit, at most one " +
+  "outcome. The decision stays the Lead's (run_delivery_decide).";
 
 // ===== run_delivery_repackage (model-free repackage) constants =====
 // M12-1S2: when a delivery run terminally failed with packaging code
@@ -2553,6 +2629,9 @@ const DELIVERY_REPACKAGE_ERROR_TEXT = "run_delivery_repackage failed";
 const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
   runId: z.string().min(1),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
+  // per-call target (proved; required by the handler). The run must
+  // belong to it; the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
@@ -2586,7 +2665,9 @@ const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
   "Re-package a retained delivery candidate after disallowed_path, verified-quiet backend " +
   "failure, or process_missing (runner provably gone; settles the run failed, " +
   "first-terminal-wins), reusing the original worktree, base commit, and verification " +
-  "config — no model, no resume, no path inference, no verification override. allowedPaths " +
+  "config — no model, no resume, no path inference, no verification override. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "belong to it. allowedPaths " +
   "must cover the original scope and every actual changed path (sole scope authority); " +
   "recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns " +
   "accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.";
@@ -2595,6 +2676,41 @@ const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
 
 const WORKSPACE_ERROR_TEXT = "workspace_status failed";
 const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: call workspace_select with a Git worktree top-level, configure --workspace-root, or provide exactly one MCP root";
+
+// A call that starts workers or writes transcripts takes its target
+// ONLY from the call's own expectedWorkspaceRoot argument — never from the
+// session selection, MCP roots, or server config (those remain the default
+// scope for read-only tools). Fixed refusal copy naming what to pass; the
+// refusal happens in the HANDLER (not as a schema-required field) because the
+// shared schemas must stay omit-tolerant for the tools that ignore the field.
+const CALL_TARGET_REQUIRED_TEXT =
+  "workspace target required: pass expectedWorkspaceRoot with the absolute path of this " +
+  "project's Git worktree top-level. This call's target comes only from that argument — " +
+  "the session/workspace binding is not used as a fallback. Retry with expectedWorkspaceRoot set.";
+const CALL_TARGET_INVALID_TEXT =
+  "workspace target invalid: expectedWorkspaceRoot must be an absolute path to a canonical " +
+  "Git worktree top-level (a subdirectory of a repo is rejected). Re-check the project root " +
+  "and retry.";
+
+/**
+ * Prove the per-call workspace target (A-class tools). Returns
+ * { proof: { root, gitHead, dirty } } (proveWorkspace SSOT — canonical Git
+ * top-level only), or { error } with a fixed refusal text when the argument is
+ * missing or cannot be proven. Never falls back to any binding source and never
+ * mutates session state.
+ * @param {unknown} expectedWorkspaceRoot
+ * @returns {{proof: {root: string, gitHead: string, dirty: boolean}} | {error: string}}
+ */
+function proveCallWorkspaceRoot(expectedWorkspaceRoot) {
+  if (typeof expectedWorkspaceRoot !== "string" || expectedWorkspaceRoot.length === 0) {
+    return { error: CALL_TARGET_REQUIRED_TEXT };
+  }
+  try {
+    return { proof: proveWorkspace(expectedWorkspaceRoot) };
+  } catch {
+    return { error: CALL_TARGET_INVALID_TEXT };
+  }
+}
 
 const WORKSPACE_STATUS_INPUT = z.object({}).strict();
 
@@ -2653,8 +2769,10 @@ const WORKSPACE_SELECT_ERROR_TEXT = "workspace_select failed: workspaceRoot must
 const WORKSPACE_SELECT_DESCRIPTION =
   // 必须保留：绝对路径指向 Git worktree 顶层（schema 表达不了）；失败不改现选。
   "Select the working Git project for this session (lead_session source): pass an " +
-  "absolute path to a Git worktree top-level; WAO proves it canonical and dispatches " +
-  "against it. Session-scoped — no config write, no host bind or restart; idempotent, " +
+  "absolute path to a Git worktree top-level; WAO proves it canonical. The selection " +
+  "is the default scope for read-only tools only — worker-touching calls take their " +
+  "target per call. Shared per server instance: other sessions on the same instance " +
+  "see the same selection. No config write, no host bind or restart; idempotent, " +
   "a failed select leaves the prior selection intact.";
 
 // ===== lead_preflight (advisory single-call aggregator) constants =====
@@ -2679,6 +2797,9 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     // M12-19: closed-set recovery fact, same SSOT enum as workspace_status.
     // null when bound, or when the binding carried no reason (never fabricated).
     unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
+    // 非绝对项目标签（<displayName>-<hash8>，与写侧桶 slug 同派生式）
+    // ——preflight 不输出绝对路径合同内的范围标识；null=未绑定或根不可识别。
+    projectBucket: z.string().min(1).max(128).nullable(),
   }).strict().nullable(),
   workspaceSelection: z.enum([
     "not_requested", "selected",
@@ -2741,10 +2862,11 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 const LEAD_PREFLIGHT_DESCRIPTION =
   // 必须保留：advisory + not a gate（M12-10-G 钉）；分节独立沉降、原工具复验。
   "Advisory single-call preflight: workspace binding, worker credential availability, active " +
-  "runs. Optional workspaceRoot selects the project, same authority as " +
-  "workspace_select; unboundReason is the same closed-set recovery fact as " +
-  "workspace_status, null when bound. ADVISORY ONLY — not a gate: warnings are facts, never " +
-  "an auto-stop; sections settle independently, re-verify via the original tools.";
+  "runs. Optional workspaceRoot selects the project, same authority as workspace_select " +
+  "(read-tool default scope only; shared per server instance); unboundReason is the same " +
+  "closed-set recovery fact as workspace_status, null when bound. ADVISORY ONLY — not a " +
+  "gate: warnings are facts, never an auto-stop; sections settle independently, " +
+  "re-verify via the original tools.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -2756,6 +2878,9 @@ const RUN_STOP_INPUT = z.object({
   runId: z.string().min(1),
   reason: z.string().min(STOP_REASON_MIN_LEN).max(STOP_REASON_MAX_LEN),
   observedSeq: z.number().int().nonnegative(),
+  // per-call target (proved; required by the handler). The run must
+  // belong to it; the session binding is not consulted.
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 const RUN_STOP_OUTPUT = z.object({
@@ -2793,8 +2918,11 @@ const RUN_STOP_DESCRIPTION =
   // 必须保留（决定 0069 + M12-10-G 钉）：先读 run_activity、observedSeq/reason
   // 协议、观察过时即拒、"10 分钟内有生命体征不建议中止"、destructive、
   // first-terminal-wins。
-  "Stop only runs owned by the bound workspace (Lead-triggered). Read run_activity first; " +
-  "pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both " +
+  "Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot " +
+  "(absolute Git worktree top-level) is required — the run must belong to it, not to the " +
+  "session binding. " +
+  "Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and " +
+  "reason (why stop) — both " +
   `recorded; worker events after observedSeq older than ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} min ` +
   "reject the call, no side effect. Advice: do not stop within 10 min of a vital sign " +
   "(any worker event) without a specific reason. first-terminal-wins: the first caller " +
@@ -2812,6 +2940,14 @@ const RUNS_LIST_INPUT = z.object({
 }).strict();
 
 const RUNS_LIST_OUTPUT = z.object({
+  // 本次列表按哪个项目取的范围——绑定来源 + 非绝对项目标签
+  //（<displayName>-<hash8>，与 lead_preflight workspace.projectBucket 同派生式；
+  // 绑定根不可识别时 projectBucket 为 null）。runs_list 本身仍跟随会话绑定
+  //（B 类缺省范围），不加目标参数。
+  scope: z.object({
+    source: z.enum(["lead_session", "server_config", "mcp_root"]),
+    projectBucket: z.string().min(1).max(128).nullable(),
+  }).strict(),
   runs: z.array(z.object({
     runId: z.string(),
     agentId: z.string(),
@@ -2820,7 +2956,7 @@ const RUNS_LIST_OUTPUT = z.object({
     updatedAt: z.string().datetime().nullable(),
     // M12-15: closed-set activity projection. activityStatus=active requires a
     // known non-terminal transcript + a fresh owner heartbeat; unresolved means
-    // non-terminal without a fresh heartbeat (never inferred failed/stopped);
+    // non-terminal without a fresh heartbeat (never inferred failed/dead/stopped);
     // terminal/unknown are never active. Shared SSOT enums from runList.js.
     activityStatus: z.enum(ACTIVITY_STATUSES),
     activityBasis: z.enum(ACTIVITY_BASES),
@@ -2841,7 +2977,8 @@ const RUNS_LIST_ANNOTATIONS = {
 
 const RUNS_LIST_DESCRIPTION =
   // 必须保留：unresolved 绝不推断 failed/dead/stopped（Lead 据此分支）。
-  "List runs owned by the bound workspace. Each item carries activityStatus/activityBasis: " +
+  "List runs owned by the bound workspace (the response's scope names that binding's " +
+  "source + non-absolute project label). Each item carries activityStatus/activityBasis: " +
   "active requires a known non-terminal transcript with a fresh owner heartbeat; unresolved " +
   "(non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped and is counted in " +
   "unresolvedCount. limit defaults to 50. Read-only, idempotent.";
@@ -3595,8 +3732,10 @@ export function createWaoMcpServer({
   runDispatchContractCheckFn,
   // M13-r2: injectable council-consult service (create mode; read mode re-renders
   // from the group record with ZERO dispatch). consultsDir is a test seam: when it
-  // is not given, records live in <bound workspace>/.wao/runs/consults — the same
-  // place the CLI uses with --cwd <workspace> — and an unbound server refuses.
+  // is not given, records live in the calling scope's `.wao/runs/consults` — the
+  // call's expectedWorkspaceRoot (create mode always; read mode when supplied) or
+  // the resolved session binding (read mode) — the same place the CLI uses with
+  // --cwd <workspace>; a read with neither target nor binding refuses.
   runConsultFn,
   consultsDir,
   // M12-18: injectable bounded in-memory run-transcript cache. Defaults to a
@@ -4307,38 +4446,40 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT }],
         };
       }
-      // M10-pre2: re-resolve and prove workspace BEFORE any dispatch.
-      // State-changing calls do their own authority proof — they do NOT trust
-      // a prior workspace_status result. If the workspace is not bound,
-      // the dispatcher is never called (zero transcript, zero fork).
+      // the dispatch target comes ONLY from this call's
+      // expectedWorkspaceRoot — proved via proveWorkspace (canonical Git
+      // top-level). The session selection / MCP roots / server config are NOT
+      // consulted (a shared server instance can no longer redirect another
+      // session's dispatch), and setSessionWorkspace is never touched. A
+      // missing or unprovable target refuses with a fixed text BEFORE any
+      // side effect (zero transcript, zero fork, zero worktree).
       let workspaceCwd;
       let workspaceProof = null;
       // M12-6 (P1-A): the server-proven frozen HEAD threaded internally to the
-      // dispatcher. This is binding.gitHead — distinct from the model-owned
-      // expectedGitHead (consumed above for the expectation check and never
-      // forwarded). RunManager.start revalidates/pins it to defeat a frozen-base
-      // TOCTOU. Defaults null when the workspace is not bound.
+      // dispatcher. This is the call-target proof's gitHead — distinct from the
+      // model-owned expectedGitHead (consumed for the expectation check and
+      // never forwarded). RunManager.start revalidates/pins it to defeat a
+      // frozen-base TOCTOU.
       let workspaceFrozenHead = null;
-      try {
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
+      {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
           return {
             isError: true,
-            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+            content: [{ type: "text", text: target.error }],
           };
         }
-        // M12-6 (FR-03): workspace/head expectation preflight. The binding is
-        // proven ONCE here at the dispatch boundary; any frozen expectation
-        // is compared against this fresh proof BEFORE the dispatcher is ever
-        // invoked. On mismatch the dispatch is refused (fixed safe text naming
-        // only the closed-set mismatch category) — zero provider process,
-        // transcript, worktree, or run. When expectations are omitted, behavior
-        // is unchanged and an additive bounded proof is still attached.
+        // M12-6 (FR-03): head/dirty expectation preflight. The target is
+        // proven ONCE here at the dispatch boundary; the optional frozen
+        // expectations are compared against this fresh proof BEFORE the
+        // dispatcher is ever invoked. On mismatch the dispatch is refused
+        // (fixed safe text naming only the closed-set mismatch category) —
+        // zero provider process, transcript, worktree, or run.
+        const binding = { bound: true, source: "call_target", ...target.proof };
         const expectation = checkWorkspaceExpectation({
           binding,
           expectedGitHead,
           expectedDirty,
-          expectedWorkspaceRoot,
         });
         if (!expectation.matched) {
           return {
@@ -4346,14 +4487,11 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: dispatchExpectationMismatchText(expectation.mismatch) }],
           };
         }
-        workspaceProof = expectation.proof;
-        workspaceCwd = binding.root;
-        workspaceFrozenHead = binding.gitHead;
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
-        };
+        // The target IS the requested root, so the root expectation is
+        // structurally satisfied — reported as matched (never null).
+        workspaceProof = { ...expectation.proof, expectedWorkspaceRootMatch: true };
+        workspaceCwd = target.proof.root;
+        workspaceFrozenHead = target.proof.gitHead;
       }
 
       // M12-9 Package B: resolve the delivery verification from the selected
@@ -4428,8 +4566,10 @@ export function createWaoMcpServer({
           ...(resolvedRoleId !== undefined ? { resolvedRoleId } : {}),
           // 0052 P0-3：fresh 逃生口透传（lead_workspace 复用会话重置）。
           ...(fresh === true ? { fresh: true } : {}),
-          // M10-pre2: server-owned canonical workspace root as cwd.
-          // The model cannot provide this — it comes from host-authorized binding.
+          // M10-pre2/server-proven canonical workspace root as cwd.
+          // The model supplies the target via expectedWorkspaceRoot, but the
+          // cwd itself is the PROVEN canonical root (proveWorkspace) — arbitrary
+          // or subdirectory paths never reach the dispatcher.
           cwd: workspaceCwd,
           // Certification advisory closeout: registry certification is recorded
           // reliability evidence, NOT a permission gate — the MCP control plane
@@ -4652,18 +4792,40 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_CONTRACT_CHECK_OUTPUT,
       annotations: RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, executionProfileId }) => {
-      // Read-only advisory precheck. Resolve the workspace binding so the result
-      // can report workspace status, but — unlike run_dispatch — a binding
-      // failure is NOT a hard refusal: it surfaces as the closed-set "unknown"
-      // workspace section (never faked observed/unbound). The service never
-      // dispatches, forks, or writes a transcript; it only reads the registry
-      // and consumes the resolved binding.
+    async ({ agentId, prompt, delivery, executionProfileId, expectedWorkspaceRoot }) => {
+      // Read-only advisory precheck. Resolve the workspace scope so the result
+      // can report it, but — unlike run_dispatch — a binding failure is NOT a
+      // hard refusal: it surfaces as the closed-set "unknown" workspace section
+      // (never faked observed/unbound). The service never dispatches, forks, or
+      // writes a transcript; it only reads the registry and consumes the
+      // resolved scope. A call that supplies expectedWorkspaceRoot is checked
+      // against THAT proved project (call_target) instead of the session
+      // binding; an unprovable target is refused with the fixed target text
+      // before any registry read.
       let workspaceBinding = null;
-      try {
-        workspaceBinding = await resolveWorkspaceBinding();
-      } catch {
-        workspaceBinding = null;
+      let workspaceScope = { source: null, projectBucket: null };
+      if (expectedWorkspaceRoot !== undefined) {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
+        }
+        workspaceBinding = { bound: true, source: "call_target", ...target.proof };
+        workspaceScope = {
+          source: "call_target",
+          projectBucket: projectBucketLabel(target.proof.root),
+        };
+      } else {
+        try {
+          workspaceBinding = await resolveWorkspaceBinding();
+        } catch {
+          workspaceBinding = null;
+        }
+        workspaceScope = workspaceBinding?.bound
+          ? {
+              source: workspaceBinding.source ?? null,
+              projectBucket: projectBucketLabel(workspaceBinding.root),
+            }
+          : { source: null, projectBucket: null };
       }
       try {
         const result = await contractCheckService({
@@ -4678,8 +4840,9 @@ export function createWaoMcpServer({
         // unknown/internal fields cannot cross the wire and an oversized or
         // malformed service object collapses to the fixed error text below
         // (strict root + the derived maxima above). Only the validated object is
-        // returned as structuredContent.
-        const parsed = RUN_DISPATCH_CONTRACT_CHECK_OUTPUT.parse(result);
+        // returned as structuredContent. workspaceScope states which project
+        // this check actually used.
+        const parsed = RUN_DISPATCH_CONTRACT_CHECK_OUTPUT.parse({ ...result, workspaceScope });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
@@ -4737,23 +4900,50 @@ export function createWaoMcpServer({
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_PAGE_WITHOUT_SEAT_TEXT }] };
       }
 
-      // ---- Read mode: re-render the stored group record. ZERO dispatch — this
-      // branch never touches consultService/dispatcher (invariant, pinned by
-      // test). CLI `consult show` keeps the FULL render via the same kernel;
-      // this MCP face projects it (0051: receipt, or one seat page).
-      // 会审记录与席位工作目录以绑定的 workspace 为准（与 run_dispatch 同一权威），
-      // 不取服务进程的当前目录——宿主从哪里拉起服务进程不该决定会审落在哪里。
-      let consultBinding = { bound: false };
-      try {
-        consultBinding = await resolveWorkspaceBinding();
-      } catch {
-        consultBinding = { bound: false };
+      // — two scope authorities, by mode:
+      //   read mode (B-class): the session binding remains the DEFAULT scope
+      //     (records + paging follow it; no dispatch happens on this path) —
+      //     but a call may pass expectedWorkspaceRoot to prove and use that
+      //     root for this read instead, so a consult created under Y stays
+      //     readable without rebinding the instance-wide selection;
+      //   create mode (A-class): EVERY seat's cwd, the consult record, and the
+      //     transcript attribution come ONLY from this call's
+      //     expectedWorkspaceRoot — proved canonical Git top-level, never the
+      //     session binding / MCP roots / server config, and never
+      //     setSessionWorkspace. The binding is not resolved on this path at
+      //     all (no roots/list round-trip, no 5s wait).
+      let consultTarget = null;
+      let effectiveRoot = null;
+      if (readMode) {
+        if (input.expectedWorkspaceRoot !== undefined) {
+          const target = proveCallWorkspaceRoot(input.expectedWorkspaceRoot);
+          if (target.error) {
+            return { isError: true, content: [{ type: "text", text: target.error }] };
+          }
+          effectiveRoot = target.proof.root;
+        } else {
+          let consultBinding = { bound: false };
+          try {
+            consultBinding = await resolveWorkspaceBinding();
+          } catch {
+            consultBinding = { bound: false };
+          }
+          effectiveRoot = consultBinding.bound ? consultBinding.root : null;
+        }
+      } else {
+        const target = proveCallWorkspaceRoot(input.expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
+        }
+        consultTarget = target.proof;
+        effectiveRoot = target.proof.root;
       }
-      // 没有绑定工作区、也没有显式给定记录目录：两种模式都拒绝，不退回进程当前目录。
-      if (!consultBinding.bound && consultsDir === undefined) {
+      // 没有可用项目根（读模式未绑定）、也没有显式给定记录目录：拒绝，不退回
+      // 进程当前目录。
+      if (effectiveRoot === null && consultsDir === undefined) {
         return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
       }
-      const recordsDir = consultsDir ?? join(consultBinding.root, ".wao", "runs", "consults");
+      const recordsDir = consultsDir ?? join(effectiveRoot, ".wao", "runs", "consults");
 
       if (readMode) {
         // 找不到 / 读不了记录，与记录读到了但重渲染或投影失败，是两回事，分开报。
@@ -4843,10 +5033,9 @@ export function createWaoMcpServer({
 
       // ---- Create mode: closed-set input checks BEFORE any dispatch. Seat ids
       // are model-supplied bounded strings (safe to name back — they are not
-      // secrets); every refusal below leaves the dispatch count at 0.
-      if (!consultBinding.bound) {
-        return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
-      }
+      // secrets); every refusal below leaves the dispatch count at 0. The
+      // target (consultTarget) was already proved above — every seat's cwd and
+      // the record live under THAT root, regardless of the session binding.
       const seatIds = input.seats;
       const duplicates = [...new Set(seatIds.filter((id, i) => seatIds.indexOf(id) !== i))];
       if (duplicates.length > 0) {
@@ -4959,7 +5148,7 @@ export function createWaoMcpServer({
           registryPath,
           runDir,
           consultsDir: recordsDir,
-          cwd: consultBinding.root,
+          cwd: consultTarget.root,
           env: process.env,
           dispatchFn: countingDispatcher,
         });
@@ -4992,7 +5181,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_CONTINUE_OUTPUT,
       annotations: RUN_CONTINUE_ANNOTATIONS,
     },
-    async ({ parentRunId, prompt, delivery }) => {
+    async ({ parentRunId, prompt, delivery, expectedWorkspaceRoot }) => {
       // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
       // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
       try {
@@ -5000,25 +5189,21 @@ export function createWaoMcpServer({
       } catch (e) {
         return { isError: true, content: [{ type: "text", text: String(e.message) }] };
       }
-      // M12-7: re-resolve and prove the workspace BEFORE any continuation —
-      // state-changing calls do their own authority proof (same as run_dispatch).
-      // The parent must belong to the bound workspace; a missing binding refuses
-      // with the fixed not-bound text (zero mutation, zero fork).
+      // the continuation target comes ONLY from this call's
+      // expectedWorkspaceRoot (proved canonical Git top-level). The shared
+      // service verifies the parent run belongs to this target via
+      // verifyRunWorkspaceOwnership — the session binding is not consulted.
+      // A missing or unprovable target refuses before any mutation/fork.
       let workspaceCwd;
-      try {
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
+      {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
           return {
             isError: true,
-            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+            content: [{ type: "text", text: target.error }],
           };
         }
-        workspaceCwd = binding.root;
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
-        };
+        workspaceCwd = target.proof.root;
       }
 
       // M12-9 Package B: run_continue does NOT support execution profiles, so
@@ -5151,26 +5336,22 @@ export function createWaoMcpServer({
       outputSchema: RUN_CORRECT_OUTPUT,
       annotations: RUN_CORRECT_ANNOTATIONS,
     },
-    async ({ runId, correctionId, prompt }) => {
-      // M12-16: re-resolve and prove the workspace BEFORE any correction —
-      // state-changing calls do their own authority proof (same as run_dispatch /
-      // run_continue). The run must belong to the bound workspace; a missing
-      // binding refuses with the fixed not-bound text (zero append, zero fork).
+    async ({ runId, correctionId, prompt, expectedWorkspaceRoot }) => {
+      // the correction target comes ONLY from this call's
+      // expectedWorkspaceRoot (proved canonical Git top-level). The shared
+      // service verifies the run belongs to this target via
+      // verifyRunWorkspaceOwnership — the session binding is not consulted.
+      // A missing or unprovable target refuses before any append.
       let workspaceCwd;
-      try {
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
+      {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
           return {
             isError: true,
-            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+            content: [{ type: "text", text: target.error }],
           };
         }
-        workspaceCwd = binding.root;
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
-        };
+        workspaceCwd = target.proof.root;
       }
 
       let result;
@@ -5337,7 +5518,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_COLLECT_OUTPUT,
       annotations: RUN_COLLECT_ANNOTATIONS,
     },
-    async ({ runId, cursor, mode }) => {
+    async ({ runId, cursor, mode, expectedWorkspaceRoot }) => {
       // Entire service call + projection + redaction + output validation in ONE
       // try/catch. Any failure collapses to the fixed safe text — never leak
       // SDK output-validation error, raw exception, path, or secret.
@@ -5353,6 +5534,12 @@ export function createWaoMcpServer({
       // append. compact reads the same snapshot but never paginates, so a
       // cursor is meaningless and must not reach the service. Only the fixed
       // safe text is returned.
+      //
+      // run_collect appends one audit event to the run's transcript,
+      // so it is an A-class call — the target comes ONLY from this call's
+      // expectedWorkspaceRoot. collectRunMessages verifies the run's
+      // ownership against that root (fail closed before any read-side fetch
+      // or append); the session binding is not consulted.
       try {
         if ((mode ?? "full") === "compact" && cursor != null) {
           return {
@@ -5360,9 +5547,17 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: COLLECT_ERROR_TEXT }],
           };
         }
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: target.error }],
+          };
+        }
         const raw = await collectService({
           runId, runDir, limit: COLLECT_LIMIT, cursor,
           deferAppend: true,
+          authorizedWorkspaceRoot: target.proof.root,
         });
         const payload = (projectCollectResultFn ?? projectCollectResult)(raw, { runId, cursor, mode });
         // TD-121: fail closed on a page whose page-level truncated/nextCursor
@@ -5412,6 +5607,15 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: COLLECT_CURSOR_REJECTED_TEXT }],
+          };
+        }
+        // Ownership refusal gets its own fixed text: the Lead must be able to
+        // tell "this run belongs to another project" from a generic collect
+        // failure. Zero writes (the verifier runs before the audit commit).
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: COLLECT_WORKSPACE_MISMATCH_TEXT }],
           };
         }
         return {
@@ -5601,7 +5805,16 @@ export function createWaoMcpServer({
       outputSchema: RUN_DELIVERY_DECIDE_OUTPUT,
       annotations: RUN_DELIVERY_DECIDE_ANNOTATIONS,
     },
-    async ({ runId, decision, reason }) => {
+    async ({ runId, decision, reason, expectedWorkspaceRoot }) => {
+      // the decision durably writes the run's transcript, so the
+      // target comes ONLY from this call's expectedWorkspaceRoot. The service
+      // verifies run ownership against that root (fail closed before the
+      // locked append); the session binding is not consulted. A missing or
+      // unprovable target refuses before any service call.
+      const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+      if (target.error) {
+        return { isError: true, content: [{ type: "text", text: target.error }] };
+      }
       try {
         // TD-250（A1b，决定 0056）：accepted 落盘后 best-effort 释放线系上游会话
         //（kimi-web 首个能力声明者；能力门/事件合同在 makeAcceptedSessionRelease）。
@@ -5610,6 +5823,7 @@ export function createWaoMcpServer({
           runDir,
           decision,
           reason,
+          authorizedWorkspaceRoot: target.proof.root,
           sessionRelease: makeAcceptedSessionRelease({ registryPath }),
         });
         // Strict validation: every scalar must pass closed-set checks.
@@ -5647,6 +5861,15 @@ export function createWaoMcpServer({
           structuredContent: payload,
         };
       } catch (err) {
+        // Ownership refusal: the target is proved, but the run belongs to a
+        // different project. Fixed text naming the cause — nothing was written
+        // and no session was released (the verifier runs before both).
+        if (err?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_DECIDE_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         // M12-6 Package 3B2a: EXPECTED policy rejections are structured outcomes
         // with the closed-set rejectionReason (single application authority) —
         // no raw gate text, no validator message, no path/event leak. Only
@@ -5685,7 +5908,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_STOP_OUTPUT,
       annotations: RUN_STOP_ANNOTATIONS,
     },
-    async ({ runId, reason, observedSeq }) => {
+    async ({ runId, reason, observedSeq, expectedWorkspaceRoot }) => {
       try {
         // FIX-A: validate runId before calling service — prevents path escape
         // at the MCP layer so the service is never invoked for malicious runIds.
@@ -5695,19 +5918,21 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
           };
         }
-        // Resolve workspace binding BEFORE calling stopRun — the service
-        // uses authorizedWorkspaceRoot to verify ownership.
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
+        // the stop target comes ONLY from this call's
+        // expectedWorkspaceRoot (proved canonical Git top-level). stopRun
+        // verifies the run's ownership against this root — the session binding
+        // is not consulted.
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
           return {
             isError: true,
-            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+            content: [{ type: "text", text: target.error }],
           };
         }
         const result = await stopService({
           runId,
           runDir,
-          authorizedWorkspaceRoot: binding.root,
+          authorizedWorkspaceRoot: target.proof.root,
           justification: { reason, observedSeq },
         });
         // Build safe output payload — use the request runId, not service return.
@@ -5798,6 +6023,13 @@ export function createWaoMcpServer({
         });
 
         const payload = {
+          // the binding context this page was scoped by — the Lead can
+          // see WHICH project the listed runs belong to (source + non-absolute
+          // bucket label; null label when the root cannot be identified).
+          scope: {
+            source: binding.source,
+            projectBucket: projectBucketLabel(binding.root),
+          },
           runs: result.runs.map((r) => ({
             runId: r.runId,
             agentId: r.agentId,
@@ -6540,24 +6772,25 @@ export function createWaoMcpServer({
       outputSchema: RUN_DELIVERY_REPACKAGE_OUTPUT,
       annotations: RUN_DELIVERY_REPACKAGE_ANNOTATIONS,
     },
-    async ({ runId, allowedPaths }) => {
+    async ({ runId, allowedPaths, expectedWorkspaceRoot }) => {
       try {
         // Pre-validate runId before workspace binding or any service call.
         if (!isValidRunId(runId)) {
           return { isError: true, content: [{ type: "text", text: DELIVERY_REPACKAGE_ERROR_TEXT }] };
         }
-        // Workspace-bound: the service needs the authorized workspace root to
-        // prove ownership + reuse the persisted linked worktree. No binding →
-        // the service is NEVER called.
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
-          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        // the repackage target comes ONLY from this call's
+        // expectedWorkspaceRoot (proved canonical Git top-level). The service
+        // proves ownership + reuses the persisted linked worktree against
+        // that root — the session binding is not consulted.
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
         }
         const result = await withBoundedWait(deliveryRepackageService({
           runId,
           runDir,
           allowedPaths,
-          authorizedWorkspaceRoot: binding.root,
+          authorizedWorkspaceRoot: target.proof.root,
         }), { runId, op: "run_delivery_repackage" });
         if (result?.__boundedWaitPending) {
           const pending = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({
@@ -6615,7 +6848,8 @@ export function createWaoMcpServer({
         // TD-226（镜像 run_delivery_decide 的 M12-9 纪律）：expected-policy 拒绝是
         // 正常结构化结果——typed 闭集码 → status:"ok" + rejectionReason，可选交付
         // 字段缺席；无原始 gate 文本、无 validator 消息、无 path/event 泄漏。服务层
-        // 已为此追加一条有界 run.delivery_repackage_rejected 审计事件。只有非 typed
+        // 已为此追加一条有界 run.delivery_repackage_rejected 审计事件
+        //（workspace_not_authorized 不落——不在别人的转录里写）。只有非 typed
         // 的意外异常保留 DELIVERY_REPACKAGE_ERROR_TEXT 塌缩。
         const rejectionReason = classifyRepackageRejection(err);
         if (rejectionReason) {
@@ -6647,18 +6881,19 @@ export function createWaoMcpServer({
       outputSchema: RUN_DELIVERY_REVERIFY_OUTPUT,
       annotations: RUN_DELIVERY_REVERIFY_ANNOTATIONS,
     },
-    async ({ runId, reason, setupCommands, timeoutMs }) => {
+    async ({ runId, reason, setupCommands, timeoutMs, expectedWorkspaceRoot }) => {
       try {
         // Pre-validate runId before workspace binding or any service call.
         if (!isValidRunId(runId)) {
           return { isError: true, content: [{ type: "text", text: DELIVERY_REVERIFY_ERROR_TEXT }] };
         }
-        // Workspace-bound: the service needs the authorized workspace root to
-        // prove ownership + verify the unchanged artifact. No binding → the
-        // service is NEVER called.
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
-          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        // the reverify target comes ONLY from this call's
+        // expectedWorkspaceRoot (proved canonical Git top-level). The service
+        // proves ownership + verifies the unchanged artifact against that
+        // root — the session binding is not consulted.
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
         }
         const result = await withBoundedWait(deliveryReverifyService({
           runId,
@@ -6666,7 +6901,7 @@ export function createWaoMcpServer({
           reason,
           ...(setupCommands !== undefined ? { setupCommands } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-          authorizedWorkspaceRoot: binding.root,
+          authorizedWorkspaceRoot: target.proof.root,
         }), { runId, op: "run_delivery_reverify" });
         if (result?.__boundedWaitPending) {
           const pending = RUN_DELIVERY_REVERIFY_OUTPUT.parse({

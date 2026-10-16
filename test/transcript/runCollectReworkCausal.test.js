@@ -19,10 +19,24 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { collectRunMessages } from "../../src/application/runCollect.js";
 import { projectCollectResult } from "../../src/application/runCollectProjection.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+
+// Shared per-call target for run_collect (the real service verifies
+// ownership; synthetic transcripts carry this root as run.started cwd).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m114-causal-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
 
 // ===== Helpers =====
 
@@ -37,7 +51,7 @@ function buildProcessTranscript(runDir, runId, messageCount, extraEvents = []) {
   const lines = [
     jl({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
     jl({ type: "session.created", backend: "process", backendSessionId: "proc_causal", runId, agentId: "w" }),
-    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
   ];
   for (const e of extraEvents) lines.push(jl(e));
   for (let i = 0; i < messageCount; i += 1) {
@@ -56,7 +70,7 @@ function buildServeTranscript(runDir, runId) {
   const lines = [
     jl({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
     jl({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_causal", serveUrl: "http://127.0.0.1:4298", runId, agentId: "w" }),
-    jl({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+    jl({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
     jl({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }),
   ];
   writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
@@ -235,7 +249,7 @@ test("M11-4-CAUSAL-4: cursor-less page 1 MCP projection failure → zero audit a
     const [c, s] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(s), client.connect(c)]);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "projection failure → isError");
     } finally {
       await client.close();
@@ -268,7 +282,7 @@ test("M11-4-CAUSAL-5: cursor continuation MCP projection failure → zero audit 
     await Promise.all([server1.connect(s1), client1.connect(c1)]);
     let cursor;
     try {
-      const res = await client1.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await client1.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       cursor = JSON.parse(res.content.find((b) => b.type === "text").text).nextCursor;
     } finally {
       await client1.close();
@@ -285,7 +299,7 @@ test("M11-4-CAUSAL-5: cursor continuation MCP projection failure → zero audit 
     const [c2, s2] = InMemoryTransport.createLinkedPair();
     await Promise.all([server2.connect(s2), client2.connect(c2)]);
     try {
-      const res = await client2.callTool({ name: "run_collect", arguments: { runId, cursor } });
+      const res = await client2.callTool({ name: "run_collect", arguments: { runId, cursor, expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "cursor page projection failure → isError");
     } finally {
       await client2.close();

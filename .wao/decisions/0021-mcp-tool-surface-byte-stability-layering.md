@@ -48,3 +48,10 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
 - run_status 的 scorecardSummary.failedChecks：z.array(z.string()) → z.array(z.enum([...SCORECARD_CHECK_NAMES])).max(SCORECARD_CHECK_NAMES.length)（闭集 6 成员；非成员/超限崩为 fixed safe text，不截断）。
 - 依据：Owner 2026-09-18 指令（上限值按双席建议定档）+ 双席咨询 run_202609180757006603nxdsx / run_20260918075704956eh790g。
 - 手续执行：FROZEN_22_WIRE_CEILING 78014→78127 与 DESC_STRIPPED_CONTRACT_SHA 均重测重冻（m12-10 注释链 truthful 记录）；FROZEN_22_DESC_CEILING 未动（零 description 变更）。
+
+## 追加记录：2026-10-15 schema 收窄（会动工作区的工具必传目标，Owner 批准）
+
+- 事实背景：同一宿主进程挂一个 MCP 服务实例、多个宿主会话共用时，会话级 workspace 选择互相串扰——未选过项目的会话读到别人的 `lead_session` 绑定，派发随之进错项目。修法（本 ADR 范畴内的收窄部分）：会动工作区的九个调用（`run_dispatch`、`run_continue`、`run_correct`、`run_stop`、`run_collect`、`run_delivery_decide`、`run_delivery_reverify`、`run_delivery_repackage`、`run_consult` create）的目标只取本次调用的 `expectedWorkspaceRoot`。
+- schema 面：八个 runId 工具与 `run_consult` 的 inputSchema 各增**可选** `expectedWorkspaceRoot` 字段（additive）；`run_dispatch` 的同名字段由"可选断言"改为 handler 内必传（固定文案拒绝，缺参零副作用）——schema 保持 optional 是因为 `RUN_DISPATCH_INPUT` 与 `run_dispatch_contract_check` 共享，schema 级必填会连带后者；后者现在自己消费该字段（给了就按它检查并在出参 `workspaceScope` 写明范围），`run_consult` 的读取/分页模式同样接受该字段（给了就按它定位组记录）。原不带目标的合法调用自此被拒：各宿主 Lead 的首次 A 类调用会被拒一次，文案指明该传什么，补参重试即恢复（`SKILL.md`/`docs/usage/host.md` 同批更新）。其余 additive 成员：`workspaceProof.source` 闭集增 `call_target`（证明来源如实标注）；`lead_preflight` workspace 增 `projectBucket`、`runs_list` 增 `scope`（只读结果的范围可见性）；`run_dispatch_contract_check` 出参增 `workspaceScope`。
+- 依据：Owner 2026-10-15 批准（Lead 两项请批——"会动工作区的工具必须写明目标项目、不写就拒；MCP 工具描述的字节冻结线随之重冻"，Owner 答复"我同意两件都批"）。
+- 手续执行：FROZEN_23_WIRE_CEILING 85101→88048、FROZEN_23_DESC_CEILING 10125→11783（描述各加一句必传目标说明与范围可见性说明；Owner 硬顶 12347 内）、FROZEN_23_HOSTVISIBLE_CEILING 20699→22941，DESC_STRIPPED_CONTRACT_SHA 重测重冻（m12-10 注释链如实记录）。同批会审修复再动描述与 schema（consult 读取目标、contract_check 范围、run_stop 描述）后按实测重冻到上述值。

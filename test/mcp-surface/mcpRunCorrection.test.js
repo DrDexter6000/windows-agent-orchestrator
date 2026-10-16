@@ -119,7 +119,7 @@ test("M12-16-MCP-1: run_correct on a running correctable run → outcome queued,
     try {
       const { threw, res } = await safeCall(client, {
         name: "run_correct",
-        arguments: { runId: RUN_ID, correctionId: "fix-1", prompt: "please also add a test for the empty-input branch" },
+        arguments: { runId: RUN_ID, correctionId: "fix-1", prompt: "please also add a test for the empty-input branch", expectedWorkspaceRoot: dir },
       });
       assert.equal(threw, false, "valid call must not throw");
       assert.equal(calls, 1, "service called exactly once");
@@ -148,7 +148,7 @@ test("M12-16-MCP-2: run_correct NEVER echoes the prompt through the safe surface
       const secret = "test-secret-marker-mcpcorr";
       const { threw, res } = await safeCall(client, {
         name: "run_correct",
-        arguments: { runId: RUN_ID, correctionId: "c1", prompt: secret },
+        arguments: { runId: RUN_ID, correctionId: "c1", prompt: secret, expectedWorkspaceRoot: dir },
       });
       assert.equal(threw, false);
       // structuredContent must not carry the prompt or a prompt key.
@@ -175,7 +175,7 @@ test("M12-16-MCP-3: unknown runId → outcome rejected/unknown_run (closed-set r
     try {
       const { threw, res } = await safeCall(client, {
         name: "run_correct",
-        arguments: { runId: "run_20260101000000000zzzz", correctionId: "c1", prompt: "x" },
+        arguments: { runId: "run_20260101000000000zzzz", correctionId: "c1", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(threw, false, "a refusal is a structured result, not a throw");
       assert.ok(!res.isError, "a refusal is NOT an isError tool failure");
@@ -201,7 +201,7 @@ test("M12-16-MCP-4: terminal run → outcome rejected/terminal_run (closed-set, 
     try {
       const { threw, res } = await safeCall(client, {
         name: "run_correct",
-        arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x" },
+        arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(threw, false);
       const sc = res.structuredContent;
@@ -216,7 +216,7 @@ test("M12-16-MCP-4: terminal run → outcome rejected/terminal_run (closed-set, 
   }
 });
 
-test("M12-16-MCP-5: workspace not bound → fixed not-bound error, service NOT called", async () => {
+test("M12-16-MCP-5: no session binding at all → the call's target still authorizes (service called); missing target → fixed refusal, service NOT called", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcp-corr-5-"));
   try {
     makeGitRepo(dir);
@@ -229,7 +229,7 @@ test("M12-16-MCP-5: workspace not bound → fixed not-bound error, service NOT c
     const server = createWaoMcpServer({
       registryPath: makeRegistry(dir),
       runDir: join(dir, "runs"),
-      correctRunFn: async () => { calls += 1; return { outcome: "queued" }; },
+      correctRunFn: async (input) => { calls += 1; return { runId: input.runId, correctionId: input.correctionId, outcome: "queued" }; },
     });
     const client = new Client({ name: "wao-test-client", version: "0.0.1" }, { capabilities: {} });
     const [ct, st] = InMemoryTransport.createLinkedPair();
@@ -237,13 +237,24 @@ test("M12-16-MCP-5: workspace not bound → fixed not-bound error, service NOT c
     try {
       const { threw, res } = await safeCall(client, {
         name: "run_correct",
-        arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x" },
+        arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(threw, false);
-      assert.equal(calls, 0, "service must NOT be called when the workspace is not bound");
-      assert.equal(res.isError, true, "not-bound collapses to a fixed tool error");
-      const text = (res.content ?? []).map((c) => c.text || "").join("");
-      assert.match(text, /not bound|not-bound|workspace/i, "fixed not-bound text");
+      // the target comes from THIS call — an entirely unbound server
+      // still executes a correctly-targeted correction (zero binding read).
+      assert.equal(calls, 1, "service called once on the call's own target");
+      assert.equal(res.isError, undefined, "no error: the call is self-authorized");
+      // Follow-up (same server): a call WITHOUT the target is refused before
+      // the service — fixed text naming what to pass.
+      const noTarget = await safeCall(client, {
+        name: "run_correct",
+        arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x" },
+      });
+      assert.equal(noTarget.threw, false);
+      assert.equal(noTarget.res.isError, true, "missing target refused");
+      const noTargetText = (noTarget.res.content ?? []).map((c) => c.text || "").join("");
+      assert.match(noTargetText, /expectedWorkspaceRoot/, "refusal names the parameter");
+      assert.match(noTargetText, /Git worktree top-level/, "refusal says what to pass");
     } finally {
       await client.close();
       await server.close();

@@ -150,7 +150,9 @@ test("WSB-06: run_dispatch passes canonical root as cwd to dispatcher", async ()
     });
     const client = await buildInMemoryClient(server);
     try {
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      // the dispatch target comes from THIS call — pass the project root;
+      // the server_config binding below must NOT be the cwd source (it may differ).
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(callCount, 1);
       assert.ok(captured.cwd, "dispatcher received cwd");
       // cwd must be the canonical root (forward-slash normalized)

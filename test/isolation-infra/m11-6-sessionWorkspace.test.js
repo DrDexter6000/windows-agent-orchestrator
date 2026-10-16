@@ -102,7 +102,7 @@ test("M11-6-GREEN-1: workspace_select exists and selects a Git repo in-session",
 // ===== GREEN acceptance matrix =====
 
 // GREEN-2: repo A → select repo B → subsequent dispatch uses repo B.
-test("M11-6-GREEN-2: switch repo A → repo B, dispatch cwd follows B", async () => {
+test("M11-6-GREEN-2: selection switches A → B, but dispatch follows the CALL's target (A)", async () => {
   const dirA = mkdtempSync(join(tmpdir(), "wao-m116-g2-a-"));
   const dirB = mkdtempSync(join(tmpdir(), "wao-m116-g2-b-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-m116-g2-runs-"));
@@ -121,13 +121,13 @@ test("M11-6-GREEN-2: switch repo A → repo B, dispatch cwd follows B", async ()
       const client = await buildInMemoryClient(server);
       try {
         await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirA } });
-        // switch to B
+        // switch the read-only default scope to B
         await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirB } });
-        await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do" } });
+        // dispatch names A as its target — the selection no longer redirects it
+        await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do", expectedWorkspaceRoot: dirA } });
         assert.ok(capturedCwd, "dispatcher was called");
-        // canonical root of B (forward slashes for compare)
-        const expected = dirB.replace(/\\/g, "/");
-        assert.equal(capturedCwd.replace(/\\/g, "/"), expected, "dispatch cwd is repo B");
+        const expected = dirA.replace(/\\/g, "/");
+        assert.equal(capturedCwd.replace(/\\/g, "/"), expected, "dispatch cwd is the CALL's target (repo A), not the selection");
       } finally {
         await client.close();
         await server.close();
@@ -308,9 +308,10 @@ test("M11-6-GREEN-9: lead_session overrides server_config default", async () => 
         await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirSession } });
         st = await client.callTool({ name: "workspace_status", arguments: {} });
         assert.equal(JSON.parse(st.content.find((b) => b.type === "text").text).source, "lead_session");
-        // dispatch uses session, not config.
-        await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do" } });
-        assert.equal(capturedCwd.replace(/\\/g, "/"), dirSession.replace(/\\/g, "/"), "dispatch cwd is session repo");
+        // dispatch follows the CALL's target — it names the CONFIG repo while
+        // the session selection points elsewhere; the call wins.
+        await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do", expectedWorkspaceRoot: dirConfig } });
+        assert.equal(capturedCwd.replace(/\\/g, "/"), dirConfig.replace(/\\/g, "/"), "dispatch cwd is the CALL's target (config repo), not the session selection");
       } finally {
         await client.close();
         await server.close();

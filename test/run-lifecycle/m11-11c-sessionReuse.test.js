@@ -1427,7 +1427,7 @@ test("M11-11C MCP-1: server injects a stable leadSession into the dispatcher (se
     const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "hi" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "hi", expectedWorkspaceRoot: dir } });
       assert.ok(captured.leadSession, "dispatcher received a server-owned leadSession");
       assert.match(captured.leadSession, UUID_V4, "leadSession is a uuid (server-generated)");
     } finally { await client.close(); await server.close(); }
@@ -1451,8 +1451,8 @@ test("M11-11C MCP-2: leadSession is STABLE across calls in one server (same Lead
     const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "a" } });
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "b" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "a", expectedWorkspaceRoot: dir } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "b", expectedWorkspaceRoot: dir } });
       assert.equal(seen.length, 2);
       assert.equal(seen[0], seen[1], "same Lead session identity across calls in one server");
     } finally { await client.close(); await server.close(); }
@@ -1487,7 +1487,7 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
     const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "secret-prompt" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "secret-prompt", expectedWorkspaceRoot: dir } });
       const dumped = JSON.stringify(res);
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
 
@@ -1514,15 +1514,16 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
         "workspaceProof has only source/head/dirty + 3 nullable match booleans",
       );
       assert.ok(
-        ["lead_session", "server_config", "mcp_root"].includes(parsed.workspaceProof.source),
+        ["call_target", "lead_session", "server_config", "mcp_root"].includes(parsed.workspaceProof.source),
         "proof source is the closed-set enum",
       );
       assert.ok(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(parsed.workspaceProof.gitHead), "proof gitHead is canonical hex");
       assert.equal(typeof parsed.workspaceProof.dirty, "boolean", "proof dirty is boolean");
-      // No expectations were supplied ⇒ all match booleans are null.
+      // No head/dirty expectations supplied ⇒ those booleans are null; the root
+      // expectation is structurally satisfied (the target IS the requested root).
       assert.equal(parsed.workspaceProof.expectedGitHeadMatch, null);
       assert.equal(parsed.workspaceProof.expectedDirtyMatch, null);
-      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, null);
+      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, true);
 
       // Original no-leak guarantees preserved (leadSession/opaqueUuid/raw
       // workspace path/prompt/argv) — none of the dispatcher bait may surface.
@@ -1555,7 +1556,7 @@ test("M11-11C MCP-4: busy dispatch → fixed actionable text, no runId/opaqueUui
     const server = createWaoMcpServer({ registryPath, runDir: "/srv/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch, certGateOverride: false });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "again" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "again", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, true, "busy dispatch is a tool error");
       const dumped = JSON.stringify(res);
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";

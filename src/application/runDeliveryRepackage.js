@@ -878,7 +878,10 @@ async function _recordRejectionAudit({ filePath, events, runId, code, transcript
  * @throws {RepackageRejectionError} (TD-226 closed-set code) on any expected
  *   precondition / scope / inventory / proof rejection — after a readable
  *   transcript exists, exactly one bounded `run.delivery_repackage_rejected`
- *   audit event is appended first (never for malformed_input/run_not_found).
+ *   audit event is appended first (never for malformed_input / run_not_found /
+ *   workspace_not_authorized — ownership is proved before any audited check,
+ *   so a run of a different project, or one whose ownership cannot be proved,
+ *   gets no write into its transcript).
  * @throws {Error} on unexpected packaging / verification / append failures
  *   （会审验收修 opus R2：晚期意外失败可能已留下 Git 移动或已落盘的 created/
  *   outcome 耐久事实——不回滚、转录不保证字节不变；仅早期意外失败才字节不变）
@@ -936,6 +939,21 @@ export async function runDeliveryRepackage({
     throw err;
   }
 
+  // Ownership before anything that can audit: every typed rejection below
+  // appends run.delivery_repackage_rejected to THIS run's transcript, and some
+  // of them (the durable-chain and process_missing checks) fire before the
+  // phase proofs re-check ownership. Proving it here first refuses a run of
+  // another project, or one whose ownership cannot be proved, without a
+  // single write into its transcript.
+  if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
+    throw new RepackageRejectionError("workspace_not_authorized", "runDeliveryRepackage: authorizedWorkspaceRoot is required");
+  }
+  try {
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  } catch (err) {
+    throw new RepackageRejectionError("workspace_not_authorized", `runDeliveryRepackage: ${err?.message ?? "workspace ownership proof failed"}`);
+  }
+
   try {
     try {
       return await _repackageAllPhases({
@@ -965,8 +983,15 @@ export async function runDeliveryRepackage({
     const code = classifyRepackageRejection(err);
     if (code) {
       // TD-226: make the rejected attempt observable in the transcript. The
-      // audit append itself is best-effort (see _recordRejectionAudit).
-      await _recordRejectionAudit({ filePath, events, runId, code, transcriptFactory });
+      // audit append itself is best-effort (see _recordRejectionAudit). A
+      // workspace-ownership rejection is the exception: the requested run
+      // belongs to ANOTHER project, so appending here would write into a
+      // transcript this call was refused for — same no-audit rule as
+      // malformed_input / run_not_found; the fixed rejection still reaches the
+      // Lead.
+      if (code !== "workspace_not_authorized") {
+        await _recordRejectionAudit({ filePath, events, runId, code, transcriptFactory });
+      }
     }
     throw err;
   }

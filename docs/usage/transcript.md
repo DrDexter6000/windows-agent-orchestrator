@@ -40,7 +40,7 @@
 | `run.delivery_verification_unavailable` | 无验证命令（unavailableReason） |
 | `run.delivery_accepted` | Lead 接受，含 updated DeliveryRef + deliveryCommit + reason |
 | `run.delivery_rejected` | Lead 拒绝，含 updated DeliveryRef + deliveryCommit + reason |
-| `run.delivery_repackage_rejected` | `run_delivery_repackage` 的 expected-policy 拒绝审计，payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 |
+| `run.delivery_repackage_rejected` | `run_delivery_repackage` 的 expected-policy 拒绝审计，payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found`/`workspace_not_authorized`（跨项目不写）不落 |
 | `run.read_only_declared` | 只读声明（`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only`），start 时恰一次的 durable 事实。payload 为空（envelope 即事实，无 prompt/路径/argv）；它的存在是 `run_activity` 附带 `readOnlyObservation` 观察投影的权威输入，本身不构成任何门 |
 | `run.lead_commit_check_started` | `runs verify-commit` 首命令前写入：checkId 随机 nonce、受检提交全形、命令清单原文 + commands-file 字节 sha256、timeoutMs、终态判定依据（准入只认终态 run.state_change；legacy 推断终态无准入资格，追加自检事件会翻转其推断状态）、提交关系事实字段（isDeliveryCommit/containsDeliveryCommit/adoptedFromTrailer，记事实不设拒）；`kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁。仅有 started 无 outcome 是合法的不完整证据，绝不读作通过 |
 | `run.lead_commit_check_outcome` | `runs verify-commit` 收口：status∈{passed,failed,aborted}、results[]（index/exitCode/timedOut/durationMs + 失败 8KiB 尾）、独立 cleanup∈{ok,failed} 字段。不做恰一条 CAS（允许多次核验，checkId 区分）；本事件族不进 validateDeliveryFacts/decide/wao accept 的任何判定输入 |

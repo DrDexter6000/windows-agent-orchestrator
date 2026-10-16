@@ -10,10 +10,24 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { collectRunMessages } from "../../src/application/runCollect.js";
 import { projectCollectResult } from "../../src/application/runCollectProjection.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+
+// Shared per-call target for run_collect (the real service verifies
+// ownership; synthetic transcripts carry this root as run.started cwd).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m114-red-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
 
 // ===== Helpers =====
 
@@ -29,7 +43,7 @@ function buildProcessTranscript(runDir, runId, messageCount, extraEvents = []) {
   const lines = [
     jl({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
     jl({ type: "session.created", backend: "process", backendSessionId: "proc_redo", runId, agentId: "w" }),
-    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
   ];
   for (const e of extraEvents) lines.push(jl(e));
   for (let i = 0; i < messageCount; i += 1) {
@@ -171,7 +185,7 @@ test("M11-4-REWORK-RED-3: cursor-less page 1 projection/schema failure → zero 
     const [c, s] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(s), client.connect(c)]);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "page 1 projection failure → isError");
       assert.ok(/run_collect failed/.test(res.content.find((b) => b.type === "text").text));
     } finally {

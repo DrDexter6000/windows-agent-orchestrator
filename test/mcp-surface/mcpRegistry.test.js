@@ -1184,7 +1184,7 @@ test("R7-C-4: run_dispatch + DispatchCwdNotFoundError → closed-set dispatch_cw
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "x" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir } });
       assert.equal(dispatchCalls, 1, "dispatcher reached (workspace bound), then refused typed");
       assert.equal(res.isError, true, "error flagged");
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
@@ -1276,7 +1276,7 @@ test("R10-A-MCP-2: `model` threads to the dispatcher as modelOverride; absent mo
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", model: "gpt-5.6-sol-xhigh" },
+        arguments: { agentId: "coder_low", prompt: "do it", model: "gpt-5.6-sol-xhigh", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, "accepted dispatch");
       assert.equal(captured.length, 1);
@@ -1290,7 +1290,7 @@ test("R10-A-MCP-2: `model` threads to the dispatcher as modelOverride; absent mo
         "output schema unchanged — model is input-only on the wire",
       );
       // Absent model = byte-compatible dispatcher input (no key at all).
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again", expectedWorkspaceRoot: dir } });
       assert.equal(captured.length, 2);
       assert.equal("modelOverride" in captured[1], false, "ordinary dispatch threads no modelOverride");
     } finally {
@@ -1325,7 +1325,7 @@ test("R10-A-MCP-3: bad `model` values are rejected at the wire (SSOT shape); dis
         try {
           const res = await client.callTool({
             name: "run_dispatch",
-            arguments: { agentId: "coder_low", prompt: "y", model: bad },
+            arguments: { agentId: "coder_low", prompt: "y", model: bad, expectedWorkspaceRoot: dir },
           });
           // If a result came back it must be an explicit error — never success.
           assert.equal(res.isError, true, `wire rejects model=${JSON.stringify(bad)}`);
@@ -1363,7 +1363,7 @@ test("R10-A-MCP-4: typed reuse conflict from the service collapses to the fixed 
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "y", model: "glm-5.3" },
+        arguments: { agentId: "coder_low", prompt: "y", model: "glm-5.3", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, true, "error flagged");
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
@@ -1459,7 +1459,7 @@ test("R11-1-MCP-2: `reasoning` threads to the dispatcher as reasoningOverride; c
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", model: "gpt-5.6-sol-xhigh", reasoning: "xhigh" },
+        arguments: { agentId: "coder_low", prompt: "do it", model: "gpt-5.6-sol-xhigh", reasoning: "xhigh", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, "accepted dispatch");
       assert.equal(captured.length, 1);
@@ -1474,7 +1474,7 @@ test("R11-1-MCP-2: `reasoning` threads to the dispatcher as reasoningOverride; c
         "output schema unchanged — reasoning is input-only on the wire",
       );
       // Absent reasoning = byte-compatible dispatcher input (no key at all).
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again", expectedWorkspaceRoot: dir } });
       assert.equal(captured.length, 2);
       assert.equal("reasoningOverride" in captured[1], false, "ordinary dispatch threads no reasoningOverride");
       assert.equal("modelOverride" in captured[1], false, "ordinary dispatch threads no modelOverride either");
@@ -1510,7 +1510,7 @@ test("R11-1-MCP-3: values outside the closed set are rejected at the wire (zod e
         try {
           const res = await client.callTool({
             name: "run_dispatch",
-            arguments: { agentId: "coder_low", prompt: "y", reasoning: bad },
+            arguments: { agentId: "coder_low", prompt: "y", reasoning: bad, expectedWorkspaceRoot: dir },
           });
           // If a result came back it must be an explicit error — never success.
           assert.equal(res.isError, true, `wire rejects reasoning=${JSON.stringify(bad)}`);
@@ -1548,7 +1548,7 @@ test("R11-1-MCP-4: typed reuse conflict from the service collapses to the fixed 
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "y", reasoning: "high" },
+        arguments: { agentId: "coder_low", prompt: "y", reasoning: "high", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, true, "error flagged");
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";

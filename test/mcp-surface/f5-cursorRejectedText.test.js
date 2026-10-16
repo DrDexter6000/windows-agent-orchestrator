@@ -78,7 +78,7 @@ function writeCollectTranscript(runDir, runId, messageBodies) {
   mkdirSync(runDir, { recursive: true });
   const lines = [
     JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_f5", runId, agentId: "w" }),
-    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-10-08T00:00:00.000Z", runId, agentId: "w" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-10-08T00:00:00.000Z", runId, agentId: "w", cwd: TARGET }),
   ];
   messageBodies.forEach((body, i) => {
     lines.push(JSON.stringify({
@@ -122,6 +122,10 @@ function writeWaitingTranscript(runDir, runId, repo) {
   writeFileSync(join(runDir, `${runId}.jsonl`), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
 }
 
+// Shared per-call target (the real collect service verifies ownership;
+// the synthetic transcripts carry this root as their run.started cwd).
+const TARGET = (() => { const d = mkdtempSync(join(tmpdir(), "wao-f5-target-")); makeGitRepo(d); return d; })();
+
 // ===== A — run_collect =====
 
 test("F5-A1: run_collect malformed cursor → dedicated text, zero audit append", async () => {
@@ -135,7 +139,7 @@ test("F5-A1: run_collect malformed cursor → dedicated text, zero audit append"
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "isError flagged");
       assert.equal(textOf(res), COLLECT_REJECTED_MCP, "dedicated cursor-rejected copy (exact)");
       assert.ok(!res.structuredContent, "no structuredContent on cursor rejection");
@@ -162,10 +166,10 @@ test("F5-A2: run_collect cross-run cursor replay → dedicated text, zero audit 
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const resA = await client.callTool({ name: "run_collect", arguments: { runId: "runA" } });
+      const resA = await client.callTool({ name: "run_collect", arguments: { runId: "runA", expectedWorkspaceRoot: TARGET } });
       const parsedA = JSON.parse(resA.content.find((b) => b.type === "text").text);
       assert.ok(parsedA.nextCursor, "runA has a next cursor");
-      const resB = await client.callTool({ name: "run_collect", arguments: { runId: "runB", cursor: parsedA.nextCursor } });
+      const resB = await client.callTool({ name: "run_collect", arguments: { runId: "runB", cursor: parsedA.nextCursor, expectedWorkspaceRoot: TARGET } });
       assert.equal(resB.isError, true, "cross-run replay fails closed");
       assert.equal(textOf(resB), COLLECT_REJECTED_MCP, "dedicated cursor-rejected copy (exact)");
       assert.equal(statSync(pathB).size, bytesBefore, "runB transcript byte-identical (no audit append)");

@@ -160,7 +160,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and advisor
     });
     const client = await buildInMemoryClient(server);
     try {
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: dir } });
       assert.equal(callCount, 1, "dispatcher called exactly once");
       assert.ok(captured.registryPath, "server-owned registryPath passed through");
       assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
@@ -204,7 +204,7 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "secret-prompt-value" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "secret-prompt-value", expectedWorkspaceRoot: dir } });
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
@@ -224,10 +224,13 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
         "workspaceProof has source/head/dirty + 3 nullable match booleans");
       assert.ok(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(parsed.workspaceProof.gitHead), "proof gitHead is canonical hex");
       assert.equal(typeof parsed.workspaceProof.dirty, "boolean", "proof dirty is boolean");
-      // No expectations were supplied → all match booleans are null.
+      // No head/dirty expectations were supplied → those booleans are null. The
+      // root expectation is structurally satisfied (the target IS the requested
+      // root) and the proof reports the per-call target source.
       assert.equal(parsed.workspaceProof.expectedGitHeadMatch, null);
       assert.equal(parsed.workspaceProof.expectedDirtyMatch, null);
-      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, null);
+      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, true);
+      assert.equal(parsed.workspaceProof.source, "call_target");
 
       // No leaks.
       const dumped = JSON.stringify(res);
@@ -329,7 +332,7 @@ test("M9-2B-05: dispatcher error returns fixed safe text, no secret/path leak", 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, true, "error flagged");
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(SECRET), "no secret leak");
@@ -373,7 +376,7 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
 
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "failing_worker", prompt: "bounded task" },
+      arguments: { agentId: "failing_worker", prompt: "bounded task", expectedWorkspaceRoot: dir },
     });
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
@@ -449,7 +452,7 @@ test("M9-2B-08: summary-less Fresh clone dispatches via real MCP + detached runn
 
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "fresh_worker", prompt: "bounded task" },
+      arguments: { agentId: "fresh_worker", prompt: "bounded task", expectedWorkspaceRoot: dir },
     });
     // The certification gate must NOT fire anywhere in the path. Note the gate
     // (when enabled) fires INSIDE the detached runner — RunManager.start appends
@@ -519,7 +522,7 @@ test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outc
     try {
       const res = await mcpClient.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "parity_worker", prompt: "parity task" },
+        arguments: { agentId: "parity_worker", prompt: "parity task", expectedWorkspaceRoot: dir },
       });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       mcpRunId = parsed.runId;
@@ -596,7 +599,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
-        agentId: "coder_low", prompt: "do it",
+        agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       },
     });
@@ -646,30 +649,36 @@ test("M9-7A-05: MCP delivery with both commands+reason rejected, service count 0
 });
 
 test("M9-7A-06: MCP delivery with no verification rejected, service count 0", async () => {
-  let callCount = 0;
-  const fakeDispatch = async () => { callCount += 1; return { accepted: true, runId: "x", state: "pending" }; };
-  const server = createWaoMcpServer({
-    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
-  });
-  const client = await buildInMemoryClient(server);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-06-"));
   try {
-    let rejected = false;
-    let result = null;
+    makeGitRepo(dir);
+    let callCount = 0;
+    const fakeDispatch = async () => { callCount += 1; return { accepted: true, runId: "x", state: "pending" }; };
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: join(dir, "runs"), dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
     try {
-      result = await client.callTool({
-        name: "run_dispatch",
-        arguments: {
-          agentId: "x", prompt: "y",
-          delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
-        },
-      });
-    } catch { rejected = true; }
-    if (!rejected) { assert.equal(result.isError, true); rejected = true; }
-    assert.ok(rejected);
-    assert.equal(callCount, 0);
+      let rejected = false;
+      let result = null;
+      try {
+        result = await client.callTool({
+          name: "run_dispatch",
+          arguments: {
+            agentId: "x", prompt: "y", expectedWorkspaceRoot: dir,
+            delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
+          },
+        });
+      } catch { rejected = true; }
+      if (!rejected) { assert.equal(result.isError, true); rejected = true; }
+      assert.ok(rejected);
+      assert.equal(callCount, 0);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   } finally {
-    await client.close();
-    await server.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -690,7 +699,7 @@ test("M9-7A-07: non-delivery dispatch still works identically", async () => {
     });
     const client = await buildInMemoryClient(server);
     try {
-      await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(callCount, 1);
       assert.ok(!captured.delivery, "no delivery forwarded for non-delivery dispatch");
     } finally {
@@ -789,7 +798,7 @@ test("M12-25-MCP-ROUT-2: malicious injected dispatcher (bad routing + leak field
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, true, "out-of-set providerSessionRouting is rejected (cannot claim a resumed session)");
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(OPAQUE), "no opaque session id leak");
@@ -825,7 +834,7 @@ test("M12-25-MCP-ROUT-3: injected dispatcher returning valid routing + leak fiel
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, undefined, "valid routing value accepted");
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.providerSessionRouting, "not_used", "valid routing threaded through");
@@ -858,7 +867,7 @@ test("M12-25-MCP-ROUT-4: injected first_turn_requested threads through verbatim"
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.providerSessionRouting, "first_turn_requested", "first_turn_requested accepted + threaded");
     } finally {
@@ -891,7 +900,7 @@ test("M12-25-MCP-ROUT-5: dispatcher omits providerSessionRouting → fixed safe 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, true, "missing required providerSessionRouting → output validation fails");
       assert.equal(res.structuredContent, undefined, "no structuredContent on the fixed safe error");
       const dumped = JSON.stringify(res);
@@ -941,7 +950,7 @@ test("resolver parity: server-threaded backendFor covers every KNOWN_BACKENDS; u
       await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "mm", prompt: "pin",
+          agentId: "mm", prompt: "pin", expectedWorkspaceRoot: dir,
           delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
           continuable: true,
         },
@@ -1000,7 +1009,7 @@ test("2026-10-04: ContinuableDeliveryOnlyError collapses to the fixed continuabl
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "y", continuable: true },
+        arguments: { agentId: "coder_low", prompt: "y", continuable: true, expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, true);
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
@@ -1029,7 +1038,7 @@ test("2026-10-04: ContinuableBackendUnsupportedError collapses to the fixed cont
       const res = await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "coder_low", prompt: "y", continuable: true,
+          agentId: "coder_low", prompt: "y", continuable: true, expectedWorkspaceRoot: dir,
           delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
         },
       });
@@ -1062,7 +1071,7 @@ test("2026-10-04: CorrectableBackendUnsupportedError collapses to the fixed corr
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "y", correctable: true },
+        arguments: { agentId: "coder_low", prompt: "y", correctable: true, expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, true);
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";

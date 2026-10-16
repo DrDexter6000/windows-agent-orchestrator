@@ -310,7 +310,7 @@ test("M11-8B-A9: MCP run_dispatch output schema declares + returns agentId", asy
       assert.ok("agentId" in props, "run_dispatch outputSchema declares agentId");
       const result = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "bounded task" },
+        arguments: { agentId: "coder_low", prompt: "bounded task", expectedWorkspaceRoot: dir },
       });
       assert.ok(result.structuredContent.runId, "dispatch returned a runId");
       assert.equal(result.structuredContent.agentId, "coder_low", "MCP run_dispatch returns canonical agentId");
@@ -371,7 +371,7 @@ test("M11-8B-A11: MCP run_collect structuredContent agentId ignores worker text"
     const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
     const client = await buildInMemoryClient(server);
     try {
-      const result = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const result = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: dir } });
       assert.equal(result.structuredContent.agentId, "researcher", "structured agentId is durable, not worker text");
     } finally {
       await client.close();

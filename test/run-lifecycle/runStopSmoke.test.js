@@ -81,7 +81,7 @@ test("SMOKE-POS: real process stop via MCP run_stop", async () => {
     const client = await buildClient(server);
     try {
       // Call run_stop through MCP
-      const res = await client.callTool({ name: "run_stop", arguments: { runId, ...stopProof(runDir, runId) } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId, expectedWorkspaceRoot: dir, ...stopProof(runDir, runId) } });
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
@@ -163,7 +163,7 @@ test("SMOKE-NEG: cross-workspace stop rejected, process survives", async () => {
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId, ...stopProof(runDir, runId) } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId, expectedWorkspaceRoot: dirB, ...stopProof(runDir, runId) } });
       assert.ok(res.isError, "must be rejected for cross-workspace");
       assert.equal(res.content[0].text, "run_stop failed");
     } finally {

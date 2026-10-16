@@ -424,7 +424,17 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
 const RED_23_WIRE = 75492;
 
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；硬顶与规则见决定 0078。
-const FROZEN_23_WIRE_CEILING = 85101;
+// 2026-10-15（Owner 批准重冻）：会动工作区的工具（run_dispatch / run_continue /
+// run_correct / run_stop / run_collect / run_delivery_decide / run_delivery_
+// repackage / run_delivery_reverify / run_consult create）的目标改为只取本次
+// 调用的 expectedWorkspaceRoot——八个 runId 工具的 inputSchema 增可选
+// expectedWorkspaceRoot、run_consult 增同一字段、WORKSPACE_PROOF.source 枚举
+// 增闭集成员 call_target、lead_preflight workspace 增 projectBucket、runs_list
+// 增 scope 对象，描述各加一句必传目标说明：85101→87406（实测；Owner 硬顶
+// 94532 内）。同批会审修复：run_consult 读取/分页也可带 expectedWorkspaceRoot、
+// run_dispatch_contract_check 按调用目标检查并在出参增 workspaceScope、
+// run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
+const FROZEN_23_WIRE_CEILING = 88048;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -598,6 +608,18 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // lane/role（schema 在 stripped 载荷内），SHA 如实变（无损证明语义不变）。
 // 0045 窗口门（2026-10-05）：run_consult 出参镜像成员补齐——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
+  // 2026-10-15（Owner 批准重冻）：会动工作区的工具目标改为只取本次调用的
+  // expectedWorkspaceRoot（收窄：缺参即拒——决定 0021 修订记录在案）。schema 面
+  // 变更全为 additive：八个 runId 工具 + run_consult 的 inputSchema 各增可选
+  // expectedWorkspaceRoot（run_dispatch/run_dispatch_contract_check 共享入参本就
+  // 有该字段）；run_dispatch 出参 workspaceProof.source 枚举增闭集成员
+  // call_target；lead_preflight workspace 出参增 projectBucket（nullable）；
+  // runs_list 出参增 scope 对象（source + projectBucket）。全部在 stripped 载荷
+  // 内，SHA 如实翻新。描述同步各加一句必传目标说明（desc 顶一并重冻）。
+  // 同批会审修复：run_dispatch_contract_check 出参增 workspaceScope（source +
+  // projectBucket；该工具改为可按调用目标检查），run_consult 读取/分页接受同一
+  // 目标字段——均在 stripped 载荷内，SHA 再如实翻新。
+  "d221a599f101b4bf7df173ecdfd5834123ec9ec6544e9939c45d6e425b3b25ee";
   // TD-220（2026-10-07）：仅活动 schema 扩闭集，按实测更新无 description 合同 hash。
   // TD-226（2026-10-08）：run_delivery_repackage 出参 schema 增 REQUIRED 闭集
   // rejectionReason（nullable enum）——schema 在 stripped 载荷内，SHA 如实翻新；
@@ -636,7 +658,9 @@ const DESC_STRIPPED_CONTRACT_SHA =
 // 0058（2026-10-11，TD-254）：run_continue 出参 rejectionReason enum 增
 // lineage_closed（线系闭合拒因——CONTINUE_REJECTION_REASONS SSOT 扩员）——
 // outputSchema 在 stripped 载荷内，SHA 如实翻新；无描述字节变化；帽内 additive。
-  "7fa75c7525b98023712f30a2bfc2e19ccbc6ac4cb6f4823ba4779efddd56941d";
+  // （历史值：7fa75c7525b98023712f30a2bfc2e19ccbc6ac4cb6f4823ba4779efddd56941d
+  // 为 2026-10-15 重冻前的实测冻结值；412710ee67e315ccee088b9ed58516cfe36a11c3240d6c51087362a9362f5e0f
+  // 为本批首轮重冻值，同批会审修复前的实测值。）
   // 0070（2026-10-13）：run_activity 的 tool_use 条目增可选 detail、tool_result 条目增
   // tail / truncated——outputSchema 在 stripped 载荷内，SHA 如实翻新。
   // 0069（2026-10-13）：run_activity command 条目增 text / truncated、入参增 order、
@@ -674,10 +698,17 @@ const PRE_M12_16_DESC_BASELINE = 11812;
 // addition.
 const M12_16_DESC_REDUCTION_MIN = 500;
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；硬顶与规则见决定 0078。
-const FROZEN_23_DESC_CEILING = 10125;
+// 2026-10-15（Owner 批准重冻）：会动工作区的工具改为必传 expectedWorkspaceRoot
+// （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
+// 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
+// run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
+const FROZEN_23_DESC_CEILING = 11783;
 
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；口径见 measureSurface()，规则见决定 0078。
-const FROZEN_23_HOSTVISIBLE_CEILING = 20699;
+// 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
+// hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
+// 同批会审修复再实测：22596→22941（硬顶同上）。
+const FROZEN_23_HOSTVISIBLE_CEILING = 22941;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

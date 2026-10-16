@@ -97,7 +97,7 @@ function assertFixedCollapse(res) {
 // ===== B1: schema shared + tool registered =====
 
 test("B1: run_dispatch_contract_check is registered, read-only/idempotent, shares run_dispatch input schema", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const { tools } = await client.listTools();
     const rd = tools.find((t) => t.name === "run_dispatch");
     const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
@@ -127,7 +127,7 @@ test("B1: run_dispatch_contract_check is registered, read-only/idempotent, share
 // ===== B4: bounded output over the wire =====
 
 test("B4: precheck returns bounded advisory result over the wire — closed-set, profile counts only, no leak", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
@@ -162,7 +162,7 @@ test("B4: precheck returns bounded advisory result over the wire — closed-set,
 
 for (const field of ["verificationCommands", "verificationSetupCommands"]) {
   test(`TD-227: ${field} lint matrix over the wire`, async (t) => {
-    await withServer(async ({ client }) => {
+    await withServer(async ({ dir, client }) => {
       const cases = [
         ["directory", "node --test test/mcp-surface", ["verification_dir_test_form", "verification_bare_node"]],
         ["quoted node.exe and directory", '\t"NODE.EXE" --test --test-force-exit "test/with spaces"', ["verification_dir_test_form", "verification_bare_node"]],
@@ -220,7 +220,7 @@ for (const field of ["verificationCommands", "verificationSetupCommands"]) {
 }
 
 test("TD-227: lint plus registry and path warnings retain bounded MCP observations", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
@@ -274,7 +274,7 @@ test("TD-227: lexical lint works without workspace or filesystem probes", async 
 // listAgents snapshot) and does NOT misread the missing id as registry_unreadable.
 
 test("B4 (MCP boundary, production parity): missing agentId over the wire → registry observed + agent_not_found (NOT registry_unreadable)", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
@@ -292,7 +292,7 @@ test("B4 (MCP boundary, production parity): missing agentId over the wire → re
 });
 
 test("B4: precheck issueCodes is the frozen closed set; availableProfiles only when no profile selected", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     // No profile selected → bounded availableProfiles surfaced.
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
@@ -321,12 +321,13 @@ test("B4: precheck issueCodes is the frozen closed set; availableProfiles only w
 
 test("B1: precheck has zero side effect — a dispatch spy that throws is never reached", async () => {
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-test-v1",
       },
@@ -342,13 +343,14 @@ test("B1: precheck has zero side effect — a dispatch spy that throws is never 
 
 test("B1: run_dispatch works without any prior precheck call (independence)", async () => {
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     // No run_dispatch_contract_check call at all — straight to run_dispatch.
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "do work",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
       },
     });
@@ -369,12 +371,13 @@ test("B1: run_dispatch works without any prior precheck call (independence)", as
 test("B3: run_dispatch with executionProfileId folds profile verification into the delivery the dispatcher receives", async () => {
   let captured = null;
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "do work",
+        expectedWorkspaceRoot: dir,
         // delivery has NO inline verification — the profile supplies it.
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-ci-test-v1",
@@ -403,12 +406,13 @@ test("B3: run_dispatch with executionProfileId folds profile verification into t
 
 test("B3: run_dispatch with unknown profile id → fixed error, dispatcher count 0", async () => {
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "rust-cargo-test-v1",
       },
@@ -423,12 +427,13 @@ test("B3: run_dispatch with unknown profile id → fixed error, dispatcher count
 
 test("B3: run_dispatch with profile + inline verification conflict → fixed error, count 0", async () => {
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
         executionProfileId: "node-npm-test-v1",
       },
@@ -443,12 +448,13 @@ test("B3: run_dispatch with profile + inline verification conflict → fixed err
 
 test("B3: run_dispatch with profile but no delivery → fixed error, count 0", async () => {
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -463,12 +469,13 @@ test("B3: run_dispatch with delivery but no verification and no profile → fixe
   // Regression guard: removing the schema-level refine must NOT let a verification-
   // less delivery reach the dispatcher. The handler enforces it (call count stays 0).
   let dispatchCalls = 0;
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
       },
     });
@@ -482,12 +489,13 @@ test("B3: run_dispatch with delivery but no verification and no profile → fixe
 // ===== B1: precheck advisory never blocks — even an unknown profile reports, not errors =====
 
 test("B1: precheck reports an unknown profile as advisory code, never throws/gates", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "rust-cargo-test-v1",
       },
@@ -533,12 +541,13 @@ function validAvailableProfile(id) {
 }
 
 test("B4/output-boundary: a malformed service result (unknown internal field) collapses, nothing crosses", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-test-v1",
       },
@@ -559,12 +568,13 @@ test("B4/output-boundary: a malformed service result (unknown internal field) co
 });
 
 test("B4/output-boundary: an oversized issueCodes array collapses (cap = CONTRACT_CHECK_ISSUE_CODES.length)", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-test-v1",
       },
@@ -584,12 +594,13 @@ test("B4/output-boundary: an oversized issueCodes array collapses (cap = CONTRAC
 });
 
 test("B4/output-boundary: an oversized observations array collapses (cap = CONTRACT_CHECK_SECTIONS.length)", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-test-v1",
       },
@@ -609,12 +620,13 @@ test("B4/output-boundary: an oversized observations array collapses (cap = CONTR
 });
 
 test("B4/output-boundary: an oversized availableProfiles array collapses (cap = EXECUTION_PROFILE_IDS.length)", async () => {
-  await withServer(async ({ client }) => {
+  await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
       arguments: {
         agentId: "coder_low",
         prompt: "x",
+        expectedWorkspaceRoot: dir,
         delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
         executionProfileId: "node-npm-test-v1",
       },

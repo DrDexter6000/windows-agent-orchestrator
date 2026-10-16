@@ -84,6 +84,7 @@
       "mcp-surface/f5-cursorRejectedText.test.js",
       "mcp-surface/m12-10-tool-surface.test.js",
       "mcp-surface/m12-12-semantics-catalog.test.js",
+      "mcp-surface/mcpCallTarget.test.js",
       "mcp-surface/mcpPlaybook.test.js",
       "mcp-surface/mcpRegistryCertEvidence.test.js",
       "mcp-surface/mcpRunCollect.test.js",

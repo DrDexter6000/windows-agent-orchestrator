@@ -28,16 +28,17 @@
 //     NO prompt, command text, absolute path, credential, PID/session/provider
 //     payload is ever placed in the result.
 //   - TD-157 referenced-path probe: when the contract resolved and the workspace
-//     is bound, relative-path-looking literals in the RESOLVED verification
-//     assertion+setup commands are stat-checked against the bound root; an
+//     scope is resolved, relative-path-looking literals in the RESOLVED
+//     verification assertion+setup commands are stat-checked against the scope
+//     root (call target or binding); an
 //     allowedPaths entry whose base AND parent directory both do not exist is a
 //     strong-typo signal too. The probe is FAIL-OPEN and ADVISORY: any fs error
 //     or uncertainty is silently skipped, and the emitted code is a
 //     section-level advisory label that NEVER affects contractValid. Observation
 //     text is fixed — dynamic paths are never echoed.
 //   - Zero side effect: reads the registry (read-only), stats candidate paths
-//     under the already-resolved bound workspace root (read-only), and consumes
-//     an already-resolved workspace binding. It never dispatches, forks, writes
+//     under the already-resolved scope root (read-only), and consumes
+//     an already-resolved workspace scope. It never dispatches, forks, writes
 //     a transcript, or mutates any state.
 //
 // Architectural contract:

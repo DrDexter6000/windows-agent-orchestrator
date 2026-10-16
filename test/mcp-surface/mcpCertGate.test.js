@@ -64,7 +64,7 @@ async function dispatchOnce({ dir, gateEnv, summaryWorkers }) {
     const client = await buildInMemoryClient(server);
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "fresh_lane", prompt: "gate probe" },
+      arguments: { agentId: "fresh_lane", prompt: "gate probe", expectedWorkspaceRoot: dir },
     });
     const text = res.content?.find((b) => b.type === "text")?.text ?? "";
     return { dispatched, isError: Boolean(res.isError), text };
@@ -162,7 +162,7 @@ test("D10 双洞①：门开 + per-dispatch model 覆盖 = 拒绝（P1-1 互斥�
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "fresh_lane", prompt: "x", model: "never-certified-model" },
+        arguments: { agentId: "fresh_lane", prompt: "x", model: "never-certified-model", expectedWorkspaceRoot: dir },
       });
       const text = res.content?.find((b) => b.type === "text")?.text ?? "";
       assert.equal(dispatched, null, "model 覆盖×门开=零 dispatch");
@@ -200,7 +200,7 @@ test("D10 双洞②：门开 + run_consult 席位不在清单 = 整体拒绝点�
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_consult",
-        arguments: { brief: "gate consult probe", seats: ["listed_lane", "unlisted_lane"] },
+        arguments: { brief: "gate consult probe", seats: ["listed_lane", "unlisted_lane"], expectedWorkspaceRoot: dir },
       });
       const text = res.content?.find((b) => b.type === "text")?.text ?? "";
       assert.equal(consultDispatches, 0, "任一席位不在清单=整体零扇出");
@@ -238,7 +238,7 @@ test("B1：门开 + per-dispatch reasoning 覆盖 = 拒绝（effort 轴在指纹
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max" },
+        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max", expectedWorkspaceRoot: dir },
       });
       const text = res.content?.find((b) => b.type === "text")?.text ?? "";
       assert.equal(dispatched, null, "reasoning 覆盖×门开=零 dispatch");
@@ -269,7 +269,7 @@ test("B1 负钉：门关 + reasoning 覆盖 = 正常透传（advisory 语义不�
       const client = await buildInMemoryClient(server);
       await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max" },
+        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max", expectedWorkspaceRoot: dir },
       });
       assert.ok(dispatched, "门关=reasoning 覆盖正常透传");
     } finally { await server.close(); }
@@ -302,7 +302,7 @@ test("opus 盲区钉：门开 + 车道 effort 与记录 executionProfile.effort 
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "fresh_lane", prompt: "x" },
+        arguments: { agentId: "fresh_lane", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(dispatched, null, "effort 漂移=零 dispatch（一次性覆盖已拒，配置漂移不得旁路）");
       assert.equal(Boolean(res.isError), true);
@@ -332,7 +332,7 @@ test("opus 盲区钉负例：effort 一致（含 null≡null 通道不可表达�
       });
       try {
         const client = await buildInMemoryClient(server);
-        await client.callTool({ name: "run_dispatch", arguments: { agentId: "fresh_lane", prompt: "x" } });
+        await client.callTool({ name: "run_dispatch", arguments: { agentId: "fresh_lane", prompt: "x", expectedWorkspaceRoot: dir } });
         assert.ok(dispatched, `effort 一致（profile=${profileEffort}）必须放行`);
       } finally { await server.close(); }
     } finally { cleanupDir(dir); }
@@ -366,7 +366,7 @@ test("B4 钉：门开 + run_continue 父车道不在清单 = 拒绝（零 fork�
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_probe", prompt: "x", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "probe" } },
+        arguments: { parentRunId: "run_parent_probe", prompt: "x", expectedWorkspaceRoot: dir, delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "probe" } },
       });
       const text = res.content?.find((b) => b.type === "text")?.text ?? "";
       assert.equal(continued, 0, "父车道不在清单=零 fork");
@@ -375,7 +375,7 @@ test("B4 钉：门开 + run_continue 父车道不在清单 = 拒绝（零 fork�
       // 父不可解析（无转录）：门不猜——透传给 continueService（注入桩计数）。
       const res2 = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_ghost_missing", prompt: "x", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "probe" } },
+        arguments: { parentRunId: "run_ghost_missing", prompt: "x", expectedWorkspaceRoot: dir, delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "probe" } },
       });
       assert.equal(continued, 1, "父不可解析=门上透传（下游 continueService 自身父校验接管）");
     } finally { await server.close(); }

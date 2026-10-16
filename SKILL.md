@@ -5,18 +5,18 @@ description: "[LEAD-ONLY] Use when the user asks to dispatch, supervise, resume,
 
 # WAO Lead Operator
 
-Loading this skill makes you the Lead Operator: you own user-needs understanding, task-goal definition, decomposition and orchestration (parallel vs serial), suitable-worker dispatch, delivery acceptance or rejection, aggregation and integration, and execution-summary reporting. WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks under supervised production trial — not autonomous production.
+Loading this skill makes you the Lead Operator: you own user-needs understanding, task-goal definition, decomposition and orchestration, suitable-worker dispatch, delivery acceptance or rejection, integration, and execution-summary reporting. WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks under supervised production trial — not autonomous production.
 
 WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
-`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight does **not** probe current provider authentication, entitlement, quota, or rate limits; one malformed entry never hides healthy workers; an unreadable registry is a distinct hard error. Detail: `docs/usage.md`.
+`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight does **not** probe current provider authentication, entitlement, quota, or rate limits; a bad entry never hides healthy workers, and an unreadable registry is a distinct hard error. Detail: `docs/usage.md`.
 
 ## Routing Contract
 
 A WAO worker and a host-native subagent are different channels — only a successful `run_dispatch` returning a `runId` counts as "used WAO".
 
 1. An explicit "use WAO"/"dispatch an external worker" request must not be silently replaced by a native subagent, and never impersonate a WAO worker.
-2. `lead_preflight({ workspaceRoot })` binds the WAO route; advisory only — never auto-stop on warning/partial/unknown.
+2. `lead_preflight({ workspaceRoot })` advisory only — never auto-stop on warning/partial/unknown; the selection scopes read tools, never a dispatch target.
 3. State any host-rule vs WAO-route conflicts before dispatching. Native subagents may do Lead-side assistance but produce no WAO transcript/delivery. WAO is optional; unspecified route → the Lead chooses.
 
 ## Mainline
@@ -29,9 +29,11 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 2. Truly independent tasks: dispatch workers in parallel.
 3. Tiny, tightly coupled, or Lead-context-heavy work: the Lead may do it directly.
 4. Add a Tester when independent execution evidence is useful. The canonical `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery.
-5. Hard check: `verificationCommands` containing the full suite (`npm test`) must declare `verificationTimeoutMs ≥ 1200000` — the default 300000 reliably hits `command_timeout` (TD-138).
+5. Hard check: `verificationCommands` containing the full suite (`npm test`) must declare `verificationTimeoutMs ≥ 1200000` — the default 300000 reliably hits `command_timeout`.
 
-Route by semantic coupling (ambiguity, long-horizon coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by name. 0046 车道（模型名席位）：多数实现优先 `glm-pro`；副通道/视觉用 `glm-flash`/`deepseek-flash`；创意/文案用 `kimi`. Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+Route by semantic coupling (ambiguity, coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by name. 0046 车道（模型名席位）：多数实现优先 `glm-pro`；副通道/视觉用 `glm-flash`/`deepseek-flash`；创意/文案用 `kimi`. Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+
+**Target-per-call**: dispatch/continue/correct/stop/collect/decide/repackage/reverify/consult-create REQUIRE `expectedWorkspaceRoot` — this project's absolute Git top-level (subdirs rejected); it IS the target (worker cwd, runner `--cwd`, transcript attribution); missing/unprovable → refused before side effects, retry with it. `expectedGitHead`/`expectedDirty`: optional assertions against it. Session selection scopes read-only tools only; one instance shares one selection.
 
 Workflow size ladder: simple read-only/tiny Lead task → do directly. One bounded worker task: dispatch, supervise, accept, report. Two or more independent workers, cross-session work, or an explicitly audited engagement → six-stage pipeline (run bare `wao stage` or `wao declare` to inspect stages/reason codes; `wao stage` records progress, `wao declare` records Lead self-work deviations).
 
@@ -45,7 +47,7 @@ A delivery task prompt must NOT ask the worker to commit, run `git add/commit/..
 
 ## Safety Preflight
 
-Before dispatch: `registry_list` for inventory + required-credential presence + recorded certification (advisory, not a gate) + any lane `dispatchHold` pause note (Owner's words, advisory only — the dispatch decision stays with the Lead). Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
+Before dispatch: `registry_list` for inventory + required-credential presence + any lane `dispatchHold` pause note (Owner's words, advisory only — the dispatch decision stays with the Lead). Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
 
 **Before unattended/stop-sensitive work**: read `references/safety-incidents.md`. **Only when using opencode**: read `references/opencode-pitfalls.md`.
 
@@ -57,13 +59,13 @@ Dispatch target forms (0045): give **`agentId`** (seat alias — unchanged) OR *
 
 Roster: `lead_preflight`, `registry_list`, `workspace_status`, `workspace_select`, `run_dispatch`, `run_dispatch_contract_check`, `run_consult`, `run_continue`, `run_correct`, `run_status`, `run_wait`, `run_await_result`, `run_collect`, `run_activity`, `run_diagnose`, `run_delivery`, `run_delivery_review`, `run_delivery_review_bundle`, `run_delivery_reverify`, `run_delivery_decide`, `run_delivery_repackage`, `run_stop`, `runs_list`.
 
-Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; never auto-call) and `semanticNotes` (1..4 `{id,meaning,doesNotMean}`; `wao://semantics/{id}`). `run_activity.scopeObservation` is advisory: `complete:true` means a terminal snapshot with every confirmed write evaluable, not filesystem completeness. For exact field semantics (`delivery.verificationTimeoutMs`, `providerSessionRouting`, `executionProfileId`, `readOnly`), read `docs/usage/dispatch.md` (MCP `run_dispatch`) and generated schemas `docs/surface/mcp-tools.md`.
+Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; never auto-call) and `semanticNotes` (1..4; `wao://semantics/{id}`). `run_activity.scopeObservation.complete:true` = terminal snapshot with every confirmed write evaluable, not filesystem completeness. Exact field semantics: `docs/usage/dispatch.md` + `docs/surface/mcp-tools.md`.
 
 Wait for meaningful changes; do not narrate unchanged polls. Before supervision, read [quiet supervision](docs/usage/supervise.md#lead-quiet-supervision).
 
-**Short-lived host sessions kill detached runners.** Hosts that clean up descendant processes on exit (headless `zcode -p`, one-shot CI scripts) have been observed hanging with zero progress (no error event; serve side may already be done), then reaped by host process-tree cleanup exactly +3600s after dispatch (delayed, not immediate). Dispatch from long-lived hosts, or keep the session alive through terminal state (dispatch → run_await_result → sleep bridges → collect in ONE session). CLI background dispatch is unaffected by shell exit.
+**Short-lived host sessions kill detached runners.** Hosts that clean up descendant processes on exit (headless `zcode -p`, one-shot CI scripts) can hang with zero progress (no error event; serve side may already be done), then get reaped by process-tree cleanup exactly +3600s after dispatch. Dispatch from long-lived hosts, or keep the session alive through terminal state (dispatch → run_await_result → sleep bridges → collect in ONE session). CLI background dispatch is unaffected by shell exit.
 
-**Host per-call timeout ≠ run death.** A wait-family call (`run_wait` / `run_await_result` / `run_consult`) may die at the HOST transport layer ("Tool execution timed out after Nms") while the run keeps living detached. On zcode the host default is 30000ms — the WAO plugin package carries `timeoutMs: 660000` (installs/reinstalls from 2026-10-04; older installs lack it). If you see a host-timeout error: do NOT treat it as run failure — verify with `runs_list`/`run_status`, then wait in smaller steps (`run_wait` 180000..600000 chunks, or `run_status` polling); `run_consult` supports `waitMs: 0` instant snapshot + consultId read mode (0051: MCP returns a capped receipt; per-seat text via `{consultId, seat, page}` — pages reassemble byte-exact, compare textSha256 across pages and restart on mismatch).
+**Host per-call timeout ≠ run death.** A wait-family call (`run_wait` / `run_await_result` / `run_consult`) may die at the HOST transport layer ("Tool execution timed out after Nms") while the run keeps living detached. On zcode the host default is 30000ms — the WAO plugin package carries `timeoutMs: 660000`. If you see a host-timeout error: do NOT treat it as run failure — verify with `runs_list`/`run_status`, then wait in smaller steps (`run_wait` 180000..600000 chunks, or `run_status` polling); `run_consult` supports `waitMs: 0` instant snapshot + consultId read mode (0051: MCP returns a capped receipt; per-seat text via `{consultId, seat, page}` — pages reassemble byte-exact, compare textSha256 across pages and restart on mismatch).
 
 ## Optional Lead Playbooks
 
@@ -91,7 +93,7 @@ Scorecard defaults to `warn`; `--scorecard-mode hard` only when missing evidence
 
 ## State and Read On Demand
 
-Run truth lives in `runs/<runId>.jsonl` (+`projects/*/`); project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. On demand: architecture/event contracts `docs/02-architecture.md`; roadmap `docs/roadmap.md`; operations `docs/usage.md` + `npm run cli -- help`; roles `docs/team-roles.md`; diagnosis `docs/troubleshooting.md`; CLI/tool reference `docs/surface/`（生成层——surface 变更后 `npm run gen:surface` 再生成，不手改）.
+Run truth lives in `runs/<runId>.jsonl` (+`projects/*/`); project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. On demand: architecture/event contracts `docs/02-architecture.md`; roadmap `docs/roadmap.md`; operations `docs/usage.md` + `npm run cli -- help`; roles `docs/team-roles.md`; diagnosis `docs/troubleshooting.md`; CLI/tool reference `docs/surface/`（生成层，随代码再生成）.
 
 At the end of each batch report one line:
 `mainline: <before> -> <after>; next: <shortest next step>`

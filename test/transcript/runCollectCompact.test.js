@@ -34,6 +34,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import {
   projectCollectResult,
@@ -43,6 +44,19 @@ import { collectRunMessages } from "../../src/application/runCollect.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { collectCommand } from "../../src/cli.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
+
+// Shared per-call target for run_collect (the real service verifies
+// ownership; synthetic transcripts carry this root as run.started cwd).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m122a-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
 
 // ===== Helpers =====
 
@@ -89,7 +103,7 @@ function sessionHeader(runId, agentId = "researcher", backend = "process", extra
   return [
     jl({ type: "run.submitted", agentId, ts: "2026-07-28T00:00:00.000Z" }),
     jl({ type: "session.created", backend, backendSessionId: "proc_m122a", runId, agentId, ...extra }),
-    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-28T00:00:01.000Z", runId, agentId }),
+    jl({ type: "run.started", backend: "claude-code", ts: "2026-07-28T00:00:01.000Z", runId, agentId, cwd: TARGET }),
   ].join("");
 }
 function msg(runId, text, idx, agentId = "researcher") {
@@ -288,7 +302,7 @@ test("M12-2A-F2: MCP compact+cursor → service NOT called, fixed error, no leak
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_f2", mode: "compact", cursor: "anytoken" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_f2", mode: "compact", cursor: "anytoken", expectedWorkspaceRoot: TARGET } });
     assert.equal(callCount, 0, "service must NOT be called for compact+cursor");
     assert.equal(res.isError, true, "compact+cursor flagged as error");
     const text = res.content.find((b) => b.type === "text").text;
@@ -338,7 +352,7 @@ test("M12-2A-G1: MCP illegal mode value rejected, service not called", async () 
     let rejected = false;
     let result = null;
     try {
-      result = await client.callTool({ name: "run_collect", arguments: { runId: "run_g1", mode: "summary" } });
+      result = await client.callTool({ name: "run_collect", arguments: { runId: "run_g1", mode: "summary", expectedWorkspaceRoot: TARGET } });
     } catch {
       rejected = true;
     }
@@ -385,7 +399,7 @@ test("M12-2A-H1: MCP compact SUCCESS appends exactly one audit", async () => {
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_h1", mode: "compact" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_h1", mode: "compact", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, undefined, "compact success");
       const parsed = res.structuredContent;
       assert.equal(parsed.view, "compact");
@@ -406,15 +420,19 @@ test("M12-2A-H2: MCP compact where service fails appends ZERO", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m122a-h2-"));
   try {
     const runDir = join(dir, "runs");
-    // Transcript with NO session.created → real service throws before any append.
+    // Transcript with NO session.created → real service throws before any
+    // append. It still carries a run.started ownership cwd for the call's
+    // target, so the refusal being exercised is the missing session metadata,
+    // not the ownership gate.
     writeTranscript(runDir, "run_h2",
       jl({ type: "run.submitted", agentId: "researcher", ts: "2026-07-28T00:00:00.000Z" }) +
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-07-28T00:00:01.000Z", runId: "run_h2", agentId: "researcher", cwd: TARGET }) +
       msg("run_h2", "orphan body", 0));
     const tpath = join(runDir, "run_h2.jsonl");
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_h2", mode: "compact" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_h2", mode: "compact", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "service failure → error");
       assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence");
       assert.ok(!res.structuredContent, "no partial output on service failure");
@@ -472,7 +490,7 @@ test("M12-2A-I1: MCP default (no mode) keeps exact full key set + pagination", a
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_i1" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_i1", expectedWorkspaceRoot: TARGET } });
       const parsed = res.structuredContent;
       // Exact key set — NO compact fields leak into default full output
       // (M12-8B adds availableDrilldowns, the bounded progressive-disclosure
@@ -527,7 +545,7 @@ test("M12-2A-J1: run_collect wire inputSchema exposes mode enum [full,compact], 
       const tools = await client.listTools();
       const rc = tools.tools.find((t) => t.name === "run_collect");
       const props = rc.inputSchema.properties ?? {};
-      assert.deepEqual(Object.keys(props).sort(), ["cursor", "mode", "runId"].sort(), "input has runId + cursor + mode");
+      assert.deepEqual(Object.keys(props).sort(), ["cursor", "expectedWorkspaceRoot", "mode", "runId"].sort(), "input has runId + cursor + mode + per-call target");
       assert.equal(rc.inputSchema.additionalProperties, false, "input strict");
       assert.deepEqual(props.mode.enum, ["full", "compact"], "mode is a closed-set enum");
     } finally {
@@ -580,7 +598,7 @@ test("M12-2A-J3: compact error returns fixed text and leaks no secret/command/pa
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_j3", mode: "compact" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_j3", mode: "compact", expectedWorkspaceRoot: TARGET } });
     assert.equal(callCount, 1);
     assert.equal(res.isError, true);
     const dumped = JSON.stringify(res);
@@ -767,7 +785,7 @@ test("M12-2A-L2: MCP compact collapses serve-sentinel throw to fixed error, zero
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir, collectRunMessagesFn: fakeCollect });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_l2", mode: "compact" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_l2", mode: "compact", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true);
       assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence");
       assert.ok(!res.structuredContent);

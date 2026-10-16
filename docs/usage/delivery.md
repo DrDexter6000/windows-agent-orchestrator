@@ -200,7 +200,7 @@ npm run cli -- runs verify-commit <runId> --commit <sha> --commands-file FILE [-
 - 输入（strict）：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`reason` 上限 2000 字符；runDir/force/merge/push/raw/includeReason 等控制面参数被拒绝。
 - 安全输出：不返回 reason/DeliveryRef（字段形状与闭集见生成层）。
 
-expected policy rejection 是正常结构化结果，不是错误：已存在决策（first-decision-wins 的 loser）或其它 durable 策略拒绝（verification/终态/reject-gate/durable facts 冲突）返回 `decisionAccepted:false` + 闭集 `rejectionReason`（如 `already_decided`）——这是结构化 outcome，消费方按正常结果处理，不视为 tool failure。只有 unexpected/internal 异常（非策略拒绝）才返回固定 `run_delivery_decide failed`，无 partial structured output。Reason 在持久化前 trim+redact，但绝不返回给 MCP。
+expected policy rejection 是正常结构化结果，不是错误：已存在决策（first-decision-wins 的 loser）或其它 durable 策略拒绝（verification/终态/reject-gate/durable facts 冲突）返回 `decisionAccepted:false` + 闭集 `rejectionReason`（如 `already_decided`）。只有 unexpected/internal 异常（非策略拒绝）才返回固定 `run_delivery_decide failed`，无 partial structured output。例外：run 不属于本次调用给出的项目时，返回专用固定文案的错误（零写入、不释放会话）。Reason 在持久化前 trim+redact，但绝不返回给 MCP。
 
 ## MCP `run_delivery_repackage`（model-free 重打包）
 
@@ -228,4 +228,4 @@ expected policy rejection 是正常结构化结果，不是错误：资格/合�
 - `concurrent_terminal_ineligible`：process_missing 结算输给不可恢复的并发终态。
 - `liveness_proof_failed`：进程仍在，禁止结算。
 
-每次被拒尝试在 transcript 追加至多一条有界审计事件 `run.delivery_repackage_rejected`（尽力写入——写失败只降级可观测性、绝不吞 typed 拒绝；payload 仅 `rejectionReason`；`malformed_input`/`run_not_found` 不落——后者无 transcript 可落）。拒绝不消费 Lead 决策，也不保证发生在所有状态变更之前：CAS 拒绝发生时 Git 分支可能已移动、`delivery_created` 可能已存在；此前成功的持久化事实不回滚，拒绝本身不改写终态（process_missing 路径若已把 run 结算为 failed，该结算不因后续拒绝回滚）；重试仍须重新证明候选与交付链。防洗白守卫按实测 HEAD==base 判定：HEAD 仍在 base 时 resolve 阶段的 `artifact_mismatch` 只能是本方打包回退残留，保留为意外错误，不洗成政策拒绝。只有意外内部异常（未桥接的 Git 打包/回退故障、严格输入校验与不变量、验证器崩溃、append/锁基础设施、锁内读取错误等）保留固定 `run_delivery_repackage failed` 塌缩，无 partial structured output。`run_delivery`（结果查询）与 `run_delivery_review`（审查）仍是各自面的 SSOT。
+每次被拒尝试在 transcript 追加至多一条有界审计事件 `run.delivery_repackage_rejected`（尽力写入——写失败只降级可观测性、绝不吞 typed 拒绝；payload 仅 `rejectionReason`；`malformed_input`/`run_not_found`/`workspace_not_authorized` 均不落——后者跨项目，不写他人转录）。拒绝不消费 Lead 决策，也不保证发生在所有状态变更之前：CAS 拒绝发生时 Git 分支可能已移动、`delivery_created` 可能已存在；此前成功的持久化事实不回滚，拒绝本身不改写终态（process_missing 路径若已把 run 结算为 failed，该结算不因后续拒绝回滚）；重试仍须重新证明候选与交付链。防洗白守卫按实测 HEAD==base 判定：HEAD 仍在 base 时 resolve 阶段的 `artifact_mismatch` 只能是本方打包回退残留，保留为意外错误，不洗成政策拒绝。只有意外内部异常（未桥接的 Git 打包/回退故障、严格输入校验与不变量、验证器崩溃、append/锁基础设施、锁内读取错误等）保留固定 `run_delivery_repackage failed` 塌缩，无 partial structured output。`run_delivery`（结果查询）与 `run_delivery_review`（审查）仍是各自面的 SSOT。

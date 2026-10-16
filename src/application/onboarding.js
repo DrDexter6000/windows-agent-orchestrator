@@ -567,7 +567,7 @@ export function buildAcceptance() {
     branches: [
       { key: "host-not-invoked", advisory: "a Host cancellation proven before tool invocation means WAO did not receive the dispatch — this is not a WAO run" },
       { key: "transport-unknown", advisory: "a missing tool result or transport loss after invocation is unknown, not proof that no worker started — inspect runs_list / point-in-time facts before any retry; no automatic retry" },
-      { key: "workspace/preflight", advisory: "a workspace binding or preflight problem prevents a dispatch-ready chain — resolve the binding before retrying the chain" },
+      { key: "workspace/preflight", advisory: "a workspace target or preflight problem prevents a dispatch-ready chain — pass expectedWorkspaceRoot with the project's absolute Git top-level (rebinding does not supply a dispatch target) and retry the chain" },
       { key: "provider/runtime", advisory: "provider or worker-runtime failure is a post-run branch — diagnosed only after a runId-bound WAO run exists" },
     ],
   };

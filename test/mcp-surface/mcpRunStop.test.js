@@ -124,7 +124,7 @@ test("MCP-03: safe output — no PID/path/session/command/stderr", async () => {
     const { server } = createServerWithFakeStop({ runDir: dir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp03", ...stopProof(dir, "run_mcp03") } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp03", expectedWorkspaceRoot: dir, ...stopProof(dir, "run_mcp03") } });
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
       // Must contain only safe fields
@@ -156,7 +156,9 @@ test("MCP-04: other workspace → run_stop failed, zero side effect", async () =
     const { server, getKillCalls } = createServerWithFakeStop({ runDir: dirA, workspaceRoot: dirB });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp04", ...stopProof(dirA, "run_mcp04") } });
+      // the caller names dirB as the target; the run belongs to dirA —
+      // the ownership gate rejects with zero side effect.
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp04", expectedWorkspaceRoot: dirB, ...stopProof(dirA, "run_mcp04") } });
       assert.ok(res.isError, "must be error");
       const text = res.content[0].text;
       assert.equal(text, "run_stop failed");
@@ -176,6 +178,7 @@ test("MCP-05: workspace not bound → fixed safe error", async () => {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir });
     const client = await buildClient(server);
     try {
+      // no expectedWorkspaceRoot → fixed target-required refusal.
       const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp05", ...stopProof(dir, "run_mcp05") } });
       assert.ok(res.isError, "must be error when workspace not bound");
     } finally {

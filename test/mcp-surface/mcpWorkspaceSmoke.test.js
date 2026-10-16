@@ -169,6 +169,9 @@ test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → d
       arguments: {
         agentId: "fake_worker",
         prompt: "write output file",
+        // The dispatch target comes only from THIS call; the server-config
+        // binding is not consulted even though it points at the same repo.
+        expectedWorkspaceRoot: workspaceDir,
         delivery: {
           mode: "git_commit_v1",
           allowedPaths: ["src/output.txt"],

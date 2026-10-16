@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 // TD-168: run_delivery 输出键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
@@ -62,6 +63,19 @@ function sensitiveDeliveryResult() {
   };
 }
 
+// Shared per-call target for run_delivery_decide tests (the injected service
+// ignores ownership; only a proven canonical Git root matters).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m96b-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
+
 // ===== Tests =====
 
 test("M9-6B-01: tools/list includes run_delivery + run_delivery_decide", async () => {
@@ -90,7 +104,7 @@ test("M9-6B-01: tools/list includes run_delivery + run_delivery_decide", async (
       assert.equal(rdd.annotations.openWorldHint, false);
 
       // run_delivery_decide input: runId + decision + reason
-      assert.deepEqual(Object.keys(rdd.inputSchema.properties).sort(), ["decision", "reason", "runId"]);
+      assert.deepEqual(Object.keys(rdd.inputSchema.properties).sort(), ["decision", "expectedWorkspaceRoot", "reason", "runId"]);
       assert.equal(rdd.inputSchema.additionalProperties, false);
     } finally {
       await client.close();
@@ -218,7 +232,7 @@ test("M9-6B-05: run_delivery_decide calls service once with server-owned runDir"
   try {
     await client.callTool({
       name: "run_delivery_decide",
-      arguments: { runId: "run_x", decision: "accepted", reason: "LGTM" },
+      arguments: { runId: "run_x", decision: "accepted", reason: "LGTM", expectedWorkspaceRoot: TARGET },
     });
     assert.equal(calls, 1);
     assert.equal(captured.runDir, "/server/runs");
@@ -247,7 +261,7 @@ test("M9-6B-06: run_delivery_decide winner output safe, no reason/deliveryRef le
   try {
     const res = await client.callTool({
       name: "run_delivery_decide",
-      arguments: { runId: "run_x", decision: "accepted", reason: "LGTM" },
+      arguments: { runId: "run_x", decision: "accepted", reason: "LGTM", expectedWorkspaceRoot: TARGET },
     });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M12-6 3B2a: additive nullable rejectionReason (closed set) on every outcome.
@@ -281,7 +295,7 @@ test("M9-6B-07: run_delivery_decide loser output", async () => {
   try {
     const res = await client.callTool({
       name: "run_delivery_decide",
-      arguments: { runId: "run_x", decision: "rejected", reason: "too late" },
+      arguments: { runId: "run_x", decision: "rejected", reason: "too late", expectedWorkspaceRoot: TARGET },
     });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.decisionAccepted, false);
@@ -367,7 +381,7 @@ test("M9-6B-10: run_delivery_decide service error → fixed 'run_delivery_decide
   try {
     const res = await client.callTool({
       name: "run_delivery_decide",
-      arguments: { runId: "r", decision: "accepted", reason: "x" },
+      arguments: { runId: "r", decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET },
     });
     assert.equal(res.isError, true);
     const dumped = JSON.stringify(res);
@@ -710,7 +724,7 @@ test("M9-6B-13: malformed decide result collapses to fixed error", async () => {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", decideRunDeliveryFn: async () => result });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_x", decision: "accepted", reason: "x" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_x", decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, `${label}: must be error`);
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes("C:\\\\"), `${label}: no path`);
@@ -726,6 +740,7 @@ test("M9-6B-13: malformed decide result collapses to fixed error", async () => {
 async function setupDeliveryRun(dir, runId, verificationStatus) {
   const { JsonlTranscript } = await import("../../src/transcript.js");
   const runDir = join(dir, "runs");
+  makeGitRepo(dir);
   const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
   const ref = {
     schemaVersion: 1, kind: "git_commit", runId,
@@ -735,7 +750,7 @@ async function setupDeliveryRun(dir, runId, verificationStatus) {
       ...(verificationStatus === "failed" ? { failureCode: "command_failed" } : {}) },
     acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
   };
-  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: dir });
   await transcript.append("run.delivery_created", { delivery: ref });
   const vType = verificationStatus === "passed" ? "run.delivery_verification_passed" : "run.delivery_verification_failed";
   await transcript.append(vType, { delivery: ref });
@@ -752,7 +767,7 @@ test("M9-6B-14: MCP accept through real service appends one event", async () => 
     const server = createWaoMcpServer({ registryPath: rp, runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i14", decision: "accepted", reason: "LGTM" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i14", decision: "accepted", reason: "LGTM", expectedWorkspaceRoot: dir } });
       const p = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, true);
       assert.equal(p.deliveryCommit, "d".repeat(40));
@@ -773,7 +788,7 @@ test("M9-6B-15: failed verification blocks accept as a STRUCTURED rejection, all
       const server = createWaoMcpServer({ registryPath: rp, runDir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "accepted", reason: "x" } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
         assert.equal(res.isError, undefined, "policy rejection is a normal structured outcome");
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, false);
@@ -790,7 +805,7 @@ test("M9-6B-15: failed verification blocks accept as a STRUCTURED rejection, all
       const server = createWaoMcpServer({ registryPath: rp, runDir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "rejected", reason: "bad" } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "rejected", reason: "bad", expectedWorkspaceRoot: dir } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, true, "reject succeeds");
         assert.equal(p.rejectionReason, null);
@@ -811,7 +826,7 @@ test("M9-6B-16: repeated/opposite decisions lose, one total event", async () => 
       const server = createWaoMcpServer({ registryPath: rp, runDir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i16", decision, reason } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i16", decision, reason, expectedWorkspaceRoot: dir } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         if (reason === "first") assert.equal(p.decisionAccepted, true);
         else { assert.equal(p.decisionAccepted, false); assert.equal(p.existingStatus, "accepted"); }
@@ -833,8 +848,8 @@ test("M9-6B-17: concurrent MCP decisions → one winner, one loser, one event", 
     const c2 = await buildInMemoryClient(s2);
     try {
       const [r1, r2] = await Promise.all([
-        c1.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c1" } }),
-        c2.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c2" } }),
+        c1.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c1", expectedWorkspaceRoot: dir } }),
+        c2.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c2", expectedWorkspaceRoot: dir } }),
       ]);
       const p1 = JSON.parse(r1.content.find((b) => b.type === "text").text);
       const p2 = JSON.parse(r2.content.find((b) => b.type === "text").text);
@@ -988,7 +1003,7 @@ async function setupReverifiedDeliveryRun(dir, runId, reverifyOutcome) {
     verification: { status: "failed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [], failureCode: "command_failed" },
     acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
   };
-  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: TARGET });
   await transcript.append("run.delivery_created", { delivery: ref });
   await transcript.append("run.delivery_verification_failed", { delivery: ref });
   await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
@@ -1022,7 +1037,7 @@ test("M12-6-3B2a-04: failed original + valid PASSED reverify → run_delivery tr
       // Explicit accept after the passed reverify — must succeed.
       const dc = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: "run_3b2a_04", decision: "accepted", reason: "reverify passed" },
+        arguments: { runId: "run_3b2a_04", decision: "accepted", reason: "reverify passed", expectedWorkspaceRoot: TARGET },
       });
       assert.equal(dc.isError, undefined);
       const dcP = JSON.parse(dc.content.find((b) => b.type === "text").text);
@@ -1035,7 +1050,7 @@ test("M12-6-3B2a-04: failed original + valid PASSED reverify → run_delivery tr
       // structured already_decided outcome, never an error.
       const dc2 = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: "run_3b2a_04", decision: "rejected", reason: "oops" },
+        arguments: { runId: "run_3b2a_04", decision: "rejected", reason: "oops", expectedWorkspaceRoot: TARGET },
       });
       const dc2P = JSON.parse(dc2.content.find((b) => b.type === "text").text);
       assert.equal(dc2.isError, undefined, "first-wins loser is a normal outcome");
@@ -1059,7 +1074,7 @@ test("M12-6-3B2a-05: failed reverify outcome → accept returns STRUCTURED verif
     try {
       const dc = await client.callTool({
         name: "run_delivery_decide",
-        arguments: { runId: "run_3b2a_05", decision: "accepted", reason: "x" },
+        arguments: { runId: "run_3b2a_05", decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET },
       });
       assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
       const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
@@ -1090,7 +1105,7 @@ test("M12-6-3B2a-06: malformed reverify chain in a real transcript → never pas
       verification: { status: "failed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [], failureCode: "command_failed" },
       acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
     };
-    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: TARGET });
     await transcript.append("run.delivery_created", { delivery: ref });
     await transcript.append("run.delivery_verification_failed", { delivery: ref });
     await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
@@ -1115,7 +1130,7 @@ test("M12-6-3B2a-06: malformed reverify chain in a real transcript → never pas
       assert.deepEqual(rdP.reverify, { status: "malformed", reason: null });
 
       // Accept stays blocked as a structured verification_failed rejection.
-      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(dc.isError, undefined);
       const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1141,7 +1156,7 @@ test("M12-6-3B2a-07: terminal_not_eligible — passed verification on a non-comp
       verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
       acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
     };
-    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: TARGET });
     await transcript.append("run.delivery_created", { delivery: ref });
     await transcript.append("run.delivery_verification_passed", { delivery: ref });
     // NO terminal state_change — the run is still running.
@@ -1151,7 +1166,7 @@ test("M12-6-3B2a-07: terminal_not_eligible — passed verification on a non-comp
     const server = createWaoMcpServer({ registryPath: rp, runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
       const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1175,7 +1190,7 @@ test("M12-6-3B2a-08: delivery_malformed — conflicting durable facts → struct
       verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
       acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
     };
-    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: TARGET });
     await transcript.append("run.delivery_created", { delivery: ref });
     // TWO verification outcomes — conflicting durable facts.
     await transcript.append("run.delivery_verification_passed", { delivery: ref });
@@ -1187,7 +1202,7 @@ test("M12-6-3B2a-08: delivery_malformed — conflicting durable facts → struct
     const server = createWaoMcpServer({ registryPath: rp, runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
       const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1205,7 +1220,7 @@ test("M12-6-3B2a-09: delivery_unavailable — no committed delivery → structur
     const runDir = join(dir, "runs");
     const runId = "run_3b2a_09";
     const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
-    await transcript.append("run.started", { backend: "claude-code" });
+    await transcript.append("run.started", { backend: "claude-code", cwd: TARGET });
     await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
     const rp = join(dir, "agents.json");
     writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -1213,7 +1228,7 @@ test("M12-6-3B2a-09: delivery_unavailable — no committed delivery → structur
     const server = createWaoMcpServer({ registryPath: rp, runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
       const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1238,7 +1253,7 @@ test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "plain Error with an old sentence stays the fixed MCP error");
       assert.ok(!JSON.stringify(res).includes("rejectionReason"), "no structured rejection for a plain Error");
       assert.ok(!JSON.stringify(res).includes("must be passed"), "no raw gate text leaks");
@@ -1255,7 +1270,7 @@ test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, undefined, "typed policy rejection is a structured outcome");
       const p = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1274,7 +1289,7 @@ test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "unknown code fails closed");
     } finally { await client.close(); await server.close(); }
   }
@@ -1290,7 +1305,7 @@ test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, undefined, "already_decided is a normal structured outcome");
       const p = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(p.decisionAccepted, false);
@@ -1354,7 +1369,7 @@ test("M9-6B-18 (TD-179): pending reject settles; a later accept is already_decid
       const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x" } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, false);
         assert.equal(p.rejectionReason, "verification_failed", "accept on pending verification is a structured rejection");
@@ -1365,7 +1380,7 @@ test("M9-6B-18 (TD-179): pending reject settles; a later accept is already_decid
       const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "rejected", reason: "verification never settled" } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "rejected", reason: "verification never settled", expectedWorkspaceRoot: dir } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, true, "TD-179 reject settles");
         assert.equal(p.rejectionReason, null);
@@ -1379,7 +1394,7 @@ test("M9-6B-18 (TD-179): pending reject settles; a later accept is already_decid
       const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x" } });
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, false);
         assert.equal(p.rejectionReason, "already_decided", "existing decision returned before gates");

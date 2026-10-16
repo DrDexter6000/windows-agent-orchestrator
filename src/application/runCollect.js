@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
+import { assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // R21（TD-128 W2 升格修复）：重建输入的绑定作用域——metrics.js 单一定义处。
 import { boundReportScope } from "../metrics.js";
 import { collectsFromTranscript } from "../backends/factory.js";
@@ -148,6 +149,11 @@ function defaultAppendFn(transcriptPath, runId) {
  * @param {string} [input.cursor] — opaque continuation token (M11-4)
  * @param {boolean} [input.deferAppend=false] — when true, do not append; return
  *        commitAppend for the caller to invoke after projection success
+ * @param {string} [input.authorizedWorkspaceRoot] — per-call proved target root
+ *        (MCP run_collect). When supplied, the run's ownership must match it —
+ *        verified fail-closed (code workspace_not_authorized) before any serve
+ *        fetch or audit append. CLI callers omit it (Owner/Lead privileged
+ *        channel, same as runStop).
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.appendCollectedFn] — injectable append (testing)
  * @param {Function} [input.fetchServeMessagesFn] — injectable serve fetch (testing)
@@ -159,6 +165,7 @@ export async function collectRunMessages({
   limit = DEFAULT_LIMIT,
   cursor,
   deferAppend = false,
+  authorizedWorkspaceRoot,
   readTranscriptFn,
   appendCollectedFn,
   fetchServeMessagesFn,
@@ -178,6 +185,15 @@ export async function collectRunMessages({
   const transcriptPath = resolveTranscriptPath(runDir, runId);
 
   const events = await _readTranscript(transcriptPath);
+
+  // the MCP boundary passes the per-call proved target root; the
+  // run's ownership must match it (ownership SSOT — mismatched/missing/
+  // malformed ownership fails closed with code workspace_not_authorized, which
+  // the MCP adapter reports as a fixed refusal) BEFORE any serve fetch or
+  // audit append. CLI callers omit the parameter.
+  if (authorizedWorkspaceRoot !== undefined) {
+    assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  }
 
   // M11-8B closeout: canonical agentId from the transcript envelope, bound to
   // the requested runId. Passed through to the projection so MCP/CLI expose a

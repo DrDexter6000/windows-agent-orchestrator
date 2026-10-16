@@ -183,6 +183,7 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
         seats: ["seat_a", "seat_b"],
         perspectives: [{ agentId: "seat_a", text: "你是成本视角：先自测预算是否闭合。" }],
         fields: { Q1: ["A", "B"] },
+        expectedWorkspaceRoot: dir,
         waitMs: 0,
       });
       assert.equal(threw, false, "create mode call succeeds");
@@ -277,6 +278,7 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
       const { res, threw } = await callConsult(client, {
         brief: BRIEF,
         seats: ["seat_a", "seat_b"],
+        expectedWorkspaceRoot: dir,
         waitMs: 0,
       });
       assert.equal(threw, false);
@@ -310,7 +312,7 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
     });
     try {
       writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: A\n\nQ2: B\n" }));
-      const { res, threw } = await callConsult(c2, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0 });
+      const { res, threw } = await callConsult(c2, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(threw, false);
       assert.notEqual(res.isError, true, `dispatch-failure seat degrades, not errors: ${errText(res)}`);
       const p = res.structuredContent;
@@ -339,7 +341,7 @@ test("MRC-B2: malformed (unstructured prose) seat — prose paged verbatim, zero
     writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: prose }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
-      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(threw, false);
       assert.notEqual(res.isError, true, errText(res));
       const receipt = res.structuredContent;
@@ -379,7 +381,7 @@ test("MRC-C1: read mode re-renders the group record as the SAME receipt shape wi
     writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: replyB }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
-      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], fields: { Q2: ["A", "B"] }, waitMs: 0 });
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], fields: { Q2: ["A", "B"] }, waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(created.threw, false);
       const consultId = created.res.structuredContent.consultId;
       const dispatchesAfterCreate = dispatchCalls.length;
@@ -407,7 +409,8 @@ test("MRC-C1: read mode re-renders the group record as the SAME receipt shape wi
       assert.equal(unknown.res.isError, true);
       assert.equal(errText(unknown.res),
         "run_consult read failed: no readable consult record with this consultId — records live in "
-        + "<bound workspace>/.wao/runs/consults; check workspace_status and the id");
+        + "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace); "
+        + "check workspace_status and the id");
       assert.equal(dispatchCalls.length, dispatchesAfterCreate, "unknown consultId never dispatches");
     } finally {
       await client.close();
@@ -432,7 +435,7 @@ test("MRC-C2: seat paging — every page ≤12KiB serialized, pages reassemble b
     writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: seatAText }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
-      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       const receipt = created.res.structuredContent;
       const seatA = receipt.seats[0];
       assert.ok(seatA.pages >= 3, `长文席至少 3 页（实测 ${seatA.pages}）`);
@@ -492,7 +495,7 @@ test("MRC-C3: hostile text fixtures — escape-dense and no-newline surrogate te
     writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: emoji }));
     const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
-      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0 });
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0, expectedWorkspaceRoot: dir });
       const receipt = created.res.structuredContent;
       for (const [seatId, original] of [["seat_a", dense], ["seat_b", emoji]]) {
         const meta = receipt.seats.find((s) => s.agentId === seatId);
@@ -543,27 +546,27 @@ test("MRC-D1: mode mutual exclusion + seat refusals + 0051 paging refusals name 
       assert.equal(noBrief.res.isError, true);
       assert.match(errText(noBrief.res), /exactly one mode/);
       // 缺席席指名。
-      const missing = await callConsult(client, { brief: "x", seats: ["seat_a", "ghost_seat"] });
+      const missing = await callConsult(client, { brief: "x", seats: ["seat_a", "ghost_seat"], expectedWorkspaceRoot: dir });
       assert.equal(missing.res.isError, true);
       assert.match(errText(missing.res), /not in registry: ghost_seat/);
       // 重复席。
-      const dup = await callConsult(client, { brief: "x", seats: ["seat_a", "seat_a"] });
+      const dup = await callConsult(client, { brief: "x", seats: ["seat_a", "seat_a"], expectedWorkspaceRoot: dir });
       assert.equal(dup.res.isError, true);
       assert.match(errText(dup.res), /seats must be unique/);
       // 视角席不在 seats。
-      const stray = await callConsult(client, { brief: "x", seats: ["seat_a"], perspectives: [{ agentId: "seat_b", text: "y" }] });
+      const stray = await callConsult(client, { brief: "x", seats: ["seat_a"], perspectives: [{ agentId: "seat_b", text: "y" }], expectedWorkspaceRoot: dir });
       assert.equal(stray.res.isError, true);
       assert.match(errText(stray.res), /not in seats: seat_b/);
       // 0051：create 模式禁带分页参数。
-      const pagingInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], seat: "seat_a" });
+      const pagingInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], seat: "seat_a", expectedWorkspaceRoot: dir });
       assert.equal(pagingInCreate.res.isError, true);
       assert.match(errText(pagingInCreate.res), /read-mode-only/);
-      const pageInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], page: 1 });
+      const pageInCreate = await callConsult(client, { brief: "x", seats: ["seat_a"], page: 1, expectedWorkspaceRoot: dir });
       assert.equal(pageInCreate.res.isError, true);
       assert.match(errText(pageInCreate.res), /read-mode-only/);
 
       // 0051 读模式分页拒绝面（先建一份真实 consult）。
-      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0 });
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(created.threw, false);
       const consultId = created.res.structuredContent.consultId;
       const dispatchesAfterCreate = dispatchCalls.length;
@@ -644,7 +647,7 @@ test("MRC-W1: create mode binds to the workspace — dispatch cwd = bound root; 
     // 不注入 consultsDir：记录目录取绑定工作区根下的 .wao/runs/consults。
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir });
     try {
-      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(threw, false);
       assert.notEqual(res.isError, true, errText(res));
       assert.equal(dispatchCalls.length, 1);
@@ -665,7 +668,7 @@ test("MRC-W1: create mode binds to the workspace — dispatch cwd = bound root; 
   }
 });
 
-test("MRC-W2: no workspace authority — create mode refuses with the fixed workspace-not-bound text and zero dispatches", async () => {
+test("MRC-W2: no workspace authority — create works on the CALL's target (zero binding read); without a target it is refused; read mode still needs a scope", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w2-"));
   try {
     makeGitRepo(dir);
@@ -676,14 +679,25 @@ test("MRC-W2: no workspace authority — create mode refuses with the fixed work
       dir, registryPath, runDir: join(dir, "runs"), noWorkspace: true,
     });
     try {
-      const { res, threw } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
-      assert.equal(threw, false);
-      assert.equal(res.isError, true, "未绑定 → isError");
+      // 无任何绑定权威 + 本次调用给出目标 → 创建照常（目标只来自本次调用）。
+      const withTarget = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
+      assert.equal(withTarget.threw, false);
+      assert.notEqual(withTarget.res.isError, true, `调用自带目标 → 创建成功：${errText(withTarget.res)}`);
+      assert.equal(dispatchCalls.length, 1, "席位照常扇出");
+      // 缺目标 → 固定文案拒绝（点名该传什么），零扇出。
+      const noTarget = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      assert.equal(noTarget.threw, false);
+      assert.equal(noTarget.res.isError, true, "缺目标 → isError");
+      assert.match(errText(noTarget.res), /expectedWorkspaceRoot/);
+      assert.equal(dispatchCalls.length, 1, "缺目标不追加扇出");
+      // 读取模式无任何权威（无绑定、无注入 consultsDir）→ 仍是固定 not-bound 文案。
+      const readMode = await callConsult(client, { consultId: "consult_20260101000000000aaaaaa" });
+      assert.equal(readMode.threw, false);
+      assert.equal(readMode.res.isError, true, "读取无范围 → isError");
       assert.ok(
-        errText(res).startsWith("workspace not bound:"),
-        `文案以 "workspace not bound:" 开头（实测：${errText(res)}）`,
+        errText(readMode.res).startsWith("workspace not bound:"),
+        `文案以 "workspace not bound:" 开头（实测：${errText(readMode.res)}）`,
       );
-      assert.equal(dispatchCalls.length, 0, "派发次数为 0");
     } finally {
       await client.close();
       await server.close();
@@ -706,7 +720,7 @@ test("MRC-W3: service failure texts distinguish before/after any seat was dispat
       runConsultFn: async () => { throw new Error("stub: service failed before dispatch"); },
     });
     try {
-      const { res, threw } = await callConsult(before.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const { res, threw } = await callConsult(before.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(threw, false);
       assert.equal(res.isError, true);
       assert.equal(errText(res), "run_consult failed before any seat was dispatched");
@@ -724,7 +738,7 @@ test("MRC-W3: service failure texts distinguish before/after any seat was dispat
       },
     });
     try {
-      const { res, threw } = await callConsult(after.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const { res, threw } = await callConsult(after.client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(threw, false);
       assert.equal(res.isError, true);
       assert.ok(
@@ -989,7 +1003,7 @@ test("MRC-W6: dispatch attempts that produced no run do not count as dispatched 
       },
     });
     try {
-      const { res } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0 });
+      const { res } = await callConsult(client, { brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: dir });
       assert.equal(res.isError, true);
       assert.equal(dispatchCalls.length, 1, "派发通道被调用过一次");
       assert.equal(errText(res), "run_consult failed before any seat was dispatched", "但没有任何席位真正派出");

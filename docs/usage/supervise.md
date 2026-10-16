@@ -50,7 +50,7 @@
 
 ## MCP `run_stop`（停止运行）
 
-`run_stop` 让 MCP host 停止一个失控的 worker run。它与 CLI `stop` 复用同一个 application service（`runStop.js`），不 shell-out CLI。destructive、workspace-bound——只允许停止 host-authorized workspace 绑定范围内的 run，不属于时拒绝；不返回 PID/path/session 等可被用于跨 workspace 探测的标识。
+`run_stop` 让 MCP host 停止一个失控的 worker run。它与 CLI `stop` 复用同一个 application service（`runStop.js`），不 shell-out CLI。destructive、目标必传——`expectedWorkspaceRoot` 给出本项目 Git 顶层，run 不属于它即拒（不读会话绑定）；不返回 PID/path/session 等可被用于跨项目探测的标识。
 
 停止之前（为什么见决定 0069；对所有车道相同）：
 

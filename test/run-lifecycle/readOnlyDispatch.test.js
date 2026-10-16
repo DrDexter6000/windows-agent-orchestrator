@@ -472,6 +472,7 @@ test("RO-M1: MCP readOnly+delivery → fixed safe text + closed-set reason code;
           agentId: "coder_low",
           prompt: "x",
           readOnly: true,
+          expectedWorkspaceRoot: dir,
           delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
         },
       });
@@ -502,7 +503,7 @@ test("RO-M2: MCP readOnly:true threads readOnly to the dispatcher; accepted disp
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "survey only", readOnly: true },
+        arguments: { agentId: "coder_low", prompt: "survey only", readOnly: true, expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, "accepted");
       assert.equal(seen.length, 1);
@@ -530,7 +531,7 @@ test("RO-M3: MCP dispatch WITHOUT readOnly threads no readOnly key (byte-unchang
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "ordinary" },
+        arguments: { agentId: "coder_low", prompt: "ordinary", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined);
       assert.equal(seen.length, 1);

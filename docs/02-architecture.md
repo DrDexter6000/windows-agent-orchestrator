@@ -79,12 +79,12 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   | 工具 | 性质 | 委托与契约要点 |
   | --- | --- | --- |
   | `registry_list` | 只读 | registry inventory 投影，委托共享 service（见上方 `registryInventory.js` 条目）。 |
-  | `run_dispatch` | destructive，delivery-capable | 在调用 shared service 前重新解析并证明 workspace——证明后的 canonical Git root 作为 server-owned `cwd` 传入，模型不能通过 tool argument 提供任意路径。支持 delivery-only 顶层 `continuable` 选项（语义见 `run_continue` 行）。 |
+  | `run_dispatch` | destructive，delivery-capable | 目标只取本次调用必传的 `expectedWorkspaceRoot`——证明为 canonical Git root 后作 server-owned `cwd`（缺参或证明不过即拒）。支持 delivery-only 顶层 `continuable`（见 `run_continue` 行）。 |
   | `run_status` / `run_collect` / `run_diagnose` | 只读 / 非只读非幂等 / 只读安全诊断（依次对应左侧三工具） | 均委托共享 application service（见上方 services 目录）。 |
   | `run_delivery` | 只读 delivery 查询 | 支持可选 `waitMs`（共享常量锁定 `[1000,300000]` ms），触发 bounded 只读 readiness wait 并返回严格闭集 `readiness`（`waiting_for_packaging\|waiting_for_verification\|reviewable\|packaging_failed\|isolation_failed\|not_requested\|ambiguous`，`isolation_failed` 见 `runDelivery.js` 条目；已校验的 pending 拒绝把 readiness 落为 `reviewable` 而 verification 仍显示 pending——规范见 §4.9）；CLI `runs delivery --wait-ms N` 与 MCP 委托同一份 `getRunDeliveryReadiness` service，`run_delivery_review` 的 exact-proof/安全投影/错误边界不因等待放松，省略 `waitMs` 时 point-in-time 输出向后兼容。 |
   | `run_delivery_decide` | destructive | 持久 Lead 决策，first-decision-wins。 |
   | `workspace_status` | 只读 | host-authorized workspace binding 状态查询。 |
-  | `workspace_select` | 会话级 | Lead 选择工作 Git 项目，`lead_session` 来源，最高优先级——workspace 解析优先级为 `lead_session` > `mcp_root` > `server_config` > fail-closed；Lead 无需 Human Owner bind、项目配置或重启即可在当前会话选择项目并派工。 |
+  | `workspace_select` | 实例级 | Lead 选择工作 Git 项目（`lead_session` 来源）——只作只读工具的缺省范围（解析优先级 `lead_session` > `mcp_root` > `server_config`）；同实例的其他会话共享该选择；无需 bind/重启；会动工作区的调用不读它。 |
   | `run_stop` | destructive，workspace-bound | 停止失控 worker，委托共享 application service `runStop.js`（CLI `stop` 与 MCP 共用同一 service）。 |
   | `runs_list` | 只读 | project-bound run 列表，用于 recovery，委托共享 application service `runList.js`（workspace ownership 由 `runWorkspaceOwnership.js` 判定）。 |
   | `run_wait` | 只读 long-poll | 终态/活性等待，委托共享 application service `runWait.js`（liveness 投影 SSOT 在 `ownerLiveness.js`）。 |
@@ -247,7 +247,7 @@ interface AgentDef {
   // 旧线字段，本线不用；binary 可选（缺省 dsh）；model 块只收 { id, providerID }，
   // reasoning.effort 只收 low / high / max，其余由 validateAgentPolicy 拒绝
   // sessionReuse：闭集。当前唯一成员 "lead_workspace"——同一 MCP Lead 会话在同一
-  // 绑定 workspace 内再次询问同一配置的专家时，复用 provider 原生会话以保留
+  // 同一 Git workspace（按调用目标）内再次询问同一配置的专家时，复用 provider 会话
   // 上下文/cache，但每次仍开一个全新 WAO run/transcript 做独立监督。
   // null/缺省 = 每次开全新 provider 会话。
   sessionReuse?: "lead_workspace" | null;
@@ -482,7 +482,7 @@ interface TranscriptEvent {
 | `run.delivery_verification_unavailable` | 无验证命令，携带 unavailableReason |
 | `run.delivery_accepted` | Lead 接受 delivery |
 | `run.delivery_rejected` | Lead 拒绝 delivery |
-| `run.delivery_repackage_rejected` | repackage expected-policy 拒绝的有界审计事实：payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 |
+| `run.delivery_repackage_rejected` | repackage expected-policy 拒绝的有界审计事实：payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found`/`workspace_not_authorized`（跨项目不写）不落 |
 | `run.read_only_declared` | 只读 run 声明；空 payload，envelope 即事实 |
 | `run.lead_commit_check_started` | `runs verify-commit`（采纳协议承载）：首命令前写入——checkId nonce、提交全形、命令原文+commands-file sha256、终态判定依据、提交关系事实字段；`kind:"lead_self_check"`+`independentAuditRequired:true`；仅 started 无 outcome = 合法不完整证据 |
 | `run.lead_commit_check_outcome` | status∈{passed,failed,aborted}+results[]（失败 8KiB 尾）+独立 cleanup∈{ok,failed}；无恰一条 CAS（checkId 区分多次核验）；不进 validateDeliveryFacts/decide/wao accept 判定输入 |
@@ -867,9 +867,9 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 ### 4.10 Expert Session Reuse
 
-同一 MCP Lead server 实例在同一绑定 Git workspace 内再次询问同一**配置了 `sessionReuse: "lead_workspace"`** 的专家（非 delivery）时，WAO 复用 provider 原生会话（如 Claude Code 会话）保留上下文/cache，同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。`deepseek-acp` 同样声明 `supportsSessionReuse=true`：关联事实挂 transcript SSOT；resume 信封携带前任 WAO runId，ACP sessionId 由 spawn 权威按 runId 绑定读取器从前任何转录取回、in-process 送达，绝不进 argv；缺失/损坏/上游拒绝一律 fail-closed，绝不静默新会话。
+同一 MCP Lead server 实例在同一目标项目内再次询问同一**配置了 `sessionReuse: "lead_workspace"`** 的专家（非 delivery）时，WAO 复用 provider 原生会话（如 Claude Code 会话）保留上下文/cache，同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。`deepseek-acp` 同样声明 `supportsSessionReuse=true`：关联事实挂 transcript SSOT；resume 信封携带前任 WAO runId，ACP sessionId 由 spawn 权威按 runId 绑定读取器从前任何转录取回、in-process 送达，绝不进 argv；缺失/损坏/上游拒绝一律 fail-closed，绝不静默新会话。
 
-**复用身份（provider 中立）**：`MCP server instance identity + 规范化 bound workspace + canonical agentId` 三者经 sha256 派生为一个**不透明的 UUID v4**（设 version/variant 位）。该 opaque uuid 是唯一进入 provider 的标识：claude-code 首轮 `--session-id <uuid>`，后续轮 `--resume <uuid>`。**绝不**把原始 Lead id / workspace 路径 / session id / agentId 经 MCP 返回或写入 provider payload——它们只停留在 dispatch 进程内。Host/MCP 重启会产生新 identity，因此开始新 provider 会话；本合同不宣称跨 Host 重启永久续用。
+**复用身份（provider 中立）**：`MCP server instance identity + 本次调用的目标 cwd + canonical agentId` 三者经 sha256 派生为一个**不透明的 UUID v4**（设 version/variant 位）。该 uuid 是唯一进入 provider 的标识：claude-code 首轮 `--session-id <uuid>`，后续轮 `--resume <uuid>`。**绝不**把原始 Lead id / workspace 路径 / session id / agentId 经 MCP 返回或写入 provider payload——它们只停留在 dispatch 进程内。Host/MCP 重启产生新 identity，即新 provider 会话；本合同不宣称跨 Host 重启永久续用。
 
 **每请求仍是新 run**：每次派发生成新 runId + transcript；绝不复用/追加一个已 terminal 的 WAO run。被复用的对象只有 backend 原生会话本身。
 

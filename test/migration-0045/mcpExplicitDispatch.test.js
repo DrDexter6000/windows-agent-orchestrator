@@ -60,10 +60,10 @@ async function withServer(fn) {
 }
 
 test("W5-1: MCP explicit {lane,role} 派发——dispatcher 收接线席位+resolvedLane/Role", async () => {
-  await withServer(async ({ client, dispatches }) => {
+  await withServer(async ({ dir, client, dispatches }) => {
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { lane: "opus", role: "auditor", prompt: "review this" },
+      arguments: { lane: "opus", role: "auditor", prompt: "review this", expectedWorkspaceRoot: dir },
     });
     assert.equal(res.isError, undefined, `unexpected error: ${JSON.stringify(res.content ?? res).slice(0, 200)}`);
     assert.equal(dispatches.length, 1);
@@ -75,7 +75,7 @@ test("W5-1: MCP explicit {lane,role} 派发——dispatcher 收接线席位+reso
 });
 
 test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修正例），零派发", async () => {
-  await withServer(async ({ client, dispatches }) => {
+  await withServer(async ({ dir, client, dispatches }) => {
     const unknownLane = await client.callTool({
       name: "run_dispatch",
       arguments: { lane: "opus1", role: "auditor", prompt: "x" },
@@ -98,10 +98,10 @@ test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修�
 });
 
 test("W5-3: 旧调用 {agentId} 字节兼容——无 lane/role 时 dispatcher 收原值、无解析字段", async () => {
-  await withServer(async ({ client, dispatches }) => {
+  await withServer(async ({ dir, client, dispatches }) => {
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "legacy_seat", prompt: "same as ever" },
+      arguments: { agentId: "legacy_seat", prompt: "same as ever", expectedWorkspaceRoot: dir },
     });
     assert.equal(res.isError, undefined);
     assert.equal(dispatches.length, 1);

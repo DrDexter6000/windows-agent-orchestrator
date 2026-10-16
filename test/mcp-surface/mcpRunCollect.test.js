@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { createWaoMcpServer, collectPageConsistencyViolation } from "../../src/mcp/server.js";
 
@@ -51,6 +52,21 @@ function sensitiveProcessResult() {
   };
 }
 
+
+// run_collect is a workspace-touching call — every service-reaching test
+// passes the per-call target. One shared canonical Git root serves all (the
+// injected collectRunMessagesFn ignores ownership; only the proof matters).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m94b-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
+
 // ===== Tests =====
 
 // ---------------------------------------------------------------------
@@ -73,7 +89,7 @@ test("M9-4B-01: tools/list has registry_list + run_dispatch + run_status + run_c
       assert.ok(rc, "run_collect present");
       // M11-4: input now accepts an optional opaque cursor for continuation.
       // M12-2A: input also accepts an optional projection mode (full|compact).
-      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId", "cursor", "mode"], "input has runId + optional cursor + optional mode");
+      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId", "cursor", "mode", "expectedWorkspaceRoot"], "input has runId + optional cursor + optional mode + per-call target");
       assert.equal(rc.inputSchema.additionalProperties, false, "input strict");
       // annotations: not read-only, not idempotent (appends audit event), open-world.
       assert.equal(rc.annotations.readOnlyHint, false, "readOnlyHint:false");
@@ -110,7 +126,7 @@ test("M9-4B-02: run_collect calls service once with server-owned runDir and fixe
   });
   const client = await buildInMemoryClient(server);
   try {
-    await client.callTool({ name: "run_collect", arguments: { runId: "run_abc" } });
+    await client.callTool({ name: "run_collect", arguments: { runId: "run_abc", expectedWorkspaceRoot: TARGET } });
     assert.equal(callCount, 1, "service called exactly once");
     assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
     assert.equal(captured.runId, "run_abc");
@@ -134,7 +150,7 @@ test("M9-4B-03: run_collect output is bounded safe projection, no raw leak", asy
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
 
@@ -202,7 +218,7 @@ test("M9-4B-04: secret value in assistant text is redacted", async () => {
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes("test-secret-value-m94b04"), "secret value redacted from assistant text");
     } finally {
@@ -231,7 +247,7 @@ test("M9-4B-05: serve message shape assistant text extracted, envelope not leake
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.messages.length, 1, "only assistant extracted");
     assert.equal(parsed.messages[0].text, "serve result text", "assistant text extracted");
@@ -300,7 +316,7 @@ test("M9-4B-07: service error returns fixed safe text, no leak", async () => {
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     assert.equal(res.isError, true, "error flagged");
     const dumped = JSON.stringify(res);
     assert.ok(!dumped.includes(SECRET), "no secret leak");
@@ -330,7 +346,7 @@ test("M9-4B-08: message and text bounds enforced with accurate truncated flags",
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.ok(parsed.messages.length <= 8, "at most 8 messages");
     assert.equal(parsed.truncated, true, "truncated=true when capped");
@@ -347,7 +363,7 @@ test("M9-4B-08: message and text bounds enforced with accurate truncated flags",
   });
   const client2 = await buildInMemoryClient(server2);
   try {
-    const res = await client2.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client2.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.ok(parsed.messages[0].text.length <= 4000, "text capped at 4000");
     assert.equal(parsed.messages[0].truncated, true, "per-message truncated=true");
@@ -368,7 +384,7 @@ test("M9-4B-09: empty collect result → messages=[] itemCount=0", async () => {
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(parsed.messages, [], "no messages");
     assert.equal(parsed.itemCount, 0, "itemCount 0");
@@ -395,7 +411,7 @@ test("TD-119: long message delivered losslessly as in-page chunk entries; trunca
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.ok(parsed.messages.length >= 2, "long message spans multiple chunk entries");
     assert.equal(parsed.messages.map((m) => m.text).join(""), full,
@@ -426,7 +442,7 @@ test("TD-119: page truncated=true implies withheld content and a nextCursor; ful
     let cursor;
     let pages = 0;
     do {
-      const args = { runId: "run_x" };
+      const args = { runId: "run_x", expectedWorkspaceRoot: TARGET };
       if (cursor) args.cursor = cursor;
       const res = await client.callTool({ name: "run_collect", arguments: args });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
@@ -458,7 +474,7 @@ test("TD-119: budget-edge anchors — exactly 4000 and exactly 12000 chars compl
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.messages.length, expectedEntries, `exactly-${len} spans ${expectedEntries} entries`);
       assert.equal(parsed.messages.map((m) => m.text).join(""), full, `exactly-${len} delivered in full`);
@@ -492,7 +508,7 @@ test("TD-119: multi-message page — entry truncated:false marks the message bou
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.truncated, false, "both messages fit the page budget");
     assert.equal(parsed.nextCursor, null, "no continuation");
@@ -561,7 +577,7 @@ test("TD-224: compact too_large carries actionable fallback guidance in text and
   const server = mkServer([msg("w".repeat(5000))]);
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", mode: "compact" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", mode: "compact", expectedWorkspaceRoot: TARGET } });
     assert.equal(res.isError, undefined, "too_large compact is a successful bounded result, not an error");
     const text = res.content.find((b) => b.type === "text").text;
     const parsed = JSON.parse(text);
@@ -589,9 +605,9 @@ test("TD-224: compact too_large carries actionable fallback guidance in text and
 
   // --- closed emission: every other variant carries NO compactFallback ---
   for (const [label, args, data] of [
-    ["compact available", { runId: "run_x", mode: "compact" }, [msg("short final")]],
-    ["compact empty", { runId: "run_x", mode: "compact" }, []],
-    ["full (default mode)", { runId: "run_x" }, [msg("w".repeat(5000))]],
+    ["compact available", { runId: "run_x", mode: "compact", expectedWorkspaceRoot: TARGET }, [msg("short final")]],
+    ["compact empty", { runId: "run_x", mode: "compact", expectedWorkspaceRoot: TARGET }, []],
+    ["full (default mode)", { runId: "run_x", expectedWorkspaceRoot: TARGET }, [msg("w".repeat(5000))]],
   ]) {
     const s = mkServer(data);
     const c2 = await buildInMemoryClient(s);
@@ -618,7 +634,7 @@ test("TD-224: full-mode chunk entries carry mechanical continuation markers (con
   const server = mkServer([msg(full)]);
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.ok(parsed.messages.length >= 2, "message spans chunk entries");
     assert.ok(!("continuation" in parsed.messages[0]), "first slice (message start) OMITS the key");
@@ -641,7 +657,7 @@ test("TD-224: full-mode chunk entries carry mechanical continuation markers (con
   const server2 = mkServer([msg(msg1), msg(msg2)]);
   const client2 = await buildInMemoryClient(server2);
   try {
-    const res = await client2.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client2.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(reassembleByContinuation([parsed]), [msg1, msg2],
       "continuation markers separate the two messages without naive whole-page glue");
@@ -658,7 +674,7 @@ test("TD-224: full-mode chunk entries carry mechanical continuation markers (con
     const pages = [];
     let cursor;
     do {
-      const args = { runId: "run_x" };
+      const args = { runId: "run_x", expectedWorkspaceRoot: TARGET };
       if (cursor) args.cursor = cursor;
       const res = await client3.callTool({ name: "run_collect", arguments: args });
       pages.push(JSON.parse(res.content.find((b) => b.type === "text").text));
@@ -714,6 +730,7 @@ test("M9-4B-10: MCP run_collect appends messages.collected via shared service", 
     mkdirSync(runDir, { recursive: true });
     writeFileSync(transcriptPath,
       JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_1", runId, agentId: "w" }) + "\n" +
+      JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-14T00:00:00.000Z", runId, agentId: "w", cwd: TARGET }) + "\n" +
       JSON.stringify({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "hello" }], ts: "2026-07-14T00:00:00.000Z", runId, agentId: "w" }) + "\n" +
       JSON.stringify({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "w" }) + "\n",
       "utf8");
@@ -724,7 +741,7 @@ test("M9-4B-10: MCP run_collect appends messages.collected via shared service", 
     const server = createWaoMcpServer({ registryPath, runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.messages.length, 1, "one assistant message extracted");
       assert.equal(parsed.messages[0].text, "hello");
@@ -766,7 +783,7 @@ test("M9-4B-11: tool-only assistant messages do not consume text quota", async (
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // The final answer must be present.
     assert.ok(parsed.messages.some((m) => m.text === "final answer"),
@@ -810,7 +827,7 @@ test("M9-4B-12: text cap does not break evidence counting for later items", asyn
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x", expectedWorkspaceRoot: TARGET } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // All 8 items (4 messages + 4 evidence) must be counted even though the
     // text cap was hit during the 4th message.
@@ -839,7 +856,7 @@ function writeM11_4Transcript(runDir, runId, messageBodies) {
   mkdirSync(runDir, { recursive: true });
   const lines = [
     JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_m114", runId, agentId: "w" }),
-    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:00.000Z", runId, agentId: "w" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:00.000Z", runId, agentId: "w", cwd: TARGET }),
   ];
   messageBodies.forEach((body, i) => {
     lines.push(JSON.stringify({
@@ -867,7 +884,7 @@ test("M11-4-B3-01: small result returns nextCursor=null; large result paginates 
     let server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     let client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.messages.length, 1);
       assert.equal(parsed.nextCursor, null, "small result: nextCursor null");
@@ -905,7 +922,7 @@ test("M11-4-B3-02: 12 messages paginate via MCP, exact-once reconstruction", asy
     const client = await buildInMemoryClient(server);
     try {
       while (true) {
-        const args = cursor ? { runId, cursor } : { runId };
+        const args = cursor ? { runId, cursor, expectedWorkspaceRoot: TARGET } : { runId, expectedWorkspaceRoot: TARGET };
         const res = await client.callTool({ name: "run_collect", arguments: args });
         const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
         collected.push(...parsed.messages.map((m) => m.text));
@@ -936,7 +953,7 @@ test("M11-4-B3-03: malformed cursor over MCP returns fixed safe text, no leak", 
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "isError flagged");
       const text = res.content.find((b) => b.type === "text").text;
       assert.ok(/run_collect failed/.test(text), "fixed safe text");
@@ -964,10 +981,10 @@ test("M11-4-B3-04: cross-run cursor replay over MCP fails closed", async () => {
     const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
     const client = await buildInMemoryClient(server);
     try {
-      const resA = await client.callTool({ name: "run_collect", arguments: { runId: "runA" } });
+      const resA = await client.callTool({ name: "run_collect", arguments: { runId: "runA", expectedWorkspaceRoot: TARGET } });
       const parsedA = JSON.parse(resA.content.find((b) => b.type === "text").text);
       assert.ok(parsedA.nextCursor, "runA has next cursor");
-      const resB = await client.callTool({ name: "run_collect", arguments: { runId: "runB", cursor: parsedA.nextCursor } });
+      const resB = await client.callTool({ name: "run_collect", arguments: { runId: "runB", cursor: parsedA.nextCursor, expectedWorkspaceRoot: TARGET } });
       assert.equal(resB.isError, true, "cross-run replay fails closed");
       assert.ok(/run_collect failed/.test(resB.content.find((b) => b.type === "text").text));
     } finally {
@@ -1006,7 +1023,7 @@ test("M11-4-B3-05: exact secret redacted across pages (redaction before paginati
       let cursor = null;
       let safety = 0;
       while (true) {
-        const args = cursor ? { runId, cursor } : { runId };
+        const args = cursor ? { runId, cursor, expectedWorkspaceRoot: TARGET } : { runId, expectedWorkspaceRoot: TARGET };
         const res = await client.callTool({ name: "run_collect", arguments: args });
         const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
         collected.push(...parsed.messages.map((m) => m.text));
@@ -1150,7 +1167,7 @@ test("TD-121: inconsistent projection fails closed at the boundary with zero aud
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, `(${truncated}, ${JSON.stringify(nextCursor)}): flagged as error`);
       const text = res.content.find((b) => b.type === "text").text;
       assert.equal(text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence", "fixed safe text（2026-10-02 起附静态诊断指路——会审 Q2 双通道）, no violation detail leaks");
@@ -1176,7 +1193,7 @@ test("TD-121: consistent projection through the same seam succeeds and commits t
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121" } });
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121", expectedWorkspaceRoot: TARGET } });
     assert.notEqual(res.isError, true, "consistent page is not an error");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.runId, "run_td121", "parsed page returned");
@@ -1209,7 +1226,7 @@ test("TD-224 council fix R1: zero-progress empty slice is never emitted (surroga
     for (;;) {
       const res = await client.callTool({
         name: "run_collect",
-        arguments: { runId: "run_x", mode: "full", ...(cursor ? { cursor } : {}) },
+        arguments: { runId: "run_x", mode: "full", expectedWorkspaceRoot: TARGET, ...(cursor ? { cursor } : {}) },
       });
       const page = JSON.parse(res.content.find((b) => b.type === "text").text);
       for (const m of page.messages || []) full.push(m);

@@ -264,6 +264,25 @@ export function deriveProjectBucketSlug(identity) {
 }
 
 /**
+ * 一个根路径的非绝对、确定性项目标签（`<displayName>-<hash8>`）。用于只读
+ * 范围显示（lead_preflight workspace.projectBucket、runs_list
+ * scope.projectBucket）——"preflight 不输出绝对路径"合同内的项目标识：能看出
+ * 本次结果按哪个项目取的范围，又不暴露完整路径。判定与写侧 `projectFactFromCwd`
+ * 用同一份生产 io（`productionProjectIo()`，含 os.tmpdir 的 scratch 判定），
+ * 桶 kind 与写侧一致；但碰撞扩长后的实际桶名可能比标签更长，本标签只作范围
+ * 标识，不是桶名权威。根不可识别（非项目、realpath 失败）→ null，绝不编造标签。
+ */
+export function projectBucketLabel(root) {
+  try {
+    const identity = identifyProjectFromCwd(root, productionProjectIo());
+    if (identity.kind !== "project") return null;
+    return deriveProjectBucketSlug(identity);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 桶 slug 的保留名防御：slug 整体不得等于 runs/ 保留目录名；displayName
  * 段不得是 Windows 保留设备名（哈希后缀使其天然不等，这里显式拒绝裸名）。
  */

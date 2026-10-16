@@ -112,7 +112,7 @@ test("M12-7-MRC-M1: run_continue registered; total tools = TOOLS.length (toolSur
       assert.equal(t.annotations.idempotentHint, false);
       assert.equal(t.annotations.openWorldHint, true);
       // Strict input: parentRunId + prompt + required delivery.
-      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["delivery", "parentRunId", "prompt"]);
+      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["delivery", "expectedWorkspaceRoot", "parentRunId", "prompt"]);
       assert.equal(t.inputSchema.additionalProperties, false);
       assert.ok(t.outputSchema, "output schema present");
     } finally { await client.close(); await server.close(); }
@@ -160,7 +160,7 @@ test("M12-7-MRC-M3: unbound workspace → service never called, fixed error", as
     try {
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       }).catch(() => ({ isError: true }));
       assert.equal(r.isError, true, "unbound → error");
       assert.equal(calls.length, 0, "service never called when workspace unbound");
@@ -181,7 +181,7 @@ test("M12-7-MRC-M4: service threaded with bound workspace + leadSession + requir
     try {
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_ok", prompt: "correct the bug", delivery: DELIVERY },
+        arguments: { parentRunId: "run_parent_ok", prompt: "correct the bug", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, undefined, "success is not an error");
       assert.equal(calls.length, 1, "service called exactly once");
@@ -238,7 +238,7 @@ test("M12-7-MRC-M5: refusal → structured accepted:false + closed-set rejection
     try {
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_legacy", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_parent_legacy", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, undefined, "a closed-set refusal is a normal outcome, not an error");
       const parsed = r.structuredContent;
@@ -269,7 +269,7 @@ test("M12-7-MRC-M6: busy refusal redacts the active lineage runId (label only)",
     try {
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_busy", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_parent_busy", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       const parsed = r.structuredContent;
       assert.equal(parsed.accepted, false);
@@ -297,7 +297,7 @@ test("M12-7-MRC-M7: credential-missing → fixed actionable text; generic throw 
     try {
       const r = await c1.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, true);
       const txt = r.content?.[0]?.text ?? "";
@@ -311,7 +311,7 @@ test("M12-7-MRC-M7: credential-missing → fixed actionable text; generic throw 
     try {
       const r = await c2.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, true);
       const txt = r.content?.[0]?.text ?? "";
@@ -363,7 +363,7 @@ test("M12-7-MRC-M8: continuation_scope_incomplete refusal surfaces bounded cumul
 
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, undefined, "a closed-set refusal is a normal outcome, not an error");
 
@@ -415,7 +415,7 @@ test("M12-7-MRC-M9: a malformed path inside the cumulative arrays fails closed �
     try {
       const r = await client.callTool({
         name: "run_continue",
-        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY },
+        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
       });
       assert.equal(r.isError, undefined, "refusal still a normal outcome");
       const parsed = r.structuredContent;

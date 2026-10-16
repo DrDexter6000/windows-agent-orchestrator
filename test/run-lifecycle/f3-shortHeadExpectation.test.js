@@ -193,7 +193,7 @@ test("F3-B1: run_dispatch accepts 7/8/12/40-hex expectedGitHead slices of the re
       try {
         const res = await client.callTool({
           name: "run_dispatch",
-          arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: head.slice(0, len) },
+          arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: head.slice(0, len), expectedWorkspaceRoot: repo },
         });
         assert.equal(fake.count, 1, `${len}-hex expectation: dispatch happens exactly once`);
         const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
@@ -234,7 +234,7 @@ test("F3-C1: 6-hex / non-hex / 65-hex expectedGitHead rejected at the wire (coun
         try {
           result = await client.callTool({
             name: "run_dispatch",
-            arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: expected },
+            arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: expected, expectedWorkspaceRoot: repo },
           });
         } catch {
           rejected = true;
@@ -270,7 +270,7 @@ test("F3-D1: prefix mismatch refuses dispatch (count 0) with the gitHead fix hin
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: wrongPrefix },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedGitHead: wrongPrefix, expectedWorkspaceRoot: repo },
       });
       assert.equal(res.isError, true, "mismatch refuses dispatch");
       assert.equal(fake.count, 0, "dispatcher never called");
@@ -302,7 +302,7 @@ test("F3-E1: untracked file still counts as dirty → expectedDirty:false mismat
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false, expectedWorkspaceRoot: repo },
       });
       assert.equal(res.isError, true, "untracked file keeps the binding dirty → mismatch");
       assert.equal(fake.count, 0, "dispatcher never called");
@@ -330,7 +330,7 @@ test("F3-E2: clean repo with expectedDirty:false still dispatches (regression co
     try {
       const res = await client.callTool({
         name: "run_dispatch",
-        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false },
+        arguments: { agentId: "coder_low", prompt: "do it", expectedDirty: false, expectedWorkspaceRoot: repo },
       });
       assert.equal(fake.count, 1, "clean binding matches expectedDirty:false");
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);

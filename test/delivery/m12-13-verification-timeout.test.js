@@ -490,7 +490,7 @@ test("VT-09: MCP run_dispatch forwards verificationTimeoutMs (inline delivery)",
       await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "coder_low", prompt: "p",
+          agentId: "coder_low", prompt: "p", expectedWorkspaceRoot: dir,
           delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"], verificationTimeoutMs: 600000 },
         },
       });
@@ -529,7 +529,7 @@ test("VT-10: MCP run_dispatch profile fold PRESERVES verificationTimeoutMs (prof
       await client.callTool({
         name: "run_dispatch",
         arguments: {
-          agentId: "coder_low", prompt: "p",
+          agentId: "coder_low", prompt: "p", expectedWorkspaceRoot: dir,
           executionProfileId: "node-npm-test-v1",
           delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationTimeoutMs: 600000 },
         },
@@ -815,7 +815,7 @@ test("VT-14: MCP run_delivery_reverify schema accepts the shared upper bound and
       // Shared upper bound accepted at the schema and forwarded.
       const res = await client.callTool({
         name: "run_delivery_reverify",
-        arguments: { runId: "run_x", reason: "tooling_invalid", timeoutMs: 7200000 },
+        arguments: { runId: "run_x", reason: "tooling_invalid", timeoutMs: 7200000, expectedWorkspaceRoot: dir },
       });
       assert.ok(res && !res.isError, "shared upper bound accepted by the schema");
       assert.equal(calls, 1, "service called once");
@@ -827,7 +827,7 @@ test("VT-14: MCP run_delivery_reverify schema accepts the shared upper bound and
       try {
         const r2 = await client.callTool({
           name: "run_delivery_reverify",
-          arguments: { runId: "run_x", reason: "tooling_invalid", timeoutMs: 7200001 },
+          arguments: { runId: "run_x", reason: "tooling_invalid", timeoutMs: 7200001, expectedWorkspaceRoot: dir },
         });
         if (r2?.isError) rejected = true;
       } catch { rejected = true; }

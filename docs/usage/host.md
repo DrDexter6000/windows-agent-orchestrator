@@ -73,7 +73,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 
 - `command` 必须是数组（`["node", "<wao-node.cjs 绝对路径>", "<stdio.js 绝对路径>", ...]`）。写成单个字符串会被拒绝。第一项是 `node`，第二项是 v22 shim `scripts/wao-node.cjs`（避免系统默认 node 是 v24 触发 WAO versionGuard），第三项起是 stdio entrypoint 与 server-owned 参数。
 - `enabled` 是 OpenCode **optional** 配置（官方 schema 不强制）。显式写 `"enabled": true` 可消除配置继承歧义、避免被父配置或全局默认覆盖；省略不必然导致禁用（实际行为取决于 OpenCode 版本与继承链）。
-- `--workspace-root` 指向**目标项目**根，不是 WAO repo。这是 host-bound workspace binding；`run_dispatch` 会在调用 shared service 前重新证明 workspace，并以 canonical Git root 作为 server-owned `cwd`。
+- `--workspace-root` 指向**目标项目**根（不是 WAO repo），是**只读工具的缺省范围**来源之一；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`。
 - 这是 host-local 配置，含绝对路径时**默认不建议 commit**；Owner 可把它放进 `.git/info/exclude`（本地忽略，不污染 `.gitignore`）。
 - **验证**：在**目标项目**根执行 `opencode --pure mcp list`，期待看到 `wao connected`。`--pure` 会禁用 OpenCode 插件（如 oh-my-openagent），用于排除插件干扰；它**不**保证禁用全局 MCP 配置，也不自动移除全局 MCP。
 - **重启边界**：修改配置后，**必须启动新的 OpenCode 进程**。`opencode --pure mcp list` 显示 `wao connected` 不等于已运行的旧进程工具已热加载——旧进程仍看不到 WAO tools。
@@ -85,7 +85,7 @@ WAO 的 MCP 工具**全部始终注册**：没有 profile、没有启动 flag，
 
 渐进式披露：观察类工具的输出统一携带 `availableDrilldowns`（≤4 条静态提示，闭集成员都在冻结工具面内），只披露可安全调用的观察工具，不自动调用、不广告 mutation/control 工具。详见[取结果与查历史](results.md)。
 
-`run_dispatch_contract_check` 是 advisory 只读预检，与 `run_dispatch` 共享输入 schema（service 复用同一 application 校验），返回闭集 workspace/registry/contract 视图与有界 issue 码。`contractValid` 只反映 delivery/profile 的机械合同，不预评 `expectedGitHead`/`expectedDirty`/`expectedWorkspaceRoot`，也不预评 continuable/backend/session 资格或 worker 凭据；sections 独立 settle 为 `observed`/`unknown`，零副作用——它不是门禁，`run_dispatch` 不依赖它，其部分失败不影响派发。它同样**接受**顶层 `readOnly` 字段但**不评估**它（只读是派发声明，不是 delivery 合同维度）。`run_dispatch` 的可选顶层输入 `executionProfileId`（与 `delivery` 同级）取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands` / `delivery.verificationSetupCommands` / `delivery.verificationUnavailableReason` 互斥，派发前解析；未知或冲突的组合由共享 resolver 稳定拒绝。派发细节见[派发](dispatch.md)。
+`run_dispatch_contract_check` 是 advisory 只读预检，与 `run_dispatch` 共享输入 schema（service 复用同一 application 校验），返回闭集 workspace/registry/contract 视图与有界 issue 码。`contractValid` 只反映 delivery/profile 的机械合同，不预评 `expectedGitHead`/`expectedDirty`，也不预评 continuable/backend/session 资格或 worker 凭据；可选 `expectedWorkspaceRoot` 只选本次检查的项目（结果 `workspaceScope` 如实标注，省略即跟随绑定）。sections 独立 settle 为 `observed`/`unknown`，零副作用——不是门禁，`run_dispatch` 不依赖它，部分失败不影响派发。它同样**接受**顶层 `readOnly` 字段但**不评估**它（只读是派发声明，不是 delivery 合同维度）。`run_dispatch` 的可选顶层输入 `executionProfileId`（与 `delivery` 同级）取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands` / `delivery.verificationSetupCommands` / `delivery.verificationUnavailableReason` 互斥，派发前解析；未知或冲突的组合由共享 resolver 稳定拒绝。派发细节见[派发](dispatch.md)。
 
 legacy argv 兼容：stdio argv parser 把任何残留的旧 profile 参数视为**普通未知 flag** 忽略——不解析值、不出现在解析输出、不改变 server 面、不失败启动；`--registry`/`--run-dir`/`--workspace-root` 解析与 fail-closed 语义不变。既有 Host 配置无需任何迁移。
 
@@ -101,7 +101,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## MCP `workspace_status`（绑定状态查询）
 
-`workspace_status` 查询当前 workspace 绑定状态，输入是 strict empty schema（拒绝任何字段）。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。
+`workspace_status` 查询当前 workspace 绑定状态，输入是 strict empty schema（拒绝任何字段）。会动工作区的调用不读此绑定（目标来自各次调用的 `expectedWorkspaceRoot`）；只读工具按它取缺省范围。
 
 `source` 的三个取值对应三种 workspace authority，优先级从高到低：`"lead_session"`（Lead 会话选择，见 `workspace_select`）> `"mcp_root"`（client roots/list）> `"server_config"`（显式 `--workspace-root`，全局静态启动参数）。`workspaceRoot` 是当前绑定的 canonical Git 顶层绝对路径（Lead/host 已显式提交，非 credential，故返回）；`bound=false` 时其余字段均为 `null`。
 
@@ -109,17 +109,17 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## MCP `workspace_select`（会话级工作区选择）
 
-`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**会话级**：只作用于当前 `createWaoMcpServer` 实例，两个 server 实例状态严格隔离；不写磁盘、不写 `.codex/config.toml`、不写 transcript、不创建 run/worktree/process，无需 host bind 或重启。验证委托 `proveWorkspace` SSOT——只接受 canonical Git 顶层（拒绝 relative/nonexistent/non-Git/subdirectory）。失败选择不影响既有有效选择（只在成功时更新）。幂等：重复选同一 repo 是 no-op。
+`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**该选择只决定只读工具的缺省范围**；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`。**实例级而非会话级**：选择存在服务实例里，同一实例上的其他宿主会话看到同一选择（已知接受的残余）；实例间严格隔离；不写任何持久状态，无需重启。验证委托 `proveWorkspace` SSOT（只接受 canonical Git 顶层）。失败选择不影响既有选择（只在成功时更新）；幂等。
 
 输入 `workspaceRoot` 必须为非空绝对路径（≤1024 字符）；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。失败返回固定安全文案 `workspace_select failed: workspaceRoot must be a canonical Git top-level directory`（不回显传入路径、stderr 或异常 message）。
 
-典型 Lead 流程：`workspace_status`（未绑定）→ `workspace_select(<current Git root>)` → `workspace_status`（确认 `lead_session`）→ `run_dispatch`。
+典型 Lead 流程：`workspace_select(<current Git root>)`（定只读缺省范围）→ `run_dispatch` 带 `expectedWorkspaceRoot`（派发目标）。
 
 ## MCP `lead_preflight`（advisory 启动检查）
 
 `lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。**advisory，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，不是 authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定。认证/授权证明边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
-输入 `workspaceRoot` 可选；提供时复用 `workspace_select` 的 workspace authority SSOT（`lead_session`），失败不覆盖既有有效选择；省略时只检查当前 session selection。输出是安全投影，不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
+输入 `workspaceRoot` 可选；提供时复用 `workspace_select` 的选择权威（该选择只作只读缺省范围），失败不覆盖既有选择；省略时只检查当前选择。`workspace.projectBucket` 是非绝对项目标签（本次结果按哪个项目取范围；认不出项目时为 null）；输出不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
 `registryIssues`/`registryIssuesTruncated` 复用与 `registry_list` 同一闭集 issue 形状与同一快照（见上文 `registry_list`）。`registryIssues` 非空时 `checkStatus.workers` 升为 `"warning"`（从而使 `complete:false`）并追加一条计数 warning，但有效 worker 照常返回——一条坏条目绝不隐藏其余 healthy worker。registry 整源不可读时 `workers` 为 `null`、`checkStatus.workers:"unknown"`、`registryIssues:[]`（unknown 绝不伪造为"零坏条目"）。
 
@@ -131,7 +131,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 
-正常使用不要求先 bind：Lead 可在当前会话用 `workspace_select` 选择 Git 项目（见上文），无需 Human Owner bind、无需项目配置、无需重启。`mcp bind` 只是**可选的持久项目级默认**，为希望冷启动即自动绑定某项目的场景提供便利——它写入的 `--workspace-root` 属 `server_config` 来源（优先级最低，见 `workspace_status`）。
+正常使用不要求先 bind：只读缺省范围用 `workspace_select` 现场选定（见上文）。`mcp bind` 只是**可选的持久项目级默认**（冷启动即绑定），写入的 `--workspace-root` 属 `server_config` 来源（优先级最低）。
 
 `mcp bind/status/unbind` 命令是各 agent harness 接入 WAO MCP 的操作面（Human Owner 面，不是 MCP 工具）：`bind` 给出或写入注册，`status` 回答"这个 harness 上 WAO 的 MCP 注册了没有"。宿主闭集与能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表派生，三能力轴：snippet（能产出该宿主形态的注册片段）/ autoBind（`bind` 能真写该宿主配置）/ hostVerified（已在真实宿主上验证加载）。三种能力为何分开算，见决定 0043。
 

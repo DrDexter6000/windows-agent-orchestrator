@@ -73,7 +73,7 @@ LLM 编排器或外部脚本的最短驱动闭环：
 
 ## MCP `run_collect`：取回 worker 的回答
 
-`run_collect` 让 MCP host 收集一个 run 的 worker 产出。它与 CLI `collect` 共用同一 application service，不 shell-out CLI。不是只读：每次成功调用向 transcript 追加一条 `messages.collected` 审计事件（不改变 terminal state）；重复调用会再次追加，非幂等。
+`run_collect` 让 MCP host 收集一个 run 的 worker 产出。它与 CLI `collect` 共用同一 application service，不 shell-out CLI。目标必传 `expectedWorkspaceRoot`（run 必须属于它）——归属核验按转录 cwd 的规范路径在任何读取副作用前 fail-closed，不符（另一项目、子目录/非 Git cwd 派出的 run、无归属事实的旧转录）时固定文案拒绝、零写入。非只读非幂等：每次成功调用向 transcript 追加一条 `messages.collected` 审计事件（不改变 terminal state）。
 
 参数与形状见 [docs/surface/mcp-tools.md](../surface/mcp-tools.md)（生成层，随代码再生成）。模型可传 `runId`、可选 `cursor`（opaque continuation token，仅 full 模式可带，值来自上一页的 `nextCursor`）、可选 `mode`（`full|compact`，省略即 `full`）。`runDir`、`limit`、`serveUrl`、`sessionId`、`raw`、`includeTools` 等是 server-owned 配置，模型不能传。
 
@@ -91,8 +91,8 @@ LLM 编排器或外部脚本的最短驱动闭环：
 - 只提取 assistant 角色 message 的 text part；assistant 文本经 secret redactor 脱敏当前进程环境中的凭据值。无 assistant message 时 `messages:[]` 是合法结果。
 - `truncated` 分两级：页级 `truncated:true` 只表示"有内容被扣留待续读"，必伴 `nextCursor`；entry 超 4000 字符时，该 entry 的 `truncated:true` 是切片标记，不是数据丢失。
 - 绝不返回：command string/argv、tool input/tool output/tool result raw payload、file_written path、cwd、serveUrl、sessionId、PID、unknown event raw object、prompt、环境变量、异常 message/stack。`content` JSON 与 `structuredContent` 语义一致。
-- 任何失败只返回固定 `run_collect failed`，不泄漏 SDK output validation error、原始异常、绝对路径或 secret。
-- 边界：成功调用追加审计事件；serve 路径可能读取外部 runtime 服务；但不杀进程、不修改 worker checkout、不改变 run terminal。
+- 其它失败只返回固定 `run_collect failed`，不泄漏 SDK output validation error、原始异常、绝对路径或 secret。
+- 边界：serve 路径可能读取外部 runtime 服务；不杀进程、不修改 worker checkout、不改变 run terminal。
 
 ### 续读
 
@@ -196,9 +196,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 ## MCP `runs_list`：列出 run
 
-`runs_list` 让 MCP host 列出当前 host-authorized workspace 绑定范围内的 run。只读、幂等：不修改任何持久状态、不追加 transcript event。workspace 未绑定时返回空 `runs:[]`，不 fail-closed——这是只读列举，不是 state-changing 操作；其它项目的 run 不可见，不跨 workspace 探测。
+`runs_list` 让 MCP host 列出当前绑定范围内的 run。只读、幂等：不修改任何持久状态、不追加 transcript event。workspace 未绑定时返回空 `runs:[]`，不 fail-closed——这是只读列举，不是 state-changing 操作；其它项目的 run 不可见，不跨 workspace 探测。
 
-输入两字段均可选。`activeOnly`（bool，默认 `false`）：只返回经证明 active 的 run——transcript 为已知非终态且有 fresh owner heartbeat（默认 10s 阈值）。单纯"未到终态"不足以算 active：一个非终态但缺 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也绝不据此推断它 failed/dead/stopped（仍可能长时间运行或休眠）；它计入 `unresolvedCount`，仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。`runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned——workspace 绑定由 server 解析，不能通过 tool argument 提供。
+输入两字段均可选。`activeOnly`（bool，默认 `false`）：只返回经证明 active 的 run——transcript 为已知非终态且有 fresh owner heartbeat（默认 10s 阈值）。单纯"未到终态"不足以算 active：一个非终态但缺 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也绝不据此推断它 failed/dead/stopped（仍可能长时间运行或休眠）；它计入 `unresolvedCount`，仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。`runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned——绑定由 server 解析，不能通过 tool argument 提供。
 
 `runs` 每个元素含 `runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
 

@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 
 import { projectCollectResult } from "../../src/application/runCollectProjection.js";
 
@@ -66,7 +66,7 @@ function buildFixture(runDir, runId, secret) {
   const lines = [
     JSON.stringify({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
     JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_smoke_m114", runId, agentId: "w" }),
-    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
     // Tool-only evidence: must be counted but not consume text quota.
     JSON.stringify({ type: "run.event", kind: "tool_use", tool: "Read", input: { file_path: "src/app.js" }, ts: "2026-07-22T00:00:05.000Z", runId, agentId: "w" }),
   ];
@@ -101,6 +101,19 @@ function buildFixture(runDir, runId, secret) {
   return { transcriptPath, longBody, unicodeBody };
 }
 
+// Shared per-call target for run_collect (the real service verifies
+// ownership; fixtures carry this root as run.started cwd).
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m114-stdio-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
+
 test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, redaction, Unicode, audit, CLI parity", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m114-stdio-"));
   const secret = "test-secret-m114-stdio-abcdef0123456789";
@@ -124,7 +137,7 @@ test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, r
     // First client/server for page 1.
     let handle = await buildStdioClient({ registryPath, runDir, secretEnv: secret });
     try {
-      const res = await handle.client.callTool({ name: "run_collect", arguments: { runId } });
+      const res = await handle.client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, undefined, "page 1 not error");
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.ok(parsed.nextCursor, "page 1 has next cursor");
@@ -144,7 +157,7 @@ test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, r
     while (cursor) {
       handle = await buildStdioClient({ registryPath, runDir, secretEnv: secret });
       try {
-        const res = await handle.client.callTool({ name: "run_collect", arguments: { runId, cursor } });
+        const res = await handle.client.callTool({ name: "run_collect", arguments: { runId, cursor, expectedWorkspaceRoot: TARGET } });
         assert.equal(res.isError, undefined, `page ${totalPages + 1} not error`);
         const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
         totalPages += 1;
@@ -203,7 +216,7 @@ test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, r
       .filter((l) => l.includes('"messages.collected"')).length;
     let invalidHandle = await buildStdioClient({ registryPath, runDir, secretEnv: secret });
     try {
-      const res = await invalidHandle.client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url" } });
+      const res = await invalidHandle.client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url", expectedWorkspaceRoot: TARGET } });
       assert.equal(res.isError, true, "invalid cursor rejected");
       assert.ok(/run_collect failed/.test(res.content.find((b) => b.type === "text").text));
     } finally {
@@ -266,7 +279,7 @@ test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, r
           const [c, s] = InMemoryTransport.createLinkedPair();
           await Promise.all([mcpServer.connect(s), mcpClient.connect(c)]);
           try {
-            const res = await mcpClient.callTool({ name: "run_collect", arguments: { runId } });
+            const res = await mcpClient.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: TARGET } });
             const mcpPage1 = res.structuredContent;
             // Deep semantic equality on every field except nextCursor literal
             // (different snapshot reads produce different digest bytes, but
@@ -358,7 +371,7 @@ test("M11-4-STDIO-SERVE: serve continuation over real HTTP boundary retrieves >5
     writeFileSync(join(runDir, `${runId}.jsonl`), [
       JSON.stringify({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
       JSON.stringify({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_stdio", serveUrl: "http://127.0.0.1:0", runId, agentId: "w" }),
-      JSON.stringify({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+      JSON.stringify({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
       JSON.stringify({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }),
     ].map((l) => l + "\n").join(""), "utf8");
 
@@ -403,7 +416,7 @@ test("M11-4-STDIO-SERVE: serve continuation over real HTTP boundary retrieves >5
         // This exercises the true serve HTTP boundary end-to-end.
         const handle = await buildStdioClient({ registryPath: join(dir, "agents.json"), runDir });
         try {
-          const args = cursor ? { runId, cursor } : { runId };
+          const args = cursor ? { runId, cursor, expectedWorkspaceRoot: TARGET } : { runId, expectedWorkspaceRoot: TARGET };
           const res = await handle.client.callTool({ name: "run_collect", arguments: args });
           assert.equal(res.isError, undefined, `serve page ${pages + 1} not error`);
           const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);

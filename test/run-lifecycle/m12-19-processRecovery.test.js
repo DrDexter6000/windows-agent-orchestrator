@@ -34,7 +34,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -54,6 +54,17 @@ import { runDeliveryRepackage } from "../../src/application/runDeliveryRepackage
 import { getRunDelivery, getRunDeliveryReadiness } from "../../src/application/runDelivery.js";
 import { resolveDeliveryCommit } from "../../src/delivery.js";
 import { computeCandidateInventory } from "../../src/application/candidateInventory.js";
+
+const TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-m1219-target-"));
+  execFileSync("git", ["init"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: d, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: d, stdio: "pipe" });
+  return d;
+})();
 
 const RUN_ID = "run_m12_19";
 const OTHER_RUN = "run_other";
@@ -1051,7 +1062,7 @@ test("M2: run_delivery_repackage wire accepts recoveryKind process_missing throu
   try {
     const res = await client.callTool({
       name: "run_delivery_repackage",
-      arguments: { runId: RUN_ID, allowedPaths: ["src"] },
+      arguments: { runId: RUN_ID, allowedPaths: ["src"], expectedWorkspaceRoot: TARGET },
     });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.recoveryKind, "process_missing");

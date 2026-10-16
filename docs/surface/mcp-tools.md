@@ -49,7 +49,7 @@ Output:
 
 ## workspace_select
 
-Select the working Git project for this session (lead_session source): pass an absolute path to a Git worktree top-level; WAO proves it canonical and dispatches against it. Session-scoped — no config write, no host bind or restart; idempotent, a failed select leaves the prior selection intact.
+Select the working Git project for this session (lead_session source): pass an absolute path to a Git worktree top-level; WAO proves it canonical. The selection is the default scope for read-only tools only — worker-touching calls take their target per call. Shared per server instance: other sessions on the same instance see the same selection. No config write, no host bind or restart; idempotent, a failed select leaves the prior selection intact.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -71,7 +71,7 @@ Output:
 
 ## lead_preflight
 
-Advisory single-call preflight: workspace binding, worker credential availability, active runs. Optional workspaceRoot selects the project, same authority as workspace_select; unboundReason is the same closed-set recovery fact as workspace_status, null when bound. ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle independently, re-verify via the original tools.
+Advisory single-call preflight: workspace binding, worker credential availability, active runs. Optional workspaceRoot selects the project, same authority as workspace_select (read-tool default scope only; shared per server instance); unboundReason is the same closed-set recovery fact as workspace_status, null when bound. ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle independently, re-verify via the original tools.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -102,7 +102,7 @@ Output:
 
 ## run_dispatch
 
-Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
+Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is REQUIRED and is this call's target — the session binding is not consulted; expectedGitHead/expectedDirty are optional assertions against it. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -139,7 +139,7 @@ Output:
 
 ## run_dispatch_contract_check
 
-Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract (inline verification or a frozen execution profile) and observes workspace binding + worker presence into one bounded closed-set result. NOT a gate — contractValid never auto-blocks; run_dispatch stays authoritative.
+Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract (inline verification or a frozen execution profile) and observes the workspace scope + worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot (absolute Git worktree top-level) checks against that proved project instead of the session binding; workspaceScope in the result names the scope actually used. NOT a gate — contractValid never auto-blocks; run_dispatch stays authoritative.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -174,10 +174,11 @@ Output:
 | observations | array<string> | yes |  |
 | profile | object\|null | yes |  |
 | availableProfiles | array<object> | no |  |
+| workspaceScope | object | yes |  |
 
 ## run_consult
 
-Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; waitMs 0..600000 (default 270000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
+Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — every seat's cwd and the record live under it; waitMs 0..600000 (default 270000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -193,6 +194,7 @@ Input:
 | reviewedRunId | string | no |  |
 | seat | string | no |  |
 | page | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 | waitMs | integer | no |  |
 
 Output:
@@ -224,7 +226,7 @@ Output:
 
 ## run_continue
 
-Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a new run resumes the parent's provider conversation in the retained worktree (no fresh worktree/session), shipping a child delivery. Eligibility: read-only, closed-set rejectionReason, before any mutation. WAO never infers correction, scope, verification, retry, or acceptance — the Lead reviews and decides.
+Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a new run resumes the parent's provider conversation in the retained worktree (no fresh worktree/session), shipping a child delivery. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the parent must belong to it. Eligibility: read-only, closed-set rejectionReason, before any mutation. WAO never infers correction, scope, verification, retry, or acceptance — the Lead reviews and decides.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -235,6 +237,7 @@ Input:
 | parentRunId | string | yes |  |
 | prompt | string | yes |  |
 | delivery | object | yes |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -257,7 +260,7 @@ Output:
 
 ## run_correct
 
-Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, delivered to the live provider stdin. Closed-set outcome queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/re-scopes/accepts; the prompt is never returned.
+Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, delivered to the live provider stdin. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Closed-set outcome queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/re-scopes/accepts; the prompt is never returned.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=true, openWorldHint=true
 
@@ -268,6 +271,7 @@ Input:
 | runId | string | yes |  |
 | correctionId | string | yes |  |
 | prompt | string | yes |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -307,7 +311,7 @@ Output:
 
 ## run_collect
 
-Collect a run's worker output: bounded, redacted assistant text + evidence counts. Each call appends one messages.collected audit event (not idempotent); cursor = prior nextCursor. mode=compact returns the last assistant text verbatim (<=4000 chars) + full evidence counts; no cursor, no semantic summary.
+Collect a run's worker output: bounded, redacted assistant text + evidence counts. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Each call appends one messages.collected audit event (not idempotent); cursor = prior nextCursor. mode=compact returns the last assistant text verbatim (<=4000 chars) + full evidence counts; no cursor, no semantic summary.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=false, openWorldHint=true
 
@@ -318,6 +322,7 @@ Input:
 | runId | string | yes |  |
 | cursor | string | no |  |
 | mode | string | no | enum: full \| compact |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -410,7 +415,7 @@ Output:
 
 ## run_delivery_decide
 
-Record an explicit Lead decision (accepted/rejected) on a delivery. First durable decision wins; later attempts lose. Expected-policy rejections return a normal outcome with a closed-set rejectionReason — only unexpected internal failures are errors. Never decides correctness automatically; returns no decision reason or delivery details.
+Record a Lead decision (accepted/rejected) on a delivery. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. First durable decision wins. Expected-policy rejections return a normal outcome with a closed-set rejectionReason; a run of another project and unexpected internal failures are errors. Never decides correctness automatically; returns no decision reason or delivery details.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -421,6 +426,7 @@ Input:
 | runId | string | yes |  |
 | decision | string | yes | enum: accepted \| rejected |
 | reason | string | yes |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -435,7 +441,7 @@ Output:
 
 ## run_stop
 
-Stop only runs owned by the bound workspace (Lead-triggered). Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill / backend abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
+Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it, not to the session binding. Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill / backend abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=false
 
@@ -446,6 +452,7 @@ Input:
 | runId | string | yes |  |
 | reason | string | yes |  |
 | observedSeq | integer | yes |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -459,7 +466,7 @@ Output:
 
 ## runs_list
 
-List runs owned by the bound workspace. Each item carries activityStatus/activityBasis: active requires a known non-terminal transcript with a fresh owner heartbeat; unresolved (non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped and is counted in unresolvedCount. limit defaults to 50. Read-only, idempotent.
+List runs owned by the bound workspace (the response's scope names that binding's source + non-absolute project label). Each item carries activityStatus/activityBasis: active requires a known non-terminal transcript with a fresh owner heartbeat; unresolved (non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped and is counted in unresolvedCount. limit defaults to 50. Read-only, idempotent.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -474,6 +481,7 @@ Output:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
+| scope | object | yes |  |
 | runs | array<object> | yes |  |
 | returnedCount | integer | yes |  |
 | truncated | boolean | yes |  |
@@ -646,7 +654,7 @@ Output:
 
 ## run_delivery_repackage
 
-Re-package a retained delivery candidate after disallowed_path, verified-quiet backend failure, or process_missing (runner provably gone; settles the run failed, first-terminal-wins), reusing the original worktree, base commit, and verification config — no model, no resume, no path inference, no verification override. allowedPaths must cover the original scope and every actual changed path (sole scope authority); recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.
+Re-package a retained delivery candidate after disallowed_path, verified-quiet backend failure, or process_missing (runner provably gone; settles the run failed, first-terminal-wins), reusing the original worktree, base commit, and verification config — no model, no resume, no path inference, no verification override. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. allowedPaths must cover the original scope and every actual changed path (sole scope authority); recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -656,6 +664,7 @@ Input:
 | --- | --- | --- | --- |
 | runId | string | yes |  |
 | allowedPaths | array<string> | yes |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -673,7 +682,7 @@ Output:
 
 ## run_delivery_reverify
 
-Re-verify the committed delivery artifact after the original verification outcome was invalidated (closed-set reason): re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. Reentrant — retries converge on the same commit, at most one outcome. The decision stays the Lead's (run_delivery_decide).
+Re-verify the committed delivery artifact after the original verification outcome was invalidated (closed-set reason): re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Reentrant — retries converge on the same commit, at most one outcome. The decision stays the Lead's (run_delivery_decide).
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -685,6 +694,7 @@ Input:
 | reason | string | yes | enum: tooling_invalid \| environment_contaminated \| dependency_setup_missing |
 | setupCommands | array<string> | no |  |
 | timeoutMs | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 

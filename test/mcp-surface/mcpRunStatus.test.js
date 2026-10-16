@@ -858,7 +858,7 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
     // 1. Dispatch returns pending (the supervised run is accepted, not yet terminal).
     const dispRes = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "failing_worker", prompt: "bounded task" },
+      arguments: { agentId: "failing_worker", prompt: "bounded task", expectedWorkspaceRoot: dir },
     });
     const dispPayload = JSON.parse(dispRes.content.find((b) => b.type === "text").text);
     const runId = dispPayload.runId;

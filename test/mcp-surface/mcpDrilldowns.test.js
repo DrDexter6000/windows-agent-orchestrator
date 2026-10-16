@@ -335,7 +335,7 @@ test("MD-07: run_collect — full page with cursor → continue+activity; compac
     const client = await buildClient(server);
     try {
       // Full page 1 (12 messages → paginated, cursor present).
-      const full = await client.callTool({ name: "run_collect", arguments: { runId: "run_c" } });
+      const full = await client.callTool({ name: "run_collect", arguments: { runId: "run_c", expectedWorkspaceRoot: dir } });
       assert.equal(full.isError, undefined);
       assert.ok(full.structuredContent.nextCursor, "page 1 has a cursor");
       assert.equal(full.structuredContent.view, undefined, "full output carries no view field");
@@ -344,7 +344,7 @@ test("MD-07: run_collect — full page with cursor → continue+activity; compac
       assert.equal(cont.view, "evidence", "continuation entry is the evidence view");
 
       // Compact mode → full collect + activity.
-      const compact = await client.callTool({ name: "run_collect", arguments: { runId: "run_c", mode: "compact" } });
+      const compact = await client.callTool({ name: "run_collect", arguments: { runId: "run_c", mode: "compact", expectedWorkspaceRoot: dir } });
       assert.equal(compact.isError, undefined);
       assert.equal(compact.structuredContent.view, "compact");
       assert.equal(compact.structuredContent.compactStatus, "available");
@@ -361,7 +361,7 @@ test("MD-07: run_collect — full page with cursor → continue+activity; compac
 
       // A completed single-page full read (≤50 items) → activity only.
       seedTranscript(runDir, "run_one", { workspaceCwd: dir, messages: ["only"], terminal: true });
-      const done = await client.callTool({ name: "run_collect", arguments: { runId: "run_one" } });
+      const done = await client.callTool({ name: "run_collect", arguments: { runId: "run_one", expectedWorkspaceRoot: dir } });
       assert.equal(done.structuredContent.nextCursor, null);
       assert.deepEqual(done.structuredContent.availableDrilldowns.map((e) => e.tool), ["run_activity"]);
     } finally { await client.close(); await server.close(); }
@@ -544,7 +544,7 @@ test("MD-10: drilldown metadata never triggers nested tool invocation or extra a
           `${call.name} bounded drilldown count`);
       }
       // run_collect still appends exactly one (the metadata path adds none).
-      const collect = await client.callTool({ name: "run_collect", arguments: { runId: "run_all" } });
+      const collect = await client.callTool({ name: "run_collect", arguments: { runId: "run_all", expectedWorkspaceRoot: dir } });
       assert.equal(collect.isError, undefined);
       assert.ok(Array.isArray(collect.structuredContent.availableDrilldowns));
     } finally { await client.close(); await server.close(); }

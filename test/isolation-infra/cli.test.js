@@ -3220,11 +3220,24 @@ test("TD-77A: 空 run（无任何 run.event）→ data:[] 不抛", async () => {
 // ===== M11-4 B4: CLI collect --cursor parity + audit append =====
 
 // A process transcript with N assistant messages for CLI continuation tests.
+// Shared per-call target for the MCP run_collect parity call (the real
+// service verifies ownership; the fixture carries this root as run.started cwd).
+const MCP_TARGET = (() => {
+  const d = mkdtempSync(join(tmpdir(), "wao-cli-mcp-target-"));
+  execSync("git init -q", { cwd: d, stdio: "pipe" });
+  execSync("git config user.email t@t.com", { cwd: d, stdio: "pipe" });
+  execSync("git config user.name T", { cwd: d, stdio: "pipe" });
+  writeFileSync(join(d, "README.md"), "# t", "utf8");
+  execSync("git add README.md", { cwd: d, stdio: "pipe" });
+  execSync("git commit -q -m init", { cwd: d, stdio: "pipe" });
+  return d;
+})();
+
 function writeM11_4CliTranscript(dir, runId, messageBodies) {
   const lines = [
     JSON.stringify({ type: "run.submitted", agentId: "researcher", ts: "2026-07-22T00:00:00.000Z" }),
     JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_m114_cli", runId, agentId: "researcher" }),
-    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "researcher" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "researcher", cwd: MCP_TARGET }),
   ];
   messageBodies.forEach((body, i) => {
     lines.push(JSON.stringify({
@@ -3377,7 +3390,7 @@ test("M11-4-B4-04: CLI --cursor output deep-equals MCP structuredContent", async
     const [c, s] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(s), client.connect(c)]);
     try {
-      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_cli_parity" } });
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_cli_parity", expectedWorkspaceRoot: MCP_TARGET } });
       const mcpPage1 = res.structuredContent;
       // Deep semantic equality: same field set, same message texts, same
       // evidenceCounts, same itemCount, same truncated. nextCursor tokens

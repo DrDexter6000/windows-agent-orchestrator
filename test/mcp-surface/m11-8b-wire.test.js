@@ -71,7 +71,9 @@ test("WIRE-RED1: invalid requested agentId does not call dispatcher (callCount=0
         callCount = 0;
         const res = await client.callTool({
           name: "run_dispatch",
-          arguments: { agentId: bad, prompt: "task" },
+          // A valid target so the refusal being proven is the agentId gate,
+          // not the (unrelated) missing-target gate.
+          arguments: { agentId: bad, prompt: "task", expectedWorkspaceRoot: dir },
         });
         assert.equal(res.isError, true, `${JSON.stringify(bad)} → isError`);
         assert.equal(callCount, 0, `dispatcher NOT called for ${JSON.stringify(bad)} (callCount=0)`);

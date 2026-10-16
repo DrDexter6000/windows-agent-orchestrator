@@ -33,7 +33,7 @@ import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnership, assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // TD-137②：等待窗到期交叉提示的单一构造处（runWait 同族 SSOT；无环——
 // runWait 及其传递依赖不回读本模块）。
 import { buildWaitWindowHint } from "./runWait.js";
@@ -1101,6 +1101,11 @@ export async function getRunDeliveryReadiness({
  * @param {string} input.runDir
  * @param {string} input.decision — "accepted" | "rejected"
  * @param {string} input.reason — trimmed non-empty
+ * @param {string} [input.authorizedWorkspaceRoot] — per-call proved target root
+ *        (MCP run_delivery_decide). When supplied, the run's ownership must
+ *        match it — verified fail-closed (code workspace_not_authorized) before
+ *        the locked append. CLI callers omit it (Owner/Lead privileged channel,
+ *        same as runStop/collect).
  * @param {Function} [input.readTranscriptFn] — for lock-external context init only
  * @param {Function} [input.transcriptFactory] — injectable for testing (async (filePath, context) => transcript)
  * @param {Function} [input.sessionRelease] — TD-250 A1b（决定 0056）：accepted 落盘后的
@@ -1108,7 +1113,7 @@ export async function getRunDeliveryReadiness({
  *   MCP/CLI 装配层各自注入）。rejected 永不触发。任何抛错在此吞掉。
  * @returns {Promise<{accepted:true, event} | {accepted:false, existing}>}
  */
-export async function decideRunDelivery({ runId, runDir, decision, reason, readTranscriptFn, transcriptFactory, sessionRelease }) {
+export async function decideRunDelivery({ runId, runDir, decision, reason, authorizedWorkspaceRoot, readTranscriptFn, transcriptFactory, sessionRelease }) {
   if (!runId || typeof runId !== "string") throw new Error("decideRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("decideRunDelivery: runDir is required");
   if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
@@ -1124,6 +1129,16 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
   // Lock-external read: initialize transcript context/seq only.
   // Authorization happens IN-LOCK inside tryAppendDecision.
   const events = await _readTranscript(filePath);
+
+  // the MCP boundary passes the per-call proved target root; the
+  // run's ownership must match it (ownership SSOT — mismatched/missing/
+  // malformed ownership fails closed with code workspace_not_authorized, which
+  // the MCP adapter reports as a fixed refusal) BEFORE any decision append or
+  // session release. CLI callers omit the parameter.
+  if (authorizedWorkspaceRoot !== undefined) {
+    assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  }
+
   const context = {
     runId,
     agentId: events[0]?.agentId ?? "unknown",
