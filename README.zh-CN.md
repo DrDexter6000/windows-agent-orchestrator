@@ -64,7 +64,8 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
 - **按批准的计划清理**——`wao worktree reclaim` 在分支进了已校验的 bundle 之后清退陈旧
   worktree 与 `wao/*` 分支，含嵌在关联工作树里的运行树；`wao runs settle` 结算 runner
   已死的 run（0082）。
-- 按决定分组的范围、发版门槛证据与 Owner 的 reliability 豁免（deepseek-pro 一行）见
+- 按决定分组的范围、发版门槛证据与 Owner 的两项 reliability 豁免（deepseek-pro 一行；
+  delta 行的越界演练）见
   [`docs/changelog-2026-10-16-v0.5.0.md`](docs/changelog-2026-10-16-v0.5.0.md)。
 
 ## 当前状态

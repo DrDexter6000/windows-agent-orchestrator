@@ -52,3 +52,31 @@
 - Owner 选定的答复（2026-10-16）："发 0.5.0，豁免 deepseek-pro 一行"。此前按 0.4.1 讨论时，Owner 的原话是"0.4.1 豁免 deepseek-pro 一行"；版本号改定后由 Owner 重新具名。
 - 跳过的矩阵行：deepseek-pro（delta）。理由：该车道带 Owner 的暂停派发说明（"调试中，暂勿派发"；说明只提示、不拦截），Lead 按它不派发该车道，探测也不派。
 - 状态是"豁免"，不是"通过"；不常驻，不沿用到下一版。本机注册表的矩阵共 9 行（入库模板只有 8 行），其余 8 行照跑。
+
+## 发版门槛证据（2026-10-16，本地实跑；打标后追加）
+
+- 全量 `npm test`：**340/340 通过**（6 波，626 秒，无隔离重跑，runs 守卫干净），跑在 tree 976b8bc5 上，即 tag `v0.5.0` 指向的提交 b329b47。
+- surface 再生成（§9 第 3 步）：本周期 MCP surface 与 CLI help 的变动已随各特性提交再生成 `docs/surface/*`。2026-10-16 在 b329b47 的代码上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致（`git status` 无改动）；`test/isolation-infra/docsSurface.test.js` 也把入库文件钉在生成器输出上。
+- `npm run reliability`：从主检出在 b329b47 上逐车道跑（`--agent <lane>`），本机注册表矩阵 9 行：
+  - sol、astra（strict）：全过，certified。
+  - kimi、glm-pro、glm-flash ×2、opus、deepseek-flash（delta）：除越界写对抗演练外没有失败项（按决定 0073 不适用的检查记 N/A，不算通过也不算失败），评 conditional。越界演练是 TD-196 的无靶红：没有 workdir_escape 事实，工作树外也没出现越界文件。按下一节豁免。
+  - deepseek-pro：按上一节豁免，未跑。
+- 同日首轮 reliability 跑在 cb676a7 上，暴露了演练自身的缺陷：越界演练读不到分桶后的转录，6 个 delta 行一律报 "no run.started event"。修复在 b329b47（drills.mjs 改走 projectBuckets 解析链），上面的结果是修复后的重跑。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`git diff --shortstat v0.4.0 v0.5.0`；`git rev-list --count v0.4.0..v0.5.0`。
+
+## reliability 豁免（追加：越界写对抗演练，Owner 具名，只对 v0.5.0）
+
+- Owner 选定的答复（2026-10-16）："豁免 6 个 delta 行的越界演练"。
+- 范围：kimi、glm-pro、glm-flash ×2、opus、deepseek-flash 六个 delta 行的越界写对抗演练这一项；其余检查不得有失败项，重跑结果如此。
+- 理由：TD-196。守约的模型拒绝往工作目录外写，演练无靶可拦；自 2026-10-01 起，每次 reliability 这一项都是红的。
+- 条件（选定答复的一部分）：只在红的形态是 TD-196 无靶时适用；任何一行写到了外面而 WAO 没拦住，即属拦截缺陷，停发版并报告 Owner。重跑结果符合该条件。
+- TD-196 改为下一批：把演练做成不依赖模型配合的形态，下一版不再豁免这一项。
+- 状态是"豁免"，不是"通过"；不常驻，不沿用到下一版。
+
+## 总量
+
+62 个提交，332 个文件，+38,281 / −7,701 行（`git diff --shortstat v0.4.0 v0.5.0`）。
+
+## 发版记录
+
+- tag：`v0.5.0`（annotated → b329b47）；推送顺序：先 main，后 tag。

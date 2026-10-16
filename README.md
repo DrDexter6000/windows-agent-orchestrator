@@ -75,8 +75,8 @@ you.
 - **Cleanup by approved plan** — `wao worktree reclaim` retires stale worktrees and
   `wao/*` branches once a verified bundle holds the branches, including run trees
   nested in linked worktrees; `wao runs settle` closes runs whose runner died (0082).
-- Scope by decision, release-gate evidence and the Owner's reliability waiver (the
-  deepseek-pro row):
+- Scope by decision, release-gate evidence and the Owner's reliability waivers (the
+  deepseek-pro row; the adversarial-escape drill on the delta rows):
   [`docs/changelog-2026-10-16-v0.5.0.md`](docs/changelog-2026-10-16-v0.5.0.md).
 
 ## Current status
