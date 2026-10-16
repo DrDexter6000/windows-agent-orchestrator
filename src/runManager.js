@@ -1,12 +1,12 @@
 import { mkdir } from "node:fs/promises";
-import { lstatSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
-import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError } from "./projectBuckets.js";
-import { createWorktree, removeWorktree, recycleRunBranch } from "./isolation.js";
+import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError, listTranscriptsDeep } from "./projectBuckets.js";
+import { createWorktree, removeWorktree, removeWorktreeNoForce, recycleRunBranch, terminalWorktreeVerdict } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
@@ -1745,6 +1745,8 @@ export class RunManager {
       // provider 会话复用（2026-09-21）：复用 run 需要把 wire 上观察到的运行时
       // 会话 id 在终态前补记成绑定的 session.created（见 Run 内 late-bind 段）。
       sessionReuse,
+      // 终态自动回收"不在使用中"门的运行存储根（resume 与 start 同一解析）。
+      runsRoot: dir,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -2165,6 +2167,7 @@ export class RunManager {
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
         verifyDeliveryFn: this.verifyDeliveryFn,
+        runsRoot: dir,
       });
       this.activeRuns.set(runId, run);
       this._ensureSigintHandler();
@@ -2218,6 +2221,7 @@ export class RunManager {
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
       verifyDeliveryFn: this.verifyDeliveryFn,
+      runsRoot: dir,
     });
     this.activeRuns.set(runId, run);
     this._ensureSigintHandler();
@@ -2406,6 +2410,159 @@ function resolveScorecardRules(optionsScorecard, agentScorecard, scorecardMode =
   return { requireEvidence: true, mode };
 }
 
+// ── 终态自动回收的"不在使用中"门：运行存储占用扫描 ─────────────────────────
+//
+// 派发允许指定 cwd、也允许不隔离——另一个尚未终态的 run B 可以把 A 的树当作
+// 工作目录（不建嵌套树、不切 A 的分支）。A 收尾时只查自己，删除可能落在 B
+// 脚下；Windows 上 git 还可能先删一部分文件、再在被占用的目录上失败。删除
+// 前扫描运行存储：任一**其它尚未终态** run 的 run.started.cwd 或
+// run.started.worktreePath 等于本树、或位于本树之内（真实路径比较，win32
+// 大小写折叠；路径已不在盘上时按词法 resolve 比较，其余解析失败判断不了）→
+// 保留（tree_in_use）。
+//
+// 扫描面与读放量（有界）：listTranscriptsDeep（strict）枚举 runsRoot 根层 +
+// projects/* 全部桶的 run_*.jsonl（wf_* 工作流转录与非 .jsonl 文件不在面内；
+// run 的项目桶由它的 cwd 决定，cwd 在本树内的 run 可能落在任何桶里，所以必须
+// 扫全部桶）。转录按 <runId>.jsonl 存放，属主就是文件名里的 runId，只认绑定
+// 到它的事件（别的 run 混写进来的行不算）。
+//
+// 派发位置只认 run.started：每个 run 只有一条，由 runner 开跑时按它实际使用的
+// cwd 写下（启动失败时补一条不带 cwd 的占位）。run.background_submitted 的 cwd
+// 是提交时的取值，不显式传 --cwd 时 runner 开跑会重读注册表，两者可能不同——
+// 它只能作"落在本树"的正面证据，不能证明一个 run 不在本树。
+//
+// 每个文件先做一次有界头读：绑定的 run.started 完整可读、cwd 与 worktreePath
+// 都在树外 → 排除，不再打开。其余（命中本树，或头读下不了结论：run.started
+// 没有、写坏、在窗外、不带 cwd）整读，坏行跳过（坏行只会让事件变少，造不出
+// 终态；终态不可逆）：已终态 → 不占用；尚未终态 → 按 run.started 的位置判，
+// 没有可用的 run.started 时提交时的 cwd 落在本树 → 占用，否则判断不了。
+//
+// 任一环节读不出、判断不了（存储根不在、桶目录 stat 失败、文件打开或读取出错、
+// 路径解析出错而不是不在盘上、没有绑定事件、尚未终态且位置证不了）→ 保留，
+// 原因记 occupancy_unprovable（fail-closed）。它与确有占用的 tree_in_use 分开
+// 记：这类转录会让所有回收停下，Lead 要看得出这是存储的问题，而不是去找一个
+// 不存在的占用者。
+
+/** 占用扫描单文件头读的字节上限（窗内没有可用的 run.started → 整读）。 */
+const WORKTREE_OCCUPANCY_HEAD_BYTES = 16384;
+
+/** run.started 的派发位置；cwd 不是非空字符串 → null（位置证不了）。 */
+function dispatchLocation(started) {
+  if (typeof started?.cwd !== "string" || started.cwd.length === 0) return null;
+  return {
+    cwd: started.cwd,
+    ...(typeof started.worktreePath === "string" && started.worktreePath.length > 0
+      ? { worktreePath: started.worktreePath } : {}),
+  };
+}
+
+/**
+ * 有界头读：窗内绑定到 runId 的那条 run.started 的派发位置；没有完整可读、带
+ * cwd 的这条事件 → null。解析不了的行（半写、被读窗截断、写坏）跳过：
+ * run.started 每个 run 只有一条，跳过别的行不会让它被错认，它自己坏了就找不到。
+ * 打开、读取出错直接抛出。
+ */
+function readDispatchLocationFromHead(filePath, runId) {
+  const fd = openSync(filePath, "r");
+  let text;
+  try {
+    const buf = Buffer.alloc(WORKTREE_OCCUPANCY_HEAD_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    text = buf.toString("utf8", 0, n);
+  } finally {
+    closeSync(fd);
+  }
+  for (const line of text.split(/\r?\n/)) {
+    let ev;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (ev?.type === "run.started" && ev.runId === runId) return dispatchLocation(ev);
+  }
+  return null;
+}
+
+/** 整读转录里绑定到 runId 的事件，跳过解析不了的行。读取出错直接抛出。 */
+function readBoundEventsSkippingBadLines(filePath, runId) {
+  const out = [];
+  for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    let ev;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (ev?.runId === runId) out.push(ev);
+  }
+  return out;
+}
+
+/** child 是否等于 ancestor 或位于其内（win32 大小写折叠，原生 sep 段边界）。 */
+function pathCoversFold(ancestor, child) {
+  const a = String(ancestor).replace(/\/+$/, "").toLowerCase();
+  const c = String(child).replace(/\/+$/, "").toLowerCase();
+  if (c === a) return true;
+  return c.startsWith(a.endsWith(sep) ? a : a + sep);
+}
+
+/**
+ * "不在使用中"门判定：除 selfRunId 外，有没有尚未终态的 run 把工作目录
+ * （或派发树）落在本树上。确有占用 → inUse:true（带占用者 runId）；任何读
+ * 不出/判不定（任一环节抛错也算）→ unprovable:true。两者调用方都保留树。
+ * 本函数不抛错。
+ *
+ * @param {string} runsRoot 中心运行存储根（runs/）
+ * @param {string} selfRunId 本 run（自身转录按文件名 runId 排除）
+ * @param {string} treePath 本树路径（verdict 已证真实路径与它一致）
+ * @returns {Promise<{inUse: boolean, byRunId?: string, unprovable?: boolean}>}
+ */
+export async function worktreeOccupiedByOtherRuns(runsRoot, selfRunId, treePath) {
+  const unprovable = { inUse: false, unprovable: true };
+  try {
+    const treeRealPath = realpathSync(treePath);
+    const covers = (p) => {
+      let anchor;
+      try {
+        anchor = realpathSync(p);
+      } catch (error) {
+        // 只有路径不在盘上才按词法锚比较；其余解析失败（I/O、权限、非法路径）
+        // 可能藏着指向本树的别名，抛出 → 判断不了
+        if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+        anchor = resolve(p);
+      }
+      return pathCoversFold(treeRealPath, anchor);
+    };
+    const locationCovers = (loc) => [loc.cwd, loc.worktreePath].some((p) => typeof p === "string" && covers(p));
+    const files = listTranscriptsDeep(runsRoot, { strict: true }).filter((e) => e.name.startsWith("run_"));
+    for (const entry of files) {
+      const runId = entry.name.slice(0, -".jsonl".length); // 转录的属主：文件名即 runId
+      if (runId === selfRunId) continue;
+      const head = readDispatchLocationFromHead(entry.path, runId);
+      if (head !== null && !locationCovers(head)) continue; // 头读确证在树外
+      // 命中本树，或头读下不了结论：整读，按绑定事件判。拼接或混写进来的别的
+      // run 的事件不能替它作证。
+      const bound = readBoundEventsSkippingBadLines(entry.path, runId);
+      if (bound.length === 0) return unprovable;
+      if (TERMINAL_STATES.includes(findState(bound))) continue; // 终态 run 不占用
+      const location = dispatchLocation(bound.find((e) => e.type === "run.started"));
+      if (location !== null) {
+        if (locationCovers(location)) return { inUse: true, byRunId: runId };
+        continue;
+      }
+      // 尚未终态、没有可用的 run.started：提交时的 cwd 只作正面证据
+      const submittedHere = bound.some((e) => e.type === "run.background_submitted"
+        && typeof e.cwd === "string" && e.cwd.length > 0 && covers(e.cwd));
+      if (submittedHere) return { inUse: true, byRunId: runId };
+      return unprovable;
+    }
+    return { inUse: false };
+  } catch {
+    return unprovable; // 枚举、头读、整读任一环节读不出
+  }
+}
+
 /**
  * Run 是单个运行的句柄。M1 起通过消费 handle.events 流驱动状态机。
  */
@@ -2431,8 +2588,10 @@ export class Run {
     readOnlyDeclared = false,
     deferredWorktreeRelease = null,
     removeWorktreeForRelease = removeWorktree,
+    removeWorktreeForTerminalRelease = removeWorktreeNoForce,
     recycleBranchForRelease = recycleRunBranch,
     sessionReuse = null,
+    runsRoot = null,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -2480,9 +2639,19 @@ export class Run {
     // 删除原语可注入（still_present 违约钉的测试缝）；默认真 isolation.removeWorktree。
     this.removeWorktreeForRelease = typeof removeWorktreeForRelease === "function"
       ? removeWorktreeForRelease : removeWorktree;
+    // 终态零丢失自动回收臂的同款测试缝；默认真 isolation.removeWorktreeNoForce
+    // （无 force、无 rmSync 兜底——与 W1a 的删除原语刻意不同）。
+    this.removeWorktreeForTerminalRelease = typeof removeWorktreeForTerminalRelease === "function"
+      ? removeWorktreeForTerminalRelease : removeWorktreeNoForce;
+    // 终态自动回收的单发防重标志（_runCleanup 多路径进入同款纪律）。
+    this._terminalWorktreeHandled = false;
     // TD-260（决定 0062 丙′）：分支回收原语同款测试缝；默认真 isolation.recycleRunBranch。
     this.recycleBranchForRelease = typeof recycleBranchForRelease === "function"
       ? recycleBranchForRelease : recycleRunBranch;
+    // 终态自动回收"不在使用中"门的运行存储根（runs/）。RunManager 的三个构造
+    // 点都传（start 前台/fire-forget 与 resume 同一 config.runDir 解析）；
+    // 缺席（测试直接构造 Run 等）→ 占用扫描判不了 → 按占用保留（fail-closed）。
+    this.runsRoot = typeof runsRoot === "string" && runsRoot.length > 0 ? runsRoot : null;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
@@ -3515,6 +3684,10 @@ export class Run {
     // 之后、best-effort、幂等。停止未确认（stop_unverified/probe 缺席）→ 留树
     // （迟到收取窗口），周期普查兜底。
     await this._releaseDeferredWorktree();
+    // 终态零丢失自动回收（只删树，分支一律保留）：同一位置（停止验证之后、
+    // cleanup_done 之前），处理 W1a 之外的 persistent 隔离树。best-effort、幂等，
+    // 事件追加失败不改写终态、不虚报释放。
+    await this._releaseTerminalWorktree();
     if (this._cleaned || !this._cleanup) return;
     this._cleaned = true;
     try {
@@ -3662,6 +3835,113 @@ export class Run {
         }
         // absent → 无事件（分支本不存在，释放事实自足）。
       } catch { /* best-effort：吞掉，绝不影响终态 */ }
+    }
+  }
+
+  /**
+   * 终态零丢失自动回收（只删树，分支一律保留）。Run 终态收尾的第四条树回收
+   * 路径，与 W1a（readOnly ephemeral）、验收放树（W1b）、lineage-close 并列。
+   *
+   * 适用对象（任一不满足 → 零事件，不是本臂的树）：
+   *   - persistent 隔离树（run.started 绑定的 worktreeStrategy === "persistent"；
+   *     只读 ephemeral 归 W1a，行为不变；无策略事实的 legacy 转录不碰）；
+   *   - 派发时没有 sessionReuse 路由（内存路由对象与转录 run.session_reuse 事实
+   *     双查——复用轮的 provider 会话 cwd 钉在树上，删了续接轮工具调用会落空）；
+   *   - 不是任何 run_lineage 线系的成员（bound run.session_reuse 之外，再查
+   *     bound run.background_submitted 的 rootRunId——线系成员的树由线系
+   *     生命周期处置：验收放树 / lineage-close）；
+   *   - 没有绑定的 run.delivery_created（打包成功的交付——undecided/
+   *     rejected/accepted——一律不碰，交付树的处置权在 Lead 验收与重打包恢复；
+   *     打包失败而树全净的在适用对象内，能重打包的形态树上一定有改动）。
+   *
+   * 删除条件（terminalWorktreeVerdict 的树侧闭集 + 此处的转录侧/运行存储侧
+   * 门）全部成立才删；任一条读不出、有歧义或不成立就保留，记一条闭集原因。
+   * 本方法对适用对象恰好记一条事件（事件族与 W1a/W1b 共用）：
+   *   released / already_gone / skipped{reason: stop_unconfirmed|state_unproven|
+   *   unproven_path|content_present|inventory_unreadable|not_tip|nested_tree_present|
+   *   tree_in_use|occupancy_unprovable} / failed{reason: still_present}。
+   *
+   * 删除用 isolation.removeWorktreeNoForce（无 force、无 rmSync 兜底；失败或删
+   * 后目录仍在 → still_present 保留）。分支一律保留——本臂绝不调用分支回收。
+   * 与 W1a 的洁净标准不同：本臂要求内容全净（ignored 也算内容），W1a 释放只读
+   * 树时不查脏。交付验证的时序由对象门结构保证：有 delivery_created 的 run 在
+   * 验证还在跑/未裁决时本臂根本不评估；本臂评估的树上没有任何后续验证会跑。
+   */
+  async _releaseTerminalWorktree() {
+    if (this._terminalWorktreeHandled) return;
+    this._terminalWorktreeHandled = true;
+    let wtPath = null;
+    try {
+      if (this.sessionReuse) return;
+      const events = await readTranscript(this.transcript.filePath);
+      const bound = (e) => e && e.runId === this.runId;
+      const started = events.find((e) => e && e.type === "run.started" && e.runId === this.runId);
+      if (typeof started?.worktreePath !== "string" || started.worktreePath.length === 0) return;
+      if (started.worktreeStrategy !== "persistent") return;
+      if (events.some((e) => e && e.type === "run.session_reuse" && e.runId === this.runId)) return;
+      if (events.some((e) => e && e.type === "run.background_submitted" && e.runId === this.runId
+        && typeof e.rootRunId === "string" && e.rootRunId !== this.runId)) return;
+      if (events.some((e) => e && e.type === "run.delivery_created" && e.runId === this.runId)) return;
+      wtPath = started.worktreePath;
+      // 终态落盘门：本 run 绑定的持久终态已在转录上（cleanup 只在终态路径进入，
+      // 此门挡住转录事实缺失/不可投影的异常形态）。
+      const state = findState(events.filter(bound));
+      if (!TERMINAL_STATES.includes(state)) {
+        await this.transcript.append("run.worktree_release_skipped", { reason: "state_unproven" });
+        return;
+      }
+      // W1a 同款停止确认门：停止未确认 → 留树（迟到收取窗口）。
+      if (!this._stopQuietConfirmed) {
+        await this.transcript.append("run.worktree_release_skipped", { reason: "stop_unconfirmed" });
+        return;
+      }
+      const verdict = terminalWorktreeVerdict({
+        worktreePath: wtPath,
+        runId: this.runId,
+        repoCwd: typeof started.cwd === "string" && started.cwd.length > 0
+          ? started.cwd : this.agent?.cwd,
+      });
+      if (verdict === "gone") {
+        await this.transcript.append("run.worktree_already_gone", {});
+        return;
+      }
+      if (verdict !== "ready") {
+        await this.transcript.append("run.worktree_release_skipped", { reason: verdict });
+        return;
+      }
+      // "不在使用中"门：删除前查运行存储——别的尚未终态 run 的 cwd/worktreePath
+      // 落在本树上（含恰好等于树根）→ 保留（tree_in_use，带占用者 runId）。存储
+      // 根缺席或任一环节读不出、判不定 → 保留（occupancy_unprovable）。扫描面与
+      // 代价见 worktreeOccupiedByOtherRuns。
+      if (!this.runsRoot) {
+        await this.transcript.append("run.worktree_release_skipped", { reason: "occupancy_unprovable" });
+        return;
+      }
+      const occupancy = await worktreeOccupiedByOtherRuns(this.runsRoot, this.runId, wtPath);
+      if (occupancy.unprovable) {
+        await this.transcript.append("run.worktree_release_skipped", { reason: "occupancy_unprovable" });
+        return;
+      }
+      if (occupancy.inUse) {
+        await this.transcript.append("run.worktree_release_skipped", { reason: "tree_in_use", byRunId: occupancy.byRunId });
+        return;
+      }
+      const removed = await this.removeWorktreeForTerminalRelease(wtPath);
+      if (!removed || existsSync(wtPath)) {
+        await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
+      } else {
+        await this.transcript.append("run.worktree_released", {});
+      }
+      // 分支一律保留：不调用 recycleRunBranch（与 W1a 的释放后分支回收刻意不同）。
+    } catch {
+      // best-effort：意外抛错路径统一 existsSync 复检收口（与 W1a 同纪律——
+      // 抛错≠完好如初，可能已半删；树仍在时按 still_present 上报，普查按可疑
+      // 处理）。适用对象都还没判定出来的抛错（转录读不出等）→ 零事件，交普查。
+      try {
+        if (wtPath && existsSync(wtPath)) {
+          await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
+        }
+      } catch { /* 双重失败：吞掉，绝不影响终态 */ }
     }
   }
 

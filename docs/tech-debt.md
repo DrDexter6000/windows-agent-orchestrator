@@ -35,7 +35,7 @@
 | TD-125 | prune 归档有 TOCTOU 覆盖窗、无逐文件容错，子目录语料与顶层日志不在清扫面 | 开放 | 等样本：TOCTOU 真实冲突实证；子目录策略 Owner 需要时另立 | docs/usage.md |
 | TD-128 | 读绑定清扫大部分已修，但维持清单仍有约十处无绑定读面：写侧 CAS 三门、seq 水位族、events[0] 类等，外 run 伪造行仍可污染观测或锁死交付决策 | 开放 | 等样本：触发条件入册（非人调用方、程序化消费输出、pre-envelope 存量变非零） | src/transcript.js src/runManager.js src/backgroundRunner.js |
 | TD-130 | 全量测试套件存在多文件多波环境性 isolation_pass 假失败，根因未定位，靠串行闸与复跑缓解 | 开放 | 等样本：T1/T2/T3 重开后闸独占下仍现 isolation_pass 假失败 | docs/research/td130-root-cause.md src/verificationGate.js src/machineGatePaths.js |
-| TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截链的实测归 TD-196 | 开放 | 择机：下次车道认证周期 | 0025 0026 |
+| TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
 | TD-138 | 全量测试约 9 分钟（2026-10-15 实测 551 秒），由 filesystem 波决定（326 秒，82 个文件并发 8），这一波在等几个交付类测试文件 | 开放 | 下一批：按 `test-results.json` 的 `durationMs` 找出最慢文件，用共用夹具或注入缝压时间 | docs/testing.md test/manifest.json |
@@ -44,7 +44,6 @@
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
 | TD-142 | workflow / DAG 层利用率低，裁定保留现状不退役 | 设计性约束 | 连续一个季度零 workflow 运行，或该层需要实质改动 | 0027 |
 | TD-143 | 证据链层依赖 runtime 厂商 transcript 访问政策，且治理方法论无第二读者与操作者 | 开放 | 等样本：backend 收紧 transcript 政策，或第二操作者加入前补交接文档 |  |
-| TD-146 | 非交付运行与未打包的交付运行，终态后即使树干净、没有新提交也不回收；`wao worktree reclaim` 已落地（含嵌套运行树），存量按 Owner 批准计划清退，新的累积仍在发生 | 开放 | 下一批：终态零丢失自动回收（0057 W1a、0060 条款已会审，0082 已批）任务书定稿 | 0082 |
 | TD-149 | repackage 的 allowedPaths 仍硬拒目录/尾斜杠条目，dispatch 收而 repackage 拒；waitWindowHint 缺 MCP 非泄漏钉 | 开放 | 等样本：实际被拒收目录清单时立项；触碰 delivery/repackage 面时顺带 | src/application/runDeliveryRepackage.js docs/02-architecture.md |
 | TD-153 | `runs list --since` 不走历史扫描通道；unknown 展示态不能作为过滤条件 | 开放 | 择机：下次改 CLI 查询面时让 --since 走历史扫描通道、放开 unknown 过滤 | src/scorecard.js src/transcript.js docs/usage.md |
 | TD-156 | runs/无保留策略，全量扫描随文件数增长变慢，当前约2-4秒逼近阈值 | 开放 | 等样本：全量扫描耗时破 5s 阈值即转按年龄归档（不删除） | scripts/canonical-test.mjs |
@@ -72,7 +71,6 @@
 | TD-193 | kimi-web 后端的 WS 事件流、seq 游标重放与按提示中止能力已静态确认但未接线，REST 通道无会话级中止 | 开放 | 等样本：kimi-web 席位转正或会话级中止需求出现 | docs/incidents/2026-09-30-kimi-web-wiring.md |
 | TD-194 | 白天并发跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除 | 开放 | 等样本：白天 flake 再现时逐案直跑复现加机器态取证，累计 3 例立专案 |  |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
-| TD-196 | 对抗逃逸演练依赖模型配合，守约模型即无靶；拦截链端到端仅有单测未实测，例外席被全量认证机械降级需脚本手工恢复 | 开放 | 下一批：越界演练改成不依赖模型配合的形态，下一版发版门槛不再豁免这一项 | 0036 0037 |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
 | TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 等样本：下次受督的长运行或 zcode 交付运行 | docs/usage.md |
 | TD-201 | dsh 组件层在册证据基于 0.1.5-rc.2 旧指纹，现装 0.2.0-rc.2 后旧证据 inconclusive 且不可由 component-check 重建 | 开放 | 等样本：coder_low_dsh 席位承重前，或 dsh 0.2.0 正式发布 | scripts/reliability/dsh-acp/evidence/ scripts/reliability/dsh-acp/wao-reuse-drill.mjs |
@@ -108,3 +106,4 @@
 | TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 等样本：真实误归样本出现时按窗口长短区分限流与额度耗尽 | src/diagnosis.js |
 | TD-307 | 分桶（D2-②b）后仍按平铺布局找转录的残留：三个独立脚本拼 `<runDir>/<runId>.jsonl` 读转录；两个复用演练的负向用例还往平铺路径改写前任转录（与桶内原件成哈希不同的孪生），并用顶层快照断言被拒的派发不留新转录（看不见桶内新增）；long-run-probe 只枚举顶层；drillEvidence 的 drillTranscriptPath 无调用方 | 开放 | 择机：下次运行这些脚本前改走 projectBuckets 解析链 | scripts/dispatch-with-liveness.mjs scripts/reliability/session-reuse-drill.mjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs scripts/long-run-probe.mjs |
 | TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含 containmentEvidence 时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求 containmentEvidence 在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 scripts/reliability/certification.mjs |
+| TD-309 | codex 车道（sol、astra）用 shell 命令写文件，transcript 里没有 file_written，拦截门看不见这类写入，往工作树外写也一样；containmentEvidence 因此判断不了，这两条 strict 行降为 conditional。WAO 调 codex 不带沙箱参数，越界写能不能被挡住取决于 codex 自身的配置 | 开放 | 下一批：方案会审——显式启用并实测 codex 的沙箱，或让 WAO 看得见 shell 写入；演练可预建目录，减少模型改走 shell | src/backends/codex.js src/backends/parsers/codex.js scripts/reliability/drills.mjs |

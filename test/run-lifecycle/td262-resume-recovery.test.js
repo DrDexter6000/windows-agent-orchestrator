@@ -91,7 +91,7 @@ test("TD-262b: resume 恢复 ephemeral——deferred 释放在场+执行位置=�
   } finally { cleanupDir(dir); }
 });
 
-test("TD-262b: persistent/legacy 转录 → 不恢复 deferred（树保留——opus 反例边界）", async () => {
+test("TD-262b: persistent/legacy 转录 → 不恢复 deferred（persistent 树由终态自动回收放、legacy 保留）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-262rr-2-"));
   try {
     makeGitRepo(dir);
@@ -107,13 +107,18 @@ test("TD-262b: persistent/legacy 转录 → 不恢复 deferred（树保留——
     writeFileSync(registryPath, JSON.stringify({ agents: { rr2: { backend: "claude-code", cwd: dir } } }), "utf8");
     const manager = makeManager(dir, registryPath, null);
     const resumedP = await manager.resume("run_262rr_p", { runDir: join(dir, "runs"), registry: registryPath });
-    assert.equal(resumedP.deferredWorktreeRelease, null, "persistent 不恢复");
+    assert.equal(resumedP.deferredWorktreeRelease, null, "persistent 不恢复 W1a deferred（opus 反例边界不变）");
     await resumedP.waitForCompletion({ pollInterval: 1 }).catch(() => {});
-    assert.ok(existsSync(join(dir, ".wao-worktrees", "run_262rr_p")), "persistent 树保留");
+    // persistent 树不再无条件保留：终态自动回收（第四条路径）对无路由、无线系、
+    // 无交付、内容全净的 persistent 树生效——树释放、分支保留。
+    assert.ok(!existsSync(join(dir, ".wao-worktrees", "run_262rr_p")), "persistent 树由终态自动回收释放");
+    const eventsP = readFileSync(join(dir, "runs", "run_262rr_p.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(eventsP.some((e) => e.type === "run.worktree_released"), "释放事实入账");
+    execSync("git rev-parse refs/heads/wao/run_262rr_p", { cwd: dir, stdio: "ignore" });
     const resumedL = await manager.resume("run_262rr_l", { runDir: join(dir, "runs"), registry: registryPath });
     assert.equal(resumedL.deferredWorktreeRelease, null, "legacy（无策略字段）不恢复——交普查");
     await resumedL.waitForCompletion({ pollInterval: 1 }).catch(() => {});
-    assert.ok(existsSync(join(dir, ".wao-worktrees", "run_262rr_l")), "legacy 树保留");
+    assert.ok(existsSync(join(dir, ".wao-worktrees", "run_262rr_l")), "legacy 树保留（终态自动回收只认持久化 persistent 事实）");
   } finally { cleanupDir(dir); }
 });
 

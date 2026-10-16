@@ -60,3 +60,7 @@
 - 宿主仓是否清退、何时清退，由 Owner 决定。
 - 分支删掉、提交被 gc 回收之后，这条运行不能再 `runs verify-commit`、repackage 或续接：三者都明确拒绝，不会从 main 重建（`test/delivery/td146ReclaimedRunEntryPoints.test.js` 钉住）。纠偏只对在跑的运行有效，清退不收在跑的运行，不受影响。
 - 2026-10 各批收尾时，Lead 曾在 bundle 校验后删掉本批交付分支（11 个 bundle 在 `runs-archive/2026-10/delivery-closeout-*.bundle`），与 0058 不符。这是历史偏差，本决定不追认；这些 bundle 同样按第 5 条保留。
+
+## 修订条（0085，2026-10-16）
+
+第 4 条留作另议的终态零丢失自动回收由决定 0085 落地：终态收尾时只删干净的树，分支仍只按本决定的批准计划删。

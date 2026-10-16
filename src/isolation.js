@@ -215,6 +215,289 @@ export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   return Promise.resolve();
 }
 
+// ===== 终态零丢失自动回收（只删树，分支一律保留）============================
+//
+// 供 Run 终态收尾路径（_runCleanup，停止验证之后）回收普通 persistent 隔离树。
+// 与 removeWorktree 的差别是安全模型：不加 --force、单发、不重试、绝无
+// rmSync(force) 兜底——删除失败或删后目录仍在时如实返回 false（调用方记
+// still_present 保留），宁可留着也不强删。判定门在 terminalWorktreeVerdict，
+// 通过全部删除条件（内容全净、HEAD 附着在自己的分支 tip、无嵌套、无共享）
+// 的树 git 无需 force 即可删除；force 在本路径是多余权力，去掉。
+
+/**
+ * 只删一棵树的保守删除原语：`git worktree remove`（无 --force），单发。
+ *
+ * 源仓库自推同 removeWorktree（在源仓库执行，避免 Windows 上待删目录作为
+ * 子进程 cwd 被锁死）；自推失败时以待删目录为 cwd 兜底执行——该形状下 git
+ * 会拒绝（不能删除当前工作树），如实返回 false。
+ *
+ * 成功判定 = 事后目录不在盘上。git worktree remove 成功时自清管理条目；
+ * 本函数不做任何 rmSync/管理条目清理（没有 force 兜底就没有残留条目要补）。
+ *
+ * @param {string} wtPath worktree 路径
+ * @param {{execFn?: Function}} [opts] 测试缝（缺省 execFileSync）
+ * @returns {boolean} 目录已不在（含本来就不在）；false = 删除失败或仍在盘上
+ */
+export function removeWorktreeNoForce(wtPath, { execFn = execFileSync } = {}) {
+  const path = resolve(wtPath);
+  if (!existsSync(path)) return true;
+  let execCwd = path;
+  try {
+    const commonDir = execFn("git", ["rev-parse", "--git-common-dir"], {
+      cwd: path,
+      env: gitChildEnv(),
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    }).toString().trim();
+    const realCommon = realpathSync(resolve(path, commonDir));
+    if (existsSync(dirname(realCommon))) execCwd = dirname(realCommon);
+  } catch { /* 自推失败走待删目录为 cwd（git 拒绝 → false） */ }
+  try {
+    execFn("git", ["worktree", "remove", path], {
+      cwd: execCwd,
+      env: gitChildEnv(),
+      stdio: "pipe",
+      windowsHide: true,
+    });
+  } catch {
+    return false;
+  }
+  return !existsSync(path);
+}
+
+const defaultTerminalGit = (cwd, args) => execFileSync("git", ["--no-optional-locks", ...args], {
+  cwd,
+  encoding: "utf8",
+  env: gitChildEnv(),
+  stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
+  timeout: 30_000,
+}).toString();
+
+/** 大小写折叠路径比较（win32 身份语义，与 worktreeReclaim 的 samePath 同型）。 */
+function samePathFold(a, b) {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+}
+
+/** child 是否严格位于 ancestor 之下一级以上（段边界，非前缀字符串）。 */
+function isBelowPath(child, ancestor) {
+  if (typeof child !== "string" || typeof ancestor !== "string" || child.length <= ancestor.length) return false;
+  const a = ancestor.endsWith(sep) ? ancestor : ancestor + sep;
+  return child.startsWith(a);
+}
+
+/**
+ * 终态自动回收的树侧判定核心（纯函数，测试可注入 git/io）。求值顺序即安全
+ * 顺序，命中即停；任一条读不出按保留处理并给出闭集原因：
+ *
+ *   gone               目录已不在盘上（already_gone 事实，非失败）
+ *   unproven_path      身份不可证：树路径的父段名不是 .wao-worktrees、目录名
+ *                      不是本 runId、lstat 非目录/是符号链接或 junction、
+ *                      realpath 与词法路径不一致（路径链上有链接）、不在 git
+ *                      worktree 登记、是源工作树、真实路径不等于 <run.started
+ *                      .cwd 的真实路径>/.wao-worktrees/<runId>（本 run 自己的
+ *                      派发目录锚——从关联工作树派发的树同样可证；嵌套树不在
+ *                      本路径处置）、与 run.started.cwd 的 common git dir 不同仓
+ *   content_present    git status --porcelain=v1 -z --untracked-files=all
+ *                      --ignored=matching 非空（staged/unstaged/untracked/
+ *                      ignored 都算内容——被 ignore 的产物也是内容）
+ *   inventory_unreadable 内容清点不了：status 或 ls-files 读失败、索引带
+ *                      skip-worktree/assume-unchanged/非正常缓存位、含子模块
+ *                     （gitlink）、.wao-worktrees 子目录扫描失败
+ *   not_tip            HEAD 不附着在 wao/<runId>（detached/别的分支），或
+ *                      HEAD 不等于该分支 tip，或 git 读不出（归属不可证）
+ *   nested_tree_present 树下有登记在册的嵌套 worktree，或 .wao-worktrees/ 下
+ *                      有未登记但有内容的子目录
+ *   ready              全部门通过，可删
+ *
+ * 只读 git 调用统一带 --no-optional-locks（裸 git status 会刷新索引=写盘）。
+ *
+ * @param {object} p
+ * @param {string} p.worktreePath 本 run 绑定的 run.started.worktreePath（调用方
+ *   保证来自绑定事实，不按名字推导）
+ * @param {string} p.runId
+ * @param {string} p.repoCwd 绑定的 run.started.cwd（源仓库锚，缺席时用 agent.cwd）
+ * @param {Function} [p.git] (cwd, args) => stdout；缺省真实 git
+ * @param {object} [p.io] {existsSync, lstatSync, realpathSync, readdirSync}
+ * @returns {"gone"|"unproven_path"|"content_present"|"inventory_unreadable"|"not_tip"|"nested_tree_present"|"ready"}
+ */
+export function terminalWorktreeVerdict({
+  worktreePath, runId, repoCwd,
+  git = defaultTerminalGit,
+  io = { existsSync, lstatSync, realpathSync, readdirSync },
+}) {
+  if (typeof worktreePath !== "string" || worktreePath.length === 0) return "unproven_path";
+  if (!io.existsSync(worktreePath)) return "gone";
+  // ── 身份 ──
+  // 父段名 = .wao-worktrees（段级、大小写折叠、双分隔符；与验收放树的路径
+  // 证明同款归一）。
+  const norm = worktreePath.replace(/\//g, "\\").replace(/\\+$/, "");
+  const idx = norm.lastIndexOf("\\");
+  const parent = idx > 0 ? norm.slice(0, idx) : "";
+  const pidx = parent.lastIndexOf("\\");
+  const parentName = pidx >= 0 ? parent.slice(pidx + 1) : parent;
+  if (parentName.toLowerCase() !== ".wao-worktrees") return "unproven_path";
+  if (typeof runId !== "string" || !isValidRunId(runId) || basenameOf(worktreePath) !== runId) {
+    return "unproven_path";
+  }
+  let st;
+  try {
+    st = io.lstatSync(worktreePath);
+  } catch {
+    return "unproven_path";
+  }
+  if (!st?.isDirectory() || st.isSymbolicLink()) return "unproven_path";
+  // 路径链无链接：realpath 解析 reparse 目标，与词法 resolve 不一致即链上有
+  // symlink/junction/短名（比较按大小写折叠——盘符与目录大小写形态不构成不一致）。
+  let wtReal;
+  try {
+    wtReal = io.realpathSync(worktreePath);
+  } catch {
+    return "unproven_path";
+  }
+  if (!samePathFold(wtReal, resolve(worktreePath))) return "unproven_path";
+  // git 登记 + 源工作树 + 主检出形状 + 同仓锚。
+  let entries;
+  try {
+    entries = parseWorktreeList(git(wtReal, ["worktree", "list", "--porcelain"]));
+  } catch {
+    return "unproven_path";
+  }
+  const registered = entries.map((e) => {
+    const raw = resolve(e.path);
+    let real = null;
+    try {
+      real = io.realpathSync(raw);
+    } catch { /* 缺失登记不参与身份比较 */ }
+    return { raw, real };
+  });
+  if (!registered.some((e) => e.real != null && samePathFold(e.real, wtReal))) return "unproven_path";
+  let mainReal = null;
+  try {
+    mainReal = io.realpathSync(registered[0].raw);
+  } catch {
+    return "unproven_path";
+  }
+  if (samePathFold(mainReal, wtReal)) return "unproven_path"; // 源工作树
+  // 身份锚 = 本 run 自己的派发目录：树的真实路径必须等于 <run.started.cwd
+  // 的真实路径>/.wao-worktrees/<runId>（createWorktree 恒建在 join(resolve(
+  // agent.cwd), ".wao-worktrees", runId)，run.started.cwd 记的就是 agent.cwd）。
+  // 从关联工作树派发的树同样可证；主检出不再参与身份判定（同仓归属由下方
+  // common git dir 锚钉住）。
+  if (typeof repoCwd !== "string" || repoCwd.length === 0) return "unproven_path";
+  let repoReal;
+  try {
+    repoReal = io.realpathSync(repoCwd);
+  } catch {
+    return "unproven_path";
+  }
+  if (!samePathFold(wtReal, joinSep(joinSep(repoReal, ".wao-worktrees"), runId))) {
+    return "unproven_path";
+  }
+  let treeCommonReal;
+  let repoCommonReal;
+  try {
+    treeCommonReal = io.realpathSync(resolve(wtReal, git(wtReal, ["rev-parse", "--git-common-dir"]).trim()));
+    repoCommonReal = io.realpathSync(resolve(repoCwd, git(repoCwd, ["rev-parse", "--git-common-dir"]).trim()));
+  } catch {
+    return "unproven_path";
+  }
+  if (!samePathFold(treeCommonReal, repoCommonReal)) return "unproven_path";
+  // ── 内容全净（被 ignore 的产物也算内容；清点不了按保留）──
+  let statusOut;
+  try {
+    statusOut = git(wtReal, [
+      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+    ]);
+  } catch {
+    return "inventory_unreadable";
+  }
+  if (statusOut.length > 0) return "content_present";
+  let lsVerbose;
+  let lsStage;
+  try {
+    lsVerbose = git(wtReal, ["ls-files", "-v"]);
+    lsStage = git(wtReal, ["ls-files", "-s"]);
+  } catch {
+    return "inventory_unreadable";
+  }
+  // 正常缓存位是大写 H；S=skip-worktree、小写=assume-unchanged、其余字母=
+  // removed/changed/unmerged 等状态——凡清点不了的一律保留。
+  if (lsVerbose.split(/\r?\n/).some((line) => line.length > 0 && !line.startsWith("H "))) {
+    return "inventory_unreadable";
+  }
+  if (lsStage.split(/\r?\n/).some((line) => line.startsWith("160000 "))) return "inventory_unreadable";
+  // ── 提交都在分支上 ──
+  const branch = `wao/${runId}`;
+  let head;
+  let tip;
+  try {
+    const short = git(wtReal, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    if (short !== branch && short !== `refs/heads/${branch}`) return "not_tip";
+    head = git(wtReal, ["rev-parse", "HEAD"]).trim();
+    tip = git(wtReal, ["rev-parse", `refs/heads/${branch}`]).trim();
+  } catch {
+    return "not_tip"; // git 读不出 = 归属不可证
+  }
+  if (!/^[0-9a-f]{40}$/.test(head) || !/^[0-9a-f]{40}$/.test(tip)
+    || head.toLowerCase() !== tip.toLowerCase()) {
+    return "not_tip";
+  }
+  // ── 结构：无嵌套在册树、无未登记有内容的子目录、不共享 ──
+  // 在册嵌套树按登记 raw 路径与真实路径双匹配：子树目录已从盘上消失的悬空
+  // 登记（prunable）realpath 失效，但登记仍在册——照字面条件保留（git 对该
+  // 形状的父树不加 force 也能删，靠这里挡）。
+  const selfRaw = resolve(worktreePath);
+  if (registered.some((e) => !samePathFold(e.raw, selfRaw)
+    && ((e.real != null && isBelowPath(e.real, wtReal)) || isBelowPath(e.raw, selfRaw)))) {
+    return "nested_tree_present";
+  }
+  const nestedRoot = joinSep(wtReal, ".wao-worktrees");
+  let nestedNames;
+  try {
+    if (io.existsSync(nestedRoot)) {
+      const rootSt = io.lstatSync(nestedRoot);
+      if (!rootSt.isDirectory() || rootSt.isSymbolicLink()) return "nested_tree_present";
+      nestedNames = io.readdirSync(nestedRoot);
+    }
+  } catch {
+    return "inventory_unreadable";
+  }
+  if (nestedNames) {
+    for (const name of nestedNames) {
+      const child = joinSep(nestedRoot, name);
+      let childSt;
+      try {
+        childSt = io.lstatSync(child);
+      } catch {
+        return "inventory_unreadable";
+      }
+      if (childSt.isSymbolicLink() || !childSt.isDirectory()) return "nested_tree_present";
+      let childEntries;
+      try {
+        childEntries = io.readdirSync(child);
+      } catch {
+        return "inventory_unreadable";
+      }
+      if (childEntries.length > 0) return "nested_tree_present"; // 未登记但有内容
+    }
+  }
+  return "ready";
+}
+
+/** 词法 basename（不触盘；Windows 两分隔符都认）。 */
+function basenameOf(p) {
+  const norm = p.replace(/\//g, "\\").replace(/\\+$/, "");
+  const i = norm.lastIndexOf("\\");
+  return i >= 0 ? norm.slice(i + 1) : norm;
+}
+
+/** 以原生分隔符 join（realpath 产出的路径与 node:path join 同分隔符形态）。 */
+function joinSep(dir, name) {
+  return dir.endsWith(sep) ? dir + name : dir + sep + name;
+}
+
 /**
  * 列出所有 worktree。
  * @param {string} cwd 仓库路径

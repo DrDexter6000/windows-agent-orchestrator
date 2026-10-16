@@ -123,16 +123,31 @@ function readProjectRecord(bucketDir, io) {
   );
 }
 
-function listBucketDirs(runDir, io) {
+/** strict 枚举的存在判定：只有 ENOENT 算不存在，其余 stat 失败抛出（existsSync 会把它们吞成 false）。 */
+function existsOrThrow(io, p) {
+  try {
+    io.statSync(p);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function listBucketDirs(runDir, io, { strict = false } = {}) {
   const root = projectsDirFor(runDir);
-  if (!io.existsSync(root)) return [];
+  if (!(strict ? existsOrThrow(io, root) : io.existsSync(root))) return [];
   const out = [];
   for (const name of io.readdirSync(root)) {
     if (name === PROJECT_INDEX_NAME) continue;
     const p = join(root, name);
     try {
       if (io.statSync(p).isDirectory()) out.push({ name, dir: p });
-    } catch { /* 竞态删除：如实跳过 */ }
+    } catch (error) {
+      // 竞态删除（ENOENT）如实跳过；strict 下其余 stat 失败（权限等）抛出——
+      // fail-closed 的调用方不能把读不出的桶当作不存在。
+      if (strict && error?.code !== "ENOENT") throw error;
+    }
   }
   return out;
 }
@@ -622,17 +637,20 @@ export function findTranscriptTwin(runDir, runId, { io } = {}) {
 /**
  * 深层枚举（listTranscriptFiles 的两层扩容）：根层 + projects/* 桶内全部
  * `.jsonl`。根层在前（readdir 原序保持），桶按字典序、桶内保持 readdir 原序；
- * 归档目录在 runs/ 树外（决定 0050），天然不在枚举面。
+ * 归档目录在 runs/ 树外（决定 0050），天然不在枚举面。strict 供 fail-closed
+ * 的调用方使用：存储根不在时抛出（不在不等于空存储）；projects/ 与桶目录只有
+ * ENOENT 算不存在，其余 stat 失败（权限等）抛出。
  */
-export function listTranscriptsDeep(runDir, { io } = {}) {
+export function listTranscriptsDeep(runDir, { io, strict = false } = {}) {
   const i = defaultIo(io);
   const out = [];
+  if (strict) i.statSync(runDir); // 存储根不在（含 ENOENT）→ 抛出
   if (i.existsSync(runDir)) {
     for (const name of i.readdirSync(runDir)) {
       if (name.endsWith(".jsonl")) out.push({ path: join(runDir, name), name, bucket: null });
     }
   }
-  for (const { name, dir } of [...listBucketDirs(runDir, i)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+  for (const { name, dir } of [...listBucketDirs(runDir, i, { strict })].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     for (const f of i.readdirSync(dir)) {
       if (f.endsWith(".jsonl")) out.push({ path: join(dir, f), name: f, bucket: name });
     }

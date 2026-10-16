@@ -177,6 +177,7 @@
       "run-lifecycle/td250-upstreamSessionRelease.test.js",
       "run-lifecycle/td251-worktree-release.test.js",
       "run-lifecycle/td262-resume-recovery.test.js",
+      "run-lifecycle/terminalWorktreeRelease.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "run-lifecycle/waoAcceptCli.test.js",
       "transcript/acceptanceRecord.test.js",

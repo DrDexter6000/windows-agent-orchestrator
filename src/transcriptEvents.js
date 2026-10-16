@@ -263,7 +263,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.worktree_release_skipped",
-    description: "worktree 释放被跳过（{reason}）：stop_unconfirmed——只读运行的 worker 停止还没确认，留树等迟到收取；unproven_path——accept 释放时绑定事实里的路径无法证明；not_tip——accept 释放时 HEAD 不是交付 commit 的 tip，保树取证。",
+    description: "worktree 释放被跳过（{reason}）：stop_unconfirmed——只读运行与终态自动回收的 worker 停止还没确认，留树等迟到收取；unproven_path——accept 释放时绑定事实里的路径无法证明，或终态自动回收时树的身份不可证（路径链有链接/不在 git 登记/真实路径不等于本 run 派发目录（run.started.cwd 真实路径）下的 .wao-worktrees/<runId>/与绑定源仓库不同仓/目录名非本 runId）；not_tip——accept 释放时 HEAD 不是交付 commit 的 tip，或终态自动回收时 HEAD 不附着在 wao/<runId> 分支 tip（含 detached），保树取证；state_unproven——终态自动回收时本 run 绑定的终态未落盘；content_present——终态自动回收时树有 staged/unstaged/untracked/ignored 内容（被 ignore 的产物也算内容，与只读树释放不查脏的标准不同）；inventory_unreadable——终态自动回收时内容清点不了（git 读失败、skip-worktree/assume-unchanged、子模块）；nested_tree_present——终态自动回收时树下有嵌套运行树（在册，或未登记但有内容）；tree_in_use——终态自动回收删除前扫运行存储，发现别的尚未终态 run 的 run.started.cwd 或 worktreePath 等于本树或位于本树内（真实路径比较，含跨项目桶；载荷带占用者 byRunId）；occupancy_unprovable——同一扫描读不出或判不定（存储根缺席、桶目录 stat 失败、派发事实缺失或缺工作目录、候选转录读不出），按 fail-closed 保留。",
   },
   {
     type: "run.worktree_release_failed",
