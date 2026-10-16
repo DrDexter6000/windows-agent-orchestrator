@@ -37,12 +37,14 @@ npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算�
 
 四步：
 
-1. 生成计划（只读普查+分类，不动任何树/分支/转录/索引）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、分类计数与逐条回收项的审批事实。不传 `--run-dir` 时缺省 WAO 安装根下的运行目录（经全局 `wao` bin 调用时）。
-2. Owner 审阅计划文件并按该 sha256 批准（批准口径见决定 0082）；"需 Owner 点名"的保留项（分支 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用、只有分支没有树且三处无转录，且未并入 main）可用 `--include` 点名豁免。
-3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，并一律用计划里的运行目录（另传不同 `--run-dir` 整体拒绝）；分支先进一个 bundle（完整历史，list-heads 须含各计划 tip），树逐棵复核内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、脏树快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，无论成败都落盘；写失败、遇目录缺失的登记（不清、分支保守跳过）或删分支阶段实时登记读不出（分支全跳过）以非零退出码结束并如实列出已删除部分。
+1. 生成计划（只读）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、分类计数与逐条回收项的审批事实（嵌套项另打目标与父树）；不传 `--run-dir` 时缺省安装根的运行目录。
+2. Owner 审阅计划文件并按该 sha256 批准（批准口径见决定 0082）；"需 Owner 点名"的保留项（未并入 main，且 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用或只有分支没有树且三处无转录）可用 `--include` 点名豁免。
+3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，一律用计划里的运行目录（另传不同 `--run-dir` 整体拒绝）；分支先进 bundle（完整历史，list-heads 含各 tip）；树逐棵复核——嵌套项先重证范围（父树仍在册同仓、路径未变、逐级无链接；旧形状嵌套项不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落盘；记录写失败、遇目录缺失登记或删分支阶段登记读不出以非零退出码结束并如实列出已删除部分。
 4. 收口：`npm run hygiene`。
 
-一律保留的形态（闭集，细节见计划文件与命令输出）：事实读不出（含有树但三处找不到转录、登记指向的目录已不存在——转录库为空且普查到树目标时整体拒绝生成计划）；源工作树、仓外路径、符号链接/junction、外仓 worktree；运行中（非终态、15 分钟内有事件、新鲜心跳）；复用线系未闭合（成员在跑、槽目录新鲜认领、线系未关未收）；未裁决（已打包未决、未决且树有未提交/暂存/未跟踪/被忽略内容）；头指针漂移；嵌套保留。已并入 main 的分支不做引用检查（删掉后提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走「管理历史 run」的 prune --archive 通道，两套清退互不越界。
+清退范围：主检出与每个经核验的关联工作树（在册、同 common git dir、目录在、路径无链接/junction）下各自的 `.wao-worktrees/` 一级 `<runId>` 子目录；嵌套项在计划里记范围证明（父树真实路径、common git dir、目标真实路径）。
+
+一律保留的形态（闭集，细节见计划文件与命令输出）：事实读不出或身份无法唯一判定（含有树但三处找不到转录、登记目录已不存在、重名或转录声明与登记树不一致；空库普查到树目标时整体拒绝生成计划）；范围外路径（源工作树、关联工作树本身、符号链接/junction、外仓 worktree）；运行中（非终态/近期事件/新鲜心跳）；复用线系未闭合；未裁决（已打包未决或树脏）；头指针漂移；嵌套保留。已并入 main 的分支不做引用检查（提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走上方 prune --archive 通道，两套清退互不越界。
 
 ## daemon 与自愈（无人值守长跑）
 

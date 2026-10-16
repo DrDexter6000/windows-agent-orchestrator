@@ -6,7 +6,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { symlinkSync } from "node:fs";
 
@@ -16,7 +16,7 @@ import {
 import { worktreeCommand } from "../../src/commands/worktree.js";
 
 import {
-  git, makeRepo, mkdtemp, makeWorktree, commitIn, seedTranscript,
+  git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
   cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow, OLD_TS,
 } from "../_worktreeReclaimHarness.mjs";
 
@@ -896,6 +896,228 @@ test("计划条目：脏树回收项打印「删除即丢弃未提交内容」�
   const line = logs.find((l) => l.includes("run_f6e"));
   assert.ok(line, "应打印该回收项");
   assert.match(line, /脏树：删除即丢弃未提交内容/);
+});
+
+// ── 嵌套范围：关联工作树里的运行树 ──
+
+test("范围：主检出、仓内关联工作树、仓外合法关联工作树三种位置的运行树都按同一套门回收；嵌套项带范围证明；从不同检出生成计划一致", async () => {
+  const s = await scenario();
+  const wtMain = s.wt("run_pos_m");
+  s.seed("run_pos_m", decidedRunEvents({ repo: s.repo, wt: wtMain, branch: "wao/run_pos_m", baseCommit: s.mainCommit, decision: "accepted" }));
+  const devIn = makeLinkedWorktree(s.repo, join(s.repo, ".dev", "wt", "devin"), "devin");
+  const wtIn = makeRunTreeIn(devIn, "run_pos_in");
+  s.seed("run_pos_in", decidedRunEvents({ repo: devIn, wt: wtIn, branch: "wao/run_pos_in", baseCommit: s.mainCommit, decision: "accepted" }));
+  const devOut = makeLinkedWorktree(s.repo, join(s.base, "devout"), "devout");
+  const wtOut = makeRunTreeIn(devOut, "run_pos_out");
+  s.seed("run_pos_out", decidedRunEvents({ repo: devOut, wt: wtOut, branch: "wao/run_pos_out", baseCommit: s.mainCommit, decision: "accepted" }));
+
+  const { plan } = await s.plan();
+  for (const runId of ["run_pos_m", "run_pos_in", "run_pos_out"]) {
+    const tree = itemsOf(plan, runId).find((i) => i.action === "remove_tree");
+    assert.ok(tree, `${runId} 应有 remove_tree（三种位置同一套门）`);
+    assert.equal(oneItem(plan, runId).category, "reclaim");
+    assert.ok(itemsOf(plan, runId).some((i) => i.action === "delete_branch"));
+  }
+  // 主根项不带范围证明；嵌套项记录父树真实路径、common git dir、目标真实路径。
+  const treeMain = itemsOf(plan, "run_pos_m").find((i) => i.action === "remove_tree");
+  assert.ok(!("scopeRoot" in treeMain), "主根项不携带范围证明字段");
+  const treeIn = itemsOf(plan, "run_pos_in").find((i) => i.action === "remove_tree");
+  assert.equal(treeIn.scopeRoot, realpathSync(devIn));
+  assert.equal(treeIn.scopeGitCommonDir, plan.repo.gitCommonDir);
+  assert.equal(treeIn.treeRealPath, realpathSync(wtIn));
+  const treeOut = itemsOf(plan, "run_pos_out").find((i) => i.action === "remove_tree");
+  assert.equal(treeOut.scopeRoot, realpathSync(devOut));
+  assert.equal(treeOut.scopeGitCommonDir, plan.repo.gitCommonDir);
+  assert.equal(treeOut.treeRealPath, realpathSync(wtOut));
+  // 关联工作树本身保留，原因照旧。
+  assert.equal(oneItem(plan, "devin").reason, "outside_worktrees_dir");
+  assert.equal(oneItem(plan, "devout").reason, "outside_worktrees_dir");
+  // 从关联工作树里生成计划：与主检出一致（普查与范围从 porcelain[0] 推导，与
+  // 调用 cwd 无关；generatedAt 来自时钟缝、逐次调用有毫秒差，不比）。
+  const fromDev = await planWorktreeReclaim({ repoCwd: devOut, runDir: s.runDir, now: fixedNow });
+  const stripClock = ({ generatedAt, ...rest }) => rest;
+  assert.deepEqual(stripClock(fromDev.plan), stripClock(plan));
+});
+
+test("范围：关联工作树本身、其下普通目录、旁边目录与登记不动（不误伤）", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.repo, ".dev", "wt", "devkeep"), "devkeep");
+  mkdirSync(join(dev, "plaindir"), { recursive: true });
+  writeFileSync(join(dev, "plaindir", "keep.txt"), "keep\n", "utf8");
+  const wt = makeRunTreeIn(dev, "run_keep");
+  s.seed("run_keep", decidedRunEvents({ repo: dev, wt, branch: "wao/run_keep", baseCommit: s.mainCommit, decision: "accepted" }));
+  const devNext = makeLinkedWorktree(s.repo, join(s.base, "devnext"), "devnext");
+  mkdirSync(join(devNext, "somedir"), { recursive: true });
+  const before = {
+    entries: git(["worktree", "list", "--porcelain"], s.repo),
+    keep: readFileSync(join(dev, "plaindir", "keep.txt"), "utf8"),
+  };
+  const { plan } = await s.plan();
+  assert.equal(oneItem(plan, "run_keep").category, "reclaim");
+  assert.equal(oneItem(plan, "devkeep").reason, "outside_worktrees_dir");
+  assert.equal(oneItem(plan, "devnext").reason, "outside_worktrees_dir");
+  assert.ok(!plan.items.some((i) => i.runId === "plaindir"), "关联工作树下的普通目录不是普查目标");
+  assert.ok(!plan.items.some((i) => i.runId === "somedir"), "旁边目录不是普查目标");
+  assert.equal(git(["worktree", "list", "--porcelain"], s.repo), before.entries, "dry-run 不动登记");
+  assert.equal(readFileSync(join(dev, "plaindir", "keep.txt"), "utf8"), before.keep);
+});
+
+test("歧义：不同父树下的重名目录（含大小写变体）→ undeterminable/registration_ambiguous，不取第一项", async () => {
+  const s = await scenario();
+  const wtMain = s.wt("run_dup");
+  s.seed("run_dup", decidedRunEvents({ repo: s.repo, wt: wtMain, branch: "wao/run_dup", baseCommit: s.mainCommit, decision: "accepted" }));
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devdup"), "devdup");
+  // 同名目录、另一分支（同名 runId 只能有一棵树绑定同一分支）。
+  git(["worktree", "add", join(dev, ".wao-worktrees", "run_dup"), "-b", "devdupA"], dev);
+  const dev2 = makeLinkedWorktree(s.repo, join(s.base, "devdup2"), "devdupC");
+  // 大小写变体：basename 小写归并后与 run_dup 相撞。
+  git(["worktree", "add", join(dev2, ".wao-worktrees", "RUN_DUP"), "-b", "devdupB"], dev2);
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_dup");
+  assert.equal(item.category, "undeterminable");
+  assert.equal(item.reason, "registration_ambiguous");
+  assert.equal(item.action, "keep");
+  assert.equal(itemsOf(plan, "run_dup").filter((i) => i.action === "remove_tree").length, 0, "重名时不得取第一项生成删除动作");
+  assert.equal(itemsOf(plan, "run_dup").filter((i) => i.action === "delete_branch").length, 0);
+  assert.ok(existsSync(wtMain) && existsSync(join(dev, ".wao-worktrees", "run_dup")));
+});
+
+test("歧义空壳在可回收树里：外层树因 has_kept_descendant 保留，不会把保留项连带删掉", async () => {
+  const s = await scenario();
+  const outer = s.wt("run_outer");
+  s.seed("run_outer", decidedRunEvents({ repo: s.repo, wt: outer, branch: "wao/run_outer", baseCommit: s.mainCommit, decision: "accepted" }));
+  // 外层运行树自己的 .wao-worktrees 下一个非空空壳，主根下另有同名空壳：两处都未登记。
+  mkdirSync(join(outer, ".wao-worktrees", "run_dupx"), { recursive: true });
+  writeFileSync(join(outer, ".wao-worktrees", "run_dupx", "keep.txt"), "kept\n");
+  mkdirSync(join(s.repo, ".wao-worktrees", "run_dupx"), { recursive: true });
+  writeFileSync(join(s.repo, ".wao-worktrees", "run_dupx", "keep.txt"), "kept\n");
+  const { plan } = await s.plan();
+  assert.equal(oneItem(plan, "run_dupx").reason, "registration_ambiguous");
+  const outerItems = itemsOf(plan, "run_outer");
+  assert.equal(outerItems.filter((i) => i.action === "remove_tree").length, 0, "外层树不得生成删除动作");
+  assert.ok(outerItems.some((i) => i.reason === "has_kept_descendant"), "外层树因保留的后代被挡住");
+});
+
+test("范围：嵌在外仓关联工作树里的本仓运行树 → outside_worktrees_dir；关联工作树根下的外仓空壳 → foreign_worktree", async () => {
+  const s = await scenario();
+  seedLibraryDummy(s);
+  const other = await makeRepo("wao-reclaim-fp-");
+  bases.push(other.repo);
+  const foreignParent = makeLinkedWorktree(other.repo, join(other.repo, ".dev", "foreign"), "foreign");
+  // 本仓的运行树建在外仓关联工作树里：本仓 porcelain 登记了它，但父树不在本
+  // 仓登记里——范围根不成立。
+  const wt = join(foreignParent, ".wao-worktrees", "run_fp");
+  git(["worktree", "add", wt, "-b", "wao/run_fp"], s.repo);
+  s.seed("run_fp", decidedRunEvents({ repo: s.repo, wt, branch: "wao/run_fp", baseCommit: s.mainCommit, decision: "accepted" }));
+  // 合法父树下的外仓空壳（本仓视角未登记、含外仓 git 元数据）。
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devfh"), "devfh");
+  git(["worktree", "add", join(dev, ".wao-worktrees", "run_fh"), "-b", "wao/run_fh"], other.repo);
+  s.seed("run_fh", cleanRunEvents({ repo: other.repo, wt: join(dev, ".wao-worktrees", "run_fh"), branch: "wao/run_fh" }));
+  const { plan } = await s.plan();
+  assert.equal(oneItem(plan, "run_fp").reason, "outside_worktrees_dir");
+  assert.equal(itemsOf(plan, "run_fp").filter((i) => i.action === "remove_tree").length, 0);
+  assert.equal(oneItem(plan, "run_fh").reason, "foreign_worktree");
+  assert.equal(oneItem(plan, "run_fh").action, "keep");
+});
+
+test("范围：父树的 .wao-worktrees 本身是 junction → 根不合格，其下登记树与目录都不入范围", async () => {
+  const s = await scenario();
+  seedLibraryDummy(s);
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devjx"), "devjx");
+  const store = join(s.base, "devjx-store");
+  mkdirSync(store, { recursive: true });
+  symlinkSync(store, join(dev, ".wao-worktrees"), "junction");
+  // 运行树经 junction 落在 store 里（登记路径穿 junction）。
+  const wt = join(dev, ".wao-worktrees", "run_jmid");
+  git(["worktree", "add", wt, "-b", "wao/run_jmid"], s.repo);
+  s.seed("run_jmid", decidedRunEvents({ repo: s.repo, wt, branch: "wao/run_jmid", baseCommit: s.mainCommit, decision: "accepted" }));
+  // 不合格根下的未登记目录不枚举（连条目都没有）。
+  mkdirSync(join(store, "run_jhusk"), { recursive: true });
+  const { plan } = await s.plan();
+  assert.equal(oneItem(plan, "run_jmid").reason, "outside_worktrees_dir");
+  assert.equal(itemsOf(plan, "run_jmid").filter((i) => i.action === "remove_tree").length, 0);
+  assert.ok(!plan.items.some((i) => i.runId === "run_jhusk"), "不合格根下的空壳不枚举");
+});
+
+test("空壳：关联工作树根下的空壳同样枚举；空 → rmdir_husk 带范围证明", async () => {
+  const s = await scenario();
+  seedLibraryDummy(s);
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devhusk"), "devhusk");
+  const emptyHusk = join(dev, ".wao-worktrees", "run_husk_n");
+  mkdirSync(emptyHusk, { recursive: true });
+  s.seed("run_husk_n", cleanRunEvents({ repo: dev, wt: emptyHusk, branch: null }));
+  const { plan } = await s.plan();
+  const husk = oneItem(plan, "run_husk_n");
+  assert.equal(husk.action, "rmdir_husk");
+  assert.equal(husk.category, "reclaim");
+  assert.equal(husk.scopeRoot, realpathSync(dev));
+  assert.equal(husk.scopeGitCommonDir, plan.repo.gitCommonDir);
+  assert.equal(husk.treeRealPath, realpathSync(emptyHusk));
+});
+
+test("范围：登记失效（树目录已删）的嵌套运行树 → undeterminable/registered_missing", async () => {
+  const s = await scenario();
+  seedLibraryDummy(s);
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devstale"), "devstale");
+  const wt = makeRunTreeIn(dev, "run_stale_n");
+  s.seed("run_stale_n", decidedRunEvents({ repo: dev, wt, branch: "wao/run_stale_n", baseCommit: s.mainCommit, decision: "accepted" }));
+  rmSync(wt, { recursive: true, force: true });
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_stale_n");
+  assert.equal(item.category, "undeterminable");
+  assert.equal(item.reason, "registered_missing");
+});
+
+test("绑定：可读转录声明的工作树与登记树不一致 → undeterminable/registration_ambiguous（三方绑定的转录腿）", async () => {
+  const s = await scenario();
+  const wtA = s.wt("run_bnd");
+  // 转录声明指向别处（另一条从未登记的路径）：这棵树不能按 run_bnd 的生命周期裁决。
+  const declaredElsewhere = join(s.base, "elsewhere-bnd", "run_bnd");
+  s.seed("run_bnd", decidedRunEvents({
+    repo: s.repo, wt: declaredElsewhere, branch: "wao/run_bnd", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_bnd");
+  assert.equal(item.category, "undeterminable");
+  assert.equal(item.reason, "registration_ambiguous");
+  assert.equal(itemsOf(plan, "run_bnd").filter((i) => i.action === "remove_tree").length, 0);
+  assert.equal(itemsOf(plan, "run_bnd").filter((i) => i.action === "delete_branch").length, 0);
+});
+
+test("宿主：没有预置 .wao-worktrees/ 忽略规则的宿主里，嵌套运行树照常按同一套门分类", async () => {
+  const base = await mkdtemp("wao-reclaim-noignore-");
+  bases.push(base);
+  const { repo, mainCommit } = await makeRepo("wao-reclaim-noignore-", { ignoreWaoWorktrees: false });
+  const runDir = join(base, "runs");
+  mkdirSync(runDir, { recursive: true });
+  const dev = makeLinkedWorktree(repo, join(base, "devplain"), "devplain");
+  const wt = makeRunTreeIn(dev, "run_norule");
+  seedTranscript(runDir, "run_norule", decidedRunEvents({ repo: dev, wt, branch: "wao/run_norule", baseCommit: mainCommit, decision: "accepted" }));
+  const { plan } = await planWorktreeReclaim({ repoCwd: repo, runDir, now: fixedNow });
+  assert.equal(oneItem(plan, "run_norule").category, "reclaim");
+  const tree = itemsOf(plan, "run_norule").find((i) => i.action === "remove_tree");
+  assert.equal(tree.scopeRoot, realpathSync(dev));
+  assert.equal(oneItem(plan, "devplain").reason, "outside_worktrees_dir");
+});
+
+test("CLI：嵌套回收项打印目标路径与父树（Owner 批准时看得见删的是哪棵）", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devcli"), "devcli");
+  const wt = makeRunTreeIn(dev, "run_cli_n");
+  s.seed("run_cli_n", decidedRunEvents({ repo: dev, wt, branch: "wao/run_cli_n", baseCommit: s.mainCommit, decision: "accepted" }));
+  const outPath = join(s.base, "plan-cli-nested.json");
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await worktreeCommand(["reclaim", "--cwd", s.repo, "--out", outPath, "--run-dir", s.runDir], { runDir: s.runDir });
+  } finally {
+    console.log = origLog;
+  }
+  const line = logs.find((l) => l.includes("run_cli_n"));
+  assert.ok(line, "应打印该回收项");
+  assert.match(line, /目标=.*run_cli_n/);
+  assert.match(line, new RegExp(`父树=${realpathSync(dev).replace(/\\/g, "\\\\")}`));
 });
 
 // 兜底：未用到的导入保持显式（OLD_TS 供手工调试种子扩展）。

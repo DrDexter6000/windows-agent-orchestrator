@@ -136,6 +136,11 @@ async function worktreeReclaimCommand(rest, config) {
     if (!reclaimRuns.has(item.runId)) reclaimRuns.set(item.runId, { runId: item.runId, facts: item.facts ?? {} });
     const entry = reclaimRuns.get(item.runId);
     if (item.action === "remove_tree" && (item.notes ?? []).some((n) => n.includes("脏树"))) entry.dirty = true;
+    // 嵌套项（父树是关联工作树）：Owner 批准时要看得见删的是哪棵、挂在谁下面。
+    if ((item.action === "remove_tree" || item.action === "rmdir_husk") && typeof item.scopeRoot === "string") {
+      entry.nestedTarget = item.treePath;
+      entry.nestedParent = item.scopeRoot;
+    }
     if (item.info) {
       entry.mergedIntoMain = item.info.mergedIntoMain;
       entry.cherryPlus = item.info.cherryPlus;
@@ -153,6 +158,7 @@ async function worktreeReclaimCommand(rest, config) {
       `终态=${terminal}`,
       `转录=${locations}`,
     ];
+    if (r.nestedParent) parts.push(`目标=${r.nestedTarget}`, `父树=${r.nestedParent}`);
     if (r.mergedIntoMain !== undefined) {
       parts.push(`已并入=${r.mergedIntoMain ? "是" : "否"}`, `cherry+=${r.cherryPlus ?? "?"}`);
     }

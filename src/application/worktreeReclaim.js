@@ -6,11 +6,15 @@
 //
 //   1 undeterminable    任一需要的事实读不出来（转录损坏/twin 转录/引用文本
 //                       读不出/清单遍历失败/git 失败/路径解析失败/线系枚举拒绝/
-//                       登记指向的目录已不存在（registered_missing）；有树但三
-//                       处找不到转录也归此类——多半是 runDir 不对，找不到不等
-//                       于不在跑）
-//   2 out_of_scope      源工作树本身 / 路径不在 <repo>/.wao-worktrees/ 下 /
-//                       符号链接或 junction / 不属于这个仓库的 worktree
+//                       登记指向的目录已不存在（registered_missing）/登记身份
+//                       无法唯一判定（registration_ambiguous：不同父树下重名、
+//                       同路径多处登记、可读转录声明的工作树与登记树不一致）；
+//                       有树但三处找不到转录也归此类——多半是 runDir 不对，找
+//                       不到不等于不在跑）
+//   2 out_of_scope      源工作树本身 / 路径不是允许范围根（主检出的
+//                       .wao-worktrees，或经核验关联工作树自己的同名根）下的
+//                       一级 <合法 runId> 子目录 / 符号链接或 junction / 不属
+//                       于这个仓库的 worktree
 //   3 running           非终态 / 最后一条绑定事件 15 分钟内 / 新鲜 owner 心跳
 //   4 reuse_open        只对真有复用关系的运行（自身绑过 rootRunId 或线系里有
 //                       别的成员）求值：线系成员非终态 / 槽目录新鲜认领 /
@@ -36,8 +40,17 @@
 //
 // 路径语义：登记路径（git 记录的 raw path）用于目录名推 runId、git 操作与
 // 符号链接/junction 检测（lstat raw）；realpath 用于身份比较（源工作树、
-// 是否在 .wao-worktrees/ 下、嵌套、apply 的"真实路径没变"复核——计划记
-// 计划期 realpath，apply 重算比对）。
+// 是否在范围根下、嵌套、apply 的"真实路径没变"复核——计划记计划期
+// realpath，apply 重算比对）。
+//
+// 范围根：主检出的 .wao-worktrees 恒为允许根；每个关联工作树再按四条资格
+// 入列——在 porcelain 登记、与主检出同一 common git dir、自己的
+// .wao-worktrees 目录在盘、登记路径逐级无符号链接/junction。嵌套项（父树
+// 是关联工作树）在计划里记范围证明（scopeRoot=父树真实路径、
+// scopeGitCommonDir、treeRealPath=目标真实路径），apply 删前逐项重证：父
+// 树仍在册、仍同仓、真实路径未变、目标仍是 <父树>/.wao-worktrees/<runId>、
+// 父树根到中间级逐级非链接；证明字段缺席（旧形状计划）或任一不成立即跳过，
+// 树与分支都保留——旧计划不会因为换了新代码就自动扩域。
 //
 // 复用面：线系成员枚举（enumerateLineageMembers + lineageMemberFiles，归档
 // 转录并进文件集、归档枚举 skipped 不丢弃）、槽目录占用（lineageSlotClaimBusy）、
@@ -61,7 +74,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { gitChildEnv } from "../delivery.js";
+import { gitChildEnv, isValidRunId } from "../delivery.js";
 import { readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 import {
@@ -78,7 +91,7 @@ export const RECLAIM_CATEGORIES = Object.freeze([
 /** 保留理由闭集（action=keep 的 items[].reason）。 */
 export const RECLAIM_KEEP_REASONS = Object.freeze([
   "transcript_unreadable", "twin_transcripts", "transcript_missing", "git_fact_failed", "lineage_refused",
-  "registered_missing",
+  "registered_missing", "registration_ambiguous",
   "source_worktree", "outside_worktrees_dir", "symlink_or_junction", "foreign_worktree",
   "non_terminal", "recent_event", "fresh_owner_heartbeat",
   "lineage_member_active", "slot_claim_fresh", "lineage_not_closed",
@@ -551,6 +564,73 @@ function repoIdentity(repoCwd) {
   return { gitCommonDir, mainWorktreePath, mainBranch, mainHead: main.head ?? null, worktrees };
 }
 
+/** 从盘根到 path 逐级 lstat：任一级是符号链接/junction（或读不出）即 false。
+ * 范围父树的资格判定用——登记路径穿链接的父树不做范围根。 */
+function pathFreeOfSymlinks(p) {
+  const levels = [];
+  let cur = resolve(p);
+  for (;;) {
+    levels.push(cur);
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  for (const level of levels.reverse()) {
+    let st;
+    try {
+      st = lstatSync(level);
+    } catch {
+      return false;
+    }
+    if (st.isSymbolicLink()) return false;
+  }
+  return true;
+}
+
+/**
+ * 范围根闭集：主检出的 .wao-worktrees（恒在列，存在与否只影响枚举）+ 每个
+ * 满足全部资格的关联工作树 W 的 <W>/.wao-worktrees：在 porcelain 登记、与
+ * 主检出同一 common git dir、目录在盘且非链接、登记路径逐级无链接。根的
+ * real 用未再解析的 join 形态——范围形状按树真实路径的父目录精确比对，根
+ * 自身是链接时其下树的 realpath 会解析到别处而不命中（保守保留）。
+ */
+function allowedWorktreeRoots(repo) {
+  const roots = [{
+    real: join(repo.mainWorktreePath, ".wao-worktrees"),
+    parentReal: repo.mainWorktreePath,
+    gitCommonDir: repo.gitCommonDir,
+    linked: false,
+  }];
+  for (const wt of repo.worktrees.slice(1)) {
+    const raw = resolve(wt.path);
+    let real;
+    try {
+      real = realpathSync(raw);
+    } catch {
+      continue; // 目录缺失：当不了范围父树（该登记自身归 registered_missing）
+    }
+    if (samePath(real, repo.mainWorktreePath)) continue;
+    if (!pathFreeOfSymlinks(raw)) continue;
+    let common;
+    try {
+      common = commonDirOf(raw);
+    } catch {
+      continue;
+    }
+    if (!samePath(common, repo.gitCommonDir)) continue;
+    const rootRaw = join(real, ".wao-worktrees");
+    let st;
+    try {
+      st = lstatSync(rootRaw);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    roots.push({ real: rootRaw, parentReal: real, gitCommonDir: repo.gitCommonDir, linked: true });
+  }
+  return roots;
+}
+
 /**
  * 被清退仓库的 docs/、.wao/decisions/、README.md 中出现过的 7 位短 SHA 集合。
  * 只对未并入主分支的分支消费（已并入的分支删掉后提交仍从 main 可达）：任一
@@ -622,7 +702,8 @@ export async function planWorktreeReclaim({
   repoCwd, runDir, includeRunIds = [], outPath, now = Date.now, referenceScanIo,
 }) {
   const repo = repoIdentity(repoCwd);
-  const worktreesRoot = join(repo.mainWorktreePath, ".wao-worktrees");
+  const allowedRoots = allowedWorktreeRoots(repo);
+  const scopeRootOf = (real) => allowedRoots.find((r) => samePath(dirname(real), r.real)) ?? null;
   const runDirAbs = resolve(runDir);
   const included = new Set(includeRunIds);
   const refScan = referencedShortShas(repo.mainWorktreePath, referenceScanIo);
@@ -683,11 +764,12 @@ export async function planWorktreeReclaim({
   }
   const branchByRunId = new Map(branches.map((b) => [b.branch.replace(/^wao\//, ""), b]));
 
-  // 普查：登记 worktree（登记路径的目录名即 runId 面）∪ 空壳目录 ∪ wao/* 分支。
-  // raw 路径经 resolve 归一为原生分隔符——git porcelain 在 Windows 输出正斜杠，
-  // 与 node join 的反斜杠混比会让前缀判定静默失效。登记指向的目录可能已不存
-  // 在（批准后有人删了树目录、登记被 --expire 留下等形态）：realpath 失败不崩，
-  // 该登记单独归类 registered_missing 保留，不参与真实路径分组与嵌套保护。
+  // 普查：登记 worktree（登记路径的目录名即 runId 面）∪ 每个允许根下的空壳
+  // 目录与未登记链接 ∪ wao/* 分支。raw 路径经 resolve 归一为原生分隔符——git
+  // porcelain 在 Windows 输出正斜杠，与 node join 的反斜杠混比会让前缀判定静
+  // 默失效。登记指向的目录可能已不存在（批准后有人删了树目录、登记被 --expire
+  // 留下等形态）：realpath 失败不崩，该登记单独归类 registered_missing 保留，
+  // 不参与真实路径分组与嵌套保护。
   const worktreeEntries = repo.worktrees.map((wt) => {
     const raw = resolve(wt.path);
     let real = null;
@@ -696,17 +778,29 @@ export async function planWorktreeReclaim({
     } catch { /* 目录缺失：missingDir 标记 */ }
     return { raw, real, missingDir: real === null };
   });
-  const registeredByDirname = new Map();
-  for (const e of worktreeEntries) {
-    const key = basename(e.raw).toLowerCase();
-    if (!registeredByDirname.has(key)) registeredByDirname.set(key, e);
-  }
   const registeredReals = worktreeEntries.map((e) => e.real).filter((r) => r != null);
+  // 登记身份按真实路径，不按目录名：范围根有多个后，不同父树下的同名目录会
+  // 混淆。普查 runId 的树候选（登记/空壳/链接）按目录名小写收集，多于一个就
+  // 无法唯一判定是哪棵（重名、同路径多处登记、同名空壳与登记并存），整条保
+  // 留（undeterminable/registration_ambiguous），绝不取第一项。
+  const candidatesByRunId = new Map();
+  const addTreeCandidate = (runId, cand) => {
+    const key = runId.toLowerCase();
+    if (!candidatesByRunId.has(key)) candidatesByRunId.set(key, []);
+    candidatesByRunId.get(key).push(cand);
+  };
+  for (const e of worktreeEntries) addTreeCandidate(basename(e.raw), { kind: "registered", entry: e });
   const husks = [];
   const looseSymlinks = [];
-  if (existsSync(worktreesRoot)) {
-    for (const ent of readdirSync(worktreesRoot, { withFileTypes: true })) {
-      const p = join(worktreesRoot, ent.name);
+  for (const root of allowedRoots) {
+    let names;
+    try {
+      names = readdirSync(root.real, { withFileTypes: true });
+    } catch {
+      continue; // 根读不出（含不存在）：该根下枚举不到目标，不崩计划
+    }
+    for (const ent of names) {
+      const p = join(root.real, ent.name);
       let st;
       try {
         st = lstatSync(p);
@@ -715,16 +809,29 @@ export async function planWorktreeReclaim({
       }
       if (st.isFile()) continue;
       if (st.isSymbolicLink()) {
-        // 未登记的符号链接/junction 目录条目：保留（不跟随）。
-        if (!registeredByDirname.has(ent.name.toLowerCase())) looseSymlinks.push({ name: ent.name, path: p });
+        // 未登记的符号链接/junction 目录条目：保留（不跟随）。realpath 命中某
+        // 个在册登记真实路径的是同一棵树的别名，不另立候选。
+        let real = null;
+        try {
+          real = realpathSync(p);
+        } catch { /* 目标失效的链接：照常立候选（保留） */ }
+        if (real && registeredReals.some((r) => samePath(r, real))) continue;
+        looseSymlinks.push({ name: ent.name, path: p, real });
         continue;
       }
       if (!st.isDirectory()) continue;
-      const real = realpathSync(p);
+      let real;
+      try {
+        real = realpathSync(p);
+      } catch {
+        continue;
+      }
       if (registeredReals.some((r) => samePath(r, real))) continue;
       husks.push({ name: ent.name, path: p, real });
     }
   }
+  for (const h of husks) addTreeCandidate(h.name, { kind: "husk", husk: h });
+  for (const s of looseSymlinks) addTreeCandidate(s.name, { kind: "loose", loose: s });
 
   const targetRunIds = new Set();
   for (const e of worktreeEntries) targetRunIds.add(basename(e.raw));
@@ -776,15 +883,13 @@ export async function planWorktreeReclaim({
   const pendingIds = [...targetRunIds];
   const enqueued = new Set(targetRunIds);
   const classifyRun = async (runId) => {
-    const registered = registeredByDirname.get(runId.toLowerCase());
-    const husk = husks.find((h) => h.name === runId);
-    const loose = looseSymlinks.find((s) => s.name === runId);
+    const cands = candidatesByRunId.get(runId.toLowerCase()) ?? [];
     const f = {
       branch: branchByRunId.get(runId) ?? null,
-      treePath: registered?.raw ?? husk?.path ?? loose?.path ?? null,
-      treeRealPath: registered?.real ?? husk?.real ?? null,
-      isHusk: !registered && !!husk,
-      isLooseSymlink: !registered && !!loose,
+      treePath: null,
+      treeRealPath: null,
+      isHusk: false,
+      isLooseSymlink: false,
     };
     facts.set(runId, f);
     const keep = (category, reason, detail) => {
@@ -794,6 +899,26 @@ export async function planWorktreeReclaim({
     // 1 undeterminable——最先求值（优先于一切回收类）。
     const info = runInfo(runId);
     f.info = info;
+
+    // 身份无法唯一判定（不同父树下重名 / 同路径多处登记 / 同名空壳·链接与
+    // 登记并存）：取任何一方都会让其余同名树静默隐形，整条保留。
+    if (cands.length > 1) {
+      // 歧义候选都是保留项：记下它们的路径交给下面的嵌套保护，否则含有它们的
+      // 可回收外层树会把它们连带删掉。
+      f.protectPaths = cands
+        .map((c) => c.entry?.real ?? c.husk?.real ?? c.loose?.path ?? c.entry?.raw ?? null)
+        .filter(Boolean);
+      keep("undeterminable", "registration_ambiguous",
+        cands.map((c) => c.entry?.raw ?? c.husk?.path ?? c.loose?.path ?? "").join("；"));
+      return;
+    }
+    const registered = cands[0]?.kind === "registered" ? cands[0].entry : null;
+    const husk = cands[0]?.kind === "husk" ? cands[0].husk : null;
+    const loose = cands[0]?.kind === "loose" ? cands[0].loose : null;
+    f.treePath = registered?.raw ?? husk?.path ?? loose?.path ?? null;
+    f.treeRealPath = registered?.real ?? husk?.real ?? null;
+    f.isHusk = !registered && !!husk;
+    f.isLooseSymlink = !registered && !!loose;
 
     // 登记指向的目录已不存在：无法指纹、无法判活性（转录说了不算——树可能
     // 是刚被删的）。单独归类保留；分支可否回收交给通用清扫清掉 stale 登记后
@@ -828,7 +953,15 @@ export async function planWorktreeReclaim({
     // 2 out_of_scope。
     if (f.isLooseSymlink) { keep("out_of_scope", "symlink_or_junction"); return; }
     if (f.treePath && f.treeRealPath && samePath(f.treeRealPath, repo.mainWorktreePath)) { keep("out_of_scope", "source_worktree"); return; }
-    if (f.treePath && f.treeRealPath && !isBelow(f.treeRealPath, worktreesRoot)) { keep("out_of_scope", "outside_worktrees_dir"); return; }
+    // 范围形状：真实路径须恰好是某个允许根（主检出的 .wao-worktrees，或经核
+    // 验关联工作树自己的同名根）下的一级子目录，且目录名是合法 runId。关联
+    // 工作树本身、它下面的其它目录、范围根外路径、根下多级嵌套一律保留。
+    if (f.treePath) {
+      const shapeRoot = f.treeRealPath != null ? scopeRootOf(f.treeRealPath) : null;
+      if (!shapeRoot || !isValidRunId(basename(f.treeRealPath))) {
+        keep("out_of_scope", "outside_worktrees_dir"); return;
+      }
+    }
     if (f.treePath && !f.isLooseSymlink) {
       let st;
       try {
@@ -844,6 +977,15 @@ export async function planWorktreeReclaim({
         const foreignCommon = commonDirOf(f.treePath);
         if (!samePath(foreignCommon, repo.gitCommonDir)) { keep("out_of_scope", "foreign_worktree"); return; }
       } catch { /* 无 git 元数据的空壳：正常路径 */ }
+    }
+    // 转录声明绑定（三方绑定的转录腿）：可读转录声明的工作树真实路径须与这条
+    // 运行绑定的树一致——声明指向别处时，这棵树不是该运行的树。缺转录/不可
+    // 读/孪生已在第 1 类保留；无声明字段的运行不受此限（由其余门裁决）。分
+    // 支腿（检出 wao/<runId>）由第 7 类头指针漂移门承担，对主根与嵌套位置同
+    // 一套。
+    if (f.treePath && info.declared != null
+      && !(f.treeRealPath != null && info.declaredReal != null && samePath(f.treeRealPath, info.declaredReal))) {
+      keep("undeterminable", "registration_ambiguous"); return;
     }
 
     // 有树但三处都找不到转录 → 无法判定并保留（缺转录≠不在跑：一个刚开跑、
@@ -1007,6 +1149,9 @@ export async function planWorktreeReclaim({
   const blockedPaths = [];
   for (const [, f] of facts) {
     if (f.treeRealPath && !reclaimTreeReals.has(f.treeRealPath.toLowerCase())) blockedPaths.push(f.treeRealPath);
+    // 没有可用真实路径的保留项（歧义候选、未登记的链接）按路径本身挡住外层树。
+    for (const p of f.protectPaths ?? []) blockedPaths.push(p);
+    if (f.isLooseSymlink && f.treePath) blockedPaths.push(f.treePath);
   }
   for (const real of registeredReals) {
     if (!reclaimTreeReals.has(real.toLowerCase())) blockedPaths.push(real);
@@ -1075,8 +1220,24 @@ export async function planWorktreeReclaim({
       items.push({ ...keepItem(cls.reason, cls.detail), facts: approvalFacts(runId) });
       continue;
     }
+    // 嵌套项（父树是关联工作树）的范围证明：apply 逐项重证的依据；主根项不
+    // 带——其范围由仓库身份与路径位置自证。treeRealPath 同时充当"目标真实
+    // 路径"证明腿。
+    const rootInfo = f.treeRealPath != null ? scopeRootOf(f.treeRealPath) : null;
+    const scopeProof = rootInfo && rootInfo.linked
+      ? { scopeRoot: rootInfo.parentReal, scopeGitCommonDir: rootInfo.gitCommonDir }
+      : {};
     if (f.isHusk) {
-      items.push({ runId, category: "reclaim", action: "rmdir_husk", treePath: f.treePath, notes, facts: approvalFacts(runId) });
+      items.push({
+        runId,
+        category: "reclaim",
+        action: "rmdir_husk",
+        treePath: f.treePath,
+        treeRealPath: f.treeRealPath,
+        ...scopeProof,
+        notes,
+        facts: approvalFacts(runId),
+      });
       continue;
     }
     // 树条目只由属主（目录名 = runId）发出；经转录绑定共享树的成员由属主
@@ -1098,6 +1259,7 @@ export async function planWorktreeReclaim({
         action: "remove_tree",
         treePath: f.treePath,
         treeRealPath: f.treeRealPath,
+        ...scopeProof,
         treeMembers: [...memberIds].sort(),
         treeBranch: f.treeBranch ?? null,
         branch: f.branch?.branch ?? null,
@@ -1263,11 +1425,64 @@ async function stillActiveFromDisk(runId, filesByRun, factsView, runDirAbs, now)
   return { active: false };
 }
 
+/**
+ * 嵌套项（父树是关联工作树）的范围重证（apply 删树/删空壳前）。逐项重新证
+ * 明：父树仍在册、仍与主检出同一 common git dir、父树真实路径未变（登记里
+ * 仍有真实路径等于 scopeRoot 的条目）、目标仍是 <父树>/.wao-worktrees/<runId>、
+ * 父树根与中间级（.wao-worktrees）逐级非符号链接/junction。任一不成立、读
+ * 不出或证明字段缺席（旧形状计划）→ 闭集跳过理由，树与分支都保留。
+ */
+function reverifyNestedScope(item, ctx, reg) {
+  const scopeRoot = item.scopeRoot;
+  const scopeCommonDir = item.scopeGitCommonDir;
+  if (typeof scopeRoot !== "string" || !scopeRoot
+    || typeof scopeCommonDir !== "string" || !scopeCommonDir
+    || typeof item.treeRealPath !== "string" || !item.treeRealPath) {
+    return { skip: "scope_proof_missing" };
+  }
+  const rootReal = join(scopeRoot, ".wao-worktrees");
+  if (!samePath(dirname(item.treeRealPath), rootReal)
+    || !samePath(basename(item.treeRealPath), item.runId)
+    || !isValidRunId(item.runId)) {
+    return { skip: "scope_proof_invalid" };
+  }
+  if (!reg.records.some((r) => r.real != null && samePath(r.real, scopeRoot))) {
+    return { skip: "scope_parent_gone", detail: scopeRoot };
+  }
+  let common;
+  try {
+    common = commonDirOf(scopeRoot);
+  } catch {
+    return { skip: "scope_common_dir_mismatch", detail: "unreadable" };
+  }
+  if (!samePath(common, scopeCommonDir) || !samePath(common, ctx.commonDir)) {
+    return { skip: "scope_common_dir_mismatch", detail: common };
+  }
+  for (const level of [scopeRoot, rootReal]) {
+    let st;
+    try {
+      st = lstatSync(level);
+    } catch {
+      return { skip: "scope_parent_gone", detail: level };
+    }
+    if (st.isSymbolicLink()) return { skip: "scope_symlink_now", detail: level };
+    if (!st.isDirectory()) return { skip: "scope_parent_gone", detail: level };
+  }
+  return { ok: true };
+}
+
 /** 删树前复核：真实路径、HEAD/分支/tip、指纹（嵌套在册树不计入清单）、嵌套
  * 保护、整树每个成员仍在跑与否（计划成员名单 ∪ apply 索引时点名单 ∪ 增量
  * 刷新后的当前声明名单，逐成员从磁盘现读；线系候选集用刷新后的 byRoot）。
- * 变化 → 闭集理由。 */
+ * 变化 → 闭集理由。嵌套项先重证范围（先于对目标的 lstat——中间级的链接要
+ * 在目标路径复核之前拦下）。 */
 async function reverifyTreeBeforeRemoval(item, ctx) {
+  const reg = ctx.liveRegState("tree_recheck");
+  if (ctx.nestedShape(item)) {
+    if (reg.unreadable) return { skip: "undeterminable_now", detail: "live_registration_unreadable" };
+    const scope = reverifyNestedScope(item, ctx, reg);
+    if (scope.skip) return scope;
+  }
   const p = item.treePath;
   let st;
   try {
@@ -1291,7 +1506,6 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
   } catch {
     return { skip: "head_changed" };
   }
-  const reg = ctx.liveRegState("tree_recheck");
   if (reg.unreadable) return { skip: "undeterminable_now", detail: "live_registration_unreadable" };
   try {
     const nestedExcluded = reg.raws
@@ -1541,7 +1755,7 @@ export async function applyWorktreeReclaim({
   // phase 标注读取用途（"tree_recheck" 摘树前复核 / "branch_delete" 删分支
   // 前的检出判断）；worktreeListFn 是测试缝，生产用真实 git。
   const liveRegState = (phase) => {
-    const out = { unreadable: false, entries: [], raws: [], reals: [], stale: [] };
+    const out = { unreadable: false, entries: [], raws: [], reals: [], stale: [], records: [] };
     let entries;
     try {
       const text = typeof worktreeListFn === "function"
@@ -1556,14 +1770,27 @@ export async function applyWorktreeReclaim({
     for (const w of entries) {
       const raw = resolve(w.path);
       out.raws.push(raw);
+      let real = null;
       try {
-        out.reals.push(realpathSync(raw));
+        real = realpathSync(raw);
       } catch {
         out.stale.push(raw);
         staleRegistrations.add(raw);
       }
+      out.records.push({ raw, real });
+      if (real != null) out.reals.push(real);
     }
     return out;
+  };
+  // 嵌套项判定：目标真实路径的父目录不是主检出的 .wao-worktrees。这类条目
+  // 必须带范围证明字段并逐项重证；旧形状计划里的嵌套回收项不存在（旧分类一
+  // 律保留），字段缺席即不动。
+  const mainRoot = join(plan.repo.mainWorktreePath, ".wao-worktrees");
+  const nestedShape = (item) => {
+    const real = typeof item.treeRealPath === "string" && item.treeRealPath
+      ? item.treeRealPath
+      : resolve(String(item.treePath ?? ""));
+    return !samePath(dirname(real), mainRoot);
   };
   const ctx = {
     transcripts,
@@ -1571,6 +1798,8 @@ export async function applyWorktreeReclaim({
     now,
     reclaimTreeReals,
     liveRegState,
+    nestedShape,
+    commonDir,
   };
   const orderedTrees = [...treeItems].sort((a, b) => b.treePath.split(sep).length - a.treePath.split(sep).length);
   const failedBranches = new Set();
@@ -1701,8 +1930,22 @@ export async function applyWorktreeReclaim({
       }
     }
 
-    // ── 删空壳目录（非递归 rmdir；非空即拒）──
+    // ── 删空壳目录（非递归 rmdir；非空即拒）。嵌套空壳同样先重证范围。──
     for (const item of huskItems) {
+      if (nestedShape(item)) {
+        let scopeSkip = null;
+        const reg = liveRegState("tree_recheck");
+        if (reg.unreadable) {
+          scopeSkip = { reason: "undeterminable_now", detail: "live_registration_unreadable" };
+        } else {
+          const scope = reverifyNestedScope(item, ctx, reg);
+          if (scope.skip) scopeSkip = { reason: scope.skip, ...(scope.detail ? { detail: scope.detail } : {}) };
+        }
+        if (scopeSkip) {
+          results.push({ runId: item.runId, action: "rmdir_husk", outcome: "skipped", ...scopeSkip });
+          continue;
+        }
+      }
       try {
         rmdirSync(item.treePath);
         results.push({ runId: item.runId, action: "rmdir_husk", outcome: "removed" });

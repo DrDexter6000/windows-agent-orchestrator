@@ -7,14 +7,14 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { planWorktreeReclaim, applyWorktreeReclaim } from "../../src/application/worktreeReclaim.js";
 import { worktreeCommand } from "../../src/commands/worktree.js";
 
 import {
-  git, makeRepo, mkdtemp, makeWorktree, commitIn, seedTranscript,
+  git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
   cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow,
 } from "../_worktreeReclaimHarness.mjs";
 
@@ -777,6 +777,161 @@ test("apply：根 + 无独立条目的共享成员 → plan 与 apply 的分类�
 function shaOfPlan2(s) {
   return createHash("sha256").update(readFileSync(join(s.base, "plan2.json"))).digest("hex");
 }
+
+// ── 嵌套范围：关联工作树里的运行树（apply 面重证）──
+
+test("apply：嵌套运行树清退——树删、分支删、bundle 可恢复、父工作树内容与登记不变", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devok"), "devok");
+  commitIn(dev, "devwork.txt", "dev content\n");
+  const wt = makeRunTreeIn(dev, "run_nested_ok");
+  s.accepted("run_nested_ok", wt);
+  const { result } = await s.planAndApply();
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_nested_ok").outcome, "removed");
+  assert.equal(outcomeOf(result, "delete_branch", "run_nested_ok").outcome, "deleted");
+  assert.ok(!existsSync(wt), "嵌套树应删除");
+  assert.equal(git(["branch", "--list", "wao/run_nested_ok"], s.repo), "");
+  // 父开发工作树的内容与登记不变。
+  assert.equal(readFileSync(join(dev, "devwork.txt"), "utf8"), "dev content\n");
+  const listed = git(["worktree", "list", "--porcelain"], s.repo).split(/\r?\n/).filter((l) => l.startsWith("worktree ")).join("\n").toLowerCase();
+  assert.ok(listed.includes("devok"), "父开发工作树仍在册");
+  assert.ok(git(["branch", "--list", "devok"], s.repo).includes("devok"), "父树分支不动");
+  // bundle 里能恢复嵌套树的分支。
+  const planItems = JSON.parse(readFileSync(join(s.base, "plan.json"), "utf8")).items;
+  const branchItem = planItems.find((i) => i.action === "delete_branch" && i.runId === "run_nested_ok");
+  const freshRepo = join(s.base, "restore-nested");
+  mkdirSync(freshRepo, { recursive: true });
+  git(["init", "-b", "main"], freshRepo);
+  git(["fetch", result.bundlePath, `refs/heads/${branchItem.branch}:refs/heads/${branchItem.branch}`], freshRepo);
+  assert.equal(git(["rev-parse", `refs/heads/${branchItem.branch}`], freshRepo), branchItem.branchTip, "嵌套树分支应能从 bundle 恢复到计划 tip");
+});
+
+test("apply：批准后父树登记消失（prune 形态）→ scope_parent_gone，树与分支保留", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devgone"), "devgone");
+  const wt = makeRunTreeIn(dev, "run_pg");
+  s.accepted("run_pg", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 只删父树的管理登记（父树目录与嵌套树都还在盘上）：apply 重证时父树不在册。
+      rmSync(join(s.repo, ".git", "worktrees", "devgone"), { recursive: true, force: true });
+    },
+  });
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_pg").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_pg").reason, "scope_parent_gone");
+  assert.ok(existsSync(wt), "父树登记消失时嵌套树不动");
+  assert.equal(outcomeOf(result, "delete_branch", "run_pg").outcome, "skipped");
+  assert.ok(git(["branch", "--list", "wao/run_pg"], s.repo).length > 0, "分支必须保留");
+});
+
+test("apply：批准后父树换仓（.git 指向另一仓的 common dir）→ scope_common_dir_mismatch，树与分支保留", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devcc"), "devcc");
+  const wt = makeRunTreeIn(dev, "run_cc");
+  s.accepted("run_cc", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 另一仓先备一个 worktree 管理条目，再把父树的 .git 指针改指过去：父树
+      // 目录与登记都未动，但 common git dir 已不是本仓。
+      const other = await makeRepo("wao-reclaim-cc2-");
+      bases.push(other.repo);
+      // 另一仓的关联工作树放在本用例自己的临时目录里，随 bases 一起清掉。
+      const otherBase = await mkdtemp("wao-reclaim-cc2-wt-");
+      bases.push(otherBase);
+      const owt = makeLinkedWorktree(other.repo, join(otherBase, "owt"), "ow");
+      // 指针指向另一仓真实存在的管理目录：common dir 读得出来，只是不属于本仓——
+      // 走的是"读出另一个 common dir"那条拒绝，而不是"读不出"。
+      const otherGitDir = git(["rev-parse", "--absolute-git-dir"], owt).trim();
+      // worktree 的 .git 指针文件带 Hidden 属性（chmod 清不掉）：unlink 后重建。
+      rmSync(join(dev, ".git"), { force: true });
+      writeFileSync(join(dev, ".git"), `gitdir: ${otherGitDir.replace(/\\/g, "/")}\n`, "utf8");
+    },
+  });
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_cc").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_cc").reason, "scope_common_dir_mismatch");
+  assert.ok(existsSync(wt), "父树换仓时嵌套树不动");
+  assert.ok(git(["branch", "--list", "wao/run_cc"], s.repo).length > 0, "分支必须保留");
+});
+
+test("apply：批准后中间级换成 junction → scope_symlink_now，树与分支保留（不跟随链接）", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devmid"), "devmid");
+  const wt = makeRunTreeIn(dev, "run_mid");
+  s.accepted("run_mid", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 把 .wao-worktrees 整体挪走后用 junction 顶替：目标的 raw 路径仍可解析，
+      // 但从父树根到目标的中间一级已是链接。
+      renameSync(join(dev, ".wao-worktrees"), join(s.base, "devmid-store"));
+      symlinkSync(join(s.base, "devmid-store"), join(dev, ".wao-worktrees"), "junction");
+    },
+  });
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_mid").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_mid").reason, "scope_symlink_now");
+  assert.ok(existsSync(wt), "中间级是链接时嵌套树不动");
+  assert.equal(outcomeOf(result, "delete_branch", "run_mid").outcome, "skipped");
+  assert.ok(git(["branch", "--list", "wao/run_mid"], s.repo).length > 0, "分支必须保留");
+});
+
+test("apply：旧形状计划（嵌套项无范围证明字段）→ scope_proof_missing，不动", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devold"), "devold");
+  const wt = makeRunTreeIn(dev, "run_oldshape");
+  s.accepted("run_oldshape", wt);
+  const outPath = join(s.base, "plan.json");
+  const { planSha256 } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath, now: fixedNow });
+  void planSha256;
+  // 模拟旧形状计划：去掉嵌套项的范围证明字段，按新字节重算 sha（Owner 批准的
+  // 就是这份字节），apply 不得因为换了新代码就自动扩域。
+  const plan = JSON.parse(readFileSync(outPath, "utf8"));
+  for (const item of plan.items) {
+    delete item.scopeRoot;
+    delete item.scopeGitCommonDir;
+  }
+  const bytes = Buffer.from(JSON.stringify(plan, null, 2) + "\n", "utf8");
+  writeFileSync(outPath, bytes);
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  const result = await applyWorktreeReclaim({ planPath: outPath, expectSha256: sha, runDir: s.runDir, now: fixedNow });
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_oldshape").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_oldshape").reason, "scope_proof_missing");
+  assert.ok(existsSync(wt), "无范围证明的嵌套项不动");
+  assert.equal(outcomeOf(result, "delete_branch", "run_oldshape").outcome, "skipped");
+  assert.equal(outcomeOf(result, "delete_branch", "run_oldshape").reason, "tree_not_removed");
+  assert.ok(git(["branch", "--list", "wao/run_oldshape"], s.repo).length > 0, "分支必须保留");
+});
+
+test("apply：嵌套树批准后内容变化 → content_changed 跳过（销毁门与主根同套）", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devchg"), "devchg");
+  const wt = makeRunTreeIn(dev, "run_nchg");
+  s.accepted("run_nchg", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => { writeFileSync(join(wt, "untracked-new.txt"), "x\n", "utf8"); },
+  });
+  assert.equal(outcomeOf(result, "remove_tree", "run_nchg").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_nchg").reason, "content_changed");
+  assert.ok(existsSync(wt));
+  assert.equal(outcomeOf(result, "delete_branch", "run_nchg").reason, "tree_not_removed");
+});
+
+test("apply：嵌套空壳带范围证明照常删除；父工作树不动", async () => {
+  const s = await scenario();
+  const dev = makeLinkedWorktree(s.repo, join(s.base, "devhusk2"), "devhusk2");
+  const husk = join(dev, ".wao-worktrees", "run_husk_apply");
+  mkdirSync(husk, { recursive: true });
+  s.seed("run_husk_apply", cleanRunEvents({ repo: dev, wt: husk, branch: null }));
+  const { result } = await s.planAndApply();
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "rmdir_husk", "run_husk_apply").outcome, "removed");
+  assert.ok(!existsSync(husk), "嵌套空壳应删除");
+  assert.ok(existsSync(dev) && existsSync(join(dev, "a.txt")), "父工作树不动");
+});
+
 
 test("apply：孪生副本平铺有刚发生的绑定事件、归档较旧、两份都是 completed → 判为在跑（recent_event），树不删", async () => {
   const s = await scenario();

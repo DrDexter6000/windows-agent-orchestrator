@@ -26,15 +26,21 @@ export function git(args, cwd) {
   }).trim();
 }
 
-/** 真 git 临时仓：main 分支一个初始提交，.gitignore 含 node_modules/ 与 .wao-worktrees/。 */
-export async function makeRepo(prefix = "wao-reclaim-") {
+/**
+ * 真 git 临时仓：main 分支一个初始提交。opts.ignoreWaoWorktrees 缺省 true——
+ * .gitignore 预置 node_modules/ 与 .wao-worktrees/；false 复现从未派发过、
+ * 没有预置 .wao-worktrees/ 忽略规则的宿主。
+ */
+export async function makeRepo(prefix = "wao-reclaim-", { ignoreWaoWorktrees = true } = {}) {
   const repo = await mkdtemp(prefix);
   git(["init", "-b", "main"], repo);
   git(["config", "user.email", "test@test"], repo);
   git(["config", "user.name", "test"], repo);
   await mkdir(join(repo, "docs"), { recursive: true });
   writeFileSync(join(repo, "a.txt"), "const a = 1;\n");
-  writeFileSync(join(repo, ".gitignore"), "node_modules/\n.wao-worktrees/\n");
+  writeFileSync(join(repo, ".gitignore"), ignoreWaoWorktrees
+    ? "node_modules/\n.wao-worktrees/\n"
+    : "node_modules/\n");
   git(["add", "."], repo);
   git(["commit", "-m", "init"], repo);
   return { repo, mainCommit: git(["rev-parse", "HEAD"], repo) };
@@ -54,6 +60,23 @@ async function mkdir(p) {
 export function makeWorktree(repo, runId, extraArgs = []) {
   const wt = join(repo, ".wao-worktrees", runId);
   git(["worktree", "add", wt, "-b", `wao/${runId}`, ...extraArgs], repo);
+  return wt;
+}
+
+/** 关联（开发）工作树：git worktree add <path> -b <branch>，非运行树。 */
+export function makeLinkedWorktree(repo, path, branch) {
+  git(["worktree", "add", path, "-b", branch], repo);
+  return path;
+}
+
+/**
+ * 在某个检出里"派发"出的运行树：<checkout>/.wao-worktrees/<runId> + wao/<runId>
+ * 分支（对齐 src/isolation.js createWorktree 的位置与分支形状；checkout 可以是
+ * 主检出，也可以是关联工作树——运行树嵌在关联工作树里的形态）。
+ */
+export function makeRunTreeIn(checkout, runId) {
+  const wt = join(checkout, ".wao-worktrees", runId);
+  git(["worktree", "add", wt, "-b", `wao/${runId}`], checkout);
   return wt;
 }
 
