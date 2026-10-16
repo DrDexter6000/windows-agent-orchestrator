@@ -7,10 +7,9 @@
 // 规则（与 milestone-discipline.md §6.3 一致）：审计要逐文件，
 // 这些断言把"逐文件核对"固化为可执行检查，防止回归。
 //
-// 新增的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
+// 本文件的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
 // 指针可达）；读者离不开的少数操作说明，在它的唯一权威处检查。
 // 被保护的文字退役时，对应的测试一起退役（AGENTS.md §Documentation）。
-// 本文件里早于这条规则的历史收尾类测试尚未清理（台账 TD-34）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,20 +26,21 @@ import { CONTINUE_REJECTION_REASONS } from "../../src/application/runContinue.js
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
 
-// TD-177 前置收敛（2026-09-26 认证正文迁移包的最小面）：认证操作正文自
-// docs/usage.md 文件级全文迁移至 docs/certification-runbook.md 后，本文件中
-// 随正文迁移的检查统一引用顶部常量、区分两个源（USAGE_DOC = 部署/日常/事件
-// 投影/MCP §四 等运维正文；CERT_RUNBOOK_DOC = 认证操作正文唯一权威）。
-// 非迁移面的 usage 字面量不在本包收敛范围。
-const USAGE_DOC = "docs/usage.md";
+// 认证操作正文的唯一权威是 docs/certification-runbook.md；使用手册各原位只留
+// 具名标题与单向链接（可达性由认证迁移守卫钉住）。
 const CERT_RUNBOOK_DOC = "docs/certification-runbook.md";
 
 /** 读取仓库内文件（相对 ROOT 的路径），返回字符串。
- * 使用手册（docs/usage.md）返回地图加 docs/usage/ 下的全部页：这些检查写于拆页之前，
- * 按整本手册断言；改为只读各自保护的那一页登记在台账 TD-34。 */
+ * docs/usage.md 是使用手册的地图这一个文件；正向检查只读它保护的那一页
+ * （docs/usage/<页>.md 或地图本身）。整本手册（地图加全部页）经 readManual()
+ * 显式读取，供负向检查（某说法不得出现在手册任何地方）与覆盖整本的形状检查。 */
 function read(rel) {
-  if (rel === "docs/usage.md") return readUsageDocs(ROOT);
   return readFileSync(join(ROOT, rel), "utf8");
+}
+
+/** 整本使用手册：地图加 docs/usage/ 下的全部页。 */
+function readManual() {
+  return readUsageDocs(ROOT);
 }
 
 /** 切 markdown 表格行单元格（跳过行首管道，丢弃行尾管道产生的空尾件）。
@@ -139,16 +139,15 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
     "docs/smoke-guide.md",
     "README.md",
   ];
-  // 0046（2026-10-06）：端口权威按通道分化——opencode-serve 文档默认 4297。
-  // TD-259（2026-10-11 双席会审修订）：kimi-web 模板端口=docs/usage.md 场景 4e
-  // worker serve 配方端口（58628）——原 58627 是 kimi web CLI 裸默认端口，照抄会把
-  // worker 派到无 WAO_IN_WORKER 标记的人用 serve（0047 env 臂静默失效）；模板指 58628
-  // 时误配=连接被拒大声失败，用户被引去看 4e 配方。原则修订：面向用户文档写**通道
-  // 配方的 worker 端口**，本机真实端口仍属配置私事，不进文档。
+  // 端口权威按通道分化——opencode-serve 文档默认 4297。kimi-web 模板端口=使用手册
+  // 场景 4e worker serve 配方端口（58628）：模板指 58628 时误配=连接被拒大声失败，
+  // 用户被引去看 4e 配方。面向用户文档写**通道配方的 worker 端口**，本机真实端口
+  // 仍属配置私事，不进文档。
   const PORT_BY_FILE = { "config/agents.example.json": "58628" };
   for (const f of FILES) {
     const allowed = PORT_BY_FILE[f] ?? "4297";
-    const ports = collectServePorts(read(f));
+    // 端口一致性是负向扫描：使用手册按整本读，各页的 serve 配方同样不得漂端口。
+    const ports = collectServePorts(f === "docs/usage.md" ? readManual() : read(f));
     for (const p of ports) {
       assert.equal(
         p, allowed,
@@ -176,8 +175,8 @@ test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`�
     "docs/usage.md",
     "docs/troubleshooting.md",
     "docs/smoke-guide.md",
-    // 认证正文迁移（2026-09-26）：迁出的命令正文（smoke/reliability/prune）落在
-    // 认证 runbook，命令形式扫描随之纳入新文件。
+    // 迁出的命令正文（smoke/reliability/prune）落在认证 runbook，命令形式扫描
+    // 随之纳入新文件。
     CERT_RUNBOOK_DOC,
   ];
   // 真命令 token（任何能真触发 version guard 的子命令）。
@@ -187,7 +186,8 @@ test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`�
   const VIOLATION = new RegExp(`node\\b[^\\n]*?src/cli\\.js\\s+(${REAL_CMD})\\b`, "i");
 
   for (const f of FILES) {
-    const txt = read(f);
+    // 负向扫描：使用手册按整本读，各页同样不得出现裸直调。
+    const txt = f === "docs/usage.md" ? readManual() : read(f);
     const m = txt.match(VIOLATION);
     assert.ok(!m,
       `${f} 出现裸 \`${m?.[0]}\` 直调（${m?.[1]} 是真命令）。` +
@@ -314,17 +314,15 @@ test("R4 只读 run：dispatch 页声明链路记录 run.read_only_declared 正�
   );
 });
 
-// TD-240⑥（2026-10-09，consult_20261008164029600fyqngp 双席裁定）：runs
-// verify-commit 的采纳协议承载边界句必须钉在 usage.md——防后续编辑静默弱化
-// "不满足独立审计证据规格 / outcome 不得当受审对象替代品"的红线。事件行集
-// 本身由上方"两表行集相等"守卫覆盖（架构表 + usage 投影两侧同步）。
-test("TD-240: usage.md 采纳协议节钉 runs verify-commit 承载边界句", () => {
-  const usage = read("docs/usage.md");
+// runs verify-commit 的采纳协议承载边界句钉在交付页——防后续编辑静默弱化
+// "不满足独立审计证据规格 / outcome 不得当受审对象替代品"的红线。
+test("使用手册交付页：采纳协议节钉 runs verify-commit 承载边界句", () => {
+  const delivery = read("docs/usage/delivery.md");
   const heading = "## 验证失败采纳协议";
-  const start = usage.indexOf(heading);
-  assert.ok(start !== -1, "docs/usage.md 缺验证失败采纳协议节");
-  const nextSection = usage.indexOf("\n## ", start + 1);
-  const section = usage.slice(start, nextSection === -1 ? undefined : nextSection);
+  const start = delivery.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage/delivery.md 缺验证失败采纳协议节");
+  const nextSection = delivery.indexOf("\n## ", start + 1);
+  const section = delivery.slice(start, nextSection === -1 ? undefined : nextSection);
   assert.ok(
     section.includes("runs verify-commit"),
     "采纳协议节必须记载 runs verify-commit 承载命令",
@@ -415,11 +413,12 @@ test("面向 lead/user 的入口文档不得再使用旧 worker 示例名", () =
     "docs/02-architecture.md",
     "docs/team-roles.md",
     "AGENT_ONBOARDING.md",
-    // 认证正文迁移（2026-09-26）：旧 worker 名扫描纳入迁出正文所在的新文件。
+    // 迁出的旧 worker 名正文落在认证 runbook，扫描随之纳入新文件。
     CERT_RUNBOOK_DOC,
   ];
   for (const file of files) {
-    const txt = read(file);
+    // 负向扫描：使用手册按整本读，各页同样不得引用旧 worker 示例名。
+    const txt = file === "docs/usage.md" ? readManual() : read(file);
     assert.ok(
       !/claude_worker|codex_worker|glm_worker|coder_deepseek_claude|coder_strict|coder_glm_claude|coder_multimodal|\bcoder_(?:hq|low|mm)(?:_dsh)?\b/.test(txt),
       `${file} 仍引用旧 worker 示例名；示例应使用 config/agents.example.json 的车道键，角色经 --role 选择`
@@ -467,39 +466,35 @@ test("M12-10b: SKILL/产品定位必须 Host-neutral，不得把具体 Host/runt
   assert.ok(/Skill-guided|CLI-backed/i.test(head), "SKILL.md 产品定位必须保留 Host-neutral 的 Skill/CLI 表述");
 });
 
-// M12-10c (Lead-authorized correction): the playbook catalog moved from TOOLS to
-// MCP RESOURCES (wao://playbooks). The fixed fail-closed error vocabulary must be
-// resource-oriented (summary/detail), never the removed-tool names. This guard
-// binds docs/usage.md to the runtime constants in src/mcp/server.js so the
-// vocabulary cannot drift: it reads the constant values from the server source
-// (the SSOT) and asserts the doc documents exactly those strings, and that the
-// removed-tool vocabulary survives in neither doc nor runtime.
-test("M12-10c: usage.md playbook resource fixed-error vocabulary is bound to server.js runtime constants (no drift)", () => {
+// playbook catalog 是 MCP resources（wao://playbooks），固定 fail-closed 错误文案
+// 必须是 resource 取向（summary/detail），绝不复现已移除的工具名。本守卫把手册
+// results 页绑定到 src/mcp/server.js 的运行时常量：从 server 源码（SSOT）读出
+// 常量值，断言文档记载的恰是这些字符串，且已移除的工具名在手册与运行时都不复存。
+test("playbook resources 固定错误文案与 server.js 运行时常量绑定（使用手册 results 页，无漂移）", () => {
   const server = read("src/mcp/server.js");
-  const usage = read("docs/usage.md");
+  const results = read("docs/usage/results.md");
   // Extract the runtime constant values (the SSOT) from server.js source.
   const summaryErr = server.match(/PLAYBOOK_SUMMARY_ERROR_TEXT\s*=\s*"([^"]*)"/)?.[1];
   const detailErr = server.match(/PLAYBOOK_DETAIL_ERROR_TEXT\s*=\s*"([^"]*)"/)?.[1];
   assert.ok(summaryErr, "src/mcp/server.js must define PLAYBOOK_SUMMARY_ERROR_TEXT");
   assert.ok(detailErr, "src/mcp/server.js must define PLAYBOOK_DETAIL_ERROR_TEXT");
   // Documented vocabulary must equal the runtime constants exactly (no drift).
-  assert.ok(usage.includes(summaryErr),
-    `docs/usage.md must document the summary resource fixed error "${summaryErr}"`);
-  assert.ok(usage.includes(detailErr),
-    `docs/usage.md must document the detail resource fixed error "${detailErr}"`);
+  assert.ok(results.includes(summaryErr),
+    `docs/usage/results.md must document the summary resource fixed error "${summaryErr}"`);
+  assert.ok(results.includes(detailErr),
+    `docs/usage/results.md must document the detail resource fixed error "${detailErr}"`);
   // The removed tool-named vocabulary must not survive in doc or runtime.
   assert.ok(!/playbook_list failed|playbook_get failed/.test(server),
     "server.js must not emit removed-tool error names (playbook_list/playbook_get failed)");
-  assert.ok(!/playbook_list failed|playbook_get failed/.test(usage),
-    "docs/usage.md must not document removed-tool error names (playbook_list/playbook_get failed)");
+  assert.ok(!/playbook_list failed|playbook_get failed/.test(readManual()),
+    "使用手册不得记载已移除工具的错误名（playbook_list/playbook_get failed）");
 });
 
-// TD-150 批B（T3）：usage.md「交付类 run 的终态语义」段落把闭集词汇写进手写文档
-// （completionMarker 值、no_effect↔completed_empty 配对、delivery_failed 终态原因、
-// ALERTS.log 路径）。这些是承载语义的枚举/路径，不是纯散文——按 M12-10c 先例钉回
-// 各 SSOT：从源码常量提取真值，断言文档记录的恰是它们；任一侧漂移即红。
-test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SSOT（无漂移）", () => {
-  const usage = read("docs/usage.md");
+// 使用手册 transcript 页把交付终态的闭集词汇（completionMarker 值、
+// no_effect↔completed_empty 配对、delivery_failed 终态原因、ALERTS.log 路径）绑定到
+// runtime SSOT：从源码常量提取真值，断言文档记录的恰是它们；任一侧漂移即红。
+test("使用手册 transcript 页：交付终态闭集词汇绑定到 runtime SSOT（无漂移）", () => {
+  const transcriptPage = read("docs/usage/transcript.md");
   // SSOT 1：DONE_MARKERS（src/runEvent.js）——completionMarker 的闭集。
   const doneMarkersSrc = read("src/runEvent.js")
     .match(/export const DONE_MARKERS = Object\.freeze\(\[([^\]]*)\]\)/)?.[1];
@@ -507,8 +502,8 @@ test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SS
   const doneMarkers = [...doneMarkersSrc.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   assert.ok(doneMarkers.length > 0, "DONE_MARKERS must be a non-empty closed set");
   for (const marker of doneMarkers) {
-    assert.ok(usage.includes(`"${marker}"`),
-      `docs/usage.md 交付终态段落必须记录 completionMarker 闭集成员 "${marker}"`);
+    assert.ok(transcriptPage.includes(`"${marker}"`),
+      `docs/usage/transcript.md 必须记录 completionMarker 闭集成员 "${marker}"`);
   }
   // SSOT 2：NO_EFFECT_DIAGNOSIS_CODES（src/diagnosis.js）——no_effect 类目的合法码，
   // 且与 DONE_MARKERS 共享同一真值（category=no_effect ↔ code=<marker>）。
@@ -519,11 +514,11 @@ test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SS
   for (const code of noEffectCodes) {
     assert.ok(doneMarkers.includes(code),
       `NO_EFFECT_DIAGNOSIS_CODES 成员 "${code}" 必须同时是 DONE_MARKERS 成员（配对纪律）`);
-    assert.ok(usage.includes(`code=${code}`),
-      `docs/usage.md 必须记录 no_effect ↔ code=${code} 配对`);
+    assert.ok(transcriptPage.includes(`code=${code}`),
+      `docs/usage/transcript.md 必须记录 no_effect ↔ code=${code} 配对`);
   }
-  assert.ok(usage.includes("category=no_effect"),
-    "docs/usage.md 必须以 category=no_effect 表述诊断类目");
+  assert.ok(transcriptPage.includes("category=no_effect"),
+    "docs/usage/transcript.md 必须以 category=no_effect 表述诊断类目");
   // SSOT 3：STATE_CHANGE_REASONS（src/transcript.js）——打包失败的终态原因名。
   const reasonsSrc = read("src/transcript.js")
     .match(/const STATE_CHANGE_REASONS = Object\.freeze\(\[([\s\S]*?)\]\);/)?.[1];
@@ -531,18 +526,17 @@ test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SS
   const reasons = [...reasonsSrc.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   assert.ok(reasons.includes("delivery_failed"),
     "STATE_CHANGE_REASONS 必须含 delivery_failed（文档已钉该词，移除即双红）");
-  assert.ok(/reason=`delivery_failed`/.test(usage),
-    "docs/usage.md 打包失败段落必须写 reason=`delivery_failed`");
+  assert.ok(/reason=`delivery_failed`/.test(transcriptPage),
+    "docs/usage/transcript.md 必须写 reason=`delivery_failed`");
   // SSOT 4：alerts.js 默认告警日志路径。
   const alertLog = read("src/alerts.js").match(/const logPath = opts\.logPath \?\? "([^"]+)"/)?.[1];
   assert.ok(alertLog, "src/alerts.js must define the default ALERTS log path");
-  assert.ok(usage.includes(`\`${alertLog}\``),
-    `docs/usage.md 必须按 runtime 默认值记录告警日志路径 \`${alertLog}\``);
+  assert.ok(transcriptPage.includes(`\`${alertLog}\``),
+    `docs/usage/transcript.md 必须按 runtime 默认值记录告警日志路径 \`${alertLog}\``);
 });
 
 test("使用手册不把 daemon 写成 M5（daemon 属 M7）", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(!/M5 daemon/.test(usage), "usage.md 仍把 daemon 误写成 M5，roadmap 中 daemon 属 M7");
+  assert.ok(!/M5 daemon/.test(readManual()), "使用手册仍把 daemon 误写成 M5，roadmap 中 daemon 属 M7");
 });
 
 test("PRD 顶部不得再自称第一稿；状态权威必须指向 roadmap", () => {
@@ -579,9 +573,10 @@ test("opencode stop 安全边界不得保留 TD-37/TD-38 修复前的陈旧文�
     /真正后台存活需要 M7 daemon/i,
   ];
   for (const file of files) {
-    const txt = read(file);
+    // 负向扫描：使用手册按整本读，各页同样不得保留陈旧 stop 文案。
+    const txt = file === "docs/usage.md" ? readManual() : read(file);
     for (const pattern of stale) {
-      assert.ok(!pattern.test(txt), `${file} 仍保留 TD-37/TD-38 修复前的陈旧 stop 文案：${pattern}`);
+      assert.ok(!pattern.test(txt), `${file} 仍保留修复前的陈旧 stop 文案：${pattern}`);
     }
   }
 
@@ -592,20 +587,11 @@ test("opencode stop 安全边界不得保留 TD-37/TD-38 修复前的陈旧文�
   );
 });
 
-test("已完成的里程碑（M0–M13）在 roadmap 里不回退；ssot 不留旧测试基线", () => {
-  const roadmap = read("docs/roadmap.md");
-  const table = roadmap.split("## 里程碑")[1] ?? "";
-  // 已完成的里程碑不回退：M0–M13 每一行都必须在表里且显示已完成。
-  for (let i = 0; i <= 13; i += 1) {
-    const row = table.split("\n").find((l) => l.startsWith(`| M${i} |`)) ?? "";
-    assert.ok(/✅ 完成 \|$/.test(row), `roadmap.md 里程碑表的 M${i} 行必须显示已完成`);
-  }
-
+test("docs/ssot.md 不留旧审计基线字面量", () => {
   const ssot = read("docs/ssot.md");
   for (const stale of ["当前 39 个 md", "npm test 372", "15 条断言", "15 assertions"]) {
     assert.ok(!ssot.includes(stale), `docs/ssot.md 仍保留旧审计基线：${stale}`);
   }
-
 });
 
 test("历史 SSOT 审计和 M7 phase 文档必须归档，不得继续作为 docs 根目录活文档", () => {
@@ -786,14 +772,6 @@ test("SKILL.md scorecard 示例必须推荐 --scorecard-rules-file，避免 Powe
     "SKILL.md 不得继续推荐失效的 PowerShell inline JSON 转义示例");
 });
 
-test("registry list/check/validate 三命令分工必须在入口文档一致", () => {
-  const marker = "registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health";
-  for (const file of ["README.md", "SKILL.md", "AGENT_ONBOARDING.md"]) {
-    assert.ok(read(file).includes(marker),
-      `${file} 缺少 registry 三命令一致分工说明：${marker}`);
-  }
-});
-
 test("TD-82: SKILL.md 不复制 wao declare 理由码，改由裸命令查询", async () => {
   const skill = read("SKILL.md");
   assert.ok(/bare `wao stage` or `wao declare`/.test(skill), "SKILL.md 未说明裸命令查询枚举");
@@ -831,15 +809,16 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
   }
 });
 
-test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
+test("tier-1 四大文档保持在 byte cap 内（usage.md 帽盖整本手册）", () => {
   const caps = {
     "docs/02-architecture.md": 133000, // 改写为现状描述后约 130.3KB，上限留约 2%
     "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
-    "docs/usage.md": 226300,          // 地图加 docs/usage/ 全部页的合计；改写为现状描述后约 222KB，上限留约 2%
+    "docs/usage.md": 226300,          // 整本手册（地图加 docs/usage/ 全部页）的合计；上限留约 2%
     "docs/troubleshooting.md": 69000, // 改写为现状描述后约 67.6KB，上限留约 2%
   };
   for (const [rel, cap] of Object.entries(caps)) {
-    const bytes = Buffer.byteLength(read(rel), "utf8");
+    // usage.md 的帽盖整本手册，按 readManual() 读；其余按单文件读。
+    const bytes = Buffer.byteLength(rel === "docs/usage.md" ? readManual() : read(rel), "utf8");
     assert.ok(bytes <= cap, `${rel} 超过冻结 byte cap ${cap}（实际 ${bytes}）；先指针化/删重复，不得续堆正文`);
   }
 });
@@ -885,18 +864,16 @@ test("派发页列出的 run_continue 拒绝原因与代码闭集 CONTINUE_REJEC
   assert.deepEqual(unknown, [], "派发页列了代码闭集里没有的拒绝原因");
 });
 
-test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () => {
-  const usage = read("docs/usage.md");
+test("使用手册 host 页与 SKILL 记录 workspace 工具（workspace_status/workspace_select/--workspace-root）", () => {
+  const host = read("docs/usage/host.md");
   const skill = read("SKILL.md");
-  // usage.md must document the new tool
-  assert.ok(usage.includes("workspace_status"), "usage.md must document workspace_status tool");
-  assert.ok(usage.includes("--workspace-root"), "usage.md must mention --workspace-root startup flag");
+  assert.ok(host.includes("workspace_status"), "docs/usage/host.md must document workspace_status tool");
+  assert.ok(host.includes("--workspace-root"), "docs/usage/host.md must mention --workspace-root startup flag");
   // SKILL.md must list it in the tool table
   assert.ok(skill.includes("workspace_status"), "SKILL.md tool table must include workspace_status");
-  // M11-6: workspace_select documented + listed
-  assert.ok(usage.includes("workspace_select"), "usage.md must document workspace_select tool (M11-6)");
-  assert.ok(skill.includes("workspace_select"), "SKILL.md tool table must include workspace_select (M11-6)");
-  // SKILL.md 当前工具数由下方 TD-120 派生守卫从 TOOLS.length 推导钉住（历史 10→22 详该守卫），此处不再钉字面量（TD-168 清扫）。
+  assert.ok(host.includes("workspace_select"), "docs/usage/host.md must document workspace_select tool");
+  assert.ok(skill.includes("workspace_select"), "SKILL.md tool table must include workspace_select");
+  // SKILL.md 当前工具数由 toolSurface 派生守卫从 TOOLS.length 推导钉住，此处不再钉计数。
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -907,16 +884,6 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
 // ============================================================
 // M10 closeout + product definition calibration guards
 // ============================================================
-
-test("M10 closeout: roadmap 中 M10 恰好一个 ✅ 完成", () => {
-  const roadmap = read("docs/roadmap.md");
-  const lines = roadmap.split("\n");
-  // 里程碑表里 | M10 | 行必须标 ✅ 完成
-  const m10Rows = lines.filter((l) => /^\|\s*M10\b/.test(l));
-  assert.ok(m10Rows.length >= 1, "roadmap 必须有 M10 进度行");
-  const completedM10 = m10Rows.filter((l) => /✅\s*完成/.test(l));
-  assert.equal(completedM10.length, 1, `M10 必须恰好一个 ✅ 完成；实际 ${completedM10.length}`);
-});
 
 test("M10 closeout: 活文档不再出现 stale M10 in-progress 文案", () => {
   const roadmap = read("docs/roadmap.md");
@@ -994,21 +961,6 @@ test("M10 closeout: roadmap 不出现 'unattended or multi-tenant release' / cre
     "PRD 必须声明 WAO 不为缺 goal/autonomy 的 Lead 补 goal loop");
 });
 
-test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adaptive Playbooks 行，标为已完成（M12-0 关闭 M11）", () => {
-  const roadmap = read("docs/roadmap.md");
-  const lines = roadmap.split("\n");
-  // 里程碑表里 | M11 | 行
-  const m11Rows = lines.filter((l) => /^\|\s*M11\b/.test(l));
-  assert.equal(m11Rows.length, 1, `roadmap 必须恰好一个 M11 进度行；实际 ${m11Rows.length}`);
-  const m11Row = m11Rows[0];
-  // M12-0 关闭 M11：必须标为 ✅ 完成，不得仍停在 🔧 进行中
-  assert.ok(/✅\s*完成/.test(m11Row), "M11 必须标为 ✅ 完成（M12-0 已退役 Tester token efficiency 并关闭 M11）");
-  assert.ok(!/🔧\s*进行中/.test(m11Row), "M11 不得仍标为 🔧 进行中（M12-0 已关闭 M11）");
-  // 名称必须含两个核心（Lead Experience + Adaptive Playbooks 或同义）
-  assert.ok(/Lead Experience/.test(m11Row) && /Adaptive Playbooks|playbook|template/i.test(m11Row),
-    "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
-});
-
 test("M11-11A-RED-03: Lead identity states the full human-owned operating contract", () => {
   const skill = read("SKILL.md");
   const roles = read("docs/team-roles.md");
@@ -1036,70 +988,67 @@ test("M10 closeout: Smash Bros delivery 未被宣称已集成", () => {
 });
 
 // ============================================================
-// M11-0A: OpenCode project-local setup docs guards
+// OpenCode 项目级安装与配置的说明守卫（安装页 / host 页）
 // ============================================================
 
 test("M11-0A: 活文档不存在错误的 opencode 包名 (opencode 而非 opencode-ai)", () => {
-  const usage = read("docs/usage.md");
+  // 负向扫描：使用手册按整本读。
   const skill = read("SKILL.md");
-  for (const [name, txt] of [["usage", usage], ["SKILL", skill]]) {
+  for (const [name, txt] of [["usage", readManual()], ["SKILL", skill]]) {
     assert.ok(!/npm i -g opencode\b(?!-ai)/.test(txt), `${name} 不得出现 'npm i -g opencode'（应为 opencode-ai）`);
     assert.ok(!/npm install -g opencode\b(?!-ai)/.test(txt), `${name} 不得出现 'npm install -g opencode'（应为 opencode-ai）`);
   }
 });
 
-test("M11-0A: 活文档存在正确的 opencode-ai 安装命令", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/npm install -g opencode-ai/.test(usage), "usage.md 必须含 'npm install -g opencode-ai'");
+test("使用手册安装页存在正确的 opencode-ai 安装命令", () => {
+  const install = read("docs/usage/install.md");
+  assert.ok(/npm install -g opencode-ai/.test(install), "docs/usage/install.md 必须含 'npm install -g opencode-ai'");
 });
 
-test("M11-0A: 活文档不存在 '无 npm install' stale，且存在 npm ci", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(!/无 npm install/.test(usage), "usage.md 不得再写 '无 npm install'（WAO 含 MCP SDK/zod 依赖）");
-  assert.ok(/npm ci/.test(usage), "usage.md 必须含 'npm ci' 安装步骤");
+test("使用手册：安装步骤用 npm ci，无 '无 npm install' 陈旧说法", () => {
+  const install = read("docs/usage/install.md");
+  assert.ok(!/无 npm install/.test(readManual()), "使用手册不得再写 '无 npm install'（WAO 含 MCP SDK/zod 依赖）");
+  assert.ok(/npm ci/.test(install), "docs/usage/install.md 必须含 'npm ci' 安装步骤");
 });
 
-test("M11-0A: usage.md 含 OpenCode 项目级配置 schema 关键字段", () => {
-  const usage = read("docs/usage.md");
+test("使用手册 host 页含 OpenCode 项目级配置 schema 关键字段", () => {
+  const host = read("docs/usage/host.md");
   for (const needle of ["\$schema", '"mcp"', '"type": "local"', '"enabled": true', '"command": [', "--workspace-root", "--pure"]) {
-    assert.ok(usage.includes(needle), `usage.md OpenCode 配置示例缺关键字段: ${needle}`);
+    assert.ok(host.includes(needle), `docs/usage/host.md OpenCode 配置示例缺关键字段: ${needle}`);
   }
 });
 
-test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command 数组要求", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/--pure/.test(usage), "usage.md 必须提到 --pure");
-  assert.ok(/禁用.*插件|插件.*干扰/.test(usage), "usage.md 必须说明 --pure 禁用插件以减少冲突");
-  assert.ok(/新的 OpenCode 进程|启动新.*进程|重启|新进程/.test(usage), "usage.md 必须说明改配置后需启动新进程");
-  assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
+test("使用手册 host 页说明 --pure 用途、新进程重启边界、command 数组要求", () => {
+  const host = read("docs/usage/host.md");
+  assert.ok(/--pure/.test(host), "docs/usage/host.md 必须提到 --pure");
+  assert.ok(/禁用.*插件|插件.*干扰/.test(host), "docs/usage/host.md 必须说明 --pure 禁用插件以减少冲突");
+  assert.ok(/新的 OpenCode 进程|启动新.*进程|重启|新进程/.test(host), "docs/usage/host.md 必须说明改配置后需启动新进程");
+  assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(host), "docs/usage/host.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9/M12-10/M12-16: usage 不再手抄 MCP 工具计数（TD-120 关系型守卫；生成层↔SSOT 一致由 docsSurface 承载）", () => {
-  const usage = read("docs/usage.md");
+test("使用手册不手抄 MCP 工具计数（计数由生成层承载）", () => {
+  const manual = readManual();
   // 生成层 docs/surface/mcp-tools.md 的内容（含头部 N tools 计数行）由
-  // docsSurface-1 字节钉（disk == generate()，gen-surface 从 live tools/list
-  // 派生头部计数）+ docsSurface-3 结构钉（headings == TOOLS）承载，此处不再
-  // 重复钉生成物内容（TD-168 清扫）。
-  // P4-乙 Phase 2A (2026-08-15): usage.md §四 migrated its shape/count hand-copies
-  // to the generated reference layer; usage.md must NOT re-introduce a
-  // hand-copied count phrase (that is how the pre-migration drift happened).
-  assert.ok(!/(?<!\d)\d+ 个工具/.test(usage),
-    "usage.md 不得手抄 MCP 工具计数（计数由生成层 docs/surface/mcp-tools.md 派生承载）");
+  // docsSurface 字节钉（disk == generate()，gen-surface 从 live tools/list
+  // 派生头部计数）与结构钉（headings == TOOLS）承载；使用手册不得重新引入
+  // 手抄计数（迁移前的漂移正是这样发生的）。
+  assert.ok(!/(?<!\d)\d+ 个工具/.test(manual),
+    "使用手册不得手抄 MCP 工具计数（计数由生成层 docs/surface/mcp-tools.md 派生承载）");
   // 精确禁止"只有 7 个工具"的陈旧文案回潮。
-  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
+  assert.ok(!/(?<!\d)7 个工具/.test(manual), "使用手册 MCP 段不得再声称只有 7 个工具");
 });
 
 // ============================================================
-// M11-1A: safe delivery changed-path projection docs guards
+// delivery 变更路径投影（changedPaths）的说明守卫
 // ============================================================
 
-test("M11-1A: usage.md 记录 changedPaths/changedPathsTruncated 字段与 64 cap", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/changedPaths/.test(usage), "usage.md 必须记录 changedPaths 字段");
-  assert.ok(/changedPathsTruncated/.test(usage), "usage.md 必须记录 changedPathsTruncated 字段");
-  assert.ok(/64/.test(usage), "usage.md 必须记录 64 cap");
+test("使用手册交付页记录 changedPaths/changedPathsTruncated 字段与 64 cap", () => {
+  const delivery = read("docs/usage/delivery.md");
+  assert.ok(/changedPaths/.test(delivery), "docs/usage/delivery.md 必须记录 changedPaths 字段");
+  assert.ok(/changedPathsTruncated/.test(delivery), "docs/usage/delivery.md 必须记录 changedPathsTruncated 字段");
+  assert.ok(/64/.test(delivery), "docs/usage/delivery.md 必须记录 64 cap");
   // 仍明确不返回 raw diff / 文件内容
-  assert.ok(/不返回.*raw diff|不是 raw diff|raw diff/.test(usage), "usage.md 必须声明不返回 raw diff");
+  assert.ok(/不返回.*raw diff|不是 raw diff|raw diff/.test(delivery), "docs/usage/delivery.md 必须声明不返回 raw diff");
 });
 
 test("M11-1A: SKILL Acceptance 段反映 bounded changed paths 但不替代语义验收", () => {
@@ -1113,52 +1062,52 @@ test("M11-1A: SKILL Acceptance 段反映 bounded changed paths 但不替代语�
 });
 
 // ============================================================
-// M11-1A closeout: OpenCode enabled is optional, not required
+// OpenCode enabled is optional, not required
 // ============================================================
 
-test("M11-1A-closeout: usage.md 不得把 OpenCode 'enabled' 声明为必填或省略必然禁用", () => {
-  const usage = read("docs/usage.md");
+test("OpenCode enabled 是 optional（host 页正向）；不得写成必填或省略必然禁用", () => {
+  const host = read("docs/usage/host.md");
   // 不得继续写 "enabled 必须" / "省略时不会启用" / "省略时该 server 不会启用" 等错误断言
-  assert.ok(!/enabled.*必须存在|enabled.*必须填|enabled:true.*必须|省略时.*不会启用|省略时该 server 不会启用/.test(usage),
-    "usage.md 不得把 OpenCode enabled 声明为必填或省略必然禁用（官方 schema 为 optional）");
+  assert.ok(!/enabled.*必须存在|enabled.*必须填|enabled:true.*必须|省略时.*不会启用|省略时该 server 不会启用/.test(readManual()),
+    "使用手册不得把 OpenCode enabled 声明为必填或省略必然禁用（官方 schema 为 optional）");
   // 必须明确 enabled 是 optional
-  assert.ok(/enabled.*optional|optional.*enabled/i.test(usage),
-    "usage.md 必须明确 enabled 是 OpenCode optional 配置");
+  assert.ok(/enabled.*optional|optional.*enabled/i.test(host),
+    "docs/usage/host.md 必须明确 enabled 是 OpenCode optional 配置");
 });
 
 // ============================================================
-// M11-1B: certification clarity + worktree hygiene authority guards
-// （certification advisory 钉已并入下方 M12-0-05——TD-168 清扫，较弱份删除，
-//   中文备选并入 M12-0-05 正向断言；旧文案负向被 strict-dispatch 禁令包含。）
+// worktree hygiene 权威说明守卫
+// （certification advisory 钉由下方 M12-0-05 承载——较弱份已删，中文备选并入
+//   其正向断言；旧文案负向被 strict-dispatch 禁令包含。）
 // ============================================================
 
-test("M11-1B: usage.md 记录 .wao-worktrees/ 仓库本地 exclude hygiene 规则", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/\/\.wao-worktrees\//.test(usage), "usage.md 必须记录 /.wao-worktrees/ 根忽略规则");
+test("使用手册派发页记录 .wao-worktrees/ 仓库本地 exclude hygiene 规则", () => {
+  const dispatch = read("docs/usage/dispatch.md");
+  assert.ok(/\/\.wao-worktrees\//.test(dispatch), "docs/usage/dispatch.md 必须记录 /.wao-worktrees/ 根忽略规则");
   // 不编辑 tracked .gitignore
-  assert.ok(/不编辑 tracked \.gitignore|不.*\.gitignore/.test(usage),
-    "usage.md 必须声明不编辑 tracked .gitignore");
+  assert.ok(/不编辑 tracked \.gitignore|不.*\.gitignore/.test(dispatch),
+    "docs/usage/dispatch.md 必须声明不编辑 tracked .gitignore");
   // 与 host activation marker block 独立
-  assert.ok(/marker block|独立|Codex.*bind/i.test(usage),
-    "usage.md 必须声明 worktree hygiene 规则与 host activation marker block 独立");
+  assert.ok(/marker block|独立|Codex.*bind/i.test(dispatch),
+    "docs/usage/dispatch.md 必须声明 worktree hygiene 规则与 host activation marker block 独立");
 });
 
 // ============================================================
-// M11-1B micro-closeout: stable-rule semantics + no add-failure rollback
+// stable-rule semantics + no add-failure rollback
 // ============================================================
 
-test("M11-1B-closeout: usage.md 不得声称 git worktree add 失败会回滚 hygiene 规则", () => {
-  const usage = read("docs/usage.md");
+test("使用手册派发页：git worktree add 失败保留稳定 hygiene 规则、不回滚（旧回滚说法不得回来）", () => {
+  const dispatch = read("docs/usage/dispatch.md");
   // 不得保留"在 git worktree add 失败时回滚本次调用新增的规则"的旧措辞。
   // 精确匹配旧错误框架（"回滚...新增的规则" / "回滚本次调用"），不误伤
   // 正确的"保留该稳定规则，不回滚"。
-  assert.ok(!/worktree add.*失败.*回滚.*新增|worktree add.*失败时回滚本次调用/.test(usage),
-    "usage.md 不得声称 git worktree add 失败会回滚 hygiene 规则（stable rule 不回滚）");
+  assert.ok(!/worktree add.*失败.*回滚.*新增|worktree add.*失败时回滚本次调用/.test(readManual()),
+    "使用手册不得声称 git worktree add 失败会回滚 hygiene 规则（stable rule 不回滚）");
   // 必须表达 stable rule + add failure 不回滚
-  assert.ok(/稳定.*hygiene|stable.*hygiene/i.test(usage),
-    "usage.md 必须声明 /.wao-worktrees/ 是稳定 hygiene 规则");
-  assert.ok(/worktree add.*失败.*保留.*不回滚|worktree add.*失败.*不回滚/.test(usage),
-    "usage.md 必须明确 git worktree add 失败时保留规则、不回滚");
+  assert.ok(/稳定.*hygiene|stable.*hygiene/i.test(dispatch),
+    "docs/usage/dispatch.md 必须声明 /.wao-worktrees/ 是稳定 hygiene 规则");
+  assert.ok(/worktree add.*失败.*保留.*不回滚|worktree add.*失败.*不回滚/.test(dispatch),
+    "docs/usage/dispatch.md 必须明确 git worktree add 失败时保留规则、不回滚");
 });
 
 // ============================================================
@@ -1196,13 +1145,14 @@ test("M11-2C-04: 活文档不得声称存在 playbook_run/start/next/recommend",
   //
   // 本守卫检测的是"肯定式声称"句式（动词 + 工具名），而不是扫所有裸词出现——
   // 因为否定声明（there is no / 不存在 / 没有）是合法且必要的，逐词扫会产生假阳性。
+  // 负向扫描：使用手册按整本读（executor 工具名的肯定式声称不得出现在任何页）。
   const live = [
-    "SKILL.md",
-    "docs/usage.md",
-    "docs/01-prd.md",
-    "docs/02-architecture.md",
-    "docs/roadmap.md",
-  ].map(read).join("\n<<<FILE_BOUNDARY>>>\n");
+    read("SKILL.md"),
+    readManual(),
+    read("docs/01-prd.md"),
+    read("docs/02-architecture.md"),
+    read("docs/roadmap.md"),
+  ].join("\n<<<FILE_BOUNDARY>>>\n");
   const stripped = live.replace(/[*`]/g, "");
   // 肯定式声称：英文动词（call/use/invoke/run/execute）或中文动词（调用/使用/执行/运行）
   // 后跟 playbook_run/start/next/recommend。这是"声称工具存在并可用"的真实信号。
@@ -1231,24 +1181,15 @@ test("M11-2C-06: architecture 明确 Catalog ≠ WorkflowEngine（分离）", ()
     "architecture 明确 Catalog 与 WorkflowEngine 分离");
 });
 
-test("M12-1 S1/S2: README records implemented inventory + model-free repackage truth", () => {
-  const readme = read("README.md");
-  for (const [name, text] of [["README", readme]]) {
-    assert.ok(/candidateInventory/.test(text), `${name} 必须记录 candidateInventory 已实现`);
-    assert.ok(/run_delivery_repackage/.test(text), `${name} 必须记录 model-free repackage 已实现`);
-    assert.ok(/不重调模型|model-free/i.test(text), `${name} 必须说明不重新调用 worker model`);
-  }
-});
-
-test("M11-2C-08: usage 含 playbook 的 MCP resources 与 CLI 两种只读入口", () => {
-  const usage = read("docs/usage.md");
-  // M12-10: the MCP entry is now RESOURCES (wao://playbooks), not tools.
-  assert.ok(/wao:\/\/playbooks/.test(usage), "usage 把 MCP playbook 入口记为 wao://playbooks resources");
-  assert.ok(!/\bplaybook_list\b/.test(usage), "usage 不得再把 playbook_list 当作 MCP 工具");
-  assert.ok(!/\bplaybook_get\b/.test(usage), "usage 不得再把 playbook_get 当作 MCP 工具");
-  assert.ok(/playbook list/.test(usage), "usage 提及 `playbook list` CLI");
-  assert.ok(/playbook show/.test(usage), "usage 提及 `playbook show` CLI");
-  assert.ok(/--format json/i.test(usage), "usage 提及 playbook --format json");
+test("使用手册 results 页含 playbook 的 MCP resources 与 CLI 两种只读入口", () => {
+  const results = read("docs/usage/results.md");
+  // The MCP entry is RESOURCES (wao://playbooks), not tools.
+  assert.ok(/wao:\/\/playbooks/.test(results), "docs/usage/results.md 把 MCP playbook 入口记为 wao://playbooks resources");
+  assert.ok(!/\bplaybook_list\b/.test(readManual()), "使用手册不得再把 playbook_list 当作 MCP 工具");
+  assert.ok(!/\bplaybook_get\b/.test(readManual()), "使用手册不得再把 playbook_get 当作 MCP 工具");
+  assert.ok(/playbook list/.test(results), "docs/usage/results.md 提及 `playbook list` CLI");
+  assert.ok(/playbook show/.test(results), "docs/usage/results.md 提及 `playbook show` CLI");
+  assert.ok(/--format json/i.test(results), "docs/usage/results.md 提及 playbook --format json");
 });
 
 test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水线）", () => {
@@ -1465,11 +1406,10 @@ function collectModelScanTargets() {
   const targets = [];
   const lineOfWholeText = (text) => (pos) => text.slice(0, pos).split(/\r?\n/).length;
   const pushText = (rel, label, text, lineOf) => targets.push({ rel, label, text, lineOf });
-  // 逐文件直读：read("docs/usage.md") 返回地图加全部用法页的拼接，用它会把用法页
-  // 扫两遍且行号错位。
-  const raw = (rel) => readFileSync(join(ROOT, rel), "utf8");
+  // 逐文件直读：地图（docs/usage.md）与 docs/usage/ 各页都由 mdUnder("docs")
+  // 逐文件收录，行号按各自文件计。
   for (const rel of ["README.md", "README.zh-CN.md", "AGENTS.md", "AGENT_ONBOARDING.md", "SKILL.md", "llms.txt"]) {
-    const text = raw(rel);
+    const text = read(rel);
     pushText(rel, rel, text, lineOfWholeText(text));
   }
   const mdUnder = (top) => {
@@ -1488,22 +1428,22 @@ function collectModelScanTargets() {
     rel.startsWith("docs/incidents/") || /^docs\/changelog-[^/]+\.md$/.test(rel);
   for (const rel of mdUnder("docs")) {
     if (frozen(rel)) continue;
-    const text = raw(rel);
+    const text = read(rel);
     pushText(rel, rel, text, lineOfWholeText(text));
   }
   for (const top of ["references", "config/roles"]) {
     for (const rel of mdUnder(top)) {
-      const text = raw(rel);
+      const text = read(rel);
       pushText(rel, rel, text, lineOfWholeText(text));
     }
   }
   for (const rel of mdUnder("scripts")) {
     if (!rel.endsWith("/README.md")) continue;
-    const text = raw(rel);
+    const text = read(rel);
     pushText(rel, rel, text, lineOfWholeText(text));
   }
   const rel = "config/agents.example.json";
-  for (const { path, value } of jsonCommentStrings(raw(rel))) {
+  for (const { path, value } of jsonCommentStrings(read(rel))) {
     pushText(rel, `${rel} 的 ${path}`, value, () => path);
   }
   return targets;
@@ -1762,36 +1702,30 @@ test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（
   assert.ok(l4.includes("src/hostAdapters/"), "L4 节必须记录 hostAdapters 归桶裁定");
 });
 
-test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
+test("run_dispatch 输入形状契约：executionProfileId 顶层、verificationCommands/contractValid 语义（SKILL + 使用手册 host 页）", () => {
   const skill = read("SKILL.md");
-  const usage = read("docs/usage.md");
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
+  const host = read("docs/usage/host.md");
+  for (const [name, text] of [["SKILL.md", skill], ["使用手册", readManual()]]) {
     // The NONEXISTENT nested shape (delivery.verification.executionProfileId) must
     // never be documented — it does not exist in the run_dispatch input schema.
     assert.ok(!/verification\.executionProfileId/i.test(text),
       `${name} 不得记录不存在的 delivery.verification.executionProfileId 形状`);
   }
-  // TD-166（2026-09-19）守卫迁移：SKILL.md 重构为路由+指针后，executionProfileId
-  // 顶层形状 / verificationCommands / contractValid 不预评清单属字段 schema 细节——
-  // 权威承载是使用手册（SKILL 经指针指路，不再复制 schema 正文）。
-  for (const [name, text] of [["docs/usage.md", usage]]) {
-    // executionProfileId is a top-level run_dispatch input, sibling of delivery.
-    assert.ok(/top-level|顶层|同级/i.test(text),
-      `${name} 必须把 executionProfileId 记为顶层（与 delivery 同级）`);
-    // Inline verification uses the real delivery-level field names.
-    assert.ok(/verificationCommands/.test(text), `${name} 必须记录 delivery.verificationCommands`);
-  }
-  // contractValid scope (usage carries the full scope sentence): mechanical
-  // contract only; it must NOT pre-evaluate the run_dispatch expectations.
-  for (const [name, text] of [["docs/usage.md", usage]]) {
-    assert.ok(/contractValid/.test(text), `${name} 必须记录 contractValid`);
-    assert.ok(/expectedGitHead|expectedDirty|expectedWorkspaceRoot/.test(text),
-      `${name} 必须列出 contractValid 不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot`);
-  }
+  // 字段 schema 细节的权威承载是使用手册 host 页（SKILL 重构为路由+指针后经指针指路）。
+  // executionProfileId is a top-level run_dispatch input, sibling of delivery.
+  assert.ok(/top-level|顶层|同级/i.test(host),
+    "docs/usage/host.md 必须把 executionProfileId 记为顶层（与 delivery 同级）");
+  // Inline verification uses the real delivery-level field names.
+  assert.ok(/verificationCommands/.test(host), "docs/usage/host.md 必须记录 delivery.verificationCommands");
+  // contractValid scope: mechanical contract only; it must NOT pre-evaluate the
+  // run_dispatch expectations.
+  assert.ok(/contractValid/.test(host), "docs/usage/host.md 必须记录 contractValid");
+  assert.ok(/expectedGitHead|expectedDirty|expectedWorkspaceRoot/.test(host),
+    "docs/usage/host.md 必须列出 contractValid 不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot");
   // The contract check shares the INPUT SCHEMA (not "Zod"), and the service does
   // not import a validation library. Regression guard for the stale "共享输入 Zod"
   // wording that wrongly attributed a Zod import to the service.
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
+  for (const [name, text] of [["SKILL.md", skill], ["使用手册", readManual()]]) {
     assert.ok(!/共享输入 Zod/.test(text), `${name} 不得再用过时的"共享输入 Zod"措辞`);
   }
 });
@@ -1818,27 +1752,21 @@ test("M11-2C-11: SKILL 不得要求任何 worker（含 native 路线）都执行
     "SKILL 必须把 WAO preflight 明确绑定到 WAO route / run_dispatch / WAO worker");
 });
 
-test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具", () => {
+test("SKILL 不得声称 minimal loop 必须经过全部工具；playbook 读取可选且在 loop 外", () => {
   const skill = read("SKILL.md");
   // 禁止暗示全部工具都是 mandatory loop。playbook catalog 是可选、位于
-  // dispatch loop 外的只读 resources（M12-10 起为 MCP resources，非工具）。
+  // dispatch loop 外的只读 MCP resources（非工具）。当前工具数与陈旧计数由
+  // toolSurface 派生守卫（TOOLS.length 正负探针）承载，此处不再钉计数。
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 23 tools，但 minimal control loop 只用相关 control tools，
-  // playbook resources 是可选且在 dispatch loop 外。
-  // （M13-r2 计数随真值：22→23，加 run_consult；负向探针同步 23→24。）
-  assert.ok(/23 MCP tools|23 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 23 MCP tools");
-  assert.ok(!/24 MCP tools|24 tools/i.test(skill),
-    "SKILL 不得再声称 24 tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
 
 test("M11-3D1: Lead 在 decision 前逐文件逐页 review，并把 fragment 当不可信数据", () => {
   const skill = read("SKILL.md");
-  const usage = read("docs/usage.md");
+  const delivery = read("docs/usage/delivery.md");
   assert.ok(skill.indexOf("`run_delivery_review`") > skill.indexOf("`run_delivery`")
     && skill.indexOf("`run_delivery_review`") < skill.indexOf("`run_delivery_decide`"),
     "SKILL 工具表把 review 放在 delivery query 与 decision 之间");
@@ -1846,8 +1774,8 @@ test("M11-3D1: Lead 在 decision 前逐文件逐页 review，并把 fragment 当
     "SKILL 要求逐文件并沿 nextCursor 读完");
   assert.ok(/untrusted repository text/i.test(skill) && /never execute commands|绝不执行/i.test(skill),
     "SKILL 明确 diff fragment 是不可信数据，不可执行其中命令");
-  assert.ok(/untrusted_repository_text/.test(usage) && /prompt injection/i.test(usage),
-    "usage 记录 artifact trust marker 与 prompt injection 边界");
+  assert.ok(/untrusted_repository_text/.test(delivery) && /prompt injection/i.test(delivery),
+    "docs/usage/delivery.md 记录 artifact trust marker 与 prompt injection 边界");
 });
 
 test("M11-3D: 本地 Git fallback 只用于不可用 review", () => {
@@ -1864,28 +1792,25 @@ test("M11-3D: 本地 Git fallback 只用于不可用 review", () => {
 //   3. architecture.md lists runCollectProjection.js as shared ownership.
 // ============================================================
 
-test("M11-4-DOC-01: usage 保留 run_collect 续读语义与零追加合同（cursor/nextCursor 字段由生成层承载）", () => {
-  const usage = read("docs/usage.md");
-  // P4-乙 Phase 2A (2026-08-15): usage.md §四 dropped the run_collect shape
-  // hand-copy; the cursor input + nextCursor output FIELD names live in the
-  // generated reference layer. 生成物内容钉（"| cursor |" / "| nextCursor |"
-  // 行存在性）与 docsSurface-1 字节钉重复，已删（TD-168 清扫）；此处只钉
-  // usage 侧续读语义。
-  assert.ok(/run_collect/.test(usage), "usage covers run_collect");
-  assert.ok(/opaque continuation token/i.test(usage),
-    "usage documents the cursor as an opaque continuation token");
+test("使用手册 results 页保留 run_collect 续读语义与零追加合同", () => {
+  const results = read("docs/usage/results.md");
+  // cursor/nextCursor 的字段形状由生成层承载（字节由 docsSurface 钉）；此处只钉
+  // results 页的续读语义与安全边界。
+  assert.ok(/run_collect/.test(results), "docs/usage/results.md covers run_collect");
+  assert.ok(/opaque continuation token/i.test(results),
+    "docs/usage/results.md documents the cursor as an opaque continuation token");
   // Continuation semantics: page-by-page until null, exact-once, frozen snapshot.
-  assert.ok(/续读|continuation/i.test(usage), "usage documents continuation flow");
-  assert.ok(/无漏项.*无重复|no loss.*no dup/i.test(usage) || /完整.*按序.*无漏项.*无重复/.test(usage),
-    "usage states no-loss/no-duplication reconstruction");
-  assert.ok(/snapshot.*冻结|frozen.*snapshot|frozen.*prefix/i.test(usage),
-    "usage documents frozen-snapshot stability");
+  assert.ok(/续读|continuation/i.test(results), "docs/usage/results.md documents continuation flow");
+  assert.ok(/无漏项.*无重复|no loss.*no dup/i.test(results) || /完整.*按序.*无漏项.*无重复/.test(results),
+    "docs/usage/results.md states no-loss/no-duplication reconstruction");
+  assert.ok(/snapshot.*冻结|frozen.*snapshot|frozen.*prefix/i.test(results),
+    "docs/usage/results.md documents frozen-snapshot stability");
   // Security: cursor never carries raw sensitive values.
-  assert.ok(/cursor.*不含.*raw|cursor.*绝不.*raw|绝不.*raw runId/i.test(usage),
-    "usage states cursor carries no raw runId/session/path/prompt/secret");
+  assert.ok(/cursor.*不含.*raw|cursor.*绝不.*raw|绝不.*raw runId/i.test(results),
+    "docs/usage/results.md states cursor carries no raw runId/session/path/prompt/secret");
   // Invalid cursor → zero audit append.
-  assert.ok(/invalid cursor|无效 cursor/i.test(usage) && /零追加|zero.*append/i.test(usage),
-    "usage states invalid cursor → zero audit append");
+  assert.ok(/invalid cursor|无效 cursor/i.test(results) && /零追加|zero.*append/i.test(results),
+    "docs/usage/results.md states invalid cursor → zero audit append");
 });
 
 test("M11-4-DOC-02: SKILL.md tells Lead to follow nextCursor to null via run_collect", () => {
@@ -1919,8 +1844,8 @@ test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownersh
 // echo or summarize the role. The absolute "绝不保存角色正文/zero-leak" wording
 // is untruthful and must be gone from architecture/usage/tech-debt.
 test("M11-5-C-DOC-1: docs do not claim role body absolutely never in transcript", () => {
-  for (const rel of ["docs/02-architecture.md", "docs/usage.md", "docs/tech-debt.md"]) {
-    const text = read(rel);
+  // 负向检查：使用手册按整本读。
+  for (const [rel, text] of [["docs/02-architecture.md", read("docs/02-architecture.md")], ["docs/usage.md", readManual()], ["docs/tech-debt.md", read("docs/tech-debt.md")]]) {
     assert.ok(!/绝不保存角色正文|角色正文零泄漏|never persists role (body|content)/i.test(text),
       `${rel}: must not claim role body absolutely never in transcript (worker output may echo role)`);
   }
@@ -1931,11 +1856,11 @@ test("M11-5-C-DOC-1: docs do not claim role body absolutely never in transcript"
 // use is a documented fact, not an implementation accident.
 test("M11-5-C-DOC-2: docs document path authority (WAO install root, not cwd)", () => {
   const arch = read("docs/02-architecture.md");
-  const usage = read("docs/usage.md");
+  const dispatch = read("docs/usage/dispatch.md");
   assert.ok(/相对 WAO 安装根|install root|not.*cwd|不依赖.*cwd|不依赖调用者 cwd/i.test(arch),
     "architecture documents install-root path authority");
-  assert.ok(/相对 WAO 安装根|install root|not.*cwd|不依赖.*cwd|不依赖调用者 cwd/i.test(usage),
-    "usage documents install-root path authority");
+  assert.ok(/相对 WAO 安装根|install root|not.*cwd|不依赖.*cwd|不依赖调用者 cwd/i.test(dispatch),
+    "docs/usage/dispatch.md documents install-root path authority");
 });
 
 // C-DOC-3: docs document the strict capability judgment (=== true, not truthy).
@@ -1959,17 +1884,17 @@ test("M11-5-C-DOC-4: docs document truthful load timing (start pre-transcript; r
 // ===== M11-11D: Lead friction closeout guards =====
 
 test("M11-11D-DOC-01: terminal run_wait proceeds to collect without redundant status", () => {
-  const usage = read("docs/usage.md");
-  // TD-166（2026-09-19）守卫迁移：流程细节（终态后免冗余 status 调用）由
-  // usage.md 承载（下方断言钉住其存在）；SKILL Acceptance 保留 compact-first 骨架即可。
-  assert.ok(/terminal:true.*run_collect.*不需要.*run_status/is.test(usage),
-    "usage documents no redundant status call after terminal wait");
+  const supervise = read("docs/usage/supervise.md");
+  // 流程细节（终态后免冗余 status 调用）由使用手册监督页承载；SKILL Acceptance
+  // 保留 compact-first 骨架即可。
+  assert.ok(/terminal:true.*run_collect.*不需要.*run_status/is.test(supervise),
+    "docs/usage/supervise.md documents no redundant status call after terminal wait");
 });
 
 test("M11-11D-DOC-02: ordinary non-delivery query is structured truth", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/deliveryRequested.*普通非 delivery run.*deliveryAvailable:false.*deliveryRequested:false.*deliveryFailure:null/is.test(usage),
-    "usage distinguishes a normal non-delivery run from packaging failure");
+  const delivery = read("docs/usage/delivery.md");
+  assert.ok(/deliveryRequested.*普通非 delivery run.*deliveryAvailable:false.*deliveryRequested:false.*deliveryFailure:null/is.test(delivery),
+    "docs/usage/delivery.md distinguishes a normal non-delivery run from packaging failure");
 });
 
 test("M11-11D-DOC-03: stop_verified means runtime quiet, not necessarily explicit stop", () => {
@@ -2092,33 +2017,33 @@ test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 per
 });
 
 test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decision authority", () => {
-  const usage = read("docs/usage.md");
+  const delivery = read("docs/usage/delivery.md");
   const arch = read("docs/02-architecture.md");
   const troubleshooting = read("docs/troubleshooting.md");
-  // TD-166（2026-09-19）守卫迁移：candidateKind 闭集细节以 usage/arch/
-  // troubleshooting 承载（SKILL 路由化后经 usage.md §四 各工具小节指路）。
-  for (const [name, text] of Object.entries({ usage, arch, troubleshooting })) {
+  // candidateKind 闭集细节以使用手册交付页/arch/troubleshooting 承载（SKILL 路由化
+  // 后经指针指路）。
+  for (const [name, text] of Object.entries({ "docs/usage/delivery.md": delivery, "docs/02-architecture.md": arch, "docs/troubleshooting.md": troubleshooting })) {
     assert.ok(/backend_failed/.test(text), `${name} 必须记录 backend_failed candidate kind`);
   }
-  assert.ok(/不调用 model|no model/i.test(usage), "usage 必须明确恢复不调用模型");
-  assert.ok(/Lead.*allowedPaths|allowedPaths.*Lead/i.test(usage), "usage 必须保留 Lead scope 权威");
+  assert.ok(/不调用 model|no model/i.test(delivery), "docs/usage/delivery.md 必须明确恢复不调用模型");
+  assert.ok(/Lead.*allowedPaths|allowedPaths.*Lead/i.test(delivery), "docs/usage/delivery.md 必须保留 Lead scope 权威");
   assert.ok(/不自动.*decision|不作 decision|不自动 accept\/reject/i.test(arch),
     "architecture 必须保留 Lead decision 权威");
 });
 
 test("M12-3B docs: review bundle is mechanical, one-page, and preserves Lead decisions + atomic tools", () => {
   const skill = read("SKILL.md");
-  const usage = read("docs/usage.md");
+  const delivery = read("docs/usage/delivery.md");
   const arch = read("docs/02-architecture.md");
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/02-architecture.md", arch]]) {
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage/delivery.md", delivery], ["docs/02-architecture.md", arch]]) {
     assert.ok(text.includes("run_delivery_review_bundle"), `${name} documents the bundle`);
   }
-  assert.match(usage, /一个.*文件页|one.*page/i);
-  assert.match(usage, /不选择.*fileIndex|never.*select/i);
-  assert.match(usage, /不遍历文件|never.*travers/i);
-  assert.match(usage, /Lead.*run_delivery_decide|Lead.*accept|Lead.*reject/i);
-  assert.match(usage, /原子.*保留|atomic.*保留|atomic.*remain/i);
-  assert.match(usage, /review:null.*非.*reviewable|非.*reviewable.*review:null/i);
+  assert.match(delivery, /一个.*文件页|one.*page/i);
+  assert.match(delivery, /不选择.*fileIndex|never.*select/i);
+  assert.match(delivery, /不遍历文件|never.*travers/i);
+  assert.match(delivery, /Lead.*run_delivery_decide|Lead.*accept|Lead.*reject/i);
+  assert.match(delivery, /原子.*保留|atomic.*保留|atomic.*remain/i);
+  assert.match(delivery, /review:null.*非.*reviewable|非.*reviewable.*review:null/i);
 });
 
 // M12-0-07: ADR-0018 exists at the exact filename, is accepted/dated 2026-07-27,
@@ -2149,17 +2074,17 @@ test("M12-0-07: ADR-0018 精确路径 + accepted/date + docs-only + partial supe
 // auto-appear there; Lead declares verificationSetupCommands to prepare them.
 // This guard pins the doc invariant so it cannot silently drift.
 test("M12-6 docs: exact verifier env does NOT inherit worker node_modules — Lead setup commands required", () => {
-  const usage = read("docs/usage.md");
+  const dispatch = read("docs/usage/dispatch.md");
   const arch = read("docs/02-architecture.md");
   // (1) The verifier runs in an isolated per-attempt temp env, not the worktree.
-  assert.ok(/isolat.*verifier|verifier.*isolat|独立.*临时|per-attempt.*temp|每次.*attempt.*temp/i.test(usage),
-    "usage 必须说明 exact verifier 运行在独立的 per-attempt 临时环境");
+  assert.ok(/isolat.*verifier|verifier.*isolat|独立.*临时|per-attempt.*temp|每次.*attempt.*temp/i.test(dispatch),
+    "docs/usage/dispatch.md 必须说明 exact verifier 运行在独立的 per-attempt 临时环境");
   // (2) Ignored/untracked deps (node_modules) are NOT inherited into that env.
-  assert.ok(/node_modules|ignored.*dependenc|untracked.*dependenc|依赖.*不继承|不继承.*依赖/i.test(usage),
-    "usage 必须说明 node_modules 等 ignored 依赖不会自动进入 exact verifier 环境");
+  assert.ok(/node_modules|ignored.*dependenc|untracked.*dependenc|依赖.*不继承|不继承.*依赖/i.test(dispatch),
+    "docs/usage/dispatch.md 必须说明 node_modules 等 ignored 依赖不会自动进入 exact verifier 环境");
   // (3) Lead declares verificationSetupCommands to make such deps available.
-  assert.ok(/verificationSetupCommands/.test(usage),
-    "usage 必须记录 verificationSetupCommands 作为 Lead 声明的环境准备入口");
+  assert.ok(/verificationSetupCommands/.test(dispatch),
+    "docs/usage/dispatch.md 必须记录 verificationSetupCommands 作为 Lead 声明的环境准备入口");
   // (4) Architecture carries the same invariant (single-source consistency).
   assert.ok(/node_modules|ignored.*dependenc|依赖.*不继承|不继承.*依赖/i.test(arch),
     "architecture 必须说明 ignored 依赖不进入 verifier 环境");
@@ -2197,49 +2122,46 @@ test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间
     "SKILL 必须说明 reverify 结果不自动决定");
 });
 
-test("M12-6 FR-07 docs: usage 记录 reverify CLI 入口、eligible failure、幂等与原\/有效 verification（字段形状由生成层承载）", () => {
-  const usage = read("docs/usage.md");
+test("使用手册交付页记录 reverify CLI 入口、eligible failure、幂等与原\/有效 verification（字段形状由生成层承载）", () => {
+  const delivery = read("docs/usage/delivery.md");
   // (1) Both surfaces documented: the MCP tool and the CLI fallback.
-  assert.ok(/run_delivery_reverify/.test(usage), "usage 必须记录 MCP run_delivery_reverify");
-  assert.ok(/runs delivery reverify/.test(usage), "usage 必须记录 CLI runs delivery reverify");
-  assert.ok(/--setup-commands-file/.test(usage) && /--timeout-ms/.test(usage) && /--reason/.test(usage),
-    "usage 必须记录 CLI 的 --reason / --setup-commands-file / --timeout-ms");
-  // (2) Input/output FIELD NAMES: P4-乙 Phase 2A moved the reverify shape
-  // hand-copy out of usage.md — the field lists (reason/setupCommands/timeoutMs;
-  // state/verificationStatus/failureCode) live in the generated reference layer.
-  // 生成物内容钉（字段行存在性）与 docsSurface-1 字节钉重复，已删（TD-168
-  // 清扫）；usage keeps the bounds + closed-set eligible/inheritance semantics
-  // below.
+  assert.ok(/run_delivery_reverify/.test(delivery), "docs/usage/delivery.md 必须记录 MCP run_delivery_reverify");
+  assert.ok(/runs delivery reverify/.test(delivery), "docs/usage/delivery.md 必须记录 CLI runs delivery reverify");
+  assert.ok(/--setup-commands-file/.test(delivery) && /--timeout-ms/.test(delivery) && /--reason/.test(delivery),
+    "docs/usage/delivery.md 必须记录 CLI 的 --reason / --setup-commands-file / --timeout-ms");
+  // (2) Input/output FIELD NAMES: the field lists (reason/setupCommands/timeoutMs;
+  // state/verificationStatus/failureCode) live in the generated reference layer
+  // （字节由 docsSurface 钉）；交付页承载下面的边界与闭集资格/继承语义。
   // (3) Eligible failure: the ORIGINAL verification failed with an
   // environment/tooling-invalid code (never content-integrity codes).
-  assert.ok(/original.*verification.*failed|原.*verification.*failed|original.*失败/i.test(usage)
-    && /command_failed|command_timeout|execution_error|setup_failed|setup_timeout|setup_environment_error/.test(usage),
-    "usage 必须说明 eligible failure 是 original verification failed + 环境/工具闭集 code");
+  assert.ok(/original.*verification.*failed|原.*verification.*failed|original.*失败/i.test(delivery)
+    && /command_failed|command_timeout|execution_error|setup_failed|setup_timeout|setup_environment_error/.test(delivery),
+    "docs/usage/delivery.md 必须说明 eligible failure 是 original verification failed + 环境/工具闭集 code");
   // (4) Idempotency / concurrency: reentrant, converges on the first caller's
   // setup, at most one outcome.
-  assert.ok(/reentrant|幂等|idempotent|并发|concurren/i.test(usage) && /first.*caller|首个.*调用|先.*声明.*setup|converge/i.test(usage),
-    "usage 必须记录 reverify 的幂等/并发收敛语义");
+  assert.ok(/reentrant|幂等|idempotent|并发|concurren/i.test(delivery) && /first.*caller|首调用者/i.test(delivery),
+    "docs/usage/delivery.md 必须记录 reverify 的幂等/并发收敛语义");
   // (5) Original vs effective verification: the original outcome is preserved;
   // the effective status is the reverify outcome.
-  assert.ok(/original.*verification|原.*verification.*保留|原始终态.*不改写/.test(usage)
-    && /effective|有效 verification|reverify.*outcome|reverify 结果/i.test(usage),
-    "usage 必须区分原 verification 与 effective（reverify）verification");
+  assert.ok(/original.*verification|原.*verification.*保留|原始终态.*不改写/.test(delivery)
+    && /effective|有效 verification|reverify.*outcome|reverify 结果/i.test(delivery),
+    "docs/usage/delivery.md 必须区分原 verification 与 effective（reverify）verification");
   // (6) Lead still owns full review + decide.
-  assert.ok(/Lead.*仍|仍由 Lead|Lead 仍须|run_delivery_decide.*仍|不自动.*decide/i.test(usage),
-    "usage 必须说明 Lead 仍须完整 review + decide，reverify 不自动决定");
+  assert.ok(/Lead.*仍|仍由 Lead|Lead 仍须|run_delivery_decide.*仍|不自动.*decide/i.test(delivery),
+    "docs/usage/delivery.md 必须说明 Lead 仍须完整 review + decide，reverify 不自动决定");
 });
 
-test("M12-6 FR-07 docs: usage 的 run_delivery_decide 区分 expected policy rejection 与固定 tool error", () => {
-  const usage = read("docs/usage.md");
+test("使用手册交付页的 run_delivery_decide 区分 expected policy rejection 与固定 tool error", () => {
+  const delivery = read("docs/usage/delivery.md");
   // Expected policy rejection (e.g. already_decided) is a NORMAL structured
   // outcome decisionAccepted:false + closed-set rejectionReason — NOT the fixed
   // tool error. Only unexpected/internal errors are the fixed error.
-  assert.ok(/decisionAccepted:\s*false/.test(usage) && /"rejectionReason"|rejectionReason/.test(usage),
-    "usage 必须记录 decisionAccepted:false + rejectionReason 结构化结果");
-  assert.ok(/expected|预期|正常|policy rejection|策略拒绝|already_decided/.test(usage),
-    "usage 必须说明 expected policy rejection 是正常结构化结果");
-  assert.ok(/unexpected|internal|意外|内部.*错误|只有.*unexpected/.test(usage),
-    "usage 必须说明固定 tool error 只留给 unexpected/internal 错误");
+  assert.ok(/decisionAccepted:\s*false/.test(delivery) && /"rejectionReason"|rejectionReason/.test(delivery),
+    "docs/usage/delivery.md 必须记录 decisionAccepted:false + rejectionReason 结构化结果");
+  assert.ok(/expected|预期|正常|policy rejection|策略拒绝|already_decided/.test(delivery),
+    "docs/usage/delivery.md 必须说明 expected policy rejection 是正常结构化结果");
+  assert.ok(/unexpected|internal|意外|内部.*错误|只有.*unexpected/.test(delivery),
+    "docs/usage/delivery.md 必须说明固定 tool error 只留给 unexpected/internal 错误");
 });
 
 test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 tool 事实", () => {
@@ -2332,7 +2254,7 @@ test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () 
   // toolProfiles.js module must be gone from the entrypoint + MCP docs.
   for (const [name, text] of [
     ["SKILL.md", read("SKILL.md")],
-    ["docs/usage.md", read("docs/usage.md")],
+    ["docs/usage.md", readManual()],
     ["docs/02-architecture.md", read("docs/02-architecture.md")],
     ["README.md", read("README.md")],
   ]) {
@@ -2346,10 +2268,10 @@ test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () 
   }
 });
 
-test("M12-10: live docs present the playbook catalog as MCP resources（含原 M11-2C-03 的 SKILL 侧钉）", () => {
+test("M12-10: live docs present the playbook catalog as MCP resources（含 SKILL 侧裸词钉）", () => {
   for (const [name, text] of [
     ["SKILL.md", read("SKILL.md")],
-    ["docs/usage.md", read("docs/usage.md")],
+    ["docs/usage.md", readManual()],
     ["docs/02-architecture.md", read("docs/02-architecture.md")],
     ["docs/01-prd.md", read("docs/01-prd.md")],
   ]) {
@@ -2359,8 +2281,7 @@ test("M12-10: live docs present the playbook catalog as MCP resources（含原 M
     assert.ok(!/playbook_list tool|playbook_get tool/i.test(text),
       `${name}: no playbook_list/playbook_get tool wording`);
   }
-  // 合并自 M11-2C-03（原重复钉已删，TD-168 清扫）：SKILL 侧裸词禁令比上面的
-  // tool-wording 禁令更严；optional/adaptable 语义钉一并迁入。
+  // SKILL 侧裸词禁令比上面的 tool-wording 禁令更严；optional/adaptable 语义钉同载。
   const skill = read("SKILL.md");
   assert.ok(!/\bplaybook_list\b/.test(skill), "SKILL.md 不得再把 playbook_list 当作工具呈现");
   assert.ok(!/\bplaybook_get\b/.test(skill), "SKILL.md 不得再把 playbook_get 当作工具呈现");
@@ -2411,18 +2332,16 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
 // MCP host → read-only canary). Failure → fix the doc, not the test.
 // ============================================================
 
-test("onboarding closeout: README 是新读者入口——23-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
+test("README 是新读者入口：当前工具计数 / 快速开始闭环 / 链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // Current tool truth (23 — M13-r2 加 run_consult)；stale counts (18/16) gone.
+  // 当前工具计数与陈旧计数（18/16）负向。
   assert.ok(/23 MCP tools|23 tools/.test(readme),
     "README 必须声明当前 23 MCP tools");
   assert.ok(!/18 MCP tools|16-tool|16 MCP/.test(readme),
     "README 不得再声称 18/16-tool（当前 23 always-registered MCP tools）");
-  // M12 complete, not in progress.
+  // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");
-  assert.ok(/M0.M12 complete/.test(readme),
-    "README 必须说明 M0–M12 complete");
   // Newcomer entrypoint: prominent AGENT_ONBOARDING.md link + one-worker path.
   assert.ok(/AGENT_ONBOARDING\.md/.test(readme),
     "README 必须链接 AGENT_ONBOARDING.md（新读者入口）");
@@ -2514,31 +2433,36 @@ test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / 
     "wao init 必须标注为可选且不是 MCP workspace 绑定 / run_dispatch 的前提");
 });
 
-test("onboarding closeout: usage.md claude-code registry 示例为 0046 原生形状（无 provider wrapper）", () => {
-  const usage = read("docs/usage.md");
-  const start = usage.indexOf("// ── claude-code");
-  const end = usage.indexOf("// ── zcode");
-  assert.ok(start !== -1 && end > start, "usage.md 必须保留 claude-code 配置示例块");
-  const ex = usage.slice(start, end);
-  assert.ok(/"backend": "claude-code"/.test(ex), "0046：claude-code 示例=原生通道条目");
+test("使用手册车道页的 claude-code registry 示例为原生形状（无 provider wrapper）", () => {
+  const lanes = read("docs/usage/lanes.md");
+  const start = lanes.indexOf("// ── claude-code");
+  const end = lanes.indexOf("// ── zcode");
+  assert.ok(start !== -1 && end > start, "docs/usage/lanes.md 必须保留 claude-code 配置示例块");
+  const ex = lanes.slice(start, end);
+  assert.ok(/"backend": "claude-code"/.test(ex), "claude-code 示例=原生通道条目");
   assert.ok(/"model"[\s\S]{0,200}"id": "/.test(ex), "sibling model {id}（示例型号是 <modelId> 占位，不钉值——各车道当前型号见 config/agents.example.json 与 wao lanes）");
   assert.ok(/"reasoning"[\s\S]{0,200}"effort"/.test(ex), "sibling reasoning {effort}");
   assert.ok(!/"protocol": "anthropic-compatible"/.test(ex) && !/apiKeyEnv/.test(ex),
-    "0046：原生 claude-code 无 provider wrapper 块");
-  assert.ok(!/seatRole/.test(ex), "0065：示例不再声明 seatRole（席位角色维退役）");
+    "原生 claude-code 无 provider wrapper 块");
+  assert.ok(!/seatRole/.test(ex), "示例不声明 seatRole（席位角色维已退役）");
 });
 
 test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {
   // No legacy managed-flag compatibility claim in any editable doc.
-  for (const rel of ["config/agents.example.json", "README.md", "AGENT_ONBOARDING.md", "docs/usage.md"]) {
-    assert.ok(!/prependArgs[^。\n]*向后兼容|手拼 prependArgs[^。\n]*兼容/.test(read(rel)),
+  for (const [rel, text] of [
+    ["config/agents.example.json", read("config/agents.example.json")],
+    ["README.md", read("README.md")],
+    ["AGENT_ONBOARDING.md", read("AGENT_ONBOARDING.md")],
+    ["docs/usage.md", readManual()],
+  ]) {
+    assert.ok(!/prependArgs[^。\n]*向后兼容|手拼 prependArgs[^。\n]*兼容/.test(text),
       `${rel} 不得再声称手拼 managed model/effort flags（args/prependArgs）向后兼容（provider 一等字段编译）`);
   }
-  // TD-120 (2026-08-15) relationship guard, agent-authoritative（决定
-  // 0081）：真相源=agent 条目的 model.id。显式 modelId 必须等于 agent 的
-  // model.id；label 必须包含 agent 的 model.id（大小写不敏感）。旧写法
-  // `entry.modelId ?? agent.model.id` 的自洽检查会让陈旧 modelId 与陈旧 label
-  // 互相证明而一直绿——关系以 agent 为准后，矩阵行任何一侧落单即红。
+  // 关系型守卫，agent-authoritative（决定 0081）：真相源=agent 条目的 model.id。
+  // 显式 modelId 必须等于 agent 的 model.id；label 必须包含 agent 的 model.id
+  // （大小写不敏感）。旧写法 `entry.modelId ?? agent.model.id` 的自洽检查会让
+  // 陈旧 modelId 与陈旧 label 互相证明而一直绿——关系以 agent 为准后，矩阵行
+  // 任何一侧落单即红。
   const parsed = JSON.parse(read("config/agents.example.json"));
   for (const entry of parsed.certification?.matrix ?? []) {
     const agentModelId = parsed.agents?.[entry.agentId]?.model?.id;
@@ -2596,10 +2520,9 @@ test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/
   }
 });
 
-test("TD-119: usage.md 不得再含旧页级 truncated 语义表述（已废弃契约句）", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(!/超限设 `truncated:true`/.test(usage),
-    "usage.md 不得再含'超限设 `truncated:true`'旧语义句（TD-119 已改为 withheld-only 页级语义 + entry 级切片标记）");
+test("TD-119: 使用手册不得再含旧页级 truncated 语义表述（已废弃契约句）", () => {
+  assert.ok(!/超限设 `truncated:true`/.test(readManual()),
+    "使用手册不得再含'超限设 `truncated:true`'旧语义句（已改为 withheld-only 页级语义 + entry 级切片标记）");
 });
 
 // ============================================================
@@ -2618,8 +2541,8 @@ test("onboarding docs: no durable docs/onboarding.md (contract forbids it) and n
   assert.ok(!existsSync(join(ROOT, "docs", "onboarding.md")),
     "docs/onboarding.md must not exist (authority lives in AGENT_ONBOARDING.md §9)");
   // No live doc may dangle a pointer at the removed file.
-  for (const f of ["AGENT_ONBOARDING.md", "docs/usage.md"]) {
-    assert.ok(!read(f).includes("docs/onboarding.md"),
+  for (const [f, text] of [["AGENT_ONBOARDING.md", read("AGENT_ONBOARDING.md")], ["docs/usage.md", readManual()]]) {
+    assert.ok(!text.includes("docs/onboarding.md"),
       `${f} must not reference the removed docs/onboarding.md (dangling pointer)`);
   }
 });
@@ -2762,12 +2685,12 @@ test("onboarding docs: two readiness paths (strict reliability OR manual endorse
     "AGENT_ONBOARDING.md must name the exact read/write surface (template, agents.json, reliability-summary.json)");
 });
 
-test("onboarding docs: docs/usage.md points at the existing authority AGENT_ONBOARDING.md", () => {
-  // SSOT: usage.md carries only a pointer to the existing onboarding authority.
-  const usage = read("docs/usage.md");
-  assert.ok(/wao onboarding/.test(usage), "docs/usage.md must mention the wao onboarding command");
-  assert.ok(/AGENT_ONBOARDING\.md/.test(usage),
-    "docs/usage.md must point at AGENT_ONBOARDING.md (the existing onboarding authority), not a new doc");
+test("使用手册安装页指向既有 onboarding 权威 AGENT_ONBOARDING.md", () => {
+  // SSOT: 使用手册只携带指向既有 onboarding 权威的指针。
+  const install = read("docs/usage/install.md");
+  assert.ok(/wao onboarding/.test(install), "docs/usage/install.md must mention the wao onboarding command");
+  assert.ok(/AGENT_ONBOARDING\.md/.test(install),
+    "docs/usage/install.md must point at AGENT_ONBOARDING.md (the existing onboarding authority), not a new doc");
 });
 
 // ============================================================
@@ -2780,8 +2703,8 @@ test("onboarding docs: docs/usage.md points at the existing authority AGENT_ONBO
 // ============================================================
 
 test("ADR 0021: 冻结工具面五字段句已改分层表述（usage + architecture 反回归 + 正向锚）", () => {
-  for (const rel of ["docs/usage.md", "docs/02-architecture.md"]) {
-    const text = read(rel);
+  // usage 侧是负向检查，按整本手册读；正向锚只在 architecture 检查。
+  for (const [rel, text] of [["docs/usage.md", readManual()], ["docs/02-architecture.md", read("docs/02-architecture.md")]]) {
     // 反回归：旧五字段"固定且逐字节稳定"活契约句不得复现（TD-119 模式）。
     assert.ok(
       !text.includes("`outputSchema`/`annotations` 固定且逐字节稳定"),
@@ -2920,19 +2843,19 @@ export const USAGE_PANEL_ALLOWLIST = Object.freeze([
   "key_only_*",
 ]);
 
-test("ADR 0023 关系型守卫: usage.md panel 节 skip 码与 waoStage SSOT 一致（前向覆盖 + 反向对账）", async () => {
+test("ADR 0023 关系型守卫: 使用手册 consult 页 panel 节 skip 码与 waoStage SSOT 一致（前向覆盖 + 反向对账）", async () => {
   const { PANEL_SKIP_REASONS } = await import("../../src/waoStage.js");
-  const usage = read("docs/usage.md");
+  const consult = read("docs/usage/consult.md");
   const heading = "## 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）";
-  const start = usage.indexOf(heading);
-  assert.ok(start !== -1, "docs/usage.md 缺 wao stage panel 节（ADR 0023）");
-  const rest = usage.slice(start + heading.length);
+  const start = consult.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage/consult.md 缺 wao stage panel 节（ADR 0023）");
+  const rest = consult.slice(start + heading.length);
   const next = rest.indexOf("\n## ");
   const slice = next === -1 ? rest : rest.slice(0, next);
   // 前向：闭集每个成员都在节内（doc 覆盖 SSOT 全集）。
   for (const code of PANEL_SKIP_REASONS) {
     assert.ok(slice.includes(code),
-      `usage.md panel 节缺闭集成员 ${code}（应覆盖 waoStage SSOT 全集）`);
+      `docs/usage/consult.md panel 节缺闭集成员 ${code}（应覆盖 waoStage SSOT 全集）`);
   }
   // 反向：节内所有反引号包裹且含下划线的 token ∈ 闭集 ∪ 冻结 allowlist。
   const allowed = new Set([...PANEL_SKIP_REASONS, ...USAGE_PANEL_ALLOWLIST]);
@@ -2942,7 +2865,7 @@ test("ADR 0023 关系型守卫: usage.md panel 节 skip 码与 waoStage SSOT 一
   assert.ok(tokens.length > 0, "panel 节反引号 token 提取异常（空集）");
   for (const token of tokens) {
     assert.ok(allowed.has(token),
-      `usage.md panel 节出现未对账 token \`${token}\`（不在 PANEL_SKIP_REASONS ∪ 冻结 allowlist）`);
+      `docs/usage/consult.md panel 节出现未对账 token \`${token}\`（不在 PANEL_SKIP_REASONS ∪ 冻结 allowlist）`);
   }
 });
 
@@ -3121,14 +3044,14 @@ test("R11-2 0024: 矩阵帽与代码 SSOT 对账（TD-120 关系型，不硬编�
   }
 });
 
-test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（--apply 适用句两处锚）", () => {
+test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + 使用手册安装页配置说明（--apply 适用句两处锚）", () => {
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(ob.includes("矩阵双源"), "AGENT_ONBOARDING.md 必须含矩阵双源说明（决策 0024）");
   assert.ok(ob.includes("`·模板候选`"), "AGENT_ONBOARDING.md 必须点名模板候选尾标");
   assert.ok(ob.includes("`--apply` 仅适用模板候选行"), "AGENT_ONBOARDING.md 必须含 --apply 适用范围句");
-  const usage = read("docs/usage.md");
-  assert.ok(usage.includes("角色矩阵按双源展示"), "使用手册的配置说明必须写明角色矩阵按双源展示");
-  assert.ok(usage.includes("`--apply` 仅适用模板候选行"), "docs/usage.md 必须含 --apply 适用范围句");
+  const install = read("docs/usage/install.md");
+  assert.ok(install.includes("角色矩阵按双源展示"), "使用手册的配置说明必须写明角色矩阵按双源展示");
+  assert.ok(install.includes("`--apply` 仅适用模板候选行"), "docs/usage/install.md 必须含 --apply 适用范围句");
 });
 
 // =====================================================================
@@ -3902,138 +3825,144 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
 });
 
 // ============================================================
-// 认证正文迁移（2026-09-26，seat-certify 五文件换成员）：原位链接可达性守卫。
-// docs/certification-runbook.md 是认证操作正文唯一权威；docs/usage.md 原位置
-// 只留原具名标题 + 指向新文件的单向链接。历史引用（docs/team-roles.md:27、
-// AGENT_ONBOARDING.md:122、docs/tech-debt.md TD-184、scripts/reliability/
-// args.mjs「认证节」、src/backends/factory.js 能力轴骨架等）经这些标题到达新
-// 正文——本守卫钉住"标题在 + 链接在 + 目标节真实存在"三层关系，防空标题假绿
-// （标题还在、链接被删或目标节改名时必须红）。断言核心抽成文本输入的纯函数，
-// 负对照喂变异文本断言必抛（当前规则的反例固化模式；变异只发生在内存副本上）。
+// 认证正文迁移的原位链接可达性守卫：docs/certification-runbook.md 是认证操作
+// 正文唯一权威；使用手册各原位只留原具名标题 + 指向新文件的单向链接。历史引用
+// （docs/team-roles.md、AGENT_ONBOARDING.md、docs/tech-debt.md、
+// scripts/reliability/args.mjs「认证节」、src/backends/factory.js 能力轴骨架等）
+// 经这些标题到达新正文——本守卫钉住"标题在 + 链接在 + 目标节真实存在"三层关系，
+// 防空标题假绿（标题还在、链接被删或目标节改名时必须红）。断言核心抽成文本输入
+// 的纯函数，负对照喂变异文本断言必抛（当前规则的反例固化模式；变异只发生在内存
+// 副本上）。
 // ============================================================
 
-/** usage 原位保留的具名标题 → runbook 目标节锚前缀（两侧同名前缀）。 */
+/** 使用手册原位保留的具名标题（所在页 + 标题前缀）。标题同时是 runbook 目标节
+ * 锚前缀（两侧同名前缀）。 */
 const CERT_MIGRATION_IN_PLACE_HEADINGS = Object.freeze([
-  "接入新模型 / 新运行时",
-  "上游 harness 原语对照",
-  "delta 认证规程",
-  "认证检查结果五态与能力轴分层",
-  "场景 1b：单次派发换模型",
-  "场景 1c：单次派发换推理力度",
+  { page: "docs/usage/lanes.md", anchor: "接入新模型 / 新运行时" },
+  { page: "docs/usage/lanes.md", anchor: "上游 harness 原语对照" },
+  { page: "docs/usage/lanes.md", anchor: "delta 认证规程" },
+  { page: "docs/usage/lanes.md", anchor: "认证检查结果五态与能力轴分层" },
+  { page: "docs/usage/dispatch.md", anchor: "场景 1b：单次派发换模型" },
+  { page: "docs/usage/dispatch.md", anchor: "场景 1c：单次派发换推理力度" },
 ]);
 
-/** usage §四 迁出段的具名导语（历史引用落点）——所在行必须同行携带单向链接。 */
+/** 手册各页迁出段的具名导语（历史引用落点）——所在行必须同行携带单向链接。 */
 const CERT_MIGRATION_IN_PLACE_LEADS = Object.freeze([
-  "认证与就绪字段的语义（`certificationReasonCode`",
-  "只派已认证车道（`--require-certified`）的完整门合同",
-  "单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则",
+  { page: "docs/usage/host.md", lead: "认证与就绪字段的语义（`certificationReasonCode`" },
+  { page: "docs/usage/dispatch.md", lead: "只派已认证车道（`--require-certified`）的完整门合同" },
+  { page: "docs/usage/dispatch.md", lead: "单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则" },
 ]);
 
-/** 纯函数：usage 原位标题段的链接可达性（0 命中/歧义/缺链接/目标节缺失必红）。 */
-function assertInPlaceCertPointer(usageText, runbookText, anchorPrefix) {
-  // (1) usage 侧原具名标题唯一在场（前缀解析：0 命中/歧义必红）。
-  const headingLine = resolveHeadingIn(usageText, USAGE_DOC, anchorPrefix, "须同步认证迁移原位标题");
+/** 纯函数：手册某页原位标题段的链接可达性（0 命中/歧义/缺链接/目标节缺失必红）。 */
+function assertInPlaceCertPointer(pageText, runbookText, anchorPrefix, pageRel) {
+  // (1) 该页原具名标题唯一在场（前缀解析：0 命中/歧义必红）。
+  const headingLine = resolveHeadingIn(pageText, pageRel, anchorPrefix, "须同步认证迁移原位标题");
   // (2) 标题到下一标题之间的原位段必须携带指向 runbook 的单向链接路径。
-  const lines = usageText.split(/\r?\n/);
+  const lines = pageText.split(/\r?\n/);
   const idx = lines.indexOf(headingLine);
   assert.ok(idx !== -1, "夹具失效：标题行定位失败");
   let end = idx + 1;
   while (end < lines.length && !/^#{1,6}\s+/.test(lines[end])) end++;
   const section = lines.slice(idx, end).join("\n");
   assert.ok(section.includes(CERT_RUNBOOK_DOC),
-    `${USAGE_DOC} §${anchorPrefix} 原位段缺指向 ${CERT_RUNBOOK_DOC} 的单向链接（不得只留空标题）`);
+    `${pageRel} §${anchorPrefix} 原位段缺指向 ${CERT_RUNBOOK_DOC} 的单向链接（不得只留空标题）`);
   // (3) 链接目标节在 runbook 真实存在且唯一（防目标节改名后链接悬空）。
   resolveHeadingIn(runbookText, CERT_RUNBOOK_DOC, anchorPrefix, "须同步原位单向链接");
 }
 
-test("认证迁移: usage 原位具名标题携带单向链接且目标节在 runbook 真实可达（防空标题假绿）", () => {
-  const usage = read(USAGE_DOC);
+test("认证迁移: 手册原位具名标题携带单向链接且目标节在 runbook 真实可达（防空标题假绿）", () => {
+  const pages = new Map([...new Set([
+    ...CERT_MIGRATION_IN_PLACE_HEADINGS.map((h) => h.page),
+    ...CERT_MIGRATION_IN_PLACE_LEADS.map((l) => l.page),
+  ])].map((page) => [page, read(page)]));
   const runbook = read(CERT_RUNBOOK_DOC);
-  for (const anchor of CERT_MIGRATION_IN_PLACE_HEADINGS) {
-    assertInPlaceCertPointer(usage, runbook, anchor);
+  for (const { page, anchor } of CERT_MIGRATION_IN_PLACE_HEADINGS) {
+    assertInPlaceCertPointer(pages.get(page), runbook, anchor, page);
   }
   // 场景 5 内的 retry 覆盖继承迁出段（非独立标题）：原位置必须以指针可达。
-  const s5Start = usage.indexOf("## 场景 5：重试 / 恢复");
-  const s5End = usage.indexOf("\n## ", s5Start + 1);
-  assert.ok(s5Start !== -1 && s5End > s5Start, `${USAGE_DOC} 必须有场景 5（重试/恢复）节`);
-  const s5 = usage.slice(s5Start, s5End);
+  const dispatch = pages.get("docs/usage/dispatch.md");
+  const s5Start = dispatch.indexOf("## 场景 5：重试 / 恢复");
+  const s5End = dispatch.indexOf("\n## ", s5Start + 1);
+  assert.ok(s5Start !== -1 && s5End > s5Start, "docs/usage/dispatch.md 必须有场景 5（重试/恢复）节");
+  const s5 = dispatch.slice(s5Start, s5End);
   assert.ok(s5.includes(CERT_RUNBOOK_DOC),
-    `${USAGE_DOC} 场景 5 的 retry 覆盖继承迁出后缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
+    `docs/usage/dispatch.md 场景 5 的 retry 覆盖继承迁出后缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
   resolveHeadingIn(runbook, CERT_RUNBOOK_DOC, "retry 的 per-dispatch 覆盖继承");
-  // §四 迁出段的具名导语（历史引用落点）同行携带链接。
-  for (const lead of CERT_MIGRATION_IN_PLACE_LEADS) {
-    const line = usage.split(/\r?\n/).find((l) => l.includes(lead));
-    assert.ok(line !== undefined, `${USAGE_DOC} 缺迁出段导语落点：${lead}`);
+  // 各页迁出段的具名导语（历史引用落点）同行携带链接。
+  for (const { page, lead } of CERT_MIGRATION_IN_PLACE_LEADS) {
+    const line = pages.get(page).split(/\r?\n/).find((l) => l.includes(lead));
+    assert.ok(line !== undefined, `${page} 缺迁出段导语落点：${lead}`);
     assert.ok(line.includes(CERT_RUNBOOK_DOC),
-      `${USAGE_DOC} 导语「${lead}」所在行缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
+      `${page} 导语「${lead}」所在行缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
   }
   // 「认证节」类泛指的总落点（scripts/reliability/args.mjs、ADR-0032 附则、
-  // src/backends/factory.js 能力轴骨架的旧指向）：usage 必须有该标题并链接新文件。
-  // （该标题是 usage 侧导航落点，不要求 runbook 存在同名节——runbook 各目标节
+  // src/backends/factory.js 能力轴骨架的旧指向）：车道页必须有该标题并链接新文件。
+  // （该标题是手册侧导航落点，不要求 runbook 存在同名节——runbook 各目标节
   // 已由上方逐项锚点核对。）
-  const landing = resolveHeadingIn(usage, USAGE_DOC, "认证正文总落点", "须保留认证总落点标题");
+  const lanes = pages.get("docs/usage/lanes.md");
+  const landing = resolveHeadingIn(lanes, "docs/usage/lanes.md", "认证正文总落点", "须保留认证总落点标题");
   {
-    const lines = usage.split(/\r?\n/);
+    const lines = lanes.split(/\r?\n/);
     const idx = lines.indexOf(landing);
     let endL = idx + 1;
     while (endL < lines.length && !/^#{1,6}\s+/.test(lines[endL])) endL++;
     assert.ok(lines.slice(idx, endL).join("\n").includes(CERT_RUNBOOK_DOC),
-      `${USAGE_DOC} §认证正文总落点 缺指向 ${CERT_RUNBOOK_DOC} 的链接（泛指「认证节」旧指向将失去落点）`);
+      `docs/usage/lanes.md §认证正文总落点 缺指向 ${CERT_RUNBOOK_DOC} 的链接（泛指「认证节」旧指向将失去落点）`);
   }
-  // 唯一权威方向：runbook 不得把认证必需义务路由回 usage（单向链接纪律）——
+  // 唯一权威方向：runbook 不得把认证必需义务路由回手册（单向链接纪律）——
   // runbook 头部声明在场（正文级反向引用由各迁移检查的读向承载）。
   assert.ok(runbook.includes("不把必需认证义务路由回 `docs/usage.md`"),
     `${CERT_RUNBOOK_DOC} 头部缺「不把必需认证义务路由回 docs/usage.md」单向链接纪律声明`);
 });
 
-test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 usage 原位标题必红（反例固化）", () => {
-  const usage = read(USAGE_DOC);
+test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删原位标题必红（反例固化）", () => {
+  const lanes = read("docs/usage/lanes.md");
   const runbook = read(CERT_RUNBOOK_DOC);
   // 负对照 1——原位段链接路径被整体改写（空标题假绿形状）→ 必红。
-  const stripped = usage.split(CERT_RUNBOOK_DOC).join(USAGE_DOC);
-  assert.notEqual(stripped, usage, "夹具失效：摘链接变异未生效");
-  assert.throws(() => assertInPlaceCertPointer(stripped, runbook, "delta 认证规程"),
+  const stripped = lanes.split(CERT_RUNBOOK_DOC).join("docs/usage/lanes.md");
+  assert.notEqual(stripped, lanes, "夹具失效：摘链接变异未生效");
+  assert.throws(() => assertInPlaceCertPointer(stripped, runbook, "delta 认证规程", "docs/usage/lanes.md"),
     /缺指向/, "原位段链接丢失必须红（防空标题假绿）");
   // 负对照 2——runbook 目标节改名（链接悬空）→ 必红。
   const renamed = runbook.replace("## delta 认证规程", "## 已改名的认证规程节");
   assert.notEqual(renamed, runbook, "夹具失效：目标节改名变异未生效");
-  assert.throws(() => assertInPlaceCertPointer(usage, renamed, "delta 认证规程"),
+  assert.throws(() => assertInPlaceCertPointer(lanes, renamed, "delta 认证规程", "docs/usage/lanes.md"),
     /0 命中/, "runbook 目标节改名必须红（单向链接悬空）");
-  // 负对照 3——usage 原位标题被删（历史引用落点失联）→ 必红。
-  const noHeading = usage.replace("## delta 认证规程\n", "");
-  assert.notEqual(noHeading, usage, "夹具失效：删标题变异未生效");
-  assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程"),
-    /0 命中|歧义/, "usage 原位标题删除必须红（历史引用落点失联）");
+  // 负对照 3——原位标题被删（历史引用落点失联）→ 必红。
+  const noHeading = lanes.replace("## delta 认证规程\n", "");
+  assert.notEqual(noHeading, lanes, "夹具失效：删标题变异未生效");
+  assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程", "docs/usage/lanes.md"),
+    /0 命中|歧义/, "原位标题删除必须红（历史引用落点失联）");
 });
 
-// ── TD-191③ / 决定 0043：宿主闭集单一权威（关系型守卫：docs ↔ hostDescriptors 表）──
-// 会审（consult_20261002211156585jgebok）裁定"模板可出/可自动绑定/真机验证是三种
-// 能力"——文档宿主条件句必须指向描述符表权威，且表内宿主在 usage 接入节可见；
-// 单边漂移（加宿主不改文档 / 改文档不动表）即红。
+// ── 决定 0043：宿主闭集单一权威（关系型守卫：docs ↔ hostDescriptors 表）──
+// "模板可出/可自动绑定/真机验证是三种能力"——文档宿主条件句必须指向描述符表
+// 权威，且表内宿主在手册 host 页接入节可见；单边漂移（加宿主不改文档 / 改文档
+// 不动表）即红。
 
 test("TD-191③/0043: 宿主闭集 = hostDescriptors 唯一权威，docs 条件句在位且表内宿主可见", async () => {
   const { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");
   const arch = read("docs/02-architecture.md");
-  const usage = read("docs/usage.md");
-  // 1) 架构与 usage 的冻结工具面段必须点名描述符表为宿主闭集权威（宿主条件句在位）
+  const host = read("docs/usage/host.md");
+  // 1) 架构与手册 host 页的冻结工具面段必须点名描述符表为宿主闭集权威（宿主条件句在位）
   assert.ok(arch.includes("hostDescriptors.js") && arch.includes("决定 0043"),
     "architecture 冻结工具面段必须携带宿主条件句并指向 hostDescriptors 唯一权威");
-  assert.ok(usage.includes("hostDescriptors.js"),
-    "usage 冻结工具面段必须指向 hostDescriptors 唯一权威");
-  // 2) 表内宿主必须在 usage 的 mcp bind 接入节出现（加宿主不改文档即红）
-  const bindSection = usage.split("mcp bind/status/unbind")[1]?.slice(0, 4000) ?? "";
+  assert.ok(host.includes("hostDescriptors.js"),
+    "docs/usage/host.md 冻结工具面段必须指向 hostDescriptors 唯一权威");
+  // 2) 表内宿主必须在手册 host 页的 mcp bind 接入节出现（加宿主不改文档即红）
+  const bindSection = host.split("mcp bind/status/unbind")[1]?.slice(0, 4000) ?? "";
   for (const id of HOST_DESCRIPTOR_IDS) {
-    assert.ok(bindSection.includes(id), `usage mcp bind 节缺少表内宿主 ${id}（宿主表与文档漂移）`);
+    assert.ok(bindSection.includes(id), `docs/usage/host.md mcp bind 节缺少表内宿主 ${id}（宿主表与文档漂移）`);
   }
-  // 3) autoBind 宿主任置如实：表里 autoBind=true 的宿主必须被 usage 标为 autoBind 当前集成员
+  // 3) autoBind 宿主任置如实：表里 autoBind=true 的宿主必须被手册标为 autoBind 当前集成员
   const autoBindIds = HOST_DESCRIPTORS.filter((d) => d.autoBind).map((d) => d.id);
   const snippetOnlyIds = HOST_DESCRIPTORS.filter((d) => d.autoBind === false).map((d) => d.id);
   // 正则不锚定列表位置（成员后可能跟 "、next"）：只要求 id 出现在对应标签的
   // 括号集内——多成员列表（如 "（当前 = claude-code、zcode）"）对每个成员都成立。
   for (const id of autoBindIds) {
-    assert.ok(new RegExp(`autoBind 宿主（[^）]*${id}`).test(usage), `usage 必须把 ${id} 列入 autoBind 宿主当前集`);
+    assert.ok(new RegExp(`autoBind 宿主（[^）]*${id}`).test(host), `docs/usage/host.md 必须把 ${id} 列入 autoBind 宿主当前集`);
   }
   for (const id of snippetOnlyIds) {
-    assert.ok(new RegExp(`snippet-only 宿主（[^）]*${id}`).test(usage), `usage 必须把 ${id} 列入 snippet-only 宿主当前集`);
+    assert.ok(new RegExp(`snippet-only 宿主（[^）]*${id}`).test(host), `docs/usage/host.md 必须把 ${id} 列入 snippet-only 宿主当前集`);
   }
 });

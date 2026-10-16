@@ -42,6 +42,7 @@ import assert from "node:assert/strict";
 
 import { packageDelivery } from "../../src/delivery.js";
 import { getRunDeliveryReview } from "../../src/application/runDeliveryReview.js";
+import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
 
 // ===== Constants =====
 
@@ -49,19 +50,26 @@ const RUN_ID = "run_m113b_0001";
 
 // ===== Helpers =====
 
+/** Shared pristine bases per object format; each scenario copies its own repo. */
+function repoBaseFor(objectFormat) {
+  return baseRepoFixture(
+    `m113b-${objectFormat}`,
+    async (dir) => {
+      await mkdir(join(dir, "src"), { recursive: true });
+      await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
+      execSync("git add .", { cwd: dir, stdio: "ignore" });
+      execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
+      return execSync("git rev-parse HEAD", {
+        cwd: dir, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+      }).trim();
+    },
+    { initArgs: [`--object-format=${objectFormat}`] },
+  );
+}
+
 async function makeRepo(prefix = "wao-m113b-", objectFormat = "sha1") {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
-  execSync(`git init -b main --object-format=${objectFormat}`, { cwd: dir, stdio: "ignore" });
-  execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
-  execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
-  await mkdir(join(dir, "src"), { recursive: true });
-  await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
-  execSync("git add .", { cwd: dir, stdio: "ignore" });
-  execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
-  const baseCommit = execSync("git rev-parse HEAD", {
-    cwd: dir, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
-  }).trim();
-  return { repo: dir, baseCommit };
+  const base = await repoBaseFor(objectFormat);
+  return { repo: copyGitRepo(base.dir, prefix), baseCommit: base.value };
 }
 
 function makeWorktree(repo, runId = RUN_ID) {
@@ -71,7 +79,6 @@ function makeWorktree(repo, runId = RUN_ID) {
 }
 
 async function cleanupRepo(repo) {
-  try { execSync("git worktree prune", { cwd: repo, stdio: "ignore" }); } catch { /* best effort */ }
   for (let attempt = 0; attempt < 5; attempt++) {
     try { await rm(repo, { recursive: true, force: true }); return; }
     catch { if (attempt === 4) return; await new Promise((r) => setTimeout(r, 50 * (attempt + 1))); }

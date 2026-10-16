@@ -13,6 +13,7 @@ import {
   detectAbsolutePathLiteral,
   DeliveryError,
 } from "../../src/delivery.js";
+import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
 
 // ===== Constants =====
 
@@ -21,12 +22,8 @@ const BRANCH = `wao/${RUN_ID}`;
 
 // ===== Helpers =====
 
-/** Create a temp git repo with initial structure. Returns { repo, baseCommit }. */
-async function makeRepo() {
-  const dir = await mkdtemp(join(tmpdir(), "wao-deliv-"));
-  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
-  execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
-  execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
+/** Shared pristine base for this file's repos; each test copies its own. */
+const repoBase = baseRepoFixture("delivery", async (dir) => {
   await mkdir(join(dir, "src"), { recursive: true });
   await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
   await writeFile(join(dir, "src", "b.js"), "const b = 2;\n");
@@ -34,12 +31,17 @@ async function makeRepo() {
   await writeFile(join(dir, ".gitignore"), "node_modules/\n*.env\nsecret/\n");
   execSync("git add .", { cwd: dir, stdio: "ignore" });
   execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
-  const baseCommit = execSync("git rev-parse HEAD", {
+  return execSync("git rev-parse HEAD", {
     cwd: dir,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "ignore"],
   }).trim();
-  return { repo: dir, baseCommit };
+});
+
+/** Create a temp git repo with initial structure. Returns { repo, baseCommit }. */
+async function makeRepo() {
+  const base = await repoBase;
+  return { repo: copyGitRepo(base.dir, "wao-deliv-"), baseCommit: base.value };
 }
 
 /** Create a linked worktree at wao/<runId>. */
@@ -54,9 +56,6 @@ function makeWorktree(repo, runId = RUN_ID) {
 
 /** Clean up temp repo with retry (Windows file lock resilience). */
 async function cleanupRepo(repo) {
-  try {
-    execSync("git worktree prune", { cwd: repo, stdio: "ignore" });
-  } catch { /* best effort */ }
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await rm(repo, { recursive: true, force: true });

@@ -123,3 +123,5 @@
 | TD-292 | 交付打包的异常信息匹配不上已知措辞时只写 "delivery packaging error"，连安全的错误类别也不给，Lead 分不清该重打包还是该查环境 | 打包失败从错误对象的结构化属性分出闭集 errorClass（src/deliveryErrorClass.js），写进 run.delivery_failed 与 run.error；诊断按类别给固定文案（src/diagnosis.js）；原文不回显；test/delivery/deliveryErrorClass.test.js |
 | TD-146 | 非交付运行与未打包的交付运行，终态后即使树干净、没有新提交也不回收 | 终态收尾时自动回收干净的隔离树，分支一律保留（决定 0085；src/runManager.js 终态收尾臂与占用扫描、src/isolation.js terminalWorktreeVerdict；test/run-lifecycle/terminalWorktreeRelease.test.js）；存量仍走 wao worktree reclaim |
 | TD-196 | 对抗逃逸演练依赖模型配合，守约模型即无靶，发版门槛只能靠豁免 | 决定 0084 组合证明：test/backends/containmentChain.test.js 七个后端的协议帧链式测试；reliability containmentEvidence 2026-10-16 在 kimi、glm-pro、glm-flash、opus、deepseek-flash 实测通过；codex 车道见 TD-309 |
+| TD-34 | 文档守卫里钉历史收尾文字的测试，以及读整本手册拼接的检查 | 钉历史的断言逐条退役并写明接续保护；手册的正向检查改读各自的归宿页，负向检查显式读整本手册；要求同一句话出现在三处的 registry 分工守卫退役，权威是生成的 docs/surface/cli.md（test/isolation-infra/docs-consistency.test.js） |
+| TD-309 | codex 车道用 shell 写文件，拦截门看不见，调用又不带沙箱参数 | 决定 0086：每次调用强制 workspace-write 沙箱，越界写由 sandboxEnforcement 证明（src/backends/codex.js、scripts/reliability/sandboxEnforcement.mjs）；2026-10-16 sol 的 reliability 全量 certified，sandboxEnforcement 两项通过；astra 未重跑，仍 conditional |

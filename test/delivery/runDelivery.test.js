@@ -12,26 +12,28 @@ import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
 import { readTranscript, findState, JsonlTranscript } from "../../src/transcript.js";
 import { packageDelivery } from "../../src/delivery.js";
 import { createWorktree } from "../../src/isolation.js";
+import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
 
 // ===== Helpers =====
 
 const RUN_ID_PREFIX = "run_delivtest";
 
-/** Create a temp git repo with initial structure. Returns { repo, baseCommit }. */
-async function makeRepo(prefix = "wao-rd-repo-") {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
-  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
-  execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
-  execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
+/** Shared pristine base for this file's repos; each test copies its own. */
+const repoBase = baseRepoFixture("run-delivery", async (dir) => {
   await mkdir(join(dir, "src"), { recursive: true });
   await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
   await writeFile(join(dir, ".gitignore"), "node_modules/\n*.env\n.wao-worktrees/\n");
   execSync("git add .", { cwd: dir, stdio: "ignore" });
   execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
-  const baseCommit = execSync("git rev-parse HEAD", {
+  return execSync("git rev-parse HEAD", {
     cwd: dir, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
   }).trim();
-  return { repo: dir, baseCommit };
+});
+
+/** Create a temp git repo with initial structure. Returns { repo, baseCommit }. */
+async function makeRepo(prefix = "wao-rd-repo-") {
+  const base = await repoBase;
+  return { repo: copyGitRepo(base.dir, prefix), baseCommit: base.value };
 }
 
 /** Clean up with retry (Windows file lock resilience). */

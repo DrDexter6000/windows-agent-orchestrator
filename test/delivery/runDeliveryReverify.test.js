@@ -33,7 +33,7 @@
 //     state, reason, effective status/failure code ONLY — never commands, paths,
 //     stderr, secrets, or environment internals.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir, appendFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -50,6 +50,7 @@ import {
   validateDeliveryFacts,
   REVERIFY_REASONS,
 } from "../../src/transcript.js";
+import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
 
 const RUN_ID = "run_m12p3b_test";
 const AGENT_ID = "coder_hq";
@@ -77,18 +78,19 @@ async function cleanupDir(dir) {
   }
 }
 
+/** Pristine base; every repo in this file is a copy of it. */
+const repoBase = baseRepoFixture("m12p3b", async (dir) => {
+  await mkdir(join(dir, "src"), { recursive: true });
+  await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
+  await writeFile(join(dir, ".gitignore"), "node_modules/\n.wao-worktrees/\n");
+  git(["add", "."], dir);
+  git(["commit", "-m", "init"], dir);
+  return git(["rev-parse", "HEAD"], dir);
+});
+
 async function makeRepo(prefix = "m12p3b-repo-") {
-  const repo = await mkdtemp(join(tmpdir(), prefix));
-  git(["init", "-b", "main"], repo);
-  git(["config", "user.email", "test@test"], repo);
-  git(["config", "user.name", "test"], repo);
-  await mkdir(join(repo, "src"), { recursive: true });
-  await writeFile(join(repo, "src", "a.js"), "const a = 1;\n");
-  await writeFile(join(repo, ".gitignore"), "node_modules/\n.wao-worktrees/\n");
-  git(["add", "."], repo);
-  git(["commit", "-m", "init"], repo);
-  const baseCommit = git(["rev-parse", "HEAD"], repo);
-  return { repo, baseCommit };
+  const base = await repoBase;
+  return { repo: copyGitRepo(base.dir, prefix), baseCommit: base.value };
 }
 
 function makeLinkedWorktree(repo, runId = RUN_ID) {
@@ -170,6 +172,47 @@ function verificationEventType(status) {
 }
 
 /**
+ * 一个共享的已打包场景：真 repo + 链接工作树，工作区的改动已由一次真实
+ * resolveDeliveryCommit 打成交付提交。不改写这一事实的场景（各自私有 runDir
+ * 转录）复用它；改写工作树、或原始命令/设置非默认（会打进交付 ref 本身）
+ * 的场景走私有完整构建。进程结束统一摘除。
+ */
+let sharedPackaged = null;
+
+async function packagedScenarioFixture() {
+  if (!sharedPackaged) {
+    const { repo, baseCommit } = await makeRepo("m12p3b-shared-");
+    const worktreePath = makeLinkedWorktree(repo, RUN_ID);
+    // A real change within allowedPaths, left UNSTAGED so the packager owns staging.
+    await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
+    const { ref: deliveryRef } = resolveDeliveryCommit({
+      runId: RUN_ID,
+      worktreePath,
+      baseCommit,
+      isolation: { type: "worktree", strategy: "persistent" },
+      allowedPaths: ["src"],
+      verificationCommands: ["assert-needs-setup"],
+    });
+    sharedPackaged = {
+      repo, baseCommit, worktreePath, deliveryRef,
+      deliveryCommit: deliveryRef.deliveryCommit,
+    };
+  } else {
+    // 复用前核对共享事实仍是原样：工作树停在交付提交上且全净。前一个场景若改写了
+    // 它，在这里响亮失败并指明修法，而不是让后面的场景以难懂的 artifact_mutated 失败。
+    const head = git(["rev-parse", "HEAD"], sharedPackaged.worktreePath);
+    const dirty = git(["status", "--porcelain", "--untracked-files=all"], sharedPackaged.worktreePath);
+    assert.ok(head === sharedPackaged.deliveryCommit && dirty === "",
+      "shared packaged fact was changed by an earlier scenario — mark scenarios that write the worktree privateRepo: true");
+  }
+  return sharedPackaged;
+}
+
+after(async () => {
+  if (sharedPackaged) await cleanupDir(sharedPackaged.repo);
+});
+
+/**
  * Build a real committed delivery + a transcript whose ORIGINAL verification
  * FAILED with `originalFailureCode` (eligible by default). The worktree stays at
  * the exact delivery commit so reverify can re-run assertions there.
@@ -182,26 +225,44 @@ async function setupReverifyScenario({
   originalFailureCode = "command_failed",
   extraEvents = [],
   allowedPaths = ["src"],
+  privateRepo = false,
 } = {}) {
-  const { repo, baseCommit } = await makeRepo();
-  const runDir = await mkdtemp(join(tmpdir(), "m12p3b-runs-"));
-  const worktreePath = makeLinkedWorktree(repo, runId);
-  // A real change within allowedPaths, left UNSTAGED so the packager owns staging.
-  await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
+  const sharedEligible = !privateRepo
+    && runId === RUN_ID
+    && allowedPaths.length === 1
+    && allowedPaths[0] === "src"
+    && originalSetupCommands.length === 0
+    && originalCommands.length === 1
+    && originalCommands[0] === "assert-needs-setup";
+  const packaged = sharedEligible ? await packagedScenarioFixture() : null;
 
-  const deliveryInput = {
-    runId,
-    worktreePath,
-    baseCommit,
-    isolation: { type: "worktree", strategy: "persistent" },
-    allowedPaths,
-    ...(originalCommands.length > 0
-      ? { verificationCommands: originalCommands }
-      : { verificationUnavailableReason: "no_assertions" }),
-    ...(originalSetupCommands.length > 0 ? { verificationSetupCommands: originalSetupCommands } : {}),
-  };
-  const { ref: deliveryRef } = resolveDeliveryCommit(deliveryInput);
-  const deliveryCommit = deliveryRef.deliveryCommit;
+  let repo;
+  let baseCommit;
+  let worktreePath;
+  let deliveryRef;
+  let deliveryCommit;
+  if (packaged) {
+    ({ repo, baseCommit, worktreePath, deliveryRef, deliveryCommit } = packaged);
+  } else {
+    ({ repo, baseCommit } = await makeRepo());
+    worktreePath = makeLinkedWorktree(repo, runId);
+    // A real change within allowedPaths, left UNSTAGED so the packager owns staging.
+    await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
+
+    const deliveryInput = {
+      runId,
+      worktreePath,
+      baseCommit,
+      isolation: { type: "worktree", strategy: "persistent" },
+      allowedPaths,
+      ...(originalCommands.length > 0
+        ? { verificationCommands: originalCommands }
+        : { verificationUnavailableReason: "no_assertions" }),
+      ...(originalSetupCommands.length > 0 ? { verificationSetupCommands: originalSetupCommands } : {}),
+    };
+    ({ ref: deliveryRef } = resolveDeliveryCommit(deliveryInput));
+    deliveryCommit = deliveryRef.deliveryCommit;
+  }
 
   const originalVerificationRef = {
     ...deliveryRef,
@@ -215,6 +276,7 @@ async function setupReverifyScenario({
     },
   };
 
+  const runDir = await mkdtemp(join(tmpdir(), "m12p3b-runs-"));
   const events = [
     { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
     {
@@ -240,7 +302,13 @@ async function setupReverifyScenario({
     ...extraEvents,
   ];
   seedTranscript(runDir, runId, events);
-  return { repo, baseCommit, runDir, worktreePath, deliveryRef, deliveryCommit };
+  return {
+    repo, baseCommit, runDir, worktreePath, deliveryRef, deliveryCommit,
+    // 共享事实里只有 runDir 归本场景；私建场景连 repo 一起清。
+    dispose: packaged
+      ? async () => { await cleanupDir(runDir); }
+      : async () => { await cleanupDir(repo); await cleanupDir(runDir); },
+  };
 }
 
 // =====================================================================
@@ -298,8 +366,7 @@ test("P3B-01: original command_failed + tooling_invalid + added setup → same c
     assert.equal(orig[0].delivery.verification.status, "failed");
     assert.equal(orig[0].delivery.verification.failureCode, "command_failed");
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -337,8 +404,7 @@ test("P3B-02: before reverify, accept is rejected (original failed); after effec
     assert.equal(again.accepted, false);
     assert.equal(again.existing.status, "accepted");
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -370,8 +436,7 @@ test("P3B-03: a failed reverify (setup cannot fix) keeps effective failed and re
     const reject = await decideRunDelivery({ runId: RUN_ID, runDir: ctx.runDir, decision: "rejected", reason: "still failing" });
     assert.equal(reject.accepted, true);
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -380,7 +445,9 @@ test("P3B-03: a failed reverify (setup cannot fix) keeps effective failed and re
 // =====================================================================
 
 test("P3B-04: reverify setup that mutates a tracked artifact → outcome failed/artifact_mutated, cannot accept", async () => {
-  const ctx = await setupReverifyScenario();
+  // 该用例的 setup 命令会改写工作树里的被跟踪文件——必须用私有场景，
+  // 不得弄脏共享已打包事实。
+  const ctx = await setupReverifyScenario({ privateRepo: true });
   try {
     const result = await runDeliveryReverify({
       runId: RUN_ID,
@@ -400,8 +467,7 @@ test("P3B-04: reverify setup that mutates a tracked artifact → outcome failed/
       /must be passed/i,
     );
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -422,7 +488,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         /not eligible|must be failed|eligible/i,
       );
       assert.equal(readEvents(ctx.runDir).filter((e) => e.type === "run.delivery_reverification_requested").length, 0, "no requested appended (artifact_mutated)");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // artifact_mismatch original
   {
@@ -432,7 +498,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         () => runDeliveryReverify({ runId: RUN_ID, runDir: ctx.runDir, authorizedWorkspaceRoot: ctx.repo, reason: "tooling_invalid", setupCommands: ["setup-prepare"], verifyDeliveryFn: countingVerifier }),
         /eligible/i,
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // passed original
   {
@@ -442,7 +508,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         () => runDeliveryReverify({ runId: RUN_ID, runDir: ctx.runDir, authorizedWorkspaceRoot: ctx.repo, reason: "tooling_invalid", setupCommands: ["setup-prepare"], verifyDeliveryFn: countingVerifier }),
         /must be failed|eligible/i,
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // unavailable original
   {
@@ -452,7 +518,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         () => runDeliveryReverify({ runId: RUN_ID, runDir: ctx.runDir, authorizedWorkspaceRoot: ctx.repo, reason: "tooling_invalid", verifyDeliveryFn: countingVerifier }),
         /must be failed|eligible|commands/i,
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // already-decided (proper)
   {
@@ -464,7 +530,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         () => runDeliveryReverify({ runId: RUN_ID, runDir: ctx.runDir, authorizedWorkspaceRoot: ctx.repo, reason: "tooling_invalid", setupCommands: ["setup-prepare"], verifyDeliveryFn: countingVerifier }),
         /decision/i,
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // missing delivery (no delivery_created). A real Git workspace so workspace
   // ownership proof passes and the DELIVERY-facts error is what surfaces.
@@ -494,7 +560,7 @@ test("P3B-05: ineligible original outcomes reject before verifier + append (arti
         () => runDeliveryReverify({ runId: RUN_ID, runDir: ctx.runDir, authorizedWorkspaceRoot: ctx.repo, reason: "tooling_invalid", setupCommands: ["setup-prepare"], verifyDeliveryFn: countingVerifier }),
         /match|eligible|ambiguous/i,
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // Verifier must never have run for any ineligible case.
   assert.equal(calls, 0, "verifier never executed for ineligible originals");
@@ -517,8 +583,7 @@ test("P3B-06: repeated calls converge on one requested + one outcome (idempotent
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_requested").length, 1);
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_passed").length, 1);
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -534,8 +599,7 @@ test("P3B-07: concurrent calls produce one requested + one outcome", async () =>
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_requested").length, 1, "one requested");
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_passed").length, 1, "one outcome");
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -570,8 +634,7 @@ test("P3B-08: a requested event without an outcome resumes (no second requested 
     assert.equal(final.filter((e) => e.type === "run.delivery_reverification_requested").length, 1, "still one requested");
     assert.equal(final.filter((e) => e.type === "run.delivery_reverification_passed").length, 1, "one outcome");
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -599,8 +662,7 @@ test("P3B-09: unknown reason / unsafe setup / non-positive / fractional timeout 
     // Nothing was appended for any of these.
     assert.equal(readEvents(ctx.runDir).filter((e) => e.type.startsWith("run.delivery_reverification")).length, 0);
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -616,8 +678,7 @@ test("P3B-10: invalid runId and missing workspace root fail closed", async () =>
       /workspace/i,
     );
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -647,8 +708,7 @@ test("P3B-11: getRunDelivery projects original verification + additive effective
     // Existing fields stay byte-compatible (delivery commit unchanged).
     assert.equal(after.deliveryCommit ?? after.deliveryRef?.deliveryCommit, ctx.deliveryCommit);
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -677,8 +737,7 @@ test("P3B-12: reverify with no new setup (original assertions only) is allowed a
     // No setup was declared for the reverify, so none is persisted on the ref.
     assert.equal(outcome.delivery.verification.setupCommands, undefined);
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -743,8 +802,7 @@ test("P3B-14: when a concurrent caller records the final outcome, the loser repo
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_requested").length, 1, "one requested");
     assert.equal(after.filter((e) => e.type === "run.delivery_reverification_passed").length, 1, "one outcome");
   } finally {
-    await cleanupDir(ctx.repo);
-    await cleanupDir(ctx.runDir);
+    await ctx.dispose();
   }
 });
 
@@ -798,7 +856,7 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed for an unknown-reason request");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 2. Persisted request with a BLANK setup command.
   {
@@ -814,7 +872,7 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed for a blank setup command");
       assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 3. FOREIGN-ENVELOPE requested event whose embedded DeliveryRef targets this
   //    run (valid reason + identity): must be a visible conflict, not ignored.
@@ -831,7 +889,7 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed on a foreign-envelope request");
       assert.equal(reverifyCount(ctx.runDir), 1, "no second request appended");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 4. FOREIGN-ENVELOPE passed outcome whose embedded DeliveryRef targets this
   //    run: must be a visible conflict, never treated as pending/complete.
@@ -853,7 +911,7 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed on a foreign-envelope outcome");
       assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 5. Envelope-bound outcome with MISMATCHED embedded identity (different
   //    canonical deliveryCommit): today the verifier RUNS and only the outcome
@@ -876,7 +934,7 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed on an identity-mismatched outcome");
       assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
 });
 
@@ -932,7 +990,7 @@ test("P3B-16: outcome events violating the verification event contract (passed-w
       );
       assert.equal(count(), 0, "verifier never executed on a passed-event-with-failed-ref");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 2. FAILED event whose embedded ref says PASSED (failed-event-with-passed-ref).
   {
@@ -950,7 +1008,7 @@ test("P3B-16: outcome events violating the verification event contract (passed-w
       );
       assert.equal(count(), 0, "verifier never executed on a failed-event-with-passed-ref");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 3. UNAVAILABLE event whose embedded ref says PASSED (unavailable-event-with-passed-ref).
   {
@@ -968,7 +1026,7 @@ test("P3B-16: outcome events violating the verification event contract (passed-w
       );
       assert.equal(count(), 0, "verifier never executed on an unavailable-event-with-passed-ref");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 4. PASSED event with a MISMATCHED canonical verifiedCommit (≠ deliveryCommit).
   {
@@ -986,7 +1044,7 @@ test("P3B-16: outcome events violating the verification event contract (passed-w
       );
       assert.equal(count(), 0, "verifier never executed on a mismatched verifiedCommit");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // 5. PASSED event with a MISSING verifiedCommit.
   {
@@ -1004,7 +1062,7 @@ test("P3B-16: outcome events violating the verification event contract (passed-w
       );
       assert.equal(count(), 0, "verifier never executed on a missing verifiedCommit");
       assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
 });
 
@@ -1061,7 +1119,7 @@ test("P3B-17: missing/noncanonical/different top-level deliveryCommit on request
       assert.equal(count(), 0, `verifier never executed on ${label}`);
       const expected = seed(ctx).length;
       assert.equal(reverifyCount(ctx.runDir), expected, `${label}: nothing appended`);
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
 
   // DECISION path: a full-looking chain whose ONLY deviation is the outcome's
@@ -1082,7 +1140,7 @@ test("P3B-17: missing/noncanonical/different top-level deliveryCommit on request
         /must be passed/i,
         "accept must fail closed on a top-level-mismatched chain",
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
   // DECISION path: a passed event whose embedded ref says FAILED must also
   // keep acceptance fail-closed.
@@ -1101,6 +1159,6 @@ test("P3B-17: missing/noncanonical/different top-level deliveryCommit on request
         /must be passed/i,
         "accept must fail closed on a type/status-disagreeing chain",
       );
-    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+    } finally { await ctx.dispose(); }
   }
 });

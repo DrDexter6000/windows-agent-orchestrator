@@ -50,6 +50,7 @@ import {
   JsonlTranscript, readTranscript, RepackageCasPolicyError,
   REPACKAGE_CAS_POLICY_CODES, validateDeliveryFacts, findValidRepackageProvenance,
 } from "../../src/transcript.js";
+import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
 
 const RUN_ID = "run_m12s2_test";
 const AGENT_ID = "coder_hq";
@@ -81,11 +82,10 @@ function gitWithIdentity(cwd, args) {
   }).trim();
 }
 
-// Worktrees checked out for a shared base repo, keyed by repo path. cleanupDir
-// consults this registry: cleaning a registered repo removes that scenario's
-// worktrees instead of deleting the base repo other scenarios still share.
-const scenarioWorktrees = new Map();
-
+// 持久场景工作树：共享母仓上一棵固定路径的链接工作树。每个场景把它复位到
+// 母仓 HEAD（分支 -B 复位 + 清空未跟踪），等价于从零 `git worktree add`，
+// 但没有每场景的登记/摘除开销，也没有 Windows 下 worktree remove 失败留下
+// 的在册分支。嵌套场景（一个场景还没收尾又要新场景）仍需 { privateRepo: true }。
 function removeWorktreeBestEffort(repo, worktreePath) {
   try {
     git(["worktree", "remove", "--force", worktreePath], repo);
@@ -101,22 +101,14 @@ function removeWorktreeBestEffort(repo, worktreePath) {
   try {
     git(["worktree", "prune"], repo);
   } catch {
-    // Best effort; addScenarioWorktree's recovery path retries removal.
+    // Best effort; the process-end after() retries removal.
   }
 }
 
 async function cleanupDir(dir) {
-  const registered = scenarioWorktrees.get(dir);
-  if (registered) {
-    for (const worktreePath of registered) {
-      try {
-        removeWorktreeBestEffort(dir, worktreePath);
-      } catch {
-        // A worktree that refuses removal must not fail the test's cleanup —
-        // the next addScenarioWorktree reclaims the branch via its own recovery.
-      }
-    }
-    registered.clear();
+  if (sharedBase && dir === sharedBase.repo) {
+    // 共享母仓跨场景存活：场景收尾只释放占用标记，真正的清理由 after() 统一做。
+    scenarioInUse = false;
     return;
   }
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -130,27 +122,29 @@ async function cleanupDir(dir) {
   }
 }
 
+/** Pristine base (src/a.js committed); private repos copy it instead of re-running the init chain. */
+const repoBase = baseRepoFixture("m12s2", async (dir) => {
+  await mkdir(join(dir, "src"), { recursive: true });
+  await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
+  await writeFile(join(dir, ".gitignore"), "node_modules/\n.wao-worktrees/\n");
+  git(["add", "."], dir);
+  git(["commit", "-m", "init"], dir);
+  return git(["rev-parse", "HEAD"], dir);
+});
+
 /** Create a real temp git repo with src/a.js committed. */
 async function makeRepo(prefix = "m12s2-repo-") {
-  const repo = await mkdtemp(join(tmpdir(), prefix));
-  git(["init", "-b", "main"], repo);
-  git(["config", "user.email", "test@test"], repo);
-  git(["config", "user.name", "test"], repo);
-  await mkdir(join(repo, "src"), { recursive: true });
-  await writeFile(join(repo, "src", "a.js"), "const a = 1;\n");
-  await writeFile(join(repo, ".gitignore"), "node_modules/\n.wao-worktrees/\n");
-  git(["add", "."], repo);
-  git(["commit", "-m", "init"], repo);
-  const baseCommit = git(["rev-parse", "HEAD"], repo);
-  return { repo, baseCommit };
+  const base = await repoBase;
+  return { repo: copyGitRepo(base.dir, prefix), baseCommit: base.value };
 }
 
-// One shared base repo per process: scenarios check out their own worktree from
+// One shared base repo per process: scenarios reset ONE persistent worktree of
 // it instead of paying a full git init/config/add/commit each. Scenarios that
 // must not share repo-level state (git replace fixtures, foreign-repo ownership
 // proofs) keep a private repo via makeRepo.
 let sharedBase = null;
-let scenarioCounter = 0;
+let scenarioWorktreePath = null;
+let scenarioInUse = false;
 
 async function sharedBaseRepo() {
   if (!sharedBase) sharedBase = await makeRepo("m12s2-shared-base-");
@@ -158,31 +152,24 @@ async function sharedBaseRepo() {
 }
 
 /**
- * Check out a fresh scenario worktree from the shared base on the SAME branch
- * name every scenario uses (`wao/<RUN_ID>`): -B resets the branch to base HEAD,
- * so one scenario's moved/dirty leftovers can never leak into the next.
+ * Acquire the shared scenario worktree on the SAME branch name every scenario
+ * uses (`wao/<RUN_ID>`), reset to base HEAD: -B plus clean makes one scenario's
+ * moved/dirty leftovers unable to leak into the next. Nested scenarios (a live
+ * scenario acquiring again) must use { privateRepo: true }.
  */
 function addScenarioWorktree(repo) {
-  scenarioCounter += 1;
-  const worktreePath = join(repo, ".wao-worktrees", `${RUN_ID}-${scenarioCounter}`);
-  try {
-    git(["worktree", "add", "-B", `wao/${RUN_ID}`, worktreePath, "HEAD"], repo);
-  } catch {
-    // cleanupDir empties the registry at the end of every test, so a worktree
-    // still registered here belongs to a scenario the current test is still
-    // using. Removing it would break that scenario silently: fail instead.
-    const inUse = [...(scenarioWorktrees.get(repo) ?? [])];
-    if (inUse.length > 0) {
-      throw new Error(`addScenarioWorktree: wao/${RUN_ID} is held by a scenario still in use (${inUse.join(", ")}); a nested scenario needs { privateRepo: true }`);
-    }
-    // A worktree whose removal failed in an earlier test can still be
-    // registered with git: prune its stale entry and retry once.
-    git(["worktree", "prune"], repo);
-    git(["worktree", "add", "-B", `wao/${RUN_ID}`, worktreePath, "HEAD"], repo);
+  if (scenarioInUse) {
+    throw new Error("addScenarioWorktree: the shared scenario worktree is still held by an unfinished scenario; a nested scenario needs { privateRepo: true }");
   }
-  if (!scenarioWorktrees.has(repo)) scenarioWorktrees.set(repo, new Set());
-  scenarioWorktrees.get(repo).add(worktreePath);
-  return worktreePath;
+  if (!scenarioWorktreePath) {
+    scenarioWorktreePath = join(repo, ".wao-worktrees", RUN_ID);
+    git(["worktree", "add", scenarioWorktreePath, "-b", `wao/${RUN_ID}`], repo);
+  } else {
+    git(["checkout", "-q", "-f", "-B", `wao/${RUN_ID}`, sharedBase.baseCommit], scenarioWorktreePath);
+    git(["clean", "-q", "-fdx"], scenarioWorktreePath);
+  }
+  scenarioInUse = true;
+  return scenarioWorktreePath;
 }
 
 /** Create a real persistent linked worktree on branch wao/<runId> at HEAD. */
@@ -195,8 +182,8 @@ function makeLinkedWorktree(repo, runId = RUN_ID) {
 after(async () => {
   if (!sharedBase) return;
   const { repo } = sharedBase;
-  for (const worktreePath of scenarioWorktrees.get(repo) ?? []) {
-    try { removeWorktreeBestEffort(repo, worktreePath); } catch { /* best effort */ }
+  if (scenarioWorktreePath) {
+    try { removeWorktreeBestEffort(repo, scenarioWorktreePath); } catch { /* best effort */ }
   }
   try { git(["worktree", "prune"], repo); } catch { /* best effort */ }
   await rm(repo, { recursive: true, force: true });

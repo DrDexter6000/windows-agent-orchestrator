@@ -9,6 +9,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { baseRepoFixture, copyGitRepo } from "./_gitRepoFixture.mjs";
+
 /** 远旧于任何新鲜阈的事件时间戳。 */
 export const OLD_TS = "2026-01-01T00:00:00.000Z";
 
@@ -32,18 +34,22 @@ export function git(args, cwd) {
  * 没有预置 .wao-worktrees/ 忽略规则的宿主。
  */
 export async function makeRepo(prefix = "wao-reclaim-", { ignoreWaoWorktrees = true } = {}) {
-  const repo = await mkdtemp(prefix);
-  git(["init", "-b", "main"], repo);
-  git(["config", "user.email", "test@test"], repo);
-  git(["config", "user.name", "test"], repo);
-  await mkdir(join(repo, "docs"), { recursive: true });
-  writeFileSync(join(repo, "a.txt"), "const a = 1;\n");
-  writeFileSync(join(repo, ".gitignore"), ignoreWaoWorktrees
-    ? "node_modules/\n.wao-worktrees/\n"
-    : "node_modules/\n");
-  git(["add", "."], repo);
-  git(["commit", "-m", "init"], repo);
-  return { repo, mainCommit: git(["rev-parse", "HEAD"], repo) };
+  // 只读母仓按 .gitignore 形态缓存一份，场景各取一份整仓复制件（与
+  // init/config/add/commit 固定链产物同形）。
+  const base = await baseRepoFixture(
+    ignoreWaoWorktrees ? "reclaim-wt-ignored" : "reclaim-wt-bare",
+    async (dir) => {
+      await mkdir(join(dir, "docs"), { recursive: true });
+      writeFileSync(join(dir, "a.txt"), "const a = 1;\n");
+      writeFileSync(join(dir, ".gitignore"), ignoreWaoWorktrees
+        ? "node_modules/\n.wao-worktrees/\n"
+        : "node_modules/\n");
+      git(["add", "."], dir);
+      git(["commit", "-m", "init"], dir);
+      return git(["rev-parse", "HEAD"], dir);
+    },
+  );
+  return { repo: copyGitRepo(base.dir, prefix), mainCommit: base.value };
 }
 
 export async function mkdtemp(prefix) {
