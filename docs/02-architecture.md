@@ -431,7 +431,7 @@ kimi-web 车道指向一个本机 `kimi web` serve（`serveUrl`）。WAO 对这�
 
 ## 3. Transcript（数据持久化）
 
-每个 run 一个 JSONL 转录文件，每行一个 JSON 事件；Transcript 是 run 事实的唯一权威，恢复、scorecard、metrics、诊断都从事件重建，不依赖内存。新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺 `runs/<runId>.jsonl` 只读兼容，定位一律经 `src/projectBuckets.js` 解析链。人读事件表与迁移操作见 `docs/usage/transcript.md`。
+每个 run 一个 JSONL 转录文件，每行一个 JSON 事件；Transcript 是 run 事实的唯一权威，恢复、scorecard、metrics、诊断都从事件重建，不依赖内存。新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺 `runs/<runId>.jsonl` 只读兼容，定位一律经 `src/projectBuckets.js` 解析链。事件类型登记表见 `src/transcriptEvents.js`（人读清单为生成层 `docs/surface/transcript-events.md`）；迁移操作见 `docs/usage/transcript.md`。
 
 ### 3.1 事件结构
 
@@ -450,45 +450,11 @@ interface TranscriptEvent {
 
 ### 3.2 事件类型清单
 
-| type | 何时写 |
-|------|--------|
-| `run.started` | run 创建；记录生效 backend/cwd/model/reasoning/providerKey、显式 override 与 agentArgs 摘要（count+sha256 指纹+addDirs 暴露面路径；无 args 缺席） |
-| `run.state_change` | 状态机转移；`reason` ∈ `STATE_CHANGE_REASONS`（闭集 SSOT = `src/transcript.js`） |
-| `run.state_change_rejected` | first-terminal-wins 拒绝迟到转移 |
-| `session.created` | backend 建立 provider session |
-| `run.provider_session_bound` | delivery+sessionReuse run 在终态分派前，把 wire 上观察到的 runtime native provider id（kimi `session.resume_hint` / codex `thread.started`）与原 spawn 身份（`backend`+`backendSessionId`）关联记录的**独立有界绑定事实**——不补第二条 `session.created`（process_missing 恢复依赖唯一 `proc_<pid>` 身份）；共享续接读取器（`resolvePriorProviderSessionId`）优先采信并严格校验（runId 信封/唯一性/native 非空且非占位/与原 spawn 身份一致），坏/重复/冲突事实 fail-closed 拒绝、绝不回落旧 `session.created` 值遮蔽 |
-| `prompt.sent` | prompt 投递 |
-| `run.submitted` | 投递完成，进入等待 |
-| `run.metrics` | token、成本与耗时事实；不触发状态转移 |
-| `run.event` | RunEvent 透传（message/command/tool/write telemetry 等） |
-| `scorecard.checked` | scorecard 检查结果 |
-| `run.completed` | 正常完成 |
-| `run.timed_out` | 仅 legacy 转录；等待窗到期改写 `run.observation_deadline_reached`。为什么见决定 0030 |
-| `run.aborted` | run 被 abort |
-| `run.error` | run 错误 |
-| `run.stop_requested` | 用户请求停止 |
-| `run.wait_policy` | 生效的 waitTimeoutMs 及来源 |
-| `run.observation_deadline_reached` | 等待窗到期的有界观察事实；不终止 worker，每 run 至多一条 |
-| `run.stop_verified` | worker runtime 已确认静默；不表示 Lead 必然调用过 stop |
-| `run.stop_unverified` | worker runtime 未确认静默 |
-| `messages.collected` | collect 拉取消息 |
-| `acceptance.recorded` | Lead 侧验收落盘（`wao accept` CLI）：decision(accepted/rejected)+reason+可选 digest/摘要；只对终态 run 追加、多笔合法（最新为当前结论）、不覆盖 run_delivery_decide 决定面 |
-| `run.rerun` | 进程式 resume 重放 |
-| `run.cleanup_done` | 终态清理完成（worktree 删除 + backend 文件工件 dispose；非 delivery run 也会发） |
-| `run.delivery_created` | delivery 打包成功，携带 DeliveryRef |
-| `run.delivery_failed` | delivery 打包失败，携带 deliveryCode 与脱敏摘要 |
-| `run.delivery_verification_passed` | delivery 验证通过 |
-| `run.delivery_verification_failed` | delivery 验证失败，含 failureCode 与有界失败输出 |
-| `run.delivery_verification_unavailable` | 无验证命令，携带 unavailableReason |
-| `run.delivery_accepted` | Lead 接受 delivery |
-| `run.delivery_rejected` | Lead 拒绝 delivery |
-| `run.delivery_repackage_rejected` | repackage expected-policy 拒绝的有界审计事实：payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found`/`workspace_not_authorized`（跨项目不写）不落 |
-| `run.read_only_declared` | 只读 run 声明；空 payload，envelope 即事实 |
-| `run.lead_commit_check_started` | `runs verify-commit`（采纳协议承载）：首命令前写入——checkId nonce、提交全形、命令原文+commands-file sha256、终态判定依据、提交关系事实字段；`kind:"lead_self_check"`+`independentAuditRequired:true`；仅 started 无 outcome = 合法不完整证据 |
-| `run.lead_commit_check_outcome` | status∈{passed,failed,aborted}+results[]（失败 8KiB 尾）+独立 cleanup∈{ok,failed}；无恰一条 CAS（checkId 区分多次核验）；不进 validateDeliveryFacts/decide/wao accept 判定输入 |
-| `workflow.*` | DAG 节点事件，写入独立 `wf_*.jsonl` |
+事件名与说明的唯一可编辑真值源是代码里的登记表 `TRANSCRIPT_EVENT_REGISTRY`（`src/transcriptEvents.js`，冻结闭集）：每个事件一行——何时写、载荷约束、闭集指针、兼容说明，必要时带 legacy 标记。人读清单由生成层产出：`docs/surface/transcript-events.md`（`npm run gen:surface` 再生成，字节新鲜度由 `docsSurface.test.js` 守卫）。`docs/usage/transcript.md` 指向同一生成清单，不维护第二份表格。
 
-`run.message` 不是落盘事件类型；它只是传给 scorecard 的 message 快照，因此不进入本表。
+写入侧守卫保证"代码写出的每种事件都已登记"：`src/transcript.js` 的所有写出口（公开 `append`、`transitionState` 的接受/拒绝两套批量、决定/repackage/verification/reverify/correction 的各 CAS 方法）共用一个事件序列化入口，序列化前查登记表。测试基建显式开严格模式（`WAO_TRANSCRIPT_EVENT_STRICT=1`，经 `buildCanonicalChildEnv` 对两个测试入口统一设置）：写出未登记类型立即抛错；被吞掉的异常写出由进程退出钩子置非零退出码。生产默认关闭：绝不丢弃事件，至多对每种类型警告一次。
+
+`run.message` 不是落盘事件类型；它只是传给 scorecard 的 message 快照，因此不进登记表。
 
 ### 3.3 Transcript API
 
@@ -879,7 +845,7 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 **epoch（会话代数）**：派生材料在 epoch ≥ 1 时追加代数行（epoch 0/缺席与旧 uuid 逐字节相同——存量会话零迁移）；keyHash **绝不**携带 epoch（槽位=身份锚点，跨代数稳定）。换代数=换 provider 会话；epoch 只活在路由条目与派生材料，不进转录审计事件。材料中的 roleSha 取**本次派发角色**正文 sha（roleId→`config/roles/<roleId>.md`，无角色=`"none"`；席位 `systemPrompt` 仅 legacy 兜底）——同车道换帽必换键、必 first。
 
-**delivery 续接的 native id 绑定与缺证据 fail-closed**：delivery+sessionReuse run 的 spawn 时刻 `session.created` 保持唯一进程身份（`proc_<pid>`——process_missing 恢复按唯一 `proc_<pid>` 解析子进程 PID，不变量不动）；运行期 wire 广告的 native provider id（kimi `session.resume_hint` / codex `thread.started`）由 runner 在终态分派前追加**独立**绑定事实 `run.provider_session_bound`（见 §3.2 事件表；不猜 id、不把 opaque UUID 当 native id、不写凭据）。共享读取器（`resolvePriorProviderSessionId` / `resolvePriorProviderSessionIdFromEvents`——spawn 权威与 `run_continue` 预检同一判定 SSOT）优先采信绑定事实并严格校验：runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份（backend/backendSessionId）一致；坏/重复/冲突事实拒绝，绝不回落旧值遮蔽。无绑定事实时保持既有 native `session.created` 兼容读取；该值的**可用性**由 backend-owned 纯验证钩子（`backend.canResumeWithRecoveredSessionId`，经现有 backend 实例调用——无 factory 分发表、共享层不按 backend 名分支、非认证能力轴）判定：kimi/codex（运行时自产 id）对 `proc_<pid>` 占位 fail-closed（`RunManager.start` 固定拒绝、`run_continue` 返回既有 `no_provider_session`，均在 lineage claim/worktree/child transcript/spawn 之前）；claude-code 覆写恒 true（resume 编译 routing.opaqueUuid，从不消费取回 id——合法 opaque 路径不被全局 proc 前缀规则误伤）；非进程式 backend（ACP）无该钩子、原 native `session.created` 语义不退化。非 delivery 复用 run 的晚补 `session.created` 写侧保持兼容（读取侧 LAST-bound）。历史 Kimi/Codex proc-only 父 run 不可续接（不迁移旧数据）。
+**delivery 续接的 native id 绑定与缺证据 fail-closed**：delivery+sessionReuse run 的 spawn 时刻 `session.created` 保持唯一进程身份（`proc_<pid>`——process_missing 恢复按唯一 `proc_<pid>` 解析子进程 PID，不变量不动）；运行期 wire 广告的 native provider id（kimi `session.resume_hint` / codex `thread.started`）由 runner 在终态分派前追加**独立**绑定事实 `run.provider_session_bound`（事件说明见 §3.2 指向的登记表/生成清单；不猜 id、不把 opaque UUID 当 native id、不写凭据）。共享读取器（`resolvePriorProviderSessionId` / `resolvePriorProviderSessionIdFromEvents`——spawn 权威与 `run_continue` 预检同一判定 SSOT）优先采信绑定事实并严格校验：runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份（backend/backendSessionId）一致；坏/重复/冲突事实拒绝，绝不回落旧值遮蔽。无绑定事实时保持既有 native `session.created` 兼容读取；该值的**可用性**由 backend-owned 纯验证钩子（`backend.canResumeWithRecoveredSessionId`，经现有 backend 实例调用——无 factory 分发表、共享层不按 backend 名分支、非认证能力轴）判定：kimi/codex（运行时自产 id）对 `proc_<pid>` 占位 fail-closed（`RunManager.start` 固定拒绝、`run_continue` 返回既有 `no_provider_session`，均在 lineage claim/worktree/child transcript/spawn 之前）；claude-code 覆写恒 true（resume 编译 routing.opaqueUuid，从不消费取回 id——合法 opaque 路径不被全局 proc 前缀规则误伤）；非进程式 backend（ACP）无该钩子、原 native `session.created` 语义不退化。非 delivery 复用 run 的晚补 `session.created` 写侧保持兼容（读取侧 LAST-bound）。历史 Kimi/Codex proc-only 父 run 不可续接（不迁移旧数据）。
 
 **能力驱动 fail-closed**：backend 若无法表达所配置的复用策略，detached runner 在 provider spawn 前失败（`backend.supportsSessionReuse !== true` 即抛错），绝不静默开新 provider 会话。初始 background transcript 可记录这次 startup failure；不得把它误报成已复用成功。
 

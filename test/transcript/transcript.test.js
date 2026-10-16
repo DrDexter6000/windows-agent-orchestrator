@@ -204,6 +204,8 @@ test("TD-104: transcript redacts nested secret values in append and transition b
     const transcript = new JsonlTranscript(join(dir, "run.jsonl"), {
       runId: "run_redact",
       agentId: "test_agent",
+      // 测试刻意写的合成意图事件（登记表只收生产事件类型；在此点名豁免）。
+      syntheticEventTypes: ["run.attempt"],
     });
 
     await transcript.append("run.event", {

@@ -63,10 +63,10 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | 文件 | 内容 |
 |------|------|
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
-| `docs/usage.md`、`docs/usage/*.md` | 使用手册：`docs/usage.md` 是页面地图，`docs/usage/` 下每页对应一项操作任务（部署、车道、宿主、派发、监督、取结果、交付、会审、维护）；`docs/usage/transcript.md` 是 architecture §3.2 事件 spec 的人读投影；`docs/usage/results.md` 维护尚无生成层的 CLI 查询命令 JSON 输出形状；命令/参数参考在生成层；认证操作正文在下一行的文件，手册里只留具名标题与单向链接 |
+| `docs/usage.md`、`docs/usage/*.md` | 使用手册：`docs/usage.md` 是页面地图，`docs/usage/` 下每页对应一项操作任务（部署、车道、宿主、派发、监督、取结果、交付、会审、维护）；`docs/usage/transcript.md` 是 transcript 的入口说明页（事件清单真值源在代码登记表，页面指向生成层清单）；`docs/usage/results.md` 维护尚无生成层的 CLI 查询命令 JSON 输出形状；命令/参数参考在生成层；认证操作正文在下一行的文件，手册里只留具名标题与单向链接 |
 | `docs/testing.md` | 开发 WAO 时何时跑全量、何时跑定向测试，worker 交付的验证命令怎么写 |
 | `docs/certification-runbook.md` | 认证操作正文唯一权威（`seat-certify` 阅读集合成员）：认证结果用于派发选择的边界、DSH 通道适用限制与能力交叉警告、接入新模型/新运行时、backend 能力对照表（指向生成层）、上游 harness 原语对照、认证与转录维护命令、delta 认证规程、五态与能力轴分层、单次派发覆盖（场景 1b/1c 含 MCP 特有规则）、retry 覆盖继承、认证与当前就绪；使用手册不保留第二份当前正文 |
-| `docs/surface/mcp-tools.md` `docs/surface/cli.md` `docs/surface/certification.md` | **生成参考层**：`mcp-tools.md`/`cli.md`（MCP 工具与 CLI 命令的参数/形状）权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；`certification.md`（backend 六轴能力与配置表达力四轴判定）权威源是 `src/backends/*.js` 类声明与 `validateAgentPolicy` 行为探针，由 `npm run gen:certification` 再生成。三者一律禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改对应权威源后须再生成并提交 |
+| `docs/surface/mcp-tools.md` `docs/surface/cli.md` `docs/surface/transcript-events.md` `docs/surface/certification.md` | **生成参考层**：`mcp-tools.md`/`cli.md`（MCP 工具与 CLI 命令的参数/形状）权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；`transcript-events.md`（转录事件类型清单）权威源是 `src/transcriptEvents.js` 的登记表 `TRANSCRIPT_EVENT_REGISTRY`（写入侧共用序列化守卫保证代码写出的每种事件都已登记），同样由 `npm run gen:surface` 再生成；`certification.md`（backend 六轴能力与配置表达力四轴判定）权威源是 `src/backends/*.js` 类声明与 `validateAgentPolicy` 行为探针，由 `npm run gen:certification` 再生成。四者一律禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改对应权威源后须再生成并提交 |
 | `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
 | `docs/troubleshooting.md` | 诊断手册（provider/cwd/runs/completion/进程/backend） |
@@ -104,7 +104,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 2. 三条铁律
 
-1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（生成层 `docs/surface/certification.md`——由 `scripts/gen-certification.mjs` 从 `src/backends/*.js` 闭集能力成员与 `validateAgentPolicy` 行为探针派生、字节钉守卫）与 `transcript-events-human`（`docs/usage/transcript.md`，投影自 `docs/02-architecture.md` §3.2，事件行集守卫）。
+1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（生成层 `docs/surface/certification.md`——由 `scripts/gen-certification.mjs` 从 `src/backends/*.js` 闭集能力成员与 `validateAgentPolicy` 行为探针派生、字节钉守卫）。transcript 事件清单不是命名投影：真值源是代码登记表（`src/transcriptEvents.js`），生成清单 `docs/surface/transcript-events.md` 属生成参考层。
 2. **类别不可混放**。根因分析进事故复盘（过程），现象+做法进 troubleshooting（运维），接口定义进 architecture（契约）。跨类别只指针不复制。
 3. **过程文档只追加**。事故复盘/mN-audit/research 定格后不改写事实；修复状态、被取代状态一律用指针，不回改正文叙述。
 
@@ -130,7 +130,7 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 
 - 旧 worker 名不得出现在面向 lead/user 的入口文档。
 - 状态机完整状态列表只在 `docs/02-architecture.md` 维护。
-- transcript 事件 spec 在 `docs/02-architecture.md` §3.2 维护，`docs/usage/transcript.md` 是受行集守卫的人读投影。
+- transcript 事件登记表在 `src/transcriptEvents.js` 维护（冻结闭集；`src/transcript.js` 所有写出口共用的序列化守卫保证代码写出的每种事件都已登记，测试基建开严格模式）；生成清单 `docs/surface/transcript-events.md` 由 `npm run gen:surface` 产出，`docs/02-architecture.md` §3.2 与 `docs/usage/transcript.md` 只指向它，不维护表格。
 - 技术债台账 `docs/tech-debt.md` 一条一行、列数与状态固定、行长有上限；每个技术债编号只在台账、已了结清单（`docs/archive/tech-debt-closed.md`）、已偿还归档三者之一有定义行，文档与代码里引用的编号都要有定义（测试夹具与冻结的归档不在检查面）。
 - 决定索引一行只放编号和标题；新决定档有体量上限。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。

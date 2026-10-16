@@ -1982,6 +1982,13 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
   const env = {
     ...baseEnv,
     WAO_SKIP_VERSION_GUARD: "1",
+    // 转录事件登记守卫（登记表 src/transcriptEvents.js + src/transcript.js
+    // 共用序列化）：两个测试入口（canonical runner 与 test-one）共用的子进程
+    // 环境在此一处开严格模式——写出未登记事件类型必须红（直接抛错；被
+    // .catch 吞掉的写出由进程退出钩子置非零退出码，runner 把"报告全绿但
+    // 子进程非零"判为失败）。测试刻意的合成类型在构造 JsonlTranscript 时用
+    // syntheticEventTypes 点名豁免。生产默认关：未开启时绝不丢事件，只警告。
+    WAO_TRANSCRIPT_EVENT_STRICT: "1",
     // TD-229（2026-10-07，全量实战暴露）：MCP 认证门禁是部署级开关（User 作用域
     // setx，宿主 spawn 时定格）——若宿主 User env 带它，套件子进程继承后
     // run_dispatch 族夹具车道（无认证记录）全被门拒绝（16 文件 stable_fail 实证；

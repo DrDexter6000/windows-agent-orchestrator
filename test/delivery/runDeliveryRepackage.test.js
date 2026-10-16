@@ -1045,7 +1045,10 @@ test("M12-1S2-NO-LONG-LOCK: slow packaging probe does not hold the transcript ap
 
     // While packaging is pending, an ordinary transcript append must complete
     // immediately — proving the append lock is NOT held during packaging.
-    const sideTranscript = new JsonlTranscript(join(runDir, `${RUN_ID}.jsonl`), { runId: RUN_ID, agentId: "side" });
+    // 测试刻意写的合成探测事件（登记表只收生产事件类型；在此点名豁免）。
+    const sideTranscript = new JsonlTranscript(join(runDir, `${RUN_ID}.jsonl`), {
+      runId: RUN_ID, agentId: "side", syntheticEventTypes: ["run.note"],
+    });
     let sideAppendDone = false;
     await Promise.race([
       (async () => { await sideTranscript.append("run.note", { probe: "side" }); sideAppendDone = true; })(),

@@ -13,7 +13,7 @@
 | [交付与验收](usage/delivery.md) | delivery 模式派发、审查、重验证、验收或拒收、重打包 |
 | [会审](usage/consult.md) | 多席只读会审、会审席位记录、审计席测试协议 |
 | [维护](usage/maintenance.md) | 清理历史 run 与工作树、daemon、Owner 看板 |
-| [transcript 格式](usage/transcript.md) | transcript 的位置与事件表 |
+| [transcript 格式](usage/transcript.md) | transcript 的位置与事件清单入口（清单在生成层） |
 
 排障见 `docs/troubleshooting.md`，认证操作见 `docs/certification-runbook.md`，开发 WAO 本身时怎么跑测试见 `docs/testing.md`。
 

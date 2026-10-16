@@ -4,6 +4,10 @@ import { dirname, join } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import {
+  isRegisteredTranscriptEventType,
+  reportUnregisteredTranscriptEventType,
+} from "./transcriptEvents.js";
+import {
   isCanonicalCommitId,
   isPathAllowed,
   isValidRepoRelativePath,
@@ -849,10 +853,38 @@ export class JsonlTranscript {
     this.context = context;
     this.seq = Number.isInteger(context?.initialSeq) ? context.initialSeq : 0;
     this.redactor = createSecretRedactor();
+    // 登记守卫的夹具豁免：测试【点名】的合成事件类型（仅此实例放行）。
+    // 不是目录级/实例级宽松开关——真实业务写出不在豁免面内；生产构造不传。
+    const synthetic = Array.isArray(context?.syntheticEventTypes)
+      ? context.syntheticEventTypes
+      : [];
+    for (const t of synthetic) {
+      if (typeof t !== "string" || t.length === 0) {
+        throw new Error("JsonlTranscript: syntheticEventTypes entries must be non-empty strings");
+      }
+    }
+    this.syntheticEventTypes = new Set(synthetic);
   }
 
   redact(value) {
     return this.redactor.redact(value);
+  }
+
+  /**
+   * 所有写出口共用的事件序列化入口：序列化前查登记表
+   * （src/transcriptEvents.js——事件名与说明的唯一真值源）。
+   * 未登记的类型经 reportUnregisteredTranscriptEventType 处理：
+   * strict（WAO_TRANSCRIPT_EVENT_STRICT=1，测试基建）记账+抛错，事件不落盘；
+   * 非 strict（生产默认）至多警告一次后照常序列化——绝不丢事件。
+   * 本实例 syntheticEventTypes 点名的合成类型放行（测试夹具专属）。
+   * 不取锁、不改字节——批量写出口逐条走这里，全部成功后仍一次追加。
+   */
+  _serializeEvent(event) {
+    const type = event && typeof event === "object" ? event.type : undefined;
+    if (!isRegisteredTranscriptEventType(type) && !this.syntheticEventTypes.has(type)) {
+      reportUnregisteredTranscriptEventType(type);
+    }
+    return JSON.stringify(event);
   }
 
   async append(type, payload = {}) {
@@ -879,7 +911,7 @@ export class JsonlTranscript {
         agentId: this.context.agentId,
         type,
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       return event;
     } finally {
       await releaseLock();
@@ -941,7 +973,7 @@ export class JsonlTranscript {
         agentId: this.context.agentId,
         type: "run.read_only_declared",
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = seq;
       return { recorded: true };
     } finally {
@@ -1012,7 +1044,7 @@ export class JsonlTranscript {
       for (const ae of attemptEvents) {
         seq += 1;
         const ev = { ...this.redact(ae.payload ?? {}), ts, seq, ...ctx, type: ae.type };
-        lines.push(JSON.stringify(ev));
+        lines.push(this._serializeEvent(ev));
         writtenAttempts.push(ev);
       }
 
@@ -1033,7 +1065,7 @@ export class JsonlTranscript {
           };
           seq += 1;
           const rejectionEvent = { ts, seq, ...ctx, type: "run.state_change_rejected", ...rejectionPayload };
-          lines.push(JSON.stringify(rejectionEvent));
+          lines.push(this._serializeEvent(rejectionEvent));
           await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
           this.seq = seq;
           return {
@@ -1055,7 +1087,7 @@ export class JsonlTranscript {
         };
         seq += 1;
         const rejectionEvent = { ts, seq, ...ctx, type: "run.state_change_rejected", ...rejectionPayload };
-        lines.push(JSON.stringify(rejectionEvent));
+        lines.push(this._serializeEvent(rejectionEvent));
         await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
         this.seq = seq;
         return { accepted: false, state: existing, rejection: rejectionPayload, attempts: writtenAttempts };
@@ -1066,12 +1098,12 @@ export class JsonlTranscript {
       for (const fe of factEvents) {
         seq += 1;
         const ev = { ...this.redact(fe.payload ?? {}), ts, seq, ...ctx, type: fe.type };
-        lines.push(JSON.stringify(ev));
+        lines.push(this._serializeEvent(ev));
         written.push(ev);
       }
       seq += 1;
       const stateEv = { ts, seq, ...ctx, type: "run.state_change", from, to, reason: safeReason };
-      lines.push(JSON.stringify(stateEv));
+      lines.push(this._serializeEvent(stateEv));
       await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
       this.seq = seq;
       return { accepted: true, state: to, transition: stateEv, facts: written, attempts: writtenAttempts };
@@ -1265,7 +1297,7 @@ export class JsonlTranscript {
       if (!appendedFacts.valid) {
         throw new DeliveryDecisionPolicyError(appendedFacts.code, appendedFacts.error);
       }
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = seq;
       return { accepted: true, event };
     } finally {
@@ -1381,7 +1413,11 @@ export class JsonlTranscript {
         }),
         ts, seq: baseSeq + 2, ...ctx, type: "run.delivery_repackaged",
       };
-      await appendFile(this.filePath, `${JSON.stringify(createdEvent)}\n${JSON.stringify(provenanceEvent)}\n`, "utf8");
+      await appendFile(
+        this.filePath,
+        `${this._serializeEvent(createdEvent)}\n${this._serializeEvent(provenanceEvent)}\n`,
+        "utf8",
+      );
       this.seq = baseSeq + 2;
       return { created: true, ref: delivery, provenance: provenanceEvent };
     } finally {
@@ -1464,7 +1500,7 @@ export class JsonlTranscript {
       const ts = new Date().toISOString();
       const ctx = { runId: this.context.runId, agentId: this.context.agentId };
       const event = { ...this.redact({ delivery }), ts, seq: baseSeq + 1, ...ctx, type };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { recorded: true, ref: delivery, outcome };
     } finally {
@@ -1556,7 +1592,7 @@ export class JsonlTranscript {
         ...ctx,
         type: "run.delivery_reverification_requested",
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { requested: true, ref: delivery, reason, setupCommands: setup };
     } finally {
@@ -1656,7 +1692,7 @@ export class JsonlTranscript {
         ...ctx,
         type,
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { recorded: true, ref: delivery, outcome };
     } finally {
@@ -1729,7 +1765,7 @@ export class JsonlTranscript {
         ...ctx,
         type: "run.correction_requested",
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { queued: true, correctionId };
     } finally {
@@ -1771,7 +1807,7 @@ export class JsonlTranscript {
       const ts = new Date().toISOString();
       const ctx = { runId: this.context.runId, agentId: this.context.agentId };
       const event = { ts, seq: baseSeq + 1, ...ctx, correctionId, type: "run.correction_claimed" };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { claimed: true, correctionId, prompt: info.prompt ?? "" };
     } finally {
@@ -1801,7 +1837,7 @@ export class JsonlTranscript {
       const ts = new Date().toISOString();
       const ctx = { runId: this.context.runId, agentId: this.context.agentId };
       const event = { ts, seq: baseSeq + 1, ...ctx, correctionId, type: "run.correction_delivered" };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { recorded: true, correctionId };
     } finally {
@@ -1839,7 +1875,7 @@ export class JsonlTranscript {
         ts, seq: baseSeq + 1, ...ctx, correctionId, reason: safeReason,
         type: "run.correction_delivery_failed",
       };
-      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      await appendFile(this.filePath, `${this._serializeEvent(event)}\n`, "utf8");
       this.seq = baseSeq + 1;
       return { recorded: true, correctionId, reason: safeReason };
     } finally {
@@ -1878,7 +1914,7 @@ export class JsonlTranscript {
       const ordered = outstanding.sort(); // deterministic order (independent of Map order)
       for (const cid of ordered) {
         seq += 1;
-        lines.push(JSON.stringify({ ts, seq, ...ctx, correctionId: cid, reason: safeReason, type: "run.correction_rejected" }));
+        lines.push(this._serializeEvent({ ts, seq, ...ctx, correctionId: cid, reason: safeReason, type: "run.correction_rejected" }));
       }
       await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
       this.seq = seq;

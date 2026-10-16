@@ -10,7 +10,7 @@
 //     Node 22.x 上为 undefined ⇒ 写出分支被静默跳过（exit 0 不写文件，fail-open），
 //     由此整体退场；直接 `node scripts/gen-surface.mjs`（含无参）必须零动作。
 //   - scripts/gen-surface-cli.mjs 是唯一薄入口：无参＝先完整 generate() 成功再
-//     写出两份；恰好 --check ＝只读比对（CRLF/LF 归一化相同，缺失/过期非零且
+//     写出三份；恰好 --check ＝只读比对（CRLF/LF 归一化相同，缺失/过期非零且
 //     不改文件）；其他任何参数＝非零退出且不生成、不写入、不检查。
 //
 // 夹具纪律：os.tmpdir() 下逐字节复制最小仓库副本——整个 src/、两个
@@ -48,6 +48,8 @@ const REPO_ROOT = join(__dirname, "..", "..");
 // 生成器结果键（正斜杠仓库相对路径），同时直接用作 fs 相对路径。
 const MCP_KEY = "docs/surface/mcp-tools.md";
 const CLI_KEY = "docs/surface/cli.md";
+const EVENTS_KEY = "docs/surface/transcript-events.md";
+const ALL_KEYS = [MCP_KEY, CLI_KEY, EVENTS_KEY];
 const SPAWN_OPTS = { encoding: "utf8", timeout: 120_000, windowsHide: true };
 
 /**
@@ -169,7 +171,7 @@ test("entry-1: docs/ 整体缺失 + 无参 → 递归建目录写出两份，内
     const r = runCli(cwd, fixture, []);
     assertSpawnClean(r, "entry-1");
     assert.equal(r.status, 0, `stderr: ${r.stderr}`);
-    for (const key of [MCP_KEY, CLI_KEY]) {
+    for (const key of ALL_KEYS) {
       const file = target(fixture, key);
       assert.ok(existsSync(file), `${key} 应被创建`);
       assert.equal(readFileSync(file, "utf8"), expected[key], `${key} 内容必须逐字等于真实派生结果`);
@@ -187,32 +189,32 @@ test("entry-1: docs/ 整体缺失 + 无参 → 递归建目录写出两份，内
   }
 });
 
-// ===== 场景 2：两份过期 + 无参生成 → 更新正确；再次执行字节不变（幂等） =====
+// ===== 场景 2：三份过期 + 无参生成 → 更新正确；再次执行字节不变（幂等） =====
 test("entry-2: 目标过期 + 无参 → 更新为派生结果；再跑一次字节不变（幂等）", async () => {
   const { home, fixture, cwd } = setup();
   try {
-    writeFileSync(target(fixture, MCP_KEY), "STALE MCP\n", "utf8");
-    writeFileSync(target(fixture, CLI_KEY), "STALE CLI\n", "utf8");
+    for (const key of ALL_KEYS) writeFileSync(target(fixture, key), `STALE ${key}\n`, "utf8");
     const lib = await importFixtureLib(fixture);
     const expected = await lib.generate();
     const r1 = runCli(cwd, fixture, []);
     assertSpawnClean(r1, "entry-2 first");
     assert.equal(r1.status, 0, `stderr: ${r1.stderr}`);
-    assert.equal(readFileSync(target(fixture, MCP_KEY), "utf8"), expected[MCP_KEY], "mcp-tools.md 应被更新");
-    assert.equal(readFileSync(target(fixture, CLI_KEY), "utf8"), expected[CLI_KEY], "cli.md 应被更新");
-    const beforeMcp = readFileSync(target(fixture, MCP_KEY));
-    const beforeCli = readFileSync(target(fixture, CLI_KEY));
+    for (const key of ALL_KEYS) {
+      assert.equal(readFileSync(target(fixture, key), "utf8"), expected[key], `${key} 应被更新`);
+    }
+    const before = new Map(ALL_KEYS.map((key) => [key, readFileSync(target(fixture, key))]));
     const r2 = runCli(cwd, fixture, []);
     assertSpawnClean(r2, "entry-2 second");
     assert.equal(r2.status, 0, `stderr: ${r2.stderr}`);
-    assert.deepEqual(readFileSync(target(fixture, MCP_KEY)), beforeMcp, "幂等：mcp-tools.md 原始字节不变");
-    assert.deepEqual(readFileSync(target(fixture, CLI_KEY)), beforeCli, "幂等：cli.md 原始字节不变");
+    for (const key of ALL_KEYS) {
+      assert.deepEqual(readFileSync(target(fixture, key)), before.get(key), `幂等：${key} 原始字节不变`);
+    }
   } finally {
     rmrfRetry(home);
   }
 });
 
-// ===== 场景 3：--check 正常（LF）/ CRLF → exit 0，两份原始字节都不动 =====
+// ===== 场景 3：--check 正常（LF）/ CRLF → exit 0，三份原始字节都不动 =====
 test("entry-3: --check 对 LF 与 CRLF 磁盘副本均 exit 0，且原始字节不动", async () => {
   const { home, fixture, cwd } = setup();
   try {
@@ -220,28 +222,29 @@ test("entry-3: --check 对 LF 与 CRLF 磁盘副本均 exit 0，且原始字节�
     const expected = await lib.generate();
 
     // LF 副本（生成器原生换行）。
-    writeFileSync(target(fixture, MCP_KEY), expected[MCP_KEY], "utf8");
-    writeFileSync(target(fixture, CLI_KEY), expected[CLI_KEY], "utf8");
-    const beforeLfMcp = readFileSync(target(fixture, MCP_KEY));
-    const beforeLfCli = readFileSync(target(fixture, CLI_KEY));
+    for (const key of ALL_KEYS) writeFileSync(target(fixture, key), expected[key], "utf8");
+    const beforeLf = new Map(ALL_KEYS.map((key) => [key, readFileSync(target(fixture, key))]));
     const rLf = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rLf, "entry-3 LF");
     assert.equal(rLf.status, 0, `LF 副本 --check 应 exit 0；stderr: ${rLf.stderr}`);
-    assert.match(rLf.stdout, /mcp-tools\.md is up to date/, "mcp-tools.md 应报 up to date");
-    assert.match(rLf.stdout, /cli\.md is up to date/, "cli.md 应报 up to date");
-    assert.deepEqual(readFileSync(target(fixture, MCP_KEY)), beforeLfMcp, "LF mcp-tools.md 原始字节不变");
-    assert.deepEqual(readFileSync(target(fixture, CLI_KEY)), beforeLfCli, "LF cli.md 原始字节不变");
+    for (const key of ALL_KEYS) {
+      assert.match(rLf.stdout, new RegExp(`${key} is up to date`), `${key} 应报 up to date`);
+    }
+    for (const key of ALL_KEYS) {
+      assert.deepEqual(readFileSync(target(fixture, key)), beforeLf.get(key), `LF ${key} 原始字节不变`);
+    }
 
     // CRLF 副本（换行归一化后等价；不得被改写回 LF）。
-    writeFileSync(target(fixture, MCP_KEY), expected[MCP_KEY].replace(/\n/g, "\r\n"), "utf8");
-    writeFileSync(target(fixture, CLI_KEY), expected[CLI_KEY].replace(/\n/g, "\r\n"), "utf8");
-    const beforeCrlfMcp = readFileSync(target(fixture, MCP_KEY));
-    const beforeCrlfCli = readFileSync(target(fixture, CLI_KEY));
+    for (const key of ALL_KEYS) {
+      writeFileSync(target(fixture, key), expected[key].replace(/\n/g, "\r\n"), "utf8");
+    }
+    const beforeCrlf = new Map(ALL_KEYS.map((key) => [key, readFileSync(target(fixture, key))]));
     const rCrlf = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rCrlf, "entry-3 CRLF");
     assert.equal(rCrlf.status, 0, `CRLF 副本 --check 应 exit 0（归一化相同）；stderr: ${rCrlf.stderr}`);
-    assert.deepEqual(readFileSync(target(fixture, MCP_KEY)), beforeCrlfMcp, "CRLF mcp-tools.md 不被改写为 LF");
-    assert.deepEqual(readFileSync(target(fixture, CLI_KEY)), beforeCrlfCli, "CRLF cli.md 不被改写为 LF");
+    for (const key of ALL_KEYS) {
+      assert.deepEqual(readFileSync(target(fixture, key)), beforeCrlf.get(key), `CRLF ${key} 不被改写为 LF`);
+    }
   } finally {
     rmrfRetry(home);
   }
@@ -255,6 +258,7 @@ test("entry-4: --check 过期/垃圾/缺失 → 非零退出；不修复、不�
     const expected = await lib.generate();
     const mcp = target(fixture, MCP_KEY);
     const cli = target(fixture, CLI_KEY);
+    const events = target(fixture, EVENTS_KEY);
 
     // 过期：渲染结果的一处 annotation hint 被漂移，形状合法但内容过期。
     assert.ok(expected[MCP_KEY].includes("readOnlyHint=true"), "夹具自检：渲染结果应含 readOnlyHint=true");
@@ -262,12 +266,14 @@ test("entry-4: --check 过期/垃圾/缺失 → 非零退出；不修复、不�
     assert.notEqual(drifted, expected[MCP_KEY], "夹具自检：漂移副本必须真的不同");
     writeFileSync(mcp, drifted, "utf8");
     writeFileSync(cli, expected[CLI_KEY], "utf8");
+    writeFileSync(events, expected[EVENTS_KEY], "utf8");
     const rStale = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rStale, "entry-4 stale");
     assert.equal(rStale.status, 1, `过期应 exit 1；stdout: ${rStale.stdout}`);
     assert.match(rStale.stderr, /mcp-tools\.md is stale/, "过期分支 stderr 应指明 mcp-tools.md stale");
     assert.equal(readFileSync(mcp, "utf8"), drifted, "--check 不得修复过期文件");
     assert.equal(readFileSync(cli, "utf8"), expected[CLI_KEY], "未过期的 cli.md 不得被动");
+    assert.equal(readFileSync(events, "utf8"), expected[EVENTS_KEY], "未过期的 transcript-events.md 不得被动");
 
     // 垃圾内容。
     writeFileSync(cli, "garbage, not markdown at all\n", "utf8");
@@ -276,7 +282,7 @@ test("entry-4: --check 过期/垃圾/缺失 → 非零退出；不修复、不�
     assert.equal(rGarbage.status, 1, `垃圾内容应 exit 1；stdout: ${rGarbage.stdout}`);
     assert.equal(readFileSync(cli, "utf8"), "garbage, not markdown at all\n", "垃圾内容保持原样");
 
-    // 缺失之一（cli.md 删掉）：exit 1、不创建、在场那份不动。
+    // 缺失之一（cli.md 删掉）：exit 1、不创建、在场那两份不动。
     rmSync(cli, { force: true });
     const rMissingOne = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rMissingOne, "entry-4 missing one");
@@ -284,14 +290,16 @@ test("entry-4: --check 过期/垃圾/缺失 → 非零退出；不修复、不�
     assert.match(rMissingOne.stderr, /cli\.md does not exist/, "缺失分支 stderr 应指明 cli.md does not exist");
     assert.ok(!existsSync(cli), "--check 不得创建缺失文件");
     assert.equal(readFileSync(mcp, "utf8"), drifted, "在场的 mcp-tools.md 原始字节不动");
+    assert.equal(readFileSync(events, "utf8"), expected[EVENTS_KEY], "在场的 transcript-events.md 原始字节不动");
 
-    // 全缺失（docs/ 整体删掉）：两份都报缺失、exit 1、目录不被创建。
+    // 全缺失（docs/ 整体删掉）：三份都报缺失、exit 1、目录不被创建。
     rmSync(join(fixture, "docs"), { recursive: true, force: true });
     const rMissingAll = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rMissingAll, "entry-4 missing all");
     assert.equal(rMissingAll.status, 1, `全缺失应 exit 1；stdout: ${rMissingAll.stdout}`);
     assert.match(rMissingAll.stderr, /mcp-tools\.md does not exist/, "全缺失也应报 mcp-tools.md does not exist");
     assert.match(rMissingAll.stderr, /cli\.md does not exist/, "全缺失也应报 cli.md does not exist");
+    assert.match(rMissingAll.stderr, /transcript-events\.md does not exist/, "全缺失也应报 transcript-events.md does not exist");
     assert.ok(!existsSync(join(fixture, "docs", "surface")), "--check 不得创建目录");
   } finally {
     rmrfRetry(home);
@@ -308,8 +316,10 @@ test("entry-5: 派生失败（动态 import 目标缺失）→ 非零退出，�
 
     writeFileSync(target(fixture, MCP_KEY), "OLD MCP — MUST SURVIVE\n", "utf8");
     writeFileSync(target(fixture, CLI_KEY), "OLD CLI — MUST SURVIVE\n", "utf8");
+    writeFileSync(target(fixture, EVENTS_KEY), "OLD EVENTS — MUST SURVIVE\n", "utf8");
     const beforeMcp = readFileSync(target(fixture, MCP_KEY));
     const beforeCli = readFileSync(target(fixture, CLI_KEY));
+    const beforeEvents = readFileSync(target(fixture, EVENTS_KEY));
 
     const rGen = runCli(cwd, fixture, []);
     assertSpawnClean(rGen, "entry-5 generate");
@@ -318,6 +328,7 @@ test("entry-5: 派生失败（动态 import 目标缺失）→ 非零退出，�
     assert.ok(rGen.stderr.length > 0, "失败原因应落在 stderr");
     assert.deepEqual(readFileSync(target(fixture, MCP_KEY)), beforeMcp, "生成失败：旧 mcp-tools.md 逐字节原样");
     assert.deepEqual(readFileSync(target(fixture, CLI_KEY)), beforeCli, "生成失败：旧 cli.md 逐字节原样");
+    assert.deepEqual(readFileSync(target(fixture, EVENTS_KEY)), beforeEvents, "生成失败：旧 transcript-events.md 逐字节原样");
 
     const rChk = runCli(cwd, fixture, ["--check"]);
     assertSpawnClean(rChk, "entry-5 check");
@@ -325,6 +336,7 @@ test("entry-5: 派生失败（动态 import 目标缺失）→ 非零退出，�
     assert.ok(!rChk.stdout.includes("up to date"), "不得输出 up to date 成功声明");
     assert.deepEqual(readFileSync(target(fixture, MCP_KEY)), beforeMcp, "检查失败：旧 mcp-tools.md 仍逐字节原样");
     assert.deepEqual(readFileSync(target(fixture, CLI_KEY)), beforeCli, "检查失败：旧 cli.md 仍逐字节原样");
+    assert.deepEqual(readFileSync(target(fixture, EVENTS_KEY)), beforeEvents, "检查失败：旧 transcript-events.md 仍逐字节原样");
   } finally {
     rmrfRetry(home);
   }
@@ -487,9 +499,11 @@ test("entry-8: import 库 / 直接运行库 / -e 导入且 argv 伪装 → 无�
     const rendered = lib.render([smokeTool]);
     assert.equal(typeof rendered[MCP_KEY], "string", "render 应产出 mcp-tools.md 文本");
     assert.equal(typeof rendered[CLI_KEY], "string", "render 应产出 cli.md 文本");
+    assert.equal(typeof rendered[EVENTS_KEY], "string", "render 应产出 transcript-events.md 文本");
     assert.ok(rendered[MCP_KEY].includes("## smoke_tool"), "render 应含传入工具的节");
     const full = await lib.generate();
     assert.equal(rendered[CLI_KEY], full[CLI_KEY], "render 与 generate 的 cli.md 一致（同一 SSOT）");
+    assert.equal(rendered[EVENTS_KEY], full[EVENTS_KEY], "render 与 generate 的 transcript-events.md 一致（登记表不依赖 tools）");
   } finally {
     rmrfRetry(home);
   }

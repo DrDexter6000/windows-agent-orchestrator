@@ -150,6 +150,10 @@ const CORE_TOP = Object.freeze(new Set([
   "src/smoke.js",
   "src/transcript.js",
   "src/projectBuckets.js", // D2-②b：转录路径/分桶权威对（解析链消费 transcriptPathFor，同层 core）
+  // 转录事件类型登记表（事件名与说明的唯一真值源）。放 src 顶层的理由：
+  // transcript.js（core 同层）的写入侧序列化守卫零开销查表；scripts/gen-surface.mjs
+  // （scripts 下向 import，不在扫描图内）渲染生成清单。零相对出边。
+  "src/transcriptEvents.js",
   // R23-F/B 登记（2026-08-22）：同机全量验证串行化闸（verification lease）。
   // 零相对出边除一条 core 同层边：./machineGatePaths.js（2→2，机器级闸路径
   // SSOT）；其余 node:fs/path/crypto。消费方 deliveryVerification/runManager/

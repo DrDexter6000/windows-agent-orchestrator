@@ -66,39 +66,6 @@ function tier1Paths(actionId) {
   return [...splitRowCells(row)[2].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 }
 
-function eventTableNames(rel, heading, nextHeadingPrefix) {
-  const text = read(rel);
-  const start = text.indexOf(heading);
-  assert.notEqual(start, -1, `${rel} 缺小节 ${heading}`);
-  const rest = text.slice(start + heading.length);
-  const next = rest.indexOf(`\n${nextHeadingPrefix} `);
-  const section = next === -1 ? rest : rest.slice(0, next);
-  return section.split(/\r?\n/)
-    .map((line) => line.match(/^\|\s*(?:\*\*)?`([^`]+)`(?:\*\*)?\s*\|/)?.[1])
-    .filter(Boolean);
-}
-
-// architecture §3.2 / usage §三即使同时误删同一行，行集相等也抓不到。
-// 这七项是历史上已经要求的人读投影下限；关系守卫负责两表相等，本集合负责
-// “两边一起漂”也必须红。新增事件仍只在 architecture 权威表定义，不在这里扩写
-// 全量清单。
-const REQUIRED_TRANSCRIPT_EVENTS = Object.freeze([
-  "run.event",
-  "scorecard.checked",
-  "run.rerun",
-  "run.cleanup_done",
-  "run.wait_policy",
-  "run.stop_verified",
-  "run.stop_unverified",
-]);
-
-function assertRequiredTranscriptEvents(archEvents, usageEvents) {
-  for (const eventName of REQUIRED_TRANSCRIPT_EVENTS) {
-    assert.ok(archEvents.includes(eventName), `architecture §3.2 缺必含 transcript 事件 ${eventName}`);
-    assert.ok(usageEvents.includes(eventName), `usage.md §三缺必含 transcript 事件 ${eventName}`);
-  }
-}
-
 const EXPECTED_M12_AUTHORITY_PATHS = Object.freeze([
   "docs/01-prd.md",
   "docs/02-architecture.md",
@@ -297,33 +264,33 @@ test("spec §7 目录结构不得把未实现的文件当作已存在列出", ()
   assertNotPresentedAsExisting("dag.js");
 });
 
-test("transcript 事件 spec 与人读投影行集相等，SKILL.md 不维护第三份清单", () => {
-  // 真值源 = architecture §3.2；usage §三只有在显式声明“投影自”且事件名
-  // 行集双向相等时，才是合法的第二份当前值陈述。
+test("SKILL.md 不维护第三份事件清单；文档只指向生成清单，不维护事件表", () => {
+  // 事件清单真值源 = src/transcriptEvents.js 登记表；生成层产出
+  // docs/surface/transcript-events.md（行集=登记表由 transcriptEventRegistry
+  // 守卫钉，字节新鲜度由 docsSurface-1 钉）。architecture §3.2 与 usage
+  // transcript 页已改为指针，不得回退成手写表。
   const skill = read("SKILL.md");
-  const usage = read("docs/usage.md");
-  const archEvents = eventTableNames("docs/02-architecture.md", "### 3.2 事件类型清单", "###");
-  const usageEvents = eventTableNames("docs/usage/transcript.md", "# transcript 格式", "##");
-  assert.ok(/投影自 `docs\/02-architecture\.md` §3\.2/.test(usage),
-    "usage.md §三必须显式声明投影自 architecture §3.2");
-  assert.equal(new Set(archEvents).size, archEvents.length, "architecture §3.2 不得有重复事件行");
-  assert.equal(new Set(usageEvents).size, usageEvents.length, "usage.md §三不得有重复事件行");
-  assert.deepEqual([...usageEvents].sort(), [...archEvents].sort(),
-    "usage 人读投影与 architecture 事件 spec 的事件名行集必须双向相等");
-  assertRequiredTranscriptEvents(archEvents, usageEvents);
-  assert.throws(() => assert.deepEqual([...usageEvents.slice(1)].sort(), [...archEvents].sort()));
-  // G3 反例：两侧同时删除同一必含事件时，行集仍相等；下限守卫必须独立抓红。
-  for (const required of REQUIRED_TRANSCRIPT_EVENTS) {
-    const archWithout = archEvents.filter((name) => name !== required);
-    const usageWithout = usageEvents.filter((name) => name !== required);
-    assert.deepEqual([...usageWithout].sort(), [...archWithout].sort(),
-      `反例前提：双侧删除 ${required} 后两表仍相等`);
-    assert.throws(
-      () => assertRequiredTranscriptEvents(archWithout, usageWithout),
-      new RegExp(`缺必含 transcript 事件 ${required.replace(".", "\\.")}`),
-      `双侧同时删除必含事件 ${required} 必须红`,
+  const arch = read("docs/02-architecture.md");
+  const usageTranscript = readFileSync(join(ROOT, "docs", "usage", "transcript.md"), "utf8");
+  for (const [label, text] of [["architecture §3.2", arch], ["usage transcript 页", usageTranscript]]) {
+    assert.ok(
+      text.includes("docs/surface/transcript-events.md"),
+      `${label} 必须指向生成清单 docs/surface/transcript-events.md`,
+    );
+    assert.doesNotMatch(
+      text,
+      /^\|\s*(?:\*\*)?`(?:run|session|prompt|scorecard|messages|acceptance|workflow)\.[a-z_.]+`/m,
+      `${label} 不得回退成手写事件表（一行一事件的形状即第三份清单）`,
     );
   }
+  assert.ok(
+    arch.includes("src/transcriptEvents.js"),
+    "architecture §3.2 必须指向登记表真值源 src/transcriptEvents.js",
+  );
+  assert.ok(
+    usageTranscript.includes("docs/surface/transcript-events.md"),
+    "usage transcript 页必须指向生成清单",
+  );
   // SKILL 不得再维护并行全量表（不得同时列 run.rerun 与 run.event 等做"完整清单"）。
   // 允许 SKILL 提及个别事件名，但不得做成"事件表"。用一个代理信号：
   // SKILL 若含 usage 不指向，且同时出现 4+ 个 run.* 事件名 → 视为并行表。
@@ -336,13 +303,14 @@ test("transcript 事件 spec 与人读投影行集相等，SKILL.md 不维护第
   );
 });
 
-test("R4 只读 run：usage.md 事件投影必须含 run.read_only_declared 正向锚", () => {
-  // Round 4 Bundle B：run.read_only_declared 是只读声明的 durable 事实类型，
-  // usage.md §三 是 architecture 事件 spec 的受守卫人读投影。
-  const usage = read("docs/usage.md");
+test("R4 只读 run：dispatch 页声明链路记录 run.read_only_declared 正向锚", () => {
+  // Round 4 Bundle B：run.read_only_declared 是只读声明的 durable 事实类型。
+  // 事件表已收进生成层（docs/surface/transcript-events.md）；操作页的正向
+  // 锚是派发页的"声明 → 强制隔离 → 观察"链路描述（事件名仍在场）。
+  const dispatch = readFileSync(join(ROOT, "docs", "usage", "dispatch.md"), "utf8");
   assert.ok(
-    usage.includes("run.read_only_declared"),
-    "usage.md transcript 事件投影缺 run.read_only_declared",
+    dispatch.includes("run.read_only_declared"),
+    "docs/usage/dispatch.md 声明链路缺 run.read_only_declared",
   );
 });
 
@@ -2005,11 +1973,13 @@ test("M11-11D-DOC-02: ordinary non-delivery query is structured truth", () => {
 });
 
 test("M11-11D-DOC-03: stop_verified means runtime quiet, not necessarily explicit stop", () => {
-  const usage = read("docs/usage.md");
-  assert.ok(/run\.stop_verified.*runtime.*静默/is.test(usage),
-    "usage gives stop_verified a runtime-quiet meaning");
-  assert.ok(/run\.stop_verified.*不表示 Lead 一定调用过 stop/is.test(usage),
-    "usage does not infer an explicit Lead stop");
+  // 事件说明的真值源迁入登记表（src/transcriptEvents.js），人读面是生成层
+  // 清单 docs/surface/transcript-events.md（字节新鲜度由 docsSurface-1 守卫）。
+  const events = readFileSync(join(ROOT, "docs", "surface", "transcript-events.md"), "utf8");
+  assert.ok(/run\.stop_verified.*runtime.*静默/is.test(events),
+    "transcript-events.md gives stop_verified a runtime-quiet meaning");
+  assert.ok(/run\.stop_verified.*不表示 Lead 一定调用过 stop/is.test(events),
+    "transcript-events.md does not infer an explicit Lead stop");
 });
 
 test("M11-11D-DOC-04: token forecast is retired from current product surfaces", () => {
@@ -3074,10 +3044,13 @@ test("R10-A: 认证 runbook（原 usage 场景 1b）记录 --model 用法、合�
     "必须记录 spawn/workflow/daemon 排除边界");
 });
 
-test("R10-A: usage.md 人读投影的 run.started 行携带 modelOverride 字段", () => {
-  const usage = read("docs/usage.md");
-  const row = usage.split(/\r?\n/).find((l) => l.startsWith("| `run.started`"));
-  assert.ok(row, "run.started 行存在");
+test("R10-A: 生成层事件清单的 run.started 行携带 modelOverride 字段", () => {
+  // 事件说明的真值源是 src/transcriptEvents.js 登记表；生成层清单
+  // docs/surface/transcript-events.md 是它的人读投影（字节新鲜度由
+  // docsSurface-1 守卫）。modelOverride 语义锚随事件表迁入登记表。
+  const events = readFileSync(join(ROOT, "docs", "surface", "transcript-events.md"), "utf8");
+  const row = events.split(/\r?\n/).find((l) => l.startsWith("| `run.started`"));
+  assert.ok(row, "transcript-events.md 的 run.started 行存在");
   assert.ok(row.includes("modelOverride"),
     "run.started 行必须提到 modelOverride 字段（一次性覆盖 vs 改注册表可审计区分）");
 });
