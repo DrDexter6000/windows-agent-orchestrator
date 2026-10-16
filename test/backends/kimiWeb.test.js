@@ -2196,10 +2196,10 @@ test("kimi-web R9 ⑯: 先见 running 后请求连续失败 → done(failed)（�
 
 // ===== 注册面（factory / registry 闭集接线） =====
 
-test("kimi-web 注册: factory 构造 + 六轴能力快照 + sessionOutlivesProcess 与设计定案一致", () => {
+test("kimi-web 注册: factory 构造 + 能力闭集快照 + sessionOutlivesProcess 与设计定案一致", () => {
   const viaFactory = backendFor({ backend: "kimi-web" }, { fetchImpl: async () => envelope({}) });
   assert.ok(viaFactory instanceof KimiWebBackend);
-  // sessionOutlivesProcess 不在六轴闭集（runManager 单独读取），直接对实例断言。
+  // sessionOutlivesProcess 不在能力轴闭集（runManager 单独读取），直接对实例断言。
   assert.equal(viaFactory.sessionOutlivesProcess, true);
   assert.deepEqual(backendCapabilitySnapshot({ backend: "kimi-web" }), {
     supportsRoleContract: true,
@@ -2209,6 +2209,7 @@ test("kimi-web 注册: factory 构造 + 六轴能力快照 + sessionOutlivesProc
     // v8 翻转：transcript 轮次 steps[].usage 实测非零（2026-09-30 live）。
     reportsTokenUsage: true,
     reportsCommandExitCode: false,
+    enforcesWriteSandbox: false,
   });
 });
 

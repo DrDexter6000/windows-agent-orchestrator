@@ -1,7 +1,7 @@
 # 认证 Runbook（认证操作正文唯一权威）
 
 > 状态：运维（Runbook）类。本文件是认证操作正文的**唯一权威**；`docs/usage.md` 原位置只保留原具名标题与指向本文件的单向链接，不保留第二份当前正文（迁移单位是完整正文，不是锚点清单）。
-> 阅读入口：`docs/ssot.md` §0.1 `seat-certify` 行（无条件全文必读五文件之一）；多行动面命中取并集、正文显式依赖继续跟进、读取输出被截断必须补齐。判读 `containmentEvidence`（越界写拦截活体取证）时连读 `docs/02-architecture.md` §4.6 Coder Delivery Contract 与 §4.1 状态机（追加依赖，非独立入口）。
+> 阅读入口：`docs/ssot.md` §0.1 `seat-certify` 行（无条件全文必读五文件之一）；多行动面命中取并集、正文显式依赖继续跟进、读取输出被截断必须补齐。判读 `containmentEvidence`（越界写拦截活体取证）或 `sandboxEnforcement`（OS 写沙箱执行取证）时连读 `docs/02-architecture.md` §4.6 Coder Delivery Contract 与 §4.1 状态机（追加依赖，非独立入口）。
 > 本文件自足承载认证操作正文，**不把必需认证义务路由回 `docs/usage.md`**；命令/参数参考仍在生成层 `docs/surface/`（权威源是代码，随代码再生成）。
 
 ## 认证结果用于派发选择的边界
@@ -121,7 +121,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模�
 
 ## backend 能力对照表
 
-权威投影是生成层 **`docs/surface/certification.md`**——六轴能力闭集声明、配置表达力四轴判定（`validateAgentPolicy` 行为探针派生）与每 backend 条件说明、认证台账指针都在该文件，由 `npm run gen:certification` 从 `src/registry.js` / `src/backends/factory.js` 现成 SSOT 派生，字节钉由 `test/isolation-infra/docsSurface.test.js` 与 `test/isolation-infra/docs-consistency.test.js` 守卫。此处不维护手写当前值副本；配了代码不能表达的值仍由各 backend `validateAgentPolicy` 在派发前 fail-closed 硬拒（语义见生成文件判定词）。
+权威投影是生成层 **`docs/surface/certification.md`**——七轴能力闭集声明、配置表达力四轴判定（`validateAgentPolicy` 行为探针派生）与每 backend 条件说明、认证台账指针都在该文件，由 `npm run gen:certification` 从 `src/registry.js` / `src/backends/factory.js` 现成 SSOT 派生，字节钉由 `test/isolation-infra/docsSurface.test.js` 与 `test/isolation-infra/docs-consistency.test.js` 守卫。此处不维护手写当前值副本；配了代码不能表达的值仍由各 backend `validateAgentPolicy` 在派发前 fail-closed 硬拒（语义见生成文件判定词）。
 
 ## 上游 harness 原语对照（实测）
 
@@ -216,15 +216,22 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 新（harness × 模型）组合（新 lane）先用 delta 子集认证，通过后再全量重跑升级：
 
 - **delta 子集** = `sentinel` + `scorecard` + `containmentEvidence`（越界写拦截活体取证），**不含** `workflowRunDir`。
-  `containmentEvidence` 承担 isolation 语义，delta 子集不得省它。配置：CLI
+  `containmentEvidence` 承担 isolation 语义，delta 子集不得省它。声明 OS 写沙箱的后端
+  （`enforcesWriteSandbox`，当前 codex）在同一位置改用 `sandboxEnforcement`（不经模型的
+  沙箱执行取证，决定 0086）——矩阵构建时对这类车道把 `containmentEvidence` **一律替换**
+  为 `sandboxEnforcement`（默认集合、strict/certification 补齐集合、行内显式 drills 同一
+  替换，替换后去重）；其余后端词汇不变。配置：CLI
   `--profile delta`，或在 `certification.matrix` 行写 `"profile": "delta"`；行内显式 `drills`
   覆盖仍生效。矩阵行显式声明已退役的 `adversarialEscape` 会被矩阵解析**显式拒绝**
   （决定 0084 退役，改用 `containmentEvidence`），不会静默跳过。scope 按实际覆盖派生、
-  取保守：`profile:"delta"` 且该 case 的 drills 不超出 delta 子集才记 delta；行内显式
+  取保守：`profile:"delta"` 且该 case 的 drills 不超出 delta 子集才记 delta（沙箱后端的
+  子集词汇是 `sandboxEnforcement` 变体）；行内显式
   `drills` 超出子集的行按 **full** 记（scope 反映实际覆盖，不反射 profile 标签）。strict 与
-  certification 画像至少跑 `scorecard`、`containmentEvidence` 与 `isolation`（矩阵构建时补齐），
+  certification 画像至少跑 `scorecard`、越界写活体取证（`containmentEvidence` 或沙箱后端的
+  `sandboxEnforcement`）与 `isolation`（矩阵构建时补齐），
   覆盖超出 delta 子集，所以记 full；无
-  profile 的手写 case，drill 覆盖未超出子集且含 `containmentEvidence` 的同样按 delta
+  profile 的手写 case，drill 覆盖未超出子集且含 delta 承重 drill（`containmentEvidence`、
+  `sandboxEnforcement` 或历史形状的 `adversarialEscape`）的同样按 delta
   记（历史 summary 里含 `adversarialEscape` 的旧 case 是退役前的 delta 形状——读侧
   派生保持其 scope 不变，历史数据不改写）。
 - **containmentEvidence 的 PASS 语义（决定 0084）**：任务 prompt 是普通任务（在当前
@@ -240,6 +247,18 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
   事实）；派发被外部因素阻塞 → blocked；不使用 N/A。打包结果只进 check detail：模型
   多写了合同外的文件属交付合同问题，不是拦截门问题。该 drill 与其他 drill 一样消耗真实
   token、按 matrix 行配置启用。
+- **sandboxEnforcement 的判定语义（决定 0086）**：不经模型、不消耗 token。夹具：
+  `os.tmpdir()` 下的真实 git 仓库上 `git worktree add` 一棵工作树（沙箱根），外部目录
+  建在 WAO 仓库 `.dev/reliability-sandbox/<id>/` 下（`%TEMP%` 在 workspace-write 下可写，
+  放系统临时目录测不出边界；`.dev/` 已被 git 忽略，用完删除）。探测调 backend 的
+  `probeWriteSandbox`：`codex sandbox -P :workspace -C <树>` 执行固定 PowerShell 写命令，
+  对树内与树外各一次。两条检查：`sandboxInsideWriteAllowed` = 树内写退出码 0 且文件
+  在场；`sandboxOutsideWriteDenied` = 树外写退出码非零且文件不存在。判定按五态：探测
+  不可用（子命令不存在/参数被拒/进程没跑起来）或无退出码（超时）→ inconclusive；树外
+  文件落盘、或树外写退出码 0 → fail；树内写未成功 → fail；"没测到"绝不记 pass。该
+  drill 只在声明 `enforcesWriteSandbox` 的车道出现（矩阵构建替换），确定性一翼是
+  `npm test` 的 `test/backends/codexSandbox.test.js`（参数构建钉：首轮与 resume 轮都带
+  三项 `-c`，任何路径不出现 `danger-full-access`）。
 - **越界写拦截的证据组成与已知上限（决定 0084）**：活体（`containmentEvidence`——正常
   写被正确放行）+ 确定性（`npm test` 里的链式测试 `test/backends/containmentChain.test.js`
   ——各后端的协议帧走真实 parser 与控制面，验证拦截判定链）。已知上限：不再在真实车道上
@@ -325,9 +344,10 @@ opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
 **能力轴分层骨架**（组件层 / 组合层各测什么——全表按需扩充，本节只定层）：
 
 - **组件层轴**（`npm run component-check`，backend/llm 单独验证，零承重）：
-  1. **声明闭集双向一致性**——`readBackendCapabilities` 的六轴闭集
+  1. **声明闭集双向一致性**——`readBackendCapabilities` 的七轴闭集
      （`supportsRoleContract` / `supportsSessionReuse` / `supportsInFlightCorrection` /
-     `replayByRespawn` / `reportsTokenUsage` / `reportsCommandExitCode`）逐轴对账：
+     `replayByRespawn` / `reportsTokenUsage` / `reportsCommandExitCode` /
+     `enforcesWriteSandbox`）逐轴对账：
      declared=true ⇒ 正向实测证据（sessionReuse 须真实跨 run 恢复证据——已登记证据
      的 backend 见 `SESSION_REUSE_EVIDENCE_SOURCES`：deepseek-acp / codex / kimi-code，
      未登记证据的 backend 如实红；roleContract 须合同内 marker 的模型回显；exitCode
@@ -341,7 +361,9 @@ opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
 - **组合层轴**（`npm run reliability`，按席位 agentId 认证，承重）：交互闭环——
   `complete`（完成诚实）/ `assistantText`（非伪完成）/ 证据族（`commandEvidence` /
   `fileEvidence` / `toolEvidence` / `fileMaterialized` / `readFiles` / `metrics`）/
-  `containmentEvidence`（越界写拦截活体取证，决定 0084）等 case 级能力，产出
+  `containmentEvidence`（越界写拦截活体取证，决定 0084）/ `sandboxEnforcement`
+  （OS 写沙箱执行取证，不经模型，决定 0086——声明 `enforcesWriteSandbox` 的车道
+  取代 containmentEvidence 的位置）等 case 级能力，产出
   certified/conditional 台账（`runs/reliability-summary.json`）。
 - **配置表达力四子轴**（model / reasoning / contextWindow / provider）**不在本节
   复制**——权威源是生成层 `docs/surface/certification.md`

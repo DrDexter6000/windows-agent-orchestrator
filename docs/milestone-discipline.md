@@ -94,7 +94,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 ### 6.7 reliability 套件：完成判定/provider 路径修改的硬门槛
 
 - `npm test`（mock）只验证逻辑对；`npm run reliability`（真实 provider）验证"系统能跑 + 输出对 + 真完成"，并输出 runtime+model certification。
-- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model。`--profile strict` 默认跑 sentinel + scorecard + containmentEvidence + isolation，并确保 command/file scorecard drill（矩阵行未显式声明 drills 时也会加上），避免只凭 sentinel 把 worker 误标为 strict-dispatch capable；`--profile delta` 跑 delta 子集（sentinel + scorecard + containmentEvidence 越界写拦截活体取证）；矩阵行可显式声明更多 drill（isolation / containmentEvidence / workflowRunDir / stop；已退役的 adversarialEscape 会被矩阵解析显式拒绝，决定 0084）。解析出 0 个认证 case 时显式失败退出，不空转报全绿。
+- reliability 读取 registry 的 `certification.matrix`（缺省回退 legacy 矩阵），用 sentinel 方法（读文件再答，防背诵/防伪完成）+ 可配置 drills 认证 runtime/model。各画像（`--profile strict` / `--profile delta`）跑哪些检查、矩阵行能声明哪些 drill，见 `docs/certification-runbook.md`「delta 认证规程」；strict 画像不会只凭 sentinel 把 worker 标为 strict-dispatch capable。解析出 0 个认证 case 时显式失败退出，不空转报全绿。
 - 规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的交付，收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二份陈述漂移；单席增量重认证的保留语义见下），不能只靠 npm test 报绿就声称完成。
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
 - 单 worker 重认证不覆盖全量：`npm run reliability -- --agent X` 跑完增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。

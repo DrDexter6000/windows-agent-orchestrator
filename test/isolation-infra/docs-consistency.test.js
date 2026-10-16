@@ -3893,7 +3893,7 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
     ["并集", row.replace("多行动面命中取并集；", ""), /并集/],
     ["依赖跟进", row.replace("正文显式依赖继续跟进；", ""), /显式依赖/],
     ["截断补读", row.replace("读取输出被截断必须补齐。", ""), /截断/],
-    ["追加依赖指针", row.replace("判读 containmentEvidence（越界写拦截活体取证）时连读", "另见"), /containmentEvidence/],
+    ["追加依赖指针", row.replace("判读 containmentEvidence 或 sandboxEnforcement（越界写拦截活体取证）时连读", "另见"), /containmentEvidence/],
   ];
   for (const [label, mutated, re] of drops) {
     assert.notEqual(mutated, row, `夹具失效：${label} 删除变异未生效`);

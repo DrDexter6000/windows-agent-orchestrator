@@ -151,6 +151,8 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
       replayByRespawn: true,
       reportsTokenUsage: false,
       reportsCommandExitCode: false,
+      // enforcesWriteSandbox 也是基类显式声明（false：进程族默认无 OS 写沙箱）。
+      enforcesWriteSandbox: false,
     },
     "快照读取对未声明子类 fail-closed（声明闭集全量轴，ADR-0032 §2；基类显式成员除外）",
   );
@@ -166,6 +168,7 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
       replayByRespawn: false,
       reportsTokenUsage: false,
       reportsCommandExitCode: false,
+      enforcesWriteSandbox: false,
     },
     "truthy 非 true 一律读 false（闭集全量轴逐成员）",
   );
@@ -179,7 +182,7 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
 // =====================================================================
 
 test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的当前声明一致", () => {
-  // ADR-0032 §2（2026-09-21）：快照扩到声明闭集全量六轴。逐成员事实源：
+  // ADR-0032 §2（2026-09-21）：快照扩到声明闭集全量。逐成员事实源：
   //   replayByRespawn —— ProcessBackend 基类 true（进程族 resume = 重放进新进程）；
   //     opencode-serve（HTTP 附着）与 deepseek-acp（resume 走 session/resume）为 false。
   //   supportsInFlightCorrection —— 仅 claude-code（stdin stream-json 在途排队）。
@@ -188,27 +191,29 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
   //     决定 0073 起 false（前者 isError 是关键词匹配，后者缺负向证据）；
   //     deepseek-acp false（evidence/phase7-exit-code-wire.json：tool_call_update
   //     不填 rawOutput、退出码只在非零退出的自由文本标记里）。
+  //   enforcesWriteSandbox —— 仅 codex（每次 exec/exec resume 显式传 workspace-write
+  //     三项 -c，决定 0086）；其余 backend 无 OS 写沙箱（越界写拦截按 0084 侦测）。
   const expected = {
-    "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
-    "codex": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
-    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: false },
-    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
+    "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true, enforcesWriteSandbox: false },
+    "codex": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true, enforcesWriteSandbox: true },
+    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: false, enforcesWriteSandbox: false },
+    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false, enforcesWriteSandbox: false },
     // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
     // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
     // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。
-    "deepseek-acp": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: false, reportsCommandExitCode: false },
-    "opencode-serve": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: true, reportsCommandExitCode: true },
+    "deepseek-acp": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: false, reportsCommandExitCode: false, enforcesWriteSandbox: false },
+    "opencode-serve": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: true, reportsCommandExitCode: true, enforcesWriteSandbox: false },
     // 第七成员 kimi-web（Owner 2026-09-30 批准入册；上游事实 = 当日对本机
     // kimi 2.1.1 `kimi web` REST 的直跑实测）：在途纠偏走 prompts 排队 +
     // prompts:steer；v8（transcript 轮次原语）起 steps[].usage 实测非零 →
     // reportsTokenUsage=true（完成判定同轮迁移到 transcript 终态原语）。
-    "kimi-web": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
+    "kimi-web": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false, enforcesWriteSandbox: false },
     // 第八成员 zcode（Owner 2026-10-01 批准入册；上游事实 = 当日对本机 zcode
     // 0.16.9 app-server 协议的 live 实测）：roleContract 拼进 content 前缀
     //（prompt 级）；session 复用 = 复用前任 sess_ id 直发 session/send；
     // 在途注入原语未见（如实 false）；session/usage 全量计量非零 → true；
     // 命令退出码通道未证实 → false。
-    "zcode": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
+    "zcode": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false, enforcesWriteSandbox: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
     assert.deepEqual(

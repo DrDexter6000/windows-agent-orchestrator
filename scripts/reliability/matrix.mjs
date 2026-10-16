@@ -2,6 +2,9 @@
 // 与 run-reliability.mjs agentInfo / runManager.matchedCertRecord 同源零漂移。
 import { providerKeyFor } from "../../src/providerFingerprint.js";
 import { matrixCaseLabel } from "../../src/registry.js";
+// 决定 0086：OS 写沙箱能力声明（enforcesWriteSandbox）的读取 SSOT——矩阵构建
+// 按声明选 drill 词汇，共享代码不按运行时名分支。
+import { backendCapabilitySnapshot } from "../../src/backends/factory.js";
 
 const LEGACY_MATRIX = [
   { agentId: "coder", label: "GLM snapshot-stable", providerID: "zhipuai-coding-plan" },
@@ -9,13 +12,30 @@ const LEGACY_MATRIX = [
   { agentId: "coder_multimodal", label: "Kimi first-stable", providerID: "kimi-for-coding", optional: true },
 ];
 
-// ADR-0025 §5 / 决定 0084：delta 认证子集的 drill 词汇 SSOT。
+// ADR-0025 §5 / 决定 0084 / 决定 0086：delta 认证子集的 drill 词汇 SSOT。
 // 新（harness × 模型）组合走 delta 认证：sentinel（core 能力）+ scorecard（strict 证据）
 // + containmentEvidence（越界写拦截的活体取证——承担 isolation 语义，不得省）。
 // 不含 workflowRunDir；通过 → conditional + certificationScope:"delta"。
 // DELTA_DRILLS 同时是 scripts/reliability/certification.mjs scope 派生的比对基准
-// （单一清单，无第二份）。
+// （单一清单，无第二份）。声明 OS 写沙箱的后端（决定 0086）在同一位置用
+// sandboxEnforcement（不经模型的沙箱执行取证）取代 containmentEvidence——
+// 词汇选择由 deltaDrillsForBackend(backend) 派生。
 export const DELTA_DRILLS = ["sentinel", "scorecard", "containmentEvidence"];
+
+// 决定 0086：enforcesWriteSandbox 后端的 delta 词汇（与 containmentEvidence 同一
+// 位置，同一 isolation 语义）。
+export const DELTA_DRILLS_WRITE_SANDBOX = ["sentinel", "scorecard", "sandboxEnforcement"];
+
+/** backend 是否声明 OS 写沙箱（读取走 backendCapabilitySnapshot SSOT，strict === true）。 */
+export function declaresWriteSandbox(backendName) {
+  return typeof backendName === "string"
+    && backendCapabilitySnapshot({ backend: backendName })?.enforcesWriteSandbox === true;
+}
+
+/** 该 backend 的 delta 子集词汇（沙箱后端为 WRITE_SANDBOX 变体，单一派生无第二份）。 */
+export function deltaDrillsForBackend(backendName) {
+  return declaresWriteSandbox(backendName) ? DELTA_DRILLS_WRITE_SANDBOX : DELTA_DRILLS;
+}
 
 // 决定 0084 退役前的 delta 词汇（adversarialEscape 越界写对抗）。只服务历史
 // summary 的 scope 读侧派生——旧 case 的 drills 原样在盘上（历史数据不改写），
@@ -40,14 +60,15 @@ function assertNoRetiredDrill(drills) {
   }
 }
 
-export function defaultDrillsForProfile(profile = "basic") {
+export function defaultDrillsForProfile(profile = "basic", backend = null) {
   if (profile === "strict" || profile === "certification") {
     // 全量覆盖超出 delta 子集：另跑 isolation（写入落在工作树、源检出没被写），
     // scope 按实际覆盖记 full；只改标签、drills 仍是 delta 子集的行仍记 delta。
-    return ["sentinel", "scorecard", "containmentEvidence", "isolation"];
+    // 决定 0086：沙箱后端的 containmentEvidence 位置由 sandboxEnforcement 取代。
+    return ["sentinel", "scorecard", containmentDrillFor(backend), "isolation"];
   }
   if (profile === "delta") {
-    return [...DELTA_DRILLS];
+    return [...deltaDrillsForBackend(backend)];
   }
   return ["sentinel"];
 }
@@ -89,7 +110,8 @@ function agentIdentity(field, agentValue, rowValue) {
 
 function normalizeCase(tc, agent = {}, profileOverride) {
   const profile = profileOverride ?? tc.profile ?? "basic";
-  const drills = normalizeDrills(tc.drills, profile);
+  const backend = agent.backend ?? tc.backend ?? null;
+  const drills = normalizeDrills(tc.drills, profile, backend);
   return {
     agentId: tc.agentId,
     label: matrixCaseLabel(tc.agentId, tc),
@@ -99,7 +121,7 @@ function normalizeCase(tc, agent = {}, profileOverride) {
     optional: tc.optional ?? false,
     expectComplete: tc.expectComplete ?? true,
     expectText: tc.expectText ?? true,
-    backend: agent.backend ?? tc.backend ?? null,
+    backend,
     // 账实一致（ADR-0032 §6）：runner 按 agentId 用 **agent 配置** 派发，台账身份必须同源。
     // 旧行为允许矩阵行覆盖 providerID/modelId → 存在"账上身份 ≠ 实际派发配置"的路径，
     // 与 :providerKey 同族的教训（TD-133 / TD-169）。行值与 agent 不一致时以 agent 为准并告警。
@@ -117,16 +139,26 @@ function mergeCategories(explicitCategories, impliedCategories) {
   return [...new Set([...(explicitCategories ?? []), ...impliedCategories])];
 }
 
-function normalizeDrills(drills, profile) {
+// 决定 0086：containmentEvidence 的 drill 名在沙箱后端上一律替换为
+// sandboxEnforcement（默认集合、strict/certification 补齐集合、行内显式 drills
+// 同一替换；替换后去重）。其余后端词汇不变。
+function containmentDrillFor(backend) {
+  return declaresWriteSandbox(backend) ? "sandboxEnforcement" : "containmentEvidence";
+}
+
+function normalizeDrills(drills, profile, backend = null) {
   assertNoRetiredDrill(drills);
+  const swapForSandbox = (drill) =>
+    drill === "containmentEvidence" ? containmentDrillFor(backend) : drill;
   const out = [];
-  for (const drill of drills ?? defaultDrillsForProfile(profile)) {
+  for (const drill of (drills ?? defaultDrillsForProfile(profile, backend)).map(swapForSandbox)) {
     if (!out.includes(drill)) out.push(drill);
   }
   if (profile === "strict" || profile === "certification") {
     // 全量画像至少跑这三项：scorecard 的命令/文件证据，加越界写拦截的活体取证
-    // 与隔离（决定 0084）。行内显式 drills 少写了也在这里补齐。
-    for (const required of ["scorecard", "containmentEvidence", "isolation"]) {
+    // 与隔离（决定 0084；沙箱后端的活体取证是 sandboxEnforcement，决定 0086）。
+    // 行内显式 drills 少写了也在这里补齐。
+    for (const required of ["scorecard", containmentDrillFor(backend), "isolation"]) {
       if (!out.includes(required)) out.push(required);
     }
   }
@@ -138,13 +170,15 @@ function requiredCategoriesForDrills(drills) {
   if (drills.includes("scorecard")) {
     categories.push("strict");
   }
-  // containmentEvidence 是 isolation 类检查（越界写拦截的活体取证，决定 0084）：
-  // 要求 operational 类目——delta 子集不得把 isolation 语义降为可选。
+  // containmentEvidence / sandboxEnforcement 是 isolation 类检查（越界写拦截的
+  // 活体取证，决定 0084 / 0086）：要求 operational 类目——delta 子集不得把
+  // isolation 语义降为可选。
   if (
     drills.includes("isolation")
     || drills.includes("workflowRunDir")
     || drills.includes("stop")
     || drills.includes("containmentEvidence")
+    || drills.includes("sandboxEnforcement")
   ) {
     categories.push("operational");
   }

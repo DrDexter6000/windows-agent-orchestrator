@@ -713,8 +713,10 @@ test("containmentEvidenceChecks: 工作树未知而有上报写入 → 上报事
 });
 
 test("strict 画像：默认 drills 含 containmentEvidence 与 isolation，scope 按覆盖记 full；只改标签不升级，历史形状不变", () => {
+  // 非 OS 写沙箱车道（zcode）：strict 默认集仍含 containmentEvidence——codex 的
+  // 沙箱替换（containmentEvidence→sandboxEnforcement）由决定 0086 的专项测试覆盖。
   const registry = {
-    agents: { coder_strict: { backend: "codex", cwd: "D:/repo" } },
+    agents: { coder_strict: { backend: "zcode", cwd: "D:/repo" } },
     certification: { matrix: [{ agentId: "coder_strict", profile: "strict" }] },
   };
   const matrix = buildCertificationMatrix({ registry });
@@ -738,7 +740,7 @@ test("strict 画像：默认 drills 含 containmentEvidence 与 isolation，scop
   assert.equal(certificationScopeForCase(relabeled[0]), "full", "full 来自实际覆盖");
   const strictExplicitNarrow = buildCertificationMatrix({
     registry: {
-      agents: { coder_s: { backend: "codex", cwd: "D:/repo" } },
+      agents: { coder_s: { backend: "zcode", cwd: "D:/repo" } },
       certification: { matrix: [{ agentId: "coder_s", profile: "strict", drills: ["sentinel"] }] },
     },
   });

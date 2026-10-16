@@ -7,8 +7,10 @@
 // `backend-capabilities` 的落点，见 docs/ssot.md §2 铁律 1）。
 //
 // 数据源（全部现成 SSOT，禁止新增真相源）：
-//   - 六轴能力：src/registry.js KNOWN_BACKENDS × src/backends/factory.js
-//     BACKEND_CAPABILITY_AXES / readBackendCapabilities（strict === true）。
+//   - 能力轴闭集：src/registry.js KNOWN_BACKENDS × src/backends/factory.js
+//     BACKEND_CAPABILITY_AXES / readBackendCapabilities（strict === true）；
+//     渲染文案中的轴数一律经 axesCountLabel() 从 BACKEND_CAPABILITY_AXES.length
+//     派生，不手写计数。
 //   - 配置表达力四轴（model override / reasoning effort / contextWindow /
 //     provider 块）：行为探针——对经共享工厂构造的 backend 实例调用
 //     validateAgentPolicy，探针形状与 支持/不支持/条件 判定法沿用
@@ -180,9 +182,21 @@ const AXIS_LABELS = {
   replayByRespawn: "replayByRespawn（重放=重生）",
   reportsTokenUsage: "reportsTokenUsage（token usage）",
   reportsCommandExitCode: "reportsCommandExitCode（命令退出码）",
+  enforcesWriteSandbox: "enforcesWriteSandbox（OS 写沙箱）",
 };
 
-/** 六轴 ✅/—（strict === true，声明闭集投影）。 */
+// 轴数文案从闭集长度派生（中文数字到九，超出即抛错——扩到十轴以上时先扩本表，
+// 不静默渲染错误计数）。
+const AXIS_COUNT_CN = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+function axesCountLabel() {
+  const n = BACKEND_CAPABILITY_AXES.length;
+  if (n >= AXIS_COUNT_CN.length) {
+    throw new Error(`gen-certification: BACKEND_CAPABILITY_AXES grew to ${n} — extend AXIS_COUNT_CN before rendering`);
+  }
+  return AXIS_COUNT_CN[n];
+}
+
+/** 能力轴 ✅/—（strict === true，声明闭集投影）。 */
 function capabilityCell(declared) {
   return declared ? "✅" : "—";
 }
@@ -252,13 +266,13 @@ export function renderCertification() {
   lines.push("");
   lines.push("数据源（现成 SSOT，本文件不含第二真相）：");
   lines.push("");
-  lines.push("- 六轴能力：`src/registry.js` `KNOWN_BACKENDS` × `src/backends/factory.js` `BACKEND_CAPABILITY_AXES` / `readBackendCapabilities`（strict `=== true`——未声明读 false，fail-closed）。");
+  lines.push(`- ${axesCountLabel()}轴能力：\`src/registry.js\` \`KNOWN_BACKENDS\` × \`src/backends/factory.js\` \`BACKEND_CAPABILITY_AXES\` / \`readBackendCapabilities\`（strict \`=== true\`——未声明读 false，fail-closed）。`);
   lines.push("- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生（判定法沿用退役 TD-162 policy 门守卫的同一套派生法；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量）。");
   lines.push("- 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。");
   lines.push("");
   lines.push("漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等。入口合同（2026-09-22 收束包拆分）：`scripts/gen-certification.mjs` 是**纯库**——只导出 `renderCertification()`，导入零副作用、零入口探测（任何 argv 形状下 import 都不生成/不检查/不退出）；进程入口是薄 CLI `scripts/gen-certification-cli.mjs`（无参＝写出、恰好 `--check`＝只读比对、其他任何参数＝非零退出且不写不查）——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。");
   lines.push("");
-  lines.push("## 一、六轴能力闭集声明（strict === true）");
+  lines.push(`## 一、${axesCountLabel()}轴能力闭集声明（strict === true）`);
   lines.push("");
   lines.push(`| backend | ${BACKEND_CAPABILITY_AXES.join(" | ")} |`);
   lines.push(`| --- | ${BACKEND_CAPABILITY_AXES.map(() => "---").join(" | ")} |`);

@@ -94,6 +94,7 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
   "replayByRespawn",
   "reportsTokenUsage",
   "reportsCommandExitCode",
+  "enforcesWriteSandbox",
 ]);
 
 /**
@@ -122,6 +123,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     provider: "不支持 provider 块——模型路由由 `model.providerID` 承担",
     supportsRoleContract: "须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）",
     reportsTokenUsage: "session.tokens 周期轮询",
+    enforcesWriteSandbox: "无 OS 写沙箱——上游 serve 无沙箱面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "未按生命体征口径适配（Owner 2026-10-12：该后端不再投入）；收口门为 `silentTimeout` 与快照稳定判据",
   }),
   "claude-code": Object.freeze({
@@ -131,6 +133,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsRoleContract: "`--append-system-prompt`（内容直传，恰好一次）",
     supportsInFlightCorrection: "stdin stream-json 排队（同一活进程；delivered 证明字节被接受，不证明模型执行了该轮）",
     reportsTokenUsage: "result 帧 usage",
+    enforcesWriteSandbox: "无 OS 写沙箱——CLI 未接线沙箱参数，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   codex: Object.freeze({
@@ -139,6 +142,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）",
     reportsTokenUsage: "turn.completed 帧 usage",
+    enforcesWriteSandbox: "每次 `exec` / `exec resume` 显式传 `-c sandbox_mode=\"workspace-write\"` 等三项（压过用户 config.toml；决定 0086）；可写面 = 运行的工作目录 + 系统临时目录（`%TEMP%` 可写是已知边界），关联工作树的 git 元数据在树外不可写；活体证据 = reliability `sandboxEnforcement`（`codex sandbox -P :workspace` 探测，不经模型）",
     vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   "kimi-code": Object.freeze({
@@ -147,6 +151,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "`kimi -r <session_id>`；id 来自轮末 `session.resume_hint`、runner 运行期补记；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "拼进同一条 prompt（非系统级通道，prompt 级引导）",
     reportsTokenUsage: "stream-json 无 usage——tokenBudget 不生效（TD-87）",
+    enforcesWriteSandbox: "无 OS 写沙箱——CLI 无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内\"等不到进展\"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征",
   }),
   "deepseek-harness": Object.freeze({
@@ -154,6 +159,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     provider: "组合由 `dshConfigPath` / `dshProvider` 表达，配 provider 块即拒",
     supportsRoleContract: "`DSH_SYSTEM_PROMPT`",
     reportsTokenUsage: "assistant/message 帧 usage",
+    enforcesWriteSandbox: "无 OS 写沙箱——dsh 无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：协议帧（握手落 `initialized`，assistant 分片落 `streaming`）。没有轮内\"等不到进展\"的收口门（请求级 15s 超时除外）；长工具调用期间不落体征事实",
   }),
   "deepseek-acp": Object.freeze({
@@ -164,6 +170,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh",
     supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",
     reportsTokenUsage: "`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道",
+    enforcesWriteSandbox: "无 OS 写沙箱（进程级）——containment 走操作员安装的 ACP 补丁面，WAO 不在调用层强制 OS 沙箱，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：协议帧（握手落 `initialized`）。没有轮内\"等不到进展\"的收口门——握手等非 prompt 请求有 15s 超时，prompt 请求本身不设时限；轮内不落体征事实",
   }),
   // 第 7 个 backend（Owner 2026-09-30 批准入册）。上游事实 = 2026-09-30 对本机
@@ -177,6 +184,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）",
     supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性（**形状未实测**，仅标注）：steered 的消费据说可见于 transcript prompts[].steeredAt / turn 结构；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称",
     reportsTokenUsage: "transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（60–240s 自适应预算 + serve 证词，见本后端的 `vitalSigns`），两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）",
+    enforcesWriteSandbox: "无 OS 写沙箱——HTTP attach 远端 serve，写发生在服务器侧进程，本机调用层无沙箱面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）",
   }),
   // 第 8 个 backend（Owner 2026-10-01 批准入册）。上游事实 = 2026-10-01 对本机
@@ -190,6 +198,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/setMode {sessionId, mode:\"yolo\"}` → `session/send`（setMode 每次派发都发、失败 fail-closed 拒绝——app-server create 默认 build，scorecard 实测写被权限层拦，runs/reliability/run_20261001213724000cy1b3a）——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证 zcode.cjs:15262 sessions:new Map 每进程一张、15256 setModel 走 requireSession、15245 查表 miss 抛 `Session is not active`、15256 wRn 装载注册；跳过 resume 直接 setModel 必失败）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据自 2026-10-10 B′ 根修起为【身份切片】（锚点=本轮新 user 消息，完成=parent 指向它的新 assistant 末位 step-finish；历史变异=基线 id 序列不再前缀→具名失败；resume 历史缺 info.id→发送前拒绝零 token）——上游消息 info.id/role/parentID 与 part id/messageID 已 live 探针实证在场且跨快照稳定（glm-flash 三轮 fresh/同进程/跨进程 resume，证据 .dev/bprime-evidence/；验收反例组 ⑨h-⑨l/⑫f 在旧位置判据上实证红）；旧判据的「头部插入→旧 stop 右移→假 completed+发射旧答案」残余就此关闭（该残余曾连带击穿 0052 失败即弃与 run_lineage 交付链）",
     supportsInFlightCorrection: "app-server 协议不开放在途注入：活动轮里再发 `session/send` 返回 -32010 \"A prompt is already running for this session\"（live 实测；bundle 运行时虽有 steer 队列，协议方法表里没有注入活动轮的方法）——如实声明 false；翻转条件 = 协议出现注入活动轮的方法并有 live 证据",
     reportsTokenUsage: "`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游 CRn 实现形状 zcode.cjs:15259，cache 系带 `Tokens` 后缀）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对（opencode session.tokens 同款语义）；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）",
+    enforcesWriteSandbox: "无 OS 写沙箱——app-server 协议无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：新 part / 工具证据、模型流分片（落 `streaming`）、app-server 后代进程的 CPU / I/O / 生灭（落 `process_active`）、工作目录文件变化（落 `files_changed`）、本轮主轮请求的上游重试等待（`v4/telemetry/event` 的 `model.request.status`：仅本会话、本轮 turnId、`querySource=main_turn` 的 `model_retry_scheduled`，有效到到达时刻+delayMs+30s 余量，落 `provider_retry`；同一安排的重复通知不延长，链上其后出现 started/completed（换 requestId 也算）、turn 结束或换轮即作废且粘住——作废前首见的安排连同其重复通知不再复活续命；failed/stream_stalled 本身不续命；上游上报 maxAttempts=0（重试预算无界）时每个新安排都会重新立窗、没有自动上限，且服务端 retry-after 可把单次退避拉长到远超 300s——有体征运行的去留归 Lead，决定 0067）。三道收口门到点先看体征，全无才收口（约 5–10 分钟）；有体征没有自动上限（决定 0067；重试等待不重置停滞预算时钟——退避窗一过仍无进展即收口）",
   }),
 });

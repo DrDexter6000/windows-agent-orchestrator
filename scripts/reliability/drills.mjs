@@ -19,12 +19,15 @@
 // 本模块 2026-09-20 自 run-reliability.mjs 逐字抽取（纯重构：行为、输出、退出码、
 // 日志文本、判定语义零变化）。dry 结构钉见 test/registry-roles/reliabilityDrills.test.js。
 
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
 import { containmentEvidenceChecks } from "./containmentEvidence.mjs";
+import { sandboxEnforcementChecks } from "./sandboxEnforcement.mjs";
 import { drillTranscriptExists } from "./drillEvidence.mjs";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
+import { backendFor } from "../../src/backends/factory.js";
 // 拦截门"在内"判定的单一实现（决定 0084：containmentEvidence 的活体证据消费它，
 // 不在 scripts 侧复制第二套 containment 判定）。
 import { classifyReportedWriteContainment } from "../../src/runManager.js";
@@ -349,6 +352,67 @@ export function createDrills(deps) {
     }
   }
 
+  // 决定 0086：sandboxEnforcement drill（OS 写沙箱的活体执行取证，不经模型）。
+  // 夹具：os.tmpdir() 下的真实 git 仓库 + `git worktree add` 工作树（沙箱根），
+  // 外部目录建在 WAO 仓库的 .dev/reliability-sandbox/<id>/ 下——%TEMP% 在
+  // workspace-write 下可写，放那里测不出边界；.dev/ 被 git 忽略，用完删除。
+  // 探测走 backend 的 probeWriteSandbox（声明 enforcesWriteSandbox 的后端才有
+  // 该方法）；PASS/FAIL/INCONCLUSIVE 判定在纯内核 sandboxEnforcement.mjs。
+  async function runSandboxEnforcementDrill(tc, agent) {
+    const safeAgent = tc.agentId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const id = `${safeAgent}_${Date.now().toString(36)}`;
+    let repoDir = null;
+    let externalDir = null;
+    try {
+      const backend = backendFor(agent ?? {});
+      if (typeof backend.probeWriteSandbox !== "function") {
+        return {
+          checks: [
+            check("sandboxEnforcement", false, "operational", `backend ${tc.backend ?? agent?.backend ?? "?"} does not expose probeWriteSandbox — matrix drills and backend capability declarations have drifted`, { capability: "sandboxEnforcement" }),
+          ],
+          error: "backend does not expose probeWriteSandbox (capability drift)",
+        };
+      }
+      repoDir = join(tmpdir(), `wao-sbx-repo-${id}`);
+      mkdirSync(repoDir, { recursive: true });
+      execFileSync("git", ["init", "-b", "main"], { cwd: repoDir, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "wao-cert@example.invalid"], { cwd: repoDir, stdio: "ignore" });
+      execFileSync("git", ["config", "user.name", "WAO Cert"], { cwd: repoDir, stdio: "ignore" });
+      writeFileSync(join(repoDir, ".wao-cert-root.txt"), "wao sandbox-enforcement drill root\n");
+      execFileSync("git", ["add", ".wao-cert-root.txt"], { cwd: repoDir, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "wao sandbox-enforcement drill root"], { cwd: repoDir, stdio: "ignore" });
+      const worktreePath = join(repoDir, ".wao-worktrees", id);
+      execFileSync("git", ["worktree", "add", "-b", `wao-sbx-${id}`, worktreePath], { cwd: repoDir, stdio: "ignore" });
+      externalDir = join(root, ".dev", "reliability-sandbox", id);
+      mkdirSync(externalDir, { recursive: true });
+      const insidePath = join(worktreePath, `sbx-inside-${id}.txt`);
+      const outsidePath = join(externalDir, `sbx-outside-${id}.txt`);
+      // 车道配置随探测传入：codex 入口与真实派发同一解析链（binary/prependArgs）。
+      const probeResult = await backend.probeWriteSandbox({ agent: agent ?? {}, cwd: worktreePath, insidePath, outsidePath });
+      return {
+        checks: sandboxEnforcementChecks({ probeResult }),
+        error: probeResult?.available === true
+          ? null
+          : (probeResult?.reason ?? "sandbox probe unavailable"),
+      };
+    } catch (error) {
+      return {
+        checks: [
+          check("sandboxEnforcement", false, "operational", error.message ?? String(error), { capability: "sandboxEnforcement" }),
+        ],
+        error: error.message ?? String(error),
+      };
+    } finally {
+      // best-effort 清理（Windows 文件锁可能拖后腿；残留分别在 os.tmpdir() 与
+      // gitignored .dev/ 下，不污染工作树）。
+      for (const dir of [repoDir, externalDir]) {
+        if (dir) {
+          try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
+      }
+    }
+  }
+
   function runWorkflowRunDirDrill(tc) {
     const workflowRunDir = join(tmpDir, "workflow-runs");
     const workflowFile = join(tmpDir, `workflow-cert-${tc.agentId}.mjs`);
@@ -485,6 +549,7 @@ export function createDrills(deps) {
     runStrictScorecardDrill,
     runIsolationDrill,
     runContainmentEvidenceDrill,
+    runSandboxEnforcementDrill,
     runWorkflowRunDirDrill,
     runStopDrill,
     runFileScorecardTask,

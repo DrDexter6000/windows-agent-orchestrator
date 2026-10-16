@@ -813,6 +813,10 @@ export class ZcodeBackend {
   // 退出码通道，不产出该证据（翻转条件 = 实测到携带退出码的 part 形状并接线）。
   reportsCommandExitCode = false;
 
+  // 决定 0086：显式声明无 OS 写沙箱（本类不继承 ProcessBackend 基类的默认
+  // false）——无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）。
+  enforcesWriteSandbox = false;
+
   constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null, deliverableProbe = null } = {}) {
     // 可注入 spawn（测试检查 child env/argv 而不启动真实进程——M11-7 同款缝）。
     this._spawnFn = spawnFn;

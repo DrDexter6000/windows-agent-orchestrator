@@ -85,7 +85,10 @@ test("B6-codex-effort: reasoning.effort → -c model_reasoning_effort", async ()
   const backend = new CodexBackend();
   const agent = { id: "tester", backend: "codex", cwd: "/x", reasoning: { effort: "high" } };
   const args = backend.buildArgs(agent, { prompt: "task" });
-  const idx = args.indexOf("-c");
+  // codex 的 argv 还有别的 -c（OS 写沙箱参数在前，决定 0086）——按值定位。
+  const idx = args.findIndex(
+    (a, i) => a === "-c" && typeof args[i + 1] === "string" && args[i + 1].includes("model_reasoning_effort"),
+  );
   assert.ok(idx >= 0, "codex generates -c for effort");
   assert.ok(args[idx + 1].includes("model_reasoning_effort"), "-c value is model_reasoning_effort");
   assert.ok(args[idx + 1].includes("high"), "effort value embedded");

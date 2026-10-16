@@ -156,13 +156,13 @@ interface RunHandle {
 }
 ```
 
-> **能力标志（provider 中立契约）**：Backend 声明静态布尔能力，闭集六轴：
+> **能力标志（provider 中立契约）**：Backend 声明静态布尔能力，闭集七轴：
 > `supportsRoleContract`（角色合同 argv 注入）、`supportsSessionReuse`（provider
 > 原生会话复用）、`supportsInFlightCorrection`、`replayByRespawn`、
-> `reportsTokenUsage`、`reportsCommandExitCode`。RunManager 在 spawn 前做能力驱动
+> `reportsTokenUsage`、`reportsCommandExitCode`、`enforcesWriteSandbox`。RunManager 在 spawn 前做能力驱动
 > 校验（fail-closed，不静默降级），读取严格 `=== true`——未声明一律读 false。
 > 共享编排代码只读这些布尔值，**不**按 runtime 名/agentId 分支。逐 backend 的
-> 六轴值与条件说明见生成层 `docs/surface/certification.md`。
+> 七轴值与条件说明见生成层 `docs/surface/certification.md`。
 
 ### 2.2 RunEvent（统一事件流）
 
@@ -385,7 +385,7 @@ verification 与 Lead decision。该 backend 不支持 provider session reuse，
   未知 stopReason 与断链（transport close 先于终态）→ failed，不投影为 completed。
 - **二次校验 = tripwire（检测非阻止）**：wire 上出现 `subagent` / `subagent_fork` /
   `spawn_teammate` 工具调用即终态 failed——副作用可能已发生，这是检测不是阻止。
-- **能力与 policy**：六轴逐值声明与条件见生成层 `docs/surface/certification.md`
+- **能力与 policy**：七轴逐值声明与条件见生成层 `docs/surface/certification.md`
   （含 `supportsSessionReuse=true` 的 lane/delivery 适用范围、
   `supportsInFlightCorrection=false` 时 run_correct 在派发层被拒）。这里钉派生
   不出的关联面事实：会话复用关联挂 transcript SSOT（opaqueUuid→routing 条目
@@ -629,7 +629,7 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 }
 ```
 
-**写入边界**：delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace。RunManager 对 backend 报告的 `write_intent` 与已确认 `file_written` 原始路径做词法 + realpath 边界判断（解析 junction/symlink；win32 先归一 MSYS 盘符路径）。Write/Edit/MultiEdit 类工具先产生带 opaque `toolCallId` 的 `write_intent`，只有匹配的成功 tool result 才确认 `file_written`；run 完成时仍有未确认写入意图也 fail closed。越界、无法关联或无法证明目标在 worktree 内时，写入不含路径的 `run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。物理位置无法证明前先对 EBUSY/EPERM/EACCES/ENOENT 短暂重试（最多 3 次）；重试后仍无法证明时，该事件附闭集 `errorCode`。该机制不解析命令文本，也不等同于 OS filesystem sandbox；backend 未报告的写入只能靠后续 artifact proof 发现。
+**写入边界**：delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace。RunManager 对 backend 报告的 `write_intent` 与已确认 `file_written` 原始路径做词法 + realpath 边界判断（解析 junction/symlink；win32 先归一 MSYS 盘符路径）。Write/Edit/MultiEdit 类工具先产生带 opaque `toolCallId` 的 `write_intent`，只有匹配的成功 tool result 才确认 `file_written`；run 完成时仍有未确认写入意图也 fail closed。越界、无法关联或无法证明目标在 worktree 内时，写入不含路径的 `run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。物理位置无法证明前先对 EBUSY/EPERM/EACCES/ENOENT 短暂重试（最多 3 次）；重试后仍无法证明时，该事件附闭集 `errorCode`。该机制不解析命令文本，也不等同于 OS filesystem sandbox；backend 未报告的写入只能靠后续 artifact proof 发现。`enforcesWriteSandbox` 车道（codex）每次调用显式 workspace-write：可写面 = 工作目录 + 系统临时目录，活体证据 `sandboxEnforcement`。
 
 **readiness 投影联动**：终端 delivery-requested run 且唯一较高优先级 delivery 事实为恰好一条 run-bound 安全 `isolation_violation` → `run_delivery` readiness 投影 `isolation_failed` + `isolationFailure:{code:"workdir_escape"}`（与 packaging failure 严格分离，无 candidateInventory/repackage/salvage/retry/stop/decision 面，Lead 只能另行派发）；缺失/多条/跨 run/非闭集 code → `ambiguous`。投影闭集与判定见 §1 `runDelivery.js` 条目。
 

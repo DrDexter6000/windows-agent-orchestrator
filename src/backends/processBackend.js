@@ -180,6 +180,12 @@ export class ProcessBackend {
   // 消费者：registry validate 静态交叉校验 tokenBudget 配置 × 本声明（不 spawn）。
   reportsTokenUsage = false;
 
+  // 决定 0086：backend 在每次调用时显式强制 OS 写沙箱（workspace-write）的
+  // 声明轴。基类 fail-closed 默认 false——进程族默认没有 OS 沙箱，越界写拦截
+  // 仍按 0084（上报侦测，非阻止）。子类按实现 opt-in（codex）。reliability 的
+  // sandboxEnforcement 检查按本声明选检查，共享代码不按运行时分支。
+  enforcesWriteSandbox = false;
+
   /**
    * M11-9: provider-neutral backend policy validation. Called by RunManager
    * BEFORE any transcript append, runDir creation, worktree, or spawn.

@@ -37,6 +37,11 @@ export class OpenCodeServeBackend {
   // commandEvent(command, exitCode)），数值退出码直接进 command 证据。
   reportsCommandExitCode = true;
 
+  // 决定 0086：显式声明无 OS 写沙箱（HTTP 家族不继承 ProcessBackend 基类的
+  // 默认 false）——写发生在远端 serve 进程，本机调用层无沙箱面；越界写拦截
+  // 按 0084（上报侦测，非阻止）。
+  enforcesWriteSandbox = false;
+
   /**
    * The `system` transport is runtime-versioned. Prove it before RunManager
    * creates a transcript or worktree; a static capability flag alone is not

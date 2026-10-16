@@ -88,6 +88,10 @@ export class DeepSeekHarnessBackend {
   // 真机负向实测证明 error 字段与退出码一致。
   reportsCommandExitCode = false;
 
+  // 决定 0086：显式声明无 OS 写沙箱（本类不继承 ProcessBackend 基类的默认
+  // false）——无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）。
+  enforcesWriteSandbox = false;
+
   constructor({ spawnFn = spawn } = {}) {
     this._spawnFn = spawnFn;
   }

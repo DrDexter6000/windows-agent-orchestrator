@@ -599,7 +599,7 @@ test("zcode ③b: validateAgentPolicy 全拒绝分支 + 通过分支", () => {
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ prependArgs: ["x.js"] })), /prependArgs/);
 });
 
-test("zcode ③c: 能力快照与类声明一致（六轴）", () => {
+test("zcode ③c: 能力快照与类声明一致（能力轴闭集）", () => {
   assert.ok(backendFor({ backend: "zcode" }) instanceof ZcodeBackend);
   assert.deepEqual(
     backendCapabilitySnapshot({ backend: "zcode" }),
@@ -610,6 +610,7 @@ test("zcode ③c: 能力快照与类声明一致（六轴）", () => {
       replayByRespawn: true,
       reportsTokenUsage: true,
       reportsCommandExitCode: false,
+      enforcesWriteSandbox: false,
     },
   );
 });

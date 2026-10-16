@@ -11,6 +11,10 @@
 //   6. containmentEvidence（决定 0084）：带隔离与交付合同的 run 里正常写一个文件，
 //      上报的写入路径、磁盘文件、拦截门的"在内"判定三方一致（越界写拦截的活体
 //      取证；确定性一翼是 npm test 的 test/backends/containmentChain.test.js）
+//   7. sandboxEnforcement（决定 0086，不经模型）：声明 enforcesWriteSandbox 的
+//      后端（codex）在临时 git 工作树上用 `codex sandbox -P :workspace` 实测
+//      写边界——树内写成功、树外写被拒且文件不落盘；确定性一翼是 npm test 的
+//      test/backends/codexSandbox.test.js（参数构建钉）。
 //
 // 消耗真实 API token。不进 npm test。用 `npm run reliability` 手动触发。
 //
@@ -19,7 +23,7 @@
 //   npm run reliability -- --agent coder     # 只跑指定 agent（增量合并，不覆盖其他 worker）
 //   npm run reliability -- --serve-url http://127.0.0.1:4298
 //   npm run reliability -- --profile strict  # 额外跑 command/file scorecard drill
-//   npm run reliability -- --profile delta   # delta 子集（sentinel+scorecard+containmentEvidence，决定 0084）
+//   npm run reliability -- --profile delta   # delta 子集（sentinel+scorecard+containmentEvidence，决定 0084；声明 OS 写沙箱的后端以 sandboxEnforcement 取代 containmentEvidence，决定 0086）
 //   npm run reliability -- --wait-timeout 300000  # 覆盖单 worker 超时（默认 300000）
 
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
@@ -104,6 +108,7 @@ const {
   runStrictScorecardDrill,
   runIsolationDrill,
   runContainmentEvidenceDrill,
+  runSandboxEnforcementDrill,
   runWorkflowRunDirDrill,
   runStopDrill,
 } = createDrills({
@@ -464,6 +469,21 @@ for (const tc of MATRIX) {
     const externalBlocker = classifyExternalBlocker(drill.error);
     checks.push(...(externalBlocker
       ? [blockedCheck("containmentEvidence", externalBlocker, "operational", { capability: "containmentEvidence" })]
+      : drill.checks));
+  }
+
+  if (tc.drills.includes("sandboxEnforcement")) {
+    handledDrills.add("sandboxEnforcement");
+    console.log(`    [DRILL] sandbox enforcement probe...`);
+    // 决定 0086：不经模型的 OS 写沙箱执行取证（与 containmentEvidence 同一
+    // 位置——矩阵构建对声明 enforcesWriteSandbox 的后端做了词汇替换）。
+    const drill = await runSandboxEnforcementDrill(tc, registry.agents?.[tc.agentId]);
+    caseResult.sandboxError = drill.error;
+    // 派发/探测被外部因素阻塞（额度/鉴权/连接）：沿用 classifyExternalBlocker——
+    // 整个取证面不可用，记一条 blocked 检查（映射 case 级 blocked，ADR-0032 §8）。
+    const externalBlocker = classifyExternalBlocker(drill.error);
+    checks.push(...(externalBlocker
+      ? [blockedCheck("sandboxEnforcement", externalBlocker, "operational", { capability: "sandboxEnforcement" })]
       : drill.checks));
   }
 

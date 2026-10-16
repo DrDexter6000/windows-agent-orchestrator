@@ -242,6 +242,11 @@ export class KimiWebBackend {
   // 消息形状（content 分段数组）中未证实退出码通道——命令退出码证据不产出。
   reportsCommandExitCode = false;
 
+  // 决定 0086：显式声明无 OS 写沙箱（HTTP attach 家族不继承 ProcessBackend
+  // 基类的默认 false）——写发生在服务器侧进程，本机调用层无沙箱面；越界写拦截
+  // 按 0084（上报侦测，非阻止）。
+  enforcesWriteSandbox = false;
+
   /**
    * 派发前的 fail-closed 策略门（M11-9 同款零副作用位置，spawn 首行再次调用）。
    * model.id 缺失必须在这里拒绝：上游缺 model 时不报错而是轮次静默秒败

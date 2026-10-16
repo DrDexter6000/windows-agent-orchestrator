@@ -2,10 +2,17 @@
 // 并列；blockerReason 原文绝不进码）。certifyCase/summarizeWorkers 经它映射。
 import { reasonCodeFor } from "../../src/application/certificationReasons.js";
 import { laneLedgerKey } from "../../src/application/identityProjection.js";
-// ADR-0025 §5 / 决定 0084：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
-// LEGACY_DELTA_DRILLS 是退役前词汇（adversarialEscape）——只服务历史 summary 的
-// 读侧派生不改写（旧 case 的 drills 原样在盘上，scope 必须保持不变）。
-import { DELTA_DRILLS, LEGACY_DELTA_DRILLS } from "./matrix.mjs";
+// ADR-0025 §5 / 决定 0084 / 决定 0086：delta drill 子集 SSOT（scope 派生的比对
+// 基准，单一清单）。LEGACY_DELTA_DRILLS 是退役前词汇（adversarialEscape）——
+// 只服务历史 summary 的读侧派生不改写（旧 case 的 drills 原样在盘上，scope 必须
+// 保持不变）。DELTA_DRILLS_WRITE_SANDBOX 是声明 OS 写沙箱后端的 delta 词汇
+// （sandboxEnforcement 与 containmentEvidence 同一位置，决定 0086）。
+import {
+  DELTA_DRILLS,
+  DELTA_DRILLS_WRITE_SANDBOX,
+  LEGACY_DELTA_DRILLS,
+  declaresWriteSandbox,
+} from "./matrix.mjs";
 // ADR-0032 §8：检查结果五态（checkStates 是两层共用的纯词汇模块，不是组件层
 // 专用——组合层消费的是"检查状态"这一中立概念，不 import 任何组件层代码）。
 import { assertCheckStateShape, checkStateOf } from "./checkStates.mjs";
@@ -51,9 +58,16 @@ export function certificationScopeForCase(caseResult = {}) {
     : [];
   const withinSubset = (subset) => drills.every((d) => subset.includes(d));
   // 空 drills（legacy 形状）对任何子集都是 vacuous true——与既有行为一致。
-  const withinDeltaSubset = withinSubset(DELTA_DRILLS) || withinSubset(LEGACY_DELTA_DRILLS);
+  // 决定 0086：声明 OS 写沙箱的后端，delta 子集是 sentinel + scorecard +
+  // sandboxEnforcement（sandboxEnforcement 与 containmentEvidence 同一位置）。
+  // 旧词汇各自的 within-subset 判定保留在前——盘上历史 case（containmentEvidence
+  // / adversarialEscape 形状）的 scope 不因能力声明翻新而改写。
+  const withinDeltaSubset = withinSubset(DELTA_DRILLS)
+    || withinSubset(LEGACY_DELTA_DRILLS)
+    || (declaresWriteSandbox(caseResult?.backend) && withinSubset(DELTA_DRILLS_WRITE_SANDBOX));
   const carriesDeltaDrill = drills.includes("containmentEvidence")
-    || drills.includes("adversarialEscape");
+    || drills.includes("adversarialEscape")
+    || drills.includes("sandboxEnforcement");
   if (caseResult?.profile === "delta" && withinDeltaSubset) return "delta";
   if (drills.length > 0 && carriesDeltaDrill && withinDeltaSubset) {
     return "delta";
