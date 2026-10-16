@@ -120,3 +120,4 @@
 | TD-144 | 宿主进程 env 块不随注册表刷新，setx 后启动的宿主派发报凭据缺失，且无标准补救文档 | 凭据解析已桥接 Windows 注册表（HKCU\Environment，每次派发现读、无缓存：src/application/credentialReadiness.js:7-20，e2cc0b9）；补救文档在 docs/troubleshooting.md §1.6（53e0387） |
 | TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | `wao runs settle` 落地：runner 已死的非终态 run（含只有 background_submitted 的无会话形状）经六道门结算为 failed（src/application/runSettle.js:3-26、test/application/runSettle.test.js；e6cee6a 说明明言 TD-172 closed） |
 | TD-223 | 凭据临时目录回收机制已落地，历史堆积的存量目录清扫未确认执行 | run 终态由 backend.dispose() 删本进程建的目录（src/backends/claudeCode.js）；崩溃残留由 wao doctor 报数、`wao sweep-claude-config --apply` 清扫（src/application/oauthDirSweep.js）；%TEMP% 里 wao-claude-oauth-* 已由 1308 个降到 27 个，存量清扫执行过 |
+| TD-292 | 交付打包的异常信息匹配不上已知措辞时只写 "delivery packaging error"，连安全的错误类别也不给，Lead 分不清该重打包还是该查环境 | 打包失败从错误对象的结构化属性分出闭集 errorClass（src/deliveryErrorClass.js），写进 run.delivery_failed 与 run.error；诊断按类别给固定文案（src/diagnosis.js）；原文不回显；test/delivery/deliveryErrorClass.test.js |

@@ -129,6 +129,22 @@ const CATEGORY_CODE_SETS = Object.freeze({
   no_effect: NO_EFFECT_DIAGNOSIS_CODES,
 });
 
+// 打包环境类别 → 固定文案事实（runManager 从错误对象结构化属性分出闭集
+// errorClass 后写入 run.delivery_failed；诊断面按值追加一条事实）。闭集成员
+// 的 SSOT 是 src/deliveryErrorClass.js 的 DELIVERY_ERROR_CLASSES——本映射的键集
+// 与之对账（test/delivery/deliveryErrorClass.test.js）。只认闭集值：未知/
+// malformed 值查不到 → 不产出附加事实；文案固定，不回显路径或消息原文，
+// 不自动重试、不替 Lead 决定。
+export const DELIVERY_ERROR_CLASS_FACTS = Object.freeze({
+  git_index_locked: "a git process still held the worktree index when packaging ran; repackaging after it exits may succeed",
+  file_locked: "a worktree file was locked or unmodifiable (EBUSY/EPERM) while packaging ran",
+  permission_denied: "packaging was denied filesystem access (EACCES)",
+  disk_full: "packaging ran out of disk space (ENOSPC)",
+  git_spawn_failed: "git could not be started (spawn failed, e.g. git missing from PATH)",
+  git_timeout: "the git process was killed or timed out during packaging",
+  git_command_failed: "a git command exited non-zero during packaging",
+});
+
 /**
  * Is (category, code) a valid diagnosis-code pair? An exact member of the
  * category's closed code set; anything else (wrong category, unknown/absent/
@@ -604,12 +620,23 @@ function diagnoseFailureInner(events, expectedRunId) {
     // 停手时写入）：追加一条静态事实——"明确拒绝并说明了原因"≠"什么都没做"。
     // 只认闭集值、只出固定文案（路径与理由仍不回显，Lead 经 collect 读原文）。
     const declaredStop = deliveryFailed.workerDeclared === "scope_expansion_required";
+    // 打包环境类别同理：闭集 errorClass → 固定文案事实（键集与
+    // src/deliveryErrorClass.js 对账）；未知/缺失值不出附加事实。只认自有键：
+    // transcript 里的 "constructor"、"__proto__" 之类不得取到继承属性。
+    const errorClassFact = typeof deliveryFailed.errorClass === "string"
+      && Object.hasOwn(DELIVERY_ERROR_CLASS_FACTS, deliveryFailed.errorClass)
+      && typeof DELIVERY_ERROR_CLASS_FACTS[deliveryFailed.errorClass] === "string"
+      ? DELIVERY_ERROR_CLASS_FACTS[deliveryFailed.errorClass]
+      : undefined;
     return {
       category: "delivery_packaging_failed",
       evidence: [
         { eventType: "run.delivery_failed", fact: "delivery packaging failed (control-plane-owned commit could not be created)" },
         ...(declaredStop
           ? [{ eventType: "run.delivery_failed", fact: "worker stopped on purpose and reported SCOPE_EXPANSION_REQUIRED (role-contract stop, not an idle run) — read its final message for the path and reason" }]
+          : []),
+        ...(errorClassFact
+          ? [{ eventType: "run.delivery_failed", fact: errorClassFact }]
           : []),
       ],
     };

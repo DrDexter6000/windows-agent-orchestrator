@@ -2800,11 +2800,13 @@ test("ADR 0021: 冻结工具面五字段句已改分层表述（usage + architec
   }
 });
 
-// 冻结 allowlist：runbook 切片内反引号包裹且含下划线、但不属于四个 import 闭集的
+// 冻结 allowlist：runbook 切片内反引号包裹且含下划线、但不属于五个 import 闭集的
 // token。按 A-5 规格"以实际用到的为准增删"，逐成员理由如下：
 //   - run_delivery / run_delivery_review / run_delivery_decide /
 //     run_delivery_repackage / run_delivery_reverify / run_diagnose：
 //     MCP 工具名（toolSurface.js TOOLS SSOT 成员，非枚举闭集值）。
+//   - run.delivery_failed：transcript 事件名（TRANSCRIPT_EVENT_REGISTRY 成员，
+//     非枚举闭集值）——errorClass 说明句引用其载荷来源事件。
 //   - disallowed_path：PACKAGING_FAILURE_CODES 成员（deliveryFailureCodes.js）。
 //   - command_failed / command_timeout / execution_error / setup_failed /
 //     setup_timeout / setup_environment_error：ELIGIBLE_REVERIFY_FAILURE_CODES
@@ -2814,8 +2816,8 @@ test("ADR 0021: 冻结工具面五字段句已改分层表述（usage + architec
 //     否定式出现（REVERIFY_FAILURE_CODES / deliveryFailureCodes.js）。
 // 规格草稿列过但按实际切片删去的（含注释）：deliveryAvailable /
 // deliveryRequested / deliveryFailure / candidateInventory / candidateKind /
-// waitMs / fileIndex / nextCursor / `runs delivery --wait-ms` 均不含下划线，
-// 反向过滤器永不命中；delivery_failed 未出现在切片中。
+// waitMs / fileIndex / nextCursor / `runs delivery --wait-ms` 与 `run.error`
+// 均不含下划线，反向过滤器永不命中。
 export const TS_RUNBOOK_ALLOWLIST = Object.freeze([
   "run_delivery",
   "run_delivery_review",
@@ -2823,6 +2825,7 @@ export const TS_RUNBOOK_ALLOWLIST = Object.freeze([
   "run_delivery_repackage",
   "run_delivery_reverify",
   "run_diagnose",
+  "run.delivery_failed",
   "disallowed_path",
   "command_failed",
   "command_timeout",
@@ -2839,6 +2842,7 @@ test("ADR 0021 关系型守卫: troubleshooting delivery runbook 闭集值与代
     await import("../../src/application/runDelivery.js");
   const { RECOVERY_CANDIDATE_KINDS, REVERIFY_REASONS } =
     await import("../../src/transcript.js");
+  const { DELIVERY_ERROR_CLASSES } = await import("../../src/deliveryErrorClass.js");
   const ts = read("docs/troubleshooting.md");
   const heading = "## delivery 失败模式 → 正确工具（闭集查表）";
   const start = ts.indexOf(heading);
@@ -2853,13 +2857,14 @@ test("ADR 0021 关系型守卫: troubleshooting delivery runbook 闭集值与代
     ...SAFE_ISOLATION_VIOLATION_CODES,
     ...RECOVERY_CANDIDATE_KINDS,
     ...REVERIFY_REASONS,
+    ...DELIVERY_ERROR_CLASSES,
   ];
-  // 前向：四个闭集的每个成员都在切片中出现（doc 覆盖 SSOT 全集）。
+  // 前向：五个闭集的每个成员都在切片中出现（doc 覆盖 SSOT 全集）。
   for (const member of closedSets) {
     assert.ok(slice.includes(member),
       `troubleshooting runbook 缺闭集成员 ${member}（应覆盖代码 SSOT 全集）`);
   }
-  // 反向：切片内所有反引号包裹且含下划线的 token ∈ 四闭集并集 ∪ 冻结 allowlist。
+  // 反向：切片内所有反引号包裹且含下划线的 token ∈ 五闭集并集 ∪ 冻结 allowlist。
   const allowed = new Set([...closedSets, ...TS_RUNBOOK_ALLOWLIST]);
   const tokens = [...slice.matchAll(/`([^`\n]+)`/g)]
     .map((m) => m[1])

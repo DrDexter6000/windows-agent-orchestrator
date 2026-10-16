@@ -50,6 +50,8 @@
 > 行为合同权威在 `docs/usage/delivery.md`（`run_delivery`、候选面 candidateInventory、`run_delivery_reverify` 各节）；本表是"现象→动作"runbook，表中枚举值由 docs-consistency 关系型守卫与代码闭集双向对账。
 >
 > 跨切规则：任何 readiness 结果只要带 `candidateInventory`/`candidateKind`，先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage` 结算），不按 readiness 标签直接人工核或重读。
+>
+> 打包失败的 `run.delivery_failed` / `run.error` 事件在能从错误对象的结构化属性（不读消息原文）分出环境类别时另携 `errorClass`（闭集 `git_index_locked`/`file_locked`/`permission_denied`/`disk_full`/`git_spawn_failed`/`git_timeout`/`git_command_failed`，SSOT=`src/deliveryErrorClass.js`；分不出时键缺席）——`run_diagnose` 把每个闭集值转成一条固定文案事实，例如 `git_index_locked`＝打包时另有 git 进程仍占着工作树索引锁，其退出后重打包可能成功。
 
 | 观察到的失败形状 | 正确动作 |
 |---|---|

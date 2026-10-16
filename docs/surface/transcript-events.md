@@ -25,7 +25,7 @@ Every event type any production write outlet may write, one row each. The single
 | `run.stop_unverified` | worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop；附 raiseAlert。 |
 | `run.completed` | 正常完成（终态 fact，与 state_change 同批原子落盘）；可携 completionMarker:"completed_empty"（闭集 DONE_MARKERS 成员）表示 worker 零产出。 |
 | `run.aborted` | run 被 abort（终态 fact；verification:"pending" 起，winner 执行 kill/abort 后补 stop_verified/stop_unverified）。 |
-| `run.error` | run 错误（非终态旁路事实；终态由 state_change 承载）。phase 标注来源（spawn/wait/scorecard/delivery 等）；delivery 失败时与 run.delivery_failed 同批另写，可携 completionMarker:"completed_empty" 或 workerDeclared:"scope_expansion_required"。 |
+| `run.error` | run 错误（非终态旁路事实；终态由 state_change 承载）。phase 标注来源（spawn/wait/scorecard/delivery 等）；delivery 失败时与 run.delivery_failed 同批另写，可携 completionMarker:"completed_empty"、workerDeclared:"scope_expansion_required" 或 errorClass（打包环境类别闭集，含义见 run.delivery_failed 行；分类不出时键缺席）。 |
 | `run.timed_out` *(legacy)* | legacy：只出现在旧转录。现在等待窗到期不写此事件，改写 `run.observation_deadline_reached`（通知不杀）；状态值保留在类型与 TERMINAL_STATES 中仅为读取 legacy 转录（findState/诊断/投影不得回归）。为什么见决定 0030。 |
 | `run.budget_exceeded` | token 预算硬闸触发事实（budget/used/multiplier/backendSessionId）：超限即转 failed（reason=budget_exceeded）并兜底 abort；同时 raiseAlert（告警失败不阻塞终态）。 |
 | `run.isolation_failed` | 非交付、非只读 run 的 worktree 隔离创建失败事实（{error} 有界摘要）：写后降级用原 cwd 继续（交付与只读形态 fail-closed 拒绝派发，不写本事件）。 |
@@ -40,7 +40,7 @@ Every event type any production write outlet may write, one row each. The single
 | `run.cleanup_done` | 终态清理完成（worktree 删除 + backend 文件工件 dispose；非 delivery run 也会发）。 |
 | `run.cleanup_error` | 清理自身失败：只记账不抛错，不改变既定终态事实。两个写出点——派发失败后的清理写 {phase: "spawn_fail", error}；终态清理 _runCleanup 写 {error}，没有 phase。 |
 | `run.delivery_created` | delivery 打包成功，含完整 DeliveryRef。前台路径经 RunManager 终态批次的 attemptEvents（无论转移 accepted/rejected 都落盘，消除孤儿 delivery commit 窗口）；重打包路径与 run.delivery_repackaged 同批原子落盘。 |
-| `run.delivery_failed` | delivery 打包失败，含 deliveryCode + 脱敏摘要。completionMarker:"completed_empty"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:"scope_expansion_required"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）。 |
+| `run.delivery_failed` | delivery 打包失败，含 deliveryCode + 脱敏摘要。completionMarker:"completed_empty"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:"scope_expansion_required"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）；由错误对象结构化属性（status/code/syscall/signal，不读消息原文）分得出的打包环境类别另携 errorClass（闭集 git_index_locked/file_locked/permission_denied/disk_full/git_spawn_failed/git_timeout/git_command_failed，SSOT=src/deliveryErrorClass.js；分不出时键缺席，absent 非 null）。 |
 | `run.delivery_verification_passed` | delivery 验证通过（载荷为携带验证结果的 DeliveryRef）。 |
 | `run.delivery_verification_failed` | delivery 验证失败，含 failureCode。事件内 DeliveryRef 的 `verification.results`（与 `setupResults`）每个命令结果带 `stdoutTail`/`stderrTail` 字段：仅非成功结果（非零退出/超时/launch error）携带内容，各保留尾部 ≤8192 字节原始输出加截断标记 `…[truncated N bytes]`（N 为丢弃字节数）；成功结果恒为空串（绿输出只计数不落体）。内容是仓内生成的子进程测试输出，随整包走 transcript append 的 exact-secret 脱敏（字面凭据值改写为 `[REDACTED:NAME]`）；MCP `run_delivery` 的 `verificationFailureSummary` 只含纯标量键，不带尾内容，要看尾内容就读 transcript。 |
 | `run.delivery_verification_unavailable` | 无验证命令（unavailableReason）。 |

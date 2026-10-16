@@ -106,6 +106,7 @@ const CORE_TOP = Object.freeze(new Set([
   "src/cliRunSummary.js",
   "src/daemonHealth.js",
   "src/delivery.js",
+  "src/deliveryErrorClass.js",
   "src/deliveryFailureCodes.js",
   "src/deliveryVerification.js",
   "src/diagnosis.js",

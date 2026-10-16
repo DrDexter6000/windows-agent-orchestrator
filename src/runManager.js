@@ -13,6 +13,7 @@ import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
+import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
@@ -3080,6 +3081,9 @@ export class Run {
           const workerDeclared = errCode === "empty_diff" && declaredScopeExpansion(messages)
             ? WORKER_DECLARED_SCOPE_EXPANSION
             : null;
+          // 打包环境类别（闭集投影，absent 非 null）：只来自错误对象的结构化
+          // 属性，不回显消息原文；deliveryCode 与各闭集零变更。
+          const errorClass = deliveryResult.error.errorClass ?? null;
           const failedMessage = doneMarker
             ? `${errMsg} — packaging failed and the worker produced no model work`
             : workerDeclared
@@ -3094,6 +3098,7 @@ export class Run {
                   message: failedMessage,
                   ...(doneMarker ? { completionMarker: doneMarker } : {}),
                   ...(workerDeclared ? { workerDeclared } : {}),
+                  ...(errorClass ? { errorClass } : {}),
                 },
               },
             ],
@@ -3104,6 +3109,7 @@ export class Run {
                 deliveryCode: errCode,
                 ...(doneMarker ? { completionMarker: doneMarker } : {}),
                 ...(workerDeclared ? { workerDeclared } : {}),
+                ...(errorClass ? { errorClass } : {}),
               },
             }],
           });
@@ -3294,7 +3300,15 @@ export class Run {
       const code = err?.deliveryCode ?? "delivery_error";
       // Sanitize message — no stack traces or stderr leakage
       const message = _sanitizeDeliveryMessage(err?.message ?? "unknown delivery error");
-      return { success: false, error: { code, message } };
+      // 结构化属性 → 闭集环境类别（index.lock/文件锁/权限/磁盘/spawn/超时/退出码；
+      // 只读结构化属性，不读消息原文）。分不出时 errorClass 键缺席（absent 非 null）。
+      const errorClass = classifyDeliveryError(err, {
+        worktreePath: this.deliveryContext?.worktreePath,
+      })?.errorClass ?? null;
+      return {
+        success: false,
+        error: { code, message, ...(errorClass ? { errorClass } : {}) },
+      };
     }
   }
 

@@ -106,7 +106,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.error",
-    description: "run 错误（非终态旁路事实；终态由 state_change 承载）。phase 标注来源（spawn/wait/scorecard/delivery 等）；delivery 失败时与 run.delivery_failed 同批另写，可携 completionMarker:\"completed_empty\" 或 workerDeclared:\"scope_expansion_required\"。",
+    description: "run 错误（非终态旁路事实；终态由 state_change 承载）。phase 标注来源（spawn/wait/scorecard/delivery 等）；delivery 失败时与 run.delivery_failed 同批另写，可携 completionMarker:\"completed_empty\"、workerDeclared:\"scope_expansion_required\" 或 errorClass（打包环境类别闭集，含义见 run.delivery_failed 行；分类不出时键缺席）。",
   },
   {
     type: "run.timed_out",
@@ -167,7 +167,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.delivery_failed",
-    description: "delivery 打包失败，含 deliveryCode + 脱敏摘要。completionMarker:\"completed_empty\"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:\"scope_expansion_required\"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）。",
+    description: "delivery 打包失败，含 deliveryCode + 脱敏摘要。completionMarker:\"completed_empty\"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:\"scope_expansion_required\"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）；由错误对象结构化属性（status/code/syscall/signal，不读消息原文）分得出的打包环境类别另携 errorClass（闭集 git_index_locked/file_locked/permission_denied/disk_full/git_spawn_failed/git_timeout/git_command_failed，SSOT=src/deliveryErrorClass.js；分不出时键缺席，absent 非 null）。",
   },
   {
     type: "run.delivery_verification_passed",
