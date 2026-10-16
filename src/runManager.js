@@ -21,7 +21,7 @@ import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
-import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
+import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "./diagnosis.js";
 // R11-1: the closed effort set SSOT lives in the registry (its historical
 // home since M11-9); the per-dispatch override validators below are hosted
 // HERE, with the synthesis site, mirroring the MODEL_OVERRIDE precedent.
@@ -459,55 +459,144 @@ function resolveLexicallyContainedWrite(rawPath, effectiveCwd) {
 
 // file_written is post-write evidence, so inability to prove the target's
 // physical location fails closed for delivery runs (physical_unresolved).
-function classifyReportedWriteContainment(rawPath, effectiveCwd) {
+function classifyReportedWriteContainmentOnce(rawPath, effectiveCwd, { realpath }) {
   const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
-  if (!lexical) return "lexical_outside";
+  if (!lexical) return { verdict: "lexical_outside" };
   try {
     // A junction/symlink inside the worktree may resolve to an outside target.
-    const physicalBase = realpathSync.native(lexical.base);
-    const physicalTarget = realpathSync.native(lexical.target);
-    return isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside";
-  } catch {
-    return "physical_unresolved";
+    const physicalBase = realpath(lexical.base);
+    const physicalTarget = realpath(lexical.target);
+    return { verdict: isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside" };
+  } catch (error) {
+    return { verdict: "physical_unresolved", errorCode: error?.code };
   }
 }
 
-function classifyReportedWriteIntentContainment(rawPath, effectiveCwd) {
+function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { realpath, lstat }) {
   const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
-  if (!lexical) return "lexical_outside";
+  if (!lexical) return { verdict: "lexical_outside" };
   let physicalBase;
   try {
-    physicalBase = realpathSync.native(lexical.base);
-  } catch {
-    return "physical_unresolved";
+    physicalBase = realpath(lexical.base);
+  } catch (error) {
+    return { verdict: "physical_unresolved", errorCode: error?.code };
   }
   try {
     // lstat distinguishes a genuinely missing target from a dangling link.
     // Only a genuine ENOENT may use nearest-existing-ancestor validation.
-    lstatSync(lexical.target);
+    lstat(lexical.target);
   } catch (error) {
-    if (error?.code !== "ENOENT") return "physical_unresolved";
+    if (error?.code !== "ENOENT") {
+      return { verdict: "physical_unresolved", errorCode: error?.code };
+    }
     let ancestor = dirname(lexical.target);
     while (true) {
       try {
-        const physicalAncestor = realpathSync.native(ancestor);
-        return isPathInside(physicalBase, physicalAncestor) ? "inside" : "physical_outside";
+        const physicalAncestor = realpath(ancestor);
+        return { verdict: isPathInside(physicalBase, physicalAncestor) ? "inside" : "physical_outside" };
       } catch (ancestorError) {
-        if (ancestorError?.code !== "ENOENT") return "physical_unresolved";
+        // An ENOENT while climbing is the normal "not created yet" shape, not
+        // a failed call: keep climbing. Any other code fails closed.
+        if (ancestorError?.code !== "ENOENT") {
+          return { verdict: "physical_unresolved", errorCode: ancestorError?.code };
+        }
         const parent = dirname(ancestor);
-        if (parent === ancestor) return "physical_unresolved";
+        // Every ancestor reported ENOENT up to the filesystem root: still
+        // unprovable. The last observed failure is the recorded code.
+        if (parent === ancestor) return { verdict: "physical_unresolved", errorCode: "ENOENT" };
         ancestor = parent;
       }
     }
   }
   try {
-    const physicalTarget = realpathSync.native(lexical.target);
-    return isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside";
-  } catch {
+    const physicalTarget = realpath(lexical.target);
+    return { verdict: isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside" };
+  } catch (error) {
     // Existing but unresolvable targets (for example dangling links) fail
     // closed; ancestor walking is reserved for lstat ENOENT above.
-    return "physical_unresolved";
+    return { verdict: "physical_unresolved", errorCode: error?.code };
   }
+}
+
+// A target can be momentarily unresolvable while a writer replaces it (temp
+// write + rename, pending delete): the failing code is then EBUSY/EPERM/EACCES/
+// ENOENT. Such a verdict is not final — the WHOLE classification is re-run
+// after the waits below (a redo sees the replacement window closed and uses the
+// existing nearest-existing-ancestor branch). Codes a real path problem
+// produces (ELOOP/ENOTDIR/EINVAL/…), a missing code, and the confirmed
+// inside/lexical_outside/physical_outside verdicts are final immediately.
+const PHYSICAL_RETRY_DELAYS_MS = Object.freeze([25, 100, 250]);
+
+function isRetryablePhysicalErrorCode(code) {
+  return code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "ENOENT";
+}
+
+// The recorded code is a closed-set member ONLY; a missing or unexpected code
+// is "other" — the raw value never reaches the transcript.
+function normalizeIsolationPhysicalErrorCode(code) {
+  return typeof code === "string" && ISOLATION_PHYSICAL_ERROR_CODES.includes(code) ? code : "other";
+}
+
+function sleepMs(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+async function classifyWithPhysicalRetry(classifyOnce, sleep) {
+  let outcome = classifyOnce();
+  let retries = 0;
+  while (outcome.verdict === "physical_unresolved"
+    && isRetryablePhysicalErrorCode(outcome.errorCode)
+    && retries < PHYSICAL_RETRY_DELAYS_MS.length) {
+    await sleep(PHYSICAL_RETRY_DELAYS_MS[retries]);
+    retries += 1;
+    outcome = classifyOnce();
+  }
+  if (outcome.verdict !== "physical_unresolved") return { verdict: outcome.verdict };
+  // Retries only bought time: once they are exhausted the verdict is unchanged
+  // (fail closed) and the last observed failure is recorded.
+  return { verdict: "physical_unresolved", errorCode: normalizeIsolationPhysicalErrorCode(outcome.errorCode) };
+}
+
+/**
+ * Containment verdict for post-write evidence.
+ * @param {string} rawPath reported write path
+ * @param {string} effectiveCwd authorized workspace
+ * @param {{realpath?: Function, lstat?: Function, sleep?: Function}} [deps]
+ *   lstat is accepted for signature parity with the intent classifier below;
+ *   a post-write verdict resolves the reported target only.
+ * @returns {Promise<{verdict: string, errorCode?: string}>} verdict ∈
+ *   inside | lexical_outside | physical_outside | physical_unresolved; errorCode
+ *   (a closed-set ISOLATION_PHYSICAL_ERROR_CODES member) is present only on
+ *   physical_unresolved.
+ */
+export async function classifyReportedWriteContainment(
+  rawPath,
+  effectiveCwd,
+  { realpath = realpathSync.native, lstat = lstatSync, sleep = sleepMs } = {},
+) {
+  return classifyWithPhysicalRetry(
+    () => classifyReportedWriteContainmentOnce(rawPath, effectiveCwd, { realpath, lstat }),
+    sleep,
+  );
+}
+
+/**
+ * Containment verdict for a reported write intent, with the same retry contract
+ * as classifyReportedWriteContainment above.
+ * @param {string} rawPath reported intent path
+ * @param {string} effectiveCwd authorized workspace
+ * @param {{realpath?: Function, lstat?: Function, sleep?: Function}} [deps]
+ * @returns {Promise<{verdict: string, errorCode?: string}>}
+ */
+export async function classifyReportedWriteIntentContainment(
+  rawPath,
+  effectiveCwd,
+  { realpath = realpathSync.native, lstat = lstatSync, sleep = sleepMs } = {},
+) {
+  return classifyWithPhysicalRetry(
+    () => classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { realpath, lstat }),
+    sleep,
+  );
 }
 
 export class RunManager {
@@ -2567,43 +2656,53 @@ export class Run {
     let budgetUsed = 0;
     let isolationViolationKind = null;
     let isolationViolationReason = null;
+    let isolationViolationErrorCode = null;
     const pendingDeliveryWriteToolCallIds = new Set();
     // M12-14: classify WHY a reported write fails the delivery containment
-    // gate. Returns a closed-set ISOLATION_VIOLATION_REASONS member, or null
-    // when the event is not a violating write. Non-delivery runs are never
-    // gated (unchanged). Correlation failures are checked BEFORE the path
-    // checks, mirroring the prior boolean short-circuit exactly — the gate
-    // itself (what fails closed) is unchanged; only the truthful reason is new.
-    const classifyDeliveryWriteViolation = (rawEvent) => {
+    // gate. Returns null when the event is not a violating write, otherwise
+    // { reason } — a closed-set ISOLATION_VIOLATION_REASONS member — plus, for a
+    // physical_unresolved verdict, the closed-set { errorCode }. Non-delivery
+    // runs are never gated (unchanged). Correlation failures are checked BEFORE
+    // the path checks, mirroring the prior boolean short-circuit exactly — the
+    // gate itself (what fails closed) is unchanged; only the truthful reason is
+    // new. Async because a containment verdict on a transient filesystem error
+    // is retried (see classifyWithPhysicalRetry) before it is final.
+    const classifyDeliveryWriteViolation = async (rawEvent) => {
       if (!this.deliveryContext) return null;
       if (rawEvent?.kind === "write_intent") {
         if (rawEvent.correlationStatus !== WRITE_INTENT_CORRELATION_STATUS.TRACKED) {
           switch (rawEvent.correlationStatus) {
             case WRITE_INTENT_CORRELATION_STATUS.MISSING_TOOL_CALL_ID:
-              return "write_intent_missing_tool_call_id";
+              return { reason: "write_intent_missing_tool_call_id" };
             case WRITE_INTENT_CORRELATION_STATUS.DUPLICATE_TOOL_CALL_ID:
-              return "write_intent_duplicate_tool_call_id";
+              return { reason: "write_intent_duplicate_tool_call_id" };
             case WRITE_INTENT_CORRELATION_STATUS.PENDING_LIMIT:
-              return "write_intent_pending_limit";
+              return { reason: "write_intent_pending_limit" };
             default:
-              return "write_intent_correlation_unconfirmed";
+              return { reason: "write_intent_correlation_unconfirmed" };
           }
         }
         if (!isConfirmableToolCallId(rawEvent.toolCallId)) {
-          return "write_intent_missing_tool_call_id";
+          return { reason: "write_intent_missing_tool_call_id" };
         }
         if (pendingDeliveryWriteToolCallIds.has(rawEvent.toolCallId)) {
-          return "write_intent_duplicate_tool_call_id";
+          return { reason: "write_intent_duplicate_tool_call_id" };
         }
         if (pendingDeliveryWriteToolCallIds.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS) {
-          return "write_intent_pending_limit";
+          return { reason: "write_intent_pending_limit" };
         }
-        const verdict = classifyReportedWriteIntentContainment(rawEvent.path, this.effectiveCwd);
-        return verdict === "inside" ? null : `write_intent_${verdict}`;
+        const { verdict, errorCode } = await classifyReportedWriteIntentContainment(
+          rawEvent.path,
+          this.effectiveCwd,
+        );
+        return verdict === "inside" ? null : { reason: `write_intent_${verdict}`, errorCode };
       }
       if (rawEvent?.kind === "file_written") {
-        const verdict = classifyReportedWriteContainment(rawEvent.path, this.effectiveCwd);
-        return verdict === "inside" ? null : `file_written_${verdict}`;
+        const { verdict, errorCode } = await classifyReportedWriteContainment(
+          rawEvent.path,
+          this.effectiveCwd,
+        );
+        return verdict === "inside" ? null : { reason: `file_written_${verdict}`, errorCode };
       }
       return null;
     };
@@ -2693,10 +2792,11 @@ export class Run {
           ev.kind === "tool_use" ||
           ev.kind === "tool_result"
         ) {
-          const writeViolationReason = classifyDeliveryWriteViolation(rawEvent);
-          if (writeViolationReason) {
+          const writeViolation = await classifyDeliveryWriteViolation(rawEvent);
+          if (writeViolation) {
             isolationViolationKind = rawEvent.kind;
-            isolationViolationReason = writeViolationReason;
+            isolationViolationReason = writeViolation.reason;
+            isolationViolationErrorCode = writeViolation.errorCode ?? null;
             break;
           }
           await markRunningOnce(STATE_CHANGE_REASON.first_event);
@@ -2800,15 +2900,29 @@ export class Run {
     if (isolationViolationKind) {
       // M12-14: persist ONLY the closed-set code/eventKind/reason — never the
       // rejected raw path. The additive reason is persisted only when it is an
-      // exact closed-set member; readers treat an absent reason as unknown.
+      // exact closed-set member; readers treat an absent reason as unknown. The
+      // same closed-set rule governs the additive errorCode: it is persisted
+      // only for a physical_unresolved reason and only as an
+      // ISOLATION_PHYSICAL_ERROR_CODES member (an unexpected code was already
+      // normalized to "other" at classification time).
       const isolationReasonPayload = ISOLATION_VIOLATION_REASONS.includes(isolationViolationReason)
         ? { reason: isolationViolationReason }
+        : {};
+      const isolationErrorCodePayload = typeof isolationViolationReason === "string"
+        && isolationViolationReason.endsWith("_physical_unresolved")
+        && ISOLATION_PHYSICAL_ERROR_CODES.includes(isolationViolationErrorCode)
+        ? { errorCode: isolationViolationErrorCode }
         : {};
       const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.workdir_escape, {
         factEvents: [
           {
             type: "run.isolation_violation",
-            payload: { code: "workdir_escape", eventKind: isolationViolationKind, ...isolationReasonPayload },
+            payload: {
+              code: "workdir_escape",
+              eventKind: isolationViolationKind,
+              ...isolationReasonPayload,
+              ...isolationErrorCodePayload,
+            },
           },
           {
             type: "run.error",

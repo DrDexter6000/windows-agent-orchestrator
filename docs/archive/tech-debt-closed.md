@@ -113,3 +113,4 @@
 | TD-291 | zcode 车道额度耗尽时转录里看不到上游的失败与重试 | backend 读本轮主轮请求的 `model.request.status`：已安排的重试在退避窗内算第四种生命体征（零载荷 `provider_retry`）；收口文案带上游摘要，诊断按尝试链把 429 归 provider_capacity、401/403 归 provider_auth |
 | TD-298 | kimi-web 的静默收口在诊断里落 `unknown`，不说明是哪道门 | 诊断给 kimi-web 收口建门表（现行 5 种、历史 2 种文案），serve 不应答归 unknown，其余归 provider_disconnect；真实转录里 11 个历史停滞从 unknown 改归 provider_disconnect |
 | TD-302 | MCP 的工作区绑定存在服务进程内存里，多个会话落到同一进程时会串，可能派错项目 | 会动工作区的 9 个 MCP 工具只按本次调用给出的 `expectedWorkspaceRoot` 执行并当场核验，不读进程级选择；已有运行的工具核对运行归属；只读工具照旧跟随选择并标明范围（0021 修订，Owner 批准收窄） |
+| TD-305 | 交付隔离门对已存在的工作树内文件调 `realpathSync.native`，失败即判 `write_intent_physical_unresolved` 并终止运行，不重试、不记错误码 | 失败码为 EBUSY/EPERM/EACCES/ENOENT 时整段判定重做（最多 3 次，等 25/100/250 ms），仍无法证明才 fail closed；违规事件带闭集 `errorCode`，诊断事实附上 |

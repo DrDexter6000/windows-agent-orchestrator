@@ -663,7 +663,7 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 }
 ```
 
-**写入边界**：delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace。RunManager 对 backend 报告的 `write_intent` 与已确认 `file_written` 原始路径做词法 + realpath 边界判断（解析 junction/symlink；win32 先归一 MSYS 盘符路径）。Write/Edit/MultiEdit 类工具先产生带 opaque `toolCallId` 的 `write_intent`，只有匹配的成功 tool result 才确认 `file_written`；run 完成时仍有未确认写入意图也 fail closed。越界、无法关联或无法证明目标在 worktree 内时，写入不含路径的 `run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。该机制不解析命令文本，也不等同于 OS filesystem sandbox；backend 未报告的写入只能靠后续 artifact proof 发现。
+**写入边界**：delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace。RunManager 对 backend 报告的 `write_intent` 与已确认 `file_written` 原始路径做词法 + realpath 边界判断（解析 junction/symlink；win32 先归一 MSYS 盘符路径）。Write/Edit/MultiEdit 类工具先产生带 opaque `toolCallId` 的 `write_intent`，只有匹配的成功 tool result 才确认 `file_written`；run 完成时仍有未确认写入意图也 fail closed。越界、无法关联或无法证明目标在 worktree 内时，写入不含路径的 `run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。物理位置无法证明前先对 EBUSY/EPERM/EACCES/ENOENT 短暂重试（最多 3 次）；重试后仍无法证明时，该事件附闭集 `errorCode`。该机制不解析命令文本，也不等同于 OS filesystem sandbox；backend 未报告的写入只能靠后续 artifact proof 发现。
 
 **readiness 投影联动**：终端 delivery-requested run 且唯一较高优先级 delivery 事实为恰好一条 run-bound 安全 `isolation_violation` → `run_delivery` readiness 投影 `isolation_failed` + `isolationFailure:{code:"workdir_escape"}`（与 packaging failure 严格分离，无 candidateInventory/repackage/salvage/retry/stop/decision 面，Lead 只能另行派发）；缺失/多条/跨 run/非闭集 code → `ambiguous`。投影闭集与判定见 §1 `runDelivery.js` 条目。
 

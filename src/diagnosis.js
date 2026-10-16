@@ -169,6 +169,27 @@ export const ISOLATION_VIOLATION_REASONS = Object.freeze([
   "file_written_physical_unresolved", // physical location of the write cannot be proven
 ]);
 
+// The frozen closed-set SSOT of filesystem error codes an isolation violation may
+// record when the physical location of a reported write stayed unprovable. Only
+// these tokens (and the catch-all "other") ever reach the durable fact: an
+// exception without a code, or with any code outside this set, is recorded as
+// "other" — the raw value is never echoed. Hosted HERE for the same reason as
+// ISOLATION_VIOLATION_REASONS above: this module must stay import-pure while the
+// write side (runManager's containment gate) and the read side (this module's
+// fact wording) both need the one set.
+export const ISOLATION_PHYSICAL_ERROR_CODES = Object.freeze([
+  "EBUSY", // the target is held by another handle (pending delete/replace)
+  "EPERM", // the operation is refused while the file is being swapped
+  "EACCES", // access is denied during the swap window
+  "ENOENT", // the target is momentarily absent (temp-write + rename replace)
+  "ELOOP", // too many links — a real path problem, not a transient one
+  "ENOTDIR", // a path component is not a directory
+  "EINVAL", // the filesystem rejected the argument
+  "ENAMETOOLONG", // the path exceeds the platform limit
+  "EIO", // device I/O error
+  "other", // any other code, or none at all
+]);
+
 // Static fact wording per reason. Correlation and physical-unresolved facts
 // must NEVER claim "outside" — they state a confirmation failure, not an
 // escape. A historical (reason-absent) or malformed reason maps to the
@@ -194,13 +215,25 @@ const ISOLATION_VIOLATION_FACT_UNKNOWN =
  * Project the safe fact wording for an isolation violation's persisted reason.
  * Only an exact closed-set member selects its wording; anything else (absent,
  * non-string, unknown value) falls back to the generic no-"outside" fact.
+ *
+ * A physical_unresolved reason additionally states WHICH filesystem error kept
+ * the location unprovable — appended only when the persisted errorCode is an
+ * exact ISOLATION_PHYSICAL_ERROR_CODES member, so no value outside the closed
+ * set can ever enter the fact text. An absent or non-member code leaves the
+ * wording byte-identical to the reason-only fact (historical transcripts).
  * @param {unknown} reason
+ * @param {unknown} errorCode
  * @returns {string}
  */
-function factForIsolationViolation(reason) {
-  return typeof reason === "string" && Object.hasOwn(ISOLATION_VIOLATION_FACTS, reason)
-    ? ISOLATION_VIOLATION_FACTS[reason]
-    : ISOLATION_VIOLATION_FACT_UNKNOWN;
+function factForIsolationViolation(reason, errorCode) {
+  const knownReason = typeof reason === "string" && Object.hasOwn(ISOLATION_VIOLATION_FACTS, reason);
+  const fact = knownReason ? ISOLATION_VIOLATION_FACTS[reason] : ISOLATION_VIOLATION_FACT_UNKNOWN;
+  return knownReason
+    && reason.endsWith("_physical_unresolved")
+    && typeof errorCode === "string"
+    && ISOLATION_PHYSICAL_ERROR_CODES.includes(errorCode)
+    ? `${fact} (filesystem error code: ${errorCode})`
+    : fact;
 }
 
 // Provider access denial facts that classify as provider_auth even when they
@@ -542,12 +575,13 @@ function diagnoseFailureInner(events, expectedRunId) {
     // "outside"; correlation/physical-unresolved reasons state a confirmation
     // failure instead). A historical reason-absent or malformed reason falls
     // back to the generic fact — it never invents "outside" and the raw
-    // malformed value is never echoed.
+    // malformed value is never echoed. A physical_unresolved reason also names
+    // the filesystem error code, and only when it is a closed-set member.
     return {
       category: "workdir_escape",
       evidence: [{
         eventType: "run.isolation_violation",
-        fact: factForIsolationViolation(isolationViolation.reason),
+        fact: factForIsolationViolation(isolationViolation.reason, isolationViolation.errorCode),
       }],
     };
   }

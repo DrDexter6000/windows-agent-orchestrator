@@ -26,6 +26,8 @@ import {
   PROVIDER_DIAGNOSIS_CODES,
   PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   NO_EFFECT_DIAGNOSIS_CODES,
+  ISOLATION_VIOLATION_REASONS,
+  ISOLATION_PHYSICAL_ERROR_CODES,
 } from "../../src/diagnosis.js";
 
 // ---------------------------------------------------------------------------
@@ -1850,4 +1852,77 @@ test("SETTLE-DX-6: 结算运行转录里有 run.error → 不走结算规则，�
   const d = diagnoseFailure(events, runId);
   assert.equal(d.category, "crash");
   assert.ok(!d.evidence.some((e) => /原因不在转录内/.test(e.fact)), "有 run.error 时不得声称原因不在转录内");
+});
+
+// ---------------------------------------------------------------------------
+// isolation violation: the physical_unresolved fact names the filesystem error
+// code that kept the target unprovable. The suffix is added ONLY when the
+// persisted errorCode is an exact closed-set member — an absent, non-string or
+// unknown code leaves the wording byte-identical to the reason-only fact, and a
+// reason that is not physical_unresolved never grows the suffix at all.
+// ---------------------------------------------------------------------------
+
+const ISOLATION_FACT_BASE = Object.freeze({
+  write_intent_physical_unresolved:
+    "the physical location of an intended write path could not be confirmed inside the authorized delivery worktree",
+  file_written_physical_unresolved:
+    "the physical location of a reported file write could not be confirmed inside the authorized delivery worktree",
+});
+
+function diagnoseIsolationViolation(extra) {
+  return diagnoseFailure(
+    [{
+      type: "run.isolation_violation",
+      runId: "run_dx_iso",
+      code: "workdir_escape",
+      eventKind: "write_intent",
+      ...extra,
+    }],
+    "run_dx_iso",
+  );
+}
+
+test("DX-ISO-1: a closed-set errorCode is appended to the physical_unresolved fact", () => {
+  for (const [reason, baseFact] of Object.entries(ISOLATION_FACT_BASE)) {
+    for (const code of ISOLATION_PHYSICAL_ERROR_CODES) {
+      const d = diagnoseIsolationViolation({ reason, errorCode: code });
+      assert.equal(d.category, "workdir_escape");
+      assert.equal(d.code, null, "provider code stays null for workdir_escape");
+      assert.equal(d.evidence.length, 1);
+      assert.equal(
+        d.evidence[0].fact,
+        `${baseFact} (filesystem error code: ${code})`,
+        `${reason} + ${code} states which filesystem error it was`,
+      );
+    }
+  }
+});
+
+test("DX-ISO-2: a missing or non-closed-set errorCode leaves the fact wording unchanged", () => {
+  for (const [reason, baseFact] of Object.entries(ISOLATION_FACT_BASE)) {
+    for (const bad of [undefined, null, 42, "", "OTHER", "ENOENT ", "eNoent", "ENOTFOUND", "EIO\n"]) {
+      const d = diagnoseIsolationViolation({ reason, errorCode: bad });
+      assert.equal(d.evidence[0].fact, baseFact, `errorCode ${JSON.stringify(bad)} adds nothing`);
+      assert.ok(!d.evidence[0].fact.includes("filesystem error code"));
+      if (typeof bad === "string" && bad.length > 0) {
+        assert.ok(!d.evidence[0].fact.includes(bad), "the untrusted code value is never echoed");
+      }
+    }
+  }
+});
+
+test("DX-ISO-3: a reason that is not physical_unresolved never grows the suffix", () => {
+  for (const reason of ISOLATION_VIOLATION_REASONS) {
+    if (reason.endsWith("_physical_unresolved")) continue;
+    const d = diagnoseIsolationViolation({ reason, errorCode: "ENOENT" });
+    assert.ok(
+      !d.evidence[0].fact.includes("filesystem error code"),
+      `${reason} must not name a filesystem error code`,
+    );
+  }
+  // A malformed reason that merely ends with the suffix is not a closed-set
+  // reason, so it projects the generic fact and still never echoes a code.
+  const malformed = diagnoseIsolationViolation({ reason: "future_physical_unresolved", errorCode: "ENOENT" });
+  assert.match(malformed.evidence[0].fact, /no trusted reason recorded/);
+  assert.ok(!malformed.evidence[0].fact.includes("filesystem error code"));
 });

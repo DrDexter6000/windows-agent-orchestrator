@@ -36,14 +36,18 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 
-import { diagnoseFailure, ISOLATION_VIOLATION_REASONS } from "../../src/diagnosis.js";
+import { diagnoseFailure, ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "../../src/diagnosis.js";
 import {
   gatherDeliveryView,
   projectDeliveryReadiness,
   projectIsolationViolation,
 } from "../../src/application/runDelivery.js";
 import { runAwaitResult } from "../../src/application/runAwaitResult.js";
-import { Run } from "../../src/runManager.js";
+import {
+  Run,
+  classifyReportedWriteContainment,
+  classifyReportedWriteIntentContainment,
+} from "../../src/runManager.js";
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
 const WIN32 = process.platform === "win32";
@@ -151,17 +155,23 @@ async function createJunctionOrSkip(t, target, path) {
 }
 
 // Assert the durable violation fact carries EXACTLY the safe closed-set fields
-// (plus transcript envelope) and never the rejected raw path.
-function assertViolationFact(events, { eventKind, reason }) {
+// (plus transcript envelope) and never the rejected raw path. `errorCode` is
+// expected only for the physical_unresolved reasons that carry it; passing it
+// pins both its value and its presence, and omitting it keeps the assertion
+// that no errorCode key was persisted at all.
+function assertViolationFact(events, { eventKind, reason, errorCode }) {
   const violation = events.find((event) => event.type === "run.isolation_violation");
   assert.ok(violation, "a run.isolation_violation fact is persisted");
   assert.equal(violation.code, "workdir_escape", "code stays workdir_escape (compat)");
   assert.equal(violation.eventKind, eventKind);
   assert.equal(violation.reason, reason);
+  if (errorCode !== undefined) assert.equal(violation.errorCode, errorCode);
+  const expectedKeys = ["agentId", "code", "eventKind", "reason", "runId", "seq", "ts", "type"];
+  if (errorCode !== undefined) expectedKeys.push("errorCode");
   assert.deepEqual(
     Object.keys(violation).sort(),
-    ["agentId", "code", "eventKind", "reason", "runId", "seq", "ts", "type"].sort(),
-    "only closed-set code/eventKind/reason plus the transcript envelope are persisted",
+    expectedKeys.sort(),
+    "only closed-set code/eventKind/reason/errorCode plus the transcript envelope are persisted",
   );
   return violation;
 }
@@ -220,6 +230,16 @@ test("M12-14-R2: every reason is a bounded write_intent_/file_written_ wire-safe
   for (const reason of ISOLATION_VIOLATION_REASONS) {
     assert.match(reason, /^(write_intent|file_written)_[a-z0-9_]+$/, `bounded shape: ${reason}`);
     assert.ok(reason.length <= 48, `bounded length: ${reason}`);
+  }
+});
+
+test("M12-14-R3: ISOLATION_PHYSICAL_ERROR_CODES is the frozen closed set of recordable codes", () => {
+  assert.ok(Object.isFrozen(ISOLATION_PHYSICAL_ERROR_CODES), "error-code set is frozen");
+  assert.deepEqual([...ISOLATION_PHYSICAL_ERROR_CODES], [
+    "EBUSY", "EPERM", "EACCES", "ENOENT", "ELOOP", "ENOTDIR", "EINVAL", "ENAMETOOLONG", "EIO", "other",
+  ]);
+  for (const code of ISOLATION_PHYSICAL_ERROR_CODES) {
+    assert.match(code, /^([A-Z][A-Z0-9]*|other)$/, `bounded wire-safe token: ${code}`);
   }
 });
 
@@ -286,9 +306,12 @@ test("M12-14-W3: write_intent with an unresolvable physical path persists write_
   try {
     const output = await finishFixture(fixture);
     assert.equal(fixture.getPackageCount(), 0);
+    // The NUL-byte error is not a retryable filesystem code, so the verdict is
+    // immediate and its code is recorded as the closed-set "other".
     assertViolationFact(output.events, {
       eventKind: "write_intent",
       reason: "write_intent_physical_unresolved",
+      errorCode: "other",
     });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -444,7 +467,7 @@ test("M12-14-W11: file_written whose target cannot be resolved persists file_wri
   fixture.setEvents(async function* events() {
     // Lexically inside, but the reported target was never materialized —
     // realpath cannot prove its physical location (post-write evidence fails
-    // closed for delivery runs).
+    // closed for delivery runs) and the recorded ENOENT survives the retries.
     yield { kind: "file_written", path: join("src", "never-created.js") };
     yield { kind: "done", reason: "completed" };
   });
@@ -454,9 +477,264 @@ test("M12-14-W11: file_written whose target cannot be resolved persists file_wri
     assertViolationFact(output.events, {
       eventKind: "file_written",
       reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
     });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("M12-14-W12: write_intent on an in-worktree dangling junction fails closed with errorCode ENOENT", async (t) => {
+  const fixture = await makeFixture({ runId: "run_m1214_w12" });
+  const link = join(fixture.effectiveCwd, "dangling-w12");
+  try {
+    // Junction on win32, dangling symlink elsewhere: the link itself exists
+    // (lstat succeeds) but its target does not, so realpath can never prove
+    // where the reported write would land.
+    await symlink(join(fixture.root, "missing-w12-target"), link, "junction");
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`dangling link creation denied by platform: ${error.code}`);
+      await rm(fixture.root, { recursive: true, force: true });
+      return;
+    }
+    throw error;
+  }
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: link, toolCallId: "w12_intent", correlationStatus: "tracked" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assert.equal(fixture.run.state, "failed");
+    assert.equal(output.result.isolationViolation, true);
+    // The transient-error retries ran out; the last observed filesystem error
+    // is on the durable fact, in the closed set.
+    assertViolationFact(output.events, {
+      eventKind: "write_intent",
+      reason: "write_intent_physical_unresolved",
+      errorCode: "ENOENT",
+    });
+    assert.ok(!output.rawTranscript.includes("dangling-w12"), "the rejected raw path is never persisted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
+// Section T — transient filesystem-error retry (both verdict functions)
+// =====================================================================
+//
+// A writer that replaces a file (temp file + rename, pending delete) can leave
+// the reported target momentarily unresolvable: EBUSY / EPERM / EACCES /
+// ENOENT. The verdict functions re-run the WHOLE classification after 25, 100
+// and 250 ms instead of terminalizing the run on the first failure; the redo
+// then uses the existing nearest-existing-ancestor branch when the target is
+// gone. Anything else — another code, no code at all, or a confirmed
+// inside/outside verdict — is final immediately. When the retries run out the
+// verdict stays physical_unresolved (fail closed) and the LAST observed code is
+// recorded. Filesystem calls and the wait are injectable seams.
+
+function fsError(code) {
+  return Object.assign(new Error(`synthetic ${code}`), { code });
+}
+
+// A deterministic sleep that only records its waits (no wall-clock cost).
+function recordingSleep(sleeps) {
+  return async (ms) => { sleeps.push(ms); };
+}
+
+const RETRY_WAITS = [25, 100, 250];
+
+test("M12-14-T1: an intent verdict retries a transient EPERM twice, then passes", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t1-worktree"));
+  const target = resolve(join(base, "src", "kept.js"));
+  const sleeps = [];
+  let failuresLeft = 2;
+  const realpath = (p) => {
+    if (p !== target) return p;
+    if (failuresLeft > 0) {
+      failuresLeft -= 1;
+      throw fsError("EPERM");
+    }
+    return target;
+  };
+  const result = await classifyReportedWriteIntentContainment(target, base, {
+    realpath,
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "inside" });
+  assert.deepEqual(sleeps, [25, 100], "one wait before each redo");
+});
+
+test("M12-14-T2: an always-EBUSY intent verdict stays physical_unresolved and records EBUSY", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t2-worktree"));
+  const target = resolve(join(base, "src", "locked.js"));
+  const sleeps = [];
+  let targetRealpathCalls = 0;
+  const realpath = (p) => {
+    if (p !== target) return p;
+    targetRealpathCalls += 1;
+    throw fsError("EBUSY");
+  };
+  const result = await classifyReportedWriteIntentContainment(target, base, {
+    realpath,
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "physical_unresolved", errorCode: "EBUSY" });
+  assert.deepEqual(sleeps, RETRY_WAITS, "three redos, each after its wait");
+  assert.equal(targetRealpathCalls, 4, "the initial pass plus three redos");
+});
+
+test("M12-14-T3: a target that vanishes between lstat and realpath is re-classified through the ancestor branch", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t3-worktree"));
+  const target = resolve(join(base, "src", "swapped.js"));
+  const sleeps = [];
+  let lstatCalls = 0;
+  let targetRealpathCalls = 0;
+  const realpath = (p) => {
+    // The worktree and its existing ancestors resolve to themselves; only the
+    // target is inside the replace window during the first pass.
+    if (p !== target) return p;
+    targetRealpathCalls += 1;
+    throw fsError("ENOENT");
+  };
+  const lstat = () => {
+    lstatCalls += 1;
+    if (lstatCalls === 1) return {}; // exists during the first pass
+    throw fsError("ENOENT"); // gone by the time the redo looks
+  };
+  const result = await classifyReportedWriteIntentContainment(target, base, {
+    realpath,
+    lstat,
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "inside" });
+  assert.deepEqual(sleeps, [25], "exactly one redo was needed");
+  assert.equal(targetRealpathCalls, 1, "the redo resolves the nearest existing ancestor instead");
+});
+
+test("M12-14-T4: a non-retryable ELOOP verdict is immediate and records ELOOP", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t4-worktree"));
+  const target = resolve(join(base, "src", "loop.js"));
+  const sleeps = [];
+  const result = await classifyReportedWriteIntentContainment(target, base, {
+    realpath: (p) => {
+      if (p !== target) return p;
+      throw fsError("ELOOP");
+    },
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "physical_unresolved", errorCode: "ELOOP" });
+  assert.deepEqual(sleeps, [], "a real path error is not retried");
+});
+
+test("M12-14-T5: an error without a code is recorded as other and is not retried", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t5-worktree"));
+  const target = resolve(join(base, "src", "codeless.js"));
+  const sleeps = [];
+  const result = await classifyReportedWriteIntentContainment(target, base, {
+    realpath: (p) => {
+      if (p !== target) return p;
+      throw new Error("unresolvable");
+    },
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "physical_unresolved", errorCode: "other" });
+  assert.deepEqual(sleeps, [], "an unknown failure is not a transient swap");
+});
+
+test("M12-14-T6: confirmed inside/outside verdicts are never retried", async () => {
+  const root = resolve(join(tmpdir(), "wao-m1214-t6"));
+  const base = resolve(join(root, "worktree"));
+  const outsideTarget = resolve(join(root, "outside", "escaped.js"));
+  const sleeps = [];
+  const deps = { lstat: () => {}, sleep: recordingSleep(sleeps) };
+
+  // lexical_outside: no filesystem call is made at all.
+  const lexical = await classifyReportedWriteIntentContainment(outsideTarget, base, {
+    ...deps,
+    realpath: () => { throw new Error("realpath must not run for a lexical verdict"); },
+  });
+  assert.deepEqual(lexical, { verdict: "lexical_outside" });
+
+  // physical_outside: resolved, but outside the worktree.
+  const target = resolve(join(base, "src", "linked.js"));
+  const physical = await classifyReportedWriteIntentContainment(target, base, {
+    ...deps,
+    realpath: (p) => (p === target ? outsideTarget : p),
+  });
+  assert.deepEqual(physical, { verdict: "physical_outside" });
+
+  // inside: resolved inside the worktree.
+  const inside = await classifyReportedWriteIntentContainment(target, base, { ...deps, realpath: (p) => p });
+  assert.deepEqual(inside, { verdict: "inside" });
+  assert.deepEqual(sleeps, [], "no sleep for any confirmed verdict");
+});
+
+test("M12-14-T7: a file_written verdict retries a transient EACCES, then passes", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t7-worktree"));
+  const target = resolve(join(base, "src", "written.js"));
+  const sleeps = [];
+  let failuresLeft = 1;
+  const result = await classifyReportedWriteContainment(target, base, {
+    realpath: (p) => {
+      if (p !== target) return p;
+      if (failuresLeft > 0) {
+        failuresLeft -= 1;
+        throw fsError("EACCES");
+      }
+      return target;
+    },
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "inside" });
+  assert.deepEqual(sleeps, [25]);
+});
+
+test("M12-14-T8: an always-EACCES file_written verdict stays physical_unresolved and records EACCES", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t8-worktree"));
+  const target = resolve(join(base, "src", "written.js"));
+  const sleeps = [];
+  const result = await classifyReportedWriteContainment(target, base, {
+    realpath: (p) => {
+      if (p !== target) return p;
+      throw fsError("EACCES");
+    },
+    lstat: () => {},
+    sleep: recordingSleep(sleeps),
+  });
+  assert.deepEqual(result, { verdict: "physical_unresolved", errorCode: "EACCES" });
+  assert.deepEqual(sleeps, RETRY_WAITS);
+});
+
+test("M12-14-T9: a redo re-checks the boundary — a target swapped to an outside link during the wait is physical_outside", async () => {
+  const base = resolve(join(tmpdir(), "wao-m1214-t9-worktree"));
+  const outside = resolve(join(tmpdir(), "wao-m1214-t9-outside", "x.js"));
+  const target = resolve(join(base, "src", "swapped.js"));
+  for (const classify of [classifyReportedWriteIntentContainment, classifyReportedWriteContainment]) {
+    const sleeps = [];
+    let first = true;
+    const result = await classify(target, base, {
+      realpath: (p) => {
+        if (p !== target) return p;
+        if (first) {
+          first = false;
+          throw fsError("EPERM");
+        }
+        return outside;
+      },
+      lstat: () => {},
+      sleep: recordingSleep(sleeps),
+    });
+    assert.deepEqual(result, { verdict: "physical_outside" }, classify.name);
+    assert.deepEqual(sleeps, [25], `${classify.name}: one wait, then the redo resolves outside`);
   }
 });
 

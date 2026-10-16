@@ -112,4 +112,3 @@
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 下次改 smoke 脚本或这几种后端时：把模板车道纳入 smoke，或在 §4 写明这些车道用什么替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-303 | 别的项目的 Lead 发现的 WAO 问题没有送到 WAO 开发侧的通道：反馈只能写进宿主自己的仓库，靠 Owner 转告。2026-10-15 一份宿主跟进反馈（含 TD-302 的发现）因此几小时后才被看到 | 开放 | TD-302 之后：wao 提供反馈入口，写进 WAO 安装根下只在本机的收件箱（不进 git；不用 GitHub Issues，仓库是公开的），WAO 开发 Lead 开工时能看到未处理的条目 | 0049 |
 | TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 撞到真实误归样本时，按窗口长短区分限流与额度耗尽，配真实措辞的测试 | src/diagnosis.js |
-| TD-305 | 交付隔离门的写前位置检查对已存在的工作树内文件调 `realpathSync.native`，失败一律判 `write_intent_physical_unresolved` 并终止运行，不重试、也不记错误码。2026-10-16 deepseek-flash 一次返工在编辑工作树内的测试文件时被它终止，多半是 worker 正在写同一文件造成的瞬时共享冲突 | 开放 | 下一批：对 EBUSY/EPERM/EACCES 短暂重试后再判，违规事件记下错误码 | src/runManager.js |
