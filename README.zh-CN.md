@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.4.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-11-v0.4.0.md)
+[![version](https://img.shields.io/badge/version-v0.5.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-16-v0.5.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,16 +51,21 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.4.0 新增（2026-10-11）
+## v0.5.0 新增（2026-10-16）
 
-- **生命周期与卫生收口**——serve 会话荚与 worktree 生命周期在终态回收/释放；转录存储按
-  项目分桶（`runs/projects/<slug>/`），并提供旧平铺文件的迁移命令（决定 0056–0058、0060）。
-- **正确性门**——测试套件干扰自动裁定登记册（0054/0059）、咨询 capped 回执 + 无损分页
-  合同（0051）、会审席位只读违规自动 FAIL（0055）。
-- **交付收口**——lineage-close 出口对已决非交付线系记账并门控证据化释放 worktree，分支
-  永不删；doctor 新增认证门可见性 advisory（决定 0058/0060）。
-- 发版门槛证据（打标提交上全量测试绿，2026-10-11）与 v0.3.0/v0.3.1 指针见
-  [`docs/changelog-2026-10-11-v0.4.0.md`](docs/changelog-2026-10-11-v0.4.0.md)。
+- **Lead 看得见、Lead 来定**——run 还有生命体征时，控制面只给建议，去留由 Lead 决定；Lead
+  看得到 worker 正在跑的命令、工具调用在对什么动手、最近输出了什么（决定 0067–0072）。
+- **车道不靠人工步骤就能用**——kimi worker serve 在派发时按需拉起、空闲时退出；车道的暂停
+  派发说明与当前型号各只写在车道配置一处；`wao lanes` 是只读的车道参考面（0064、
+  0073–0075、0079–0081）。
+- **宿主项目接入**——会改工作区的 MCP 工具只从调用本身取目标项目，共用一个 server 的会话
+  不再派发进彼此的项目；`wao mcp status` 只读探测宿主注册状态；宿主项目的 Lead 用
+  `wao feedback` 报 WAO 缺陷（0066、0083）。
+- **按批准的计划清理**——`wao worktree reclaim` 在分支进了已校验的 bundle 之后清退陈旧
+  worktree 与 `wao/*` 分支，含嵌在关联工作树里的运行树；`wao runs settle` 结算 runner
+  已死的 run（0082）。
+- 按决定分组的范围、发版门槛证据与 Owner 的 reliability 豁免（deepseek-pro 一行）见
+  [`docs/changelog-2026-10-16-v0.5.0.md`](docs/changelog-2026-10-16-v0.5.0.md)。
 
 ## 当前状态
 
@@ -160,7 +165,7 @@ AGENT_ONBOARDING.md §3。
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.4.0](docs/changelog-2026-10-11-v0.4.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.5.0](docs/changelog-2026-10-16-v0.5.0.md)） |
 | **跑真实 smoke 测试**（claude/codex/opencode） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |

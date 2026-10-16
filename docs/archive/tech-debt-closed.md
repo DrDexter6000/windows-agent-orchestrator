@@ -117,3 +117,6 @@
 | TD-303 | 别的项目的 Lead 发现的 WAO 问题没有送到 WAO 开发侧的通道，只能写进宿主仓库、靠 Owner 转告 | `wao feedback submit/list/show/close` 写进主检出下的本机收件箱 `.wao/inbox/`（不进 git；任何入口、任何工作树都落到同一处）；`npm run hygiene` 在有未处理条目时多一行提示；决定 0083 |
 | TD-293 | 架构 §3.2 与使用手册的事件清单缺了代码写出的 30 种事件，守卫只比两张表、不查代码写了什么 | 事件登记表 `src/transcriptEvents.js`（68 种）是唯一编辑处，清单由 `npm run gen:surface` 生成；所有写出口共用一个序列化函数查表，测试里严格模式下写出未登记类型即红 |
 | TD-306 | 在开发工作树里派发的交付运行，运行树嵌在 `.dev/wt/<批>/.wao-worktrees/` 下，`wao worktree reclaim` 把它们算作范围外、永不清退 | 清退纳入经核验的关联工作树（在册、同 common dir、路径无链接）下的运行树：计划记范围证明，apply 删除前重证；重名一律保留并挡住外层树；运行树的位置不变 |
+| TD-144 | 宿主进程 env 块不随注册表刷新，setx 后启动的宿主派发报凭据缺失，且无标准补救文档 | 凭据解析已桥接 Windows 注册表（HKCU\Environment，每次派发现读、无缓存：src/application/credentialReadiness.js:7-20，e2cc0b9）；补救文档在 docs/troubleshooting.md §1.6（53e0387） |
+| TD-172 | 无会话的非终态 run 无法 stop 与结算，永久计入 unresolved 污染计数信噪比 | `wao runs settle` 落地：runner 已死的非终态 run（含只有 background_submitted 的无会话形状）经六道门结算为 failed（src/application/runSettle.js:3-26、test/application/runSettle.test.js；e6cee6a 说明明言 TD-172 closed） |
+| TD-223 | 凭据临时目录回收机制已落地，历史堆积的存量目录清扫未确认执行 | run 终态由 backend.dispose() 删本进程建的目录（src/backends/claudeCode.js）；崩溃残留由 wao doctor 报数、`wao sweep-claude-config --apply` 清扫（src/application/oauthDirSweep.js）；%TEMP% 里 wao-claude-oauth-* 已由 1308 个降到 27 个，存量清扫执行过 |
