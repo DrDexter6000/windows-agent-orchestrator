@@ -163,9 +163,9 @@ export const CAPABILITY_NOTES = Object.freeze({
     vitalSigns: "可读体征：协议帧（握手落 `initialized`，assistant 分片落 `streaming`）。没有轮内\"等不到进展\"的收口门（请求级 15s 超时除外）；长工具调用期间不落体征事实",
   }),
   "deepseek-acp": Object.freeze({
-    model: "模型经 shipped acp profile 的 session configOptions 承载；通道已证可 set（Phase 5），但 WAO 未接线（ACP 值形状是 provider/model JSON 对，非裸 model.id）；配了即拒，模型取 profile 缺省",
+    model: "只接受 `{ id, providerID }`（ACP 的模型选项值是 provider/model 二元组 JSON，裸 id 表达不了，配了即拒）；经 `session/set_config_option` 下发，值不在 session/new 广告的选项里或响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒；不配时新会话用 profile 缺省、resume 沿用恢复会话的模型",
     reasoning: "经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒",
-    contextWindow: "同 model 块——无可验证设置通道，配了即拒",
+    contextWindow: "无可验证设置通道，配了即拒（model 块只接受 id 与 providerID）",
     provider: "组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒",
     supportsSessionReuse: "ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh",
     supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",

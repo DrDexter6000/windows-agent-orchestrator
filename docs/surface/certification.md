@@ -85,9 +85,9 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - reportsTokenUsage（token usage）：assistant/message 帧 usage
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——dsh 无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）
 - **deepseek-acp**
-  - model override：模型经 shipped acp profile 的 session configOptions 承载；通道已证可 set（Phase 5），但 WAO 未接线（ACP 值形状是 provider/model JSON 对，非裸 model.id）；配了即拒，模型取 profile 缺省
+  - model override：只接受 `{ id, providerID }`（ACP 的模型选项值是 provider/model 二元组 JSON，裸 id 表达不了，配了即拒）；经 `session/set_config_option` 下发，值不在 session/new 广告的选项里或响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒；不配时新会话用 profile 缺省、resume 沿用恢复会话的模型
   - reasoning effort：经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒
-  - model.contextWindow：同 model 块——无可验证设置通道，配了即拒
+  - model.contextWindow：无可验证设置通道，配了即拒（model 块只接受 id 与 providerID）
   - provider 块：组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒
   - 生命体征与收口：可读体征：协议帧（握手落 `initialized`）。没有轮内"等不到进展"的收口门——握手等非 prompt 请求有 15s 超时，prompt 请求本身不设时限；轮内不落体征事实
   - supportsRoleContract（角色合同）：per-dispatch `--patch` personaPrefix（结构化序列化）

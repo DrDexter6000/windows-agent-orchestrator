@@ -72,7 +72,7 @@
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
 | TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 等样本：下次受督的长运行或 zcode 交付运行 | docs/usage.md |
-| TD-201 | dsh 组件层在册证据基于 0.1.5-rc.2 旧指纹，现装 0.2.0-rc.2 后旧证据 inconclusive 且不可由 component-check 重建 | 开放 | 等样本：coder_low_dsh 席位承重前，或 dsh 0.2.0 正式发布 | scripts/reliability/dsh-acp/evidence/ scripts/reliability/dsh-acp/wao-reuse-drill.mjs |
+| TD-201 | dsh 的 phase6 跨 run 会话恢复证据绑定 0.1.5-rc.2 的运行时指纹，现装 0.2.1-rc.2 下组件层判 inconclusive；component-check 只判不重建，要重跑 wao-reuse-drill（消耗 token） | 开放 | 等样本：coder_low_dsh 席位承重前，或 dsh 出正式版（非预发布） | scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json scripts/reliability/dsh-acp/wao-reuse-drill.mjs |
 | TD-204 | 认证 caseId 仍以 label 为合并键，改名即换键，仅 warn-only 护栏在线未解耦 | 开放 | 择机：下次改认证台账 schema 时解耦 caseId 与 label |  |
 | TD-206 | kimiWeb 失败 run 的部分产出不落盘，中途失败后已产出文本不可恢复 | 开放 | 等样本：受督 kimiWeb 长 run 需要中途产出可恢复 |  |
 | TD-209 | runner 无声挂死根因与延迟收割者身份未明，复现时需带现场归因；心跳盲区已缓解 | 开放 | 等样本：再遇同形（无声悬置+心跳活+计时器在场）带现场归因 | test/isolation-infra/backgroundRunner.test.js src/backends/kimiWeb.js |
