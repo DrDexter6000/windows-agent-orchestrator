@@ -86,3 +86,7 @@ Owner 当天提出，画像要有 Lead 参与、不断进化，并进入 Lead �
 - 同 id 换模型从配置上察觉不到，只能靠 `reviewPending`。
 - 长会话或上下文压缩之后，Lead 规划新批次前应重看 `lead_preflight` 或 `wao lanes`。
 - 宿主私有记忆里另存的车道事实，由宿主迁进 `config/lane-traits.json`，记忆里只留指针。
+
+## 修订条（0088）
+
+§4 的 caveats 投影见 0088。

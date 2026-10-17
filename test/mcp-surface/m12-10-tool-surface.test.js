@@ -621,9 +621,12 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // reviewReasons≤4,caveats≤2,cost}；星级/basis/ratingsState 闭集 enum 派生自
 // laneProfile SSOT）——outputSchema 在 stripped 载荷内，SHA 如实翻新；描述句
 // 变化不进 stripped 载荷（desc 顶与 hostVisible 顶均未抬、实测复验通过）。
+// 0088（2026-10-17，Owner 批准放宽上限）：lanes 每行的 caveats 由前 2 条改为
+// 全部（≤4）——outputSchema 的 maxItems 2→4，wire 字节不变，SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac";
-  // （历史值：6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f
+  "38d4110294431e2bcc3220e6a24fd97da48e57ded1d49e0eae244067e101034d";
+  // （历史值：2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac
+  // 为 0087 lanes 投影的冻结值；6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f
   // 为 2026-10-15/16 重冻后的实测冻结值——0087 lanes 投影之前的最后值。）
   // 2026-10-16（schema 改动，按实测更新）：run_delivery_reverify 的 input/
   // output schema 各增可选 attempt（integer 1..2）——schema 在 stripped 载荷

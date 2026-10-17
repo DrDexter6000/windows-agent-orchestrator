@@ -315,7 +315,7 @@ function clip(text, max) {
 }
 
 /**
- * lead_preflight 的紧凑投影（0087 §4）。行序=lanes.json 声明序；只含车道表里
+ * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088）。行序=lanes.json 声明序；只含车道表里
  * 有画像的车道；不排序、不加推荐字段。所有字符串在应用层截到 MCP schema 上限，
  * 保证投影总能通过校验。
  * @returns {{scale:string, dimensionLabels:Object, rows:object[], omittedLaneIds:string[]}|null}
@@ -351,7 +351,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
       ratings,
       ratingsState: rs.state,
       reviewReasons: rs.reasons.slice(0, 4).map((s) => clip(s, 160)),
-      caveats: entry.caveats.slice(0, 2),
+      caveats: [...entry.caveats],
       cost: entry.cost,
     });
   }

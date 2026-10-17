@@ -2841,7 +2841,7 @@ const LANES_PROJECTION_OUTPUT = z.object({
     }).strict(),
     ratingsState: z.enum([...RATINGS_STATES]),
     reviewReasons: z.array(z.string().max(160)).max(4),
-    caveats: z.array(z.string().max(120)).max(2),
+    caveats: z.array(z.string().max(120)).max(4),
     cost: z.string().max(200).nullable(),
   }).strict()).max(PROJECTION_ROWS_CAP),
 }).strict();

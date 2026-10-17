@@ -187,7 +187,9 @@ const ROLE_PATCH_FILE = "role.patch.yml";
 const PATCH_SWEEP_STALE_MS = 60 * 60 * 1000;
 
 const SHUTDOWN_TIMEOUT_MS = 1000;
-const HANDSHAKE_TIMEOUT_MS = 15000;
+// 非 prompt 请求（initialize、建会话、恢复、设配置）的时限。dsh 空闲时约 5.5 秒应答
+// initialize，几个 worker 同时跑测试时要 16–18 秒；时限要留出这段余量。
+const HANDSHAKE_TIMEOUT_MS = 60000;
 const STDERR_TAIL_LIMIT = 4000;
 const ANOMALY_LIMIT = 64;
 const BOUNDED_TEXT_LIMIT = 120;

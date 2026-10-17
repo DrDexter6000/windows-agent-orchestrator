@@ -171,7 +171,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",
     reportsTokenUsage: "`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道",
     enforcesWriteSandbox: "无 OS 写沙箱（进程级）——containment 走操作员安装的 ACP 补丁面，WAO 不在调用层强制 OS 沙箱，越界写拦截按 0084（上报侦测，非阻止）",
-    vitalSigns: "可读体征：协议帧（握手落 `initialized`）。没有轮内\"等不到进展\"的收口门——握手等非 prompt 请求有 15s 超时，prompt 请求本身不设时限；轮内不落体征事实",
+    vitalSigns: "可读体征：协议帧（握手落 `initialized`）。没有轮内\"等不到进展\"的收口门——握手等非 prompt 请求有 60s 超时，prompt 请求本身不设时限；轮内不落体征事实",
   }),
   // 第 7 个 backend（Owner 2026-09-30 批准入册）。上游事实 = 2026-09-30 对本机
   // kimi 2.1.1 `kimi web` REST API 的直跑实测（详见 src/backends/kimiWeb.js 文件头；

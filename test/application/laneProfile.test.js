@@ -7,7 +7,7 @@
 //     各长度界、顶层 schemaVersion/scale）；
 //   - ratingsState：四种状态、四轴各自不一致、undefined/null 空值归一不算
 //     不同、reviewPending 并入 reasons、身份不一致而无 reviewPending 仍 review；
-//   - 投影：行序=lanes.json 声明序、caveats 只取前 2、null 原样、每格只投影
+//   - 投影：行序=lanes.json 声明序、caveats 全部投影、null 原样、每格只投影
 //     {stars,basis,n,note} 且超长 note 截断、invalid 车道省略并回传 id、
 //     读失败返回 null；
 //   - preflight：worker 上下文 lanes=null、lanes 独立结算（null 不改 complete、
@@ -312,7 +312,7 @@ test("projectLaneProfiles：行序=lanes.json 声明序；只含有画像的车�
   assert.deepEqual(proj.rows.map((r) => r.id), ["lb", "la"], "行序=声明序（B 先声明）");
 });
 
-test("projectLaneProfiles：caveats 只取前 2 条；null 原样保留不折算", () => {
+test("projectLaneProfiles：caveats 全部投影；null 原样保留不折算", () => {
   const entry = validEntry({
     cost: null,
     caveats: ["一", "二", "三", "四"],
@@ -322,7 +322,7 @@ test("projectLaneProfiles：caveats 只取前 2 条；null 原样保留不折算
     traitsResult: { state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale, traits: { la: entry }, invalidIds: [], issues: [] },
   });
   const row = proj.rows[0];
-  assert.deepEqual(row.caveats, ["一", "二"], "caveats 至多前 2 条");
+  assert.deepEqual(row.caveats, ["一", "二", "三", "四"], "caveats 全部投影，不截条数");
   assert.equal(row.cost, null, "cost null 原样");
   assert.equal(row.ratingsState, "unrated", "未评不折算");
   for (const d of RATING_DIMENSIONS) {

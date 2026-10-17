@@ -89,7 +89,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - reasoning effort：经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒
   - model.contextWindow：无可验证设置通道，配了即拒（model 块只接受 id 与 providerID）
   - provider 块：组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒
-  - 生命体征与收口：可读体征：协议帧（握手落 `initialized`）。没有轮内"等不到进展"的收口门——握手等非 prompt 请求有 15s 超时，prompt 请求本身不设时限；轮内不落体征事实
+  - 生命体征与收口：可读体征：协议帧（握手落 `initialized`）。没有轮内"等不到进展"的收口门——握手等非 prompt 请求有 60s 超时，prompt 请求本身不设时限；轮内不落体征事实
   - supportsRoleContract（角色合同）：per-dispatch `--patch` personaPrefix（结构化序列化）
   - supportsSessionReuse（会话复用）：ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh
   - reportsTokenUsage（token usage）：`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道
