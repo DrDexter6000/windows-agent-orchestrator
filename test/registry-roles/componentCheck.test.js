@@ -59,6 +59,7 @@ import {
   recordComponentCheck,
   summarizeComponentLedger,
 } from "../../scripts/reliability/componentLedger.mjs";
+import { addedSince, transcriptSnapshot } from "../../scripts/reliability/drillRuns.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..");
@@ -1106,7 +1107,8 @@ test("kernel G1/G5: sessionReuseEvidenceFromPhase6File 交叉核原始素材，�
   const real = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
   const accepted = sessionReuseEvidenceFromPhase6File(real);
   assert.equal(accepted.accepted, true, "仓库内 Phase 6 真证据被接受");
-  assert.match(accepted.detail, /same provider session 811d622a/);
+  assert.ok(accepted.detail.includes(`same provider session ${real.steps.run1.backendSessionId}`),
+    "the acceptance names the provider session the evidence itself recorded");
   assert.match(accepted.detail, /3\/3 fail-closed negatives refused/);
 
   assert.equal(real.embeddedEvidence?.format, "phase6-session-reuse-self-contained-v1");
@@ -1311,6 +1313,33 @@ test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径�
     "共享 drill 必须绑定运行时身份");
   assert.match(sharedSource, /LEAD_FRESH/,
     "共享 drill 必须保留 N-D 新会话差分对照（fresh lead），不得为过测移除");
+  // run 记录按项目分桶存放：两个 drill 只经 drillRuns.mjs 读取，不各自拼路径或枚举。
+  for (const [name, text] of [[source.drill, drillSource], [sharedDrill, sharedSource]]) {
+    assert.match(text, /scripts\/reliability\/drillRuns\.mjs/, `${name} reads run records through drillRuns.mjs`);
+    assert.doesNotMatch(text, /join\(runDir, `\$\{[^}]*\}\.jsonl`\)/, `${name} must not build a flat transcript path`);
+    assert.doesNotMatch(text, /listTranscriptsDeep|resolveTranscriptPath/, `${name} must not enumerate or resolve run records itself`);
+  }
+});
+
+test("drillRuns: the negative-A snapshot keys run records by bucketed path, so a same-named record in another bucket is new", () => {
+  const runDir = join(tmpdir(), "drill-runs-fixture");
+  const tree = (bucketsWithRecord) => {
+    const dirs = new Map([[runDir, ["run_flat.jsonl"]], [join(runDir, "projects"), [".index.json", ...Object.keys(bucketsWithRecord)]]]);
+    for (const [bucket, names] of Object.entries(bucketsWithRecord)) dirs.set(join(runDir, "projects", bucket), names);
+    return {
+      existsSync: (p) => dirs.has(p),
+      readdirSync: (p) => {
+        if (!dirs.has(p)) throw Object.assign(new Error(`ENOENT ${p}`), { code: "ENOENT" });
+        return dirs.get(p);
+      },
+      statSync: (p) => ({ isDirectory: () => dirs.has(p) }),
+    };
+  };
+  const before = transcriptSnapshot(runDir, { io: tree({ a: ["run_existing.jsonl"] }) });
+  assert.equal(before.size, 2, "the flat record and the bucketed record are both listed");
+  const sameNameElsewhere = transcriptSnapshot(runDir, { io: tree({ a: ["run_existing.jsonl"], b: ["run_existing.jsonl"] }) });
+  assert.deepEqual(addedSince(before, sameNameElsewhere), [join("projects", "b", "run_existing.jsonl")]);
+  assert.deepEqual(addedSince(before, before), [], "an unchanged tree adds nothing");
 });
 
 // TD-184（2026-10-09，astra+opus 会审修）：CLI 形状验证器的正反例。夹具为

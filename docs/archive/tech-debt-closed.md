@@ -126,3 +126,4 @@
 | TD-34 | 文档守卫里钉历史收尾文字的测试，以及读整本手册拼接的检查 | 钉历史的断言逐条退役并写明接续保护；手册的正向检查改读各自的归宿页，负向检查显式读整本手册；要求同一句话出现在三处的 registry 分工守卫退役，权威是生成的 docs/surface/cli.md（test/isolation-infra/docs-consistency.test.js） |
 | TD-309 | codex 车道用 shell 写文件，拦截门看不见，调用又不带沙箱参数 | 决定 0086：每次调用强制 workspace-write 沙箱，越界写由 sandboxEnforcement 证明（src/backends/codex.js、scripts/reliability/sandboxEnforcement.mjs）；2026-10-16 sol 的 reliability 全量 certified，sandboxEnforcement 两项通过；astra 未重跑，仍 conditional |
 | TD-311 | registry list/check/validate 的作用复述在 README、README.zh-CN、SKILL、AGENT_ONBOARDING、使用手册与排障手册多处 | 唯一归宿是 CLI help（src/cliHelp.js，生成副本 docs/surface/cli.md）；各处改为指向它或只留操作说明（入口文档、onboarding §4d 与 install.ps1、docs/usage/install.md 与 results.md、troubleshooting.md、两处代码注释） |
+| TD-201 | dsh 的 phase6 跨 run 会话恢复证据绑定旧运行时指纹，升级 0.2.1-rc.2 后组件层判 inconclusive | 2026-10-17 在 0.2.1-rc.2 上用 deepseek-flash 重跑 wao-reuse-drill：同一 ACP 会话复述标记，三条负向全部拒绝，组件层判 pass（scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json） |

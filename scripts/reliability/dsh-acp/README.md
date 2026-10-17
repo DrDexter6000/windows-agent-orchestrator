@@ -10,7 +10,7 @@
 | `acp-smoke.mjs` | containment 冒烟：`initialize → session/new → session/close`，**不调用模型**，用于二分定位可安全关闭的插件 |
 | `acp-config-option.mjs` | config-option 可设置性探针：单会话内 `set_config_option` 对 `reasoning_effort`/`model` 的 set-确认 + 负对照，**不发 prompt**（Phase 5，2026-09-20） |
 | `acp-tool-sample.mjs` | 工具名采样：抓 `tool_call` 的真实字段形状与工具名 |
-| `wao-reuse-drill.mjs` | §3.6 会话复用关联面真实 WAO 派发 drill（Phase 6，2026-09-21）：正向跨 run 恢复 + 三条负向 fail-closed；经 `dispatchRun` fork 真实 detached runner→RunManager→backend→dsh→模型 |
+| `wao-reuse-drill.mjs` | §3.6 会话复用关联面真实 WAO 派发 drill（Phase 6）：正向跨 run 恢复 + 三条负向 fail-closed；经 `dispatchRun` fork 真实 detached runner→RunManager→backend→dsh→模型 |
 | `wao-contain-safe.patch.yml` | 实测收敛的 containment 覆盖层（`--patch` 叠加到 shipped `acp` profile）|
 | `evidence/*.json` | 各阶段原始输出（F2–F7 的证据） |
 
@@ -74,15 +74,14 @@ ADR-0032 §8 批次的 **E 核查**（静态、零 token、零模型）：已安
   currentValue，与 off/low/max 走同一 wire 通道）；`model` 的 set 只有单值取证，
   不构成 WAO 侧接线依据。
 
-## Phase 6 结论（evidence/phase6-session-reuse.json，2026-09-21，dsh 0.1.5-rc.2，Node v22.23.1）
+## Phase 6：真实派发的跨 run 恢复 drill（结果与日期、dsh 版本、运行时指纹见 evidence/phase6-session-reuse.json）
 
-ADR-0031 §3.6 关联面落地的**真实 WAO 派发**证据（非裸探针）：
+ADR-0031 §3.6 关联面的**真实 WAO 派发**取证（非裸探针），通过条件：
 
-- **正向**：同 lane（`coder_low_dsh_reuse`）同身份两次派发——run1 `first_turn_requested`
-  （写入随机 marker，ACP session `811d622a-…`）→ run2 `resume_requested`
-  （`run.session_reuse.turn=resume`，`session.created.backendSessionId` 与 run1 **相同**，
-  assistant 复述 marker）——跨进程、跨 WAO run 的真实上下文恢复。
-- **负向×3**（全部拒绝，绝不静默新会话）：前任转录 `backendSessionId` 改空 → 派发拒绝
+- **正向**：同 lane 同身份两次派发——run1 `first_turn_requested`（写入随机 marker）→
+  run2 `resume_requested`，要求 `run.session_reuse.turn=resume`、`session.created.backendSessionId`
+  与 run1 **相同**、assistant 复述 marker——跨进程、跨 WAO run 的真实上下文恢复。
+- **负向×3**（必须拒绝，绝不静默新会话）：前任转录 `backendSessionId` 改空 → 派发拒绝
   （固定文案）；routing 条目损坏 → 派发拒绝；关联指向不存在会话 → 上游
   `-32602 "session is not resumable"` → run failed（不回退 `session/new`）。
 
@@ -91,9 +90,12 @@ ADR-0031 §3.6 关联面落地的**真实 WAO 派发**证据（非裸探针）�
 ```powershell
 node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs
 # 前置：dsh 在 PATH；~/.wao/runtimes/dsh-acp/wao-contain.patch.yml 已装；
-# DEEPSEEK_API_KEY 在 Windows 用户环境。registry 默认只读外层主仓 config/agents.json，
-# 复制到 <repo>/.wao/runs/drill-agents.json（--registry-source 可换来源）。
+# DEEPSEEK_API_KEY 在 Windows 用户环境。registry 默认只读主检出的 config/agents.json，
+# 复制到 <repo>/.wao/runs/drill-agents.json，注入 scratch 车道 deepseek_acp_reuse_probe
+# （= deepseek-flash 车道 + sessionReuse lead_workspace；--registry-source 可换来源）。
 ```
+
+在开发工作树里跑：证据文件写进 drill 所在的仓库。
 
 诚实边界：drill 经 `dispatchRun`（CLI `run --background` 与 MCP `run_dispatch` 共享的
 派发服务）+ **固定 leadSession** 模拟 MCP server 的稳定注入——CLI 每次派发一次性

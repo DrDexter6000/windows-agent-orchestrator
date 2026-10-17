@@ -7,7 +7,7 @@
 // 复现（消耗真实 token，保持最小）：
 //   node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs
 // 前置：
-//   - dsh（0.1.5-rc.x）在 PATH；
+//   - dsh 在 PATH；
 //   - ~/.wao/runtimes/dsh-acp/wao-contain.patch.yml 已由操作员安装（内容 =
 //     scripts/reliability/dsh-acp/wao-contain-safe.patch.yml）；
 //   - Windows 用户环境有 DEEPSEEK_API_KEY（WAO 的 user-env bridge 会取）。
@@ -19,12 +19,12 @@
 // dispatchRun fork 出的 detached runner → RunManager.start → deepSeekAcp backend →
 // 真实 dsh --profile acp → 真实 DeepSeek API 全链路真实。
 //
-// registry：默认只读外层主仓 config/agents.json（本 drill 所在 worktree 无该
-// gitignored 文件），复制到 <repo>/.wao/runs/drill-agents.json（lane =
-// coder_low_dsh_reuse：backend deepseek-acp + sessionReuse lead_workspace；
-// 不改任何既有条目）。--registry-source <path> 可覆盖来源。
+// registry：默认只读主检出的 config/agents.json，复制到 <repo>/.wao/runs/drill-agents.json
+// 并注入 scratch 车道 deepseek_acp_reuse_probe = 注册表 deepseek-flash 车道 +
+// sessionReuse lead_workspace（不改任何既有条目；源注册表已有同名键即拒绝）。
+// --registry-source <path> 可覆盖来源。注册表定位与 run 记录读取见 ../drillRuns.mjs。
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,10 +32,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const srcUrl = (rel) => pathToFileURL(join(ROOT, rel)).href;
 const { dispatchRun } = await import(srcUrl("src/application/runDispatch.js"));
 const { readTranscript, findState, TERMINAL_STATES } = await import(srcUrl("src/transcript.js"));
-const { deriveReuseKeyHash } = await import(srcUrl("src/application/sessionReuse.js"));
+const { mainCheckoutRegistry, transcriptPathOf, transcriptSnapshot, addedSince } = await import(srcUrl("scripts/reliability/drillRuns.mjs"));
 const { probeRuntimeIdentity } = await import(srcUrl("scripts/reliability/runtimeIdentity.mjs"));
 
-const AGENT_ID = "coder_low_dsh_reuse";
+const AGENT_ID = "deepseek_acp_reuse_probe";
+const SOURCE_LANE = "deepseek-flash";
 const LEAD = `phase6-drill-lead-${Date.now().toString(36)}`;
 const MARKER = `WAO_REUSE_P6_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 const WAIT_MS = 240_000;
@@ -45,21 +46,26 @@ function argValue(flag) {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
-const registrySource = argValue("--registry-source") ?? resolve(ROOT, "..", "..", "config", "agents.json");
+const registrySource = argValue("--registry-source") ?? mainCheckoutRegistry(ROOT);
 
 // 夹具：复制 registry 到 <repo>/.wao/runs/（cwd 内；不改外层文件）。
 const scratchDir = join(ROOT, ".wao", "runs");
 const drillRegistry = join(scratchDir, "drill-agents.json");
 const runDir = join(scratchDir, "phase6-reuse-runs");
 mkdirSync(scratchDir, { recursive: true });
-const registryRaw = readFileSync(registrySource, "utf8");
-const registryJson = JSON.parse(registryRaw);
-const lane = registryJson.agents?.[AGENT_ID];
-if (!lane || lane.sessionReuse !== "lead_workspace" || lane.backend !== "deepseek-acp") {
-  console.error(`registry source has no ${AGENT_ID} deepseek-acp/lead_workspace lane: ${JSON.stringify(lane)}`);
+const registryJson = JSON.parse(readFileSync(registrySource, "utf8"));
+const sourceLane = registryJson.agents?.[SOURCE_LANE];
+if (!sourceLane || sourceLane.backend !== "deepseek-acp") {
+  console.error(`registry source has no ${SOURCE_LANE} deepseek-acp lane: ${JSON.stringify(sourceLane)}`);
   process.exit(2);
 }
-writeFileSync(drillRegistry, registryRaw, "utf8");
+if (registryJson.agents[AGENT_ID]) {
+  console.error(`registry source already has a ${AGENT_ID} lane — refusing to shadow a non-drill lane`);
+  process.exit(2);
+}
+const lane = { ...sourceLane, sessionReuse: "lead_workspace" };
+registryJson.agents = { ...registryJson.agents, [AGENT_ID]: lane };
+writeFileSync(drillRegistry, JSON.stringify(registryJson, null, 2), "utf8");
 rmSync(runDir, { recursive: true, force: true });
 mkdirSync(runDir, { recursive: true });
 const runtimeIdentity = probeRuntimeIdentity({ backendName: "deepseek-acp", agent: lane });
@@ -76,6 +82,7 @@ const evidence = {
   dsh: runtimeIdentity.version,
   runtimeIdentity,
   agentId: AGENT_ID,
+  scratchLane: { agentId: AGENT_ID, sourceLane: SOURCE_LANE, sessionReuse: lane.sessionReuse },
   leadSession: "<fixed drill lead (simulates the MCP server's stable injection)>",
   marker: MARKER,
   entry: "dispatchRun (the shared background dispatch service used by CLI run --background and MCP run_dispatch); the detached runner / RunManager / deepSeekAcp / dsh / model chain is real",
@@ -91,8 +98,10 @@ function fail(note) {
   process.exit(1);
 }
 
+const transcriptOf = (runId) => transcriptPathOf(runDir, runId, ROOT);
+
 async function eventsOf(runId) {
-  try { return await readTranscript(join(runDir, `${runId}.jsonl`)); } catch { return []; }
+  try { return await readTranscript(transcriptOf(runId)); } catch { return []; }
 }
 
 async function waitForTerminal(runId) {
@@ -200,7 +209,7 @@ evidence.positive = {
 if (!positivePass) fail(`positive drill failed: ${JSON.stringify(evidence.positive.claims)}`);
 
 // ── 负向 A（R3 行 2）：前任转录 session.created.backendSessionId 改空 → 派发拒绝 ──
-const priorPath = join(runDir, `${r2.runId}.jsonl`);
+const priorPath = transcriptOf(r2.runId);
 function rewritePrior(events, mutate) {
   writeFileSync(priorPath, events.map((e) => JSON.stringify(mutate(e))).join("\n") + "\n", "utf8");
 }
@@ -211,15 +220,14 @@ rewritePrior(t2.events, (e) => (e?.type === "session.created" && e.runId === r2.
 // was written" from the ABSENCE of a runId, so a dispatch that wrote a
 // transcript and *then* threw would still record a green field. Snapshot the
 // runs dir and compare — that is the actual claim.
-const jsonlBefore = new Set(readdirSync(runDir).filter((n) => n.endsWith(".jsonl")));
+const jsonlBefore = transcriptSnapshot(runDir);
 let negA = { refused: false };
 try {
   await dispatch("should be refused", "negA_dispatch");
 } catch (error) {
   negA = { refused: true, message: error.message };
 }
-const addedTranscripts = readdirSync(runDir)
-  .filter((n) => n.endsWith(".jsonl") && !jsonlBefore.has(n));
+const addedTranscripts = addedSince(jsonlBefore, transcriptSnapshot(runDir));
 evidence.negativeA = {
   evidenceRef: "negativeA",
   tamper: "prior transcript session.created.backendSessionId -> empty string",
@@ -234,8 +242,17 @@ rewritePrior(t2.events, (e) => e);
 if (!evidence.negativeA.pass) fail(`negative A failed: ${JSON.stringify(negA)}`);
 
 // ── 负向 B（R3 行 4）：路由条目损坏 → 派发拒绝（不是静默 first）──
-const keyHash = deriveReuseKeyHash({ leadSession: LEAD, workspace: ROOT, agentId: AGENT_ID });
-const entryPath = join(runDir, ".session-reuse", `${keyHash}.json`);
+// 路由键哈希含派发时冻结的车道/角色指纹材料，drill 侧重算会漂；按内容发现：
+// 负向 A 被拒后 LEAD 键的条目仍指向 run2（与 session-reuse-drill.mjs 同法）。
+const reuseDir = join(runDir, ".session-reuse");
+let entryPath = null;
+for (const name of readdirSync(reuseDir)) {
+  if (!name.endsWith(".json")) continue;
+  try {
+    if (JSON.parse(readFileSync(join(reuseDir, name), "utf8"))?.runId === r2.runId) { entryPath = join(reuseDir, name); break; }
+  } catch { /* 损坏条目不参与发现 */ }
+}
+if (entryPath === null) fail("routing entry for the LEAD identity (must point at run2) not found — cannot run negative B");
 const entryBackup = readFileSync(entryPath, "utf8");
 writeFileSync(entryPath, "{damaged-not-json", "utf8");
 let negB = { refused: false };

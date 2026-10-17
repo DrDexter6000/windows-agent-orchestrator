@@ -383,7 +383,7 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
   "deepseek-acp": Object.freeze({
     path: "scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json",
     drill: "scripts/reliability/dsh-acp/wao-reuse-drill.mjs",
-    note: "ADR-0031 §3.6 Phase 6 real-dispatch drill (2026-09-21, dsh 0.1.5-rc.2): same ACP session across two runs + three fail-closed negatives",
+    note: "ADR-0031 §3.6 Phase 6 real-dispatch drill (date and dsh version in the evidence file): same ACP session across two runs + three fail-closed negatives",
   }),
   // TD-184（2026-10-09）：codex / kimi-code 真实派发 drill 证据。进程式 CLI
   // 形状（详见 PHASE6_BACKEND_SHAPES）：暗号差分对照 + 链深 2 + N-C 无 native

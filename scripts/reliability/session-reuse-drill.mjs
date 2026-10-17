@@ -29,7 +29,7 @@
 // 证据覆盖边界（如实）：non-delivery 的 lead_workspace 车道。delivery 复用 run
 // 走另一条写侧（run.provider_session_bound，TD188）不在本 drill 范围。
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -37,6 +37,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const srcUrl = (rel) => pathToFileURL(join(ROOT, rel)).href;
 const { dispatchRun } = await import(srcUrl("src/application/runDispatch.js"));
 const { readTranscript, findState, TERMINAL_STATES } = await import(srcUrl("src/transcript.js"));
+const { mainCheckoutRegistry, transcriptPathOf, transcriptSnapshot, addedSince } = await import(srcUrl("scripts/reliability/drillRuns.mjs"));
 const { probeRuntimeIdentity } = await import(srcUrl("scripts/reliability/runtimeIdentity.mjs"));
 
 // 每后端的 drill 配置：scratch 车道（注入复制件，不碰外层注册表）、证据路径、
@@ -70,11 +71,8 @@ if (!cfg) {
   console.error(`usage: session-reuse-drill.mjs --backend <${Object.keys(DRILL_BACKENDS).join("|")}>`);
   process.exit(2);
 }
-// registry 来源：主仓优先（本 drill 在主仓跑），worktree 形态回退外层主仓。
-const registrySource = argValue("--registry-source")
-  ?? (existsSync(join(ROOT, "config", "agents.json"))
-    ? join(ROOT, "config", "agents.json")
-    : resolve(ROOT, "..", "..", "config", "agents.json"));
+// registry 来源：主检出的 config/agents.json（定位与 run 记录读取见 drillRuns.mjs）。
+const registrySource = argValue("--registry-source") ?? mainCheckoutRegistry(ROOT);
 
 const AGENT_ID = cfg.agentId;
 const LEAD = `phase6-drill-lead-${Date.now().toString(36)}`;
@@ -135,8 +133,10 @@ function fail(note) {
   process.exit(1);
 }
 
+const transcriptOf = (runId) => transcriptPathOf(runDir, runId, ROOT);
+
 async function eventsOf(runId) {
-  try { return await readTranscript(join(runDir, `${runId}.jsonl`)); } catch { return []; }
+  try { return await readTranscript(transcriptOf(runId)); } catch { return []; }
 }
 
 async function waitForTerminal(runId) {
@@ -356,22 +356,21 @@ evidence.negativeD.pass = true;
 // ── 负向 A（共享核心，后端无关）：前任转录（=最新 run3）session.created.backendSessionId
 //    全部改空 → 派发拒绝（不是静默 first/fresh）。快照 runs 目录对比——拒绝的
 //    派发不得留下任何新转录（A5 教训）。──
-const priorPath = join(runDir, `${r3.runId}.jsonl`);
+const priorPath = transcriptOf(r3.runId);
 function rewritePrior(events, mutate) {
   writeFileSync(priorPath, events.map((e) => JSON.stringify(mutate(e))).join("\n") + "\n", "utf8");
 }
 rewritePrior(t3.events, (e) => (e?.type === "session.created" && e.runId === r3.runId
   ? { ...e, backendSessionId: "" }
   : e));
-const jsonlBefore = new Set(readdirSync(runDir).filter((n) => n.endsWith(".jsonl")));
+const jsonlBefore = transcriptSnapshot(runDir);
 let negA = { refused: false };
 try {
   await dispatch("should be refused", "negA_dispatch");
 } catch (error) {
   negA = { refused: true, message: error.message };
 }
-const addedTranscripts = readdirSync(runDir)
-  .filter((n) => n.endsWith(".jsonl") && !jsonlBefore.has(n));
+const addedTranscripts = addedSince(jsonlBefore, transcriptSnapshot(runDir));
 evidence.negativeA = {
   evidenceRef: "negativeA",
   tamper: "prior transcript session.created.backendSessionId (all bound lines incl. the LAST-bound native line) -> empty string",
