@@ -193,7 +193,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模�
 
 ## 认证与转录维护命令
 
-registry list / registry check 命令在 `docs/usage/install.md`；本节收 smoke、runtime certification 与 drill 转录维护命令：
+registry 各命令的作用见 CLI help（`npm run cli -- --help`，生成副本 `docs/surface/cli.md`）；本节收 smoke、runtime certification 与 drill 转录维护命令：
 
 ```powershell
 # 跑一次真实 smoke（消耗真实 API token）

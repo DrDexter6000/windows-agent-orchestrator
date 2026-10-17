@@ -21,9 +21,9 @@ Commands:
   serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（零副作用）
   serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删）
   serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：双门判定后优雅 shutdown 并显式重启；--workspace-dir 缺省取车道声明值
-  registry list [--registry FILE]
+  registry list [--registry FILE]                    # 车道清单与各车道的认证状态
   registry check [--registry FILE] [--format json]   # live opencode-serve 健康探测；其他车道的就绪看 \`wao lanes\`，环境看 \`wao doctor\`
-  registry validate [--registry FILE] [--format json]
+  registry validate [--registry FILE] [--format json]  # 静态 schema 校验，不改任何文件
   spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE]
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--run-dir DIR] [--format json]

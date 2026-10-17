@@ -500,7 +500,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json] [--strict] [--warn-as-error]`；`--warn-as-error` 只把 WARN 也卡成非零退出（CI 用），不改报告内容；`--strict` 加跑 src/ 的 JS parse smoke
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -546,7 +546,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.12 DeepSeek Harness JSON-RPC backend 启动或空结果
 
 - **先确认边界**：WAO 只 detect/invoke/report，不安装、升级、登录或修复 DSH。GUI 中选择的 preset 不会自动成为 WAO worker；WAO 使用 registry 明确指定的 dedicated `dsh-jsonrpc-agent` + Cordis config。
-- **preflight 报配置错误**：确认 `binary` 可执行、`dshConfigPath` 可读、`credentialEnv` 为非空环境变量名；用 `registry validate` 检查静态合同，用 `registry list` 检查 credential availability。
+- **preflight 报配置错误**：确认 `binary` 可执行、`dshConfigPath` 可读、`credentialEnv` 为非空环境变量名；再用 `registry validate`、`registry list` 自查（各命令的作用见 CLI help）。
 - **runtime identity mismatch / malformed JSON-RPC / transport closed**：这是 DSH composition 或 transport 故障，不是模型语义失败。直接运行同一 binary 做 `initialize` no-model probe；不得改成抓 TUI 文本或把未知输出投影为 completed。
 - **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
 - **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。

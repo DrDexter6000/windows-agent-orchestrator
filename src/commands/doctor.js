@@ -6,8 +6,8 @@
 // 永不执行）、JSON 加性强化（schemaVersion/advisory/status/severity/fix）、
 // --warn-as-error（CI opt-in，独立于 --strict）。
 // Round 8 R8-2：新增 registry cwd 存在性 WARN（advisory）。存在性是机器状态
-// （环境类检查），地盘在 doctor——SKILL 契约明载 `registry validate = static
-// schema`（纯静态），本检查不进 validate。判定本体复用 runManager SSOT 的
+// （环境类检查），地盘在 doctor，不进 `registry validate`（validate 的范围见 CLI
+// help）。判定本体复用 runManager SSOT 的
 // probePredictedDispatchCwd（与 assertExistingDispatchCwd 同一 path.resolve +
 // statSync 目录判定路径，本文件不写第三份判定逻辑）。
 // Round 8 R8-C（C-8/C-10）：cwd === "." 的 worker 出 INFO（R8-1 去占位化的

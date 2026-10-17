@@ -365,9 +365,9 @@ function Write-WaoNextSteps {
     Write-Host '安装完成。下一步（命令逐字来自 AGENT_ONBOARDING.md §4c/§4d）：' -ForegroundColor Green
     Write-Host "  cd $Path"
     Write-Host '  npm run cli -- wao onboarding --agent <你保留的 worker id> --apply    # §4c 自动生成 config/agents.json'
-    Write-Host '  npm run cli -- registry list --registry config/agents.json           # §4d inventory + certification'
-    Write-Host '  npm run cli -- registry validate --registry config/agents.json      # §4d 静态 schema 校验'
-    Write-Host '  npm run cli -- wao doctor --cwd <目标项目>                            # §4d 环境自检'
+    Write-Host '  npm run cli -- registry list --registry config/agents.json           # §4d'
+    Write-Host '  npm run cli -- registry validate --registry config/agents.json      # §4d'
+    Write-Host '  npm run cli -- wao doctor --cwd <目标项目>                            # §4d'
     Write-Host ''
     Write-Host '可选：npm link（每台机器一次，暴露全局 wao 命令）——本脚本不执行它，见 AGENT_ONBOARDING.md §4a。'
     Write-Host "首次使用前必读：SKILL.md 与 references/safety-incidents.md（$WaoDocOnboarding §4）。"

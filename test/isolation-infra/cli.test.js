@@ -2620,8 +2620,8 @@ test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL�
 });
 
 // ── R8-2: doctor registry cwd 存在性 WARN（R8-C C-7/C-8/C-10 同步）───────────
-// 环境类检查的地盘是 doctor（SKILL 契约：registry validate = static schema，
-// 存在性是机器状态不进 validate）。判定语义与 R7 assertExistingDispatchCwd
+// 环境类检查的地盘是 doctor（存在性是机器状态，不进 registry validate；
+// validate 的范围见 CLI help）。判定语义与 R7 assertExistingDispatchCwd
 // 完全一致（同一 runManager SSOT 探针：path.resolve 后 statSync 目录判定）；
 // 能力收窄与 R7 两层派发门对称（本地进程式 backend 查，HTTP serve 豁免）。
 // R8-C C-8 起健康面唯一条目：cwd === "." 的 worker 出 INFO（静默落点提示，

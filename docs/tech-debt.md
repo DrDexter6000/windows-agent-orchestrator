@@ -37,7 +37,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
-| TD-138 | 全量测试约 12 分钟（2026-10-17 实测 715 秒），由 filesystem 波决定（402 秒，工作量合计 2928 秒，并发 8）。最慢的交付类文件已改用共用 git 夹具（单独跑降 9%–73%），但并发下仍是 repackage 255 秒、reclaimApply 220 秒；余下主要是被测代码本身的真实 git 子进程（deliveryVerification 的并发变慢见 TD-171） | 开放 | 择机：给 src/delivery.js 的打包与恢复加 git 执行器注入缝，或把这几个文件拆小、摊到更多并发槽 | test/_gitRepoFixture.mjs src/delivery.js docs/testing.md |
+| TD-138 | 全量测试约 12 分钟（2026-10-17 实测 715 秒），由 filesystem 波决定（402 秒，工作量合计 2928 秒，并发 8）。最慢的交付类文件已改用共用 git 夹具（单独跑降 9%–73%），但并发下仍是 repackage 255 秒、reclaimApply 220 秒；余下主要是被测代码本身的真实 git 子进程 | 开放 | 择机：给 src/delivery.js 的打包与恢复加 git 执行器注入缝，或把这几个文件拆小、摊到更多并发槽 | test/_gitRepoFixture.mjs src/delivery.js docs/testing.md |
 | TD-139 | MCP 的 run_status 只返回 lastActivity.kind，不含活动摘要文本（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 择机：下次改 MCP 状态面时按 run_activity 同一口径放开摘要 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 择机：每季度核对 v24 libuv 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
@@ -53,7 +53,7 @@
 | TD-168 | 测试冗余清扫主体已落地，35 个删并候选仍待人工逐条定谳 | 开放 | 择机：候选逐条定谳；cli.test.js 下次大改时顺带整理 | test/fixtures/mcpWireKeySets.js test/isolation-infra/reporter.test.js |
 | TD-169 | 认证通道零 case 已改显式失败（拒跑 exit 2）；selected/executed 等执行计数与 strict drill 覆盖不足可归 full 两项未做 | 开放 | 择机：阶段 2 处理 | scripts/run-reliability.mjs |
 | TD-170 | 全量测试各波的时长没有基线和漂移告警（上次靠人工比对才发现 390s 涨到 600s） | 开放 | 等样本：环境漂移再次污染验证结论时建波时长基线与告警 |  |
-| TD-171 | deliveryVerification.test.js 在并发下从约 246 秒涨到约 600 秒，原因没查清 | 开放 | 等样本：下次复现时查 | test/delivery/deliveryVerification.test.js |
+| TD-171 | deliveryVerification.test.js 曾在并发下从约 246 秒涨到约 600 秒，原因没查清；2026-10-16/17 的全量里是 207–215 秒，没有复现 | 开放 | 等样本：再复现时查 | test/delivery/deliveryVerification.test.js |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 择机：触碰派发任务书或 workdir_escape 提示面时做分类提示与诊断标注 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 等样本：四项独立触发（接线 model、改文档、auditor 无 verdict、排查断链） | docs/troubleshooting.md |
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |
@@ -106,4 +106,3 @@
 | TD-307 | 分桶（D2-②b）后仍按平铺布局找转录的残留：三个独立脚本拼 `<runDir>/<runId>.jsonl` 读转录；两个复用演练的负向用例还往平铺路径改写前任转录（与桶内原件成哈希不同的孪生），并用顶层快照断言被拒的派发不留新转录（看不见桶内新增）；long-run-probe 只枚举顶层；drillEvidence 的 drillTranscriptPath 无调用方 | 开放 | 择机：下次运行这些脚本前改走 projectBuckets 解析链 | scripts/dispatch-with-liveness.mjs scripts/reliability/session-reuse-drill.mjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs scripts/long-run-probe.mjs |
 | TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含 containmentEvidence 时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求 containmentEvidence 在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 scripts/reliability/certification.mjs |
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
-| TD-311 | registry list/check/validate 的分工是同一句英文，原样写在 README、SKILL、AGENT_ONBOARDING 三处，没有测试守着；它的归宿应是 CLI help，而生成的 docs/surface/cli.md 只写了 check 的语义 | 开放 | 择机：把 list、validate 的语义写进 CLI help 并再生成 surface，三处入口文档改为指向它 | src/cliHelp.js docs/surface/cli.md |

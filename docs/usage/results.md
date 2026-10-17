@@ -57,7 +57,7 @@ npm run --silent cli -- wao handoff read lead --format json
 > 下面七个查询子命令的 JSON 输出形状没有生成层，以本节为准（归属见 `docs/ssot.md` §1.3）；改这些命令的输出时同步改这里。
 
 - `registry validate --format json` → `{checked, valid, agents:[{id, ok, issues[], warnings[]}]}`。JSON 模式维持 exit code 契约：有错误条目 → exit 1；文本模式的 ⚠ warning 进入 `warnings[]`，不阻塞。registry 源 JSON 解析失败时输出 `{checked:0, valid:false, agents:[], issues:[...]}`——顶层 `issues` 数组保留原始解析错误 message，exit 1。文本模式：角色合同失败的 agent 只输出一行 `✖ <id>`，不先打 ✔ 成功行再打 ✖。
-- `registry check --format json` → `{allOk, agents:[{id, status:"ok"|"fail"|"skip", serveUrl?, error?}]}`；fail 照旧 exit 1。`registry check` 只探 opencode-serve 的健康；非 opencode-serve 车道的 `skip` 行（文本模式同文案）`error` 是固定值——车道就绪看 `wao lanes`，环境看 `wao doctor`。
+- `registry check --format json` → `{allOk, agents:[{id, status:"ok"|"fail"|"skip", serveUrl?, error?}]}`；fail 照旧 exit 1。非 opencode-serve 车道的 `skip` 行（文本模式同文案）`error` 是一句固定文案，指路 `wao lanes`（车道就绪）与 `wao doctor`（环境）。
 - `runs list --format json` → `{runs:[{runId, agentId, state, terminal, updatedAt, ...}], matchedCount}`（直接序列化共享 listRuns 服务结果）。
 - `runs summary --format json` → `{total, byState, latest}`（无事件时间戳时 `latest:null`）。
 - `runs grep <pattern> --format json` → `{pattern, matched, matches:[{runId, type, ts}]}`——与文本路径一致，每个 run 只记录首个命中事件，不是全量命中清单。

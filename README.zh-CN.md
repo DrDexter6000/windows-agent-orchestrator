@@ -123,11 +123,10 @@ Copy-Item config/agents.example.json config/agents.json
 #    host 授权 workspace（MCP）决定；见 AGENT_ONBOARDING.md §4c。
 
 # 2. 校验 registry（此步不需要任何 runtime）
-# registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health
+# 各 registry 命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
-#    registry check 探测活的 opencode-serve backend（维护档 lane）——入库模板
-#    默认不含 opencode 车道，通常直接跳过。
+#    入库模板默认不含 opencode 车道，registry check 无可探测，直接跳过。
 
 # 3. 接入 MCP Host（主控制面——决定 0017）
 #    在 WAO 安装根目录（你 clone 的仓库）里跑。把任意 MCP host（Claude Desktop /

@@ -149,11 +149,10 @@ Copy-Item config/agents.example.json config/agents.json
 #    see AGENT_ONBOARDING.md §4c.
 
 # 2. Verify the registry (no runtime needed for this)
-# registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health
+# What each registry command does: npm run cli -- --help (generated copy: docs/surface/cli.md)
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
-#    registry check probes a live opencode-serve backend (maintenance lane) —
-#    the tracked template ships no opencode lane, so it is usually skipped.
+#    Skip registry check: the tracked template ships no opencode lane for it to probe.
 
 # 3. Connect an MCP Host (primary control surface — Decision 0017)
 #    Run this from the WAO install root (the repo you cloned). Point any MCP

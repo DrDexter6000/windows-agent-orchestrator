@@ -136,14 +136,14 @@ Copy-Item config/agents.example.json config/agents.json
 验证 registry 并自检环境（在 WAO 仓根目录下执行）：
 
 ```
-npm run cli -- registry list --registry config/agents.json      # inventory + certification 状态
-npm run cli -- registry validate --registry config/agents.json  # 静态 schema 校验（不改任何文件）
-npm run cli -- wao doctor --cwd <目标项目>                        # 环境自检
+npm run cli -- registry list --registry config/agents.json
+npm run cli -- registry validate --registry config/agents.json
+npm run cli -- wao doctor --cwd <目标项目>
 ```
 
-Registry command split: registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health.
+各命令的作用见 `npm run cli -- --help`（生成副本：`docs/surface/cli.md`）。
 
-`registry check` 只适用于 opencode-serve 后端（需要先起 serve 注入 provider key）；当前入库模板默认不含 opencode 车道——通常直接跳过它。
+当前入库模板默认不含 opencode 车道，`registry check` 通常直接跳过。
 
 **doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置（opencode worker 有没有配 tokenBudget）、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 

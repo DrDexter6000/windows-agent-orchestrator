@@ -92,10 +92,8 @@ Copy-Item config/agents.example.json config/agents.json
 ## 验证安装
 
 ```powershell
-# 列出所有配置的 agent
+# 各命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
 npm run cli -- registry list --registry config/agents.json
-
-# 探 opencode-serve 的健康（registry check 只探它）
 npm run cli -- registry check --registry config/agents.json
 
 # 车道一屏参考（只读）
