@@ -291,7 +291,18 @@ import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/
 // 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。
 import { projectBucketLabel } from "../projectIdentity.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
-import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP, WORKSPACE_UNBOUND_REASONS } from "../application/leadPreflight.js";
+import {
+  aggregateLeadPreflight,
+  ACTIVE_RUNS_CAP,
+  WORKERS_CAP,
+  WORKSPACE_UNBOUND_REASONS,
+  // 0087: lane-profile projection SSOT caps/closed sets (home:
+  // src/application/laneProfile.js; re-exported by the aggregator so this
+  // module never imports laneProfile directly — isolation guard edge).
+  PROJECTION_ROWS_CAP,
+  RATING_BASES,
+  RATINGS_STATES,
+} from "../application/leadPreflight.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
 import {
   listLeadPlaybooks,
@@ -2792,6 +2803,49 @@ const LEAD_PREFLIGHT_INPUT = z.object({
   workspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
+// 0087: lane-profile compact projection — ONE closed sub-schema used BOTH for
+// the independent pre-validation in the handler (a malformed projection is
+// nulled with an observation, NEVER degrading the whole preflight) and as the
+// `lanes` member of LEAD_PREFLIGHT_OUTPUT. The seven dimension keys are fixed
+// object members (never array indices); bounds mirror the application-layer
+// truncation (src/application/laneProfile.js) so a projection that passed the
+// app layer always passes here. Derived from the laneProfile SSOT enums/caps —
+// no second hand-maintained list can drift.
+const LANE_RATING_CELL_OUTPUT = z.object({
+  stars: z.number().int().min(1).max(5).nullable(),
+  basis: z.enum([...RATING_BASES]).nullable(),
+  n: z.number().int().positive().nullable(),
+  note: z.string().max(80).nullable(),
+}).strict();
+const LANES_PROJECTION_OUTPUT = z.object({
+  scale: z.string().min(1).max(240),
+  dimensionLabels: z.object({
+    research: z.string().max(32),
+    code: z.string().max(32),
+    review: z.string().max(32),
+    design: z.string().max(32),
+    longHorizon: z.string().max(32),
+    writing: z.string().max(32),
+    visual: z.string().max(32),
+  }).strict(),
+  rows: z.array(z.object({
+    id: z.string().max(64),
+    ratings: z.object({
+      research: LANE_RATING_CELL_OUTPUT,
+      code: LANE_RATING_CELL_OUTPUT,
+      review: LANE_RATING_CELL_OUTPUT,
+      design: LANE_RATING_CELL_OUTPUT,
+      longHorizon: LANE_RATING_CELL_OUTPUT,
+      writing: LANE_RATING_CELL_OUTPUT,
+      visual: LANE_RATING_CELL_OUTPUT,
+    }).strict(),
+    ratingsState: z.enum([...RATINGS_STATES]),
+    reviewReasons: z.array(z.string().max(160)).max(4),
+    caveats: z.array(z.string().max(120)).max(2),
+    cost: z.string().max(200).nullable(),
+  }).strict()).max(PROJECTION_ROWS_CAP),
+}).strict();
+
 const LEAD_PREFLIGHT_OUTPUT = z.object({
   // workspace is null when the binding could not be resolved (unknown), NOT
   // when known-unbound (that is {bound:false}). workspaceSelection is the
@@ -2848,6 +2902,11 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   // from the SAME scan that produced activeRuns (lead_preflight does not
   // rescan). null when the active-run query was unreadable (unknown, NOT 0).
   unresolvedRunCount: z.number().int().nullable(),
+  // 0087: compact lane-profile projection (per-dimension star ratings with
+  // basis). null in a worker context, when unreadable, or when the independent
+  // sub-schema validation below failed — advisory reference data only, never
+  // part of checkStatus/complete. Bounds = the LANES_PROJECTION_OUTPUT SSOT.
+  lanes: LANES_PROJECTION_OUTPUT.nullable(),
   observations: z.array(z.string().max(512)).max(64),
   warnings: z.array(z.string().max(512)).max(64),
   manualChecks: z.array(z.string().max(512)).max(32),
@@ -2868,12 +2927,13 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 
 const LEAD_PREFLIGHT_DESCRIPTION =
   // 必须保留：advisory + not a gate（M12-10-G 钉）；分节独立沉降、原工具复验。
-  "Advisory single-call preflight: workspace binding, worker credential availability, active " +
-  "runs. Optional workspaceRoot selects the project, same authority as workspace_select " +
-  "(read-tool default scope only; shared per server instance); unboundReason is the same " +
-  "closed-set recovery fact as workspace_status, null when bound. ADVISORY ONLY — not a " +
-  "gate: warnings are facts, never an auto-stop; sections settle independently, " +
-  "re-verify via the original tools.";
+  // unboundReason 的语义只写在 workspace_status 的 description 里，这里不复述。
+  "Advisory single-call preflight: workspace binding, worker credentials, active runs, " +
+  "lane profiles (per-dimension star ratings, not routing rules; wao lanes has full " +
+  "profiles). Optional workspaceRoot selects the project, same authority as " +
+  "workspace_select (read-tool default scope only, shared per server instance). " +
+  "ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle " +
+  "independently, re-verify via the original tools.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -3685,6 +3745,10 @@ export function createWaoMcpServer({
   // returned via MCP.
   leadSession,
   getRegistryInventoryFn,
+  // 0087：可注入的车道画像投影与 worker 上下文判定（测试缝，同
+  // getRegistryInventoryFn 模式；缺省=聚合器默认读真实文件与真实 env/cwd）。
+  laneProfilesFn,
+  workerContextFn,
   // ADR-0032 修订（2026-09-22）：可注入的认证证据详情服务（默认真实
   // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
   getCertificationEvidenceFn,
@@ -4284,10 +4348,28 @@ export function createWaoMcpServer({
           // Server-build drift facts (the git subprocess lives in
           // serverBuildFacts.js; the aggregator only consumes the result).
           serverBuildFactsFn: readServerBuildFacts,
+          // 0087: lane-profile injection seams (same pattern as
+          // getRegistryInventoryFn — production defaults live in the
+          // aggregator; tests replay synthetic projections/contexts).
+          ...(typeof laneProfilesFn === "function" ? { laneProfilesFn } : {}),
+          ...(typeof workerContextFn === "function" ? { workerContextFn } : {}),
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
             ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,
         });
+        // 0087: settle the lanes section INDEPENDENTLY before the full output
+        // validation — a projection that fails the sub-schema is nulled with
+        // one bounded observation and must NEVER degrade the whole preflight
+        // (the other sections are untouched; complete is not a lanes input).
+        if (payload && payload.lanes != null) {
+          const lanesCheck = LANES_PROJECTION_OUTPUT.safeParse(payload.lanes);
+          if (!lanesCheck.success) {
+            payload.lanes = null;
+            if (Array.isArray(payload.observations) && payload.observations.length < 64) {
+              payload.observations.push("lane profiles projection failed output validation — use wao lanes");
+            }
+          }
+        }
         // Validate AND return the parsed safe object — not the raw payload.
         // parse() with strict schemas strips any internal-only / unknown fields
         // so the Lead never sees fields that bypassed the output contract.
@@ -4306,6 +4388,8 @@ export function createWaoMcpServer({
           activeRunCount: null,
           activeRunsTruncated: false,
           unresolvedRunCount: null,
+          // 0087: no lane profiles derivable on aggregate failure.
+          lanes: null,
           observations: [],
           warnings: ["lead_preflight could not aggregate — use workspace_status, registry_list, and runs_list directly"],
           manualChecks: [

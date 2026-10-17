@@ -15,8 +15,10 @@
 //     成对显式给出时放行 + 横幅注记（操作员显式声明两侧权威，测试/嵌入面同用）。
 //   - 车道表权威失败（结构非法/不可读）≠ 成功的空面：报告 issue、exitCode 1、
 //     不渲染正常车道面。
-//   - 本文件不出现画像文件名字面量（隔离守卫白名单只含 application/lanesView.js）；
-//     画像路径经视图对象的 traitsPath 字段展示。
+//   - 本文件不出现画像文件名字面量（隔离守卫白名单只含
+//     src/application/laneProfile.js）；画像路径经视图对象的 traitsPath 字段
+//     展示。画像加载器经 lanesView.js 的 re-export 取得（0087 守卫边：
+//     本文件不准直接引用 laneProfile.js）。
 
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -59,7 +61,13 @@ function wrapLines(text, width) {
 
 const axesLabel = (a) => `${a.backend ?? "?"}/${a.modelId ?? "?"}/${a.providerID ?? "-"}/${a.effort ?? "null"}`;
 
-function renderLane(row, width) {
+const RATINGS_STATE_LINES = {
+  current: "评分状态: 当前（打分身份与车道表一致，无待复核标记）",
+  unrated: "评分状态: 未评（七格全未评——未评不折算成任何星数）",
+  unknown: "评分状态: 无法判定（车道侧事实不可得）",
+};
+
+function renderLane(row, width, dimensionLabels) {
   const body = width - 4; // 缩进 4 后的可用宽
   const lines = [];
   const emit = (label, value) => {
@@ -82,8 +90,39 @@ function renderLane(row, width) {
 
   if (row.traitsState === "present") {
     const t = row.traits;
-    emit("profile", `${t.profile}（owner 撰写——主观评价）`);
-    emit("suggestedUses", t.suggestedUses.join(" / "));
+    // 0087：七项分项星级（星数/依据/measured 附 n；note 与 evidence 折行）。
+    lines.push("  评分（刻度见表头）:");
+    for (const dim of Object.keys(dimensionLabels)) {
+      const cell = t.ratings[dim];
+      if (cell.stars === null) {
+        lines.push(`    ${dimensionLabels[dim]}: 未评`);
+        continue;
+      }
+      lines.push(`    ${dimensionLabels[dim]}: ${cell.stars} 星（${cell.basis}${cell.basis === "measured" ? `，n=${cell.n}` : ""}）`);
+      if (cell.note !== undefined) {
+        for (const seg of wrapLines(`note: ${cell.note}`, body - 6)) lines.push(`      ${seg}`);
+      }
+      if (cell.evidence !== undefined) {
+        for (const seg of wrapLines(`evidence: ${cell.evidence}`, body - 6)) lines.push(`      ${seg}`);
+      }
+    }
+    if (row.ratingsState === "review") {
+      lines.push("  评分状态: 待复核——");
+      for (const r of row.reviewReasons) {
+        for (const seg of wrapLines(r, body - 4)) lines.push(`    ${seg}`);
+      }
+    } else {
+      lines.push(`  ${RATINGS_STATE_LINES[row.ratingsState] ?? `评分状态: ${row.ratingsState}`}`);
+    }
+    emit("成本", t.cost ?? "未提供");
+    if (t.caveats.length > 0) {
+      lines.push("  注意事项:");
+      for (const c of t.caveats) {
+        for (const seg of wrapLines(`- ${c}`, body - 4)) lines.push(`    ${seg}`);
+      }
+    } else {
+      lines.push("  注意事项: 无");
+    }
     emit("context", `${t.contextWindow.tokens} tokens${t.contextWindow.shape ? `（${t.contextWindow.shape}）` : ""} [source: ${t.contextWindow.source}]`);
     emit("multimodal", `image=${t.multimodal.image ? "是" : "否"} video=${t.multimodal.video ? "是" : "否"} [source: ${t.multimodal.source}]`);
     if (t.effortNote) emit("effortNote", t.effortNote);
@@ -168,6 +207,10 @@ export async function lanesCommand(args, config) {
       for (const seg of wrapLines(`${k}: ${v}`, width - 2)) out.push(`  ${seg}`);
     }
     out.push(`  lanes.json sha256=${view.lanesSha256 ?? "null"}；画像文件 ${view.traitsPath ?? "(路径未知)"} sha256=${view.traitsSha256 ?? "null"}`);
+    // 0087：表头显示一次刻度（各车道的星级都对着它读）。
+    if (view.traitsScale) {
+      for (const seg of wrapLines(`刻度: ${view.traitsScale}`, width - 2)) out.push(`  ${seg}`);
+    }
     if (view.state === "ok" && view.lanes.length === 0) {
       out.push(`  ${view.lanesStateNote}`);
     }
@@ -178,7 +221,7 @@ export async function lanesCommand(args, config) {
     } else {
       for (const row of view.lanes) {
         out.push("");
-        out.push(...renderLane(row, width));
+        out.push(...renderLane(row, width, view.dimensionLabels));
       }
       if (view.issues.length > 0) {
         out.push("");

@@ -1,13 +1,10 @@
 // src/application/lanesView.js
 //
-// 0064（2026-10-12，Owner 批 A0+A1）：车道画像读取面（wao lanes）的纯投影层。
+// 车道画像读取面（wao lanes，决定 0064、0087）的纯投影层。画像的加载、校验与
+// 待复核判定归 src/application/laneProfile.js；本模块只做视图投影，行携带画像
+// 与 ratingsState/reviewReasons。
 //
-// 定位：lane-traits.json（Owner 手拟画像矩阵）自此起有一个**展示层**消费者——
-// 这是 0046 §1.5 隔离铁律的预告放宽（test/registry-roles/laneTraits.test.js
-// 原注释："读取面落地时本钉须同步放宽为白名单"）。画像仍然不进派发解析面、
-// 不进门禁、不进 MCP wire（隔离守卫已同步改为"白名单 + 导入边"双钉）。
-//
-// 契约（会审 consult_202610121021490657ur8lp 双席 P1 全采纳）：
+// 契约（会审 consult_202610121021490657ur8lp 双席 P1 全采纳；0087 增补）：
 //   - 事实陈列，零排序零推荐：行序恒=lanes.json 声明序（不按 readyState 重排）。
 //   - 0065（0045 §1.2 终局）：seatRole 声明列删除（席位角色维退役——对抗性改
 //     派生事实，wao stage --reviewed-run；registry 归一化已 strip 该字段）。
@@ -20,93 +17,22 @@
 //   - 画像降级三态分开：absent（无该车道键）/ invalid（形状错误）/ unreadable
 //     （整文件不可读）——不用默认值冒充观察事实（sol P1-4）。
 //   - 本模块纯函数：所有 IO（读文件/探测/registry）由调用方注入；零 env 读取。
+//     画像加载器经 laneProfile.js 取得并 re-export（命令层单入口——laneProfile
+//     只准被本模块与 leadPreflight 引用，隔离守卫钉住）。
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { isAbsolute, join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 // axesEqual/laneAxes/agentAxes（explicit 派发 G4 同一判定，0064 起导出）。
 // validDispatchHold（TD-283）：dispatchHold 的形状校验与车道表同一纪律。
 import { axesEqual, laneAxes, agentAxes, validDispatchHold } from "../dispatchResolution.js";
+import {
+  readLaneTraits,
+  ratingsState,
+  buildScaleLine,
+  DIMENSION_LABELS,
+} from "./laneProfile.js";
 
-const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-/** traits 单车道形状校验（与 test/registry-roles/laneTraits.test.js 的结构钉
- *  同一形状——profile/suggestedUses/contextWindow/multimodal 必填，effortNote /
- *  concurrencyNote
- *  可选；来源标注必为字符串）。不合规=整车道降级 invalid（不造默认值）。
- *  纯函数：返回 {ok:true, entry} 或 {ok:false, fields:[...]}。 */
-export function validateTraitEntry(id, entry) {
-  const bad = [];
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-    return { ok: false, fields: ["(非对象)"] };
-  }
-  if (typeof entry.profile !== "string") bad.push("profile");
-  if (!Array.isArray(entry.suggestedUses)
-    || entry.suggestedUses.length === 0
-    || entry.suggestedUses.some((u) => typeof u !== "string")) bad.push("suggestedUses");
-  const cw = entry.contextWindow;
-  if (!cw || typeof cw !== "object" || !Number.isInteger(cw.tokens) || cw.tokens <= 0
-    || typeof cw.source !== "string") bad.push("contextWindow");
-  const mm = entry.multimodal;
-  if (!mm || typeof mm !== "object" || typeof mm.image !== "boolean"
-    || typeof mm.video !== "boolean" || typeof mm.source !== "string") bad.push("multimodal");
-  if (entry.effortNote !== undefined && typeof entry.effortNote !== "string") bad.push("effortNote");
-  // 决定 0074：同车道并发的实测记录（可选；自由文本，写明并发数、日期与取样条件）。
-  if (entry.concurrencyNote !== undefined && typeof entry.concurrencyNote !== "string") bad.push("concurrencyNote");
-  if (bad.length > 0) return { ok: false, fields: bad };
-  return {
-    ok: true,
-    entry: {
-      profile: entry.profile,
-      suggestedUses: [...entry.suggestedUses],
-      contextWindow: { tokens: cw.tokens, source: cw.source, ...(typeof cw.shape === "string" ? { shape: cw.shape } : {}) },
-      multimodal: { image: mm.image, video: mm.video, source: mm.source },
-      ...(entry.effortNote !== undefined ? { effortNote: entry.effortNote } : {}),
-      ...(entry.concurrencyNote !== undefined ? { concurrencyNote: entry.concurrencyNote } : {}),
-    },
-  };
-}
-
-/**
- * 加载并形状校验 config/lane-traits.json（读取根=WAO 安装根，与 loadLanesConfig
- * 同纪律；readFileFn 可注入）。三态：ok（可读且顶层形状合法——单车道形状错误
- * 降级为该车道 invalid + issue）/ unreadable（文件缺失或 JSON 不可解析——所有
- * 车道标 unreadable）/ invalid（可解析但顶层形状坏——所有车道标 invalid）。
- * 只读展示面：任何失败都不抛（命令层如实报告，不中断其他轴）。
- */
-export function readLaneTraits(explicitPath, readFileFn = null) {
-  const path = typeof explicitPath === "string"
-    ? (isAbsolute(explicitPath) ? explicitPath : join(WAO_ROOT, explicitPath))
-    : join(WAO_ROOT, "config", "lane-traits.json");
-  const read = readFileFn ?? ((p) => readFileSync(p, "utf8"));
-  let raw;
-  try {
-    raw = read(path);
-  } catch {
-    return { state: "unreadable", path, sha256: null, traits: {}, issues: [`画像文件不可读：${path}`] };
-  }
-  const text = typeof raw === "string" ? raw : String(raw);
-  const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
-  let doc;
-  try {
-    doc = JSON.parse(text);
-  } catch (e) {
-    return { state: "unreadable", path, sha256, traits: {}, issues: [`画像文件不可解析：${e.message}`] };
-  }
-  if (!doc || typeof doc !== "object" || Array.isArray(doc) || typeof doc.traits !== "object"
-    || doc.traits === null || Array.isArray(doc.traits)) {
-    return { state: "invalid", path, sha256, traits: {}, issues: ["画像文件顶层形状错误（应含 traits 对象）"] };
-  }
-  const traits = {};
-  const issues = [];
-  for (const [id, entry] of Object.entries(doc.traits)) {
-    const v = validateTraitEntry(id, entry);
-    if (v.ok) traits[id] = v.entry;
-    else issues.push(`车道 ${id} 画像形状错误（${v.fields.join("/")}）`);
-  }
-  return { state: "ok", path, sha256, traits, issues };
-}
+// 命令层（src/commands/lanes.js）经本模块取画像加载器——它不准直接引用
+// laneProfile.js（0087 §5 守卫边）。
+export { readLaneTraits };
 
 /** 画布常量：derived issues 上限（诚实截断标志，防 registry 异常膨胀刷屏）。 */
 const DERIVED_ISSUE_CAP = 16;
@@ -178,14 +104,17 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     }
 
     // 画像轴三态（sol P1-4）：整文件 unreadable/invalid 传染所有车道；否则
-    // absent（无键）/ invalid（该车道形状错误）/ present。
+    // absent（无键）/ invalid（该车道形状错误）/ present。present 时附评分
+    // 状态与待复核原因（0087：与车道表身份比对 + reviewPending，全文不截断）。
     let traitsState = "absent";
     let traits = null;
+    let profileRating = null;
     if (traitsResult.state === "unreadable") traitsState = "unreadable";
     else if (traitsResult.state === "invalid") traitsState = "invalid";
     else if (Object.prototype.hasOwnProperty.call(traitsResult.traits, id)) {
       traitsState = "present";
       traits = traitsResult.traits[id];
+      profileRating = ratingsState(traits, lane);
     } else {
       const bad = (traitsResult.issues ?? []).some((s) => s.startsWith(`车道 ${id} 画像形状错误`));
       if (bad) traitsState = "invalid";
@@ -203,7 +132,11 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       wiring,
       ...(wiringDetail ? { wiringDetail } : {}),
       traitsState,
-      ...(traits ? { traits } : {}),
+      ...(traits ? {
+        traits,
+        ratingsState: profileRating.state,
+        reviewReasons: profileRating.reasons,
+      } : {}),
       // 认证轴：inventory 简表口径原样透传（null=未取得匹配认证，原因未区分）
       certification: wiredForAxes ? (inv?.certification ?? null) : null,
       certificationLastHealthyAt: wiredForAxes ? (inv?.certificationLastHealthyAt ?? null) : null,
@@ -246,10 +179,14 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     lanesSha256: lanesDoc?.sha256 ?? null,
     traitsSha256: traitsResult?.sha256 ?? null,
     traitsPath: traitsResult?.path ?? null,
+    // 0087：表头刻度行（一次）与七个维度的中文名（视图层从 laneProfile 取，
+    // 中文名只有一个归宿）。
+    traitsScale: traitsResult?.state === "ok" ? buildScaleLine(traitsResult.scale) : null,
+    dimensionLabels: { ...DIMENSION_LABELS },
     // 头部事实来源（人读面与 --json 同源；渲染层只投影不加工）
     sourceNotes: {
       order: "行序=lanes.json 声明序；事实陈列，非推荐",
-      profile: "画像=Owner 手拟矩阵（config 内画像文件；初次落库 2026-10-06，其后有 Owner 修订；无新鲜度机制——模型升级以重认证为准）",
+      profile: "画像=分项星级与依据（实测 measured 由 Lead 维护，owner 由 Owner 维护）；与车道表身份不一致或写了 reviewPending 即待复核",
       certification: "认证=reliability 台账简表口径（不比较 effort，非当前执行画像适用性结论）",
       readyState: "就绪=环境探测（口径同 wao onboarding；未接线/条目无效=跳过探测）",
       dispatchHold: "暂停说明=车道表 dispatchHold（Owner 原话；只告知不拦截，派发决定权在 Lead）",

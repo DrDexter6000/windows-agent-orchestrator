@@ -9,58 +9,32 @@
 //   - 接线四态：wired/drift（axesEqual 同 explicit 派发 G4 判定）/unwired
 //     （键不存在）/invalid（键在、条目无法解析）严格分开；
 //   - 画像三态：present/absent/invalid（该车道形状错误）/unreadable（整文件）；
+//     present 时行带 v2 画像与 ratingsState/reviewReasons（0087），表头带
+//     刻度行与维度中文名；
 //   - 车道表权威失败（ok:false / sha256=null）≠ 成功的空面；合法空表≠失败。
 //   - 交叉报告：孤儿画像键/registry 额外键不静默丢弃。
+// （画像文件加载与 v2 形状校验的钉在 test/application/laneProfile.test.js。）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { readLaneTraits, validateTraitEntry, buildLanesView } from "../../src/application/lanesView.js";
+import { buildLanesView } from "../../src/application/lanesView.js";
+import { DIMENSION_LABELS } from "../../src/application/laneProfile.js";
 
-function cleanupDir(dir) {
-  try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-}
+const unrated = () => ({ stars: null, basis: null });
+const noRatings = () => ({
+  research: unrated(), code: unrated(), review: unrated(), design: unrated(),
+  longHorizon: unrated(), writing: unrated(), visual: unrated(),
+});
 
 const validTrait = {
-  profile: "测试画像",
-  suggestedUses: ["用途A", "用途B"],
+  ratings: noRatings(),
+  ratedAgainst: null,
+  cost: "按量计费",
+  caveats: [],
   contextWindow: { tokens: 1000000, source: "official（测试）" },
   multimodal: { image: true, video: false, source: "official" },
 };
 
-test("validateTraitEntry：合法/形状错误字段点名/非对象", () => {
-  assert.deepEqual(validateTraitEntry("x", validTrait).entry.suggestedUses, ["用途A", "用途B"]);
-  const bad = validateTraitEntry("x", { ...validTrait, profile: 123, suggestedUses: [] });
-  assert.equal(bad.ok, false);
-  assert.deepEqual(bad.fields.sort(), ["profile", "suggestedUses"].sort());
-  assert.equal(validateTraitEntry("x", "字符串").ok, false);
-});
-
-test("readLaneTraits：可读/不可解析/顶层形状坏/单车道形状错误三态分开", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-lv-1-"));
-  try {
-    const p = join(dir, "t.json");
-    writeFileSync(p, JSON.stringify({ schemaVersion: 1, traits: { a: validTrait } }), "utf8");
-    const ok = readLaneTraits(p);
-    assert.equal(ok.state, "ok");
-    assert.ok(ok.sha256);
-    assert.ok(ok.traits.a);
-
-    writeFileSync(p, "{ not json", "utf8");
-    assert.equal(readLaneTraits(p).state, "unreadable");
-
-    writeFileSync(p, JSON.stringify({ traits: [] }), "utf8");
-    assert.equal(readLaneTraits(p).state, "invalid");
-
-    // 单车道形状错误：文件级 ok、该车道降级 + issue（不用默认值冒充事实）。
-    writeFileSync(p, JSON.stringify({ traits: { a: validTrait, b: { profile: 1 } } }), "utf8");
-    const mixed = readLaneTraits(p);
-    assert.equal(mixed.state, "ok");
-    assert.equal(mixed.traits.a.profile, "测试画像");
-    assert.ok(mixed.issues.some((s) => s.includes("车道 b 画像形状错误")));
-  } finally { cleanupDir(dir); }
-});
+const scale = { "5": "最强", "4": "强", "3": "堪用", "2": "弱", "1": "不适合" };
 
 // ── buildLanesView 夹具 ───────────────────────────────────────────────────────
 
@@ -82,7 +56,7 @@ const agent = (over = {}) => ({
 function baseInputs() {
   return {
     lanesDoc: laneDoc([L1, L2, L3]),
-    traitsResult: { state: "ok", path: "t.json", sha256: "b".repeat(64), traits: { l1: validTrait }, issues: [] },
+    traitsResult: { state: "ok", path: "t.json", sha256: "b".repeat(64), scale, traits: { l1: validTrait }, invalidIds: [], issues: [] },
     inventory: {
       agents: [
         { id: "l1", certification: "certified", certificationLastHealthyAt: "2026-10-06T00:00:00.000Z" },
@@ -157,23 +131,62 @@ test("buildLanesView：certification null 语义收窄 + 状态原样透传", ()
   assert.equal(buildLanesView(input).lanes[0].certification, "draft-only");
 });
 
-test("buildLanesView：画像三态 + 孤儿键/registry 额外键交叉报告不静默丢弃", () => {
+test("buildLanesView：画像三态 + v2 行形状（ratingsState/reviewReasons/刻度行）", () => {
   const input = baseInputs();
+  // l1：全未评（ratedAgainst null）。
+  // l2：已评且 ratedAgainst 与声明一致 → current；不一致 → review。
+  const ratedTrait = {
+    ...validTrait,
+    ratings: { ...noRatings(), review: { stars: 4, basis: "measured", n: 8, evidence: "提交 aaa1111", note: "稳" } },
+    ratedAgainst: { backend: "codex", modelId: "m2", providerID: null, effort: null },
+  };
   input.traitsResult = {
-    state: "ok", path: "t.json", sha256: "b".repeat(64),
-    traits: { l1: validTrait, ghost: validTrait },
-    issues: ["车道 l2 画像形状错误（profile）"],
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale,
+    traits: { l1: validTrait, l2: ratedTrait, ghost: validTrait },
+    invalidIds: [],
+    issues: ["车道 l3 画像形状错误（cost）"],
   };
   const view = viewWithInvalidL3(input);
   assert.equal(view.lanes[0].traitsState, "present");
-  assert.equal(view.lanes[0].traits.profile, "测试画像");
-  assert.equal(view.lanes[1].traitsState, "invalid", "形状错误=invalid");
-  assert.equal(view.lanes[2].traitsState, "absent", "无键=absent");
+  assert.equal(view.lanes[0].traits.cost, "按量计费");
+  assert.equal(view.lanes[0].ratingsState, "unrated", "七格全未评");
+  assert.deepEqual(view.lanes[0].reviewReasons, []);
+  assert.equal(view.lanes[1].traitsState, "present");
+  assert.equal(view.lanes[1].ratingsState, "current", "打分身份与声明一致");
+  // 身份漂移（registry 侧改轴不进画像比对——ratedAgainst 比的是 lanes.json 声明；
+  // 这里直接给 lanes.json 另一个 modelId 构造不一致）。
+  const driftTraitInput = baseInputs();
+  driftTraitInput.lanesDoc = laneDoc([L1, { ...L2, model: { id: "m2x" } }, L3]);
+  driftTraitInput.traitsResult = {
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale,
+    traits: { l2: ratedTrait }, invalidIds: [], issues: [],
+  };
+  const driftTraitsView = buildLanesView(driftTraitInput);
+  assert.equal(driftTraitsView.lanes[1].ratingsState, "review", "ratedAgainst 与声明不一致=待复核");
+  assert.deepEqual(driftTraitsView.lanes[1].reviewReasons, ["modelId：打分时 m2，现为 m2x"]);
+  // reviewPending 原文并入。
+  const pendingInput = baseInputs();
+  pendingInput.traitsResult = {
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale,
+    traits: { l1: { ...validTrait, reviewPending: "换代待重测" } }, invalidIds: [], issues: [],
+  };
+  // 全未评 + reviewPending：只免身份比对，照样待复核。
+  assert.equal(buildLanesView(pendingInput).lanes[0].ratingsState, "review");
+
+  assert.equal(view.lanes[2].traitsState, "invalid", "形状错误=invalid");
   assert.ok(view.issues.some((s) => s.includes("画像孤儿键：ghost")), "孤儿画像键上报");
   assert.ok(view.issues.some((s) => s.includes("registry 额外键")), "registry 额外键上报");
 
-  const unreadableView = buildLanesView({ ...baseInputs(), traitsResult: { state: "unreadable", path: "t.json", sha256: null, traits: {}, issues: [] } });
+  // 表头：刻度行一次 + 七个维度中文名 + sourceNotes.profile 现状文案。
+  assert.equal(view.traitsScale, "5 最强；4 强；3 堪用；2 弱；1 不适合；null 未评");
+  assert.deepEqual(Object.keys(view.dimensionLabels),
+    ["research", "code", "review", "design", "longHorizon", "writing", "visual"]);
+  assert.deepEqual(view.dimensionLabels, DIMENSION_LABELS, "维度名从 laneProfile 的唯一归宿投影");
+  assert.ok(typeof view.sourceNotes.profile === "string" && view.sourceNotes.profile.length > 0, "画像来源说明在场");
+
+  const unreadableView = buildLanesView({ ...baseInputs(), traitsResult: { state: "unreadable", path: "t.json", sha256: null, scale: null, traits: {}, invalidIds: [], issues: [] } });
   assert.equal(unreadableView.lanes[0].traitsState, "unreadable", "整文件不可读传染所有车道");
+  assert.equal(unreadableView.traitsScale, null, "不可读时无刻度行");
 });
 
 test("buildLanesView：车道表权威失败≠成功的空面；合法空表≠失败", () => {

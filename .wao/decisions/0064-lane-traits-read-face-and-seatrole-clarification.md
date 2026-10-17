@@ -40,3 +40,10 @@
 - BACKEND_CLI 无 zcode 映射（backendCliMap.js 只列 claude-code/codex/kimi-code/opencode-serve/deepseek-harness/deepseek-acp）→ zcode 三车道 readyState 恒 unknown（"backend maps to no CLI"）——**既有权威的覆盖缺口**，onboarding/doctor 同盲，非本批引入；画像面如实显示。待 Owner 决定是否补映射（zcode CLI 探测可行性另证）。
 - runs/reliability-summary.json 的 counts 头（certified:2/conditional:7）与 workers 实际（2+6）不一致（opus 红队实锤）——台账数据侧旧账，读取面以逐车道 matched 结果为准不消费 counts；不在本批修。
 - loadLanesConfig 对 lanes 非数组静默归 []（ok:true 无 issue）——既有行为，读取面按"合法空表"呈现；结构非法反例须走未知顶层键。
+
+## 修订条（0087，2026-10-17）
+
+由 0087 修订三处：
+- 边界第 1 条的"不进 MCP wire"：lead_preflight 带画像的只读紧凑投影。
+- 边界第 4 条的新鲜度：改为身份绑定加 reviewPending。
+- 裁定第 4 条的允许导入边：画像加载模块也可被 lead_preflight 的聚合器引用，聚合器只准被 MCP 服务引用；派发、门禁、backend 路径仍禁止引用。

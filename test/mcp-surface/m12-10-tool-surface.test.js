@@ -434,10 +434,15 @@ const RED_23_WIRE = 75492;
 // 94532 内）。同批会审修复：run_consult 读取/分页也可带 expectedWorkspaceRoot、
 // run_dispatch_contract_check 按调用目标检查并在出参增 workspaceScope、
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
-const FROZEN_23_WIRE_CEILING = 88227;
+const FROZEN_23_WIRE_CEILING = 90661;
 // 2026-10-16（Owner 批准小幅重冻）：run_delivery_reverify 入参/出参增可选
 // attempt（1|2，缺省 1——第二次显式重验机会），描述加一句第二次机会说明：
 // 88048→88227（实测；本批批准 wire+desc 合计涨幅 ≤300B，实测合计 +252B）。
+// 2026-10-17（Owner 批准重冻）：lead_preflight 出参增 lanes 车道画像紧凑投影
+//（scale/dimensionLabels/rows——七格 {stars,basis,n,note}、待复核状态与原因、
+// caveats 前 2、cost；独立子 schema 校验，不合格置 null 不连累其余各节），
+// 描述改提车道分项星级并压缩原句腾字节（desc/hostVisible 冻结线未抬）：
+// 88227→90661（实测；Owner 硬顶 94532 内）。
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -610,19 +615,16 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // 0045 §1.4 第 5 步（2026-10-05）：run_dispatch/contract_check 共享入参加
 // lane/role（schema 在 stripped 载荷内），SHA 如实变（无损证明语义不变）。
 // 0045 窗口门（2026-10-05）：run_consult 出参镜像成员补齐——SHA 如实翻新。
+// 0087（2026-10-17，Owner 批准重冻）：lead_preflight 出参增 lanes 车道画像
+// 紧凑投影（LANES_PROJECTION_OUTPUT——nullable strict 对象：scale ≤240、
+// 七键 dimensionLabels、rows ≤16 的 {id,七格 ratings,ratingsState,
+// reviewReasons≤4,caveats≤2,cost}；星级/basis/ratingsState 闭集 enum 派生自
+// laneProfile SSOT）——outputSchema 在 stripped 载荷内，SHA 如实翻新；描述句
+// 变化不进 stripped 载荷（desc 顶与 hostVisible 顶均未抬、实测复验通过）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  // 2026-10-15（Owner 批准重冻）：会动工作区的工具目标改为只取本次调用的
-  // expectedWorkspaceRoot（收窄：缺参即拒——决定 0021 修订记录在案）。schema 面
-  // 变更全为 additive：八个 runId 工具 + run_consult 的 inputSchema 各增可选
-  // expectedWorkspaceRoot（run_dispatch/run_dispatch_contract_check 共享入参本就
-  // 有该字段）；run_dispatch 出参 workspaceProof.source 枚举增闭集成员
-  // call_target；lead_preflight workspace 出参增 projectBucket（nullable）；
-  // runs_list 出参增 scope 对象（source + projectBucket）。全部在 stripped 载荷
-  // 内，SHA 如实翻新。描述同步各加一句必传目标说明（desc 顶一并重冻）。
-  // 同批会审修复：run_dispatch_contract_check 出参增 workspaceScope（source +
-  // projectBucket；该工具改为可按调用目标检查），run_consult 读取/分页接受同一
-  // 目标字段——均在 stripped 载荷内，SHA 再如实翻新。
-  "6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f";
+  "2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac";
+  // （历史值：6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f
+  // 为 2026-10-15/16 重冻后的实测冻结值——0087 lanes 投影之前的最后值。）
   // 2026-10-16（schema 改动，按实测更新）：run_delivery_reverify 的 input/
   // output schema 各增可选 attempt（integer 1..2）——schema 在 stripped 载荷
   // 内，SHA 如实翻新；描述句变化不进 stripped 载荷（desc 顶另行按实测重冻）。
@@ -708,19 +710,22 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
-const FROZEN_23_DESC_CEILING = 11856;
+const FROZEN_23_DESC_CEILING = 11847;
 // 2026-10-16（Owner 批准小幅重冻，与 wire 同批）：run_delivery_reverify 描述
 // 加一句 attempt:2 第二次机会说明：11783→11856（实测；wire+desc 合计涨幅
 // 批准 ≤300B，实测 +252B）。
+// 2026-10-17：lead_preflight 描述改提车道分项星级，压缩原句后净减：11856→11847
+//（实测，冻结线下调，未抬）。
 
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；口径见 measureSurface()，规则见决定 0078。
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 23067;
+const FROZEN_23_HOSTVISIBLE_CEILING = 23058;
 // 2026-10-16（Owner 批准小幅重冻，与 wire/desc 同批——同一 attempt 字段的
 // inputSchema 字节进 hostVisible）：22941→23067（实测；hostVisible 无独立硬顶，
 // 在 wire 硬顶内）。
+// 2026-10-17：lead_preflight 描述压缩净减：23067→23058（实测，冻结线下调，未抬）。
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

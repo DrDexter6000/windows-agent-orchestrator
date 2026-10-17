@@ -40,6 +40,21 @@ import {
 } from "./registryInventory.js";
 import { createVerificationGate } from "../verificationGate.js";
 import { projectBucketLabel } from "../projectIdentity.js";
+// 0087：车道画像紧凑投影——加载器与投影只在 lead_preflight.lanes 一处出 MCP。
+// 闭集常量 re-export 给 MCP 层派生 zod enum/上限（单一 SSOT，不复制清单）。
+import {
+  projectLaneProfiles,
+  readLaneTraits,
+  PROJECTION_ROWS_CAP,
+  RATING_BASES,
+  RATINGS_STATES,
+} from "./laneProfile.js";
+// 0087 §5：MCP 服务处在 worker 上下文时 lanes 置 null（WAO 不向 worker 投影
+// 画像）。判定注入以便测试；缺省读真实 env/cwd。
+import { nestedDispatchContext } from "../nestedDispatchGuard.js";
+import { loadLanesConfig } from "../dispatchResolution.js";
+
+export { PROJECTION_ROWS_CAP, RATING_BASES, RATINGS_STATES };
 
 /**
  * @typedef {Object} PreflightWorkspace
@@ -141,6 +156,16 @@ function defaultGateStatus() {
   return createVerificationGate().status();
 }
 
+// 0087: default lane-profiles projection — reads the repo-tracked lanes table
+// and profile file (WAO install root, same discipline as the CLI) and projects
+// the compact shape. Read-only; never throws upward (the section catches).
+// Injected via laneProfilesFn for tests; the MCP handler replays its own.
+function defaultLaneProfiles() {
+  const lanesDoc = loadLanesConfig();
+  const traitsResult = readLaneTraits();
+  return projectLaneProfiles({ lanesDoc, traitsResult });
+}
+
 // One observation-time FACT line from a status snapshot. Durations derive
 // from the snapshot's own numbers (no second clock read): heldMs =
 // ageMs + (heartbeatAt - startedAt). No causal claim anywhere — the line
@@ -219,6 +244,14 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   gate status (defaults to createVerificationGate().status()). Supplies the
  *   one queue-visibility observation line; any throw degrades to line
  *   omission, never a preflight failure.
+ * @param {Function} [input.laneProfilesFn] — 0087: injectable lane-profiles
+ *   projection (defaults to reading the lanes table + profile file and calling
+ *   projectLaneProfiles). Advisory-only section: a throw or null result
+ *   settles lanes=null with an observation — never a warning, never
+ *   checkStatus/complete.
+ * @param {Function} [input.workerContextFn] — 0087: injectable worker-context
+ *   detector (defaults to nestedDispatchContext()). A non-null result forces
+ *   lanes=null with an observation (profiles are never projected to workers).
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -233,6 +266,8 @@ export async function aggregateLeadPreflight({
   listRunsFn,
   serverBuildFactsFn,
   gateStatusFn,
+  laneProfilesFn,
+  workerContextFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
@@ -533,6 +568,42 @@ export async function aggregateLeadPreflight({
     // Read threw unexpectedly → omit the line entirely (never fail, never fake free).
   }
 
+  // --- Section 5: lane profiles (0087; advisory, independent, read-only) ---
+  // NOT part of checkStatus and NEVER flips complete: this is reference data
+  // for the Lead's dispatch judgment, not an observed mechanical check. Settles
+  // independently — worker context / unreadable file / malformed lane → lanes=null
+  // plus ONE bounded observation each (never a warning, never a failure).
+  // Profiles are NEVER projected to workers (0087 §5): a worker-context MCP
+  // session gets lanes=null, full stop.
+  let lanes = null;
+  const observeLaneOmission = (line) => {
+    if (observations.length < 64) observations.push(line);
+  };
+  try {
+    const contextFn = typeof workerContextFn === "function" ? workerContextFn : nestedDispatchContext;
+    if (contextFn() != null) {
+      observeLaneOmission("lane profiles are not shown in a worker context");
+    } else {
+      const fn = laneProfilesFn ?? defaultLaneProfiles;
+      const projection = await fn();
+      if (projection != null && typeof projection === "object") {
+        lanes = {
+          scale: projection.scale,
+          dimensionLabels: projection.dimensionLabels,
+          rows: projection.rows,
+        };
+        for (const id of (projection.omittedLaneIds ?? [])) {
+          observeLaneOmission(`lane ${id} profile is invalid — row omitted from lanes; see wao lanes`);
+        }
+      } else {
+        observeLaneOmission("lane profiles could not be read — use wao lanes");
+      }
+    }
+  } catch {
+    lanes = null;
+    observeLaneOmission("lane profiles could not be read — use wao lanes");
+  }
+
   // complete = every section reliably observed AND no selection failure.
   // A selection failure or any "unknown"/"warning" makes it false.
   const sections = ["workspace", "workers", "activeRuns"];
@@ -558,6 +629,11 @@ export async function aggregateLeadPreflight({
     activeRunCount,
     activeRunsTruncated,
     unresolvedRunCount,
+    // 0087: compact lane-profile projection ({scale, dimensionLabels, rows});
+    // null in a worker context, when the file/lanes table is unreadable, or
+    // (at the MCP boundary) when the sub-schema validation fails. Advisory
+    // reference data only — not part of checkStatus/complete.
+    lanes,
     observations,
     warnings,
     manualChecks,

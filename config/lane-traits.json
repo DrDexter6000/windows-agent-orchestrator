@@ -1,62 +1,474 @@
 {
-  "schemaVersion": 1,
-  "_comment": "车道画像元数据（特征描述+建议任务类别+上下文/多模态事实）——仅对 Lead agent 暴露、供选席参考。非路由规则、非身份成分、不进派发解析面（dispatchResolution 不读本文件）、不进 MCP wire（冻结面零字节）。来源标注：official=官方文档核实、owner=Owner 实测口述、wire=dsh/ACP 会话广告值。描述性文字来自 Owner 手拟矩阵（含主观评价），与可核实事实分列。",
+  "schemaVersion": 2,
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（只有 Owner 改），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话。",
+  "scale": {
+    "1": "不适合",
+    "2": "弱，需重点把关",
+    "3": "堪用，需常规会审",
+    "4": "强，偶有遗漏",
+    "5": "名册里最强，可独立承担"
+  },
   "traits": {
     "sol": {
-      "profile": "四星智力，相对严谨、保守、后端能力较强，容易钻牛角尖，价格中高（Owner 撰写）",
-      "suggestedUses": ["方案 advisor", "交付物 auditor", "bug 挖掘", "文生图 / 图生图"],
-      "contextWindow": { "tokens": 1050000, "shape": "922K in / 128K out shared", "source": "official" },
-      "multimodal": { "image": true, "video": false, "source": "official" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原画像：后端能力较强"
+        },
+        "review": {
+          "stars": 5,
+          "basis": "measured",
+          "n": 89,
+          "evidence": "统计口径：10-06 至 10-17 全部会审记录，按各席位运行记录里的 Q1 作答计数与配对比较；过程见画像改造批的提交说明",
+          "note": "最严：与 kimi 共同会审 25 次里 15 次更严、从不更松；常附可复现的反例"
+        },
+        "design": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原建议用途：方案 advisor"
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": {
+        "backend": "codex",
+        "modelId": "gpt-6.1-sol",
+        "providerID": null,
+        "effort": "high"
+      },
+      "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity；价格中高（Owner）",
+      "caveats": [
+        "会审常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
+        "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
+        "codex 沙箱里找不到 Node 22、跑不了 npm 全局命令：任务书写明 Node 22 绝对路径，dsh 之类核验由 Lead 做",
+        "能文生图、图生图（Owner）"
+      ],
+      "contextWindow": {
+        "tokens": 1050000,
+        "shape": "922K in / 128K out shared",
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official"
+      },
       "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "astra": {
-      "profile": "五星智力，极其严谨、保守、后端能力极强，容易钻牛角尖，价格高昂（Owner 撰写）",
-      "suggestedUses": ["方案 advisor", "交付物 auditor", "高难度 bug 挖掘"],
-      "contextWindow": { "tokens": 1050000, "shape": "922K in / 128K out shared", "source": "official" },
-      "multimodal": { "image": true, "video": false, "source": "official" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原画像：后端能力极强"
+        },
+        "review": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原画像：极其严谨；原建议用途：高难度 bug 挖掘"
+        },
+        "design": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原建议用途：方案 advisor"
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": {
+        "backend": "codex",
+        "modelId": "gpt-6-astra",
+        "providerID": null,
+        "effort": "medium"
+      },
+      "cost": "codex 订阅额度；价格高昂（Owner）",
+      "caveats": [
+        "只用于疑难杂症（Owner 规则）",
+        "容易钻牛角尖（Owner）：任务书写清范围与停止条件"
+      ],
+      "contextWindow": {
+        "tokens": 1050000,
+        "shape": "922K in / 128K out shared",
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official"
+      },
       "concurrencyNote": "同车道 3 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "glm-pro": {
-      "profile": "三星半智力，代码能力不错、长程任务能力较强，价廉（Owner 撰写）",
-      "suggestedUses": ["主力代码执行"],
-      "contextWindow": { "tokens": 1000000, "source": "official" },
-      "multimodal": { "image": false, "video": false, "source": "official（GLM-5 系首个原生多模态是 Flash；本体无视觉）" },
-      "concurrencyNote": "订阅额度按无限对待；要避开的只有 GLM 高峰（北京时间 9:00–18:00，即 UTC 01:00–10:00），高峰消耗 ×3，批量派发会在几十分钟内用尽 5 小时窗口，之后新会话在 WAO 里表现为 zcode turn stalled（没有首个流块，或流静默 60 秒以上）。同时 8 个并发的长文档改写都完成了，停滞与并发无关（measured 2026-10-14）"
+      "ratings": {
+        "research": {
+          "stars": 3,
+          "basis": "measured",
+          "n": 174,
+          "evidence": "提交 0b06602：台账重建 12 份同题材料（如 run_20261013194459495xmuqx9）",
+          "note": "与 Lead 终裁一致 137/174（deepseek-flash 144）；守格式最好"
+        },
+        "code": {
+          "stars": 3,
+          "basis": "measured",
+          "n": 19,
+          "evidence": "提交 eb3dc86 5fe4f67 79ea9e0 cad1b9f abf3d27 f192b4b e6cee6a 407ea91 a6fd6c2 bcb4022 c4b777d 08d76cc cb676a7 3f33240 8b8d5c4 5b266a8 44c5d6d 07790fc 20bc951",
+          "note": "主力：有 sol 在场的 19 批第一轮都被要求修改（多为大活）"
+        },
+        "review": {
+          "stars": 2,
+          "basis": "measured",
+          "n": 2,
+          "evidence": "提交 4f1b7fd、412dc47",
+          "note": "两次判通过而同席要求修改；有一条提醒查实为 TD-234"
+        },
+        "design": {
+          "stars": null,
+          "basis": null
+        },
+        "longHorizon": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原画像：长程任务能力较强"
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": {
+        "backend": "zcode",
+        "modelId": "bigmodel-api/GLM-5.3",
+        "providerID": null,
+        "effort": "max"
+      },
+      "cost": "GLM 订阅，额度按无限对待；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
+      "caveats": [
+        "不能看图：看图类任务派别的车道",
+        "高峰外再派；成片出现 zcode turn stalled（无首个流块或静默 60 秒以上）时先怀疑额度"
+      ],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": false,
+        "video": false,
+        "source": "official（GLM-5 系首个原生多模态是 Flash；本体无视觉）"
+      },
+      "concurrencyNote": "同时 8 个并发的长文档改写都完成了，停滞与并发无关（measured 2026-10-14）"
     },
     "glm-flash": {
-      "profile": "三星智力，代码能力不如 glm-pro，价格极其低廉（Owner 撰写）",
-      "suggestedUses": ["副代码执行", "视觉理解", "探索/研究/总结"],
-      "contextWindow": { "tokens": 1000000, "source": "official" },
-      "multimodal": { "image": true, "video": false, "source": "official（GLM-5 系首个原生多模态）" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": 2,
+          "basis": "owner",
+          "note": "原画像：代码能力不如 glm-pro"
+        },
+        "review": {
+          "stars": null,
+          "basis": null
+        },
+        "design": {
+          "stars": null,
+          "basis": null
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": {
+        "backend": "zcode",
+        "modelId": "bigmodel-api/GLM-5.3-Flash",
+        "providerID": null,
+        "effort": "max"
+      },
+      "cost": "GLM 订阅；价格极其低廉（Owner）",
+      "caveats": [],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official（GLM-5 系首个原生多模态）"
+      },
       "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "kimi": {
-      "profile": "四星智力，有格局、有创意、文案强，但不如 astra 严谨，价格高昂（Owner 撰写）",
-      "suggestedUses": ["方案 advisor", "交付物 auditor", "头脑风暴", "视觉设计"],
-      "contextWindow": { "tokens": 262144, "source": "owner（k3-256k 档 256K；K3 冷却期才 1M，1M 档=未来席位升级项，需另 model id 另认证）" },
-      "multimodal": { "image": true, "video": false, "source": "owner（仅图；视频识别需 kimi-for-coding=K2.8 Preview 另车道）" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": null,
+          "basis": null
+        },
+        "review": {
+          "stars": 3,
+          "basis": "measured",
+          "n": 37,
+          "evidence": "统计口径：10-06 至 10-17 全部会审记录，按各席位运行记录里的 Q1 作答计数与配对比较；过程见画像改造批的提交说明",
+          "note": "比 sol 松：共同会审 25 次里 15 次更松、10 次相同、从不更严"
+        },
+        "design": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原画像：有格局、有创意；原建议用途：方案 advisor、头脑风暴"
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原画像：文案强"
+        },
+        "visual": {
+          "stars": 4,
+          "basis": "owner",
+          "note": "原建议用途：视觉设计"
+        }
+      },
+      "ratedAgainst": {
+        "backend": "kimi-web",
+        "modelId": "kimi-code/k3-256k",
+        "providerID": null,
+        "effort": null
+      },
+      "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）；价格高昂（Owner）",
+      "caveats": [
+        "重要会审备好替补席位（如 opus）",
+        "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败",
+        "严谨度不如 astra（Owner）"
+      ],
+      "contextWindow": {
+        "tokens": 262144,
+        "source": "owner（k3-256k 档 256K；K3 冷却期才 1M，1M 档=未来席位升级项，需另 model id 另认证）"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "owner（仅图；视频识别需 kimi-for-coding=K2.8 Preview 另车道）"
+      },
       "concurrencyNote": "同车道 6 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）",
       "effortNote": "通道不表达 effort（kimi-web thinking 字段未实测，WAO 不发明映射）——模型侧默认 high（owner 实测）"
     },
     "opus": {
-      "profile": "五星智力，有格局、有创意、文案强，但不如 astra 严谨，价格高昂（Owner 撰写）",
-      "suggestedUses": ["方案 advisor", "交付物 auditor", "创意头脑风暴", "高要求视觉设计"],
-      "contextWindow": { "tokens": 1000000, "source": "official" },
-      "multimodal": { "image": true, "video": false, "source": "official" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": null,
+          "basis": null
+        },
+        "review": {
+          "stars": 4,
+          "basis": "measured",
+          "n": 19,
+          "evidence": "统计口径：10-06 至 10-17 全部会审记录，按各席位运行记录里的 Q1 作答计数与配对比较；过程见画像改造批的提交说明",
+          "note": "替补主审：与 sol 共同会审 8 次里 4 次相同、3 次更松、1 次更严"
+        },
+        "design": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原画像：有格局、有创意；原建议用途：方案 advisor、创意头脑风暴"
+        },
+        "longHorizon": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "Owner：Claude Code 车道的宏观项目管理更强"
+        },
+        "writing": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原画像：文案强"
+        },
+        "visual": {
+          "stars": 5,
+          "basis": "owner",
+          "note": "原建议用途：高要求视觉设计"
+        }
+      },
+      "ratedAgainst": {
+        "backend": "claude-code",
+        "modelId": "claude-opus-5-5",
+        "providerID": null,
+        "effort": "high"
+      },
+      "cost": "Claude 订阅（OAuth 长期 token）；价格高昂（Owner）",
+      "caveats": [
+        "任务书写明所有命令前台跑完再作答：后台命令未完成时它会结束回合，只留中间话",
+        "严谨度不如 astra（Owner）"
+      ],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official"
+      },
       "concurrencyNote": "同车道 3 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "deepseek-pro": {
-      "profile": "（Owner 画像待撰写）",
-      "suggestedUses": ["（Owner 未撰写）"],
-      "contextWindow": { "tokens": 1000000, "source": "official" },
-      "multimodal": { "image": false, "video": false, "source": "official（无视觉证据）" },
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": null,
+          "basis": null
+        },
+        "review": {
+          "stars": null,
+          "basis": null
+        },
+        "design": {
+          "stars": null,
+          "basis": null
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": null,
+      "cost": "DeepSeek API 按量计费",
+      "caveats": [],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "owner（除 glm-pro 外各车道都能看图）"
+      },
       "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     },
     "deepseek-flash": {
-      "profile": "三星智力，代码能力不如 glm，执行速度极快，价格极其低廉（Owner 撰写）",
-      "suggestedUses": ["副代码执行", "视觉理解", "探索/研究/总结"],
-      "contextWindow": { "tokens": 1000000, "source": "official" },
-      "multimodal": { "image": true, "video": false, "source": "official（deepseek-flash 接受图像输入，api-docs 实证）" },
+      "ratings": {
+        "research": {
+          "stars": 3,
+          "basis": "measured",
+          "n": 174,
+          "evidence": "提交 0b06602：台账重建 12 份同题材料（如 run_20261013194502118opoxiu）",
+          "note": "与 Lead 终裁一致 144/174（glm-pro 137）；19 行分歧里终裁站它 13 次"
+        },
+        "code": {
+          "stars": 3,
+          "basis": "measured",
+          "n": 5,
+          "evidence": "提交 a6fd6c2、bcb4022、e1d832b、8708204、93c31e7",
+          "note": "5 个任务 2 个第一轮会审即通过"
+        },
+        "review": {
+          "stars": 2,
+          "basis": "measured",
+          "n": 7,
+          "evidence": "提交 eb3dc86、5fe4f67、79ea9e0、cad1b9f（含两场）、abf3d27、47e48ed",
+          "note": "能补文档与一致性问题，后端深层缺陷多漏；sol 判要修时它 4 次判通过附意见"
+        },
+        "design": {
+          "stars": null,
+          "basis": null
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": {
+        "backend": "deepseek-acp",
+        "modelId": "deepseek-flash",
+        "providerID": "deepseek-official",
+        "effort": "max"
+      },
+      "reviewPending": "服务端模型已换成 V4.1-Flash-1017，实测格都是换代前的数据",
+      "cost": "DeepSeek API 按量计费，极便宜（每百万输入 token 1–2 元）；通道不报 token 用量",
+      "caveats": [
+        "跑得稳：10-06 起 54 次只有 2 次没跑完，都是 WAO 误判",
+        "涉及截断与脱敏的改动要专门审：换代前两次犯先截断再脱敏",
+        "当会审席用时长：中位 15.5 分钟（sol 7.4 分钟）"
+      ],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official（deepseek-flash 接受图像输入，api-docs 实证）"
+      },
       "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
     }
   }
