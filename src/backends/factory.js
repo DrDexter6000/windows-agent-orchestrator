@@ -105,7 +105,7 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  * 字节钉由 test/isolation-infra/docsSurface.test.js + docs-consistency.test.js 守卫）。
  * 纪律：
  *   - 这里只写**派生不出**的条件/限制语义（fail-closed 分叉、通道形状、绑定事实）；
- *     判定词（支持/不支持/条件）与档位集合由生成器对 validateAgentPolicy 的行为
+ *     判定词（支持/不支持/条件；model 栏为必填/可选＋写法）与档位集合由生成器对 validateAgentPolicy 的行为
  *     探针派生，不在此复述——静态文本复述探针可派生的集合会制造第二份会漂的值。
  *   - 键集：四个 policy 面（model / reasoning / contextWindow / provider）＋
  *     BACKEND_CAPABILITY_AXES 成员（仅承载额外条件者，如 opencode-serve 角色合同
@@ -119,7 +119,7 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  */
 export const CAPABILITY_NOTES = Object.freeze({
   "opencode-serve": Object.freeze({
-    model: "须 OpenCode 形状 `{providerID, id, variant}`；canonical 裸 `{id}` 被拒（模型路由由 model.providerID 承担）",
+    model: "`variant` 可选",
     provider: "不支持 provider 块——模型路由由 `model.providerID` 承担",
     supportsRoleContract: "须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）",
     reportsTokenUsage: "session.tokens 周期轮询",
@@ -177,7 +177,7 @@ export const CAPABILITY_NOTES = Object.freeze({
   // kimi 2.1.1 `kimi web` REST API 的直跑实测（详见 src/backends/kimiWeb.js 文件头；
   // v8 完成判定 = transcript 轮次终态原语）。
   "kimi-web": Object.freeze({
-    model: "`model.id` 必填（空白/纯空白串同拒）并原样直传 prompts body（上游缺 model 时接口返 success 但轮次静默秒败——fail-closed 硬拒于派发前）；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填——裸 model 探针形状因缺连接字段被拒（§二判定词按探针机械派生，非模型通道不存在）",
+    model: "空白/纯空白 `model.id` 同样被拒；id 原样直传 prompts body——上游缺 model 时接口返 success 但轮次静默秒败，所以派发前硬拒；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填",
     reasoning: "prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒",
     provider: "kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒",
     supportsRoleContract: "拼进 prompt 正文前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）",
@@ -191,7 +191,7 @@ export const CAPABILITY_NOTES = Object.freeze({
   // zcode 0.16.9 捆绑 CLI app-server（ZCode Protocol v1）的 live 实测（详见
   // src/backends/zcode.js 文件头）。
   "zcode": Object.freeze({
-    model: "`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）",
+    model: "ref 须恰好一个 `/`、两段非空（该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；per-dispatch `--model` 覆盖同样须是 ref（裸 id 无法路由）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）",
     reasoning: "effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options",
     provider: "登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒",
     supportsRoleContract: "拼进 `session/send` content 前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）",
@@ -200,6 +200,30 @@ export const CAPABILITY_NOTES = Object.freeze({
     reportsTokenUsage: "`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游 CRn 实现形状 zcode.cjs:15259，cache 系带 `Tokens` 后缀）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对（opencode session.tokens 同款语义）；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）",
     enforcesWriteSandbox: "无 OS 写沙箱——app-server 协议无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：新 part / 工具证据、模型流分片（落 `streaming`）、app-server 后代进程的 CPU / I/O / 生灭（落 `process_active`）、工作目录文件变化（落 `files_changed`）、本轮主轮请求的上游重试等待（`v4/telemetry/event` 的 `model.request.status`：仅本会话、本轮 turnId、`querySource=main_turn` 的 `model_retry_scheduled`，有效到到达时刻+delayMs+30s 余量，落 `provider_retry`；同一安排的重复通知不延长，链上其后出现 started/completed（换 requestId 也算）、turn 结束或换轮即作废且粘住——作废前首见的安排连同其重复通知不再复活续命；failed/stream_stalled 本身不续命；上游上报 maxAttempts=0（重试预算无界）时每个新安排都会重新立窗、没有自动上限，且服务端 retry-after 可把单次退避拉长到远超 300s——有体征运行的去留归 Lead，决定 0067）。三道收口门到点先看体征，全无才收口（约 5–10 分钟）；有体征没有自动上限（决定 0067；重试等待不重置停滞预算时钟——退避窗一过仍无进展即收口）",
+  }),
+});
+
+/**
+ * 每 backend 的配置表达力探针**底稿**——该 backend `validateAgentPolicy` 能接受的
+ * 最小配置。消费者**只有** `scripts/gen-certification.mjs`：校验与用法见那里的
+ * `checkProbeBase` / `probeExpressivity`；键集须等于 KNOWN_BACKENDS，新 backend
+ * 必须在此登记底稿，缺了生成器即报错。占位值一律用一眼能看出是假的值（假 model
+ * id / 回环丢弃端口 9 / 假 env 名）——不得出现真实路径、主机或凭据名。
+ */
+export const POLICY_PROBE_BASES = Object.freeze({
+  "opencode-serve": Object.freeze({}),
+  "claude-code": Object.freeze({}),
+  "codex": Object.freeze({}),
+  "kimi-code": Object.freeze({}),
+  "deepseek-harness": Object.freeze({}),
+  "deepseek-acp": Object.freeze({}),
+  "kimi-web": Object.freeze({
+    model: Object.freeze({ id: "gen-certification-probe-model" }),
+    serveUrl: "http://127.0.0.1:9",
+    tokenEnv: "GEN_CERTIFICATION_PROBE_TOKEN",
+  }),
+  "zcode": Object.freeze({
+    model: Object.freeze({ id: "gen-certification-probe/gen-certification-probe-model" }),
   }),
 });
 

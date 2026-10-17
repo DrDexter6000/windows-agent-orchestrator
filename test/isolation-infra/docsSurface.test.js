@@ -88,8 +88,9 @@ test("docsSurface-4: HELP_TEXT is a non-empty long string; cli.md embeds it verb
 
 // TD-162 生成层批次（2026-09-22）：docs/surface/certification.md 由
 // scripts/gen-certification.mjs 派生（registry/factory 闭集 SSOT +
-// validateAgentPolicy 行为探针，判定法沿用退役 TD-162 policy 门守卫的同一套
-// 派生法）。byte-pin 同 docsSurface-1 的纪律：测试不重新实现任何格式化逻辑——
+// validateAgentPolicy 行为探针；探针为「底稿＋单项」派生法——
+// 从 POLICY_PROBE_BASES 登记的最小合法底稿深拷贝出发，一次只改/只加一项）。
+// byte-pin 同 docsSurface-1 的纪律：测试不重新实现任何格式化逻辑——
 // 生成器即 formatter，磁盘 == 重渲染即钉住。usage.md 的手写表体已删除
 // （docs-consistency.test.js 的 TD-162 守卫同步收敛为同款字节钉，非两套机制）。
 test("docsSurface-5: committed docs/surface/certification.md equals renderCertification() output byte-for-byte", async () => {

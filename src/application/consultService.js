@@ -272,7 +272,7 @@ export function deriveSeatStates({ runState, questions, attribution }) {
  *
  * R9（决定 0023）：modelFamily 是展示闭集模块，dispatch/delivery 控制面路径
  * 不得消费——本服务属控制面，因此不做族系归类判断，只原样透出 registry 的
- * 原始字段：backend 字符串 + provider 标识（zcode 形 model.providerID 优先；
+ * 原始字段：backend 字符串 + provider 标识（opencode-serve / deepseek-acp 形 model.providerID 优先；
  * wrapper 形取 provider.baseUrl——该形状下唯一可区分提供方的原始字段；
  * 均缺 → null）。"厂族是否不同"的判断是 Lead 的事，工具只报事实。
  * @param {object} agent registry 条目

@@ -4,8 +4,10 @@
 // process 组：真实子进程（spawnSync node），temp 夹具在 os.tmpdir() 下。
 //
 // 被钉合同：
-//   - scripts/gen-certification.mjs 是纯库：只导出 renderCertification()，导入
-//     零副作用、零入口探测（无 import.meta.main / argv 比对 / realpath-ino 判定 /
+//   - scripts/gen-certification.mjs 是纯库：导出 renderCertification() 与探针内核
+//     具名导出（probeExpressivity / checkProbeBase——探针内核
+//     单元回归在 test/process/genCertificationProbes.test.js），导入零副作用、
+//     零入口探测（无 import.meta.main / argv 比对 / realpath-ino 判定 /
 //     process.exit）。旧实现的 F1（import.meta.main 在 Node < 22.18 为 undefined ⇒
 //     fail-open 静默跳过）与 N1/N2（argv 判定误杀/漏杀）由此整块退场。
 //   - scripts/gen-certification-cli.mjs 是唯一薄入口：无参＝写出；恰好 --check ＝

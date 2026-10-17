@@ -53,6 +53,25 @@ test("DSH policy accepts flash/max/1m and rejects unsupported provider policy", 
   );
 });
 
+// DSH 只把 model.id 交给运行时（DSH_MODEL env）——model.providerID /
+// model.variant 配了即拒（kimi-web/zcode 同款纪律，不静默丢弃路由字段；
+// providerID 还会进车道身份四元组，静默接受会让认证台账记下不存在的 provider 区分）。
+test("DSH policy rejects model.providerID / model.variant; bare model.id still passes", () => {
+  const backend = new DeepSeekHarnessBackend();
+  assert.throws(
+    () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash", providerID: "deepseek" } })),
+    /cannot express model\.providerID\/model\.variant[\s\S]*DSH_MODEL/,
+  );
+  assert.throws(
+    () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash", variant: "stable" } })),
+    /cannot express model\.providerID\/model\.variant[\s\S]*DSH_MODEL/,
+  );
+  assert.doesNotThrow(
+    () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash" } })),
+    "bare model.id（无 providerID/variant）照常通过",
+  );
+});
+
 test("DSH JSON-RPC buffers pre-response notifications and completes after bound receipt + idle", async () => {
   const backend = new DeepSeekHarnessBackend();
   const handle = await backend.spawn(agent({ env: { FAKE_DSH_MODE: "foreign-first" } }), {

@@ -61,6 +61,15 @@ export class CodexBackend extends ProcessBackend {
    * or provider (Codex uses its own auth, not an anthropic-compatible wrapper).
    */
   validateAgentPolicy(agent) {
+    // 仓库纪律（kimi-web/zcode 同款）：配了表达不了的 model 子字段必须硬拒，不静默
+    // 丢弃——model.providerID 会进车道身份四元组（identityProjection），静默接受会
+    // 让认证台账记下运行时根本不存在的 provider 区分。
+    if (agent?.model?.providerID !== undefined || agent?.model?.variant !== undefined) {
+      throw new Error(
+        "codex backend cannot express model.providerID/model.variant "
+        + "(only model.id is handed to the runtime via `--model` — rejected instead of silently dropping routing fields)",
+      );
+    }
     if (agent?.model?.contextWindow) {
       throw new Error("codex backend cannot express model.contextWindow (no CLI flag for it)");
     }

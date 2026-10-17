@@ -993,7 +993,9 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/kimi）不受护栏限制�
           backend: "kimi-code",
           binary: "node",
           cwd: dir,
-          model: { providerID: "moonshot", id: "kimi-for-coding" },
+          // 裸 model id：kimi-code 的 validateAgentPolicy 拒绝 model.providerID
+          // （配了即拒，策略校验先于本测试的护栏到达点）。
+          model: { id: "kimi-for-coding" },
         },
       },
     }), "utf8");
@@ -1085,13 +1087,15 @@ test("P1-1: 启用 requireCertified 时，派发未认证 worker 被拒绝（认
       agents: {
         // 一个"已认证"（在 summary 里），一个"未认证"（不在）
         // binary 用不存在的路径：让认证门放行后 backend.spawn 快速失败（而非挂起真 claude）
+        // model 用裸 id：claude-code 的 validateAgentPolicy 拒绝 model.providerID
+        // （配了即拒，策略校验先于认证门）。
         certified_worker: {
           backend: "claude-code", binary: "/nonexistent/binary", cwd: dir,
-          model: { providerID: "deepseek", id: "deepseek-v4-flash" },
+          model: { id: "deepseek-v4-flash" },
         },
         unverified_worker: {
           backend: "claude-code", binary: "/nonexistent/binary", cwd: dir,
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
+          model: { id: "glm-5.2" },
         },
       },
     }), "utf8");
@@ -1141,10 +1145,12 @@ test("P1-1 阈值：core 全过即放行（conditional 放行，draft-only/rejec
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        cert_w:   { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { providerID: "x", id: "y" } },
-        cond_w:   { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { providerID: "x", id: "y" } },
-        draft_w:  { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { providerID: "x", id: "y" } },
-        reject_w: { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { providerID: "x", id: "y" } },
+        // model 用裸 id：claude-code 拒绝 model.providerID，
+        // 策略校验先于认证门——带 providerID 会让 draft/reject 的拒绝先撞在策略上。
+        cert_w:   { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { id: "y" } },
+        cond_w:   { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { id: "y" } },
+        draft_w:  { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { id: "y" } },
+        reject_w: { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { id: "y" } },
       },
     }), "utf8");
     const runDir = join(dir, "runs");
@@ -1188,7 +1194,7 @@ test("P1-1 manualOverride=cleared：rejected worker 被 owner 背书后放行（
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        cleared_w: { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { providerID: "x", id: "y" } },
+        cleared_w: { backend: "claude-code", binary: "/nonexistent/binary", cwd: dir, model: { id: "y" } },
       },
     }), "utf8");
     const runDir = join(dir, "runs");

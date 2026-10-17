@@ -165,9 +165,18 @@ export class ClaudeCodeBackend extends ProcessBackend {
    * wrapper to set --context-window; provider without wrapper is meaningless).
    */
   validateAgentPolicy(agent) {
+    // 仓库纪律（kimi-web/zcode 同款）：配了本 backend 表达不了的 model 子字段必须
+    // 硬拒，不静默丢弃——model.providerID 会进车道身份四元组（identityProjection），
+    // 静默接受会让认证台账记下运行时根本不存在的 provider 区分。
+    if (agent?.model?.providerID !== undefined || agent?.model?.variant !== undefined) {
+      throw new Error(
+        "claude-code backend cannot express model.providerID/model.variant "
+        + "(only model.id is handed to the runtime via `--model` — rejected instead of silently dropping routing fields)",
+      );
+    }
     const hasProvider = !!agent?.provider;
-    // Provider path: can express everything.
-    if (hasProvider) return; // model/reasoning/contextWindow/provider all OK.
+    // Provider path: can express everything else.
+    if (hasProvider) return; // model.id/reasoning/contextWindow/provider all OK.
     // Native path: model + reasoning OK; contextWindow/provider NOT expressible.
     if (agent?.model?.contextWindow) {
       throw new Error("claude-code native path (no provider) cannot express model.contextWindow — requires a provider wrapper");

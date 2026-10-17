@@ -79,6 +79,30 @@ test("CAP-A2c-claude: contextWindow WITHOUT provider → reject (native path can
   );
 });
 
+// 进程式三件套只把 model.id 交给运行时（--model）——model.providerID /
+// model.variant 配了即拒（kimi-web/zcode 同款纪律，不静默丢弃路由字段；providerID
+// 还会进车道身份四元组，静默接受会让认证台账记下运行时根本不存在的 provider 区分）。
+test("CAP-A2d-claude: model.providerID / model.variant → reject; bare model.id still passes", async () => {
+  const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
+  const backend = new ClaudeCodeBackend();
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "x", providerID: "deepseek" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "x", variant: "stable" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "x" } }));
+  // provider wrapper 路径同样只读 model.id：检查必须在 provider 早退之前。
+  const provider = { baseUrl: "https://example.invalid", apiKeyEnv: "CAP_A2D_KEY" };
+  assert.throws(
+    () => backend.validateAgentPolicy({ provider, model: { id: "x", providerID: "deepseek" } }),
+    /cannot express model\.providerID\/model\.variant/,
+  );
+  assert.doesNotThrow(() => backend.validateAgentPolicy({ provider, model: { id: "x" } }));
+});
+
 // ===== A3: Codex validator =====
 
 test("CAP-A3-codex: model+reasoning accepted", async () => {
@@ -110,6 +134,20 @@ test("CAP-A3c-codex: contextWindow → reject", async () => {
     }),
     /cannot express|not supported|contextWindow/i,
   );
+});
+
+test("CAP-A3d-codex: model.providerID / model.variant → reject; bare model.id still passes", async () => {
+  const { CodexBackend } = await import("../../src/backends/codex.js");
+  const backend = new CodexBackend();
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "x", providerID: "openai" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "x", variant: "stable" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "x" } }));
 });
 
 // ===== A4: Kimi validator =====
@@ -149,6 +187,20 @@ test("CAP-A4c-kimi: contextWindow → reject", async () => {
     () => backend.validateAgentPolicy({ model: { id: "x", contextWindow: 200000 } }),
     /cannot express|not supported|contextWindow/i,
   );
+});
+
+test("CAP-A4d-kimi: model.providerID / model.variant → reject; bare model.id still passes", async () => {
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const backend = new KimiCodeBackend();
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "kimi-code/k3", providerID: "moonshot" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.throws(
+    () => backend.validateAgentPolicy({ model: { id: "kimi-code/k3", variant: "stable" } }),
+    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
+  );
+  assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "kimi-code/k3" } }));
 });
 
 // ===== B: RunManager causality — real Kimi + reasoning → zero side effects =====

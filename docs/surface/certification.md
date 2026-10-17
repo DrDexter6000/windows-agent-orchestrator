@@ -6,10 +6,10 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 数据源（现成 SSOT，本文件不含第二真相）：
 
 - 七轴能力：`src/registry.js` `KNOWN_BACKENDS` × `src/backends/factory.js` `BACKEND_CAPABILITY_AXES` / `readBackendCapabilities`（strict `=== true`——未声明读 false，fail-closed）。
-- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生（判定法沿用退役 TD-162 policy 门守卫的同一套派生法；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量）。
+- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生——探针从 `src/backends/factory.js` `POLICY_PROBE_BASES` 登记的最小合法底稿深拷贝出发，一次只改或只加被测的一项（底稿合法性/最小性在生成期校验）；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量。
 - 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。
 
-漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等。入口合同（2026-09-22 收束包拆分）：`scripts/gen-certification.mjs` 是**纯库**——只导出 `renderCertification()`，导入零副作用、零入口探测（任何 argv 形状下 import 都不生成/不检查/不退出）；进程入口是薄 CLI `scripts/gen-certification-cli.mjs`（无参＝写出、恰好 `--check`＝只读比对、其他任何参数＝非零退出且不写不查）——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。
+漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等。入口合同（2026-09-22 收束包拆分）：`scripts/gen-certification.mjs` 是**纯库**——导出 `renderCertification()` 与探针内核具名导出（`probeExpressivity` / `checkProbeBase`），导入零副作用、零入口探测（任何 argv 形状下 import 都不生成/不检查/不退出）；进程入口是薄 CLI `scripts/gen-certification-cli.mjs`（无参＝写出、恰好 `--check`＝只读比对、其他任何参数＝非零退出且不写不查）——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。
 
 ## 一、七轴能力闭集声明（strict === true）
 
@@ -26,27 +26,27 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 
 ✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。
 
-## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生）
+## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）
 
-判定词（只管 **WAO 接线层**）：**支持**＝全部探针通过；**不支持**＝全部探针被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/certification-runbook.md`「上游 harness 原语对照（实测）」节）；**条件**＝部分探针通过（条件写在格内，探针派生）。
+判定词（只管 **WAO 接线层**）：每个探针＝登记底稿的深拷贝＋只改/只加被测的一项，因此拒绝可归因到被测项本身。**支持**＝全部探针通过；**条件**＝部分探针通过（条件写在格内，探针派生）；**不支持**＝被测项本身被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/certification-runbook.md`「上游 harness 原语对照（实测）」节）。model 栏判定词为 **必填/可选**（底稿含 model 且去掉即被拒＝必填），后接该 backend 的最小可接受写法（裸 `{id}` / `<provider>/<model>` 引用 / `{providerID, id}` 三种形状按序探测；全被拒时生成失败——探针覆盖不足，不写 `不支持`）。
 
 | backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 |
 | --- | --- | --- | --- | --- |
-| opencode-serve | 条件：仅 OpenCode 形状 `{providerID, id}` | 不支持 | 不支持 | 不支持 |
-| claude-code | 支持 | 支持 | 条件：仅 provider 路径 | 支持 |
-| codex | 支持 | 支持 | 不支持 | 不支持 |
-| kimi-code | 支持 | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
-| deepseek-harness | 支持 | 条件：effort ∈ {high, max} | 支持 | 不支持 |
-| deepseek-acp | 条件：仅 OpenCode 形状 `{providerID, id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
-| kimi-web | 不支持 | 不支持 | 不支持 | 不支持 |
-| zcode | 不支持 | 支持 | 不支持 | 不支持 |
+| opencode-serve | 可选：`{providerID, id}` | 不支持 | 不支持 | 不支持 |
+| claude-code | 可选：裸 `{id}` | 支持 | 条件：仅 provider 路径 | 支持 |
+| codex | 可选：裸 `{id}` | 支持 | 不支持 | 不支持 |
+| kimi-code | 可选：裸 `{id}` | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
+| deepseek-harness | 可选：裸 `{id}` | 条件：effort ∈ {high, max} | 支持 | 不支持 |
+| deepseek-acp | 可选：`{providerID, id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
+| kimi-web | 必填：裸 `{id}` | 不支持 | 不支持 | 不支持 |
+| zcode | 必填：`<provider>/<model>` 引用 | 支持 | 不支持 | 不支持 |
 
 衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。
 
 ### 条件与限制说明（CAPABILITY_NOTES 单一出处：src/backends/factory.js）
 
 - **opencode-serve**
-  - model override：须 OpenCode 形状 `{providerID, id, variant}`；canonical 裸 `{id}` 被拒（模型路由由 model.providerID 承担）
+  - model override：`variant` 可选
   - provider 块：不支持 provider 块——模型路由由 `model.providerID` 承担
   - 生命体征与收口：未按生命体征口径适配（Owner 2026-10-12：该后端不再投入）；收口门为 `silentTimeout` 与快照稳定判据
   - supportsRoleContract（角色合同）：须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）
@@ -95,7 +95,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - reportsTokenUsage（token usage）：`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱（进程级）——containment 走操作员安装的 ACP 补丁面，WAO 不在调用层强制 OS 沙箱，越界写拦截按 0084（上报侦测，非阻止）
 - **kimi-web**
-  - model override：`model.id` 必填（空白/纯空白串同拒）并原样直传 prompts body（上游缺 model 时接口返 success 但轮次静默秒败——fail-closed 硬拒于派发前）；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填——裸 model 探针形状因缺连接字段被拒（§二判定词按探针机械派生，非模型通道不存在）
+  - model override：空白/纯空白 `model.id` 同样被拒；id 原样直传 prompts body——上游缺 model 时接口返 success 但轮次静默秒败，所以派发前硬拒；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填
   - reasoning effort：prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒
   - provider 块：kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒
   - 生命体征与收口：可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）
@@ -105,7 +105,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - reportsTokenUsage（token usage）：transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（60–240s 自适应预算 + serve 证词，见本后端的 `vitalSigns`），两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——HTTP attach 远端 serve，写发生在服务器侧进程，本机调用层无沙箱面，越界写拦截按 0084（上报侦测，非阻止）
 - **zcode**
-  - model override：`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）
+  - model override：ref 须恰好一个 `/`、两段非空（该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；per-dispatch `--model` 覆盖同样须是 ref（裸 id 无法路由）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）
   - reasoning effort：effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options
   - provider 块：登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒
   - 生命体征与收口：可读体征：新 part / 工具证据、模型流分片（落 `streaming`）、app-server 后代进程的 CPU / I/O / 生灭（落 `process_active`）、工作目录文件变化（落 `files_changed`）、本轮主轮请求的上游重试等待（`v4/telemetry/event` 的 `model.request.status`：仅本会话、本轮 turnId、`querySource=main_turn` 的 `model_retry_scheduled`，有效到到达时刻+delayMs+30s 余量，落 `provider_retry`；同一安排的重复通知不延长，链上其后出现 started/completed（换 requestId 也算）、turn 结束或换轮即作废且粘住——作废前首见的安排连同其重复通知不再复活续命；failed/stream_stalled 本身不续命；上游上报 maxAttempts=0（重试预算无界）时每个新安排都会重新立窗、没有自动上限，且服务端 retry-after 可把单次退避拉长到远超 300s——有体征运行的去留归 Lead，决定 0067）。三道收口门到点先看体征，全无才收口（约 5–10 分钟）；有体征没有自动上限（决定 0067；重试等待不重置停滞预算时钟——退避窗一过仍无进展即收口）

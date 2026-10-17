@@ -3444,11 +3444,12 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
 // 守卫」（结构/闭集声明/policy 行为探针对账，2026-09-18 落地）已随 docs/usage.md
 // 手写表体一并退场：能力对照表改为生成层 docs/surface/certification.md，由
 // scripts/gen-certification.mjs 从 registry/factory 闭集 SSOT +
-// validateAgentPolicy 行为探针派生（判定法沿用原 policy 门守卫的同一套派生法，
+// validateAgentPolicy 行为探针派生（「底稿＋单项」派生法，
 // 含 KIMI_K3_MODEL_ID / OPENCODE_NATIVE_SYSTEM_MIN_VERSION 源常量锚定与
-// CAPABILITY_NOTES 键集校验——漂移在生成期即红）。守卫收敛：此处不再解析手写
-// 表体（死锚已删），也不与 docsSurface.test.js 的字节钉形成两套机制——统一为
-// 「重新渲染 == 磁盘内容」（模式照抄 docsSurface.test.js），任一侧漂移即红。
+// CAPABILITY_NOTES / POLICY_PROBE_BASES 键集校验——漂移在生成期即红）。守卫
+// 收敛：此处不再解析手写表体（死锚已删），也不与 docsSurface.test.js 的字节钉
+// 形成两套机制——统一为「重新渲染 == 磁盘内容」（模式照抄 docsSurface.test.js），
+// 任一侧漂移即红。
 // ---------------------------------------------------------------------------
 
 test("TD-162 生成物守卫: docs/surface/certification.md 与 renderCertification() 逐字节一致", async () => {
