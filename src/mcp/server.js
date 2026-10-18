@@ -2806,14 +2806,15 @@ const LEAD_PREFLIGHT_INPUT = z.object({
 // 0087: lane-profile compact projection — ONE closed sub-schema used BOTH for
 // the independent pre-validation in the handler (a malformed projection is
 // nulled with an observation, NEVER degrading the whole preflight) and as the
-// `lanes` member of LEAD_PREFLIGHT_OUTPUT. The seven dimension keys are fixed
-// object members (never array indices); bounds mirror the application-layer
-// truncation (src/application/laneProfile.js) so a projection that passed the
-// app layer always passes here. Derived from the laneProfile SSOT enums/caps —
-// no second hand-maintained list can drift.
+// `lanes` member of LEAD_PREFLIGHT_OUTPUT. The seven dimension keys are optional
+// object members (never array indices): a rated dimension carries its cell, an
+// unrated one is absent (0089). Bounds mirror the application-layer truncation
+// (src/application/laneProfile.js) so a projection that passed the app layer
+// always passes here. Derived from the laneProfile SSOT enums/caps — no second
+// hand-maintained list can drift.
 const LANE_RATING_CELL_OUTPUT = z.object({
-  stars: z.number().int().min(1).max(5).nullable(),
-  basis: z.enum([...RATING_BASES]).nullable(),
+  stars: z.number().int().min(1).max(5),
+  basis: z.enum([...RATING_BASES]),
   n: z.number().int().positive().nullable(),
   note: z.string().max(80).nullable(),
 }).strict();
@@ -2831,18 +2832,21 @@ const LANES_PROJECTION_OUTPUT = z.object({
   rows: z.array(z.object({
     id: z.string().max(64),
     ratings: z.object({
-      research: LANE_RATING_CELL_OUTPUT,
-      code: LANE_RATING_CELL_OUTPUT,
-      review: LANE_RATING_CELL_OUTPUT,
-      design: LANE_RATING_CELL_OUTPUT,
-      longHorizon: LANE_RATING_CELL_OUTPUT,
-      writing: LANE_RATING_CELL_OUTPUT,
-      visual: LANE_RATING_CELL_OUTPUT,
+      research: LANE_RATING_CELL_OUTPUT.optional(),
+      code: LANE_RATING_CELL_OUTPUT.optional(),
+      review: LANE_RATING_CELL_OUTPUT.optional(),
+      design: LANE_RATING_CELL_OUTPUT.optional(),
+      longHorizon: LANE_RATING_CELL_OUTPUT.optional(),
+      writing: LANE_RATING_CELL_OUTPUT.optional(),
+      visual: LANE_RATING_CELL_OUTPUT.optional(),
     }).strict(),
     ratingsState: z.enum([...RATINGS_STATES]),
     reviewReasons: z.array(z.string().max(160)).max(4),
     caveats: z.array(z.string().max(120)).max(4),
     cost: z.string().max(200).nullable(),
+    dispatchHold: z.string().max(DISPATCH_HOLD_MAX_CHARS).nullable(),
+    contextWindowTokens: z.number().int().positive(),
+    imageInput: z.boolean(),
   }).strict()).max(PROJECTION_ROWS_CAP),
 }).strict();
 

@@ -121,6 +121,7 @@
       "registry-roles/kimiHomeTokenReadiness.test.js",
       "registry-roles/knownBackendsF3.test.js",
       "registry-roles/knownBackendsSsot.test.js",
+      "registry-roles/laneReviewStats.test.js",
       "registry-roles/laneTraits.test.js",
       "registry-roles/loadBearingEnv.test.js",
       "registry-roles/m11-9-packageA.test.js",

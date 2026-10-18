@@ -16,12 +16,13 @@
 | 开发中 | 改动所在的测试文件，加上直接消费被改模块的测试 |
 | 送审前 | 改动涉及的测试文件，加上横切守卫组；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js`（它核对 `test/manifest.json` 与磁盘一致） |
 | 合入 main 前 | 在最终候选上跑一次全量 |
+| 只改画像数据（`config/lane-traits.json`）的批次，合入前 | `test/registry-roles/laneTraits.test.js`、`test/application/laneProfile.test.js` 加横切守卫组，不跑全量（决定 0089） |
 
 **横切守卫组**：`test/isolation-infra/docs-consistency.test.js`、`test/isolation-infra/docsSurface.test.js`、`test/isolation-infra/staticRunsGuard.test.js`、`test/isolation-infra/desensitization.test.js`、`test/mcp-surface/m12-10-tool-surface.test.js`。它们检查文档与代码一致、生成层是否需要再生成、测试有没有写进仓库的 `runs/`、被跟踪文件里有没有凭据形状的字面量、MCP 工具面的字节上限，几秒钟跑完，却最常抓到改动的连带问题。新增这类跨全仓的守卫时，把它加进这张清单。
 
 **最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量。
 
-全局 `wao` 与宿主的 MCP 注册常常直接指向开发检出（本仓库的维护机器就是这样），main 上的错误会立刻影响正在用 WAO 的会话，所以合入前这一次全量不能省。
+全局 `wao` 与宿主的 MCP 注册常常直接指向开发检出（本仓库的维护机器就是这样），main 上的错误会立刻影响正在用 WAO 的会话，所以合入前这一次全量不能省；唯一的例外是上表里只改画像数据的批次。
 
 ## 用真实车道试用分支代码
 
@@ -47,7 +48,8 @@
 | 交付改动的范围 | 验证命令 |
 |---|---|
 | 只改测试文件或文档（`*.md`、`docs/**`），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组，以及直接读这份文档的测试文件（`git grep -l '<文档路径>' -- test` 列出）；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
-| 触及共享核心：测试与文档以外的一切改动（`src/**`、`config/**`、`scripts/**` 等），以及公共夹具 | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
+| 只改画像数据（`config/lane-traits.json`） | `test/registry-roles/laneTraits.test.js`、`test/application/laneProfile.test.js` 加横切守卫组 |
+| 触及共享核心：测试、文档与画像数据以外的一切改动（`src/**`、`config/**`、`scripts/**` 等），以及公共夹具 | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
 
 - 任务书把 worker 自检命令与 `verificationCommands` 分开写。worker 自检一律定向，汇报写明"这些文件通过，其余未测"。
 - 交付规格的其它要求（`allowedPaths`、新增测试文件时的 manifest 登记）见[交付与验收](usage/delivery.md)场景 4b。

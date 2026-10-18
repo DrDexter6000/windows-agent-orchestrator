@@ -175,7 +175,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 1. 归因先行：读 `runs delivery` 摘要与转录内 `delivery_verification_*` 事件的 `stdoutTail`/`stderrTail`（失败命令的诊断细节在此）；确认失败命令在正确路径/环境下同样失败，且工件本身无需修改。
 2. commit trailer 交叉引用：采纳集成时在 commit message 加 `WAO-Adopted-From: <runId>` 与 `WAO-Original-Delivery: <deliveryCommitSha>`。decide 的 reason 字段落盘会 trim+redact 且不经 MCP 回读（已知审计面限制）——可 grep 的 trailer 才是审计侧能复核的那半边。
 3. 独立审计强制：采纳必须经独立审计席回审，证据规格写死：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog。禁止 Lead 单方闭环。
-4. 集成后全量终验：集成结果就是最终候选，按 `docs/testing.md` 跑一次全量（跑前按 `docs/troubleshooting.md` §8.2 错峰），绿后方可推送。
+4. 集成后终验：集成结果就是最终候选，按 `docs/testing.md` 的批次规则验证（一般是一次全量，跑前按 `docs/troubleshooting.md` §8.2 错峰），绿后方可推送。
 5. 集成前工作区纪律：cherry-pick 交付提交前，Lead 工作区必须干净（未提交改动先提交）——交付提交与 Lead 本地改动触碰同一文件时会冲突中止。
 
 ### `runs verify-commit` 承载边界

@@ -18,7 +18,7 @@ import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 // laneAxes：车道侧四轴（backend/modelId/providerID/effort，null 归一）——与
 // explicit 派发 G4、wao lanes 接线轴同一判定来源，不造第二份比较规则。
-import { laneAxes } from "../dispatchResolution.js";
+import { laneAxes, validDispatchHold } from "../dispatchResolution.js";
 
 const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -269,10 +269,10 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
   return { state: "ok", path, sha256, scale: doc.scale, traits, invalidIds, issues };
 }
 
-/** 把五档刻度拼成一行（视图表头与 preflight 投影共用）。 */
-export function buildScaleLine(scale) {
+/** 把五档刻度拼成一行（视图表头与 preflight 投影共用）；末尾一句说明未评怎么表示。 */
+export function buildScaleLine(scale, unratedNote = "null 未评") {
   if (!validScale(scale)) return null;
-  return ["5", "4", "3", "2", "1"].map((k) => `${k} ${scale[k]}`).join("；") + "；null 未评";
+  return ["5", "4", "3", "2", "1"].map((k) => `${k} ${scale[k]}`).join("；") + `；${unratedNote}`;
 }
 
 /**
@@ -315,7 +315,8 @@ function clip(text, max) {
 }
 
 /**
- * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088）。行序=lanes.json 声明序；只含车道表里
+ * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
+ * 每行带暂停说明、上下文窗口与能否看图，见 0089）。行序=lanes.json 声明序；只含车道表里
  * 有画像的车道；不排序、不加推荐字段。所有字符串在应用层截到 MCP schema 上限，
  * 保证投影总能通过校验。
  * @returns {{scale:string, dimensionLabels:Object, rows:object[], omittedLaneIds:string[]}|null}
@@ -325,7 +326,7 @@ function clip(text, max) {
 export function projectLaneProfiles({ lanesDoc, traitsResult }) {
   if (!traitsResult || traitsResult.state !== "ok" || traitsResult.scale == null) return null;
   if (!lanesDoc || lanesDoc.ok !== true || lanesDoc.sha256 == null || !Array.isArray(lanesDoc.lanes)) return null;
-  const scaleLine = buildScaleLine(traitsResult.scale);
+  const scaleLine = buildScaleLine(traitsResult.scale, "未列出的维度＝未评");
   if (scaleLine == null) return null;
   const rows = [];
   const laneList = lanesDoc.lanes;
@@ -339,6 +340,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
     const ratings = {};
     for (const d of RATING_DIMENSIONS) {
       const cell = entry.ratings[d];
+      if (cell.stars === null) continue; // 未评不投影：dimensionLabels 列全七项，缺席即未评
       ratings[d] = {
         stars: cell.stars,
         basis: cell.basis,
@@ -353,6 +355,9 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
       reviewReasons: rs.reasons.slice(0, 4).map((s) => clip(s, 160)),
       caveats: [...entry.caveats],
       cost: entry.cost,
+      dispatchHold: validDispatchHold(lane.dispatchHold),
+      contextWindowTokens: entry.contextWindow.tokens,
+      imageInput: entry.multimodal.image,
     });
   }
   // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。

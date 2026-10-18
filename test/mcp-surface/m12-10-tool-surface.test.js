@@ -434,7 +434,7 @@ const RED_23_WIRE = 75492;
 // 94532 内）。同批会审修复：run_consult 读取/分页也可带 expectedWorkspaceRoot、
 // run_dispatch_contract_check 按调用目标检查并在出参增 workspaceScope、
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
-const FROZEN_23_WIRE_CEILING = 90661;
+const FROZEN_23_WIRE_CEILING = 90744;
 // 2026-10-16（Owner 批准小幅重冻）：run_delivery_reverify 入参/出参增可选
 // attempt（1|2，缺省 1——第二次显式重验机会），描述加一句第二次机会说明：
 // 88048→88227（实测；本批批准 wire+desc 合计涨幅 ≤300B，实测合计 +252B）。
@@ -443,6 +443,9 @@ const FROZEN_23_WIRE_CEILING = 90661;
 // caveats 前 2、cost；独立子 schema 校验，不合格置 null 不连累其余各节），
 // 描述改提车道分项星级并压缩原句腾字节（desc/hostVisible 冻结线未抬）：
 // 88227→90661（实测；Owner 硬顶 94532 内）。
+// 0089（2026-10-17 Owner 批准放宽画像预算）：lanes 每行增 dispatchHold、
+// contextWindowTokens、imageInput，七格改为可缺省（未评不投影）：
+// 90661→90744（实测；描述未改，desc/hostVisible 冻结线未动）。
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -623,9 +626,12 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // 变化不进 stripped 载荷（desc 顶与 hostVisible 顶均未抬、实测复验通过）。
 // 0088（2026-10-17，Owner 批准放宽上限）：lanes 每行的 caveats 由前 2 条改为
 // 全部（≤4）——outputSchema 的 maxItems 2→4，wire 字节不变，SHA 如实翻新。
+// 0089（2026-10-17，Owner 批准放宽画像预算）：lanes 每行增 dispatchHold、
+// contextWindowTokens、imageInput，七格改为 optional——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "38d4110294431e2bcc3220e6a24fd97da48e57ded1d49e0eae244067e101034d";
-  // （历史值：2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac
+  "ccd1adeb0bab708e5fa7cbf85032090e3a5ef72ac52000e1caa304239c60db61";
+  // （历史值：38d4110294431e2bcc3220e6a24fd97da48e57ded1d49e0eae244067e101034d
+  // 为 0088 caveats 放宽后的冻结值；2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac
   // 为 0087 lanes 投影的冻结值；6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f
   // 为 2026-10-15/16 重冻后的实测冻结值——0087 lanes 投影之前的最后值。）
   // 2026-10-16（schema 改动，按实测更新）：run_delivery_reverify 的 input/

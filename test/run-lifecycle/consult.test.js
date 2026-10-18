@@ -239,6 +239,20 @@ test("INV-1f: 同一 Qn 重复出现产生多条有序条目（不合并、不�
   assert.deepEqual(a.ordered.map((e) => e.q), [1, 2, 1]);
 });
 
+test("INV-1g: 行首加粗的结论行也是锚点（**Q1：…** / **Q1**：…），零损失、取值照常", () => {
+  for (const text of ["**Q1：FIX_FIRST**\n理由", "**Q1**：FIX_FIRST\n理由"]) {
+    const a = assertLossless(text, `加粗锚点 ${text.slice(0, 8)}`);
+    assert.deepEqual(a.ordered.map((e) => e.q), [1], `${JSON.stringify(text)} 是 Q1 锚点`);
+    const { fieldValues } = compareFields({ s: a }, { Q1: ["PASS", "FIX_FIRST"] });
+    assert.equal(fieldValues.Q1.s, "FIX_FIRST");
+  }
+  // 不放宽成模糊匹配：句中加粗、列表前缀、没有冒号的加粗、下划线加粗都不是锚点
+  // （下划线是单词字符，__ 包住的结论取不到值）。
+  for (const text of ["结论 **Q1：FIX_FIRST**", "1. **Q1：FIX_FIRST**", "**Q1 方案**", "__Q1: FIX_FIRST__"]) {
+    assert.equal(attributeReply(text).ordered.length, 0, `${JSON.stringify(text)} 不是锚点`);
+  }
+});
+
 // ===== INV-2：标记即提示 =====
 
 test("INV-2a: 闭集值不同 → fieldDiff 恰含该 Qn；同值/未填不标", () => {

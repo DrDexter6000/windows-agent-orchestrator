@@ -7,9 +7,9 @@
 //     各长度界、顶层 schemaVersion/scale）；
 //   - ratingsState：四种状态、四轴各自不一致、undefined/null 空值归一不算
 //     不同、reviewPending 并入 reasons、身份不一致而无 reviewPending 仍 review；
-//   - 投影：行序=lanes.json 声明序、caveats 全部投影、null 原样、每格只投影
-//     {stars,basis,n,note} 且超长 note 截断、invalid 车道省略并回传 id、
-//     读失败返回 null；
+//   - 投影：行序=lanes.json 声明序、caveats 全部投影、null 原样、未评格不投影、
+//     每格只投影 {stars,basis,n,note} 且超长 note 截断、每行带暂停说明/上下文
+//     窗口/能否看图、invalid 车道省略并回传 id、读失败返回 null；
 //   - preflight：worker 上下文 lanes=null、lanes 独立结算（null 不改 complete、
 //     不合格子 schema 置 null 不连累其余各节）、投影形状过 LEAD_PREFLIGHT_OUTPUT、
 //     只有 lead_preflight 的出参 schema 含画像键。
@@ -312,7 +312,7 @@ test("projectLaneProfiles：行序=lanes.json 声明序；只含有画像的车�
   assert.deepEqual(proj.rows.map((r) => r.id), ["lb", "la"], "行序=声明序（B 先声明）");
 });
 
-test("projectLaneProfiles：caveats 全部投影；null 原样保留不折算", () => {
+test("projectLaneProfiles：caveats 全部投影；未评格不投影、不折算；null 原样保留", () => {
   const entry = validEntry({
     cost: null,
     caveats: ["一", "二", "三", "四"],
@@ -325,11 +325,39 @@ test("projectLaneProfiles：caveats 全部投影；null 原样保留不折算", 
   assert.deepEqual(row.caveats, ["一", "二", "三", "四"], "caveats 全部投影，不截条数");
   assert.equal(row.cost, null, "cost null 原样");
   assert.equal(row.ratingsState, "unrated", "未评不折算");
-  for (const d of RATING_DIMENSIONS) {
-    assert.equal(row.ratings[d].stars, null);
-    assert.equal(row.ratings[d].n, null, "n 缺失投影为 null");
-    assert.equal(row.ratings[d].note, null, "note 缺失投影为 null");
-  }
+  assert.deepEqual(row.ratings, {}, "七格全未评 → 一格都不投影");
+  assert.ok(proj.scale.endsWith("未列出的维度＝未评"), "刻度行说明缺席即未评");
+
+  const half = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: { state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale, traits: { la: entryWithRating() }, invalidIds: [], issues: [] },
+  });
+  assert.deepEqual(Object.keys(half.rows[0].ratings), ["research"], "只投影已评的维度");
+});
+
+test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看图", () => {
+  const traitsResult = {
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+    traits: {
+      la: validEntry({ contextWindow: { tokens: 262144, source: "owner" }, multimodal: { image: false, video: false, source: "official" } }),
+      lb: validEntry(),
+    },
+    invalidIds: [], issues: [],
+  };
+  const proj = projectLaneProfiles({
+    lanesDoc: laneDoc([{ ...LANE_A, dispatchHold: "调试中，暂勿派发" }, { ...LANE_B, dispatchHold: "坏\u0007值" }]),
+    traitsResult,
+  });
+  const [a, b] = proj.rows;
+  assert.equal(a.dispatchHold, "调试中，暂勿派发", "暂停说明原话照录");
+  assert.equal(a.contextWindowTokens, 262144);
+  assert.equal(a.imageInput, false);
+  assert.equal(b.dispatchHold, null, "形状不合法的暂停说明投影为 null（与车道表读取面同一校验）");
+  assert.equal(b.contextWindowTokens, 1000000);
+  assert.equal(b.imageInput, true);
+
+  const noHold = projectLaneProfiles({ lanesDoc: laneDoc([LANE_A]), traitsResult });
+  assert.equal(noHold.rows[0].dispatchHold, null, "没写暂停说明 → null");
 });
 
 test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note 截成 79+…；evidence 不进投影", () => {
@@ -347,7 +375,7 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   // 行键闭集与维度中文名。
   assert.deepEqual(
     Object.keys(proj.rows[0]).sort(),
-    ["caveats", "cost", "id", "ratings", "ratingsState", "reviewReasons"],
+    ["caveats", "contextWindowTokens", "cost", "dispatchHold", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
   );
   assert.deepEqual(Object.keys(proj.dimensionLabels), RATING_DIMENSIONS);
   assert.equal(proj.dimensionLabels.research, DIMENSION_LABELS.research, "中文名来自同一归宿");
@@ -528,8 +556,8 @@ test("MCP lead_preflight：合法投影过整份出参 schema（形状即 LEAD_P
       assert.deepEqual(Object.keys(lanes.dimensionLabels), RATING_DIMENSIONS);
       const row = lanes.rows[0];
       assert.deepEqual(Object.keys(row).sort(),
-        ["caveats", "cost", "id", "ratings", "ratingsState", "reviewReasons"]);
-      assert.deepEqual(Object.keys(row.ratings), RATING_DIMENSIONS, "七格固定对象键");
+        ["caveats", "contextWindowTokens", "cost", "dispatchHold", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
+      assert.deepEqual(Object.keys(row.ratings), ["research"], "只含已评维度（夹具只评了 research）");
       assert.equal(row.ratingsState, "current");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }

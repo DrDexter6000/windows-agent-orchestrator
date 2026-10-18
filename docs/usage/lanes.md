@@ -62,8 +62,8 @@
       // model 时模型取 profile 缺省。
     },
 
-    // ── codex（进程式）──
-    "tester": {
+    // ── codex（进程式；codex 车道只用做会审，见车道画像）──
+    "sol": {
       "backend": "codex",
       "cwd": "D:/projects/my-app"
     },
@@ -84,7 +84,7 @@
 
 席位角色（`seatRole` 字段）已退役，不要再声明。对抗性是派生事实：登记会审席位时，按审者车道与被审产出作者车道的关系（车道指纹比对）判定。登记命令 `npm run cli -- wao stage 2/4 --task <T> --panel-seats <a,b> [--reviewed-run <runId>[,<runId>]]`（panel 字段只在 stage 2 与 4 登记），登记时按当时的 registry 车道配置 × 被审 run 的 `run.started` 钉住作者事实：车道不同 = 对抗前提成立；席位与作者同车道 = 回避违反，大声提示（advisory，不阻断）。`--reviewed-run` 支持多值（共同作者）。作者不可读或缺 `run.started` 时如实输出 unknown，不折叠成"无违反"。老 registry 里遗留的 seatRole 字段不会被拒载：归一化直接忽略（读取面零消费），`registry validate` 对在场字段出弃用 advisory，可以删掉。
 
-车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）；`lead_preflight` 也带一份车道画像紧凑表（开工时随手可见，完整内容仍看 `wao lanes`）。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
+车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）；`lead_preflight` 带一份紧凑表：已评的格、成本、全部注意事项、暂停说明、上下文窗口与能否看图，开工时一次看全；证据与样本出处仍看 `wao lanes`。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
 
 车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截——它进 `wao lanes`、`registry list` / `registry_list` 的条目与派发 stderr 提示；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。它不是接线轴，不参与派发解析的任何裁定。
 

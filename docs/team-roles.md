@@ -60,7 +60,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | bounded implementation package：实现功能、修 bug、重构、兼容性调整、TDD（RED→GREEN 与指定验证）、脚本/文档/配置、前端实现与 UI 截图还原、图像/视觉内容理解（车道具备视觉能力时）、独立并行实现包与窄修正；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不替 Lead 作产品、架构、范围、拆包或转派决策；不自行扩域；不验收自己；不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
 | **默认 lane 配置** | 主力 `glm-pro`、副通道 `glm-flash`/`deepseek-flash`——见 `config/agents.example.json` 对应条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **派工策略** | 高耦合/长程优先 `glm-pro`（次选 `sol`）；预算敏感并行小包与视觉/探索优先 `glm-flash`/`deepseek-flash`；创意/文案优先 `kimi`；高要求前端设计 `opus` |
+| **派工策略** | 高耦合/长程优先 `glm-pro`；预算敏感并行小包与视觉/探索优先 `glm-flash`/`deepseek-flash`；创意/文案优先 `kimi`；高要求前端设计 `opus` |
 
 ### Tester（测试员）+ 轮询职责
 
@@ -69,7 +69,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 执行层验证 + 运行监控 |
 | **Work Scope** | 跑测试、验证 exitCode、检查产出文件存在、报缺陷；轮询各 worker 运行状态（`runs status`/`runs list`）、检测超时/失控、向 Lead 汇报异常，降低 Lead 的 token 开销；多模态识别（读取并分析图像输入，车道具备视觉能力时）；边界清晰的简单任务 |
 | **边界** | 不修 bug（归 Coder）；不做语义判断（只看证据）；不审编排方案（归 Auditor） |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `sol` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **默认 lane 配置** | 主力 `glm-pro`，看图任务用 `glm-flash`/`deepseek-flash`——见 `config/agents.example.json` 对应条目；本机真值以 `config/agents.json`（gitignored）为准 |
 
 ### Chief-Advisor / Auditor（首席顾问与审计员）— 按需双模式
 
@@ -87,7 +87,7 @@ WAO 是"装一次，开发多个项目"的工具：
 1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
 2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按车道名头衔、prompt 长度、文件数量或预计耗时机械路由。
 3. **默认实现通道偏好**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `glm-pro`（质量优先；额度见车道画像的成本，凡它能完成的实现任务都优先交给它，不按任务形态——如整文件一次性重写——另分车道）；预算敏感、可独立并行的批量小包与视觉/探索优先 `glm-flash` 或 `deepseek-flash`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。选车道前可用 `npm run cli -- wao lanes` 一屏查看各车道接线 / Owner 画像 / 认证 / 就绪（画像来自 `config/lane-traits.json`，分项星级加依据；开工时 `lead_preflight` 带紧凑表，`wao lanes` 看全量；零排序零推荐）。
-4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `glm-pro`（次选 `sol`）。
+4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `glm-pro`。
 5. **多模态与创意**：视觉、前端、创意和多模态任务优先 `kimi`（文案/头脑风暴）或 `glm-flash`/`deepseek-flash`（视觉理解）；`opus` 承担高要求前端设计与备胎审计。
 6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
    **并发**：同一车道同时派 2–4 个任务通常没有问题；本机实测同车道 3–6 个并发的最小任务全部完成（各车道的记录见 `wao lanes` 的 `concurrency` 行）。这是一次取样，不是服务方承诺的限额：长任务、大上下文下可能更低。出现超时或限流（运行失败、诊断指向 provider）时，按事实降低并发重派；WAO 不设并发上限，也不代为排队。并发说的是相互独立的运行；同一个复用会话不能重叠派发（复用槽互斥）。并发写同一个检出会互相踩，写任务用隔离工作树；同机的全量交付验证本来就串行（见 `docs/usage/delivery.md` 同机验证串行化闸）。

@@ -52,7 +52,7 @@
       }
     },
     "sol": {
-      "_comment": "方案 advisor/交付物 auditor/高难度代码执行（via codex）。",
+      "_comment": "方案与交付物的会审席（via codex）；用途限制见车道画像。",
       "backend": "codex",
       "cwd": ".",
       "model": {
@@ -63,7 +63,7 @@
       }
     },
     "astra": {
-      "_comment": "方案 advisor/交付物 auditor/高难度 bug 挖掘（via codex）；auditor 家族对抗席。",
+      "_comment": "方案与交付物的会审席，专攻疑难问题（via codex）；auditor 家族对抗席；用途限制见车道画像。",
       "backend": "codex",
       "cwd": ".",
       "model": {

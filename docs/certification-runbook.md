@@ -188,7 +188,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模�
 - 【参】文档修复落地前做**并立检查**：grep 同节旧限定词 / 同义门——新句与旧句并立是文档返工的共同形状（第二门槛、健康端点洞、双日期先例），与 kimi-web 接线事故 F8 病根同族。
 - 【参】车道带 `dispatchHold`（`config/lanes.json`）的：巡检结论出来后判断是否解除；解除只改这一个字段，`registry_list`、`wao lanes` 与派发提示随之改变。
 
-**收口**（六项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → 原语表守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 升级或换代的车道在 `config/lane-traits.json` 写 `reviewPending`（复核规则见决定 0087）→ 刷新记录写进提交说明（范围+结论+证据指针；含前置盘点结果——各 harness 本地×latest 版本对照、升级建议与 Owner 决定，暂缓/维持现状同样写明）；还在等 Owner 决定的升级建议登记进台账，防"建议过但无人记得"。
+**收口**（七项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → 原语表守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 升级或换代的车道在 `config/lane-traits.json` 写 `reviewPending`（复核规则见决定 0087）→ 画像复核：`npm run lane-review-stats -- --since <上次巡检日>` 重算会审席位统计，查这期间各车道的失败诊断有没有新规律，复测待复核车道，按 0087 的写规则改画像并汇报 Owner（决定 0089）→ 刷新记录写进提交说明（范围+结论+证据指针；含前置盘点结果——各 harness 本地×latest 版本对照、升级建议与 Owner 决定，暂缓/维持现状同样写明）；还在等 Owner 决定的升级建议登记进台账，防"建议过但无人记得"。
 
 **显式排除清单**（故意不进本节，非遗漏）：worktree/分支回收细则（hygiene 既有机制，ADR 0035）；各事故的叙事与归因（incident 文件）；Windows 系统配置操作（环境提示，SOP 不改系统）。
 

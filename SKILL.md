@@ -47,7 +47,7 @@ A delivery task prompt must NOT ask the worker to commit, run `git add/commit/..
 
 ## Safety Preflight
 
-Before dispatch: `registry_list` for inventory + required-credential presence + any lane `dispatchHold` pause note (Owner's words, advisory only — the dispatch decision stays with the Lead). Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
+Before dispatch: choose the lane from `lead_preflight` `lanes` — ratings with basis, cost, caveats, `dispatchHold` (Owner's pause note); advisory, not routing: the Lead decides. Evidence and sources: `wao lanes`; disagree with a profile: `wao feedback submit`. `registry_list` for inventory + required-credential presence. Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
 
 **Before unattended/stop-sensitive work**: read `references/safety-incidents.md`. **Only when using opencode**: read `references/opencode-pitfalls.md`.
 
@@ -81,7 +81,7 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 
 `run_delivery_reverify`: only when the original verification failed and the Lead judged a closed-set environment cause (tooling_invalid/environment_contaminated/dependency_setup_missing); it re-verifies the SAME unchanged delivery commit once — new setup may be appended, the ORIGINAL assertions can never be modified; the result never auto-decides. Before any reverify read `docs/usage/delivery.md` `run_delivery_reverify`（资格闭集；repackage 见同页 `run_delivery_repackage` 小节）；归因必须先于 reverify 调用——规格错误不适用 reverify，防烧唯一机器杠杆。
 
-合入 main 或推送采纳结果之前，在最终候选（含已采纳进来的交付）上跑一次全量 `npm test`，绿了才收口；何为最终候选、失败怎么判读见 `docs/testing.md`。
+合入 main 或推送采纳结果之前，在最终候选（含已采纳进来的交付）上跑一次全量 `npm test`，绿了才收口；何为最终候选、失败怎么判读、只改画像数据的例外见 `docs/testing.md`。
 
 ## Advisor / Auditor Discipline
 

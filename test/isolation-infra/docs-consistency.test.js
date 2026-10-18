@@ -2504,8 +2504,9 @@ test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/
     tester: "Tester",
     auditor: "Chief-Advisor / Auditor",
   };
-  // 0046 步⑤：三 Coder 角色合并为 coder；lane 指针=车道键。
-  const LANE_POINTER = { researcher: "glm-flash", coder: "glm-pro", tester: "sol", auditor: "astra" };
+  // 0046 步⑤：三 Coder 角色合并为 coder；lane 指针=车道键。codex 车道只用做会审
+  // （Owner 规则，写在车道画像），所以 tester 指向 glm-pro。
+  const LANE_POINTER = { researcher: "glm-flash", coder: "glm-pro", tester: "glm-pro", auditor: "astra" };
   const sections = new Map();
   for (const part of roles.split(/^### /m).slice(1)) {
     const title = part.slice(0, part.indexOf("\n")).trim();
@@ -3386,6 +3387,10 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
   const skill = read("SKILL.md");
   assert.match(read("docs/testing.md"), /合入 main 前[^\n]*最终候选上跑一次全量/,
     "docs/testing.md 必须写明：合入 main 前在最终候选上跑一次全量");
+  // 0089 §6：不跑全量的例外只限画像数据文件这一个文件，范围不能被悄悄放宽。
+  const exceptionRows = read("docs/testing.md").split("\n").filter((l) => /不跑全量/.test(l));
+  assert.ok(exceptionRows.length > 0 && exceptionRows.every((l) => l.includes("只改画像数据（`config/lane-traits.json`）")),
+    "docs/testing.md 里不跑全量的例外只限只改 config/lane-traits.json 的批次");
   assert.match(skill, /最终候选[^\n]*上跑一次全量 `npm test`[^\n]*`docs\/testing\.md`/,
     "SKILL.md ## Acceptance 必须在场：合入或集成前在最终候选上跑一次全量，并指向 docs/testing.md");
   assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
