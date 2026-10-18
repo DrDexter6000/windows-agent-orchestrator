@@ -1,10 +1,11 @@
 // src/application/modelFamily.js
 //
-// 模型族系推断（R9 / 决策 0023：跨族系三席会审推荐的展示层辅助）。
+// 模型族系推断（决策 0023、0090：会审选不同族系的副审时的展示层辅助）。
 //
 // ⚠ 本表不是契约，展示专用，消费者不得据此门控。
-// 唯一用途：onboarding/doctor 的会审就绪提示推断"族系多样性"展示标签
-// （经 panelReadiness.js 消费）。dispatch/delivery 路径禁止 import 本模块
+// 用途：onboarding/doctor 的会审就绪提示（经 panelReadiness.js）、会审记录的
+// 对抗性派生（panelDerivation.js）、车道画像读取面的族系列（laneProfile.js，
+// 进 lead_preflight.lanes 与 wao lanes）。dispatch/delivery 路径禁止 import 本模块
 // ——族系标签不参与任何派发、验收或交付判定（测试钉住消费面闭集）。
 //
 // 归一规则：model id 小写 → 剥 [..] 类上下文窗口后缀（如 [1m]）→ 取首段
@@ -32,10 +33,13 @@ const BACKEND_FAMILY_FALLBACK = Object.freeze({
   "kimi-web": "kimi",
   "deepseek-harness": "deepseek",
   "deepseek-acp": "deepseek",
-  "codex": "codex",
+  "codex": "gpt",
 });
 
-/** 族系 token → 展示标签（codex 标注 GPT 血缘，与 claude 系区分）。 */
+/** 词表 token 的归并：codex 系型号（如 codex-mini）属 GPT 族系。 */
+const FAMILY_ALIASES = Object.freeze({ codex: "gpt" });
+
+/** 族系 token → 展示标签。 */
 const FAMILY_LABELS = Object.freeze({
   deepseek: "DeepSeek",
   glm: "GLM",
@@ -46,7 +50,6 @@ const FAMILY_LABELS = Object.freeze({
   qwen: "Qwen",
   llama: "Llama",
   mistral: "Mistral",
-  codex: "Codex(GPT)",
 });
 
 /**
@@ -63,7 +66,7 @@ export function modelFamilyOf({ modelId, backend } = {}) {
     const token = normalizeModelToken(segment);
     if (token) {
       const hit = KNOWN_FAMILIES.find((f) => token === f || token.startsWith(f));
-      if (hit) return hit;
+      if (hit) return FAMILY_ALIASES[hit] ?? hit;
     }
   }
   return BACKEND_FAMILY_FALLBACK[String(backend ?? "").toLowerCase()] ?? UNKNOWN_FAMILY;

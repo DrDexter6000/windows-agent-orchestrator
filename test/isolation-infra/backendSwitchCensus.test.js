@@ -77,8 +77,10 @@ function walkJs(dir, out) {
 //                               与 zcode（registry 提供绝对 binary）不走 PATH
 //                               CLI 探测，缺席=缺省 null，合法。
 //   application/modelFamily.js  — 族系回退轴：modelId 不可解析时的展示缺省。
-//                               kimi-web→kimi（同 kimi-code 族）；zcode 有意
-//                               不加（多 provider 宿主，缺省 UNKNOWN 是诚实）。
+//                               kimi-web→kimi（同 kimi-code 族）；codex→gpt（决定
+//                               0090：与写了 gpt 型号的 codex 车道同族，不再自成
+//                               一族）；zcode 有意不加（多 provider 宿主，缺省
+//                               UNKNOWN 是诚实）。
 //   application/registryInventory.js — 模型展示回退轴："(default)" 列表=normalize
 //                               不强制 model.id 的后端（恰为五老进程族后端；
 //                               kimi-web/zcode 在 normalize 强制 model.id，
@@ -104,7 +106,7 @@ function walkJs(dir, out) {
 //   owner-dashboard/*          — （当前零身份串；如未来出现按登记）。
 const REGISTERED_CENSUS = {
   "application/backendCliMap.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
-  "application/modelFamily.js": { codex: 3, "claude-code": 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, "kimi-web": 1 },
+  "application/modelFamily.js": { codex: 2, "claude-code": 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, "kimi-web": 1 },
   "application/panelReadiness.js": { "opencode-serve": 1 },
   "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
   "application/runStop.js": { "opencode-serve": 3 },

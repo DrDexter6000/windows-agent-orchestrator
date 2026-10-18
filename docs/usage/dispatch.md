@@ -185,6 +185,8 @@ verification 环境合同：可选声明 `verificationSetupCommands: string[]`�
 
 `providerSessionRouting` 是闭集 `"not_used" | "first_turn_requested" | "resume_requested"`，描述本次派发的路由请求真相，不是 provider 会话成功/建立的证明。派生仅来自 `dispatchRun` 内部已选定的路由回合（`routing.turn`）：普通一次性派发（含普通 delivery 的 `lead_workspace` 复用——该复用是有意不使用 provider session）为 `not_used`；reusable expert 首轮 / continuable delivery 根首轮为 `first_turn_requested`；reusable expert resume / continuable 续接为 `resume_requested`。`accepted:false` 早返回恒为 `not_used`。绝不暴露 routing mode、opaque session uuid、Lead id、workspace path、argv 或 provider payload——这些是 server-owned 内部细节。provider 是否真正 resume 成功由后续 `run_status` / `run_await_result` 的传输与终态证据决定；WAO 不据此自动决定路由、不自动重试、不自动 stop。
 
+CLI 前台 `run` 派发复用型专家时，显式给 `--cwd <目标项目的 git 根>`：复用身份含本次调用的目标 cwd（见 `docs/02-architecture.md` §4.10），cwd 不同就接不上上一轮的会话，要重新派发。
+
 reuse 路由对前任 run 的判定是 runId 绑定读取：`session.created` 存在性检查（决定 busy/resume/first 分派）与终态判定（`findState`）都只由前任 run 自身事件计算——尾部追加的外 run 伪造行不能把 crashed 前任翻转成 resumable，不能把在飞前任翻成 resume，也不能把终态前任伪造成在飞而阻断派发。前任 transcript 为信封前 legacy 格式（事件无 `runId` 字段）时，reuse 路由从 resume 降级为 first（认领槽位开新回合，不复用无法归属到前任 run 的会话）；全无信封的前任 transcript（零绑定事件）按 busy 处理（不可归属 = 永不并发驱动同一 provider 会话）。
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到自然终态（token 闸门 / 等待窗到期通知 / 兜底 abort 都生效——到期不杀），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。

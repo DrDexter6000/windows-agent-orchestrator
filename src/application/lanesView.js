@@ -27,6 +27,7 @@ import {
   readLaneTraits,
   ratingsState,
   buildScaleLine,
+  laneFamilyLabel,
   DIMENSION_LABELS,
 } from "./laneProfile.js";
 
@@ -129,6 +130,8 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       modelId: declared.modelId,
       providerID: declared.providerID,
       effort: declared.effort,
+      // 0090：推断族系（会审选不同族系的副审时参考；展示专用非契约）。
+      family: laneFamilyLabel(lane),
       wiring,
       ...(wiringDetail ? { wiringDetail } : {}),
       traitsState,

@@ -33,8 +33,8 @@ test("R9: model id 归一——剥 [..] 类后缀、取首段（/ 或 - 之前�
 });
 
 test("R9: 无 model 块的 worker 按 backend 名兜底（tester/codex 形状）", () => {
-  assert.equal(modelFamilyOf({ backend: "codex" }), "codex",
-    "tester 无 model 块——codex backend 兜底为 codex 族（GPT 血缘）");
+  assert.equal(modelFamilyOf({ backend: "codex" }), "gpt",
+    "无 model 块的 codex 车道兜底为 GPT 族系——与写了 gpt 型号的 codex 车道同族（决定 0090）");
   assert.equal(modelFamilyOf({ backend: "claude-code" }), "claude");
   assert.equal(modelFamilyOf({ backend: "kimi-code" }), "kimi");
   assert.equal(modelFamilyOf({ backend: "deepseek-harness" }), "deepseek");
@@ -52,7 +52,9 @@ test("R9: 未识别 → 未知族系（不猜）；model 优先于 backend 兜�
 test("R9: familyLabel 展示标签闭集；未知 token 一律未知族系", () => {
   assert.equal(familyLabel("glm"), "GLM");
   assert.equal(familyLabel("deepseek"), "DeepSeek");
-  assert.equal(familyLabel("codex"), "Codex(GPT)", "codex 标注 GPT 血缘与 claude 系区分");
+  assert.equal(familyLabel("gpt"), "GPT");
+  assert.equal(modelFamilyOf({ modelId: "codex-mini-latest" }), "gpt", "codex 系型号归 GPT 族系");
+  assert.equal(familyLabel("codex"), UNKNOWN_FAMILY, "codex 不再是独立族系 token（决定 0090）");
   assert.equal(familyLabel("no-such-family"), UNKNOWN_FAMILY);
   assert.equal(familyLabel(undefined), UNKNOWN_FAMILY);
 });
@@ -97,8 +99,9 @@ test("R9 守卫: 消费面闭集——dispatch/delivery 路径不得 import mode
   walk(join(ROOT, "src"));
   // 展示面闭集：panelReadiness（共享推导）、onboarding 命令层（族系展示标签）、
   // panelDerivation（0065：对抗性派生的族系维——advisory 事实输出进 panel 记录，
-  // 同为展示级非门控；dispatch/delivery/runManager 等控制面路径出现即红）。
-  assert.deepEqual(consumers.sort(), ["application/panelDerivation.js", "application/panelReadiness.js", "commands/onboarding.js"],
+  // 同为展示级非门控）、laneProfile（0090：画像读取面的族系列，进
+  // lead_preflight.lanes 与 wao lanes）；dispatch/delivery/runManager 等控制面路径出现即红。
+  assert.deepEqual(consumers.sort(), ["application/laneProfile.js", "application/panelDerivation.js", "application/panelReadiness.js", "commands/onboarding.js"],
     `modelFamily 消费面必须是展示闭集，实际：${consumers.join(", ")}`);
 });
 

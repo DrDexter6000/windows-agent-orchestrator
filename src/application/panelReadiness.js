@@ -80,6 +80,8 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  * 0065：多样性口径——候选=全部行（角色维退役）；tier=探测候选数量。
  *
  * @param {Array<{id: string, backend: string|null, model: string|null, readyState: string}>} rows
+ * @param {{dispatchHolds?: Object<string, string>}} [opts] dispatchHolds：车道表的
+ *   暂停说明 {laneId: 原话}（决定 0090）。带暂停说明的行不算候选，单列进 held。
  * @returns {{
  *   tier: "three_seat"|"two_seat"|"none",
  *   available: Array<{id: string, family: string}>,
@@ -90,7 +92,10 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  *   duplicateModelKeys: Array<{backend: string|null, modelId: string|null, ids: string[]}>,
  *   singleWorkerVacuous: boolean,
  *   seats: Array<{id: string, family: string}>|null,
+ *   held: Array<{id: string, dispatchHold: string}>,
  * }}
+ *   held：车道表带暂停说明的行（Owner 暂停派发，只告知不拦截）——不进任何
+ *     候选口径，连同原话如实展示（决定 0090）。
  *   available：可用（探测 ready）候选——探测口径数量，不声称已配齐可派发副审。
  *   loginUnverified / injectedAuth / probeUnknown：如实展示清单（登录态型 /
  *     serve 注入型 / 探测未知）。
@@ -105,9 +110,10 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  *     "首席未知吞掉后续跨族对"反例；找不到跨族对退化为前两名如实展示，
  *     由 insufficientFamilyDiversity 提示）。永不排序推荐非候选（Lead 拥有选位权）。
  */
-export function assessPanelReadiness(rows) {
+export function assessPanelReadiness(rows, { dispatchHolds = {} } = {}) {
   const list = Array.isArray(rows) ? rows : [];
-  const entries = list.map((row) => ({
+  const holdOf = (id) => (Object.prototype.hasOwnProperty.call(dispatchHolds, id) ? dispatchHolds[id] : null);
+  const all = list.map((row) => ({
     id: String(row?.id ?? "?"),
     family: modelFamilyOf({ modelId: row?.model, backend: row?.backend }),
     backend: typeof row?.backend === "string" ? row.backend : null,
@@ -115,6 +121,9 @@ export function assessPanelReadiness(rows) {
     readyState: typeof row?.readyState === "string" ? row.readyState : "unknown",
     serveInjected: row?.backend === "opencode-serve",
   }));
+  // 决定 0090：暂停派发的车道不算候选（避免把 Owner 暂停的车道配进建议席位）。
+  const held = all.filter((e) => holdOf(e.id) !== null).map((e) => ({ id: e.id, dispatchHold: holdOf(e.id) }));
+  const entries = all.filter((e) => holdOf(e.id) === null);
   const readySeats = entries.filter((e) => e.readyState === "ready");
   const loginUnverified = entries
     .filter((e) => e.readyState === "login_based" && !e.serveInjected)
@@ -145,8 +154,10 @@ export function assessPanelReadiness(rows) {
       .map((e) => e.id),
     insufficientFamilyDiversity: readySeats.length >= 2 && new Set(knownFamilies).size < 2,
     duplicateModelKeys,
+    // 按注册表行数（含暂停的车道）：它说的是"注册表里只有一名 worker"。
     singleWorkerVacuous: list.length === 1,
     seats: suggestSeatPair(readySeats),
+    held,
   };
 }
 

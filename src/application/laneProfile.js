@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 // laneAxes：车道侧四轴（backend/modelId/providerID/effort，null 归一）——与
 // explicit 派发 G4、wao lanes 接线轴同一判定来源，不造第二份比较规则。
 import { laneAxes, validDispatchHold } from "../dispatchResolution.js";
+// 推断族系（0090：会审选不同族系的副审时参考；展示专用非契约，见 modelFamily.js）。
+import { modelFamilyOf, familyLabel } from "./modelFamily.js";
 
 const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -308,6 +310,12 @@ export function ratingsState(entry, lane) {
   return reasons.length > 0 ? { state: "review", reasons } : { state: "current", reasons: [] };
 }
 
+/** 车道的推断族系展示标签：由车道表的 backend 与 modelId 推断（0090）。 */
+export function laneFamilyLabel(lane) {
+  const axes = laneAxes(lane);
+  return familyLabel(modelFamilyOf({ modelId: axes.modelId, backend: axes.backend }));
+}
+
 /** 应用层截断：超长截成 max-1 字符加"…"（总长=max），不超长原样。 */
 function clip(text, max) {
   if (text.length <= max) return text;
@@ -316,7 +324,7 @@ function clip(text, max) {
 
 /**
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
- * 每行带暂停说明、上下文窗口与能否看图，见 0089）。行序=lanes.json 声明序；只含车道表里
+ * 每行带暂停说明、上下文窗口与能否看图，见 0089；推断族系见 0090）。行序=lanes.json 声明序；只含车道表里
  * 有画像的车道；不排序、不加推荐字段。所有字符串在应用层截到 MCP schema 上限，
  * 保证投影总能通过校验。
  * @returns {{scale:string, dimensionLabels:Object, rows:object[], omittedLaneIds:string[]}|null}
@@ -350,6 +358,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
     }
     rows.push({
       id,
+      family: laneFamilyLabel(lane),
       ratings,
       ratingsState: rs.state,
       reviewReasons: rs.reasons.slice(0, 4).map((s) => clip(s, 160)),

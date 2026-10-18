@@ -4,7 +4,7 @@
 
 ## registry 配置详解
 
-每种 backend 需要的字段不同。完整角色矩阵以 `config/agents.example.json` + `docs/team-roles.md` 为权威，本页不复制维护。下面只保留最小形状示例：
+每种 backend 需要的字段不同。完整的车道接线模板是 `config/agents.example.json`，本页不复制维护。model、reasoning 写成结构化字段（各 backend 接受哪些子字段见生成层 `docs/surface/certification.md`），由 backend 编译成命令行参数，不要在 `args` 里手拼同义的 flag。下面只保留最小形状示例：
 
 ```jsonc
 {
@@ -23,7 +23,7 @@
     "opus": {
       "backend": "claude-code",
       "model": { "id": "<modelId>" },
-      "reasoning": { "effort": "high" },
+      "reasoning": { "effort": "<effort>" },
       "cwd": ".",
       "args": ["--dangerously-skip-permissions"]
     },
@@ -33,7 +33,7 @@
       "backend": "zcode",
       "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
       "model": { "id": "bigmodel-api/<modelId>" },
-      "reasoning": { "effort": "max" },
+      "reasoning": { "effort": "<effort>" },
       "cwd": "."
     },
 
@@ -62,17 +62,19 @@
       // model 时模型取 profile 缺省。
     },
 
-    // ── codex（进程式；codex 车道只用做会审，见车道画像）──
+    // ── codex（进程式；用途与限制见 wao lanes）──
     "sol": {
       "backend": "codex",
       "cwd": "D:/projects/my-app"
     },
 
-    // ── 带 worktree 隔离的 agent ──
+    // ── 带 worktree 隔离的车道（isolation 对任何 backend 都可写）──
     "glm-pro": {
-      "backend": "claude-code",
+      "backend": "zcode",
+      "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
+      "model": { "id": "bigmodel-api/<modelId>" },
+      "reasoning": { "effort": "<effort>" },
       "cwd": "D:/projects/my-app",
-      "args": ["--dangerously-skip-permissions"],
       "isolation": { "type": "worktree", "strategy": "persistent" }
       // strategy: "persistent"（默认，run 后保留 worktree）| "ephemeral"（run 后清理）
     }
@@ -80,13 +82,13 @@
 }
 ```
 
-示例里的 `<modelId>` 是占位：各车道当前型号见 `config/agents.example.json` 与 `npm run cli -- wao lanes`（车道当前型号只写在配置里）。
+示例里的 `<modelId>`、`<effort>` 是占位：各车道当前的型号与推理力度见 `config/lanes.json` 与 `npm run cli -- wao lanes`（车道当前值只写在配置里）；各 backend 接受哪些 effort 值见生成层 `docs/surface/certification.md`。
 
-席位角色（`seatRole` 字段）已退役，不要再声明。对抗性是派生事实：登记会审席位时，按审者车道与被审产出作者车道的关系（车道指纹比对）判定。登记命令 `npm run cli -- wao stage 2/4 --task <T> --panel-seats <a,b> [--reviewed-run <runId>[,<runId>]]`（panel 字段只在 stage 2 与 4 登记），登记时按当时的 registry 车道配置 × 被审 run 的 `run.started` 钉住作者事实：车道不同 = 对抗前提成立；席位与作者同车道 = 回避违反，大声提示（advisory，不阻断）。`--reviewed-run` 支持多值（共同作者）。作者不可读或缺 `run.started` 时如实输出 unknown，不折叠成"无违反"。老 registry 里遗留的 seatRole 字段不会被拒载：归一化直接忽略（读取面零消费），`registry validate` 对在场字段出弃用 advisory，可以删掉。
+老 registry 里遗留的 `seatRole` 字段不会被拒载：归一化直接忽略，`registry validate` 对在场字段给弃用提示，可以删掉。会审席位的对抗性怎么判定见[会审](consult.md)。
 
-车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）；`lead_preflight` 带一份紧凑表：已评的格、成本、全部注意事项、暂停说明、上下文窗口与能否看图，开工时一次看全；证据与样本出处仍看 `wao lanes`。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
+车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）；开工时 `lead_preflight` 带一份紧凑表，证据与样本出处看 `wao lanes`。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
 
-车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截——它进 `wao lanes`、`registry list` / `registry_list` 的条目与派发 stderr 提示；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。它不是接线轴，不参与派发解析的任何裁定。
+车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截：读车道表的各个面和派发时的 stderr 提示都会带上它；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。它不是接线轴，不参与派发解析的任何裁定。
 
 声明了 `kimiHome` 的 kimi-web 车道，凭据是 `<kimiHome>/server.token` 文件（serve 拉起时生成，见下文「kimi 车道的 worker serve」一节）；这个文件是否就绪在三处可见：
 

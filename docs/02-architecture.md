@@ -1025,7 +1025,7 @@ src/
 │   ├── handlers.js           #   节点处理器（agent/gate/router/integrator + 自定义注册）
 │   └── handoff.js            #   节点间引用传递 + promptBuilder
 config/
-├── agents.example.json       # registry 模板（角色化 5 角色）
+├── agents.example.json       # registry 模板（每车道一条）
 └── default.json              # 默认设置
 test/
 └── （各模块配 node:test 测试）

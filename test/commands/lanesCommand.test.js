@@ -68,6 +68,7 @@ test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 
     const text = lines.join("\n");
     assert.ok(text.includes("显式拼接面"), "成对放行有横幅注记");
     assert.ok(text.includes("lane l1"), "l1 在场");
+    assert.match(text, /^lane l1 — .+ · 推断族系 \S+$/m, "车道行带推断族系（决定 0090）");
     assert.ok(/接线: 漂移——explicit 派发将拒绝/.test(text), "l2 drift 判定与拒绝语义");
     assert.ok(!text.includes("seatRole:"), "seatRole 列已退役（0065）");
     assert.ok(text.includes("certification: certified"), "台账匹配记录显示");

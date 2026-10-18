@@ -224,6 +224,28 @@ test("0065 建议配对: 全候选中找已知跨族对——首席未知不得�
   assert.deepEqual(deterministic.seats.map((e) => e.id), ["glm_a", "ds_a"], "首个跨族对（glm_a×ds_a）胜出");
 });
 
+test("决定 0090: 车道表带暂停说明的行不算候选——不进配对与任何计数，连同原话单列进 held", () => {
+  const rows = [
+    row("deepseek-pro", { backend: "deepseek-acp", model: "deepseek-v4-pro" }, "ready"),
+    row("deepseek-flash", { backend: "deepseek-acp", model: "deepseek-flash" }, "ready"),
+    row("opus", { backend: "claude-code", model: "claude-opus-5-5" }, "ready"),
+  ];
+  const before = assessPanelReadiness(rows);
+  assert.deepEqual(before.held, [], "没有暂停说明时 held 为空");
+  assert.deepEqual(before.seats.map((s) => s.id), ["deepseek-pro", "opus"], "对照：不传暂停说明时首个跨族对含 deepseek-pro");
+  const a = assessPanelReadiness(rows, { dispatchHolds: { "deepseek-pro": "调试中，暂勿派发" } });
+  assert.deepEqual(a.held, [{ id: "deepseek-pro", dispatchHold: "调试中，暂勿派发" }]);
+  assert.deepEqual(a.available.map((e) => e.id), ["deepseek-flash", "opus"], "暂停的车道不算可用候选");
+  assert.deepEqual(a.seats.map((s) => s.id), ["deepseek-flash", "opus"], "建议配对不含暂停的车道");
+  assert.equal(a.tier, "three_seat");
+  const loginHeld = assessPanelReadiness(
+    [row("sol", { backend: "codex", model: "gpt-6.1-sol" }, "login_based")],
+    { dispatchHolds: { sol: "暂停" } },
+  );
+  assert.deepEqual(loginHeld.loginUnverified, [], "暂停的车道也不进如实展示的各桶，只在 held");
+  assert.deepEqual(loginHeld.held.map((h) => h.id), ["sol"]);
+});
+
 test("0065: duplicateModelKeys——同 backend+modelId 多键如实点名（tier 虚高提示）", () => {
   const p = assessPanelReadiness([
     row("lane_a", { model: "bigmodel-api/GLM-5.3" }, "ready"),

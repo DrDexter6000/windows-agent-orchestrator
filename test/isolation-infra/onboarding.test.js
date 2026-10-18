@@ -60,7 +60,6 @@ const TEMPLATE = {
     coder_low: {
       _comment: "[Coder-Low] role comment",
       _comment_backend: "backend comment",
-      _comment_task: "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
       backend: "claude-code",
       provider: {
         protocol: "anthropic-compatible",
@@ -75,7 +74,6 @@ const TEMPLATE = {
     },
     coder_mm: {
       _comment: "[Coder-MM] role comment",
-      _comment_task: "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核",
       backend: "kimi-code",
       cwd: ".",
       systemPrompt: "config/roles/coder_mm.md",
@@ -84,7 +82,6 @@ const TEMPLATE = {
     auditor: {
       _comment: "[Auditor] role comment",
       _comment_auth: "官方 Claude OAuth（claude login），不走 wrapper",
-      _comment_task: "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       backend: "claude-code",
       cwd: ".",
       systemPrompt: "config/roles/auditor.md",
@@ -184,7 +181,7 @@ function makeMemFs(initial = {}) {
 function memRun({
   agentId, apply, endorseWorker, installRoot = "D:/wao", probeEnv,
   initial = {}, reliabilitySummaryPath = "D:/wao/runs/reliability-summary.json",
-  privateRegistryPath,
+  privateRegistryPath, dispatchHolds,
 } = {}) {
   const fs = makeMemFs({
     "D:/wao/config/agents.example.json": JSON.stringify(TEMPLATE),
@@ -200,6 +197,7 @@ function memRun({
       reliabilitySummaryPath,
       privateRegistryPath,
       probeEnv,
+      dispatchHolds,
       fs,
     }),
   };
@@ -1094,12 +1092,12 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent), derived
 // PURELY from the tracked template rows (backend / provider.apiKeyEnv / model.id
-// / _comment_task / _comment_auth) plus an INJECTED environment probe. Design
+// / _comment_auth) plus an INJECTED environment probe. Design
 // iron law: no second hand-written role table, no auto-selection, no config
 // write — the recommendation is advisory and the user keeps the choice.
 // Probing is injectable everywhere; nothing here touches the real environment.
 
-test("R6-C: buildRecommendations derives rows from template rows (backend→CLI, apiKeyEnv, duty truncation, authNote)", async () => {
+test("R6-C: buildRecommendations derives rows from template rows (backend→CLI, apiKeyEnv, authNote; no lane-purpose field)", async () => {
   const custom = {
     agents: {
       w_key: {
@@ -1128,9 +1126,8 @@ test("R6-C: buildRecommendations derives rows from template rows (backend→CLI,
   assert.equal(byId.w_key.requiresCli, "claude", "backend→CLI mapping");
   assert.equal(byId.w_key.requiresKeyEnv, "ZHIPU_API_KEY", "provider.apiKeyEnv carried");
   assert.equal(byId.w_key.model, "glm-5.3[1m]");
-  assert.ok(byId.w_key.duty.startsWith("适合任务: "), "_comment_task carried verbatim");
-  assert.ok(byId.w_key.duty.length <= 60, "_comment_task truncated to ~60 chars");
-  assert.ok(byId.w_key.duty.endsWith("…"), "truncation is marked with an ellipsis");
+  // 决定 0090：车道用途只写在车道画像——注册表注释 _comment_task 不再进行。
+  assert.equal("duty" in byId.w_key, false, "rows carry no lane-purpose field");
   assert.equal(byId.w_key.authNote, "官方 Claude OAuth（claude login），不走 wrapper");
   assert.equal(byId.w_key.readyState, "ready", "user_env key counts as present (bridged at dispatch)");
   // No provider → no key requirement; login-state family.
@@ -1312,8 +1309,9 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   assert.ok(text.includes("[CLI 登录态]"), "login-state rows rendered");
   assert.ok(text.indexOf("[ready]") < text.indexOf("[CLI 登录态]"), "ready rows sorted before login rows");
   assert.ok(text.includes("认证: key DEEPSEEK_API_KEY"), "key env name shown as the auth method");
-  // duty comes from _comment_task (display strips the redundant prefix).
-  assert.ok(text.includes("适合: 边界明确的实现包/TDD"), "duty rendered from the template row");
+  // 决定 0090：矩阵不再显示车道用途（"适合"段），只给一行指向车道画像。
+  assert.ok(!text.includes("适合:"), "matrix carries no lane-purpose segment");
+  assert.ok(text.includes("各车道擅长什么、有什么限制：npm run cli -- wao lanes"), "pointer to the lane profile");
   // R6-C3（P2-3）：authNote 行改形状断言——结构化基座在前、模板注释只进括号补充
   // （替换旧的纯子串断言，钉住新拼接形状）。
   assert.match(text, /认证: claude CLI 登录态（官方/,
@@ -1356,7 +1354,7 @@ test("R6-C: recommendations are additive; every pre-existing result key is prese
       `mode ${JSON.stringify(m)} must carry recommendations.rows`);
     // Rows carry the bounded spec shape and the closed readyState domain.
     for (const row of json.recommendations.rows) {
-      for (const k of ["id", "backend", "model", "requiresCli", "requiresKeyEnv", "duty", "readyState"]) {
+      for (const k of ["id", "backend", "model", "requiresCli", "requiresKeyEnv", "readyState"]) {
         assert.ok(k in row, `row must carry ${k}`);
       }
       assert.ok(["ready", "missing_cli", "missing_key", "missing_both", "login_based", "unknown"].includes(row.readyState),
@@ -1432,9 +1430,9 @@ test("R6-C2/R9: 矩阵渲染含 backend 列、登录态行写明具体 CLI、分
   // 极简模板：一个 key 型 + 一个登录型（codex）+ 一个 coder 通道（claude-code + ZHIPU key）。
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
-      tester: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login" },
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 写代码" },
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      tester: { backend: "codex", _comment_auth: "codex login" },
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" } },
     },
   }));
   const fsMod = await import("node:fs/promises");
@@ -1480,8 +1478,8 @@ test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-d
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
-      tester: { backend: "codex", _comment_task: "适合任务: 跑测试" },
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      tester: { backend: "codex" },
     },
   }));
   const fsMod = await import("node:fs/promises");
@@ -1521,8 +1519,8 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
-      w_login: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login", model: { id: "gpt-x" } },
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      w_login: { backend: "codex", _comment_auth: "codex login", model: { id: "gpt-x" } },
       w_serve: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" } },
       w_none: { backend: "some-future-backend", model: { id: "m" } },
     },
@@ -1545,8 +1543,9 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
   // 第一行布局：id/backend/model 后跟状态括号。
   assert.match(text, /^ {2}w_key\s+claude-code\s+glm-5\.3\[1m\]\s+\[/m,
     "第一行 = id/backend/model/状态");
-  // 第二行布局：认证标签与 适合 前缀。
-  assert.match(text, /^ {4}认证: .+ · 适合: /m, "第二行 = 认证/适合");
+  // 第二行布局：只有认证标签（车道用途不在矩阵里，决定 0090）。
+  assert.match(text, /^ {4}认证: /m, "第二行 = 认证");
+  assert.ok(!/^ {4}认证: .+ · 适合: /m.test(text), "第二行不再带适合段");
   // 认证标签四分支：
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 分支");
   assert.match(text, /认证: codex CLI 登录态（codex login）/, "CLI 登录态分支 + authNote 括号拼接");
@@ -1577,17 +1576,16 @@ test("复核 R4: displayWidth 语义 + 矩阵渲染行显示宽上界（回归�
   assert.equal(displayWidth("中文"), 4, "CJK 每字符 2 格");
   assert.equal(displayWidth("认证: key ZHIPU_API_KEY"), displayWidth("认证: ") + 17,
     "混合串 = 各段显示宽之和（key ZHIPU_API_KEY = 17 格）");
-  // (b) 渲染上界：用含长中文 authNote/duty 的 fixture 渲染，矩阵块每行 ≤120 显示格。
+  // (b) 渲染上界：用含长中文 authNote 的 fixture 渲染，矩阵块每行 ≤120 显示格。
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-width-"));
   const root = join(dir, "wao");
   mkdirSync(join(root, "config"), { recursive: true });
   const longAuth = "很长的认证说明".repeat(12); // 48 CJK = 96 显示格，必触发截断
-  const longDuty = "适合任务: " + "中文职责描述".repeat(15);
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
       coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" },
-        _comment_task: longDuty, _comment_auth: longAuth },
-      tester: { backend: "codex", _comment_task: longDuty, _comment_auth: longAuth },
+        _comment_auth: longAuth },
+      tester: { backend: "codex", _comment_auth: longAuth },
     },
   }));
   const fsMod = await import("node:fs/promises");
@@ -1743,7 +1741,7 @@ test("R9 需求 2/4: 无可用候选 → 跳过提示（--panel-skip-reason 登�
   }
 });
 
-test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系单一 → 跨族系是更强推荐一行", async () => {
+test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系单一 → 副审建议来自不同族系一行", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
     coder_g1: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
@@ -1756,7 +1754,7 @@ test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系
     assert.ok(!("missingAdversarial" in r.panelReadiness), "missingAdversarial 已随 seatRole 退役删除");
     const text = renderHuman(r);
     assert.ok(text.includes("跨族系提示"), "同族提示行在场（0065 起主提示）");
-    assert.ok(text.includes("跨族系是更强推荐"), "跨族系推荐措辞");
+    assert.ok(text.includes("副审建议来自不同族系"), "跨族系建议措辞（决定 0090）");
     assert.ok(text.includes("未知族系不参与判定"), "未知族系不参与判定的括注随提示行在场");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
@@ -2196,11 +2194,12 @@ function privEntry(backend = "claude-code", modelId = "deepseek-v4-flash", apiKe
 const GOLDEN_TEMPLATE_MATRIX = `角色矩阵与当前环境适配（推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置））:
   id                       backend         model               状态
   coder_low                claude-code     deepseek-v4-flash   [ready]
-    认证: key DEEPSEEK_API_KEY · 适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档…
+    认证: key DEEPSEEK_API_KEY
   coder_mm                 kimi-code       kimi-code/k3        [CLI 登录态]
-    认证: kimi CLI 登录态 · 适合: 图像/视频内容理解、前端设计与实现、视觉/美术审核
+    认证: kimi CLI 登录态
   auditor                  claude-code     claude-opus-5       [CLI 登录态]
-    认证: claude CLI 登录态（官方 Claude OAuth（claude logi… · 适合: 前置方案审计/后置独立复核/PASS-FAIL 判定
+    认证: claude CLI 登录态（官方 Claude OAuth（claude logi…
+  各车道擅长什么、有什么限制：npm run cli -- wao lanes
 `;
 const GOLDEN_TEMPLATE_BLOCK = `${GOLDEN_TEMPLATE_MATRIX}
 会审就绪（模板面·按当前环境探测，决策 0023）: 两席可配——探测候选恰 1（次之推荐：Lead 主审 + 一名副审）
@@ -2214,6 +2213,65 @@ function matrixBlock(text) {
   assert.ok(start !== -1 && end > start, "矩阵块锚缺失（角色矩阵头/表尾句）");
   return text.slice(start, end).trimEnd();
 }
+
+test("决定 0090: 会审就绪块不把暂停派发的车道算作候选，暂停说明单列一行", async () => {
+  const { result } = await memRun({ probeEnv: PROBE_TEMPLATE_FACE, dispatchHolds: { coder_low: "调试中，暂勿派发" } });
+  const r = await result;
+  assert.deepEqual(r.panelReadiness.held, [{ id: "coder_low", dispatchHold: "调试中，暂勿派发" }]);
+  assert.ok(!r.panelReadiness.available.some((e) => e.id === "coder_low"), "暂停的车道不算可用候选");
+  const text = renderHuman(r);
+  assert.ok(text.includes("  暂停派发（车道表 dispatchHold，不计入候选）:\n    coder_low：调试中，暂勿派发\n"), "暂停说明单列");
+  const plain = await (await memRun({ probeEnv: PROBE_TEMPLATE_FACE })).result;
+  assert.deepEqual(plain.panelReadiness.held, [], "没有暂停说明时 held 为空");
+});
+
+test("决定 0090: onboarding 命令层从车道表读暂停说明交给会审就绪块；非默认 --registry 时车道表停用", async () => {
+  const { onboardingCommand } = await import("../../src/commands/onboarding.js");
+  const root = mkdtempSync(join(tmpdir(), "wao-onb-hold-"));
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify(TEMPLATE));
+  const lanesDoc = {
+    ok: true, sha256: "f".repeat(64), issues: [],
+    lanes: [{ id: "coder_low", backend: "claude-code", model: { id: "deepseek-v4-flash" }, reasoning: { effort: "max" }, dispatchHold: "调试中，暂勿派发", aliases: {} }],
+  };
+  const config = { registry: join(root, "config", "agents.json"), runDir: join(root, "runs"), loadLanesConfigFn: () => lanesDoc };
+  const run = async (args) => {
+    const out = [];
+    const original = console.log;
+    console.log = (...a) => { out.push(a.map(String).join(" ")); };
+    const savedExitCode = process.exitCode;
+    try {
+      await onboardingCommand([...args, "--json", "--install-root", root], config);
+    } finally {
+      console.log = original;
+      process.exitCode = savedExitCode;
+    }
+    return JSON.parse(out.join("\n"));
+  };
+  try {
+    const r = await run([]);
+    assert.deepEqual(r.panelReadiness.held, [{ id: "coder_low", dispatchHold: "调试中，暂勿派发" }], "默认注册表：读车道表的暂停说明");
+    const other = await run(["--registry", join(root, "other.json")]);
+    assert.deepEqual(other.panelReadiness.held, [], "非默认 --registry：车道表停用，没有暂停说明");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("决定 0090: 多条暂停说明各占一行，长原话折行不截断，每行 ≤120 显示格", async () => {
+  const longHold = "调".repeat(100); // 200 显示格，合法长度内
+  const { result } = await memRun({
+    probeEnv: PROBE_TEMPLATE_FACE,
+    dispatchHolds: { coder_low: longHold, coder_mm: "暂停" },
+  });
+  const text = renderHuman(await result);
+  const lines = text.split("\n");
+  const head = lines.indexOf("  暂停派发（车道表 dispatchHold，不计入候选）:");
+  assert.ok(head !== -1, "暂停块在场");
+  const block = lines.slice(head + 1, head + 4);
+  assert.equal(block.map((l) => l.trim()).join(""), `coder_low：${longHold}coder_mm：暂停`, "两条都在、原话完整");
+  for (const l of block) assert.ok(displayWidth(l) <= 120, `行宽 ≤120：${displayWidth(l)}`);
+});
 
 test("R11-2 0024 纯模板面：私有缺席 = 现状模板面逐字不变（字节回归）+ source 全 template + 尾句不扩词", async () => {
   const { result } = await memRun({ probeEnv: PROBE_TEMPLATE_FACE });
@@ -2283,11 +2341,11 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
 // 反向不对称亦不判）。
 
 
-test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + 私有独有行省略适合段 + C-2 提示共存 + 行宽 ≤120", async () => {
+test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + C-2 提示共存 + 行宽 ≤120", async () => {
   const priv = {
     agents: {
       coder_low: privEntry("claude-code", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
-      my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有（无 _comment_task）
+      my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有
       bad_seat: privEntry("not-a-real-backend", "deepseek-v4-flash", "ZHIPU_API_KEY"), // 无效 → 剔除
     },
   };
@@ -2314,7 +2372,6 @@ test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + dr
   assert.ok(extraIdx !== -1);
   assert.ok(!lines[extraIdx].includes("·模板候选"), "私有独有行不打模板候选标");
   assert.ok(lines[extraIdx + 1].includes("认证: kimi CLI 登录态"), "私有独有行认证照常");
-  assert.ok(!lines[extraIdx + 1].includes("适合:"), "私有独有行'适合:'段整段省略（缺席不是坏值）");
   assert.ok(!lines[extraIdx + 1].includes("?"), "私有独有行不打 ?");
   assert.ok(text.includes(
     "drift: coder_low 私有 model=deepseek-v4-pro/backend=claude-code ≠ 模板 deepseek-v4-flash/claude-code"),

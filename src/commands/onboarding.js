@@ -22,10 +22,11 @@ import { existsSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseOptions } from "./shared.js";
+import { parseOptions, lanesDocForCall } from "./shared.js";
+import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // R6-C3（P1-2）：displayWidth（东亚宽字符计 2）与引擎共用同一份实现——渲染层
 // 不再持第二份宽度表（分层方向 commands → application 合法）。
-import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth, MAX_CANDIDATES } from "../application/onboarding.js";
+import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth, wrapDisplay, MAX_CANDIDATES } from "../application/onboarding.js";
 // TD-191② / 决定 0043：--host 指引消费 hostDescriptors 唯一权威（同一张表）。
 import * as hostDescriptors from "../hostAdapters/hostDescriptors.js";
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
@@ -143,6 +144,9 @@ export async function onboardingCommand(args, config) {
     // R6-C: production environment probe (injected; the service stays pure).
     // 决定 0074：kimiHome 车道就绪按 token 文件推导（同一探测实现）。
     probeEnv: { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
+    // 决定 0090：会审就绪块不把车道表里暂停派发的车道算作候选。非默认 --registry
+    // 时车道表停用（防跨绑，lanesDocForCall），没有暂停说明。
+    dispatchHolds: dispatchHoldsByLane(lanesDocForCall(options, config, config?.loadLanesConfigFn)),
   });
 
   if (json) {
@@ -271,8 +275,8 @@ export function renderHuman(r) {
     //
     // R6-C3（P1-2 + 席位 B）：表头 + 每个 worker 两行，全部列宽按显示宽（东亚宽
     // 字符计 2）计算——padEnd 按码元计宽曾把中文认证列后面的整列右移几十格。
-    // 第一行 id/backend/model/状态 ≤ ~70 显示格；第二行 认证/适合 ≤ ~125 显示格
-    // （认证标签整段截到 60、duty 截到 50），120 列终端不再折行错位。
+    // 第一行 id/backend/model/状态 ≤ ~70 显示格；第二行认证标签整段截到 56 显示格，
+    // 120 列终端不再折行错位。
     //
     // R11-2（决策 0024）：双源矩阵——私有 registry 在场且可读时，矩阵 =
     // 已配置行（真实状态，私有 registry 顺序稳定，不打来源标）+ 模板未配置候选
@@ -296,13 +300,7 @@ export function renderHuman(r) {
           ? (row.drift ? " ·drift" : "")
           : " ·模板候选";
         lines.push(`  ${padEndDisplay(row.id ?? "?", 24)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]${mark}`);
-        if (mixed && row.source === "configured") {
-          // 0024(5)：私有行"适合:"段仅在私有条目真带 _comment_task 时显示——
-          // 缺席 = 整段省略，不打 "?"（缺席不是坏值）；systemPrompt 指针不进展示面。
-          lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)}${row.duty ? ` · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}` : ""}`);
-        } else {
-          lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
-        }
+        lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)}`);
       }
       if (mixed) {
         // 0024(4)：drift 有界明细（≤3 条 + "另有 K 条"尾注）——值全从行字段投影。
@@ -333,6 +331,8 @@ export function renderHuman(r) {
           }
         }
       }
+      // 决定 0090：车道用途与限制只写在车道画像；矩阵只管接线与认证就绪。
+      lines.push("  各车道擅长什么、有什么限制：npm run cli -- wao lanes");
       // R9（决策 0023）：既有"会审备选"句升级为分级块（三席/两席/无 + 同族 +
       // 单 worker 注脚 + 登录态未验证），标签仍从模板行生、不动矩阵列宽。
       lines.push("");
@@ -429,7 +429,7 @@ function panelReadinessLines(r) {
     lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 三席可配——探测候选 ≥2（推荐标准：Lead 主审 + 两名副审；候选计数是探测口径，不声称已配齐可派发副审）`);
     lines.push(`  建议配对（族系最大化展示，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
     if (p.insufficientFamilyDiversity) {
-      lines.push("  跨族系提示：可用候选的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
+      lines.push("  跨族系提示：可用候选的已知族系不足两族——副审建议来自不同族系（未知族系不参与判定）");
     }
   } else if (p.tier === "two_seat") {
     lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 两席可配——探测候选恰 1（次之推荐：Lead 主审 + 一名副审）`);
@@ -460,6 +460,16 @@ function panelReadinessLines(r) {
   // 但绝不无声消失（key 检查细节见 wao doctor）。
   if (p.keyOnly?.length > 0) {
     lines.push(`  key 名已解析但无 CLI 探测面（未验证令牌/serve 可达性，不计入可用）: ${p.keyOnly.join("、")}`);
+  }
+  // 决定 0090：车道表带暂停说明的车道不算候选——每条一行、Owner 原话不截断
+  // （超宽折行，每行 ≤120 显示格；只告知不拦截）。
+  if (p.held?.length > 0) {
+    lines.push("  暂停派发（车道表 dispatchHold，不计入候选）:");
+    for (const h of p.held) {
+      const [first, ...rest] = wrapDisplay(`${h.id}：${h.dispatchHold}`, 114);
+      lines.push(`    ${first}`);
+      for (const seg of rest) lines.push(`      ${seg}`);
+    }
   }
   // 0065（0045 §1.2 终局）：0019 §3 席位惯例句（实现席/对抗席清单）随席位
   // 角色维退役删除——车道均可任副审（角色=派发时帽子），回避/组合由 Lead 按派生
@@ -533,12 +543,6 @@ function recommendationAuthLabel(row) {
   }
   if (row.authNote) return `${base}（${row.authNote}）`;
   return base;
-}
-
-/** duty display: _comment_task rows start with "适合任务: "/"默认适合: " — strip for display. */
-function recommendationDutyDisplay(duty) {
-  if (typeof duty !== "string" || duty.length === 0) return "?";
-  return duty.replace(/^(适合任务|默认适合)\s*[:：]\s*/, "");
 }
 
 /** readyState → human bracket label (ready / missing / login / probe-failed). */

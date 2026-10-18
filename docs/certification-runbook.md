@@ -7,8 +7,8 @@
 ## 认证结果用于派发选择的边界
 
 当前派发策略：
-- 真实编码/文件修改/命令执行优先用经认证的 coder 席位——**本行只定规则、不定名单**：当前哪些席位属此列，查 `registry list`（当前配置 × 历史认证的**匹配投影**，不重验运行时；简表把台账缺失/不可读折叠成"无认证记录"，且**投影不含 certificationScope**——delta/full 只在 summary 磁盘层，双指针互补，勿把 `registry list` 当充分条件；需判适用性时用 `registry list --cert-evidence` 与"认证证据绑定执行画像"节）与当前 runDir 下的 `reliability-summary.json` 的 `workers` 字段（认证台账权威），角色划分权威见 `docs/team-roles.md`（席位名单是活配置，写进本文必漂移——负向守卫钉住本节不得出现席位 id）。
-- 标准角色以 `docs/team-roles.md` 为权威，配置落地以 `config/agents.example.json` 为模板。
+- 真实编码/文件修改/命令执行优先派给经认证的车道——**本行只定规则、不定名单**：当前哪些车道属此列，查 `registry list`（当前配置 × 历史认证的**匹配投影**，不重验运行时；简表把台账缺失/不可读折叠成"无认证记录"，且**投影不含 certificationScope**——delta/full 只在 summary 磁盘层，双指针互补，勿把 `registry list` 当充分条件；需判适用性时用 `registry list --cert-evidence` 与"认证证据绑定执行画像"节）与当前 runDir 下的 `reliability-summary.json` 的 `workers` 字段（认证台账权威），角色划分权威见 `docs/team-roles.md`（席位名单是活配置，写进本文必漂移——负向守卫钉住本节不得出现席位 id）。
+- 角色合同以 `config/roles/*.md` 为准（Lead 的职责与派工原则见 `docs/team-roles.md`），接线以 `config/agents.example.json` 为模板，车道用法见车道画像（`config/lane-traits.json`）。
 - opencode worker 只作为 fallback / optional lane 的选择政策以 `docs/team-roles.md` 为权威（本文不重复政策正文）；该通道受 Owner 暂停投入裁定约束（在册裁定状态见原语表行）。派发前仍必须看最新 certification、`tokenBudget` 和 stop verification evidence（在册历史机制证据不代表当前部署已验证）。
 - runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准（本行是**选择参考**；认证的门禁语义——MCP advisory、CLI `--require-certified`——见"认证与当前就绪"节，两回事不混写）。
 
@@ -99,23 +99,23 @@ credentialReadiness 探针面 + envPolicy 允许清单。
 
 **lane 变更同步面（两段式）**：
 
-**第一段 · lane 变更（模型/effort/通道调整——只动本机，模板不动）**：
+**第一段 · lane 变更（模型/effort/通道调整）**：
 ① live `config/agents.json` 席位块（model/reasoning/通道字段）；
 ② 同文件 `certification.matrix` 行（modelId/label 仍是手写；label 兼任认证 caseId，改名即改
 历史证据关联，慎动）；
-②′ **lanes.json 断言面同步**：effort/model 任何变更必须 live registry
-+ `config/lanes.json`（+example，模板事件时）**三处原子同步**——G4"注册表赢、不一致即拒"
-会让该车道全部 explicit 派发 `lane_wiring_mismatch` 整拒；
+②′ **lanes.json 断言面同步**：effort/model 任何变更，live registry、`config/lanes.json`、
+`config/agents.example.json` **三处原子同步**——G4"注册表赢、不一致即拒"会让该车道全部
+explicit 派发 `lane_wiring_mismatch` 整拒；模板与车道表的四轴一致由 docs-consistency 的关系检查守住；
 ③ 改完**裸跑 `npm run cli -- onboarding` 看 ·drift 明细**（闭集 =
-backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模板的滞后一条命令立见；
-滞后本身是合法状态，看一眼是确认"我知道它滞后"而非"必须消除"）；
+backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴的 drift 应当清零；认证矩阵行
+可以滞后，看一眼确认"我知道它滞后"即可；
 ④ 认证档位变化（模型/通道）时走 delta 认证；**effort 调整 = delta 重取证**：四元组指纹虽
 不含 effort，但 executionProfile 失真即认证不再代表执行特征——重取证范围 = effort 相关 drill
 子集 + 画像重绑，`conditional` 状态沿用。
 
-**第二段 · 模板改版（蓄意事件：新认证组合入册/角色矩阵调整/新 lane 进模板）**：
+**第二段 · 模板改版（蓄意事件：新认证组合入册/新 lane 进模板）**：
 ③ `config/agents.example.json`（席位块+矩阵行，双身份：新手脚手架+测试夹具锚点）；
-④ `docs/team-roles.md`；⑤ `docs/usage.md` 示例（如有）；⑥ `AGENT_ONBOARDING.md`
+④ 新 lane 的画像条目（`config/lane-traits.json`）；⑤ `docs/usage/` 下的示例（如有）；⑥ `AGENT_ONBOARDING.md`
 （如有）；⑦ 测试断言面（模板动了钉自然翻红——按红项逐一核对，是设计行为）；
 ⑧ 新测试文件登记 manifest。改版收尾同样裸跑一次 onboarding 确认 ·drift 清零
 （模板与 live 的已知滞后应在改版中一并审视，蓄意保留的记入行内注记）。
@@ -186,7 +186,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模�
 - 【参】长验证前确认无计划内系统重启（Active Hours 避开安静窗）。
 - 【参】测试证明力存疑时用变异自检（删掉实现里的对应赋值，测试必须变红）。
 - 【参】文档修复落地前做**并立检查**：grep 同节旧限定词 / 同义门——新句与旧句并立是文档返工的共同形状（第二门槛、健康端点洞、双日期先例），与 kimi-web 接线事故 F8 病根同族。
-- 【参】车道带 `dispatchHold`（`config/lanes.json`）的：巡检结论出来后判断是否解除；解除只改这一个字段，`registry_list`、`wao lanes` 与派发提示随之改变。
+- 【参】车道带 `dispatchHold`（`config/lanes.json`）的：巡检结论出来后判断是否解除；解除只改这一个字段，读车道表的各个面与派发提示随之改变。
 
 **收口**（七项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → 原语表守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 升级或换代的车道在 `config/lane-traits.json` 写 `reviewPending`（复核规则见决定 0087）→ 画像复核：`npm run lane-review-stats -- --since <上次巡检日>` 重算会审席位统计，查这期间各车道的失败诊断有没有新规律，复测待复核车道，按 0087 的写规则改画像并汇报 Owner（决定 0089）→ 刷新记录写进提交说明（范围+结论+证据指针；含前置盘点结果——各 harness 本地×latest 版本对照、升级建议与 Owner 决定，暂缓/维持现状同样写明）；还在等 Owner 决定的升级建议登记进台账，防"建议过但无人记得"。
 

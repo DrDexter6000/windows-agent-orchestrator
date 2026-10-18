@@ -54,7 +54,8 @@ import { WAO_VERSION } from "../version.js";
 import { gitChildEnv } from "../delivery.js";
 
 import { validateWaoDir } from "../waoDir.js";
-import { parseOptions, resolveTargetCwd } from "./shared.js";
+import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
+import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
 import { normalizeAgent } from "../registry.js";
 // R8-2：cwd 存在性判定复用 R7-AB 的 runManager SSOT（adapters→core 下向边）。
@@ -644,15 +645,23 @@ export async function waoDoctorCommand(args, config) {
         }),
       });
     }
-    const panel = assessPanelReadiness(panelRows);
+    // 决定 0090：车道表里暂停派发的车道不算会审候选（非默认 --registry 时车道表停用）。
+    const panel = assessPanelReadiness(panelRows, {
+      dispatchHolds: dispatchHoldsByLane(lanesDocForCall(options, config, config?.loadLanesConfigFn)),
+    });
     // 0065（opus P1-3）：静默条件=three_seat 且已知族系 ≥2——三席全同族仍打印
     // （假全清防线从"零对抗席"平移到"零跨族"；R9-C C-1.4 同病预防）。
-    if (panel.tier !== "three_seat" || panel.insufficientFamilyDiversity) {
+    // 决定 0090：车道表有暂停说明时也打印，暂停说明不因会审已可配而消失。
+    const panelShort = panel.tier !== "three_seat" || panel.insufficientFamilyDiversity;
+    if (panelShort || panel.held.length > 0) {
       const seatList = panel.available.map((e) => e.id).join("、");
       let detail;
       let fix;
-      if (panel.tier === "three_seat" && panel.insufficientFamilyDiversity) {
-        detail = `已配置面：会审探测候选 ≥2（${seatList}）——但已知族系不足两族（跨族系是更强推荐，0019/0023；`
+      if (!panelShort) {
+        detail = `已配置面：会审探测候选 ≥2 且来自不同族系（${seatList}）`;
+        fix = "暂停说明只告知不拦截，派不派由 Lead 决定；解除暂停只改 config/lanes.json 的 dispatchHold";
+      } else if (panel.tier === "three_seat" && panel.insufficientFamilyDiversity) {
+        detail = `已配置面：会审探测候选 ≥2（${seatList}）——但已知族系不足两族（副审建议来自不同族系，0023/0090；`
           + `对抗性按车道派生，0045 §1.2/wao stage --reviewed-run），建议补配跨族系车道；`
           + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
         fix = "增配跨族系可用车道（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
@@ -689,6 +698,9 @@ export async function waoDoctorCommand(args, config) {
       // 凭据声明车道——未验证令牌有效性/serve 可达性）。
       if (panel.keyOnly.length > 0) {
         detail += `；key 名已解析但无 CLI 探测面（未验证令牌/serve 可达性，不计入可用）：${panel.keyOnly.join("、")}`;
+      }
+      if (panel.held.length > 0) {
+        detail += `；暂停派发（车道表 dispatchHold，不计入候选）：${panel.held.map((h) => `${h.id}（${h.dispatchHold}）`).join("、")}`;
       }
       pushCheck(checks, {
         name: "panel_readiness",

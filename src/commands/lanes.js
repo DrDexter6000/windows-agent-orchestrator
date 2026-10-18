@@ -25,7 +25,7 @@ import { readFile } from "node:fs/promises";
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
-import { buildRecommendations, displayWidth } from "../application/onboarding.js";
+import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
 import { buildLanesView, readLaneTraits } from "../application/lanesView.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 
@@ -40,23 +40,6 @@ function parseOptions(args) {
     else throw new Error(`wao lanes: unknown option "${a}"（支持：--json / --registry FILE / --lanes-file FILE / --run-dir DIR）`);
   }
   return options;
-}
-
-/** 显示宽折行（非截断——原文保留；CJK 宽字符计 2，与 onboarding 同 displayWidth）。 */
-function wrapLines(text, width) {
-  if (displayWidth(text) <= width) return [text];
-  const out = [];
-  let line = "";
-  for (const ch of text) {
-    if (displayWidth(line + ch) > width) {
-      out.push(line);
-      line = ch;
-    } else {
-      line += ch;
-    }
-  }
-  if (line.length > 0) out.push(line);
-  return out;
 }
 
 const axesLabel = (a) => `${a.backend ?? "?"}/${a.modelId ?? "?"}/${a.providerID ?? "-"}/${a.effort ?? "null"}`;
@@ -79,7 +62,7 @@ function renderLane(row, width, dimensionLabels) {
     lines.push(`  ${label}:`);
     for (const seg of wrapLines(value, body - 2)) lines.push(`    ${seg}`);
   };
-  lines.push(`lane ${row.id} — ${row.backend ?? "?"} · ${row.modelId ?? "?"} · effort ${row.effort ?? "null"}`);
+  lines.push(`lane ${row.id} — ${row.backend ?? "?"} · ${row.modelId ?? "?"} · effort ${row.effort ?? "null"} · 推断族系 ${row.family}`);
   // TD-283：Owner 的暂停派发说明（车道表自带，与接线状态无关）——只告知不拦截。
   if (row.dispatchHold) emit("dispatchHold", `${row.dispatchHold}（Owner 暂停说明，仅提示不拦截——派发决定权在 Lead）`);
   if (row.wiring === "wired") lines.push("  接线: 一致（lanes.json 声明与 registry 接线四轴相符）");

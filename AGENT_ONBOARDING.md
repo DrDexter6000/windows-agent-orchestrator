@@ -43,7 +43,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **Node.js v22**（`engines` 为 `>=22 <23`；v24 的 libuv Windows Job Object 回归会被 WAO 版本守卫拒绝，见 §4 开头的调用纪律）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
 - **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage/lanes.md`「kimi 车道的 worker serve」）
-- **认证任选其一**（车道对应关系见 §4c 选择表）：zcode 桌面登录态（glm-pro/glm-flash）、官方 Claude OAuth `claude login`（opus）、`codex login`（sol/astra）、`KIMI_WEB_TOKEN`（kimi，kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（deepseek-pro/deepseek-flash，ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
+- **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth 隔离**：provider-wrapped claude-code worker 用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证；`opus` 不走 wrapper，使用官方 Claude OAuth。
 
@@ -101,7 +101,7 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 
 先分清两个文件的作用域，不要混淆：
 
-- **`config/agents.example.json`（入库的模板）**：车道键=模型家族短名（glm-pro / glm-flash / kimi / sol / astra / opus / deepseek-pro / deepseek-flash）；角色与车道解绑（角色库 auditor/coder/researcher/tester 经 `--lane <车道> --role <角色>` 显式选择；席位角色声明已退役，对抗性按审者×作者车道派生）——它是上游样例，不需要编辑它本身。
+- **`config/agents.example.json`（入库的模板）**：车道键=模型家族短名（`wao onboarding` 列出全部候选）；角色与车道解绑，派发时用 `--lane <车道> --role <角色>` 显式选择——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
 > **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印角色矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
@@ -129,7 +129,7 @@ Copy-Item config/agents.example.json config/agents.json
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
-> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是两名**不同族系**车道（跨族系是更强推荐；任何车道都可任副审，席位角色不设人工声明——对抗性在登记席位时按审者×作者车道派生，见 `wao stage --reviewed-run`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。你有多种认证时按此优先级裁剪：先保两条不同族系车道，再保族系差异面。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
+> **为会审留车道**：你有多种认证时，裁剪 registry 先保两条不同族系的车道，会审才配得齐（组席规则见 `SKILL.md`，操作见 `docs/usage/consult.md`）。`wao onboarding` 的会审就绪块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境提示：你已生成 `config/agents.json` 后按它的真实行显示（已配置面），还没生成时按模板显示（模板面）。只有一个 worker 时它就是被审产出的作者，会审无从谈起，如实跳过即可。
 
 ### 4d. 自检 registry 与环境（必做）
 
@@ -180,13 +180,13 @@ npm run cli -- run <agentId> --prompt "Read package.json and report the package 
 
 ## 5. 开始用：最小闭环
 
-### 派发 GLM 任务（推荐 glm-pro 或 glm-flash）
+### 派发第一个任务
 
 ```
 npm run cli -- run glm-pro --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-`glm-pro` 跑 zcode app-server（原厂 harness 驱动原厂 LLM），型号见 `wao lanes`，适合较重编码任务；轻量/探索任务用 `glm-flash`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
+命令里的 `glm-pro` 换成你接好的车道；各车道擅长什么、有什么限制，看 `npm run cli -- wao lanes`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
 
 ### 记录状态（每次任务后）
 

@@ -115,7 +115,7 @@ npm link          # 可选，每机一次：暴露全局 `wao` 命令（如 `wao
 #    （在手工复制之前先跑它——已存在 config/agents.json 时它会拒绝覆盖。）
 #    手工等价步骤：
 Copy-Item config/agents.example.json config/agents.json
-#    agents.example.json 是入库模板，与 canonical 团队角色一一对应——不要改它。
+#    agents.example.json 是入库模板，config/lanes.json 的每条车道各有一个条目——不要改它。
 #    你复制出的 agents.json 是 gitignored 的、由你裁剪：只保留你真有 runtime/认证
 #    路径的 worker，其余删掉。一个 runtime 就够用 WAO。
 #    各 runtime 的认证方式选择表见 AGENT_ONBOARDING.md。

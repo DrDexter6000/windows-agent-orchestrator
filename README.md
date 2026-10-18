@@ -139,8 +139,8 @@ npm link          # optional, once per machine: exposes the global `wao` command
 #    (run it BEFORE any manual copy — it refuses to overwrite an existing
 #    config/agents.json). Manual equivalent below:
 Copy-Item config/agents.example.json config/agents.json
-#    agents.example.json is the TRACKED template, aligned one-to-one with the
-#    canonical team roles — leave it untouched. Your copied agents.json is
+#    agents.example.json is the TRACKED template with one entry per lane in
+#    config/lanes.json — leave it untouched. Your copied agents.json is
 #    gitignored and yours to prune: keep only the workers whose runtime/auth
 #    path you actually have, delete the rest. One runtime is enough to use WAO.
 #    The per-runtime auth choice table is in AGENT_ONBOARDING.md.

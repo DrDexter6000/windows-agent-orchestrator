@@ -335,6 +335,25 @@ test("projectLaneProfiles：caveats 全部投影；未评格不投影、不折�
   assert.deepEqual(Object.keys(half.rows[0].ratings), ["research"], "只投影已评的维度");
 });
 
+test("projectLaneProfiles：每行带推断族系（决定 0090），由车道表的 backend 与 modelId 推断", () => {
+  const traitsResult = {
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+    traits: { la: validEntry(), lb: validEntry(), lc: validEntry(), ld: validEntry() },
+    invalidIds: [], issues: [],
+  };
+  const proj = projectLaneProfiles({
+    lanesDoc: laneDoc([
+      LANE_A,
+      LANE_B,
+      { id: "lc", backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" } },
+      { id: "ld", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" } },
+    ]),
+    traitsResult,
+  });
+  assert.deepEqual(proj.rows.map((r) => r.family), ["未知族系", "GPT", "GPT", "GLM"],
+    "认不出的型号按 backend 兜底（codex→GPT，与写了 gpt 型号的同族）；zcode 不兜底（多 provider 宿主），认不出即未知");
+});
+
 test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看图", () => {
   const traitsResult = {
     state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
@@ -375,7 +394,7 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   // 行键闭集与维度中文名。
   assert.deepEqual(
     Object.keys(proj.rows[0]).sort(),
-    ["caveats", "contextWindowTokens", "cost", "dispatchHold", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
+    ["caveats", "contextWindowTokens", "cost", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
   );
   assert.deepEqual(Object.keys(proj.dimensionLabels), RATING_DIMENSIONS);
   assert.equal(proj.dimensionLabels.research, DIMENSION_LABELS.research, "中文名来自同一归宿");
@@ -556,7 +575,7 @@ test("MCP lead_preflight：合法投影过整份出参 schema（形状即 LEAD_P
       assert.deepEqual(Object.keys(lanes.dimensionLabels), RATING_DIMENSIONS);
       const row = lanes.rows[0];
       assert.deepEqual(Object.keys(row).sort(),
-        ["caveats", "contextWindowTokens", "cost", "dispatchHold", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
+        ["caveats", "contextWindowTokens", "cost", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
       assert.deepEqual(Object.keys(row.ratings), ["research"], "只含已评维度（夹具只评了 research）");
       assert.equal(row.ratingsState, "current");
     } finally { await client.close(); await server.close(); }

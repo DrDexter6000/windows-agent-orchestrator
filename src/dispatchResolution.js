@@ -103,6 +103,20 @@ export function laneDispatchHold(lanesDoc, laneId) {
 }
 
 /**
+ * 车道表里全部合法 dispatchHold 的映射 {laneId: 原话}（纯函数；表不可用时为空）。
+ * 会审就绪提示（onboarding / doctor）据此不把暂停的车道算作候选（决定 0090）。
+ */
+export function dispatchHoldsByLane(lanesDoc) {
+  if (!lanesDoc || lanesDoc.ok !== true || !Array.isArray(lanesDoc.lanes)) return {};
+  const holds = {};
+  for (const lane of lanesDoc.lanes) {
+    const hold = lane && typeof lane.id === "string" ? validDispatchHold(lane.dispatchHold) : null;
+    if (hold !== null) holds[lane.id] = hold;
+  }
+  return holds;
+}
+
+/**
  * 派发面的 stderr advisory 行（run/spawn/consult 席位共用同一文案；形制同
  * dispatchResourceAdvisory 的 `[wao] advisory:` 行）。只提示，永不拦截。
  */

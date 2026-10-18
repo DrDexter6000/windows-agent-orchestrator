@@ -31,7 +31,7 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 4. Add a Tester when independent execution evidence is useful. The canonical `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery.
 5. Hard check: `verificationCommands` containing the full suite (`npm test`) must declare `verificationTimeoutMs ≥ 1200000` — the default 300000 reliably hits `command_timeout`.
 
-Route by semantic coupling (ambiguity, coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by name. 0046 车道（模型名席位）：多数实现优先 `glm-pro`；副通道/视觉用 `glm-flash`/`deepseek-flash`；创意/文案用 `kimi`. Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+Route by semantic coupling (ambiguity, coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by name; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
 
 **Target-per-call**: dispatch/continue/correct/stop/collect/decide/repackage/reverify/consult-create REQUIRE `expectedWorkspaceRoot` — this project's absolute Git top-level (subdirs rejected); it IS the target (worker cwd, runner `--cwd`, transcript attribution); missing/unprovable → refused before side effects, retry with it. `expectedGitHead`/`expectedDirty`: optional assertions against it. Session selection scopes read-only tools only; one instance shares one selection.
 
@@ -47,7 +47,7 @@ A delivery task prompt must NOT ask the worker to commit, run `git add/commit/..
 
 ## Safety Preflight
 
-Before dispatch: choose the lane from `lead_preflight` `lanes` — ratings with basis, cost, caveats, `dispatchHold` (Owner's pause note); advisory, not routing: the Lead decides. Evidence and sources: `wao lanes`; disagree with a profile: `wao feedback submit`. `registry_list` for inventory + required-credential presence. Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
+Before dispatch: choose the lane from `lead_preflight` `lanes` — ratings with basis, cost, caveats, `family`, `dispatchHold` (Owner's pause note); advisory, not routing: the Lead decides. Evidence and sources: `wao lanes`; disagree with a profile: `wao feedback submit`. `registry_list` for inventory + required-credential presence. Host MCP/provider/auth config belongs to the host runtime — **never put credential values in prompts, MCP args, or the repo**. Delivery runs force persistent worktree isolation: a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging — a detection mechanism, not an OS sandbox. A terminal `provider_capacity` diagnosis is the live execution fact — WAO never auto-retries or swaps. After `stop`, trust the terminal result + transcript; daemon liveness via `daemon ping/list/status`, not `.wao/`.
 
 **Before unattended/stop-sensitive work**: read `references/safety-incidents.md`. **Only when using opencode**: read `references/opencode-pitfalls.md`.
 
@@ -85,7 +85,7 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 
 ## Advisor / Auditor Discipline
 
-Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换 `kimi` 车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。三席会审是推荐标准（决策 0023，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 两名副审，跨族系大模型会审是更强推荐；席位避同族、避被审产出作者（0019 §3 回避保留）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换另一条车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。三席会审是推荐标准（决策 0023、0090，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 至少两名副审（配不齐时一名次之），副审来自不同族系（`lanes` 的 `family`），避开被审产出的作者（0019 §3）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
 
 ## Scorecard
 

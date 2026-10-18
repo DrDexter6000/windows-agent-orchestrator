@@ -75,3 +75,7 @@ privateSeatRole（缺席=null）与值不匹配两种事实。
 ## 修订节（0065，2026-10-12）：drift 闭集的 seatRole 轴删除
 
 0062 B9 乙′为本决定 drift 闭集新增的 seatRole 轴（seatRoleDriftBetween/Rows）随 0045 §1.2 终局执行（决定 0065）整体删除——模板与私有副本的席位声明均已退役（模板 8 席删除、私有副本字段弃用为惰性），无可比对对象。drift 闭集回到 backend + model.id + reasoning.effort（0044 d′）+ 认证矩阵行 modelId（0044 d′）。
+
+## 修订条（0090，2026-10-18）
+
+矩阵的"适合"段（读模板 `_comment_task`）删去，换一行指向 `wao lanes`：车道用途只写在车道画像。会审就绪块不把带暂停说明的车道算作候选。见 0090。

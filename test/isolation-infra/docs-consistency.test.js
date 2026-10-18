@@ -1201,9 +1201,9 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("Advisor/Auditor failure remains Lead-governed and may fall back to another lane（0046：kimi）", () => {
+test("Advisor/Auditor failure remains Lead-governed and may fall back to another lane", () => {
   const skill = read("SKILL.md");
-  assert.match(skill, /不可用、超时或无 verdict 时可换 `kimi` 车道/);
+  assert.match(skill, /不可用、超时或无 verdict 时可换另一条车道/);
   assert.match(skill, /不阻断 dispatch/);
   assert.match(skill, /项目权威明令必审时停为 governance block，不得称 WAO control-plane failure/);
 });
@@ -1218,10 +1218,6 @@ test("M12 worker routing: SKILL keeps semantic routing and Lead authority", () =
     "SKILL must not use package surface size as an automatic reassignment rule");
   assert.ok(/拆分.*转派.*Lead|Lead.*(?:拆分|转派).*决定/i.test(skill),
     "Lead must own package split and reassignment decisions");
-  assert.ok(/多数实现优先 `glm-pro`/i.test(skill),
-    "0046：SKILL 路由建议指向 glm-pro（模型名车道，旧席位名已废弃）");
-  assert.ok(/视觉用 `glm-flash`\/`deepseek-flash`|`glm-flash`.*`deepseek-flash`/i.test(skill),
-    "0046：视觉/副通道建议指向 flash 车道");
   assert.ok(!/`coder_low`|`coder_hq`|`coder_mm`/.test(skill),
     "0046：SKILL 不得再引用已废弃的旧席位名");
 });
@@ -1237,17 +1233,13 @@ test("M12 role naming: stable auditor id represents one advisory/audit expert", 
   }
 });
 
-test("M12 canonical value pins: 0046 车道键模板（原厂通道+effort 档）", () => {
+test("M12 canonical value pins: 0046 车道键模板（原厂通道形状）", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
   const flash = parsed.agents?.["glm-flash"];
-  assert.equal(flash?.backend, "zcode");
-  assert.equal(flash?.reasoning?.effort, "max");
+  // 各车道的接线轴（backend/model/effort）由 fixtureDriftGuard 的"模板轴 ≡ 车道表"
+  // 关系检查承担（决定 0090），这里不再钉字面值。
   assert.equal(flash?.provider, undefined, "0046：原生通道无 provider wrapper 块");
   assert.equal(flash?.sessionReuse, "lead_workspace", "researcher 复用政策的席位承载（0046 §4）");
-  assert.equal(parsed.agents?.sol?.reasoning?.effort, "high");
-  // Owner 2026-10-06 批复：astra/opus xhigh→high（0046 §2 官方五档内降档）。
-  assert.equal(parsed.agents?.astra?.reasoning?.effort, "high");
-  assert.equal(parsed.agents?.opus?.reasoning?.effort, "high");
   const dsp = parsed.agents?.["deepseek-pro"];
   assert.equal(dsp?.model?.providerID, "deepseek-official", "ACP 双字段 model 形状（0046 §3）");
   // 各车道 model.id 的字面值断言已退役（车道升级型号即成漂移欠条）：模板与
@@ -1541,18 +1533,17 @@ test("车道当前型号只在配置里：现行文档与模板注释不得出�
     `车道当前型号只允许写在配置里（config/lanes.json 与 config/agents.example.json 的 model.id、认证矩阵的 modelId/label）。两种合法改法：写的是车道当前绑定 → 改成车道名或 <modelId> 占位；写的是某个具体型号的事实 → 放进 <!-- model-specific --> 就地标记。命中清单：\n${hits.join("\n")}`);
 });
 
-test("车道当前型号只在配置里：lanes.json 车道与 agents.example.json 同 id 条目接线一致（关系检查）", () => {
+test("车道当前型号只在配置里：lanes.json 车道与 agents.example.json 同 id 条目接线一致（关系检查）", async () => {
+  const { laneAxes, agentAxes, axesEqual } = await import("../../src/dispatchResolution.js");
   const lanes = JSON.parse(read("config/lanes.json")).lanes ?? [];
   const parsed = JSON.parse(read("config/agents.example.json"));
   for (const lane of lanes) {
     const agent = parsed.agents?.[lane.id];
     assert.ok(agent, `agents.example.json 缺与车道同 id 的条目：${lane.id}`);
-    assert.equal(agent?.model?.id, lane.model?.id,
-      `${lane.id}：agents.example.json 的 model.id 必须等于 config/lanes.json 的 model.id（当前型号只写在配置里，升级时两处同改）`);
-    if (lane.model?.providerID !== undefined || agent?.model?.providerID !== undefined) {
-      assert.equal(agent?.model?.providerID, lane.model?.providerID,
-        `${lane.id}：providerID 必须与 config/lanes.json 一致（任一侧写了，两侧都要有且相等）`);
-    }
+    // 与 explicit 派发同一判定（决定 0090）：四轴（backend/model.id/providerID/effort）
+    // 不一致时，照抄模板配出的注册表会被 `--lane` 派发以 lane_wiring_mismatch 拒绝。
+    assert.ok(axesEqual(laneAxes(lane), agentAxes(agent)),
+      `${lane.id}：agents.example.json 的接线轴 ${JSON.stringify(agentAxes(agent))} 必须等于 config/lanes.json 的 ${JSON.stringify(laneAxes(lane))}（升级型号或改 effort 时两处同改）`);
   }
 });
 
@@ -2485,39 +2476,37 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     "agents.example.json 必须标注为完整示例/推荐配置");
   assert.ok(/一个 worker|one worker|删到只剩/.test(raw),
     "agents.example.json 必须说明可删减到只剩一个 worker");
-  // Correction review (Lead): tracked template stays aligned one-to-one with
-  // the canonical team roles; pruning happens on the gitignored private copy
-  // (agents.json), never on the tracked template itself.
-  assert.ok(/入库/.test(raw) && /一一对应/.test(raw) && /team-roles/.test(raw),
-    "agents.example.json 必须自述为入库模板且与 team-roles.md 角色一一对应");
+  // Pruning happens on the gitignored private copy (agents.json), never on the
+  // tracked template itself.
+  assert.ok(/入库/.test(raw), "agents.example.json 必须自述为入库模板");
   assert.ok(/config\/agents\.json（gitignored|复制为 config\/agents\.json/.test(raw),
     "裁剪作用域必须指向 gitignored 的私人 agents.json 副本，而非模板本身");
   assert.ok(!/本文件[^。]{0,40}(?:按可用认证|删减|编辑|修改)/.test(raw),
     "入库模板不得声称按认证删减/编辑它本身（删减只发生在私人副本）");
 });
 
-test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/model/effort 当前值", () => {
+test("team-roles.md 的 worker 角色表与角色库一一对应，职责只指向合同文件（决定 0090）", () => {
   const roles = read("docs/team-roles.md");
-  const sectionTitles = {
-    researcher: "Researcher",
-    coder: "Coder",
-    tester: "Tester",
-    auditor: "Chief-Advisor / Auditor",
-  };
-  // 0046 步⑤：三 Coder 角色合并为 coder；lane 指针=车道键。codex 车道只用做会审
-  // （Owner 规则，写在车道画像），所以 tester 指向 glm-pro。
-  const LANE_POINTER = { researcher: "glm-flash", coder: "glm-pro", tester: "glm-pro", auditor: "astra" };
-  const sections = new Map();
-  for (const part of roles.split(/^### /m).slice(1)) {
-    const title = part.slice(0, part.indexOf("\n")).trim();
-    sections.set(title, part);
+  const stems = readdirSync(join(ROOT, "config", "roles"))
+    .filter((f) => f.endsWith(".md")).map((f) => f.slice(0, -3)).sort();
+  assert.ok(stems.length > 0, "角色库为空");
+  const rowIds = [...roles.matchAll(/^\| `([a-z-]+)` \|/gm)].map((m) => m[1]).sort();
+  assert.deepEqual(rowIds, stems, "worker 角色表的行必须与 config/roles/*.md 一一对应");
+  for (const stem of stems) {
+    assert.ok(roles.includes(`\`config/roles/${stem}.md\``), `team-roles.md 的 ${stem} 行缺合同指针`);
   }
-  for (const [id, titlePrefix] of Object.entries(sectionTitles)) {
-    const section = [...sections.entries()].find(([t]) => t.startsWith(titlePrefix))?.[1];
-    assert.ok(section, `team-roles.md 必须存在 ### ${titlePrefix} 角色节`);
-    assert.ok(section.includes("config/agents.example.json") && section.includes(`\`${LANE_POINTER[id]}\``), `${titlePrefix} 缺默认 lane 指针（0046：${LANE_POINTER[id]}）`);
-    assert.ok(/config\/agents\.json.*gitignored/.test(section), `${titlePrefix} 缺本机真值声明`);
-    assert.ok(!/^\| \*\*(?:backend|model|effort)\*\* \|/m.test(section), `${titlePrefix} 仍复制 lane 当前值`);
+});
+
+test("SKILL.md 与 team-roles.md 不写车道名：车道怎么用只写在车道画像（决定 0090）", () => {
+  const laneIds = JSON.parse(read("config/lanes.json")).lanes.map((l) => l.id);
+  assert.ok(laneIds.length > 0, "车道表为空");
+  for (const file of ["SKILL.md", "docs/team-roles.md"]) {
+    const text = read(file);
+    for (const id of laneIds) {
+      const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      assert.ok(!new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(text),
+        `${file} 出现车道名 ${id}：车道的用途与限制写在 config/lane-traits.json（lead_preflight / wao lanes），这里只写角色与原则`);
+    }
   }
 });
 
@@ -2902,14 +2891,15 @@ test("ADR 0023: 决策 0023 在场 + 四码/两阶段/supersedes 与代码 SSOT 
     "0019 的 status: accepted 保留（supersede 指针不改写历史决策状态）");
 });
 
-test("ADR 0023: SKILL.md 三席标准表述锚（推荐标准/两节点/skip 登记/跨族系/红线）", () => {
+test("ADR 0023/0090: SKILL.md 会审表述锚（推荐标准/两节点/skip 登记/不同族系/红线）", () => {
   const skill = read("SKILL.md");
   assert.ok(skill.includes("三席会审是推荐标准（决策 0023"),
     "SKILL.md 必须把三席会审表述为推荐标准并指向 0023");
   assert.ok(skill.includes("`wao stage 2`") && skill.includes("`wao stage 4`"),
     "SKILL.md 必须点名方案（stage 2）与验收（stage 4）两节点");
   assert.ok(skill.includes("--panel-skip-reason"), "SKILL.md 必须指向 skip 登记 flag");
-  assert.ok(skill.includes("跨族系大模型会审是更强推荐"), "SKILL.md 必须携带跨族系推荐");
+  assert.ok(skill.includes("至少两名副审") && skill.includes("副审来自不同族系"),
+    "SKILL.md 必须写明至少两名副审、来自不同族系（Owner 2026-10-18，决定 0090）");
   assert.ok(skill.includes("0019 §3"), "SKILL.md 必须引用保留的 0019 §3 席位回避");
   assert.ok(skill.includes("panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用"),
     "SKILL.md panel 记录必须复述证据不是验收红线");
@@ -2918,13 +2908,10 @@ test("ADR 0023: SKILL.md 三席标准表述锚（推荐标准/两节点/skip 登
     "SKILL.md 不得保留 0019 的'默认不审'时代窄调句（0023 已 supersede）");
 });
 
-test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0023 表述", () => {
+test("ADR 0023: team-roles.md 与 onboarding 的会审旧姿态句不复现", () => {
   const roles = read("docs/team-roles.md");
-  const item7 = roles.split("\n").find((l) => l.startsWith("7. **")) ?? "";
-  assert.ok(item7.includes("三席会审是推荐标准（决策 0023"), "team-roles 第 7 条必须是三席推荐标准表述");
-  assert.ok(item7.includes("--panel-skip-reason"), "team-roles 第 7 条必须指向 skip 登记");
-  assert.ok(item7.includes("`run_delivery_decide` 只由 Lead 调用"), "team-roles 第 7 条必须复述红线");
-  assert.ok(item7.includes("ADR 0019 §3"), "team-roles 第 7 条必须指向席位回避规则（ADR 0019 §3）");
+  // 会审规则只在 SKILL.md 一处（决定 0090）；team-roles 与 onboarding 只指过去，
+  // 这里只守已退役的说法不回来。
   // 反回归：0019 时代的"默认姿态不变"句不得复现（0023 已 supersede §2）。
   assert.ok(!roles.includes("默认姿态不变"), "team-roles 不得保留'默认姿态不变'旧姿态句");
   // R9-C C-2：标准开发流流程图旧姿态句不得复现——方案/验收两行都必须是 0023
@@ -2939,10 +2926,6 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(!/对抗席车道/.test(ob) && !/实现席车道/.test(ob),
     "0065：onboarding 副审建议不得再用对抗席/实现席车道组合措辞（席位角色维退役）");
-  assert.ok(/不同族系/.test(ob), "onboarding 副审建议必须含跨族系建议");
-  assert.ok(/审者×作者车道派生|--reviewed-run/.test(ob), "0065：副审建议须指向派生机制（--reviewed-run）");
-  assert.ok(ob.includes("决策 0023"), "onboarding 副审建议必须指向决策 0023");
-  assert.ok(ob.includes("--panel-skip-reason"), "onboarding 副审建议必须提及 skip 登记出口");
 });
 
 // ---------------------------------------------------------------------------

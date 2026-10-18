@@ -8,7 +8,7 @@
 
 ```powershell
 # brief 文件 = 共享任务书（编号问题 Q1..Qn + 输出格式契约），逐字节分发给每席
-npm run cli -- consult run brief.md --seats astra,kimi,glm-flash
+npm run cli -- consult run brief.md --seats a,b,c
 
 # 带每席视角片段（答题姿势 2-3 句：差异化资产 + 自测问题；原样拼在该席 prompt 尾部）
 npm run cli -- consult run brief.md --seats a,b --perspective a=persp-a.md --perspective b=persp-b.md
@@ -26,7 +26,7 @@ npm run cli -- consult show <consultId> --format json
 npm run cli -- consult wait <consultId>
 
 # 取一席的完整原文写进文件
-npm run cli -- consult show <consultId> --seat kimi --out kimi.md
+npm run cli -- consult show <consultId> --seat a --out a.md
 ```
 
 **状态两维独立**：每席 `runState`（transcript 真值：pending/running/completed/
@@ -96,11 +96,11 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 
 ## 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）
 
-方案（stage 2）与交付物验收（stage 4）可登记会审 panel 记录——三席会审（Lead 主审 + 两名副审）是推荐标准，配不齐则以两席为次之推荐；强烈推荐但非强制，跳过需登记显式理由：
+方案（stage 2）与交付物验收（stage 4）可登记会审 panel 记录。组席规则见 `SKILL.md`；强烈推荐但非强制，跳过需登记显式理由：
 
 ```powershell
 # 登记自报副审席位（registry 存在性校验；自报、未验证——评审旁证走 --artifacts 的 runs/<runId>.jsonl）
-npm run cli -- wao stage 2 --task "方案定稿" --panel-seats glm-pro,astra --artifacts docs/plan.md
+npm run cli -- wao stage 2 --task "方案定稿" --panel-seats a,b --artifacts docs/plan.md
 # 登记跳过理由（闭集码；与 --panel-seats 互斥，非法码 fail-fast）
 npm run cli -- wao stage 4 --task "交付验收" --panel-skip-reason low_risk_small_task
 # 裸跑查看 panel 分布 + skip 理由分布（pipeline 自省）
@@ -109,9 +109,10 @@ npm run cli -- wao stage --cwd <目标项目>
 
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（panel 字段只在方案（2）/交付物验收（4）登记）；同一 stage 允许多条记录，返工/窄复核照常再登记。
+- 席位不声明角色，对抗性是派生事实：带 `--reviewed-run <runId>` 登记时，按当时的 registry 车道配置 × 被审 run 的 `run.started` 钉住作者——审者车道与作者车道不同 = 对抗前提成立；席位与作者同车道 = 回避违反，大声提示（advisory，不阻断）。`--reviewed-run` 可给多个 runId（共同作者）；作者不可读或缺 `run.started` 时如实输出 unknown，不折叠成"无违反"。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
 - 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块按面切换——私有 `config/agents.json` 不存在时是模板面（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到已配置面（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）。`wao doctor` 的 `panel_readiness` 检查恒为已配置面——从你的 `config/agents.json` + doctor 既有探测推导（无效条目不进计数），仅当探测候选 ≤1 或已知族系不足两族时打印 INFO（三席且跨族才静默；registry 缺位沿"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。
-- 分级语义：候选=全部有效行（任何车道都可能任副审，临场帽子=派发时 role）；tier 按 ready 候选计数（探测口径，不声称已配齐可派发副审）：三席（≥2，推荐标准）/两席（恰 1，次之推荐）/零候选（跳过提示）。已知族系不足两族时仍判三席，但必附跨族系提示（doctor 不静默）。对抗性不做事前预判，由 `wao stage --reviewed-run` 按审者×作者车道指纹派生。`login_based`/`unknown`/`key_only_*` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"，无 CLI 面凭据车道展示 key_only 面）；跨族系（推断族系标签，展示专用非契约）是更强推荐。
+- 分级语义：候选=全部有效行（任何车道都可能任副审，临场帽子=派发时 role）；tier 按 ready 候选计数（探测口径，不声称已配齐可派发副审）：三席（≥2，推荐标准）/两席（恰 1，次之推荐）/零候选（跳过提示）。已知族系不足两族时仍判三席，但必附跨族系提示（doctor 不静默）。车道表里带 `dispatchHold` 的车道不算候选，连同暂停说明单列一行。`login_based`/`unknown`/`key_only_*` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"，无 CLI 面凭据车道展示 key_only 面）；族系是推断标签，展示专用、非契约。
 
 ## MCP `run_consult`（多席只读会审）
 

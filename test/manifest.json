@@ -319,6 +319,7 @@
       "isolation-infra/gitLocalExcludeCloseout.test.js",
       "isolation-infra/installPs1.test.js",
       "run-lifecycle/kimiTokenFileDoctorCheck.test.js",
+      "run-lifecycle/doctorPanelHold.test.js",
       "run-lifecycle/m10pre3cDaemonSignalTruth.test.js",
       "run-lifecycle/m10preCloseout2.test.js",
       "delivery/m11-10-readiness.test.js",

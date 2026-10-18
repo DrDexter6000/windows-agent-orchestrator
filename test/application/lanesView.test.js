@@ -108,6 +108,12 @@ test("buildLanesView：四接线态 + 行序钉（lanes.json 声明序，不按 
   assert.equal(unwiredView.lanes[2].certification, null);
 });
 
+test("buildLanesView：每行带推断族系（决定 0090），与 lead_preflight 同一推断", () => {
+  const view = viewWithInvalidL3(baseInputs());
+  assert.deepEqual(view.lanes.map((r) => r.family), ["未知族系", "GPT", "GPT"],
+    "zcode 认不出型号即未知；codex 车道归 GPT——接线状态（含 invalid）不影响族系");
+});
+
 test("buildLanesView：行不再携带 seatRole 键（0065 列退役钉——恢复即红）", () => {
   const input = baseInputs();
   // registry 侧带旧声明（迁移期形状）——归一化已 strip，视图行也不得再出现该键。

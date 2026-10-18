@@ -2831,6 +2831,7 @@ const LANES_PROJECTION_OUTPUT = z.object({
   }).strict(),
   rows: z.array(z.object({
     id: z.string().max(64),
+    family: z.string().max(32),
     ratings: z.object({
       research: LANE_RATING_CELL_OUTPUT.optional(),
       code: LANE_RATING_CELL_OUTPUT.optional(),

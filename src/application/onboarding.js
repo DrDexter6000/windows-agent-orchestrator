@@ -129,7 +129,7 @@ export function buildCandidateList(template) {
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent): one row per
 // template worker, derived PURELY from the tracked template rows (backend,
-// provider.apiKeyEnv, model.id, _comment_task/_comment_auth) plus the INJECTED
+// provider.apiKeyEnv, model.id, _comment_auth) plus the INJECTED
 // environment probe. There is no second hand-written role table and no
 // auto-selection/auto-write — the choice stays with the user, matching the
 // existing "mutation requires explicit selection" contract.
@@ -166,7 +166,6 @@ export { BACKEND_CLI };
 export const RECOMMENDATIONS_ADVISORY =
   "推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置）";
 
-const DUTY_MAX = 60;      // _comment_task 截断上限（≈60 显示格）
 const AUTH_NOTE_MAX = 60; // _comment_auth 截断上限（≈60 显示格）
 
 // R6-C3（P1-2）：东亚宽字符码点区间表（Hangul Jamo / CJK 部首·符号·表意·
@@ -201,6 +200,23 @@ export function displayWidth(value) {
   let w = 0;
   for (const ch of String(value ?? "")) w += isWideChar(ch) ? 2 : 1;
   return w;
+}
+
+/** 按显示宽折行（不截断，原文保留；CJK 宽字符计 2）。wao lanes 与 onboarding 共用。 */
+export function wrapDisplay(text, width) {
+  if (displayWidth(text) <= width) return [text];
+  const out = [];
+  let line = "";
+  for (const ch of text) {
+    if (displayWidth(line + ch) > width) {
+      out.push(line);
+      line = ch;
+    } else {
+      line += ch;
+    }
+  }
+  if (line.length > 0) out.push(line);
+  return out;
 }
 
 const READY_RANK = {
@@ -318,7 +334,7 @@ async function computeReadyState({ requiresCli, requiresKeyEnvNames, requiresTok
  * @returns {Promise<{advisory: string, rows: {
  *   id: string, backend: string|null, model: string|null,
  *   requiresCli: string|null, requiresKeyEnv: string|null,
- *   duty: string|null, authNote: string|null,
+ *   authNote: string|null,
  *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown",
  *   source: "template"|"configured"
  * }[]>}>
@@ -376,7 +392,6 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
       requiresCli,
       requiresKeyEnv,
       ...(requiresTokenFile ? { requiresTokenFile } : {}),
-      duty: truncateNote(agent._comment_task, DUTY_MAX),
       authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
       readyState: await computeReadyState({ requiresCli, requiresKeyEnvNames: credNames.length > 0 ? credNames : null, requiresTokenFile, probeCli, probeKey, probeTokenFile }),
       // R11-2（决策 0024）：结构化来源字段（两态闭集）——JSON 消费者拿得到双源事实。
@@ -843,6 +858,8 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
  * @param {{hasCli: Function, hasKeyEnv: Function}} [input.probeEnv] — injected
  *   environment probe for the advisory recommendations (see buildRecommendations);
  *   omitted ⇒ every probe reads as "unknown" (no probing of any kind).
+ * @param {Object<string, string>} [input.dispatchHolds] — 决定 0090：车道表的暂停说明
+ *   {laneId: 原话}（命令层从车道表读出后注入）；会审就绪块不把这些车道算作候选。
  * @param {{readFile: Function, writeFile: Function, rename: Function, existsSync: Function, unlink: Function, mkdir: Function}} input.fs
  *   injectable filesystem (default bindings are wired by the command layer).
  *   `mkdir` is recursive-parent creation used only by the atomic write.
@@ -858,6 +875,7 @@ export async function runOnboarding({
   reliabilitySummaryPath,
   privateRegistryPath,
   probeEnv,
+  dispatchHolds = {},
   fs,
 } = {}) {
   const _fs = fs;
@@ -877,7 +895,7 @@ export async function runOnboarding({
     invalidCount: 0,
     sourceUnreadable: false,
   };
-  const finalize = (partial) => baseResult({ ...partial, recommendations, panelState });
+  const finalize = (partial) => baseResult({ ...partial, recommendations, panelState, dispatchHolds });
 
   // Read + parse the tracked template first. The candidate list (shown even in a
   // bare preview) is derived from it, and every selection is validated against it.
@@ -1141,9 +1159,9 @@ export async function runOnboarding({
  * 随席位角色维退役删除；新增 keyOnly 透传与 duplicateModelKeys（同 backend+
  * modelId 多键点名——tier 按行计数时的虚高提示）。
  */
-function projectPanelReadiness(rows) {
+function projectPanelReadiness(rows, dispatchHolds = {}) {
   const list = Array.isArray(rows) ? rows : [];
-  const a = assessPanelReadiness(list);
+  const a = assessPanelReadiness(list, { dispatchHolds });
   return {
     tier: a.tier,
     available: a.available.map((e) => ({ id: e.id, family: e.family })),
@@ -1155,6 +1173,7 @@ function projectPanelReadiness(rows) {
     insufficientFamilyDiversity: a.insufficientFamilyDiversity,
     duplicateModelKeys: a.duplicateModelKeys,
     singleWorkerVacuous: a.singleWorkerVacuous,
+    held: a.held,
     rowCount: list.length,
   };
 }
@@ -1184,7 +1203,7 @@ function baseResult(partial) {
     // R9（决策 0023）：三席会审就绪分级（advisory 加性字段）。从 panelState.rows
     // 单次推导（panelReadiness 单一实现）——模板面/已配置面（R10-B）共用同一条
     // 投影；rows 空时 tier 如实为 "none"，人类输出整块不打印。
-    panelReadiness: projectPanelReadiness(partial.panelState?.rows ?? partial.recommendations?.rows ?? []),
+    panelReadiness: projectPanelReadiness(partial.panelState?.rows ?? partial.recommendations?.rows ?? [], partial.dispatchHolds),
     // R10-B：readiness 块的面元数据（与人类输出同源的加性字段，单点投影）——
     // panelFace: 输入行来源（"template" 模板面 / "configured" 已配置面）；
     // panelConfiguredCount: 已配置面时私有 registry 的 worker 数（模板面 null）；
