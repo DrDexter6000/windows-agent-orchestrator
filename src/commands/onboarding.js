@@ -269,7 +269,7 @@ export function renderHuman(r) {
     lines.push("            npm run cli -- wao onboarding --agent <id> --apply    # write config/agents.json");
     lines.push("            (global form: wao onboarding --agent <id>)");
 
-    // R6-C: role matrix + current-environment fit (advisory). Rows are derived
+    // R6-C: lane matrix + current-environment fit (advisory). Rows are derived
     // from the template rows and the injected probe; the engine already sorted
     // them ready-first. The tail line hands the choice back to the user.
     //
@@ -288,7 +288,7 @@ export function renderHuman(r) {
     if (rows.length > 0) {
       const mixed = typeof r.recommendations?.configuredCount === "number";
       lines.push("");
-      lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
+      lines.push(`车道矩阵与当前环境适配（${r.recommendations.advisory}）:`);
       if (mixed) {
         // 0024(1)：表头一句交代混合（N = 私有有效行总数，M = 模板未配置候选总数）。
         lines.push(`  矩阵 = 你的 config/agents.json（${r.recommendations.configuredCount} 名）+ 模板未配置候选（${r.recommendations.templateCandidateCount} 名）`);
@@ -498,7 +498,7 @@ function panelReadinessLines(r) {
 }
 
 // ── R6-C human rendering helpers ─────────────────────────────────────────────
-// Derived from the engine rows (single source). No second hand-written role
+// Derived from the engine rows (single source). No second hand-written lane
 // table: labels are shape-derived (key env name / CLI login state) and the only
 // per-worker auth text comes from the template's _comment_auth (carried as
 // row.authNote).

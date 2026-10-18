@@ -104,9 +104,9 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 - **`config/agents.example.json`（入库的模板）**：车道键=模型家族短名（`wao onboarding` 列出全部候选）；角色与车道解绑，派发时用 `--lane <车道> --role <角色>` 显式选择——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
-> **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印角色矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
+> **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印车道矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
 > 注意次序：自动化路径要求 `config/agents.json` 尚不存在——若你已按下面手动 `Copy-Item` 过，`--apply` 会拒绝覆盖（安全设计），删掉该副本后重跑即可。
-> **矩阵双源展示**：已生成可读的 `config/agents.json` 后，裸跑 `npm run cli -- wao onboarding` 的角色矩阵自动变双源——已配置行（你的真实配置、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；已配置行与模板同 id 但 backend/model 漂移时行尾挂 `·drift` 并在表后列有界明细。`--apply` 仅适用模板候选行（为未配置 worker 生成单 worker registry；已配置行本身不受 `--apply` 改写）。还没生成 `config/agents.json`（或文件不可读）时矩阵是纯模板面，输出不变。
+> **矩阵双源展示**：已生成可读的 `config/agents.json` 后，裸跑 `npm run cli -- wao onboarding` 的车道矩阵自动变双源——已配置行（你的真实配置、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；已配置行与模板同 id 但 backend/model 漂移时行尾挂 `·drift` 并在表后列有界明细。`--apply` 仅适用模板候选行（为未配置 worker 生成单 worker registry；已配置行本身不受 `--apply` 改写）。还没生成 `config/agents.json`（或文件不可读）时矩阵是纯模板面，输出不变。
 
 ```powershell
 Copy-Item config/agents.example.json config/agents.json
@@ -295,7 +295,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 | `run-lifecycle/` | run 生命周期、续谱、sessionReuse |
 | `mcp-surface/` | 23-tool 冻结工具面与 MCP wire 契约 |
 | `transcript/` | 事件解析、summary、collect 投影 |
-| `registry-roles/` | registry schema、角色矩阵 |
+| `registry-roles/` | registry schema、角色与车道 |
 | `backends/` | 各 backend 适配 |
 | `isolation-infra/` | worktree 隔离、canonical runner、**docs-consistency 文档漂移守卫** |
 | `workflow/` | DAG 引擎 |

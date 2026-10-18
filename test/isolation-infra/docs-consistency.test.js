@@ -3034,7 +3034,7 @@ test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + 使用手册安装页配置
   assert.ok(ob.includes("`·模板候选`"), "AGENT_ONBOARDING.md 必须点名模板候选尾标");
   assert.ok(ob.includes("`--apply` 仅适用模板候选行"), "AGENT_ONBOARDING.md 必须含 --apply 适用范围句");
   const install = read("docs/usage/install.md");
-  assert.ok(install.includes("角色矩阵按双源展示"), "使用手册的配置说明必须写明角色矩阵按双源展示");
+  assert.ok(install.includes("车道矩阵按双源展示"), "使用手册的配置说明必须写明车道矩阵按双源展示");
   assert.ok(install.includes("`--apply` 仅适用模板候选行"), "docs/usage/install.md 必须含 --apply 适用范围句");
 });
 

@@ -1088,12 +1088,12 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
   rmSync(dir, { recursive: true, force: true });
 });
 
-// ── 18. R6-C: role matrix + environment-adapted recommendations ─────────────
+// ── 18. R6-C: lane matrix + environment-adapted recommendations ─────────────
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent), derived
 // PURELY from the tracked template rows (backend / provider.apiKeyEnv / model.id
 // / _comment_auth) plus an INJECTED environment probe. Design
-// iron law: no second hand-written role table, no auto-selection, no config
+// iron law: no second hand-written lane table, no auto-selection, no config
 // write — the recommendation is advisory and the user keeps the choice.
 // Probing is injectable everywhere; nothing here touches the real environment.
 
@@ -1300,7 +1300,7 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
     },
   })).result;
   const text = renderHuman(allPresent);
-  assert.ok(text.includes("角色矩阵与当前环境适配"), "matrix block header");
+  assert.ok(text.includes("车道矩阵与当前环境适配"), "matrix block header");
   assert.ok(text.includes(RECOMMENDATIONS_ADVISORY), "advisory sentence shared with JSON");
   assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。"),
     "tail advisory line hands the choice back to the user");
@@ -1494,7 +1494,7 @@ test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-d
   });
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 2, "矩阵本身照常渲染（前置条件）");
-  assert.ok(text.includes("角色矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
+  assert.ok(text.includes("车道矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
   assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 旧席位惯例句不打印（0065 已整体退役）");
   assert.ok(!text.includes("coder_hq") && !text.includes("coder_low") && !text.includes("coder_mm"),
     "不得打印模板里没有的 worker id");
@@ -1602,7 +1602,7 @@ test("复核 R4: displayWidth 语义 + 矩阵渲染行显示宽上界（回归�
   const inMatrix = [];
   let seen = false;
   for (const line of text.split("\n")) {
-    if (line.includes("角色矩阵")) seen = true;
+    if (line.includes("车道矩阵")) seen = true;
     else if (seen && line.includes("按你有的认证")) break;
     else if (seen && line.trim().length > 0) inMatrix.push(line);
   }
@@ -2190,8 +2190,8 @@ function privEntry(backend = "claude-code", modelId = "deepseek-v4-flash", apiKe
 
 // 模板面字节回归黄金串（与双源改造前的模板面输出逐字一致——私有缺席时既有
 // 展示面不变）。探测：claude CLI 在、DEEPSEEK key 在、其余 key 缺。块界 =
-// 角色矩阵头到表尾句前；renderHuman 的块尾部空白用 trimEnd 归一。
-const GOLDEN_TEMPLATE_MATRIX = `角色矩阵与当前环境适配（推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置））:
+// 车道矩阵头到表尾句前；renderHuman 的块尾部空白用 trimEnd 归一。
+const GOLDEN_TEMPLATE_MATRIX = `车道矩阵与当前环境适配（推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置））:
   id                       backend         model               状态
   coder_low                claude-code     deepseek-v4-flash   [ready]
     认证: key DEEPSEEK_API_KEY
@@ -2208,9 +2208,9 @@ const GOLDEN_TEMPLATE_BLOCK = `${GOLDEN_TEMPLATE_MATRIX}
 
 // 不可读回退面只比矩阵部分前缀（分级块尾部多一条 sourceUnreadable 标注行）。
 function matrixBlock(text) {
-  const start = text.indexOf("角色矩阵与当前环境适配");
+  const start = text.indexOf("车道矩阵与当前环境适配");
   const end = text.indexOf("按你有的认证");
-  assert.ok(start !== -1 && end > start, "矩阵块锚缺失（角色矩阵头/表尾句）");
+  assert.ok(start !== -1 && end > start, "矩阵块锚缺失（车道矩阵头/表尾句）");
   return text.slice(start, end).trimEnd();
 }
 
@@ -2417,7 +2417,7 @@ test("R11-2 0024 私有不可读回退模板面：矩阵逐字不变 + sourceUnr
   assert.equal(r.panelSourceUnreadable, true);
   assert.equal(r.recommendations.configuredCount, null, "不可读降级面无双源事实");
   const text = renderHuman(r);
-  assert.ok(text.startsWith(GOLDEN_TEMPLATE_MATRIX, text.indexOf("角色矩阵与当前环境适配")),
+  assert.ok(text.startsWith(GOLDEN_TEMPLATE_MATRIX, text.indexOf("车道矩阵与当前环境适配")),
     "不可读降级后矩阵部分与模板面逐字一致");
   assert.ok(text.includes("私有 registry 读取失败"), "sourceUnreadable 标注行在场");
   assert.ok(!text.includes("·模板候选"), "降级面不打来源标");
@@ -2541,7 +2541,7 @@ test("R11-2 0024 双源皆空：0 行不渲染矩阵块、事实字段如实、�
   assert.deepEqual(r.recommendations.rows, []);
   assert.equal(r.panelReadiness.rowCount, 0);
   const text = renderHuman(r);
-  assert.ok(!text.includes("角色矩阵"), "零行不渲染矩阵块");
+  assert.ok(!text.includes("车道矩阵"), "零行不渲染矩阵块");
 });
 
 test("R11-2 0024 drift 明细 ≤3 上界：5 条 drift → 3 条明细 + '另有 2 条'尾注", async () => {

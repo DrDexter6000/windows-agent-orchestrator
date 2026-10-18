@@ -1,4 +1,4 @@
-# WAO 标准团队角色矩阵
+# WAO 团队角色与派工原则
 
 > 状态：现行。Lead 的职责、worker 角色清单与 Lead 的派工原则；worker 角色的合同全文在 `config/roles/*.md`。
 > 上游：`AGENT_ONBOARDING.md`（部署模型）、`SKILL.md`（安全铁律）。

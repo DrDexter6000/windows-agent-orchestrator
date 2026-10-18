@@ -71,7 +71,7 @@ Copy-Item config/agents.example.json config/agents.json
 编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`，解析为发起派发的进程的当前工作目录：CLI 通道是你敲命令时所在的目录，MCP 通道是 MCP 服务进程的 cwd（由宿主决定）；恒存在，开箱即跑。要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖。`wao doctor` 对 cwd 为 `.` 的 worker 出一条 INFO 落点提示，不计 DEGRADED。
 
 > 从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段，零手编。正式验收链见 `AGENT_ONBOARDING.md` §9。
-> 已生成 `config/agents.json` 后裸跑 `npm run cli -- wao onboarding`，角色矩阵按双源展示：已配置行（真实状态、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；同 id 但 backend/model 漂移的行挂 `·drift` 并在表后列有界明细；`--apply` 仅适用模板候选行。还没生成（或不可读）时是纯模板面。
+> 已生成 `config/agents.json` 后裸跑 `npm run cli -- wao onboarding`，车道矩阵按双源展示：已配置行（真实状态、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；同 id 但 backend/model 漂移的行挂 `·drift` 并在表后列有界明细；`--apply` 仅适用模板候选行。还没生成（或不可读）时是纯模板面。
 
 派发选择怎么用认证结果，见 `docs/certification-runbook.md` §认证结果用于派发选择的边界。
 

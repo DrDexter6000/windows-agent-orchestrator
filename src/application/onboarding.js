@@ -25,7 +25,7 @@
 // template), never fabricates certification status (certified/conditional/etc.),
 // and never echoes untrusted/malicious input in fixed safe error messages.
 //
-// R6-C: advisory role-matrix recommendations (buildRecommendations) are derived
+// R6-C: advisory lane-matrix recommendations (buildRecommendations) are derived
 //   purely from the tracked template rows; environment probing is INJECTED
 //   (probeEnv) so this module stays pure — it performs no env reads, no PATH
 //   lookups, and no subprocess work of its own. Probing never selects or writes
@@ -125,12 +125,12 @@ export function buildCandidateList(template) {
   return out;
 }
 
-// ── Role-matrix recommendations (R6-C) ───────────────────────────────────────
+// ── Lane-matrix recommendations (R6-C) ───────────────────────────────────────
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent): one row per
 // template worker, derived PURELY from the tracked template rows (backend,
 // provider.apiKeyEnv, model.id, _comment_auth) plus the INJECTED
-// environment probe. There is no second hand-written role table and no
+// environment probe. There is no second hand-written lane table and no
 // auto-selection/auto-write — the choice stays with the user, matching the
 // existing "mutation requires explicit selection" contract.
 //
@@ -314,7 +314,7 @@ async function computeReadyState({ requiresCli, requiresKeyEnvNames, requiresTok
 }
 
 /**
- * Build the advisory role-matrix recommendations for the bounded candidate list.
+ * Build the advisory lane-matrix recommendations for the bounded candidate list.
  * Rows are sorted ready-first (login_based next; stable sort keeps the template
  * order inside each rank). Probe results are memoized per unique name within the
  * call (cost bound); probe failures degrade to "unknown" and never throw.
@@ -930,7 +930,7 @@ export async function runOnboarding({
     panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
     recommendations = await buildDualSourceMatrix({ template, privateRegistry: privateLoad.registry, cfg, probeEnv });
   } else {
-    // R6-C: advisory role matrix + environment fit, derived from the template rows
+    // R6-C: advisory lane matrix + environment fit, derived from the template rows
     // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
     // unique name); probe failures degrade to "unknown" and never throw.
     recommendations = await buildTemplateFaceRecommendations(candidates, template, probeEnv);
@@ -1196,7 +1196,7 @@ function baseResult(partial) {
     // Carried by EVERY outcome — including refused/error — so a Fresh Lead always
     // sees the acceptance chain, PASS facts, and closed recovery branches.
     acceptance: buildAcceptance(),
-    // R6-C: advisory role-matrix recommendations (single source shared by --json
+    // R6-C: advisory lane-matrix recommendations (single source shared by --json
     // and human output, like acceptance). Defaults to the empty matrix so a call
     // site can never drop the field.
     recommendations: partial.recommendations ?? emptyRecommendations(),
