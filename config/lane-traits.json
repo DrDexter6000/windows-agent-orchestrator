@@ -53,7 +53,7 @@
       },
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity；价格中高（Owner）",
       "caveats": [
-        "只用做会审（Owner 规则）。会审常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
+        "只用做会审（Owner 规则）；会审要查 bug 时优选它（Owner）。常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
         "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
         "codex 沙箱里找不到 Node 22、跑不了 npm 全局命令：任务书写明 Node 22 绝对路径，dsh 之类核验由 Lead 做",
         "能文生图、图生图（Owner）"
@@ -177,6 +177,7 @@
       },
       "cost": "GLM 订阅，额度按无限对待；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
       "caveats": [
+        "默认实现车道（Owner 规则）：它能完成的实现任务都优先交给它，不按任务形态另分车道",
         "高峰外再派；成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）"
       ],
       "contextWindow": {
