@@ -92,3 +92,4 @@
 0088 | lead_preflight 的车道画像带上每条车道的全部注意事项
 0089 | 车道画像的读与维护：lead_preflight 一次看全，巡检时复核，纯画像数据改动不跑全量
 0090 | 车道怎么用只写在画像：角色与原则文档不写车道名，会审副审来自不同族系
+0091 | dsh 进宿主表：Cordis profile patch 的 YAML 片段，探测按 profile OR 合并

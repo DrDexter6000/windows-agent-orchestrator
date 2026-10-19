@@ -1438,6 +1438,413 @@ test("决定 0066: kimi-code / opencode(JSONC) / zcode 插件 / claude-desktop �
   }
 });
 
+// ── dsh：Cordis profile patch 层（决定 0091）─────────────────────────────────
+// 两席会审给的可复现输入都落成用例：块标量里的伪条目、引号键、同列块序列、
+// 空 args、disabled、按 id 覆盖、别人的 server、嵌套同名键。
+function writeDshFile(home, profile, fileName, text) {
+  const dir = join(home, ".dsh", "profiles", profile);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, fileName), text);
+}
+
+function writeDshPatch(home, profile, text) {
+  writeDshFile(home, profile, "cordis.patch.yml", text);
+}
+
+const dshFwd = (p) => String(p).replace(/\\/g, "/");
+
+function dshPatchFor(stdio, options = {}) {
+  const {
+    serverName = "wao",
+    flow = false,
+    argsIndent = 10,
+    nameKey = "name",
+    disabled,
+    extraRows = [],
+  } = options;
+  const args = flow
+    ? `        args: ["x/wao-node.cjs", "${dshFwd(stdio)}"]`
+    : [
+      "        args:",
+      `${" ".repeat(argsIndent)}- "x/wao-node.cjs"`,
+      `${" ".repeat(argsIndent)}- "${dshFwd(stdio)}"`,
+    ].join("\n");
+  const lines = [
+    "- insert:",
+    "    - id: \"mcp-wao\"",
+    `      ${nameKey}: "@deepseek-ai/dsh-mcp-client"`,
+    "      config:",
+    `        serverName: "${serverName}"`,
+    "        transport: \"stdio\"",
+    "        command: \"node\"",
+    args,
+    "        toolCallTimeoutMs: 660000",
+  ];
+  if (disabled !== undefined) lines.push(`      disabled: ${disabled}`);
+  lines.push(...extraRows);
+  return lines.join("\n");
+}
+
+function dshOtherServer() {
+  return [
+    "- insert:",
+    "    - id: \"mcp-web\"",
+    "      name: \"@deepseek-ai/dsh-mcp-client\"",
+    "      config:",
+    "        serverName: \"web\"",
+    "        transport: \"streamable-http\"",
+    "        url: \"http://localhost:3000/mcp\"",
+  ].join("\n");
+}
+
+test("决定 0091: dsh 探测——认证形态、覆盖/禁用/别的 server、块标量与引号键", async () => {
+  const { probeHostRegistration } = await import("../../src/hostAdapters/hostRegistrationProbe.js");
+  const home = mkdtempSync(join(tmpdir(), "wao-probe-dsh-"));
+  const expectedStdio = stdioOfThisRepo();
+  const probe = () => probeHostRegistration("dsh", { expectedStdio, home, env: {} });
+  const reset = () => rmSync(join(home, ".dsh"), { recursive: true, force: true });
+  try {
+    assert.equal(probe().state, "not_registered", "没有 ~/.dsh/profiles = 未注册");
+    assert.match(probe().sources[0].detail, /absent/);
+
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio));
+    const baseline = probe();
+    assert.equal(baseline.state, "registered");
+    assert.ok(baseline.sources.every((s) => s.effective === false), "dsh sources 不排优先级");
+
+    // 引号键：YAML 里 `"name":` 与 `name:` 等价
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { nameKey: '"name"' }));
+    assert.equal(probe().state, "registered", "引号键的 name 也要认");
+
+    // 同列块序列：`- ` 与 `args:` 同缩进是合法 YAML（PyYAML 默认输出）
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { argsIndent: 8 }));
+    assert.equal(probe().state, "registered", "与 args: 同列的列表项也要认");
+
+    // flow 序列 args
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { flow: true }));
+    assert.equal(probe().state, "registered");
+
+    // 别人的 serverName（http、无 args）不是 WAO 的注册，也不得把结果抬成 unknown
+    reset();
+    writeDshPatch(home, "web", dshOtherServer());
+    assert.equal(probe().state, "not_registered", "别的 serverName 不算 WAO 注册");
+
+    // disabled: true → 条目在，但宿主不会加载
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { disabled: "true" }));
+    let r = probe();
+    assert.equal(r.state, "not_registered", "disabled 的条目不算注册");
+    assert.match(r.sources.find((s) => s.entryPresent).detail, /disabled/);
+
+    // disabled 是 !!js 表达式 → 读不出定论
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { disabled: "!!js process.env.X" }));
+    assert.equal(probe().state, "unknown", "禁用的表达式读不出 → unknown");
+
+    // 块标量里的示例文本不是条目（会审 sol 的假阳输入）
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"notes\"",
+      "      name: \"unrelated\"",
+      "      config:",
+      "        text: |",
+      "          - name: '@deepseek-ai/dsh-mcp-client'",
+      "            config:",
+      "              serverName: wao",
+      `              args: ['${dshFwd(expectedStdio)}']`,
+    ].join("\n"));
+    assert.equal(probe().state, "not_registered", "块标量内容是文档，不是注册");
+
+    // 整条 flow 行：提到客户端包名却解析不出 → unknown（不能断言未注册）
+    reset();
+    writeDshPatch(home, "web",
+      `- insert: [{ id: "mcp-wao", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: wao, args: ["${dshFwd(expectedStdio)}"] } }]`);
+    assert.equal(probe().state, "unknown", "读不出的行不能断言未注册");
+
+    // 空 args 是 null，不是空列表
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        args:",
+      "        toolCallTimeoutMs: 660000",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "空 args 读不出 → unknown");
+
+    // 嵌套的同名键不得顶替 config 的直接子级
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        args: [\"Z:/elsewhere/src/mcp/stdio.js\"]",
+      "        extra:",
+      `          args: ["${dshFwd(expectedStdio)}"]`,
+    ].join("\n"));
+    assert.equal(probe().state, "registered_other_target", "嵌套 args 不属于 config 直接子级");
+
+    // 按 id 覆盖（无 insert 的 patch）→ 定论不可得
+    reset();
+    writeDshPatch(home, "web", `${dshPatchFor(expectedStdio)}\n- id: "mcp-wao"\n  disabled: true\n`);
+    assert.equal(probe().state, "unknown", "同文件按 id 覆盖 → unknown");
+
+    // 跨文件覆盖：patch 覆盖 cordis.yml 里的条目
+    reset();
+    writeDshFile(home, "web", "cordis.yml", dshPatchFor(expectedStdio));
+    writeDshPatch(home, "web", "- id: \"mcp-wao\"\n  disabled: true\n");
+    assert.equal(probe().state, "unknown", "跨文件按 id 覆盖 → unknown");
+
+    // profile 之间是独立组合：任一 profile 注册即有工具
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio));
+    writeDshPatch(home, "tui", "- id: unrelated\n  name: \"@deepseek-ai/dsh-client-ui-settings-general\"\n");
+    assert.equal(probe().state, "registered", "另一个 profile 没注册不影响已注册的那个");
+
+    // 指向另一份安装
+    reset();
+    writeDshPatch(home, "web", dshPatchFor("Z:/elsewhere/src/mcp/stdio.js"));
+    assert.equal(probe().state, "registered_other_target");
+
+    // 根清单 cordis.yml 也是合法组成层
+    reset();
+    writeDshFile(home, "web", "cordis.yml", dshPatchFor(expectedStdio));
+    assert.equal(probe().state, "registered", "cordis.yml 里的 insert 行同样算注册");
+
+    // 读不了 ≠ 没有：只有 ENOENT/ENOTDIR 算缺失
+    const eacces = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    assert.equal(probeHostRegistration("dsh", { expectedStdio, home, env: {}, io: { readdirSync: () => { throw eacces; } } }).state, "unknown");
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    assert.equal(probeHostRegistration("dsh", { expectedStdio, home, env: {}, io: { readdirSync: () => { throw enoent; } } }).state, "not_registered");
+
+    // DSH_HOME 覆盖默认位置
+    const alt = mkdtempSync(join(tmpdir(), "wao-probe-dsh-alt-"));
+    try {
+      writeDshPatch(alt, "web", dshPatchFor(expectedStdio));
+      assert.equal(probeHostRegistration("dsh", {
+        expectedStdio, home, env: { DSH_HOME: join(alt, ".dsh") },
+      }).state, "registered");
+    } finally {
+      rmSync(alt, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决定 0091: dsh 复核轮——覆盖行带 name、flow 覆盖、|2- 块标量、字符串 disabled", async () => {
+  const { probeHostRegistration } = await import("../../src/hostAdapters/hostRegistrationProbe.js");
+  const home = mkdtempSync(join(tmpdir(), "wao-probe-dsh2-"));
+  const expectedStdio = stdioOfThisRepo();
+  const probe = () => probeHostRegistration("dsh", { expectedStdio, home, env: {} });
+  const reset = () => rmSync(join(home, ".dsh"), { recursive: true, force: true });
+  try {
+    // 带 name 断言、无 insert 的行是覆盖（按 id 替换 config），不是注册
+    reset();
+    writeDshPatch(home, "web", [
+      dshPatchFor(expectedStdio),
+      "- id: \"mcp-wao\"",
+      "  name: \"@deepseek-ai/dsh-mcp-client\"",
+      "  config: { serverName: web }",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "带 name 的覆盖行 → unknown");
+
+    // flow 覆盖行提到客户端行 id：读不出，不能被正常条目消掉
+    reset();
+    writeDshPatch(home, "web", `${dshPatchFor(expectedStdio)}\n- { id: "mcp-wao", disabled: true }\n`);
+    assert.equal(probe().state, "unknown", "flow 覆盖行提到客户端 id → unknown");
+
+    // 可读的别的 server + flow 写法的 WAO 条目 → 仍然 unknown
+    reset();
+    writeDshPatch(home, "web", [
+      dshOtherServer(),
+      `- insert: [{ id: "mcp-wao", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: wao, args: ["${dshFwd(expectedStdio)}"] } }]`,
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "读不出的 WAO 行不能被可读的 web 条目消掉");
+
+    // 块标量缩进指示符的另一种合法顺序 |2-
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"notes\"",
+      "      name: \"unrelated\"",
+      "      config:",
+      "        text: |2-",
+      "          - name: '@deepseek-ai/dsh-mcp-client'",
+      "            config:",
+      "              serverName: wao",
+      `              args: ['${dshFwd(expectedStdio)}']`,
+    ].join("\n"));
+    assert.equal(probe().state, "not_registered", "|2- 块标量内容同样是文本");
+
+    // loader 按布尔取用 disabled：字符串 "false" 是 truthy → 禁用
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { disabled: "\"false\"" }));
+    assert.equal(probe().state, "not_registered", "字符串 false 不能冒充布尔 false");
+
+    // 空 disabled = null → 启用
+    reset();
+    writeDshPatch(home, "web", dshPatchFor(expectedStdio, { disabled: "" }));
+    assert.equal(probe().state, "registered", "空 disabled 按启用");
+
+    // unknown 路径也不标 effective（profiles 目录读不了）
+    const eacces = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    const unreadable = probeHostRegistration("dsh", {
+      expectedStdio, home, env: {}, io: { readdirSync: () => { throw eacces; } },
+    });
+    assert.equal(unreadable.state, "unknown");
+    assert.ok(unreadable.sources.every((s) => s.effective === false), "dsh 的 sources 恒 false");
+
+    // 多行 flow 覆盖行：首行只有 "- {"，id 在后续行 → 仍要认出
+    reset();
+    writeDshPatch(home, "web", [
+      dshPatchFor(expectedStdio),
+      "- {",
+      "    id: mcp-wao,",
+      "    disabled: true",
+      "  }",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "多行 flow 覆盖 → unknown");
+
+    // 跨文件：注册在 cordis.yml，flow 覆盖在 patch（patch 里没有包名，只有 id）
+    reset();
+    writeDshFile(home, "web", "cordis.yml", dshPatchFor(expectedStdio));
+    writeDshPatch(home, "web", "- { id: mcp-wao, disabled: true }");
+    assert.equal(probe().state, "unknown", "跨文件 flow 覆盖 → unknown");
+
+    // disabled: 后接块结构 = 对象，不是 null
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        command: \"node\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+      "      disabled:",
+      "        reason: maintenance",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "disabled 后接块结构 → unknown");
+
+    // 多行 flow 的字段缩进可以不等，整块原文都要看
+    reset();
+    writeDshPatch(home, "web", [
+      dshPatchFor(expectedStdio),
+      "- {",
+      "    id: mcp-wao,",
+      "  disabled: true",
+      "  }",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "不等缩进的多行 flow 覆盖 → unknown");
+
+    // disabled: 后接同缩进的块序列（合法写法）：非 null
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        command: \"node\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+      "      disabled:",
+      "      - maintenance",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "disabled 同缩进块序列 → unknown");
+
+    // 普通字段的字符串里出现包名不算遗漏的客户端条目
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        command: \"node\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+      "        env:",
+      "          CLIENT_PACKAGE: \"@deepseek-ai/dsh-mcp-client\"",
+    ].join("\n"));
+    assert.equal(probe().state, "registered", "配置值里的包名不是第二条客户端条目");
+
+    // 裸 `-` 也是合法的空列表项：disabled 后接它就不是 null
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - id: \"mcp-wao\"",
+      "      name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      "        transport: \"stdio\"",
+      "        command: \"node\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+      "      disabled:",
+      "      -",
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "disabled 后接裸 - → 非 null → unknown");
+
+    // name 的标量另起一行：认不出这行是不是客户端条目
+    reset();
+    writeDshPatch(home, "web", [
+      "- insert:",
+      "    - name: \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+      "    - name:",
+      "        \"@deepseek-ai/dsh-mcp-client\"",
+      "      config:",
+      "        serverName: \"wao\"",
+      `        args: ["${dshFwd(expectedStdio)}"]`,
+    ].join("\n"));
+    assert.equal(probe().state, "unknown", "换行写的 name 读不出 → unknown");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决定 0091: dsh 片段=Cordis profile-patch insert 行（YAML，非 mcpServers），零写入", async () => {
+  const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const { detectHostFromEnv } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-dsh-emit-"));
+  try {
+    const r = await bindWorkspace({ host: "dsh", cwd: dir });
+    assert.equal(r.mode, "snippet");
+    assert.equal(r.bound, false);
+    assert.equal(r.hostVerified, true, "2026-10-18 真机验证（23 工具 + lead_preflight 实调）");
+    assert.equal(r.snippet.configShape, "dsh-cordis-profile-patch");
+    assert.equal(r.snippet.insert.name, "@deepseek-ai/dsh-mcp-client");
+    assert.equal(r.snippet.insert.config.serverName, "wao");
+    assert.equal(r.snippet.insert.config.transport, "stdio");
+    assert.equal(r.snippet.insert.config.toolCallTimeoutMs, 660_000,
+      "660000 = 600s 最大阻塞预算 + 60s 余量（dsh 客户端默认 60s）");
+    assert.ok(r.snippet.insert.config.args.some((a) => a.endsWith("src/mcp/stdio.js")), "片段携带 stdio 入口");
+    assert.match(r.snippet.yaml, /^- insert:/);
+    assert.match(r.snippet.yaml, /name: "@deepseek-ai\/dsh-mcp-client"/);
+    assert.match(r.snippet.yaml, /serverName: "wao"/);
+    assert.match(r.snippet.yaml, /toolCallTimeoutMs: 660000/);
+    assert.equal(r.configFile, "~/.dsh/profiles/<profile>/cordis.patch.yml");
+    assert.equal(existsSync(join(dir, ".dsh")), false, "零写入：不碰任何 dsh 配置");
+    assert.equal(detectHostFromEnv({ DSH_SESSION_ID: "sess-1" }), "dsh", "dsh 会话可识别（CLI 子进程仍有 DSH_*）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("决定 0066: statusAllHosts 一览——codex 用户级注册并入 registered（项目未绑定也算有工具）", async () => {
   const { statusAllHosts } = await import("../../src/application/mcpWorkspaceActivation.js");
   const { HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");

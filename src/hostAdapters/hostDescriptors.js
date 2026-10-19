@@ -32,6 +32,12 @@
 //                 日志（%LOCALAPPDATA%\Claude\Logs\mcp-server-wao.log）记录 server
 //                 启动、initialize 握手、tools/list 与 resources/list 均收到返回。
 //                 日志不含消息体——工具个数未从宿主侧读到，对话内调用未演练。
+//   dsh         — 真机验证（2026-10-18，dsh 0.2.1-rc.2）：web profile 的
+//                 cordis.patch.yml 加一条 dsh-mcp-client 的 insert 行后由
+//                 patchReload live 生效；宿主内 initialize 握手成功、tools/list
+//                 23 个工具（前缀 mcp__wao__），并在真实会话里调用 lead_preflight
+//                 返回完整结果（server build 行确认加载本检出 HEAD）。片段见
+//                 docs/usage/host.md。
 //   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话 23 工具；
 //   codex 0.159.2 `codex exec` 调用 wao.workspace_status completed。详见决定 0066。）
 //
@@ -79,6 +85,54 @@ function zcodePluginShape(entry) {
         wao: { command: entry.command, args: entry.args, timeoutMs: ZCODE_PLUGIN_TIMEOUT_MS },
       },
     },
+  };
+}
+
+// dsh 的 MCP 客户端插件（@deepseek-ai/dsh-mcp-client）给单次 tools/call 的默认
+// 超时是 60000ms；WAO 等待族最长 600s。660000 = 600s 最大阻塞预算 + 60s 余量
+// （与 zcode 同一算法、同一理由：不设时 run_wait / run_await_result / run_consult
+// 会被宿主掐成"假失败"）。
+const DSH_MCP_TOOL_TIMEOUT_MS = 660_000;
+
+/** YAML 双引号标量：路径与命令行值不需要多行/转义花样，只转义反斜杠与引号。 */
+function yamlDoubleQuote(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * dsh 形态：Cordis profile patch 层的 `insert` 行（YAML），不是 mcpServers JSON。
+ * 注册位置是 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`；profile 声明
+ * patchReload: live 时改完即生效，否则下次启动 dsh 才加载。
+ * `yaml` 是给 Owner 直接粘贴的成品；`insert` 是同一行的结构化投影（同源生成）。
+ */
+function dshCordisPatchShape(entry) {
+  const insert = {
+    id: "mcp-wao",
+    name: "@deepseek-ai/dsh-mcp-client",
+    config: {
+      serverName: "wao",
+      transport: "stdio",
+      command: entry.command,
+      args: entry.args,
+      toolCallTimeoutMs: DSH_MCP_TOOL_TIMEOUT_MS,
+    },
+  };
+  const lines = [
+    "- insert:",
+    `    - id: ${yamlDoubleQuote(insert.id)}`,
+    `      name: ${yamlDoubleQuote(insert.name)}`,
+    "      config:",
+    `        serverName: ${yamlDoubleQuote(insert.config.serverName)}`,
+    `        transport: ${yamlDoubleQuote(insert.config.transport)}`,
+    `        command: ${yamlDoubleQuote(insert.config.command)}`,
+    "        args:",
+    ...insert.config.args.map((arg) => `          - ${yamlDoubleQuote(arg)}`),
+    `        toolCallTimeoutMs: ${DSH_MCP_TOOL_TIMEOUT_MS}`,
+  ];
+  return {
+    configShape: "dsh-cordis-profile-patch",
+    insert,
+    yaml: lines.join("\n"),
   };
 }
 
@@ -155,6 +209,22 @@ export const HOST_DESCRIPTORS = [
     configHint: "%APPDATA%\\Claude\\claude_desktop_config.json",
     example: () =>
       "把 mcp bind --host claude-desktop emit 的 mcpServers.wao 条目并入 %APPDATA%\\Claude\\claude_desktop_config.json，完全退出并重启 Claude 桌面端",
+  },
+  {
+    id: "dsh",
+    label: "DeepSeek Harness",
+    snippet: true,
+    autoBind: false, // dsh 的 profile patch 由 Owner 手改；WAO 不写用户家目录配置
+    hostVerified: true, // 2026-10-18 真机验证（见文件头证据锚点）
+    stability: "experimental", // dsh 0.2.1-rc.2：profile patch 格式随预发布版本演进
+    renderSnippet: dshCordisPatchShape,
+    configHint: "~/.dsh/profiles/<profile>/cordis.patch.yml",
+    // DSH 会把 DSH_* 从 MCP stdio 子进程里脱敏，但 CLI 子进程（wao 命令）仍有
+    // DSH_SESSION_ID——advisory 跑在后者的进程里，所以这两轴照样可用。
+    detectEnv: ["DSH_SESSION_ID"],
+    sessionEnv: ["DSH_SESSION_ID"],
+    example: () =>
+      "把 mcp bind --host dsh emit 的 insert 行并入 ~/.dsh/profiles/<profile>/cordis.patch.yml（profile 设了 patchReload: live 时立即生效，否则重启 dsh），开新会话后用 mcp status --host dsh 核对",
   },
 ];
 

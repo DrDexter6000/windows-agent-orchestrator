@@ -78,6 +78,13 @@ async function mcpBindCommand(args, config) {
     if (result.example) {
       console.log(`Example (${result.example.stability}): ${result.example.command}`);
     }
+    // YAML 形态的片段（dsh 的 Cordis profile patch）在 JSON 里是转义字符串——
+    // 再打一份可直接粘贴的原文，粘贴目标取 configFile（片段本身仍是唯一形状源）。
+    if (typeof result.snippet?.yaml === "string" && result.snippet.yaml.length > 0) {
+      console.log("");
+      console.log(`Paste into ${result.configFile ?? `${host} config`}:`);
+      console.log(result.snippet.yaml);
+    }
     return;
   }
   console.log(

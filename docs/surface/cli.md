@@ -69,7 +69,7 @@ Commands:
   daemon supervisor status|stop [--run-dir DIR]
   daemon health [--run-dir DIR]
 
-MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code, codex, zcode, kimi-code, opencode, claude-desktop):
+MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code, codex, zcode, kimi-code, opencode, claude-desktop, dsh):
   mcp status [--host <host>] [--cwd <git-root>]   # read-only: is WAO's MCP registered on this harness? no --host = every known host
   mcp bind --host <host> [--cwd <git-root>]   # codex: writes the project's .codex/config.toml (needs --cwd); every other host: prints the exact registration command/snippet (WAO never writes their config)
   mcp unbind --host codex --cwd <git-root>

@@ -164,9 +164,454 @@ function mergeConfigValue(low, high) {
   return out;
 }
 
+// ── dsh：Cordis profile patch 的最小 YAML 行扫描 ──────────────────────────────
+// dsh 的注册面是 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（及 profile 根
+// 清单 cordis.yml）里的 `- insert: [row…]`，row 形如
+//   - id: mcp-wao
+//     name: '@deepseek-ai/dsh-mcp-client'
+//     config: { serverName: wao, transport: stdio, command: node, args: [...] }
+// 仓库不引 YAML 依赖（生产依赖纪律），这里只认两种实见形态：块序列 args 与 flow
+// 序列 args。认不出的（flow 映射 config、锚点/别名、include）→ unknown，绝不折算
+// 成 not_registered（读数纪律同本文件头）。bundle 层与 --patch 叠加不在探测范围。
+const DSH_MCP_CLIENT_NAME = "@deepseek-ai/dsh-mcp-client";
+
+/** 去掉 YAML 行尾注释（引号内的 # 不算；# 前必须是空白或行首）。 */
+function stripYamlLineComment(line) {
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote) {
+      out += ch;
+      if (quote === '"' && ch === "\\" && i + 1 < line.length) {
+        out += line[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && line[i + 1] === "'") {
+          out += line[i + 1];
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
+    out += ch;
+  }
+  return out;
+}
+
+function yamlIndent(line) {
+  return /^[ \t]*/.exec(line)[0].length;
+}
+
+/** 列表项行：`- x` 或裸 `-`（空条目也是合法 YAML）。 */
+function isYamlListItem(text) {
+  return /^-(?:\s|$)/.test(text);
+}
+
+/** 解析单个 YAML 标量；认不出（嵌套结构、未闭合引号）返回 null。 */
+function parseYamlScalar(text) {
+  const s = text.trim();
+  if (s.length === 0) return null;
+  if (s.startsWith('"')) {
+    let out = "";
+    for (let i = 1; i < s.length; i += 1) {
+      const ch = s[i];
+      if (ch === "\\") {
+        const next = s[i + 1];
+        if (next === undefined) return null;
+        out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+        i += 1;
+        continue;
+      }
+      if (ch === '"') return s.slice(i + 1).trim() === "" ? out : null;
+      out += ch;
+    }
+    return null;
+  }
+  if (s.startsWith("'")) {
+    let out = "";
+    for (let i = 1; i < s.length; i += 1) {
+      if (s[i] === "'") {
+        if (s[i + 1] === "'") {
+          out += "'";
+          i += 1;
+          continue;
+        }
+        return s.slice(i + 1).trim() === "" ? out : null;
+      }
+      out += s[i];
+    }
+    return null;
+  }
+  if (/[[\]{}]/.test(s)) return null;
+  return s;
+}
+
+/** 解析 `[a, b]` flow 序列；认不出返回 null（空序列返回 []）。 */
+function parseYamlFlowSequence(text) {
+  const s = text.trim();
+  if (!s.startsWith("[") || !s.endsWith("]")) return null;
+  const body = s.slice(1, -1);
+  if (body.trim() === "") return [];
+  const parts = [];
+  let cur = "";
+  let quote = null;
+  let depth = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (quote) {
+      cur += ch;
+      if (quote === '"' && ch === "\\" && i + 1 < body.length) {
+        cur += body[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && body[i + 1] === "'") {
+          cur += body[i + 1];
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "[" || ch === "{") { depth += 1; cur += ch; continue; }
+    if (ch === "]" || ch === "}") { depth -= 1; cur += ch; continue; }
+    if (ch === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  if (quote) return null;
+  parts.push(cur);
+  const out = [];
+  for (const part of parts) {
+    const value = parseYamlScalar(part);
+    if (value === null) return null;
+    out.push(value);
+  }
+  return out;
+}
+
+/**
+ * 扫描成行记录：去注释、跳过块标量（`|` / `>`）的正文、保留缩进与正文。
+ * 块标量里的 `- name: …` 是文本，不是条目——不跳过就会把文档示例读成注册。
+ */
+function scanYamlLines(text) {
+  const raw = text.split(/\r?\n/).map(stripYamlLineComment);
+  const out = [];
+  let blockIndent = -1;
+  for (const line of raw) {
+    if (line.trim() === "") continue;
+    const indent = yamlIndent(line);
+    if (blockIndent >= 0) {
+      if (indent > blockIndent) continue;
+      blockIndent = -1;
+    }
+    // 块标量头：`|`、`>` 后允许缩进指示符与 chomping 指示符的两种顺序（`|2-`、`|-2`）。
+    if (/:\s*[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$/.test(line)) blockIndent = indent;
+    out.push({ indent, text: line.slice(indent) });
+  }
+  return out;
+}
+
+/** `key: value` 切分（键可带引号）；不像键值行的返回 null。 */
+function splitYamlKeyValue(text) {
+  const m = /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[A-Za-z0-9_.-]+):\s*(.*)$/.exec(text);
+  if (!m) return null;
+  const key = m[1].startsWith('"') || m[1].startsWith("'") ? parseYamlScalar(m[1]) : m[1];
+  if (key === null) return null;
+  return { key, valueText: m[2].trim() };
+}
+
+/** 一段行区间里同级键的最小缩进（跳过列表项——那些是子结构，不是同级键）。 */
+function minFieldIndent(lines, from, to) {
+  let min = Number.POSITIVE_INFINITY;
+  for (let i = from; i < to; i += 1) {
+    const line = lines[i];
+    if (/^[}\]]/.test(line.text)) continue; // flow 结构的收尾行不是同级键
+    if (isYamlListItem(line.text)) {
+      // 跳过整个子列表项块：它的字段属于它自己，不是外层的同级键。
+      const itemIndent = line.indent;
+      let j = i + 1;
+      while (j < to && lines[j].indent > itemIndent) j += 1;
+      i = j - 1;
+      continue;
+    }
+    min = Math.min(min, line.indent);
+  }
+  return Number.isFinite(min) ? min : -1;
+}
+
+/** 解析某缩进层的键值；同一键出现两次 → duplicate（YAML 非法，读不出定论）。 */
+function parseYamlFields(lines, from, to, indent) {
+  const fields = new Map();
+  let duplicate = false;
+  if (indent < 0) return { fields, duplicate };
+  for (let i = from; i < to; i += 1) {
+    const line = lines[i];
+    if (line.indent !== indent || isYamlListItem(line.text)) continue;
+    const kv = splitYamlKeyValue(line.text);
+    if (!kv) continue;
+    if (fields.has(kv.key)) duplicate = true;
+    fields.set(kv.key, { valueText: kv.valueText, index: i });
+  }
+  return { fields, duplicate };
+}
+
+/** 一行（列表项）连同它的字段层。 */
+function collectYamlRows(lines) {
+  const rows = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isYamlListItem(lines[i].text)) continue;
+    const rowIndent = lines[i].indent;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (lines[j].indent <= rowIndent) { end = j; break; }
+    }
+    const siblingIndent = minFieldIndent(lines, i + 1, end);
+    const first = splitYamlKeyValue(lines[i].text.replace(/^-[ \t]*/, "").trim());
+    const parsed = parseYamlFields(lines, i + 1, end, siblingIndent);
+    rows.push({
+      start: i,
+      end,
+      rowIndent,
+      siblingIndent,
+      rawText: lines[i].text,
+      firstKey: first?.key ?? null,
+      firstValue: first?.valueText ?? null,
+      fields: parsed.fields,
+      duplicate: parsed.duplicate,
+      insideInsert: false,
+    });
+  }
+  // 行是否位于某个 insert 块内：insert 行与它的子行是"注册"；insert 之外的
+  // 带 id 行是覆盖（patch 语义：按 id 替换字段，config 整体替换）。
+  for (let k = 0; k < rows.length; k += 1) {
+    const row = rows[k];
+    for (let p = k - 1; p >= 0; p -= 1) {
+      const ancestor = rows[p];
+      if (ancestor.rowIndent >= row.rowIndent || ancestor.end <= row.start) continue;
+      row.insideInsert = ancestor.firstKey === "insert";
+      break;
+    }
+  }
+  return rows;
+}
+
+/** 该行上的一个字段（列表项首行或同级键）。 */
+function rowField(row, key) {
+  if (row.firstKey === key) return { valueText: row.firstValue ?? "", index: row.start };
+  return row.fields.get(key) ?? null;
+}
+
+/**
+ * `args` 字段 → 字符串数组。认不出/空 → `{ok:false}`（空 args 在 YAML 里是 null，
+ * 不是空列表：不能当成"指向别处"，只能记 unknown）。
+ */
+function parseArgsField(lines, field, row) {
+  const text = field.valueText;
+  if (text.length > 0) {
+    if (!text.startsWith("[")) return { ok: false };
+    const seq = parseYamlFlowSequence(text);
+    return seq === null ? { ok: false } : { ok: true, args: seq };
+  }
+  const argsIndent = lines[field.index].indent;
+  const items = [];
+  for (let i = field.index + 1; i < row.end; i += 1) {
+    const line = lines[i];
+    if (line.indent < argsIndent) break;
+    const item = isYamlListItem(line.text) ? /^-[ \t]*(.*)$/.exec(line.text) : null;
+    // 与 args: 同列的 - 也是合法块序列（PyYAML 默认输出）；同列非列表=下一个键。
+    if (!item) {
+      if (line.indent === argsIndent) break;
+      return { ok: false };
+    }
+    const value = parseYamlScalar(item[1]);
+    if (value === null) return { ok: false };
+    items.push(value);
+  }
+  if (items.length === 0) return { ok: false };
+  return { ok: true, args: items };
+}
+
+/**
+ * `disabled` 的取值语义（dsh loader 按布尔取用）：字面 true 与非空字符串为禁用；
+ * false / null / 空值为启用；`!!js` 表达式读不出 → unknown。
+ */
+function classifyDisabledField(field) {
+  const text = field.valueText.trim();
+  if (text === "") return "enabled"; // 空值 = null
+  if (text === "true") return "disabled";
+  if (text === "false" || text === "null" || text === "~") return "enabled";
+  if (text.startsWith("!!js")) return "unknown";
+  if (/^["']/.test(text)) {
+    const value = parseYamlScalar(text);
+    if (value === null) return "unknown";
+    return value.length > 0 ? "disabled" : "enabled";
+  }
+  if (/^-?\d+$/.test(text)) return Number(text) === 0 ? "enabled" : "disabled";
+  return "unknown";
+}
+
+/** 该字段是否有块结构值：更深的结构，或与键同缩进的块序列（`disabled:\n- x`）。 */
+function fieldHasBlockValue(lines, field, end) {
+  const indent = lines[field.index].indent;
+  for (let i = field.index + 1; i < end; i += 1) {
+    if (lines[i].indent < indent) return false;
+    if (lines[i].indent === indent) return isYamlListItem(lines[i].text);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 一条 dsh-mcp-client 行 → {kind, args}。
+ * kind: wao / other（serverName 不是 wao）/ disabled / unreadable。
+ */
+function parseClientConfig(lines, row) {
+  const configField = rowField(row, "config");
+  if (!configField || configField.valueText.length > 0) return { kind: "unreadable" };
+  const configIndent = lines[configField.index].indent;
+  // config 块在同级键（缩进 ≤ config:）处结束——后面的 disabled 等不能再算进来。
+  let configEnd = row.end;
+  for (let i = configField.index + 1; i < row.end; i += 1) {
+    if (lines[i].indent <= configIndent) { configEnd = i; break; }
+  }
+  const childIndent = minFieldIndent(lines, configField.index + 1, configEnd);
+  if (childIndent < 0) return { kind: "unreadable" };
+  const config = parseYamlFields(lines, configField.index + 1, configEnd, childIndent);
+  if (config.duplicate) return { kind: "unreadable" };
+  const server = config.fields.get("serverName");
+  if (!server) return { kind: "unreadable" };
+  const serverName = parseYamlScalar(server.valueText);
+  if (serverName === null) return { kind: "unreadable" };
+  if (serverName !== "wao") return { kind: "other" };
+  const disabledField = rowField(row, "disabled");
+  if (disabledField) {
+    // `disabled:` 后接块结构 = 非 null 的对象，读不出布尔值 → unknown。
+    if (disabledField.valueText === "" && fieldHasBlockValue(lines, disabledField, row.end)) {
+      return { kind: "unreadable" };
+    }
+    const disabled = classifyDisabledField(disabledField);
+    if (disabled === "unknown") return { kind: "unreadable" };
+    if (disabled === "disabled") return { kind: "disabled" };
+  }
+  const argsField = config.fields.get("args");
+  if (!argsField) return { kind: "unreadable" };
+  const parsedArgs = parseArgsField(lines, argsField, row);
+  if (!parsedArgs.ok) return { kind: "unreadable" };
+  return { kind: "wao", args: parsedArgs.args };
+}
+
+/**
+ * 解析一份 dsh profile YAML 文本。
+ * @returns {{sawClient: boolean, clients: Array<{id: string|null, kind: string, args?: string[]}>, overrideIds: string[], unparsedHit: boolean}}
+ *   sawClient = 文本里出现客户端包名（解析不出条目时调用方据此记 unknown）；
+ *   overrideIds = 按 id 覆盖（无 insert 的 patch）行——命中客户端行 id 时定论不可得；
+ *   unparsedHit = 有读不出的行提到客户端包名或客户端行 id（flow mapping 等）。
+ */
+function parseDshProfileText(text) {
+  const lines = scanYamlLines(text);
+  const sawClient = lines.some((line) => line.text.includes(DSH_MCP_CLIENT_NAME));
+  const rows = collectYamlRows(lines);
+  const clients = [];
+  const overrideIds = [];
+  const indeterminate = [];
+  for (const row of rows) {
+    const nameField = rowField(row, "name");
+    // name 写成下一行或块结构（`name:` 后换行）：认不出这行是不是客户端条目。
+    if (nameField && nameField.valueText === "" && fieldHasBlockValue(lines, nameField, row.end)) {
+      indeterminate.push(row);
+      continue;
+    }
+    const name = nameField ? parseYamlScalar(nameField.valueText) : null;
+    if (name === DSH_MCP_CLIENT_NAME && row.insideInsert) {
+      const idField = rowField(row, "id");
+      const id = idField ? parseYamlScalar(idField.valueText) : null;
+      clients.push({ id, ...parseClientConfig(lines, row) });
+      continue;
+    }
+    if (name === DSH_MCP_CLIENT_NAME) {
+      // 带 name 断言但不带 insert 的行是覆盖（按 id 替换 config），不是注册。
+      const idField = rowField(row, "id");
+      const id = idField ? parseYamlScalar(idField.valueText) : null;
+      if (id) overrideIds.push(id);
+      continue;
+    }
+    if (rowField(row, "insert") !== null) continue;
+    const idField = rowField(row, "id");
+    const id = idField ? parseYamlScalar(idField.valueText) : null;
+    if (id) overrideIds.push(id);
+  }
+  // 读不出的行（flow row、flow 形式的 insert/config 等）的**整块原文**；调用方
+  // 还要结合同 profile 其它文件里的客户端行 id 判断它们是否可能改变定论。
+  // 用整块而不是首行+同级字段：多行 flow 允许各字段缩进不同，按最小缩进取字段会漏。
+  const unparsedTexts = [...rows.filter((row) => row.firstKey === null
+    || (row.firstValue ?? "").startsWith("[")
+    || (row.firstValue ?? "").startsWith("{")), ...indeterminate]
+    .map((row) => lines.slice(row.start, row.end).map((line) => line.text).join("\n"));
+  return { sawClient, clients, overrideIds, unparsedTexts };
+}
+
+/** 单个 dsh 文件 → 注册状态（overrideHit 由调用方按同 profile 跨文件算好）。 */
+function classifyDshFile(parsed, { want, platform, overrideHit, unparsedHit }) {
+  if (unparsedHit) {
+    // 有读不出的行提到客户端包名或客户端行 id（flow mapping 等）：其它可读条目
+    // 不能证明这一行是什么。
+    return { state: "unknown", entryPresent: true, detail: "an unparsed row mentions the dsh-mcp-client or its row id" };
+  }
+  if (!parsed.sawClient) return { state: "not_registered", entryPresent: false };
+  if (parsed.clients.length === 0) {
+    // 文本提到客户端包名，却一条行都解析不出（flow 行、锚点等）→ 不能断言没注册。
+    return {
+      state: "unknown",
+      entryPresent: true,
+      detail: "dsh-mcp-client mentioned but no client row could be parsed",
+    };
+  }
+  if (overrideHit) {
+    return { state: "unknown", entryPresent: true, detail: "a patch row overrides the client row by id" };
+  }
+  const wao = parsed.clients.filter((client) => client.kind !== "other");
+  if (wao.length === 0) return { state: "not_registered", entryPresent: false };
+  if (wao.length > 1) {
+    return { state: "unknown", entryPresent: true, detail: "multiple dsh-mcp-client rows in one file" };
+  }
+  const client = wao[0];
+  if (client.kind === "unreadable") {
+    return { state: "unknown", entryPresent: true, detail: "dsh-mcp-client row not in a readable form" };
+  }
+  if (client.kind === "disabled") {
+    return { state: "not_registered", entryPresent: true, detail: "wao entry present but disabled" };
+  }
+  return {
+    state: client.args.some((arg) => normalizePath(arg, platform) === want) ? "registered" : "registered_other_target",
+    entryPresent: true,
+  };
+}
+
 // 每个 probe 返回的 sources **按该宿主的优先级从高到低排列**。返回数组的宿主是
 // "高优先级整条覆盖"语义，由 resolveEffectiveRegistration 取生效来源；返回
-// {state, sources} 的宿主（opencode）自己按其合并语义算好了结果。
+// {state, sources} 的宿主（opencode、dsh）自己按其合并语义算好了结果。
 const PROBES = {
   // Claude Code：local > project > user（官方 scope 优先级）。~/.claude.json 的
   // user 级 mcpServers 与 local 级 projects[<cwd>].mcpServers（2026-10-12 本机
@@ -295,6 +740,116 @@ const PROBES = {
         ? `${key} enabled but no installed plugin copy readable under ${cacheDir}`
         : `${key} enabled; installed copies: ${copies.map((c) => `${c.version}=${c.state}`).join(", ")}`,
     }];
+  },
+  // dsh：$DSH_HOME/profiles/<profile>/ 下的 cordis.patch.yml 与 cordis.yml（Cordis
+  // YAML 组成层）。一个 profile 内两个文件是同一棵组合树的不同层，patch 层可按
+  // id 覆盖（`- id: …` 且无 insert 的行），所以**同一 profile 内任何不确定都记
+  // unknown**；profile 之间是独立组合，任一 profile 注册即 registered。bundle
+  // 层、--patch 叠加与 cordis:include 不在探测范围。sources 不排优先级：dsh 的
+  // 各 profile 不是覆盖关系，`effective` 恒 false。
+  dsh: (io, ctx) => {
+    const dshHome = typeof ctx.env.DSH_HOME === "string" && ctx.env.DSH_HOME.length > 0
+      ? ctx.env.DSH_HOME
+      : join(ctx.home, ".dsh");
+    const profilesDir = join(dshHome, "profiles");
+    let names;
+    try {
+      names = io.readdirSync(profilesDir).map(String).sort();
+    } catch (err) {
+      const absent = err?.code === "ENOENT" || err?.code === "ENOTDIR";
+      return {
+        state: absent ? "not_registered" : "unknown",
+        sources: [{
+          scope: "user",
+          path: profilesDir,
+          state: absent ? "not_registered" : "unknown",
+          entryPresent: false,
+          effective: false,
+          detail: absent ? "absent" : "unreadable",
+        }],
+      };
+    }
+    const want = normalizePath(ctx.expectedStdio, ctx.platform);
+    const sources = [];
+    const profileStates = [];
+    for (const name of names) {
+      const files = [];
+      for (const fileName of ["cordis.patch.yml", "cordis.yml"]) {
+        const path = join(profilesDir, name, fileName);
+        let raw;
+        try {
+          raw = io.readFileSync(path, "utf8");
+        } catch (err) {
+          if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
+          files.push({ path, parsed: null });
+          continue;
+        }
+        files.push({ path, parsed: parseDshProfileText(raw) });
+      }
+      if (files.length === 0) continue;
+      // 跨文件：patch 层可以覆盖任意文件的同 id 行 → 定论不可得。
+      const clientIds = new Set();
+      const overrideIds = new Set();
+      for (const file of files) {
+        if (!file.parsed) continue;
+        for (const client of file.parsed.clients) if (client.id && client.kind !== "other") clientIds.add(client.id);
+        for (const id of file.parsed.overrideIds) overrideIds.add(id);
+      }
+      const overrideHit = [...clientIds].some((id) => overrideIds.has(id));
+      // 未解析行是否可能改变定论：要看**整个 profile** 的客户端 id（跨文件覆盖）。
+      const clientIdList = [...clientIds];
+      const mentionsUnparsed = (parsed) => parsed.unparsedTexts.some((text) =>
+        text.includes(DSH_MCP_CLIENT_NAME) || clientIdList.some((id) => text.includes(id)));
+      const fileStates = [];
+      for (const file of files) {
+        if (!file.parsed) {
+          fileStates.push("unknown");
+          sources.push({ scope: `profile:${name}`, path: file.path, state: "unknown", entryPresent: false, detail: "unreadable" });
+          continue;
+        }
+        const classified = classifyDshFile(file.parsed, {
+          want,
+          platform: ctx.platform,
+          overrideHit,
+          unparsedHit: mentionsUnparsed(file.parsed),
+        });
+        fileStates.push(classified.state);
+        sources.push({
+          scope: `profile:${name}`,
+          path: file.path,
+          state: classified.state,
+          entryPresent: classified.entryPresent,
+          ...(classified.detail ? { detail: classified.detail } : {}),
+        });
+      }
+      // 同一 profile 内：任何不确定压过 registered（覆盖/禁用/多条目都可能改变定论）。
+      if (fileStates.includes("unknown")) profileStates.push("unknown");
+      else if (fileStates.includes("registered")) profileStates.push("registered");
+      else if (fileStates.includes("registered_other_target")) profileStates.push("registered_other_target");
+      else profileStates.push("not_registered");
+    }
+    if (sources.length === 0) {
+      return {
+        state: "not_registered",
+        sources: [{
+          scope: "user",
+          path: profilesDir,
+          state: "not_registered",
+          entryPresent: false,
+          effective: false,
+          detail: "no profile config files",
+        }],
+      };
+    }
+    const overall = profileStates.includes("registered") ? "registered"
+      : profileStates.includes("unknown") ? "unknown"
+        : profileStates.includes("registered_other_target") ? "registered_other_target"
+          : "not_registered";
+    return {
+      state: overall,
+      // dsh 的 sources 没有优先级：各 profile 独立组合，不做"生效来源"标记。
+      sources: sources.map((source) => ({ ...source, effective: false })),
+    };
   },
   // %APPDATA%\Claude\claude_desktop_config.json 的 mcpServers（2026-10-12 本机实读；
   // 仅 win32 位置核实过——其余平台不猜）。
