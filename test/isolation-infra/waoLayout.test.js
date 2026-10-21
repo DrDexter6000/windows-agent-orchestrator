@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initWaoDir, getWaoDir, WAO_TOP_LEVEL_SLOTS } from "../../src/waoDir.js";
+import { initWaoDir, getWaoDir, WAO_TOP_LEVEL_SLOTS, WAO_OPTIONAL_TOP_LEVEL_SLOTS } from "../../src/waoDir.js";
 import { addDecision } from "../../src/waoDecisions.js";
 
 async function makeInitWao() {
@@ -14,14 +14,14 @@ async function makeInitWao() {
 }
 
 /**
- * 守卫1（导出供复用）：.wao/ 顶层只有预定义 6 槽位。
+ * 守卫1（导出供复用）：.wao/ 顶层只允许预定义 7 必需槽位 + 可选槽位（inbox）。
  * 这是治文档熵增的核心：负向断言"不准新建文档类型"。
  * 任何 agent 想往 .wao/ 塞 docs/my-finding.md，这里会抓。
  */
 export function assertWaoTopLevelClean(waoDir) {
   assert.ok(existsSync(waoDir), ".wao/ 必须存在");
   const actual = readdirSync(waoDir);
-  const allowed = new Set(WAO_TOP_LEVEL_SLOTS);
+  const allowed = new Set([...WAO_TOP_LEVEL_SLOTS, ...WAO_OPTIONAL_TOP_LEVEL_SLOTS]);
   const unexpected = actual.filter((e) => !allowed.has(e));
   assert.deepEqual(unexpected, [],
     `.wao/ 出现未授权顶层条目 ${JSON.stringify(unexpected)}；只允许 ${[...allowed].join(", ")}`);
@@ -98,6 +98,32 @@ test("S3-5 守卫1: tmpdir .wao/ 加非法文件 → 断言失败报未授权条
       () => assertWaoTopLevelClean(getWaoDir(dir)),
       /rogue-doc/,
       "应有非法文件报错，并指出文件名",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("S3-5 守卫1: tmpdir .wao/ 加可选槽位 inbox/ → assertWaoTopLevelClean 通过", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    await mkdir(join(waoDir, "inbox"), { recursive: true });
+    assertWaoTopLevelClean(waoDir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("S3-5 守卫1: inbox 放行后未知条目 random-dir 仍报未授权并指出名字", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    await mkdir(join(waoDir, "random-dir"), { recursive: true });
+    assert.throws(
+      () => assertWaoTopLevelClean(waoDir),
+      /random-dir/,
+      "inbox 之外的可选外顶层条目仍应报错，并指出名字",
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

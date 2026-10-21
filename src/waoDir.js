@@ -6,7 +6,7 @@
  * agent 不直接建文件，通过 wao 命令读写，本模块提供底层目录操作。
  *
  * 三条铁律的物理保障：
- *   1. 只有这 7 个顶层槽位（validateWaoDir 负向断言多余文件）
+ *   1. 顶层槽位封闭：7 必需 + 可选 inbox（validateWaoDir 负向断言多余文件）
  *   2. map.md 只放索引（waoDecisions/waoState 的写入命令保证）
  *   3. .wao/ 进 .gitignore（过程性，不进版本控制）
  */
@@ -19,6 +19,11 @@ import { join, resolve } from "node:path";
 // 原先 STAGE/DECL 写进 decisions/（被 git 跟踪），实验声明和真实 ADR 混在一起污染版本库。
 // 0045 §4.2：migration=台账迁移证据包槽（.wao/migration/0045-ledger/，证据文件入库）。
 export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"];
+
+// 可选顶层槽位：机器本地报缺陷收件箱，由 `feedback submit` 按需创建，
+// 不在 `wao init` 预建（init 后仍只有上面 7 个槽位，不凭空多出空 inbox/）。
+// validateWaoDir 对它们放行但不要求存在（missing 只查必需槽位）。
+export const WAO_OPTIONAL_TOP_LEVEL_SLOTS = ["inbox"];
 
 // state/decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
 const SLOTS_WITH_MAP = ["state", "decisions", "pipeline", "handoff"];
@@ -93,7 +98,7 @@ export function validateWaoDir(cwd, override) {
   } catch {
     return { ok: false, initialized: true, missing: WAO_TOP_LEVEL_SLOTS, unexpected: [] };
   }
-  const allowed = new Set(WAO_TOP_LEVEL_SLOTS);
+  const allowed = new Set([...WAO_TOP_LEVEL_SLOTS, ...WAO_OPTIONAL_TOP_LEVEL_SLOTS]);
   for (const entry of actual) {
     if (!allowed.has(entry)) unexpected.push(entry);
   }
