@@ -65,9 +65,14 @@ test("TD-236 行为钉：gitChildEnv force-last 不可被调用方反盖，身�
   assert.equal(defended.GIT_NO_REPLACE_OBJECTS, "1", "调用方显式反盖值被 force-last 覆写");
   assert.equal(defended.KNOWN_KEY, "v", "调用方其余 env 原样透传");
   // 缺省 = process.env 展开。
+  // TD-315：Windows 环境块保留键的原始大小写（PowerShell 启动的进程里是 `Path`），
+  // 硬编码 `process.env.PATH` 会稳定假红。这里按大小写不敏感发现键名、再比同一个键，
+  // 断言强度不变（POSIX 上该键就是 PATH）。不要简化回硬编码——那会让本机全量重新变红。
   const fromProcess = gitChildEnv();
   assert.equal(fromProcess.GIT_NO_REPLACE_OBJECTS, "1");
-  assert.equal(fromProcess.PATH, process.env.PATH, "缺省时展开 process.env");
+  const pathKey = Object.keys(process.env).find((key) => /^path$/i.test(key));
+  assert.ok(pathKey, "环境里应至少有一个 PATH 变体键，否则本条断言无从比较");
+  assert.equal(fromProcess[pathKey], process.env[pathKey], "缺省时展开 process.env");
   // commitEnv 身份透传（packageDelivery 的 commit-tree 场景）：身份键保持调用方值。
   const commitEnv = gitChildEnv({
     ...process.env,
