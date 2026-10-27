@@ -93,6 +93,19 @@ test("isDaemonAlive: null handshake = 死", () => {
   assert.equal(isDaemonAlive(null, 10000, 2000), false);
 });
 
+test("isDaemonAlive: heartbeatAt 为 Infinity（如 JSON 里写 1e400）= 死", () => {
+  // 防假心跳：daemon 已死而握手里残留 Infinity 时，不能所有调用方都当它活着。
+  assert.equal(isDaemonAlive({ heartbeatAt: Infinity }, 10000, 2000), false);
+});
+
+test("isDaemonAlive: heartbeatAt 远在未来（now + 2×阈值）= 死", () => {
+  assert.equal(isDaemonAlive({ heartbeatAt: 10000 + 2 * 2000 }, 10000, 2000), false);
+});
+
+test("isDaemonAlive: heartbeatAt 略在未来（now + 阈值/2）= 活（时钟微偏差容差）", () => {
+  assert.equal(isDaemonAlive({ heartbeatAt: 10000 + 2000 / 2 }, 10000, 2000), true);
+});
+
 test("scanResumableRuns: 只返回非终态 run 的 runId", () => {
   const runDir = makeRunDir();
   try {

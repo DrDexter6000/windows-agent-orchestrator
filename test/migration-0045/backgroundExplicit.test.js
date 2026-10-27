@@ -12,9 +12,11 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { loadLanesConfig } from "../../src/dispatchResolution.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
+const sha = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 // 在库车道表 opus 的接线轴：注册表夹具照它写，不写当前型号字面值（升级型号时跟着走）。
 const OPUS_LANE = loadLanesConfig().lanes.find((l) => l.id === "opus");
 
@@ -81,8 +83,10 @@ test("BG-3: 无 lane/role 的 dispatchRun argv 无新旗标（字节兼容）", 
 
 test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落档；解析失败=具名 fail-closed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-bg2-"));
-  const ROLES = join(REPO_ROOT, "config", "roles");
-  writeFileSync(join(ROLES, "w2b-hat.md"), "# w2b hat\nMARKER_W2B_HAT\n", "utf8");
+  // TD-314：只读地用角色库真实角色 researcher（解析层固定从 config/roles/<id>.md
+  // 取帽），不再往真实角色库写临时角色——那会与并发跑的 dispatchResolution 的
+  // 角色库清单断言冲突。期望的 sha 在运行时从真实文件内容算出。
+  const researcherMd = readFileSync(join(REPO_ROOT, "config", "roles", "researcher.md"), "utf8");
   try {
     makeGitRepo(dir);
     const runDir = join(dir, "runs");
@@ -96,7 +100,7 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
     let spawnHappened = false;
     const result = await runBackground({
       agentId: "opus", prompt: "t", runDir, runId: "run_0045_bg2_ok",
-      registry, lane: "opus", role: "w2b-hat",
+      registry, lane: "opus", role: "researcher",
       backendFor: () => ({
         supportsRoleContract: true, sessionOutlivesProcess: false,
         async spawn() {
@@ -118,8 +122,9 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
       return null;
     })();
     assert.equal(started.resolvedFrom, "explicit");
-    assert.equal(started.roleId, "w2b-hat");
-    assert.equal(started.rolePin.systemPrompt, "config/roles/w2b-hat.md", "角色库帽经钉住机制生效");
+    assert.equal(started.roleId, "researcher");
+    assert.equal(started.rolePin.systemPrompt, "config/roles/researcher.md", "角色库帽经钉住机制生效");
+    assert.equal(started.rolePin.sha256, sha(researcherMd), "钉住 sha=真实角色文件正文指纹（运行时算出）");
 
     // 解析失败（未知 lane）：具名 fail-closed——run.error + failed 终态，零 spawn。
     // 忠实预写 dispatchRun 的管道事实（background_submitted + pending），真后台
@@ -131,7 +136,7 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
     let failSpawnHappened = false;
     const failResult = await runBackground({
       agentId: "claude-opus", prompt: "t", runDir, runId: "run_0045_bg2_bad",
-      registry, lane: "no-such-lane", role: "w2b-hat",
+      registry, lane: "no-such-lane", role: "researcher",
       backendFor: () => ({
         supportsRoleContract: true, sessionOutlivesProcess: false,
         async spawn() { failSpawnHappened = true; return null; },
@@ -148,6 +153,5 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
       "failed 终态 + 闭集原因");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES, "w2b-hat.md"), { force: true });
   }
 });

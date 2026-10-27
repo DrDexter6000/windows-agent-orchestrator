@@ -107,5 +107,4 @@
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
 | TD-312 | zcode 后端的存活判定不知道主机在待机：笔记本进新型待机后，worker 正在跑的本地命令被冻住（后代进程 CPU 不动），静默超预算就以 `zcode turn stalled` 收尾。10-17 横评里 glm-pro 5 次停住都在待机中，同一条命令醒着时 145 秒跑完 | 开放 | 择机：失败信息写明静默期间主机在待机（System 日志 Kernel-Power 506/507，本机不提权读得到），让 Lead 知道重派即可；是否从静默预算里扣除待机时长另定 | src/backends/zcode.js |
 | TD-313 | kimi-web 席位的最终答复有时把过程叙述和结论接在同一行（缺换行），会审锚点认不出 Q1，两席结论不一致的提示与 `npm run lane-review-stats` 都会漏；10-06 到 10-17 的 59 个 kimi 席位里有 4 次 | 开放 | 择机：查 kimi-web 后端拼接助手消息文本时为什么没有换行，按消息或工具调用边界补上 | src/backends/kimiWeb.js |
-| TD-314 | 全量套件里 migration-0045 的两个文件互相干扰：explicitDispatch 往仓库真实的 config/roles/ 写 _0045_w2_* 临时角色文件，dispatchResolution 断言该目录恰好四个角色；同一 wave 并发跑时后者稳定假红（2026-10-19 batch35 全量复现，单跑通过） | 开放 | 择机：临时角色文件落到 os.tmpdir()，或把这两文件登记进 interference registry | test/migration-0045/explicitDispatch.test.js test/migration-0045/dispatchResolution.test.js |
-
+| TD-316 | owner 心跳判活（checkOwnerLiveness）只查 heartbeatAt 是不是数字：Infinity（JSON 里写 1e400）和远在未来的时间戳都判"有人持有"。owner 已死而心跳残留这种值时，孤儿 run 永不 resume、runs settle 永不结算、worktree 永不回收；方向是过度保守，不破坏数据。readOwnerLease 已拒 Infinity，有限的未来值仍判 fresh | 开放 | 择机：按 isDaemonAlive 的口径收紧（有限数字、比阈值更靠未来即判死），补用例 | src/application/ownerLiveness.js |

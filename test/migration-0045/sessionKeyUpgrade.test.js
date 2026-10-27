@@ -8,11 +8,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-
-const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 const sha256hex = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 
@@ -65,8 +63,11 @@ function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); 
 
 test("HOLE-A: continue 臂——父 rolePin sha 与当前角色文件不符 → role_contract_drift 拒（同谱系静默换帽关门）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ha-"));
-  const ROLES = join(REPO_ROOT, "config", "roles");
-  writeFileSync(join(ROLES, "w3c-hat.md"), "# original\nW3C_ORIGINAL\n", "utf8");
+  // TD-314：角色文件写进本测试自己的临时目录（钉与注册表都用返回的绝对路径，
+  // resolveRoleContractPath 对绝对路径原样使用）——篡改只发生在临时副本上，
+  // 绝不碰仓库的真实角色库。
+  const rolePath = join(dir, "w3c-hat.md");
+  writeFileSync(rolePath, "# original\nW3C_ORIGINAL\n", "utf8");
   try {
     makeGitRepo(dir);
     const runId = "run_0045_hole_a";
@@ -74,7 +75,7 @@ test("HOLE-A: continue 臂——父 rolePin sha 与当前角色文件不符 → 
     mkdirSync(runDir, { recursive: true });
     const originalSha = sha256hex("# original\nW3C_ORIGINAL\n");
     const lines = [
-      { type: "run.started", backend: "claude-code", cwd: dir, rolePin: { systemPrompt: "config/roles/w3c-hat.md", sha256: originalSha }, ts: "2026-10-05T00:00:00.000Z", runId, agentId: "w3c-seat", seq: 1 },
+      { type: "run.started", backend: "claude-code", cwd: dir, rolePin: { systemPrompt: rolePath, sha256: originalSha }, ts: "2026-10-05T00:00:00.000Z", runId, agentId: "w3c-seat", seq: 1 },
       { type: "session.created", backend: "claude-code", backendSessionId: "s1", ts: "2026-10-05T00:00:00.200Z", runId, agentId: "w3c-seat", seq: 2 },
       { type: "prompt.sent", prompt: "d", ts: "2026-10-05T00:00:00.300Z", runId, agentId: "w3c-seat", seq: 3 },
       { type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-10-05T00:00:00.400Z", runId, agentId: "w3c-seat", seq: 4 },
@@ -85,11 +86,11 @@ test("HOLE-A: continue 臂——父 rolePin sha 与当前角色文件不符 → 
     writeFileSync(join(runDir, `${runId}.jsonl`), lines + "\n", "utf8");
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "w3c-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/w3c-hat.md" },
+      "w3c-seat": { backend: "claude-code", cwd: dir, systemPrompt: rolePath },
     } }), "utf8");
     const { continueRun } = await import("../../src/application/runContinue.js");
-    // 派发后角色文件被改：
-    writeFileSync(join(ROLES, "w3c-hat.md"), "# TAMPERED\nW3C_ORIGINAL\n", "utf8");
+    // 派发后角色文件被改（TD-314：改的是临时目录里的副本）：
+    writeFileSync(rolePath, "# TAMPERED\nW3C_ORIGINAL\n", "utf8");
     const r = await continueRun({
       parentRunId: runId, prompt: "fix",
       delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
@@ -101,7 +102,6 @@ test("HOLE-A: continue 臂——父 rolePin sha 与当前角色文件不符 → 
     assert.match(r.detail, /SAME provider lineage under a different role/);
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES, "w3c-hat.md"), { force: true });
   }
 });
 
@@ -133,20 +133,24 @@ test("HOLE-B（0052 修订）: dispatchRun——explicit（resolvedLane/Role）�
 
 test("HOLE-B 对照：lead_workspace 派发照常进复用路由（升维材料随行；W4b 政策语义）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb2-"));
-  const ROLES = join(REPO_ROOT, "config", "roles");
-  writeFileSync(join(ROLES, "w4b-hat.md"), "# w4b\nPOL_HAT\n", "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     // 0045 W4b：席位字段降级——复用进路由须经 resolvedRoleId（角色政策或原生角色兼容）。
     // 本对照走"原生角色兼容"腿：席位 systemPrompt stem=派发角色+席位自带字段。
+    // TD-314：只读地用角色库真实角色——派发侧角色指纹固定取 config/roles/<id>.md，
+    // 不再往真实角色库写临时角色。auditor 是唯一未入 roles.json 政策册的真实角色，
+    // 恰好保证生效来源就是本对照要测的席位兼容腿（入册角色会走政策腿①）。
+    const { loadRolePolicies } = await import("../../src/dispatchResolution.js");
+    assert.ok(!Object.hasOwn(loadRolePolicies().roles, "auditor"),
+      "前提：auditor 不在 config/roles.json 政策册；入册后本对照改测政策腿①，须换一个未入册的角色");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "reuse-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/w4b-hat.md", sessionReuse: "lead_workspace" },
+      "reuse-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/auditor.md", sessionReuse: "lead_workspace" },
     } }), "utf8");
     const { dispatchRun } = await import("../../src/application/runDispatch.js");
     let argv = null;
     await dispatchRun({
-      agentId: "reuse-seat", prompt: "t", resolvedRoleId: "w4b-hat",
+      agentId: "reuse-seat", prompt: "t", resolvedRoleId: "auditor",
       registryPath, runDir: join(dir, "runs"), runId: "run_0045_hole_b2",
       leadSession: "stable-lead-session", cwd: dir,
       spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
@@ -160,6 +164,5 @@ test("HOLE-B 对照：lead_workspace 派发照常进复用路由（升维材料�
     assert.notEqual(material.roleSha256, "none", "有角色席=正文 sha（非 none）");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES, "w4b-hat.md"), { force: true });
   }
 });

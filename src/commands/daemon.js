@@ -6,13 +6,13 @@
 //   - 外部模块：./daemon.js（connectDaemon/readDaemonHandshake/isDaemonAlive/...）、
 //     ./daemonSupervisor.js（readSupervisorState）
 //   - 共享工具：./shared.js（parseOptions/loadPrompt，纯函数/低风险 I/O）
-//   - node built-in：child_process（spawn/spawnSync）、fs（readFileSync/unlinkSync/existsSync）、
+//   - node built-in：child_process（spawn/spawnSync）、fs（readFileSync/unlinkSync/existsSync/statSync）、
 //     path（join/resolve/dirname）、url（fileURLToPath）
 //
 // daemon 族零跨 family 共享——resolveDaemonPipe 只被 daemon 用，自包含。
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -99,16 +99,89 @@ async function daemonSupervisorCommand(args, config) {
 }
 
 // P5 TD-46：dump daemon 最新健康采样（daemon 周期写 daemon-health.json）。无文件→无运行/未采样。
+// 读侧新鲜度：daemon 停掉后残留的旧采样不代表当前状态（宿主实机踩过：11 天前的
+// worktree 残留告警，当时实际为 0）——daemon 不在跑、采样超期、采样时间戳在未来、
+// 或采样早于当前 daemon 启动（上一轮残留）都整体改判 stale（staleReason 给机读原因），
+// 原结论降级进 lastSample。纯阈值判定仍在 src/daemonHealth.js 不动。
+const STALE_SAMPLE_AFTER_MS = 10 * 60 * 1000; // daemon 每 30s 采样一次（src/daemon.js healthIntervalMs），10 分钟无新采样即过期
+// 时钟偏差容差：sampledAt 比 now 略微超前（采样与读取之间的时钟微调）仍算新鲜；
+// 超前超过 60s 视为未来采样（时间戳异常），不判新鲜。
+const FUTURE_SAMPLE_TOLERANCE_MS = 60 * 1000;
 async function daemonHealthCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
   const healthPath = join(runDir, "daemon-health.json");
-  try {
-    const data = JSON.parse(readFileSync(healthPath, "utf8"));
-    console.log(JSON.stringify(data, null, 2));
-  } catch {
+  if (!existsSync(healthPath)) {
     console.log(JSON.stringify({ ok: false, note: "no daemon-health.json（daemon 未运行或尚未采样，30s 后首次采样）。Start: daemon start。" }, null, 2));
+    return;
   }
+  // 读不出 / 坏 JSON / 不是普通对象（null、数组、标量）都视为无效采样，与"文件缺失"分开提示。
+  let data;
+  let mtimeMs;
+  try {
+    data = JSON.parse(readFileSync(healthPath, "utf8"));
+    mtimeMs = statSync(healthPath).mtimeMs;
+  } catch {
+    data = undefined;
+  }
+  const isPlainObject = data !== null && typeof data === "object" && !Array.isArray(data);
+  if (!isPlainObject) {
+    console.log(JSON.stringify({
+      ok: false,
+      note: "daemon-health.json 存在但不是有效的采样对象（可能正写到一半或已损坏）；daemon 在跑时每 30 s 重写，稍后再查",
+    }, null, 2));
+    return;
+  }
+  // 采样时间：优先采样自带的 sampledAt；只有"有限数字且落在 Date 可表示范围内"才采用
+  // （1e20 / 8.64e15+1 这类值会让 new Date(...).toISOString() 抛 RangeError），否则退回文件 mtime。
+  // 先校验后换算：命令对任何文件内容都不抛异常。
+  const hasSampledAt = typeof data.sampledAt === "number"
+    && Number.isFinite(data.sampledAt)
+    && Number.isFinite(new Date(data.sampledAt).getTime());
+  const sampledAt = hasSampledAt ? data.sampledAt : mtimeMs;
+  const sampledAtSource = hasSampledAt ? "sample" : "mtime";
+  const now = Date.now();
+  const ageMs = now - sampledAt;
+  const sampledAtIso = new Date(sampledAt).toISOString();
+  const hs = readDaemonHandshake(runDir);
+  const daemonRunning = isDaemonAlive(hs, now, DEFAULT_LIVENESS_THRESHOLD_MS);
+  // 握手 startedAt 是有限数字时，采样必须不早于它（采样属于当前这一轮 daemon；
+  // 新 daemon 已起、首次采样前，上一轮留下的采样不判新鲜）。
+  const hasStartedAt = hs !== null && typeof hs === "object"
+    && typeof hs.startedAt === "number" && Number.isFinite(hs.startedAt);
+  const fromPreviousDaemon = hasStartedAt && sampledAt < hs.startedAt;
+  const fresh = daemonRunning
+    && ageMs <= STALE_SAMPLE_AFTER_MS
+    && ageMs >= -FUTURE_SAMPLE_TOLERANCE_MS
+    && !fromPreviousDaemon;
+  if (!fresh) {
+    let staleReason;
+    if (!daemonRunning) staleReason = "daemon_not_running";
+    else if (ageMs < -FUTURE_SAMPLE_TOLERANCE_MS) staleReason = "sample_in_future";
+    else if (fromPreviousDaemon) staleReason = "sample_from_previous_daemon";
+    else staleReason = "sample_too_old";
+    // 分钟数一律写正数：过旧写"N 分钟前"，未来写"N 分钟后"，不出现"约 -N 分钟前"。
+    const minutes = Math.round(Math.abs(ageMs) / 60000);
+    const reasonNote = {
+      daemon_not_running: `daemon 未运行；原结论放在 lastSample，不代表当前状态`,
+      sample_in_future: `采样时间戳在未来（约 ${minutes} 分钟后），不可信；原结论放在 lastSample，不代表当前状态`,
+      sample_from_previous_daemon: `采样属于上一轮 daemon（早于当前 daemon 启动）；原结论放在 lastSample，不代表当前状态`,
+      sample_too_old: `这是约 ${minutes} 分钟前的旧采样（采样过旧）；原结论放在 lastSample，不代表当前状态`,
+    }[staleReason];
+    console.log(JSON.stringify({
+      level: "stale",
+      fresh: false,
+      staleReason,
+      daemonRunning,
+      sampledAtIso,
+      ageMs,
+      sampledAtSource,
+      note: reasonNote,
+      lastSample: data,
+    }, null, 2));
+    return;
+  }
+  console.log(JSON.stringify({ ...data, fresh: true, daemonRunning, sampledAtIso, ageMs, sampledAtSource }, null, 2));
 }
 
 function resolveDaemonPipe(options) {

@@ -6,17 +6,14 @@
 //   ①派发后改注册表 systemPrompt 指向（换文件）②派发后改角色文件内容；
 //   另防一类静默丢角色：③派发后注册表撤掉 systemPrompt。
 //   legacy 无钉档案行为逐字保留（第 3 步切换批的遗留五态再收紧）。
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-
-const REPO_ROOT = resolve(import.meta.dirname, "../..");
-const ROLES_DIR = join(REPO_ROOT, "config", "roles");
 
 function makeGitRepo(dir) {
   execSync("git init", { cwd: dir, stdio: "pipe" });
@@ -39,9 +36,16 @@ function makeRegistry(dir, agents) {
   writeFileSync(registryPath, JSON.stringify({ agents }), "utf8");
   return registryPath;
 }
+// TD-314：临时角色文件不再写进仓库的 config/roles/（真实角色库——与并发跑的
+// dispatchResolution 的角色库清单断言冲突，且崩溃会把临时角色留在库里），改写进
+// os.tmpdir() 下的共享临时目录。注册表 systemPrompt 与 rolePin 都用返回的绝对
+// 路径：resolveRoleContractPath 对绝对路径原样使用，加载、钉住与续跑语义不变。
+const TEMP_ROLES_DIR = mkdtempSync(join(tmpdir(), "wao-0045-pin-roles-"));
+after(() => cleanupDir(TEMP_ROLES_DIR));
 function writeRoleFile(name, content) {
-  writeFileSync(join(ROLES_DIR, name), content, "utf8");
-  return `config/roles/${name}`;
+  const rolePath = join(TEMP_ROLES_DIR, name);
+  writeFileSync(rolePath, content, "utf8");
+  return rolePath;
 }
 const sha = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 
@@ -100,7 +104,6 @@ test("PIN-1: start 钉 rolePin{systemPrompt,sha256} 进 run.started；无角色�
       "钉 = registry 声明路径 + 正文 sha256");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_pin_a.md"), { force: true });
   }
 });
 
@@ -126,8 +129,6 @@ test("PIN-2: resume 钉优先——注册表改指向别文件后，续跑仍用
     assert.ok(!capture.task.roleContract.includes("MARKER_ROLE_B"), "注册表新指向 B 未被采用——静默换身份洞关闭");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_pin_a.md"), { force: true });
-    rmSync(join(ROLES_DIR, "_0045_pin_b.md"), { force: true });
   }
 });
 
@@ -142,8 +143,8 @@ test("PIN-3: 钉住文件内容被改 → role_contract_drift 具名拒绝，零
     const transcriptPath = join(dir, "runs", `${runId}.jsonl`);
     writeTranscript(join(dir, "runs"), runId, baseEvents(runId, "_0045_pin", pin));
     const bytesBefore = readFileSync(transcriptPath, "utf8");
-    // 派发后角色文件被编辑
-    writeRoleFile("_0045_pin_a.md", "# Pin A TAMPERED\nMARKER_ROLE_A\n");
+    // 派发后角色文件被编辑（TD-314：改的是临时目录里的钉住文件）
+    writeFileSync(roleA, "# Pin A TAMPERED\nMARKER_ROLE_A\n", "utf8");
 
     const registryPath = makeRegistry(dir, { _0045_pin: { backend: "claude-code", cwd: dir, systemPrompt: roleA } });
     const capture = {};
@@ -161,7 +162,6 @@ test("PIN-3: 钉住文件内容被改 → role_contract_drift 具名拒绝，零
     assert.equal(readFileSync(transcriptPath, "utf8"), bytesBefore, "转录字节不变");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_pin_a.md"), { force: true });
   }
 });
 
@@ -181,7 +181,6 @@ test("PIN-4: legacy 无钉档案 → 从当前注册表读取（行为逐字保�
     assert.match(capture.task.roleContract, /MARKER_ROLE_B/, "legacy 档案照旧读注册表指向");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_pin_b.md"), { force: true });
   }
 });
 
@@ -203,6 +202,5 @@ test("PIN-5: 有钉但注册表已撤 systemPrompt → 仍加载钉住角色（�
     assert.match(capture.task.roleContract, /MARKER_ROLE_A/, "撤掉注册表指向后仍按钉加载——静默丢角色洞关闭");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_pin_a.md"), { force: true });
   }
 });

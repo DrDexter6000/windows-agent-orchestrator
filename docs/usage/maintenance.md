@@ -70,7 +70,7 @@ npm run cli -- daemon supervisor status    # 读 daemon-supervisor.json
 npm run cli -- daemon supervisor stop      # SIGTERM supervisor（daemon 独立存活）
 
 # 可观测：daemon 每 30s 采样（rss/heap/在飞 run/worktree 残留），超阈→warn（长跑泄漏信号）。
-npm run cli -- daemon health               # dump 最新采样
+npm run cli -- daemon health               # 最新采样；daemon 未运行、采样过旧或时间戳异常时 level=stale（原因见 staleReason），原结论在 lastSample
 
 # 停 daemon（IPC shutdown）
 npm run cli -- daemon stop

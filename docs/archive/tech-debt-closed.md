@@ -128,3 +128,4 @@
 | TD-311 | registry list/check/validate 的作用复述在 README、README.zh-CN、SKILL、AGENT_ONBOARDING、使用手册与排障手册多处 | 唯一归宿是 CLI help（src/cliHelp.js，生成副本 docs/surface/cli.md）；各处改为指向它或只留操作说明（入口文档、onboarding §4d 与 install.ps1、docs/usage/install.md 与 results.md、troubleshooting.md、两处代码注释） |
 | TD-201 | dsh 的 phase6 跨 run 会话恢复证据绑定旧运行时指纹，升级 0.2.1-rc.2 后组件层判 inconclusive | 2026-10-17 在 0.2.1-rc.2 上用 deepseek-flash 重跑 wao-reuse-drill：同一 ACP 会话复述标记，三条负向全部拒绝，组件层判 pass（scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json） |
 | TD-315 | 行为钉比较 { ...process.env }.PATH；Windows 环境块保留键的原始大小写（PowerShell 启动的进程里是 Path），从这类 shell 跑全量时该用例稳定假红，代码本身无问题 | 2026-10-21：断言改为按大小写不敏感发现键名再比较同一个键，强度不变；本机全量 350→351 |
+| TD-314 | 全量里 migration-0045 的 explicitDispatch 往仓库 config/roles/ 写临时角色文件，与同 wave 并发、断言角色库恰好四个角色的 dispatchResolution 互相干扰，稳定假红；另有六个测试也写该目录 | 2026-10-28：七个测试改用角色库真实角色（只读）或系统临时目录的绝对路径，不再写仓库的 config/roles/；写入者与四个列目录的读者并发跑通过 |

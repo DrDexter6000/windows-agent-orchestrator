@@ -14,12 +14,10 @@
 import { test } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
-
-const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 function makeGitRepo(dir) {
   execSync("git init", { cwd: dir, stdio: "pipe" });
@@ -139,9 +137,12 @@ test("PA-RED2: delivery mode WITH a systemPrompt composes delivery contract + ro
   const dir = mkdtempSync(join(tmpdir(), "wao-m118c-pa2-"));
   try {
     makeGitRepo(dir);
-    mkdirSync(join(REPO_ROOT, "config", "roles"), { recursive: true });
-    const rolePath = "config/roles/_m118c_pa_role.md";
-    writeFileSync(join(REPO_ROOT, rolePath), "# Coder\nWrite tested code.\n", "utf8");
+    // TD-314: the role contract file lives in THIS test's own tmpdir and the
+    // registry references it by absolute path (resolveRoleContractPath passes
+    // absolute paths through unchanged) — the repo's config/roles/ is the real
+    // role library and must not gain temp files mid-suite.
+    const rolePath = join(dir, "_m118c_pa_role.md");
+    writeFileSync(rolePath, "# Coder\nWrite tested code.\n", "utf8");
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: { _m118c_coder: { backend: "claude-code", cwd: dir, systemPrompt: rolePath } },
@@ -193,7 +194,6 @@ test("PA-RED2: delivery mode WITH a systemPrompt composes delivery contract + ro
       "delivery contract precedes role body");
   } finally {
     cleanupDir(dir);
-    try { rmSync(join(REPO_ROOT, "config", "roles", "_m118c_pa_role.md"), { force: true }); } catch {}
   }
 });
 

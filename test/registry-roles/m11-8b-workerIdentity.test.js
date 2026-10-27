@@ -34,7 +34,7 @@ import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
@@ -45,8 +45,6 @@ import { projectCollectResult } from "../../src/application/runCollectProjection
 import { dispatchRun } from "../../src/application/runDispatch.js";
 
 // ===== Helpers =====
-
-const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 function makeRegistry(dir, agents) {
   const registryPath = join(dir, "agents.json");
@@ -454,10 +452,12 @@ test("M11-8B-B5: RunManager.start injects composed identity once; prompt.sent ke
   const dir = mkdtempSync(join(tmpdir(), "wao-m118b-b5-"));
   try {
     makeGitRepo(dir);
-    // A role contract file under config/roles/.
-    mkdirSync(join(REPO_ROOT, "config", "roles"), { recursive: true });
-    const rolePath = "config/roles/_m118b_test_role.md";
-    writeFileSync(join(REPO_ROOT, rolePath), "# Test Coder\nYou write tested code.\n", "utf8");
+    // TD-314: the role contract file lives in THIS test's own tmpdir and the
+    // registry references it by absolute path (resolveRoleContractPath passes
+    // absolute paths through unchanged) — the repo's config/roles/ is the real
+    // role library and must not gain temp files mid-suite.
+    const rolePath = join(dir, "_m118b_test_role.md");
+    writeFileSync(rolePath, "# Test Coder\nYou write tested code.\n", "utf8");
     const registryPath = makeRegistry(dir, {
       _m118b_coder: { backend: "claude-code", cwd: dir, systemPrompt: rolePath },
     });
@@ -517,7 +517,5 @@ test("M11-8B-B5: RunManager.start injects composed identity once; prompt.sent ke
     assert.ok(!/canonical WAO agentId/i.test(promptSent.prompt), "identity header must NOT leak into prompt.sent");
   } finally {
     cleanupDir(dir);
-    // remove the test role file
-    try { rmSync(join(REPO_ROOT, "config", "roles", "_m118b_test_role.md"), { force: true }); } catch { /* best effort */ }
   }
 });

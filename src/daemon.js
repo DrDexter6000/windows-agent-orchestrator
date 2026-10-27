@@ -78,14 +78,19 @@ export function readHandshake(runDir) {
 }
 
 /**
- * 判 daemon 是否活着：heartbeatAt 在阈值内 = 活。
+ * 判 daemon 是否活着：heartbeatAt 是有限数字、且 |now - heartbeatAt| ≤ 阈值 = 活。
+ * 比阈值更靠未来的心跳同样判死——握手里残留 Infinity/远未来时间戳（daemon 已死）
+ * 时，不能让所有调用方（daemon start 的幂等门、supervisor 的重启判据）永远当它活着。
+ * 活 daemon 每 DEFAULT_HEARTBEAT_INTERVAL_MS(2s) 重写心跳，只有系统时钟回拨超过阈值
+ * 的那一两秒会碰到未来一侧，代价接受。
  * @param {object|null} handshake - readHandshake 的返回
  * @param {number} now - 当前时间戳（ms）
  * @param {number} thresholdMs - 心跳超时阈值
  */
 export function isDaemonAlive(handshake, now, thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS) {
   if (!handshake || typeof handshake.heartbeatAt !== "number") return false;
-  return (now - handshake.heartbeatAt) <= thresholdMs;
+  if (!Number.isFinite(handshake.heartbeatAt)) return false;
+  return Math.abs(now - handshake.heartbeatAt) <= thresholdMs;
 }
 
 /**
@@ -381,7 +386,8 @@ export async function startDaemon(opts = {}) {
       writeFileSync(join(runDir, "daemon-health.json"), JSON.stringify({ ...sample, level: health.level, issues: health.issues }, null, 2), "utf8");
       if (health.level === "warn") {
         // 记 health_warn 事件到 transcript？daemon 无单一 transcript；先写 health 文件，CLI health 可读。
-        // （告警通道：lead 轮询 daemon health 命令 / 监控 daemon-health.json level）
+        // （告警通道：新鲜度由 `daemon health` 命令判断；直接监控 daemon-health.json 的 level 时，
+        //   必须同时核对 sampledAt 和握手心跳——daemon 停掉后文件仍保留最后一次结论）
       }
     } catch {
       // 采样失败不杀 daemon

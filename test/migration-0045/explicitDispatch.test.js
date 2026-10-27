@@ -60,16 +60,15 @@ function readStarted(dir, runDirName = "runs") {
 
 test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默认帽），注记五件套落档", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-expl1-"));
-  // 角色库两个可区分角色：接线席位默认帽 coder_low、目标帽 researcher
-  const roleCoderLow = "# coder_low\nMARKER_DEFAULT_HAT\n";
-  const roleResearcher = "# researcher\nMARKER_RESEARCHER_HAT\n";
-  writeFileSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), roleCoderLow, "utf8");
-  writeFileSync(join(ROLES_DIR, "_0045_w2_researcher.md"), roleResearcher, "utf8");
+  // TD-314：直接用角色库真实角色（接线席位默认帽 coder、目标帽 researcher），
+  // 不再往 config/roles/ 写临时文件——那会与并发跑的 dispatchResolution 的
+  // 角色库清单断言冲突，且测试中途崩溃会把临时角色留在真实角色库。
+  const researcherMd = readFileSync(join(ROLES_DIR, "researcher.md"), "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      _0045_w2_lane_seat: { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/_0045_w2_coder_low.md" },
+      _0045_w2_lane_seat: { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/coder.md" },
     } }), "utf8");
     const capture = {};
     const manager = await makeManager(dir, registryPath, capture);
@@ -77,7 +76,7 @@ test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默�
       prompt: "task", runDir: join(dir, "runs"), registry: registryPath,
       resolvedTarget: {
         kind: "resolved", source: "explicit", agentId: "_0045_w2_lane_seat",
-        laneId: "test-lane", roleId: "_0045_w2_researcher",
+        laneId: "test-lane", roleId: "researcher",
         lanesSha256: "ab".repeat(32),
       },
     });
@@ -87,28 +86,25 @@ test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默�
     assert.ok(started, "run.started 存在");
     assert.equal(started.resolvedFrom, "explicit");
     assert.equal(started.laneId, "test-lane");
-    assert.equal(started.roleId, "_0045_w2_researcher");
+    assert.equal(started.roleId, "researcher");
     assert.equal(started.wiringAgent, undefined, "W4d：过渡接线字段退役（envelope agentId=车道键）");
     assert.equal(started.lanesSha256, "ab".repeat(32));
     assert.equal(started.sessionReuseDecision, "fresh_identity_transition", "R3 裁定⑥：有界 fresh 原因");
-    // 角色钉住指向角色库目标帽（P1 机制承载 W2 的角色生效）
+    // 角色钉住指向角色库目标帽（P1 机制承载 W2 的角色生效）；sha256 现算真实文件
     assert.deepEqual(started.rolePin, {
-      systemPrompt: "config/roles/_0045_w2_researcher.md",
-      sha256: sha(roleResearcher),
+      systemPrompt: "config/roles/researcher.md",
+      sha256: sha(researcherMd),
     });
-    assert.match(capture.task.roleContract, /MARKER_RESEARCHER_HAT/, "worker 收到目标帽正文");
-    assert.ok(!capture.task.roleContract.includes("MARKER_DEFAULT_HAT"), "接线席位默认帽未被注入");
+    assert.match(capture.task.roleContract, /# Role: Researcher/, "worker 收到目标帽正文");
+    assert.ok(!capture.task.roleContract.includes("# Role: Coder"), "接线席位默认帽未被注入");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), { force: true });
-    rmSync(join(ROLES_DIR, "_0045_w2_researcher.md"), { force: true });
   }
 });
 
 test("EXPL-2（W4d）：alias=执行——角色=别名表 roleId 经库加载；身份头结构化", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-expl2-"));
-  const roleDefault = "# default\nMARKER_ALIAS_HAT\n";
-  writeFileSync(join(ROLES_DIR, "w3d-alias-hat.md"), roleDefault, "utf8");
+  const testerMd = readFileSync(join(ROLES_DIR, "tester.md"), "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
@@ -121,7 +117,7 @@ test("EXPL-2（W4d）：alias=执行——角色=别名表 roleId 经库加载�
       prompt: "task", runDir: join(dir, "runs"), registry: registryPath,
       resolvedTarget: {
         kind: "resolved", source: "alias", agentId: "test-lane",
-        laneId: "test-lane", roleId: "w3d-alias-hat",
+        laneId: "test-lane", roleId: "tester",
         lanesSha256: "cd".repeat(32),
       },
     });
@@ -129,16 +125,15 @@ test("EXPL-2（W4d）：alias=执行——角色=别名表 roleId 经库加载�
     const started = readStarted(dir);
     assert.equal(started.resolvedFrom, "alias");
     assert.equal(started.laneId, "test-lane");
-    assert.equal(started.roleId, "w3d-alias-hat");
+    assert.equal(started.roleId, "tester");
     assert.equal(started.wiringAgent, undefined, "W4d：过渡字段全面退役");
     assert.equal(started.sessionReuseDecision, undefined, "alias 无 fresh 注记");
-    assert.deepEqual(started.rolePin, { systemPrompt: "config/roles/w3d-alias-hat.md", sha256: sha(roleDefault) },
+    assert.deepEqual(started.rolePin, { systemPrompt: "config/roles/tester.md", sha256: sha(testerMd) },
       "alias 角色钉=别名表角色经库加载（W4d 别名执行化）");
-    assert.match(capture.task.roleContract, /MARKER_ALIAS_HAT/);
-    assert.match(capture.task.roleContract, /lane=test-lane role=w3d-alias-hat/, "alias 也用结构化身份头（W4d）");
+    assert.match(capture.task.roleContract, /# Role: Tester/);
+    assert.match(capture.task.roleContract, /lane=test-lane role=tester/, "alias 也用结构化身份头（W4d）");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "w3d-alias-hat.md"), { force: true });
   }
 });
 
@@ -263,32 +258,28 @@ test("CLI-3: agentId 与 lane/role 混用 → dispatch_selector_invalid", async 
 
 test("HDR-1: explicit 派发身份头=lane/role 模板，无接线席位名（alias/legacy 头保持原钉）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hdr1-"));
-  writeFileSync(join(ROLES_DIR, "w3b-hat.md"), "# w3b\nMARKER_W3B\n", "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-"w3b-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/_0045_w2_coder_low.md" },
+"w3b-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/coder.md" },
     } }), "utf8");
-    writeFileSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), "# cl\nMARKER_CL\n", "utf8");
     const capture = {};
     const manager = await makeManager(dir, registryPath, capture);
     const run = await manager.start("w3b-seat", {
       prompt: "t", runDir: join(dir, "runs"), registry: registryPath,
       resolvedTarget: {
         kind: "resolved", source: "explicit", agentId: "w3b-seat",
-        laneId: "test-lane", roleId: "w3b-hat",
+        laneId: "test-lane", roleId: "tester",
         lanesSha256: "ab".repeat(32),
       },
     });
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
-    assert.match(capture.task.roleContract, /Your canonical WAO identity is lane=test-lane role=w3b-hat\./, "结构化身份头");
+    assert.match(capture.task.roleContract, /Your canonical WAO identity is lane=test-lane role=tester\./, "结构化身份头");
     assert.ok(!capture.task.roleContract.includes("Your canonical WAO agentId is"), "无旧模板头");
     assert.ok(!/wiring|agentId is w3b-seat/.test(capture.task.roleContract), "接线席位名不入头");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "w3b-hat.md"), { force: true });
-    rmSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), { force: true });
   }
 });
 
