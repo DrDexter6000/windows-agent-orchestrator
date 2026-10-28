@@ -246,7 +246,7 @@ function Test-WaoExistingDest {
     if ($LASTEXITCODE -ne 0 -or (Normalize-WaoRemoteUrl "$remote") -ne (Normalize-WaoRemoteUrl $WaoRepoUrl)) {
         return 'remote-mismatch'
     }
-    $status = (& git -C $Path status --porcelain 2>&1) | Out-String
+    $status = (& git -C $Path --no-optional-locks status --porcelain 2>&1) | Out-String
     if ($status.Trim()) { return 'dirty' }
     return 'clean'
 }

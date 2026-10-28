@@ -220,7 +220,7 @@ function _worktreeIntact(gitFn, wtPath, commit) {
     const head = String(gitFn(["rev-parse", "HEAD"], { cwd: wtPath })).trim();
     if (head !== commit) return false;
     const porcelain = String(gitFn(
-      ["status", "--porcelain=v1", "-z", "--untracked-files=no"],
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
       { cwd: wtPath },
     ));
     if (porcelain.trim().length > 0) return false;

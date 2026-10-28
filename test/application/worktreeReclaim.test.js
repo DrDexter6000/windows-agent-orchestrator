@@ -6,8 +6,8 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { symlinkSync } from "node:fs";
 
 import {
@@ -1118,6 +1118,36 @@ test("CLI：嵌套回收项打印目标路径与父树（Owner 批准时看得�
   assert.ok(line, "应打印该回收项");
   assert.match(line, /目标=.*run_cli_n/);
   assert.match(line, new RegExp(`父树=${realpathSync(dev).replace(/\\/g, "\\\\")}`));
+});
+
+// 私有索引副本（2026-10-28 会审必改）：computeTreeFingerprint 的工作树 diff
+// （diff ... HEAD）经 diff.autoRefreshIndex 会刷新并写回真实索引
+// （--no-optional-locks 也拦不住）。改在副本上跑后：真实索引字节不动、不留
+// index.lock、mtime-only 不误报 dirty、真实内容改动照报。
+test("指纹私有索引：工作树 diff 不写真实索引；mtime-only 不报 dirty、真改动照报", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_prividx");
+  const indexAbs = resolve(wt, git(["rev-parse", "--git-path", "index"], wt));
+  const indexBefore = readFileSync(indexAbs);
+
+  // 只改 mtime、内容不变：不得报成 dirty，也不得写真实索引
+  const aPath = join(wt, "a.txt");
+  const st = lstatSync(aPath);
+  utimesSync(aPath, new Date(st.atimeMs), new Date(st.mtimeMs + 5000));
+  const fp1 = await computeTreeFingerprint(wt);
+  assert.equal(fp1.dirty.unstaged, false, "只改 mtime 不得报成改动");
+  assert.equal(fp1.dirty.staged, false);
+  assert.equal(fp1.dirty.untracked, false);
+  assert.deepEqual(readFileSync(indexAbs), indexBefore, "真实 .git/index 字节必须原样");
+  assert.ok(!existsSync(`${indexAbs}.lock`), "不得留下 index.lock 残锁");
+
+  // 真实内容改动仍被报出（比较语义不变），且依旧不写真实索引
+  writeFileSync(aPath, "const a = 2;\n", "utf8");
+  const fp2 = await computeTreeFingerprint(wt);
+  assert.equal(fp2.dirty.unstaged, true, "真实内容改动必须照报");
+  assert.notEqual(fp2.worktreeDiffSha256, fp1.worktreeDiffSha256, "工作树 diff 哈希应随内容变化");
+  assert.deepEqual(readFileSync(indexAbs), indexBefore, "真实 .git/index 字节仍必须原样");
+  assert.ok(!existsSync(`${indexAbs}.lock`), "仍不得留下 index.lock 残锁");
 });
 
 // 兜底：未用到的导入保持显式（OLD_TS 供手工调试种子扩展）。

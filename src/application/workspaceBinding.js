@@ -100,7 +100,7 @@ function git(args, cwd, opts = {}) {
  * @returns {boolean}
  */
 function isDirty(cwd, opts) {
-  const output = git(["status", "--porcelain"], cwd, opts);
+  const output = git(["--no-optional-locks", "status", "--porcelain"], cwd, opts);
   return output.length > 0;
 }
 

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve, isAbsolute, join, normalize as posixNormalize } from "node:path";
 import { posix } from "node:path";
+import { createPrivateIndexCopy } from "./gitPrivateIndex.js";
 
 /**
  * Coder Delivery Contract v1 — deterministic Git delivery packager (Phase 2).
@@ -620,7 +621,7 @@ export function assertCommittedDeliveryRef(deliveryRef) {
   }
 
   // 6. Worktree must be clean (no non-ignored changes) — verification requirement.
-  const porcelain = String(git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
+  const porcelain = String(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
   if (porcelain.trim().length > 0) {
     throw new DeliveryError("artifact_mismatch", `worktree is dirty: ${parseNul(porcelain).join(", ")}`);
   }
@@ -655,11 +656,26 @@ export function assertCommittedDeliveryRef(deliveryRef) {
  *   when either required Git read failed
  */
 export function listWorktreeChangedPaths(cwd, baseCommit) {
+  // 真实索引路径（linked worktree 下输出已是绝对路径，否则按 cwd resolve）。
+  // 取路径失败 → null（与两条 git 读失败同一语义，绝不出半真相）。
+  const indexRaw = gitSafe(["rev-parse", "--git-path", "index"], { cwd });
+  if (indexRaw === null) return null;
   // Tracked changes (modified/deleted) relative to base. --no-renames keeps the
   // path set as RAW repository path identity: rename detection (diff.renames)
   // would collapse a delete+similar-add into one rename pair and drop the
-  // deleted source from containment checks.
-  const tracked = gitSafe(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd });
+  // deleted source from containment checks. 工作树 diff 会经 diff.autoRefreshIndex
+  // 刷新并写回索引（--no-optional-locks 也拦不住）：改在私有索引副本上跑，真实
+  // 索引字节不动。
+  const priv = createPrivateIndexCopy(resolve(cwd, String(indexRaw).trim()));
+  let tracked;
+  try {
+    tracked = gitSafe(
+      ["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"],
+      priv === null ? { cwd } : { cwd, env: { ...process.env, ...priv.env } },
+    );
+  } finally {
+    priv?.dispose();
+  }
   if (tracked === null) return null;
 
   // Non-ignored untracked files
@@ -694,10 +710,22 @@ function detectChanges(cwd, baseCommit) {
 
   // Tracked changes (modified/deleted) relative to base. --no-renames: raw
   // path identity — rename detection must not hide a deleted source from the
-  // allowedPaths containment check below.
-  const tracked = parseNul(
-    git(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd }),
-  );
+  // allowedPaths containment check below. 工作树 diff 会经 diff.autoRefreshIndex
+  // 刷新并写回索引（--no-optional-locks 也拦不住）：改在私有索引副本上跑，真实
+  // 索引字节不动。rev-parse --git-path index 失败照常抛出（detectChanges 的
+  // 失败语义本就是抛）。
+  const indexRaw = String(git(["rev-parse", "--git-path", "index"], { cwd })).trim();
+  const priv = createPrivateIndexCopy(resolve(cwd, indexRaw));
+  let trackedOut;
+  try {
+    trackedOut = git(
+      ["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"],
+      priv === null ? { cwd } : { cwd, env: { ...process.env, ...priv.env } },
+    );
+  } finally {
+    priv?.dispose();
+  }
+  const tracked = parseNul(trackedOut);
 
   // Non-ignored untracked files
   const untracked = parseNul(
@@ -1638,7 +1666,7 @@ function verifyPostCommitIntegrity(cwd, candidateCommit, canonicalBase, expected
 
   // 8. Worktree must be clean
   const porcelain = String(
-    git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }),
+    git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }),
   );
   if (porcelain.trim().length > 0) {
     const dirtyPaths = parseNul(porcelain).join(", ");
@@ -1928,7 +1956,7 @@ function recoverDeliveryCommit(input) {
   assertDeliveryIdentity(cwd, "artifact_mismatch", canonicalHead);
 
   // Clean worktree.
-  const porcelain = String(git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
+  const porcelain = String(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
   if (porcelain.trim().length > 0) {
     throw new DeliveryError("artifact_mismatch", "worktree is dirty during recovery");
   }

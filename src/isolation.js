@@ -407,8 +407,9 @@ export function terminalWorktreeVerdict({
   // ── 内容全净（被 ignore 的产物也算内容；清点不了按保留）──
   let statusOut;
   try {
+    // 旗写在调用处（守卫只认调用处）；缺省的 defaultTerminalGit 另有前置，git 接受重复的全局选项。
     statusOut = git(wtReal, [
-      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+      "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
     ]);
   } catch {
     return "inventory_unreadable";

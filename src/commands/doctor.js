@@ -947,7 +947,7 @@ export async function waoDoctorCommand(args, config) {
         let dirtyCount = -1;
         try {
           branch = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: checkoutRoot, encoding: "utf8", windowsHide: true, env: gitChildEnv() }).stdout?.trim() || "未知";
-          const st = spawnSync("git", ["status", "--porcelain"], { cwd: checkoutRoot, encoding: "utf8", windowsHide: true, env: gitChildEnv() }).stdout ?? "";
+          const st = spawnSync("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: checkoutRoot, encoding: "utf8", windowsHide: true, env: gitChildEnv() }).stdout ?? "";
           dirtyCount = st.split("\n").filter((l) => l.trim().length > 0).length;
         } catch { /* 探测失败如实未知 */ }
         const hot = (branch !== "main" && branch !== "未知") || dirtyCount > 0;

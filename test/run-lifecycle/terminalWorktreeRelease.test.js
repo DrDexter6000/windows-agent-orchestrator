@@ -644,7 +644,7 @@ test("terminalWorktreeVerdict: 清点不了 → inventory_unreadable（skip-work
     assert.equal(terminalWorktreeVerdict({
       worktreePath: wt, runId: "run_twr_inv1", repoCwd: dir,
       git: (cwd, args) => {
-        if (args[0] === "status") throw new Error("status failed");
+        if (args.includes("status")) throw new Error("status failed"); // 首参是调用处写的 --no-optional-locks
         return execFileSync("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).toString();
       },
     }), "inventory_unreadable");

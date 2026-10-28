@@ -278,7 +278,7 @@ export async function closeRunLineage({
         const branch = gitRev(p, ["rev-parse", "--abbrev-ref", "HEAD"]);
         const head = gitRev(p, ["rev-parse", "HEAD"]);
         let dirtyFiles = 0;
-        try { dirtyFiles = gitRev(p, ["status", "--porcelain"]).split(/\r?\n/).filter(Boolean).length; } catch { dirtyFiles = -1; }
+        try { dirtyFiles = gitRev(p, ["--no-optional-locks", "status", "--porcelain"]).split(/\r?\n/).filter(Boolean).length; } catch { dirtyFiles = -1; }
         const m = branch.startsWith("wao/") ? branch.slice(4) : null;
         if (!m || !snapshot.has(m)) { results.push({ path: p, outcome: "skipped_not_tip", branch }); continue; }
         const member = members.find((x) => x.runId === m);

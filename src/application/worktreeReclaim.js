@@ -75,6 +75,7 @@ import {
 import { createHash } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { gitChildEnv, isValidRunId } from "../delivery.js";
+import { createPrivateIndexCopy } from "../gitPrivateIndex.js";
 import { readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 import {
@@ -147,12 +148,14 @@ function commonDirOf(cwd) {
   return realpathSync(resolve(cwd, gitReadOnly(["rev-parse", "--git-common-dir"], cwd).trim()));
 }
 
-/** 流式哈希 git 输出（大 diff --binary 不整块落内存）。 */
-function hashGitOutput(args, cwd) {
+/** 流式哈希 git 输出（大 diff --binary 不整块落内存）。callerEnv：子进程的完整
+ * env（如带私有索引副本 GIT_INDEX_FILE 的 process.env 副本；缺省 process.env），
+ * 经 gitChildEnv 强制注入后传给子进程。 */
+function hashGitOutput(args, cwd, callerEnv) {
   return new Promise((resolveHash, reject) => {
     const child = spawn("git", args, {
       cwd,
-      env: gitChildEnv(),
+      env: gitChildEnv(callerEnv),
       windowsHide: true,
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -293,14 +296,24 @@ export function untrackedIgnoredManifest(treePath, records, nestedExcluded = [],
  */
 export async function computeTreeFingerprint(treePath, { nestedExcluded = [] } = {}) {
   const head = gitReadOnly(["rev-parse", "HEAD"], treePath).trim();
-  const worktreeDiffSha256 = await hashGitOutput([
-    "--no-optional-locks", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD",
-  ], treePath);
+  // 工作树 diff（diff ... HEAD）会经 diff.autoRefreshIndex 刷新并写回索引
+  //（--no-optional-locks 也拦不住）：改在私有索引副本上跑，真实索引字节不动。
+  // --cached 的 diff 不看工作树、不刷新，照旧直跑。
+  const indexAbs = resolve(treePath, gitReadOnly(["rev-parse", "--git-path", "index"], treePath).trim());
+  const priv = createPrivateIndexCopy(indexAbs);
+  let worktreeDiffSha256;
+  try {
+    worktreeDiffSha256 = await hashGitOutput([
+      "--no-optional-locks", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD",
+    ], treePath, priv === null ? undefined : { ...process.env, ...priv.env });
+  } finally {
+    priv?.dispose();
+  }
   const indexDiffSha256 = await hashGitOutput([
     "--no-optional-locks", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-color",
   ], treePath);
-  const records = parseStatusZ(gitReadOnly([
-    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+  const records = parseStatusZ(gitText([
+    "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
   ], treePath));
   return {
     head,

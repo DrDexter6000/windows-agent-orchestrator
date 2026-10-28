@@ -73,7 +73,7 @@ function revParseHead(root, gitBin) {
 // src/ dirty status from porcelain output (empty = clean). null = unreadable.
 function srcDirty(root, gitBin) {
   try {
-    const out = execFileSync(gitBin, ["status", "--porcelain", "--", "src/"], {
+    const out = execFileSync(gitBin, ["--no-optional-locks", "status", "--porcelain", "--", "src/"], {
       cwd: root,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],

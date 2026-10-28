@@ -125,6 +125,12 @@ const CORE_TOP = Object.freeze(new Set([
   "src/dispatchResourceAdvisory.js",
   "src/frictionLog.js",
   "src/gitLocalExclude.js",
+  // 工作树只读 git diff 的私有索引副本（GIT_INDEX_FILE 指向 os.tmpdir() 下的
+  // 复制件，diff.autoRefreshIndex 的刷新写回落在副本上，真实 .git/index 不被
+  // 触碰；副本 mtime 回拨 1 秒防 racy-git 漏报）。零相对出边（node:fs/os/path
+  // only，不起 git 子进程）；消费方 src/delivery.js（core 同层）与
+  // src/application/worktreeReclaim.js（下向 import）。
+  "src/gitPrivateIndex.js",
   "src/installRoot.js",
   "src/isolation.js",
   // R23-F/A 登记（2026-08-21）：机器级闸路径 SSOT（inflight marker / Round B 验证

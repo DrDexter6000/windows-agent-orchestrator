@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
@@ -11,9 +11,10 @@ import {
   packageDelivery,
   prepareDeliveryRequest,
   detectAbsolutePathLiteral,
+  listWorktreeChangedPaths,
   DeliveryError,
 } from "../../src/delivery.js";
-import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
+import { baseRepoFixture, copyGitRepo, git as fixtureGit, initGitRepo } from "../_gitRepoFixture.mjs";
 
 // ===== Constants =====
 
@@ -1880,5 +1881,86 @@ test("TD-233 council P2-3: kernel rejects an empty-changes delivery commit (pari
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// 私有索引副本（2026-10-28 会审必改）：工作树 diff 经 diff.autoRefreshIndex 会
+// 刷新并写回真实索引（--no-optional-locks 也拦不住）。listWorktreeChangedPaths
+// 与 detectChanges（经 inspectDelivery）的工作树 diff 改在副本上跑后：真实索引
+// 字节不动、不留 index.lock、mtime-only 不误报、真实内容改动照报。
+test("私有索引副本：工作树 diff 不写真实索引；mtime-only 不报改动、真改动照报", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    const indexPath = resolve(
+      wtPath,
+      execSync("git rev-parse --git-path index", { cwd: wtPath, encoding: "utf8" }).trim(),
+    );
+    const indexBefore = readFileSync(indexPath);
+
+    // 只改 mtime、内容不变：不得报成改动，也不得写真实索引
+    const aPath = join(wtPath, "src", "a.js");
+    const st = statSync(aPath);
+    utimesSync(aPath, new Date(st.atimeMs), new Date(st.mtimeMs + 5000));
+    assert.deepEqual(listWorktreeChangedPaths(wtPath, baseCommit), [], "mtime-only 不报成改动");
+    // 经 inspectDelivery 走到 detectChanges 的同一工作树 diff：mtime-only = 空
+    // diff → empty_diff（既有语义不变），同时索引字节不动
+    assertDeliveryError(() => inspectDelivery(baseInput(wtPath, baseCommit)), "empty_diff");
+    assert.deepEqual(readFileSync(indexPath), indexBefore, "真实 .git/index 字节必须原样");
+    assert.ok(!existsSync(`${indexPath}.lock`), "不得留下 index.lock 残锁");
+
+    // 真实内容改动仍被报出（比较语义不变），且依旧不写真实索引
+    await writeFile(join(wtPath, "src", "b.js"), "const b = 3;\n");
+    assert.deepEqual(listWorktreeChangedPaths(wtPath, baseCommit), ["src/b.js"]);
+    const ref = inspectDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.changedFiles, ["src/b.js"]);
+    assert.deepEqual(readFileSync(indexPath), indexBefore, "真实 .git/index 字节仍必须原样");
+    assert.ok(!existsSync(`${indexPath}.lock`), "仍不得留下 index.lock 残锁");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// split-index（2026-10-28 复核）：副本写回若另写一份共享索引，git 会顺手清理过期
+// 的 sharedindex.*，连真实索引仍引用的那份也删，真实索引随即打不开。副本上关掉
+// core.splitIndex 后，共享索引文件原样留着，真实索引照常可读；继承来的
+// GIT_CONFIG_PARAMETERS（如上游 `git -c core.splitIndex=true`）也重新打不开它。
+test("私有索引副本：split-index 仓库里不删真实索引引用的共享索引", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "wao-deliv-split-"));
+  try {
+    initGitRepo(repo);
+    fixtureGit(["config", "core.splitIndex", "true"], repo);
+    fixtureGit(["config", "splitIndex.sharedIndexExpire", "now"], repo);
+    fixtureGit(["config", "splitIndex.maxPercentChange", "0"], repo);
+    await writeFile(join(repo, "a.txt"), "a\n");
+    await writeFile(join(repo, "b.txt"), "b\n");
+    fixtureGit(["add", "a.txt", "b.txt"], repo);
+    fixtureGit(["commit", "-q", "-m", "init"], repo);
+    const baseCommit = fixtureGit(["rev-parse", "HEAD"], repo);
+    const shared = () => readdirSync(join(repo, ".git")).filter((n) => n.startsWith("sharedindex.")).sort();
+    const sharedBefore = shared();
+    assert.ok(sharedBefore.length > 0, "夹具应是 split-index 仓库");
+
+    const aPath = join(repo, "a.txt");
+    const st = statSync(aPath);
+    utimesSync(aPath, new Date(st.atimeMs), new Date(st.mtimeMs + 5000));
+    assert.deepEqual(listWorktreeChangedPaths(repo, baseCommit), [], "mtime-only 不报成改动");
+    assert.deepEqual(shared(), sharedBefore, "真实索引引用的共享索引文件必须留着");
+    // 真实索引仍可读：共享索引被删时这里以 fatal 退出 128 而抛错
+    fixtureGit(["--no-optional-locks", "status", "--porcelain"], repo);
+
+    utimesSync(aPath, new Date(st.atimeMs), new Date(st.mtimeMs + 10000));
+    const inherited = process.env.GIT_CONFIG_PARAMETERS;
+    process.env.GIT_CONFIG_PARAMETERS = "'core.splitIndex=true'";
+    try {
+      assert.deepEqual(listWorktreeChangedPaths(repo, baseCommit), []);
+    } finally {
+      if (inherited === undefined) delete process.env.GIT_CONFIG_PARAMETERS;
+      else process.env.GIT_CONFIG_PARAMETERS = inherited;
+    }
+    assert.deepEqual(shared(), sharedBefore, "继承的 GIT_CONFIG_PARAMETERS 打开 split-index 时也必须留着");
+    fixtureGit(["--no-optional-locks", "status", "--porcelain"], repo);
+  } finally {
+    await cleanupRepo(repo);
   }
 });
