@@ -129,3 +129,7 @@
 | TD-201 | dsh 的 phase6 跨 run 会话恢复证据绑定旧运行时指纹，升级 0.2.1-rc.2 后组件层判 inconclusive | 2026-10-17 在 0.2.1-rc.2 上用 deepseek-flash 重跑 wao-reuse-drill：同一 ACP 会话复述标记，三条负向全部拒绝，组件层判 pass（scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json） |
 | TD-315 | 行为钉比较 { ...process.env }.PATH；Windows 环境块保留键的原始大小写（PowerShell 启动的进程里是 Path），从这类 shell 跑全量时该用例稳定假红，代码本身无问题 | 2026-10-21：断言改为按大小写不敏感发现键名再比较同一个键，强度不变；本机全量 350→351 |
 | TD-314 | 全量里 migration-0045 的 explicitDispatch 往仓库 config/roles/ 写临时角色文件，与同 wave 并发、断言角色库恰好四个角色的 dispatchResolution 互相干扰，稳定假红；另有六个测试也写该目录 | 2026-10-28：七个测试改用角色库真实角色（只读）或系统临时目录的绝对路径，不再写仓库的 config/roles/；写入者与四个列目录的读者并发跑通过 |
+| TD-15 | ProcessBackend 的 retries 参数被忽略；自动重试已裁定不做，这个参数是候选删除项 | 2026-10-28：删除该参数与字段；无人读取的 config.retries 也从 config/default.json、cli.js 默认配置、生产代码的 RunManager 配置与两份文档的示例里删除（测试夹具里的同名字段无人读，未动）；HTTP 式 backend 自己的重试次数不变 |
+| TD-272 | deepseek-acp 的 extractExitCode 读平铺文本块，线上数据是嵌套块，从不生效；候选删除 | 2026-10-28：删除 extractExitCode 与只供它用的 contentText，命令事件不带退出码（工具结果文本不是退出码证据）；dsh 0.1.5-rc.2 的线上事件字节不变 |
+| TD-316 | 心跳判活写了三遍：checkOwnerLiveness 把 Infinity（1e400）与远未来值判新鲜，readOwnerLease 拒 Infinity 却把有限远未来值判新鲜；owner 已死时孤儿 run 不 resume、不回收、不结算 | 2026-10-28：收成 ownerLiveness.js 的 isFreshHeartbeat（有限且与当前相差不超过阈值），三处都用它；Infinity 租约仍判畸形，settle 照旧拒绝 |
+| TD-317 | registry validate 原样回显 registry 键名，非法键名里的敏感串会进输出，换行能伪造一行 | 2026-10-28：registry 是合法 JSON 时，非法键名的条目以 1 起序号指代（文本 ✖ #<序号>，JSON 的 id 为 null 并带 position），不回显；文件解析失败时报错带出源文本，见 TD-318 |

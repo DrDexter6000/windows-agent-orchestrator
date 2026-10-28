@@ -320,8 +320,8 @@ const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: a command failed while the harn
 
 // 工具结果里的全部文本：ACP 线上的真实形状是嵌套块
 // （{type:"content", content:{type:"text", text}}），平铺的 {type:"text", text} 也认。
-// 只供上面的报错识别用——不接到 extractExitCode：从命令的标准输出里读"退出码"不是
-// 证据（命令可以打印任何文字）。
+// 只供上面的报错识别用——不从工具结果文本提取退出码：从命令的标准输出里读"退出码"
+// 不是证据（命令可以打印任何文字）。
 function toolResultText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -333,28 +333,6 @@ function toolResultText(content) {
       && block.content.type === "text" && typeof block.content.text === "string") parts.push(block.content.text);
   }
   return parts.join("\n");
-}
-
-/** 从 shell 工具结果文本提取退出码；无法提取时不伪造（返回 undefined）。 */
-function extractExitCode(content) {
-  const text = contentText(content);
-  if (!text) return undefined;
-  let found;
-  for (const line of text.split(/\r?\n/)) {
-    const match = line.match(/^\s*(?:exit(?:\s+code)?|exitcode)\s*[:=]?\s*(-?\d+)\s*$/i);
-    if (match) found = Number(match[1]);
-  }
-  return found;
-}
-
-function contentText(content) {
-  if (!Array.isArray(content)) return null;
-  const joined = content
-    .filter((block) => block && typeof block === "object" && block.type === "text"
-      && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("\n");
-  return joined.length > 0 ? joined : null;
 }
 
 function parseRawInput(value) {
@@ -411,7 +389,9 @@ export class DeepSeekAcpBackend {
   // evidence/phase7-exit-code-wire.json）：dsh-acp 0.1.5-rc.2 的 tool_call_update
   // 只携带 {toolCallId, status, content}（不填协议自带的 rawOutput 自由字段）；
   // 退出码只以自由文本标记 `[exit code: N]` 出现且仅在非零退出时（干净退出 0 无痕）；
-  // 本文件 handleToolCallUpdate 现只读 update.content 文本解析（extractExitCode）。
+  // 本文件 handleToolCallUpdate 现不从 update.content 文本解析退出码（TD-272 删除
+  // extractExitCode：线上工具结果是嵌套块，平铺文本解析从不生效；命令 stdout 里的
+  // "退出码"也不是证据）。
   // 翻转条件 = 上游在 tool_call_update 提供可结构化解析的退出码字段（或 WAO 接线
   // 该通道并有实测证据）。声明 false ⇒ strict/scorecard 的 commandsPassed 类检查
   // 记 not-applicable + 原因（不置绿、不算失败）——是否允许缺该轴的 harness 拿
@@ -710,7 +690,7 @@ export class DeepSeekAcpBackend {
       toolCalls.set(toolCallId, { tool });
       const key = tool.toLowerCase();
       if (SHELL_TOOL_NAMES.includes(key) && typeof input.command === "string" && input.command.length > 0) {
-        // shell 类 → command 证据；退出码在终态更新到达时提取（无法提取则不伪造）。
+        // shell 类 → command 证据；退出码一律不带（TD-272：工具结果文本不是退出码证据）。
         pendingCommands.set(toolCallId, input.command);
         // 决定 0072：调用到达即落一条 tool_use——命令还在跑时 Lead 就看得到它跑的是
         // 什么（此前要等终态更新才落 command，长命令期间转录里没有它）。command
@@ -764,7 +744,7 @@ export class DeepSeekAcpBackend {
       const command = pendingCommands.get(toolCallId);
       if (command !== undefined) {
         pendingCommands.delete(toolCallId);
-        events.push(commandEvent(command, extractExitCode(output), { toolCallId }));
+        events.push(commandEvent(command, undefined, { toolCallId }));
       }
       // tool_result 以 toolCallId 为关联键（与其它后端同一约定）：失败的写调用不发
       // file_written，控制面靠这条结果关闭同一调用的写意图。

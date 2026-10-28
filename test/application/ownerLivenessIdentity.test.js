@@ -15,6 +15,8 @@ import assert from "node:assert/strict";
 
 import {
   identifyProcessIdentity,
+  isFreshHeartbeat,
+  DEFAULT_OWNER_LIVENESS_THRESHOLD_MS,
   PID_IDENTITY_TOLERANCE_MS,
   PID_IDENTITY_VERDICTS,
   PID_IDENTITY_BASES,
@@ -22,6 +24,40 @@ import {
 
 const NOW = 1_800_000_000_000;
 const ANCHOR = NOW - 3 * 24 * 60 * 60 * 1000; // 三天前记录的 pid
+
+// =====================================================================
+// TD-316: isFreshHeartbeat——心跳判活的唯一规矩。
+// 有限数字 且 |now - heartbeatAt| ≤ 阈值 才 fresh；比阈值更靠未来的心跳
+// 同样判死（活进程每 2s 重写心跳，只有时钟回拨超阈值那一两秒碰未来侧）。
+// =====================================================================
+
+const HB_NOW = 1_000_000;
+const HB_TH = 2000;
+
+test("TD-316 HB-01: 非有限值与非数字（Infinity/NaN/字符串/undefined）一律不 fresh", () => {
+  assert.equal(isFreshHeartbeat(Infinity, HB_NOW, HB_TH), false, "Infinity（JSON 文本 1e400 解析而来）");
+  assert.equal(isFreshHeartbeat(-Infinity, HB_NOW, HB_TH), false);
+  assert.equal(isFreshHeartbeat(NaN, HB_NOW, HB_TH), false);
+  assert.equal(isFreshHeartbeat("990000", HB_NOW, HB_TH), false, "字符串数字不 fresh");
+  assert.equal(isFreshHeartbeat(undefined, HB_NOW, HB_TH), false);
+});
+
+test("TD-316 HB-02: 过去侧——阈值内 fresh，超阈值不 fresh（边界 |Δ|=阈值 含）", () => {
+  assert.equal(isFreshHeartbeat(HB_NOW - 1000, HB_NOW, HB_TH), true);
+  assert.equal(isFreshHeartbeat(HB_NOW - HB_TH, HB_NOW, HB_TH), true, "边界取 <=，含");
+  assert.equal(isFreshHeartbeat(HB_NOW - HB_TH - 1, HB_NOW, HB_TH), false);
+});
+
+test("TD-316 HB-03: 未来侧——阈值内 fresh，超阈值不 fresh（时钟微回拨容差）", () => {
+  assert.equal(isFreshHeartbeat(HB_NOW + 1000, HB_NOW, HB_TH), true);
+  assert.equal(isFreshHeartbeat(HB_NOW + HB_TH, HB_NOW, HB_TH), true, "边界取 <=，含");
+  assert.equal(isFreshHeartbeat(HB_NOW + HB_TH + 1, HB_NOW, HB_TH), false, "远未来 = 死");
+});
+
+test("TD-316 HB-04: 缺省阈值 = DEFAULT_OWNER_LIVENESS_THRESHOLD_MS", () => {
+  assert.equal(isFreshHeartbeat(HB_NOW - DEFAULT_OWNER_LIVENESS_THRESHOLD_MS, HB_NOW), true);
+  assert.equal(isFreshHeartbeat(HB_NOW - DEFAULT_OWNER_LIVENESS_THRESHOLD_MS - 1, HB_NOW), false);
+});
 
 function deps(overrides = {}) {
   return {

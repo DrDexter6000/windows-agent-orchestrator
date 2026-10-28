@@ -11,6 +11,9 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { readRegistry, normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
+// TD-317: registry 键名是磁盘上的不可信数据——validate 输出绝不回显非法键名
+// （换行可在文本输出里伪造一行）。既定做法同 normalizeAgent 的固定文案 throw。
+import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -255,89 +258,99 @@ async function registryValidateCommand(args, config) {
     const agent = agents[id];
     const issues = [];
 
-    // 1. backend 必填且合法
-    if (!agent.backend) {
-      issues.push("missing backend");
-    } else if (!KNOWN_BACKENDS.includes(agent.backend)) {
-      // TD-161（auditor F3 修复）：issue 携带完整指路（与 normalizeAgent 的
-      // throw 同源 unknownBackendGuidance）——组合错误路径（坏 backend +
-      // 缺 cwd 等）下 normalizeAgent 先抛别的错，issue 若只报坏值会让支持集
-      // 提示彻底消失。纯坏 backend 时第 6 步 catch 会去重，闭集仍只出现一次。
-      issues.push(unknownBackendGuidance(agent.backend));
-    }
-
-    // 2. cwd 必填
-    if (!agent.cwd) {
-      issues.push("missing cwd");
-    }
-
-    // 3. opencode-serve 专属字段
-    if (agent.backend === "opencode-serve") {
-      if (!agent.serveUrl) issues.push("missing serveUrl");
-      if (!agent.agent) issues.push('missing agent (e.g. "build")');
-      if (!agent.model) {
-        issues.push("missing model");
-      } else {
-        if (!agent.model.providerID) issues.push("missing model.providerID");
-        if (!agent.model.id) issues.push("missing model.id");
+    // 0. 条目内容必须是普通对象（磁盘上的不可信数据）。null 会让下面的
+    // agent.backend 读取抛 TypeError、整个命令崩溃——JSON 契约和序号都拿不到；
+    // 数字/字符串/数组读不到字段，只会报出误导的缺字段问题。不是对象 → 记固定
+    // 文案 issue（不回显内容），跳过全部字段
+    // 检查，直接走既有的输出分支（合法键名照常显示 id；非法键名用 1 起序号、
+    // 不回显），命令照常输出并以 exit 1 结束。
+    if (agent === null || typeof agent !== "object" || Array.isArray(agent)) {
+      issues.push("条目内容不是对象");
+    } else {
+      // 1. backend 必填且合法
+      if (!agent.backend) {
+        issues.push("missing backend");
+      } else if (!KNOWN_BACKENDS.includes(agent.backend)) {
+        // TD-161（auditor F3 修复）：issue 携带完整指路（与 normalizeAgent 的
+        // throw 同源 unknownBackendGuidance）——组合错误路径（坏 backend +
+        // 缺 cwd 等）下 normalizeAgent 先抛别的错，issue 若只报坏值会让支持集
+        // 提示彻底消失。纯坏 backend 时第 6 步 catch 会去重，闭集仍只出现一次。
+        issues.push(unknownBackendGuidance(agent.backend));
       }
-      // C3（审计 P0）：opencode worker 必须配 tokenBudget（06-18 事故防线，硬门）。
-      // 未配 → registry validate 报错，阻止派发（stop 虚假成功 + 无预算上限 = 06-18 复现）。
-      if (typeof agent.tokenBudget !== "number") {
-        issues.push("missing tokenBudget (opencode worker 必须配，06-18 事故防线；进程式 worker 可不配)");
-      }
-    }
 
-    // 4. scorecard rules 形状（如有）
-    if (agent.scorecard) {
-      const rules = agent.scorecard.rules ?? {};
-      if (rules.requireCommands !== undefined && !Array.isArray(rules.requireCommands)) {
-        issues.push("scorecard.rules.requireCommands must be an array");
+      // 2. cwd 必填
+      if (!agent.cwd) {
+        issues.push("missing cwd");
       }
-      if (rules.requireFiles !== undefined && !Array.isArray(rules.requireFiles)) {
-        issues.push("scorecard.rules.requireFiles must be an array");
+
+      // 3. opencode-serve 专属字段
+      if (agent.backend === "opencode-serve") {
+        if (!agent.serveUrl) issues.push("missing serveUrl");
+        if (!agent.agent) issues.push('missing agent (e.g. "build")');
+        if (!agent.model) {
+          issues.push("missing model");
+        } else {
+          if (!agent.model.providerID) issues.push("missing model.providerID");
+          if (!agent.model.id) issues.push("missing model.id");
+        }
+        // C3（审计 P0）：opencode worker 必须配 tokenBudget（06-18 事故防线，硬门）。
+        // 未配 → registry validate 报错，阻止派发（stop 虚假成功 + 无预算上限 = 06-18 复现）。
+        if (typeof agent.tokenBudget !== "number") {
+          issues.push("missing tokenBudget (opencode worker 必须配，06-18 事故防线；进程式 worker 可不配)");
+        }
       }
-      if (rules.requireEvidence !== undefined && typeof rules.requireEvidence !== "boolean") {
-        issues.push("scorecard.rules.requireEvidence must be boolean");
+
+      // 4. scorecard rules 形状（如有）
+      if (agent.scorecard) {
+        const rules = agent.scorecard.rules ?? {};
+        if (rules.requireCommands !== undefined && !Array.isArray(rules.requireCommands)) {
+          issues.push("scorecard.rules.requireCommands must be an array");
+        }
+        if (rules.requireFiles !== undefined && !Array.isArray(rules.requireFiles)) {
+          issues.push("scorecard.rules.requireFiles must be an array");
+        }
+        if (rules.requireEvidence !== undefined && typeof rules.requireEvidence !== "boolean") {
+          issues.push("scorecard.rules.requireEvidence must be boolean");
+        }
       }
-    }
 
-    // 5. args 形状（如有）
-    if (agent.args !== undefined && !Array.isArray(agent.args)) {
-      issues.push("args must be an array");
-    }
+      // 5. args 形状（如有）
+      if (agent.args !== undefined && !Array.isArray(agent.args)) {
+        issues.push("args must be an array");
+      }
 
-    if (agent.prependArgs !== undefined && !Array.isArray(agent.prependArgs)) {
-      issues.push("prependArgs must be an array");
-    }
+      if (agent.prependArgs !== undefined && !Array.isArray(agent.prependArgs)) {
+        issues.push("prependArgs must be an array");
+      }
 
-    // TD-79：env 字段形状校验（worker 声明的子进程 env 注入，如 PIP_REQUIRE_VIRTUALENV）。
-    // 必须是 {string:string} 对象——key/value 都得是 string（spawn env 契约）。
-    if (agent.env !== undefined) {
-      if (typeof agent.env !== "object" || agent.env === null || Array.isArray(agent.env)) {
-        issues.push("env must be an object");
-      } else {
-        for (const [k, v] of Object.entries(agent.env)) {
-          if (isSecretEnvName(k)) {
-            issues.push(`env.${k} is secret-like; configure an inherited provider credential channel instead`);
-          }
-          if (typeof v !== "string") {
-            issues.push(`env.${k} value must be a string`);
+      // TD-79：env 字段形状校验（worker 声明的子进程 env 注入，如 PIP_REQUIRE_VIRTUALENV）。
+      // 必须是 {string:string} 对象——key/value 都得是 string（spawn env 契约）。
+      if (agent.env !== undefined) {
+        if (typeof agent.env !== "object" || agent.env === null || Array.isArray(agent.env)) {
+          issues.push("env must be an object");
+        } else {
+          for (const [k, v] of Object.entries(agent.env)) {
+            if (isSecretEnvName(k)) {
+              issues.push(`env.${k} is secret-like; configure an inherited provider credential channel instead`);
+            }
+            if (typeof v !== "string") {
+              issues.push(`env.${k} value must be a string`);
+            }
           }
         }
       }
-    }
 
-    // 6. 跑一遍 normalizeAgent 做最终校验（它会 throw 如果有硬错误）
-    try {
-      normalizeAgent(id, agent);
-    } catch (e) {
-      // TD-161 双打印消解 + auditor N1 修复：精确等值比对（重建预期消息）
-      // ——不用子串匹配：错误原文会回显用户值（如 waitTimeout 坏值恰含
-      // "has unknown backend" 时子串去重会吞掉真实错误，实测假通过
-      // valid:true）。其余硬错误照常透传。
-      if (e.message !== `Agent ${id} has ${unknownBackendGuidance(agent.backend)}`) {
-        issues.push(e.message);
+      // 6. 跑一遍 normalizeAgent 做最终校验（它会 throw 如果有硬错误）
+      try {
+        normalizeAgent(id, agent);
+      } catch (e) {
+        // TD-161 双打印消解 + auditor N1 修复：精确等值比对（重建预期消息）
+        //——不用子串匹配：错误原文会回显用户值（如 waitTimeout 坏值恰含
+        // "has unknown backend" 时子串去重会吞掉真实错误，实测假通过
+        // valid:true）。其余硬错误照常透传。
+        if (e.message !== `Agent ${id} has ${unknownBackendGuidance(agent.backend)}`) {
+          issues.push(e.message);
+        }
       }
     }
 
@@ -402,10 +415,24 @@ async function registryValidateCommand(args, config) {
         }
       }
     } else {
-      if (asJson) {
-        agentResults.push({ id, ok: false, issues, warnings: [] });
+      // TD-317: 非法键名的条目绝不回显键名（敏感串进输出、换行在文本模式伪造
+      // 一行），改用它在 agents 里的 1 起序号指代。normalizeAgent 的非法 id 检查
+      // 在所有字段检查之前（固定文案 throw，src/registry.js），所以这类条目必然
+      // 走本分支——✔ 行/角色合同失败行/warnings 对其不可达，issues 里也只有
+      // 固定文案（不会出现 `Agent <非法键名> ...` 消息）。
+      if (isValidCanonicalAgentId(id)) {
+        if (asJson) {
+          agentResults.push({ id, ok: false, issues, warnings: [] });
+        } else {
+          console.log(`✖ ${id}\t${issues.join("; ")}`);
+        }
       } else {
-        console.log(`✖ ${id}\t${issues.join("; ")}`);
+        const position = ids.indexOf(id) + 1;
+        if (asJson) {
+          agentResults.push({ id: null, position, ok: false, issues, warnings: [] });
+        } else {
+          console.log(`✖ #${position}\t键名不是合法 agent id，不回显（本条以 1 起序号指代）\t${issues.join("; ")}`);
+        }
       }
       allOk = false;
     }

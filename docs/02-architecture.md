@@ -1062,7 +1062,6 @@ Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`v
   "pollInterval": 5000,
   "waitTimeout": null,            // 派发侧等待窗：null=禁用；到期只通知不终止（观察预算，非执行死线），为什么见决定 0030
   "timeout": 30000,               // 单次后端请求超时（ms）
-  "retries": 2,                   // 后端请求重试次数
   "defaultIsolation": "none",     // "none" | "worktree"
   "worktreeDir": null,            // daemon 统计 worktree 残留的目录；null = ".wao-worktrees"（worktree 固定建在 <repo>/.wao-worktrees/）
   "silentTimeout": null,          // 静默无响应早失败：null=不启用，数值=ms

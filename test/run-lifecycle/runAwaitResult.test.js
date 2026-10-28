@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { JsonlTranscript } from "../../src/transcript.js";
+import { checkOwnerLiveness } from "../../src/application/ownerLiveness.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 
 // ===== Helpers =====
@@ -438,8 +439,14 @@ test("O3: post-initial re-read failure → read_failure, stale facts, NO fresh-h
     const clk = clockSleep();
     // A FRESH owner heartbeat file exists at expiry. The composite must NOT
     // combine it with stale events to report process_only/fresh — the read
-    // failed, so the observation is stale/unknown.
-    writeFileSync(join(runDir, ".owner-run_o3"), JSON.stringify({ pid: 1, heartbeatAt: clk.get() + 99999 }));
+    // failed, so the observation is stale/unknown. Fresh is the TD-316 rule
+    // (finite number AND |now - hb| <= threshold): a past-side
+    // within-threshold heartbeat, self-proven below via the SSOT reader — a
+    // far-future value would NOT be fresh and this fixture would silently
+    // stop covering the scenario.
+    writeFileSync(join(runDir, ".owner-run_o3"), JSON.stringify({ pid: 1, heartbeatAt: clk.get() - 1000 }));
+    assert.equal(checkOwnerLiveness(runDir, "run_o3", clk.get()).fresh, true,
+      "夹具自证：写入时刻该心跳按 TD-316 判法确实新鲜（失败发生在首个 poll，时钟只前进 2000ms，仍在阈值内）");
     const { runAwaitResult } = await import("../../src/application/runAwaitResult.js");
     const out = await runAwaitResult({
       runId: "run_o3", runDir, waitMs: 4000,

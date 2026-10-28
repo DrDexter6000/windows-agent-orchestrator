@@ -26,7 +26,7 @@ import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from 
 import { resolveTranscriptPath, listTranscriptsDeep } from "./projectBuckets.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
-import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
+import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS, isFreshHeartbeat } from "./application/ownerLiveness.js";
 import { validateBoundedWaitTimeout } from "./application/timeoutPolicy.js";
 
 // Re-export for backward compatibility with daemon tests/supervisor imports
@@ -78,19 +78,18 @@ export function readHandshake(runDir) {
 }
 
 /**
- * 判 daemon 是否活着：heartbeatAt 是有限数字、且 |now - heartbeatAt| ≤ 阈值 = 活。
- * 比阈值更靠未来的心跳同样判死——握手里残留 Infinity/远未来时间戳（daemon 已死）
- * 时，不能让所有调用方（daemon start 的幂等门、supervisor 的重启判据）永远当它活着。
- * 活 daemon 每 DEFAULT_HEARTBEAT_INTERVAL_MS(2s) 重写心跳，只有系统时钟回拨超过阈值
- * 的那一两秒会碰到未来一侧，代价接受。
+ * 判 daemon 是否活着。TD-316 起不再自写比较——判活规矩只有一条，全部委托
+ * ownerLiveness.js 的 isFreshHeartbeat：heartbeatAt 是有限数字、且
+ * |now - heartbeatAt| ≤ 阈值 = 活；比阈值更靠未来的心跳同样判死（握手里残留
+ * Infinity/远未来时间戳时，daemon start 的幂等门、supervisor 的重启判据不能
+ * 永远当它活着）。本函数行为与委托前完全相同。
  * @param {object|null} handshake - readHandshake 的返回
  * @param {number} now - 当前时间戳（ms）
  * @param {number} thresholdMs - 心跳超时阈值
  */
 export function isDaemonAlive(handshake, now, thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS) {
-  if (!handshake || typeof handshake.heartbeatAt !== "number") return false;
-  if (!Number.isFinite(handshake.heartbeatAt)) return false;
-  return Math.abs(now - handshake.heartbeatAt) <= thresholdMs;
+  if (!handshake) return false;
+  return isFreshHeartbeat(handshake.heartbeatAt, now, thresholdMs);
 }
 
 /**
@@ -340,7 +339,6 @@ export async function startDaemon(opts = {}) {
       // because when the deadline is disabled (null) that formula collapses to
       // 5000ms and would starve real backends. Use a fixed daemon-local default.
       timeout: opts.requestTimeout ?? 30000,
-      retries: 0,
     },
     readRegistry: registryResolver,
     transcriptDir: runDir,

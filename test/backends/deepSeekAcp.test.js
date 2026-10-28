@@ -505,11 +505,12 @@ test("ACP 投影表：message/thinking/write_intent/file_written/tool_result/com
   // 写意图），绝不发 file_written
   assert.ok(events.some((e) => e.kind === "tool_result" && e.tool === "call_w2" && e.isError === true));
   assert.ok(!events.some((e) => e.kind === "file_written" && e.path === "bad.txt"));
-  // shell：command 事件带 toolCallId；退出码可提取才带上，否则不伪造
-  assert.ok(events.some((e) => e.kind === "command" && e.command === "Get-Content -LiteralPath ./proof.txt -Raw" && e.toolCallId === "call_s1" && e.exitCode === 0));
+  // shell：command 事件带 toolCallId；退出码一律不带（TD-272：工具结果文本不是退出码
+  // 证据——结果里写着 "exit code: 0" 也不带）
+  assert.ok(events.some((e) => e.kind === "command" && e.command === "Get-Content -LiteralPath ./proof.txt -Raw" && e.toolCallId === "call_s1" && e.exitCode === undefined));
   const noCode = events.find((e) => e.kind === "command" && e.command === "Write-Output hi");
   assert.ok(noCode, "shell 命令证据必须在场");
-  assert.equal(noCode.exitCode, undefined, "无法提取退出码时不伪造");
+  assert.equal(noCode.exitCode, undefined, "命令事件一律不带退出码");
   // usage 去重：usage_update（上下文占用）绝不进 metrics；终局 usage 唯一来源
   const metrics = events.filter((e) => e.kind === "metrics");
   assert.equal(metrics.length, 1);
@@ -546,7 +547,7 @@ test("ACP 0072: shell 命令在调用到达时先落 tool_use（在途可见）�
   const commands = events.filter((e) => e.kind === "command");
   assert.equal(commands.length, 1, "command 条数不变：到了终态的才有");
   assert.equal(commands[0].toolCallId, "call_s1");
-  assert.equal(commands[0].exitCode, undefined, "退出码照旧：提取不到就不伪造");
+  assert.equal(commands[0].exitCode, undefined, "命令事件一律不带退出码（TD-272）");
 });
 
 test("ACP 0072: 消费方还在处理上一条事件时到达的调用不滞留——在途的命令当即可见，不必等它结束", async () => {

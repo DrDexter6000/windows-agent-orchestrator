@@ -163,7 +163,6 @@ export async function runBackground(opts = {}) {
       // finite value — it bounds a single HTTP poll, not the total run duration.
       waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
       timeout: 30000, // independent backend request/poll timeout (not derived from deadline)
-      retries: 0,
     },
     readRegistry: registryResolver,
     // M11-11C: test seam — an injected backendFor overrides the default
@@ -406,7 +405,6 @@ export async function runResumeBackground(opts = {}) {
       // ADR-0030：waitTimeout 到期在 resume 续跑里同样是观察通知，不是终止。
       waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
       timeout: 30000,
-      retries: 0,
     },
     readRegistry: registryResolver,
     transcriptDir: runDir,

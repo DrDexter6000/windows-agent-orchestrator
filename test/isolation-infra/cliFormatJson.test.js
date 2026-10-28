@@ -110,6 +110,105 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
 });
 
 // =====================================================================
+// TD-317: registry validate——非法键名条目绝不回显键名。
+// 键名是磁盘上的不可信数据（可含敏感串/换行，换行在文本模式可伪造一行）；
+// 非法条目以 agents 内 1 起序号指代（JSON: id:null + position；text: ✖ #<序号>），
+// 合法条目输出不变（无 position 字段）。
+// =====================================================================
+
+test("TD-317: registry validate——非法键名条目 text/json 整段输出零回显，按序号指代，合法条目不变，exit 1", async () => {
+  const dir = makeTempDir("wao-fmt-validate-noecho-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    // 非法键名（含换行，可伪造一行）放第 1 位；合法条目第 2 位。
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        "SECRET_SENTINEL\n[FAIL] forged": { backend: "claude-code", cwd: dir, model: { id: "x" } },
+        good_worker: { backend: "claude-code", cwd: dir, model: { id: "x" } },
+      },
+    }), "utf8");
+
+    // JSON 模式：整段原文不含哨兵串与载荷；非法条目 id:null + position；合法条目照常。
+    const rj = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
+    assert.equal(rj.status, 1, "非法键名条目 → invalid → exit 1 契约不变");
+    assert.ok(!rj.stdout.includes("SECRET_SENTINEL"), "JSON 整段输出不得含哨兵键名");
+    assert.ok(!rj.stdout.includes("forged"), "JSON 整段输出不得含键名载荷");
+    const parsed = JSON.parse(rj.stdout);
+    assert.equal(parsed.checked, 2, "非法键名条目仍计入 checked");
+    assert.equal(parsed.valid, false);
+    const bad = parsed.agents.find((a) => a.id === null);
+    assert.ok(bad, "存在 id:null 条目");
+    assert.equal(bad.position, 1, "position = registry 内 1 起序号（非法键名在前）");
+    assert.equal(bad.ok, false);
+    assert.ok(Array.isArray(bad.issues) && bad.issues.length > 0, "issues 非空（normalizeAgent 固定文案）");
+    assert.deepEqual(bad.warnings, [], "非法条目 warnings 为空数组");
+    const good = parsed.agents.find((a) => a.id === "good_worker");
+    assert.ok(good, "合法条目照常出现");
+    assert.equal(good.ok, true);
+    assert.ok(!("position" in good), "合法条目不携带 position 字段");
+
+    // 文本模式：同样零回显；✖ 行以 #<序号> 指代；合法条目 ✔ 行不变。
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 1, "text 模式 invalid → exit 1");
+    assert.ok(!rt.stdout.includes("SECRET_SENTINEL"), "text 整段输出不得含哨兵键名");
+    assert.ok(!rt.stdout.includes("forged"), "text 整段输出不得含键名载荷（含换行伪造行）");
+    assert.match(rt.stdout, /^✖ #1\t/m, "非法键名条目以 ✖ #<序号> 行指代");
+    assert.match(rt.stdout, /^✔ good_worker\t/m, "合法条目 ✔ 行不变");
+    assert.match(rt.stdout, /2 agent\(s\) checked, has errors/, "汇总行不变");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// batch38 会审：registry validate——条目内容不是普通对象（null/数字/字符串/
+// 数组）一律记固定文案 issue（旧代码对 null 读 agent.backend 抛 TypeError、
+// 整个命令崩溃；其余类型只报误导的缺字段问题）。不回显内容；合法键名照常显示 id，非法键名
+// 走 TD-317 的序号指代与零回显；两种模式照常输出、exit 1。
+// =====================================================================
+
+test("batch38: registry validate——非对象条目（null/数字）text/json 都不崩、不回显非法键名，JSON 两条 ok:false，exit 1", async () => {
+  const dir = makeTempDir("wao-fmt-validate-nonobj-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        ok_id: null,
+        "bad key\n[FAIL] x": 42,
+      },
+    }), "utf8");
+
+    // JSON 模式：stdout 可解析（= 命令没崩），两条都 ok:false，非法键名与载荷零回显。
+    const rj = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
+    assert.equal(rj.status, 1, "invalid → exit 1 契约不变（不是崩溃退出）");
+    assert.ok(!rj.stdout.includes("bad key"), "JSON 整段输出不得含非法键名");
+    assert.ok(!rj.stdout.includes("[FAIL] x"), "JSON 整段输出不得含键名载荷");
+    const parsed = JSON.parse(rj.stdout);
+    assert.equal(parsed.checked, 2, "非对象条目仍计入 checked");
+    assert.equal(parsed.valid, false);
+    const nullEntry = parsed.agents.find((a) => a.id === "ok_id");
+    assert.ok(nullEntry, "合法键名的非对象条目照常以 id 指代");
+    assert.equal(nullEntry.ok, false);
+    assert.ok(nullEntry.issues.some((i) => i.includes("条目内容不是对象")), "固定文案 issue");
+    const badEntry = parsed.agents.find((a) => a.id === null);
+    assert.ok(badEntry, "非法键名的非对象条目以 id:null 出现");
+    assert.equal(badEntry.position, 2, "position = 1 起序号（非法键名在第 2 位）");
+    assert.equal(badEntry.ok, false);
+
+    // 文本模式：汇总行照常（= 命令没崩），✖ 行两种指代都在，零回显。
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 1, "text 模式 invalid → exit 1");
+    assert.ok(!rt.stdout.includes("bad key"), "text 整段输出不得含非法键名");
+    assert.ok(!rt.stdout.includes("[FAIL] x"), "text 整段输出不得含键名载荷（含换行伪造行）");
+    assert.match(rt.stdout, /✖ ok_id\t/, "合法键名照常以 id 指代");
+    assert.match(rt.stdout, /✖ #2\t/, "非法键名以 ✖ #<序号> 指代");
+    assert.match(rt.stdout, /2 agent\(s\) checked, has errors/, "汇总行照常输出");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
 // D1-D3 终审收口（Bug#1 裁决落地）: registry validate text 模式——角色合同
 // 失败路径只打一行 ✖（不再先打 ✔ 再打 ✖ 的自相矛盾两行）。
 //

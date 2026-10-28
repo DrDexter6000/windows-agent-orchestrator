@@ -83,7 +83,6 @@ Copy-Item config/agents.example.json config/agents.json
   "pollInterval": 5000,          // opencode 轮询间隔 ms
   "waitTimeout": null,           // 派发侧等待窗 ms；null=禁用。到期只通知不终止——观察预算，非执行死线；设值须在 1000..600000
   "timeout": 30000,              // HTTP 请求超时 ms
-  "retries": 2,                  // HTTP 请求重试次数
   "defaultIsolation": "none",    // 默认不隔离（可选 "worktree"）
   "worktreeDir": null            // worktree 存放目录（null = <cwd>/.wao-worktrees）
 }

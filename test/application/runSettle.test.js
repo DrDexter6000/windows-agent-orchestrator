@@ -2,6 +2,9 @@
 //
 // `wao runs settle` 的数据逻辑（任务第 3 步）：
 //   - 六道门的通过与拒绝各一条（闭集理由）；
+//   - owner 租约心跳走真实 readOwnerLease 读文件（TD-316）：有限远未来
+//     heartbeatAt 不算新鲜、租约门照走；1e400（解析成 Infinity）判畸形 →
+//     owner_lease_corrupt；
 //   - dry-run 零写入（转录字节不变）；
 //   - --apply 写入的事件形状（failed/process_missing + 确认事实载荷）；
 //   - expectedLastSeq 不符 → observed_seq_changed、不写终态；
@@ -21,7 +24,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { readTranscript } from "../../src/transcript.js";
-import { checkOwnerLiveness } from "../../src/application/ownerLiveness.js";
+import { checkOwnerLiveness, readOwnerLease } from "../../src/application/ownerLiveness.js";
 import {
   settleRun,
   listSettleCandidates,
@@ -579,6 +582,49 @@ test("SET-28: 列候选——非终态且无新鲜心跳逐条给结论；终态
     const b = result.candidates.find((c) => c.runId === "run_cand_b");
     assert.equal(b.eligible, true);
     assert.equal(b.state, "running");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 门 2 租约心跳（TD-316，端到端：真实 readOwnerLease 读磁盘租约文件） ────────
+
+test("SET-32: 门 2——有限远未来 heartbeatAt 不算新鲜（TD-316）：租约门照走，eligible", async () => {
+  const dir = tempDir("wao-set-32-");
+  try {
+    const runId = "run_set32";
+    seedProcSession(join(dir, `${runId}.jsonl`), runId);
+    // settleDeps 默认带 present:false 的租约桩——显式换回真实 readOwnerLease
+    // （同 SET-28 给 ownerHeartbeatReader 注真实 checkOwnerLiveness 的做法），
+    // 让门 2 端到端读磁盘上的租约文件。pid 等其余字段合法、heartbeatAt 是
+    // 有限数字但在阈值外的远未来：wellFormed:true 且 fresh:false（TD-316 前
+    // 这里会读成 fresh:true）。
+    writeFileSync(join(dir, `.owner-${runId}`), JSON.stringify({ pid: 100, heartbeatAt: NOW + 3600_000 }), "utf8");
+    assert.equal(readOwnerLease(dir, runId, NOW).fresh, false, "自证：有限远未来按 TD-316 判不新鲜");
+    let ownerAnchor = null;
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      ownerLeaseReader: readOwnerLease,
+      identifyFn: async (pid, anchorAt) => {
+        if (pid === 100) ownerAnchor = anchorAt;
+        return { verdict: "gone", basis: "pid_exited" };
+      },
+    }) });
+    assert.equal(r.eligible, true, "远未来心跳不再触发 owner_fresh；租约过门后其余门全过");
+    assert.equal(ownerAnchor, NOW + 3600_000, "身份门以租约 heartbeatAt 为锚——租约确实被读到且判 wellFormed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-33: 门 2 拒绝——租约写 1e400（JSON 解析成 Infinity）→ owner_lease_corrupt（保守拒绝）", async () => {
+  const dir = tempDir("wao-set-33-");
+  try {
+    const runId = "run_set33";
+    seedProcSession(join(dir, `${runId}.jsonl`), runId);
+    // JSON.stringify 写不出 1e400（Infinity 会序列化成 null），必须落原始 JSON
+    // 文本；ownerLeaseReader 同样显式换回真实 readOwnerLease（见 SET-32）。
+    writeFileSync(join(dir, `.owner-${runId}`), '{"pid":100,"heartbeatAt":1e400}', "utf8");
+    assert.equal(readOwnerLease(dir, runId, NOW).wellFormed, false, "自证：非有限 heartbeatAt 判畸形");
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      ownerLeaseReader: readOwnerLease,
+    }) });
+    assert.equal(r.refused, "owner_lease_corrupt", "畸形租约保守拒绝——既有正确行为，钉住");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

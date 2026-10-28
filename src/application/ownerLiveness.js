@@ -7,7 +7,9 @@
 // backgroundRunner every 2 seconds while the runner process is alive,
 // and deleted on exit.
 //
-// This module owns the ONLY freshness algorithm — no third copy.
+// This module owns the ONLY freshness algorithm — isFreshHeartbeat (TD-316),
+// shared by checkOwnerLiveness, readOwnerLease, and daemon.js isDaemonAlive —
+// no second copy.
 //
 // Architectural contract:
 //   - Does NOT import src/commands/*, src/mcp/*, MCP SDK, or zod.
@@ -26,6 +28,29 @@ import { join } from "node:path";
 export const DEFAULT_OWNER_LIVENESS_THRESHOLD_MS = 10000;
 
 /**
+ * TD-316: the ONE heartbeat freshness rule — a heartbeat is fresh only if
+ * heartbeatAt is a finite number AND |now - heartbeatAt| <= thresholdMs.
+ * A heartbeat further in the future than the threshold is exactly as dead as
+ * a stale one: a residual heartbeat from a dead owner (Infinity from JSON
+ * text like 1e400, or a far-future timestamp) must not keep an orphan run
+ * forever un-resumable / un-settleable / un-reclaimed.
+ *
+ * A live process rewrites its heartbeat every 2 seconds, so only a system
+ * clock setback larger than the threshold can touch the future side of the
+ * comparison, and only for the second or two until the next rewrite — that
+ * cost is accepted.
+ *
+ * @param {unknown} heartbeatAt — heartbeat timestamp (ms) as read from disk
+ * @param {number} now — current timestamp (ms)
+ * @param {number} [thresholdMs] — staleness threshold (default 10000)
+ * @returns {boolean}
+ */
+export function isFreshHeartbeat(heartbeatAt, now, thresholdMs = DEFAULT_OWNER_LIVENESS_THRESHOLD_MS) {
+  if (typeof heartbeatAt !== "number" || !Number.isFinite(heartbeatAt)) return false;
+  return Math.abs(now - heartbeatAt) <= thresholdMs;
+}
+
+/**
  * Get the owner heartbeat file path for a run.
  * @param {string} runDir
  * @param {string} runId
@@ -37,6 +62,12 @@ export function ownerFilePath(runDir, runId) {
 
 /**
  * Check owner heartbeat freshness.
+ *
+ * Freshness is isFreshHeartbeat (TD-316): finite heartbeatAt AND
+ * |now - heartbeatAt| <= thresholdMs. Non-finite values (Infinity from JSON
+ * text like 1e400) are treated as "not a number" → {fresh:false,
+ * heartbeatAt:null}; a finite but beyond-threshold future value is NOT fresh
+ * and its heartbeatAt is still reported verbatim.
  *
  * @param {string} runDir
  * @param {string} runId
@@ -51,8 +82,10 @@ export function checkOwnerLiveness(runDir, runId, now, thresholdMs = DEFAULT_OWN
   if (!existsSync(filePath)) return { fresh: false, heartbeatAt: null };
   try {
     const owner = JSON.parse(readFileSync(filePath, "utf8"));
-    if (typeof owner.heartbeatAt !== "number") return { fresh: false, heartbeatAt: null };
-    const fresh = (now - owner.heartbeatAt) <= thresholdMs;
+    if (typeof owner.heartbeatAt !== "number" || !Number.isFinite(owner.heartbeatAt)) {
+      return { fresh: false, heartbeatAt: null };
+    }
+    const fresh = isFreshHeartbeat(owner.heartbeatAt, now, thresholdMs);
     return { fresh, heartbeatAt: owner.heartbeatAt };
   } catch {
     return { fresh: false, heartbeatAt: null };
@@ -136,7 +169,10 @@ export function readOwnerLease(runDir, runId, now, thresholdMs = DEFAULT_OWNER_L
   if (!Number.isInteger(owner.pid) || owner.pid <= 0) {
     return { present: true, wellFormed: false };
   }
-  const fresh = (now - owner.heartbeatAt) <= thresholdMs;
+  // TD-316: fresh is the shared rule — a finite but beyond-threshold future
+  // heartbeatAt is fresh:false (a residual lease must not read as a live
+  // owner), while wellFormed keeps its own meaning above.
+  const fresh = isFreshHeartbeat(owner.heartbeatAt, now, thresholdMs);
   return {
     present: true,
     wellFormed: true,

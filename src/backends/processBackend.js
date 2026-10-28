@@ -92,7 +92,6 @@ export class ProcessBackend {
     parserClass,
     buildArgs,
     timeout = 30_000,
-    retries = 0,
     waoCliPath = null,
     rawCapturePath = null,
     credentialEnvNames = () => [],
@@ -117,8 +116,6 @@ export class ProcessBackend {
     this.parserClass = parserClass;
     this.buildArgs = buildArgs;
     this.timeout = timeout;
-    // 进程式不像 HTTP 可重试——默认 retries:0。M2 明确禁用进程级重试。
-    this.retries = retries;
     // WAO CLI 路径（注入 worker env，让 worker 能调 wao decision/handoff 记录状态）。
     // 由 cli.js 的 backendFor 构造时传入。
     this.waoCliPath = waoCliPath;

@@ -26,6 +26,7 @@ import { execFileSync } from "node:child_process";
 
 import { readTranscript } from "../../src/transcript.js";
 import { RunManager } from "../../src/runManager.js";
+import { checkOwnerLiveness } from "../../src/application/ownerLiveness.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 
 // ===== Helpers =====
@@ -150,8 +151,14 @@ test("W3 (red flag A): mid-wait re-read failure FAILS CLOSED — no stale+fresh 
     let readCalls = 0;
     const clk = clockSleep();
     // A FRESH owner heartbeat exists at expiry. run_wait must NOT combine it
-    // with stale events into a clean-looking progress/process_only.
-    writeFileSync(join(runDir, ".owner-run_w3"), JSON.stringify({ pid: 1, heartbeatAt: clk.get() + 999999 }));
+    // with stale events into a clean-looking progress/process_only. Fresh is
+    // the TD-316 rule (finite number AND |now - hb| <= threshold): a
+    // past-side within-threshold heartbeat, self-proven below via the SSOT
+    // reader — a far-future value would NOT be fresh and this fixture would
+    // silently stop covering the scenario.
+    writeFileSync(join(runDir, ".owner-run_w3"), JSON.stringify({ pid: 1, heartbeatAt: clk.get() - 1000 }));
+    assert.equal(checkOwnerLiveness(runDir, "run_w3", clk.get()).fresh, true,
+      "夹具自证：写入时刻该心跳按 TD-316 判法确实新鲜（失败发生在首个 poll，时钟只前进 2000ms，仍在阈值内）");
     const { runWait } = await import("../../src/application/runWait.js");
     const out = await runWait({
       runId: "run_w3", runDir, waitMs: 180000,

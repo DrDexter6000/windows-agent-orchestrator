@@ -11,7 +11,6 @@
 | 编号 | 问题 | 状态 | 何时处理 | 指针 |
 |---|---|---|---|---|
 | TD-13 | 进程终止只走 Windows 的 taskkill，没有跨平台分支；仓库契约把范围限定在 Windows | 设计性约束 | 需要跨平台时 | AGENTS.md |
-| TD-15 | ProcessBackend 的 retries 参数被忽略；自动重试已裁定不做，这个参数是候选删除项 | 开放 | 择机：下次改动进程式后端的派发参数时删除 |  |
 | TD-16 | 真实 CLI smoke 依赖真实 API、登录与费用，刻意不进 npm test、CI 不跑 | 设计性约束 | 涉及外部系统的 milestone 收尾必跑 smoke | docs/milestone-discipline.md |
 | TD-29 | 大 DAG 的 completedResults Map 占用内存，无流式或分页机制 | 开放 | 等样本：实际遇到大 DAG 内存压力 |  |
 | TD-31 | workflow 脚本具备完全 JS 能力，风险与 npm script 同级，属刻意接受 | 设计性约束 | 文档标注即可，无需代码修复 |  |
@@ -95,7 +94,6 @@
 | TD-267 | MCP 的 run_delivery 在验证排队时不带验证闸信息（CLI 已带） | 开放 | 等样本：走 MCP 的 Lead 再报验证排队盲区 | 0066 |
 | TD-270 | deepseek 两后端仍无静默期取样（processActivity 只接 processBackend/zcode）；0072 起命令在跑已对 Lead 可见 | 开放 | 择机：下次改动 deepseek 后端时接静默取样 | 0070 0072 |
 | TD-271 | 评分与 run_activity 的退出码推断仍是两套实现；0073 起两道门效果已一致，仅未并轨 | 开放 | 择机：下次改评分或活动投影时并成一个判据 | 0072 0073 |
-| TD-272 | deepseek-acp 的 extractExitCode 读平铺文本块，线上数据是嵌套块，从不生效；候选删除 | 开放 | 择机：下次改动 deepseek-acp 时删除（toolResultText 已明确不接线） | 0073 |
 | TD-273 | `config/lane-exceptions.json` 的五条例外对退出码轴已非必需，未清理 | 开放 | 择机：下次例行认证时清理 | 0073 |
 | TD-274 | kimi 车道出现过上游 `Request timed out`（发生时只有一个任务在跑），原因未查明 | 开放 | 等样本：上游 Request timed out 再现时带现场归因 | 0073 0074 |
 | TD-280 | zcode / kimi-web 的严格评分演练以 failed 收尾（认证判定仍是不适用），认证演练没有重跑 | 开放 | 择机：下次例行认证时重跑 | 0072 |
@@ -107,5 +105,4 @@
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
 | TD-312 | zcode 后端的存活判定不知道主机在待机：笔记本进新型待机后，worker 正在跑的本地命令被冻住（后代进程 CPU 不动），静默超预算就以 `zcode turn stalled` 收尾。10-17 横评里 glm-pro 5 次停住都在待机中，同一条命令醒着时 145 秒跑完 | 开放 | 择机：失败信息写明静默期间主机在待机（System 日志 Kernel-Power 506/507，本机不提权读得到），让 Lead 知道重派即可；是否从静默预算里扣除待机时长另定 | src/backends/zcode.js |
 | TD-313 | kimi-web 席位的最终答复有时把过程叙述和结论接在同一行（缺换行），会审锚点认不出 Q1，两席结论不一致的提示与 `npm run lane-review-stats` 都会漏；10-06 到 10-17 的 59 个 kimi 席位里有 4 次 | 开放 | 择机：查 kimi-web 后端拼接助手消息文本时为什么没有换行，按消息或工具调用边界补上 | src/backends/kimiWeb.js |
-| TD-316 | owner 心跳判活（checkOwnerLiveness）只查 heartbeatAt 是不是数字：Infinity（JSON 里写 1e400）和远在未来的时间戳都判"有人持有"。owner 已死而心跳残留这种值时，孤儿 run 永不 resume、runs settle 永不结算、worktree 永不回收；方向是过度保守，不破坏数据。readOwnerLease 已拒 Infinity，有限的未来值仍判 fresh | 开放 | 择机：按 isDaemonAlive 的口径收紧（有限数字、比阈值更靠未来即判死），补用例 | src/application/ownerLiveness.js |
-| TD-317 | `registry validate` 原样回显 registry 的键名（文本输出的 `✖ <id>` 行与 JSON 的 id 字段）：键名不是合法 agent id 时，敏感串进输出，换行还能在文本输出里伪造一行。normalizeAgent 对非法 id 只抛固定文案，registry_list 投影成 agentId:null，doctor 只报个数 | 开放 | 择机：非法键名改为只报序号或转义后输出，补用例 | src/commands/registry.js |
+| TD-318 | JSON 配置的内容会在报错与文本输出里原样回显：JSON.parse 失败时 V8 的报错带出源文本片段，registry validate 的 issues、doctor 的 registry_loads、readRegistry 抛出的错误都原样转出；registry validate 的文本输出直接打印 issues，backend 等字段值里的换行能伪造一行 | 开放 | 择机：给 JSON 配置做一个共用的安全解析，报错只带行列号；文本输出前转义换行与控制字符；同步 docs/usage/results.md 的解析错误契约 | src/registry.js src/commands/registry.js src/commands/doctor.js |

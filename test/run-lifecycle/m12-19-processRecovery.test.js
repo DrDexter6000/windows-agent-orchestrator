@@ -436,6 +436,41 @@ test("C6: existing checkOwnerLiveness unchanged (regression)", async () => {
 });
 
 // =============================================================================
+// TD-316: 心跳判活只有一条规矩——checkOwnerLiveness / readOwnerLease 都用
+// isFreshHeartbeat。残留心跳（owner 已死）里的 Infinity（JSON 文本 1e400）与
+// 远未来时间戳都不得判 fresh，否则孤儿 run 永不 resume / 永不结算。
+// =============================================================================
+
+test("C7: checkOwnerLiveness——1e400（JSON 文本）与远未来心跳都不 fresh", async () => {
+  const { checkOwnerLiveness } = await import("../../src/application/ownerLiveness.js");
+  const dir = await mkdtemp(join(tmpdir(), "lease-future-"));
+  try {
+    // JSON.parse 把 1e400 解析成 Infinity（typeof number 但非有限）——按"不是数字"
+    // 处理：{fresh:false, heartbeatAt:null}。
+    writeFileSync(join(dir, `.owner-${RUN_ID}`), '{"heartbeatAt":1e400,"pid":5}', "utf8");
+    assert.deepEqual(checkOwnerLiveness(dir, RUN_ID, 5000, 1000), { fresh: false, heartbeatAt: null });
+    // 有限的远未来值：不 fresh，但 heartbeatAt 照实回填。
+    writeFileSync(join(dir, `.owner-${RUN_ID}`), JSON.stringify({ pid: 5, heartbeatAt: 5000 + 2 * 1000 }), "utf8");
+    assert.deepEqual(checkOwnerLiveness(dir, RUN_ID, 5000, 1000), { fresh: false, heartbeatAt: 7000 });
+    // 对照：未来但在阈值内仍 fresh（时钟微回拨容差）。
+    writeFileSync(join(dir, `.owner-${RUN_ID}`), JSON.stringify({ pid: 5, heartbeatAt: 5500 }), "utf8");
+    assert.deepEqual(checkOwnerLiveness(dir, RUN_ID, 5000, 1000), { fresh: true, heartbeatAt: 5500 });
+  } finally { await cleanupDir(dir); }
+});
+
+test("C8: readOwnerLease——1e400 仍 wellFormed:false；远未来 wellFormed 但不 fresh", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lease-future-lease-"));
+  try {
+    writeFileSync(join(dir, `.owner-${RUN_ID}`), '{"heartbeatAt":1e400,"pid":5}', "utf8");
+    assert.deepEqual(readOwnerLease(dir, RUN_ID, 5000, 1000), { present: true, wellFormed: false });
+    writeFileSync(join(dir, `.owner-${RUN_ID}`), JSON.stringify({ pid: 5, heartbeatAt: 7000 }), "utf8");
+    assert.deepEqual(readOwnerLease(dir, RUN_ID, 5000, 1000), {
+      present: true, wellFormed: true, fresh: false, heartbeatAt: 7000, pid: 5,
+    });
+  } finally { await cleanupDir(dir); }
+});
+
+// =============================================================================
 // Group D: isPidAlive consolidation — one algorithm, re-exported everywhere
 // =============================================================================
 

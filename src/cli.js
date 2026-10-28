@@ -82,7 +82,6 @@ const hardcodedDefaults = {
   pollInterval: 5000,
   waitTimeout: null,
   timeout: 30000,
-  retries: 2,
   defaultIsolation: "none",
   worktreeDir: null,
   stateDir: ".wao",

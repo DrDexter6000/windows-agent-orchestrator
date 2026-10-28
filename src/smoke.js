@@ -75,7 +75,7 @@ async function smokeOne(backendType, cwd, runDir) {
   };
   await writeFile(registryPath, JSON.stringify(registryContent, null, 2));
 
-  const config = { registry: registryPath, runDir, pollInterval: 1000, waitTimeout: 120000, timeout: 30000, retries: 0 };
+  const config = { registry: registryPath, runDir, pollInterval: 1000, waitTimeout: 120000, timeout: 30000 };
   const manager = new RunManager({ config, readRegistry, backendFor });
   const run = await manager.start(agentId, {
     prompt: SMOKE_PROMPT, registry: registryPath, runDir,
@@ -214,7 +214,7 @@ async function smokeScorecard(cwd, runDir) {
     },
   };
   await writeFile(registryPath, JSON.stringify(registryContent, null, 2));
-  const config = { registry: registryPath, runDir, pollInterval: 1000, waitTimeout: 180000, timeout: 30000, retries: 0 };
+  const config = { registry: registryPath, runDir, pollInterval: 1000, waitTimeout: 180000, timeout: 30000 };
 
   let allOk = true;
 
