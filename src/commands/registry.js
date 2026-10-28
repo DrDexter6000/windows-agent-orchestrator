@@ -14,6 +14,10 @@ import { readRegistry, normalizeAgent, certMigrationAdvisories, matrixLabelRetir
 // TD-317: registry 键名是磁盘上的不可信数据——validate 输出绝不回显非法键名
 // （换行可在文本输出里伪造一行）。既定做法同 normalizeAgent 的固定文案 throw。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
+// TD-318: 解析报错不带源文本（safeJsonParse）；文本输出里拼进配置来源值的地方
+// （issues/warnings/✔ 行的 backend 与 model/角色合同失败行）先过控制字符转义，
+// 值里的换行不能再伪造一行。--format json 不变（JSON.stringify 自带转义）。
+import { safeJsonParse, escapeControlChars } from "../safeText.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -28,6 +32,9 @@ import { loadRoleContract } from "../application/roleContract.js";
 // 适用性是三态闭集（匹配/不匹配/无法判断），"无法判断"绝不算绿；本渲染
 // 绝不派生"总体可用=true"之类的合并绿——适用性永远与组合结果并列呈现。
 // 简表（表头 + 行）字节不变：默认调用（不带 flag）输出与旧行为完全一致。
+// TD-318（二）：声明/观测/组合/限制四列的值来自 registry 与两本台账（磁盘上
+// 的不可信数据）——拼行前先过 escapeControlChars，值里的换行不能再伪造一行。
+// applicability 与 sources 的 file/state 是本仓库计算出的闭集字面量，不过转义。
 function renderCertEvidence(rows) {
   for (const row of rows) {
     const d = row.declared ?? {};
@@ -36,22 +43,22 @@ function renderCertEvidence(rows) {
     const rec = b.record ?? {};
     const las = row.limitationsAndSources ?? {};
     console.log(`cert-evidence ${row.id}`);
-    console.log(`  声明: backend=${d.backend ?? "-"} model=${d.modelId ?? "-"} provider=${d.providerID ?? "-"} providerKey=${d.providerKey ?? "null"} effort=${d.effort ?? "null"}`);
+    console.log(`  声明: backend=${escapeControlChars(d.backend ?? "-")} model=${escapeControlChars(d.modelId ?? "-")} provider=${escapeControlChars(d.providerID ?? "-")} providerKey=${escapeControlChars(d.providerKey ?? "null")} effort=${escapeControlChars(d.effort ?? "null")}`);
     // B2（2026-09-22）：保留取证时间——组件观测行渲染 lastVerifiedAt（审计清单
     // "保留取证时间"；服务行本就携带，此前渲染层丢弃）。缺失/形状外 → "?"（与
     // result/codeRef 的缺席约定一致：缺席是事实，不得静默隐去）。
     const compLine = (list) => list.length === 0
       ? "-"
       : list.map((r) => `${r.result ?? "?"}@${r.codeRef ?? "?"}@${r.lastVerifiedAt ?? "?"}${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}${r.advisoryCode ? `(${r.advisoryCode})` : ""}`).join(", ");
-    console.log(`  组件观测: state=${c.state}${c.llmKeyDerivable === false ? " llm键不可派生(无providerID)" : ""} backend=[${compLine(c.backend ?? [])}] llm=[${compLine(c.llm ?? [])}]${c.truncated ? " (截断)" : ""}`);
+    console.log(`  组件观测: state=${escapeControlChars(c.state)}${c.llmKeyDerivable === false ? " llm键不可派生(无providerID)" : ""} backend=[${escapeControlChars(compLine(c.backend ?? []))}] llm=[${escapeControlChars(compLine(c.llm ?? []))}]${c.truncated ? " (截断)" : ""}`);
     // B2-audit11 缺口 2：lastFullHealthyRunAt 缺席渲染 "?"（与 lastVerifiedAt/
     // capturedAt 的"缺席显示 ?、不静默隐去"约定一致）——有记录但缺全绿时间戳
     // 是事实，不得整项省略被读成"无此维度"；无记录仍由"无记录"整体标记承载。
-    console.log(`  组合结果: state=${b.state}${rec.status ? ` status=${rec.status}` : " 无记录"}${rec.executionProfile ? ` effort=${rec.executionProfile.effort ?? "null"} codeRef=${rec.executionProfile.codeRef ?? "?"} capturedAt=${rec.executionProfile.capturedAt ?? "?"}` : " 画像=未记录(legacy)"}${b.record != null ? ` lastFullHealthy=${rec.lastFullHealthyRunAt ?? "?"}` : ""}`);
+    console.log(`  组合结果: state=${escapeControlChars(b.state)}${rec.status ? ` status=${escapeControlChars(rec.status)}` : " 无记录"}${rec.executionProfile ? ` effort=${escapeControlChars(rec.executionProfile.effort ?? "null")} codeRef=${escapeControlChars(rec.executionProfile.codeRef ?? "?")} capturedAt=${escapeControlChars(rec.executionProfile.capturedAt ?? "?")}` : " 画像=未记录(legacy)"}${b.record != null ? ` lastFullHealthy=${escapeControlChars(rec.lastFullHealthyRunAt ?? "?")}` : ""}`);
     console.log(`  证据适用性: ${row.applicability}`);
     const sources = (las.sources ?? []).map((s) => `${s.file}(${s.state})`).join(" ");
     const limits = (las.limitations ?? []).length > 0 ? (las.limitations ?? []).join(" | ") : "无";
-    console.log(`  限制与来源: ${limits} — 来源: ${sources}`);
+    console.log(`  限制与来源: ${escapeControlChars(limits)} — 来源: ${escapeControlChars(sources)}`);
   }
 }
 
@@ -93,7 +100,10 @@ async function registryCommand(args, config) {
   const anyHold = agents.some((a) => typeof a.dispatchHold === "string");
   console.log(`id\tbackend\tmodel\tcertification\tcwd${anyHold ? "\tdispatchHold" : ""}`);
   for (const agent of agents) {
-    console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}${anyHold ? `\t${agent.dispatchHold ?? "-"}` : ""}`);
+    // TD-318（二）：表行值全部来自 registry/台账（model.id、cwd、certification
+    // 状态是自由文本）——先过转义再拼行，值里的换行不能再伪造一行检查结果。
+    // id 已是合法 canonical agent id（TD-317 面），不过转义。
+    console.log(`${agent.id}\t${escapeControlChars(agent.backend)}\t${escapeControlChars(agent.model)}\t${escapeControlChars(agent.certification ?? "-")}\t${escapeControlChars(agent.cwd)}${anyHold ? `\t${escapeControlChars(agent.dispatchHold ?? "-")}` : ""}`);
   }
   if (certEvidence) renderCertEvidence(certEvidence);
 }
@@ -126,11 +136,13 @@ async function registryCheckCommand(args, config) {
       const result = await backend.healthCheck(agent.serveUrl);
       if (result.ok) {
         results.push({ id: agent.id, status: "ok", serveUrl: agent.serveUrl });
-        if (!asJson) console.log(`${agent.id}\tok\t${agent.serveUrl}`);
+        // TD-318（二）：serveUrl 是配置自由值——文本行先转义；JSON 面不变。
+        if (!asJson) console.log(`${agent.id}\tok\t${escapeControlChars(agent.serveUrl)}`);
       } else {
         const error = result.error ?? `HTTP ${result.status}`;
         results.push({ id: agent.id, status: "fail", serveUrl: agent.serveUrl, error });
-        if (!asJson) console.log(`${agent.id}\tFAIL\t${agent.serveUrl}\t${error}`);
+        // TD-318（二）：error 可能带上游报错原文（含 URL 片段）——同样先转义。
+        if (!asJson) console.log(`${agent.id}\tFAIL\t${escapeControlChars(agent.serveUrl)}\t${escapeControlChars(error)}`);
         allOk = false;
       }
     } else {
@@ -212,12 +224,14 @@ async function registryValidateCommand(args, config) {
 
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    // TD-318: 安全解析——V8 报错自带源文本片段，旧实现原样转出会把 registry
+    // 原文拼进 issues/文本行。新错误只有固定文案 + 行列号（src/safeText.js）。
+    parsed = safeJsonParse(raw, "registry 文件");
   } catch (e) {
     if (asJson) {
-      console.log(JSON.stringify({ checked: 0, valid: false, agents: [], issues: [`JSON parse error: ${e.message}`] }, null, 2));
+      console.log(JSON.stringify({ checked: 0, valid: false, agents: [], issues: [e.message] }, null, 2));
     } else {
-      console.log(`✖ JSON parse error: ${e.message}`);
+      console.log(`✖ ${e.message}`);
     }
     process.exitCode = 1;
     return;
@@ -368,6 +382,12 @@ async function registryValidateCommand(args, config) {
       if (agent && typeof agent === "object" && Object.prototype.hasOwnProperty.call(agent, "seatRole")) {
         warnings.push("seatRole 已废弃（0045 §1.2 终局：对抗性按审者×作者车道派生；读取面忽略）——可从 registry 删除该字段");
       }
+      // TD-318 复核：条目自带的 id 字段不再生效（normalizeAgent 恒以键名为 id）。
+      // 与键名不一致时给固定文案 warning——不回显那个值（它可能携带换行/敏感串，
+      // 换行在文本模式可伪造一行），只让配置者知道键名说了算。
+      if (Object.prototype.hasOwnProperty.call(agent, "id") && agent.id !== id) {
+        warnings.push("条目里的 id 字段与键名不一致，已按键名处理（条目自带 id 不生效）");
+      }
       // R23-C §5: half-migration visibility — a registered lane whose summary
       // worker record predates the R23-C schema (missing providerKey /
       // lastFullHealthyRunAt) gets NON-BLOCKING advisories. certMigrationAdvisories
@@ -400,7 +420,8 @@ async function registryValidateCommand(args, config) {
           if (asJson) {
             agentResults.push({ id, ok: false, issues: [issue], warnings });
           } else {
-            console.log(`✖ ${id}\t${issue}`);
+            // TD-318: 报错原文可能携带配置来源值（systemPrompt 路径等）——转义后再进文本行。
+            console.log(`✖ ${id}\t${escapeControlChars(issue)}`);
           }
           allOk = false;
           continue;
@@ -409,9 +430,11 @@ async function registryValidateCommand(args, config) {
       if (asJson) {
         agentResults.push({ id, ok: true, issues: [], warnings });
       } else {
-        console.log(`✔ ${id}\t${agent.backend}\t${model}`);
+        // TD-318: backend/model 与 warning 文案都携带配置来源值——转义防伪造行
+        //（✔ 分支的 backend 虽必属闭集、model.id 仍是自由配置值）。
+        console.log(`✔ ${id}\t${escapeControlChars(agent.backend)}\t${escapeControlChars(model)}`);
         for (const w of warnings) {
-          console.log(`  ⚠ ${id}: ${w}`);
+          console.log(`  ⚠ ${id}: ${escapeControlChars(w)}`);
         }
       }
     } else {
@@ -424,14 +447,16 @@ async function registryValidateCommand(args, config) {
         if (asJson) {
           agentResults.push({ id, ok: false, issues, warnings: [] });
         } else {
-          console.log(`✖ ${id}\t${issues.join("; ")}`);
+          // TD-318: issues 携带配置来源值（unknown-backend 指路里的 backend、env 键名）——转义。
+          console.log(`✖ ${id}\t${escapeControlChars(issues.join("; "))}`);
         }
       } else {
         const position = ids.indexOf(id) + 1;
         if (asJson) {
           agentResults.push({ id: null, position, ok: false, issues, warnings: [] });
         } else {
-          console.log(`✖ #${position}\t键名不是合法 agent id，不回显（本条以 1 起序号指代）\t${issues.join("; ")}`);
+          // TD-318: 序号指代写法保持现状（TD-317）；issues 部分同样过转义。
+          console.log(`✖ #${position}\t键名不是合法 agent id，不回显（本条以 1 起序号指代）\t${escapeControlChars(issues.join("; "))}`);
         }
       }
       allOk = false;

@@ -540,3 +540,193 @@ test("R23-D: registry validate --format json × corrupt 台账——零 advisory
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// TD-318: registry validate——配置内容不经报错与文本输出原样漏出。
+//   1. 坏 JSON：V8 的 JSON.parse 报错自带源文本片段（"...ENTINEL": undefined}"
+//      is not valid JSON）——旧实现把它拼进 issues/文本行，registry 原文进输出。
+//      解析失败必须折叠成固定文案 + 行列号（src/safeText.js safeJsonParse）。
+//   2. 合法 registry 的条目值含换行：issues/warnings/✔ 行拼配置来源值，换行能
+//      伪造一行检查结果——文本输出先过控制字符转义（escapeControlChars）；
+//      --format json 输出不变（JSON.stringify 自带转义，原值仍可机读）。
+// =====================================================================
+
+test("TD-318: registry validate——坏 JSON（含哨兵）text/json 输出都零回显，只给固定文案", async () => {
+  const dir = makeTempDir("wao-fmt-validate-badjson-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, `{"TD318_LEAK_SENTINEL": undefined}`, "utf8");
+
+    const rj = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
+    assert.equal(rj.status, 1, "坏 JSON → invalid → exit 1 契约不变");
+    assert.ok(!rj.stdout.includes("TD318_LEAK_SENTINEL"), "JSON 整段输出不得回显源文本");
+    const parsed = JSON.parse(rj.stdout);
+    assert.equal(parsed.checked, 0);
+    assert.equal(parsed.valid, false);
+    assert.deepEqual(parsed.agents, []);
+    assert.ok(Array.isArray(parsed.issues) && parsed.issues.length > 0, "顶层 issues 在场");
+    assert.ok(parsed.issues.every((i) => !i.includes("TD318_LEAK_SENTINEL")), "issues 文案零源文本");
+    assert.match(parsed.issues[0], /不是合法的 JSON/, "issues 是安全解析的固定文案");
+
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 1, "text 模式 invalid → exit 1");
+    assert.ok(!rt.stdout.includes("TD318_LEAK_SENTINEL"), "text 整段输出不得回显源文本");
+    assert.ok(!rt.stderr.includes("TD318_LEAK_SENTINEL"), "stderr 同样零回显");
+    assert.match(rt.stdout, /✖ registry 文件不是合法的 JSON/, "文本行是安全解析的固定文案");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-318: registry validate——backend 含换行的合法 registry，文本输出不出现伪造行；JSON issues 里也是可见转义", async () => {
+  const dir = makeTempDir("wao-fmt-validate-forged-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        evil_worker: { backend: "evil\n[FAIL] forged", cwd: dir },
+      },
+    }), "utf8");
+
+    // 文本模式：unknown-backend issue 会回显 backend 原值——换行必须转成可见
+    // 写法，不得出现以 [FAIL] forged 开头的伪造行。
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 1, "unknown backend → invalid → exit 1");
+    const forgedLines = rt.stdout.split(/\r?\n/).filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forgedLines.length, 0, `文本输出不得有伪造行，实际: ${JSON.stringify(forgedLines)}`);
+    assert.ok(rt.stdout.includes("evil\\n[FAIL] forged"), "backend 值以可见转义（\\n 字面量）呈现");
+
+    // JSON 模式：未知 backend 的报错在源头（unknownBackendGuidance）就转义了
+    // backend 值，issues 里同样是可见转义，没有真实换行。
+    const rj = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
+    assert.equal(rj.status, 1);
+    const parsed = JSON.parse(rj.stdout);
+    const bad = parsed.agents.find((a) => a.id === "evil_worker");
+    assert.ok(bad, "条目在场");
+    assert.equal(bad.ok, false);
+    assert.ok(bad.issues.some((i) => i.includes("evil\\n[FAIL] forged")), "JSON issues 里 backend 值是可见转义（源头转义）");
+    assert.ok(bad.issues.every((i) => !i.includes("\n")), "JSON issues 不含真实换行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// TD-318 会审修（补齐转义点用例，registry validate 文本模式）：✔ 行的
+// model.id、⚠ warning 行的 matrix label、✖ 角色合同失败行——三处渲染点都拼
+// 配置来源值，值里自带的换行必须转成可见写法，不得出现以载荷开头的伪造行
+//（每条都对物理行断言"没有任何一行以伪造的那段开头"）。
+// =====================================================================
+
+test("TD-318: 合法条目 model.id 含换行——✔ 行不被伪造，值以可见转义呈现", async () => {
+  const dir = makeTempDir("wao-fmt-validate-modelnl-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        ok_model: { backend: "claude-code", cwd: dir, model: { id: "glm\n[FAIL] forged" } },
+      },
+    }), "utf8");
+
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 0, "合法条目 → exit 0");
+    const forgedLines = rt.stdout.split(/\r?\n/).filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forgedLines.length, 0, `文本输出不得有伪造行，实际: ${JSON.stringify(forgedLines)}`);
+    assert.match(rt.stdout, /^✔ ok_model\tclaude-code\t/m, "✔ 行照常输出");
+    assert.ok(rt.stdout.includes("glm\\n[FAIL] forged"), "model.id 以可见转义（\\n 字面量）呈现");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-318: warning 含换行（matrix label 撞名 advisory）——⚠ 行不被伪造", async () => {
+  const dir = makeTempDir("wao-fmt-validate-warnnl-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    // matrix label 是 registry 顶层自由配置值——两条 lane 撞名产生 advisory，
+    // 文案嵌 label 原值（src/registry.js matrixLabelRetirementAdvisories）。
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        warn_worker: { backend: "claude-code", cwd: dir },
+      },
+      certification: {
+        matrix: [
+          { agentId: "warn_worker", label: "evil\n[FAIL] forged" },
+          { agentId: "other_lane", label: "evil\n[FAIL] forged" },
+        ],
+      },
+    }), "utf8");
+
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 0, "warning 不阻塞 → exit 0");
+    const warnLines = rt.stdout.split(/\r?\n/).filter((l) => l.includes("⚠"));
+    assert.ok(warnLines.length > 0, "撞名 advisory 在场");
+    const forgedLines = rt.stdout.split(/\r?\n/).filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forgedLines.length, 0, `文本输出不得有伪造行，实际: ${JSON.stringify(forgedLines)}`);
+    assert.ok(rt.stdout.includes('label "evil\\n[FAIL] forged"'), "label 以可见转义（\\n 字面量）呈现");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-318: 角色合同失败行的报错（systemPrompt 指向含换行名字的不存在路径）——✖ 行不被伪造", async () => {
+  const dir = makeTempDir("wao-fmt-validate-rolenl-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        bad_role: { backend: "codex", cwd: dir, systemPrompt: join(dir, "no-such\n[FAIL] forged.md") },
+      },
+    }), "utf8");
+
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 1, "角色合同失败 → exit 1 契约不变");
+    const forgedLines = rt.stdout.split(/\r?\n/).filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forgedLines.length, 0, `文本输出不得有伪造行，实际: ${JSON.stringify(forgedLines)}`);
+    // 形状钉住（与 D1-D3 守卫同口径）：恰好一行 ✖、无 ✔ 行。
+    const crossLines = rt.stdout.split(/\r?\n/).filter((l) => l.includes("✖"));
+    assert.equal(crossLines.length, 1, `恰好一行 ✖，实际 ${crossLines.length} 行：${JSON.stringify(crossLines)}`);
+    assert.match(crossLines[0], /^✖ bad_role\t角色合同无效: /, "✖ 行形状不变");
+    // 现状如实标注：loadRoleContract 的报错是固定文案（不带路径——
+    // src/application/roleContract.js 的文档化承诺），路径里的换行当前到不了
+    // 这行渲染。本用例钉住该行的转义接线与"恰好一行 ✖"形状；若报错文案将来
+    // 开始携带路径文本，转义必须已就位（去掉 escapeControlChars 时，任何携带
+    // 换行的报错都会在物理行断言上翻红）。
+    assert.ok(!rt.stdout.includes("no-such\n"), "路径原文（含换行）不进文本输出");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// TD-318 复核：registry 条目自带的 id 字段不再生效（normalizeAgent 恒以键名为
+// id）——validate 对"id 与键名不一致"给固定文案 warning，不回显那个值；条目
+// 本身合法（exit 0），文本/JSON 都不出现伪造行。
+test("TD-318: registry validate——条目自带 id 与键名不一致——warning 固定文案零回显，exit 0", async () => {
+  const dir = makeTempDir("wao-fmt-validate-entryid-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        evil_id: { backend: "claude-code", cwd: dir, id: "evil\n[FAIL] forged" },
+      },
+    }), "utf8");
+
+    const rt = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
+    assert.equal(rt.status, 0, "条目本身合法（id 字段不生效）→ exit 0");
+    const forgedLines = rt.stdout.split(/\r?\n/).filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forgedLines.length, 0, `文本输出不得有伪造行，实际: ${JSON.stringify(forgedLines)}`);
+    assert.ok(rt.stdout.includes("已按键名处理"), "不一致 warning 在场（固定文案）");
+    assert.ok(!rt.stdout.includes("[FAIL] forged"), "warning 不回显条目自带的 id 值");
+
+    const rj = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
+    assert.equal(rj.status, 0);
+    const parsed = JSON.parse(rj.stdout);
+    const entry = parsed.agents.find((a) => a.id === "evil_id");
+    assert.ok(entry, "JSON 面 id 是键名");
+    assert.equal(entry.ok, true, "合法条目");
+    assert.ok(entry.warnings.some((w) => w.includes("已按键名处理")), "JSON warnings 含固定文案");
+    assert.ok(!rj.stdout.includes("[FAIL] forged"), "JSON 整段输出零回显该值");
+  } finally {
+    cleanupDir(dir);
+  }
+});

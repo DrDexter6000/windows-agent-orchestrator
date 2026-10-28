@@ -3,6 +3,10 @@ import { isAbsolute } from "node:path";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import { isValidSessionReuseMode } from "./application/sessionReuse.js";
 import { isValidKimiHome, isValidServeWorkspaceDir } from "./envPolicy.js";
+// TD-318: JSON.parse 的 V8 报错自带源文本片段——registry 原文会随报错进
+// CLI/MCP 输出。安全解析只抛固定文案 + 行列号（validate/doctor 同一实现）；
+// unknownBackendGuidance 回显的 backend 值过控制字符转义（换行不能伪造一行）。
+import { safeJsonParse, escapeControlChars } from "./safeText.js";
 
 // M11-9: canonical model/reasoning/provider policy.
 // Closed-set effort enum — the complete set of reasoning effort values WAO
@@ -51,10 +55,11 @@ export const KNOWN_BACKENDS = Object.freeze([
 // TD-161（auditor F3 修复）：unknown-backend 指路文案的单一真相——
 // normalizeAgent 的 throw 与 commands 层 validate 的 issue 共用，保证组合
 // 错误路径（坏 backend + 其他硬错误，normalizeAgent 先抛别的错）下支持集
-// 提示仍完整且恰好出现一次。静态文案：只含支持集与指路，无用户数据。
+// 提示仍完整且恰好出现一次。除支持集与指路外，回显的是过 escapeControlChars
+// 的 backend 值（TD-318 二：值保留便于排错，控制字符换成可见转义，不能伪造行）。
 export function unknownBackendGuidance(backend) {
   return (
-    `unknown backend: ${backend} (supported: ${KNOWN_BACKENDS.join("/")}). ` +
+    `unknown backend: ${escapeControlChars(backend)} (supported: ${KNOWN_BACKENDS.join("/")}). ` +
     `To use a different model, configure the model/provider fields on an existing backend; ` +
     `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
     `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`
@@ -176,7 +181,9 @@ function normalizeModelPolicy(id, agent) {
 
 export async function readRegistry(filePath) {
   const raw = await readFile(filePath, "utf8");
-  const parsed = JSON.parse(raw);
+  // TD-318: 安全解析——解析失败只抛"registry 文件不是合法的 JSON（第 X 行第
+  // Y 列）"，不携带源文本（src/safeText.js）。
+  const parsed = safeJsonParse(raw, "registry 文件");
   const agents = parsed.agents ?? {};
 
   return {
@@ -232,7 +239,8 @@ export function normalizeAgent(id, agent) {
   // KNOWN_BACKENDS SSOT above (replaces the else-arm throw that used to tail
   // the per-backend chain; the field-validation branches below are unchanged
   // and together cover every member). Fixed-safe: static supported set +
-  // static guidance; only the bad value itself is echoed (existing behavior).
+  // static guidance; only the bad value itself is echoed, with control
+  // characters escaped (TD-318 二, via unknownBackendGuidance).
   // rejected backend candidates (e.g. zcode → ADR-0028) are Owner decisions;
   // pointer only, never reasons here
   if (!KNOWN_BACKENDS.includes(agent.backend)) {
@@ -347,10 +355,14 @@ export function normalizeAgent(id, agent) {
   // （不原地删输入对象——raw 供 validate 层出弃用 advisory；sol 条款）。
   // M11-9: canonical model/reasoning/provider policy validation + legacy normalization.
   normalizeModelPolicy(id, agent);
-  const { seatRole: _retiredSeatRole, ...rest } = agent ?? {};
+  const { seatRole: _retiredSeatRole, id: _ignoredEntryId, ...rest } = agent ?? {};
   return {
-    id,
     ...rest,
+    // id 恒为键名（已过 isValidCanonicalAgentId 校验），条目自带的 id 字段不再
+    // 生效。旧展开序 { id, ...rest } 让条目值盖掉键名——agents.good = { id:
+    // "evil\n[FAIL] forged" } 归一化后身份被冒用，registry list/check 按"id 已
+    // 是合法键名、无需转义"的前提直接打印的文本行也随之可被伪造。
+    id,
   };
 }
 

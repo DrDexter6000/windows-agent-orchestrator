@@ -21,6 +21,9 @@ import { fileURLToPath } from "node:url";
 import { laneAxes, validDispatchHold } from "../dispatchResolution.js";
 // 推断族系（0090：会审选不同族系的副审时参考；展示专用非契约，见 modelFamily.js）。
 import { modelFamilyOf, familyLabel } from "./modelFamily.js";
+// TD-318（二）：画像 JSON 的解析失败不许带出源文本（V8 报错自带原文片段，
+// 会随 issues 进 wao lanes 输出；registry 文件同一问题，src/safeText.js）。
+import { safeJsonParse } from "../safeText.js";
 
 const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -246,9 +249,11 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
   const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
   let doc;
   try {
-    doc = JSON.parse(text);
+    // TD-318（二）：解析失败只报"lane-traits.json不是合法的 JSON（第 X 行第
+    // Y 列）"，不携带源文本。
+    doc = safeJsonParse(text, "lane-traits.json");
   } catch (e) {
-    return { state: "unreadable", path, sha256, scale: null, traits: {}, invalidIds: [], issues: [`画像文件不可解析：${e.message}`] };
+    return { state: "unreadable", path, sha256, scale: null, traits: {}, invalidIds: [], issues: [e.message] };
   }
   if (!isPlainObject(doc) || doc.schemaVersion !== 2 || !validScale(doc.scale)
     || !isPlainObject(doc.traits)) {

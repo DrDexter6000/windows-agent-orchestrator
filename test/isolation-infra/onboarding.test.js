@@ -2695,3 +2695,43 @@ test("d′ ②: 认证矩阵行 modelId 漂移（席位块同值）→ drift.mat
   assert.ok(text.includes("drift(矩阵): coder_low 认证矩阵 modelId=deepseek-v4-flash-x ≠ 模板矩阵 deepseek-v4-flash"),
     "人读明细含矩阵维");
 });
+
+// ── TD-318（三）：文本输出的行伪造防线 ────────────────────────────────────────
+
+// 模板 _comment_auth 是无内容校验的自由文本（只按显示宽截断），经 authNote 流进
+// 矩阵认证行（仅登录态型认证的行拼接——key 型行在 requiresKeyEnv 提前返回，
+// 故用 auditor 夹具）。值里的换行必须在 join 前可见化——不能在终端伪造一行
+// 检查结果；程序自身的多行排版（snippet 代码围栏等）照旧。
+test("TD-318（三）: 模板 _comment_auth 含换行——renderHuman 不伪造行，多行排版照旧", async () => {
+  const tpl = JSON.parse(JSON.stringify(TEMPLATE));
+  tpl.agents.auditor._comment_auth = "x\n[FAIL] forged";
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    initial: { "D:/wao/config/agents.example.json": JSON.stringify(tpl) },
+  });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  const text = renderHuman(r);
+  assert.ok(
+    !text.split("\n").some((l) => l.startsWith("[FAIL] forged")),
+    "值内换行不得伪造一行",
+  );
+  assert.ok(text.includes("wao onboarding: NEEDS-SELECTION"), "标题行照常");
+  assert.ok(text.includes("（x\\n[FAIL] forged）"), "载荷以可见转义留在原行内");
+  assert.ok(text.split("\n").includes("```json"), "snippet 代码围栏仍独立成行");
+  assert.ok(/车道矩阵与当前环境适配/.test(text), "矩阵块照常在场");
+});
+
+// TD-318 复核：renderHostGuideBlock 的未知宿主分支曾提前 return 绕过逐行转义
+// ——hostId 是调用方传入的自由值，含换行时能伪造一行。与已知宿主分支同一纪律
+//（join 前逐行转义）。
+test("TD-318 复核: --host 未知宿主 id 含换行——renderHostGuideBlock 不伪造行", async () => {
+  const { renderHostGuideBlock } = await import("../../src/commands/onboarding.js");
+  const out = renderHostGuideBlock("evil\n[FAIL] forged", { hostExamples: [] });
+  assert.ok(
+    !out.split("\n").some((l) => l.startsWith("[FAIL] forged")),
+    "值内换行不得伪造一行",
+  );
+  assert.ok(out.includes("evil\\n[FAIL] forged"), "hostId 以可见转义在场（排错仍可见）");
+  assert.match(out, /not in the verified host table/, "未知宿主通用指引块照常");
+});

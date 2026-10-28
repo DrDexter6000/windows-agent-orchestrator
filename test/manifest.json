@@ -73,6 +73,7 @@
       "isolation-infra/playbookCli.test.js",
       "isolation-infra/reporter.test.js",
       "isolation-infra/rmrfRetry.test.js",
+      "isolation-infra/safeText.test.js",
       "isolation-infra/scorecard.test.js",
       "isolation-infra/stateChangeReasons.test.js",
       "isolation-infra/staticRunsGuard.test.js",

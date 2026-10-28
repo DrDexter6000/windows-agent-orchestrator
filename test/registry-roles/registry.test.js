@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readRegistry } from "../../src/registry.js";
+import { readRegistry, normalizeAgent, unknownBackendGuidance } from "../../src/registry.js";
 
 test("reads agent registry and applies cwd override", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
@@ -226,4 +226,43 @@ test("P4-T2: managed --model in args → fixed migration error (no legacy extrac
     /migrate|no longer supported|structured/i,
     "managed --model in args is rejected (no transparent extraction)",
   );
+});
+
+// TD-318: readRegistry 遇坏 JSON 抛安全错误——V8 的 JSON.parse 报错自带源文本
+// 片段（Unexpected token 'u', ...<原文>... is not valid JSON），原样上抛会让
+// registry 原文进 CLI/MCP 输出。新错误只有固定文案 + 行列号（src/safeText.js），
+// 不携带源文本。
+test("readRegistry 遇坏 JSON 抛固定文案错误（不含源文本）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
+  const registryPath = join(dir, "agents.json");
+  await writeFile(registryPath, `{"TD318_LEAK_SENTINEL": undefined}`, "utf8");
+  await assert.rejects(
+    () => readRegistry(registryPath),
+    (e) => {
+      assert.ok(!e.message.includes("TD318_LEAK_SENTINEL"), "错误 message 不得含源文本哨兵");
+      assert.match(e.message, /registry 文件不是合法的 JSON/, "固定文案 + 标签");
+      return true;
+    },
+  );
+});
+
+// TD-318（二）：unknownBackendGuidance 经 registry list/check、wao lanes、派发与
+// MCP 的错误路径原样带出——回显的 backend 值必须先过控制字符转义，值里的换行
+// 不能在终端伪造一行。值本身保留（可见转义写法），便于排错。
+test("TD-318（二）：unknownBackendGuidance 回显的 backend 值过控制字符转义", () => {
+  const g = unknownBackendGuidance("evil\n[FAIL] forged");
+  assert.ok(!g.includes("\n"), "结果不含真实换行（不能伪造一行）");
+  assert.ok(g.includes("evil\\n[FAIL] forged"), "值以可见转义在场（排错仍可见）");
+  assert.ok(g.includes("(supported: "), "支持集指路保持");
+});
+
+// TD-318 复核：条目自带的 id 字段曾按 { id, ...rest } 展开序盖掉已过
+// isValidCanonicalAgentId 校验的键名——agents.good = { id: "evil\n[FAIL]" }
+// 归一化后身份被冒用，registry list/check 按"id 已是合法键名、无需转义"
+// 前提直接打印的文本行随之可被伪造。归一化结果的 id 恒为键名。
+test("TD-318 复核: normalizeAgent——条目自带 id 字段不生效，id 恒为键名", () => {
+  const a = normalizeAgent("good_key", { backend: "claude-code", cwd: "D:/proj", id: "someone_else" });
+  assert.equal(a.id, "good_key", "合法条目：id 恒为键名");
+  const forged = normalizeAgent("good_key", { backend: "claude-code", cwd: "D:/proj", id: "evil\n[FAIL] forged" });
+  assert.equal(forged.id, "good_key", "带载荷的条目 id 同样不生效（不能冒用身份）");
 });

@@ -72,3 +72,39 @@ test("registry check：JSON 模式 skip 行 error=同一固定文案；字段名
     assert.equal(process.exitCode, undefined, "skip 路径不设退出码");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// TD-318（二）：serveUrl 是配置自由值——文本 FAIL 行先过控制字符转义，值里的
+// 换行不能伪造一行（探测定向 127.0.0.1:1，连接拒绝即刻失败，无真实服务依赖）。
+test("TD-318（二）：registry check 文本行——serveUrl 含换行先转义，FAIL 行不伪造", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-regcheck-esc-"));
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    agents: {
+      evil_serve: {
+        backend: "opencode-serve",
+        serveUrl: "http://127.0.0.1:1\n[FAIL] forged",
+        agent: "build",
+        model: { providerID: "p", id: "m" },
+        cwd: ".",
+      },
+    },
+  }), "utf8");
+  try {
+    const lines = [];
+    const original = console.log;
+    console.log = (...args) => { lines.push(args.map(String).join(" ")); };
+    const savedExitCode = process.exitCode;
+    try {
+      await registryCheckCommand(
+        ["--registry", join(dir, "agents.json")],
+        { registry: join(dir, "agents.json") },
+      );
+    } finally {
+      console.log = original;
+      process.exitCode = savedExitCode;
+    }
+    assert.equal(lines.find((l) => l.startsWith("[FAIL] forged")), undefined, "没有任何一行以 [FAIL] forged 开头");
+    const failLine = lines.find((l) => l.startsWith("evil_serve\tFAIL\t"));
+    assert.ok(failLine !== undefined, "FAIL 行在场（探测失败是事实，不得静默）");
+    assert.ok(failLine.includes("http://127.0.0.1:1\\n[FAIL] forged"), `serveUrl 以可见转义在场（实际行：${JSON.stringify(failLine)}）`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

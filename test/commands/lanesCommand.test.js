@@ -143,6 +143,47 @@ test("wao lanes：车道表权威失败（结构非法）→ exitCode 1 + 不渲
   } finally { cleanupDir(dir); }
 });
 
+// TD-318（二）：JSON.parse 的 V8 报错自带源文本片段——坏 JSON 的 lanes.json
+// 原文不得进 wao lanes 的文本或 JSON 输出（JSON.stringify 转义换行，但旧实现
+// 的 issue 文案本身携带原文片段）。
+test("TD-318（二）：wao lanes 遇坏 JSON 车道表——文本与 JSON 输出都不带源文本", async () => {
+  const dir = makeEnv();
+  try {
+    writeFileSync(join(dir, "lanes.json"), '{"lanes": [{"LEAK_SENTINEL_LANES": undefined}]}', "utf8");
+    const runLanes = async (asJson) => {
+      const lines = [];
+      const origLog = console.log;
+      console.log = (...a) => { lines.push(a.join(" ")); };
+      const prevExit = process.exitCode;
+      try {
+        await lanesCommand(
+          [
+            ...(asJson ? ["--json"] : []),
+            "--registry", join(dir, "agents.json"),
+            "--lanes-file", join(dir, "lanes.json"),
+            "--run-dir", join(dir, "runs"),
+          ],
+          { registry: "config/agents.json", runDir: join(dir, "runs") },
+        );
+      } finally {
+        console.log = origLog;
+        process.exitCode = prevExit;
+      }
+      return asJson ? JSON.parse(lines.join("\n")) : lines.join("\n");
+    };
+    const text = await runLanes(false);
+    assert.ok(text.includes("车道表不可用"), "失败面标题照常");
+    assert.ok(!text.includes("LEAK_SENTINEL_LANES"), `文本输出不含源文本哨兵（实际：${text.slice(0, 400)}）`);
+    const payload = await runLanes(true);
+    const serialized = JSON.stringify(payload);
+    assert.ok(!serialized.includes("LEAK_SENTINEL_LANES"), "JSON 输出不含源文本哨兵");
+    assert.ok(
+      (payload.issues ?? []).some((i) => /lanes\.json不是合法的 JSON/.test(i)),
+      `issue 是固定文案（实际：${JSON.stringify(payload.issues ?? [])}）`,
+    );
+  } finally { cleanupDir(dir); }
+});
+
 // 决定 0074（车道就绪事实如实呈现）：声明 kimiHome 的 kimi-web 车道，就绪按
 // <kimiHome>/server.token 文件推导（key_only_present/key_only_missing——复用
 // 现有八态闭集，不新增状态），不探 tokenEnv（那个变量不会被派发读到）；人读
@@ -265,5 +306,46 @@ test("wao lanes：车道带 dispatchHold → 人读行与 --json 都显示；无
     assert.equal(h1.dispatchHold, "夹具：暂停说明");
     assert.equal(h2.dispatchHold, null);
     assert.ok(payload.sourceNotes.dispatchHold, "--json 同源带来源注记");
+  } finally { cleanupDir(dir); }
+});
+
+// ── TD-318（三）：文本输出的行伪造防线 ────────────────────────────────────────
+
+// 车道表 model.id 是无内容校验的自由文本（dispatchHold 已被 TD-283 结构校验拒绝
+// 控制字符，modelId 是仍能流到文本面的注入缝）。值里的换行必须在 join 前可见化
+// ——不能在终端伪造一行检查结果。
+test("TD-318（三）：wao lanes 文本模式——modelId 含换行不伪造行；正常车道行照常", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-forge-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+    schema: 2,
+    lanes: [
+      { id: "f1", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, aliases: {} },
+      { id: "f2", backend: "codex", model: { id: "x\n[FAIL] forged" }, reasoning: { effort: "high" }, aliases: {} },
+    ],
+  }), "utf8");
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    agents: {
+      f1: { backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir },
+    },
+  }), "utf8");
+  try {
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      await lanesCommand(
+        ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: "config/agents.json", runDir: join(dir, "runs") },
+      );
+    } finally { console.log = origLog; }
+    const text = lines.join("\n");
+    assert.ok(
+      !text.split("\n").some((l) => l.startsWith("[FAIL] forged")),
+      "值内换行不得伪造一行",
+    );
+    assert.ok(text.includes("lane f1 —"), "正常车道行照常在场");
+    assert.ok(text.includes("lane f2 —"), "带载荷车道照常渲染");
+    assert.ok(text.includes("x\\n[FAIL] forged"), "载荷以可见转义留在原行内");
   } finally { cleanupDir(dir); }
 });

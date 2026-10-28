@@ -294,6 +294,46 @@ test("loadLanesConfig：顶层不是对象、lanes 不是数组或条目为 null
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// TD-318（二）：JSON.parse 的 V8 报错自带源文本片段——lanes.json 原文不得随
+// issues 进 wao lanes / validate / 派发拒绝的输出（registry 文件同一问题）。
+test("TD-318（二）：loadLanesConfig 遇坏 JSON——issue 只有固定文案，不带源文本", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanes-badjson-"));
+  try {
+    const path = join(dir, "lanes.json");
+    writeFileSync(path, '{"lanes": [{"LEAK_SENTINEL_LANES": undefined}]}', "utf8");
+    const doc = loadLanesConfig(path);
+    assert.equal(doc.ok, false, "坏 JSON → 结构红");
+    assert.equal(doc.lanes.length, 0, "无车道条目");
+    const joined = doc.issues.join("\n");
+    assert.ok(!joined.includes("LEAK_SENTINEL_LANES"), `issue 不带源文本哨兵（实际：${joined}）`);
+    assert.match(doc.issues[0], /lanes\.json不是合法的 JSON/, "固定文案（文件名标签，无 V8 原文）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── TD-318 复核：派发拒绝消息拼进配置来源值——先过控制字符转义 ────────────────
+// 拒绝消息被 CLI（src/commands/run.js）原样 throw、MCP（src/mcp/server.js）原样
+// 放进 content.text：值里的真实换行能在终端伪造一行。两个生成点（结构 issue
+// 明细 / 接线不一致的各轴值）逐外部值转义，固定文案不动。
+
+test("TD-318 复核: lanes_config_invalid 明细含配置值（未知键名带换行）——拒绝消息单行、可见转义", () => {
+  const badDoc = { ...LIVE, issues: ['lane "t1" 未知键 "evil\n[FAIL] forged"'] };
+  const r = R({ lanesDoc: badDoc, lane: "glm-flash", role: "researcher" });
+  assert.equal(r.kind, "error");
+  assert.equal(r.code, "lanes_config_invalid");
+  assert.ok(!r.message.includes("\n"), `拒绝消息不含真实换行（实际：${JSON.stringify(r.message)}）`);
+  assert.ok(r.message.includes("evil\\n[FAIL] forged"), "配置值以可见转义在场");
+});
+
+test("TD-318 复核: lane_wiring_mismatch 轴值含换行（model）——拒绝消息单行、可见转义", () => {
+  const doctored = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
+  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: "evil\n[FAIL] forged" };
+  const r = R({ lanesDoc: { ...LIVE, lanes: doctored.lanes }, lane: "glm-flash", role: "researcher" });
+  assert.equal(r.kind, "error");
+  assert.equal(r.code, "lane_wiring_mismatch");
+  assert.ok(!r.message.includes("\n"), `拒绝消息不含真实换行（实际：${JSON.stringify(r.message)}）`);
+  assert.ok(r.message.includes("evil\\n[FAIL] forged"), "model 值以可见转义在场");
+});
+
 test("W1 绊线（W4d 结构化版）：lanes.json 永不含 wiringAgent（含即结构红，14 号钉）；包版本前置观察", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(!LIVE.lanes.some((l) => typeof l.wiringAgent === "string"),

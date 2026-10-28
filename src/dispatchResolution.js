@@ -28,6 +28,12 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
+// TD-318（二）：roles/lanes 两份配置 JSON 的解析失败不许带出源文本——V8 报错
+// 自带原文片段，会随 issues 进 wao lanes / validate / 派发拒绝的输出（registry
+// 文件同一问题，src/safeText.js）。TD-318 复核：派发拒绝消息拼进配置来源值
+//（结构 issue 明细、接线不一致的各轴值）时先过 escapeControlChars——CLI 原样
+// throw、MCP 原样进 content.text，值里的换行不能在那里伪造一行。
+import { safeJsonParse, escapeControlChars } from "./safeText.js";
 
 const WAO_ROOT = resolveRoot();
 function resolveRoot() {
@@ -154,14 +160,18 @@ export { laneAxes, agentAxes, axesEqual };
  * 0045 R4/W4b："终局复用策略归角色"落地——config/roles.json（git 跟踪、键白名单、
  * 闭集校验）加载。文件缺失=空政策（所有角色不复用；席位兼容来源按 effectiveSessionReuse）。
  * 结构 issue 与 lanes.json 同纪律（调用方决定消费语义）。
+ * @param {string} [explicitPath] 显式路径（注入缝——生产恒读安装根的
+ *   config/roles.json；解析语义同 loadLanesConfig 的 explicitPath）
  */
 const ROLE_POLICY_TOP_KEYS = new Set(["schema", "roles", "_comment"]);
 const ROLE_POLICY_KEYS = new Set(["sessionReuse"]);
 export const SESSION_REUSE_POLICIES = Object.freeze(["lead_workspace"]);
 
-export function loadRolePolicies() {
+export function loadRolePolicies(explicitPath) {
   let raw;
-  const path = join(WAO_ROOT, "config", "roles.json");
+  const path = typeof explicitPath === "string"
+    ? (isAbsolute(explicitPath) ? explicitPath : join(WAO_ROOT, explicitPath))
+    : join(WAO_ROOT, "config", "roles.json");
   try {
     raw = readFileSync(path, "utf8");
   } catch {
@@ -170,9 +180,11 @@ export function loadRolePolicies() {
   let doc;
   const issues = [];
   try {
-    doc = JSON.parse(raw);
+    // TD-318（二）：解析失败只报"roles.json不是合法的 JSON（第 X 行第 Y 列）"，
+    // 不携带源文本。
+    doc = safeJsonParse(raw, "roles.json");
   } catch (e) {
-    return { ok: false, path, roles: {}, issues: [`roles.json 不可解析：${e.message}`] };
+    return { ok: false, path, roles: {}, issues: [e.message] };
   }
   if (doc.schema !== 1) issues.push("roles.json schema 必须为 1");
   for (const k of Object.keys(doc)) {
@@ -292,9 +304,10 @@ export function loadLanesConfig(explicitPath) {
   const sha256 = createHash("sha256").update(raw, "utf8").digest("hex");
   let doc;
   try {
-    doc = JSON.parse(raw);
+    // TD-318（二）：同 loadRolePolicies——解析失败固定文案 + 行列号，不带源文本。
+    doc = safeJsonParse(raw, "lanes.json");
   } catch (e) {
-    return { ok: false, path, sha256, lanes: [], issues: [`lanes.json 不可解析：${e.message}`], rolesHint: [] };
+    return { ok: false, path, sha256, lanes: [], issues: [e.message], rolesHint: [] };
   }
   const issues = validateLanesStructure(doc);
   // 顶层不是对象（如文件内容为 null）、lanes 不是数组或条目不是对象时，结构校验
@@ -387,7 +400,9 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
       kind: "error", code: "lanes_config_invalid",
       received: { lane: safe(lane), role: safe(role) },
       choices: { forms: ["agentId", "lane+role"] },
-      message: `lanes_config_invalid: config/lanes.json 结构校验未过（${lanesDoc.issues.length} 项 issue）——explicit 派发整表拒绝；修复 lanes.json 或按 agentId 派发。明细：${lanesDoc.issues.slice(0, 3).join("；")}`,
+      // TD-318 复核：issue 明细携带配置来源值（未知键名等自由文本）——拼进拒绝
+      // 消息前先过控制字符转义（CLI 原样 throw、MCP 原样进 content.text）。
+      message: `lanes_config_invalid: config/lanes.json 结构校验未过（${lanesDoc.issues.length} 项 issue）——explicit 派发整表拒绝；修复 lanes.json 或按 agentId 派发。明细：${escapeControlChars(lanesDoc.issues.slice(0, 3).join("；"))}`,
     };
   }
 
@@ -453,12 +468,14 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
     }
     if (!axesEqual(laneAxes(targetLane), agentAxes(wiring))) {
       // G4：注册表赢——车道字段只断言不生效，不一致即拒（防"改 lanes.json 换模型"）。
+      // TD-318 复核：两侧轴值都是配置来源的自由值（model.id 只要求非空字符串）
+      //——拼进拒绝消息前逐值过控制字符转义，固定文案不动。
       const la = laneAxes(targetLane); const aa = agentAxes(wiring);
       return {
         kind: "error", code: "lane_wiring_mismatch",
         received: { lane: safe(laneName), role: safe(roleName) },
         choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${laneName}" 声明 (${la.backend}/${la.modelId}/${la.effort}) 与注册表 ${targetLane.id} (${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——注册表为准，请对齐 lanes.json。`,
+        message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 声明 (${escapeControlChars(la.backend)}/${escapeControlChars(la.modelId)}/${escapeControlChars(la.effort)}) 与注册表 ${escapeControlChars(targetLane.id)} (${escapeControlChars(aa.backend)}/${escapeControlChars(aa.modelId)}/${escapeControlChars(aa.effort)}) 不一致——注册表为准，请对齐 lanes.json。`,
       };
     }
     return {

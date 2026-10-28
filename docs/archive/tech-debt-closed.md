@@ -133,3 +133,4 @@
 | TD-272 | deepseek-acp 的 extractExitCode 读平铺文本块，线上数据是嵌套块，从不生效；候选删除 | 2026-10-28：删除 extractExitCode 与只供它用的 contentText，命令事件不带退出码（工具结果文本不是退出码证据）；dsh 0.1.5-rc.2 的线上事件字节不变 |
 | TD-316 | 心跳判活写了三遍：checkOwnerLiveness 把 Infinity（1e400）与远未来值判新鲜，readOwnerLease 拒 Infinity 却把有限远未来值判新鲜；owner 已死时孤儿 run 不 resume、不回收、不结算 | 2026-10-28：收成 ownerLiveness.js 的 isFreshHeartbeat（有限且与当前相差不超过阈值），三处都用它；Infinity 租约仍判畸形，settle 照旧拒绝 |
 | TD-317 | registry validate 原样回显 registry 键名，非法键名里的敏感串会进输出，换行能伪造一行 | 2026-10-28：registry 是合法 JSON 时，非法键名的条目以 1 起序号指代（文本 ✖ #<序号>，JSON 的 id 为 null 并带 position），不回显；文件解析失败时报错带出源文本，见 TD-318 |
+| TD-318 | JSON 配置的内容会在报错与文本输出里原样回显：JSON.parse 失败时 V8 报错带出源文本片段；命令的文本输出直接拼配置值，换行能伪造一行 | 2026-10-28：新增 src/safeText.js；registry、roles.json、lanes.json、lane-traits 与两个官方脚本改用 safeJsonParse（报错只带行列号）；registry validate/list/check、doctor、wao lanes、wao onboarding 的文本输出与未知 backend 报错转义控制字符 |

@@ -28,6 +28,9 @@ import { getRegistryInventoryWithIssues } from "../application/registryInventory
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
 import { buildLanesView, readLaneTraits } from "../application/lanesView.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
+// TD-318（三）：车道表/画像/registry/台账值是磁盘上的不可信文本——join 前逐行
+// 转义，值里的换行不能再伪造一行（core 顶层叶子，commands 下向 import）。
+import { escapeControlChars } from "../safeText.js";
 
 function parseOptions(args) {
   const options = { json: false, registry: undefined, lanesFile: undefined, runDir: undefined };
@@ -212,7 +215,9 @@ export async function lanesCommand(args, config) {
         for (const i of view.issues) out.push(`  - ${i}`);
       }
     }
-    console.log(out.join("\n"));
+    // TD-318（三）：每行元素在 join 前转义——程序自身的换行只来自 join，元素
+    // 内部（配置来源值）的控制字符一律可见化。--json 不经此路径。
+    console.log(out.map(escapeControlChars).join("\n"));
   }
   if (view.state !== "ok") process.exitCode = 1;
 }

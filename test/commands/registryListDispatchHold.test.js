@@ -95,3 +95,81 @@ test("TD-283 registry list：非默认 --registry → 车道表停用，dispatch
     assert.equal(payload.find((a) => a.id === HELD.id).dispatchHold, null, "非默认注册表不按本仓库车道表 join");
   } finally { cleanupDir(env.dir); }
 });
+
+// ── TD-318（二）：registry list 文本表的配置值转义 ─────────────────────────────
+
+// 合法条目的 model.id 是自由配置值（normalizeAgent 只要求非空字符串）——含换行
+// 时文本表先过控制字符转义，不能伪造一行；--format json 不变（自带转义）。
+test("TD-318（二）：registry list 文本表——model.id 含换行先转义，不伪造行；JSON 面不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reglist-esc-"));
+  const runDir = join(dir, "runs");
+  mkdirSync(runDir, { recursive: true });
+  const registryPath = join(dir, "agents.json");
+  const forgedModelId = "glm-5.2\n[FAIL] forged";
+  writeFileSync(registryPath, JSON.stringify({
+    agents: { evil_model: { backend: "claude-code", cwd: dir, model: { id: forgedModelId } } },
+  }), "utf8");
+  try {
+    const lines = await runList(["list", "--registry", registryPath, "--run-dir", runDir], { registryPath, runDir });
+    assert.equal(lines.find((l) => l.startsWith("[FAIL] forged")), undefined, "没有任何一行以 [FAIL] forged 开头");
+    const row = lines.find((l) => l.startsWith("evil_model\t"));
+    assert.ok(row.includes("glm-5.2\\n[FAIL] forged"), `model 值以可见转义在场（实际行：${JSON.stringify(row)}）`);
+
+    const jsonLines = await runList(
+      ["list", "--registry", registryPath, "--run-dir", runDir, "--format", "json"],
+      { registryPath, runDir },
+    );
+    const payload = JSON.parse(jsonLines.join("\n"));
+    assert.equal(payload.find((a) => a.id === "evil_model").model, forgedModelId, "JSON 面 model 原样（不经转义）");
+  } finally { cleanupDir(dir); }
+});
+
+// backend 含换行 = 闭集外值：listAgents 在渲染前抛 unknownBackendGuidance——
+// 报错 message 必须单行（backend 值经转义回显），不能借换行伪造一行。
+test("TD-318（二）：registry list——backend 含换行的条目以单行报错拒绝（值转义回显）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reglist-badbackend-"));
+  const runDir = join(dir, "runs");
+  mkdirSync(runDir, { recursive: true });
+  const registryPath = join(dir, "agents.json");
+  writeFileSync(registryPath, JSON.stringify({
+    agents: { evil_backend: { backend: "evil\n[FAIL] forged", cwd: dir } },
+  }), "utf8");
+  try {
+    await assert.rejects(
+      runList(["list", "--registry", registryPath, "--run-dir", runDir], { registryPath, runDir }),
+      (e) => {
+        assert.ok(!e.message.includes("\n"), `报错必须单行（实际：${JSON.stringify(e.message)}）`);
+        assert.ok(e.message.includes("evil\\n[FAIL] forged"), "坏值以可见转义回显（排错仍可见）");
+        return true;
+      },
+    );
+  } finally { cleanupDir(dir); }
+});
+
+// ── TD-318 复核：条目自带的 id 字段不生效 ────────────────────────────────────
+
+// agents.evil_id = { id: "evil\n[FAIL] forged", … } 曾让归一化结果的 id 变成
+// 那个未校验值——list 文本行按"id 已是合法键名、无需转义"的前提直接打印，
+// 随之可被伪造。id 恒为键名后：文本无伪造行、JSON 面 id=键名。
+test("TD-318 复核: registry list——条目自带 id 不生效（文本不伪造行，JSON id=键名）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reglist-entryid-"));
+  const runDir = join(dir, "runs");
+  mkdirSync(runDir, { recursive: true });
+  const registryPath = join(dir, "agents.json");
+  writeFileSync(registryPath, JSON.stringify({
+    agents: { evil_id: { backend: "claude-code", cwd: dir, id: "evil\n[FAIL] forged" } },
+  }), "utf8");
+  try {
+    const lines = await runList(["list", "--registry", registryPath, "--run-dir", runDir], { registryPath, runDir });
+    assert.equal(lines.find((l) => l.startsWith("[FAIL] forged")), undefined, "没有任何一行以 [FAIL] forged 开头");
+    assert.ok(lines.find((l) => l.startsWith("evil_id\t")), "文本行按键名输出");
+
+    const jsonLines = await runList(
+      ["list", "--registry", registryPath, "--run-dir", runDir, "--format", "json"],
+      { registryPath, runDir },
+    );
+    const payload = JSON.parse(jsonLines.join("\n"));
+    assert.equal(payload.length, 1, "单条目");
+    assert.equal(payload[0].id, "evil_id", "JSON 面 id 是键名，不是条目自带值");
+  } finally { cleanupDir(dir); }
+});

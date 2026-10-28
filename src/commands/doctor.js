@@ -63,6 +63,10 @@ import { normalizeAgent, KNOWN_BACKENDS } from "../registry.js";
 // 复核席第三轮（2026-10-28）：registry 键名合法性判定复用 canonicalAgentId SSOT
 //（与 normalizeAgent 的 id 校验同源——doctor 不写第二份字母表）。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
+// TD-318: registry 解析报错不带源文本（safeJsonParse）；文本输出的 name/detail
+// 拼配置来源值（未知 backend、cwd/binary 路径、env 名），先过控制字符转义——
+// 值里的换行不能再伪造一行检查结果。--format json 不变（JSON.stringify 自带转义）。
+import { safeJsonParse, escapeControlChars } from "../safeText.js";
 // R8-2：cwd 存在性判定复用 R7-AB 的 runManager SSOT（adapters→core 下向边）。
 import { probePredictedDispatchCwd } from "../runManager.js";
 // R8-2：与 R7 两层派发门同一能力键收窄——backendFor 构造无副作用
@@ -215,7 +219,10 @@ export async function waoDoctorCommand(args, config) {
   if (existsSync(registryPath)) {
     try {
       const raw = await readFile(registryPath, "utf8");
-      const reg = JSON.parse(raw);
+      // TD-318: 安全解析——V8 报错自带源文本片段，旧实现把 registry 原文拼进
+      // registry_loads detail。新错误只有固定文案 + 行列号（src/safeText.js，
+      // readRegistry/registry validate 同一实现）。
+      const reg = safeJsonParse(raw, "registry 文件");
       registryAgents = reg.agents ?? {};
       registryOk = true;
     } catch (error) {
@@ -870,6 +877,12 @@ export async function waoDoctorCommand(args, config) {
   //    陈旧 shim 与 ~/.agents/skills 整仓拷贝。改为**只报事实不裁决**：PATH 上
   //    有没有 wao、版本是否漂移、skills 拷贝是否同步、本检出根在哪。三份安装
   //    权威收敛为一份属 Owner 机器裁定（TD-191⑥ 机器半），doctor 不替 Owner 选。
+  //    TD-318 会审修：installLines 嵌的外部来源值（PATH 上的 wao 路径、
+  //    wao --version 输出、junction 目标、分支名、各安装根 package.json 版本、
+  //    skills 拷贝路径/版本）在拼行时就地 escapeControlChars——值里自带的换行
+  //    若留进 detail，渲染端 invocation_method 的 split("\n") 例外会把它当程序
+  //    自己的排版换行保留下来，伪造一行检查结果。程序用来排版的换行只来自
+  //    join("\n")；探测用的原值（spawn 命令等）不经转义。
   const installLines = [];
   const whereWao = spawnSync(
     process.platform === "win32" ? "where" : "which",
@@ -883,7 +896,7 @@ export async function waoDoctorCommand(args, config) {
     : whereLines[0]) ?? null;
   let shimVersion = null;
   if (waoPath) {
-    installLines.push(`全局 \`wao\` 在 PATH：${waoPath}`);
+    installLines.push(`全局 \`wao\` 在 PATH：${escapeControlChars(waoPath)}`);
     shimVersion = "未知";
     try {
       const v = spawnSync(`"${waoPath}" --version`, { encoding: "utf8", windowsHide: true, timeout: 30000, shell: true });
@@ -892,10 +905,10 @@ export async function waoDoctorCommand(args, config) {
     if (shimVersion === "未知") {
       installLines.push("shim 版本未探测到（无法与当前仓比对——如实报未知，不判漂移）。");
     } else if (shimVersion === WAO_VERSION) {
-      installLines.push(`版本与当前仓一致（${WAO_VERSION}）。`);
+      installLines.push(`版本与当前仓一致（${escapeControlChars(WAO_VERSION)}）。`);
     } else {
       installLines.push(
-        `版本漂移：PATH shim=${shimVersion} vs 当前仓=${WAO_VERSION}——宿主可能调到旧 WAO 行为（TD-191⑥）。`,
+        `版本漂移：PATH shim=${escapeControlChars(shimVersion)} vs 当前仓=${escapeControlChars(WAO_VERSION)}——宿主可能调到旧 WAO 行为（TD-191⑥）。`,
       );
     }
   } else {
@@ -923,7 +936,7 @@ export async function waoDoctorCommand(args, config) {
       // 验收修（astra+opus）：不预断目标就是 A（当前检出）——如实显示实际目标，
       // 是否同一份由读报告的人对照"当前检出"行判断。
       rootVersions.push(["B skills 槽位（junction）", skillsVersion ?? "未知"]);
-      installLines.push(`skills 槽位是 junction/symlink → ${skillsSlotTarget}（与该目标同体；对照下方"当前检出"行判断是否同一份；TD-191⑥）。`);
+      installLines.push(`skills 槽位是 junction/symlink → ${escapeControlChars(skillsSlotTarget)}（与该目标同体；对照下方"当前检出"行判断是否同一份；TD-191⑥）。`);
       // 决定 0049 advisory（kimi+opus 会审共同风险项，advisory 不阻断）：junction
       // 换来零漂移的同时丢掉了开发/执行隔离——目标恰为当前检出时，全局入口跑的
       // 就是这份检出的实时状态。如实报告其分支与脏态：非 main 或有未提交改动时
@@ -939,7 +952,7 @@ export async function waoDoctorCommand(args, config) {
         } catch { /* 探测失败如实未知 */ }
         const hot = (branch !== "main" && branch !== "未知") || dirtyCount > 0;
         installLines.push(
-          `junction 目标=当前检出：分支 ${branch}${dirtyCount >= 0 ? `、未提交改动 ${dirtyCount} 处` : ""}${hot ? "——全局入口正在执行开发中代码（决定 0049 advisory，不阻断）" : "（开发面干净）"}。`,
+          `junction 目标=当前检出：分支 ${escapeControlChars(branch)}${dirtyCount >= 0 ? `、未提交改动 ${dirtyCount} 处` : ""}${hot ? "——全局入口正在执行开发中代码（决定 0049 advisory，不阻断）" : "（开发面干净）"}。`,
         );
       }
     } else {
@@ -954,10 +967,10 @@ export async function waoDoctorCommand(args, config) {
       }
       installLines.push(
         inSync === null
-          ? `skills 整仓拷贝在场（${dirname(skillsCopySkill)}；同步性未探测）。`
+          ? `skills 整仓拷贝在场（${escapeControlChars(dirname(skillsCopySkill))}；同步性未探测）。`
           : inSync
-            ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${skillsVersion ?? "未知"}）。`
-            : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${skillsVersion ?? "未知"}）——宿主可能加载旧技能（TD-191⑥）。`,
+            ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${escapeControlChars(skillsVersion ?? "未知")}）。`
+            : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${escapeControlChars(skillsVersion ?? "未知")}）——宿主可能加载旧技能（TD-191⑥）。`,
       );
     }
   }
@@ -967,19 +980,20 @@ export async function waoDoctorCommand(args, config) {
     let cv = "未知";
     try { cv = JSON.parse(readFileSync(installerPkg, "utf8")).version ?? "未知"; } catch { /* 如实未知 */ }
     rootVersions.push(["C installer 根", cv]);
-    installLines.push(`installer 根在场：${join(homedir(), "wao")}（版本 ${cv}；Owner 裁定的日常执行根——TD-191⑥）。`);
+    installLines.push(`installer 根在场：${escapeControlChars(join(homedir(), "wao"))}（版本 ${escapeControlChars(cv)}；Owner 裁定的日常执行根——TD-191⑥）。`);
   }
   if (shimVersion !== null && shimVersion !== "未知") rootVersions.push(["PATH 全局 shim", shimVersion]);
-  installLines.push(`当前检出（安装权威候选之一）：${dirname(fileURLToPath(import.meta.url))}${sep}..${sep}..（版本 ${WAO_VERSION}）`);
+  installLines.push(`当前检出（安装权威候选之一）：${escapeControlChars(dirname(fileURLToPath(import.meta.url)) + sep + ".." + sep + "..")}（版本 ${escapeControlChars(WAO_VERSION)}）`);
   rootVersions.push(["A 当前检出", WAO_VERSION]);
   // 一致性裁决报告：在场形态 ≥2 且版本不齐 → 明示漂移与维护义务；只有一份在场
-  // 则明示"唯一在册"，避免把单形态机器误报成漂移。
+  // 则明示"唯一在册"，避免把单形态机器误报成漂移。rootVersions 存原值（一致性
+  // 比对按真值），渲染时逐值转义（版本来自磁盘上的 package.json）。
   const present = new Set(rootVersions.map(([, v]) => v));
   if (rootVersions.length >= 2) {
     installLines.push(
       present.size === 1
-        ? `安装形态 ${rootVersions.length} 份在场、版本一致（${[...present][0]}）——一致性义务满足。`
-        : `**安装形态版本漂移**：${rootVersions.map(([n, v]) => `${n}=${v}`).join(" / ")}——三份一致性维护义务与刷新规则见 AGENT_ONBOARDING §2（日常根=C，Owner 2026-10-02 裁定）。`,
+        ? `安装形态 ${rootVersions.length} 份在场、版本一致（${escapeControlChars([...present][0])}）——一致性义务满足。`
+        : `**安装形态版本漂移**：${rootVersions.map(([n, v]) => `${n}=${escapeControlChars(v)}`).join(" / ")}——三份一致性维护义务与刷新规则见 AGENT_ONBOARDING §2（日常根=C，Owner 2026-10-02 裁定）。`,
     );
   } else {
     installLines.push("在册安装形态唯一（当前检出）——无一致性义务。");
@@ -1029,7 +1043,16 @@ export async function waoDoctorCommand(args, config) {
     console.log(`WAO Doctor: ${verdict}`);
     for (const c of checks) {
       const label = c.level === "warn" ? "WARN" : (c.level === "info" ? "INFO" : (c.pass ? "OK" : "FAIL"));
-      console.log(`  [${label}] ${c.name}: ${c.detail}`);
+      // TD-318: name/detail 都可能携带配置来源值（未知 backend、cwd/binary 路径、
+      // env 名、dispatchHold）——转义后换行/控制字符无法伪造一行检查结果。唯一
+      // 例外 invocation_method：它的 detail 是刻意 join("\n") 的多行排版，动态值
+      // 已在拼 installLines 时转义（见步骤 8 的 TD-318 会审修），这里逐段转义
+      // 保留程序自己的换行，不破坏排版。
+      const name = escapeControlChars(c.name);
+      const detail = c.name === "invocation_method"
+        ? String(c.detail).split("\n").map(escapeControlChars).join("\n")
+        : escapeControlChars(c.detail);
+      console.log(`  [${label}] ${name}: ${detail}`);
     }
   }
   if (fails.length > 0 || (options.warnAsError && warns.length > 0)) process.exitCode = 1;

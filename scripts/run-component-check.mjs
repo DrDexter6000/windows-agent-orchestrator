@@ -56,6 +56,9 @@ import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
 import { backendFor } from "../src/backends/factory.js";
 // ADR-0032 §8：检查五态（打印面按状态出图标，N/A 不再显示为红叉）。
 import { checkStateOf } from "./reliability/checkStates.mjs";
+// TD-318（二）：registry 读取的解析失败只报固定文案 + 行列号——V8 报错自带
+// 源文本片段，stderr 原样转出会把 registry 原文带进终端（src/safeText.js）。
+import { safeJsonParse } from "../src/safeText.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -114,7 +117,9 @@ if (!existsSync(REGISTRY_PATH)) {
 }
 let registry;
 try {
-  registry = JSON.parse(readFileSync(REGISTRY_PATH, "utf8"));
+  // TD-318（二）：读 registry 的解析走安全实现；下面的 composition summary 是
+  // 运行产生的数据，仍走 JSON.parse（语义不同，不在此列）。
+  registry = safeJsonParse(readFileSync(REGISTRY_PATH, "utf8"), "registry 文件");
 } catch (error) {
   console.error(`[component-check] registry unparseable (${REGISTRY_PATH}): ${error?.message ?? error}`);
   process.exit(2);

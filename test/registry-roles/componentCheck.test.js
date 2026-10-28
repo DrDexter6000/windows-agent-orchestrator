@@ -2190,6 +2190,28 @@ test("结构钉: 临时装配 registry 只含 _fixture_* 装配，不动主 regi
   assert.ok(!/writeFileSync\(\s*REGISTRY_PATH/.test(entry), "入口绝不写主 registry");
 });
 
+// TD-318（二）：入口读 registry 的解析失败只报固定文案 + 行列号——V8 报错自带
+// 源文本片段，stderr 原样转出会把 registry 原文带进终端。静态钉（不启动真实
+// 组件检查）；composition summary 是运行产生的数据，仍走 JSON.parse。
+test("结构钉 TD-318（二）: registry 读取走 safeJsonParse；composition summary 保持 JSON.parse", () => {
+  const entry = readFileSync(ENTRY, "utf8");
+  assert.match(
+    entry,
+    /import \{ safeJsonParse \} from "\.\.\/src\/safeText\.js"/,
+    "safeJsonParse import 自 src/safeText.js",
+  );
+  assert.match(
+    entry,
+    /safeJsonParse\(readFileSync\(REGISTRY_PATH, "utf8"\), "registry 文件"\)/,
+    "registry 读取调用安全解析",
+  );
+  assert.match(
+    entry,
+    /compositionSummary = JSON\.parse\(readFileSync\(COMPOSITION_SUMMARY_PATH, "utf8"\)\)/,
+    "composition summary（运行产物）不走安全解析",
+  );
+});
+
 test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不下发为被测配置", () => {
   const registry = syntheticRegistry();
   registry.certification = { fixtures: { llm: [{ agentId: "fallback" }] } };

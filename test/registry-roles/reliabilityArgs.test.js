@@ -8,6 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseReliabilityArgs, USAGE } from "../../scripts/reliability/args.mjs";
 
 test("f1: --help / -h → help 路径，零消耗退出", () => {
@@ -49,4 +52,29 @@ test("f1: 空参数=全量意图合法（调用方负责提示成本），USAGE 
   assert.equal(r.error, null);
   assert.deepEqual(r.values, {});
   assert.ok(USAGE.includes("--agent") && USAGE.includes("--profile") && USAGE.includes("消耗 token"));
+});
+
+// TD-318（二）：入口读 registry 的解析失败只报固定文案 + 行列号——V8 报错自带
+// 源文本片段，顶层抛出走 Node 的未捕获输出也不带 registry 原文。静态钉（不
+// 启动真实认证）；读运行产生的汇总数据（summaryPath）仍走 JSON.parse。
+test("TD-318（二）结构钉: registry 读取走 safeJsonParse；运行数据 JSON.parse 不动", () => {
+  const entry = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "run-reliability.mjs"),
+    "utf8",
+  );
+  assert.match(
+    entry,
+    /import \{ safeJsonParse \} from "\.\.\/src\/safeText\.js"/,
+    "safeJsonParse import 自 src/safeText.js",
+  );
+  assert.match(
+    entry,
+    /safeJsonParse\(readFileSync\(REGISTRY, "utf8"\), "registry 文件"\)/,
+    "registry 读取调用安全解析",
+  );
+  assert.match(
+    entry,
+    /JSON\.parse\(readFileSync\(summaryPath, "utf8"\)\)/,
+    "汇总数据（运行产物）不走安全解析",
+  );
 });

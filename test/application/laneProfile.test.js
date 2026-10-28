@@ -238,6 +238,21 @@ test("readLaneTraits：schemaVersion/scale 顶层三态", () => {
   } finally { cleanupDir(dir); }
 });
 
+// TD-318（二）：JSON.parse 的 V8 报错自带源文本片段——画像原文不得随 issues
+// 进 wao lanes 输出（registry 文件同一问题）。
+test("readLaneTraits：坏 JSON——unreadable 态的 issue 只有固定文案，不带源文本", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lp-badjson-"));
+  try {
+    const p = join(dir, "t.json");
+    writeFileSync(p, '{"traits": {"LEAK_SENTINEL_TRAITS": undefined}}', "utf8");
+    const r = readLaneTraits(p);
+    assert.equal(r.state, "unreadable", "坏 JSON 与文件不可读同一态");
+    const joined = r.issues.join("\n");
+    assert.ok(!joined.includes("LEAK_SENTINEL_TRAITS"), `issue 不带源文本哨兵（实际：${joined}）`);
+    assert.match(r.issues[0], /lane-traits\.json不是合法的 JSON/, "固定文案（文件名标签，无 V8 原文）");
+  } finally { cleanupDir(dir); }
+});
+
 // ── ratingsState ─────────────────────────────────────────────────────────────
 
 test("ratingsState：四种状态", () => {

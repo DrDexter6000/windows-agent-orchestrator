@@ -147,6 +147,11 @@ const CORE_TOP = Object.freeze(new Set([
   "src/registry.js",
   "src/runEvidenceAssessment.js",
   "src/runManager.js",
+  // TD-318：安全 JSON 解析（报错只带行列号，不带源文本）与文本输出的控制字符转义。
+  // 零相对出边；消费方 src/registry.js、src/dispatchResolution.js（core 同层）、
+  // src/application/laneProfile.js 与 src/commands/registry.js、doctor.js、lanes.js、
+  // onboarding.js（下向 import），以及两个 scripts/ 入口。
+  "src/safeText.js",
   "src/scorecard.js",
   "src/smoke.js",
   "src/transcript.js",

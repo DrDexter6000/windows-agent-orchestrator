@@ -37,6 +37,9 @@ import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
 // R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
 import { providerKeyFor } from "../src/providerFingerprint.js";
+// TD-318（二）：registry 读取的解析失败只报固定文案 + 行列号（V8 报错自带
+// 源文本片段；顶层抛出走 Node 的未捕获输出也不带原文）——src/safeText.js。
+import { safeJsonParse } from "../src/safeText.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 // reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
 import { backendCapabilitySnapshot, backendFor } from "../src/backends/factory.js";
@@ -130,7 +133,8 @@ const SENTINEL_B = `OMEGA_${Date.now().toString(36).toUpperCase()}`;
 // 每个 case：agent + completionMode + 期望行为
 // 读 config/agents.json 确定哪些 agent 可用
 function loadRegistry() {
-  return JSON.parse(readFileSync(REGISTRY, "utf8"));
+  // TD-318（二）：解析失败固定文案 + 行列号，不带 registry 原文。
+  return safeJsonParse(readFileSync(REGISTRY, "utf8"), "registry 文件");
 }
 
 const registry = loadRegistry();

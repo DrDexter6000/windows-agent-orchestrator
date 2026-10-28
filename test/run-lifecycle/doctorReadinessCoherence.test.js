@@ -29,7 +29,7 @@
 // User/Machine 作用域读取经 config 注入 stub（同 kimiTokenFile/doctorPanelHold 的
 // 隔离纪律——真读只在真 doctor 跑）。值不回显进断言。
 
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -432,6 +432,133 @@ test("backend_map 的 hasOwn 守卫：backend 为 constructor/__proto__ 的 work
     }
     assert.equal(checkNamed(report, "registry_entry_"), undefined, "未知 backend 不做条目校验（向前兼容设计）");
   } finally {
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── TD-318（2026-10-28）：registry 解析报错与文本输出的配置内容零漏出 ──────────
+
+test("TD-318: 坏 JSON registry——registry_loads detail 零源文本；json 与文本整段输出都不含哨兵", async () => {
+  let root;
+  try {
+    root = mkdtempSync(join(tmpdir(), "wao-doctor-readiness-badjson-"));
+    // V8 对该形状的报错自带源文本片段（..."ENTINEL": undefined}"... is not valid
+    // JSON）——旧实现把 error.message 拼进 registry_loads detail，registry 原文
+    // 进输出。安全解析（src/safeText.js）只给固定文案 + 行列号。
+    writeFileSync(join(root, "agents.json"), `{"TD318_LEAK_SENTINEL": undefined}`, "utf8");
+
+    const jsonLines = await doctorRunLines(root, ["--format", "json"]);
+    const jsonRaw = jsonLines.join("\n");
+    assert.ok(!jsonRaw.includes("TD318_LEAK_SENTINEL"), "json 整段输出不得回显源文本");
+    const report = JSON.parse(jsonLines.find((l) => l.trimStart().startsWith("{")));
+    const loadCheck = report.checks.find((c) => c.name === "registry_loads");
+    assert.ok(loadCheck, "registry_loads 恒在场（P2-1）");
+    assert.equal(loadCheck.level, "warn", "解析失败 = WARN（→ DEGRADED），既有契约不变");
+    assert.ok(!loadCheck.detail.includes("TD318_LEAK_SENTINEL"), "detail 零源文本");
+    assert.match(loadCheck.detail, /不是合法的 JSON/, "detail 是安全解析的固定文案");
+
+    const textLines = await doctorRunLines(root, []);
+    const textRaw = textLines.join("\n");
+    assert.ok(!textRaw.includes("TD318_LEAK_SENTINEL"), "文本整段输出不得回显源文本");
+  } finally {
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("TD-318: backend 含换行——文本输出不出现被伪造的行（backend_map detail 转义）；json 原值不变", async () => {
+  let root;
+  try {
+    root = makeRoot((dir) => ({
+      evil_worker: { backend: "evil\n[FAIL] forged", cwd: dir },
+    }));
+
+    // json 契约不变：backend_map 的 detail 保留原值（含真实换行，由 JSON 转义承载）。
+    const jsonLines = await doctorRunLines(root, ["--format", "json"]);
+    const report = JSON.parse(jsonLines.find((l) => l.trimStart().startsWith("{")));
+    const mapCheck = report.checks.find((c) => c.name === "backend_map_evil_worker");
+    assert.ok(mapCheck, "backend_map_evil_worker WARN 在场");
+    assert.ok(mapCheck.detail.includes("evil\n[FAIL] forged"), "json detail 保持原值（JSON 输出不变）");
+
+    // 文本模式：detail 里的换行必须转成可见写法，不得出现被伪造的行。
+    const textLines = await doctorRunLines(root, []);
+    const textRaw = textLines.join("\n");
+    const forged = textLines.filter((l) => l.trimStart().startsWith("[FAIL] forged"));
+    assert.equal(forged.length, 0, `文本输出不得出现被伪造的行，实际: ${JSON.stringify(forged)}`);
+    assert.ok(textRaw.includes("evil\\n[FAIL] forged"), "backend 值以可见转义（\\n 字面量）呈现");
+  } finally {
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── TD-318 会审修（补齐转义点用例，doctor 文本模式）──────────────────────────
+// 两个此前没钉住的渲染点：检查名里的换行（registry env 块键名直进 env_<id>_<名>
+// 检查名）与 invocation_method 的动态值（installLines 嵌外部来源值——PATH 上的
+// wao 路径、各安装根 package.json 版本等；值里自带的换行会借渲染端的 split("\n")
+// 例外以真实换行回流，伪造一行检查结果。会审已用带换行的版本值复现，修复=拼行时
+// 就地转义）。两条都对物理行断言"没有任何一行以伪造的那段开头"。
+
+test("TD-318: 检查名含换行（registry env 块键名）——文本输出不被伪造；json 名保持原值", async () => {
+  let root;
+  try {
+    root = mkdtempSync(join(tmpdir(), "wao-doctor-readiness-envnl-"));
+    writeFileSync(join(root, "zcode.cjs"), "/* dummy */", "utf8");
+    writeZcodeRegistry(root, {
+      binary: join(root, "zcode.cjs"),
+      env: { "evil\n[FAIL] forged": "1" },
+    });
+
+    // json 契约不变：检查名保留原值（含真实换行，由 JSON 转义承载）。
+    const jsonLines = await doctorRunLines(root, ["--format", "json"]);
+    const report = JSON.parse(jsonLines.find((l) => l.trimStart().startsWith("{")));
+    const envCheck = report.checks.find((c) => c.name.startsWith("env_zc_evil"));
+    assert.ok(envCheck, "env 块键名产生 env_zc_<名> 检查");
+    assert.ok(envCheck.name.includes("evil\n[FAIL] forged"), "json 检查名保持原值（JSON 输出不变）");
+
+    // 文本模式：名字里的换行必须转成可见写法，不得出现被伪造的物理行。
+    const textLines = await doctorRunLines(root, []);
+    const physical = textLines.join("\n").split("\n");
+    const forged = physical.filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forged.length, 0, `文本输出不得出现被伪造的行，实际: ${JSON.stringify(forged)}`);
+    assert.ok(textLines.join("\n").includes("env_zc_evil\\n[FAIL] forged"), "检查名以可见转义（\\n 字面量）呈现");
+  } finally {
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("TD-318: invocation_method 动态值含换行（installer 根版本）——不被伪造；程序自己的多行排版仍是多行", async () => {
+  let root;
+  let savedUserProfile;
+  try {
+    root = mkdtempSync(join(tmpdir(), "wao-doctor-readiness-invm-"));
+    // 注入缝：os.homedir() 在 Windows 读 USERPROFILE——重定向到临时"主目录"，
+    // 放一个版本号含换行的 wao/package.json，doctor 的 installer 根探测就会读到
+    // 它（PATH/skills 探测照常真跑，断言只针对载荷与排版，不钉机器状态）。
+    const fakeHome = join(root, "home");
+    mkdirSync(join(fakeHome, "wao"), { recursive: true });
+    writeFileSync(join(fakeHome, "wao", "package.json"), JSON.stringify({ version: "evil\n[FAIL] forged" }), "utf8");
+    savedUserProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = fakeHome;
+    writeFileSync(join(root, "zcode.cjs"), "/* dummy */", "utf8");
+    writeZcodeRegistry(root, { binary: join(root, "zcode.cjs") });
+
+    const textLines = await doctorRunLines(root, []);
+    const textRaw = textLines.join("\n");
+    // 载荷以真实换行回流 = 伪造行（修复前实测：installer 行与版本漂移行各伪造一行）。
+    const physical = textRaw.split("\n");
+    const forged = physical.filter((l) => l.startsWith("[FAIL] forged"));
+    assert.equal(forged.length, 0, `文本输出不得出现被伪造的行，实际: ${JSON.stringify(forged)}`);
+    assert.ok(!textRaw.includes("evil\n[FAIL] forged"), "版本值不再以真实换行出现");
+    assert.ok(textRaw.includes("evil\\n[FAIL] forged"), "版本值以可见转义（\\n 字面量）呈现");
+    // 程序自己的多行排版保留：invocation_method 前缀行与后续安装形态行仍是
+    // 不同的物理行（过度转义会把 join("\n") 的排版换行也吞掉）。
+    const head = physical.filter((l) => l.includes("invocation_method:"));
+    assert.equal(head.length, 1, "invocation_method 前缀行在场");
+    const layoutLines = physical.filter((l) => l.includes("当前检出（安装权威候选之一）"));
+    assert.ok(layoutLines.length >= 1, "安装形态内容行在场");
+    assert.ok(!layoutLines.some((l) => l.includes("invocation_method:")), "排版换行保留：内容行与前缀行是不同物理行");
+  } finally {
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserProfile;
     if (root) rmSync(root, { recursive: true, force: true });
   }
 });

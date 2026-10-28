@@ -22,6 +22,23 @@ test("POL-1: 政策登记加载——活体 researcher=lead_workspace，其余�
   assert.deepEqual([...SESSION_REUSE_POLICIES], ["lead_workspace"]);
 });
 
+// TD-318（二）：JSON.parse 的 V8 报错自带源文本片段——roles.json 原文不得随
+// issues 进输出。explicitPath 是注入缝（生产恒读安装根的 config/roles.json），
+// 本用例不触真实配置文件。
+test("TD-318（二）：loadRolePolicies 遇坏 JSON——issue 只有固定文案，不带源文本", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-pol-badjson-"));
+  try {
+    const path = join(dir, "roles.json");
+    writeFileSync(path, '{"roles": {"LEAK_SENTINEL_ROLES": undefined}}', "utf8");
+    const p = loadRolePolicies(path);
+    assert.equal(p.ok, false, "坏 JSON → 结构红");
+    assert.deepEqual(p.roles, {}, "无政策透出");
+    const joined = p.issues.join("\n");
+    assert.ok(!joined.includes("LEAK_SENTINEL_ROLES"), `issue 不带源文本哨兵（实际：${joined}）`);
+    assert.match(p.issues[0], /roles\.json不是合法的 JSON/, "固定文案（文件名标签，无 V8 原文）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("POL-2: 生效规则——角色政策优先；席位字段仅限原生角色兼容；跨帽绝不继承", () => {
   const policies = { researcher: { sessionReuse: "lead_workspace" } };
   const seatResearcher = { systemPrompt: "config/roles/researcher.md", sessionReuse: "lead_workspace" };

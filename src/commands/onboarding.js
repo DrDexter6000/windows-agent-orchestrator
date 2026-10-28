@@ -36,6 +36,9 @@ import * as hostDescriptors from "../hostAdapters/hostDescriptors.js";
 import { resolveCredentialEnv, kimiHomeTokenFileState } from "../application/credentialReadiness.js";
 // R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
 import { familyLabel } from "../application/modelFamily.js";
+// TD-318（三）：模板/私有 registry/车道表的自由文本值是磁盘上的不可信文本——
+// 人读面 join 前逐行转义，值里的换行不能再伪造一行（core 顶层叶子，下向 import）。
+import { escapeControlChars } from "../safeText.js";
 
 // ── R6-C: production environment probe ───────────────────────────────────────
 // One probeEnv per command invocation, passed to the pure recommendation engine.
@@ -205,6 +208,8 @@ export function buildHostGuide(hostId, result) {
 export function renderHostGuideBlock(hostId, result) {
   const d = hostDescriptors.findHostDescriptor(hostId);
   if (!d) {
+    // TD-318 复核：未知宿主分支与已知宿主分支同一纪律——join 前逐行转义
+    //（hostId 经参数多处入行，值里的换行不能伪造一行）。
     return [
       "",
       `── Host registration (host: ${hostId} — not in the verified host table) ──`,
@@ -214,7 +219,7 @@ export function renderHostGuideBlock(hostId, result) {
       `  2. Start a new ${hostId} session and confirm the WAO tools are listed.`,
       `  3. WAO cannot probe ${hostId}; to add it to the table follow the real-host admission checklist in AGENT_ONBOARDING.md.`,
       "",
-    ].join("\n");
+    ].map(escapeControlChars).join("\n");
   }
   const guide = buildHostGuide(hostId, result);
   const lines = [
@@ -243,7 +248,9 @@ export function renderHostGuideBlock(hostId, result) {
   lines.push(`Is it registered? npm run cli -- mcp status --host ${d.id}   (read-only probe of ${d.id}'s own config)`);
   lines.push(`hostVerified=${d.hostVerified} — ${d.hostVerified ? "load verified on the real host (evidence in hostDescriptors.js)" : "format-level admission only; real-host load NOT yet verified (admission checklist: AGENT_ONBOARDING.md)"}.`);
   lines.push("");
-  return lines.join("\n");
+  // TD-318（三）：join 前逐行转义（hostId 经参数传入，其余为程序自有文案——
+  // 对干净值恒等）。本块元素全部单行，无排版损失。
+  return lines.map(escapeControlChars).join("\n");
 }
 
 // Human-readable rendering of the bounded result. Single-sourced from the same
@@ -390,7 +397,10 @@ export function renderHuman(r) {
   lines.push("");
   lines.push("Host-neutral MCP stdio snippet (add to your MCP host config):");
   lines.push("```json");
-  lines.push(JSON.stringify(r.mcpSnippet, null, 2));
+  // TD-318（三）：本块是 renderHuman 里唯一程序有意写成多行的元素——拆成逐行
+  // 元素再整体转义，保住 JSON 排版（JSON.stringify 的字符串值自带 \\n 转义，
+  // 真实换行只来自缩进结构，split 后逐行转义对干净片段是恒等变换）。
+  lines.push(...JSON.stringify(r.mcpSnippet, null, 2).split("\n"));
   lines.push("```");
 
   // R5-D: per-host one-line registration EXAMPLES — conveniences derived from
@@ -404,7 +414,9 @@ export function renderHuman(r) {
     }
   }
 
-  return `${lines.join("\n")}\n`;
+  // TD-318（三）：join 前逐行转义——元素内部（配置来源值：候选行/认证注记/
+  // dispatchHold/原因句等）的控制字符一律可见化，程序自身的换行只来自 join。
+  return `${lines.map(escapeControlChars).join("\n")}\n`;
 }
 
 // ── R9 三席会审就绪分级块（决策 0023）────────────────────────────────────────
