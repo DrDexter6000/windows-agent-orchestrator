@@ -156,7 +156,7 @@ pwsh -File scripts/kimi-serve.ps1 -KimiHome <主目录> -Port 58628 -WorkspaceDi
 
 - 是什么、从哪来：`kimi web` serve 的持久 Bearer token，由上游 serve 签发，**持久化在 `<kimi 主目录>/server.token`**。文件内的值就是活体凭据（用它调 `/api/v1/meta` 得 200 可验证），跨启动与优雅 shutdown 均不变。headless 获取配方就是读这个文件：重定向或无 TTY 的启动**不打印** token，上游 `--help` 里的 "printed at startup" 只适用于交互式控制台启动。
 - `rotate-token` 子命令生成新持久 token，旧 token **立即失效**。token 按主目录隔离（`KIMI_CODE_HOME` 分家后两家互不相通）；轮换影响同一主目录内的全部 serve，轮换前先想清楚。
-- 怎么注入：Windows User 作用域（`setx KIMI_WEB_TOKEN <值>`）。WAO 派发链读 env 有 HKCU 回退，**不需要新开终端**；需要新终端（或用 `[Environment]::GetEnvironmentVariable(...,'User')` 读取）的只有直接读进程 env 的工具（如身份探针）。值不回显；registry 只声明名（`tokenEnv: "KIMI_WEB_TOKEN"`）。Git Bash 下的引号纪律见 `docs/certification-runbook.md` 代跑取证段。
+- 怎么注入：Windows User 作用域（`setx KIMI_WEB_TOKEN <值>`）。WAO 派发链读 env 有 HKCU 回退，**不需要新开终端**；需要新终端（或用 `[Environment]::GetEnvironmentVariable(...,'User')` 读取）的只有直接读进程 env 的第三方工具。值不回显；registry 只声明名（`tokenEnv: "KIMI_WEB_TOKEN"`）。Git Bash 下的引号纪律见 `docs/certification-runbook.md` 代跑取证段。
 - WAO 的边界：WAO 从 registry 的 `tokenEnv` 指定的环境变量读取 Bearer 凭据，不负责令牌发放。声明了 `kimiHome` 的车道不读它，直接读主目录的 `server.token`。
 
 ### 进程荚与维护命令

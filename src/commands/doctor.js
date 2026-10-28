@@ -45,7 +45,7 @@
 
 import { existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve, join, dirname, sep } from "node:path";
+import { resolve, join, dirname, sep, isAbsolute, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -57,7 +57,12 @@ import { validateWaoDir } from "../waoDir.js";
 import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
 import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
-import { normalizeAgent } from "../registry.js";
+// 会审修复批（2026-10-28）：registry 条目校验复用 KNOWN_BACKENDS + normalizeAgent
+//（与派发 readRegistry().getAgent 同一实现——doctor 不得把派发会拒的条目判 HEALTHY）。
+import { normalizeAgent, KNOWN_BACKENDS } from "../registry.js";
+// 复核席第三轮（2026-10-28）：registry 键名合法性判定复用 canonicalAgentId SSOT
+//（与 normalizeAgent 的 id 校验同源——doctor 不写第二份字母表）。
+import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 // R8-2：cwd 存在性判定复用 R7-AB 的 runManager SSOT（adapters→core 下向边）。
 import { probePredictedDispatchCwd } from "../runManager.js";
 // R8-2：与 R7 两层派发门同一能力键收窄——backendFor 构造无副作用
@@ -74,7 +79,9 @@ import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, ag
 import { CLAUDE_OAUTH_TOKEN_ENV, kimiServerTokenFile } from "../envPolicy.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
 // 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
-import { BACKEND_CLI } from "../application/backendCliMap.js";
+// BACKEND_OWN_READINESS：无 PATH CLI 但 doctor 自有就绪检查的 backend（zcode/
+// kimi-web）——不进"无法映射"的 backend_map WARN 面。
+import { BACKEND_CLI, BACKEND_OWN_READINESS } from "../application/backendCliMap.js";
 // R9（决策 0023）：三席会审就绪分级（已配置面）。分级推导与六态映射的单一实现
 // 在 application/panelReadiness.js（onboarding 的模板面共用同一份）——本文件只
 // 包装输入行（registry agents + 本命令既有的 CLI/key 探测事实），禁止在此重算分级。
@@ -146,7 +153,8 @@ async function whichCli(name) {
 
 // backend → CLI 探测映射：单一权威表在 ../application/backendCliMap.js（R6-C3 收敛，
 // 含无独立 CLI 的 "deepseek-harness": null）。无法映射（null 或未列出）的 backend
-// 由调用方 WARN（不静默）。
+// 由调用方 WARN（不静默）；例外 = BACKEND_OWN_READINESS 在册的 backend（zcode/
+// kimi-web）——doctor 有自己的就绪检查覆盖，不是"无法映射"。
 
 // 各 CLI 的官方安装方式（run: 修复提示用，只打印永不执行）。
 const CLI_INSTALL_HINT = {
@@ -238,6 +246,51 @@ export async function waoDoctorCommand(args, config) {
     });
   }
 
+  // 2a. 非法 id 分流（复核席第三轮 2026-10-28）：registry 的原始键名若不是合法
+  //     agent id（如含换行或敏感串），此前会被原样拼进 registry_entry_<id> /
+  //     cwd_<id> / backend_map_<id> / zcode_binary_<id> 等检查名与 detail——敏感串
+  //     进输出，换行还能在文本输出里伪造一行检查。仓库对非法 id 的既定做法是
+  //     绝不回显（normalizeAgent 抛固定文案；registry_list 的
+  //     projectRegistryIssues 投影成 agentId: null）。此处先行分流：合法 id 的
+  //     条目进入后续全部检查；非法 id 的条目不进任何逐 worker 检查（条目校验、
+  //     CLI/key、cwd、binary、承重 env、OAuth、panel——派发对它们本就会拒，
+  //     getAgent 解析期 normalizeAgent 即抛），只出一条 FAIL：名字固定、只报
+  //     个数、不回显任何键名。此后本文件对 registry 条目的一切读取都以
+  //     validRegistryEntries 为唯一来源。
+  const registryEntries = Object.entries(registryAgents);
+  const validRegistryEntries = registryEntries.filter(([id]) => isValidCanonicalAgentId(id));
+  const invalidIdEntryCount = registryEntries.length - validRegistryEntries.length;
+  if (invalidIdEntryCount > 0) {
+    pushCheck(checks, {
+      name: "registry_entry_invalid_id",
+      pass: false,
+      detail: `registry 里有 ${invalidIdEntryCount} 个 worker 的键名不是合法的 agent id（只允许 A-Z a-z 0-9 . _ -，1..128 个字符；键名不回显），派发这些 worker 会被拒；run: npm run cli -- registry validate --registry ${registryPath}`,
+      fix: `npm run cli -- registry validate --registry ${registryPath}`,
+    });
+  }
+
+  // 2b. registry 条目校验（会审修复批 2026-10-28）：backend 属于 KNOWN_BACKENDS 的
+  //     worker 用派发同一实现 normalizeAgent 校验——派发这个 worker 时
+  //     readRegistry().getAgent(id) 在解析阶段就会抛错，doctor 不得把这种条目判
+  //     HEALTHY。FAIL 文案固定，不回显错误原文（原文会带用户配置值），原因走
+  //     registry validate。未知 backend 不做这项校验（照旧只出 backend_map_<id>
+  //     WARN——向前兼容的刻意设计）；其余检查照常进行。
+  if (registryOk) {
+    for (const [id, agent] of validRegistryEntries) {
+      if (!KNOWN_BACKENDS.includes(agent?.backend)) continue;
+      try {
+        normalizeAgent(id, agent);
+      } catch {
+        pushCheck(checks, {
+          name: `registry_entry_${id}`,
+          pass: false,
+          detail: `worker ${id} 的 registry 条目通不过校验，派发这个 worker 时解析 registry 就会失败；run: npm run cli -- registry validate --registry ${registryPath} 查看原因`,
+          fix: `npm run cli -- registry validate --registry ${registryPath} 查看原因`,
+        });
+      }
+    }
+  }
+
   // 3. scoped 计算：保留 worker 需要哪些 CLI、声明哪些 key env 名。
   const neededClis = new Set();
   const keyNames = new Set();
@@ -248,11 +301,17 @@ export async function waoDoctorCommand(args, config) {
   const cliFound = new Map();
   const keySource = new Map();
   if (registryOk) {
-    for (const [id, agent] of Object.entries(registryAgents)) {
+    for (const [id, agent] of validRegistryEntries) {
       const backend = agent?.backend;
-      const cli = BACKEND_CLI[backend];
+      // 会审修复批：hasOwn 守卫——裸 [backend] 取值会让 constructor/__proto__ 这类
+      // 名字取到原型链上的值而静默漏检（该 worker 既不进 CLI 面也不进 WARN 面）。
+      const cli = Object.hasOwn(BACKEND_CLI, backend) ? BACKEND_CLI[backend] : undefined;
       if (cli) {
         neededClis.add(cli);
+      } else if (Object.hasOwn(BACKEND_OWN_READINESS, backend)) {
+        // 自有就绪面的 backend（zcode/kimi-web，见 BACKEND_OWN_READINESS 注释）：
+        // doctor 用自己的检查覆盖（zcode_binary_<id> / kimi_token_file_<id> + key_*），
+        // 不进"无法映射"WARN 面——真未知的 backend 与 BACKEND_CLI null 值照旧 WARN。
       } else {
         // 无法映射的 backend → WARN（不静默）：该 worker 的 CLI/key 检查无法覆盖。
         unmappableBackends.push({ id, backend });
@@ -287,8 +346,10 @@ export async function waoDoctorCommand(args, config) {
   }
 
   // 5. provider key（scoped + 作用域扩展）：只查保留 worker 声明的 env 名（不写死三连）。
-  //    进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用域再查：
-  //    命中 → WARN（新开终端可用）；仍无 → FAIL。kimi-code 靠 CLI 登录态，不查任何 kimi key。
+  //    进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用域再查（reader 经
+  //    config.userEnvReader 注入缝——与 5b/5d 同款）：命中 → INFO（派发时凭据桥从
+  //    User 作用域注入，不依赖进程继承——与 registry_list 的 credentialAvailability
+  //    同判 available）；仍无 → FAIL。kimi-code 靠 CLI 登录态，不查任何 kimi key。
   if (!registryOk) {
     pushCheck(checks, { name: "keys", pass: true, level: "info", detail: "未配置（跳过）" });
     // R8-2：registry 缺位（--apply 前）或解析失败时，cwd 检查与 CLI/key 同款
@@ -320,24 +381,30 @@ export async function waoDoctorCommand(args, config) {
       // R5 审计 P1-2：不做 kimi 跨 worker 抑制——kimi-code worker 经 envPolicy 本就
       // 声明零 key（登录态认证）；而 claude-code wrapper + Kimi 端点的 worker 声明的
       // KIMI_API_KEY 是它真正需要的 env，必须照常检查（registry 级布尔会吞掉它）。
-      const r = await resolveCredentialEnv(name);
+      const r = await resolveCredentialEnv(name, { userEnvReader: config.userEnvReader });
       keySource.set(name, r.source); // R9：panel_readiness 输入事实（不二次解析）
       if (r.source === "process_env") {
         pushCheck(checks, { name: `key_${name}`, pass: true, detail: "已设置" });
       } else if (r.source === "user_env") {
+        // 派发不依赖进程继承：RunManager 的 env 解析器对全部继承变量做 User 作用域
+        // 回退（凭据桥注入），registry_list 的 credentialAvailability 同判 available
+        // ——此处 WARN 是虚警（MCP 宿主里建议"重启终端"更是无从执行）。
+        // 会审修复批：身份探针自 TD-208 起已能回退读 User 作用域，不再是"需要
+        // 新开终端"的例子——该面收敛为"只有直接读进程环境变量的第三方工具"。
         pushCheck(checks, {
           name: `key_${name}`,
           pass: true,
-          level: "warn",
-          detail: `User 作用域已设置，当前进程未继承（新开终端可用）；run: 重启当前终端即可继承`,
-          fix: "重启当前终端（新进程继承 Windows User 作用域变量，无需重设 key）",
+          level: "info",
+          detail: `User 作用域已设置——派发时由凭据桥从 User 作用域注入，当前进程未继承不影响派发；只有直接读进程环境变量的第三方工具才需要新开终端`,
         });
       } else {
+        // 会审修复批：setx 落 Windows User 作用域，而 WAO 派发经凭据桥直接读取该
+        // 作用域——设置后重跑 doctor 即可确认，不必重启终端。
         pushCheck(checks, {
           name: `key_${name}`,
           pass: false,
-          detail: `未设置（对应 provider 会 401）；run: setx ${name} "<key>"（Windows User 作用域，新开终端生效）`,
-          fix: `setx ${name} "<key>"（Windows User 作用域，新开终端生效）`,
+          detail: `未设置（对应 provider 会 401）；run: setx ${name} "<key>"——setx 写入 Windows User 作用域；WAO 派发经凭据桥直接读取，设置后重跑 doctor 即可确认，不必重启终端`,
+          fix: `setx ${name} "<key>"（setx 写入 Windows User 作用域；WAO 派发经凭据桥直接读取，设置后重跑 doctor 即可确认，不必重启终端）`,
         });
       }
     }
@@ -351,7 +418,7 @@ export async function waoDoctorCommand(args, config) {
   //     文件路径与生成方式，值不回显。探测事实存 Map 供 panel 行复用（不二次读盘）。
   const kimiTokenState = new Map();
   if (registryOk) {
-    for (const [id, agent] of Object.entries(registryAgents)) {
+    for (const [id, agent] of validRegistryEntries) {
       const tokenFile = kimiServerTokenFile(agent);
       if (tokenFile === null) continue;
       const state = await kimiHomeTokenFileState(tokenFile);
@@ -362,6 +429,49 @@ export async function waoDoctorCommand(args, config) {
         pass: false,
         detail: `kimi-web worker ${id} 的 token 文件缺失或为空: ${tokenFile}（kimiHome 车道的派发凭据=该文件，缺失或为空时派发在建会话之前即被拒）；run: 在该主目录拉起一次 kimi web serve 生成 server.token（第一次在该主目录拉起时自动生成——见 docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
         fix: `在该 kimiHome 主目录拉起一次 kimi web serve 生成 ${tokenFile}（docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
+      });
+    }
+  }
+
+  // 5a′. zcode 车道 binary 体检（BACKEND_OWN_READINESS 在册的自有就绪面）：zcode 无
+  //     PATH CLI，派发 spawn 的就是 node <binary> app-server——binary 缺失/非绝对
+  //     路径/文件不在，派发时 node 加载不到 binary，app-server 起不来。与 kimi token
+  //     文件同口径：文件在时不产生条目（零 OK 噪音）。绝对路径形状与 registry 校验
+  //     同判（isAbsolute）；文件探测 existsSync + statSync().isFile()，读不到按缺失
+  //     处理；值是路径非凭据，可回显。会审修复批：不带盘符的根路径
+  //     （\foo\x.cjs / /foo/x.cjs）isAbsolute 为真但落在哪个盘取决于派发时的
+  //     运行目录，doctor 无从确认文件是否在——改出 WARN（pass: true，不计 FAIL 面），
+  //     不查文件（查了就是按 doctor 自己的盘误报）。
+  if (registryOk) {
+    for (const [id, agent] of validRegistryEntries) {
+      if (agent?.backend !== "zcode") continue;
+      const binary = agent?.binary;
+      const binaryRoot = typeof binary === "string" ? parse(binary).root : null;
+      if (binaryRoot === "\\" || binaryRoot === "/") {
+        pushCheck(checks, {
+          name: `zcode_binary_${id}`,
+          pass: true,
+          level: "warn",
+          detail: `zcode worker ${id} 的 binary ${binary} 是不带盘符的根路径——派发时按运行目录所在盘解析，doctor 无法确认文件是否在；run: 改成带盘符的完整路径或 UNC 路径（docs/usage/lanes.md 的 registry 示例）`,
+          fix: `把 ${registryPath} 里该 worker 的 binary 改成带盘符的完整路径或 UNC 路径（docs/usage/lanes.md 的 registry 示例）`,
+        });
+        continue;
+      }
+      let binaryOk = false;
+      if (typeof binary === "string" && isAbsolute(binary)) {
+        try {
+          binaryOk = existsSync(binary) && statSync(binary).isFile();
+        } catch {
+          binaryOk = false; // 读不到（如权限）按缺失处理
+        }
+      }
+      if (binaryOk) continue;
+      const shown = typeof binary === "string" && binary.trim().length > 0 ? binary : "(未设置)";
+      pushCheck(checks, {
+        name: `zcode_binary_${id}`,
+        pass: false,
+        detail: `zcode worker ${id} 的 binary ${shown} 缺失、非绝对路径或不是文件——派发时 node 加载不到 binary，app-server 起不来（node <binary> app-server；桌面更新后安装路径会漂移）；run: 改成桌面捆绑 zcode.cjs 的真实绝对路径（docs/usage/lanes.md 的 registry 示例）`,
+        fix: `把 ${registryPath} 里该 worker 的 binary 改成桌面捆绑 zcode.cjs 的真实绝对路径（docs/usage/lanes.md 的 registry 示例）`,
       });
     }
   }
@@ -381,7 +491,7 @@ export async function waoDoctorCommand(args, config) {
     // 测试不起 powershell），同步 reader 只查 Map。
     const userEnvReaderAsync = config.userEnvReader ?? readWindowsUserEnvValue;
     const userEnvValues = new Map();
-    for (const agent of Object.values(registryAgents)) {
+    for (const [, agent] of validRegistryEntries) {
       const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
       const envBlockNames = Object.keys(agent?.env ?? {});
       for (const n of new Set([...declaredList.map((d) => d.name), ...envBlockNames])) {
@@ -389,7 +499,7 @@ export async function waoDoctorCommand(args, config) {
         try { userEnvValues.set(n, await userEnvReaderAsync(n)); } catch { userEnvValues.set(n, undefined); }
       }
     }
-    for (const [id, agent] of Object.entries(registryAgents)) {
+    for (const [id, agent] of validRegistryEntries) {
       const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
       // 注册表 env 块声明的变量同样承重（无论 backend 是否声明表在册）。
       const envBlockNames = Object.keys(agent?.env ?? {});
@@ -459,7 +569,7 @@ export async function waoDoctorCommand(args, config) {
   //     缺陷（副本内续期会作废 ~/.claude 原件登录），fix 指路迁移。名字在场、值不
   //     回显（envPolicy 纪律）。
   if (registryOk) {
-    const nativeClaudeWorkers = Object.entries(registryAgents)
+    const nativeClaudeWorkers = validRegistryEntries
       .filter(([, agent]) => agent?.backend === "claude-code" && !agent?.provider)
       .map(([id]) => id);
     if (nativeClaudeWorkers.length > 0) {
@@ -515,7 +625,7 @@ export async function waoDoctorCommand(args, config) {
 
   // 6. registry 完整性：opencode worker 必须配 tokenBudget；OAuth + provider worker 组合 WARN。
   if (registryOk) {
-    const agents = Object.entries(registryAgents);
+    const agents = validRegistryEntries;
     for (const { id, backend } of unmappableBackends) {
       pushCheck(checks, {
         name: `backend_map_${id}`,
@@ -615,7 +725,7 @@ export async function waoDoctorCommand(args, config) {
     // 进计数）；仅当探测候选 ≤1 或已知族系不足两族时打印 INFO；INFO 不计
     // DEGRADED/退出码——advisory。
     const panelRows = [];
-    for (const [id, agent] of Object.entries(registryAgents)) {
+    for (const [id, agent] of validRegistryEntries) {
       // 归一化门（口径一致）：无效条目不进行（其修复出口是既有 per-agent 检查）。
       let normalized = null;
       try {

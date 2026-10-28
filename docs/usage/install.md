@@ -39,7 +39,7 @@ claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔�
 
 ### Provider key（claude-code wrapper / opencode serve 需要）
 
-claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。按你用的 provider 配：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`。key 的验证、注入与 401 排错见 `docs/troubleshooting.md` §1.2（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 WARN（新开终端可用）；都没有为 FAIL（附 setx 修复提示）。
+claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。按你用的 provider 配：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`。key 的验证、注入与 401 排错见 `docs/troubleshooting.md` §1.2（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。
 
 ## 安装本工具
 

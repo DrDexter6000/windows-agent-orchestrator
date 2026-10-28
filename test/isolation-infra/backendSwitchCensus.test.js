@@ -75,7 +75,9 @@ function walkJs(dir, out) {
 //   application/backendCliMap.js — CLI 探测映射轴：harness 自管进程的 backend
 //                               显式 null（注释在册）；kimi-web（HTTP attach）
 //                               与 zcode（registry 提供绝对 binary）不走 PATH
-//                               CLI 探测，缺席=缺省 null，合法。
+//                               CLI 探测，在 BACKEND_CLI 缺席=缺省 null，合法；
+//                               二者各一次=BACKEND_OWN_READINESS 冻结表（doctor
+//                               自有就绪检查轴，键带引号以便本普查可见）。
 //   application/modelFamily.js  — 族系回退轴：modelId 不可解析时的展示缺省。
 //                               kimi-web→kimi（同 kimi-code 族）；codex→gpt（决定
 //                               0090：与写了 gpt 型号的 codex 车道同族，不再自成
@@ -90,8 +92,9 @@ function walkJs(dir, out) {
 //                               各自的单点能力/投影轴（缺席=缺省臂，合法）。
 //   commands/registry.js       — TD-161 已消灭本地闭集数组（import KNOWN_BACKENDS）；
 //                               残余字面=按后端差异化展示/校验轴。
-//   commands/doctor.js         — doctor 探测映射轴（kimi-web/zcode 无 CLI/key
-//                               就绪映射=如实 WARN，在册备忘）。
+//   commands/doctor.js         — doctor 探测映射轴；zcode 一次=5a′ binary 文件
+//                               体检（zcode/kimi-web 经 BACKEND_OWN_READINESS
+//                               免 backend_map WARN，kimi-web 走 token/key 检查）。
 //   commands/onboarding.js     — opencode-serve 差异化指引轴。
 //   envPolicy.js               — env 允许清单轴（各后端凭据/环境变量策略）。
 //   hostAdapters/codexMcpConfig.js — codex 宿主适配轴。
@@ -105,7 +108,7 @@ function walkJs(dir, out) {
 //                               code 等亦然，kimi-web/zcode 不入最小面）。
 //   owner-dashboard/*          — （当前零身份串；如未来出现按登记）。
 const REGISTERED_CENSUS = {
-  "application/backendCliMap.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
+  "application/backendCliMap.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1, "deepseek-harness": 1, "deepseek-acp": 1, zcode: 1, "kimi-web": 1 },
   "application/modelFamily.js": { codex: 2, "claude-code": 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, "kimi-web": 1 },
   "application/panelReadiness.js": { "opencode-serve": 1 },
   "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
@@ -141,7 +144,7 @@ const REGISTERED_CENSUS = {
   // 0065（2026-10-12）：KNOWN_CLIS 改从 BACKEND_CLI 值域派生（修手抄漏 dsh 的
   // 两面口径分叉）——原数组字面里的 CLI 名 "codex" 随之离开本文件（doctor 的
   // 后端身份串轴不变）。
-  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, "kimi-code": 1, "opencode-serve": 1 },
+  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, "kimi-code": 1, "opencode-serve": 1, zcode: 1 },
   // TD-258（2026-10-11）：recommendationReadyLabel 加 zcode/kimi-web 显示覆盖
   // （"无 CLI 探测面"/"serve 探测未覆盖"——轴向=无 CLI 面车道的错标修正，非
   // runtime 分叉）。

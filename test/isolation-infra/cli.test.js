@@ -1969,14 +1969,16 @@ test("wao doctor: OAuth 登录态 + provider-wrapped claude-code worker 给 WARN
       claudeAiOauth: { accessToken: "oauth-token" },
     }));
     const registryPath = join(dir, "agents.json");
+    // 会审修复批：provider 块不再带 model（normalizeAgent 拒 provider 携带 model——
+    // 坏条目会掺入与本用例无关的 registry_entry FAIL）。
     writeFileSync(registryPath, JSON.stringify({
       agents: {
         researcher: {
           backend: "claude-code",
           provider: {
+            protocol: "anthropic-compatible",
             baseUrl: "https://api.deepseek.com/anthropic",
             apiKeyEnv: "DEEPSEEK_API_KEY",
-            model: "deepseek-v4-flash",
           },
           cwd: dir,
         },
@@ -2646,10 +2648,13 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ ru
         // 出一条 INFO 静默落点提示（R8-1 后模板值即 "."）
         coder_low: { backend: "claude-code", cwd: "." },
         // HTTP serve backend：cwd 是远端目录提示，与派发层能力豁免对称
-        // （CE-13/RCE-6 钉死的不拒面）→ doctor 不得更严，不产生条目
+        // （CE-13/RCE-6 钉死的不拒面）→ doctor 不得更严，不产生条目。
+        // 会审修复批：补 model.providerID/model.id（normalizeAgent 必填——坏条目
+        // 会掺入与本用例无关的 registry_entry FAIL，翻转 verdict/exit 断言）。
         ghost_serve: {
           backend: "opencode-serve",
           serveUrl: "http://127.0.0.1:4297",
+          model: { providerID: "opencode", id: "gpt-x" },
           cwd: badCwd,
           tokenBudget: 5000000,
         },

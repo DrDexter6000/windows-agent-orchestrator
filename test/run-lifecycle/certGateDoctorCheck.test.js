@@ -196,9 +196,18 @@ test("TD-256 doctor：5b User 作用域臂修复——承重 env 经 userEnvRead
   const probeFile = join(root, "lb-probe-config.json");
   writeFileSync(probeFile, "{}", "utf8");
   try {
+    // 会审修复批：夹具补成可通过 normalizeAgent 的 zcode 条目（binary+model.id——
+    // 坏条目会掺入与本用例无关的 registry_entry/zcode_binary FAIL）；binary 指向
+    // 真实文件使 binary 面零噪音，断言只看承重 env 面。
+    const zcodeBinary = join(root, "zcode.cjs");
+    writeFileSync(zcodeBinary, "/* dummy */", "utf8");
     writeFileSync(
       join(root, "agents.json"),
-      JSON.stringify({ agents: { lb_probe: { backend: "zcode", cwd: root } } }),
+      JSON.stringify({
+        agents: {
+          lb_probe: { backend: "zcode", cwd: root, binary: zcodeBinary, model: { id: "bigmodel-api/GLM-5.3" } },
+        },
+      }),
       "utf8",
     );
     const checks = await doctorChecks(root, {

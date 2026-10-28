@@ -88,7 +88,9 @@ reliability 认证的 `metricsNonZero` 检查按 backend 能力声明条件适�
 ① src/backends/factory.js 构造分支（backendCapabilityMatrix 交叉钉）② src/registry.js
 normalize 必填字段（knownBackendsSsot 交叉钉）③ `test/isolation-infra/backendSwitchCensus.test.js`
 登记表——src/ 任何后端身份串消费点（字面比较/冻结集合/查表）都必须登记轴向意图，full-set
-消费点必须全知闭集（扩员即红）④ src/backends/factory.js `POLICY_PROBE_BASES` 登记最小合法底稿
+消费点必须全知闭集（扩员即红）；没有 PATH CLI 的新 backend 还要决定是否进
+src/application/backendCliMap.js 的 BACKEND_OWN_READINESS，进了就要在 doctor 加它的自有就绪检查
+④ src/backends/factory.js `POLICY_PROBE_BASES` 登记最小合法底稿
 （缺项、不合法或不最小，生成即红），再 npm run gen:certification 再生成 docs/surface/
 certification.md ⑤ 上游原语对照表加行（这一轮的刷新记录写进提交说明） ⑥ 有 tokenEnv/credentialEnv 者：
 credentialReadiness 探针面 + envPolicy 允许清单。
