@@ -223,7 +223,7 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
   const backend = new ClaudeCodeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   assert.deepEqual(captures[0].args, [
-    "-p", "do",
+    "-p",
     "--output-format", "stream-json",
     "--verbose",
     "--include-partial-messages",

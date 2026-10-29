@@ -46,6 +46,8 @@
       "delivery/runsDelivery.test.js",
       "delivery/runsDeliveryReverifyCli.test.js",
       "delivery/runsDeliveryReviewCli.test.js",
+      "isolation-infra/keepAwake.test.js",
+      "isolation-infra/runnerPrompt.test.js",
       "isolation-infra/alerts.test.js",
       "isolation-infra/atomicWriteSync.test.js",
       "isolation-infra/backendCapabilityMatrix.test.js",

@@ -40,7 +40,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 - 持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。
 - 基础设施故障一律 fail-open：闸的争用、等待、降级不改变任何验证结果语义、不新增失败码。
 - `npm run cli -- runs gate` 只读查询当前持有者 / free / corrupt 与 kill switch 状态；`--release` 是文档在案的人工破锁通道，仅限确认没有验证在跑而租约残留时使用。
-- 交付验证停在 pending 时，CLI `runs delivery <runId>`（含 `--wait-ms`）把同一份只读闸快照并入输出（文本多一行 `Verification gate: …`，JSON 多 `verificationGate`）。只报租约事实——谁持有（本 run / 别的持有者，点名）、开始时间、心跳年龄，或无租约——不推断执行状态：租约可能陈旧（看心跳年龄），别人持有不能证明本 run 正在排队，无租约也不能证明验证尚未开始。MCP `run_delivery` 输出不含闸快照。
+- 交付验证停在 pending 时，CLI `runs delivery <runId>`（含 `--wait-ms`）与 MCP `run_delivery` 把同一份只读闸快照并入输出（CLI 文本多一行 `Verification gate: …`，JSON 与 MCP 多 `verificationGate`）。只报租约事实——谁持有（本 run / 别的持有者，点名）、开始时间、心跳年龄，或无租约——不推断执行状态：租约可能陈旧（看心跳年龄），别人持有不能证明本 run 正在排队，无租约也不能证明验证尚未开始。
 - 设 `WAO_VERIFICATION_GATE=off` 完全绕过闸，回到并发行为；停用后只剩 canonical 套件的 advisory inflight 标记告警层。
 
 ### 写入意图与越界检查

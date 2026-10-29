@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
 import { dispatchRun, PROVIDER_SESSION_ROUTING } from "../../src/application/runDispatch.js";
 import { getRunDelivery } from "../../src/application/runDelivery.js";
@@ -43,8 +44,16 @@ function cleanupDir(dir) {
 function makeFakeSpawn() {
   const calls = [];
   const fakeSpawn = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
-    return { unref() {} };
+    const call = { cmd, args, opts, stdinText: null, stdinEnded: false };
+    calls.push(call);
+    return {
+      unref() {},
+      // 提示词经 stdin 交给 runner：记下写入的内容。
+      stdin: {
+        once() {},
+        end(text, cb) { call.stdinText = String(text ?? ""); call.stdinEnded = true; cb?.(); },
+      },
+    };
   };
   return { fakeSpawn, calls };
 }
@@ -87,11 +96,13 @@ test("M9-2A-01: accepted dispatch writes initial durable facts and spawns detach
     assert.ok(stateChange, "pending state_change written");
     assert.equal(stateChange.reason, "background_spawned", "pending reason is background_spawned");
 
-    // Spawn exactly once, detached + stdio ignore.
+    // Spawn exactly once, detached; stdin carries the prompt, stdout/stderr ignored.
     assert.equal(calls.length, 1, "spawn called exactly once");
     const { opts: spawnOpts } = calls[0];
     assert.equal(spawnOpts.detached, true, "detached:true");
-    assert.deepEqual(spawnOpts.stdio, "ignore", "stdio:ignore");
+    assert.deepEqual(spawnOpts.stdio, ["pipe", "ignore", "ignore"], "stdin pipe, stdout/stderr ignore");
+    assert.equal(calls[0].stdinText, "do the task", "prompt written to the runner's stdin");
+    assert.equal(calls[0].stdinEnded, true, "stdin closed after the prompt");
     // unref must be called — fakeSpawn returns an object with unref; verify no throw.
   } finally {
     cleanupDir(dir);
@@ -126,8 +137,12 @@ test("M9-2A-02: spawn argv carries all required background runner params", async
     const argv = calls[0].args;
     // Must include runner path, agentId, prompt, run-dir, run-id, registry, timeouts.
     assert.ok(argv.includes("coder_low"), "argv has agentId");
-    assert.ok(argv.includes("--prompt"), "argv has --prompt flag");
-    assert.ok(argv.includes("task content"), "argv has prompt value");
+    assert.ok(argv.includes("--prompt-stdin"), "argv says the prompt comes over stdin");
+    assert.equal(argv[argv.indexOf("--prompt-stdin") + 1],
+      createHash("sha256").update("task content", "utf8").digest("hex"),
+      "the flag carries the prompt's sha256 so the runner can detect a truncated handoff");
+    assert.ok(!argv.includes("task content"), "prompt is not on the runner's command line");
+    assert.equal(calls[0].stdinText, "task content", "prompt delivered over stdin");
     assert.ok(argv.includes("--run-dir"), "argv has --run-dir");
     assert.ok(argv.includes(runDir), "argv has runDir value");
     assert.ok(argv.includes("--run-id"), "argv has --run-id");
@@ -565,12 +580,12 @@ test("M9-7A-08: argv total length guard rejects oversized input before transcrip
   try {
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const runDir = join(dir, "runs");
-    // Build a prompt that makes total argv > 24000 chars.
-    const hugePrompt = "x".repeat(25000);
+    // Oversized scorecard rules make total argv > 24000 chars (the prompt no
+    // longer counts: it goes over stdin).
     let threw = false;
     try {
       await dispatchRun({
-        agentId: "coder_low", prompt: hugePrompt, registryPath, runDir,
+        agentId: "coder_low", prompt: "x", scorecardRules: "x".repeat(25000), registryPath, runDir,
         spawnFn: fakeSpawn,
       });
     } catch { threw = true; }
@@ -798,7 +813,7 @@ test("D2-②b argv 门: --transcript-dir 追加后复检最终 argv 长度（两
     const runDir = join(dir, "runs");
     // 校准：先发一次短 prompt，从捕获的最终实参测量总长与 transcript-dir 对的
     // 占用；随后把 prompt 加长到"过首门、撞复检门"的窗口内。
-    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn });
+    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn });
     assert.equal(probe.accepted, true);
     const args = calls[calls.length - 1].args;
     const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
@@ -806,12 +821,12 @@ test("D2-②b argv 门: --transcript-dir 追加后复检最终 argv 长度（两
     const tdIdx = args.indexOf("--transcript-dir");
     assert.ok(tdIdx >= 0, "探针实参含 --transcript-dir");
     const tdPair = "--transcript-dir".length + 1 + String(args[tdIdx + 1]).length + 1;
-    const probePrompt = "X".length;
+    const probeRules = "X".length;
     // 窗口：pre 门总额 = total - tdPair + Δ ≤ 24000 且 final = total + Δ > 24000。
     const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2); // 窗口中点附近
-    const bigPrompt = "X".repeat(probePrompt + delta);
+    const bigRules = "X".repeat(probeRules + delta);
     await assert.rejects(
-      dispatchRun({ agentId: "coder_low", prompt: bigPrompt, registryPath, runDir, cwd: dir, spawnFn: fakeSpawn }),
+      dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: bigRules, registryPath, runDir, cwd: dir, spawnFn: fakeSpawn }),
       /argv too long after transcript-dir/,
       `复检门命中（探针总额 ${totalProbe}，tdPair ${tdPair}，Δ ${delta}）`,
     );
@@ -833,7 +848,7 @@ test("D2-②b F1: 复检门拒绝后同 runId 重试可 accepted，claim 零残�
     const runDir = join(dir, "runs");
     const customRunId = "run_custom_retry_f1";
     // 校准探针（同 argv 门测试法）
-    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: "run_probe_cal" });
+    const probe = await dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: "run_probe_cal" });
     assert.equal(probe.accepted, true);
     const args = calls[calls.length - 1].args;
     const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
@@ -843,7 +858,7 @@ test("D2-②b F1: 复检门拒绝后同 runId 重试可 accepted，claim 零残�
     const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2);
     // 第一次：超长 prompt 撞复检门（零副作用拒绝——claim 必须随之释放）
     await assert.rejects(
-      dispatchRun({ agentId: "coder_low", prompt: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId }),
+      dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId: customRunId }),
       /argv too long after transcript-dir/,
     );
     assert.ok(existsSync(join(runDir, ".claims", `${customRunId}.g0.released`)), "拒绝路径 claim 已释放（g0.released——代文件按终法永不删除，八轮 R7-a 语义）");
@@ -868,7 +883,7 @@ test("D2-②b 三轮 sol⑥: 复用分支同样过最终 argv 门", async () => 
     const runDir = join(dir, "runs");
     const runId = "run_reuse_gate";
     // 建档：短 prompt 首发成功（转录落位）
-    const first = await dispatchRun({ agentId: "coder_low", prompt: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId });
+    const first = await dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: "X", registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId });
     assert.equal(first.accepted, true);
     const totalOf = (a) => a.reduce((sum, x) => sum + String(x).length + 1, 0);
     const args = calls[calls.length - 1].args;
@@ -878,7 +893,7 @@ test("D2-②b 三轮 sol⑥: 复用分支同样过最终 argv 门", async () => 
     const delta = (24000 - totalProbe) + tdPair - Math.ceil(tdPair / 2);
     // 复用分支（同 runId 已有档）+ 超长 prompt → 必须拒（修前漏检）
     await assert.rejects(
-      dispatchRun({ agentId: "coder_low", prompt: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId }),
+      dispatchRun({ agentId: "coder_low", prompt: "X", scorecardRules: "X".repeat(1 + delta), registryPath, runDir, cwd: dir, spawnFn: fakeSpawn, runId }),
       /argv too long after transcript-dir/,
       "复用分支也过最终门（sol 探针：24041 曾 accepted）",
     );
@@ -960,4 +975,30 @@ test("delivery 强制隔离不被用户 isolate:false 稀释：argv 只有 --iso
   } finally {
     cleanupDir(dir);
   }
+});
+
+// 会审（kimi）：runner 活着却一直不读 stdin 时，派发不能无限等待——到时限结束 runner，
+// 按启动失败收口（run.error + failed），不留 pending 转录。
+test("prompt handoff 超时：结束 runner，转录落 run.error(prompt_handoff) + failed，派发报错", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-handoff-timeout-"));
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    let kills = 0;
+    const stuckSpawn = () => ({
+      unref() {},
+      kill() { kills += 1; },
+      stdin: { once() {}, end() { /* 回调一直不来 */ } },
+    });
+    await assert.rejects(
+      dispatchRun({ agentId: "coder_low", prompt: "x", registryPath, runDir, spawnFn: stuckSpawn, promptHandoffTimeoutMs: 30 }),
+      /prompt handoff timed out/,
+    );
+    assert.equal(kills, 1, "runner 被结束");
+    const { listTranscriptsDeep } = await import("../../src/projectBuckets.js");
+    const [only] = listTranscriptsDeep(runDir);
+    const events = await readTranscript(only.path);
+    assert.equal(events.find((e) => e.type === "run.error")?.phase, "prompt_handoff");
+    assert.equal(findState(events), "failed");
+  } finally { cleanupDir(dir); }
 });

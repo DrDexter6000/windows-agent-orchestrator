@@ -8,6 +8,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { runBackground, parseSimpleFlags } from "../../src/backgroundRunner.js";
 import { readTranscript, findState } from "../../src/transcript.js";
+import { rmrfRetry } from "../_rmrfHelper.mjs";
 
 // --- P2 后台生命周期接管（watchdog / detached runner）---
 // 06-18 事故架构洞：fire-and-forget spawn 的孤儿会话脱离任何 WAO 进程，所有防线
@@ -165,8 +166,16 @@ test("P2 CLI --background: 立即返回 + detached runner 推进状态机到终�
     assert.ok(state, "detached runner 应写 transcript");
     assert.ok(["failed", "completed", "timed_out"].includes(state),
       `runner 应推进到终态（非卡 submitted），实际 ${state}`);
+
+    // 终态出现后 runner 还在追加转录，写完才删 .owner-<runId>。等它删掉再清目录，
+    // 否则 rm 会与最后几次追加竞态（ENOTEMPTY，10-29 全量里出现过）。
+    const ownerPath = path.join(runDir, `.owner-${parsed.runId}`);
+    for (let i = 0; i < 100 && existsSync(ownerPath); i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(existsSync(ownerPath), false, "runner 写完转录后应删 owner 文件");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    rmrfRetry(dir);
   }
 });
 

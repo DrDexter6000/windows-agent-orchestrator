@@ -1209,6 +1209,60 @@ test("runs delivery: verification pending → 输出带验证闸租约事实（�
   } finally { cleanupDir(runDir); }
 });
 
+// TD-267：MCP run_delivery 与 CLI 同一份推导——两条路径都带 verificationGate；
+// 非 pending 不查闸；查闸失败或形状不合只省略这一段，查询照常返回。
+test("run_delivery (MCP): verification pending → 带验证闸租约事实（定点与等待两条路径），非 pending 不带", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m1110-mcp-gate-"));
+  try {
+    makeGitRepo(dir);
+    const view = (status) => ({
+      runId: "run_gate", terminalState: "completed", deliveryAvailable: true,
+      deliveryRef: makeRef("run_gate"), verification: { status }, acceptance: { status: "pending" }, deliveryFailure: null,
+    });
+    const heldByOther = { free: false, holder: { owner: "canonical-test", runId: "run_someone_else", startedAt: 1791802020000, ageMs: 12000, pid: 4242 } };
+    const call = async ({ status, lease, waitMs }) => {
+      let statusCalls = 0;
+      const server = createWaoMcpServer({
+        registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
+        getRunDeliveryFn: async () => view(status),
+        getRunDeliveryReadinessFn: async () => ({ ...view(status), readiness: "waiting_for_verification", waitReturnedEarly: false }),
+        createVerificationGateFn: () => ({
+          status: async () => {
+            statusCalls += 1;
+            if (lease instanceof Error) throw lease;
+            return lease;
+          },
+        }),
+      });
+      const client = await buildClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_gate", ...(waitMs ? { waitMs } : {}) } });
+        assert.equal(res.isError, undefined);
+        return { parsed: res.structuredContent, statusCalls };
+      } finally { await client.close(); await server.close(); }
+    };
+
+    for (const waitMs of [undefined, 1000]) {
+      const { parsed } = await call({ status: "pending", lease: heldByOther, waitMs });
+      assert.deepEqual(parsed.verificationGate, {
+        lease: "held_by_other",
+        holder: { owner: "canonical-test", runId: "run_someone_else", startedAt: 1791802020000, heartbeatAgeMs: 12000 },
+      }, `waitMs=${waitMs}：持有者只带身份字段、开始时间与心跳年龄`);
+    }
+    assert.equal((await call({ status: "pending", lease: { free: true } })).parsed.verificationGate.lease, "free");
+
+    const settled = await call({ status: "passed", lease: heldByOther });
+    assert.equal("verificationGate" in settled.parsed, false);
+    assert.equal(settled.statusCalls, 0, "非 pending 不触达闸");
+
+    const broken = await call({ status: "pending", lease: new Error("lease unreadable") });
+    assert.equal("verificationGate" in broken.parsed, false, "查闸失败只省略这一段");
+    const odd = await call({ status: "pending", lease: { free: false, holder: { owner: "x".repeat(500) } } });
+    assert.equal("verificationGate" in odd.parsed, false, "形状超界只省略这一段");
+    assert.equal(odd.parsed.verificationStatus, "pending");
+  } finally { cleanupDir(dir); }
+});
+
 test("M11-10-CLI-03: invalid --wait-ms is rejected before the service is called", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m1110-cli-03-"));
   try {

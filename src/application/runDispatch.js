@@ -31,6 +31,7 @@ import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, clai
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
+import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride, resolvePredictedDispatchCwd } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
@@ -311,6 +312,7 @@ function generateRunId() {
  * @param {string} [input.scorecardMode]
  * @param {boolean} [input.requireCertified=false] — propagated to runner + RunManager
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
+ * @param {number} [input.promptHandoffTimeoutMs] — injectable prompt-handoff bound (tests)
  * @param {string} [input.runnerPath] — override detached runner path
  * @param {string} [input.execPath] — override node executable (defaults to process.execPath)
  * @returns {Promise<{accepted:boolean, runId:string, state:string, transcriptPath?:string, terminalState?:string}>}
@@ -329,6 +331,7 @@ export async function dispatchRun({
   scorecardMode,
   requireCertified = false,
   spawnFn,
+  promptHandoffTimeoutMs,
   runnerPath,
   execPath,
   delivery,
@@ -764,7 +767,8 @@ export async function dispatchRun({
   const runnerArgs = [
     _runnerPath,
     agentId,
-    "--prompt", prompt,
+    // 提示词经标准输入交给 runner（见下方 spawn），不进命令行；argv 只带它的摘要。
+    ...promptStdinArgs(prompt),
     "--run-dir", resolvedRunDir,
     "--run-id", finalRunId,
     "--registry", resolvedRegistry,
@@ -874,7 +878,7 @@ export async function dispatchRun({
   const ARGV_MAX_TOTAL = 24000;
   const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
   if (totalArgvLen > ARGV_MAX_TOTAL) {
-    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
+    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce delivery/scorecard size`);
   }
 
   // All preflight passed — now decide the transcript bucket ONCE (TD-190 D2-②b
@@ -932,7 +936,7 @@ export async function dispatchRun({
     const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
     if (finalArgvLen > ARGV_MAX_TOTAL) {
       if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
-      throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
+      throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce delivery/scorecard size`);
     }
   }
 
@@ -1022,13 +1026,23 @@ export async function dispatchRun({
     });
   }
 
-  // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes
-  // transcript); unref so the parent does not wait for it.
+  // detached: runner survives CLI/MCP process exit; stdin carries the prompt
+  // (written and closed here), stdout/stderr ignored (runner writes transcript);
+  // unref so the parent does not wait for it.
   // M11-7: thread resolved credential VALUES into the runner's env (NOT argv —
   // values must never appear in argv). The runner's ProcessBackend then inherits
   // them via process.env (buildChildEnv) and redacts them (createSecretRedactor).
   const runnerEnv = { ...process.env, ...finalCredentials };
-  _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
+  const runner = _spawn(_execPath, runnerArgs, { detached: true, stdio: ["pipe", "ignore", "ignore"], env: runnerEnv });
+  const handoff = await writeRunnerPrompt(runner, prompt, promptHandoffTimeoutMs ? { timeoutMs: promptHandoffTimeoutMs } : {});
+  if (handoff === "timeout") {
+    // runner 活着却一直不读提示词：结束它（它还没起 worker），按启动失败收口，不留 pending 转录。
+    try { runner.kill(); } catch { /* 已退出 */ }
+    await transcript.append("run.error", { phase: "prompt_handoff", error: PROMPT_HANDOFF_TIMEOUT_TEXT });
+    await transcript.transitionState("pending", "failed", STATE_CHANGE_REASON.startup_error);
+    throw new Error(PROMPT_HANDOFF_TIMEOUT_TEXT);
+  }
+  runner.unref();
 
   return {
     accepted: true,

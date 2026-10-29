@@ -132,7 +132,7 @@ test("M12-14: provider wrapper 子进程 env 强制 CLAUDE_CODE_DISABLE_AUTO_MEM
   assert.ok(cap.args.some((a) => a.includes("claude-code-provider-wrapper")), "argv 以 wrapper 开头");
   const sep = cap.args.indexOf("--");
   assert.ok(sep > 0, "wrapper 参数以 -- 分隔");
-  assert.deepEqual(cap.args.slice(sep + 1, sep + 5), ["-p", "do", "--output-format", "stream-json"], "-- 之后是 claude CLI argv");
+  assert.deepEqual(cap.args.slice(sep + 1, sep + 4), ["-p", "--output-format", "stream-json"], "-- 之后是 claude CLI argv（提示词走标准输入）");
   assert.ok(cap.args.includes("--model") && cap.args.includes("glm-5.2"), "CLI --model 仍从 canonical 字段推导");
 });
 

@@ -899,7 +899,10 @@ function makeCapturingChild() {
     if (typeof cb === "function") setImmediate(() => cb(null));
     return true; // no backpressure
   };
-  stdin.end = () => { stdin.writableEnded = true; };
+  stdin.end = (chunk) => {
+    if (chunk !== undefined) stdinChunks.push(String(chunk));
+    stdin.writableEnded = true;
+  };
   const child = new EventEmitter();
   child.stdin = stdin;
   child.stdout = new EventEmitter();
@@ -1011,7 +1014,7 @@ test("M12-16: sendCorrection synchronous write throw → {ok:false, reason:'send
   assert.equal(cap.child.stdin.listenerCount("error"), beforeErr, "sync-throw path detaches the error listener too");
 });
 
-test("M12-16: 非 correctable 路径字节级兼容 — -p <prompt> positional，stdio[0]='ignore'，无 sendCorrection", async () => {
+test("非 correctable 路径 — -p 不带位置参数，提示词以纯文本写进 stdin 后关闭，无 sendCorrection", async () => {
   const cap = makeCapturingChild();
   const argv = [];
   const stdioSeen = [];
@@ -1021,15 +1024,27 @@ test("M12-16: 非 correctable 路径字节级兼容 — -p <prompt> positional�
     return cap.child;
   };
   const backend = new ClaudeCodeBackend({ spawnFn });
-  const handle = await backend.spawn(makeAgent(), { prompt: "ordinary run" });
+  const handle = await backend.spawn(makeAgent(), { prompt: "ordinary run 长任务书" });
   const args = argv[0];
-  assert.equal(stdioSeen[0][0], "ignore", "非 correctable stdin='ignore'（字节兼容）");
+  assert.equal(stdioSeen[0][0], "pipe", "提示词走 stdin");
   assert.ok(args.includes("-p"), "非 correctable 仍带 -p");
-  assert.ok(args.includes("ordinary run"), "非 correctable 把 prompt 作为 positional argv");
+  assert.equal(args.some((a) => a.includes("ordinary run")), false, "提示词不进命令行");
   assert.equal(args.includes("--input-format"), false, "非 correctable 不带 --input-format");
   assert.equal(handle.sendCorrection, undefined, "非 correctable handle 不挂 sendCorrection");
   assert.equal(handle.supportsSendCorrection, undefined);
-  assert.equal(cap.stdinText(), "", "非 correctable 不向 stdin 写任何字节");
+  assert.equal(cap.stdinText(), "ordinary run 长任务书", "原样纯文本，不是 stream-json");
+  assert.equal(cap.child.stdin.writableEnded, true, "写完即关闭 stdin");
+});
+
+test("codex 的提示词同样走 stdin，提示位写 -", async () => {
+  const cap = makeCapturingChild();
+  const argv = [];
+  const backend = new CodexBackend({ spawnFn: (binary, args) => { argv.push([...args]); return cap.child; } });
+  await backend.spawn(makeAgent(), { prompt: "评审这个提交" });
+  assert.equal(argv[0][argv[0].length - 1], "-");
+  assert.equal(argv[0].includes("评审这个提交"), false);
+  assert.equal(cap.stdinText(), "评审这个提交");
+  assert.equal(cap.child.stdin.writableEnded, true);
 });
 
 test("M12-16: base ProcessBackend（supportsInFlightCorrection=false）即使 task.correctable=true 也不启用 correctable（能力门 defense-in-depth）", async () => {

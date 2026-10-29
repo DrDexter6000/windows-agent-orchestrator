@@ -142,6 +142,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // executed the turn.
   supportsInFlightCorrection = true;
 
+  // 非纠偏运行的提示词也走标准输入（`-p` 不带位置参数），不占 Windows 命令行预算；
+  // 角色合同仍在命令行上（--append-system-prompt）。
+  promptViaStdin = true;
+
   // ADR-0025 批次 2（TD-87）：claude stream-json 的 result 帧携带 usage
   // （ClaudeStreamParser 产出 metrics token 事实）——tokenBudget 闸门对该
   // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
@@ -198,13 +202,13 @@ export class ClaudeCodeBackend extends ProcessBackend {
         const args = [];
         // M12-16: a correctable run feeds its prompt (and later corrections) to
         // the SAME process over stdin as stream-json user messages, so it uses
-        // `-p` (print mode, boolean) + `--input-format stream-json` and NO
-        // positional prompt. A normal run keeps the byte-compatible `-p <prompt>`
-        // positional form.
+        // `-p` (print mode, boolean) + `--input-format stream-json`. A normal run
+        // writes its prompt to stdin as plain text (promptViaStdin). Neither puts
+        // the prompt on the command line.
         if (task.correctable) {
           args.push("-p", "--input-format", "stream-json");
         } else {
-          args.push("-p", task.prompt);
+          args.push("-p");
         }
         args.push(
           "--output-format", "stream-json",

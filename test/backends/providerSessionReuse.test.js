@@ -19,7 +19,7 @@ test("codex: resume 轮编译 exec resume <thread_id>，id 缺失派发前拒绝
   const resumed = backend.buildArgs({}, { prompt: "ping", sessionReuse: RESUME_ROUTING, priorProviderSessionId: CODEX_THREAD });
   assert.deepEqual(resumed.slice(0, 3), ["exec", "resume", CODEX_THREAD], "resume 轮以 exec resume <thread_id> 续接前任会话");
   assert.ok(resumed.includes("--json"), "续接仍走 --json 事件流");
-  assert.equal(resumed[resumed.length - 1], "ping", "prompt 仍在末尾");
+  assert.equal(resumed[resumed.length - 1], "-", "提示位仍在末尾（提示词走标准输入）");
   assert.throws(
     () => backend.buildArgs({}, { prompt: "ping", sessionReuse: RESUME_ROUTING }),
     /prior provider thread id/,

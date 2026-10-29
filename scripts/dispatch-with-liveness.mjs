@@ -48,6 +48,7 @@ import { join, resolve, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { readTranscript, findState, findLastEventSeq, TERMINAL_STATES } from "../src/transcript.js";
+import { resolveTranscriptPath } from "../src/projectBuckets.js";
 import { boundReportScope } from "../src/metrics.js";
 import { diagnoseFailure, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { assessRunEvidence } from "../src/runEvidenceAssessment.js";
@@ -426,7 +427,7 @@ export async function observeWithSettle(runId, runDir, windowMs, settleMs, sleep
   if (settleMs > 0) {
     await sleepFn(settleMs);
     try {
-      const settled = await readTranscript(join(runDir, `${runId}.jsonl`));
+      const settled = await readTranscript(resolveTranscriptPath(runDir, runId));
       return { events: settled, rereadOk: true };
     } catch {
       // 复核三轮：重读失败 = 证停事实未知 = 启发式臂不可用（fail-closed）。
@@ -438,12 +439,13 @@ export async function observeWithSettle(runId, runDir, windowMs, settleMs, sleep
 }
 
 async function observeUntilTerminal(runId, runDir, windowMs) {
-  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  // 运行转录在项目桶里；还没落盘时解析回落到平铺路径，所以每次读都重新解析。
+  const transcriptPath = () => resolveTranscriptPath(runDir, runId);
   let events = [];
   // 后台派发 JSON 打印时 transcript 已创建；仍留短重试防御启动竞态。
   for (let attempt = 0; attempt < 10; attempt += 1) {
     try {
-      events = await readTranscript(transcriptPath);
+      events = await readTranscript(transcriptPath());
       break;
     } catch (error) {
       if (attempt === 9) throw error;
@@ -459,7 +461,7 @@ async function observeUntilTerminal(runId, runDir, windowMs) {
     while (!isTerminalState(state)) {
       await sleep(POLL_INTERVAL_MS);
       try {
-        events = await readTranscript(transcriptPath);
+        events = await readTranscript(transcriptPath());
         readFailedNotified = false;
       } catch {
         if (!readFailedNotified) {

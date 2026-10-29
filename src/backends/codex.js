@@ -55,6 +55,10 @@ export class CodexBackend extends ProcessBackend {
   // reliability 的 sandboxEnforcement 检查消费本声明（probeWriteSandbox）。
   enforcesWriteSandbox = true;
 
+  // 提示词走标准输入（`codex exec` 与 `exec resume` 的提示位写 `-`），不占 Windows
+  // 命令行预算；角色合同仍在命令行上（-c developer_instructions）。
+  promptViaStdin = true;
+
   /**
    * M11-9 capability: Codex can express model (--model) and reasoning
    * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag)
@@ -135,7 +139,8 @@ export class CodexBackend extends ProcessBackend {
             .replace(/\t/g, "\\t");
           args.push("-c", `developer_instructions="${safe}"`);
         }
-        args.push(task.prompt);
+        // 提示词经标准输入送达（promptViaStdin），这里只占位。
+        args.push("-");
         return args;
       },
       // M11-7: delegate to the runtime-neutral env-policy SSOT.

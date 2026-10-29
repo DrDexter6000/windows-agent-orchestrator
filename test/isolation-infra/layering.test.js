@@ -76,6 +76,8 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/projectIdentity.js",
   "src/waoCliPath.js",
   "src/version.js",
+  "src/keepAwake.js",
+  "src/runnerPrompt.js",
 ]));
 
 // core(2) 的 application 内精确成员例外（TD-122 归零裁定）：sessionReuse 消费

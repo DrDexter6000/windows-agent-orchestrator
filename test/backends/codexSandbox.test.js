@@ -57,7 +57,8 @@ test("首轮 exec：三项沙箱 -c 固定插在基础参数之后、prompt 之�
     SANDBOX_BLOCK,
     "三项沙箱参数紧跟基础参数，顺序固定",
   );
-  assert.equal(args[args.length - 1], "do the task", "prompt 仍是末尾位置参数");
+  assert.equal(args[args.length - 1], "-", "末尾提示位是 -：提示词走标准输入");
+  assert.ok(!args.includes("do the task"), "提示词不进命令行");
 });
 
 test("resume 轮 exec resume：同一三项沙箱 -c，同样固定位置", () => {
@@ -76,7 +77,8 @@ test("resume 轮 exec resume：同一三项沙箱 -c，同样固定位置", () =
     SANDBOX_BLOCK,
     "resume 轮同样带三项沙箱参数（exec resume 不接受 -s，一律 -c）",
   );
-  assert.equal(args[args.length - 1], "continue");
+  assert.equal(args[args.length - 1], "-");
+  assert.ok(!args.includes("continue"));
 });
 
 test("带 model/effort/roleContract 时：沙箱块仍在 --model 与其余 -c 之前", () => {
@@ -96,7 +98,7 @@ test("带 model/effort/roleContract 时：沙箱块仍在 --model 与其余 -c �
     args.findIndex((a) => typeof a === "string" && a.includes("developer_instructions")) > sandboxStart,
     "roleContract 的 -c 在沙箱块之后",
   );
-  assert.equal(args[args.length - 1], "task", "prompt 仍在末尾");
+  assert.equal(args[args.length - 1], "-", "提示位仍在末尾");
 });
 
 test("readOnly 任务不分支：参数与普通任务逐字节相同（同样 workspace-write）", () => {

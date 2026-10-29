@@ -178,6 +178,7 @@ import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGate
 import { PROJECTS_DIRNAME } from "../src/projectBuckets.js";
 import { HOST_DESCRIPTORS } from "../src/hostAdapters/hostDescriptors.js";
 import { INSTALL_ROOT_ENV } from "../src/installRoot.js";
+import { KEEP_AWAKE_ENV, holdAwake } from "../src/keepAwake.js";
 
 // R23-F/B Round B (TD-130): the machine-level verification lease gate. main()
 // wraps ONE canonical invocation (the same granularity as a verifyDelivery
@@ -1996,6 +1997,9 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
     // 钉 "0"（默认关）；门禁自身行为由 mcpCertGate.test.js 自设环境变量覆盖，
     // 不受此钉影响。
     WAO_MCP_REQUIRE_CERTIFIED: "0",
+    // 决定 0093：测试里构造的后台进程与验证命令不各自起保持唤醒的子进程——
+    // 全量入口自己已经保持着；定向入口跑得短，不需要。
+    [KEEP_AWAKE_ENV]: "0",
     ...(gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {}),
   };
   // 决定 0066（会审 consult_202610121557386770ygr68 sol 席）：套件由哪个 agent
@@ -2137,6 +2141,9 @@ export function workerBannerLine(env = process.env) {
 }
 
 async function main() {
+  // 决定 0093：全量跑着就保持唤醒，随本进程退出失效。要在 isolateSuiteTemp 之前：
+  // 子进程用真实的临时目录编译，不进套件退出时删掉的那个。
+  holdAwake();
   const here = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(here, "..");
   const testDir = join(repoRoot, "test");

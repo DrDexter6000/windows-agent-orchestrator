@@ -46,7 +46,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared/core 成员例外清单内者。
 - **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（含转录分桶路径权威 `src/projectBuckets.js`——新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺只读兼容，定位一律经其三级解析链；与 transcript.js 同层=路径权威对）（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
-- **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/projectIdentity.js`（项目身份规范化纯函数：cwd 规范化/稳定键/桶 slug 派生）、`src/waoCliPath.js`、`src/version.js`（CLI/MCP 版本常量，读 package.json 单一来源）+ `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
+- **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/projectIdentity.js`（项目身份规范化纯函数：cwd 规范化/稳定键/桶 slug 派生）、`src/waoCliPath.js`、`src/version.js`（CLI/MCP 版本常量，读 package.json 单一来源）、`src/keepAwake.js`、`src/runnerPrompt.js` + `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
 - `src/owner-dashboard/**` 是浏览器静态资产，不参与 Node import 图。
 
 **方向规则（闭集，机器强制）**：**禁上向；任意下向（含跳层）与同层合法**。adapter 越过 application 直取 core/backends/shared 是声明合法的现状（呈现/入口层直连，application 不是收口点）。上向例外白名单为空（**恰 0 条**）：`application/sessionReuse.js` 经 CORE_MEMBERS 精确例外归 core 桶——它消费 `transcript.js`（core），是服务而非叶子，不能下沉 shared；registry/runManager 同层消费，runContinue/runDispatch/backgroundRunner 下向消费。守卫机制：冻结精确集合、双向 deepEqual、上限 12、变更须同步本图。未登记的新顶层文件或新子目录一律 fail-closed（不自动归 core）。
@@ -571,13 +571,13 @@ for await (const ev of handle.events):
 
 ### 4.4 调度 / 限并发（未实现）
 
-未实现独立调度器（无 `src/scheduler.js`）。并行靠 RunManager 直接并行 `spawn` 多个 run：没有信号量、限并发、优先级队列，并行度由调用方决定。
+没有调度器、信号量与优先级队列：并行度由调用方决定。
 
 ### 4.5 daemon 与可重入单进程
 
 WAO 提供两种进程形态，共用同一套 RunManager/transcript 生命周期：
 
-**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（`spawn({detached:true, stdio:'ignore'}) + unref()`）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它，不需要 OS service。
+**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（`detached` + `unref()`，提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。运行、交付验证命令与 canonical 全量期间保持唤醒（`src/keepAwake.js`，决定 0093；`WAO_KEEP_AWAKE=0` 关闭）。
 
 **持久 daemon**：`src/daemon.js` 是长期存活的 detached 进程，持有多个 in-flight run（复用 runBackground 核心驱动），经命名管道暴露窄协议 IPC（默认 `\\.\pipe\wao-daemon`，JSON-line over `node:net`：一行请求、一行响应；只在本机，不可远程触达；选型见决定 0012）。心跳写 runDir 的 handshake（`daemon.json`），CLI 重连判活；优雅退出清 handshake + 关 pipe。daemon start 内部走 `RunManager.start`，不按 backend 名分支。
 

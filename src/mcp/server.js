@@ -118,6 +118,7 @@ import {
   // readiness projection.
   SAFE_ISOLATION_VIOLATION_CODES,
 } from "../application/runDelivery.js";
+import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import {
   runDeliveryReverify,
   REVERIFY_REASONS,
@@ -2202,6 +2203,20 @@ function safeProjectIsolationFailure(value) {
 // Standalone run_delivery output: the legacy base plus the REQUIRED M12-8B
 // progressive-disclosure metadata. Only this standalone shape carries the
 // field — the review bundle embeds RUN_DELIVERY_OUTPUT_BASE instead.
+// TD-267: a pending verification's machine-gate lease snapshot — the same shape
+// as the CLI `runs delivery` verificationGate field. Lease facts only (who holds
+// it, since when, heartbeat age), never an execution state.
+const VERIFICATION_GATE_VIEW_SCHEMA = z.object({
+  lease: z.enum(["held_by_this_run", "held_by_other", "free", "corrupt"]),
+  holder: z.object({
+    owner: z.string().max(200).optional(),
+    runId: z.string().max(200).optional(),
+    agentId: z.string().max(200).optional(),
+    startedAt: z.union([z.number(), z.string().max(64)]).optional(),
+    heartbeatAgeMs: z.number().optional(),
+  }).optional(),
+});
+
 const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS).
@@ -2213,6 +2228,8 @@ const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   // a SEPARATE settlement from deliveryFailure (a packaging failure). No
   // candidateInventory/repackage/salvage/retry/stop/decision surface.
   isolationFailure: ISOLATION_FAILURE_SCHEMA.nullable(),
+  // TD-267: present only while verification is pending and undecided.
+  verificationGate: VERIFICATION_GATE_VIEW_SCHEMA.optional(),
 });
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -3658,6 +3675,7 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
  * @param {Function} [input.getRunDeliveryReadinessFn] — injectable readiness-wait service for testing (M11-10)
+ * @param {Function} [input.createVerificationGateFn] — injectable verification-gate factory for testing (TD-267)
  * @param {Function} [input.computeCandidateInventoryFn] — injectable candidate-inventory reader for testing (M12-1S1)
  * @param {Function} [input.decideRunDeliveryFn] — injectable delivery decision service for testing
  * @param {Function} [input.listLeadPlaybooksFn] — injectable playbook list service for testing
@@ -3818,6 +3836,9 @@ export function createWaoMcpServer({
   getRunDiagnosisFn,
   getRunDeliveryFn,
   getRunDeliveryReadinessFn,
+  // TD-267: injectable verification-gate factory for run_delivery's pending
+  // lease snapshot (defaults to the real machine gate; status() only).
+  createVerificationGateFn,
   // M12-1S1: injectable candidate-inventory reader (defaults to the real
   // read-only kernel reader; threaded to the delivery services only when a
   // workspace binding authorizes the read).
@@ -4043,6 +4064,14 @@ export function createWaoMcpServer({
         params: { progressToken, progress, total: 100 },
       });
     };
+  }
+
+  // TD-267：验证 pending 时并入验证闸租约快照（与 CLI runs delivery 同一份推导）；
+  // 查不到或形状不合就省略，不让附加信息拖垮查询。
+  async function attachVerificationGate(payload, view, runId) {
+    const gate = await describePendingVerificationGate(view, runId, { createGate: createVerificationGateFn });
+    const parsed = gate ? VERIFICATION_GATE_VIEW_SCHEMA.safeParse(gate) : null;
+    if (parsed?.success) payload.verificationGate = parsed.data;
   }
 
   const mcp = new McpServer(
@@ -5900,6 +5929,7 @@ export function createWaoMcpServer({
           // M12-12: self-describing notes (same shared projection as the
           // point-in-time path via selectDeliverySemanticNotes).
           payload.semanticNotes = selectDeliverySemanticNotes(payload);
+          await attachVerificationGate(payload, result, runId);
           const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -5928,6 +5958,7 @@ export function createWaoMcpServer({
         payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
         // M12-12: self-describing notes (point-in-time path).
         payload.semanticNotes = selectDeliverySemanticNotes(payload);
+        await attachVerificationGate(payload, delivery, runId);
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],

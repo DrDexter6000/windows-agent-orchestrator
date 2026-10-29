@@ -50,8 +50,13 @@ function makeRegistry(dir, agents) {
 function makeFakeSpawn() {
   const calls = [];
   const fakeSpawn = (cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
-    return { unref() {} };
+    const call = { cmd, args, opts, stdinText: null };
+    calls.push(call);
+    return {
+      unref() {},
+      // 提示词经 stdin 交给 runner：记下写入的内容。
+      stdin: { once() {}, end(text, cb) { call.stdinText = String(text ?? ""); cb?.(); } },
+    };
   };
   return { fakeSpawn, calls };
 }
@@ -320,10 +325,13 @@ test("M12-7-RC-09: committed parent → child resumes in retained worktree; pare
     assert.ok(result.runId && result.runId !== "run_parent_happy", "child runId generated");
     assert.equal(result.state, "pending");
 
-    // Spawned exactly once, detached + ignored stdio.
+    // Spawned exactly once, detached; the prompt goes over stdin, not argv.
     assert.equal(calls.length, 1, "spawned once");
     assert.equal(calls[0].opts.detached, true);
-    assert.deepEqual(calls[0].opts.stdio, "ignore");
+    assert.deepEqual(calls[0].opts.stdio, ["pipe", "ignore", "ignore"]);
+    assert.ok(calls[0].args.includes("--prompt-stdin"));
+    assert.ok(!calls[0].args.includes("correct the bug"), "prompt not on the runner's command line");
+    assert.equal(calls[0].stdinText, "correct the bug");
 
     // argv: reuses the worktree, resumes the lineage session, ships the child delivery.
     const reuse = JSON.parse(argVal(calls, "--reuse-worktree-json"));
@@ -542,9 +550,10 @@ test("M12-7-RC-15: argv rejection is pre-mutation and leaves the lineage immedia
       worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
       deliveryCommit: parent.deliveryCommit,
     });
+    // An oversized delivery spec (still on argv) trips the guard; the prompt no longer counts.
     await assert.rejects(() => continueRun({
-      parentRunId: "run_parent_argv", prompt: "x".repeat(25000),
-      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      parentRunId: "run_parent_argv", prompt: "x",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: [`node --test ${"x".repeat(25000)}`] },
       runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
       authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
       backendFor: () => ({ supportsSessionReuse: true }),
@@ -1147,5 +1156,43 @@ test("TD188-R1-RC-7: 槽内实际前任 B 有效（绑定事实）→ 续接接�
     const routing = JSON.parse(argVal(calls, "--session-reuse-json"));
     assert.equal(routing.priorRunId, OWNER, "routing 携带锁内已验证的同一实际前任 B（而非请求父 A）");
     assert.equal(routing.turn, "resume");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+// 会审（kimi）：续接派发的提示词交接超时同样有界——结束 runner，走派发前回滚，线系立即可重试。
+test("M12-7 prompt handoff 超时：结束 runner 并回滚，线系可立即重试", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_handoff");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-handoff-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_handoff", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    let kills = 0;
+    await assert.rejects(() => continueRun({
+      parentRunId: "run_parent_handoff", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => ({ unref() {}, kill() { kills += 1; }, stdin: { once() {}, end() {} } }),
+      promptHandoffTimeoutMs: 30,
+    }), /prompt handoff timed out/);
+    assert.equal(kills, 1, "runner 被结束");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "回滚：父树回到原分支");
+    assert.equal(git("rev-parse HEAD", parent.wt), parent.deliveryCommit);
+
+    const { fakeSpawn, calls } = makeFakeSpawn();
+    const retry = await continueRun({
+      parentRunId: "run_parent_handoff", prompt: "retry correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: join(dir, "agents.json"),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }), spawnFn: fakeSpawn,
+    });
+    assert.equal(retry.accepted, true, "线系没被占住");
+    assert.equal(calls.length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

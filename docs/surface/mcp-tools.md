@@ -413,6 +413,7 @@ Output:
 | availableDrilldowns | array<object> | yes |  |
 | semanticNotes | array<object> | yes |  |
 | isolationFailure | object\|null | yes |  |
+| verificationGate | object | no |  |
 
 ## run_delivery_decide
 

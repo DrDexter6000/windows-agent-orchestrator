@@ -434,7 +434,9 @@ const RED_23_WIRE = 75492;
 // 94532 内）。同批会审修复：run_consult 读取/分页也可带 expectedWorkspaceRoot、
 // run_dispatch_contract_check 按调用目标检查并在出参增 workspaceScope、
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
-const FROZEN_23_WIRE_CEILING = 90795;
+// TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
+// 90795→91293（实测；硬顶 94532 内）。
+const FROZEN_23_WIRE_CEILING = 91293;
 // 2026-10-16（Owner 批准小幅重冻）：run_delivery_reverify 入参/出参增可选
 // attempt（1|2，缺省 1——第二次显式重验机会），描述加一句第二次机会说明：
 // 88048→88227（实测；本批批准 wire+desc 合计涨幅 ≤300B，实测合计 +252B）。
@@ -633,9 +635,11 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // 0090（2026-10-18）：lanes 每行增 family（string ≤32）——SHA 如实翻新。
 // 0088 修订条（2026-10-28，Owner 批准放宽）：lanes 每行的 caveats 上限 4→6
 // （CAVEATS_CAP）——outputSchema 的 maxItems 改一位数，wire 字节不变，SHA 如实翻新。
+// TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "3b3e4fe6fa873d9bcf800218f95af41c132179f0514b58bdce1e1bce1bc6e556";
-  // （历史值：b103cb7263a9a02c4036a1149788975487630e500945331e5122febac0b7712d
+  "4f6c89f8ac79c92e61547739278056e02504635f9584aa6cfce922a69b8c0ed7";
+  // （历史值：3b3e4fe6fa873d9bcf800218f95af41c132179f0514b58bdce1e1bce1bc6e556
+  // 为 0088 修订条放宽 caveats 上限后的冻结值；b103cb7263a9a02c4036a1149788975487630e500945331e5122febac0b7712d
   // 为 0090 family 字段增补后的冻结值；ccd1adeb0bab708e5fa7cbf85032090e3a5ef72ac52000e1caa304239c60db61
   // 为 0089 投影字段增补后的冻结值；38d4110294431e2bcc3220e6a24fd97da48e57ded1d49e0eae244067e101034d
   // 为 0088 caveats 放宽后的冻结值；2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac

@@ -37,6 +37,7 @@ export { REASONING_EFFORTS };
 // writers (scripts/run-reliability.mjs agentInfo / matrix.normalizeCase) used
 // at certification time. Same src-relative import shape as the line above.
 import { providerKeyFor } from "./providerFingerprint.js";
+import { holdAwake } from "./keepAwake.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -2706,8 +2707,19 @@ export class Run {
    *     并通知调用方（options.onObservationDeadline）——**通知不杀**：不 abort
    *     事件流、不产生 timed_out，监督继续到自然终态。终止只剩 Lead 显式 stop
    *     （外部 abort）与既有硬安全线（tokenBudget / workdir_escape）。
+   *
+   * 决定 0093：驱动期间保持唤醒——前台运行、后台 runner 与 daemon 都经这里驱动。
    */
   async waitForCompletion(options = {}) {
+    const awake = holdAwake();
+    try {
+      return await this._waitForCompletion(options);
+    } finally {
+      awake.release();
+    }
+  }
+
+  async _waitForCompletion(options = {}) {
     // M10-pre3: unified timeout precedence via SSOT — default is now disabled.
     const { resolveWaitTimeout } = await import("./application/timeoutPolicy.js");
     const { ms: waitTimeout, source: waitTimeoutSource, enabled: deadlineEnabled } = resolveWaitTimeout({

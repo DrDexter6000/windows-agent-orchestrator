@@ -82,10 +82,6 @@ export function drillTranscriptExists(transcriptsDir, runId, { existsFn = exists
   }
 }
 
-export function drillTranscriptPath(transcriptsDir, runId) {
-  return join(transcriptsDir, `${runId}.jsonl`);
-}
-
 /**
  * 收集 summary（或任意 case 数组包装）引用的全部 drillRunIds：非空字符串值，
  * 去重、保序。null（如实未记录）与形状外的值不收集——它们不是可回查主张。

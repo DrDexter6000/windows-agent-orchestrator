@@ -38,6 +38,7 @@ import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispa
 import { laneFingerprint as laneFingerprintOf } from "./application/identityProjection.js";
 import { providerKeyFor } from "./providerFingerprint.js";
 import { loadRoleContract, roleContractSha256 } from "./application/roleContract.js";
+import { PROMPT_STDIN_FLAG, promptDigest, readRunnerPrompt } from "./runnerPrompt.js";
 
 // D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
@@ -512,7 +513,7 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
  *   node backgroundRunner.js <agentId> --prompt "..." --run-dir D --registry F [--wait-timeout N]
  *   node backgroundRunner.js --resume-run-id <runId> --run-dir D --registry F [--wait-timeout N]
  */
-export async function runMain(argv = process.argv.slice(2)) {
+export async function runMain(argv = process.argv.slice(2), { stdin = process.stdin } = {}) {
   // TD-40：detached runner 是直接 spawn worker 子进程的点，必须在 v24（回归）上拒绝——
   // 否则子进程树可能被 OS Job Object bug 误杀，产生半完成的孤儿 transcript。
   // WAO_SKIP_VERSION_GUARD=1 绕过（仅测试用）。
@@ -526,6 +527,45 @@ export async function runMain(argv = process.argv.slice(2)) {
   const args = argv.filter((a) => !a.startsWith("--"));
   const opts = parseSimpleFlags(argv);
   const agentId = args[0];
+  // 派发方经标准输入交来提示词（runDispatch / runContinue），argv 带它的摘要；直接带
+  // --prompt 起 runner 的仍可用。读 stdin 出错或摘要对不上，都说明交接不完整（派发方
+  // 写到一半退出），不启动 worker：落 run.error + failed 收口（delivery-json 解析失败的
+  // 同款纪律），不留 pending 转录。
+  let prompt = opts.prompt;
+  if (argv.includes(PROMPT_STDIN_FLAG)) {
+    let error = null;
+    try {
+      prompt = await readRunnerPrompt(stdin);
+      if (promptDigest(prompt) !== opts[PROMPT_STDIN_FLAG.slice(2)]) {
+        error = "prompt handoff incomplete: stdin did not match the dispatched prompt digest";
+      }
+    } catch {
+      error = "prompt handoff incomplete: reading stdin failed";
+    }
+    if (error !== null) {
+      const runDir = opts["run-dir"];
+      const runId = opts["run-id"];
+      if (runDir && runId) {
+        const transcriptPath = runnerTranscriptPath(runDir, opts["transcript-dir"], runId);
+        try {
+          let events = [];
+          try { events = await readTranscript(transcriptPath); } catch { events = []; }
+          const t = new JsonlTranscript(transcriptPath, {
+            runId, agentId: agentId ?? "unknown",
+            initialSeq: findLastEventSeq(events),
+          });
+          if (!TERMINAL_STATES.includes(findState(events.filter((e) => e && e.runId === runId)))) {
+            await t.append("run.error", { phase: "prompt_handoff", error });
+            await t.transitionState("pending", "failed", STATE_CHANGE_REASON.startup_error);
+          }
+        } catch { /* best effort — don't mask the original error */ }
+      }
+      process.stdout.write(JSON.stringify({
+        runId: runId ?? "unknown", completed: false, failed: true, timedOut: false, error,
+      }) + "\n");
+      return;
+    }
+  }
 
   // ADR-0030 实施批（TD-148 姊妹脸 (a)）：resume 接管模式。`resume <runId>` 不带
   // --wait 时 CLI 以 detached 形状 fork 本入口（--resume-run-id <runId>），runner
@@ -627,7 +667,7 @@ export async function runMain(argv = process.argv.slice(2)) {
 
   const result = await runBackground({
     agentId,
-    prompt: opts.prompt,
+    prompt,
     registry: opts.registry,
     runDir: opts["run-dir"],
     runId: opts["run-id"],

@@ -327,9 +327,12 @@ export class ProcessBackend {
     // other run is byte-compatible (stdin "ignore").
     const correctable = task.correctable === true && this.supportsInFlightCorrection === true
       && typeof this.encodeUserMessage === "function";
+    // 声明 promptViaStdin 的后端不把提示词放进命令行（Windows 命令行有长度上限，长任务
+    // 书会被上面的预算检查拒掉），提示词在子进程起来后写进它的标准输入。
+    const promptOnStdin = !correctable && this.promptViaStdin === true;
     const child = this._spawnFn(binary, args, {
       cwd: agent.cwd,
-      stdio: correctable ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+      stdio: correctable || promptOnStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments,
       // 注入 WAO env：让 worker 能调 wao 命令记录状态（角色 prompt 教 worker 用 $WAO_CLI）。
@@ -405,6 +408,11 @@ export class ProcessBackend {
         this._kill(child);
         throw new Error(`correctable spawn failed to write initial prompt to stdin: ${error.message}`);
       }
+    } else if (promptOnStdin) {
+      // 子进程先退出时写入会报 EPIPE：那次退出照常由事件流收口，这里不另报。
+      // （真实 spawn 的管道必有 stdin；测试注入的假子进程可以没有。）
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(task.prompt ?? "");
     }
 
     return {

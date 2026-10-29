@@ -91,7 +91,6 @@
 | TD-254 | readOnly×lead_workspace 错位与 resume 源仓两缺口仍未修 | 开放 | 等样本：隔离边界崩溃恢复族另案观察 | 0058 |
 | TD-260 | 若干收口项（红队补记、supersedes lineage 事实、交付收条等）登记未实施 | 开放 | 择机：Owner 点名后实施各收口项 | 0062 |
 | TD-266 | worker 会读宿主仓库的规则与概况文件，连同任务需要读的内容一起发给车道背后的模型方 | 设计性约束 | Owner 2026-10-15 裁定：用户自己选了车道，就是同意把项目内容发给对应的模型方，要保密可以改用本地模型；WAO 不做读取范围声明，也不做按项目的车道白名单 | AGENTS.md |
-| TD-267 | MCP 的 run_delivery 在验证排队时不带验证闸信息（CLI 已带） | 开放 | 等样本：走 MCP 的 Lead 再报验证排队盲区 | 0066 |
 | TD-270 | deepseek 两后端仍无静默期取样（processActivity 只接 processBackend/zcode）；0072 起命令在跑已对 Lead 可见 | 开放 | 择机：下次改动 deepseek 后端时接静默取样 | 0070 0072 |
 | TD-271 | 评分与 run_activity 的退出码推断仍是两套实现；0073 起两道门效果已一致，仅未并轨 | 开放 | 择机：下次改评分或活动投影时并成一个判据 | 0072 0073 |
 | TD-273 | `config/lane-exceptions.json` 的五条例外对退出码轴已非必需，未清理 | 开放 | 择机：下次例行认证时清理 | 0073 |
@@ -100,9 +99,8 @@
 | TD-281 | requireCommands×无退出码后端：registry validate 已有警告（0072），派发时刻仍无提示 | 开放 | 择机：下次改派发前检查时把警告接到派发面 | 0072 |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex（opencode 要点名才跑），入库模板里的 zcode、kimi-web、deepseek-acp 车道都不在 smoke 内；milestone-discipline §4 却要求涉及外部系统的里程碑收尾必跑 smoke | 开放 | 择机：下次改 smoke 或这些后端时把模板车道纳入，或在 §4 写明替代 | src/smoke.js docs/milestone-discipline.md |
 | TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 等样本：真实误归样本出现时按窗口长短区分限流与额度耗尽 | src/diagnosis.js |
-| TD-307 | 分桶（D2-②b）后仍按平铺布局找转录的残留：三个独立脚本拼 `<runDir>/<runId>.jsonl` 读转录；两个复用演练的负向用例还往平铺路径改写前任转录（与桶内原件成哈希不同的孪生），并用顶层快照断言被拒的派发不留新转录（看不见桶内新增）；long-run-probe 只枚举顶层；drillEvidence 的 drillTranscriptPath 无调用方 | 开放 | 择机：下次运行这些脚本前改走 projectBuckets 解析链 | scripts/dispatch-with-liveness.mjs scripts/reliability/session-reuse-drill.mjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs scripts/long-run-probe.mjs |
 | TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含 containmentEvidence 时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求 containmentEvidence 在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 scripts/reliability/certification.mjs |
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
-| TD-312 | zcode 后端的存活判定不知道主机在待机：笔记本进新型待机后，worker 正在跑的本地命令被冻住（后代进程 CPU 不动），静默超预算就以 `zcode turn stalled` 收尾。10-17 横评里 glm-pro 5 次停住都在待机中，同一条命令醒着时 145 秒跑完 | 开放 | 择机：失败信息写明静默期间主机在待机（System 日志 Kernel-Power 506/507，本机不提权读得到），让 Lead 知道重派即可；是否从静默预算里扣除待机时长另定 | src/backends/zcode.js |
-| TD-313 | kimi-web 席位的最终答复有时把过程叙述和结论接在同一行（缺换行），会审锚点认不出 Q1，两席结论不一致的提示与 `npm run lane-review-stats` 都会漏；10-06 到 10-17 的 59 个 kimi 席位里有 4 次 | 开放 | 择机：查 kimi-web 后端拼接助手消息文本时为什么没有换行，按消息或工具调用边界补上 | src/backends/kimiWeb.js |
 | TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt` | 开放 | 等样本：codex 车道需要在途纠偏时（Owner 2026-10-29 裁定暂不做：codex 车道只做会审）；做法是把 codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |
+| TD-322 | 从 Claude 桌面端 Code 标签调 MCP 的长等待会在约 60 秒报 Request timed out：run_wait 最短 180 秒，run_consult 默认等 270 秒。WAO 只在客户端带 progressToken 时发进度通知，桌面端没有因此续期（2026-10-29 复测：调用超时时运行仍在跑）；该宿主上的 Lead 只能改用 CLI 的 `runs wait` | 等待裁定 | Owner 定出路：宿主侧设 MCP_TOOL_TIMEOUT 后重启桌面端试（未验证桌面端是否读取）、MCP 面放开 60 秒以内的等待（与决定 0030 的下限取舍）、或维持现状 | src/application/runWait.js src/mcp/server.js |
+| TD-323 | codex 沙箱里的会审席找不到 Node 22：scripts/wao-node.cjs 只看 WAO_NODE、%LOCALAPPDATA% 约定路径与 PATH，沙箱用户三样都对不上（PATH 只有 Node 24），席位跑 `npm test` 或 CLI 时任务书得写死 node-v22 的绝对路径 | 开放 | 择机：下次改 codex 后端或启动器时，让席位环境拿得到 WAO 自己所用的 Node 路径 | scripts/wao-node.cjs src/backends/codex.js |

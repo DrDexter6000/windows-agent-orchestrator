@@ -167,8 +167,9 @@ test("M11-5-B1: claude-code buildArgs uses --append-system-prompt <content> once
     assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1, "flag exactly once");
     // content follows the flag
     assert.ok(args[flagIdx + 1]?.includes("ROLE_MARKER_CLAUDE"), "role content follows the flag");
-    // task prompt present as its own arg, not concatenated with role
-    assert.ok(args.includes("TASK_MARKER"), "task prompt is its own arg");
+    // task prompt is not concatenated with role; it goes over stdin, not argv
+    assert.ok(!args[flagIdx + 1].includes("TASK_MARKER"), "task prompt not concatenated with role");
+    assert.ok(!args.includes("TASK_MARKER"), "task prompt goes over stdin, not argv");
     // no path-based flag (TOCTOU elimination)
     assert.ok(!args.includes("--append-system-prompt-file"), "no path-based file flag (TOCTOU eliminated)");
   } finally {
@@ -195,8 +196,9 @@ test("M11-5-B2: codex buildArgs uses -c developer_instructions once, task separa
   // exactly once
   assert.equal(args.filter((a) => typeof a === "string" && a.includes("developer_instructions")).length, 1,
     "developer_instructions exactly once");
-  // task prompt present as its own positional arg, NOT concatenated into developer_instructions
-  assert.ok(args.includes("TASK_MARKER"), "task prompt is a separate positional arg");
+  // task prompt NOT concatenated into developer_instructions; it goes over stdin ("-" placeholder)
+  assert.ok(!devInstr.includes("TASK_MARKER"), "task prompt not concatenated into developer_instructions");
+  assert.equal(args[args.length - 1], "-", "prompt slot is the stdin placeholder");
   // never model_instructions_file
   assert.ok(!args.some((a) => typeof a === "string" && a.includes("model_instructions_file")),
     "never uses model_instructions_file");
@@ -268,9 +270,10 @@ test("M11-5-B4: no roleContract → all three backends legacy-compatible argv", 
       `${BackendClass.name}: no --append-system-prompt when no role`);
     assert.ok(!args.some((a) => typeof a === "string" && a.includes("developer_instructions")),
       `${BackendClass.name}: no developer_instructions when no role`);
-    // task prompt still present
-    assert.ok(args.some((a) => a === "JUST_TASK" || (typeof a === "string" && a.includes("JUST_TASK"))),
-      `${BackendClass.name}: task prompt present`);
+    // task prompt still delivered: on argv, or over stdin for backends that declare it
+    const onArgv = args.some((a) => a === "JUST_TASK" || (typeof a === "string" && a.includes("JUST_TASK")));
+    assert.equal(onArgv, backend.promptViaStdin !== true,
+      `${BackendClass.name}: task prompt on argv unless it goes over stdin`);
   }
 });
 

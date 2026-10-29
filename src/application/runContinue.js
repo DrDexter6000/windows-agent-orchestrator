@@ -74,6 +74,7 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 import { inheritedEnvNames } from "../envPolicy.js";
 import { CredentialMissingError } from "./runDispatch.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
+import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
 
 // Reuse the dispatch application service's startup-failure error type so the MCP
 // boundary collapses a missing credential to the same fixed actionable text.
@@ -274,6 +275,7 @@ function toPublicDelivery(validated) {
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding (canonical git root)
  * @param {string} input.leadSession — server-owned Lead session identity (lineage key input)
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
+ * @param {number} [input.promptHandoffTimeoutMs] — injectable prompt-handoff bound (tests)
  * @param {Function} [input.backendFor] — injectable (agent) => backend instance (tests)
  * @param {Function} [input.prepareContinuationWorktreeFn] — injectable transition (tests)
  * @param {Function} [input.listChangedPathsFn] — injectable cumulative-scope change reader (tests)
@@ -298,6 +300,7 @@ export async function continueRun({
   authorizedWorkspaceRoot,
   leadSession,
   spawnFn,
+  promptHandoffTimeoutMs,
   backendFor,
   prepareContinuationWorktreeFn = prepareContinuationWorktree,
   listChangedPathsFn,
@@ -648,7 +651,8 @@ export async function continueRun({
   const runnerArgs = [
     _runnerPath,
     agentId,
-    "--prompt", prompt,
+    // 提示词经标准输入交给 runner（见下方 spawn），不进命令行；argv 只带它的摘要。
+    ...promptStdinArgs(prompt),
     "--run-dir", resolvedRunDir,
     "--run-id", childRunId,
     "--registry", resolve(registryPath),
@@ -666,7 +670,7 @@ export async function continueRun({
 
   const totalArgvLen = runnerArgs.reduce((sum, arg) => sum + String(arg).length + 1, 0);
   if (totalArgvLen > ARGV_MAX_TOTAL) {
-    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery size`);
+    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce delivery size`);
   }
 
   // ---- Mutation phase: lineage claim → worktree transition → transcript → fork ----
@@ -778,7 +782,14 @@ export async function continueRun({
     });
 
     const runnerEnv = { ...process.env, ...finalCredentials };
-    _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
+    const runner = _spawn(_execPath, runnerArgs, { detached: true, stdio: ["pipe", "ignore", "ignore"], env: runnerEnv });
+    const handoff = await writeRunnerPrompt(runner, prompt, promptHandoffTimeoutMs ? { timeoutMs: promptHandoffTimeoutMs } : {});
+    if (handoff === "timeout") {
+      // runner 活着却一直不读提示词：结束它（它还没起 worker），抛出后走下方的派发前回滚。
+      try { runner.kill(); } catch { /* 已退出 */ }
+      throw new Error(PROMPT_HANDOFF_TIMEOUT_TEXT);
+    }
+    runner.unref();
   } catch (error) {
     await rollbackPreSpawnContinuation({
       worktreePath,

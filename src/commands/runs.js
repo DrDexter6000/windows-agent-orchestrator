@@ -88,6 +88,7 @@ import {
   gateDisabled,
   gateEngaged,
 } from "../verificationGate.js";
+import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 // runs settle 门 6 的 daemon 握手 SSOT：daemon.js 与本模块同属 adapters 层，
@@ -2006,39 +2007,6 @@ function _printReadinessText(result) {
   }
 }
 
-/**
- * 2026-10-12 消费者侧反馈：交付验证停在 pending 时，runs delivery 只显示 pending——
- * Lead 要另跑 runs gate 才知道闸被谁占着（当日一条运行等了约 11 分钟）。pending
- * 且尚未裁决时并入验证闸**租约事实**的只读快照：与 runs gate 同一个 status()
- * 查询，绝不认领、绝不释放；查询失败则整段省略（显示面附加信息，fail-open）。
- *
- * 只报租约事实，不推断执行状态（会审 sol 席）：租约可能陈旧（附心跳年龄让 Lead
- * 自己判断）；"别人持有"不能证明本 run 正在排队（验证也可能已中断，或 fail-open
- * 无闸运行）；"无租约"不能证明验证尚未开始。措辞因此只说持有情况。
- * @returns {Promise<{lease: "held_by_this_run"|"held_by_other"|"free"|"corrupt", holder?: object}|null>}
- */
-async function describePendingVerificationGate(view, runId, hostDeps) {
-  if (!view?.deliveryAvailable || view.verification?.status !== "pending") return null;
-  if (view.acceptance?.status === "accepted" || view.acceptance?.status === "rejected") return null;
-  try {
-    const createGate = hostDeps?.createGate
-      ?? (() => createVerificationGate({ identity: { owner: "cli/runs-delivery" } }));
-    const lease = await createGate().status();
-    if (lease.free) return { lease: "free" };
-    if (lease.corrupt) return { lease: "corrupt" };
-    const h = lease.holder ?? {};
-    const holder = {};
-    for (const k of ["owner", "runId", "agentId"]) {
-      if (typeof h[k] === "string" && h[k].length > 0) holder[k] = h[k];
-    }
-    if (typeof h.startedAt === "string" || Number.isFinite(h.startedAt)) holder.startedAt = h.startedAt;
-    if (Number.isFinite(h.ageMs)) holder.heartbeatAgeMs = h.ageMs;
-    return { lease: h.runId === runId ? "held_by_this_run" : "held_by_other", holder };
-  } catch {
-    return null;
-  }
-}
-
 function pendingVerificationGateLine(gate) {
   if (!gate) return null;
   if (gate.lease === "free") return "Verification gate: no lease held (the gate does not explain this pending state; see: runs gate)";
@@ -2084,7 +2052,7 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       const waitMs = _coerceWaitMs(options.waitMs);
       const readinessService = hostDeps?.getRunDeliveryReadinessFn ?? getRunDeliveryReadiness;
       const result = await readinessService({ runId, runDir, waitMs });
-      const waitGate = await describePendingVerificationGate(result, runId, hostDeps);
+      const waitGate = await describePendingVerificationGate(result, runId, { createGate: hostDeps?.createGate });
       if (options.format === "json") {
         console.log(JSON.stringify(waitGate ? { ...result, verificationGate: waitGate } : result, null, 2));
       } else {
@@ -2094,7 +2062,7 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       return;
     }
     const view = await getRunDelivery({ runId, runDir });
-    const pendingGate = await describePendingVerificationGate(view, runId, hostDeps);
+    const pendingGate = await describePendingVerificationGate(view, runId, { createGate: hostDeps?.createGate });
     if (options.format === "json") {
       console.log(JSON.stringify(pendingGate ? { ...view, verificationGate: pendingGate } : view, null, 2));
     } else {

@@ -444,3 +444,25 @@ test("复核四审: 重读成功 + 新鲜证停 → 重派照常（fail-closed �
   });
   assert.equal(r.redispatch, true, "新鲜证停（默认严格臂）照常放行");
 });
+
+// TD-307：运行转录按项目分桶后，观察与证停重读都要走解析链，不能只看 runDir 平铺路径。
+test("TD-307: observeWithSettle 读项目桶里的转录（平铺路径不存在）", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { observeWithSettle } = await import("../../scripts/dispatch-with-liveness.mjs");
+  const runDir = mkdtempSync(join(tmpdir(), "wao-liveness-bucket-"));
+  try {
+    const runId = "run_20261029120000000bucket";
+    const bucket = join(runDir, "projects", "demo-0a1b2c3d");
+    mkdirSync(bucket, { recursive: true });
+    const events = [
+      { type: "run.state_change", runId, seq: 1, ts: "2026-10-29T12:00:00.000Z", from: null, to: "running" },
+      { type: "run.state_change", runId, seq: 2, ts: "2026-10-29T12:00:01.000Z", from: "running", to: "completed" },
+    ];
+    writeFileSync(join(bucket, `${runId}.jsonl`), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    const result = await observeWithSettle(runId, runDir, 1000, 1, async () => {});
+    assert.equal(result.rereadOk, true, "证停重读也读到了桶里的转录");
+    assert.equal(result.events.length, 2);
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});

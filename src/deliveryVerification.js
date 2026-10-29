@@ -11,6 +11,7 @@ import { INSTALL_ROOT_ENV } from "./installRoot.js";
 // 自身不进闸——只提供 opts.gate 缝与 HELD 注入；是否创建闸由调用方裁决
 // （createCallerGate）。
 import { VERIFICATION_GATE_HELD_ENV, createVerificationGate, gateEngaged } from "./verificationGate.js";
+import { holdAwake } from "./keepAwake.js";
 
 /**
  * Delivery Verification Kernel (Phase 3B).
@@ -87,6 +88,8 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
   // Back-compat: a bare number is the legacy timeout form.
   const timeoutMs = typeof opts === "number" ? opts : (opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const env = (opts && typeof opts === "object" && !Array.isArray(opts)) ? (opts.env ?? process.env) : process.env;
+  // 决定 0093：验证命令跑着就保持唤醒（交付验证、复验、重打包、verify-commit 都走这里）。
+  const awake = holdAwake();
   return new Promise((resolve) => {
     const startTime = Date.now();
     let stdoutBytes = 0;
@@ -158,7 +161,7 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
         launchError: true,
       });
     });
-  });
+  }).finally(() => awake.release());
 }
 
 // ===== TD-130 (R17) W1: bounded output-tail helpers =====

@@ -10,11 +10,12 @@
 // 必须在 v22 跑（WAO 版本守卫拒 v24；本脚本经 daemon 派发真实 worker 烧 token）。
 // 报告输出到 .dev/long-run-report.md。
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { connectDaemon, readHandshake, isDaemonAlive, DEFAULT_LIVENESS_THRESHOLD_MS } from "../src/daemon.js";
+import { listTranscriptsDeep } from "../src/projectBuckets.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -97,11 +98,17 @@ function scanRuns() {
   const failed = [];
   let counts = { completed: 0, failed: 0, timed_out: 0, aborted: 0, running: 0, other: 0 };
   if (!existsSync(runDir)) return { failed, counts };
-  for (const f of readdirSync(runDir)) {
-    if (!f.endsWith(".jsonl")) continue;
-    const runId = f.replace(/\.jsonl$/, "");
+  // 平铺与各项目桶里的转录一并统计（运行转录按项目分桶）。同一 runId 只算一次：
+  // 平铺与桶内都有时取桶内那份（桶优先于平铺）。直接用全量枚举，不经解析链的有界
+  // 桶扫描——超过扫描上限的桶不会被当成坏文件静默跳过。
+  const transcripts = new Map();
+  for (const t of listTranscriptsDeep(runDir)) {
+    const runId = t.name.replace(/\.jsonl$/, "");
+    if (!transcripts.has(runId) || t.bucket !== null) transcripts.set(runId, t.path);
+  }
+  for (const [runId, path] of transcripts) {
     try {
-      const evs = readFileSync(join(runDir, f), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+      const evs = readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
       const state = findStateLocal(evs);
       if (["completed", "failed", "timed_out", "aborted"].includes(state)) counts[state]++;
       else if (state === "running") counts.running++;
