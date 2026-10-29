@@ -195,17 +195,25 @@
     "glm-flash": {
       "ratings": {
         "research": {
-          "stars": null,
-          "basis": null
+          "stars": 3,
+          "basis": "measured",
+          "n": 99,
+          "evidence": "同题横评（2026-10-29，台账重建 5 题×1 轮，逐条对照 Lead 终裁）；运行如 run_202610290624000489r3zuf",
+          "note": "与 Lead 终裁一致 68/99（同日 kimi 68、deepseek-flash 70）；引文 4 处不逐字、2 处超长；GLM 高峰时段中位用时 10.0 分钟"
         },
         "code": {
-          "stars": 2,
-          "basis": "owner",
-          "note": "代码能力不如 glm-pro"
+          "stars": 3,
+          "basis": "measured",
+          "n": 2,
+          "evidence": "同题横评（2026-10-29，2 个实现题×1 轮，按隐藏测试判分）；运行如 run_20261029062452688gfvtkz",
+          "note": "隐藏测试 27/28（DEC-05 未过）、全过 1/2，同日 kimi 与 deepseek-flash 各 26/28；高峰用时 30/44 分钟；Owner 原评 2 星（不如 glm-pro）"
         },
         "review": {
-          "stars": null,
-          "basis": null
+          "stars": 1,
+          "basis": "measured",
+          "n": 5,
+          "evidence": "同题横评（2026-10-29，5 个含真缺陷的会审题×1 轮，按答案键人工判分）；运行如 run_20261029064019971uwopzm",
+          "note": "5 题都该判先修，全答 PASS_WITH_NOTES（含自标中等严重的）；关键缺陷 1/8（含两处半分），同日 kimi 5/8、4/5；中位 22.2 分钟"
         },
         "design": {
           "stars": null,
@@ -241,7 +249,7 @@
         "video": false,
         "source": "official（GLM-5 系首个原生多模态）"
       },
-      "concurrencyNote": "同车道 4 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
+      "concurrencyNote": "同车道峰值 7 个并发全部完成（measured 2026-10-29：横评两波，各 5 道调研或会审题加 2 道代码题；更高并发未测）"
     },
     "kimi": {
       "ratings": {
