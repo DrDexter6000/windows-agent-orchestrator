@@ -95,3 +95,4 @@
 0091 | dsh 进宿主表：Cordis profile patch 的 YAML 片段，探测按 profile OR 合并
 0092 | 车道画像以实测为准：实测可以覆盖 Owner 的手动输入，Owner 特别标注的除外
 0093 | WAO 有活在跑时自己保持唤醒：运行驱动、验证命令与全量测试期间申请系统与显示都需要
+0094 | 退役 workflow/DAG 层与 wao state：多步编排归 Lead，WAO 只留派发、会审与续接原语

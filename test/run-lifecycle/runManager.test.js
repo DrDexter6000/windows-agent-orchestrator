@@ -2138,12 +2138,12 @@ test("S1-3 集成: budget_exceeded 触发 raiseAlert → ALERTS.log 被写", asy
   }
 });
 
-test("并发 start 同毫秒不产生 runId 碰撞（真实 workflow 并行暴露）", async () => {
+test("并发 start 同毫秒不产生 runId 碰撞（并发派发场景）", async () => {
   const dir = await makeTempDir();
   try {
     const fetchImpl = createMockFetch();
     const manager = createManager(dir, fetchImpl);
-    // 同毫秒并行 start 3 个 run（模拟 workflow 同层 Promise.all）
+    // 同毫秒并行 start 3 个 run（模拟并发派发的 Promise.all）
     const runs = await Promise.all([
       manager.start("test_agent", { prompt: "a" }),
       manager.start("test_agent", { prompt: "b" }),

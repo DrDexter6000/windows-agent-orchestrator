@@ -5,7 +5,7 @@
 // A read-only, provider-neutral, deterministic registry of exactly four
 // built-in Lead playbooks. Each playbook is a compact decision scaffold with
 // evidence gates and adaptation points. The Lead chooses, keeps, skips, or
-// changes defaults — the catalog does NOT dispatch, execute a workflow, or
+// changes defaults — the catalog does NOT dispatch, execute anything, or
 // make semantic decisions.
 //
 // Architectural contract:

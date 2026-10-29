@@ -21,7 +21,7 @@ test("S3-4: writeHandoff 建交接卡 + 更新 map", async () => {
       from: "lead",
       to: "coder",
       summary: "Refactor auth.js to async/await",
-      artifacts: ["runs/run_xxx.jsonl", ".wao/state/current.md"],
+      artifacts: ["runs/run_xxx.jsonl", ".wao/handoff/lead-2026-01-01.md"],
       claims: [{ field: "affectedFiles", value: "src/auth.js" }],
     });
     assert.ok(existsSync(path), "交接卡应被创建");

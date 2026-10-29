@@ -14,7 +14,7 @@ async function makeInitWao() {
 }
 
 /**
- * 守卫1（导出供复用）：.wao/ 顶层只允许预定义 7 必需槽位 + 可选槽位（inbox）。
+ * 守卫1（导出供复用）：.wao/ 顶层只允许预定义 6 必需槽位 + 可选槽位（inbox/state；0094）。
  * 这是治文档熵增的核心：负向断言"不准新建文档类型"。
  * 任何 agent 想往 .wao/ 塞 docs/my-finding.md，这里会抓。
  */
@@ -104,11 +104,12 @@ test("S3-5 守卫1: tmpdir .wao/ 加非法文件 → 断言失败报未授权条
   }
 });
 
-test("S3-5 守卫1: tmpdir .wao/ 加可选槽位 inbox/ → assertWaoTopLevelClean 通过", async () => {
+test("S3-5 守卫1: tmpdir .wao/ 加可选槽位 inbox/ 或 state/ → assertWaoTopLevelClean 通过（0094：state 转可选）", async () => {
   const dir = await makeInitWao();
   try {
     const waoDir = getWaoDir(dir);
     await mkdir(join(waoDir, "inbox"), { recursive: true });
+    await mkdir(join(waoDir, "state"), { recursive: true });
     assertWaoTopLevelClean(waoDir);
   } finally {
     await rm(dir, { recursive: true, force: true });

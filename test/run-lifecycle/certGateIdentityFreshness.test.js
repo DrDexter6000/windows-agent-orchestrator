@@ -718,6 +718,7 @@ test("T8f §3 scope 派生收窄：profile:'delta' 不再短路——显式 dril
   assert.equal(certificationScopeForCase({ profile: "delta" }), "delta", "无 drills 的 legacy 形状不误伤");
   assert.equal(certificationScopeForCase({ profile: "delta", drills: [] }), "delta");
   // 显式 drills 超出子集 → full（TD-133(c)：scope 反映实际覆盖，不反射标签）。
+  // 历史形状钉：workflowRunDir 已随决定 0094 退役，含它的历史 case scope 派生照旧 full（读侧不漂移）。
   assert.equal(
     certificationScopeForCase({ profile: "delta", drills: ["sentinel", "workflowRunDir"] }),
     "full",

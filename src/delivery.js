@@ -8,7 +8,7 @@ import { createPrivateIndexCopy } from "./gitPrivateIndex.js";
  * Coder Delivery Contract v1 — deterministic Git delivery packager (Phase 2).
  *
  * This module owns Git delivery inspection and packaging. It is a deep module
- * that must NOT import CLI, RunManager, workflow, transcript, backend, or role
+ * that must NOT import CLI, RunManager, transcript, backend, or role
  * modules. Node built-ins only.
  *
  * Git is invoked with structured argument arrays (execFileSync). No shell-built

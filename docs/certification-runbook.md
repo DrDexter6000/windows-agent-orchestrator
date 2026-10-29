@@ -223,7 +223,7 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 
 新（harness × 模型）组合（新 lane）先用 delta 子集认证，通过后再全量重跑升级：
 
-- **delta 子集** = `sentinel` + `scorecard` + `containmentEvidence`（越界写拦截活体取证），**不含** `workflowRunDir`。
+- **delta 子集** = `sentinel` + `scorecard` + `containmentEvidence`（越界写拦截活体取证）。
   `containmentEvidence` 承担 isolation 语义，delta 子集不得省它。声明 OS 写沙箱的后端
   （`enforcesWriteSandbox`，当前 codex）在同一位置改用 `sandboxEnforcement`（不经模型的
   沙箱执行取证，决定 0086）——矩阵构建时对这类车道把 `containmentEvidence` **一律替换**
@@ -485,11 +485,11 @@ npm run cli -- run sol --prompt "..." --background --model <modelId>
 - **回显 effective model**：前台 text 格式在派发成功时打印一行 `effective model: {...}`；`--format json` 把同一对象作为结果里的 `model` 字段；后台 JSON 输出带 `model` 字段。**失败模式**：WAO 不校验模型 id 是否真实存在——打错的模型名要到 provider 期（worker 启动后）才报错，回显就是让你在派发时刻立刻看见打错了什么（回显是 advisory：展示的是 WAO 实际下发了什么，不证明 provider 接受该 id）。
 - **resume 继承覆盖事实**：`resume`（含 daemon `--resume-on-start` 接管）从 `run.started.modelOverride` 同源重建覆盖——后台派发带 `--model` 后 runner 崩溃、daemon 接管续跑时，后半程仍跑派发时的模型，transcript 里的覆盖事实不失真。合成与形状门与 start 同一道（只替换 `.id`；持久化值非法则拒绝 resume，fail-closed）；resume 不接受调用方新传的覆盖。
 - **两道硬互斥（fail-fast，零副作用）**：
-  1. `--model` × `--require-certified`（闭集码 `model_override_certified_conflict`）：无条件互斥——认证矩阵按 provider+model 组合记录，任何覆盖（即使值与注册表一致）都使"已认证组合"声明失效。CLI 在 argv 边界早拒；`RunManager.start` 顶部作权威拒绝（前台/后台/workflow/daemon 全通道同一语义）。
+  1. `--model` × `--require-certified`（闭集码 `model_override_certified_conflict`）：无条件互斥——认证矩阵按 provider+model 组合记录，任何覆盖（即使值与注册表一致）都使"已认证组合"声明失效。CLI 在 argv 边界早拒；`RunManager.start` 顶部作权威拒绝（前台/后台/daemon 全通道同一语义）。
   2. `--model` × provider-session 复用派发（闭集码 `model_override_reuse_conflict`，typed `ModelOverrideConflictError`）：reusable expert（`sessionReuse: "lead_workspace"`）与 continuable delivery 谱系根两形状都拒——跨回合续用的 provider 会话必须跑同一个模型（resume 侧只从 `run.started` 重建该 run 自己的覆盖事实、不接受调用方新传覆盖；派发时再换模型会破坏 provider 会话契约）。dispatchRun 在路由槽/transcript/fork 之前拒绝。
 - **正交放行**：`--model` × `--read-only` 可同用（金丝雀换模型试跑是合理用法）；`--model` × `--delivery-spec-file`（及 MCP `delivery` 块）放行，但**该 run 的认证组合声明失效**——reliability 认证按注册表的 provider+model 组合记录，覆盖后的组合未经认证；override 事实已由 `run.started.modelOverride` 入 transcript 供审计。
 - **形状门**：非空 string、长度 ≤128、不以 `--` 开头、不含空白/控制字符。`--` 前缀规则是承重的——后台 runner 的 `parseSimpleFlags` 会把 `--` 开头的值当下一个 flag，值对会静默断裂。违规以固定文案 fail-fast（不回显原值）。MCP `run_dispatch` 的 `model` 参数走同一 SSOT（wire schema 正则与核心校验器同源）。
-- **排除边界**：`--model` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝（多席统一模型语义混浊，Owner 场景是单派发）；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的模型应写进声明本身（注册表 model 策略）。持久换模型 = 改注册表，不是加 flag。
+- **排除边界**：`--model` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝（多席统一模型语义混浊，Owner 场景是单派发）；daemon 派发不解析该 flag——声明式表面的模型应写进声明本身（注册表 model 策略）。持久换模型 = 改注册表，不是加 flag。
 
 （MCP 面）**单次模型覆盖（可选，`model`）**：`run_dispatch` 顶层可带 `model`（`"model": "<modelId>"`，CLI 等价 `run --model`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 model 的 `.id`（contextWindow/providerID/variant 保留），wire schema 与核心校验器同源（非空、≤128、不以 `--` 开头、无空白/控制字符）。互斥与放行：× provider-session 复用（reusable expert / continuable 谱系根）以固定文案拒绝（闭集码 `model_override_reuse_conflict`——"A per-dispatch model override cannot be combined with provider-session reuse … must run one model"）；认证互斥（closed-set `model_override_certified_conflict`）在 MCP 侧不可达——`requireCertified` 恒为 server-owned `false`，认证矩阵（provider+model 组合的 certified 记录）只在 CLI 显式 `--require-certified` 时被求值；× `delivery` 块放行，但**该 run 的认证组合声明失效**（认证按注册表 provider+model 组合记录，覆盖后的组合未经认证）——override 事实由 `run.started.modelOverride` 入 transcript 供审计。派发成功不回显 effective model（MCP 输出 schema 冻结为闭集字段）；打错的模型名要到 provider 期才报错，需即时确认时读 transcript 的 `run.started.model`。
 
@@ -519,7 +519,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
   1. `--reasoning` × `--require-certified`（闭集码 `reasoning_override_certified_conflict`）：无条件互斥——覆盖改变认证组合被测量时的执行包络，任何覆盖都使"已认证组合"声明失效。CLI 在 argv 边界早拒；`RunManager.start` 顶部作权威拒绝。
   2. `--reasoning` × provider-session 复用派发（闭集码 `reasoning_override_reuse_conflict`，typed `ReasoningOverrideConflictError`）：reusable expert 与 continuable delivery 谱系根两形状都拒——跨回合续用的 provider 会话必须跑同一推理力度。dispatchRun 在路由槽/transcript/fork 之前拒绝。**组合策略拒绝指对旗标**：`--model` 与 `--reasoning` 同用时撞复用，model 冲突先拒（确定性顺序，runDispatch.js 注明）；policy 门拒绝的提示句按在场覆盖组三种形状（仅 model / 仅 reasoning / 双覆盖）指对旗标。
 - **正交放行**：`--reasoning` × `--read-only` / × `--delivery-spec-file`（及 MCP `delivery` 块）可同用（同 `--model` 的认证组合声明失效注意事项）。
-- **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
+- **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝；daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
 
 （MCP 面）**单次推理力度覆盖（可选，`reasoning`）**：`run_dispatch` 顶层可带 `reasoning`（`"reasoning": "minimal"|"low"|"medium"|"high"|"xhigh"|"max"`，CLI 等价 `run --reasoning`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 reasoning 的 `.effort`，与 `model` 参数可同用。wire schema 直接序列化闭集枚举（`registry.js` 的 `REASONING_EFFORTS` SSOT 经 runDispatch 下向 re-export——zod enum，比正则更严，与核心校验器零漂移）。互斥与放行：× provider-session 复用以固定文案拒绝（闭集码 `reasoning_override_reuse_conflict`——"A per-dispatch reasoning effort override cannot be combined with provider-session reuse … must run one reasoning effort"）；认证互斥在 MCP 侧不可达（同 `model` 的 server-owned `false` 构造）；× `delivery` 块放行。不可表达（opencode-serve）与条件不支持（kimi K3-only、dsh high|max）组合走既有 per-backend policy 门自然拒绝。**`run_dispatch_contract_check` 共享该输入 schema 但有意忽略 `reasoning`**（它只就 delivery 合同给 advisory——与对 `model` 的忽略同一先例）。派发成功不回显 effective reasoning（MCP 输出 schema 冻结）；需即时确认时读 transcript 的 `run.started.reasoning`。
 

@@ -287,9 +287,9 @@ export async function spawnCommand(args, config) {
   // silent ignore: spawnCommand's single-agent background path reuses
   // spawnBackgroundRunner, which WOULD thread the override — an explicit
   // boundary keeps the exclusion honest (multi-seat uniform-model semantics
-  // are ambiguous, and the Owner scenario is a single dispatch). Workflow
-  // agent nodes and daemon dispatches are excluded for the same reason: a
-  // declarative surface's model belongs in the declaration itself.
+  // are ambiguous, and the Owner scenario is a single dispatch). Daemon
+  // dispatches are excluded for the same reason: a declarative surface's
+  // model belongs in the declaration itself.
   if (options.model !== undefined) {
     throw new Error(
       "--model is only supported on `run`, not `spawn` "
@@ -300,7 +300,7 @@ export async function spawnCommand(args, config) {
   // R11-1: --reasoning is a `run`-only surface, exactly like --model above —
   // spawnCommand's single-agent background path reuses spawnBackgroundRunner,
   // which WOULD thread the override, so the boundary must keep the exclusion
-  // honest. Workflow agent nodes and daemon dispatches are excluded for the
+  // honest. Daemon dispatches are excluded for the
   // same reason: a declarative surface's reasoning belongs in the declaration.
   if (options.reasoning !== undefined) {
     throw new Error(

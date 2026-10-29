@@ -71,12 +71,12 @@ Every event type any production write outlet may write, one row each. The single
 | `run.lineage_closed` | 线系显式关闭（{rootRunId, reason（有界正文）, reasonSha256}——路径不替代内容）：写入后 run_continue 对该线系的续跑被拒（闭态检查读根转录 bound 事件）；已闭合重入=跳过写事实、补偿重试释放。 |
 | `run.lead_commit_check_started` | `runs verify-commit`（采纳协议承载）首命令前写入：checkId 随机 nonce、受检提交全形、命令清单原文 + commands-file 字节 sha256、timeoutMs、终态判定依据（准入只认终态 run.state_change；legacy 推断终态无准入资格，追加自检事件会翻转其推断状态）、提交关系事实字段（isDeliveryCommit/containsDeliveryCommit/adoptedFromTrailer，记事实不设拒）；`kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁。仅有 started 无 outcome 是合法的不完整证据，绝不读作通过。 |
 | `run.lead_commit_check_outcome` | `runs verify-commit` 收口：status∈{passed,failed,aborted}、results[]（index/exitCode/timedOut/durationMs + 失败 8KiB 尾）、独立 cleanup∈{ok,failed} 字段。不做恰一条 CAS（允许多次核验，checkId 区分）；本事件族不进 validateDeliveryFacts/decide/wao accept 的任何判定输入。 |
-| `workflow.started` | DAG 执行开始（写独立 `wf_*.jsonl`，经 JsonlTranscript.append）：载荷 {workflowId, nodeCount, layers}；payload 冲突字段重命名保护信封（nodeRunId/nodeType/nodeAgentId）。 |
-| `workflow.node.started` | DAG 节点开始（`wf_*.jsonl`）：载荷 {nodeId, nodeType, nodeAgentId}——节点的 type/agentId 写盘前改名，不覆盖信封字段。 |
-| `workflow.node.completed` | DAG 节点完成（`wf_*.jsonl`）：载荷 {nodeId, runId→nodeRunId, completed, error?}——typed 拒绝文案（如 dispatch_cwd_not_found）随本事件落盘，是 CLI 汇总外的唯一持久诊断出口。 |
-| `workflow.completed` | DAG 执行完成（`wf_*.jsonl`）：载荷 {workflowId, completed, executed[], skipped[]}。 |
+| `workflow.started` *(legacy)* | legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 执行开始（写独立 `wf_*.jsonl`，经 JsonlTranscript.append）：载荷 {workflowId, nodeCount, layers}；payload 冲突字段重命名保护信封（nodeRunId/nodeType/nodeAgentId）。 |
+| `workflow.node.started` *(legacy)* | legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 节点开始（`wf_*.jsonl`）：载荷 {nodeId, nodeType, nodeAgentId}——节点的 type/agentId 写盘前改名，不覆盖信封字段。 |
+| `workflow.node.completed` *(legacy)* | legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 节点完成（`wf_*.jsonl`）：载荷 {nodeId, runId→nodeRunId, completed, error?}——typed 拒绝文案（如 dispatch_cwd_not_found）随本事件落盘，是 CLI 汇总外的唯一持久诊断出口。 |
+| `workflow.completed` *(legacy)* | legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 执行完成（`wf_*.jsonl`）：载荷 {workflowId, completed, executed[], skipped[]}。 |
 
-*(legacy) = 没有现行生产写出点，仅为读取旧转录保留：`run.timed_out`。*
+*(legacy) = 没有现行生产写出点，仅为读取旧转录保留：`run.timed_out`, `workflow.started`, `workflow.node.started`, `workflow.node.completed`, `workflow.completed`。*
 
 `run.message` 不是落盘事件类型（RunManager 把 message 快照传给 scorecard，不写进 transcript），因此不在本表。状态机 `reason` 的闭集见 `STATE_CHANGE_REASONS`（`src/transcript.js`）。
 

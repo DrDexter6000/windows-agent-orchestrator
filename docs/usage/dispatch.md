@@ -10,7 +10,7 @@ npm run cli -- <command> [options]
 
 不要直接 `node src/cli.js <command>`：系统默认 `node` 常是 v24，会被 WAO 硬拒；`npm run cli` 走 v22 shim，是可靠入口。下面为简洁省略前缀。
 
-执行过一次性 `npm link` 后，优先用全局 `wao` 命令：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 写法等价（同一个 CLI、同一个 v22 shim；全局 `wao` 从安装根解析配置与 `runs/`，见[安装](install.md)），可从任意目录调用。本文写 `wao X` 时 `wao` 指全局 shim。顶层命令（serve/run/registry/consult/…）的写法就是 `wao X`；wao 命名空间子命令（doctor/onboarding/state/…）可以直接裸写——全局 `wao doctor` 与 `npm run cli -- doctor` 都能执行，两段式 `wao wao doctor` 也照旧可用。把顶层命令写进命名空间（如 `wao wao serve`）会收到 Unknown 指路。
+执行过一次性 `npm link` 后，优先用全局 `wao` 命令：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 写法等价（同一个 CLI、同一个 v22 shim；全局 `wao` 从安装根解析配置与 `runs/`，见[安装](install.md)），可从任意目录调用。本文写 `wao X` 时 `wao` 指全局 shim。顶层命令（serve/run/registry/consult/…）的写法就是 `wao X`；wao 命名空间子命令（doctor/onboarding/…）可以直接裸写——全局 `wao doctor` 与 `npm run cli -- doctor` 都能执行，两段式 `wao wao doctor` 也照旧可用。把顶层命令写进命名空间（如 `wao wao serve`）会收到 Unknown 指路。
 
 脚本化消费（管道/jq）：`npm run cli --` 的 stdout 带 npm 横幅行，直接 `| jq` 会炸——加 `-s`（silent）得干净输出：`npm run cli -s -- <command> --format json | jq`。`--format json` 的诊断输出含 `state` 与 `terminal`（非终态与"无失败事实"不再混淆）。读结果优先用 projection JSON（`collect --format json`）——那是路径无关形状；直读转录（`runs/<runId>.jsonl`）或 raw collect 才需要按 kind 解析。转录事件是平铺形状：载荷字段合并进信封顶层（`{kind, role, parts, ts, seq, runId, agentId, type}` 一层平铺），没有嵌套的 `payload` 键；信封字段（ts/seq/runId/agentId/type）权威、载荷不得覆盖；`run.error` 的 `error`/`phase` 同样在顶层。
 
@@ -70,7 +70,7 @@ runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
 `runs wait` 与 MCP `run_wait` 工具共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附 `semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；等待期间 Ctrl-C 会打印中断时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）；非数字值（如 `--wait-ms abc`）在 CLI 层即以固定文案 `--wait-ms must be a number` 拒绝（不回显原值，service 不被调用）。`runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
-工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve、kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、workflow agent 节点、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
+工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve、kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
 ## 场景 2b：上游空窗期的派发活性重试
 

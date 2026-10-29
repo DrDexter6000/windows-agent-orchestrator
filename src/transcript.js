@@ -2820,6 +2820,7 @@ export function findState(events) {
     return "pending";
   }
   // TD-102: workflow.completed {completed:false} is a failed workflow, not completed.
+  // 读取归档的旧 workflow 转录（决定 0094 退役了 workflow 层，写入方不复存在）：
   // 读取 workflow.completed 事件的 payload——type 映射只看类型名，不看 completed 字段。
   if (last.type === "workflow.completed" && last.completed === false) {
     return "failed";
@@ -2839,6 +2840,7 @@ function findLatestIndex(events, type) {
 /**
  * 旧 transcript 兜底：把最后事件的 type 映射到状态。
  * 严格复刻重构前 runs list / runs summary 的行为（用最后事件 type 作为状态）。
+ * workflow.completed 一条读取归档的旧 workflow 转录（决定 0094 退役，写入方不复存在）。
  */
 function inferStateFromLegacyEvent(type) {
   const legacyMap = {

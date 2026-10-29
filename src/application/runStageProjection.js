@@ -43,9 +43,9 @@
 //     non-terminal state_change (resurrection: terminal then running), and
 //     later malformed state_change (missing/unknown `to`) are all ignored.
 //   - run.stop_requested is an INTENT, not a fact — it never establishes
-//     terminal. workflow.completed, session/delivery/correction bookkeeping,
-//     and every other event type are outside the bounded basis and cannot
-//     move the stage.
+//     terminal. Legacy workflow.completed (decision 0094; archived transcripts
+//     only), session/delivery/correction bookkeeping, and every other event
+//     type are outside the bounded basis and cannot move the stage.
 //
 // Fail-closed cross-run binding:
 //   - The requested runId is validated with isValidRunId (throw) BEFORE any
@@ -91,8 +91,9 @@ export const EXECUTION_STAGES = Object.freeze([
 // ===== Bounded closed-set basis (event types that can move the stage) =====
 //
 // Every type outside these four closed sets — session/delivery/correction/
-// scorecard/stop bookkeeping, workflow events, unknown types — cannot move
-// the stage (no semantic judgment, no payload echo).
+// scorecard/stop bookkeeping, legacy workflow events (decision 0094; archived
+// transcripts only), unknown types — cannot move the stage (no semantic
+// judgment, no payload echo).
 
 // accepted basis: the control plane accepted the run.
 const ACCEPTED_BASIS_TYPES = new Set(["run.submitted", "run.background_submitted"]);

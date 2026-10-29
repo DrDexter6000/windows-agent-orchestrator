@@ -4,8 +4,8 @@
 // 证伪优先测试。
 //
 // 覆盖面：
-//   1. defaultDrillsForProfile("delta") 词汇（sentinel+scorecard+containmentEvidence，
-//      不含 workflowRunDir）与 matrix 行显式 drills 覆盖；退役 drill（adversarialEscape）
+//   1. defaultDrillsForProfile("delta") 词汇（sentinel+scorecard+containmentEvidence）
+//      与 matrix 行显式 drills 覆盖；退役 drill（adversarialEscape / workflowRunDir）
 //      的矩阵行被显式拒绝，不静默跳过；
 //   2. containmentEvidence drill 判定内核（纯函数，dry 形状——不烧 token）：
 //      三方一致（上报/磁盘/在内判定）→ 全绿；文件缺失/内容不符/判 outside/合法写入
@@ -89,13 +89,13 @@ function ctnAgreementInputs() {
 
 // ════ 1. delta profile 词汇（matrix.mjs）════
 
-test("defaultDrillsForProfile: delta = sentinel+scorecard+containmentEvidence，不含 workflowRunDir", () => {
+test("defaultDrillsForProfile: delta = sentinel+scorecard+containmentEvidence，不含 isolation", () => {
   assert.deepEqual(defaultDrillsForProfile("delta"), ["sentinel", "scorecard", "containmentEvidence"]);
   assert.deepEqual(DELTA_DRILLS, ["sentinel", "scorecard", "containmentEvidence"]);
   assert.deepEqual(LEGACY_DELTA_DRILLS, ["sentinel", "scorecard", "adversarialEscape"],
     "退役前词汇（历史 summary 读侧 scope 派生专用，决定 0084）形状钉住");
-  assert.ok(!defaultDrillsForProfile("delta").includes("workflowRunDir"),
-    "delta 子集不含 workflowRunDir（ADR-0025 §5）");
+  assert.ok(!defaultDrillsForProfile("delta").includes("isolation"),
+    "delta 子集不含 isolation（ADR-0025 §5：isolation 语义由 containmentEvidence 承担）");
   assert.ok(!defaultDrillsForProfile("delta").includes("adversarialEscape"),
     "退役 drill 不得经 delta 默认集回流（决定 0084）");
   // basic 档位不变；strict / certification 也跑活体写入取证（决定 0084：每条车道），
@@ -127,7 +127,7 @@ test("buildCertificationMatrix: requiredCategories 连续性——operational �
         { agentId: "coder_new", label: "strict-only", drills: ["sentinel", "scorecard"] },
         { agentId: "coder_new", label: "ctn", drills: ["sentinel", "containmentEvidence"] },
         { agentId: "coder_new", label: "isolate", drills: ["sentinel", "isolation"] },
-        { agentId: "coder_new", label: "wf", drills: ["sentinel", "workflowRunDir"] },
+        { agentId: "coder_new", label: "sandbox", drills: ["sentinel", "sandboxEnforcement"] },
         { agentId: "coder_new", label: "stop", drills: ["sentinel", "stop"] },
       ],
     },
@@ -135,7 +135,7 @@ test("buildCertificationMatrix: requiredCategories 连续性——operational �
   const byLabel = new Map(buildCertificationMatrix({ registry }).map((row) => [row.label, row]));
   assert.deepEqual(byLabel.get("basic").requiredCategories, ["core", "observability"]);
   assert.deepEqual(byLabel.get("strict-only").requiredCategories, ["core", "strict", "observability"]);
-  for (const label of ["ctn", "isolate", "wf", "stop"]) {
+  for (const label of ["ctn", "isolate", "sandbox", "stop"]) {
     assert.deepEqual(byLabel.get(label).requiredCategories, ["core", "operational", "observability"],
       `${label} 行的 operational 类目要求不因换血漂移`);
   }
@@ -163,6 +163,24 @@ test("buildCertificationMatrix【证伪】: 显式声明退役 drill adversarial
     certification: { matrix: [{ agentId: "coder_new", profile: "delta" }] },
   };
   assert.doesNotThrow(() => buildCertificationMatrix({ registry: okRegistry }));
+});
+
+test("buildCertificationMatrix【证伪】: 显式声明退役 drill workflowRunDir 的行 → 显式失败（决定 0094）", () => {
+  const registry = {
+    agents: { coder_new: { backend: "zcode", cwd: "D:/repo" } },
+    certification: { matrix: [{ agentId: "coder_new", profile: "delta", drills: ["sentinel", "workflowRunDir"] }] },
+  };
+  assert.throws(
+    () => buildCertificationMatrix({ registry }),
+    (err) => {
+      assert.match(err.message, /retired drill "workflowRunDir"/);
+      assert.match(err.message, /decision 0094/);
+      assert.match(err.message, /workflow layer is gone/);
+      assert.match(err.message, /Silent skip is forbidden/);
+      return true;
+    },
+    "已退役 workflowRunDir 必须显式失败并给出可读原因（决定 0094）",
+  );
 });
 
 test("buildCertificationMatrix: delta 行显式 drills 覆盖仍然生效（不强制回填 scorecard）", () => {
@@ -370,7 +388,7 @@ test("certifyCase: 非 delta（strict）全量 drill 覆盖全过 → certified�
   const result = certifyCase({
     caseId: "full-lane",
     profile: "strict",
-    drills: ["sentinel", "scorecard", "isolation", "workflowRunDir"],
+    drills: ["sentinel", "scorecard", "isolation", "stop"],
     checks: deltaPassingChecks(),
   });
   assert.equal(result.status, "certified");
@@ -451,6 +469,7 @@ test("certificationScopeForCase: 新旧词汇对照——现行按 containmentEv
   assert.equal(certificationScopeForCase({ profile: "delta", drills: [] }), "delta");
   assert.equal(certificationScopeForCase({ profile: "strict" }), "full");
   assert.equal(certificationScopeForCase({ profile: "basic" }), "full");
+  // 历史形状钉：含已退役 workflowRunDir（决定 0094）的历史 case，scope 派生照旧记 full（读侧不漂移）。
   assert.equal(certificationScopeForCase({ profile: "delta", drills: ["sentinel", "workflowRunDir"] }), "full");
   assert.equal(certificationScopeForCase({ drills: ["sentinel"] }), "full",
     "不含 delta 承重 drill 的覆盖 → full（scope 描述规程归属，不是完备度）");
@@ -493,7 +512,7 @@ test("summarizeCertification: full profile 全绿 → certified 且 scope=full",
       modelId: "bigmodel-api/GLM-5.3",
       providerKey: null,
       profile: "strict",
-      drills: ["sentinel", "scorecard", "isolation", "workflowRunDir"],
+      drills: ["sentinel", "scorecard", "isolation", "stop"],
       checks: deltaPassingChecks(),
     },
   ]);
@@ -662,7 +681,7 @@ test("源级钉: containmentEvidence drill 接线（run-reliability 派发启闭
     "拦截门'在内'判定必须消费 src/runManager.js 的单一实现（不在 scripts 侧复制）");
   const drillBody = glue.slice(
     glue.indexOf("async function runContainmentEvidenceDrill"),
-    glue.indexOf("function runWorkflowRunDirDrill"),
+    glue.indexOf("async function runSandboxEnforcementDrill"),
   );
   assert.ok(drillBody.includes('"--isolate"'), "containment drill 派发必须强制隔离");
   assert.ok(drillBody.includes('"--delivery-spec-file"'), "containment drill 必须走 delivery run（拦截面所在）");

@@ -3,10 +3,9 @@
 // 0045 §1.4 派发目标解析（写侧第一增量，R3 会审 consult_20261005185623675eln792
 // 裁定版）：车道注册表（config/lanes.json）+ lane/role 显式派发 + 老席位名别名注解。
 //
-// 分层契约（auditor R3 裁定）：本模块在**核心层**——workflow/handlers 直接调
-// RunManager.start，若解析器放 application/ 会让 workflow 向上引用（layering
-// 冻结，test/isolation-infra/layering.test.js）；核心承载、应用服务与
-// RunManager 向下调用（R7-AB 先例，同 matchedCertRecord 的 hosting 注释）。
+// 分层契约（auditor R3 裁定）：本模块在**核心层**——应用服务与 RunManager
+// 向下调用解析器（R7-AB 先例，同 matchedCertRecord 的 hosting 注释）；若放
+// application/ 会让核心反向向上引用（layering 冻结，test/isolation-infra/layering.test.js）。
 //
 // 语义合同（两席收敛裁定）：
 //   - 合法输入二选一：{agentId} 或 {lane, role}；混用/缺半/全空 = dispatch_selector_invalid

@@ -109,7 +109,7 @@ export function resolveTargetCwd(options) {
 /**
  * 解析 --isolate / --no-isolate flag → true | false | undefined(不覆盖配置)。
  *
- * TD-98 阶段 2c：从 cli.js 移到 shared.js（纯函数，spawn/run/workflow 多 family 共用）。
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js（纯函数，spawn/run 多 family 共用）。
  */
 export function resolveIsolateFlag(options) {
   if (options.isolate === true) return true;
@@ -138,7 +138,7 @@ export function resolveReadOnlyFlag(options) {
  * WAO CLI 路径（注入 worker env，让 worker 能调 wao 命令记录状态）
  * TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard。
  *
- * TD-98 阶段 2c：从 cli.js 移到 shared.js（cli.js + workflow.js 共用）。
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js。
  * 导出名与签名 backendFor(agent) 保持不变（test 直接从此 import）。
  */
 export function backendFor(agent) {
@@ -149,7 +149,7 @@ export function backendFor(agent) {
  * 构造 RunManager（生产路径：模块默认 readRegistry + backendFor）。
  * 测试钩子：允许 config 注入 mock readRegistry / backendFor。
  *
- * TD-98 阶段 2c：从 cli.js 移到 shared.js（cli.js + workflow.js 共用）。
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js。
  */
 export function newRunManager(config) {
   return new RunManager({

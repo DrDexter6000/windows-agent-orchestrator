@@ -96,7 +96,7 @@ const getArg = (name) => _argResult.values[name];
 const SERVE_URL = getArg("serve-url") || "http://127.0.0.1:4298";
 const REGISTRY = getArg("registry") || resolve(ROOT, "config/agents.json");
 const ONLY_AGENT = getArg("agent");
-// 默认 300000（5min/worker）：strict profile 含 scorecard+isolation+workflow 多 drill，
+// 默认 300000（5min/worker）：strict profile 含 scorecard+isolation 等多 drill，
 // 120s 易在重 worker 上卡边界（codex/claude-code strict 单 worker 实测 30-60s，留余量）。
 // 全量批跑时每个 worker 独立 runCli，此值是单 worker 上限，非全量总时长。
 const WAIT_TIMEOUT = getArg("wait-timeout") || "300000";
@@ -112,7 +112,6 @@ const {
   runIsolationDrill,
   runContainmentEvidenceDrill,
   runSandboxEnforcementDrill,
-  runWorkflowRunDirDrill,
   runStopDrill,
 } = createDrills({
   nodeBin: NODE_BIN,
@@ -491,12 +490,6 @@ for (const tc of MATRIX) {
       : drill.checks));
   }
 
-  if (tc.drills.includes("workflowRunDir")) {
-    handledDrills.add("workflowRunDir");
-    console.log(`    [DRILL] workflow run-dir colocation...`);
-    checks.push(...runWorkflowRunDirDrill(tc));
-  }
-
   if (tc.drills.includes("stop")) {
     handledDrills.add("stop");
     console.log(`    [DRILL] stop/abort audit...`);
@@ -507,7 +500,7 @@ for (const tc of MATRIX) {
 
   // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
   // 记实际 runId；drills.mjs 只回 checks、不上抛内部 runId 的 drill（isolation/
-  // containmentEvidence/workflowRunDir/stop）如实记 null。派发失败/无 runId 时的
+  // containmentEvidence/stop）如实记 null。派发失败/无 runId 时的
   // "unknown" 占位也如实归 null——它不是可回查 id，入账即悬空指针（复核 FAIL-B
   // 硬禁令：不得记录指向不存在证据的 id）。
   const resolvableRunId = (value) =>

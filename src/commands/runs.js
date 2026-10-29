@@ -526,7 +526,7 @@ async function runsGateCommand(args, config, deps = {}) {
 }
 
 // TD-153(d2): runId/wf id 的内嵌时间戳前缀（`run_`/`wf_` + 固定宽 17 位 UTC
-// 毫秒时间戳，generateRunId/workflow.js 同款 SSOT 格式）。
+// 毫秒时间戳；wf_ 为历史兼容——workflow 层已由决定 0094 退役，仅旧归档文件）。
 const RUN_FILE_TS_RE = /^(?:run|wf)_(\d{17})/;
 
 /**
@@ -576,9 +576,10 @@ async function loadRunFiles(runDir) {
 }
 
 /**
- * TD-102: 只加载 run_*.jsonl（排除 wf_* workflow transcript）。
+ * TD-102: 只加载 run_*.jsonl（排除 wf_* 历史工作流转录——决定 0094 退役后
+ * 不再新增，读侧兼容）。
  * list/summary/metrics --summary/dashboard 使用此函数——
- * workflow transcript 不是 worker run，不应计入 run 聚合。
+ * wf_* 转录不是 worker run，不应计入 run 聚合。
  * grep/prune 保持 loadRunFiles（所有 .jsonl）。
  */
 async function loadRunOnlyFiles(runDir) {

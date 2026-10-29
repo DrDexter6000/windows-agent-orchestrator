@@ -4,8 +4,7 @@
 // EXISTING directory, refused in the preflight chain BEFORE any side effect
 // (runDir creation, transcript write, worktree creation, spawn). This is the
 // FOREGROUND family that never goes through dispatchRun: `run` without
-// --background (commands/run.js), workflow agent nodes
-// (src/workflow/handlers.js → ctx.runManager.start), and daemon `start`
+// --background (commands/run.js) and daemon `start`
 // (src/daemon.js → manager.start).
 //
 // Same typed error as layer 1 — single SSOT class defined in
@@ -29,10 +28,8 @@
 //   2. Acceptance      — existing absolute cwd runs as before (run.started.cwd
 //      still recorded); relative "." threads verbatim (RCE-4, RCE-12).
 //   3. Channel e2e     — foreground CLI exit non-zero + typed stderr (RCE-7);
-//      the workflow channel's typed message PERSISTS in the wf transcript
-//      (workflow.node.completed.error — R7-C C-1's durable assertion layer)
-//      and the CLI summary projects it (RCE-8); daemon handleRequest rejects
-//      typed (RCE-9).
+//      daemon handleRequest rejects typed (RCE-9).（RCE-8 的 workflow agent
+//      节点通道已随决定 0094 退役删除。）
 //   4. Ordering        — the cwd refusal precedes the credential check,
 //      mirroring layer 1's determinism argument (RCE-10).
 //   5. SSOT identity   — start throws the SAME class layer 1 throws (RCE-11).
@@ -58,9 +55,7 @@ import { fileURLToPath } from "node:url";
 
 import { RunManager, DispatchCwdNotFoundError } from "../../src/runManager.js";
 import { readRegistry } from "../../src/registry.js";
-import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
-import { WorkflowEngine } from "../../src/workflow/engine.js";
-import { buildWorkflowNodeSummary } from "../../src/commands/workflow.js";
+import { readTranscript } from "../../src/transcript.js";
 import { handleRequest } from "../../src/daemon.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -338,7 +333,7 @@ test("RCE-6: HTTP-shape backend (no preflightInvocation) + nonexistent cwd → g
 });
 
 // =====================================================================
-// 4. Channel end-to-end — foreground CLI / workflow engine / daemon
+// 4. Channel end-to-end — foreground CLI / daemon
 // =====================================================================
 
 test("RCE-7: CLI e2e — foreground run + bad-cwd registry fixture → exit non-zero, stderr typed + path, run-dir zero .jsonl", () => {
@@ -361,69 +356,6 @@ test("RCE-7: CLI e2e — foreground run + bad-cwd registry fixture → exit non-
     assert.ok(r.stderr.includes(resolve(PLACEHOLDER_CWD)), `stderr names the resolved path, got: ${r.stderr}`);
     assert.doesNotMatch(r.stderr, /node\.exe ENOENT/, "no misleading executable-ENOENT face");
     assert.deepEqual(listTranscripts(runDir), [], "run-dir has zero .jsonl — runDir never created");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-test("RCE-8: workflow agent node, bad registry cwd → typed message PERSISTS in the wf transcript (workflow.node.completed.error)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-rce8-"));
-  const { backend, spawns } = makeProcessBackend();
-  try {
-    // Workflow agent nodes go through ctx.runManager.start (handlers.js),
-    // NOT dispatchRun. The engine's per-node catch folds a thrown start error
-    // into { completed:false, error: message }. R7-C (C-1) persists that error
-    // into the wf transcript's workflow.node.completed payload — the DURABLE
-    // production surface (memory nodeResults die with the process). The
-    // assertion layer is therefore the wf_*.jsonl, wired exactly like
-    // commands/workflow.js wires it in production.
-    const registryPath = makeRegistry(dir, {
-      researcher: { backend: "claude-code", cwd: PLACEHOLDER_CWD },
-    });
-    const wfRunDir = join(dir, "wf-runs");
-    const manager = makeManager({ registryPath, runDir: wfRunDir, backend });
-    const workflowRunId = "wf_rce8";
-    const wfTranscript = new JsonlTranscript(join(wfRunDir, `${workflowRunId}.jsonl`), {
-      runId: workflowRunId,
-      agentId: "rce8-wf",
-    });
-    const engine = new WorkflowEngine({ runManager: manager, transcript: wfTranscript });
-    const wfDef = {
-      id: "rce8-wf",
-      nodes: [
-        { id: "research_a", type: "agent", agentId: "researcher", prompt: "研究 {{topic}}" },
-      ],
-      edges: [],
-    };
-    const result = await engine.execute(wfDef, { registry: registryPath, runDir: wfRunDir });
-    assert.equal(result.completed, false, "the node failure marks the workflow incomplete");
-    const node = result.nodeResults.research_a;
-    assert.equal(node.completed, false, "agent node failed");
-
-    // The assertion layer (C-1): read the PERSISTED wf transcript and prove the
-    // typed refusal — reason code + typed text + resolved path — landed on the
-    // workflow.node.completed event.
-    const wfFiles = listTranscripts(wfRunDir);
-    assert.equal(wfFiles.length, 1, "exactly one .jsonl — the workflow-level transcript");
-    assert.match(wfFiles[0], /^wf_/, "the only transcript is workflow-level (wf_ prefix) — zero run transcripts");
-    const events = await readTranscript(join(wfRunDir, wfFiles[0]));
-    const nodeCompleted = events.find((e) => e.type === "workflow.node.completed");
-    assert.ok(nodeCompleted, "workflow.node.completed is persisted");
-    assert.equal(nodeCompleted.nodeId, "research_a");
-    assert.equal(nodeCompleted.completed, false, "persisted node completion carries completed:false");
-    assert.ok(typeof nodeCompleted.error === "string" && nodeCompleted.error.length > 0,
-      "the typed error text is persisted (C-1: no in-memory-only diagnostics)");
-    assert.match(nodeCompleted.error, /dispatch_cwd_not_found/, "persisted error carries the closed-set reason code");
-    assert.match(nodeCompleted.error, /dispatch working directory does not exist/, "persisted error carries the typed refusal");
-    assert.ok(nodeCompleted.error.includes(resolve(PLACEHOLDER_CWD)), "persisted error names the resolved path");
-
-    // C-1 CLI projection: the summary exposes the same error for the failed
-    // node (successful nodes keep the exact {completed, runId} shape).
-    const summary = buildWorkflowNodeSummary(wfDef, result);
-    assert.equal(summary.research_a.completed, false);
-    assert.match(summary.research_a.error, /dispatch_cwd_not_found/, "CLI summary projects the node error");
-
-    assert.equal(spawns.length, 0, "zero spawns for the refused node");
   } finally {
     cleanupDir(dir);
   }

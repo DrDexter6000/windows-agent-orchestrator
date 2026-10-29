@@ -75,7 +75,8 @@
 //          A new file at depth ≥3 under a pre-existing bucket, or ≥2 under any
 //          other pre-existing subdirectory, still escapes; every known writer
 //          (transcripts, .owner-*, daemon*.json, .session-reuse/*,
-//          .lineage-reuse/*, workflow subdirectories) is flat at depth 0/1/2
+//          .lineage-reuse/*, legacy workflow subdirectories — retired by
+//          decision 0094, only archived dirs remain) is flat at depth 0/1/2
 //          (transcripts only), and a NEW subdirectory at any observed level is
 //          itself an entry.
 //       3. Concurrent NON-suite writers: while `npm test` runs in the MAIN
@@ -644,7 +645,8 @@ export function mapReportToFiles(report, expectedRels) {
 // projects/ bucket root goes one deeper (TD-249, depth 2 for transcripts) —
 // R8-C C-1: the old *.jsonl-top-level-only set let real writer shapes escape:
 // `.owner-*` heartbeats, daemon.json/daemon-health.json/daemon-supervisor.json,
-// `.session-reuse/`+`.lineage-reuse/` slots, workflow transcript subdirectories)
+// `.session-reuse/`+`.lineage-reuse/` slots, legacy workflow transcript
+// subdirectories (decision 0094; archived dirs only))
 // and diffs after each wave; additions are attributed to the wave (or the
 // isolation phase) that first observed them. All decision logic below is PURE
 // over an injectable listDir (the meta-tests never touch a real runs/); the

@@ -87,7 +87,6 @@
       "isolation-infra/waoHandoff.test.js",
       "isolation-infra/waoLayout.test.js",
       "isolation-infra/waoStage.test.js",
-      "isolation-infra/waoState.test.js",
       "mcp-surface/claudeBlindnessGuard.test.js",
       "mcp-surface/f5-cursorRejectedText.test.js",
       "mcp-surface/m12-10-tool-surface.test.js",
@@ -209,13 +208,6 @@
       "transcript/td220-runActivityProjection.test.js",
       "transcript/transcript.test.js",
       "transcript/transitionExpectedLastSeq.test.js",
-      "workflow/engine.test.js",
-      "workflow/engineStateIntegration.test.js",
-      "workflow/handlers.test.js",
-      "workflow/handoff.test.js",
-      "workflow/loader.test.js",
-      "workflow/nodeSummary.test.js",
-      "workflow/schema.test.js",
       "transcript/reverifyMultiChain.test.js"
     ],
     "git": [

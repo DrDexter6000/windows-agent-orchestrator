@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,22 +10,38 @@ async function makeTempDir() {
   return mkdtemp(join(tmpdir(), "wao-dir-"));
 }
 
-test("S3-1: initWaoDir 创建 7 槽位 + 各 map.md（TD-91 加 pipeline）", async () => {
+test("S3-1: initWaoDir 创建 6 必需槽位 + 各 map.md（TD-91 加 pipeline；0094 state 转可选）", async () => {
   const dir = await makeTempDir();
   try {
     await initWaoDir(dir);
-    // 7 个顶层槽位都存在
+    // 6 个必需槽位都存在
     assert.ok(existsSync(join(dir, ".wao", "project.md")), "project.md 应存在");
-    assert.ok(existsSync(join(dir, ".wao", "state")), "state/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "decisions")), "decisions/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "pipeline")), "pipeline/ 应存在（TD-91）");
     assert.ok(existsSync(join(dir, ".wao", "handoff")), "handoff/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "runs")), "runs/ 应存在");
-    // 各 map.md 存在（state/decisions/pipeline/handoff 有 map，project.md 是单文件，runs 无 map）
-    assert.ok(existsSync(join(dir, ".wao", "state", "map.md")), "state/map.md 应存在");
+    assert.ok(existsSync(join(dir, ".wao", "migration")), "migration/ 应存在（0045 §4.2）");
+    // 可选槽位不预建（0094：state/inbox 由历史布局或 feedback 按需创建）
+    assert.ok(!existsSync(join(dir, ".wao", "state")), "state/ 不应被 init 预建（决定 0094）");
+    // 各 map.md 存在（decisions/pipeline/handoff 有 map，project.md 是单文件，runs/migration 无 map）
     assert.ok(existsSync(join(dir, ".wao", "decisions", "map.md")), "decisions/map.md 应存在");
     assert.ok(existsSync(join(dir, ".wao", "pipeline", "map.md")), "pipeline/map.md 应存在（TD-91）");
     assert.ok(existsSync(join(dir, ".wao", "handoff", "map.md")), "handoff/map.md 应存在");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("S3-1: 已有 state/ 的旧布局 validateWaoDir 仍 ok（0094：state 转可选放行）", async () => {
+  const dir = await makeTempDir();
+  try {
+    await initWaoDir(dir);
+    await mkdir(join(dir, ".wao", "state"), { recursive: true });
+    await writeFile(join(dir, ".wao", "state", "current.md"), "");
+    const result = validateWaoDir(dir);
+    assert.ok(result.ok, "带可选 state/ 的旧布局应放行");
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.unexpected, [], "state/ 不算多余文件");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -109,10 +125,11 @@ test("S3-1: getWaoDir 支持 --state-dir 覆盖", () => {
   assert.ok(custom.endsWith(".custom-wao"), `应支持覆盖，got ${custom}`);
 });
 
-test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 7 槽位（TD-91 pipeline；0045 §4.2 migration 证据包槽）", () => {
+test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 6 必需槽位（TD-91 pipeline；0045 §4.2 migration；0094 state 转可选）", () => {
   assert.ok(Array.isArray(WAO_TOP_LEVEL_SLOTS));
-  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 7, "应正好 7 个槽位（0045：+migration）");
-  for (const slot of ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"]) {
+  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 6, "应正好 6 个必需槽位（0094：state 移出必需集）");
+  for (const slot of ["project.md", "decisions", "pipeline", "handoff", "runs", "migration"]) {
     assert.ok(WAO_TOP_LEVEL_SLOTS.includes(slot), `应含 ${slot}`);
   }
+  assert.ok(!WAO_TOP_LEVEL_SLOTS.includes("state"), "state 不在必需槽位（决定 0094）");
 });

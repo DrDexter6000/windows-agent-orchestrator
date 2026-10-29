@@ -2,11 +2,11 @@
 //
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
-// 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor |
+// 命令族：wao init | decision | handoff | declare | stage | ask | doctor |
 //         onboarding | sweep-claude-config | accept | lanes
 //
 // 依赖：
-//   - 外部模块：../waoDir.js、../waoState.js、../waoDecisions.js、../waoDeclare.js、
+//   - 外部模块：../waoDir.js、../waoDecisions.js、../waoDeclare.js、
 //     ../waoStage.js、../waoHandoff.js、../application/oauthDirSweep.js、
 //     ../application/acceptanceRecord.js
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
@@ -25,7 +25,6 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { initWaoDir, getWaoDir } from "../waoDir.js";
-import { writeStateSnapshot, readCurrentState } from "../waoState.js";
 import { addDecision, listDecisions, readDecision } from "../waoDecisions.js";
 import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "../waoDeclare.js";
 import { addStage, summarizeStages, STAGE_NUMBERS, PANEL_SKIP_REASONS, PANEL_STAGES } from "../waoStage.js";
@@ -97,7 +96,7 @@ async function waoInitCommand(args, config) {
   console.log(JSON.stringify({
     initialized: true,
     waoDir,
-    slots: ["project.md", "state/", "decisions/", "pipeline/", "handoff/", "runs/"],
+    slots: ["project.md", "decisions/", "pipeline/", "handoff/", "runs/", "migration/"],
   }, null, 2));
 }
 
@@ -427,50 +426,6 @@ async function waoAcceptCommand(args, config) {
   }, null, 2));
 }
 
-async function waoStateCommand(args, config) {
-  const [sub, ...tail] = args;
-  if (sub === "read") {
-    const options = parseOptions(tail);
-    const cwd = resolveTargetCwd(options);
-    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-    const state = await readCurrentState(waoDir);
-    if (!state) {
-      console.log(JSON.stringify({ initialized: false, message: ".wao/ not initialized or no current state" }, null, 2));
-      return;
-    }
-    if (options.format === "text" || !options.format) {
-      console.log(`workflow: ${state.workflowId}`);
-      console.log(`updated: ${state.updated}`);
-      console.log(`status: ${state.status}`);
-      console.log("steps:");
-      for (const s of state.steps) {
-        console.log(`  ${s.node}\t${s.status}\t${s.runId}`);
-      }
-    } else {
-      console.log(JSON.stringify(state, null, 2));
-    }
-    return;
-  }
-  if (sub === "snapshot") {
-    const options = parseOptions(tail);
-    const cwd = resolveTargetCwd(options);
-    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-    // 手动快照：需 workflowId（必填），其余可选
-    if (!options.workflowId) throw new Error("wao state snapshot requires --workflow-id");
-    await writeStateSnapshot(waoDir, {
-      workflowId: options.workflowId,
-      executed: [],
-      skipped: [],
-      completedResults: new Map(),
-      allNodes: [],
-      predecessors: {},
-    });
-    console.log(JSON.stringify({ snapshot: true, waoDir }, null, 2));
-    return;
-  }
-  throw new Error(`Unknown wao state subcommand: ${sub ?? "(none)"}. Try: wao state read | wao state snapshot`);
-}
-
 /**
  * wao sweep-claude-config（TD-223，2026-10-07）：清扫 os.tmpdir() 下 claude-code
  * native OAuth 临时配置目录（wao-claude-oauth-*，含凭据副本）。默认 dry-run 只
@@ -513,7 +468,7 @@ async function waoSweepClaudeConfigCommand(args) {
 // 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
 // 0064：+lanes（车道画像只读查询面）。
 export const WAO_SUBCOMMANDS = [
-  "init", "state", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
+  "init", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
   "sweep-claude-config", "accept", "lanes",
 ];
 
@@ -521,10 +476,6 @@ export async function waoCommand(args, config, deps = {}) {
   const [sub, ...tail] = args;
   if (sub === "init") {
     await waoInitCommand(tail, config);
-    return;
-  }
-  if (sub === "state") {
-    await waoStateCommand(tail, config);
     return;
   }
   if (sub === "decision") {

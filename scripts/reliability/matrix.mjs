@@ -15,7 +15,7 @@ const LEGACY_MATRIX = [
 // ADR-0025 §5 / 决定 0084 / 决定 0086：delta 认证子集的 drill 词汇 SSOT。
 // 新（harness × 模型）组合走 delta 认证：sentinel（core 能力）+ scorecard（strict 证据）
 // + containmentEvidence（越界写拦截的活体取证——承担 isolation 语义，不得省）。
-// 不含 workflowRunDir；通过 → conditional + certificationScope:"delta"。
+// 通过 → conditional + certificationScope:"delta"。
 // DELTA_DRILLS 同时是 scripts/reliability/certification.mjs scope 派生的比对基准
 // （单一清单，无第二份）。声明 OS 写沙箱的后端（决定 0086）在同一位置用
 // sandboxEnforcement（不经模型的沙箱执行取证）取代 containmentEvidence——
@@ -43,10 +43,12 @@ export function deltaDrillsForBackend(backendName) {
 // RETIRED_DRILLS），不会经此清单回流。
 export const LEGACY_DELTA_DRILLS = ["sentinel", "scorecard", "adversarialEscape"];
 
-// 已退役 drill 闭集：矩阵行显式声明即解析失败（决定 0084 退役，改用
-// containmentEvidence）。不得静默跳过——静默跳过会把 delta 子集的 isolation
-// 语义悄悄丢掉。
+// 已退役 drill 闭集：矩阵行显式声明即解析失败。adversarialEscape 由决定 0084
+// 退役、改用 containmentEvidence，静默跳过会把 delta 子集的 isolation 语义悄悄
+// 丢掉；workflowRunDir 随决定 0094 的 workflow 层退役，静默跳过会让矩阵行以为
+// 跑过了。两者都不得静默跳过。
 const RETIRED_DRILLS = Object.freeze({
+  workflowRunDir: 'retired by decision 0094 — the workflow layer is gone; remove the drill from the matrix row',
   adversarialEscape: 'retired by decision 0084 — replace it with "containmentEvidence" (live containment-evidence drill; the adversarial out-of-bounds drill left the delta gate because a compliant model refuses the instruction, leaving nothing to intercept)',
 });
 
@@ -175,7 +177,6 @@ function requiredCategoriesForDrills(drills) {
   // isolation 语义降为可选。
   if (
     drills.includes("isolation")
-    || drills.includes("workflowRunDir")
     || drills.includes("stop")
     || drills.includes("containmentEvidence")
     || drills.includes("sandboxEnforcement")

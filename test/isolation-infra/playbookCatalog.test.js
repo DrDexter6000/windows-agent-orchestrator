@@ -8,7 +8,6 @@
 //   - Malformed input → PlaybookValidationError.
 //   - Deep clone immutability.
 //   - Dependency boundary (no commands/MCP/SDK/zod/env/Git/argv/console).
-//   - Existing workflow templates byte-identical.
 //   - Catalog reads cause no filesystem mutation.
 //
 // Attack tests (dynamic import from temp dir):
@@ -249,20 +248,6 @@ test("PB-A10: playbookCatalog.js imports no commands/MCP/SDK/zod, no env/Git/arg
   assert.ok(!/process\.argv/.test(src), "no argv");
   assert.ok(!/console\./.test(src), "no console");
   assert.ok(!/execFileSync|execSync|spawnSync/.test(src), "no Git subprocess");
-});
-
-// ===== PB-A11: workflow templates byte-identical =====
-
-test("PB-A11: existing workflow templates are byte-identical (SHA-256)", () => {
-  const templates = [
-    { file: "workflows/templates/analyze-implement.mjs", sha: "2b58da89f222e5f59f0df6f0078c1ce308dd41b89848bc607533d521cf8412da" },
-    { file: "workflows/templates/parallel-research.mjs", sha: "603420046a975adf43d2be70002a640dbaeb2f24be3ab882b6bda88618631840" },
-  ];
-  for (const t of templates) {
-    const content = readFileSync(join(ROOT, t.file));
-    const sha = createHash("sha256").update(content).digest("hex");
-    assert.equal(sha, t.sha, `${t.file} byte-identical`);
-  }
 });
 
 // ===== PB-A12: catalog reads cause no filesystem mutation =====

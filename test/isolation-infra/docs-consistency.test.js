@@ -180,7 +180,7 @@ test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`�
     CERT_RUNBOOK_DOC,
   ];
   // 真命令 token（任何能真触发 version guard 的子命令）。
-  const REAL_CMD = "run|spawn|retry|resume|status|tail|collect|stop|runs|workflow|worktree|wao|daemon|registry";
+  const REAL_CMD = "run|spawn|retry|resume|status|tail|collect|stop|runs|worktree|wao|daemon|registry";
   // 命中：node [可选路径/]src/cli.js 后紧跟一个真命令（中间允许空格）。
   // 不命中：help/--help（豁免）、以及 `do not call`/`不要直接` 等否定语境。
   const VIOLATION = new RegExp(`node\\b[^\\n]*?src/cli\\.js\\s+(${REAL_CMD})\\b`, "i");
@@ -242,8 +242,9 @@ test("SKILL.md 按需指向 opencode 运维避坑，正文不复制事故清单"
 
 test("spec §7 目录结构不得把未实现的文件当作已存在列出", () => {
   const spec = read("docs/02-architecture.md");
-  // scheduler.js 与 workflow/dag.js 从未实现（roadmap 无对应 milestone）。
-  // spec 不得把它们当作既有文件列出而不标注未实现。
+  // scheduler.js 从未实现（roadmap 无对应 milestone）。
+  // spec 不得把它当作既有文件列出而不标注未实现。（workflow/dag.js 的钉随
+  // workflow 层退役——决定 0094——一并退役。）
   // 允许的形态：出现该名但前后合理窗口内含"未实现"/"（规划）"等标注。
   function assertNotPresentedAsExisting(name) {
     let from = 0;
@@ -260,8 +261,6 @@ test("spec §7 目录结构不得把未实现的文件当作已存在列出", ()
     }
   }
   assertNotPresentedAsExisting("scheduler.js");
-  assertNotPresentedAsExisting("workflow/dag.js");
-  assertNotPresentedAsExisting("dag.js");
 });
 
 test("SKILL.md 不维护第三份事件清单；文档只指向生成清单，不维护事件表", () => {
@@ -553,15 +552,6 @@ test("历史 dispatch NO-GO 记录必须显式标注已被新认证结果取代"
   assert.ok(/10-runtime-driver-comparison|roadmap|reliability-summary/.test(head), "09-dispatch-readiness-review 未指向当前认证/状态权威");
 });
 
-test("workflow gate requiredClaims 格式由 architecture 单点定义", () => {
-  const arch = read("docs/02-architecture.md");
-  assert.ok(
-    /requiredClaims.*nodeId\.field|nodeId\.field.*requiredClaims/.test(arch),
-    "02-architecture.md 缺 gate requiredClaims 的 nodeId.field 契约"
-  );
-  assert.ok(!read("SKILL.md").includes("requiredClaims"), "SKILL.md 不应复制 workflow 字段契约");
-});
-
 test("opencode stop 安全边界不得保留 TD-37/TD-38 修复前的陈旧文案", () => {
   const files = ["README.md", "SKILL.md", "docs/usage.md", "docs/troubleshooting.md"];
   const stale = [
@@ -743,13 +733,6 @@ test("M8 scorecard 默认 warn 语义固化（SKILL+architecture 不得回退为
   const arch = read("docs/02-architecture.md");
   assert.ok(/默认 warn|mode.*warn|scorecard-mode/i.test(arch),
     "02-architecture.md 必须反映 M8-1 scorecard 默认 warn 语义");
-});
-
-test("workflow 节点由 architecture 定义（integrator，M8-5）", () => {
-  // （TD-168 清扫：原"SKILL.md 必须指向动态 CLI help"断言与下方 F1 守卫重复——
-  // F1 版更宽（正向 + 禁静态命令索引负向），较弱份已删。）
-  const arch = read("docs/02-architecture.md");
-  assert.ok(/integrator/i.test(arch), "02-architecture.md 节点处理器清单必须含 integrator（M8-5）");
 });
 
 test("provider-wrapped claude-code worker 必须记录 OAuth 覆盖 provider key 的排查入口", () => {
@@ -1169,16 +1152,24 @@ test("M11-2C-05: PRD 继续拒绝 automatic decomposition 与 fixed workflow", (
     "PRD 继续否定强制固定 workflow");
 });
 
-test("M11-2C-06: architecture 明确 Catalog ≠ WorkflowEngine（分离）", () => {
+test("M11-2C-06: architecture 明确 Playbook Catalog 只读、不执行", () => {
+  // 决定 0094 退役了 WorkflowEngine（可执行 CLI DAG）；本钉随之只保护
+  // Catalog 的现存事实：只读决策脚手架，不是 executor。
   const arch = read("docs/02-architecture.md");
-  // 必须同时出现 Catalog（只读 Lead Playbook）与 WorkflowEngine（可执行 CLI DAG），
-  // 并表达二者分离/不同用途。
   assert.ok(/Playbook Catalog|Lead Playbook|playbookCatalog/i.test(arch),
     "architecture 提及 Playbook Catalog");
-  assert.ok(/WorkflowEngine|workflow engine|executable.*template/i.test(arch),
-    "architecture 提及 WorkflowEngine/executable template");
-  assert.ok(/分离|separate|distinct|不同于|不是.*executor|read-only.*not.*executable/i.test(arch),
-    "architecture 明确 Catalog 与 WorkflowEngine 分离");
+  assert.ok(/只读[^。]*不执行|不派发、不执行|read-only[^.]*not.*executable/i.test(arch),
+    "architecture 明确 Catalog 只读、不执行");
+});
+
+test("0094: architecture 写明 WAO 不提供 DAG 执行、多步编排归 Lead", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(/不提供 DAG 执行/.test(arch),
+    "architecture 必须写明 WAO 不提供 DAG 执行");
+  assert.ok(/多步编排由 Lead|多步编排归 Lead/.test(arch),
+    "architecture 必须写明多步编排由 Lead 组合原语完成");
+  assert.ok(!/WorkflowEngine|DAG 数据模型|workflow run/.test(arch),
+    "architecture 不得再把 DAG 引擎写成现存能力");
 });
 
 test("使用手册 results 页含 playbook 的 MCP resources 与 CLI 两种只读入口", () => {
@@ -1955,36 +1946,28 @@ test("M12-0-02: authority docs + ADR 禁止旧监督替代表述（自动监督�
 });
 
 // M12-0-03: PRD must not retain the retracted LLM-router / auto-semantic-workflow
-// product directions. The Lead defines/selects/modifies the deterministic plan;
-// the already-shipped WorkflowEngine is only a Lead-authored expert mechanical
-// executor. The "LLM orchestrator as a first-class pluggable strategy" and "use
-// an LLM to decide routing" directions are gone.
+// product directions. The Lead defines, selects and changes any multi-step plan;
+// WAO executes no DAG (decision 0094). The "LLM orchestrator as a first-class
+// pluggable strategy" and "use an LLM to decide routing" directions are gone.
 test("M12-0-03: PRD 删除 LLM router / 自动语义 workflow 产品方向", () => {
   const prd = read("docs/01-prd.md");
   assert.ok(!/LLM 编排器.*一等公民|一等公民.*LLM 编排器/.test(prd),
     "PRD 不得保留'LLM 编排器（一等公民）'产品方向");
   assert.ok(!/用 LLM 决定分流/.test(prd),
     "PRD 不得保留'用 LLM 决定分流到哪个 agent'产品方向");
-  assert.ok(/Lead.*定义.*选择.*修改.*deterministic|Lead.*defines.*selects.*modifies.*deterministic|定义\/选择\/修改.*deterministic/i.test(prd),
-    "PRD 必须说明 Lead 定义/选择/修改 deterministic execution plan");
-  assert.ok(/Lead-authored.*mechanical|mechanical executor|专家级.*机械.*执行|Lead-authored expert mechanical/i.test(prd),
-    "PRD 必须把已实现 WorkflowEngine 定位为 Lead-authored expert mechanical executor");
+  // （决定 0094 退役 WorkflowEngine 后，"deterministic execution plan/mechanical
+  // executor"两句正向钉随之退役；两条负向钉继续守住已否决的产品方向不回潮。）
 });
 
-// M12-0-04: architecture downgrades router/gate to mechanical. router is a
-// Lead-authored deterministic function; gate is a Lead-specified mechanical
-// condition. No WAO/LLM auto semantic routing or semantic acceptance. run_wait
-// is liveness observation; supervision belongs to the Lead.
-test("M12-0-04: architecture router=Lead-authored deterministic，gate=mechanical condition；run_wait 是 liveness observation", () => {
+// M12-0-04: No WAO/LLM auto semantic routing or semantic acceptance. run_wait
+// is liveness observation; supervision belongs to the Lead. （决定 0094 退役
+// workflow 层后，router/gate 的两句正向钉随之退役；负向钉与 run_wait 钉保留。）
+test("M12-0-04: architecture 不得保留 LLM 自动语义路由方向；run_wait 是 liveness observation", () => {
   const arch = read("docs/02-architecture.md");
   assert.ok(!/可由 LLM 驱动/.test(arch),
-    "architecture 不得把 router 描述为'可由 LLM 驱动'");
+    "architecture 不得把路由描述为'可由 LLM 驱动'");
   assert.ok(!/可插拔策略的一等公民/.test(arch),
     "architecture 不得保留 LLM 编排器'可插拔策略的一等公民'方向");
-  assert.ok(/Lead-authored deterministic|router.*deterministic.*function|router 是.*Lead.*deterministic|Lead.*定义.*router.*deterministic/i.test(arch),
-    "architecture 必须把 router 定义为 Lead-authored deterministic function");
-  assert.ok(/mechanical condition|机械条件|Lead.*specified.*mechanical|Lead-specified mechanical/i.test(arch),
-    "architecture 必须把 gate 定义为 Lead-specified mechanical condition（非语义验收）");
   assert.ok(/run_wait.*liveness|liveness observation|观察.*监督.*Lead|supervision.*Lead|监督.*属于 Lead|supervision belongs to the Lead/i.test(arch),
     "architecture 必须说明 run_wait 是 liveness observation，supervision 属于 Lead");
 });
@@ -2953,7 +2936,7 @@ test("R10-A: 认证 runbook（原 usage 场景 1b）记录 --model 用法、合�
   assert.match(runbook, /effective model/, "必须记录 effective model 回显");
   // 排除边界。
   assert.match(runbook, /spawn[\s\S]{0,120}(不支持|不携带|没有|排除|不在)|--model[\s\S]{0,160}spawn/,
-    "必须记录 spawn/workflow/daemon 排除边界");
+    "必须记录 spawn/daemon 排除边界");
 });
 
 test("R10-A: 生成层事件清单的 run.started 行携带 modelOverride 字段", () => {
@@ -3091,9 +3074,9 @@ test("R11-1: RUN_USAGE_TEXT 用法页携带 --reasoning（CLI 面；生成层字
   assert.match(RUN_USAGE_TEXT, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集值域说明");
   assert.match(RUN_USAGE_TEXT, /mutually exclusive with\s+--require-certified/, "认证互斥");
   assert.match(RUN_USAGE_TEXT, /provider-session reuse agents/, "复用互斥");
-  assert.match(RUN_USAGE_TEXT, /only on run and retry \(not\s+spawn\/workflow\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag；spawn/workflow/daemon 不支持）");
+  assert.match(RUN_USAGE_TEXT, /only on run and retry \(not\s+spawn\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag；spawn/daemon 不支持）");
   // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮（TD-126）。
-  assert.doesNotMatch(RUN_USAGE_TEXT, /only on run \(not\s+spawn\/workflow\/daemon\)/, "TD-126 旧句不得回潮");
+  assert.doesNotMatch(RUN_USAGE_TEXT, /only on run \(not\s+spawn\/daemon\)/, "TD-126 旧句不得回潮");
   assert.match(RUN_USAGE_TEXT, /effective reasoning/, "回显失败模式说明（advisory）");
   // 生成层 run_dispatch input 表的 "| reasoning | string | no | enum: minimal"
   // 行内容钉与 docsSurface-1 字节钉重复，已删（TD-168 清扫）。
@@ -3306,8 +3289,8 @@ test("技术债编号只定义一次，文档与代码里引用的编号都有�
     "同一个 TD 编号只能定义在一处（台账、已了结清单、已偿还归档三者互斥）");
   const defined = new Set(all);
 
-  // 引用解析：查定义行，不查「文本里出现过」。扫描面 = 文档、决定、源码、配置、脚本、
-  // 工作流与参考资料；测试目录（含合成编号的夹具）与冻结的 docs/archive 不扫。
+  // 引用解析：查定义行，不查「文本里出现过」。扫描面 = 文档、决定、源码、配置、
+  // 脚本与参考资料；测试目录（含合成编号的夹具）与冻结的 docs/archive 不扫。
   const scanned = [];
   const walk = (rel) => {
     for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
@@ -3316,7 +3299,7 @@ test("技术债编号只定义一次，文档与代码里引用的编号都有�
       if (/\.(md|js|mjs|cjs|json|ps1|txt)$/.test(entry.name)) scanned.push(child);
     }
   };
-  for (const top of ["docs", ".wao/decisions", "src", "config", "scripts", "workflows", "references", "playbooks", "tools", "bin"]) {
+  for (const top of ["docs", ".wao/decisions", "src", "config", "scripts", "references", "playbooks", "tools", "bin"]) {
     if (existsSync(join(ROOT, top))) walk(top);
   }
   for (const name of readdirSync(ROOT)) if (/\.(md|txt)$/.test(name)) scanned.push(name);

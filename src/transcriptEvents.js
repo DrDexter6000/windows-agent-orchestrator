@@ -13,7 +13,8 @@
 //     scorecard，不写进 transcript），因此【不】登记——它不是漏登。
 //   - `run.timed_out` 标 legacy：没有现行生产写出点，仅为读取旧转录保留
 //     （findState/诊断兼容面）。
-//   - workflow 事件登记四个具体名字（不登记通配），写独立 `wf_*.jsonl`。
+//   - workflow 事件登记四个具体名字（不登记通配），标 legacy：只出现在旧
+//     转录（workflow 层已由决定 0094 退役，不再有写入方），读侧仍识别。
 //   - 本模块零相对出边（node only）；消费方 src/transcript.js（写入侧
 //     序列化守卫）、scripts/gen-surface.mjs（渲染生成清单）与测试。
 //
@@ -29,7 +30,7 @@
  * 登记表。每条：具体事件类型名 + 说明（何时写、载荷约束、闭集指针、
  * 兼容说明；架构表与手册表两边事实的并集）+ 可选 legacy 标记。
  * 顺序即生成清单的行序（生命周期 → 终态事实 → 会话/消息 → 交付 →
- * 复核 → 纠错 → 回收/线系 → scorecard → workflow 族）。
+ * 复核 → 纠错 → 回收/线系 → scorecard → workflow 族，末族已 legacy）。
  */
 export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   {
@@ -291,19 +292,23 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "workflow.started",
-    description: "DAG 执行开始（写独立 `wf_*.jsonl`，经 JsonlTranscript.append）：载荷 {workflowId, nodeCount, layers}；payload 冲突字段重命名保护信封（nodeRunId/nodeType/nodeAgentId）。",
+    description: "legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 执行开始（写独立 `wf_*.jsonl`，经 JsonlTranscript.append）：载荷 {workflowId, nodeCount, layers}；payload 冲突字段重命名保护信封（nodeRunId/nodeType/nodeAgentId）。",
+    legacy: true,
   },
   {
     type: "workflow.node.started",
-    description: "DAG 节点开始（`wf_*.jsonl`）：载荷 {nodeId, nodeType, nodeAgentId}——节点的 type/agentId 写盘前改名，不覆盖信封字段。",
+    description: "legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 节点开始（`wf_*.jsonl`）：载荷 {nodeId, nodeType, nodeAgentId}——节点的 type/agentId 写盘前改名，不覆盖信封字段。",
+    legacy: true,
   },
   {
     type: "workflow.node.completed",
-    description: "DAG 节点完成（`wf_*.jsonl`）：载荷 {nodeId, runId→nodeRunId, completed, error?}——typed 拒绝文案（如 dispatch_cwd_not_found）随本事件落盘，是 CLI 汇总外的唯一持久诊断出口。",
+    description: "legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 节点完成（`wf_*.jsonl`）：载荷 {nodeId, runId→nodeRunId, completed, error?}——typed 拒绝文案（如 dispatch_cwd_not_found）随本事件落盘，是 CLI 汇总外的唯一持久诊断出口。",
+    legacy: true,
   },
   {
     type: "workflow.completed",
-    description: "DAG 执行完成（`wf_*.jsonl`）：载荷 {workflowId, completed, executed[], skipped[]}。",
+    description: "legacy：只出现在旧转录（workflow 层已由决定 0094 退役，不再有写入方）。DAG 执行完成（`wf_*.jsonl`）：载荷 {workflowId, completed, executed[], skipped[]}。",
+    legacy: true,
   },
 ].map((entry) => Object.freeze({ legacy: false, ...entry })));
 

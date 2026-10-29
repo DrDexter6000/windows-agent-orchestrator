@@ -134,7 +134,7 @@ test("buildCertificationMatrix: operational drills require operational certifica
         matrix: [
           {
             agentId: "researcher",
-            drills: ["sentinel", "scorecard", "isolation", "workflowRunDir", "stop"],
+            drills: ["sentinel", "scorecard", "isolation", "stop", "containmentEvidence"],
           },
         ],
       },
@@ -144,7 +144,7 @@ test("buildCertificationMatrix: operational drills require operational certifica
   assert.deepEqual(matrix[0].requiredCategories, ["core", "strict", "operational", "observability"]);
 });
 
-test("buildCertificationMatrix: isolation and workflowRunDir are operational checks even without stop", () => {
+test("buildCertificationMatrix: isolation and sandboxEnforcement are operational checks even without stop", () => {
   const matrix = buildCertificationMatrix({
     registry: {
       agents: registry.agents,
@@ -152,7 +152,7 @@ test("buildCertificationMatrix: isolation and workflowRunDir are operational che
         matrix: [
           {
             agentId: "researcher",
-            drills: ["sentinel", "scorecard", "isolation", "workflowRunDir"],
+            drills: ["sentinel", "scorecard", "isolation", "sandboxEnforcement"],
           },
         ],
       },

@@ -2,7 +2,7 @@
  * RunEvent 类型定义与构造器（spec §2.2）。
  *
  * 所有 backend（opencode-serve / 进程式 claude-code / codex）的输出统一翻译成 RunEvent 序列。
- * 编排层（RunManager / DAG 引擎）只面对这个统一形状，永远不碰传输细节。
+ * 编排层（RunManager）只面对这个统一形状，永远不碰传输细节。
  *
  * 契约边界（M4 更新）：
  *   message + done + metrics 三类事件。

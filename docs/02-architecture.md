@@ -27,7 +27,7 @@
 │              事件/资源订阅                                     │
 │              shared application services                       │
 ├──────────────────────────────────────────────────────────────┤
-│ L3 编排层    DAG 引擎 · 可插拔节点 · 结构化 handoff            │
+│ L3 编排层    已退役（决定 0094）——多步编排归 Lead            │
 ├──────────────────────────────────────────────────────────────┤
 │ L2 控制平面  RunManager · 状态机 · 调度器 · 隔离 · 恢复        │
 ├──────────────────────────────────────────────────────────────┤
@@ -44,7 +44,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 - **adapters**（所有外部面/入口）：`src/mcp/**`、`src/commands/**`、`src/cli.js`、`src/ownerDashboardServer.js`（第三个网络面：loopback HTTP 观察边界）、`src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js`。
 - **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared/core 成员例外清单内者。
-- **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（含转录分桶路径权威 `src/projectBuckets.js`——新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺只读兼容，定位一律经其三级解析链；与 transcript.js 同层=路径权威对）（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
+- **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（含转录分桶路径权威 `src/projectBuckets.js`——新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺只读兼容，定位一律经其三级解析链；与 transcript.js 同层=路径权威对）（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
 - **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/projectIdentity.js`（项目身份规范化纯函数：cwd 规范化/稳定键/桶 slug 派生）、`src/waoCliPath.js`、`src/version.js`（CLI/MCP 版本常量，读 package.json 单一来源）、`src/keepAwake.js`、`src/runnerPrompt.js` + `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
 - `src/owner-dashboard/**` 是浏览器静态资产，不参与 Node import 图。
@@ -73,7 +73,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
   CLI `runs delivery` / `runs diagnose` / `collect` / `status` 均委托共享 service。非 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
-- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向，上向例外白名单为空）由 `test/isolation-infra/layering.test.js` 机器强制。
+- RunManager / transcript / delivery / Backend 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L2 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向，上向例外白名单为空）由 `test/isolation-infra/layering.test.js` 机器强制。
 - MCP 工具面（当前 inventory；完整 23-tool 冻结清单见下方冻结工具面条目与 §7）：
 
   | 工具 | 性质 | 委托与契约要点 |
@@ -114,7 +114,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - Worker 接收 bounded task prompt。
 - Worker 可以接收稳定 role contract 和必要安全/运行时约束。
   - **角色合同注入**：由 **backend 能力声明** 驱动——RunManager 仅当 `backend.supportsRoleContract === true` 才允许带角色（严格相等，字符串/数字/对象/null/undefined 一律 fail closed），**不按 runtime 名称分支**。`systemPrompt` 路径由共享 `roleContract.js` 的 `resolveRoleContractPath` **相对 WAO 安装根**（从模块 URL 推导，非 `process.cwd()`）解析，所以同一份全局 registry + 角色文件可从任意目标项目目录使用。**加载时序**：start 在创建 transcript 和 spawn 前加载验证角色；resume 在读取既有 transcript 后、任何 append/spawn 前加载（失败时 transcript 字节不变）。不支持注入的 backend 配了 `systemPrompt` 在这两个时点 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。八个 backend 各自注入：claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 与 kimi-web 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导）；deepseek-harness 用 `DSH_SYSTEM_PROMPT`；deepseek-acp 用 per-dispatch `--patch` personaPrefix；zcode 拼进 `session/send` content 前缀；OpenCode 须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测），用 message API 原生 `system` 字段，task 仍只在 user text part 出现一次。注入条件逐 backend 见 `src/backends/factory.js` 能力说明（生成面 `docs/surface/`）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。**WAO 不把角色合同保存为 `prompt.sent`/控制面输入**——transcript 只持久化原始 task prompt。（注意：worker 输出可能在回答中引用或复述角色内容，这由模型决定，因此不能宣称 transcript 永远不含角色正文。）
-  - **canonical worker identity**：身份闭集 SSOT 是 `src/canonicalAgentId.js`（`isValidCanonicalAgentId` + `safeProjectAgentId`：合法字符仅 `[A-Za-z0-9._-]`、长度 1..128；dependency-free、root-level）。`roleContract.js` 的 `composeRoleContractWithIdentity` 是唯一组合函数，**只接受已验证的 canonical id**——非法 id（含 newline/whitespace/injection）不得以任何形式进入模型提示词（不"压成同一行"，而是直接拒绝加身份头，只返回角色正文）。start 和 resume 都走它，结果一致、角色合同恰好注入一次。只有本就配了角色合同的 agent 加身份头；未配 systemPrompt 的行为不变。身份头不伪装成 Lead task prompt（`prompt.sent` 仍只存原始 task prompt）。registry normalization（`registry.js`）用同一 SSOT：非法 registry id 在 transcript/spawn 前以**固定安全错误**拒绝（不回显恶意 id；是配置合法性校验，不是 Lead workflow gate）。结构化身份提取是 `transcript.js` 的 `extractCanonicalAgentId(events, expectedRunId)`：**只有每个事件都具备与 `expectedRunId` 一致的 `runId` 且同一个合法 canonical agentId** 才返回该 id；缺失、冲突、非法或跨 run 一律返回 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。status/wait/collect 传入其请求 runId，并复用各自已读的同一份 transcript 快照（身份不额外读 transcript/registry/文件系统）。`run_dispatch`/`run_status`/`run_wait`/`run_collect` 的 MCP output schema 都用共享长度/字符合同声明 `agentId`、根对象 strict，并返回 `OUTPUT.parse(payload)` 的结果；malformed/extra/超长/injection service output 折叠为既有固定安全错误。
+  - **canonical worker identity**：身份闭集 SSOT 是 `src/canonicalAgentId.js`（`isValidCanonicalAgentId` + `safeProjectAgentId`：合法字符仅 `[A-Za-z0-9._-]`、长度 1..128；dependency-free、root-level）。`roleContract.js` 的 `composeRoleContractWithIdentity` 是唯一组合函数，**只接受已验证的 canonical id**——非法 id（含 newline/whitespace/injection）不得以任何形式进入模型提示词（不"压成同一行"，而是直接拒绝加身份头，只返回角色正文）。start 和 resume 都走它，结果一致、角色合同恰好注入一次。只有本就配了角色合同的 agent 加身份头；未配 systemPrompt 的行为不变。身份头不伪装成 Lead task prompt（`prompt.sent` 仍只存原始 task prompt）。registry normalization（`registry.js`）用同一 SSOT：非法 registry id 在 transcript/spawn 前以**固定安全错误**拒绝（不回显恶意 id；是配置合法性校验，不是语义门禁）。结构化身份提取是 `transcript.js` 的 `extractCanonicalAgentId(events, expectedRunId)`：**只有每个事件都具备与 `expectedRunId` 一致的 `runId` 且同一个合法 canonical agentId** 才返回该 id；缺失、冲突、非法或跨 run 一律返回 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。status/wait/collect 传入其请求 runId，并复用各自已读的同一份 transcript 快照（身份不额外读 transcript/registry/文件系统）。`run_dispatch`/`run_status`/`run_wait`/`run_collect` 的 MCP output schema 都用共享长度/字符合同声明 `agentId`、根对象 strict，并返回 `OUTPUT.parse(payload)` 的结果；malformed/extra/超长/injection service output 折叠为既有固定安全错误。
   - **worker evidence discipline**：同一 SSOT 组合函数 `composeRoleContractWithIdentity` 在身份头与角色正文之间恰好一次地注入一个固定的控制面所有证据纪律块（导出常量 `WORKER_EVIDENCE_DISCIPLINE`；唯一正文权威在 `src/application/roleContract.js`，本段只述语义不复制正文）。(1) **WQ-01 grounding**——对仓库路径/端点/符号/模块/API 形状/测试行为做具体断言前，先检查相关仓库证据，并在最终报告中给出支撑的 repo-relative 路径/符号/测试；未验证的断言必须显式标为 unverified/uncertain，不得当事实陈述。(2) **WQ-02 async/state**——改动 async/有状态 UI 或 query-gating 行为时，枚举适用状态（normal、loading、error、missing、unparseable、stale-data-plus-error），测试每个适用状态及高风险组合；省略某状态须说明为何不适用。该块是 **worker 执行/汇报纪律，不是语义验收规则**：不引入 parser、scorecard、自动重试/自动打回、自动门或接受决策，**Lead 仍是唯一语义裁判**。只对已有非空 role contract 且 agentId 合法的 worker 生效（start/resume 同一 SSOT，恰好一次）；无 role contract 或非法 agentId 行为不变；块随既有 roleContract transport 注入，不新增能力门，也不强制不支持 role 注入的 backend 承载它；六种正式 canonical 身份的组成串除 agentId 令牌外逐字节一致（无 runtime 名称/worker 席位分支）。
 - Transcript 与控制面仍由 WAO/Lead 所有。
 
@@ -123,9 +123,9 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 ## 2. L1：运行时抽象
 
 > **本章是 "runtime-agnostic" 承诺的技术落点**（定义见 `docs/01-prd.md` §1）。
-> 强承诺：编排逻辑（L2/L3）不针对具体 runtime 写分支——同一套 RunManager / 状态机 /
-> scorecard / DAG 引擎，对所有 runtime 一视同仁。加新 runtime = 写一个 Backend 类 + parser，
-> 编排层一行不改。本章定义的就是这个承诺赖以成立的接口契约。
+> 强承诺：控制平面（L2）不针对具体 runtime 写分支——同一套 RunManager / 状态机 /
+> scorecard，对所有 runtime 一视同仁。加新 runtime = 写一个 Backend 类 + parser，
+> 控制平面一行不改。本章定义的就是这个承诺赖以成立的接口契约。
 
 ### 2.1 Backend 接口（核心）
 
@@ -585,7 +585,7 @@ WAO 提供两种进程形态，共用同一套 RunManager/transcript 生命周�
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。worker 只准备变更，不创建 commit。
 
-**模块边界**：`src/delivery.js` 是 deep module，只依赖 Node built-ins，不 import CLI / RunManager / workflow / transcript / backend / role 模块。Git 通过 `execFileSync("git", args)` 结构化参数调用，**禁止 shell-built command string**。
+**模块边界**：`src/delivery.js` 是 deep module，只依赖 Node built-ins，不 import CLI / RunManager / transcript / backend / role 模块。Git 通过 `execFileSync("git", args)` 结构化参数调用，**禁止 shell-built command string**。
 
 **API（v1）**：
 
@@ -806,7 +806,7 @@ runs delivery <runId> --reject --reason-file FILE [--format json]       # Lead �
 不重写已有 `run.delivery_created` 或 verification 事件。pending 拒绝的决策 ref 显式保留 `verification:"pending"` + `acceptance:"rejected"`——这正是读面校验的唯一合法 pending 决策形态。
 
 **原子 first-decision-wins**（`JsonlTranscript.tryAppendDecision`）：
-在已有 cross-process append lock 内完成：读事件 → **先经共享事实权威校验** → 返回已校验的已有 decision（`{accepted:false,existing}` loser，先于任何新动作 gate）→ append at most one decision event → 返回 `{accepted:true,event}` 给 winner。此原语窄，不泛化为 workflow engine。
+在已有 cross-process append lock 内完成：读事件 → **先经共享事实权威校验** → 返回已校验的已有 decision（`{accepted:false,existing}` loser，先于任何新动作 gate）→ append at most one decision event → 返回 `{accepted:true,event}` 给 winner。此原语窄，不泛化为编排引擎。
 append 失败原样传播；不在 durable transcript write 前 report acceptance。
 CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` + existing（loser）。
 
@@ -856,71 +856,9 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 ---
 
-## 5. L3：编排层
+## 5. 多步编排
 
-L3 是确定性 DAG 编排（`defineWorkflow` + `WorkflowEngine`）：同层并行、层间串行、失败传播；引擎只做机械执行，语义决策归 Lead（见 5.4）。
-
-### 5.1 DAG 数据模型
-
-```js
-interface WorkflowDef {
-  id: string;
-  nodes: NodeDef[];
-  edges: EdgeDef[];
-}
-interface NodeDef {
-  id: string;
-  type: "agent" | "gate" | "router" | "integrator";  // 另可 registerHandler 注册自定义 type
-  agentId?: string;            // type=agent 必填（校验强制）
-  prompt?: string;
-  promptBuilder?: (ctx) => string;   // 动态 prompt，可读 ctx.upstream
-  requiredClaims?: string[];   // gate："nodeId.field" 或裸 "field"
-  routes?: (ctx) => string | string[];  // router：下游 node id
-  scorecard?: { rules: ScorecardRules };  // agent：节点级规则
-  template?: { separator?: string };      // integrator：分隔符，默认 "\n\n"
-}
-interface EdgeDef {
-  from: string;
-  to: string;
-  dataEdge?: boolean;
-}
-```
-
-`defineWorkflow(def)` 校验并归一化：重复 node id、悬空 edge、自环、循环、agent 节点缺 agentId 一律抛错。`topoSort(def)` 分层，同层无执行依赖，可并行。
-
-**依赖语义**：
-- 默认（`dataEdge` 省略或 false）= 执行依赖：计入分层，`to` 等 `from` 完成后才启动。
-- `dataEdge: true` = 非执行依赖：不计入分层，`to` 的启动时机与 `from` 无关；`from` 已完成时其产出仍作为 upstream 引用传给 `to`（见 5.2），未完成则该引用缺席。没有"数据就绪事件"或流式 handoff——`dataEdge` 不是"数据可用后即启动"；真正的数据依赖未实现，登记在 `docs/tech-debt.md`。
-
-### 5.2 节点间引用传递
-
-`buildUpstreamContext` 构造 `ctx.upstream[nodeId] = { runId, transcriptPath, completed, output, text, tokens, costUsd }`——传引用不传内容（防 token 爆炸），不含 messages 全文；`output` 是节点产出（agent 节点为 `{ text, tokens, costUsd }`），`text`/`tokens`/`costUsd` 是它的一等别名。
-
-- prompt 构造：`promptBuilder(ctx)` 优先，其次静态 `prompt`，都缺则报错。
-- 字段完整性校验在 gate 节点上做：`checkRequiredClaims(node, upstream)` 按 `requiredClaims` 检查前驱产出字段，缺字段 → gate 不通过（`completed:false`，`missing` 列出缺项）。
-
-### 5.3 workflow 定义（.mjs ESM 模块）
-
-workflow 定义是仓库里的 ESM 模块：`export default defineWorkflow({...})`（推荐）或裸对象（loader 补校验），只认 `.mjs`，不支持 `.yaml`/`.json`。参数式 DAG：`applyTemplate(def, vars)` 替换字符串值里的 `{{key}}` 占位符（未提供的原样保留，返回新对象）。
-
-workflow 只写图拓扑（nodes + edges）与 `agentId` 对 registry 的引用；模型 profile 与环境（cwd/worktree 策略）在 registry agent 定义里，workflow 不重复；workflow 不声明权限，沿用 RunManager 的 worktree 与 cwd 策略。
-
-定义即行为：无独立 workflow 配置存储，改模块即改未来 run 的行为。模板目录 `workflows/templates/` 与 `--vars` 见 `docs/surface/cli.md`。
-
-### 5.4 节点处理器
-
-内置四类（`src/workflow/handlers.js`）：agent（`RunManager.start` + `waitForCompletion`，agentId 别名经 dispatchResolution 解析、`node.scorecard` 透传）、gate（前驱全 completed + requiredClaims 检查）、router（`node.routes(ctx)` 选下游）、integrator（前驱文本去重、按序拼初稿）。自定义类型经 `registerHandler(type, handler)` 注册（须有 `execute(node, ctx)`）。
-
-`gate.requiredClaims` uses `"nodeId.field"` to require one predecessor field; a bare `"field"` searches all predecessors. This format is part of the workflow contract, not a Lead prompt convention.
-
-integrator 拼出初稿即算 completed，但不判定交付质量——终验归后续节点或 Lead，不自动跑完整性 gate；draft 经 `ctx.upstream` 供下游引用。
-
-**节点语义（为什么见决定 0018）**：`router` 是 **Lead-authored deterministic function**——分支条件由 Lead
-写定，引擎机械求值，WAO/LLM 不做自动语义路由。`gate` 是 **Lead-specified mechanical condition**
-（证据存在性、字段完整性等程序可判定事实），不是语义验收——验收由 Lead 拍板。WorkflowEngine
-（`src/workflow/engine.js`）作为 Lead-authored expert mechanical executor 执行 Lead 写定的分层/
-并行/依赖，不构成 "LLM 编排器一等公民" 产品方向；如需把外部 LLM 判断接入某个节点，是 Lead 在
-自己 plan 里的显式选择并自行负责，不焊死在引擎里，也不由 WAO 自动驱动。
+WAO 不提供 DAG 执行或"预先声明、由控制面推进"的多步计划（决定 0094 退役了原 workflow/DAG 层；读侧仍识别旧 `wf_*` 归档转录）。多步编排由 Lead 用现有原语组合完成：并行研究与核验用 consult（`run_consult`）；实现加验证用带交付规格的派发（`run_dispatch` + 交付验证、会审包、裁定）；续接与纠偏用 `run_continue` / `run_correct`。验收与语义决策始终归 Lead。量大且重复的流水线在宿主侧写脚本调用 WAO 的派发、等待与交付原语实现，不在控制面里再建第二套状态机；"A 跑完自动接 B"的无人值守串联由宿主定时唤醒 Lead 决定（不变量 4）。
 
 ---
 
@@ -978,7 +916,7 @@ src/
 │   ├── server.js             #   MCP server factory + 23 tools（registry_list/workspace_status/workspace_select/lead_preflight/run_dispatch/run_dispatch_contract_check/run_consult/run_continue/run_correct/run_status/run_collect/run_diagnose/run_delivery/run_delivery_decide/run_stop/runs_list/run_wait/run_await_result/run_activity/run_delivery_review/run_delivery_review_bundle/run_delivery_repackage/run_delivery_reverify；playbook catalog 为 wao://playbooks resources 非 tools；roster 名序=toolSurface SSOT）
 │   ├── toolSurface.js        #   冻结工具面 SSOT：23 个 always-registered tools 的 frozen 数组（playbook 目录不在工具面，由 MCP resources 承载）+ 唯一性/计数不变量；server.js 构造期 deepEqual 自检，无 Host/runtime 分支、无 profile
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root；未知 flag 一律忽略不失败，含旧 profile 参数）
-├── application/              # L3：shared application services（use-case 层）
+├── application/              # L4：shared application services（use-case 层）
 │   ├── registryInventory.js  #   registry inventory SSOT（CLI + MCP 共用；providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表；独立部分投影 getRegistryInventoryWithIssues + REGISTRY_ISSUE_CODES/REGISTRY_ISSUES_CAP 闭集——registry 可读但单条坏条目时返回有效 worker + 有界安全 issues 而非整表失败，严格路径不变）
 │   ├── runDispatch.js        #   background dispatch service（CLI + MCP 共用；continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
 │   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
@@ -1017,12 +955,6 @@ src/
 │       ├── lineStream.js     # stdout 行流解析基类
 │       ├── claudeCode.js     # claude-code stream-json 解析
 │       └── codex.js          # codex 输出解析
-├── workflow/                 # L3：DAG 引擎
-│   ├── schema.js             #   图定义 + 校验 + 拓扑排序
-│   ├── loader.js             #   .mjs 加载 + applyTemplate（参数式 DAG）
-│   ├── engine.js             #   执行引擎（分层 + 并行 + 失败传播；节点抛错不废同层；workflowTimeout 截断剩余层）
-│   ├── handlers.js           #   节点处理器（agent/gate/router/integrator + 自定义注册）
-│   └── handoff.js            #   节点间引用传递 + promptBuilder
 config/
 ├── agents.example.json       # registry 模板（每车道一条）
 └── default.json              # 默认设置
@@ -1030,16 +962,9 @@ test/
 └── （各模块配 node:test 测试）
 ```
 
-> **不存在的模块**（勿当作既有文件）：`scheduler.js`（限并发调度器，未实现，见 §4.4；在册 tech-debt：docs/tech-debt.md）、`workflow/dag.js`（无独立 dag.js——DAG 能力在 schema.js + engine.js）。
+> **不存在的模块**（勿当作既有文件）：`scheduler.js`（限并发调度器，未实现，见 §4.4；在册 tech-debt：docs/tech-debt.md）。原 `src/workflow/`（DAG 引擎）已随决定 0094 删除。
 
-**Lead Playbook Catalog ≠ WorkflowEngine（概念分离）**：WAO 有两套**不同用途**的编排辅助，必须区分，不得混淆：
-
-| 概念 | 位置 | 可执行 | 用途 |
-|---|---|---:|---|
-| Lead Playbook Catalog | `playbooks/lead/*.json` + `application/playbookCatalog.js` + MCP resources `wao://playbooks`/`wao://playbooks/{id}`（只读 resources/CLI） | 否 | 可选的 Lead 决策脚手架：evidence gate、adaptation point。Lead 保留/跳过/修改条件步骤；catalog 不派发、不推进 phase、不验收。 |
-| WorkflowEngine | `src/workflow/engine.js` + `workflows/templates/*.mjs` | 是 | 确定性 CLI DAG 执行（分层 + 并行 + 失败传播），硬编码 agent/prompt。 |
-
-Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），**不是**第二个 executor；不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。`workflow run/list` 是专家级 CLI 特性，不是 Playbook Catalog 的基础。
+**Lead Playbook Catalog（只读、不执行）**：`playbooks/lead/*.json` + `application/playbookCatalog.js` + MCP resources `wao://playbooks`/`wao://playbooks/{id}`（只读 resources/CLI）。Catalog 是可选的 Lead 决策脚手架：evidence gate、adaptation point；Lead 保留/跳过/修改条件步骤。它是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），不派发、不执行、不推进 phase、不验收——不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。多步执行能力（DAG 引擎）已随决定 0094 退役，见 §5。
 
 **模块边界规则**：
 - backend 特定逻辑**只在** `src/backends/` 下

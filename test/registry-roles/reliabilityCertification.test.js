@@ -659,7 +659,7 @@ test("pruneStaleCases T4 认证级：清算后 worker 级聚合升 certified（�
     check("sentinelA", true, "core"), check("sentinelB", true, "core"),
     check("hasDoneEvent", true, "core"),
     check("commandsPassed", true, "strict"), check("filesExist", true, "strict"), check("hasEvidence", true, "strict"),
-    check("workflowRunDir", true, "operational"),
+    check("operationalProbe", true, "operational"),
     check("metricsNonZero", true, "observability", { capability: "metrics" }),
   ];
   const prior = [

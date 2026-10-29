@@ -1421,7 +1421,6 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.doesNotMatch(out, /runs forecast/, "已移除的 forecast 不得继续出现在 help");
   // wao 族（整族曾缺席）
   assert.match(out, /wao init/, "help 必须列出 wao init");
-  assert.match(out, /wao state/, "help 必须列出 wao state");
   assert.match(out, /wao decision/, "help 必须列出 wao decision");
   assert.match(out, /wao declare/, "help 必须列出 wao declare（TD-82 自做声明）");
   assert.match(out, /wao stage/, "help 必须列出 wao stage（TD-83 阶段声明）");
@@ -1432,7 +1431,6 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /daemon supervise/, "help 必须列出 daemon supervise");
   assert.match(out, /daemon supervisor/, "help 必须列出 daemon supervisor");
   assert.match(out, /daemon health/, "help 必须列出 daemon health");
-  assert.match(out, /workflow list/, "help 必须列出 workflow list（TD-88 模板库）");
   // mcp 族（M10 P0-1 workspace activation）
   assert.match(out, /mcp bind/, "help 必须列出 mcp bind（M10 P0-1 workspace activation）");
   assert.match(out, /mcp status/, "help 必须列出 mcp status");
@@ -1844,28 +1842,12 @@ test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校�
   assert.match(r2.stderr, /requires 一句话任务/, "stderr 提示需要一句话任务");
 });
 
-test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB：临时 run-dir，占位 cwd 派发前拒绝）", () => {
-  // workflow list 应列出 analyze-implement 和 parallel-research 两个模板
-  const r = spawnSync(process.execPath, ["src/cli.js", "workflow", "list"],
-    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
-  assert.equal(r.status, 0, `workflow list 应成功，stderr=${r.stderr}`);
-  assert.match(r.stdout, /analyze-implement/, "list 应列出 analyze-implement 模板");
-  assert.match(r.stdout, /parallel-research/, "list 应列出 parallel-research 模板");
-  assert.match(r.stdout, /workflow run <名字>/, "list 提示按名字调用用法");
-
-  // R7-AB 测试卫生：workflow run 的 agent 节点此前不带 --run-dir，会真实派发
-  // 2 路 researcher（example registry 的占位 cwd D:/projects/your-project），
-  // 失败 transcript 直接泄漏进仓库真实 runs/。现在显式指向临时 run-dir——
-  // 本测试对仓库 runs/ 的写入结构性归零（任何机器、任何 env 下均成立）。
-  //
-  // R7-C（C-6）与机器状态解耦：不再依赖 D:/projects/your-project 在本机不
-  // 存在（该路径存在的机器上本测试会硬失败且真实派发）。改用 fixture
-  // registry——形状来源 config/agents.example.json 的 researcher 条目
-  // （claude-code 进程式 backend），cwd 指向本测试 tmpdir 下的随机必缺路径，
-  // 任何机器上确定性不存在。
+test("R7-AB 层一：run --background 缺 cwd 拒绝（fixture 必缺 cwd，派发服务层 typed 拒绝）", () => {
+  // R7-C（C-6）与机器状态解耦：fixture registry——形状来源 config/agents.example.json
+  // 的 researcher 条目（claude-code 进程式 backend），cwd 指向本测试 tmpdir 下的
+  // 随机必缺路径，任何机器上确定性不存在。
   const dir = mkdtempSync(join(tmpdir(), "wao-td88-wf-"));
   try {
-    const wfRunDir = join(dir, "wf-runs");
     const bgRunDir = join(dir, "bg-runs");
     const badCwd = join(dir, `no-such-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     const fixtureRegistry = join(dir, "agents.td88-fixture.json");
@@ -1875,42 +1857,8 @@ test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB�
       },
     }), "utf8");
 
-    // 按名字调用应解析到 templates/ 目录。不验证 workflow 执行结果（节点失败
-    // 是 per-node catch，引擎照常收尾输出汇总），只验证名字解析不报"找不到文件"
-    // ——原意图（验证名字解析不报 MODULE_NOT_FOUND）保持不变。
-    const r2 = spawnSync(process.execPath, [
-      "src/cli.js", "workflow", "run", "parallel-research",
-      "--vars", "topicA=testA", "--vars", "topicB=testB",
-      "--registry", fixtureRegistry, // fixture（example 形状，cwd 必缺）——不依赖 example 占位路径在本机不存在
-      "--run-dir", wfRunDir,
-    ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
-    assert.doesNotMatch(r2.stderr || "", /MODULE_NOT_FOUND|Cannot find module.*parallel-research/,
-      "按名字调用应解析到模板文件，不报模块未找到");
-    assert.equal(r2.status, 0, `workflow 引擎应跑完并输出节点汇总，stderr=${r2.stderr}`);
-    assert.match(r2.stdout, /"workflowRunId": "wf_/, "输出 workflow 级 runId");
-
-    // R7-AB 层二（workflow 节点通道，事故通道）：fixture 的必缺 cwd 在
-    // RunManager.start 被 typed 拒绝——agent 节点 completed:false 且无 runId
-    // （run 从未 start），临时 run-dir 只含 workflow 级 transcript、零 run
-    // transcript。typed 文案断言钉在持久层（wf_*.jsonl 的
-    // workflow.node.completed.error，R7-C C-1）：
-    // run-lifecycle/runManagerCwdExistence.test.js RCE-8。
-    const summary = JSON.parse(r2.stdout);
-    assert.equal(summary.completed, false, "节点失败 → workflow 整体 completed:false");
-    for (const nodeId of ["research_a", "research_b"]) {
-      assert.ok(summary.nodes[nodeId], `${nodeId} 节点出现在汇总里`);
-      assert.equal(summary.nodes[nodeId].completed, false, `${nodeId} 因必缺 cwd 被拒`);
-      assert.equal(summary.nodes[nodeId].runId, undefined, `${nodeId} 无 runId——run 在 start 前置校验被拒，从未创建`);
-      assert.match(summary.nodes[nodeId].error, /dispatch_cwd_not_found/,
-        `${nodeId} 汇总透出闭集 reason code（R7-C C-1 CLI 投影）`);
-    }
-    const wfJsonl = existsSync(wfRunDir) ? readdirSync(wfRunDir).filter((f) => f.endsWith(".jsonl")) : [];
-    assert.equal(wfJsonl.length, 1, "run-dir 只含 workflow 级 transcript");
-    assert.match(wfJsonl[0], /^wf_/, "唯一 transcript 是 workflow 级（wf_ 前缀）");
-
-    // R7-AB 层一（同一缺陷的后台派发面，预防性）：fixture 的必缺 cwd 在派发
-    // 服务层被 typed 拒绝。这里用【后台派发通道】端到端钉死该契约：
-    // exit 非零 + stderr 含 dispatch_cwd_not_found 与解析后的必缺路径 +
+    // fixture 的必缺 cwd 在派发服务层被 typed 拒绝。这里用【后台派发通道】端到端
+    // 钉死该契约：exit 非零 + stderr 含 dispatch_cwd_not_found 与解析后的必缺路径 +
     // run-dir 零 run transcript（早于任何 transcript 写入、零 fork）。
     const bg = spawnSync(process.execPath, [
       "src/cli.js", "run", "researcher",
@@ -2228,7 +2176,7 @@ test("R5-B: doctor scoped——registry 无 worker 时 CLI/key 全部 INFO 跳�
     // 建一个完整 .wao/（6 槽位）使 wao_init 为 OK——verdict 可确定断言 HEALTHY。
     mkdirSync(join(dir, ".wao"), { recursive: true });
     writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
-    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs", "migration"]) { // 0045 §4.2：+migration 证据槽（7 槽）
+    for (const slot of ["decisions", "pipeline", "handoff", "runs", "migration"]) { // 6 必需槽位（project.md + 5 目录；0094：state 转可选）
       mkdirSync(join(dir, ".wao", slot), { recursive: true });
     }
     const registryPath = join(dir, "agents.json");
@@ -2798,7 +2746,7 @@ test("R8-2: --warn-as-error 在仅 cwd 存在性 WARN 时 exit 1（分级语义�
     // 且 name 为 cwd_tester，与 cli_* 的 PATH 探测结果解耦。
     mkdirSync(join(dir, ".wao"), { recursive: true });
     writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
-    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs", "migration"]) { // 0045 §4.2：+migration 证据槽（7 槽）
+    for (const slot of ["decisions", "pipeline", "handoff", "runs", "migration"]) { // 6 必需槽位（project.md + 5 目录；0094：state 转可选）
       mkdirSync(join(dir, ".wao", slot), { recursive: true });
     }
     const registryPath = join(dir, "agents.json");
@@ -4207,9 +4155,9 @@ test("R11-1-CLI-7: run --help 用法页含 --reasoning（闭集 + 互斥 + 仅 r
   assert.match(out, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集说明");
   assert.match(out, /mutually exclusive with\s+--require-certified/, "认证互斥说明");
   assert.match(out, /provider-session reuse agents/, "复用互斥说明");
-  assert.match(out, /only on run and retry \(not\s+spawn\/workflow\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag）");
+  assert.match(out, /only on run and retry \(not\s+spawn\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag）");
   // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮。
-  assert.doesNotMatch(out, /only on run \(not\s+spawn\/workflow\/daemon\)/, "TD-126 旧句不得回潮");
+  assert.doesNotMatch(out, /only on run \(not\s+spawn\/daemon\)/, "TD-126 旧句不得回潮");
   assert.match(out, /effective reasoning/, "回显说明（advisory）");
 });
 
@@ -5774,16 +5722,16 @@ function runCliCapture(cmd) {
 }
 
 test("bare wao-namespace subcommand at top level executes as `wao <sub>` (exit 0)", () => {
-  // state read 指向一个空的临时目录：没有 .wao 状态时固定输出 initialized:false，
-  // 结果不随运行它的检出变化。
+  // 裸 declare 指向一个空的临时目录：没有 .wao/pipeline 时固定输出零声明，
+  // 只读、无副作用，结果不随运行它的检出变化。
   const dir = mkdtempSync(join(tmpdir(), "wao-bare-sub-"));
   try {
     const cwdArg = `--cwd "${dir}"`;
-    const bare = runCliCapture(`state read --format json ${cwdArg}`);
+    const bare = runCliCapture(`declare ${cwdArg}`);
     assert.equal(bare.status, 0, `裸顶层子命令必须执行成功而非报 Unknown（stderr: ${bare.stderr}）`);
-    const namespaced = runCliCapture(`wao state read --format json ${cwdArg}`);
+    const namespaced = runCliCapture(`wao declare ${cwdArg}`);
     assert.equal(namespaced.status, 0, `wao <sub> 两段式照旧可用（stderr: ${namespaced.stderr}）`);
-    assert.equal(JSON.parse(bare.stdout).initialized, false, "空目录没有 .wao 状态");
+    assert.equal(JSON.parse(bare.stdout).count, 0, "空目录没有声明");
     assert.deepEqual(JSON.parse(bare.stdout), JSON.parse(namespaced.stdout), "两种写法输出相同");
   } finally {
     rmrfRetry(dir);
@@ -5802,6 +5750,19 @@ test("TD-191④: non-namespace unknown command keeps exit 1 + gains a generic po
   assert.notEqual(status, 0);
   assert.match(stderr, /Unknown command: definitely-not-a-command/);
   assert.match(stderr, /wao <sub>/, "通用指路必须提到 wao 命名空间两段式形态");
+});
+
+// 决定 0094：workflow 与 wao state 已退役，三种旧调用都必须报未知命令（路由被恢复即变红）。
+test("0094: workflow、wao state 与裸 state 已退役，调用即报未知命令", () => {
+  for (const [cmd, pattern] of [
+    ["workflow list", /Unknown command: workflow/],
+    ["state read", /Unknown command: state/],
+    ["wao state read", /Unknown wao subcommand: state/],
+  ]) {
+    const { status, stderr } = runCliExpectFail(cmd);
+    assert.notEqual(status, 0, `${cmd} 应以非零退出`);
+    assert.match(stderr, pattern, `${cmd} 应报未知命令`);
+  }
 });
 
 // TD-260（0062 B9 乙′）→0065 supersede：seatRole 漂移指针行已随席位声明退役删除；

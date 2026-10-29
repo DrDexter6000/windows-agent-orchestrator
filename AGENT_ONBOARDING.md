@@ -9,7 +9,7 @@
 
 ## 1. WAO 是什么
 
-WAO 是一个 **Windows 原生、headless 的 agent 编排控制平面**。它不自己推理，而是调度其它 agent runtime（如 claude-code / codex / zcode——支持的 backend 适配器闭集见生成的 `docs/surface/certification.md`）作为 worker 干活，自己负责：dispatch、transcript 记录、worktree 隔离、resume、metrics、scorecard 门控、workflow DAG、状态外化。
+WAO 是一个 **Windows 原生、headless 的 agent 编排控制平面**。它不自己推理，而是调度其它 agent runtime（如 claude-code / codex / zcode——支持的 backend 适配器闭集见生成的 `docs/surface/certification.md`）作为 worker 干活，自己负责：dispatch、transcript 记录、worktree 隔离、resume、metrics、scorecard 门控、项目记录（`.wao/`）。
 
 **你的角色**：你是主控（lead）。你用 WAO 的命令派发任务给 worker，监控、验收、整合。你不直接干全程——你编排。
 
@@ -57,7 +57,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 > `npm run cli` 走 `scripts/wao-node.cjs`（自动用 v22 shim），是唯一可靠的入口。
 > 下面命令里的 `<WAO目录>` 指 WAO 仓的根路径，`<目标项目>` 指你要开发的项目根。
 >
-> 第一次必读：**`SKILL.md`**（命令参考、workflow、安全铁律）和 **`references/safety-incidents.md`**（铁律背后的真实事故）。不读懂不要派发任务。
+> 第一次必读：**`SKILL.md`**（命令参考、安全铁律）和 **`references/safety-incidents.md`**（铁律背后的真实事故）。不读懂不要派发任务。
 >
 > 机器消费提示：脚本/agent 解析 WAO 输出时用 `npm run cli --silent -- <command>`——不带 `--silent` 时 npm 会把脚本 banner 打进 stdout，污染 `--format json` 的解析。
 
@@ -147,7 +147,7 @@ npm run cli -- wao doctor --cwd <目标项目>
 
 **doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置（opencode worker 有没有配 tokenBudget）、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 
-**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（project/state/decisions/pipeline/handoff/runs 6 槽位），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。两点补充：`pipeline/` 是第 6 槽位；fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
+**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（6 必需槽位：project.md/decisions/pipeline/handoff/runs/migration），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。inbox 与 state 是可选槽位（init 不预建，已存在的历史 state/ 布局放行）。另：fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
 
 ### 4e. 连接 MCP Host（主控通道，Decision 0017）
 
@@ -188,7 +188,7 @@ npm run cli -- run glm-pro --prompt "你的任务" --cwd <目标项目> --regist
 
 命令里的 `glm-pro` 换成你接好的车道；各车道擅长什么、有什么限制，看 `npm run cli -- wao lanes`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
 
-### 记录状态（每次任务后）
+### 记录状态
 
 用 `.wao/` 命令记录，**不要自己新建文档文件**（会导致文档熵增）：
 
@@ -198,9 +198,6 @@ npm run cli -- wao decision add --title "为什么选 X" --body "理由"
 
 # 写交接卡（给下游 worker）
 npm run cli -- wao handoff write --from lead --to coder --summary "任务描述"
-
-# 读当前项目进度
-npm run cli -- wao state read
 ```
 
 ---
@@ -219,11 +216,9 @@ npm run cli -- wao state read
 
 ---
 
-## 7. 进阶：workflow 编排
+## 7. 进阶：多步任务
 
-单任务验证通过后，可以编排多节点 workflow（DAG）。详见 `SKILL.md` §workflow。
-
-workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节点完成落盘）——这是断点续接的基础。崩了重启，读 current.md 就知道跑到哪。
+多步任务用现有原语组合：并行研究与核验用 `run_consult`（CLI `consult run`），实现加验证用带交付规格的派发（`run --delivery-spec-file` / `run_dispatch`），续接与纠偏用 `run_continue` / `run_correct`。WAO 不提供预先声明的多步计划（决定 0094）。
 
 ---
 
@@ -278,12 +273,11 @@ lead_preflight  →  run_dispatch（只读、no-delivery canary）  →  run_awa
 
 ### 10.1 仓库地图
 
-src/ 按 `docs/02-architecture.md` §1 的四层组织（层边界与依赖方向的唯一权威在那里，这里只做导航）：
+src/ 按 `docs/02-architecture.md` §1 的分层组织：L3 编排层已由决定 0094 退役，现存 L4、L2、L1 三层（层边界与依赖方向的唯一权威在那里，这里只做导航）：
 
 | 层 | 位置 | 一句话 |
 |---|---|---|
 | L4 接口层 | `src/mcp/`、`src/commands/`、`src/application/`、`src/hostAdapters/` | MCP（主入口）与 CLI（fallback）委托**同一批** application services——业务规则只写一次 |
-| L3 编排层 | `src/workflow/` | 声明式 DAG 引擎 + 可插拔节点 |
 | L2 控制平面 | src 根（`runManager.js`、`isolation.js`、`registry.js`、daemon 系列） | 状态机、调度、worktree 隔离、恢复 |
 | L1 运行时抽象 | `src/backends/`、`transcript.js` | Backend 接口的各 runtime 实现 + transcript 读写 |
 
@@ -298,7 +292,6 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 | `registry-roles/` | registry schema、角色与车道 |
 | `backends/` | 各 backend 适配 |
 | `isolation-infra/` | worktree 隔离、canonical runner、**docs-consistency 文档漂移守卫** |
-| `workflow/` | DAG 引擎 |
 | `parsers/` | backend 输出解析 |
 
 此外还有 `application/`、`commands/`、`process/` 等域目录，同样按领域归位。

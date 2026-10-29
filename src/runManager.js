@@ -72,7 +72,7 @@ const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
 
 // R7-AB: SSOT for the working-directory existence early-refusal shared by the
 // two dispatch/execution authorities — RunManager.start (foreground family:
-// `run` without --background, workflow agent nodes, daemon `start`, `retry`)
+// `run` without --background, daemon `start`, `retry`)
 // plus RunManager.resume's replay re-spawn branch (R7-C C-5), and dispatchRun
 // (background family: `run --background` / `spawn` / MCP run_dispatch). One
 // class definition; runDispatch.js imports it DOWNWARD (application→core,
@@ -687,7 +687,7 @@ export class RunManager {
       // M8-1：默认 scorecard 模式。warn=默认开启(不阻塞,只留痕) | hard=升级硬闸 | off=完全关闭。
       scorecardMode = "warn",
       // fire-and-forget 语义：调用方是否会在 backend 起来后立即返回（不进 waitForCompletion）。
-      // 默认 false = 安全（run/workflow/resume 等都会 wait 或由调用方管理生命周期）。
+      // 默认 false = 安全（run/resume 等都会 wait 或由调用方管理生命周期）。
       // 仅 CLI spawnCommand 在不带 --wait 时显式传 true，触发 P0-1 护栏。
       fireAndForget = false,
       // P1-1 认证新鲜度强制门（opt-in，06-18 事故教训"调度安全不能建立在模型行为假设上"）。
@@ -789,7 +789,7 @@ export class RunManager {
     // override (the message names the flag(s) actually in play). Both checks
     // sit BEFORE the registry read: zero transcript, zero worktree, zero
     // spawn. start is the authoritative single point — it covers the
-    // foreground family (run / workflow agent nodes / daemon start) AND the
+    // foreground family (run / daemon start) AND the
     // background family (the detached runner's --model/--reasoning/
     // --require-certified all land here); the CLI re-refuses earlier for the
     // operator's face, and dispatchRun re-refuses the reuse shape before the
@@ -1116,8 +1116,8 @@ export class RunManager {
     // with dispatchRun (defined in THIS module — DispatchCwdNotFoundError +
     // assertExistingDispatchCwd above; runDispatch imports them downward).
     // Covers the FOREGROUND family that never goes through dispatchRun: `run`
-    // without --background (commands/run.js → start), workflow agent nodes
-    // (workflow/handlers.js → start), and daemon `start` (daemon.js → start).
+    // without --background (commands/run.js → start) and daemon `start`
+    // (daemon.js → start).
     //
     // Mechanism note: the runner's --cwd reaches start as the cwd option;
     // getAgent(agentId, { cwd }) above merges it over the registry entry, so
@@ -2422,7 +2422,7 @@ function resolveScorecardRules(optionsScorecard, agentScorecard, scorecardMode =
 // 保留（tree_in_use）。
 //
 // 扫描面与读放量（有界）：listTranscriptsDeep（strict）枚举 runsRoot 根层 +
-// projects/* 全部桶的 run_*.jsonl（wf_* 工作流转录与非 .jsonl 文件不在面内；
+// projects/* 全部桶的 run_*.jsonl（历史 wf_* 工作流转录与非 .jsonl 文件不在面内；
 // run 的项目桶由它的 cwd 决定，cwd 在本树内的 run 可能落在任何桶里，所以必须
 // 扫全部桶）。转录按 <runId>.jsonl 存放，属主就是文件名里的 runId，只认绑定
 // 到它的事件（别的 run 混写进来的行不算）。

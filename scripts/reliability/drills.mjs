@@ -120,7 +120,7 @@ const REQUIRED_DRILL_DEPS = Object.freeze([
  *
  * @param {object} deps — 入口环境（单一来源：入口的模块级常量，本模块不复制这些定义）
  * @param {string} deps.nodeBin — 派发 CLI 子进程用的 node 可执行文件（v22 shim 选定）
- * @param {string} deps.root — WAO 仓库根（定位 src/cli.js；stop/workflow 的 cwd）
+ * @param {string} deps.root — WAO 仓库根（定位 src/cli.js；stop 的 cwd）
  * @param {string} deps.tmpDir — drill 临时目录（worker cwd / 派发 --cwd / git 夹具根）
  * @param {string} deps.waitTimeout — 单 worker 等待超时（毫秒字符串，CLI 参数原样透传）
  * @param {string} deps.pollInterval — 轮询间隔（毫秒字符串，CLI 参数原样透传）
@@ -413,36 +413,7 @@ export function createDrills(deps) {
     }
   }
 
-  function runWorkflowRunDirDrill(tc) {
-    const workflowRunDir = join(tmpDir, "workflow-runs");
-    const workflowFile = join(tmpDir, `workflow-cert-${tc.agentId}.mjs`);
-    const workflowId = `cert-${tc.agentId}`;
-    writeFileSync(workflowFile, [
-      "export default {",
-      `  id: ${JSON.stringify(workflowId)},`,
-      "  nodes: [",
-      `    { id: "agent", type: "agent", agentId: ${JSON.stringify(tc.agentId)}, prompt: "Reply with exactly WAO_WORKFLOW_RUN_DIR_OK" },`,
-      "  ],",
-      "  edges: [],",
-      "};",
-      "",
-    ].join("\n"));
 
-    const { ok, stdout, error } = runCli([
-      "workflow", "run", workflowFile,
-      "--run-dir", workflowRunDir,
-      "--wait-timeout", waitTimeout,
-      "--registry", registry,
-    ], { cwd: root });
-    const result = extractJson(stdout || "");
-    const childRunId = result?.nodes?.agent?.runId;
-    return [
-      check("workflowCompleted", result?.completed === true, "operational", `completed=${result?.completed}`, { capability: "workflowRunDir" }),
-      check("workflowTranscriptInRunDir", Boolean(result?.workflowRunId && drillTranscriptExists(workflowRunDir, result.workflowRunId)), "operational", result?.workflowRunId ?? "missing workflowRunId", { capability: "workflowRunDir" }),
-      check("workflowChildTranscriptInRunDir", Boolean(childRunId && drillTranscriptExists(workflowRunDir, childRunId)), "operational", childRunId ?? "missing child runId", { capability: "workflowRunDir" }),
-      ...(ok ? [] : [check("workflowRunDirError", false, "operational", error, { capability: "workflowRunDir" })]),
-    ];
-  }
 
   function runStopDrill(tc) {
     if (tc.backend !== "opencode-serve") {
@@ -450,7 +421,7 @@ export function createDrills(deps) {
         check("stopSupported", false, "operational", `stop drill currently supports opencode-serve, got ${tc.backend}`, { capability: "backendStopQuiet" }),
       ];
     }
-    // stop drill 用独立 runDir（与 workflowRunDirDrill 同款：显式传 --run-dir 与 readRunEvents 对齐，
+    // stop drill 用独立 runDir（显式传 --run-dir 与 readRunEvents 对齐，
     // 避免 spawn/stop 写到默认 runDir（项目根 runs/）而 readRunEvents 读 tmpDir/runs 的错位 ENOENT）。
     const stopRunDir = join(tmpDir, "stop-runs");
     mkdirSync(stopRunDir, { recursive: true }); // detached runner 不自动建 runDir，须预创建
@@ -550,7 +521,6 @@ export function createDrills(deps) {
     runIsolationDrill,
     runContainmentEvidenceDrill,
     runSandboxEnforcementDrill,
-    runWorkflowRunDirDrill,
     runStopDrill,
     runFileScorecardTask,
     ensureTmpGitRepo,

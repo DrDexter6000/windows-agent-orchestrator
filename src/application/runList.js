@@ -41,7 +41,7 @@ export const ACTIVITY_BASES = [
 ];
 
 /**
- * Scan runDir for run_*.jsonl files (excludes wf_* workflow transcripts).
+ * Scan runDir for run_*.jsonl files (excludes legacy wf_* workflow transcripts).
  * @param {string} runDir
  * @returns {string[]} sorted array of filenames (e.g. ["run_abc.jsonl", ...])
  */

@@ -47,8 +47,6 @@ Commands:
   runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
   runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）
-  workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
-  workflow list   # 列出可用模板（workflows/templates/）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
   feedback submit --file <md> [--title <text>] [--inbox-dir DIR] [--format json]   # 宿主 Lead 报 WAO 缺陷/别扭到本机收件箱（不联网、不调用模型）
@@ -76,8 +74,6 @@ MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code,
 
 Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor), namespaced (wao wao doctor), or npm form (npm run cli -- wao doctor):
   wao init [--cwd DIR] [--state-dir DIR]
-  wao state read [--format text|json]
-  wao state snapshot --workflow-id ID [--cwd DIR]
   wao decision add --title T [--body B | --body-file F] [--context C]
   wao decision list [--format json]
   wao decision show <id>

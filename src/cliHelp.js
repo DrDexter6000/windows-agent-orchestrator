@@ -52,8 +52,6 @@ Commands:
   runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
   runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）
-  workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
-  workflow list   # 列出可用模板（workflows/templates/）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
   feedback submit --file <md> [--title <text>] [--inbox-dir DIR] [--format json]   # 宿主 Lead 报 WAO 缺陷/别扭到本机收件箱（不联网、不调用模型）
@@ -81,8 +79,6 @@ MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code,
 
 Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor), namespaced (wao wao doctor), or npm form (npm run cli -- wao doctor):
   wao init [--cwd DIR] [--state-dir DIR]
-  wao state read [--format text|json]
-  wao state snapshot --workflow-id ID [--cwd DIR]
   wao decision add --title T [--body B | --body-file F] [--context C]
   wao decision list [--format json]
   wao decision show <id>
@@ -104,12 +100,12 @@ Notes:
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 21 名；与 HELP_TEXT 的关系是
+// （如 `run status ...`）做 did-you-mean 提示。恰 20 名；与 HELP_TEXT 的关系是
 // 双向守卫（HELP_TEXT 每个两空格命令行首词必须在闭集内，闭集每个成员在
 // HELP_TEXT 有行锚定条目）；不含 help（HELP_TEXT 无 help 命令行）。
 export const COMMAND_NAMES = Object.freeze([
   "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
-  "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
+  "stop", "runs", "dashboard", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
   "feedback",
 ]);
 
@@ -166,7 +162,7 @@ Notes:
     the provider when the worker starts — the echoed "effective model" in the
     dispatch output is advisory: it shows what WAO threaded, not that the
     provider accepts the id. --model exists only on run and retry (not
-    spawn/workflow/daemon); a persistent model change belongs in the registry
+    spawn/daemon); a persistent model change belongs in the registry
     model policy.
   - --reasoning VALUE must be one of the closed effort set
     minimal/low/medium/high/xhigh/max; anything else is refused with a fixed
@@ -181,7 +177,7 @@ Notes:
     through its existing policy gate with a hint naming --reasoning. The
     echoed "effective reasoning" is advisory in the same sense as the model
     echo. --reasoning exists only on run and retry (not
-    spawn/workflow/daemon); a persistent reasoning change belongs in the
+    spawn/daemon); a persistent reasoning change belongs in the
     registry reasoning policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

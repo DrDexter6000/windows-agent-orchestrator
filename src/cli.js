@@ -22,8 +22,7 @@ import { registryCommand } from "./commands/registry.js";
 import { runsCommand, buildDashboard, runsDashboardCommand, runDashboardWeb } from "./commands/runs.js";
 // M12-8F: top-level `dashboard` 命令族（人类 Owner 启动器，wao dashboard）。
 import { dashboardCommand } from "./commands/dashboard.js";
-// TD-98 阶段 2c：workflow + worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
-import { workflowCommand } from "./commands/workflow.js";
+// TD-98 阶段 2c：worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
 import { worktreeCommand } from "./commands/worktree.js";
 // TD-98 阶段 2d：wao + doctor 命令族拆到 src/commands/（行为不变，纯搬迁）。
 // wao.js 的 waoCommand 接受 deps.askHandler（= cli.js 的 waoAskCommand）。
@@ -126,7 +125,7 @@ async function waoCommand(args, config) {
 
 // TD-98 阶段 2c：newRunManager / resolveIsolateFlag / backendFor 已移至 commands/shared.js。
 // cli.js 不再直接用 newRunManager/resolveIsolateFlag（run/spawn 已迁出）；
-// commands/run.js、workflow.js 等从 shared.js import 使用。
+// commands/run.js 等从 shared.js import 使用。
 
 // TD-98 阶段 1：daemon 命令族已拆到 src/commands/daemon.js（行为不变）。
 
@@ -204,10 +203,6 @@ async function main(argv) {
     await dashboardCommand(rest, config);
     return;
   }
-  if (command === "workflow") {
-    await workflowCommand(rest, config);
-    return;
-  }
   if (command === "worktree") {
     await worktreeCommand(rest, config);
     return;
@@ -250,7 +245,7 @@ async function main(argv) {
   }
   throw new Error(
     `Unknown command: ${command}. See --help for available commands; ` +
-      `wao-namespace subcommands (doctor/onboarding/state/…) run as "wao <sub>".`
+      `wao-namespace subcommands (doctor/onboarding/…) run as "wao <sub>".`
   );
 }
 
@@ -282,12 +277,8 @@ async function main(argv) {
 // 已移至 src/commands/runs.js（上方 import + re-export）。
 
 
-// TD-98 阶段 2c：workflow 命令族（workflowCommand + workflowListCommand）已移至
-// src/commands/workflow.js（上方 import）。workflowRunCommand + parseTemplateVars 也在那里。
-
-
 // TD-98 阶段 2d：wao 命令族（waoCommand 派遣器 + waoDoctorCommand + waoInit/Handoff/Decision/
-// Declare/Stage/State 子命令 + doctor 专用 helper）已移至 src/commands/wao.js + doctor.js。
+// Declare/Stage 子命令 + doctor 专用 helper）已移至 src/commands/wao.js + doctor.js。
 // 仅 waoAskCommand 留 cli.js——它调用 commands/run.js 导出的 runCommand（上方 import）。
 
 
@@ -342,11 +333,6 @@ async function waoAskCommand(args, config) {
   await runCommand(runArgs, config);
 }
 
-// waoStateCommand 已移至 src/commands/wao.js（TD-98 阶段 2d，随 wao 族搬迁）。
-
-// workflowRunCommand 已移至 src/commands/workflow.js（TD-98 阶段 2c，随 workflow 族搬迁）。
-
-
 // parseDuration 已移至 src/commands/runs.js（runs prune 专用 helper，随 runs 族搬迁）。
 
 // loadRun 已移至 commands/shared.js（TD-98 阶段 2e-1a：status/tail/collect 迁出后，
@@ -359,9 +345,7 @@ async function waoAskCommand(args, config) {
 // src/commands/run.js（TD-98 阶段 2e-3，随 run/spawn 族搬迁；上方 import + re-export runAndWait）。
 
 
-// parseTemplateVars + worktreeCommand 已移至 src/commands/（TD-98 阶段 2c：
-// parseTemplateVars 是 workflow run 专用 helper，worktreeCommand 是 worktree 族，
-// 分别搬到 commands/workflow.js 和 commands/worktree.js，上方 import）。
+// worktreeCommand 已移至 src/commands/worktree.js（TD-98 阶段 2c，随 worktree 族搬迁；上方 import）。
 
 
 function printHelp() {

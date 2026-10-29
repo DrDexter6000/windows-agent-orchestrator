@@ -2,31 +2,33 @@
  * .wao/ 目录管理（S3-1，阶段 3）。
  *
  * 定位：项目状态外化的物理基础。每个被 WAO 管理的项目有一个 .wao/ 目录，
- * 结构锁死为 7 个槽位（project.md/state/decisions/pipeline/handoff/runs/migration）。
+ * 必需槽位 6 个（project.md/decisions/pipeline/handoff/runs/migration），
+ * 另有可选槽位 inbox 与 state（决定 0094：state 随 workflow 层退役，历史布局放行）。
  * agent 不直接建文件，通过 wao 命令读写，本模块提供底层目录操作。
  *
  * 三条铁律的物理保障：
- *   1. 顶层槽位封闭：7 必需 + 可选 inbox（validateWaoDir 负向断言多余文件）
- *   2. map.md 只放索引（waoDecisions/waoState 的写入命令保证）
+ *   1. 顶层槽位封闭：6 必需 + 可选 inbox/state（validateWaoDir 负向断言多余文件）
+ *   2. map.md 只放索引（waoDecisions 的写入命令保证）
  *   3. .wao/ 进 .gitignore（过程性，不进版本控制）
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// 锁死的 7 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
+// 锁死的 6 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
 // TD-91：pipeline/ 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
 // 原先 STAGE/DECL 写进 decisions/（被 git 跟踪），实验声明和真实 ADR 混在一起污染版本库。
 // 0045 §4.2：migration=台账迁移证据包槽（.wao/migration/0045-ledger/，证据文件入库）。
-export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"];
+export const WAO_TOP_LEVEL_SLOTS = ["project.md", "decisions", "pipeline", "handoff", "runs", "migration"];
 
-// 可选顶层槽位：机器本地报缺陷收件箱，由 `feedback submit` 按需创建，
-// 不在 `wao init` 预建（init 后仍只有上面 7 个槽位，不凭空多出空 inbox/）。
-// validateWaoDir 对它们放行但不要求存在（missing 只查必需槽位）。
-export const WAO_OPTIONAL_TOP_LEVEL_SLOTS = ["inbox"];
+// 可选顶层槽位：inbox 是机器本地报缺陷收件箱，由 `feedback submit` 按需创建；
+// state 是 workflow 层的旧布局（决定 0094 退役）。两者都不在 `wao init` 预建
+// （init 后仍只有上面 6 个槽位），validateWaoDir 对它们放行但不要求存在
+// （missing 只查必需槽位）。
+export const WAO_OPTIONAL_TOP_LEVEL_SLOTS = ["inbox", "state"];
 
-// state/decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
-const SLOTS_WITH_MAP = ["state", "decisions", "pipeline", "handoff"];
+// decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
+const SLOTS_WITH_MAP = ["decisions", "pipeline", "handoff"];
 
 /**
  * 解析 .wao/ 路径。
@@ -39,7 +41,8 @@ export function getWaoDir(cwd, override) {
 
 /**
  * 初始化 .wao/ 骨架。幂等：重复 init 不破坏已有内容。
- * 创建 6 槽位 + 各 map.md 空文件 + project.md 骨架 + 追加 .wao/ 到 .gitignore。
+ * 创建 6 个必需槽位 + 各 map.md 空文件 + project.md 骨架 + 追加 .wao/ 到 .gitignore。
+ * 可选槽位（inbox/state）不预建。
  */
 export async function initWaoDir(cwd, override) {
   const waoDir = getWaoDir(cwd, override);
@@ -55,15 +58,6 @@ export async function initWaoDir(cwd, override) {
     } else {
       const slotDir = join(waoDir, slot);
       await mkdir(slotDir, { recursive: true });
-      // state 多一个 history 子目录
-      if (slot === "state") {
-        await mkdir(join(slotDir, "history"), { recursive: true });
-      }
-      // 当前 current.md（state 专属）
-      if (slot === "state") {
-        const cur = join(slotDir, "current.md");
-        if (!existsSync(cur)) await writeFile(cur, "", "utf8");
-      }
       // map.md（有索引的槽位）
       if (SLOTS_WITH_MAP.includes(slot)) {
         const mapPath = join(slotDir, "map.md");
@@ -125,11 +119,6 @@ const PROJECT_TEMPLATE = `# Project
 `;
 
 const MAP_HEADER = {
-  state: `# State Map
-
-<!-- 索引：历史进度快照。一行一条，不放正文。 -->
-<!-- 格式：<date>-<slug> | <workflowId> | <一句话> -->
-`,
   decisions: `# Decisions Map
 
 <!-- 索引：ADR 冻结决策（NNNN-*.md）。一行一条，不放正文。随代码版本化。 -->

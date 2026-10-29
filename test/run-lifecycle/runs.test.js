@@ -553,7 +553,7 @@ test("collect on process-type run: 从 transcript 重建 message，不报 openco
   }
 });
 
-// --- TD-102 Batch 1B: runs aggregation must exclude workflow transcripts ---
+// --- TD-102 Batch 1B: runs 聚合排除 wf_* 转录（wf_ 为归档旧文件的历史兼容，决定 0094） ---
 
 test("TD-102: runs list excludes wf_* transcripts", async () => {
   const dir = await makeRunDir();
@@ -642,7 +642,7 @@ test("TD-102: runs dashboard --format json excludes wf_* transcripts", async () 
   }
 });
 
-test("TD-102: direct status wf_* still works and reports failed for completed:false", async () => {
+test("TD-102: direct status wf_* still works and reports failed for completed:false（归档旧转录的读侧兼容，决定 0094）", async () => {
   const dir = await makeRunDir();
   try {
     await writeJsonl(dir, "wf_direct", [

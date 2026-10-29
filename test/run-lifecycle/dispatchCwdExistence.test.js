@@ -398,7 +398,7 @@ test("CE-9: the run usage page documents the --cwd existence requirement", async
     "--cwd line carries the existence requirement",
   );
   // R7-C (C-9): "refused at dispatch" alone misdescribes the foreground family
-  // (run/workflow/daemon start never go through the dispatch service — they
+  // (run/daemon start never go through the dispatch service — they
   // are refused at START). The precise shared phrasing is dispatch/start.
   assert.match(
     RUN_USAGE_TEXT,

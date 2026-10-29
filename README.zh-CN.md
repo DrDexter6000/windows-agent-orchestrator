@@ -86,7 +86,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 相同的 transcript 持久事实。工具表与路由契约见 [`SKILL.md`](SKILL.md)。
 
 **里程碑 M0–M12 全部完成。** 已交付要点：多 backend 派发 + worktree 隔离 + 断点续跑 +
-token/成本计量；声明式 DAG 工作流与参数化模板；证据链 scorecard；daemon 监管、诊断与
+token/成本计量；证据链 scorecard；daemon 监管、诊断与
 runtime 认证；workspace 绑定的派发/恢复/停止 + `run_wait` 存活观察；安全的 changed-path
 投影、exact 交付证明与有界/脱敏 diff 审查；`disallowed_path` 保留失败的 advisory
 `candidateInventory` 恢复 + Lead 授权的**不重调模型** `run_delivery_repackage`（复用原
@@ -160,7 +160,7 @@ AGENT_ONBOARDING.md §3。
 | 你想…… | 读这个 |
 |---|---|
 | **从零开始——安装、单 worker、校验、MCP host、首个 canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)——唯一的新用户上手路径 |
-| **作为 agent / 脚本使用编排器**（23 个 MCP 工具、命令、工作流、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
+| **作为 agent / 脚本使用编排器**（23 个 MCP 工具、命令、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
 | **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——部署与使用各页的地图 |
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
@@ -197,9 +197,6 @@ npm run cli -- runs list                                # 恢复清单
 npm run cli -- runs metrics <runId>                     # tokens / 成本
 npm run cli -- runs scorecard <runId>                   # 证据门结果
 npm run cli -- playbook list|show <id>                  # 可选的 Lead playbook 目录
-
-# 声明式 DAG 工作流
-npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
 完整命令参考：`npm run cli -- help`；23 工具 MCP 表与路由契约见 [`SKILL.md`](SKILL.md)。

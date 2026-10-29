@@ -2,7 +2,7 @@
  * .wao/handoff/ 读写（S3-4，阶段 3）。
  *
  * 多 agent 交接卡：每个 agent 完成时写一张，下游读最新的接手。
- * 传引用不传内容（artifacts 是路径引用，不是 messages 全文）——照架构 spec §5.2。
+ * 传引用不传内容（artifacts 是路径引用，不是 messages 全文）。
  *
  * 文件名：<from>-<date>.md（同 role 多次交接按日期区分）
  */

@@ -104,8 +104,7 @@ application service as the CLI fallback, producing identical transcript durable 
 See [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 
 **Milestones M0–M12 complete.** Delivered highlights: multi-backend dispatch with
-worktree isolation, resume, and token/cost metrics; declarative DAG workflows and
-parameterized templates; evidence-chain scorecards; daemon supervision, diagnostics, and
+worktree isolation, resume, and token/cost metrics; evidence-chain scorecards; daemon supervision, diagnostics, and
 runtime certification; workspace-bound dispatch/recovery/stop with `run_wait` liveness
 observation; safe changed-path projection, exact delivery proof, and bounded/redacted
 diff review; advisory `candidateInventory` recovery for retained `disallowed_path`
@@ -189,7 +188,7 @@ is set); see AGENT_ONBOARDING.md §3.
 | You want to… | Read this |
 |---|---|
 | **Start from zero — install, one worker, validate, MCP host, first canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the single new-user setup path |
-| **Use the orchestrator as an agent / from a script** (23 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (23 MCP tools, commands, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — map of the deployment and usage pages |
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |
@@ -227,9 +226,6 @@ npm run cli -- runs list                                # recovery inventory
 npm run cli -- runs metrics <runId>                     # tokens / cost
 npm run cli -- runs scorecard <runId>                   # evidence gate result
 npm run cli -- playbook list|show <id>                  # optional Lead playbook catalog
-
-# Declarative DAG workflows
-npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
 Full command reference: `npm run cli -- help`, or [`SKILL.md`](SKILL.md) for the

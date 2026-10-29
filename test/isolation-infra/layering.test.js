@@ -16,8 +16,9 @@
 // 动态 import() 披露清单、src 顶层新文件 fail-closed。
 //
 // 已知盲区（明示，不宣称完备）：
-//   1. 变量驱动的动态 import 静态不可见——真实例：src/workflow/loader.js:19
-//      `const mod = await import(url);`（url 由 pathToFileURL 运行时拼出）。
+//   1. 变量驱动的动态 import 静态不可见——`const mod = await import(url);`
+//      形态（url 由 pathToFileURL 运行时拼出；src 当前无实例，此前的
+//      workflow/loader.js 已随决定 0094 删除）。
 //   2. 无 from 子句的副作用式 import（`import "./x.js";`）不在静态匹配范围
 //      （当前 src 树无此形态）。
 //   3. 模板字面量内容理论上可伪造 import 语句外观；模板字符串形式的
@@ -54,7 +55,7 @@ const REPO_ROOT = resolve(import.meta.dirname, "../..");
 // src 顶层文件没有目录前缀可依，因此三张顶层清单（adapters/shared/core）都是
 // 显式冻结集合：新顶层文件不出现在任何清单 → classifyPath 返回 null →
 // fail-closed 红（见突变测试 f）。目录桶（mcp/commands/backends/application/
-// workflow/未来新目录）按前缀自动归桶。
+// 未来新目录）按前缀自动归桶。
 
 const DEPTH = Object.freeze({ adapters: 0, application: 1, core: 2, backends: 3, shared: 4 });
 
@@ -113,8 +114,8 @@ const CORE_TOP = Object.freeze(new Set([
   "src/deliveryVerification.js",
   "src/diagnosis.js",
   // 决定 0045 写侧 W1（2026-10-05）：派发目标解析（lanes.json + lane/role 显式
-  // 派发 + 别名注解）。放核心层的理由（R3 会审 auditor 裁定）：workflow/handlers
-  // 直接调 RunManager.start，若放 application/ 会迫使 workflow 向上引用；核心
+  // 派发 + 别名注解）。放核心层的理由（R3 会审 auditor 裁定）：应用服务与
+  // RunManager 向下调用解析器，若放 application/ 会让核心反向向上引用；核心
   // 承载、应用服务向下调用（R7-AB 先例，同 matchedCertRecord）。零相对出边
   // （node:fs/path/url/crypto only）；消费方 src/commands/run.js、src/runManager.js
   // （W2）、registry validate/doctor（经 validateLanesAgainstRegistry）。
@@ -178,7 +179,6 @@ const CORE_TOP = Object.freeze(new Set([
   "src/waoDir.js",
   "src/waoHandoff.js",
   "src/waoStage.js",
-  "src/waoState.js",
 ]));
 
 const ADAPTER_DIRS = Object.freeze(["src/mcp/", "src/commands/"]);
@@ -187,7 +187,8 @@ const ADAPTER_DIRS = Object.freeze(["src/mcp/", "src/commands/"]);
 // 取消"未识别子目录自动归 core"——新子目录静默归 core 可双向放过违例（更深
 // 语义目录 import core 变 2→2 合法、更浅语义目录被 application import 变
 // 1→2 合法）。未登记的新顶层文件或新子目录一律 fail-closed。
-const CORE_DIRS = Object.freeze(["src/workflow/"]);
+// 当前为空——src/workflow/ 随决定 0094（workflow 层退役）删除。
+const CORE_DIRS = Object.freeze([]);
 
 // 上向边白名单现为空（TD-122 归零：sessionReuse 经 CORE_MEMBERS 归 core，
 // upward 2→0）；机制保留——未来合法上向例外须先改 docs SSOT 再回填本清单
@@ -224,8 +225,6 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/commands/runs.js -> src/application/lineageClose.js",
   // runs settle 结算出口：CLI 动态接线（adapters→application 下向）。
   "src/commands/runs.js -> src/application/runSettle.js",
-  // 0045 W4c：workflow agentHandler 经解析层（workflow→core 下向，同其 RunManager 直调平级）。
-  "src/workflow/handlers.js -> src/dispatchResolution.js",
   "src/runManager.js -> src/backends/opencodeStopVerify.js",
 ]);
 
@@ -496,7 +495,7 @@ test("有牙（纯函数）：CORE_MEMBERS 使 sessionReuse 归 core，合成 re
 
 test("突变 a：合成 core 文件新增单行上向 import → 违例", async () => {
   const root = buildTree("mut-a", {
-    "src/workflow/thing.js": `import { serve } from "../application/service.js";\nexport { serve };\n`,
+    "src/registry.js": `import { serve } from "./application/service.js";\nexport { serve };\n`,
   });
   try {
     const scan = await scanTree(root);
@@ -504,7 +503,7 @@ test("突变 a：合成 core 文件新增单行上向 import → 违例", async 
     const v = checkEdges(scan.edges);
     assert.equal(v.length, 1);
     assert.equal(v[0].code, "upward", "core(2) -> application(1) 是上向违例");
-    assert.equal(v[0].from, "src/workflow/thing.js");
+    assert.equal(v[0].from, "src/registry.js");
     assert.equal(v[0].to, "src/application/service.js");
   } finally {
     cleanupTree(root);
@@ -514,11 +513,11 @@ test("突变 a：合成 core 文件新增单行上向 import → 违例", async 
 test("突变 b：合成多行上向 import（from 子句独占收尾行）→ 违例", async () => {
   // 真实锚点形态：src/ownerDashboardServer.js:38-46 —— 行首 ^import 锚定会漏。
   const root = buildTree("mut-b", {
-    "src/workflow/thing.js": [
+    "src/registry.js": [
       "import {",
       "  serve,",
       "  listen,",
-      "} from \"../application/service.js\";",
+      "} from \"./application/service.js\";",
       "export { serve, listen };",
       "",
     ].join("\n"),
@@ -537,7 +536,7 @@ test("突变 b：合成多行上向 import（from 子句独占收尾行）→ �
 
 test("突变 c：export ... from 上向 re-export → 违例", async () => {
   const root = buildTree("mut-c", {
-    "src/workflow/thing.js": `export { serve } from "../application/service.js";\n`,
+    "src/transcript.js": `export { serve } from "./application/service.js";\n`,
   });
   try {
     const scan = await scanTree(root);
@@ -558,7 +557,7 @@ test("突变 d：JSDoc 类型引用 import(\"../x.js\") 不进入任何列表", 
     "export function f() { return null; }",
     "",
   ].join("\n");
-  const { staticEdges, dynamicEdges } = extractEdges(jsdoc, "src/workflow/thing.js");
+  const { staticEdges, dynamicEdges } = extractEdges(jsdoc, "src/transcript.js");
   assert.deepEqual(staticEdges, [], "JSDoc 不产静态边");
   assert.deepEqual(dynamicEdges, [], "JSDoc 不产动态边（注释剥离生效）");
   // 代码体保留（剥离只清注释，不动代码）。
@@ -574,7 +573,7 @@ test("突变 e：普通字符串字面量含 from './x' 字样 → 不误报", (
     "const code = `docs say: import z from \"../application/service.js\";`;",
     "",
   ].join("\n");
-  const { staticEdges, dynamicEdges } = extractEdges(text, "src/workflow/thing.js");
+  const { staticEdges, dynamicEdges } = extractEdges(text, "src/registry.js");
   assert.deepEqual(staticEdges, [], "字符串内容不产边（语句位置门槛杀死关键词伪装）");
   assert.deepEqual(dynamicEdges, []);
 });
@@ -616,9 +615,9 @@ test("突变 f2：合成 src 新子目录（未登记 CORE_DIRS）→ fail-close
 test("突变 g：合成新增相对字面量动态 import → 不在 DYNAMIC_DISCLOSED，红", async () => {
   // 方向本身合法（core→backends 下向）——红只能来自披露清单精确集合。
   const root = buildTree("mut-g", {
-    "src/workflow/dyn.js": [
+    "src/registry.js": [
       "export async function go() {",
-      "  return import(\"../backends/thing.js\");",
+      "  return import(\"./backends/thing.js\");",
       "}",
       "",
     ].join("\n"),
@@ -629,7 +628,7 @@ test("突变 g：合成新增相对字面量动态 import → 不在 DYNAMIC_DIS
     const actual = scan.dynamicEdges.map((e) => `${e.from} -> ${e.to}`);
     const diff = diffKeySets(actual, DYNAMIC_DISCLOSED);
     // 合成树上冻结清单自然不满足（missing 非空）；本突变只证明 extra 判红路径。
-    assert.deepEqual(diff.extra, ["src/workflow/dyn.js -> src/backends/thing.js"], "新增未披露动态边 = extra");
+    assert.deepEqual(diff.extra, ["src/registry.js -> src/backends/thing.js"], "新增未披露动态边 = extra");
   } finally {
     cleanupTree(root);
   }

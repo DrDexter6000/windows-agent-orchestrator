@@ -98,17 +98,25 @@ test("registry-1: 登记表形状——冻结、无重复、说明非空、legac
   assert.ok(Object.isFrozen(TRANSCRIPT_EVENT_TYPES));
   assert.throws(() => TRANSCRIPT_EVENT_TYPES.push("run.registry_bypass_probe"), TypeError);
   assert.equal(isRegisteredTranscriptEventType("run.registry_bypass_probe"), false);
-  // 唯一 legacy：run.timed_out（无现行生产写出点，仅旧转录读取兼容）。
+  // legacy：run.timed_out（无现行生产写出点，仅旧转录读取兼容）+ 四个 workflow.*
+  // （决定 0094 退役 workflow 层后不再有写入方，读侧仍识别旧 wf_* 转录）。
   const legacy = TRANSCRIPT_EVENT_REGISTRY.filter((entry) => entry.legacy);
-  assert.deepEqual(legacy.map((entry) => entry.type), ["run.timed_out"]);
+  assert.deepEqual(
+    [...legacy.map((entry) => entry.type)].sort(),
+    ["run.timed_out", "workflow.completed", "workflow.node.completed", "workflow.node.started", "workflow.started"],
+  );
   // run.message 不是落盘事件类型（scorecard 临时形状），不登记——不是漏登。
   assert.ok(!TRANSCRIPT_EVENT_TYPES.includes("run.message"));
-  // workflow 登记四个具体名字，不登记通配。
+  // workflow 登记四个具体名字（全部 legacy），不登记通配。
   const workflow = types.filter((t) => t.startsWith("workflow."));
   assert.deepEqual(
     [...workflow].sort(),
     ["workflow.completed", "workflow.node.completed", "workflow.node.started", "workflow.started"],
   );
+  for (const entry of workflow) {
+    assert.equal(TRANSCRIPT_EVENT_REGISTRY.find((e) => e.type === entry).legacy, true,
+      `${entry} 必须标 legacy（决定 0094 后无写入方）`);
+  }
 });
 
 // ── 严格模式行为（真实子进程） ───────────────────────────────────────────────

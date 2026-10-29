@@ -98,7 +98,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 - 规则：任何修改 completion 判定 / metrics 提取 / provider 错误处理 / silentTimeout 的交付，收尾必须跑 `npm run reliability` 全绿（矩阵构成以 registry `certification.matrix` 当前装配为权威、缺省回退 legacy 矩阵——本文件不复制构成清单，防第二份陈述漂移；单席增量重认证的保留语义见下），不能只靠 npm test 报绿就声称完成。
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
 - 单 worker 重认证不覆盖全量：`npm run reliability -- --agent X` 跑完增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
-- 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 的 case 含 scorecard/isolation/workflow 多个 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
+- 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 的 case 含 scorecard/isolation 等多个 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
 
 ## 7. 交付验证环境盲区纪律
 

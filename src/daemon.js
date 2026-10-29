@@ -49,7 +49,7 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 
 // handshake 文件名。放 runDir/（与 transcript 同目录）——不能放 .wao/，
-// .wao/ 是锁死 5 槽位结构（waoDir.js WAO_TOP_LEVEL_SLOTS），有 layout 守卫负向断言。
+// .wao/ 的顶层槽位结构锁死（waoDir.js WAO_TOP_LEVEL_SLOTS），有 layout 守卫负向断言。
 export const HANDSHAKE_FILE = "daemon.json";
 
 // 默认命名管道（ADR 0012）。Windows 本机 IPC，不可远程触达。

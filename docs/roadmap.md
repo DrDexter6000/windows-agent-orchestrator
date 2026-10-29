@@ -13,8 +13,8 @@
 | M2 | 第二个 runtime：ProcessBackend 与 parser | ✅ 完成 |
 | M3 | 隔离与恢复：worktree、进程隔离、端口表、runs resume | ✅ 完成 |
 | M4 | 可观测：token / 时长 / 命令数聚合 | ✅ 完成 |
-| M5 | DAG 编排骨架 | ✅ 完成 |
-| M6 | scorecard 与可插拔节点 | ✅ 完成 |
+| M5 | DAG 编排骨架 | ✅ 完成（已随决定 0094 退役） |
+| M6 | scorecard 与可插拔节点 | ✅ 完成（可插拔节点已随决定 0094 退役） |
 | M7 | 持久执行与监督恢复：daemon、验收契约 | ✅ 完成 |
 | M8 | Lead 体验层：编排便利下沉为工具默认行为 | ✅ 完成 |
 | M9 | Agent Runtime Control Surface：MCP server 与共享 application services | ✅ 完成 |

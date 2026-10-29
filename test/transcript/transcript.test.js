@@ -117,7 +117,7 @@ test("findState uses last run.state_change.to when present", () => {
 });
 
 test("findState falls back to legacy event type when no state_change", () => {
-  // 旧 transcript 兜底：completed 终态
+  // 旧 transcript 兜底：completed 终态（workflow.completed 为归档旧 workflow 转录的读侧兼容——决定 0094）
   assert.equal(findState([{ type: "run.completed" }]), "completed");
   assert.equal(findState([{ type: "workflow.completed" }]), "completed");
   assert.equal(findState([{ type: "run.timed_out" }]), "timed_out");
@@ -159,7 +159,7 @@ test("findState: run.stop_requested after a non-terminal state_change is an inte
   assert.equal(findState(events), "running");
 });
 
-// --- TD-102 Batch 1B: workflow transcript outcome semantics ---
+// --- TD-102 Batch 1B: 归档旧 workflow 转录的读侧兼容（决定 0094 退役写入方，findState 仍识别） ---
 
 test("TD-102: workflow.completed {completed:true} → findState returns completed", () => {
   const events = [

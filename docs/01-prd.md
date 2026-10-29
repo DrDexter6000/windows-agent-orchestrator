@@ -54,13 +54,13 @@ RunMaestro 升级后工作流彻底崩溃——主控 Agent 无法调度 worker�
 - 开放可控（用户完全掌握编排逻辑，不绑闭源产品）
 
 > **"runtime-agnostic" 的精确定义**（本词在本文档多处出现，统一指此义）：
-> 指**编排逻辑（L2 控制平面 / L3 编排层 / scorecard）不针对具体 runtime 写分支**——
-> 同一套 RunManager / 状态机 / DAG 引擎，对 opencode-serve / claude-code / codex 一视同仁，
+> 指**控制平面（L2 / scorecard）不针对具体 runtime 写分支**——
+> 同一套 RunManager / 状态机，对 opencode-serve / claude-code / codex 一视同仁，
 > 只通过统一的 `Backend` 接口 + `RunEvent` 流交互（见 spec §2）。
-> **强承诺**：加一个新 runtime 是"写一个 Backend 类 + parser"的局部加法，编排层一行不改。
+> **强承诺**：加一个新 runtime 是"写一个 Backend 类 + parser"的局部加法，控制平面一行不改。
 > **不承诺**：① 所有 runtime 能力对等（能力差异客观存在，Backend 自行降级）；
-> ② 短期 `[S]` 就能在一个工作流里混用多 runtime——真正混用要等 `[M]` 的 DAG 引擎
-> 把节点和 backend 解耦。短期 `[S]` 只验证"多个 backend 各自能跑"。
+> ② 短期 `[S]` 就能在一个任务流里混用多 runtime——多 runtime 混用由 Lead 用多次派发组合。
+> 短期 `[S]` 只验证"多个 backend 各自能跑"。
 
 Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它是 macOS-first + Docker + Electron + 闭源，不可用（详见 `research/04`）。
 
@@ -114,15 +114,9 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ### 5.3 工作流编排（中期目标）
 
-> **编排归属（ADR 0018）**：Lead 定义、选择、修改 deterministic execution plan——节点拓扑、
-> 分支条件、依赖语义都由 Lead 撰写。已实现的 WorkflowEngine（`workflow run`，见 §6 L3）只是
-> **Lead-authored expert mechanical executor**：它按 Lead 写定的分层/并行/依赖机械执行，不自动做
-> 语义拆解、不自动语义路由、不自动选择 worker。WAO 不提供由模型自动决定分流到哪个 worker 的语义编排方向。
+多步编排由 Lead 组合派发、会审与续接完成（决定 0094：WAO 不提供 DAG 执行；ADR 0018 的编排归属不变——语义拆解、路由、worker 选择都由 Lead 决定，不做自动语义编排）。
 
-- **U8 定义可复用流程**：我要定义一次"分析→编码→测试→审查→提交"流程，之后对每个新任务复用，只换输入。
-- **U9 精确调度**：流程里"审查"节点必须等"测试"节点完成才能开始，即使"编码"的数据已经到了。
-- **U10 确定性扩展**：我要能注册自定义节点类型，按 Lead 写定的确定性规则扩展流程，不必改核心代码。
-- **U11 配置即改进**：我改进了一次流程定义，之后所有任务都按新标准执行，不必改代码。
+- U8–U11（可复用流程、精确调度、自定义节点扩展、改流程定义即改进）原由 DAG 引擎承载，随决定 0094 退役：需要时由 Lead 组合派发、会审与续接；量大、重复的流水线由宿主侧脚本调用这些原语，验收仍归 Lead。
 
 ### 5.4 长任务可监督与可恢复（中长期）
 
@@ -158,16 +152,15 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ### L3 编排层
 
-> Lead 定义/选择/修改 deterministic execution plan；已实现 WorkflowEngine 只是 Lead-authored
-> expert mechanical executor（见 §5.3 与 ADR 0018）。编排引擎不把外部模型自动判断作为一等编排策略。
+> 多步编排由 Lead 组合派发、会审与续接（决定 0094）；原 WorkflowEngine/DAG 引擎已退役。
 
 | 能力 | 阶段 |
 |------|------|
-| 内置工作流模板（parallel / sequential） | [M] |
-| 声明式 DAG（YAML） | [M] |
-| 数据依赖 vs 执行依赖解耦 | [M] |
-| 可插拔节点类型（Lead-authored deterministic） | [M] |
-| 结构化 handoff（程序可校验） | [M] |
+| 内置工作流模板（parallel / sequential） | [M]（已随决定 0094 退役） |
+| 声明式 DAG（YAML） | [M]（已随决定 0094 退役） |
+| 数据依赖 vs 执行依赖解耦 | [M]（已随决定 0094 删除） |
+| 可插拔节点类型（Lead-authored deterministic） | [M]（已随决定 0094 退役） |
+| 结构化 handoff（`wao handoff`） | [M]（仍在——通用交接卡，非 DAG 专属） |
 
 ### L4 接口层
 
