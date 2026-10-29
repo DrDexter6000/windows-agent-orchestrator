@@ -1,7 +1,7 @@
 # WAO 团队角色与派工原则
 
 > 状态：现行。Lead 的职责、worker 角色清单与 Lead 的派工原则；worker 角色的合同全文在 `config/roles/*.md`。
-> 上游：`AGENT_ONBOARDING.md`（部署模型）、`SKILL.md`（安全铁律）。
+> 上游：`AGENT_ONBOARDING.md`（部署模型）、`SKILL.md`（Safety Preflight）。
 
 ## 部署模型（前提）
 
@@ -13,7 +13,7 @@ WAO 是"装一次，开发多个项目"的工具：
 ## 核心原则
 
 1. 每个角色有明确的 work scope（做什么）和边界（不做什么）
-2. Worker 通过最终 assistant response 交付结果；编排层（Lead / 控制面）负责记录和传递
+2. Worker 通过最终 assistant response 交付结果；控制面 / Lead 负责记录和传递
 3. Lead 负责编排+验收，worker 只做 bounded 任务
 4. Chief-Advisor / Auditor 是 Lead Agent 的平级合作伙伴；canonical `agentId` 保持 `auditor`，同一专家按需承担前置建议与后置审计
 5. 默认进程式 backend（安全），opencode 仅在需要 token 闸门精确控成本时用
@@ -71,7 +71,7 @@ Lead 收到需求
   → Lead 整合，汇报 owner
 ```
 
-Worker 通过最终 assistant response 交付结果。编排层负责记录和传递。Tester 的轮询反馈给 Lead，异常时 Lead 介入。同一 auditor 会话连审方案与交付两阶段会侵蚀独立性（ADR 0019 §3）；两阶段分席更稳。
+Worker 通过最终 assistant response 交付结果。控制面 / Lead 负责记录和传递。Tester 的轮询反馈给 Lead，异常时 Lead 介入。同一 auditor 会话连审方案与交付两阶段会侵蚀独立性（ADR 0019 §3）；两阶段分席更稳。
 
 ## 车道与角色的事实在哪里
 

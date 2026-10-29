@@ -1077,7 +1077,7 @@ test("B2-⑤ 零断言 + unavailableReason 路径不入闸（gate.acquire 零调
 
 // ── B2-⑥ 生产路径入闸判定（createCallerGate）──
 //
-// 三条生产路径的开启纪律收敛为一个导出工厂：只有"调用方依赖默认验证器"
+// 各条生产路径的开启纪律收敛为一个导出工厂：只有"调用方依赖默认验证器"
 // （注入了 verifyDeliveryFn 的测试/内部复用一律不得入闸——否则 33 处注入式
 // 测试会在 npm test 期间真实争抢机器租约）且 gateEngaged() 时才创建闸对象。
 // 闸生命周期（acquire/release）仍由 verifyDelivery 内部的缝负责。

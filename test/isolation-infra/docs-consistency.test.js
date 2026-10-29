@@ -1162,12 +1162,10 @@ test("M11-2C-06: architecture 明确 Playbook Catalog 只读、不执行", () =>
     "architecture 明确 Catalog 只读、不执行");
 });
 
-test("0094: architecture 写明 WAO 不提供 DAG 执行、多步编排归 Lead", () => {
+test("0094: 已退役说法不得回来（architecture 不得再出现 WorkflowEngine / DAG 数据模型 / workflow run）", () => {
+  // 只保留负向断言：退役说法不得回潮。不要求文档必须出现某句正向措辞——
+  // 那类"必须出现某句话"的钉违反仓库文档规则（一处定义，处处指针）。
   const arch = read("docs/02-architecture.md");
-  assert.ok(/不提供 DAG 执行/.test(arch),
-    "architecture 必须写明 WAO 不提供 DAG 执行");
-  assert.ok(/多步编排由 Lead|多步编排归 Lead/.test(arch),
-    "architecture 必须写明多步编排由 Lead 组合原语完成");
   assert.ok(!/WorkflowEngine|DAG 数据模型|workflow run/.test(arch),
     "architecture 不得再把 DAG 引擎写成现存能力");
 });
@@ -3619,7 +3617,8 @@ test("B3-③: 依赖完整——现行主表行保留 containmentEvidence 追加
   //     保留在 §0.1 主表 seat-certify 行内——表述为追加/连读依赖，不是另一条可选入口
   //     （入口唯一性由 B3-⑥/⑦ 钉住：五文件集合 + 拒绝索引/节选路线）。
   const entry = splitRowCells(seatCertifyMainRowFrom(read("docs/ssot.md")))[2];
-  assert.ok(entry.includes("containmentEvidence"), "主表 seat-certify 行缺 containmentEvidence 追加依赖触发词（越界写拦截活体取证判读）");
+  assert.ok(entry.includes("containmentEvidence") && entry.includes("sandboxEnforcement"),
+    "主表 seat-certify 行缺 containmentEvidence / sandboxEnforcement 追加依赖触发词（越界写拦截与 OS 沙箱活体取证判读——§0.1 行两词都在场）");
   assert.ok(entry.includes("§4.6 Coder Delivery Contract"),
     "主表 seat-certify 行缺追加依赖指针 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同——必须连读）");
   assert.ok(entry.includes("§4.1 状态机"),
@@ -3715,9 +3714,10 @@ function assertFileLevelSeatRow(row) {
     "seat-certify 行缺『正文显式依赖继续跟进』义务（五文件正文写明的依赖不得断读）");
   assert.ok(entry.includes("截断") && entry.includes("补齐"),
     "seat-certify 行缺『读取输出被截断必须补齐』义务（截断不得当读毕）");
-  // —— ⑦d containmentEvidence 追加依赖指针在场（追加/连读表述，非独立入口；
-  //     关系对真实正文的核对在 B3-③）。
-  assert.ok(entry.includes("containmentEvidence"), "seat-certify 行缺 containmentEvidence 追加依赖触发词（见 B3-③）");
+  // —— ⑦d containmentEvidence / sandboxEnforcement 追加依赖指针在场（追加/连读表述，
+  //     非独立入口；关系对真实正文的核对在 B3-③）。
+  assert.ok(entry.includes("containmentEvidence") && entry.includes("sandboxEnforcement"),
+    "seat-certify 行缺 containmentEvidence / sandboxEnforcement 追加依赖触发词（见 B3-③）");
   assert.ok(/docs\/02-architecture\.md/.test(entry) && entry.includes("§4.6") && entry.includes("§4.1"),
     "seat-certify 行缺 docs/02-architecture.md §4.6/§4.1 追加依赖指针（五文件外的已知追加依赖）");
   assert.ok(/追加|连读/.test(entry),

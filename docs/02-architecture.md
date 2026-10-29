@@ -69,7 +69,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   - `runDeliveryReview.js` — exact delivery commit proof + bounded/redacted diff projection，CLI/MCP 共用。
   - `runCollectProjection.js` — run_collect 的共享安全投影 + cursor codec + 分页，CLI 续读与 MCP 委托同一投影，无第二算法。
   - `sessionWorkspace.js` — Lead 会话级工作区选择纯验证内核，委托 `workspaceBinding.js` 的 `proveWorkspace` SSOT；无状态——per-MCP-server 会话状态由 server 闭包持有，application 层不存全局/持久状态。
-  - `runDrilldowns.js` — 有界 Lead 渐进式披露元数据 SSOT：静态闭集 catalog（tool/view/detail/purpose/reveals/cost/readOnly 七键）+ 纯事实选择规则 + 硬上限 `DRILLDOWN_MAX_ENTRIES`/`DRILLDOWN_SERIALIZED_MAX_BYTES`/`DRILLDOWN_FIELD_MAX_LEN`；`run_await_result`/`run_status`/`run_diagnose`/`run_collect`/`run_delivery`/`run_activity` 六个观察工具的输出携带（schema REQUIRED）`availableDrilldowns`，MCP schema 枚举与上限由同一模块导出派生，无第二份列表；只披露不调用、不决策、不广告 mutation/control 工具，`readOnly` 按工具如实（run_collect 三条为 false，余为 true），字段永不含 transcript/provider/仓库文本。
+  - `runDrilldowns.js` — 有界 Lead 渐进式披露元数据 SSOT：静态闭集 catalog（tool/view/detail/purpose/reveals/cost/readOnly 七键）+ 纯事实选择规则 + 硬上限 `DRILLDOWN_MAX_ENTRIES`/`DRILLDOWN_SERIALIZED_MAX_BYTES`/`DRILLDOWN_FIELD_MAX_LEN`；`run_await_result`/`run_status`/`run_diagnose`/`run_collect`/`run_delivery`/`run_activity`/`run_wait` 七个观察工具的输出携带（schema REQUIRED）`availableDrilldowns`，MCP schema 枚举与上限由同一模块导出派生，无第二份列表；只披露不调用、不决策、不广告 mutation/control 工具，`readOnly` 按工具如实（run_collect 三条为 false，余为 true），字段永不含 transcript/provider/仓库文本。
 
   CLI `runs delivery` / `runs diagnose` / `collect` / `status` 均委托共享 service。非 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
@@ -706,7 +706,7 @@ backend done:completed
 **`waitForCompletion` result contract**：
 - 每个非抛出的 terminal result 都带一致布尔：`completed`、`failed`、`aborted`、`timedOut`——恰好一个为 true 且与终态一致。
 - 成功：`{completed:true, failed:false, aborted:false, timedOut:false, messages, evidence, metrics, delivery}`——`delivery` 是完整 DeliveryRef。
-- 打包失败：`{completed:false, failed:true, aborted:false, timedOut:false, messages, evidence, metrics, deliveryError:{code, message}}`——结构化非抛出。
+- 打包失败：`{completed:false, failed:true, aborted:false, timedOut:false, messages, evidence, metrics, deliveryError:{code, message, errorClass?}}`——结构化非抛出；`errorClass` 为可选键，取值闭集的单一权威在 `src/deliveryErrorClass.js`。
 - budget 超限、abort、hard scorecard fail 返回同一结构化 terminal 形状，且不调用 packager。accepted 的 backend failure 是例外路径：持久化 `run.error` + terminal `failed` 后抛出。
 - 等待窗到期不是终态（为什么见决定 0030）：定时器是纯通知器（写 `run.observation_deadline_reached` + 回调 `onObservationDeadline`），不 abort、不产生 `timed_out`；到期后终态仍是自然的 completed/failed（或外部 stop 的 aborted）。`timedOut:true` 只对 legacy timed_out 终态转录出现（loser 结果沿用既有终态，读取兼容）。到期事实在 CLI/runner 结果上以 `observationDeadlineReached:true` 呈现（additive）。
 

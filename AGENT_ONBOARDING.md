@@ -13,7 +13,7 @@ WAO 是一个 **Windows 原生、headless 的 agent 编排控制平面**。它�
 
 **你的角色**：你是主控（lead）。你用 WAO 的命令派发任务给 worker，监控、验收、整合。你不直接干全程——你编排。
 
-**核心原则**（不可违反，详见 `SKILL.md` §安全铁律）：
+**核心原则**（不可违反，详见 `SKILL.md` §Safety Preflight）：
 1. 编排逻辑不灌进 worker 的 system prompt（worker 只看到干净任务 prompt）
 2. transcript 是事实来源（不是 session context）
 3. 状态外化到 `.wao/` 文件（不依赖 session 活着）
@@ -57,7 +57,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 > `npm run cli` 走 `scripts/wao-node.cjs`（自动用 v22 shim），是唯一可靠的入口。
 > 下面命令里的 `<WAO目录>` 指 WAO 仓的根路径，`<目标项目>` 指你要开发的项目根。
 >
-> 第一次必读：**`SKILL.md`**（命令参考、安全铁律）和 **`references/safety-incidents.md`**（铁律背后的真实事故）。不读懂不要派发任务。
+> 第一次必读：**`SKILL.md`**（命令参考、Safety Preflight）和 **`references/safety-incidents.md`**（其背后的真实事故）。不读懂不要派发任务。
 >
 > 机器消费提示：脚本/agent 解析 WAO 输出时用 `npm run cli --silent -- <command>`——不带 `--silent` 时 npm 会把脚本 banner 打进 stdout，污染 `--format json` 的解析。
 

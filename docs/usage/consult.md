@@ -52,7 +52,7 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 （判断权在 Lead）；会话独立性如实显示"未提供"。
 
 **席位比预算慢时**：等待预算最长 10 分钟（`--wait-timeout` 默认 600000ms，范围
-180000..600000，同 `runs wait`），席位常常更久，kimi 车道尤其。预算到期只是
+180000..600000，同 `runs wait`），席位可能较慢、预算留足（快慢特性见车道画像）。预算到期只是
 不再等，席位照跑——`budgetExpired` 或空回执**不等于零输出**。扇出一完成，
 `consult run` 就在 stderr 报出 `consultId` 与各席 runId：`consult wait
 <consultId>` 接着等（各席到终态或窗口到期即返回，可反复调用），`consult show

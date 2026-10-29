@@ -53,7 +53,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 ```powershell
 # spawn 不带 --wait，立即返回 runId
-npm run cli -- spawn researcher --prompt "分析 auth 模块并列出风险文件"
+npm run cli -- spawn <agentId> --prompt "分析 auth 模块并列出风险文件"
 
 # 之后查看状态
 npm run cli -- status <runId>
@@ -161,7 +161,7 @@ kimi-code 与 deepseek-harness 两个后端当前暂停使用（为什么见决�
 }
 ```
 
-`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容是侦测不是沙箱：越界写的 `file_written` 证据一经观察到，即触发 `workdir_escape` 转 failed（写后侦测拦截，非写前阻止）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
+`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容在未声明 OS 写沙箱的车道是侦测不是沙箱（写后侦测非写前阻止；codex 车道例外——见 `docs/02-architecture.md` §4.6）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
 
 单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用。它不是 `run_wait` / `run_await_result` 的观察窗口——它约束 exact verifier 的逐条 setup/assertion 命令执行。语义：
 
@@ -174,7 +174,7 @@ continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"
 
 `continuable` 的后端资格以后端类声明（`supportsSessionReuse`）为准——人读投影见生成层 `docs/surface/certification.md` 能力列（registry 的 `sessionReuse` 条目是路由配置，不是能力证明）。资格拒绝携带固定原因码 `continuable_backend_unsupported`，缺 delivery 拒绝携带 `continuable_delivery_only`（固定文案，不回显席位/workspace/backend 名）。
 
-只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`）。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制 worktree 隔离——非复用轮是 ephemeral（终态且停止验证确认后回收树，停止未确认则留树保迟到收取）；sessionReuse 复用轮是 persistent（kimi 会话 server 侧 cwd 钉在首轮树）；worktree 创建失败时 fail-closed 拒绝派发（typed `read_only_worktree_required`，不走普通 run 的降级原 cwd 路径）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见[监督](supervise.md)的 `run_activity` 一节）。`readOnly` 与 `delivery` 块互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，不是"没写"），不是全知监控；② 强制隔离与越界侦测是侦测机制，不是 OS 沙箱——隔离降低误写面，但不能物理阻止越界写；③ 观察是 advisory 非门——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）是两回事：那是不可验证、无持久事实的 prompt 约定；控制面 `readOnly` 声明有 durable 事实事件 + 基于上报证据的观察投影。
+只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`）。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制 worktree 隔离——非复用轮是 ephemeral（终态且停止验证确认后回收树，停止未确认则留树保迟到收取）；sessionReuse 复用轮是 persistent（kimi 会话 server 侧 cwd 钉在首轮树）；worktree 创建失败时 fail-closed 拒绝派发（typed `read_only_worktree_required`，不走普通 run 的降级原 cwd 路径）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见[监督](supervise.md)的 `run_activity` 一节）。`readOnly` 与 `delivery` 块互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，不是"没写"），不是全知监控；② 强制隔离与越界侦测在未声明 OS 写沙箱的车道是侦测机制不是 OS 沙箱——降低误写面、不物理阻止（codex 例外见本页 delivery 一节）；③ 观察是 advisory 非门——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）是两回事：那是不可验证、无持久事实的 prompt 约定；控制面 `readOnly` 声明有 durable 事实事件 + 基于上报证据的观察投影。
 
 单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则见 `docs/certification-runbook.md` §场景 1b / §场景 1c（与 CLI 覆盖正文合并维护；单向链接；唯一权威）。
 

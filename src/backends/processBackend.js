@@ -323,8 +323,10 @@ export class ProcessBackend {
     // M12-16: a correctable task needs a stdin pipe so the runner can queue
     // follow-up user turns to the SAME live provider process. Only when this
     // backend declared the capability (supportsInFlightCorrection + an
-    // encodeUserMessage wire encoder) does the child get a piped stdin; every
-    // other run is byte-compatible (stdin "ignore").
+    // encodeUserMessage wire encoder), OR the backend declared promptViaStdin
+    // (the prompt is written to the child's stdin after spawn — decision 0093),
+    // does the child get a piped stdin; every other run is byte-compatible
+    // (stdin "ignore").
     const correctable = task.correctable === true && this.supportsInFlightCorrection === true
       && typeof this.encodeUserMessage === "function";
     // 声明 promptViaStdin 的后端不把提示词放进命令行（Windows 命令行有长度上限，长任务

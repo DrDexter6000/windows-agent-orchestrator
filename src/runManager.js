@@ -3468,9 +3468,11 @@ export class Run {
 
   /**
    * TD-103 Phase 3A: finalize delivery by calling the packager.
-   * Returns {success:true, ref} or {success:false, error:{code, message}}.
+   * Returns {success:true, ref} or {success:false, error:{code, message, errorClass?}}
+   * (errorClass: optional closed-set environment class — SSOT src/deliveryErrorClass.js;
+   * key absent, not null, when unclassifiable).
    * Never throws — packaging failures are structured results.
-   * @returns {Promise<{success:true, ref:object}|{success:false, error:{code, message}}>}
+   * @returns {Promise<{success:true, ref:object}|{success:false, error:{code, message, errorClass?}}>}
    */
   async _finalizeDelivery() {
     try {

@@ -34,7 +34,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 
 ### 同机验证串行化闸
 
-同一台机器上并发发起的全量交付验证会互相踩踏：多个验证命令序列同时在跑，彼此拖慢到 `command_timeout`，取证信号被稀释。任何经三条生产路径（run 交付验证、`run_delivery_reverify`、`run_delivery_repackage`）发起的交付验证，与直连 `npm test` 的 canonical 全量，共用一把机器级租约闸串行化；粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。
+同一台机器上并发发起的全量交付验证会互相踩踏：多个验证命令序列同时在跑，彼此拖慢到 `command_timeout`，取证信号被稀释。任何经四条生产路径（run 交付验证、`run_delivery_reverify`、`run_delivery_repackage`、`runs verify-commit`）发起的交付验证，与直连 `npm test` 的 canonical 全量，共用一把机器级租约闸串行化；粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。
 
 - 并发发起时后到者排队而不是并发踩踏：墙钟总时长可能变长，但每个验证都在自己的完整预算内跑完。排队每约 30 秒向 `%LOCALAPPDATA%\wao\gate.log` 打一条含持有者身份的等待日志；排队不消耗 `verificationTimeoutMs` 或测试预算，也不产生新的交付失败码。
 - 持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。
@@ -45,7 +45,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 
 ### 写入意图与越界检查
 
-WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。Claude Code 的 Write/Edit/MultiEdit 会先记录 `write_intent`；只有同一 `toolCallId` 的成功结果才确认 `file_written`。若写入意图无法关联、重复、超过 pending 上限、run 完成时仍未确认，或 backend 报告的意图/已确认写入经词法路径和 filesystem realpath（含 junction/symlink）不能证明位于该 worktree，run 会在 packaging 前以 `workdir_escape` 失败，transcript 只保留固定安全事实、不保留越界路径。`write_intent` 不是"文件已写入"的证据。该检查不解析 worker command，也不是 OS filesystem sandbox；它不会把语义判断或处置权从 Lead 手中拿走。
+WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。Claude Code 的 Write/Edit/MultiEdit 会先记录 `write_intent`；只有同一 `toolCallId` 的成功结果才确认 `file_written`。若写入意图无法关联、重复、超过 pending 上限、run 完成时仍未确认，或 backend 报告的意图/已确认写入经词法路径和 filesystem realpath（含 junction/symlink）不能证明位于该 worktree，run 会在 packaging 前以 `workdir_escape` 失败，transcript 只保留固定安全事实、不保留越界路径。`write_intent` 不是"文件已写入"的证据。该检查不解析 worker command，也不是 OS filesystem sandbox（codex 车道例外，见 `docs/02-architecture.md` §4.6）；它不会把语义判断或处置权从 Lead 手中拿走。
 
 限制：仅支持 `run`（foreground 和 background 均可），不支持 `spawn`。Background delivery 需要 `--isolate`。
 

@@ -1,6 +1,6 @@
 # WAO Safety Incidents — 必读背景
 
-> 本文件是 SKILL.md "安全铁律" 的详细背景。主控在第一次使用 WAO 前、或遇到 opencode worker 异常时读它。
+> 本文件是 SKILL.md "Safety Preflight" 一节的详细背景。主控在第一次使用 WAO 前、或遇到 opencode worker 异常时读它。
 > 这里记录的真实事故，是每条铁律存在的理由。读懂它们，你才知道为什么规则这么定。
 
 ## 事故 1：06-17 DeepSeek quota 耗尽（TD-35）

@@ -4,7 +4,7 @@
 //
 // 主症状：同一台机器上并发发起的"全量交付验证"互相踩踏——多个 verifyDelivery
 // 命令序列同时在跑，彼此拖慢到 command_timeout，取证信号被稀释。本轮用一把
-// 机器级租约锁把"任何经三条生产路径发起的交付验证"与"直连 canonical 全量"
+// 机器级租约锁把"任何经四条生产路径发起的交付验证"与"直连 canonical 全量"
 // 串行化（粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()）。
 //
 // 设计红线（不可让步）：
@@ -88,7 +88,7 @@ export function gateLogPath() {
 
 /**
  * kill switch 判定：env[WAO_VERIFICATION_GATE] trim+小写后恰为 "off" 才算关。
- * 其余一切值（含未设置）都保持开闸。由调用方（三条生产路径 / canonical main）
+ * 其余一切值（含未设置）都保持开闸。由调用方（四条生产路径 / canonical main）
  * 在创建闸之前调用。
  *
  * @param {NodeJS.ProcessEnv} [env=process.env]
@@ -103,7 +103,7 @@ export function gateDisabled(env = process.env) {
  *
  *   engaged = kill switch 未关 且 本进程未持闸（HELD 为空）。
  *
- * 三条生产路径与 canonical main 在创建闸之前统一问它，避免各调用点长出第二份
+ * 四条生产路径与 canonical main 在创建闸之前统一问它，避免各调用点长出第二份
  * 判定逻辑；防自锁的第二道防线（第一道是注入方根本不创建闸）。
  *
  * @param {NodeJS.ProcessEnv} [env=process.env]

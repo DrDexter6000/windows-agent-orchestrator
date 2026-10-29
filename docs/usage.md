@@ -6,7 +6,7 @@
 |---|---|
 | [安装与配置](usage/install.md) | 第一次安装 WAO、写配置、验证安装 |
 | [车道配置与维护](usage/lanes.md) | 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 车道的 serve、认证入口 |
-| [接入宿主与绑定项目](usage/host.md) | 把 MCP 服务注册进 Claude Code / Codex / OpenCode，绑定项目 |
+| [接入宿主与绑定项目](usage/host.md) | 把 MCP 服务注册进表内七类宿主（宿主表见该页），绑定项目 |
 | [派发](usage/dispatch.md) | 派出一个 worker：前台或后台、并行、工作树隔离、重试与恢复、续跑、纠正 |
 | [监督](usage/supervise.md) | run 在跑时：等待、看状态和活动、停止 |
 | [取结果与查历史](usage/results.md) | 取回答、诊断、脚本消费 JSON、列出与统计 run |

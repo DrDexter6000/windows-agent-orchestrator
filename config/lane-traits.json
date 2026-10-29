@@ -303,7 +303,6 @@
       },
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）；价格高昂（Owner）",
       "caveats": [
-        "用它做重要会审时备好替补席位",
         "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败"
       ],
       "contextWindow": {

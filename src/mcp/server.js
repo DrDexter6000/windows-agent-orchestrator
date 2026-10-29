@@ -1591,9 +1591,9 @@ const STATUS_ERROR_TEXT = "run_status failed";
 
 // ===== M12-8B: shared bounded progressive-disclosure metadata schema =====
 //
-// `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY six
+// `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY seven
 // tools (run_await_result, run_status, run_diagnose, run_collect, run_delivery,
-// run_activity). It tells the Lead which safe observation tool can reveal more
+// run_activity, run_wait). It tells the Lead which safe observation tool can reveal more
 // about the returned result — never auto-calls it, never makes a semantic
 // decision, never advertises a destructive/mutating tool, and never contains
 // transcript/provider/repository text (every string is static, chosen by
@@ -1707,7 +1707,7 @@ const RUN_STATUS_OUTPUT = z.object({
   // 去留由 Lead 决定，WAO 不据此做任何动作。
   leadAdvisory: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
@@ -1838,7 +1838,7 @@ const RUN_COLLECT_OUTPUT = z.object({
   // text content and structuredContent from this one field.
   compactFallback: z.string().optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
@@ -1925,7 +1925,7 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
@@ -3321,7 +3321,7 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   observation: OBSERVATION_FACT,
   termination: TERMINATION_FACT.nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
@@ -3560,7 +3560,7 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   truncated: z.boolean(),
   nextCursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,

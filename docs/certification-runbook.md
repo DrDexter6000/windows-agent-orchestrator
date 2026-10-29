@@ -177,7 +177,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 - 【硬】delivery spec 的 allowedPaths 覆盖联动守卫文档（本表行集 = KNOWN_BACKENDS 闭集，原语表守卫会咬未同步的表）。
 - 【硬】全量验证错峰：以本机实测确认安静窗口（当前证据 01:00–06:00，见 incident 文件）；安静窗口数据是本机单时段实测，换机重测。
 - 【硬】会审与全量验证不并行（资源竞争致 command_timeout）。
-- 【硬】reverify 单发、仅环境类失败码可用；`artifact_mutated` 不具资格——先取证工作树终态（瞬态孤儿/中断 vs 真变异）再决定重派。
+- 【硬】reverify 至多两条链、仅环境类失败码可用（attempt 2 是 Lead 显式申请的第二次、也是最后一次机会，从不自动重试——见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 小节）；`artifact_mutated` 不具资格——先取证工作树终态（瞬态孤儿/中断 vs 真变异）再决定重派。
 - 【硬】销毁性回收：先 bundle 保全+verify、显式路径禁 glob、双席审计+Owner 点名批准；bundle 存在不证明整个工作树可恢复（未提交/未跟踪/被引证据另行处理）。
 - 【硬】验收决定即时落账（reject/accept 当轮记录，不留补记）。
 - 【硬】HTTP attach 实测的凭据纪律：值从 env 读取、内存构造 Authorization 头——绝不展开进外部程序 argv、URL、任务书、转录或报告（`curl -H "…$TOKEN"` 经 shell 展开后值仍在 argv，"来源是 env"≠"没进命令行"；参考实现 `src/backends/kimiWeb.js` 的 resolveBearerToken/request）。401/403、服务不可达、响应不可解析分别如实记"本轮未完成该项复核"——不推断零差异，不为完成盘点自行取新凭据、改认证配置或重启服务。
@@ -267,11 +267,14 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
   drill 只在声明 `enforcesWriteSandbox` 的车道出现（矩阵构建替换），确定性一翼是
   `npm test` 的 `test/backends/codexSandbox.test.js`（参数构建钉：首轮与 resume 轮都带
   三项 `-c`，任何路径不出现 `danger-full-access`）。
-- **越界写拦截的证据组成与已知上限（决定 0084）**：活体（`containmentEvidence`——正常
-  写被正确放行）+ 确定性（`npm test` 里的链式测试 `test/backends/containmentChain.test.js`
-  ——各后端的协议帧走真实 parser 与控制面，验证拦截判定链）。已知上限：不再在真实车道上
+- **越界写拦截的证据组成与已知上限（决定 0084、0086）**：未声明 OS 写沙箱的车道是活体
+  （`containmentEvidence`——正常写被正确放行）+ 确定性（`npm test` 里的链式测试
+  `test/backends/containmentChain.test.js`——各后端的协议帧走真实 parser 与控制面，验证拦截
+  判定链）；声明 `enforcesWriteSandbox` 的车道（codex）换成上一条的 `sandboxEnforcement` +
+  `test/backends/codexSandbox.test.js`。已知上限：不再在真实车道上
   实测"模型越界并被拦住"这一整段（守约的模型拒绝往外写，无靶可拦）；后端不上报的写入
-  （如 shell 命令）不在拦截面内（`docs/02-architecture.md` 已有声明）。
+  （如 shell 命令）不在拦截面内——限未声明 OS 写沙箱的车道（codex 车道每次调用带
+  workspace-write 沙箱，`docs/02-architecture.md` §4.6 已有声明）。
 - **通过 → `conditional` + `certificationScope:"delta"`**：delta 子集全过**不产生** `certified`。
   `runs/reliability-summary.json` 的 worker 记录取 `status:"conditional"` + 事实字段
   `certificationScope:"delta"`（按该 worker case 的 profile/drill 覆盖派生，混合取保守值

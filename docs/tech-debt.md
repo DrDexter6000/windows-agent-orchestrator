@@ -55,7 +55,7 @@
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 择机：触碰交付验证恢复面时做 verification_interrupted 识别与 pending 形态 reverify | docs/02-architecture.md |
 | TD-180 | codex 后端启动期退出、零写入零 verdict：用量到顶已能识别（codex 自报的原话进终局 run.error，诊断归 provider_capacity），其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 等样本：再遇启动期退出样本，先查 codex JSON 输出有无原话 | 0067 docs/troubleshooting.md |
-| TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 等样本：跨波失败再现时按 testing.md §8.1 安静窗口单发复验收敛归因 |  |
+| TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 等样本：跨波失败再现时按 docs/troubleshooting.md §8.1 安静窗口单发复验收敛归因 |  |
 | TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 等样本：下一次真实恢复 drill 运行 |  |
 | TD-183 | 完成门只在角色合同探针上（roleProbeRunCompletion）；等待到期与 llm 侧各检查不校验探针 run 是否完成即判定，传输层失败仍可能记成假红 | 开放 | 等样本：provider 抖动打到未覆盖探针时补完成门，或 Owner 裁定推广 | scripts/reliability/componentDrills.mjs src/transcript.js |
 | TD-184 | 复用证据已还清；遗留 dsh drill 路由键重算失效待修、codex 转录照不到部分工具调用等小项 | 开放 | 择机：dsh drill 路由键修复待排期；原语表 30 天期限钟持续刷新 | 0045 scripts/reliability/session-reuse-drill.mjs |
@@ -94,7 +94,7 @@
 | TD-280 | zcode / kimi-web 的严格评分演练以 failed 收尾（认证判定仍是不适用），认证演练没有重跑 | 开放 | 择机：下次例行认证时重跑 | 0072 |
 | TD-281 | requireCommands×无退出码后端：registry validate 已有警告（0072），派发时刻仍无提示 | 开放 | 择机：下次改派发前检查时把警告接到派发面 | 0072 |
 | TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 等样本：真实误归样本出现时按窗口长短区分限流与额度耗尽 | src/diagnosis.js |
-| TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含 containmentEvidence 时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求 containmentEvidence 在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 scripts/reliability/certification.mjs |
+| TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含相应活体检查（containmentEvidence，或声明 OS 沙箱车道的 sandboxEnforcement）时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求相应活体检查（containmentEvidence，或声明 OS 沙箱车道的 sandboxEnforcement）在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 0086 scripts/reliability/certification.mjs |
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
 | TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt` | 开放 | 等样本：codex 车道需要在途纠偏时（Owner 2026-10-29 裁定暂不做：codex 车道只做会审）；做法是把 codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |
 | TD-322 | 从 Claude 桌面端 Code 标签调 MCP 的长等待会在约 60 秒报 Request timed out：run_wait 最短 180 秒，run_consult 默认等 270 秒。WAO 只在客户端带 progressToken 时发进度通知，桌面端没有因此续期（2026-10-29 复测：调用超时时运行仍在跑）；该宿主上的 Lead 只能改用 CLI 的 `runs wait` | 等待裁定 | Owner 定出路：宿主侧设 MCP_TOOL_TIMEOUT 后重启桌面端试（未验证桌面端是否读取）、MCP 面放开 60 秒以内的等待（与决定 0030 的下限取舍）、或维持现状 | src/application/runWait.js src/mcp/server.js |

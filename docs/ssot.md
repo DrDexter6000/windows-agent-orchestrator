@@ -134,7 +134,7 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - 技术债台账 `docs/tech-debt.md` 一条一行、列数与状态固定、行长有上限；每个技术债编号只在台账、已了结清单（`docs/archive/tech-debt-closed.md`）、已偿还归档三者之一有定义行，文档与代码里引用的编号都要有定义（测试夹具与冻结的归档不在检查面）。
 - 决定索引一行只放编号和标题；新决定档有体量上限。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
-- seat-certify 入口：§0.1 的行无条件全文必读恰五个文件；多行动面取并集、正文显式依赖跟进、截断补读三项义务在场；containmentEvidence 连读 architecture §4.6/§4.1 是追加依赖指针，不是独立入口；改成索引、节选替代全文或按裁量收窄都会红。
+- seat-certify 入口：§0.1 的行无条件全文必读恰五个文件；多行动面取并集、正文显式依赖跟进、截断补读三项义务在场；containmentEvidence 或 sandboxEnforcement 连读 architecture §4.6/§4.1 是追加依赖指针，不是独立入口；改成索引、节选替代全文或按裁量收窄都会红。
 - 认证正文迁出处：使用手册保留具名标题与指向 `docs/certification-runbook.md` 的单向链接，目标节必须真实存在；摘链接、改目标节名、删标题都会红。
 - 使用手册：`docs/usage.md` 的页表与 `docs/usage/` 下的文件一一对应，每页开头指回地图，页内相对链接都能解析到文件；派发页的续跑拒绝原因与代码闭集双向一致。
 - roadmap：里程碑表里已完成的里程碑不回退；字节上限把它限在一张表的体量。

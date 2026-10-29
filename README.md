@@ -68,7 +68,8 @@ you.
   branches are always kept (0085); delivery reverify gives the Lead one explicit
   second chance, and packaging failures carry a closed-set error class.
 - **Lane profiles you can trust** — per-dimension ratings with their basis, marked for
-  review when a lane changes and shown in full by `lead_preflight`; measured results
+  review when a lane changes; `lead_preflight` carries each lane's ratings and all
+  caveats, while `wao lanes` carries the evidence-backed complete profile; measured results
   take precedence over manual ratings unless the Owner marked them (0087–0090, 0092).
 - **WAO keeps the machine awake while it works** — worker runs, delivery verification
   and full suites ask Windows to keep the system and display awake (best effort; a
@@ -107,15 +108,9 @@ decides. The playbook catalog is read on demand via MCP resources
 application service as the CLI fallback, producing identical transcript durable facts.
 See [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 
-**Milestones M0–M12 complete.** Delivered highlights: multi-backend dispatch with
-worktree isolation, resume, and token/cost metrics; evidence-chain scorecards; daemon supervision, diagnostics, and
-runtime certification; workspace-bound dispatch/recovery/stop with `run_wait` liveness
-observation; safe changed-path projection, exact delivery proof, and bounded/redacted
-diff review; advisory `candidateInventory` recovery for retained `disallowed_path`
-failures plus Lead-authorized, model-free `run_delivery_repackage` (re-check and re-verify
-the original worktree, base, and verification declaration without calling the worker
-model again); `run_continue` correction lineages; the 23-tool frozen MCP surface; and
-per-command execution budgets.
+**Milestones:** progress and per-milestone scope live in
+[`docs/roadmap.md`](docs/roadmap.md) — the single authority for milestone
+progress (this README deliberately does not restate the completed range here).
 
 Certification is advisory evidence about a worker's recorded reliability, not a dispatch
 permission gate. Two-tier verification, the delta certification procedure, and the

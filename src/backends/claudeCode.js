@@ -94,7 +94,9 @@ function activeOauthTokenValue(task) {
  * Claude Code backend（M2-6）。
  * 薄封装：ProcessBackend + ClaudeStreamParser + 参数构造。
  *
- * 调用：claude -p "<prompt>" --output-format stream-json --verbose
+ * 调用：claude -p --output-format stream-json --verbose（裸 -p，不带位置参数——本后端声明
+ * promptViaStdin，非纠偏运行的提示词在子进程起来后写进它的标准输入；纠偏运行以
+ * stream-json 用户消息经同一 stdin 投递。提示词不进命令行，决定 0093。）
  *
  * P4 融合项 #3（决策B）：优先用 agent.provider 一等字段推导参数（wrapper prependArgs +
  * claude CLI flags），单一真相源防漂移（opus-4.8 bug 温床）。无 provider 时向后兼容，

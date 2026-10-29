@@ -2,7 +2,7 @@
   "_comment": "Worker lane registry 模板：车道键=模型家族短名，模型绑定原厂 harness。本文件是入库的完整示例（complete example，可裁剪）：复制为 config/agents.json（gitignored，不入库）后按可用认证删减，删到只剩一个 worker 也行。条目不携带 systemPrompt：角色是派发时按任务显式选择的帽子（--role），合同在 config/roles/*.md。车道的用途与限制（画像）只给 Lead 看，见 config/lane-traits.json（npm run cli -- wao lanes）。",
   "_comment_ssot": "⚠ 本表各条目的接线轴（backend/model.id/providerID/effort）须与 config/lanes.json 逐条一致：改车道型号或 effort 时两处同改，不一致时 --lane 派发即拒。车道身份=四元组 {backend, model.id, providerID, providerKey} 内容指纹（effort=参数不进身份）；模型 id/harness 升级走 harness 版本巡检 SOP + 重认证，派发只派认证清单中的。新增车道=Owner 组合权；同 backend 多 model 车道合法（如 deepseek-pro/deepseek-flash）。",
   "_comment_example_axes": "zcode binary 为桌面捆绑路径占位（换机改真实路径）。各 backend 接受哪些字段、effort 取哪些值，见生成层 docs/surface/certification.md。",
-  "_comment_safe": "安全：本模板除 kimi 外的车道都是进程式 backend（进程死即会话死，停止可以核实）；kimi 走共享的 kimi web serve，会话比进程活得久，没有会话级中止通道，停止时会话若仍在输出，只能记为 stop_unverified。如需 token 闸门精确控成本的 opencode fallback，见 docs/troubleshooting.md。",
+  "_comment_safe": "安全：本模板除 kimi 外的车道都是进程式 backend（进程死即会话死，停止可以核实）；kimi 走共享的 kimi web serve，会话比进程活得久，停止语义（验证口径与服务端中止路由）见 docs/usage/supervise.md 的 run_stop 一节。如需 token 闸门精确控成本的 opencode fallback，见 docs/troubleshooting.md。",
   "agents": {
     "glm-pro": {
       "_comment": "via zcode app-server（原厂 harness 驱动原厂 LLM）；型号、用途与限制见 wao lanes。",

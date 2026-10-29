@@ -1,6 +1,6 @@
 # 接入宿主与绑定项目
 
-> [使用手册](../usage.md)的一页：把 WAO 的 MCP 服务注册进宿主（Claude Code、Codex、OpenCode），并把会话绑定到一个项目。
+> [使用手册](../usage.md)的一页：把 WAO 的 MCP 服务注册进表内七类宿主（清单见本页宿主表），并把会话绑定到一个项目。
 
 ## MCP stdio 接口
 
@@ -95,7 +95,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## MCP `lead_preflight`（advisory 启动检查）
 
-`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。**advisory，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，不是 authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定。认证/授权证明边界见 `docs/certification-runbook.md` §认证与当前就绪。
+`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询 + 车道画像，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。车道画像经 `lanes` 字段给出（分项评分、族系、注意事项、成本、`dispatchHold` 说明）；带依据的完整画像见 `wao lanes`，字段见 `docs/surface/mcp-tools.md`。**advisory，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，不是 authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定。认证/授权证明边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
 输入 `workspaceRoot` 可选；提供时复用 `workspace_select` 的选择权威（该选择只作只读缺省范围），失败不覆盖既有选择；省略时只检查当前选择。`workspace.projectBucket` 是非绝对项目标签（本次结果按哪个项目取范围；认不出项目时为 null）；输出不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
@@ -131,7 +131,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 | claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件 |
 | dsh | 把片段的 `insert` 行并入 `~/.dsh/profiles/<profile>/cordis.patch.yml`（YAML，不是 `mcpServers` JSON）；profile 声明 `patchReload: live` 时改完立即生效，否则重启 dsh | 各 profile 的 `cordis.patch.yml` 与 `cordis.yml`（按 id 覆盖、`disabled` 表达式、flow 行记 unknown；bundle 层、`--patch` 叠加与 `cordis:include` 不在探测范围） |
 
-表内七个宿主都已完成真机加载验证；claude-desktop 只核实到握手完成、`tools/list` 有返回（对话内调用未演练，配置位置只核实过 Windows）。dsh 是 2026-10-18 在 dsh 0.2.1-rc.2 上验证的：`cordis.patch.yml` 的 insert 行经 live reload 生效后握手成功、`tools/list` 列出全部工具（前缀 `mcp__wao__`；计数见生成层 docs/surface/mcp-tools.md），并在会话内真实调用 `lead_preflight` 返回结果；其 MCP 客户端默认单次调用超时 60s，片段里同样带 `toolCallTimeoutMs: 660000`（理由同 zcode）。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊：**zcode 片段 = 本地插件包形态**（`.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射 + 本地名录），官方接入命令 `zcode plugins marketplace add <名录目录> && zcode plugins install wao@wao-local`，新会话加载 WAO 全部工具（前缀 `mcp__plugin_wao_wao__`；计数见生成层 docs/surface/mcp-tools.md）。`.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_wait` / `run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。
+表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威（`AGENT_ONBOARDING.md` §4e 同指）。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态，官方接入命令与排坑见 `AGENT_ONBOARDING.md` §4e；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_wait` / `run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
 
 **前置条件**（仅 autoBind/codex 路径）：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
 

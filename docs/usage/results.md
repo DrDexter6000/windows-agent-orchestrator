@@ -183,7 +183,7 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 - `view` ∈ 闭集 `compact | timeline | evidence | delivery | diagnosis`（深度由浅到深：compact 最后一助手文本 → timeline 活动时间线一页 → evidence 一页有界 worker 输出 → delivery 交付事实 → diagnosis 故障诊断）。
 - `detail` = 一行深度短语；`purpose` = Lead 为何可能想看它；`reveals` = 展开后能看到的额外事实（均为字段/文本级的既有安全输出，无新内容）。
 - `cost` ∈ 闭集 `low | medium | high`：`low` 单次快照读取；`medium` 分页或较大输出；`high` 完整 delivery diff 审阅。
-- `readOnly` 按被披露工具如实标注：`run_collect` 每次成功调用追加一条 `messages.collected` 审计，其三条 entry 报 `readOnly:false`；其余五个工具零 append，报 `readOnly:true`。
+- `readOnly` 按被披露工具如实标注：`run_collect` 每次成功调用追加一条 `messages.collected` 审计，其三条 entry 报 `readOnly:false`；其余五个可披露工具零 append，报 `readOnly:true`。
 
 每个工具的输出都基于已返回的机器事实选择披露：不推断、不给处方、不选文件、不遍历 cursor；内容全是 WAO 代码选定的静态字符串，不含 transcript/provider/仓库文本。上限（≤4 条、序列化 ≤2048 字节、字段 ≤160 字符）由共享模块硬性强制，≤4 条同时反映到 schema `maxItems`。代表性披露：
 

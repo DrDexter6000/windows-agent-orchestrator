@@ -14,7 +14,7 @@
 
 请按以下步骤完成 onboarding：
 
-1. **读 onboarding 文档**：读 `D:/projects/windows-agent-orchestrator/AGENT_ONBOARDING.md`。特别注意 §2 部署模型（skill 装哪 vs .wao/ 建哪）和 §安全铁律。这些来自真实事故（烧过上亿 token），不可违反。
+1. **读 onboarding 文档**：读 `D:/projects/windows-agent-orchestrator/AGENT_ONBOARDING.md`。特别注意 §2 部署模型（skill 装哪 vs .wao/ 建哪）和 §6 安全边界。这些来自真实事故（烧过上亿 token），不可违反。
 
 2. **读安全背景**：读 `D:/projects/windows-agent-orchestrator/references/safety-incidents.md`。了解 06-17 和 06-18 两次 quota 事故的根因。
 

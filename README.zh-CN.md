@@ -58,8 +58,9 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   越界帧都会被拦（决定 0084、0086）。
 - **运行收得干净、不丢东西**——符合条件的隔离运行到终态只删干净的树，分支一律保留（0085）；交付重验证
   给 Lead 一次显式的第二次机会，打包失败带闭集错误类别。
-- **车道画像分项、有依据、以实测为准**——依据随格，换代即标待复核，`lead_preflight` 一次
-  给全；实测可覆盖手动评分，Owner 特别标注的除外（0087–0090、0092）。
+- **车道画像分项、有依据、以实测为准**——依据随格，换代即标待复核；`lead_preflight` 给出每条
+  车道的分项评分与全部注意事项，带依据的完整画像在 `wao lanes`；实测可覆盖手动评分，Owner
+  特别标注的除外（0087–0090、0092）。
 - **WAO 干活时自己保持唤醒**——worker 运行、交付验证与全量测试期间向 Windows 申请保持唤醒
   （尽力而为，用户自己选睡眠照样会睡），屏幕不再空闲熄灭，合盖也不进待机；提示词经标准输入交给 runner 与 codex/claude CLI（0093）。
 - **dsh 进宿主表**——`wao mcp bind` 给出 DeepSeek Harness 的 profile patch 插入行，
@@ -86,13 +87,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 不占工具面。每个改状态的操作都与 CLI fallback 调用同一共享 application service，产生
 相同的 transcript 持久事实。工具表与路由契约见 [`SKILL.md`](SKILL.md)。
 
-**里程碑 M0–M12 全部完成。** 已交付要点：多 backend 派发 + worktree 隔离 + 断点续跑 +
-token/成本计量；证据链 scorecard；daemon 监管、诊断与
-runtime 认证；workspace 绑定的派发/恢复/停止 + `run_wait` 存活观察；安全的 changed-path
-投影、exact 交付证明与有界/脱敏 diff 审查；`disallowed_path` 保留失败的 advisory
-`candidateInventory` 恢复 + Lead 授权的**不重调模型** `run_delivery_repackage`（复用原
-worktree、base 与验证声明原地重检重验，不再调用 worker 模型）；`run_continue` 修正谱系；
-23 工具冻结 MCP 面；逐命令执行预算。
+**里程碑进度**：以 [`docs/roadmap.md`](docs/roadmap.md) 为唯一权威（每期范围与完成状态都在那里）——README 刻意不复述已完成范围。
 
 认证是关于 worker 已记录可靠性的 advisory 证据，不是派发许可门。两层验证、delta 认证
 规程与上游原语复核 SOP 见 [`docs/certification-runbook.md`](docs/certification-runbook.md)；

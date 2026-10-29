@@ -76,7 +76,7 @@
       "reasoning": { "effort": "<effort>" },
       "cwd": "D:/projects/my-app",
       "isolation": { "type": "worktree", "strategy": "persistent" }
-      // strategy: "persistent"（默认，run 后保留 worktree）| "ephemeral"（run 后清理）
+      // strategy: "persistent"（默认保留；符合条件的干净树终态自动释放、分支一律保留——docs/02-architecture.md §4.3 与决定 0085）| "ephemeral"（run 后清理）
     }
   }
 }
