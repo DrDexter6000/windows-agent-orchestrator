@@ -19,7 +19,7 @@
 //   - alert(level, msg, opts): 替代 raiseAlert
 
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { parseOptions } from "./shared.js";
 
@@ -49,9 +49,13 @@ export async function stopCommand(args, config, deps = {}) {
 
   // Delegate to shared application service
   const { stopRun, STOP_REASON_MIN_LEN, STOP_REASON_MAX_LEN, STOP_OBSERVATION_MAX_AGE_SECONDS } = await import("../application/runStop.js");
+  // 服务端中止需要鉴权的后端（kimi-web）取派发该运行的 registry agent——路径同其它
+  // 命令：--registry 优先，缺省 config.registry。
+  const registry = options.registry ?? config?.registry;
   const result = await stopRun({
     runId,
     runDir,
+    ...(typeof registry === "string" && registry.length > 0 ? { registryPath: resolve(registry) } : {}),
     justification: { reason, observedSeq },
     deps: { ...deps, config },
   });
@@ -136,6 +140,22 @@ function stopResultToCliJson(r) {
       sideEffectAttempted: false,
       terminalAccepted: false,
       terminalState: r.terminalState,
+    };
+  }
+  // Server-side stop target not resolvable — nothing was sent, terminal not
+  // claimed (same face as invalid PID: the worker may still be running).
+  if (r.stopRouteUnavailable) {
+    return {
+      runId: r.runId,
+      stopped: false,
+      backend: r.backend,
+      sideEffectAttempted: false,
+      terminalAccepted: false,
+      terminalState: r.terminalState,
+      verified: false,
+      outcome: "stop_route_unavailable",
+      taskkillCalled: false,
+      error: r.routeError,
     };
   }
   // Invalid PID

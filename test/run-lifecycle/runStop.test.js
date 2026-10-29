@@ -15,7 +15,7 @@ import { join, resolve, sep } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
+import { JsonlTranscript, readTranscript, findState } from "../../src/transcript.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -426,6 +426,350 @@ writeFileSync(${JSON.stringify(join(dir, "td23304-out.json"))}, JSON.stringify({
     assert.notEqual(resolve(out.alertPaths[0]), join(resolve(dir), "ALERTS.log"),
       "alert must never land at the bare process cwd");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 服务端中止按会话记录的 backend 选实现：kimi-web ─────────────────────────────
+
+const KW_TOKEN_ENV = "WAO_RUNSTOP_KW_TEST_TOKEN";
+const KW_TOKEN = "fake-key-runstop-kw-9f8e7d6c5b4a";
+const KW_SERVE = "http://127.0.0.1:4310";
+const KW_SESSION_URL = `${KW_SERVE}/api/v1/sessions/session_kw`;
+
+async function seedKimiWebRun(runDir, runId, { agentId = "coder_kw", serveUrl = KW_SERVE } = {}) {
+  const tp = join(runDir, `${runId}.jsonl`);
+  const t = new JsonlTranscript(tp, { runId, agentId });
+  await t.append("run.started", { backend: "kimi-web" });
+  await t.append("run.background_submitted", { background: true, cwd: runDir });
+  await t.append("session.created", { backend: "kimi-web", backendSessionId: "session_kw", serveUrl });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  return tp;
+}
+
+function writeKwRegistry(dir, agents) {
+  const path = join(dir, "agents.json");
+  writeFileSync(path, JSON.stringify({ agents }), "utf8");
+  return path;
+}
+
+function kwAgent(dir, overrides = {}) {
+  return {
+    backend: "kimi-web", cwd: dir, serveUrl: `${KW_SERVE}/`, tokenEnv: KW_TOKEN_ENV,
+    model: { id: "kimi-code/k3" }, ...overrides,
+  };
+}
+
+/** 假 kimi web 服务器：abort 前会话忙；stillBusy=true 时中止后仍报忙。 */
+function kwServer({ stillBusy = false } = {}) {
+  const calls = [];
+  let aborted = false;
+  const reply = (data) => ({ ok: true, status: 200, async text() { return JSON.stringify({ code: 0, msg: "", data }); } });
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    calls.push({ url: u, method: init.method ?? "GET", authorization: init.headers?.authorization });
+    if (u === `${KW_SESSION_URL}/prompts`) return reply({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
+    if (u === `${KW_SESSION_URL}/prompts/msg_live:abort`) { aborted = true; return reply({ aborted: true }); }
+    if (u === KW_SESSION_URL) {
+      const busy = stillBusy || !aborted;
+      return reply({ id: "session_kw", busy, main_turn_active: busy, last_turn_reason: aborted ? "cancelled" : null });
+    }
+    if (u === `${KW_SESSION_URL}/messages`) return reply({ items: [] });
+    throw new Error(`unexpected request ${u}`);
+  };
+  return { calls, fetchImpl };
+}
+
+async function withKwToken(fn) {
+  process.env[KW_TOKEN_ENV] = KW_TOKEN;
+  try { return await fn(); } finally { delete process.env[KW_TOKEN_ENV]; }
+}
+
+test("KW-01: kimi-web 会话的 stop——GET prompts → POST :abort 带 agent 的 Bearer；中止后不忙 → stop_verified{backend:kimi-web}，终态 aborted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-01-"));
+  try {
+    const tp = await seedKimiWebRun(dir, "run_kw01");
+    const registryPath = writeKwRegistry(dir, { coder_kw: kwAgent(dir) });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { calls, fetchImpl } = kwServer();
+    const captured = [];
+    const result = await withKwToken(() => stopRun({
+      runId: "run_kw01", runDir: dir, registryPath,
+      justification: { reason: "worker loops on the same edit", observedSeq: 0 },
+      deps: { fetchImpl, alert: alertCapture(captured), stopVerify: { rounds: 1, intervalMs: 0 } },
+    }));
+    assert.equal(result.terminalAccepted, true);
+    assert.equal(result.terminalState, "aborted");
+    assert.equal(result.sideEffectAttempted, true);
+    assert.equal(result.stopVerified, true);
+    const promptCalls = calls.filter((c) => c.url.includes("/prompts"));
+    assert.deepEqual(promptCalls.map((c) => [c.method, c.url]), [
+      ["GET", `${KW_SESSION_URL}/prompts`],
+      ["POST", `${KW_SESSION_URL}/prompts/msg_live:abort`],
+    ]);
+    for (const call of calls) assert.equal(call.authorization, `Bearer ${KW_TOKEN}`);
+    assert.equal(captured.length, 0, "已核实停止不告警");
+
+    const events = await readTranscript(tp);
+    assert.equal(events.find((e) => e.type === "run.aborted").backend, "kimi-web");
+    const verified = events.filter((e) => e.type === "run.stop_verified");
+    assert.equal(verified.length, 1);
+    assert.equal(verified[0].backend, "kimi-web");
+    assert.equal(verified[0].method, "abort+verify");
+    assert.equal(events.filter((e) => e.type === "run.stop_unverified").length, 0);
+    assert.ok(!readFileSync(tp, "utf8").includes(KW_TOKEN), "token 不进转录");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-02: kimi-web 中止后会话仍忙 → stop_unverified{backend:kimi-web}，终态已认领，告警点名 kimi-web 且不含 token", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-02-"));
+  try {
+    const tp = await seedKimiWebRun(dir, "run_kw02");
+    const registryPath = writeKwRegistry(dir, { coder_kw: kwAgent(dir) });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { calls, fetchImpl } = kwServer({ stillBusy: true });
+    const captured = [];
+    const result = await withKwToken(() => stopRun({
+      runId: "run_kw02", runDir: dir, registryPath,
+      deps: { fetchImpl, alert: alertCapture(captured), stopVerify: { rounds: 1, intervalMs: 0 } },
+    }));
+    assert.equal(result.terminalAccepted, true);
+    assert.equal(result.terminalState, "aborted");
+    assert.equal(result.stopVerified, false);
+    assert.ok(calls.some((c) => c.url.endsWith(":abort")), "中止已发出");
+    const events = await readTranscript(tp);
+    const unverified = events.filter((e) => e.type === "run.stop_unverified");
+    assert.equal(unverified.length, 1);
+    assert.equal(unverified[0].backend, "kimi-web");
+    assert.equal(unverified[0].method, "abort+verify");
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].message, "stop run_kw02 not verified: kimi-web session may still be active");
+    assert.ok(!readFileSync(tp, "utf8").includes(KW_TOKEN), "token 不进转录");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-03: 停止目标解析失败各腿 → 不认领终态、对服务器零请求、固定文案、outcome stop_route_unavailable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-03-"));
+  try {
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { SERVER_STOP_ROUTE_TEXT } = await import("../../src/backends/factory.js");
+    const legs = [
+      { name: "no registry path", registryPath: undefined, text: SERVER_STOP_ROUTE_TEXT.agentUnavailable },
+      { name: "registry unreadable", registryPath: join(dir, "missing", "agents.json"), text: SERVER_STOP_ROUTE_TEXT.agentUnavailable },
+      { name: "agent not registered", agents: { other_kw: kwAgent(dir) }, text: SERVER_STOP_ROUTE_TEXT.agentUnavailable },
+      {
+        name: "backend differs",
+        agents: { coder_kw: { backend: "opencode-serve", cwd: dir, serveUrl: KW_SERVE, model: { providerID: "p", id: "m" } } },
+        text: SERVER_STOP_ROUTE_TEXT.agentMismatch,
+      },
+      { name: "serveUrl differs", agents: { coder_kw: kwAgent(dir, { serveUrl: "http://127.0.0.1:4999" }) }, text: SERVER_STOP_ROUTE_TEXT.agentMismatch },
+    ];
+    for (const [index, leg] of legs.entries()) {
+      const runId = `run_kw03_${index}`;
+      const tp = await seedKimiWebRun(dir, runId);
+      const registryPath = leg.agents ? writeKwRegistry(dir, leg.agents) : leg.registryPath;
+      const { calls, fetchImpl } = kwServer();
+      const captured = [];
+      const result = await withKwToken(() => stopRun({
+        runId, runDir: dir, registryPath,
+        justification: { reason: "worker loops on the same edit", observedSeq: 0 },
+        deps: { fetchImpl, alert: alertCapture(captured), stopVerify: { rounds: 1, intervalMs: 0 } },
+      }));
+      assert.equal(calls.length, 0, `${leg.name}: 对服务器零请求`);
+      assert.equal(result.stopRouteUnavailable, true, leg.name);
+      assert.equal(result.terminalAccepted, false, leg.name);
+      assert.equal(result.terminalState, "running", leg.name);
+      assert.equal(result.sideEffectAttempted, false, leg.name);
+      assert.equal(result.stopVerified, false, leg.name);
+      assert.equal(result.outcome, "stop_route_unavailable", leg.name);
+      assert.equal(result.routeError, leg.text, leg.name);
+
+      const events = await readTranscript(tp);
+      const stateChanges = events.filter((e) => e.type === "run.state_change");
+      assert.equal(stateChanges.at(-1).to, "running", `${leg.name}: 终态未认领（没有新的 state_change）`);
+      assert.equal(stateChanges.length, 3, leg.name);
+      assert.equal(findState(events), "running", `${leg.name}: 投影仍是原状态（stop_requested 只是意图）`);
+      assert.equal(events.filter((e) => e.type === "run.aborted").length, 0, leg.name);
+      const requested = events.filter((e) => e.type === "run.stop_requested");
+      assert.equal(requested.length, 1, leg.name);
+      assert.equal(requested[0].statedReason, "worker loops on the same edit", `${leg.name}: 同一份 stop_requested 载荷`);
+      const unverified = events.filter((e) => e.type === "run.stop_unverified");
+      assert.equal(unverified.length, 1, leg.name);
+      assert.equal(unverified[0].backendSessionId, "session_kw");
+      assert.equal(unverified[0].backend, "kimi-web");
+      assert.equal(unverified[0].outcome, "stop_route_unavailable");
+      assert.equal(unverified[0].taskkillCalled, false);
+
+      assert.equal(captured.length, 1, `${leg.name}: 一次告警`);
+      assert.equal(captured[0].level, "stop_unverified");
+      assert.equal(captured[0].message, `stop ${runId} not sent, run not marked aborted: ${leg.text}`);
+      for (const text of [captured[0].message, result.routeError, readFileSync(tp, "utf8")]) {
+        assert.ok(!text.includes(KW_TOKEN), `${leg.name}: 不含 token`);
+      }
+      for (const text of [captured[0].message, result.routeError]) {
+        assert.ok(!text.includes("127.0.0.1") && !text.includes("agents.json"), `${leg.name}: 不回显 URL / registry`);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-04: opencode-serve 路由不读 registry——registry 坏档照样停下，事件与告警文案不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-04-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, "{ not json", "utf8");
+    const tp = join(dir, "run_kw04.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_kw04", agentId: "a" });
+    await t.append("run.started", { backend: "opencode-serve" });
+    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_kw04", serveUrl: "http://127.0.0.1:9" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "running", "first_event");
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
+    const captured = [];
+    let target = null;
+    const result = await stopRun({
+      runId: "run_kw04", runDir: dir, registryPath,
+      deps: {
+        executeStop: async (b) => { target = b; return { verified: false, taskkillCalled: false }; },
+        alert: alertCapture(captured),
+      },
+    });
+    assert.ok(target instanceof OpenCodeServeBackend, "opencode-serve 仍用 OpenCodeServeBackend");
+    assert.equal(result.terminalAccepted, true);
+    assert.equal(result.stopRouteUnavailable, undefined);
+    const events = await readTranscript(tp);
+    assert.equal(events.find((e) => e.type === "run.aborted").backend, "opencode-serve");
+    const unverified = events.find((e) => e.type === "run.stop_unverified");
+    assert.deepEqual(
+      { backendSessionId: unverified.backendSessionId, backend: unverified.backend, method: unverified.method, taskkillCalled: unverified.taskkillCalled },
+      { backendSessionId: "ses_kw04", backend: "opencode-serve", method: "abort+verify", taskkillCalled: false },
+    );
+    assert.equal(captured[0].message, "stop run_kw04 not verified: opencode session may still be active");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-05: 已在终态的 kimi-web 运行——不解析停止目标，认领被拒、零副作用（registry 解析不出也不告警）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-05-"));
+  try {
+    const tp = await seedKimiWebRun(dir, "run_kw05");
+    await new JsonlTranscript(tp, { runId: "run_kw05", agentId: "coder_kw" })
+      .transitionState("running", "completed", "done");
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { calls, fetchImpl } = kwServer();
+    const captured = [];
+    const result = await withKwToken(() => stopRun({
+      runId: "run_kw05", runDir: dir,
+      deps: { fetchImpl, alert: alertCapture(captured), stopVerify: { rounds: 1, intervalMs: 0 } },
+    }));
+    assert.equal(result.rejected, true);
+    assert.equal(result.terminalAccepted, false);
+    assert.equal(result.terminalState, "completed");
+    assert.equal(result.sideEffectAttempted, false);
+    assert.equal(result.stopRouteUnavailable, undefined, "终态运行不走解析失败面");
+    assert.equal(calls.length, 0, "对服务器零请求");
+    assert.equal(captured.length, 0, "不告警");
+    const events = await readTranscript(tp);
+    assert.equal(events.filter((e) => e.type === "run.stop_unverified").length, 0);
+    assert.equal(findState(events), "completed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-07: 终态只来自旧式事实（非终态 state_change 之后的 run.aborted）——认领不被挡，停止目标照常解析：opencode 目标非空；kimi-web 解析不出时不认领", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-07-"));
+  try {
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
+    {
+      const tp = join(dir, "run_kw07a.jsonl");
+      const t = new JsonlTranscript(tp, { runId: "run_kw07a", agentId: "a" });
+      await t.append("run.started", { backend: "opencode-serve" });
+      await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_kw07", serveUrl: "http://127.0.0.1:9" });
+      await t.transitionState(null, "pending", "created");
+      await t.transitionState("pending", "running", "first_event");
+      await t.append("run.aborted", { backendSessionId: "ses_kw07" });
+      assert.equal(findState(await readTranscript(tp)), "aborted", "前提：读侧从旧式事实推断出终态");
+      let target = null;
+      const result = await stopRun({
+        runId: "run_kw07a", runDir: dir,
+        deps: { executeStop: async (b) => { target = b; return { verified: true, taskkillCalled: false }; }, alert: async () => {} },
+      });
+      assert.equal(result.terminalAccepted, true, "仲裁没见到已认领的终态，认领被接受");
+      assert.ok(target instanceof OpenCodeServeBackend, "认领之后真的发出中止（目标非空）");
+    }
+    {
+      const tp = join(dir, "run_kw07b.jsonl");
+      const t = new JsonlTranscript(tp, { runId: "run_kw07b", agentId: "coder_kw" });
+      await t.append("run.started", { backend: "kimi-web" });
+      await t.append("session.created", { backend: "kimi-web", backendSessionId: "session_kw", serveUrl: KW_SERVE });
+      await t.transitionState(null, "pending", "created");
+      await t.transitionState("pending", "running", "first_event");
+      await t.append("run.aborted", { backendSessionId: "session_kw" });
+      const { calls, fetchImpl } = kwServer();
+      let executed = false;
+      const result = await withKwToken(() => stopRun({
+        runId: "run_kw07b", runDir: dir,
+        deps: {
+          fetchImpl, alert: async () => {}, stopVerify: { rounds: 1, intervalMs: 0 },
+          executeStop: async () => { executed = true; return { verified: true, taskkillCalled: false }; },
+        },
+      }));
+      assert.equal(executed, false, "没有目标就不认领、不执行");
+      assert.equal(result.stopRouteUnavailable, true);
+      assert.equal(result.terminalAccepted, false);
+      assert.equal(calls.length, 0, "对服务器零请求");
+      const events = await readTranscript(tp);
+      assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "aborted").length, 0, "没有认领");
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("KW-06: token 只在 Windows 用户环境里——停止按派发时的同一条桥解析；哪里都取不到 → 不认领终态、零请求、固定文案", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-kw-06-"));
+  delete process.env[KW_TOKEN_ENV];
+  try {
+    const registryPath = writeKwRegistry(dir, { coder_kw: kwAgent(dir) });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const { SERVER_STOP_ROUTE_TEXT } = await import("../../src/backends/factory.js");
+    {
+      const tp = await seedKimiWebRun(dir, "run_kw06a");
+      const { calls, fetchImpl } = kwServer();
+      const asked = [];
+      const result = await stopRun({
+        runId: "run_kw06a", runDir: dir, registryPath,
+        deps: {
+          fetchImpl, alert: alertCapture([]), stopVerify: { rounds: 1, intervalMs: 0 },
+          userEnvReader: async (name) => { asked.push(name); return name === KW_TOKEN_ENV ? KW_TOKEN : undefined; },
+        },
+      });
+      assert.deepEqual(asked, [KW_TOKEN_ENV], "只解析该 agent 声明的凭据名");
+      assert.equal(result.terminalAccepted, true);
+      assert.equal(result.stopVerified, true);
+      assert.ok(calls.some((c) => c.url.endsWith(":abort")), "中止已发出");
+      for (const call of calls) assert.equal(call.authorization, `Bearer ${KW_TOKEN}`);
+      assert.ok(!readFileSync(tp, "utf8").includes(KW_TOKEN), "token 不进转录");
+    }
+    {
+      const tp = await seedKimiWebRun(dir, "run_kw06b");
+      const { calls, fetchImpl } = kwServer();
+      const captured = [];
+      const result = await stopRun({
+        runId: "run_kw06b", runDir: dir, registryPath,
+        deps: { fetchImpl, alert: alertCapture(captured), stopVerify: { rounds: 1, intervalMs: 0 }, userEnvReader: async () => undefined },
+      });
+      assert.equal(calls.length, 0, "对服务器零请求");
+      assert.equal(result.stopRouteUnavailable, true);
+      assert.equal(result.terminalAccepted, false);
+      assert.equal(result.routeError, SERVER_STOP_ROUTE_TEXT.credentialUnavailable);
+      assert.equal(captured.length, 1);
+      const events = await readTranscript(tp);
+      assert.equal(findState(events), "running", "未认领终态");
+      assert.equal(events.find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+    }
+  } finally {
+    delete process.env[KW_TOKEN_ENV];
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── Architecture boundary ────────────────────────────────────────────────────

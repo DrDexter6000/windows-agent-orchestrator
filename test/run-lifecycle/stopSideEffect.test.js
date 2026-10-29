@@ -378,6 +378,97 @@ test("TD-100.9b: opencode winner unverified → stop_unverified + alert + stoppe
 });
 
 // ---------------------------------------------------------------------------
+// 9c/9d. kimi-web：CLI 经 config.registry 取派发该运行的 agent；取不到时不认领终态
+// ---------------------------------------------------------------------------
+async function seedKimiWebTranscript(dir, runId) {
+  const tp = join(dir, `${runId}.jsonl`);
+  const t = new JsonlTranscript(tp, { runId, agentId: "coder_kw" });
+  await t.append("run.started", { backend: "kimi-web" });
+  await t.append("session.created", { backend: "kimi-web", backendSessionId: "session_kw", serveUrl: "http://127.0.0.1:4310" });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  return tp;
+}
+
+test("TD-100.9c: kimi-web stop via CLI——config.registry 里的 agent 鉴权，中止后不忙 → stopped=true", async () => {
+  const dir = await makeDir();
+  const tokenEnv = "WAO_STOPCLI_KW_TEST_TOKEN";
+  process.env[tokenEnv] = "stopcli-kw-token-value-1234";
+  try {
+    const tp = await seedKimiWebTranscript(dir, "run_kw_cli");
+    const registry = join(dir, "agents.json");
+    await writeFile(registry, JSON.stringify({ agents: { coder_kw: {
+      backend: "kimi-web", cwd: dir, serveUrl: "http://127.0.0.1:4310", tokenEnv, model: { id: "kimi-code/k3" },
+    } } }), "utf8");
+    let aborted = false;
+    const reply = (data) => ({ ok: true, status: 200, async text() { return JSON.stringify({ code: 0, data }); } });
+    const auth = [];
+    const fetchImpl = async (url, init = {}) => {
+      auth.push(init.headers?.authorization);
+      const u = String(url);
+      if (u.endsWith("/prompts")) return reply({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
+      if (u.endsWith("/prompts/msg_live:abort")) { aborted = true; return reply({ aborted: true }); }
+      if (u.endsWith("/messages")) return reply({ items: [] });
+      return reply({ id: "session_kw", busy: !aborted, main_turn_active: !aborted });
+    };
+    const { stopCommand } = await import("../../src/commands/stop.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_kw_cli", "--run-dir", dir, ...stopProofFlags(dir, "run_kw_cli")], { runDir: dir, registry }, {
+        fetchImpl, alert: async () => {}, stopVerify: { rounds: 1, intervalMs: 0 },
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.terminalAccepted, true);
+    assert.equal(parsed.stopped, true);
+    assert.ok(aborted, ":abort 已发出");
+    assert.ok(auth.length > 0 && auth.every((a) => a === "Bearer stopcli-kw-token-value-1234"));
+    const events = await readTranscript(tp);
+    assert.equal(events.find((e) => e.type === "run.stop_verified").backend, "kimi-web");
+  } finally {
+    delete process.env[tokenEnv];
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.9d: kimi-web stop via CLI——registry 取不到 agent → stopped=false、outcome stop_route_unavailable、终态不认领、固定说明", async () => {
+  const dir = await makeDir();
+  try {
+    const tp = await seedKimiWebTranscript(dir, "run_kw_cli_na");
+    let fetches = 0;
+    let alertCalled = false;
+    const { stopCommand } = await import("../../src/commands/stop.js");
+    const { SERVER_STOP_ROUTE_TEXT } = await import("../../src/backends/factory.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_kw_cli_na", "--run-dir", dir, ...stopProofFlags(dir, "run_kw_cli_na")], { runDir: dir, registry: join(dir, "absent.json") }, {
+        fetchImpl: async () => { fetches += 1; throw new Error("no request expected"); },
+        alert: async () => { alertCalled = true; },
+      });
+    });
+    assert.deepEqual(JSON.parse(out), {
+      runId: "run_kw_cli_na",
+      stopped: false,
+      backend: "kimi-web",
+      sideEffectAttempted: false,
+      terminalAccepted: false,
+      terminalState: "running",
+      verified: false,
+      outcome: "stop_route_unavailable",
+      taskkillCalled: false,
+      error: SERVER_STOP_ROUTE_TEXT.agentUnavailable,
+    });
+    assert.equal(fetches, 0);
+    assert.ok(alertCalled);
+    const events = await readTranscript(tp);
+    assert.equal(events.filter((e) => e.type === "run.state_change").at(-1).to, "running", "没有新的 state_change");
+    assert.equal(events.filter((e) => e.type === "run.aborted").length, 0);
+    assert.equal(events.find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 10. rejected 不写 stop_verified/stop_unverified
 // ---------------------------------------------------------------------------
 test("TD-100.10: rejected 不写 stop_verified/stop_unverified", async () => {
@@ -716,6 +807,8 @@ test("TD-100.22: invalid PID (proc_not-a-number) → stopped=false, outcome=inva
     assert.equal(events.find((e) => e.type === "run.aborted"), undefined, "不得写 run.aborted");
     // 不得写 aborted state_change
     assert.equal(events.find((e) => e.type === "run.state_change" && e.to === "aborted"), undefined, "不得写 aborted state_change");
+    // 投影仍是原状态：stop_requested 是意图，不是终态事实
+    assert.equal(findState(events), "running", "findState 保持原状态");
     // alert 指出 invalid PID
     assert.ok(alertMsg && /invalid/i.test(alertMsg), "alert 指出 invalid PID");
   } finally {

@@ -86,15 +86,15 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.stop_requested",
-    description: "用户请求停止；含 reason:\"user\" 与 Lead 的理由、观察位置事实；不在 claim 前单独 append，经 transitionState 的 attemptEvents 同批提交。",
+    description: "用户请求停止；含 reason:\"user\" 与 Lead 的理由、观察位置事实。认领终态的停止不在 claim 前单独 append，经 transitionState 的 attemptEvents 同批提交；没认领的停止（invalid_pid、停止路由不可用）单独追加——它只是意图，不改变运行状态。",
   },
   {
     type: "run.stop_verified",
-    description: "worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（opencode 路径），可重建\"为何 verified\"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。",
+    description: "worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（服务端路径：opencode-serve、kimi-web），可重建\"为何 verified\"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。",
   },
   {
     type: "run.stop_unverified",
-    description: "worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop；附 raiseAlert。",
+    description: "worker runtime 未能确认静默；可能来自终态清理（outcome: alive/probe_error）或显式 stop（进程路径的 outcome 同 run.stop_verified；服务端路径带 backend/method；没认领终态的停止为 invalid_pid / stop_route_unavailable）；附 raiseAlert。",
   },
   {
     type: "run.completed",

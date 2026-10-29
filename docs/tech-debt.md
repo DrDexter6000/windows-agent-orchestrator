@@ -66,7 +66,7 @@
 | TD-186 | 认证证据适用性与取证闭环已修多轮；组件层台账历史死指针、过时注释等残留仍未处理 | 开放 | 择机：触碰组件层台账时清死指针与过时注释；旧画像不明时不得宣称当前已验证 | src/application/registryInventory.js scripts/reliability/prune-drill-transcripts.mjs |
 | TD-190 | 各项目的运行记录已按项目分桶，但都放在 WAO 安装根下，能读该根的本机会话仍可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 等样本：出现需要按项目隔离读取的宿主 | 0060 |
 | TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查 | 开放 | 等样本：各残余自带触发（宿主命令注册、advisory 失效宿主、codex 工具缺失再现） | 0066 0043 |
-| TD-193 | kimi-web 后端的 WS 事件流、seq 游标重放与按提示中止能力已静态确认但未接线，REST 通道无会话级中止 | 开放 | 等样本：kimi-web 席位转正或会话级中止需求出现 | docs/incidents/2026-09-30-kimi-web-wiring.md |
+| TD-193 | kimi-web 后端的 WS 事件流与 seq 游标重放已静态确认但未接线；中止已改走 REST 的 `prompts/{id}:abort` | 开放 | 等样本：REST 轮询的延迟或断线后补读成为实际问题 | docs/incidents/2026-09-30-kimi-web-wiring.md src/backends/kimiWeb.js |
 | TD-194 | 白天并发跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除 | 开放 | 等样本：白天 flake 再现时逐案直跑复现加机器态取证，累计 3 例立专案 |  |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
@@ -105,3 +105,4 @@
 | TD-310 | 会审席位的只读违规只按 file_written 判，codex 席位用 shell 在自己的 ephemeral 树里写看不见；带 sessionReuse 的只读运行，这类写入留在线系的持久树里（不到源检出） | 开放 | 择机：收尾时按只读树的 git 状态判违规（各后端通用），或给席位单独用 read-only 沙箱 | 0055 0086 src/application/consultService.js |
 | TD-312 | zcode 后端的存活判定不知道主机在待机：笔记本进新型待机后，worker 正在跑的本地命令被冻住（后代进程 CPU 不动），静默超预算就以 `zcode turn stalled` 收尾。10-17 横评里 glm-pro 5 次停住都在待机中，同一条命令醒着时 145 秒跑完 | 开放 | 择机：失败信息写明静默期间主机在待机（System 日志 Kernel-Power 506/507，本机不提权读得到），让 Lead 知道重派即可；是否从静默预算里扣除待机时长另定 | src/backends/zcode.js |
 | TD-313 | kimi-web 席位的最终答复有时把过程叙述和结论接在同一行（缺换行），会审锚点认不出 Q1，两席结论不一致的提示与 `npm run lane-review-stats` 都会漏；10-06 到 10-17 的 59 个 kimi 席位里有 4 次 | 开放 | 择机：查 kimi-web 后端拼接助手消息文本时为什么没有换行，按消息或工具调用边界补上 | src/backends/kimiWeb.js |
+| TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt` | 开放 | 等样本：codex 车道需要在途纠偏时（Owner 2026-10-29 裁定暂不做：codex 车道只做会审）；做法是把 codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |

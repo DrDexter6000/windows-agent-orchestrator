@@ -143,9 +143,20 @@ test("findState lets a later terminal legacy event override non-terminal state_c
   const events = [
     { type: "run.started", seq: 1 },
     { type: "run.state_change", from: "pending", to: "submitted", seq: 2 },
-    { type: "run.stop_requested", seq: 3 },
+    { type: "run.aborted", seq: 3 },
   ];
   assert.equal(findState(events), "aborted");
+});
+
+test("findState: run.stop_requested after a non-terminal state_change is an intent, not a terminal fact", () => {
+  // stop 没认领到终态（invalid_pid、停止路由不可用）时写的形状：worker 仍在跑。
+  const events = [
+    { type: "run.started", seq: 1 },
+    { type: "run.state_change", from: "submitted", to: "running", seq: 2 },
+    { type: "run.stop_requested", seq: 3 },
+    { type: "run.stop_unverified", seq: 4 },
+  ];
+  assert.equal(findState(events), "running");
 });
 
 // --- TD-102 Batch 1B: workflow transcript outcome semantics ---

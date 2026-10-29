@@ -87,7 +87,9 @@ function walkJs(dir, out) {
 //                               不强制 model.id 的后端（恰为五老进程族后端；
 //                               kimi-web/zcode 在 normalize 强制 model.id，
 //                               故不在列表——见 registryInventory.js:106 注释）。
-//   application/runStop.js     — opencode-serve 专属停止语义轴（serve 无进程树）。
+//   application/runStop.js     — （零身份串：服务端中止实现与停止事实的缺省
+//                               backend 均由 factory.js 的 serverStopTargetFor /
+//                               serverStopBackendOf 给出）。
 //   application/panelReadiness.js / consultService / runCollect / runAwaitResult —
 //                               各自的单点能力/投影轴（缺席=缺省臂，合法）。
 //   commands/registry.js       — TD-161 已消灭本地闭集数组（import KNOWN_BACKENDS）；
@@ -112,7 +114,6 @@ const REGISTERED_CENSUS = {
   "application/modelFamily.js": { codex: 2, "claude-code": 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, "kimi-web": 1 },
   "application/panelReadiness.js": { "opencode-serve": 1 },
   "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
-  "application/runStop.js": { "opencode-serve": 3 },
   // 0056（TD-250，2026-10-11）：serveMaintenance 的清扫认领门——只认领
   // session.created 里 backend==="kimi-web" 的会话（轴向=会话归属声明消费，
   // 不选 backend、不分叉运行时行为；能力面由 supportsSessionRelease 承载）。

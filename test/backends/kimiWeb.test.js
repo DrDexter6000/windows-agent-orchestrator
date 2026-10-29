@@ -13,7 +13,7 @@
 //（messages 仅供停止验证探针；detail 仅供提交前静默门与探针）。v7 的全部
 // 启发式（preSubmitIds 消息快照 / preSubmitReason 锚 / WAIT-ACTIVE→IN-TURN→
 // SETTLE 活动转移 / messages 双读稳定性）及其测试删除（删除清单见交付汇报）。
-// 保留面（第四步不变项）：F3 提交前静默门、abort 固定错误、sendCorrection
+// 保留面（第四步不变项）：F3 提交前静默门、sendCorrection
 // 排队+steer 协议、token 递归清洗、POST 仅 ECONNREFUSED 重试、探针消费者形状、
 // fail-closed 形状门（transcript 响应缺 items 数组 ⇒ 固定错误）。
 // 能力翻转：reportsTokenUsage false→true（transcript steps[].usage 实测非零；
@@ -228,8 +228,17 @@ test("kimi-web ①: validateAgentPolicy 通过分支与全部拒绝分支（无 
     () => backend.validateAgentPolicy(makeAgent({ model: { id: "kimi-code/k3", variant: "stable" } })),
     /cannot express model\.providerID\/model\.variant/,
   );
-  // prompts thinking 字段值形状未实测——不发明映射，配了即拒。
-  assert.throws(() => backend.validateAgentPolicy(makeAgent({ reasoning: { effort: "low" } })), /cannot express reasoning/);
+  // 2.4.0：reasoning.effort 直传 prompts thinking——只放行 low/high/max，其余档位硬拒。
+  for (const effort of ["low", "high", "max"]) {
+    assert.doesNotThrow(() => backend.validateAgentPolicy(makeAgent({ reasoning: { effort } })), effort);
+  }
+  for (const effort of ["minimal", "medium", "xhigh", "off", undefined]) {
+    assert.throws(
+      () => backend.validateAgentPolicy(makeAgent({ reasoning: { effort } })),
+      /supports reasoning\.effort low, high or max only/,
+      String(effort),
+    );
+  }
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "kimi-code/k3", contextWindow: 200000 } })), /cannot express model\.contextWindow/);
   assert.throws(
     () => backend.validateAgentPolicy(makeAgent({
@@ -298,6 +307,33 @@ test("kimi-web ②: roleContract 作为 prompt 前缀（ROLE_TASK_SEPARATOR 衔�
   assert.equal(promptBody.content.length, 1, "role 与 task 同在唯一 text 分段里（恰好一次）");
 });
 
+test("kimi-web ②: reasoning.effort low/high/max → POST prompts body 带 thinking:<effort>；不配力度时 body 无 thinking 字段", async () => {
+  for (const effort of ["low", "high", "max"]) {
+    const { calls, fetchImpl } = kimiServer(spawnOkRoutes());
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    await backend.spawn(makeAgent({ reasoning: { effort } }), { prompt: "x" });
+    const body = JSON.parse(calls[3].body);
+    assert.equal(calls[3].url, "http://127.0.0.1:4310/api/v1/sessions/session_new/prompts");
+    assert.equal(body.thinking, effort);
+  }
+  const { calls, fetchImpl } = kimiServer(spawnOkRoutes());
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  await backend.spawn(makeAgent(), { prompt: "x" });
+  assert.ok(!Object.hasOwn(JSON.parse(calls[3].body), "thinking"), "没配力度就不带 thinking");
+});
+
+test("kimi-web ②: 不支持的力度在首个 HTTP 请求前拒绝", async () => {
+  const { calls, fetchImpl } = kimiServer(() => { throw new Error("no requests expected"); });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  for (const effort of ["minimal", "medium", "xhigh"]) {
+    await assert.rejects(
+      () => backend.spawn(makeAgent({ reasoning: { effort } }), { prompt: "x" }),
+      /supports reasoning\.effort low, high or max only/,
+    );
+  }
+  assert.equal(calls.length, 0);
+});
+
 test("kimi-web ②: spawn 前置策略门——坏配置在首个 HTTP 请求前拒绝", async () => {
   const { calls, fetchImpl } = kimiServer(() => { throw new Error("no requests expected"); });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
@@ -340,6 +376,34 @@ test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门�
     content: [{ type: "text", text: "continue" }],
     model: "kimi-code/k3",
     permission_mode: "auto",
+  });
+});
+
+test("kimi-web ③: resume 轮同样带 thinking（车道声明或 --reasoning 覆盖合成进 agent.reasoning）", async () => {
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior") {
+      return detailEnvelope("session_prior", false, false, null);
+    }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior/transcript?agent_id=main") {
+      return transcriptEnvelope([]);
+    }
+    if (url.endsWith("/api/v1/sessions/session_prior/prompts")) {
+      return envelope({ prompt_id: "msg_q2", status: "running" });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  await backend.spawn(makeAgent({ reasoning: { effort: "max" } }), {
+    prompt: "continue",
+    sessionReuse: { turn: "resume", priorRunId: "run_prior" },
+    priorProviderSessionId: "session_prior",
+  });
+  assert.equal(calls[2].url, "http://127.0.0.1:4310/api/v1/sessions/session_prior/prompts");
+  assert.deepEqual(JSON.parse(calls[2].body), {
+    content: [{ type: "text", text: "continue" }],
+    model: "kimi-code/k3",
+    permission_mode: "auto",
+    thinking: "max",
   });
 });
 
@@ -1235,20 +1299,391 @@ test("kimi-web ⑤: 闭集外未知 state 值 → 一律非终态（fail-closed 
   assert.equal(polls(), 8, "连续 8 拍闭集外即退出——未知状态绝不无限等待也绝不猜终态");
 });
 
-// ===== ⑥ abort：无会话级中止通道 =====
+// ===== ⑥ abort：中止当前活动的 prompt（kimi 2.4.0） =====
 
-test("kimi-web ⑥: abort 抛固定错误且绝不调用 /api/v1/shutdown（也不探 cancel/interrupt 动作）", async () => {
-  const { calls, fetchImpl } = kimiServer((url) => {
+const PROMPTS_URL = "http://127.0.0.1:4310/api/v1/sessions/session_new/prompts";
+
+/** spawn 路由 + abort 路由：GET prompts 返回 promptsData；POST :abort 交给 onAbort。 */
+function abortServer({ promptsData, onAbort, onList }) {
+  return kimiServer((url, init) => {
     if (url.includes("/api/v1/shutdown")) {
       throw new Error("server-level shutdown must never be called by the backend");
     }
+    if (url === PROMPTS_URL && (init.method ?? "GET") === "GET") {
+      return onList ? onList(init) : envelope(promptsData);
+    }
+    if (url.endsWith(":abort")) return onAbort(url, init);
     return spawnOkRoutes()(url);
+  });
+}
+
+test("kimi-web ⑥: abort——GET prompts 取 active 的 prompt id → POST …/prompts/{promptId}:abort（body {}）；绝不调 /api/v1/shutdown", async () => {
+  const { calls, fetchImpl } = abortServer({
+    promptsData: { active: { prompt_id: "msg_q1", status: "running" }, queued: [] },
+    onAbort: () => envelope({ aborted: true, at_seq: 12 }),
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  await assert.rejects(() => handle.abort(), /no session-level abort channel/);
+  const before = calls.length;
+  await handle.abort();
+  const abortCalls = calls.slice(before);
+  assert.deepEqual(abortCalls.map((c) => [c.method, c.url]), [
+    ["GET", PROMPTS_URL],
+    ["POST", `${PROMPTS_URL}/msg_q1:abort`],
+  ]);
+  assert.deepEqual(JSON.parse(abortCalls[1].body), {});
+  for (const call of abortCalls) assert.equal(call.headers.authorization, `Bearer ${TOKEN_VALUE}`);
   assert.ok(!calls.some((c) => c.url.includes("/api/v1/shutdown")), "绝不请求服务器级 shutdown（共享服务器会误杀无关会话）");
-  assert.ok(!calls.some((c) => /cancel|interrupt|abort/.test(c.url)), "不虚构上游不存在的中止动作名");
+});
+
+test("kimi-web ⑥: abort——active 键名 id / promptId / 裸字符串同样取到 prompt id", async () => {
+  for (const active of [{ id: "msg_a" }, { promptId: "msg_a" }, "msg_a"]) {
+    const { calls, fetchImpl } = abortServer({
+      promptsData: { active, queued: [] },
+      onAbort: () => envelope({ aborted: true }),
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    await handle.abort();
+    assert.equal(calls.at(-1).url, `${PROMPTS_URL}/msg_a:abort`, JSON.stringify(active));
+  }
+});
+
+test("kimi-web ⑥: abort——没有活动 prompt（active:null）视为已停：不报错、不发 :abort", async () => {
+  const { calls, fetchImpl } = abortServer({
+    promptsData: { active: null, queued: [] },
+    onAbort: () => { throw new Error("abort must not be posted without an active prompt"); },
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  await handle.abort();
+  assert.ok(!calls.some((c) => c.url.endsWith(":abort")));
+});
+
+test("kimi-web ⑥: abort 失败腿——上游拒绝 / HTTP 错 / aborted 非 true（复查仍有活动 prompt）/ 列表畸形 / active 无 id → 固定文案，不含上游原文、token 或 URL", async () => {
+  const echo = `token ${TOKEN_VALUE} at http://127.0.0.1:4310/secret upstream-detail`;
+  const legs = [
+    { name: "code!==0", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => envelope(null, { code: 40001, msg: echo }) },
+    { name: "HTTP 500", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => jsonResponse({ code: 0, msg: echo }, 500) },
+    { name: "aborted:false", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => envelope({ aborted: false }) },
+    { name: "list rejected", onList: () => envelope(null, { code: 40401, msg: echo }), onAbort: () => envelope({ aborted: true }) },
+    { name: "list malformed", promptsData: { queued: [] }, onAbort: () => envelope({ aborted: true }) },
+    { name: "active without id", promptsData: { active: { status: "running" } }, onAbort: () => envelope({ aborted: true }) },
+    { name: "transport", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => { throw new TypeError(`fetch failed ${echo}`); } },
+  ];
+  for (const leg of legs) {
+    const { fetchImpl } = abortServer(leg);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    await assert.rejects(() => handle.abort(), (error) => {
+      assert.match(error.message, /^kimi-web abort failed: /, leg.name);
+      assert.ok(!error.message.includes(TOKEN_VALUE), `${leg.name}: 不含 token`);
+      assert.ok(!error.message.includes("upstream-detail"), `${leg.name}: 不回显上游原文`);
+      assert.ok(!error.message.includes("127.0.0.1"), `${leg.name}: 不含 URL`);
+      assert.equal(error.cause, undefined, `${leg.name}: 不挂原错误`);
+      return true;
+    });
+  }
+});
+
+test("kimi-web ⑥: abort 竞态——:abort 未获确认（40402 / aborted:false）时复查列表：已无活动 prompt → 视为已停；复查失败或畸形 → 固定文案", async () => {
+  const unacknowledged = [
+    () => envelope(null, { code: 40402, msg: "no active prompt" }),
+    () => envelope({ aborted: false }),
+  ];
+  for (const onAbortReply of unacknowledged) {
+    let abortPosted = false;
+    const { calls, fetchImpl } = abortServer({
+      onList: () => envelope(abortPosted ? { active: null, queued: [] } : { active: { prompt_id: "msg_q1" }, queued: [] }),
+      onAbort: () => { abortPosted = true; return onAbortReply(); },
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    const before = calls.length;
+    await handle.abort();
+    assert.deepEqual(calls.slice(before).map((c) => [c.method, c.url]), [
+      ["GET", PROMPTS_URL],
+      ["POST", `${PROMPTS_URL}/msg_q1:abort`],
+      ["GET", PROMPTS_URL],
+    ]);
+  }
+  for (const relist of [() => envelope({ queued: [] }), () => envelope(null, { code: 40401, msg: "gone" })]) {
+    let abortPosted = false;
+    const { fetchImpl } = abortServer({
+      onList: () => (abortPosted ? relist() : envelope({ active: { prompt_id: "msg_q1" }, queued: [] })),
+      onAbort: () => { abortPosted = true; return envelope(null, { code: 40402, msg: "no active prompt" }); },
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    await assert.rejects(() => handle.abort(), (error) => {
+      assert.match(error.message, /^kimi-web abort failed: /);
+      return true;
+    });
+  }
+});
+
+test("kimi-web ⑥: abort 先逐条中止排队的 prompt、再中止活动的——只停活动的，排队那条会接着跑（2.4.0 实测）", async () => {
+  const { calls, fetchImpl } = abortServer({
+    promptsData: { active: { prompt_id: "msg_live" }, queued: [{ prompt_id: "msg_q2" }, { prompt_id: "msg_q3" }] },
+    onAbort: () => envelope({ aborted: true }),
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  const before = calls.length;
+  await handle.abort();
+  assert.deepEqual(calls.slice(before).map((c) => [c.method, c.url]), [
+    ["GET", PROMPTS_URL],
+    ["POST", `${PROMPTS_URL}/msg_q2:abort`],
+    ["POST", `${PROMPTS_URL}/msg_q3:abort`],
+    ["POST", `${PROMPTS_URL}/msg_live:abort`],
+  ]);
+});
+
+test("kimi-web ⑥: abort——没有活动轮、只有排队的也逐条中止；queued 不是数组或条目缺 id → 固定文案", async () => {
+  {
+    const { calls, fetchImpl } = abortServer({
+      promptsData: { active: null, queued: [{ prompt_id: "msg_q2" }] },
+      onAbort: () => envelope({ aborted: true }),
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    const before = calls.length;
+    await handle.abort();
+    assert.deepEqual(calls.slice(before).map((c) => [c.method, c.url]), [
+      ["GET", PROMPTS_URL],
+      ["POST", `${PROMPTS_URL}/msg_q2:abort`],
+    ]);
+  }
+  for (const promptsData of [
+    { active: { prompt_id: "msg_live" }, queued: "msg_q2" },
+    { active: null, queued: [{ status: "queued" }] },
+  ]) {
+    const { fetchImpl } = abortServer({ promptsData, onAbort: () => envelope({ aborted: true }) });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    await assert.rejects(() => handle.abort(), (error) => {
+      assert.match(error.message, /^kimi-web abort failed: /, JSON.stringify(promptsData));
+      return true;
+    });
+  }
+});
+
+test("kimi-web ⑥: abort 超时 → 固定文案（不含 token）", async () => {
+  const { fetchImpl: base } = abortServer({
+    promptsData: { active: { prompt_id: "msg_q1" } },
+    onAbort: () => envelope({ aborted: true }),
+  });
+  let hang = false;
+  const fetchImpl = (url, init = {}) => {
+    if (hang && url.endsWith(":abort")) {
+      return new Promise((_, reject) => {
+        const abortError = new Error(`This operation was aborted ${TOKEN_VALUE}`);
+        abortError.name = "AbortError";
+        init.signal?.addEventListener("abort", () => reject(abortError));
+      });
+    }
+    return base(url, init);
+  };
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 50, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  hang = true;
+  await assert.rejects(() => handle.abort(), (error) => {
+    assert.match(error.message, /^kimi-web abort failed: /);
+    assert.ok(!error.message.includes(TOKEN_VALUE));
+    return true;
+  });
+});
+
+test("kimi-web ⑥: abort 幂等——二次调用复用首次结果（成功不重发请求；失败原样重放同一拒绝）", async () => {
+  {
+    const { calls, fetchImpl } = abortServer({
+      promptsData: { active: { prompt_id: "msg_q1" } },
+      onAbort: () => envelope({ aborted: true }),
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    const before = calls.length;
+    await Promise.all([handle.abort(), handle.abort()]);
+    await handle.abort();
+    assert.equal(calls.length - before, 2, "恰一次 GET prompts + 一次 :abort");
+  }
+  {
+    const { calls, fetchImpl } = abortServer({
+      promptsData: { active: { prompt_id: "msg_q1" } },
+      onAbort: () => envelope(null, { code: 40001, msg: "nope" }),
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    const before = calls.length;
+    const first = await handle.abort().catch((e) => e);
+    const second = await handle.abort().catch((e) => e);
+    assert.ok(first instanceof Error);
+    assert.equal(second, first, "同一拒绝原样重放");
+    assert.equal(calls.length - before, 3, "GET prompts + :abort + 复查 GET 各一次；失败也不重发");
+  }
+});
+
+test("kimi-web ⑥: 中止前会话忙、中止后不忙——sessionStatus busy 投影观察到停下", async () => {
+  let submitted = false;
+  let aborted = false;
+  const { fetchImpl } = kimiServer((url, init) => {
+    if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_new" });
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_new") {
+      // spawn 期静默门要求 idle；提交后直到中止前都在忙。
+      const busy = submitted && !aborted;
+      return detailEnvelope("session_new", busy, busy, null);
+    }
+    if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([]);
+    if (url === PROMPTS_URL && init.method === "POST") {
+      submitted = true;
+      return envelope({ prompt_id: "msg_q1", status: "running" });
+    }
+    if (url === PROMPTS_URL) return envelope({ active: aborted ? null : { prompt_id: "msg_q1" }, queued: [] });
+    if (url.endsWith(":abort")) { aborted = true; return envelope({ aborted: true }); }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  const probe = () => handle.sessionStatus(handle.serveUrl, handle.backendSessionId, { cwd: handle.cwd });
+  assert.deepEqual(await probe(), { type: "busy" });
+  await handle.abort();
+  assert.deepEqual(await probe(), { type: "idle" });
+});
+
+test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面（wao stop 用）：abort 走 GET prompts → :abort 带 agent 的 Bearer、幂等；探针读会话详情与消息", async () => {
+  let aborted = false;
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url.includes("/api/v1/shutdown")) throw new Error("server-level shutdown must never be called");
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old") {
+      return detailEnvelope("session_old", !aborted, !aborted, aborted ? "cancelled" : null);
+    }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/messages") return envelope({ items: [{ id: "m1" }] });
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts") {
+      return envelope({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
+    }
+    if (url.endsWith("/prompts/msg_live:abort")) { aborted = true; return envelope({ aborted: true }); }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const target = backend.stopTarget(makeAgent({ serveUrl: "http://127.0.0.1:4310/" }), "session_old");
+  assert.deepEqual(Object.keys(target).sort(), ["abort", "messages", "session", "sessionStatus"]);
+  assert.deepEqual(await target.sessionStatus("ignored", "ignored", {}), { type: "busy" });
+  await Promise.all([target.abort("ignored", "ignored"), target.abort()]);
+  await target.abort();
+  const abortCalls = calls.filter((c) => c.url.includes("/prompts"));
+  assert.deepEqual(abortCalls.map((c) => [c.method, c.url]), [
+    ["GET", "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts"],
+    ["POST", "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts/msg_live:abort"],
+  ], "同一目标恰一次 GET prompts + 一次 :abort");
+  for (const call of calls) assert.equal(call.headers.authorization, `Bearer ${TOKEN_VALUE}`);
+  assert.deepEqual(await target.sessionStatus(), { type: "idle" });
+  assert.equal((await target.session()).busy, false);
+  assert.deepEqual(await target.messages(), { data: [{ id: "m1" }] });
+});
+
+test("kimi-web ⑥: 停止面的状态读不到时抛错——状态读 HTTP 500、同轮详情读 busy、消息不增长：verifyStopQuiet 记不可观察，绝不判 quiet", async () => {
+  let detailReads = 0;
+  const { fetchImpl } = kimiServer((url) => {
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_flaky") {
+      detailReads += 1;
+      // 每轮先读状态（失败），再读详情（仍忙）。
+      return detailReads % 2 === 1
+        ? jsonResponse({ code: 0, msg: "down", data: null }, 500)
+        : detailEnvelope("session_flaky", true, true, null);
+    }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_flaky/messages") return envelope({ items: [] });
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const target = backend.stopTarget(makeAgent(), "session_flaky");
+  await assert.rejects(() => target.sessionStatus(), /kimi-web session status unavailable/);
+  detailReads = 0;
+  const result = await verifyStopQuiet(target, "http://127.0.0.1:4310", "session_flaky", { rounds: 3, intervalMs: 1 });
+  assert.deepEqual(result, { quiet: null, observation: "unavailable" }, "不可观察 ≠ 已停止");
+});
+
+test("kimi-web ⑥: factory.serverStopTargetFor——按会话记录的 backend 选服务端中止；kimi-web 须 registry agent 同后端同 serveUrl，否则固定文案、零请求", async () => {
+  const { serverStopTargetFor, serverStopBackendOf, SERVER_STOP_ROUTE_TEXT } = await import("../../src/backends/factory.js");
+  const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
+  const { calls, fetchImpl } = kimiServer(() => { throw new Error("resolution must not send requests"); });
+  const session = { backend: "kimi-web", serveUrl: "http://127.0.0.1:4310", backendSessionId: "session_old" };
+
+  // 缺省 / opencode-serve：OpenCodeServeBackend，不调 loadAgent。
+  let loads = 0;
+  const loadAgent = async () => { loads += 1; return makeAgent(); };
+  for (const s of [{ serveUrl: "http://127.0.0.1:1" }, { backend: "opencode-serve", serveUrl: "http://127.0.0.1:1" }]) {
+    const target = await serverStopTargetFor(s, { fetchImpl, loadAgent });
+    assert.ok(target instanceof OpenCodeServeBackend);
+    assert.equal(serverStopBackendOf(s), "opencode-serve");
+  }
+  assert.equal(loads, 0, "opencode-serve 路由不取 registry agent");
+
+  // kimi-web 匹配（serveUrl 尾斜杠不计）→ 停止面。
+  const target = await serverStopTargetFor(session, { fetchImpl, loadAgent: async () => makeAgent({ serveUrl: "http://127.0.0.1:4310/" }) });
+  assert.deepEqual(Object.keys(target).sort(), ["abort", "messages", "session", "sessionStatus"]);
+
+  const legs = [
+    ["no loadAgent", undefined, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
+    ["agent null", async () => null, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
+    ["registry throws", async () => { throw new Error(`registry at D:/secret/agents.json ${TOKEN_VALUE}`); }, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
+    ["backend differs", async () => makeAgent({ backend: "opencode-serve" }), SERVER_STOP_ROUTE_TEXT.agentMismatch],
+    ["serveUrl differs", async () => makeAgent({ serveUrl: "http://127.0.0.1:4999" }), SERVER_STOP_ROUTE_TEXT.agentMismatch],
+  ];
+  for (const [name, load, text] of legs) {
+    await assert.rejects(() => serverStopTargetFor(session, { fetchImpl, loadAgent: load }), (error) => {
+      assert.equal(error.message, text, name);
+      assert.ok(!error.message.includes(TOKEN_VALUE) && !error.message.includes("127.0.0.1") && !error.message.includes("secret"), name);
+      return true;
+    });
+  }
+  await assert.rejects(
+    () => serverStopTargetFor({ backend: "zcode", serveUrl: "http://127.0.0.1:1" }, { fetchImpl, loadAgent }),
+    (error) => error.message === SERVER_STOP_ROUTE_TEXT.unsupported,
+  );
+  assert.equal(calls.length, 0, "解析阶段零请求");
+});
+
+test("kimi-web ②: --reasoning 覆盖经 RunManager 合成进 agent.reasoning → POST prompts 带 thinking；不支持的覆盖在首个请求前拒绝", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { RunManager } = await import("../../src/runManager.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-kimiweb-reasoning-"));
+  try {
+    // 提交后 transcript 即给出本轮的 completed turn，run 自然收口（不留后台轮询）。
+    let submitted = false;
+    const { calls, fetchImpl } = kimiServer((url, init) => {
+      if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope(submitted ? [turnItem({ steps: [stepItem()] })] : []);
+      if (url === PROMPTS_URL && init.method === "POST") submitted = true;
+      if (url.endsWith(":delete")) return envelope({ deleted: true });
+      return spawnOkRoutes()(url);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const manager = new RunManager({
+      config: { registry: "x", runDir: dir, pollInterval: 5, waitTimeout: 2000, timeout: 5000, retries: 0, defaultIsolation: "none" },
+      readRegistry: async () => ({
+        getAgent(id) { return makeAgent({ id, cwd: dir }); },
+        listAgents() { return []; },
+      }),
+      transcriptDir: dir,
+      backendFor: () => backend,
+      userEnvReader: async () => ({}),
+    });
+    const run = await manager.start("coder_kimiweb", { prompt: "x", runId: "run_kimiweb_reasoning1", reasoningOverride: "high" });
+    const prompt = calls.find((c) => c.method === "POST" && c.url === PROMPTS_URL);
+    assert.equal(JSON.parse(prompt.body).thinking, "high");
+    const result = await run.waitForCompletion({});
+    assert.equal(result.state ?? run.state, "completed");
+
+    const before = calls.length;
+    await assert.rejects(
+      () => manager.start("coder_kimiweb", { prompt: "x", runId: "run_kimiweb_reasoning2", reasoningOverride: "medium" }),
+      /supports reasoning\.effort low, high or max only/,
+    );
+    assert.equal(calls.length, before, "被拒的覆盖零请求");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("kimi-web ⑥: handle 探针按 runManager/opencodeStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + messages 页形状；serveUrl 形参可忽略", async () => {
@@ -1863,9 +2298,9 @@ test("kimi-web R9 F1: sessionStatus 非布尔形状（detail 在场、值形状�
   assert.deepEqual(result, { quiet: false, metric: "session_status" }, "不可观察 ≠ 已停止——绝不产 stop_verified");
 });
 
-test("kimi-web R9 F1: sessionStatus detail 不可得（HTTP 500）→ 保持 null（该腿消费者记 unverified，与非布尔→busy 分工不同）", async () => {
-  // F1 只改"detail 在场但值非布尔"的投影；HTTP 500/请求失败腿保持 null——
-  // 消费侧把不可得如实记 quiet:null/stop_unverified（行为不同，不动）。
+test("kimi-web R9 F1: sessionStatus detail 不可得（HTTP 500）→ 保持 null（停止面再把 null 转成抛错，与非布尔→busy 分工不同）", async () => {
+  // F1 只改"detail 在场但值非布尔"的投影；HTTP 500/请求失败腿本方法保持 null——
+  // 停止面（stopTarget）把它转成抛错，验证器记 quiet:null/stop_unverified（见 ⑥ 停止面用例）。
   const { fetchImpl } = kimiServer(() => jsonResponse({ code: 0, msg: "down", data: null }, 500));
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   assert.equal(await backend.sessionStatus(makeAgent(), "ses_f1e"), null, "detail 不可得 → null 保持");

@@ -6074,11 +6074,17 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: target.error }],
           };
         }
+        // registryPath：服务端中止需要鉴权的后端取派发该运行的 agent（启动配置的
+        // 同一份 registry）。停止目标解析不出来时服务不认领终态，下面的 payload
+        // 如实回显 terminalAccepted:false / sideEffectAttempted:false。
         const result = await stopService({
           runId,
           runDir,
+          registryPath,
           authorizedWorkspaceRoot: target.proof.root,
           justification: { reason, observedSeq },
+          // 停止目标的 token 与派发走同一个 user-env 读取器。
+          deps: { userEnvReader: resolveUserEnv },
         });
         // Build safe output payload — use the request runId, not service return.
         // Collapse authorization failure to fixed error (don't leak ownership details).

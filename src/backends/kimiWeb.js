@@ -1,15 +1,17 @@
 // src/backends/kimiWeb.js
 //
-// 第 7 个 backend「kimi-web」（HTTP attach 型）：驱动 `kimi web` 本地服务器
-// （kimi 2.1.1）的 Kimi Code 官方 REST API。闭集 6→7 扩员经 Owner 2026-09-30 批准。
+// 第 7 个 backend「kimi-web」（HTTP attach 型）：驱动 `kimi web` 本地服务器的
+// Kimi Code 官方 REST API（入册时 kimi 2.1.1，现为 2.4.0）。闭集 6→7 扩员经 Owner
+// 2026-09-30 批准。
 //
-// 上游 API 事实（全部来自 2026-09-30 对本机 kimi 2.1.1 的直跑实测，本注释即依据）：
+// 上游 API 事实（未标版本的条目是 2026-09-30 对本机 kimi 2.1.1 的直跑实测，标 2.4.0
+// 的是 2026-10-28/29 的实测；本注释即依据）：
 //   - 所有请求需 Authorization: Bearer <token>；响应统一包 {code,msg,data}，
 //     code!==0 即失败（msg 含原因）。
 //   - POST /api/v1/sessions {title?, metadata:{cwd}} → data.id（session_ 前缀）；
 //     metadata.cwd 或 workspace_id 必填（缺则 40001）——WAO 侧用 agent.cwd 填。
-//   - POST /api/v1/sessions/{id}/prompts {content:[{type:"text",text}], model}
-//     → data.prompt_id、data.status:"running"。两个实测坑：content 必须是分段
+//   - POST /api/v1/sessions/{id}/prompts {content:[{type:"text",text}], model,
+//     thinking?}（thinking 见下方 2.4.0 节）→ data.prompt_id、data.status:"running"。两个实测坑：content 必须是分段
 //     数组形状（裸字符串直接 40001）；model 必填——缺 model 时接口照样返
 //     success/running，但轮次**静默秒败**。v8 起（transcript 轮次原语）该失败是
 //     一等公民事实：轮次以 state:"failed" + error:"Model not set" 落在
@@ -48,10 +50,24 @@
 //   - POST /api/v1/sessions/{id}/prompts:steer {prompt_ids:["msg_…"]}
 //     → data.steered===true 即成功；无活动轮时 40402 "no active prompt to steer
 //     into"（fail-closed）。
-//   - 中止面实测定论：REST 无会话级/轮次级中止端点（tasks:cancel/stop/abort 等
-//     8 个候选动作名全部 40001 "unsupported action"）。存在 POST /api/v1/shutdown
-//     （服务器级，杀全部会话）——backend 的 abort() 绝不允许调它：共享服务器上
-//     会误杀无关会话。
+//   - 中止面：2026-09-30 对 2.1.1 实测时 REST 无会话级/轮次级中止端点
+//     （tasks:cancel/stop/abort 等 8 个候选动作名全部 40001 "unsupported action"）。
+//     **kimi 2.4.0（Lead 实测）**：`POST /api/v1/sessions/{id}/prompts/{promptId}:abort`
+//     （body {}；OpenAPI operationId promptAction "Abort a running prompt or steer a
+//     queued prompt"，响应 data {aborted, at_seq?}）→ code 0 {aborted:true}，那一轮
+//     transcript state 变 cancelled；之后 `GET /api/v1/sessions/{id}/prompts` →
+//     data {active:null, queued:[]}；有活动轮时 active 是对象 {prompt_id,
+//     user_message_id, status, content, created_at}，prompt_id 即 POST prompts 回执
+//     的 id。对已停的 prompt 再 :abort → code 40402。会话里还有排队的 prompt 时只中止
+//     活动轮，排队那条在 200 ms 内成为新的活动轮、会话重新变忙；对排队的 prompt
+//     :abort 同样返回 {aborted:true} 并把它移出队列。中止只停模型这一轮：这一轮已
+//     启动的 shell 命令进程跑到自己结束（实测中止后 45 秒仍在）；删除会话会连带
+//     收掉。另有 POST /api/v1/shutdown（服务器级，杀全部会话）——backend 的
+//     abort() 绝不允许调它：共享服务器上会误杀无关会话。
+//   - **thinking（kimi 2.4.0，Lead 实测）**：prompts body 的 thinking 是力度字符串；
+//     "max"、"low" 被接受并正常完成，"high" 被接受（10-29）；非法值 → code 50001 "Thinking effort "<v>" is
+//     not supported by model "kimi-code/k3.1-pro". Supported efforts: off, low, high,
+//     max."。官方文档：K3.1 Pro 只支持思考模式，关闭思考会被上游拒绝。
 //   - **TD-250 会话生命周期面（2026-10-10 live 探针，决定 0056 依据）**：
 //     `POST /api/v1/sessions/{id}:delete`（body {}）→ code 0 {deleted:true}，
 //     连带删 serve events 文件；对已不存在会话 → HTTP 200 + code 40401
@@ -89,11 +105,13 @@
 // 锚、活动转移观测（WAIT-ACTIVE/IN-TURN/SETTLE 状态机）、messages 双读稳定性
 // （F2）——messages 端点退出完成判定。
 //
-// 停止杠杆声明（诚实面）：REST 无会话级中止端点（abort 抛固定错误，原因由控制面
-// 记入 run.aborted.error）；显式停止需 Lead 人工处置服务器侧；停止验证经 handle
-// 探针（session/sessionStatus/messages，sessionStatus 为 busy 投影）；v8 起
+// 停止杠杆声明（诚实面）：abort() 中止会话正在跑和排队的 prompt（GET prompts，先对
+// queued 逐条、再对 active POST …/prompts/{promptId}:abort；两样都没有视为已停；失败抛固定
+// 文案，原因由控制面记入 run.aborted.error）；停止验证经 handle 探针（session/
+// sessionStatus/messages，sessionStatus 为 busy 投影——中止后会话不忙）；
 // reportsTokenUsage=true（transcript steps[].usage 实测非零）——tokenBudget 闸门
-// 生效，但失控 run 仍无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督。
+// 生效。已知边界：中止不收这一轮已经启动的命令进程（它们跑到自己结束）；会话
+// 按原规则保留（failed/aborted 的会话留作取证源，不删）。
 //
 // 翻页截断声明（v8）：transcript 单页不翻页（见上）；messages 探针页同理（仅供
 // 停止验证计数，不翻页）。
@@ -139,6 +157,10 @@ const TRANSCRIPT_AGENT_ID = "main";
 // TD-250（2026-10-10 live 探针）：会话级 40401 = "session … does not exist"——
 // releaseSession 把它分派为 already_gone（HTTP 200 + code 40401 信封，非路由 404）。
 const KIMI_SESSION_GONE_CODE = 40401;
+
+// 2.4.0 实测：prompts body 的 thinking 接受的力度（服务端另报 off，WAO 不放行——
+// 关闭思考对 K3.1 Pro 会被上游拒绝；WAO 的 effort 闭集里也没有 off）。
+const KIMI_WEB_THINKING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
 // 无进展出口阈值（named const；v8 语义收窄到 turn 归属）：归属 turn 连续 ≥8 拍
 // state 不变且 steps/frames 无增长（首见拍建立基线——turn 出现即进展，提交滞后
@@ -194,11 +216,10 @@ const USAGE_FIELDS = Object.freeze([
 
 export class KimiWebBackend {
   // 会话活在 WAO 进程之外的 `kimi web` 服务器里（HTTP attach 型，TD-39 同款语义：
-  // WAO 进程退出 ≠ session 死）。停止杠杆（诚实声明，见文件头）：REST 无会话级
-  // 中止端点（abort 抛固定错误）；显式停止需 Lead 人工处置服务器侧；停止验证经
-  // handle 探针观测会话 busy 状态；v8 起 tokenBudget 闸门生效（reportsTokenUsage=
-  // true——transcript steps[].usage 实测非零）——但失控 run 仍无 WAO 内自动停止
-  // 杠杆，派发须 bounded 任务 + 操作员监督。
+  // WAO 进程退出 ≠ session 死）。停止杠杆（诚实声明，见文件头）：abort 中止排队与
+  // 活动的 prompt（不收这一轮已经启动的命令进程）；停止验证经 handle 探针观测会话
+  // busy 状态；tokenBudget 闸门生效（reportsTokenUsage=true——transcript
+  // steps[].usage 实测非零）。
   sessionOutlivesProcess = true;
 
   // 角色合同拼进 prompt 正文前缀（role 在前、task 在后、恰好一次，分隔符
@@ -221,9 +242,9 @@ export class KimiWebBackend {
 
   // 在途纠偏 = 先 POST prompts 排队拿 prompt_id，再 POST prompts:steer 转入活动轮。
   // delivered（steered===true）证明纠偏已转入活动轮，**不证明模型截断了当轮生成**
-  // ——上游实测：纠偏在轮边界被模型消费（原生成流跑完当轮）。消费可见性（v8
-  // 注，**形状未实测**——仅标注，不据此做任何判定）：steered 的消费据说可见于
-  // transcript prompts[].steeredAt / turn 结构。不对称声明（保留）：排队成功但
+  // ——上游实测：纠偏在轮边界被模型消费（原生成流跑完当轮）。消费可见性：prompts
+  // 列表项带 steeredAt 与状态枚举（2.4.0 OpenAPI 在册，未 live 实测——仅标注，不据
+  // 此做任何判定）。不对称声明（保留）：排队成功但
   // steer 失败（如 40402 无活动轮）时，上游可能仍会在后续轮消费该排队消息——
   // send_failed ≠ 一定未执行，Lead 重发前须知此不对称。
   supportsInFlightCorrection = true;
@@ -269,10 +290,14 @@ export class KimiWebBackend {
         + "(the prompts body takes a bare model id string — rejected instead of silently dropping routing fields)",
       );
     }
-    // prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒。
-    if (agent?.reasoning !== undefined && agent?.reasoning !== null) {
+    // reasoning.effort 直传 prompts body 的 thinking 字符串（2.4.0 实测，见文件头）。
+    // 只放行 low/high/max；其余档位（含 minimal/medium/xhigh）硬拒——K3.1 Pro 只
+    // 支持思考模式，关闭思考会被上游拒绝。型号与力度的搭配由服务端校验。
+    if (agent?.reasoning !== undefined && agent?.reasoning !== null
+      && !KIMI_WEB_THINKING_EFFORTS.includes(agent.reasoning.effort)) {
       throw new Error(
-        "kimi-web backend cannot express reasoning (the prompts thinking field shape is unverified — no mapping invented)",
+        "kimi-web backend supports reasoning.effort low, high or max only "
+        + "(passed as the prompts thinking field; other efforts are rejected)",
       );
     }
     if (agent?.model?.contextWindow !== undefined) {
@@ -321,10 +346,7 @@ export class KimiWebBackend {
     // user-env（setx 后长命 shell 的子进程拿不到）——runManager 的 credential
     // 桥（credentialReadiness → task.resolvedCredentials）已按 envPolicy 把
     // tokenEnv 解析进来。spawn 时捕获到 per-agent 槽，request 免 PowerShell 重读。
-    const bridgedToken = task?.resolvedCredentials?.[agent.tokenEnv];
-    if (typeof bridgedToken === "string" && bridgedToken.trim().length > 0) {
-      SPAWN_BRIDGED_BEARER.set(agent, bridgedToken);
-    }
+    bridgeBearer(agent, task?.resolvedCredentials);
     // 决定 0075：车道声明了 serveWorkspaceDir 时，serve 没在跑就先把它拉起来（resume 轮
     // 同样需要 serve 在场——会话存在主目录里，重启后的 serve 仍能续接）。拉不起来在这里抛错，
     // 派发以固定文案失败；拉起或等待过，就给 Lead 留一条说明（handle 交出后 events 的第一条；
@@ -439,34 +461,50 @@ export class KimiWebBackend {
         stallClock: opts?.stallClock,
         serveStartNote,
       }),
-      // 上游无会话级中止通道（见文件头停止杠杆声明）：抛固定错误（原因由控制面
-      // 记入 run.aborted.error；cleanup 的停止验证对 kimi-web 形状不可观察 → 记
-      // run.stop_unverified），绝不调 POST /api/v1/shutdown（服务器级，会杀共享
-      // 服务器上的无关会话）。
-      abort: async () => {
-        throw new Error(
-          "kimi-web backend has no session-level abort channel "
-          + "(upstream REST exposes none; the server-level /api/v1/shutdown would kill "
-          + "unrelated sessions on the shared kimi web server) — record stop_unverified instead",
-        );
+      // 停止面（abort / session / messages / sessionStatus）与 wao stop 共用同一实现。
+      ...this.stopTarget(agent, sessionId),
+      // M12-16 handle 级纠偏钩子（runManager provider 中立消费，见 _pollCorrections）。
+      sendCorrection: (text) => this.sendCorrection(agent, sessionId, text),
+    };
+  }
+
+  /**
+   * 一个会话的停止面：handle 与 wao stop / run_stop（经 factory 的服务端中止选择）
+   * 共用。调用形状对齐 opencodeStopVerify 的消费者：
+   *   - abort：中止排队与活动的 prompt（见文件头停止杠杆声明）；成功后会话不忙，停止
+   *     验证经 sessionStatus 观察到停下。绝不调 POST /api/v1/shutdown（服务器级，会杀
+   *     共享服务器上的无关会话）。幂等：同一目标二次调用复用首次结果（含首次的拒绝）。
+   *   - session / messages / sessionStatus：停止探针。实际调用形状是
+   *     (serveUrl, sessionId, {cwd})——形参忽略，会话身份用这里的 agent+sessionId。
+   *     messages 返回 {data} 页形状（sample 读 page?.data 计数）；sessionStatus 是 GET
+   *     会话详情的 busy 投影，形状对齐 opencodeServe.sessionStatus（{type:"busy"|
+   *     "idle"}；无 retry 形状，绝不虚构，也绝不 else-推断-idle；R9 F1：detail 在场但
+   *     双字段任一非布尔 → **busy** 保守投影）。detail 不可得时底层 sessionStatus()
+   *     返回 null，这里把 null 转成抛错——isKnownStatus(null)===true，直接交出 null 会
+   *     让验证器在同轮 session/messages 读得到时虚记 stop_verified；抛错才记为不可观察。
+   * 鉴权 token 由 agent 解析（tokenEnv / kimiHome，见 resolveBearerToken）；进程外的停止
+   * 没有派发时的桥接值，调用方经 resolvedCredentials 传入同一条 user-env 桥的结果。
+   * token 在建目标时就解析：取不到即抛（resolveBearerToken 的固定文案），不留到中止时。
+   */
+  stopTarget(agent, sessionId, { resolvedCredentials } = {}) {
+    bridgeBearer(agent, resolvedCredentials);
+    resolveBearerToken(agent);
+    let abortPromise = null;
+    return {
+      abort: () => {
+        abortPromise ??= this.abortActivePrompt(agent, sessionId);
+        return abortPromise;
       },
-      // 停止探针（#1 签名对齐消费者）：opencodeStopVerify.sample / runManager 的
-      // 实际调用形状是 (serveUrl, sessionId, {cwd})——serveUrl/opts 形参忽略，
-      // 会话身份用闭包内 agent+sessionId（与 spawn 绑定同一会话）。messages 返回
-      // {data} 页形状（sample 读 page?.data 计数）；sessionStatus 是 GET 会话详情
-      // 的 busy 投影，返回形状对齐 opencodeServe.sessionStatus（{type:"busy"|
-      // "idle"}；detail 不可得 → **null**——kimi-web 无 retry 形状，绝不虚构，也
-      // 绝不 else-推断-idle；R9 F1：detail 在场但双字段任一非布尔 → **busy**
-      // 保守投影——isKnownStatus(null)===true 会把不可观察虚记 stop_verified，
-      // 宁可虚报忙、绝不虚报停止）——cleanup 的 verifyStopQuiet 据此可真正观察
-      // kimi-web 会话（不可观察时如实不可观察，绝不虚报）。
       session: (_serveUrl, _sessionId, _probeOpts) => this.sessionDetail(agent, sessionId),
       messages: async (_serveUrl, _sessionId, _probeOpts) => ({
         data: await this.messages(agent, sessionId),
       }),
-      sessionStatus: (_serveUrl, _sessionId, _probeOpts) => this.sessionStatus(agent, sessionId),
-      // M12-16 handle 级纠偏钩子（runManager provider 中立消费，见 _pollCorrections）。
-      sendCorrection: (text) => this.sendCorrection(agent, sessionId, text),
+      // 状态读不到（null）时抛错：停止验证器才会把这一轮记为不可观察，而不是已知非活跃。
+      sessionStatus: async (_serveUrl, _sessionId, _probeOpts) => {
+        const status = await this.sessionStatus(agent, sessionId);
+        if (status === null) throw new Error("kimi-web session status unavailable");
+        return status;
+      },
     };
   }
 
@@ -565,10 +603,65 @@ export class KimiWebBackend {
           // 要写文件/跑命令的 turn 会永久挂起——恒发 "auto"（枚举闭集 manual|yolo|auto），
           // 与其它 worker 席位 --dangerously-skip-permissions 的姿态对齐。证据：2026-10-01 coder_mm delta 认证 scorecard 失败（turn stalled 8 拍，runs/reliability 日志）。
           permission_mode: "auto",
+          // 配了力度才带 thinking（车道声明或 --reasoning 覆盖，覆盖由 RunManager 合成进
+          // agent.reasoning）；没配不发这个字段，由服务端用默认值。
+          ...(typeof agent.reasoning?.effort === "string" ? { thinking: agent.reasoning.effort } : {}),
         }),
       },
     );
     return response?.data;
+  }
+
+  /**
+   * 中止会话正在跑和排队的 prompt（2.4.0 实测，见文件头）：GET prompts，先对 queued 里
+   * 的每一条、再对 active POST …/prompts/{promptId}:abort——只停活动的，排队那条会立刻
+   * 接着跑起来。两样都没有 → 视为已停，不报错；有 :abort 未获确认时再读一次列表，两样
+   * 都已没有也算已停。其余上游拒绝或传输失败 → 固定文案错误（不回显上游原文、token 或
+   * URL）。绝不调服务器级 /api/v1/shutdown。
+   */
+  async abortActivePrompt(agent, sessionId) {
+    const base = `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`;
+    const listPrompts = async () => {
+      const listed = await this.request(agent, base, { method: "GET" });
+      const data = listed?.data;
+      if (!data || typeof data !== "object" || !("active" in data)
+        || (data.queued !== undefined && !Array.isArray(data.queued))) {
+        throw new Error("prompts list malformed");
+      }
+      return { active: data.active ?? null, queued: data.queued ?? [] };
+    };
+    const abortPrompt = async (promptId) => {
+      try {
+        const aborted = await this.request(agent, `${base}/${encodeURIComponent(promptId)}:abort`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        return aborted?.data?.aborted === true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const { active, queued } = await listPrompts();
+      // 排队的先停：只停活动的，排队那条在 200 ms 内就成为新的活动轮（2.4.0 实测）。
+      const promptIds = [...queued, ...(active === null ? [] : [active])].map(activePromptId);
+      if (promptIds.includes(null)) throw new Error("prompt id missing");
+      let acknowledged = true;
+      for (const promptId of promptIds) {
+        if (!(await abortPrompt(promptId))) acknowledged = false;
+      }
+      if (!acknowledged) {
+        // 竞态：GET 之后这一轮自己结束了，:abort 得到 40402 或 aborted:false。再读一次
+        // 列表：活动与排队都已没有即视为已停；还有才按失败处置。
+        const after = await listPrompts();
+        if (after.active !== null || after.queued.length > 0) throw new Error("abort not acknowledged");
+      }
+    } catch {
+      throw new Error(
+        "kimi-web abort failed: the server did not confirm aborting the active prompt "
+        + "(upstream rejected the request, the request failed or timed out, or the prompts list was malformed)",
+      );
+    }
   }
 
   /**
@@ -687,8 +780,10 @@ export class KimiWebBackend {
    * isKnownStatus(null) === true（src/backends/opencodeStopVerify.js:134，只读
    * 参照），null 会被当成"已知且非活跃"，session/messages 零增长时 verifyStopQuiet
    * 判 quiet:true ⇒ 不可观察被虚记 run.stop_verified。宁可虚报忙、绝不虚报停止
-   * （与下方 F5 true 腿同款取舍）；HTTP 500/请求失败腿保持 null（消费者对不可得
-   * 记 unverified，行为不同，不动）。
+   * （与下方 F5 true 腿同款取舍）。HTTP 500/请求失败腿本方法返回 null；停止面
+   * （stopTarget）再把 null 转成抛错——验证器只把抛错记为不可观察，单个 null 在
+   * 同轮 session/messages 读得到时仍算已知非活跃（状态读 500、详情读 busy、消息
+   * 不增长 → 虚记 stop_verified）。
    */
   async sessionStatus(agent, sessionId) {
     let detail;
@@ -1217,6 +1312,13 @@ export class KimiWebBackend {
 // 40101，不做静默回落。错误只点名文件路径，不回显内容。
 const SPAWN_BRIDGED_BEARER = new WeakMap();
 const HOME_FILE_BEARER = new WeakMap();
+// 桥接值写进 per-agent 槽（spawn 的 task.resolvedCredentials，或进程外停止的同形结果）。
+function bridgeBearer(agent, resolvedCredentials) {
+  const bridged = resolvedCredentials?.[agent?.tokenEnv];
+  if (typeof bridged === "string" && bridged.trim().length > 0) {
+    SPAWN_BRIDGED_BEARER.set(agent, bridged);
+  }
+}
 function resolveBearerToken(agent) {
   const tokenFile = kimiServerTokenFile(agent);
   if (tokenFile !== null) {
@@ -1537,6 +1639,18 @@ function metricsEventFromTurn(turn) {
     }
   }
   return seen ? metricsEvent(sums) : null;
+}
+
+// GET prompts 的 active / queued 条目 → prompt id。2.4.0 实测条目是对象，id 在 prompt_id
+// （与 POST prompts 回执同键）；id、promptId 只作形状变化时的兜底。取不到 → null
+// （调用方按失败处置，不猜）。
+function activePromptId(active) {
+  if (typeof active === "string") return active.length > 0 ? active : null;
+  if (!active || typeof active !== "object") return null;
+  for (const key of ["prompt_id", "id", "promptId"]) {
+    if (typeof active[key] === "string" && active[key].length > 0) return active[key];
+  }
+  return null;
 }
 
 // F6（v7 起保留）：request() 对 null/undefined 抛出值原样抛出（保留"这本来就不

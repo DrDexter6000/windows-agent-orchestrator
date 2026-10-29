@@ -41,8 +41,8 @@
 //                                      scripts/reliability/dsh-acp/evidence/phase6-*.json
 //   supportsInFlightCorrection= false  ACP 无在途消息改写（F7）——如实声明，不静默
 //   replayByRespawn           = false  跨 run 上下文续接走 session/resume，本层不承担重放
-//   reportsTokenUsage         = false  usage_update + PromptResponse.usage 存在但实测可为 null
-//                                      （组件验证抓到 declared=true/input=null）
+//   reportsTokenUsage         = false  PromptResponse 实测只带 stopReason（0.2.1-rc.4；更早版本
+//                                      的 usage 实测可为 null），usage_update 是上下文占用
 //   reportsCommandExitCode    = false  tool_call_update 不填 rawOutput、退出码只在自由文本
 //                                      非零标记里（evidence/phase7-exit-code-wire.json）
 //

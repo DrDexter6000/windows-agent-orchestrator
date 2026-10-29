@@ -2528,12 +2528,22 @@ export function validateDeliveryFacts(events, options = {}) {
  * - 有 state_change 但均非终态 → 返回 null（前置事实不算已 claim）。
  * - 完全无 state_change → 用 findState 的 legacy fallback（旧 transcript 兼容）。
  *
- * TD-100 收尾：SSOT 统一——legacy fallback 与 findState/inferStateFromLegacyEvent 完全一致，
- * 不再排除 run.stop_requested。stop 命令的 stop_requested 不再 claim 前单独写入，而是通过
+ * TD-100 收尾：SSOT 统一——完全无 state_change 时的 legacy fallback 与 findState 同源
+ * （run.stop_requested 也读成 aborted）；有 state_change 时只认终态 state_change，而 findState
+ * 另会从其后的终态事实推断（不含 run.stop_requested）——两者此时可能不同，要预判认领
+ * 结果请用 claimedTerminalState。stop 命令的 stop_requested 不再 claim 前单独写入，而是通过
  * transitionState 的 attemptEvents 同批提交——因此持锁读取的旧 events 中不会包含本次的
  * stop_requested，不会自拒绝。
  */
 function _detectExistingTerminal(events) {
+  return claimedTerminalState(events);
+}
+
+/**
+ * 认领仲裁的判据（transitionState 持锁时据此拒绝）：已认领的终态，没有则 null。调用方
+ * 可据此预判一次 claim 会不会被拒——findState 读出的终态不等于已认领（见上）。
+ */
+export function claimedTerminalState(events) {
   let lastTerminal = null;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const ev = events[index];
@@ -2793,6 +2803,10 @@ export function findState(events) {
   if (stateChange) {
     if (!TERMINAL_STATES.includes(stateChange.to)) {
       for (let index = events.length - 1; index > stateChangeIndex; index -= 1) {
+        // run.stop_requested 是停止意图，不是终态事实：stop 没认领到终态时也会写它
+        // （invalid_pid、停止路由不可用），worker 仍在跑。有 state_change 的转录里只认
+        // 终态事实；它映射成 aborted 只在没有 state_change 的旧转录里成立（见下方兜底）。
+        if (events[index].type === "run.stop_requested") continue;
         const inferred = inferStateFromLegacyEvent(events[index].type);
         if (TERMINAL_STATES.includes(inferred)) {
           return inferred;

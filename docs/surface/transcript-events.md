@@ -20,9 +20,9 @@ Every event type any production write outlet may write, one row each. The single
 | `run.event` | RunEvent 透传（message/command/tool/write telemetry 等；含 write_intent、file_written、tool_use、tool_result——write_intent 仅是未确认的 containment telemetry）。 |
 | `run.wait_policy` | 实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/disabled）。默认 disabled（waitTimeoutMs 为 null）。 |
 | `run.observation_deadline_reached` | 等待窗到期的观察事实，载荷恰为 {waitTimeoutMs, source}（有界，不回显路径/环境）。到期不终止 worker（通知不杀）：前台 CLI 打印一行指引后继续等，后台 runner 继续监督到自然终态。每 run 至多一条（多等待者按 run 级标志幂等去重）。advisory 事实：落盘失败被吞，不改变监督语义。 |
-| `run.stop_requested` | 用户请求停止；含 reason:"user" 与 Lead 的理由、观察位置事实；不在 claim 前单独 append，经 transitionState 的 attemptEvents 同批提交。 |
-| `run.stop_verified` | worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（opencode 路径），可重建"为何 verified"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。 |
-| `run.stop_unverified` | worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop；附 raiseAlert。 |
+| `run.stop_requested` | 用户请求停止；含 reason:"user" 与 Lead 的理由、观察位置事实。认领终态的停止不在 claim 前单独 append，经 transitionState 的 attemptEvents 同批提交；没认领的停止（invalid_pid、停止路由不可用）单独追加——它只是意图，不改变运行状态。 |
+| `run.stop_verified` | worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（服务端路径：opencode-serve、kimi-web），可重建"为何 verified"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。 |
+| `run.stop_unverified` | worker runtime 未能确认静默；可能来自终态清理（outcome: alive/probe_error）或显式 stop（进程路径的 outcome 同 run.stop_verified；服务端路径带 backend/method；没认领终态的停止为 invalid_pid / stop_route_unavailable）；附 raiseAlert。 |
 | `run.completed` | 正常完成（终态 fact，与 state_change 同批原子落盘）；可携 completionMarker:"completed_empty"（闭集 DONE_MARKERS 成员）表示 worker 零产出。 |
 | `run.aborted` | run 被 abort（终态 fact；verification:"pending" 起，winner 执行 kill/abort 后补 stop_verified/stop_unverified）。 |
 | `run.error` | run 错误（非终态旁路事实；终态由 state_change 承载）。phase 标注来源（spawn/wait/scorecard/delivery 等）；delivery 失败时与 run.delivery_failed 同批另写，可携 completionMarker:"completed_empty"、workerDeclared:"scope_expansion_required" 或 errorClass（打包环境类别闭集，含义见 run.delivery_failed 行；分类不出时键缺席）。 |

@@ -188,6 +188,59 @@ test("MCP-05: workspace not bound → fixed safe error", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("MCP-07: run_stop 把启动配置的 registryPath 传给 stop 服务；kimi-web 停止目标解析不出 → 非错误 payload，terminalAccepted/sideEffectAttempted 均 false、终态为原状态", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcp-07-"));
+  try {
+    makeGitRepo(dir);
+    const tp = join(dir, "run_mcp07.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_mcp07", agentId: "coder_kw" });
+    await t.append("run.started", { backend: "kimi-web" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", { backend: "kimi-web", backendSessionId: "session_kw", serveUrl: "http://127.0.0.1:4310" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "submitted", "spawned");
+    await t.transitionState("submitted", "running", "first_event");
+
+    const registryPath = join(dir, "absent-agents.json");
+    const seen = [];
+    const readers = [];
+    const userEnvReader = async () => undefined;
+    let fetches = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: dir, workspaceRoot: dir, userEnvReader,
+      stopRunFn: async (input) => {
+        seen.push(input.registryPath);
+        readers.push(input.deps?.userEnvReader);
+        const { stopRun } = await import("../../src/application/runStop.js");
+        return stopRun({
+          ...input,
+          deps: { fetchImpl: async () => { fetches += 1; throw new Error("no request expected"); }, alert: async () => {} },
+        });
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp07", expectedWorkspaceRoot: dir, ...stopProof(dir, "run_mcp07") } });
+      assert.deepEqual(seen, [registryPath], "registryPath 原样传到 stop 服务");
+      assert.deepEqual(readers, [userEnvReader], "派发同一个 user-env 读取器传到 stop 服务");
+      assert.ok(!res.isError);
+      assert.deepEqual(res.structuredContent, {
+        runId: "run_mcp07",
+        terminalAccepted: false,
+        terminalState: "running",
+        sideEffectAttempted: false,
+        stopVerified: false,
+      });
+      assert.equal(fetches, 0, "停止没有发出");
+      const events = await readTranscript(tp);
+      assert.equal(events.find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("MCP-06: annotations — destructiveHint true, idempotentHint false", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcp-06-"));
   try {

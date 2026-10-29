@@ -26,10 +26,12 @@
 import { join, resolve, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq, claimedTerminalState } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
-import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
+import { serverStopTargetFor, serverStopBackendOf, serverStopSessionLabel, SERVER_STOP_ROUTE_TEXT } from "../backends/factory.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
+import { readRegistry } from "../registry.js";
+import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W3）：已拒路径回显 terminalState 的绑定作用域——metrics.js
@@ -158,6 +160,8 @@ function checkStopJustification(justification, scope, nowMs) {
  * @param {string} input.runId
  * @param {string} input.runDir
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding (optional)
+ * @param {string} [input.registryPath] — registry 路径：服务端中止需要鉴权的后端
+ *   （kimi-web）取派发该运行的 agent；opencode-serve 路由不读它
  * @param {{reason: string, observedSeq: number}} [input.justification] — Lead 面必带
  *   （决定 0069）；不满足时返回 { preconditionFailed: <STOP_PRECONDITION_CODES> }，
  *   零事件、零副作用
@@ -174,6 +178,8 @@ function checkStopJustification(justification, scope, nowMs) {
  *     rejected?: true,
  *     // invalid PID:
  *     invalidPid?: true,
+ *     // server-side stop target could not be resolved (terminal not claimed):
+ *     stopRouteUnavailable?: true, routeError?: string,
  *     // auth failure:
  *     authorized?: false, authorizationError?: string,
  *   }
@@ -298,8 +304,9 @@ export async function stopRun(input) {
   }
   // TD-265：停止走哪条路由由会话记录的事实决定，不按后端名分支——proc_<pid>
   // 占位 id，以及"provider 原生会话 id + session.created.hostPid（承载会话的本机
-  // 进程）"，都走进程树击杀；有 serveUrl 的走服务端中止。此前非 proc_ 一律被当
-  // 成 serveUrl 路由，原生会话 id 的进程式后端因此停不掉。
+  // 进程）"，都走进程树击杀；有 serveUrl 的走服务端中止（中止实现由
+  // backends/factory.js 的 serverStopTargetFor 按会话记录的 backend 选）。此前非
+  // proc_ 一律被当成 serveUrl 路由，原生会话 id 的进程式后端因此停不掉。
   const isProcPlaceholder = session.backendSessionId.startsWith("proc_");
   const hostPid = !isProcPlaceholder && !session.serveUrl
     && Number.isInteger(session.hostPid) && session.hostPid > 0
@@ -316,6 +323,11 @@ export async function stopRun(input) {
     },
   };
 
+  // R13-C: bound read (same sweep as the session lookup above) — a foreign
+  // tail run.started never supplies the writer context's agentId, nor the
+  // registry agent the server-side stop authenticates as.
+  const startedAgentId = findLatestBound(events, "run.started", runId)?.agentId;
+
   // Re-open transcript for writing
   const transcript = new JsonlTranscript(transcriptPath, {
     runId,
@@ -324,9 +336,7 @@ export async function stopRun(input) {
     // ENOENT 豁免会把既有账本误判成空账本（孤儿 stop 事实）。与
     // commands/shared.js:161 同款。
     initialSeq: findLastEventSeq(events),
-    // R13-C: bound read (same sweep as the session lookup above) — a foreign
-    // tail run.started never supplies the writer context's agentId.
-    agentId: findLatestBound(events, "run.started", runId)?.agentId ?? "unknown",
+    agentId: startedAgentId ?? "unknown",
   });
 
   // ── Process path ──────────────────────────────────────────────────────────
@@ -353,15 +363,42 @@ export async function stopRun(input) {
     });
   }
 
-  // ── Opencode path ─────────────────────────────────────────────────────────
+  // ── Server-side abort path ────────────────────────────────────────────────
   if (!session?.serveUrl) {
     throw new Error(
       `Run ${runId} has no stop route: its session (backend ${session.backend ?? "unknown"}) records neither a host process id nor a serveUrl — `
       + "the worker process has to be ended manually (runs dispatched before the host process was recorded are in this state)",
     );
   }
-  return await opencodeStop({
-    transcript, session, fromState, runId, deps, stopRequestedAttempt,
+  // 先解析停止目标，再认领终态：目标解析不出来（需要鉴权的后端取不到派发该运行
+  // 的 registry agent 或它的 token、agent 与会话记录对不上、该后端没有服务端中止）
+  // 时不认领终态——认领了却发不出中止，转录会说 aborted 而 worker 照跑。终态已认领的
+  // 运行不解析：认领必被拒、零副作用。判据取认领仲裁同一个（claimedTerminalState，同样
+  // 读整份转录）——findState 从旧式终态事实读出的终态并不挡认领。
+  let target = null;
+  if (claimedTerminalState(events) === null) {
+    try {
+      target = await serverStopTargetFor(session, {
+        fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+        loadAgent: async () => {
+          if (typeof input.registryPath !== "string" || input.registryPath.length === 0) return null;
+          if (typeof startedAgentId !== "string" || startedAgentId.length === 0) return null;
+          const registry = await readRegistry(input.registryPath);
+          return registry.getAgent(startedAgentId);
+        },
+        // 凭据按派发时的同一条路解析（process env → Windows 用户环境），值只交给停止目标。
+        resolveCredentials: async (agent) => (await assessWorkerReadiness({
+          agent, resolver: createEnvResolver(deps.userEnvReader),
+        })).resolvedEnv,
+      });
+    } catch (error) {
+      return await stopRouteUnavailable({
+        transcript, session, fromState, runId, deps, stopRequestedAttempt, error,
+      });
+    }
+  }
+  return await serverStop({
+    transcript, session, fromState, runId, deps, stopRequestedAttempt, target,
     runDir: resolvedRunDir,
   });
 }
@@ -502,14 +539,13 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
   };
 }
 
-// ── opencodeStop (extracted from stop.js) ────────────────────────────────────
+// ── serverStop (server-side abort; target chosen by backends/factory.js) ─────
 
-async function opencodeStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, runDir }) {
+async function serverStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, target, runDir }) {
   const executeStop = deps.executeStop ?? ((b, url, sid, opts) => executeStopWithVerification(b, url, sid, opts));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
-  const backend = deps.opencodeBackend ?? new OpenCodeServeBackend({
-    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
-  });
+  // 停止事实的 backend 取会话记录（缺省值由 factory 给出）。
+  const backendName = serverStopBackendOf(session);
 
   const termResult = await transcript.transitionState(fromState, "aborted", STATE_CHANGE_REASON.stop_requested, {
     attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
@@ -517,7 +553,7 @@ async function opencodeStop({ transcript, session, fromState, runId, deps, stopR
       type: "run.aborted",
       payload: {
         backendSessionId: session.backendSessionId,
-        backend: "opencode-serve",
+        backend: backendName,
         reason: "stop_requested",
         verification: "pending",
       },
@@ -537,7 +573,7 @@ async function opencodeStop({ transcript, session, fromState, runId, deps, stopR
   // Winner: execute backend abort
   const stopVerify = deps.stopVerify ?? {};
   const stopResult = await executeStop(
-    backend, session.serveUrl, session.backendSessionId,
+    target, session.serveUrl, session.backendSessionId,
     {
       cwd: session.cwd,
       rounds: stopVerify.rounds ?? 3,
@@ -549,20 +585,20 @@ async function opencodeStop({ transcript, session, fromState, runId, deps, stopR
   if (stopResult.verified) {
     await transcript.append("run.stop_verified", {
       backendSessionId: session.backendSessionId,
-      backend: "opencode-serve",
+      backend: backendName,
       method: "abort+verify",
       taskkillCalled: stopResult.taskkillCalled ?? false,
     });
   } else {
     await transcript.append("run.stop_unverified", {
       backendSessionId: session.backendSessionId,
-      backend: "opencode-serve",
+      backend: backendName,
       method: "abort+verify",
       taskkillCalled: stopResult.taskkillCalled ?? false,
     });
     // TD-233（告警落点收口）：同 processStop——告警跟随实际写转录的 runDir。
     await alert("stop_unverified",
-      `stop ${runId} not verified: opencode session may still be active`,
+      `stop ${runId} not verified: ${serverStopSessionLabel(session)} session may still be active`,
       { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
@@ -617,6 +653,43 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
     taskkillExitCode: null,
     processAliveBefore: false,
     processAliveAfter: false,
+  };
+}
+
+// ── stopRouteUnavailable (server-side stop target not resolvable) ────────────
+
+async function stopRouteUnavailable({ transcript, session, fromState, runId, deps, stopRequestedAttempt, error }) {
+  const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
+  // 只回显 factory 的固定文案；其余抛出值不进转录、告警或返回（可能带路径等细节）。
+  const routeError = Object.values(SERVER_STOP_ROUTE_TEXT).includes(error?.message)
+    ? error.message
+    : SERVER_STOP_ROUTE_TEXT.unresolved;
+  const backend = serverStopBackendOf(session);
+
+  // 同 invalidPidStop：不认领终态——只记 stop_requested + stop_unverified。
+  await transcript.append("run.stop_requested", { ...stopRequestedAttempt.payload });
+  await transcript.append("run.stop_unverified", {
+    backendSessionId: session.backendSessionId,
+    backend,
+    outcome: "stop_route_unavailable",
+    taskkillCalled: false,
+  });
+  await alert("stop_unverified",
+    `stop ${runId} not sent, run not marked aborted: ${routeError}`,
+    { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
+  ).catch(() => { /* alert failure doesn't affect the result */ });
+
+  return {
+    runId,
+    stopRouteUnavailable: true,
+    terminalAccepted: false,
+    terminalState: fromState ?? "unknown",
+    sideEffectAttempted: false,
+    stopVerified: false,
+    backend,
+    outcome: "stop_route_unavailable",
+    taskkillCalled: false,
+    routeError,
   };
 }
 
