@@ -19,7 +19,8 @@
 // dispatchRun fork 出的 detached runner → RunManager.start → deepSeekAcp backend →
 // 真实 dsh --profile acp → 真实 DeepSeek API 全链路真实。
 //
-// registry：默认只读主检出的 config/agents.json，复制到 <repo>/.wao/runs/drill-agents.json
+// registry：默认只读主检出的 config/agents.json，复制到
+// <repo>/.wao/runs/session-reuse-drill/drill-agents-deepseek_acp.json
 // 并注入 scratch 车道 deepseek_acp_reuse_probe = 注册表 deepseek-flash 车道 +
 // sessionReuse lead_workspace（不改任何既有条目；源注册表已有同名键即拒绝）。
 // --registry-source <path> 可覆盖来源。注册表定位与 run 记录读取见 ../drillRuns.mjs。
@@ -48,10 +49,11 @@ function argValue(flag) {
 }
 const registrySource = argValue("--registry-source") ?? mainCheckoutRegistry(ROOT);
 
-// 夹具：复制 registry 到 <repo>/.wao/runs/（cwd 内；不改外层文件）。
-const scratchDir = join(ROOT, ".wao", "runs");
-const drillRegistry = join(scratchDir, "drill-agents.json");
-const runDir = join(scratchDir, "phase6-reuse-runs");
+// 夹具：复制 registry 到 <repo>/.wao/runs/session-reuse-drill/（cwd 内；不改外层文件）——
+// 与 ../session-reuse-drill.mjs 同一落点，.wao/runs 根白名单只收这个子目录。
+const scratchDir = join(ROOT, ".wao", "runs", "session-reuse-drill");
+const drillRegistry = join(scratchDir, "drill-agents-deepseek_acp.json");
+const runDir = join(scratchDir, "phase6-reuse-runs-deepseek_acp");
 mkdirSync(scratchDir, { recursive: true });
 const registryJson = JSON.parse(readFileSync(registrySource, "utf8"));
 const sourceLane = registryJson.agents?.[SOURCE_LANE];

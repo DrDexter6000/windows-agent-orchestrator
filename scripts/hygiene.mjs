@@ -22,7 +22,7 @@ export const ROOT_WHITELIST = new Map([
   ["archive-2026-10", "历史证据冷藏室：根目录上的演练与测试残留（含 INDEX.md 与哈希核验的移动清单，内容不逐件检查）"],
   ["consults", "M13 Agent Union 会审组记录（席位-runId 映射/意见-决策回链——决定 0039）"],
   ["serve-maintenance", "WAO 自己写的活状态：serve 清扫台账 sweep-ledger.jsonl 与回收锁 recycle.lock（serveMaintenance.js serveMaintenanceDir，决定 0057 落 runs 槽）+ lineage 关闭锁 lineage-locks/（lineageClose.js）"],
-  ["session-reuse-drill", "TD-184 会话复用 drill 的 scratch 子目录：注册表复制件 drill-agents-*.json + run 目录 phase6-reuse-runs-*/（scripts/reliability/session-reuse-drill.mjs）"],
+  ["session-reuse-drill", "TD-184 会话复用 drill 的 scratch 子目录：注册表复制件 drill-agents-*.json + run 目录 phase6-reuse-runs-*/（scripts/reliability/session-reuse-drill.mjs 与 dsh-acp/wao-reuse-drill.mjs）"],
 ]);
 
 // ---- W4 config ----

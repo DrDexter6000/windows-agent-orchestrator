@@ -87,9 +87,9 @@ test("W1: ROOT_WHITELIST covers WAO-written live state and drill scratch with re
     assert.ok(ROOT_WHITELIST.get(name).length > 5, `白名单条目 ${name} 必须带理由`);
   }
   // drill 脚本顶层即执行（不可导入），用源文本钉 scratch 落点与白名单条目一致
-  const drillSrc = readFileSync(
-    path.join(thisTreeRoot, "scripts", "reliability", "session-reuse-drill.mjs"), "utf8",
-  );
-  assert.match(drillSrc, /join\(ROOT, "\.wao", "runs", "session-reuse-drill"\)/,
-    "drill 的 scratchDir 必须收在白名单子目录 .wao/runs/session-reuse-drill 内");
+  for (const rel of [["session-reuse-drill.mjs"], ["dsh-acp", "wao-reuse-drill.mjs"]]) {
+    const drillSrc = readFileSync(path.join(thisTreeRoot, "scripts", "reliability", ...rel), "utf8");
+    assert.match(drillSrc, /join\(ROOT, "\.wao", "runs", "session-reuse-drill"\)/,
+      `${rel.join("/")} 的 scratchDir 必须收在白名单子目录 .wao/runs/session-reuse-drill 内`);
+  }
 });

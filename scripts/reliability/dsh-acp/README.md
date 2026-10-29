@@ -91,7 +91,8 @@ ADR-0031 §3.6 关联面的**真实 WAO 派发**取证（非裸探针），通�
 node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs
 # 前置：dsh 在 PATH；~/.wao/runtimes/dsh-acp/wao-contain.patch.yml 已装；
 # DEEPSEEK_API_KEY 在 Windows 用户环境。registry 默认只读主检出的 config/agents.json，
-# 复制到 <repo>/.wao/runs/drill-agents.json，注入 scratch 车道 deepseek_acp_reuse_probe
+# 复制到 <repo>/.wao/runs/session-reuse-drill/drill-agents-deepseek_acp.json，注入 scratch
+# 车道 deepseek_acp_reuse_probe
 # （= deepseek-flash 车道 + sessionReuse lead_workspace；--registry-source 可换来源）。
 ```
 
@@ -101,7 +102,7 @@ node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs
 派发服务）+ **固定 leadSession** 模拟 MCP server 的稳定注入——CLI 每次派发一次性
 leadSession（设计如此），同身份复现只能这样进；MCP 注入面由
 `test/run-lifecycle/m11-11c-sessionReuse.test.js` MCP-1/MCP-2 单测钉住。run 产物在
-`<repo>/.wao/runs/phase6-reuse-runs/`。**删除** routing 条目（而非损坏）会回到"条目
+`<repo>/.wao/runs/session-reuse-drill/phase6-reuse-runs-deepseek_acp/`。**删除** routing 条目（而非损坏）会回到"条目
 不存在 ⇒ first"的 M11-11C provider-中立合同（ADR-0031 §3.6 裁定范围注）——该路径
 未在本 drill 执行（会多烧一轮模型 token），属已知设计行为而非未测缺陷。
 
