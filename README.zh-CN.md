@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.5.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-16-v0.5.0.md)
+[![version](https://img.shields.io/badge/version-v0.6.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-29-v0.6.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,22 +51,23 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.5.0 新增（2026-10-16）
+## v0.6.0 新增（2026-10-29）
 
-- **Lead 看得见、Lead 来定**——run 还有生命体征时，控制面只给建议，去留由 Lead 决定；Lead
-  看得到 worker 正在跑的命令、工具调用在对什么动手、最近输出了什么（决定 0067–0072）。
-- **车道不靠人工步骤就能用**——kimi worker serve 在派发时按需拉起、空闲时退出；车道的暂停
-  派发说明与当前型号各只写在车道配置一处；`wao lanes` 是只读的车道参考面（0064、
-  0073–0075、0079–0081）。
-- **宿主项目接入**——会改工作区的 MCP 工具只从调用本身取目标项目，共用一个 server 的会话
-  不再派发进彼此的项目；`wao mcp status` 只读探测宿主注册状态；宿主项目的 Lead 用
-  `wao feedback` 报 WAO 缺陷（0066、0083）。
-- **按批准的计划清理**——`wao worktree reclaim` 在分支进了已校验的 bundle 之后清退陈旧
-  worktree 与 `wao/*` 分支，含嵌在关联工作树里的运行树；`wao runs settle` 结算 runner
-  已死的 run（0082）。
-- 按决定分组的范围、发版门槛证据与 Owner 的两项 reliability 豁免（deepseek-pro 一行；
-  delta 行的越界演练）见
-  [`docs/changelog-2026-10-16-v0.5.0.md`](docs/changelog-2026-10-16-v0.5.0.md)。
+- **越界写拦得住，且有证明**——非 codex 车道活体演示会如实报告自己的写入；codex 车道每次
+  调用都带 OS 写沙箱，用参数钉与不经模型的沙箱检查证明；链式测试证明有写事件投影的后端的
+  越界帧都会被拦（决定 0084、0086）。
+- **运行收得干净、不丢东西**——符合条件的隔离运行到终态只删干净的树，分支一律保留（0085）；交付重验证
+  给 Lead 一次显式的第二次机会，打包失败带闭集错误类别。
+- **车道画像分项、有依据、以实测为准**——依据随格，换代即标待复核，`lead_preflight` 一次
+  给全；实测可覆盖手动评分，Owner 特别标注的除外（0087–0090、0092）。
+- **WAO 干活时自己保持唤醒**——worker 运行、交付验证与全量测试期间向 Windows 申请保持唤醒
+  （尽力而为，用户自己选睡眠照样会睡），屏幕不再空闲熄灭，合盖也不进待机；提示词经标准输入交给 runner 与 codex/claude CLI（0093）。
+- **dsh 进宿主表**——`wao mcp bind` 给出 DeepSeek Harness 的 profile patch 插入行，
+  `wao mcp status` 探测它的 YAML 层（0091）。
+- **退役 workflow/DAG 层与 `wao state`**——多步编排由 Lead 组合派发、会审与续接完成；
+  存档里的旧 workflow 转录照常可读（0094）。
+- 按决定分组的范围与发版门槛证据见
+  [`docs/changelog-2026-10-29-v0.6.0.md`](docs/changelog-2026-10-29-v0.6.0.md)。
 
 ## 当前状态
 
@@ -165,7 +166,7 @@ AGENT_ONBOARDING.md §3。
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.5.0](docs/changelog-2026-10-16-v0.5.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.6.0](docs/changelog-2026-10-29-v0.6.0.md)） |
 | **跑真实 smoke 测试**（claude/codex/opencode） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |

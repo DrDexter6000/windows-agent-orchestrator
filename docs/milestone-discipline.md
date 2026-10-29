@@ -46,7 +46,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 1. 所有 task 的验收 gate 全绿
 2. 技术债审计完成（已修或已登记）
 3. `npm test` 全绿
-4. 涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿
+4. 涉及外部系统交互的 milestone，必须有真实运行时证据，不能只靠 mock 报绿：`npm run smoke` 覆盖 claude-code 与 codex（opencode 要点名才跑）；其余后端（zcode、kimi-web、deepseek-acp 等）以该车道的 `npm run reliability` 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项——发版检查单 §9 第 5 步的 reliability 本来就包含这些车道。里程碑若改了 sentinel 碰不到的行为（stop、resume 等），仍按该 task 的验收 gate 取对应的真实证据
 5. 更新 `docs/roadmap.md` 里程碑表
 6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（边界与流程见决定 0034）
 
@@ -63,7 +63,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 ### 6.1 mock 证明"逻辑对"，真实 smoke 证明"系统能跑"
 
 - mock 抓不到的缺陷真实存在：`.cmd` 包装器导致的 spawn 参数问题、流式输出 parts 追加的竞态。mock 派发用 `process.execPath`（真 exe），mock 消息一次性完整返回——碰不到包装器与流式追加这两个面。
-- 规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑 `npm run smoke`。
+- 规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑真实运行时验证，覆盖面见 §4 第 4 条。
 
 ### 6.2 红绿测试纪律
 

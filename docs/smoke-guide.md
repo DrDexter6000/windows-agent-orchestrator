@@ -15,7 +15,7 @@
 - `--isolate` 让 run 在隔离 git worktree 里执行，报告会打印 worktree 路径。
 - transcript 写在 `os.tmpdir()` 下的 `wao-smoke-*` 临时目录（按项目分桶），结束时打印路径并保留。
 
-脚本只覆盖 claude-code、codex、opencode-serve（显式）。zcode、kimi-web、deepseek-acp 不覆盖，对这些车道用手动 smoke。
+脚本只覆盖 claude-code、codex、opencode-serve（显式）。其余后端（zcode、kimi-web、deepseek-acp 等）的里程碑证据，按 `docs/milestone-discipline.md` §4 第 4 条取自该车道的 reliability；手动 smoke 只用于排查。
 
 ### scorecard 专项
 

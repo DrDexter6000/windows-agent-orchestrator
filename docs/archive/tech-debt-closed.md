@@ -143,3 +143,5 @@
 | TD-29 | 大 DAG 的 completedResults Map 占用内存，无流式或分页机制 | 2026-10-29：决定 0094 退役 DAG 引擎，completedResults 随之不存在 |
 | TD-31 | workflow 脚本具备完全 JS 能力，风险与 npm script 同级，属刻意接受 | 2026-10-29：决定 0094 删除 workflow 执行，WAO 不再加载 workflow 脚本 |
 | TD-142 | workflow / DAG 层利用率低，裁定保留现状不退役 | 2026-10-29：退出条件已满足（07-08 之后零真实运行；0027 计的 643 次里 634 次是测试写进真实运行目录的残留），决定 0094 退役 |
+| TD-294 | `npm run smoke` 只探测 claude 与 codex，zcode、kimi-web、deepseek-acp 车道不在 smoke 内，而 milestone-discipline §4 要求里程碑收尾必跑 smoke | 2026-10-29：§4 第 4 条写明替代——smoke 不覆盖的后端以该车道的 reliability 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项；smoke-guide 与 TD-16 同步 |
+| TD-273 | `config/lane-exceptions.json` 的五条例外未清理（原行称其对退出码轴已非必需；五条的 checks 实为 adversarialEscapeIntercepted） | 2026-10-29：不清理。决定 0084 §4 规定以 adversarialEscape 为键的例外保持原样、历史不改写；新 case 不再生成该检查，例外影响不到新认证 |
