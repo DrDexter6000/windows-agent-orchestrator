@@ -429,3 +429,11 @@ test("DEC-16: errorClass 取继承属性名时不产出附加事实", () => {
     for (const ev of d.evidence) assert.equal(typeof ev.fact, "string");
   }
 });
+
+test("DEC-17: git_index_locked 事实不再许诺重打包，两种持锁情形都写上（TD-320）", () => {
+  const fact = DELIVERY_ERROR_CLASS_FACTS.git_index_locked;
+  assert.doesNotMatch(fact, /may succeed/, "这种失败没有重打包候选，不许诺重打包能成");
+  assert.match(fact, /no repackage candidate/);
+  assert.match(fact, /still writing/, "仍有进程持锁的情形");
+  assert.match(fact, /left the lock behind/, "残锁情形");
+});

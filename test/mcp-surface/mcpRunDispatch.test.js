@@ -1082,3 +1082,121 @@ test("2026-10-04: CorrectableBackendUnsupportedError collapses to the fixed corr
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
 });
+
+// ── TD-319：MCP 错误文本输出口统一转义（register 包装层） ──────────────────────
+
+test("TD-319: dispatchSelectorErrorText 返回行数组——join 结果与改前逐字一致", async () => {
+  const { dispatchSelectorErrorText } = await import("../../src/mcp/server.js");
+  const resolution = {
+    kind: "error", code: "unknown_lane",
+    message: 'unknown_lane: 收到 lane="no_such"；该车道未注册。',
+    received: { lane: "no_such", role: "auditor" },
+    choices: {
+      forms: ["agentId", "lane+role"],
+      lanes: ["claude-opus", "glm-pro"],
+      roles: ["auditor", "coder"],
+      aliases: ["opus"],
+    },
+  };
+  const parts = dispatchSelectorErrorText(resolution);
+  assert.ok(Array.isArray(parts), "返回行数组（不再 join）");
+  assert.ok(parts.every((l) => typeof l === "string" && !l.includes("\n")), "每行都是真单行");
+  // join 结果逐字复现改前 wire 文本（干净值下包装层逐行转义是恒等变换）。
+  assert.deepEqual(parts, [
+    'dispatch refused: unknown_lane. unknown_lane: 收到 lane="no_such"；该车道未注册。',
+    "known lanes (2): claude-opus, glm-pro",
+    "known roles (2): auditor, coder",
+    "known aliases (1): opus",
+    "accepted forms: agentId | lane+role",
+    'fix: run_dispatch({ "lane": "claude-opus", "role": "auditor", "prompt": "任务文本" }) 或 run_dispatch({ "agentId": "<别名>", "prompt": "任务文本" })',
+  ]);
+  // >32 项截断指向 registry_list 的行也保持单行结构。
+  const many = Array.from({ length: 40 }, (_, i) => `lane_${i}`);
+  const capped = dispatchSelectorErrorText({ ...resolution, choices: { lanes: many, roles: ["coder"] } });
+  const cappedLaneLine = capped.find((l) => l.startsWith("known lanes"));
+  assert.match(cappedLaneLine, /lane_31 …（截断，全 wao lanes 详见 registry_list）/);
+  assert.ok(!cappedLaneLine.includes("\n"));
+});
+
+test("TD-319: withToolErrorTextEscape——isError 文本转义（字符串与行数组），非错误结果原样", async () => {
+  const { withToolErrorTextEscape } = await import("../../src/mcp/server.js");
+  // 返回的 isError：字符串 text 的换行变成可见写法，不再多出行。
+  const stringCase = await withToolErrorTextEscape(async () => ({
+    isError: true,
+    content: [
+      { type: "text", text: "refused: evil\n[FORGED] forged line" },
+      { type: "text", text: ["dispatch refused: line one", "line two\ninner"] },
+      { type: "resource", resource: { uri: "wao://x" } },
+    ],
+  }), {}, {});
+  assert.equal(stringCase.isError, true);
+  assert.equal(stringCase.content[0].text, "refused: evil\\n[FORGED] forged line", "字符串 text：注入换行转义");
+  assert.equal(stringCase.content[1].text, "dispatch refused: line one\nline two\\ninner", "行数组 text：行间换行保留、行内转义");
+  assert.deepEqual(stringCase.content[2], { type: "resource", resource: { uri: "wao://x" } }, "非 text 项原样不动");
+  // 非错误结果：同一对象原样返回（成功输出不加这一层）。
+  const ok = { content: [{ type: "text", text: JSON.stringify({ fine: true }) }], structuredContent: { fine: true } };
+  const passthrough = await withToolErrorTextEscape(async () => ok, {}, {});
+  assert.strictEqual(passthrough, ok, "成功结果对象同一引用（字节不变）");
+  // isError 缺 content / 非 isError 不带 content：不裹不改。
+  // isError 但缺 content（不具形）：不裹不改，原样返回。
+  const odd = await withToolErrorTextEscape(async () => ({ isError: true }), {}, {});
+  assert.deepEqual(odd, { isError: true }, "不具形的结果原样返回");
+});
+
+test("TD-319: withToolErrorTextEscape——抛错收敛为 SDK 同形 isError，文本转义；UrlElicitationRequired 原样上抛", async () => {
+  const { withToolErrorTextEscape } = await import("../../src/mcp/server.js");
+  const { McpError, ErrorCode } = await import("@modelcontextprotocol/sdk/types.js");
+  // 抛错分支：与 SDK createToolError 同形，message 里的换行可见化。
+  const thrown = await withToolErrorTextEscape(async () => {
+    throw new Error("service blew up\n[FORGED] forged line");
+  }, {}, {});
+  assert.deepEqual(
+    thrown,
+    { content: [{ type: "text", text: "service blew up\\n[FORGED] forged line" }], isError: true },
+  );
+  // 带 lines 的错误：逐行转义后换行（行数保持）。
+  const multi = await withToolErrorTextEscape(async () => {
+    const err = new Error("a\nb");
+    err.lines = ["first\ninjected", "second"];
+    throw err;
+  }, {}, {});
+  assert.equal(multi.content[0].text, "first\\ninjected\nsecond");
+  assert.equal(multi.isError, true);
+  // 唯一例外照 SDK：McpError 且 code === UrlElicitationRequired 原样上抛。
+  const elicitation = new McpError(ErrorCode.UrlElicitationRequired, "elicitation required");
+  await assert.rejects(
+    withToolErrorTextEscape(async () => { throw elicitation; }, {}, {}),
+    (e) => e === elicitation,
+  );
+  // 其它 McpError 照常收敛（不享受例外；message 带 "MCP error <code>:" 前缀）。
+  const otherMcp = await withToolErrorTextEscape(async () => {
+    throw new McpError(ErrorCode.InvalidParams, "bad params\n[FORGED]");
+  }, {}, {});
+  assert.equal(otherMcp.isError, true);
+  assert.equal(otherMcp.content[0].text, "MCP error -32602: bad params\\n[FORGED]");
+});
+
+test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本、行内控制字符不再伪造一行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcp-td319-"));
+  try {
+    const registryPath = makeRegistry(dir, {});
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs") });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { lane: "no_such_lane_td319", role: "auditor", prompt: "t" } });
+      assert.equal(res.isError, true, "未知 lane 被拒");
+      const text = res.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+      const rows = text.split("\n");
+      assert.ok(rows.length >= 3, `选择器拒绝是多行（行数组语义保留）: ${JSON.stringify(rows)}`);
+      assert.match(rows[0], /^dispatch refused: unknown_lane\./);
+      assert.ok(rows.some((l) => l.startsWith("known lanes")), "合法 lane 行在场");
+      assert.ok(rows.some((l) => l.startsWith("fix: run_dispatch(")), "修正例行在场");
+      assert.ok(rows.every((l) => !l.includes("\n")), "每行单行");
+      // 非错误结果字节不变：workspace_status 在未绑定工作区时也是结构化成功输出，
+      // 其 JSON 文本不经转义层（withToolErrorTextEscape 对非 isError 原样返回）。
+      const status = await client.callTool({ name: "workspace_status", arguments: {} });
+      assert.notEqual(status.isError, true);
+      assert.doesNotThrow(() => JSON.parse(status.content.find((b) => b.type === "text").text), "成功 JSON 文本仍可解析（未过转义层）");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});

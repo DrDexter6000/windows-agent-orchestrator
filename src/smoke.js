@@ -26,6 +26,9 @@ import { readTranscript, findFirstBound, STATE_CHANGE_REASON } from "./transcrip
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （src 同层边，与既有 transcript.js import 同族）。
 import { boundReportScope } from "./metrics.js";
+// TD-319：顶层 catch 是 smoke 的报错输出口——统一经 renderErrorText 渲染，
+// 配置值里的控制字符不再能伪造一行。
+import { renderErrorText } from "./safeText.js";
 
 const SMOKE_PROMPT = "Reply with exactly: smoke ok";
 
@@ -306,6 +309,6 @@ async function smokeScorecard(cwd, runDir) {
 }
 
 main().catch((error) => {
-  console.error(error.message);
+  console.error(renderErrorText(error));
   process.exit(1);
 });

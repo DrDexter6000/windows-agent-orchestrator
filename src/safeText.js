@@ -15,11 +15,25 @@
 //      src/registry.js 的 unknownBackendGuidance 与 doctor 的 invocation_method
 //      明细——这两个 JSON 字段里因此也是转义写法，不是原值。
 //
+// TD-319：报错也收进同一条底线，但不在逐个插值点补——两个输出口统一渲染：
+//   - CLI 报错（src/cli.js 顶层 catch、src/commands/run.js 的 sessionReuse 分支、
+//     src/smoke.js 顶层 catch、src/commands/worktree.js 自己打的 reclaim 报错）与
+//     MCP 错误文本（src/mcp/server.js 的 register 包装层）都经 renderErrorText
+//     落地。MCP SDK 自己产生的错误（未知工具名、入参或出参校验）不经这一层。
+//   - 有意分行的报错用 linesError 构造（CLI：src/commands/run.js 派发选择器拒绝、
+//     delivery-spec 内层提示与把顶层命令名当 agentId 的提示，runs.js 的 runs wait
+//     用法，consult.js 的用法，observe.js 的 collect 指路，dashboard.js 的非 Git
+//     目录拒绝），或像 server.js 的 dispatchSelectorErrorText 一样返回行数组——
+//     渲染时各行分别转义后再用 "\n" 连接；其余报错里的换行一律显示为转义写法。
+//
 // 消费方：解析——src/registry.js（readRegistry）、src/dispatchResolution.js
 // （roles.json、lanes.json）、src/application/laneProfile.js（车道画像文件）、
 // scripts/run-component-check.mjs 与 scripts/run-reliability.mjs（读 registry）；
 // 文本转义——src/commands/registry.js、doctor.js、lanes.js、onboarding.js 与
-// src/registry.js 的未知 backend 报错。零相对出边。
+// src/registry.js 的未知 backend 报错；输出口渲染——src/cli.js、src/smoke.js、
+// src/commands/run.js、worktree.js、observe.js、dashboard.js、runs.js、consult.js
+// 与 src/mcp/server.js（renderErrorText / linesError / errorLines）。
+// 零相对出边。
 
 // V8 报错的规范位置子句只认 message **末尾**：以 ` at position N (line X column Y)`
 // 结尾（新式，V8 自己算好的行列，直取），或以 ` at position N` 结尾（旧式，按
@@ -113,8 +127,78 @@ const NAMED_ESCAPES = new Map([
  * @param {unknown} text - 任意值（非字符串按 String() 归一，与模板拼接同语义）
  * @returns {string}
  */
+// String() 自己会抛的值（没有 toString 的对象、toString 抛错）落成固定占位，
+// 转义与报错渲染因此都不抛错。
+const UNPRINTABLE = "[unprintable value]";
+
+function textOf(value) {
+  try {
+    return String(value);
+  } catch {
+    return UNPRINTABLE;
+  }
+}
+
 export function escapeControlChars(text) {
-  return String(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => (
+  return textOf(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => (
     NAMED_ESCAPES.get(ch) ?? `\\u${ch.codePointAt(0).toString(16).padStart(4, "0")}`
   ));
+}
+
+/**
+ * 有意分多行的报错构造器（TD-319）。message 仍是各行以 "\n" 连接——照旧读
+ * .message 的代码不受影响；另带自有属性 lines（入参数组的冻结副本），输出口的
+ * renderErrorText 据此按行转义：行内混进的控制字符变成可见写法，不再增殖行数。
+ *
+ * @param {string[]} lines - 非空字符串数组，每行是有意的一行
+ * @param {(message: string) => Error} [makeError] - 错误构造器，缺省 new Error；
+ *   传自定义构造器可保留调用方自己的错误类与 code
+ * @returns {Error} message === lines.join("\n")，带冻结的 lines 属性
+ */
+export function linesError(lines, makeError = (message) => new Error(message)) {
+  const frozen = Object.freeze([...lines]);
+  const error = makeError(frozen.join("\n"));
+  error.lines = frozen;
+  return error;
+}
+
+/**
+ * 一条报错的行（TD-319）：自有属性 lines 为数组时取它的副本，否则 message
+ * （非 Error 取 String(value)）算一行。renderErrorText 与"在原报错后追加提示行"
+ * 的调用方共用这一条规则。
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+export function errorLines(value) {
+  // 读属性本身也可能抛（getter、代理），整体兜底成固定占位。
+  try {
+    if (value instanceof Error && Object.hasOwn(value, "lines") && Array.isArray(value.lines)) {
+      return [...value.lines];
+    }
+    return [textOf(value instanceof Error ? value.message : value)];
+  } catch {
+    return [UNPRINTABLE];
+  }
+}
+
+/**
+ * 输出口唯一的报错渲染函数（TD-319，不抛错）：
+ *   - 自有属性 lines 为数组的 Error：各行分别 escapeControlChars 后用 "\n" 连接
+ *     （有意分行的报错保持行数，行内控制字符可见化）；
+ *   - 其余 Error：escapeControlChars(String(error.message))——message 里的换行
+ *     一律变成可见写法，不能伪造一行；
+ *   - 字符串数组：逐行转义后连接（MCP isError 文本的行数组形态）；
+ *   - 字符串：整体转义；其它值：escapeControlChars(String(value))。
+ *
+ * @param {unknown} value - 抛出的/返回的错误文本载荷
+ * @returns {string}
+ */
+export function renderErrorText(value) {
+  if (value instanceof Error) {
+    return errorLines(value).map((line) => escapeControlChars(line)).join("\n");
+  }
+  if (Array.isArray(value)) {
+    return value.map((line) => escapeControlChars(line)).join("\n");
+  }
+  return escapeControlChars(value);
 }

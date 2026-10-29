@@ -31,6 +31,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 - 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期是通知，不是终止：WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后继续等到自然终态；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。
 - 终止 worker 只有两个来源：Lead 显式 `stop`；硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
+- 前台等到失败终态时（`run`、`spawn --wait`）不抛裸错误，返回 `{runId, completed:false, failed:true, timedOut:false, error, transcript, diagnosis?}`：`error` 超过 500 字符时截断并注明总长，`diagnosis` 是同一 runId 的诊断（同 `runs diagnose`）。
 
 派发前看目标车道有没有 `dispatchHold`：那是 Owner 的暂停派发原话，只提示、不拦截，派不派由 Lead 决定；在哪里看得到见[车道](lanes.md)。
 

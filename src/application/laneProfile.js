@@ -56,6 +56,23 @@ export const RATINGS_STATES = Object.freeze(["unrated", "current", "review", "un
 /** 紧凑投影的行数上限（防异常膨胀；真实车道表远小于此）。 */
 export const PROJECTION_ROWS_CAP = 16;
 
+// 画像字段的上限只写在这里：文件校验、紧凑投影的截断，以及 MCP 出参 schema
+// （经聚合器转出）都引用这一组值，两层各自把关但数值不会各写一份。
+/** 每条车道的注意事项条数（lead_preflight 全部投影；取值见 0088 修订条）。 */
+export const CAVEATS_CAP = 6;
+/** 每条注意事项的字符数。 */
+export const CAVEAT_MAX_CHARS = 120;
+/** reviewPending 与投影里每条待复核原因的字符数。 */
+export const REVIEW_REASON_MAX_CHARS = 160;
+/** 投影里待复核原因的条数。 */
+export const REVIEW_REASONS_CAP = 4;
+/** cost 的字符数。 */
+export const COST_MAX_CHARS = 200;
+/** 投影时每格备注截到的字符数（文件里的备注上限另见 validateRatingCell）。 */
+export const PROJECTED_NOTE_MAX_CHARS = 80;
+/** 投影里刻度行的字符数。 */
+export const SCALE_MAX_CHARS = 240;
+
 /** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
 const LANE_ENTRY_KEYS = new Set([
   "ratings", "ratedAgainst", "reviewPending", "cost",
@@ -171,11 +188,11 @@ export function validateTraitEntry(id, entry) {
   } else if (entry.ratedAgainst !== null) {
     bad.push("ratedAgainst（全未评时必须显式为 null）");
   }
-  if (entry.reviewPending !== undefined && !isStr(entry.reviewPending, 1, 160)) bad.push("reviewPending");
-  if (entry.cost !== null && entry.cost !== undefined && !isStr(entry.cost, 1, 200)) bad.push("cost");
+  if (entry.reviewPending !== undefined && !isStr(entry.reviewPending, 1, REVIEW_REASON_MAX_CHARS)) bad.push("reviewPending");
+  if (entry.cost !== null && entry.cost !== undefined && !isStr(entry.cost, 1, COST_MAX_CHARS)) bad.push("cost");
   if (entry.cost === undefined) bad.push("cost");
-  if (!Array.isArray(entry.caveats) || entry.caveats.length > 4
-    || entry.caveats.some((c) => !isStr(c, 1, 120))) bad.push("caveats");
+  if (!Array.isArray(entry.caveats) || entry.caveats.length > CAVEATS_CAP
+    || entry.caveats.some((c) => !isStr(c, 1, CAVEAT_MAX_CHARS))) bad.push("caveats");
   // contextWindow / multimodal / effortNote / concurrencyNote：沿用 v1 规则。
   const cw = entry.contextWindow;
   if (!cw || typeof cw !== "object" || Array.isArray(cw) || !Number.isInteger(cw.tokens) || cw.tokens <= 0
@@ -358,7 +375,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
         stars: cell.stars,
         basis: cell.basis,
         n: cell.n ?? null,
-        note: cell.note == null ? null : clip(cell.note, 80),
+        note: cell.note == null ? null : clip(cell.note, PROJECTED_NOTE_MAX_CHARS),
       };
     }
     rows.push({
@@ -366,7 +383,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
       family: laneFamilyLabel(lane),
       ratings,
       ratingsState: rs.state,
-      reviewReasons: rs.reasons.slice(0, 4).map((s) => clip(s, 160)),
+      reviewReasons: rs.reasons.slice(0, REVIEW_REASONS_CAP).map((s) => clip(s, REVIEW_REASON_MAX_CHARS)),
       caveats: [...entry.caveats],
       cost: entry.cost,
       dispatchHold: validDispatchHold(lane.dispatchHold),
@@ -378,7 +395,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
   const tableIds = new Set(laneList.map((l) => l?.id).filter((x) => typeof x === "string"));
   const omittedLaneIds = (traitsResult.invalidIds ?? []).filter((id) => tableIds.has(id));
   return {
-    scale: clip(scaleLine, 240),
+    scale: clip(scaleLine, SCALE_MAX_CHARS),
     dimensionLabels: { ...DIMENSION_LABELS },
     rows,
     omittedLaneIds,

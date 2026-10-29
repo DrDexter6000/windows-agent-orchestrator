@@ -31,3 +31,10 @@ deepseek-flash 加上 Owner 的高峰规则后有 3 条，也得藏掉一条。�
 
 - preflight 输出变长：按现有画像，多出 4 条 caveats，约 130 字。
 - MCP 工具面：出参 schema 只改一个上限值，wire 字节不变；description-stripped 合同哈希按实测翻新（0078）。
+
+## 修订条（2026-10-28）
+
+- 来源：Owner 2026-10-28："如有必要、我同意和批准放宽，特别是'注意事项最多 4 条'这一项。具体是否放宽、放宽到多少，还请你独立思考、客观判断。"
+- 决定 1 的条数上限由 4 改为 6。取值只写在 `src/application/laneProfile.js` 的 `CAVEATS_CAP`，画像校验与 MCP 出参 schema 都引用它。每条 120 字符、reviewPending 160 字符不变。
+- 理由：Owner 的规则与原话不由 Lead 删改，sol 的 4 条里占了 3 条（第一条只好把两件事并成一句），astra 的 3 条全是。Lead 要记实测的注意事项，只能挤进一句或删旧条。长度没有触顶：最长的一条 71 字，reviewPending 最长 109 字。
+- 否决：不设上限（Lead 每次规划都读 preflight，8 条车道各 6 条已有 48 行）；放到 5（sol 拆开后就是 5 条，再记一条又满）；把 Owner 规则拆成单独字段（多一个字段，投影与 schema 各多一套，放宽条数已经够用）。

@@ -24,7 +24,8 @@ import { join } from "node:path";
  */
 export const DELIVERY_ERROR_CLASSES = Object.freeze([
   // git 已跑但退出非零，且工作树 git 索引锁文件在场（探测：读关联工作树
-  // .git 文件指向的 git dir，查其下 index.lock；探测失败不判此类）。
+  // .git 文件指向的 git dir，查其下 index.lock；探测失败不判此类）。锁文件
+  // 不记持有者，这里不判断它是否还被进程占着——诊断事实把两种情形都写上。
   "git_index_locked",
   // fs 错误 EBUSY/EPERM，且非 spawn 引起（Windows 上文件被占用/不可改的
   // 常见形状）。

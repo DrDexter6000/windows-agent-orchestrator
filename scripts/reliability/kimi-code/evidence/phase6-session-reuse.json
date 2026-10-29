@@ -1,20 +1,20 @@
 {
   "drill": "TD-184 phase6 session-reuse association (real dispatch, kimi-code)",
   "format": "phase6-session-reuse-self-contained-v1",
-  "date": "2026-10-08T22:54:09.451Z",
+  "date": "2026-10-28T22:44:24.149Z",
   "node": "v22.23.1",
   "backend": "kimi-code",
   "runtimeIdentity": {
     "distribution": "kimi",
-    "version": "2.1.1",
+    "version": "2.4.0",
     "binaryPath": "C:\\Users\\17865\\.kimi-code\\bin\\kimi.exe",
-    "fingerprint": "v1-b2ddc0fd24cf66f2",
+    "fingerprint": "v1-85f59e159aaf615a",
     "verified": true,
     "reason": null
   },
   "agentId": "kimi_code_reuse_probe",
   "leadSession": "<fixed drill lead (simulates the MCP server's stable injection)>",
-  "marker": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+  "marker": "WAO_REUSE_P6_MVSPBY9K_4L6N25",
   "entry": "dispatchRun (the shared background dispatch service used by CLI run --background and MCP run_dispatch); the detached runner / RunManager / backend / CLI / model chain is real",
   "registrySource": "D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json",
   "scratchLane": {
@@ -26,14 +26,14 @@
     },
     "sessionReuse": "lead_workspace"
   },
-  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.wao\\runs\\phase6-reuse-runs-kimi_code",
+  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.wao\\runs\\session-reuse-drill\\phase6-reuse-runs-kimi_code",
   "steps": {
     "run1": {
-      "runId": "run_202610082254094522iscuy",
+      "runId": "run_20261028224424150qter50",
       "accepted": true,
       "providerSessionRouting": "first_turn_requested",
       "state": "completed",
-      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616",
       "runSessionReuseTurn": "first",
       "assistantEcho": "MARKER_STORED",
       "toolEventCount": 0,
@@ -45,45 +45,51 @@
       }
     },
     "run2": {
-      "runId": "run_20261008225430260bdcfba",
+      "runId": "run_202610282244568501kv58k",
       "accepted": true,
       "providerSessionRouting": "resume_requested",
       "state": "completed",
-      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616",
       "runSessionReuseTurn": "resume",
-      "assistantEcho": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+      "assistantEcho": "WAO_REUSE_P6_MVSPBY9K_4L6N25",
       "evidenceRefs": {
         "sessionCreated": "run2-session-created",
         "sessionReuse": "run2-session-reuse",
         "assistant": "run2-assistant",
         "terminal": "run2-terminal"
-      }
+      },
+      "toolEventCount": 0
     },
     "run3": {
-      "runId": "run_20261008225446792vkzohy",
+      "runId": "run_20261028224856638zeuexr",
       "accepted": true,
       "providerSessionRouting": "resume_requested",
       "state": "completed",
-      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616",
       "runSessionReuseTurn": "resume",
-      "assistantEcho": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+      "assistantEcho": "WAO_REUSE_P6_MVSPBY9K_4L6N25",
       "evidenceRefs": {
         "sessionCreated": "run3-session-created",
         "sessionReuse": "run3-session-reuse",
         "assistant": "run3-assistant",
         "terminal": "run3-terminal"
-      }
+      },
+      "toolEventCount": 0
     },
     "negD_fresh_control": {
-      "runId": "run_20261008225501485eklcs4",
+      "runId": "run_20261028224913277i776m1",
       "accepted": true,
       "providerSessionRouting": "first_turn_requested"
     },
     "negC_dispatch": {
-      "runId": "run_20261008225523037weadh3",
+      "runId": "run_2026102822531785272wtk7",
       "accepted": true,
       "providerSessionRouting": "resume_requested"
     }
+  },
+  "routingEntryAfterRun2": {
+    "keyFile": "8955b511c247a807fca4546b39f96b074edff99fb9842b4210111cbe3d1b5584.json",
+    "runId": "run_202610282244568501kv58k"
   },
   "positive": {
     "pass": true,
@@ -99,17 +105,18 @@
   },
   "negativeD": {
     "evidenceRef": "negativeD",
-    "runId": "run_20261008225501485eklcs4",
+    "runId": "run_20261028224913277i776m1",
     "control": "distinct leadSession, same lane/workspace/prompt as run2 — fresh provider conversation must NOT be able to echo the marker",
     "state": "completed",
     "runSessionReuseTurn": "first",
     "markerEchoed": false,
-    "assistantEcho": "I don't have a marker string — this conversation contains no earlier message asking me to remember one, and I won't invent one. If you have the marker, paste it and I'll store or echo it as needed.",
+    "assistantEcho": "There is no marker string to repeat — this is the first message in our conversation, and nothing earlier asked me to remember one. If you meant to send the marker first, paste it and I'll echo it back",
     "evidenceRefs": {
       "sessionReuse": "negd-session-reuse",
       "assistant": "negd-assistant",
       "terminal": "negd-terminal"
     },
+    "toolEventCount": 0,
     "pass": true
   },
   "negativeA": {
@@ -140,25 +147,25 @@
   "embeddedEvidence": {
     "format": "phase6-session-reuse-self-contained-v1",
     "backend": "kimi-code",
-    "marker": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+    "marker": "WAO_REUSE_P6_MVSPBY9K_4L6N25",
     "positiveInputs": {
       "run1": {
-        "runId": "run_202610082254094522iscuy",
+        "runId": "run_20261028224424150qter50",
         "providerSessionRouting": "first_turn_requested",
-        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MV04VGBJ_K2SNHY\nDo not use any tools. Do not read or write any files. Do not run any commands.\nReply with exactly one line: MARKER_STORED"
+        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MVSPBY9K_4L6N25\nDo not use any tools. Do not read or write any files. Do not run any commands.\nReply with exactly one line: MARKER_STORED"
       },
       "run2": {
-        "runId": "run_20261008225430260bdcfba",
+        "runId": "run_202610282244568501kv58k",
         "providerSessionRouting": "resume_requested",
         "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
       },
       "run3": {
-        "runId": "run_20261008225446792vkzohy",
+        "runId": "run_20261028224856638zeuexr",
         "providerSessionRouting": "resume_requested",
         "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
       },
       "freshControl": {
-        "runId": "run_20261008225501485eklcs4",
+        "runId": "run_20261028224913277i776m1",
         "providerSessionRouting": "first_turn_requested",
         "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
       }
@@ -167,21 +174,21 @@
       {
         "id": "run1-session-created",
         "source": "run transcript excerpt",
-        "runId": "run_202610082254094522iscuy",
+        "runId": "run_20261028224424150qter50",
         "type": "session.created",
-        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+        "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616"
       },
       {
         "id": "run1-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_202610082254094522iscuy",
+        "runId": "run_20261028224424150qter50",
         "type": "run.session_reuse",
         "turn": "first"
       },
       {
         "id": "run1-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_202610082254094522iscuy",
+        "runId": "run_20261028224424150qter50",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
@@ -190,90 +197,90 @@
       {
         "id": "run1-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_202610082254094522iscuy",
+        "runId": "run_20261028224424150qter50",
         "type": "run.completed",
         "state": "completed"
       },
       {
         "id": "run2-session-created",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225430260bdcfba",
+        "runId": "run_202610282244568501kv58k",
         "type": "session.created",
-        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+        "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616"
       },
       {
         "id": "run2-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225430260bdcfba",
+        "runId": "run_202610282244568501kv58k",
         "type": "run.session_reuse",
         "turn": "resume"
       },
       {
         "id": "run2-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225430260bdcfba",
+        "runId": "run_202610282244568501kv58k",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
-        "text": "WAO_REUSE_P6_MV04VGBJ_K2SNHY"
+        "text": "WAO_REUSE_P6_MVSPBY9K_4L6N25"
       },
       {
         "id": "run2-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225430260bdcfba",
+        "runId": "run_202610282244568501kv58k",
         "type": "run.completed",
         "state": "completed"
       },
       {
         "id": "run3-session-created",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225446792vkzohy",
+        "runId": "run_20261028224856638zeuexr",
         "type": "session.created",
-        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+        "backendSessionId": "session_4a90074f-207a-4818-a23e-6278e3d51616"
       },
       {
         "id": "run3-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225446792vkzohy",
+        "runId": "run_20261028224856638zeuexr",
         "type": "run.session_reuse",
         "turn": "resume"
       },
       {
         "id": "run3-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225446792vkzohy",
+        "runId": "run_20261028224856638zeuexr",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
-        "text": "WAO_REUSE_P6_MV04VGBJ_K2SNHY"
+        "text": "WAO_REUSE_P6_MVSPBY9K_4L6N25"
       },
       {
         "id": "run3-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225446792vkzohy",
+        "runId": "run_20261028224856638zeuexr",
         "type": "run.completed",
         "state": "completed"
       },
       {
         "id": "negd-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225501485eklcs4",
+        "runId": "run_20261028224913277i776m1",
         "type": "run.session_reuse",
         "turn": "first"
       },
       {
         "id": "negd-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225501485eklcs4",
+        "runId": "run_20261028224913277i776m1",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
-        "text": "I don't have a marker string — this conversation contains no earlier message asking me to remember one, and I won't invent one. If you have the marker, paste it and I'll store or echo it as needed."
+        "text": "There is no marker string to repeat — this is the first message in our conversation, and nothing earlier asked me to remember one. If you meant to send the marker first, paste it and I'll echo it back"
       },
       {
         "id": "negd-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_20261008225501485eklcs4",
+        "runId": "run_20261028224913277i776m1",
         "type": "run.completed",
         "state": "completed"
       }
@@ -283,7 +290,7 @@
         "id": "negativeA",
         "input": {
           "kind": "prior-transcript-session-id",
-          "runId": "run_20261008225446792vkzohy",
+          "runId": "run_20261028224856638zeuexr",
           "backendSessionId": ""
         },
         "refusal": {
@@ -311,12 +318,12 @@
         "id": "negativeC",
         "input": {
           "kind": "prior-transcript-session-id",
-          "runId": "run_20261008225446792vkzohy",
+          "runId": "run_20261028224856638zeuexr",
           "backendSessionId": "11111111-2222-4333-8444-555555555555"
         },
         "refusal": {
           "kind": "resume_rejected",
-          "runId": "run_20261008225523037weadh3",
+          "runId": "run_2026102822531785272wtk7",
           "dispatchAccepted": true,
           "providerSessionRouting": "resume_requested",
           "terminalState": "failed",
@@ -329,7 +336,7 @@
         "id": "negativeD",
         "input": {
           "kind": "fresh-lead-differential",
-          "runId": "run_20261008225501485eklcs4",
+          "runId": "run_20261028224913277i776m1",
           "leadSession": "distinct-fresh-lead",
           "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
         },
@@ -347,7 +354,7 @@
   "pass": true,
   "repro": [
     "node scripts/wao-node.cjs scripts/reliability/session-reuse-drill.mjs --backend kimi-code",
-    "consumes real tokens (run1/run2/run3/fresh-control are small model turns; negC is rejected upstream at session lookup, before the model — no usage fact observed this turn)",
+    "consumes real tokens (run1/run2/run3/fresh-control are small model turns; negC observed a session-lookup refusal error with no native id and no provider_session_bound, no usage observed — zero-token is NOT claimed)",
     "prereq: kimi-code CLI on PATH and logged in; registry source D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json (read-only copy, scratch lane injected)"
   ]
 }

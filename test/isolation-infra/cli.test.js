@@ -8,7 +8,8 @@ import { test } from "node:test";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
@@ -6085,5 +6086,150 @@ test("CLI 全链: 两个 --tag 都进后台 run.started.tags，形状与前台�
     assert.deepEqual(fgStarted?.tags, { team: "alpha", work: "fix" }, "前台同 flags 产出同形状 tags（后台与前台的 start 形状一致）");
   } finally {
     rmrfRetry(dir);
+  }
+});
+
+// ── TD-319：CLI 报错输出口统一转义（配置值带控制字符不能在报错里伪造一行）──────
+
+test("TD-319: 配置值带换行——CLI 报错单行收口，转义写法在场（serve --url 拒绝清单）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-serve-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        kimi_seat: {
+          backend: "kimi-web",
+          cwd: ".",
+          model: { id: "kimi-k2" },
+          tokenEnv: "WAO_TEST_KIMI_TOKEN_NAME",
+          // 配置来源值（serveUrl）里藏一个换行：改前会被原样拼进报错，
+          // 在 stderr 伪造一行 "[FAIL] forged-line-from-registry"。
+          serveUrl: "http://127.0.0.1:58628\n[FAIL] forged-line-from-registry",
+        },
+      },
+    }), "utf8");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "serve", "status",
+      "--url", "http://127.0.0.1:9",
+      "--registry", registryPath,
+    ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
+    assert.notEqual(result.status, 0, "不匹配的 --url 被拒绝");
+    assert.ok(result.stderr.includes("matches no kimi-web agent"), "拒绝文案在场");
+    assert.ok(
+      result.stderr.includes("http://127.0.0.1:58628\\n[FAIL] forged-line-from-registry"),
+      `换行以可见写法在场: ${JSON.stringify(result.stderr)}`,
+    );
+    // 无伪造行：整条报错单行，[FAIL] 载荷不作为独立行出现。
+    const stderrLines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+    assert.equal(stderrLines.length, 1, `报错应为单行: ${JSON.stringify(stderrLines)}`);
+    assert.ok(!stderrLines.some((l) => l.startsWith("[FAIL]")), "不得出现伪造行");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-319: 派发选择器拒绝仍是多行输出——行数与改前一致，各行结构不变", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-selector-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { probe_seat: { backend: "claude-code", cwd: "." } },
+    }), "utf8");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "run", "no_such_agent_probe", "--prompt", "t",
+      "--registry", registryPath, "--run-dir", join(dir, "runs-none"),
+    ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
+    assert.notEqual(result.status, 0, "未知 agentId 被拒");
+    const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+    // 改前（join("\n") 时代）同一夹具的行数：报错 message + 合法 alias + 合法 role +
+    // 修正示例（非默认 --registry → 车道表停用：aliases 是空数组但仍真值，照推一行
+    // 空清单；无合法 lane 行；unknown_agent 无 forms 行）。
+    assert.equal(lines.length, 4, `行数与改前一致: ${JSON.stringify(lines)}`);
+    assert.match(lines[0], /unknown_agent/);
+    assert.match(lines[1], /^合法 alias: $/, "空 alias 清单行（改前同样在场）");
+    assert.match(lines[2], /^合法 role: /);
+    assert.match(lines[3], /^修正示例: /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-319: collect 取回失败——原报错 + 指路行恰两行（raw 与投影模式同形）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-collect-"));
+  try {
+    const emptyRunDir = join(dir, "runs-empty");
+    mkdirSync(emptyRunDir, { recursive: true });
+    for (const extraArgs of [[], ["--format", "json"]]) {
+      const result = spawnSync(process.execPath, [
+        "src/cli.js", "collect", "run_td319_probe", "--run-dir", emptyRunDir, ...extraArgs,
+      ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
+      assert.notEqual(result.status, 0, `取回失败退出非零 (${extraArgs.join(" ")})`);
+      const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+      assert.equal(lines.length, 2, `原报错 + 指路行恰两行 (${extraArgs.join(" ")}): ${JSON.stringify(lines)}`);
+      assert.match(lines[1], /^  — 查看已记录的运行状态与失败证据/, "第二行是指路行");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-319: dashboard 的非 Git 目录拒绝仍是两行，不折成带字面 \\n 的一行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-dash-"));
+  try {
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "dashboard", "--cwd", dir, "--no-open",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 60000, env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
+    assert.notEqual(result.status, 0, "非 Git 目录被拒绝");
+    const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+    assert.equal(lines.length, 2, `两行报错: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].includes("需要 Git 仓库"), "第一行是拒绝原因");
+    assert.ok(lines[1].includes("--cwd"), "第二行是指路");
+    assert.ok(!result.stderr.includes("\\n"), "分行不是字面的 \\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-319: run 把顶层命令名当 agentId 时的 did-you-mean 提示仍是两行", () => {
+  const result = spawnSync(process.execPath, ["src/cli.js", "run", "status"], {
+    cwd: process.cwd(), encoding: "utf8", timeout: 60000, env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+  });
+  assert.notEqual(result.status, 0);
+  const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+  assert.equal(lines.length, 2, `两行提示: ${JSON.stringify(lines)}`);
+  assert.equal(lines[0], "Provide --prompt or --prompt-file");
+  assert.ok(lines[1].includes("\"status\" is a top-level WAO command"), "第二行是 did-you-mean 提示");
+});
+
+test("TD-319: worktree reclaim 自己打的拒绝明细里，计划带进来的换行显示为转义写法", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-reclaim-"));
+  try {
+    const repo = join(dir, "repo");
+    mkdirSync(repo);
+    execSync("git init -q", { cwd: repo });
+    const realRepo = realpathSync(repo);
+    // 计划里的 runDir 藏一个换行：apply 以 run_dir_mismatch 拒绝时会把它拼进明细。
+    const plan = {
+      version: 1,
+      items: [],
+      repo: { gitCommonDir: join(realRepo, ".git"), mainWorktreePath: realRepo },
+      runDir: `${join(dir, "runs")}\n[FORGED] reclaim-line`,
+    };
+    const bytes = JSON.stringify(plan);
+    const planPath = join(dir, "plan.json");
+    writeFileSync(planPath, bytes, "utf8");
+    const sha = createHash("sha256").update(Buffer.from(bytes, "utf8")).digest("hex");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "worktree", "reclaim", "--apply", planPath, "--expect-sha256", sha,
+      "--run-dir", join(dir, "other-runs"),
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 60000, env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
+    assert.notEqual(result.status, 0, "运行目录不一致被拒绝");
+    const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
+    assert.equal(lines.length, 1, `拒绝应为单行: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].includes("run_dir_mismatch"), "拒绝码在场");
+    assert.ok(lines[0].includes("\\n[FORGED] reclaim-line"), "换行以可见写法在场");
+    assert.ok(!lines.some((l) => l.startsWith("[FORGED]")), "不得出现伪造行");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

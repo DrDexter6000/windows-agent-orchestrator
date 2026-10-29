@@ -295,3 +295,69 @@ test("HDR-2: explicit resume 身份头从钉住值重建（车道已改名仍按
   const invalid = composeRoleContractWithIdentity({ roleContract: "BODY", agentId: "x", identity: { laneId: "../evil", roleId: "r" } });
   assert.equal(invalid, "BODY", "非法片段=头省略（防御位；路径层已具名拒）");
 });
+
+// ── TD-319：有意分行的 CLI 报错经 linesError 构造（message 与 join 逐字一致）──
+
+test("TD-319: 派发选择器拒绝带 lines——message 与 join 逐字一致、冻结、各行结构不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td319-expl-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      probe_seat: { backend: "claude-code", cwd: dir },
+    } }), "utf8");
+    let thrown = null;
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      const { runCommand } = await import("../../src/commands/run.js");
+      // 不带 --registry（车道表照常启用，同 CLI-2 夹具）：多行拒绝的完整形态。
+      await runCommand(["--lane", "no_such_lane_td319", "--role", "auditor", "--prompt", "t"], { registry: registryPath });
+    } catch (e) {
+      thrown = e;
+    } finally {
+      console.log = origLog;
+    }
+    assert.ok(thrown, "未知 lane 被拒");
+    assert.ok(Array.isArray(thrown.lines), "带自有 lines 属性");
+    assert.ok(Object.isFrozen(thrown.lines), "lines 冻结");
+    assert.equal(thrown.message, thrown.lines.join("\n"), ".message 与 join 逐字一致（照旧读 .message 的消费方不变）");
+    assert.equal(thrown.lines[0].split("\n").length, 1, "首行是单行 message");
+    assert.match(thrown.lines[0], /unknown_lane/);
+    assert.ok(thrown.lines.some((l) => l.startsWith("合法 lane: ")), "合法 lane 行在场");
+    assert.ok(thrown.lines.some((l) => l.startsWith("合法 role: ")), "合法 role 行在场");
+    assert.ok(thrown.lines.some((l) => l.startsWith("修正示例: ")), "修正示例行在场");
+  } finally { cleanupDir(dir); }
+});
+
+test("TD-319: consult 未知子命令与 runs wait 未知旗标——linesError 多行（用法页行不被折行转义）", async () => {
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    const { consultCommand, CONSULT_USAGE, CONSULT_USAGE_LINES } = await import("../../src/commands/consult.js");
+    assert.equal(CONSULT_USAGE, CONSULT_USAGE_LINES.join("\n"), "用法页 join 形与行数组同源");
+    let consultErr = null;
+    try {
+      await consultCommand(["frobnicate"], {});
+    } catch (e) { consultErr = e; }
+    assert.ok(consultErr, "未知子命令被拒");
+    assert.ok(Array.isArray(consultErr.lines) && Object.isFrozen(consultErr.lines));
+    assert.equal(consultErr.message, consultErr.lines.join("\n"), "message 与 join 逐字一致");
+    assert.equal(consultErr.lines.length, 1 + CONSULT_USAGE_LINES.length, "报错一行 + 用法页各行（用法页多行保留）");
+    assert.match(consultErr.lines[0], /consult: unknown subcommand "frobnicate"/);
+    assert.ok(consultErr.lines.every((l) => !l.includes("\n")), "每行都是真单行（渲染时不会被二次转义折行）");
+
+    const { runsCommand } = await import("../../src/commands/runs.js");
+    let waitErr = null;
+    try {
+      await runsCommand(["wait", "run_td319_probe", "--bogus-flag", "1"], { runDir: join(tmpdir(), "wao-unused-runs") });
+    } catch (e) { waitErr = e; }
+    assert.ok(waitErr, "未知旗标被拒");
+    assert.ok(Array.isArray(waitErr.lines) && Object.isFrozen(waitErr.lines));
+    assert.equal(waitErr.message, waitErr.lines.join("\n"));
+    assert.equal(waitErr.lines.length, 2, "报错一行 + 用法一行");
+    assert.match(waitErr.lines[0], /unknown flag for runs wait: --bogus-flag/);
+    assert.match(waitErr.lines[1], /用法：wao runs wait <runId>/);
+  } finally {
+    console.log = origLog;
+  }
+});

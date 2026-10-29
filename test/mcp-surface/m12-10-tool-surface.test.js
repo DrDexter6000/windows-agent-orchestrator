@@ -631,9 +631,12 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // 0089（2026-10-17，Owner 批准放宽画像预算）：lanes 每行增 dispatchHold、
 // contextWindowTokens、imageInput，七格改为 optional——SHA 如实翻新。
 // 0090（2026-10-18）：lanes 每行增 family（string ≤32）——SHA 如实翻新。
+// 0088 修订条（2026-10-28，Owner 批准放宽）：lanes 每行的 caveats 上限 4→6
+// （CAVEATS_CAP）——outputSchema 的 maxItems 改一位数，wire 字节不变，SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "b103cb7263a9a02c4036a1149788975487630e500945331e5122febac0b7712d";
-  // （历史值：ccd1adeb0bab708e5fa7cbf85032090e3a5ef72ac52000e1caa304239c60db61
+  "3b3e4fe6fa873d9bcf800218f95af41c132179f0514b58bdce1e1bce1bc6e556";
+  // （历史值：b103cb7263a9a02c4036a1149788975487630e500945331e5122febac0b7712d
+  // 为 0090 family 字段增补后的冻结值；ccd1adeb0bab708e5fa7cbf85032090e3a5ef72ac52000e1caa304239c60db61
   // 为 0089 投影字段增补后的冻结值；38d4110294431e2bcc3220e6a24fd97da48e57ded1d49e0eae244067e101034d
   // 为 0088 caveats 放宽后的冻结值；2a7c060f379efbbaa5547777665a19b14c1be231e3fb3c38bc3b3459676795ac
   // 为 0087 lanes 投影的冻结值；6cb5eba776ec191fb43b658a37c520b6f70ef35cb76623663cc8dca081d3f57f

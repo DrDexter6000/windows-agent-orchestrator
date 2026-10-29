@@ -31,6 +31,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { parseOptions } from "./shared.js";
 import { runDashboardWeb } from "./runs.js";
 import { canonicalizeWorkspacePath } from "../application/workspaceBinding.js";
+import { linesError } from "../safeText.js";
 
 /**
  * M12-8F: strict canonical Git root of a directory (nested directories allowed —
@@ -134,10 +135,10 @@ export async function dashboardCommand(args, config, injections = {}) {
   try {
     workspaceRoot = gitRoot(targetCwd);
   } catch {
-    throw new Error(
-      `wao dashboard 需要 Git 仓库：${targetCwd} 不在任何 Git 仓库内。\n` +
-        `请在一个 Git 项目目录内运行本命令，或用 --cwd 指定一个 Git 项目根目录。`,
-    );
+    throw linesError([
+      `wao dashboard 需要 Git 仓库：${targetCwd} 不在任何 Git 仓库内。`,
+      "请在一个 Git 项目目录内运行本命令，或用 --cwd 指定一个 Git 项目根目录。",
+    ]);
   }
 
   // The production opener takes the spawn seam; a fully injected openUrlFn

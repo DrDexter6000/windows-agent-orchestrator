@@ -52,6 +52,9 @@ import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assert
 import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
 import { renderMcpHostAdvisory } from "../application/mcpWorkspaceActivation.js";
 import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
+// TD-319：报错输出口渲染 + 有意分行的报错构造（派发选择器拒绝 / delivery-spec
+// 内层提示），行内控制字符可见化、行数不变。
+import { linesError, renderErrorText } from "../safeText.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -113,10 +116,12 @@ async function loadDeliverySpec(options) {
   } catch (error) {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
         && typeof parsed.delivery === "object" && parsed.delivery !== null) {
-      throw new Error(
-        `${error.message}\n` +
+      // TD-319：两行有意分行（原拒绝 + INNER 提示）——linesError 构造，
+      // .message 与改前 join("\n") 逐字一致。
+      throw linesError([
+        error.message,
         `(hint: --delivery-spec-file expects the INNER delivery object {"mode": "git_commit_v1", ...} — remove the outer {"delivery": ...} wrapper)`,
-      );
+      ]);
     }
     throw error;
   }
@@ -236,7 +241,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     // 派发经 dispatchRun 可达）。打印原闭集 message（不重写）+ 一行静态指引——
     // 指引是固定安全文本，不拼接任何动态内容。其他错误原样上抛（顶层 catch 不变）。
     if (error && error.name === "SessionReuseWorkspaceRequiredError") {
-      console.error(error.message);
+      console.error(renderErrorText(error));
       console.error("pass --cwd <git-root> for sessionReuse agents");
       process.exitCode = 1;
       return;
@@ -404,10 +409,10 @@ export async function runCommand(args, config) {
   // A-1（friction 2026-08-15 #1）：agentId 位置误填了顶层命令名（如 `run status ...`）
   // → did-you-mean 提示。纯检查、零副作用，先于超时校验/文件读取/manager 构造。
   if (agentId && COMMAND_NAMES.includes(agentId) && !options.prompt && !options.promptFile) {
-    throw new Error(
-      `Provide --prompt or --prompt-file\n` +
+    throw linesError([
+      "Provide --prompt or --prompt-file",
       `(hint: "${agentId}" is a top-level WAO command, not an agentId — did you mean \`${agentId} ...\` without the \`run\` prefix? Full list: \`npm run cli -- help\`)`,
-    );
+    ]);
   }
   // M10-pre closeout-3: validate ALL timeout values at the CLI boundary BEFORE any
   // side effects (loadDeliverySpec, manager.start, dispatchRun). This is the single
@@ -567,7 +572,9 @@ export async function runCommand(args, config) {
         if (choices.lanes?.length) lines.push(`合法 lane: ${choices.lanes.join(", ")}`);
         if (choices.roles?.length) lines.push(`合法 role: ${choices.roles.join(", ")}`);
         lines.push(`修正示例: npm run cli -- run --lane ${choices.lanes?.[0] ?? "<lane>"} --role ${choices.roles?.[0] ?? "<role>"} --prompt "任务文本"`);
-        throw new Error(lines.join("\n"));
+        // TD-319：有意分行的拒绝——linesError 构造（.message 与改前 join("\n")
+        // 逐字一致），输出口按行转义，行内的控制字符不再增殖行数。
+        throw linesError(lines);
       }
     }
     if (resolution.source === "explicit") {

@@ -64,6 +64,8 @@ npm run --silent cli -- wao handoff read lead --format json
 - `wao decision list --format json` → `{decisions: string[]}`（map.md 索引行原样包装，不做 id/title 解析）。
 - `wao handoff read <role> --format json` → 找到时 `{found:true, role, body}`；未找到时 `{found:false}`。
 
+报错文本的控制字符规则（与上面 registry 解析报错同一底线）：CLI 报错（顶层 catch、sessionReuse 拒绝、`npm run smoke` 的顶层 catch 与 `worktree reclaim` 自己打的报错）和 MCP 错误文本（各工具 handler 返回的 `isError` 结果与 handler 抛错）里的控制字符（C0/DEL/C1 与 U+2028/U+2029）一律显示为转义写法——配置值里混进的换行不能在报错里伪造一行。有意分行的报错（派发选择器拒绝、delivery-spec 提示、把顶层命令名当 agentId 的提示、`runs wait`/`consult` 的"报错+用法"、collect 取回失败的指路行、dashboard 的非 Git 目录拒绝）逐行转义后再换行，行数不变。成功输出的 JSON 不加这一层（`JSON.stringify` 自带转义，原值仍可机读）。MCP SDK 自己产生的错误（未知工具名、入参或出参校验失败）不经这一层。
+
 LLM 编排器或外部脚本的最短驱动闭环：
 
 1. `spawn` 启动 run，拿 runId

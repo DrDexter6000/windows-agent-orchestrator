@@ -48,7 +48,7 @@
       "_comment_serveWorkspaceDir": "可选 serveWorkspaceDir（绝对路径，稳定目录，不在任何 git 工作树内）：worker serve 的工作目录。声明后，派发时发现 serve 没在跑（回环地址上连接被拒）WAO 会以它为工作目录把 serve 拉起来并等它应答；前提是主目录里已有 server.token（首次启动用 scripts/kimi-serve.ps1）。不声明则 serve 须事先手动拉起（见 docs/usage/lanes.md「kimi 车道的 worker serve」）。",
       "_comment_kimiHome": "可选 kimiHome（绝对路径）：worker serve 的私有 KIMI_CODE_HOME。声明后 token 取自 <kimiHome>/server.token、不读 tokenEnv；不装插件的私有主目录下 serve 不拉助手进程（见 docs/usage/lanes.md「kimi 车道的 worker serve」）。",
       "model": {
-        "id": "kimi-code/k3-256k"
+        "id": "kimi-code/k3.1-pro"
       }
     },
     "sol": {
@@ -149,9 +149,9 @@
       },
       {
         "agentId": "kimi",
-        "label": "kimi-code/k3-256k via kimi-web（模板行）",
+        "label": "kimi-code/k3.1-pro via kimi-web（模板行）",
         "profile": "delta",
-        "modelId": "kimi-code/k3-256k",
+        "modelId": "kimi-code/k3.1-pro",
         "drills": [
           "sentinel",
           "scorecard",

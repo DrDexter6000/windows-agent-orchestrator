@@ -28,6 +28,13 @@ import {
   RATING_DIMENSIONS,
   DIMENSION_LABELS,
   PROJECTION_ROWS_CAP,
+  CAVEATS_CAP,
+  CAVEAT_MAX_CHARS,
+  COST_MAX_CHARS,
+  PROJECTED_NOTE_MAX_CHARS,
+  REVIEW_REASON_MAX_CHARS,
+  REVIEW_REASONS_CAP,
+  SCALE_MAX_CHARS,
 } from "../../src/application/laneProfile.js";
 import { aggregateLeadPreflight } from "../../src/application/leadPreflight.js";
 
@@ -189,13 +196,16 @@ test("validateTraitEntry：长度界——note/evidence/cost/caveats/reviewPendi
   assert.equal(validateTraitEntry("x", entryWithRating({ evidence: "字".repeat(200) })).ok, true);
   assert.equal(validateTraitEntry("x", entryWithRating({ evidence: "字".repeat(201) })).ok, false);
   assert.equal(validateTraitEntry("x", validEntry({ cost: null })).ok, true, "cost null 合法");
-  assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(200) })).ok, true);
-  assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(201) })).ok, false);
+  assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(COST_MAX_CHARS) })).ok, true);
+  assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(COST_MAX_CHARS + 1) })).ok, false);
   assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "待复核" })).ok, true);
-  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "字".repeat(161) })).ok, false);
-  assert.equal(validateTraitEntry("x", validEntry({ caveats: ["a", "b", "c", "d"] })).ok, true);
-  assert.equal(validateTraitEntry("x", validEntry({ caveats: ["a", "b", "c", "d", "e"] })).ok, false, "caveats 至多 4 条");
-  assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(121)] })).ok, false, "caveat 1–120");
+  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "字".repeat(REVIEW_REASON_MAX_CHARS) })).ok, true);
+  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "字".repeat(REVIEW_REASON_MAX_CHARS + 1) })).ok, false);
+  const caveatsOf = (n) => Array.from({ length: n }, (_, i) => `c${i}`);
+  assert.equal(validateTraitEntry("x", validEntry({ caveats: caveatsOf(CAVEATS_CAP) })).ok, true);
+  assert.equal(validateTraitEntry("x", validEntry({ caveats: caveatsOf(CAVEATS_CAP + 1) })).ok, false, "caveats 至多 CAVEATS_CAP 条");
+  assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS)] })).ok, true);
+  assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS + 1)] })).ok, false, "单条注意事项超长");
   assert.equal(validateTraitEntry("x", validEntry({ caveats: [] })).ok, true);
 });
 
@@ -403,8 +413,8 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   const cell = proj.rows[0].ratings.research;
   assert.deepEqual(Object.keys(cell).sort(), ["basis", "n", "note", "stars"], "恰好四键");
   assert.equal(cell.n, 5);
-  assert.equal(cell.note.length, 80, "截断后总长 80");
-  assert.ok(cell.note.endsWith("…") && cell.note.startsWith("字".repeat(79)), "79 字符加 …");
+  assert.equal(cell.note.length, PROJECTED_NOTE_MAX_CHARS, "截断后总长等于投影上限");
+  assert.ok(cell.note.endsWith("…") && cell.note.startsWith("字".repeat(PROJECTED_NOTE_MAX_CHARS - 1)), "上限减一个字符再加 …");
   assert.ok(!JSON.stringify(proj.rows[0]).includes("提交 abc1234"), "evidence 不进投影");
   // 行键闭集与维度中文名。
   assert.deepEqual(
@@ -611,4 +621,11 @@ test("MCP 面：只有 lead_preflight 的出参 schema 含画像投影键", asyn
       assert.deepEqual(offenders, ["lead_preflight"], "画像投影键只出现在 lead_preflight 出参");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
+});
+
+test("画像字段上限只在 laneProfile.js 定义一次；改值要有意改这里（0088 修订条）", () => {
+  assert.deepEqual(
+    { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP },
+    { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16 },
+  );
 });

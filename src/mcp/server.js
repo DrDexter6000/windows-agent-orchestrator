@@ -299,11 +299,26 @@ import {
   // 0087: lane-profile projection SSOT caps/closed sets (home:
   // src/application/laneProfile.js; re-exported by the aggregator so this
   // module never imports laneProfile directly — isolation guard edge).
+  CAVEATS_CAP,
+  CAVEAT_MAX_CHARS,
+  COST_MAX_CHARS,
+  PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   RATING_BASES,
   RATINGS_STATES,
+  REVIEW_REASON_MAX_CHARS,
+  REVIEW_REASONS_CAP,
+  SCALE_MAX_CHARS,
 } from "../application/leadPreflight.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
+// TD-319：MCP 错误文本输出口统一渲染。SDK 对 isError/抛错只透传 text/message，
+// 配置来源值里的控制字符原样上 wire；register 的包装层（见 withToolErrorTextEscape）
+// 把每个 text 项经 renderErrorText 收敛为转义后的字符串（有意分行的文本用行数组）。
+import { renderErrorText } from "../safeText.js";
+// UrlElicitationRequired 是 SDK 约定的 elicitation 通道错误（1.29.0 的
+// setToolHandler 对 McpError+该 code 原样上抛、不裹 CallToolResult）——包装层
+// 照抄这一条例外，其余抛错收敛为转义后的 isError 结果。
+import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -809,8 +824,11 @@ const DELIVERY_INPUT = z.object({
  * 合法全集[≤32 项截断指向 registry_list] + 修正例）。M11-8B 纪律：isError 固定
  * 文本（不 structuredContent——SDK 对 isError 出参的 outputSchema 校验未验证，
  * R3 auditor_claude 裁定保守形态）。
+ * TD-319：返回**行数组**（不再 join）——有意分行的错误文本；register 的包装层
+ * 逐行转义后用 "\n" 连接，wire 字节与 join 时代对干净文本一致（导出供测试钉
+ * 行数组与 join 结果逐字一致）。
  */
-function dispatchSelectorErrorText(resolution) {
+export function dispatchSelectorErrorText(resolution) {
   const cap = (list) => (list.length > 32
     ? `${list.slice(0, 32).join(", ")} …（截断，全 wao lanes 详见 registry_list）`
     : list.join(", "));
@@ -823,7 +841,36 @@ function dispatchSelectorErrorText(resolution) {
   const exLane = (c.lanes ?? [])[0] ?? "<lane>";
   const exRole = (c.roles ?? [])[0] ?? "<role>";
   parts.push(`fix: run_dispatch({ "lane": "${exLane}", "role": "${exRole}", "prompt": "任务文本" }) 或 run_dispatch({ "agentId": "<别名>", "prompt": "任务文本" })`);
-  return parts.join("\n");
+  return parts;
+}
+
+/**
+ * TD-319：register 包装层——每个工具 handler 的错误文本输出口（导出仅为测试
+ * 直接测包装逻辑；生产入口是 createWaoMcpServer 里的 register）。
+ *   - handler 正常返回且 isError === true：content 里每个 type:"text" 项的
+ *     text（字符串或行数组）经 renderErrorText 变成转义后的字符串；其余项与
+ *     非错误结果原样返回（成功输出走 JSON.stringify，本就安全，不加这层）。
+ *   - handler 抛错：SDK 1.29.0 会把 error.message 原样放进错误文本（dist/esm/
+ *     server/mcp.js createToolError）；这里自己接住，返回与 SDK 同形的
+ *     { content:[{type:"text",text}], isError:true }，text 经转义。唯一例外
+ *     照 SDK：McpError 且 code === UrlElicitationRequired 时原样上抛。
+ */
+export async function withToolErrorTextEscape(handler, args, extra) {
+  try {
+    const result = await handler(args, extra);
+    if (!result || result.isError !== true || !Array.isArray(result.content)) return result;
+    return {
+      ...result,
+      content: result.content.map((item) => (
+        item && item.type === "text"
+          ? { ...item, text: renderErrorText(item.text) }
+          : item
+      )),
+    };
+  } catch (error) {
+    if (error instanceof McpError && error.code === ErrorCode.UrlElicitationRequired) throw error;
+    return { content: [{ type: "text", text: renderErrorText(error) }], isError: true };
+  }
 }
 
 const RUN_DISPATCH_INPUT = z.object({
@@ -2808,18 +2855,18 @@ const LEAD_PREFLIGHT_INPUT = z.object({
 // nulled with an observation, NEVER degrading the whole preflight) and as the
 // `lanes` member of LEAD_PREFLIGHT_OUTPUT. The seven dimension keys are optional
 // object members (never array indices): a rated dimension carries its cell, an
-// unrated one is absent (0089). Bounds mirror the application-layer truncation
-// (src/application/laneProfile.js) so a projection that passed the app layer
-// always passes here. Derived from the laneProfile SSOT enums/caps — no second
-// hand-maintained list can drift.
+// unrated one is absent (0089). The profile's own bounds are the laneProfile
+// constants (re-exported by the aggregator), so a projection that passed the
+// app layer always passes here and the two layers cannot drift apart; id,
+// family and label bounds are generous wire limits on values defined elsewhere.
 const LANE_RATING_CELL_OUTPUT = z.object({
   stars: z.number().int().min(1).max(5),
   basis: z.enum([...RATING_BASES]),
   n: z.number().int().positive().nullable(),
-  note: z.string().max(80).nullable(),
+  note: z.string().max(PROJECTED_NOTE_MAX_CHARS).nullable(),
 }).strict();
 const LANES_PROJECTION_OUTPUT = z.object({
-  scale: z.string().min(1).max(240),
+  scale: z.string().min(1).max(SCALE_MAX_CHARS),
   dimensionLabels: z.object({
     research: z.string().max(32),
     code: z.string().max(32),
@@ -2842,9 +2889,9 @@ const LANES_PROJECTION_OUTPUT = z.object({
       visual: LANE_RATING_CELL_OUTPUT.optional(),
     }).strict(),
     ratingsState: z.enum([...RATINGS_STATES]),
-    reviewReasons: z.array(z.string().max(160)).max(4),
-    caveats: z.array(z.string().max(120)).max(4),
-    cost: z.string().max(200).nullable(),
+    reviewReasons: z.array(z.string().max(REVIEW_REASON_MAX_CHARS)).max(REVIEW_REASONS_CAP),
+    caveats: z.array(z.string().max(CAVEAT_MAX_CHARS)).max(CAVEATS_CAP),
+    cost: z.string().max(COST_MAX_CHARS).nullable(),
     dispatchHold: z.string().max(DISPATCH_HOLD_MAX_CHARS).nullable(),
     contextWindowTokens: z.number().int().positive(),
     imageInput: z.boolean(),
@@ -4010,9 +4057,11 @@ export function createWaoMcpServer({
   // registration order) — if the two drift, server construction fails loudly
   // rather than emitting a tool list that disagrees with the SSOT.
   const registered = [];
+  // TD-319：所有 handler 经 withToolErrorTextEscape 包装——isError 文本与抛错
+  // message 统一转义后再上 wire（有意分行的错误文本以行数组给出，逐行转义）。
   const register = (name, metadata, handler) => {
     registered.push(name);
-    mcp.registerTool(name, metadata, handler);
+    mcp.registerTool(name, metadata, (args, extra) => withToolErrorTextEscape(handler, args, extra));
   };
 
   /**

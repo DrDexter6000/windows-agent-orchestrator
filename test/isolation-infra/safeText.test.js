@@ -16,11 +16,14 @@
 //（不再出现"第 0 列"）。
 // 转义面：\n \r \t 名字写法；ESC/DEL/C1/U+2028/U+2029 的 \uXXXX 写法；普通
 // 中英文原样；伪造行载荷整体可见化。
+// TD-319 输出口面：linesError（保留错误类/code/message，lines 冻结副本）与
+// renderErrorText（带 lines 的错误逐行转义、普通错误整体转义、字符串数组、
+// 非字符串值、U+2028/U+2029）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { safeJsonParse, escapeControlChars } from "../../src/safeText.js";
+import { safeJsonParse, escapeControlChars, errorLines, linesError, renderErrorText } from "../../src/safeText.js";
 
 const SENTINEL = "TD318_LEAK_SENTINEL";
 
@@ -291,4 +294,104 @@ test("escapeControlChars: 伪造行载荷整体可见化——输出不再含真
   const escaped = escapeControlChars("evil\n[FAIL] forged");
   assert.ok(!escaped.includes("\n"), "输出不得再含真实换行");
   assert.equal(escaped, "evil\\n[FAIL] forged");
+});
+
+// —— linesError / renderErrorText（TD-319 输出口） ——
+
+test("linesError: message === lines.join，lines 是冻结副本，makeError 保留错误类与 code", () => {
+  class RefusalError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "RefusalError";
+      this.code = "E_TD319";
+    }
+  }
+  const err = linesError(["第一行：拒绝原因", "第二行：修正指引"], (message) => new RefusalError(message));
+  assert.ok(err instanceof RefusalError, "调用方的错误类保留");
+  assert.equal(err.name, "RefusalError");
+  assert.equal(err.code, "E_TD319", "调用方的 code 保留");
+  assert.equal(err.message, "第一行：拒绝原因\n第二行：修正指引", "message 与 join 逐字一致（照旧读 .message 的代码不受影响）");
+  assert.deepEqual(err.lines, ["第一行：拒绝原因", "第二行：修正指引"]);
+  assert.ok(Object.isFrozen(err.lines), "lines 冻结");
+  // 入参数组被复制：构造后改原数组不影响 error.lines
+  const src = ["a", "b"];
+  const copied = linesError(src);
+  src[0] = "mutated";
+  assert.equal(copied.lines[0], "a", "lines 是副本，不是原数组引用");
+  assert.equal(copied.message, "a\nb", "缺省 makeError 用 Error");
+});
+
+test("renderErrorText: 带 lines 的错误——行内注入换行仍只输出原定行数", () => {
+  const err = linesError(["prefix evil\n[FORGED] suffix", "second line"]);
+  const text = renderErrorText(err);
+  const rows = text.split("\n");
+  assert.equal(rows.length, 2, `行数不变（注入的换行成为可见写法，不增殖行）: ${JSON.stringify(text)}`);
+  assert.equal(rows[0], "prefix evil\\n[FORGED] suffix");
+  assert.equal(rows[1], "second line");
+});
+
+test("renderErrorText: 普通错误的换行变成可见写法（不伪造行）", () => {
+  const err = new Error("serve auth env is absent: set EVIL\n[FAIL] forged-name (value is never echoed)");
+  const text = renderErrorText(err);
+  assert.ok(!text.includes("\n"), "输出不得含真实换行");
+  assert.equal(text, "serve auth env is absent: set EVIL\\n[FAIL] forged-name (value is never echoed)");
+});
+
+test("renderErrorText: 字符串数组逐行转义后连接（MCP isError 行数组形态）", () => {
+  assert.equal(renderErrorText(["dispatch refused: unknown_lane. 收到 lane=\"x\"", "known lanes (2): a, b"]), "dispatch refused: unknown_lane. 收到 lane=\"x\"\nknown lanes (2): a, b");
+  assert.equal(renderErrorText(["a\nb", "c"]), "a\\nb\nc", "行内换行转义，行间换行保留");
+});
+
+test("renderErrorText: 字符串整体转义——其中的换行显示为可见写法", () => {
+  assert.equal(renderErrorText("x\ny"), "x\\ny");
+  assert.equal(renderErrorText("plain"), "plain");
+});
+
+test("renderErrorText: 非字符串值经 String() 归一后转义", () => {
+  assert.equal(renderErrorText(42), "42");
+  assert.equal(renderErrorText(null), "null");
+  assert.equal(renderErrorText(undefined), "undefined");
+});
+
+test("renderErrorText: U+2028/U+2029 在行数组与字符串分支里都转义", () => {
+  const err = linesError(["a", "b\u2028c"]);
+  const text = renderErrorText(err);
+  assert.ok(!text.includes("\u2028"), "带 lines 错误的行内行分隔符不再原样输出");
+  assert.equal(text, "a\nb\\u2028c");
+  assert.equal(renderErrorText(["x\u2028y"]), "x\\u2028y", "字符串数组的行内行分隔符转义");
+  assert.equal(renderErrorText("p\u2029q"), "p\\u2029q", "字符串整体转义");
+});
+
+test("errorLines: 只认自有属性 lines；继承来的 lines 不算，回落到 message 一行", () => {
+  const own = linesError(["a", "b"]);
+  assert.deepEqual(errorLines(own), ["a", "b"]);
+  const proto = { lines: ["forged-1", "forged-2"] };
+  const inherited = Object.create(Object.assign(Object.create(Error.prototype), proto));
+  inherited.message = "real message";
+  assert.ok(inherited instanceof Error);
+  assert.deepEqual(errorLines(inherited), ["real message"], "原型上的 lines 不采信");
+  assert.equal(renderErrorText(inherited), "real message", "渲染同样只认自有属性");
+  assert.deepEqual(errorLines(new Error("x\ny")), ["x\ny"], "普通错误的 message 原样算一行（换行由渲染转义）");
+  assert.deepEqual(errorLines("plain"), ["plain"], "非 Error 取 String(value)");
+  const copy = errorLines(own);
+  copy.push("extra");
+  assert.deepEqual(own.lines, ["a", "b"], "返回副本，不改原错误的行");
+});
+
+test("renderErrorText / escapeControlChars: String() 会抛的值落成固定占位，不抛错", () => {
+  const bare = Object.create(null);
+  const hostile = { toString() { throw new Error("boom"); } };
+  assert.equal(renderErrorText(bare), "[unprintable value]");
+  assert.equal(renderErrorText(hostile), "[unprintable value]");
+  assert.equal(escapeControlChars(bare), "[unprintable value]");
+  const err = new Error("x");
+  err.message = bare;
+  assert.equal(renderErrorText(err), "[unprintable value]", "message 本身不可打印也不抛");
+});
+
+test("renderErrorText: 读 message 的 getter 自己抛错时也只落成固定占位", () => {
+  const err = new Error("x");
+  Object.defineProperty(err, "message", { get() { throw new Error("boom"); } });
+  assert.equal(renderErrorText(err), "[unprintable value]");
+  assert.deepEqual(errorLines(err), ["[unprintable value]"]);
 });

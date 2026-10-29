@@ -36,6 +36,9 @@ import { CursorRejectedError } from "../application/runActivityProjection.js";
 // M11-4: shared safe projection — same module MCP uses, so CLI continuation
 // output is deep-equal to MCP structuredContent.
 import { projectCollectResult } from "../application/runCollectProjection.js";
+// TD-319：collect 取回失败的"原报错 + 指路"两行有意分行——linesError 构造
+//（原错误带 lines 就沿用它的行，否则 message 算一行；.message 与改前逐字一致）。
+import { errorLines, linesError } from "../safeText.js";
 
 // M9-3A: describeActivity/summarizeToolInput/truncate were the local copy of the
 // status activity algorithm. They have been migrated to the shared application
@@ -305,7 +308,7 @@ export async function collectCommand(args, config) {
       });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
-      throw new Error(`${error.message}\n  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --format json`);
+      throw linesError([...errorLines(error), `  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --format json`]);
     }
     return;
   }
@@ -416,8 +419,8 @@ export async function collectCommand(args, config) {
   try {
     raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
   } catch (error) {
-    throw new Error(`${error.message}
-  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --run-dir ${runDir} --format json`);
+    // TD-319：同 raw 分支——原错误带 lines 沿用其行，否则 message 算一行，加指路行。
+    throw linesError([...errorLines(error), `  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --run-dir ${runDir} --format json`]);
   }
   // F5: 投影抛出的 CursorRejectedError（过期/跨 run/被改——不透子类型）折叠为
   // 专属恢复文案；其余投影错误原样上抛。折叠发生在 commitAppend 之前——被拒

@@ -19,6 +19,7 @@
 | worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
 | `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-run) |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
+| `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
 | zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
 | 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.15](#715-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
@@ -27,7 +28,6 @@
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
 | 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
 | runs 状态池有大量 running 噪音 | [§4 运行数据运维](#4-运行数据运维) |
-| run 完成了但 metrics 全 0 | [§5 证据完整性](#5-证据完整性) |
 | worker 完成判定不可靠（过早 completed 或该完成没完成） | [§6 完成判定](#6-完成判定) |
 | claude-code wrapper 401 / worker 连不上 provider | [§7.1](#71-claude-code-wrapper-401worker-连不上-provider) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
@@ -51,7 +51,7 @@
 >
 > 跨切规则：任何 readiness 结果只要带 `candidateInventory`/`candidateKind`，先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage` 结算），不按 readiness 标签直接人工核或重读。
 >
-> 打包失败的 `run.delivery_failed` / `run.error` 事件在能从错误对象的结构化属性（不读消息原文）分出环境类别时另携 `errorClass`（闭集 `git_index_locked`/`file_locked`/`permission_denied`/`disk_full`/`git_spawn_failed`/`git_timeout`/`git_command_failed`，SSOT=`src/deliveryErrorClass.js`；分不出时键缺席）——`run_diagnose` 把每个闭集值转成一条固定文案事实，例如 `git_index_locked`＝打包时另有 git 进程仍占着工作树索引锁，其退出后重打包可能成功。
+> 打包失败的 `run.delivery_failed` / `run.error` 事件在能从错误对象的结构化属性（不读消息原文）分出环境类别时另携 `errorClass`（闭集 `git_index_locked`/`file_locked`/`permission_denied`/`disk_full`/`git_spawn_failed`/`git_timeout`/`git_command_failed`，SSOT=`src/deliveryErrorClass.js`；分不出时键缺席）——`run_diagnose` 把每个闭集值转成一条固定文案事实，例如 `git_index_locked`＝打包时工作树的索引锁文件在场，可能仍有 git 进程在写，也可能是退出的进程留下的残锁；这种失败没有重打包候选，处置见 [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场)。
 
 | 观察到的失败形状 | 正确动作 |
 |---|---|
@@ -281,9 +281,9 @@ worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktre
 
 ```bash
 # 1. 定位 worktree（.wao-worktrees/<runId>；或读转录 delivery 事件的 worktreePath（经链定位）
-# 2. 导出补丁（含 untracked：先 add -N 再 diff）
+# 2. 导出补丁（含 untracked：先 add -N；对 HEAD 比，打包已暂存的改动也在内）
 git -C <worktreeRoot> add -A -N
-git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
+git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 # 3. Lead 评估补丁后按采纳协议处理（如合入：commit 带 WAO-Adopted-From: <runId> trailer——见 docs/usage/delivery.md 验证失败采纳协议）
 # 4. 清理：npm run cli -- worktree remove <worktreeRoot>（内部即强制清理并重试）
 ```
@@ -304,14 +304,11 @@ git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
   心跳+转录残缺=同形态）再查转录 mtime 与派发时刻差。
 - **边界**：观察登记；不引入 broker/看门狗（会审裁定）。
 
-## 5. 证据完整性
+### 4.6 打包以 `git_index_locked` 失败（工作树索引锁在场）
 
-### 5.1 metrics 提取（已修复）
-
-- **症状**：run 成功 completed，但 `run.metrics` 记 `tokens:{input:0,output:0}`，实际 provider 用了几万 token
-- **根因**：message.info.tokens 在流式传输期间是 0（serve 在 message 完成后才回填）——读到的是流式占位值
-- **现状**：metrics 从 **session endpoint**（`GET /session/{id}`）提取累计 tokens——serve 维护的累计值，比 message.info.tokens 可靠；run 进行中也周期性提取，tokenBudget 闸门不必等完成即可触发
-- **验证**：transcript 的 metrics 事件与 `runs metrics` 应显示非零累计 token
+- **症状**：delivery run 终态 failed，`run_delivery` 只给 `deliveryFailure.code:"unknown"`，`run_diagnose` 带一条 `git_index_locked` 事实：打包时 run 工作树的 `index.lock` 在场。这种失败没有重打包候选，等多久也不会变成可重打包。
+- **分辨**：锁路径用 `git -C <run 工作树> rev-parse --git-path index.lock` 取。机器上一个 git 进程都没有（`Get-CimInstance Win32_Process -Filter "Name='git.exe'"` 为空）时，锁没有持有者，是残锁，git 不会自己清。还有 git 进程时判不了：git 可以继承当前目录操作这棵树，命令行里未必带路径；锁是 0 字节、修改时间早于打包也只是线索，活进程持锁时同样如此。等这些进程全部退出后锁仍在，才算残锁；开着 fsmonitor 或 IDE 一直轮询 git 时这一条可能始终不成立，那就按判不清处理。
+- **出口**：判定为残锁后由 Lead 手工删锁；判不清就不删（WAO 不替你删：删错了，删掉的是活进程正在写的索引）。锁处理完再按 §4.4 抢救仍在 run 工作树里、没有提交的改动（配方里的 `git add -N` 要写索引；补丁要对 HEAD 导，打包可能已暂存了一部分），核对补丁完整后再用 `wao runs lineage-close --run-id <runId> --reason-file <FILE> --apply` 释放工作树；不值得抢救就直接关闭或重新派发。
 
 ---
 
@@ -358,18 +355,6 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   （parser `done(completed)` 与 exit-0 兜底两条路径同时生效）。有效的 tool-only /
   command-only / file-written 完成仍判 `none`。
 
-### 6.4 worker 失败时主控收不到证据（已修复）
-
-- **现状**：CLI 的 `runAndWait(run, options)` 包装 `waitForCompletion`，捕获 failed 抛错，
-  转为结构化结果：
-  ```json
-  {"runId":"run_xxx","completed":false,"failed":true,"timedOut":false,"error":"provider error [401]: 身份验证失败","transcript":"<path>","diagnosis":{...}}
-  ```
-  error 超长会截断（500 字符）并指向 transcript；`run`/`spawn --wait`/并行 wait 三个路径
-  都已接入。主控能看到 runId（定位 run）+ error（决定是否接手）。
-- **主控接手决策**：收到 `failed:true` 后：读转录（经解析链定位）看详细证据 → 判断失败
-  原因（可恢复/不可恢复）→ 决定重试、换 worker、或自己接手。
-
 ### 6.5 snapshot-stable 伪完成（codex 实测暴露，已修复）
 
 - **判据**：snapshot-stable 的 completed 判定要求"快照稳定 + **至少一条 assistant message
@@ -386,15 +371,6 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **现状**：两个完成模式都支持 `silentTimeout`——超过该时长仍无 assistant message 无
   error → `done(failed)`（"silent timeout"）。默认不启用；启用需在 streamEvents 调用时传
   silentTimeout（ms）
-
-### 6.7 first-stable metrics 偏小（codex 实测暴露，已修复）
-
-- **症状**：first-stable 的 CLI metrics `input:408`，但 serve session 实际 `input:29706`
-- **根因**：按首条 message 的 `info.tokens` 瞬时值提取，不是累计值——多轮工具调用的真实
-  消耗远大于首条
-- **现状**：first-stable 完成后先 abort serve session，再重试读 session endpoint、等累计
-  usage 稳定（serve 在 abort 后可能延迟一小段时间才回填，单次读会出现假 0），取累计
-  metrics；读不到回退 message.info.tokens
 
 ### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"
 

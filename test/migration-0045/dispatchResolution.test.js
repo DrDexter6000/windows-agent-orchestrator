@@ -84,7 +84,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
     { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: {} },
     { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: {} },
-    { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: {} },
+    { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3.1-pro", effort: null, aliases: {} },
     { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: {} },
     { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: {} },
   ]);

@@ -59,6 +59,9 @@ import { feedbackCommand } from "./commands/feedback.js";
 import { HELP_TEXT } from "./cliHelp.js";
 // v0.2.0（决定 0038）：CLI 版本常量，单一来源 package.json（同 MCP SERVER_VERSION）。
 import { WAO_VERSION } from "./version.js";
+// TD-319：CLI 报错输出口统一渲染——配置值里混进的控制字符显示为转义写法，
+// 不能在报错里伪造一行（有意分行的报错由 linesError 的 lines 逐行转义）。
+import { renderErrorText } from "./safeText.js";
 // TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/resolveTargetCwd
 // 抽到 commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。
 // cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
@@ -366,6 +369,6 @@ function printHelp() {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-  console.error(error.message);
+  console.error(renderErrorText(error));
   process.exitCode = 1;
 });

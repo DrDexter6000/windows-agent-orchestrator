@@ -18,6 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { CAVEATS_CAP, CAVEAT_MAX_CHARS, COST_MAX_CHARS, REVIEW_REASON_MAX_CHARS } from "../../src/application/laneProfile.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const read = (rel) => readFileSync(join(ROOT, rel), "utf8");
@@ -100,10 +101,10 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
     } else {
       assert.equal(t.ratedAgainst, null, `${id} 全未评时 ratedAgainst 必须显式为 null`);
     }
-    assert.ok(t.reviewPending === undefined || isStr(t.reviewPending, 1, 160), `${id}.reviewPending 1–160`);
-    assert.ok(t.cost === null || t.cost === undefined || isStr(t.cost, 1, 200), `${id}.cost 1–200 或 null`);
-    assert.ok(Array.isArray(t.caveats) && t.caveats.length <= 4
-      && t.caveats.every((c) => isStr(c, 1, 120)), `${id}.caveats 0–4 条、各 1–120`);
+    assert.ok(t.reviewPending === undefined || isStr(t.reviewPending, 1, REVIEW_REASON_MAX_CHARS), `${id}.reviewPending 1–${REVIEW_REASON_MAX_CHARS}`);
+    assert.ok(t.cost === null || t.cost === undefined || isStr(t.cost, 1, COST_MAX_CHARS), `${id}.cost 1–${COST_MAX_CHARS} 或 null`);
+    assert.ok(Array.isArray(t.caveats) && t.caveats.length <= CAVEATS_CAP
+      && t.caveats.every((c) => isStr(c, 1, CAVEAT_MAX_CHARS)), `${id}.caveats 0–${CAVEATS_CAP} 条、各 1–${CAVEAT_MAX_CHARS}`);
     // v1 沿用规则。
     assert.ok(Number.isInteger(t.contextWindow?.tokens) && t.contextWindow?.tokens > 0, `${id}.contextWindow.tokens 正整数`);
     assert.ok(SOURCE_TOKENS.some((k) => (t.contextWindow?.source ?? "").includes(k)), `${id}.contextWindow.source 须含来源标注`);

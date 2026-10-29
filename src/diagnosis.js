@@ -136,7 +136,7 @@ const CATEGORY_CODE_SETS = Object.freeze({
 // malformed 值查不到 → 不产出附加事实；文案固定，不回显路径或消息原文，
 // 不自动重试、不替 Lead 决定。
 export const DELIVERY_ERROR_CLASS_FACTS = Object.freeze({
-  git_index_locked: "a git process still held the worktree index when packaging ran; repackaging after it exits may succeed",
+  git_index_locked: "the worktree's git index lock file (index.lock) was present when packaging ran: a git process was still writing the index, or one that exited left the lock behind; this failure has no repackage candidate (docs/troubleshooting.md §4.6)",
   file_locked: "a worktree file was locked or unmodifiable (EBUSY/EPERM) while packaging ran",
   permission_denied: "packaging was denied filesystem access (EACCES)",
   disk_full: "packaging ran out of disk space (ENOSPC)",

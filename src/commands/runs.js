@@ -37,6 +37,9 @@ import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { planProjectsMigration, applyProjectsMigration, verifyProjectsMigration } from "../application/runsMigrateProjects.js";
+// TD-319：`runs wait` 的"报错 + 用法"两行有意分行——linesError 构造（.message
+// 与改前逐字一致），CLI 输出口按行转义。
+import { linesError } from "../safeText.js";
 // TD-250（A1b，决定 0056）：验收后线系上游会话卫生（kimi-web 能力位门控）。
 import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import { productionProjectIo } from "../projectIdentity.js";
@@ -317,12 +320,12 @@ async function runsWaitCommand(args, config, deps = {}) {
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a.startsWith("--")) {
-      if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw new Error(`unknown flag for runs wait: ${a}\n${RUNS_WAIT_USAGE}`);
-      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times\n${RUNS_WAIT_USAGE}`);
+      if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw linesError([`unknown flag for runs wait: ${a}`, RUNS_WAIT_USAGE]);
+      if (seenFlags.has(a)) throw linesError([`${a} specified multiple times`, RUNS_WAIT_USAGE]);
       seenFlags.add(a);
       const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value\n${RUNS_WAIT_USAGE}`);
-      if (v.trim().length === 0) throw new Error(`${a} must be non-empty\n${RUNS_WAIT_USAGE}`);
+      if (v === undefined || v.startsWith("--")) throw linesError([`${a} requires a value`, RUNS_WAIT_USAGE]);
+      if (v.trim().length === 0) throw linesError([`${a} must be non-empty`, RUNS_WAIT_USAGE]);
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       flags[key] = v;
       i += 1;
@@ -331,12 +334,11 @@ async function runsWaitCommand(args, config, deps = {}) {
     }
   }
   if (positionals.length !== 1) {
-    throw new Error(`runs wait requires exactly one <runId>\n${RUNS_WAIT_USAGE}`);
+    throw linesError([`runs wait requires exactly one <runId>`, RUNS_WAIT_USAGE]);
   }
   const runId = positionals[0];
   if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {
-    throw new Error(`--format only supports json|text
-${RUNS_WAIT_USAGE}`);
+    throw linesError([`--format only supports json|text`, RUNS_WAIT_USAGE]);
   }
   const asJson = flags.format === "json";
   const runDir = resolve(flags.runDir ?? config.runDir);
@@ -351,8 +353,7 @@ ${RUNS_WAIT_USAGE}`);
   let waitMs = RUN_WAIT_DEFAULT_MS;
   if (flags.waitMs !== undefined) {
     waitMs = Number(flags.waitMs);
-    if (Number.isNaN(waitMs)) throw new Error(`--wait-ms must be a number
-${RUNS_WAIT_USAGE}`);
+    if (Number.isNaN(waitMs)) throw linesError([`--wait-ms must be a number`, RUNS_WAIT_USAGE]);
   }
 
   const service = deps.runWaitFn ?? runWait;

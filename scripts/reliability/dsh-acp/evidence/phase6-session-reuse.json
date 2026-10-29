@@ -1,13 +1,13 @@
 {
   "drill": "ADR-0031 §3.6 phase6 session-reuse association (real dispatch)",
-  "date": "2026-10-17T17:11:52.074Z",
+  "date": "2026-10-28T22:49:10.247Z",
   "node": "v22.23.1",
-  "dsh": "0.2.1-rc.2",
+  "dsh": "0.2.1-rc.4",
   "runtimeIdentity": {
     "distribution": "dsh",
-    "version": "0.2.1-rc.2",
+    "version": "0.2.1-rc.4",
     "binaryPath": "C:\\Users\\17865\\AppData\\Roaming\\npm\\dsh.cmd",
-    "fingerprint": "v1-4e39dc2ef88cb74b",
+    "fingerprint": "v1-cf72c3a78588cfb3",
     "verified": true,
     "reason": null
   },
@@ -18,17 +18,17 @@
     "sessionReuse": "lead_workspace"
   },
   "leadSession": "<fixed drill lead (simulates the MCP server's stable injection)>",
-  "marker": "WAO_REUSE_P6_MVCNLY07_61Q8AV",
+  "marker": "WAO_REUSE_P6_MVSPI39B_YDL1UP",
   "entry": "dispatchRun (the shared background dispatch service used by CLI run --background and MCP run_dispatch); the detached runner / RunManager / deepSeekAcp / dsh / model chain is real",
   "registrySource": "D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json",
-  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.dev\\wt\\batch29\\.wao\\runs\\phase6-reuse-runs",
+  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.wao\\runs\\phase6-reuse-runs",
   "steps": {
     "run1": {
-      "runId": "run_202610171711520762btycq",
+      "runId": "run_20261028224910249a7d5lo",
       "accepted": true,
       "providerSessionRouting": "first_turn_requested",
       "state": "completed",
-      "backendSessionId": "298fc28d-150b-4bad-ada3-04b280e6a8bf",
+      "backendSessionId": "3f4dc844-485e-4958-91e0-37a8415bec21",
       "runSessionReuseTurn": "first",
       "assistantEcho": "MARKER_STORED",
       "evidenceRefs": {
@@ -39,13 +39,13 @@
       }
     },
     "run2": {
-      "runId": "run_2026101717120417306cxca",
+      "runId": "run_20261028224918302h1v827",
       "accepted": true,
       "providerSessionRouting": "resume_requested",
       "state": "completed",
-      "backendSessionId": "298fc28d-150b-4bad-ada3-04b280e6a8bf",
+      "backendSessionId": "3f4dc844-485e-4958-91e0-37a8415bec21",
       "runSessionReuseTurn": "resume",
-      "assistantEcho": "WAO_REUSE_P6_MVCNLY07_61Q8AV",
+      "assistantEcho": "WAO_REUSE_P6_MVSPI39B_YDL1UP",
       "resumeSystemFact": true,
       "evidenceRefs": {
         "sessionCreated": "run2-session-created",
@@ -56,7 +56,7 @@
       }
     },
     "negC_dispatch": {
-      "runId": "run_20261017171212278o8tvzv",
+      "runId": "run_20261028224926377bitxzu",
       "accepted": true,
       "providerSessionRouting": "resume_requested"
     }
@@ -97,15 +97,15 @@
   },
   "embeddedEvidence": {
     "format": "phase6-session-reuse-self-contained-v1",
-    "marker": "WAO_REUSE_P6_MVCNLY07_61Q8AV",
+    "marker": "WAO_REUSE_P6_MVSPI39B_YDL1UP",
     "positiveInputs": {
       "run1": {
-        "runId": "run_202610171711520762btycq",
+        "runId": "run_20261028224910249a7d5lo",
         "providerSessionRouting": "first_turn_requested",
-        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MVCNLY07_61Q8AV\nReply with exactly one line: MARKER_STORED"
+        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MVSPI39B_YDL1UP\nReply with exactly one line: MARKER_STORED"
       },
       "run2": {
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "providerSessionRouting": "resume_requested",
         "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
       }
@@ -114,21 +114,21 @@
       {
         "id": "run1-session-created",
         "source": "run transcript excerpt",
-        "runId": "run_202610171711520762btycq",
+        "runId": "run_20261028224910249a7d5lo",
         "type": "session.created",
-        "backendSessionId": "298fc28d-150b-4bad-ada3-04b280e6a8bf"
+        "backendSessionId": "3f4dc844-485e-4958-91e0-37a8415bec21"
       },
       {
         "id": "run1-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_202610171711520762btycq",
+        "runId": "run_20261028224910249a7d5lo",
         "type": "run.session_reuse",
         "turn": "first"
       },
       {
         "id": "run1-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_202610171711520762btycq",
+        "runId": "run_20261028224910249a7d5lo",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
@@ -137,28 +137,28 @@
       {
         "id": "run1-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_202610171711520762btycq",
+        "runId": "run_20261028224910249a7d5lo",
         "type": "run.completed",
         "state": "completed"
       },
       {
         "id": "run2-session-created",
         "source": "run transcript excerpt",
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "type": "session.created",
-        "backendSessionId": "298fc28d-150b-4bad-ada3-04b280e6a8bf"
+        "backendSessionId": "3f4dc844-485e-4958-91e0-37a8415bec21"
       },
       {
         "id": "run2-session-reuse",
         "source": "run transcript excerpt",
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "type": "run.session_reuse",
         "turn": "resume"
       },
       {
         "id": "run2-resume-system",
         "source": "run transcript excerpt",
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "type": "run.event",
         "kind": "message",
         "role": "system",
@@ -167,16 +167,16 @@
       {
         "id": "run2-assistant",
         "source": "run transcript excerpt",
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "type": "run.event",
         "kind": "message",
         "role": "assistant",
-        "text": "WAO_REUSE_P6_MVCNLY07_61Q8AV"
+        "text": "WAO_REUSE_P6_MVSPI39B_YDL1UP"
       },
       {
         "id": "run2-terminal",
         "source": "run transcript excerpt",
-        "runId": "run_2026101717120417306cxca",
+        "runId": "run_20261028224918302h1v827",
         "type": "run.completed",
         "state": "completed"
       }
@@ -186,7 +186,7 @@
         "id": "negativeA",
         "input": {
           "kind": "prior-transcript-session-id",
-          "runId": "run_2026101717120417306cxca",
+          "runId": "run_20261028224918302h1v827",
           "backendSessionId": ""
         },
         "refusal": {
@@ -214,12 +214,12 @@
         "id": "negativeC",
         "input": {
           "kind": "prior-transcript-session-id",
-          "runId": "run_2026101717120417306cxca",
+          "runId": "run_20261028224918302h1v827",
           "backendSessionId": "11111111-2222-4333-8444-555555555555"
         },
         "refusal": {
           "kind": "resume_rejected",
-          "runId": "run_20261017171212278o8tvzv",
+          "runId": "run_20261028224926377bitxzu",
           "dispatchAccepted": true,
           "providerSessionRouting": "resume_requested",
           "terminalState": "failed",

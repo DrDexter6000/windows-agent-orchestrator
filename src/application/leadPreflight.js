@@ -45,16 +45,34 @@ import { projectBucketLabel } from "../projectIdentity.js";
 import {
   projectLaneProfiles,
   readLaneTraits,
+  CAVEATS_CAP,
+  CAVEAT_MAX_CHARS,
+  COST_MAX_CHARS,
+  PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   RATING_BASES,
   RATINGS_STATES,
+  REVIEW_REASON_MAX_CHARS,
+  REVIEW_REASONS_CAP,
+  SCALE_MAX_CHARS,
 } from "./laneProfile.js";
 // 0087 §5：MCP 服务处在 worker 上下文时 lanes 置 null（WAO 不向 worker 投影
 // 画像）。判定注入以便测试；缺省读真实 env/cwd。
 import { nestedDispatchContext } from "../nestedDispatchGuard.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 
-export { PROJECTION_ROWS_CAP, RATING_BASES, RATINGS_STATES };
+export {
+  CAVEATS_CAP,
+  CAVEAT_MAX_CHARS,
+  COST_MAX_CHARS,
+  PROJECTED_NOTE_MAX_CHARS,
+  PROJECTION_ROWS_CAP,
+  RATING_BASES,
+  RATINGS_STATES,
+  REVIEW_REASON_MAX_CHARS,
+  REVIEW_REASONS_CAP,
+  SCALE_MAX_CHARS,
+};
 
 /**
  * @typedef {Object} PreflightWorkspace

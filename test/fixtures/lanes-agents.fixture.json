@@ -24,7 +24,7 @@
     "kimi": {
       "backend": "kimi-web",
       "model": {
-        "id": "kimi-code/k3-256k"
+        "id": "kimi-code/k3.1-pro"
       },
       "cwd": "."
     },

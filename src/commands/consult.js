@@ -28,6 +28,9 @@ import {
   rerenderConsultFromRecord,
   waitForConsult,
 } from "../application/consultService.js";
+// TD-319：未知子命令的"报错 + 用法"两行有意分行——linesError 构造（.message
+// 与改前逐字一致），CLI 输出口按行转义。
+import { linesError } from "../safeText.js";
 
 // 可重复旗标收集（--perspective/--fields 可出现多次；parseOptions 只留末值，
 // 重复值在这里显式收集）。
@@ -367,7 +370,9 @@ async function consultWaitCommand(args, config, deps = {}) {
   console.log(renderCouncilDiffText(result));
 }
 
-export const CONSULT_USAGE = [
+// TD-319：用法页的行数组是单一事实源——CONSULT_USAGE（join 形，help 打印用）
+// 与未知子命令报错（linesError 显式带出各行，用法页的多行不被当一行转义）同源。
+export const CONSULT_USAGE_LINES = [
   "consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]",
   "consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]",
@@ -380,7 +385,8 @@ export const CONSULT_USAGE = [
   "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",
   "                  `consult show <id>` reads the current state.",
   "  --seat --out    write one seat's complete final text to a file (without --out: print it)",
-].join("\n");
+];
+export const CONSULT_USAGE = CONSULT_USAGE_LINES.join("\n");
 
 /**
  * `wao consult` 派遣器。deps 参数仅供测试注入（runConsult/loadConsultRecord/
@@ -404,5 +410,5 @@ export async function consultCommand(args, config, deps = {}) {
     console.log(CONSULT_USAGE);
     return;
   }
-  throw new Error(`consult: unknown subcommand "${sub}"\n${CONSULT_USAGE}`);
+  throw linesError([`consult: unknown subcommand "${sub}"`, ...CONSULT_USAGE_LINES]);
 }

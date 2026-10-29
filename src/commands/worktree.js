@@ -20,6 +20,9 @@ import { resolve } from "node:path";
 import { listWorktrees, removeWorktree } from "../isolation.js";
 import { planWorktreeReclaim, applyWorktreeReclaim, RECLAIM_REFUSAL_CODES } from "../application/worktreeReclaim.js";
 import { readInstallRoot, resolveConfigPath } from "../installRoot.js";
+// TD-319：本命令自己往 stderr 打的报错与提示也走统一渲染（拼进的路径、
+// 拒绝明细、异常消息里的控制字符显示为转义写法，不能伪造一行）。
+import { renderErrorText } from "../safeText.js";
 import { parseOptions } from "./shared.js";
 
 /** --include 可重复给出：手收全部值（parseOptions 只对 --tag 做重复收集）。
@@ -62,7 +65,7 @@ async function worktreeReclaimCommand(rest, config) {
       if (!RECLAIM_REFUSAL_CODES.includes(result.refused)) {
         throw new Error(`worktree reclaim --apply 拒绝码越闭集：${result.refused}`);
       }
-      console.error(`[worktree reclaim] 整体拒绝（零删除）：${result.refused}${result.detail ? `（${result.detail}）` : ""}`);
+      console.error(renderErrorText(`[worktree reclaim] 整体拒绝（零删除）：${result.refused}${result.detail ? `（${result.detail}）` : ""}`));
       process.exitCode = 1;
       return;
     }
@@ -81,12 +84,12 @@ async function worktreeReclaimCommand(rest, config) {
     // 有异常面（stale 登记 / 删分支阶段实时登记读不出 / 中途异常 / 记录写失败）
     // 时不打印"完成"，以非零退出码结束；已删除的部分已在上面照实列出。
     if (result.recordsWriteFailed) {
-      console.error(`[worktree reclaim] 记录写入失败（保全目录 ${result.preserveDir ?? "未建立"}）——删除已执行但无审计记录，人工核查后处置`);
+      console.error(renderErrorText(`[worktree reclaim] 记录写入失败（保全目录 ${result.preserveDir ?? "未建立"}）——删除已执行但无审计记录，人工核查后处置`));
       process.exitCode = 1;
       return;
     }
     if (result.aborted) {
-      console.error(`[worktree reclaim] 中途异常中止：${result.aborted.message}——已执行部分已在上面如实列出`);
+      console.error(renderErrorText(`[worktree reclaim] 中途异常中止：${result.aborted.message}——已执行部分已在上面如实列出`));
       console.log(`  记录：${result.preserveDir ?? "（未建立）"}`);
       process.exitCode = 1;
       return;
@@ -103,7 +106,7 @@ async function worktreeReclaimCommand(rest, config) {
     if (result.staleRegistrations?.length) {
       // 本命令不做仓库级 prune：stale 登记不清、持有它的分支保守跳过，提示走
       // 通用清扫后重出计划。
-      console.error(`[worktree reclaim] 目录缺失的在册登记 ${result.staleRegistrations.length} 条（未清理）：${result.staleRegistrations.join("；")}——走 serve 维护 / runs verify-commit 的通用清扫后重出计划`);
+      console.error(renderErrorText(`[worktree reclaim] 目录缺失的在册登记 ${result.staleRegistrations.length} 条（未清理）：${result.staleRegistrations.join("；")}——走 serve 维护 / runs verify-commit 的通用清扫后重出计划`));
       console.log(`  记录：${result.preserveDir}`);
       process.exitCode = 1;
       return;
@@ -120,7 +123,7 @@ async function worktreeReclaimCommand(rest, config) {
     includeRunIds: collectRepeat(rest, "--include"),
     outPath: resolve(options.out),
   });
-  if (warning) console.error(`[worktree reclaim] 提示：${warning}`);
+  if (warning) console.error(renderErrorText(`[worktree reclaim] 提示：${warning}`));
   const byCategory = plan.counts.byCategory;
   const kept = Object.entries(byCategory).filter(([c]) => c !== "reclaim").reduce((n, [, v]) => n + v, 0);
   console.log(`[worktree reclaim] 计划写出：${resolve(options.out)}（只读，未动任何树/分支/转录）`);
