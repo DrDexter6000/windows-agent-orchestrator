@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（只有 Owner 改），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话。",
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话，遇到相反的实测可以改写；标了（Owner 规则）的是 Owner 定的政策，实测不改它。",
   "scale": {
     "1": "不适合",
     "2": "弱，需重点把关",
@@ -114,7 +114,8 @@
       "cost": "codex 订阅额度；价格高昂（Owner）",
       "caveats": [
         "只在疑难杂症时作会审席（Owner 规则）",
-        "容易钻牛角尖（Owner）：任务书写清范围与停止条件"
+        "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
+        "分项评分只用 Owner 手动输入，不跑横评、不按实测改格（Owner 规则）"
       ],
       "contextWindow": {
         "tokens": 1050000,

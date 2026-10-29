@@ -62,9 +62,9 @@ Owner 当天提出，画像要有 Lead 参与、不断进化，并进入 Lead �
      - 只有 lead_preflight 的出参 schema 含画像字段。
 6. **写规则。**
    - Lead 可以给未评格首次打 `measured`，也可以凭证据更新 `measured` 格。提交说明写明旧值、新值和依据，汇报时告诉 Owner，Owner 可以否决。
-   - `owner` 格只有 Owner 能改。Lead 有相反证据时提议，由 Owner 决定保留还是改为 `measured`。
+   - `owner` 格：实测覆盖到的维度以实测为准，Owner 特别标注的除外，见 0092。
    - Owner 可以改写任何一格。
-   - `official` 格、`cost`、`caveats`、`ratedAgainst`、`reviewPending` 以及其余事实字段，由 Lead 凭出处维护；标了"（Owner）"的原话不改。
+   - `official` 格、`cost`、`caveats`、`ratedAgainst`、`reviewPending` 以及其余事实字段，由 Lead 凭出处维护；Owner 原话与标注的处理见 0092。
    - 防偏：样本量随格记录；未评不扣分；长期未评的车道，由 Lead 安排小样本试用。
 7. **预算。** wire 冻结线在本批重冻，硬顶 94,532 B 不动。description 与 hostVisible 的冻结线不抬：description 里提到 lanes 的那几个字，要靠压缩原句等量腾出来。
 8. **版本巡检。** `docs/certification-runbook.md` 的巡检收尾加一项：升级或换代的车道写 `reviewPending`。
