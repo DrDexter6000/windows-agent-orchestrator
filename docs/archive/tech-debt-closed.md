@@ -145,3 +145,4 @@
 | TD-142 | workflow / DAG 层利用率低，裁定保留现状不退役 | 2026-10-29：退出条件已满足（07-08 之后零真实运行；0027 计的 643 次里 634 次是测试写进真实运行目录的残留），决定 0094 退役 |
 | TD-294 | `npm run smoke` 只探测 claude 与 codex，zcode、kimi-web、deepseek-acp 车道不在 smoke 内，而 milestone-discipline §4 要求里程碑收尾必跑 smoke | 2026-10-29：§4 第 4 条写明替代——smoke 不覆盖的后端以该车道的 reliability 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项；smoke-guide 与 TD-16 同步 |
 | TD-273 | `config/lane-exceptions.json` 的五条例外未清理（原行称其对退出码轴已非必需；五条的 checks 实为 adversarialEscapeIntercepted） | 2026-10-29：不清理。决定 0084 §4 规定以 adversarialEscape 为键的例外保持原样、历史不改写；新 case 不再生成该检查，例外影响不到新认证 |
+| TD-322 | 桌面端 Code 标签调 MCP 的长等待约 60 秒就报 Request timed out：run_wait 下限 180 秒，多个 MCP 等待默认 270 秒 | 2026-10-29：决定 0095——run_wait 下限改 30 秒，MCP 等待默认 45 秒，未收口的结果带 nextStep；了结依据是提供了可用的短等待办法，不是保证整个调用 60 秒内返回 |

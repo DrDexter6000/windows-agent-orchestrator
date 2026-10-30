@@ -200,7 +200,7 @@ test("M12-7-MRC-M4: service threaded with bound workspace + leadSession + requir
 
       const parsed = r.structuredContent;
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuation", "parentRunId", "rejectionReason", "rootRunId", "runId", "state"],
+        ["accepted", "agentId", "continuation", "nextStep", "parentRunId", "rejectionReason", "rootRunId", "runId", "state"],
         "strict output keys only");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_child_ok");

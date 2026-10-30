@@ -138,9 +138,14 @@ import { createRunSummaryCache } from "../application/runSummaryCache.js";
 import {
   runWait,
   RUN_WAIT_MIN_MS,
-  RUN_WAIT_DEFAULT_MS,
   RUN_WAIT_MAX_MS,
+  // 决定 0095：MCP 调用面的缺省 45000（CLI 有界缺省 RUN_WAIT_DEFAULT_MS
+  // 270000 不变，两者各自命名）。
+  MCP_RUN_WAIT_DEFAULT_MS,
 } from "../application/runWait.js";
+// 决定 0095：nextStep——等待族工具没等到收口时的一句固定英文模板（MCP 面只写
+// 工具名、不含 runId）。run_await_result 有意不加（它是取结果形态）。
+import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
 import {
   runAwaitResult,
   RUN_AWAIT_RESULT_MIN_MS,
@@ -659,7 +664,7 @@ const DISPATCH_CREDENTIAL_MISSING_TEXT =
 const DISPATCH_REUSE_BUSY_TEXT =
   "run_dispatch refused: this expert still has an active run for the current Lead session and workspace. " +
   "A provider session cannot be driven concurrently. Wait for the prior run to reach a terminal state " +
-  "(poll with run_status / run_wait), then re-dispatch the follow-up to resume the conversation.";
+  "(keep waiting with run_wait; run_status is a point-in-time read), then re-dispatch the follow-up to resume the conversation.";
 
 // M12-6 (FR-04 / P1-B): fixed, actionable text for an invalid_verification_path
 // DeliveryError. Unlike the generic dispatch failure, this surfaces the closed-
@@ -1012,6 +1017,9 @@ const RUN_DISPATCH_OUTPUT = z.object({
   state: z.string(),
   workspaceProof: WORKSPACE_PROOF,
   providerSessionRouting: z.enum(PROVIDER_SESSION_ROUTING),
+  // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
+  // accepted:false 不给。
+  nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
 }).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
@@ -1129,10 +1137,11 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
 //     → re-render the stored group record (CLI `consult show` parity) with
 //       ZERO dispatch — the read path never touches the dispatcher.
 //
-// waitMs is a CLOSED SET 0..600000, default 270000 (run_await_result-style floor
-// 0 = fan out + immediate point-in-time snapshot; run_wait's 180000 floor is a
-// CLI/r1 policy injected as the service's budgetFloorMs default, NOT this face's
-// domain). Expiry = observation cutoff ONLY: seats keep running, states stay
+// waitMs is a CLOSED SET 0..600000, default 45000 (run_await_result-style floor
+// 0 = fan out + immediate point-in-time snapshot; the CLI consult floor is the
+// service's budgetFloorMs default, NOT this face's
+// domain). 决定 0095：MCP 缺省从 270000 降到 45000（约 60s 宿主工具超时内，
+// 留 15s 余量）；expiry = observation cutoff ONLY: seats keep running, states stay
 // truthful (running/budgetExpired), never killed, never re-dispatched.
 const RUN_CONSULT_ERROR_TEXT = "run_consult failed before any seat was dispatched";
 const RUN_CONSULT_READ_ERROR_TEXT =
@@ -1156,7 +1165,8 @@ const RUN_CONSULT_PAGING_IN_CREATE_TEXT =
   "run_consult refused: seat/page are read-mode-only parameters — create mode " +
   "({brief, seats}) returns a receipt; page it afterwards via {consultId, seat, page}";
 const RUN_CONSULT_WAIT_MIN_MS = 0;
-const RUN_CONSULT_WAIT_DEFAULT_MS = 270000;
+// 决定 0095：MCP 缺省 45000（原 270000）。
+const RUN_CONSULT_WAIT_DEFAULT_MS = 45000;
 
 const RUN_CONSULT_INPUT = z.object({
   // Read mode selector. consultId shape mirrors the service's isValidConsultId
@@ -1294,15 +1304,16 @@ const RUN_CONSULT_ANNOTATIONS = {
 };
 
 const RUN_CONSULT_DESCRIPTION =
-  // 必须保留（MRC-E1 钉×13）：INLINE text / 0..600000 / default 270000 /
-  // observation cutoff only / never killed or re-dispatched / MECHANICAL RECEIPT /
+  // 必须保留（MRC-E1 钉×13）：INLINE text / 0..600000 / default 数值插值
+  //（决定 0095 起 45000）/ observation cutoff only / never killed or
+  // re-dispatched / MECHANICAL RECEIPT /
   // no per-seat body text, no excerpts / 12KiB serialized / reassemble byte-exact /
   // textSha256 / restart from page 1 / never synthesizes / ZERO dispatch。
   "Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE " +
   "text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git " +
   "worktree top-level) is required — every seat's cwd and the record live under it; " +
   "waitMs 0..600000 (default " +
-  "270000; expiry = observation cutoff only — seats keep running, never killed or " +
+  `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats keep running, never killed or ` +
   "re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — " +
   "per-seat runId/state/pages, fieldDiff, independence facts). Facts only — " +
   "never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, " +
@@ -1435,6 +1446,9 @@ const RUN_CONTINUE_OUTPUT = z.object({
   state: z.string().nullable(),
   // Refusal-only (non-null iff accepted === false).
   rejectionReason: z.enum(CONTINUE_REJECTION_REASONS).nullable(),
+  // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
+  // accepted:false 不给。
+  nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
   // M12-22: cumulative-scope facts — surfaced ONLY on a continuation_scope_incomplete
   // refusal (absent on success and every other refusal). Safe repo-relative paths
   // only; never absolute paths, prompt, command, provider/session data, or Git errors.
@@ -2230,6 +2244,9 @@ const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   isolationFailure: ISOLATION_FAILURE_SCHEMA.nullable(),
   // TD-267: present only while verification is pending and undecided.
   verificationGate: VERIFICATION_GATE_VIEW_SCHEMA.optional(),
+  // 决定 0095：仅在带 waitMs 的路径、且等待到期仍未收口时给（再调 run_delivery
+  // 并传 waitMs）；不带 waitMs 是即时查询，不给。BASE 不携带（bundle 嵌 BASE）。
+  nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
 });
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -3126,7 +3143,7 @@ const RUN_WAIT_ERROR_TEXT = "run_wait failed";
 const RUN_WAIT_INPUT = z.object({
   runId: z.string().min(1),
   afterSeq: z.number().int().nonnegative().optional(),
-  waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(RUN_WAIT_DEFAULT_MS),
+  waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(MCP_RUN_WAIT_DEFAULT_MS),
 }).strict();
 
 // M12-11: the additive observation + termination facts, shared verbatim by
@@ -3171,6 +3188,9 @@ const RUN_WAIT_OUTPUT = z.object({
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
   // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES).
   semanticNotes: SEMANTIC_NOTES,
+  // 决定 0095：未等到收口时的一句固定模板（终态与非终态都给；runId 不上
+  // MCP 面）。waitWindowHint / transcriptQuiet 仍不进 wire（TD-149(b) 钉）。
+  nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
 }).strict();
 
 const RUN_WAIT_ANNOTATIONS = {
@@ -3183,12 +3203,15 @@ const RUN_WAIT_ANNOTATIONS = {
 const RUN_WAIT_DESCRIPTION =
   // 必须保留（M12-10-G、M6、X-02、runWait.test.js 钉）：区间/默认/0 无效/
   // 即时替代、Host transport 原句、re-read point-in-time、observation unknown、
-  // semanticNotes + 详情 URI。
+  // semanticNotes + 详情 URI。决定 0095：区间/默认改为常量插值（30000..600000，
+  // default 45000），新增 nextStep 一句。
   "Wait for terminal state or observation-window expiry, then a liveness summary; early " +
   "return ONLY on terminal. waitMs " +
-  `${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms (default ${RUN_WAIT_DEFAULT_MS}; ` +
+  `${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms (default ${MCP_RUN_WAIT_DEFAULT_MS}; ` +
   "waitMs=0 is intentionally invalid — point-in-time: run_await_result(waitMs:0) or " +
-  "run_status). Expiry never terminates. Host transport loss/cancellation does not stop the " +
+  "run_status). Expiry never terminates; the additive nextStep names the next call " +
+  "(call run_wait again within the host's tool timeout; on terminal, run_delivery with " +
+  "an explicit waitMs). Host transport loss/cancellation does not stop the " +
   "detached run: observation unknown; no control-plane mutation — re-read point-in-time; " +
   "never infer a stop. Self-explaining semanticNotes; wao://semantics/{id}.";
 
@@ -3755,7 +3778,7 @@ const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
 // F5 (2026-10-08): 坏 cursor 专属拒绝文案（同上，组合工具同款折叠）。
 const DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT =
   `run_delivery_review_bundle failed — ${CURSOR_REJECTED_GUIDANCE}`;
-const DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS = 270000;
+const DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS = 45000;
 
 const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
   runId: z.string().min(1),
@@ -4941,6 +4964,11 @@ export function createWaoMcpServer({
           // opaque uuid / Lead id / workspace the dispatcher might also return are
           // NEVER forwarded (the handler selects exactly these keys).
           providerSessionRouting: result.providerSessionRouting,
+          // 决定 0095：受理成功的后台运行附 nextStep（静态模板，MCP 面不含
+          // runId）；accepted:false 不给。
+          ...(result.accepted === true
+            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }) }
+            : {}),
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -5316,7 +5344,8 @@ export function createWaoMcpServer({
           ...(input.reviewedRunId !== undefined ? { reviewedRunId: input.reviewedRunId } : {}),
           budgetMs: input.waitMs,
           // MCP face domain: 0..600000 (0 = fan out + immediate point-in-time
-          // snapshot). The service's own default floor (180000, run_wait domain)
+          // snapshot). The service's own default floor (CONSULT_WAIT_MIN_MS,
+          // 180000 — consult CLI domain since 决定 0095, no longer run_wait's)
           // is the CLI/r1 policy — injected down to this face's floor here.
           budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
           registryPath,
@@ -5480,6 +5509,10 @@ export function createWaoMcpServer({
           rootRunId: result.accepted ? result.rootRunId : null,
           state: result.accepted ? result.state : null,
           rejectionReason: result.accepted ? null : result.rejectionReason,
+          // 决定 0095：受理成功的后台续跑附 nextStep（静态模板）；拒收不给。
+          ...(result.accepted === true
+            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }) }
+            : {}),
           ...(projectedScope ? {
             inheritedChangedPaths: projectedScope.inheritedChangedPaths,
             inheritedChangedCount: projectedScope.inheritedChangedCount,
@@ -5930,6 +5963,12 @@ export function createWaoMcpServer({
           // point-in-time path via selectDeliverySemanticNotes).
           payload.semanticNotes = selectDeliverySemanticNotes(payload);
           await attachVerificationGate(payload, result, runId);
+          // 决定 0095：带 waitMs 的等待到期仍未收口（waitReturnedEarly:false 是
+          // 唯一的"还在等"返回形状——settled/undeterminable 都提前返回）时给
+          // nextStep；不带 waitMs 的即时查询不给。
+          if (result.waitReturnedEarly === false) {
+            payload.nextStep = buildNextStep({ surface: "mcp", situation: "delivery_unsettled" });
+          }
           const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -6261,9 +6300,9 @@ export function createWaoMcpServer({
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
 
-        // M10-pre3 closeout (P1-A): keep the MCP request alive across the
-        // >=180s long-poll. The MCP SDK default request timeout is 60s, so a
-        // 180s server-side wait would be killed by the client before it
+        // M10-pre3 closeout (P1-A): keep the MCP request alive across a long
+        // poll. The MCP SDK default request timeout is 60s, so a server-side
+        // wait longer than that would be killed by the client before it
         // returns. The standard mechanism is notifications/progress: when the
         // client passes `onprogress`, the SDK attaches _meta.progressToken
         // (= the request id) to the request; we read it from `extra` and emit
@@ -6271,7 +6310,9 @@ export function createWaoMcpServer({
         // that set `resetTimeoutOnProgress:true` then resets its 60s timer on
         // each notification. This is entirely opt-in and standard — we do NOT
         // patch the host or require a global timeout change. If the client did
-        // not request progress (no token), we send nothing.
+        // not request progress (no token), we send nothing.（决定 0095：MCP 面
+        // 缺省已降到 45000，落在已观测最紧的 ~60s 宿主工具超时内；宿主允许长
+        // 调用时 Lead 可显式加长，此机制继续兜底。）
         const progressToken = extra?._meta?.progressToken;
         const hasKeepalive = progressToken !== undefined && progressToken !== null
           && typeof extra?.sendNotification === "function";
@@ -6301,7 +6342,7 @@ export function createWaoMcpServer({
           // The earlier `input?.afterSeq ?? 0` coercion collapsed both into 0,
           // which made every first poll misreport history as progress.
           ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
-          waitMs: input?.waitMs ?? RUN_WAIT_DEFAULT_MS,
+          waitMs: input?.waitMs ?? MCP_RUN_WAIT_DEFAULT_MS,
           authorizedWorkspaceRoot: binding.root,
           ...(onPoll ? { onPoll } : {}),
         });
@@ -6341,6 +6382,13 @@ export function createWaoMcpServer({
           terminal: payload.terminal,
           terminationSource: payload.termination?.source ?? null,
           transcriptQuiet: result.transcriptQuiet === true,
+        });
+        // 决定 0095：nextStep——终态与非终态都给（MCP 面不含 runId）；读失败
+        // （observationOutcome read_failure）时体征年龄不可观测，走重读分支。
+        payload.nextStep = runWaitNextStep({
+          surface: "mcp",
+          terminal: payload.terminal === true,
+          vitalSignAgeMs: Number.isFinite(result.vitalSignAgeMs) ? result.vitalSignAgeMs : null,
         });
 
         // M11-8B closeout: return the PARSED safe object.

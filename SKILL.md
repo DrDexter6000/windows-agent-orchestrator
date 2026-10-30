@@ -63,9 +63,11 @@ Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; neve
 
 Wait for meaningful changes; do not narrate unchanged polls. Before supervision, read [quiet supervision](docs/usage/supervise.md#lead-quiet-supervision).
 
-**Short-lived host sessions kill detached runners.** Hosts that clean up descendant processes on exit (headless `zcode -p`, one-shot CI scripts) can hang with zero progress (no error event; serve side may already be done), then get reaped by process-tree cleanup exactly +3600s after dispatch. Dispatch from long-lived hosts, or keep the session alive through terminal state (dispatch → run_await_result → sleep bridges → collect in ONE session). CLI background dispatch is unaffected by shell exit.
+**Discipline: a live run needs a live wait.** Before ending any turn while a run is still active, a wait must already be attached — CLI `wao runs wait <runId> --until-settled`, or repeated MCP `run_wait` calls until the run settles (decision 0095; details in supervise.md).
 
-**Host per-call timeout ≠ run death.** A wait-family call (`run_wait` / `run_await_result` / `run_consult`) may die at the HOST transport layer ("Tool execution timed out after Nms") while the run keeps living detached. On zcode the host default is 30000ms — the WAO plugin package carries `timeoutMs: 660000`. If you see a host-timeout error: do NOT treat it as run failure — verify with `runs_list`/`run_status`, then wait in smaller steps (`run_wait` 180000..600000 chunks, or `run_status` polling); `run_consult` supports `waitMs: 0` instant snapshot + consultId read mode (0051: MCP returns a capped receipt; per-seat text via `{consultId, seat, page}` — pages reassemble byte-exact, compare textSha256 across pages and restart on mismatch).
+**Host per-call timeout ≠ run death.** A wait-family call may die at the HOST transport layer while the run keeps living detached — never treat that as run failure: verify with `run_status`, then keep waiting (bounds, defaults, `nextStep`: docs/usage/supervise.md「等待到收口」).
+
+**Short-lived host sessions kill detached runners.** Hosts that clean up descendant processes on exit (headless `zcode -p`, one-shot CI scripts) can hang with zero progress (no error event; serve side may already be done), then get reaped by process-tree cleanup exactly +3600s after dispatch. Dispatch from long-lived hosts, or keep the session alive through terminal state (dispatch → run_await_result → sleep bridges → collect in ONE session). CLI background dispatch is unaffected by shell exit.
 
 ## Optional Lead Playbooks
 

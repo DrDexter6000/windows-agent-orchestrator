@@ -34,6 +34,7 @@ import { projectExecutionStage } from "./runStageProjection.js";
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 import {
   LEAD_ADVISORY_QUIET_SECONDS, VITAL_SIGN_RECENT_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText,
+  vitalSignAgeMs,
 } from "./runQuietAdvisory.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
@@ -288,9 +289,10 @@ export async function getRunStatus({
   // R20：同在绑定作用域内反查（外 run/无信封 run.event 不再供给心跳）。
   const lastActivity = [...scope].reverse().find((e) => e.type === "run.event") ?? null;
   const lastActivityTs = lastActivity?.ts ?? null;
-  const secondsSinceActivity = lastActivityTs
-    ? Math.round((_now() - new Date(lastActivityTs).getTime()) / 1000)
-    : null;
+  // 决定 0095：年龄算法走 runQuietAdvisory.vitalSignAgeMs 单一定义处（非有限
+  // → null；未来钳 0；毫秒不预取整），这里只做既有契约的秒换算。
+  const lastActivityAgeMs = vitalSignAgeMs(scope, _now());
+  const secondsSinceActivity = lastActivityAgeMs === null ? null : Math.round(lastActivityAgeMs / 1000);
   // TD-113: the repeat-write counter reads the SAME bound scope (`scope`, not
   // the raw `events` array) — unscoped counting stays out (foreign-run tail
   // lines included). It is positional and takes no clock; the time dimension

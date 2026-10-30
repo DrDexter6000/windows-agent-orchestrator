@@ -126,22 +126,24 @@ test("TD-109-W1: terminal run → runs wait --format json prints service result 
 //
 // 此前只有 JSON 模式有终态断言（W1）；text 是默认格式却无结构断言。只钉
 // 五行前缀结构与关键值（Run 行的 runId/state、Terminal: yes），不逐字钉
-// Waited/Liveness/Observation 的动态值（避免脆弱）。
+// Waited/Liveness/Observation 的动态值（避免脆弱）。决定 0095 起追加一行
+// `Next step: ...`（终态分支模板）——行数 5 → 6。
 // =====================================================================
 
-test("D1-D3-text: terminal run → runs wait（text 默认模式）五行结构：Run/Terminal/Waited/Liveness/Observation", async () => {
+test("D1-D3-text: terminal run → runs wait（text 默认模式）六行结构：Run/Terminal/Waited/Liveness/Observation/Next step", async () => {
   const dir = makeRunDir();
   try {
     writeFileSync(join(dir, "run_done.jsonl"),
       terminalEvents().map((e) => JSON.stringify({ runId: "run_done", agentId: "coder_low", ...e })).join("\n") + "\n", "utf8");
     const out = await captureLog(() => runsCommand(["wait", "run_done"], { runDir: dir }));
     const lines = out.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 5, `text 输出恰好五行，实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
+    assert.equal(lines.length, 6, `text 输出恰好六行，实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
     assert.match(lines[0], /^Run: run_done \(completed\)$/, "第 1 行：Run: <runId> (<state>)");
     assert.equal(lines[1], "Terminal: yes", "第 2 行：Terminal: yes（终态）");
     assert.match(lines[2], /^Waited: \d+ ms \(window \d+ ms\)$/, "第 3 行：Waited: <ms> ms (window <ms> ms)");
     assert.match(lines[3], /^Liveness: \S+$/, "第 4 行：Liveness: <非空标签>");
     assert.match(lines[4], /^Observation: \S+( \(\S+\))?$/, "第 5 行：Observation: <outcome>[ (<observation.outcome>)]");
+    assert.match(lines[5], /^Next step: /, "第 6 行：Next step（决定 0095）");
   } finally {
     cleanupDir(dir);
   }
@@ -199,8 +201,9 @@ test("TD-109-W3: out-of-range / non-integer --wait-ms → service error, wait ne
     await writeJsonl(dir, "run_active", runningEvents());
     // （"abc" 曾在此列表——D1-D3 收口后非数字值由 CLI 层以固定文案拒绝，不再
     // 到达 service；该用例迁移到下方 D1-D3-Bug2 测试。这里保留仍到达 service
-    // 边界的值：越界整数 / 非整数数字。）
-    for (const bad of ["179999", "600001", "1.5"]) {
+    // 边界的值：越界整数 / 非整数数字。决定 0095：下限 30000——29999 越界，
+    // 179999 已合法。）
+    for (const bad of ["29999", "600001", "1.5"]) {
       const slept = [];
       const startedAt = Date.now();
       await assert.rejects(
@@ -217,7 +220,7 @@ test("TD-109-W3: out-of-range / non-integer --wait-ms → service error, wait ne
         ),
         (err) => {
           // The SERVICE's exact boundary error — the CLI must not reword it.
-          assert.match(err.message, /waitMs must be an integer in \[180000, 600000\]/,
+          assert.match(err.message, /waitMs must be an integer in \[30000, 600000\]/,
             `--wait-ms ${bad}: service error text required`);
           return true;
         },
@@ -256,7 +259,7 @@ test("TD-109-W3c: subprocess exit code 1 + stderr carries the service error text
       runningEvents().map((e) => JSON.stringify({ runId: "run_active", agentId: "coder_low", ...e })).join("\n") + "\n", "utf8");
     const r = spawnSync(
       process.execPath,
-      ["src/cli.js", "runs", "wait", "run_active", "--wait-ms", "179999", "--run-dir", dir],
+      ["src/cli.js", "runs", "wait", "run_active", "--wait-ms", "29999", "--run-dir", dir],
       {
         cwd: REPO_ROOT,
         encoding: "utf8",
@@ -265,7 +268,7 @@ test("TD-109-W3c: subprocess exit code 1 + stderr carries the service error text
       },
     );
     assert.notEqual(r.status, 0, `invalid --wait-ms must exit non-zero (got status ${r.status}, stdout=${r.stdout})`);
-    assert.match(r.stderr, /waitMs must be an integer in \[180000, 600000\]/,
+    assert.match(r.stderr, /waitMs must be an integer in \[30000, 600000\]/,
       "stderr must contain the service boundary error text");
   } finally {
     cleanupDir(dir);
@@ -276,10 +279,11 @@ test("TD-109-W3c: subprocess exit code 1 + stderr carries the service error text
 // D1-D3 终审收口（Bug-2）: 非数字 --wait-ms 的 CLI 诊断文案。
 //
 // 今天 `--wait-ms abc` 经 CLI 的 Number() 强转变成 NaN 原样传给 service，
-// service 报 `waitMs must be an integer in [180000, 600000], got: null`
-// （原始输入丢失，用户看到的是 got:null 而非自己敲了什么）。裁决：CLI 层在
-// 强转后 Number.isNaN 即拒绝，固定安全文本 `--wait-ms must be a number`
-// （不回显原值）——service 边界与越界/非整数文案保持不变。
+// service 报 `waitMs must be an integer in [30000, 600000], got: null`
+//（决定 0095 起下限 30000；原始输入丢失，用户看到的是 got:null 而非自己敲了
+// 什么）。裁决：CLI 层在强转后 Number.isNaN 即拒绝，固定安全文本
+// `--wait-ms must be a number`（不回显原值）——service 边界与越界/非整数文案
+// 保持不变。
 // （"abc" 从 W3 的 service 文案用例迁移至此：非数字从此由 CLI 层拒绝。）
 // =====================================================================
 
@@ -611,13 +615,15 @@ test("TD-114-B1-text: 窗口到期打印五行摘要结构 + Hint 行，process.
     ));
     const lines = out.split("\n").filter((l) => l.length > 0);
     // TD-137②：五行摘要后追加一行同族上限交叉提示（Hint）——摘要结构不变。
-    assert.equal(lines.length, 6, `text 输出恰好六行（五行摘要 + Hint），实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
+    // 决定 0095：再追加一行 Next step——共七行。
+    assert.equal(lines.length, 7, `text 输出恰好七行（五行摘要 + Hint + Next step），实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
     assert.match(lines[0], /^Run: run_active \(running\)$/, "第 1 行：Run: <runId> (<state>)");
     assert.equal(lines[1], "Terminal: no", "第 2 行：Terminal: no（窗口到期）");
     assert.match(lines[2], /^Waited: \d+ ms \(window \d+ ms\)$/, "第 3 行：Waited: <ms> ms (window <ms> ms)");
     assert.match(lines[3], /^Liveness: \S+$/, "第 4 行：Liveness: <非空标签>");
     assert.match(lines[4], /^Observation: \S+( \(\S+\))?$/, "第 5 行：Observation: <outcome>[ (<observation.outcome>)]");
     assert.match(lines[5], /^Hint: 观察窗到期非终态；本命令上限 600000ms；同族：/, "第 6 行：Hint 同族上限交叉提示");
+    assert.match(lines[6], /^Next step: /, "第 7 行：Next step（决定 0095，未收口给续等指引）");
     assert.equal(process.exitCode, prev, "窗口到期（正常结果）不得设置非零退出码");
   } finally {
     process.exitCode = prev;

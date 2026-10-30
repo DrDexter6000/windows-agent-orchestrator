@@ -251,17 +251,17 @@ async function seedRunning(runDir, runId, wsDir) {
   return tp;
 }
 
-test("GATE-F3-01: runWait accepts waitMs=180000 (lower bound) — real call, structured result", async () => {
+test("GATE-F3-01: runWait accepts waitMs=30000 (lower bound, decision 0095) — real call, structured result", async () => {
   const wsDir = makeRunDir();
   const runDir = makeRunDir();
   try {
     makeGitRepo(wsDir);
     await seedRunning(runDir, "run_lb", wsDir);
-    const { runWait } = await import("../../src/application/runWait.js");
+    const { runWait, RUN_WAIT_MIN_MS } = await import("../../src/application/runWait.js");
     // Fake clock that immediately exhausts the window so the call returns at
     // the boundary without real waiting. Each now() call advances past waitMs.
     const result = await runWait({
-      runId: "run_lb", runDir, waitMs: 180000,
+      runId: "run_lb", runDir, waitMs: RUN_WAIT_MIN_MS,
       sleepFn: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => (t += 200_000); })(),
     });

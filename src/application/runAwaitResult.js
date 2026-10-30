@@ -104,12 +104,13 @@ import {
 import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 
 // waitMs is a single composition budget. 0 = pure point-in-time (read once,
-// return immediately). The default matches run_wait's default observation
-// window. The hard cap (270000) is the maximum a caller may ask this ONE call
+// return immediately). 决定 0095：MCP 调用面的缺省改为 45000（已观测最紧的
+// 宿主约 60 秒工具超时，留 15 秒余量；上限不变，宿主允许长调用时显式加长）。
+// The hard cap (270000) is the maximum a caller may ask this ONE call
 // to wait; arbitrary re-polling via run_wait/run_collect remains unbounded by
 // this tool's budget.
 export const RUN_AWAIT_RESULT_MIN_MS = 0;
-export const RUN_AWAIT_RESULT_DEFAULT_MS = 270000;
+export const RUN_AWAIT_RESULT_DEFAULT_MS = 45000;
 export const RUN_AWAIT_RESULT_MAX_MS = 270000;
 
 // Default progress keepalive interval. This is INDEPENDENT of the internal poll
@@ -457,7 +458,7 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {number} [input.afterSeq] — cursor; omitted = baseline-at-first-read
- * @param {number} [input.waitMs=270000] — composition budget (0..270000)
+ * @param {number} [input.waitMs=45000] — composition budget (0..270000)
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {Function} [input.nowFn] — injectable clock (testing)
  * @param {Function} [input.sleepFn] — injectable sleep (testing)

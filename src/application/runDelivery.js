@@ -32,11 +32,21 @@ import {
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
-import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { verifyRunWorkspaceOwnership, assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // TD-137②：等待窗到期交叉提示的单一构造处（runWait 同族 SSOT；无环——
 // runWait 及其传递依赖不回读本模块）。
 import { buildWaitWindowHint } from "./runWait.js";
+// 决定 0095：收口判定（本模块不能反向被 runSettlement import，所以两侧共用
+// 的交付请求意向谓词与隔离违例投影的家在 runSettlement.js；这里再导出，既有
+// 消费者不改）。getRunDeliveryReadiness 的等待去留改由收口判定决定。
+import {
+  determineRunSettlement,
+  hasReverifyFact,
+  deliveryWasRequested as _deliveryWasRequested,
+  projectIsolationViolation,
+  projectIsolationViolationCode,
+  SAFE_ISOLATION_VIOLATION_CODES,
+} from "./runSettlement.js";
 import { proveWorkspace } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
 
@@ -69,74 +79,24 @@ export const DELIVERY_READINESS_STATES = Object.freeze([
   "ambiguous", // conflicting or terminal-incomplete durable chain — fail closed
 ]);
 
-// M12-13: the closed set of SAFE isolation-violation codes the projection
-// accepts as delivery-readiness evidence. Anything else (missing/non-string
-// code, unknown value, multiple violations) is NOT evidence → ambiguous. Also
-// consumed by run_await_result (isolationFailureCode) — one closed set.
-export const SAFE_ISOLATION_VIOLATION_CODES = Object.freeze(["workdir_escape"]);
+// 决定 0095：SAFE_ISOLATION_VIOLATION_CODES 与隔离违例投影（M12-13/M12-14）
+// 的家已移至 runSettlement.js（避免与收口判定的依赖成环）；这里再导出，
+// runAwaitResult / server.js 等既有消费者不改。
+export { projectIsolationViolation, projectIsolationViolationCode, SAFE_ISOLATION_VIOLATION_CODES };
 
-/**
- * M12-14: project the isolation-violation evidence for a run, including the
- * additive closed-set REASON.
- *
- * Exactly ONE run-bound run.isolation_violation whose code (a top-level
- * durable fact — transcript append spreads event payloads flat, the same
- * idiom as deliveryCode / verificationStatus) is a member of the safe closed
- * set → { code, reason }. The reason is an exact ISOLATION_VIOLATION_REASONS
- * member, or null when the durable fact is historical (reason-absent) or the
- * persisted reason is malformed/unknown — an unknown reason is NEVER upgraded
- * to a closed-set value and the raw malformed value is never echoed. Zero
- * bound violations → null (no evidence). Multiple bound violations, or a
- * single one with a missing / malformed / non-safe code → "ambiguous" (fail
- * closed — never treated as evidence).
- *
- * Envelope-bound: only events whose runId equals the requested runId count — a
- * foreign-run violation in a concatenated/corrupt transcript is ignored, not
- * evidence.
- *
- * @param {object[]} events
- * @param {string} runId
- * @returns {{code: string, reason: string|null}|"ambiguous"|null}
- */
-export function projectIsolationViolation(events, runId) {
-  if (!Array.isArray(events)) return null;
-  const bound = events.filter(
-    (e) => e && e.type === "run.isolation_violation" && e.runId === runId,
-  );
-  if (bound.length === 0) return null;
-  if (bound.length > 1) return "ambiguous";
-  const code = bound[0].code;
-  if (typeof code !== "string" || !SAFE_ISOLATION_VIOLATION_CODES.includes(code)) {
-    return "ambiguous";
-  }
-  const reason = bound[0].reason;
-  return {
-    code,
-    reason: typeof reason === "string" && ISOLATION_VIOLATION_REASONS.includes(reason)
-      ? reason
-      : null,
-  };
-}
+// M12-13/M12-14: projectIsolationViolation / projectIsolationViolationCode 的
+// 实现家在 runSettlement.js（决定 0095 移入；本文件再导出，见上方 export）。
 
-/**
- * M12-13: project the isolation-violation CODE for a run.
- *
- * Exactly ONE run-bound run.isolation_violation whose code is a member of the
- * safe closed set → that code. Zero bound violations → null. Multiple bound
- * violations, or a single one with a missing / malformed / non-safe code →
- * "ambiguous" (fail closed). Delegates to projectIsolationViolation (M12-14)
- * so code and reason projections can never diverge on what counts as evidence.
- *
- * @param {object[]} events
- * @param {string} runId
- * @returns {string|null} safe code, "ambiguous", or null
- */
-export function projectIsolationViolationCode(events, runId) {
-  const violation = projectIsolationViolation(events, runId);
-  return violation === "ambiguous" ? "ambiguous" : violation?.code ?? null;
-}
-
-const WAITING_READINESS_STATES = new Set(["waiting_for_packaging", "waiting_for_verification"]);
+// 决定 0095：等待去留 = 两个等待态（waiting_for_packaging / waiting_for_verification，
+// 不论终态——legacy 语义）∪ "readiness 是 reviewable、run 已终态、但收口判定仍
+// unsettled"（验证中拒收 / reverify pending——这两种形状此前立即返回，是本决定要
+// 修的）。非终态 run 上的 reviewable（验证已完备，只是 run 还没停）立即返回
+//（m11-10 SVC-06 钉）；not_requested / packaging_failed / isolation_failed /
+// ambiguous 不论终态都立即返回。
+const SETTLEMENT_WAITING_READINESS = new Set([
+  "waiting_for_packaging",
+  "waiting_for_verification",
+]);
 
 const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
@@ -230,8 +190,11 @@ export function projectDeliveryReadiness(events, runId) {
       : "waiting_for_verification";
   }
   // Legacy created refs without an explicit pending status remain readable,
-  // but do not gain decision eligibility. The authority already checked them.
-  if (facts.createdRef) return "waiting_for_verification";
+  // but do not gain decision eligibility. The authority already checked them,
+  // except for reverify facts: with no original outcome any reverify fact is a
+  // broken chain (decision 0095), which the authority already rejects for an
+  // explicit-pending ref.
+  if (facts.createdRef) return hasReverifyFact(events) ? "ambiguous" : "waiting_for_verification";
   const failed = events.filter((event) => event?.type === "run.delivery_failed"
     && event.runId === runId);
   if (failed.length > 1) return "ambiguous";
@@ -279,19 +242,9 @@ function _findBoundDeliveryFailed(events, runId) {
   return null;
 }
 
-function _deliveryWasRequested(events, runId) {
-  return events.some(
-    (e) => e && e.runId === runId && (
-      (e.type === "run.background_submitted" && e.deliveryRequested === true)
-      || (
-        e.type === "run.started"
-        && e.delivery
-        && typeof e.delivery.mode === "string"
-        && e.delivery.mode.length > 0
-      )
-    ),
-  );
-}
+// 决定 0095：_deliveryWasRequested（runId 绑定的交付意向谓词）的家在
+// runSettlement.js（deliveryWasRequested）；上方以该名导入为私有别名，
+// 以下既有调用处不变。
 
 // ===== Private: shared delivery-view gatherer =====
 //
@@ -984,6 +937,11 @@ export async function getRunDeliveryReadiness({
   // "pending" 非终态路径。
   let terminalState = findState(events.filter((e) => e && e.runId === runId));
   let readiness = projectDeliveryReadiness(events, runId);
+  // 决定 0095：等待去留由收口判定决定，不再只看 readiness 是否为等待态——
+  // "验证中拒收"与"reverify pending"两种形状的 readiness 是 reviewable、但尚未
+  // 收口，必须真正等待；settled 与 undeterminable（malformed/ambiguous 等不可
+  // 由等待改善的持久事实）立即返回。
+  let settlement = determineRunSettlement(events, runId);
   // Candidate-inventory authority/reader, threaded into every readiness
   // result build and consumed only by an eligible recovery candidate.
   //
@@ -1003,9 +961,12 @@ export async function getRunDeliveryReadiness({
     buildLivenessDeps: () => _livenessDeps(resolve(runDir), nowFn, isAliveFn, ownerLeaseReader),
   };
 
-  // Non-waiting readiness settles immediately: reviewable, packaging_failed,
-  // not_requested, and ambiguous are durable facts — waiting cannot change them.
-  if (!WAITING_READINESS_STATES.has(readiness)) {
+  // 决定 0095：等待去留——两个等待态照旧等待；终态 run 上 readiness 为
+  // reviewable 但收口判定仍 unsettled（验证中拒收 / reverify pending）也等待；
+  // 其余一切（settled、ambiguous/malformed、not_requested / packaging_failed、
+  // 非终态的 reviewable）立即返回——等待改变不了它们。
+  if (!SETTLEMENT_WAITING_READINESS.has(readiness)
+    && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
     return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
   }
 
@@ -1054,7 +1015,11 @@ export async function getRunDeliveryReadiness({
     // 翻转 terminal-during-wait 提前返回的终态事实/候选门。
     terminalState = findState(events.filter((e) => e && e.runId === runId));
     readiness = projectDeliveryReadiness(events, runId);
-    if (!WAITING_READINESS_STATES.has(readiness)) {
+    settlement = determineRunSettlement(events, runId);
+    // 决定 0095：轮内同款判定——等待态照旧；终态 reviewable-but-unsettled 继续
+    // 等；其余（含中途出现的 ambiguous / settled / 非终态 reviewable）立即返回。
+    if (!SETTLEMENT_WAITING_READINESS.has(readiness)
+      && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
       return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
     }
 

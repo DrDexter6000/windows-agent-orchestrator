@@ -786,7 +786,7 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
       const d = entry.description;
       assert.match(d, /INLINE text/, "brief is inline text, never a file path");
       assert.match(d, /0\.\.600000/);
-      assert.match(d, /default 270000/);
+      assert.match(d, /default 45000/, "决定 0095：MCP 缺省 45000");
       assert.match(d, /observation cutoff only/);
       assert.match(d, /never killed or re-dispatched/);
       assert.match(d, /MECHANICAL RECEIPT/, "0051：create 返回机械回执");

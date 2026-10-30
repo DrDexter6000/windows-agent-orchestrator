@@ -1497,8 +1497,8 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       // (transcriptPath/leadSession/opaqueUuid/workspace/argv) must never surface.
       assert.deepEqual(
         Object.keys(parsed).sort(),
-        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
-        "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting",
+        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting + additive nextStep (decision 0095)",
       );
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_mcp3");

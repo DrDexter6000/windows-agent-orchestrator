@@ -606,7 +606,9 @@ test("X-02: four descriptions mention semanticNotes self-explain + detail uri; g
       }
       // run_wait guarded keywords (runWait.test.js M11-11A-RED-02) preserved.
       const wait = tools.tools.find((x) => x.name === "run_wait").description;
-      assert.ok(/270000|270 seconds|4\.5 min/i.test(wait), "run_wait keeps the 270000/4.5 min default");
+      assert.ok(/default 45000/.test(wait), "run_wait keeps the 45000 default (decision 0095)");
+      // 决定 0095：run_wait 描述新增 nextStep 一句。
+      assert.ok(/nextStep/.test(wait), "run_wait names nextStep");
       // run_diagnose keeps "Lead" (m12-10 G guard).
       assert.ok(/lead/i.test(tools.tools.find((x) => x.name === "run_diagnose").description), "run_diagnose keeps Lead");
     } finally { await client.close(); await server.close(); }

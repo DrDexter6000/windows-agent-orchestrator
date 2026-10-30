@@ -4,7 +4,7 @@
 //
 // The MCP tool wraps the read-only composite service runAwaitResult. It:
 //   - is read-only + idempotent, workspace-bound, openWorldHint:false (snapshot-only),
-//   - accepts runId + optional waitMs (0..270000, default 270000) + optional afterSeq,
+//   - accepts runId + optional waitMs (0..270000, default 45000) + optional afterSeq,
 //   - returns a partitioned payload: run observation (terminal/liveness/cursor/
 //     observationOutcome) + independent result partition,
 //   - carries a mandatory observationOutcome closed-set field distinguishing a
@@ -127,7 +127,7 @@ test("MAR-01: tool discoverable; read-only/idempotent/openWorldHint:false annota
   } finally { rmrfRetry(dir); }
 });
 
-test("MAR-02: input schema — runId required, waitMs default+max 270000 min 0, afterSeq optional, strict", async () => {
+test("MAR-02: input schema — runId required, waitMs default 45000 max 270000 min 0, afterSeq optional, strict", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mar02-"));
   try {
     makeGitRepo(dir);
@@ -139,8 +139,10 @@ test("MAR-02: input schema — runId required, waitMs default+max 270000 min 0, 
       const props = t.inputSchema.properties ?? {};
       assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "runId", "waitMs"].sort());
       assert.equal(t.inputSchema.additionalProperties, false, "strict input");
-      assert.equal(props.waitMs.default, 270000, "default 270000");
-      assert.equal(props.waitMs.maximum, 270000, "max 270000");
+      // 决定 0095：MCP 缺省 45000（上限 270000 不变），数值取自常量。
+      const { RUN_AWAIT_RESULT_DEFAULT_MS, RUN_AWAIT_RESULT_MAX_MS } = await import("../../src/application/runAwaitResult.js");
+      assert.equal(props.waitMs.default, RUN_AWAIT_RESULT_DEFAULT_MS, "default 45000 (decision 0095)");
+      assert.equal(props.waitMs.maximum, RUN_AWAIT_RESULT_MAX_MS, "max 270000");
       assert.equal(props.waitMs.minimum, 0, "min 0 (point-in-time)");
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); }

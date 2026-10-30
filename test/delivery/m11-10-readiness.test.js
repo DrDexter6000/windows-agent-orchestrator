@@ -1809,13 +1809,14 @@ test("TD-179-R3 (projection+service): pending rejection with no outcome yet — 
       td179PendingRejectedEvent(runId, ref),
     ];
     writeTranscript(runDir, runId, partials);
-    // Keep the RED path bounded when the old implementation still waits.
+    // Decision 0095: a rejection while verification is pending is not settled, so the
+    // waitMs path waits to its (fake-clock) deadline; DSW-01/02 pin the wait itself.
     let clock = 1_000_000;
     const r = await getRunDeliveryReadiness({
       runId, runDir, waitMs: 1000,
       sleepFn: async (ms) => { clock += ms; }, nowFn: () => clock,
     });
-    assert.equal(r.readiness, "reviewable", "decision exists → reviewable settles immediately");
+    assert.equal(r.readiness, "reviewable", "decision exists → readiness reviewable");
     assert.equal(r.verification.status, "pending", "verification stays pending");
     assert.equal(r.acceptance.status, "rejected");
     assert.deepEqual(r.effectiveVerification, { status: "pending" }, "no reverify → effective stays pending");

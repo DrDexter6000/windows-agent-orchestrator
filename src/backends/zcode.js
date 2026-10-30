@@ -289,8 +289,9 @@ const RETRY_GRACE_MARGIN_MS = 30_000;
 // retry-after 400000ms ⇒ 采纳 400000ms）。1 小时宽于一切已核证的缺省形状，只拒
 // 非有限值、负数与超过它的值（fail-closed）。
 const RETRY_DELAY_MAX_MS = 3_600_000;
-// 流在收时向转录发 runtime_activity("streaming") 的最小间隔：一分钟一条——等待
-// 类命令最短观察窗 180s，流活着时窗内必有至少一条。
+// 流在收时向转录发 runtime_activity("streaming") 的最小间隔：一分钟一条——流活着
+// 时，任何满 60s 的观察窗内至少有一条（更短的单次等待可能遇不上，体征年龄仍按
+// 最后一条算）。
 const STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS = 60_000;
 const PROCESS_ACTIVITY_WINDOW_MS = 30_000;
 // 收口门凭进程活动 / 文件变化续命时落转录事实的最小间隔（零 part 两道门到点后

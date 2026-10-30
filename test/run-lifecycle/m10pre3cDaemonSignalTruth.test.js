@@ -8,15 +8,15 @@
 //     timed_out instead of aborted;
 //   - the keepalive test does not prove SDK timeout reset (swallows the call
 //     error, never passes resetTimeoutOnProgress);
-//   - runWait service does not enforce 180000..600000 itself.
+//   - runWait service does not enforce its waitMs range itself.
 //
-// All process-side assertions use short, deterministic waits (no 180s real
+// All process-side assertions use short, deterministic waits (no long real
 // wait). No real model calls.
 
 import { test } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -313,17 +313,17 @@ test("PRE3C-08: real deadline timer → exactly one timed_out", async () => {
 });
 
 // ============================================================
-// RED 8: runWait service bounds 180000..600000
+// RED 8: runWait service bounds 30000..600000（决定 0095：下限 180000→30000）
 // ============================================================
 
-test("PRE3C-09: runWait rejects waitMs below 180000", async () => {
+test("PRE3C-09: runWait rejects waitMs below 30000", async () => {
   const dir = makeRunDir();
   const runDir = makeRunDir();
   try {
     const { runWait } = await import("../../src/application/runWait.js");
     await assert.rejects(
-      () => runWait({ runId: "r", runDir, waitMs: 179999, sleepFn: () => Promise.resolve(), nowFn: () => Date.now() }),
-      /waitMs|180000/i,
+      () => runWait({ runId: "r", runDir, waitMs: 29999, sleepFn: () => Promise.resolve(), nowFn: () => Date.now() }),
+      /waitMs|30000/i,
     );
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
@@ -340,13 +340,21 @@ test("PRE3C-09b: runWait rejects waitMs above 600000", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-test("PRE3C-09c: runWait accepts waitMs 180000 and 600000 boundaries", async () => {
-  const { fileURLToPath } = await import("node:url");
-  const { readFileSync } = await import("node:fs");
-  const src = readFileSync(
-    join(join(fileURLToPath(new URL(".", import.meta.url))), "../..", "src", "application", "runWait.js"),
-    "utf8",
-  );
-  // The validation must reference both bounds, not only the lower one.
-  assert.ok(/180000/.test(src) && /600000/.test(src), "runWait must enforce both 180000 and 600000 bounds");
+test("PRE3C-09c: runWait accepts both boundary values (RUN_WAIT_MIN_MS and RUN_WAIT_MAX_MS) and runs the wait", async () => {
+  const runDir = makeRunDir();
+  try {
+    const { runWait, RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS } = await import("../../src/application/runWait.js");
+    assert.equal(RUN_WAIT_MIN_MS, 30000, "decision 0095");
+    assert.equal(RUN_WAIT_MAX_MS, 600000);
+    const runId = "run_bounds";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      { type: "run.started", runId, agentId: "a", ts: "2026-10-30T00:00:00.000Z" },
+      { type: "run.state_change", runId, agentId: "a", from: "running", to: "completed", reason: "done", ts: "2026-10-30T00:00:01.000Z" },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    for (const waitMs of [RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS]) {
+      let t = 0;
+      const r = await runWait({ runId, runDir, waitMs, sleepFn: async (ms) => { t += ms; }, nowFn: () => t });
+      assert.equal(r.terminal, true, `boundary ${waitMs}: the wait runs and observes the terminal state`);
+    }
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
 });

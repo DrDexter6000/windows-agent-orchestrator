@@ -28,6 +28,32 @@ export const VITAL_SIGN_RECENT_SECONDS = 10 * 60;
 export const LEAD_ADVISORY_WIRE_MAX_LEN = 480;
 
 /**
+ * 决定 0095：作用域内最后一条 worker `run.event`（含 runtime_activity）距今
+ * 多少毫秒。口径同 runStatus 的心跳（决定 0069），未来时间钳成 0（同 runStop
+ * 的事实侧）；时间戳读不出/非有限 → null（"无法观测"）。调用方比较阈值时直接
+ * 用毫秒，不先取整。
+ *
+ * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
+ * @param {number} nowMs
+ * @returns {number|null} 年龄毫秒数；无法观测时 null
+ */
+export function vitalSignAgeMs(scopeEvents, nowMs) {
+  if (!Number.isFinite(nowMs)) return null;
+  let baseTs = null;
+  for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
+    const e = scopeEvents[i];
+    if (e?.type === "run.event") {
+      baseTs = e.ts;
+      break;
+    }
+  }
+  if (baseTs === null || baseTs === undefined) return null;
+  const base = new Date(baseTs).getTime();
+  if (!Number.isFinite(base)) return null;
+  return Math.max(0, nowMs - base);
+}
+
+/**
  * 距最近一次动作或正文过了多少秒。从未有过动作时从 run.submitted 起算；连
  * run.submitted 都没有（卡在 pending、从未派出去的运行——真实转录里有这种停了
  * 三周的孤儿）就从转录的第一条事件起算。

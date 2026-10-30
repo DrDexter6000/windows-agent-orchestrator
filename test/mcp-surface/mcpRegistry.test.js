@@ -1286,8 +1286,8 @@ test("R10-A-MCP-2: `model` threads to the dispatcher as modelOverride; absent mo
       const out = res.structuredContent ?? {};
       assert.deepEqual(
         Object.keys(out).sort(),
-        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
-        "output schema unchanged — model is input-only on the wire",
+        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "model is input-only on the wire (nextStep is decision 0095's additive field)",
       );
       // Absent model = byte-compatible dispatcher input (no key at all).
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again", expectedWorkspaceRoot: dir } });
@@ -1470,8 +1470,8 @@ test("R11-1-MCP-2: `reasoning` threads to the dispatcher as reasoningOverride; c
       const out = res.structuredContent ?? {};
       assert.deepEqual(
         Object.keys(out).sort(),
-        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
-        "output schema unchanged — reasoning is input-only on the wire",
+        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "reasoning is input-only on the wire (nextStep is decision 0095's additive field)",
       );
       // Absent reasoning = byte-compatible dispatcher input (no key at all).
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again", expectedWorkspaceRoot: dir } });

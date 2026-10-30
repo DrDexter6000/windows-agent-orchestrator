@@ -166,7 +166,7 @@ test("M12-3B-RED-02: one call waits once and returns one requested review page",
   }
 });
 
-test("M12-3B-RED-03: omitted waitMs uses one 270-second readiness budget", async () => {
+test("M12-3B-RED-03: omitted waitMs uses one 45-second readiness budget", async () => {
   const dir = makeGitDir("m123b-default-");
   try {
     let observedWaitMs = null;
@@ -187,7 +187,8 @@ test("M12-3B-RED-03: omitted waitMs uses one 270-second readiness budget", async
         arguments: { runId: "run_default", fileIndex: 0 },
       });
       assert.equal(result.isError, undefined);
-      assert.equal(observedWaitMs, 270000);
+      // 决定 0095：缺省等待 270000 → 45000。
+      assert.equal(observedWaitMs, 45000);
     } finally {
       await client.close();
       await server.close();

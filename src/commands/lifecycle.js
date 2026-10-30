@@ -297,7 +297,7 @@ export async function resumeCommand(args, config) {
       runId,
       resumed: true,
       delegated: "background-runner",
-      note: "detached runner owns the resumed lifecycle (token gate / observation-deadline notice / natural terminal); poll with `runs status`/`runs wait`",
+      note: "detached runner owns the resumed lifecycle (token gate / observation-deadline notice / natural terminal); wait to settlement: `wao runs wait <runId> --until-settled`",
     }));
     return;
   }

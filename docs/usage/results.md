@@ -69,7 +69,7 @@ npm run --silent cli -- wao handoff read lead --format json
 LLM 编排器或外部脚本的最短驱动闭环：
 
 1. `spawn` 启动 run，拿 runId
-2. `status <runId>` 轮询状态
+2. `runs wait <runId> --until-settled` 等到收口（`status <runId>` 只做即时查询）
 3. `collect <runId>` 或读 transcript 拿产出
 4. `runs metrics <runId>` 拿成本
 

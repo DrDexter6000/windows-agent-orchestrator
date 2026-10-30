@@ -256,7 +256,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       background: true,
       terminalAccepted: false,
       terminalState: result.terminalState,
-      note: `not forked: transcript already terminal (${result.terminalState})`,
+      note: `not forked: transcript already terminal (${result.terminalState}); wait to settlement: \`wao runs wait ${result.runId} --until-settled\``,
     }, null, 2));
     return;
   }
@@ -274,7 +274,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     // effort: override}) under the same advisory discipline. Present only
     // when --reasoning was given (ordinary dispatches stay byte-identical).
     ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
-    note: "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Poll with `status`/`tail`.",
+    note: "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Wait to settlement: `wao runs wait <runId> --until-settled`.",
   }, null, 2));
 }
 
@@ -747,7 +747,7 @@ export function printObservationDeadlineNotice(runId, { waitTimeoutMs, source } 
   console.error(
     `[${runId}] observation deadline reached (waitTimeout ${waitTimeoutMs}ms, source ${source})`
     + " — worker NOT stopped, still waiting for natural terminal;"
-    + " bounded observation: `runs wait <runId>`; dispatcher-independent survival: --background",
+    + " wait to settlement: `runs wait <runId> --until-settled`; dispatcher-independent survival: --background",
   );
 }
 

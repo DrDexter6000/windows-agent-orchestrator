@@ -137,6 +137,7 @@ Output:
 | state | string | yes |  |
 | workspaceProof | object | yes |  |
 | providerSessionRouting | string | yes | enum: not_used \| first_turn_requested \| resume_requested |
+| nextStep | string | no |  |
 
 ## run_dispatch_contract_check
 
@@ -179,7 +180,7 @@ Output:
 
 ## run_consult
 
-Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — every seat's cwd and the record live under it; waitMs 0..600000 (default 270000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
+Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — every seat's cwd and the record live under it; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -252,6 +253,7 @@ Output:
 | rootRunId | string\|null | yes |  |
 | state | string\|null | yes |  |
 | rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| lineage_closed \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| role_contract_drift \| legacy_dispatch_continuable_unsupported \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
+| nextStep | string | no |  |
 | inheritedChangedPaths | array<string>\|null | no |  |
 | inheritedChangedCount | integer\|null | no |  |
 | inheritedChangedTruncated | boolean\|null | no |  |
@@ -414,6 +416,7 @@ Output:
 | semanticNotes | array<object> | yes |  |
 | isolationFailure | object\|null | yes |  |
 | verificationGate | object | no |  |
+| nextStep | string | no |  |
 
 ## run_delivery_decide
 
@@ -491,7 +494,7 @@ Output:
 
 ## run_wait
 
-Wait for terminal state or observation-window expiry, then a liveness summary; early return ONLY on terminal. waitMs 180000..600000 ms (default 270000; waitMs=0 is intentionally invalid — point-in-time: run_await_result(waitMs:0) or run_status). Expiry never terminates. Host transport loss/cancellation does not stop the detached run: observation unknown; no control-plane mutation — re-read point-in-time; never infer a stop. Self-explaining semanticNotes; wao://semantics/{id}.
+Wait for terminal state or observation-window expiry, then a liveness summary; early return ONLY on terminal. waitMs 30000..600000 ms (default 45000; waitMs=0 is intentionally invalid — point-in-time: run_await_result(waitMs:0) or run_status). Expiry never terminates; the additive nextStep names the next call (call run_wait again within the host's tool timeout; on terminal, run_delivery with an explicit waitMs). Host transport loss/cancellation does not stop the detached run: observation unknown; no control-plane mutation — re-read point-in-time; never infer a stop. Self-explaining semanticNotes; wao://semantics/{id}.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -523,6 +526,7 @@ Output:
 | termination | object\|null | yes |  |
 | availableDrilldowns | array<object> | yes |  |
 | semanticNotes | array<object> | yes |  |
+| nextStep | string | no |  |
 
 ## run_await_result
 
@@ -633,7 +637,7 @@ Output:
 
 ## run_delivery_review_bundle
 
-One bounded read-only readiness wait that returns early once settled (waitMs: 1000..300000 ms, waitMs=0 is invalid; omit = default 270000 ms wait; pending-at-deadline truthful, never an error), then, only when reviewable, one Lead-selected bounded review page (review is null otherwise — no diff read); response always carries the safe run_delivery facts. fileIndex/cursor are Lead-supplied: the tool never chooses/traverses files or cursors, never summarizes repository text, never stop/retry/repackage/accept/reject. Host transport loss/cancellation does not stop the detached run — re-read point-in-time; run_delivery + run_delivery_review remain for atomic control (immediate reads).
+One bounded read-only readiness wait that returns early once settled (waitMs: 1000..300000 ms, waitMs=0 is invalid; omit = default 45000 ms wait; pending-at-deadline truthful, never an error), then, only when reviewable, one Lead-selected bounded review page (review is null otherwise — no diff read); response always carries the safe run_delivery facts. fileIndex/cursor are Lead-supplied: the tool never chooses/traverses files or cursors, never summarizes repository text, never stop/retry/repackage/accept/reject. Host transport loss/cancellation does not stop the detached run — re-read point-in-time; run_delivery + run_delivery_review remain for atomic control (immediate reads).
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 

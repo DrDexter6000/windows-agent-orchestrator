@@ -532,6 +532,86 @@ function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
 }
 
 /**
+ * 解析链内核（同步；§2 opus 顺序）——resolveTranscriptPath（既有路径字符串
+ * 合同，行为不变）与 resolveTranscriptPathDetailed（决定 0095：`runs wait
+ * --until-settled` 等待器要的明确信号）共用的唯一链实现。返回详细对象：
+ *   - path：命中的路径；未命中时为旧平铺路径（与 resolveTranscriptPath 的
+ *     非 forAppend 兼容形状一致）或 null（扫描层抛错且无快命中）；
+ *   - found：解析到一个存在的转录（含多副本全同）；
+ *   - degraded：扫描超限、孪生核验被跳过（复验 sol/S3：降级必须可见）；
+ *   - conflict：多副本内容不同（持久冲突）；
+ *   - unreadable：多副本里有一份哈希读失败——没有"内容不同"的证据，可能只是
+ *     一次瞬时读失败（如 Windows 共享冲突），不算冲突；
+ *   - 附加内部字段（scanError/hashFailedPath/conflictPaths）仅供
+ *     resolveTranscriptPath 重放既有具名硬错文案，公共详细面不携带。
+ */
+function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
+  const i = defaultIo(io);
+  const flat = transcriptPathFor(runDir, runId);
+  const flatExists = i.existsSync(flat);
+
+  // ① cwdHint → 桶（经冻结索引+权威核验）。
+  const hintedDir = bucketCandidateFromCwdHint(runDir, cwdHint, i);
+  const hintedPath = hintedDir !== null && i.existsSync(transcriptPathFor(hintedDir, runId))
+    ? transcriptPathFor(hintedDir, runId)
+    : null;
+  const fastPath = hintedPath ?? (flatExists ? flat : null);
+
+  // ②③ 扫描层（含平铺/hint 未命中时的兜底定位 + 全层孪生检测）。
+  let bucketHits;
+  try {
+    bucketHits = scanBucketHits(runDir, runId, i);
+  } catch (e) {
+    if (e instanceof TranscriptResolutionError && e.code === "transcript-resolution-scan-over-limit") {
+      // 扫描超限：有快命中 → 可观测降级（degraded:true，孪生检测此轮不可用）；
+      // 无快命中 → found:false + degraded:true（快命中缺席本身无法核验）。
+      return {
+        path: fastPath,
+        found: fastPath !== null,
+        degraded: true,
+        conflict: false,
+        scanError: e,
+      };
+    }
+    throw e;
+  }
+  const all = [...new Set([hintedPath, ...bucketHits, flatExists ? flat : null].filter((p) => p !== null))];
+  if (all.length === 1) {
+    return { path: all[0], found: true, degraded: false, conflict: false };
+  }
+  if (all.length > 1) {
+    const hashes = all.map((p) => shaOfIfExists(p, i));
+    const badIdx = hashes.findIndex((h) => h === null);
+    if (badIdx >= 0) {
+      return {
+        path: null,
+        found: false,
+        degraded: false,
+        conflict: false,
+        unreadable: true,
+        hashFailedPath: all[badIdx],
+      };
+    }
+    if (new Set(hashes).size > 1) {
+      return { path: null, found: false, degraded: false, conflict: true, conflictPaths: all };
+    }
+    // 全同：hint 桶 > 字典序最小桶 > 平铺。
+    let picked;
+    if (hintedPath !== null) {
+      picked = hintedPath;
+    } else {
+      // 复验 F4：码元比较（localeCompare 随 locale 漂移——确定性要求）。
+      const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      picked = bucketOnly[0] ?? flat;
+    }
+    return { path: picked, found: true, degraded: false, conflict: false };
+  }
+
+  // 全未命中：非 forAppend 语义里返回旧平铺路径（调用方的 ENOENT 语义兼容）。
+  return { path: flat, found: false, degraded: false, conflict: false };
+}
+
+/**
  * 解析链（同步；§2 opus 顺序）。返回一个**路径字符串**：
  * 命中桶/平铺 → 该路径；全未命中 → 非 forAppend 时返回旧平铺路径（调用方
  * 的 ENOENT 语义与迁移前逐字节兼容），forAppend:true 时具名硬错
@@ -548,57 +628,58 @@ function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
  * 不可用；findTranscriptTwin 仍会硬错供诊断）；无快命中 → 保持具名硬错。
  */
 export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend = false, io } = {}) {
-  const i = defaultIo(io);
   if (!runDir || typeof runDir !== "string") throw new Error("resolveTranscriptPath: runDir required");
   if (!runId || typeof runId !== "string") throw new Error("resolveTranscriptPath: runId required");
-  const flat = transcriptPathFor(runDir, runId);
-  const flatExists = i.existsSync(flat);
 
-  // ① cwdHint → 桶（经冻结索引+权威核验）。
-  const hintedDir = bucketCandidateFromCwdHint(runDir, cwdHint, i);
-  const hintedPath = hintedDir !== null && i.existsSync(transcriptPathFor(hintedDir, runId))
-    ? transcriptPathFor(hintedDir, runId)
-    : null;
-  const fastPath = hintedPath ?? (flatExists ? flat : null);
+  const d = resolveTranscriptChain(runDir, runId, { cwdHint, io });
+  // 扫描超限：降级必须发信号（stderr 告警行——静默返回不算可观测）；
+  // forAppend 不降级——追加者未完成孪生比较不得当作无冲突。
+  if (d.scanError) {
+    if (d.found && d.degraded && !forAppend) {
+      console.warn(`[transcript-resolution] scan over limit (${d.scanError.detail}); degraded to fast hit without twin check: ${d.path}`);
+      return d.path;
+    }
+    throw d.scanError;
+  }
+  if (d.unreadable) {
+    throw new TranscriptResolutionError("transcript-resolution-conflict",
+      `runId ${runId} has multiple copies and one is unreadable (hash failed): ${d.hashFailedPath} — refusing to pick without comparison`);
+  }
+  if (d.conflict) {
+    throw multiBucketConflict(runId, d.conflictPaths);
+  }
+  if (!d.found) {
+    if (forAppend) {
+      throw new TranscriptResolutionError("transcript-not-found",
+        `runId ${runId} not found in any layer (flat or ${TRANSCRIPT_SCAN_BUCKET_LIMIT}-bucket scan); appenders must not create a legacy flat file`);
+    }
+    return d.path;
+  }
+  return d.path;
+}
 
-  // ②③ 扫描层（含平铺/hint 未命中时的兜底定位 + 全层孪生检测）。
-  let bucketHits;
-  try {
-    bucketHits = scanBucketHits(runDir, runId, i);
-  } catch (e) {
-    if (e instanceof TranscriptResolutionError && e.code === "transcript-resolution-scan-over-limit" && fastPath !== null) {
-      // 复验 sol/S3：降级必须发信号（stderr 告警行——静默返回不算可观测）；
-      // forAppend 不降级——追加者未完成孪生比较不得当作无冲突。
-      if (forAppend) throw e;
-      console.warn(`[transcript-resolution] scan over limit (${e.detail}); degraded to fast hit without twin check: ${fastPath}`);
-      return fastPath;
-    }
-    throw e;
-  }
-  const all = [...new Set([hintedPath, ...bucketHits, flatExists ? flat : null].filter((p) => p !== null))];
-  if (all.length === 1) return all[0];
-  if (all.length > 1) {
-    const hashes = all.map((p) => shaOfIfExists(p, i));
-    const badIdx = hashes.findIndex((h) => h === null);
-    if (badIdx >= 0) {
-      throw new TranscriptResolutionError("transcript-resolution-conflict",
-        `runId ${runId} has multiple copies and one is unreadable (hash failed): ${all[badIdx]} — refusing to pick without comparison`);
-    }
-    if (new Set(hashes).size > 1) {
-      throw multiBucketConflict(runId, all);
-    }
-    // 全同：hint 桶 > 字典序最小桶 > 平铺。
-    if (hintedPath !== null) return hintedPath;
-    // 复验 F4：码元比较（localeCompare 随 locale 漂移——确定性要求）。
-    const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    return bucketOnly[0] ?? flat;
-  }
-
-  if (forAppend) {
-    throw new TranscriptResolutionError("transcript-not-found",
-      `runId ${runId} not found in any layer (flat or ${TRANSCRIPT_SCAN_BUCKET_LIMIT}-bucket scan); appenders must not create a legacy flat file`);
-  }
-  return flat;
+/**
+ * 决定 0095：详细解析面——给 `runs wait --until-settled` 等待器的明确信号。
+ * 返回 `{ path, found, degraded, conflict, unreadable }`（不抛具名硬错；扫描层
+ * 自身的意外 I/O 错误仍上抛，由调用方按不可信轮处理）：
+ *   - found:false 且其余皆 false —— 未找到（path 为兼容形状的旧平铺路径，
+ *     该文件不存在，读取会 ENOENT）；
+ *   - degraded:true —— 扫描超限、孪生核验被跳过（只当不可信轮，不当冲突）；
+ *   - unreadable:true —— 多副本里有一份哈希读失败（只当不可信轮，不当冲突）；
+ *   - conflict:true —— 多副本内容不同（持久冲突，立即处理）。
+ * 既有 resolveTranscriptPath 的行为与调用方不变。
+ */
+export function resolveTranscriptPathDetailed(runDir, runId, { cwdHint = null, io } = {}) {
+  if (!runDir || typeof runDir !== "string") throw new Error("resolveTranscriptPathDetailed: runDir required");
+  if (!runId || typeof runId !== "string") throw new Error("resolveTranscriptPathDetailed: runId required");
+  const d = resolveTranscriptChain(runDir, runId, { cwdHint, io });
+  return {
+    path: d.path,
+    found: d.found,
+    degraded: d.degraded,
+    conflict: d.conflict,
+    unreadable: d.unreadable === true,
+  };
 }
 
 function multiBucketConflict(runId, paths) {

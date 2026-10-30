@@ -59,10 +59,10 @@ import { createSecretRedactor } from "../secretRedaction.js";
 import { dispatchRun } from "./runDispatch.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
-// 预算范围与 run_wait 同域（0039 r1：--wait-timeout 默认 600000，范围同 run_wait）。
-import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS, RUN_WAIT_DEFAULT_MS } from "./runWait.js";
 // R9（决定 0023）：modelFamily 是展示闭集模块，本文件（dispatch/delivery 控制
 // 面路径）不得 import——三块砖①厂族改为 registry 原始字段直读（seatRuntimeFacts）。
+// 决定 0095：本模块不再引用 RUN_WAIT_*（run_wait 的下限已随 MCP 面降到 30000，
+// consult 的 CLI 等待域保持 180000..600000，见下方显式常量）。
 
 // ===== 锚点规则（brief 解析与席位回复归组共用同一 SSOT）=====
 //
@@ -329,9 +329,13 @@ export function extractFinalAssistantText(events, { runId, env } = {}) {
 
 // ===== 编排 =====
 
-export const CONSULT_WAIT_MIN_MS = RUN_WAIT_MIN_MS;
-export const CONSULT_WAIT_MAX_MS = RUN_WAIT_MAX_MS;
-export const CONSULT_WAIT_DEFAULT_MS = RUN_WAIT_MAX_MS; // 600000
+// 决定 0095：consult 的 CLI 等待域显式写死，不再引用 RUN_WAIT_*——run_wait 的
+// 下限已降到 30000（MCP 面），consult 的 CLI 语义不变。两个 CLI 缺省（创建
+// 600000 / 再等 270000）各自成文，不从一个常量合成。
+export const CONSULT_WAIT_MIN_MS = 180000;
+export const CONSULT_WAIT_MAX_MS = 600000;
+export const CONSULT_WAIT_DEFAULT_MS = 600000; // `consult run`（runConsult budgetMs）的创建缺省
+export const CONSULT_REWAIT_DEFAULT_MS = 270000; // `consult wait`（waitForConsult）的再等缺省
 
 /** consultId 形如 consult_<YYYYMMDDHHMMSSsss><6位base36随机>（与 runId 同时间戳形状）。 */
 export function generateConsultId(nowFn = Date.now) {
@@ -407,8 +411,9 @@ export async function runConsult({
   declaredFields,
   reviewedRunId,
   budgetMs = CONSULT_WAIT_DEFAULT_MS,
-  // M13-r2：预算下限按调用面注入——CLI/r1 保持 run_wait 域（180000），MCP
-  // run_consult 的 waitMs 闭集是 0..600000（0=扇出后立即取当下观察快照），注入 0。
+  // M13-r2：预算下限按调用面注入——CLI/r1 保持 consult 域（CONSULT_WAIT_MIN_MS
+  // 180000，决定 0095 起与 run_wait 域解耦），MCP run_consult 的 waitMs 闭集是
+  // 0..600000（0=扇出后立即取当下观察快照），注入 0。
   // 上限恒为 CONSULT_WAIT_MAX_MS，不可注入。
   budgetFloorMs = CONSULT_WAIT_MIN_MS,
   registryPath,
@@ -852,15 +857,15 @@ export async function loadConsultRecord({
  * @param {string} input.consultId
  * @param {string} input.consultsDir
  * @param {string} input.runDir
- * @param {number} [input.waitMs] 观察窗，[CONSULT_WAIT_MIN_MS, CONSULT_WAIT_MAX_MS]；缺省与 `runs wait` 相同
- *   （RUN_WAIT_DEFAULT_MS）——调用方自己的命令超时往往只有几分钟，缺省不取上限
+ * @param {number} [input.waitMs] 观察窗，[CONSULT_WAIT_MIN_MS, CONSULT_WAIT_MAX_MS]；缺省 CONSULT_REWAIT_DEFAULT_MS
+ *   （270000）——调用方自己的命令超时往往只有几分钟，缺省不取上限
  * @returns {Promise<{record: object, allTerminal: boolean, waitedMs: number, windowMs: number}>}
  */
 export async function waitForConsult({
   consultId,
   consultsDir,
   runDir,
-  waitMs = RUN_WAIT_DEFAULT_MS,
+  waitMs = CONSULT_REWAIT_DEFAULT_MS,
   pollIntervalMs = 2000,
   readFileFn = readFile,
   readTranscriptFn = readTranscript,

@@ -62,13 +62,14 @@ npm run cli -- tail <runId> --follow # 实时跟踪
 
 # 阻塞等待 run 到终态（或观察窗口到期）
 npm run cli -- runs wait <runId>                     # 默认窗口 270000 ms，text 摘要
-npm run cli -- runs wait <runId> --wait-ms 600000    # 窗口 180000..600000 ms
-npm run cli -- runs wait <runId> --format json       # 完整服务结果 + semanticNotes
+npm run cli -- runs wait <runId> --wait-ms 600000    # 窗口 30000..600000 ms
+npm run cli -- runs wait <runId> --format json       # 完整服务结果 + semanticNotes + nextStep
+npm run cli -- runs wait <runId> --until-settled     # 轮询到收口才退出（与 --wait-ms 互斥）
 ```
 
 runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
-`runs wait` 与 MCP `run_wait` 工具共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附 `semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；等待期间 Ctrl-C 会打印中断时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）；非数字值（如 `--wait-ms abc`）在 CLI 层即以固定文案 `--wait-ms must be a number` 拒绝（不回显原值，service 不被调用）。`runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
+`runs wait` 与 MCP `run_wait` 共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码（0/3/4/130）与诚实边界见 [supervise.md「等待到收口」](supervise.md#等待到收口runs-wait---until-settled-与-nextstep决定-0095)。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve、kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
@@ -190,7 +191,7 @@ CLI 前台 `run` 派发复用型专家时，显式给 `--cwd <目标项目的 gi
 
 reuse 路由对前任 run 的判定是 runId 绑定读取：`session.created` 存在性检查（决定 busy/resume/first 分派）与终态判定（`findState`）都只由前任 run 自身事件计算——尾部追加的外 run 伪造行不能把 crashed 前任翻转成 resumable，不能把在飞前任翻成 resume，也不能把终态前任伪造成在飞而阻断派发。前任 transcript 为信封前 legacy 格式（事件无 `runId` 字段）时，reuse 路由从 resume 降级为 first（认领槽位开新回合，不复用无法归属到前任 run 的会话）；全无信封的前任 transcript（零绑定事件）按 busy 处理（不可归属 = 永不并发驱动同一 provider 会话）。
 
-返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到自然终态（token 闸门 / 等待窗到期通知 / 兜底 abort 都生效——到期不杀），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
+返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到自然终态（token 闸门 / 等待窗到期通知 / 兜底 abort 都生效——到期不杀），写入共享 transcript。Lead 结束回合前按返回的 `nextStep` 挂好等待，`run_status` 只做即时查询。
 
 ## MCP `run_continue`（Lead 授权修正续跑）
 

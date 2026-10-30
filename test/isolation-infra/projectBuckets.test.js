@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  resolveRunDirForWrite, resolveTranscriptPath, listTranscriptsDeep, findTranscriptTwin,
+  resolveRunDirForWrite, resolveTranscriptPath, resolveTranscriptPathDetailed, listTranscriptsDeep, findTranscriptTwin,
   projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs,
   TranscriptResolutionError, TRANSCRIPT_SCAN_BUCKET_LIMIT,
 } from "../../src/projectBuckets.js";
@@ -253,6 +253,30 @@ test("D2-②b 验收批⑤: 孪生之一哈希读失败 → 具名硬错（null 
     assert.throws(() => resolveTranscriptPath(root, "run_hf", { io: badIo }),
       (e) => e.code === "transcript-resolution-conflict" && /unreadable/.test(e.message),
       "哈希读失败=硬错（不判同、不择一）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("决定 0095: 详细解析面——哈希读失败是 unreadable 不是 conflict；内容不同才是 conflict", () => {
+  const root = makeRoot("wao-pb-0095-");
+  try {
+    mkdirSync(join(root, "repo-dt"), { recursive: true });
+    const w = resolveRunDirForWrite(root, identifyProjectFromCwd(join(root, "repo-dt"), IO));
+    const bucketFile = join(w.transcriptDir, "run_dt.jsonl");
+    const flatFile = join(root, "run_dt.jsonl");
+    write(bucketFile, "{\"same\":1}\n");
+    write(flatFile, "{\"same\":1}\n");
+    assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt"),
+      { path: bucketFile, found: true, degraded: false, conflict: false, unreadable: false }, "同哈希孪生 → 桶内优先");
+    const badIo = { sha256: (p) => { if (p === flatFile) throw new Error("EBUSY"); return "x"; } };
+    assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt", { io: badIo }),
+      { path: null, found: false, degraded: false, conflict: false, unreadable: true },
+      "一份哈希读失败：没有内容不同的证据（可能瞬时），不报冲突");
+    writeFileSync(flatFile, "{\"CHANGED\":true}\n", "utf8");
+    assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt"),
+      { path: null, found: false, degraded: false, conflict: true, unreadable: false }, "内容不同 → 持久冲突");
+    assert.deepEqual(resolveTranscriptPathDetailed(root, "run_none"),
+      { path: join(root, "run_none.jsonl"), found: false, degraded: false, conflict: false, unreadable: false },
+      "未找到 → 兼容形状的平铺路径，其余信号皆 false");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

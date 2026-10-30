@@ -391,8 +391,8 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
     // run_dispatch: only agentId + prompt are accepted.
     assert.match(d("run_dispatch"), /agentId/i);
     // run_wait is a long observation primitive, not a point-in-time alias.
-    assert.match(d("run_wait"), /180000\.\.600000/);
-    assert.match(d("run_wait"), /default 270000/);
+    assert.match(d("run_wait"), /30000\.\.600000/);
+    assert.match(d("run_wait"), /default 45000/);
     assert.match(d("run_wait"), /waitMs=0 is intentionally invalid/i);
     assert.match(d("run_wait"), /run_await_result\(waitMs:0\).*run_status/i);
     // M12-19: wait-capable tools truthfully state that Host transport
@@ -436,7 +436,12 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 91293;
+const FROZEN_23_WIRE_CEILING = 91612;
+// 0095（2026-10-29，Owner 批准的批次）：Lead 及时得知运行收口——run_wait 输入
+// 下限 30000/缺省 45000、出参增可选 nextStep；run_await_result/run_consult/
+// run_delivery_review_bundle 的 MCP 缺省改 45000；run_delivery 出参增可选
+// nextStep；run_dispatch/run_continue 出参增可选 nextStep；相关描述同步：
+// 91293→91612（实测；Owner 硬顶 94532 内）。
 // 2026-10-16（Owner 批准小幅重冻）：run_delivery_reverify 入参/出参增可选
 // attempt（1|2，缺省 1——第二次显式重验机会），描述加一句第二次机会说明：
 // 88048→88227（实测；本批批准 wire+desc 合计涨幅 ≤300B，实测合计 +252B）。
@@ -637,7 +642,11 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // （CAVEATS_CAP）——outputSchema 的 maxItems 改一位数，wire 字节不变，SHA 如实翻新。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "4f6c89f8ac79c92e61547739278056e02504635f9584aa6cfce922a69b8c0ed7";
+  "01f67952fae7719865955c7a0a30ab47b7c8b576cdecdc9bd6ea432e0a022e76";
+// 0095（2026-10-29）：run_wait/run_delivery/run_dispatch/run_continue 出参增
+// 可选 nextStep（string≤480，取自 LEAD_ADVISORY_WIRE_MAX_LEN）、run_wait 输入
+// waitMs 的 min/default 变化（30000/45000）——schema 在 stripped 载荷内，SHA
+// 如实翻新（决定 0095，Owner 批准本批重冻）。
   // （历史值：3b3e4fe6fa873d9bcf800218f95af41c132179f0514b58bdce1e1bce1bc6e556
   // 为 0088 修订条放宽 caveats 上限后的冻结值；b103cb7263a9a02c4036a1149788975487630e500945331e5122febac0b7712d
   // 为 0090 family 字段增补后的冻结值；ccd1adeb0bab708e5fa7cbf85032090e3a5ef72ac52000e1caa304239c60db61
@@ -730,7 +739,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
-const FROZEN_23_DESC_CEILING = 11847;
+const FROZEN_23_DESC_CEILING = 11990;
+// 0095（2026-10-29，Owner 批准重冻）：run_wait 描述改写区间/缺省并加 nextStep
+// 一句：11847→11990（实测）。
 // 2026-10-16（Owner 批准小幅重冻，与 wire 同批）：run_delivery_reverify 描述
 // 加一句 attempt:2 第二次机会说明：11783→11856（实测；wire+desc 合计涨幅
 // 批准 ≤300B，实测 +252B）。
@@ -741,7 +752,9 @@ const FROZEN_23_DESC_CEILING = 11847;
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 23058;
+const FROZEN_23_HOSTVISIBLE_CEILING = 23197;
+// 0095（2026-10-29，Owner 批准重冻）：与 wire/desc 同批——nextStep 输出字段与
+// 新默认值进 inputSchema/description：23058→23197（实测）。
 // 2026-10-16（Owner 批准小幅重冻，与 wire/desc 同批——同一 attempt 字段的
 // inputSchema 字节进 hostVisible）：22941→23067（实测；hostVisible 无独立硬顶，
 // 在 wire 硬顶内）。

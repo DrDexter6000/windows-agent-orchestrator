@@ -3,7 +3,7 @@
 // M12-3 Package A CORRECTION: runAwaitResult composite read-only service — TDD RED→GREEN.
 //
 // run_await_result folds (1) a Lead-controlled bounded wait for terminal
-// (waitMs 0..270000, default 270000), (2) a truthful run/liveness/cursor
+// (waitMs 0..270000, default 45000), (2) a truthful run/liveness/cursor
 // observation, and (3) a safe terminal-then-compact collection into ONE call.
 // It is strictly read-only and advisory:
 //   - never appends messages.collected, never invokes commitAppend,

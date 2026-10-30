@@ -27,7 +27,7 @@ import { join, resolve, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 
 import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
-import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
+import { resolveTranscriptPath, resolveTranscriptPathDetailed, listTranscriptsDeep } from "../projectBuckets.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
 // R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
 // isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
@@ -99,6 +99,10 @@ import { readHandshake, isDaemonAlive } from "../daemon.js";
 // selector — no copied algorithm, no copied catalog.
 import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
 import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
+// 决定 0095：`runs wait --until-settled` 的收口判定 + 两面共用的 nextStep 模板。
+import { determineRunSettlement } from "../application/runSettlement.js";
+import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
+import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "../application/runQuietAdvisory.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
 // reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
 // Shared workspace authority (proveWorkspace) + registry IDs (readRegistry).
@@ -281,12 +285,13 @@ async function runsCommand(args, config, deps) {
 
 // TD-109: strict flag set for `runs wait`. Unknown flags are rejected so a
 // typo'd flag cannot silently produce wrong output (same discipline as
-// runs delivery review / reverify).
-const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir"]);
+// runs delivery review / reverify). 决定 0095：`--until-settled` 是布尔旗标
+//（不带值），与 `--wait-ms` 互斥。
+const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir", "--until-settled"]);
 // F-④（2026-10-10 摩擦处置批）：`runs wait --run-id X` 连续两报错且都不含正确
 // 用法（runId 是位置参数、没有 --run-id 旗标）。所有 argv 解析错误附本行——
 // 报错即教学，用户不需要去翻 help。
-const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [--wait-ms <ms>] [--format json|text] [--run-dir <dir>]（runId 为位置参数，无 --run-id 旗标）";
+const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [--wait-ms <ms> | --until-settled] [--format json|text] [--run-dir <dir>]（runId 为位置参数，无 --run-id 旗标；--until-settled 不带值，不能与 --wait-ms 同用）";
 
 /**
  * TD-109: `runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]`
@@ -318,12 +323,18 @@ async function runsWaitCommand(args, config, deps = {}) {
   const seenFlags = new Set();
   const flags = {};
   const positionals = [];
+  let untilSettled = false;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a.startsWith("--")) {
       if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw linesError([`unknown flag for runs wait: ${a}`, RUNS_WAIT_USAGE]);
       if (seenFlags.has(a)) throw linesError([`${a} specified multiple times`, RUNS_WAIT_USAGE]);
       seenFlags.add(a);
+      // 决定 0095：布尔旗标——不带值；跟在后面的 token 一律按位置参数处理。
+      if (a === "--until-settled") {
+        untilSettled = true;
+        continue;
+      }
       const v = args[i + 1];
       if (v === undefined || v.startsWith("--")) throw linesError([`${a} requires a value`, RUNS_WAIT_USAGE]);
       if (v.trim().length === 0) throw linesError([`${a} must be non-empty`, RUNS_WAIT_USAGE]);
@@ -342,7 +353,17 @@ async function runsWaitCommand(args, config, deps = {}) {
     throw linesError([`--format only supports json|text`, RUNS_WAIT_USAGE]);
   }
   const asJson = flags.format === "json";
+  if (untilSettled && flags.waitMs !== undefined) {
+    throw linesError([`--until-settled and --wait-ms are mutually exclusive`, RUNS_WAIT_USAGE]);
+  }
   const runDir = resolve(flags.runDir ?? config.runDir);
+
+  // 决定 0095：`--until-settled` 走收口等待器（无界轮询直到收口/不可信/冲突/
+  // SIGINT），不经有界 runWait 服务。
+  if (untilSettled) {
+    await runsWaitUntilSettledCommand({ runId, asJson, runDir, config }, deps);
+    return;
+  }
 
   // CLI only coerces; the service is the shared business boundary and throws
   // its own exact error for out-of-range / non-integer values (not reworded).
@@ -401,7 +422,7 @@ async function runsWaitCommand(args, config, deps = {}) {
 
   if (asJson) {
     // Same selector and facts shape as the MCP run_wait handler — no copied
-    // catalog, no adapted semantics.
+    // catalog, no adapted semantics. 决定 0095：附 nextStep（CLI 面，带 runId）。
     const semanticNotes = selectSemanticNotes("run_wait", {
       observationOutcome: result.observationOutcome,
       outcome: result.observation?.outcome,
@@ -409,7 +430,13 @@ async function runsWaitCommand(args, config, deps = {}) {
       terminationSource: result.termination?.source ?? null,
       transcriptQuiet: result.transcriptQuiet === true,
     });
-    console.log(JSON.stringify({ ...result, semanticNotes }, null, 2));
+    const nextStep = runWaitNextStep({
+      surface: "cli",
+      terminal: result.terminal === true,
+      vitalSignAgeMs: Number.isFinite(result.vitalSignAgeMs) ? result.vitalSignAgeMs : null,
+      runId: result.runId,
+    });
+    console.log(JSON.stringify({ ...result, semanticNotes, nextStep }, null, 2));
     return;
   }
   console.log(`Run: ${result.runId} (${result.state})`);
@@ -421,6 +448,268 @@ async function runsWaitCommand(args, config, deps = {}) {
   // 改动既有五行结构（runsWait.test.js 的行序锚点保持稳定）。
   if (result.waitWindowHint) {
     console.log(`Hint: ${result.waitWindowHint}`);
+  }
+  // 决定 0095：有界等待的出口一句话（终态与到期都给；不终断言 worker 状态）。
+  console.log(`Next step: ${runWaitNextStep({
+    surface: "cli",
+    terminal: result.terminal === true,
+    vitalSignAgeMs: Number.isFinite(result.vitalSignAgeMs) ? result.vitalSignAgeMs : null,
+    runId: result.runId,
+  })}`);
+}
+
+// 决定 0095：`runs wait --until-settled` 的轮询参数。间隔 15 秒；不可信轮连续
+// 4 次退出 3；持久冲突立即退出 4；SIGINT 退出 130。不设总时长。可信未收口轮
+// 的进度行只在首轮、状态或原因变化、不可信轮之后，以及距上一行满 5 分钟时打印：
+// 宿主常把命令的整段输出交给模型，逐轮一行（每小时 240 行）只是白耗上下文。
+const RUNS_WAIT_SETTLED_POLL_INTERVAL_MS = 15000;
+const RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS = 4;
+const RUNS_WAIT_SETTLED_PROGRESS_EVERY_MS = 5 * 60 * 1000;
+
+/**
+ * 决定 0095：`wao runs wait <runId> --until-settled`——每轮串行：解析路径 →
+ * 读一份新快照 → 收口判定 + 生命体征 → 进度行（节流，见上方常量）；轮与轮
+ * 之间 sleep，不重叠。
+ * 只读：不改任何状态、不停 worker、不设总时长；永不沿用旧快照报收口。
+ *
+ * 可信轮 = 解析 found 且不降级、无冲突，快照读取成功，判定不是
+ * undeterminable；只有可信轮把不可信计数清零。判定 settled 后再解析一次，
+ * 路径或冲突状态变了算不可信轮继续，不变才退出 0 并输出终行与 nextStep。
+ *
+ * 退出码：0 收口；3 不可信轮连续 4 次（打印诊断入口）；4 持久冲突（多副本
+ * 内容不同）；130 SIGINT（单一出口：置位后正常完成不再输出进度，只输出一份
+ * 标注快照读取时间的最终结果）。
+ *
+ * deps 注入缝（测试确定性）：resolveDetailedFn / readTranscriptFn / nowFn /
+ * sleepFn / pollIntervalMs。
+ */
+async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {}) {
+  const pollIntervalMs = deps.pollIntervalMs ?? RUNS_WAIT_SETTLED_POLL_INTERVAL_MS;
+  const resolveDetailedFn = deps.resolveDetailedFn ?? resolveTranscriptPathDetailed;
+  const readTranscriptFn = deps.readTranscriptFn ?? readTranscript;
+  const nowFn = deps.nowFn ?? Date.now;
+  const sleepFn = deps.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+
+  const progress = (line) => {
+    // 文本模式进度写 stdout；JSON 模式进度写 stderr，stdout 只留最终 JSON。
+    if (asJson) console.error(line);
+    else console.log(line);
+  };
+  // 可信未收口轮的进度节流（见上方常量）。不可信轮每轮都打，打过之后下一个
+  // 可信轮无条件再打一行。
+  let lastProgressKey = null;
+  let lastProgressAt = null;
+  const untrustedProgress = (line) => {
+    progress(line);
+    lastProgressKey = null;
+  };
+
+  // SIGINT 单一出口：只置位；循环顶部感知后经统一的最终输出点退出（130）。
+  let interrupted = false;
+  const onSigint = () => { interrupted = true; };
+  process.on("SIGINT", onSigint);
+
+  // 单一 outcome：循环里每条路径只赋值一次并 break；函数末尾统一输出一份。
+  let outcome = null;
+  let lastSettlement = null;
+  let lastSnapshotReadAt = null;
+  let lastUntrustedReason = null;
+
+  const safeResolve = () => {
+    try {
+      return resolveDetailedFn(runDir, runId);
+    } catch {
+      // 解析链自身的意外 I/O 错误：按不可信轮处理（不当冲突、不当收口）。
+      return { path: null, found: false, degraded: false, conflict: false };
+    }
+  };
+
+  try {
+    let untrustedRounds = 0;
+    for (let round = 1; ; round += 1) {
+      if (interrupted) {
+        outcome = { kind: "interrupted" };
+        break;
+      }
+      const resolution = safeResolve();
+      if (resolution.conflict) {
+        outcome = { kind: "conflict" };
+        break;
+      }
+      if (!resolution.found || resolution.degraded) {
+        untrustedRounds += 1;
+        const [reason, text] = resolution.degraded
+          ? ["degraded_resolution", "resolution degraded (scan over limit, twin check skipped)"]
+          : resolution.unreadable
+            ? ["copy_unreadable", "copy unreadable (one of several copies failed to hash)"]
+            : ["not_found", "not found"];
+        lastUntrustedReason = reason;
+        if (!interrupted) {
+          untrustedProgress(`[runs wait] round ${round}: ${runId} transcript ${text} (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
+        }
+      } else {
+        let events = null;
+        let readOk = false;
+        try {
+          events = await readTranscriptFn(resolution.path);
+          readOk = true;
+          lastSnapshotReadAt = nowFn();
+        } catch {
+          readOk = false;
+        }
+        if (!readOk) {
+          untrustedRounds += 1;
+          lastUntrustedReason = "snapshot_read_failed";
+          if (!interrupted) {
+            untrustedProgress(`[runs wait] round ${round}: ${runId} snapshot read failed (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
+          }
+        } else {
+          const settlement = determineRunSettlement(events, runId);
+          lastSettlement = settlement;
+          if (settlement.status === "undeterminable") {
+            untrustedRounds += 1;
+            lastUntrustedReason = `undeterminable:${settlement.reason}`;
+            if (!interrupted) {
+              untrustedProgress(`[runs wait] round ${round}: ${runId} settlement undeterminable (${settlement.reason}) (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
+            }
+          } else if (settlement.status === "settled") {
+            // 收口判定后再解析一次：路径或冲突状态变了 → 不可信轮继续。
+            const confirm = safeResolve();
+            if (confirm.conflict || !confirm.found || confirm.degraded || confirm.path !== resolution.path) {
+              untrustedRounds += 1;
+              lastUntrustedReason = "resolution_changed_after_settled";
+              if (!interrupted) {
+                untrustedProgress(`[runs wait] round ${round}: ${runId} settled but transcript resolution changed; continuing (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
+              }
+            } else {
+              outcome = { kind: "settled", settlement };
+              break;
+            }
+          } else {
+            // 可信轮（未收口）：清零不可信计数；进度行按节流规则打印。非终态且转录
+            // 满 30 分钟未见新体征时，体征部分换成安静提示（runs settle / stop 两个
+            // 出口，只在 Lead 决定时用）。终态轮（等验证或 reverify）不报体征——
+            // 等待器分不清验证慢还是结果已丢，只指向交付状态。
+            untrustedRounds = 0;
+            const now = nowFn();
+            let detail = `; delivery state: wao runs delivery ${runId}`;
+            let quiet = false;
+            if (!settlement.facts.terminal) {
+              const ageMs = vitalSignAgeMs(boundReportScope(events, runId) ?? events, now);
+              quiet = ageMs !== null && ageMs >= LEAD_ADVISORY_QUIET_SECONDS * 1000;
+              detail = ageMs === null
+                ? "; vital sign age unknown"
+                : quiet
+                  ? `; ${runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: ageMs, runId })}`
+                  : `; last vital sign ${Math.floor(ageMs / 60000)} min ago`;
+            }
+            const progressKey = `${settlement.facts.state}|${settlement.reason}|${quiet}`;
+            if (!interrupted && (progressKey !== lastProgressKey || lastProgressAt === null
+              || now - lastProgressAt >= RUNS_WAIT_SETTLED_PROGRESS_EVERY_MS)) {
+              progress(`[runs wait] round ${round}: ${runId} state=${settlement.facts.state} not settled (${settlement.reason})${detail}`);
+              lastProgressKey = progressKey;
+              lastProgressAt = now;
+            }
+          }
+        }
+      }
+      if (untrustedRounds >= RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS) {
+        outcome = { kind: "untrusted", reason: lastUntrustedReason, rounds: untrustedRounds };
+        break;
+      }
+      // 轮与轮之间 sleep（不重叠）；SIGINT 置位后 sleep 照常结束，循环顶部退出。
+      await sleepFn(pollIntervalMs);
+    }
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+
+  // —— 单一最终输出点（每条路径恰好一份；SIGINT 与正常完成的竞争只有一个出口：
+  //    置位后即便本轮已判收口，也只输出中断结果并退出 130，绝不出第二份）——
+  const snapshotReadIso = lastSnapshotReadAt === null
+    ? null
+    : new Date(lastSnapshotReadAt).toISOString();
+  if (interrupted) {
+    // interrupted：退出码 130，唯一一份最终结果，标注快照读取时间。
+    process.exitCode = 130;
+    const state = lastSettlement?.facts?.state ?? "unknown";
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: false,
+        runId,
+        interrupted: true,
+        state,
+        settlement: lastSettlement
+          ? { status: lastSettlement.status, reason: lastSettlement.reason, facts: lastSettlement.facts }
+          : null,
+        snapshotReadAt: snapshotReadIso,
+      }, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${state})`);
+      console.log(`Settlement: ${lastSettlement ? `${lastSettlement.status} (${lastSettlement.reason})` : "not yet judged"}`);
+      console.log(`(interrupted; snapshot read at ${snapshotReadIso ?? "never"})`);
+    }
+    return;
+  }
+  if (outcome.kind === "settled") {
+    const s = outcome.settlement;
+    const nextStep = buildNextStep({
+      surface: "cli",
+      situation: "settled_line",
+      runId,
+      settlementReason: s.reason,
+      acceptanceStatus: s.facts.acceptanceStatus,
+    });
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: true,
+        runId,
+        state: s.facts.state,
+        settlement: { status: s.status, reason: s.reason, facts: s.facts },
+        nextStep,
+      }, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${s.facts.state})`);
+      const reverify = s.facts.reverifyStatus === "complete" ? `; reverify ${s.facts.effectiveVerificationStatus}` : "";
+      const verification = s.facts.verificationStatus ? `; verification ${s.facts.verificationStatus}${reverify}` : "";
+      console.log(`Settlement: settled (${s.reason}${verification})`);
+      console.log(`Next step: ${nextStep}`);
+    }
+    return;
+  }
+  if (outcome.kind === "conflict") {
+    process.exitCode = 4;
+    if (asJson) {
+      console.log(JSON.stringify({ settled: false, runId, conflict: true, diagnostics: `wao runs diagnose ${runId}` }, null, 2));
+    } else {
+      console.log(`Conflict: ${runId} has multiple distinct transcript copies — refusing to pick one.`);
+      console.log(`Diagnostics: wao runs diagnose ${runId}`);
+    }
+    return;
+  }
+  if (outcome.kind === "untrusted") {
+    process.exitCode = 3;
+    // 最后一轮读到了快照、只是交付事实不能收口（如终态前没打包的失败运行）时，
+    // 照实说"无法判定"并给出运行状态；读取/解析层的失败才说"不可信"。
+    const undeterminable = outcome.reason.startsWith("undeterminable:");
+    const state = undeterminable ? lastSettlement.facts.state : null;
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: false,
+        runId,
+        ...(state ? { state } : {}),
+        untrustedRounds: outcome.rounds,
+        reason: outcome.reason,
+        diagnostics: `wao runs diagnose ${runId}`,
+      }, null, 2));
+    } else if (undeterminable) {
+      console.log(`Run: ${runId} (${state})`);
+      console.log(`Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`);
+      console.log(`Diagnostics: wao runs diagnose ${runId}; delivery facts: wao runs delivery ${runId}`);
+    } else {
+      console.log(`Untrusted: ${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS} consecutive rounds could not be trusted (last: ${outcome.reason}).`);
+      console.log(`Diagnostics: wao runs diagnose ${runId}`);
+    }
   }
 }
 

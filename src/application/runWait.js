@@ -33,11 +33,18 @@ import { checkOwnerLiveness } from "./ownerLiveness.js";
 // run_wait and run_await_result is built from one closed set, with no import
 // cycle (runAwaitResult already imports summarizeLiveness from here).
 import { projectObservation, READ_FAILURE_REASONS } from "./runObservationProjection.js";
-import { isTranscriptQuiet } from "./runQuietAdvisory.js";
+import { isTranscriptQuiet, vitalSignAgeMs } from "./runQuietAdvisory.js";
 
-export const RUN_WAIT_MIN_MS = 180000;
+// 决定 0095：下限从 180000 降到 30000（约 60s 就掐 MCP 调用的宿主也能用一次
+// 短等待）；服务校验区间 [RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS] 仍是唯一校验处。
+export const RUN_WAIT_MIN_MS = 30000;
+// CLI 有界 `runs wait` 的缺省观察窗（保持 270000 不变）。
 export const RUN_WAIT_DEFAULT_MS = 270000;
 export const RUN_WAIT_MAX_MS = 600000;
+// MCP 调用面的缺省（决定 0095：已观测最紧的宿主约 60 秒工具超时，45000 留
+// 15 秒余量）；宿主允许长调用时 Lead 可显式加长。与 CLI 缺省各自命名、互不
+// 派生。
+export const MCP_RUN_WAIT_DEFAULT_MS = 45000;
 
 // TD-137②：三个观察窗上限的交叉提示（上限数值零变更）。同族三个等待命令的
 // 窗口各不相同（runs wait / delivery waitMs / await-result），窗口到期返回的
@@ -77,6 +84,8 @@ function waitReadFailureResult({ runId, agentId, state, cursor, waitedMs, window
     activityEventCount: null,
     lastActivityKind: null,
     ownerHeartbeat: "unknown",
+    // 决定 0095：读失败快照不可信，体征年龄不可观测（null）。
+    vitalSignAgeMs: null,
     observation,
     termination,
   };
@@ -212,6 +221,14 @@ export function summarizeLiveness({ events, runDir, runId, activityBaseline, now
   };
 }
 
+// 决定 0095：本次快照的体征年龄（runQuietAdvisory.vitalSignAgeMs 的绑定口径
+// 与本模块状态投影一致——boundReportScope，legacy 全无信封快照保持全量读法）。
+// 结果里的 additive 字段：CLI/MCP 适配层用它渲染 nextStep；不进 MCP wire
+//（TD-149(b) 同款纪律，payload 由适配层显式选键构造）。读失败路径为 null。
+function snapshotVitalAgeMs(events, runId, now) {
+  return vitalSignAgeMs(boundReportScope(events, runId) ?? events, now);
+}
+
 /**
  * Wait for a run to reach terminal state or observation period to expire.
  *
@@ -232,7 +249,7 @@ export function summarizeLiveness({ events, runDir, runId, activityBaseline, now
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir
  * @param {number} [input.afterSeq] — cursor; omitted = baseline-at-first-read
- * @param {number} [input.waitMs=270000] — observation period (>= 180000)
+ * @param {number} [input.waitMs=270000] — observation period (>= 30000)
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
  * @param {Function} [input.nowFn] — injectable clock (testing)
@@ -269,8 +286,8 @@ export async function runWait(input) {
   }
 
   // Validate waitMs — the service is the shared business boundary and must
-  // enforce the same 180000..600000 range as the MCP adapter, independent of
-  // zod. A direct service caller that passes 179999 or 600001 must be rejected.
+  // enforce the same 30000..600000 range as the MCP adapter, independent of
+  // zod. A direct service caller that passes 29999 or 600001 must be rejected.
   if (!Number.isInteger(waitMs) || waitMs < RUN_WAIT_MIN_MS || waitMs > RUN_WAIT_MAX_MS) {
     throw new Error(`waitMs must be an integer in [${RUN_WAIT_MIN_MS}, ${RUN_WAIT_MAX_MS}], got: ${JSON.stringify(waitMs)}`);
   }
@@ -347,6 +364,7 @@ export async function runWait(input) {
       activityEventCount: 0,
       lastActivityKind: null,
       ownerHeartbeat: "n/a",
+      vitalSignAgeMs: snapshotVitalAgeMs(events, runId, _now()),
       observation,
       termination,
     };
@@ -433,6 +451,7 @@ export async function runWait(input) {
         activityEventCount: 0,
         lastActivityKind: null,
         ownerHeartbeat: "n/a",
+        vitalSignAgeMs: snapshotVitalAgeMs(currentEvents, runId, _now()),
         observation,
         termination,
       };
@@ -479,6 +498,7 @@ export async function runWait(input) {
     activityEventCount: liv.activityEventCount,
     lastActivityKind: liv.lastActivityKind,
     ownerHeartbeat: liv.ownerHeartbeat,
+    vitalSignAgeMs: snapshotVitalAgeMs(currentEvents, runId, _now()),
     // TD-137②：窗口到期（非终态）附带上限交叉提示；终态/提前返回不带。
     waitWindowHint: buildWaitWindowHint(RUN_WAIT_MAX_MS),
     // 决定 0068：转录里是否已到 advisory 门限没有新的动作或正文（语义注记的事实）。

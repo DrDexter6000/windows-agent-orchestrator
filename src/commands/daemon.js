@@ -239,7 +239,7 @@ export async function daemonStartCommand(args, config) {
   console.log(JSON.stringify({
     ok: true, started: true, pipe,
     runDir,
-    note: "detached daemon owning worker lifecycle. Poll with `daemon ping`/`daemon status`.",
+    note: "detached daemon owning worker lifecycle. Health: `daemon ping`/`daemon status`; per-run settlement: `wao runs wait <runId> --until-settled`.",
   }, null, 2));
 }
 
@@ -265,7 +265,7 @@ async function daemonRunCommand(args, config) {
     const transcript = resolveTranscriptPath(runDir, res.runId);
     console.log(JSON.stringify({
       ok: true, runId: res.runId, transcript, ownedBy: "daemon",
-      note: "run owned by daemon. Poll with `daemon list`/`daemon status`/`tail`.",
+      note: "run owned by daemon. Health: `daemon list`/`daemon status`; wait to settlement: `wao runs wait <runId> --until-settled`.",
     }, null, 2));
   } catch (e) {
     console.log(JSON.stringify({ ok: false, error: e.message }, null, 2));

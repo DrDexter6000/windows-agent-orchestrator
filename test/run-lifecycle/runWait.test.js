@@ -370,7 +370,7 @@ test("MCP-WAIT-02: extra args rejected", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("MCP-WAIT-03: waitMs < 180000 rejected", async () => {
+test("MCP-WAIT-03: waitMs < 30000 rejected", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpw-03-"));
   try {
     makeGitRepo(dir);
@@ -381,7 +381,8 @@ test("MCP-WAIT-03: waitMs < 180000 rejected", async () => {
     });
     const client = await buildClient(server);
     try {
-      await client.callTool({ name: "run_wait", arguments: { runId: "run_x", waitMs: 5000 } });
+      // 决定 0095：下限 180000 → 30000；29999 仍被拒，179999 从此合法。
+      await client.callTool({ name: "run_wait", arguments: { runId: "run_x", waitMs: 29999 } });
     } catch { /* zod rejects */ }
     finally { await client.close(); await server.close(); }
     assert.equal(serviceCalls, 0);
@@ -465,10 +466,11 @@ test("M11-11A-RED-01: omitted service wait uses the 270-second observation defau
   }
 });
 
-test("M11-11A-RED-02: MCP omitted waitMs forwards the shared 270-second default", async () => {
+test("M11-11A-RED-02: MCP omitted waitMs forwards the shared MCP default (45000, decision 0095)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpw-m1111a-02-"));
   try {
     makeGitRepo(dir);
+    const { MCP_RUN_WAIT_DEFAULT_MS } = await import("../../src/application/runWait.js");
     let capturedInput = null;
     const server = createWaoMcpServer({
       registryPath: "/r.json",
@@ -495,13 +497,14 @@ test("M11-11A-RED-02: MCP omitted waitMs forwards the shared 270-second default"
       await client.callTool({ name: "run_wait", arguments: { runId: "run_default_270" } });
       const tools = await client.listTools();
       const tool = tools.tools.find((item) => item.name === "run_wait");
-      assert.equal(tool.inputSchema.properties.waitMs.default, 270000);
-      assert.match(tool.description, /270000|270 seconds|4\.5 min/i);
+      assert.equal(tool.inputSchema.properties.waitMs.default, MCP_RUN_WAIT_DEFAULT_MS);
+      assert.equal(tool.inputSchema.properties.waitMs.minimum, 30000, "决定 0095：MCP 下限 30000");
+      assert.match(tool.description, /default 45000/, "描述与缺省一致");
     } finally {
       await client.close();
       await server.close();
     }
-    assert.equal(capturedInput.waitMs, 270000);
+    assert.equal(capturedInput.waitMs, MCP_RUN_WAIT_DEFAULT_MS);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
