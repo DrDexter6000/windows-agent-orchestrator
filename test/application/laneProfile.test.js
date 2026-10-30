@@ -856,25 +856,24 @@ test("0097 preflight 聚合器：lanes 带 costTierScale/ownerRules；notices �
 
 // ── 0097 真实数据：config/lane-traits.json 本身 ─────────────────────────────
 
-test("0097 真实数据：校验与投影零 issue 零观察；Owner 四条规则与八档成本档在场", () => {
+// 只钉形状，不钉 Owner 给的值：成本档与规则条文的家是画像文件，Owner 改值不该红这里。
+test("0097 真实数据：校验与投影零 issue 零观察；Owner 规则与每条车道的成本档在场", () => {
   const r = readLaneTraits();
   assert.equal(r.state, "ok", "真实画像文件必须可读且顶层合法");
   assert.deepEqual(r.issues, [], "零 issue");
   assert.deepEqual(r.observations, [], "零降级观察");
-  assert.ok(Array.isArray(r.ownerRules) && r.ownerRules.length === 4, "Owner 规则四条");
+  assert.ok(Array.isArray(r.ownerRules) && r.ownerRules.length > 0, "Owner 规则在场");
   assert.equal(typeof r.costTierScale, "string", "成本档说明在场");
-  const expectedTiers = {
-    sol: 4, astra: 5, "glm-pro": 1, "glm-flash": 0.5, kimi: 4, opus: 3,
-    "deepseek-pro": null, "deepseek-flash": 1,
-  };
-  for (const [id, tier] of Object.entries(expectedTiers)) {
-    assert.ok(r.traits[id], `${id} 在画像里`);
-    assert.equal(r.traits[id].costTier, tier, `${id}.costTier=${tier}`);
+  const lanesDoc = loadLanesConfig();
+  for (const lane of lanesDoc.lanes) {
+    const entry = r.traits[lane.id];
+    assert.ok(entry, `${lane.id} 在画像里`);
+    assert.ok(validCostTier(entry.costTier), `${lane.id}.costTier 是 0.5–5 步长 0.5 的数或 null`);
   }
-  const proj = projectLaneProfiles({ lanesDoc: loadLanesConfig(), traitsResult: r });
+  const proj = projectLaneProfiles({ lanesDoc, traitsResult: r });
   assert.ok(proj != null, "真实投影非 null");
   assert.deepEqual(proj.notices, [], "真实投影零 notices");
-  assert.equal(proj.ownerRules.length, 4);
+  assert.deepEqual(proj.ownerRules, r.ownerRules, "规则原样投影");
 });
 
 test("0097 真实数据：进了 score 的那组数字不再出现在同格 note（每格一条断言）", () => {

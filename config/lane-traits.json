@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话，遇到相反的实测可以改写；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
   "costTierScale": "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数，取非高峰的基础档，高峰倍率看各车道 cost",
   "ownerRules": [
     "sol、astra（codex 车道）只做会审，不派实现、测试或调研；astra 只用于疑难杂症",
@@ -63,7 +63,6 @@
       "caveats": [
         "会审要查 bug 时优选它（Owner）",
         "常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
-        "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
         "codex 沙箱里找不到 Node 22、跑不了 npm 全局命令：任务书写明 Node 22 绝对路径，dsh 之类核验由 Lead 做",
         "能文生图、图生图（Owner）"
       ],
@@ -166,9 +165,8 @@
           "basis": null
         },
         "longHorizon": {
-          "stars": 4,
-          "basis": "owner",
-          "note": "长程任务能力较强"
+          "stars": 3,
+          "basis": "owner"
         },
         "writing": {
           "stars": null,
@@ -186,7 +184,7 @@
         "effort": "max"
       },
       "costTier": 1,
-      "cost": "GLM 订阅，额度按无限对待；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
+      "cost": "GLM 订阅；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
       "caveats": [
         "成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）",
         "隔离派发时会用写文件工具在工作树外（如 %TEMP%）落普查脚本，被判越界、run 当场失败（10-21、10-28）：任务书写明不落文件"
@@ -218,7 +216,7 @@
           "n": 2,
           "score": { "hits": 27, "total": 28, "label": "隐藏测试通过" },
           "evidence": "同题横评（2026-10-29，2 个实现题×1 轮，按隐藏测试判分）；运行如 run_20261029062452688gfvtkz",
-          "note": "DEC-05 未过；全过 1/2，同日 kimi 与 deepseek-flash 各 26/28；高峰用时 30/44 分钟；Owner 原评 2 星（不如 glm-pro）"
+          "note": "DEC-05 未过；全过 1/2，同日 kimi 与 deepseek-flash 各 26/28；高峰用时 30/44 分钟"
         },
         "review": {
           "stars": 1,
@@ -233,16 +231,16 @@
           "basis": null
         },
         "longHorizon": {
-          "stars": null,
-          "basis": null
+          "stars": 3,
+          "basis": "owner"
         },
         "writing": {
           "stars": null,
           "basis": null
         },
         "visual": {
-          "stars": null,
-          "basis": null
+          "stars": 3,
+          "basis": "owner"
         }
       },
       "ratedAgainst": {
@@ -479,8 +477,8 @@
           "basis": null
         },
         "visual": {
-          "stars": null,
-          "basis": null
+          "stars": 2,
+          "basis": "owner"
         }
       },
       "ratedAgainst": {
@@ -489,7 +487,7 @@
         "providerID": "deepseek-official",
         "effort": "max"
       },
-      "costTier": 1,
+      "costTier": 1.5,
       "cost": "DeepSeek API 按量计费，极便宜：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周一至周五（不含中国法定节假日）北京时间 9:00–12:00、14:00–18:00（UTC 01:00–04:00、06:00–10:00）为高峰，其余时段空闲价（官方定价页）；通道不报 token 用量",
       "caveats": [
         "开始干活后很稳（横评 48 次全部跑完）；启动超时只见于机器很忙或笔记本待机时，不耗 token，重派即可",
