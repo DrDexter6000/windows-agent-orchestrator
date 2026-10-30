@@ -49,6 +49,8 @@ import {
 } from "./runSettlement.js";
 import { proveWorkspace } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
+// 决定 0098：交付读面的 adoption 查询（主分支上声明采纳本运行的提交）。
+import { queryRunAdoption } from "./adoptionQuery.js";
 
 // M11-8C: packaging failure codes come from the shared safe-projection
 // allowlist (deliveryFailureCodes.js). The application projection and the MCP
@@ -619,6 +621,26 @@ function _livenessDeps(runDir, nowFn, isAliveFn, ownerLeaseReader) {
   };
 }
 
+/**
+ * 决定 0098：把 adoption 查询包成绝不抛错的形态。adoption 是 advisory 事实
+ * （"主分支上有提交声明采纳了这个运行"，不是"已落地"），任何失败都折叠成
+ * 闭集 unchecked（内部意外也一样——git_error 方向 fail-safe），绝不让交付
+ * 读面本身失败。不核验运行归属（决定第 3 条）。
+ * @private
+ */
+async function _safeAdoption(runId, repoRoot, gitFn, timeoutMs) {
+  try {
+    return await queryRunAdoption({
+      repoRoot,
+      runId,
+      ...(typeof gitFn === "function" ? { gitFn } : {}),
+      timeoutMs,
+    });
+  } catch {
+    return { status: "unchecked", commits: [], truncated: false, uncheckedReason: "git_error", branch: null };
+  }
+}
+
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
 
 /**
@@ -638,6 +660,11 @@ function _livenessDeps(runDir, nowFn, isAliveFn, ownerLeaseReader) {
  *   probe for the process_missing liveness proof
  * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease
  *   reader for the process_missing liveness proof
+ * @param {string} [input.adoptionRepoRoot] — 决定 0098：adoption 查询的仓库根
+ *  （CLI 的 --cwd 来源）。不触发任何 workspace ownership 核验；缺省回落到
+ *   authorizedWorkspaceRoot（MCP 会话绑定根），两者都没有 → unchecked/unbound。
+ * @param {Function} [input.adoptionGitFn] — injectable adoption git executor
+ * @param {number} [input.adoptionTimeoutMs] — per-call adoption git timeout
  * @returns {Promise<object>} delivery view: {runId, terminalState, deliveryRef, verification, acceptance}
  */
 export async function getRunDelivery({
@@ -649,6 +676,9 @@ export async function getRunDelivery({
   nowFn,
   isAliveFn,
   ownerLeaseReader,
+  adoptionRepoRoot,
+  adoptionGitFn,
+  adoptionTimeoutMs,
 }) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDelivery: runDir is required");
@@ -744,6 +774,17 @@ export async function getRunDelivery({
       view.candidateKind = null;
     }
   }
+  // 决定 0098：每个返回形态都带 adoption（交付不可用、隔离失败、打包失败、
+  // 未请求交付都带）。仓库根取调用方给的 authorizedWorkspaceRoot（MCP 会话
+  // 绑定；CLI 经 adoptionRepoRoot 传 --cwd，避免把 CLI cwd 误接成 inventory
+  // 的授权根——readiness 路径的 authorizedWorkspaceRoot 会触发归属核验）；
+  // 未给 → unchecked/unbound，不跑 git。扫主分支全历史（不按交付的 base 收窄）。
+  view.adoption = await _safeAdoption(
+    runId,
+    adoptionRepoRoot ?? authorizedWorkspaceRoot,
+    adoptionGitFn,
+    adoptionTimeoutMs,
+  );
   return view;
 }
 
@@ -893,6 +934,11 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  * @param {number} [input.pollIntervalMs] — internal poll interval (testing)
  * @param {Function} [input.onPoll] — optional keepalive hook ({index,fraction});
  *   the MCP adapter wires it to notifications/progress. Read-only: a notification, not a write.
+ * @param {string} [input.adoptionRepoRoot] — 决定 0098：adoption 查询的仓库根
+ *  （CLI 的 --cwd 来源；不触发 ownership 核验）。缺省回落 authorizedWorkspaceRoot
+ *  （MCP 会话绑定根）；都没有 → unchecked/unbound。
+ * @param {Function} [input.adoptionGitFn] — injectable adoption git executor
+ * @param {number} [input.adoptionTimeoutMs] — per-call adoption git timeout
  * @returns {Promise<object>} { runId, readiness, waitReturnedEarly, terminalState,
  *   deliveryAvailable, deliveryRef, deliveryFailure, verification, acceptance }
  */
@@ -909,6 +955,9 @@ export async function getRunDeliveryReadiness({
   ownerLeaseReader,
   pollIntervalMs,
   onPoll,
+  adoptionRepoRoot,
+  adoptionGitFn,
+  adoptionTimeoutMs,
 }) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDeliveryReadiness: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDeliveryReadiness: runDir is required");
@@ -960,6 +1009,18 @@ export async function getRunDeliveryReadiness({
     computeInventoryFn,
     buildLivenessDeps: () => _livenessDeps(resolve(runDir), nowFn, isAliveFn, ownerLeaseReader),
   };
+  // 决定 0098 第 5 条：adoption 的 git 查询只在返回前算一次，绝不进轮询——
+  // 每条返回路径都经 finishWithAdoption 收尾（等待 N 轮也只查一次 git）。
+  const adoptionRoot = adoptionRepoRoot ?? authorizedWorkspaceRoot;
+  const finishWithAdoption = async (result) => {
+    result.adoption = await _safeAdoption(
+      runId,
+      adoptionRoot,
+      adoptionGitFn,
+      adoptionTimeoutMs,
+    );
+    return result;
+  };
 
   // 决定 0095：等待去留——两个等待态照旧等待；终态 run 上 readiness 为
   // reviewable 但收口判定仍 unsettled（验证中拒收 / reverify pending）也等待；
@@ -967,7 +1028,7 @@ export async function getRunDeliveryReadiness({
   // 非终态的 reviewable）立即返回——等待改变不了它们。
   if (!SETTLEMENT_WAITING_READINESS.has(readiness)
     && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
-    return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
+    return finishWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
   }
 
   // Bounded wait loop (non-busy: sleep between re-reads). Capture the start
@@ -1020,7 +1081,7 @@ export async function getRunDeliveryReadiness({
     // 等；其余（含中途出现的 ambiguous / settled / 非终态 reviewable）立即返回。
     if (!SETTLEMENT_WAITING_READINESS.has(readiness)
       && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
-      return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
+      return finishWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
     }
 
     // Keepalive: notify the caller that the poll is still alive. The fraction
@@ -1039,7 +1100,7 @@ export async function getRunDeliveryReadiness({
   // deadline-expiry path). This is not a new state, not an echoed error, and it
   // never stop/retry/accept/rejects.
   if (readFailed) {
-    return _buildReadinessResult(runId, events, terminalState, "ambiguous", true, inventoryOpts);
+    return finishWithAdoption(_buildReadinessResult(runId, events, terminalState, "ambiguous", true, inventoryOpts));
   }
 
   // Deadline expired while still pending. Return the truthful fact — this is
@@ -1050,7 +1111,7 @@ export async function getRunDeliveryReadiness({
   // payload，该字段不进入合同形状。
   const result = _buildReadinessResult(runId, events, terminalState, readiness, false, inventoryOpts);
   result.waitWindowHint = buildWaitWindowHint(DELIVERY_WAIT_MS_MAX);
-  return result;
+  return finishWithAdoption(result);
 }
 
 // ===== Service: decideRunDelivery (durable decision) =====

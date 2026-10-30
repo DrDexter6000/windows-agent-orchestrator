@@ -565,6 +565,16 @@ function hasPackagedDelivery(events, runId) {
   return events.some((e) => e && e.type === "run.delivery_created" && e.runId === runId);
 }
 
+/** 主工作树当前检出的分支（refs/heads/* 短名）；detached、branch 缺失或非
+ * refs/heads/* → null。repoIdentity 与交付读面的 adoption 查询（决定 0098，
+ * application/adoptionQuery.js）共用——"主分支"的判定只有这一份。 */
+export function mainWorktreeBranch(main) {
+  if (!main || typeof main !== "object") return null;
+  const branch = main.branch;
+  if (typeof branch !== "string" || !branch.startsWith("refs/heads/")) return null;
+  return branch.slice("refs/heads/".length);
+}
+
 /** 仓库身份事实（git 为准）。失败 → 抛错（plan 整体失败）。 */
 function repoIdentity(repoCwd) {
   const gitCommonDir = commonDirOf(repoCwd);
@@ -572,8 +582,7 @@ function repoIdentity(repoCwd) {
   const main = worktrees[0];
   if (!main) throw new Error(`worktree reclaim: no worktrees listed for ${repoCwd}`);
   const mainWorktreePath = realpathSync(main.path);
-  let mainBranch = null;
-  if (main.branch && main.branch.startsWith("refs/heads/")) mainBranch = main.branch.slice("refs/heads/".length);
+  const mainBranch = mainWorktreeBranch(main);
   return { gitCommonDir, mainWorktreePath, mainBranch, mainHead: main.head ?? null, worktrees };
 }
 

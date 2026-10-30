@@ -5,9 +5,11 @@
 // 断言永远不会失败而全量照绿；同日普查又在 src/application/identityProjection.js 里找到
 // 两个字面 NUL（本应写成 \u0000 转义）。
 //
-// 规则：`git ls-files` 列出的文件（二进制扩展名除外）必须是合法 UTF-8，且不含 TAB、LF、
-// CR 以外的 C0 控制字符、DEL、C1 控制字符（U+0080..U+009F）。要表达这些字符，源码里写
-// 转义。BOM（U+FEFF）不是控制字符，不在检查面。
+// 规则：会进仓库的文件（`git ls-files --cached --others --exclude-standard`，即已跟踪的
+// 加上未跟踪且未忽略的；二进制扩展名除外）必须是合法 UTF-8，且不含 TAB、LF、CR 以外的
+// C0 控制字符、DEL、C1 控制字符（U+0080..U+009F）。要表达这些字符，源码里写转义。BOM
+// （U+FEFF）不是控制字符，不在检查面。带上未跟踪的，worker 自检时还没提交的新文件也在
+// 扫描内。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,8 +19,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-// 二进制文件不按文本扫。仓库目前没有这类文件；加入时把扩展名登记在这里。
-const BINARY_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".zip", ".gz", ".woff", ".woff2"]);
+// 二进制文件不按文本扫。仓库目前没有这类文件；未跟踪的文件也在扫描内，常见的办公与
+// 音视频格式一并登记。加入新的二进制格式时把扩展名登记在这里。
+const BINARY_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".zip", ".gz", ".woff", ".woff2",
+  ".pptx", ".docx", ".xlsx", ".mp4", ".mov", ".mp3", ".wav",
+]);
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 test("被跟踪的文本文件是合法 UTF-8，且不含控制字节（TAB/LF/CR 以外的 C0、DEL、C1）", (t) => {
@@ -27,7 +33,7 @@ test("被跟踪的文本文件是合法 UTF-8，且不含控制字节（TAB/LF/C
     t.skip("not a git checkout");
     return;
   }
-  const files = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
+  const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
   assert.ok(files.length > 0, "git ls-files 没有列出任何文件");
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const hits = [];

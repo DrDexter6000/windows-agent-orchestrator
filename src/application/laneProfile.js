@@ -419,7 +419,7 @@ function clip(text, max) {
 
 /**
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
- * 每行带暂停说明、上下文窗口与能否看图，见 0089；推断族系见 0090；行带
+ * 每行带暂停说明、上下文窗口与能否看图/看视频，见 0089；推断族系见 0090；行带
  * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097）。行序=
  * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
  * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
@@ -474,6 +474,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
       dispatchHold: validDispatchHold(lane.dispatchHold),
       contextWindowTokens: entry.contextWindow.tokens,
       imageInput: entry.multimodal.image,
+      videoInput: entry.multimodal.video,
     });
   }
   // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。

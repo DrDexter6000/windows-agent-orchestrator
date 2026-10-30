@@ -213,9 +213,12 @@
       "transcript/td220-runActivityProjection.test.js",
       "transcript/transcript.test.js",
       "transcript/transitionExpectedLastSeq.test.js",
-      "transcript/reverifyMultiChain.test.js"
+      "transcript/reverifyMultiChain.test.js",
+      "delivery/mcpRunDeliveryAdoption.test.js"
     ],
     "git": [
+      "delivery/adoptionQuery.test.js",
+      "delivery/runsDeliveryAdoption.test.js",
       "application/lineageClose.test.js",
       "registry-roles/candidateInventory.test.js",
       "isolation-infra/hygieneGitState.test.js",

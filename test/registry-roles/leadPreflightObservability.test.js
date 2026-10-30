@@ -83,21 +83,24 @@ function baseInput(overrides = {}) {
 }
 
 const FACTS_LINE = (o) => /^server build:/.test(o);
-const DRIFT_WARNING = "server code checkout differs from server start (HEAD or src/ changed) — restart host before trusting MCP dogfood results";
+const DRIFT_WARNING = "server src/ differs from server start (src tree or uncommitted src changes) — restart host before trusting MCP dogfood results";
 const GATE_LINE_RE = /^verification gate: (free|held by .+|state unreadable)$/;
 
 // ===== A. serverBuildFacts unit (real git subprocess) =====
 
-test("SBF-A1: git code root → readable, HEAD facts match the repo, src/ clean", async () => {
+test("SBF-A1: git code root → readable, HEAD + src tree facts match the repo, src/ clean", async () => {
   const root = mkdtempSync(join(tmpdir(), "wao-sbf-a1-"));
   try {
     makeGitRepo(root);
     const mod = await importFactsModuleFrom(root, "a1");
     const head = gitHeadOf(root); // post-copy-commit HEAD == load-time HEAD
+    const srcTree = execFileSync("git", ["rev-parse", "HEAD:src"], { cwd: root, encoding: "utf8" }).trim();
     const facts = mod.readServerBuildFacts();
     assert.equal(facts.readable, true);
     assert.equal(facts.headAtStart, head, "module-load HEAD is the repo HEAD");
     assert.equal(facts.headNow, head);
+    assert.equal(facts.srcTreeAtStart, srcTree, "module-load src tree hash is HEAD:src");
+    assert.equal(facts.srcTreeNow, srcTree);
     assert.equal(facts.srcDirtyNow, false, "src/ clean right after the module commit");
     assert.ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(facts.startedAt), "startedAt is ISO");
     assert.equal(facts.packageVersion, null, "temp repo has no package.json → version degrades to null");
@@ -108,7 +111,7 @@ test("SBF-A1: git code root → readable, HEAD facts match the repo, src/ clean"
   } finally { cleanupDir(root); }
 });
 
-test("SBF-A2: src/ content change → srcDirtyNow=true with HEAD unchanged (content fact)", async () => {
+test("SBF-A2: src/ content change → srcDirtyNow=true with HEAD and src tree unchanged (content fact)", async () => {
   const root = mkdtempSync(join(tmpdir(), "wao-sbf-a2-"));
   try {
     makeGitRepo(root);
@@ -120,12 +123,13 @@ test("SBF-A2: src/ content change → srcDirtyNow=true with HEAD unchanged (cont
     writeFileSync(join(root, "src", "newFile.js"), "// untracked\n", "utf8");
     const facts = mod.readServerBuildFacts();
     assert.equal(facts.headNow, head);
+    assert.equal(facts.srcTreeNow, facts.srcTreeAtStart, "uncommitted changes do not move HEAD:src");
     assert.equal(facts.srcDirtyNow, true);
     assert.equal(facts.readable, true);
   } finally { cleanupDir(root); }
 });
 
-test("SBF-A3: new commit in src/ → headNow drifts from headAtStart", async () => {
+test("SBF-A3: new commit in src/ → srcTreeNow and headNow drift from start", async () => {
   const root = mkdtempSync(join(tmpdir(), "wao-sbf-a3-"));
   try {
     makeGitRepo(root);
@@ -133,8 +137,24 @@ test("SBF-A3: new commit in src/ → headNow drifts from headAtStart", async () 
     writeFileSync(join(root, "src", "change.js"), "export const x = 1;\n", "utf8");
     const head2 = gitCommitAll(root, "change src");
     const facts = mod.readServerBuildFacts();
+    assert.notEqual(facts.srcTreeNow, facts.srcTreeAtStart, "committed src content change moves the tree hash");
     assert.notEqual(facts.headNow, facts.headAtStart, "HEAD drifted after commit");
     assert.equal(facts.headNow, head2);
+    assert.equal(facts.readable, true);
+  } finally { cleanupDir(root); }
+});
+
+test("SBF-A6: commit touching only files OUTSIDE src/ → HEAD drifts but src tree stays (tree is the authority)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sbf-a6-"));
+  try {
+    makeGitRepo(root);
+    const mod = await importFactsModuleFrom(root, "a6");
+    writeFileSync(join(root, "profile-data.json"), "{\"lane\":\"x\"}\n", "utf8");
+    gitCommitAll(root, "profile data only");
+    const facts = mod.readServerBuildFacts();
+    assert.notEqual(facts.headNow, facts.headAtStart, "HEAD drifted (docs/profile/tests commit)");
+    assert.equal(facts.srcTreeNow, facts.srcTreeAtStart, "src/ untouched → tree hash unchanged → no server-code drift");
+    assert.equal(facts.srcDirtyNow, false);
     assert.equal(facts.readable, true);
   } finally { cleanupDir(root); }
 });
@@ -147,6 +167,8 @@ test("SBF-A4: non-git code root → degraded facts (readable:false, nulls, no th
     assert.equal(facts.readable, false);
     assert.equal(facts.headAtStart, null, "module-load HEAD unreadable outside a repo");
     assert.equal(facts.headNow, null);
+    assert.equal(facts.srcTreeAtStart, null, "module-load src tree unreadable outside a repo");
+    assert.equal(facts.srcTreeNow, null);
     assert.equal(facts.srcDirtyNow, null);
     assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(facts.startedAt), "start time still recorded");
     assert.equal(typeof facts.packageVersion === "string" || facts.packageVersion === null, true);
@@ -160,10 +182,13 @@ test("SBF-A5: git binary failure at query time → readable:false (query-side de
     const mod = await importFactsModuleFrom(root, "a5");
     const facts = mod.readServerBuildFacts({ gitBin: "wao-definitely-not-git-a5" });
     assert.equal(facts.headNow, null, "query HEAD degrades on git failure");
+    assert.equal(facts.srcTreeNow, null, "query src tree degrades on git failure");
     assert.equal(facts.srcDirtyNow, null);
     assert.equal(facts.readable, false);
     assert.ok(facts.headAtStart == null || /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(facts.headAtStart),
       "load-time HEAD (real repo) is sha-shaped or null — never an error string");
+    assert.ok(facts.srcTreeAtStart == null || /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(facts.srcTreeAtStart),
+      "load-time src tree (real repo) is sha-shaped or null — never an error string");
   } finally { cleanupDir(root); }
 });
 
@@ -172,66 +197,75 @@ test("SBF-A5: git binary failure at query time → readable:false (query-side de
 test("SB-B1: unchanged facts (both sides provably clean) → one observation line, no warning, complete stays true", async () => {
   const sha = "f".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: false, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: false, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}, checkout unchanged since start`));
+  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}, src/ unchanged since start`));
   assert.ok(!result.warnings.includes(DRIFT_WARNING));
   assert.equal(result.complete, true);
 });
 
-test("SB-B9: started dirty, still dirty (same HEAD) → equality-unverified observation, NEVER a match claim and NEVER drift (验收会审 astra/sol 反例)", async () => {
-  const sha = "e".repeat(40);
+test("SB-B1b: HEAD drifted but src tree same (commit outside src/) → NO warning; the line names the start HEAD and the current one", async () => {
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: true, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: "1".repeat(40), headNow: "2".repeat(40), srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: false, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o.includes("src/ had uncommitted changes at start and still does (content equality unverified)")),
-    `line shape: ${JSON.stringify(result.observations)}`);
-  assert.ok(!result.observations.some((o) => o.includes("checkout unchanged")), "双侧脏不得宣称 unchanged");
-  assert.ok(!result.warnings.includes(DRIFT_WARNING), "同头双侧脏不可证漂移，不得告警（防误报训练用户忽略）");
+  assert.ok(!result.warnings.includes(DRIFT_WARNING), "只改 src/ 以外的提交不是服务代码漂移（fb_20261030T140948Z_ow2bgf）");
+  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${"1".repeat(40)} (HEAD now ${"2".repeat(40)}), src/ unchanged since start`),
+    "at HEAD 是启动时的提交，现在的提交另写（HEAD 只作定位，不作比较权威）");
 });
 
-test("SB-B10: started dirty, now clean (same HEAD) → drift warning (checkout differs from what was loaded)", async () => {
-  const sha = "d".repeat(40);
+test("SB-B1c: src tree differs (committed src change) → drift warning; complete STILL true (complete covers only the three sections)", async () => {
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: true, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: "1".repeat(40), headNow: "2".repeat(40), srcTreeAtStart: "a".repeat(40), srcTreeNow: "b".repeat(40), srcDirtyAtStart: false, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.warnings.includes(DRIFT_WARNING), "脏→净=与启动态不同（加载过的是脏内容）");
-});
-
-test("SB-B2: HEAD drift → drift warning; complete STILL true (complete covers only the three sections)", async () => {
-  const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: "1".repeat(40), headNow: "2".repeat(40), srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
-  }));
-  assert.ok(result.warnings.includes(DRIFT_WARNING), "drift warning present");
+  assert.ok(result.warnings.includes(DRIFT_WARNING), "src 树变了 → 漂移告警");
   assert.ok(!result.observations.some(FACTS_LINE), "no observation line on drift");
-  assert.equal(result.complete, true, "new warning must NOT flip complete");
+  assert.equal(result.complete, true, "warning must NOT flip complete");
   assert.deepEqual(Object.keys(result.checkStatus).sort(), ["activeRuns", "workers", "workspace"],
     "checkStatus still exactly the three complete-covered sections");
 });
 
-test("SB-B3: src/ dirty (clean start → dirty now, same HEAD) → drift warning", async () => {
+test("SB-B9: started dirty, still dirty (same src tree) → equality-unverified observation, NEVER a match claim and NEVER drift (验收会审 astra/sol 反例)", async () => {
+  const sha = "e".repeat(40);
+  const result = await aggregateLeadPreflight(baseInput({
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: true, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
+  }));
+  assert.ok(result.observations.some((o) => o.includes("src/ had uncommitted changes at start and still does (content equality unverified)")),
+    `line shape: ${JSON.stringify(result.observations)}`);
+  assert.ok(!result.observations.some((o) => o.includes("src/ unchanged")), "双侧脏不得宣称 unchanged");
+  assert.ok(!result.warnings.includes(DRIFT_WARNING), "同树双侧脏不可证漂移，不得告警（防误报训练用户忽略）");
+});
+
+test("SB-B10: started dirty, now clean (same src tree) → drift warning (checkout differs from what was loaded)", async () => {
+  const sha = "d".repeat(40);
+  const result = await aggregateLeadPreflight(baseInput({
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: true, srcDirtyNow: false, readable: true, packageVersion: "0.1.0" }),
+  }));
+  assert.ok(result.warnings.includes(DRIFT_WARNING), "脏→净=与启动态不同（加载过的是脏内容）");
+});
+
+test("SB-B3: src/ dirty (clean start → dirty now, same src tree) → drift warning", async () => {
   const sha = "a".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: false, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: false, srcDirtyNow: true, readable: true, packageVersion: "0.1.0" }),
   }));
   assert.ok(result.warnings.includes(DRIFT_WARNING));
 });
 
 test("SB-B4: readable:false → degraded observation with package version, never a warning", async () => {
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: null, headNow: null, srcDirtyNow: null, readable: false, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: null, headNow: null, srcTreeAtStart: null, srcTreeNow: null, srcDirtyNow: null, readable: false, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o === "server build facts degraded: started 2026-10-08T14:02:33.000Z, package version 0.1.0, code checkout HEAD unreadable"));
+  assert.ok(result.observations.some((o) => o === "server build facts degraded: started 2026-10-08T14:02:33.000Z, package version 0.1.0, code checkout src tree hash unreadable"));
   assert.ok(!result.warnings.includes(DRIFT_WARNING));
   assert.equal(result.complete, true);
 });
 
-test("SB-B5: dirty status unreadable (HEAD same) → says exactly that; no warning, no unchanged claim", async () => {
+test("SB-B5: dirty status unreadable (src tree same) → says exactly that; no warning, no unchanged claim", async () => {
   const sha = "b".repeat(40);
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcDirtyAtStart: null, srcDirtyNow: null, readable: true, packageVersion: "0.1.0" }),
+    serverBuildFactsFn: () => ({ startedAt: "2026-10-08T14:02:33.000Z", headAtStart: sha, headNow: sha, srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyAtStart: null, srcDirtyNow: null, readable: true, packageVersion: "0.1.0" }),
   }));
-  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}; src/ dirty status not fully readable — cannot confirm checkout matches start`));
+  assert.ok(result.observations.some((o) => o === `server build: started 2026-10-08T14:02:33.000Z at HEAD ${sha}; src/ dirty status not fully readable — cannot confirm src/ matches start`));
   assert.ok(!result.warnings.includes(DRIFT_WARNING));
 });
 
@@ -252,10 +286,49 @@ test("SB-B7: no serverBuildFactsFn → no server-build lines at all (back-compat
 
 test("SB-B8: malformed facts (missing startedAt) → no line, never renders 'undefined'", async () => {
   const result = await aggregateLeadPreflight(baseInput({
-    serverBuildFactsFn: () => ({ headAtStart: "c".repeat(40), headNow: "c".repeat(40), srcDirtyNow: false, readable: true }),
+    serverBuildFactsFn: () => ({ headAtStart: "c".repeat(40), headNow: "c".repeat(40), srcTreeAtStart: "a".repeat(40), srcTreeNow: "a".repeat(40), srcDirtyNow: false, readable: true }),
   }));
   assert.ok(!result.observations.some(FACTS_LINE), "no server build line without a start time");
   assert.ok(!JSON.stringify(result).includes("undefined"), "never renders undefined");
+});
+
+// Real-facts-module end-to-end (fb_20261030T140948Z_ow2bgf 的三条硬性分支):
+// temp repo + 真实 git 子进程 + 真实 serverBuildFacts 模块，聚合器只收
+// serverBuildFactsFn 注入。钉的是「比较权威是 HEAD:src 树哈希，不是 HEAD」。
+test("SB-B11: real facts — commit touching only outside src/ → NO drift warning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sbf-b11-"));
+  try {
+    makeGitRepo(root);
+    const mod = await importFactsModuleFrom(root, "b11");
+    writeFileSync(join(root, "lane-profile.md"), "# lane facts\n", "utf8");
+    gitCommitAll(root, "profile data only");
+    const result = await aggregateLeadPreflight(baseInput({ serverBuildFactsFn: mod.readServerBuildFacts }));
+    assert.ok(!result.warnings.includes(DRIFT_WARNING), "HEAD 漂移但 src 树未动 → 不告警（此前每次都误报重启）");
+    assert.ok(result.observations.some((o) => /src\/ unchanged since start/.test(o)), `line shape: ${JSON.stringify(result.observations)}`);
+  } finally { cleanupDir(root); }
+});
+
+test("SB-B12: real facts — committed change inside src/ → drift warning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sbf-b12-"));
+  try {
+    makeGitRepo(root);
+    const mod = await importFactsModuleFrom(root, "b12");
+    writeFileSync(join(root, "src", "serverCode.js"), "export const y = 2;\n", "utf8");
+    gitCommitAll(root, "server code change");
+    const result = await aggregateLeadPreflight(baseInput({ serverBuildFactsFn: mod.readServerBuildFacts }));
+    assert.ok(result.warnings.includes(DRIFT_WARNING), "src/ 提交内容变了 → 告警");
+  } finally { cleanupDir(root); }
+});
+
+test("SB-B13: real facts — uncommitted change inside src/ → drift warning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sbf-b13-"));
+  try {
+    makeGitRepo(root);
+    const mod = await importFactsModuleFrom(root, "b13");
+    writeFileSync(join(root, "src", "application", "serverBuildFacts.js"), "// touched\n", "utf8");
+    const result = await aggregateLeadPreflight(baseInput({ serverBuildFactsFn: mod.readServerBuildFacts }));
+    assert.ok(result.warnings.includes(DRIFT_WARNING), "src/ 有未提交改动 → 告警");
+  } finally { cleanupDir(root); }
 });
 
 // ===== C. verification-gate status line =====

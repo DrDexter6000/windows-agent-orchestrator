@@ -118,6 +118,13 @@ import {
   // readiness projection.
   SAFE_ISOLATION_VIOLATION_CODES,
 } from "../application/runDelivery.js";
+// 决定 0098：run_delivery 出参的 adoption 三态闭集（status/commits 上限/
+// uncheckedReason 均从应用层 SSOT 派生，wire schema 不复制第二份清单）。
+import {
+  ADOPTION_STATUSES,
+  ADOPTION_UNCHECKED_REASONS,
+  ADOPTION_COMMITS_CAP,
+} from "../application/adoptionQuery.js";
 import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import {
   runDeliveryReverify,
@@ -2267,6 +2274,49 @@ const VERIFICATION_GATE_VIEW_SCHEMA = z.object({
   }).optional(),
 });
 
+// 决定 0098：run_delivery 出参的 adoption 对象——"主分支上有提交声明采纳了
+// 这个运行"，不是"已落地"。闭集枚举与上限全部从 application/adoptionQuery.js
+// 的 SSOT 派生；branch 只给 CLI 文本行用，wire 不携带。
+const ADOPTION_OUTPUT = z.object({
+  status: z.enum([...ADOPTION_STATUSES]),
+  commits: z.array(COMMIT_HASH_SCHEMA).max(ADOPTION_COMMITS_CAP),
+  truncated: z.boolean(),
+  uncheckedReason: z.enum([...ADOPTION_UNCHECKED_REASONS]).nullable(),
+}).strict();
+
+// Project the service-side adoption fact through the strict closed shape.
+// Absent (older service / injected fake) defaults to unchecked/unbound — the
+// advisory direction, never an error. Malformed values throw → the handler's
+// fixed safe error; a found/not_found result must carry a null reason and an
+// unchecked result must carry a closed-set reason with no commits.
+function safeProjectAdoption(value) {
+  if (value === null || value === undefined) {
+    return { status: "unchecked", commits: [], truncated: false, uncheckedReason: "unbound" };
+  }
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("bad adoption");
+  const status = value.status;
+  if (!ADOPTION_STATUSES.includes(status)) throw new Error("bad adoption status");
+  if (!Array.isArray(value.commits)) throw new Error("bad adoption commits");
+  if (value.commits.length > ADOPTION_COMMITS_CAP) throw new Error("bad adoption commits cap");
+  const commits = value.commits.map((c) => {
+    COMMIT_HASH_SCHEMA.parse(c);
+    return c;
+  });
+  if (typeof value.truncated !== "boolean") throw new Error("bad adoption truncated");
+  const reason = value.uncheckedReason ?? null;
+  if (reason !== null && !ADOPTION_UNCHECKED_REASONS.includes(reason)) {
+    throw new Error("bad adoption uncheckedReason");
+  }
+  if (status === "unchecked") {
+    if (reason === null || commits.length > 0 || value.truncated !== false) {
+      throw new Error("bad adoption unchecked shape");
+    }
+    return { status, commits: [], truncated: false, uncheckedReason: reason };
+  }
+  if (reason !== null) throw new Error("bad adoption reason on found/not_found");
+  return { status, commits, truncated: value.truncated, uncheckedReason: null };
+}
+
 const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS).
@@ -2280,6 +2330,9 @@ const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   isolationFailure: ISOLATION_FAILURE_SCHEMA.nullable(),
   // TD-267: present only while verification is pending and undecided.
   verificationGate: VERIFICATION_GATE_VIEW_SCHEMA.optional(),
+  // 决定 0098：adoption 三态（"主分支上有提交声明采纳了这个运行"）。仅独立
+  // 出参携带；review bundle 内嵌 BASE，不带（BASE 字节不变）。
+  adoption: ADOPTION_OUTPUT,
   // 决定 0095：仅在带 waitMs 的路径、且等待到期仍未收口时给（再调 run_delivery
   // 并传 waitMs）；不带 waitMs 是即时查询，不给。BASE 不携带（bundle 嵌 BASE）。
   nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
@@ -2984,6 +3037,9 @@ const LANES_PROJECTION_OUTPUT = z.object({
     dispatchHold: z.string().max(DISPATCH_HOLD_MAX_CHARS).nullable(),
     contextWindowTokens: z.number().int().positive(),
     imageInput: z.boolean(),
+    // 0089 §1（2026-10-30 起）：能否原生理解视频（kimi 是唯一 true 车道——
+    // 其他车道要先抽帧截图；决定 0098 同批）。
+    videoInput: z.boolean(),
   }).strict()).max(PROJECTION_ROWS_CAP),
 }).strict();
 
@@ -6033,6 +6089,9 @@ export function createWaoMcpServer({
           // builder (the review bundle strict-parses the builder output against
           // the BASE and must stay byte-identical) — standalone only.
           payload.isolationFailure = safeProjectIsolationFailure(result.isolationFailure);
+          // 决定 0098：adoption 由共享 service 附带（等待路径 git 只在返回前查
+          // 一次，不进轮询）；安全投影后进独立出参。
+          payload.adoption = safeProjectAdoption(result.adoption);
           // M12-8B: bounded progressive-disclosure metadata (wait path — same
           // projection as the point-in-time path via selectDeliveryDrilldowns).
           payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
@@ -6070,6 +6129,9 @@ export function createWaoMcpServer({
         // builder (the review bundle strict-parses the builder output against
         // the BASE and must stay byte-identical) — standalone only.
         payload.isolationFailure = safeProjectIsolationFailure(delivery.isolationFailure);
+        // 决定 0098：adoption 由共享 service 附带（仓库根=会话绑定根；未绑定 →
+        // service 报 unchecked/unbound，不跑 git）；安全投影后进独立出参。
+        payload.adoption = safeProjectAdoption(delivery.adoption);
         // M12-8B: bounded progressive-disclosure metadata (point-in-time path).
         payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
         // M12-12: self-describing notes (point-in-time path).

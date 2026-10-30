@@ -661,6 +661,9 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
     // M12-13: nullable isolationFailure (null on a packaging-failed run — this
     // failure shape belongs to packaging, not an isolation escape; additive).
     "isolationFailure",
+    // 0098: adoption 三态（主分支 WAO-Adopted-From；standalone 出参独有，
+    // review bundle 嵌 BASE 不带）。
+    "adoption",
   ]);
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);

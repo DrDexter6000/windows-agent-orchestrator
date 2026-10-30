@@ -380,11 +380,11 @@ test("projectLaneProfiles：每行带推断族系（决定 0090），由车道�
     "认不出的型号按 backend 兜底（codex→GPT，与写了 gpt 型号的同族）；zcode 不兜底（多 provider 宿主），认不出即未知");
 });
 
-test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看图", () => {
+test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看图/看视频", () => {
   const traitsResult = {
     state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
     traits: {
-      la: validEntry({ contextWindow: { tokens: 262144, source: "owner" }, multimodal: { image: false, video: false, source: "official" } }),
+      la: validEntry({ contextWindow: { tokens: 262144, source: "owner" }, multimodal: { image: false, video: true, source: "official" } }),
       lb: validEntry(),
     },
     invalidIds: [], issues: [],
@@ -397,9 +397,11 @@ test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看�
   assert.equal(a.dispatchHold, "调试中，暂勿派发", "暂停说明原话照录");
   assert.equal(a.contextWindowTokens, 262144);
   assert.equal(a.imageInput, false);
+  assert.equal(a.videoInput, true, "videoInput 紧挨 imageInput 投影（0089：原生理解视频与先抽帧是两回事）");
   assert.equal(b.dispatchHold, null, "形状不合法的暂停说明投影为 null（与车道表读取面同一校验）");
   assert.equal(b.contextWindowTokens, 1000000);
   assert.equal(b.imageInput, true);
+  assert.equal(b.videoInput, false);
 
   const noHold = projectLaneProfiles({ lanesDoc: laneDoc([LANE_A]), traitsResult });
   assert.equal(noHold.rows[0].dispatchHold, null, "没写暂停说明 → null");
@@ -420,7 +422,7 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   // 行键闭集与维度中文名。
   assert.deepEqual(
     Object.keys(proj.rows[0]).sort(),
-    ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
+    ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons", "videoInput"],
   );
   assert.deepEqual(Object.keys(proj.dimensionLabels), RATING_DIMENSIONS);
   assert.equal(proj.dimensionLabels.research, DIMENSION_LABELS.research, "中文名来自同一归宿");
@@ -601,7 +603,7 @@ test("MCP lead_preflight：合法投影过整份出参 schema（形状即 LEAD_P
       assert.deepEqual(Object.keys(lanes.dimensionLabels), RATING_DIMENSIONS);
       const row = lanes.rows[0];
       assert.deepEqual(Object.keys(row).sort(),
-        ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
+        ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons", "videoInput"]);
       assert.deepEqual(Object.keys(row.ratings), ["research"], "只含已评维度（夹具只评了 research）");
       assert.equal(row.ratingsState, "current");
     } finally { await client.close(); await server.close(); }
@@ -907,4 +909,14 @@ test("0097 真实数据：进了 score 的那组数字不再出现在同格 note
     assert.equal((cell.note ?? "").includes(num), false,
       `${laneId}.${dim} note 不再重复 ${num}（数字只留在 score）`);
   }
+});
+
+test("真实画像：videoInput 只有 kimi 为 true（0089：其余车道要先抽帧截图）", () => {
+  const r = readLaneTraits();
+  assert.equal(r.state, "ok");
+  const proj = projectLaneProfiles({ lanesDoc: loadLanesConfig(), traitsResult: r });
+  assert.ok(proj, "真实画像可投影");
+  const videoTrue = proj.rows.filter((x) => x.videoInput === true).map((x) => x.id);
+  assert.deepEqual(videoTrue, ["kimi"], "原生理解视频的车道只有 kimi");
+  assert.ok(proj.rows.length > 1, "其余车道在列（它们的 videoInput 均为 false）");
 });

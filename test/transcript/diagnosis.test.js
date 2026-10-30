@@ -1762,6 +1762,95 @@ test("kimi-web 收口排序: 带上游错误正文的 kimi turn failed (… 429 
 });
 
 // ---------------------------------------------------------------------------
+// 2026-10-30：deepseek-acp 报出的上游传输失败 → provider_disconnect（反馈
+// fb_20261030T122616Z_sr9otr）。
+//
+// 真实样本 run_20261030122044630xal92g（deepseek-flash 只读会审席）：dsh 以
+// JSON-RPC -32603 回绝 session/prompt，报文 "Internal error: turn failed:
+// DeepSeek Messages transport failed"。会审席本来不写文件——run 有活动、无
+// file_written / 无 command exit0，旧读法落 no_effect（"读完没产出"），读不出
+// 根因是 harness 到上游的传输断了。文案前两段由控制面拼（deepSeekAcp.js 的
+// promptPromise 收口 + processFrame reject），锚定它们 + -32603 + 单行
+// "transport failed" 标记；同前缀的 "stream: duplicate message_start" 是流
+// 协议异常，不命中（宁漏贴勿误贴）。契约：
+//   - 命中 → provider_disconnect，两条固定短语事实（标记命中 + 更细原因不可
+//     区分），不回显上游报文原文（"Internal error…"、"DeepSeek Messages"
+//     不进证据）、不给处方；
+//   - 真 401/额度文本仍按 auth/capacity 规则先判；有产出的运行仍归
+//     evidence_passed_backend_failed。
+// ---------------------------------------------------------------------------
+
+const DEEPSEEK_TRANSPORT_RUN = "run_deepseek_transport";
+
+function deepseekTransportEvents(runId, error, extra = []) {
+  return [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-10-30T12:20:01.000Z" },
+    ...extra,
+    { type: "run.error", phase: "wait", runId, ts: "2026-10-30T12:24:55.000Z", error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-10-30T12:24:55.000Z" },
+  ];
+}
+
+// 只读会审席的轮内活动：读上下文（tool_use / assistant text），无文件写、无命令。
+const DEEPSEEK_CONSULT_ACTIVITY = [
+  { type: "run.event", kind: "tool_use", tool: "Read", input: {}, runId: DEEPSEEK_TRANSPORT_RUN, ts: "2026-10-30T12:21:00.000Z" },
+  { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reviewing…" }], runId: DEEPSEEK_TRANSPORT_RUN, ts: "2026-10-30T12:22:00.000Z" },
+];
+
+const DEEPSEEK_TRANSPORT_ERROR =
+  "deepseek-acp session/prompt failed: deepseek-acp JSON-RPC error -32603: Internal error: turn failed: DeepSeek Messages transport failed";
+
+function deepseekTransportDiagnosis(error, extra = DEEPSEEK_CONSULT_ACTIVITY) {
+  return diagnoseFailure(deepseekTransportEvents(DEEPSEEK_TRANSPORT_RUN, error, extra), DEEPSEEK_TRANSPORT_RUN);
+}
+
+test("deepseek-acp 上游传输失败: 真实文案 → provider_disconnect（非 no_effect），证据不回显报文原文", () => {
+  const d = deepseekTransportDiagnosis(DEEPSEEK_TRANSPORT_ERROR);
+  assert.equal(d.category, "provider_disconnect", "上游传输失败 → provider 流中断，不再误读 no_effect");
+  assert.equal(d.code, null, "provider_disconnect 不带 code");
+  assert.equal(d.evidence.length, 2, "两条事实（标记命中 + 更细原因不可区分）");
+  assert.ok(d.evidence.every((e) => e.eventType === "run.error"), "证据指向 run.error");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /transport failed 标记/, "证据说明命中的是传输失败标记");
+  assert.match(joined, /无法区分/, "证据如实写更细原因不可区分");
+  assert.ok(!joined.includes("Internal error") && !joined.includes("DeepSeek Messages"),
+    "上游报文原文（Internal error… / DeepSeek Messages…）不得进证据");
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+  assert.ok(!d.evidence.some((e) => /无 file_written/.test(e.fact)), "不得落 no_effect 的事实");
+});
+
+test("deepseek-acp 同前缀的其它 -32603 报文（stream: duplicate message_start）→ 不命中（宁漏贴勿误贴）", () => {
+  // 真实姊妹样本（run_20261030082505403xlpe1d）：同前缀同错误码，报文是流协议
+  // 异常不是传输失败——照原路径走（有活动无产出 → no_effect）。
+  const d = deepseekTransportDiagnosis(
+    "deepseek-acp session/prompt failed: deepseek-acp JSON-RPC error -32603: Internal error: turn failed: DeepSeek Messages stream: duplicate message_start",
+  );
+  assert.equal(d.category, "no_effect", "流协议异常不虚构传输失败，照原路径走");
+  assert.ok(!d.evidence.some((e) => /transport failed 标记/.test(e.fact)), "不得带传输失败事实");
+});
+
+test("deepseek-acp 上游传输失败: 只是引用这句文案的其它错误不命中（锚定控制面前缀）", () => {
+  const d = deepseekTransportDiagnosis(`relayed upstream note: "${DEEPSEEK_TRANSPORT_ERROR}"`);
+  assert.equal(d.category, "no_effect", "引用不是报错本体：照原路径走（有活动无产出）");
+  assert.ok(!d.evidence.some((e) => /transport failed 标记/.test(e.fact)), "不得带传输失败事实");
+});
+
+test("deepseek-acp 上游传输失败排序: 有命令 exit0 产出 → 仍 evidence_passed_backend_failed（传输失败门不抢）", () => {
+  const d = deepseekTransportDiagnosis(DEEPSEEK_TRANSPORT_ERROR, [
+    { type: "run.event", kind: "command", command: "npm test", exitCode: 0, runId: DEEPSEEK_TRANSPORT_RUN, ts: "2026-10-30T12:23:00.000Z" },
+  ]);
+  assert.equal(d.category, "evidence_passed_backend_failed", "有产出的运行仍归「证据通过需人工确认」");
+});
+
+test("deepseek-acp 上游传输失败排序: 报文带真 401 文本 → 仍 provider_auth（auth 文本规则先判）", () => {
+  const d = deepseekTransportDiagnosis(
+    "deepseek-acp session/prompt failed: deepseek-acp JSON-RPC error -32603: Internal error: 401 Unauthorized after DeepSeek Messages transport failed",
+  );
+  assert.equal(d.category, "provider_auth", "上游真给了 401 文本 → provider_auth 先判，传输失败标记不抢");
+  assert.equal(d.code, "unauthorized");
+});
+
+// ---------------------------------------------------------------------------
 // runs settle 结算的 process_missing 运行（终态 failed + 理由 process_missing
 // + 确认事实）：归 unknown，证据只给两条事实——结算的由来与原因不在转录内。
 // ---------------------------------------------------------------------------

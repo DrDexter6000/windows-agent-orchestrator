@@ -6,10 +6,16 @@
 // be any unrelated project.
 //
 // At MODULE LOAD it records startedAt (ISO-8601 UTC) plus the code checkout's
-// git HEAD at that moment. The exported query re-reads `git rev-parse HEAD`
-// and `git status --porcelain -- src/` at call time. These are CONTENT facts:
-// file mtime is never a criterion (checkout/stash refresh mtimes without
-// changing content and would produce false drift reports).
+// git HEAD and the src/ TREE hash (`git rev-parse HEAD:src`) at that moment.
+// The exported query re-reads `git rev-parse HEAD`, `git rev-parse HEAD:src`
+// and `git status --porcelain -- src/` at call time. The restart-drift
+// comparison authority is the src/ tree hash + src/ dirty state: the tree hash
+// changes ONLY when the committed content of src/ changes, so a commit that
+// touches nothing under src/ (lane profile data, docs, tests) is not server
+// code drift even though HEAD moves. HEAD is retained as an observability
+// fact only (the consumer's observation line still names it). These are
+// CONTENT facts: file mtime is never a criterion (checkout/stash refresh
+// mtimes without changing content and would produce false drift reports).
 //
 // Architectural contract:
 //   - Does NOT import src/mcp/*, src/commands/*, MCP SDK, or zod.
@@ -22,11 +28,12 @@
 //     exist only as internal derivation inputs).
 //
 // Degradation truth table (what each failure returns):
-//   - code root underivable, git binary missing, not a Git repo, or HEAD
-//     malformed/unreadable → { readable:false, headAtStart:null (or the
-//     load-time value), headNow:null, srcDirtyNow:null } — the consumer
-//     degrades to a start-time + package-version observation, never a warning.
-//   - HEAD readable but `git status --porcelain -- src/` fails →
+//   - code root underivable, git binary missing, not a Git repo, no src/ tree
+//     in HEAD, or a hash malformed/unreadable → { readable:false,
+//     srcTreeAtStart:null (or the load-time value), srcTreeNow:null,
+//     srcDirtyNow:null } — the consumer degrades to a start-time +
+//     package-version observation, never a warning.
+//   - src tree hash readable but `git status --porcelain -- src/` fails →
 //     { readable:true, srcDirtyNow:null } — dirty UNKNOWN, never faked clean.
 //   - All reads succeed → full comparison facts.
 
@@ -70,6 +77,23 @@ function revParseHead(root, gitBin) {
   }
 }
 
+// Tree hash of HEAD:src only (same 40/64-hex shape gate). This is the
+// restart-drift comparison authority: it moves ONLY when the committed
+// content of src/ moves, so commits that leave src/ untouched keep it stable
+// while HEAD (the observability fact above) drifts.
+function revParseHeadSrcTree(root, gitBin) {
+  try {
+    const out = execFileSync(gitBin, ["rev-parse", "HEAD:src"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 // src/ dirty status from porcelain output (empty = clean). null = unreadable.
 function srcDirty(root, gitBin) {
   try {
@@ -89,13 +113,14 @@ function srcDirty(root, gitBin) {
 // captured at load too — without it, a start-dirty → still-dirty checkout
 // would be indistinguishable from start-clean → stayed-clean, and the consumer
 // could not tell "matches start" from "cannot confirm" (验收会审 astra/sol
-// 反例：仅凭启动 HEAD 判"unchanged"超出证据).
+// 反例：仅凭启动事实判"unchanged"超出证据).
 const STARTED_AT = new Date().toISOString();
 const CODE_ROOT = deriveCodeRoot();
 const HEAD_AT_START = CODE_ROOT != null ? revParseHead(CODE_ROOT, "git") : null;
-// Only meaningful when the load-time HEAD was readable; otherwise null (the
-// start-state dirty flag alone proves nothing about what was loaded).
-const SRC_DIRTY_AT_START = CODE_ROOT != null && HEAD_AT_START != null
+const SRC_TREE_AT_START = CODE_ROOT != null ? revParseHeadSrcTree(CODE_ROOT, "git") : null;
+// Only meaningful when the load-time src tree was readable; otherwise null
+// (the start-state dirty flag alone proves nothing about what was loaded).
+const SRC_DIRTY_AT_START = CODE_ROOT != null && SRC_TREE_AT_START != null
   ? srcDirty(CODE_ROOT, "git")
   : null;
 const PACKAGE_VERSION = readPackageVersion();
@@ -104,18 +129,21 @@ const PACKAGE_VERSION = readPackageVersion();
  * Read the structured server-build facts (pure read; no writes, no caching
  * of call-time results).
  *
- * The two call-time reads (HEAD, src/ dirty) are NOT atomic with each other
- * or with the load-time capture: a checkout/restore landing between them can
- * make the pair momentarily inconsistent. Consumers must treat these as
- * ADVISORY facts, never as proof of what modules are loaded.
+ * The call-time reads (HEAD, src tree, src/ dirty) are NOT atomic with each
+ * other or with the load-time capture: a checkout/restore landing between
+ * them can make the pair momentarily inconsistent. Consumers must treat these
+ * as ADVISORY facts, never as proof of what modules are loaded.
  *
  * @param {{gitBin?: string, codeRoot?: string}} [opts] — injection points for
  *   tests (fake git binary / relocated code root).
  * @returns {{startedAt: string, headAtStart: string|null, headNow: string|null,
+ *   srcTreeAtStart: string|null, srcTreeNow: string|null,
  *   srcDirtyAtStart: boolean|null, srcDirtyNow: boolean|null, readable: boolean,
  *   packageVersion: string|null}}
- *   readable is true ONLY when both the load-time and current HEAD were read —
- *   a null on either side is "cannot confirm", never "matches".
+ *   readable is true ONLY when both the load-time and current src/ tree
+ *   hashes were read — the comparison authority — a null on either side is
+ *   "cannot confirm", never "matches". headAtStart/headNow are observability
+ *   facts only; they stay null exactly when the HEAD reads fail.
  */
 export function readServerBuildFacts(opts = {}) {
   const gitBin = opts.gitBin ?? "git";
@@ -123,14 +151,17 @@ export function readServerBuildFacts(opts = {}) {
     ? opts.codeRoot
     : CODE_ROOT;
   const headNow = root != null ? revParseHead(root, gitBin) : null;
-  const srcDirtyNow = root != null && headNow != null ? srcDirty(root, gitBin) : null;
+  const srcTreeNow = root != null ? revParseHeadSrcTree(root, gitBin) : null;
+  const srcDirtyNow = root != null && srcTreeNow != null ? srcDirty(root, gitBin) : null;
   return {
     startedAt: STARTED_AT,
     headAtStart: HEAD_AT_START,
     headNow,
+    srcTreeAtStart: SRC_TREE_AT_START,
+    srcTreeNow,
     srcDirtyAtStart: SRC_DIRTY_AT_START,
     srcDirtyNow,
-    readable: HEAD_AT_START != null && headNow != null,
+    readable: SRC_TREE_AT_START != null && srcTreeNow != null,
     packageVersion: PACKAGE_VERSION,
   };
 }

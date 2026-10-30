@@ -436,7 +436,12 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 92639;
+const FROZEN_23_WIRE_CEILING = 93142;
+// 0098（2026-10-30，Owner 批准本批重冻）：run_delivery 出参增 adoption 三态
+// 对象（status/commits≤5/truncated/uncheckedReason，闭集从 adoptionQuery SSOT
+// 派生；BASE 不带——review bundle 嵌 BASE 字节不变）、lead_preflight lanes
+// 每行增 videoInput：92639→93142（实测；Owner 硬顶 94532 内）。描述与
+// inputSchema 零改动（desc/hostVisible 冻结线未动）。
 // 0097（2026-10-30，Owner 批准的批次）：选车道的关键事实送到 Lead 面前——
 // lead_preflight 出参 lanes 增 costTierScale/ownerRules 顶层键、每行增 costTier、
 // research/code/review 三格增可选 score；run_dispatch 出参增可选 laneFacts：
@@ -656,8 +661,13 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // stripped 载荷内，SHA 如实翻新（决定 0097，工具面重冻；描述与 inputSchema
 // 零改动，desc/hostVisible 冻结线未动）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "73e46657303d73dea7750a8575ea58bf367671190183254742837c241bc14844";
-// （历史值：38e9f93b791e5c9cc21fb3289584f55b109a6c688eaa019cd2d467b8527413a3
+  "a31ff42f8790f05601d26907f6907db16d8f05c7613544066660d1cc298702d1";
+// 0098（2026-10-30，Owner 批准本批重冻）：run_delivery 出参增 adoption 三态
+// 对象、lead_preflight lanes 每行增 videoInput——两个 outputSchema 都在
+// stripped 载荷内，SHA 如实翻新（描述与 inputSchema 零改动，desc/hostVisible
+// 冻结线未动；BASE 不带 adoption，review bundle 嵌 BASE 字节不变）。
+// （历史值：73e46657303d73dea7750a8575ea58bf367671190183254742837c241bc14844
+// 为 0097 lanes costTier/score 与 laneFacts 后的冻结值；38e9f93b791e5c9cc21fb3289584f55b109a6c688eaa019cd2d467b8527413a3
 // 为 0096 run_consult nextStep 后的冻结值。）
 // 0095（2026-10-29）：run_wait/run_delivery/run_dispatch/run_continue 出参增
 // 可选 nextStep（string≤480，取自 LEAD_ADVISORY_WIRE_MAX_LEN）、run_wait 输入

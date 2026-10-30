@@ -133,7 +133,9 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     // M12-12: semanticNotes added (REQUIRED self-describing notes; see wao://semantics).
     // M12-13: isolationFailure added (nullable; present only when the terminal run
     // carries a safe run-bound workdir_escape isolation violation — null here).
-    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "originalVerificationStatus", "effectiveVerificationStatus", "reverify", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind", "availableDrilldowns", "semanticNotes", "isolationFailure"]);
+    // 0098: adoption added（主分支 WAO-Adopted-From 三态；注入的假服务不带该
+    // 字段时投影为 unchecked/unbound 缺省——本例即缺省形态）。
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "originalVerificationStatus", "effectiveVerificationStatus", "reverify", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind", "availableDrilldowns", "semanticNotes", "isolationFailure", "adoption"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
     assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");

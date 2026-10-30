@@ -418,6 +418,7 @@ Output:
 | semanticNotes | array<object> | yes |  |
 | isolationFailure | object\|null | yes |  |
 | verificationGate | object | no |  |
+| adoption | object | yes |  |
 | nextStep | string | no |  |
 
 ## run_delivery_decide

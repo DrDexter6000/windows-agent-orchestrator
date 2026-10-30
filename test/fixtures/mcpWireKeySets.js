@@ -35,17 +35,18 @@ export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
   "reasoning", "role",
 ]);
 
-// run_delivery (point-in-time) output: 23 top-level keys (M11-1A-01 /
+// run_delivery (point-in-time) output: 24 top-level keys (M11-1A-01 /
 // M11-10-MCP-02). Consumers compare as a Set. M11-8C added
 // deliveryAvailable/deliveryFailure; M11-12B verificationFailureSummary;
 // M12-1S1/M12-4A candidateInventory + candidateKind; M12-6 3B2a the reverify
 // chain trio; M12-8B availableDrilldowns; M12-12 semanticNotes; M12-13
-// isolationFailure.
+// isolationFailure; 0098 adoption（主分支 WAO-Adopted-From 三态——standalone
+// 出参独有，review bundle 嵌 BASE 不带）.
 export const RUN_DELIVERY_OUTPUT_KEYS = Object.freeze([
   "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
   "changedFileCount", "changedPaths", "changedPathsTruncated",
   "verificationStatus", "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
   "verificationFailureCode", "verificationFailureSummary",
   "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-  "availableDrilldowns", "semanticNotes", "isolationFailure",
+  "availableDrilldowns", "semanticNotes", "isolationFailure", "adoption",
 ]);

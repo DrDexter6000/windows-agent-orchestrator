@@ -117,6 +117,8 @@ test("PB-RED2: getRunDelivery reports plain non-delivery truth without a packagi
       deliveryAvailable: false,
       deliveryRequested: false,
       deliveryFailure: null,
+      // 0098：服务视图恒带 adoption（无仓库根 → unchecked/unbound）。
+      adoption: { status: "unchecked", commits: [], truncated: false, uncheckedReason: "unbound", branch: null },
     });
   } finally {
     cleanupDir(dir);
@@ -286,6 +288,8 @@ test("PB-RED10: cross-run / conflicting delivery_failed does not fake a packagin
       deliveryAvailable: false,
       deliveryRequested: false,
       deliveryFailure: null,
+      // 0098：服务视图恒带 adoption（无仓库根 → unchecked/unbound）。
+      adoption: { status: "unchecked", commits: [], truncated: false, uncheckedReason: "unbound", branch: null },
     });
   } finally {
     cleanupDir(dir);

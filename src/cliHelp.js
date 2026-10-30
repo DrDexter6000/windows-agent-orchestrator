@@ -46,7 +46,7 @@ Commands:
   runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard
   dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
   runs diagnose <runId> [--run-dir DIR] [--format json]
-  runs delivery <runId> [--run-dir DIR] [--format json]   # 交付状态查询（只读）
+  runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json]   # 交付状态查询（只读）；--cwd 指定仓库根（缺省 WAO_TARGET_CWD，再当前目录）供主分支 WAO-Adopted-From 采纳查询
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery reverify <runId> --reason <code> [--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 未变工件审计式重验证；--attempt 2 为第二次（也是最后一次）机会，仅当第一次因环境/工具码失败
   runs wait <runId> [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标，见 docs/usage/supervise.md）

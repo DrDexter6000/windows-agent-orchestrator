@@ -606,13 +606,18 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
     assert.equal(view.deliveryRequested, true);
     // M12-6 3B2a: ADDITIVE original/effective/reverify projection — the OLD
     // fields are untouched; effectiveVerification + reverify are new keys.
+    // 0098: ADDITIVE adoption——每个返回形态都带（此处无仓库根 → unchecked/unbound，
+    // 不跑 git）。
     assert.deepEqual(
       Object.keys(view).sort(),
       [
-        "acceptance", "deliveryAvailable", "deliveryRef", "deliveryRequested", "runId",
+        "acceptance", "adoption", "deliveryAvailable", "deliveryRef", "deliveryRequested", "runId",
         "terminalState", "verification", "effectiveVerification", "reverify",
       ].sort(),
     );
+    assert.deepEqual(view.adoption, {
+      status: "unchecked", commits: [], truncated: false, uncheckedReason: "unbound", branch: null,
+    });
     // Zero-drift truth: a plain chain with NO reverify events → effective ===
     // the original status carried by the outcome ref (TD-179: the outcome
     // event's embedded status agrees with its type) and a clean "none"

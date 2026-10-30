@@ -170,30 +170,30 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 
 ## 验证失败采纳协议
 
-当控制面交付验证 failed 且归因为 Lead 侧规格/环境错误（而非工件缺陷）时，按以下协议处置：
+当交付验证 failed 且归因为 Lead 侧规格/环境错误（非工件缺陷）时，按以下协议处置：
 
-1. 归因先行：读 `runs delivery` 摘要与转录内 `delivery_verification_*` 事件的 `stdoutTail`/`stderrTail`（失败命令的诊断细节在此）；确认失败命令在正确路径/环境下同样失败，且工件本身无需修改。
-2. commit trailer 交叉引用：采纳集成时在 commit message 加 `WAO-Adopted-From: <runId>` 与 `WAO-Original-Delivery: <deliveryCommitSha>`。decide 的 reason 字段落盘会 trim+redact 且不经 MCP 回读（已知审计面限制）——可 grep 的 trailer 才是审计侧能复核的那半边。
-3. 独立审计强制：采纳必须经独立审计席回审，证据规格写死：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog。禁止 Lead 单方闭环。
+1. 归因先行：读 `runs delivery` 摘要与转录 `delivery_verification_*` 事件的 `stdoutTail`/`stderrTail`（细节在此）；确认失败命令在正确路径/环境下同样失败、工件无需修改。
+2. commit trailer 交叉引用：采纳集成时在 commit message 加 `WAO-Adopted-From: <runId>` 与 `WAO-Original-Delivery: <deliveryCommitSha>`，trailer 按 `Key: value` 成段；squash 时保留。acceptance 裁决原样交付的那个提交，采纳的家是落地提交的 trailer——decide 的 reason 落盘会 trim+redact 且不经 MCP 回读，可 grep 的 trailer 才是审计侧能复核的那半边。
+3. 独立审计强制：采纳必须经独立审计席回审，证据规格：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog。禁止 Lead 单方闭环。
 4. 集成后终验：集成结果就是最终候选，按 `docs/testing.md` 的批次规则验证（一般是一次全量，跑前按 `docs/troubleshooting.md` §8.2 错峰），绿后方可推送。
-5. 集成前工作区纪律：cherry-pick 交付提交前，Lead 工作区必须干净（未提交改动先提交）——交付提交与 Lead 本地改动触碰同一文件时会冲突中止。
+5. 集成前工作区纪律：cherry-pick 交付提交前 Lead 工作区必须干净（未提交改动先提交），否则与本地改动触碰同一文件时会冲突中止。
+
+### 读面 adoption 三态
+
+`runs delivery`（`--cwd DIR` 指定仓库根，缺省同其他命令）与 MCP `run_delivery` 附带 `adoption`：在主工作树当前检出的分支按 runId 找 trailer；`status` 为 `found`/`not_found`/`unchecked`（unchecked 给闭集原因），`commits` 为命中提交（≤5，另 `truncated`）。它只说明“主分支上有提交声明采纳了这个运行”，不是“已落地”：`not_found` 不等于没落地——squash 丢了 trailer 就是 not_found，accepted 交付也不要求 trailer。
 
 ### `runs verify-commit` 承载边界
 
-本命令只承载上述协议第 1 步（Lead 侧归因）与第 4 步（集成后终验）的执行——在临时 worktree 检出指定提交、执行 Lead 提供的命令清单、把证据以 `run.lead_commit_check_started/_outcome` 事件族追加进指定 run 的转录（仅 started 无 outcome = 合法不完整证据，绝不读作通过）。它不满足第 3 步独立审计证据规格（HEAD hash + `git branch --contains <sha>` + reflog——本命令的 outcome 不是这些证据的替代品，不得当受审对象替代品；独立审计席仍必须按第 3 步证据规格另行回审）。两事件带 `kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁，CLI 输出与投影不出现 accepted/verified 措辞，事件族不进 validateDeliveryFacts / decide / wao accept 任何判定输入。
-
-```bash
-npm run cli -- runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
-```
+本命令只承载上述协议第 1 步（Lead 侧归因）与第 4 步（集成后终验）的执行——在临时 worktree 检出指定提交、执行 Lead 提供的命令清单、把证据以 `run.lead_commit_check_started/_outcome` 事件族追加进该 run 转录（仅 started 无 outcome = 合法不完整证据，不读作通过）。它不满足第 3 步独立审计证据规格（HEAD hash + `git branch --contains <sha>` + reflog——outcome 不是这些证据的替代品、不当受审对象替代品，独立审计席仍须按第 3 步另行回审）。两事件带 `kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁，CLI 输出与投影不出现 accepted/verified 措辞，事件族不进 validateDeliveryFacts / decide / wao accept 任何判定输入。
 
 - `--commit`：全形 canonical SHA（40/64 小写 hex；短形拒绝，短形只用于期望锚），经 `rev-parse --verify --end-of-options <sha>^{commit}` 等值校验。`--commands-file`：UTF-8 JSON 字符串数组（与 `runs delivery reverify --setup-commands-file` 同一解析器与边界：≤32 条、每条 ≤512 字符；命令含静态可辨绝对路径字面量即拒绝——防越出临时 worktree）。`--timeout-ms`：单值闭区间 `[1000,7200000]`（每命令预算，缺省 300000）。
-- 前置：runId 须为该 workspace 的已终态 delivery run（转录含 `run.delivery_created`）；提交与 run 的关系记事实字段（isDeliveryCommit / containsDeliveryCommit / adoptedFromTrailer）不设拒——跨 run 同仓提交可核验。
+- 前置：runId 须为该 workspace 的已终态 delivery run（转录含 `run.delivery_created`）；提交与 run 的关系记事实字段（isDeliveryCommit / containsDeliveryCommit / adoptedFromTrailer）不设拒。
 - 执行：一律走系统唯一有意 shell 边界（`runVerificationCommand`）+ verifier 同款 attempt env 确定性钉 + 同机机器验证闸串行；临时 worktree 在 `<repo>/.wao-worktrees/verify-<nonce>/`（检出 + 用后清理；不进 os.tmpdir()）。
 - 退出码：outcome 为 passed 且 cleanup 为 ok 才是 0；失败/中断/清理失败均非零（结果照记，`cleanup:"failed"` 如实落事件）。
 
-`run_delivery` 投影在验证失败摘要中携带 `stderrTailInTranscript` 布尔提示位（true = 失败命令的 result frame 带非空 stdoutTail/stderrTail，诊断细节去转录里读；投影永不携带尾内容本身）。
+`run_delivery` 失败摘要带 `stderrTailInTranscript` 提示位（true = 失败命令 result frame 有非空尾，细节去转录读；投影永不携带尾内容本身）。
 
-审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用受审对象的可机读锚点，禁止转述交付内容——最低四要素：受审 commit hash（或 runId）、比较基线（base commit）、受影响文件清单（或"git show 自行审阅"的指引）、测试证据所在提交。转述会让"计划内容"混入"实际内容"，审计者无法发现二者差异。
+审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用可机读锚点，禁止转述交付内容——最低四要素：受审 commit hash（或 runId）、比较基线（base commit）、受影响文件清单（或"git show 自行审阅"的指引）、测试证据所在提交。转述会让计划与实际内容混淆，审计者发现不了差异。
 
 ## MCP `run_delivery_decide`（持久 Lead 决策）
 

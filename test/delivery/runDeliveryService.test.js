@@ -103,6 +103,8 @@ test("M9-6A-04: ordinary run without delivery request returns structured truth",
       deliveryAvailable: false,
       deliveryRequested: false,
       deliveryFailure: null,
+      // 0098：服务视图恒带 adoption（此处无仓库根 → unchecked/unbound）。
+      adoption: { status: "unchecked", commits: [], truncated: false, uncheckedReason: "unbound", branch: null },
     });
   } finally { cleanupDir(dir); }
 });

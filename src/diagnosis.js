@@ -20,7 +20,7 @@
 //   budget                      — run.state_change reason:budget_exceeded
 //   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
 //   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
-//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据三条：
+//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据四条：
 //                                 ① worker 活跃工作后静默≥120s 且 exit≠0；
 //                                 ② zcode/kimi-web 静默收口文案——backend 在静默到点后
 //                                   有界收口。kimi-web 逐门判定（见
@@ -40,7 +40,12 @@
 //                                   retry_scheduled → 本类；链尾 started/completed
 //                                   （请求已完成、轮次却失败）→ 照原路径走
 //                                   （evidence_passed_backend_failed/no_effect/
-//                                   unknown 等），只附摘要事实
+//                                   unknown 等），只附摘要事实；
+//                                 ④ deepseek-acp 报出的上游传输失败——本运行最后
+//                                   一条 run.error 是 backend 控制面前缀的 prompt
+//                                   失败文案且报文带 transport failed 标记：harness
+//                                   到上游的传输断了（只读席有活动、无产出，此前
+//                                   被 no_effect 误读）
 //   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
 //   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
 //   aborted_manual              — run.aborted 事件
@@ -423,6 +428,22 @@ const KIMI_WEB_SILENT_CLOSEOUT_GATES = Object.freeze([
 // zcode 自己以失败结束本轮的文案（backend 固定句式，step-finish reason error
 // 的 part 不带错误明细）。
 const ZCODE_TURN_FAILED_SIGNAL = /^zcode turn failed \(step-finish reason error/;
+
+// deepseek-acp 报出的上游传输失败 → provider_disconnect。prompt 轮在 harness 内部
+// 失败、其到 DeepSeek 上游的传输断掉时，dsh 以 JSON-RPC 错误回绝 session/prompt；
+// 文案前两段由控制面自己拼（src/backends/deepSeekAcp.js：promptPromise 收口写
+// "deepseek-acp session/prompt failed: "，processFrame 的 reject 写 "deepseek-acp
+// JSON-RPC error -32603: "），其后才是上游报文。锚定 = 这两个控制面段 + 实测内部
+// 错误码 -32603，报文侧只认同一行内的 "transport failed" 标记（真实样本
+// run_20261030122044630xal92g："Internal error: turn failed: DeepSeek Messages
+// transport failed"）。同前缀的 "stream: duplicate message_start" 等其它 -32603
+// 报文不匹配——那是流协议异常，不是传输失败，照原路径走（宁漏贴勿误贴）。
+// 证据只写 DEEPSEEK_ACP_TRANSPORT_FAILED_FACTS 的固定短语，不回显上游报文原文。
+const DEEPSEEK_ACP_TRANSPORT_FAILED_SIGNAL = /^deepseek-acp session\/prompt failed: deepseek-acp JSON-RPC error -32603: [^\r\n]*transport failed/;
+const DEEPSEEK_ACP_TRANSPORT_FAILED_FACTS = Object.freeze([
+  "deepseek-acp 本轮 prompt 请求以 JSON-RPC 内部错误（-32603）失败，harness 报文带 transport failed 标记——其到上游的传输断了，run 以 failed 终态",
+  "上游（provider 侧）传输失败由 harness 明确报告；网络中断与 provider 侧断流等更细原因在本转录内无法区分（provider 流中断）",
+]);
 
 // zcode 收口/失败文案末尾的上游主轮请求摘要（backend summarySuffix 生成，格式
 // 锚定在句尾）：`; upstream: last main-turn request <status> (statusCode N,
@@ -1030,6 +1051,23 @@ function diagnoseFailureInner(events, expectedRunId) {
       evidence.push({ eventType: "run.error", fact: gate.causeFact });
       return { category: gate.category, evidence };
     }
+  }
+
+  //      ③' deepseek-acp 报出的上游传输失败（绑定本运行最后一条 run.error）：prompt
+  //      轮因 harness 到上游的传输断裂而失败时，backend 的失败文案以控制面前缀
+  //      开头、报文带 transport failed（信号定义与文案出处见
+  //      DEEPSEEK_ACP_TRANSPORT_FAILED_SIGNAL）。只读会审席有活动、无 file_written /
+  //      无 command exit0，此前被 no_effect 误读——上游传输失败才是根因。排序与
+  //      zcode/kimi-web 收口门同槽：auth/config/capacity 文本规则之后（上游真给了
+  //      401/额度文本的仍按那些规则判）、evidence_passed_backend_failed 之后（有
+  //      产出的运行仍归后者）、no_effect/crash 之前。证据只写固定短语，不回显
+  //      报文原文、不给处方。
+  if (state === "failed" && lastErrorEvent !== null
+    && DEEPSEEK_ACP_TRANSPORT_FAILED_SIGNAL.test(lastErrorEvent.error)) {
+    for (const fact of DEEPSEEK_ACP_TRANSPORT_FAILED_FACTS) {
+      evidence.push({ eventType: "run.error", fact });
+    }
+    return { category: "provider_disconnect", evidence };
   }
 
   //      ② TD-74 严格签名：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0。

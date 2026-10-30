@@ -313,10 +313,13 @@ export async function aggregateLeadPreflight({
   // The git subprocess lives in serverBuildFacts.js; only the structured
   // facts are consumed here. Truthfulness rules (验收会审 astra/sol 修正：
   // "unchanged" 只在启动与当下两侧都证明干净时才可说；启动时已脏 → 当下
-  // 仍脏是内容未证等价、不是匹配也不是漂移；警告永不断言旧代码"正在"运行):
-  //   same HEAD + both sides provably clean → "checkout unchanged since start"
-  //   HEAD differs OR dirty flag flipped (clean↔dirty) → drift warning
-  //   same HEAD + dirty on BOTH sides → factual observation: content equality
+  // 仍脏是内容未证等价、不是匹配也不是漂移；警告永不断言旧代码"正在"运行)。
+  // 比较权威 = src/ 树哈希（HEAD:src）+ src/ dirty 状态——只改 src/ 以外的
+  // 提交（画像数据、文档、测试）不动树哈希，不构成服务代码漂移；HEAD 事实
+  // 保留在观察行里仅作定位（fb_20261030T140948Z_ow2bgf）：
+  //   same src tree + both sides provably clean → "src/ unchanged since start"
+  //   src tree differs OR dirty flag flipped (clean↔dirty) → drift warning
+  //   same src tree + dirty on BOTH sides → factual observation: content equality
   //                                        unverified (NOT a match, NOT drift)
   //   any dirty flag null (and not drift)  → observation: cannot confirm match
   //   not readable (git failed / non-Git)→ degraded observation (start time +
@@ -331,30 +334,36 @@ export async function aggregateLeadPreflight({
         const startedAt = typeof f.startedAt === "string" && f.startedAt.length > 0
           ? f.startedAt
           : null;
-        const headShape = (v) => typeof v === "string" && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(v);
-        const headAtStart = headShape(f.headAtStart) ? f.headAtStart : null;
-        const headNow = headShape(f.headNow) ? f.headNow : null;
-        if (startedAt != null && headAtStart != null && headNow != null) {
-          const headSame = headAtStart === headNow;
+        const hashShape = (v) => typeof v === "string" && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(v);
+        const headAtStart = hashShape(f.headAtStart) ? f.headAtStart : null;
+        const headNow = hashShape(f.headNow) ? f.headNow : null;
+        const treeAtStart = hashShape(f.srcTreeAtStart) ? f.srcTreeAtStart : null;
+        const treeNow = hashShape(f.srcTreeNow) ? f.srcTreeNow : null;
+        if (startedAt != null && treeAtStart != null && treeNow != null) {
+          const treeSame = treeAtStart === treeNow;
           const dirtyBothKnown = f.srcDirtyAtStart != null && f.srcDirtyNow != null;
-          if (headSame && f.srcDirtyAtStart === false && f.srcDirtyNow === false) {
-            observations.push(`server build: started ${startedAt} at HEAD ${headNow}, checkout unchanged since start`);
-          } else if (!headSame || (dirtyBothKnown && f.srcDirtyAtStart !== f.srcDirtyNow)) {
+          // "at HEAD" 是启动时的提交；HEAD 后来动过（src/ 树没变）就另写现在的
+          // 提交——不把当前 HEAD 说成启动 HEAD。
+          const headFact = (headAtStart != null ? ` at HEAD ${headAtStart}` : "")
+            + (headNow != null && headNow !== headAtStart ? ` (HEAD now ${headNow})` : "");
+          if (treeSame && f.srcDirtyAtStart === false && f.srcDirtyNow === false) {
+            observations.push(`server build: started ${startedAt}${headFact}, src/ unchanged since start`);
+          } else if (!treeSame || (dirtyBothKnown && f.srcDirtyAtStart !== f.srcDirtyNow)) {
             warnings.push(
-              "server code checkout differs from server start (HEAD or src/ changed) — restart host before trusting MCP dogfood results",
+              "server src/ differs from server start (src tree or uncommitted src changes) — restart host before trusting MCP dogfood results",
             );
           } else if (f.srcDirtyAtStart === true && f.srcDirtyNow === true) {
-            observations.push(`server build: started ${startedAt} at HEAD ${headNow}; src/ had uncommitted changes at start and still does (content equality unverified)`);
+            observations.push(`server build: started ${startedAt}${headFact}; src/ had uncommitted changes at start and still does (content equality unverified)`);
           } else {
-            // 剩余形态：HEAD 相同但至少一侧 dirty 状态不可读——既不可宣称
+            // 剩余形态：src 树相同但至少一侧 dirty 状态不可读——既不可宣称
             // 匹配，也不可宣称漂移，如实说"无法确认"。
-            observations.push(`server build: started ${startedAt} at HEAD ${headNow}; src/ dirty status not fully readable — cannot confirm checkout matches start`);
+            observations.push(`server build: started ${startedAt}${headFact}; src/ dirty status not fully readable — cannot confirm src/ matches start`);
           }
         } else if (startedAt != null) {
           const v = typeof f.packageVersion === "string" && f.packageVersion.length > 0
             ? f.packageVersion
             : "unknown";
-          observations.push(`server build facts degraded: started ${startedAt}, package version ${v}, code checkout HEAD unreadable`);
+          observations.push(`server build facts degraded: started ${startedAt}, package version ${v}, code checkout src tree hash unreadable`);
         }
       }
     } catch {

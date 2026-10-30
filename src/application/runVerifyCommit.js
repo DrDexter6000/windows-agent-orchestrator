@@ -96,6 +96,8 @@ import {
   createCallerGate,
 } from "../deliveryVerification.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// 决定 0098：adoptedFromTrailer 事实字段的判定与交付读面 adoption 查询共用。
+import { messageDeclaresAdoption } from "./adoptionQuery.js";
 import { nestedDispatchContext, nestedDispatchRefusalText } from "../nestedDispatchGuard.js";
 import { ensureWaoWorktreeExclude } from "../gitLocalExclude.js";
 // prune --expire 判龄窗（isolation.WORKTREE_PRUNE_EXPIRE，SSOT 注释写明 git 2.50 语义
@@ -523,12 +525,11 @@ export async function runVerifyCommit({
       ["log", "-1", "--format=%B", "--end-of-options", commit],
       { cwd: authorizedWorkspaceRoot },
     ));
-    // 会审验收修（F3，astra+opus）：行锚定精确匹配——includes 会把前缀碰撞
-    // （run_example2 命中 run_example）与正文伪 trailer 一并误报。
-    adoptedFromTrailer = new RegExp(
-      `^WAO-Adopted-From: ${runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-      "m",
-    ).test(message);
+    // 决定 0098 第 4 条：trailer 判定与交付读面的 adoption 查询共用同一个
+    // 匹配函数（CRLF 归一、行尾空白容忍、整行相等、runId 精确、所在段落全
+    // Key: value 形——段落规则取代原行锚定正则，前缀碰撞与缩进伪 trailer
+    // 仍不命中）。
+    adoptedFromTrailer = messageDeclaresAdoption(message, runId);
   } catch {
     adoptedFromTrailer = false;
   }

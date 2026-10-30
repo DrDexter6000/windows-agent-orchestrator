@@ -17,7 +17,7 @@
 ## 决定
 
 1. **lead_preflight 一次看全。**
-   - `lanes` 每行加三个字段：`dispatchHold`（车道表的暂停说明，与 `registry_list` 用同一校验）、`contextWindowTokens`、`imageInput`。
+   - `lanes` 每行加三个字段：`dispatchHold`（车道表的暂停说明，与 `registry_list` 用同一校验）、`contextWindowTokens`、`imageInput`。2026-10-30 起再加 `videoInput`（Owner：kimi 是唯一原生理解视频的车道，其他车道要先抽帧截图；决定 0098 同批）。
    - 未评的维度不投影；`scale` 行末写"未列出的维度＝未评"。
    - `registry_list` 仍是凭据与认证明细的读取面。
 2. **一项事实一处。** glm-pro 的注意事项"不能看图"与 `imageInput` 重复，删去。

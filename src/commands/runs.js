@@ -2378,10 +2378,10 @@ export { runsCommand, runsDeliveryCommand, runsGateCommand };
  * runs delivery <runId> — Lead acceptance record.
  *
  * Read-only query:
- *   runs delivery <runId> [--format json]
+ *   runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json]
  *
  * Read-only bounded wait (M11-10):
- *   runs delivery <runId> --wait-ms N [--format json]
+ *   runs delivery <runId> --wait-ms N [--run-dir DIR] [--cwd DIR] [--format json]
  *
  * Decision:
  *   runs delivery <runId> --accept --reason-file FILE [--format json]
@@ -2442,6 +2442,26 @@ function _printReadinessText(result) {
   } else {
     console.log("Delivery: (not requested)");
   }
+  const adoption = _adoptionLine(result.adoption, result.acceptance?.status ?? null, result.deliveryRequested);
+  if (adoption) console.log(adoption);
+}
+
+/** 决定 0098 §6：adoption 三态文本行。found 打提交 sha（truncated 追 " …"）；
+ * not_found 打缺 trailer 行，但 acceptance 为 accepted 时不打（accepted 交付
+ * 本来不要求 trailer）；unchecked 打闭集原因。没请求交付的运行谈不上采纳，
+ * 只在 found 时打。无 adoption（注入假服务）不打。 */
+function _adoptionLine(adoption, acceptanceStatus, deliveryRequested) {
+  if (!adoption || typeof adoption !== "object") return null;
+  if (adoption.status === "found") {
+    const shas = adoption.commits.join(", ") + (adoption.truncated ? " …" : "");
+    return `Adopted in: ${shas} (WAO-Adopted-From on ${adoption.branch ?? "(branch unknown)"})`;
+  }
+  if (deliveryRequested !== true) return null;
+  if (adoption.status === "not_found") {
+    if (acceptanceStatus === "accepted") return null;
+    return `No WAO-Adopted-From trailer on ${adoption.branch ?? "(branch unknown)"}`;
+  }
+  return `Adoption not checked (${adoption.uncheckedReason})`;
 }
 
 function pendingVerificationGateLine(gate) {
@@ -2482,13 +2502,16 @@ async function runsDeliveryCommand(args, config, hostDeps) {
 
   // Read-only query (no --accept / --reject)
   if (!options.accept && !options.reject) {
+    // 决定 0098：adoption 查询的仓库根——--cwd 显式给，缺省走 resolveTargetCwd
+    //（WAO_TARGET_CWD / 当前目录）。只作 adoption 的根，不当 inventory 授权根。
+    const adoptionRoot = resolveTargetCwd(options);
     // M11-10: optional bounded, read-only wait. The CLI delegates to the SAME
     // readiness/wait service the MCP run_delivery tool uses — no second
     // algorithm, no direct transcript parsing, zero transcript append.
     if (options.waitMs !== undefined) {
       const waitMs = _coerceWaitMs(options.waitMs);
       const readinessService = hostDeps?.getRunDeliveryReadinessFn ?? getRunDeliveryReadiness;
-      const result = await readinessService({ runId, runDir, waitMs });
+      const result = await readinessService({ runId, runDir, waitMs, adoptionRepoRoot: adoptionRoot });
       const waitGate = await describePendingVerificationGate(result, runId, { createGate: hostDeps?.createGate });
       if (options.format === "json") {
         console.log(JSON.stringify(waitGate ? { ...result, verificationGate: waitGate } : result, null, 2));
@@ -2498,7 +2521,7 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       }
       return;
     }
-    const view = await getRunDelivery({ runId, runDir });
+    const view = await getRunDelivery({ runId, runDir, adoptionRepoRoot: adoptionRoot });
     const pendingGate = await describePendingVerificationGate(view, runId, { createGate: hostDeps?.createGate });
     if (options.format === "json") {
       console.log(JSON.stringify(pendingGate ? { ...view, verificationGate: pendingGate } : view, null, 2));
@@ -2516,6 +2539,8 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       } else {
         console.log("Delivery: (not requested)");
       }
+      const adoption = _adoptionLine(view.adoption, view.acceptance?.status ?? null, view.deliveryRequested);
+      if (adoption) console.log(adoption);
     }
     return;
   }

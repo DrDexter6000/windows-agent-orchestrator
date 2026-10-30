@@ -14,8 +14,10 @@
 //   2. 本机绝对路径（C:\Users\、D:\projects\<非WAO项目> 等路径结构泄露）
 //   3. 敏感文件被误跟踪（agents.json/.env/runs 等本该 gitignore 却被 git add -f）
 //
-// 关键：扫 `git ls-files`（会进仓库的文件），不扫磁盘全文件——.wao/state/、.dev/、
-// runs/ 都含本机路径但都 gitignore，扫磁盘会海量误报。
+// 关键：扫会进仓库的文件（`git ls-files --cached --others --exclude-standard`：已跟踪的
+// 加上未跟踪且未忽略的），不扫磁盘全文件——.wao/state/、.dev/、runs/ 都含本机路径
+// 但都 gitignore，扫磁盘会海量误报。带上未跟踪的，worker 自检时还没提交的新文件
+// 也在扫描内，不必等交付验证才拦下（第 53 批的教训）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -31,10 +33,10 @@ const ROOT = join(__dirname, "..", "..");
 // 用 import.meta.url 动态解析，不硬编码文件名，改名/复制不受影响。
 const SELF = "test/isolation-infra/" + basename(fileURLToPath(import.meta.url));
 
-/** 拿 git 跟踪的文件清单（只这些会进仓库）。失败说明不在 git 仓内，跳过本门控。 */
+/** 拿会进仓库的文件清单（已跟踪 + 未跟踪且未忽略）。失败说明不在 git 仓内，跳过本门控。 */
 function trackedFiles() {
   try {
-    const out = execFileSync("git", ["ls-files"], { cwd: ROOT, encoding: "utf8" });
+    const out = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8" });
     return out.split("\n").filter(Boolean);
   } catch {
     return []; // 非 git 仓（罕见），门控无法运行，静默跳过。
@@ -117,6 +119,6 @@ test("脱敏门控: 敏感文件（agents.json/.env/runs 等）绝不被 git 跟
   const tracked = trackedFiles();
   const leaked = tracked.filter((f) => FORBIDDEN.test(f));
   assert.equal(leaked.length, 0,
-    `敏感文件被 git 跟踪（应 gitignore）：${leaked.join(", ")}。` +
-    `用 git rm --cached <file> 移除跟踪（保留本地文件），它们含本机路径/凭证/run transcript。`);
+    `敏感文件会进仓库（已跟踪，或未跟踪也未忽略）：${leaked.join(", ")}。` +
+    `已跟踪的用 git rm --cached <file> 移除跟踪（保留本地文件），未跟踪的补进 .gitignore；它们含本机路径/凭证/run transcript。`);
 });
