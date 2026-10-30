@@ -19,12 +19,12 @@
 // 拒绝并**加长哈希**（8→10→12…hex，扩长形状恒过 FACT_BUCKET_RE 校验器）；
 // 老桶永不改名（冻结意图）。
 //
-// 读侧解析链（§2，opus 顺序）：①cwdHint→桶（经索引）→②旧平铺→③64 桶有界
-// 扫描兜底。重复检测统一规则（验收批修复）：收集全部层命中（hint 桶+平铺+
-// 扫描桶），sha256 全同→单一返回（优先级 hint 桶>字典序桶>平铺）；任一哈希
-// 读失败或哈希不同→具名硬错（不判同、不择一）。快命中（①②）遇扫描超限→
-// 可观测降级返回快命中（孪生检测不可用，经 findTranscriptTwin 可诊断），
-// 无快命中时超限仍硬错。
+// 读侧解析链（§2，opus 顺序）：①cwdHint→桶（经索引）→②旧平铺→③全桶扫
+// 描兜底（决定 0100：扫描不设上限，查重总是完整的）。重复检测统一规则（验
+// 收批修复）：收集全部层命中（hint 桶+平铺+扫描桶），sha256 全同→单一返回
+// （优先级 hint 桶>字典序桶>平铺）；任一哈希读失败或哈希不同→具名硬错（不
+// 判同、不择一）。桶数增长只由 lead_preflight 的提示阈值观测（见
+// PROJECT_BUCKET_HINT_THRESHOLD），解析链自身不因桶数截断或拒绝。
 // 同步实现（对规格 async 的一处有意偏离）：本地 fs 全同步可用，48 个消费点
 // 多在同步上下文，免控制流重写；行为边界不变。
 
@@ -53,15 +53,18 @@ export const CLAIMS_DIRNAME = ".claims";
  * 这侧管路径安全）。
  */
 export const SAFE_BUCKET_SLUG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
-/** 解析链第 3 级有界扫描上限（§6.10）：runs/projects/ 一层目录项数。 */
-export const TRANSCRIPT_SCAN_BUCKET_LIMIT = 64;
+/**
+ * lead_preflight 桶数提示阈值（决定 0100）：runs/projects/ 一层桶目录数超过
+ * 该值时 preflight 加一条 observation。它只是提示阈值——解析链扫描全部桶，
+ * 不设扫描上限，也不据此拒绝任何操作。
+ */
+export const PROJECT_BUCKET_HINT_THRESHOLD = 64;
 export const PROJECT_RECORD_RETRIES = 3;
 /** 桶记录并发半写重读的同步退避间隔（ms）——紧循环重读对半写窗口无效。 */
 export const PROJECT_RECORD_RETRY_BACKOFF_MS = 20;
 
 /** 具名错误闭集（closed-set；消费者按 code 分支，不 parse 文案）。 */
 export const TRANSCRIPT_RESOLUTION_ERROR_CODES = Object.freeze([
-  "transcript-resolution-scan-over-limit",
   "transcript-resolution-conflict",
   "transcript-not-found",
 ]);
@@ -156,6 +159,15 @@ function listBucketDirs(runDir, io, { strict = false } = {}) {
     }
   }
   return out;
+}
+
+/**
+ * 数 runs/projects/ 下的桶目录个数（决定 0100：lead_preflight 的桶数提示用；
+ * 与解析链同款口径——.index.json 不算桶，projects/ 不存在算 0）。读不出
+ * （如 readdirSync 失败）抛错，由调用方决定是否吞掉。
+ */
+export function countProjectBuckets(runDir, { io } = {}) {
+  return listBucketDirs(runDir, defaultIo(io)).length;
 }
 
 /** key→slug 索引读取；损坏/缺失/forceRebuild → 扫描 .project.json 重建（权威重建缓存）。 */
@@ -542,14 +554,13 @@ function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
  * 合同，行为不变）与 resolveTranscriptPathDetailed（决定 0095：`runs wait
  * --until-settled` 等待器要的明确信号）共用的唯一链实现。返回详细对象：
  *   - path：命中的路径；未命中时为旧平铺路径（与 resolveTranscriptPath 的
- *     非 forAppend 兼容形状一致）或 null（扫描层抛错且无快命中）；
+ *     非 forAppend 兼容形状一致）或 null（unreadable/conflict 轮）；
  *   - found：解析到一个存在的转录（含多副本全同）；
- *   - degraded：扫描超限、孪生核验被跳过（复验 sol/S3：降级必须可见）；
  *   - conflict：多副本内容不同（持久冲突）；
  *   - unreadable：多副本里有一份哈希读失败——没有"内容不同"的证据，可能只是
  *     一次瞬时读失败（如 Windows 共享冲突），不算冲突；
- *   - 附加内部字段（scanError/hashFailedPath/conflictPaths）仅供
- *     resolveTranscriptPath 重放既有具名硬错文案，公共详细面不携带。
+ *   - 附加内部字段（hashFailedPath/conflictPaths）仅供 resolveTranscriptPath
+ *     重放既有具名硬错文案，公共详细面不携带。
  */
 function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
   const i = defaultIo(io);
@@ -561,29 +572,13 @@ function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
   const hintedPath = hintedDir !== null && i.existsSync(transcriptPathFor(hintedDir, runId))
     ? transcriptPathFor(hintedDir, runId)
     : null;
-  const fastPath = hintedPath ?? (flatExists ? flat : null);
 
-  // ②③ 扫描层（含平铺/hint 未命中时的兜底定位 + 全层孪生检测）。
-  let bucketHits;
-  try {
-    bucketHits = scanBucketHits(runDir, runId, i);
-  } catch (e) {
-    if (e instanceof TranscriptResolutionError && e.code === "transcript-resolution-scan-over-limit") {
-      // 扫描超限：有快命中 → 可观测降级（degraded:true，孪生检测此轮不可用）；
-      // 无快命中 → found:false + degraded:true（快命中缺席本身无法核验）。
-      return {
-        path: fastPath,
-        found: fastPath !== null,
-        degraded: true,
-        conflict: false,
-        scanError: e,
-      };
-    }
-    throw e;
-  }
+  // ②③ 扫描层（含平铺/hint 未命中时的兜底定位 + 全层孪生检测；决定 0100：
+  // 扫描全部桶，不因桶数截断或拒绝——查重总是完整的）。
+  const bucketHits = scanBucketHits(runDir, runId, i);
   const all = [...new Set([hintedPath, ...bucketHits, flatExists ? flat : null].filter((p) => p !== null))];
   if (all.length === 1) {
-    return { path: all[0], found: true, degraded: false, conflict: false };
+    return { path: all[0], found: true, conflict: false };
   }
   if (all.length > 1) {
     const hashes = all.map((p) => shaOfIfExists(p, i));
@@ -592,14 +587,13 @@ function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
       return {
         path: null,
         found: false,
-        degraded: false,
         conflict: false,
         unreadable: true,
         hashFailedPath: all[badIdx],
       };
     }
     if (new Set(hashes).size > 1) {
-      return { path: null, found: false, degraded: false, conflict: true, conflictPaths: all };
+      return { path: null, found: false, conflict: true, conflictPaths: all };
     }
     // 全同：hint 桶 > 字典序最小桶 > 平铺。
     let picked;
@@ -610,11 +604,11 @@ function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
       const bucketOnly = all.filter((p) => p !== flat).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       picked = bucketOnly[0] ?? flat;
     }
-    return { path: picked, found: true, degraded: false, conflict: false };
+    return { path: picked, found: true, conflict: false };
   }
 
   // 全未命中：非 forAppend 语义里返回旧平铺路径（调用方的 ENOENT 语义兼容）。
-  return { path: flat, found: false, degraded: false, conflict: false };
+  return { path: flat, found: false, conflict: false };
 }
 
 /**
@@ -630,23 +624,12 @@ function resolveTranscriptChain(runDir, runId, { cwdHint = null, io } = {}) {
  *     （桶优先于平铺=§6.5；hint 是最强定位器）；
  *   - 任一哈希**读失败** → 具名硬错（null 不得与 null 判同——哈希失败=损坏，
  *     不猜）；哈希不同 → 具名硬错（列全路径，不择一）。
- * 扫描超限：有快命中（hint 桶/平铺）→ 可观测降级返回快命中（孪生检测此轮
- * 不可用；findTranscriptTwin 仍会硬错供诊断）；无快命中 → 保持具名硬错。
  */
 export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend = false, io } = {}) {
   if (!runDir || typeof runDir !== "string") throw new Error("resolveTranscriptPath: runDir required");
   if (!runId || typeof runId !== "string") throw new Error("resolveTranscriptPath: runId required");
 
   const d = resolveTranscriptChain(runDir, runId, { cwdHint, io });
-  // 扫描超限：降级必须发信号（stderr 告警行——静默返回不算可观测）；
-  // forAppend 不降级——追加者未完成孪生比较不得当作无冲突。
-  if (d.scanError) {
-    if (d.found && d.degraded && !forAppend) {
-      console.warn(`[transcript-resolution] scan over limit (${d.scanError.detail}); degraded to fast hit without twin check: ${d.path}`);
-      return d.path;
-    }
-    throw d.scanError;
-  }
   if (d.unreadable) {
     throw new TranscriptResolutionError("transcript-resolution-conflict",
       `runId ${runId} has multiple copies and one is unreadable (hash failed): ${d.hashFailedPath} — refusing to pick without comparison`);
@@ -657,7 +640,7 @@ export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend
   if (!d.found) {
     if (forAppend) {
       throw new TranscriptResolutionError("transcript-not-found",
-        `runId ${runId} not found in any layer (flat or ${TRANSCRIPT_SCAN_BUCKET_LIMIT}-bucket scan); appenders must not create a legacy flat file`);
+        `runId ${runId} not found in any layer (flat or bucket scan); appenders must not create a legacy flat file`);
     }
     return d.path;
   }
@@ -666,11 +649,10 @@ export function resolveTranscriptPath(runDir, runId, { cwdHint = null, forAppend
 
 /**
  * 决定 0095：详细解析面——给 `runs wait --until-settled` 等待器的明确信号。
- * 返回 `{ path, found, degraded, conflict, unreadable }`（不抛具名硬错；扫描层
- * 自身的意外 I/O 错误仍上抛，由调用方按不可信轮处理）：
+ * 返回 `{ path, found, conflict, unreadable }`（不抛具名硬错；解析层自身的
+ * 意外 I/O 错误仍上抛，由调用方按不可信轮处理）：
  *   - found:false 且其余皆 false —— 未找到（path 为兼容形状的旧平铺路径，
  *     该文件不存在，读取会 ENOENT）；
- *   - degraded:true —— 扫描超限、孪生核验被跳过（只当不可信轮，不当冲突）；
  *   - unreadable:true —— 多副本里有一份哈希读失败（只当不可信轮，不当冲突）；
  *   - conflict:true —— 多副本内容不同（持久冲突，立即处理）。
  * 既有 resolveTranscriptPath 的行为与调用方不变。
@@ -682,7 +664,6 @@ export function resolveTranscriptPathDetailed(runDir, runId, { cwdHint = null, i
   return {
     path: d.path,
     found: d.found,
-    degraded: d.degraded,
     conflict: d.conflict,
     unreadable: d.unreadable === true,
   };
@@ -693,12 +674,9 @@ function multiBucketConflict(runId, paths) {
     `runId ${runId} has multiple distinct copies: ${paths.join(" | ")}`);
 }
 
+// 决定 0100：扫描看全部桶（无上限）——查重必须建立在完整可见的命中集上。
 function scanBucketHits(runDir, runId, io) {
   const buckets = listBucketDirs(runDir, io);
-  if (buckets.length > TRANSCRIPT_SCAN_BUCKET_LIMIT) {
-    throw new TranscriptResolutionError("transcript-resolution-scan-over-limit",
-      `projects/ has ${buckets.length} buckets (limit ${TRANSCRIPT_SCAN_BUCKET_LIMIT}); narrow with a cwdHint/--cwd or --project selector`);
-  }
   const hits = [];
   for (const { dir } of buckets) {
     const p = transcriptPathFor(dir, runId);

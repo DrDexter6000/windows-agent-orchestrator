@@ -343,7 +343,7 @@ export async function continueRun({
   //    runId + one canonical agentId. A single cross-run/corrupt event invalidates
   //    identity rather than donating another run's worker/session lineage.
   const resolvedRunDir = resolve(runDir);
-  // D2-②b：父转录读侧解析链（桶/平铺/有界扫描——父 run 可能是旧平铺档）。
+  // D2-②b：父转录读侧解析链（桶/平铺/全桶扫描——父 run 可能是旧平铺档）。
   const parentTranscriptPath = resolveTranscriptPath(resolvedRunDir, parentRunId);
   let parentEvents;
   try {

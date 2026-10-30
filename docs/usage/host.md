@@ -99,13 +99,15 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 输入 `workspaceRoot` 可选；提供时复用 `workspace_select` 的选择权威（该选择只作只读缺省范围），失败不覆盖既有选择；省略时只检查当前选择。`workspace.projectBucket` 是绑定根所属项目的非绝对标签（链接工作树取主工作树的项目；认不出项目时为 null）；输出不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
-`registryIssues`/`registryIssuesTruncated` 复用与 `registry_list` 同一闭集 issue 形状与同一快照（见上文 `registry_list`）。`registryIssues` 非空时 `checkStatus.workers` 升为 `"warning"`（从而使 `complete:false`）并追加一条计数 warning，但有效 worker 照常返回。registry 整源不可读时 `workers` 为 `null`、`checkStatus.workers:"unknown"`、`registryIssues:[]`（unknown 绝不伪造为"零坏条目"）。
+`registryIssues`/`registryIssuesTruncated` 复用与 `registry_list` 同一闭集 issue 形状与同一快照。`registryIssues` 非空时 `checkStatus.workers` 升为 `"warning"`（`complete:false`）并追加一条计数 warning，但有效 worker 照常返回。registry 整源不可读时 `workers` 为 `null`、`checkStatus.workers:"unknown"`、`registryIssues:[]`（unknown 绝不伪造为"零坏条目"）。
 
 未绑定时 `workspace.unboundReason` 与 `workspace_status` 同一闭集（见上文）。
 
-`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，但也绝不据此推断它 failed/dead/stopped——它仍可能在长时间运行或休眠。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描），并在 `unresolvedRunCount > 0` 时追加一条 advisory observation（说明这些 run 被排除出 `activeRuns`、不证明失败或停止，请用 `runs_list` 独立查看）。`activeRunCount=0` 不应被误读为"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
+`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，也不据此推断它 failed/dead/stopped（它可能仍在跑或休眠）。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描）；`unresolvedRunCount > 0` 时追加一条 advisory observation（这些 run 不在 `activeRuns` 里，不证明失败或停止，用 `runs_list` 查看）。`activeRunCount=0` 不等于"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
 
-`observations` 里的 server build 一行说明服务进程跑的是哪一版代码。MCP 服务进程只在启动时加载 WAO 代码，它派发的 runner 加载当下检出的代码，合入新提交后两者可能不一致。`server build: started <启动时间> at HEAD <提交>, src/ unchanged since start` 表示启动以来 `src/` 的树哈希（`HEAD:src`）没变、前后都干净；HEAD 动过时 `<提交>` 后补 `(HEAD now <当前提交>)`。树哈希或 `src/` 的干净状态变了，这一行换成 warning `server src/ differs from server start…`，重启宿主（开新会话）才会加载新代码；只改 `src/` 以外的提交不触发。树哈希读不出时只给启动时间与包版本，其余无法确认的情形照实写明。这一行不影响 `complete`。
+`observations` 里的 server build 一行说明服务进程跑的是哪一版代码。MCP 服务进程只在启动时加载 WAO 代码，它派发的 runner 加载当下检出的代码，合入新提交后两者可能不同。`server build: started <启动时间> at HEAD <提交>, src/ unchanged since start` 表示启动以来 `src/` 的树哈希（`HEAD:src`）没变、前后都干净；HEAD 动过时 `<提交>` 后补 `(HEAD now <当前提交>)`。树哈希或 `src/` 的干净状态变了，这一行换成 warning `server src/ differs from server start…`，重启宿主（开新会话）才会加载新代码；只改 `src/` 以外的提交不触发。树哈希读不出时只给启动时间与包版本。这一行不影响 `complete`。
+
+项目桶超过 64 个时，`observations` 多一行 `run buckets: …`（桶数与阈值；按 runId 解析要逐桶查），不影响 `complete`。
 
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 

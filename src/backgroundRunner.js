@@ -104,7 +104,7 @@ function makeObjectRegistry(registryObj) {
 
 /** 0045 W3c：解析/校验类失败的具名收口（W2b 形状提炼）——run.error + failed 终态，零 spawn。 */
 // D2-②b：runner 侧转录定位——已决定桶目录（--transcript-dir）时 O(1) 直取；
-// 无提示（旧父进程/旧档）走读侧解析链（平铺→有界扫描）。
+// 无提示（旧父进程/旧档）走读侧解析链（平铺→全桶扫描）。
 function runnerTranscriptPath(runDir, transcriptDir, runId) {
   return transcriptDir ? transcriptPathFor(transcriptDir, runId) : resolveTranscriptPath(runDir, runId);
 }

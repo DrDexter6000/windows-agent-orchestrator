@@ -479,7 +479,7 @@ const RUNS_WAIT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
  * 之间 sleep，不重叠。
  * 只读：不改任何状态、不停 worker、不设总时长；永不沿用旧快照报收口。
  *
- * 可信轮 = 解析 found 且不降级、无冲突，快照读取成功，判定不是
+ * 可信轮 = 解析 found、无冲突，快照读取成功，判定不是
  * undeterminable；只有可信轮把不可信计数清零。判定 settled 后再解析一次，
  * 路径或冲突状态变了算不可信轮继续，不变才退出 0 并输出终行与 nextStep。
  *
@@ -550,7 +550,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       return resolveDetailedFn(runDir, runId);
     } catch {
       // 解析链自身的意外 I/O 错误：按不可信轮处理（不当冲突、不当收口）。
-      return { path: null, found: false, degraded: false, conflict: false };
+      return { path: null, found: false, conflict: false };
     }
   };
 
@@ -585,12 +585,10 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
         outcome = { kind: "conflict" };
         break;
       }
-      if (!resolution.found || resolution.degraded) {
-        const [reason, text] = resolution.degraded
-          ? ["degraded_resolution", "transcript resolution degraded (scan over limit, twin check skipped)"]
-          : resolution.unreadable
-            ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
-            : ["not_found", "transcript not found"];
+      if (!resolution.found) {
+        const [reason, text] = resolution.unreadable
+          ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+          : ["not_found", "transcript not found"];
         markUntrusted(round, reason, text);
       } else {
         const events = await readSnapshot(resolution);
@@ -604,7 +602,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
           } else if (settlement.status === "settled") {
             // 收口判定后再解析一次：路径或冲突状态变了 → 不可信轮继续。
             const confirm = safeResolve();
-            if (confirm.conflict || !confirm.found || confirm.degraded || confirm.path !== resolution.path) {
+            if (confirm.conflict || !confirm.found || confirm.path !== resolution.path) {
               markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
             } else {
               outcome = { kind: "settled", settlement };
@@ -639,19 +637,17 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
                 }
                 if (proof?.gone === true) {
                   lastProofRefusal = null; // 最新一次证明已成立，旧拒收理由不再挂着
-                  // 证明成立：重新解析、重读、再判一次收口。解析降级/读取失败按
+                  // 证明成立：重新解析、重读、再判一次收口。解析变更/读取失败按
                   // 原有规则算不可信轮——绝不把旧快照当成仍 pending。
                   const reResolution = safeResolve();
                   if (reResolution.conflict) {
                     outcome = { kind: "conflict" };
                     break;
                   }
-                  if (!reResolution.found || reResolution.degraded) {
-                    const [reason, text] = reResolution.degraded
-                      ? ["degraded_resolution", "transcript resolution degraded (scan over limit, twin check skipped)"]
-                      : reResolution.unreadable
-                        ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
-                        : ["not_found", "transcript not found"];
+                  if (!reResolution.found) {
+                    const [reason, text] = reResolution.unreadable
+                      ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+                      : ["not_found", "transcript not found"];
                     markUntrusted(round, reason, text);
                     progressAllowed = false;
                   } else {
@@ -668,7 +664,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
                       } else if (reSettlement.status === "settled") {
                         // 与既有收口出口同一确认：收口后再解析一次。
                         const confirm = safeResolve();
-                        if (confirm.conflict || !confirm.found || confirm.degraded || confirm.path !== reResolution.path) {
+                        if (confirm.conflict || !confirm.found || confirm.path !== reResolution.path) {
                           markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
                           progressAllowed = false;
                         } else {
@@ -677,14 +673,14 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
                         }
                       } else if (reSettlement.facts.terminal && reSettlement.reason === "verification_pending") {
                         // 重读仍是终态等验证：照"已收口"那一支再解析一次——冲突
-                        // 立即退出 4；路径变了/未找到/降级算不可信轮继续；不变才
+                        // 立即退出 4；路径变了/未找到算不可信轮继续；不变才
                         // 退出 3（verifier_gone）。
                         const confirm = safeResolve();
                         if (confirm.conflict) {
                           outcome = { kind: "conflict" };
                           break;
                         }
-                        if (!confirm.found || confirm.degraded || confirm.path !== reResolution.path) {
+                        if (!confirm.found || confirm.path !== reResolution.path) {
                           markUntrusted(round, "resolution_changed_after_verifier_gone", "verifier proven gone but transcript resolution changed; continuing");
                           progressAllowed = false;
                         } else {

@@ -1757,7 +1757,7 @@ export class RunManager {
   async resume(runId, options = {}) {
     const { runDir } = options;
     const dir = resolve(runDir ?? this.config.runDir);
-    // D2-②b：读侧解析链（桶/平铺/有界扫描）；未命中回落平铺形状（readTranscript
+    // D2-②b：读侧解析链（桶/平铺/全桶扫描）；未命中回落平铺形状（readTranscript
     // 空 → 上方既有 null 语义）。
     const transcript = new JsonlTranscript(resolveTranscriptPath(dir, runId), {
       runId,

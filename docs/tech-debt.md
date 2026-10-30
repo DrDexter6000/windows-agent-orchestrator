@@ -80,7 +80,6 @@
 | TD-225 | workspace 绑定强制 git 仓库，非 git 任务需现造锚点仓库并事后清扫 | 设计性约束 | 需要时现造锚点仓库，任务完成后顺手清扫现场 |  |
 | TD-231 | repackage 的 validateInput 严校验、CAS 形状不变量、commit 失败、Git 异常等拒绝路径仍为裸意外错误 | 开放 | 择机：触碰 repackage 时把拒绝路径从裸意外错误改为闭集拒绝 |  |
 | TD-241 | 成功面 text 仍与 structuredContent 双份全量 JSON（C1 挂起），kimi/opencode/zcode 三宿主消费行为未探 | 开放 | 等样本：C3 实测截断，或未探宿主证据显示成功面 text 被消费 | 0051 |
-| TD-243 | 转录解析 cwdHint 接线为零调用点，桶数超上限即写侧不可用且无快命中时查询付全扫描成本 | 开放 | 择机：接线前先测真实桶数增长曲线 |  |
 | TD-244 | 前台 isolation 失败时转录首事件缺 project 事实，被判 unattributed 且迁移闭集缺该类型 | 开放 | 择机：随下次触碰前台 isolation 失败路径修（触发面低频） | src/runManager.js |
 | TD-245 | 运行认领文件永不删除、每次仲裁全量列目录；四个需要持续 IO 故障才触发的理论窗口已接受 | 设计性约束 | 认领目录列举成为瓶颈，或真实撞到并发认领 |  |
 | TD-248 | interference 登记册的交付保留路径仍靠派发纪律保护，机器化未落地 | 开放 | 择机：触碰派发纪律面时把交付保留路径机器化 | 0054 |
@@ -99,4 +98,3 @@
 | TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt` | 开放 | 等样本：codex 车道需要在途纠偏时（Owner 2026-10-29 裁定暂不做：codex 车道只做会审）；做法是把 codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |
 | TD-323 | codex 沙箱里的会审席找不到 Node 22：scripts/wao-node.cjs 只看 WAO_NODE、%LOCALAPPDATA% 约定路径与 PATH，沙箱用户三样都对不上（PATH 只有 Node 24），席位跑 `npm test` 或 CLI 时任务书得写死 node-v22 的绝对路径 | 开放 | 择机：下次改 codex 后端或启动器时，让席位环境拿得到 WAO 自己所用的 Node 路径 | scripts/wao-node.cjs src/backends/codex.js |
 | TD-324 | MCP 工具对"运行不能证明属于本项目"的报法没对齐：run_delivery_review(_bundle)、run_stop、run_delivery_reverify 仍报成笼统的 failed；run_continue、run_correct 只给闭集原因 workspace_mismatch；run_collect、run_delivery_decide 的固定文案只列了部分原因（没有相对或已消失的 cwd、重复、缺 cwd 或冲突的归属事实） | 开放 | 择机：Lead 再在这些工具上分不清归属拒绝与一般失败时，照 run_activity 等四个读工具的分类与原因清单一次对齐，结尾按各工具写不写盘各自写 | src/application/runWorkspaceOwnership.js src/mcp/server.js |
-| TD-325 | 桶数上限是硬崖：`runs/projects/` 超过 64 个桶时，所有追加与没有快速命中的按 runId 读取都抛错；生产调用不带 cwd 提示，只有旧平铺档有快速命中，所以新派发、状态读取一起失败，事前没有预警（2026-10-30 实遇，归档旧桶后恢复） | 开放 | 第 55 批：扫描不设上限，桶数超过 64 时在 lead_preflight 提示（Owner 2026-10-30 批准）。决定 0099 已去掉开发工作树这个最大的增长源，子目录 cwd、非 Git 目录仍各占一桶 | src/projectBuckets.js |

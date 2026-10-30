@@ -78,6 +78,7 @@ function baseInput(overrides = {}) {
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+    countProjectBucketsFn: () => 0, // 不读本机盘上的 /runs/projects（BK-G3 显式改用缺省计数器）
     ...overrides,
   };
 }
@@ -526,4 +527,54 @@ test("MCP-F2: observations/warnings/manualChecks wire schema UNCHANGED (no refre
       assert.deepEqual(props.manualChecks, { type: "array", items: { type: "string", maxLength: 512 }, maxItems: 32 });
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
+});
+
+// ===== G. run bucket count hint (decision 0100; facts-only observation) =====
+
+test("BK-G1: 65 buckets → one observation naming count and threshold; 64 → none; complete untouched", async () => {
+  const at65 = await aggregateLeadPreflight(baseInput({ countProjectBucketsFn: () => 65 }));
+  const lines65 = at65.observations.filter((o) => o.startsWith("run buckets:"));
+  assert.equal(lines65.length, 1, "exactly one bucket observation above the threshold");
+  assert.equal(lines65[0], "run buckets: 65 under runs/projects/ (hint threshold 64); every runId lookup checks each bucket",
+    "the line names the count and the threshold (no absolute paths)");
+  assert.equal(at65.complete, true, "facts only — complete stays true");
+  const at64 = await aggregateLeadPreflight(baseInput({ countProjectBucketsFn: () => 64 }));
+  assert.equal(at64.observations.filter((o) => o.startsWith("run buckets:")).length, 0,
+    "at the threshold → no line");
+  assert.equal(at64.complete, true);
+});
+
+test("BK-G2: counter throws → line omitted, rest of the result unchanged", async () => {
+  const input = baseInput({ gateStatusFn: async () => ({ free: true }) });
+  const baseline = await aggregateLeadPreflight(input);
+  const failing = await aggregateLeadPreflight({ ...input, countProjectBucketsFn: () => { throw new Error("EIO"); } });
+  assert.equal(failing.observations.filter((o) => o.startsWith("run buckets:")).length, 0,
+    "unreadable count → no line (and no throw)");
+  assert.deepEqual(failing.observations, baseline.observations, "observations otherwise identical");
+  assert.deepEqual(failing.warnings, baseline.warnings);
+  assert.deepEqual(failing.checkStatus, baseline.checkStatus);
+  assert.equal(failing.complete, baseline.complete, "complete unaffected");
+});
+
+test("BK-G3: default counter reads the real runs/projects/ (65 real buckets → the line)", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-obs-g3-"));
+  try {
+    for (let i = 0; i < 65; i++) mkdirSync(join(runDir, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
+    const result = await aggregateLeadPreflight(baseInput({ runDir, countProjectBucketsFn: undefined }));
+    assert.ok(result.observations.some((o) => o === "run buckets: 65 under runs/projects/ (hint threshold 64); every runId lookup checks each bucket"),
+      "default wiring counts the real bucket dirs");
+  } finally { cleanupDir(runDir); }
+});
+
+test("BK-G4: lane omissions that would fill the 64-line cap → still 64 lines, bucket line kept, lanes fill the rest", async () => {
+  const result = await aggregateLeadPreflight(baseInput({
+    countProjectBucketsFn: () => 65,
+    workerContextFn: () => null,
+    laneProfilesFn: async () => ({ rows: [], omittedLaneIds: Array.from({ length: 70 }, (_, i) => `lane${i}`), notices: [] }),
+  }));
+  assert.equal(result.observations.length, 64, "never past the MCP output cap (observations.max(64))");
+  const bucketAt = result.observations.findIndex((o) => o.startsWith("run buckets:"));
+  const firstLaneAt = result.observations.findIndex((o) => o.startsWith("lane "));
+  assert.ok(bucketAt >= 0, "the bucket line survives a full lane section");
+  assert.ok(firstLaneAt > bucketAt, "the lane section fills the slots left after the bucket line");
 });

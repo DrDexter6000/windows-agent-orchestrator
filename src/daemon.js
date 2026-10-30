@@ -547,7 +547,7 @@ export async function handleRequest(req, manager, ctx = {}) {
     }
     // 不在内存：读 transcript 兜底
     const { runDir } = ctx;
-    // D2-②b：状态兜底走解析链（桶/平铺/有界扫描）。
+    // D2-②b：状态兜底走解析链（桶/平铺/全桶扫描）。
     const filePath = resolveTranscriptPath(runDir, runId);
     if (existsSync(filePath)) {
       const raw = readFileSync(filePath, "utf8");

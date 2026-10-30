@@ -146,3 +146,5 @@
 | TD-294 | `npm run smoke` 只探测 claude 与 codex，zcode、kimi-web、deepseek-acp 车道不在 smoke 内，而 milestone-discipline §4 要求里程碑收尾必跑 smoke | 2026-10-29：§4 第 4 条写明替代——smoke 不覆盖的后端以该车道的 reliability 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项；smoke-guide 与 TD-16 同步 |
 | TD-273 | `config/lane-exceptions.json` 的五条例外未清理（原行称其对退出码轴已非必需；五条的 checks 实为 adversarialEscapeIntercepted） | 2026-10-29：不清理。决定 0084 §4 规定以 adversarialEscape 为键的例外保持原样、历史不改写；新 case 不再生成该检查，例外影响不到新认证 |
 | TD-322 | 桌面端 Code 标签调 MCP 的长等待约 60 秒就报 Request timed out：run_wait 下限 180 秒，多个 MCP 等待默认 270 秒 | 2026-10-29：决定 0095——run_wait 下限改 30 秒，MCP 等待默认 45 秒，未收口的结果带 nextStep；了结依据是提供了可用的短等待办法，不是保证整个调用 60 秒内返回 |
+| TD-325 | 桶数上限是硬崖：`runs/projects/` 超过 64 个桶时，所有追加与没有快速命中的按 runId 读取都抛错，新派发、状态读取一起失败（2026-10-30 实遇） | 2026-10-30：决定 0100——按 runId 解析时扫描全部桶，不设上限；桶数超过 64 时 lead_preflight 只提示。决定 0099 已去掉开发工作树这个最大的增长源 |
+| TD-243 | 转录解析 cwdHint 接线为零调用点，桶数超上限即写侧不可用且无快命中时查询付全扫描成本 | 2026-10-30：决定 0100——按 runId 解析时扫描全部桶，不再有桶数上限，写侧不会因此不可用；无 hint 的全扫描实测每桶约 34 µs（39 个桶一次 1.1 ms）。cwdHint 层在 src/ 里仍没有调用点（只有演练脚本 drillRuns.mjs 用它），只是不再造成可用性问题 |

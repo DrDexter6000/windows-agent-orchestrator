@@ -99,8 +99,8 @@ function scanRuns() {
   let counts = { completed: 0, failed: 0, timed_out: 0, aborted: 0, running: 0, other: 0 };
   if (!existsSync(runDir)) return { failed, counts };
   // 平铺与各项目桶里的转录一并统计（运行转录按项目分桶）。同一 runId 只算一次：
-  // 平铺与桶内都有时取桶内那份（桶优先于平铺）。直接用全量枚举，不经解析链的有界
-  // 桶扫描——超过扫描上限的桶不会被当成坏文件静默跳过。
+  // 平铺与桶内都有时取桶内那份（桶优先于平铺）。直接用全量枚举，不按 runId 逐个
+  // 走解析链。
   const transcripts = new Map();
   for (const t of listTranscriptsDeep(runDir)) {
     const runId = t.name.replace(/\.jsonl$/, "");

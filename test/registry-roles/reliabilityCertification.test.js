@@ -1012,6 +1012,36 @@ test("D2-②b 桶化修复: sweep 清理面覆盖桶内 run_*.jsonl（被引用�
   }
 });
 
+test("决定 0100: sweep 看全部桶——65 个桶时第 65 个桶照常清理，被引用与新鲜的照样保留", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0100-sweep-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    for (let i = 0; i < 65; i++) mkdirSync(join(transcriptsDir, PROJECTS_DIRNAME, `b-${String(i).padStart(3, "0")}-0123abcd`), { recursive: true });
+    const lastBucket = join(transcriptsDir, PROJECTS_DIRNAME, "b-064-0123abcd");
+    const summaryPath = join(dir, "reliability-summary.json");
+    const now = Date.now();
+    const old = new Date(now - DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS - 24 * 3600 * 1000);
+    for (const name of ["run_lref.jsonl", "run_lstale.jsonl", "run_lfresh.jsonl"]) {
+      writeFileSync(join(lastBucket, name), "{}\n", "utf8");
+    }
+    utimesSync(join(lastBucket, "run_lref.jsonl"), old, old);
+    utimesSync(join(lastBucket, "run_lstale.jsonl"), old, old);
+    writeFileSync(summaryPath, JSON.stringify({
+      cases: [{ caseId: "a", executionProfile: { drillRunIds: { sentinel: "run_lref" } } }],
+    }), "utf8");
+
+    const plan = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now, dryRun: true });
+    assert.deepEqual(plan.wouldRemove, ["run_lstale"], "第 65 个桶里只有「未引用+超龄」进入待删清单");
+    assert.equal(plan.bucketSweepSkipped, undefined, "不再有跳过桶层的形态");
+    const result = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now });
+    assert.equal(result.removed, 1);
+    assert.ok(!existsSync(join(lastBucket, "run_lstale.jsonl")), "待删件真删了");
+    assert.ok(existsSync(join(lastBucket, "run_lref.jsonl")) && existsSync(join(lastBucket, "run_lfresh.jsonl")), "被引用与新鲜的保留");
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 
 test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘守卫 + 悬空置 null + 发布零删除（清理只在维护步骤）", () => {
   const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");

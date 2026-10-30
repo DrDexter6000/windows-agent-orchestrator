@@ -102,7 +102,7 @@ function realResolver(runDir) {
     const path = join(runDir, `${rid}.jsonl`);
     let exists = false;
     try { readFileSync(path); exists = true; } catch { exists = false; }
-    return { path, found: exists, degraded: false, conflict: false };
+    return { path, found: exists, conflict: false };
   };
 }
 
@@ -331,28 +331,8 @@ test("U-03d: 4× snapshot read failure → exit 3, Untrusted (no state line)", a
 });
 
 // =====================================================================
-// U-04: 解析降级（扫描超限、孪生核验跳过）→ 不可信轮；4 次退出 3。
+// U-04b: 多副本里一份哈希读失败 → 不可信轮（不是冲突）；4 次退出 3。
 // =====================================================================
-
-test("U-04: degraded resolution counts as untrusted (4× → exit 3)", async () => {
-  const dir = makeRunDir();
-  try {
-    writeLines(dir, "run_u04", [started("run_u04", { delivery: false }), stateChange("run_u04", "completed")]);
-    const r = await runWaitSettled({
-      dir, runId: "run_u04",
-      deps: {
-        resolveDetailedFn: () => ({
-          path: join(dir, "run_u04.jsonl"), found: true, degraded: true, conflict: false,
-        }),
-      },
-    });
-    assert.equal(r.exitCode, 3);
-    assert.match(r.out, /resolution degraded/);
-    assert.match(r.out, /Diagnostics: wao runs diagnose run_u04/);
-  } finally {
-    cleanupDir(dir);
-  }
-});
 
 test("U-04b: an unreadable copy (hash failed) is an untrusted round, not a conflict (4× → exit 3)", async () => {
   const dir = makeRunDir();
@@ -360,7 +340,7 @@ test("U-04b: an unreadable copy (hash failed) is an untrusted round, not a confl
     const r = await runWaitSettled({
       dir, runId: "run_u04b",
       deps: {
-        resolveDetailedFn: () => ({ path: null, found: false, degraded: false, conflict: false, unreadable: true }),
+        resolveDetailedFn: () => ({ path: null, found: false, conflict: false, unreadable: true }),
       },
     });
     assert.equal(r.exitCode, 3, "不是 4：没有内容不同的证据");
@@ -385,7 +365,7 @@ test("U-05: persistent conflict → immediate exit 4", async () => {
       deps: {
         resolveDetailedFn: () => {
           calls += 1;
-          return { path: null, found: false, degraded: false, conflict: true };
+          return { path: null, found: false, conflict: true };
         },
       },
     });
@@ -763,7 +743,7 @@ test("W-02: 证明成立但重读时结果已落盘 → 照常退出 0，不报 
   }
 });
 
-test("W-03: 证明成立后重读解析降级 → 不可信轮，不当 pending、不退出 3(verifier_gone)", async () => {
+test("W-03: 证明成立后重读解析不可读（哈希失败轮）→ 不可信轮，不当 pending、不退出 3(verifier_gone)", async () => {
   const dir = makeRunDir();
   try {
     const runId = "run_wg03";
@@ -783,13 +763,13 @@ test("W-03: 证明成立后重读解析降级 → 不可信轮，不当 pending�
         readTranscriptFn,
         resolveDetailedFn: (rd, rid) => {
           resolves += 1;
-          if (resolves === 2) return { path: join(dir, `${rid}.jsonl`), found: true, degraded: true, conflict: false };
+          if (resolves === 2) return { path: null, found: false, conflict: false, unreadable: true };
           return real(rd, rid);
         },
       },
     });
-    assert.equal(r.exitCode, undefined, "降级只算不可信轮；随后收口退出 0");
-    assert.ok(r.outLines.some((l) => l.includes("resolution degraded")), "重读的解析降级按既有规则报");
+    assert.equal(r.exitCode, undefined, "解析不可读只算不可信轮；随后收口退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("copy unreadable")), "重读的解析不可读按既有规则报");
     assert.ok(!/verifier_gone|Stuck:/.test(r.out));
   } finally {
     cleanupDir(dir);
@@ -1031,7 +1011,7 @@ test("W-10: 重读仍 pending、确认解析冲突 → 立即退出 4", async ()
         ...verifierProofDeps,
         resolveDetailedFn: (rd, rid) => {
           calls += 1;
-          if (calls === 3) return { path: null, found: false, degraded: false, conflict: true };
+          if (calls === 3) return { path: null, found: false, conflict: true };
           return real(rd, rid);
         },
       },
@@ -1101,7 +1081,7 @@ test("W-12: 重读仍 pending、确认时未找到 → 不可信轮、不退出 
         readTranscriptFn,
         resolveDetailedFn: (rd, rid) => {
           calls += 1;
-          if (calls === 3) return { path: null, found: false, degraded: false, conflict: false };
+          if (calls === 3) return { path: null, found: false, conflict: false };
           return real(rd, rid);
         },
       },

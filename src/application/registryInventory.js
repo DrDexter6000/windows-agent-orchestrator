@@ -945,7 +945,7 @@ const DRILL_RUN_ID_SHAPE_RE = /^[A-Za-z0-9_-]+$/;
  *   - 无 runDir / 记录无画像 / 无 drillRunIds / 某 drill 的 id 为 null → 无限制项
  *     （null = 如实"未记录 id"，设计内状态，不是缺陷）；
  *   - id 非字符串/空/形状外（含 "unknown" 占位）、转录文件不在场、或解析抛错
- *     （多副本冲突/扫描超限）→ 该 drill 计入 drill-evidence-unresolvable
+ *     （多副本冲突）→ 该 drill 计入 drill-evidence-unresolvable
  *     限制项（取证链断裂的可见面）。
  * @private
  */
@@ -960,7 +960,7 @@ function drillEvidenceLimitations(runDir, workerRecord, existsFn) {
     if (typeof runId === "string" && DRILL_RUN_ID_SHAPE_RE.test(runId)) {
       try {
         resolvable = existsFn(resolveTranscriptPath(join(runDir, CERT_DRILL_TRANSCRIPTS_SUBDIR), runId, { cwdHint: null }));
-      } catch { // 多副本哈希冲突 / 桶扫描超限 → fail-closed：不可回查
+      } catch { // 多副本哈希冲突 → fail-closed：不可回查
         resolvable = false;
       }
     }

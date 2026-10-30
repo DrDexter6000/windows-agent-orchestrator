@@ -7,9 +7,9 @@
 // 覆盖面（规格 §5/§6 验收项 → 测试）：
 //   - 写侧：先写者胜（同 key 复用旧桶）；wx 独占 + key 校验 + 碰撞扩长（§6.1/6.2）；
 //     记录半写有界重读（§6.11-6）；索引损坏扫描重建（§6.11-5）。
-//   - 读侧：三级链（cwdHint→桶[经冻结索引，不重推桶名]→旧平铺→64 桶扫描）；
-//     fast-hit 孪生检测（哈希同→桶优先可观测；异→具名硬错 §6.5 统一规则）；
-//     扫描超限具名错（§6.10）；forAppend 未命中不得误建平铺（§6.9）。
+//   - 读侧：三级链（cwdHint→桶[经冻结索引，不重推桶名]→旧平铺→全桶扫描，
+//     决定 0100：扫描不设上限）；fast-hit 孪生检测（哈希同→桶优先可观测；
+//     异→具名硬错 §6.5 统一规则）；forAppend 未命中不得误建平铺（§6.9）。
 //   - 枚举：listTranscriptsDeep 两层、根层原序、.index.json 非桶。
 //   - 事实：projectFactForWrite 记最终写位（扩长后与目录一致）；readFirstProjectFact。
 import { test } from "node:test";
@@ -21,7 +21,7 @@ import { join } from "node:path";
 import {
   resolveRunDirForWrite, resolveTranscriptPath, resolveTranscriptPathDetailed, listTranscriptsDeep, findTranscriptTwin,
   projectFactForWrite, readFirstProjectFact, loadBucketIndex, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs,
-  TranscriptResolutionError, TRANSCRIPT_SCAN_BUCKET_LIMIT,
+  TranscriptResolutionError, PROJECT_BUCKET_HINT_THRESHOLD, countProjectBuckets,
 } from "../../src/projectBuckets.js";
 import { identifyProjectFromCwd, identityOfFirstEvent } from "../../src/projectIdentity.js";
 
@@ -176,23 +176,57 @@ test("D2-②b 读侧: 孪生检测统一规则（哈希同→桶优先+可观测
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("D2-②b 读侧: 扫描超限具名错 + forAppend 未命中不误建平铺", () => {
+test("决定 0100: 65+ 桶照常解析——扫描不设上限，forAppend 照常定位", () => {
   const root = makeRoot("wao-pb-r4-");
   try {
-    // 造 >64 桶（无 .project.json 的裸目录也算目录项）
-    for (let i = 0; i <= TRANSCRIPT_SCAN_BUCKET_LIMIT; i++) {
+    // 一个真项目桶 + 65 个裸目录桶（无 .project.json 的裸目录也算目录项）
+    mkdirSync(join(root, "repo-many"), { recursive: true });
+    const w = resolveRunDirForWrite(root, identifyProjectFromCwd(join(root, "repo-many"), IO));
+    for (let i = 0; i <= PROJECT_BUCKET_HINT_THRESHOLD; i++) {
       mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
     }
-    assert.throws(() => resolveTranscriptPath(root, "run_x"), (e) => e instanceof TranscriptResolutionError
-      && e.code === "transcript-resolution-scan-over-limit"
-      && /projects\/ has 65 buckets/.test(e.message), "超限=具名错（附实际桶数与建议），绝不静默截断");
-    const root2 = makeRoot("wao-pb-r4b-");
-    try {
-      assert.throws(() => resolveTranscriptPath(root2, "run_missing", { forAppend: true }), (e) => e instanceof TranscriptResolutionError
-        && e.code === "transcript-not-found"
-        && /appenders must not create/.test(e.message), "追加者未命中 → 具名错（§6.9 不误建平铺）");
-      assert.equal(existsSync(join(root2, "run_missing.jsonl")), false, "回落形状未被实体化");
-    } finally { rmSync(root2, { recursive: true, force: true }); }
+    write(join(w.transcriptDir, "run_x.jsonl"), "{\"a\":1}\n");
+    assert.equal(resolveTranscriptPath(root, "run_x"), join(w.transcriptDir, "run_x.jsonl"),
+      "超过提示阈值：扫描照常命中，不因桶数抛错");
+    assert.equal(resolveTranscriptPath(root, "run_x", { forAppend: true }), join(w.transcriptDir, "run_x.jsonl"),
+      "forAppend 追加照常解析（查重看全部桶）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("决定 0100: 65+ 桶下两个桶里内容不同的同名副本仍报冲突", () => {
+  const root = makeRoot("wao-pb-r4b-");
+  try {
+    for (let i = 0; i <= PROJECT_BUCKET_HINT_THRESHOLD; i++) {
+      mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
+    }
+    write(join(root, "projects", "b-000", "run_c.jsonl"), "{\"a\":1}\n");
+    write(join(root, "projects", "b-064", "run_c.jsonl"), "{\"CHANGED\":true}\n");
+    assert.throws(() => resolveTranscriptPath(root, "run_c"), (e) => e instanceof TranscriptResolutionError
+      && e.code === "transcript-resolution-conflict"
+      && /multiple distinct copies/.test(e.message), "超阈值桶数下查重仍是全层的（不截断、不静默择一）");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("决定 0100: 65+ 桶下 findTranscriptTwin 照常返回（不因桶数抛错）", () => {
+  const root = makeRoot("wao-pb-r4c-");
+  try {
+    for (let i = 0; i <= PROJECT_BUCKET_HINT_THRESHOLD; i++) {
+      mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
+    }
+    write(join(root, "projects", "b-010", "run_t.jsonl"), "{\"a\":1}\n");
+    const twin = findTranscriptTwin(root, "run_t");
+    assert.equal(twin.bucketPaths.length, 1, "桶内命中原样可观测");
+    assert.equal(twin.flatPath, null, "平铺无副本 → null");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("D2-②b 读侧: forAppend 未命中不误建平铺（§6.9 行为不变）", () => {
+  const root = makeRoot("wao-pb-r4d-");
+  try {
+    assert.throws(() => resolveTranscriptPath(root, "run_missing", { forAppend: true }), (e) => e instanceof TranscriptResolutionError
+      && e.code === "transcript-not-found"
+      && /appenders must not create/.test(e.message), "追加者未命中 → 具名错（§6.9 不误建平铺）");
+    assert.equal(existsSync(join(root, "run_missing.jsonl")), false, "回落形状未被实体化");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -266,16 +300,16 @@ test("决定 0095: 详细解析面——哈希读失败是 unreadable 不是 con
     write(bucketFile, "{\"same\":1}\n");
     write(flatFile, "{\"same\":1}\n");
     assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt"),
-      { path: bucketFile, found: true, degraded: false, conflict: false, unreadable: false }, "同哈希孪生 → 桶内优先");
+      { path: bucketFile, found: true, conflict: false, unreadable: false }, "同哈希孪生 → 桶内优先");
     const badIo = { sha256: (p) => { if (p === flatFile) throw new Error("EBUSY"); return "x"; } };
     assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt", { io: badIo }),
-      { path: null, found: false, degraded: false, conflict: false, unreadable: true },
+      { path: null, found: false, conflict: false, unreadable: true },
       "一份哈希读失败：没有内容不同的证据（可能瞬时），不报冲突");
     writeFileSync(flatFile, "{\"CHANGED\":true}\n", "utf8");
     assert.deepEqual(resolveTranscriptPathDetailed(root, "run_dt"),
-      { path: null, found: false, degraded: false, conflict: true, unreadable: false }, "内容不同 → 持久冲突");
+      { path: null, found: false, conflict: true, unreadable: false }, "内容不同 → 持久冲突");
     assert.deepEqual(resolveTranscriptPathDetailed(root, "run_none"),
-      { path: join(root, "run_none.jsonl"), found: false, degraded: false, conflict: false, unreadable: false },
+      { path: join(root, "run_none.jsonl"), found: false, conflict: false, unreadable: false },
       "未找到 → 兼容形状的平铺路径，其余信号皆 false");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -306,27 +340,6 @@ test("D2-②b 验收批⑤: hint 与无 hint 同一套孪生规则（三份同�
     assert.throws(() => resolveTranscriptPath(root, "run_u"), (e) => e.code === "transcript-resolution-conflict");
     assert.throws(() => resolveTranscriptPath(root, "run_u", { cwdHint: join(root, "repo-u2"), io }),
       (e) => e.code === "transcript-resolution-conflict", "hint 不豁免异内容硬错");
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("D2-②b 验收批S3: 快命中遇扫描超限 → 可观测降级；无快命中仍硬错", () => {
-  const root = makeRoot("wao-pb-v7-");
-  try {
-    for (let i = 0; i <= TRANSCRIPT_SCAN_BUCKET_LIMIT; i++) {
-      mkdirSync(join(root, "projects", `b-${String(i).padStart(3, "0")}`), { recursive: true });
-    }
-    write(join(root, "run_flat.jsonl"), "{\"b\":1}\n");
-    // 平铺快命中在场：读降级返回平铺（stderr 告警）；forAppend 不降级——
-    // 未完成孪生比较不得当作无冲突（复验 sol）。
-    assert.equal(resolveTranscriptPath(root, "run_flat"), join(root, "run_flat.jsonl"), "快命中降级");
-    assert.throws(() => resolveTranscriptPath(root, "run_flat", { forAppend: true }),
-      (e) => e.code === "transcript-resolution-scan-over-limit", "forAppend 不降级（未比较≠无冲突）");
-    // 无快命中：保持具名硬错
-    assert.throws(() => resolveTranscriptPath(root, "run_none2"),
-      (e) => e.code === "transcript-resolution-scan-over-limit");
-    // 诊断面：findTranscriptTwin 对超限仍硬错（可观测）
-    assert.throws(() => findTranscriptTwin(root, "run_flat"),
-      (e) => e.code === "transcript-resolution-scan-over-limit");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -616,5 +629,23 @@ test("D2-②b 七轮 F7-3: claimAgeMs 读当前最大代（年龄提示可用）
     assert.equal(claimRunIdForWrite(root, "run_age").claimed, true);
     const age = claimAgeMs(root, "run_age");
     assert.ok(typeof age === "number" && age >= -50 && age < 5000, `当前代年龄（实测 ${age}ms；NTFS 时间戳粒度可致微小负值）`);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 决定 0100 钉：桶数计数（lead_preflight 提示的数据源）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("决定 0100: countProjectBuckets——无 projects/ 为 0、只数目录、不数 .index.json、读不出抛错", () => {
+  const root = makeRoot("wao-pb-cnt-");
+  try {
+    assert.equal(countProjectBuckets(root), 0, "runs/projects/ 不存在 → 0");
+    mkdirSync(join(root, "projects", "b-1"), { recursive: true });
+    mkdirSync(join(root, "projects", "b-2"), { recursive: true });
+    writeFileSync(join(root, "projects", ".index.json"), "{}", "utf8");
+    writeFileSync(join(root, "projects", "not-a-dir.txt"), "x", "utf8");
+    assert.equal(countProjectBuckets(root), 2, "只数目录（.index.json 与普通文件不算桶）");
+    const badIo = { existsSync: () => true, readdirSync: () => { const e = new Error("EIO"); e.code = "EIO"; throw e; } };
+    assert.throws(() => countProjectBuckets(root, { io: badIo }), /EIO/, "读不出 → 抛错（调用方决定吞否）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

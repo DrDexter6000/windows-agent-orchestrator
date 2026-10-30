@@ -40,6 +40,9 @@ import {
 } from "./registryInventory.js";
 import { createVerificationGate } from "../verificationGate.js";
 import { projectBucketLabel } from "../projectIdentity.js";
+// 决定 0100：runs/projects/ 桶数提示——解析链扫描全部桶（无上限），桶数增长
+// 只在这里被观测成一条事实行（不改 checkStatus、不影响 complete）。
+import { countProjectBuckets, PROJECT_BUCKET_HINT_THRESHOLD } from "../projectBuckets.js";
 // 0087（0097 修订）：车道画像紧凑投影——结构化投影只在 lead_preflight.lanes
 // 一处出 MCP；派发受理的 laneFacts 回显行由 laneFactsLine 从同一投影派生。
 // 闭集常量 re-export 给 MCP 层派生 zod enum/上限（单一 SSOT，不复制清单）。
@@ -286,6 +289,11 @@ function renderGateStatusLine(lease, knownAgentIds) {
  * @param {Function} [input.workerContextFn] — 0087: injectable worker-context
  *   detector (defaults to nestedDispatchContext()). A non-null result forces
  *   lanes=null with an observation (profiles are never projected to workers).
+ * @param {Function} [input.countProjectBucketsFn] — 0100: injectable bucket
+ *   counter (defaults to countProjectBuckets from projectBuckets.js; signature
+ *   (runDir) → count). When the count exceeds PROJECT_BUCKET_HINT_THRESHOLD,
+ *   ONE advisory observation is added — facts only, never checkStatus/complete.
+ *   A throw or non-finite count omits the line entirely.
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -302,6 +310,7 @@ export async function aggregateLeadPreflight({
   gateStatusFn,
   laneProfilesFn,
   workerContextFn,
+  countProjectBucketsFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
@@ -612,7 +621,28 @@ export async function aggregateLeadPreflight({
     // Read threw unexpectedly → omit the line entirely (never fail, never fake free).
   }
 
-  // --- Section 5: lane profiles (0087; advisory, independent, read-only) ---
+  // --- Section 5: run bucket count hint (0100; advisory, read-only, independent) ---
+  // Facts only: transcript resolution scans EVERY bucket under runs/projects/
+  // (decision 0100 — no scan cap), so past the hint threshold each runId lookup
+  // gets linearly more expensive. The line names the count and the threshold;
+  // it never touches checkStatus/complete and never renders absolute paths. An
+  // unreadable count omits the line — "could not confirm" is not "confirmed
+  // few", but this hint is advisory enough that omission (not a warning) is the
+  // honest settling. It runs before the lane section, which fills the remaining
+  // observation slots up to the 64-line output cap.
+  try {
+    const countFn = typeof countProjectBucketsFn === "function" ? countProjectBucketsFn : countProjectBuckets;
+    const count = await countFn(runDir);
+    if (Number.isFinite(count) && count > PROJECT_BUCKET_HINT_THRESHOLD && observations.length < 64) {
+      observations.push(
+        `run buckets: ${count} under runs/projects/ (hint threshold ${PROJECT_BUCKET_HINT_THRESHOLD}); every runId lookup checks each bucket`,
+      );
+    }
+  } catch {
+    // 桶数读不出 → 不加这一条（不抛、不影响其余结果）。
+  }
+
+  // --- Section 6: lane profiles (0087; advisory, independent, read-only) ---
   // NOT part of checkStatus and NEVER flips complete: this is reference data
   // for the Lead's dispatch judgment, not an observed mechanical check. Settles
   // independently — worker context / unreadable file / malformed lane → lanes=null
