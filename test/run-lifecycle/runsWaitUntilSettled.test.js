@@ -628,8 +628,571 @@ test("U-11: quiet non-terminal round names the exits; terminal rounds carry no v
     assert.match(progressLines[0], /No new signs of life in the transcript for 31 min/);
     assert.match(progressLines[0], /wao runs settle and wao stop/);
     assert.match(progressLines[1],
-      /state=completed not settled \(verification_pending\); delivery state: wao runs delivery run_u11$/);
+      /state=completed not settled \(verification_pending\); delivery state: wao runs delivery run_u11; verifier proof: not_pending$/,
+      "终态轮不报体征；无后台派发的形状证明以 not_pending 拒绝，理由进进度行");
     assert.ok(!/vital sign|signs of life/.test(progressLines[1]), "终态轮不报体征");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0096：等待器证明验证者已不在（节流 5 分钟；证明成立后重读再判一次）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PROOF_TS = "2026-09-01T00:00:00.000Z";
+
+// 与 settle 同一套注入：证明里的所有探测都是桩，零真实进程/PowerShell。
+// handshakeReader 是三态读器契约（{present:false} = 无握手文件）。
+const verifierProofDeps = {
+  verifierProofDeps: {
+    ownerLeaseReader: () => ({ present: false }),
+    identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+    runnerScanFn: async () => ({ alive: false }),
+    handshakeReader: () => ({ present: false }),
+    daemonAliveFn: () => false,
+  },
+};
+
+function verifierEvents(runId, { decideRejected = false } = {}) {
+  const ref = makeRef(runId);
+  const events = [
+    { ...started(runId), ts: PROOF_TS },
+    { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: PROOF_TS },
+    { ...created(runId, ref), ts: PROOF_TS },
+    { ...stateChange(runId, "completed"), ts: PROOF_TS },
+  ];
+  if (decideRejected) {
+    events.push({
+      type: "run.delivery_rejected",
+      runId,
+      agentId: "coder_low",
+      ts: PROOF_TS,
+      delivery: {
+        ...ref,
+        verification: { ...ref.verification, status: "pending" },
+        acceptance: { status: "rejected", reviewerType: "lead_agent" },
+      },
+      deliveryCommit: ref.deliveryCommit,
+      reviewerType: "lead_agent",
+      reason: "验证不会完成，先行有界拒收",
+    });
+  }
+  return { ref, events };
+}
+
+test("W-01: 证明成立且重读仍 pending → 退出 3（文本终行 + verifier_gone 的 nextStep）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg01";
+    const { events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const r = await runWaitSettled({ dir, runId, deps: verifierProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 3, `只输出三行终行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[0], `Run: ${runId} (completed)`);
+    assert.equal(
+      r.outLines[1],
+      `Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (lease_missing); waiting will not change this.`,
+    );
+    assert.match(r.outLines[2], /^Next step: Its verification will not finish\. Reject it while it is pending: wao runs delivery run_wg01 --reject --reason-file <FILE>\./);
+    assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-01b: JSON 模式——{settled:false,runId,state,reason,basis,nextStep}，进度不上 stdout", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg01b";
+    const { events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const r = await runWaitSettled({ dir, runId, asJson: true, deps: verifierProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 1, "stdout 只留最终 JSON");
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual(Object.keys(parsed).sort(), ["basis", "nextStep", "reason", "runId", "settled", "state"]);
+    assert.equal(parsed.settled, false);
+    assert.equal(parsed.runId, runId);
+    assert.equal(parsed.state, "completed");
+    assert.equal(parsed.reason, "verifier_gone");
+    assert.equal(parsed.basis, "lease_missing");
+    assert.equal(typeof parsed.nextStep, "string");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-01c: 已拒收之后的 verifier_gone → nextStep 指'没有可等的了'（第二支）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg01c";
+    const { events } = verifierEvents(runId, { decideRejected: true });
+    writeLines(dir, runId, events);
+    const r = await runWaitSettled({ dir, runId, asJson: true, deps: verifierProofDeps });
+    assert.equal(r.exitCode, 3);
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.reason, "verifier_gone");
+    assert.match(parsed.nextStep, /already rejected; nothing is left to wait for/);
+    assert.ok(!parsed.nextStep.includes("--reject"), "已拒收不再建议拒收");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-02: 证明成立但重读时结果已落盘 → 照常退出 0，不报 verifier_gone", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg02";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return events;
+      return [...events, outcome(runId, "passed", ref)];
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { ...verifierProofDeps, readTranscriptFn } });
+    assert.equal(r.exitCode, undefined, "重读已收口 → 退出 0");
+    assert.equal(reads, 2, "一轮正常读 + 证明后一次重读");
+    assert.match(r.out, /Settlement: settled \(delivery_settled/);
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out), "不出现 verifier_gone 输出");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-03: 证明成立后重读解析降级 → 不可信轮，不当 pending、不退出 3(verifier_gone)", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg03";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let resolves = 0;
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      return reads === 1 ? events : [...events, outcome(runId, "passed", ref)];
+    };
+    const real = realResolver(dir);
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn,
+        resolveDetailedFn: (rd, rid) => {
+          resolves += 1;
+          if (resolves === 2) return { path: join(dir, `${rid}.jsonl`), found: true, degraded: true, conflict: false };
+          return real(rd, rid);
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "降级只算不可信轮；随后收口退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("resolution degraded")), "重读的解析降级按既有规则报");
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-03b: 证明成立后重读失败 → 不可信轮，不当 pending、不退出 3(verifier_gone)", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg03b";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 2) throw new Error("EBUSY");
+      if (reads === 1) return events;
+      return [...events, outcome(runId, "passed", ref)];
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { ...verifierProofDeps, readTranscriptFn } });
+    assert.equal(r.exitCode, undefined);
+    assert.ok(r.outLines.some((l) => l.includes("snapshot read failed")), "重读失败按快照读取失败记账");
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-04: 证明不成立（租约新鲜）→ 照常等待，不输出新内容", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg04";
+    const { ref, events } = verifierEvents(runId);
+    // 夹具用验证者形状（一条 background_submitted + 各事件带 ts）：证明的前提
+    // 成立，才真走到租约门那一支（缺 background_submitted 或缺可解析 ts 会在
+    // 前提就以 foreground_verifier/not_pending 拒绝，测不到"证明不成立 → 继续
+    // 等"）。
+    writeLines(dir, runId, events);
+    let appended = false;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        verifierProofDeps: {
+          ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: Date.now(), pid: 100 }),
+          identifyFn: async () => ({ verdict: "same", basis: "identity_confirmed" }),
+          runnerScanFn: async () => ({ alive: false }),
+          handshakeReader: () => ({ present: false }),
+          daemonAliveFn: () => false,
+        },
+        sleepFn: async () => {
+          if (!appended) {
+            appended = true;
+            appendLines(dir, runId, [outcome(runId, "passed", ref)]);
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "证明不成立 → 继续等，结果落地后退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("not settled (verification_pending)")), "照常打未收口进度");
+    assert.ok(r.outLines.some((l) => l.includes("verifier proof: owner_fresh")), "证明被拒的理由进进度行明细");
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out), "不输出 verifier_gone");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-05: 节流——同一等待器两次证明至少间隔 5 分钟（时钟注入）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg05";
+    const ref = makeRef(runId);
+    const { events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const clockBase = Date.parse("2026-10-15T12:00:00.000Z");
+    let clock = clockBase;
+    let proofCalls = 0;
+    let reads = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        nowFn: () => clock,
+        sleepFn: async () => { clock += 15000; },
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads < 26 ? events : [...events, outcome(runId, "passed", ref)];
+        },
+        verifierGoneFn: async () => {
+          proofCalls += 1;
+          return { gone: false, refusal: "owner_fresh" };
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "第 26 轮结果落地后收口");
+    assert.equal(reads, 26);
+    assert.equal(proofCalls, 2, "首轮一次 + 满 5 分钟（第 21 轮）一次；5 分钟内不重复");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ── 第 51 批修正轮：证明后的重读分支与单一出口 ──────────────────────────────
+
+test("W-06: 证明成立、重读得到 reverify_pending → 继续等，不退出 3；结果落地收口 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg06";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const failedRef = makeRef(runId, {
+      verification: { status: "failed", failureCode: "command_failed", commands: [], verifiedCommit: DELIVERED, results: [] },
+    });
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return events;
+      const failed = [...events, outcome(runId, "failed", failedRef), reverifyRequested(runId, failedRef)];
+      if (reads === 2) return failed;
+      return [...failed, reverifyOutcome(runId, failedRef, "passed")];
+    };
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: { ...verifierProofDeps, readTranscriptFn },
+    });
+    assert.equal(r.exitCode, undefined, "reverify 落结果后收口退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("not settled (reverify_pending)")),
+      `重读后的可信未收口形态照常打印: ${JSON.stringify(r.outLines)}`);
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-07: 证明成立、重读无法判定（pending 验证 + reverify 事实）→ 不可信轮继续，不退出 3", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg07";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const failedRef = makeRef(runId, {
+      verification: { status: "failed", failureCode: "command_failed", commands: [], verifiedCommit: DELIVERED, results: [] },
+    });
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return events;
+      // 重读：原始验证仍 pending 却已有 reverify 事实 → 无法判定（断链）。
+      if (reads === 2) return [...events, reverifyRequested(runId, failedRef)];
+      // 落盘：原始验证 failed + reverify 链走完 → 收口。
+      return [
+        ...events,
+        outcome(runId, "failed", failedRef),
+        reverifyRequested(runId, failedRef),
+        reverifyOutcome(runId, failedRef, "passed"),
+      ];
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { ...verifierProofDeps, readTranscriptFn } });
+    assert.equal(r.exitCode, undefined, "只有一轮不可信，随后收口退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("settlement undeterminable (delivery_facts_malformed)")),
+      `重读的无法判定按既有规则记账: ${JSON.stringify(r.outLines)}`);
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-08: 证明抛错 → 不构成死亡证明，继续等；结果落地收口 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg08";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    let proofCalls = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      return reads === 1 ? events : [...events, outcome(runId, "passed", ref)];
+    };
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn,
+        verifierGoneFn: async () => {
+          proofCalls += 1;
+          throw new Error("probe exploded");
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "证明抛错继续等，结果落地后收口");
+    assert.equal(reads, 2);
+    assert.equal(proofCalls, 1);
+    assert.ok(r.outLines.some((l) => l.includes("not settled (verification_pending)")), "照常打未收口进度");
+    assert.ok(!r.outLines.some((l) => l.includes("verifier proof:")), "抛错的证明不带拒收理由注脚");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-09: 证明期间 SIGINT → 单一出口 130，只输出一份中断结果", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg09";
+    const { events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const base = process.listenerCount("SIGINT");
+    const r = await runWaitSettled({
+      dir, runId, asJson: true,
+      deps: {
+        ...verifierProofDeps,
+        verifierGoneFn: async () => {
+          process.emit("SIGINT");
+          return { gone: true, basis: "lease_missing" };
+        },
+      },
+    });
+    assert.equal(r.exitCode, 130, "证明期间置位的中断以 130 退出");
+    assert.equal(r.outLines.length, 1, `只输出一份最终结果，实际: ${JSON.stringify(r.outLines)}`);
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.interrupted, true);
+    assert.equal(parsed.settled, false);
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out), "中断路径不出 verifier_gone 终行");
+    assert.equal(process.listenerCount("SIGINT"), base, "SIGINT handler 注销（无泄漏）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-10: 重读仍 pending、确认解析冲突 → 立即退出 4", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg10";
+    const { events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let calls = 0;
+    const real = realResolver(dir);
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        resolveDetailedFn: (rd, rid) => {
+          calls += 1;
+          if (calls === 3) return { path: null, found: false, degraded: false, conflict: true };
+          return real(rd, rid);
+        },
+      },
+    });
+    assert.equal(r.exitCode, 4, "退出 3 前的确认解析冲突按冲突出口");
+    assert.equal(calls, 3, "解析三次：首轮、重读前、退出前确认");
+    assert.match(r.out, /multiple distinct transcript copies/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-11: 重读仍 pending、确认时路径变了 → 不可信轮、不退出 3；随后收口 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg11";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    let calls = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      // 读 1（首轮）与读 2（证明后的重读）都还是 verification_pending；读 3 起
+      // 结果才落盘。
+      return reads <= 2 ? events : [...events, outcome(runId, "passed", ref)];
+    };
+    const real = realResolver(dir);
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn,
+        resolveDetailedFn: (rd, rid) => {
+          calls += 1;
+          const res = real(rd, rid);
+          if (calls === 3) return { ...res, path: `${res.path}.moved` };
+          return res;
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "确认失败的轮算不可信轮，随后收口退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("verifier proven gone but transcript resolution changed")),
+      `确认解析变化的进度行在场: ${JSON.stringify(r.outLines)}`);
+    assert.ok(!/Stuck:/.test(r.out), "不退出 3");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-12: 重读仍 pending、确认时未找到 → 不可信轮、不退出 3；随后收口 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg12";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    let calls = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      return reads <= 2 ? events : [...events, outcome(runId, "passed", ref)];
+    };
+    const real = realResolver(dir);
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn,
+        resolveDetailedFn: (rd, rid) => {
+          calls += 1;
+          if (calls === 3) return { path: null, found: false, degraded: false, conflict: false };
+          return real(rd, rid);
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined);
+    // 确认解析失败（未找到）与路径变化同一记账文本（镜像既有 settled 确认一支
+    // 的统一说法），照不可信轮打印、不退出 3。
+    assert.ok(r.outLines.some((l) => l.includes("verifier proven gone but transcript resolution changed; continuing (untrusted 1/4)")),
+      `确认未找到按不可信轮记账: ${JSON.stringify(r.outLines)}`);
+    assert.ok(!/Stuck:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-13: 重读后运行复活（非终态）→ 进度行的体征年龄用新快照", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg13";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const freshTs = "2026-10-15T11:59:30.000Z";
+    const revived = [
+      ...events,
+      { type: "run.state_change", runId, agentId: "coder_low", from: "completed", to: "running", reason: "evil_revival", ts: freshTs },
+      { type: "run.event", runId, agentId: "coder_low", ts: freshTs, event: { type: "tool_use" } },
+    ];
+    const settledAgain = [
+      ...revived,
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: freshTs },
+      outcome(runId, "passed", ref),
+    ];
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return events;
+      if (reads === 2) return revived;
+      return settledAgain;
+    };
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn,
+        nowFn: () => Date.parse("2026-10-15T12:00:00.000Z"),
+      },
+    });
+    assert.equal(r.exitCode, undefined, "复活形态按新快照继续等、再收口退出 0");
+    const progressLines = r.outLines.filter((l) => l.startsWith("[runs wait]"));
+    assert.ok(progressLines.some((l) => l.includes("state=running not settled (not_terminal); last vital sign 0 min ago")),
+      `体征取自重读的新快照（30s 前的 run.event），实际: ${JSON.stringify(progressLines)}`);
+    assert.ok(!progressLines.some((l) => l.includes("vital sign age unknown")),
+      "不能用首次快照算体征（首次快照无 run.event）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-14: 证明被拒理由参与节流键——理由变了打印一行，不变按 5 分钟节流", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg14";
+    const { ref, events } = verifierEvents(runId);
+    writeLines(dir, runId, events);
+    const clockBase = Date.parse("2026-10-15T12:00:00.000Z");
+    let clock = clockBase;
+    let proofCalls = 0;
+    let reads = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        nowFn: () => clock,
+        sleepFn: async () => { clock += 15000; },
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads < 42 ? events : [...events, outcome(runId, "passed", ref)];
+        },
+        verifierGoneFn: async () => {
+          proofCalls += 1;
+          // 轮 1/21 同理由 owner_fresh；轮 41 换成 runner_scan_failed。
+          return { gone: false, refusal: proofCalls <= 2 ? "owner_fresh" : "runner_scan_failed" };
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "第 42 轮结果落地后收口");
+    const proofLines = r.outLines.filter((l) => l.includes("verifier proof:"));
+    assert.equal(proofLines.length, 3, `轮 1（首打）、轮 21（5 分钟节流到期）、轮 41（理由变化），实际: ${JSON.stringify(r.outLines)}`);
+    assert.match(proofLines[0], /verifier proof: owner_fresh/);
+    assert.match(proofLines[1], /verifier proof: owner_fresh/);
+    assert.match(proofLines[2], /verifier proof: runner_scan_failed/);
+    assert.equal(proofCalls, 3, "证明仍按 5 分钟节流：轮 1/21/41");
   } finally {
     cleanupDir(dir);
   }

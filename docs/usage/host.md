@@ -59,9 +59,9 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 
 ## 冻结工具面（always-registered tools）
 
-WAO 的 MCP 工具**全部始终注册**：没有 profile、没有启动 flag，连接期间每个工具都能独立调用，宿主不必重启就保有全部能力。它不按宿主名分支，也不是权限层；各宿主的接入通路与能力在 `src/hostAdapters/hostDescriptors.js` 的冻结描述符表里，表外宿主用 host-neutral 片段接入。工具名单、契约哈希与描述字节上限怎样冻结，见 `docs/02-architecture.md`「冻结工具面」与决定 0021。
+WAO 的 MCP 工具全部始终注册，不按宿主名分支、也不是权限层——冻结规则见 `docs/02-architecture.md`「冻结工具面」；各宿主的接入通路与能力在 `src/hostAdapters/hostDescriptors.js` 的冻结描述符表里，表外宿主用 host-neutral 片段接入。
 
-渐进式披露：观察类工具的输出统一携带 `availableDrilldowns`（≤4 条静态提示，闭集成员都在冻结工具面内），只披露可安全调用的观察工具，不自动调用、不广告 mutation/control 工具。详见[取结果与查历史](results.md)。
+渐进式披露（观察类工具的输出统一携带 `availableDrilldowns`）详见[取结果与查历史](results.md)。
 
 `run_dispatch_contract_check` 是 advisory 只读预检，与 `run_dispatch` 共享输入 schema（service 复用同一 application 校验），返回闭集 workspace/registry/contract 视图与有界 issue 码。`contractValid` 只反映 delivery/profile 的机械合同，不预评 `expectedGitHead`/`expectedDirty`，也不预评 continuable/backend/session 资格或 worker 凭据；可选 `expectedWorkspaceRoot` 只选本次检查的项目（结果 `workspaceScope` 如实标注，省略即跟随绑定）。sections 独立 settle 为 `observed`/`unknown`，零副作用——不是门禁，`run_dispatch` 不依赖它，部分失败不影响派发。它同样**接受**顶层 `readOnly` 字段但**不评估**它（只读是派发声明，不是 delivery 合同维度）。`run_dispatch` 的可选顶层输入 `executionProfileId`（与 `delivery` 同级）取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands` / `delivery.verificationSetupCommands` / `delivery.verificationUnavailableReason` 互斥，派发前解析；未知或冲突的组合由共享 resolver 稳定拒绝。派发细节见[派发](dispatch.md)。
 

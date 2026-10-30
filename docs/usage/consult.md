@@ -122,6 +122,8 @@ npm run cli -- wao stage --cwd <目标项目>
 - **读取模式** `{consultId}`（可带 `expectedWorkspaceRoot` 指定项目，缺省跟随会话绑定）：从组记录（该项目的 `.wao/runs/consults/<consultId>.json`，与 CLI `--cwd <工作区>` 同一落点；扇出后即可读）重渲染同一回执形状，零派发——读取路径不触碰 dispatch 通道；runState/formatState 按当前 transcript 真值重导出。
 - **按席分页** `{consultId, seat, page?}`：返回该席最终正文单页（`view:"seatPage"`；`page` 默认 1）——每整页响应 ≤12KiB（序列化 UTF-8 字节，含外壳与转义）；行边界优先切页、单行超帽按码点硬切（不拆代理对）；各页按序拼接逐字节等于该席最终正文；每页携带全文 `textSha256` 版本锚（跨页不一致=正文在读取间隙变化，从第 1 页重读，不跨版本拼接）；`textFinal:false`（非终态席）标记分页边界会漂移。
 
+**还有席位没到终态时的 `nextStep`**：有已派发、未终态、转录读得到的席位（有 runId、`runState` 不在终态闭集、不是 `missing`）时，MCP 回执（创建与读取）带 `nextStep`（≤480 字符，不含任何 id）：对这些席位反复 `run_wait`，再按 consultId 重读。CLI `consult run`/`wait`/`show` 文本模式末尾加 `Next step:` 行、JSON 加 `nextStep` 字段：逐席 `wao runs wait <runId> --until-settled`（能后台就后台，否则前台逐个），再 `wao consult show <consultId>` 重读；超 480 字符时改用不列 runId 的版本。分页视图与全部终态都不带；`consult wait` 到期仍有席位在跑时 stderr 指向这一行，未终态席位全是 `missing`（转录读不到）或派发未成立时没有这一行，stderr 如实说明并指向 `consult show`。
+
 输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席指名拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。创建模式必传 `expectedWorkspaceRoot`——每个席位的 cwd 与组记录都落在该目标下，不读会话绑定与进程目录；读取/分页模式可用它当场指定项目，缺省才跟随会话绑定，两者皆无时拒绝。以上输入拒绝都发生在任何派发之前（派发计数为 0）。之后的失败只回固定文案：创建模式是 `…before any seat was dispatched` 或 `…after seats were dispatched`（席位 run 可能在跑，用 `runs_list` 找）；读取模式区分找不到记录与记录在但渲染失败。
 
 **与 CLI 的对应关系**：`wao consult run <briefFile> --seats a,b …`（brief 走文件；`--wait-timeout` 即场景 4d 的总预算）与创建模式同一 service；`wao consult show <consultId>` 与读取模式同一重渲染内核，但保持全量渲染（CLI 面不收窄）。参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。

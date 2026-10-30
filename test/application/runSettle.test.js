@@ -24,11 +24,14 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { readTranscript } from "../../src/transcript.js";
+import { readHandshakeDetailed } from "../../src/daemon.js";
 import { checkOwnerLiveness, readOwnerLease } from "../../src/application/ownerLiveness.js";
 import {
   settleRun,
   listSettleCandidates,
+  proveVerifierGone,
   SETTLE_REJECTION_REASONS,
+  VERIFIER_GONE_REFUSALS,
   SETTLE_QUIET_WINDOW_MS,
   parseRunnerScanOutput,
   defaultRunnerScan,
@@ -69,14 +72,14 @@ function seedProcSession(tp, runId, pid = 4321) {
   ]);
 }
 
-/** 全部通过的注入集；各测试按需覆写单门。 */
+/** 全部通过的注入集；各测试按需覆写单门。handshakeReader 是三态读器契约。 */
 function settleDeps(overrides = {}) {
   return {
     nowFn: () => NOW,
     ownerLeaseReader: () => ({ present: false }),
     identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
     runnerScanFn: async () => ({ alive: false }),
-    handshakeReader: () => null,
+    handshakeReader: () => ({ present: false }),
     daemonAliveFn: () => false,
     ...overrides,
   };
@@ -383,7 +386,7 @@ test("SET-19: 门 6 拒绝——活 daemon → daemon_owned", async () => {
     const runId = "run_set19";
     seedNoSession(join(dir, `${runId}.jsonl`), runId);
     const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
-      handshakeReader: () => ({ pid: 1, pipe: "p", startedAt: NOW, heartbeatAt: NOW - 1000 }),
+      handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 1, pipe: "p", startedAt: NOW, heartbeatAt: NOW - 1000 } }),
       daemonAliveFn: () => true,
     }) });
     assert.equal(r.refused, "daemon_owned");
@@ -396,7 +399,7 @@ test("SET-20: 门 6 通过——daemon 握手不在/不新鲜 → 算满足", as
     const runId = "run_set20";
     seedNoSession(join(dir, `${runId}.jsonl`), runId);
     const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
-      handshakeReader: () => ({ pid: 1, heartbeatAt: NOW - 3600_000 }),
+      handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 1, heartbeatAt: NOW - 3600_000 } }),
       daemonAliveFn: (h, now) => now - h.heartbeatAt <= 10_000, // 真实判法：过期 = 死
     }) });
     assert.equal(r.eligible, true);
@@ -674,4 +677,556 @@ test("SET-31: 默认 runner 扫描——进程出错、旧式裸计数都判失�
   assert.match(calls[0].command, /^\$ErrorActionPreference='Stop';/, "CIM 的非终止错误必须升级为终止错误");
   assert.match(calls[0].command, /--run-id run_20260101000000000abcdef/);
   assert.match(calls[0].command, /--resume-run-id run_20260101000000000abcdef/);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0096：proveVerifierGone——终态 completed + 验证显式 pending 的后台运行，
+// 其验证者是否已不在。全部探测注入；零真实进程、零真实 PowerShell。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BASE = "b".repeat(40);
+const DELIVERED = "d".repeat(40);
+
+function makePendingRef(runId, over = {}) {
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId,
+    baseCommit: BASE,
+    deliveryCommit: DELIVERED,
+    branch: `wao/${runId}`,
+    worktreePath: "D:/fake/wt",
+    changedFiles: ["src/a.js"],
+    verification: { status: "pending", commands: [], verifiedCommit: DELIVERED, results: [] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+    ...over,
+  };
+}
+
+/**
+ * 后台派发、已完成、交付显式 pending 的运行（验证者形状的基线）。
+ * opts.rerun / opts.backgroundCount / opts.noBackground / opts.completed 可改前提。
+ */
+function seedVerifierGoneRun(tp, runId, opts = {}) {
+  const ref = opts.ref ?? makePendingRef(runId);
+  const events = [
+    ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+    ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+    ev(runId, 3, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+    ev(runId, 4, "run.state_change", OLD, { from: null, to: "pending", reason: "background_spawned" }),
+    ev(runId, 5, "run.delivery_created", OLD, { delivery: ref }),
+    ev(runId, 6, "run.state_change", OLD, { from: "running", to: "completed", reason: "done" }),
+  ];
+  if (opts.noBackground) events.splice(1, 1);
+  if (opts.doubleBackground) events.splice(2, 0, ev(runId, 50, "run.background_submitted", OLD, { background: true }));
+  if (opts.rerun) {
+    events.push(ev(runId, 7, "run.rerun", OLD, {
+      originalSessionId: "proc_4321", newSessionId: "proc_9999", reason: "replay", hostPid: 9999,
+    }));
+  }
+  if (opts.extra) events.push(...opts.extra.map((e, i) => ev(runId, 100 + i, e.type, e.ts ?? OLD, e.extra ?? {})));
+  writeLines(tp, events);
+  return ref;
+}
+
+/** 前提取快照：读出已落盘的转录（prove 接收 events，不自己读）。 */
+async function readSeed(tp) {
+  return readTranscript(tp);
+}
+
+function proofDeps(overrides = {}) {
+  return settleDeps(overrides);
+}
+
+test("SET-34: VERIFIER_GONE_REFUSALS 闭集", () => {
+  assert.deepEqual(VERIFIER_GONE_REFUSALS, [
+    "not_pending", "foreground_verifier", "resumed",
+    "owner_lease_corrupt", "owner_fresh", "owner_alive",
+    "process_identity_unknown", "quiet_window", "daemon_owned",
+    "runner_scan_failed", "runner_alive",
+  ]);
+});
+
+test("SET-35: 证明成立——租约缺失 → gone，basis=lease_missing", async () => {
+  const dir = tempDir("wao-vg-35-");
+  try {
+    const runId = "run_vg35";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId);
+    const events = await readSeed(tp);
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: true, basis: "lease_missing" });
+    assert.equal(Object.hasOwn(r, "pid"), false, "不回显 pid");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-36: 证明成立——过期租约 + 身份判定三种 gone basis", async () => {
+  const dir = tempDir("wao-vg-36-");
+  try {
+    for (const basis of ["pid_exited", "rebooted_since_anchor", "pid_reused"]) {
+      const runId = `run_vg36_${basis}`;
+      const tp = join(dir, `${runId}.jsonl`);
+      seedVerifierGoneRun(tp, runId);
+      const events = await readSeed(tp);
+      let seen = null;
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps({
+        ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: NOW - 3600_000, pid: 777 }),
+        identifyFn: async (pid, anchorAt) => {
+          seen = { pid, anchorAt };
+          return { verdict: "gone", basis };
+        },
+      }) });
+      assert.deepEqual(r, { gone: true, basis }, basis);
+      assert.deepEqual(seen, { pid: 777, anchorAt: NOW - 3600_000 }, "探的是租约 pid 与 heartbeatAt 锚");
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-37: not_pending——有结果 / 有 reverify 事实 / legacy 未显式 pending / 非终态", async () => {
+  const dir = tempDir("wao-vg-37-");
+  try {
+    // ① 原始验证已有结果。
+    {
+      const runId = "run_vg37_result";
+      const tp = join(dir, `${runId}.jsonl`);
+      const ref = seedVerifierGoneRun(tp, runId);
+      const events = await readSeed(tp);
+      events.push(ev(runId, 200, "run.delivery_verification_passed", OLD, {
+        delivery: { ...ref, verification: { status: "passed", commands: [], verifiedCommit: DELIVERED, results: [] } },
+      }));
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    }
+    // ② 原始验证 pending 却有 reverify 事实（断链）。
+    {
+      const runId = "run_vg37_reverify";
+      const tp = join(dir, `${runId}.jsonl`);
+      const ref = seedVerifierGoneRun(tp, runId);
+      const events = await readSeed(tp);
+      events.push(ev(runId, 200, "run.delivery_reverification_requested", OLD, {
+        delivery: ref, deliveryCommit: DELIVERED, reason: "tooling_invalid",
+      }));
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    }
+    // ③ legacy created 未显式声明 pending（没有拒绝资格，也就没有这项证明）。
+    {
+      const runId = "run_vg37_legacy";
+      const tp = join(dir, `${runId}.jsonl`);
+      const legacyRef = makePendingRef(runId, { verification: { commands: [], verifiedCommit: DELIVERED, results: [] } });
+      seedVerifierGoneRun(tp, runId, { ref: legacyRef });
+      const events = await readSeed(tp);
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    }
+    // ④ 非终态。
+    {
+      const runId = "run_vg37_running";
+      const tp = join(dir, `${runId}.jsonl`);
+      seedVerifierGoneRun(tp, runId);
+      const events = (await readSeed(tp)).filter((e) => !(e.type === "run.state_change" && e.to === "completed"));
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-38: foreground_verifier——前台运行（无 background_submitted）", async () => {
+  const dir = tempDir("wao-vg-38-");
+  try {
+    const runId = "run_vg38";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId, { noBackground: true });
+    const events = await readSeed(tp);
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: false, refusal: "foreground_verifier" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-39: resumed——有绑定的 run.rerun（驱动进程换过）", async () => {
+  const dir = tempDir("wao-vg-39-");
+  try {
+    const runId = "run_vg39";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId, { rerun: true });
+    const events = await readSeed(tp);
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: false, refusal: "resumed" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+async function proveWith(seedOpts, depsOverrides) {
+  const dir = tempDir("wao-vg-gate-");
+  const runId = "run_vg_gate";
+  try {
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId, seedOpts);
+    const events = await readSeed(tp);
+    return await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps(depsOverrides) });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("SET-40: owner 租约门——损坏 / 新鲜 / 判 alive / 判 unknown", async () => {
+  assert.deepEqual(await proveWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: false }),
+  }), { gone: false, refusal: "owner_lease_corrupt" });
+  assert.deepEqual(await proveWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: NOW - 1000, pid: 100 }),
+  }), { gone: false, refusal: "owner_fresh" });
+  assert.deepEqual(await proveWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: NOW - 3600_000, pid: 100 }),
+    identifyFn: async () => ({ verdict: "same", basis: "identity_confirmed" }),
+  }), { gone: false, refusal: "owner_alive" });
+  assert.deepEqual(await proveWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: NOW - 3600_000, pid: 100 }),
+    identifyFn: async () => ({ verdict: "unknown", basis: "identity_unknown" }),
+  }), { gone: false, refusal: "process_identity_unknown" });
+});
+
+test("SET-41: quiet_window——最后一条绑定事件太新", async () => {
+  const dir = tempDir("wao-vg-41-");
+  try {
+    const runId = "run_vg41";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId);
+    const events = await readSeed(tp);
+    events.push(ev(runId, 200, "run.event", new Date(NOW - 60_000).toISOString(), { kind: "message" }));
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: false, refusal: "quiet_window" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-42: daemon 可能在驱动 → daemon_owned（completed 前启动的新鲜握手；之前启动、过期、pid 判 same）", async () => {
+  const beforeCompleted = Date.parse(OLD) - 3600_000;
+  // 新鲜握手，completed 之前启动。
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 900, startedAt: beforeCompleted, heartbeatAt: NOW - 1000 } }),
+    daemonAliveFn: (h, now) => now - h.heartbeatAt <= 10_000,
+  }), { gone: false, refusal: "daemon_owned" });
+  // 过期握手，completed 之前启动，pid 判 same。
+  let seenPid = null;
+  let seenAnchor = null;
+  const r = await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 901, startedAt: beforeCompleted, heartbeatAt: NOW - 3600_000 } }),
+    daemonAliveFn: () => false,
+    identifyFn: async (pid, anchorAt) => {
+      seenPid = pid; seenAnchor = anchorAt;
+      return { verdict: "same", basis: "identity_confirmed" };
+    },
+  });
+  assert.deepEqual(r, { gone: false, refusal: "daemon_owned" });
+  assert.equal(seenPid, 901, "探的是握手 pid");
+  assert.equal(seenAnchor, beforeCompleted, "锚取握手 startedAt");
+});
+
+test("SET-43: daemon 不拒——completed 之后才启动的新鲜握手；过期且 pid 判 gone", async () => {
+  const beforeCompleted = Date.parse(OLD) - 3600_000;
+  // 晚于 completed 启动：daemon 跳过终态运行，不可能是验证者。
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 902, startedAt: NOW - 1000, heartbeatAt: NOW - 500 } }),
+    daemonAliveFn: () => true,
+  }), { gone: true, basis: "lease_missing" });
+  // 早于 completed 启动但已过期且 pid 判 gone。
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 903, startedAt: beforeCompleted, heartbeatAt: NOW - 3600_000 } }),
+    daemonAliveFn: () => false,
+    identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  }), { gone: true, basis: "lease_missing" });
+});
+
+test("SET-44: 进程扫描门——扫描失败 / 命中", async () => {
+  assert.deepEqual(await proveWith({}, {
+    runnerScanFn: async () => ({ failed: true }),
+  }), { gone: false, refusal: "runner_scan_failed" });
+  assert.deepEqual(await proveWith({}, {
+    runnerScanFn: async () => ({ alive: true }),
+  }), { gone: false, refusal: "runner_alive" });
+});
+
+test("SET-45: 有界 pending 拒绝之后同样成立", async () => {
+  const dir = tempDir("wao-vg-45-");
+  try {
+    const runId = "run_vg45";
+    const tp = join(dir, `${runId}.jsonl`);
+    const ref = seedVerifierGoneRun(tp, runId);
+    const decisionRef = {
+      ...ref,
+      verification: { status: "pending", commands: [], verifiedCommit: DELIVERED, results: [] },
+      acceptance: { status: "rejected", reviewerType: "lead_agent" },
+    };
+    const events = await readSeed(tp);
+    events.push(ev(runId, 200, "run.delivery_rejected", OLD, {
+      delivery: decisionRef,
+      deliveryCommit: DELIVERED,
+      reviewerType: "lead_agent",
+      reason: "验证不会完成，先有界拒收",
+    }));
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: true, basis: "lease_missing" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-46: runner 扫描命令含三种 -like 匹配（--run-id / --resume-run-id / resume），仍排除自身祖先链", async () => {
+  const calls = [];
+  const fakeExec = (stdout) => (file, args, opts, cb) => {
+    calls.push({ file, command: args[args.length - 1] });
+    cb(null, stdout);
+  };
+  const runId = "run_20260101000000000abcdef";
+  assert.deepEqual(await defaultRunnerScan(runId, fakeExec("wao-scan-ok:0:0")), { alive: false });
+  const command = calls[0].command;
+  assert.match(command, new RegExp(`\\*--run-id ${runId}\\*`), "--run-id 匹配");
+  assert.match(command, new RegExp(`\\*--resume-run-id ${runId}\\*`), "--resume-run-id 匹配");
+  assert.match(command, new RegExp(`\\*resume ${runId}\\*`), "前台 resume <runId> 匹配");
+  assert.match(command, /\$ex=\@\(\); \$pp=\$PID;/, "从扫描进程自身开始建祖先链");
+  assert.match(command, /\$pp=\$q\.ParentProcessId/, "沿父链上溯");
+  assert.match(command, /\$ex -notcontains \[string\]\$_.ProcessId/, "排除祖先链上的进程");
+});
+
+test("SET-47: settle 门 3——前台 resume 续跑中的非终态运行被扫描命中 → runner_alive", async () => {
+  const dir = tempDir("wao-vg-47-");
+  try {
+    const runId = "run_vg47";
+    writeLines(join(dir, `${runId}.jsonl`), [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+      ev(runId, 3, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+      ev(runId, 4, "run.rerun", OLD, { originalSessionId: "proc_1111", newSessionId: "proc_4321", reason: "replay", hostPid: 4321 }),
+    ]);
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      // 前台 `wao resume <runId>` 正在续跑：默认扫描会命中（新匹配），结算必须拒。
+      runnerScanFn: async () => ({ alive: true }),
+    }) });
+    assert.equal(r.refused, "runner_alive");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 51 批修正轮（会审必改 1/2/3 + 建议 7 + 会审缺口）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("SET-48: 门 6（真实 readHandshakeDetailed）——文件不在放行；在但空/半截/null/数组 → daemon_owned；读出但不新鲜放行", async () => {
+  const dir = tempDir("wao-set-48-");
+  try {
+    const runId = "run_set48";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedNoSession(tp, runId);
+    // 文件不在：放行。
+    const r0 = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      handshakeReader: readHandshakeDetailed,
+    }) });
+    assert.equal(r0.eligible, true, "无握手文件照旧视为没有 daemon");
+    // 文件在但读不出：四种形状都拒 daemon_owned（空串、半截 JSON、JSON null、数组）。
+    for (const [name, content] of [
+      ["空串", ""],
+      ["半截", '{"pid":12'],
+      ["null", "null"],
+      ["数组", "[1,2]"],
+    ]) {
+      writeFileSync(join(dir, "daemon.json"), content, "utf8");
+      const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+        handshakeReader: readHandshakeDetailed,
+      }) });
+      assert.equal(r.refused, "daemon_owned", `握手文件在但读不出（${name}）不能当成没有 daemon`);
+      const daemonFact = r.gates.find((g) => g.gate === "daemon");
+      assert.match(daemonFact.detail, /握手文件在但读不出/, `${name}: 拒绝事实写明读不出`);
+    }
+    // 读出了但不新鲜（过期握手 = 死 daemon）：放行。
+    writeFileSync(join(dir, "daemon.json"), JSON.stringify({ pid: 1, heartbeatAt: NOW - 3600_000 }), "utf8");
+    const r1 = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      handshakeReader: readHandshakeDetailed,
+      daemonAliveFn: (h, now) => now - h.heartbeatAt <= 10_000,
+    }) });
+    assert.equal(r1.eligible, true, "读出的过期握手照旧放行");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-49: proveVerifierGone——握手文件在但读不出（真实 readHandshakeDetailed）→ daemon_owned", async () => {
+  const dir = tempDir("wao-vg-49-");
+  try {
+    const runId = "run_vg49";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedVerifierGoneRun(tp, runId);
+    const events = await readSeed(tp);
+    for (const content of ["", '{"pid":12', "null", "[1,2]"]) {
+      writeFileSync(join(dir, "daemon.json"), content, "utf8");
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps({
+        handshakeReader: readHandshakeDetailed,
+      }) });
+      assert.deepEqual(r, { gone: false, refusal: "daemon_owned" }, `内容 ${JSON.stringify(content)} 不能当成无 daemon`);
+    }
+    // 文件不在：照旧放行。
+    rmSync(join(dir, "daemon.json"), { force: true });
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps({
+      handshakeReader: readHandshakeDetailed,
+    }) });
+    assert.deepEqual(r, { gone: true, basis: "lease_missing" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-50: 同一时刻不算\"之后\"——startedAt === completedAt 且握手新鲜 → daemon_owned；completedAt+1 → 放行", async () => {
+  const completedAt = Date.parse(OLD);
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 910, startedAt: completedAt, heartbeatAt: NOW - 1000 } }),
+    daemonAliveFn: (h, now) => now - h.heartbeatAt <= 10_000,
+  }), { gone: false, refusal: "daemon_owned" }, "startedAt === completedAt 按\"之前启动\"继续判：新鲜即拒");
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 911, startedAt: completedAt + 1, heartbeatAt: NOW - 1000 } }),
+    daemonAliveFn: () => true,
+  }), { gone: true, basis: "lease_missing" }, "completedAt+1 才算晚于 completed 启动");
+});
+
+test("SET-51: legacy completed（只有 run.completed、没有绑定 state_change→completed）→ not_pending", async () => {
+  const dir = tempDir("wao-vg-51-");
+  try {
+    const runId = "run_vg51";
+    const tp = join(dir, `${runId}.jsonl`);
+    writeLines(tp, [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "run.delivery_created", OLD, { delivery: makePendingRef(runId) }),
+      ev(runId, 4, "run.completed", OLD, {}),
+    ]);
+    const events = await readSeed(tp);
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: false, refusal: "not_pending" },
+      "有界 pending 拒绝要求绑定的 completed state_change；没有它证明不成立");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-52: 扫描命令——notBeforeMs 给出时按 CreationDate 收窄；缺省时命令文本与旧版逐字节相同", async () => {
+  const calls = [];
+  const fakeExec = (stdout) => (file, args, opts, cb) => {
+    calls.push({ file, command: args[args.length - 1] });
+    cb(null, stdout);
+  };
+  const runId = "run_20260101000000000abcdef";
+  // 缺省：与收窄前的命令逐字节相同（含旧版 blind 行、无 $cut）。
+  const legacyCommand = [
+    "$ErrorActionPreference='Stop';",
+    "$ex=@(); $pp=$PID; $n=0;",
+    "while ($pp -and ($ex -notcontains [string]$pp) -and $n -lt 64) { $ex+=[string]$pp; $n++;",
+    "  $q=Get-CimInstance Win32_Process -Filter ('ProcessId='+$pp);",
+    "  if (-not $q) { break }; $pp=$q.ParentProcessId };",
+    "$all=@(Get-CimInstance Win32_Process | Where-Object { $ex -notcontains [string]$_.ProcessId });",
+    `$hit=@($all | Where-Object { $_.CommandLine -like '*--run-id ${runId}*' -or $_.CommandLine -like '*--resume-run-id ${runId}*' -or $_.CommandLine -like '*resume ${runId}*' }).Count;`,
+    "$blind=@($all | Where-Object { $_.Name -like 'node*' -and -not $_.CommandLine }).Count;",
+    "'wao-scan-ok:' + $hit + ':' + $blind",
+  ].join(" ");
+  await defaultRunnerScan(runId, fakeExec("wao-scan-ok:0:0"));
+  assert.equal(calls[0].command, legacyCommand, "notBeforeMs 缺省 = 旧命令逐字节");
+  // 收窄：$cut 用 epoch ms − 5000 换算；blind 行按 CreationDate（转 UTC）过滤，
+  // 读不到 CreationDate 的照旧计入；命令行原文仍不出 PowerShell，回传仍只有计数。
+  const notBefore = Date.parse("2026-10-30T08:00:00.000Z");
+  await defaultRunnerScan(runId, fakeExec("wao-scan-ok:0:1"), notBefore);
+  const narrowed = calls[1].command;
+  assert.match(narrowed, /\$cut=\[DateTimeOffset\]::FromUnixTimeMilliseconds\((\d+)\)\.UtcDateTime;/);
+  assert.equal(
+    Number(/\$cut=\[DateTimeOffset\]::FromUnixTimeMilliseconds\((\d+)\)/.exec(narrowed)[1]),
+    notBefore - 5000,
+    "换算带 5 秒时钟偏差余量",
+  );
+  assert.match(narrowed, /\$null -eq \$\_\.CreationDate\) -or \(\$\_\.CreationDate\.ToUniversalTime\(\) -ge \$cut/, "读不到 CreationDate 的照旧计入");
+  assert.ok(!narrowed.includes("-and -not $_.CommandLine }).Count;"), "旧版 blind 行不再出现");
+  assert.match(narrowed, /'wao-scan-ok:' \+ \$hit \+ ':' \+ \$blind/, "回传仍只有计数");
+  assert.match(narrowed, /CommandLine -like/, "匹配仍在 PowerShell 内做");
+});
+
+test("SET-53: 扫描的收窄锚只取那条 run.background_submitted 的时刻；前台运行、多条或读不出就不传", async () => {
+  const dir = tempDir("wao-vg-53-");
+  try {
+    const runId = "run_vg53";
+    const tp = join(dir, `${runId}.jsonl`);
+    // run.started 比派发事实早一分钟：锚必须是派发事实，不是最早一条事件。
+    const submittedMs = Date.parse(OLD);
+    const startedIso = new Date(submittedMs - 60_000).toISOString();
+    writeLines(tp, [
+      ev(runId, 1, "run.started", startedIso, { backend: "claude-code" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "run.state_change", OLD, { from: null, to: "pending", reason: "background_spawned" }),
+    ]);
+    const seen = [];
+    const scanStub = async (id, notBeforeMs) => {
+      seen.push(notBeforeMs);
+      return { alive: false };
+    };
+    await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({ runnerScanFn: scanStub }) });
+    assert.equal(seen[0], submittedMs, "settle 门 3 传派发事实的时刻");
+    // 证明部分用验证者形状（终态 completed + 交付显式 pending）才会走到扫描。
+    const proofId = "run_vg53_proof";
+    seedVerifierGoneRun(join(dir, `${proofId}.jsonl`), proofId);
+    const events = await readSeed(join(dir, `${proofId}.jsonl`));
+    seen.length = 0;
+    await proveVerifierGone({ events, runId: proofId, runDir: dir, deps: proofDeps({ runnerScanFn: scanStub }) });
+    assert.equal(seen[0], submittedMs, "证明的扫描同样传派发事实的时刻");
+    // 前台运行（会审复现：前台驱动先启动、后写 run.started，比首条事件早，命令行
+    // 读不到）：没有派发事实就不收窄，读不到命令行的进程照旧让扫描判失败。
+    writeLines(tp, [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+      ev(runId, 3, "run.state_change", OLD, { from: null, to: "running", reason: "first_message" }),
+    ]);
+    seen.length = 0;
+    await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({ runnerScanFn: scanStub }) });
+    assert.equal(seen.length, 1, "前台运行同样走到门 3");
+    assert.equal(seen[0], undefined, "前台运行不传锚");
+    // 结果层面：扫描桩模拟"有读不到命令行、且早于首事件创建的活驱动"——不传锚时
+    // 它仍在盲区（失败），传锚才会被排除。前台运行不传锚，结算必须拒。
+    const blindDriverScan = async (id, notBeforeMs) => (notBeforeMs === undefined ? { failed: true } : { alive: false });
+    const refused = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({ runnerScanFn: blindDriverScan }) });
+    assert.equal(refused.refused, "runner_scan_failed", "前台运行的盲区活驱动不能被收窄排除");
+    // 两条派发事实 → 不传。
+    writeLines(tp, [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 4, "run.state_change", OLD, { from: null, to: "pending", reason: "background_spawned" }),
+    ]);
+    seen.length = 0;
+    await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({ runnerScanFn: scanStub }) });
+    assert.equal(seen[0], undefined, "两条派发事实不传锚");
+    // 派发事实的 ts 读不出 → 不传。
+    writeLines(tp, [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "run.background_submitted", "not-a-timestamp", { background: true }),
+      ev(runId, 3, "run.state_change", OLD, { from: null, to: "pending", reason: "background_spawned" }),
+    ]);
+    seen.length = 0;
+    await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({ runnerScanFn: scanStub }) });
+    assert.equal(seen[0], undefined, "读不出锚就不传");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-54: 前面的门拒绝后不再起扫描（证明顺序：租约→静默→daemon→扫描）", async () => {
+  const scanThrows = async () => { throw new Error("scan must not run after an earlier gate refused"); };
+  // 前提拒绝（两条 background_submitted）也不进探测。
+  assert.deepEqual(await proveWith({ doubleBackground: true }, {
+    runnerScanFn: scanThrows,
+  }), { gone: false, refusal: "foreground_verifier" });
+  // 租约门拒绝：扫描不起。
+  assert.deepEqual(await proveWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: false }),
+    runnerScanFn: scanThrows,
+  }), { gone: false, refusal: "owner_lease_corrupt" });
+  // daemon 门拒绝：扫描不起。
+  const beforeCompleted = Date.parse(OLD) - 3600_000;
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 920, startedAt: beforeCompleted, heartbeatAt: NOW - 1000 } }),
+    daemonAliveFn: () => true,
+    runnerScanFn: scanThrows,
+  }), { gone: false, refusal: "daemon_owned" });
+});
+
+test("SET-55: daemon 握手 pid 判 unknown → daemon_owned", async () => {
+  const beforeCompleted = Date.parse(OLD) - 3600_000;
+  assert.deepEqual(await proveWith({}, {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 921, startedAt: beforeCompleted, heartbeatAt: NOW - 3600_000 } }),
+    daemonAliveFn: () => false,
+    identifyFn: async () => ({ verdict: "unknown", basis: "identity_unknown" }),
+  }), { gone: false, refusal: "daemon_owned" });
+});
+
+test("SET-56: 两条 background_submitted → foreground_verifier（恰好一条的前提）", async () => {
+  assert.deepEqual(await proveWith({ doubleBackground: true }, {}), { gone: false, refusal: "foreground_verifier" });
 });

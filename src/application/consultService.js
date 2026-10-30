@@ -49,6 +49,9 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
+// 决定 0096：有未终态席位时回执带 MCP 面 nextStep（模板与长度上限的家在
+// runNextStep.js，本模块只提供席位判定并转交）。
+import { buildNextStep } from "./runNextStep.js";
 
 function listRoleLibrarySync() { return listRoleLibrary(); }
 
@@ -1156,6 +1159,20 @@ export function paginateConsultText(text, { capBytes = CONSULT_PAGE_CAP_BYTES, m
 }
 
 /**
+ * 决定 0096：仍是"在跑"的席位——有 runId，当前 runState 不在 TERMINAL_STATES，
+ * 且不是转录读不到的 `missing`。没有 runId 的席位（派发未成立）与 missing 席位
+ * 都不算（CLI 与 MCP 回执共用同一判定，不各写一份）。
+ * @param {Array<object>} seats
+ * @returns {Array<object>}
+ */
+export function selectNonTerminalSeats(seats) {
+  return (Array.isArray(seats) ? seats : []).filter((seat) =>
+    seat && typeof seat.runId === "string" && seat.runId.length > 0
+    && seat.runState !== "missing"
+    && !TERMINAL_STATES.includes(seat.runState));
+}
+
+/**
  * 全量结果 → MCP 机械回执（纯投影）。create 成功与 read 无 seat 两路径共用
  * 同一函数（会审必改：不造第三种形状）。
  *
@@ -1166,6 +1183,9 @@ export function paginateConsultText(text, { capBytes = CONSULT_PAGE_CAP_BYTES, m
  * 实测 265-607 字/席，是回执帽的主要破帽项；原文在 recordPath）。保留：
  * fieldDiff/fieldValues/bricks（体积小且是 0039 不变式②标记机制本身）。回执
  * 不含任何正文摘录/预览（0039 不变式①：预览=有选择的截断）。
+ *
+ * 决定 0096：有未终态席位时附 MCP 面 nextStep（不带任何具体 id）；全部终态时
+ * 不带该字段。席位分页视图不带。
  *
  * pageMeasure(seat, candidatePageText) 由调用方注入（与 seatPage 视图同一
  * 信封构造器）——回执里每席的 pages 与后续分页读同一把尺，计数不漂移。
@@ -1187,6 +1207,15 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
       textFinal: TERMINAL_STATES.includes(seat.runState),
     };
   });
+  const nonTerminal = selectNonTerminalSeats(seats);
+  const nextStep = nonTerminal.length > 0
+    ? buildNextStep({
+      surface: "mcp",
+      situation: "consult_seats_running",
+      seatCount: seats.length,
+      nonTerminalSeatCount: nonTerminal.length,
+    })
+    : null;
   return {
     view: "receipt",
     consultId: result.consultId,
@@ -1195,6 +1224,7 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
     brief: result.brief,
     budgetMs: result.budgetMs,
     elapsedMs: result.elapsedMs,
+    ...(nextStep === null ? {} : { nextStep }),
     seats,
     fieldDiff: result.fieldDiff,
     fieldValues: result.fieldValues,

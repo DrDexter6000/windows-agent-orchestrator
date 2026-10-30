@@ -436,7 +436,10 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 91612;
+const FROZEN_23_WIRE_CEILING = 91730;
+// 0096（2026-10-30，Owner 批准的批次）：run_consult 回执增可选 nextStep（string
+// ≤480）与描述一句"有未终态席位时带 nextStep"：91612→91730（实测；Owner 硬顶
+// 94532 内）。
 // 0095（2026-10-29，Owner 批准的批次）：Lead 及时得知运行收口——run_wait 输入
 // 下限 30000/缺省 45000、出参增可选 nextStep；run_await_result/run_consult/
 // run_delivery_review_bundle 的 MCP 缺省改 45000；run_delivery 出参增可选
@@ -641,8 +644,10 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // 0088 修订条（2026-10-28，Owner 批准放宽）：lanes 每行的 caveats 上限 4→6
 // （CAVEATS_CAP）——outputSchema 的 maxItems 改一位数，wire 字节不变，SHA 如实翻新。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate——SHA 如实翻新。
+// 0096（2026-10-30，Owner 批准的批次）：run_consult 出参增可选 nextStep——outputSchema
+// 在 stripped 载荷内，SHA 如实翻新（决定 0096，工具面重冻）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "01f67952fae7719865955c7a0a30ab47b7c8b576cdecdc9bd6ea432e0a022e76";
+  "38e9f93b791e5c9cc21fb3289584f55b109a6c688eaa019cd2d467b8527413a3";
 // 0095（2026-10-29）：run_wait/run_delivery/run_dispatch/run_continue 出参增
 // 可选 nextStep（string≤480，取自 LEAD_ADVISORY_WIRE_MAX_LEN）、run_wait 输入
 // waitMs 的 min/default 变化（30000/45000）——schema 在 stripped 载荷内，SHA
@@ -739,7 +744,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
-const FROZEN_23_DESC_CEILING = 11990;
+const FROZEN_23_DESC_CEILING = 12063;
+// 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
+// 席位时带 nextStep"：11990→12063（实测；Owner 硬顶 12347 内）。
 // 0095（2026-10-29，Owner 批准重冻）：run_wait 描述改写区间/缺省并加 nextStep
 // 一句：11847→11990（实测）。
 // 2026-10-16（Owner 批准小幅重冻，与 wire 同批）：run_delivery_reverify 描述
@@ -752,7 +759,9 @@ const FROZEN_23_DESC_CEILING = 11990;
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 23197;
+const FROZEN_23_HOSTVISIBLE_CEILING = 23270;
+// 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句
+// 进 hostVisible：23197→23270（实测）。
 // 0095（2026-10-29，Owner 批准重冻）：与 wire/desc 同批——nextStep 输出字段与
 // 新默认值进 inputSchema/description：23058→23197（实测）。
 // 2026-10-16（Owner 批准小幅重冻，与 wire/desc 同批——同一 attempt 字段的

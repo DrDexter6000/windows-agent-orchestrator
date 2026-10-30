@@ -53,7 +53,7 @@
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 择机：触碰派发任务书或 workdir_escape 提示面时做分类提示与诊断标注 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 等样本：四项独立触发（接线 model、改文档、auditor 无 verdict、排查断链） | docs/troubleshooting.md |
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |
-| TD-179 | 验证进程未落 outcome 即死的自动识别（verification_interrupted 事实）与经 reverify 重跑 pending 形态仍未实现 | 开放 | 择机：触碰交付验证恢复面时做 verification_interrupted 识别与 pending 形态 reverify | docs/02-architecture.md |
+| TD-179 | 验证进程未落结果即死的交付没有正式验收出口：等待器在后台形态可证明时已退出（决定 0096），但只能有界拒收后手工采纳；记中断事实、reverify 重跑 pending 形态未做。09-01 至 10-30 共 1 例，为前台 | 开放 | 等样本：后台形态出现，或 Lead 需要正式验收这种交付时 | .wao/decisions/0096-waiter-exits-when-the-verifier-is-gone.md |
 | TD-180 | codex 后端启动期退出、零写入零 verdict：用量到顶已能识别（codex 自报的原话进终局 run.error，诊断归 provider_capacity），其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 等样本：再遇启动期退出样本，先查 codex JSON 输出有无原话 | 0067 docs/troubleshooting.md |
 | TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 等样本：跨波失败再现时按 docs/troubleshooting.md §8.1 安静窗口单发复验收敛归因 |  |
 | TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 等样本：下一次真实恢复 drill 运行 |  |

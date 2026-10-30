@@ -27,7 +27,12 @@ import {
   loadConsultRecord,
   rerenderConsultFromRecord,
   waitForConsult,
+  selectNonTerminalSeats,
 } from "../application/consultService.js";
+// 决定 0096：有未终态席位时，consult 的三条命令在输出末尾附 CLI 面 nextStep
+//（模板与长度上限的家在 runNextStep.js）。
+import { buildNextStep } from "../application/runNextStep.js";
+import { TERMINAL_STATES } from "../transcript.js";
 // TD-319：未知子命令的"报错 + 用法"两行有意分行——linesError 构造（.message
 // 与改前逐字一致），CLI 输出口按行转义。
 import { linesError } from "../safeText.js";
@@ -94,6 +99,31 @@ function parseFields(rawValues) {
 
 function resolveConsultsDir(options, config) {
   return join(resolveTargetCwd(options), config?.stateDir ?? ".wao", "runs", "consults");
+}
+
+/**
+ * 决定 0096：还有未终态席位时给 CLI 面 nextStep（未终态席位的判定与 MCP 回执
+ * 共用 selectNonTerminalSeats）；全部终态返回 null（输出不带该行/字段）。
+ * `json` 只影响超过 480 字符时不列 runId 的回退说法。
+ * @param {object} result — runConsult / rerenderConsultFromRecord 的结果
+ * @param {{json: boolean}} options
+ * @returns {string|null}
+ */
+function consultNextStep(result, { json }) {
+  const running = selectNonTerminalSeats(result?.seats);
+  if (running.length === 0) return null;
+  return buildNextStep({
+    surface: "cli",
+    situation: "consult_seats_running",
+    seatRunIds: running.map((seat) => seat.runId),
+    consultId: result.consultId,
+    cliJson: json,
+  });
+}
+
+/** 决定 0096：文本模式在 stdout 末尾补 nextStep 行（没有就什么都不加）。 */
+function printConsultNextStep(nextStep) {
+  if (nextStep !== null) console.log(`Next step: ${nextStep}`);
 }
 
 // ===== council-diff 文本渲染（只呈现事实；每席归组文本逐行缩进、零截断）=====
@@ -272,11 +302,13 @@ async function consultRunCommand(args, config, deps = {}) {
       console.error(`[consult] read now: consult show ${consultId}${where} · keep waiting after the budget: consult wait ${consultId}${where}`);
     },
   });
+  const nextStep = consultNextStep(result, { json: format === "json" });
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(nextStep === null ? result : { ...result, nextStep }, null, 2));
     return;
   }
   console.log(renderCouncilDiffText(result));
+  printConsultNextStep(nextStep);
 }
 
 function writeSeatText(result, options, deps) {
@@ -327,11 +359,13 @@ async function consultShowCommand(args, config, deps = {}) {
   if (options.out !== undefined) {
     throw new Error("consult show: --out goes with --seat <agentId> (one seat's complete final text)");
   }
+  const nextStep = consultNextStep(result, { json: format === "json" });
   if (format === "json") {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(nextStep === null ? result : { ...result, nextStep }, null, 2));
     return;
   }
   console.log(renderCouncilDiffText(result));
+  printConsultNextStep(nextStep);
 }
 
 async function consultWaitCommand(args, config, deps = {}) {
@@ -360,14 +394,43 @@ async function consultWaitCommand(args, config, deps = {}) {
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
-  console.error(`[consult] ${consultId}: ${waited.allTerminal
-    ? "every dispatched seat reached a terminal state"
-    : "the window expired with seats still running — run consult wait again"} after ${Math.round(waited.waitedMs / 1000)}s`);
+  // stderr 只陈列这一次看到的事实。有 runId 的席位：等待或重渲染任一次看到它们
+  // 全部终态，就说全部终态（等待结束到重渲染之间可能刚到终态；等待已看到终态、
+  // 重渲染时转录暂时读不到，也不是"窗口到期"）；否则说窗口到期，会输出
+  // `Next step:` 行才说"see the next step below"。再按数补上转录读不到的席位与
+  // 派发未成立（没有 runId）的席位；一个都没派发出去就直说。有这几类时指向
+  // `consult show`。
+  const nextStep = consultNextStep(result, { json: format === "json" });
+  const seats = result.seats ?? [];
+  const dispatchedSeats = seats.filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
+  const undispatched = seats.length - dispatchedSeats.length;
+  const unreadable = dispatchedSeats.filter((seat) => seat.runState === "missing").length;
+  const parts = [];
+  if (dispatchedSeats.length === 0) {
+    parts.push("no seat was dispatched");
+  } else if (waited.allTerminal || dispatchedSeats.every((seat) => TERMINAL_STATES.includes(seat.runState))) {
+    parts.push("every dispatched seat reached a terminal state");
+  } else {
+    parts.push(nextStep !== null
+      ? "the window expired with seats still running — see the next step below"
+      : "the window expired before every dispatched seat was observed terminal");
+  }
+  if (unreadable > 0) parts.push(`${unreadable} seat transcript(s) could not be read`);
+  if (undispatched > 0 && dispatchedSeats.length > 0) parts.push(`${undispatched} seat(s) were never dispatched`);
+  const pointToShow = dispatchedSeats.length === 0 || unreadable > 0 || undispatched > 0;
+  console.error(`[consult] ${consultId}: ${parts.join("; ")}${pointToShow
+    ? ` — see their state with: consult show ${consultId}`
+    : ""} after ${Math.round(waited.waitedMs / 1000)}s`);
   if (format === "json") {
-    console.log(JSON.stringify({ ...result, wait: { allTerminal: waited.allTerminal, waitedMs: waited.waitedMs, windowMs: waited.windowMs } }, null, 2));
+    console.log(JSON.stringify({
+      ...result,
+      ...(nextStep === null ? {} : { nextStep }),
+      wait: { allTerminal: waited.allTerminal, waitedMs: waited.waitedMs, windowMs: waited.windowMs },
+    }, null, 2));
     return;
   }
   console.log(renderCouncilDiffText(result));
+  printConsultNextStep(nextStep);
 }
 
 // TD-319：用法页的行数组是单一事实源——CONSULT_USAGE（join 形，help 打印用）

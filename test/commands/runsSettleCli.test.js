@@ -40,7 +40,7 @@ function cliDeps() {
     ownerLeaseReader: () => ({ present: false }),
     identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
     runnerScanFn: async () => ({ alive: false }),
-    handshakeReader: () => null,
+    handshakeReader: () => ({ present: false }),
     daemonAliveFn: () => false,
   };
 }
@@ -180,4 +180,30 @@ test("CLI-SETTLE-5: --reason-file 缺失或为空 → 报错", async () => {
       /could not be read/,
     );
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("CLI-SETTLE-6: CLI 注入真实三态读器——runDir 里残留读不出内容的 daemon.json → 门 6 daemon_owned", async () => {
+  const dir = tempDir("wao-cli-settle6-");
+  try {
+    seedCandidate(dir, "run_cli_f");
+    // 不传 handshakeReader 覆写：生产注入的 readHandshakeDetailed 读真实文件。
+    // 半截 JSON（daemon 崩在写一半）不能当成"没有 daemon"放行。
+    writeFileSync(join(dir, "daemon.json"), '{"pid":123', "utf8");
+    const reasonFile = join(dir, "reason.txt");
+    writeFileSync(reasonFile, "runner 已死，但 daemon 握手文件读不出。\n", "utf8");
+    const deps = cliDeps();
+    delete deps.handshakeReader; // 让生产的真实读器注入生效
+    const out = await capture(() => runsCommand(
+      ["settle", "--run-id", "run_cli_f", "--reason-file", reasonFile, "--run-dir", dir],
+      { runDir: dir },
+      deps,
+    ));
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.refused, "daemon_owned");
+    const daemonFact = parsed.gates.find((g) => g.gate === "daemon");
+    assert.match(daemonFact.detail, /握手文件在但读不出/);
+  } finally {
+    process.exitCode = undefined;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

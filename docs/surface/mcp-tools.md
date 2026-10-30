@@ -180,7 +180,7 @@ Output:
 
 ## run_consult
 
-Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — every seat's cwd and the record live under it; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
+Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — every seat's cwd and the record live under it; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). The receipt carries nextStep when a dispatched seat is not terminal yet. Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -210,6 +210,7 @@ Output:
 | brief | object | no |  |
 | budgetMs | integer | no |  |
 | elapsedMs | integer\|null | no |  |
+| nextStep | string | no |  |
 | seats | array<object> | no |  |
 | fieldDiff | array<string> | no |  |
 | fieldValues | object | no |  |

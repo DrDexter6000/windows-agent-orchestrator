@@ -40,8 +40,8 @@
   - 文件：只给安全 repo-relative path。`runtime_status`：闭集（`initialized|streaming|provider_retry|process_active|files_changed|serve_active|unknown`），不返回 stream delta/retry error/session/model；未知事件用固定 sentinel。
 - 安全顺序：动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页；绝不返回完整 tool input/output、error text、credential、PID、provider session。
 - cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图与位置；append-only 增长可继续。历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 返回有界结构化恢复结果：`status:"cursor_rejected"` + 静态 `choices`（`isError:true`、带 `structuredContent`、无首页 entries/counts/nextCursor），需显式重新请求——重新请求无 cursor 的第一页，或用已知序列中的 `afterSeq`（如 `run_wait` 的数值 cursor）重入。WAO 只呈现事实与选择，不自动重试/停止/决策，不回显 raw cursor 或动态错误。跨 workspace、无效 envelope、畸形输出返回固定通用错误（`run_activity failed`，无 structuredContent）。
-- `scopeObservation`（advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`；`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`outsidePathCount`/`outsidePathsTruncated`。`complete:true` 只说明：观察到的 transcript 快照已是终态，且该快照中每一条确认的 `file_written` 路径都能在恰好一个有效合同权威（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它不证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也不表示 worker 仍在运行。快照未终态或任一确认路径无法求值 → `unknown`（`complete:false`）。
-- `readOnlyObservation`（advisive、additive、仅声明过只读的 run 才出现）：闭集 `no_writes_observed | writes_observed | unknown`；`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`writtenPaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`writtenPathCount`/`writtenPathsTruncated`。权威 = 恰好一条绑定的 `run.started`（绝对 worktreePath）+ 恰好一条绑定的 `run.read_only_declared`；任一 file_written 路径无法在 worktree 下求值、权威缺失/歧义、声明缺失/重复/跨 run → 整体 `unknown`（fail-closed）。读法：它报的是当前快照观察——非终态快照也可 `writes_observed`（运行中告警，呈现不等于动作）；`no_writes_observed` 是"未观察到写"（基于工具上报证据），不是"没写"；`complete:true` 仅当快照终态且全部可求值。观察到越界写不自动停止、不失败、不改写自然终态——纯 advisory，终审归 Lead。cursor 续页从冻结前缀投影（append-only 稳定），新读第一页可观察后追加的写。
+- `scopeObservation`（advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`；字段（`observedFileCount`、上限 25 条的脱敏 `outsidePaths` 等）与 `complete:true` 的准确语义——只说明快照已终态且每条确认的 `file_written` 都能在有效合同权威下求值，不证明文件系统完整性、语义、验收，也不表示 worker 仍在运行——见[架构](../02-architecture.md)的 scope 投影段（该口径的唯一完整家）。
+- `readOnlyObservation`（advisive、additive、仅声明过只读的 run 才出现）：闭集 `no_writes_observed | writes_observed | unknown`。权威、fail-closed 与诚实读法（`writes_observed` 是运行中告警、`no_writes_observed` 不是"没写"、观察到越界写不自动停止——终审归 Lead）见[架构](../02-architecture.md)的只读声明段；cursor 续页从冻结前缀投影（append-only 稳定），新读第一页可观察后追加的写。
 
 ## MCP `run_stop`（停止运行）
 
@@ -100,11 +100,7 @@ transport keepalive：MCP SDK 的请求超时可能短于观察窗口。client �
 
 transport 恢复契约：`run_wait` / `run_await_result` 都是只读 advisory 工具。一次调用没有返回结果（transport drop/超时被 host 中断）时观察状态是 unknown——没有 control-plane 变更、没有停止 worker；恢复方式是 point-in-time 重读（`run_await_result(waitMs:0)` 或 `run_status`）。绝不能从 transport 丢失推断 worker 是 alive 还是 dead；只有干净观测到的终态（`termination` 非空）才陈述终止事实，且来源是闭集 `termination.source`，不是猜测。
 
-三个互相独立的时钟，不要混淆：
-
-1. 执行截止（execution deadline）：worker run 上的 wall-clock 终止时钟，默认禁用——WAO 不用 wall-clock 杀 worker，改由 Lead 观察驱动；显式配置时仍生效。
-2. 后端请求超时（backend request timeout）：单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。
-3. Lead 观察等待（`run_wait`）：Lead 侧的 long-poll 阻塞上限（`waitMs`，区间与缺省见上），只决定 Lead 一次调用等多久，不影响 worker 生命周期。到时返回当前 liveness 与一句 `nextStep` 让 Lead 决定继续等/collect/stop。
+三个互相独立的时钟（执行截止、后端请求超时、Lead 观察等待）的职责划分见 [架构](../02-architecture.md) 的"三钟分离"；`run_wait` 的 `waitMs`（区间与缺省见上）只决定一次调用等多久，不影响 worker 生命周期。
 
 CLI fallback：MCP `run_wait` 与 CLI `runs wait <runId> [--wait-ms N]` 共用同一等待服务；要一直等到收口用 `runs wait <runId> --until-settled`（见下节）。`status` 轮询或 `tail --follow` 也能拼出观察，但语义不等同。
 
@@ -112,6 +108,6 @@ CLI fallback：MCP `run_wait` 与 CLI `runs wait <runId> [--wait-ms N]` 共用�
 
 **收口（settled）**是同一份可信快照上的闭集判定：运行已终态；有交付时，原始验证与最新 reverify 链都已有结果。未请求交付、打包失败、隔离失败都算收口；事实校验 malformed、原始验证尚无结果却已有 reverify 事实、reverify malformed、孤立 reverify 链、终态后既无 `delivery_created` 也无 `delivery_failed`（常见于打包前就失败或被停的运行）是"无法判定"。收口不含"验证通过""Lead 已验收""WAO 收尾已完成"——`verification passed is not acceptance` 恒成立。
 
-`wao runs wait <runId> --until-settled`（与 `--wait-ms` 互斥）：每 15 秒一轮，重新解析路径、读新快照、判定一次；只读、不停 worker、不设总时长。退出码：`0` 收口（终行带验证结果与 `nextStep`；JSON `{ settled, runId, state, settlement, nextStep }`）；`3` 连续 4 轮不可信或无法判定（读取失败、解析降级、副本读不出、未找到，或交付事实不能收口；后者先报运行状态，再指向 `runs diagnose` 与 `runs delivery`）；`4` 持久冲突（多副本内容不同，立即退出）；`130` SIGINT（只输出一份标注快照读取时间的结果）。诚实边界：只保证收口时退出——能否因此唤醒 Lead 取决于宿主；runner 已死或验证结果丢失的运行会一直挂着：非终态满 30 分钟未见新体征时进度行给出 `runs settle`/`stop`（只在 Lead 决定时用），终态等验证的轮只指向 `runs delivery`。进度：文本写 stdout，`--format json` 时写 stderr、stdout 只留最终 JSON；只在首轮、状态或原因变化、不可信轮及其后一轮、距上一行满 5 分钟时打印。
+`wao runs wait <runId> --until-settled`（与 `--wait-ms` 互斥）：每 15 秒一轮，重新解析路径、读新快照、判定一次；只读、不停 worker、不设总时长。退出码：`0` 收口（终行带验证结果与 `nextStep`；JSON `{ settled, runId, state, settlement, nextStep }`）；`3` 连续 4 轮不可信或无法判定（读取失败、解析降级、副本读不出、未找到，或交付事实不能收口；后者先报运行状态，再指向 `runs diagnose` 与 `runs delivery`），或 `verifier_gone`（终态等验证的后台运行已无验证进程；不可重试；JSON 以 `reason` 与本轮的不可信面区分，附 `basis` 与 `nextStep`）；`4` 持久冲突（多副本内容不同，立即退出）；`130` SIGINT（只输出一份标注快照读取时间的结果）。同一等待器每 5 分钟至多证明一次，成立后重新解析、重读、再判一次：已收口照常退出 0，仍等验证才退出 3。诚实边界：只保证收口时退出——能否因此唤醒 Lead 取决于宿主；仍会一直挂着：前台运行（验证在 `wao run` 进程里跑，转录不记 pid）、resumed 运行（`run.rerun`）、reverify 请求后进程死了（再调一次 `wao runs delivery reverify` 会接着跑）、证明不成立（租约损坏、身份判不了、有活 daemon、进程扫描失败——本机有读不到命令行、且晚于本运行创建的 node 进程）。非终态满 30 分钟未见新体征时进度行给出 `runs settle`/`stop`（只在 Lead 决定时用）。进度：文本写 stdout，`--format json` 时写 stderr、stdout 只留最终 JSON；只在首轮、状态或原因变化、不可信轮及其后一轮、距上一行满 5 分钟时打印。
 
-`nextStep` 是没等到收口时附的一句固定英文模板：MCP 面只写工具名、不含 runId（`run_wait`；`run_delivery` 带 waitMs 未收口；`run_dispatch`/`run_continue` 受理后台运行）；CLI 面写命令、带 runId。按体征年龄分档，阈值与安静监督同源。MCP 等待族的缺省落在约 60 秒的宿主超时内（区间与缺省见各工具描述）；`run_delivery` 带 waitMs 的等待由收口判定决定——"验证中拒收"与"reverify pending"两种 readiness 显示 reviewable 但未收口的状态也会真正等待。
+`nextStep` 是没等到收口时附的一句固定英文模板：MCP 面只写工具名、不含 runId；CLI 面写命令、带 runId。按体征年龄分档，阈值与安静监督同源。MCP 等待族的缺省与区间见各工具描述；`run_delivery` 带 waitMs 的等待由收口判定决定——"验证中拒收"与"reverify pending"两种 readiness 显示 reviewable 但未收口的状态也会真正等待（区间与缺省见[交付](delivery.md)）。

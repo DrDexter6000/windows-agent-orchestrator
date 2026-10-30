@@ -91,16 +91,20 @@ import {
 import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
-// runs settle 门 6 的 daemon 握手 SSOT：daemon.js 与本模块同属 adapters 层，
-// 静态导入合法；application 层的 runSettle.js 不得上向导入，由这里注入。
-import { readHandshake, isDaemonAlive } from "../daemon.js";
+// runs settle 门 6 与 verifier 证明的 daemon 握手 SSOT：daemon.js 与本模块同属
+// adapters 层，静态导入合法；application 层的 runSettle.js 不得上向导入，由这
+// 里注入三态读器 readHandshakeDetailed（分清文件不在/读不出/读出——readHandshake
+// 把读不出也归为无 daemon，对证明不够）。
+import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
 // TD-109: `runs wait` delegates to the SAME liveness-aware wait service the
 // MCP run_wait tool uses, and attaches notes via the SAME semanticNotes
 // selector — no copied algorithm, no copied catalog.
 import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
 import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
 // 决定 0095：`runs wait --until-settled` 的收口判定 + 两面共用的 nextStep 模板。
+// 决定 0096：同一等待器用 proveVerifierGone 证明终态等验证的运行已无验证进程。
 import { determineRunSettlement } from "../application/runSettlement.js";
+import { proveVerifierGone } from "../application/runSettle.js";
 import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
 import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "../application/runQuietAdvisory.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
@@ -462,9 +466,12 @@ async function runsWaitCommand(args, config, deps = {}) {
 // 4 次退出 3；持久冲突立即退出 4；SIGINT 退出 130。不设总时长。可信未收口轮
 // 的进度行只在首轮、状态或原因变化、不可信轮之后，以及距上一行满 5 分钟时打印：
 // 宿主常把命令的整段输出交给模型，逐轮一行（每小时 240 行）只是白耗上下文。
+// 决定 0096：终态等验证的轮每 5 分钟至多证明一次验证者已不在；证明成立后
+// 重读仍 pending 即以退出码 3（reason verifier_gone）退出。
 const RUNS_WAIT_SETTLED_POLL_INTERVAL_MS = 15000;
 const RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS = 4;
 const RUNS_WAIT_SETTLED_PROGRESS_EVERY_MS = 5 * 60 * 1000;
+const RUNS_WAIT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
 
 /**
  * 决定 0095：`wao runs wait <runId> --until-settled`——每轮串行：解析路径 →
@@ -476,12 +483,21 @@ const RUNS_WAIT_SETTLED_PROGRESS_EVERY_MS = 5 * 60 * 1000;
  * undeterminable；只有可信轮把不可信计数清零。判定 settled 后再解析一次，
  * 路径或冲突状态变了算不可信轮继续，不变才退出 0 并输出终行与 nextStep。
  *
- * 退出码：0 收口；3 不可信轮连续 4 次（打印诊断入口）；4 持久冲突（多副本
- * 内容不同）；130 SIGINT（单一出口：置位后正常完成不再输出进度，只输出一份
- * 标注快照读取时间的最终结果）。
+ * 决定 0096：可信、终态 completed 且 reason 为 verification_pending 的轮，先
+ * 证明验证者已不在（节流 5 分钟；证明本身只读）。成立后重新解析、重读、再判
+ * 一次收口：已收口照常退出 0；仍是终态等验证则照收口出口再解析一次——冲突退
+ * 出 4，解析变了算不可信轮，不变才退出 3（reason verifier_gone，附 basis 与
+ * nextStep）；重读的解析/读取失败照原有规则算不可信轮。证明被拒的理由并入本
+ * 轮进度行明细并参与节流键（理由变了就打印；不变仍按 5 分钟节流）。runner 先
+ * 写结果后删租约，所以"先证明、后重读"不会把刚写完结果正在退出的 runner 判死。
+ *
+ * 退出码：0 收口；3 不可信轮连续 4 次（打印诊断入口）或证明验证者已不在
+ *（verifier_gone，不可重试）；4 持久冲突（多副本内容不同）；130 SIGINT
+ *（单一出口：置位后正常完成不再输出进度，只输出一份标注快照读取时间的最终
+ * 结果）。
  *
  * deps 注入缝（测试确定性）：resolveDetailedFn / readTranscriptFn / nowFn /
- * sleepFn / pollIntervalMs。
+ * sleepFn / pollIntervalMs / verifierGoneFn / verifierProofDeps。
  */
 async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {}) {
   const pollIntervalMs = deps.pollIntervalMs ?? RUNS_WAIT_SETTLED_POLL_INTERVAL_MS;
@@ -489,6 +505,20 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
   const readTranscriptFn = deps.readTranscriptFn ?? readTranscript;
   const nowFn = deps.nowFn ?? Date.now;
   const sleepFn = deps.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  // 决定 0096：验证者已不在的证明。daemon 握手 SSOT 在 adapters 层（daemon.js），
+  // 由本命令注入；其余读器与 settle 同一套，测试可经 verifierProofDeps 覆写。
+  const verifierGoneFn = deps.verifierGoneFn ?? proveVerifierGone;
+  const verifierProofDeps = {
+    nowFn,
+    handshakeReader: readHandshakeDetailed,
+    daemonAliveFn: isDaemonAlive,
+    ...(deps.verifierProofDeps ?? {}),
+  };
+  let lastVerifierProofAt = null;
+  // 建议（会审）：证明被拒的理由并入进度行明细与节流键——sticky 到下一次证明
+  // 给出新理由；理由变化立即打印一行，不变时仍按 5 分钟节流。不回显 pid、路径
+  // 与命令行。
+  let lastProofRefusal = null;
 
   const progress = (line) => {
     // 文本模式进度写 stdout；JSON 模式进度写 stderr，stdout 只留最终 JSON。
@@ -526,6 +556,25 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
 
   try {
     let untrustedRounds = 0;
+    // 不可信轮的唯一记账点（进度行文案与计数口径不变）。
+    const markUntrusted = (round, reason, text) => {
+      untrustedRounds += 1;
+      lastUntrustedReason = reason;
+      if (!interrupted) {
+        untrustedProgress(`[runs wait] round ${round}: ${runId} ${text} (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
+      }
+    };
+    // 读一份快照：成功返回事件数组并记下读取时刻；失败返回 null（调用方按
+    // 原有规则算不可信轮）。
+    const readSnapshot = async (resolution) => {
+      try {
+        const events = await readTranscriptFn(resolution.path);
+        lastSnapshotReadAt = nowFn();
+        return events;
+      } catch {
+        return null;
+      }
+    };
     for (let round = 1; ; round += 1) {
       if (interrupted) {
         outcome = { kind: "interrupted" };
@@ -537,50 +586,26 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
         break;
       }
       if (!resolution.found || resolution.degraded) {
-        untrustedRounds += 1;
         const [reason, text] = resolution.degraded
-          ? ["degraded_resolution", "resolution degraded (scan over limit, twin check skipped)"]
+          ? ["degraded_resolution", "transcript resolution degraded (scan over limit, twin check skipped)"]
           : resolution.unreadable
-            ? ["copy_unreadable", "copy unreadable (one of several copies failed to hash)"]
-            : ["not_found", "not found"];
-        lastUntrustedReason = reason;
-        if (!interrupted) {
-          untrustedProgress(`[runs wait] round ${round}: ${runId} transcript ${text} (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
-        }
+            ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+            : ["not_found", "transcript not found"];
+        markUntrusted(round, reason, text);
       } else {
-        let events = null;
-        let readOk = false;
-        try {
-          events = await readTranscriptFn(resolution.path);
-          readOk = true;
-          lastSnapshotReadAt = nowFn();
-        } catch {
-          readOk = false;
-        }
-        if (!readOk) {
-          untrustedRounds += 1;
-          lastUntrustedReason = "snapshot_read_failed";
-          if (!interrupted) {
-            untrustedProgress(`[runs wait] round ${round}: ${runId} snapshot read failed (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
-          }
+        const events = await readSnapshot(resolution);
+        if (events === null) {
+          markUntrusted(round, "snapshot_read_failed", "snapshot read failed");
         } else {
-          const settlement = determineRunSettlement(events, runId);
+          let settlement = determineRunSettlement(events, runId);
           lastSettlement = settlement;
           if (settlement.status === "undeterminable") {
-            untrustedRounds += 1;
-            lastUntrustedReason = `undeterminable:${settlement.reason}`;
-            if (!interrupted) {
-              untrustedProgress(`[runs wait] round ${round}: ${runId} settlement undeterminable (${settlement.reason}) (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
-            }
+            markUntrusted(round, `undeterminable:${settlement.reason}`, `settlement undeterminable (${settlement.reason})`);
           } else if (settlement.status === "settled") {
             // 收口判定后再解析一次：路径或冲突状态变了 → 不可信轮继续。
             const confirm = safeResolve();
             if (confirm.conflict || !confirm.found || confirm.degraded || confirm.path !== resolution.path) {
-              untrustedRounds += 1;
-              lastUntrustedReason = "resolution_changed_after_settled";
-              if (!interrupted) {
-                untrustedProgress(`[runs wait] round ${round}: ${runId} settled but transcript resolution changed; continuing (untrusted ${untrustedRounds}/${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS})`);
-              }
+              markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
             } else {
               outcome = { kind: "settled", settlement };
               break;
@@ -588,23 +613,116 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
           } else {
             // 可信轮（未收口）：清零不可信计数；进度行按节流规则打印。非终态且转录
             // 满 30 分钟未见新体征时，体征部分换成安静提示（runs settle / stop 两个
-            // 出口，只在 Lead 决定时用）。终态轮（等验证或 reverify）不报体征——
-            // 等待器分不清验证慢还是结果已丢，只指向交付状态。
+            // 出口，只在 Lead 决定时用）。终态等验证的轮不报体征；证明验证者已不在
+            // 之后仍等验证才退出 3（见下）。
             untrustedRounds = 0;
+            let progressAllowed = true;
+            // 进度行的体征取自本轮判定所用的快照——证明后的重读改判时用新快照，
+            // 不用首次的 events。
+            let progressEvents = events;
+            if (settlement.facts.terminal && settlement.reason === "verification_pending") {
+              // 决定 0096：终态 completed、验证显式 pending、无结果、无 reverify——
+              // 后台验证者可能已经不在了。节流：同一等待器 5 分钟至多证明一次。
+              const proofNow = nowFn();
+              const proofDue = lastVerifierProofAt === null
+                || proofNow - lastVerifierProofAt >= RUNS_WAIT_VERIFIER_PROOF_EVERY_MS;
+              if (proofDue) {
+                lastVerifierProofAt = proofNow;
+                let proof;
+                try {
+                  proof = await verifierGoneFn({ events, runId, runDir, deps: verifierProofDeps });
+                } catch {
+                  proof = null; // 探测自身的意外失败不构成死亡证明：继续等
+                }
+                if (proof?.gone === false && typeof proof.refusal === "string") {
+                  lastProofRefusal = proof.refusal;
+                }
+                if (proof?.gone === true) {
+                  lastProofRefusal = null; // 最新一次证明已成立，旧拒收理由不再挂着
+                  // 证明成立：重新解析、重读、再判一次收口。解析降级/读取失败按
+                  // 原有规则算不可信轮——绝不把旧快照当成仍 pending。
+                  const reResolution = safeResolve();
+                  if (reResolution.conflict) {
+                    outcome = { kind: "conflict" };
+                    break;
+                  }
+                  if (!reResolution.found || reResolution.degraded) {
+                    const [reason, text] = reResolution.degraded
+                      ? ["degraded_resolution", "transcript resolution degraded (scan over limit, twin check skipped)"]
+                      : reResolution.unreadable
+                        ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+                        : ["not_found", "transcript not found"];
+                    markUntrusted(round, reason, text);
+                    progressAllowed = false;
+                  } else {
+                    const reEvents = await readSnapshot(reResolution);
+                    if (reEvents === null) {
+                      markUntrusted(round, "snapshot_read_failed", "snapshot read failed");
+                      progressAllowed = false;
+                    } else {
+                      const reSettlement = determineRunSettlement(reEvents, runId);
+                      lastSettlement = reSettlement;
+                      if (reSettlement.status === "undeterminable") {
+                        markUntrusted(round, `undeterminable:${reSettlement.reason}`, `settlement undeterminable (${reSettlement.reason})`);
+                        progressAllowed = false;
+                      } else if (reSettlement.status === "settled") {
+                        // 与既有收口出口同一确认：收口后再解析一次。
+                        const confirm = safeResolve();
+                        if (confirm.conflict || !confirm.found || confirm.degraded || confirm.path !== reResolution.path) {
+                          markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
+                          progressAllowed = false;
+                        } else {
+                          outcome = { kind: "settled", settlement: reSettlement };
+                          break;
+                        }
+                      } else if (reSettlement.facts.terminal && reSettlement.reason === "verification_pending") {
+                        // 重读仍是终态等验证：照"已收口"那一支再解析一次——冲突
+                        // 立即退出 4；路径变了/未找到/降级算不可信轮继续；不变才
+                        // 退出 3（verifier_gone）。
+                        const confirm = safeResolve();
+                        if (confirm.conflict) {
+                          outcome = { kind: "conflict" };
+                          break;
+                        }
+                        if (!confirm.found || confirm.degraded || confirm.path !== reResolution.path) {
+                          markUntrusted(round, "resolution_changed_after_verifier_gone", "verifier proven gone but transcript resolution changed; continuing");
+                          progressAllowed = false;
+                        } else {
+                          outcome = { kind: "verifier_gone", settlement: reSettlement, basis: proof.basis };
+                          break;
+                        }
+                      } else {
+                        // 重读后是别的可信未收口形态（例如结果已落、reverify 又
+                        // pending）：照常等待，进度行按新判定与新快照打印。
+                        settlement = reSettlement;
+                        progressEvents = reEvents;
+                      }
+                    }
+                  }
+                }
+              }
+            }
             const now = nowFn();
-            let detail = `; delivery state: wao runs delivery ${runId}`;
+            // 拒收理由注脚只在"终态等验证"的形态上挂着（sticky：直到下一次证明
+            // 给出新理由或形态离开）；形态离开即清，复活等别的形态不带旧注脚。
+            const stillPendingShape = settlement.facts.terminal && settlement.reason === "verification_pending";
+            if (!stillPendingShape) lastProofRefusal = null;
+            const proofNote = stillPendingShape && lastProofRefusal !== null
+              ? `; verifier proof: ${lastProofRefusal}`
+              : "";
+            let detail = `; delivery state: wao runs delivery ${runId}${proofNote}`;
             let quiet = false;
             if (!settlement.facts.terminal) {
-              const ageMs = vitalSignAgeMs(boundReportScope(events, runId) ?? events, now);
+              const ageMs = vitalSignAgeMs(boundReportScope(progressEvents, runId) ?? progressEvents, now);
               quiet = ageMs !== null && ageMs >= LEAD_ADVISORY_QUIET_SECONDS * 1000;
               detail = ageMs === null
-                ? "; vital sign age unknown"
+                ? `; vital sign age unknown${proofNote}`
                 : quiet
-                  ? `; ${runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: ageMs, runId })}`
-                  : `; last vital sign ${Math.floor(ageMs / 60000)} min ago`;
+                  ? `; ${runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: ageMs, runId })}${proofNote}`
+                  : `; last vital sign ${Math.floor(ageMs / 60000)} min ago${proofNote}`;
             }
-            const progressKey = `${settlement.facts.state}|${settlement.reason}|${quiet}`;
-            if (!interrupted && (progressKey !== lastProgressKey || lastProgressAt === null
+            const progressKey = `${settlement.facts.state}|${settlement.reason}|${quiet}|${proofNote}`;
+            if (progressAllowed && !interrupted && (progressKey !== lastProgressKey || lastProgressAt === null
               || now - lastProgressAt >= RUNS_WAIT_SETTLED_PROGRESS_EVERY_MS)) {
               progress(`[runs wait] round ${round}: ${runId} state=${settlement.facts.state} not settled (${settlement.reason})${detail}`);
               lastProgressKey = progressKey;
@@ -673,6 +791,33 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       const reverify = s.facts.reverifyStatus === "complete" ? `; reverify ${s.facts.effectiveVerificationStatus}` : "";
       const verification = s.facts.verificationStatus ? `; verification ${s.facts.verificationStatus}${reverify}` : "";
       console.log(`Settlement: settled (${s.reason}${verification})`);
+      console.log(`Next step: ${nextStep}`);
+    }
+    return;
+  }
+  if (outcome.kind === "verifier_gone") {
+    // 决定 0096：证明成立且重读仍是终态等验证。退出码 3（不可重试），
+    // JSON 以 reason 与本轮的不可信面区分；只给闭集 basis，不回显 pid/路径。
+    process.exitCode = 3;
+    const s = outcome.settlement;
+    const nextStep = buildNextStep({
+      surface: "cli",
+      situation: "verifier_gone",
+      runId,
+      acceptanceStatus: s.facts.acceptanceStatus,
+    });
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: false,
+        runId,
+        state: s.facts.state,
+        reason: "verifier_gone",
+        basis: outcome.basis,
+        nextStep,
+      }, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${s.facts.state})`);
+      console.log(`Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (${outcome.basis}); waiting will not change this.`);
       console.log(`Next step: ${nextStep}`);
     }
     return;
@@ -2480,8 +2625,9 @@ async function runsSettleCommand(args, config, deps = {}) {
   const options = parseOptions(args);
   const { settleRun, listSettleCandidates } = await import("../application/runSettle.js");
   const runDir = resolve(options.runDir ?? config.runDir ?? "runs");
-  // daemon 门读器默认给真实实现；调用方（测试）经 deps 覆写。
-  const settleDeps = { handshakeReader: readHandshake, daemonAliveFn: isDaemonAlive, ...deps };
+  // daemon 门读器默认给真实实现（三态读器：文件在但读不出不算"没有 daemon"）；
+  // 调用方（测试）经 deps 覆写。
+  const settleDeps = { handshakeReader: readHandshakeDetailed, daemonAliveFn: isDaemonAlive, ...deps };
   if (!options.runId) {
     const result = await listSettleCandidates({ runDir, deps: settleDeps });
     console.log(JSON.stringify(result, null, 2));

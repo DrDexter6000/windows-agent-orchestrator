@@ -1258,6 +1258,8 @@ const RUN_CONSULT_OUTPUT = z.object({
   // Create mode: measured elapsed; read mode: the record's historical value
   // (null only for a hand-corrupted record without it).
   elapsedMs: z.number().int().nonnegative().nullable().optional(),
+  // 决定 0096：回执在有未终态席位时带一句 MCP 面下一步（工具名，不含任何 id）。
+  nextStep: z.string().max(480).optional(),
   seats: z.array(RUN_CONSULT_RECEIPT_SEAT).optional(),
   fieldDiff: z.array(z.string()).optional(),
   fieldValues: z.record(z.record(z.string().nullable())).optional(),
@@ -1315,7 +1317,8 @@ const RUN_CONSULT_DESCRIPTION =
   "waitMs 0..600000 (default " +
   `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats keep running, never killed or ` +
   "re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — " +
-  "per-seat runId/state/pages, fieldDiff, independence facts). Facts only — " +
+  "per-seat runId/state/pages, fieldDiff, independence facts). The receipt carries " +
+  "nextStep when a dispatched seat is not terminal yet. Facts only — " +
   "never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, " +
   "ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's " +
   "final text (page default 1; each page ≤12KiB serialized; pages reassemble " +

@@ -71,12 +71,12 @@ function seedTranscript(runDir, runId, events) {
   return filePath;
 }
 
-/** 结算通道的全注入 deps（六门全过）。 */
+/** 结算通道的全注入 deps（六门全过）。handshakeReader 是三态读器契约。 */
 const settlePassDeps = {
   ownerLeaseReader: () => ({ present: false }),
   identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
   runnerScanFn: async () => ({ alive: false }),
-  handshakeReader: () => null,
+  handshakeReader: () => ({ present: false }),
   daemonAliveFn: () => false,
 };
 

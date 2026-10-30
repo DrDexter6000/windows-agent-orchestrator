@@ -43,6 +43,8 @@ import {
   generateConsultId,
   isValidConsultId,
 } from "../../src/application/consultService.js";
+// 决定 0096：CLI consult 的 nextStep 模板（480 上限与超长回退在这里钉住）。
+import { buildNextStep } from "../../src/application/runNextStep.js";
 
 test("会审还在等待预算之内被读取时，没到终态的席位不标预算到期；预算过了才标", async () => {
   const record = {
@@ -1348,4 +1350,280 @@ test("会审：注册表键与车道别名同名时，组记录与派发都按�
   }));
   assert.equal(calls[0].agentId, "lane-a", "别名优先：派发车道键");
   assert.equal(result.record.seats[0].backend, "claude-code", "组记录与派发目标同源，不取同名注册表条目");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0096：consult 三条 CLI 命令在有未终态席位时给 nextStep（文本末尾一行 /
+// JSON 一个字段）；consult wait 的 stderr 不再另说"run consult wait again"。
+// ═══════════════════════════════════════════════════════════════════════════
+
+function runningCraftedResult() {
+  const result = craftedResult();
+  result.seats[1] = { ...result.seats[1], runState: "running", finalText: "" };
+  return result;
+}
+
+async function captureConsult(fn) {
+  const out = [];
+  const err = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a) => out.push(a.join(" "));
+  console.error = (...a) => err.push(a.join(" "));
+  try {
+    await fn();
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
+  return { out: out.join("\n"), err: err.join("\n"), outLines: out, errLines: err };
+}
+
+test("CLI-8: consult run 有未终态席位 → 文本末尾 Next step 行 / JSON nextStep 字段；全终态不带", async () => {
+  const result = runningCraftedResult();
+  const deps = { runConsult: async () => result };
+  const config = {
+    registry: join(tmpdir(), "wao-consult-cli8", "agents.json"),
+    runDir: join(tmpdir(), "wao-consult-cli8", "runs"),
+  };
+  const text = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--cwd", "C:/tmp/x"], config, deps,
+  ));
+  assert.equal(text.outLines.at(-1),
+    "Next step: Seats not terminal yet: run_b. Before ending the turn, wait on each: "
+    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
+    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    + "consult_20261002120000000abc123.");
+
+  const json = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--format", "json", "--cwd", "C:/tmp/x"], config, deps,
+  ));
+  const parsed = JSON.parse(json.out);
+  assert.equal(typeof parsed.nextStep, "string");
+  assert.match(parsed.nextStep, /^Seats not terminal yet: run_b\./);
+  assert.equal(parsed.seats[1].finalText, "", "JSON 仍带每席完整字段（nextStep 只加不换）");
+
+  // 全部终态：不带该行/字段（craftedResult 的席位都是 completed）。
+  const settledText = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--cwd", "C:/tmp/x"], config,
+    { runConsult: async () => craftedResult() },
+  ));
+  assert.ok(!settledText.outLines.some((l) => l.startsWith("Next step: ")), "全部终态文本不带 nextStep 行");
+  const settledJson = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--format", "json", "--cwd", "C:/tmp/x"], config,
+    { runConsult: async () => craftedResult() },
+  ));
+  assert.equal("nextStep" in JSON.parse(settledJson.out), false, "全部终态 JSON 不带 nextStep");
+});
+
+test("CLI-9: consult show 有未终态席位 → 文本末尾 Next step 行 / JSON nextStep 字段", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [
+      { agentId: "seat_a", runId: "run_show_r", runState: "running", formatState: "partial" },
+      { agentId: "seat_b", runId: null, runState: "dispatch_failed", formatState: "empty" },
+    ],
+    fieldDiff: [],
+  };
+  const readTranscript = async (path) => {
+    const runId = basename(path, ".jsonl");
+    if (runId !== "run_show_r") throw new Error(`ENOENT stub: ${path}`);
+    return makeTranscript("run_show_r", { state: "running", finalText: "Q1: 仍在核对。\n" });
+  };
+  const deps = { loadConsultRecord: async () => record, readTranscript };
+  const text = await captureConsult(() => consultCommand(["show", consultId, "--cwd", "C:/tmp/x"], {}, deps));
+  assert.equal(text.outLines.at(-1),
+    "Next step: Seats not terminal yet: run_show_r. Before ending the turn, wait on each: "
+    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
+    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    + `${consultId}.`);
+
+  const json = await captureConsult(() => consultCommand(["show", consultId, "--format", "json", "--cwd", "C:/tmp/x"], {}, deps));
+  const parsed = JSON.parse(json.out);
+  assert.match(parsed.nextStep, /^Seats not terminal yet: run_show_r\./);
+
+  // 无未终态席位（missing 不算、无 runId 不算）→ 不带。
+  const allSettled = {
+    ...record,
+    seats: [
+      { agentId: "seat_a", runId: "run_show_done", runState: "completed", formatState: "structured" },
+      { agentId: "seat_b", runId: "run_show_missing", runState: "missing", formatState: "empty" },
+      { agentId: "seat_c", runId: null, runState: "dispatch_failed", formatState: "empty" },
+    ],
+  };
+  const noStep = await captureConsult(() => consultCommand(["show", consultId, "--cwd", "C:/tmp/x"], {}, {
+    loadConsultRecord: async () => allSettled,
+    readTranscript: async (path) => (basename(path, ".jsonl") === "run_show_done"
+      ? makeTranscript("run_show_done", { finalText: "Q1: 可行。\n" })
+      : (() => { throw new Error("ENOENT stub"); })()),
+  }));
+  assert.ok(!noStep.outLines.some((l) => l.startsWith("Next step: ")), "missing/无 runId 席位不算在跑");
+});
+
+test("CLI-10: consult wait 有未终态席位 → 文本 Next step / JSON nextStep；stderr 指向这一行", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [{ agentId: "seat_a", runId: "run_wait_r", runState: "running", formatState: "partial" }],
+    fieldDiff: [],
+  };
+  const readTranscript = async () => makeTranscript("run_wait_r", { state: "running", finalText: "Q1: 仍在核对。\n" });
+  const deps = {
+    waitForConsult: async () => ({ record, allTerminal: false, waitedMs: 270000, windowMs: 270000 }),
+    readTranscript,
+  };
+  const text = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, deps));
+  assert.equal(text.outLines.at(-1),
+    "Next step: Seats not terminal yet: run_wait_r. Before ending the turn, wait on each: "
+    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
+    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    + `${consultId}.`);
+  assert.match(text.err, /see the next step below/);
+  assert.ok(!text.err.includes("run consult wait again"), "stderr 不再留第二套说法");
+
+  const json = await captureConsult(() => consultCommand(["wait", consultId, "--format", "json", "--cwd", "C:/tmp/x"], {}, deps));
+  const parsed = JSON.parse(json.out);
+  assert.match(parsed.nextStep, /^Seats not terminal yet: run_wait_r\./);
+  assert.deepEqual(parsed.wait, { allTerminal: false, waitedMs: 270000, windowMs: 270000 });
+});
+
+test("CLI-11: consult 的 nextStep 超过 480 字符时改用不列 runId 的版本（8 席）", () => {
+  const consultId = "consult_20261002120000000abc123";
+  const runIds = Array.from({ length: 8 }, (_, i) => `run_2026100212000000${i}consult`);
+  const text = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: runIds, consultId, cliJson: false,
+  });
+  assert.match(text, /^Seats not terminal yet \(listed above\)\./);
+  assert.ok(!runIds.some((id) => text.includes(id)), "文本回退不列 runId");
+  assert.ok(text.length <= 480);
+  const json = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: runIds, consultId, cliJson: true,
+  });
+  assert.match(json, /^Seats not terminal yet \(see seats\[\]\.runId\)\./);
+  assert.ok(json.length <= 480);
+});
+
+test("CLI-12: consult wait 未终态席位全是 missing → stderr 不说 see the next step below，如实说明并指向 consult show", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [{ agentId: "seat_a", runId: "run_wait_missing", runState: "running", formatState: "partial" }],
+    fieldDiff: [],
+  };
+  // 转录读不到 → 重渲染后该席 runState=missing → selectNonTerminalSeats 不算 →
+  // 没有 nextStep。
+  const deps = {
+    waitForConsult: async () => ({ record, allTerminal: false, waitedMs: 270000, windowMs: 270000 }),
+    readTranscript: async () => { throw new Error("ENOENT stub"); },
+  };
+  const text = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, deps));
+  assert.ok(!text.err.includes("see the next step below"), "没有 nextStep 行时 stderr 不得指向它");
+  assert.match(text.err, /before every dispatched seat was observed terminal/, "如实说窗口到期仍有席位未被观察到终态");
+  assert.match(text.err, /1 seat transcript\(s\) could not be read/, "如实说席位转录读不到");
+  assert.match(text.err, new RegExp(`consult show ${consultId}`), "指向 consult show");
+  assert.ok(!text.outLines.some((l) => l.startsWith("Next step: ")), "stdout 没有 Next step 行");
+
+  const json = await captureConsult(() => consultCommand(["wait", consultId, "--format", "json", "--cwd", "C:/tmp/x"], {}, deps));
+  const parsed = JSON.parse(json.out);
+  assert.equal("nextStep" in parsed, false, "全 missing 时 JSON 不带 nextStep");
+  assert.ok(!json.err.includes("see the next step below"));
+  assert.match(json.err, new RegExp(`consult show ${consultId}`));
+});
+
+test("CLI-13: consult wait 等待说未全终态、重渲染时席位已全部终态 → stderr 按重渲染结果说全部终态", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [{ agentId: "seat_a", runId: "run_wait_late_done", runState: "running", formatState: "partial" }],
+    fieldDiff: [],
+  };
+  // 会审复现的竞态：等待窗到期时席位还没终态，重渲染读转录时已经 completed。
+  const deps = {
+    waitForConsult: async () => ({ record, allTerminal: false, waitedMs: 270000, windowMs: 270000 }),
+    readTranscript: async () => makeTranscript("run_wait_late_done", { finalText: "Q1: 可行。\n" }),
+  };
+  const text = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, deps));
+  assert.match(text.err, /every dispatched seat reached a terminal state/, "按重渲染结果说全部终态");
+  assert.ok(!text.err.includes("could not be read"), "不得归咎于转录读不到");
+  assert.ok(!text.err.includes("see the next step below"));
+  assert.ok(!text.outLines.some((l) => l.startsWith("Next step: ")), "全部终态没有 Next step 行");
+});
+
+test("CLI-14: consult wait 等待已看到全部终态、重渲染时转录暂时读不到 → 不说窗口到期，补一句重读失败", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [{ agentId: "seat_a", runId: "run_wait_reread_fail", runState: "completed", formatState: "structured" }],
+    fieldDiff: [],
+  };
+  // 会审复现：等待第一次读取就见 completed 并返回，重渲染再读时暂时 EACCES。
+  const deps = {
+    waitForConsult: async () => ({ record, allTerminal: true, waitedMs: 0, windowMs: 270000 }),
+    readTranscript: async () => { throw Object.assign(new Error("EACCES stub"), { code: "EACCES" }); },
+  };
+  for (const format of ["text", "json"]) {
+    const args = ["wait", consultId, "--cwd", "C:/tmp/x", ...(format === "json" ? ["--format", "json"] : [])];
+    const captured = await captureConsult(() => consultCommand(args, {}, deps));
+    assert.match(captured.err, /every dispatched seat reached a terminal state/, `${format}: 等待已看到全部终态`);
+    assert.ok(!captured.err.includes("window expired"), `${format}: 不得说窗口到期`);
+    assert.match(captured.err, /1 seat transcript\(s\) could not be read/, `${format}: 补一句重读失败`);
+    assert.match(captured.err, new RegExp(`consult show ${consultId}`), `${format}: 指向 consult show`);
+  }
+});
+
+test("CLI-15: consult wait 有派发未成立的席位（没有 runId）→ stderr 如实计数并指向 consult show；一席都没派发就直说", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const base = {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    fieldDiff: [],
+  };
+  const failedSeat = { agentId: "seat_x", runId: null, runState: "dispatch_failed", formatState: "empty" };
+  // 一席都没派发：waitForConsult 对空队列给 allTerminal:true，不能据此说"全部终态"。
+  const none = { ...base, seats: [failedSeat] };
+  const noneOut = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, {
+    waitForConsult: async () => ({ record: none, allTerminal: true, waitedMs: 0, windowMs: 270000 }),
+    readTranscript: async () => [],
+  }));
+  assert.match(noneOut.err, /no seat was dispatched/, "零派发直说");
+  assert.ok(!noneOut.err.includes("every dispatched seat reached a terminal state"), "零派发不得说全部终态");
+  assert.match(noneOut.err, new RegExp(`consult show ${consultId}`));
+  // 已终态 + 派发未成立：说全部终态，并计数派发未成立的席位。
+  const mixed = { ...base, seats: [{ agentId: "seat_a", runId: "run_wait_mixed_done", runState: "running", formatState: "partial" }, failedSeat] };
+  const mixedOut = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, {
+    waitForConsult: async () => ({ record: mixed, allTerminal: true, waitedMs: 1000, windowMs: 270000 }),
+    readTranscript: async () => makeTranscript("run_wait_mixed_done", { finalText: "Q1: 可行。\n" }),
+  }));
+  assert.match(mixedOut.err, /every dispatched seat reached a terminal state; 1 seat\(s\) were never dispatched/);
+  assert.match(mixedOut.err, new RegExp(`consult show ${consultId}`));
 });

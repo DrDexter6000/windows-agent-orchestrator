@@ -87,9 +87,18 @@ test("NEXT-04: 输入校验——未知 surface/situation 抛错；CLI 面缺 ru
 });
 
 test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超长 runId 触发守卫）", () => {
-  // 所有情形 × 两面 × 大龄数字均在限内。
+  // 所有情形 × 两面 × 大龄数字均在限内（新情形按各自需要的入参渲染；
+  // verifier_gone 只有 CLI 面，MCP 面必须拒绝）。
   for (const situation of NEXT_STEP_SITUATIONS) {
     for (const surface of ["mcp", "cli"]) {
+      if (situation === "verifier_gone" && surface === "mcp") {
+        assert.throws(
+          () => buildNextStep({ surface, situation }),
+          /CLI-only/,
+          "verifier_gone 在 MCP 面拒绝",
+        );
+        continue;
+      }
       const text = buildNextStep({
         surface,
         situation,
@@ -97,6 +106,9 @@ test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超�
         vitalSignAgeMs: 6 * 60 * 60 * 1000,
         settlementReason: "delivery_settled",
         acceptanceStatus: null,
+        ...(situation === "consult_seats_running"
+          ? { seatRunIds: [RUN_ID], consultId: "consult_20261029210000000abc123", seatCount: 1, nonTerminalSeatCount: 1 }
+          : {}),
       });
       assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${situation}/${surface}: ${text.length} > ${NEXT_STEP_MAX_LEN}`);
     }
@@ -127,4 +139,98 @@ test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把
     assert.ok(!/run_delivery_decide|\b(accept|accepts|reject|rejects)\b/i.test(text),
       `nextStep 不建议 accept/reject: ${text}`);
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0096：两个新情形——verifier_gone（CLI 面）与 consult_seats_running
+//（MCP 面不带任何具体 id；CLI 面列 runId，超长时改用不列 runId 的版本）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-07: verifier_gone——只有 CLI 面；按 acceptanceStatus 两支，均 ≤480", () => {
+  const pending = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "pending",
+  });
+  assert.match(pending, /Its verification will not finish\. Reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\./);
+  assert.match(pending, /adopt the delivery commit by hand under the adoption protocol \(docs\/usage\/delivery\.md\); wao runs delivery run_\S+ shows the commit\./);
+  assert.ok(pending.length <= NEXT_STEP_MAX_LEN, `${pending.length}`);
+
+  const rejected = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "rejected",
+  });
+  assert.match(rejected, /already rejected; nothing is left to wait for/);
+  assert.match(rejected, /adopt the delivery commit by hand under the adoption protocol/);
+  assert.ok(!rejected.includes("--reject"), "已拒收不再建议拒收");
+  assert.ok(rejected.length <= NEXT_STEP_MAX_LEN, `${rejected.length}`);
+
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "verifier_gone" }),
+    /CLI-only/,
+    "MCP 面没有这项证明，也就没有这条 nextStep",
+  );
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "verifier_gone" }),
+    /runId/,
+    "CLI 面仍需 runId 渲染命令",
+  );
+});
+
+test("NEXT-08: consult_seats_running——MCP 面不落任何具体 id；CLI 面列 runId 并带 consultId", () => {
+  const mcp = buildNextStep({
+    surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 3,
+  });
+  assert.match(mcp, /^3 of 5 seats are not terminal yet\./);
+  assert.match(mcp, /call run_wait repeatedly/);
+  assert.match(mcp, /seats\[\]\.runId/);
+  assert.match(mcp, /re-read this consult with run_consult and its consultId/);
+  assert.ok(!mcp.includes(RUN_ID) && !/consult_\d/.test(mcp), "MCP 面不含 runId/consultId 字面");
+  assert.ok(mcp.length <= NEXT_STEP_MAX_LEN);
+
+  const consultId = "consult_20261029210000000abc123";
+  const cli = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: [RUN_ID], consultId,
+  });
+  assert.match(cli, new RegExp(`Seats not terminal yet: ${RUN_ID}\\.`));
+  assert.match(cli, /wao runs wait <runId> --until-settled/);
+  assert.match(cli, /in the background if your host notifies you when background commands finish; otherwise one after another in the foreground/);
+  assert.match(cli, new RegExp(`re-read with wao consult show ${consultId}\\.$`));
+  assert.ok(cli.includes(RUN_ID) && cli.includes(consultId), "CLI 面列 runId 与 consultId");
+  assert.ok(cli.length <= NEXT_STEP_MAX_LEN);
+});
+
+test("NEXT-09: consult_seats_running CLI 超长回退——8 席不列 runId（文本/JSON 两种说法），仍 ≤480", () => {
+  const consultId = "consult_20261029210000000abc123";
+  const runIds = Array.from({ length: 8 }, (_, i) => `run_2026102921000000${i}nextstp`);
+  const listed = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: runIds, consultId,
+  });
+  assert.ok(listed.length <= NEXT_STEP_MAX_LEN, `列 runId 的版本也必须在限内或回退：${listed.length}`);
+
+  const text = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: runIds, consultId, cliJson: false,
+  });
+  assert.match(text, /^Seats not terminal yet \(listed above\)\./);
+  for (const runId of runIds) assert.ok(!text.includes(runId), `文本回退不列 runId: ${runId}`);
+  assert.ok(text.includes(consultId), "仍指出重读命令");
+  assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length}`);
+
+  const json = buildNextStep({
+    surface: "cli", situation: "consult_seats_running", seatRunIds: runIds, consultId, cliJson: true,
+  });
+  assert.match(json, /^Seats not terminal yet \(see seats\[\]\.runId\)\./);
+  for (const runId of runIds) assert.ok(!json.includes(runId), `JSON 回退不列 runId: ${runId}`);
+  assert.ok(json.length <= NEXT_STEP_MAX_LEN, `${json.length}`);
+
+  // 入参校验：CLI 面必须给非空 seatRunIds 与 consultId；MCP 面必须给计数。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "consult_seats_running", consultId }),
+    /seatRunIds/,
+  );
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "consult_seats_running", seatRunIds: [RUN_ID] }),
+    /consultId/,
+  );
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "consult_seats_running", seatCount: 5 }),
+    /seatCount and nonTerminalSeatCount/,
+  );
 });

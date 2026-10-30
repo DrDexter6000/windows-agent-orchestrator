@@ -78,6 +78,36 @@ export function readHandshake(runDir) {
 }
 
 /**
+ * runs settle 门 6 / proveVerifierGone 用的三态读取：分清"文件不在 / 文件在但
+ * 读不出或不是对象 / 读出了"。readHandshake 把空串、半截 JSON、JSON `null` 都
+ * 归为 null（= 无 daemon）——对判活够用，对证明不够：握手文件在却读不出内容
+ * 时，不能当成"没有 daemon"放行（文件在，就可能有 daemon 在写它）。
+ * 读取错误里只有 ENOENT 算"文件不在"；其余（权限/IO）与内容损坏同罪——文件
+ * 在场但内容不可信。数组与非对象 JSON 同样算读不出（不是 handshake 形状）。
+ * @returns {{present:false}|{present:true,unreadable:true}|{present:true,unreadable:false,handshake:object}}
+ */
+export function readHandshakeDetailed(runDir) {
+  const filePath = join(runDir, HANDSHAKE_FILE);
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { present: false };
+    return { present: true, unreadable: true };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { present: true, unreadable: true };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { present: true, unreadable: true };
+  }
+  return { present: true, unreadable: false, handshake: parsed };
+}
+
+/**
  * 判 daemon 是否活着。TD-316 起不再自写比较——判活规矩只有一条，全部委托
  * ownerLiveness.js 的 isFreshHeartbeat：heartbeatAt 是有限数字、且
  * |now - heartbeatAt| ≤ 阈值 = 活；比阈值更靠未来的心跳同样判死（握手里残留

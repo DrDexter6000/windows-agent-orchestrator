@@ -1015,3 +1015,162 @@ test("MRC-W6: dispatch attempts that produced no run do not count as dispatched 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0096：回执在有未终态席位（有 runId、非终态、非 missing）时带 nextStep。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RECEIPT_BASE_KEYS = [
+  "bricks", "brief", "budgetMs", "consultId", "elapsedMs", "fieldDiff", "fieldValues",
+  "questions", "recordPath", "seats", "view",
+];
+const RECEIPT_RUNNING_KEYS = [...RECEIPT_BASE_KEYS, "nextStep"].sort();
+
+function receiptSeat(agentId, { runId, runState, finalText = "" }) {
+  return {
+    agentId,
+    runId,
+    runState,
+    formatState: "structured",
+    budgetExpired: false,
+    attribution: { ordered: [], unclassified: "", preamble: "" },
+    finalText,
+  };
+}
+
+function receiptFixture(seats) {
+  return {
+    consultId: "consult_20261030071437756abc123",
+    recordPath: "C:/tmp/consults/consult_20261030071437756abc123.json",
+    questions: [{ q: 1, heading: "## Q1 方案可行吗" }],
+    brief: { path: null, sha256: "a".repeat(64) },
+    budgetMs: 600000,
+    elapsedMs: 1000,
+    seats,
+    fieldDiff: [],
+    fieldValues: {},
+    bricks: { runtimeFacts: [], authorInSeats: null, reviewedAgentId: null, sessionIndependence: "未提供" },
+  };
+}
+
+test("MRC-A2: 投影——只有未终态席位（有 runId、非 missing）才带 nextStep；键集钉住", () => {
+  const measure = (seat, candidate) => Buffer.byteLength(candidate, "utf8") + 400;
+
+  // 全终态 → 不带。
+  const allTerminal = projectConsultReceipt(receiptFixture([
+    receiptSeat("seat_a", { runId: "run_a", runState: "completed" }),
+    receiptSeat("seat_b", { runId: "run_b", runState: "failed" }),
+  ]), { pageMeasure: measure });
+  assert.deepEqual(Object.keys(allTerminal).sort(), RECEIPT_BASE_KEYS);
+  assert.equal("nextStep" in allTerminal, false, "全部终态不带 nextStep");
+
+  // missing 与无 runId（派发未成立）都不算。
+  const noneRunning = projectConsultReceipt(receiptFixture([
+    receiptSeat("seat_a", { runId: "run_a", runState: "completed" }),
+    receiptSeat("seat_b", { runId: "run_b", runState: "missing" }),
+    receiptSeat("seat_c", { runId: null, runState: "dispatch_failed" }),
+  ]), { pageMeasure: measure });
+  assert.equal("nextStep" in noneRunning, false, "missing 与无 runId 席位不算在跑");
+
+  // 一个非终态席 → 带 MCP 面 nextStep（不带任何具体 id）。
+  const running = projectConsultReceipt(receiptFixture([
+    receiptSeat("seat_a", { runId: "run_a", runState: "running" }),
+    receiptSeat("seat_b", { runId: "run_b", runState: "completed" }),
+  ]), { pageMeasure: measure });
+  assert.deepEqual(Object.keys(running).sort(), RECEIPT_RUNNING_KEYS);
+  assert.equal(running.nextStep,
+    "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_wait repeatedly (within the host's tool-call timeout) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.");
+  assert.ok(!running.nextStep.includes("run_a") && !running.nextStep.includes(running.consultId), "不含具体 id");
+  assert.ok(running.nextStep.length <= 480);
+});
+
+test("MRC-A3: create 与 read 两条路径都带 nextStep；席位到终态后读回不再带", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-a3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { state: "running", finalText: "Q1: 仍在核对。\n" }));
+    writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { state: "completed", finalText: "Q1: 可行。\n" }));
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const created = await callConsult(client, {
+        brief: BRIEF, seats: ["seat_a", "seat_b"], expectedWorkspaceRoot: dir, waitMs: 0,
+      });
+      assert.equal(created.threw, false);
+      assert.notEqual(created.res.isError, true, errText(created.res));
+      const createdReceipt = created.res.structuredContent;
+      assert.match(createdReceipt.nextStep, /^1 of 2 seats are not terminal yet\./);
+      assert.ok(!createdReceipt.nextStep.includes("run_consult_stub_seat_a"), "create 回执不带具体 runId");
+
+      const readBack = await callConsult(client, { consultId: createdReceipt.consultId, expectedWorkspaceRoot: dir });
+      assert.equal(readBack.threw, false);
+      assert.notEqual(readBack.res.isError, true, errText(readBack.res));
+      const readReceipt = readBack.res.structuredContent;
+      assert.equal(readReceipt.view, "receipt");
+      assert.equal(readReceipt.nextStep, createdReceipt.nextStep, "read 路径与 create 同一投影");
+
+      // 席位到终态后读回：不再带 nextStep。
+      writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { state: "completed", finalText: "Q1: 已完成。\n" }));
+      const settled = await callConsult(client, { consultId: createdReceipt.consultId, expectedWorkspaceRoot: dir });
+      assert.equal(settled.threw, false);
+      assert.equal(settled.res.structuredContent.nextStep, undefined);
+      assert.ok(!("nextStep" in settled.res.structuredContent), "全部终态不带该字段");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-F2: 有未终态席位、带 nextStep 的诚实边界回执仍 ≤8KiB（帽不抬）", () => {
+  const longId = "s".repeat(32);
+  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `问题标题第${i}号`.repeat(10) }));
+  const fieldDiff = questions.map((q) => `Q${q.q}`);
+  const fieldValues = Object.fromEntries(fieldDiff.map((q, i) => [q, Object.fromEntries(
+    Array.from({ length: 5 }, (_, j) => [`席位_${j}`, `选项${i}`]),
+  )]));
+  const mkSeat = (i) => ({
+    agentId: i === 0 ? longId : `${longId}_${i}`,
+    runId: "run_20260101000000000aaaaaa",
+    // 混入未终态席位：nextStep 进回执（最坏情况）。
+    runState: i === 0 ? "running" : "completed",
+    formatState: "structured",
+    budgetExpired: false,
+    finalText: "正文不进回执。".repeat(8000),
+    attribution: { ordered: [{ q: 1, text: "正文不进回执。".repeat(8000) }], unclassified: "", preamble: "" },
+  });
+  const result = {
+    consultId: "consult_20260101000000000aaaaaa",
+    recordPath: "x".repeat(80),
+    questions,
+    brief: { path: null, sha256: "a".repeat(64) },
+    budgetMs: 600000,
+    elapsedMs: 123456,
+    seats: Array.from({ length: 5 }, (_, i) => mkSeat(i)),
+    fieldDiff,
+    fieldValues,
+    bricks: {
+      runtimeFacts: Array.from({ length: 5 }, (_, i) => ({ agentId: `${longId}_${i}`, backend: "claude-code", provider: null })),
+      authorInSeats: null,
+      reviewedAgentId: null,
+      sessionIndependence: "未提供",
+    },
+  };
+  const receipt = projectConsultReceipt(result, {
+    pageMeasure: (seat, candidate) => Buffer.byteLength(JSON.stringify({
+      view: "seatPage", consultId: result.consultId, seat: seat.agentId, runId: seat.runId,
+      runState: seat.runState, formatState: seat.formatState, budgetExpired: seat.budgetExpired,
+      textFinal: false, page: 1, totalPages: 1, totalChars: 1,
+      textSha256: "a".repeat(64), pageText: candidate,
+    }), "utf8"),
+  });
+  assert.equal(typeof receipt.nextStep, "string", "有未终态席位 → 带 nextStep");
+  const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
+  assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
+    `诚实边界 + nextStep 回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）；帽不得抬`);
+  assert.ok(!JSON.stringify(receipt).includes("正文不进回执"), "正文仍不进回执");
+});

@@ -16,6 +16,7 @@ import { findState } from "../../src/transcript.js";
 
 import {
   readHandshake,
+  readHandshakeDetailed,
   isDaemonAlive,
   scanResumableRuns,
   connectDaemon,
@@ -72,6 +73,30 @@ test("readHandshake: 文件不存在返回 null", () => {
   const runDir = makeRunDir();
   try {
     assert.equal(readHandshake(runDir), null);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("readHandshakeDetailed: 三态——文件不在 / 在但读不出（空、半截、null、数组）/ 读出了", () => {
+  const runDir = makeRunDir();
+  try {
+    // 文件不在。
+    assert.deepEqual(readHandshakeDetailed(runDir), { present: false });
+    // 文件在但读不出或不是对象：四种内容形状。
+    for (const [name, content] of [
+      ["空串", ""],
+      ["半截 JSON", '{"pid":123'],
+      ["JSON null", "null"],
+      ["数组", '[{"pid":1}]'],
+    ]) {
+      writeFileSync(join(runDir, HANDSHAKE_FILE), content, "utf8");
+      assert.deepEqual(readHandshakeDetailed(runDir), { present: true, unreadable: true }, name);
+    }
+    // 读出了：对象原样带回。
+    const hs = { pid: 777, pipe: "\\\\.\\pipe\\wao-daemon", startedAt: 1, heartbeatAt: 2 };
+    writeFileSync(join(runDir, HANDSHAKE_FILE), JSON.stringify(hs), "utf8");
+    assert.deepEqual(readHandshakeDetailed(runDir), { present: true, unreadable: false, handshake: hs });
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
