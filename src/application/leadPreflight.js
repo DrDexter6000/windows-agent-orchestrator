@@ -40,21 +40,30 @@ import {
 } from "./registryInventory.js";
 import { createVerificationGate } from "../verificationGate.js";
 import { projectBucketLabel } from "../projectIdentity.js";
-// 0087：车道画像紧凑投影——加载器与投影只在 lead_preflight.lanes 一处出 MCP。
+// 0087（0097 修订）：车道画像紧凑投影——结构化投影只在 lead_preflight.lanes
+// 一处出 MCP；派发受理的 laneFacts 回显行由 laneFactsLine 从同一投影派生。
 // 闭集常量 re-export 给 MCP 层派生 zod enum/上限（单一 SSOT，不复制清单）。
+// 0097：投影新增 costTier/costTierScale/ownerRules/score 的上限同样经此转出。
 import {
   projectLaneProfiles,
   readLaneTraits,
   CAVEATS_CAP,
   CAVEAT_MAX_CHARS,
   COST_MAX_CHARS,
+  COST_TIER_MAX,
+  COST_TIER_SCALE_MAX_CHARS,
+  OWNER_RULES_CAP,
+  OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   RATING_BASES,
+  RATING_DIMENSIONS,
   RATINGS_STATES,
   REVIEW_REASON_MAX_CHARS,
   REVIEW_REASONS_CAP,
   SCALE_MAX_CHARS,
+  SCORE_LABEL_MAX_CHARS,
+  SCORED_DIMENSIONS,
 } from "./laneProfile.js";
 // 0087 §5：MCP 服务处在 worker 上下文时 lanes 置 null（WAO 不向 worker 投影
 // 画像）。判定注入以便测试；缺省读真实 env/cwd。
@@ -65,13 +74,20 @@ export {
   CAVEATS_CAP,
   CAVEAT_MAX_CHARS,
   COST_MAX_CHARS,
+  COST_TIER_MAX,
+  COST_TIER_SCALE_MAX_CHARS,
+  OWNER_RULES_CAP,
+  OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   RATING_BASES,
+  RATING_DIMENSIONS,
   RATINGS_STATES,
   REVIEW_REASON_MAX_CHARS,
   REVIEW_REASONS_CAP,
   SCALE_MAX_CHARS,
+  SCORE_LABEL_MAX_CHARS,
+  SCORED_DIMENSIONS,
 };
 
 /**
@@ -605,13 +621,20 @@ export async function aggregateLeadPreflight({
       const fn = laneProfilesFn ?? defaultLaneProfiles;
       const projection = await fn();
       if (projection != null && typeof projection === "object") {
+        // 0097：顶层新增 costTierScale/ownerRules 原样透传（null=缺失或降级），
+        // notices（降级观察）各记一条 preflight 观察。
         lanes = {
           scale: projection.scale,
           dimensionLabels: projection.dimensionLabels,
+          costTierScale: projection.costTierScale ?? null,
+          ownerRules: projection.ownerRules ?? null,
           rows: projection.rows,
         };
         for (const id of (projection.omittedLaneIds ?? [])) {
           observeLaneOmission(`lane ${id} profile is invalid — row omitted from lanes; see wao lanes`);
+        }
+        for (const notice of (projection.notices ?? [])) {
+          observeLaneOmission(`lane profiles: ${notice}`);
         }
       } else {
         observeLaneOmission("lane profiles could not be read — use wao lanes");

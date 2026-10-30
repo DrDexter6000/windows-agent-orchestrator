@@ -35,6 +35,8 @@ import { renderRunSummary } from "../cliRunSummary.js";
 import { boundReportScope } from "../metrics.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall } from "./shared.js";
 import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
+// 0097 §4：派发时回显所选车道一行事实（只陈列非推荐；fail-open——null 不打印）。
+import { laneFactsLine } from "../application/laneFactsLine.js";
 import { readRegistry } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
@@ -495,6 +497,8 @@ export async function runCommand(args, config) {
   // TD-283：目标车道的 Owner 暂停派发说明——解析块内取（lanesDoc 已在作用域），
   // 块外打印。--explain 在块内早退，不受影响。
   let dispatchHoldLine = null;
+  // 0097 §4：所选车道一行事实（解析块内取，块外打印；fail-open）。
+  let laneFactsText = null;
   const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
   // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名）。原 A-1 顺序
   // （prompt 校验先于注册表解析）保持：无 prompt 时先拒绝，不触发解析。
@@ -591,6 +595,10 @@ export async function runCommand(args, config) {
     // 目标不是带说明的车道 → null（不打印）。仅提示，不改任何派发决策与退出码。
     const holdLaneId = resolution.kind === "resolved" && typeof resolution.laneId === "string" ? resolution.laneId : agentId;
     dispatchHoldLine = dispatchHoldAdvisoryLine(holdLaneId, laneDispatchHold(lanesDoc, holdLaneId));
+    // 0097 §4：同一目标键取回显行（与 dispatchHold 同一 lanesDoc——非默认
+    // --registry 时表停用，回显随之缺省）。画像读失败返回 null，不打印。
+    // laneFactsLineFn：测试缝（夹具注入；生产路径缺省真实实现）。
+    laneFactsText = (config?.laneFactsLineFn ?? laneFactsLine)(holdLaneId, { lanesDoc });
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
@@ -627,6 +635,9 @@ export async function runCommand(args, config) {
   // TD-283：目标车道带 Owner 暂停说明 → stderr 一行 advisory（dispatchResource-
   // Advisory 同款纪律：只提示、不拦截、不改退出码、不污染 stdout 管道）。
   if (dispatchHoldLine) console.error(dispatchHoldLine);
+  // 0097 §4：派发那一刻（前台与后台都在这里分岔前）往 stderr 打所选车道一行
+  // 事实（只陈列，不是推荐；同款 advisory 纪律，fail-open——null 不打印）。
+  if (laneFactsText) console.error(`[wao] ${laneFactsText}`);
   // 决定 0066：派发发生在可识别的宿主会话里而该宿主未注册 WAO MCP 时，明确告知
   // Lead 自己走的是命令行通道（同为 fail-open advisory：stderr 一行，不阻塞）。
   const mcpHostAdvisory = renderMcpHostAdvisory({

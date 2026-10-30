@@ -138,6 +138,7 @@ Output:
 | workspaceProof | object | yes |  |
 | providerSessionRouting | string | yes | enum: not_used \| first_turn_requested \| resume_requested |
 | nextStep | string | no |  |
+| laneFacts | string | no |  |
 
 ## run_dispatch_contract_check
 

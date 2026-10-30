@@ -32,7 +32,7 @@ import {
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
-import { verifyRunWorkspaceOwnership, assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnership, verifyRunWorkspaceOwnershipTyped, assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // TD-137②：等待窗到期交叉提示的单一构造处（runWait 同族 SSOT；无环——
 // runWait 及其传递依赖不回读本模块）。
 import { buildWaitWindowHint } from "./runWait.js";
@@ -929,7 +929,7 @@ export async function getRunDeliveryReadiness({
 
   let events = await _readTranscript(filePath);
   if (authorizedWorkspaceRoot !== undefined) {
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+    verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, runId);
   }
   // R20 (TD-128 M5)：readiness 握手的初始读 terminalState 同款绑定（与上方
   // point-in-time 查询、projectDeliveryReadiness :364 同一 runId、同一 R15
@@ -1008,7 +1008,7 @@ export async function getRunDeliveryReadiness({
     // propagates, so the caller sees the SAME fixed error the initial read
     // would raise.
     if (authorizedWorkspaceRoot !== undefined) {
-      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+      verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, runId);
     }
     // R20 (TD-128 M5)：等待循环内每次 poll 快照的 terminalState 同款绑定过滤
     // （与初始读同一 runId、同一 R15 范式）——poll 内外 run 伪终态尾条不再

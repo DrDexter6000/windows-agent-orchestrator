@@ -1200,3 +1200,72 @@ test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
 });
+
+// ---------------------------------------------------------------------
+// 0097 §4: accepted dispatch carries the additive optional laneFacts field
+// (the selected lane's one-line facts, verbatim from laneFactsLine — facts
+// only, never a recommendation). Not accepted → absent. run_continue does
+// NOT carry it: RUN_CONTINUE_OUTPUT in src/mcp/server.js is strict and has no
+// laneFacts key, so its output validation would reject one. Here we pin the
+// run_dispatch side only.
+// ---------------------------------------------------------------------
+
+test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → key absent; not accepted → absent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0097-facts-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const FACTS = "所选车道事实（只陈列，不是推荐）：x · 成本档 1（Owner 相对档 0.5–5，非价格倍数）· 评分当前；Owner 规则见 lead_preflight 的 lanes.ownerRules";
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_0097_facts", agentId: "x", state: "pending",
+      providerSessionRouting: "not_used",
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+      laneFactsLineFn: (laneId) => (laneId === "x" ? FACTS : null),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+      assert.equal(res.isError, undefined, "受理成功");
+      const parsed = res.structuredContent;
+      assert.equal(parsed.laneFacts, FACTS, "受理回执带同一行文字");
+      assert.ok(!parsed.laneFacts.startsWith("[wao] "), "不带 [wao] 前缀（那是 CLI stderr 的形制）");
+      assert.deepEqual(Object.keys(parsed).sort(),
+        ["accepted", "agentId", "laneFacts", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "键集钉：laneFacts 是唯一新增键");
+
+      // 回显失败（fail-open null）→ 键缺省，受理不受影响。
+      const serverNull = createWaoMcpServer({
+        registryPath, runDir: "/server/runs", workspaceRoot: dir,
+        dispatchRunFn: fakeDispatch,
+        laneFactsLineFn: () => null,
+      });
+      const clientNull = await buildInMemoryClient(serverNull);
+      try {
+        const resNull = await clientNull.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+        assert.equal(resNull.isError, undefined);
+        assert.equal("laneFacts" in resNull.structuredContent, false, "null → 键缺省");
+      } finally { await clientNull.close(); await serverNull.close(); }
+
+      // 未受理（accepted:false）→ 不带 laneFacts/nextStep。
+      const serverRefused = createWaoMcpServer({
+        registryPath, runDir: "/server/runs", workspaceRoot: dir,
+        dispatchRunFn: async () => ({
+          accepted: false, runId: "run_0097_no", agentId: "x", state: "refused",
+          providerSessionRouting: "not_used",
+        }),
+        laneFactsLineFn: () => FACTS,
+      });
+      const clientRefused = await buildInMemoryClient(serverRefused);
+      try {
+        const resRefused = await clientRefused.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+        const parsedRefused = JSON.parse(resRefused.content.find((b) => b.type === "text").text);
+        assert.equal(parsedRefused.accepted, false);
+        assert.equal("laneFacts" in parsedRefused, false, "未受理不带 laneFacts");
+        assert.equal("nextStep" in parsedRefused, false, "未受理不带 nextStep");
+      } finally { await clientRefused.close(); await serverRefused.close(); }
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});

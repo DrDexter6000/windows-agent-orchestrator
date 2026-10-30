@@ -1,15 +1,17 @@
 // src/application/laneProfile.js
 //
-// 车道画像（schemaVersion 2，决定 0087）的加载、校验、待复核判定与
-// lead_preflight 紧凑投影。每格带星级与依据（measured/official/owner）；
-// 打分身份与车道表不一致，或写了 reviewPending，即待复核。
+// 车道画像（schemaVersion 2，决定 0087；costTier/score/ownerRules 见 0097）的
+// 加载、校验、待复核判定与 lead_preflight 紧凑投影。每格带星级与依据
+// （measured/official/owner）；打分身份与车道表不一致，或写了 reviewPending，
+// 即待复核。
 //
-// 定位与边界（0087 §5）：
+// 定位与边界（0087 §5；0097 修订）：
 //   - 画像文件名字面量只出现在本模块（隔离守卫 test/registry-roles/laneTraits.test.js
 //     白名单只含本文件）；本模块只准被 src/application/lanesView.js（wao lanes
-//     视图）与 src/application/leadPreflight.js（preflight 聚合器）引用。
-//   - 画像不进派发解析、门禁、认证与运行时行为；投影只出现在
-//     lead_preflight.lanes 一处 MCP 出参里。
+//     视图）、src/application/leadPreflight.js（preflight 聚合器）与
+//     src/application/laneFactsLine.js（派发受理回显行，0097）引用。
+//   - 画像不进派发解析、门禁、认证与运行时行为；投影出现在 lead_preflight.lanes
+//     一处 MCP 出参里，laneFactsLine 只从投影派生一行文字（0097 §5 修订）。
 //   - WAO 不按星级排序、不推荐、不路由；未评格不折算成任何星数。
 //   - 本模块除加载器（readLaneTraits，readFileFn 可注入）外全部纯函数。
 import { createHash } from "node:crypto";
@@ -33,6 +35,10 @@ const WAO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const RATING_DIMENSIONS = Object.freeze([
   "research", "code", "review", "design", "longHorizon", "writing", "visual",
 ]);
+
+/** 可带 score 的维度（0097）：计数分数只出现在这三个实测维度。MCP 出参 schema
+ *  只在这三格放行 score，并从本常量派生——文件校验与 schema 同一清单。 */
+export const SCORED_DIMENSIONS = Object.freeze(["research", "code", "review"]);
 
 /** 七个维度的中文名（只在本模块定义一次；视图层与投影都从这里取）。 */
 export const DIMENSION_LABELS = Object.freeze({
@@ -72,15 +78,31 @@ export const COST_MAX_CHARS = 200;
 export const PROJECTED_NOTE_MAX_CHARS = 80;
 /** 投影里刻度行的字符数。 */
 export const SCALE_MAX_CHARS = 240;
+// 0097（选车道的关键事实）：以下上限同样只写在这里，MCP 出参 schema 经聚合器
+// 转出后引用同一组值。
+/** costTier 上限（Owner 相对档 0.5–5、步长 0.5；只有 Owner 改）。 */
+export const COST_TIER_MAX = 5;
+/** costTierScale 说明串的字符数。 */
+export const COST_TIER_SCALE_MAX_CHARS = 160;
+/** ownerRules 的条数上限（有序，排在前面的优先）。 */
+export const OWNER_RULES_CAP = 8;
+/** 每条 Owner 规则的字符数（复用注意事项的单条上限）。 */
+export const OWNER_RULE_MAX_CHARS = CAVEAT_MAX_CHARS;
+/** score.label 的字符数（只给同样本的实测格）。 */
+export const SCORE_LABEL_MAX_CHARS = 16;
+/** 投影携带的画像观察条数上限（costTier/ownerRules 降级一类）。 */
+export const PROJECTION_NOTICES_CAP = 8;
+/** 每条投影观察的字符数。 */
+export const PROJECTION_NOTICE_MAX_CHARS = 160;
 
 /** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
 const LANE_ENTRY_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost",
+  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
 ]);
 
 /** 每格键闭集。 */
-const RATING_CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence"]);
+const RATING_CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence", "score"]);
 
 /** ratedAgainst 键闭集（恰好四键）。 */
 const RATED_AGAINST_KEYS = new Set(["backend", "modelId", "providerID", "effort"]);
@@ -88,9 +110,29 @@ const RATED_AGAINST_KEYS = new Set(["backend", "modelId", "providerID", "effort"
 const isStr = (v, min, max) => typeof v === "string" && v.length >= min && v.length <= max;
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const hasOnly = (obj, allowed) => isPlainObject(obj) && Object.keys(obj).every((k) => allowed.has(k));
+// 0097：ownerRules/score.label 不含控制字符（磁盘上的不可信文本，同 TD-318 的
+// 纪律——不让控制字节混进投影）。
+const hasControlChars = (v) => typeof v === "string" && /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v);
+
+/** costTier 合法形（0097）：null，或 0.5–5、步长 0.5 的有限数。 */
+export function validCostTier(v) {
+  return v === null
+    || (Number.isFinite(v) && v > 0 && v <= COST_TIER_MAX && Number.isInteger(v * 2));
+}
+
+/** score 合法形（0097）：恰好 {hits,total,label} 三键，只许出现在 measured 格。 */
+function validScore(v) {
+  return isPlainObject(v)
+    && Object.keys(v).length === 3
+    && Number.isInteger(v.hits) && Number.isInteger(v.total)
+    && v.total >= 1 && v.hits >= 0 && v.hits <= v.total
+    && isStr(v.label, 1, SCORE_LABEL_MAX_CHARS) && !hasControlChars(v.label);
+}
 
 /** 单格形状校验：未评 {stars:null,basis:null}（不许带别的键）或已评
- *  （stars 1–5 整数、basis 必填、按 basis 的 n/evidence 规则）。
+ *  （stars 1–5 整数、basis 必填、按 basis 的 n/evidence 规则；score 只许
+ *  measured 格且形状见 validScore——不合法即整格 invalid，按现有格级纪律
+ *  连带整条车道降级 invalid，投影省略该行）。
  *  返回 {ok:true, cell} 或 {ok:false, field}。 */
 function validateRatingCell(cell) {
   if (!isPlainObject(cell)) return { ok: false, field: "(非对象)" };
@@ -98,8 +140,8 @@ function validateRatingCell(cell) {
     if (!RATING_CELL_KEYS.has(k)) return { ok: false, field: `ratings 未知键 ${k}` };
   }
   if (cell.stars === null && cell.basis === null) {
-    if ("n" in cell || "note" in cell || "evidence" in cell) {
-      return { ok: false, field: "未评格不许带 n/note/evidence" };
+    if ("n" in cell || "note" in cell || "evidence" in cell || "score" in cell) {
+      return { ok: false, field: "未评格不许带 n/note/evidence/score" };
     }
     return { ok: true, cell: { stars: null, basis: null } };
   }
@@ -114,6 +156,10 @@ function validateRatingCell(cell) {
   }
   if (cell.evidence !== undefined && !isStr(cell.evidence, 1, 200)) {
     return { ok: false, field: "evidence 须为 1–200 字符" };
+  }
+  if ("score" in cell) {
+    if (cell.basis !== "measured") return { ok: false, field: "score 只许出现在 measured 格" };
+    if (!validScore(cell.score)) return { ok: false, field: "score 须为 {hits,total,label}（整数、total≥1、0≤hits≤total、label 无控制字符）" };
   }
   const hasN = "n" in cell;
   if (cell.basis === "measured") {
@@ -135,16 +181,19 @@ function validateRatingCell(cell) {
       ...(hasN ? { n: cell.n } : {}),
       ...(cell.note !== undefined ? { note: cell.note } : {}),
       ...(cell.evidence !== undefined ? { evidence: cell.evidence } : {}),
+      ...("score" in cell ? { score: { hits: cell.score.hits, total: cell.score.total, label: cell.score.label } } : {}),
     },
   };
 }
 
 /** traits 单车道形状校验（schemaVersion 2）。任一项不合规即整条车道降级
- *  invalid——不造默认值（与 v1 同纪律）。纯函数：
- *  返回 {ok:true, entry} 或 {ok:false, fields:[...]}。 */
+ *  invalid——不造默认值（与 v1 同纪律）。唯一例外（0097）：costTier 不合法
+ *  只把该格当 null 并记一条观察，车道照常投影。纯函数：
+ *  返回 {ok:true, entry, observations:[...]} 或 {ok:false, fields:[...]}。 */
 export function validateTraitEntry(id, entry) {
   void id; // 键名只在 issue 文案里用（调用方拼），校验本身与 id 无关
   const bad = [];
+  const observations = [];
   if (!isPlainObject(entry)) return { ok: false, fields: ["(非对象)"] };
   for (const k of Object.keys(entry)) {
     if (!LANE_ENTRY_KEYS.has(k)) bad.push(`未知键 ${k}`);
@@ -163,6 +212,9 @@ export function validateTraitEntry(id, entry) {
       for (const d of RATING_DIMENSIONS) {
         const v = validateRatingCell(entry.ratings[d]);
         if (!v.ok) bad.push(`ratings.${d}（${v.field}）`);
+        else if (v.cell.score !== undefined && !SCORED_DIMENSIONS.includes(d)) {
+          bad.push(`ratings.${d}（score 只许出现在 ${SCORED_DIMENSIONS.join("/")} 格）`);
+        }
       }
     }
   }
@@ -203,6 +255,10 @@ export function validateTraitEntry(id, entry) {
   if (entry.effortNote !== undefined && typeof entry.effortNote !== "string") bad.push("effortNote");
   if (entry.concurrencyNote !== undefined && typeof entry.concurrencyNote !== "string") bad.push("concurrencyNote");
   if (bad.length > 0) return { ok: false, fields: bad };
+  // costTier（0097）：不合法只降级该格为 null + 一条观察，车道不消失。
+  const costTierOk = entry.costTier === undefined || validCostTier(entry.costTier);
+  const costTier = costTierOk ? (entry.costTier ?? null) : null;
+  if (!costTierOk) observations.push("costTier 不合法，按未给（null）处理");
   const ratings = {};
   for (const d of RATING_DIMENSIONS) ratings[d] = validateRatingCell(entry.ratings[d]).cell;
   const ra = anyRated
@@ -220,6 +276,7 @@ export function validateTraitEntry(id, entry) {
       ratedAgainst: ra,
       ...(entry.reviewPending !== undefined ? { reviewPending: entry.reviewPending } : {}),
       cost: entry.cost,
+      costTier,
       caveats: [...entry.caveats],
       contextWindow: {
         tokens: cw.tokens,
@@ -230,6 +287,7 @@ export function validateTraitEntry(id, entry) {
       ...(entry.effortNote !== undefined ? { effortNote: entry.effortNote } : {}),
       ...(entry.concurrencyNote !== undefined ? { concurrencyNote: entry.concurrencyNote } : {}),
     },
+    observations,
   };
 }
 
@@ -249,7 +307,9 @@ function validScale(scale) {
  * 与 loadLanesConfig 同纪律；readFileFn 可注入）。三态：ok（单车道形状错误降级
  * 为该车道 invalid + issue + invalidIds）/ unreadable（缺失或 JSON 不可解析）/
  * invalid（可解析但顶层形状坏——schemaVersion/scale/traits）。只读展示面：
- * 任何失败都不抛。ok 时额外携带 scale（五档刻度原文，供视图/投影拼行）。
+ * 任何失败都不抛。ok 时额外携带 scale（五档刻度原文）、costTierScale 与
+ * ownerRules（0097：顶层两键，坏值只降级自身并记观察）；observations 携带
+ * 全部降级观察（costTier/ownerRules/costTierScale 一类，供视图与投影上报）。
  */
 export function readLaneTraits(explicitPath, readFileFn = null) {
   const path = typeof explicitPath === "string"
@@ -260,7 +320,7 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
   try {
     raw = read(path);
   } catch {
-    return { state: "unreadable", path, sha256: null, scale: null, traits: {}, invalidIds: [], issues: [`画像文件不可读：${path}`] };
+    return { state: "unreadable", path, sha256: null, scale: null, costTierScale: null, ownerRules: [], traits: {}, invalidIds: [], issues: [`画像文件不可读：${path}`], observations: [] };
   }
   const text = typeof raw === "string" ? raw : String(raw);
   const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
@@ -270,27 +330,40 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
     // Y 列）"，不携带源文本。
     doc = safeJsonParse(text, "lane-traits.json");
   } catch (e) {
-    return { state: "unreadable", path, sha256, scale: null, traits: {}, invalidIds: [], issues: [e.message] };
+    return { state: "unreadable", path, sha256, scale: null, costTierScale: null, ownerRules: [], traits: {}, invalidIds: [], issues: [e.message], observations: [] };
   }
   if (!isPlainObject(doc) || doc.schemaVersion !== 2 || !validScale(doc.scale)
     || !isPlainObject(doc.traits)) {
     return {
-      state: "invalid", path, sha256, scale: null, traits: {}, invalidIds: [],
+      state: "invalid", path, sha256, scale: null, costTierScale: null, ownerRules: [], traits: {}, invalidIds: [],
       issues: ["画像文件顶层形状错误（应含 schemaVersion 2、五档 scale、traits 对象）"],
+      observations: [],
     };
   }
+  // 0097 顶层两键：坏值只降级自身 + 一条观察，不连累 traits（与 costTier 同纪律）。
+  const observations = [];
+  const costTierScale = isStr(doc.costTierScale, 1, COST_TIER_SCALE_MAX_CHARS) && !hasControlChars(doc.costTierScale)
+    ? doc.costTierScale
+    : null;
+  if (costTierScale === null) observations.push("costTierScale 缺失或不合法，按未给（null）处理");
+  const ownerRulesValid = Array.isArray(doc.ownerRules) && doc.ownerRules.length <= OWNER_RULES_CAP
+    && doc.ownerRules.every((r) => isStr(r, 1, OWNER_RULE_MAX_CHARS) && !hasControlChars(r));
+  const ownerRules = doc.ownerRules === undefined ? [] : (ownerRulesValid ? [...doc.ownerRules] : null);
+  if (doc.ownerRules !== undefined && ownerRules === null) observations.push("ownerRules 不合法，置 null（各车道行照常投影）");
   const traits = {};
   const invalidIds = [];
   const issues = [];
   for (const [id, entry] of Object.entries(doc.traits)) {
     const v = validateTraitEntry(id, entry);
-    if (v.ok) traits[id] = v.entry;
-    else {
+    if (v.ok) {
+      traits[id] = v.entry;
+      for (const obs of v.observations) observations.push(`车道 ${id} 画像：${obs}`);
+    } else {
       invalidIds.push(id);
       issues.push(`车道 ${id} 画像形状错误（${v.fields.join("/")}）`);
     }
   }
-  return { state: "ok", path, sha256, scale: doc.scale, traits, invalidIds, issues };
+  return { state: "ok", path, sha256, scale: doc.scale, costTierScale, ownerRules, traits, invalidIds, issues, observations };
 }
 
 /** 把五档刻度拼成一行（视图表头与 preflight 投影共用）；末尾一句说明未评怎么表示。 */
@@ -346,11 +419,15 @@ function clip(text, max) {
 
 /**
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
- * 每行带暂停说明、上下文窗口与能否看图，见 0089；推断族系见 0090）。行序=lanes.json 声明序；只含车道表里
- * 有画像的车道；不排序、不加推荐字段。所有字符串在应用层截到 MCP schema 上限，
- * 保证投影总能通过校验。
- * @returns {{scale:string, dimensionLabels:Object, rows:object[], omittedLaneIds:string[]}|null}
+ * 每行带暂停说明、上下文窗口与能否看图，见 0089；推断族系见 0090；行带
+ * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097）。行序=
+ * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
+ * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
+ * @returns {{scale:string, dimensionLabels:Object, costTierScale:(string|null),
+ *   ownerRules:(string[]|null), rows:object[], omittedLaneIds:string[],
+ *   notices:string[]}|null}
  *   单车道 invalid 时省略该行并把 id 放进 omittedLaneIds（供调用方写观察）；
+ *   notices 携带降级观察（0097：costTier/ownerRules/costTierScale 一类，有界）；
  *   画像文件不可读/不合法或车道表不可用时返回 null。
  */
 export function projectLaneProfiles({ lanesDoc, traitsResult }) {
@@ -376,11 +453,19 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
         basis: cell.basis,
         n: cell.n ?? null,
         note: cell.note == null ? null : clip(cell.note, PROJECTED_NOTE_MAX_CHARS),
+        ...(cell.score !== undefined ? {
+          score: {
+            hits: cell.score.hits,
+            total: cell.score.total,
+            label: clip(cell.score.label, SCORE_LABEL_MAX_CHARS),
+          },
+        } : {}),
       };
     }
     rows.push({
       id,
       family: laneFamilyLabel(lane),
+      costTier: entry.costTier ?? null,
       ratings,
       ratingsState: rs.state,
       reviewReasons: rs.reasons.slice(0, REVIEW_REASONS_CAP).map((s) => clip(s, REVIEW_REASON_MAX_CHARS)),
@@ -394,10 +479,20 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
   // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
   const tableIds = new Set(laneList.map((l) => l?.id).filter((x) => typeof x === "string"));
   const omittedLaneIds = (traitsResult.invalidIds ?? []).filter((id) => tableIds.has(id));
+  const notices = (traitsResult.observations ?? [])
+    .slice(0, PROJECTION_NOTICES_CAP)
+    .map((s) => clip(s, PROJECTION_NOTICE_MAX_CHARS));
   return {
     scale: clip(scaleLine, SCALE_MAX_CHARS),
     dimensionLabels: { ...DIMENSION_LABELS },
+    costTierScale: traitsResult.costTierScale == null
+      ? null
+      : clip(traitsResult.costTierScale, COST_TIER_SCALE_MAX_CHARS),
+    ownerRules: traitsResult.ownerRules == null
+      ? null
+      : [...traitsResult.ownerRules].map((r) => clip(r, OWNER_RULE_MAX_CHARS)),
     rows,
     omittedLaneIds,
+    notices,
   };
 }

@@ -74,7 +74,7 @@ import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W2 升格修复）：compact 重建输入的绑定作用域——metrics.js 单一
 // 定义处。
 import { boundReportScope } from "../metrics.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { summarizeLiveness, buildWaitWindowHint } from "./runWait.js";
 import { reconstructItemsFromEvents } from "./runCollect.js";
 import { projectCollectResult } from "./runCollectProjection.js";

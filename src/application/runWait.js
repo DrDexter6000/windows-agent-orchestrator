@@ -26,7 +26,7 @@ import { isValidRunId } from "../delivery.js";
 // boundReportScope 单一定义处（runList.js 同款 application → metrics 接线，
 // 无环）——不新写第二套"何时绑定"规则。
 import { boundReportScope } from "../metrics.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 // M12-11: the pure backend-neutral observation/termination projector (SSOT).
 // Re-export READ_FAILURE_REASONS from the projector so the MCP schema for BOTH

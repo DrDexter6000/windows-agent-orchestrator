@@ -32,10 +32,10 @@ const DIMENSIONS = ["research", "code", "review", "design", "longHorizon", "writ
 const BASES = ["measured", "official", "owner"];
 const SOURCE_TOKENS = ["official", "owner", "wire"];
 const LANE_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost",
+  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
 ]);
-const CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence"]);
+const CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence", "score"]);
 
 const isStr = (v, min, max) => typeof v === "string" && v.length >= min && v.length <= max;
 
@@ -48,6 +48,13 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
   }
   const ids = Object.keys(doc.traits ?? {});
   assert.ok(ids.length >= 8, `应覆盖 ≥8 车道（实际 ${ids.length}）`);
+  // 0097：顶层 costTierScale（说明串）与 ownerRules（有序，排在前面的优先）。
+  assert.ok(typeof doc.costTierScale === "string" && doc.costTierScale.length > 0, "costTierScale 非空字符串");
+  assert.ok(Array.isArray(doc.ownerRules) && doc.ownerRules.length >= 1 && doc.ownerRules.length <= 8,
+    "ownerRules 1–8 条有序数组");
+  for (const rule of doc.ownerRules ?? []) {
+    assert.ok(typeof rule === "string" && rule.length > 0 && rule.length <= 120, "每条 Owner 规则 1–120 字");
+  }
   for (const id of ids) {
     assert.ok(laneIds.has(id), `traits 键 ${id} 不是 lanes.json 车道键`);
     const t = doc.traits[id];
@@ -81,13 +88,31 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
       if (cell.basis === "measured") {
         assert.ok(Number.isInteger(cell.n) && cell.n >= 1, `${id}.ratings.${d} measured 须带正整数 n`);
         assert.ok(typeof cell.evidence === "string", `${id}.ratings.${d} measured 须带 evidence`);
+        // 0097：score 只许 measured 格；hits/total 整数、total≥1、0≤hits≤total，
+        // label 1–16 字非空。
+        if ("score" in cell) {
+          const s = cell.score;
+          assert.ok(s && typeof s === "object" && !Array.isArray(s), `${id}.ratings.${d}.score 对象`);
+          assert.deepEqual(Object.keys(s).sort(), ["hits", "label", "total"], `${id}.ratings.${d}.score 恰好三键`);
+          assert.ok(Number.isInteger(s.hits) && Number.isInteger(s.total), `${id}.ratings.${d}.score.hits/total 整数`);
+          assert.ok(s.total >= 1 && s.hits >= 0 && s.hits <= s.total, `${id}.ratings.${d}.score total≥1、0≤hits≤total`);
+          assert.ok(typeof s.label === "string" && s.label.length >= 1 && s.label.length <= 16,
+            `${id}.ratings.${d}.score.label 1–16 字`);
+        }
       } else if (cell.basis === "official") {
         assert.ok(!("n" in cell), `${id}.ratings.${d} official 不许带 n`);
         assert.ok(typeof cell.evidence === "string", `${id}.ratings.${d} official 须带 evidence`);
+        assert.ok(!("score" in cell), `${id}.ratings.${d} score 只许 measured 格`);
       } else {
         assert.ok(!("n" in cell), `${id}.ratings.${d} owner 不许带 n`);
+        assert.ok(!("score" in cell), `${id}.ratings.${d} score 只许 measured 格`);
       }
     }
+    // 0097：costTier 是 Owner 相对档——null 或 0.5–5、步长 0.5。
+    assert.ok(
+      t.costTier === null || (Number.isFinite(t.costTier) && t.costTier > 0 && t.costTier <= 5 && Number.isInteger(t.costTier * 2)),
+      `${id}.costTier null 或 0.5–5 步长 0.5`,
+    );
     // ratedAgainst 与评分状态相容：有已评格必填四键，全未评必须 null。
     if (anyRated) {
       const ra = t.ratedAgainst;
@@ -152,12 +177,14 @@ export function literalOffenders(files) {
 }
 
 /** 导入边扫描（纯函数）：解析相对 import 边，违规引用目标 = 违规。
- *  允许边（0087 §5）：laneProfile ← lanesView/leadPreflight；lanesView ←
+ *  允许边（0087 §5；0097 修订）：laneProfile ← lanesView/leadPreflight/
+ *  laneFactsLine；laneFactsLine ← commands/run.js、mcp/server.js；lanesView ←
  *  commands/lanes.js；lanes ← commands/wao.js；leadPreflight ← mcp/server.js
  *  （聚合器这一跳同守）。 */
 export function importEdgeOffenders(files) {
   const ALLOWED_IMPORTERS = {
-    "src/application/laneProfile.js": new Set(["src/application/lanesView.js", "src/application/leadPreflight.js"]),
+    "src/application/laneProfile.js": new Set(["src/application/lanesView.js", "src/application/leadPreflight.js", "src/application/laneFactsLine.js"]),
+    "src/application/laneFactsLine.js": new Set(["src/commands/run.js", "src/mcp/server.js"]),
     "src/application/lanesView.js": new Set(["src/commands/lanes.js"]),
     "src/commands/lanes.js": new Set(["src/commands/wao.js"]),
     "src/application/leadPreflight.js": new Set(["src/mcp/server.js"]),
@@ -212,15 +239,19 @@ test("0087 隔离钉反例（夹具合成清单——不触 src/）：白名单�
     { path: "src/application/laneProfile.js", content: "const p = 'config/lane-traits.json';" },
     { path: "src/application/lanesView.js", content: "import { readLaneTraits } from './laneProfile.js';" },
     { path: "src/application/leadPreflight.js", content: "import { projectLaneProfiles } from './laneProfile.js';" },
+    { path: "src/application/laneFactsLine.js", content: "import { readLaneTraits } from './laneProfile.js';" },
     { path: "src/commands/lanes.js", content: "import { buildLanesView } from '../application/lanesView.js';" },
     { path: "src/commands/wao.js", content: "import { lanesCommand } from './lanes.js';" },
-    { path: "src/mcp/server.js", content: "import { aggregateLeadPreflight } from '../application/leadPreflight.js';" },
+    { path: "src/mcp/server.js", content: "import { aggregateLeadPreflight } from '../application/leadPreflight.js';\nimport { laneFactsLine } from '../application/laneFactsLine.js';" },
+    { path: "src/commands/run.js", content: "import { laneFactsLine } from '../application/laneFactsLine.js';" },
     // 反例 1：白名单外文件出现画像文件名字面量。
     { path: "src/runManager.js", content: "// reads config/lane-traits.json\nexport const x = 1;" },
     // 反例 2：派发解析面引用画像加载模块（无字面量——字面钉抓不住，导入边钉必须红）。
     { path: "src/dispatchResolution.js", content: "import { readLaneTraits } from './application/laneProfile.js';" },
     // 反例 3：应用服务（非 server）引用 preflight 聚合器——聚合器这一跳同守。
     { path: "src/application/runDispatch.js", content: "import { aggregateLeadPreflight } from './leadPreflight.js';" },
+    // 反例 4（0097）：laneFactsLine 被白名单外的面引用（会审/门禁等）。
+    { path: "src/application/consultService.js", content: "import { laneFactsLine } from './laneFactsLine.js';" },
   ];
   const lit = literalOffenders(fixtures);
   assert.ok(lit.includes("src/runManager.js"), "白名单外字面引用被抓");
@@ -228,5 +259,6 @@ test("0087 隔离钉反例（夹具合成清单——不触 src/）：白名单�
   const edges = importEdgeOffenders(fixtures);
   assert.ok(edges.includes("src/dispatchResolution.js → src/application/laneProfile.js"), "派发路径间接引入被抓");
   assert.ok(edges.includes("src/application/runDispatch.js → src/application/leadPreflight.js"), "聚合器被 server 之外引用被抓");
-  assert.equal(edges.length, 2, "六条合法边（含聚合器←server）零误报");
+  assert.ok(edges.includes("src/application/consultService.js → src/application/laneFactsLine.js"), "laneFactsLine 被白名单外面引用被抓");
+  assert.equal(edges.length, 3, "合法边（含 laneFactsLine 两条新边）零误报");
 });

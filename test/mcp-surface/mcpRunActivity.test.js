@@ -330,9 +330,11 @@ test("MAA-07: terminal run → ordered activity + cursor replay walks the whole 
 });
 
 // =====================================================================
-// #12 Workspace-bound: cross-workspace → fixed error, no leak.
+// #12 Workspace-bound: cross-workspace → ownership-refusal fixed text, no leak.
+// 0097 五′：归属拒绝不再折叠成笼统 "run_activity failed"——Lead 必须分得清
+// "属于另一项目"与一般失败（run_collect 同款纪律）。
 // =====================================================================
-test("MAA-08: cross-workspace → fixed error text, no leak", async () => {
+test("MAA-08: cross-workspace → ownership-refusal fixed text, no leak", async () => {
   const dirA = mkdtempSync(join(tmpdir(), "wao-maa08a-"));
   const dirB = mkdtempSync(join(tmpdir(), "wao-maa08b-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-maa08-rd-"));
@@ -344,8 +346,18 @@ test("MAA-08: cross-workspace → fixed error text, no leak", async () => {
     try {
       const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_xws" } });
       const dumped = JSON.stringify(res);
-      assert.ok(dumped.includes("run_activity failed"), "fixed safe text on cross-workspace");
+      assert.match(dumped, /run_activity refused: this run cannot be shown to belong to the bound workspace/,
+        "归属拒绝专属固定文案（不是笼统 failed）");
+      assert.ok(!dumped.includes("run_activity failed"), "不再折叠成笼统失败文案");
       assert.ok(!res.structuredContent, "no partial structuredContent");
+      // 固定文案不回显路径或 runId（dirA/dirB 都是临时路径，出现即泄漏）：文本里查
+      // 原生反斜杠与正斜杠两种写法，序列化结果里查 JSON 转义写法。
+      const text = res.content.map((c) => c.text ?? "").join("\n");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.replace(/\\/g, "/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+      assert.ok(!dumped.includes("run_xws"), "不回显 runId");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dirA, { recursive: true, force: true }); rmSync(dirB, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });

@@ -36,7 +36,7 @@ import {
   assertEventsBoundToRunId } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 /**
  * Read ONE transcript snapshot and derive the shared read-only activity facts.

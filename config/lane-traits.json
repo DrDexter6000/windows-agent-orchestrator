@@ -1,6 +1,13 @@
 {
   "schemaVersion": 2,
-  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话，遇到相反的实测可以改写；标了（Owner 规则）的是 Owner 定的政策，实测不改它。",
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。caveats 里标了（Owner）的是 Owner 原话，遇到相反的实测可以改写；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
+  "costTierScale": "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数，取非高峰的基础档，高峰倍率看各车道 cost",
+  "ownerRules": [
+    "sol、astra（codex 车道）只做会审，不派实现、测试或调研；astra 只用于疑难杂症",
+    "要真跑一次 deepseek-acp 后端（如验证该后端的改动）用 deepseek-flash；deepseek-pro 暂停期间连最小探测也不派",
+    "实现任务默认 glm-pro：它能完成的都优先交给它，不按任务形态另分车道；GLM 高峰（UTC 01:00–10:00）期间优先 glm-flash",
+    "能省则省，质量和效率优先"
+  ],
   "scale": {
     "1": "不适合",
     "2": "弱，需重点把关",
@@ -51,9 +58,10 @@
         "providerID": null,
         "effort": "high"
       },
+      "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity；价格中高（Owner）",
       "caveats": [
-        "只用做会审（Owner 规则）；会审要查 bug 时优选它（Owner）",
+        "会审要查 bug 时优选它（Owner）",
         "常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
         "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
         "codex 沙箱里找不到 Node 22、跑不了 npm 全局命令：任务书写明 Node 22 绝对路径，dsh 之类核验由 Lead 做",
@@ -111,9 +119,9 @@
         "providerID": null,
         "effort": "medium"
       },
+      "costTier": 5,
       "cost": "codex 订阅额度；价格高昂（Owner）",
       "caveats": [
-        "只在疑难杂症时作会审席（Owner 规则）",
         "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
         "分项评分只用 Owner 手动输入，不跑横评、不按实测改格（Owner 规则）"
       ],
@@ -135,8 +143,9 @@
           "stars": 3,
           "basis": "measured",
           "n": 174,
+          "score": { "hits": 137, "total": 174, "label": "与 Lead 终裁一致" },
           "evidence": "提交 0b06602：台账重建 12 份同题材料（如 run_20261013194459495xmuqx9）",
-          "note": "与 Lead 终裁一致 137/174（deepseek-flash 144）；守格式最好"
+          "note": "同批 deepseek-flash 144；守格式最好"
         },
         "code": {
           "stars": 3,
@@ -176,10 +185,10 @@
         "providerID": null,
         "effort": "max"
       },
+      "costTier": 1,
       "cost": "GLM 订阅，额度按无限对待；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
       "caveats": [
-        "默认实现车道（Owner 规则）：它能完成的实现任务都优先交给它，不按任务形态另分车道",
-        "高峰外再派；成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）",
+        "成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）",
         "隔离派发时会用写文件工具在工作树外（如 %TEMP%）落普查脚本，被判越界、run 当场失败（10-21、10-28）：任务书写明不落文件"
       ],
       "contextWindow": {
@@ -199,22 +208,25 @@
           "stars": 3,
           "basis": "measured",
           "n": 99,
+          "score": { "hits": 68, "total": 99, "label": "与 Lead 终裁一致" },
           "evidence": "同题横评（2026-10-29，台账重建 5 题×1 轮，逐条对照 Lead 终裁）；运行如 run_202610290624000489r3zuf",
-          "note": "与 Lead 终裁一致 68/99（同日 kimi 68、deepseek-flash 70）；引文 4 处不逐字、2 处超长；GLM 高峰时段中位用时 10.0 分钟"
+          "note": "同日 kimi 68、deepseek-flash 70；引文 4 处不逐字、2 处超长；GLM 高峰时段中位用时 10.0 分钟"
         },
         "code": {
           "stars": 3,
           "basis": "measured",
           "n": 2,
+          "score": { "hits": 27, "total": 28, "label": "隐藏测试通过" },
           "evidence": "同题横评（2026-10-29，2 个实现题×1 轮，按隐藏测试判分）；运行如 run_20261029062452688gfvtkz",
-          "note": "隐藏测试 27/28（DEC-05 未过）、全过 1/2，同日 kimi 与 deepseek-flash 各 26/28；高峰用时 30/44 分钟；Owner 原评 2 星（不如 glm-pro）"
+          "note": "DEC-05 未过；全过 1/2，同日 kimi 与 deepseek-flash 各 26/28；高峰用时 30/44 分钟；Owner 原评 2 星（不如 glm-pro）"
         },
         "review": {
           "stars": 1,
           "basis": "measured",
           "n": 5,
+          "score": { "hits": 1, "total": 8, "label": "关键缺陷找到" },
           "evidence": "同题横评（2026-10-29，5 个含真缺陷的会审题×1 轮，按答案键人工判分）；运行如 run_20261029064019971uwopzm",
-          "note": "5 题都该判先修，全答 PASS_WITH_NOTES（含自标中等严重的）；关键缺陷 1/8（含两处半分），同日 kimi 5/8、4/5；中位 22.2 分钟"
+          "note": "5 题都该判先修，全答 PASS_WITH_NOTES（含自标中等严重的）；找到的含两处半分；同日 kimi 5/8、4/5；中位 22.2 分钟"
         },
         "design": {
           "stars": null,
@@ -239,6 +251,7 @@
         "providerID": null,
         "effort": "max"
       },
+      "costTier": 0.5,
       "cost": "GLM 订阅；价格极其低廉（Owner）",
       "caveats": [],
       "contextWindow": {
@@ -258,22 +271,25 @@
           "stars": 3,
           "basis": "measured",
           "n": 99,
+          "score": { "hits": 68, "total": 99, "label": "与 Lead 终裁一致" },
           "evidence": "同题横评（2026-10-29，K3.1 Pro，台账重建 5 题×1 轮，逐条对照 Lead 终裁）；运行如 run_20261029032023925b809zt",
-          "note": "与 Lead 终裁一致 68/99（同轮 deepseek-flash 70/99）；中位用时 3.0 分钟"
+          "note": "同轮 deepseek-flash 70/99；中位用时 3.0 分钟"
         },
         "code": {
           "stars": 3,
           "basis": "measured",
           "n": 2,
+          "score": { "hits": 26, "total": 28, "label": "隐藏测试通过" },
           "evidence": "同题横评（2026-10-29，K3.1 Pro，2 个实现题×1 轮，按隐藏测试判分）；运行如 run_20261029033538314zj2ryq",
-          "note": "隐藏测试 26/28、全过 1/2（同轮 deepseek-flash 26/28、0/2）；用时 20/21 分钟（deepseek-flash 10/10）"
+          "note": "全过 1/2（同轮 deepseek-flash 26/28、0/2）；用时 20/21 分钟（deepseek-flash 10/10）"
         },
         "review": {
           "stars": 3,
           "basis": "measured",
           "n": 5,
+          "score": { "hits": 5, "total": 8, "label": "关键缺陷找到" },
           "evidence": "同题横评（2026-10-29，K3.1 Pro，5 个含真缺陷的会审题×1 轮，按答案键人工判分）；运行如 run_20261029032116699xqj24a",
-          "note": "关键缺陷找到 5/8，判先修 4/5（同轮 deepseek-flash 6/8、5/5）；中位用时 9.2 分钟"
+          "note": "判先修 4/5（同轮 deepseek-flash 6/8、5/5）；中位用时 9.2 分钟"
         },
         "design": {
           "stars": 4,
@@ -301,6 +317,7 @@
         "providerID": null,
         "effort": null
       },
+      "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）；价格高昂（Owner）",
       "caveats": [
         "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败"
@@ -361,6 +378,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "costTier": 3,
       "cost": "Claude 订阅（OAuth 长期 token）；价格高昂（Owner）",
       "caveats": [
         "任务书写明所有命令前台跑完再作答：后台命令未完成时它会结束回合，只留中间话"
@@ -408,6 +426,7 @@
         }
       },
       "ratedAgainst": null,
+      "costTier": null,
       "cost": "DeepSeek API 按量计费",
       "caveats": [],
       "contextWindow": {
@@ -427,22 +446,25 @@
           "stars": 3,
           "basis": "measured",
           "n": 396,
+          "score": { "hits": 277, "total": 396, "label": "与 Lead 终裁一致" },
           "evidence": "同题横评（台账重建 5 题：10-17 三轮、10-29 rc.4 复测一轮，逐条对照 Lead 终裁）；运行如 run_20261017183554062qzyrui",
-          "note": "与 Lead 终裁一致 277/396，10-29 复测 70/99 与前三轮持平（glm-pro 三轮 204/297）；中位用时 2.4 分钟"
+          "note": "10-29 复测 70/99 与前三轮持平（glm-pro 三轮 204/297）；中位用时 2.4 分钟"
         },
         "code": {
           "stars": 3,
           "basis": "measured",
           "n": 8,
+          "score": { "hits": 107, "total": 112, "label": "隐藏测试通过" },
           "evidence": "同题横评（2 个实现题：10-17 三轮、10-29 rc.4 复测一轮，按隐藏测试判分）；运行如 run_20261017185340266yoaf4q",
-          "note": "隐藏测试 107/112、全过 4/8（glm-pro 三轮 79/84、3/6，含两次停滞运行的树）；10-29 复测两题各 10 分钟（kimi 20/21）"
+          "note": "全过 4/8（glm-pro 三轮 79/84、3/6，含两次停滞运行的树）；10-29 复测两题各 10 分钟（kimi 20/21）"
         },
         "review": {
           "stars": 3,
           "basis": "measured",
           "n": 20,
+          "score": { "hits": 24, "total": 32, "label": "关键缺陷找到" },
           "evidence": "同题横评（5 个含真缺陷的会审题：10-17 三轮、10-29 rc.4 复测一轮，按答案键人工判分）；运行如 run_2026101718424367861t4ai",
-          "note": "关键缺陷找到 24/32，判先修 15/20（glm-pro 7/24、0/15）；10-29 复测 6/8、5/5；中位用时 11.0 分钟"
+          "note": "判先修 15/20（glm-pro 7/24、0/15）；10-29 复测 6/8、5/5；中位用时 11.0 分钟"
         },
         "design": {
           "stars": null,
@@ -467,10 +489,11 @@
         "providerID": "deepseek-official",
         "effort": "max"
       },
+      "costTier": 1,
       "cost": "DeepSeek API 按量计费，极便宜：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周一至周五（不含中国法定节假日）北京时间 9:00–12:00、14:00–18:00（UTC 01:00–04:00、06:00–10:00）为高峰，其余时段空闲价（官方定价页）；通道不报 token 用量",
       "caveats": [
         "开始干活后很稳（横评 48 次全部跑完）；启动超时只见于机器很忙或笔记本待机时，不耗 token，重派即可",
-        "不必为省钱刻意避开 DeepSeek 高峰：能省则省，质量和效率优先（Owner 规则）",
+        "不必为省钱刻意避开 DeepSeek 高峰（Owner 规则）",
         "涉及截断与脱敏的改动要专门审：换代前两次犯先截断再脱敏"
       ],
       "contextWindow": {

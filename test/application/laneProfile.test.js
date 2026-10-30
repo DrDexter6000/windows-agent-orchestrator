@@ -19,8 +19,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { validateTraitEntry } from "../../src/application/laneProfile.js";
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
 import {
-  validateTraitEntry,
   readLaneTraits,
   ratingsState,
   projectLaneProfiles,
@@ -419,7 +420,7 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   // 行键闭集与维度中文名。
   assert.deepEqual(
     Object.keys(proj.rows[0]).sort(),
-    ["caveats", "contextWindowTokens", "cost", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
+    ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"],
   );
   assert.deepEqual(Object.keys(proj.dimensionLabels), RATING_DIMENSIONS);
   assert.equal(proj.dimensionLabels.research, DIMENSION_LABELS.research, "中文名来自同一归宿");
@@ -600,7 +601,7 @@ test("MCP lead_preflight：合法投影过整份出参 schema（形状即 LEAD_P
       assert.deepEqual(Object.keys(lanes.dimensionLabels), RATING_DIMENSIONS);
       const row = lanes.rows[0];
       assert.deepEqual(Object.keys(row).sort(),
-        ["caveats", "contextWindowTokens", "cost", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
+        ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons"]);
       assert.deepEqual(Object.keys(row.ratings), ["research"], "只含已评维度（夹具只评了 research）");
       assert.equal(row.ratingsState, "current");
     } finally { await client.close(); await server.close(); }
@@ -628,4 +629,283 @@ test("画像字段上限只在 laneProfile.js 定义一次；改值要有意改�
     { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP },
     { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16 },
   );
+});
+
+// ── 0097：costTier / score / ownerRules / costTierScale ─────────────────────
+
+import {
+  COST_TIER_MAX,
+  COST_TIER_SCALE_MAX_CHARS,
+  OWNER_RULES_CAP,
+  OWNER_RULE_MAX_CHARS,
+  SCORE_LABEL_MAX_CHARS,
+  SCORED_DIMENSIONS,
+  PROJECTION_NOTICES_CAP,
+  validCostTier,
+} from "../../src/application/laneProfile.js";
+
+test("0097 costTier 校验：0.5/1/5/null 合法；0/0.25/5.5/字符串/NaN 只降级该格为 null + 一条观察，车道照常", () => {
+  const withCostTier = (val) => {
+    const e = validEntry({ costTier: val });
+    e.ratings = entryWithRating().ratings;
+    e.ratedAgainst = entryWithRating().ratedAgainst;
+    return e;
+  };
+  for (const okVal of [0.5, 1, 2.5, 5, null]) {
+    const r = validateTraitEntry("x", withCostTier(okVal));
+    assert.equal(r.ok, true, `costTier=${okVal} 车道必须合法`);
+    assert.equal(r.entry.costTier, okVal, `costTier=${okVal} 原样保留`);
+    assert.deepEqual(r.observations, [], `costTier=${okVal} 零观察`);
+  }
+  for (const badVal of [0, 0.25, 5.5, "1", NaN]) {
+    const r = validateTraitEntry("x", withCostTier(badVal));
+    assert.equal(r.ok, true, `costTier=${badVal} 不许让整条车道 invalid`);
+    assert.equal(r.entry.costTier, null, `costTier=${badVal} 该格当 null`);
+    assert.ok(r.traits === undefined && r.entry != null, "车道照常归一");
+    assert.equal(r.observations.length, 1, `costTier=${badVal} 恰一条观察`);
+    assert.match(r.observations[0], /costTier 不合法/);
+  }
+  // 缺省 costTier：null、零观察（旧形状兼容——整节 lanes 不消失）。
+  const plain = validateTraitEntry("x", entryWithRating());
+  assert.equal(plain.entry.costTier, null);
+  assert.deepEqual(plain.observations, []);
+  // validCostTier 纯函数直测。
+  assert.equal(validCostTier(0.5), true);
+  assert.equal(validCostTier(1), true);
+  assert.equal(validCostTier(5), true);
+  assert.equal(validCostTier(null), true);
+  for (const bad of [0, -1, 0.25, 5.5, 6, "1", NaN, undefined]) {
+    assert.equal(validCostTier(bad), false, `validCostTier(${bad})=false`);
+  }
+});
+
+test("0097 score 校验：measured 带合法 score 通过；形状坏/非 measured 格带 score 即整车道 invalid", () => {
+  const good = entryWithRating({ score: { hits: 3, total: 5, label: "与终裁一致" } });
+  const g = validateTraitEntry("x", good);
+  assert.equal(g.ok, true, "合法 score 通过");
+  assert.deepEqual(g.entry.ratings.research.score, { hits: 3, total: 5, label: "与终裁一致" });
+  for (const bad of [
+    { hits: 6, total: 5, label: "x" },       // hits > total
+    { hits: -1, total: 5, label: "x" },      // hits < 0
+    { hits: 1, total: 0, label: "x" },       // total < 1
+    { hits: 1.5, total: 5, label: "x" },     // 非整数
+    { hits: 1, total: 5, label: "" },        // 空标签
+    { hits: 1, total: 5, label: "x".repeat(SCORE_LABEL_MAX_CHARS + 1) }, // 超长
+    { hits: 1, total: 5, label: "a\u0007b" }, // 控制字符
+    { hits: 1, total: 5 },                   // 缺 label
+    { total: 5, label: "x" },                // 缺 hits
+    { hits: 1, total: 5, label: "x", extra: 1 }, // 多键
+  ]) {
+    assert.equal(validateTraitEntry("x", entryWithRating({ score: bad })).ok, false,
+      `score=${JSON.stringify(bad)} 按现有格级纪律：整条车道 invalid`);
+  }
+  // 非 measured 格不许 score：owner 格与未评格。
+  const ownerScored = entryWithRating({ basis: "owner" });
+  ownerScored.ratings.research.score = { hits: 1, total: 2, label: "x" };
+  assert.equal(validateTraitEntry("x", ownerScored).ok, false, "owner 格带 score 即 invalid");
+  const unratedScored = validEntry();
+  unratedScored.ratings.code = { stars: null, basis: null, score: { hits: 1, total: 2, label: "x" } };
+  assert.equal(validateTraitEntry("x", unratedScored).ok, false, "未评格带 score 即 invalid");
+  // 只有 SCORED_DIMENSIONS 的格可带 score（MCP 出参 schema 从同一清单派生）：
+  // 别的维度带 score 在文件校验就让车道 invalid，不会过了校验再让 MCP 层整节失败。
+  assert.deepEqual([...SCORED_DIMENSIONS], ["research", "code", "review"]);
+  const writingScored = entryWithRating();
+  writingScored.ratings.writing = { stars: 3, basis: "measured", n: 2, evidence: "e", score: { hits: 1, total: 2, label: "x" } };
+  const w = validateTraitEntry("x", writingScored);
+  assert.equal(w.ok, false, "writing 格带 score 即整车道 invalid");
+  assert.ok(w.fields.some((f) => f.includes("score 只许出现在 research/code/review 格")), "issue 写明可带 score 的维度");
+  const writingPlain = entryWithRating();
+  writingPlain.ratings.writing = { stars: 3, basis: "measured", n: 2, evidence: "e" };
+  assert.equal(validateTraitEntry("x", writingPlain).ok, true, "同一格不带 score 照常合法");
+});
+
+test("0097 ownerRules/costTierScale 顶层校验：缺省/合法/坏值", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lp-0097-top-"));
+  try {
+    const p = join(dir, "t.json");
+    const write = (over) => writeFileSync(p, JSON.stringify(validDoc({ a: entryWithRating() }, over)), "utf8");
+    // 缺省：ownerRules=[]、costTierScale=null + 一条观察。
+    write({});
+    let r = readLaneTraits(p);
+    assert.equal(r.state, "ok");
+    assert.deepEqual(r.ownerRules, []);
+    assert.equal(r.costTierScale, null);
+    assert.equal(r.observations.length, 1, "缺 costTierScale 记一条观察");
+    assert.match(r.observations[0], /costTierScale 缺失或不合法/);
+    // 合法。
+    write({
+      costTierScale: "成本档：Owner 给的相对档位，0.5–5，数越小越便宜",
+      ownerRules: ["规则一", "规则二"],
+    });
+    r = readLaneTraits(p);
+    assert.deepEqual(r.ownerRules, ["规则一", "规则二"]);
+    assert.equal(r.costTierScale, "成本档：Owner 给的相对档位，0.5–5，数越小越便宜");
+    assert.deepEqual(r.observations, [], "合法时零观察");
+    // 坏 ownerRules（条数超上限/空串/超长/控制字符/非数组）→ null + 一条观察，traits 照常。
+    const badRules = [
+      42,
+      Array.from({ length: OWNER_RULES_CAP + 1 }, (_, i) => `r${i}`),
+      [""],
+      ["x".repeat(OWNER_RULE_MAX_CHARS + 1)],
+      ["a\u0007b"],
+    ];
+    // 带上合法的 costTierScale，观察里就只剩 ownerRules 这一条。
+    const okScale = "成本档：Owner 给的相对档位，0.5–5，数越小越便宜";
+    for (const rules of badRules) {
+      write({ costTierScale: okScale, ownerRules: rules });
+      r = readLaneTraits(p);
+      assert.equal(r.state, "ok", `ownerRules=${JSON.stringify(rules).slice(0, 30)} 不连累文件`);
+      assert.equal(r.ownerRules, null, "坏 ownerRules 置 null");
+      assert.ok(r.traits.a, "车道照常");
+      assert.equal(r.observations.length, 1, "恰一条观察");
+      assert.match(r.observations[0], /ownerRules 不合法/);
+    }
+    // 坏 costTierScale（非字符串/超长/控制字符）→ null + 观察。
+    for (const bad of [42, "", "x".repeat(COST_TIER_SCALE_MAX_CHARS + 1), "a\u0007b"]) {
+      write({ costTierScale: bad });
+      r = readLaneTraits(p);
+      assert.equal(r.costTierScale, null, `costTierScale=${JSON.stringify(bad)} → null`);
+      assert.equal(r.observations.length, 1, "恰一条观察");
+      assert.match(r.observations[0], /costTierScale 缺失或不合法/);
+    }
+    // 车道级 costTier 降级观察进 observations（带车道前缀）。
+    const e = entryWithRating();
+    e.costTier = 0;
+    write({});
+    writeFileSync(p, JSON.stringify(validDoc({ a: e })), "utf8");
+    r = readLaneTraits(p);
+    assert.ok(r.traits.a, "costTier 坏值车道照常存在");
+    assert.equal(r.traits.a.costTier, null);
+    assert.ok(r.observations.some((o) => o.startsWith("车道 a 画像：costTier 不合法")));
+  } finally { cleanupDir(dir); }
+});
+
+test("0097 投影：行带 costTier、格带 score、顶层带 costTierScale/ownerRules、notices 有界", () => {
+  const traits = {
+    la: (() => {
+      const e = entryWithRating({ score: { hits: 3, total: 5, label: "与终裁一致" } });
+      e.costTier = 1;
+      return e;
+    })(),
+  };
+  const proj = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: {
+      state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+      costTierScale: "成本档说明", ownerRules: ["规则一"], traits, invalidIds: [], issues: [],
+      observations: ["车道 la 画像：costTier 不合法，按未给（null）处理"],
+    },
+  });
+  assert.equal(proj.costTierScale, "成本档说明");
+  assert.deepEqual(proj.ownerRules, ["规则一"]);
+  assert.equal(proj.rows[0].costTier, 1);
+  const cell = proj.rows[0].ratings.research;
+  assert.deepEqual(cell.score, { hits: 3, total: 5, label: "与终裁一致" }, "score 进投影");
+  assert.deepEqual(proj.notices, ["车道 la 画像：costTier 不合法，按未给（null）处理"]);
+  // 无 score 的格不携带 score 键；costTier 未给为 null；顶层缺省为 null/[]。
+  const projBare = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: {
+      state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+      costTierScale: null, ownerRules: null, traits: { la: entryWithRating() }, invalidIds: [], issues: [],
+      observations: [],
+    },
+  });
+  assert.equal(!("score" in projBare.rows[0].ratings.research), true, "无 score 不带键");
+  assert.equal(projBare.rows[0].costTier, null);
+  assert.equal(projBare.costTierScale, null);
+  assert.equal(projBare.ownerRules, null);
+  assert.deepEqual(projBare.notices, []);
+  // notices 上限。
+  const many = Array.from({ length: PROJECTION_NOTICES_CAP + 3 }, (_, i) => `观察${i}`);
+  const projMany = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: {
+      state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+      costTierScale: null, ownerRules: [], traits: { la: entryWithRating() }, invalidIds: [], issues: [],
+      observations: many,
+    },
+  });
+  assert.equal(projMany.notices.length, PROJECTION_NOTICES_CAP);
+});
+
+test("0097 preflight 聚合器：lanes 带 costTierScale/ownerRules；notices 各记一条观察", async () => {
+  const projection = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: {
+      state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+      costTierScale: "成本档说明", ownerRules: ["规则一"],
+      traits: { la: entryWithRating() }, invalidIds: [], issues: [],
+      observations: ["车道 la 画像：costTier 不合法，按未给（null）处理"],
+    },
+  });
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: binding,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: noWorkers,
+    listRunsFn: noRuns,
+    workerContextFn: () => null,
+    laneProfilesFn: async () => projection,
+  });
+  assert.equal(result.lanes.costTierScale, "成本档说明");
+  assert.deepEqual(result.lanes.ownerRules, ["规则一"]);
+  assert.equal(result.lanes.rows[0].costTier, null);
+  assert.ok(result.observations.some((o) => o.includes("lane profiles: 车道 la 画像：costTier 不合法")));
+  assert.equal(result.complete, true, "观察不改 complete");
+});
+
+// ── 0097 真实数据：config/lane-traits.json 本身 ─────────────────────────────
+
+test("0097 真实数据：校验与投影零 issue 零观察；Owner 四条规则与八档成本档在场", () => {
+  const r = readLaneTraits();
+  assert.equal(r.state, "ok", "真实画像文件必须可读且顶层合法");
+  assert.deepEqual(r.issues, [], "零 issue");
+  assert.deepEqual(r.observations, [], "零降级观察");
+  assert.ok(Array.isArray(r.ownerRules) && r.ownerRules.length === 4, "Owner 规则四条");
+  assert.equal(typeof r.costTierScale, "string", "成本档说明在场");
+  const expectedTiers = {
+    sol: 4, astra: 5, "glm-pro": 1, "glm-flash": 0.5, kimi: 4, opus: 3,
+    "deepseek-pro": null, "deepseek-flash": 1,
+  };
+  for (const [id, tier] of Object.entries(expectedTiers)) {
+    assert.ok(r.traits[id], `${id} 在画像里`);
+    assert.equal(r.traits[id].costTier, tier, `${id}.costTier=${tier}`);
+  }
+  const proj = projectLaneProfiles({ lanesDoc: loadLanesConfig(), traitsResult: r });
+  assert.ok(proj != null, "真实投影非 null");
+  assert.deepEqual(proj.notices, [], "真实投影零 notices");
+  assert.equal(proj.ownerRules.length, 4);
+});
+
+test("0097 真实数据：进了 score 的那组数字不再出现在同格 note（每格一条断言）", () => {
+  const r = readLaneTraits();
+  assert.equal(r.state, "ok");
+  const proj = projectLaneProfiles({ lanesDoc: loadLanesConfig(), traitsResult: r });
+  const cases = [
+    ["glm-pro", "research", "137/174"],
+    ["glm-flash", "research", "68/99"],
+    ["glm-flash", "code", "27/28"],
+    ["glm-flash", "review", "1/8"],
+    ["kimi", "research", "68/99"],
+    // kimi.code：本格数字 26/28 与同轮 deepseek-flash 恰好同分，note 里保留的
+    // 是对照事实（"同轮 deepseek-flash 26/28"）——自报位置（"隐藏测试 26/28"）
+    // 已删。此格断言自报短语，其余各格断言数字本身。
+    ["kimi", "code", "隐藏测试 26/28"],
+    ["kimi", "review", "5/8"],
+    ["deepseek-flash", "research", "277/396"],
+    ["deepseek-flash", "code", "107/112"],
+    ["deepseek-flash", "review", "24/32"],
+  ];
+  for (const [laneId, dim, num] of cases) {
+    const row = proj.rows.find((x) => x.id === laneId);
+    assert.ok(row, `${laneId} 行在场`);
+    const cell = row.ratings[dim];
+    assert.ok(cell?.score, `${laneId}.${dim} 带 score`);
+    if (/^\d+\/\d+$/.test(num)) {
+      assert.equal(`${cell.score.hits}/${cell.score.total}`, num,
+        `${laneId}.${dim} score 数字与台账一致`);
+    }
+    assert.equal((cell.note ?? "").includes(num), false,
+      `${laneId}.${dim} note 不再重复 ${num}（数字只留在 score）`);
+  }
 });

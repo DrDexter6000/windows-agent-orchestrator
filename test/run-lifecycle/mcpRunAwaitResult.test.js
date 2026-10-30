@@ -372,7 +372,14 @@ test("MAR-11: cross-workspace → fixed error (workspace-bound)", async () => {
     try {
       const res = await client.callTool({ name: "run_await_result", arguments: { runId: "run_xws", waitMs: 0 } });
       const dumped = JSON.stringify(res);
-      assert.ok(dumped.includes("run_await_result failed"), "fixed safe text on cross-workspace");
+      assert.match(dumped, /run_await_result refused: this run cannot be shown to belong to the bound workspace/, "归属拒绝专属固定文案（0097 五′）");
+      assert.ok(!dumped.includes("run_xws"), "不回显 runId");
+      // 文本里查原生反斜杠与正斜杠两种写法，序列化结果里查 JSON 转义写法。
+      const text = res.content.map((c) => c.text ?? "").join("\n");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.replace(/\\/g, "/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dirA); rmrfRetry(dirB); rmrfRetry(runDir); }
 });

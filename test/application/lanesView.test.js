@@ -180,6 +180,8 @@ test("buildLanesView：画像三态 + v2 行形状（ratingsState/reviewReasons/
   assert.equal(buildLanesView(pendingInput).lanes[0].ratingsState, "review");
 
   assert.equal(view.lanes[2].traitsState, "invalid", "形状错误=invalid");
+  assert.ok(view.issues.includes("车道 l3 画像形状错误（cost）"),
+    "形状错误的原因进尾部 issues（行面写的是\"见尾部 issues\"）");
   assert.ok(view.issues.some((s) => s.includes("画像孤儿键：ghost")), "孤儿画像键上报");
   assert.ok(view.issues.some((s) => s.includes("registry 额外键")), "registry 额外键上报");
 
@@ -190,8 +192,9 @@ test("buildLanesView：画像三态 + v2 行形状（ratingsState/reviewReasons/
   assert.deepEqual(view.dimensionLabels, DIMENSION_LABELS, "维度名从 laneProfile 的唯一归宿投影");
   assert.ok(typeof view.sourceNotes.profile === "string" && view.sourceNotes.profile.length > 0, "画像来源说明在场");
 
-  const unreadableView = buildLanesView({ ...baseInputs(), traitsResult: { state: "unreadable", path: "t.json", sha256: null, scale: null, traits: {}, invalidIds: [], issues: [] } });
+  const unreadableView = buildLanesView({ ...baseInputs(), traitsResult: { state: "unreadable", path: "t.json", sha256: null, scale: null, traits: {}, invalidIds: [], issues: ["画像文件不可读：t.json"] } });
   assert.equal(unreadableView.lanes[0].traitsState, "unreadable", "整文件不可读传染所有车道");
+  assert.ok(unreadableView.issues.includes("画像文件不可读：t.json"), "整文件不可读的原因也进 issues");
   assert.equal(unreadableView.traitsScale, null, "不可读时无刻度行");
 });
 

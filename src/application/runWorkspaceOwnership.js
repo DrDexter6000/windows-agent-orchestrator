@@ -279,6 +279,25 @@ export function verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, req
 }
 
 /**
+ * 0097 五′：读侧归属核验——同一判定（verify），但给运行归属比较抛出的 Error 标
+ * code="workspace_not_authorized"，让 MCP 边界按 TYPE（e.code）把"运行属于
+ * 另一个项目"折叠成归属拒绝专属文案，而不是笼统失败。绑定根本身证明失败
+ * （目录不在、Git 证明失败）在打标区之外抛出、不标 code——那不是"运行属于
+ * 另一个项目"，照旧走笼统失败。消息原文保留（CLI 面照旧读到具体原因）；供
+ * 只读观察工具（run_activity / run_wait / run_await_result / run_delivery
+ * 等待路径）使用——写面用 assert 同款语义。
+ */
+export function verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, requestedRunId) {
+  const verify = createRunWorkspaceVerifier(authorizedWorkspaceRoot);
+  try {
+    return verify(events, requestedRunId);
+  } catch (e) {
+    if (e && typeof e === "object") e.code = "workspace_not_authorized";
+    throw e;
+  }
+}
+
+/**
  * Fail-closed ownership gate for the MCP write surfaces that must name WHY
  * they refused (run_collect / run_delivery_decide). Same verifier and same
  * refusals as verifyRunWorkspaceOwnership; the only difference is the closed

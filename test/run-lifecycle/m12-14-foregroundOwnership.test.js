@@ -50,6 +50,7 @@ import { packageDelivery } from "../../src/delivery.js";
 import {
   findRunWorkspaceOwnership,
   verifyRunWorkspaceOwnership,
+  verifyRunWorkspaceOwnershipTyped,
   createRunWorkspaceVerifier,
 } from "../../src/application/runWorkspaceOwnership.js";
 
@@ -187,6 +188,59 @@ test("M12-14-FG-OWN-01: valid foreground run (started.cwd only) is authorized", 
     assert.equal(result.authorized, true);
     assert.equal(result.ownershipCwd, dir);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── 0097 五′：typed 读侧核验只给运行归属比较的拒绝打标 ─────────────────────
+
+test("0097 verifyRunWorkspaceOwnershipTyped: a run of another project is typed; an unprovable bound root is not", () => {
+  const dirA = mkdtempSync(join(tmpdir(), "wao-fgown-typed-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "wao-fgown-typed-b-"));
+  try {
+    makeGitRepo(dirA);
+    makeGitRepo(dirB);
+    const runId = "run_fgown_typed";
+    // Same verdict as the untyped verifier when ownership matches.
+    assert.equal(verifyRunWorkspaceOwnershipTyped([simpleEvent("run.started", runId, { cwd: dirA })], dirA, runId).authorized, true);
+    // The run belongs to another project: typed, original message kept.
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([simpleEvent("run.started", runId, { cwd: dirB })], dirA, runId),
+      (e) => e.code === "workspace_not_authorized" && /workspace mismatch/.test(e.message),
+    );
+    // No ownership fact at all (legacy transcript): still a refusal about the run.
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([simpleEvent("session.created", runId)], dirA, runId),
+      (e) => e.code === "workspace_not_authorized" && /missing ownership/.test(e.message),
+    );
+    // A relative run cwd (old transcripts wrote ".") proves nothing under any root:
+    // a refusal about the run, which the fixed text lists among its causes.
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([simpleEvent("run.started", runId, { cwd: "." })], dirA, runId),
+      (e) => e.code === "workspace_not_authorized" && /unprovable ownership workspace/.test(e.message),
+    );
+    // Duplicated and incomplete ownership facts are refusals about the run as well.
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([
+        simpleEvent("run.background_submitted", runId, { cwd: dirA }),
+        simpleEvent("run.background_submitted", runId, { cwd: dirA }),
+      ], dirA, runId),
+      (e) => e.code === "workspace_not_authorized" && /ambiguous ownership/.test(e.message),
+    );
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([simpleEvent("run.background_submitted", runId, { cwd: "" })], dirA, runId),
+      (e) => e.code === "workspace_not_authorized" && /malformed ownership/.test(e.message),
+    );
+    // The bound root itself no longer proves: not "this run belongs to another
+    // project", so the error stays untyped (the MCP read tools answer with
+    // their generic failure text).
+    const goneRoot = join(dirA, "no-such-root");
+    assert.throws(
+      () => verifyRunWorkspaceOwnershipTyped([simpleEvent("run.started", runId, { cwd: dirA })], goneRoot, runId),
+      (e) => e.code !== "workspace_not_authorized",
+    );
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
 });
 
 // ── FG-OWN-02/03: delivery review uses the same ownership SSOT ───────────────

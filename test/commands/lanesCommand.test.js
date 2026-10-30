@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lanesCommand } from "../../src/commands/lanes.js";
+import { displayWidth } from "../../src/application/onboarding.js";
 
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -115,6 +116,179 @@ test("wao lanes：防跨绑——单独非默认 --registry 拒绝；未知选�
       /unknown option/,
       "未知选项 fail-fast",
     );
+  } finally { cleanupDir(dir); }
+});
+
+// ── 0097 §5：开头对照表 + 成本档/Owner 规则段（夹具画像经 config.readLaneTraitsFn
+//    注入——不读真实画像，改数据不红这里）──────────────────────────────────
+
+const SCALE = { "5": "最强", "4": "强", "3": "堪用", "2": "弱", "1": "不适合" };
+const unrated = () => ({ stars: null, basis: null });
+const baseEntry = (over = {}) => ({
+  ratings: {
+    research: unrated(), code: unrated(), review: unrated(), design: unrated(),
+    longHorizon: unrated(), writing: unrated(), visual: unrated(),
+  },
+  ratedAgainst: null,
+  cost: "按量计费",
+  costTier: null,
+  caveats: [],
+  contextWindow: { tokens: 1000000, source: "official（测试）" },
+  multimodal: { image: true, video: false, source: "official" },
+  ...over,
+});
+
+/** 夹具车道表：声明序 t1(实测三格带 score)、t2(全未评)、t3(带 dispatchHold)、
+ *  t4(无画像)、t5(写了 reviewPending)。t1 与 registry 四轴一致（current）；
+ *  t2 全未评（unrated→未评，不是待复核）；t5 待复核（review）。 */
+function makeTableEnv() {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-tbl-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+    schema: 2,
+    lanes: [
+      { id: "t1", backend: "zcode", model: { id: "p1/m1" }, reasoning: { effort: "max" }, aliases: {} },
+      { id: "t2", backend: "zcode", model: { id: "p1/m2" }, reasoning: { effort: "max" }, aliases: {} },
+      { id: "t3", backend: "codex", model: { id: "m3" }, reasoning: { effort: "high" }, aliases: {}, dispatchHold: "夹具：暂停" },
+      { id: "t4", backend: "codex", model: { id: "m4" }, reasoning: { effort: "high" }, aliases: {} },
+      { id: "t5", backend: "codex", model: { id: "m5" }, reasoning: { effort: "high" }, aliases: {} },
+    ],
+  }), "utf8");
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    agents: {
+      t1: { backend: "zcode", model: { id: "p1/m1" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir },
+      t2: { backend: "zcode", model: { id: "p1/m2" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir },
+      t3: { backend: "codex", model: { id: "m3" }, reasoning: { effort: "high" }, cwd: dir },
+      t4: { backend: "codex", model: { id: "m4" }, reasoning: { effort: "high" }, cwd: dir },
+      t5: { backend: "codex", model: { id: "m5" }, reasoning: { effort: "high" }, cwd: dir },
+    },
+  }), "utf8");
+  const traitsResult = {
+    state: "ok", path: join(dir, "traits.json"), sha256: "b".repeat(64), scale: SCALE,
+    costTierScale: "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数",
+    ownerRules: ["规则一（先）", "规则二（后）"],
+    observations: [],
+    traits: {
+      t1: baseEntry({
+        costTier: 0.5,
+        ratings: {
+          research: { stars: 3, basis: "measured", n: 99, evidence: "e", score: { hits: 68, total: 99, label: "与终裁一致" } },
+          code: { stars: 3, basis: "measured", n: 2, evidence: "e", score: { hits: 27, total: 28, label: "隐藏测试通过" } },
+          review: { stars: 3, basis: "measured", n: 19, evidence: "e" }, // 实测无分数
+          design: { stars: 4, basis: "owner", note: "advisor" },
+          longHorizon: unrated(), writing: unrated(), visual: unrated(),
+        },
+        ratedAgainst: { backend: "zcode", modelId: "p1/m1", providerID: null, effort: "max" },
+      }),
+      t2: baseEntry({}),
+      t3: baseEntry({
+        costTier: 4,
+        ratings: {
+          code: { stars: 5, basis: "owner", note: "后端强" },
+          research: unrated(), review: unrated(), design: unrated(),
+          longHorizon: unrated(), writing: unrated(), visual: unrated(),
+        },
+        ratedAgainst: { backend: "codex", modelId: "m3", providerID: null, effort: "high" },
+      }),
+      t5: baseEntry({ reviewPending: "夹具：换代待复核" }),
+    },
+    invalidIds: [], issues: [],
+  };
+  return { dir, traitsResult };
+}
+
+async function runLanesCapture(dir, traitsResult, args = []) {
+  const chunks = [];
+  const origLog = console.log;
+  console.log = (...a) => { chunks.push(a.join(" ")); };
+  try {
+    await lanesCommand(
+      ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs"), ...args],
+      { registry: "config/agents.json", runDir: join(dir, "runs"), readLaneTraitsFn: () => traitsResult },
+    );
+  } finally { console.log = origLog; }
+  // 人读面是单次 console.log(join("\n"))——按换行拆回逐行。
+  return chunks.join("\n").split("\n");
+}
+
+test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停/待复核/未评/无画像、宽度 ≤120", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    const lines = await runLanesCapture(dir, traitsResult);
+    const text = lines.join("\n");
+    // 表在细节之前：第一条含 lane 细节的行（"lane t1 —"）晚于表头行。
+    const headerIdx = lines.findIndex((l) => l.includes("车道对照表"));
+    assert.ok(headerIdx > 0, "对照表在场");
+    assert.ok(headerIdx < lines.findIndex((l) => /^lane t1 — /.test(l)), "对照表在细节之前");
+    assert.ok(lines[headerIdx].includes("只列三个实测维度"), "表头注明只列三个实测维度");
+    // 表头七列。
+    assert.match(lines[headerIdx + 1], /车道\s+族系\s+写代码\s+把关\s+调研\s+成本档\s+状态/);
+    // 声明序：t1 行在 t2 行之前，以此类推。
+    const rowIdx = (id) => lines.findIndex((l) => new RegExp(`^\\s*${id}\\s`).test(l));
+    assert.ok(rowIdx("t1") < rowIdx("t2") && rowIdx("t2") < rowIdx("t3") && rowIdx("t3") < rowIdx("t4"),
+      "表行序=声明序");
+    // 四种格写法：实测有分数（3★ 96% n=2；27/28=96%）、实测无分数（3★ n=19）、
+    // Owner 评（5★ 主观）、未评（—）。
+    const t1Row = lines[rowIdx("t1")];
+    assert.match(t1Row, /3★ 96% n=2/, "实测有分数：写代码 27/28 → 96%");
+    assert.match(t1Row, /3★ 69% n=99/, "调研 68/99 → 69%");
+    assert.match(t1Row, /3★ n=19/, "实测无分数只带 n");
+    const t3Row = lines[rowIdx("t3")];
+    assert.match(t3Row, /5★ 主观/, "Owner 评写主观");
+    assert.match(t3Row, /—/, "未评格写 —");
+    // 成本档列。
+    assert.match(t1Row, /0\.5/, "t1 成本档 0.5");
+    assert.match(t3Row, / 4\s/, "t3 成本档 4");
+    // 状态列：t3 暂停（dispatchHold）、t2 未评（unrated 不写成待复核）、t4 无画像、
+    // t5 待复核（reviewPending）、t1 空。
+    assert.match(t3Row, /暂停/, "dispatchHold → 暂停");
+    assert.match(lines[rowIdx("t2")], /未评$/, "ratingsState unrated → 未评");
+    assert.ok(!lines[rowIdx("t2")].includes("待复核"), "没评过不写成待复核");
+    assert.match(lines[rowIdx("t4")], /无画像$/, "画像文件无该车道键 → 无画像");
+    assert.match(lines[rowIdx("t5")], /待复核$/, "ratingsState review → 待复核");
+    for (const word of ["暂停", "待复核", "未评", "无画像"]) {
+      assert.ok(!lines[rowIdx("t1")].includes(word), `current 且无暂停 → 状态空（不含 ${word}）`);
+    }
+    // 表尾图例：百分比的分母不一定是 n。
+    const legendIdx = rowIdx("t5") + 1;
+    assert.match(lines[legendIdx], /^\s+格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）/, "表尾图例");
+    // 宽度：对照表块内每行（含图例）≤120 显示列（中文字符按 2 列计）。
+    for (let i = headerIdx; i <= legendIdx; i++) {
+      assert.ok(displayWidth(lines[i]) <= 120, `对照表行宽 ≤120（超宽行：${lines[i].slice(0, 30)}…）`);
+    }
+    // 成本档说明与 Owner 规则段在表后、细节前；说明串自带"成本档："前缀，不再加第二个标签。
+    assert.ok(text.includes("成本档：Owner 给的相对档位"), "costTierScale 说明串在场");
+    assert.ok(!text.includes("成本档: 成本档："), "不重复标签");
+    const rulesIdx = lines.findIndex((l) => l.includes("Owner 规则（排在前面的优先）"));
+    assert.ok(rulesIdx > headerIdx, "Owner 规则段在表后");
+    assert.ok(lines.some((l) => l.includes("- 规则一（先）")), "规则按序列出");
+    assert.ok(lines.some((l) => l.includes("- 规则二（后）")), "第二条规则");
+    // 细节里的评分格显示 score（68/99 与 label）。
+    assert.ok(text.includes("调研整理: 3 星（measured，n=99，68/99 与终裁一致）"), "细节格带 score");
+  } finally { cleanupDir(dir); }
+});
+
+test("0097 wao lanes --json：带 costTierScale/ownerRules/costTier/score，不另造表格字符串", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    let payload = null;
+    const origLog = console.log;
+    console.log = (s) => { payload = JSON.parse(s); };
+    try {
+      await lanesCommand(
+        ["--json", "--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: "config/agents.json", runDir: join(dir, "runs"), readLaneTraitsFn: () => traitsResult },
+      );
+    } finally { console.log = origLog; }
+    assert.equal(payload.costTierScale, traitsResult.costTierScale);
+    assert.deepEqual(payload.ownerRules, ["规则一（先）", "规则二（后）"]);
+    const t1 = payload.lanes.find((r) => r.id === "t1");
+    assert.equal(t1.traits.costTier, 0.5);
+    assert.deepEqual(t1.traits.ratings.code.score, { hits: 27, total: 28, label: "隐藏测试通过" });
+    assert.ok(!("score" in t1.traits.ratings.review), "无 score 的格不带键");
+    assert.equal(payload.lanes.find((r) => r.id === "t4").traitsState, "absent");
+    // 不另造表格字符串：--json 不含对照表的渲染行。
+    assert.ok(!JSON.stringify(payload).includes("车道对照表"), "--json 不带表格字符串");
   } finally { cleanupDir(dir); }
 });
 

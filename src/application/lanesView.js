@@ -18,7 +18,7 @@
 //     （整文件不可读）——不用默认值冒充观察事实（sol P1-4）。
 //   - 本模块纯函数：所有 IO（读文件/探测/registry）由调用方注入；零 env 读取。
 //     画像加载器经 laneProfile.js 取得并 re-export（命令层单入口——laneProfile
-//     只准被本模块与 leadPreflight 引用，隔离守卫钉住）。
+//     只准被本模块、leadPreflight 与 laneFactsLine 引用，隔离守卫钉住）。
 
 // axesEqual/laneAxes/agentAxes（explicit 派发 G4 同一判定，0064 起导出）。
 // validDispatchHold（TD-283）：dispatchHold 的形状校验与车道表同一纪律。
@@ -156,12 +156,18 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     });
   }
 
+  // 画像加载器的 issue（某车道形状错误及其字段、整文件不可读或顶层形状错误）
+  // 原样上报——行面写"见尾部 issues"，原因就得在尾部。
+  for (const i of (traitsResult.issues ?? [])) pushIssue(i);
   // 交叉报告（不静默丢弃）：孤儿画像键（traits 有、lanes 无）与 registry 额外键
   // （registry 有、lanes 无——非车道，不进行面）。
   if (traitsResult.state === "ok") {
     for (const key of Object.keys(traitsResult.traits)) {
       if (!laneIds.has(key)) pushIssue(`画像孤儿键：${key}（不在 lanes.json 车道表）`);
     }
+    // 0097：降级观察（costTier/ownerRules/costTierScale 一类）如实上报——降级
+    // 不吞掉，也不连累行面。
+    for (const obs of (traitsResult.observations ?? [])) pushIssue(`画像观察：${obs}`);
   }
   for (const key of Object.keys(registryAgents ?? {})) {
     if (!laneIds.has(key)) pushIssue(`registry 额外键：${key}（不在 lanes.json 车道表，不进行面）`);
@@ -185,6 +191,9 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     // 0087：表头刻度行（一次）与七个维度的中文名（视图层从 laneProfile 取，
     // 中文名只有一个归宿）。
     traitsScale: traitsResult?.state === "ok" ? buildScaleLine(traitsResult.scale) : null,
+    // 0097：顶层两键原样投影（文件不可读/不合法时 null/[]——不造默认值冒充）。
+    costTierScale: traitsResult?.state === "ok" ? traitsResult.costTierScale ?? null : null,
+    ownerRules: traitsResult?.state === "ok" ? traitsResult.ownerRules ?? null : null,
     dimensionLabels: { ...DIMENSION_LABELS },
     // 头部事实来源（人读面与 --json 同源；渲染层只投影不加工）
     sourceNotes: {

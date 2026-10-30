@@ -436,7 +436,12 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 91730;
+const FROZEN_23_WIRE_CEILING = 92639;
+// 0097（2026-10-30，Owner 批准的批次）：选车道的关键事实送到 Lead 面前——
+// lead_preflight 出参 lanes 增 costTierScale/ownerRules 顶层键、每行增 costTier、
+// research/code/review 三格增可选 score；run_dispatch 出参增可选 laneFacts：
+// 91730→92639（实测；Owner 硬顶 94532 内）。描述与 hostVisible 冻结线未动
+//（描述与 inputSchema 零改动）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 回执增可选 nextStep（string
 // ≤480）与描述一句"有未终态席位时带 nextStep"：91612→91730（实测；Owner 硬顶
 // 94532 内）。
@@ -646,8 +651,14 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate——SHA 如实翻新。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 出参增可选 nextStep——outputSchema
 // 在 stripped 载荷内，SHA 如实翻新（决定 0096，工具面重冻）。
+// 0097（2026-10-30，Owner 批准的批次）：lanes 投影增 costTierScale/ownerRules/
+// costTier 与三格可选 score、run_dispatch 增可选 laneFacts——outputSchema 在
+// stripped 载荷内，SHA 如实翻新（决定 0097，工具面重冻；描述与 inputSchema
+// 零改动，desc/hostVisible 冻结线未动）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "38e9f93b791e5c9cc21fb3289584f55b109a6c688eaa019cd2d467b8527413a3";
+  "73e46657303d73dea7750a8575ea58bf367671190183254742837c241bc14844";
+// （历史值：38e9f93b791e5c9cc21fb3289584f55b109a6c688eaa019cd2d467b8527413a3
+// 为 0096 run_consult nextStep 后的冻结值。）
 // 0095（2026-10-29）：run_wait/run_delivery/run_dispatch/run_continue 出参增
 // 可选 nextStep（string≤480，取自 LEAD_ADVISORY_WIRE_MAX_LEN）、run_wait 输入
 // waitMs 的 min/default 变化（30000/45000）——schema 在 stripped 载荷内，SHA

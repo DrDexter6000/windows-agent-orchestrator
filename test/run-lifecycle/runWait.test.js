@@ -959,3 +959,38 @@ test("KEEPALIVE-02 (P1-A): no progressToken → no notifications (standard opt-i
       "server must NOT emit progress notifications when the client did not request them");
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
+
+// 0097 五′：归属拒绝专属固定文案——run_wait 对属于另一项目的运行返回
+// "run_wait refused: this run cannot be shown to belong to the bound workspace…"，
+// 不再折叠成笼统 "run_wait failed"（run_collect 同款纪律；固定文案不回显
+// 路径或 runId）。
+test("MCP-WAIT-0097: cross-workspace → ownership-refusal fixed text, no leak", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "wao-wait97a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "wao-wait97b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-wait97-rd-"));
+  try {
+    makeGitRepo(dirA); makeGitRepo(dirB);
+    mkdirSync(runDir, { recursive: true });
+    await seedRunningRun(runDir, "run_xws_wait", dirA);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_xws_wait", waitMs: 30000 } });
+      const dumped = JSON.stringify(res);
+      assert.match(dumped, /run_wait refused: this run cannot be shown to belong to the bound workspace/,
+        "归属拒绝专属固定文案");
+      assert.ok(!dumped.includes("run_wait failed"), "不再折叠成笼统失败文案");
+      assert.ok(!dumped.includes("run_xws_wait"), "不回显 runId");
+      // 文本里查原生反斜杠与正斜杠两种写法，序列化结果里查 JSON 转义写法。
+      const text = res.content.map((c) => c.text ?? "").join("\n");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.replace(/\\/g, "/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});

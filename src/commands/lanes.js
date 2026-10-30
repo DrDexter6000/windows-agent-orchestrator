@@ -47,6 +47,70 @@ function parseOptions(args) {
 
 const axesLabel = (a) => `${a.backend ?? "?"}/${a.modelId ?? "?"}/${a.providerID ?? "-"}/${a.effort ?? "null"}`;
 
+// ── 0097 §5：开头对照表（声明序，不排序）────────────────────────────────────
+// 只列三个实测维度（research/code/review）；格写法：实测有分数 `3★ 96% n=8`、
+// 实测无分数 `3★ n=19`、Owner 评 `4★ 主观`、未评/无画像 `—`。状态列：暂停
+// （dispatchHold）优先，其次画像缺失或无效，再按 ratingsState 写待复核/未评/
+// 无法判定，current 为空。事实陈列，不排序不推荐——对照只是并排，判断归 Lead。
+
+/** 单格写法（输入视图行里已归一的画像格；无画像给 null → "—"）。 */
+function summaryCell(cell) {
+  if (cell == null || cell.stars == null) return "—";
+  if (cell.basis === "measured") {
+    const pct = cell.score ? ` ${Math.round((cell.score.hits / cell.score.total) * 100)}%` : "";
+    return `${cell.stars}★${pct} n=${cell.n ?? "?"}`;
+  }
+  if (cell.basis === "owner") return `${cell.stars}★ 主观`;
+  return `${cell.stars}★ official`;
+}
+
+/** 状态列的一词事实：画像状态（traitsState 不是 present）与评分状态
+ *  （ratingsState）各一张闭集表；"没评过"不写成"待复核"。 */
+const SUMMARY_TRAITS_STATUS = { absent: "无画像", invalid: "画像无效", unreadable: "画像不可读" };
+const SUMMARY_RATINGS_STATUS = { review: "待复核", unrated: "未评", unknown: "无法判定" };
+
+/** 状态列：暂停（dispatchHold）优先，其次画像状态，再次评分状态。 */
+function summaryStatus(row) {
+  if (row.dispatchHold) return "暂停";
+  if (row.traitsState !== "present") return SUMMARY_TRAITS_STATUS[row.traitsState] ?? "";
+  return SUMMARY_RATINGS_STATUS[row.ratingsState] ?? "";
+}
+
+/** 显示宽感知的右补空格（中文字符占 2 列，用 displayWidth 对齐）。 */
+function padDisplayEnd(text, width) {
+  const w = displayWidth(text);
+  return w >= width ? text : text + " ".repeat(width - w);
+}
+
+/** 对照表（含表头）：每行 = 车道 | 族系 | 写代码 | 把关 | 调研 | 成本档 | 状态。 */
+function renderSummaryTable(rows) {
+  const header = ["车道", "族系", "写代码", "把关", "调研", "成本档", "状态"];
+  const table = rows.map((row) => {
+    const t = row.traits;
+    return [
+      row.id,
+      row.family ?? "—",
+      summaryCell(t ? t.ratings.code : null),
+      summaryCell(t ? t.ratings.review : null),
+      summaryCell(t ? t.ratings.research : null),
+      t && t.costTier != null ? String(t.costTier) : "—",
+      summaryStatus(row),
+    ];
+  });
+  const widths = header.map((h, i) => Math.max(
+    displayWidth(h),
+    ...table.map((cells) => displayWidth(cells[i])),
+  ));
+  const fmt = (cells) => "  " + cells.map((c, i) => padDisplayEnd(c, widths[i])).join("  ").trimEnd();
+  return [
+    "车道对照表（只列三个实测维度，其余见下方；行序=声明序，非推荐）:",
+    fmt(header),
+    ...table.map(fmt),
+    // 百分比的分母是 score.total（如 2 题里的 28 个隐藏测试），不一定是 n。
+    "  格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）",
+  ];
+}
+
 const RATINGS_STATE_LINES = {
   current: "评分状态: 当前（打分身份与车道表一致，无待复核标记）",
   unrated: "评分状态: 未评（七格全未评——未评不折算成任何星数）",
@@ -84,7 +148,7 @@ function renderLane(row, width, dimensionLabels) {
         lines.push(`    ${dimensionLabels[dim]}: 未评`);
         continue;
       }
-      lines.push(`    ${dimensionLabels[dim]}: ${cell.stars} 星（${cell.basis}${cell.basis === "measured" ? `，n=${cell.n}` : ""}）`);
+      lines.push(`    ${dimensionLabels[dim]}: ${cell.stars} 星（${cell.basis}${cell.basis === "measured" ? `，n=${cell.n}` : ""}${cell.score ? `，${cell.score.hits}/${cell.score.total} ${cell.score.label}` : ""}）`);
       if (cell.note !== undefined) {
         for (const seg of wrapLines(`note: ${cell.note}`, body - 6)) lines.push(`      ${seg}`);
       }
@@ -162,7 +226,9 @@ export async function lanesCommand(args, config) {
   const lanesDoc = options.lanesFile !== undefined
     ? loadLanesConfig(resolve(options.lanesFile))
     : loadLanesConfig();
-  const traitsResult = readLaneTraits();
+  // readLaneTraitsFn：测试缝（夹具画像注入；生产路径缺省真实画像）。与
+  // loadLanesConfigFn/readRegistry 同一注入纪律。
+  const traitsResult = (config?.readLaneTraitsFn ?? readLaneTraits)();
 
   // 就绪轴：探测权威只吃 registry 有效条目 ∩ 车道键（wired+drift 均探测——
   // drift 条目本身合法，就绪事实属于 registry 侧；未接线/无效无行）。
@@ -189,6 +255,24 @@ export async function lanesCommand(args, config) {
     const out = [];
     out.push("wao lanes — 车道一屏参考（只读；事实陈列，非推荐）");
     if (explicitPairing) out.push("  注记: 显式拼接面——非默认 registry 与显式车道表成对给出（防跨绑规则的放行形）");
+    // 0097 §5：开头先打一屏对照表（声明序，不排序），表后列成本档说明与 Owner
+    // 规则，再接原有细节。车道表不可用时不渲染（对照无从对照）。
+    if (view.state === "ok") {
+      out.push("");
+      out.push(...renderSummaryTable(view.lanes));
+      if (view.costTierScale) {
+        // 说明串自带"成本档：…"前缀——直接列出，不加第二个标签。
+        for (const seg of wrapLines(view.costTierScale, width - 2)) out.push(`  ${seg}`);
+      }
+      if (Array.isArray(view.ownerRules)) {
+        out.push("  Owner 规则（排在前面的优先）:");
+        if (view.ownerRules.length === 0) out.push("    无");
+        for (const rule of view.ownerRules) {
+          for (const seg of wrapLines(`- ${rule}`, width - 4)) out.push(`    ${seg}`);
+        }
+      }
+      out.push("");
+    }
     for (const [k, v] of Object.entries(view.sourceNotes)) {
       for (const seg of wrapLines(`${k}: ${v}`, width - 2)) out.push(`  ${seg}`);
     }

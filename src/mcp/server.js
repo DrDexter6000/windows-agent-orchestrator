@@ -305,17 +305,29 @@ import {
   // 0087: lane-profile projection SSOT caps/closed sets (home:
   // src/application/laneProfile.js; re-exported by the aggregator so this
   // module never imports laneProfile directly — isolation guard edge).
+  // 0097: costTier/costTierScale/ownerRules/score bounds join the same SSOT.
   CAVEATS_CAP,
   CAVEAT_MAX_CHARS,
   COST_MAX_CHARS,
+  COST_TIER_MAX,
+  COST_TIER_SCALE_MAX_CHARS,
+  OWNER_RULES_CAP,
+  OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   RATING_BASES,
+  RATING_DIMENSIONS,
   RATINGS_STATES,
   REVIEW_REASON_MAX_CHARS,
   REVIEW_REASONS_CAP,
   SCALE_MAX_CHARS,
+  SCORE_LABEL_MAX_CHARS,
+  SCORED_DIMENSIONS,
 } from "../application/leadPreflight.js";
+// 0097 §4：派发受理回显所选车道一行事实（只陈列，不推荐；fail-open——画像读
+// 失败或车道不在画像里时 laneFactsLine 返回 null，派发照常）。守卫边
+//（laneFactsLine ← mcp/server.js）由 test/registry-roles/laneTraits.test.js 钉。
+import { laneFactsLine, LANE_FACTS_LINE_MAX_CHARS } from "../application/laneFactsLine.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
 // TD-319：MCP 错误文本输出口统一渲染。SDK 对 isError/抛错只透传 text/message，
 // 配置来源值里的控制字符原样上 wire；register 的包装层（见 withToolErrorTextEscape）
@@ -1020,6 +1032,10 @@ const RUN_DISPATCH_OUTPUT = z.object({
   // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
   // accepted:false 不给。
   nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
+  // 决定 0097 §4：受理成功时回显所选车道一行事实（同一行文字，只陈列非推荐；
+  // 画像读失败或车道不在画像里时缺省——fail-open，绝不影响派发）。accepted:false
+  // 不给；run_continue 不给。
+  laneFacts: z.string().min(1).max(LANE_FACTS_LINE_MAX_CHARS).optional(),
 }).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
@@ -1769,6 +1785,20 @@ const COLLECT_WORKSPACE_MISMATCH_TEXT =
 const CURSOR_REJECTED_GUIDANCE =
   "cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); " +
   "never hand-modify a cursor token";
+// 0097 五′（2026-10-30 Lead 实遇：读一个属于另一工作树项目的运行时，run_activity
+// 把归属拒绝折成了笼统的 "run_activity failed"）。会话绑定（workspace_select /
+// lead_preflight 选定项目）下的只读观察工具照 run_collect 的写法给同款固定文案
+// ——Lead 必须能分清"归属拒绝"与"一般失败"。单一构造器生成，各工具一份常量，
+// 不回显路径或 runId。run_status 不做归属核验（statusService 无绑定入参），无此分支。
+// 原因按 runWorkspaceOwnership.js 的六类拒绝逐类写：不匹配（另一项目、子目录、
+// 非 Git 路径）、证明不了（相对或已消失的路径）、没有、重复、缺 cwd、冲突（提交
+// 与开跑记下的 cwd 不一致）。换项目只对"属于另一个项目"有用，所以写成条件句。
+const boundWorkspaceMismatchText = (tool) =>
+  `${tool} refused: this run cannot be shown to belong to the bound workspace — its transcript's `
+  + "ownership facts name a cwd in another project, a subdirectory, or a non-Git, relative or "
+  + "vanished path, or they are missing (legacy transcript), duplicated, incomplete (no cwd) or "
+  + "in conflict. Read-only; nothing was written. If the run belongs to another project, "
+  + "select it (workspace_select / lead_preflight workspaceRoot) and retry.";
 const COLLECT_CURSOR_REJECTED_TEXT = `run_collect failed — ${CURSOR_REJECTED_GUIDANCE}`;
 // TD-224 (2026-10-08): compact too_large degradation guidance — the D1-D3
 // discipline from the CLI --final marker (src/commands/observe.js), lifted to
@@ -1969,6 +1999,9 @@ const RUN_DIAGNOSE_DESCRIPTION =
 // ===== run_delivery (read-only query) constants =====
 
 const DELIVERY_QUERY_ERROR_TEXT = "run_delivery failed";
+// 0097 五′：归属拒绝专属固定文案（wait 路径的归属核验在 getRunDeliveryReadiness
+// 内 fail-closed；即时路径的候选盘点失败已收敛为 null，不经此分支）。
+const DELIVERY_QUERY_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_delivery");
 const COMMIT_HASH_RE = /^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/;
 const COMMIT_HASH_SCHEMA = z.string().regex(COMMIT_HASH_RE);
 // M12-9 Package C: these Sets/Enums derive from the SHARED closed sets in
@@ -2896,14 +2929,37 @@ const LEAD_PREFLIGHT_INPUT = z.object({
 // constants (re-exported by the aggregator), so a projection that passed the
 // app layer always passes here and the two layers cannot drift apart; id,
 // family and label bounds are generous wire limits on values defined elsewhere.
+// 0097: rows carry costTier (nullable); only the cells of SCORED_DIMENSIONS
+// may carry score {hits,total,label} — the same list the app layer validates
+// against (a score on any other dimension makes that lane invalid there), so
+// score stays structurally forbidden on the other four. The top level carries
+// costTierScale and ownerRules (null = missing or degraded, never fabricated).
 const LANE_RATING_CELL_OUTPUT = z.object({
   stars: z.number().int().min(1).max(5),
   basis: z.enum([...RATING_BASES]),
   n: z.number().int().positive().nullable(),
   note: z.string().max(PROJECTED_NOTE_MAX_CHARS).nullable(),
 }).strict();
+// Written out, not LANE_RATING_CELL_OUTPUT.extend(...): shared field instances
+// would serialize as long $ref paths on the wire (+230 bytes, measured).
+const LANE_RATING_CELL_WITH_SCORE = z.object({
+  stars: z.number().int().min(1).max(5),
+  basis: z.enum([...RATING_BASES]),
+  n: z.number().int().positive().nullable(),
+  note: z.string().max(PROJECTED_NOTE_MAX_CHARS).nullable(),
+  score: z.object({
+    hits: z.number().int().nonnegative(),
+    total: z.number().int().positive(),
+    label: z.string().min(1).max(SCORE_LABEL_MAX_CHARS),
+  }).strict().optional(),
+}).strict();
 const LANES_PROJECTION_OUTPUT = z.object({
   scale: z.string().min(1).max(SCALE_MAX_CHARS),
+  // 0097: Owner-given relative cost scale note + ordered Owner policy rules
+  // (earlier wins). null = missing/degraded at the app layer — reported there
+  // as an observation, never faked here.
+  costTierScale: z.string().min(1).max(COST_TIER_SCALE_MAX_CHARS).nullable(),
+  ownerRules: z.array(z.string().min(1).max(OWNER_RULE_MAX_CHARS)).max(OWNER_RULES_CAP).nullable(),
   dimensionLabels: z.object({
     research: z.string().max(32),
     code: z.string().max(32),
@@ -2916,15 +2972,11 @@ const LANES_PROJECTION_OUTPUT = z.object({
   rows: z.array(z.object({
     id: z.string().max(64),
     family: z.string().max(32),
-    ratings: z.object({
-      research: LANE_RATING_CELL_OUTPUT.optional(),
-      code: LANE_RATING_CELL_OUTPUT.optional(),
-      review: LANE_RATING_CELL_OUTPUT.optional(),
-      design: LANE_RATING_CELL_OUTPUT.optional(),
-      longHorizon: LANE_RATING_CELL_OUTPUT.optional(),
-      writing: LANE_RATING_CELL_OUTPUT.optional(),
-      visual: LANE_RATING_CELL_OUTPUT.optional(),
-    }).strict(),
+    costTier: z.number().positive().max(COST_TIER_MAX).nullable(),
+    ratings: z.object(Object.fromEntries(RATING_DIMENSIONS.map((d) => [
+      d,
+      (SCORED_DIMENSIONS.includes(d) ? LANE_RATING_CELL_WITH_SCORE : LANE_RATING_CELL_OUTPUT).optional(),
+    ]))).strict(),
     ratingsState: z.enum([...RATINGS_STATES]),
     reviewReasons: z.array(z.string().max(REVIEW_REASON_MAX_CHARS)).max(REVIEW_REASONS_CAP),
     caveats: z.array(z.string().max(CAVEAT_MAX_CHARS)).max(CAVEATS_CAP),
@@ -3142,6 +3194,8 @@ const RUNS_LIST_DESCRIPTION =
 // ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
 
 const RUN_WAIT_ERROR_TEXT = "run_wait failed";
+// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+const RUN_WAIT_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_wait");
 
 const RUN_WAIT_INPUT = z.object({
   runId: z.string().min(1),
@@ -3228,6 +3282,8 @@ const RUN_WAIT_DESCRIPTION =
 // available for arbitrary re-polling.
 
 const RUN_AWAIT_RESULT_ERROR_TEXT = "run_await_result failed";
+// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+const RUN_AWAIT_RESULT_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_await_result");
 
 const RUN_AWAIT_RESULT_INPUT = z.object({
   runId: z.string().min(1),
@@ -3389,6 +3445,8 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 // idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
 
 const RUN_ACTIVITY_ERROR_TEXT = "run_activity failed";
+// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+const RUN_ACTIVITY_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_activity");
 
 // Cursor wire contract: opaque base64url, ≤ ACTIVITY_CURSOR_MAX_CHARS — the
 // exact bounds enforced by the projector codec (parity, no drift).
@@ -3845,6 +3903,9 @@ export function createWaoMcpServer({
   // getRegistryInventoryFn 模式；缺省=聚合器默认读真实文件与真实 env/cwd）。
   laneProfilesFn,
   workerContextFn,
+  // 0097 §4：可注入的派发回显行（测试缝，同 laneProfilesFn 模式；缺省=真实
+  // laneFactsLine——fail-open，返回 null 时受理回执不带 laneFacts）。
+  laneFactsLineFn,
   // ADR-0032 修订（2026-09-22）：可注入的认证证据详情服务（默认真实
   // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
   getCertificationEvidenceFn,
@@ -4544,6 +4605,9 @@ export function createWaoMcpServer({
       let resolvedLane;
       let resolvedRole;
       let resolvedRoleId;
+      // 0097 §4：回显行用解析所得车道键（explicit/alias 都有 laneId；agentId 直派
+      // 时席位键即车道键）。laneFactsLine 只陈列事实，fail-open。
+      let factsLaneId = agentId;
       if (lane !== undefined || role !== undefined || agentId === undefined) {
         const lanesDoc = loadLanesConfig();
         const registry = await readRegistry(registryPath);
@@ -4566,6 +4630,9 @@ export function createWaoMcpServer({
         // 0045 W4b：生效复用策略按角色取——alias 派发的角色注记也透传（显式路径
         // 本就被洞②真门排除复用，resolvedRoleId 仅为统一语义）。
         resolvedRoleId = resolution.roleId ?? undefined;
+        if (resolution.kind === "resolved" && typeof resolution.laneId === "string") {
+          factsLaneId = resolution.laneId;
+        }
       } else if (!isValidCanonicalAgentId(agentId)) {
         return {
           isError: true,
@@ -4972,6 +5039,13 @@ export function createWaoMcpServer({
           ...(result.accepted === true
             ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }) }
             : {}),
+          // 决定 0097 §4：受理成功附所选车道一行事实（无 [wao] 前缀）。回显失败
+          // =laneFactsLine 返回 null → 键缺省，绝不把受理折成错误。
+          ...(() => {
+            if (result.accepted !== true) return {};
+            const facts = (laneFactsLineFn ?? laneFactsLine)(factsLaneId);
+            return facts == null ? {} : { laneFacts: facts };
+          })(),
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -6006,7 +6080,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // 0097 五′：归属拒绝专属固定文案（wait 路径在初始读与每次轮询读前
+        // fail-closed 核验归属；固定文案，不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_QUERY_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_QUERY_ERROR_TEXT }],
@@ -6400,7 +6482,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // 0097 五′：归属拒绝专属固定文案（服务在每次读转录前 fail-closed 核验
+        // 归属；固定文案，不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_WAIT_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }],
@@ -6554,7 +6644,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // 0097 五′：归属拒绝专属固定文案（服务在初始读与每次轮询读前 fail-closed
+        // 核验归属；固定文案，不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_AWAIT_RESULT_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: RUN_AWAIT_RESULT_ERROR_TEXT }],
@@ -6638,6 +6736,14 @@ export function createWaoMcpServer({
             // 宿主不再失明；前缀不变。
             content: [{ type: "text", text: RUN_ACTIVITY_CURSOR_REJECTED_TEXT }],
             structuredContent: RUN_ACTIVITY_RECOVERY.parse(buildCursorRecovery()),
+          };
+        }
+        // 0097 五′：归属拒绝专属固定文案——Lead 分得清"属于另一项目"与一般失败
+        //（run_collect 同款纪律；固定文案，不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_ACTIVITY_WORKSPACE_MISMATCH_TEXT }],
           };
         }
         return {

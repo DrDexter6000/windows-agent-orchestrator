@@ -6,6 +6,7 @@
       "application/runSettle.test.js",
       "application/lanesView.test.js",
       "application/laneProfile.test.js",
+      "application/laneFactsLine.test.js",
       "application/panelDerivation.test.js",
       "application/serveMaintenance.test.js",
       "application/serveReviveAndHusk.test.js",

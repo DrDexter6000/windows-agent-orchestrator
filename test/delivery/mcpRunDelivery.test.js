@@ -1439,3 +1439,47 @@ test("M9-6B-18 (TD-179): pending reject settles; a later accept is already_decid
     }
   } finally { cleanupDir(dir); }
 });
+
+// 0097 五′：wait 路径的归属拒绝专属固定文案——带 waitMs 的 run_delivery 对属于
+// 另一项目的运行返回 "run_delivery refused: …cannot be shown to belong to the
+// bound workspace…"，不再折叠成笼统 "run_delivery failed"（run_collect 同款纪律；
+// 即时路径的候选盘点失败已收敛为 null，不经此分支）。
+test("0097 五′: run_delivery waitMs cross-workspace → ownership-refusal fixed text", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "wao-d97a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "wao-d97b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-d97-rd-"));
+  try {
+    await makeGitRepo(dirA);
+    await makeGitRepo(dirB);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_xws_delivery";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-08-02T00:00:00.000Z", runId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-08-02T00:00:01.000Z", runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dirA, runId, agentId: "coder_low" }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-08-02T00:00:02.000Z", runId }),
+    ].join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 1000 } });
+      const dumped = JSON.stringify(res);
+      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to the bound workspace/,
+        "归属拒绝专属固定文案");
+      assert.ok(!dumped.includes("run_delivery failed"), "不再折叠成笼统失败文案");
+      assert.ok(!dumped.includes(runId), "不回显 runId");
+      // 文本里查原生反斜杠与正斜杠两种写法，序列化结果里查 JSON 转义写法。
+      const text = res.content.map((c) => c.text ?? "").join("\n");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.replace(/\\/g, "/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
