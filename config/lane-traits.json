@@ -59,7 +59,7 @@
         "effort": "high"
       },
       "costTier": 4,
-      "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity；价格中高（Owner）",
+      "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
         "会审要查 bug 时优选它（Owner）",
         "常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
@@ -119,9 +119,8 @@
         "effort": "medium"
       },
       "costTier": 5,
-      "cost": "codex 订阅额度；价格高昂（Owner）",
+      "cost": "codex 订阅额度",
       "caveats": [
-        "容易钻牛角尖（Owner）：任务书写清范围与停止条件",
         "分项评分只用 Owner 手动输入，不跑横评、不按实测改格（Owner 规则）"
       ],
       "contextWindow": {
@@ -184,7 +183,7 @@
         "effort": "max"
       },
       "costTier": 1,
-      "cost": "GLM 订阅；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口；价廉（Owner）",
+      "cost": "GLM 订阅；GLM 高峰（北京 9:00–18:00，即 UTC 01:00–10:00）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口",
       "caveats": [
         "成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）",
         "隔离派发时会用写文件工具在工作树外（如 %TEMP%）落普查脚本，被判越界、run 当场失败（10-21、10-28）：任务书写明不落文件"
@@ -250,7 +249,7 @@
         "effort": "max"
       },
       "costTier": 0.5,
-      "cost": "GLM 订阅；价格极其低廉（Owner）",
+      "cost": "GLM 订阅",
       "caveats": [],
       "contextWindow": {
         "tokens": 1000000,
@@ -316,7 +315,7 @@
         "effort": null
       },
       "costTier": 4,
-      "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）；价格高昂（Owner）",
+      "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [
         "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败"
       ],
@@ -377,7 +376,7 @@
         "effort": "high"
       },
       "costTier": 3,
-      "cost": "Claude 订阅（OAuth 长期 token）；价格高昂（Owner）",
+      "cost": "Claude 订阅（OAuth 长期 token）",
       "caveats": [
         "任务书写明所有命令前台跑完再作答：后台命令未完成时它会结束回合，只留中间话"
       ],
@@ -488,7 +487,7 @@
         "effort": "max"
       },
       "costTier": 1.5,
-      "cost": "DeepSeek API 按量计费，极便宜：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周一至周五（不含中国法定节假日）北京时间 9:00–12:00、14:00–18:00（UTC 01:00–04:00、06:00–10:00）为高峰，其余时段空闲价（官方定价页）；通道不报 token 用量",
+      "cost": "DeepSeek API 按量计费：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周一至周五（不含中国法定节假日）北京时间 9:00–12:00、14:00–18:00（UTC 01:00–04:00、06:00–10:00）为高峰，其余时段空闲价（官方定价页）；通道不报 token 用量",
       "caveats": [
         "开始干活后很稳（横评 48 次全部跑完）；启动超时只见于机器很忙或笔记本待机时，不耗 token，重派即可",
         "不必为省钱刻意避开 DeepSeek 高峰（Owner 规则）",
