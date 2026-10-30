@@ -15,12 +15,17 @@
 //      不把无法 realpath 的历史路径静默归入 scratch）
 //   R7 外国 harness 沙箱（闭表，当前仅 codex exec）→ _sandbox 桶（词法判定，
 //      排在 R3 前=不受沙箱树死活影响；与 scratch 分开——沙箱里是真活不是探针）
+//   R8 链接工作树归主工作树（决定 0099）：`.git` 是文件时按 git 自己的读法追
+//      gitdir→commondir，共同目录 basename 恰为 ".git" → 主工作树=其父目录
+//      （与 git worktree list 第一行同源；读文件只经注入的 readGitFile，
+//      未注入或任何一步失败=照旧按工作树自身路径归属，绝不抛错）
 //
 // 架构契约：core 纯函数；不 import src/commands/*、src/mcp/*、SDK、zod；
-// filesystem 只经注入的 realpath（测试可控，生产传 node:fs realpathSync）。
+// filesystem 只经注入的 realpath 与 readGitFile（测试可控，生产传
+// node:fs realpathSync 与有界小文件读实现）。
 
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, win32 as pathWin32, posix as pathPosix } from "node:path";
 
 // Windows 保留设备名（slug 首段不得为这些——加哈希后缀已天然避开，表用于
 // 显式防御性校验）。runs/ 下的既有保留目录同理（分桶命名空间待 Owner 裁定，
@@ -55,7 +60,8 @@ const DISPLAY_NAME_MAX = 40;
  * 规范化一个转录首事件 cwd 为项目身份。
  *
  * @param {string|null|undefined} raw 转录首事件的 cwd 值（原样）
- * @param {{platform?: NodeJS.Platform, realpath?: (p:string)=>string, tmpdir?: string}} [io]
+ * @param {{platform?: NodeJS.Platform, realpath?: (p:string)=>string,
+ *          tmpdir?: string, readGitFile?: (p:string)=>string}} [io]
  * @returns {{kind:"project", key:string, displayName:string}
  *          |{kind:"scratch", key:string}
  *          |{kind:"unattributed", reason:string}}
@@ -119,6 +125,12 @@ export function identifyProjectFromCwd(raw, io = {}) {
   }
   // R4 在 realpath 之后重放（junction 可能揭示 worktree 段）
   resolved = resolved.replace(WORKTREE_SEGRE_SAFE(platform), "");
+  // R8 链接工作树归主工作树（决定 0099）：只看当前路径根上的 `.git` 文件（子
+  // 目录不往上找）；读文件经注入的 readGitFile（未注入=不生效），任何失败/
+  // 形状不对 → null=照旧。命中时替换 resolved 后直接走 R2（不重判 R4/R5/R7——
+  // 主工作树路径是归属终点）。
+  const r8MainRoot = linkedWorktreeMainRoot(resolved, { platform, realpath, readGitFile: io.readGitFile });
+  if (r8MainRoot !== null) resolved = r8MainRoot;
   // R2 win32 大小写折叠（键）；displayName 取 **resolved** 路径的 basename
   //（opus 终审 M5：取 realpath 之前的 basename 时，同 key 因原始写法/junction
   // 别名分出两个桶——桶名确定性要求 displayName 与 key 同源）。
@@ -140,6 +152,54 @@ function defaultTmpdir(_platform) {
   return "";
 }
 
+// ── R8（决定 0099）：链接工作树 → 主工作树 ──────────────────────────────────
+// 与 git 自己的读法一致（不起子进程，只读两个小文件）：`git worktree add` 出的
+// 树根 `.git` 是文件（"gitdir: <路径>"）；gitdir 下 commondir 文件指向共同目录；
+// 共同目录 basename 恰为 ".git"（区分大小写，git 去掉 `/.git` 后缀时同样区分
+// 大小写）时主工作树=其父目录——与 `git worktree list` 第一行报告的路径同源；
+// 不叫 ".git" 时 git 把共同目录本身报成主工作树，R8 则照旧。裸仓库（x.git）、子模块
+//（.git/modules/sub）、--separate-git-dir 主检出、无 commondir（admin 目录被
+// prune）等形状 basename 不符/读不出 → null（照旧按工作树自身路径归属）。
+function linkedWorktreeMainRoot(resolved, { platform, realpath, readGitFile }) {
+  if (typeof readGitFile !== "function") return null; // 未注入读函数=R8 不生效
+  try {
+    const win32 = (platform ?? process.platform) === "win32";
+    const resolvePath = win32 ? pathWin32.resolve : pathPosix.resolve;
+    const dirnameOf = win32 ? pathWin32.dirname : pathPosix.dirname;
+    // 盘符相对形（`D:admin`）：盘符与基准路径不同时，win32 按进程在该盘的当前
+    // 目录解析，归属会随进程漂移（与 R6 拒绝相对 cwd 同理）；git 不写这种形状，
+    // 同盘也一并拒绝 → 照旧。
+    const driveRelative = (p) => win32 && /^[A-Za-z]:(?![\\/])/.test(p);
+    // ① <工作树根>/.git 文件："gitdir: <路径>" 前缀（git 写入的固定形状），去行尾
+    //    CR/LF（只去行尾，不 trim 别处），前缀后非空。
+    const dotGit = stripTrailingEol(readGitFile(`${resolved}/.git`));
+    if (!dotGit.startsWith("gitdir: ")) return null;
+    const gitdirHint = dotGit.slice("gitdir: ".length);
+    if (gitdirHint.length === 0 || driveRelative(gitdirHint)) return null;
+    // ② gitdir：\ 换 /，以工作树根为基准解析（绝对路径原样），realpath 后统一
+    //    / 分隔（gitdir 可能经 junction）。
+    const gitdir = realpath(resolvePath(resolved, gitdirHint.replace(/\\/g, "/"))).replace(/\\/g, "/");
+    // ③ <gitdir>/commondir：以 gitdir 的 **realpath** 为基准解析（不是工作树根、
+    //    不是进程 cwd——git 的语义），再 realpath（commondir 常是 ../.. 相对形）。
+    const commondirRaw = stripTrailingEol(readGitFile(`${gitdir}/commondir`));
+    if (commondirRaw.length === 0 || driveRelative(commondirRaw)) return null;
+    const commondir = realpath(resolvePath(gitdir, commondirRaw.replace(/\\/g, "/"))).replace(/\\/g, "/");
+    // ④ 共同目录 basename 恰为 ".git"（区分大小写）→ 主工作树=父目录。
+    const segs = commondir.replace(/\/+$/, "").split("/");
+    if (segs[segs.length - 1] !== ".git") return null;
+    const mainRoot = dirnameOf(commondir);
+    if (typeof mainRoot !== "string" || mainRoot.length === 0) return null;
+    return mainRoot;
+  } catch {
+    return null; // 读失败/超限/realpath 失败/形状不对——一律照旧（不抛、不变 unattributed）
+  }
+}
+
+// 只去行尾 CR/LF（不 trim 别处）——git 元数据文件是单行内容 + 行尾换行。
+function stripTrailingEol(s) {
+  return typeof s === "string" ? s.replace(/[\r\n]+$/, "") : "";
+}
+
 function sanitizeDisplayName(name) {
   const cleaned = name
     .replace(/[^A-Za-z0-9._-]+/g, "-")
@@ -150,14 +210,28 @@ function sanitizeDisplayName(name) {
 
 // 桶归属事实的规则版本（与 planProjectsMigration 的 rulesVersion 同源——
 // 写入首事件的归属事实携带版本，未来规则演进可区分新旧事实）。
-export const PROJECT_IDENTITY_RULES_VERSION = "td190-r2";
+// td190-r3 = 决定 0099 的 R8（链接工作树归主工作树）。
+export const PROJECT_IDENTITY_RULES_VERSION = "td190-r3";
 
 // 生产 IO 组装（写侧调用方用；测试注入自己的 io）。集中一处避免各调用点
 // 自行拼装造成 realpath/tmpdir 口径漂移。
 // M5：win32 下 native 形态返回盘上规范大小写（普通形态原样返回输入的
 // 大小写——displayName 派生会漂）；非 win32 两者同义。
-import { realpathSync as _realpathSync } from "node:fs";
+import { realpathSync as _realpathSync, statSync as _statSync, readFileSync as _readFileSync } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
+
+// R8 生产读文件实现（决定 0099）：只读 git 的两个小元数据文件（`.git` 文件与
+// commondir）。statSync 确认普通文件且不超过上限再读 utf8——目录、超限、不
+// 存在一律抛错（R8 调用方整段 try/catch 兜底=照旧，不会击穿身份判定）。
+// 上限防身份判定读进大文件（正常 gitdir/commondir 都是几十字节）。
+export const GIT_META_FILE_MAX_BYTES = 4096;
+export function readGitFileBounded(p) {
+  const st = _statSync(p);
+  if (!st.isFile()) throw new Error(`readGitFileBounded: not a regular file: ${p}`);
+  if (st.size > GIT_META_FILE_MAX_BYTES) throw new Error(`readGitFileBounded: file over ${GIT_META_FILE_MAX_BYTES} bytes: ${p}`);
+  return _readFileSync(p, "utf8");
+}
+
 export function productionProjectIo() {
   // M5 Round-2 必改（双席复核出首轮空操作）：win32 必须用函数属性
   // realpathSync.native（盘上规范大小写）——它不是命名导出，首轮误当双命名
@@ -170,6 +244,7 @@ export function productionProjectIo() {
       ? (p) => _realpathSync.native(p)
       : (p) => _realpathSync(p),
     tmpdir: _tmpdir(),
+    readGitFile: readGitFileBounded,
   };
 }
 
@@ -266,11 +341,12 @@ export function deriveProjectBucketSlug(identity) {
 /**
  * 一个根路径的非绝对、确定性项目标签（`<displayName>-<hash8>`）。用于只读
  * 范围显示（lead_preflight workspace.projectBucket、runs_list
- * scope.projectBucket）——"preflight 不输出绝对路径"合同内的项目标识：能看出
- * 本次结果按哪个项目取的范围，又不暴露完整路径。判定与写侧 `projectFactFromCwd`
- * 用同一份生产 io（`productionProjectIo()`，含 os.tmpdir 的 scratch 判定），
- * 桶 kind 与写侧一致；但碰撞扩长后的实际桶名可能比标签更长，本标签只作范围
- * 标识，不是桶名权威。根不可识别（非项目、realpath 失败）→ null，绝不编造标签。
+ * scope.projectBucket）——"preflight 不输出绝对路径"合同内的项目标识：标签是
+ * **绑定根所属项目**的（R8 之后链接工作树取主工作树的项目），不暴露完整路径。
+ * 判定与写侧 `projectFactFromCwd` 用同一份生产 io（`productionProjectIo()`，
+ * 含 os.tmpdir 的 scratch 判定与 R8 的 readGitFile），桶 kind 与写侧一致；但
+ * 碰撞扩长后的实际桶名可能比标签更长，本标签只作范围标识，不是桶名权威。
+ * 根不可识别（非项目、realpath 失败）→ null，绝不编造标签。
  */
 export function projectBucketLabel(root) {
   try {

@@ -36,6 +36,8 @@ import { transcriptPathFor } from "./transcript.js";
 import {
   identifyProjectFromCwd,
   isReservedBucketSlug,
+  productionProjectIo,
+  readGitFileBounded,
   PROJECT_IDENTITY_RULES_VERSION,
 } from "./projectIdentity.js";
 
@@ -81,8 +83,12 @@ function defaultIo(io = {}) {
     writeFileSync: io.writeFileSync ?? fsDefault.writeFileSync,
     readdirSync: io.readdirSync ?? fsDefault.readdirSync,
     statSync: io.statSync ?? fsDefault.statSync,
-    realpath: io.realpath ?? fsDefault.realpathSync,
+    // 决定 0099 R8：realpath 与读文件的缺省都取写侧那份生产实现（win32 的
+    // realpath 用 .native，返回盘上大小写）——R8 的 basename 比较区分大小写，两侧
+    // realpath 实现不同时，同一个链接工作树 cwd 会推出不同的 key。
+    realpath: io.realpath ?? productionProjectIo().realpath,
     tmpdir: io.tmpdir ?? osTmpdir(),
+    readGitFile: io.readGitFile ?? readGitFileBounded,
     openSync: io.openSync ?? fsDefault.openSync,
     readSync: io.readSync ?? fsDefault.readSync,
     closeSync: io.closeSync ?? fsDefault.closeSync,
@@ -513,7 +519,7 @@ function shaOfIfExists(path, io) {
 
 function bucketCandidateFromCwdHint(runDir, cwdHint, io) {
   if (typeof cwdHint !== "string" || cwdHint.length === 0) return null;
-  const identity = identifyProjectFromCwd(cwdHint, { realpath: io.realpath, tmpdir: io.tmpdir });
+  const identity = identifyProjectFromCwd(cwdHint, { realpath: io.realpath, tmpdir: io.tmpdir, readGitFile: io.readGitFile });
   if (identity.kind !== "project") {
     const bucket = identity.kind === "sandbox" ? "_sandbox" : identity.kind === "scratch" ? "_scratch" : "_unattributed";
     const dir = join(projectsDirFor(runDir), bucket);

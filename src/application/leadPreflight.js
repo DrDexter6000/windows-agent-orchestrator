@@ -390,7 +390,8 @@ export async function aggregateLeadPreflight({
       unboundReason: null,
       // 非绝对、确定性的项目标签（与写侧桶 slug 同派生式，来自
       // projectIdentity SSOT）——在"preflight 不输出绝对路径"合同内让 Lead
-      // 看出本次结果按哪个项目取的范围。根不可识别 → null（绝不编造）。
+      // 看出绑定根所属项目的标签；链接工作树取主工作树的项目（决定 0099 R8）。
+      // 根不可识别 → null（绝不编造）。
       projectBucket: projectBucketLabel(workspaceBinding.root),
     };
     checkStatus.workspace = "observed";

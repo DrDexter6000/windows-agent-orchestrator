@@ -47,7 +47,7 @@ const FIRST_EVENT_TYPES = new Set(["run.started", "run.background_submitted"]);
 /**
  * 对 runDir 根层存量做分桶迁移计划（纯读，零写入）。
  *
- * @param {{runDir: string, io?: {readdirSync?: Function, statSync?: Function, readFileSync?: Function, realpath?: Function, platform?: NodeJS.Platform, tmpdir?: string}}} input
+ * @param {{runDir: string, io?: {readdirSync?: Function, statSync?: Function, readFileSync?: Function, realpath?: Function, platform?: NodeJS.Platform, tmpdir?: string, readGitFile?: Function}}} input
  * @returns {{rulesVersion: string, buckets: Array<{slug: string, displayName: string, projectKey: string, fileCount: number, bytes: number, skippedNonTerminal: string[]}>, scratchFileCount: number, scratchBytes: number, unattributed: Array<{file: string, reason: string}>, reservedDirsSkipped: string[], scanned: number, parseFailures: Array<{file: string, reason: string}>}}
  */
 export function planProjectsMigration({ runDir, io = {} }) {
@@ -56,7 +56,7 @@ export function planProjectsMigration({ runDir, io = {} }) {
   const readFileSync = io.readFileSync ?? fsReadFileSync;
   const realpath = io.realpath ?? ((p) => p);
 
-  const rulesVersion = PROJECT_IDENTITY_RULES_VERSION; // 与 projectIdentity SSOT 同源（td190-r2：R1-R7+slug v1）——
+  const rulesVersion = PROJECT_IDENTITY_RULES_VERSION; // 与 projectIdentity SSOT 同源（td190-r3：R1-R8+slug v1）——
   // 计划与未来写入侧的桶归属事实都携带该版本（opus 补强 1 的读侧对应物）。
 
   const out = {
@@ -132,6 +132,9 @@ export function planProjectsMigration({ runDir, io = {} }) {
       platform: io.platform ?? process.platform,
       realpath,
       tmpdir: io.tmpdir,
+      // 决定 0099 R8：原样转交调用方的读函数——计划器保持"不注入就不碰盘"的
+      // 缺省（生产 CLI 传 productionProjectIo()，含 readGitFile）。
+      readGitFile: io.readGitFile,
     });
     if (factError !== null) {
       out.parseFailures.push({ file, reason: `recorded project fact rejected: ${factError}` });
@@ -223,6 +226,9 @@ function defaultIoApply(io) {
     realpath: io.realpath ?? ((p) => p),
     platform: io.platform ?? process.platform,
     tmpdir: io.tmpdir,
+    // 决定 0099 R8：只转交调用方的读函数，与计划器、与本函数的 realpath 缺省一致
+    //（不注入就不碰盘）；生产 CLI 传 productionProjectIo()，含 readGitFile。
+    readGitFile: io.readGitFile,
   };
 }
 
@@ -330,7 +336,7 @@ export function applyProjectsMigration({ runDir, manifestDir, io = {}, stamp = n
     if (!TERMINAL_STATES.includes(state)) {
       totals.keptNonTerminal += 1; items.push({ runId, status: "kept_non_terminal", state: state ?? "unreadable" }); continue;
     }
-    const { identity, factError } = identityOfFirstEvent(first, { platform: i.platform, realpath: i.realpath, tmpdir: i.tmpdir });
+    const { identity, factError } = identityOfFirstEvent(first, { platform: i.platform, realpath: i.realpath, tmpdir: i.tmpdir, readGitFile: i.readGitFile });
     if (factError !== null) {
       totals.failures += 1; items.push({ runId, status: "failed:fact_rejected", detail: factError }); continue;
     }

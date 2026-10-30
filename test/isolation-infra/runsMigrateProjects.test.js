@@ -41,7 +41,7 @@ test("TD-190 计划器: 记录事实优先于推导（规则演进不拆旧桶�
     });
 
     const plan = planProjectsMigration({ runDir, io: { realpath: (p) => p, tmpdir: "C:/PROBE-TMP" } });
-    assert.equal(plan.rulesVersion, "td190-r2");
+    assert.equal(plan.rulesVersion, "td190-r3");
     // 两个项目桶：主仓（legacy 推导）+ other-project（事实钦定 slug 原样采用）
     const slugs = plan.buckets.map((b) => b.slug).sort();
     assert.deepEqual(slugs, [
@@ -119,7 +119,7 @@ test("TD-256 apply: 迁移全链（project+unattributed+非终态不动）+ 新�
     for (const l of lines) {
       assert.equal(typeof l.sha256, "string");
       assert.equal(typeof l.slug, "string");
-      assert.equal(l.rulesVersion, "td190-r2");
+      assert.equal(l.rulesVersion, "td190-r3");
     }
     const unattrIntent = lines.find((l) => l.runId === "run_unattr" && l.phase === "intent");
     assert.equal(unattrIntent.kind, "unattributed");

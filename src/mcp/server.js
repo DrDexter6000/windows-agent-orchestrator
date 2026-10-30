@@ -301,7 +301,8 @@ import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/workspaceExpectation.js";
 // 非绝对项目标签（只读范围显示——lead_preflight workspace.projectBucket
-// 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。
+// 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。标签是绑定根
+// 所属项目的；链接工作树取主工作树的项目（决定 0099 R8）。
 import { projectBucketLabel } from "../projectIdentity.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import {
@@ -3055,8 +3056,9 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     // M12-19: closed-set recovery fact, same SSOT enum as workspace_status.
     // null when bound, or when the binding carried no reason (never fabricated).
     unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
-    // 非绝对项目标签（<displayName>-<hash8>，与写侧桶 slug 同派生式）
-    // ——preflight 不输出绝对路径合同内的范围标识；null=未绑定或根不可识别。
+    // 非绝对项目标签（<displayName>-<hash8>，与写侧桶 slug 同派生式）——
+    // 绑定根所属项目的标签，链接工作树取主工作树的项目（决定 0099 R8）；
+    // null=未绑定或根不可识别。
     projectBucket: z.string().min(1).max(128).nullable(),
   }).strict().nullable(),
   workspaceSelection: z.enum([
@@ -3204,10 +3206,10 @@ const RUNS_LIST_INPUT = z.object({
 }).strict();
 
 const RUNS_LIST_OUTPUT = z.object({
-  // 本次列表按哪个项目取的范围——绑定来源 + 非绝对项目标签
-  //（<displayName>-<hash8>，与 lead_preflight workspace.projectBucket 同派生式；
-  // 绑定根不可识别时 projectBucket 为 null）。runs_list 本身仍跟随会话绑定
-  //（B 类缺省范围），不加目标参数。
+  // 绑定来源 + 非绝对项目标签（<displayName>-<hash8>，与 lead_preflight
+  // workspace.projectBucket 同派生式）——标签是绑定根所属项目的，链接工作树
+  // 取主工作树的项目（决定 0099 R8）；绑定根不可识别时 projectBucket 为 null。
+  // runs_list 本身仍跟随会话绑定（B 类缺省范围），不加目标参数。
   scope: z.object({
     source: z.enum(["lead_session", "server_config", "mcp_root"]),
     projectBucket: z.string().min(1).max(128).nullable(),
