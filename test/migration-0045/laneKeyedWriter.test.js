@@ -51,6 +51,13 @@ test("KEYW-2: tri-state 严格——providerKey undefined 与 null 是不同车�
   assert.equal(Object.keys(summary.workers).length, 2, "tri-state 不同=不同车道记录");
 });
 
+test("KEYW-2b: 车道键冻结——台账已按这些键落盘，改动哈希输入（含三态哨兵的写法）不得改变它们", () => {
+  // 期望值由第 50 批之前、哨兵还是字面 NUL 字节的源码算出；改成 \u0000 转义后逐一相等。
+  assert.equal(laneLedgerKey({ backend: "codex", modelId: "gpt-x", providerID: undefined, providerKey: null }), "lane:59c525fc31b81c0f");
+  assert.equal(laneLedgerKey({ backend: "zcode", modelId: null }), "lane:51f0f047c35b6e63");
+  assert.equal(laneLedgerKey(undefined), "lane:a58682800649eb10");
+});
+
 test("KEYW-3: 无身份事实的 legacy case → seat: 名键（可被读者选出）", () => {
   const summary = summarizeCertification([
     mkCase("legacy_agg", { backend: undefined, providerID: undefined, modelId: undefined, providerKey: undefined }),

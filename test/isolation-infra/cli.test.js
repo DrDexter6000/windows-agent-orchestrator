@@ -5181,7 +5181,7 @@ test("TD-137② runWait 服务：窗口到期（非终态）带 waitWindowHint�
   }
 });
 
-test("TD-137② getRunDeliveryReadiness 服务：deadline 到期（非终态）带提示；settled 立即返回不带", async () => {
+test("TD-137② getRunDeliveryReadiness 服务：deadline 到期（非终态）带提示；提前返回不带", async () => {
   const { getRunDeliveryReadiness, DELIVERY_WAIT_MS_MAX } = await import("../../src/application/runDelivery.js");
   const runDir = mkdtempSync(join(tmpdir(), "wao-td137-dlv-rd-"));
   try {
@@ -5211,7 +5211,7 @@ test("TD-137② getRunDeliveryReadiness 服务：deadline 到期（非终态）�
       "delivery wait 自身上限");
     assert.match(r.waitWindowHint, /runs wait 600000/, "同族：runs wait 上限在场");
 
-    // 对照：not_requested 立即返回（settled）→ 无提示字段。
+    // 对照：not_requested 立即返回（提前返回，不是收口判定）→ 无提示字段。
     const plainId = "run_td137plain";
     writeFileSync(join(runDir, `${plainId}.jsonl`),
       line({ type: "run.started", runId: plainId, backend: "claude-code" }) + "\n", "utf8");
@@ -5222,7 +5222,7 @@ test("TD-137② getRunDeliveryReadiness 服务：deadline 到期（非终态）�
     });
     assert.equal(settled.readiness, "not_requested");
     assert.equal(settled.waitReturnedEarly, true);
-    assert.equal("waitWindowHint" in settled, false, "settled 路径不是观察窗到期，不带提示");
+    assert.equal("waitWindowHint" in settled, false, "提前返回不是观察窗到期，不带提示");
   } finally {
     rmrfRetry(runDir);
   }
@@ -5275,7 +5275,7 @@ test("TD-137② runs wait CLI：text 在五行摘要后追加 Hint 行（原行�
   assert.ok(Array.isArray(parsed.semanticNotes), "semanticNotes selector 照旧");
 });
 
-test("TD-137② runs delivery --wait-ms CLI：到期打印 Hint；settled 不打印", async () => {
+test("TD-137② runs delivery --wait-ms CLI：到期打印 Hint；提前返回不打印", async () => {
   const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
   const expired = async () => ({
     runId: "run_dh", terminalState: "running", readiness: "waiting_for_packaging",
@@ -5299,8 +5299,26 @@ test("TD-137② runs delivery --wait-ms CLI：到期打印 Hint；settled 不打
   });
   const outSettled = await captureLog(() =>
     runsDeliveryCommand(["run_dh2", "--wait-ms", "1000", "--run-dir", "."], {}, { getRunDeliveryReadinessFn: settled }));
-  assert.match(outSettled, /\(settled\)/);
-  assert.doesNotMatch(outSettled, /^Hint: /m, "settled 不是观察窗到期，无 Hint 行");
+  assert.match(outSettled, /^Readiness: reviewable \(returned early\)$/m);
+  assert.doesNotMatch(outSettled, /^Hint: /m, "提前返回不是观察窗到期，无 Hint 行");
+
+  // 决定 0095：提前返回不是收口判定——仍在跑的 run、重读失败的 ambiguous 也提前返回，
+  // 都不能标成 settled（收口由 runs wait --until-settled 判定）。
+  for (const [runId, terminalState, readiness] of [
+    ["run_dh3", "running", "not_requested"],
+    ["run_dh4", "completed", "ambiguous"],
+  ]) {
+    const early = async () => ({
+      runId, terminalState, readiness,
+      waitReturnedEarly: true, deliveryAvailable: false, deliveryRequested: readiness !== "not_requested",
+      deliveryFailure: null, isolationFailure: null, verification: null,
+      effectiveVerification: null, reverify: null, acceptance: null,
+    });
+    const out = await captureLog(() =>
+      runsDeliveryCommand([runId, "--wait-ms", "1000", "--run-dir", "."], {}, { getRunDeliveryReadinessFn: early }));
+    assert.match(out, new RegExp(`^Readiness: ${readiness} \\(returned early\\)$`, "m"));
+    assert.doesNotMatch(out, /settled/, `${readiness}：不标成 settled`);
+  }
 });
 
 test("TD-137④ 写路径接受目录条目：尾斜杠归一化、混合清单、精确文件不变、非法形状照拒且回显原始输入", async () => {

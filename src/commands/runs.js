@@ -2276,11 +2276,13 @@ function _coerceWaitMs(raw) {
 /** Human-readable rendering of a readiness result (non-json --wait-ms output). */
 function _printReadinessText(result) {
   console.log(`Run: ${result.runId} (${result.terminalState})`);
-  console.log(
-    `Readiness: ${result.readiness}${result.waitReturnedEarly ? " (settled)" : " (wait expired)"}`,
-  );
+  // waitReturnedEarly only says the service stopped before the window ended. It is
+  // not a settlement verdict (decision 0095): a still-running run, a failed
+  // re-read and a malformed reverify chain return early too. `runs wait
+  // --until-settled` is the command that judges settlement.
+  console.log(`Readiness: ${result.readiness}${result.waitReturnedEarly ? " (returned early)" : " (wait expired)"}`);
   // TD-137②：等待窗到期（waitReturnedEarly:false）时服务附带的同族上限交叉
-  // 提示——settled 路径服务不带该字段，此处自然不打印。
+  // 提示——提前返回时服务不带该字段，此处自然不打印。
   if (result.waitWindowHint) {
     console.log(`Hint: ${result.waitWindowHint}`);
   }

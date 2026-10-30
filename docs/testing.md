@@ -18,7 +18,7 @@
 | 合入 main 前 | 在最终候选上跑一次全量 |
 | 只改画像数据（`config/lane-traits.json`）的批次，合入前 | `test/registry-roles/laneTraits.test.js`、`test/application/laneProfile.test.js` 加横切守卫组，不跑全量（决定 0089） |
 
-**横切守卫组**：`test/isolation-infra/docs-consistency.test.js`、`test/isolation-infra/docsSurface.test.js`、`test/isolation-infra/staticRunsGuard.test.js`、`test/isolation-infra/desensitization.test.js`、`test/mcp-surface/m12-10-tool-surface.test.js`。它们检查文档与代码一致、生成层是否需要再生成、测试有没有写进仓库的 `runs/`、被跟踪文件里有没有凭据形状的字面量、MCP 工具面的字节上限，几秒钟跑完，却最常抓到改动的连带问题。新增这类跨全仓的守卫时，把它加进这张清单。
+**横切守卫组**：`test/isolation-infra/docs-consistency.test.js`、`test/isolation-infra/docsSurface.test.js`、`test/isolation-infra/staticRunsGuard.test.js`、`test/isolation-infra/desensitization.test.js`、`test/isolation-infra/controlBytes.test.js`、`test/mcp-surface/m12-10-tool-surface.test.js`。它们检查文档与代码一致、生成层是否需要再生成、测试有没有写进仓库的 `runs/`、被跟踪文件里有没有混进控制字节或非 UTF-8 内容（比如正则里的 `\b` 落成了退格字节）、有没有凭据形状的字面量、MCP 工具面的字节上限，几秒钟跑完，却最常抓到改动的连带问题。新增这类跨全仓的守卫时，把它加进这张清单。
 
 **最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量。
 
