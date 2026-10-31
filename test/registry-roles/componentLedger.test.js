@@ -615,9 +615,9 @@ test("record【运行时身份】: runtimeIdentity 入账 + subject.runtimeFinge
   // honest unverified 形状：version/binaryPath 可 null，稳定 fingerprint 必填，且明确 verified=false。
   const unknown = recordComponentCheck({
     kind: "backend",
-    name: "opencode-serve",
+    name: "kimi-web",
     codeRef: "abc123",
-    runtimeIdentity: { distribution: "opencode-serve", version: null, binaryPath: null, fingerprint: "unverified-v1-0011223344556677", verified: false, reason: "HTTP service backend" },
+    runtimeIdentity: { distribution: "kimi-web", version: null, binaryPath: null, fingerprint: "unverified-v1-0011223344556677", verified: false, reason: "HTTP service backend" },
     result: "blocked",
     blockedReason: "fixture-unavailable",
   });

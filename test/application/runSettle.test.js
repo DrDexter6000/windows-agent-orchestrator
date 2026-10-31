@@ -296,9 +296,9 @@ test("SET-14: 门 5 拒绝——serveUrl 会话 → session_has_stop_route", asy
   try {
     const runId = "run_set14";
     writeLines(join(dir, `${runId}.jsonl`), [
-      ev(runId, 1, "run.started", OLD, { backend: "opencode-serve" }),
+      ev(runId, 1, "run.started", OLD, { backend: "kimi-web" }),
       ev(runId, 2, "run.background_submitted", OLD, { background: true }),
-      ev(runId, 3, "session.created", OLD, { backend: "opencode-serve", backendSessionId: "ses_1", serveUrl: "http://127.0.0.1:1" }),
+      ev(runId, 3, "session.created", OLD, { backend: "kimi-web", backendSessionId: "ses_1", serveUrl: "http://127.0.0.1:1" }),
       ev(runId, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
     ]);
     const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps() });

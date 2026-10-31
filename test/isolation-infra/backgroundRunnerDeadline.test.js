@@ -12,7 +12,7 @@
 //
 // 前台通知行钉在 test/cli.test.js；根语义钉在 test/runManager.test.js。
 
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -21,49 +21,24 @@ import path from "node:path";
 
 import { runBackground, runResumeBackground } from "../../src/backgroundRunner.js";
 import { JsonlTranscript, readTranscript, findState } from "../../src/transcript.js";
+import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+before(() => {
+  process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
+});
+after(() => {
+  delete process.env[KIMI_TEST_TOKEN_ENV];
+});
 
 function makeMockFetch({ assistantDelayMs = 0 } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_td151_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], promptedAt: 0 });
-      return { ok: true, status: 200, async json() { return { data: { id } }; }, async text() { return JSON.stringify({ data: { id } }); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.promptedAt = Date.now();
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      // TD-151：慢 worker——assistant 回复在 prompt 之后 assistantDelayMs 才出现在
-      // 消息流里（> 等待窗 deadline，即"活过 deadline"的构造性证明）。延迟挂在
-      // /message 轮询上而不是 prompt_async（后者阻塞在 start 里，等不到 wait 窗）。
-      if (session && assistantDelayMs > 0 && (Date.now() - session.promptedAt) < assistantDelayMs) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      if (session && assistantDelayMs > 0 && !session.assistantDelivered) {
-        session.assistantDelivered = true;
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: "slow worker survived the deadline" }],
-        });
-      }
-      return { ok: true, status: 200, async json() { return session?.messages ?? []; }, async text() { return JSON.stringify(session?.messages ?? []); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  // TD-151：慢 worker——assistant 回复在提交后 assistantDelayMs 毫秒才出现在
+  // transcript 轮里（> 等待窗 deadline，即"活过 deadline"的构造性证明）。延迟挂
+  // 在 transcript 轮询上而不是提交（后者阻塞在 start 里，等不到 wait 窗）。
+  return runServer(KIMI_TEST_SERVE_URL, {
+    delayMs: assistantDelayMs,
+    replies: ["slow worker survived the deadline"],
+  }).fetchImpl;
 }
 
 // ── 钉 1：后台不杀（TD-148 主害）─────────────────────────────────────────────
@@ -77,11 +52,11 @@ test("TD-148 主害钉: 后台 run 小 waitTimeout + 慢 worker → 活过 deadl
       registry: {
         agents: {
           bg_slow: {
-            backend: "opencode-serve",
-            serveUrl: "http://127.0.0.1:4299",
-            agent: "build",
+            backend: "kimi-web",
+            serveUrl: KIMI_TEST_SERVE_URL,
             cwd: dir,
-            model: { providerID: "p", id: "m" },
+            model: { id: "kimi-code/k3" },
+            tokenEnv: KIMI_TEST_TOKEN_ENV,
             completionMode: "first-stable",
           },
         },

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { before, after } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -9,6 +9,25 @@ import { execSync } from "node:child_process";
 import { runBackground, parseSimpleFlags } from "../../src/backgroundRunner.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
+import {
+  runServer,
+  envelope,
+  detailEnvelope,
+  transcriptEnvelope,
+  turnItem,
+  stepItem,
+  KIMI_TEST_SERVE_URL,
+  KIMI_TEST_TOKEN_ENV,
+  KIMI_TEST_TOKEN_VALUE,
+} from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+before(() => {
+  process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
+});
+after(() => {
+  delete process.env[KIMI_TEST_TOKEN_ENV];
+});
 
 // --- P2 后台生命周期接管（watchdog / detached runner）---
 // 06-18 事故架构洞：fire-and-forget spawn 的孤儿会话脱离任何 WAO 进程，所有防线
@@ -18,47 +37,9 @@ import { rmrfRetry } from "../_rmrfHelper.mjs";
 // 本测试验证进程内核心函数 runBackground：驱动完一个 run + 状态机推进 + transcript 完整。
 
 function makeMockFetch({ assistantDelayMs = 0 } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_bg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], promptedAt: 0 });
-      return { ok: true, status: 200, async json() { return { data: { id } }; }, async text() { return JSON.stringify({ data: { id } }); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.promptedAt = Date.now();
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        if (assistantDelayMs === 0) {
-          // 零延迟：assistant 立即可见（原行为）。
-          session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "bg done" }] });
-        }
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      // TD-151：慢 worker——assistant 在 prompt 之后 assistantDelayms 才出现在消息流
-      // （延迟挂 /message 轮询，不挂 prompt_async——后者阻塞在 start，等不到 wait 窗）。
-      if (session && assistantDelayMs > 0 && (Date.now() - session.promptedAt) < assistantDelayMs) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      if (session && assistantDelayMs > 0 && !session.assistantDelivered) {
-        session.assistantDelivered = true;
-        session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "bg done" }] });
-      }
-      return { ok: true, status: 200, async json() { return session?.messages ?? []; }, async text() { return JSON.stringify(session?.messages ?? []); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  // kimi-web 假服务器（语义对齐原 opencode mock：提交后 assistantDelayMs 毫秒
+  // "bg done" 才出现在 transcript 轮里——延迟挂轮询，不挂提交）。
+  return runServer(KIMI_TEST_SERVE_URL, { delayMs: assistantDelayMs, replies: ["bg done"] }).fetchImpl;
 }
 
 test("P2 runBackground: 驱动 run 到 completed，状态机推进，transcript 完整", async () => {
@@ -67,7 +48,7 @@ test("P2 runBackground: 驱动 run 到 completed，状态机推进，transcript 
     const result = await runBackground({
       agentId: "bg_agent",
       prompt: "do it",
-      registry: { agents: { bg_agent: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
+      registry: { agents: { bg_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
       runDir: dir,
       fetchImpl: makeMockFetch(),
       waitTimeout: 3000,
@@ -99,7 +80,7 @@ test("P2 runBackground（TD-151 迁移）: 小 waitTimeout + 慢 worker → 到�
     const result = await runBackground({
       agentId: "bg_slow",
       prompt: "x",
-      registry: { agents: { bg_slow: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
+      registry: { agents: { bg_slow: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
       runDir: dir,
       fetchImpl: makeMockFetch({ assistantDelayMs: 500 }),
       waitTimeout: 300,
@@ -186,29 +167,52 @@ test("P2 CLI --background: 立即返回 + detached runner 推进状态机到终�
 test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "wao-owner-"));
   try {
-    // slow mock：/message 先空几轮（让 run 卡 running），再返回 assistant（让 run 完成）。
-    // 这样能在 run 进行中观测到 ownership 文件。
-    // 停止验证三面必须可观察且稳定（idle status + 稳定 tokens + 稳定 messages）：
-    // 缺席（404）时 verifyStopQuiet 判 unavailable → 写 run.stop_unverified，
+    // slow mock：transcript 轮先空跑几拍（turn 在 running，让 run 卡 running），
+    // 第 4 拍起 completed 带 assistant 文本（让 run 完成）——这样能在 run 进行中
+    // 观测到 ownership 文件。
+    // 停止验证三面必须可观察且稳定（sessionStatus/detail 投影 idle + 稳定 messages）：
+    // 缺席（40401/抛错）时 verifyStopQuiet 判 unavailable → 写 run.stop_unverified，
     // 且 raiseAlert 是 fire-and-forget，会在 runBackground 返回后异步写 ALERTS.log，
     // 与 finally 的 rm(dir) 竞态。补齐三面让 stop 验证走真实 quiet 判定 → stop_verified。
-    // 用 pathname 精确匹配：backend 会带 ?directory=.../limit=... 查询串，不能
-    // 用裸字符串 includes/endsWith 匹配（/session/status 与 /session/<id> 易混）。
+    // （本测试的会话在终态后仍可探测——与共享 runServer 的"终态即删"形状不同，
+    // 这里钉的就是可观察 quiet。）
+    const sessionSlow = `${KIMI_TEST_SERVE_URL}/api/v1/sessions/session_slow`;
     let polls = 0;
+    let submitted = false;
     const slowFetch = async (url, init = {}) => {
-      const { pathname } = new URL(String(url));
+      const urlStr = String(url);
       const method = init.method ?? "GET";
-      if (method === "POST" && pathname === "/api/session") return { ok: true, status: 200, async json() { return { data: { id: "ses_slow" } }; }, async text() { return JSON.stringify({ data: { id: "ses_slow" } }); } };
-      if (method === "POST" && pathname === "/session/ses_slow/prompt_async") return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      if (method === "GET" && pathname === "/session/ses_slow/message") {
-        polls += 1;
-        const msgs = polls > 3 ? [{ info: { id: "m", role: "assistant" }, parts: [{ type: "text", text: "done" }] }] : [];
-        return { ok: true, status: 200, async json() { return msgs; }, async text() { return JSON.stringify(msgs); } };
+      if (method === "POST" && urlStr === `${KIMI_TEST_SERVE_URL}/api/v1/sessions`) {
+        return envelope({ id: "session_slow" });
       }
-      if (method === "GET" && pathname === "/session/status") return { ok: true, status: 200, async json() { return { ses_slow: { type: "idle" } }; }, async text() { return JSON.stringify({ ses_slow: { type: "idle" } }); } };
-      if (method === "GET" && pathname === "/session/ses_slow") return { ok: true, status: 200, async json() { return { id: "ses_slow", tokens: { input: 100, output: 5, reasoning: 1 }, cost: 0 }; }, async text() { return JSON.stringify({ id: "ses_slow", tokens: { input: 100, output: 5, reasoning: 1 }, cost: 0 }); } };
-      if (method === "POST" && pathname === "/session/ses_slow/abort") return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      return { ok: false, status: 404, async text() { return "x"; } };
+      if (method === "GET" && urlStr === sessionSlow) {
+        return detailEnvelope("session_slow", false, false, null);
+      }
+      if (method === "GET" && urlStr === `${sessionSlow}/messages`) {
+        return envelope({ items: [] });
+      }
+      if (method === "GET" && urlStr === `${sessionSlow}/transcript?agent_id=main`) {
+        if (!submitted) return transcriptEnvelope([]);
+        polls += 1;
+        const done = polls > 3;
+        return transcriptEnvelope([turnItem({
+          turnId: "t0",
+          triggerPromptId: "msg_slow",
+          state: done ? "completed" : "running",
+          steps: done ? [stepItem({ frames: [{ kind: "text", text: "done", role: "assistant" }] })] : [],
+        })]);
+      }
+      if (method === "POST" && urlStr.endsWith(`${sessionSlow}/prompts`)) {
+        submitted = true;
+        return envelope({ prompt_id: "msg_slow", status: "running" });
+      }
+      if (method === "GET" && urlStr === `${sessionSlow}/prompts`) {
+        return envelope({ active: polls > 3 ? null : { prompt_id: "msg_slow" }, queued: [] });
+      }
+      if (method === "POST" && urlStr === `${sessionSlow}/prompts/msg_slow:abort`) {
+        return envelope({ aborted: true });
+      }
+      throw new Error(`unexpected request ${urlStr}`);
     };
 
     let runIdObserved = null;
@@ -216,7 +220,7 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
     const runPromise = runBackground({
       agentId: "owner_agent",
       prompt: "do it",
-      registry: { agents: { owner_agent: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
+      registry: { agents: { owner_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
       runDir: dir,
       fetchImpl: slowFetch,
       waitTimeout: 5000,
@@ -242,7 +246,7 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
     const events = await readTranscript(path.join(dir, `${result.runId}.jsonl`));
     const stopVerified = events.find((e) => e.type === "run.stop_verified");
     assert.ok(stopVerified, "transcript 应有 run.stop_verified（停验证观察到 quiet）");
-    assert.equal(stopVerified.backendSessionId, "ses_slow", "stop_verified 绑定本 run 的 session");
+    assert.equal(stopVerified.backendSessionId, "session_slow", "stop_verified 绑定本 run 的 session");
     assert.equal(events.some((e) => e.type === "run.stop_unverified"), false,
       "不得回到 stop_unverified（unavailable 告警路径）");
     assert.equal(existsSync(path.join(dir, "ALERTS.log")), false,
@@ -307,7 +311,7 @@ test("M12-6 P1-A: runBackground threads frozenGitHead; stale HEAD fails the run 
     let sessionCreations = 0;
     const baseFetch = makeMockFetch();
     const countingFetch = async (url, init = {}) => {
-      if (init.method === "POST" && String(url).endsWith("/api/session")) sessionCreations += 1;
+      if (init.method === "POST" && String(url).endsWith("/api/v1/sessions")) sessionCreations += 1;
       return baseFetch(url, init);
     };
 
@@ -316,7 +320,7 @@ test("M12-6 P1-A: runBackground threads frozenGitHead; stale HEAD fails the run 
       prompt: "x",
       cwd: repo,
       frozenGitHead: frozen,
-      registry: { agents: { bg_p1a: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: repo, model: { providerID: "p", id: "m" } } } },
+      registry: { agents: { bg_p1a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: repo, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } },
       runDir,
       fetchImpl: countingFetch,
       waitTimeout: 1000,
@@ -413,7 +417,7 @@ test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可�
   const never = runBackground({
     agentId: "hb_hang",
     prompt: "hang",
-    registry: { agents: { hb_hang: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
+    registry: { agents: { hb_hang: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
     runDir: dir,
     runId,
     fetchImpl: makeMockFetch(),

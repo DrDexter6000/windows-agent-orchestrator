@@ -52,107 +52,35 @@ async function captureLog(fn) {
   return lines.join("\n");
 }
 
-/** Mock fetch for opencode-serve backend (worker writes a file, then done). */
+import {
+  runServer,
+  KIMI_TEST_SERVE_URL,
+  KIMI_TEST_TOKEN_ENV,
+  KIMI_TEST_TOKEN_VALUE,
+} from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
+process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
+
+/** Mock fetch for the kimi-web backend (assistant replies in order, then "done"). */
 function createMockFetch({ replies = ["Mock response"] } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], replies: [...replies] });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return JSON.stringify({ data: { id } }); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      if (session) {
-        const body = JSON.parse(init.body);
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        const reply = session.replies.shift() ?? "done";
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: reply }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return JSON.stringify(session?.messages ?? []); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { replies: [...replies] }).fetchImpl;
 }
 
-/** Mock fetch that writes a file to the worktree during prompt processing. */
+/** Mock fetch that writes a file to the worktree at prompt submission. */
 function createWorkerFetch({ writePath, writeContent = "modified\n" } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], writePath, writeContent });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return JSON.stringify({ data: { id } }); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      if (session) {
-        const body = JSON.parse(init.body);
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        if (session.writePath) {
-          const { writeFile: wf } = await import("node:fs/promises");
-          await wf(session.writePath, session.writeContent);
-        }
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: "done" }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return JSON.stringify(session?.messages ?? []); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { writePath, writeContent, replies: ["done"] }).fetchImpl;
 }
 
-const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
+const { KimiWebBackend } = await import("../../src/backends/kimiWeb.js");
 
 /** Build config with mock backend. */
 function makeConfig(runDir, repoDir, fetchImpl) {
-  const backend = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
   // M11-8C: delivery mode requires role-contract support (to inject the
-  // Delivery Execution Contract). Production delivery uses process backends
-  // that declare this natively; this fake HTTP backend drives the lifecycle.
-  backend.supportsRoleContract = true;
-  backend.validateRoleContractTransport = async () => {};
+  // Delivery Execution Contract). kimi-web declares supportsRoleContract
+  // natively（role 拼进 prompt 前缀）——无需再给假 HTTP 后端打能力补丁。
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 1000, retries: 0 });
   return {
     registry: "x",
     runDir,
@@ -169,11 +97,11 @@ function makeConfig(runDir, repoDir, fetchImpl) {
         );
         return {
           id,
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4299",
-          agent: "build",
+          backend: "kimi-web",
+          serveUrl: KIMI_TEST_SERVE_URL,
           cwd: repoDir ?? runDir,
-          model: { providerID: "p", id: "m" },
+          model: { id: "kimi-code/k3" },
+          tokenEnv: KIMI_TEST_TOKEN_ENV,
           ...defined,
         };
       },

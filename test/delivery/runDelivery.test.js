@@ -8,7 +8,17 @@ import assert from "node:assert/strict";
 import { RunManager } from "../../src/runManager.js";
 import { Run } from "../../src/runManager.js";
 import { DeliveryError } from "../../src/delivery.js";
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
+import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
+import {
+  runServer,
+  KIMI_TEST_SERVE_URL,
+  KIMI_TEST_TOKEN_ENV,
+  KIMI_TEST_TOKEN_VALUE,
+} from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
+process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
 import { readTranscript, findState, JsonlTranscript } from "../../src/transcript.js";
 import { packageDelivery } from "../../src/delivery.js";
 import { createWorktree } from "../../src/isolation.js";
@@ -50,47 +60,9 @@ async function cleanupDir(dir) {
 }
 
 /** Mock fetch that simulates assistant response + file_written evidence. */
-function createMockFetch({ replies = ["Mock response"], evidence = [] } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], replies: [...replies], evidence: [...evidence] });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return JSON.stringify({ data: { id } }); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        const reply = session.replies.shift() ?? "done";
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: reply }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return JSON.stringify(session?.messages ?? []); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+function createMockFetch({ replies = ["Mock response"] } = {}) {
+  // kimi-web 假服务器（61a：现行唯一 serve 家族后端）——逐次回复队列，耗尽回 "done"。
+  return runServer(KIMI_TEST_SERVE_URL, { replies: [...replies] }).fetchImpl;
 }
 
 /** Create RunManager backed by mock fetch + temp repo. */
@@ -112,11 +84,11 @@ function makeManager(runDir, repoDir, fetchImpl, opts = {}) {
       );
       return {
         id,
-        backend: "opencode-serve",
-        serveUrl: "http://127.0.0.1:4299",
-        agent: "build",
+        backend: "kimi-web",
+        serveUrl: KIMI_TEST_SERVE_URL,
         cwd: repoDir ?? runDir,
-        model: { providerID: "p", id: "m" },
+        model: { id: "kimi-code/k3" },
+        tokenEnv: KIMI_TEST_TOKEN_ENV,
         ...defined,
       };
     },
@@ -125,18 +97,11 @@ function makeManager(runDir, repoDir, fetchImpl, opts = {}) {
   return new RunManager({
     config,
     readRegistry,
-    // M11-8C: delivery mode now requires a backend that supports role-contract
-    // injection (to deliver the control-owned Delivery Execution Contract).
-    // These integration tests drive the packager via an opencode-serve backend;
-    // declare the capability so the delivery contract can be carried (the fake
-    // HTTP event stream is unaffected). Production delivery uses claude-code/
-    // codex/kimi-code which declare supportsRoleContract = true natively.
-    backendFor: () => {
-      const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
-      b.supportsRoleContract = true;
-      b.validateRoleContractTransport = async () => {};
-      return b;
-    },
+    // M11-8C: delivery mode requires role-contract support (to deliver the
+    // control-owned Delivery Execution Contract). These integration tests
+    // drive the packager via kimi-web——supportsRoleContract 原生声明（role 拼
+    // 进 prompt 前缀），无需给假后端打能力补丁。
+    backendFor: () => new KimiWebBackend({ fetchImpl, timeout: 1000, retries: 0 }),
     ...opts.manager,
   });
 }
@@ -284,7 +249,7 @@ test("3A1-05: unsupported mode rejects before backend.spawn", async () => {
     // Wrap fetch to count spawn attempts
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
-      if (urlStr.includes("/api/session")) spawnCount++;
+      if (urlStr.includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -321,7 +286,7 @@ test("3A1-06: delivery with isolation none rejects before backend.spawn", async 
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
-      if (urlStr.includes("/api/session")) spawnCount++;
+      if (urlStr.includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -360,7 +325,7 @@ test("3A1-07: delivery with ephemeral worktree rejects before backend.spawn", as
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
-      if (urlStr.includes("/api/session")) spawnCount++;
+      if (urlStr.includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     // (a) Agent isolation {type:"worktree",strategy:"ephemeral"} via the
@@ -374,11 +339,11 @@ test("3A1-07: delivery with ephemeral worktree rejects before backend.spawn", as
           getAgent(id) {
             return {
               id,
-              backend: "opencode-serve",
-              serveUrl: "http://127.0.0.1:4299",
-              agent: "build",
+              backend: "kimi-web",
+              serveUrl: KIMI_TEST_SERVE_URL,
               cwd: agentDir,
-              model: { providerID: "p", id: "m" },
+              model: { id: "kimi-code/k3" },
+              tokenEnv: KIMI_TEST_TOKEN_ENV,
               isolation: { type: "worktree", strategy: "ephemeral" },
             };
           },
@@ -442,7 +407,7 @@ test("3A1-08: invalid allowedPaths rejects before spawn using delivery-kernel co
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -479,7 +444,7 @@ test("3A1-09: missing or whitespace-only verification declaration rejects before
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -827,11 +792,11 @@ function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, 
       );
       return {
         id,
-        backend: "opencode-serve",
-        serveUrl: "http://127.0.0.1:4299",
-        agent: "build",
+        backend: "kimi-web",
+        serveUrl: KIMI_TEST_SERVE_URL,
         cwd: repoDir ?? runDir,
-        model: { providerID: "p", id: "m" },
+        model: { id: "kimi-code/k3" },
+        tokenEnv: KIMI_TEST_TOKEN_ENV,
         ...defined,
       };
     },
@@ -840,66 +805,18 @@ function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, 
   return new RunManager({
     config,
     readRegistry,
-    // M11-8C: declare role-contract support so delivery mode can inject the
-    // Delivery Execution Contract (production delivery uses process backends
-    // that declare this natively; this fake HTTP backend drives the packager).
-    backendFor: () => {
-      const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
-      b.supportsRoleContract = true;
-      b.validateRoleContractTransport = async () => {};
-      return b;
-    },
+    // M11-8C: delivery mode requires role-contract support (to deliver the
+    // control-owned Delivery Execution Contract). kimi-web declares
+    // supportsRoleContract natively（role 拼进 prompt 前缀）——无需能力补丁。
+    backendFor: () => new KimiWebBackend({ fetchImpl, timeout: 1000, retries: 0 }),
     packageDeliveryFn,
     verifyDeliveryFn: opts.verifyDeliveryFn ?? dummyVerifier,
   });
 }
 
-/** Mock fetch that writes a file to the worktree via evidence, simulating worker output. */
+/** Mock fetch that writes a file to the worktree at prompt submission, simulating worker output. */
 function createWorkerFetch({ writePath, writeContent = "modified\n" } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], writePath, writeContent });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return JSON.stringify({ data: { id } }); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        // Simulate worker writing a file
-        if (session.writePath) {
-          const { writeFile: wf } = await import("node:fs/promises");
-          await wf(session.writePath, session.writeContent);
-        }
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: "done" }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return JSON.stringify(session?.messages ?? []); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { writePath, writeContent, replies: ["done"] }).fetchImpl;
 }
 
 test("3A2-01: completed backend + valid diff packages exactly one delivery commit", async () => {
@@ -976,27 +893,8 @@ test("3A2-05: backend failure never calls packager", async () => {
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg05-"));
   let packageCount = 0;
   try {
-    // Mock where /message throws → streamEvents emits done(failed)
-    const failingFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_fail" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        throw new Error("backend gone");
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // Mock where the transcript poll throws → streamEvents emits done(failed)
+    const failingFetch = runServer(KIMI_TEST_SERVE_URL, { failTranscriptAfterSubmit: "backend gone" }).fetchImpl;
     const mgr = makeManagerWithPackager(
       runDir, repo, failingFetch,
       () => { packageCount++; return {}; },
@@ -1596,26 +1494,8 @@ test("3A2-06: wait deadline expiry notifies (never kills) and never calls packag
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg06-"));
   let packageCount = 0;
   try {
-    const timeoutFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_timeout" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // transcript 轮恒 running——永不完成（到期只通知不杀的构造形状）
+    const timeoutFetch = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
     const mgr = makeManagerWithPackager(
       runDir, repo, timeoutFetch,
       () => { packageCount++; return {}; },
@@ -1651,56 +1531,13 @@ test("3A2-07: budget failure never calls packager", async () => {
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg07-"));
   let packageCount = 0;
   try {
-    // Mock that returns session with large token count → budget exceeded.
-    // Returns empty messages first so metrics polling (every 5 polls) triggers
-    // before completion detection.
-    let pollCount = 0;
-    const budgetFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_budget" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        pollCount++;
-        // Return empty for first 6 polls so metrics polling triggers,
-        // then return assistant message
-        if (pollCount < 7) {
-          return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-        }
-        return {
-          ok: true, status: 200,
-          async json() {
-            return [{
-              info: { id: "msg_reply", role: "assistant" },
-              parts: [{ type: "text", text: "done" }],
-            }];
-          },
-          async text() { return "[]"; },
-        };
-      }
-      // Session endpoint for metrics polling — return large token count.
-      // trySessionMetrics reads sess.tokens directly (not under .data).
-      if (init.method === "GET" && urlStr.includes("/session/")) {
-        return {
-          ok: true, status: 200,
-          async json() {
-            return { tokens: { input: 1000, output: 1000, reasoning: 0 } };
-          },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // Mock whose completed turn carries a large usage → the metrics event the
+    // kimi-web backend emits（completed 轮 steps[].usage 求和）trips the budget
+    // gate before done(completed) reaches packaging.
+    const budgetFetch = runServer(KIMI_TEST_SERVE_URL, {
+      replies: ["done"],
+      usage: { inputOther: 1000, output: 1000, inputCacheRead: 0, inputCacheCreation: 0 },
+    }).fetchImpl;
     const mgr = makeManagerWithPackager(
       runDir, repo, budgetFetch,
       () => { packageCount++; return {}; },
@@ -1724,26 +1561,8 @@ test("3A2-08: manual abort before packaging never calls packager", async () => {
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg08-"));
   let packageCount = 0;
   try {
-    const slowFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_slow" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // transcript 轮恒 running——永不完成（手动 abort 的构造形状）
+    const slowFetch = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
     const mgr = makeManagerWithPackager(
       runDir, repo, slowFetch,
       () => { packageCount++; return {}; },
@@ -1799,37 +1618,9 @@ test("3A2-18: external terminal wins before package gate — no Git commit and n
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg18-"));
   let packageCount = 0;
   try {
-    // Mock that returns one assistant message so backend reports done:completed.
+    // Mock that completes the turn so backend reports done:completed.
     // But we externally claim aborted before waitForCompletion reaches packaging.
-    const completeFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_stop_gate" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return {
-          ok: true, status: 200,
-          async json() {
-            return [{
-              info: { id: "msg_reply", role: "assistant" },
-              parts: [{ type: "text", text: "done" }],
-            }];
-          },
-          async text() { return "[]"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    const completeFetch = runServer(KIMI_TEST_SERVE_URL, { replies: ["done"] }).fetchImpl;
 
     const mgr = makeManagerWithPackager(
       runDir, repo, completeFetch,
@@ -1986,7 +1777,7 @@ test("3A-SEC-01: runId with shell metacharacters rejected before worktree creati
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -2020,7 +1811,7 @@ test("3A-SEC-02: runId with path traversal rejected", async () => {
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -2051,7 +1842,7 @@ test("3A-SEC-03: runId with path separator rejected", async () => {
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -2082,7 +1873,7 @@ test("3A-SEC-04: runId with ampersand rejected", async () => {
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -2113,7 +1904,7 @@ test("3A-SEC-05: runId with spaces rejected", async () => {
   try {
     const fetchImpl = createMockFetch();
     const countingFetch = async (...args) => {
-      if (String(args[0]).includes("/api/session")) spawnCount++;
+      if (String(args[0]).includes("/api/v1/sessions")) spawnCount++;
       return fetchImpl(...args);
     };
     const mgr = makeManager(runDir, agentDir, countingFetch);
@@ -3173,20 +2964,8 @@ test("3B2-09: backend failure → verifierCount===0", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-09-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b209-"));
   let verifyCount = 0;
-  const failingFetch = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_fail" } }; }, async text() { return "{}"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) { throw new Error("backend gone"); }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return ""; } };
-  };
+  // transcript 轮询抛错 → streamEvents 收成 done(failed)
+  const failingFetch = runServer(KIMI_TEST_SERVE_URL, { failTranscriptAfterSubmit: "backend gone" }).fetchImpl;
   try {
     const mgr = makeManagerWithPackager(
       runDir, repo, failingFetch,
@@ -3213,23 +2992,8 @@ test("3B2-10: wait timeout → verifierCount===0", async () => {
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b210-"));
   let verifyCount = 0;
   // A fetch that never produces a done event — will hang until waitTimeout
-  const hangingFetch = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_hang" } }; }, async text() { return "{}"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      // Return messages but no done signal — will keep polling
-      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return ""; } };
-  };
+  // transcript 轮恒 running——永不发出 done（将一直轮询）
+  const hangingFetch = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
   try {
     const mgr = makeManagerWithPackager(
       runDir, repo, hangingFetch,
@@ -3292,22 +3056,8 @@ test("3B2-12: user abort → verifierCount===0", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-12-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b212-"));
   let verifyCount = 0;
-  const hangingFetch = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_abort" } }; }, async text() { return "{}"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return ""; } };
-  };
+  // transcript 轮恒 running——永不发出 done
+  const hangingFetch = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
   try {
     const mgr = makeManagerWithPackager(
       runDir, repo, hangingFetch,
@@ -3479,11 +3229,13 @@ test("3B2-18: transcript append failure in verification propagates through waitF
 });
 
 /**
- * 3B2-20: HTTP resume respects the injected verifier function.
- * The Run created via HTTP resume must carry verifyDeliveryFn from RunManager,
- * not fall back to the default.
+ * 3B2-20: resume of a serve-backed run respects the injected verifier function.
+ * The Run created on resume must carry verifyDeliveryFn from RunManager,
+ * not fall back to the default. kimi-web declares replayByRespawn, so this
+ * exercises the replay branch; the attach branch only served opencode-serve
+ * and goes with it in 61b.
  */
-test("3B2-20: HTTP resume respects injected verifier (CTO closeout C)", async () => {
+test("3B2-20: serve-backed resume respects injected verifier (CTO closeout C)", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-20-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b220-"));
   let verifyCount = 0;
@@ -3506,7 +3258,7 @@ test("3B2-20: HTTP resume respects injected verifier (CTO closeout C)", async ()
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(originalWorktree, "src", "a.js"), "resume modified\n");
 
-    // Resume via HTTP path (opencode-serve is HTTP backend)
+    // Resume（kimi-web 声明 replayByRespawn → 走 replay 重放分支；61a 迁移注）
     const resumedRun = await mgr.resume("run_3b2_test_20", { runDir });
     assert.ok(resumedRun, "resume must succeed");
     // The resumed Run must carry the injected verifier (not default)
@@ -3794,7 +3546,7 @@ test("M126-CAUSAL: verification starts only after worker cleanup/quiet check com
   let verifierObserved = null;
   // Causal observable: _runCleanup invokes this.handle.abort() before it hands
   // control to _verifyDeliveryResult (see RunManager._runCleanup → the
-  // _sessionKilled/abort path, awaited before the verifier). The mock opencode
+  // _sessionKilled/abort path, awaited before the verifier). The serve
   // handle exposes abort(); we wrap it so the verifier can assert cleanup ran.
   // (We do NOT rely on run.stop_verified/run.cleanup_done transcript events:
   // those are backend-specific — the mock handle lacks session/messages, so the

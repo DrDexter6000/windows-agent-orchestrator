@@ -323,9 +323,9 @@ test("R14-AC-1: backend 事实取末条绑定 session.created；无匹配降级 
   const snapA = await reader([
     bound(),
     bound({ type: "session.created", backend: "process", backendSessionId: "proc_a", seq: 2 }),
-    bound({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_b", seq: 3 }),
+    bound({ type: "session.created", backend: "kimi-web", backendSessionId: "srv_b", seq: 3 }),
   ]);
-  assert.equal(snapA.backend, "opencode-serve", "末条绑定 session.created 的 backend 胜出");
+  assert.equal(snapA.backend, "kimi-web", "末条绑定 session.created 的 backend 胜出");
 
   // (b) 无 session.created → "unknown"（报告面既有降级不变）。
   const snapB = await reader([bound()]);
@@ -624,6 +624,8 @@ test("R16-CO-1: 篡改探针 — 外 run 尾条 session.created 不再重定向 
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     // 修复前 findLatest 采信尾条 → serve 路径 → fetch 打到伪造 serveUrl/sessionId。
+    // 61a 注：伪造行保留 opencode-serve——serve 取消息路径只服务它，换成 kimi-web
+    // 后零 fetch 就不再能单独证明重定向面关闭（同 CO-2/3/5，61b 随后端一并处理）。
     appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "session.created", runId: "run_evil", agentId: "researcher",
       backend: "opencode-serve", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
@@ -643,6 +645,9 @@ test("R16-CO-1: 篡改探针 — 外 run 尾条 session.created 不再重定向 
 });
 
 test("R16-CO-2: 篡改探针 — 外 run 尾条 run.started.cwd 不再重定向 serve directory 参数（首条绑定纪律）", async () => {
+  // 61a 注：本组钉 runCollect 的 serve 取消息路径——该路径只服务 opencode-serve
+  //（kimi-web 走转录重建，不发 serve fetch），故保留 opencode-serve 夹具（61b 随
+  // 后端一并退役）。
   const dir = mkdtempSync(join(tmpdir(), "wao-r16-co2-"));
   let captured = null;
   try {
@@ -710,8 +715,8 @@ test("R16-CO-4: legacy 降级 — 无信封（pre-envelope）session.created 不
     // 修复前无绑定 findLatest 采信它并发起 serve fetch；R16 起不可见）。
     const lines = [
       { type: "run.submitted", agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
-      { type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
-      { type: "run.started", backend: "opencode-serve", cwd: "D:/legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+      { type: "session.created", backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "run.started", backend: "kimi-web", cwd: "D:/legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
     ];
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
 
@@ -1135,7 +1140,7 @@ test("R18-AW-5: SSOT 序语义钉 — compact 的 session 反查取末条【绑�
       { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-07-28T00:00:00.000Z", seq: 1 },
       { type: "session.created", backend: "process", backendSessionId: "proc_first", runId, agentId: "coder_low", seq: 2 },
       { type: "run.started", backend: "claude-code", runId, agentId: "coder_low", ts: "2026-07-28T00:00:01.000Z", seq: 3 },
-      { type: "session.created", backend: "opencode-serve", backendSessionId: "sess_last", runId, agentId: "coder_low", seq: 4 },
+      { type: "session.created", backend: "kimi-web", backendSessionId: "sess_last", runId, agentId: "coder_low", seq: 4 },
       { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }], runId, agentId: "coder_low", ts: "2026-07-28T00:00:10.000Z", seq: 5 },
       { type: "run.completed", runId, agentId: "coder_low", ts: "2026-07-28T00:10:00.000Z", seq: 6 },
       { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-07-28T00:10:01.000Z", seq: 7 },
@@ -1143,7 +1148,7 @@ test("R18-AW-5: SSOT 序语义钉 — compact 的 session 反查取末条【绑�
     writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
     appendForeignLine(resolveTranscriptPath(dir, runId), {
       type: "session.created", runId: "run_evil", agentId: "coder_low",
-      backend: "opencode-serve", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
+      backend: "kimi-web", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
     });
 
     const out = await runAwaitResult({ runId, runDir: dir, waitMs: 0 });
@@ -1151,7 +1156,7 @@ test("R18-AW-5: SSOT 序语义钉 — compact 的 session 反查取末条【绑�
     // 手搓反查（R18 前）与 findLatestBound（R18 后）同为「末条 runId 绑定」——
     // 本探针钉交换后的语义原样：多条绑定取末条，外 run 尾条不可见。行为恒等
     // 交换（纪律一致性），设计上不红（R14-CR-1 / R16-CO-3 同口径）。
-    assert.equal(out.result.backend, "opencode-serve", "末条绑定 session.created 的 backend 胜出");
+    assert.equal(out.result.backend, "kimi-web", "末条绑定 session.created 的 backend 胜出");
     assert.notEqual(out.result.backend, undefined);
   } finally { cleanupDir(dir); }
 });

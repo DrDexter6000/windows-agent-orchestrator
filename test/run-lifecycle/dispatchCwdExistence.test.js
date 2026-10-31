@@ -33,7 +33,7 @@
 //      Error still owns the no-explicit-cwd sessionReuse face (CE-10); a registry
 //      agent without any cwd is rejected by the registry SSOT, not by the
 //      existence check (CE-11).
-//   3b. Capability symmetry (R7-C C-2) — an HTTP-shape backend (opencode-serve,
+//   3b. Capability symmetry (R7-C C-2) — an HTTP-shape backend (kimi-web,
 //      no preflightInvocation) is exempt at layer 1 exactly as at layer 2: a
 //      bad registry cwd does NOT refuse the dispatch (CE-13).
 //   4b. Priority in the corner (R7-C C-3) — a sessionReuse agent with NO
@@ -537,36 +537,45 @@ test("CE-12: DispatchCwdNotFoundError exported from runDispatch.js IS the shared
 // 9. Capability symmetry (R7-C C-2) — HTTP backends exempt at layer 1 too
 // =====================================================================
 
-test("CE-13: opencode-serve agent (no preflightInvocation) + nonexistent registry cwd → NOT refused, forks exactly as before", async () => {
+test("CE-13: kimi-web agent (no preflightInvocation) + nonexistent registry cwd → NOT refused, forks exactly as before", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ce13-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     // Symmetry pin: layer 2 (RunManager.start, runManager.js) keys the cwd
     // gate on the declared preflightInvocation capability — an HTTP backend
-    // (opencode-serve) threads cwd to the serve API as a REMOTE directory
+    // (kimi-web) threads cwd to the serve API as a REMOTE directory
     // hint, never spawns a local process with that cwd, and is exempt. Layer
     // 1 must not be stricter than layer 2 (the C-2 asymmetry): dispatching
-    // the example registry's coder_opencode_fallback shape with a registry
+    // a serve-family registry shape with a registry
     // cwd that does not exist locally must dispatch exactly as pre-R7 — the
     // detached runner forks; whether the REMOTE directory exists is the serve
     // side's business, not a local spawn failure.
     const registryPath = makeRegistry(dir, {
-      coder_opencode_fallback: {
-        backend: "opencode-serve",
+      coder_kw_fallback: {
+        backend: "kimi-web",
         cwd: PLACEHOLDER_CWD,
         serveUrl: "http://127.0.0.1:4297",
-        model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
+        model: { id: "kimi-code/k3" },
+        tokenEnv: "CE13_KW_TEST_TOKEN",
       },
     });
     const runDir = join(dir, "runs");
-    const result = await dispatchRun({
-      agentId: "coder_opencode_fallback",
-      prompt: "x",
-      registryPath,
-      runDir,
-      spawnFn: fakeSpawn,
-      userEnvReader: NO_ENV_READER,
-    });
+    // kimi-web 的 tokenEnv 是必填凭据（dispatch 层 1 同样把关；61a 迁移加的面）
+    //——设假值，测完即删。
+    process.env.CE13_KW_TEST_TOKEN = "ce13-kw-token-value";
+    let result;
+    try {
+      result = await dispatchRun({
+        agentId: "coder_kw_fallback",
+        prompt: "x",
+        registryPath,
+        runDir,
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      });
+    } finally {
+      delete process.env.CE13_KW_TEST_TOKEN;
+    }
     assert.equal(result.accepted, true, "the HTTP-shape dispatch is NOT refused by the local cwd gate");
     assert.equal(calls.length, 1, "the detached runner forked exactly once");
     assert.equal(calls[0].args.includes("--cwd"), false, "no explicit --cwd was supplied to thread");
@@ -936,6 +945,9 @@ test("MO-7: RunManager.start authoritative refusals — certified conflict, reus
   }
 });
 
+// 61a 注：MO-8 第一腿钉 opencode-serve 的 {providerID,id,variant} 模型形状在
+// --model 覆盖下的兄弟字段保全——kimi-web 拒绝 providerID/variant（裸 id 通道），
+// 迁不过去；保留 opencode-serve 夹具，61b 随后端退役时一并处置。
 test("MO-8: sibling preservation — opencode-serve {providerID,id,variant} and the no-model tester shape", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mo8-"));
   try {
@@ -1621,6 +1633,8 @@ test("RO-7: RunManager.start authoritative refusals — certified conflict, reus
   }
 });
 
+// 61a 注：RO-8 第一腿钉 OpenCodeServeBackend 自身的 reasoning.effort 拒绝文案
+//（生产类行为，非通用 serve 样例）；保留，61b 随后端退役时一并处置。
 test("RO-8: natural per-backend policy refusals — opencode-serve, deepseek-harness minimal, kimi non-K3 (hint names --reasoning)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ro8-"));
   try {

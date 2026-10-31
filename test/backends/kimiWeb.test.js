@@ -46,8 +46,23 @@ import { backendFor, backendCapabilitySnapshot } from "../../src/backends/factor
 import { normalizeAgent } from "../../src/registry.js";
 import { verifyStopQuiet } from "../../src/backends/opencodeStopVerify.js";
 
-const TOKEN_ENV = "KIMI_WEB_TEST_TOKEN";
-const TOKEN_VALUE = "kimi-web-test-token-value-0123456789";
+// 61a：底层信封/路由夹具迁至共享文件（多文件共用，同一函数只留一份）。
+import {
+  KIMI_TEST_TOKEN_ENV,
+  KIMI_TEST_TOKEN_VALUE,
+  kimiServer,
+  envelope,
+  jsonResponse,
+  detailEnvelope,
+  transcriptEnvelope,
+  turnItem,
+  stepItem,
+  spawnOkRoutes,
+  turnScriptServer,
+} from "../fixtures/kimiWebServe.js";
+
+const TOKEN_ENV = KIMI_TEST_TOKEN_ENV;
+const TOKEN_VALUE = KIMI_TEST_TOKEN_VALUE;
 
 before(() => {
   process.env[TOKEN_ENV] = TOKEN_VALUE;
@@ -66,138 +81,6 @@ function makeAgent(overrides = {}) {
     tokenEnv: TOKEN_ENV,
     ...overrides,
   };
-}
-
-/** 假 kimi web 服务器：记录全部请求，按测试提供的 handler 应答。 */
-function kimiServer(handler) {
-  const calls = [];
-  const fetchImpl = async (url, init = {}) => {
-    const urlStr = String(url);
-    calls.push({
-      url: urlStr,
-      method: init.method ?? "GET",
-      body: init.body,
-      headers: init.headers ?? {},
-    });
-    return handler(urlStr, init, calls.length);
-  };
-  return { calls, fetchImpl };
-}
-
-/** kimi web 统一响应信封 {code,msg,data}（code===0 即成功）。 */
-function envelope(data, { code = 0, msg = "" } = {}) {
-  return jsonResponse({ code, msg, data });
-}
-
-function jsonResponse(value, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    async json() {
-      return value;
-    },
-    async text() {
-      return JSON.stringify(value);
-    },
-  };
-}
-
-/** 会话详情健康形状（A4 在场门：id 与 busy/main_turn_active 都必须在场）。 */
-function detailEnvelope(sessionId, busy, mainTurnActive, reason) {
-  return envelope({
-    id: sessionId,
-    busy,
-    main_turn_active: mainTurnActive,
-    last_turn_reason: reason,
-    usage: {},
-  });
-}
-
-/** transcript 信封（data.items 轮粒度 + seq 水位 + has_more；v8 只消费 items）。 */
-function transcriptEnvelope(items, extra = {}) {
-  return envelope({ items, seq: 7, has_more: false, ...extra });
-}
-
-/** transcript 轮条目（形状锚 = 2026-09-30 live 实测，见 backend 文件头）。 */
-function turnItem(overrides = {}) {
-  return {
-    kind: "turn",
-    turnId: "t0",
-    triggerPromptId: "msg_q1",
-    ordinal: 0,
-    state: "completed",
-    prompt: "hi",
-    endedAt: "2026-09-30T12:00:00.000Z",
-    durationMs: 1234,
-    error: null,
-    steps: [],
-    ...overrides,
-  };
-}
-
-/** transcript step 条目（usage/frames 形状锚 = live 实测）。 */
-function stepItem(overrides = {}) {
-  return {
-    stepId: "s0",
-    turnId: "t0",
-    ordinal: 0,
-    state: "completed",
-    usage: { inputOther: 100, output: 7, inputCacheRead: 10, inputCacheCreation: 3 },
-    llmTiming: { firstTokenMs: 120, totalMs: 900 },
-    frames: [{ kind: "text", text: "answer", role: "assistant" }],
-    ...overrides,
-  };
-}
-
-/**
- * spawn 成功所需的最小路由（fresh 轮）。v8 起 spawn 时序 = POST /sessions →
- * GET 会话详情（F3 提交前静默门，idle 即过）→ GET transcript?agent_id=main
- * （preSubmitTurnIds 观察锚——不参与判定）→ POST /prompts；preTurns 即提交前
- * transcript 内容。
- */
-function spawnOkRoutes(sessionId = "session_new", preTurns = []) {
-  return (url) => {
-    if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: sessionId });
-    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}`) {
-      return detailEnvelope(sessionId, false, false, null);
-    }
-    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}/transcript?agent_id=main`) {
-      return transcriptEnvelope(preTurns);
-    }
-    if (url.endsWith(`/api/v1/sessions/${sessionId}/prompts`)) {
-      return envelope({ prompt_id: "msg_q1", status: "running" });
-    }
-    throw new Error(`unexpected ${url}`);
-  };
-}
-
-/**
- * 事件轮（transcript 轮询）夹具：spawn 阶段（提交前 transcript 读）返回
- * preTurns；markSpawned() 之后每拍按 script 回放（script[i-1] 为第 i 拍的
- * items——数组成员或 (pollNumber) => items 函数；超出脚本长度恒重复最后一项）。
- * polls() 只计事件轮拍数（不含 spawn 的提交前读）。
- */
-function turnScriptServer(sessionId, { promptId = "msg_q1", preTurns = [], script = [] } = {}) {
-  let spawned = false;
-  let polls = 0;
-  const handler = (url) => {
-    if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: sessionId });
-    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}`) {
-      return detailEnvelope(sessionId, false, false, null);
-    }
-    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}/transcript?agent_id=main`) {
-      if (!spawned) return transcriptEnvelope(preTurns);
-      polls += 1;
-      const entry = script[Math.min(polls - 1, script.length - 1)];
-      const items = typeof entry === "function" ? entry(polls) : (entry ?? []);
-      return transcriptEnvelope(items);
-    }
-    if (url.endsWith(`/api/v1/sessions/${sessionId}/prompts`)) {
-      return envelope({ prompt_id: promptId, status: "running" });
-    }
-    throw new Error(`unexpected ${url}`);
-  };
-  return { handler, markSpawned: () => { spawned = true; }, polls: () => polls };
 }
 
 /**

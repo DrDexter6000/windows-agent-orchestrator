@@ -117,7 +117,7 @@ function makeProcessBackend() {
 }
 
 /**
- * A fake HTTP backend (opencode-serve shape): NO preflightInvocation — the
+ * A fake HTTP backend (kimi-web shape): NO preflightInvocation — the
  * layer-2 cwd gate must NOT apply (cwd is a remote directory hint there).
  */
 function makeHttpBackend() {
@@ -129,7 +129,7 @@ function makeHttpBackend() {
     async spawn(agent, task) {
       spawns.push({ agent, task });
       return {
-        backend: "opencode-serve",
+        backend: "kimi-web",
         backendSessionId: "s2",
         messageId: "m2",
         admittedSeq: 1,
@@ -316,15 +316,22 @@ test("RCE-6: HTTP-shape backend (no preflightInvocation) + nonexistent cwd → g
   const dir = mkdtempSync(join(tmpdir(), "wao-rce6-"));
   const { backend, spawns } = makeHttpBackend();
   try {
-    // opencode-serve shape: agent.cwd is threaded to the serve API as a REMOTE
+    // kimi-web shape: agent.cwd is threaded to the serve API as a REMOTE
     // directory hint — there is no local spawn with that cwd, so no local
     // ENOENT trap, and the existence gate must not fire. This also pins the
-    // compat contract the repo's own opencode-serve fixtures rely on.
+    // compat contract the repo's own serve-family fixtures rely on.
     const registryPath = makeRegistry(dir, {
-      surveyor: { backend: "opencode-serve", cwd: PLACEHOLDER_CWD, serveUrl: "http://127.0.0.1:4299", model: { providerID: "p", id: "m" } },
+      surveyor: { backend: "kimi-web", cwd: PLACEHOLDER_CWD, serveUrl: "http://127.0.0.1:4299", model: { id: "kimi-code/k3" }, tokenEnv: "RCE6_KW_TEST_TOKEN" },
     });
     const manager = makeManager({ registryPath, runDir: join(dir, "runs"), backend });
-    const run = await manager.start("surveyor", { prompt: "x" });
+    // kimi-web 的 tokenEnv 是必填凭据（61a 迁移加的面）——设假值，测完即删。
+    process.env.RCE6_KW_TEST_TOKEN = "rce6-kw-token-value";
+    let run;
+    try {
+      run = await manager.start("surveyor", { prompt: "x" });
+    } finally {
+      delete process.env.RCE6_KW_TEST_TOKEN;
+    }
     assert.ok(run.runId, "start proceeds (pre-R7 behavior preserved)");
     assert.equal(spawns.length, 1, "spawn reached, cwd threaded as before");
   } finally {

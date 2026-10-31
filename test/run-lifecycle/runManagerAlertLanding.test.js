@@ -69,7 +69,7 @@ test("TD-239-R1: budget 告警落转录目录——config.runDir ≠ 实际转�
     const backend = {
       async spawn() {
         return {
-          backend: "opencode-serve",
+          backend: "kimi-web",
           backendSessionId: "ses_td239_r1",
           messageId: "msg_td239_r1",
           admittedSeq: null,
@@ -95,7 +95,7 @@ test("TD-239-R1: budget 告警落转录目录——config.runDir ≠ 实际转�
     };
     const readRegistry = async () => ({
       getAgent(id) {
-        return { id, backend: "opencode-serve", serveUrl: "http://x", cwd: root, tokenBudget: 500000, tokenBudgetMultiplier: 100 };
+        return { id, backend: "kimi-web", serveUrl: "http://x", cwd: root, tokenBudget: 500000, tokenBudgetMultiplier: 100 };
       },
       listAgents() { return []; },
     });

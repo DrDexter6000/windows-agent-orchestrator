@@ -279,16 +279,16 @@ test("TD-100.7: taskkill 后 PID 已死 → outcome=killed + stop_verified", asy
 });
 
 // ---------------------------------------------------------------------------
-// 8. opencode loser 不调用 backend.abort/executeStopWithVerification
+// 8. serve 后端 loser 不调用 backend.abort/executeStopWithVerification
 // ---------------------------------------------------------------------------
-test("TD-100.8: opencode loser 不调用 executeStopWithVerification", async () => {
+test("TD-100.8: kimi-web loser 不调用 executeStopWithVerification", async () => {
   const dir = await makeDir();
   try {
-    // 构造一个 opencode (有 serveUrl) 且已 completed 的 transcript
-    const tp = join(dir, "run_opencode_done.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_opencode_done", agentId: "agent" });
-    await t.append("run.started", { backend: "opencode-serve" });
-    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_done", serveUrl: "http://localhost:1" });
+    // 构造一个 kimi-web (有 serveUrl) 且已 completed 的 transcript
+    const tp = join(dir, "run_kimi_done.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_kimi_done", agentId: "agent" });
+    await t.append("run.started", { backend: "kimi-web" });
+    await t.append("session.created", { backend: "kimi-web", backendSessionId: "ses_done", serveUrl: "http://localhost:1" });
     await t.transitionState(null, "pending", "created");
     await t.transitionState("pending", "submitted", "spawned");
     await t.transitionState("submitted", "running", "first_event");
@@ -298,14 +298,14 @@ test("TD-100.8: opencode loser 不调用 executeStopWithVerification", async () 
     let execStopCalls = 0;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_opencode_done", "--run-dir", dir, ...stopProofFlags(dir, "run_opencode_done")], { runDir: dir }, {
+      await stopCommand(["run_kimi_done", "--run-dir", dir, ...stopProofFlags(dir, "run_kimi_done")], { runDir: dir }, {
         executeStop: async () => { execStopCalls++; return { verified: true, abortCalled: true, taskkillCalled: false }; },
         alert: async () => {},
       });
     });
     const parsed = JSON.parse(out);
     assert.equal(parsed.terminalAccepted, false);
-    assert.equal(execStopCalls, 0, "opencode loser 不调 executeStopWithVerification");
+    assert.equal(execStopCalls, 0, "kimi-web loser 不调 executeStopWithVerification");
     assert.equal(parsed.sideEffectAttempted, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -313,22 +313,41 @@ test("TD-100.8: opencode loser 不调用 executeStopWithVerification", async () 
 });
 
 // ---------------------------------------------------------------------------
-// 9. opencode winner verified/unverified 两路径保持同一事件语义
+// 9. kimi-web winner verified/unverified 两路径保持同一事件语义
+//（61a：kimi-web 的停止目标解析需要 registry agent + token——目标解析成功后才
+//  轮到注入的 executeStop；与 9c/9d 的真停止面互补，这里钉的是事件语义。）
 // ---------------------------------------------------------------------------
-test("TD-100.9a: opencode winner verified → stop_verified + stopped=true", async () => {
-  const dir = await makeDir();
-  try {
-    const tp = join(dir, "run_oc_v.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_oc_v", agentId: "agent" });
-    await t.append("run.started", { backend: "opencode-serve" });
-    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_v", serveUrl: "http://localhost:2" });
-    await t.transitionState(null, "pending", "created");
-    await t.transitionState("pending", "submitted", "spawned");
-    await t.transitionState("submitted", "running", "first_event");
+const KW9_TOKEN_ENV = "WAO_STOPSIDE_KW_TEST_TOKEN";
+const KW9_SERVE = "http://127.0.0.1:4310";
 
+async function seedKwServeRun(dir, runId, sessionId) {
+  const tp = join(dir, `${runId}.jsonl`);
+  const t = new JsonlTranscript(tp, { runId, agentId: "coder_kw" });
+  await t.append("run.started", { backend: "kimi-web" });
+  await t.append("session.created", { backend: "kimi-web", backendSessionId: sessionId, serveUrl: KW9_SERVE });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  return tp;
+}
+
+async function kw9Registry(dir) {
+  const registry = join(dir, "agents.json");
+  await writeFile(registry, JSON.stringify({ agents: { coder_kw: {
+    backend: "kimi-web", cwd: dir, serveUrl: KW9_SERVE, tokenEnv: KW9_TOKEN_ENV, model: { id: "kimi-code/k3" },
+  } } }), "utf8");
+  return registry;
+}
+
+test("TD-100.9a: kimi-web winner verified → stop_verified + stopped=true", async () => {
+  const dir = await makeDir();
+  process.env[KW9_TOKEN_ENV] = "stopside-kw-token-value-4567";
+  try {
+    const tp = await seedKwServeRun(dir, "run_kw_v", "session_v");
+    const registry = await kw9Registry(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_oc_v", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_v")], { runDir: dir }, {
+      await stopCommand(["run_kw_v", "--run-dir", dir, ...stopProofFlags(dir, "run_kw_v")], { runDir: dir, registry }, {
         executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false }),
         alert: async () => {},
       });
@@ -341,25 +360,21 @@ test("TD-100.9a: opencode winner verified → stop_verified + stopped=true", asy
     const events = await readTranscript(tp);
     assert.ok(events.find((e) => e.type === "run.stop_verified"), "含 stop_verified");
   } finally {
+    delete process.env[KW9_TOKEN_ENV];
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("TD-100.9b: opencode winner unverified → stop_unverified + alert + stopped=false", async () => {
+test("TD-100.9b: kimi-web winner unverified → stop_unverified + alert + stopped=false", async () => {
   const dir = await makeDir();
+  process.env[KW9_TOKEN_ENV] = "stopside-kw-token-value-4567";
   try {
-    const tp = join(dir, "run_oc_uv.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_oc_uv", agentId: "agent" });
-    await t.append("run.started", { backend: "opencode-serve" });
-    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_uv", serveUrl: "http://localhost:3" });
-    await t.transitionState(null, "pending", "created");
-    await t.transitionState("pending", "submitted", "spawned");
-    await t.transitionState("submitted", "running", "first_event");
-
+    const tp = await seedKwServeRun(dir, "run_kw_uv", "session_uv");
+    const registry = await kw9Registry(dir);
     let alertCalled = false;
     const { stopCommand } = await import("../../src/commands/stop.js");
     const out = await captureLog(async () => {
-      await stopCommand(["run_oc_uv", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_uv")], { runDir: dir }, {
+      await stopCommand(["run_kw_uv", "--run-dir", dir, ...stopProofFlags(dir, "run_kw_uv")], { runDir: dir, registry }, {
         executeStop: async () => ({ verified: false, abortCalled: true, taskkillCalled: true }),
         alert: async () => { alertCalled = true; },
       });
@@ -373,6 +388,7 @@ test("TD-100.9b: opencode winner unverified → stop_unverified + alert + stoppe
     const events = await readTranscript(tp);
     assert.ok(events.find((e) => e.type === "run.stop_unverified"), "含 stop_unverified");
   } finally {
+    delete process.env[KW9_TOKEN_ENV];
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -725,31 +741,27 @@ test("TD-100.20: stop loser 事件顺序 stop_requested → state_change_rejecte
   }
 });
 
-test("TD-100.21: opencode stop_verified 写 backend/method/taskkillCalled", async () => {
+test("TD-100.21: kimi-web stop_verified 写 backend/method/taskkillCalled", async () => {
   const dir = await makeDir();
+  process.env[KW9_TOKEN_ENV] = "stopside-kw-token-value-4567";
   try {
-    const tp = join(dir, "run_oc_v2.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_oc_v2", agentId: "agent" });
-    await t.append("run.started", { backend: "opencode-serve" });
-    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_v2", serveUrl: "http://localhost:9" });
-    await t.transitionState(null, "pending", "created");
-    await t.transitionState("pending", "submitted", "spawned");
-    await t.transitionState("submitted", "running", "first_event");
-
+    const tp = await seedKwServeRun(dir, "run_kw_v2", "session_v2");
+    const registry = await kw9Registry(dir);
     const { stopCommand } = await import("../../src/commands/stop.js");
     await captureLog(async () => {
-      await stopCommand(["run_oc_v2", "--run-dir", dir, ...stopProofFlags(dir, "run_oc_v2")], { runDir: dir }, {
-        executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false, backend: "opencode-serve", method: "abort+verify" }),
+      await stopCommand(["run_kw_v2", "--run-dir", dir, ...stopProofFlags(dir, "run_kw_v2")], { runDir: dir, registry }, {
+        executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false, backend: "kimi-web", method: "abort+verify" }),
         alert: async () => {},
       });
     });
     const events = await readTranscript(tp);
     const verified = events.find((e) => e.type === "run.stop_verified");
     assert.ok(verified, "含 stop_verified");
-    assert.equal(verified.backend, "opencode-serve");
+    assert.equal(verified.backend, "kimi-web");
     assert.equal(verified.method, "abort+verify");
     assert.equal(verified.taskkillCalled, false);
   } finally {
+    delete process.env[KW9_TOKEN_ENV];
     await rm(dir, { recursive: true, force: true });
   }
 });

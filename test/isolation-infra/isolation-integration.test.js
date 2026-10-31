@@ -3,52 +3,23 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import test from "node:test";
 import assert from "node:assert/strict";
+import test, { before, after } from "node:test";
 import { RunManager } from "../../src/runManager.js";
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
+import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
 import { readTranscript } from "../../src/transcript.js";
+import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+before(() => {
+  process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
+});
+after(() => {
+  delete process.env[KIMI_TEST_TOKEN_ENV];
+});
 
 function createMockFetch() {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [] });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return "{}"; },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: "ok" }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return "[]"; },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return ""; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { replies: ["ok"] }).fetchImpl;
 }
 
 async function makeTempRepo() {
@@ -72,9 +43,9 @@ function makeManager(dir, fetchImpl, repoDir) {
       // filter undefined（和真 registry.js 一致）
       const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
       return {
-        id, backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299",
-        agent: "build", cwd: repoDir ?? dir,
-        model: { providerID: "p", id: "m" },
+        id, backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL,
+        cwd: repoDir ?? dir,
+        model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV,
         ...defined,
       };
     },
@@ -82,7 +53,7 @@ function makeManager(dir, fetchImpl, repoDir) {
   });
   return new RunManager({
     config, readRegistry,
-    backendFor: () => new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 }),
+    backendFor: () => new KimiWebBackend({ fetchImpl, timeout: 1000, retries: 0 }),
   });
 }
 
@@ -131,8 +102,8 @@ test("ephemeral worktree: run 完成后被清理", async () => {
       getAgent(id, overrides = {}) {
         const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
         return {
-          id, backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299",
-          agent: "build", cwd: repo, model: { providerID: "p", id: "m" },
+          id, backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL,
+          cwd: repo, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV,
           isolation: { type: "worktree", strategy: "ephemeral" },
           ...defined,
         };
@@ -141,7 +112,7 @@ test("ephemeral worktree: run 完成后被清理", async () => {
     });
     const mgr = new RunManager({
       config, readRegistry,
-      backendFor: () => new OpenCodeServeBackend({ fetchImpl: createMockFetch(), timeout: 1000, retries: 0 }),
+      backendFor: () => new KimiWebBackend({ fetchImpl: createMockFetch(), timeout: 1000, retries: 0 }),
     });
     const run = await mgr.start("test", { prompt: "hi", runId: "eph_test_1" });
     const events = await readTranscript(run.transcript.filePath);

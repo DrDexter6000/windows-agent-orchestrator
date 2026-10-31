@@ -3,7 +3,7 @@
 // M10 P0-2: run_stop shared service + MCP tool tests.
 //
 // Tests cover:
-//   - Service: process winner/loser, concurrency, invalid PID, opencode
+//   - Service: process winner/loser, concurrency, invalid PID, kimi-web
 //   - Workspace authorization: same/other/missing/duplicate/malformed/delivery
 //   - MCP adapter: schema, extra args, safe output, annotations, concurrency
 
@@ -355,16 +355,16 @@ test("TD-233-02: invalid PID — alert lands in runDir even with deps.config mis
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("TD-233-03: opencode unverified stop — alert lands in runDir even with deps.config missing", async () => {
+test("TD-233-03: kimi-web unverified stop — alert lands in runDir even with deps.config missing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td233-03-"));
   try {
     makeGitRepo(dir);
     const tp = join(dir, "run_td23303.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_td23303", agentId: "a" });
-    await t.append("run.started", { backend: "opencode" });
+    const t = new JsonlTranscript(tp, { runId: "run_td23303", agentId: "coder_kw" });
+    await t.append("run.started", { backend: "kimi-web" });
     await t.append("run.background_submitted", { background: true, cwd: dir });
     await t.append("session.created", {
-      backend: "opencode-serve", backendSessionId: "sess_td23303", serveUrl: "http://127.0.0.1:9",
+      backend: "kimi-web", backendSessionId: "session_td23303", serveUrl: KW_SERVE,
     });
     await t.transitionState(null, "pending", "created");
     await t.transitionState("pending", "submitted", "spawned");
@@ -372,13 +372,15 @@ test("TD-233-03: opencode unverified stop — alert lands in runDir even with de
 
     const { stopRun } = await import("../../src/application/runStop.js");
     const captured = [];
-    const result = await stopRun({
-      runId: "run_td23303", runDir: dir,
+    // kimi-web 的停止目标解析需要 registry agent + token（61a 迁移加的面）；
+    // executeStop 仍注入——这里钉的是告警落点，不是真停止面（那在 KW-01/02）。
+    const result = await withKwToken(() => stopRun({
+      runId: "run_td23303", runDir: dir, registryPath: writeKwRegistry(dir, { coder_kw: kwAgent(dir) }),
       deps: {
         executeStop: async () => ({ verified: false, taskkillCalled: false }),
         alert: alertCapture(captured),
       },
-    });
+    }));
     assert.equal(result.stopVerified, false);
     assertAlertInsideRunDir(captured, dir);
   } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { startDaemon, connectDaemon } from "../../src/daemon.js";
+import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
 import { readTranscript, findState, JsonlTranscript } from "../../src/transcript.js";
 
 function makeRunDir() {
@@ -38,27 +39,16 @@ function makeGitRepo(dir) {
   execFileSync("git", ["commit", "-q", "-m", "i"], { cwd: dir });
 }
 
-// Mock fetch that NEVER returns an assistant message (run stays running).
+// Mock fetch whose turn never completes (run stays running) — kimi-web 假服务器
+//（61a：现行唯一 serve 家族后端；transcript 轮恒 running）。假 bearer 绝不发真实请求。
+process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
+process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
+
 function silentFetch() {
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_silent" } }; }, async text() { return "{}"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "x"; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
 }
 function mockRegistry(runDir) {
-  return { agents: { worker_a: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: runDir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } };
+  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } };
 }
 
 // ============================================================

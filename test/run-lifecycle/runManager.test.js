@@ -6,60 +6,29 @@ import { identifyProjectFromCwd } from "../../src/projectIdentity.js";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname, basename} from "node:path";
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Run, RunManager, gracefulShutdown } from "../../src/runManager.js";
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
+import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
 import { JsonlTranscript, findLastEventSeq, readTranscript, findState } from "../../src/transcript.js";
 import { diagnoseFailure } from "../../src/diagnosis.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
 import { raiseAlert } from "../../src/alerts.js";
 import { checkScorecard } from "../../src/scorecard.js";
+import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
 
-// 复用 integration.test.js 的 mock fetch 模式
+// 61a：kimi-web agent 的假 bearer（现行唯一 serve 家族后端；绝不发真实请求）。
+before(() => {
+  process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
+});
+after(() => {
+  delete process.env[KIMI_TEST_TOKEN_ENV];
+});
+
+// kimi-web 假服务器驱动 run（原 opencode-serve mock fetch 的等价物）：提交后
+// assistantDelay 毫秒 turn 才 completed（0 = 立即）。
 function createMockFetch({ assistantDelay = 0 } = {}) {
-  const sessions = new Map();
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_mock_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [], assistantDelay });
-      return {
-        ok: true, status: 200,
-        async json() { return { data: { id } }; },
-        async text() { return JSON.stringify({ data: { id } }); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        if (session.assistantDelay > 0) {
-          await new Promise((r) => setTimeout(r, session.assistantDelay));
-        }
-        session.messages.push({
-          info: { id: "msg_reply", role: "assistant" },
-          parts: [{ type: "text", text: "Mock response" }],
-        });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return {
-        ok: true, status: 200,
-        async json() { return session?.messages ?? []; },
-        async text() { return JSON.stringify(session?.messages ?? []); },
-      };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+  return runServer(KIMI_TEST_SERVE_URL, { delayMs: assistantDelay }).fetchImpl;
 }
 
 function createManager(dir, fetchImpl) {
@@ -71,7 +40,7 @@ function createManager(dir, fetchImpl) {
     timeout: 5000,
     retries: 0,
   };
-  const backendFor = (agent) => new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
+  const backendFor = (agent) => new KimiWebBackend({ fetchImpl, timeout: 1000, retries: 0 });
   // readRegistry mock：返回一个固定 agent
   const readRegistry = async () => ({
     getAgent(id, overrides = {}) {
@@ -79,11 +48,11 @@ function createManager(dir, fetchImpl) {
       // mock 对齐（曾把 cwd 覆盖成 undefined，制造"agent.cwd 神秘缺失"假象）。
       return {
         id,
-        backend: "opencode-serve",
-        serveUrl: "http://127.0.0.1:4299",
-        agent: "build",
+        backend: "kimi-web",
+        serveUrl: KIMI_TEST_SERVE_URL,
         cwd: "D:/test",
-        model: { providerID: "p", id: "m" },
+        model: { id: "kimi-code/k3" },
+        tokenEnv: KIMI_TEST_TOKEN_ENV,
         ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)),
       };
     },
@@ -210,53 +179,10 @@ test("gracefulShutdown aborts all active managers' runs on SIGINT", async () => 
 test("deadline 到期后 assistant 才出现：通知不杀，自然 completed（TD-151 迁移）", async () => {
   const dir = await makeTempDir();
   try {
-    // 慢 worker mock：assistant 在 prompt 后 150ms 才出现在 /message 流里
-    // （> waitTimeout 50——deadline 先到）。延迟挂 /message 轮询而非 prompt_async
-    // （后者阻塞在 start 内，等不到 wait 窗）。
-    const assistantDelayMs = 150;
-    const sessions = new Map();
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        const id = `ses_slow_${Date.now()}`;
-        sessions.set(id, { messages: [], promptedAt: 0, assistantDelivered: false });
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        const sessionId = new URL(urlStr).pathname.split("/")[2];
-        const body = JSON.parse(init.body);
-        const session = sessions.get(sessionId);
-        if (session) {
-          session.promptedAt = Date.now();
-          session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        }
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        const sessionId = new URL(urlStr).pathname.split("/")[2];
-        const session = sessions.get(sessionId);
-        if (session && (Date.now() - session.promptedAt) < assistantDelayMs) {
-          return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-        }
-        if (session && !session.assistantDelivered) {
-          session.assistantDelivered = true;
-          session.messages.push({
-            info: { id: "msg_reply", role: "assistant" },
-            parts: [{ type: "text", text: "slow reply" }],
-          });
-        }
-        return {
-          ok: true, status: 200,
-          async json() { return session?.messages ?? []; },
-          async text() { return JSON.stringify(session?.messages ?? []); },
-        };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // 慢 worker mock：assistant 在提交后 150ms 才出现在 transcript 轮里
+    // （> waitTimeout 50——deadline 先到）。延迟挂 transcript 轮询而非提交
+    // （提交阻塞在 start 内，等不到 wait 窗）。
+    const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { delayMs: 150, replies: ["slow reply"] }).fetchImpl;
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
@@ -282,24 +208,8 @@ test("deadline 到期后 assistant 才出现：通知不杀，自然 completed�
 test("failed transition when backend throws during wait", async () => {
   const dir = await makeTempDir();
   try {
-    // messages() 抛错 → waitForCompletion 失败
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_fail" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        throw new Error("backend exploded");
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // 提交后的 transcript 轮询抛错 → streamEvents 收成 done(failed) → waitForCompletion 失败
+    const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { failTranscriptAfterSubmit: "backend exploded" }).fetchImpl;
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
@@ -341,6 +251,8 @@ test("aborted transition via Run.abort()", async () => {
     const abortedEvent = events.find((e) => e.type === "run.aborted");
     assert.ok(abortedEvent);
     assert.equal(abortedEvent.reason, "user");
+    // 中止成功不落 error；与 failAbort 用例（落 error）互为对照，钉住夹具的 :abort 路由。
+    assert.equal(abortedEvent.error, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -474,32 +386,13 @@ test("transcript state_change events have from/to/reason fields", async () => {
 });
 
 test("onRemove is idempotent: abort + waitForCompletion error don't double-remove", async () => {
-  // 覆盖审计发现的技术债：waitForCompletion 错误路径与 abort 同时触发时
-  // _removeFromManager 只执行一次，不产生重复 activeRuns 操作
-  const dir = await makeTempDir();
-  try {
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_idem" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      // messages 抛错 → 触发 waitForCompletion 错误路径
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        throw new Error("concurrent failure");
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
-    const manager = createManager(dir, fetchImpl);
+    // 覆盖审计发现的技术债：waitForCompletion 错误路径与 abort 同时触发时
+    // _removeFromManager 只执行一次，不产生重复 activeRuns 操作
+    const dir = await makeTempDir();
+    try {
+      // 提交后的 transcript 轮询抛错 → 触发 waitForCompletion 错误路径
+      const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { failTranscriptAfterSubmit: "concurrent failure" }).fetchImpl;
+      const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
     // manager.list() 应该含此 run
@@ -519,27 +412,9 @@ test("abort updates state to aborted even when backend.abort fails", async () =>
   // 覆盖审计发现的技术债：abort 失败时内存 state 必须仍更新到 aborted
   const dir = await makeTempDir();
   try {
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_abortfail" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      // abort 端点抛错
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        throw new Error("backend abort exploded");
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // :abort 端点抛错（abort 杠杆故障——kimi-web 的 abortActivePrompt 会收成
+    // 固定失败文案，run 仍按意图转 aborted）
+    const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { failAbort: true }).fetchImpl;
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
     await run.abort("user");
@@ -562,27 +437,11 @@ test("abort updates state to aborted even when backend.abort fails", async () =>
 // 到期不再终态化——改为钉：到期只落观察事实（RunManager 侧的职责切分保留），
 // 监督继续（非终态），由外部显式 stop 收尾（终止只剩 Lead stop / 硬安全线）。
 test("M1 核心切分（ADR-0030 迁移）: 到期由 RunManager 记事实；终止需显式 stop，不依赖 backend emit done", async () => {
-  // mock 持续返回空（永不完成），且永不 emit done。
+  // mock 持续不完成（永不 emit done）。
   const dir = await makeTempDir();
   try {
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_never" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      // message 持续返回空——backend 永不 emit done
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // transcript 轮恒 running（delayMs 无限）——backend 永不 emit done
+    const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
@@ -646,24 +505,8 @@ test("backend emit done(failed) 时 RunManager 转 failed 并抛错", async () =
   // RunManager 应据此转 failed，并 rethrow 让调用方感知。
   const dir = await makeTempDir();
   try {
-    const fetchImpl = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return {
-          ok: true, status: 200,
-          async json() { return { data: { id: "ses_fail_done" } }; },
-          async text() { return "{}"; },
-        };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      // message 抛错 → streamEvents emit done(failed)
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        throw new Error("backend gone");
-      }
-      return { ok: false, status: 404, async text() { return ""; } };
-    };
+    // 提交后的 transcript 轮询抛错 → streamEvents emit done(failed)
+    const fetchImpl = runServer(KIMI_TEST_SERVE_URL, { failTranscriptAfterSubmit: "backend gone" }).fetchImpl;
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
@@ -1714,11 +1557,11 @@ test("M8-1: 默认 warn + 证据满足 → completed（无 warn 事件，与正�
 // ---------------------------------------------------------------------------
 // 会话兜底 abort（事故修复，2026-06-17）
 //
-// 背景：opencode-serve 的 HTTP session 在 run 结束后可能继续生成。
-// 对会自然停止的模型（GLM）无害，但对无限多轮模型（DeepSeek-v4-flash）是
+// 背景：serve 家族后端（现行 kimi-web）的 HTTP session 在 run 结束后可能继续
+// 生成。对会自然停止的模型（GLM）无害，但对无限多轮模型（DeepSeek-v4-flash）是
 // quota 黑洞——run 已 completed/timed_out/failed，serve 端 session 还在无限生成。
 //
-// 真实事故：一次 researcher(deepseek) run 超时后，RunManager 只写了 run.timed_out，
+// 真实事故（06-17，当时用 opencode-serve）：一次 researcher(deepseek) run 超时后，RunManager 只写了 run.timed_out，
 // 没有发送 serve session abort，DeepSeek 在后台烧光了用户当日 quota。
 //
 // 契约：RunManager 在任何终态（completed/failed/timed_out）的清理路径里，
@@ -1737,7 +1580,7 @@ function createSessionKillBackend(scenario, { hangMs = 120 } = {}) {
   const backend = {
     async spawn(agent, task) {
       return {
-        backend: "opencode-serve",
+        backend: "kimi-web",
         backendSessionId: "ses_kill_test",
         messageId: "msg_kill",
         admittedSeq: null,
@@ -1780,7 +1623,7 @@ test("事故修复: run completed 后必须兜底 abort serve session（防 deep
       timeout: 5000, retries: 0, defaultIsolation: "none",
     };
     const readRegistry = async () => ({
-      getAgent(id) { return { id, backend: "opencode-serve", serveUrl: "http://x", cwd: dir }; },
+      getAgent(id) { return { id, backend: "kimi-web", serveUrl: "http://x", cwd: dir }; },
       listAgents() { return []; },
     });
     const manager = new RunManager({ config, readRegistry, backendFor: () => mock.backend });
@@ -1804,7 +1647,7 @@ test("事故修复: run failed 后必须兜底 abort serve session", async () =>
       timeout: 5000, retries: 0, defaultIsolation: "none",
     };
     const readRegistry = async () => ({
-      getAgent(id) { return { id, backend: "opencode-serve", serveUrl: "http://x", cwd: dir }; },
+      getAgent(id) { return { id, backend: "kimi-web", serveUrl: "http://x", cwd: dir }; },
       listAgents() { return []; },
     });
     const manager = new RunManager({ config, readRegistry, backendFor: () => mock.backend });
@@ -1832,7 +1675,7 @@ test("事故修复（TD-151 迁移）: 到期后自然 completed 的清理路径
       timeout: 5000, retries: 0, defaultIsolation: "none",
     };
     const readRegistry = async () => ({
-      getAgent(id) { return { id, backend: "opencode-serve", serveUrl: "http://x", cwd: dir }; },
+      getAgent(id) { return { id, backend: "kimi-web", serveUrl: "http://x", cwd: dir }; },
       listAgents() { return []; },
     });
     const manager = new RunManager({ config, readRegistry, backendFor: () => mock.backend });
@@ -1854,7 +1697,7 @@ test("事故修复（TD-151 迁移）: 到期后自然 completed 的清理路径
 // ---------------------------------------------------------------------------
 // token 预算硬闸门（S1-1，事故修复 2026-06-18）
 //
-// 背景：06-18 事故证明，即使 abort 被调（TD-35），opencode serve 端 session
+// 背景：06-18 事故证明（当时后端为 opencode-serve），即使 abort 被调（TD-35），serve 端 session
 // 仍可能继续烧 token（TD-37）。唯一不依赖 abort 是否生效的防线是：本地累计
 // token 超阈值即强制终止 run，不再依赖后端"真的停了"。
 //
@@ -1863,7 +1706,7 @@ test("事故修复（TD-151 迁移）: 到期后自然 completed 的清理路径
 //   （reason=budget_exceeded），写 run.budget_exceeded，走 _runCleanup 兜底 abort。
 //   未配 tokenBudget 的 agent 不启用闸门（向后兼容）。
 //
-// 计量口径：opencode session.tokens 比 provider 账单偏小 1-2 数量级（cache read/
+// 计量口径：serve 端 session 计量比 provider 账单偏小 1-2 数量级（cache read/
 // context 重发不计），故用 multiplier（默认 100）逼近 provider 计费。
 // ---------------------------------------------------------------------------
 
@@ -1877,7 +1720,7 @@ function createBudgetBackend(mode, { stepTokens = 2000, multiplier = 100 } = {})
   const backend = {
     async spawn(agent, task) {
       return {
-        backend: "opencode-serve",
+        backend: "kimi-web",
         backendSessionId: "ses_budget_test",
         messageId: "msg_budget",
         admittedSeq: null,
@@ -1920,7 +1763,7 @@ function budgetManager(dir, mock, agentOverrides = {}) {
   };
   const readRegistry = async () => ({
     getAgent(id) {
-      return { id, backend: "opencode-serve", serveUrl: "http://x", cwd: dir, ...agentOverrides };
+      return { id, backend: "kimi-web", serveUrl: "http://x", cwd: dir, ...agentOverrides };
     },
     listAgents() { return []; },
   });

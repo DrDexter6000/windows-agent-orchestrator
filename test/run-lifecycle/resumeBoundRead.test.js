@@ -261,6 +261,10 @@ test("R13C-RESUME-3: 尾部外 run 伪造 session.created 不劫持 attach/repla
   }
 });
 
+// 61a 注：RESUME-4 钉的是 RunManager resume 的 **HTTP attach 分支**——该分支的
+// 调用形状（backend.streamEvents(serveUrl, sessionId, …)）是 opencode-serve 专属，
+// 且 kimi-web 声明 replayByRespawn=true（resume 走 replay 分支，永不到 attach）。
+// 本用例保留 opencode-serve 夹具，61b 随后端退役时一并处置。
 test("R13C-RESUME-4: HTTP attach 面 messageId/admittedSeq 绑定——外 run 尾条不供给 attach 句柄", async () => {
   const dir = tempDir("wao-r13c-res4-");
   try {

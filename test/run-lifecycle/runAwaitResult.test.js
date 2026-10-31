@@ -243,12 +243,12 @@ test("B1: serve-shaped terminal transcript performs NO serve HTTP fetch (snapsho
   const runDir = mkdtempSync(join(tmpdir(), "wao-b1-rd-"));
   try {
     makeGitRepo(dir);
-    // Serve-backed session (serveUrl + backend opencode-serve) BUT with
+    // Serve-backed session (serveUrl + backend kimi-web) BUT with
     // transcript run.event entries. The composite reconstructs from the
     // transcript snapshot and must NEVER call the serve backend.
     seedTranscript(runDir, "run_b1", {
       workspaceCwd: dir, messages: ["serve snapshot answer"], terminal: true,
-      backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297",
+      backend: "kimi-web", serveUrl: "http://127.0.0.1:4297",
     });
     const { readTranscript } = await import("../../src/transcript.js");
     let readCalls = 0;
@@ -264,7 +264,7 @@ test("B1: serve-shaped terminal transcript performs NO serve HTTP fetch (snapsho
       assert.equal(out.terminal, true);
       assert.equal(out.result.status, "available", "compact reconstructed from transcript snapshot");
       assert.deepEqual(out.result.messages, [{ role: "assistant", text: "serve snapshot answer", truncated: false }]);
-      assert.equal(out.result.backend, "opencode-serve", "backend derives from the same session snapshot");
+      assert.equal(out.result.backend, "kimi-web", "backend derives from the same session snapshot");
       assert.equal(fetchCalls, 0, "snapshot-only: ZERO serve HTTP fetches");
       assert.equal(readCalls, 1, "single snapshot read");
     } finally {

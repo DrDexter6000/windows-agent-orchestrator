@@ -5,6 +5,12 @@ import {
   defaultDrillsForProfile,
 } from "../../scripts/reliability/matrix.mjs";
 
+// 61a 注：本文件的 registry 夹具钉 buildCertificationMatrix 的身份派生面——
+// researcher 的 model 形状带 providerID（矩阵行的 providerID/modelId 从 agent
+// 派生、completionMode 透传、LEGACY_CASES 标签兜底）。kimi-web 无法表达
+// model.providerID（裸 id 通道，配了即拒），legacy 标签（"GLM snapshot-stable"
+// 等）也钉在 matrix.mjs 的 opencode 时代 LEGACY_CASES 上——迁过去会改变被测
+// 语义。整文件保留 opencode-serve 夹具，61b 随后端退役连同 LEGACY_CASES 一并处置。
 const registry = {
   agents: {
     researcher: {

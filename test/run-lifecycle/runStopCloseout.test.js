@@ -294,10 +294,19 @@ test("TD265-02: 既无 hostPid 也无 serveUrl → 拒绝并点名后端，零�
 
 test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非法 hostPid 不被采信", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td265-03-"));
+  const tokenEnv = "WAO_CLOSEOUT_KW_TEST_TOKEN";
+  process.env[tokenEnv] = "closeout-kw-token-value-89ab";
   try {
     makeGitRepo(dir);
-    await seedSessionRun(dir, "run_td265_03a", dir, { backend: "opencode-serve", backendSessionId: "ses_serve", serveUrl: "http://127.0.0.1:9", hostPid: 4321 });
+    await seedSessionRun(dir, "run_td265_03a", dir, { backend: "kimi-web", backendSessionId: "session_serve", serveUrl: "http://127.0.0.1:9", hostPid: 4321 });
     await seedSessionRun(dir, "run_td265_03b", dir, { backend: "zcode", backendSessionId: "sess_native_3", hostPid: "4321" });
+    // kimi-web 的停止目标解析需要 registry agent + token（61a 迁移加的面；executeStop
+    // 仍注入——本测试钉的是路由优先级，不是真停止面）。registry agent 须与会话同
+    // backend + serveUrl；回环丢弃端口 9——注入 executeStop 下零真实请求。
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: { a: {
+      backend: "kimi-web", cwd: dir, serveUrl: "http://127.0.0.1:9", tokenEnv, model: { id: "kimi-code/k3" },
+    } } }), "utf8");
     const { stopRun } = await import("../../src/application/runStop.js");
     let killCalls = 0;
     let serveStops = 0;
@@ -305,7 +314,7 @@ test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非
       kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; },
       executeStop: async () => { serveStops += 1; return { verified: true, abortCalled: true, taskkillCalled: false }; },
     });
-    const viaServe = await stopRun({ runId: "run_td265_03a", runDir: dir, authorizedWorkspaceRoot: dir, deps });
+    const viaServe = await stopRun({ runId: "run_td265_03a", runDir: dir, authorizedWorkspaceRoot: dir, registryPath, deps });
     assert.equal(serveStops, 1);
     assert.equal(viaServe.terminalState, "aborted");
     await assert.rejects(
@@ -313,7 +322,10 @@ test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非
       /has no stop route/,
     );
     assert.equal(killCalls, 0, "字符串形的 hostPid 不是整数，不采信");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    delete process.env[tokenEnv];
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("TD265-04: resume 重放之后 stop 的目标是重放记录的新进程，不是 session.created 里的旧进程", async () => {

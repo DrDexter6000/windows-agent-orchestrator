@@ -13,6 +13,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync, spawnSync as _ss } from "node:child_process";
 import { findState } from "../../src/transcript.js";
+import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
+
+// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+// 本文件多处用进程级 before/after 不便（模块底部另有分组），统一在 startDaemon
+// 前 set、daemon.stop 后 delete；这里给纯函数测试兜一个文件级设置。
+process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
+process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
 
 import {
   readHandshake,
@@ -40,11 +47,14 @@ function makeRunDir() {
 function writeTranscript(runDir, runId, stateChangeTo, agentId = "test_agent") {
   const lines = [
     { ts: "2026-06-25T00:00:00.000Z", seq: 1, runId, agentId, type: "run.created" },
-    { ts: "2026-06-25T00:00:01.000Z", seq: 2, runId, agentId, type: "session.created", backendSessionId: "s_x", backend: "opencode-serve" },
-    { ts: "2026-06-25T00:00:02.000Z", seq: 3, runId, agentId, type: "run.started", cwd: runDir, backend: "opencode-serve" },
+    { ts: "2026-06-25T00:00:01.000Z", seq: 2, runId, agentId, type: "session.created", backendSessionId: "s_x", backend: "kimi-web" },
+    { ts: "2026-06-25T00:00:02.000Z", seq: 3, runId, agentId, type: "run.started", cwd: runDir, backend: "kimi-web" },
+    // prompt.sent：kimi-web 的 resume 走 replay 分支（replayByRespawn=true），
+    // 重放需要绑定 prompt.sent——61a 迁移时补上（旧 opencode attach 分支不需要）。
+    { ts: "2026-06-25T00:00:02.500Z", seq: 4, runId, agentId, type: "prompt.sent", prompt: "leftover task" },
   ];
   if (stateChangeTo) {
-    lines.push({ ts: "2026-06-25T00:00:03.000Z", seq: 4, runId, agentId, type: "run.state_change", from: "submitted", to: stateChangeTo });
+    lines.push({ ts: "2026-06-25T00:00:03.000Z", seq: 5, runId, agentId, type: "run.state_change", from: "submitted", to: stateChangeTo });
   }
   writeFileSync(
     join(runDir, `${runId}.jsonl`),
@@ -383,22 +393,9 @@ test("D-F2: daemon list 含 external（活 owner 文件）的 run，不只是 da
 test("D-F2: daemon list 含 daemon-owned run 仍标 daemon", async () => {
   const runDir = makeRunDir();
   const pipe = uniquePipe();
-  // silent fetch：/message 永远空 → run 卡 running 不自终，给 list 创造窗口看到 in-memory run。
+  // silent fetch：transcript 轮恒 running → run 卡 running 不自终，给 list 创造窗口看到 in-memory run。
   // （makeMockFetch 会立即 completed，run 从内存移除，list 看不到——故用 silent。）
-  const silentFetch = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_d" } }; }, async text() { return JSON.stringify({ data: { id: "ses_d" } }); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    }
-    return { ok: false, status: 404, async text() { return "x"; } };
-  };
-  const daemon = await startDaemon({ runDir, pipe, registry: mockRegistry(runDir), fetchImpl: silentFetch, waitTimeout: 60000, pollInterval: 50 });
+  const daemon = await startDaemon({ runDir, pipe, registry: mockRegistry(runDir), fetchImpl: silentFetch(), waitTimeout: 60000, pollInterval: 50 });
   try {
     const startRes = await connectDaemon(pipe, { cmd: "start", agentId: "worker_a", prompt: "x" });
     await new Promise((r) => setTimeout(r, 200)); // 让 run 进入 running 并落盘
@@ -465,46 +462,19 @@ test("connectDaemon: 连不上（无 daemon）抛错", async () => {
 // ============================================================
 // in-process 起 daemon server（mock registry + mock fetch 注入，不烧 token）。
 
-// mock fetch：opencode-serve 回环，session 创建后 prompt_async 推一条 assistant 消息。
-// TD-163（ADR-0030 收口）：seed 允许预置"daemon 重启前已存在的 serve 端 session"——
-// opencode session 存活于 WAO 进程之外（sessionOutlivesProcess），重启后的 daemon
-// resume 应能看到该 session 的既有对话并自然收敛到终态。
-function makeMockFetch({ seed } = {}) {
-  const sessions = new Map();
-  if (seed) {
-    for (const [id, session] of Object.entries(seed)) sessions.set(id, session);
-  }
-  return async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      const id = `ses_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [] });
-      return { ok: true, status: 200, async json() { return { data: { id } }; }, async text() { return JSON.stringify({ data: { id } }); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const body = JSON.parse(init.body);
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "ok" }] });
-      }
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      const sessionId = new URL(urlStr).pathname.split("/")[2];
-      const session = sessions.get(sessionId);
-      return { ok: true, status: 200, async json() { return session?.messages ?? []; }, async text() { return JSON.stringify(session?.messages ?? []); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "not found"; } };
-  };
+// mock fetch：kimi-web 假服务器——建会话、提交后 transcript 轮回 completed
+//（"ok" assistant 文本），终态后会话端点答 40401（见共享夹具文件头）。
+function makeMockFetch() {
+  return runServer(KIMI_TEST_SERVE_URL, { replies: ["ok"] }).fetchImpl;
+}
+
+/** 永不完成的假 fetch（transcript 轮恒 running）：run 卡 running 不自终。 */
+function silentFetch() {
+  return runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
 }
 
 function mockRegistry(runDir) {
-  return { agents: { worker_a: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: runDir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } };
+  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } };
 }
 
 test("daemon server: ping 返回 ok", async () => {
@@ -584,24 +554,8 @@ test("daemon server: status 返回指定 run 的状态", async () => {
 test("daemon server: stop <runId> 中止 in-memory run", async () => {
   const runDir = makeRunDir();
   const pipe = uniquePipe();
-  // silent fetch：/message 永远空 → run 卡 running 不自终，给 stop 创造窗口
-  const silentFetch = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-      return { ok: true, status: 200, async json() { return { data: { id: "ses_s" } }; }, async text() { return JSON.stringify({ data: { id: "ses_s" } }); } };
-    }
-    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    if (init.method === "GET" && urlStr.includes("/message")) {
-      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    }
-    if (init.method === "POST" && urlStr.includes("/abort")) {
-      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    }
-    return { ok: false, status: 404, async text() { return "x"; } };
-  };
-  const daemon = await startDaemon({ runDir, pipe, registry: mockRegistry(runDir), fetchImpl: silentFetch, waitTimeout: 60000, pollInterval: 50 });
+  // silent fetch：transcript 轮恒 running → run 卡 running 不自终，给 stop 创造窗口
+  const daemon = await startDaemon({ runDir, pipe, registry: mockRegistry(runDir), fetchImpl: silentFetch(), waitTimeout: 60000, pollInterval: 50 });
   try {
     const startRes = await connectDaemon(pipe, { cmd: "start", agentId: "worker_a", prompt: "x" });
     await new Promise((r) => setTimeout(r, 200)); // 让 run 进入 running
@@ -676,12 +630,11 @@ test("优雅退出：stop 后 daemon.json 删除", async () => {
 // Increment 5 — 重启 resume-scan（daemon 启动时接管未完成 run）
 // ============================================================
 
-// TD-163（ADR-0030 收口）迁移：原形状曾以 timed_out 为合成终结器——旧测试的
-// makeMockFetch 是全新内存 Map，transcript 里残留的 backendSessionId（s_x）在其
-// 中不存在 → /message 永远空 → 流永不结束 → 旧语义靠 waitTimeout(3000) 到期杀。
-// 新语义（到期=通知不杀）下如实的形态：预置 serve 端 session（seed）——opencode
-// session 本就存活于 daemon 进程之外，重启后的 daemon resume 附加到该 session，
-// 看到既有 assistant 回复 → 快照稳定 → 自然 done(completed)。终态=自然完成。
+// TD-163（ADR-0030 收口）迁移：原形状曾以 timed_out 为合成终结器——61a 前的
+// opencode attach 形态靠 seed 预置 serve 端会话。kimi-web 的 resume 走 replay
+// 分支（replayByRespawn=true）：daemon 重扫残留 run 后重放绑定 prompt 到**新**
+// 会话（transcript 需带 prompt.sent——writeTranscript 已补），假服务器把新会话
+// 驱动到自然 completed。终态=自然完成（到期只通知不杀的语义不变）。
 test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终态", async () => {
   const runDir = makeRunDir();
   const pipe = uniquePipe();
@@ -695,17 +648,8 @@ test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终�
     const daemon = await startDaemon({
       runDir, pipe,
       registry: mockRegistry(runDir),
-      // serve 端 session 在 daemon 重启中存活（sessionOutlivesProcess），对话已完整。
-      fetchImpl: makeMockFetch({
-        seed: {
-          s_x: {
-            messages: [
-              { info: { id: "msg_leftover_user", role: "user" }, parts: [{ type: "text", text: "x" }] },
-              { info: { id: "msg_leftover_reply", role: "assistant" }, parts: [{ type: "text", text: "ok" }] },
-            ],
-          },
-        },
-      }),
+      // 重放的新会话由假服务器驱动到自然 completed（"ok" assistant 回复）。
+      fetchImpl: makeMockFetch(),
       resumeOnStart: true,
       waitTimeout: 3000,
       pollInterval: 20,
@@ -830,20 +774,12 @@ test("D-F1: daemon run 经 CLI 派发，run 出现在 daemon list（解 D-F1 + D
   // 用 in-process daemon + mock fetch（不烧 token），CLI 经默认 pipe 连它。
   // 注意：必须用异步 spawn（非 spawnSync）——spawnSync 阻塞父事件循环，
   // in-process daemon 无法 accept 连接（named pipe server 要事件循环驱动）。
-  // 用 silent fetch（/message 永远空）让 run 卡 running，这样 daemon list 查询时它还在。
-  const silentFetch = async (url, init = {}) => {
-    const u = String(url);
-    if (init.method === "POST" && u.endsWith("/api/session")) return { ok: true, status: 200, async json() { return { data: { id: "ses_df1" } }; }, async text() { return JSON.stringify({ data: { id: "ses_df1" } }); } };
-    if (init.method === "POST" && u.includes("/prompt_async")) return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    if (init.method === "GET" && u.includes("/message")) return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
-    if (init.method === "POST" && u.includes("/abort")) return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-    return { ok: false, status: 404, async text() { return "x"; } };
-  };
+  // 用 silent fetch（transcript 轮恒 running）让 run 卡 running，这样 daemon list 查询时它还在。
   const daemon = await startDaemon({
     runDir,
     pipe: "\\\\.\\pipe\\wao-daemon",
     registry: mockRegistry(runDir),
-    fetchImpl: silentFetch,
+    fetchImpl: silentFetch(),
     waitTimeout: 60000,
     pollInterval: 50,
   });

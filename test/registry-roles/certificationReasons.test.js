@@ -311,7 +311,7 @@ test("TD-111-R2c: identity 不匹配 → 认证（含新字段）不可继承；
   const mismatch = await inventoryWithSummary(HQ, {
     coder_hq: {
       status: "certified",
-      backend: "opencode-serve",
+      backend: "kimi-web",
       modelId: "glm-5.2",
       reasonCode: null,
       lastHealthyRunAt: "2026-08-10T06:20:00.000Z",

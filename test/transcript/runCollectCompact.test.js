@@ -186,7 +186,7 @@ test("M12-2A-B1: process compact — last assistant verbatim + FULL-snapshot cou
 test("M12-2A-B2: serve compact — last assistant verbatim (serve message shape)", () => {
   const raw = {
     data: [serveAssistant("srv-a"), serveAssistant("srv-final"), serveUser("srv-u")],
-    reconstructed: false, backend: "opencode-serve", agentId: "researcher",
+    reconstructed: false, backend: "kimi-web", agentId: "researcher",
   };
   const compact = projectCollectResult(raw, { runId: "run_b2", mode: "compact" });
   assert.equal(compact.compactStatus, "available");
@@ -751,6 +751,9 @@ test("M12-2A-K7: default raw `collect <runId>` stays byte-compatible (no project
 // Section L — serve sentinel fail-closed; compact never bypasses it.
 // =====================================================================
 
+// 61a 注：本组钉 runCollect 的 serve 取消息哨兵——该路径只服务 opencode-serve
+//（kimi-web 走转录重建，不发 serve fetch），保留 opencode-serve 夹具；61b 随后端
+// 退役时一并处置（同 runCollect.test.js serve 路径用例家族）。
 test("M12-2A-L1: serve sentinel (>=10001) throws before projection — compact bypass impossible", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m122a-l1-"));
   try {
