@@ -354,7 +354,6 @@
       "run-lifecycle/certGateDoctorCheck.test.js"
     ],
     "lock": [
-      "isolation-infra/portAllocator.test.js",
       "migration-0045/backgroundExplicit.test.js",
       "migration-0045/rolePinning.test.js",
       "migration-0045/sessionKeyUpgrade.test.js",

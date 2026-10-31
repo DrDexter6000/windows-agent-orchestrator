@@ -15,7 +15,7 @@
 //     默认参数，**不进指纹**。
 //
 // 架构契约：纯函数模块——不 import registry/命令层/MCP，不做任何 I/O（读真实
-// 案卷的验证走 scripts/migration/validate-identity-projection.mjs）；依赖仅
+// 案卷的一次性验证已随 0045 迁移完成）；依赖仅
 // node:crypto。消费面接线（runList/registryInventory 换显示）在 0045 §6 第 3 步
 // 写侧批——本模块先落地先验证，不改任何既有投影行为（§6 "第 0–2 步不改行为"）。
 import { createHash } from "node:crypto";

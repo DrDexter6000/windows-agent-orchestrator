@@ -3349,6 +3349,29 @@ test("决定索引一行只放编号和标题；新决定档有体量上限", ()
   }
 });
 
+test("决定档编号唯一、map.md 行严格升序、map 与档两侧编号集合相等", () => {
+  // 第 60 批（2026-10-31）：0019 撞号合并后钉住"一档一号"。按计数查重——先收进
+  // Set 会静默去重，撞号就看不见了（这正是 0019 曾经漏掉的原因）。
+  const counts = new Map();
+  for (const name of readdirSync(join(ROOT, ".wao/decisions"))) {
+    const id = name.match(/^(\d{4})-/)?.[1];
+    if (!id) continue;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  const duplicated = [...counts].filter(([, n]) => n > 1).map(([id, n]) => `${id}×${n}`);
+  assert.deepEqual(duplicated, [], "同一编号不得有不止一个决定档（撞号）");
+  const rows = read(".wao/decisions/map.md").split(/\r?\n/).filter((l) => /^\d{4} \| /.test(l));
+  let previous = 0;
+  for (const row of rows) {
+    const n = Number(row.slice(0, 4));
+    assert.ok(n > previous, `map.md 编号必须严格升序：${row.slice(0, 24)}…`);
+    previous = n;
+  }
+  const mapIds = new Set(rows.map((r) => r.slice(0, 4)));
+  assert.deepEqual([...mapIds].sort(), [...counts.keys()].sort(),
+    "map.md 的编号集合必须与编号决定档的编号集合相等（多行少行都红）");
+});
+
 // SKILL P6 诚实锚点（R23-A）。
 
 test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificationTimeoutMs 下限（R23-A）", () => {

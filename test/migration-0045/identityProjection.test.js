@@ -1,8 +1,7 @@
 // test/migration-0045/identityProjection.test.js
 //
 // 0045 §1.5 读取侧单元测试：自描述派生 / 冻结 legacy 闭集 / 投影三态 / 指纹。
-// 真实案卷全量验证走 scripts/migration/validate-identity-projection.mjs（本文件
-// 只钉纯函数契约）。
+// 本文件只钉纯函数契约（真实案卷的一次性验证已随 0045 迁移完成）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

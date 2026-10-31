@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,6 +91,27 @@ test("S3-3: readDecision 读单个正文", async () => {
     const body = await readDecision(waoDir, "0001");
     assert.match(body, /Readable/, "含标题");
     assert.match(body, /full body text/, "含正文");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readDecision 同一编号匹配到不止一个文件时抛错（撞号不静默取第一个）", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    const decisionsDir = join(waoDir, "decisions");
+    await writeFile(join(decisionsDir, "0001-alpha.md"), "# 0001: alpha\n", "utf8");
+    await writeFile(join(decisionsDir, "0001-beta.md"), "# 0001: beta\n", "utf8");
+    await assert.rejects(
+      () => readDecision(waoDir, "0001"),
+      (err) => {
+        assert.match(err.message, /0001/, "错误文案写明编号");
+        assert.match(err.message, /0001-alpha\.md/, "错误文案列出撞号文件名");
+        assert.match(err.message, /0001-beta\.md/, "错误文案列出撞号文件名");
+        return true;
+      },
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

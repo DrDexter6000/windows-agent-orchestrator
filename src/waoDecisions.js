@@ -61,16 +61,19 @@ export async function listDecisions(waoDir) {
 }
 
 /**
- * 读单条决策正文。
+ * 读单条决策正文。同一编号匹配到不止一个文件（撞号）时抛错——编号必须唯一。
  * @param {string} waoDir
  * @param {string} id 如 "0001"
  */
 export async function readDecision(waoDir, id) {
   const decisionsDir = join(waoDir, "decisions");
   const files = await readdir(decisionsDir);
-  const match = files.find((f) => f.startsWith(`${id}-`));
-  if (!match) throw new Error(`decision ${id} not found`);
-  return readFile(join(decisionsDir, match), "utf8");
+  const matches = files.filter((f) => f.startsWith(`${id}-`));
+  if (matches.length === 0) throw new Error(`decision ${id} not found`);
+  if (matches.length > 1) {
+    throw new Error(`decision ${id} matches ${matches.length} files: ${matches.join(", ")}`);
+  }
+  return readFile(join(decisionsDir, matches[0]), "utf8");
 }
 
 /** 扫现有正文取最大编号，返回下一个（0001, 0002...） */

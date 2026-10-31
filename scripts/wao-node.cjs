@@ -5,7 +5,7 @@
 //
 // 背景：WAO 的 nodeVersionGuard 拒绝 v24（libuv Windows Job Object 回归杀长进程），
 // 只放行 v22。但开发者机器的默认 node 常是 v24（PATH 里）。本 shim 让 WAO 的所有
-// 入口（cli/smoke/reliability/long-run）自动用 v22 跑，无需改全局 PATH、
+// 入口（cli/smoke/reliability）自动用 v22 跑，无需改全局 PATH、
 // 无需每个项目各塞一份 node.exe。
 //
 // 定位 v22 的优先级（腿 1/2 行为不变；腿 3 为新增扩展）：

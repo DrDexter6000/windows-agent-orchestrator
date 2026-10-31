@@ -60,9 +60,9 @@
 0056 | TD-250 kimi serve 进程荚泄漏：终态会话卫生+手动 serve 维护族
 0057 | TD-251 worktree 生命周期根修+会话仓存量卫生+私有主目录阶梯①
 0058 | TD-254 线系闭合出口+TD-253 私有主目录②③④
+0059 | 干扰登记册 B2 门修订：文件级失败回响判定（解除死机制）+案 A/B 收口
 0060 | TD-256 批：门禁可见性+收账出口+TD-252 收口+D3 存量实迁（含三处旧缺陷修复）
 0061 | TD-258/259 批：onboarding 凭据探测面扩展（key_only 两态）+模板两缺陷改版
-0059 | 干扰登记册 B2 门修订：文件级失败回响判定（解除死机制）+案 A/B 收口
 0062 | TD-260 批：发版检查单（milestone-discipline §9）+frictions 三方会审收口
 0063 | TD-261/262 批：serve recycle 死实例复活+重启健壮性+resume 的 ephemeral 恢复
 0064 | lane-traits 读取面（wao lanes）+ seatRole 语义澄清
