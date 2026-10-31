@@ -78,9 +78,9 @@ you.
 - **Run storage that does not fall over** — runs dispatched from a linked dev worktree go
   into the main project's bucket (0099); runId lookups scan every bucket with no limit, and
   above 64 buckets `lead_preflight` shows one facts-only line (0100).
-- **Correctness** — tracked text files are guarded against control bytes and invalid UTF-8;
-  diagnosis names deepseek-acp transport failures; the MCP server build check looks at
-  `src/` only.
+- **Correctness** — text files bound for the repository (tracked, plus untracked and not
+  ignored) are guarded against control bytes and invalid UTF-8; diagnosis names deepseek-acp
+  transport failures; the MCP server build check looks at `src/` only.
 - Scope by decision and release-gate evidence:
   [`docs/changelog-2026-10-31-v0.7.0.md`](docs/changelog-2026-10-31-v0.7.0.md).
 

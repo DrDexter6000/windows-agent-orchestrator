@@ -103,7 +103,7 @@ candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，
 
 ### 读绑定（伪终态防御）
 
-`run_delivery` 投影的 `terminalState` 只由本 run 自身信封事件计算，尾部追加的外 run 或伪造终态行不可见；这道绑定保护的四个面与诚实边界见[架构](../02-architecture.md) §4.7「终态与候选投影只认本 run 的信封」。
+规则与诚实边界见[架构](../02-architecture.md) §4.7「终态与候选投影只认本 run 的信封」。
 
 ### delivery readiness handshake（可选 bounded 只读 wait）
 
@@ -138,7 +138,7 @@ npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --fo
 
 `run_delivery_review_bundle` 是默认的低摩擦 delivery 首屏查询：一个调用先等待 delivery readiness，再仅在 readiness 为 `reviewable` 时读取 Lead 指定的一个文件页。它机械组合既有 `getRunDeliveryReadiness`、`run_delivery` 安全投影和 `getRunDeliveryReview`/`projectReviewResult`，不引入第二份 delivery/readiness/review 判定。
 
-- 输入：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` 共用，何时返回由收口判定决定（见[监督](supervise.md)「等待到收口」）。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
+- 输入：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` 共用，何时返回见[监督](supervise.md)「等待到收口」。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
 - 输出（strict）：`delivery` 为 `run_delivery` 安全投影，`review` 为单页 review 或 `null`。非 `reviewable` 状态返回 `review:null`，同时保留完整安全 delivery/readiness 事实；该路径零 diff/Git review read。`reviewable` 时 review commit 与 changed-file count 必须和 delivery 投影精确一致，否则整次调用固定失败。
 - Lead 权限不变：WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment、不判定 binary/diff-too-large 是否可接受，也不 stop/retry/repackage/accept/reject。Lead 仍须审查 `0..changedFileCount-1` 的全部文件和全部页面，然后独立调用 `run_delivery_decide`。
 - 原子路径保留：`run_delivery` 继续提供 point-in-time/readiness-only 查询；`run_delivery_review` 继续提供单独或 continuation-page 读取。长 worker、人工轮询、故障排查和非标准流程不受组合工具限制。

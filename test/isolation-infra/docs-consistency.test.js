@@ -3520,12 +3520,12 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
     { mcp: ["runs_list"], cli: ["runs list"] },
     { mcp: ["run_dispatch"], cli: ["run"] },
     { mcp: ["run_delivery", "run_delivery_decide"], cli: ["runs delivery"] },
-    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: ["runs delivery"] },
+    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: ["runs delivery review"] },
     { mcp: ["run_stop"], cli: ["stop"] },
     { mcp: ["run_diagnose"], cli: ["runs diagnose"] },
   ];
   assert.equal(rows.length, expected.length, `映射表行数漂移（${rows.length} vs ${expected.length}）——删行/加行须同步守卫期望`);
-  const cliTokenRe = /runs [a-z]+|\bcollect\b|\brun\b|\bstop\b|\bstatus\b/g;
+  const cliTokenRe = /runs delivery review|runs [a-z]+|\bcollect\b|\brun\b|\bstop\b|\bstatus\b/g;
   rows.forEach((row, i) => {
     const cells = splitRowCells(row).map((c) => c.trim());
     const mcp = cells[1]?.match(/[a-z]+(?:_[a-z]+)+/g) ?? [];
@@ -3540,7 +3540,7 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
     }
     for (const token of cli) {
       if (token.startsWith("runs ")) {
-        assert.ok(RUNS_SUBCOMMANDS.includes(token.replace("runs ", "")),
+        assert.ok(RUNS_SUBCOMMANDS.includes(token.split(" ")[1]),
           `映射表 CLI 子命令 \`${token}\` 不在 RUNS_SUBCOMMANDS`);
       }
     }

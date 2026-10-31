@@ -66,8 +66,8 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   Lead 审查后可以 accept，不再只能 reject（0101）。
 - **运行存放不再塌**——从链接的开发工作树派发的运行进主项目的桶（0099）；按 runId 查转录扫描
   全部桶、不设上限，超过 64 个桶时 `lead_preflight` 给一行事实（0100）。
-- **正确性**——被跟踪的文本文件防控制字节与非 UTF-8；诊断点名 deepseek-acp 的传输失败；
-  MCP 服务的 build 检查只看 `src/`。
+- **正确性**——会进仓库的文本文件（已跟踪的，加上未跟踪且未忽略的）防控制字节与非 UTF-8；
+  诊断点名 deepseek-acp 的传输失败；MCP 服务的 build 检查只看 `src/`。
 - 按决定分组的范围与发版门槛证据见
   [`docs/changelog-2026-10-31-v0.7.0.md`](docs/changelog-2026-10-31-v0.7.0.md)。
 
