@@ -29,7 +29,7 @@ add("W5", "worktree 注册漂移", { ok: driftProblems.length === 0, problems: d
 const bc = classifyBranchCount(countRunBranches(repo));
 add("W4", `wao/run_* 分支棘轮帽 ${BRANCH_CAP}`, {
   ok: bc.ok,
-  problems: bc.ok ? [] : [`当前 ${bc.count} > 帽 ${bc.cap} → 修复: 交付收尾清理（已决+非脏+活文档零引用→remove+删分支）；确需扩容: 改 hygiene.mjs BRANCH_CAP + declare`],
+  problems: bc.ok ? [] : [`当前 ${bc.count} > 帽 ${bc.cap} → 修复: wao worktree reclaim 清退（规程见 docs/usage/maintenance.md）；确需扩容: 改 hygiene.mjs BRANCH_CAP + declare`],
   notes: bc.ok ? [`当前 ${bc.count} / 帽 ${bc.cap}`] : [],
 });
 

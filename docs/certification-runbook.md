@@ -178,7 +178,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 - 【硬】全量验证错峰：以本机实测确认安静窗口（当前证据 01:00–06:00，见 incident 文件）；安静窗口数据是本机单时段实测，换机重测。
 - 【硬】会审与全量验证不并行（资源竞争致 command_timeout）。
 - 【硬】reverify 至多两条链、仅环境类失败码可用（attempt 2 是 Lead 显式申请的第二次、也是最后一次机会，从不自动重试——见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 小节）；`artifact_mutated` 不具资格——先取证工作树终态（瞬态孤儿/中断 vs 真变异）再决定重派。
-- 【硬】销毁性回收：先 bundle 保全+verify、显式路径禁 glob、双席审计+Owner 点名批准；bundle 存在不证明整个工作树可恢复（未提交/未跟踪/被引证据另行处理）。
+- 【硬】销毁性回收：先备份保全并 verify、显式路径禁 glob；批量清退 worktree 与 `wao/*` 分支走 `wao worktree reclaim`，谁判定、哪些要用户同意、bundle 保全不到什么，见 `docs/02-architecture.md` §4.3「人工清退」。
 - 【硬】验收决定即时落账（reject/accept 当轮记录，不留补记）。
 - 【硬】HTTP attach 实测的凭据纪律：值从 env 读取、内存构造 Authorization 头——绝不展开进外部程序 argv、URL、任务书、转录或报告（`curl -H "…$TOKEN"` 经 shell 展开后值仍在 argv，"来源是 env"≠"没进命令行"；参考实现 `src/backends/kimiWeb.js` 的 resolveBearerToken/request）。401/403、服务不可达、响应不可解析分别如实记"本轮未完成该项复核"——不推断零差异，不为完成盘点自行取新凭据、改认证配置或重启服务。
 - 【硬】更新通道只读：应用内"检查更新"不得点击、`upgrade`/`update` 类子命令不得运行（kimi upgrade 无只读 check 模式，跑=真升级）；查询动作是否零副作用不确定时记"待操作员核实"，查询失败不构成修复更新服务的授权。

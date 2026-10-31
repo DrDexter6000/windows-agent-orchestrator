@@ -1,6 +1,7 @@
 // src/application/worktreeReclaim.js
 //
-// `wao worktree reclaim`——存量 worktree 与 wao/* 分支的 Owner 批准清退。
+// `wao worktree reclaim`——存量 worktree 与 wao/* 分支按计划清退（谁判定见
+// docs/02-architecture.md §4.3「人工清退」）。
 // 两段式：plan（只读普查+分类+写计划，打印计划 sha256）与 apply（只执行
 // sha256 绑定的已批准计划）。分类闭集与求值顺序是本模块的权威，命中即停：
 //
@@ -21,12 +22,12 @@
 //                       线系既未关闭也未 accepted
 //   5 pending_lead      交付已打包未裁决 / 未裁决且树有未提交、暂存、未跟踪或
 //                       被忽略的内容（只读与普通运行没有决定，一律算未裁决）
-//   6 owner_nomination  只对未并入主分支的分支求值：tip 短 SHA 被被清退仓库的
+//   6 include_required  只对未并入主分支的分支求值：tip 短 SHA 被被清退仓库的
 //                       docs/、.wao/decisions/、README.md 引用 / 三处找不到转录
 //                       且未并入（已并入的分支不做引用检查——删掉后提交仍在
 //                       主分支上，引用不受影响）。只有分支、没有树的项走本类；
 //                       有树的缺转录项在第 1 类就保留。--include 点名豁免，
-//                       点名者按第 8 类处理并记"Owner 点名"
+//                       点名者按第 8 类处理并记"--include 点名"
 //   7 tree_protection   头指针漂移（detached/换了分支/tip 不等）/ 嵌套保护 /
 //                       空壳非空
 //   8 reclaim           已裁决或线系已关（树脏不阻塞，按放弃处理并标注）/
@@ -86,7 +87,7 @@ import { removeWorktreeAdminEntry } from "../isolation.js";
 /** 类别闭集（计划 items[].category 与计数键）。 */
 export const RECLAIM_CATEGORIES = Object.freeze([
   "undeterminable", "out_of_scope", "running", "reuse_open", "pending_lead",
-  "owner_nomination", "tree_protection", "tree_shared", "reclaim",
+  "include_required", "tree_protection", "tree_shared", "reclaim",
 ]);
 
 /** 保留理由闭集（action=keep 的 items[].reason）。 */
@@ -732,7 +733,7 @@ function isDirEmpty(path) {
  * @param {object} p
  * @param {string} p.repoCwd 被清退仓库（任意目录，git 解析到仓库级事实）
  * @param {string} p.runDir 转录目录（三处枚举的根）
- * @param {string[]} [p.includeRunIds] Owner 点名的 runId（豁免第 6 类）
+ * @param {string[]} [p.includeRunIds] --include 点名的 runId（豁免第 6 类）
  * @param {string} [p.outPath] 计划写出路径
  * @param {Function} [p.now] 时钟缝
  * @param {object} [p.referenceScanIo] 引用扫描读缝（测试注入读失败；缺省 node:fs）
@@ -1139,20 +1140,20 @@ export async function planWorktreeReclaim({
       if (f.treePath && hasContent) { keep("pending_lead", "undecided_dirty_tree"); return; }
     }
 
-    // 6 owner_nomination（--include 点名豁免）。只对未并入主分支的分支求值：
+    // 6 include_required（--include 点名豁免）。只对未并入主分支的分支求值：
     // 已并入的分支删掉后提交仍从主分支可达，引用与转录缺口都不受影响——先判
     // 并入，再看引用扫描（扫描失败对已并入分支不生效，照常回收）。对未并入
     // 分支：引用面读不出（任一 docs/decisions/README 文件读失败）时无法断言
-    // "未被引用"，归无法判定并保留；tip 短 SHA 被引用、三处无转录同样要 Owner
-    // 点名。
+    // "未被引用"，归无法判定并保留；tip 短 SHA 被引用、三处无转录同样要
+    // --include 点名。
     if (!included.has(runId) && f.branch) {
       const merged = branchMergedIntoMain(`refs/heads/${f.branch.branch}`);
       if (!merged) {
         if (refScan.failed) { keep("undeterminable", "reference_scan_failed"); return; }
         if (refScan.shas.has(f.branch.tip.slice(0, 7))) {
-          keep("owner_nomination", "referenced_short_sha"); return;
+          keep("include_required", "referenced_short_sha"); return;
         }
-        if (info.missing) { keep("owner_nomination", "transcript_missing_unmerged"); return; }
+        if (info.missing) { keep("include_required", "transcript_missing_unmerged"); return; }
       }
     }
 
@@ -1226,7 +1227,7 @@ export async function planWorktreeReclaim({
   }
 
   // ── 生成 items ──
-  // items[].facts——Owner 按 sha256 批准时要看的审批事实（保留与回收条目都带；
+  // items[].facts——审阅计划时要看的审批事实（保留与回收条目都带；
   // 同一 runId 的多条目共享同一份）：
   //   lastDecision        "accepted" | "rejected" | "none"——这条运行最后一个
   //                       交付决定。仅在转录可读且无孪生时在场（缺席 = 事实不
@@ -1260,7 +1261,7 @@ export async function planWorktreeReclaim({
   for (const runId of [...facts.keys()].sort()) {
     const f = facts.get(runId);
     const cls = classifications.get(runId) ?? { category: "undeterminable", reason: "git_fact_failed", detail: "no_classification" };
-    const notes = included.has(runId) ? ["Owner 点名"] : [];
+    const notes = included.has(runId) ? ["--include 点名"] : [];
     const keepItem = (reason, detail) => ({
       runId,
       category: cls.category,

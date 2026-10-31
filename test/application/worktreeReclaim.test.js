@@ -257,7 +257,7 @@ test("分类：共享树有一个成员保留 → 整树保留 tree_shared/share
   assert.equal(itemsOf(plan, "run_root4").filter((i) => i.action === "remove_tree").length, 0);
 });
 
-test("分类：分支 tip 短 SHA 被引用 → owner_nomination/referenced_short_sha", async () => {
+test("分类：分支 tip 短 SHA 被引用 → include_required/referenced_short_sha", async () => {
   const s = await scenario();
   const wt = s.wt("run_ref");
   const sha = commitIn(wt, "feature.txt", "x\n");
@@ -267,11 +267,11 @@ test("分类：分支 tip 短 SHA 被引用 → owner_nomination/referenced_shor
   writeFileSync(join(s.repo, "docs", "decision-proof.md"), `钉住 ${sha.slice(0, 7)} 不变。\n`, "utf8");
   const { plan } = await s.plan();
   const item = oneItem(plan, "run_ref");
-  assert.equal(item.category, "owner_nomination");
+  assert.equal(item.category, "include_required");
   assert.equal(item.reason, "referenced_short_sha");
 });
 
-test("分类：只有分支没有树、三处无转录且未并入 → owner_nomination/transcript_missing_unmerged；--include 点名豁免", async () => {
+test("分类：只有分支没有树、三处无转录且未并入 → include_required/transcript_missing_unmerged；--include 点名豁免", async () => {
   const s = await scenario();
   seedLibraryDummy(s);
   // 孤立提交：先借一棵临时树造提交，再把树与临时分支清掉，只留 wao/run_nom。
@@ -288,7 +288,7 @@ test("分类：只有分支没有树、三处无转录且未并入 → owner_nom
   const named = await s.plan({ includeRunIds: ["run_nom"] });
   const branch = itemsOf(named.plan, "run_nom").find((i) => i.action === "delete_branch");
   assert.ok(branch, "点名后应回收分支");
-  assert.deepEqual(branch.notes, ["Owner 点名"]);
+  assert.deepEqual(branch.notes, ["--include 点名"]);
 });
 
 test("分类：有树但三处无转录 → undeterminable/transcript_missing（刚开跑形态不落回收类；--include 不豁免）", async () => {
@@ -303,7 +303,7 @@ test("分类：有树但三处无转录 → undeterminable/transcript_missing（
   assert.equal(item.reason, "transcript_missing");
   assert.equal(item.action, "keep");
   assert.equal(itemsOf(plain.plan, "run_fresh").filter((i) => i.action === "remove_tree").length, 0);
-  // Owner 点名豁免的是第 6 类；缺转录的事实缺口点不出事实来。
+  // --include 点名豁免的是第 6 类；缺转录的事实缺口点不出事实来。
   const named = await s.plan({ includeRunIds: ["run_fresh"] });
   assert.equal(oneItem(named.plan, "run_fresh").reason, "transcript_missing");
   assert.equal(itemsOf(named.plan, "run_fresh").filter((i) => i.action === "remove_tree").length, 0);
@@ -556,13 +556,13 @@ test("分类：已并入 main 且 tip 被引用 → 照常回收（引用检查�
   assert.equal(mergedItem.category, "reclaim");
   assert.equal(mergedItem.action, "delete_branch");
 
-  // 对照：未并入且 tip 被引用 → 照旧 owner_nomination（要 Owner 点名）。
+  // 对照：未并入且 tip 被引用 → 照旧 include_required（要 --include 点名）。
   const wt = s.wt("run_unm");
   const sha = commitIn(wt, "feature.txt", "x\n");
   git(["worktree", "remove", "--force", wt], s.repo); // 只留分支
   writeFileSync(join(s.repo, "docs", "feature-note.md"), `钉住 ${sha.slice(0, 7)}。\n`, "utf8");
   const plan2 = await s.plan();
-  assert.equal(oneItem(plan2.plan, "run_unm").category, "owner_nomination");
+  assert.equal(oneItem(plan2.plan, "run_unm").category, "include_required");
   assert.equal(oneItem(plan2.plan, "run_unm").reason, "referenced_short_sha");
 });
 
@@ -615,7 +615,7 @@ test("CLI：--include=<id> 等号写法生效（不再静默忽略）", async ()
   assert.deepEqual(plan.include, ["run_incl"], "--include= 等号写法应被收进点名名单");
   const branch = plan.items.find((i) => i.runId === "run_incl" && i.action === "delete_branch");
   assert.ok(branch, "点名后分支应回收");
-  assert.ok(branch.notes.includes("Owner 点名"));
+  assert.ok(branch.notes.includes("--include 点名"));
 });
 
 test("分类：引用文本读不出（注入缝，无独占锁）→ 已并入分支照常回收；未并入分支 undeterminable/reference_scan_failed", async () => {
@@ -1100,7 +1100,7 @@ test("宿主：没有预置 .wao-worktrees/ 忽略规则的宿主里，嵌套运
   assert.equal(oneItem(plan, "devplain").reason, "outside_worktrees_dir");
 });
 
-test("CLI：嵌套回收项打印目标路径与父树（Owner 批准时看得见删的是哪棵）", async () => {
+test("CLI：嵌套回收项打印目标路径与父树（审阅时看得见删的是哪棵）", async () => {
   const s = await scenario();
   const dev = makeLinkedWorktree(s.repo, join(s.base, "devcli"), "devcli");
   const wt = makeRunTreeIn(dev, "run_cli_n");

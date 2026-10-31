@@ -27,7 +27,7 @@ import { parseOptions } from "./shared.js";
 
 /** --include 可重复给出：手收全部值（parseOptions 只对 --tag 做重复收集）。
  * `--include <id>` 与 `--include=<id>` 两种写法都收；等号写法静默忽略会让
- * Owner 以为点了名。 */
+ * 调用者以为点了名。 */
 function collectRepeat(rest, flag) {
   const values = [];
   const eq = `${flag}=`;
@@ -54,7 +54,7 @@ async function worktreeReclaimCommand(rest, config) {
     : resolveConfigPath(config.runDir ?? "runs", readInstallRoot());
   if (options.apply) {
     if (!options.expectSha256) {
-      throw new Error("worktree reclaim --apply requires --expect-sha256 <hex>（Owner 批准的计划 sha256）");
+      throw new Error("worktree reclaim --apply requires --expect-sha256 <hex>（生成计划时打印的 sha256）");
     }
     const result = await applyWorktreeReclaim({
       planPath: resolve(options.apply),
@@ -127,11 +127,11 @@ async function worktreeReclaimCommand(rest, config) {
   const byCategory = plan.counts.byCategory;
   const kept = Object.entries(byCategory).filter(([c]) => c !== "reclaim").reduce((n, [, v]) => n + v, 0);
   console.log(`[worktree reclaim] 计划写出：${resolve(options.out)}（只读，未动任何树/分支/转录）`);
-  console.log(`  计划 sha256：${planSha256}（Owner 按此批准；--apply 须带同一值，且 --run-dir 须与生成时一致）`);
+  console.log(`  计划 sha256：${planSha256}（--apply 须带同一值，且 --run-dir 须与生成时一致）`);
   console.log(`  普查：worktrees ${plan.counts.worktrees}，wao/* 分支 ${plan.counts.waoBranches}；保留 ${kept}，回收 ${byCategory.reclaim ?? 0}`);
   const summary = Object.entries(byCategory).filter(([, v]) => v > 0).map(([c, v]) => `${c}=${v}`).join(" ");
   console.log(`  分类计数（按 runId，含无独立条目的共享成员）：${summary}`);
-  // 逐条打印回收项——Owner 按 sha256 批准时要看的审批事实（同一 runId 的树/
+  // 逐条打印回收项——审阅计划时要看的审批事实（同一 runId 的树/
   // 分支条目只打一行；已并入与 cherry 数沿用条目 info 字段）。
   const reclaimRuns = new Map();
   for (const item of plan.items) {
@@ -139,7 +139,7 @@ async function worktreeReclaimCommand(rest, config) {
     if (!reclaimRuns.has(item.runId)) reclaimRuns.set(item.runId, { runId: item.runId, facts: item.facts ?? {} });
     const entry = reclaimRuns.get(item.runId);
     if (item.action === "remove_tree" && (item.notes ?? []).some((n) => n.includes("脏树"))) entry.dirty = true;
-    // 嵌套项（父树是关联工作树）：Owner 批准时要看得见删的是哪棵、挂在谁下面。
+    // 嵌套项（父树是关联工作树）：审阅时要看得见删的是哪棵、挂在谁下面。
     if ((item.action === "remove_tree" || item.action === "rmdir_husk") && typeof item.scopeRoot === "string") {
       entry.nestedTarget = item.treePath;
       entry.nestedParent = item.scopeRoot;

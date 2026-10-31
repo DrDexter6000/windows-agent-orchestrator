@@ -885,7 +885,7 @@ test("apply：旧形状计划（嵌套项无范围证明字段）→ scope_proof
   const outPath = join(s.base, "plan.json");
   const { planSha256 } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath, now: fixedNow });
   void planSha256;
-  // 模拟旧形状计划：去掉嵌套项的范围证明字段，按新字节重算 sha（Owner 批准的
+  // 模拟旧形状计划：去掉嵌套项的范围证明字段，按新字节重算 sha（审阅的
   // 就是这份字节），apply 不得因为换了新代码就自动扩域。
   const plan = JSON.parse(readFileSync(outPath, "utf8"));
   for (const item of plan.items) {

@@ -35,12 +35,12 @@ npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算�
 
 ## 批量清退 worktree 与分支（`wao worktree reclaim`）
 
-派发 advisory 弹行，或 `npm run hygiene` 的 W4/W5 变红时，按本规程处置。销毁性纪律：清退删 worktree 与 `wao/*` 分支（分支先全量进 bundle 保全，verify 过才动手），须 Owner 按计划 sha256 批准。符合条件的干净 `persistent` 树终态已自动释放、分支一律保留（`docs/02-architecture.md` §4.3，决定 0085），本节清退的是残留树与分支。
+派发 advisory 弹行，或 `npm run hygiene` 的 W4/W5 变红时，按本规程处置。符合条件的干净 `persistent` 树终态已自动释放、分支一律保留（`docs/02-architecture.md` §4.3，决定 0085），本节清退的是残留树与分支。
 
 四步：
 
 1. 生成计划（只读）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、分类计数与逐条回收项的审批事实（嵌套项另打目标与父树）；不传 `--run-dir` 时缺省安装根的运行目录。
-2. Owner 审阅计划文件并按该 sha256 批准（批准口径见决定 0082）；"需 Owner 点名"的保留项（未并入 main，且 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用或只有分支没有树且三处无转录）可用 `--include` 点名豁免。
+2. 审阅与判定：谁判定、哪些要用户同意，见 `docs/02-architecture.md` §4.3「人工清退」。`include_required` 类保留项（未并入 main，且 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用或只有分支没有树且三处无转录）判定可以回收的，带 `--include <runId>` 重新生成计划。
 3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，一律用计划里的运行目录（另传不同 `--run-dir` 整体拒绝）；分支先进 bundle（完整历史，list-heads 含各 tip）；树逐棵复核——嵌套项先重证范围（父树仍在册同仓、路径未变、逐级无链接；旧形状嵌套项不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落盘；记录写失败、遇目录缺失登记或删分支阶段登记读不出以非零退出码结束并如实列出已删除部分。
 4. 收口：`npm run hygiene`。
 

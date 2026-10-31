@@ -65,7 +65,7 @@ export const BRANCH_CAP = 60;
 
 
 /** ADR 0035 S3 固定行文案（两个计数是仅有的动态内容；无其他动态载荷）。
- * 行尾清退指路：指向 `wao worktree reclaim`（计划→Owner 按 sha256 批准→
+ * 行尾清退指路：指向 `wao worktree reclaim`（计划→sha256→
  * apply；规程见 docs/usage/maintenance.md）。仍为静态文本。 */
 function advisoryLine(worktrees, waoRunBranches) {
   return `[wao] advisory: worktrees=${worktrees} waoRunBranches=${waoRunBranches} (npm run hygiene; reclaim: wao worktree reclaim, SOP docs/usage/maintenance.md)`;
