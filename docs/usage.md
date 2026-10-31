@@ -23,13 +23,13 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 
 | 用途 | MCP 工具 | CLI 等价 | 差异注 |
 |---|---|---|---|
-| 单 run 状态 | `run_status` | `runs diagnose <runId>`（诊断视图）/ `runs metrics <runId>`（指标视图） | 无单一等价——MCP run_status 是即时快照，CLI 按"要诊断还是要指标"分两命令 |
+| 单 run 状态 | `run_status` | `status <runId>` | 同一 service（`getRunStatus`），等价；诊断与指标另有 `runs diagnose` / `runs metrics` |
 | 等待/观察 | `run_wait` | `runs wait <runId>` | 同一 service，等价 |
 | 收集结果 | `run_collect` | `collect <runId>` | 等价（CLI 另有 `--final`/游标续读） |
 | 全局统计 | —（无直接等价） | `runs summary` / `runs list` | MCP 侧用 `runs_list` 按需过滤 |
 | run 列表 | `runs_list` | `runs list` | 等价 |
 | 派发 | `run_dispatch` | `run <agentId> …` | MCP 无前台阻塞语义，CLI run 前台等待 |
 | 验收/交付查询与决策 | `run_delivery` / `run_delivery_decide` | `runs delivery <runId> [--accept/--reject]` | CLI 覆盖查询与 accept/reject；review 见下行 |
-| 交付审查（diff/review） | `run_delivery_review` / `run_delivery_review_bundle` | —（无 CLI 等价，MCP 独有） | CLI 侧用 `runs delivery` 查询 + 本地只读 Git 兜底 |
+| 交付审查（diff/review） | `run_delivery_review` / `run_delivery_review_bundle` | `runs delivery review <runId> --file-index N` | review 等价；bundle（readiness 加单文件一页）无 CLI 等价 |
 | 停止 | `run_stop` | `stop <runId> --observed-seq <n> --reason "<理由>"` | 等价（都要先看最新状态、写明理由，决定 0069） |
 | 台账诊断 | `run_diagnose` | `runs diagnose` | 等价（MCP 返回含 state/terminal；CLI JSON 分支刻意不含） |

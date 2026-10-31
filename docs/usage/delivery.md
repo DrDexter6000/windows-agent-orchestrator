@@ -103,7 +103,7 @@ candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，
 
 ### 读绑定（伪终态防御）
 
-`run_delivery`（point-in-time 与 `--wait-ms` readiness 两条路径）投影的 `terminalState` 只由本 run 自身信封事件计算：尾部追加的外 run / 伪造终态行不可见，不可归属时按 `pending` 非终态路径处理，绝不凭不可归属事件投影终态。同一绑定保护四个面：候选投影（`backend_failed` / `process_missing` / isolation 结算门）只由本 run 自身事件门控，外 run 的 `completed`/`failed` 尾条既不能把真实 failed run 读成 completed，也不能为非 failed run 武装候选门；daemon 的孤儿恢复（`daemon start --resume-on-start` / `daemon list` 统一视图）按本 run 自身非终态诚实放行给 owner 心跳关；runManager 采纳外部终态（stop/abort 等并发写入）与后台 runner 启动失败/解析失败的 `run.error`+`failed` 落盘都只认带 runId 信封的写入——交付模式 run 完成时，尾部的外 run 伪终态行不会压制失败事实落盘，也不会导致打包被跳过、交付物未打包。合法全绑定 transcript 上过滤器恒等。诚实边界：绑定只杀跨 run 注入与错读；同 runId 伪造追加 = `runs/` 写权限攻击面，读侧无解。
+`run_delivery` 投影的 `terminalState` 只由本 run 自身信封事件计算，尾部追加的外 run 或伪造终态行不可见；这道绑定保护的四个面与诚实边界见[架构](../02-architecture.md) §4.7「终态与候选投影只认本 run 的信封」。
 
 ### delivery readiness handshake（可选 bounded 只读 wait）
 
@@ -138,7 +138,7 @@ npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --fo
 
 `run_delivery_review_bundle` 是默认的低摩擦 delivery 首屏查询：一个调用先等待 delivery readiness，再仅在 readiness 为 `reviewable` 时读取 Lead 指定的一个文件页。它机械组合既有 `getRunDeliveryReadiness`、`run_delivery` 安全投影和 `getRunDeliveryReview`/`projectReviewResult`，不引入第二份 delivery/readiness/review 判定。
 
-- 输入：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` readiness 共用；readiness 稳定即提前返回。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
+- 输入：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` 共用，何时返回由收口判定决定（见[监督](supervise.md)「等待到收口」）。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
 - 输出（strict）：`delivery` 为 `run_delivery` 安全投影，`review` 为单页 review 或 `null`。非 `reviewable` 状态返回 `review:null`，同时保留完整安全 delivery/readiness 事实；该路径零 diff/Git review read。`reviewable` 时 review commit 与 changed-file count 必须和 delivery 投影精确一致，否则整次调用固定失败。
 - Lead 权限不变：WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment、不判定 binary/diff-too-large 是否可接受，也不 stop/retry/repackage/accept/reject。Lead 仍须审查 `0..changedFileCount-1` 的全部文件和全部页面，然后独立调用 `run_delivery_decide`。
 - 原子路径保留：`run_delivery` 继续提供 point-in-time/readiness-only 查询；`run_delivery_review` 继续提供单独或 continuation-page 读取。长 worker、人工轮询、故障排查和非标准流程不受组合工具限制。
@@ -153,7 +153,7 @@ npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --fo
 - 输入（strict）：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`reason` 是闭集环境/工具原因（枚举见生成层）；`attempt` 可选（整数 1 或 2，缺省 1；2 = 第二次也是最后一次机会，资格如上）；`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数，与 `verificationTimeoutMs` 共享闭界 `[1000,7200000]`，zod 边界与 service 常量同源）——省略时继承该 delivery ref 上持久化的执行预算，ref 无持久值才用 service 默认 300000；持久值缺失/损坏/越界 fail-closed 拒绝（不自动回退默认值）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
 - eligible failure：第一次链的原 verification 失败 code 必须是环境/工具闭集（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`）；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）不可 reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
 - 幂等/并发：每条链各自 reentrant + crash-safe——重试/并发收敛到该 attempt 首调用者记录的 setup 与同一个 commit，每条链最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_passed` / `_failed` / `_unavailable`；结果只写进本次 attempt 自己的那条链；`attempt` 字段只在值为 2 时落盘，缺省视为 1，旧 transcript 读取逐字节不变）。不带 attempt 或 `attempt: 1` 的重复调用绝不跑第二次验证（在第一条链上收敛）。
-- 原 vs effective verification：原始终态 verification 保留不改写，第二条链也不改写第一条链的事实；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（最新一条 reverify 链的结果，含 `reverify: {status, reason}` 链事实）。消费方一律以最新一条链为准：只有最新链完整（requested + outcome）时 effective 才取其结果，非完整链（none/pending/malformed）不改变 effective 状态（fail-closed）。决定门禁取"决定之前最近一条完整链"的结果作支撑，accept 仍须 passed；决定之后追加的请求不能事后给决定撑腰。
+- 原 vs effective verification：原始终态 verification 保留不改写，第二条链也不改写第一条链的事实；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（最新一条 reverify 链的结果，含 `reverify: {status, reason}` 链事实）。消费方一律以最新一条链为准：只有最新链完整（requested + outcome）时 effective 才取其结果，非完整链（none/pending/malformed）不改变 effective 状态（fail-closed）。有 reverify 链时，决定门禁取"决定之前最近一条完整链"的结果作支撑，accept 须 passed；决定之后追加的请求不能事后给决定撑腰。
 - 安全输出：不返回 commands/worktree 路径/stderr/reason/env/raw events（字段形状与闭集见生成层；settled 输出含本次收敛的 `attempt`）。
 
 Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery_review_bundle`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。

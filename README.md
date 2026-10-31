@@ -61,9 +61,10 @@ you.
 ## What's new in v0.7.0 (2026-10-31)
 
 - **The Lead hears when a run settles, on any host** — `wao runs wait <runId> --until-settled`
-  exits only when the run, its packaging, its verification and any reverify have results;
-  unsettled waits and accepted dispatches carry a `nextStep`; MCP waits default to 45 s so
-  they fit hosts that time a tool call out after about a minute (decision 0095). The waiter
+  exits only once the run has settled: terminal and, for a delivery, its verification and any
+  reverify have results; MCP `run_delivery` with `waitMs` waits for settlement the same way;
+  unsettled waits and accepted dispatches carry a `nextStep`; the four MCP wait tools default
+  to 45 s so they fit hosts that time a tool call out after about a minute (decision 0095). The waiter
   exits with `verifier_gone` when it can prove that a pending delivery's verifier is gone,
   and consult receipts say how to keep waiting on unfinished seats (0096).
 - **Lane facts where the Lead decides** — the lane profile holds the Owner's cost tiers,
@@ -218,7 +219,7 @@ npm run cli -- status|tail <runId>                      # observe
 npm run cli -- collect <runId> [--cursor T --format json]   # bounded worker output + continuation
 npm run cli -- runs diagnose <runId>                    # failure category
 npm run cli -- runs delivery <runId>                    # changed-path projection
-npm run cli -- runs delivery review <runId>             # safe bounded/redacted diff review
+npm run cli -- runs delivery review <runId> --file-index 0   # one changed file, bounded/redacted diff
 npm run cli -- stop <runId>                             # stop a runaway worker
 npm run cli -- runs list                                # recovery inventory
 npm run cli -- runs metrics <runId>                     # tokens / cost

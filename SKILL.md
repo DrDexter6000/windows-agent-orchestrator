@@ -63,7 +63,7 @@ Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; neve
 
 Wait for meaningful changes; do not narrate unchanged polls. Before supervision, read [quiet supervision](docs/usage/supervise.md#lead-quiet-supervision).
 
-**Discipline: a live run needs a live wait.** Before ending any turn while a run is still active, a wait must already be attached — CLI `wao runs wait <runId> --until-settled`, or repeated MCP `run_wait` calls until the run settles (decision 0095; details in supervise.md).
+**Discipline: a live run needs a live wait.** Before ending any turn while a run is still active, a wait must already be attached — CLI `wao runs wait <runId> --until-settled`, or repeated MCP `run_wait` calls until terminal, then `run_delivery` with `waitMs` until a delivery settles (decision 0095; details in supervise.md).
 
 **Host per-call timeout ≠ run death.** A wait-family call may die at the HOST transport layer while the run keeps living detached — never treat that as run failure: verify with `run_status`, then keep waiting (bounds, defaults, `nextStep`: docs/usage/supervise.md「等待到收口」).
 

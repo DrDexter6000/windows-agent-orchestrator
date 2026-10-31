@@ -53,9 +53,10 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
 
 ## v0.7.0 新增（2026-10-31）
 
-- **运行收口时 Lead 会知道，不靠宿主推送**——`wao runs wait <runId> --until-settled` 等到运行、
-  打包、验证与 reverify 都有结果才退出；没等到收口的等待与受理的派发都附 `nextStep`；MCP 等待
-  缺省 45 秒，放得进约一分钟就让工具调用超时的宿主（决定 0095）。能证明待验证交付的验证进程
+- **运行收口时 Lead 会知道，不靠宿主推送**——`wao runs wait <runId> --until-settled` 等到运行
+  收口才退出：已终态，有交付时验证与 reverify 也都有了结果；MCP `run_delivery` 带 `waitMs`
+  时同样按收口判定等；没等到收口的等待与受理的派发都附 `nextStep`；四个 MCP 等待类工具缺省
+  45 秒，放得进约一分钟就让工具调用超时的宿主（决定 0095）。能证明待验证交付的验证进程
   已不在时，等待器以 `verifier_gone` 退出；会审回执说明怎么接着等没到终态的席位（0096）。
 - **选车道的事实送到 Lead 做决定的地方**——车道画像一处给出 Owner 成本档、实测分数与 Owner 规则；
   `wao lanes` 开头一屏总表，派发回显所选车道的事实，`lead_preflight` 车道行标明能否看视频
@@ -187,7 +188,7 @@ npm run cli -- status|tail <runId>                      # 观察
 npm run cli -- collect <runId> [--cursor T --format json]   # 有界 worker 输出 + 续读
 npm run cli -- runs diagnose <runId>                    # 失败归类
 npm run cli -- runs delivery <runId>                    # changed-path 投影
-npm run cli -- runs delivery review <runId>             # 安全的有界/脱敏 diff 审查
+npm run cli -- runs delivery review <runId> --file-index 0   # 一个改动文件的有界/脱敏 diff 审查
 npm run cli -- stop <runId>                             # 停掉失控 worker
 npm run cli -- runs list                                # 恢复清单
 npm run cli -- runs metrics <runId>                     # tokens / 成本

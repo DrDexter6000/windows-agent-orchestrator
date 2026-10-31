@@ -714,6 +714,8 @@ backend done:completed
 - 成功：`scorecard.checked`（如有）→ `run.delivery_created` → `run.completed` → `run.state_change completed`（seq 连续）。
 - 打包失败：`run.delivery_failed` → `run.error phase=delivery` → `run.state_change failed`（seq 连续）。
 
+**终态与候选投影只认本 run 的信封**：`run_delivery`（point-in-time 与 `--wait-ms` 两条路径）投影的 `terminalState` 只由本 run 自身信封事件计算：尾部追加的外 run / 伪造终态行不可见，不可归属时按 `pending` 非终态路径处理，绝不凭不可归属事件投影终态。同一绑定保护四个面：候选投影（`backend_failed` / `process_missing` / isolation 结算门）只由本 run 自身事件门控，外 run 的 `completed`/`failed` 尾条既不能把真实 failed run 读成 completed，也不能为非 failed run 武装候选门；daemon 的孤儿恢复（`daemon start --resume-on-start` / `daemon list` 统一视图）按本 run 自身非终态诚实放行给 owner 心跳关；runManager 采纳外部终态（stop/abort 等并发写入）与后台 runner 启动失败/解析失败的 `run.error`+`failed` 落盘都只认带 runId 信封的写入——交付模式 run 完成时，尾部的外 run 伪终态行不会压制失败事实落盘，也不会导致打包被跳过、交付物未打包。合法全绑定 transcript 上过滤器恒等。诚实边界：绑定只杀跨 run 注入与错读；同 runId 伪造追加 = `runs/` 写权限攻击面，读侧无解。
+
 `packageDeliveryFn` 构造函数参数（默认 `packageDelivery`）仅供测试/组合注入，非通用 service container。
 
 ### 4.8 Delivery Verification 集成

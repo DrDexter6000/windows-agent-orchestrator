@@ -3513,19 +3513,19 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
   const { RUNS_SUBCOMMANDS } = await import("../../src/commands/runs.js");
   // 冻结期望配对（改表 = 有意变更，须同步此钉）：
   const expected = [
-    { mcp: ["run_status"], cli: ["runs diagnose", "runs metrics"] },
+    { mcp: ["run_status"], cli: ["status"] },
     { mcp: ["run_wait"], cli: ["runs wait"] },
     { mcp: ["run_collect"], cli: ["collect"] },
     { mcp: [], cli: ["runs summary", "runs list"] },
     { mcp: ["runs_list"], cli: ["runs list"] },
     { mcp: ["run_dispatch"], cli: ["run"] },
     { mcp: ["run_delivery", "run_delivery_decide"], cli: ["runs delivery"] },
-    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: [] },
+    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: ["runs delivery"] },
     { mcp: ["run_stop"], cli: ["stop"] },
     { mcp: ["run_diagnose"], cli: ["runs diagnose"] },
   ];
   assert.equal(rows.length, expected.length, `映射表行数漂移（${rows.length} vs ${expected.length}）——删行/加行须同步守卫期望`);
-  const cliTokenRe = /runs [a-z]+|\bcollect\b|\brun\b|\bstop\b/g;
+  const cliTokenRe = /runs [a-z]+|\bcollect\b|\brun\b|\bstop\b|\bstatus\b/g;
   rows.forEach((row, i) => {
     const cells = splitRowCells(row).map((c) => c.trim());
     const mcp = cells[1]?.match(/[a-z]+(?:_[a-z]+)+/g) ?? [];
@@ -3547,7 +3547,7 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
   });
   // R9 补强（coder_mm 验证）：差异注等**全表**提到的 MCP 名也必须 ∈ TOOLS
   // （改任一格提到不存在的工具即红）。已知边界（单向绑定，自知）：TOOLS /
-  // 子命令**新增**不强制补行；CLI 顶层命令（run/collect/stop）改名靠精确配对
+  // 子命令**新增**不强制补行；CLI 顶层命令（run/collect/stop/status）改名靠精确配对
   // 钉的行值红，不在权威源派生面内。
   for (const name of (section.match(/[a-z]+(?:_[a-z]+)+/g) ?? [])) {
     assert.ok(TOOLS.includes(name), `映射表任意格提到的 MCP 名 \`${name}\` 不在 TOOLS 冻结面`);
