@@ -584,6 +584,45 @@ function _lastBoundStateChangeIs(events, runId, expected) {
   return to === expected;
 }
 
+// 决定 0101：任何信封里的 reverify 事实（`run.delivery_reverification_*` 是
+// reverify 链的事件命名空间，含畸形与孤立的）。原 runSettlement.js 的定义原样
+// 搬入；runSettlement.js 从这里导入并照旧导出，既有消费者不改。
+export function hasReverifyFact(events) {
+  return events.some(
+    (e) => e && typeof e.type === "string" && e.type.startsWith("run.delivery_reverification_"),
+  );
+}
+
+/**
+ * 决定 0101 第 1 条：这个交付是否"派发时声明了无可跑验证"。写门
+ * （tryAppendDecision）、恢复资格（validateDeliveryFacts 的 recoveryAcceptable）
+ * 与已有决定的读面校验（_validateBoundDecisionEvent）共用这一个纯谓词。三条
+ * 同时成立才为真：
+ *   - created ref 自己声明：verification.commands 是空数组（缺失/非数组都为假），
+ *     unavailableReason 是 trim 后非空的字符串——只看 created ref，结果事件或
+ *     决定快照上补出的理由不算；
+ *   - 恰有一条绑定该 runId 的原始结果事件，类型是
+ *     run.delivery_verification_unavailable（只认原始事件族
+ *     run.delivery_verification_*，不认 reverify 链）；
+ *   - 转录里没有任何 reverify 事实（hasReverifyFact 为假）。
+ * 纯函数：不读盘、不抛错；拿不准的输入一律返回假。
+ */
+export function isDeclaredUnverifiableDelivery(events, runId, createdRef) {
+  const verification = createdRef?.verification;
+  if (!verification || typeof verification !== "object") return false;
+  if (!Array.isArray(verification.commands) || verification.commands.length !== 0) return false;
+  if (typeof verification.unavailableReason !== "string"
+    || verification.unavailableReason.trim().length === 0) return false;
+  if (!Array.isArray(events) || typeof runId !== "string" || runId.length === 0) return false;
+  const outcomes = events.filter(
+    (e) => e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
+  );
+  if (outcomes.length !== 1 || outcomes[0].type !== "run.delivery_verification_unavailable") {
+    return false;
+  }
+  return !hasReverifyFact(events);
+}
+
 /**
  * TD-179: validate the single bound decision event against the created ref,
  * the (optional) original outcome event, and the reverify chain projection.
@@ -606,7 +645,10 @@ function _lastBoundStateChangeIs(events, runId, expected) {
  *     NEAREST complete reverify chain before the decision is the backing
  *     result (with at most two chains, a later pending chain never supports
  *     an earlier decision and an earlier chain is superseded); an accepted
- *     must be passed. Legacy tolerance ONLY: a missing or "pending"
+ *     must be passed, EXCEPT a delivery the 决定 0101 predicate declares
+ *     unverifiable, whose accepted snapshot may claim "unavailable" backed by
+ *     the earlier bound original unavailable outcome (never a reverify chain).
+ *     Legacy tolerance ONLY: a missing or "pending"
  *     acceptance stamp on such a backed nonpending snapshot.
  *
  * @param {object} decision — the bound run.delivery_accepted/rejected event
@@ -673,11 +715,13 @@ function _validateBoundDecisionEvent(decision, {
   // Nonpending snapshot: it must be BACKED by an earlier matching original
   // outcome or a valid (complete) reverify chain outcome in the prefix.
   let backed = false;
+  let backedByOriginalOutcome = false;
   if (outcomeEvent) {
     const outcomeIndex = events.indexOf(outcomeEvent);
     if (outcomeIndex >= 0 && outcomeIndex < decisionIndex
       && _verificationOutcomeFromType(outcomeEvent.type) === claimed) {
       backed = true;
+      backedByOriginalOutcome = true;
     }
   }
   // A request appended later cannot retroactively authorize this snapshot.
@@ -696,7 +740,16 @@ function _validateBoundDecisionEvent(decision, {
     return "decision event verification status has no earlier matching original outcome or valid reverify backing";
   }
   if (decision.type === "run.delivery_accepted" && claimed !== "passed") {
-    return "an accepted decision must be backed by a passed verification";
+    // 决定 0101 第 3 条：accepted 快照声明 unavailable 时，仅当交付满足"声明
+    // 无可跑验证"谓词，且背书来自决定之前那条绑定的原始 unavailable 结果事件
+    // （不是 reverify 链——hasReverifyFact 为假时 reverify 链本就不存在）才
+    // 有效；其余组合照旧报原来的错误。
+    const declaredUnverifiable = claimed === "unavailable"
+      && backedByOriginalOutcome
+      && isDeclaredUnverifiableDelivery(events, runId, createdRef);
+    if (!declaredUnverifiable) {
+      return "an accepted decision must be backed by a passed verification";
+    }
   }
   if (stamp !== undefined && stamp !== expectedStamp && stamp !== "pending") {
     return "decision event acceptance status disagrees with the event type";
@@ -1250,7 +1303,12 @@ export class JsonlTranscript {
    *     snapshot backing in append order) — a VALIDATED existing decision is
    *     returned as the already_decided loser BEFORE any new-action gate;
    *   - reject allowed when verification status ∈ {passed, failed, unavailable};
-   *   - accept requires terminal state completed + effective verification passed;
+   *   - accept requires terminal state completed + effective verification
+   *     passed, OR a delivery the 决定 0101 pure predicate declares
+   *     unverifiable (created declared empty commands + a non-empty
+   *     unavailableReason, exactly one bound original unavailable outcome, no
+   *     reverify facts) — the same rule on the normal completed and the
+   *     recovery paths;
    *   - TD-179: reject is ALSO allowed for a pending verification, but ONLY on
    *     a completed run whose created ref EXPLICITLY declares
    *     verification.status "pending" with no outcome and no decision — the
@@ -1327,10 +1385,16 @@ export class JsonlTranscript {
       // fails closed; it is never auto-accepted and never silently hidden.
       const verificationStatus = facts.effectiveVerificationStatus;
       if (decision === "accepted") {
-        // Accept ALWAYS requires a passed (effective) verification, for both the
-        // normal completed path, the recovery path, and the reverify path. A
-        // pending verification NEVER gains acceptance (TD-179 keeps this).
-        if (verificationStatus !== "passed") {
+        // 决定 0101：accept 在 effective passed 之外，也接受"派发时声明无可跑
+        // 验证"的交付（同一纯谓词：created 声明空命令 + 非空理由、恰一条绑定
+        // 的原始 unavailable、无任何 reverify 事实——正常 completed 路径与恢复
+        // 路径同一规则）。failed 仍须一条完整 reverify 链 passed 才能 accept；
+        // pending 永不接受（TD-179 保留）。谓词为真时不可能有 reverify 链，
+        // effective 即原始 unavailable，快照按原样声明 unavailable。
+        const declaredUnverifiable = isDeclaredUnverifiableDelivery(
+          events, this.context.runId, facts.createdRef,
+        );
+        if (verificationStatus !== "passed" && !declaredUnverifiable) {
           // M12-9: typed policy rejection; message kept for diagnostics only.
           throw new DeliveryDecisionPolicyError("verification_failed", `Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
         }
@@ -2466,12 +2530,17 @@ export function validateDeliveryFacts(events, options = {}) {
   // semantics, so the normal completed-run accept path is untouched. Requires:
   //   - exactly one bound run.delivery_failed with code "disallowed_path";
   //   - a run.delivery_repackaged provenance bound to the created commit; AND
-  //   - verification status "passed".
+  //   - original verification status "passed", OR (决定 0101) the delivery
+  //     declared itself unverifiable at dispatch — original status only, never
+  //     effective, so a "reverify passed after failed" recovery delivery is NOT
+  //     admitted here (决定 0101 keeps reverify out of the recovery path).
   // The terminal failed is never rewritten to completed here — the decide gate
   // consults this flag to admit an explicit Lead accept on the failed run.
   const createdRunId = createdEvents[0].runId ?? null;
   const recoveryProvenance = findValidRepackageProvenance(events, createdRunId, createdRef);
-  const recoveryAcceptable = recoveryProvenance !== null && verificationStatus === "passed";
+  const recoveryAcceptable = recoveryProvenance !== null
+    && (verificationStatus === "passed"
+      || isDeclaredUnverifiableDelivery(events, createdRunId, createdRef));
 
   // M12-6 Package 3B: project the reverify audit chain (ADDITIVE). The
   // effective verification status used for the Lead accept/reject decision

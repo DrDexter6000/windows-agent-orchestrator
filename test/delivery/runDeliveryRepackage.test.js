@@ -46,6 +46,7 @@ import { verifyDelivery } from "../../src/deliveryVerification.js";
 import { computeCandidateInventory } from "../../src/application/candidateInventory.js";
 import { getRunDelivery, getRunDeliveryReadiness } from "../../src/application/runDelivery.js";
 import { decideRunDelivery } from "../../src/application/runDelivery.js";
+import { runDeliveryReverify } from "../../src/application/runDeliveryReverify.js";
 import {
   JsonlTranscript, readTranscript, RepackageCasPolicyError,
   REPACKAGE_CAS_POLICY_CODES, validateDeliveryFacts, findValidRepackageProvenance,
@@ -834,6 +835,114 @@ test("M12-1S2-ACCEPT-DENY-NO-PROVENANCE: accept rejected without recovery proven
     await assert.rejects(() => decideRunDelivery({
       runId: RUN_ID, runDir, decision: "accepted", reason: "x",
     }), /completed|recovery/);
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// 决定 0101：原始合同声明 verificationUnavailableReason 的恢复场景。重打包后
+// 验证为 unavailable（真实验证器对空命令短路，不跑任何命令），accept 在
+// provenance + 谓词齐备时成功；run 的终态 failed 不被改写。
+test("决定 0101-RECOVER: repackage with a declared-unavailable verification accepts on the recovery chain", async () => {
+  const { repo, runDir } = await setupDisallowedScenario({
+    verificationCommands: null,
+    verificationUnavailableReason: "docs-only change; nothing runnable",
+  });
+  try {
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      // 真实验证器核对已提交 ref 后对"空命令 + 非空理由"短路为 unavailable；
+      // 任何命令执行都是契约违反。
+      verifyDeliveryFn: realVerifierWith(async () => { throw new Error("must not run: declared unverifiable"); }),
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(result.verificationStatus, "unavailable");
+    const events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_unavailable").length, 1);
+    assert.equal(events.filter((e) => e.type === "run.delivery_repackaged").length, 1, "recovery provenance present");
+    const created = events.find((e) => e.type === "run.delivery_created");
+    assert.deepEqual(created.delivery.verification.commands, []);
+    assert.equal(created.delivery.verification.unavailableReason, "docs-only change; nothing runnable");
+
+    const accept = await decideRunDelivery({
+      runId: RUN_ID, runDir, decision: "accepted", reason: "manually reviewed; docs-only",
+    });
+    assert.equal(accept.accepted, true);
+    assert.equal(accept.event.type, "run.delivery_accepted");
+    assert.equal(accept.event.delivery.verification.status, "unavailable", "accepted snapshot declares unavailable");
+
+    // run 的终态 failed 照旧不被改写。
+    const view = await getRunDelivery({ runId: RUN_ID, runDir, authorizedWorkspaceRoot: repo });
+    assert.equal(view.terminalState, "failed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// 决定 0101 负向：没有 provenance 时，声明无可跑验证的交付照旧拒绝恢复 accept。
+test("决定 0101-RECOVER-DENY: declared-unverifiable accept still refused without recovery provenance", async () => {
+  const { repo, runDir, worktreePath } = await setupDisallowedScenario({
+    verificationCommands: null,
+    verificationUnavailableReason: "docs-only change; nothing runnable",
+  });
+  try {
+    // 重新 seed：终态 failed + created 声明 + 原始 unavailable，但无
+    // run.delivery_repackaged provenance —— accept 必须照旧拒绝。
+    const fakeCommit = "c".repeat(40);
+    const fakeBase = "b".repeat(40);
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId: RUN_ID,
+      baseCommit: fakeBase, deliveryCommit: fakeCommit, branch: `wao/${RUN_ID}`,
+      worktreePath, changedFiles: ["src/a.js"],
+      verification: { status: "unavailable", unavailableReason: "docs-only change; nothing runnable", commands: [], verifiedCommit: fakeCommit, results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    seedTranscript(runDir, RUN_ID, [
+      { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
+      { type: "run.started", backend: "test", cwd: repo, worktreePath,
+        delivery: { mode: "git_commit_v1", baseCommit: fakeBase, allowedPaths: ["src"], verificationUnavailableReason: "docs-only change; nothing runnable" } },
+      { type: "run.state_change", from: null, to: "failed", reason: "empty_diff" },
+      { type: "run.delivery_created", delivery: ref },
+      { type: "run.delivery_verification_unavailable", delivery: ref },
+    ]);
+    await assert.rejects(() => decideRunDelivery({
+      runId: RUN_ID, runDir, decision: "accepted", reason: "x",
+    }), /completed|recovery/);
+    const events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0);
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// 决定 0101 第 2 条：恢复资格只看原始验证，不看 effective。原始 failed 的恢复交付即使
+// 之后 reverify passed，accept 照旧拒绝（终态 failed，又不是 recovery accept）。
+test("决定 0101-RECOVER-ORIGINAL-ONLY: a recovery delivery whose original verification failed stays refused after a passing reverify", async () => {
+  const { repo, runDir } = await setupDisallowedScenario();
+  try {
+    await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: failedVerifier, computeInventoryFn: computeCandidateInventory,
+    });
+    await runDeliveryReverify({
+      runId: RUN_ID, runDir, authorizedWorkspaceRoot: repo, reason: "tooling_invalid",
+      verifyDeliveryFn: passedVerifier,
+    });
+    const facts = validateDeliveryFacts(await readEvents(runDir), { expectedRunId: RUN_ID, allowVerificationPending: true });
+    assert.equal(facts.verificationStatus, "failed", "the original verification stays failed");
+    assert.equal(facts.effectiveVerificationStatus, "passed", "the reverify chain passed");
+    assert.equal(facts.recoveryAcceptable, false, "recovery eligibility reads the original status only");
+    await assert.rejects(() => decideRunDelivery({
+      runId: RUN_ID, runDir, decision: "accepted", reason: "reverify passed",
+    }), /run terminal state is failed/);
+    const events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0);
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

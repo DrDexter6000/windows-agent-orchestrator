@@ -55,7 +55,7 @@ WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权
 # 查询 delivery 状态
 npm run cli -- runs delivery <runId> --format json
 
-# 接受（要求 verification passed + terminal completed）
+# 接受（要求 verification passed 或派发时声明无可跑验证，terminal completed）
 npm run cli -- runs delivery <runId> --accept --reason-file accept-reason.txt --format json
 
 # 拒绝（允许 passed/failed/unavailable verification）
@@ -214,7 +214,7 @@ process_missing 结算：与前两类（终态 failed）不同，`process_missin
 - 可重入/崩溃恢复/并发安全：相同输入的并发或重试 → 恰好一条终态事实、恰好一条 `run.delivery_created` 与恰好一个最终 verification 结果；不同 allowedPaths 的竞争请求不会互相覆盖（含 process_missing 竞争请求收敛到同一终态/commit/验证）。打包在 transcript append 锁外进行（长操作不持锁）；只有短读/校验/CAS-append 在锁内。包装移动了分支但 transcript append 失败/崩溃时，下次同名调用从 Git 精确对象恢复同一个 commit（严格证明 parent/count/files/message/identity/branch/clean 后才落盘，不丢结果、不重调 model）。
 - 安全输出：不返回 worktreePath/commands/stderr/reason/PID/path（字段形状与闭集见生成层）。
 
-追加一条 recovery provenance（`run.delivery_repackaged`），绑定 DeliveryRef / 请求 runId / 已批准 scope / `recoveryKind`。原始终态 failed 不被改写为 completed；但当且仅当 durable recovery facts、provenance、唯一 DeliveryRef 与 verification chain 一致且 verification=passed 时，`run_delivery_decide(accepted)` 可被 Lead 显式接受（仍由 Lead 决定，非自动）。verification failed/unavailable 仍可供 Lead review/reject，绝不自动 reject。
+追加一条 recovery provenance（`run.delivery_repackaged`），绑定 DeliveryRef / 请求 runId / 已批准 scope / `recoveryKind`。原始终态 failed 不被改写为 completed；但当且仅当 durable recovery facts、provenance、唯一 DeliveryRef 与 verification chain 一致且原始 verification=passed 或原合同声明无可跑验证时，`run_delivery_decide(accepted)` 可被 Lead 显式接受。verification failed 仍可供 Lead review/reject，绝不自动 reject。
 
 expected policy rejection 是正常结构化结果，不是错误：资格/合同/worktree/清单/范围/并发等前置门未过时返回 `status:"ok"` + 闭集 `rejectionReason`（成功与 pending 恒为 `null`；此时交付字段缺席）。闭集（服务层 `REPACKAGE_REJECTION_CODES` SSOT）：
 

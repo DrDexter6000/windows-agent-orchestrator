@@ -21,6 +21,7 @@ import {
   validateDeliveryFacts,
   projectReverifyChain,
   TERMINAL_STATES,
+  hasReverifyFact,
 } from "../transcript.js";
 import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 
@@ -135,14 +136,10 @@ function settlementResult(status, reason, facts) {
   return { status, reason, facts };
 }
 
-// 任何信封里的 reverify 事实（`run.delivery_reverification_*` 是 reverify 链的事件
-// 命名空间，见 transcript.js；reverify 投影同样把外 run 信封的这类事件当冲突）。
-// runDelivery 的 readiness 投影对没有验证状态的 legacy ref 用同一谓词。
-export function hasReverifyFact(events) {
-  return events.some(
-    (e) => e && typeof e.type === "string" && e.type.startsWith("run.delivery_reverification_"),
-  );
-}
+// 任何信封里的 reverify 事实——实现的家已随决定 0101 移入 src/transcript.js
+//（"声明无可跑验证"谓词与之共用），这里照旧以同名导出，既有消费者
+//（runDelivery 的 readiness 投影等）不改。
+export { hasReverifyFact };
 
 /**
  * 决定 0095：在同一份 transcript 快照上判定一个运行是否已收口。

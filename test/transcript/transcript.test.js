@@ -22,6 +22,8 @@ import {
   DeliveryDecisionPolicyError,
   REPACKAGE_CAS_POLICY_CODES,
   RepackageCasPolicyError,
+  hasReverifyFact,
+  isDeclaredUnverifiableDelivery,
 } from "../../src/transcript.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
 
@@ -1371,6 +1373,366 @@ test("M12-9-T5: tryAppendDecision verification/terminal gates throw the dedicate
 });
 
 // ============================================================
+// 决定 0101: a delivery dispatched with verificationUnavailableReason
+// ("declared unverifiable") can be Lead-accepted.
+//
+// The pure predicate isDeclaredUnverifiableDelivery (created declared empty
+// commands + a non-empty unavailableReason; exactly one bound original
+// run.delivery_verification_unavailable outcome; zero reverify facts) is the
+// single rule behind all three gates:
+//   - write gate (tryAppendDecision): accept admits effective passed OR the
+//     predicate; the terminal gate is unchanged;
+//   - recovery eligibility (recoveryAcceptable): provenance still required,
+//     original passed OR the predicate — never effective;
+//   - read-side validation (_validateBoundDecisionEvent): an accepted snapshot
+//     claiming "unavailable" is valid only when the predicate holds and the
+//     backing is the earlier bound original unavailable outcome.
+// ============================================================
+
+/** A created ref that declares "no runnable verification" at dispatch time. */
+function decUnverifiableRef(overrides = {}) {
+  return decRef({
+    verification: { status: "pending", commands: [], unavailableReason: "docs-only change; nothing runnable", verifiedCommit: DEC_COMMIT, results: [] },
+    ...overrides,
+  });
+}
+
+function decUnavailableOutcomeRef(reason = "docs-only change; nothing runnable") {
+  return decRef({
+    verification: { status: "unavailable", commands: [], unavailableReason: reason, verifiedCommit: DEC_COMMIT, results: [] },
+  });
+}
+
+function decFailedOutcomeRef() {
+  return decRef({
+    verification: { status: "failed", failureCode: "command_failed", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+  });
+}
+
+function decDecisionEvent(type, outcomeRef, { reason = "decision" } = {}) {
+  return {
+    type: `run.delivery_${type}`,
+    runId: DEC_RUN,
+    delivery: { ...outcomeRef, acceptance: { status: type, reviewerType: "lead_agent" } },
+    deliveryCommit: DEC_COMMIT,
+    reason,
+  };
+}
+
+test("决定 0101: isDeclaredUnverifiableDelivery — every clause's true/false branch directly", () => {
+  const qualified = decUnverifiableRef();
+  const base = [
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: qualified },
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+  ];
+  // 正向：三条同时成立。
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, qualified), true, "all three clauses hold");
+
+  // created 声明逐条证伪。
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decRef({
+    verification: { status: "pending", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "non-empty commands");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decRef({
+    verification: { status: "pending", commands: "node -e 0", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "non-array commands");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decRef({
+    verification: { status: "pending", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "missing commands");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decRef({
+    verification: { status: "pending", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "missing reason");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decUnverifiableRef({
+    verification: { status: "pending", commands: [], unavailableReason: "   \n\t ", verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "whitespace-only reason");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, decUnverifiableRef({
+    verification: { status: "pending", commands: [], unavailableReason: 42, verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "non-string reason");
+  // 理由只在结果事件上、created 上没有 → 假。
+  assert.equal(isDeclaredUnverifiableDelivery([
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+      verification: { status: "pending", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+    }) },
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+  ], DEC_RUN, decRef({
+    verification: { status: "pending", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+  })), false, "reason only on the outcome event");
+
+  // 原始结果事件逐条证伪。
+  assert.equal(isDeclaredUnverifiableDelivery([
+    base[0],
+  ], DEC_RUN, qualified), false, "no outcome event");
+  assert.equal(isDeclaredUnverifiableDelivery([
+    base[0],
+    { type: "run.delivery_verification_failed", runId: DEC_RUN, delivery: decFailedOutcomeRef() },
+  ], DEC_RUN, qualified), false, "original outcome is failed");
+  assert.equal(isDeclaredUnverifiableDelivery([
+    base[0],
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+  ], DEC_RUN, qualified), false, "two unavailable outcomes");
+  assert.equal(isDeclaredUnverifiableDelivery([
+    base[0],
+    { type: "run.delivery_verification_unavailable", runId: "run_FOREIGN", delivery: decUnavailableOutcomeRef({ runId: "run_FOREIGN" }) },
+  ], DEC_RUN, qualified), false, "unavailable outcome is foreign (unbound)");
+  // reverify 链的 unavailable 事件不算原始结果。
+  assert.equal(isDeclaredUnverifiableDelivery([
+    base[0],
+    { type: "run.delivery_reverification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef(), deliveryCommit: DEC_COMMIT },
+  ], DEC_RUN, qualified), false, "reverify unavailable is not the original outcome");
+
+  // 任一 reverify 事实（含畸形/孤立/外信封）都证伪。
+  assert.equal(isDeclaredUnverifiableDelivery(base.concat([
+    { type: "run.delivery_reverification_requested", runId: DEC_RUN, delivery: qualified, deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+  ]), DEC_RUN, qualified), false, "a single reverify requested event");
+  assert.equal(isDeclaredUnverifiableDelivery(base.concat([
+    { type: "run.delivery_reverification_requested", runId: DEC_RUN, delivery: qualified, deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+    { type: "run.delivery_reverification_passed", runId: DEC_RUN, delivery: qualified, deliveryCommit: DEC_COMMIT },
+  ]), DEC_RUN, qualified), false, "a complete reverify chain");
+  assert.equal(isDeclaredUnverifiableDelivery(base.concat([
+    { type: "run.delivery_reverification_requested", runId: "run_FOREIGN", delivery: qualified, deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+  ]), DEC_RUN, qualified), false, "an outer-envelope reverify event");
+
+  // 拿不准的输入一律假。
+  assert.equal(isDeclaredUnverifiableDelivery("not an array", DEC_RUN, qualified), false, "non-array events");
+  assert.equal(isDeclaredUnverifiableDelivery(base, undefined, qualified), false, "missing runId");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, null), false, "null createdRef");
+  assert.equal(isDeclaredUnverifiableDelivery(base, DEC_RUN, {}), false, "createdRef without verification");
+  assert.equal(hasReverifyFact([
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN },
+  ]), false, "hasReverifyFact ignores the original outcome family");
+});
+
+test("决定 0101: accept succeeds for a declared-unverifiable delivery on a completed run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "d0101-accept-"));
+  try {
+    const filePath = join(dir, `${DEC_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+    await t.append("run.delivery_created", { delivery: decUnverifiableRef() });
+    // TD-179: the outcome event's embedded status must agree with its type.
+    await t.append("run.delivery_verification_unavailable", { delivery: decUnavailableOutcomeRef() });
+    await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const result = await t.tryAppendDecision({ decision: "accepted", reason: "manually reviewed; docs-only change" });
+    assert.equal(result.accepted, true, "accept succeeds");
+    assert.equal(result.event.type, "run.delivery_accepted");
+    assert.equal(result.event.delivery.verification.status, "unavailable", "decision snapshot declares unavailable");
+    assert.equal(result.event.delivery.acceptance.status, "accepted");
+
+    // 重读：facts 有效，decisionEvent 就是这条 accepted。
+    const events = await readTranscript(filePath);
+    const facts = validateDeliveryFacts(events, { expectedRunId: DEC_RUN, allowVerificationPending: true });
+    assert.equal(facts.valid, true, "re-read facts are valid");
+    assert.equal(facts.decisionEvent?.type, "run.delivery_accepted", "decisionEvent is the accepted event");
+    assert.equal(facts.effectiveVerificationStatus, "unavailable");
+
+    // first-decision-wins：再 accept 一次是既有的 loser 路径。
+    const second = await t.tryAppendDecision({ decision: "accepted", reason: "again" });
+    assert.equal(second.accepted, false, "second accept is a loser");
+    assert.equal(second.existing.status, "accepted");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("决定 0101: the write gate still throws verification_failed and appends nothing on every unqualified shape", async () => {
+  const qualifiedCreated = { type: "run.delivery_created", runId: DEC_RUN, delivery: decUnverifiableRef() };
+  const cases = [
+    ["original outcome is failed even though created declares unverifiable", [
+      qualifiedCreated,
+      { type: "run.delivery_verification_failed", runId: DEC_RUN, delivery: decFailedOutcomeRef() },
+    ], "verification_failed"],
+    ["created commands non-empty", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "pending", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "unavailable", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+    ], "verification_failed"],
+    ["created commands missing", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "pending", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "unavailable", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+    ], "verification_failed"],
+    ["created commands non-array", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "pending", commands: "node -e 0", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "unavailable", commands: "node -e 0", unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+    ], "verification_failed"],
+    ["created reason missing", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "pending", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "unavailable", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+    ], "verification_failed"],
+    ["created reason whitespace-only", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decUnverifiableRef({
+        verification: { status: "pending", commands: [], unavailableReason: "  ", verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+    ], "verification_failed"],
+    ["created reason non-string", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decUnverifiableRef({
+        verification: { status: "pending", commands: [], unavailableReason: null, verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+    ], "verification_failed"],
+    ["reason only on the outcome event, absent on created", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+        verification: { status: "pending", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+      }) },
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+    ], "verification_failed"],
+    ["a single reverify requested event exists", [
+      qualifiedCreated,
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+      { type: "run.delivery_reverification_requested", runId: DEC_RUN, delivery: decUnverifiableRef(), deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+    ], "verification_failed"],
+    ["a complete reverify chain exists", [
+      qualifiedCreated,
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+      { type: "run.delivery_reverification_requested", runId: DEC_RUN, delivery: decUnverifiableRef(), deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+      { type: "run.delivery_reverification_passed", runId: DEC_RUN, delivery: decUnverifiableRef(), deliveryCommit: DEC_COMMIT },
+    ], "verification_failed"],
+    ["an outer-envelope reverify event exists", [
+      qualifiedCreated,
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+      { type: "run.delivery_reverification_requested", runId: "run_FOREIGN", delivery: decUnverifiableRef({ runId: "run_FOREIGN" }), deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+    ], "verification_failed"],
+    ["run is not terminal", [
+      qualifiedCreated,
+      { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() },
+    ], "terminal_not_eligible"],
+  ];
+  for (const [label, seed, expectedCode] of cases) {
+    const dir = await mkdtemp(join(tmpdir(), "d0101-deny-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      for (const { type, ...payload } of seed) await t.append(type, payload);
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "accepted", reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, `${label}: dedicated type`);
+          assert.equal(err.code, expectedCode, `${label}: machine code`);
+          return true;
+        },
+      );
+      const events = await readTranscript(filePath);
+      assert.equal(
+        events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length,
+        0,
+        `${label}: no decision event appended`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("决定 0101: read-side — an accepted snapshot claiming unavailable is valid only under the predicate with original-outcome backing", () => {
+  const qualified = decUnverifiableRef();
+  const outcome = { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decUnavailableOutcomeRef() };
+  const opts = { expectedRunId: DEC_RUN, allowVerificationPending: true };
+
+  // 正向：谓词为真 + 决定之前那条绑定的原始 unavailable 背书 → valid。
+  const ok = [
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: qualified },
+    outcome,
+    decDecisionEvent("accepted", decUnavailableOutcomeRef(), { reason: "manually reviewed" }),
+  ];
+  const okFacts = validateDeliveryFacts(ok, opts);
+  assert.equal(okFacts.valid, true, "qualified unavailable accept reads valid");
+  assert.equal(okFacts.decisionEvent?.type, "run.delivery_accepted");
+
+  // created 声明不符（commands 非空）→ malformed，错误文案照旧。
+  const mismatch = [
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({
+      verification: { status: "pending", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+    }) },
+    { type: "run.delivery_verification_unavailable", runId: DEC_RUN, delivery: decRef({
+      verification: { status: "unavailable", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+    }) },
+    decDecisionEvent("accepted", decRef({
+      verification: { status: "unavailable", commands: ["node -e 0"], unavailableReason: "x", verifiedCommit: DEC_COMMIT, results: [] },
+    })),
+  ];
+  const mismatchFacts = validateDeliveryFacts(mismatch, opts);
+  assert.equal(mismatchFacts.valid, false, "declaration mismatch is malformed");
+  assert.equal(mismatchFacts.code, "delivery_malformed");
+  assert.equal(mismatchFacts.error, "an accepted decision must be backed by a passed verification");
+
+  // 决定早于原始结果事件 → 照旧的 no-backing malformed。
+  const earlyDecision = [
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: qualified },
+    decDecisionEvent("accepted", decUnavailableOutcomeRef(), { reason: "manually reviewed" }),
+    outcome,
+  ];
+  const earlyFacts = validateDeliveryFacts(earlyDecision, opts);
+  assert.equal(earlyFacts.valid, false, "decision before the original outcome is malformed");
+  assert.equal(earlyFacts.code, "delivery_malformed");
+  assert.equal(
+    earlyFacts.error,
+    "decision event verification status has no earlier matching original outcome or valid reverify backing",
+  );
+
+  // 另有 reverify 事件 → 谓词为假，照旧 malformed。
+  const withReverify = ok.concat([
+    { type: "run.delivery_reverification_requested", runId: DEC_RUN, delivery: qualified, deliveryCommit: DEC_COMMIT, reason: "tooling_invalid" },
+  ]);
+  const reverifyFacts = validateDeliveryFacts(withReverify, opts);
+  assert.equal(reverifyFacts.valid, false, "an extra reverify event breaks the read-side validity");
+  assert.equal(reverifyFacts.code, "delivery_malformed");
+  assert.equal(reverifyFacts.error, "an accepted decision must be backed by a passed verification");
+
+  // 快照声明 passed 而原始是 unavailable → 照旧 malformed（无背书）。
+  const passedSnapshot = [
+    { type: "run.delivery_created", runId: DEC_RUN, delivery: qualified },
+    outcome,
+    decDecisionEvent("accepted", decRef({
+      verification: { status: "passed", commands: ["node -e 0"], verifiedCommit: DEC_COMMIT, results: [] },
+    })),
+  ];
+  const passedFacts = validateDeliveryFacts(passedSnapshot, opts);
+  assert.equal(passedFacts.valid, false, "passed snapshot over an unavailable original stays malformed");
+  assert.equal(passedFacts.code, "delivery_malformed");
+});
+
+// 决定 0101 第 1 条括注：原始结果以事件类型为准——内嵌状态仍写 pending 或缺失的旧形状
+// 照样满足谓词，accept 的快照按校验后的状态盖章为 unavailable，重读有效。
+test("决定 0101: a legacy original unavailable outcome (embedded status pending or missing) qualifies; the snapshot is stamped unavailable", async () => {
+  for (const [label, verification] of [
+    ["embedded status pending", { status: "pending", commands: [], unavailableReason: "docs-only change; nothing runnable", verifiedCommit: DEC_COMMIT, results: [] }],
+    ["embedded status missing", { commands: [], unavailableReason: "docs-only change; nothing runnable", verifiedCommit: DEC_COMMIT, results: [] }],
+  ]) {
+    const dir = await mkdtemp(join(tmpdir(), "d0101-legacy-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      await t.append("run.delivery_created", { delivery: decUnverifiableRef() });
+      await t.append("run.delivery_verification_unavailable", { delivery: decRef({ verification }) });
+      await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+      const result = await t.tryAppendDecision({ decision: "accepted", reason: "manually reviewed" });
+      assert.equal(result.accepted, true, `${label}: accept succeeds`);
+      assert.equal(result.event.delivery.verification.status, "unavailable", `${label}: snapshot stamped unavailable`);
+      const facts = validateDeliveryFacts(await readTranscript(filePath), { expectedRunId: DEC_RUN, allowVerificationPending: true });
+      assert.equal(facts.valid, true, `${label}: re-read facts are valid`);
+      assert.equal(facts.decisionEvent?.type, "run.delivery_accepted", `${label}: the accepted event is the decision`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// ============================================================
 // TD-71: Windows append-lock transient EPERM/EBUSY bounded retry.
 //
 // On Windows, creating runs/<runId>.jsonl.seq.lock can fail TRANSIENTLY with
@@ -1820,7 +2182,10 @@ test("TD-71: a metadata-write non-transient error after a successful open cleans
 //     before the decision. A late real outcome (passed/failed/unavailable)
 //     stays a legal display fact; acceptance stays rejected.
 //   - A nonpending decision needs earlier matching original or valid reverify
-//     backing; accepted must be passed. Legacy tolerance ONLY: a missing or
+//     backing; accepted must be passed, EXCEPT a delivery the 决定 0101
+//     predicate declares unverifiable (its accepted snapshot may claim
+//     "unavailable" backed by the earlier bound original unavailable outcome).
+//     Legacy tolerance ONLY: a missing or
 //     "pending" acceptance stamp on a backed nonpending snapshot, and missing
 //     top-level deliveryCommit/seq/verifiedCommit historical optional values.
 //   - tryAppendDecision validates facts BEFORE returning already_decided and

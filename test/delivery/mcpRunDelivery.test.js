@@ -739,7 +739,7 @@ test("M9-6B-13: malformed decide result collapses to fixed error", async () => {
 
 // Real integration tests using actual JsonlTranscript + default service.
 
-async function setupDeliveryRun(dir, runId, verificationStatus) {
+async function setupDeliveryRun(dir, runId, verificationStatus, unavailableReason = null) {
   const { JsonlTranscript } = await import("../../src/transcript.js");
   const runDir = join(dir, "runs");
   makeGitRepo(dir);
@@ -749,13 +749,13 @@ async function setupDeliveryRun(dir, runId, verificationStatus) {
     baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
     branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
     verification: { status: verificationStatus, commands: [], verifiedCommit: "d".repeat(40), results: [],
-      ...(verificationStatus === "failed" ? { failureCode: "command_failed" } : {}) },
+      ...(verificationStatus === "failed" ? { failureCode: "command_failed" } : {}),
+      ...(unavailableReason !== null ? { unavailableReason } : {}) },
     acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
   };
   await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: dir });
   await transcript.append("run.delivery_created", { delivery: ref });
-  const vType = verificationStatus === "passed" ? "run.delivery_verification_passed" : "run.delivery_verification_failed";
-  await transcript.append(vType, { delivery: ref });
+  await transcript.append(`run.delivery_verification_${verificationStatus}`, { delivery: ref });
   await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
   const rp = join(dir, "agents.json");
   writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -817,6 +817,49 @@ test("M9-6B-15: failed verification blocks accept as a STRUCTURED rejection, all
     const events = await readTranscript(join(runDir, "run_i15.jsonl"));
     assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1);
     assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0);
+  } finally { cleanupDir(dir); }
+});
+
+// 决定 0101：真实共享服务（无注入）下的 run_delivery_decide。
+test("M9-6B-18 (决定 0101): MCP accept through the real service succeeds for a declared-unverifiable delivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-18-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i18", "unavailable", "docs-only change; nothing runnable");
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "manually reviewed; docs-only", expectedWorkspaceRoot: dir } });
+      const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, true);
+      assert.equal(p.acceptanceStatus, "accepted");
+      assert.equal(p.rejectionReason, null);
+    } finally { await client.close(); await server.close(); }
+    const { readTranscript } = await import("../../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i18.jsonl"));
+    const accepted = events.filter((e) => e.type === "run.delivery_accepted");
+    assert.equal(accepted.length, 1);
+    assert.equal(accepted[0].delivery.verification.status, "unavailable", "accepted snapshot declares unavailable");
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-6B-19 (决定 0101): MCP accept refuses a created ref whose declaration does not qualify", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-19-"));
+  try {
+    // commands 为空但 created 上没有 unavailableReason —— 谓词不成立，
+    // 照旧 verification_failed 结构化拒绝，不落任何决定。
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i19", "unavailable");
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i19", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
+      const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "verification_failed");
+      assert.equal(p.acceptanceStatus, null);
+    } finally { await client.close(); await server.close(); }
+    const { readTranscript } = await import("../../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i19.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 0);
   } finally { cleanupDir(dir); }
 });
 

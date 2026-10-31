@@ -179,7 +179,9 @@ test("3C2-A03: reject creates one rejected event", async () => {
 });
 
 /**
- * 3C2-04: accept is refused when verification is failed or unavailable.
+ * 3C2-04: accept is refused when verification is failed. A delivery dispatched
+ * with verificationUnavailableReason (declared unverifiable, 决定 0101) is
+ * acceptable — see 3C2-A04b below.
  */
 test("3C2-A04: accept refused when verification failed", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-a04-");
@@ -201,6 +203,48 @@ test("3C2-A04: accept refused when verification failed", async () => {
     const events = await readTranscript(transcript.filePath);
     assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0,
       "no accepted event should be written");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/**
+ * 3C2-A04b (决定 0101): a real `runs delivery <runId> --accept` succeeds for a
+ * delivery whose created ref declared no runnable verification — JSON shows
+ * acceptance accepted + verification unavailable.
+ */
+test("3C2-A04b: accept succeeds for a declared-unverifiable (unavailable) delivery", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-a04b-");
+  try {
+    await writeFullDeliveryLifecycle(transcript, {
+      verificationStatus: "unavailable",
+      ref: {
+        verification: {
+          status: "unavailable",
+          unavailableReason: "docs-only change; nothing runnable",
+          commands: [],
+          verifiedCommit: "d".repeat(40),
+          results: [],
+        },
+      },
+    });
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "manually reviewed; docs-only change", "utf8");
+
+    const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+    const out = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.decisionAccepted, true);
+    assert.equal(parsed.delivery.acceptance.status, "accepted");
+    assert.equal(parsed.delivery.verification.status, "unavailable");
+
+    const events = await readTranscript(transcript.filePath);
+    const acceptedEvents = events.filter((e) => e.type === "run.delivery_accepted");
+    assert.equal(acceptedEvents.length, 1, "exactly one accepted event");
+    assert.equal(acceptedEvents[0].delivery.verification.status, "unavailable");
+    assert.equal(acceptedEvents[0].delivery.acceptance.status, "accepted");
   } finally {
     await cleanupDir(dir);
   }

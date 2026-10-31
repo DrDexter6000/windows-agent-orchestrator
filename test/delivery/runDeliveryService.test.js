@@ -297,6 +297,36 @@ test("M12-1S2-S3: decideRunDelivery recovery-accept admits a failed run only via
   } finally { cleanupDir(dir); }
 });
 
+// 决定 0101：合格"声明无可跑验证"的 accept 照旧触发上游会话释放。
+test("决定 0101-SVC: accept of a declared-unverifiable delivery still fires sessionRelease once", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("d0101svc");
+  try {
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "unavailable", unavailableReason: "docs-only change; nothing runnable", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"] }, worktreePath: "/fake/wt", worktreeBranch: `wao/${runId}` });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.delivery_verification_unavailable", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const calls = [];
+    const result = await decideRunDelivery({
+      runId, runDir: dir, decision: "accepted", reason: "manually reviewed; docs-only",
+      sessionRelease: async (input) => { calls.push(input); return { session: true }; },
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.event.delivery.verification.status, "unavailable");
+    assert.equal(calls.length, 1, "sessionRelease fired exactly once");
+    assert.equal(calls[0].runId, runId);
+    assert.equal(Array.isArray(calls[0].events), true);
+  } finally { cleanupDir(dir); }
+});
+
 // ============================================================
 // M12-6 Package 3B2a: structured decision-rejection classification
 // (single application-level authority) + additive reverify projection

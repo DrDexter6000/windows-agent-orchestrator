@@ -796,7 +796,7 @@ runs delivery <runId> --reject --reason-file FILE [--format json]       # Lead �
 - 必须存在 exactly one committed delivery（有 `run.delivery_created`；有 verification event，或符合下述有界 pending 拒绝形态）。
 - `--accept` 和 `--reject` 互斥。
 - `--reason-file` 必须是非空 UTF-8 文件（不支持 inline reason，避免 PowerShell quoting drift）。
-- `--accept` 要求 effective verification `passed` 且 run terminal `completed`；唯一例外是 **recovery accept**：终态 `failed` 的 run，若其持久失败恰好是 exactly one 绑定的 `run.delivery_failed`（code `disallowed_path`）、已被绑定到 created commit 的 model-free repackage 取代、且 verification `passed`，可以接受。recovery accept 不把终态 failed 改写成 completed。
+- `--accept` 要求 run terminal `completed`，且 effective verification `passed` 或交付**声明无可跑验证**（决定 0101：created ref 的 `verification.commands` 是空数组、`unavailableReason` 去空白后非空，恰一条绑定的原始 `run.delivery_verification_unavailable`，转录里没有任何 `run.delivery_reverification_*` 事件；三处判定共用 `src/transcript.js` 的同一谓词）。唯一例外是 **recovery accept**：终态 `failed` 的 run，若其持久失败恰好是 exactly one 绑定的 `run.delivery_failed`（code `disallowed_path`）、已被绑定到 created commit 的 model-free repackage 取代、且原始 verification `passed` 或声明无可跑验证，可以接受。recovery accept 不把终态 failed 改写成 completed。
 - `--reject` 允许 passed/failed/unavailable verification，但仍要求 committed delivery。
 - **有界 pending 拒绝**：`--reject` 额外允许「verification 仍 pending 且无任何 `run.delivery_verification_*` outcome」的形态，但仅当 run 已有**绑定的** `run.state_change → completed`（legacy 末事件推断不算——追加决策事件本身会变成末事件并把推断状态打回 running），且 `run.delivery_created` 的 DeliveryRef **显式**声明 `verification.status:"pending"`（缺失/未知/谎称终态的 legacy ref 不获得该资格）。该出口不推断验证进程生死、不中断验证、不伪造结果：迟到的真实 outcome（passed/failed/unavailable）照常落盘并在读面如实显示，acceptance 恒为 rejected。`--accept` 对 pending 一律拒绝（`verification_failed`）；`run_delivery_reverify` 资格不变（仍要求原始 verification failed）；repackage 资格不变。验证进程在 pending 期间死掉时，CLI 等待器 `runs wait --until-settled` 的出口见 `docs/usage/supervise.md` 的等待器一节。
 - 决策本身不执行 merge/reset/checkout/cherry-pick/push/branch deletion。accepted 落盘后另行 best-effort 释放线系资源：上游 provider 会话（能力位门控）与线系 worktree（tip/路径证明门控，分支保留，delivery commit 可达性不丢）；释放失败只记事件，绝不逆转 accepted。
@@ -819,7 +819,7 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 **已有 decision 的校验**（绑定模式下唯一一条时）：
 - 身份匹配（与 created 同一 canonical `(runId, base, deliveryCommit)`）；在场顶层 `deliveryCommit`/`verifiedCommit` 一致；内嵌 verification 状态必须**在场且已知**（缺失/未知恒为冲突）；acceptance 印记与事件类型一致——**窄 legacy 例外**：缺失或 `"pending"` 的印记仅在「非 pending 快照且有更早的匹配原始 outcome 或合法 reverify 背书」时允许（legacy C2 形态）。
 - 每个 decision 都须在其前缀中已有同一 created；未来追加的 created 或 reverify 请求不得反过来证明过去的决定。新动作的终态权限只从当前 run 的绑定事件中读取。
-- **非 pending decision** 必须在其 transcript 前缀（append 序，seq 缺失允许）中有更早的匹配原始 outcome 或完整合法 reverify 链背书；accepted 必须背书为 passed。
+- **非 pending decision** 必须在其 transcript 前缀（append 序，seq 缺失允许）中有更早的匹配原始 outcome 或完整合法 reverify 链背书；accepted 必须背书为 passed，或快照为 unavailable、由更早的原始 unavailable 背书且交付声明无可跑验证。
 - **pending decision** 只能是 reject：显式印 `rejected`、created 显式声明 pending、更早存在绑定 `run.state_change → completed`、且决策前无原始 outcome（**之后的迟到 outcome 合法**）。pending 的 accepted 永不合法——迟到的 pass 也不能将其洗白（读面 fail-closed `ambiguous`，写面拒绝其充当已有决策）。合法 pending 拒绝之后的迟到 passed/failed/unavailable 在读面**如实显示该原始 outcome**，acceptance 恒为 rejected；reverify 链（projectReverifyChain 的特殊合同不变：任何外信封 reverify 事件仍是 malformed，绝不预过滤、资格不变）与 pending decision 互斥。
 
 **读面语义**（point / readiness / await 三面一致）：
