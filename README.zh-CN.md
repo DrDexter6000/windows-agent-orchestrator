@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.6.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-29-v0.6.0.md)
+[![version](https://img.shields.io/badge/version-v0.7.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-31-v0.7.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,24 +51,24 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.6.0 新增（2026-10-29）
+## v0.7.0 新增（2026-10-31）
 
-- **越界写拦得住，且有证明**——非 codex 车道活体演示会如实报告自己的写入；codex 车道每次
-  调用都带 OS 写沙箱，用参数钉与不经模型的沙箱检查证明；链式测试证明有写事件投影的后端的
-  越界帧都会被拦（决定 0084、0086）。
-- **运行收得干净、不丢东西**——符合条件的隔离运行到终态只删干净的树，分支一律保留（0085）；交付重验证
-  给 Lead 一次显式的第二次机会，打包失败带闭集错误类别。
-- **车道画像分项、有依据、以实测为准**——依据随格，换代即标待复核；`lead_preflight` 给出每条
-  车道的分项评分与全部注意事项，带依据的完整画像在 `wao lanes`；实测可覆盖手动评分，Owner
-  特别标注的除外（0087–0090、0092）。
-- **WAO 干活时自己保持唤醒**——worker 运行、交付验证与全量测试期间向 Windows 申请保持唤醒
-  （尽力而为，用户自己选睡眠照样会睡），屏幕不再空闲熄灭，合盖也不进待机；提示词经标准输入交给 runner 与 codex/claude CLI（0093）。
-- **dsh 进宿主表**——`wao mcp bind` 给出 DeepSeek Harness 的 profile patch 插入行，
-  `wao mcp status` 探测它的 YAML 层（0091）。
-- **退役 workflow/DAG 层与 `wao state`**——多步编排由 Lead 组合派发、会审与续接完成；
-  存档里的旧 workflow 转录照常可读（0094）。
+- **运行收口时 Lead 会知道，不靠宿主推送**——`wao runs wait <runId> --until-settled` 等到运行、
+  打包、验证与 reverify 都有结果才退出；没等到收口的等待与受理的派发都附 `nextStep`；MCP 等待
+  缺省 45 秒，放得进约一分钟就让工具调用超时的宿主（决定 0095）。能证明待验证交付的验证进程
+  已不在时，等待器以 `verifier_gone` 退出；会审回执说明怎么接着等没到终态的席位（0096）。
+- **选车道的事实送到 Lead 做决定的地方**——车道画像一处给出 Owner 成本档、实测分数与 Owner 规则；
+  `wao lanes` 开头一屏总表，派发回显所选车道的事实，`lead_preflight` 车道行标明能否看视频
+  （0097、0098）。Owner 确认后，实测事实可以替换 Owner 的评语。
+- **交付读得更全，卡住的更少**——`run_delivery` 显示主分支上有没有提交声明采纳了这个运行
+  （`WAO-Adopted-From`，三态；0098）；派发时声明了 `verificationUnavailableReason` 的交付，
+  Lead 审查后可以 accept，不再只能 reject（0101）。
+- **运行存放不再塌**——从链接的开发工作树派发的运行进主项目的桶（0099）；按 runId 查转录扫描
+  全部桶、不设上限，超过 64 个桶时 `lead_preflight` 给一行事实（0100）。
+- **正确性**——被跟踪的文本文件防控制字节与非 UTF-8；诊断点名 deepseek-acp 的传输失败；
+  MCP 服务的 build 检查只看 `src/`。
 - 按决定分组的范围与发版门槛证据见
-  [`docs/changelog-2026-10-29-v0.6.0.md`](docs/changelog-2026-10-29-v0.6.0.md)。
+  [`docs/changelog-2026-10-31-v0.7.0.md`](docs/changelog-2026-10-31-v0.7.0.md)。
 
 ## 当前状态
 
@@ -161,7 +161,7 @@ AGENT_ONBOARDING.md §3。
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.6.0](docs/changelog-2026-10-29-v0.6.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.7.0](docs/changelog-2026-10-31-v0.7.0.md)） |
 | **跑真实 smoke 测试**（claude/codex/opencode） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |
