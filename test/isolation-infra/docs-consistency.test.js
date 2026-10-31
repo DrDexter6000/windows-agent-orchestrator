@@ -7,9 +7,7 @@
 // 规则（与 milestone-discipline.md §6.3 一致）：审计要逐文件，
 // 这些断言把"逐文件核对"固化为可执行检查，防止回归。
 //
-// 本文件的测试只做四件事：文档与代码一致；已废除的说法不回来；形状（行长、列、
-// 指针可达）；读者离不开的少数操作说明，在它的唯一权威处检查。
-// 被保护的文字退役时，对应的测试一起退役（AGENTS.md §Documentation）。
+// 文档上的测试只查什么、被保护的文字退役时怎么办，见 docs/ssot.md §4。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -122,7 +120,7 @@ test("归档的 m6-audit 不再把 TD-33 描述为 'parts schema 实测未知'�
   const txt = read("docs/archive/m6-audit.md");
   // research/07 标题即"TD-33 勘测完毕"——schema 已知。
   // m6-audit 不得以"未知"作为未做理由（理由应是"待实现 parser"）。
-  // 归档后此断言仍保留：历史快照的事实错误也需修正（SSOT 铁律 3 允许修正事实错误）。
+  // 归档后此断言仍保留：历史快照的事实错误也需修正（docs/ssot.md §1.4 允许修正事实错误并标注）。
   assert.ok(
     !/parts schema[^。]*未知/.test(txt) && !/实测未知/.test(txt),
     "m6-audit 仍把 TD-33 schema 描述为未知，与 research/07 矛盾"
@@ -158,10 +156,10 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
 });
 
 test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`，不得出现裸 `node .../src/cli.js <真命令>`", () => {
-  // SSOT 铁律补维：命令调用形式这一维此前从未被铁律或测试覆盖，
+  // SSOT 规则补维：命令调用形式这一维此前从未被规则或测试覆盖，
   // 导致权威源自己都漂（fresh-agent 照抄 onboarding 的 `node <WAO>/src/cli.js`
   // 在 v24 默认环境下被 version guard 拒，且文档从未提到正确的 `npm run cli` 入口）。
-  // 本断言把"命令形式一致"从 prose 铁律变成机器不变量——凡依赖 agent 自觉遵守
+  // 本断言把"命令形式一致"从 prose 规则变成机器不变量——凡依赖 agent 自觉遵守
   // prose 的约束都会漂，落到确定性测试里才守得住（WAO 反复验证过的元教训）。
   //
   // 命令形式权威源：`npm run cli -- <command>`（走 v22 shim scripts/wao-node.cjs）。
@@ -654,17 +652,18 @@ test("0065：agents.example.json 零 seatRole 声明（0045 §1.2 终局——�
     "0065：模板零席位声明（席位角色维退役——对抗性从审者×作者车道派生，wao stage --reviewed-run）");
 });
 
+// docs/ssot.md §2 的四条原则与配套三条，按名字钉住：在 ssot 里，不在 AGENTS.md 里。
+const SSOT_RULE_NAMES = ["一处申明", "不重复", "一处定义，处处指针", "不留孤儿", "类别不可混放", "过程文档只追加", "活文档只写现状"];
+
 test("SSOT 分类标准存在：docs/ssot.md 是文档体系的权威类别定义", () => {
-  // docs/ssot.md 定义五大类别（契约/决策/运维/过程/调研）+ 三条铁律。
-  // 它是"写新文档前必读"的入口，缺失等于文档体系无分类约束。
+  // 五大类别（契约/决策/运维/过程/调研）也在这里；缺失等于文档体系无分类约束。
   const ssot = read("docs/ssot.md");
   assert.ok(ssot.length > 0, "缺少 docs/ssot.md（文档 SSOT 分类标准）");
   for (const cat of ["契约", "决策", "运维", "过程", "调研"]) {
     assert.ok(ssot.includes(cat), `docs/ssot.md 缺少类别定义：${cat}`);
   }
-  // 三条铁律必须存在
-  for (const rule of ["一处定义，处处指针", "类别不可混放", "过程文档只追加"]) {
-    assert.ok(ssot.includes(rule), `docs/ssot.md 缺少铁律：${rule}`);
+  for (const rule of SSOT_RULE_NAMES) {
+    assert.ok(ssot.includes(rule), `docs/ssot.md 缺少原则：${rule}`);
   }
 });
 
@@ -678,18 +677,25 @@ test("ssot.md 指向的 AGENTS.md §Read Before Changes 锚点存在（仅钉已
   assert.ok(!/^#{1,6} 文档纪律$/m.test(agents));
 });
 
-test("AGENTS.md 必须在写新文档前指向 SSOT 分类标准", () => {
-  // AGENTS.md 只保留入口和默认动作；分类与铁律正文只在 docs/ssot.md 定义。
+test("AGENTS.md 的 Documentation 一节只留指向 docs/ssot.md §2 的指针", () => {
+  // AGENTS.md 只保留入口和默认动作；分类与原则正文只在 docs/ssot.md 定义。
   const a = read("AGENTS.md");
-  assert.ok(/docs\/ssot\.md/.test(a), "AGENTS.md 未指向 docs/ssot.md（文档分类标准）");
-  assert.ok(/^## Documentation$/m.test(a), "AGENTS.md 缺文档规则一节（一次改动写哪里）");
-  for (const copiedRule of ["一处定义，处处指针", "类别不可混放", "过程文档只追加"]) {
-    assert.ok(!a.includes(copiedRule), `AGENTS.md 不应复制 docs/ssot.md 铁律：${copiedRule}`);
+  const section = a.match(/^## Documentation\n([\s\S]*?)(?=^## |(?![\s\S]))/m);
+  assert.ok(section, "AGENTS.md 缺 Documentation 一节");
+  const body = section[1].trim();
+  assert.ok(/`docs\/ssot\.md` §2/.test(body), "AGENTS.md Documentation 一节须指向 docs/ssot.md §2");
+  assert.ok(!body.includes("\n"), "AGENTS.md Documentation 一节只留一句指针，规则正文在 docs/ssot.md");
+  for (const copiedRule of SSOT_RULE_NAMES) {
+    assert.ok(!a.includes(copiedRule), `AGENTS.md 不应复制 docs/ssot.md 原则：${copiedRule}`);
+  }
+  // 已迁到 docs/ssot.md 的六条英文规则不得回到 AGENTS.md。
+  for (const retired of ["What a change writes", "Reference documents describe the present", "Adding or changing a rule", "Debt ledger", "Tests on documents", "A red size limit", "One fact has one editable home"]) {
+    assert.ok(!a.includes(retired), `AGENTS.md 不应恢复已迁到 docs/ssot.md 的规则：${retired}`);
   }
 });
 
 test("状态机完整状态列表只在 02-architecture.md 权威定义，不外泄到其余契约文件", () => {
-  // 铁律 1：一处定义，处处指针。状态机的完整状态链（含 pending→submitted→running 全序列）
+  // 原则 3：一处定义，处处指针。状态机的完整状态链（含 pending→submitted→running 全序列）
   // 全文只允许出现在 02-architecture.md。其余契约文件（PRD/SKILL/AGENTS）只许提"状态机"
   // 概念 + 指针，不许复制完整状态链（这是 06-23 审计发现的核心重复源）。
   // 注：research/ 与 mN-audit.md 是过程/调研类（冻结快照），允许保留历史定义。
@@ -704,7 +710,7 @@ test("状态机完整状态列表只在 02-architecture.md 权威定义，不外
     const txt = read(f);
     assert.ok(
       !FULL_STATE_CHAIN.test(txt),
-      `${f} 包含完整状态机状态链（pending→submitted→running）——应只指针指向 02-architecture.md，不复制正文（SSOT 铁律 1）`
+      `${f} 包含完整状态机状态链（pending→submitted→running）——应只指针指向 02-architecture.md，不复制正文（docs/ssot.md §2「一处定义，处处指针」）`
     );
   }
   // 权威源必须确实定义了完整状态链。

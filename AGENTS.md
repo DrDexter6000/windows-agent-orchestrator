@@ -2,6 +2,8 @@
 
 WAO is a Windows-native control plane for supervised worker dispatch through local agent runtimes.
 
+**Lean by default** (Owner: 简练就是美，灵活就是美；除非工程和技术必要，官僚就是丑). Prefer the smaller design, the shorter text and fewer rules, from architecture to wording; add a process step, rule, guard or abstraction only when engineering or technical necessity requires it.
+
 ## Invariants
 
 1. WAO run state comes from the run's transcript (`runs/<runId>.jsonl` legacy flat, or `runs/projects/<slug>/<runId>.jsonl` since D2-②b — resolved via `src/projectBuckets.js`); agent memory may provide context but never overrides transcript facts.
@@ -19,18 +21,11 @@ condition. `SKILL.md` remains conditional on actually operating WAO.
 
 For aggregation, parsing, or classification changes, green unit tests are not enough; smoke the result against real transcripts before declaring completion.
 
-**WAO development Lead only**: start work by checking `wao feedback list`; each open entry either enters the ledger or is closed with a written reason. Workers do not do this.
+**WAO development Lead only**: start work by checking `wao feedback list` (how: `docs/usage/host.md` §反馈收件箱); each open entry either enters the ledger or is closed with a written reason. Workers do not do this.
 
 ## Documentation
 
-One fact has one editable home; everything else links to it. Document categories are defined in `docs/ssot.md`.
-
-- **What a change writes.** Code and tests; for each fact that changed, the reference text that is its home (a change may touch several facts, each in its own place); a decision record only when you chose between alternatives (`.wao/decisions/`, at most 8 KB: background, decision, rejected alternatives, known limits); one ledger line when a debt item opens or closes. For an ordinary development batch, the story of the batch — what changed, how it was verified, who reviewed it, run and consult ids — goes in the commit message, not in a document. Releases, incidents and workstream close-outs keep the records `docs/milestone-discipline.md` and `docs/incidents/` ask for.
-- **Reference documents describe the present.** Replace the text that is no longer true; do not append what changed, when, or in which batch.
-- **Adding or changing a rule.** Choose the rule's home before writing it; identifiers, CLI text and comments describe the mechanism, and who decides or approves is stated only in that home. Before changing a rule, find every current statement of it by its domain symbols (module, command, closed-set names) and its wording in Chinese and English, across code, comments, tests, generated docs and the decision index, without truncating the results, and reduce the others to pointers. Archived history, changelogs, incident records, research notes and decision bodies stay as written.
-- **Debt ledger** (`docs/tech-debt.md`): one line per unresolved item, format and limits in its header. Updating a row rewrites it; closing a row moves it to `docs/archive/tech-debt-closed.md`.
-- **Tests on documents** check agreement with code, that a retired claim stays gone, shape, and the few operating instructions a reader cannot work without — in the one place that is authoritative for them, never as the same sentence required in several files. When the text a test protects is retired, the test is retired with it.
-- **A red size limit means move or delete content.** Raising a limit is the Owner's decision.
+Before writing or changing any document, read `docs/ssot.md` §2–§4.
 
 ## Commands
 

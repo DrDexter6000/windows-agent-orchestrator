@@ -4,7 +4,7 @@
 // TD-162 生成层（2026-09-22 批次）—— backend 能力/认证事实的生成参考层。
 // 手写副本退场：docs/usage.md 的「backend 能力对照表（TD-162）」表体已删除，
 // 本脚本产出 docs/surface/certification.md 作为唯一投影（命名投影
-// `backend-capabilities` 的落点，见 docs/ssot.md §2 铁律 1）。
+// `backend-capabilities` 的落点，见 docs/ssot.md §2 原则 3）。
 //
 // 数据源（全部现成 SSOT，禁止新增真相源）：
 //   - 能力轴闭集：src/registry.js KNOWN_BACKENDS × src/backends/factory.js

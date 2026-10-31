@@ -6,10 +6,10 @@
  * 另有可选槽位 inbox 与 state（决定 0094：state 随 workflow 层退役，历史布局放行）。
  * agent 不直接建文件，通过 wao 命令读写，本模块提供底层目录操作。
  *
- * 三条铁律的物理保障：
+ * 布局的三条保证：
  *   1. 顶层槽位封闭：6 必需 + 可选 inbox/state（validateWaoDir 负向断言多余文件）
  *   2. map.md 只放索引（waoDecisions 的写入命令保证）
- *   3. .wao/ 进 .gitignore（过程性，不进版本控制）
+ *   3. 除 decisions/ 外都在 .gitignore 里（过程性，不进版本控制）
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
