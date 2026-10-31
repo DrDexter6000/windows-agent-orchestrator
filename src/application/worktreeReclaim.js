@@ -93,7 +93,7 @@ export const RECLAIM_CATEGORIES = Object.freeze([
 export const RECLAIM_KEEP_REASONS = Object.freeze([
   "transcript_unreadable", "twin_transcripts", "transcript_missing", "git_fact_failed", "lineage_refused",
   "registered_missing", "registration_ambiguous",
-  "source_worktree", "outside_worktrees_dir", "symlink_or_junction", "foreign_worktree",
+  "source_worktree", "outside_worktrees_dir", "symlink_or_junction", "foreign_worktree", "private_clone",
   "non_terminal", "recent_event", "fresh_owner_heartbeat",
   "lineage_member_active", "slot_claim_fresh", "lineage_not_closed",
   "delivery_packaged_undecided", "undecided_dirty_tree",
@@ -146,6 +146,24 @@ function gitOk(args, cwd) {
  * 调用 cwd 再 realpath，才能得到可比的绝对身份。 */
 function commonDirOf(cwd) {
   return realpathSync(resolve(cwd, gitReadOnly(["rev-parse", "--git-common-dir"], cwd).trim()));
+}
+
+/** 决定 0102：私有克隆的盘面形状——目录下 .git 是目录（登记树的 .git 是文件），
+ * 且 .git/objects/info/alternates 的至少一行（realpath 后）等于本仓 common dir
+ * 的 objects（`git clone --shared` 的借用登记）。读不出/不匹配 → false，由调用
+ * 方照旧外来处理。 */
+function privateCloneAlternatesHit(treePath, gitCommonDir) {
+  try {
+    if (!lstatSync(join(treePath, ".git")).isDirectory()) return false;
+    const repoObjects = realpathSync(join(gitCommonDir, "objects"));
+    const alternates = readFileSync(join(treePath, ".git", "objects", "info", "alternates"), "utf8");
+    for (const line of alternates.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t.length === 0 || t.startsWith("#")) continue;
+      if (samePath(realpathSync(resolve(treePath, t)), repoObjects)) return true;
+    }
+  } catch { /* 无 .git/alternates 或读不出：不认 */ }
+  return false;
 }
 
 /** 流式哈希 git 输出（大 diff --binary 不整块落内存）。callerEnv：子进程的完整
@@ -992,6 +1010,20 @@ export async function planWorktreeReclaim({
         keep("undeterminable", "git_fact_failed", "tree_lstat"); return;
       }
       if (st.isSymbolicLink()) { keep("out_of_scope", "symlink_or_junction"); return; }
+    }
+    // 决定 0102：WAO 私有克隆在 foreign_worktree 之前识别——克隆有自己的 .git
+    // 目录（源仓的 git worktree list 没有它）、alternates 指向本仓对象库、目录
+    // 名是合法 runId、可读转录以 worktreeForm:"private_clone" 把本 runId 绑定
+    // 到此目录。首版一律保留（自动回收记入台账，另批做）；认不出来源的克隆
+    // 照旧按外来处理，不会被误删。
+    if (f.treePath && f.treeRealPath && info.events && isValidRunId(basename(f.treeRealPath))) {
+      const startedEv = info.events.find((e) => e && e.type === "run.started" && e.runId === runId);
+      if (startedEv?.worktreeForm === "private_clone"
+        && info.declaredReal != null && samePath(info.declaredReal, f.treeRealPath)
+        && privateCloneAlternatesHit(f.treePath, repo.gitCommonDir)) {
+        keep("tree_protection", "private_clone");
+        return;
+      }
     }
     if (f.isHusk) {
       // 空壳目录里如果还有别的仓库的 git 元数据（common dir 指向别处），不碰。

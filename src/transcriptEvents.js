@@ -35,7 +35,7 @@
 export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   {
     type: "run.started",
-    description: "run 创建；记录生效 backend/cwd/model/worktreePath 与显式 override、agentArgs 摘要（count+sha256 指纹+addDirs 暴露面路径；无 args 缺席）。带 `--model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留；`reasoning` 无条件落盘（agent 无 reasoning 时 JSON 省略该键），带 `--reasoning` 覆盖的派发另含显式 `reasoningOverride` 字段，合成后同样只替换 `.effort`；`providerKey` 无条件落盘，是 provider 接入方指纹（归一化 baseUrl + `apiKeyEnv` 变量名；userinfo/query/fragment 在归一化时丢弃，凭据不入 transcript），无 provider 块的 lane 为显式 `null`（已观察无接入方，与 legacy 父 run 的字段缺失区分），也是 `run_continue` 续跑漂移比对的父侧 durable 事实；delivery 派发另含 delivery 块（allowedPaths 等交付合同事实）。",
+    description: "run 创建；记录生效 backend/cwd/model/worktreePath 与显式 override、agentArgs 摘要（count+sha256 指纹+addDirs 暴露面路径；无 args 缺席）。带 `--model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留；`reasoning` 无条件落盘（agent 无 reasoning 时 JSON 省略该键），带 `--reasoning` 覆盖的派发另含显式 `reasoningOverride` 字段，合成后同样只替换 `.effort`；`providerKey` 无条件落盘，是 provider 接入方指纹（归一化 baseUrl + `apiKeyEnv` 变量名；userinfo/query/fragment 在归一化时丢弃，凭据不入 transcript），无 provider 块的 lane 为显式 `null`（已观察无接入方，与 legacy 父 run 的字段缺失区分），也是 `run_continue` 续跑漂移比对的父侧 durable 事实；delivery 派发另含 delivery 块（allowedPaths 等交付合同事实）；只读 ephemeral 轮的隔离树形态为私有克隆（决定 0102）时另含 `worktreeForm: \"private_clone\"` 与 `worktreeBaseCommit`（冻结基点完整 SHA）——resume 的延迟释放处置与回收普查按 worktreeForm 分流，没有该字段的转录一律按链接工作树处理。",
   },
   {
     type: "run.state_change",
@@ -276,7 +276,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.worktree_branch_kept",
-    description: "分支回收判定保留（{uniqueCommits：独有提交数} 或 {reason：-d 拒绝等原因}）；分支回收失败绝不反过来污染释放结果（独立 try，事件即事实）。",
+    description: "保留判定，两种树形态各一义：链接树是分支回收判定保留分支（{uniqueCommits：独有提交数} 或 {reason：-d 拒绝等原因}），分支回收失败绝不反过来污染释放结果（独立 try，事件即事实）；私有克隆（run.started.worktreeForm 为 private_clone，决定 0102）是删前检查判保留、整个克隆不删（{uniqueCommits：克隆里新写、源仓对象库没有的提交数} 或 {reason：head_drift / nested_worktree / probe_failed}）。",
   },
   {
     type: "run.lineage_closed",

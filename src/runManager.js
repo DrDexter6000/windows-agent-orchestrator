@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
 import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError, listTranscriptsDeep } from "./projectBuckets.js";
-import { createWorktree, removeWorktree, removeWorktreeNoForce, recycleRunBranch, terminalWorktreeVerdict } from "./isolation.js";
+import { createWorktree, createReadOnlyClone, removeWorktree, removeWorktreeNoForce, removeReadOnlyClone, recycleRunBranch, probeReadOnlyClone, terminalWorktreeVerdict } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
@@ -602,7 +602,7 @@ export async function classifyReportedWriteIntentContainment(
 }
 
 export class RunManager {
-  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader, createWorktreeFn = createWorktree }) {
+  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader, createWorktreeFn = createWorktree, createReadOnlyCloneFn = createReadOnlyClone }) {
     this.config = config;
     this.readRegistry = readRegistry;
     this.transcriptDir = transcriptDir;
@@ -616,6 +616,8 @@ export class RunManager {
     // mutate the source HEAD between revalidation and `git worktree add` to
     // prove the frozen-base TOCTOU defense. Production uses the real createWorktree.
     this.createWorktreeFn = createWorktreeFn;
+    // 决定 0102：ephemeral 只读轮的私有克隆建树缝（同 createWorktreeFn 的写法）。
+    this.createReadOnlyCloneFn = createReadOnlyCloneFn;
     this.activeRuns = new Map();
   }
 
@@ -1319,15 +1321,24 @@ export class RunManager {
       effectiveCwd = reuseWorktree.path;
     } else if (isolationConfig.type === "worktree") {
       try {
-        worktreeInfo = await this.createWorktreeFn(
-          agent.cwd,
-          finalRunId,
-          // Pin the worktree to the server-proven frozen commit (whenever one is
-          // threaded) so a micro-race on the source HEAD cannot silently shift
-          // the delivery base. Revalidation above already proved equality at the
-          // start of this window; the pin closes the remaining rev-parse→add gap.
-          frozenGitHead ? { commitish: frozenGitHead } : {},
-        );
+        // 决定 0102：ephemeral 只读轮的树形态改私有克隆（席位写仓库的 git 命令
+        // 全部落克隆，不再污染共享仓）；冻结基点照传。其余路径（交付、
+        // persistent、sessionReuse、非只读）仍走 createWorktreeFn。
+        worktreeInfo = readOnly && isolationConfig.strategy === "ephemeral"
+          ? await this.createReadOnlyCloneFn(
+            agent.cwd,
+            finalRunId,
+            frozenGitHead ? { commitish: frozenGitHead } : {},
+          )
+          : await this.createWorktreeFn(
+            agent.cwd,
+            finalRunId,
+            // Pin the worktree to the server-proven frozen commit (whenever one is
+            // threaded) so a micro-race on the source HEAD cannot silently shift
+            // the delivery base. Revalidation above already proved equality at the
+            // start of this window; the pin closes the remaining rev-parse→add gap.
+            frozenGitHead ? { commitish: frozenGitHead } : {},
+          );
         effectiveCwd = worktreeInfo.path;
         if (isolationConfig.strategy === "ephemeral") {
           if (readOnly) {
@@ -1422,6 +1433,11 @@ export class RunManager {
       backend: agent.backend,
       cwd: agent.cwd,
       ...(worktreeInfo ? { worktreePath: worktreeInfo.path, worktreeBranch: worktreeInfo.branch } : {}),
+      // 决定 0102：私有克隆形态的绑定事实——resume 的释放处置与回收普查都从
+      // 这里读；没有 worktreeForm 的转录一律按链接树处理。
+      ...(worktreeInfo?.form === "private_clone"
+        ? { worktreeForm: worktreeInfo.form, worktreeBaseCommit: worktreeInfo.baseCommit }
+        : {}),
       // TD-262（0063，opus 会审条款）：持久化隔离策略事实——resume 只认此字段
       // 恢复 deferredWorktreeRelease（旧转录缺席 → 不恢复，交普查）；"ephemeral"
       // 由构造保证 = readOnly && 非 sessionReuse（0057 W1a），复用轮/交付轮恒
@@ -1542,11 +1558,28 @@ export class RunManager {
     if (readOnly) {
       await transcript.appendReadOnlyDeclared();
     }
+    // 决定 0102：Run 构造之前退出的路径（pending 被拒、认证门、fire-and-forget
+    // 护栏、spawn 失败）没人认领 deferredWorktreeRelease，私有克隆在此走共用处置
+    // 原语（先查后删）。前三条还没起 worker；spawn 失败没有可核验的句柄，照旧
+    // 直接处置（TD-262 起如此）。best-effort：清理失败不改变退出事实。
+    const disposeCloneOnEarlyExit = async () => {
+      if (!deferredWorktreeRelease) return;
+      try {
+        await disposeReadOnlyClone({
+          clonePath: deferredWorktreeRelease,
+          branch: worktreeInfo.branch,
+          baseCommit: worktreeInfo.baseCommit,
+          sourceCwd: agent.cwd,
+          transcript,
+        });
+      } catch { /* 清理失败如实留给普查 */ }
+    };
     const pendingResult = await this._transition(transcript, null, "pending", STATE_CHANGE_REASON.created);
     // TD-99：若 pending rejected（runId 已有终态——如同 runId 复用旧终态 transcript），
     // 不得 spawn backend，立即报已有终态。
     if (!pendingResult.accepted) {
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+      await disposeCloneOnEarlyExit();
       throw new Error(`Cannot start run ${finalRunId}: transcript already in terminal state "${pendingResult.state}" (first-terminal-wins)`);
     }
 
@@ -1615,6 +1648,7 @@ export class RunManager {
         await transcript.append("run.error", { phase: "certification-gate", agentId, reasons });
         await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.certification_gate);
         if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+        await disposeCloneOnEarlyExit();
         throw new Error(
           `Refused dispatch: worker "${agentId}" did not pass core certification — ${reasons.join("; ")}. `
           + `Run \`npm run reliability -- --agent ${agentId}\` to certify, or set manualOverride:"cleared" if owner-backed. `
@@ -1634,6 +1668,7 @@ export class RunManager {
       });
       await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.fire_forget_guard);
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+      await disposeCloneOnEarlyExit();
       throw new Error(
         `Refused fire-and-forget spawn: backend "${agent.backend}" holds sessions outside the WAO process `
         + `(sessionOutlivesProcess=true). Without an owner driving waitForCompletion, this run would bypass `
@@ -1675,27 +1710,10 @@ export class RunManager {
       await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.spawn_error);
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
       // TD-262（0062 审核轮，opus 实锤）：readOnly ephemeral 轮 spawn 失败时 Run
-      // 未构造、deferredWorktreeRelease 无人认领——树与分支永久泄漏（2026-10-11
-      // kimi serve 死亡两连失败实锤）。此处补清理：树删+零独有分支回收（与
-      // _releaseDeferredWorktree 同款事件与判定）；交付轮不动（spawn 失败的交付
-      // 树按既有语义保留取证）。best-effort：清理失败不改变 spawn 失败事实。
-      if (deferredWorktreeRelease) {
-        try {
-          await removeWorktree(deferredWorktreeRelease);
-          if (!existsSync(deferredWorktreeRelease)) {
-            await transcript.append("run.worktree_released", {});
-            const r = recycleRunBranch(agent.cwd, finalRunId);
-            if (r.outcome === "recycled") {
-              await transcript.append("run.worktree_branch_recycled", {});
-            } else if (r.outcome === "kept") {
-              await transcript.append("run.worktree_branch_kept",
-                r.uniqueCommits != null ? { uniqueCommits: r.uniqueCommits } : { reason: r.reason });
-            }
-          } else {
-            await transcript.append("run.worktree_release_failed", { reason: "still_present" });
-          }
-        } catch { /* 树清理失败如实留给普查（.dev 脚本兜底） */ }
-      }
+      // 未构造、deferredWorktreeRelease 无人认领——树永久泄漏（2026-10-11 kimi
+      // serve 死亡两连失败实锤）。决定 0102 起这棵树是私有克隆，走共用处置；交付
+      // 轮不动（spawn 失败的交付树按既有语义保留取证）。
+      await disposeCloneOnEarlyExit();
       throw error;
     }
     await transcript.append("session.created", {
@@ -1743,6 +1761,11 @@ export class RunManager {
       readOnlyDeclared: readOnly,
       // TD-251 W1a：readOnly ephemeral 树延迟释放（_runCleanup 停止验证之后）。
       deferredWorktreeRelease,
+      // 决定 0102：私有克隆的形态与冻结基点随 deferredWorktreeRelease 一起传
+      // （_releaseDeferredWorktree 的处置分支按形态分流）。
+      ...(worktreeInfo?.form === "private_clone"
+        ? { deferredWorktreeForm: "private_clone", deferredWorktreeBaseCommit: worktreeInfo.baseCommit }
+        : {}),
       // provider 会话复用（2026-09-21）：复用 run 需要把 wire 上观察到的运行时
       // 会话 id 在终态前补记成绑定的 session.created（见 Run 内 late-bind 段）。
       sessionReuse,
@@ -1854,6 +1877,13 @@ export class RunManager {
     const ephemeralWorktree = !deliveryContext && runStarted.worktreeStrategy === "ephemeral"
       && typeof runStarted.worktreePath === "string" && runStarted.worktreePath.length > 0
       ? runStarted.worktreePath : null;
+    // 决定 0102：私有克隆的形态与冻结基点随 deferredWorktreeRelease 一起从
+    // run.started 恢复；没有 worktreeForm 的旧转录 = 链接树，恒 null 走原路径
+    //（含 0062 的分支回收）。
+    const ephemeralCloneForm = ephemeralWorktree && runStarted.worktreeForm === "private_clone"
+      ? "private_clone" : null;
+    const ephemeralCloneBaseCommit = ephemeralCloneForm && typeof runStarted.worktreeBaseCommit === "string"
+      ? runStarted.worktreeBaseCommit : null;
     if (ephemeralWorktree && !existsSync(ephemeralWorktree)) {
       throw new Error(
         `resume_refused: ephemeral worktree missing (${runStarted.worktreePath}) — `
@@ -2162,8 +2192,15 @@ export class RunManager {
         cleanup: composeBackendDispose(null, backend),
         ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
         // TD-262（0063）：ephemeral 只读轮的延迟释放恢复（终态停止确认后放树+
-        // 零独有分支回收——与 start 路径同款语义）。
-        ...(ephemeralWorktree ? { deferredWorktreeRelease: ephemeralWorktree, effectiveCwd: ephemeralWorktree } : {}),
+        // 零独有分支回收——与 start 路径同款语义）；决定 0102：私有克隆的形态
+        // 与基点一并恢复。
+        ...(ephemeralWorktree ? {
+          deferredWorktreeRelease: ephemeralWorktree,
+          effectiveCwd: ephemeralWorktree,
+          ...(ephemeralCloneForm
+            ? { deferredWorktreeForm: ephemeralCloneForm, deferredWorktreeBaseCommit: ephemeralCloneBaseCommit }
+            : {}),
+        } : {}),
         scorecardRules: resumeScorecardRules,
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
@@ -2216,8 +2253,14 @@ export class RunManager {
       initialState: state,
       ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
       // TD-262（0063）：attach 路径同款恢复（sol 会审条款：两条 Run 构造路径
-      // 都要恢复参数）。
-      ...(ephemeralWorktree ? { deferredWorktreeRelease: ephemeralWorktree, effectiveCwd: ephemeralWorktree } : {}),
+      // 都要恢复参数）；决定 0102：私有克隆的形态与基点一并恢复。
+      ...(ephemeralWorktree ? {
+        deferredWorktreeRelease: ephemeralWorktree,
+        effectiveCwd: ephemeralWorktree,
+        ...(ephemeralCloneForm
+          ? { deferredWorktreeForm: ephemeralCloneForm, deferredWorktreeBaseCommit: ephemeralCloneBaseCommit }
+          : {}),
+      } : {}),
       scorecardRules: resumeScorecardRules,
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
@@ -2565,6 +2608,39 @@ export async function worktreeOccupiedByOtherRuns(runsRoot, selfRunId, treePath)
 }
 
 /**
+ * 决定 0102：私有克隆的共用处置原语（spawn 失败清理与 _releaseDeferredWorktree
+ * 共用）。先查后删，事件即事实，全程 best-effort：
+ *   - 目录已不在 → run.worktree_already_gone；
+ *   - probe keep（独有提交 / head_drift / nested_worktree / 读不出）→ 整个克隆
+ *     保留，记 run.worktree_branch_kept（能数时带 uniqueCommits，否则带闭集
+ *     reason）；
+ *   - clean → removeReadOnlyClone（绝不调 git worktree remove——源仓里没有克隆
+ *     的登记），按 existsSync 记 run.worktree_released 或
+ *     run.worktree_release_failed（still_present）。
+ * 停止未确认的门在调用方（_releaseDeferredWorktree 的 skipped 事件照旧由门
+ * 产生）。probe/remove 不抛错；append 失败向上抛，由调用方的 best-effort
+ * try/catch 收口——绝不改终态。
+ */
+async function disposeReadOnlyClone({ clonePath, branch, baseCommit, sourceCwd, transcript, probeFn = probeReadOnlyClone, removeFn = removeReadOnlyClone }) {
+  if (!existsSync(clonePath)) {
+    await transcript.append("run.worktree_already_gone", {});
+    return;
+  }
+  const probe = probeFn(clonePath, { branch, baseCommit, sourceCwd });
+  if (probe.outcome === "keep") {
+    await transcript.append("run.worktree_branch_kept",
+      probe.uniqueCommits != null ? { uniqueCommits: probe.uniqueCommits } : { reason: probe.reason });
+    return;
+  }
+  removeFn(clonePath);
+  if (existsSync(clonePath)) {
+    await transcript.append("run.worktree_release_failed", { reason: "still_present" });
+  } else {
+    await transcript.append("run.worktree_released", {});
+  }
+}
+
+/**
  * Run 是单个运行的句柄。M1 起通过消费 handle.events 流驱动状态机。
  */
 export class Run {
@@ -2588,9 +2664,13 @@ export class Run {
     correctable = false,
     readOnlyDeclared = false,
     deferredWorktreeRelease = null,
+    deferredWorktreeForm = null,
+    deferredWorktreeBaseCommit = null,
     removeWorktreeForRelease = removeWorktree,
     removeWorktreeForTerminalRelease = removeWorktreeNoForce,
     recycleBranchForRelease = recycleRunBranch,
+    removeReadOnlyCloneForRelease = removeReadOnlyClone,
+    probeReadOnlyCloneForRelease = probeReadOnlyClone,
     sessionReuse = null,
     runsRoot = null,
   }) {
@@ -2635,6 +2715,11 @@ export class Run {
     // 标志 + 停止确认旗（_verifyStopQuietIfCapable 写 run.stop_verified 时置真）。
     this.deferredWorktreeRelease = typeof deferredWorktreeRelease === "string" && deferredWorktreeRelease.length > 0
       ? deferredWorktreeRelease : null;
+    // 决定 0102：私有克隆形态与冻结基点（随 deferredWorktreeRelease 一起从
+    // run.started 恢复；没有 worktreeForm 的旧转录 = 链接树，恒 null 走原路径）。
+    this.deferredWorktreeForm = deferredWorktreeForm === "private_clone" ? "private_clone" : null;
+    this.deferredWorktreeBaseCommit = typeof deferredWorktreeBaseCommit === "string" && deferredWorktreeBaseCommit.length > 0
+      ? deferredWorktreeBaseCommit : null;
     this._deferredWorktreeHandled = false;
     this._stopQuietConfirmed = false;
     // 删除原语可注入（still_present 违约钉的测试缝）；默认真 isolation.removeWorktree。
@@ -2649,6 +2734,11 @@ export class Run {
     // TD-260（决定 0062 丙′）：分支回收原语同款测试缝；默认真 isolation.recycleRunBranch。
     this.recycleBranchForRelease = typeof recycleBranchForRelease === "function"
       ? recycleBranchForRelease : recycleRunBranch;
+    // 决定 0102：私有克隆的处置原语同款测试缝（probe/remove 两个，缺省真实现）。
+    this.removeReadOnlyCloneForRelease = typeof removeReadOnlyCloneForRelease === "function"
+      ? removeReadOnlyCloneForRelease : removeReadOnlyClone;
+    this.probeReadOnlyCloneForRelease = typeof probeReadOnlyCloneForRelease === "function"
+      ? probeReadOnlyCloneForRelease : probeReadOnlyClone;
     // 终态自动回收"不在使用中"门的运行存储根（runs/）。RunManager 的三个构造
     // 点都传（start 前台/fire-forget 与 resume 同一 config.runDir 解析）；
     // 缺席（测试直接构造 Run 等）→ 占用扫描判不了 → 按占用保留（fail-closed）。
@@ -3799,6 +3889,27 @@ export class Run {
     if (this._deferredWorktreeHandled) return;
     this._deferredWorktreeHandled = true;
     if (!this.deferredWorktreeRelease) return;
+    if (this.deferredWorktreeForm === "private_clone") {
+      // 决定 0102：私有克隆的延迟释放——停止未确认的门在前（照旧记 skipped）；
+      // 其余交共用处置原语（先查后删）。0062 的链接树分支回收不适用：分支活在
+      // 克隆里，源仓没有登记也没有分支。全程 best-effort，绝不改终态。
+      try {
+        if (!this._stopQuietConfirmed) {
+          await this.transcript.append("run.worktree_release_skipped", { reason: "stop_unconfirmed" });
+        } else {
+          await disposeReadOnlyClone({
+            clonePath: this.deferredWorktreeRelease,
+            branch: `wao/${this.runId}`,
+            baseCommit: this.deferredWorktreeBaseCommit,
+            sourceCwd: this.agent?.cwd,
+            transcript: this.transcript,
+            probeFn: this.probeReadOnlyCloneForRelease,
+            removeFn: this.removeReadOnlyCloneForRelease,
+          });
+        }
+      } catch { /* 双重失败：吞掉，绝不影响终态 */ }
+      return;
+    }
     let released = false;
     try {
       let eventType = null;

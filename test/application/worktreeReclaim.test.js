@@ -1152,3 +1152,78 @@ test("指纹私有索引：工作树 diff 不写真实索引；mtime-only 不报
 
 // 兜底：未用到的导入保持显式（OLD_TS 供手工调试种子扩展）。
 void OLD_TS; void rmSync;
+
+// ===== 决定 0102：私有克隆的盘点识别 =========================================
+
+import { createReadOnlyClone } from "../../src/isolation.js";
+
+/** 私有克隆绑定的终态转录事件（run.started 带 worktreeForm/worktreePath）。 */
+function privateCloneRunEvents({ repo, clone, runId, withForm = true }) {
+  return [
+    {
+      type: "run.started", backend: "test", cwd: repo, worktreePath: clone, worktreeBranch: `wao/${runId}`,
+      ...(withForm ? { worktreeForm: "private_clone" } : {}),
+    },
+    { type: "run.state_change", from: null, to: "pending", reason: "created" },
+    { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+  ];
+}
+
+test("分类：WAO 私有克隆（真克隆+绑定转录）→ tree_protection/private_clone；源仓工作树计数不含克隆", async () => {
+  const s = await scenario();
+  // 用生产原语在源仓 .wao-worktrees/<runId> 下建真实私有克隆（冻结基点=建仓提交）
+  const clone = await createReadOnlyClone(s.repo, "run_pc", { commitish: s.mainCommit });
+  s.seed("run_pc", privateCloneRunEvents({ repo: s.repo, clone: clone.path, runId: "run_pc" }));
+  // 前置事实：克隆不在源仓的 worktree 登记里（工作树与分支计数只数源仓自己的登记）
+  const wtList = git(["worktree", "list", "--porcelain"], s.repo);
+  assert.ok(!wtList.includes("run_pc"), "源仓 worktree list 不含克隆");
+  assert.ok(!git(["for-each-ref", "refs/heads/wao/"], s.repo).includes("run_pc"), "源仓无克隆分支");
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_pc");
+  assert.equal(item.action, "keep");
+  assert.equal(item.category, "tree_protection");
+  assert.equal(item.reason, "private_clone");
+});
+
+test("分类：转录绑定此目录但没有 worktreeForm（链接树形态的转录）→ foreign_worktree", async () => {
+  const s = await scenario();
+  const clone = await createReadOnlyClone(s.repo, "run_pc_nf", { commitish: s.mainCommit });
+  s.seed("run_pc_nf", privateCloneRunEvents({ repo: s.repo, clone: clone.path, runId: "run_pc_nf", withForm: false }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_pc_nf");
+  assert.equal(item.action, "keep");
+  assert.equal(item.reason, "foreign_worktree");
+});
+
+test("分类：转录声明的树路径不是此目录（声明的是源仓）→ foreign_worktree", async () => {
+  const s = await scenario();
+  await createReadOnlyClone(s.repo, "run_pc_elsewhere", { commitish: s.mainCommit });
+  s.seed("run_pc_elsewhere", privateCloneRunEvents({ repo: s.repo, clone: s.repo, runId: "run_pc_elsewhere" }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_pc_elsewhere");
+  assert.equal(item.action, "keep");
+  assert.equal(item.reason, "foreign_worktree");
+});
+
+test("分类：同样的克隆但无转录 → out_of_scope/foreign_worktree（认不出来源不误删）", async () => {
+  const s = await scenario();
+  seedLibraryDummy(s); // 转录库非空：空库+树目标会整体拒绝（8c）
+  await createReadOnlyClone(s.repo, "run_pc_nt");
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_pc_nt");
+  assert.equal(item.action, "keep");
+  assert.equal(item.reason, "foreign_worktree");
+});
+
+test("分类：alternates 指向别处的克隆（转录谎报 private_clone）→ foreign_worktree", async () => {
+  const s = await scenario();
+  const other = await makeRepo("wao-reclaim-pc-foreign-");
+  bases.push(other.repo);
+  git(["clone", "--shared", "--no-checkout", "--quiet", "--", other.repo, join(s.repo, ".wao-worktrees", "run_alt")], other.repo);
+  s.seed("run_alt", privateCloneRunEvents({ repo: s.repo, clone: join(s.repo, ".wao-worktrees", "run_alt"), runId: "run_alt" }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_alt");
+  assert.equal(item.action, "keep");
+  assert.equal(item.reason, "foreign_worktree");
+});

@@ -313,6 +313,7 @@
       "delivery/runsVerifyCommit.test.js",
       "delivery/verificationTailCapture.test.js",
       "run-lifecycle/readOnlyDispatch.test.js",
+      "run-lifecycle/readOnlyClone.test.js",
       "delivery/deliveryErrorClass.test.js"
     ],
     "process": [

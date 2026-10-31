@@ -3048,7 +3048,7 @@ test("TD-150-T5: klwc9 形状（marker+empty_diff）走真实 manager.start ⇒ 
 
 // ----- T6：TD-145 只读豁免活路径回归钉 -----
 
-/** readOnlyDispatch 形状的 manager：fake createWorktreeFn + process 式 mock backend。 */
+/** readOnlyDispatch 形状的 manager：fake 隔离缝 + process 式 mock backend。 */
 function makeTd150RoManager(runDir, backend) {
   const config = {
     registry: "x", runDir, pollInterval: 10, waitTimeout: 5000,
@@ -3063,6 +3063,10 @@ function makeTd150RoManager(runDir, backend) {
     readRegistry,
     backendFor: () => backend,
     userEnvReader: async () => ({}),
+    // 决定 0102：readOnly 非复用轮的隔离缝=私有克隆。
+    createReadOnlyCloneFn: async (cwd, rid) => ({
+      path: join(runDir, `wt_${rid}`), branch: `wao/${rid}`, baseCommit: "a".repeat(40), form: "private_clone",
+    }),
     createWorktreeFn: async (cwd, rid) => ({ path: join(runDir, `wt_${rid}`), branch: `wao/${rid}` }),
   });
 }

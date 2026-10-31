@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve, sep } from "node:path";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { isValidRunId, gitChildEnv } from "./delivery.js";
+import { isValidRunId, gitChildEnv, isCanonicalCommitId } from "./delivery.js";
 import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
 /**
@@ -579,6 +579,202 @@ export function recycleRunBranch(sourceCwd, runId, { execFn = execFileSync } = {
     return { outcome: "kept", reason: "delete_failed" };
   }
   return { outcome: "recycled" };
+}
+
+// ===== 决定 0102：ephemeral 只读运行的私有克隆原语 ==========================
+//
+// 链接工作树的 .git 是指向共享 common dir 的一个文件：席位在自己树里跑
+// `git config` / `git branch` / `git worktree add`，写的全是共享仓（TD-310 实锤）。
+// 私有克隆 = 源仓 .wao-worktrees/<runId> 下的 `git clone --shared --no-checkout`
+// 副本：有自己的 .git 目录，一切写仓库的命令都落在克隆里；对象借自源仓
+//（alternates 由 git 自己写），分支活在克隆里，源仓既没有它的 worktree 登记
+// 也没有它的分支。因此 0062 的链接树分支回收与 removeWorktree 对克隆一律不
+// 适用——删除就是删目录（removeReadOnlyClone），删前先做证据检查
+//（probeReadOnlyClone）。
+
+/** 克隆 remote.origin.pushurl 的固定不可用值（.invalid 是保留 TLD，永不可达）。 */
+export const READ_ONLY_CLONE_PUSHURL = "https://wao.invalid/push-forbidden";
+
+/**
+ * 建一个只读运行的私有克隆（决定 0102）。
+ *
+ * 与 createWorktree 并列的另一形态：createWorktree 不动，它还服务交付与
+ * persistent 树。clone 成功之后任一步失败都删掉半建目录再抛出——调用方
+ *（RunManager）按现有只读隔离失败路径抛 ReadOnlyWorktreeRequiredError，绝不
+ * 回退到源仓。
+ *
+ * 源仓的本地 config 不复制（git clone 的默认行为）；本机要紧的 core.longpaths /
+ * core.autocrlf 是全局配置照常生效。alternates 的路径由 git 按 realpath 落盘，
+ * 源仓本身是一棵链接工作树时同样指向 common dir 的对象库。
+ *
+ * @param {string} sourceCwd 源仓库（主工作树或链接工作树）路径
+ * @param {string} runId 运行 id（目录名 + 分支名，校验同 createWorktree）
+ * @param {{commitish?: string}} [opts] 冻结基点（调用方负责传 canonical hex）；
+ *   缺省取源仓 HEAD 的提交。解析成完整 SHA 后才建克隆——解析不了即拒绝。
+ * @returns {Promise<{path: string, branch: string, baseCommit: string, form: "private_clone"}>}
+ */
+export async function createReadOnlyClone(sourceCwd, runId, { commitish } = {}) {
+  if (!isValidRunId(runId)) {
+    throw new Error(`Invalid worktree name (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(runId)}`);
+  }
+  const cwd = resolve(sourceCwd);
+  if (!isGitRepo(cwd)) {
+    throw new Error(`${cwd} is not a git repository (worktree requires git)`);
+  }
+  await ensureWaoWorktreeExclude(cwd);
+  const clonePath = join(cwd, ".wao-worktrees", runId);
+  const branch = `wao/${runId}`;
+  // 失败清理只删本次 clone 成功建出的目录：目标已存在且非空时 git clone 自己
+  // 拒绝，这里不删别人的东西。
+  let cloned = false;
+  try {
+    // 1. 基点先解析成完整 SHA（--end-of-options 防选项形 commitish，同
+    //    createWorktree 的纵深防御）。
+    const baseCommit = execFileSync("git", [
+      "rev-parse", "--verify", "--end-of-options", `${commitish || "HEAD"}^{commit}`,
+    ], {
+      cwd,
+      env: gitChildEnv(),
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    }).toString().trim();
+    if (!isCanonicalCommitId(baseCommit)) {
+      throw new Error(`base commit resolution returned a non-SHA: ${JSON.stringify(baseCommit)}`);
+    }
+    // 2. 共享克隆（不检出；-- 结束选项区，防源/目标路径以 - 开头）。clone 自己
+    //    失败时会删掉它建出的目录。
+    execFileSync("git", ["clone", "--shared", "--no-checkout", "--quiet", "--", cwd, clonePath], {
+      cwd,
+      env: gitChildEnv(),
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    cloned = true;
+    // 3. 克隆里建 wao/<runId> 并检出冻结基点（--no-checkout 的克隆此刻没有
+    //    工作区文件，本步把基点内容落到盘上）。
+    execFileSync("git", ["checkout", "-q", "-b", branch, baseCommit], {
+      cwd: clonePath,
+      env: gitChildEnv(),
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    // 4. 挡误用 origin 的推送：pushurl 覆盖 push 方向的 url。只挡克隆→源仓
+    //    的误用；席位显式写源仓路径挡不住（决定 0102 已知边界）。
+    execFileSync("git", ["config", "remote.origin.pushurl", READ_ONLY_CLONE_PUSHURL], {
+      cwd: clonePath,
+      env: gitChildEnv(),
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    return { path: clonePath, branch, baseCommit, form: "private_clone" };
+  } catch (error) {
+    // clone 成功之后的步骤失败：半建的克隆不留给普查。clone 之前或 clone 本身
+    // 失败（含目标已被别人占用）不删——那不是本次建的。
+    if (cloned) {
+      try { rmSync(clonePath, { recursive: true, force: true }); } catch { /* 尽力 */ }
+    }
+    throw error;
+  }
+}
+
+/**
+ * 私有克隆的删前证据检查（决定 0102）：纯读、不抛错，任何 git 失败都按保留
+ * 处理（probe_failed）——删克隆丢的是克隆自己对象库里的东西，宁可错留。
+ *
+ * 求值顺序即安全顺序：
+ *   1. 在克隆里列出除 refs/stash 外全部引用与 HEAD 可达、基点不可达的提交，
+ *      再到源仓的对象库里逐个查：源仓没有的，就是在克隆里新写的提交（新对象
+ *      只写进克隆自己的对象库，删克隆丢的正是这些）。只认对象在哪、不认克隆
+ *      里引用的值（引用席位能改）；源仓在运行期间删掉的分支，对象仍在源仓，
+ *      不会误算。个数 > 0 → keep 带数；
+ *   2. HEAD 不附着在 refs/heads/<branch>（detached / 换了分支）→ head_drift；
+ *   3. 克隆里登记了别的工作树 → nested_worktree；
+ *   4. 全过 → clean。
+ *
+ * @param {string} clonePath 克隆目录
+ * @param {{branch: string, baseCommit: string, sourceCwd: string}} bound 绑定事实
+ *   （branch=wao/<runId>；baseCommit=冻结基点完整 SHA；sourceCwd=建克隆的源仓）。
+ *   形制不对按 probe_failed 保留（fail-closed，绑定残缺的克隆绝不删）。
+ * @param {{execFn?: Function}} [opts] 测试缝（缺省 execFileSync）。
+ * @returns {{outcome: "clean"} | {outcome: "keep", uniqueCommits?: number, reason?: "probe_failed"|"head_drift"|"nested_worktree"}}
+ */
+export function probeReadOnlyClone(clonePath, { branch, baseCommit, sourceCwd } = {}, { execFn = execFileSync } = {}) {
+  const path = resolve(clonePath);
+  try {
+    if (typeof branch !== "string" || branch.length === 0
+      || !isCanonicalCommitId(baseCommit)
+      || typeof sourceCwd !== "string" || sourceCwd.length === 0) {
+      return { outcome: "keep", reason: "probe_failed" };
+    }
+    // 只处置真克隆：.git 是目录（链接工作树的 .git 是文件——删目录会丢掉它的
+    // 改动并在源仓留下孤儿登记）。
+    if (!lstatSync(join(path, ".git")).isDirectory()) return { outcome: "keep", reason: "probe_failed" };
+    const gitIn = (cwd, args, input) => String(execFn("git", args, {
+      cwd,
+      env: gitChildEnv(),
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+      ...(input != null ? { input } : {}),
+    }));
+    const git = (args) => gitIn(path, args);
+    const candidates = git(["rev-list", "--exclude=refs/stash", "--all", "--not", baseCommit])
+      .split(/\r?\n/).filter((l) => l.length > 0);
+    if (!candidates.every(isCanonicalCommitId)) return { outcome: "keep", reason: "probe_failed" };
+    if (candidates.length > 0) {
+      const answers = gitIn(resolve(sourceCwd), ["cat-file", "--batch-check"], `${candidates.join("\n")}\n`)
+        .split(/\r?\n/).filter((l) => l.length > 0);
+      if (answers.length !== candidates.length) return { outcome: "keep", reason: "probe_failed" };
+      let uniqueCommits = 0;
+      // 答复只认两种形状：`<oid> missing` 与 `<oid> commit <size>`，其余一律读不出。
+      for (let i = 0; i < candidates.length; i += 1) {
+        if (answers[i] === `${candidates[i]} missing`) uniqueCommits += 1;
+        else if (!/^commit \d+$/.test(answers[i].slice(candidates[i].length + 1))
+          || !answers[i].startsWith(`${candidates[i]} `)) return { outcome: "keep", reason: "probe_failed" };
+      }
+      if (uniqueCommits > 0) return { outcome: "keep", uniqueCommits };
+    }
+    const short = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    if (short !== branch && short !== `refs/heads/${branch}`) {
+      return { outcome: "keep", reason: "head_drift" };
+    }
+    if (parseWorktreeList(git(["worktree", "list", "--porcelain"])).length > 1) {
+      return { outcome: "keep", reason: "nested_worktree" };
+    }
+    return { outcome: "clean" };
+  } catch {
+    return { outcome: "keep", reason: "probe_failed" };
+  }
+}
+
+/**
+ * 删除私有克隆目录（决定 0102）：有界重试的 rmSync（写法照 removeWorktree 的
+ * 重试循环），绝不调 `git worktree remove`——源仓里没有克隆的登记，git 只会
+ * 拒绝。路径 resolve 成绝对路径后只落在目录本身，不以克隆为任何进程的 cwd
+ *（Windows 上克隆作为进程 cwd 会被锁死）。删除失败不抛出，调用方以
+ * existsSync 为准记 worktree_release_failed。
+ *
+ * @param {string} clonePath 克隆目录
+ */
+export function removeReadOnlyClone(clonePath) {
+  const path = resolve(clonePath);
+  if (!existsSync(path)) return;
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 100;
+  let attempt = 0;
+  let removed = false;
+  while (attempt < MAX_RETRIES && !removed) {
+    attempt += 1;
+    try {
+      rmSync(path, { recursive: true, force: true });
+      removed = !existsSync(path);
+    } catch { /* 尽力，下次重试 */ }
+    if (!removed && attempt < MAX_RETRIES) {
+      const end = Date.now() + RETRY_DELAY_MS * attempt; // 线性退避 100/200ms
+      while (Date.now() < end) { /* busy wait */ }
+    }
+  }
 }
 
 function parseWorktreeList(porcelain) {

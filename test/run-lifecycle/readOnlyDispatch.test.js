@@ -100,8 +100,8 @@ function recordingBackend(events = []) {
   return { backend, spawns };
 }
 
-/** RunManager with an injectable createWorktreeFn + fake backend. */
-function makeManager({ dir, backend, createWorktreeFn }) {
+/** RunManager with an injectable createWorktreeFn/createReadOnlyCloneFn + fake backend. */
+function makeManager({ dir, backend, createWorktreeFn, createReadOnlyCloneFn }) {
   return new RunManager({
     config: {
       registry: join(dir, "agents.json"),
@@ -122,6 +122,7 @@ function makeManager({ dir, backend, createWorktreeFn }) {
     backendFor: () => backend,
     userEnvReader: async () => ({}),
     ...(createWorktreeFn ? { createWorktreeFn } : {}),
+    ...(createReadOnlyCloneFn ? { createReadOnlyCloneFn } : {}),
   });
 }
 
@@ -266,9 +267,15 @@ test("RO-R1: readOnly forces worktree isolation over an explicit isolate:false a
     makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
     let wtCalls = 0;
+    let cloneCalls = 0;
     const manager = makeManager({
       dir,
       backend,
+      // 决定 0102：readOnly 非复用轮的树形态=私有克隆——隔离缝走 cloneFn。
+      createReadOnlyCloneFn: async () => {
+        cloneCalls += 1;
+        return { path: FAKE_WORKTREE, branch: "wao/run_ro_r1", baseCommit: "a".repeat(40), form: "private_clone" };
+      },
       createWorktreeFn: async () => {
         wtCalls += 1;
         return { path: FAKE_WORKTREE, branch: "wao/run_ro_r1" };
@@ -280,7 +287,8 @@ test("RO-R1: readOnly forces worktree isolation over an explicit isolate:false a
       isolate: false,
       readOnly: true,
     });
-    assert.equal(wtCalls, 1, "worktree created despite isolate:false");
+    assert.equal(cloneCalls, 1, "isolation created via the private-clone seam despite isolate:false");
+    assert.equal(wtCalls, 0, "createWorktreeFn is NOT the readOnly isolation seam (decision 0102)");
     // The worker spawns INSIDE the worktree.
     assert.equal(spawns.length, 1);
     assert.equal(spawns[0].agent.cwd, FAKE_WORKTREE, "backend spawn cwd is the worktree");
@@ -305,8 +313,9 @@ test("RO-R2: worktree creation failure × readOnly → typed fail-closed refusal
     const manager = makeManager({
       dir,
       backend,
-      createWorktreeFn: async () => {
-        throw new Error("git worktree add failed");
+      // 决定 0102：readOnly 的隔离创建走私有克隆缝——失败同型 fail-closed。
+      createReadOnlyCloneFn: async () => {
+        throw new Error("git clone failed");
       },
     });
     await assert.rejects(
@@ -393,7 +402,10 @@ test("RO-R5: NO HARD GATE — a readOnly run with confirmed writes reaches its N
     const manager = makeManager({
       dir,
       backend,
-      createWorktreeFn: async () => ({ path: FAKE_WORKTREE, branch: "wao/run_ro_r5" }),
+      // 决定 0102：readOnly 非复用轮的树形态=私有克隆。
+      createReadOnlyCloneFn: async () => ({
+        path: FAKE_WORKTREE, branch: "wao/run_ro_r5", baseCommit: "a".repeat(40), form: "private_clone",
+      }),
     });
     const run = await manager.start("coder_low", { prompt: "supposedly read-only", readOnly: true });
     const waitResult = await run.waitForCompletion({ pollInterval: 10 });

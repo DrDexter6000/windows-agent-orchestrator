@@ -4,7 +4,7 @@
 
 ## 模块职责
 
-提供统一的 **git worktree 创建/删除/列举**能力，供 `RunManager` 在启动 run 时按需调用，为每个 run 建立隔离的代码工作树。
+提供统一的 **git worktree 创建/删除/列举**能力，供 `RunManager` 在启动 run 时按需调用，为每个 run 建立隔离的代码工作树。ephemeral 只读 run 不用 worktree，用源仓的私有克隆：`createReadOnlyClone`、`probeReadOnlyClone`（删前证据检查）、`removeReadOnlyClone`，规则见 `docs/02-architecture.md` §4.3 ① 与决定 0102。
 
 边界（设计原则）：
 

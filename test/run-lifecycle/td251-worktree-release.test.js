@@ -79,6 +79,7 @@ test("TD-251 W1a: readOnly 非复用 run → ephemeral，completed+停止确认�
   const dir = mkdtempSync(join(tmpdir(), "wao-td251-ro-"));
   try {
     makeGitRepo(dir);
+    const baseHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
     // isAlive:false → verifyProcessExit quiet → stop_verified → 停止确认。
     const backend = fakeBackend({ handleExtra: { isAlive: () => false } });
     const mgr = makeManager(dir, backend);
@@ -89,17 +90,21 @@ test("TD-251 W1a: readOnly 非复用 run → ephemeral，completed+停止确认�
     assert.ok(started?.worktreePath, "readOnly 强制隔离在场");
     // TD-262（0063）：策略事实持久化——resume 恢复只认此字段（opus 条款）。
     assert.equal(started.worktreeStrategy, "ephemeral", "readOnly 非复用轮=ephemeral（resume 资格事实）");
+    // 决定 0102：ephemeral 只读轮的树形态=私有克隆，绑定事实随 run.started 落盘。
+    assert.equal(started.worktreeForm, "private_clone");
+    assert.equal(started.worktreeBaseCommit, baseHead, "冻结基点=源仓 HEAD 完整 SHA");
     assert.ok(!existsSync(started.worktreePath), "停止确认后树已回收（延迟释放）");
     const wt = events.filter((e) => WT_EVENT_TYPES.includes(e.type));
     assert.deepEqual(wt.map((e) => e.type), ["run.worktree_released"]);
     assert.ok(events.some((e) => e.type === "run.stop_verified"), "停止确认事实在树释放之前");
-    // TD-260（0062 丙′）：零独有分支随树释放回收（棘轮不再被会审/只读轮顶红）。
+    // 决定 0102：私有克隆不触发 0062 分支回收——分支活在克隆的 .git 里，源仓
+    // 既没有登记也没有分支；克隆随目录删除一起消失。
     const br = events.filter((e) => BRANCH_EVENT_TYPES.includes(e.type));
-    assert.deepEqual(br.map((e) => e.type), ["run.worktree_branch_recycled"]);
+    assert.deepEqual(br.map((e) => e.type), [], "私有克隆零分支回收事件");
     let branchMissing = false;
     try { execSync("git rev-parse refs/heads/wao/run_td251_ro1", { cwd: dir, stdio: "pipe" }); }
     catch { branchMissing = true; }
-    assert.ok(branchMissing, "分支已删（rev-parse 对缺失 ref 退出非零）");
+    assert.ok(branchMissing, "源仓没有克隆的分支（rev-parse 对缺失 ref 退出非零）");
   } finally { cleanupDir(dir); }
 });
 
@@ -452,7 +457,7 @@ test("TD-260 丙′（审核修订）: skipped/still_present 臂不调分支回�
   } finally { cleanupDir(dir); }
 });
 
-test("TD-262（0062 审核轮）: readOnly 轮 spawn 失败 → 树清理+零独有分支回收（不再泄漏）", async () => {
+test("TD-262（0062 审核轮）: readOnly 轮 spawn 失败 → 树清理（决定 0102：私有克隆形态）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td262-spawn-"));
   try {
     makeGitRepo(dir);
@@ -479,15 +484,15 @@ test("TD-262（0062 审核轮）: readOnly 轮 spawn 失败 → 树清理+零独
     find(dir);
     assert.ok(tPath, "spawn 失败轮转录在场");
     const events = readFileSync(tPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.ok(!existsSync(join(dir, ".wao-worktrees", "run_td262_s1")), "spawn 失败后树已清理");
+    assert.ok(!existsSync(join(dir, ".wao-worktrees", "run_td262_s1")), "spawn 失败后克隆已清理");
     assert.deepEqual(
       events.filter((e) => [...WT_EVENT_TYPES, ...BRANCH_EVENT_TYPES].includes(e.type)).map((e) => e.type),
-      ["run.worktree_released", "run.worktree_branch_recycled"],
-      "spawn 失败轮：released+recycled 事件入账（树/分支不再泄漏——opus 实锤修复）",
+      ["run.worktree_released"],
+      "spawn 失败轮：released 事件入账（克隆不再泄漏——opus 实锤修复）；分支回收不适用（决定 0102）",
     );
     let branchGone = false;
     try { execSync("git rev-parse refs/heads/wao/run_td262_s1", { cwd: dir, stdio: "pipe" }); }
     catch { branchGone = true; }
-    assert.ok(branchGone, "spawn 失败轮分支已回收");
+    assert.ok(branchGone, "源仓没有克隆的分支");
   } finally { cleanupDir(dir); }
 });
