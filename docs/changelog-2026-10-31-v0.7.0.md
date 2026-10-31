@@ -58,3 +58,24 @@
 - 修复：以上各条都改了。为守住手册的字节上限，`docs/usage/delivery.md` 里讲转录绑定保护的一整段搬进 `docs/02-architecture.md` §4.7（它本来就是架构层的事实），手册原处只留指针，没有抬上限。地图表的守卫期望同步改了配对。sol 的"会审查 bug 时优选"并入第 1 条 Owner 规则，"不必为省钱刻意避开 DeepSeek 高峰"并入"能省则省"那条，两条注意事项删掉，原话不变。画像改动后在候选上跑选车道评测三轮（Sonnet）：36 个回答 28 正确、8 可接受、没有错的；与上一轮相比只有 S6（日志摘要）两轮选了 glm-pro（可接受），这个场景 10-30 也这样摇摆过。
 - 复核 consult_20261031075503998hgfwrr（deepseek-flash，FIX_FIRST）：新写的归属拒绝一段把 `run_delivery` 的即时查询也算了进去，代码只在带 `waitMs` 的等待路径核验归属。改为只写等待路径，即时查询不核验归属这一事实并入台账 TD-324。同轮另改：手册原处那句还复述了规则，改成纯指针；收口的无法判定清单补上"绑定的打包失败不止一条"；README 双语的守卫范围改准；地图表守卫补钉 `runs delivery review`。
 - 判为不改：会审另列了几处结构意见——项目身份规则在参考文档里没有一处完整的家、各页各写自己工具的等待缺省、`docs/usage/lanes.md` 的示例注册表键是形状示例、`docs/usage/consult.md` 用 `a,b` 作占位。它们与代码不矛盾，也不妨碍照做，留给以后的文档整理。
+- 二次复核 consult_20261031080631973ej86d0（deepseek-flash，PASS_WITH_NOTES）：上一轮各条都已修对；同意上一条判为不改的几处。两条备注不改：即时查询"不核验归属"是"不据归属拒绝"的简写（候选盘点内部仍做一次核验，失败时盘点为 null）；TD-324 一行里"缺"字兼作动词与原因名，读着略绕。
+
+## 发版门槛证据（2026-10-31，本地实跑；打标后追加）
+
+- 全量 `npm test`：**361/361 通过**（6 波，657 秒，无隔离重跑，runs 守卫干净），跑在 tree dec106eb 上，即 tag `v0.7.0` 指向的提交 acb109f。
+- surface 再生成（§9 第 3 步）：在 acb109f 上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致（`git status` 无改动）。
+- `npm run reliability`：从主检出在 acb109f 上逐车道跑（`--agent <lane>`）：
+  - sol、astra（strict）：全过，certified。
+  - kimi、deepseek-flash、opus、glm-flash、glm-pro（delta）：全过，评 conditional（delta 子集全过不产生 certified）。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`：claude-code PASS，codex PASS。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（§4 第 4 条）。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.6.0 v0.7.0`；`git rev-list --count v0.6.0..v0.7.0`。
+
+## 总量
+
+15 个提交，133 个文件，+11,156 / −834 行（`git diff --shortstat v0.6.0 v0.7.0`）。
+
+## 发版记录
+
+- tag：`v0.7.0`（annotated → acb109f，正文载门槛证据与 Owner 豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩：tag 指向的就是跑过全量的提交本身。
