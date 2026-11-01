@@ -149,3 +149,5 @@
 | TD-325 | 桶数上限是硬崖：`runs/projects/` 超过 64 个桶时，所有追加与没有快速命中的按 runId 读取都抛错，新派发、状态读取一起失败（2026-10-30 实遇） | 2026-10-30：决定 0100——按 runId 解析时扫描全部桶，不设上限；桶数超过 64 时 lead_preflight 只提示。决定 0099 已去掉开发工作树这个最大的增长源 |
 | TD-243 | 转录解析 cwdHint 接线为零调用点，桶数超上限即写侧不可用且无快命中时查询付全扫描成本 | 2026-10-30：决定 0100——按 runId 解析时扫描全部桶，不再有桶数上限，写侧不会因此不可用；无 hint 的全扫描实测每桶约 34 µs（39 个桶一次 1.1 ms）。cwdHint 层在 src/ 里仍没有调用点（只有演练脚本 drillRuns.mjs 用它），只是不再造成可用性问题 |
 | TD-210 | CLI 已钉新版且自动更新已关，wrapper 通道在新版下的回归验证未做 | 2026-11-01：决定 0106——provider 通道连同 wrapper 退役，没有要验证的对象 |
+| TD-327 | MCP run_continue 对 explicit 父档报笼统错误：服务层以 explicit_dispatch_continuable_unsupported 拒绝，该码不在 CONTINUE_REJECTION_REASONS 闭集，MCP 输出 schema 解析失败折成固定文案 | 2026-11-01：码进闭集（MCP 枚举派生自同一 SSOT），Lead 看到 accepted:false + 具名码；docs/surface 再生成，工具面 SHA 与线帽如实重冻（93142→93186，Owner 批准，硬顶内），MCP 层测试钉住 |
+| TD-328 | 别名派发的 run 续跑后自称变了：start 对 explicit 与别名都用结构化 lane/role 身份头，resume 只为 explicit 从钉住的 laneId/roleId 重建，别名退回 agentId 头；runManager 注释也不再成立 | 2026-11-01：resume 对 explicit 与别名都从 run.started 钉住事实重建结构化头（片段缺失/非法仍 identity_pin_invalid 具名拒，零 respawn），报错文案改两种来源通用，过时注释改正，HDR-3/HDR-4 钉住 |

@@ -283,6 +283,46 @@ test("M12-7-MRC-M6: busy refusal redacts the active lineage runId (label only)",
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
 
+// TD-327（2026-11-01）：explicit 父档的拒绝码进了 CONTINUE_REJECTION_REASONS
+// 闭集——MCP 输出 schema（z.enum 派生自同一 SSOT）解析通过，Lead 看到
+// accepted:false + 具名码，不再折成 isError 笼统文案。服务层实拒带 detail，
+// 该字段不在 handler 的投影字段里，不得漏到线上。
+test("TD-327: explicit_dispatch_continuable_unsupported → structured accepted:false + named code (not isError)", async () => {
+  const dir = makeGitDir("wao-td327-mrc-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server } = makeServer({
+      dir,
+      serviceResult: (args) => ({
+        accepted: false,
+        parentRunId: args.parentRunId,
+        continuation: true,
+        rejectionReason: "explicit_dispatch_continuable_unsupported",
+        detail: "the parent run was dispatched as an explicit lane+role combination; a silent hat switch",
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_explicit", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r.isError, undefined, "closed-set refusal is a normal outcome, not an error");
+      const parsed = r.structuredContent;
+      assert.equal(parsed.accepted, false);
+      assert.equal(parsed.parentRunId, "run_parent_explicit");
+      assert.equal(parsed.continuation, true);
+      assert.equal(parsed.rejectionReason, "explicit_dispatch_continuable_unsupported");
+      assert.equal(parsed.runId, null);
+      assert.equal(parsed.agentId, null);
+      assert.equal(parsed.rootRunId, null);
+      assert.equal(parsed.state, null);
+      const dumped = JSON.stringify(r);
+      assert.ok(!dumped.includes("silent hat switch"), "service detail text never in MCP output");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
 // =====================================================================
 // Group 5: environmental failures collapse to fixed safe text
 // =====================================================================

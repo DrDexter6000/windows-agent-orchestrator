@@ -114,6 +114,7 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "worker_configuration_changed", // current backend/model/provider differs from the parent session
   "role_contract_drift", // 0045 R4 洞①：父钉住的角色正文与当前文件不一致/不可加载——同谱系静默换帽拒绝
   "legacy_dispatch_continuable_unsupported", // 0045 W4d：父 envelope agentId=重键前席位名——跨版本谱系拒绝
+  "explicit_dispatch_continuable_unsupported", // 0045 R3 H3：父为 explicit（车道+角色）派发——续接不携角色会静默换帽，具名拒绝
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted

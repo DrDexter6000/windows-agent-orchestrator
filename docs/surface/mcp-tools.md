@@ -254,7 +254,7 @@ Output:
 | agentId | string\|null | yes |  |
 | rootRunId | string\|null | yes |  |
 | state | string\|null | yes |  |
-| rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| lineage_closed \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| role_contract_drift \| legacy_dispatch_continuable_unsupported \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
+| rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| lineage_closed \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| role_contract_drift \| legacy_dispatch_continuable_unsupported \| explicit_dispatch_continuable_unsupported \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
 | nextStep | string | no |  |
 | inheritedChangedPaths | array<string>\|null | no |  |
 | inheritedChangedCount | integer\|null | no |  |

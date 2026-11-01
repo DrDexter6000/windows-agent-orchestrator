@@ -256,7 +256,7 @@ test("CLI-3: agentId 与 lane/role 混用 → dispatch_selector_invalid", async 
 
 // ── W3b 身份头（R4 裁定：explicit 结构化身份、无接线括注、resume 从钉住值重建）──
 
-test("HDR-1: explicit 派发身份头=lane/role 模板，无接线席位名（alias/legacy 头保持原钉）", async () => {
+test("HDR-1: explicit 派发身份头=lane/role 模板，无接线席位名（alias 同款结构化；legacy 头保持原钉）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hdr1-"));
   try {
     makeGitRepo(dir);
@@ -294,6 +294,92 @@ test("HDR-2: explicit resume 身份头从钉住值重建（车道已改名仍按
   assert.ok(!explicit.includes("agentId is"), "explicit 不含 agentId 头");
   const invalid = composeRoleContractWithIdentity({ roleContract: "BODY", agentId: "x", identity: { laneId: "../evil", roleId: "r" } });
   assert.equal(invalid, "BODY", "非法片段=头省略（防御位；路径层已具名拒）");
+});
+
+// ── TD-328（2026-11-01）：别名 run 的 resume 同样从钉住事实重建结构化头 ──
+// start 对 explicit 与别名派发都用结构化 lane/role 头（W4d），resume 此前只为
+// explicit 重建、别名退回 agentId 头（worker 续跑后自称变了）——现在两种来源都
+// 从 run.started 钉住的 laneId/roleId 重建；钉住片段非法=identity_pin_invalid
+// 具名拒绝（零 respawn、转录字节不变）。夹具照 rolePinning.test.js 的 resume
+// 基线事件；角色用角色库真实 tester.md（TD-314 纪律：不往 config/roles/ 写临时文件）。
+
+function aliasResumeBaseEvents(dir, runId, startedExtra) {
+  const agentId = "test-lane";
+  return [
+    { type: "run.started", backend: "claude-code", cwd: dir, ts: "2026-11-01T00:00:00.000Z", runId, agentId, seq: 1, ...startedExtra },
+    { type: "session.created", backend: "claude-code", backendSessionId: "s1", ts: "2026-11-01T00:00:00.200Z", runId, agentId, seq: 2 },
+    { type: "prompt.sent", prompt: "do it", ts: "2026-11-01T00:00:00.300Z", runId, agentId, seq: 3 },
+    { type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-11-01T00:00:00.400Z", runId, agentId, seq: 4 },
+  ].map((l) => JSON.stringify(l)).join("\n");
+}
+
+test("HDR-3（TD-328）：别名 run 的 resume 用结构化身份头（不含 agentId 头）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-hdr3-"));
+  const testerMd = readFileSync(join(ROLES_DIR, "tester.md"), "utf8");
+  try {
+    makeGitRepo(dir);
+    const runId = "run_0045_hdr3";
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    writeFileSync(join(dir, "runs", `${runId}.jsonl`),
+      aliasResumeBaseEvents(dir, runId, {
+        resolvedFrom: "alias", laneId: "test-lane", roleId: "tester",
+        rolePin: { systemPrompt: "config/roles/tester.md", sha256: sha(testerMd) },
+      }) + "\n", "utf8");
+    // 别名派发的注册表条目=车道键、无 systemPrompt（W4d；角色事实只来自钉）
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      "test-lane": { backend: "claude-code", cwd: dir },
+    } }), "utf8");
+    const capture = {};
+    const manager = await makeManager(dir, registryPath, capture);
+    const resumed = await manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath });
+    try { await resumed.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
+    assert.match(capture.task.roleContract, /Your canonical WAO identity is lane=test-lane role=tester\./,
+      "别名 run 续跑仍按钉住事实生成结构化身份头");
+    assert.ok(!capture.task.roleContract.includes("agentId is"), "不退回 agentId 头（自称不再中途改变）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("HDR-4（TD-328）：别名 run 钉住片段非法 → identity_pin_invalid 具名拒，零 respawn", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-hdr4-"));
+  const testerMd = readFileSync(join(ROLES_DIR, "tester.md"), "utf8");
+  try {
+    makeGitRepo(dir);
+    const runId = "run_0045_hdr4";
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    const transcriptPath = join(dir, "runs", `${runId}.jsonl`);
+    // 角色正文钉有效（过 role_contract_drift 维）、身份片段 laneId 非法——
+    // 显式两种来源共用同一具名拒绝（alias 与 explicit 同款）。
+    writeFileSync(transcriptPath,
+      aliasResumeBaseEvents(dir, runId, {
+        resolvedFrom: "alias", laneId: "../evil", roleId: "tester",
+        rolePin: { systemPrompt: "config/roles/tester.md", sha256: sha(testerMd) },
+      }) + "\n", "utf8");
+    const bytesBefore = readFileSync(transcriptPath, "utf8");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      "test-lane": { backend: "claude-code", cwd: dir },
+    } }), "utf8");
+    const capture = {};
+    const manager = await makeManager(dir, registryPath, capture);
+    await assert.rejects(
+      () => manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath }),
+      (e) => {
+        assert.match(e.message, /identity_pin_invalid/, "具名闭集原因码");
+        assert.match(e.message, /refusing to resume/, "固定拒绝文案");
+        return true;
+      },
+      "别名 run 身份钉不可验证必须具名 fail-closed",
+    );
+    assert.equal(capture.task, undefined, "零 respawn（spawn 未发生）");
+    assert.equal(readFileSync(transcriptPath, "utf8"), bytesBefore, "转录字节不变");
+  } finally {
+    cleanupDir(dir);
+  }
 });
 
 // ── TD-319：有意分行的 CLI 报错经 linesError 构造（message 与 join 逐字一致）──

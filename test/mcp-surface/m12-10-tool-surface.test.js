@@ -436,7 +436,11 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 93142;
+const FROZEN_23_WIRE_CEILING = 93186;
+// TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
+// enum 增 explicit_dispatch_continuable_unsupported（CONTINUE_REJECTION_REASONS
+// SSOT 扩员）：93142→93186（实测；Owner 硬顶 94532 内）。描述与 inputSchema
+// 零改动（desc/hostVisible 冻结线未动）。
 // 0098（2026-10-30，Owner 批准本批重冻）：run_delivery 出参增 adoption 三态
 // 对象（status/commits≤5/truncated/uncheckedReason，闭集从 adoptionQuery SSOT
 // 派生；BASE 不带——review bundle 嵌 BASE 字节不变）、lead_preflight lanes
@@ -661,7 +665,13 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // stripped 载荷内，SHA 如实翻新（决定 0097，工具面重冻；描述与 inputSchema
 // 零改动，desc/hostVisible 冻结线未动）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "a31ff42f8790f05601d26907f6907db16d8f05c7613544066660d1cc298702d1";
+  "e91d5a6e1fddf5850ff8a9df0514892e69d5f2d20a2b77d324c978809f7776f1";
+// TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
+// enum 增 explicit_dispatch_continuable_unsupported（TD-327 具名拒因——
+// CONTINUE_REJECTION_REASONS SSOT 扩员）——outputSchema 在 stripped 载荷内，
+// SHA 如实翻新；无描述字节变化；wire 帽同批重冻（93142→93186），帽内 additive。
+// （历史值：a31ff42f8790f05601d26907f6907db16d8f05c7613544066660d1cc298702d1
+// 为 0098 adoption/videoInput 后的冻结值。）
 // 0098（2026-10-30，Owner 批准本批重冻）：run_delivery 出参增 adoption 三态
 // 对象、lead_preflight lanes 每行增 videoInput——两个 outputSchema 都在
 // stripped 载荷内，SHA 如实翻新（描述与 inputSchema 零改动，desc/hostVisible
