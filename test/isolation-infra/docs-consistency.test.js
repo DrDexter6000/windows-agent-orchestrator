@@ -1523,10 +1523,10 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
     `SKILL.md Minimal MCP Loop 当前工具数必须与 toolSurface TOOLS.length=${n} 一致（M12-10 playbook 转 resources；M12-16 加 run_correct）`);
   assert.ok(!new RegExp(`(?<!\\d)${n + 1} MCP tools|(?<!\\d)${n + 1} tools`, "i").test(skill),
     `SKILL.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
-  // 精确匹配 "server.js ... N tools" 的当前状态注释行。
-  const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(new RegExp(`${n} tools`).test(serverLine),
-    `architecture server.js 注释工具数必须与 toolSurface TOOLS.length=${n} 一致`);
+  // architecture 的 server.js "N tools + roster" 注释行已随 §7
+  // 手写目录树退役——工具数与 roster 名序的权威是 src/mcp/toolSurface.js 与生成层
+  // docs/surface/mcp-tools.md（headings == TOOLS 由 docsSurface-3 钉），此处不再
+  // 对文档手抄清单做第二份钉。
   // 2026-10-02 SSOT 体检补盲：中文计数形式（"恰好 N 个 always-registered"）此前
   // 不在守卫射程——英文 "N tools" 正则匹配不到中文表述，M12-16/M13 两轮加工具后
   // 架构契约段漂移到"恰好 22 个"未被抓住。正负探针均从 SSOT 派生（n±1），
@@ -1541,12 +1541,8 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
     `README.zh-CN.md 中文计数必须与 TOOLS.length=${n} 一致`);
   assert.ok(!readmeZh.includes(`${n + 1} 个 MCP 工具`) && !readmeZh.includes(`${n - 1} 个 MCP 工具`),
     `README.zh-CN.md 不得声称 ${n + 1}/${n - 1} 个 MCP 工具`);
-  // roster 完备性：server.js 注释行的工具名序列必须与 TOOLS 同名同序——2026-10-02
-  // 发现该行写 23 tools 却只列 22 名（漏 run_consult），且历史顺序与 SSOT 不一致。
-  const roster = serverLine.match(/tools（([^；]+)；/);
-  assert.ok(roster, "server.js 注释行必须含 tools（…；格式的 roster 名单");
-  assert.deepEqual(roster[1].split("/"), TOOLS,
-    "architecture server.js 注释 roster 必须与 toolSurface TOOLS 同名同序（单边漂移即红）");
+  // （roster 名序钉随 §7 目录树的 server.js 注释行退役——权威同上：toolSurface.js
+  // 与生成层 docs/surface/mcp-tools.md。）
 });
 
 // ── TD-257（2026-10-11 onboarding 面漂移批）：版本面与计数声称守卫 ──
@@ -2121,10 +2117,11 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
   // is the shared service both the CLI and MCP delegate to.
   assert.ok(/runDeliveryReverify\.js[^|\n]*与 MCP 共用/.test(arch),
     "architecture states runDeliveryReverify.js is the single shared reverify service (CLI+MCP)");
-  // Current tool fact on the server.js comment line (exact count is pinned by
-  // the M12-8A guard — here only the full list must include the tool).
-  assert.ok(/run_delivery_reverify/.test(arch),
-    "architecture server.js 工具清单必须包含 run_delivery_reverify");
+  // Current tool fact: the §1 MCP tool table keeps a row for the tool (the
+  // exact tool set is owned by src/mcp/toolSurface.js and the generated surface;
+  // the name also appears elsewhere in architecture, so match the table row).
+  assert.ok(/^\s*\| `run_delivery_reverify` \|/m.test(arch),
+    "architecture §1 MCP 工具表必须有 run_delivery_reverify 一行");
 });
 
 // ============================================================
@@ -2243,21 +2240,10 @@ test("M12-10: architecture records toolSurface.js as the frozen tool-surface SSO
   //   覆盖面含本文件且更宽，此处不再重复查 architecture 一遍。）
 });
 
-test("M12-10: the 22 always-registered tools are listed in architecture", () => {
-  const arch = read("docs/02-architecture.md");
-  // The server.js tool-list comment line must carry the 22-tool truth and must
-  // NOT list the removed playbook tools.
-  const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  // （计数本身由 TD-120 派生守卫钉住——同正则提取 serverLine 后断言
-  //   TOOLS.length；此处不再重复钉 "22 tools" 字面量。TD-168 清扫。）
-  assert.ok(!/playbook_list/.test(serverLine), "architecture tool list omits playbook_list");
-  assert.ok(!/playbook_get/.test(serverLine), "architecture tool list omits playbook_get");
-  // workspace_select / run_dispatch_contract_check / run_wait (formerly hidden
-  // under lead) must remain in the always-registered list.
-  assert.ok(/workspace_select/.test(serverLine), "architecture tool list includes workspace_select");
-  assert.ok(/run_dispatch_contract_check/.test(serverLine), "architecture tool list includes run_dispatch_contract_check");
-  assert.ok(/\brun_wait\b/.test(serverLine), "architecture tool list includes run_wait");
-});
+// （M12-10 "the 22 always-registered tools are listed in architecture" 整测随
+// §7 目录树的 server.js 注释行退役——不含 playbook 工具、含 workspace_select 等
+// 在场断言都锚定那一行。always-registered 工具清单的权威是 src/mcp/toolSurface.js
+// 与生成层 docs/surface/mcp-tools.md（docsSurface-3 钉 headings == TOOLS 同名同序）。）
 
 test("M12-10: SKILL documents response-driven progressive disclosure (availableDrilldowns)", () => {
   const skill = read("SKILL.md");

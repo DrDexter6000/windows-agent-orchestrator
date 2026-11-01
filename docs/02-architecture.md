@@ -53,7 +53,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 - MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
 - Application Services 层是最小 Lead 闭环的 use-case 层。**共享 services**：
-  - `registryInventory.js` — registry inventory SSOT，CLI 与 MCP 共用。
+  - `registryInventory.js` — registry inventory SSOT，CLI 与 MCP 共用；每个 worker 的 `providerReadiness` 只投影静态事实、不做 live check（闭集与语义见 `docs/certification-runbook.md`「认证与当前就绪」）。
   - `runDispatch.js` — background 派发 service，CLI 与 MCP 共用。
   - `runStatus.js` — 只读 run status service。
   - `runCollect.js` — run collection service（非只读）。
@@ -74,7 +74,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   CLI `runs delivery` / `runs diagnose` / `collect` / `status` 均委托共享 service。非 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
 - RunManager / transcript / delivery / Backend 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L2 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向，上向例外白名单为空）由 `test/isolation-infra/layering.test.js` 机器强制。
-- MCP 工具面（当前 inventory；完整 23-tool 冻结清单见下方冻结工具面条目与 §7）：
+- MCP 工具面（当前 inventory；完整 23-tool 冻结清单见下方冻结工具面条目）：
 
   | 工具 | 性质 | 委托与契约要点 |
   | --- | --- | --- |
@@ -851,6 +851,8 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 WAO 不提供 DAG 执行或"预先声明、由控制面推进"的多步计划（决定 0094 退役了原 workflow/DAG 层；读侧仍识别旧 `wf_*` 归档转录）。多步编排由 Lead 用现有原语组合完成：并行研究与核验用 consult（`run_consult`）；实现加验证用带交付规格的派发（`run_dispatch` + 交付验证、会审包、裁定）；续接与纠偏用 `run_continue` / `run_correct`。验收与语义决策始终归 Lead。量大且重复的流水线在宿主侧写脚本调用 WAO 的派发、等待与交付原语实现，不在控制面里再建第二套状态机；"A 跑完自动接 B"的无人值守串联由宿主定时唤醒 Lead 决定（不变量 4）。
 
+**Lead Playbook Catalog（只读、不执行）**：`playbooks/lead/*.json` 是可选的 Lead 决策脚手架（evidence gate、adaptation point，由 Lead 保留/跳过/修改），经 MCP resources `wao://playbooks`/`wao://playbooks/{id}` 与 CLI 只读消费，加载与校验的 SSOT 在 `src/application/playbookCatalog.js`。Catalog 不派发、不执行、不推进 phase、不验收。
+
 ---
 
 ## 6. 横切层
@@ -877,90 +879,22 @@ aggregateSummary(runs, runIds = null)        // 跨 run：{ totalRuns, byState, 
 
 报表读取按 runId 信封绑定收窄（`boundReportScope` 单一定义处）：带信封 transcript 只见本 run 事件；无信封 legacy transcript 保持历史读法；`--summary` 以文件名 stem 为权威 runId。duration = `run.started.ts` 到最后一条绑定事件；tokens/costUsd 取最后一条 `run.metrics`。
 
+### 6.3 diagnosis（只给证据）
+
+`src/diagnosis.js` 的 `diagnoseFailure` 只输出事实证据（`{ category, code, evidence }`），不给处方：retry、换 worker、接管或放弃都由 Lead 定。类别闭集 `DIAGNOSIS_CATEGORIES` 与码闭集 `DIAGNOSIS_CODES` 的权威在该文件（MCP schema 从中派生）；`provider_capacity`（终态的限流与配额耗尽）与 `no_effect`（有活动无产出）是不同类别。Lead 面的码表与读法见 `docs/usage/results.md`「MCP `run_diagnose`：诊断失败原因」。
+
 ---
 
 ## 7. 目录结构与模块边界
 
-> 本节目录树注释只承载**契约**（闭集、委托关系、安全边界），不承载实现史；在册债务见 `docs/tech-debt.md`，架构决策记录见 `.wao/decisions/`。
+模块清单以代码为准（`git ls-files src`）；每个文件的职责写在它的文件头注释、JSDoc 与导出常量里，层级与依赖方向见 §1「L4 依赖方向」。`config/` 见 §8，测试组织见 `docs/testing.md`。
 
-```
-src/
-├── cli.js                    # L4：CLI 入口与路由
-├── registry.js               # L1：registry 加载
-├── transcript.js             # L1：JSONL transcript
-├── runManager.js             # L2：RunManager + 状态机
-├── isolation.js              # L2：worktree（进程隔离=Node 内置 Job Object v22 + taskkill）
-├── delivery.js               # L2：Coder Delivery Contract v1（isolated delivery inspect/package，不 import CLI/RunManager）
-├── metrics.js                # 横切：metrics 聚合
-├── runEvent.js               # L1：RunEvent 类型（message/done/metrics + 证据 command/file_written/tool_use/tool_result）
-├── scorecard.js              # 横切：证据链门控
-├── diagnosis.js              # 横切：故障诊断（给证据不给处方）；类别闭集 = DIAGNOSIS_CATEGORIES（provider_auth/provider_capacity/config_conflict/timeout/budget/scorecard_fail/evidence_passed_backend_failed/provider_disconnect/no_effect/crash/aborted_manual/workdir_escape/delivery_packaging_failed/unknown/none）
-│                              # code 闭集单一通用 SSOT：`DIAGNOSIS_CODES` = `PROVIDER_DIAGNOSIS_CODES` ∪ `PROVIDER_CAPACITY_DIAGNOSIS_CODES` ∪ `NO_EFFECT_DIAGNOSIS_CODES`（三组冻结码不互并，completed_empty 不并入 provider 集）；MCP run_diagnose/run_await_result 与内核真相共用同一 code 闭集，无第二份列表
-│                              # provider_auth 专属：entitlement 拒绝归 provider_auth；码表 = `PROVIDER_DIAGNOSIS_CODES`（5 值），code 永不回显原文
-│                              # provider_capacity：只有 failed 终态的持久 `run.error` 可归 `provider_capacity`（`rate_limited` / `quota_exhausted`），非终态 runtime rate-limit 活动不升级为失败；WAO 不据此自动重试或换 worker
-│                              # provider_disconnect：worker 活跃工作后静默≥120s 且 exit≠0；或本运行最后一条 run.error 是 zcode / kimi-web 的静默收口文案（锚定前缀的门表；kimi-web 的 serve 不应答归 unknown）；或是 deepseek-acp 带控制面前缀的 prompt 失败，错误码 -32603 且报文带 transport failed（到上游的传输断了）。zcode 文案带上游摘要、最后的主轮请求 failed 且状态码 429/401/403 时先归 provider_capacity / provider_auth；auth/config/capacity 先判，no_effect/crash 后判
-│                              # completed-empty 真相：进程 exit 0 是传输完成，不等于 worker 产出了可用结果——completed run 若仅有 transport 活动（runtime init/thinking/zero-usage metrics）而无 assistant 文本/命令活动/文件写入/工具调用，归 no_effect + 内核码 completed_empty（NO_EFFECT_DIAGNOSIS_CODES）
-│                              # 投影规则：经 `isValidDiagnosisCode(category, code)` 配对校验投影——provider_auth 携带 provider 码、provider_capacity 携带 rate_limited/quota_exhausted、no_effect 携带 completed_empty、其余类别恒为 null；failed no_effect 仍 null，正常 completed 仍 none/null；有效 tool-only/command-only/file-written run 仍判 none
-├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
-├── mcp/                      # L4：MCP adapter（agent-facing primary）
-│   ├── server.js             #   MCP server factory + 23 tools（registry_list/workspace_status/workspace_select/lead_preflight/run_dispatch/run_dispatch_contract_check/run_consult/run_continue/run_correct/run_status/run_collect/run_diagnose/run_delivery/run_delivery_decide/run_stop/runs_list/run_wait/run_await_result/run_activity/run_delivery_review/run_delivery_review_bundle/run_delivery_repackage/run_delivery_reverify；playbook catalog 为 wao://playbooks resources 非 tools；roster 名序=toolSurface SSOT）
-│   ├── toolSurface.js        #   冻结工具面 SSOT：23 个 always-registered tools 的 frozen 数组（playbook 目录不在工具面，由 MCP resources 承载）+ 唯一性/计数不变量；server.js 构造期 deepEqual 自检，无 Host/runtime 分支、无 profile
-│   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root；未知 flag 一律忽略不失败，含旧 profile 参数）
-├── application/              # L4：shared application services（use-case 层）
-│   ├── registryInventory.js  #   registry inventory SSOT（CLI + MCP 共用；providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表；独立部分投影 getRegistryInventoryWithIssues + REGISTRY_ISSUE_CODES/REGISTRY_ISSUES_CAP 闭集——registry 可读但单条坏条目时返回有效 worker + 有界安全 issues 而非整表失败，严格路径不变）
-│   ├── runDispatch.js        #   background dispatch service（CLI + MCP 共用；continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
-│   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
-│   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
-│   ├── runContinue.js        #   Lead 授权修正续跑 service（由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；共享读取器 + backend 钩子的完整可续接预检先于 claim/worktree/child transcript/spawn，缺真实 provider 会话证据返回既有 no_provider_session；从不推断 correction/scope/retry/accept
-│   ├── runStatus.js          #   read-only run status service（CLI + MCP 共用）
-│   ├── runCollect.js         #   run collection service（CLI + MCP 共用）
-│   ├── runDiagnosis.js       #   read-only run diagnosis service（CLI + MCP 共用）
-│   ├── runDelivery.js        #   delivery query + decision service（CLI + MCP 共用）
-│   ├── runStop.js            #   runaway worker stop service（CLI + MCP 共用，workspace-bound）
-│   ├── runList.js            #   workspace-bound run list service（查询内复用 ownership proof）
-│   ├── runWorkspaceOwnership.js # run workspace ownership判定（query-scoped proof cache；前台收口：background 权威 = 恰好一条绑定的 `run.background_submitted` 事件 + 其 `cwd` 字段——**不是** payload 的 `background:true` 布尔；foreground = 无 background_submitted 且恰好一条绑定 `run.started` 且 cwd 有效；envelope runId 精确绑定，legacy 无 runId 容错仅在没有任何 ownership 事件携带 runId 时启用；`proveWorkspace` realpath + Windows 平台大小写折叠）
-│   ├── runWait.js            #   long-poll 终态/活性等待 service（MCP 共用，只读）
-│   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（snapshot-only，advisory；readFailureReason 闭集；终态+快照干净时投影有界闭集 outcome——diagnosis+delivery 安全事实，无 commit/path/diff/命令/推荐，复用同一 snapshot、零额外读）
-│   ├── ownerLiveness.js      #   run liveness 投影 SSOT（terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
-│   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（MCP 共用）
-│   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（无状态，委托 proveWorkspace）
-│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略；前任会话读取器优先校验 run.provider_session_bound 绑定事实，坏事实 fail-closed 不回落）（CORE_MEMBERS 例外：归 core 桶）
-│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（组合 registryInventory+listRuns，advisory 非 gate；registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
-│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（CLI 用，委托 hostAdapters）
-│   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（CLI + MCP 共用）
-│   ├── processStopVerify.js  #   bounded process exit verification
-│   ├── runDeliveryReview.js  #   exact delivery proof + bounded/redacted diff review（CLI + MCP 共用）
-│   ├── playbookCatalog.js    #   read-only Lead Playbook Catalog SSOT（loader + MCP/CLI 共用；validatePlaybookSummaryList/validatePlaybookV1）
-│   └── runSemanticsNotes.js  #   pure provider-neutral semanticNotes SSOT（冻结静态目录 + 纯 selector；四 tool 成功结果的 1..4 条 self-describing notes）
-├── hostAdapters/             # L4：host-specific config adapters
-│   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
-├── backends/
-│   ├── serveStopVerify.js    # L1：serve 型停止验证共享模块（abort 后静默轮询核验）
-│   ├── processBackend.js     # L1：进程式 backend 基类
-│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——OAuth 直连 / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入。OAuth 通道凭据双模式：`CLAUDE_CODE_OAUTH_TOKEN` 长期令牌可解析时隔离目录保持空、不拷贝 `~/.claude` 凭据、认证走 env（名字经 envPolicy 继承并进脱敏器）——凭据拷贝与续期令牌单次轮换互斥；令牌缺席回退 spawn 时现拷贝路径）
-│   ├── codex.js              # L1：codex 后端
-│   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
-│   ├── deepSeekAcp.js        # L1：DSH ACP 集成面后端（dsh --profile acp + --patch containment/role-contract；契约见 §2.5b）
-│   └── parsers/
-│       ├── lineStream.js     # stdout 行流解析基类
-│       ├── claudeCode.js     # claude-code stream-json 解析
-│       └── codex.js          # codex 输出解析
-config/
-├── agents.example.json       # registry 模板（每车道一条）
-└── default.json              # 默认设置
-test/
-└── （各模块配 node:test 测试）
-```
+边界规则（现状）：
 
-> **不存在的模块**（勿当作既有文件）：`scheduler.js`（限并发调度器，未实现，见 §4.4；在册 tech-debt：docs/tech-debt.md）。原 `src/workflow/`（DAG 引擎）已随决定 0094 删除。
-
-**Lead Playbook Catalog（只读、不执行）**：`playbooks/lead/*.json` + `application/playbookCatalog.js` + MCP resources `wao://playbooks`/`wao://playbooks/{id}`（只读 resources/CLI）。Catalog 是可选的 Lead 决策脚手架：evidence gate、adaptation point；Lead 保留/跳过/修改条件步骤。它是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），不派发、不执行、不推进 phase、不验收——不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。多步执行能力（DAG 引擎）已随决定 0094 退役，见 §5。
-
-**模块边界规则**：
-- backend 特定逻辑**只在** `src/backends/` 下
-- 状态机逻辑**只在** `runManager.js`
-- 隔离机制**只在** `isolation.js`
-- CLI 只做路由 + 调用 RunManager，不持有业务逻辑
+- 运行时行为差异留在 backend 与 parser 后面（不变量 3），共享编排代码不按 runtime 分支。backend 名以带引号字面量出现在 `src/` 的每个消费点，由 `test/isolation-infra/backendSwitchCensus.test.js` 逐文件逐次数普查（`backends/factory.js` 与 `registry.js` 另走全集检查），新消费点要么登记轴向意图，要么改走 SSOT；`src/diagnosis.js` 按各 runtime 的报错文案分类，不在普查范围内。
+- 状态定义与终态仲裁（`transitionState`，first-terminal-wins）在 `src/transcript.js`；`runManager` 与 `runStop`/`runSettle`/`runDispatch`/`backgroundRunner` 等都经它转状态（§4.1）。
+- 隔离按维度分处（§4.3 的隔离表）：文件维（worktree 与私有克隆）在 `src/isolation.js`；进程维靠 Node 内置 Job Object 加 stop 时的 `taskkill /T /F`（`src/application/runStop.js`），不在 `isolation.js` 里。
+- CLI/MCP adapter 委托共享 application service，业务规则只写一次；非 use-case 的编排仍在 `src/commands/*.js`（§1）。
 
 ---
 
