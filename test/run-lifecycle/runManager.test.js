@@ -17,7 +17,7 @@ import { raiseAlert } from "../../src/alerts.js";
 import { checkScorecard } from "../../src/scorecard.js";
 import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
 
-// 61a：kimi-web agent 的假 bearer（现行唯一 serve 家族后端；绝不发真实请求）。
+// kimi-web agent 的假 bearer（现行唯一 serve 家族后端；绝不发真实请求）。
 before(() => {
   process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
 });
@@ -25,7 +25,7 @@ after(() => {
   delete process.env[KIMI_TEST_TOKEN_ENV];
 });
 
-// kimi-web 假服务器驱动 run（原 opencode-serve mock fetch 的等价物）：提交后
+// kimi-web 假服务器驱动 run：提交后
 // assistantDelay 毫秒 turn 才 completed（0 = 立即）。
 function createMockFetch({ assistantDelay = 0 } = {}) {
   return runServer(KIMI_TEST_SERVE_URL, { delayMs: assistantDelay }).fetchImpl;
@@ -2790,7 +2790,6 @@ test("TD-150-T5: klwc9 形状（marker+empty_diff）走真实 manager.start ⇒ 
     // klwc9 复现三件套：默认 warn 规则 + 流式但零模型工作 + empty_diff 打包失败。
     const workerBackend = {
       supportsRoleContract: true,
-      validateRoleContractTransport: async () => {},
       async spawn() {
         return {
           backend: "process",

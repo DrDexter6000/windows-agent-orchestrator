@@ -20,7 +20,6 @@ import { readRegistry } from "./registry.js";
 import { RunManager } from "./runManager.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
-import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
 import { readTranscript, findFirstBound, STATE_CHANGE_REASON } from "./transcript.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
@@ -41,23 +40,7 @@ function cliAvailable(name) {
   }
 }
 
-/** 探测 opencode serve 端口（扫描 4297-4299）*/
-async function probeOpenCodeServe() {
-  for (const port of [4297, 4298, 4299]) {
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/session`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (resp.ok) return port;
-    } catch {
-      // 端口未开，继续
-    }
-  }
-  return null;
-}
-
 function backendFor(agent) {
-  if (agent.backend === "opencode-serve") return new OpenCodeServeBackend();
   if (agent.backend === "claude-code") return new ClaudeCodeBackend();
   if (agent.backend === "codex") return new CodexBackend();
   if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
@@ -67,13 +50,9 @@ function backendFor(agent) {
 async function smokeOne(backendType, cwd, runDir) {
   const agentId = `smoke_${backendType}`;
   const registryPath = join(runDir, "agents.json");
-  const ocPort = process.env.WAO_OPENCODE_PORT || "4297";
   const registryContent = {
     agents: {
-      [agentId]:
-        backendType === "opencode-serve"
-          ? { backend: "opencode-serve", serveUrl: `http://127.0.0.1:${ocPort}`, agent: "build", cwd, model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" } }
-          : { backend: backendType, cwd },
+      [agentId]: { backend: backendType, cwd },
     },
   };
   await writeFile(registryPath, JSON.stringify(registryContent, null, 2));
@@ -148,21 +127,9 @@ async function main() {
   const candidates = [];
   if (cliAvailable("claude")) candidates.push("claude-code");
   if (cliAvailable("codex")) candidates.push("codex");
-  // opencode 需要起 serve，默认不 smoke，除非显式要求
-  if (requested.includes("opencode") || requested.includes("glm")) {
-    const ocPort = await probeOpenCodeServe();
-    if (ocPort) {
-      console.log(`探测到 opencode serve: 127.0.0.1:${ocPort}`);
-      candidates.push("opencode-serve");
-      process.env.WAO_OPENCODE_PORT = String(ocPort);
-    } else {
-      console.log("⚠️  未探测到 opencode serve（扫描 4297-4299），跳过 opencode smoke");
-    }
-  }
 
-  let filtered = requested.filter((r) => !["opencode", "glm"].includes(r));
-  const targets = filtered.length > 0
-    ? filtered.map((r) => (r === "claude" ? "claude-code" : r === "codex" ? "codex" : r)).filter((c) => candidates.includes(c))
+  const targets = requested.length > 0
+    ? requested.map((r) => (r === "claude" ? "claude-code" : r === "codex" ? "codex" : r)).filter((c) => candidates.includes(c))
     : candidates;
 
   if (targets.length === 0) {

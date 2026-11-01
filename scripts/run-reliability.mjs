@@ -19,9 +19,8 @@
 // 消耗真实 API token。不进 npm test。用 `npm run reliability` 手动触发。
 //
 // 用法：
-//   npm run reliability                      # 全矩阵（需 serve 带 key 运行）
+//   npm run reliability                      # 全矩阵
 //   npm run reliability -- --agent coder     # 只跑指定 agent（增量合并，不覆盖其他 worker）
-//   npm run reliability -- --serve-url http://127.0.0.1:4298
 //   npm run reliability -- --profile strict  # 额外跑 command/file scorecard drill
 //   npm run reliability -- --profile delta   # delta 子集（sentinel+scorecard+containmentEvidence，决定 0084；声明 OS 写沙箱的后端以 sandboxEnforcement 取代 containmentEvidence，决定 0086）
 //   npm run reliability -- --wait-timeout 300000  # 覆盖单 worker 超时（默认 300000）
@@ -93,7 +92,6 @@ if (_argResult.error) {
   process.exit(2);
 }
 const getArg = (name) => _argResult.values[name];
-const SERVE_URL = getArg("serve-url") || "http://127.0.0.1:4298";
 const REGISTRY = getArg("registry") || resolve(ROOT, "config/agents.json");
 const ONLY_AGENT = getArg("agent");
 // 默认 300000（5min/worker）：strict profile 含 scorecard+isolation 等多 drill，
@@ -112,7 +110,6 @@ const {
   runIsolationDrill,
   runContainmentEvidenceDrill,
   runSandboxEnforcementDrill,
-  runStopDrill,
 } = createDrills({
   nodeBin: NODE_BIN,
   root: ROOT,
@@ -129,7 +126,7 @@ const SENTINEL_A = `ALPHA_${Date.now().toString(36).toUpperCase()}`;
 const SENTINEL_B = `OMEGA_${Date.now().toString(36).toUpperCase()}`;
 
 // --- 测试矩阵定义 ---
-// 每个 case：agent + completionMode + 期望行为
+// 每个 case：agent + 期望行为
 // 读 config/agents.json 确定哪些 agent 可用
 function loadRegistry() {
   // TD-318（二）：解析失败固定文案 + 行列号，不带 registry 原文。
@@ -203,7 +200,6 @@ function agentInfo(agentId) {
     // （registry.agents[agentId].reasoning.effort；null = 未配置，runtime 默认），
     // 不从矩阵行/别处复制。旧记录不补猜（由 summarize 层留 undefined）。
     effort: agent.reasoning?.effort ?? null,
-    completionMode: agent.completionMode ?? "snapshot-stable",
   };
 }
 
@@ -317,7 +313,7 @@ function unsupportedDrillChecks(tc, handledDrills) {
 
 // --- 执行矩阵 ---
 console.log("=== WAO Reliability Suite ===");
-console.log(`serve: ${SERVE_URL}, registry: ${REGISTRY}`);
+console.log(`registry: ${REGISTRY}`);
 console.log(`profile: ${PROFILE_OVERRIDE ?? "from matrix/default"}`);
 console.log(`sentinels: A=${SENTINEL_A}, B=${SENTINEL_B}`);
 console.log("");
@@ -364,7 +360,6 @@ for (const tc of MATRIX) {
       capturedAt: new Date().toISOString(),
       drillRunIds: {},
     },
-    completionMode: tc.completionMode ?? info.completionMode,
     requiredCategories: tc.requiredCategories,
     profile: tc.profile,
     drills: tc.drills,
@@ -490,12 +485,6 @@ for (const tc of MATRIX) {
       : drill.checks));
   }
 
-  if (tc.drills.includes("stop")) {
-    handledDrills.add("stop");
-    console.log(`    [DRILL] stop/abort audit...`);
-    checks.push(...runStopDrill(tc));
-  }
-
   checks.push(...unsupportedDrillChecks(tc, handledDrills));
 
   // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
@@ -542,88 +531,6 @@ for (const tc of MATRIX) {
   if (caseResult.scorecardError) console.log(`    scorecard error: ${caseResult.scorecardError}`);
   console.log("");
 }
-
-// silentTimeout 验证（用 bad-provider 配置）。
-// 注：此探针依赖 opencode-serve（已降级为 fallback，决策 0005）。主力 lane 全是进程式 backend，
-// silent-timeout 机制已在进程式 backend 实现（TD-43，2026-06-25）；此探针对 opencode-serve（fallback lane）仍有效。
-// ADR-0032 §8（2026-09-21 修复）：serve 不可达时不再写"通过"（旧坏模式：silentPass=true
-// 顶绿）——检查如实记 not-applicable + 原因（fallback lane down）；不置绿、不算失败，
-// allPass/退出码只受真失败影响。
-console.log(`${ONLY_AGENT ? "[ambient] " : ""}[RUN] silentTimeout early-fail test...${ONLY_AGENT ? " (fallback-lane 探针，与目标 lane 无关)" : ""}`);
-let serveReachable = false;
-try {
-  const probeRes = await fetch(`${SERVE_URL}/`, { method: "GET", signal: AbortSignal.timeout(3000) });
-  serveReachable = probeRes.ok || probeRes.status < 500;
-} catch {
-  serveReachable = false;
-}
-
-let silentState = "fail";
-let silentElapsed = 0;
-let silentResult = null;
-let silentCheck;
-if (!serveReachable) {
-  console.log(`  ${ONLY_AGENT ? "[ambient] " : ""}[N/A] silentTimeout: opencode-serve not reachable at ${SERVE_URL} (fallback lane down; process-based silent-timeout covered by TD-43 unit tests)`);
-  silentState = "not-applicable";
-  silentCheck = naCheck(
-    "silentTimeout",
-    `opencode-serve not reachable at ${SERVE_URL} — the fallback-lane silent-timeout probe has no surface in this run (process-based silent-timeout is covered by TD-43 unit tests); recorded not-applicable, never as a pass (ADR-0032 §8)`,
-    "operational",
-    { capability: "silentTimeout" },
-  );
-} else {
-  const badConfig = {
-    agents: {
-      _silent_test: {
-        backend: "opencode-serve", serveUrl: SERVE_URL, agent: "build",
-        cwd: TMP_DIR, completionMode: "first-stable",
-        model: { providerID: "zhipuai-coding-plan", id: "nonexistent-model-test" },
-      },
-    },
-  };
-  const badConfigPath = join(TMP_DIR, "bad-agents.json");
-  writeFileSync(badConfigPath, JSON.stringify(badConfig));
-  const silentStart = Date.now();
-  const { stdout: silentOut } = runCli([
-    "run", "_silent_test", "--prompt", "test",
-    "--wait-timeout", "60000", "--poll-interval", "2000",
-    "--silent-timeout", "12000",
-    "--registry", badConfigPath, "--format", "json",
-  ]);
-  silentElapsed = Date.now() - silentStart;
-  silentResult = extractJson(silentOut || "");
-  const silentPass = silentResult?.failed === true &&
-               /silent timeout/i.test(silentResult?.error ?? "") &&
-               silentElapsed < 25000;
-  silentState = silentPass ? "pass" : "fail";
-  silentCheck = check("silentTimeout", silentPass, "operational", `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`, { capability: "silentTimeout" });
-  console.log(`  ${ONLY_AGENT ? "[ambient] " : ""}[${silentPass ? "PASS" : "FAIL"}] silentTimeout: failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`);
-}
-// 决定 0042（Owner 2026-10-02）：--agent 模式退出码只归目标 lane——ambient
-// 段（fallback-lane 探针）真失败不翻 allPass/退出码，只在 [ambient] 行如实可见；
-// 全量模式语义不变（ambient 失败仍算整次失败）。
-if (silentState === "fail" && !ONLY_AGENT) allPass = false;
-// suite case 的全绿基准：N/A 不置绿（pass=false → lastHealthyRunAt=null），但也不算失败。
-const silentCasePass = silentState === "pass";
-results.push({
-  caseId: "silentTimeout",
-  requiredCategories: ["operational"],
-  recommendedUse: "suite-operational-check",
-  checks: [silentCheck],
-  certification: certifyCase({
-    caseId: "silentTimeout",
-    requiredCategories: ["operational"],
-    recommendedUse: "suite-operational-check",
-    checks: [silentCheck],
-    error: silentResult?.error,
-  }),
-  pass: silentCasePass,
-  // TD-111: suite-level case 同样记录全绿时间（无 agentId，不进 worker 聚合，仅保 case 级一致）。
-  lastHealthyRunAt: silentCasePass ? new Date().toISOString() : null,
-  failed: silentResult?.failed,
-  elapsedMs: silentElapsed,
-  error: serveReachable ? silentResult?.error : `not-applicable (opencode-serve not reachable at ${SERVE_URL})`,
-});
 
 // 清理（Windows 下可能有文件锁，try/catch 不阻断结果输出）。
 // 0045 窗口门 4 修复（2026-10-06）：删除后必须**重建空目录**——Kimi serve 的

@@ -28,7 +28,6 @@
 // claude-code derives its names per-agent from provider/legacy args, plus the
 // native-OAuth long-term token name (TD-229, added channel-conditionally inside
 // inheritedEnvNames — not a static list), so it has no static list here (null).
-// opencode-serve is HTTP-backed (no process creds).
 /**
  * kimiHome 的形状（决定 0074 会审）：绝对路径（盘符或根起头），首尾不带空白——带
  * 空白的路径会被原样拿去拼 token 文件位置。registry 与 backend 的校验共用这一个判据。
@@ -77,7 +76,6 @@ const INHERITED_ENV_NAMES = {
   // 内置 provider 配置（~/.zcode/v2/runtime/provider/windows-x86_64/…）；缺失时
   // CLI 回落到两条不存在的路径，`app-server` 启动即退（2026-10-01 bisect 实证）。
   "zcode": ["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"],
-  "opencode-serve": [],
 };
 
 /**

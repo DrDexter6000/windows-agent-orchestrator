@@ -10,12 +10,11 @@
 - 在临时目录生成一次性 registry（cwd=当前目录），prompt 固定为 `Reply with exactly: smoke ok`。
 - 每个 backend 跑一次 run，等完成后读 transcript，验证状态链含 running 与 completed、终态为 completed，并打印 assistant 回复。
 - 只跑其中一个：`npm run smoke -- codex`（或 `claude`）。
-- opencode-serve 默认不跑。传 `opencode` 或 `glm` 才探测：对 `127.0.0.1:4297-4299` 逐个 GET `/api/session`，探测到就加入本次 smoke，否则警告并跳过。serve 要先自己起：`opencode serve --hostname 127.0.0.1 --port 4297`。模板已不含 opencode 车道，这条只回归通道本身。
 - 传 `scorecard` 只跑 scorecard 专项（见下），不跑普通 smoke。
 - `--isolate` 让 run 在隔离 git worktree 里执行，报告会打印 worktree 路径。
 - transcript 写在 `os.tmpdir()` 下的 `wao-smoke-*` 临时目录（按项目分桶），结束时打印路径并保留。
 
-脚本只覆盖 claude-code、codex、opencode-serve（显式）。其余后端（zcode、kimi-web、deepseek-acp 等）的里程碑证据，按 `docs/milestone-discipline.md` §4 第 4 条取自该车道的 reliability；手动 smoke 只用于排查。
+脚本只覆盖 claude-code、codex。其余后端（zcode、kimi-web、deepseek-acp 等）的里程碑证据，按 `docs/milestone-discipline.md` §4 第 4 条取自该车道的 reliability；手动 smoke 只用于排查。
 
 ### scorecard 专项
 

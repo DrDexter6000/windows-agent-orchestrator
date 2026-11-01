@@ -779,7 +779,7 @@ test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工
   assert.deepEqual(
     events.map((e) => e.kind),
     ["command", "tool_result", "tool_use", "tool_result", "command", "tool_result", "message", "message", "metrics", "done"],
-    "逐 part 双事件形状（投影在前、终态结果在后）与 opencode/kimi-web 一致",
+    "逐 part 双事件形状（投影在前、终态结果在后）与 kimi-web 一致",
   );
   // Bash → commandEvent：tool part state schema 无退出码字段（nor 闭集核证），
   // exitCode 恒省略绝不虚构；toolCallId 关联 tool_result。
@@ -798,7 +798,7 @@ test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工
 
 test("zcode ④e: 非终态 status（pending|running）只投影主事件不追加 tool_result；write 帧缺 file_path 不虚构 file_written", async () => {
   // 腿 1：pending/running（nor 闭集前两臂）= 工具已发起未收口——command 在场、
-  // tool_result 缺席（闭集内非终态绝不猜成终态，镜像 opencodeServe terminal 门）。
+  // tool_result 缺席（闭集内非终态绝不猜成终态，terminal-status 门）。
   const pending = toolPart({ callId: "call_pending", tool: "Bash", status: "pending", input: { command: "node slow.mjs" }, raw: "queued" });
   const running = toolPart({ callId: "call_running", tool: "Bash", status: "running", input: { command: "node slower.mjs" } });
   const leg1 = await runScenario({
@@ -821,7 +821,7 @@ test("zcode ④e: 非终态 status（pending|running）只投影主事件不追�
   leg1.child.kill();
 
   // 腿 2：Write 帧 input 缺 file_path → 零 file_written（不虚构）；终态
-  // tool_result 仍按 state 投影（与 opencodeServe 逐 part 双事件形状一致）。
+  // tool_result 仍按 state 投影（逐 part 双事件形状）。
   const noPath = toolPart({
     callId: "call_nopath",
     tool: "Write",

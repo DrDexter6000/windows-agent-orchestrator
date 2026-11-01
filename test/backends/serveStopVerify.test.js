@@ -1,9 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-// verifyStopQuiet 还没实现，先 import 应失败（红）。
-// 实现后改回正常 import。
-import { verifyStopQuiet, executeStopWithVerification } from "../../src/backends/opencodeStopVerify.js";
+import { verifyStopQuiet, executeStopWithVerification } from "../../src/backends/serveStopVerify.js";
 
 /**
  * mock backend：session() 和 messages() 返回值可控。
@@ -140,7 +138,7 @@ function mockBackendWithAbort({ sessionTokensSeq, messagesSeq, abortShouldFail =
       if (abortShouldFail) throw new Error("abort failed");
     },
     abortCalls: () => abortCalls,
-    // taskkill 兜底钩子（生产里调 taskkill /IM opencode.exe，测试里计数）
+    // taskkill 兜底钩子（生产里是调用方的树杀实现，测试里计数）
     taskkillCalls: () => taskkillCalls,
     _recordTaskkill: () => { taskkillCalls += 1; },
   };
@@ -178,4 +176,68 @@ test("S1-2: executeStopWithVerification — quiet=false → unverified + taskkil
   assert.equal(result.verified, false, "后台仍在烧 → stop unverified");
   assert.equal(result.taskkillCalled, true, "quiet=false 必须强制 taskkill 兜底");
   assert.ok(result.verifyResult?.delta, "应带 verify 详情");
+});
+
+function stopBackend({ status = null, unavailable = false } = {}) {
+  let abortCalls = 0;
+  return {
+    get abortCalls() {
+      return abortCalls;
+    },
+    async abort() {
+      abortCalls += 1;
+    },
+    async sessionStatus() {
+      if (unavailable) throw new Error("status unavailable");
+      return status;
+    },
+    async session() {
+      if (unavailable) throw new Error("session unavailable");
+      return { tokens: { input: 10, output: 2, reasoning: 0 } };
+    },
+    async messages() {
+      if (unavailable) throw new Error("messages unavailable");
+      return { data: [{ info: { role: "assistant" }, parts: [] }] };
+    },
+  };
+}
+
+test("S1-2: 观测不可用 → 绝不记为已核实静止，也不 taskkill", async () => {
+  const backend = stopBackend({ unavailable: true });
+  let taskkillCalls = 0;
+  const result = await executeStopWithVerification(backend, "http://x", "ses_unknown", {
+    rounds: 2,
+    intervalMs: 1,
+    taskkill: async () => {
+      taskkillCalls += 1;
+    },
+  });
+
+  assert.equal(result.abortCalled, true);
+  assert.equal(result.verified, false);
+  assert.equal(result.verifyResult?.quiet, null);
+  assert.equal(result.verifyResult?.observation, "unavailable");
+  assert.equal(taskkillCalls, 0, "unknown observation must not kill unrelated sessions on a shared serve");
+});
+
+test("S1-2: 未知会话状态 → 不可观察，不是已核实静止", async () => {
+  const backend = stopBackend({ status: { type: "future-state" } });
+  const result = await verifyStopQuiet(backend, "http://x", "ses_future", {
+    rounds: 2,
+    intervalMs: 1,
+  });
+
+  assert.equal(result.quiet, null);
+  assert.equal(result.observation, "unavailable");
+});
+
+test("S1-2: 会话状态 busy 压过稳定的计数", async () => {
+  const backend = stopBackend({ status: { type: "busy" } });
+  const result = await verifyStopQuiet(backend, "http://x", "ses_busy", {
+    rounds: 2,
+    intervalMs: 1,
+  });
+
+  assert.equal(result.quiet, false);
+  assert.equal(result.metric, "session_status");
 });

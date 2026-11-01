@@ -140,8 +140,8 @@ test("T1a 身份：summary 记录 backend ≠ registry 配置 → 拒绝（固�
       gate_w: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
     });
     const runDir = makeSummary(join(dir, "runs"), {
-      // 认证时是 opencode-serve；registry 已改成 claude-code，未重跑 reliability。
-      gate_w: { agentId: "gate_w", backend: "opencode-serve", modelId: "glm-5.2", status: "certified", lastHealthyRunAt: NOW_ISO() },
+      // 认证时是 codex；registry 已改成 claude-code，未重跑 reliability。
+      gate_w: { agentId: "gate_w", backend: "codex", modelId: "glm-5.2", status: "certified", lastHealthyRunAt: NOW_ISO() },
     });
     const manager = makeGateManager({ registryPath, runDir });
     await assert.rejects(
@@ -150,7 +150,7 @@ test("T1a 身份：summary 记录 backend ≠ registry 配置 → 拒绝（固�
         assert.match(err.message, /Refused dispatch/, "认证门拒绝");
         assert.match(err.message, /认证身份不匹配/, "reason 是新的固定文案");
         // fixed-safe：不回显 summary/registry 的身份值（磁盘数据可能被改）
-        assert.ok(!err.message.includes("opencode-serve"), "不得回显记录的 backend 值");
+        assert.ok(!err.message.includes("codex"), "不得回显记录的 backend 值");
         assert.ok(!err.message.includes("claude-code"), "不得回显 registry 的 backend 值");
         return true;
       },
@@ -295,7 +295,7 @@ test("T3b 旁路：manualOverride=cleared + 身份不匹配 + 无新鲜度 → �
     });
     const runDir = makeSummary(join(dir, "runs"), {
       // 最恶劣组合：身份不匹配 + lastHealthyRunAt 缺失，但 owner 手动背书。
-      cleared_w: { agentId: "cleared_w", backend: "opencode-serve", modelId: "other-model", status: "rejected", manualOverride: "cleared" },
+      cleared_w: { agentId: "cleared_w", backend: "codex", modelId: "other-model", status: "rejected", manualOverride: "cleared" },
     });
     const manager = makeGateManager({ registryPath, runDir });
     const run = await manager.start("cleared_w", { prompt: "x", requireCertified: true });

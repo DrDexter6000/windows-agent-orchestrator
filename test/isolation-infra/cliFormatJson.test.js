@@ -16,7 +16,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +24,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * spawn 级跑 repo 的 src/cli.js（guard 豁免注入），返回 {status, stdout, stderr}。
- * 用异步 spawn（不是 spawnSync）：spawnSync 会阻塞本进程事件循环，本文件
- * registry check 测试的回环 HTTP server 就无法应答子进程（实测 ok 路径被饿到 5s abort）。
+ * 用异步 spawn（不是 spawnSync）：spawnSync 会阻塞本进程事件循环。
  */
 async function runCli(args, { timeout = 60_000 } = {}) {
   return new Promise((resolveRun, rejectRun) => {
@@ -66,7 +64,7 @@ function writeRunTranscript(dir, runId, events) {
 }
 
 // =====================================================================
-// TD-86 A1-1/A1-2: registry validate / registry check
+// TD-86 A1-1: registry validate
 // =====================================================================
 
 test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维持 invalid → exit 1 契约", async () => {
@@ -244,52 +242,6 @@ test("D1-D3 守卫: registry validate text——角色合同失败的 agent 恰�
     assert.match(crossLines[0], /^✖ bad_role\t角色合同无效: /,
       "✖ 行形状：✖ <id>\\t角色合同无效: <原因>");
   } finally {
-    cleanupDir(dir);
-  }
-});
-
-test("TD-86: registry check --format json 输出 {allOk,agents:[{id,status}]}（ok/fail/skip，不依赖真实网络）", async () => {
-  const dir = makeTempDir("wao-fmt-check-");
-  // 只监听 127.0.0.1 的回环 HTTP 服务（"ok" 分支），不触真实网络。
-  const server = createServer((req, res) => { res.writeHead(200); res.end("{}"); });
-  try {
-    await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-    const port = server.address().port;
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        ok_worker: {
-          backend: "opencode-serve",
-          serveUrl: `http://127.0.0.1:${port}`,
-          agent: "build",
-          cwd: dir,
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-        },
-        down_worker: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:1", // 回环不可达端口 → 连接拒绝（快，≤5s timeout）
-          agent: "build",
-          cwd: dir,
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-        },
-        proc_worker: { backend: "claude-code", cwd: dir, model: { id: "x" } }, // 非 opencode → SKIP 分支
-      },
-    }), "utf8");
-
-    const r = await runCli(["registry", "check", "--registry", registryPath, "--format", "json"]);
-    assert.equal(r.status, 1, "含 fail 条目 → exit 1（既有契约）");
-    const parsed = JSON.parse(r.stdout);
-    assert.equal(parsed.allOk, false, "down_worker FAIL → allOk:false");
-
-    const byId = Object.fromEntries(parsed.agents.map((a) => [a.id, a]));
-    assert.equal(byId.ok_worker.status, "ok", "回环 200 → status:ok");
-    assert.equal(byId.ok_worker.serveUrl, `http://127.0.0.1:${port}`, "ok 条目带 serveUrl");
-    assert.equal(byId.down_worker.status, "fail", "连接拒绝 → status:fail");
-    assert.ok(typeof byId.down_worker.error === "string" && byId.down_worker.error.length > 0,
-      "fail 条目带 error");
-    assert.equal(byId.proc_worker.status, "skip", "进程式 backend → SKIP 分支");
-  } finally {
-    await new Promise((resolveClose) => server.close(resolveClose));
     cleanupDir(dir);
   }
 });

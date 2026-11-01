@@ -35,9 +35,8 @@
 //                 file_written 是其计数内核 ACTIVITY_KIND_MAP 的确定子集）
 //   - 证停：      transcript 的 run.stop_verified / run.stop_unverified 事实
 //                 （src/runManager.js _verifyStopQuietIfCapable 写入面）
-//   - backend 家族：src/registry.js KNOWN_BACKENDS——除 opencode-serve（唯一
-//                 sessionOutlivesProcess=true，src/backends/opencodeServe.js）外均为
-//                 本地进程式 backend，进程退出即无会话残留
+//   - 会话是否活过进程：backend 实例的 sessionOutlivesProcess 属性
+//                 （src/backends/factory.js 构造，零副作用；不按 runtime 名分支）
 //
 // 出处：TD-158（auditor 修正版方案，双席一致）；派发形状依据 TD-148。
 // 运行：node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs ...（Node v22 经 shim）。
@@ -53,7 +52,8 @@ import { boundReportScope } from "../src/metrics.js";
 import { diagnoseFailure, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { assessRunEvidence } from "../src/runEvidenceAssessment.js";
 import { summarizeLiveness } from "../src/application/runWait.js";
-import { readRegistry, KNOWN_BACKENDS } from "../src/registry.js";
+import { readRegistry } from "../src/registry.js";
+import { backendFor } from "../src/backends/factory.js";
 import { checkNodeVersion } from "../src/nodeVersionGuard.js";
 
 // ===== 常量（导出：测试钉默认值） =====
@@ -87,14 +87,12 @@ export const LIVENESS_SIGNAL_KINDS = Object.freeze([
 ]);
 
 /**
- * 本地进程式 backend 闭集（由 KNOWN_BACKENDS SSOT 派生，不手抄）：除
- * opencode-serve（唯一 sessionOutlivesProcess=true 的 HTTP serve backend）外，
- * claude-code / codex / kimi-code / deepseek-harness 的 worker 生命周期 = 进程
- * 生命周期，进程退出即无会话残留（docs/usage/dispatch.md 同款口径）。
+ * 条件③（进程死 ⇒ 无会话残留）的后端事实：该 agent 的 backend 会话是否随 worker
+ * 进程结束。按 backend 实例的 sessionOutlivesProcess 属性判定，不按名单。
  */
-export const PROCESS_BACKEND_IDS = Object.freeze(
-  KNOWN_BACKENDS.filter((b) => b !== "opencode-serve"),
-);
+export function sessionEndsWithProcess(agent) {
+  return backendFor(agent).sessionOutlivesProcess !== true;
+}
 
 /**
  * 透传保留 flag（出现即拒绝）：--prompt/--prompt-file/--background/--format 由
@@ -520,8 +518,7 @@ function collectRunSummary(events, runId, backendNoSession, stopRereadOk = false
 async function resolveBackendNoSession(registryPath, agentId) {
   try {
     const registry = await readRegistry(registryPath);
-    const agent = registry.getAgent(agentId);
-    return PROCESS_BACKEND_IDS.includes(agent?.backend);
+    return sessionEndsWithProcess(registry.getAgent(agentId));
   } catch {
     return false;
   }

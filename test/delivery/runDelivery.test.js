@@ -16,7 +16,7 @@ import {
   KIMI_TEST_TOKEN_VALUE,
 } from "../fixtures/kimiWebServe.js";
 
-// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+// kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
 process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
 process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
 import { readTranscript, findState, JsonlTranscript } from "../../src/transcript.js";
@@ -61,7 +61,7 @@ async function cleanupDir(dir) {
 
 /** Mock fetch that simulates assistant response + file_written evidence. */
 function createMockFetch({ replies = ["Mock response"] } = {}) {
-  // kimi-web 假服务器（61a：现行唯一 serve 家族后端）——逐次回复队列，耗尽回 "done"。
+  // kimi-web 假服务器（现行唯一 serve 家族后端）——逐次回复队列，耗尽回 "done"。
   return runServer(KIMI_TEST_SERVE_URL, { replies: [...replies] }).fetchImpl;
 }
 
@@ -3232,8 +3232,7 @@ test("3B2-18: transcript append failure in verification propagates through waitF
  * 3B2-20: resume of a serve-backed run respects the injected verifier function.
  * The Run created on resume must carry verifyDeliveryFn from RunManager,
  * not fall back to the default. kimi-web declares replayByRespawn, so this
- * exercises the replay branch; the attach branch only served opencode-serve
- * and goes with it in 61b.
+ * exercises the replay branch (WAO resumes by replay only).
  */
 test("3B2-20: serve-backed resume respects injected verifier (CTO closeout C)", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-20-");

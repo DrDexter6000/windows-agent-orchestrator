@@ -165,7 +165,6 @@ const CLI_INSTALL_HINT = {
   claude: "npm install -g @anthropic-ai/claude-code",
   codex: "npm install -g @openai/codex",
   kimi: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
-  opencode: "npm install -g opencode-ai",
   dsh: "安装 dsh CLI（deepseek-acp 线驱动上游 dsh --profile acp；见 docs/certification-runbook.md §DSH 通道）",
 };
 
@@ -630,7 +629,7 @@ export async function waoDoctorCommand(args, config) {
     pushCheck(checks, { name: "wao_mcp_cert_gate_visibility", pass: true, level: "info", detail });
   }
 
-  // 6. registry 完整性：opencode worker 必须配 tokenBudget；OAuth + provider worker 组合 WARN。
+  // 6. registry 完整性：OAuth + provider worker 组合 WARN。
   if (registryOk) {
     const agents = validRegistryEntries;
     for (const { id, backend } of unmappableBackends) {
@@ -654,30 +653,20 @@ export async function waoDoctorCommand(args, config) {
         fix: "对使用官方 OAuth 的用户是预期行为，provider worker 走 wrapper 隔离，无需处理",
       });
     }
-    for (const [id, agent] of agents) {
-      if (agent.backend === "opencode-serve" && !agent.tokenBudget) {
-        pushCheck(checks, {
-          name: `budget_${id}`,
-          pass: false,
-          detail: `opencode worker ${id} 未配 tokenBudget（06-18 事故风险，必须配）；run: 在 config/agents.json 给 ${id} 补 tokenBudget 数字字段`,
-          fix: `在 config/agents.json 给 ${id} 补 tokenBudget 数字字段`,
-        });
-      }
-    }
     // R8-2 + R8-C（C-7/C-8/C-10）：registry cwd 检查（advisory，非门禁）。逐个已
     // 配置 worker：判定复用 runManager SSOT 探针（path.resolve 后 statSync 目录
     // 判定，语义与派发期 assertExistingDispatchCwd 完全一致——含"存在但是文件"
     // 同判不存在）。能力收窄与 R7 两层派发门对称：只查会以该 cwd 本地 spawn 的
     // backend（经共享工厂解析后声明 preflightInvocation 能力）；HTTP serve
-    // backend（opencode-serve 形状，cwd 是远端目录提示）豁免——对它 WARN 会是
+    // backend（cwd 是远端目录提示）豁免——对它 WARN 会是
     // 与派发语义相悖的假预警（CE-13/RCE-6 钉死的不拒面上 doctor 不得更严）。
     // "." 经 path.resolve 解析为**发起派发的进程的 cwd**（SSOT 见 runManager.js
     // resolvePredictedDispatchCwd：CLI 通道=你敲命令时所在目录；MCP 通道=MCP
     // 服务进程的 cwd，由 host 决定），任何进程 cwd 都存在 ⇒ 不进 WARN 面；R8-C
     // C-8 起对 cwd === "." 的 worker 出一条 INFO（不计 DEGRADED，R5-B advisory
     // 语义）：R8-1 去占位化把"忘传 --cwd"从 typed 早拒绝换成静默落在派发进程
-    // cwd，doctor 对这个静默面给显式信号。除此之外健康面不产生条目（budget_*
-    // 同款惯例：只在有信号时出现，避免 N 条 OK 噪音）。
+    // cwd，doctor 对这个静默面给显式信号。除此之外健康面不产生条目（同款
+    // 惯例：只在有信号时出现，避免 N 条 OK 噪音）。
     for (const [id, agent] of agents) {
       let localSpawnBackend = false;
       try {
@@ -802,10 +791,6 @@ export async function waoDoctorCommand(args, config) {
       }
       if (panel.loginUnverified.length > 0) {
         detail += `；登录态未验证（不计入可用）：${panel.loginUnverified.join("、")}`;
-      }
-      // C-5：serve 注入型不是登录态型认证——单独归类措辞，不进"登录态未验证"。
-      if (panel.injectedAuth.length > 0) {
-        detail += `；注入式认证（serve 探测不覆盖，不计入可用）：${panel.injectedAuth.join("、")}`;
       }
       // C-12：探测未知如实展示（docblock 承诺兑现）。
       if (panel.probeUnknown.length > 0) {

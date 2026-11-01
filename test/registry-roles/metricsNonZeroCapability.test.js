@@ -183,7 +183,7 @@ test("TD87-CERT-T3: 源级钉——metricsCheck.mjs 的判定源是 backendCapab
   const kernel = readFileSync(new URL("../../scripts/reliability/metricsCheck.mjs", import.meta.url), "utf8");
   assert.match(kernel, /import\s*\{\s*backendCapabilitySnapshot\s*\}\s*from\s*"\.\.\/\.\.\/src\/backends\/factory\.js"/,
     "kernel 必须消费 ADR-0025 批次 2 SSOT（src/backends/factory.js）");
-  assert.ok(!/"(?:kimi-code|claude-code|codex|deepseek-harness|opencode-serve)"/.test(kernel),
+  assert.ok(!/"(?:kimi-code|claude-code|codex|deepseek-harness)"/.test(kernel),
     "kernel 代码不得含 backend 名字字面量分支（声明是唯一判定源；注释提及形状不算分支）");
   assert.ok(!/\bproviderID\b/.test(kernel), "kernel 不得读 providerID（名字分支复活即红）");
 });
@@ -195,7 +195,7 @@ test("TD87-CERT-T3: 五 backend 真实矩阵不漂移仍由 ADR25-B2-MATRIX 承�
   // 提示本文件的 kimi/claude 形状前提失去真实矩阵锚）。
   const matrixTest = readFileSync(new URL("./backendCapabilityValidate.test.js", import.meta.url), "utf8");
   assert.match(matrixTest, /ADR25-B2-MATRIX/, "ADR25-B2-MATRIX 矩阵断言必须存在");
-  for (const backend of ["claude-code", "codex", "kimi-code", "deepseek-harness", "opencode-serve"]) {
+  for (const backend of ["claude-code", "codex", "kimi-code", "deepseek-harness"]) {
     assert.ok(matrixTest.includes(`"${backend}"`), `MATRIX 断言必须覆盖 ${backend}`);
   }
 });

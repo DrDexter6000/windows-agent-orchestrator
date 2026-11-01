@@ -16,7 +16,7 @@ WAO 是"装一次，开发多个项目"的工具：
 2. Worker 通过最终 assistant response 交付结果；控制面 / Lead 负责记录和传递
 3. Lead 负责编排+验收，worker 只做 bounded 任务
 4. Chief-Advisor / Auditor 是 Lead Agent 的平级合作伙伴；canonical `agentId` 保持 `auditor`，同一专家按需承担前置建议与后置审计
-5. 默认进程式 backend（安全），opencode 仅在需要 token 闸门精确控成本时用
+5. 默认进程式 backend（进程死即会话死，停止可核实）；serve 型车道（kimi-web）按其认证与停止验证证据使用
 
 ## Lane：角色多通道（决策 0025）
 

@@ -13,11 +13,10 @@ test("reads agent registry and applies cwd override", async () => {
     JSON.stringify({
       agents: {
         glm_worker: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
+          backend: "deepseek-acp",
+          credentialEnv: "DSH_API_KEY",
           cwd: "D:/projects/app-worktree",
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.1" },
+          model: { providerID: "deepseek", id: "glm-5.1" },
         },
       },
     }),
@@ -27,9 +26,9 @@ test("reads agent registry and applies cwd override", async () => {
   const agent = registry.getAgent("glm_worker", { cwd: "D:/projects/override" });
 
   assert.equal(agent.id, "glm_worker");
-  assert.equal(agent.backend, "opencode-serve");
+  assert.equal(agent.backend, "deepseek-acp");
   assert.equal(agent.cwd, "D:/projects/override");
-  assert.deepEqual(agent.model, { providerID: "zhipuai-coding-plan", id: "glm-5.1" });
+  assert.deepEqual(agent.model, { providerID: "deepseek", id: "glm-5.1" });
 });
 
 test("ignores undefined override values", async () => {
@@ -40,11 +39,10 @@ test("ignores undefined override values", async () => {
     JSON.stringify({
       agents: {
         glm_worker: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
+          backend: "deepseek-acp",
+          credentialEnv: "DSH_API_KEY",
           cwd: "D:/projects/app-worktree",
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.1" },
+          model: { providerID: "deepseek", id: "glm-5.1" },
         },
       },
     }),
@@ -114,19 +112,19 @@ test("未知 backend 被拒绝", async () => {
   assert.throws(() => registry.getAgent("bad"), /unknown backend/);
 });
 
-test("混合 registry: opencode-serve + claude-code + codex 共存", async () => {
+test("混合 registry: kimi-web + claude-code + codex 共存", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
     registryPath,
     JSON.stringify({
       agents: {
-        glm: {
-          backend: "opencode-serve",
+        kw: {
+          backend: "kimi-web",
           serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
+          tokenEnv: "KIMI_WEB_TOKEN",
           cwd: "D:/a",
-          model: { providerID: "p", id: "m" },
+          model: { id: "m" },
         },
         claude: { backend: "claude-code", cwd: "D:/b" },
         codex: { backend: "codex", cwd: "D:/c" },
@@ -137,7 +135,7 @@ test("混合 registry: opencode-serve + claude-code + codex 共存", async () =>
   const agents = registry.listAgents();
   assert.equal(agents.length, 3);
   const ids = agents.map((a) => a.id).sort();
-  assert.deepEqual(ids, ["claude", "codex", "glm"]);
+  assert.deepEqual(ids, ["claude", "codex", "kw"]);
 });
 
 // ===== P4 融合项 #3（决策B 全量迁移）：provider 一等字段 =====

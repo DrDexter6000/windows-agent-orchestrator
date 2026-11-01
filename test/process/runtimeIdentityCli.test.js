@@ -1,8 +1,8 @@
 // test/process/runtimeIdentityCli.test.js
 //
 // runtime-identity-cli 薄入口回归（2026-10-02 前置盘点 round 2 F1 落地）。
-// 子进程用例全部走免 spawn 路径（未知名无描述符 / opencode-serve 描述符 null），
-// 保持确定性；真实 spawn 语义已由 runtimeIdentity.test.js（注入 spawnFn）与
+// 子进程用例全部走免 spawn 路径（未知名无描述符），保持确定性；
+// 真实 spawn 语义已由 runtimeIdentity.test.js（注入 spawnFn）与
 // zcode.test.js（resolveInvocationPrefix）覆盖，此处只钉 CLI 接线。
 
 import test from "node:test";
@@ -40,32 +40,6 @@ test("cli: 未知 backend 名 → honest unknown JSON + exit 0（unknown 是合�
   assert.equal(id.distribution, null);
   assert.match(id.reason, /no harness probe descriptor/);
   assert.equal(id.verified, false);
-});
-
-test("cli: opencode-serve → 描述符 null 的 honest unknown + exit 0（零 spawn）", () => {
-  const { code, stdout } = runCli(["--backend", "opencode-serve"]);
-  assert.equal(code, 0);
-  const id = JSON.parse(stdout.trim().split("\n").at(-1));
-  assert.equal(id.distribution, "opencode-serve");
-  assert.equal(id.verified, false);
-  assert.match(id.reason, /no local harness binary/);
-});
-
-test("cli: --registry 显式路径的读取路径（opencode-serve 席位在场仍 honest unknown）", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-rtid-cli-"));
-  try {
-    const regPath = join(dir, "agents.json");
-    writeFileSync(regPath, JSON.stringify({
-      agents: { mm: { id: "mm", backend: "opencode-serve", serveUrl: "http://127.0.0.1:1", model: { providerID: "x", id: "m" } } },
-    }));
-    const { code, stdout } = runCli(["--backend", "opencode-serve", "--registry", regPath]);
-    assert.equal(code, 0);
-    const id = JSON.parse(stdout.trim().split("\n").at(-1));
-    assert.equal(id.verified, false);
-    assert.match(id.reason, /no local harness binary/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test("cli: --registry 找到 anchor 席位时消费其 binary（假路径 ENOENT 也是确定性证据）", () => {

@@ -21,7 +21,7 @@ import {
   KIMI_TEST_TOKEN_VALUE,
 } from "../fixtures/kimiWebServe.js";
 
-// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+// kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
 before(() => {
   process.env[KIMI_TEST_TOKEN_ENV] = KIMI_TEST_TOKEN_VALUE;
 });
@@ -37,7 +37,7 @@ after(() => {
 // 本测试验证进程内核心函数 runBackground：驱动完一个 run + 状态机推进 + transcript 完整。
 
 function makeMockFetch({ assistantDelayMs = 0 } = {}) {
-  // kimi-web 假服务器（语义对齐原 opencode mock：提交后 assistantDelayMs 毫秒
+  // kimi-web 假服务器（提交后 assistantDelayMs 毫秒
   // "bg done" 才出现在 transcript 轮里——延迟挂轮询，不挂提交）。
   return runServer(KIMI_TEST_SERVE_URL, { delayMs: assistantDelayMs, replies: ["bg done"] }).fetchImpl;
 }
@@ -48,7 +48,7 @@ test("P2 runBackground: 驱动 run 到 completed，状态机推进，transcript 
     const result = await runBackground({
       agentId: "bg_agent",
       prompt: "do it",
-      registry: { agents: { bg_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
+      registry: { agents: { bg_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } },
       runDir: dir,
       fetchImpl: makeMockFetch(),
       waitTimeout: 3000,
@@ -80,7 +80,7 @@ test("P2 runBackground（TD-151 迁移）: 小 waitTimeout + 慢 worker → 到�
     const result = await runBackground({
       agentId: "bg_slow",
       prompt: "x",
-      registry: { agents: { bg_slow: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
+      registry: { agents: { bg_slow: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } },
       runDir: dir,
       fetchImpl: makeMockFetch({ assistantDelayMs: 500 }),
       waitTimeout: 300,
@@ -220,7 +220,7 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
     const runPromise = runBackground({
       agentId: "owner_agent",
       prompt: "do it",
-      registry: { agents: { owner_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
+      registry: { agents: { owner_agent: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } },
       runDir: dir,
       fetchImpl: slowFetch,
       waitTimeout: 5000,
@@ -417,7 +417,7 @@ test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可�
   const never = runBackground({
     agentId: "hb_hang",
     prompt: "hang",
-    registry: { agents: { hb_hang: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } },
+    registry: { agents: { hb_hang: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: dir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } },
     runDir: dir,
     runId,
     fetchImpl: makeMockFetch(),

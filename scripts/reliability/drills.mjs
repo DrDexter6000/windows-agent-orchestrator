@@ -415,55 +415,6 @@ export function createDrills(deps) {
 
 
 
-  function runStopDrill(tc) {
-    if (tc.backend !== "opencode-serve") {
-      return [
-        check("stopSupported", false, "operational", `stop drill currently supports opencode-serve, got ${tc.backend}`, { capability: "backendStopQuiet" }),
-      ];
-    }
-    // stop drill 用独立 runDir（显式传 --run-dir 与 readRunEvents 对齐，
-    // 避免 spawn/stop 写到默认 runDir（项目根 runs/）而 readRunEvents 读 tmpDir/runs 的错位 ENOENT）。
-    const stopRunDir = join(tmpDir, "stop-runs");
-    mkdirSync(stopRunDir, { recursive: true }); // detached runner 不自动建 runDir，须预创建
-    // detached runner 继承 CLI 的 cwd：cwd=tmpDir 时 runner 找不到 registry/config 秒退
-    // （detached 进程 cwd 不能是临时目录）。stop drill 的 spawn 必须用 cwd=项目根。
-    const { ok, stdout, error } = runCli([
-      "spawn", tc.agentId,
-      "--prompt", "Begin this task and wait quietly until stopped.",
-      "--registry", registry,
-      "--run-dir", stopRunDir,
-    ], { cwd: root });
-    const spawned = extractJson(stdout || "");
-    if (!ok || !spawned?.runId) {
-      return [
-        check("stopSpawned", false, "operational", error ?? "missing runId", { capability: "localStopLedger" }),
-      ];
-    }
-    // detached runner 异步起：spawn 返回 runId 时 transcript 可能还没写第一个事件。
-    // 等 transcript 文件出现（轮询，有限次），再 stop——否则 stop/readRunEvents 读空 ENOENT。
-    waitForTranscript(stopRunDir, spawned.runId, 15000);
-    const stopped = runCli(["stop", spawned.runId, "--run-dir", stopRunDir, "--registry", registry], { cwd: root });
-    const stopResult = extractJson(stopped.stdout || "");
-    const events = readRunEvents(spawned.runId, stopRunDir);
-    // TD-37 尾巴收口：读产品路径产出的验证事件（cli.js stop → executeStopWithVerification）。
-    //   - run.stop_verified  → serve 端 token/message 轮询确认真停 → check pass
-    //   - run.stop_unverified → abort 后后台仍增长（06-18 事故复现路径）→ check fail + 附 delta/metric
-    //   - 都没有 → 产品路径未跑到验证（异常），判 fail
-    const stopVerified = events.find((e) => e.type === "run.stop_verified");
-    const stopUnverified = events.find((e) => e.type === "run.stop_unverified");
-    const quietCheck = stopVerified
-      ? check("backendStopQuietVerified", true, "operational", "verified: serve session token/message stable across rounds", { capability: "backendStopQuiet" })
-      : stopUnverified
-        ? check("backendStopQuietVerified", false, "operational", `not verified: backend still active (metric=${stopUnverified.metric ?? "?"}, taskkill=${stopUnverified.taskkillCalled})`, { capability: "backendStopQuiet", delta: stopUnverified.delta })
-        : check("backendStopQuietVerified", false, "operational", "not verified: no run.stop_verified/run.stop_unverified event (product verify path did not run)", { capability: "backendStopQuiet" });
-    return [
-      check("localStopRequested", stopResult?.stopped === true, "operational", `stopped=${stopResult?.stopped}`, { capability: "localStopLedger" }),
-      check("localStopStateAborted", inferState(events) === "aborted", "operational", `state=${inferState(events)}`, { capability: "localStopLedger" }),
-      check("stopSeqMonotonic", hasMonotonicSeq(events), "operational", "transcript seq monotonic", { capability: "transcriptSeq" }),
-      quietCheck,
-    ];
-  }
-
   function runFileScorecardTask(tc, fileName, options = {}) {
     const fileSentinel = `FILE_${Date.now().toString(36).toUpperCase()}_${tc.agentId}`;
     const prompt = [
@@ -521,7 +472,6 @@ export function createDrills(deps) {
     runIsolationDrill,
     runContainmentEvidenceDrill,
     runSandboxEnforcementDrill,
-    runStopDrill,
     runFileScorecardTask,
     ensureTmpGitRepo,
     readRunEvents,

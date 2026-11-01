@@ -5,21 +5,16 @@ import {
   defaultDrillsForProfile,
 } from "../../scripts/reliability/matrix.mjs";
 
-// 61a 注：本文件的 registry 夹具钉 buildCertificationMatrix 的身份派生面——
-// researcher 的 model 形状带 providerID（矩阵行的 providerID/modelId 从 agent
-// 派生、completionMode 透传、LEGACY_CASES 标签兜底）。kimi-web 无法表达
-// model.providerID（裸 id 通道，配了即拒），legacy 标签（"GLM snapshot-stable"
-// 等）也钉在 matrix.mjs 的 opencode 时代 LEGACY_CASES 上——迁过去会改变被测
-// 语义。整文件保留 opencode-serve 夹具，61b 随后端退役连同 LEGACY_CASES 一并处置。
+// 夹具钉 buildCertificationMatrix 的身份派生面——researcher 的 model 形状带
+// providerID（矩阵行的 providerID/modelId 从 agent 派生）。
+// providerID 形状用 deepseek-acp 表达（现行唯一带 providerID 的后端）。
 const registry = {
   agents: {
     researcher: {
-      backend: "opencode-serve",
-      serveUrl: "http://127.0.0.1:4297",
-      agent: "build",
+      backend: "deepseek-acp",
+      credentialEnv: "DSH_API_KEY",
       cwd: "D:/repo",
       model: { providerID: "deepseek", id: "deepseek-v4-flash" },
-      completionMode: "first-stable",
     },
     coder_strict: {
       backend: "claude-code",
@@ -31,7 +26,7 @@ const registry = {
     matrix: [
       {
         agentId: "researcher",
-        label: "DeepSeek via opencode",
+        label: "DeepSeek via dsh-acp",
         profile: "strict",
         drills: ["sentinel", "scorecard", "isolation"],
         requiredCategories: ["core", "strict", "observability"],
@@ -54,21 +49,20 @@ test("buildCertificationMatrix: reads top-level certification.matrix and enriche
   assert.equal(matrix.length, 2);
   assert.deepEqual(matrix[0], {
     agentId: "researcher",
-    label: "DeepSeek via opencode",
+    label: "DeepSeek via dsh-acp",
     profile: "strict",
     drills: ["sentinel", "scorecard", "isolation", "containmentEvidence"],
     requiredCategories: ["core", "strict", "observability", "operational"],
     optional: false,
     expectComplete: true,
     expectText: true,
-    backend: "opencode-serve",
+    backend: "deepseek-acp",
     providerID: "deepseek",
     modelId: "deepseek-v4-flash",
     // R23-C：归一化 case 新增认证身份第 4 维 providerKey（无条件写）。researcher
     // fixture 无 agent.provider 块 → 显式 null（已观察确认无接入方；契约详见
     // test/run-lifecycle/certGateIdentityFreshness.test.js T6）。
     providerKey: null,
-    completionMode: "first-stable",
   });
   assert.equal(matrix[1].backend, "claude-code");
   // ADR-0032 §6 账实一致：coder_strict fixture **无 agent.model 块** →
@@ -109,22 +103,9 @@ test("buildCertificationMatrix: CLI profile overrides configured profile; strict
   assert.deepEqual(strictMatrix[0].drills, ["sentinel", "scorecard", "containmentEvidence", "isolation"]);
 });
 
-test("buildCertificationMatrix: falls back to legacy cases when no certification config exists", () => {
-  const matrix = buildCertificationMatrix({
-    registry: {
-      agents: {
-        coder: {
-          backend: "opencode-serve",
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-        },
-        researcher: registry.agents.researcher,
-      },
-    },
-  });
-
-  assert.deepEqual(matrix.map((c) => c.agentId), ["coder", "researcher"]);
-  assert.equal(matrix[0].label, "GLM snapshot-stable");
-  assert.equal(matrix[1].completionMode, "first-stable");
+test("buildCertificationMatrix: 无 certification.matrix 配置 → 零 case", () => {
+  const matrix = buildCertificationMatrix({ registry: { agents: registry.agents } });
+  assert.deepEqual(matrix, [], "未声明矩阵 → 不派发任何缺省 case");
 });
 
 test("defaultDrillsForProfile: basic is sentinel-only, strict runs the full containment set", () => {
@@ -140,7 +121,7 @@ test("buildCertificationMatrix: operational drills require operational certifica
         matrix: [
           {
             agentId: "researcher",
-            drills: ["sentinel", "scorecard", "isolation", "stop", "containmentEvidence"],
+            drills: ["sentinel", "scorecard", "isolation", "containmentEvidence"],
           },
         ],
       },

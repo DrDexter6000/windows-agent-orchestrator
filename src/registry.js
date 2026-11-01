@@ -36,7 +36,7 @@ export const REASONING_EFFORTS = Object.freeze([
 // 出现的每一处都读它）；per-backend 专属字段校验分支、factory 构造器分发
 // 与能力映射各自承载不同语义，不在单点修改承诺内。
 export const KNOWN_BACKENDS = Object.freeze([
-  "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
+  "claude-code", "codex", "kimi-code", "deepseek-harness",
   // ADR-0031（B-2）：DSH ACP 集成面 backend（dsh --profile acp）。闭集 5→6
   // 扩员由 ADR-0031 提议，待 Owner 裁定 accepted（Owner 未决——不声称已授权）。
   // 新旧两线并存；旧 deepseek-harness 保留至新线认证通过后由 Owner 决定去留
@@ -246,15 +246,8 @@ export function normalizeAgent(id, agent) {
   if (!KNOWN_BACKENDS.includes(agent.backend)) {
     throw new Error(`Agent ${id} has ${unknownBackendGuidance(agent.backend)}`);
   }
-  if (agent.backend === "opencode-serve") {
-    if (!agent.serveUrl) {
-      throw new Error(`Agent ${id} is missing serveUrl`);
-    }
-    if (!agent.model?.providerID || !agent.model?.id) {
-      throw new Error(`Agent ${id} is missing model.providerID/model.id`);
-    }
-  } else if (agent.backend === "kimi-web") {
-    // HTTP attach 型（同 opencode-serve 的 serveUrl 用法：`kimi web` 本地服务器
+  if (agent.backend === "kimi-web") {
+    // HTTP attach 型（serveUrl = `kimi web` 本地服务器
     // 基址）。tokenEnv 是 bearer token 的 env 变量名（新增字段，按既有字符串字段
     // 的校验风格：非空非空白字符串）；model.id 必填——上游缺 model 时轮次静默
     // 秒败（backend validateAgentPolicy 同样硬拒，这里是配置层的早失败面）。

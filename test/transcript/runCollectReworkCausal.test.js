@@ -7,7 +7,7 @@
 //
 // Coverage map (CTO rework requirements):
 //   - default service/MCP path ≥60 messages, all read exactly once (RED-1 GREEN)
-//   - process AND serve (mocked HTTP boundary) continuation >50 messages
+//   - process continuation >50 messages
 //   - command/tool/file evidence frozen across pages (RED-2 GREEN)
 //   - cursor-less AND cursor continuation projection/schema failure → zero append (RED-3 GREEN + cursor variant)
 //   - --cursor missing value rejected before read/append (RED-4 GREEN)
@@ -65,38 +65,6 @@ function buildProcessTranscript(runDir, runId, messageCount, extraEvents = []) {
   writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
 }
 
-function buildServeTranscript(runDir, runId) {
-  mkdirSync(runDir, { recursive: true });
-  const lines = [
-    jl({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
-    jl({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_causal", serveUrl: "http://127.0.0.1:4298", runId, agentId: "w" }),
-    jl({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w", cwd: TARGET }),
-    jl({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }),
-  ];
-  writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
-}
-
-// Serve fetch mock that simulates the OpenCode serve /message HTTP boundary:
-// it receives a `limit` query param and returns up to that many messages.
-// This proves the service passes SERVE_PROJECTION_LIMIT (not 50) in
-// projection mode, so the full list is retrieved in one call.
-function buildMockServeFetch(totalMessages) {
-  return async (_serveUrl, _sessionId, opts) => {
-    const limit = Number(opts?.limit ?? 50);
-    // Serve semantics: return the LAST `limit` messages (matching real
-    // OpenCode serve /message?limit=N behavior).
-    const all = [];
-    for (let i = 0; i < totalMessages; i += 1) {
-      all.push({
-        info: { role: "assistant" },
-        parts: [{ type: "text", text: `serve-m${i}` }],
-      });
-    }
-    const data = all.slice(-limit);
-    return { data, cursor: { previous: null, next: null } };
-  };
-}
-
 function readAuditCount(transcriptPath) {
   try {
     return readFileSync(transcriptPath, "utf8").trim().split("\n")
@@ -131,49 +99,6 @@ test("M11-4-CAUSAL-1: process 60 messages via service+projection — all 60 read
     assert.equal(collected.length, 60, "all 60 reachable");
     for (let i = 0; i < 60; i += 1) assert.equal(collected[i], `m${i}`, `msg ${i} in order`);
     assert.ok(pages >= 2, `multi-page (${pages})`);
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-// =====================================================================
-// CAUSAL-2: serve path (mocked HTTP boundary) — 60 messages retrieved in
-// one call (SERVE_PROJECTION_LIMIT), all reachable via continuation.
-// =====================================================================
-test("M11-4-CAUSAL-2: serve 60 messages via mocked HTTP boundary — full retrieval + continuation", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m114-causal2-"));
-  try {
-    const runDir = join(dir, "runs");
-    const runId = "run_causal2";
-    buildServeTranscript(runDir, runId);
-    const fetchCalls = [];
-    const fetchFn = async (url, sid, opts) => {
-      fetchCalls.push({ limit: opts?.limit });
-      return buildMockServeFetch(60)(url, sid, opts);
-    };
-
-    const collected = [];
-    let cursor = null;
-    let pages = 0;
-    while (true) {
-      const raw = await collectRunMessages({
-        runId, runDir, cursor, deferAppend: true,
-        fetchServeMessagesFn: fetchFn,
-        appendCollectedFn: async () => {},
-      });
-      const page = projectCollectResult(raw, { runId, cursor });
-      collected.push(...page.messages.map((m) => m.text));
-      cursor = page.nextCursor;
-      pages += 1;
-      if (!cursor) break;
-      if (pages > 20) throw new Error("runaway");
-    }
-    assert.equal(collected.length, 60, "all 60 serve messages reachable");
-    for (let i = 0; i < 60; i += 1) assert.equal(collected[i], `serve-m${i}`, `serve msg ${i} in order`);
-    // Every fetch must have used a large limit (projection mode), NOT 50.
-    for (const c of fetchCalls) {
-      assert.ok(c.limit > 50, `serve fetch used projection limit >50 (got ${c.limit})`);
-    }
   } finally {
     cleanupDir(dir);
   }

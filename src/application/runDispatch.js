@@ -626,7 +626,7 @@ export async function dispatchRun({
   // declared capability the M12-14 invocation-budget preflight keys on. A
   // backend implementing preflightInvocation composes a LOCAL OS invocation
   // and spawns with cwd: agent.cwd (the ENOENT-blames-the-executable trap); an
-  // HTTP backend (opencode-serve shape, no preflightInvocation) threads cwd to
+  // HTTP backend (no preflightInvocation) threads cwd to
   // the serve API as a REMOTE directory hint — no local spawn, no local
   // ENOENT trap — and is exempt, exactly as docs/usage.md promises and as
   // layer 2 already exempts it (symmetric semantics: local-spawn backends are
@@ -788,7 +788,7 @@ export async function dispatchRun({
   }
   // TD-198: the runner argv keeps threading the RAW --cwd flag value when one
   // was given — the runner's RunManager.start normalizes idempotently against
-  // its inherited cwd (the CLI's), and HTTP backends (opencode-serve) treat
+  // its inherited cwd (the CLI's), and HTTP backends treat
   // cwd as a REMOTE hint that must not be silently replaced by a locally
   // resolved path. The ABSOLUTE ownership fact lives in
   // run.background_submitted.cwd above, not in the argv.

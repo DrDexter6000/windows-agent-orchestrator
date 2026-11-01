@@ -3,14 +3,14 @@
 // TD-98 阶段 1：registry 命令族从 cli.js 拆出（行为不变，纯搬迁）。
 //
 // 依赖：
-//   - 外部模块：../registry.js（readRegistry/normalizeAgent）、../backends/opencodeServe.js
+//   - 外部模块：../registry.js（normalizeAgent/KNOWN_BACKENDS 等）
 //   - 共享工具：./shared.js（parseOptions，纯函数）
 //   - node built-in：fs/promises（readFile）、path（join/resolve）
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { readRegistry, normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
+import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
 // TD-317: registry 键名是磁盘上的不可信数据——validate 输出绝不回显非法键名
 // （换行可在文本输出里伪造一行）。既定做法同 normalizeAgent 的固定文案 throw。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -18,7 +18,6 @@ import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 // （issues/warnings/✔ 行的 backend 与 model/角色合同失败行）先过控制字符转义，
 // 值里的换行不能再伪造一行。--format json 不变（JSON.stringify 自带转义）。
 import { safeJsonParse, escapeControlChars } from "../safeText.js";
-import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
@@ -64,10 +63,6 @@ function renderCertEvidence(rows) {
 
 async function registryCommand(args, config) {
   const [sub, ...tail] = args;
-  if (sub === "check") {
-    await registryCheckCommand(tail, config);
-    return;
-  }
   if (sub === "validate") {
     await registryValidateCommand(tail, config);
     return;
@@ -106,56 +101,6 @@ async function registryCommand(args, config) {
     console.log(`${agent.id}\t${escapeControlChars(agent.backend)}\t${escapeControlChars(agent.model)}\t${escapeControlChars(agent.certification ?? "-")}\t${escapeControlChars(agent.cwd)}${anyHold ? `\t${escapeControlChars(agent.dispatchHold ?? "-")}` : ""}`);
   }
   if (certEvidence) renderCertEvidence(certEvidence);
-}
-
-async function registryCheckCommand(args, config) {
-  const options = parseOptions(args);
-  const registry = await readRegistry(resolve(options.registry ?? config.registry));
-  const agents = registry.listAgents();
-  if (agents.length === 0) {
-    // TD-86（D2 A1）：JSON 模式输出结构化空结果（allOk 与 text 模式 exit 0 语义一致）。
-    if (options.format === "json") {
-      console.log(JSON.stringify({ allOk: true, agents: [] }, null, 2));
-      return;
-    }
-    console.log("No agents in registry.");
-    return;
-  }
-  // TD-86（D2 A1）：--format json 输出 {allOk, agents:[{id,status,serveUrl?,error?}]}。
-  // 字段全部来自既有计算结果（healthCheck 返回 + agent 配置），exit code 契约不变。
-  // 非 opencode-serve 车道的 skip 原因是本命令的探测范围（只探 opencode-serve
-  // 健康），不是 WAO 不认识该 backend——固定文案指路 wao lanes（车道就绪）与
-  // wao doctor（环境），text/JSON 同值；字段名不变。
-  const asJson = options.format === "json";
-  const SKIP_NOT_PROBED = "registry check probes opencode-serve health only; for lane readiness see 'wao lanes', for environment see 'wao doctor'";
-  let allOk = true;
-  const results = [];
-  for (const agent of agents) {
-    if (agent.backend === "opencode-serve") {
-      const backend = new OpenCodeServeBackend({ timeout: 5000, retries: 0 });
-      const result = await backend.healthCheck(agent.serveUrl);
-      if (result.ok) {
-        results.push({ id: agent.id, status: "ok", serveUrl: agent.serveUrl });
-        // TD-318（二）：serveUrl 是配置自由值——文本行先转义；JSON 面不变。
-        if (!asJson) console.log(`${agent.id}\tok\t${escapeControlChars(agent.serveUrl)}`);
-      } else {
-        const error = result.error ?? `HTTP ${result.status}`;
-        results.push({ id: agent.id, status: "fail", serveUrl: agent.serveUrl, error });
-        // TD-318（二）：error 可能带上游报错原文（含 URL 片段）——同样先转义。
-        if (!asJson) console.log(`${agent.id}\tFAIL\t${escapeControlChars(agent.serveUrl)}\t${escapeControlChars(error)}`);
-        allOk = false;
-      }
-    } else {
-      results.push({ id: agent.id, status: "skip", error: SKIP_NOT_PROBED });
-      if (!asJson) console.log(`${agent.id}\tSKIP\t${SKIP_NOT_PROBED}`);
-    }
-  }
-  if (asJson) {
-    console.log(JSON.stringify({ allOk, agents: results }, null, 2));
-  }
-  if (!allOk) {
-    process.exitCode = 1;
-  }
 }
 
 /**
@@ -297,24 +242,7 @@ async function registryValidateCommand(args, config) {
         issues.push("missing cwd");
       }
 
-      // 3. opencode-serve 专属字段
-      if (agent.backend === "opencode-serve") {
-        if (!agent.serveUrl) issues.push("missing serveUrl");
-        if (!agent.agent) issues.push('missing agent (e.g. "build")');
-        if (!agent.model) {
-          issues.push("missing model");
-        } else {
-          if (!agent.model.providerID) issues.push("missing model.providerID");
-          if (!agent.model.id) issues.push("missing model.id");
-        }
-        // C3（审计 P0）：opencode worker 必须配 tokenBudget（06-18 事故防线，硬门）。
-        // 未配 → registry validate 报错，阻止派发（stop 虚假成功 + 无预算上限 = 06-18 复现）。
-        if (typeof agent.tokenBudget !== "number") {
-          issues.push("missing tokenBudget (opencode worker 必须配，06-18 事故防线；进程式 worker 可不配)");
-        }
-      }
-
-      // 4. scorecard rules 形状（如有）
+      // 3. scorecard rules 形状（如有）
       if (agent.scorecard) {
         const rules = agent.scorecard.rules ?? {};
         if (rules.requireCommands !== undefined && !Array.isArray(rules.requireCommands)) {
@@ -328,7 +256,7 @@ async function registryValidateCommand(args, config) {
         }
       }
 
-      // 5. args 形状（如有）
+      // 4. args 形状（如有）
       if (agent.args !== undefined && !Array.isArray(agent.args)) {
         issues.push("args must be an array");
       }
@@ -354,7 +282,7 @@ async function registryValidateCommand(args, config) {
         }
       }
 
-      // 6. 跑一遍 normalizeAgent 做最终校验（它会 throw 如果有硬错误）
+      // 5. 跑一遍 normalizeAgent 做最终校验（它会 throw 如果有硬错误）
       try {
         normalizeAgent(id, agent);
       } catch (e) {
@@ -471,4 +399,4 @@ async function registryValidateCommand(args, config) {
   if (!allOk) process.exitCode = 1;
 }
 
-export { registryCommand, registryCheckCommand, registryValidateCommand };
+export { registryCommand, registryValidateCommand };

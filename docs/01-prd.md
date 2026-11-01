@@ -6,7 +6,7 @@
 
 ## 0. 产品定义
 
-**核心价值**：WAO 的价值是把 worker token 消耗路由到外部 provider quota——WAO 让 Lead 用确定性原语把任务派给外部 worker runtime（claude-code / codex / opencode-serve），把 token 账单落在 worker 的 provider 上，而不是把活揽回 Lead 自己的上下文。WAO 是 Lead 的**辅助执行控制面**，不是门禁，也不是第二个语义总管。
+**核心价值**：WAO 的价值是把 worker token 消耗路由到外部 provider quota——WAO 让 Lead 用确定性原语把任务派给外部 worker runtime（claude-code / codex / kimi-web 等），把 token 账单落在 worker 的 provider 上，而不是把活揽回 Lead 自己的上下文。WAO 是 Lead 的**辅助执行控制面**，不是门禁，也不是第二个语义总管。
 
 > **权威边界（ADR 0018）**：WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。
 > （English: WAO monitors, never supervises; packages, never accepts; presents, never decides.）
@@ -55,7 +55,7 @@ RunMaestro 升级后工作流彻底崩溃——主控 Agent 无法调度 worker�
 
 > **"runtime-agnostic" 的精确定义**（本词在本文档多处出现，统一指此义）：
 > 指**控制平面（L2 / scorecard）不针对具体 runtime 写分支**——
-> 同一套 RunManager / 状态机，对 opencode-serve / claude-code / codex 一视同仁，
+> 同一套 RunManager / 状态机，对各 backend 一视同仁，
 > 只通过统一的 `Backend` 接口 + `RunEvent` 流交互（见 spec §2）。
 > **强承诺**：加一个新 runtime 是"写一个 Backend 类 + parser"的局部加法，控制平面一行不改。
 > **不承诺**：① 所有 runtime 能力对等（能力差异客观存在，Backend 自行降级）；
@@ -194,7 +194,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 短期目标（[S] 项）的完成定义：
 
-1. **多 backend 并存**：registry 里同时有 opencode-serve 和至少一个进程式 backend（claude-code 或 codex），都能 spawn 并收集结果。
+1. **多 backend 并存**：registry 里同时有多条不同 backend 的车道（如 claude-code 与 codex），都能 spawn 并收集结果。
 2. **状态机显式化**：每个 run 有明确状态（非靠最后事件推断），状态转换写 transcript。
 3. **可恢复**：`runs resume <runId>` 能接续未完成的 run（或明确报告为何不可恢复）。
 4. **隔离**：不同 run 用不同 worktree，进程互不残留（有 cleanup 钩子）。

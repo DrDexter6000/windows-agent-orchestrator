@@ -9,7 +9,6 @@
 当前派发策略：
 - 真实编码/文件修改/命令执行优先派给经认证的车道——**本行只定规则、不定名单**：当前哪些车道属此列，查 `registry list`（当前配置 × 历史认证的**匹配投影**，不重验运行时；简表把台账缺失/不可读折叠成"无认证记录"，且**投影不含 certificationScope**——delta/full 只在 summary 磁盘层，双指针互补，勿把 `registry list` 当充分条件；需判适用性时用 `registry list --cert-evidence` 与"认证证据绑定执行画像"节）与当前 runDir 下的 `reliability-summary.json` 的 `workers` 字段（认证台账权威），角色划分权威见 `docs/team-roles.md`（席位名单是活配置，写进本文必漂移——负向守卫钉住本节不得出现席位 id）。
 - 角色合同以 `config/roles/*.md` 为准（Lead 的职责与派工原则见 `docs/team-roles.md`），接线以 `config/agents.example.json` 为模板，车道用法见车道画像（`config/lane-traits.json`）。
-- opencode worker 只作为 fallback / optional lane 的选择政策以 `docs/team-roles.md` 为权威（本文不重复政策正文）；该通道受 Owner 暂停投入裁定约束（在册裁定状态见原语表行）。派发前仍必须看最新 certification、`tokenBudget` 和 stop verification evidence（在册历史机制证据不代表当前部署已验证）。
 - runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准（本行是**选择参考**；认证的门禁语义——MCP advisory、CLI `--require-certified`——见"认证与当前就绪"节，两回事不混写）。
 
 ## DSH 通道适用限制与能力交叉警告
@@ -139,7 +138,6 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 | kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`；2.4.0 复跑跨 run drill 通过，2026-10-28）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | `kimi web` 本地 HTTP API：`POST /api/v1/sessions/{id}/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（本地 2.4.0 OpenAPI 仍在册，2026-10-28） | **实测阳性（2026-09-30）**：`steered:true` 后纠偏消息在同一活会话被消费、模型紧邻轮立即响应（原生成流跑完当轮，打断发生在轮边界）——语义同 claude-code stdin 排队（delivered 即入列，不证明截断当轮生成） | `@moonshot-ai/kimi-code`（官方 docs 记载包名）＋ GitHub MoonshotAI/kimi-code releases；`kimi upgrade` 无只读 check（跑=真升级） |
 | deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — | 候选包名 `@deepseek-ai/dsh-jsonrpc-agent` 查询 E404（候选名未经官方确认——E404 首先说明候选渠道未确认）；变更信息源未知 |
 | deepseek-acp | ACP `session/resume`（0.2.1-rc.4 的 initialize 仍广告 `sessionCapabilities` close/list/resume，2026-10-28 直跑） | 已接线（ADR-0031 §3.6）；跨 run 恢复的真实派发证据见 `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`（2026-10-28 在 rc.4 上重取） | 上游无（ACP 无在途消息改写，F7 实测；0.2.1-rc.4 的 initialize 同样没有在途注入能力，2026-10-28） | 上游无此能力 | npm `@deepseek-ai/dsh`（dist-tag 全是预发布：latest 0.2.1-rc.2、next 0.2.1-rc.4、alpha 0.2.2-alpha.2，本机装 next；2026-10-28 核验）＋ GitHub deepseek-ai/deepseek-harness releases（tag 形如 `dsh-v0.2.1-rc.2`） |
-| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） | npm `opencode-ai`（参照渠道；部署对象无在册） |
 | kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；2.4.0 起有 prompt 级中止 `POST …/prompts/{promptId}:abort`：2026-10-29 实测该轮转为 cancelled，这一轮已启动的命令进程要删会话才收；2.1.1 时 8 个动作名实测阴性） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`；2.4.0 实派与 OpenAPI 核对通过，所用 9 个端点仍在册，2026-10-28） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） | 宿主同 kimi-code（同二进制同渠道；服务身份证据走执行检查单的认证探针脚本，不占本列） |
 | zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；**live 逐测 2026-10-10**：跨进程 resume 真跑实证——B′ 探针 turn3 + 生产冒烟两轮 + 桥验证派发，bundle b816e386/15647 行〔3.15.1，当日桌面自更〕，消息/part 身份原语同日实证） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"；3.16.3（捆绑 CLI 0.17.0）bundle 复核：`Session is not active` 与每进程一张的 sessions 表仍在（行号已漂移），resume 次序依据成立，2026-10-29） | 协议未见在途注入原语：0.17.0 的 `session/send` 遇活动轮仍抛 -32010，`turn.steerQueued` 等转向事件只在桌面端内部（2026-10-29 bundle 核查） | 上游无此能力 | 官网 changelog（zcode.z.ai，产品版本锚）＋应用内更新通道（只提示、不自动下载；各版本元数据在 `cdn-zcode.z.ai/zcode/electron/releases/<版本>/windows-x64/latest.yml`，含 sha512）；捆绑 CLI 0.17.0（3.16.3）为内部序列，随桌面走 |
 
@@ -153,7 +151,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 
 **触发**（三源合一，两钟合并——事件触发的当场刷新会顺带重置期限钟，基线日=最近复核日）：① 期限守卫变红（30 天）；② 事件触发（harness 升级 / WAO 适配层改动 / 新 harness 入册，角色分工见"认证更新的触发器与执行人"节——升级由操作员执行，Lead 界定影响并安排验证，Owner 决定新增组合、费用与承重用途）；③ Owner 指令。守卫红后的第一分钟：读本表表头的基线日与期限 → 从下方"对象与证据"起（身份界定 → 前置盘点 → 动作出口），**先别急着升级**。
 
-**对象与证据**。对象身份 = 实际运行的东西。单目标只读探针命令：`node scripts/wao-node.cjs scripts/reliability/runtime-identity-cli.mjs --backend <name> --registry <file>`——**探配置目标必带 `--registry`**（缺省不读任何 registry、仅 PATH 级探测——正是②"不得拿 PATH 同名程序替代配置对象"的张力所在；仅 PATH 级身份探测可省）。每次调用取该 backend 首个匹配席位作 anchor 并在输出携带 `anchorAgentId`（**无席位 backend 返回 `anchorAgentId:null`——PATH 级探测的正常形态，非故障**），多部署逐目标各调一次，勿以单次调用代表全部目标。探针条目覆盖 KNOWN_BACKENDS 闭集全员（kimi-web 探宿主 kimi 二进制；zcode 经 backend `resolveInvocationPrefix` 以 node 前缀探桌面捆绑 zcode.cjs；opencode-serve 恒 honest unknown）——新 backend 入册时核对探针覆盖面。**证据单位是实际安装/部署，不是席位**：同一 harness 多席位可能用不同 binary / serveUrl——按实际目标去重，多目标在该行列子项，不得挑一个席位代表全部；PATH 探测只代表当前执行环境；**服务型 backend 的本机 CLI 与服务部署是两个对象，分别记录——CLI 版本差不推服务面**。宿主二进制版本对 HTTP attach 型只是**提醒，不证明 live 服务身份**（kimi-web 探针与 serveUrl 指向的服务没有身份关联，升级后旧服务可能仍在跑）——本地安装版本与运行服务身份分开记录，证据不足记"服务身份未确认"。**服务身份证据递进**（认证层级与载荷可识别性是两根轴，不压成一维阶梯）：① 目标地址有响应（裸端口存活；401 带 `WWW-Authenticate` 头可记高一档"讲 HTTP 的服务类"）→ ② 响应有产品特征但身份/版本证据不完整（可辨 banner / 产品结构而无版本 → 记"服务类型可辨，版本未确认"；认证后 200 无版本字段 = "认证可达、版本未确认"，居②③之间）→ ③ 版本确认——只认**显式版本字段**或**与宿主探针的一致比对**（认证成功但只回"healthy"同样不够③）。**认证与否单独记录为支撑证据**："认证通过"（token 被接受）本身是强身份线索；未认证的自报版本是弱证据。文档版本字段 ≠ 运行程序版本——字段语义未经证实时如实标"上游自报"。梯度 ①② 不得写成"身份已确认"；③ 的执行出口见执行检查单的认证探针脚本（盘点席通常无凭据，须代跑）。端点/原语面复核 = **对照在册原语结论复核**（本表该行括注 + 已有证据指针），不设 OpenAPI 快照文件——完整历史 schema 的机械比较能力就此明确放弃，出现追查任意接口漂移的真实需求时再评估入库快照（届时快照也须绑定实际服务身份）。复核触发不因版本未动而豁免：服务换部署、实际行为与在册结论冲突同样触发。证据四层不可互替：上游有原语 / WAO 已接线 / 真实运行成功 / 席位认证适用——`gen:certification` 再生成只反映代码声明与配置探针，不产生真实运行证据。
+**对象与证据**。对象身份 = 实际运行的东西。单目标只读探针命令：`node scripts/wao-node.cjs scripts/reliability/runtime-identity-cli.mjs --backend <name> --registry <file>`——**探配置目标必带 `--registry`**（缺省不读任何 registry、仅 PATH 级探测——正是②"不得拿 PATH 同名程序替代配置对象"的张力所在；仅 PATH 级身份探测可省）。每次调用取该 backend 首个匹配席位作 anchor 并在输出携带 `anchorAgentId`（**无席位 backend 返回 `anchorAgentId:null`——PATH 级探测的正常形态，非故障**），多部署逐目标各调一次，勿以单次调用代表全部目标。探针条目覆盖 KNOWN_BACKENDS 闭集全员（kimi-web 探宿主 kimi 二进制；zcode 经 backend `resolveInvocationPrefix` 以 node 前缀探桌面捆绑 zcode.cjs）——新 backend 入册时核对探针覆盖面。**证据单位是实际安装/部署，不是席位**：同一 harness 多席位可能用不同 binary / serveUrl——按实际目标去重，多目标在该行列子项，不得挑一个席位代表全部；PATH 探测只代表当前执行环境；**服务型 backend 的本机 CLI 与服务部署是两个对象，分别记录——CLI 版本差不推服务面**。宿主二进制版本对 HTTP attach 型只是**提醒，不证明 live 服务身份**（kimi-web 探针与 serveUrl 指向的服务没有身份关联，升级后旧服务可能仍在跑）——本地安装版本与运行服务身份分开记录，证据不足记"服务身份未确认"。**服务身份证据递进**（认证层级与载荷可识别性是两根轴，不压成一维阶梯）：① 目标地址有响应（裸端口存活；401 带 `WWW-Authenticate` 头可记高一档"讲 HTTP 的服务类"）→ ② 响应有产品特征但身份/版本证据不完整（可辨 banner / 产品结构而无版本 → 记"服务类型可辨，版本未确认"；认证后 200 无版本字段 = "认证可达、版本未确认"，居②③之间）→ ③ 版本确认——只认**显式版本字段**或**与宿主探针的一致比对**（认证成功但只回"healthy"同样不够③）。**认证与否单独记录为支撑证据**："认证通过"（token 被接受）本身是强身份线索；未认证的自报版本是弱证据。文档版本字段 ≠ 运行程序版本——字段语义未经证实时如实标"上游自报"。梯度 ①② 不得写成"身份已确认"；③ 的执行出口见执行检查单的认证探针脚本（盘点席通常无凭据，须代跑）。端点/原语面复核 = **对照在册原语结论复核**（本表该行括注 + 已有证据指针），不设 OpenAPI 快照文件——完整历史 schema 的机械比较能力就此明确放弃，出现追查任意接口漂移的真实需求时再评估入库快照（届时快照也须绑定实际服务身份）。复核触发不因版本未动而豁免：服务换部署、实际行为与在册结论冲突同样触发。证据四层不可互替：上游有原语 / WAO 已接线 / 真实运行成功 / 席位认证适用——`gen:certification` 再生成只反映代码声明与配置探针，不产生真实运行证据。
 
 **前置盘点（本地安装 × 官方最新版对照，升级建议的发现入口）**。harness 版本巡检（本节流程）的第一组动作：对本表行集（= KNOWN_BACKENDS 闭集，即 harness 目录清单）逐行走四步链——
 
@@ -320,8 +318,8 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 
 **`reportsCommandExitCode` 诚实声明（只声明，不放行）**：backend 类第六个能力
 声明成员，语义 = **WAO 今天能否产出命令退出码证据**（含 scorecard 的
-toolCallId↔tool_result 0/1 推断通道，非仅 wire 原生数值）。当前声明：codex /
-opencode-serve（wire 原生数值）、claude-code（逐条证明过的推断通道）为 true；zcode / kimi-web /
+toolCallId↔tool_result 0/1 推断通道，非仅 wire 原生数值）。当前声明：codex（wire
+原生数值）、claude-code（逐条证明过的推断通道）为 true；zcode / kimi-web /
 kimi-code / deepseek-harness / deepseek-acp 为 false。false 的依据如实：kimi-code 的
 `isError` 是对输出文本的关键词匹配（输出 `Process exited with code 7` 会被读成成功）；
 deepseek-harness 没有"非零退出必置 error"的实测；deepseek-acp 的 `tool_call_update`
@@ -350,7 +348,7 @@ backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先
 `runtime-drifted` advisory「建议重跑」（不删）；不进认证门、不加 registry schema
 字段。探测失败或无本地二进制时明确 `verified:false`，指纹按探测目标稳定派生为
 `unverified-v1-*`：这只避免同一未验证目标每次制造新键，绝不表示运行时身份已验证。
-opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
+例：zcode 无席位 fallback 裸名不在 PATH → 恒 honest unknown。
 
 **能力轴分层骨架**（组件层 / 组合层各测什么——全表按需扩充，本节只定层）：
 
@@ -484,7 +482,7 @@ npm run cli -- run sol --prompt "..." --background --model <modelId>
 
 语义要点：
 
-- **只替换 `model.id`**：注册表里 model 是嵌套对象（canonical `{id, contextWindow?}`；opencode-serve 是 `{providerID, id, variant}`）。覆盖只改 `.id`，兄弟字段（contextWindow / providerID / variant）全部保留；注册表没有 model 的 worker 会合成出 `{id}`。合成发生在 `validateAgentPolicy` 与 `run.started` 落盘之前——策略校验照常跑合成后的对象，`run.started` 的 `model` 字段即合成后策略，并**另加显式 `modelOverride` 字段**（审计可区分"改注册表"与"一次性覆盖"）。
+- **只替换 `model.id`**：注册表里 model 是嵌套对象（canonical `{id, contextWindow?}`；deepseek-acp 是 `{providerID, id}`）。覆盖只改 `.id`，兄弟字段（contextWindow / providerID）全部保留；注册表没有 model 的 worker 会合成出 `{id}`。合成发生在 `validateAgentPolicy` 与 `run.started` 落盘之前——策略校验照常跑合成后的对象，`run.started` 的 `model` 字段即合成后策略，并**另加显式 `modelOverride` 字段**（审计可区分"改注册表"与"一次性覆盖"）。
 - **回显 effective model**：前台 text 格式在派发成功时打印一行 `effective model: {...}`；`--format json` 把同一对象作为结果里的 `model` 字段；后台 JSON 输出带 `model` 字段。**失败模式**：WAO 不校验模型 id 是否真实存在——打错的模型名要到 provider 期（worker 启动后）才报错，回显就是让你在派发时刻立刻看见打错了什么（回显是 advisory：展示的是 WAO 实际下发了什么，不证明 provider 接受该 id）。
 - **resume 继承覆盖事实**：`resume`（含 daemon `--resume-on-start` 接管）从 `run.started.modelOverride` 同源重建覆盖——后台派发带 `--model` 后 runner 崩溃、daemon 接管续跑时，后半程仍跑派发时的模型，transcript 里的覆盖事实不失真。合成与形状门与 start 同一道（只替换 `.id`；持久化值非法则拒绝 resume，fail-closed）；resume 不接受调用方新传的覆盖。
 - **两道硬互斥（fail-fast，零副作用）**：
@@ -515,7 +513,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 
 - **只替换 `reasoning.effort`**：注册表里 reasoning 是嵌套对象（canonical `{effort}`）。覆盖只改 `.effort`，合成发生在 `validateAgentPolicy` 与 `run.started` 落盘之前——策略校验照常跑合成后的对象；`run.started` 的 `reasoning` 字段即合成后策略（无论有无覆盖都落盘，静态 reasoning 同样可审计），并**另加显式 `reasoningOverride` 字段**（审计可区分"改注册表"与"一次性覆盖"）。
 - **闭集值域**：`minimal / low / medium / high / xhigh / max`（`registry.js` 的 `REASONING_EFFORTS` SSOT，六值导出）。集外值（含大小写变体如 `HIGH`）以固定文案 fail-fast（不回显原值）。MCP `run_dispatch` 的 `reasoning` 参数走同一 SSOT——wire schema 直接序列化闭集枚举（zod enum，比正则更严）。
-- **无能力布尔（设计决策）**：不可表达（opencode-serve 拒绝任何 `reasoning.effort`）与条件不支持（kimi 仅 K3 模型 × {low,high,max}；deepseek-harness 仅 high|max）都走**既有 per-backend policy 门自然拒绝**——合成后的对象照常过 `validateAgentPolicy`，拒绝时追加指对 `--reasoning` 旗标的固定提示句（不回显值）。平面"能力布尔"编码不了这些条件支持，故不设。
+- **无能力布尔（设计决策）**：条件不支持（kimi 仅 K3 模型 × {low,high,max}；deepseek-harness 仅 high|max）走**既有 per-backend policy 门自然拒绝**——合成后的对象照常过 `validateAgentPolicy`，拒绝时追加指对 `--reasoning` 旗标的固定提示句（不回显值）。平面"能力布尔"编码不了这些条件支持，故不设。
 - **与 `--model` 可同用**：两个覆盖各改各的字段（`.id` / `.effort`），互不干扰；前台回显合并为一行 `effective model: {...}, reasoning: {...}`（advisory：展示 WAO 实际下发了什么，不证明 provider 接受）。
 - **resume 继承覆盖事实**：`resume`（含 daemon `--resume-on-start` 接管）从 `run.started.reasoningOverride` 同源重建覆盖——后台派发带 `--reasoning` 后 runner 崩溃、daemon 接管续跑时，后半程仍跑派发时的力度。合成与闭集门与 start 同一道；持久化值非法则拒绝 resume（fail-closed，零 re-spawn）；resume 不接受调用方新传的覆盖。
 - **两道硬互斥（fail-fast，零副作用，"任一覆盖在场即拒"）**：
@@ -524,7 +522,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 - **正交放行**：`--reasoning` × `--read-only` / × `--delivery-spec-file`（及 MCP `delivery` 块）可同用（同 `--model` 的认证组合声明失效注意事项）。
 - **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝；daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
 
-（MCP 面）**单次推理力度覆盖（可选，`reasoning`）**：`run_dispatch` 顶层可带 `reasoning`（`"reasoning": "minimal"|"low"|"medium"|"high"|"xhigh"|"max"`，CLI 等价 `run --reasoning`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 reasoning 的 `.effort`，与 `model` 参数可同用。wire schema 直接序列化闭集枚举（`registry.js` 的 `REASONING_EFFORTS` SSOT 经 runDispatch 下向 re-export——zod enum，比正则更严，与核心校验器零漂移）。互斥与放行：× provider-session 复用以固定文案拒绝（闭集码 `reasoning_override_reuse_conflict`——"A per-dispatch reasoning effort override cannot be combined with provider-session reuse … must run one reasoning effort"）；认证互斥在 MCP 侧不可达（同 `model` 的 server-owned `false` 构造）；× `delivery` 块放行。不可表达（opencode-serve）与条件不支持（kimi K3-only、dsh high|max）组合走既有 per-backend policy 门自然拒绝。**`run_dispatch_contract_check` 共享该输入 schema 但有意忽略 `reasoning`**（它只就 delivery 合同给 advisory——与对 `model` 的忽略同一先例）。派发成功不回显 effective reasoning（MCP 输出 schema 冻结）；需即时确认时读 transcript 的 `run.started.reasoning`。
+（MCP 面）**单次推理力度覆盖（可选，`reasoning`）**：`run_dispatch` 顶层可带 `reasoning`（`"reasoning": "minimal"|"low"|"medium"|"high"|"xhigh"|"max"`，CLI 等价 `run --reasoning`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 reasoning 的 `.effort`，与 `model` 参数可同用。wire schema 直接序列化闭集枚举（`registry.js` 的 `REASONING_EFFORTS` SSOT 经 runDispatch 下向 re-export——zod enum，比正则更严，与核心校验器零漂移）。互斥与放行：× provider-session 复用以固定文案拒绝（闭集码 `reasoning_override_reuse_conflict`——"A per-dispatch reasoning effort override cannot be combined with provider-session reuse … must run one reasoning effort"）；认证互斥在 MCP 侧不可达（同 `model` 的 server-owned `false` 构造）；× `delivery` 块放行。条件不支持（kimi K3-only、dsh high|max）组合走既有 per-backend policy 门自然拒绝。**`run_dispatch_contract_check` 共享该输入 schema 但有意忽略 `reasoning`**（它只就 delivery 合同给 advisory——与对 `model` 的忽略同一先例）。派发成功不回显 effective reasoning（MCP 输出 schema 冻结）；需即时确认时读 transcript 的 `run.started.reasoning`。
 
 ## retry 的 per-dispatch 覆盖继承（与 resume 重建链对称）
 

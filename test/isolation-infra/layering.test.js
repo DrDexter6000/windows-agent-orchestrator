@@ -199,8 +199,6 @@ const WHITELIST_HARD_CAP = 12;
 // 字符串字面量相对动态 import() 的冻结披露清单（`${from} -> ${to}`）。
 // 集合变大或变小都会红（deepEqual 双向相等）；新增合法动态依赖 = 显式扩单。
 const DYNAMIC_DISCLOSED = Object.freeze([
-  // src/application/runCollect.js:294 —— runCollect 拉取 opencode 消息页（application→backends 下向）
-  "src/application/runCollect.js -> src/backends/opencodeServe.js",
   // src/commands/run.js:282/378/379 —— timeoutPolicy（shared）+ diagnosis/transcript（core）
   "src/commands/run.js -> src/application/timeoutPolicy.js",
   "src/commands/run.js -> src/diagnosis.js",
@@ -212,7 +210,7 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/commands/stop.js -> src/application/runStop.js",
   // src/frictionLog.js:52 —— diagnosis（core 同层）
   "src/frictionLog.js -> src/diagnosis.js",
-  // src/runManager.js:1260/2082/2162 —— timeoutPolicy/processStopVerify（shared）+ opencodeStopVerify（backends）
+  // src/runManager.js —— timeoutPolicy/processStopVerify（shared）+ serveStopVerify（backends）
   "src/runManager.js -> src/application/processStopVerify.js",
   "src/runManager.js -> src/application/timeoutPolicy.js",
   "src/commands/lifecycle.js -> src/application/timeoutPolicy.js",
@@ -224,7 +222,7 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/commands/runs.js -> src/application/lineageClose.js",
   // runs settle 结算出口：CLI 动态接线（adapters→application 下向）。
   "src/commands/runs.js -> src/application/runSettle.js",
-  "src/runManager.js -> src/backends/opencodeStopVerify.js",
+  "src/runManager.js -> src/backends/serveStopVerify.js",
 ]);
 
 // ===== 纯函数扫描器 =====

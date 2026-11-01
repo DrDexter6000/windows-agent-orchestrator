@@ -4,7 +4,7 @@
 //
 // 命令族：retry <runId> / resume <runId>
 // retry：读旧 run 的 prompt.sent 重新 spawn（新 runId）。
-// resume：attach 到已有 session（opencode HTTP 类，进程已死则重 spawn）。
+// resume：重放恢复（把原 prompt 重放进新进程或新会话）。
 //   ADR-0030 实施批起：不带 --wait 的 resume fork detached runner 托管（TD-148
 //   姊妹脸 (a) 根修）；带 --wait 前台等待（到期=通知不杀）。
 //

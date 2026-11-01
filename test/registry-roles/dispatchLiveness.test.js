@@ -23,7 +23,7 @@ import {
   DEFAULT_MAX_ROUNDS,
   BACKOFF_BASE_MS,
   COMPLETED_EMPTY_MARKER,
-  PROCESS_BACKEND_IDS,
+  sessionEndsWithProcess,
   RESERVED_PASSTHROUGH_FLAGS,
 } from "../../scripts/dispatch-with-liveness.mjs";
 // SSOT 接地钉：脚本常量必须是 src 闭集的成员/派生，不允许第二套分类框架。
@@ -261,13 +261,11 @@ test("TD-158 接地: 终态判定转发 transcript.js TERMINAL_STATES（非第�
   assert.deepEqual([...TERMINAL_STATES], ["completed", "failed", "aborted", "timed_out"]);
 });
 
-test("TD-158 接地: 进程式 backend 闭集由 KNOWN_BACKENDS 派生（排除 opencode-serve）", () => {
-  assert.ok(PROCESS_BACKEND_IDS.includes("claude-code"));
-  assert.ok(PROCESS_BACKEND_IDS.includes("codex"));
-  assert.ok(PROCESS_BACKEND_IDS.includes("kimi-code"));
-  assert.ok(PROCESS_BACKEND_IDS.includes("deepseek-harness"));
-  assert.ok(!PROCESS_BACKEND_IDS.includes("opencode-serve"));
-  for (const b of PROCESS_BACKEND_IDS) assert.ok(KNOWN_BACKENDS.includes(b));
+test("TD-158 接地: 条件③按 backend 的 sessionOutlivesProcess 属性判定（不按名单）", () => {
+  for (const backend of KNOWN_BACKENDS.filter((b) => b !== "kimi-web")) {
+    assert.equal(sessionEndsWithProcess({ backend }), true, `${backend} 的会话随进程结束`);
+  }
+  assert.equal(sessionEndsWithProcess({ backend: "kimi-web" }), false, "kimi-web 的会话活过进程");
 });
 
 // ===== auditor 批次2 复核回归钉（F3/F4）=====

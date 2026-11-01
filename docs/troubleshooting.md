@@ -3,8 +3,7 @@
 > 定位：本文件是 WAO 运维/诊断的按需读取层。SKILL.md 是 agent 入口层（每次加载技能都读）；
 > 本文件是出问题时第一时间读的诊断手册——记录已知的故障模式、根因、诊断套路、修复方法。
 >
-> SKILL.md 的避坑小节（opencode-serve operations & pitfalls）讲"避免踩坑"的预防知识；
-> 本文件讲"已经踩坑了怎么诊断"的排障知识。两者互补。
+> 本文件讲"已经踩坑了怎么诊断"的排障知识。
 >
 > 新发现的坑按 symptom/root-cause/fix 三段式追加到对应章节末尾，保持本文件持续更新。
 
@@ -15,15 +14,12 @@
 | 症状 | 去哪看 |
 |------|--------|
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
-| worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key401) |
-| worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
 | `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-run) |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
 | `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
 | zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
 | 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.15](#715-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
-| opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
 | 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
@@ -73,10 +69,9 @@
 
 ## 1. provider 故障
 
-opencode-serve 是 HTTP 类 backend：worker 的任务由 serve 转发给 provider API。
-故障可能发生在三层：provider 认证 / provider 白名单 / provider 模型行为。
-关键区别：opencode TUI 正常 ≠ serve 正常——TUI 继承了终端 env + 可能带特殊 header，
-serve 后台进程不一定。
+provider 故障可能发生在三层：provider 认证 / provider 白名单 / provider 模型行为。
+HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——serve 进程的
+凭据/环境与交互式 CLI 不一定相同，排障时先分清故障在哪一层。
 
 ### 诊断套路（worker 卡 submitted 时）
 
@@ -85,72 +80,27 @@ serve 后台进程不一定。
    - 看最后状态：submitted（卡住）/ running（正常）/ timed_out
    - 看 backendSessionId
 
-2. 直接查 serve 端 session message（绕过 WAO 看原始响应）:
-   curl -s "http://127.0.0.1:4298/session/<backendSessionId>/message?limit=50"
+2. 查最近的 run.event 消息/错误事实（转录即真相：所有 run 都从转录取回）:
+   npm run cli -- tail <runId> --limit 50
 
-3. 看 assistant message 的结构:
-   - 有 info.error → provider 报错（§1.1）
-   - 有 parts 内容 → 正常回复，WAO 完成判定的问题（§6）
-   - 只有 user message，无 assistant message → 静默拒绝（§1.3）
-   - assistant message parts 为空 + tokens 全 0 → 见 §1.1/§1.3
+3. 看最后几条事件:
+   - 有 provider 错误事实（run.error、失败原文）→ provider 报错（§1.1）
+   - 有 assistant 消息 → 正常回复，看完成判定（§6）
+   - 提交后既无回复也无错误 → 上游静默拒收；配了 silentTimeout 会按时收口（§6.6）
 ```
 
 ### 1.1 provider 返回 error（401/欠费/限流）
 
 - **症状**：worker 快速 `done(failed)`，error 含 "provider error [401]" / "身份验证失败" / "quota"
-- **根因**：provider API 返回错误，opencode serve 把它包成 `{info:{role:assistant, error:{name, data:{message, statusCode}}}, parts:[]}` 的 message
-- **WAO 行为**：两种完成模式都检测 `info.error`——发现即 `done(failed)` 并透传错误，不等超时。`MessageAbortedError` 除外：它是我们 abort 的副作用，不是 provider 错误
-- **修复**：按 statusCode 处理——401 查 key（§1.2），quota/限流 等待或换 provider
-
-### 1.2 serve 进程缺 provider key（401）
-
-- **症状**：worker 报 401 身份验证失败，但 opencode TUI 用同一个 provider 正常
-- **根因**：opencode.json 用 `{env:ZHIPU_API_KEY}` / `{env:KIMI_API_KEY}` 引用 key。
-  serve 进程没继承这些 env 变量 → 发请求时无认证 → 401。
-  TUI 从终端继承 env 所以正常；serve 后台进程启动方式不同，env 可能缺失。
-- **验证**：
-  ```
-  # 1. 确认 key 本身有效（直打 provider API）
-  curl -s -X POST "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" \
-    -H "Authorization: Bearer <ZHIPU_API_KEY>" -H "Content-Type: application/json" \
-    -d '{"model":"glm-5.2","messages":[{"role":"user","content":"OK"}],"max_tokens":5}'
-  # 如果直打成功但 serve 401 → serve 缺 key
-
-  # 2. 确认 key 在 User registry
-  powershell -Command "[System.Environment]::GetEnvironmentVariable('ZHIPU_API_KEY','User')"
-  ```
-- **修复**：用 `scripts/serve.ps1` 启动 serve——它从 User registry 读 key 注入 serve 进程。
-  不要用裸 `opencode serve`（可能不带 key）。serve.ps1 支持的 key：ZHIPU_API_KEY / KIMI_API_KEY / DEEPSEEK_API_KEY（新增 provider 在脚本 $keyNames 补一行）
-
-### 1.3 Kimi 白名单（静默拒绝）
-
-- **症状**：Kimi worker session 建立成功、prompt 投递成功，但静默无响应——无 assistant message、无 error message、WAO 卡 submitted 超时。opencode TUI 用 Kimi 正常。
-- **根因**：Kimi 的 coding endpoint（`api.kimi.com/coding/v1`）做了客户端白名单，只接受认可的 coding agent 客户端。
-  opencode.json 通过 `User-Agent: opencode/1.15.4` 伪装 header 过白名单——但这个 header 只挂在 model id `kimi-for-coding` 上（provider 层 + model 层都配了）。
-  用其它 model id（`k2p6` / `kimi-k2.7`）没有 header 配置 → Kimi 静默拒绝（连 error 都不返回，WAO 无法靠 message.error 检测）。
-- **验证**：
-  ```
-  # 直打 Kimi API 确认白名单
-  curl -s -X POST "https://api.kimi.com/coding/v1/chat/completions" \
-    -H "Authorization: Bearer <KIMI_API_KEY>" -H "Content-Type: application/json" \
-    -d '{"model":"kimi-for-coding","messages":[{"role":"user","content":"OK"}],"max_tokens":5}'
-  # 返回 "access_terminated_error" → 白名单拒绝（直打也不行，需 User-Agent header）
-  ```
-- **修复**：opencode 通道的 Kimi worker，model id 必须用 `kimi-for-coding`（唯一带 User-Agent header 的）。
-  providers.json 不要用 `k2p6`/`kimi-k2.7` 等其它 id。
-- **检测边界**：静默拒绝没有 error message，完成判定无法从消息里看到。可选的 silentTimeout 能把等待截短为早失败（§6.6，默认不启用）；未启用时只能靠 waitTimeout 兜底超时。
-
-### 1.4 DeepSeek-v4-flash 无限多轮
-
-- **症状**：DeepSeek worker 回答后继续无限生成确认轮，token 烧到 waitTimeout
-- **根因**：模型行为，每轮 emit step-finish 但 `time.completed` 永远不设
-- **修复**：给该 worker 配 `completionMode: "first-stable"`（registry 字段，默认 snapshot-stable）。注意 first-stable 的完成判定对多轮工具调用任务有误判风险（§6.2）
+- **根因**：provider API 返回错误，worker runtime 把错误包进失败响应
+- **WAO 行为**：完成判定检测到错误事实即 `done(failed)` 并透传错误，不等超时
+- **修复**：按 statusCode 处理——401 查 key（§1.6 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
 
 ### 1.5 kimi-code backend（进程式，阶段 2 新增）
 
-- **是什么**：Kimi via `kimi-code` CLI（进程式 backend），官方支持 Kimi，过白名单无需伪装 header。进程死即会话死，不存在 opencode 的 stop 虚假成功风险。Kimi 车道现状（kimi-web / kimi-code）见 `docs/usage/lanes.md`。
+- **是什么**：Kimi via `kimi-code` CLI（进程式 backend），官方支持 Kimi，过白名单无需伪装 header。进程死即会话死，没有 serve 型的停止验证问题。Kimi 车道现状（kimi-web / kimi-code）见 `docs/usage/lanes.md`。
 - **配置**：`backend: "kimi-code"`，`cwd` 必填。registry 条目的 `args` 可追加参数，但不要加 `--yolo` 或 `--auto`：`kimi -p` 不能与它们同用，会以 `Cannot combine --prompt with ...` 退出。binary 默认走 PATH 里的 `kimi`。
-- **vs opencode Kimi**：kimi-code 更安全——进程式，加 kimi 自带 max_steps_per_turn=100 + agent_task_timeout_s=900。
+- **自带控制**：kimi 自带 max_steps_per_turn=100 + agent_task_timeout_s=900。
 - **已知局限：token 预算硬闸门对 kimi-code 无效**。kimi stream-json 不含 usage/token 字段，进程式 backend 无 session endpoint 可轮询。给 kimi agent 配 tokenBudget 不会报错但不生效。kimi 的成本控制靠：kimi 自带超时 + WAO `waitTimeout`。这是进程式 backend 的固有限制（claude-code/codex 同样无 session endpoint，但 claude-code 的 result 事件含 usage，kimi 不含）。
 - **完成判定**：kimi 无显式 done 事件，靠进程 exit（exit 0 → done(completed)，非 0 → done(failed)），由 ProcessBackend 兜底。注意 exit 0 仅表示传输完成，不等于 worker 产出了可用结果——见 §6.3 末尾的 completed-empty 说明。
 
@@ -247,16 +197,16 @@ serve 后台进程不一定。
 - **根因**：旧 run 没清理 + 泄漏 session（session 未被 kill 的 run 永远卡在 running/submitted）
 - **修复**：
   - 手动清理：`npm run cli -- runs prune`（支持 `--older-than` 按时限清理、`--archive` 归档），或删除 `runs/` 下的旧 jsonl
-  - 杀泄漏 session：`taskkill /IM opencode.exe /F`（会杀所有 serve session，慎用）
-- **预防**：run 结束后 WAO 会兜底发送 abort，并在 opencode 类 handle 上做后台 quietness 验证。历史遗留 session 仍需手动清。
+  - kimi-web 车道的会话清扫见 `wao serve sweep`（§4.2）
+- **预防**：run 结束后 WAO 会兜底发送 abort，并在 serve 类 handle 上做后台 quietness 验证。历史遗留 session 仍需手动清。
 
 ### 4.2 旧泄漏的 serve session（quota 风险）
 
-- **症状**：serve 进程里有多个 ESTABLISHED session，对应已结束的 run，仍在烧 token
-- **根因**：run 结束时未被 abort 的 serve session 不会被 provider 停止——DeepSeek/GLM 这类模型会一直烧到 quota
-- **现状**：`stop` 命令和 RunManager 终态清理路径都接入后台 quietness 验证——abort 后联合观察 OpenCode session status 与 token/message 稳定性。观察面不可读会诚实记录 unverified；确认仍 active 时告警，但不会自动全局 taskkill 其他 session。**仍务必给每个 opencode agent 配 `tokenBudget`**——这是不依赖 abort 生效的最后一道防线。
-- **修复**：`taskkill /IM opencode.exe /F` 杀 serve（连带所有 session），用 serve.ps1 重启
-- **诊断**：`netstat -ano | findstr :4298 | findstr ESTABLISHED` 看 session 数
+- **症状**：kimi web serve 里有多个会话对应已结束的 run，仍在烧 token
+- **根因**：run 结束时未被中止的会话不会被 provider 停止——无限多轮模型会一直烧到 quota
+- **现状**：`stop` 命令和 RunManager 终态清理路径都接入后台 quietness 验证——abort 后轮询会话状态与 token/message 稳定性；观察面不可读会诚实记录 unverified，确认仍 active 时告警。kimi-web 终态还会释放上游会话（`supportsSessionRelease`）；WAO 拉起的 serve 由空闲看护在闲置一段时间后优雅关停（`docs/usage/lanes.md`）
+- **修复**：`wao serve sweep` 清扫 WAO 认领且 worktree 已亡的会话（默认 dry-run，`--apply` 才删）；必要时 `wao serve recycle` 重启 serve。
+- **诊断**：`wao serve status` 看实例元数据与会话计数
 
 ### 4.3 run_await_result 返回 read_failure（transcript 读失败）
 
@@ -314,25 +264,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ## 6. 完成判定
 
-WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-stable`（配 `completionMode`）。
-
-### 6.1 snapshot-stable 对慢响应 + 短 timeout 误判超时
-
-- **症状**：worker 实际回复了，但 run 还是 timed_out
-- **根因**：snapshot-stable 需要两轮稳定（看到 assistant → 等 interval → 快照不变 → done）。
-  如果 waitTimeout < (响应时间 + 2×interval)，第二轮确认来不及就超时
-- **修复**：对慢响应模型（GLM 首次冷启动 ~30s），waitTimeout 设为响应时间的 2-3 倍。或用 first-stable（快，但有 §6.2 风险）
-
-### 6.2 first-stable 完成判定（C' 重设计，已修复）
-
-- **判据**：first-stable 以"**首条含非空 text part 的 assistant message**"为完成信号。
-  text part 精确区分"还在干活（工具轮，有 tool 无 text）"和"给出答案（text 出现）"。
-  完成后 emit 首条 assistant 并立即 abort serve 端 session，不等后续重复轮。
-- **为什么不看 step-finish**：DeepSeek 每轮（含工具轮）都 emit step-finish——把它当完成
-  信号会在工具轮截断多轮任务。
-- **取舍**：首条 text 即完成——任务需要模型多轮正文时会被提前截断。适用于回答后无限
-  重复确认轮的模型（DeepSeek-v4-flash 等，在 registry 条目里配 `completionMode: "first-stable"`；缺省
-  是 `snapshot-stable`）。
+完成判定在各 backend 内：进程式 backend 按解析到的 done 事件，缺省按进程退出码收口（§6.3）；kimi-web 按 transcript 里本轮的终态；zcode 见 §6.9。completed 却没有 assistant 文本的情形，另由 scorecard 的 `requireAssistantText` 规则拦截。
 
 ### 6.3 ProcessBackend（claude-code/codex）exit 1 → done(failed)（已实现）
 
@@ -355,22 +287,12 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   （parser `done(completed)` 与 exit-0 兜底两条路径同时生效）。有效的 tool-only /
   command-only / file-written 完成仍判 `none`。
 
-### 6.5 snapshot-stable 伪完成（codex 实测暴露，已修复）
+### 6.6 静默无响应早失败（silentTimeout）
 
-- **判据**：snapshot-stable 的 completed 判定要求"快照稳定 + **至少一条 assistant message
-  有非空 text part**"——GLM 在 tool-call 轮的 message 有 tool part（非 step-start）但无
-  text（读完文件没答），只看快照稳定会把它判成 completed（`assistantTextCount=0` 的伪
-  完成）。无 text 则重置观察状态继续等，不判 completed（与 first-stable C' 对齐）。
-- **纵深防御**：scorecard 的 `requireAssistantText` 规则——即使完成判定漏了，scorecard
-  也会拦截"completed 但无 assistant text"。
-
-### 6.6 静默无响应早失败（silentTimeout，已实现）
-
-- **症状**：Kimi 白名单 / 不存在的 model：serve 不产 error message 也不产 assistant message
-  → 只能等完整 waitTimeout
-- **现状**：两个完成模式都支持 `silentTimeout`——超过该时长仍无 assistant message 无
-  error → `done(failed)`（"silent timeout"）。默认不启用；启用需在 streamEvents 调用时传
-  silentTimeout（ms）
+- **症状**：上游静默拒收（不报错也不回复）。waitTimeout 到期只通知、不终止（ADR-0030），收口要靠下面的判据。
+- **现状**：`silentTimeout`（ms；调用参数优先，其次 registry 条目，再次全局配置）在各 backend 的判据不同：
+  - 进程式 backend：开始读流后超过该时长仍没有任何 parser 事件 → `done(failed)`（"silent timeout"）。
+  - kimi-web：提交后超过该时长，本轮的 turn 仍没出现在 transcript 里 → silent fail；没设 silentTimeout 时，连续 8 拍不见本轮 turn 同样失败收口。turn 出现之后由无进展出口管（见 `src/backends/factory.js` 能力说明的 vitalSigns）。
 
 ### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"
 
@@ -466,9 +388,9 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 7.5 agents.json 配置漂移
 
-- **症状**：worker 用了过时的配置（旧 worker 名、缺 tokenBudget、backend 不认）
+- **症状**：worker 用了过时的配置（旧 worker 名、backend 不认、字段缺漏）
 - **根因**：agents.json 没跟上入库模板 `config/agents.example.json`，或沿用了旧版配置
-- **验证**：`npm run cli -- registry validate --registry config/agents.json` 检查所有 worker。opencode worker 必须有 tokenBudget
+- **验证**：`npm run cli -- registry validate --registry config/agents.json` 检查所有 worker
 - **修复**：对照 `config/agents.example.json` 更新 agents.json，重跑 registry validate
 
 ### 7.6 wao doctor 体检
@@ -476,7 +398,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json] [--strict] [--warn-as-error]`；`--warn-as-error` 只把 WARN 也卡成非零退出（CI 用），不改报告内容；`--strict` 加跑 src/ 的 JS parse smoke
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性（opencode worker 必须配 tokenBudget）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续

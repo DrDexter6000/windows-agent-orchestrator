@@ -25,7 +25,7 @@ import { RunManager } from "../../src/runManager.js";
 import { readTranscript, findState, JsonlTranscript, findLastEventSeq } from "../../src/transcript.js";
 import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
 
-// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+// kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
 process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
 process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
 
@@ -47,7 +47,7 @@ function silentFetch() {
 }
 
 function mockRegistry(runDir) {
-  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } };
+  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } };
 }
 
 // ============================================================

@@ -2,7 +2,7 @@
 //
 // M9-4A: shared run collection application service — TDD tests.
 //
-// Proves that CLI collect logic (process reconstruction + serve backend fetch +
+// Proves that CLI collect logic (transcript reconstruction +
 // messages.collected durable fact) is extracted into a shared, argv-free,
 // console-free, MCP-free application service. The algorithm exists exactly once;
 // CLI and MCP both call it.
@@ -120,9 +120,8 @@ test("M9-4A-02: limit truncates reconstructed events to the last N", async () =>
 // M9-4A-03: missing session.created or backendSessionId → fail-closed, no fetch/append.
 // ---------------------------------------------------------------------
 
-test("M9-4A-03: missing session.created → fail-closed, no fetch or append", async () => {
+test("M9-4A-03: missing session.created → fail-closed, no append", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m94a-03-"));
-  let fetchCalls = 0;
   let appendCalls = 0;
   try {
     const runDir = join(dir, "runs");
@@ -132,52 +131,9 @@ test("M9-4A-03: missing session.created → fail-closed, no fetch or append", as
     );
     await assert.rejects(() => collectRunMessages({
       runId: "run_nosession", runDir,
-      fetchServeMessagesFn: async () => { fetchCalls += 1; return { data: [] }; },
       appendCollectedFn: async () => { appendCalls += 1; },
     }));
-    assert.equal(fetchCalls, 0, "fetch not called");
     assert.equal(appendCalls, 0, "append not called");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-// ---------------------------------------------------------------------
-// M9-4A-04: serve path — fetch called once with exact serveUrl/sessionId/cwd + caller limit.
-// ---------------------------------------------------------------------
-
-test("M9-4A-04: serve path calls fetch once with exact params", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-04-"));
-  let fetchCalls = 0;
-  let capturedFetch = null;
-  try {
-    const runDir = join(dir, "runs");
-    writeTranscript(runDir, "run_serve",
-      jl({ type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_123", cwd: "/repo", runId: "run_serve", agentId: "w" }) +
-      jl({ type: "run.started", backend: "opencode-serve", cwd: "/repo", ts: "2026-07-14T00:00:00.000Z", runId: "run_serve", agentId: "w" }) +
-      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:01:00.000Z", runId: "run_serve", agentId: "w" }),
-    );
-    const fakeFetch = async (serveUrl, sessionId, opts) => {
-      fetchCalls += 1;
-      capturedFetch = { serveUrl, sessionId, opts };
-      return { data: [{ id: "m1", info: { role: "assistant" }, parts: [{ type: "text", text: "result" }] }] };
-    };
-    let appendedEvent = null;
-    const result = await collectRunMessages({
-      runId: "run_serve", runDir, limit: 30,
-      fetchServeMessagesFn: fakeFetch,
-      appendCollectedFn: async (type, payload) => { appendedEvent = { type, payload }; },
-    });
-
-    assert.equal(fetchCalls, 1, "fetch called exactly once");
-    assert.equal(capturedFetch.serveUrl, "http://127.0.0.1:4297", "exact serveUrl");
-    assert.equal(capturedFetch.sessionId, "sess_123", "exact sessionId");
-    assert.equal(capturedFetch.opts.cwd, "/repo", "exact cwd from run.started");
-    assert.equal(capturedFetch.opts.limit, 30, "caller limit passed");
-
-    // serve path: result has the backend response data.
-    assert.ok(result.data, "serve result has data");
-    assert.ok(!result.reconstructed, "serve path not reconstructed");
   } finally {
     cleanupDir(dir);
   }
@@ -211,55 +167,6 @@ test("M9-4A-05: process success appends exactly one messages.collected, terminal
     // Terminal state unchanged: read events, check last state is still failed.
     const events = await readTranscript(join(runDir, "run_proc.jsonl"));
     assert.equal(findState(events), "failed", "terminal unchanged");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-// ---------------------------------------------------------------------
-// M9-4A-06: serve success → exactly one messages.collected, terminal unchanged.
-// ---------------------------------------------------------------------
-
-test("M9-4A-06: serve success appends exactly one messages.collected, terminal unchanged", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-06-"));
-  let appendCalls = 0;
-  try {
-    const runDir = join(dir, "runs");
-    writeTranscript(runDir, "run_serve",
-      jl({ type: "session.created", backend: "opencode-serve", serveUrl: "http://x", backendSessionId: "sess_1", runId: "run_serve", agentId: "w" }) +
-      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:00.000Z", runId: "run_serve", agentId: "w" }),
-    );
-    await collectRunMessages({
-      runId: "run_serve", runDir,
-      fetchServeMessagesFn: async () => ({ data: [{ id: "m1" }] }),
-      appendCollectedFn: async () => { appendCalls += 1; },
-    });
-    assert.equal(appendCalls, 1, "exactly one append for serve");
-    const events = await readTranscript(join(runDir, "run_serve.jsonl"));
-    assert.equal(findState(events), "completed", "terminal unchanged");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-// ---------------------------------------------------------------------
-// M9-4A-07: fetch/reconstruction failure → no append.
-// ---------------------------------------------------------------------
-
-test("M9-4A-07: serve fetch failure → no messages.collected appended", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-07-"));
-  let appendCalls = 0;
-  try {
-    const runDir = join(dir, "runs");
-    writeTranscript(runDir, "run_serve",
-      jl({ type: "session.created", backend: "opencode-serve", serveUrl: "http://x", backendSessionId: "sess_1", runId: "run_serve", agentId: "w" }),
-    );
-    await assert.rejects(() => collectRunMessages({
-      runId: "run_serve", runDir,
-      fetchServeMessagesFn: async () => { throw new Error("network down"); },
-      appendCollectedFn: async () => { appendCalls += 1; },
-    }));
-    assert.equal(appendCalls, 0, "no append on fetch failure");
   } finally {
     cleanupDir(dir);
   }
@@ -312,12 +219,11 @@ test("M9-4A-09: two collects → two messages.collected events, terminal unchang
 });
 
 // ---------------------------------------------------------------------
-// M9-4A-10: malicious/path-traversal/blank runId rejected before read/fetch/append.
+// M9-4A-10: malicious/path-traversal/blank runId rejected before read/append.
 // ---------------------------------------------------------------------
 
-test("M9-4A-10: malicious runId rejected before read/fetch/append", async () => {
+test("M9-4A-10: malicious runId rejected before read/append", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m94a-10-"));
-  let fetchCalls = 0;
   let appendCalls = 0;
   let readCalls = 0;
   const fakeRead = async () => { readCalls += 1; return []; };
@@ -329,7 +235,6 @@ test("M9-4A-10: malicious runId rejected before read/fetch/append", async () => 
         await collectRunMessages({
           runId: bad, runDir: dir,
           readTranscriptFn: fakeRead,
-          fetchServeMessagesFn: async () => { fetchCalls += 1; return { data: [] }; },
           appendCollectedFn: async () => { appendCalls += 1; },
         });
       } catch {
@@ -338,7 +243,6 @@ test("M9-4A-10: malicious runId rejected before read/fetch/append", async () => 
       assert.ok(threw, `malicious runId ${JSON.stringify(bad)} must throw`);
     }
     assert.equal(readCalls, 0, "readTranscript never called");
-    assert.equal(fetchCalls, 0, "fetch never called");
     assert.equal(appendCalls, 0, "append never called");
   } finally {
     cleanupDir(dir);
@@ -408,37 +312,6 @@ test("M9-4A-12: messages.collected runId correctly attributed when first event l
     assert.equal(collected.length, 1, "one messages.collected");
     // The audit event's runId must be the validated arg, not "unknown".
     assert.equal(collected[0].runId, runId, "messages.collected runId is the validated arg, not unknown");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-// ---------------------------------------------------------------------
-// M9-4A-13: serve path messages.collected runId correctly attributed
-//           (Reviewer A CTO rework P1: serve branch must pass runId too).
-// ---------------------------------------------------------------------
-
-test("M9-4A-13: serve path messages.collected runId = validated arg (first event no runId)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-13-"));
-  try {
-    const runDir = join(dir, "runs");
-    const runId = "run_serve_attr";
-    // First event lacks runId field; session.created has serveUrl (serve path).
-    writeTranscript(runDir, runId,
-      jl({ type: "run.submitted", agentId: "researcher", ts: "2026-07-14T00:00:00.000Z" }) +
-      jl({ type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_serve", runId, agentId: "researcher" }) +
-      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "researcher" }),
-    );
-    // Use default (real) append + fake fetch.
-    await collectRunMessages({
-      runId, runDir,
-      fetchServeMessagesFn: async () => ({ data: [{ id: "m1" }] }),
-    });
-
-    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
-    const collected = events.filter((e) => e.type === "messages.collected");
-    assert.equal(collected.length, 1, "one messages.collected");
-    assert.equal(collected[0].runId, runId, "serve path runId = validated arg, not unknown/absent");
   } finally {
     cleanupDir(dir);
   }

@@ -372,7 +372,7 @@ test("TD-233-03: kimi-web unverified stop — alert lands in runDir even with de
 
     const { stopRun } = await import("../../src/application/runStop.js");
     const captured = [];
-    // kimi-web 的停止目标解析需要 registry agent + token（61a 迁移加的面）；
+    // kimi-web 的停止目标解析需要 registry agent + token；
     // executeStop 仍注入——这里钉的是告警落点，不是真停止面（那在 KW-01/02）。
     const result = await withKwToken(() => stopRun({
       runId: "run_td23303", runDir: dir, registryPath: writeKwRegistry(dir, { coder_kw: kwAgent(dir) }),
@@ -561,7 +561,7 @@ test("KW-03: 停止目标解析失败各腿 → 不认领终态、对服务器�
       { name: "agent not registered", agents: { other_kw: kwAgent(dir) }, text: SERVER_STOP_ROUTE_TEXT.agentUnavailable },
       {
         name: "backend differs",
-        agents: { coder_kw: { backend: "opencode-serve", cwd: dir, serveUrl: KW_SERVE, model: { providerID: "p", id: "m" } } },
+        agents: { coder_kw: { backend: "claude-code", cwd: dir } },
         text: SERVER_STOP_ROUTE_TEXT.agentMismatch,
       },
       { name: "serveUrl differs", agents: { coder_kw: kwAgent(dir, { serveUrl: "http://127.0.0.1:4999" }) }, text: SERVER_STOP_ROUTE_TEXT.agentMismatch },
@@ -615,42 +615,6 @@ test("KW-03: 停止目标解析失败各腿 → 不认领终态、对服务器�
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("KW-04: opencode-serve 路由不读 registry——registry 坏档照样停下，事件与告警文案不变", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-kw-04-"));
-  try {
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, "{ not json", "utf8");
-    const tp = join(dir, "run_kw04.jsonl");
-    const t = new JsonlTranscript(tp, { runId: "run_kw04", agentId: "a" });
-    await t.append("run.started", { backend: "opencode-serve" });
-    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_kw04", serveUrl: "http://127.0.0.1:9" });
-    await t.transitionState(null, "pending", "created");
-    await t.transitionState("pending", "running", "first_event");
-    const { stopRun } = await import("../../src/application/runStop.js");
-    const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
-    const captured = [];
-    let target = null;
-    const result = await stopRun({
-      runId: "run_kw04", runDir: dir, registryPath,
-      deps: {
-        executeStop: async (b) => { target = b; return { verified: false, taskkillCalled: false }; },
-        alert: alertCapture(captured),
-      },
-    });
-    assert.ok(target instanceof OpenCodeServeBackend, "opencode-serve 仍用 OpenCodeServeBackend");
-    assert.equal(result.terminalAccepted, true);
-    assert.equal(result.stopRouteUnavailable, undefined);
-    const events = await readTranscript(tp);
-    assert.equal(events.find((e) => e.type === "run.aborted").backend, "opencode-serve");
-    const unverified = events.find((e) => e.type === "run.stop_unverified");
-    assert.deepEqual(
-      { backendSessionId: unverified.backendSessionId, backend: unverified.backend, method: unverified.method, taskkillCalled: unverified.taskkillCalled },
-      { backendSessionId: "ses_kw04", backend: "opencode-serve", method: "abort+verify", taskkillCalled: false },
-    );
-    assert.equal(captured[0].message, "stop run_kw04 not verified: opencode session may still be active");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
 test("KW-05: 已在终态的 kimi-web 运行——不解析停止目标，认领被拒、零副作用（registry 解析不出也不告警）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-kw-05-"));
   try {
@@ -677,27 +641,31 @@ test("KW-05: 已在终态的 kimi-web 运行——不解析停止目标，认领
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("KW-07: 终态只来自旧式事实（非终态 state_change 之后的 run.aborted）——认领不被挡，停止目标照常解析：opencode 目标非空；kimi-web 解析不出时不认领", async () => {
+test("KW-07: 终态只来自旧式事实（非终态 state_change 之后的 run.aborted）——认领不被挡，目标解析得出时照常中止；解析不出时不认领", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-kw-07-"));
   try {
     const { stopRun } = await import("../../src/application/runStop.js");
-    const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
     {
+      const registryPath = writeKwRegistry(dir, { coder_kw: kwAgent(dir) });
       const tp = join(dir, "run_kw07a.jsonl");
-      const t = new JsonlTranscript(tp, { runId: "run_kw07a", agentId: "a" });
-      await t.append("run.started", { backend: "opencode-serve" });
-      await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_kw07", serveUrl: "http://127.0.0.1:9" });
+      const t = new JsonlTranscript(tp, { runId: "run_kw07a", agentId: "coder_kw" });
+      await t.append("run.started", { backend: "kimi-web" });
+      await t.append("session.created", { backend: "kimi-web", backendSessionId: "session_kw", serveUrl: KW_SERVE });
       await t.transitionState(null, "pending", "created");
       await t.transitionState("pending", "running", "first_event");
-      await t.append("run.aborted", { backendSessionId: "ses_kw07" });
+      await t.append("run.aborted", { backendSessionId: "session_kw" });
       assert.equal(findState(await readTranscript(tp)), "aborted", "前提：读侧从旧式事实推断出终态");
+      const { fetchImpl } = kwServer();
       let target = null;
-      const result = await stopRun({
-        runId: "run_kw07a", runDir: dir,
-        deps: { executeStop: async (b) => { target = b; return { verified: true, taskkillCalled: false }; }, alert: async () => {} },
-      });
+      const result = await withKwToken(() => stopRun({
+        runId: "run_kw07a", runDir: dir, registryPath,
+        deps: {
+          fetchImpl, alert: async () => {}, stopVerify: { rounds: 1, intervalMs: 0 },
+          executeStop: async (b) => { target = b; return { verified: true, taskkillCalled: false }; },
+        },
+      }));
       assert.equal(result.terminalAccepted, true, "仲裁没见到已认领的终态，认领被接受");
-      assert.ok(target instanceof OpenCodeServeBackend, "认领之后真的发出中止（目标非空）");
+      assert.ok(target, "认领之后真的发出中止（目标非空）");
     }
     {
       const tp = join(dir, "run_kw07b.jsonl");

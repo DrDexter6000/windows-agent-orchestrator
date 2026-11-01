@@ -40,7 +40,7 @@ test("TD-161 F3: 组合错误（坏 backend + 缺 cwd）下支持集与 ADR 指�
   // 2026-10-01 起 zcode 是闭集成员——unknown 例值换用一个真正不在册的名字。
   const issues = await validateIssuesWith({ bad: { backend: "qwen-cli" } });
   const joined = issues.join("\n");
-  for (const b of ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"]) {
+  for (const b of ["claude-code", "codex", "kimi-code", "deepseek-harness"]) {
     assert.ok(joined.includes(b), `组合错误 issues 必须仍含支持集成员：${b}`);
   }
   assert.ok(joined.includes("ADR-0028"), "组合错误 issues 必须仍含 ADR-0028 指路");
@@ -48,7 +48,7 @@ test("TD-161 F3: 组合错误（坏 backend + 缺 cwd）下支持集与 ADR 指�
 
 test("TD-161 双打印消解: 纯坏 backend 时闭集恰好罗列一次", async () => {
   const issues = await validateIssuesWith({ bad: { backend: "qwen-cli", cwd: "D:/proj" } });
-  const occurrences = issues.join("\n").split("supported: opencode-serve/claude-code").length - 1;
+  const occurrences = issues.join("\n").split("supported: claude-code/codex").length - 1;
   assert.equal(occurrences, 1, `闭集应恰好罗列一次，实际 ${occurrences} 次（issues: ${JSON.stringify(issues)}）`);
 });
 
@@ -65,7 +65,7 @@ test("TD-161 N1 回归钉: 坏值回显含 'has unknown backend' 的其他错误
 
 test("TD-161 F3 单元钉: unknownBackendGuidance 含五成员 + Owner decision + ADR-0028", () => {
   const g = unknownBackendGuidance("qwen-cli");
-  for (const b of ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"]) {
+  for (const b of ["claude-code", "codex", "kimi-code", "deepseek-harness"]) {
     assert.ok(g.includes(b));
   }
   assert.ok(g.includes("Owner decision"));

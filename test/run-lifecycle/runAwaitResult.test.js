@@ -21,7 +21,7 @@
 //   R1/R2/R3 ..... 7+8 read-only/idempotent: zero append, bytes unchanged, repeat deepEqual
 //   V1..V4 ....... 9   fail-closed validation before any read; cross-workspace
 //   I1 ........... 9   agentId canonical/unknown projection
-//   A1/A2/A3 ..... 6+9 architecture purity: no SDK/zod/commands; reuses SSOT; no serve import
+//   A1/A2/A3 ..... 6+9 architecture purity: no SDK/zod/commands; reuses SSOT; no collect import
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -869,10 +869,9 @@ test("A2: runAwaitResult.js reuses M12-2A projection + shared reconstruction (no
   assert.ok(!/createSecretRedactor|sanitizeControls|extractAssistantTexts/.test(src), "no duplicated redaction/parser internals");
 });
 
-test("A3: runAwaitResult.js is snapshot-only — no collectRunMessages / opencodeServe import (no serve fetch)", async () => {
+test("A3: runAwaitResult.js is snapshot-only — no collectRunMessages import (no collect side effects)", async () => {
   const { readFileSync: rf } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const src = rf(join(join(fileURLToPath(new URL(".", import.meta.url))), "../..", "src", "application", "runAwaitResult.js"), "utf8");
-  assert.ok(!/collectRunMessages/.test(src), "must NOT import collectRunMessages (avoids serve fetch path)");
-  assert.ok(!/opencodeServe/.test(src), "must NOT import the serve backend (snapshot-only)");
+  assert.ok(!/collectRunMessages/.test(src), "must NOT import collectRunMessages (zero audit appends — snapshot-only)");
 });

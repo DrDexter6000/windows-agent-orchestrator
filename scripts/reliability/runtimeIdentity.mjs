@@ -16,8 +16,6 @@
 //     字段、不新增依赖（ADR-0032 Consequences）。
 //   - 身份不可验证时明确 verified:false；指纹按探测目标稳定派生，避免每次运行
 //     制造新键。稳定键只表示“同一未验证目标”，绝不表示运行时已经验证。
-//   - opencode-serve 是 HTTP 服务 backend：无本地 harness 二进制可探 → honest
-//     unknown（runtime 身份是 serve 部署，不经 --version 可知）。
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -36,7 +34,7 @@ export const HARNESS_VERSION_PROBES = Object.freeze({
   "codex": Object.freeze({ distribution: "codex", binary: configuredBinary("codex") }),
   "kimi-code": Object.freeze({ distribution: "kimi", binary: configuredBinary("kimi") }),
   // kimi-web：本地 HTTP 服务由宿主 kimi CLI 二进制承载（`kimi web`），`kimi --version`
-  // 与服务器 banner 同源同版——探宿主二进制是诚实的运行时身份（opencode-serve null 是因独立部署无本地二进制，此处不同）。
+  // 与服务器 banner 同源同版——探宿主二进制是诚实的运行时身份。
   "kimi-web": Object.freeze({ distribution: "kimi-web", binary: configuredBinary("kimi") }),
   "deepseek-acp": Object.freeze({ distribution: "dsh", binary: configuredBinary("dsh") }),
   "deepseek-harness": Object.freeze({ distribution: "dsh-jsonrpc-agent", binary: configuredBinary("dsh-jsonrpc-agent") }),
@@ -44,12 +42,6 @@ export const HARNESS_VERSION_PROBES = Object.freeze({
   // 更新漂移）；无席位 fallback 裸名不在 PATH → honest unknown。真实探测依赖
   // backend resolveInvocationPrefix 提供 node 入口前缀（component-check 已接线）。
   "zcode": Object.freeze({ distribution: "zcode", binary: configuredBinary("zcode") }),
-  // opencode-serve：HTTP 服务——无本地二进制；探测恒 honest unknown。
-  "opencode-serve": null,
-});
-
-const UNKNOWN_REASON_BY_BACKEND = Object.freeze({
-  "opencode-serve": "HTTP service backend — no local harness binary to probe; the runtime identity is the serve deployment, not discoverable via --version",
 });
 
 function identityHash(parts) {
@@ -106,9 +98,6 @@ export function probeRuntimeIdentity({ backendName, agent = null, resolvedInvoca
   const probe = HARNESS_VERSION_PROBES[backendName];
   if (probe === undefined) {
     return unknownIdentity(null, `no harness probe descriptor for backend ${JSON.stringify(backendName)} — runtime identity unprobed`, ["backend", String(backendName)]);
-  }
-  if (probe === null) {
-    return unknownIdentity(backendName, UNKNOWN_REASON_BY_BACKEND[backendName] ?? "no local harness binary for this backend", ["backend", String(backendName)]);
   }
   const bare = resolvedInvocation?.binary ?? probe.binary(agent);
   const binaryPath = resolveBareBinary(bare, process.platform);

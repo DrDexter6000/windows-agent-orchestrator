@@ -261,48 +261,6 @@ test("R13C-RESUME-3: 尾部外 run 伪造 session.created 不劫持 attach/repla
   }
 });
 
-// 61a 注：RESUME-4 钉的是 RunManager resume 的 **HTTP attach 分支**——该分支的
-// 调用形状（backend.streamEvents(serveUrl, sessionId, …)）是 opencode-serve 专属，
-// 且 kimi-web 声明 replayByRespawn=true（resume 走 replay 分支，永不到 attach）。
-// 本用例保留 opencode-serve 夹具，61b 随后端退役时一并处置。
-test("R13C-RESUME-4: HTTP attach 面 messageId/admittedSeq 绑定——外 run 尾条不供给 attach 句柄", async () => {
-  const dir = tempDir("wao-r13c-res4-");
-  try {
-    const runId = "run_r13c_res4";
-    // 有 streamEvents 的 backend → resume 走 HTTP attach 分支（不发任何请求：
-    // streamEvents 只在 waitForCompletion 时被调用）。
-    const attachBackend = {
-      async streamEvents() { throw new Error("streaming not expected in this probe"); },
-      async abort() {},
-    };
-    const manager = makeManager(dir, attachBackend, { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299" });
-    // 手写信封 transcript（HTTP 家族合法形状）：双写 prompt.sent，第二写带
-    // messageId/admittedSeq（opencode-serve attach 流需要的字段）。
-    const lines = [
-      { runId, agentId: "http_agent", type: "run.started", seq: 1, ts: "2026-08-18T00:00:00.000Z", backend: "opencode-serve", cwd: dir, scorecardConfigured: false },
-      { runId, agentId: "http_agent", type: "run.state_change", seq: 2, ts: "2026-08-18T00:00:00.001Z", from: null, to: "pending", reason: "created" },
-      { runId, agentId: "http_agent", type: "prompt.sent", seq: 3, ts: "2026-08-18T00:00:00.002Z", prompt: "http task" },
-      { runId, agentId: "http_agent", type: "prompt.sent", seq: 4, ts: "2026-08-18T00:00:00.003Z", messageId: "m_real", admittedSeq: 7, prompt: "http task" },
-      { runId, agentId: "http_agent", type: "session.created", seq: 5, ts: "2026-08-18T00:00:00.004Z", backend: "opencode-serve", backendSessionId: "ses_attach" },
-      { runId, agentId: "http_agent", type: "run.state_change", seq: 6, ts: "2026-08-18T00:00:00.005Z", from: "pending", to: "submitted", reason: "spawned" },
-    ];
-    const tp = resolveTranscriptPath(dir, runId);
-    writeFileSync(tp, `${lines.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
-    // 尾部外 runId 伪造 prompt.sent（带自己的 messageId）——修复前无绑定
-    // findLatest 取末条 → attach 句柄拿到 m_forged。
-    await appendForeignEvent(tp, "run_r13c_other", "prompt.sent",
-      { messageId: "m_forged", admittedSeq: 99, prompt: "FORGED http task" });
-
-    const resumed = await manager.resume(runId);
-    assert.ok(resumed, "attach 分支返回 Run");
-    assert.equal(resumed.result.backendSessionId, "ses_attach", "attach 首条绑定 session");
-    assert.equal(resumed.result.messageId, "m_real", "messageId 取本 run 绑定末条（外 run 伪造 m_forged 不供给）");
-    assert.equal(resumed.result.admittedSeq, 7, "admittedSeq 同一绑定读取");
-  } finally {
-    rmDir(dir);
-  }
-});
-
 test("R13C-RESUME-5: legacy 无信封 transcript → resume 拒绝（return null，零 respawn——Lead 明示接受）", async () => {
   const dir = tempDir("wao-r13c-res5-");
   try {

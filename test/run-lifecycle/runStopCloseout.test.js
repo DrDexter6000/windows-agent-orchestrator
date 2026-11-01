@@ -300,7 +300,7 @@ test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非
     makeGitRepo(dir);
     await seedSessionRun(dir, "run_td265_03a", dir, { backend: "kimi-web", backendSessionId: "session_serve", serveUrl: "http://127.0.0.1:9", hostPid: 4321 });
     await seedSessionRun(dir, "run_td265_03b", dir, { backend: "zcode", backendSessionId: "sess_native_3", hostPid: "4321" });
-    // kimi-web 的停止目标解析需要 registry agent + token（61a 迁移加的面；executeStop
+    // kimi-web 的停止目标解析需要 registry agent + token（executeStop
     // 仍注入——本测试钉的是路由优先级，不是真停止面）。registry agent 须与会话同
     // backend + serveUrl；回环丢弃端口 9——注入 executeStop 下零真实请求。
     const registryPath = join(dir, "agents.json");

@@ -1336,11 +1336,10 @@ export function backendStartupConfigChecks({
  * 显式停止的执行形态判定（证据 = 装配实际配置，runtime-agnostic——不按 backend
  * 名分支）：装配携带非空 serveUrl → "serve"（会话活在外部 serve 进程，stop 走
  * serve abort 车道——`wao stop` 的 serveUrl+sessionId 路径）；否则 → "process"
- * （会话即 WAO 派生的 worker 进程，进程死即会话死——registry 安全注记与
- * opencodeServe 独有的 sessionOutlivesProcess=true 声明同源）。缺 serveUrl 正是
- * 进程形的常态，绝不构成判负理由（2026-09-20 缺陷 4：stop drill 假设 opencode
- * 路径，`wao stop` 对 ACP sessionId（非 proc_ 锚、无 serveUrl）报 "no serveUrl"，
- * 进程形被整体误杀）。
+ * （会话即 WAO 派生的 worker 进程，进程死即会话死）。缺 serveUrl 正是
+ * 进程形的常态，绝不构成判负理由（2026-09-20 缺陷 4：stop drill 曾假设
+ * serve 形为唯一路径，`wao stop` 对 ACP sessionId（非 proc_ 锚、无 serveUrl）
+ * 报 "no serveUrl"，进程形被整体误杀）。
  */
 export function backendStopFormOf(assemblyEntry) {
   return typeof assemblyEntry?.serveUrl === "string" && assemblyEntry.serveUrl.trim().length > 0
@@ -1457,8 +1456,8 @@ export function componentResultFromChecks(checks = []) {
 // ── 身份解析（装配解析身份；行内不写身份字面量）──────────────────────────────
 
 /**
- * agent 的 llm 身份。providerID 维约定：registry 的 model.providerID（opencode
- * 系）；缺失时以 backend 家族名充当（claude-code/codex/kimi 系自认证 CLI 没有
+ * agent 的 llm 身份。providerID 维约定：registry 的 model.providerID；缺失时
+ * 以 backend 家族名充当（claude-code/codex/kimi 系自认证 CLI 没有
  * 独立的 provider 登记维度）——接入方区分由 providerKey 维继续承担（第 4 维，
  * providerFingerprint SSOT），族内单射不受影响。无 model.id → null（非 llm 主体）。
  */
@@ -2073,7 +2072,7 @@ export function createComponentDrills(deps) {
   };
 
   // 后台族（--background / spawn/stop）显式 run-dir：detached runner 不自动建
-  // runDir，须预创建（runStopDrill 同款纪律）；CLI 进程 cwd=root（detached
+  // runDir，须预创建；CLI 进程 cwd=root（detached
   // runner 继承 CLI cwd，registry/config 解析不能落在临时目录）。
   const backgroundRunDir = (name) => {
     const dir = join(tmpDir, name);
@@ -2307,7 +2306,7 @@ export function createComponentDrills(deps) {
     //    2026-09-20 缺陷 4：原实现把 serve 形当唯一形态（spawn + `wao stop` 的
     //    serveUrl 车道），进程式 backend（无 serveUrl 是常态）被整体误杀——
     //    deepseek-acp 的 ACP sessionId 既非 proc_ 锚也无 serveUrl，`wao stop`
-    //    恒报 "no serveUrl (opencode path needs one)"。
+    //    恒报 "no serveUrl"。
     //      - serve 形：spawn 托管 + `wao stop`（serve abort 车道），既有语义保持。
     //      - 进程形：owning-supervisor 车道真实驱动 stop——daemon 持有 run
     //        （daemon run），优雅停机（daemon stop → abortAll → handle.abort →

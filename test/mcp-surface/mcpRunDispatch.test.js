@@ -964,7 +964,7 @@ test("resolver parity: server-threaded backendFor covers every KNOWN_BACKENDS; u
       }
       // Capability truth over the closed set (class-level declarations).
       const reuseTrue = ["claude-code", "codex", "kimi-code", "kimi-web", "zcode", "deepseek-acp"];
-      const reuseNotTrue = ["deepseek-harness", "opencode-serve"];
+      const reuseNotTrue = ["deepseek-harness"];
       for (const id of reuseTrue) {
         assert.equal(resolver({ backend: id }).supportsSessionReuse, true,
           `${id} declares provider session reuse — continuable must pass its gate`);

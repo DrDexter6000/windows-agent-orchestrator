@@ -3,8 +3,9 @@
 // M11-5 Package A (CTO rework): trust/runtime closure — behavioral tests.
 //
 // These tests drive the REAL RunManager.start / .resume with a fake backend
-// to prove (1) opencode-serve fail-closed, (2) systemPrompt type validation,
-// (3) Claude TOCTOU elimination, (4) no-RunManager gap.
+// to prove (1) systemPrompt type validation, (2) Claude TOCTOU elimination,
+// (3) no-RunManager gap.（现行 backend 全部声明 supportsRoleContract=true；不支持
+// 角色注入时 fail-closed 的能力门见 roleContractPackageA2 的 A2-START1。）
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -71,43 +72,6 @@ function makeManager({ runDir, registryPath, backend }) {
     backendFor: () => backend,
   });
 }
-
-// ===== RED-1: opencode-serve + systemPrompt must fail closed =====
-
-test("M11-5-A-RED1: opencode-serve + systemPrompt must fail closed before spawn", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m115-a-red1-"));
-  try {
-    const runDir = join(dir, "runs");
-    mkdirSync(runDir, { recursive: true });
-    const rolePath = makeRoleFile(dir, "role.md", "ROLE_OP_ENCODE");
-    const registryPath = makeRegistry(dir, {
-      coder: {
-        backend: "opencode-serve",
-        cwd: dir,
-        serveUrl: "http://127.0.0.1:4298",
-        model: { providerID: "test", id: "test-model" },
-        systemPrompt: rolePath,
-      },
-    });
-    const { backend, calls } = makeFakeBackend();
-    const mgr = makeManager({ runDir, registryPath, backend });
-    let threw = false;
-    try {
-      await mgr.start("coder", { prompt: "do task", runDir, registry: registryPath });
-    } catch (e) {
-      threw = true;
-      assert.match(e.message, /systemPrompt|role contract|opencode/i,
-        "error must mention systemPrompt/role/opencode");
-    }
-    assert.ok(threw, "opencode-serve + systemPrompt must throw");
-    assert.equal(calls.length, 0, "zero spawn calls");
-    // Zero transcript (no jsonl file created).
-    const jsonlFiles = existsSync(runDir) ? readdirSync(runDir).filter(f => f.endsWith(".jsonl")) : [];
-    assert.equal(jsonlFiles.length, 0, "zero transcript files");
-  } finally {
-    cleanupDir(dir);
-  }
-});
 
 // ===== RED-2: systemPrompt:0 must be rejected at normalizeAgent =====
 

@@ -7,8 +7,7 @@
 // commands/shared.js）共用本模块。
 //
 // 注入点：
-//   - fetchImpl：HTTP 家族（opencode-serve / kimi-web）使用（测试注入；不注入走
-//     默认 fetch）。
+//   - fetchImpl：HTTP 家族（kimi-web）使用（测试注入；不注入走默认 fetch）。
 //   - waoCliPath：三个进程式 backend（claude-code / codex / kimi-code）使用。
 //     显式注入优先；未注入时内部调 getWaoCliPath() 解析。
 //     daemon.js / backgroundRunner.js 在启动时算好传入（每次进程一次）；
@@ -22,7 +21,6 @@
 //  correctable 派发。现改为薄包装：构造委托本工厂，仅"未知 backend → null"的
 //  fail-closed 闸门留在包装层。parity 钉：mcpRunDispatch.test.js。）
 
-import { OpenCodeServeBackend } from "./opencodeServe.js";
 import { ClaudeCodeBackend } from "./claudeCode.js";
 import { CodexBackend } from "./codex.js";
 import { KimiCodeBackend } from "./kimiCode.js";
@@ -32,36 +30,20 @@ import { KimiWebBackend } from "./kimiWeb.js";
 import { ZcodeBackend } from "./zcode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 
-// 「转录自报」能力位（2026-10-02 Lead 体验批，双席会审两席共同裁定）：
-// 消息与证据事件**完整落盘**的 backend（collect 走转录重建，不做活服务拉取）。
-// 这是行为元数据表（HARNESS_VERSION_PROBES 同形状——键控查表，共享层不按
-// runtime 名分支），**不是** gen:certification 的能力轴，不进派生面。
-// 本批仅启用 kimi-web（其 run.event 完整性已实证：run_20261002121934119hkvz81
-// 36 tool_use/67 tool_result/30 command/1 file_written/2 message 含 5,560 字终稿）。
-// opencode-serve 的 run.event 亦落盘（N4）但本批不扩大爆炸半径——留口：全员
-// 启用后 serve 拉取路径可整体退役（取源统一为转录重建）。
-export const SELF_REPORTED_TRANSCRIPT_BACKENDS = Object.freeze(new Set(["kimi-web"]));
-export function collectsFromTranscript(backendName) {
-  return typeof backendName === "string" && SELF_REPORTED_TRANSCRIPT_BACKENDS.has(backendName);
-}
-
 /**
  * 按 agent.backend 选对应后端实例。
  *
  * @param {object} agent - 规范化后的 agent（含 backend 字段）
  * @param {object} [opts]
- * @param {Function} [opts.fetchImpl] - HTTP 家族 backend（opencode-serve / kimi-web）
+ * @param {Function} [opts.fetchImpl] - HTTP 家族 backend（kimi-web）
  *   的 fetch 注入（测试；不注入走默认 fetch）。
  * @param {string} [opts.waoCliPath] - worker 注入用的 WAO CLI 入口路径；
  *   未注入时内部调 getWaoCliPath() 解析（TD-90）。
  */
 export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
-  if (agent.backend === "opencode-serve") {
-    return new OpenCodeServeBackend(fetchImpl ? { fetchImpl } : {});
-  }
   // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的官方 REST
   // API；闭集 6→7 扩员经 Owner 2026-09-30 批准）。构造零副作用；fetchImpl 注入
-  // 同 opencode-serve 分支（HTTP 家族不需要 waoCliPath）。
+  // 是 HTTP 家族的测试缝（HTTP 家族不需要 waoCliPath）。
   if (agent.backend === "kimi-web") {
     return new KimiWebBackend(fetchImpl ? { fetchImpl } : {});
   }
@@ -85,9 +67,10 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
 //
 // 会话记录（session.created）带 serveUrl 的运行，停止时由这里按会话记录的 backend
 // 选中止实现——runStop 只调本函数，自身不按后端名分支（仓库不变量 3）。返回值的调用
-// 形状 = opencodeStopVerify.executeStopWithVerification 消费的 {abort, session,
+// 形状 = serveStopVerify.executeStopWithVerification 消费的 {abort, session,
 // messages, sessionStatus}。
-//   - backend 缺省 / opencode-serve：OpenCodeServeBackend（不读 registry）。
+//   - backend 缺省：不猜——不发任何请求，抛 SERVER_STOP_ROUTE_TEXT.unresolved，
+//     调用方据此不认领终态。
 //   - kimi-web：鉴权要 token，token 不在转录里——取派发该运行的 registry agent
 //     （loadAgent 回调，由调用方按 run.started.agentId 绑定读取）；agent 须同为该
 //     backend、serveUrl 去尾斜杠后与会话记录相同，否则不发任何请求。token 在这里
@@ -95,8 +78,6 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
 //     算解析失败。
 //   - 其余 backend：没有服务端中止。
 // 解析失败一律抛固定文案（不回显 token、URL 或 registry 内容）；调用方据此不认领终态。
-
-const DEFAULT_SERVER_STOP_BACKEND = "opencode-serve";
 
 export const SERVER_STOP_ROUTE_TEXT = Object.freeze({
   agentUnavailable:
@@ -117,23 +98,22 @@ export const SERVER_STOP_ROUTE_TEXT = Object.freeze({
     + "and the worker may still be running",
 });
 
-/** 会话记录里的 backend（缺省 = opencode-serve）——写进停止事实的 backend 字段。 */
+/** 会话记录里的 backend——写进停止事实的 backend 字段；缺省如实记 null（不猜）。 */
 export function serverStopBackendOf(session) {
   return typeof session?.backend === "string" && session.backend.length > 0
     ? session.backend
-    : DEFAULT_SERVER_STOP_BACKEND;
+    : null;
 }
 
-/** 停止未核实告警里的会话称谓（opencode-serve 沿用 "opencode"，其余用 backend 名）。 */
+/** 停止未核实告警里的会话称谓（直接用 backend 名，缺时 "unknown"）。 */
 export function serverStopSessionLabel(session) {
-  const backend = serverStopBackendOf(session);
-  return backend === DEFAULT_SERVER_STOP_BACKEND ? "opencode" : backend;
+  return serverStopBackendOf(session) ?? "unknown";
 }
 
 /**
  * @param {object} session — 会话记录（backend / serveUrl / backendSessionId）
  * @param {object} [opts]
- * @param {Function} [opts.fetchImpl] — HTTP 注入（opencode-serve 分支原样传入构造）
+ * @param {Function} [opts.fetchImpl] — HTTP 注入（kimi-web 分支原样传入构造）
  * @param {() => Promise<object>} [opts.loadAgent] — 取派发该运行的 registry agent；
  *   只在需要鉴权的 backend 上调用
  * @param {(agent: object) => Promise<Record<string, string>>} [opts.resolveCredentials] —
@@ -142,8 +122,8 @@ export function serverStopSessionLabel(session) {
  */
 export async function serverStopTargetFor(session, { fetchImpl, loadAgent, resolveCredentials } = {}) {
   const backend = serverStopBackendOf(session);
-  if (backend === "opencode-serve") {
-    return new OpenCodeServeBackend({ fetchImpl });
+  if (backend === null) {
+    throw new Error(SERVER_STOP_ROUTE_TEXT.unresolved);
   }
   if (backend === "kimi-web") {
     let agent = null;
@@ -205,8 +185,8 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  *     判定词（支持/不支持/条件；model 栏为必填/可选＋写法）与档位集合由生成器对 validateAgentPolicy 的行为
  *     探针派生，不在此复述——静态文本复述探针可派生的集合会制造第二份会漂的值。
  *   - 键集：四个 policy 面（model / reasoning / contextWindow / provider）＋
- *     BACKEND_CAPABILITY_AXES 成员（仅承载额外条件者，如 opencode-serve 角色合同
- *     的版本门）。缺席 = 该轴无额外条件（判定词即全部语义）。
+ *     BACKEND_CAPABILITY_AXES 成员（仅承载额外条件者）。缺席 = 该轴无额外条件
+ *     （判定词即全部语义）。
  *   - 成员增补属 Owner 决策：新 backend 必须在此登记条件说明（无则显式空对象）。
  *   - `vitalSigns` 是每个 backend 的必填项（决定 0069，Owner 2026-10-13："WAO 抽象
  *     原则统一，适配层 case by case"）：写明控制面在这条后端上读得到哪些生命体征、
@@ -215,14 +195,6 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  *     地方在这里如实登记为例外。生成器缺项即红。
  */
 export const CAPABILITY_NOTES = Object.freeze({
-  "opencode-serve": Object.freeze({
-    model: "`variant` 可选",
-    provider: "不支持 provider 块——模型路由由 `model.providerID` 承担",
-    supportsRoleContract: "须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）",
-    reportsTokenUsage: "session.tokens 周期轮询",
-    enforcesWriteSandbox: "无 OS 写沙箱——上游 serve 无沙箱面，越界写拦截按 0084（上报侦测，非阻止）",
-    vitalSigns: "未按生命体征口径适配（Owner 2026-10-12：该后端不再投入）；收口门为 `silentTimeout` 与快照稳定判据",
-  }),
   "claude-code": Object.freeze({
     contextWindow: "仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒",
     provider: "经 provider wrapper（`baseUrl` / `apiKeyEnv`）表达",
@@ -294,7 +266,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsRoleContract: "拼进 `session/send` content 前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）",
     supportsSessionReuse: "resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/setMode {sessionId, mode:\"yolo\"}` → `session/send`（setMode 每次派发都发、失败 fail-closed 拒绝——app-server create 默认 build，scorecard 实测写被权限层拦，runs/reliability/run_20261001213724000cy1b3a）——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证：sessions 表每进程一张、setModel 走 requireSession、查表 miss 抛 `Session is not active`、resume 装载注册；跳过 resume 直接 setModel 必失败；依据链与各版本复核见 certification-runbook 原语表 zcode 行）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据自 2026-10-10 B′ 根修起为【身份切片】（锚点=本轮新 user 消息，完成=parent 指向它的新 assistant 末位 step-finish；历史变异=基线 id 序列不再前缀→具名失败；resume 历史缺 info.id→发送前拒绝零 token）——上游消息 info.id/role/parentID 与 part id/messageID 已 live 探针实证在场且跨快照稳定（glm-flash 三轮 fresh/同进程/跨进程 resume，证据 .dev/bprime-evidence/；验收反例组 ⑨h-⑨l/⑫f 在旧位置判据上实证红）；旧判据的「头部插入→旧 stop 右移→假 completed+发射旧答案」残余就此关闭（该残余曾连带击穿 0052 失败即弃与 run_lineage 交付链）",
     supportsInFlightCorrection: "app-server 协议不开放在途注入：活动轮里再发 `session/send` 返回 -32010 \"A prompt is already running for this session\"（live 实测；bundle 运行时虽有 steer 队列，协议方法表里没有注入活动轮的方法）——如实声明 false；翻转条件 = 协议出现注入活动轮的方法并有 live 证据",
-    reportsTokenUsage: "`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游实现形状，cache 系带 `Tokens` 后缀；0.17.0 实跑仍非零，2026-10-29）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对（opencode session.tokens 同款语义）；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）",
+    reportsTokenUsage: "`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游实现形状，cache 系带 `Tokens` 后缀；0.17.0 实跑仍非零，2026-10-29）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）",
     enforcesWriteSandbox: "无 OS 写沙箱——app-server 协议无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：新 part / 工具证据、模型流分片（落 `streaming`）、app-server 后代进程的 CPU / I/O / 生灭（落 `process_active`）、工作目录文件变化（落 `files_changed`）、本轮主轮请求的上游重试等待（`v4/telemetry/event` 的 `model.request.status`：仅本会话、本轮 turnId、`querySource=main_turn` 的 `model_retry_scheduled`，有效到到达时刻+delayMs+30s 余量，落 `provider_retry`；同一安排的重复通知不延长，链上其后出现 started/completed（换 requestId 也算）、turn 结束或换轮即作废且粘住——作废前首见的安排连同其重复通知不再复活续命；failed/stream_stalled 本身不续命；上游上报 maxAttempts=0（重试预算无界）时每个新安排都会重新立窗、没有自动上限，且服务端 retry-after 可把单次退避拉长到远超 300s——有体征运行的去留归 Lead，决定 0067）。三道收口门到点先看体征，全无才收口（约 5–10 分钟）；有体征没有自动上限（决定 0067；重试等待不重置停滞预算时钟——退避窗一过仍无进展即收口）",
   }),
@@ -308,7 +280,6 @@ export const CAPABILITY_NOTES = Object.freeze({
  * id / 回环丢弃端口 9 / 假 env 名）——不得出现真实路径、主机或凭据名。
  */
 export const POLICY_PROBE_BASES = Object.freeze({
-  "opencode-serve": Object.freeze({}),
   "claude-code": Object.freeze({}),
   "codex": Object.freeze({}),
   "kimi-code": Object.freeze({}),

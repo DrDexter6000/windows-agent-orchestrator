@@ -12,7 +12,7 @@
 // Architectural contract:
 //   - Does NOT import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Does NOT parse argv, console.log, or shell-out CLI.
-//   - Reuses transcript, process/opencode stop primitives, verification, alert.
+//   - Reuses transcript, process/serve stop primitives, verification, alert.
 //   - Returns structured results; CLI/MCP adapters format output.
 //
 // Workspace authorization (MCP path):
@@ -29,7 +29,7 @@ import { spawnSync } from "node:child_process";
 import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq, claimedTerminalState } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { serverStopTargetFor, serverStopBackendOf, serverStopSessionLabel, SERVER_STOP_ROUTE_TEXT } from "../backends/factory.js";
-import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
+import { executeStopWithVerification } from "../backends/serveStopVerify.js";
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { raiseAlert } from "../alerts.js";
@@ -161,7 +161,7 @@ function checkStopJustification(justification, scope, nowMs) {
  * @param {string} input.runDir
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding (optional)
  * @param {string} [input.registryPath] — registry 路径：服务端中止需要鉴权的后端
- *   （kimi-web）取派发该运行的 agent；opencode-serve 路由不读它
+ *   （kimi-web）取派发该运行的 agent
  * @param {{reason: string, observedSeq: number}} [input.justification] — Lead 面必带
  *   （决定 0069）；不满足时返回 { preconditionFailed: <STOP_PRECONDITION_CODES> }，
  *   零事件、零副作用

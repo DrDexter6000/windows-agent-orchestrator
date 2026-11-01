@@ -1145,7 +1145,6 @@ test("R6-C: backend→CLI mapping covers all live backends (null = no standalone
     "claude-code": "claude",
     codex: "codex",
     "kimi-code": "kimi",
-    "opencode-serve": "opencode",
     "deepseek-harness": null,
     // ADR-0031：ACP 线直接驱动上游 dsh CLI（CLI 在场 ≠ 就绪，还需操作员安装
     // containment 覆盖层——见 docs/usage.md）。
@@ -1223,21 +1222,18 @@ test("R6-C: rows are sorted ready-first (stable within rank)", async () => {
       m1: { backend: "codex", model: { id: "m" } },
       m2: { backend: "claude-code", provider: { apiKeyEnv: "K2" }, model: { id: "m" } },
       l: { backend: "kimi-code", model: { id: "m" } },
-      u: { backend: "opencode-serve", model: { id: "m" } },
+      u: { backend: "deepseek-harness", model: { id: "m" } },
     },
   };
   const candidates = [
-    { id: "m2", backend: "claude-code", model: "m" },   // missing_key
-    { id: "l", backend: "kimi-code", model: "m" },      // login_based
-    { id: "r", backend: "claude-code", model: "m" },    // ready
-    { id: "m1", backend: "codex", model: "m" },         // missing_cli
-    { id: "u", backend: "opencode-serve", model: "m" }, // probe timeout → unknown
+    { id: "m2", backend: "claude-code", model: "m" },       // missing_key
+    { id: "l", backend: "kimi-code", model: "m" },          // login_based
+    { id: "r", backend: "claude-code", model: "m" },        // ready
+    { id: "m1", backend: "codex", model: "m" },             // missing_cli
+    { id: "u", backend: "deepseek-harness", model: "m" },   // 无 CLI 面 → unknown
   ];
   const rec = await buildRecommendations(candidates, custom, {
-    hasCli: async (n) => {
-      if (n === "opencode") throw new Error("timeout");
-      return n === "claude" || n === "kimi"; // codex missing
-    },
+    hasCli: async (n) => n === "claude" || n === "kimi", // codex missing
     hasKeyEnv: async (n) => (n === "K1" ? "process_env" : "missing"),
   });
   assert.deepEqual(rec.rows.map((r) => r.id), ["r", "l", "m1", "m2", "u"],
@@ -1509,9 +1505,9 @@ test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-d
 });
 
 // R6-C3（P1-2 + 席位 B + P2-2 + P2-3）：两行布局 + 表头按显示宽对齐；认证标签
-// 四分支（key / opencode serve 注入 / CLI 登录态 / —）；带 authNote 行的标签是
-// "结构化基座（模板注释）" 括号形状；opencode-serve 行状态括号不再误标 CLI 登录态。
-test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状、opencode 状态括号", async () => {
+// 三分支（key / CLI 登录态 / —）；带 authNote 行的标签是
+// "结构化基座（模板注释）" 括号形状。
+test("R6-C3: 两行布局+表头、认证标签三分支、authNote 括号形状", async () => {
   const { runOnboarding } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix4-"));
@@ -1521,7 +1517,6 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
     agents: {
       w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
       w_login: { backend: "codex", _comment_auth: "codex login", model: { id: "gpt-x" } },
-      w_serve: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" } },
       w_none: { backend: "some-future-backend", model: { id: "m" } },
     },
   }));
@@ -1536,32 +1531,22 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
       existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
   });
   const text = renderHuman(r);
-  assert.equal(r.recommendations.rows.length, 4);
-  // 表头行：列宽与数据行一致（id 22 / backend 15 / model 19 显示格 + 1 分隔空格）。
+  assert.equal(r.recommendations.rows.length, 3);
+  // 表头行：列宽与数据行一致（列宽带模板态下限，非按本夹具行宽）。
   assert.match(text, /^ {2}id {23}backend {9}model {15}状态$/m,
-    "表头行按显示宽与数据行同列宽（复核 R2：id 列 24 容纳 coder_opencode_fallback）");
+    "表头行按显示宽与数据行同列宽");
   // 第一行布局：id/backend/model 后跟状态括号。
   assert.match(text, /^ {2}w_key\s+claude-code\s+glm-5\.3\[1m\]\s+\[/m,
     "第一行 = id/backend/model/状态");
   // 第二行布局：只有认证标签（车道用途不在矩阵里，决定 0090）。
   assert.match(text, /^ {4}认证: /m, "第二行 = 认证");
   assert.ok(!/^ {4}认证: .+ · 适合: /m.test(text), "第二行不再带适合段");
-  // 认证标签四分支：
+  // 认证标签三分支：
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 分支");
   assert.match(text, /认证: codex CLI 登录态（codex login）/, "CLI 登录态分支 + authNote 括号拼接");
-  // 注：第二行整段按显示宽截到 60——完整标签 "…先起 scripts/serve.ps1）" 的尾部
-  // 会被截断，但语义修复面（注入 ≠ 无需 provider key）必须可见。
-  assert.match(text, /认证: opencode serve 注入（仍需 provider key/,
-    "opencode-serve 分支：注入 ≠ 无需 key（docs/usage.md §Provider key）");
   assert.match(text, /认证: —/, "无 CLI 映射且无 key 分支");
   // authNote 行的精确前缀形状（钉住新拼接形状）。
   assert.match(text, /认证: codex CLI 登录态（/, "结构化基座在前，authNote 只进括号补充");
-  // opencode-serve 状态括号：不再误标 [CLI 登录态]；readyState 引擎值不因此变。
-  assert.match(text, /w_serve\s+opencode-serve\s+glm-5\.2\s+\[serve 探测未覆盖\]/,
-    "opencode-serve 行状态括号为 [serve 探测未覆盖]");
-  const serveRow = r.recommendations.rows.find((row) => row.id === "w_serve");
-  assert.equal(serveRow.readyState, "login_based",
-    "引擎 readyState 不因显示改动词而变（CLI 在 PATH 且无 key ⇒ login_based）");
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1804,12 +1789,13 @@ test("R9: panelReadiness 是加性字段——既有键全保留、JSON 可序�
     for (const e of [...json.panelReadiness.available, ...json.panelReadiness.seats]) {
       assert.ok(typeof e.id === "string" && typeof e.family === "string");
     }
-    // R9-C C-5/C-6/0065：新投影字段形状（injectedAuth/probeUnknown/keyOnly/
+    // R9-C C-6/0065：新投影字段形状（probeUnknown/keyOnly/
     // insufficientFamilyDiversity/duplicateModelKeys）都是加性可序列化成员。
-    for (const key of ["injectedAuth", "probeUnknown", "keyOnly", "insufficientFamilyDiversity", "duplicateModelKeys"]) {
+    for (const key of ["probeUnknown", "keyOnly", "insufficientFamilyDiversity", "duplicateModelKeys"]) {
       assert.ok(key in json.panelReadiness, `panelReadiness 投影缺加性字段：${key}`);
     }
     assert.ok(!("sameFamily" in json.panelReadiness), "旧字段名 sameFamily 不再投影（C-6 改名）");
+    assert.ok(!("injectedAuth" in json.panelReadiness), "injectedAuth 已随 opencode 后端退役删除（决定 0105）");
     assert.ok(!("missingAdversarial" in json.panelReadiness), "missingAdversarial 已随 seatRole 退役删除");
     assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(json.panelReadiness)), "不携带凭证值");
   } finally {
@@ -1834,7 +1820,7 @@ test("R9: 分级块每行显示宽 ≤120（与矩阵块同纪律）", async () 
   const { displayWidth } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_opencode_fallback: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" }, tokenBudget: 5000000 },
+    coder_dsh_fallback: { backend: "deepseek-harness", model: { id: "deepseek-v4-flash" }, dshConfigPath: "C:/wao-test/dsh.json", credentialEnv: "DEEPSEEK_API_KEY" },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" } },
     coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
     coder_mm: { backend: "claude-code", provider: { apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-code/k3" } },
@@ -1878,30 +1864,6 @@ test("0065 语义翻转钉（R9-C C-1 历史病灶位）: 角色名键照常计�
     assert.ok(r.panelReadiness.seats !== null, "有建议配对（跨族对：DeepSeek×GLM）");
     assert.deepEqual(r.panelReadiness.seats.map((e) => e.id), ["researcher", "coder_hq"],
       "建议配对=族系最大化（跨族对胜出）");
-  } finally {
-    rmSync(join(root, ".."), { recursive: true, force: true });
-  }
-});
-
-test("R9-C C-5: serve 注入型席位单独归类展示——不进'登录态未验证'行", async () => {
-  const { renderHuman } = await import("../../src/commands/onboarding.js");
-  const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_opencode_fallback: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" }, tokenBudget: 5000000 },
-  });
-  try {
-    // opencode CLI 探测为真 + serve 注入型无 key 声明 → 引擎值 login_based（基线
-    // 遗留语义），但展示不得把它讲成"登录态未验证"——它是注入式认证。
-    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
-    const serveRow = r.recommendations.rows.find((row) => row.id === "coder_opencode_fallback");
-    assert.equal(serveRow.readyState, "login_based", "引擎 readyState 原值不动（前置条件）");
-    assert.deepEqual(r.panelReadiness.injectedAuth, ["coder_opencode_fallback"]);
-    assert.deepEqual(r.panelReadiness.loginUnverified, [], "serve 注入型不进登录态未验证清单");
-    assert.equal(r.panelReadiness.tier, "two_seat");
-    const text = renderHuman(r);
-    assert.ok(text.includes("注入式认证（serve 探测不覆盖，不计入可用）: coder_opencode_fallback"),
-      "注入式认证单独措辞行在场");
-    assert.ok(!text.includes("登录态未验证"), "分级块不再把 serve 注入型标成登录态未验证");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -2424,7 +2386,7 @@ test("R11-2 0024 私有不可读回退模板面：矩阵逐字不变 + sourceUnr
   assert.ok(!text.includes("仅适用模板候选行"), "降级面尾句不扩词");
 });
 
-test("R11-2 0024 drift 闭集仅 backend + model.id：opencode legacy 形状（providerID/contextWindow/variant）差异不误判", async () => {
+test("R11-2 0024 drift 闭集仅 backend + model.id：model 兄弟字段（providerID/contextWindow/variant）差异不误判", async () => {
   // 模板侧 legacy 形状：providerID/variant/contextWindow 全不同但 id 相同。
   const customTpl = {
     agents: {

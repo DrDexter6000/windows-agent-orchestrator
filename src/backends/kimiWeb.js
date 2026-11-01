@@ -25,8 +25,7 @@
 //       · **tool 帧形状 = 2026-10-01 live 探针（delta 认证证据链）**：v1 曾误以为
 //         frames 是 thinking|text 闭集——实测另有 kind:"tool"（name=工具名；
 //         input 形状随工具变化；state 有 done 等终态）。按
-//         kimiToolProjectionEvents 投影为证据事件（镜像 opencodeServe
-//         evidenceEventsFromOpenCodeToolPart），证据先于 assistant 文本发射；
+//         kimiToolProjectionEvents 投影为证据事件，证据先于 assistant 文本发射；
 //         决定 0071 起命令 / 工具调用在轮询期即落（projectKimiToolFrames），
 //         写文件证据仍等整轮带着正文完成（决定 0072 起在途先预告一条只带路径
 //         的 tool_use）。
@@ -46,7 +45,7 @@
 //     （sessionStatus busy 投影）；**不参与完成判定**。
 //   - GET /api/v1/sessions/{id}/messages → data.items[]（**newest-first**，实测
 //     如此）——**v8 起不再参与完成判定**（handle.messages 仅供停止验证消费者，
-//     按 opencodeStopVerify.sample 的调用形状 (serveUrl, sessionId, {cwd}) 读取）。
+//     按 serveStopVerify.sample 的调用形状 (serveUrl, sessionId, {cwd}) 读取）。
 //   - POST /api/v1/sessions/{id}/prompts:steer {prompt_ids:["msg_…"]}
 //     → data.steered===true 即成功；无活动轮时 40402 "no active prompt to steer
 //     into"（fail-closed）。
@@ -282,7 +281,7 @@ export class KimiWebBackend {
       );
     }
     // 表达面拒斥：prompts body 只认裸 model.id 字符串——providerID/variant 是
-    // opencode 形状的路由字段，kimi-web 无此表达面，配了即拒（防迁移配置的
+    // 带路由语义的遗留字段，kimi-web 无此表达面，配了即拒（防迁移配置的
     // 路由字段被静默丢弃后仍被当作有效配置派发）。
     if (agent?.model?.providerID !== undefined || agent?.model?.variant !== undefined) {
       throw new Error(
@@ -447,7 +446,7 @@ export class KimiWebBackend {
       redact: (value) => runRedactor.redact(value),
       // events 工厂：RunManager 传 signal（仅作 abort 静默退出——终态判定不依赖
       // 它，事件流自身的有界性由 silentTimeout 家族 + 无进展出口保证）、
-      // pollInterval / silentTimeout 控制轮询（职责划分镜像 opencodeServe.streamEvents）；
+      // pollInterval / silentTimeout 控制轮询（轮询与判定的职责划分同 streamEvents 惯例）；
       // correctable run 另传 onPollTick（排队纠偏的投递钩子——缺了它 correctable
       // run 的纠偏永远不被投递，消费侧见 runManager._pollCorrections），原样
       // 透传给 streamEvents 每轮轮询调用一次。
@@ -470,14 +469,14 @@ export class KimiWebBackend {
 
   /**
    * 一个会话的停止面：handle 与 wao stop / run_stop（经 factory 的服务端中止选择）
-   * 共用。调用形状对齐 opencodeStopVerify 的消费者：
+   * 共用。调用形状对齐 serveStopVerify 的消费者：
    *   - abort：中止排队与活动的 prompt（见文件头停止杠杆声明）；成功后会话不忙，停止
    *     验证经 sessionStatus 观察到停下。绝不调 POST /api/v1/shutdown（服务器级，会杀
    *     共享服务器上的无关会话）。幂等：同一目标二次调用复用首次结果（含首次的拒绝）。
    *   - session / messages / sessionStatus：停止探针。实际调用形状是
    *     (serveUrl, sessionId, {cwd})——形参忽略，会话身份用这里的 agent+sessionId。
    *     messages 返回 {data} 页形状（sample 读 page?.data 计数）；sessionStatus 是 GET
-   *     会话详情的 busy 投影，形状对齐 opencodeServe.sessionStatus（{type:"busy"|
+   *     会话详情的 busy 投影，形状为 {type:"busy"|
    *     "idle"}；无 retry 形状，绝不虚构，也绝不 else-推断-idle；R9 F1：detail 在场但
    *     双字段任一非布尔 → **busy** 保守投影）。detail 不可得时底层 sessionStatus()
    *     返回 null，这里把 null 转成抛错——isKnownStatus(null)===true，直接交出 null 会
@@ -701,7 +700,7 @@ export class KimiWebBackend {
 
   /**
    * GET messages（v8 起职责收窄：**仅供停止验证消费者**——handle.messages 按
-   * opencodeStopVerify.sample 的页形状返回；完成判定已整体迁移到 transcript
+   * serveStopVerify.sample 的页形状返回；完成判定已整体迁移到 transcript
    * 轮次原语，本端点不再参与任何判定分支）。A4（缺数据虚报停止）：缺 items
    * 数组 ⇒ 抛固定错误（fail-closed，绝不回落 []——空数组会被消费者当成"会话
    * 真的没有消息"的健康观测，虚报停止面）。
@@ -772,12 +771,12 @@ export class KimiWebBackend {
   /**
    * 停止验证的 busy 投影（handle.sessionStatus 的实现，#1/A4）：GET 会话详情的
    * busy/main_turn_active 双字段投影为 {type:"busy"|"idle"}——返回形状对齐
-   * opencodeServe.sessionStatus（其 statuses[sessionId] 值即该形状；kimi-web
+   * 会话状态探针（其 statuses[sessionId] 值即该形状；kimi-web
    * 无 retry 形状，绝不虚构）。A4：detail 不可得（任何错误——HTTP/信封/在场门）
    * ⇒ 返回 **null**（消费者把"观测不可得"如实记 stop_unverified，与下面的形状
    * 投影分工不同）。**R9 F1**：detail 在场（在场门已过）但任一字段非布尔 ⇒
-   * 返回 **{type:"busy"}**（保守投影）——事实依据：消费者 opencodeStopVerify 的
-   * isKnownStatus(null) === true（src/backends/opencodeStopVerify.js:134，只读
+   * 返回 **{type:"busy"}**（保守投影）——事实依据：消费者 serveStopVerify 的
+   * isKnownStatus(null) === true（src/backends/serveStopVerify.js，只读
    * 参照），null 会被当成"已知且非活跃"，session/messages 零增长时 verifyStopQuiet
    * 判 quiet:true ⇒ 不可观察被虚记 run.stop_verified。宁可虚报忙、绝不虚报停止
    * （与下方 F5 true 腿同款取舍）。HTTP 500/请求失败腿本方法返回 null；停止面
@@ -898,7 +897,7 @@ export class KimiWebBackend {
 
   /**
    * 轮询生成器（v8 结构性重写：**原厂 transcript 轮次终态原语**；职责划分镜像
-   * opencodeServe.streamEvents——完成/失败/超时判定归这里，signal 仅作 abort
+   * 轮询流惯例——完成/失败/超时判定归这里，signal 仅作 abort
    * 静默退出，不承担任何终止兜底）。每拍恰一次 GET transcript?agent_id=main，
    * 按 triggerPromptId === promptId 圈定本轮唯一 turn（锚 = spawn 记录的
    * turnAnchor.promptId/submitAt；历史轮/前任轮按构造不可能被误归属或重放）：
@@ -1060,7 +1059,7 @@ export class KimiWebBackend {
           );
           return;
         }
-        // tool 帧证据投影（2026-10-01 补齐，证据先行——同 opencode 惯例：证据
+        // tool 帧证据投影（2026-10-01 补齐，证据先行——证据
         // 事件先于消息投影）：归属 turn 的 steps[].frames 里 kind==="tool" 的帧
         // 逐帧投影为证据事件。delta 证据链动机：v1 误以为 frames 是 thinking|text
         // 闭集，模型真写了文件但 WAO 无 file_written 事件——delta scorecard 的
@@ -1201,7 +1200,7 @@ export class KimiWebBackend {
   }
 
   /**
-   * 统一请求门：镜像 opencodeServe.request 的超时/重试/204 处理，外加 kimi web
+   * 统一请求门：超时/重试/204 统一处理，外加 kimi web
    * 的 {code,msg,data} 信封判定——非 2xx 或 body.code!==0 都算失败（抛含 msg 的
    * 错误）。Bearer 解析两级（2026-10-04 会审 coder_mm 纠正的陈旧注释）：优先
    * spawn 捕获的桥接槽 SPAWN_BRIDGED_BEARER（task.resolvedCredentials，每 run
@@ -1509,8 +1508,7 @@ function kimiWritePath(frame) {
   return typeof filePath === "string" && filePath.length > 0 ? filePath : null;
 }
 
-// 单个 tool 帧的投影规则——**镜像 src/backends/opencodeServe.js 的
-// evidenceEventsFromOpenCodeToolPart**（差异仅限帧形状与终态词）。
+// 单个 tool 帧的投影规则（证据事件先于终态词判定；差异仅限帧形状与终态词）。
 // 形状来源 = 2026-10-01 live 探针（delta 证据链）：
 //   {kind:"tool", frameId, toolCallId, name:"Write", state:"done",
 //    input:{path:"wao_perm_probe.txt", content:"…"}, output:"Wrote 8 bytes to …"}
@@ -1522,7 +1520,7 @@ function kimiWritePath(frame) {
 //     （path 缺席不虚构 file_written）；
 //   - 其余 → toolUseEvent(name, input)；
 //   - state 终态（done|error|failed）再追加 toolResultEvent(toolCallId, output,
-//     isError 按 state 判)——投影事件在前、结果事件在后，与 opencode 逐 part 的
+//     isError 按 state 判)——投影事件在前、结果事件在后（逐 part 的
 //     双事件形状一致（结果事件由 kimiToolResultEvent 单独构造；两者何时发射
 //     见 projectKimiToolFrames）。
 function kimiToolCallId(frame) {
@@ -1555,14 +1553,14 @@ function kimiToolProjectionEvents(frame) {
 }
 
 // tool 帧 state 的终态闭集（live 探针实测 done；error/failed 为错误终态）——
-// 闭集外（含非终态/未知 state）绝不追加 tool_result、绝不猜终态。与 opencode
-// 的 isTerminalToolStatus 同位：opencode 终态词是 "completed"，kimi 实测是
+// 闭集外（含非终态/未知 state）绝不追加 tool_result、绝不猜终态。终态词
+// 闭集与各后端各自实测对齐（kimi 实测是
 // "done"，闭集按各自 live 形状取，不复用。
 function isTerminalKimiToolState(state) {
   return state === "done" || state === "error" || state === "failed";
 }
 
-// opencodeServe.js isFileWriteTool 同款谓词（该函数未导出——镜像保持一处一份
+// isFileWriteTool 同款谓词（各后端各自一份
 // 语义，注释互指）。
 function isFileWriteToolKey(toolKey) {
   return toolKey === "write" || toolKey === "edit" || toolKey === "multiedit";

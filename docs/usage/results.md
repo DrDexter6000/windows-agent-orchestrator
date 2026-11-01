@@ -34,7 +34,7 @@ WAO 可被任何调用方平等驱动：bash 脚本、LLM 编排器、CI。
 `--format json` 不是全局开关，支持面以命令为准（本页只列常用面，不维护全量清单）：
 
 - 恒为 JSON、无需 flag：`spawn`（含 runId + transcript 路径）；`status`（无 `--format` 分支——flag 是 no-op，被接受但不改变任何行为，输出恒 JSON）；裸 `collect <runId>`（raw ops JSON）。
-- `--format json` 显式开启：`run`（JSON 输出含 messages + metrics）；查询族（registry validate / registry check / runs list / runs summary / runs grep / wao decision list / wao handoff read，形状见下）；runs 族多数子命令（wait / gate / metrics / scorecard / diagnose / dashboard / delivery）。
+- `--format json` 显式开启：`run`（JSON 输出含 messages + metrics）；查询族（registry validate / runs list / runs summary / runs grep / wao decision list / wao handoff read，形状见下）；runs 族多数子命令（wait / gate / metrics / scorecard / diagnose / dashboard / delivery）。
 - 已知例外：`collect --final` 接受 `--format json`，但 stdout 恒为四态文本，不输出 JSON 信封（该组合 stderr 警告一次）。机器可读请去掉 `--final`，用分页 `collect <runId> --format json`。
 
 ```powershell
@@ -46,7 +46,6 @@ npm run --silent cli -- run glm-flash --prompt "..." --format json | ConvertFrom
 
 # 查询族：registry / runs / wao 的只读子命令（同样支持 --format json）
 npm run --silent cli -- registry validate --registry config/agents.json --format json
-npm run --silent cli -- registry check --registry config/agents.json --format json
 npm run --silent cli -- runs list --format json
 npm run --silent cli -- runs summary --format json
 npm run --silent cli -- runs grep "error" --format json
@@ -54,10 +53,9 @@ npm run --silent cli -- wao decision list --format json
 npm run --silent cli -- wao handoff read lead --format json
 ```
 
-> 下面七个查询子命令的 JSON 输出形状没有生成层，以本节为准（归属见 `docs/ssot.md` §1.3）；改这些命令的输出时同步改这里。
+> 下面六个查询子命令的 JSON 输出形状没有生成层，以本节为准（归属见 `docs/ssot.md` §1.3）；改这些命令的输出时同步改这里。
 
 - `registry validate --format json` → `{checked, valid, agents:[{id, ok, issues[], warnings[]}]}`。`id` 为 null 时（键名不合法，不回显），`position` 是按解析后键的枚举顺序计的 1 起序号（整数样式的键排在前面，不一定等于文件里的行序），文本模式对这类条目输出 `✖ #<序号>`。JSON 模式维持 exit code 契约：有错误条目 → exit 1；文本模式的 ⚠ warning 进入 `warnings[]`，不阻塞。registry 源 JSON 解析失败时输出 `{checked:0, valid:false, agents:[], issues:[...]}`——顶层 `issues` 数组只含固定文案，能从报错取到位置时附行列号（如 `registry 文件不是合法的 JSON（第 3 行第 7 列）`），取不到位置时只有固定文案；不回显源文本，exit 1。文本模式：角色合同失败的 agent 只输出一行 `✖ <id>`，不先打 ✔ 成功行再打 ✖。
-- `registry check --format json` → `{allOk, agents:[{id, status:"ok"|"fail"|"skip", serveUrl?, error?}]}`；fail 照旧 exit 1。非 opencode-serve 车道的 `skip` 行（文本模式同文案）`error` 是一句固定文案，指路 `wao lanes`（车道就绪）与 `wao doctor`（环境）。
 - `runs list --format json` → `{runs:[{runId, agentId, state, terminal, updatedAt, ...}], matchedCount}`（直接序列化共享 listRuns 服务结果）。
 - `runs summary --format json` → `{total, byState, latest}`（无事件时间戳时 `latest:null`）。
 - `runs grep <pattern> --format json` → `{pattern, matched, matches:[{runId, type, ts}]}`——与文本路径一致，每个 run 只记录首个命中事件，不是全量命中清单。

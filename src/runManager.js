@@ -369,17 +369,10 @@ function isConfirmableToolCallId(value) {
     && value !== "unknown";
 }
 
-async function validateRoleContractTransport(backend, agent, roleContract) {
-  if (typeof roleContract !== "string" || roleContract.length === 0) return;
-  if (typeof backend.validateRoleContractTransport === "function") {
-    await backend.validateRoleContractTransport(agent, { roleContract });
-  }
-}
-
 // R10-C C-3: when a per-dispatch model override is active and the backend
 // refuses the (synthesized) policy, the operator sees a registry-shape error
 // for a dispatch they made with --model — the two facts never connect in the
-// message (opencode-serve's model-shape text, kimi-code's effort/model pairing
+// message (a backend's model-shape text, kimi-code's effort/model pairing
 // both read as pure registry complaints). Append ONE bounded sentence naming
 // the override whenever it is in play. The verdict itself is untouched: same
 // throw, same backend decision, only the message gains the hint (fixed text —
@@ -750,7 +743,7 @@ export class RunManager {
     //   model: { ...(agent.model ?? {}), id: modelOverride }
     // AFTER registry resolution and BEFORE validateAgentPolicy / the
     // run.started append below — only `.id` is replaced; every sibling field
-    // (canonical contextWindow, opencode-serve providerID/variant) survives.
+    // (canonical contextWindow, zcode ref siblings, deepseek-acp providerID) survives.
     // Deliberately NOT a getAgent override: registry.getAgent shallow-merges
     // top-level keys, so passing model there would replace the whole object
     // and silently drop the siblings. Mutually exclusive with requireCertified
@@ -772,7 +765,7 @@ export class RunManager {
     // (same getAgent shallow-merge caveat — never a getAgent override). The
     // value is gated by the CLOSED-SET SSOT (isValidReasoningOverride above,
     // REASONING_EFFORTS from registry.js). No capability boolean exists by
-    // design: inexpressible policies (opencode-serve) and conditional subsets
+    // design: inexpressible policies and conditional subsets
     // (kimi K3-only, deepseek-harness high|max) refuse naturally through the
     // existing per-backend validateAgentPolicy gate over the synthesized
     // object. Mutually exclusive with requireCertified and sessionReuse by the
@@ -864,7 +857,7 @@ export class RunManager {
     // above) — the same post-getAgent, pre-validation slot as the model
     // synthesis. The synthesized object flows through validateAgentPolicy
     // below unchanged: zero NEW validation surface; a backend that cannot
-    // express the effort (opencode-serve) or only a conditional subset
+    // express the effort or only a conditional subset
     // (kimi-code K3-only, deepseek-harness high|max) refuses exactly as it
     // would for the same registry-declared shape. For a registry entry without
     // any reasoning this synthesizes a bare {effort}.
@@ -1030,11 +1023,6 @@ export class RunManager {
         : deliveryContract;
     }
 
-    // Runtime-managed transports may need to prove a dynamic capability (for
-    // example an OpenCode server version) in addition to the static flag. The
-    // hook is provider-neutral and runs before runDir/transcript/worktree/spawn.
-    await validateRoleContractTransport(backend, agent, roleContract);
-
     // M11-9 CTO closeout: validate the backend can express the agent's canonical
     // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
     // runs AFTER the role-contract / delivery-contract checks (which are more
@@ -1132,10 +1120,9 @@ export class RunManager {
     // that implements preflightInvocation composes a LOCAL OS invocation and
     // spawns with cwd: agent.cwd (processBackend.js spawn / deepSeekHarness),
     // so a missing directory hits Node's classic ENOENT-blames-the-executable
-    // trap there. OpenCodeServe (an HTTP backend with no preflightInvocation)
-    // threads agent.cwd to the serve API as a REMOTE directory hint — no local
-    // spawn, no local ENOENT trap — and is unaffected, exactly as it is by the
-    // invocation-budget preflight.
+    // trap there. HTTP 型 backend（无 preflightInvocation 能力）把 agent.cwd
+    // 作为远端目录提示透传给 serve API——无本地 spawn、无本地 ENOENT 陷阱，
+    // 不受影响（与 invocation 预算预检同一豁免面）。
     //
     // Position: BEFORE the credential check, mirroring layer 1's ordering —
     // the refusal stays deterministic across environments (machine env cannot
@@ -1180,8 +1167,8 @@ export class RunManager {
     // Failing here means zero transcript bytes, zero worktree, zero spawn.
     //
     // Provider-neutral: keyed on the capability (the method), never the runtime
-    // name — OpenCodeServe (an HTTP backend with no preflightInvocation) is
-    // unaffected. This is a best-effort EARLY gate, NOT a byte-identity guarantee:
+    // name — HTTP 型 backend（无 preflightInvocation 能力）不受影响。
+    // This is a best-effort EARLY gate, NOT a byte-identity guarantee:
     // it assumes buildArgs and binary resolution are deterministic and
     // cwd-independent for the configured process backends (preflight uses the
     // pre-worktree `agent`). spawn re-runs compileInvocation as the authoritative
@@ -1686,7 +1673,7 @@ export class RunManager {
     // 拿不到 prompt。修复：spawn 前先写 prompt.sent {prompt}（不含 messageId，spawn 前还没有），
     // spawn 成功后再写第二条含 messageId/admittedSeq 的 prompt.sent（ProcessBackend 家族该值
     // 为 undefined，序列化丢键——第二写与首写同样裸落盘）；resume/retry 自 R13-C 起用
-    // findLatestBound 取最后一条绑定记录，保证 opencode-serve resume 拿得到 messageId。
+    // findLatestBound 取最后一条绑定记录（resume 流取 messageId 的同一纪律）。
     await transcript.append("prompt.sent", { prompt });
 
     let result;
@@ -1724,7 +1711,7 @@ export class RunManager {
       // stop 据此找到要击杀的进程树（proc_<pid> 占位 id 的后端不需要）。
       ...(Number.isInteger(result.hostPid) && result.hostPid > 0 ? { hostPid: result.hostPid } : {}),
     });
-    // spawn 成功后补写带 messageId/admittedSeq 的 prompt.sent（resume opencode-serve 流需要 messageId）。
+    // spawn 成功后补写带 messageId/admittedSeq 的 prompt.sent（serve 型 resume 流需要 messageId）。
     // 此时已过 spawn 失败分支，不会产生"terminal 先于 prompt.sent"的 race。
     await transcript.append("prompt.sent", {
       messageId: result.messageId,
@@ -1892,9 +1879,8 @@ export class RunManager {
       );
     }
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
-    // 执行位置（attach 轮询 cwd / replay spawn 的 agent.cwd 覆写）：ephemeral 轮
-    // =隔离树；其余沿既有语义。getAgent/Run.agent 仍按 resumeCwd（源仓）解析。
-    const executionCwd = ephemeralWorktree ?? resumeCwd;
+    // 执行位置（replay spawn 的 agent.cwd 覆写）：ephemeral 轮 =隔离树；其余沿
+    // 既有语义。getAgent/Run.agent 仍按 resumeCwd（源仓）解析。
     // 0045 W4d（R5 §1.3）：重键前档案的 envelope agentId=席位名，注册表已无此键——
     // getAgent 的 Unknown 信号转固定文案具名拒绝（不裸抛、不静默换道）。mock 注册
     // 表可无 listAgents——以 getAgent 本身为准（诚实信号），不做前置键扫描。
@@ -2078,11 +2064,6 @@ export class RunManager {
         : deliveryContract;
     }
 
-    // Same dynamic transport proof as start. Resume may read the existing
-    // transcript to reconstruct context, but this runs before append/spawn and
-    // therefore preserves transcript bytes on refusal.
-    await validateRoleContractTransport(backend, agent, resumeRoleContract);
-
     // M11-7 (CTO closeout): credential availability check on resume too — same
     // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
     // throw (spawn count 0, transcript bytes unchanged). Resolved values are
@@ -2110,12 +2091,10 @@ export class RunManager {
       resumeScorecardRules = runStarted.delivery.scorecardRules;
     }
 
-    // Process-style backends replay the persisted prompt into a fresh process.
-    // Production backends declare replayByRespawn explicitly. The capability
-    // fallback preserves the long-standing contract for injected/test backends:
-    // a backend that can spawn but has no attach stream cannot be treated as an
-    // HTTP/session backend. This remains provider-neutral and avoids routing an
-    // otherwise resumable backend into a missing streamEvents method.
+    // Resume replays the persisted prompt into a fresh process or session.
+    // Production backends declare replayByRespawn explicitly; the capability
+    // fallback keeps the contract for injected/test backends that can spawn but
+    // expose no streamEvents. Provider-neutral: no runtime-name branch.
     if (backend.replayByRespawn === true || typeof backend.streamEvents !== "function") {
       // TD-54：prompt.sent 可能写两条，取最后一条（两条都有 .prompt，无差别）。
       // R13-C：读取带 runId 绑定——尾部追加的外 run 伪造 prompt.sent 不得被
@@ -2212,64 +2191,13 @@ export class RunManager {
       return run;
     }
 
-    // HTTP 类 backend（opencode-serve）→ attach 到已有 session
-    const serveUrl = agent.serveUrl;
-    const sessionId = session.backendSessionId;
-    // TD-103 audit: delivery runs use worktree cwd for streamEvents polling.
-    // TD-262（0063）：ephemeral 轮的轮询/探针 cwd = 隔离树（executionCwd）。
-    const cwd = executionCwd;
-    // TD-262（0063，sol 会审条款）：attach 重建的 handle 此前缺停止探针——
-    // 终态清理恒 stop_unconfirmed。按 backend 能力位接线（不变量 3，不按
-    // runtime 名分支）：backend 自带 (serveUrl, sessionId, opts) 形探针则透传。
-    const probeCapable = typeof backend.session === "function" && typeof backend.messages === "function";
-    // TD-54 修复：prompt.sent 现在可能写两条（spawn 前 {prompt} + spawn 后 {messageId,...}），
-    // resume 取最后一条才有 messageId（opencode-serve resume 流需要）。
-    // R13-C：读取带 runId 绑定——外 run 尾条不得供给 attach 的
-    // messageId/admittedSeq。
-    const boundPromptEvent = findLatestBound(events, "prompt.sent", runId);
-    const handle = {
-      backend: session.backend,
-      backendSessionId: sessionId,
-      messageId: boundPromptEvent?.messageId,
-      admittedSeq: boundPromptEvent?.admittedSeq,
-      events: (signal, opts) => backend.streamEvents(serveUrl, sessionId, { cwd, signal, interval: opts?.pollInterval }),
-      abort: async () => backend.abort(serveUrl, sessionId),
-      ...(probeCapable ? {
-        session: (u, i, o) => backend.session(u, i, o),
-        messages: (u, i, o) => backend.messages(u, i, o),
-      } : {}),
-    };
-
-    const run = new Run({
-      runId,
-      agentId: transcript.context.agentId,
-      agent,
-      backend,
-      handle,
-      transcript,
-      result: handle,
-      config: this.config,
-      onRemove: () => this.activeRuns.delete(runId),
-      initialState: state,
-      ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
-      // TD-262（0063）：attach 路径同款恢复（sol 会审条款：两条 Run 构造路径
-      // 都要恢复参数）；决定 0102：私有克隆的形态与基点一并恢复。
-      ...(ephemeralWorktree ? {
-        deferredWorktreeRelease: ephemeralWorktree,
-        effectiveCwd: ephemeralWorktree,
-        ...(ephemeralCloneForm
-          ? { deferredWorktreeForm: ephemeralCloneForm, deferredWorktreeBaseCommit: ephemeralCloneBaseCommit }
-          : {}),
-      } : {}),
-      scorecardRules: resumeScorecardRules,
-      deliveryContext,
-      packageDeliveryFn: this.packageDeliveryFn,
-      verifyDeliveryFn: this.verifyDeliveryFn,
-      runsRoot: dir,
-    });
-    this.activeRuns.set(runId, run);
-    this._ensureSigintHandler();
-    return run;
+    // WAO resumes by replay only. Every production backend gets there (kimi-web,
+    // zcode and the process backends declare replayByRespawn; deepseek-acp has
+    // no streamEvents), so only an injected backend that declares no replay but
+    // exposes its own event stream reaches this line: refuse, never return silently.
+    throw new Error(
+      "resume: backend declares no replayByRespawn but exposes streamEvents; WAO resumes by replay only",
+    );
   }
 
   async abort(runId, reason = STATE_CHANGE_REASON.user) {
@@ -3761,7 +3689,7 @@ export class Run {
     }
     // 会话兜底 abort（事故修复 2026-06-17）：无论哪条终态路径（completed/failed/
     // timed_out/user-abort），清理时都必须向 serve 端 session 发送 abort。
-    // HTTP 类 backend（opencode-serve）的 session 不一定随 run 结束自行死——
+    // HTTP 类 backend 的 session 不一定随 run 结束自行死——
     // 对无限多轮模型（DeepSeek-v4-flash）会持续烧 token 直到 quota 耗尽。
     // handle.abort 幂等：user-abort 路径已调过则 _sessionKilled 挡住重复调用；
     // 进程式 backend abort 是 no-op（进程已死），不报错。
@@ -3772,10 +3700,10 @@ export class Run {
       } catch {
         // 兜底 abort 失败不影响已定的终态（和 _abortInternal 一致：状态机以意图为准）
       }
-      // C6（TD-38，审计 P0 收口）：opencode 类 backend 的 abort 可能虚假成功（06-18 事故根因）。
+      // C6（TD-38，审计 P0 收口）：serve 类 backend 的 abort 可能虚假成功（06-18 事故根因）。
       // _runCleanup 是 waitForCompletion 终态后的兜底路径（TD-35 修），此处的 abort 同样要验证。
       // 复用 verifyStopQuiet：abort 后轮询 session/message，未停则标记 + 告警（不阻断终态）。
-      // 只对有 session/messages 方法的 backend（opencode 类）验证；进程式（claude-code/kimi/codex）
+      // 只对有 session/messages 方法的 backend（serve 类）验证；进程式（claude-code/kimi/codex）
       // abort 是 no-op 且进程已死，跳过验证。
       await this._verifyStopQuietIfCapable().catch(() => { /* 验证失败不影响终态 */ });
     }
@@ -4128,8 +4056,8 @@ export class Run {
   }
 
   /**
-   * C6（TD-38）：_runCleanup 的 abort 后静默验证（仅 opencode 类 backend）。
-   * 判断 handle 是否有 session/messages 方法（opencode 有，进程式无）。
+   * C6（TD-38）：_runCleanup 的 abort 后静默验证（仅 serve 类 backend）。
+   * 判断 handle 是否有 session/messages 方法（serve 类有，进程式无）。
    * 有则复用 verifyStopQuiet 验证后台是否真停；未停写 run.stop_unverified + 告警。
    * 失败/无能力 → 降级，不阻断终态。
    */
@@ -4220,15 +4148,14 @@ export class Run {
       return;
     }
 
-    // opencode 类 backend：取 serveUrl + sessionId 用于验证
+    // serve 类 backend：取 serveUrl + sessionId 用于验证
     if (typeof h.session !== "function" || typeof h.messages !== "function") {
       return;
     }
-    // opencode 类：取 serveUrl + sessionId 用于验证
     const serveUrl = this.result?.serveUrl;
     const sessionId = this.result?.backendSessionId;
     if (!serveUrl || !sessionId) return;
-    const { verifyStopQuiet } = await import("./backends/opencodeStopVerify.js");
+    const { verifyStopQuiet } = await import("./backends/serveStopVerify.js");
     const result = await verifyStopQuiet(h, serveUrl, sessionId, {
       cwd: this.result?.cwd, rounds: 3, intervalMs: 2000,
     });
@@ -4251,7 +4178,7 @@ export class Run {
   async _abortInternal(reason) {
     this._aborted = true;
     // TD-163（ADR-0030 收口）：打断所有在飞 waitForCompletion 的等待控制器。
-    // 事件流生成器（opencode streamEvents 的 while(!signal.aborted) 轮询、进程式
+    // 事件流生成器（serve 型轮询流的 while(!signal.aborted)、进程式
     // backend 的 signal 监听）靠 signal 退出；只调 handle.abort 不保证流终止
     // （HTTP session abort 后 /message 常态返回冻结快照，轮询永不 yield）。
     // 旧定时器的 controller.abort() 兜着这一臂——定时器降级为通知器后由本路径接管。

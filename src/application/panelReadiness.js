@@ -20,9 +20,7 @@
 // deriveReadyState 是映射的单一实现（onboarding 的 computeReadyState
 // 探测归一后委托到这里，doctor 用自己的探测事实构造后也委托到这里）。
 // login_based/unknown 不计入"可用"但如实展示：登录态型展示"登录态未验证"
-// （文案不得把登录态当已验证讲）；serve 注入型（backend=opencode-serve）的
-// login_based 原值是基线遗留——展示层单列 injectedAuth（注入式认证，serve
-// 探测不覆盖）；unknown 展示"探测未知"。
+// （文案不得把登录态当已验证讲）；unknown 展示"探测未知"。
 // 未知族系 ≠ 同族：跨族系判断只统计已知族系（modelFamily UNKNOWN_FAMILY
 // 不参与多样性判定）。
 
@@ -86,7 +84,6 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  *   tier: "three_seat"|"two_seat"|"none",
  *   available: Array<{id: string, family: string}>,
  *   loginUnverified: string[],
- *   injectedAuth: string[],
  *   probeUnknown: string[],
  *   insufficientFamilyDiversity: boolean,
  *   duplicateModelKeys: Array<{backend: string|null, modelId: string|null, ids: string[]}>,
@@ -97,8 +94,7 @@ export function deriveReadyState({ requiresCli, requiresKeyEnv, cli, key }) {
  *   held：车道表带暂停说明的行（Owner 暂停派发，只告知不拦截）——不进任何
  *     候选口径，连同原话如实展示（决定 0090）。
  *   available：可用（探测 ready）候选——探测口径数量，不声称已配齐可派发副审。
- *   loginUnverified / injectedAuth / probeUnknown：如实展示清单（登录态型 /
- *     serve 注入型 / 探测未知）。
+ *   loginUnverified / probeUnknown：如实展示清单（登录态型 / 探测未知）。
  *   insufficientFamilyDiversity：≥2 可用候选且已知族系不足两族（未知族系不
  *     参与判定 ⇒ 含"一已知+一未知"、"全未知"——无法确认跨族系，同样提示）。
  *     0065 起为主提示（原 missingAdversarial 随 seatRole 退役废止）。
@@ -119,17 +115,13 @@ export function assessPanelReadiness(rows, { dispatchHolds = {} } = {}) {
     backend: typeof row?.backend === "string" ? row.backend : null,
     modelId: typeof row?.model === "string" ? row.model : null,
     readyState: typeof row?.readyState === "string" ? row.readyState : "unknown",
-    serveInjected: row?.backend === "opencode-serve",
   }));
   // 决定 0090：暂停派发的车道不算候选（避免把 Owner 暂停的车道配进建议席位）。
   const held = all.filter((e) => holdOf(e.id) !== null).map((e) => ({ id: e.id, dispatchHold: holdOf(e.id) }));
   const entries = all.filter((e) => holdOf(e.id) === null);
   const readySeats = entries.filter((e) => e.readyState === "ready");
   const loginUnverified = entries
-    .filter((e) => e.readyState === "login_based" && !e.serveInjected)
-    .map((e) => e.id);
-  const injectedAuth = entries
-    .filter((e) => e.readyState === "login_based" && e.serveInjected)
+    .filter((e) => e.readyState === "login_based")
     .map((e) => e.id);
   const probeUnknown = entries.filter((e) => e.readyState === "unknown").map((e) => e.id);
   const knownFamilies = readySeats.map((e) => e.family).filter((f) => f !== UNKNOWN_FAMILY);
@@ -146,7 +138,6 @@ export function assessPanelReadiness(rows, { dispatchHolds = {} } = {}) {
     tier: readySeats.length >= 2 ? "three_seat" : readySeats.length === 1 ? "two_seat" : "none",
     available: readySeats.map((e) => ({ id: e.id, family: e.family })),
     loginUnverified,
-    injectedAuth,
     probeUnknown,
     // TD-258：key_only_* 不计入可用、不抬 tier，但绝不从叙事里无声消失。
     keyOnly: entries

@@ -5,7 +5,7 @@
 // 核心不变量：先 claim 终态（transitionState），只有 accepted winner 才执行
 // 破坏性副作用（taskkill / backend.abort）。rejected loser 零副作用。
 //
-// M10 P0-2A: processStop/opencodeStop/invalidPidStop logic extracted to
+// M10 P0-2A: processStop/serverStop/invalidPidStop logic extracted to
 // src/application/runStop.js. This module now owns only:
 //   - CLI adapter (argv parsing + JSON output formatting)
 //   - Primitive helpers exported for the service: killProcessTree, isPidAlive, waitForPidExit
@@ -120,7 +120,7 @@ function stopResultToCliJson(r) {
       terminalState: r.terminalState,
     };
   }
-  // Opencode winner
+  // Server-stop winner
   if (r.terminalAccepted && !viaProcess) {
     return {
       runId: r.runId,
@@ -132,7 +132,7 @@ function stopResultToCliJson(r) {
       taskkillCalled: r.taskkillCalled,
     };
   }
-  // Opencode loser
+  // Server-stop loser
   if (r.rejected) {
     return {
       runId: r.runId,

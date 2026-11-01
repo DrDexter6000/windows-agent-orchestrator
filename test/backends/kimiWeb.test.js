@@ -2,7 +2,7 @@
 //
 // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的官方 REST
 // API）的离线单元测试：注入 fetchImpl 的假服务器构造全部上游形状，零真实服务器、
-// 零网络（风格镜像 test/backends/opencodeServe.test.js）。上游事实锚点 =
+// 零网络。上游事实锚点 =
 // 2026-09-30 对本机 kimi 2.1.1 的直跑实测（src/backends/kimiWeb.js 文件头）。
 //
 // 第八轮交付（完成判定迁移到**原厂 transcript 轮次终态原语**）适配：完成判定 =
@@ -21,7 +21,7 @@
 //
 // 第九轮交付（R9 定点修复 + 六审盲区反例；transcript 核心架构不动——归属/终态/
 // 拼接/usage 既有实现保持）：F1 sessionStatus 非布尔形状 → busy 保守投影（消费侧
-// isKnownStatus(null)===true 会虚记 stop_verified——opencodeStopVerify.js:134）；
+// isKnownStatus(null)===true 会虚记 stop_verified——serveStopVerify.js）；
 // F2 turnFailureText 过与 request 层同一 redactToken（HTTP 200 成功路径的
 // turn.error 不再绕开清洗）；F3 无 turn 分支只以 silentTimeout 为界（8 拍兜底仅
 // silentTimeout 缺席时生效）；F4 闭集外 state 独立有界出口（连续 8 拍、增长不清
@@ -31,8 +31,8 @@
 //
 // 第十轮小交付（2026-10-01 delta 认证证据链补齐）：completed 轮 steps[].frames
 // 里 kind:"tool" 的帧（形状 = 2026-10-01 live 探针：{kind:"tool", frameId,
-// toolCallId, name, state, input, output}）投影为证据事件——镜像 opencodeServe
-// evidenceEventsFromOpenCodeToolPart（bash/shell+command → command、
+// toolCallId, name, state, input, output}）投影为证据事件（证据先行：
+// bash/shell+command → command、
 // write/edit/multiedit+path/file_path → file_written、其余 → tool_use、终态
 // done|error|failed 追加 tool_result），证据先于 assistant 文本发射。v1 误以为
 // frames 是 thinking|text 闭集：模型真写了文件但 WAO 无 file_written 事件，
@@ -44,9 +44,9 @@ import assert from "node:assert/strict";
 import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
 import { backendFor, backendCapabilitySnapshot } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
-import { verifyStopQuiet } from "../../src/backends/opencodeStopVerify.js";
+import { verifyStopQuiet } from "../../src/backends/serveStopVerify.js";
 
-// 61a：底层信封/路由夹具迁至共享文件（多文件共用，同一函数只留一份）。
+// 底层信封/路由夹具在共享文件里（多文件共用，同一函数只留一份）。
 import {
   KIMI_TEST_TOKEN_ENV,
   KIMI_TEST_TOKEN_VALUE,
@@ -102,7 +102,7 @@ test("kimi-web ①: validateAgentPolicy 通过分支与全部拒绝分支（无 
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "" } })), /requires model\.id/);
   // 修复 D：纯空白串与缺失同罪（空白 id 直传上游 = 事实上的缺 model 静默秒败）。
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "   " } })), /requires model\.id/);
-  // 修复 D：kimi-web 无 providerID/variant 表达面（防 opencode 迁移配置静默丢路由字段）。
+  // 修复 D：kimi-web 无 providerID/variant 表达面（防遗留路由字段被静默丢弃）。
   assert.throws(
     () => backend.validateAgentPolicy(makeAgent({ model: { id: "kimi-code/k3", providerID: "moonshot" } })),
     /cannot express model\.providerID\/model\.variant/,
@@ -519,7 +519,7 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
     events.push(ev);
   }
-  // 事件顺序（证据先行，同 opencode 惯例）：tool 帧证据逐帧（投影事件 + 终态
+  // 事件顺序（证据先行）：tool 帧证据逐帧（投影事件 + 终态
   // tool_result）→ user echo → assistant text → metrics → done(completed)。
   assert.deepEqual(
     events.map((e) => e.kind),
@@ -585,7 +585,7 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   assert.equal(polls(), 1, "首拍即终态——轮次原语无需等待窗口/稳定性重读");
 });
 
-test("kimi-web ⑤: 混合帧 completed 轮（thinking + tool + text）→ tool 帧证据先于 assistant message（证据先行，同 opencode 惯例；thinking 帧不投影）", async () => {
+test("kimi-web ⑤: 混合帧 completed 轮（thinking + tool + text）→ tool 帧证据先于 assistant message（证据先行；thinking 帧不投影）", async () => {
   const turn = turnItem({
     steps: [stepItem({
       stepId: "s0",
@@ -635,7 +635,7 @@ test("kimi-web ⑤: 混合帧 completed 轮（thinking + tool + text）→ tool 
   assert.equal(polls(), 1);
 });
 
-test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 done|error|failed 之外不追加 tool_result、无 path 不虚构 file_written（镜像 opencodeServe 的 terminal-status 门）", async () => {
+test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 done|error|failed 之外不追加 tool_result、无 path 不虚构 file_written（terminal-status 门）", async () => {
   // 腿 1：bash 帧 state:"running"（终态闭集外的任意非终态值代表形状）→ 只投影
   // commandEvent，无 tool_result——闭集外 state 绝不猜成终态。
   {
@@ -673,7 +673,7 @@ test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 d
     assert.equal(events.at(-1).reason, "completed");
   }
   // 腿 2：Write 帧 input 缺 path/file_path → 不虚构 file_written；终态
-  // tool_result 仍按 state 投影（与 opencodeServe 逐 part 双事件形状一致）。
+  // tool_result 仍按 state 投影（逐 part 双事件形状）。
   {
     const turn = turnItem({
       steps: [stepItem({
@@ -1487,19 +1487,19 @@ test("kimi-web ⑥: 停止面的状态读不到时抛错——状态读 HTTP 500
 
 test("kimi-web ⑥: factory.serverStopTargetFor——按会话记录的 backend 选服务端中止；kimi-web 须 registry agent 同后端同 serveUrl，否则固定文案、零请求", async () => {
   const { serverStopTargetFor, serverStopBackendOf, SERVER_STOP_ROUTE_TEXT } = await import("../../src/backends/factory.js");
-  const { OpenCodeServeBackend } = await import("../../src/backends/opencodeServe.js");
   const { calls, fetchImpl } = kimiServer(() => { throw new Error("resolution must not send requests"); });
   const session = { backend: "kimi-web", serveUrl: "http://127.0.0.1:4310", backendSessionId: "session_old" };
 
-  // 缺省 / opencode-serve：OpenCodeServeBackend，不调 loadAgent。
+  // 会话记录没有 backend 字段时不按任何后端路由——不发请求、
+  // 抛 unresolved；backend 字段如实记 null（不猜）。
   let loads = 0;
   const loadAgent = async () => { loads += 1; return makeAgent(); };
-  for (const s of [{ serveUrl: "http://127.0.0.1:1" }, { backend: "opencode-serve", serveUrl: "http://127.0.0.1:1" }]) {
-    const target = await serverStopTargetFor(s, { fetchImpl, loadAgent });
-    assert.ok(target instanceof OpenCodeServeBackend);
-    assert.equal(serverStopBackendOf(s), "opencode-serve");
-  }
-  assert.equal(loads, 0, "opencode-serve 路由不取 registry agent");
+  await assert.rejects(
+    () => serverStopTargetFor({ serveUrl: "http://127.0.0.1:1" }, { fetchImpl, loadAgent }),
+    (error) => error.message === SERVER_STOP_ROUTE_TEXT.unresolved,
+  );
+  assert.equal(serverStopBackendOf({ serveUrl: "http://127.0.0.1:1" }), null, "无 backend 如实记 null（不猜）");
+  assert.equal(loads, 0, "无 backend 不取 registry agent");
 
   // kimi-web 匹配（serveUrl 尾斜杠不计）→ 停止面。
   const target = await serverStopTargetFor(session, { fetchImpl, loadAgent: async () => makeAgent({ serveUrl: "http://127.0.0.1:4310/" }) });
@@ -1509,7 +1509,7 @@ test("kimi-web ⑥: factory.serverStopTargetFor——按会话记录的 backend 
     ["no loadAgent", undefined, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
     ["agent null", async () => null, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
     ["registry throws", async () => { throw new Error(`registry at D:/secret/agents.json ${TOKEN_VALUE}`); }, SERVER_STOP_ROUTE_TEXT.agentUnavailable],
-    ["backend differs", async () => makeAgent({ backend: "opencode-serve" }), SERVER_STOP_ROUTE_TEXT.agentMismatch],
+    ["backend differs", async () => makeAgent({ backend: "codex" }), SERVER_STOP_ROUTE_TEXT.agentMismatch],
     ["serveUrl differs", async () => makeAgent({ serveUrl: "http://127.0.0.1:4999" }), SERVER_STOP_ROUTE_TEXT.agentMismatch],
   ];
   for (const [name, load, text] of legs) {
@@ -1569,7 +1569,7 @@ test("kimi-web ②: --reasoning 覆盖经 RunManager 合成进 agent.reasoning �
   }
 });
 
-test("kimi-web ⑥: handle 探针按 runManager/opencodeStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + messages 页形状；serveUrl 形参可忽略", async () => {
+test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + messages 页形状；serveUrl 形参可忽略", async () => {
   // F3 静默门后夹具分相：spawn 期（静默门 + transcript 读）idle 放行；探针期翻
   // busy——"探针可观察 busy"的意图不变（静默门只约束提交前）。
   let probePhase = false;
@@ -1596,11 +1596,11 @@ test("kimi-web ⑥: handle 探针按 runManager/opencodeStopVerify 真实调用�
   assert.equal(typeof handle.session, "function");
   assert.equal(typeof handle.messages, "function");
   assert.equal(typeof handle.sessionStatus, "function");
-  // #1：runManager._runCleanup / opencodeStopVerify.sample 的真实调用形状——传
+  // #1：runManager._runCleanup / serveStopVerify.sample 的真实调用形状——传
   // 错误的 serveUrl 也必须工作（形参被忽略，会话身份来自 spawn 闭包）。
   const wrongServeUrl = "http://10.255.255.1:9";
   const status = await handle.sessionStatus(wrongServeUrl, handle.backendSessionId, { cwd: handle.cwd });
-  assert.deepEqual(status, { type: "busy" }, "busy 投影对齐 opencodeServe.sessionStatus 返回形状");
+  assert.deepEqual(status, { type: "busy" }, "busy 投影为 {type:\"busy\"} 形状");
   const detail = await handle.session(wrongServeUrl, handle.backendSessionId, { cwd: handle.cwd });
   assert.equal(detail.busy, true);
   assert.equal(detail.main_turn_active, true);
@@ -1992,7 +1992,7 @@ test("kimi-web ⑫ A4 缺数据不虚报：detail 缺 id 或 busy/main_turn_acti
   // 腿 6（R9 F1 更新）：sessionStatus——detail 双字段非布尔（detail 在场、在场门
   // 已过，值形状不符）→ {type:"busy"} 保守投影（旧形状 null 会被消费者
   // isKnownStatus(null)===true 当成"已知且非活跃"，虚记 stop_verified——见
-  // opencodeStopVerify.js:134 事实依据；与腿 4/5 的"不可得 → null"分工不同）。
+  // serveStopVerify isKnownStatus(null)===true 事实依据；与腿 4/5 的"不可得 → null"分工不同）。
   {
     const { fetchImpl } = kimiServer(() => envelope({ id: "ses_m6", busy: "weird", main_turn_active: "weird", last_turn_reason: null }));
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
@@ -2141,7 +2141,7 @@ test("kimi-web ⑲ F6 非 Error 抛出值包裹：fetch 抛 null / undefined →
 test("kimi-web R9 F1: sessionStatus 非布尔形状（detail 在场、值形状不符）→ busy 保守投影——消费级反例：verifyStopQuiet 判 非 quiet（metric session_status），绝不产 stop_verified", async () => {
   // 反例的确定性：session/messages 两指标全程零增长（messages 恒空页）——唯一能
   // 阻止 quiet:true 的就是 status 通道。旧形状 null 下 isKnownStatus(null)===true
-  //（opencodeStopVerify.js:134）→ observed 且非 active → quiet:true ⇒ 不可观察
+  //（serveStopVerify isKnownStatus(null)===true）→ observed 且非 active → quiet:true ⇒ 不可观察
   // 被虚记 stop_verified；F1 后 busy 投影被 isActiveStatus 命中 → 非 quiet。
   let probePhase = false;
   const { fetchImpl } = kimiServer((url) => {

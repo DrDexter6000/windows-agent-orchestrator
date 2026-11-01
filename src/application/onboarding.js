@@ -1167,7 +1167,6 @@ function projectPanelReadiness(rows, dispatchHolds = {}) {
     available: a.available.map((e) => ({ id: e.id, family: e.family })),
     seats: a.seats ? a.seats.map((e) => ({ id: e.id, family: e.family })) : null,
     loginUnverified: a.loginUnverified,
-    injectedAuth: a.injectedAuth,
     probeUnknown: a.probeUnknown,
     keyOnly: a.keyOnly,
     insufficientFamilyDiversity: a.insufficientFamilyDiversity,

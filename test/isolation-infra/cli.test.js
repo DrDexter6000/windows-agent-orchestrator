@@ -692,77 +692,6 @@ test("TD-104: registry validate rejects secret-like agent.env keys", () => {
   }
 });
 
-test("C3: registry validate 拒绝缺 tokenBudget 的 opencode worker（06-18 事故防线硬门）", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-budget-validate-"));
-  try {
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        bad_opencode: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
-          cwd: "D:/projects/app",
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-          // 故意不配 tokenBudget
-        },
-      },
-    }), "utf8");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js",
-      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
-      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
-      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
-      "registry", "validate", "--run-dir", join(dir, "runs-none"),
-      "--registry", registryPath,
-    ], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    });
-
-    assert.notEqual(result.status, 0, "缺 tokenBudget 的 opencode worker 应校验失败");
-    assert.match(result.stdout, /tokenBudget/i, "错误信息应提及 tokenBudget");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("C3: registry validate 接受配了 tokenBudget 的 opencode worker", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-budget-ok-"));
-  try {
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        good_opencode: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
-          cwd: "D:/projects/app",
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-          tokenBudget: 5000000,
-        },
-      },
-    }), "utf8");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js",
-      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
-      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
-      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
-      "registry", "validate", "--run-dir", join(dir, "runs-none"),
-      "--registry", registryPath,
-    ], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    });
-
-    assert.equal(result.status, 0, "配了 tokenBudget 的 opencode worker 应校验通过");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("P2: 裸 spawn（不带 --wait）路由到 background runner 托管（06-18 架构洞正解）", () => {
   // P0-1 旧护栏（拒绝裸 spawn）已被 P2 替换：现在不拒，而是 fork detached runner 托管。
   // runner 拥有 worker handle，驱动 waitForCompletion（token 闸门/超时/兜底 abort 都生效），
@@ -772,13 +701,10 @@ test("P2: 裸 spawn（不带 --wait）路由到 background runner 托管（06-18
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        glm_worker: {
-          backend: "opencode-serve",
-          serveUrl: "http://127.0.0.1:4297",
-          agent: "build",
+        bg_worker: {
+          backend: "claude-code",
+          binary: "nonexistent-binary-p2",
           cwd: dir,
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-          tokenBudget: 5000000,
         },
       },
     }), "utf8");
@@ -786,7 +712,7 @@ test("P2: 裸 spawn（不带 --wait）路由到 background runner 托管（06-18
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "spawn", "glm_worker",
+      "spawn", "bg_worker",
       "--prompt", "do anything",
       "--registry", registryPath,
       "--run-dir", runDir,
@@ -1435,8 +1361,7 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /mcp bind/, "help 必须列出 mcp bind（M10 P0-1 workspace activation）");
   assert.match(out, /mcp status/, "help 必须列出 mcp status");
   assert.match(out, /mcp unbind/, "help 必须列出 mcp unbind");
-  // TD-86（D2 A1）：七命令 --format json 能力入 help（新增断言，防 help 与实现漂移）。
-  assert.match(out, /registry check [^\n]*--format json/, "help 必须标注 registry check --format json（TD-86）");
+  // TD-86（D2 A1）：六命令 --format json 能力入 help（新增断言，防 help 与实现漂移）。
   assert.match(out, /registry validate [^\n]*--format json/, "help 必须标注 registry validate --format json（TD-86）");
   assert.match(out, /runs list [^\n]*--format json/, "help 必须标注 runs list --format json（TD-86）");
   assert.match(out, /runs summary [^\n]*--format json/, "help 必须标注 runs summary --format json（TD-86）");
@@ -2194,7 +2119,7 @@ test("R5-B: doctor scoped——registry 无 worker 时 CLI/key 全部 INFO 跳�
     assert.equal(parsed.advisory, true, "JSON 顶层应有 advisory=true");
     assert.equal(parsed.verdict, "HEALTHY（advisory，非门禁）", "无 FAIL 无 WARN → HEALTHY + 非门禁标注");
     assert.equal(result.status, 0);
-    for (const cli of ["claude", "codex", "kimi", "opencode"]) {
+    for (const cli of ["claude", "codex", "dsh", "kimi"]) {
       const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
       assert.ok(c, `应有 cli_${cli} 检查项`);
       assert.equal(c.status, "info", `无 worker 需要 ${cli} → INFO 跳过`);
@@ -2345,7 +2270,7 @@ test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示�
     assert.ok(reg, "缺位回退应有 registry INFO 项");
     assert.equal(reg.status, "info");
     assert.match(reg.detail, /onboarding --agent <id> --apply/);
-    for (const cli of ["claude", "codex", "kimi", "opencode"]) {
+    for (const cli of ["claude", "codex", "dsh", "kimi"]) {
       const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
       assert.ok(c && c.status === "info", "registry 缺失时 CLI 检查全部 INFO");
     }
@@ -2585,6 +2510,9 @@ test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL�
 // 不计 DEGRADED）；其余健康面零条目（budget_* 同款惯例）。
 test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ run: 子句；\".\" 给 INFO 不给 WARN；HTTP backend 零条目", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-"));
+  // kimi-web 车道在 doctor 有自有就绪检查（tokenEnv）——注入进程 env 使该面 OK，
+  // 本用例只断言 cwd_* 条目面（opencode 时代该 fixture 无 token 检查面）。
+  process.env.R82_KIMI_WEB_TOKEN = "fake-key-r82-doctor-cwd";
   try {
     const badCwd = join(dir, "no-such-project");
     const registryPath = join(dir, "agents.json");
@@ -2598,14 +2526,12 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ ru
         coder_low: { backend: "claude-code", cwd: "." },
         // HTTP serve backend：cwd 是远端目录提示，与派发层能力豁免对称
         // （CE-13/RCE-6 钉死的不拒面）→ doctor 不得更严，不产生条目。
-        // 会审修复批：补 model.providerID/model.id（normalizeAgent 必填——坏条目
-        // 会掺入与本用例无关的 registry_entry FAIL，翻转 verdict/exit 断言）。
         ghost_serve: {
-          backend: "opencode-serve",
+          backend: "kimi-web",
           serveUrl: "http://127.0.0.1:4297",
-          model: { providerID: "opencode", id: "gpt-x" },
+          model: { id: "kimi-k3" },
+          tokenEnv: "R82_KIMI_WEB_TOKEN",
           cwd: badCwd,
-          tokenBudget: 5000000,
         },
       },
     }), "utf8");
@@ -2647,7 +2573,7 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ ru
     assert.deepEqual(
       cwdItems.map((c) => `${c.name}:${c.status}`).sort(),
       ["cwd_coder_low:info", "cwd_researcher:warn"],
-      "仅本地进程式 worker 出条目：bad cwd=WARN、\".\"=INFO；opencode-serve（远端提示）零条目",
+      "仅本地进程式 worker 出条目：bad cwd=WARN、\".\"=INFO；kimi-web（远端提示）零条目",
     );
     assert.ok(!parsed.checks.some((c) => c.name === "cwd_ghost_serve"),
       "HTTP serve backend 不得出 cwd_* 条目（CE-13/RCE-6 不拒面对称）");
@@ -2655,6 +2581,7 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ ru
     assert.match(parsed.verdict, /^DEGRADED（\d+ warn）/, "WARN → DEGRADED");
     assert.equal(result.status, 0, "仅 WARN + INFO → exit 0（advisory 非门禁，INFO 不计 DEGRADED）");
   } finally {
+    delete process.env.R82_KIMI_WEB_TOKEN;
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -3966,7 +3893,7 @@ test("R10-A-CLI-8: run --background --model 全链 — CLI JSON 回显 + runner�
 // <effort>）。与 --model 同机制的单次生效覆盖；闭集（minimal/low/medium/
 // high/xhigh/max）；可与 --model 同用（"gpt-5.6-sol + xhigh" 场景）；两道硬
 // 互斥（requireCertified / provider-session reuse）与 model 同语义；无能力
-// 布尔——不可表达（opencode-serve）与条件子集（kimi K3 / dsh high|max）走
+// 布尔——条件子集（kimi K3 / dsh high|max）走
 // 既有 per-backend policy 门自然拒绝。
 // ---------------------------------------------------------------------------
 
@@ -4768,7 +4695,7 @@ test("R13-CLI-3: D 形状探针 — ProcessBackend 盘上真实形状（合法�
 test("R13-CLI-4: 合法双条回归 — TD-54 双 prompt.sent（HTTP 家族形状：第二写带 messageId）→ retry 仍取最后一条绑定记录", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-r13-dbl-"));
   try {
-    // runManager.start 的合法形状（HTTP 家族，如 opencode-serve）：spawn 前首写
+    // runManager.start 的合法形状（HTTP 家族，如 kimi-web）：spawn 前首写
     // {prompt}，spawn 后补写 {messageId, admittedSeq, prompt}（runManager.js
     // 双写位）。两条文本用不同值以分辨取法——断言"取最后一条本 run 绑定记录"
     // 语义在纯绑定（R13-C 删收窄后）原样保留。

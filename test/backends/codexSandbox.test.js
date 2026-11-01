@@ -209,7 +209,6 @@ test("能力面：codex 声明 enforcesWriteSandbox=true 且独有 probeWriteSan
   assert.equal(backendCapabilitySnapshot({ backend: "codex" }).enforcesWriteSandbox, true);
 
   const others = [
-    "opencode-serve",
     "claude-code",
     "kimi-code",
     "deepseek-harness",
@@ -219,11 +218,9 @@ test("能力面：codex 声明 enforcesWriteSandbox=true 且独有 probeWriteSan
   ];
   for (const name of others) {
     const backend = backendFor(
-      name === "opencode-serve"
-        ? { backend: name, serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: "D:/x", model: { providerID: "p", id: "m" } }
-        : name === "kimi-web"
-          ? { backend: name, serveUrl: "http://127.0.0.1:4310", cwd: "D:/x", model: { id: "kimi-code/k3" }, tokenEnv: "T" }
-          : { backend: name, cwd: "D:/x" },
+      name === "kimi-web"
+        ? { backend: name, serveUrl: "http://127.0.0.1:4310", cwd: "D:/x", model: { id: "kimi-code/k3" }, tokenEnv: "T" }
+        : { backend: name, cwd: "D:/x" },
     );
     assert.equal(backend.enforcesWriteSandbox, false, `${name} 如实声明无 OS 写沙箱`);
     assert.equal(

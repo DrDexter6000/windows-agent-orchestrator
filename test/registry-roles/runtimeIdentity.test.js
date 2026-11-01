@@ -8,9 +8,8 @@
 //   1. 探测形状：一次 spawn、argv 恰 ["--version"]、known → v1-<hash16> 指纹
 //      稳定（同输入同指纹——身份可比对）；
 //   2. unknown 明确 verified=false，且同一探测目标的未验证键稳定（不制造新键噪声）；
-//   3. opencode-serve（HTTP 服务 backend）→ honest unknown + 原因；
-//   4. 未知 backend 名 → unknown（无描述符，不猜）；
-//   5. HARNESS_VERSION_PROBES 是身份元数据表（八 backend 全覆盖或显式 null）；
+//   3. 未知 backend 名 → unknown（无描述符，不猜）；
+//   4. HARNESS_VERSION_PROBES 是身份元数据表（七 backend 全覆盖）；
 //   6. 版本解析：stdout 首个非空行、超长截断、多行 banner 取首行。
 
 import { test } from "node:test";
@@ -78,25 +77,13 @@ test("probe F6【证伪】: 探测失败/无输出/非零退出 → stable unver
   assert.match(throwing.reason, /spawn failed/);
 });
 
-test("probe: opencode-serve（HTTP 服务 backend）→ honest unknown + 原因（无 --version 可探）", () => {
-  const spawn = fakeSpawn({ stdout: "1.19.0\n" });
-  const id = probeRuntimeIdentity({ backendName: "opencode-serve", spawnFn: spawn, randomFn: () => "a" });
-  const repeated = probeRuntimeIdentity({ backendName: "opencode-serve", spawnFn: spawn, randomFn: () => "b" });
-  assert.equal(spawn.calls.length, 0, "无本地二进制——零 spawn");
-  assert.equal(id.version, null);
-  assert.equal(id.verified, false);
-  assert.match(id.fingerprint, /^unverified-v1-/);
-  assert.equal(id.fingerprint, repeated.fingerprint, "legacy randomness injection must not churn an unverified runtime key");
-  assert.match(id.reason, /HTTP service backend/);
-});
-
 test("probe: kimi-web（HTTP 服务、宿主 kimi 二进制承载）→ 探宿主 kimi --version，verified 身份", () => {
-  // kimi-web 与 opencode-serve 同为 HTTP 服务 backend，但本地有承载二进制：
+  // kimi-web 是 HTTP 服务 backend，但本地有承载二进制：
   // `kimi --version` 输出与服务器 banner 同源同版（2026-09-30 实测 kimi 2.1.1）
-  // ——探宿主 kimi 二进制是诚实的运行时身份，不走 opencode-serve 的 null/unknown。
+  // ——探宿主 kimi 二进制是诚实的运行时身份。
   const spawn = fakeSpawn({ stdout: "kimi 2.1.1\n" });
   const id = probeRuntimeIdentity({ backendName: "kimi-web", agent: { binary: "C:/probe/kimi.exe" }, spawnFn: spawn });
-  assert.equal(spawn.calls.length, 1, "有宿主二进制——恰一次 spawn（区别于 opencode-serve 的零 spawn）");
+  assert.equal(spawn.calls.length, 1, "有宿主二进制——恰一次 spawn");
   assert.deepEqual(spawn.calls[0].args, ["--version"], "探测 argv 恰为 --version");
   assert.equal(id.distribution, "kimi-web");
   assert.equal(id.version, "kimi 2.1.1");
@@ -131,16 +118,15 @@ test("probe【证伪】: 未知 backend 名 → unknown（无描述符，不猜�
   assert.match(id.reason, /no harness probe descriptor/);
 });
 
-test("HARNESS_VERSION_PROBES F5: 八 backend 全覆盖，所有 process backend honor agent.binary", () => {
-  const knownBackends = ["claude-code", "codex", "kimi-code", "kimi-web", "deepseek-acp", "deepseek-harness", "opencode-serve", "zcode"];
+test("HARNESS_VERSION_PROBES F5: 七 backend 全覆盖，所有 process backend honor agent.binary", () => {
+  const knownBackends = ["claude-code", "codex", "kimi-code", "kimi-web", "deepseek-acp", "deepseek-harness", "zcode"];
   assert.deepEqual([...Object.keys(HARNESS_VERSION_PROBES)].sort(), [...knownBackends].sort());
-  assert.equal(HARNESS_VERSION_PROBES["opencode-serve"], null, "HTTP 服务显式 null（不静默缺省）");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({}), "dsh");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({ binary: "C:/custom/dsh.exe" }), "C:/custom/dsh.exe");
   assert.equal(HARNESS_VERSION_PROBES["claude-code"].binary({ binary: "C:/custom/claude-wrapper.exe" }), "C:/custom/claude-wrapper.exe");
   assert.equal(HARNESS_VERSION_PROBES.codex.binary({ binary: "C:/custom/codex-wrapper.exe" }), "C:/custom/codex-wrapper.exe");
   assert.equal(HARNESS_VERSION_PROBES["kimi-code"].binary({ binary: "C:/custom/kimi-wrapper.exe" }), "C:/custom/kimi-wrapper.exe");
-  // kimi-web：HTTP 服务但宿主 kimi 二进制承载（区别于 opencode-serve 的显式 null）。
+  // kimi-web：HTTP 服务但宿主 kimi 二进制承载。
   assert.equal(HARNESS_VERSION_PROBES["kimi-web"].binary({}), "kimi");
   assert.equal(HARNESS_VERSION_PROBES["kimi-web"].binary({ binary: "C:/custom/kimi-wrapper.exe" }), "C:/custom/kimi-wrapper.exe");
 });

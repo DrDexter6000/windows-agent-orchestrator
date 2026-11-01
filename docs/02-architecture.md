@@ -113,7 +113,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
 - Worker 接收 bounded task prompt。
 - Worker 可以接收稳定 role contract 和必要安全/运行时约束。
-  - **角色合同注入**：由 **backend 能力声明** 驱动——RunManager 仅当 `backend.supportsRoleContract === true` 才允许带角色（严格相等，字符串/数字/对象/null/undefined 一律 fail closed），**不按 runtime 名称分支**。`systemPrompt` 路径由共享 `roleContract.js` 的 `resolveRoleContractPath` **相对 WAO 安装根**（从模块 URL 推导，非 `process.cwd()`）解析，所以同一份全局 registry + 角色文件可从任意目标项目目录使用。**加载时序**：start 在创建 transcript 和 spawn 前加载验证角色；resume 在读取既有 transcript 后、任何 append/spawn 前加载（失败时 transcript 字节不变）。不支持注入的 backend 配了 `systemPrompt` 在这两个时点 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。八个 backend 各自注入：claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 与 kimi-web 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导）；deepseek-harness 用 `DSH_SYSTEM_PROMPT`；deepseek-acp 用 per-dispatch `--patch` personaPrefix；zcode 拼进 `session/send` content 前缀；OpenCode 须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测），用 message API 原生 `system` 字段，task 仍只在 user text part 出现一次。注入条件逐 backend 见 `src/backends/factory.js` 能力说明（生成面 `docs/surface/`）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。**WAO 不把角色合同保存为 `prompt.sent`/控制面输入**——transcript 只持久化原始 task prompt。（注意：worker 输出可能在回答中引用或复述角色内容，这由模型决定，因此不能宣称 transcript 永远不含角色正文。）
+  - **角色合同注入**：由 **backend 能力声明** 驱动——RunManager 仅当 `backend.supportsRoleContract === true` 才允许带角色（严格相等，字符串/数字/对象/null/undefined 一律 fail closed），**不按 runtime 名称分支**。`systemPrompt` 路径由共享 `roleContract.js` 的 `resolveRoleContractPath` **相对 WAO 安装根**（从模块 URL 推导，非 `process.cwd()`）解析，所以同一份全局 registry + 角色文件可从任意目标项目目录使用。**加载时序**：start 在创建 transcript 和 spawn 前加载验证角色；resume 在读取既有 transcript 后、任何 append/spawn 前加载（失败时 transcript 字节不变）。不支持注入的 backend 配了 `systemPrompt` 在这两个时点 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。七个 backend 各自注入：claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 与 kimi-web 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导）；deepseek-harness 用 `DSH_SYSTEM_PROMPT`；deepseek-acp 用 per-dispatch `--patch` personaPrefix；zcode 拼进 `session/send` content 前缀。注入条件逐 backend 见 `src/backends/factory.js` 能力说明（生成面 `docs/surface/`）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。**WAO 不把角色合同保存为 `prompt.sent`/控制面输入**——transcript 只持久化原始 task prompt。（注意：worker 输出可能在回答中引用或复述角色内容，这由模型决定，因此不能宣称 transcript 永远不含角色正文。）
   - **canonical worker identity**：身份闭集 SSOT 是 `src/canonicalAgentId.js`（`isValidCanonicalAgentId` + `safeProjectAgentId`：合法字符仅 `[A-Za-z0-9._-]`、长度 1..128；dependency-free、root-level）。`roleContract.js` 的 `composeRoleContractWithIdentity` 是唯一组合函数，**只接受已验证的 canonical id**——非法 id（含 newline/whitespace/injection）不得以任何形式进入模型提示词（不"压成同一行"，而是直接拒绝加身份头，只返回角色正文）。start 和 resume 都走它，结果一致、角色合同恰好注入一次。只有本就配了角色合同的 agent 加身份头；未配 systemPrompt 的行为不变。身份头不伪装成 Lead task prompt（`prompt.sent` 仍只存原始 task prompt）。registry normalization（`registry.js`）用同一 SSOT：非法 registry id 在 transcript/spawn 前以**固定安全错误**拒绝（不回显恶意 id；是配置合法性校验，不是语义门禁）。结构化身份提取是 `transcript.js` 的 `extractCanonicalAgentId(events, expectedRunId)`：**只有每个事件都具备与 `expectedRunId` 一致的 `runId` 且同一个合法 canonical agentId** 才返回该 id；缺失、冲突、非法或跨 run 一律返回 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。status/wait/collect 传入其请求 runId，并复用各自已读的同一份 transcript 快照（身份不额外读 transcript/registry/文件系统）。`run_dispatch`/`run_status`/`run_wait`/`run_collect` 的 MCP output schema 都用共享长度/字符合同声明 `agentId`、根对象 strict，并返回 `OUTPUT.parse(payload)` 的结果；malformed/extra/超长/injection service output 折叠为既有固定安全错误。
   - **worker evidence discipline**：同一 SSOT 组合函数 `composeRoleContractWithIdentity` 在身份头与角色正文之间恰好一次地注入一个固定的控制面所有证据纪律块（导出常量 `WORKER_EVIDENCE_DISCIPLINE`；唯一正文权威在 `src/application/roleContract.js`，本段只述语义不复制正文）。(1) **WQ-01 grounding**——对仓库路径/端点/符号/模块/API 形状/测试行为做具体断言前，先检查相关仓库证据，并在最终报告中给出支撑的 repo-relative 路径/符号/测试；未验证的断言必须显式标为 unverified/uncertain，不得当事实陈述。(2) **WQ-02 async/state**——改动 async/有状态 UI 或 query-gating 行为时，枚举适用状态（normal、loading、error、missing、unparseable、stale-data-plus-error），测试每个适用状态及高风险组合；省略某状态须说明为何不适用。该块是 **worker 执行/汇报纪律，不是语义验收规则**：不引入 parser、scorecard、自动重试/自动打回、自动门或接受决策，**Lead 仍是唯一语义裁判**。只对已有非空 role contract 且 agentId 合法的 worker 生效（start/resume 同一 SSOT，恰好一次）；无 role contract 或非法 agentId 行为不变；块随既有 roleContract transport 注入，不新增能力门，也不强制不支持 role 注入的 backend 承载它；六种正式 canonical 身份的组成串除 agentId 令牌外逐字节一致（无 runtime 名称/worker 席位分支）。
 - Transcript 与控制面仍由 WAO/Lead 所有。
@@ -129,7 +129,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 ### 2.1 Backend 接口（核心）
 
-八个 runtime（opencode-serve / claude-code / codex / kimi-code /
+七个 runtime（claude-code / codex / kimi-code /
 deepseek-harness / deepseek-acp / kimi-web / zcode）实现同一接口。
 上层只面对这个接口，永远不碰传输细节（HTTP / stdio）。
 
@@ -166,7 +166,7 @@ interface RunHandle {
 
 ### 2.2 RunEvent（统一事件流）
 
-无论 opencode 的"轮询 /message"、claude-code 的"读 stdout"还是 ACP 的
+无论 kimi-web 的 REST 轮询、claude-code 的"读 stdout"还是 ACP 的
 JSON-RPC 通知，在 Backend 实现内部被翻译成**同一个事件序列**。
 
 ```js
@@ -221,16 +221,12 @@ token 不得伪装成 reasoning token。
 ```js
 interface AgentDef {
   id: string;                    // canonical：[A-Za-z0-9._-]，1..128
-  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness"
+  backend: "claude-code" | "codex" | "kimi-code" | "deepseek-harness"
          | "deepseek-acp" | "kimi-web" | "zcode"; // 闭集：成员增补属 Owner 决策，评估过的候选与裁定见 ADR-0028
   cwd: string;                   // 必须是非空字符串
-  // opencode-serve：serveUrl 与 model.{providerID,id} 必填；agent（agent 名）、
-  // model.variant 可选
-  serveUrl?: string;
-  agent?: string;
-  model?: { providerID: string; id: string; variant?: string };
   // kimi-web：serveUrl、model.id、tokenEnv（bearer token 的 env 名）必填；
   // kimiHome、serveWorkspaceDir 可选（绝对路径）
+  serveUrl?: string;
   tokenEnv?: string;
   // 进程式 backend（claude-code / codex / kimi-code）：binary、args 可选
   // （缺省走 PATH）；serveUrl/model 非必填
@@ -274,7 +270,7 @@ JSON 仍由 `readRegistry` 抛错——另一类失败，绝不伪造成部分�
 ### 2.4 Backend 工厂
 
 `src/backends/factory.js` 的 `backendFor(agent)` 是唯一构造工厂：闭集每个成员返回
-对应 backend 类（opencode-serve / kimi-web 构造可注入 fetch；claude-code / codex /
+对应 backend 类（kimi-web 构造可注入 fetch；claude-code / codex /
 kimi-code / zcode 注入 waoCliPath；deepseek 两线零参构造），未知 backend 抛错。
 所有构造点（daemon / backgroundRunner / commands 层）共用它；构造零副作用。
 `backendCapabilitySnapshot(agent)` 静态构造并读取闭集能力声明（未知 backend →
@@ -405,17 +401,7 @@ verification 与 Lead decision。该 backend 不支持 provider session reuse，
 containment 安装见 `docs/certification-runbook.md`「DSH 通道适用限制与能力交叉警告」，车道配置见 `docs/usage/lanes.md`；
 wire 证据与复现资产见 `scripts/reliability/dsh-acp/`（evidence/*.json）。
 
-### 2.6 OpenCodeServeBackend
-
-HTTP 轮询型 backend。`spawn` 建会话并投递任务，返回
-`{ backend, backendSessionId, serveUrl, cwd, messageId, admittedSeq, events, abort,
-session, messages, sessionStatus }`。`events(signal, opts)` 是 AsyncIterable：内部
-轮询 `/message` 填充；完成判定按 `completionMode`——缺省 `snapshot-stable`（快照
-稳定），可配 `first-stable`（供会无限重复回答的模型）。消费方（RunManager 的
-waitForCompletion）消费这条流直到 `done`，不是独立方法。`messages` 分页拉取历史
-消息，`healthCheck` 探测 serve 健康。
-
-### 2.7 KimiWebBackend 的 worker serve
+### 2.6 KimiWebBackend 的 worker serve
 
 kimi-web 车道指向一个本机 `kimi web` serve（`serveUrl`）。WAO 对这个 serve 的生命周期只做两件事，其余（状态、清扫、回收）是 `wao serve` 的手动命令，操作见 `docs/usage/lanes.md`「kimi 车道的 worker serve」：
 
@@ -948,7 +934,7 @@ src/
 ├── hostAdapters/             # L4：host-specific config adapters
 │   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
 ├── backends/
-│   ├── opencodeServe.js      # L1：HTTP 类 backend
+│   ├── serveStopVerify.js    # L1：serve 型停止验证共享模块（abort 后静默轮询核验）
 │   ├── processBackend.js     # L1：进程式 backend 基类
 │   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入。native OAuth 通道凭据双模式：`CLAUDE_CODE_OAUTH_TOKEN` 长期令牌可解析时隔离目录保持空、不拷贝 `~/.claude` 凭据、认证走 env（名字经 envPolicy native 通道继承并进脱敏器）——凭据拷贝与续期令牌单次轮换互斥；令牌缺席回退 spawn 时现拷贝路径）
 │   ├── codex.js              # L1：codex 后端

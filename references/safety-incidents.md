@@ -1,6 +1,6 @@
 # WAO Safety Incidents — 必读背景
 
-> 本文件是 SKILL.md "Safety Preflight" 一节的详细背景。主控在第一次使用 WAO 前、或遇到 opencode worker 异常时读它。
+> 本文件是 SKILL.md "Safety Preflight" 一节的详细背景。主控在第一次使用 WAO 前、或遇到 serve 型 worker 异常时读它。
 > 这里记录的真实事故，是每条铁律存在的理由。读懂它们，你才知道为什么规则这么定。
 
 ## 事故 1：06-17 DeepSeek quota 耗尽（TD-35）
@@ -48,14 +48,14 @@
 | token 闸门 | ✅ 有效（有 session endpoint） | ❌ 无效（无 session endpoint） |
 | 历史事故 | 06-17 + 06-18（两次） | 无 |
 
-**权衡**：opencode 有 token 闸门但会话生命周期不可靠；进程式会话绝对可靠但无闸门。**默认走进程式（可靠停 > 有闸门但可能停不住）**，需要精确控成本时走 opencode（必配 tokenBudget）。
+**权衡**（06-18 当时）：opencode 有 token 闸门但会话生命周期不可靠；进程式会话绝对可靠但无闸门。由此定下的默认至今不变：**默认走进程式（可靠停 > 有闸门但可能停不住）**。
 
 ---
 
 ## 主控的责任（不是 worker 的）
 
 worker 只看到任务 prompt，看不到这些安全约束。**主控负责**：
-1. 派发前确认 worker 配了 tokenBudget（opencode）或用了进程式 backend
+1. 派发前确认用的是进程式 backend；serve 型车道（kimi-web）停止后看 `stop_verified`
 2. 监控 `runs/ALERTS.log`（budget_exceeded / stop_unverified）
-3. 任务结束后确认无残留进程（`tasklist | grep opencode`）
+3. 任务结束后确认无残留进程（kimi-web 车道用 `wao serve status`；进程式车道看 `tasklist`）
 4. 用 `.wao/` 记录状态，不依赖 session context

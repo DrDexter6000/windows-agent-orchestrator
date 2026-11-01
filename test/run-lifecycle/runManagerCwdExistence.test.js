@@ -17,7 +17,7 @@
 // declared capability the M12-14 invocation-budget preflight uses — a backend
 // implementing preflightInvocation composes a LOCAL OS invocation and spawns
 // with cwd: agent.cwd (the Node ENOENT-blames-the-executable trap). An HTTP
-// backend (opencode-serve shape: no preflightInvocation) threads cwd to the
+// backend (no preflightInvocation, kimi-web shape) threads cwd to the
 // serve API as a REMOTE directory hint — no local spawn — and stays unaffected,
 // byte-compatible with pre-R7 behavior.
 //
@@ -324,7 +324,7 @@ test("RCE-6: HTTP-shape backend (no preflightInvocation) + nonexistent cwd → g
       surveyor: { backend: "kimi-web", cwd: PLACEHOLDER_CWD, serveUrl: "http://127.0.0.1:4299", model: { id: "kimi-code/k3" }, tokenEnv: "RCE6_KW_TEST_TOKEN" },
     });
     const manager = makeManager({ registryPath, runDir: join(dir, "runs"), backend });
-    // kimi-web 的 tokenEnv 是必填凭据（61a 迁移加的面）——设假值，测完即删。
+    // kimi-web 的 tokenEnv 是必填凭据——设假值，测完即删。
     process.env.RCE6_KW_TEST_TOKEN = "rce6-kw-token-value";
     let run;
     try {

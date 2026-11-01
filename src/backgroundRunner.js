@@ -10,7 +10,7 @@
 // 本模块是正解：detached runner 进程**拥有** worker handle，驱动 waitForCompletion
 // （含 token 闸门 + 观察到期通知 + 兜底 abort），写共享 transcript（文件，跨进程）。
 // CLI 用 --background flag fork 一个跑本模块的 detached 子进程，拿 runId 立即返回，
-// runner 独立活到 run 结束。process 死即会话死；opencode 类由 waitForCompletion 内的
+// runner 独立活到 run 结束。process 死即会话死；serve 类由 waitForCompletion 内的
 // 三层防线兜底。runtime-agnostic（不按 backend 名分支）。
 //
 // ADR-0030（TD-151）：等待窗到期在 runner 内同样 = 通知不杀——waitForCompletion 只落
@@ -86,7 +86,7 @@ function makeObjectRegistry(registryObj) {
  * @param {string} opts.prompt
  * @param {object|string} opts.registry - registry 对象或路径
  * @param {string} opts.runDir
- * @param {Function} [opts.fetchImpl] - 测试注入（opencode）
+ * @param {Function} [opts.fetchImpl] - 测试注入（HTTP 家族）
  * @param {number} [opts.waitTimeout] - explicit override (becomes "explicit" tier)
  * @param {number} [opts.globalWaitTimeout] - server-owned global config.waitTimeout
  * @param {number} [opts.pollInterval]

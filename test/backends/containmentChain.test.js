@@ -18,15 +18,12 @@
 //   zcode           ZcodeBackend + spawnFn 假 app-server；只有终态 file_written。
 //   deepseek-acp    DeepSeekAcpBackend + 内存 peer.notify——write_intent +
 //                   file_written 两段；越界同样恒在 intent 段被拦。
-//   opencode-serve  OpenCodeServeBackend + fetchImpl 假服务器（构造器自带该
-//                   注入缝，snapshot-stable 轮询可确定性驱动）；只有终态
-//                   file_written。
 //
 // 不覆盖的后端（原因，不假装覆盖）：
 //   claudeCodeProvider.js——只做 provider 包装的参数推导，不产出事件流；写事件
 //     投影就是 claude-code 的 ClaudeStreamParser，上面已覆盖。
 //   src/backends/ 其余模块（factory / kimiServe* / deepSeekHarness /
-//     opencodeStopVerify / processActivity / stallBudget / processBackend 共享
+//     serveStopVerify / processActivity / stallBudget / processBackend 共享
 //     传输层）——没有独立的写事件投影面；processBackend 的传输由 kimi-code 组
 //     经真实类穿过。
 
@@ -45,7 +42,6 @@ import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
 import { ZcodeBackend } from "../../src/backends/zcode.js";
 import { DeepSeekAcpBackend } from "../../src/backends/deepSeekAcp.js";
 import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
 import { CodexStreamParser } from "../../src/backends/parsers/codex.js";
 import { Run } from "../../src/runManager.js";
@@ -1011,159 +1007,5 @@ test("containment chain / deepseek-acp: 界内写正对照——file_path 优先
   } finally {
     await cleanupFixture(fixture);
     if (scenario) await rm(scenario.dir, { recursive: true, force: true });
-  }
-});
-
-// ===== opencode-serve：OpenCodeServeBackend + fetchImpl 假服务器 =====
-
-function opencodeJsonResponse(value, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    async json() {
-      return value;
-    },
-    async text() {
-      return JSON.stringify(value);
-    },
-  };
-}
-
-function opencodeServer({ messagePolls }) {
-  const fetchImpl = async (url, init = {}) => {
-    const urlStr = String(url);
-    if (urlStr === "http://127.0.0.1:4313/api/session" && init.method === "POST") {
-      return opencodeJsonResponse({
-        data: {
-          id: "ses_oc_chain",
-          location: { directory: "D:/projects/worktree" },
-          title: "",
-          projectID: "global",
-          cost: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          time: { created: 1, updated: 1 },
-        },
-      });
-    }
-    if (urlStr.includes("/session/ses_oc_chain/prompt_async")) {
-      return opencodeJsonResponse({}, 204);
-    }
-    if (urlStr.includes("/session/ses_oc_chain/message")) {
-      return opencodeJsonResponse(messagePolls());
-    }
-    if (urlStr.includes("/session/ses_oc_chain/abort")) {
-      return opencodeJsonResponse({}, 204);
-    }
-    if (urlStr.includes("/session/status")) {
-      return opencodeJsonResponse({});
-    }
-    if (urlStr.includes("/session/ses_oc_chain")) {
-      return opencodeJsonResponse({
-        id: "ses_oc_chain",
-        tokens: { input: 5, output: 2, reasoning: 0 },
-        cost: 0,
-      });
-    }
-    throw new Error(`unexpected ${urlStr}`);
-  };
-  return { fetchImpl };
-}
-
-const opencodeWriteMsgs = (input) => ([
-  { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "do the task" }] },
-  {
-    info: { id: "a1", role: "assistant" },
-    parts: [
-      {
-        type: "tool",
-        callID: "call_oc_write",
-        tool: "write",
-        state: { status: "completed", input, output: "wrote" },
-      },
-      { type: "text", text: "wrote the file" },
-    ],
-  },
-]);
-
-async function opencodeScenario({ effectiveCwd, writeInput }) {
-  const { fetchImpl } = opencodeServer({
-    // snapshot-stable：第 1 拍空（无 assistant），第 2 拍出现、第 3 拍同快照 → 完成。
-    messagePolls: (() => {
-      let polls = 0;
-      return () => {
-        polls += 1;
-        return polls <= 1 ? [] : opencodeWriteMsgs(writeInput);
-      };
-    })(),
-  });
-  const backend = new OpenCodeServeBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  return backend.spawn(
-    {
-      id: "coder_opencode",
-      backend: "opencode-serve",
-      serveUrl: "http://127.0.0.1:4313",
-      agent: "build",
-      cwd: effectiveCwd,
-      model: { providerID: "zhipuai-coding-plan", id: "glm-5.1" },
-    },
-    { prompt: "do the task" },
-  );
-}
-
-test("containment chain / opencode-serve: 源级钉——写路径取键链 filePath ?? file_path ?? path", () => {
-  assertSourcePins([
-    ["src/backends/opencodeServe.js", "const filePath = input.filePath ?? input.file_path ?? input.path;"],
-  ]);
-});
-
-for (const [label, pathFactory, marker] of [
-  ["relative ../ escape", () => "../opencode_escape_rel.txt", "opencode_escape_rel"],
-  ["absolute outside escape", (fixture) => join(fixture.root, "outside-opencode", "escaped.txt"), "outside-opencode"],
-]) {
-  test(`containment chain / opencode-serve: ${label} → file_written 段拦截，reason 闭集成员 file_written_lexical_outside`, async () => {
-    const fixture = await makeDeliveryRunFixture({
-      backendName: "opencode-serve",
-      spawnHandle: ({ effectiveCwd, root }) => opencodeScenario({
-        effectiveCwd,
-        writeInput: { filePath: pathFactory({ root }) },
-      }),
-    });
-    try {
-      const output = await finishRun(fixture);
-      assertEscapeBlocked(fixture, output, {
-        eventKind: "file_written",
-        reason: "file_written_lexical_outside",
-        marker,
-      });
-    } finally {
-      await cleanupFixture(fixture);
-    }
-  });
-}
-
-test("containment chain / opencode-serve: 界内写正对照——filePath 优先于 file_path/path 双诱饵、path 逐字节保真、零 write_intent、打包照常", async () => {
-  const fixture = await makeDeliveryRunFixture({
-    backendName: "opencode-serve",
-    spawnHandle: ({ effectiveCwd }) => opencodeScenario({
-      effectiveCwd,
-      writeInput: {
-        filePath: "out/inside-opencode.txt",
-        file_path: "out/decoy-a-opencode.txt",
-        path: "out/decoy-b-opencode.txt",
-      },
-    }),
-  });
-  await createInsideFile(fixture.effectiveCwd, "out/inside-opencode.txt");
-  try {
-    const output = await finishRun(fixture);
-    assertPositivePackaged(fixture, output, { expectWriteIntent: false });
-    const written = output.events.find(
-      (event) => event.type === "run.event" && event.kind === "file_written",
-    );
-    assert.equal(written?.path, "out/inside-opencode.txt", "取键链首选 filePath，path 与帧内原值逐字节相同");
-    assert.notEqual(written?.path, "out/decoy-a-opencode.txt");
-    assert.notEqual(written?.path, "out/decoy-b-opencode.txt");
-  } finally {
-    await cleanupFixture(fixture);
   }
 });

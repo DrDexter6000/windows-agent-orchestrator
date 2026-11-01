@@ -96,17 +96,6 @@ function extractKimiK3ModelId() {
   return id;
 }
 
-// opencode-serve 角色合同版本门事实源：OPENCODE_NATIVE_SYSTEM_MIN_VERSION 源常量。
-function extractOpencodeMinVersion() {
-  const src = readFileSync(join(REPO_ROOT, "src", "backends", "opencodeServe.js"), "utf8");
-  const raw = src.match(/OPENCODE_NATIVE_SYSTEM_MIN_VERSION = Object\.freeze\(\[([^\]]*)\]\)/)?.[1];
-  if (!raw) {
-    throw new Error("gen-certification: src/backends/opencodeServe.js must define OPENCODE_NATIVE_SYSTEM_MIN_VERSION");
-  }
-  const [maj, min] = [...raw.matchAll(/\d+/g)].map((m) => m[0]);
-  return `${maj}.${min}`;
-}
-
 /**
  * 底稿校验（生成期红，不静默渲染）：底稿必须通过该 backend 的
  * validateAgentPolicy（否则每格探针都从非法配置出发，"不支持"会撞在缺别的
@@ -312,11 +301,9 @@ function verdictCell({ verdict, condition }) {
  */
 export function renderCertification() {
   const k3ModelId = extractKimiK3ModelId();
-  const opencodeMinVersion = extractOpencodeMinVersion();
 
   // CAPABILITY_NOTES 键集守卫（生成期红，不静默）：闭集成员必须有登记（可为
-  // 空对象），闭集外不得有孤儿键；opencode 版本门注记必须含源常量派生的
-  // `maj.min`（注记漂移即生成失败——退役守卫同款锚定纪律）。
+  // 空对象），闭集外不得有孤儿键。
   const noteKeys = Object.keys(CAPABILITY_NOTES).sort();
   const backendKeys = [...KNOWN_BACKENDS].sort();
   if (JSON.stringify(noteKeys) !== JSON.stringify(backendKeys)) {
@@ -345,13 +332,6 @@ export function renderCertification() {
       + "— 写明读得到哪些生命体征、哪些落成转录事实、有哪些收口门（决定 0069）",
     );
   }
-  const opencodeRoleNote = CAPABILITY_NOTES["opencode-serve"]?.supportsRoleContract ?? "";
-  if (!opencodeRoleNote.includes(opencodeMinVersion)) {
-    throw new Error(
-      `gen-certification: opencode-serve supportsRoleContract note must carry the version gate ${opencodeMinVersion} derived from OPENCODE_NATIVE_SYSTEM_MIN_VERSION (note drifted)`,
-    );
-  }
-
   // 探针（共享工厂构造——构造期零副作用；validateAgentPolicy 是纯校验）。
   // 每格探针从登记底稿深拷贝出发只改/只加一项；底稿合法性/最小性生成期校验。
   const rows = KNOWN_BACKENDS.map((backendKey) => {
@@ -390,7 +370,7 @@ export function renderCertification() {
     lines.push(`| ${row.backendKey} | ${BACKEND_CAPABILITY_AXES.map((axis) => capabilityCell(row.capabilities[axis])).join(" | ")} |`);
   }
   lines.push("");
-  lines.push("✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。");
+  lines.push("✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴见 §二条件与限制说明。");
   lines.push("");
   lines.push("## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）");
   lines.push("");
@@ -408,7 +388,7 @@ export function renderCertification() {
     lines.push(`| ${row.backendKey} | ${cells.join(" | ")} |`);
   }
   lines.push("");
-  lines.push("衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。");
+  lines.push("衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——需要路由字段的 backend（deepseek-acp）必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。");
   lines.push("");
   lines.push("### 条件与限制说明（CAPABILITY_NOTES 单一出处：src/backends/factory.js）");
   lines.push("");

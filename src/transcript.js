@@ -85,7 +85,7 @@ export const STATE_CHANGE_REASONS = Object.freeze([
   // ── 终态 timed_out ──
   "timeout", // Run.waitForCompletion：wall-clock deadline timer 触发（唯一 timed_out 来源）
   // ── 终态 aborted（abort 家族；同值随 run.aborted payload.reason 一并落盘）──
-  "stop_requested", // runStop processStop/opencodeStop：Lead stop 命令 claim aborted
+  "stop_requested", // runStop processStop/serverStop：Lead stop 命令 claim aborted
   "external_signal", // Run.waitForCompletion：外部 AbortSignal 打断等待
   "user", // RunManager.abort / Run.abort 的默认 reason
   "SIGINT", // gracefulShutdown 默认 reason（进程级 SIGINT handler）
@@ -2793,8 +2793,8 @@ export function findLatest(events, type) {
  * Order semantics mirror the two established bound disciplines:
  *   - findLatestBound: LAST bound match. Required where the legal writer
  *     appends the authoritative fact LAST (TD-54 double prompt.sent — the
- *     second event carries messageId/admittedSeq on the HTTP family ONLY,
- *     opencode-serve / deepseek-harness; the ProcessBackend family's legal
+ *     second event carries messageId/admittedSeq on the HTTP family ONLY
+ *     (deepseek-harness 同形); the ProcessBackend family's legal
  *     double write lands BARE on both legs — its spawn result carries
  *     messageId/admittedSeq === undefined and JSON serialization drops the
  *     keys, pinned by the R14-W3 real contract sentinel in

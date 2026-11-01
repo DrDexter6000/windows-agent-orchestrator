@@ -319,7 +319,7 @@ function makeObjectRegistry(registryObj) {
  * @param {string} opts.runDir - transcript/handshake 目录
  * @param {string} [opts.pipe] - 命名管道（默认 DEFAULT_PIPE）
  * @param {object|string} opts.registry - registry 对象（测试）或路径（生产）
- * @param {Function} [opts.fetchImpl] - opencode fetch 注入（测试）
+ * @param {Function} [opts.fetchImpl] - HTTP 家族 fetch 注入（测试）
  * @param {number} [opts.waitTimeout]
  * @param {number} [opts.pollInterval]
  * @param {number} [opts.heartbeatIntervalMs]

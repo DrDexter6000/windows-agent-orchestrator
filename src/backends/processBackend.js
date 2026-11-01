@@ -222,7 +222,7 @@ export class ProcessBackend {
    * so a preflight pass can never let an overflowing invocation reach the OS.
    *
    * Provider-neutral: the budget is a function of the resolved binary's
-   * capability (.cmd/.bat vs .exe), never of the backend name. OpenCodeServe
+   * capability (.cmd/.bat vs .exe), never of the backend name. An HTTP backend
    * (an HTTP backend) has no preflightInvocation and is unaffected.
    */
   async preflightInvocation(agent, task) {
@@ -591,7 +591,7 @@ export class ProcessBackend {
         }
         // TD-A 静默早失败：silentTimeout 内若无任何 parser 事件，说明 provider 静默拒绝
         // （重试死循环 / 白名单 / 不存在的 model，进程活着但不产出）。
-        // 语义对齐 opencodeServe.streamEventsSnapshotStable。不等 waitTimeout，直接 done(failed)。
+        // 不等 waitTimeout，直接 done(failed)。
         if (silentTimeout && !anyEventSeen && (Date.now() - startTime) > silentTimeout) {
           yield doneEvent(
             "failed",

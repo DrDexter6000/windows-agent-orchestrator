@@ -192,7 +192,7 @@ test("PB-A06: all built-in playbooks satisfy structural bounds", () => {
 
 test("PB-A07: no built-in playbook contains forbidden content", () => {
   const FORBIDDEN = [
-    /claude-code|codex|kimi|opencode|glm/i,
+    /claude-code|codex|kimi|glm/i,
     /node_modules\//,
     /[A-Za-z]:\\\\/,
     /\/home\/|\/usr\/|\/etc\//,

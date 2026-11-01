@@ -53,7 +53,7 @@
 //      (MO-2), SSOT shape gate (MO-3), reuse/lineage typed conflict with zero
 //      side effects (MO-4/MO-5), the runner→start synthesis chain (MO-6),
 //      start-level authoritative refusals (MO-7), sibling-field preservation
-//      incl. opencode-serve and no-model shapes (MO-8). R10-C C-1: resume
+//      incl. the no-model shape (MO-8). R10-C C-1: resume
 //      rebuilds the persisted run.started.modelOverride fact — daemon
 //      takeover keeps the dispatched model across run.rerun (MO-9),
 //      byte-compatible without the fact (MO-9b), corrupt persisted value
@@ -89,9 +89,8 @@ import { RunManager } from "../../src/runManager.js";
 import { runBackground } from "../../src/backgroundRunner.js";
 import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError, ModelOverrideConflictError, ReasoningOverrideConflictError } from "../../src/application/runDispatch.js";
 // R11-1: REAL backend instances for the natural policy-refusal group (RO-8) —
-// opencode-serve cannot express reasoning.effort at all, deepseek-harness
-// limits it to high|max, kimi-code gates it on the K3 model id.
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
+// deepseek-harness limits reasoning.effort to high|max, kimi-code gates it on
+// the K3 model id.
 import { DeepSeekHarnessBackend } from "../../src/backends/deepSeekHarness.js";
 import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 
@@ -560,7 +559,7 @@ test("CE-13: kimi-web agent (no preflightInvocation) + nonexistent registry cwd 
       },
     });
     const runDir = join(dir, "runs");
-    // kimi-web 的 tokenEnv 是必填凭据（dispatch 层 1 同样把关；61a 迁移加的面）
+    // kimi-web 的 tokenEnv 是必填凭据（dispatch 层 1 同样把关）
     //——设假值，测完即删。
     process.env.CE13_KW_TEST_TOKEN = "ce13-kw-token-value";
     let result;
@@ -945,10 +944,7 @@ test("MO-7: RunManager.start authoritative refusals — certified conflict, reus
   }
 });
 
-// 61a 注：MO-8 第一腿钉 opencode-serve 的 {providerID,id,variant} 模型形状在
-// --model 覆盖下的兄弟字段保全——kimi-web 拒绝 providerID/variant（裸 id 通道），
-// 迁不过去；保留 opencode-serve 夹具，61b 随后端退役时一并处置。
-test("MO-8: sibling preservation — opencode-serve {providerID,id,variant} and the no-model tester shape", async () => {
+test("MO-8: sibling preservation — deepseek-acp {providerID,id} and the no-model tester shape", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mo8-"));
   try {
     const runDir = join(dir, "runs");
@@ -977,18 +973,17 @@ test("MO-8: sibling preservation — opencode-serve {providerID,id,variant} and 
       backendFor: () => fakeBackend,
     });
 
-    // opencode-serve legacy model shape: providerID + variant survive the
-    // id replacement (a whole-object swap would silently drop them).
+    // deepseek-acp model shape: providerID survives the id replacement (a
+    // whole-object swap would silently drop it).
     await makeManager({
-      backend: "opencode-serve",
-      serveUrl: "http://127.0.0.1:4297",
+      backend: "deepseek-acp",
       cwd: dir,
-      model: { providerID: "zhipuai-coding-plan", id: "glm-5.2", variant: "stable" },
-    }).start("a", { prompt: "p", modelOverride: "glm-5.3" });
+      model: { providerID: "deepseek", id: "deepseek-v4-flash" },
+    }).start("a", { prompt: "p", modelOverride: "deepseek-v4-pro" });
     assert.deepEqual(
       spawnedModels.at(-1),
-      { providerID: "zhipuai-coding-plan", id: "glm-5.3", variant: "stable" },
-      "opencode-serve shape: only .id replaced, providerID/variant preserved",
+      { providerID: "deepseek", id: "deepseek-v4-pro" },
+      "deepseek-acp shape: only .id replaced, providerID preserved",
     );
 
     // tester shape (registry entry without any model): synthesizes a bare {id}.
@@ -1162,7 +1157,7 @@ test("MO-10: a policy refusal under an active override names --model (start + re
   try {
     // A backend that refuses the contextWindow shape — the auditor's face:
     // the operator typed --model and got a registry-shape error that never
-    // mentioned the override (opencodeServe.js model-shape / kimiCode.js
+    // mentioned the override (backend model-shape / kimiCode.js
     // effort-pairing refusals read the same way).
     const rejectingBackend = {
       validateAgentPolicy(agent) {
@@ -1232,8 +1227,8 @@ test("MO-10: a policy refusal under an active override names --model (start + re
 //   - the value is a CLOSED SET (registry.js REASONING_EFFORTS —
 //     minimal/low/medium/high/xhigh/max), not a shape contract;
 //   - the override replaces ONLY reasoning.effort; sibling fields survive;
-//   - NO capability boolean: inexpressible (opencode-serve) and conditional
-//     (kimi K3-only, dsh high|max) policies refuse via the existing
+//   - NO capability boolean: conditional (kimi K3-only, dsh high|max)
+//     policies refuse via the existing
 //     per-backend validateAgentPolicy gate over the synthesized object;
 //   - the same two hard mutual exclusions as the model override (certified /
 //     provider-session reuse), with "ANY override present" semantics and a
@@ -1633,9 +1628,7 @@ test("RO-7: RunManager.start authoritative refusals — certified conflict, reus
   }
 });
 
-// 61a 注：RO-8 第一腿钉 OpenCodeServeBackend 自身的 reasoning.effort 拒绝文案
-//（生产类行为，非通用 serve 样例）；保留，61b 随后端退役时一并处置。
-test("RO-8: natural per-backend policy refusals — opencode-serve, deepseek-harness minimal, kimi non-K3 (hint names --reasoning)", async () => {
+test("RO-8: natural per-backend policy refusals — deepseek-harness minimal, kimi non-K3 (hint names --reasoning)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ro8-"));
   try {
     const runDir = join(dir, "runs");
@@ -1646,25 +1639,7 @@ test("RO-8: natural per-backend policy refusals — opencode-serve, deepseek-har
       backendFor: () => backend,
     });
 
-    // (1) opencode-serve × --reasoning: validateAgentPolicy refuses
-    // reasoning.effort unconditionally (opencodeServe.js) — NO capability
-    // boolean needed; the hint names the --reasoning flag.
-    await assert.rejects(
-      () => makeManager(
-        {
-          backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: dir,
-          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-        },
-        new OpenCodeServeBackend(),
-      ).start("a", { prompt: "p", reasoningOverride: "high" }),
-      (e) => {
-        assert.equal(e.message, "opencode-serve backend cannot express reasoning.effort" + REASONING_HINT,
-          "fail-closed verdict + the --reasoning-naming hint");
-        return true;
-      },
-    );
-
-    // (2) deepseek-harness × minimal: the policy limits effort to high|max
+    // (1) deepseek-harness × minimal: the policy limits effort to high|max
     // (deepSeekHarness.js) — a conditional subset refuses naturally.
     await assert.rejects(
       () => makeManager(
@@ -1682,7 +1657,7 @@ test("RO-8: natural per-backend policy refusals — opencode-serve, deepseek-har
       },
     );
 
-    // (3) kimi-code × non-K3 model + effort: the K3×{low,high,max} pairing
+    // (2) kimi-code × non-K3 model + effort: the K3×{low,high,max} pairing
     // gate (kimiCode.js) refuses an effort on a non-K3 model id.
     await assert.rejects(
       () => makeManager(

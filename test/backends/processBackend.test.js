@@ -623,7 +623,7 @@ test("agent.prependArgs 在 runtime args 前注入 wrapper 参数", async () => 
 // --- TD-A: 进程式 backend silentTimeout ---
 // RunManager 算出 silentTimeout 传给 handle.events(signal, {silentTimeout})，
 // 但原 processBackend.events 签名是 (signal)，第二参数被丢弃 → 静默死循环只能干等 waitTimeout。
-// 修复：events 接第二参数，_streamEvents 里复用 opencodeServe 语义——
+// 修复：events 接第二参数，_streamEvents 里同款语义——
 // silentTimeout 内若无任何 parser 事件 → doneEvent("failed", "silent timeout...")。
 
 test("TD-A: 静默进程 + silentTimeout → 在超时窗口内 done(failed, silent timeout)", async () => {
@@ -1277,7 +1277,7 @@ test("M12-21: runEventIsUsableEffect — five effect kinds + non-blank assistant
 // 开始返回 messageId，夹具不变、该断言不红，"后端家族开始写 messageId"无任何
 // 测试会察觉。本哨兵直接断言【后端真实产物】：ProcessBackend.spawn 返回体
 // messageId/admittedSeq === undefined（processBackend.js 显式写死）。红 = 家族
-// 开始真实返回 messageId（HTTP 家族 opencode-serve/deepseek-harness 的形状），
+// 开始真实返回 messageId（HTTP 家族 deepseek-harness 的形状），
 // 提示重新评估 R13-C 的全部 D 形状结论（cli.test.js R13-CLI-3 注释指向此处）。
 //
 // 断言取值不取键：spawn 返回体上键【存在】且值为 undefined（显式

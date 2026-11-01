@@ -32,7 +32,6 @@ import { join, resolve } from "node:path";
 
 import { RunManager } from "../../src/runManager.js";
 import { readRegistry, normalizeAgent } from "../../src/registry.js";
-import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
 import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
@@ -126,8 +125,6 @@ function writeSeedTranscript(transcriptPath, runId, agentId, { backend = "claude
 //          runtime name. Every current backend supports the transport.
 // ---------------------------------------------------------------------
 test("M11-5-A2-CAP1: backends declare supportsRoleContract capability", () => {
-  assert.equal(new OpenCodeServeBackend().supportsRoleContract, true,
-    "OpenCode native system field carries the role contract");
   assert.equal(new ClaudeCodeBackend().supportsRoleContract, true,
     "claude-code supports role contract");
   assert.equal(new CodexBackend().supportsRoleContract, true,
@@ -422,8 +419,7 @@ test("M11-5-A2-NORM2: normalizeAgent systemPrompt error is a fixed safe shape (n
 
 // ---------------------------------------------------------------------
 // A2-ARCH1: the role-contract decision region in runManager.js must not
-//           contain runtime-name branches (opencode-serve / claude-code /
-//           codex / kimi-code). The decision must be capability-driven.
+// contain runtime-name branches. The decision must be capability-driven.
 //
 //           We isolate the role-contract region (start + resume load) and
 //           assert it references supportsRoleContract, not runtime names.
@@ -434,19 +430,16 @@ test("M11-5-A2-ARCH1: runManager role-contract region is capability-driven, no r
   assert.ok(/supportsRoleContract/.test(src),
     "RunManager reads supportsRoleContract capability");
   // No runtime-name branch in the role-contract decision. We look for the
-  // specific anti-pattern: `agent.backend === "opencode-serve"` or
-  // `backend === "...runtime..."` used to decide role injection.
-  // The old code had: if (agent.backend === "opencode-serve") { throw ... }
-  // for the role contract. That must be gone.
-  // We check that no "opencode-serve" comparison appears in a role-contract
-  // context by ensuring the capability is the sole gate.
+  // anti-pattern: `backend === "...runtime..."` used to decide role
+  // injection (the pre-M11-5 code branched on a runtime name here). The
+  // capability must be the sole gate.
   // Strict guard: the start role-contract block must not branch on runtime.
   // Package C1: path resolution moved into loadRoleContract (no call-site resolve()).
   // 0045 W3b/W4d：start 块角色源=explicitRolePath ?? agent.systemPrompt（解析层供角色）。
   const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(roleSourcePath\)/);
   assert.ok(startRoleBlock, "found start role-contract block");
   const block = startRoleBlock[0];
-  assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),
+  assert.ok(!/claude-code|codex|kimi-code/.test(block),
     "start role-contract block has NO runtime-name branch");
   assert.ok(/supportsRoleContract/.test(block),
     "start role-contract block uses supportsRoleContract capability");
@@ -466,7 +459,7 @@ test("M11-5-A2-ARCH2: resume role-contract region is capability-driven, no silen
   const resumeRoleBlock = src.match(/let resumeRoleSource[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
   assert.ok(resumeRoleBlock, "found resume role-contract block");
   const block = resumeRoleBlock[0];
-  assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),
+  assert.ok(!/claude-code|codex|kimi-code/.test(block),
     "resume role-contract block has NO runtime-name branch");
   assert.ok(/supportsRoleContract/.test(block),
     "resume role-contract block uses supportsRoleContract capability");

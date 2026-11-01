@@ -262,7 +262,6 @@ const dummyVerifier = async (deliveryRef) => ({
 function makeDoneOnlyBackend() {
   return {
     supportsRoleContract: true,
-    validateRoleContractTransport: async () => {},
     async spawn() {
       return {
         backend: "process",

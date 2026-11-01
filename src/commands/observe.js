@@ -12,8 +12,7 @@
 //
 // 依赖：
 //   - 外部模块：../transcript.js（readTranscript——R13-C 清理了本文件不再
-//     使用的 findLatest 死 import）、
-//     ../backends/opencodeServe.js（tail 不直接用，保留供未来；collect serve 路径走 service）
+//     使用的 findLatest 死 import）
 //   - 共享工具：./shared.js（parseOptions/loadRun）
 //   - 共享 service：../application/runStatus.js（status）、../application/runCollect.js（collect）
 //   - 共享投影：../application/runCollectProjection.js（M11-4 collect continuation）
@@ -24,7 +23,6 @@ import { watchFile, unwatchFile } from "node:fs";
 import { resolve } from "node:path";
 
 import { readTranscript } from "../transcript.js";
-import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { parseOptions, loadRun } from "./shared.js";
 // M9-3A: status aggregation delegated to shared application service.
 import { getRunStatus } from "../application/runStatus.js";

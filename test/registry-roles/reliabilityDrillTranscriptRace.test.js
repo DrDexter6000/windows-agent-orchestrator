@@ -51,7 +51,6 @@ function certCase(caseId, runId) {
     providerID: "deepseek",
     modelId: "deepseek-v3.2",
     providerKey: null,
-    completionMode: "snapshot-stable",
     requiredCategories: ["core"],
     drills: ["sentinel"],
     profile: "full",

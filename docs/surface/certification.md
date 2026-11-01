@@ -15,7 +15,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 
 | backend | supportsRoleContract | supportsSessionReuse | supportsInFlightCorrection | replayByRespawn | reportsTokenUsage | reportsCommandExitCode | enforcesWriteSandbox |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| opencode-serve | ✅ | — | — | — | ✅ | ✅ | — |
 | claude-code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | codex | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | kimi-code | ✅ | ✅ | — | ✅ | — | — | — |
@@ -24,7 +23,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | kimi-web | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
 | zcode | ✅ | ✅ | — | ✅ | ✅ | — | — |
 
-✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。
+✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴见 §二条件与限制说明。
 
 ## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）
 
@@ -32,7 +31,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 
 | backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 |
 | --- | --- | --- | --- | --- |
-| opencode-serve | 可选：`{providerID, id}` | 不支持 | 不支持 | 不支持 |
 | claude-code | 可选：裸 `{id}` | 支持 | 条件：仅 provider 路径 | 支持 |
 | codex | 可选：裸 `{id}` | 支持 | 不支持 | 不支持 |
 | kimi-code | 可选：裸 `{id}` | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
@@ -41,17 +39,10 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | kimi-web | 必填：裸 `{id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
 | zcode | 必填：`<provider>/<model>` 引用 | 支持 | 不支持 | 不支持 |
 
-衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。
+衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——需要路由字段的 backend（deepseek-acp）必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。
 
 ### 条件与限制说明（CAPABILITY_NOTES 单一出处：src/backends/factory.js）
 
-- **opencode-serve**
-  - model override：`variant` 可选
-  - provider 块：不支持 provider 块——模型路由由 `model.providerID` 承担
-  - 生命体征与收口：未按生命体征口径适配（Owner 2026-10-12：该后端不再投入）；收口门为 `silentTimeout` 与快照稳定判据
-  - supportsRoleContract（角色合同）：须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）
-  - reportsTokenUsage（token usage）：session.tokens 周期轮询
-  - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——上游 serve 无沙箱面，越界写拦截按 0084（上报侦测，非阻止）
 - **claude-code**
   - model.contextWindow：仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒
   - provider 块：经 provider wrapper（`baseUrl` / `apiKeyEnv`）表达
@@ -112,7 +103,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - supportsRoleContract（角色合同）：拼进 `session/send` content 前缀，role/task 以 `\n\n---\n\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）
   - supportsSessionReuse（会话复用）：resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/setMode {sessionId, mode:"yolo"}` → `session/send`（setMode 每次派发都发、失败 fail-closed 拒绝——app-server create 默认 build，scorecard 实测写被权限层拦，runs/reliability/run_20261001213724000cy1b3a）——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证：sessions 表每进程一张、setModel 走 requireSession、查表 miss 抛 `Session is not active`、resume 装载注册；跳过 resume 直接 setModel 必失败；依据链与各版本复核见 certification-runbook 原语表 zcode 行）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据自 2026-10-10 B′ 根修起为【身份切片】（锚点=本轮新 user 消息，完成=parent 指向它的新 assistant 末位 step-finish；历史变异=基线 id 序列不再前缀→具名失败；resume 历史缺 info.id→发送前拒绝零 token）——上游消息 info.id/role/parentID 与 part id/messageID 已 live 探针实证在场且跨快照稳定（glm-flash 三轮 fresh/同进程/跨进程 resume，证据 .dev/bprime-evidence/；验收反例组 ⑨h-⑨l/⑫f 在旧位置判据上实证红）；旧判据的「头部插入→旧 stop 右移→假 completed+发射旧答案」残余就此关闭（该残余曾连带击穿 0052 失败即弃与 run_lineage 交付链）
   - supportsInFlightCorrection（在途纠偏）：app-server 协议不开放在途注入：活动轮里再发 `session/send` 返回 -32010 "A prompt is already running for this session"（live 实测；bundle 运行时虽有 steer 队列，协议方法表里没有注入活动轮的方法）——如实声明 false；翻转条件 = 协议出现注入活动轮的方法并有 live 证据
-  - reportsTokenUsage（token usage）：`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游实现形状，cache 系带 `Tokens` 后缀；0.17.0 实跑仍非零，2026-10-29）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对（opencode session.tokens 同款语义）；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）
+  - reportsTokenUsage（token usage）：`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游实现形状，cache 系带 `Tokens` 后缀；0.17.0 实跑仍非零，2026-10-29）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——app-server 协议无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）
 
 ## 三、认证台账（指针；严禁嵌入 live 值）

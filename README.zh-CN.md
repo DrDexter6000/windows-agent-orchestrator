@@ -29,7 +29,7 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
 - **账单路由**——worker 跑在各自的 provider 配额上，Lead 的上下文保持小而便宜。
 - **原厂 harness**——WAO 直接驱动各厂商自己的 CLI，不做协议重实现：ZCode 驱动 GLM、
   Kimi 桌面 web 通道、Codex CLI、DeepSeek over ACP。参考机队的全部 8 个席位都运行在
-  原厂 harness 上；共支持 8 个 backend 适配器——逐轴事实见生成的
+  原厂 harness 上；共支持 7 个 backend 适配器——逐轴事实见生成的
   [能力矩阵](docs/surface/certification.md)。
 - **Transcript 即事实来源**——每个 run 都可以从其转录完整重建（新档在 `runs/projects/<slug>/<runId>.jsonl`，旧档平铺 `runs/<runId>.jsonl`）；
   交付审查是有界且脱敏的投影，永远不是裸 diff。
@@ -123,7 +123,6 @@ Copy-Item config/agents.example.json config/agents.json
 # 各 registry 命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
-#    入库模板默认不含 opencode 车道，registry check 无可探测，直接跳过。
 
 # 3. 接入 MCP Host（主控制面——决定 0017）
 #    在 WAO 安装根目录（你 clone 的仓库）里跑。把任意 MCP host（Claude Desktop /
@@ -163,7 +162,7 @@ AGENT_ONBOARDING.md §3。
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
 | **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.7.0](docs/changelog-2026-10-31-v0.7.0.md)） |
-| **跑真实 smoke 测试**（claude/codex/opencode） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
+| **跑真实 smoke 测试**（claude/codex） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |
 | **跟里程碑 / 进度** | [`docs/roadmap.md`](docs/roadmap.md) |
@@ -202,7 +201,7 @@ npm run cli -- playbook list|show <id>                  # 可选的 Lead playboo
 
 ```powershell
 npm test            # 全部单元/集成测试（mock 子进程，不需要 API token）
-npm run smoke       # 真实 CLI smoke（claude/codex/opencode——消耗 API token）
+npm run smoke       # 真实 CLI smoke（claude/codex——消耗 API token）
 npm run reliability # runtime/model 认证矩阵——消耗 API token
 ```
 

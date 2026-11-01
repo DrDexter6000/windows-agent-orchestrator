@@ -72,7 +72,7 @@ const EXPECTED_M12_AUTHORITY_PATHS = Object.freeze([
   ".wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md",
 ]);
 
-/** 收集所有 opencode-serve serveUrl 端口（形如 :4297）。 */
+/** 收集所有 serveUrl 端口（形如 :58628）。 */
 function collectServePorts(text) {
   const out = [];
   for (const m of text.matchAll(/serveUrl[^:]*:\s*"https?:\/\/[^:]+:(\d+)"/g)) {
@@ -127,9 +127,10 @@ test("归档的 m6-audit 不再把 TD-33 描述为 'parts schema 实测未知'�
   );
 });
 
-test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默认）", () => {
-  // 权威：opencode 默认端口 4297。
-  // 例外的 config/agents.json 是 gitignored 本地文件，不纳入断言。
+test("面向用户的文档 serveUrl 端口必须统一为 58628（kimi-web 场景 4e worker serve 配方）", () => {
+  // 面向用户文档里的 serve 通道只有 kimi-web。模板端口=使用手册场景 4e worker serve 配方端口（58628）：
+  // 模板指 58628 时误配=连接被拒大声失败，用户被引去看 4e 配方。本机真实端口
+  // 仍属配置私事，不进文档。例外的 config/agents.json 是 gitignored 本地文件。
   const FILES = [
     "config/agents.example.json",
     "SKILL.md",
@@ -137,19 +138,13 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
     "docs/smoke-guide.md",
     "README.md",
   ];
-  // 端口权威按通道分化——opencode-serve 文档默认 4297。kimi-web 模板端口=使用手册
-  // 场景 4e worker serve 配方端口（58628）：模板指 58628 时误配=连接被拒大声失败，
-  // 用户被引去看 4e 配方。面向用户文档写**通道配方的 worker 端口**，本机真实端口
-  // 仍属配置私事，不进文档。
-  const PORT_BY_FILE = { "config/agents.example.json": "58628" };
   for (const f of FILES) {
-    const allowed = PORT_BY_FILE[f] ?? "4297";
     // 端口一致性是负向扫描：使用手册按整本读，各页的 serve 配方同样不得漂端口。
     const ports = collectServePorts(f === "docs/usage.md" ? readManual() : read(f));
     for (const p of ports) {
       assert.equal(
-        p, allowed,
-        `${f} 出现非 ${allowed} 的 serveUrl 端口（${p}）。面向用户文档统一写通道配方端口（kimi-web=58628[场景 4e worker serve]，opencode=4297）；本机真实端口属配置私事，不进文档。`
+        p, "58628",
+        `${f} 出现非 58628 的 serveUrl 端口（${p}）。面向用户文档统一写通道配方端口（kimi-web=58628[场景 4e worker serve]）；本机真实端口属配置私事，不进文档。`
       );
     }
   }
@@ -221,21 +216,6 @@ test("spec 顶层状态不得再自称草稿/第一稿（M0-M6 已实现，契�
   // 不应再标"🟡 第一稿 / 草稿"误导读者以为还在设计期。
   const head = spec.split("\n").slice(0, 8).join("\n");
   assert.ok(!/第一稿|🟡.*草稿|草稿.*待实现/.test(head), "spec 顶层仍自称草稿/第一稿，与实现进度不符");
-});
-
-test("SKILL.md 按需指向 opencode 运维避坑，正文不复制事故清单", () => {
-  const skill = read("SKILL.md");
-  const pitfalls = read("references/opencode-pitfalls.md");
-  assert.ok(skill.includes("references/opencode-pitfalls.md"), "SKILL.md 缺 opencode 按需指针");
-  const must = [
-    { kw: /provider|providerID/i, why: "provider id 错配（如 deepseek 写成 deepseek-coding-plan）导致 401" },
-    { kw: /port|端口|4297/i, why: "serveUrl 端口必须与 opencode serve --port 实际一致" },
-    { kw: /oh-my-openagent|OmO|Maestro System Context|杂草/i, why: "OmO 插件往 session 注入 Maestro context，是 talking-cli 域杂草" },
-    { kw: /first-stable|无限|循环|重复确认/i, why: "DeepSeek-v4-flash 回答后无限重复，需 completionMode: first-stable" },
-  ];
-  for (const { kw, why } of must) {
-    assert.ok(kw.test(pitfalls), `opencode-pitfalls.md 缺少运维项（${why}）`);
-  }
 });
 
 test("spec §7 目录结构不得把未实现的文件当作已存在列出", () => {
@@ -551,8 +531,10 @@ test("历史 dispatch NO-GO 记录必须显式标注已被新认证结果取代"
 });
 
 test("opencode stop 安全边界不得保留 TD-37/TD-38 修复前的陈旧文案", () => {
-  const files = ["README.md", "SKILL.md", "docs/usage.md", "docs/troubleshooting.md"];
+  const files = ["README.md", "SKILL.md", "docs/usage.md", "docs/troubleshooting.md", "references/safety-incidents.md"];
   const stale = [
+    /未停则强制 taskkill \+ 告警/,
+    /_runCleanup[^\n]*静默验证未做/,
     /backendStopQuiet[^。\n]*(当前未认证|未认证|false\/absent)/i,
     /直到\s*`?backendStopQuiet`?\s*认证通过/i,
     /intentionally fails[^。\n]*backendStopQuietVerified/i,
@@ -606,10 +588,6 @@ test("agents.example.json 车道条目的 backend/model/effort 完整且落在 r
   const parsed = JSON.parse(raw);
   const laneIds = Object.keys(parsed.agents ?? {});
   assert.ok(laneIds.length >= 8, `0046 模板应含 ≥8 条车道（实际 ${laneIds.length}）`);
-  for (const [id, w] of Object.entries(parsed.agents ?? {})) {
-    assert.notEqual(w?.backend, "opencode-serve",
-      `${id} 不得用 opencode-serve（决策 0005：主 worker 进程式）`);
-  }
   const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
   for (const id of laneIds) {
     const w = parsed.agents[id];
@@ -2327,8 +2305,6 @@ test("README 是新读者入口：当前工具计数 / 快速开始闭环 / 链�
     "README 快速开始必须复制 agents.example.json 模板");
   assert.ok(/registry validate/.test(readme) && /registry list/.test(readme),
     "README 快速开始必须包含 registry validate/list");
-  assert.ok(/registry check[^\n]*(?:opencode|只对)/.test(readme),
-    "README 必须说明 registry check 只对 opencode-serve backend");
   assert.ok(/MCP host|MCP Host/.test(readme),
     "README 必须指向 MCP Host 配置路径");
   // Correction review (Lead): npm ci canonical (package-lock tracked);
@@ -3410,7 +3386,7 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
   // (3) 02-architecture AgentDef backend enum 行紧邻处含 ADR-0028 指针
   //（闭集成员增补属 Owner 决策；曾评估未纳入的 runtime 先例）。
   const archLines = read("docs/02-architecture.md").split("\n");
-  const enumIdx = archLines.findIndex((l) => /backend:\s*"opencode-serve"/.test(l));
+  const enumIdx = archLines.findIndex((l) => /backend:\s*"claude-code"/.test(l));
   assert.ok(enumIdx !== -1, "02-architecture.md 缺 AgentDef backend enum 行");
   const enumWindow = archLines.slice(enumIdx, enumIdx + 3).join("\n");
   assert.ok(/ADR-?0028/.test(enumWindow),
@@ -3443,7 +3419,7 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
 // 手写表体一并退场：能力对照表改为生成层 docs/surface/certification.md，由
 // scripts/gen-certification.mjs 从 registry/factory 闭集 SSOT +
 // validateAgentPolicy 行为探针派生（「底稿＋单项」派生法，
-// 含 KIMI_K3_MODEL_ID / OPENCODE_NATIVE_SYSTEM_MIN_VERSION 源常量锚定与
+// 含 KIMI_K3_MODEL_ID 源常量锚定与
 // CAPABILITY_NOTES / POLICY_PROBE_BASES 键集校验——漂移在生成期即红）。守卫
 // 收敛：此处不再解析手写表体（死锚已删），也不与 docsSurface.test.js 的字节钉
 // 形成两套机制——统一为「重新渲染 == 磁盘内容」（模式照抄 docsSurface.test.js），

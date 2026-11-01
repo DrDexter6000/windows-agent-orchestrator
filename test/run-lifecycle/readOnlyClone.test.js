@@ -410,7 +410,7 @@ function writeEphemeralTranscript(dir, runId, agentId, { worktreePath, baseCommi
   writeFileSync(join(dir, "runs", `${runId}.jsonl`), lines.join(""), "utf8");
 }
 
-function makeResumeManager(dir, registryPath, spawnAgentCapture, { mode = "replay" } = {}) {
+function makeResumeManager(dir, registryPath, spawnAgentCapture) {
   const fakeBackend = {
     supportsRoleContract: true, sessionOutlivesProcess: false,
     async spawn(agent) {
@@ -422,8 +422,6 @@ function makeResumeManager(dir, registryPath, spawnAgentCapture, { mode = "repla
         isAlive: () => false,
       };
     },
-    // attach 路径（replayByRespawn 非 true 且有 streamEvents）的事件流。
-    ...(mode === "attach" ? { async *streamEvents() { yield { kind: "done", reason: "completed" }; } } : {}),
     defaultBinary() { return "claude"; },
     credentialEnvNames: () => [],
   };
@@ -464,28 +462,6 @@ test("0102: resume（replay）恢复形态与基点——执行位置=克隆，�
       ["run.worktree_released"],
       "克隆路径无分支回收事件",
     );
-  } finally { cleanupDir(dir); }
-});
-
-test("0102: resume（attach）同样恢复形态与基点", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-pc-attach-"));
-  try {
-    makeGitRepo(dir);
-    const runId = "run_pc_a1";
-    const c1 = gitOut(["rev-parse", "HEAD"], dir);
-    const clone = await createReadOnlyClone(dir, runId, { commitish: c1 });
-    writeEphemeralTranscript(dir, runId, "pc2", { worktreePath: clone.path, baseCommit: c1 });
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({ agents: { pc2: { backend: "claude-code", cwd: dir } } }), "utf8");
-    const manager = makeResumeManager(dir, registryPath, null, { mode: "attach" });
-    const resumed = await manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath });
-    assert.equal(resumed.deferredWorktreeRelease, clone.path, "attach 路径也恢复 deferred");
-    assert.equal(resumed.deferredWorktreeForm, "private_clone");
-    assert.equal(resumed.deferredWorktreeBaseCommit, c1);
-    assert.equal(resumed.effectiveCwd, clone.path);
-    resumed._stopQuietConfirmed = true;
-    await resumed._runCleanup();
-    assert.ok(!existsSync(clone.path), "克隆已释放");
   } finally { cleanupDir(dir); }
 });
 

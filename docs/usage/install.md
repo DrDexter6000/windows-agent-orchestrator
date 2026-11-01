@@ -24,7 +24,7 @@ WAO 进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harne
 
 | runtime | 安装 | 用途 |
 |---------|------|------|
-| opencode | `npm install -g opencode-ai` | HTTP 类 backend（需先 `opencode serve`）；也可作为 MCP Lead host（见[接入宿主与绑定项目](host.md)的 OpenCode 项目级配置） |
+| opencode | `npm install -g opencode-ai` | 作为 MCP Lead host；项目级配置见[接入宿主与绑定项目](host.md) |
 | claude code | 见 [anthropic 官方](https://docs.anthropic.com/en/docs/claude-code) | 进程式 backend（需登录：`claude login`） |
 | codex | `npm i -g @openai/codex` | 进程式 backend（需登录：`codex login`） |
 | kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | 进程式 backend，多模态（需过 Kimi 白名单，无需登录命令）。暂停使用：kimi 车道走 kimi-web；本后端不支持在途纠偏、不上报 token 用量 |
@@ -37,9 +37,9 @@ kimi-code 与 DSH stdio 面为何暂停，见决定 0074。
 
 claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔离配置目录：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的会话不可见（设计行为，含 `--add-dir` 逃生门）。见 `docs/troubleshooting.md` §7.13。
 
-### Provider key（claude-code wrapper / opencode serve 需要）
+### Provider key（claude-code wrapper 需要）
 
-claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。按你用的 provider 配：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`。key 的验证、注入与 401 排错见 `docs/troubleshooting.md` §1.2（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。
+claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key。按你用的 provider 配：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`。key 的验证与排错见 `docs/troubleshooting.md` §1.1/§1.6。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。
 
 ## 安装本工具
 
@@ -80,7 +80,7 @@ Copy-Item config/agents.example.json config/agents.json
 {
   "registry": "config/agents.json",
   "runDir": "runs",              // transcript 存放目录
-  "pollInterval": 5000,          // opencode 轮询间隔 ms
+  "pollInterval": 5000,          // 轮询间隔 ms
   "waitTimeout": null,           // 派发侧等待窗 ms；null=禁用。到期只通知不终止——观察预算，非执行死线；设值须在 1000..600000
   "timeout": 30000,              // HTTP 请求超时 ms
   "defaultIsolation": "none",    // 默认不隔离（可选 "worktree"）
@@ -93,7 +93,7 @@ Copy-Item config/agents.example.json config/agents.json
 ```powershell
 # 各命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
 npm run cli -- registry list --registry config/agents.json
-npm run cli -- registry check --registry config/agents.json
+npm run cli -- registry validate --registry config/agents.json
 
 # 车道一屏参考（只读）
 npm run cli -- wao lanes

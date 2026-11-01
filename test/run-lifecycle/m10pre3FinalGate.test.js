@@ -40,7 +40,7 @@ function makeGitRepo(dir) {
 }
 
 // Mock fetch whose turn never completes (run stays running) — kimi-web 假服务器
-//（61a：现行唯一 serve 家族后端；transcript 轮恒 running）。假 bearer 绝不发真实请求。
+//（现行唯一 serve 家族后端；transcript 轮恒 running）。假 bearer 绝不发真实请求。
 process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
 process.on("exit", () => { delete process.env[KIMI_TEST_TOKEN_ENV]; });
 
@@ -48,7 +48,7 @@ function silentFetch() {
   return runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
 }
 function mockRegistry(runDir) {
-  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } };
+  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } };
 }
 
 // ============================================================

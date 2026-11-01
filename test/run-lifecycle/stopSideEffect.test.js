@@ -314,7 +314,7 @@ test("TD-100.8: kimi-web loser 不调用 executeStopWithVerification", async () 
 
 // ---------------------------------------------------------------------------
 // 9. kimi-web winner verified/unverified 两路径保持同一事件语义
-//（61a：kimi-web 的停止目标解析需要 registry agent + token——目标解析成功后才
+//（kimi-web 的停止目标解析需要 registry agent + token——目标解析成功后才
 //  轮到注入的 executeStop；与 9c/9d 的真停止面互补，这里钉的是事件语义。）
 // ---------------------------------------------------------------------------
 const KW9_TOKEN_ENV = "WAO_STOPSIDE_KW_TEST_TOKEN";

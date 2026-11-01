@@ -6,12 +6,6 @@ import { matrixCaseLabel } from "../../src/registry.js";
 // 按声明选 drill 词汇，共享代码不按运行时名分支。
 import { backendCapabilitySnapshot } from "../../src/backends/factory.js";
 
-const LEGACY_MATRIX = [
-  { agentId: "coder", label: "GLM snapshot-stable", providerID: "zhipuai-coding-plan" },
-  { agentId: "researcher", label: "DeepSeek first-stable", providerID: "deepseek" },
-  { agentId: "coder_multimodal", label: "Kimi first-stable", providerID: "kimi-for-coding", optional: true },
-];
-
 // ADR-0025 §5 / 决定 0084 / 决定 0086：delta 认证子集的 drill 词汇 SSOT。
 // 新（harness × 模型）组合走 delta 认证：sentinel（core 能力）+ scorecard（strict 证据）
 // + containmentEvidence（越界写拦截的活体取证——承担 isolation 语义，不得省）。
@@ -45,10 +39,11 @@ export const LEGACY_DELTA_DRILLS = ["sentinel", "scorecard", "adversarialEscape"
 
 // 已退役 drill 闭集：矩阵行显式声明即解析失败。adversarialEscape 由决定 0084
 // 退役、改用 containmentEvidence，静默跳过会把 delta 子集的 isolation 语义悄悄
-// 丢掉；workflowRunDir 随决定 0094 的 workflow 层退役，静默跳过会让矩阵行以为
-// 跑过了。两者都不得静默跳过。
+// 丢掉；workflowRunDir 随决定 0094 的 workflow 层退役、stop 随决定 0105 的
+// opencode 后端退役，静默跳过会让矩阵行以为跑过了。都不得静默跳过。
 const RETIRED_DRILLS = Object.freeze({
   workflowRunDir: 'retired by decision 0094 — the workflow layer is gone; remove the drill from the matrix row',
+  stop: 'retired by decision 0105 — it only drove opencode-serve; explicit stop is exercised per lane by the component-check stop drill; remove the drill from the matrix row',
   adversarialEscape: 'retired by decision 0084 — replace it with "containmentEvidence" (live containment-evidence drill; the adversarial out-of-bounds drill left the delta gate because a compliant model refuses the instruction, leaving nothing to intercept)',
 });
 
@@ -81,10 +76,9 @@ export function buildCertificationMatrix({
   profileOverride,
 } = {}) {
   const agents = registry?.agents ?? {};
+  // registry 未声明 certification.matrix 时没有缺省 case（零 case、零派发）。
   const configured = registry?.certification?.matrix;
-  const rawCases = Array.isArray(configured) && configured.length > 0
-    ? configured
-    : LEGACY_MATRIX;
+  const rawCases = Array.isArray(configured) ? configured : [];
 
   return rawCases
     .filter((tc) => !onlyAgent || tc.agentId === onlyAgent)
@@ -133,7 +127,6 @@ function normalizeCase(tc, agent = {}, profileOverride) {
     // providerID 硬编码行值导致该维度对现网全部 lane 空转的教训（TD-133 同族）。
     // 无 provider 块 → null（已观察确认无接入方）。
     providerKey: providerKeyFor(agent.provider),
-    completionMode: tc.completionMode ?? agent.completionMode ?? "snapshot-stable",
   };
 }
 
@@ -177,7 +170,6 @@ function requiredCategoriesForDrills(drills) {
   // isolation 语义降为可选。
   if (
     drills.includes("isolation")
-    || drills.includes("stop")
     || drills.includes("containmentEvidence")
     || drills.includes("sandboxEnforcement")
   ) {

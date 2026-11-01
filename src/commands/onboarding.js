@@ -459,11 +459,6 @@ function panelReadinessLines(r) {
   if (p.loginUnverified?.length > 0) {
     lines.push(`  登录态未验证（如实展示，不计入可用）: ${p.loginUnverified.join("、")}`);
   }
-  // C-5：serve 注入型（opencode-serve）不是登录态型认证——单独措辞归类，
-  // 不进"登录态未验证"行（引擎 readyState 原值不动，只改展示归类）。
-  if (p.injectedAuth?.length > 0) {
-    lines.push(`  注入式认证（serve 探测不覆盖，不计入可用）: ${p.injectedAuth.join("、")}`);
-  }
   // C-12：探测未知如实展示一行（docblock 承诺的"如实展示"在此兑现）。
   if (p.probeUnknown?.length > 0) {
     lines.push(`  探测未知（如实展示，不计入可用）: ${p.probeUnknown.join("、")}`);
@@ -544,11 +539,7 @@ function recommendationAuthLabel(row) {
   // authNote 只作补充（模板 _comment_auth），不再替代结构化基座。
   if (row.requiresKeyEnv) return `认证: key ${row.requiresKeyEnv}`;
   let base;
-  // R6-C3（P2-2）："注入"单独出现会被读成无需 key——补明仍需 provider key 且要
-  // 先起 serve（scripts/serve.ps1 注入；docs/usage/install.md 的 Provider key 一节是权威）。
-  if (row.backend === "opencode-serve") {
-    base = "认证: opencode serve 注入（仍需 provider key，先起 scripts/serve.ps1）";
-  } else if (row.requiresCli) {
+  if (row.requiresCli) {
     base = `认证: ${row.requiresCli} CLI 登录态`;
   } else {
     base = "认证: —";
@@ -559,10 +550,6 @@ function recommendationAuthLabel(row) {
 
 /** readyState → human bracket label (ready / missing / login / probe-failed). */
 function recommendationReadyLabel(row) {
-  // R6-C3（P2-2）：opencode-serve 的可用性取决于 serve 进程是否可达，PATH 上有
-  // opencode CLI ≠ serve 已注入 key——不再误标 [CLI 登录态]。仅改显示，
-  // 引擎 readyState 值不变。
-  if (row.backend === "opencode-serve") return "serve 探测未覆盖";
   // TD-258（opus 显示修正）：zcode 无 CLI 探测面（binary 绝对路径直连）——
   // "探测失败"对从未探测的车道是错标；kimi-web 探测异常时同理。
   if (row.backend === "zcode") return "无 CLI 探测面（binary 直连）";

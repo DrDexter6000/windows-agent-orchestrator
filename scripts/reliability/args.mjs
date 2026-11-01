@@ -18,7 +18,6 @@
 
 // 已知参数白名单（值参数）。新增参数须同步 USAGE 文案与本表。
 const KNOWN_VALUE_ARGS = Object.freeze([
-  "serve-url",
   "registry",
   "agent",
   "wait-timeout",
@@ -29,7 +28,7 @@ const KNOWN_VALUE_ARGS = Object.freeze([
 export const USAGE = `WAO Reliability Suite（真实 runtime 认证；消耗 token）
 
 用法: npm run reliability -- [--agent <agentId>] [--profile <strict|delta>]
-                [--registry <file>] [--serve-url <url>]
+                [--registry <file>]
                 [--wait-timeout <ms>] [--poll-interval <ms>]
 
   --agent <id>        只认证该 agent（增量刷新常用形态）

@@ -15,7 +15,7 @@ import { spawnSync, spawnSync as _ss } from "node:child_process";
 import { findState } from "../../src/transcript.js";
 import { runServer, KIMI_TEST_SERVE_URL, KIMI_TEST_TOKEN_ENV, KIMI_TEST_TOKEN_VALUE } from "../fixtures/kimiWebServe.js";
 
-// 61a：kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
+// kimi-web 假服务器（现行唯一 serve 家族后端）+ 假 bearer，绝不发真实请求。
 // 本文件多处用进程级 before/after 不便（模块底部另有分组），统一在 startDaemon
 // 前 set、daemon.stop 后 delete；这里给纯函数测试兜一个文件级设置。
 process.env[KIMI_TEST_TOKEN_ENV] ??= KIMI_TEST_TOKEN_VALUE;
@@ -50,7 +50,7 @@ function writeTranscript(runDir, runId, stateChangeTo, agentId = "test_agent") {
     { ts: "2026-06-25T00:00:01.000Z", seq: 2, runId, agentId, type: "session.created", backendSessionId: "s_x", backend: "kimi-web" },
     { ts: "2026-06-25T00:00:02.000Z", seq: 3, runId, agentId, type: "run.started", cwd: runDir, backend: "kimi-web" },
     // prompt.sent：kimi-web 的 resume 走 replay 分支（replayByRespawn=true），
-    // 重放需要绑定 prompt.sent——61a 迁移时补上（旧 opencode attach 分支不需要）。
+    // 重放需要绑定 prompt.sent。
     { ts: "2026-06-25T00:00:02.500Z", seq: 4, runId, agentId, type: "prompt.sent", prompt: "leftover task" },
   ];
   if (stateChangeTo) {
@@ -474,7 +474,7 @@ function silentFetch() {
 }
 
 function mockRegistry(runDir) {
-  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV, completionMode: "first-stable" } } };
+  return { agents: { worker_a: { backend: "kimi-web", serveUrl: KIMI_TEST_SERVE_URL, cwd: runDir, model: { id: "kimi-code/k3" }, tokenEnv: KIMI_TEST_TOKEN_ENV } } };
 }
 
 test("daemon server: ping 返回 ok", async () => {
@@ -630,8 +630,7 @@ test("优雅退出：stop 后 daemon.json 删除", async () => {
 // Increment 5 — 重启 resume-scan（daemon 启动时接管未完成 run）
 // ============================================================
 
-// TD-163（ADR-0030 收口）迁移：原形状曾以 timed_out 为合成终结器——61a 前的
-// opencode attach 形态靠 seed 预置 serve 端会话。kimi-web 的 resume 走 replay
+// kimi-web 的 resume 走 replay
 // 分支（replayByRespawn=true）：daemon 重扫残留 run 后重放绑定 prompt 到**新**
 // 会话（transcript 需带 prompt.sent——writeTranscript 已补），假服务器把新会话
 // 驱动到自然 completed。终态=自然完成（到期只通知不杀的语义不变）。

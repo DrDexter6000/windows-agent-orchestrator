@@ -91,7 +91,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.stop_verified",
-    description: "worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（服务端路径：opencode-serve、kimi-web），可重建\"为何 verified\"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。",
+    description: "worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop。载荷含 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter（进程路径）或 backend/method/taskkillCalled（服务端路径：kimi-web），可重建\"为何 verified\"——以后置 PID 存活检查为准，taskkill exitCode=0 单独不构成 verified。",
   },
   {
     type: "run.stop_unverified",

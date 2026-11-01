@@ -57,7 +57,6 @@ test("createDrills 返回全部环境依赖 drill glue（组合入口与将来�
     "runStrictScorecardDrill",
     "runIsolationDrill",
     "runContainmentEvidenceDrill",
-    "runStopDrill",
     "runFileScorecardTask",
     "ensureTmpGitRepo",
     "readRunEvents",
@@ -86,7 +85,6 @@ const MOVED_GLUE_NAMES = [
   "runStrictScorecardDrill",
   "runIsolationDrill",
   "runContainmentEvidenceDrill",
-  "runStopDrill",
   "runFileScorecardTask",
   "ensureTmpGitRepo",
   "readRunEvents",
@@ -106,7 +104,7 @@ test("源级钉: run-reliability.mjs 不再内联定义任何 drill glue（复�
     "组合入口必须从 ./reliability/drills.mjs import 工厂");
   const wiring = entry.match(/const\s*\{([^}]*)\}\s*=\s*createDrills\(/s);
   assert.ok(wiring, "组合入口必须解构装配 createDrills(...) 的返回值");
-  for (const name of ["runCli", "runStrictScorecardDrill", "runIsolationDrill", "runContainmentEvidenceDrill", "runStopDrill"]) {
+  for (const name of ["runCli", "runStrictScorecardDrill", "runIsolationDrill", "runContainmentEvidenceDrill"]) {
     assert.ok(new RegExp(`\\b${name}\\b`).test(wiring[1]), `组合入口必须接线 drill：${name}`);
   }
   // 主流程仍消费的纯 glue 也从共享模块 import（不留本地副本）。
@@ -258,7 +256,7 @@ test("源级钉: runStrictScorecardDrill 文件证据 = 存在 + 内容承载 se
   assert.match(glue, /includes\(fileSentinel\)/, "内容判定 = sentinel 在场（includes）");
 });
 
-test("源级钉: run-reliability 无 completed 顶替 / 无 silentPass 顶绿；commandsPassed 按声明条件化", () => {
+test("源级钉: run-reliability 无 completed 顶替；commandsPassed 按声明条件化", () => {
   const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
   // 坏模式 5：缺 scorecard 用 completed 顶替 → 现在必须是红（固定文案在场）。
   assert.doesNotMatch(entry, /check\("commandsPassed", completed/, "completed 顶替形状必须消失");
@@ -268,9 +266,6 @@ test("源级钉: run-reliability 无 completed 顶替 / 无 silentPass 顶绿；
   assert.match(entry, /naCheck\(\s*"commandsPassed"/, "declared=false ⇒ commandsPassed 记 N/A");
   assert.match(entry, /scorecardCommandFailureIsCredible\(observedCommandsCheck\)/,
     "declared=false 仍须保留 scorecard 已明确观察到的真实非零退出失败");
-  // 坏模式 2：silentTimeout serve 不可达不再写通过。
-  assert.doesNotMatch(entry, /silentPass = true/, "skip 顶绿必须消失");
-  assert.match(entry, /naCheck\(\s*"silentTimeout"/, "serve 不可达记 N/A + 原因");
   // 坏模式 4：fileMaterialized 消费内容比对事实。
   assert.match(entry, /fileContentMatches/, "fileMaterialized 判定消费内容比对");
   // 五态判定：case pass 状态感知（N/A 不算失败也不置绿）。

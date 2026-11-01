@@ -58,7 +58,7 @@ function refOnlyBackend() {
   };
 }
 
-/** opencode/deepseek-acp 形：model 必须带 providerID+id，其他 model 子字段拒。 */
+/** deepseek-acp 形：model 必须带 providerID+id，其他 model 子字段拒。 */
 function pairOnlyBackend() {
   return {
     validateAgentPolicy(agent) {

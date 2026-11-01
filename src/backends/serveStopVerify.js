@@ -1,7 +1,7 @@
 /**
- * opencode 后台静默验证（S1-2，TD-37 落地，事故修复 2026-06-18）。
+ * serve 后台静默验证（S1-2，TD-37 落地，事故修复 2026-06-18）。
  *
- * 背景：06-18 事故证明 opencode 的 abort HTTP 调用可能"虚假成功"——返回 204、
+ * 背景：06-18 事故（当时的后端是 opencode-serve）证明 serve 型 backend 的 abort HTTP 调用可能"虚假成功"——返回 204、
  * transcript 写 run.aborted，但 serve 端 session 继续烧 token 7.4h。
  * "成功停止"必须由实测定义（token/message 不再增长），不能由"调用没报错"定义。
  *
@@ -15,15 +15,13 @@
  *   2. messages 数量（新 message 出现 = 又生成了一轮）
  *
  * MessageAbortedError 处理：abort 副产物会在 messages 末尾追加一条
- * { info: { error: { name: "MessageAbortedError" } }, parts: [] }。这条 message
- * 是 abort 的正常表现，不是"后台还在跑"。第 1 轮采样时把它计入基线，
- * 后续轮次相比基线增长才算"未停"。
- *
- * 不读 opencode.db（那是取证手段，运行时不依赖直接读 serve 内部库）。
+ * { info: { error: { name: "MessageAbortedError" } }, parts: [] }（按上游消息
+ * 形状报告的中止标记）。这条 message 是 abort 的正常表现，不是"后台还在跑"。
+ * 第 1 轮采样时把它计入基线，后续轮次相比基线增长才算"未停"。
  */
 
 /**
- * @param {object} backend OpenCodeServeBackend 实例（需有 session() 和 messages()）
+ * @param {object} backend serve 型 backend 实例（需有 session() 和 messages()）
  * @param {string} serveUrl
  * @param {string} sessionId
  * @param {{cwd?: string, rounds?: number, intervalMs?: number}} opts
@@ -150,11 +148,11 @@ function sleep(ms) {
 //
 // WAO must not turn an unknown observation into either verified success or a
 // global process kill. A taskkill callback is therefore explicit and optional;
-// the default path never kills unrelated OpenCode sessions.
+// the default path never kills unrelated serve sessions.
 // ---------------------------------------------------------------------------
 
 /**
- * @param {object} backend OpenCodeServeBackend 实例（abort/session/messages）
+ * @param {object} backend serve 型 backend 实例（abort/session/messages）
  * @param {string} serveUrl
  * @param {string} sessionId
  * @param {{cwd?: string, rounds?: number, intervalMs?: number, taskkill?: () => Promise<void>}} opts

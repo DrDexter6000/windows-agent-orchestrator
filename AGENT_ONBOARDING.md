@@ -143,9 +143,8 @@ npm run cli -- wao doctor --cwd <目标项目>
 
 各命令的作用见 `npm run cli -- --help`（生成副本：`docs/surface/cli.md`）。
 
-当前入库模板默认不含 opencode 车道，`registry check` 通常直接跳过。
 
-**doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置（opencode worker 有没有配 tokenBudget）、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
+**doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 
 **（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（6 必需槽位：project.md/decisions/pipeline/handoff/runs/migration），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。inbox 与 state 是可选槽位（init 不预建，已存在的历史 state/ 布局放行）。另：fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
 
@@ -186,7 +185,7 @@ npm run cli -- run <agentId> --prompt "Read package.json and report the package 
 npm run cli -- run glm-pro --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-命令里的 `glm-pro` 换成你接好的车道；各车道擅长什么、有什么限制，看 `npm run cli -- wao lanes`。**不要默认用 opencode worker**——它有 stop 虚假成功风险，只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
+命令里的 `glm-pro` 换成你接好的车道；各车道擅长什么、有什么限制，看 `npm run cli -- wao lanes`。
 
 ### 记录状态
 
@@ -206,11 +205,10 @@ npm run cli -- wao handoff write --from lead --to coder --summary "任务描述"
 
 这些来自真实事故（烧掉上亿 token 的教训），详见 `references/safety-incidents.md`：
 
-1. **opencode worker 必须配 `tokenBudget`，否则不要派发。**
-2. **默认用进程式车道（模板 zcode / codex / claude-code / deepseek-acp），不是 opencode。** 进程式车道没有 opencode 的 stop 虚假成功风险面，但进程类别不替代停止验证——任何停止仍看第 3 条的 `stop_verified`。
-3. **`stop` 之后看 `stop_verified`，不只看命令返回。** abort 返回 200 ≠ 后台停了。
-4. **任务结束后检查残余进程**（按所用 backend）：opencode serve 用 `tasklist` 查；kimi-web 车道的会话进程群（kimi.exe 及子进程）用 `wao serve status` 检查、必要时按 `docs/usage/lanes.md` 的 serve 维护配方处置——进程名在场本身不等于泄漏。看不见的后台进程曾烧了一夜 token。
-5. **用 `.wao/` 记录，不新建文档，不把上下文塞 session。**
+1. **默认用进程式车道（模板 zcode / codex / claude-code / deepseek-acp）。** 进程死即会话死，但进程类别不替代停止验证——任何停止仍看第 2 条的 `stop_verified`。
+2. **`stop` 之后看 `stop_verified`，不只看命令返回。** abort 请求成功 ≠ 后台停了。
+3. **任务结束后检查残余进程**（按所用 backend）：kimi-web 车道的会话进程群（kimi.exe 及子进程）用 `wao serve status` 检查、必要时按 `docs/usage/lanes.md` 的 serve 维护配方处置——进程名在场本身不等于泄漏。看不见的后台进程曾烧了一夜 token。
+4. **用 `.wao/` 记录，不新建文档，不把上下文塞 session。**
 
 **核心**：token 拿来用是投资，可接受；无人值守的无用循环 + 不清理残余，绝对不可接受。
 
@@ -225,8 +223,7 @@ npm run cli -- wao handoff write --from lead --to coder --summary "任务描述"
 ## 8. 遇到问题
 
 - **worker 401**：provider key 没配（`wao doctor` 会查出 FAIL 并给 `run:` 修复提示）
-- **opencode worker 卡住**：serve 没起 或 key 没注入 serve 进程（用 `scripts/serve.ps1` 起 serve）
-- **run 失控（烧 token）**：先 `npm run cli -- status <runId>` 看它在做什么（记下输出里的 `observedSeq`），再 `npm run cli -- stop <runId> --observed-seq <n> --reason "<为什么要停>"`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置——全局 `/IM` 扫杀只作为 opencode 事故的最后手段（先见 `docs/troubleshooting.md`）
+- **run 失控（烧 token）**：先 `npm run cli -- status <runId>` 看它在做什么（记下输出里的 `observedSeq`），再 `npm run cli -- stop <runId> --observed-seq <n> --reason "<为什么要停>"`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置（排障见 `docs/troubleshooting.md`）
 - **不确定环境**：跑 `wao doctor`（advisory——HEALTHY/DEGRADED 可直接继续，BROKEN 项按 `run:` 提示处理后由 owner 裁决）
 
 详细排障：`docs/troubleshooting.md`。

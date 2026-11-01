@@ -92,11 +92,10 @@ function syntheticRegistry() {
         model: { id: "kimi-code/k3" },
       },
       fallback: {
-        backend: "opencode-serve",
-        serveUrl: "http://127.0.0.1:4297",
-        agent: "build",
+        backend: "deepseek-acp",
+        credentialEnv: "CC_TEST_DSH_TOKEN",
         cwd: ".",
-        model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
+        model: { providerID: "deepseek", id: "deepseek-v4-pro" },
         tokenBudget: 5000000,
         tokenBudgetMultiplier: 100,
       },
@@ -132,7 +131,7 @@ function check_(name, pass, extra = {}) {
 test("subjects: --subject backend → 在册全部 backend（去重排序，键含 codeRef）", () => {
   const { subjects, error } = resolveSubjects({ registry: syntheticRegistry(), subjectArg: "backend", codeRef: CODE_REF });
   assert.equal(error, null);
-  assert.deepEqual(subjects.map((s) => s.name), ["claude-code", "codex", "kimi-code", "opencode-serve"]);
+  assert.deepEqual(subjects.map((s) => s.name), ["claude-code", "codex", "deepseek-acp", "kimi-code"]);
   for (const s of subjects) {
     assert.equal(s.kind, "backend");
     assert.equal(s.key, `backend:${s.name}@${CODE_REF}`);
@@ -146,7 +145,7 @@ test("subjects: --subject llm → 在册全部 llm 身份（providerID 缺失时
   assert.equal(error, null);
   assert.deepEqual(
     subjects.map((s) => `${s.providerID}/${s.modelId}`),
-    ["claude-code/glm-5.3-flash[1m]", "codex/gpt-5.6-sol", "kimi-code/kimi-code/k3", "zhipuai-coding-plan/glm-5.2"],
+    ["claude-code/glm-5.3-flash[1m]", "codex/gpt-5.6-sol", "deepseek/deepseek-v4-pro", "kimi-code/kimi-code/k3"],
   );
   assert.equal(subjects[0].providerKey, "https://a.example/api|KEY_A");
   assert.equal(subjects[1].providerKey, null, "无 provider 块 → null（已观察无接入方）");
@@ -157,8 +156,8 @@ test("subjects: <kind> 精确命中——backend 名 / providerID+modelId / 裸 
   const byBackend = resolveSubjects({ registry, subjectArg: "codex", codeRef: CODE_REF });
   assert.deepEqual(byBackend.subjects.map((s) => s.name), ["codex"]);
 
-  const byFullLlm = resolveSubjects({ registry, subjectArg: "zhipuai-coding-plan/glm-5.2", codeRef: CODE_REF });
-  assert.deepEqual(byFullLlm.subjects.map((s) => s.modelId), ["glm-5.2"]);
+  const byFullLlm = resolveSubjects({ registry, subjectArg: "deepseek/deepseek-v4-pro", codeRef: CODE_REF });
+  assert.deepEqual(byFullLlm.subjects.map((s) => s.modelId), ["deepseek-v4-pro"]);
 
   const byBareModel = resolveSubjects({ registry, subjectArg: "gpt-5.6-sol", codeRef: CODE_REF });
   assert.deepEqual(byBareModel.subjects.map((s) => s.providerID), ["codex"]);
@@ -191,7 +190,7 @@ test("llmIdentityOf: 无 model.id → null（非 llm 主体）；providerID 维 
   assert.equal(llmIdentityOf({ backend: "codex", cwd: "." }), null);
   assert.equal(llmIdentityOf(null), null);
   const withProviderID = llmIdentityOf(syntheticRegistry().agents.fallback);
-  assert.equal(withProviderID.providerID, "zhipuai-coding-plan");
+  assert.equal(withProviderID.providerID, "deepseek");
   const derived = llmIdentityOf(syntheticRegistry().agents.tester);
   assert.equal(derived.providerID, "codex");
 });
@@ -576,7 +575,7 @@ test("分账【证伪】: llm 被测 × backend 夹具方向同样分账（夹�
   registry.certification = { fixtures: { backend: [{ agentId: "tester" }] } };
   const plan = planComponentChecks({
     registry,
-    subjectArg: "zhipuai-coding-plan/glm-5.2",
+    subjectArg: "deepseek/deepseek-v4-pro",
     codeRef: CODE_REF,
     compositionSummary: null,
     now: NOW,
@@ -601,7 +600,7 @@ test("分账【证伪】: llm 被测 × backend 夹具方向同样分账（夹�
     now: NOW,
   });
   const record = recordComponentCheck(inputs[0]);
-  assert.match(record.key, /^llm:zhipuai-coding-plan\/glm-5\.2@/);
+  assert.match(record.key, /^llm:deepseek\/deepseek-v4-pro@/);
   assert.equal(record.result, "pass", "informational 红不进判定（越界配合度仅记录）");
   assert.equal(record.fixture.kind, "backend");
   assert.equal(record.fixture.identity.backend, "codex");
@@ -1603,7 +1602,7 @@ test("kernel: 配置传递按支持范围——装配带 model → 值必须送�
 });
 
 test("kernel: stop 执行形态判定——装配携带 serveUrl → serve；无 serveUrl → process（缺 serveUrl 是进程形常态，绝非判负理由）", () => {
-  assert.equal(backendStopFormOf({ serveUrl: "http://127.0.0.1:4297", backend: "opencode-serve" }), "serve");
+  assert.equal(backendStopFormOf({ serveUrl: "http://127.0.0.1:4297", backend: "kimi-web" }), "serve");
   // 进程式 backend（claude-code/codex/kimi-code/deepseek-acp）装配无 serveUrl。
   assert.equal(backendStopFormOf({ backend: "deepseek-acp", cwd: "." }), "process");
   assert.equal(backendStopFormOf({ backend: "claude-code", model: { id: "glm-5.3[1m]" } }), "process");
@@ -1697,8 +1696,8 @@ test("kernel【证伪】: stop process 形——自然完成/车辆未确认/宿
 });
 
 test("kernel【证伪】: stop 判定不受缺 serveUrl 干扰——进程形断言集不含任何 serveUrl 依赖（缺陷 4 钉）", () => {
-  // 2026-09-20 缺陷 4 实证形态：`wao stop` 对 ACP sessionId 报
-  // "session has no serveUrl (opencode path needs one)"。进程形判定内核的
+  // 2026-09-20 缺陷 4 实证形态：`wao stop` 对 ACP sessionId 曾报
+  // "session has no serveUrl"。进程形判定内核的
   // 输入面（form/stopAccepted/events/supervisorExited）不消费 serveUrl，
   // 判定不得因缺 serveUrl 翻红——红的唯一来源是真实停止事实缺失。
   const src = readFileSync(join(REPO_ROOT, "scripts", "reliability", "componentDrills.mjs"), "utf8");
@@ -1851,7 +1850,7 @@ const STUB_CLI_SOURCE = [
   "  writeFileSync(join(runDir, runId + \".jsonl\"), \"\", \"utf8\");",
   "  appendEvents(runId, [",
   "    { type: \"run.started\", agentId: \"a1\", cwd: runDir },",
-  "    { type: \"session.created\", backend: \"opencode-serve\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
+  "    { type: \"session.created\", backend: \"kimi-web\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
   "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
   "  ]);",
   "  say({ runId, background: true });",
@@ -1912,9 +1911,9 @@ test("glue【集成 dry】: stop 按执行形态分车道——serve 走 spawn+`
       return { checks: out.checks, argv: readFileSync(argvLog, "utf8") };
     };
 
-    // serve 形（opencode-serve 装配）：spawn 托管 + `wao stop` serve abort 车道——
+    // serve 形（kimi-web 装配）：spawn 托管 + `wao stop` serve abort 车道——
     // 既有语义保持，三断言全绿，绝不触碰 daemon。
-    const serve = runLane({ backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: "." });
+    const serve = runLane({ backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", cwd: "." });
     const serveBy = new Map(serve.checks.map((c) => [c.name, c]));
     assert.match(serve.argv, /spawn a1 /, "serve 形经 spawn 托管派发");
     assert.match(serve.argv, /stop run_stub_serve /, "serve 形经 `wao stop` serve abort 车道");
@@ -2023,7 +2022,7 @@ const ROLE_PROBE_STUB_CLI_SOURCE = [
   "  const runId = \"run_stub_role_serve\";",
   "  appendEvents(opts[\"run-dir\"], runId, [",
   "    { type: \"run.started\", agentId: args[1], cwd: opts.cwd ?? \".\" },",
-  "    { type: \"session.created\", backend: \"opencode-serve\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
+  "    { type: \"session.created\", backend: \"kimi-web\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
   "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
   "  ]);",
   "  say({ runId, background: true });",
@@ -2049,7 +2048,7 @@ test("TD-183 glue【集成 dry】: role 探针完成事实接线——探针未�
       process.env.STUB_ROLE_SCENARIO = scenario;
       const registryPath = join(tmp, `registry-${Math.random().toString(36).slice(2)}.json`);
       writeFileSync(registryPath, JSON.stringify({
-        agents: { a1: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: "." } },
+        agents: { a1: { backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", cwd: "." } },
       }));
       const drills = createComponentDrills({
         nodeBin: "node", root: fakeRoot, tmpDir: tmp, waitTimeout: "1000", pollInterval: "50", registry: registryPath,
@@ -2226,16 +2225,16 @@ test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不�
   const assembly = plan.tempRegistry.agents[plan.subjects[0].fixtureAgentId];
   // 基底 = 被测 backend（kimi-code）anchor 的净化克隆；model/provider 保持被测
   // 自己的实际配置（那就是它的支持范围）——夹具 llm（fallback 的
-  // zhipuai/glm-5.2）不得以任何形态进入装配。
+  // deepseek/deepseek-v4-pro）不得以任何形态进入装配。
   assert.equal(assembly.backend, "kimi-code");
   assert.equal(assembly.model.id, "kimi-code/k3", "model = 被测 anchor 自己的配置");
   assert.equal(assembly.provider, undefined, "夹具 llm 的 provider 不得注入被测装配");
-  assert.ok(!JSON.stringify(assembly).includes("glm-5.2"), "夹具 modelId 不得出现在被测装配");
-  assert.ok(!JSON.stringify(assembly).includes("zhipuai-coding-plan"), "夹具 providerID 不得出现在被测装配");
+  assert.ok(!JSON.stringify(assembly).includes("deepseek-v4-pro"), "夹具 modelId 不得出现在被测装配");
+  assert.ok(!JSON.stringify(assembly).includes("deepseek"), "夹具 providerID 不得出现在被测装配");
   assert.equal(assembly.systemPrompt, undefined, "角色合同剥离（与组件机械验证无关）");
   assert.equal(assembly.sessionReuse, undefined, "sessionReuse 由 capability 探针显式控制");
   // 夹具身份仍完整进台账资格账（record.fixture）——记账归记账，下发归下发。
-  assert.equal(plan.subjects[0].fixtureAccount.identity.modelId, "glm-5.2");
+  assert.equal(plan.subjects[0].fixtureAccount.identity.modelId, "deepseek-v4-pro");
 
   // 反向：验 llm → 基底 = 夹具 backend anchor，model = 被测 llm anchor（被测
   // 身份正是要验证的下发对象——这与"夹具身份不下发"不冲突）。
@@ -2243,14 +2242,14 @@ test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不�
   registry2.certification = { fixtures: { backend: [{ agentId: "coder_mm" }] } };
   const plan2 = planComponentChecks({
     registry: registry2,
-    subjectArg: "zhipuai-coding-plan/glm-5.2",
+    subjectArg: "deepseek/deepseek-v4-pro",
     codeRef: CODE_REF,
     compositionSummary: null,
     now: NOW,
   });
   const assembly2 = plan2.tempRegistry.agents[plan2.subjects[0].fixtureAgentId];
   assert.equal(assembly2.backend, "kimi-code", "基底 = 夹具 backend（coder_mm 的 kimi-code）");
-  assert.equal(assembly2.model.id, "glm-5.2", "model = 被测 llm 的实际配置");
+  assert.equal(assembly2.model.id, "deepseek-v4-pro", "model = 被测 llm 的实际配置");
 });
 
 test("装配【证伪·回归钉】: 被测 anchor 无 model/provider（deepseek-acp 形状）→ 装配零夹具身份注入（2026-09-20 首跑 7 连红根因）", () => {

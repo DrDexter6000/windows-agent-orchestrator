@@ -1,6 +1,6 @@
 // test/fixtures/kimiWebServe.js
 //
-// kimi-web 假服务器共享夹具（61a 批设立）：`kimi-web`（现行唯一的 serve 家族
+// kimi-web 假服务器共享夹具：`kimi-web`（现行唯一的 serve 家族
 // 后端，HTTP attach 型——会话活过 WAO 进程）的离线测试构造。零真实服务器、
 // 零网络：全部经注入的 fetchImpl 回放上游形状；鉴权 token 用测试自设的假环境
 // 变量（withKimiToken / KIMI_TEST_TOKEN_ENV，测完即删），绝不发真实请求。
@@ -8,11 +8,11 @@
 // 两层夹具：
 //   1. 底层信封/路由件（kimiServer / envelope / detailEnvelope / turnItem /
 //      spawnOkRoutes / turnScriptServer……）——原 test/backends/kimiWeb.test.js
-//      的夹具原样迁来（61a 起多文件共用，同一函数只留一份；形状锚 =
+//      的夹具原样迁来（多文件共用，同一函数只留一份；形状锚 =
 //      src/backends/kimiWeb.js 文件头的上游实测）。
 //   2. runServer——RunManager 级"驱动一个 run 到完成"的有状态假服务器
 //      （spawn 建会话 → F3 静默门 → POST prompts → transcript 轮询见 running →
-//      delayMs 后 completed）。语义对齐各测试原 opencode-serve mock fetch：
+//      delayMs 后 completed）。
 //      assistantDelay → delayMs、慢回复跨 deadline；writePath/writeContent →
 //      提交时写文件（交付测试的 worker 产出）；replies → 逐次回复队列。
 //
@@ -20,7 +20,7 @@
 // （detail/prompts；messages 没有路由，请求即抛错）改答 code 40401 "session does not exist"（TD-250
 // releaseSession 删除后的真实回显形状）。这不是为了测删除，而是让
 // RunManager._runCleanup 的停止探针（verifyStopQuiet，硬编码 3 轮 × 2s）落到
-// "不可观察 → 立即收口"，与旧 opencode mock 的 404 探针同速——否则每个终态
+// "不可观察 → 立即收口"——否则每个终态
 // run 白等 4s。副作用：终态清理会记 run.stop_unverified（observation
 // unavailable）+ releaseSession already_gone——这两条是本夹具形状的既知事实，
 // 相关文件不对其断言。
@@ -177,11 +177,11 @@ export function turnScriptServer(sessionId, { promptId = "msg_q1", preTurns = []
 }
 
 /**
- * RunManager 级有状态假服务器（61a：替代各测试的 opencode-serve mock fetch）。
+ * RunManager 级有状态假服务器。
  * 每会话一台小状态机：pending →（POST prompts）→ running →（delayMs 后）
  * completed；abort 走 GET prompts → POST …/{promptId}:abort → aborted。
  *
- * 选项（对齐旧 opencode mock 的语义）：
+ * 选项：
  *   - delayMs：提交后多少毫秒 turn 才 completed（0 = 立即；Infinity = 永不完成
  *     ——"silent"假服务器的等价物：run 持续 running，停滞预算下限 60s 保证测试
  *     窗口内不误收口）。写文件（writePath）发生在提交时（同旧 createWorkerFetch

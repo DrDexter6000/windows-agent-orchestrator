@@ -20,7 +20,6 @@ export const BACKEND_CLI = {
   "claude-code": "claude",
   codex: "codex",
   "kimi-code": "kimi",
-  "opencode-serve": "opencode",
   // JSON-RPC 适配器 backend（src/backends/factory.js 的活分支）：进程由 harness
   // 自管，不依赖 PATH 上的独立 CLI，无物可探——显式置 null 而非缺省。
   "deepseek-harness": null,

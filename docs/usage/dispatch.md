@@ -71,7 +71,7 @@ runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
 `runs wait` 与 MCP `run_wait` 共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码（0/3/4/130）与诚实边界见 [supervise.md「等待到收口」](supervise.md#等待到收口runs-wait---until-settled-与-nextstep决定-0095)。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
-工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（opencode-serve、kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
+工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`）：本地进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）在两层都查；HTTP serve backend（kimi-web：cwd 作为会话参数交给 serve）两层一致豁免。两层都拦：前台执行通道（`run` 前台、daemon `start`、`retry` → RunManager.start，以及 `resume` 的进程重放分支 → RunManager.resume）与后台派发通道（`run --background` / `spawn` / MCP `run_dispatch` → dispatchRun 派发服务层，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
 ## 场景 2b：上游空窗期的派发活性重试
 
@@ -121,9 +121,7 @@ npm run cli -- retry <runId> --wait
 # 重试时替换源 run 的 per-dispatch 覆盖（显式 flag 优先于继承值）
 npm run cli -- retry <runId> --model <id> --reasoning <effort>
 
-# 恢复：接续一个未完成的 run
-#   opencode-serve：attach 到已有 session
-#   claude/codex：重放原 prompt（进程式无法 attach，只能重放）
+# 恢复：接续一个未完成的 run（重放原 prompt 到新进程/新会话）
 npm run cli -- resume <runId> --wait
 ```
 

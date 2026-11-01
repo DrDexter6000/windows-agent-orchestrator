@@ -133,24 +133,6 @@ test("R9 需求 2: 六态逐态映射——login_based/unknown 不计入可用�
   assert.deepEqual(a.probeUnknown, ["coder_b"], "unknown 如实展示为探测未知");
 });
 
-test("R9-C C-5: serve 注入型席位从 loginUnverified 分离 → injectedAuth 单列", () => {
-  const a = assessPanelReadiness([
-    row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),
-    row("auditor", { model: "claude-opus-5" }, "login_based"),
-    row("coder_opencode_fallback", { backend: "opencode-serve", model: "glm-5.2" }, "login_based"),
-  ]);
-  assert.deepEqual(a.loginUnverified, ["auditor"], "登录态型照常进登录态未验证");
-  assert.deepEqual(a.injectedAuth, ["coder_opencode_fallback"],
-    "serve 注入型单列 injectedAuth——不是登录态型认证（展示归类修正，引擎值不动）");
-  const a2 = assessPanelReadiness([
-    row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),
-    row("coder_mm", { model: "kimi-code/k3" }, "ready"),
-    row("coder_opencode_fallback", { backend: "opencode-serve", model: "glm-5.2" }, "missing_cli"),
-  ]);
-  assert.deepEqual(a2.injectedAuth, [],
-    "serve 注入型但 readyState ≠ login_based（如缺 CLI）不进 injectedAuth 清单");
-});
-
 test("R9 需求 2 / 0065 主提示: 同族提示 insufficientFamilyDiversity——≥2 可用且已知族系单一 → true", () => {
   const same = assessPanelReadiness([
     row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),

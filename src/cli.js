@@ -339,7 +339,7 @@ async function waoAskCommand(args, config) {
 // stop/retry 仍暂留 cli.js 继续共用 loadRun；上方 import）。
 
 // backendFor 已移至 commands/shared.js（TD-98 阶段 2c：newRunManager 的后端选择器，随
-// newRunManager 一起搬走；cli.js 不再直接调用，但 OpenCodeServeBackend 仍被 stop/spawn 用）。
+// newRunManager 一起搬走；cli.js 不再直接调用）。
 
 // parseAgentList / loadScorecardRules / parseScorecardRules / runAndWait 已移至
 // src/commands/run.js（TD-98 阶段 2e-3，随 run/spawn 族搬迁；上方 import + re-export runAndWait）。

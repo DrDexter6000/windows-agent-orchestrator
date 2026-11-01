@@ -27,7 +27,7 @@
 //   I1/I2/I3 ...... 5 (default full exact keys + pagination/cursor unchanged)
 //   J1/J2/J3 ...... 8 (real MCP Client wire schema + error fixed, no leak)
 //   K1..K8 ........ 7 (CLI compact parity + strict parser + default raw unchanged)
-//   L1/L2 ......... 2+6 (serve sentinel fail-closed, compact never bypasses)
+//   L2 ............ MCP collapses service throw to fixed error, zero append
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -748,32 +748,8 @@ test("M12-2A-K7: default raw `collect <runId>` stays byte-compatible (no project
 });
 
 // =====================================================================
-// Section L — serve sentinel fail-closed; compact never bypasses it.
+// Section L — MCP collapses a service throw to a fixed error.
 // =====================================================================
-
-// 61a 注：本组钉 runCollect 的 serve 取消息哨兵——该路径只服务 opencode-serve
-//（kimi-web 走转录重建，不发 serve fetch），保留 opencode-serve 夹具；61b 随后端
-// 退役时一并处置（同 runCollect.test.js serve 路径用例家族）。
-test("M12-2A-L1: serve sentinel (>=10001) throws before projection — compact bypass impossible", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m122a-l1-"));
-  try {
-    const runDir = join(dir, "runs");
-    writeTranscript(runDir, "run_l1",
-      sessionHeader("run_l1", "researcher", "opencode-serve", { serveUrl: "http://127.0.0.1:4297" }) +
-      jl({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-28T00:10:00.000Z", runId: "run_l1", agentId: "researcher" }));
-    // Inject a serve fetch that returns the sentinel count.
-    const fetchServe = async () => ({ data: Array(10001).fill(serveAssistant("x")) });
-    // Projection mode (deferAppend) MUST hit the service sentinel and throw,
-    // so projectCollectResult(compact) is never reached.
-    await assert.rejects(
-      () => collectRunMessages({ runId: "run_l1", runDir, deferAppend: true, fetchServeMessagesFn: fetchServe }),
-      /serve snapshot exceeds safe capacity/,
-    );
-    assert.equal(countAudits(join(runDir, "run_l1.jsonl")), 0, "zero append on sentinel");
-  } finally {
-    rmrfRetry(dir);
-  }
-});
 
 test("M12-2A-L2: MCP compact collapses serve-sentinel throw to fixed error, zero append", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m122a-l2-"));

@@ -13,7 +13,7 @@
 //   - every backend WITHOUT it never spawns a local process — it threads
 //     agent.cwd as a REMOTE directory hint (HTTP serve API).
 // Today the partition is exact (ProcessBackend family + deepseek-harness on
-// one side, opencode-serve on the other), but nothing declared the binding —
+// one side, kimi-web on the other), but nothing declared the binding —
 // any one-sided drift (a capability added to the HTTP backend, or removed
 // from a process backend) would silently break the cwd gate's scoping. This
 // matrix walks EVERY backend the shared factory (src/backends/factory.js)
@@ -21,7 +21,7 @@
 //
 // Maintenance boundary: a backend type newly added to the factory MUST get a
 // case below (the hardcoded expected partitions enumerate the current factory
-// branches; `registry.js` normalizeAgent's known-backend set is the same eight).
+// branches; `registry.js` normalizeAgent's known-backend set is the same seven).
 //
 // Pure group: object construction + injectable seams only. The process-family
 // spawn is recorded through the established `_spawnFn` injection point and
@@ -93,16 +93,6 @@ function factoryCases(dir) {
       },
     },
     {
-      key: "opencode-serve",
-      agent: {
-        backend: "opencode-serve",
-        cwd: "D:/matrix/remote-hint",
-        serveUrl: "http://127.0.0.1:4299",
-        agent: "build",
-        model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
-      },
-    },
-    {
       // 第七成员 kimi-web：HTTP attach（`kimi web` REST）。bearer token 每请求
       // 从 env 解析——matrix 的 spawn 腿需要该 env 在场（token 值任意非空）。
       key: "kimi-web",
@@ -161,8 +151,8 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
           // kimi-web v8 起 spawn 序列（POST /sessions → GET 会话详情（提交前
           // 静默门）→ GET transcript?agent_id=main（preSubmitTurnIds 观察锚）→
           // POST prompts）走 fail-closed 形状门（A4）：transcript 需 items 数组、
-          // detail 需 id 与 busy/main_turn_active 在场；其余端点（含
-          // opencode-serve 的 POST /api/session）维持默认 `{data:{id}}` 形状。
+          // detail 需 id 与 busy/main_turn_active 在场；其余端点维持默认
+          // `{data:{id}}` 形状。
           if (urlStr.includes("/transcript?agent_id=")) {
             const transcriptBody = { data: { items: [], seq: 1, has_more: false } };
             return {
@@ -228,7 +218,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     );
     assert.deepEqual(
       remoteHintKeys,
-      ["opencode-serve", "kimi-web"],
+      ["kimi-web"],
       "the remote-hint family declares no preflightInvocation",
     );
   } finally {

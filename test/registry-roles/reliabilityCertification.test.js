@@ -65,7 +65,7 @@ test("certifyCase: all core, strict, operational, and observability checks pass 
 
 test("certifyCase: failed core check rejects the runtime/model combination", () => {
   const result = certifyCase({
-    caseId: "opencode+bad-model",
+    caseId: "codex+bad-model",
     checks: [
       check("completed", false, "core", { capability: "complete" }),
       check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
@@ -79,7 +79,7 @@ test("certifyCase: failed core check rejects the runtime/model combination", () 
 
 test("certifyCase: core passes but strict evidence fails -> draft-only", () => {
   const result = certifyCase({
-    caseId: "opencode+deepseek",
+    caseId: "codex+deepseek",
     checks: [
       check("completed", true, "core", { capability: "complete" }),
       check("hasAssistantText", true, "core", { capability: "assistantText" }),
@@ -300,7 +300,7 @@ test("certifyCase: core and strict pass but ops or metrics fail -> conditional",
 
 test("certifyCase: local stop ledger is not backend stop quietness", () => {
   const result = certifyCase({
-    caseId: "opencode-stop",
+    caseId: "serve-stop",
     checks: [
       check("completed", true, "core", { capability: "complete" }),
       check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
@@ -374,7 +374,7 @@ test("summarizeCertification: aggregates agent cases into worker capability summ
     {
       caseId: "researcher strict",
       agentId: "researcher",
-      backend: "opencode-serve",
+      backend: "kimi-web",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       checks: [
@@ -405,7 +405,7 @@ test("summarizeCertification: aggregates agent cases into worker capability summ
   assert.match(Object.keys(summary.workers)[0], /^lane:[0-9a-f]{16}$/, "0045：有身份事实 → 车道指纹键");
   assert.equal(recordOf(summary, "researcher").status, "conditional");
   assert.equal(recordOf(summary, "researcher").recommendedUse, "supervised-dispatch");
-  assert.equal(recordOf(summary, "researcher").backend, "opencode-serve");
+  assert.equal(recordOf(summary, "researcher").backend, "kimi-web");
   assert.equal(recordOf(summary, "researcher").providerID, "deepseek");
   assert.equal(recordOf(summary, "researcher").modelId, "deepseek-v4-flash");
   assert.equal(recordOf(summary, "researcher").capabilities.complete, true);

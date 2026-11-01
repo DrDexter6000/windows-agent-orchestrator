@@ -593,7 +593,7 @@ function createUpstreamRequestTracker() {
 // "File created at …wao_cert_coder_hq_muq3vm7a.txt"、文件真实落盘），但本 backend
 // 的完成路径不投影 tool part → WAO 侧零证据事件，delta scorecard 的 hasEvidence
 // 误红。补齐 = completed 轮把本轮 parts 里的 tool 帧投影为证据事件（证据先于
-// assistant 文本发射——opencodeServe/kimiWeb 同惯例）。
+// assistant 文本发射——证据先行惯例。
 //
 // tool part 形状来源 = 捆绑 zcode.cjs（0.16.9，sha256 FAD4C35C…E6275F，**形状不
 // 发明**）的 zod schema 只读核证。`session/messages` 结果 schema `U5i =
@@ -616,7 +616,7 @@ function createUpstreamRequestTracker() {
 //     dangerouslyDisableSandbox?}`。file_path 是绝对路径形状 → fileWrittenEvent
 //     **原样透传**（控制面 containment 求值用词法+realpath，kimi-web 同款）。
 //
-// 投影规则——镜像 src/backends/opencodeServe.js 的 evidenceEventsFromOpenCodeToolPart
+// 投影规则——tool 帧证据投影（证据事件先于终态判定）
 // TD-199（2026-10-02，双席会审后重设）：证据投影改【part 投影台账】驱动的增量
 // 投影——轮询每拍扫【本轮全区间】[baselineParts, parts.length)，每 part 双状态
 // {identitySent, resultSent}，首见发主事件、首见终态发 tool_result，各恰一次。
@@ -720,13 +720,13 @@ function projectTurnToolEvents(newMsgs, ledger) {
 
 // tool part state.status 的终态闭集（bundle schema nor 核证：闭集 =
 // pending|running|completed|error，其中 completed|error 为终态、pending|running
-// 非终态）。与 opencode 的 isTerminalToolStatus（completed|error|failed）同位
+// 非终态）。终态词闭集按上游协议各自对齐（completed|error|failed）
 // 不同集：zcode 的闭集是 schema literal，没有 "failed"——不掺入他席词表。
 function isTerminalZcodeToolStatus(status) {
   return status === "completed" || status === "error";
 }
 
-// opencodeServe.js isFileWriteTool 同款谓词（该函数未导出——镜像保持一处一份
+// isFileWriteTool 同款谓词（各后端各自一份
 // 语义，kimiWeb.js isFileWriteToolKey 同款，注释互指）。
 function isFileWriteToolKey(toolKey) {
   return toolKey === "write" || toolKey === "edit" || toolKey === "multiedit";
@@ -806,7 +806,7 @@ export class ZcodeBackend {
 
   // token 计量：session/usage 全量计量 live 非零实测（2026-10-01）——完成后取
   // 一次 → metrics 事件。会话级累计（非增量）：RunManager 预算闸门按累计值比对
-  // （opencode session.tokens 同款语义）；resume 轮的 usage 含前任轮用量，如实。
+  // （会话级累计语义）；resume 轮的 usage 含前任轮用量，如实。
   reportsTokenUsage = true;
 
   // 命令退出码：live 闭集（text|step-finish）无退出码；bundle 核证的 tool part
@@ -1795,7 +1795,7 @@ export class ZcodeBackend {
   /**
    * completed 轮发射序列：usage（session/usage——reportsTokenUsage=true 的通道；
    * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮消息的 type:"tool"
-   * 帧逐帧投影——身份键台账，证据先行，opencode/kimi-web 同惯例）→ 台账补漏
+   * 帧逐帧投影——身份键台账，证据先行）→ 台账补漏
    * （TD-199：终态先补未发证据）→ user echo → assistant text（身份切片：只取
    * parentID===锚点 U 的新 assistant 消息的 text parts——回显启发式退役：echo
    * 是 user 消息自己的 part，parent 过滤天然排除；发射前非空复检，N1 教训）

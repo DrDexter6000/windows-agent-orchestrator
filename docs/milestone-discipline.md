@@ -46,7 +46,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 1. 所有 task 的验收 gate 全绿
 2. 技术债审计完成（已修或已登记）
 3. `npm test` 全绿
-4. 涉及外部系统交互的 milestone，必须有真实运行时证据，不能只靠 mock 报绿：`npm run smoke` 覆盖 claude-code 与 codex（opencode 要点名才跑）；其余后端（zcode、kimi-web、deepseek-acp 等）以该车道的 `npm run reliability` 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项——发版检查单 §9 第 5 步的 reliability 本来就包含这些车道。里程碑若改了 sentinel 碰不到的行为（stop、resume 等），仍按该 task 的验收 gate 取对应的真实证据
+4. 涉及外部系统交互的 milestone，必须有真实运行时证据，不能只靠 mock 报绿：`npm run smoke` 覆盖 claude-code 与 codex；其余后端（zcode、kimi-web、deepseek-acp 等）以该车道的 `npm run reliability` 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项——发版检查单 §9 第 5 步的 reliability 本来就包含这些车道。里程碑若改了 sentinel 碰不到的行为（stop、resume 等），仍按该 task 的验收 gate 取对应的真实证据
 5. 更新 `docs/roadmap.md` 里程碑表
 6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（边界与流程见决定 0034）
 
@@ -85,10 +85,10 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 
 - 规则：milestone 收尾时主动走 §3 审计流程，不等用户要求。
 
-### 6.6 修一处必须验证所有同类路径（跨完成模式/跨 provider）
+### 6.6 修一处必须验证所有同类路径（跨 backend/跨 provider）
 
-- 完成判定、provider、metrics 相关代码在每条完成模式（first-stable / snapshot-stable）、每个 provider 各有一条路径。只修打红的那条、不同步其余同类路径，这种局部修复会被独立 reliability 测试（真实 provider）再次打红。
-- 规则：涉及完成判定 / provider / metrics 的修改，必须问"同类路径（另一个 completionMode、其它 provider）有没有同样问题"，全部验证才算完成。npm test 全绿 ≠ 实测可用。
+- 完成判定、provider、metrics 相关代码在每个 backend、每个 provider 各有一条路径。只修打红的那条、不同步其余同类路径，这种局部修复会被独立 reliability 测试（真实 provider）再次打红。
+- 规则：涉及完成判定 / provider / metrics 的修改，必须问"同类路径（其它 backend、其它 provider）有没有同样问题"，全部验证才算完成。npm test 全绿 ≠ 实测可用。
 - 规则（决定 0034 扩展）：补丁交付说明须自声明治标/治本；同类问题第二次出现 → 先检索 tech-debt/事故记录、写一段共同原因归因再动手，不打无归因的第三个补丁。
 
 ### 6.7 reliability 套件：完成判定/provider 路径修改的硬门槛

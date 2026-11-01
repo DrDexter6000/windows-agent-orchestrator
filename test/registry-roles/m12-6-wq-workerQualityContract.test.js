@@ -230,6 +230,6 @@ test("M12-6-WQ-GRN-07: single injection point — no second block insertion, no 
   // 参数选择头模板是 0045 合同声明的能力，非席位分支）。
   const fn = rcSrc.match(/export function composeRoleContractWithIdentity\(\{ roleContract, agentId, identity \}\) \{[\s\S]*?\n\}/);
   assert.ok(fn, "composition function body found");
-  assert.ok(!/claude|codex|kimi|opencode|researcher|coder_hq|coder_low|coder_mm|tester|auditor/i.test(fn[0]),
+  assert.ok(!/claude|codex|kimi|researcher|coder_hq|coder_low|coder_mm|tester|auditor/i.test(fn[0]),
     "composition body must not branch by backend or worker seat");
 });
