@@ -22,6 +22,7 @@
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
 | `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/surface/certification.md`（生成层：backend 能力/配置表达力事实与台账指针；npm run gen:certification 再生成）、`docs/certification-runbook.md`（认证检查结果五态与能力轴分层，含组件层验证）、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
 | `seat-certify` | 给某席位/车道装配做组合层认证（certified / conditional / draft-only；台账键=车道内容指纹，席位名仅 provenance） | 无条件全文必读：`docs/certification-runbook.md`、`docs/team-roles.md`、`docs/tech-debt.md`。三份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 containmentEvidence 或 sandboxEnforcement（越界写拦截活体取证）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定）；判读身份头、历史身份投影、resume、续接或会话复用相关证据时连读 docs/02-architecture.md §1 的 canonical worker identity 条、§3.3 的历史身份投影段、§4.2 的 resume 段、§4.10 Expert Session Reuse，与 docs/usage/dispatch.md 的 MCP run_continue 节（续接资格拒绝）；车道表事实（lane→轴/别名映射）以 config/lanes.json 为数据权威、席位接线模板以 config/agents.example.json 为模板权威（0045 §3） |
+| `owner-decide` | 判断一件事是否只能由 Owner 决定（Lead 不自行决定，也不替 Owner 选） | `AGENTS.md`（新增第三方依赖与开发工具链）、`SKILL.md`（扩大工作：新子系统、协议、持久状态或预计超过半天的独立工作流；安全事故的完整修复）、`AGENT_ONBOARDING.md`（多份安装并存时收敛为唯一检出；新 MCP 宿主入表前的真机验证；删除覆盖 Owner 冻结契约的测试）、`docs/01-prd.md`（POSIX 车道重开）、`docs/02-architecture.md`（MCP 工具真删除式减面；DSH 旧 harness 线去留）、`src/registry.js`（backend 闭集增减成员）、`docs/team-roles.md`（车道组合与认证费用；旧通道已死时的原位迁移；打开 MCP 认证清单门禁）、`docs/certification-runbook.md`（上游 harness 升级与改变在册的暂停投入裁定；新组合的费用与承重用途；接受认证残余；放宽 strict 轴；effort 纳入派发身份；车道换代后测不到的 Owner 评分是否沿用；组件认证的参照夹具；manualOverride 旁路）、`docs/milestone-discipline.md`（缺陷延后与重大取舍的成本否决；milestone 级真实运行时证据豁免；发版 reliability 门槛的逐次豁免）、`docs/troubleshooting.md`（worker 切到 DSH 后是否跑完整 reliability）、`docs/ssot.md`（§4：抬高文档字节上限）、`docs/tech-debt.md`（各条写明待 Owner 裁定或点名的剩余工作）、`docs/usage/lanes.md`（车道暂停派发说明 dispatchHold）、`docs/usage/delivery.md`（交付审查的只读 fallback 授权）、`docs/usage/supervise.md`（固定频率汇报；项目本地跨会话工作笔记）、`config/lane-traits.json`（车道画像里的 Owner 数据：原话、ownerRules、costTier）、`test/isolation-infra/docs-consistency.test.js` 与 `test/mcp-surface/m12-10-tool-surface.test.js`（SKILL.md 与 MCP 工具面的字节帽）、`src/dispatchResourceAdvisory.js`（wao/run_* 分支帽上调） |
 
 ## 1. 核心架构：五大类别
 
@@ -85,6 +86,8 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | `docs/archive/mN-audit.md` | 里程碑审计（历史快照，已归档；见 `docs/archive/README.md`） |
 | `docs/archive/docs-ssot-audit.md` | 历史 SSOT 审计快照 |
 | `docs/archive/m7-phases.md` | M7 完成后的 phase plan 历史快照 |
+
+全部过程类档案的入口：`docs/archive/README.md`。
 
 **铁律**：事故复盘**不维护修复进度**——修复状态用一行指针指向 `tech-debt.md` 的 TD 编号。`docs/archive/` 是过程类别的归档子目录（里程碑审计、整份旧台账与旧 roadmap 等冻结快照），头部由 `archive/README.md` 统一标注"非现行契约源"。
 
