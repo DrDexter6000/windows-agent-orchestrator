@@ -102,11 +102,12 @@
 //     win32, ~/.wao-machine fallback — NEVER derived from TMP/TEMP/TMPDIR; NOT
 //     a lock). A second concurrent full suite on this machine prints one
 //     WARNING (results may be contaminated by resource contention — remedy:
-//     sequential re-run), or a NOTICE downgrade when an existence probe
-//     (kill(pid, 0)) provably shows the marker's pid is dead — a stale orphan.
-//     It never blocks, never waits, and eats no budget. Deleted on every exit
-//     path; a crashed run leaves an orphan whose only consequence is that
-//     later runs print the same line.
+//     sequential re-run), or a NOTICE when an existence probe (kill(pid, 0))
+//     provably shows the marker's pid is dead — a stale orphan, which a suite
+//     holding its own verification lease replaces with its own marker. It
+//     never blocks, never waits, and eats no budget. Deleted on every exit
+//     path; a crashed run leaves an orphan that the next suite holding the
+//     lease takes over.
 //   - TD-165 hang watchdogs, THREE layers (before this, a hung test file could
 //     stall a wave FOREVER: both child adapters only awaited `close`, and
 //     nothing anywhere owned a timer):
@@ -216,17 +217,15 @@ export const MANIFEST_GROUPS = Object.freeze([
 // never competes with cross-file load for the SDK request budget. Every manifest
 // category must appear in exactly one wave (validated before execution).
 //
-// Concurrency — HISTORICAL measured evidence (filesystem wave, 54 files; frozen
-// figures kept for the record, NOT the basis of the current value):
-//   @8  = 212s  (argv-order scheduling strands the alphabetically-late pole)
-//   @16 = 178s  (conservative knee — solidly past the @8 that failed the target)
-//   @24 = 171s  (diminishing: +8 concurrency saves only ~7s past 16)
-// Historical conclusion: 16 is the smallest value that comfortably meets the delivery window.
-// Current choice: 8, PROVISIONAL (2026-09-26). Basis: a small repeated-case
-// comparison observed shorter TAP process duration (excluding queue time waiting
-// for a runner slot) at 8, with no observed batch throughput loss. That small
-// comparison does NOT establish optimality, full-suite speed, root cause, or
-// acceptance.
+// Concurrency — measured 2026-11-01 on a 16-CPU laptop, one wave at a time through
+// this runner, interleaved (filesystem wave, 96 files):
+//   on mains power: @8 = 474 / 517 / 528 s, @16 = 412 / 418 / 504 s, all green
+//   on battery with the lid closed: @16 = 1503 s, 10 files timed out at
+//   TEST_TIMEOUT_MS (deliveryVerification 1196 s in-wave)
+// The wave is resource-bound: per-file time grows with concurrency (the summed
+// per-file time at 16 is about 1.5x that at 8), so 16 was 5-20 % faster on mains
+// (three interleaved pairs, mean 12 %) and failed on battery with the lid closed.
+// 8 stays; going faster means less git work per file (TD-138).
 function hardwareParallelism() {
   try { return availableParallelism ? availableParallelism() : cpus().length; }
   catch { return 4; }
@@ -1125,9 +1124,9 @@ export function finalRunnerOutcome({ verdict, runsAdditions, runsGuardError, rep
 // SSOT's constant + resolver so the pinned public surface stays byte-stable.
 // A crashed run leaves an orphan: since R23-F/A A2 an existence probe
 // (killProbe, default process.kill(pid, 0)) distinguishes PROVABLY dead owners —
-// those downgrade to a NOTICE (same pid/startedAt anchors, no WARNING) — while
-// anything unprovable keeps the WARNING verbatim (fail-safe: no proof of death,
-// no downgrade; no grace/reclaim semantics in either branch). None of this
+// those get a NOTICE (same pid/startedAt anchors, no WARNING), and a suite holding
+// its own verification lease takes the marker over — while anything unprovable
+// keeps the WARNING verbatim (fail-safe: no proof of death, no takeover). None of this
 // module executes when the meta-tests import the file: main() only runs under
 // the invokedDirectly guard at the bottom.
 export { INFLIGHT_MARKER_FILENAME, inflightMarkerPath };
@@ -1136,54 +1135,62 @@ export { INFLIGHT_MARKER_FILENAME, inflightMarkerPath };
  * Pure decision core over injectable fs primitives (the meta-tests inject
  * fakes; realInflightAdapter is the only code that touches the real machine
  * state dir).
- *   begin() → "created"     — no marker existed; this invocation O_EXCL-claimed
- *                            it ({pid, startedAt}) and owns its deletion.
- *            "observed"    — a marker exists (live suite, crash orphan, or torn
- *                            write): exactly one line is printed — a WARNING
- *                            for anything alive-or-unproven, or (R23-F/A A2)
- *                            a NOTICE downgrade when killProbe PROVABLY shows
- *                            the owner dead. The marker is NOT ours either way —
- *                            a foreign marker must survive our exit (a running
- *                            suite still needs it; no grace/reclaim semantics).
+ *   begin() → "created"     — no marker existed, or it was the orphan of a
+ *                            suite killProbe PROVABLY shows dead and
+ *                            mayTakeOver is set (one NOTICE, then taken over);
+ *                            this invocation O_EXCL-claimed it ({pid,
+ *                            startedAt}) and owns its deletion.
+ *            "observed"    — a live or unproven suite's marker, or a torn write
+ *                            (one WARNING); or a dead suite's orphan this
+ *                            invocation may not or could not take over (its
+ *                            NOTICE, plus a WARNING when another suite claimed
+ *                            the marker first). The marker is NOT ours — a
+ *                            foreign marker must survive our exit (a running
+ *                            suite still needs it).
  *            "unavailable" — the machine state dir could not be marked
  *                            (unwritable). Advisory: the suite runs unmarked,
  *                            never a failure.
  *   end()   — deletes the marker ONLY when this invocation created it; acts at
  *             most once; delete failures are silent (worst case = an orphan
- *             that only ever causes the same line on later runs).
- * @param {{readMarker: () => (string|null), createMarker: (text: string) => void, deleteMarker: () => void, warn?: (line: string) => void, killProbe?: (pid: number) => void, pid?: number, now?: () => string}} input
+ *             that the next suite takes over).
+ * mayTakeOver: true only when this suite acquired its own verification lease
+ * handle and that handle had not reported the lease lost when the marker was
+ * built (lost() is set by the heartbeat, so it trails a takeover until the
+ * next successful beat). The lease admits one holder at a time, so two suites
+ * cannot take an orphan over at once while it stays exclusive; a stale takeover
+ * (STALE_MS), the MAX_HOLD_MS limit or a manual breakLock() can supersede a
+ * holder, and if that lands between the re-read and the delete in begin(), the
+ * old holder could still remove its successor's marker. Suites without their
+ * own handle (gate off, or under an ancestor's lease as in delivery
+ * verification) never delete a marker they did not create.
+ * @param {{readMarker: () => (string|null), createMarker: (text: string) => void, deleteMarker: () => void, warn?: (line: string) => void, killProbe?: (pid: number) => void, pid?: number, now?: () => string, mayTakeOver?: boolean}} input
  */
-export function createInflightMarker({ readMarker, createMarker, deleteMarker, warn = (line) => console.error(line), killProbe = (probePid) => process.kill(probePid, 0), pid = process.pid, now = () => new Date().toISOString() }) {
+export function createInflightMarker({ readMarker, createMarker, deleteMarker, warn = (line) => console.error(line), killProbe = (probePid) => process.kill(probePid, 0), pid = process.pid, now = () => new Date().toISOString(), mayTakeOver = false }) {
   let owned = false;
-  const warnExisting = (text) => {
-    // Best-effort parse: an orphan from a crashed run — or a torn/empty write —
-    // still warns; the printed pid/startedAt just show what could be read.
+  // Best-effort parse: an orphan from a crashed run — or a torn/empty write —
+  // still warns; the printed pid/startedAt just show what could be read.
+  // R23-F/A A2: the one accepted proof of death is killProbe(pid, 0) throwing
+  // EXACTLY code "ESRCH" ("no such process" — POSIX errno name; empirically the
+  // same code string on win32 libuv, verified 2026-08-21 against a
+  // freshly-exited child pid). A normal return means alive; EPERM (exists but
+  // not ours) or any other error means not proven; an unparsable pid means
+  // nothing to prove.
+  const inspect = (text) => {
     let info = {};
     try { info = JSON.parse(text) || {}; } catch { /* keep {} ⇒ "unknown" */ }
     const theirPid = Number.isFinite(info.pid) ? info.pid : "unknown";
     const theirTs = typeof info.startedAt === "string" && info.startedAt ? info.startedAt : "unknown";
-    // R23-F/A A2: downgrade to NOTICE only on PROOF of death. The one accepted
-    // proof is killProbe(pid, 0) throwing EXACTLY code "ESRCH" ("no such
-    // process" — POSIX errno name; empirically the same code string on win32
-    // libuv, verified 2026-08-21 against a freshly-exited child pid). A normal
-    // return means alive; EPERM (exists but not ours) or any other error means
-    // not proven; an unparsable pid means nothing to prove. All of those keep
-    // the WARNING verbatim — fail-safe: no proof of death ⇒ no downgrade.
+    let dead = false;
     if (theirPid !== "unknown") {
-      let provablyDead = false;
-      try { killProbe(theirPid); } catch (err) { provablyDead = !!err && err.code === "ESRCH"; }
-      if (provablyDead) {
-        warn(`[canonical] NOTICE: stale inflight marker — its suite (pid ${theirPid}, started at ${theirTs}) is gone (kill(pid,0) → ESRCH); continuing (advisory: nothing was blocked or deleted)`);
-        return "observed";
-      }
+      try { killProbe(theirPid); } catch (err) { dead = !!err && err.code === "ESRCH"; }
     }
+    return { theirPid, theirTs, dead };
+  };
+  const warnLive = ({ theirPid, theirTs }) => {
     warn(`[canonical] WARNING: another full suite started at ${theirTs} (pid ${theirPid}) — results may be affected by resource contention`);
     return "observed";
   };
-  const begin = () => {
-    let existing = null;
-    try { existing = readMarker(); } catch { existing = null; } // unreadable ≈ absent (advisory)
-    if (typeof existing === "string") return warnExisting(existing);
+  const claim = () => {
     try {
       createMarker(JSON.stringify({ pid, startedAt: now() }) + "\n");
       owned = true;
@@ -1194,14 +1201,38 @@ export function createInflightMarker({ readMarker, createMarker, deleteMarker, w
       // that appeared means we raced a real suite; warn like any observer.
       let raced = null;
       try { raced = readMarker(); } catch { raced = null; }
-      if (typeof raced === "string") return warnExisting(raced);
+      if (typeof raced === "string") return warnLive(inspect(raced));
       return "unavailable";
     }
+  };
+  const begin = () => {
+    let existing = null;
+    try { existing = readMarker(); } catch { existing = null; } // unreadable ≈ absent (advisory)
+    if (typeof existing !== "string") return claim();
+    const seen = inspect(existing);
+    if (!seen.dead) return warnLive(seen); // fail-safe: no proof of death ⇒ no takeover
+    if (!mayTakeOver) {
+      warn(`[canonical] NOTICE: stale inflight marker — its suite (pid ${seen.theirPid}, started at ${seen.theirTs}) is gone (kill(pid,0) → ESRCH); continuing (advisory: nothing was blocked or deleted)`);
+      return "observed";
+    }
+    // Proof of death under the lease: nobody needs a dead suite's marker, and
+    // left in place it stops every later suite from marking itself (one orphan
+    // from 2026-08-22 silenced this layer until 2026-11-01). Take it over:
+    // delete it only if it still holds what we read, then claim like a clean
+    // start.
+    warn(`[canonical] NOTICE: stale inflight marker — its suite (pid ${seen.theirPid}, started at ${seen.theirTs}) is gone (kill(pid,0) → ESRCH); replacing it with this suite's marker`);
+    let current = null;
+    try { current = readMarker(); } catch { current = null; }
+    if (typeof current === "string" && current !== existing) return warnLive(inspect(current));
+    if (typeof current === "string") {
+      try { deleteMarker(); } catch { return "observed"; } // the orphan stays: run unmarked
+    }
+    return claim();
   };
   const end = () => {
     if (!owned) return false;
     owned = false;
-    try { deleteMarker(); return true; } catch { return false; } // silent: worst case an orphan (WARNING if pid alive/unknown, NOTICE if provably dead — R23-F/A)
+    try { deleteMarker(); return true; } catch { return false; } // silent: worst case an orphan (WARNING while its pid looks alive; taken over once provably dead)
   };
   return { begin, end };
 }
@@ -1224,6 +1255,13 @@ export function realInflightAdapter(markerPath = inflightMarkerPath()) {
     createMarker: (text) => writeFileSync(markerPath, text, { flag: "wx" }),
     deleteMarker: () => unlinkSync(markerPath),
   };
+}
+
+// The suite's marker at the machine-global location: startCanonicalSuite's
+// default createMarker. The second argument is the meta-tests' seam (adapter,
+// killProbe, warn); production passes none.
+export function machineInflightMarker({ mayTakeOver = false } = {}, { adapter = realInflightAdapter(), ...core } = {}) {
+  return createInflightMarker({ ...adapter, ...core, mayTakeOver });
 }
 
 // ── Discovery: every test/**/*.test.js, test-relative, forward-slashed ───────
@@ -1939,6 +1977,7 @@ export function realWaveObservers({
   createGate = () => createVerificationGate({ identity: { owner: "scripts/canonical-test.mjs#observation" } }),
   markerReader = realInflightAdapter(),
   countNodeProcesses = defaultCountNodeProcesses,
+  ownPid = process.pid,
 } = {}) {
   let gate = null;
   return {
@@ -1957,6 +1996,7 @@ export function realWaveObservers({
       if (raw === null) return { state: "none" };
       try {
         const info = JSON.parse(raw) || {};
+        if (info.pid === ownPid) return { state: "none" }; // this suite's own marker is not another suite
         return { state: "present", pid: Number.isFinite(info.pid) ? info.pid : "unknown", startedAt: typeof info.startedAt === "string" && info.startedAt ? info.startedAt : "unknown" };
       } catch {
         return { state: "present", pid: "unknown", startedAt: "unknown", note: "marker present but unparseable" };
@@ -2060,21 +2100,23 @@ export function isolateSuiteTemp() {
  * @param {{repoRoot: string, testDir: string, manifestPath: string, reportPath: string,
  *           nodeExe: string, env?: NodeJS.ProcessEnv,
  *           createGate?: (() => object)|null,
- *           createMarker?: () => {begin: Function, end: Function},
+ *           createMarker?: (opts: {mayTakeOver: boolean}) => {begin: Function, end: Function},
  *           runSuiteFn?: (args: object) => Promise<void>}} args
  */
 export async function startCanonicalSuite({
   repoRoot, testDir, manifestPath, reportPath, nodeExe,
   env = process.env,
   createGate = null,
-  createMarker = () => createInflightMarker(realInflightAdapter()),
+  createMarker = machineInflightMarker,
   runSuiteFn = runSuite,
 }) {
   const gate = typeof createGate === "function" ? createGate() : null;
   const handle = gate ? await gate.acquire() : null;
   try {
     const childEnv = buildCanonicalChildEnv(env, { gateHeld: Boolean(handle) });
-    const inflight = createMarker();
+    // Only a suite holding its own lease handle, not yet reported lost, takes an
+    // orphan over (see createInflightMarker); an inherited HELD flag proves nothing.
+    const inflight = createMarker({ mayTakeOver: Boolean(handle) && !handle.lost() });
     inflight.begin();
     try {
       await runSuiteFn({ repoRoot, testDir, manifestPath, reportPath, nodeExe, childEnv });

@@ -4827,10 +4827,10 @@ test("B3-⑧ RUNS_SUBCOMMANDS 收录 gate：unknown-subcommand 错误列出它�
 //
 // R23-F/A 的 A2 单测全部注入 killProbe 假探针；这里用**真实子进程 + 默认探针**
 // （process.kill(pid, 0)，无任何注入）实证降级链路的最后一公里：一个刚退出的
-// 短命子进程的 pid，在真实进程表里确实探死 ⇒ 孤儿标记降级为 NOTICE（含 pid）。
+// 短命子进程的 pid，在真实进程表里确实探死 ⇒ 孤儿标记打 NOTICE（含 pid）并被接管。
 // Windows pid 可能被系统即时复用——每个"新鲜退出"的 pid 试一次，最多 3 个。
 
-test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ 孤儿标记降级 NOTICE", async () => {
+test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ 孤儿标记 NOTICE 并被接管", async () => {
   const { createInflightMarker, realInflightAdapter, INFLIGHT_MARKER_FILENAME } =
     await import("../../scripts/canonical-test.mjs");
 
@@ -4850,23 +4850,25 @@ test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ �
       writeFileSync(markerPath, JSON.stringify({ pid, startedAt: "2026-08-22T00:00:00.000Z" }), "utf8");
 
       const warnings = [];
-      const m = createInflightMarker({ ...adapter, warn: (l) => warnings.push(l) });
+      const m = createInflightMarker({ ...adapter, warn: (l) => warnings.push(l), mayTakeOver: true });
       const outcome = m.begin();
       const noticed = warnings.find((l) => l.includes("NOTICE") && l.includes(`pid ${pid}`) && l.includes("ESRCH"));
       if (noticed) {
         sawNoticed = { pid, outcome, line: noticed };
+        assert.equal(JSON.parse(readFileSync(markerPath, "utf8")).pid, process.pid, "接管后文件里是本进程的标记");
       } else if (outcome !== "observed") {
         throw new Error(`attempt ${attempt}: expected observed, got ${outcome}; warnings=${JSON.stringify(warnings)}`);
       }
-      // 观察者语义不变：不删别人的标记。
-      assert.equal(m.end(), false, "观察者绝不删除他人标记");
+      // 接管后标记归本次删除；pid 被复用（探活为活）时按观察者处理、不删别人的标记。
+      assert.equal(m.end(), Boolean(noticed), noticed ? "接管后的标记归本次删除" : "观察者绝不删除他人标记");
+      if (noticed) assert.equal(existsSync(markerPath), false, "退出后标记文件已删");
     } finally {
       rmrfRetry(dir);
     }
   }
   assert.ok(sawNoticed,
     "3 个新鲜退出 pid 全部被复用（病理性环境）——降级链路未能实证，请在该环境复核 pid 复用率");
-  assert.equal(sawNoticed.outcome, "observed");
+  assert.equal(sawNoticed.outcome, "created");
   assert.match(sawNoticed.line, /stale inflight marker/);
 });
 

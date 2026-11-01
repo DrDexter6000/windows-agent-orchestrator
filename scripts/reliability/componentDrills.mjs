@@ -1796,8 +1796,7 @@ export function assembleFixtureAgent({ subject, fixture, registry }) {
   }
 
   // 被测 = llm：基底 = 夹具 backend anchor；model 覆盖为被测 llm 的实际配置
-  // （own-property 克隆）。provider 块已随决定 0106 退役（registry 拒绝载入，
-  // anchor 不可能携带——不再克隆/剥离）。
+  // （own-property 克隆）。
   const entry = cleanAgentEntry(fixtureAnchor);
   if (subjectAnchor.model && typeof subjectAnchor.model === "object") {
     entry.model = { ...subjectAnchor.model };

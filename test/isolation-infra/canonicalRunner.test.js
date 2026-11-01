@@ -1110,7 +1110,7 @@ const esrhError = () => { const e = new Error("kill ESRCH"); e.code = "ESRCH"; r
 function markerOver(fsx, extras = {}) {
   return createInflightMarker({
     readMarker: fsx.readMarker, createMarker: fsx.createMarker, deleteMarker: fsx.deleteMarker,
-    warn: extras.warn, killProbe: extras.killProbe, pid: extras.pid, now: extras.now,
+    warn: extras.warn, killProbe: extras.killProbe, pid: extras.pid, now: extras.now, mayTakeOver: extras.mayTakeOver,
   });
 }
 
@@ -1165,21 +1165,66 @@ test("inflight marker: a stale orphan with a LIVE-looking pid keeps the WARNING;
 });
 
 // ── R23-F/A A2：死 pid 降级 NOTICE（killProbe 注入；默认 process.kill(pid, 0)）──
-test("A2①: provably-dead marker pid (probe → ESRCH) ⇒ exactly one NOTICE carrying pid+startedAt, never the word WARNING", () => {
+test("A2①: provably-dead marker pid (probe → ESRCH) ⇒ exactly one NOTICE carrying pid+startedAt, then this suite takes the marker over", () => {
   const fsx = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }) + "\n");
   const lines = [];
   const m = markerOver(fsx, {
     warn: (l) => lines.push(l),
     killProbe: () => { throw esrhError(); }, // 存在性探针证死（win32 实证 shape：code "ESRCH"）
+    pid: 4242,
+    now: () => "2026-11-01T00:00:00.000Z",
+    mayTakeOver: true,
   });
-  assert.equal(m.begin(), "observed", "降级只改告警文案与严重度——观察者返回值/语义不变");
+  assert.equal(m.begin(), "created", "证死且持租约 ⇒ 接管：删掉孤儿，按干净启动建自己的标记");
   assert.equal(lines.length, 1, "恰一行输出");
   assert.ok(!lines[0].includes("WARNING"), "NOTICE 行绝不含 WARNING 字样（两种严重度机器可区分）");
-  assert.ok(lines[0].includes("[canonical] NOTICE:"), "降级为 NOTICE 前缀");
+  assert.ok(lines[0].includes("[canonical] NOTICE:"), "NOTICE 前缀");
   assert.ok(lines[0].includes("(pid 7") && lines[0].includes("2026-08-01T00:00:00.000Z"),
     "NOTICE 带 marker 内的 pid 与 startedAt（人眼判 staleness 的锚点保留）");
-  assert.equal(fsx.ops.creates.length, 0, "无宽限/重建语义：证死也不覆盖别人的标记");
-  assert.equal(m.end(), false, "无接管语义：证死也不删别人的标记（删除权仍归写入者自己）");
+  assert.equal(fsx.ops.deletes, 1, "孤儿被删");
+  assert.deepEqual(JSON.parse(fsx.ops.creates[0]), { pid: 4242, startedAt: "2026-11-01T00:00:00.000Z" }, "换上本次的标记");
+  assert.equal(m.end(), true, "接管后的标记归本次删除");
+  assert.equal(fsx.ops.deletes, 2);
+});
+
+test("A2①b: the orphan is removed only if it still holds what was read — a suite that claimed the marker meanwhile keeps it", () => {
+  const fsx = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }) + "\n");
+  const fresh = JSON.stringify({ pid: 999, startedAt: "2026-11-01T00:00:01.000Z" }) + "\n";
+  const firstRead = fsx.readMarker;
+  let reads = 0;
+  fsx.readMarker = () => { reads += 1; if (reads === 2) fsx.set(fresh); return firstRead(); };
+  const lines = [];
+  const m = markerOver(fsx, { warn: (l) => lines.push(l), killProbe: (p) => { if (p === 7) throw esrhError(); }, mayTakeOver: true });
+  assert.equal(m.begin(), "observed", "别的套件抢先接管了 ⇒ 按观察者处理");
+  assert.equal(fsx.ops.deletes, 0, "绝不删别人刚建的标记");
+  assert.equal(fsx.ops.creates.length, 0);
+  assert.equal(lines.length, 2, "一行 NOTICE（孤儿）+ 一行 WARNING（抢先的套件）");
+  assert.ok(lines[1].startsWith("[canonical] WARNING: another full suite started at 2026-11-01T00:00:01.000Z (pid 999)"));
+  assert.equal(m.end(), false);
+});
+
+test("A2①c: without the verification lease a provably dead orphan gets only the NOTICE — nothing is deleted or created", () => {
+  const fsx = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }) + "\n");
+  const lines = [];
+  const m = markerOver(fsx, { warn: (l) => lines.push(l), killProbe: () => { throw esrhError(); } });
+  assert.equal(m.begin(), "observed", "不持租约 ⇒ 不接管");
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("[canonical] NOTICE:") && lines[0].includes("(pid 7") && !lines[0].includes("WARNING"));
+  assert.equal(fsx.ops.deletes, 0, "孤儿原样保留");
+  assert.equal(fsx.ops.creates.length, 0);
+  assert.equal(m.end(), false);
+});
+
+test("A2①d: the suite's default marker factory forwards mayTakeOver to the marker core", async () => {
+  const { machineInflightMarker } = await import("../../scripts/canonical-test.mjs");
+  const orphan = JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }) + "\n";
+  const core = { killProbe: () => { throw esrhError(); }, warn: () => {} };
+  const taken = fakeInflightFs(orphan);
+  assert.equal(machineInflightMarker({ mayTakeOver: true }, { adapter: taken, ...core }).begin(), "created", "持闸 ⇒ 接管");
+  assert.equal(taken.ops.deletes, 1);
+  const kept = fakeInflightFs(orphan);
+  assert.equal(machineInflightMarker({}, { adapter: kept, ...core }).begin(), "observed", "缺省不接管");
+  assert.equal(kept.ops.deletes, 0);
 });
 
 test("A2②: alive pid (probe returns normally) and EPERM (exists but not ours) both keep the original WARNING verbatim", () => {
@@ -1190,7 +1235,11 @@ test("A2②: alive pid (probe returns normally) and EPERM (exists but not ours) 
   for (const [label, probe] of cases) {
     const fsx = fakeInflightFs(JSON.stringify({ pid: 4242, startedAt: "2026-08-20T09:00:00.000Z" }) + "\n");
     const warnings = [];
-    markerOver(fsx, { warn: (l) => warnings.push(l), killProbe: probe }).begin();
+    const m = markerOver(fsx, { warn: (l) => warnings.push(l), killProbe: probe, mayTakeOver: true });
+    assert.equal(m.begin(), "observed", `${label}: 持租约也不接管`);
+    assert.equal(fsx.ops.deletes, 0, `${label}: 零删除`);
+    assert.equal(fsx.ops.creates.length, 0, `${label}: 零创建`);
+    assert.equal(m.end(), false, `${label}: 退出不删`);
     assert.equal(warnings.length, 1, `${label}: 恰一行`);
     assert.ok(
       warnings[0].startsWith("[canonical] WARNING: another full suite started at 2026-08-20T09:00:00.000Z (pid 4242) — results may be affected by resource contention"),
@@ -1212,7 +1261,11 @@ test("A2③: fail-safe — unparseable / pid-less marker content NEVER downgrade
   for (const content of torn) {
     const fsx = fakeInflightFs(content);
     const lines = [];
-    markerOver(fsx, { warn: (l) => lines.push(l), killProbe: () => { throw esrhError(); } }).begin();
+    const m = markerOver(fsx, { warn: (l) => lines.push(l), killProbe: () => { throw esrhError(); }, mayTakeOver: true });
+    assert.equal(m.begin(), "observed", `${JSON.stringify(content)}: 证不出死 ⇒ 持租约也不接管`);
+    assert.equal(fsx.ops.deletes, 0);
+    assert.equal(fsx.ops.creates.length, 0);
+    assert.equal(m.end(), false);
     assert.equal(lines.length, 1, `${JSON.stringify(content)}: 仍恰一行`);
     assert.ok(lines[0].startsWith("[canonical] WARNING:") && !lines[0].includes("NOTICE"),
       `${JSON.stringify(content)}: 证不出 pid 的死活 ⇒ 维持 WARNING，绝不降级`);
@@ -1224,7 +1277,7 @@ test("inflight marker: end() delete failure is silent (no crash) and end acts at
   fsx.deleteMarker = () => { throw new Error("EPERM"); };
   const m = markerOver(fsx, {});
   assert.equal(m.begin(), "created");
-  assert.doesNotThrow(() => m.end(), "删除失败必须静默——最坏情形只是孤儿标记（下次仅 WARNING）");
+  assert.doesNotThrow(() => m.end(), "删除失败必须静默——最坏情形只是孤儿标记（下一次全量接管它）");
   assert.equal(m.end(), false, "end 至多作用一次：失败后不再重试不再抛");
 });
 
@@ -1399,6 +1452,25 @@ test("B2-⑦b kill switch（createGate=null）⇒ 零闸段、marker 层原样�
   assert.deepEqual(ops, ["marker:begin", "suite", "marker:end"],
     "停用开关下完全绕过闸（降级为 R22 marker 告警层）");
   assert.equal(seenSuiteArgs.childEnv[VERIFICATION_GATE_HELD_ENV], undefined);
+});
+
+test("B2-⑦d 孤儿接管只在本进程持闸时：持闸 ⇒ mayTakeOver；停用开关、或只继承了 HELD=1 ⇒ 不接管", async () => {
+  const { startCanonicalSuite } = await import("../../scripts/canonical-test.mjs");
+  const seen = [];
+  const run = (createGate, env) => startCanonicalSuite({
+    repoRoot: ".", testDir: "test", manifestPath: "test/manifest.json",
+    reportPath: "test-results.json", nodeExe: process.execPath,
+    env, createGate,
+    createMarker: (opts) => { seen.push(opts.mayTakeOver); return { begin: () => "created", end: () => true }; },
+    runSuiteFn: async () => {},
+  });
+  await run(() => ({ acquire: async () => ({ token: "t", lost: () => false, release: async () => true }) }), {});
+  await run(null, {});
+  await run(null, { [VERIFICATION_GATE_HELD_ENV]: "1" });
+  await run(() => ({ acquire: async () => null }), {});
+  await run(() => ({ acquire: async () => ({ token: "t", lost: () => true, release: async () => true }) }), {});
+  assert.deepEqual(seen, [true, false, false, false, false],
+    "本进程持闸 / 停用开关 / 只继承了 HELD=1（证明不了持闸）/ acquire 返回 null / 租约已丢");
 });
 
 test("B2-⑦c suite 抛错 ⇒ marker.end 与 release 仍按序执行，错误向上传播", async () => {
@@ -2269,6 +2341,12 @@ test("TD-181(a) 真实观测适配器（注入 fs/gate/count seam，零真实进
   const torn = obs.concurrentFullSuite();
   assert.equal(torn.state, "present", "撕裂标记仍是 present（标记存在这一事实独立于可解析性）");
   assert.equal(torn.pid, "unknown");
+  // 本套件自己的标记不是"另一个全量"（注入的 ownPid 与缺省的 process.pid 两条接线）。
+  const own = realWaveObservers({ createGate: () => ({ status: async () => ({ free: true }) }), markerReader, ownPid: 4242 });
+  markerText = JSON.stringify({ pid: 4242, startedAt: "2026-09-25T02:00:00.000Z" }) + "\n";
+  assert.deepEqual(own.concurrentFullSuite(), { state: "none" });
+  markerText = JSON.stringify({ pid: process.pid, startedAt: "2026-09-25T02:00:00.000Z" }) + "\n";
+  assert.deepEqual(obs.concurrentFullSuite(), { state: "none" }, "缺省 ownPid = process.pid");
 
   // gate：held / corrupt。
   const held = realWaveObservers({
