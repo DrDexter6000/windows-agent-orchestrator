@@ -208,7 +208,7 @@ test("M12-6-FR02-C1: registry inventory projects strict providerReadiness (unkno
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        ready: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "WAO_TEST_M126_REQ" } },
+        ready: { backend: "deepseek-acp", cwd: dir, credentialEnv: "WAO_TEST_M126_REQ" },
         noCred: { backend: "claude-code", cwd: dir },
       },
     }), "utf8");

@@ -8,7 +8,7 @@ import { isValidKimiHome, isValidServeWorkspaceDir } from "./envPolicy.js";
 // unknownBackendGuidance 回显的 backend 值过控制字符转义（换行不能伪造一行）。
 import { safeJsonParse, escapeControlChars } from "./safeText.js";
 
-// M11-9: canonical model/reasoning/provider policy.
+// M11-9: canonical model/reasoning policy.
 // Closed-set effort enum — the complete set of reasoning effort values WAO
 // recognizes. Backends translate only these; anything else is malformed.
 // R11-1: EXPORTED so the per-dispatch reasoning override SSOT
@@ -60,7 +60,7 @@ export const KNOWN_BACKENDS = Object.freeze([
 export function unknownBackendGuidance(backend) {
   return (
     `unknown backend: ${escapeControlChars(backend)} (supported: ${KNOWN_BACKENDS.join("/")}). ` +
-    `To use a different model, configure the model/provider fields on an existing backend; ` +
+    `To use a different model, configure the model/reasoning fields on an existing backend; ` +
     `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
     `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`
   );
@@ -77,7 +77,7 @@ function isZcodeModelRef(id) {
   return first > 0 && id.indexOf("/", first + 1) === -1 && first < id.length - 1;
 }
 
-// Flags that are MANAGED by the structured model/reasoning/provider fields.
+// Flags that are MANAGED by the structured model/reasoning fields.
 // If ANY of these appear in args/prependArgs, the configuration is using the
 // old hand-crafted form. M11-9 CTO closeout: there is NO transparent legacy
 // extraction — these flags in args/prependArgs are a fixed migration error.
@@ -100,17 +100,15 @@ function findManagedFlag(args) {
 }
 
 /**
- * M11-9: Validate the canonical model/reasoning/provider policy.
+ * M11-9: Validate the canonical model/reasoning policy.
  *
  * Enforces the CTO contract:
  *   model?:     { id: string, contextWindow?: positive integer }
  *   reasoning?: { effort: "minimal"|"low"|"medium"|"high"|"xhigh"|"max" }
- *   provider?:  { protocol: "anthropic-compatible", baseUrl: string, apiKeyEnv: string }
  *
  * Rules:
- *   - provider MUST NOT carry model/effort/contextWindow (old shape → reject).
- *   - provider present → protocol/baseUrl/apiKeyEnv ALL required and non-blank.
- *     A half-provider must NOT trigger the wrapper path.
+ *   - provider is retired (decision 0106): any non-null provider block is
+ *     rejected with a fixed message, for every backend alike.
  *   - managed flags (--model/--default-model/--effort/--context-window) in
  *     args/prependArgs → fixed migration error. No transparent extraction.
  *   - malformed values → reject with a fixed safe error (no echo of malicious value).
@@ -131,24 +129,9 @@ function normalizeModelPolicy(id, agent) {
     );
   }
 
-  // --- provider validation (strict: all three required when present) ---
+  // --- provider rejection (decision 0106: provider channel retired) ---
   if (agent.provider !== undefined && agent.provider !== null) {
-    const p = agent.provider;
-    if (typeof p !== "object") {
-      throw new Error(`Agent ${id}: provider must be an object`);
-    }
-    if (p.model !== undefined || p.effort !== undefined || p.contextWindow !== undefined) {
-      throw new Error(`Agent ${id}: provider must not carry model/effort/contextWindow (use top-level model/reasoning)`);
-    }
-    if (p.protocol !== "anthropic-compatible") {
-      throw new Error(`Agent ${id}: provider.protocol must be "anthropic-compatible"`);
-    }
-    if (typeof p.baseUrl !== "string" || p.baseUrl.trim().length === 0) {
-      throw new Error(`Agent ${id}: provider.baseUrl is required and must be a non-blank string`);
-    }
-    if (typeof p.apiKeyEnv !== "string" || p.apiKeyEnv.trim().length === 0) {
-      throw new Error(`Agent ${id}: provider.apiKeyEnv is required and must be a non-blank string`);
-    }
+    throw new Error(`Agent ${id}: provider is no longer supported (decision 0106) — remove the provider block`);
   }
 
   // --- model validation ---
@@ -346,7 +329,7 @@ export function normalizeAgent(id, agent) {
   }
   // 0065（0045 §1.2 终局）：seatRole 校验删除——字段废弃，归一化结果 strip
   // （不原地删输入对象——raw 供 validate 层出弃用 advisory；sol 条款）。
-  // M11-9: canonical model/reasoning/provider policy validation + legacy normalization.
+  // M11-9: canonical model/reasoning policy validation + legacy normalization.
   normalizeModelPolicy(id, agent);
   const { seatRole: _retiredSeatRole, id: _ignoredEntryId, ...rest } = agent ?? {};
   return {
@@ -364,8 +347,9 @@ export function normalizeAgent(id, agent) {
  *
  * A reliability-summary worker record written before R23-C lacks BOTH new
  * fields:
- *   - providerKey        (identity dimension #4 — normalized baseUrl +
- *                        apiKeyEnv NAME fingerprint)
+ *   - providerKey        (identity dimension #4 — retained field, always
+ *                        null since decision 0106; disk records may still
+ *                        carry pre-0106 strings)
  *   - lastFullHealthyRunAt (full-scope-only freshness basis; the dispatch
  *                        gate falls back to lastHealthyRunAt while absent)
  *

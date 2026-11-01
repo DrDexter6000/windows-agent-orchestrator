@@ -6,7 +6,7 @@
 // 生产事故（RED）：一个 claude-code supervised worker 获得了 provider auto-memory
 // 能力，在 WAO 检测到 workdir_escape 之前成功编辑了 WAO worktree 之外的全局 memory
 // 文件。修复：ClaudeCodeBackend 把 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 注入【每一个】
-// supervised 子进程 env（native OAuth / provider wrapper / start / resume 会话复用），
+// supervised 子进程 env（OAuth 直连 / start / resume 会话复用），
 // 且 backend 安全值覆盖任何 agent.env 反设企图（Windows env 大小写不敏感，大小写
 // 变体也算）。不动 RunManager、不加 runtime-name 分支、不加能力布尔。
 //
@@ -73,24 +73,6 @@ function nativeAgent(extra = {}) {
   return { id: "w", backend: "claude-code", binary: "fake-claude", cwd: process.cwd(), ...extra };
 }
 
-function providerAgent(extra = {}) {
-  // 故意不设 binary：真实 provider agent 也不设——ClaudeCodeBackend.resolveBinary
-  // 检测到 provider 后直接返回 { binary: node, prependArgs: wrapper }，确定性、
-  // 不探测真实 PATH。设了 binary 会短路 provider 推导，测不到 wrapper 路径。
-  return {
-    id: "w",
-    backend: "claude-code",
-    cwd: process.cwd(),
-    model: { id: "glm-5.2" },
-    provider: {
-      protocol: "anthropic-compatible",
-      baseUrl: "https://provider.example/api/anthropic",
-      apiKeyEnv: "M1214_PROVIDER_KEY",
-    },
-    ...extra,
-  };
-}
-
 // env 对象里按 Windows 语义（大小写不敏感）找指定名字的条目。
 function envEntriesCaseInsensitive(env, name) {
   const upper = name.toUpperCase();
@@ -105,27 +87,6 @@ test("M12-14: native OAuth 路径（无 provider）子进程 env 含 CLAUDE_CODE
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   assert.equal(captures.length, 1, "恰好一次 spawn");
   assert.equal(captures[0].opts.env[MANAGED], "1", "native 直连子进程必须关闭 auto-memory");
-});
-
-test("M12-14: provider wrapper 路径子进程 env 含 flag，且 wrapper argv/凭据通道不变", async () => {
-  const prev = process.env.M1214_PROVIDER_KEY;
-  process.env.M1214_PROVIDER_KEY = "m1214-dummy-credential";
-  try {
-    const { spawnFn, captures } = makeCapturingSpawn();
-    const backend = new ClaudeCodeBackend({ spawnFn });
-    await spawnAndCapture(backend, providerAgent(), { prompt: "do" });
-    const cap = captures[0];
-    assert.equal(cap.opts.env[MANAGED], "1", "provider wrapper 子进程必须关闭 auto-memory");
-    // provider 路径证据：binary = node，argv 以 wrapper 脚本开头
-    assert.equal(cap.binary, process.execPath, "provider 路径走 node 调 wrapper");
-    assert.ok(cap.args.some((a) => a.includes("claude-code-provider-wrapper")), "argv 含 wrapper 脚本");
-    assert.ok(cap.args.includes("--base-url"), "wrapper 参数不变（--base-url）");
-    // 凭据通道保留：声明的 apiKeyEnv 注入子进程（值不泄漏进本 flag）
-    assert.equal(cap.opts.env.M1214_PROVIDER_KEY, "m1214-dummy-credential", "provider 凭据 env 仍然注入");
-  } finally {
-    if (prev === undefined) delete process.env.M1214_PROVIDER_KEY;
-    else process.env.M1214_PROVIDER_KEY = prev;
-  }
 });
 
 test("M12-14: 会话复用 first turn（--session-id）子进程 env 含 flag，argv 复用语义不变", async () => {
@@ -234,20 +195,18 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
 });
 
 test("M12-14: 不泄漏敏感值 —— flag 是常量 '1'，凭据值只出现在其声明 env 名下", async () => {
-  const prev = process.env.M1214_PROVIDER_KEY;
-  process.env.M1214_PROVIDER_KEY = "m1214-sensitive-value";
-  try {
-    const { spawnFn, captures } = makeCapturingSpawn();
-    const backend = new ClaudeCodeBackend({ spawnFn });
-    await spawnAndCapture(backend, providerAgent(), { prompt: "do" });
-    const env = captures[0].opts.env;
-    assert.equal(env[MANAGED], "1", "flag 值是常量，不派生自任何凭据");
-    const leaked = Object.entries(env).filter(([name, value]) => name !== "M1214_PROVIDER_KEY" && value === "m1214-sensitive-value");
-    assert.deepEqual(leaked, [], "凭据值不复制到任何其他 env 名");
-  } finally {
-    if (prev === undefined) delete process.env.M1214_PROVIDER_KEY;
-    else process.env.M1214_PROVIDER_KEY = prev;
-  }
+  const { spawnFn, captures } = makeCapturingSpawn();
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  // claude-code 继承的凭据名只有长期令牌名（envPolicy）——别的名字进不了子进程 env。
+  await spawnAndCapture(backend, nativeAgent(), {
+    prompt: "do",
+    resolvedCredentials: { CLAUDE_CODE_OAUTH_TOKEN: "m1214-dummy-value" },
+  });
+  const env = captures[0].opts.env;
+  assert.equal(env[MANAGED], "1", "flag 值是常量，不派生自任何凭据");
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "m1214-dummy-value", "凭据值在其声明 env 名下");
+  const leaked = Object.entries(env).filter(([name, value]) => name !== "CLAUDE_CODE_OAUTH_TOKEN" && value === "m1214-dummy-value");
+  assert.deepEqual(leaked, [], "凭据值不复制到任何其他 env 名");
 });
 
 // ── 4. Claude-only：其它 runtime 不接收该变量 ──────────────────────────
@@ -294,12 +253,4 @@ test("2026-10-05: agent.env 反设 CLAUDE_CONFIG_DIR 被剥离（任意大小写
   const env = captures[0].opts.env;
   assert.notEqual(env["claude_config_dir"], "C:/evil/override", "小写反设被剥");
   assert.ok(env.CLAUDE_CONFIG_DIR && env.CLAUDE_CONFIG_DIR !== "C:/evil/override", "权威值来自 backend 预备");
-});
-
-test("2026-10-05: provider wrapper 通道字节不变 —— bare 恰好一次、无 CLAUDE_CONFIG_DIR 注入", async () => {
-  const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
-  await spawnAndCapture(backend, providerAgent(), { prompt: "do" });
-  assert.equal(captures[0].args.filter((a) => a === "--bare").length, 1, "wrapper 通道维持 bare（2026-09-19 原形态）");
-  assert.ok(!captures[0].opts.env.CLAUDE_CONFIG_DIR, "wrapper 通道不注入隔离目录（凭据走 wrapper env）");
 });

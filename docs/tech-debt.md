@@ -71,7 +71,6 @@
 | TD-204 | 认证 caseId 仍以 label 为合并键，改名即换键，仅 warn-only 护栏在线未解耦 | 开放 | 择机：下次改认证台账 schema 时解耦 caseId 与 label |  |
 | TD-206 | kimiWeb 失败 run 的部分产出不落盘，中途失败后已产出文本不可恢复 | 开放 | 等样本：受督 kimiWeb 长 run 需要中途产出可恢复 |  |
 | TD-209 | runner 无声挂死根因与延迟收割者身份未明，复现时需带现场归因；心跳盲区已缓解 | 开放 | 等样本：再遇同形（无声悬置+心跳活+计时器在场）带现场归因 | test/isolation-infra/backgroundRunner.test.js src/backends/kimiWeb.js |
-| TD-210 | CLI 已钉新版且自动更新已关，wrapper 通道在新版下的回归验证未做 | 开放 | 等样本：下次启用 wrapper 车道时先做回归验证 | 0045 src/backends/claudeCode.js |
 | TD-212 | certification 视图答不到组合验到什么程度，矩阵投影未实现 | 开放 | 择机：下一轮生成器维护窗做矩阵投影 | scripts/gen-certification.mjs |
 | TD-216 | 判定失败是否新引入仍需自建基线对照，一键差分工具未落地 | 开放 | 等样本：fixture 权威化落地后复测红盘再定 |  |
 | TD-219 | acceptance 落盘已落地，但仓库外写入任务走不了交付管线，expectedWriteRoots 与 manifest 第二步未落地 | 开放 | 等样本：仓库外写入任务族再临 |  |

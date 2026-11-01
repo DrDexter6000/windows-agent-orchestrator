@@ -858,8 +858,8 @@ export class ZcodeBackend {
    * 首行再次调用做权威防线）。zcode 能表达：model.id（上游原生 ref
    * `<providerId>/<modelId>` 拆分后经 session/setModel 下发）与 reasoning.effort
    * （直传 options.reasoningLevel——值闭集由上游 zod 校验，报错如实透传固定
-   * 形状；不发明映射）。不能表达（配了即拒）：contextWindow、provider 块（登录态
-   * 与桌面共享）、model.providerID/variant（路由在 ref 里）、agent.args/prependArgs
+   * 形状；不发明映射）。不能表达（配了即拒）：contextWindow、
+   * model.providerID/variant（路由在 ref 里）、agent.args/prependArgs
    * （app-server 协议模式无实证旗标——拒绝而非静默丢弃）。
    */
   validateAgentPolicy(agent) {
@@ -881,11 +881,6 @@ export class ZcodeBackend {
       throw new Error(
         "zcode backend cannot express model.providerID/model.variant "
         + "(model routing is the <providerId>/<modelId> ref inside model.id — rejected instead of silently dropping routing fields)",
-      );
-    }
-    if (agent?.provider) {
-      throw new Error(
-        "zcode backend cannot express provider (login state is shared with the ZCode desktop install — no anthropic-compatible wrapper face)",
       );
     }
     if (agent?.reasoning !== undefined && agent?.reasoning !== null

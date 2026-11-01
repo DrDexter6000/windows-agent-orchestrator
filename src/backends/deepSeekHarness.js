@@ -106,9 +106,6 @@ export class DeepSeekHarnessBackend {
         + "(only model.id is handed to the runtime via the `DSH_MODEL` env — rejected instead of silently dropping routing fields)",
       );
     }
-    if (agent?.provider) {
-      throw new Error("deepseek-harness cannot express provider policy; configure the DSH composition instead");
-    }
     const effort = agent?.reasoning?.effort;
     if (effort !== undefined && !["high", "max"].includes(effort)) {
       throw new Error("deepseek-harness reasoning.effort must be high or max when present");

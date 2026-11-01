@@ -416,9 +416,6 @@ export class DeepSeekAcpBackend {
   }
 
   validateAgentPolicy(agent) {
-    if (agent?.provider) {
-      throw new Error("deepseek-acp cannot express provider policy; the composition is fixed via --profile acp and operator-installed patches");
-    }
     assertPermissionModeEnv(agent);
     // model 块（0046 §3/§5 第④步起接线）：ACP 的 model 选项 value 是
     // provider/model 二元组（JSON.stringify([providerID, id])，provider 段实测
@@ -504,7 +501,7 @@ export class DeepSeekAcpBackend {
   }
 
   async spawn(agent, task) {
-    // 会审（kimi）：runManager 只在车道带结构化策略（model / reasoning / provider）时才调
+    // 会审（kimi）：runManager 只在车道带结构化策略（model / reasoning）时才调
     // validateAgentPolicy——没有这些块的车道会带着拼错的模式直达 harness。启动前无条件再查一次。
     assertPermissionModeEnv(agent);
     // preflight：containment detect + resume fail-closed + argv 预算预检

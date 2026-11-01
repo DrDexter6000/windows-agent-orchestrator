@@ -48,16 +48,6 @@ test("CAP-A1: ProcessBackend default validateAgentPolicy rejects any structured 
 
 // ===== A2: ClaudeCode validator — expressible vs inexpressible =====
 
-test("CAP-A2-claude: model+reasoning accepted (provider path)", async () => {
-  const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
-  const backend = new ClaudeCodeBackend();
-  assert.doesNotThrow(() => backend.validateAgentPolicy({
-    model: { id: "glm-5.2", contextWindow: 1000000 },
-    reasoning: { effort: "high" },
-    provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "K" },
-  }));
-});
-
 test("CAP-A2b-claude-native: model+reasoning accepted (OAuth direct)", async () => {
   const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
   const backend = new ClaudeCodeBackend();
@@ -67,7 +57,7 @@ test("CAP-A2b-claude-native: model+reasoning accepted (OAuth direct)", async () 
   }));
 });
 
-test("CAP-A2c-claude: contextWindow WITHOUT provider → reject (native path can't express it)", async () => {
+test("CAP-A2c-claude: contextWindow → reject (no CLI flag to express it)", async () => {
   const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
   const backend = new ClaudeCodeBackend();
   assert.throws(
@@ -75,7 +65,7 @@ test("CAP-A2c-claude: contextWindow WITHOUT provider → reject (native path can
       model: { id: "claude-opus-5", contextWindow: 200000 },
     }),
     /cannot express|not supported|contextWindow/i,
-    "native claude path rejects contextWindow (no wrapper to set it)",
+    "claude-code rejects contextWindow (no CLI flag for it)",
   );
 });
 
@@ -94,13 +84,6 @@ test("CAP-A2d-claude: model.providerID / model.variant → reject; bare model.id
     /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
   );
   assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "x" } }));
-  // provider wrapper 路径同样只读 model.id：检查必须在 provider 早退之前。
-  const provider = { baseUrl: "https://example.invalid", apiKeyEnv: "CAP_A2D_KEY" };
-  assert.throws(
-    () => backend.validateAgentPolicy({ provider, model: { id: "x", providerID: "deepseek" } }),
-    /cannot express model\.providerID\/model\.variant/,
-  );
-  assert.doesNotThrow(() => backend.validateAgentPolicy({ provider, model: { id: "x" } }));
 });
 
 // ===== A3: Codex validator =====
@@ -112,17 +95,6 @@ test("CAP-A3-codex: model+reasoning accepted", async () => {
     model: { id: "gpt-5.6-sol" },
     reasoning: { effort: "high" },
   }));
-});
-
-test("CAP-A3b-codex: provider → reject (codex doesn't use provider wrapper)", async () => {
-  const { CodexBackend } = await import("../../src/backends/codex.js");
-  const backend = new CodexBackend();
-  assert.throws(
-    () => backend.validateAgentPolicy({
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "K" },
-    }),
-    /cannot express|not supported|provider/i,
-  );
 });
 
 test("CAP-A3c-codex: contextWindow → reject", async () => {
@@ -283,11 +255,13 @@ test("CAP-C1: tracked synthetic six-worker fixture passes validateAgentPolicy", 
   const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
   const { CodexBackend } = await import("../../src/backends/codex.js");
   const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const { KimiWebBackend } = await import("../../src/backends/kimiWeb.js");
   const registry = await readRegistry("test/fixtures/agents.six.json");
   const backends = {
     "claude-code": new ClaudeCodeBackend(),
     "codex": new CodexBackend(),
     "kimi-code": new KimiCodeBackend(),
+    "kimi-web": new KimiWebBackend(),
   };
   for (const agent of registry.listAgents()) {
     const backend = backends[agent.backend];

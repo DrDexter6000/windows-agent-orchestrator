@@ -25,7 +25,6 @@
 | 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
 | runs 状态池有大量 running 噪音 | [§4 运行数据运维](#4-运行数据运维) |
 | worker 完成判定不可靠（过早 completed 或该完成没完成） | [§6 完成判定](#6-完成判定) |
-| claude-code wrapper 401 / worker 连不上 provider | [§7.1](#71-claude-code-wrapper-401worker-连不上-provider) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
 | agents.json 配置过时/缺 tokenBudget | [§7.5](#75-agentsjson-配置漂移) |
 | claude-code worker 看不到用户级 skills | [§7.13](#713-claude-code-worker-看不到用户级-skills临时-claude_config_dir) |
@@ -106,7 +105,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 
 ### 1.6 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
 
-- **症状**：派发秒报 typed 错误 `credential missing: OPENROUTER_API_KEY`（registry 条目声明了 `provider.apiKeyEnv`）；转录零写入、零 fork。PowerShell 查 User 作用域明明有值。
+- **症状**：派发秒报 typed 错误 `credential missing: OPENROUTER_API_KEY`（registry 条目声明了 `credentialEnv`）；转录零写入、零 fork。PowerShell 查 User 作用域明明有值。
 - **判读**：凭据解析顺序是 process.env → Windows Current-User registry（`HKCU\Environment`）→ missing，两个源都找不到才报。每次派发现读注册表、无跨次缓存：setx 之后不用重启宿主，下一次派发即生效；解析到的值由控制面注入 worker 子进程 env（值只进子进程 env 与脱敏器，不进 argv/日志/转录）。仍会报 missing 的情形：值只写在 Machine 作用域（解析不读它），或声明的 env 名与实际设置的名字不一致。
 - **验证**：
   ```
@@ -358,26 +357,10 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 进程式 backend 是主力路径。本章覆盖进程式路径的坑与实机部署问题。
 
-### 7.1 claude-code wrapper 401（worker 连不上 provider）
-
-- **症状**：走 claude-code provider wrapper 的车道（模板里没有这种车道，自建时才会遇到）报 `401 Invalid authentication credentials` / `身份验证失败`
-- **根因 A：provider key 没进 Lead runtime env**。wrapper 用 `ANTHROPIC_AUTH_TOKEN` 注入认证，它读的是 `process.env.<KEY_ENV>`（如 ZHIPU_API_KEY）。如果 Lead runtime 进程没继承这个 env（key 在 User registry 但没进 runtime 的 env），wrapper 拿不到 key → 401。
-- **根因 B：claude-code OAuth 登录态覆盖 provider key**。当 `~/.claude/.credentials.json` 含 `claudeAiOauth` 时，claude-code 可能优先用 OAuth accessToken，忽略 wrapper 注入的 `ANTHROPIC_AUTH_TOKEN`，把 Claude OAuth token 发到 DeepSeek/ZHIPU base URL → 401。wrapper 给 provider worker 设置独立的 `CLAUDE_CONFIG_DIR`（`.wao-worker-claude-config/`），隔离用户 `~/.claude`，provider worker 读不到 Claude OAuth 凭证；`opus` 车道不走 wrapper，使用官方 Claude OAuth。
-- **验证**：`npm run cli -- wao doctor` 会查 key 是否在 env。或手动 `echo $ZHIPU_API_KEY`。若 key 存在但 provider worker 仍 401，检查 transcript 的 provider error；OAuth 覆盖类问题通常表现为 token tail 与 provider key tail 不一致。
-- **修复**：确保 key 在 User registry（`[System.Environment]::SetEnvironmentVariable('ZHIPU_API_KEY','<val>','User')`），重启 runtime 让它继承。不要把 `~/.claude/.credentials.json` 复制到 `.wao-worker-claude-config/`。
-
-### 7.2 DeepSeek variant=max 不能用 model 后缀
-
-<!-- model-specific -->
-- **症状**：`--model deepseek-v4-flash:max` 报 `400 The supported API model names are deepseek-v4-pro or deepseek-v4-flash`
-- **根因**：DeepSeek anthropic 端点只认 `deepseek-v4-flash` / `deepseek-v4-pro`，variant 不是 model id 的一部分
-<!-- /model-specific -->
-- **修复**：variant=max 用 `--effort max`（映射到 `CLAUDE_CODE_EFFORT_LEVEL` env），**不要**塞进 model id
-
 ### 7.3 opus 车道（claude-code 官方通道）401
 
 - **症状**：`opus` 车道的运行报 401
-- **根因**：`opus` 车道用官方 Claude（不走 wrapper），需要 claude-code 自己的认证（`claude login` 或 API key），不是 provider key
+- **根因**：`opus` 车道用官方 Claude OAuth，需要 claude-code 自己的登录态（`claude login`；或长期令牌 `CLAUDE_CODE_OAUTH_TOKEN`，见 §7.14）
 - **修复**：`claude login` 完成官方认证
 
 ### 7.4 worker 在错误目录干活
@@ -398,7 +381,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json] [--strict] [--warn-as-error]`；`--warn-as-error` 只把 WARN 也卡成非零退出（CI 用），不改报告内容；`--strict` 加跑 src/ 的 JS parse smoke
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的凭据 env 名（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -439,7 +422,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 - **现状**：Claude backend 启用 `--include-partial-messages`；init/streaming/provider retry 只投影成 payload-free 闭集 `runtime_activity`；stream delta 按固定间隔采样，原始文本/error/session/model 不落 transcript。cache read/write 使用独立指标字段，不混入 reasoning。
 - **隔离**：WAO Claude worker 设置 `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`；delivery mode 额外设置 `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`。普通一次性 run 使用 `--no-session-persistence`，显式 session reuse 不使用该 flag。
-- **验收边界**：本地 parser/wrapper/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
+- **验收边界**：本地 parser/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
 
 ### 7.12 DeepSeek Harness JSON-RPC backend 启动或空结果
 

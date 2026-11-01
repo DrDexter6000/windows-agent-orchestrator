@@ -71,16 +71,15 @@ reliability 认证的 `metricsNonZero` 检查按 backend 能力声明条件适�
 
 ## 接入新模型 / 新运行时（lane 内操作 vs Owner 决策）
 
-**claude-code 车道纯净模式**：backend 对**所有** claude-code worker 会话强制纯净模式（src/backends/claudeCode.js buildArgs 硬编码，非 registry 可选项）——全局 CLAUDE.md/技能/插件/hooks/MCP 一律不进 worker 上下文（全局技能/插件对 worker 是纯 token 税，实证 worker 期零使用）。实现按认证通道分两种：provider wrapper 通道（凭据经 wrapper env 注入）叠 `--bare --strict-mcp-config` 双旗标；native OAuth 通道 bare 与 OAuth 凭据互斥，改用 `--strict-mcp-config` + 把 `CLAUDE_CONFIG_DIR` 指向隔离空目录承载纯净（凭据走 `CLAUDE_CODE_OAUTH_TOKEN` 或目录内凭据拷贝，实测比 bare 更纯）。角色合同仍经 `--append-system-prompt` 显式注入，不受影响；认证在两条通道下都可用。任何 claude-code 驱动 lane 均默认继承此配置。
+**claude-code 车道纯净模式**：backend 对**所有** claude-code worker 会话强制纯净模式（src/backends/claudeCode.js buildArgs 硬编码，非 registry 可选项）——全局 CLAUDE.md/技能/插件/hooks/MCP 一律不进 worker 上下文（全局技能/插件对 worker 是纯 token 税，实证 worker 期零使用）。认证走 native OAuth 通道：`--bare` 与 OAuth 凭据互斥，用 `--strict-mcp-config` + 把 `CLAUDE_CONFIG_DIR` 指向隔离空目录承载纯净（凭据走 `CLAUDE_CODE_OAUTH_TOKEN` 或目录内凭据拷贝，实测比 bare 更纯）。角色合同仍经 `--append-system-prompt` 显式注入，不受影响。任何 claude-code 驱动 lane 均默认继承此配置。
 
 **第一分叉（先判断要的是哪一面）**：
 
-- **只换模型** = 改既有 backend 的 `provider`/`model` 字段——lane 内操作（组合权在 Owner：
+- **只换模型** = 改既有 backend 的 `model` 字段——lane 内操作（组合权在 Owner：
   写 registry + 付认证费，见 docs/team-roles.md §Lane）。
 - **新 backend 的标准登记项——生命体征与收口**：口径只有一条，没有生命体征才由控制面收口，有生命体征去留归 Lead；适配层逐个落地。入册时写明并登记到 `src/backends/factory.js` 的 `CAPABILITY_NOTES.<backend>.vitalSigns`（缺项生成即红）：①控制面在这条后端上读得到哪些体征；②每道"等不到进展"的收口门到点时先看这些体征，全无才收口；③让收口门续命的体征落成 `runtime_activity` 事实（Lead 下钻时看得见）；④做不到的地方如实登记为例外。为什么见决定 0069。
 - **明确要求另一 CLI/runtime 驱动** = 新 backend = Owner 决策（backend 闭集成员增补属
-  Owner 裁量）。provider 替代方案是否可接受由 Owner 判断，**不得当成等价解**——provider
-  lane 只解模型面（backend 不变），不构成 "指定 CLI 驱动 runtime" 需求的满足。
+  Owner 裁量）。
 
 **扩员同步面（add-a-backend sync surface）**：新 backend 入列（Owner 决定）时的同步义务由
 守卫机器化。同步面 =
@@ -94,9 +93,9 @@ src/application/backendCliMap.js 的 BACKEND_OWN_READINESS，进了就要在 doc
 certification.md ⑤ 上游原语对照表加行（这一轮的刷新记录写进提交说明） ⑥ 有 tokenEnv/credentialEnv 者：
 credentialReadiness 探针面 + envPolicy 允许清单。
 
-**操作食谱（只换模型时）**：改 provider 块（`baseUrl`/`apiKeyEnv`）→ 设 env（Windows User
-环境变量）→ smoke 首跑 → 承重前 delta 认证。档位规则：同 backend 换 model/provider →
-`--profile delta`；换 backend / 升主力 lane → 全量重跑（delta 规程见下文「delta 认证规程」节）。
+**操作食谱（只换模型时）**：改 model 字段（`model.id`；有 tokenEnv/credentialEnv 的
+backend 设对应 env——Windows User 环境变量）→ smoke 首跑 → 承重前 delta 认证。档位规则：
+同 backend 换 model → `--profile delta`；换 backend / 升主力 lane → 全量重跑（delta 规程见下文「delta 认证规程」节）。
 
 **lane 变更同步面（两段式）**：
 
@@ -123,7 +122,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 
 ## backend 能力对照表
 
-权威投影是生成层 **`docs/surface/certification.md`**——七轴能力闭集声明、配置表达力四轴判定（`validateAgentPolicy` 行为探针派生）与每 backend 条件说明、认证台账指针都在该文件，由 `npm run gen:certification` 从 `src/registry.js` / `src/backends/factory.js` 现成 SSOT 派生，字节钉由 `test/isolation-infra/docsSurface.test.js` 与 `test/isolation-infra/docs-consistency.test.js` 守卫。此处不维护手写当前值副本；配了代码不能表达的值仍由各 backend `validateAgentPolicy` 在派发前 fail-closed 硬拒（语义见生成文件判定词）。
+权威投影是生成层 **`docs/surface/certification.md`**——七轴能力闭集声明、配置表达力三轴判定（`validateAgentPolicy` 行为探针派生）与每 backend 条件说明、认证台账指针都在该文件，由 `npm run gen:certification` 从 `src/registry.js` / `src/backends/factory.js` 现成 SSOT 派生，字节钉由 `test/isolation-infra/docsSurface.test.js` 与 `test/isolation-infra/docs-consistency.test.js` 守卫。此处不维护手写当前值副本；配了代码不能表达的值仍由各 backend `validateAgentPolicy` 在派发前 fail-closed 硬拒（语义见生成文件判定词）。
 
 ## 上游 harness 原语对照（实测）
 
@@ -374,7 +373,7 @@ backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先
   （OS 写沙箱执行取证，不经模型，决定 0086——声明 `enforcesWriteSandbox` 的车道
   取代 containmentEvidence 的位置）等 case 级能力，产出
   certified/conditional 台账（`runs/reliability-summary.json`）。
-- **配置表达力四子轴**（model / reasoning / contextWindow / provider）**不在本节
+- **配置表达力三子轴**（model / reasoning / contextWindow）**不在本节
   复制**——权威源是生成层 `docs/surface/certification.md`
   （`npm run gen:certification` 从 backend 代码派生，字节钉由
   `test/isolation-infra/docsSurface.test.js` / `docs-consistency.test.js` 守卫）；
@@ -454,7 +453,7 @@ advisory-only，`requireCertified=false` 与 CLI 门禁语义原样）。
 - **更新频次 = 事件触发为主**：① 上游运行时版本变更（操作员升级 claude/codex/kimi/
   dsh 等后——组件层入口的 runtimeIdentity 探测会把版本漂移显式标成 advisory）；②
   WAO 适配代码变更（backend/parser 改动 = codeRef 滚动，旧组件键自然过期）；③
-  **席位有效配置变化（model / reasoning / provider）**：Lead 判断影响面 → 安排该席位
+  **席位有效配置变化（model / reasoning）**：Lead 判断影响面 → 安排该席位
   **定向重验**（重跑其认证 case），或**明确记录暂缓及使用限制**（何时补验、在此之前
   该席位按什么范围降级使用）。配置变更后的旧证据不自动适用（新证据记录执行画像，
   只读适用性三态见上段）。
@@ -543,7 +542,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 
 **认证 advisory 上下文**：每个 agent 额外携带两个 advisory 字段——`certificationReasonCode`（闭集机器码，解释"为什么不是 certified"：`case_blocked`（外部 blocker：provider/credential/quota，或显式 blocked）/ `core_checks_failed` / `strict_evidence_failed` / `operational_or_observability_failed` / `missing_certification_checks`，分支优先级与 reliability 认定一致，blocked 优先于 core 失败）与 `certificationLastHealthyAt`（该 worker 最近一次全绿 case 的 bounded ISO-8601 UTC 时间戳，认证新鲜度）。`certificationReasonCode` 在 `certified` 时为 `null`（闭集权威 `certificationReasons.js` 只对 certified 规定原因码为 null，时间字段不受此约束）；`certificationLastHealthyAt` 与 status 投影**相互独立**——无 summary 记录、identity（backend/modelId；记录与 agent 双侧声明 `providerID` 时同比对；`providerKey` 同为第 4 比对维——记录侧缺字段 = legacy 容忍，显式 null = 已观察无接入方，判定与派发门共用 `runManager.js` 的 `matchedCertRecord` SSOT）变更后认证不可继承、以及旧格式 summary（缺字段）时为 `null`；`certified` 且存在合法全绿历史时**保留该历史时间**（合法历史时间不因 status 为 certified 而清空）——两字段一律**不伪造**。闭集唯一权威在 `src/application/certificationReasons.js`（MCP schema enum 从它派生，无第二份清单）；worker 级 `reasonCode` 取"决定最终（最差）status 的 case"的码，`lastHealthyRunAt` 聚合 active identity 各 case 的最近全绿时间（旧 identity 的全绿不计入）。两字段只含闭集码/日期——blockerReason 原文、路径、命令、stderr 绝不进任何 wire 输出（磁盘 summary 里的自由文本 `reason` 是另一层契约，保持不变）。
 
-**凭据可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`credentialAvailability`（`available` / `missing` / `not_required`）只反映 worker **registry 显式声明为必需**的 credential（`provider.apiKeyEnv` / legacy `--api-key-env`）是否在当前环境可用——不声称 runtime 整体健康。优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `missing`；未声明必需凭据的 worker 为 `not_required`。**可选继承变量**（如 `OPENAI_BASE_URL`、`CODEX_HOME`、`KIMI_MODEL_NAME`）会被继承但不参与 missing gate——不会因缺少可选配置阻止派发。`missingCredentialEnvNames` 列出缺失的必需 env 变量**名**（绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名；设置或轮换凭据后**无需重启 Host**（每次评估重新观察当前状态）。
+**凭据可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`credentialAvailability`（`available` / `missing` / `not_required`）只反映 worker **registry 显式声明为必需**的 credential（`credentialEnv` / `tokenEnv`）是否在当前环境可用——不声称 runtime 整体健康。优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `missing`；未声明必需凭据的 worker 为 `not_required`。**可选继承变量**（如 `OPENAI_BASE_URL`、`CODEX_HOME`、`KIMI_MODEL_NAME`）会被继承但不参与 missing gate——不会因缺少可选配置阻止派发。`missingCredentialEnvNames` 列出缺失的必需 env 变量**名**（绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名；设置或轮换凭据后**无需重启 Host**（每次评估重新观察当前状态）。
 
 **provider readiness 真相（truth）**：`providerReadiness` 是严格投影对象，字段含义：
 
@@ -561,7 +560,7 @@ registry certification 是 **advisory 证据，不是 permission gate**：`regis
 **显式 CLI 认证门（`--require-certified`）的现行判定**（读 runDir 下 `reliability-summary.json`）：
 
 - **记录选择**：席位键精确命中优先（`manualOverride` 坐记录上）；未命中且台账为车道键空间（lane-v1）时按身份事实匹配扫描（同一 `matchedCertRecord` 判定）。
-- **身份比对（四元组）**：记录的 backend/modelId（`providerID` 在记录与 agent 双侧声明时同比对；`providerKey` = `<规范化 baseUrl>|<apiKeyEnv 变量名>`，单一实现 `src/providerFingerprint.js`——baseUrl 归一化（scheme/host 小写、去默认端口、路径保留大小写仅去尾斜杠、丢弃 userinfo/query/fragment 防凭据落盘），apiKeyEnv 只取**变量名**、绝不取密钥值）必须与当前 registry 该 agent 的配置一致，不一致按未认证拒绝（固定文案，不回显配置值；判定与 `registry_list` 投影共用 `matchedCertRecord` SSOT）——改 `config/agents.json` 换 backend/model/接入方后不重跑 reliability，旧组合的认证不放行。`providerKey` 记录侧缺字段（undefined）= legacy 跳过该维；显式 `null` = 已观察无接入方，与 agent 侧不可派生（null）匹配、与可派生不匹配；双侧非 null 时逐字节比对。reliability 写入侧与派发门比对侧同源调用（契约测试钉死逐字节一致）。
+- **身份比对（四元组）**：记录的 backend/modelId（`providerID` 在记录与 agent 双侧声明时同比对；`providerKey` 维当前侧恒为 `null`）必须与当前 registry 该 agent 的配置一致，不一致按未认证拒绝（固定文案，不回显配置值；判定与 `registry_list` 投影共用 `matchedCertRecord` SSOT）——改 `config/agents.json` 换 backend/model 后不重跑 reliability，旧组合的认证不放行。`providerKey` 记录侧缺字段（undefined）= legacy 跳过该维；显式 `null` = 现行恒值，与当前侧匹配；非空字符串不匹配任何车道（重认证是唯一路径）。
 - **status 阈值**：`certified` / `conditional` 放行（core 全过即放行的阈值）；其余按未认证拒绝。
 - **新鲜度（全量口径）**：读该 worker 的 `lastFullHealthyRunAt`（仅 full-scope 且全绿的 case 刷新；delta 全绿是 conditional，不洗白全量口径的派发新鲜度；记录侧无条件写，`null` = 从未有全量绿）。仅 legacy 记录缺该字段（undefined）才回落旧判据 `lastHealthyRunAt`（文案如实标注实际读取的字段名）；显式 `null` 与坏时间不回落、直接 fail-closed 拒绝（固定文案锚点"无新鲜认证/认证已过期"；过期 reason 只展示天数，不回显磁盘时间戳原文）。超过新鲜窗口（默认 30 天）即拒。
 - **Owner 旁路**：`manualOverride:"cleared"` 在 summary 中**找到该 worker 记录后**才生效（无记录仍拒），并绕过身份、状态、新鲜度三项检查。

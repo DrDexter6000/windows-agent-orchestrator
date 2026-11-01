@@ -37,9 +37,9 @@ kimi-code 与 DSH stdio 面为何暂停，见决定 0074。
 
 claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔离配置目录：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的会话不可见（设计行为，含 `--add-dir` 逃生门）。见 `docs/troubleshooting.md` §7.13。
 
-### Provider key（claude-code wrapper 需要）
+### 凭据 env（credentialEnv / tokenEnv 车道需要）
 
-claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key。按你用的 provider 配：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`。key 的验证与排错见 `docs/troubleshooting.md` §1.1/§1.6。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。
+声明 `credentialEnv`（deepseek-acp）或 `tokenEnv`（kimi-web）的车道从 env 读 key。按你用的车道配：`DEEPSEEK_API_KEY` / `KIMI_WEB_TOKEN`。key 的验证与排错见 `docs/troubleshooting.md` §1.1/§1.6。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。
 
 ## 安装本工具
 

@@ -28,7 +28,7 @@ function acceptAllBackend() {
   return { validateAgentPolicy() {} };
 }
 
-/** kimi-web 形：model.id/serveUrl/tokenEnv 必填；providerID/variant/reasoning/contextWindow/provider 一律拒。 */
+/** kimi-web 形：model.id/serveUrl/tokenEnv 必填；providerID/variant/reasoning/contextWindow 一律拒。 */
 function kimiWebLikeBackend() {
   return {
     validateAgentPolicy(agent) {
@@ -36,14 +36,13 @@ function kimiWebLikeBackend() {
       if (agent?.model?.providerID !== undefined || agent?.model?.variant !== undefined) throw new Error("cannot express providerID/variant");
       if (agent?.reasoning !== undefined) throw new Error("cannot express reasoning");
       if (agent?.model?.contextWindow !== undefined) throw new Error("cannot express contextWindow");
-      if (agent?.provider) throw new Error("cannot express provider");
       if (typeof agent?.serveUrl !== "string" || !agent.serveUrl) throw new Error("requires serveUrl");
       if (typeof agent?.tokenEnv !== "string" || !agent.tokenEnv) throw new Error("requires tokenEnv");
     },
   };
 }
 
-/** zcode 形：model.id 必须是恰好一个斜杠的 ref；providerID/variant/contextWindow/provider 拒。 */
+/** zcode 形：model.id 必须是恰好一个斜杠的 ref；providerID/variant/contextWindow 拒。 */
 function refOnlyBackend() {
   return {
     validateAgentPolicy(agent) {
@@ -53,7 +52,6 @@ function refOnlyBackend() {
       }
       if (agent?.model?.providerID !== undefined || agent?.model?.variant !== undefined) throw new Error("cannot express providerID/variant");
       if (agent?.model?.contextWindow !== undefined) throw new Error("cannot express contextWindow");
-      if (agent?.provider) throw new Error("cannot express provider");
     },
   };
 }
@@ -69,7 +67,6 @@ function pairOnlyBackend() {
         }
         if (Object.keys(m).some((k) => k !== "id" && k !== "providerID")) throw new Error("no extra model subfields");
       }
-      if (agent?.provider) throw new Error("cannot express provider");
       if (agent?.reasoning?.effort !== undefined && !["low", "high", "max"].includes(agent.reasoning.effort)) {
         throw new Error("effort must be low/high/max");
       }
@@ -344,7 +341,6 @@ test("probe-attribution: “不支持”只在被测项本身被拒时出现（�
   const r = probeExpressivity(kimiWebLikeBackend(), { k3ModelId: K3, base });
   assert.equal(r.reasoning.verdict, "不支持");
   assert.equal(r.contextWindow.verdict, "不支持");
-  assert.equal(r.provider.verdict, "不支持");
   assert.notEqual(r.model.verdict, "不支持", "model 本身可表达（必填：裸）——同格其余“不支持”不可能再来自缺 model.id");
 });
 

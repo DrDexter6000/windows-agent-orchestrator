@@ -11,8 +11,9 @@
 //      inheritance + the secret redactor.
 //
 //   2. requiredCredentialNames(agent) — env names the REGISTRY explicitly
-//      declares as REQUIRED (provider.apiKeyEnv / legacy --api-key-env). Only
-//      these participate in the credential-missing gate.
+//      declares as REQUIRED (deepseek-harness/deepseek-acp credentialEnv,
+//      kimi-web tokenEnv). Only these participate in the credential-missing
+//      gate.
 //
 // This is the single source: backend inheritance (src/backends/*) and
 // readiness assessment (src/application/credentialReadiness.js) both delegate
@@ -25,9 +26,9 @@
 // registry explicitly declares.
 
 // Per-backend OPTIONAL inherited env names (the full set a backend MAY inherit).
-// claude-code derives its names per-agent from provider/legacy args, plus the
-// native-OAuth long-term token name (TD-229, added channel-conditionally inside
-// inheritedEnvNames — not a static list), so it has no static list here (null).
+// claude-code derives its names per-agent (the native-OAuth long-term token
+// name, added inside inheritedEnvNames — not a static list), so it has no
+// static list here (null).
 /**
  * kimiHome 的形状（决定 0074 会审）：绝对路径（盘符或根起头），首尾不带空白——带
  * 空白的路径会被原样拿去拼 token 文件位置。registry 与 backend 的校验共用这一个判据。
@@ -79,8 +80,9 @@ const INHERITED_ENV_NAMES = {
 };
 
 /**
- * Explicitly-declared REQUIRED credential env names for an agent.
- * Only provider.apiKeyEnv and legacy --api-key-env count. A static backend-wide
+ * Explicitly-declared REQUIRED credential env names for an agent
+ * (deepseek-harness/deepseek-acp credentialEnv, kimi-web tokenEnv — a
+ * kimiHome lane reads its token from a file, not env). A static backend-wide
  * list is NEVER assumed required.
  * @param {object} agent — normalized agent from registry
  * @returns {string[]} required credential env names (deduped, may be empty)
@@ -93,16 +95,8 @@ export function requiredCredentialNames(agent) {
     : agent.backend === "kimi-web"
       // 决定 0074：声明了 kimiHome 的车道，token 来自文件——不是环境凭据，不进这张表。
       ? (kimiServerTokenFile(agent) === null ? agent.tokenEnv : undefined)
-      : agent.backend === "claude-code"
-        ? agent.provider?.apiKeyEnv
-        : undefined;
+      : undefined;
   if (typeof configured === "string" && configured.length > 0) names.push(configured);
-  if (agent.backend !== "claude-code") return [...new Set(names)];
-  const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-  const idx = prependArgs.indexOf("--api-key-env");
-  if (idx >= 0 && idx + 1 < prependArgs.length && prependArgs[idx + 1]) {
-    names.push(prependArgs[idx + 1]);
-  }
   return [...new Set(names)];
 }
 
@@ -111,8 +105,8 @@ export function requiredCredentialNames(agent) {
 // ~/.claude/.credentials.json——凭据拷贝与 OAuth 续期令牌单次轮换互斥（副本内
 // 续期后新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌，下一次拷贝
 // 续期失败、CLI 清空登录；机制与物证见 claudeCode.js 头注释）。OPTIONAL：缺席
-// 永不阻断派发（回退旧拷贝路径）。provider wrapper 通道显式排除——wrapper 自带
-// 凭据 env（provider.apiKeyEnv），此变量混入可能抢走 provider key 的认证优先级。
+// 永不阻断派发（回退旧拷贝路径）。决定 0106 起这是 claude-code 的唯一通道，
+// 无条件继承。
 export const CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
 // 0047 嵌套派发豁免变量名（Lead 命令级授权，审计协议见 docs/usage/consult.md 场景 4e）。
@@ -133,8 +127,8 @@ export function inheritedEnvNames(agent) {
   if (!agent || typeof agent !== "object") return [];
   const backend = agent.backend;
   const names = new Set(requiredCredentialNames(agent));
-  // TD-229：native OAuth 通道（无 provider）才继承长期令牌名（见常量注释）。
-  if (backend === "claude-code" && !agent.provider) names.add(CLAUDE_OAUTH_TOKEN_ENV);
+  // TD-229：claude-code 无条件继承长期令牌名（决定 0106：native OAuth 是唯一通道）。
+  if (backend === "claude-code") names.add(CLAUDE_OAUTH_TOKEN_ENV);
   const staticNames = INHERITED_ENV_NAMES[backend];
   if (Array.isArray(staticNames)) {
     for (const n of staticNames) if (typeof n === "string" && n.length > 0) names.add(n);

@@ -36,7 +36,6 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
 import { laneFingerprint as laneFingerprintOf } from "./application/identityProjection.js";
-import { providerKeyFor } from "./providerFingerprint.js";
 import { loadRoleContract, roleContractSha256 } from "./application/roleContract.js";
 import { PROMPT_STDIN_FLAG, promptDigest, readRunnerPrompt } from "./runnerPrompt.js";
 
@@ -207,7 +206,8 @@ export async function runBackground(opts = {}) {
           backend: agentEntry.backend,
           modelId: agentEntry.model?.id ?? null,
           providerID: agentEntry.model?.providerID ?? null,
-          providerKey: providerKeyFor(agentEntry.provider),
+          // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
+          providerKey: null,
         }),
         roleSha256: recomputedRoleSha,
       };

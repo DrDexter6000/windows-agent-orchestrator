@@ -48,7 +48,7 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 + 强制隔离），回复正文的唯一权威在各 run transcript，经 runId 回链。呈现尾部附
 独立性三块砖事实表（厂族 / 非作者 / 会话独立性），全部 advisory、不下独立性
 结论：厂族砖直读 registry 原始字段（`backend` + `provider` 标识：
-`model.providerID` 优先，wrapper 形取 `provider.baseUrl`），不做族系归类判断
+`model.providerID`），不做族系归类判断
 （判断权在 Lead）；会话独立性如实显示"未提供"。
 
 **席位比预算慢时**：等待预算最长 10 分钟（`--wait-timeout` 默认 600000ms，范围

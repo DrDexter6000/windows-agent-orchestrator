@@ -136,22 +136,24 @@ const REGISTERED_CENSUS = {
   // TD-220 验收修（2026-10-07）：EXIT_CODE_INFERENCE_PROVEN_BACKENDS 闭集成员
   // （数据来源可靠性声明，ADR-0032 §8；runActivityProjection 经它门控推断）。
   "scorecard.js": { "claude-code": 1 },
-  // TD-229（2026-10-07）：doctor 5d 认证模式检查按 backend==="claude-code" &&
-  // !provider 筛 native worker（轴向=native OAuth 通道识别，非全后端分叉）。
+  // TD-229（2026-10-07）：doctor 5d 认证模式检查按 backend==="claude-code" 筛
+  // worker（轴向=OAuth 通道识别，非全后端分叉；决定 0106 起唯一通道——原
+  // provider-worker 筛选函数随通道退役删除，1 处身份串离开本文件）。
   // 0065（2026-10-12）：KNOWN_CLIS 改从 BACKEND_CLI 值域派生（修手抄漏 dsh 的
   // 两面口径分叉）——原数组字面里的 CLI 名 "codex" 随之离开本文件（doctor 的
   // 后端身份串轴不变）。
-  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, "kimi-code": 1, zcode: 1 },
+  "commands/doctor.js": { "claude-code": 1, "deepseek-harness": 1, "kimi-code": 1, zcode: 1 },
   // TD-258（2026-10-11）：recommendationReadyLabel 加 zcode/kimi-web 显示覆盖
   // （"无 CLI 探测面"/"serve 探测未覆盖"——轴向=无 CLI 面车道的错标修正，非
   // runtime 分叉）。
   "commands/onboarding.js": { zcode: 1, "kimi-web": 1 },
   "commands/registry.js": { "claude-code": 1 },
-  // TD-229（2026-10-07）：inheritedEnvNames 对 native 通道（backend==="claude-code"
-  // && !provider）追加长期令牌继承名——通道条件派生，非新分叉轴。
+  // TD-229（2026-10-07）+ 决定 0106：inheritedEnvNames 对 claude-code（唯一
+  // OAuth 通道）无条件追加长期令牌继承名；requiredCredentialNames 的 claude-code
+  // provider 分支随通道退役删除（2 处身份串离开本文件）。
   // 决定 0074（2026-10-13）：kimiServerTokenFile 按 backend==="kimi-web" 认领 kimiHome
   // 字段（凭据来源声明——同一文件既有的 per-backend 凭据名表的延伸，非运行时分叉）。
-  "envPolicy.js": { "claude-code": 4, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "kimi-web": 2 },
+  "envPolicy.js": { "claude-code": 2, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "kimi-web": 2 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
   "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1, "kimi-code": 1 },
   "hostAdapters/hostRegistrationProbe.js": { "claude-code": 1, "kimi-code": 1 },

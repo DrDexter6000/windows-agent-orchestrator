@@ -26,7 +26,6 @@
 import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
 import { deriveIndependenceRelations } from "./consultService.js";
 import { modelFamilyOf, UNKNOWN_FAMILY } from "./modelFamily.js";
-import { providerKeyFor } from "../providerFingerprint.js";
 
 /** 席位侧事实：registry 归一化条目 → 与 run.started 同形的四元组指纹 + 族系。
  *  条目缺席（自报 id 不在注册表）= laneFingerprint null + resolution unknown-agent
@@ -41,13 +40,14 @@ export function seatFactsFromRegistry(seatIds, agentsById) {
       backend: typeof agent.backend === "string" ? agent.backend : null,
       modelId: agent.model && typeof agent.model.id === "string" ? agent.model.id : null,
       providerID: agent.model && typeof agent.model.providerID === "string" ? agent.model.providerID : null,
-      providerKey: providerKeyFor(agent.provider) ?? null,
+      // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
+      providerKey: null,
     };
     const hasAnyAxis = identity.backend !== null || identity.modelId !== null;
     return {
       agentId: id,
-      // 与作者侧对称：任一轴在场即可派生指纹（providerKey 缺席=显式 null——
-      // 同 run.started 的三态纪律，两侧同形故可比）。
+      // 与作者侧对称：任一轴在场即可派生指纹（providerKey 恒为显式 null——
+      // 决定 0106；同 run.started 的三态纪律，两侧同形故可比）。
       laneFingerprint: hasAnyAxis ? laneFingerprint(identity) : null,
       modelId: identity.modelId,
       family: modelFamilyOf({ modelId: identity.modelId, backend: identity.backend }),

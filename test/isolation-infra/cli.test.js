@@ -521,18 +521,17 @@ test("0065: wao stage --reviewed-run 对抗性派生——同车道回避违反�
   // auditor=跨车道（claude-code + claude-opus-5）。
   writeFileSync(registry, JSON.stringify({
     agents: {
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3" } },
+      coder_hq: { backend: "claude-code", cwd: ".", model: { id: "glm-5.3" } },
       auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
     },
   }), "utf8");
   // 被审 run 转录：作者=coder_hq 的车道（claude-code + glm-5.3 模型轴；providerKey
-  // =该车道 provider 块的规范指纹——真实派发的 run.started 携带它，R23-C 四元组
-  // 的第 4 维；夹具用同值保证与席位侧 registry 四元组可比）。
+  // =决定 0106 起的现行恒值 null——夹具用同值保证与席位侧 registry 四元组可比）。
   const runDir = join(dir, "runs");
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "run_author1.jsonl"), JSON.stringify({
     type: "run.started", backend: "claude-code", model: { id: "glm-5.3" },
-    reasoning: { effort: "high" }, providerKey: "https://open.bigmodel.cn/api/anthropic|ZHIPU_API_KEY",
+    reasoning: { effort: "high" }, providerKey: null,
     runId: "run_author1", agentId: "coder_hq", seq: 1, ts: "2026-10-12T00:00:00.000Z", cwd: dir,
   }) + "\n", "utf8");
   try {
@@ -1504,11 +1503,9 @@ function makePanelFixture(name) {
   spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
     { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
   const registry = join(dir, "agents.json");
-  // 0065：--reviewed-run 派生路径走归一化（readRegistry.listAgents）——provider
-  // 用完整合法形状（protocol/baseUrl/apiKeyEnv 三字段）。
   writeFileSync(registry, JSON.stringify({
     agents: {
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." },
+      coder_hq: { backend: "claude-code", cwd: "." },
       auditor: { backend: "claude-code", cwd: "." },
     },
   }), "utf8");
@@ -1720,7 +1717,7 @@ test("R9-C C-13: --panel-seats 的 registry 存在性校验四路径 fail-fast�
     // 路径 4：agents 表在场但 seats 引用未知 id（此前唯一有覆盖的路径——回归钉）。
     const unknown = join(dir, "unknown.json");
     writeFileSync(unknown, JSON.stringify({
-      agents: { coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: "." } },
+      agents: { coder_low: { backend: "claude-code", cwd: "." } },
     }), "utf8");
     const ghost = run(unknown);
     assert.notEqual(ghost.status, 0, "未知 id 必须 fail-fast");
@@ -1834,105 +1831,21 @@ test("run --background: malformed --scorecard-rules fail-fast，不返回 ghost 
   }
 });
 
-test("wao doctor: OAuth 登录态 + provider-wrapped claude-code worker 给 WARN", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-oauth-"));
-  try {
-    const home = join(dir, "home");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({
-      claudeAiOauth: { accessToken: "oauth-token" },
-    }));
-    const registryPath = join(dir, "agents.json");
-    // 会审修复批：provider 块不再带 model（normalizeAgent 拒 provider 携带 model——
-    // 坏条目会掺入与本用例无关的 registry_entry FAIL）。
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        researcher: {
-          backend: "claude-code",
-          provider: {
-            protocol: "anthropic-compatible",
-            baseUrl: "https://api.deepseek.com/anthropic",
-            apiKeyEnv: "DEEPSEEK_API_KEY",
-          },
-          cwd: dir,
-        },
-      },
-    }), "utf8");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js", "wao", "doctor",
-      "--registry", registryPath,
-      "--cwd", dir,
-      "--format", "json",
-    ], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      env: { ...process.env, HOME: home, USERPROFILE: home, DEEPSEEK_API_KEY: "provider-key" },
-      timeout: 10000,
-    });
-    const parsed = JSON.parse(result.stdout);
-    const warn = parsed.checks.find((c) => c.name === "claude_oauth_provider_workers");
-    assert.ok(warn, "doctor 应报告 OAuth + provider worker 组合风险");
-    assert.equal(warn.pass, true, "OAuth provider warning 不应让 doctor FAIL");
-    assert.equal(warn.level, "warn");
-    assert.match(warn.detail, /researcher/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("wao doctor: auditor-only claude-code OAuth 不触发 provider worker WARN", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-auditor-"));
-  try {
-    const home = join(dir, "home");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({
-      claudeAiOauth: { accessToken: "oauth-token" },
-    }));
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        auditor: {
-          backend: "claude-code",
-          model: { id: "claude-opus-4-8" },
-          cwd: dir,
-        },
-      },
-    }), "utf8");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js", "wao", "doctor",
-      "--registry", registryPath,
-      "--cwd", dir,
-      "--format", "json",
-    ], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      env: { ...process.env, HOME: home, USERPROFILE: home },
-      timeout: 10000,
-    });
-    const parsed = JSON.parse(result.stdout);
-    assert.ok(!parsed.checks.some((c) => c.name === "claude_oauth_provider_workers"));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// TD-107: wao doctor 的 verdict 会被与本组测试无关的环境检查污染——provider key
-// （ZHIPU/DEEPSEEK/KIMI_API_KEY，本机密钥，干净检出里没有）与本机 gitignored
-// config/agents.json（registry_loads）。这几个测试只验证 wao_init / parse_smoke /
-// invocation_method 本身，不应耦合本机密钥/配置。注入 dummy key + 指向 tracked
-// synthetic registry（test/fixtures/agents.six.json），把 verdict 隔离到被测检查项。
-// 不改产品语义——doctor 仍是 preflight 体检；只是测试不再要求真实密钥/本机配置。
-// R5-B scoped 后防护意图不变：dummy key 让 scoped key 检查在进程 env 命中，
-// 不触发 Windows User 作用域读取（慢且耦合本机注册表）。
+// TD-107: wao doctor 的 verdict 会被与本组测试无关的环境检查污染——required
+// credential 名（KIMI_WEB_TOKEN/KIMI_API_KEY，本机密钥，干净检出里没有）与本机
+// gitignored config/agents.json（registry_loads）。这几个测试只验证 wao_init /
+// parse_smoke / invocation_method 本身，不应耦合本机密钥/配置。注入 dummy key +
+// 指向 tracked synthetic registry（test/fixtures/agents.six.json），把 verdict
+// 隔离到被测检查项。不改产品语义——doctor 仍是 preflight 体检；只是测试不再
+// 要求真实密钥/本机配置。R5-B scoped 后防护意图不变：dummy key 让 scoped key
+// 检查在进程 env 命中，不触发 Windows User 作用域读取（慢且耦合本机注册表）。
 const DOCTOR_REGISTRY = "test/fixtures/agents.six.json";
 function doctorSpawnEnv() {
   return {
     ...process.env,
-    ZHIPU_API_KEY: process.env.ZHIPU_API_KEY || "td107-test-key",
-    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || "td107-test-key",
+    KIMI_WEB_TOKEN: process.env.KIMI_WEB_TOKEN || "td107-test-key",
     KIMI_API_KEY: process.env.KIMI_API_KEY || "td107-test-key",
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || "td107-test-key",
   };
 }
 
@@ -2187,8 +2100,8 @@ test("R5-B: doctor scoped key——只查保留 worker 声明的 env 名；缺�
     writeFileSync(registryPath, JSON.stringify({
       agents: {
         coder_low: {
-          backend: "claude-code",
-          provider: { protocol: "anthropic-compatible", baseUrl: "https://example.invalid/anthropic", apiKeyEnv: "WAO_TEST_NO_SUCH_KEY_R5B" },
+          backend: "deepseek-acp",
+          credentialEnv: "WAO_TEST_NO_SUCH_KEY_R5B",
           cwd: dir,
         },
       },
@@ -2207,9 +2120,9 @@ test("R5-B: doctor scoped key——只查保留 worker 声明的 env 名；缺�
     assert.equal(key.status, "fail");
     assert.match(key.fix, /setx WAO_TEST_NO_SUCH_KEY_R5B/, "key 缺失 fix 应给 setx（User 作用域）提示");
     assert.match(key.detail, /run: setx/, "FAIL 行应附 run: 修复提示");
-    // scoped：未声明的 key 不得被检查（不写死三连）
+    // scoped：未声明的 key 不得被检查（不写死名单）
     assert.ok(!parsed.checks.some((c) => c.name === "key_ZHIPU_API_KEY" || c.name === "key_DEEPSEEK_API_KEY"),
-      "未声明的 provider key 不得被检查（scoped 收窄）");
+      "未声明的凭据 env 不得被检查（scoped 收窄）");
     assert.equal(result.status, 1, "有 FAIL → exit 1");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2224,8 +2137,8 @@ test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 k
       agents: {
         coder_mm: { backend: "kimi-code", cwd: dir },
         coder_hq: {
-          backend: "claude-code",
-          provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "KIMI_API_KEY" },
+          backend: "deepseek-acp",
+          credentialEnv: "KIMI_API_KEY",
           cwd: dir,
         },
       },
@@ -2245,9 +2158,9 @@ test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 k
     const parsed = JSON.parse(result.stdout);
     const kimiChecks = parsed.checks.filter((c) => c.name === "key_KIMI_API_KEY");
     // R5 审计 P1-2：kimi 登录态特例只作用于 kimi-code worker 自身（envPolicy 零声明）；
-    // claude-code wrapper 声明的 KIMI_API_KEY 是该 worker 真正需要的 env，必须照常检查
+    // 其他 worker 声明的 KIMI_API_KEY 是该 worker 真正需要的 env，必须照常检查
     // （进程 env 已注入 fake-kimi-key → OK）。有真实检查在场时不再叠同名 INFO 说明项。
-    assert.equal(kimiChecks.length, 1, "wrapper 声明的 KIMI_API_KEY 恰一条真实检查（无同名 INFO 叠加）");
+    assert.equal(kimiChecks.length, 1, "声明的 KIMI_API_KEY 恰一条真实检查（无同名 INFO 叠加）");
     assert.equal(kimiChecks[0].pass, true);
     assert.equal(kimiChecks[0].status, "ok", "fake-kimi-key 已注入进程 env → 存在性检查 OK（未被特例吞掉）");
   } finally {
@@ -2287,9 +2200,9 @@ test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示�
 // ── R9-C C-3: doctor panel_readiness 行为面（决策 0023；advisory 非门禁）─────────
 // C-1.4 静默条件收窄为 three_seat 且含对抗席；其余形态打印 INFO 且不计 DEGRADED、
 // 不改退出码（0023 红线）。fixture 目录先 wao init 把 verdict 隔离到被测面
-// （wao_init WARN 不混入断言）；HOME/USERPROFILE 指向空目录隔离本机 OAuth 凭据
-// （claude_oauth_provider_workers WARN 面）；dummy key 沿 TD-107 doctorSpawnEnv。
-// CLI 探测沿既有套件假设（claude/kimi CLI 在 PATH——与本文件其它 doctor 测试一致）。
+// （wao_init WARN 不混入断言）；HOME/USERPROFILE 指向空目录隔离本机 OAuth 凭据；
+// dummy key 沿 TD-107 doctorSpawnEnv。
+// CLI 探测沿既有套件假设（claude/kimi/dsh CLI 在 PATH——与本文件其它 doctor 测试一致）。
 function makeDoctorPanelFixture(name, agents) {
   const dir = mkdtempSync(join(tmpdir(), name));
   spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
@@ -2308,8 +2221,8 @@ function doctorPanelRun(dir, registryPath) {
 
 test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（无条目）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-silent-", {
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
-    coder_mm: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.moonshot.cn/anthropic", apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-k3" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
+    coder_mm: { backend: "deepseek-acp", credentialEnv: "KIMI_API_KEY", model: { id: "kimi-k3" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2325,7 +2238,7 @@ test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（
 
 test("R9-C C-3: doctor 两席 → panel_readiness INFO 打印、不计 DEGRADED、exit 0（advisory 红线）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-two-", {
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
   });
   try {
@@ -2378,8 +2291,8 @@ test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展�
 
 test("R9-C C-1.4→0065（假全清防线平移）: 三席全同族 → doctor 不静默，附跨族系补配提示", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-nofam-", {
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
-    coder_g2: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "bigmodel-api/GLM-5.3" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
+    coder_g2: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "bigmodel-api/GLM-5.3" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2397,8 +2310,8 @@ test("R9-C C-1.4→0065（假全清防线平移）: 三席全同族 → doctor �
 
 test("0065 语义翻转钉（R9-C C-1 历史病灶位）: researcher 角色名键照常计入 → 跨族三席静默", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-researcher-", {
-    researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    researcher: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2415,7 +2328,7 @@ test("0065 语义翻转钉（R9-C C-1 历史病灶位）: researcher 角色名�
 
 test("R9-C C-16: 单 worker registry → 空转事实为主句直给（先建议后撤回的话术废除）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-solo-", {
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -2454,12 +2367,12 @@ test("0065: doctor 分级与 seatRole 声明无关——带声明与不带声明
   // 0065 终局：字段废弃为惰性——同 registry 形状（my_reviewer+coder_hq 双 ready、
   // DeepSeek×GLM 跨族）无论带不带 seatRole 声明都是三席静默。
   const withDeclared = makeDoctorPanelFixture("wao-doctor-panel-declared-", {
-    my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: ".", seatRole: "adversarial" },
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: ".", seatRole: "implementation" },
+    my_reviewer: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" }, cwd: ".", seatRole: "adversarial" },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "KIMI_API_KEY", model: { id: "glm-5.2" }, cwd: ".", seatRole: "implementation" },
   });
   const undecl = makeDoctorPanelFixture("wao-doctor-panel-undeclared-", {
-    my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
-    coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    my_reviewer: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "KIMI_API_KEY", model: { id: "glm-5.2" }, cwd: "." },
   });
   try {
     for (const fx of [withDeclared, undecl]) {

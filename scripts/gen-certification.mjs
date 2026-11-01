@@ -11,8 +11,8 @@
 //     BACKEND_CAPABILITY_AXES / readBackendCapabilities（strict === true）；
 //     渲染文案中的轴数一律经 axesCountLabel() 从 BACKEND_CAPABILITY_AXES.length
 //     派生，不手写计数。
-//   - 配置表达力四轴（model override / reasoning effort / contextWindow /
-//     provider 块）：行为探针，「底稿＋单项」派生法——每格
+//   - 配置表达力三轴（model override / reasoning effort /
+//     contextWindow）：行为探针，「底稿＋单项」派生法——每格
 //     探针从 src/backends/factory.js POLICY_PROBE_BASES 登记的最小合法底稿
 //     深拷贝出发，只改或只加被测的一项，对经共享工厂构造的 backend 实例调用
 //     validateAgentPolicy。底稿合法性/最小性在生成期校验（checkProbeBase），
@@ -60,11 +60,6 @@ const AUDIENCE = "Audience: repository-level agents and humans; 认证台账 liv
 
 // 惰性 fetch（探针只调 validateAgentPolicy，构造期与探针期都不发网络请求）。
 const PROBE_FETCH_IMPL = async () => ({ ok: true, status: 200, json: async () => ({}) });
-const PROBE_PROVIDER = {
-  protocol: "anthropic-compatible",
-  baseUrl: "https://gen-certification-probe.invalid",
-  apiKeyEnv: "GEN_CERTIFICATION_PROBE_KEY",
-};
 // 探针占位值（与 POLICY_PROBE_BASES 同款纪律：一眼假，无真实路径/主机/凭据名）。
 const PROBE_MODEL_ID = "gen-certification-probe-model";
 const PROBE_PROVIDER_ID = "gen-certification-probe";
@@ -146,7 +141,7 @@ function cloneWithModel(base, model) {
 }
 
 /**
- * 对一个 backend 跑四轴行为探针（底稿＋单项派生法），返回判定 + 机械可渲染的
+ * 对一个 backend 跑三轴行为探针（底稿＋单项派生法），返回判定 + 机械可渲染的
  * 条件事实。每个探针都是底稿的深拷贝、只改或只加一项，不改底稿本身。
  */
 export function probeExpressivity(backend, { k3ModelId, base, backendKey = "(unnamed)" }) {
@@ -204,24 +199,11 @@ export function probeExpressivity(backend, { k3ModelId, base, backendKey = "(unn
     acceptedKinds.has("k3") ? `须绑定 ${k3ModelId}` : null,
   ].filter(Boolean);
 
-  // ---- provider：底稿＋provider 块。 ----
-  const providerAccepted = probePasses(backend, {
-    ...structuredClone(base),
-    provider: structuredClone(PROBE_PROVIDER),
-  });
-
-  // ---- contextWindow：在已证合法的 model 上只加 contextWindow；provider 被接受时
-  // 再探 provider 路径（底稿＋provider 块＋含 contextWindow 的 model）。 ----
+  // ---- contextWindow：在已证合法的 model 上只加 contextWindow。 ----
   const contextModel = { ...structuredClone(legalModel), contextWindow: PROBE_CONTEXT_WINDOW };
   const contextWindowShapes = [
     { name: "model 路径", agent: cloneWithModel(base, contextModel) },
   ];
-  if (providerAccepted) {
-    contextWindowShapes.push({
-      name: "provider 路径",
-      agent: { ...cloneWithModel(base, contextModel), provider: structuredClone(PROBE_PROVIDER) },
-    });
-  }
   const contextWindowResults = contextWindowShapes.map((s) => probePasses(backend, s.agent));
 
   return {
@@ -242,10 +224,6 @@ export function probeExpressivity(backend, { k3ModelId, base, backendKey = "(unn
         ? `仅 ${contextWindowShapes.filter((_, i) => contextWindowResults[i]).map((s) => s.name).join(" / ")}`
         : null,
     },
-    provider: {
-      verdict: deriveVerdict([providerAccepted]),
-      condition: null,
-    },
   };
 }
 
@@ -253,12 +231,11 @@ export function probeExpressivity(backend, { k3ModelId, base, backendKey = "(unn
 // 渲染
 // =====================================================================
 
-// 四轴 policy 面的条件说明键序（CAPABILITY_NOTES 键 → 展示标签；顺序即渲染顺序）。
+// 三轴 policy 面的条件说明键序（CAPABILITY_NOTES 键 → 展示标签；顺序即渲染顺序）。
 const POLICY_NOTE_ORDER = [
   ["model", "model override"],
   ["reasoning", "reasoning effort"],
   ["contextWindow", "model.contextWindow"],
-  ["provider", "provider 块"],
   // 决定 0069：每个 backend 的必填项（缺项即生成失败，见下方守卫）。
   ["vitalSigns", "生命体征与收口"],
 ];
@@ -288,7 +265,7 @@ function capabilityCell(declared) {
   return declared ? "✅" : "—";
 }
 
-/** 四轴判定格：判定词（探针派生）＋ 条件（探针机械渲染）。 */
+/** 三轴判定格：判定词（探针派生）＋ 条件（探针机械渲染）。 */
 function verdictCell({ verdict, condition }) {
   return condition === null ? verdict : `${verdict}：${condition}`;
 }
@@ -357,7 +334,7 @@ export function renderCertification() {
   lines.push("数据源（现成 SSOT，本文件不含第二真相）：");
   lines.push("");
   lines.push(`- ${axesCountLabel()}轴能力：\`src/registry.js\` \`KNOWN_BACKENDS\` × \`src/backends/factory.js\` \`BACKEND_CAPABILITY_AXES\` / \`readBackendCapabilities\`（strict \`=== true\`——未声明读 false，fail-closed）。`);
-  lines.push("- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生——探针从 `src/backends/factory.js` `POLICY_PROBE_BASES` 登记的最小合法底稿深拷贝出发，一次只改或只加被测的一项（底稿合法性/最小性在生成期校验）；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量。");
+  lines.push("- 配置表达力三轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生——探针从 `src/backends/factory.js` `POLICY_PROBE_BASES` 登记的最小合法底稿深拷贝出发，一次只改或只加被测的一项（底稿合法性/最小性在生成期校验）；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量。");
   lines.push("- 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。");
   lines.push("");
   lines.push("漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等。入口合同（2026-09-22 收束包拆分）：`scripts/gen-certification.mjs` 是**纯库**——导出 `renderCertification()` 与探针内核具名导出（`probeExpressivity` / `checkProbeBase`），导入零副作用、零入口探测（任何 argv 形状下 import 都不生成/不检查/不退出）；进程入口是薄 CLI `scripts/gen-certification-cli.mjs`（无参＝写出、恰好 `--check`＝只读比对、其他任何参数＝非零退出且不写不查）——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。");
@@ -372,18 +349,17 @@ export function renderCertification() {
   lines.push("");
   lines.push("✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴见 §二条件与限制说明。");
   lines.push("");
-  lines.push("## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）");
+  lines.push("## 二、配置表达力三轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）");
   lines.push("");
   lines.push("判定词（只管 **WAO 接线层**）：每个探针＝登记底稿的深拷贝＋只改/只加被测的一项，因此拒绝可归因到被测项本身。**支持**＝全部探针通过；**条件**＝部分探针通过（条件写在格内，探针派生）；**不支持**＝被测项本身被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/certification-runbook.md`「上游 harness 原语对照（实测）」节）。model 栏判定词为 **必填/可选**（底稿含 model 且去掉即被拒＝必填），后接该 backend 的最小可接受写法（裸 `{id}` / `<provider>/<model>` 引用 / `{providerID, id}` 三种形状按序探测；全被拒时生成失败——探针覆盖不足，不写 `不支持`）。");
   lines.push("");
-  lines.push("| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 |");
-  lines.push("| --- | --- | --- | --- | --- |");
+  lines.push("| backend | model override（model.id / --model） | reasoning effort | model.contextWindow |");
+  lines.push("| --- | --- | --- | --- |");
   for (const row of rows) {
     const cells = [
       verdictCell(row.expressivity.model),
       verdictCell(row.expressivity.reasoning),
       verdictCell(row.expressivity.contextWindow),
-      verdictCell(row.expressivity.provider),
     ];
     lines.push(`| ${row.backendKey} | ${cells.join(" | ")} |`);
   }

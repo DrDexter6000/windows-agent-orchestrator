@@ -59,9 +59,8 @@ test("buildCertificationMatrix: reads top-level certification.matrix and enriche
     backend: "deepseek-acp",
     providerID: "deepseek",
     modelId: "deepseek-v4-flash",
-    // R23-C：归一化 case 新增认证身份第 4 维 providerKey（无条件写）。researcher
-    // fixture 无 agent.provider 块 → 显式 null（已观察确认无接入方；契约详见
-    // test/run-lifecycle/certGateIdentityFreshness.test.js T6）。
+    // R23-C：归一化 case 带认证身份第 4 维 providerKey（无条件写，恒为显式 null；
+    // 契约详见 test/run-lifecycle/certGateIdentityFreshness.test.js T6）。
     providerKey: null,
   });
   assert.equal(matrix[1].backend, "claude-code");

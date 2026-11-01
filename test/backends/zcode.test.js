@@ -592,9 +592,6 @@ test("zcode ③b: validateAgentPolicy 全拒绝分支 + 通过分支", () => {
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "a/b/c" } })), /native ref shape/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "bigmodel-api/GLM-5.3", contextWindow: 1000000 } })), /contextWindow/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "bigmodel-api/GLM-5.3", providerID: "x" } })), /providerID\/model.variant/);
-  assert.throws(() => backend.validateAgentPolicy(makeAgent({
-    provider: { protocol: "anthropic-compatible", baseUrl: "https://x.invalid", apiKeyEnv: "K" },
-  })), /cannot express provider/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ args: ["--yolo"] })), /agent\.args/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ prependArgs: ["x.js"] })), /prependArgs/);
 });

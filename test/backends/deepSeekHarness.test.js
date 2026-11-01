@@ -34,19 +34,9 @@ async function collect(handle) {
   return events;
 }
 
-test("DSH policy accepts flash/max/1m and rejects unsupported provider policy", () => {
+test("DSH policy accepts flash/max/1m and rejects unsupported effort", () => {
   const backend = new DeepSeekHarnessBackend();
   assert.doesNotThrow(() => backend.validateAgentPolicy(agent()));
-  assert.throws(
-    () => backend.validateAgentPolicy(agent({
-      provider: {
-        protocol: "anthropic-compatible",
-        baseUrl: "https://example.invalid",
-        apiKeyEnv: "OTHER_KEY",
-      },
-    })),
-    /cannot express provider/,
-  );
   assert.throws(
     () => backend.validateAgentPolicy(agent({ reasoning: { effort: "xhigh" } })),
     /reasoning\.effort/,

@@ -40,8 +40,8 @@
 //     path（resolve/join/dirname）、url（fileURLToPath）、child_process（spawnSync/execSync）、
 //     os（homedir/tmpdir）
 //
-// 本模块内部 helper：_doctorParseSmoke、isProviderWrappedClaudeCodeWorker、
-// hasClaudeOauthCredentials、whichCli（均为 doctor 专用，随 doctor 族搬迁）。
+// 本模块内部 helper：_doctorParseSmoke、whichCli（均为 doctor 专用，随 doctor
+// 族搬迁）。
 
 import { existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -124,26 +124,6 @@ function _doctorParseSmoke() {
   return { pass: false, detail: `${failures.length} 个文件解析失败: ${failures.join(", ")}` };
 }
 
-function isProviderWrappedClaudeCodeWorker(agent) {
-  if (agent?.backend !== "claude-code") return false;
-  if (agent.provider?.baseUrl && agent.provider?.apiKeyEnv) return true;
-  const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-  return prependArgs.includes("--base-url") && prependArgs.includes("--api-key-env");
-}
-
-async function hasClaudeOauthCredentials(env = process.env) {
-  const base = env.USERPROFILE || env.HOME;
-  if (!base) return false;
-  const credentialsPath = join(base, ".claude", ".credentials.json");
-  try {
-    const raw = await readFile(credentialsPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return Boolean(parsed?.claudeAiOauth);
-  } catch {
-    return false;
-  }
-}
-
 /** 检查 CLI 是否在 PATH（where/which）。*/
 async function whichCli(name) {
   const { execSync } = await import("node:child_process");
@@ -192,7 +172,7 @@ function pushCheck(checks, { name, pass = true, level, detail, fix }) {
 
 /**
  * wao doctor：部署前/定期体检（advisory，非门禁）。按 registry 保留的 worker 收窄检查：
- * 只探测保留 worker 需要的 CLI、只查保留 worker 声明的 provider key env 名。
+ * 只探测保留 worker 需要的 CLI、只查保留 worker 声明的凭据 env 名。
  * verdict 三值：HEALTHY（exit 0）/ DEGRADED(N warn)（exit 0，--warn-as-error 时 exit 1）/
  * BROKEN(N fail[, M warn])（exit 1）。
  */
@@ -302,7 +282,7 @@ export async function waoDoctorCommand(args, config) {
   const keyNames = new Set();
   const unmappableBackends = [];
   let hasKimiWorker = false;
-  let providerWorkerCount = 0;
+  let credWorkerCount = 0;
   // R9：CLI/key 探测事实的收集面（panel_readiness 输入；见步骤 4/5 的填充点）。
   const cliFound = new Map();
   const keySource = new Map();
@@ -324,7 +304,7 @@ export async function waoDoctorCommand(args, config) {
       }
       if (backend === "kimi-code") hasKimiWorker = true;
       const names = requiredCredentialNames(agent);
-      if (names.length > 0) providerWorkerCount += 1;
+      if (names.length > 0) credWorkerCount += 1;
       for (const name of names) keyNames.add(name);
     }
   }
@@ -351,11 +331,12 @@ export async function waoDoctorCommand(args, config) {
     });
   }
 
-  // 5. provider key（scoped + 作用域扩展）：只查保留 worker 声明的 env 名（不写死三连）。
-  //    进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用域再查（reader 经
-  //    config.userEnvReader 注入缝——与 5b/5d 同款）：命中 → INFO（派发时凭据桥从
-  //    User 作用域注入，不依赖进程继承——与 registry_list 的 credentialAvailability
-  //    同判 available）；仍无 → FAIL。kimi-code 靠 CLI 登录态，不查任何 kimi key。
+  // 5. required credential key（scoped + 作用域扩展）：只查保留 worker 声明的 env 名
+  //    （不写死名单）。进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用
+  //    域再查（reader 经 config.userEnvReader 注入缝——与 5b/5d 同款）：命中 → INFO
+  //    （派发时凭据桥从 User 作用域注入，不依赖进程继承——与 registry_list 的
+  //    credentialAvailability 同判 available）；仍无 → FAIL。kimi-code 靠 CLI 登录态，
+  //    不查任何 kimi key。
   if (!registryOk) {
     pushCheck(checks, { name: "keys", pass: true, level: "info", detail: "未配置（跳过）" });
     // R8-2：registry 缺位（--apply 前）或解析失败时，cwd 检查与 CLI/key 同款
@@ -365,17 +346,17 @@ export async function waoDoctorCommand(args, config) {
     // R9：panel_readiness 沿同一 U1 INFO 跳过模式（registry 缺位/parse-fail 都
     // 不计算分级，形状与 cli_*/keys/cwd 一致）。
     pushCheck(checks, { name: "panel_readiness", pass: true, level: "info", detail: "未配置（跳过）" });
-  } else if (providerWorkerCount === 0 && !hasKimiWorker) {
+  } else if (credWorkerCount === 0 && !hasKimiWorker) {
     pushCheck(checks, {
       name: "keys",
       pass: true,
       level: "info",
-      detail: "registry 无需要 provider key 的 worker（key 检查全部跳过）",
+      detail: "registry 无需要凭据 env 的 worker（key 检查全部跳过）",
     });
   } else {
     if (hasKimiWorker && !keyNames.has("KIMI_API_KEY")) {
-      // 说明项仅在"没有任何 worker 声明 KIMI_API_KEY"时出现——若 claude-code wrapper
-      // 声明了它（真实需要），下方存在性检查在场，说明项冗余且会同名重复。
+      // 说明项仅在"没有任何 worker 声明 KIMI_API_KEY"时出现——若有 worker 声明了它
+      // （真实需要），下方存在性检查在场，说明项冗余且会同名重复。
       pushCheck(checks, {
         name: "key_KIMI_API_KEY",
         pass: true,
@@ -385,8 +366,8 @@ export async function waoDoctorCommand(args, config) {
     }
     for (const name of [...keyNames].sort()) {
       // R5 审计 P1-2：不做 kimi 跨 worker 抑制——kimi-code worker 经 envPolicy 本就
-      // 声明零 key（登录态认证）；而 claude-code wrapper + Kimi 端点的 worker 声明的
-      // KIMI_API_KEY 是它真正需要的 env，必须照常检查（registry 级布尔会吞掉它）。
+      // 声明零 key（登录态认证）；而其他 worker 声明的 KIMI_API_KEY 若是它真正
+      // 需要的 env，必须照常检查（registry 级布尔会吞掉它）。
       const r = await resolveCredentialEnv(name, { userEnvReader: config.userEnvReader });
       keySource.set(name, r.source); // R9：panel_readiness 输入事实（不二次解析）
       if (r.source === "process_env") {
@@ -409,7 +390,7 @@ export async function waoDoctorCommand(args, config) {
         pushCheck(checks, {
           name: `key_${name}`,
           pass: false,
-          detail: `未设置（对应 provider 会 401）；run: setx ${name} "<key>"——setx 写入 Windows User 作用域；WAO 派发经凭据桥直接读取，设置后重跑 doctor 即可确认，不必重启终端`,
+          detail: `未设置（对应上游会 401）；run: setx ${name} "<key>"——setx 写入 Windows User 作用域；WAO 派发经凭据桥直接读取，设置后重跑 doctor 即可确认，不必重启终端`,
           fix: `setx ${name} "<key>"（setx 写入 Windows User 作用域；WAO 派发经凭据桥直接读取，设置后重跑 doctor 即可确认，不必重启终端）`,
         });
       }
@@ -569,14 +550,15 @@ export async function waoDoctorCommand(args, config) {
     }
   }
 
-  // 5d. TD-229（2026-10-07）：claude-code native OAuth 通道认证模式体检（advisory，
-  //     恒 INFO——机器 env 状态不得影响 verdict/退出码，同 5c 纪律）。令牌可解析 →
+  // 5d. TD-229（2026-10-07）：claude-code OAuth 通道（决定 0106 起唯一通道）认证
+  //     模式体检（advisory，恒 INFO——机器 env 状态不得影响 verdict/退出码，同 5c
+  //     纪律）。令牌可解析 →
   //     token 模式（隔离目录保持空、不拷贝凭据）；缺席 → 旧拷贝模式带 TD-229 轮换
   //     缺陷（副本内续期会作废 ~/.claude 原件登录），fix 指路迁移。名字在场、值不
   //     回显（envPolicy 纪律）。
   if (registryOk) {
     const nativeClaudeWorkers = validRegistryEntries
-      .filter(([, agent]) => agent?.backend === "claude-code" && !agent?.provider)
+      .filter(([, agent]) => agent?.backend === "claude-code")
       .map(([id]) => id);
     if (nativeClaudeWorkers.length > 0) {
       const token = await resolveCredentialEnv(CLAUDE_OAUTH_TOKEN_ENV, {
@@ -629,7 +611,7 @@ export async function waoDoctorCommand(args, config) {
     pushCheck(checks, { name: "wao_mcp_cert_gate_visibility", pass: true, level: "info", detail });
   }
 
-  // 6. registry 完整性：OAuth + provider worker 组合 WARN。
+  // 6. registry 完整性：backend 映射与 cwd 检查。
   if (registryOk) {
     const agents = validRegistryEntries;
     for (const { id, backend } of unmappableBackends) {
@@ -639,18 +621,6 @@ export async function waoDoctorCommand(args, config) {
         level: "warn",
         detail: `worker ${id} 的 backend "${backend}" 无 CLI/key 映射——该 worker 的 CLI/key 检查无法覆盖（不静默）；run: 人工确认该 backend 的 CLI 与认证就绪`,
         fix: "人工确认该 backend 的 CLI/认证就绪（doctor 映射表无此 backend）",
-      });
-    }
-    const providerClaudeWorkers = agents
-      .filter(([, agent]) => isProviderWrappedClaudeCodeWorker(agent))
-      .map(([id]) => id);
-    if (providerClaudeWorkers.length > 0 && await hasClaudeOauthCredentials()) {
-      pushCheck(checks, {
-        name: "claude_oauth_provider_workers",
-        pass: true,
-        level: "warn",
-        detail: `claude-code OAuth 登录态存在；provider worker (${providerClaudeWorkers.join(",")}) 必须通过 wrapper 的 CLAUDE_CONFIG_DIR 隔离，避免 OAuth token 覆盖 provider key；run: 对使用官方 OAuth 的用户是预期行为，provider worker 走 wrapper 隔离，无需处理`,
-        fix: "对使用官方 OAuth 的用户是预期行为，provider worker 走 wrapper 隔离，无需处理",
       });
     }
     // R8-2 + R8-C（C-7/C-8/C-10）：registry cwd 检查（advisory，非门禁）。逐个已

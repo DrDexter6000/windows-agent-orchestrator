@@ -123,12 +123,6 @@ test("kimi-web ①: validateAgentPolicy 通过分支与全部拒绝分支（无 
     );
   }
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ model: { id: "kimi-code/k3", contextWindow: 200000 } })), /cannot express model\.contextWindow/);
-  assert.throws(
-    () => backend.validateAgentPolicy(makeAgent({
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://probe.invalid", apiKeyEnv: "K" },
-    })),
-    /cannot express provider/,
-  );
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ serveUrl: undefined })), /requires serveUrl/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ serveUrl: "   " })), /requires serveUrl/);
   assert.throws(() => backend.validateAgentPolicy(makeAgent({ tokenEnv: undefined })), /requires tokenEnv/);

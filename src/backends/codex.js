@@ -61,8 +61,7 @@ export class CodexBackend extends ProcessBackend {
 
   /**
    * M11-9 capability: Codex can express model (--model) and reasoning
-   * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag)
-   * or provider (Codex uses its own auth, not an anthropic-compatible wrapper).
+   * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag).
    */
   validateAgentPolicy(agent) {
     // 仓库纪律（kimi-web/zcode 同款）：配了表达不了的 model 子字段必须硬拒，不静默
@@ -76,9 +75,6 @@ export class CodexBackend extends ProcessBackend {
     }
     if (agent?.model?.contextWindow) {
       throw new Error("codex backend cannot express model.contextWindow (no CLI flag for it)");
-    }
-    if (agent?.provider) {
-      throw new Error("codex backend cannot express provider (uses its own auth, not an anthropic-compatible wrapper)");
     }
     // model.id and reasoning.effort are fine.
   }

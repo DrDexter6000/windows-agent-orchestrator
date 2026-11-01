@@ -28,7 +28,6 @@ import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
 import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, TranscriptResolutionError } from "../projectBuckets.js";
-import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
 import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
@@ -571,7 +570,8 @@ export async function dispatchRun({
           backend: agent.backend,
           modelId: agent.model?.id ?? null,
           providerID: agent.model?.providerID ?? null,
-          providerKey: providerKeyFor(agent.provider),
+          // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
+          providerKey: null,
         }),
         roleSha256: roleShaSource
           ? roleContractSha256(loadRoleContract(roleShaSource))

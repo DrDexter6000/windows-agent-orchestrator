@@ -34,8 +34,6 @@ import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 // TD-186：认证证据绑定执行画像——运行时身份探测复用组件层既有探针（一次 spawn /
 // backend，零新指纹平台），探不到如实 verified:false，绝不猜。
 import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
-// R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
-import { providerKeyFor } from "../src/providerFingerprint.js";
 // TD-318（二）：registry 读取的解析失败只报固定文案 + 行列号（V8 报错自带
 // 源文本片段；顶层抛出走 Node 的未捕获输出也不带原文）——src/safeText.js。
 import { safeJsonParse } from "../src/safeText.js";
@@ -193,9 +191,9 @@ function agentInfo(agentId) {
     backend: agent.backend ?? null,
     providerID: agent.model?.providerID ?? null,
     modelId: agent.model?.id ?? null,
-    // R23-C：providerKey（规范化 baseUrl + apiKeyEnv 变量名指纹）——与
-    // matrix.normalizeCase 同一 SSOT 派生（src/providerFingerprint.js），无第二套归一化。
-    providerKey: providerKeyFor(agent.provider),
+    // 决定 0106：providerKey 维恒为 null（provider 通道退役）——与
+    // matrix.normalizeCase 同值，记录侧继续写显式 null。
+    providerKey: null,
     // TD-186：执行画像第 4 值——effort 取自该 lane 实际生效的 agent 配置
     // （registry.agents[agentId].reasoning.effort；null = 未配置，runtime 默认），
     // 不从矩阵行/别处复制。旧记录不补猜（由 summarize 层留 undefined）。

@@ -389,7 +389,9 @@ export function matrixScopeFromRegistry(registry) {
       backend: agent.backend ?? null,
       providerID: agent.model?.providerID ?? null,
       modelId: agent.model?.id ?? null,
-      providerKey: agent.provider?.apiKeyEnv ?? null,
+      // 决定 0106：providerKey 维恒为 null（provider 通道退役，registry 拒绝
+      // provider 块——agent.provider 不存在）。
+      providerKey: null,
     }));
   }
   return { matrixAgentIds, matrixLaneKeys };
@@ -471,10 +473,10 @@ function summarizeWorkers(cases, matrixAgentIds, matrixLaneKeys) {
         backend: active.backend,
         providerID: active.providerID,
         modelId: active.modelId,
-        // R23-C：认证身份第 4 维——active identity 的 providerKey（规范化 baseUrl +
-        // apiKeyEnv 变量名指纹，src/providerFingerprint.js 单一实现）。无条件写：
-        // null = 已观察、确认无接入方；undefined 仅 legacy active（从未有 case
-        // 声明该字段）——门侧 matchedCertRecord 对 undefined 跳过该维比对。
+        // R23-C → 决定 0106：认证身份第 4 维——active identity 的 providerKey。
+        // 现行写入侧恒 null（provider 通道退役）。无条件写：null = 已观察、确认
+        // 无接入方；undefined 仅 legacy active（从未有 case 声明该字段）——门侧
+        // matchedCertRecord 对 undefined 跳过该维比对。
         providerKey: active.providerKey,
         status,
         recommendedUse: RECOMMENDED_USE[status],

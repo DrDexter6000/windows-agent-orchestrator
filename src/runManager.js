@@ -31,12 +31,6 @@ import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "./d
 // discipline as MODEL_OVERRIDE_MAX/_WIRE_PATTERN below.
 import { REASONING_EFFORTS } from "./registry.js";
 export { REASONING_EFFORTS };
-// R23-C: the providerKey fingerprint normalizer (single implementation, src
-// host) — matchedCertRecord below compares the record-side providerKey against
-// the CURRENT agent.provider derivation, same judgment the reliability
-// writers (scripts/run-reliability.mjs agentInfo / matrix.normalizeCase) used
-// at certification time. Same src-relative import shape as the line above.
-import { providerKeyFor } from "./providerFingerprint.js";
 import { holdAwake } from "./keepAwake.js";
 
 /**
@@ -295,14 +289,13 @@ export function assertValidReasoningOverride(value) {
 // undefined-vs-null false mismatches). No agent-registry schema field added.
 //
 // R23-C (ADR-0026 v2 方向, 2026-08-21): the compared set is now the identity
-// QUADRUPLE backend + modelId + providerID (unchanged) + providerKey — the
-// normalized-baseUrl + apiKeyEnv-NAME fingerprint from the single-host
-// normalizer src/providerFingerprint.js (env NAME, never the secret value).
+// QUADRUPLE backend + modelId + providerID (unchanged) + providerKey. Since
+// decision 0106 retired the provider channel, the agent side is ALWAYS null;
 // Record-side tri-state: undefined = legacy record, dimension skipped;
-// explicit null = observed-no-provider — matches an agent with no derivable
-// provider block, mismatches an agent with one; a non-null record key must
-// byte-equal the agent-side derivation. Re-certification is the only path
-// across a provider-wiring change (same lesson as TD-131's backend/model).
+// explicit null = observed-no-provider — matches every current lane; a
+// non-null record key (a pre-0106 certified provider wiring) matches nothing
+// — re-certification is the only path across it (same lesson as TD-131's
+// backend/model).
 //
 // Hosting: HERE (core), imported DOWNWARD by src/application/registryInventory.js
 // (the display path's former private copy, same direction discipline as the
@@ -340,7 +333,9 @@ export function matchedCertRecord(agent, record) {
   if (record.modelId !== undefined && record.modelId !== modelId) return null;
   const providerID = agent.model?.providerID ?? null;
   if (providerID !== null && record.providerID !== undefined && record.providerID !== providerID) return null;
-  if (record.providerKey !== undefined && record.providerKey !== providerKeyFor(agent.provider)) return null;
+  // 决定 0106：providerKey 维恒为 null（当前侧）。记录侧仍可是字符串或 null——
+  // 带 non-null providerKey 的旧认证不再匹配任何车道（预期行为）。
+  if (record.providerKey !== undefined && record.providerKey !== null) return null;
   return record;
 }
 
@@ -1027,10 +1022,10 @@ export class RunManager {
     // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
     // runs AFTER the role-contract / delivery-contract checks (which are more
     // fundamental backend-capability gates). FAIL-CLOSED: when the agent has ANY
-    // structured policy (model/reasoning/provider), the backend MUST implement
+    // structured policy (model/reasoning), the backend MUST implement
     // validateAgentPolicy and confirm it can express it. A backend lacking the
     // method + a structured policy = reject. No structured policy → skip.
-    const hasStructuredPolicy = agent.model || agent.reasoning || agent.provider;
+    const hasStructuredPolicy = agent.model || agent.reasoning;
     if (hasStructuredPolicy) {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
@@ -1440,18 +1435,14 @@ export class RunManager {
       // undefined value is dropped by JSON serialization, so ordinary
       // dispatches stay byte-compatible).
       reasoning: agent.reasoning,
-      // R23-C §4: the provider ATTACHMENT fingerprint (providerKeyFor —
-      // normalized baseUrl + apiKeyEnv NAME). The normalizer DROPS
-      // userinfo/query/fragment, so a baseUrl carrying embedded credentials
-      // can never reach the transcript the way persisting the raw provider
-      // block would. Unconditional key: a lane with no provider block
-      // serializes an EXPLICIT null ("observed, no provider attached") —
-      // deliberately NOT undefined-dropped like `model`/`reasoning` above, so
-      // run_continue's drift check can tell a legacy parent (field absent →
-      // dimension skipped) from an observed-bare parent (null — a provider
-      // wired after the parent ran must NOT be silently adopted). Same
-      // tri-state discipline as matchedCertRecord.
-      providerKey: providerKeyFor(agent.provider),
+      // 决定 0106：providerKey 维恒为 null（provider 通道退役；providerFingerprint
+      // 随通道删除）。Unconditional key: a lane serializes an EXPLICIT null
+      // ("observed, no provider attached") — deliberately NOT undefined-dropped
+      // like `model`/`reasoning` above, so run_continue's drift check can tell
+      // a legacy parent (field absent → dimension skipped) from an
+      // observed-bare parent (null — a record-side string must NOT be silently
+      // adopted). Same tri-state discipline as matchedCertRecord.
+      providerKey: null,
       // R10-A: the EXPLICIT override fact — the Lead's own input, never a
       // secret. `model` above already reflects the synthesized policy (the
       // synthesis precedes this append); modelOverride lets an auditor tell
@@ -1583,8 +1574,8 @@ export class RunManager {
     // 身份（TD-131 → R23-C 四元组）：记录的 backend/modelId/providerKey
     //   （providerID 双侧声明时同比对；providerKey 记录侧 undefined = legacy 跳过、
     //   显式 null = 已观察无接入方）必须与当前 registry 该 agent 的配置一致
-    //   （matchedCertRecord SSOT，与显示层投影共用）——改配置换 backend/model/
-    //   接入方后不重跑 reliability，旧组合的认证不得放行。不匹配 → 按未认证拒绝，
+    //   （matchedCertRecord SSOT，与显示层投影共用）——改配置换 backend/model
+    //   后不重跑 reliability，旧组合的认证不得放行。不匹配 → 按未认证拒绝，
     //   固定文案（不回显 summary/registry 值——磁盘数据可能被改）。
     // 新鲜度（TD-132 → R23-C §2）：按 per-worker 的 lastFullHealthyRunAt 判
     //   （仅 full-scope 且全绿的 case 才刷新，scripts/reliability/certification.mjs
@@ -1953,7 +1944,7 @@ export class RunManager {
     // inherited model cannot be expressed gets the --model-naming sentence too.
     // R11-1: the rebuilt reasoning override rides the same wrapper with its own
     // shape (a resumed --reasoning dispatch gets the --reasoning-naming one).
-    const resumeHasPolicy = agent.model || agent.reasoning || agent.provider;
+    const resumeHasPolicy = agent.model || agent.reasoning;
     if (resumeHasPolicy) {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");

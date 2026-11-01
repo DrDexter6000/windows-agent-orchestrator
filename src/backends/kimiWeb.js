@@ -302,12 +302,6 @@ export class KimiWebBackend {
     if (agent?.model?.contextWindow !== undefined) {
       throw new Error("kimi-web backend cannot express model.contextWindow");
     }
-    // kimi 托管认证：服务器 bearer token（tokenEnv）是传输凭证，不是模型 provider。
-    if (agent?.provider) {
-      throw new Error(
-        "kimi-web backend cannot express provider (kimi managed auth; the server bearer token is not a model provider)",
-      );
-    }
     if (typeof agent?.serveUrl !== "string" || agent.serveUrl.trim().length === 0) {
       throw new Error("kimi-web backend requires serveUrl (non-empty string)");
     }

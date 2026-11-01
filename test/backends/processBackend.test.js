@@ -774,9 +774,8 @@ test("TD-104: process backends declare only their assigned credential channels",
 
   // credentialEnvNames delegates to the env-policy SSOT, which keys off
   // agent.backend. Pass the backend field so the SSOT resolves the static list.
-  assert.deepEqual(claude.credentialEnvNames({ backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" } }), ["ZHIPU_API_KEY"]);
-  // TD-229（2026-10-07）：native 通道（无 provider）额外继承长期令牌名——
-  // OPTIONAL（缺席不阻断），provider 通道不继承（防抢认证优先级）。
+  // TD-229（2026-10-07）+ 决定 0106：claude-code（唯一 OAuth 通道）无条件继承
+  // 长期令牌名——OPTIONAL（缺席不阻断）。
   assert.deepEqual(claude.credentialEnvNames({ backend: "claude-code" }), ["CLAUDE_CODE_OAUTH_TOKEN"]);
   assert.deepEqual(kimi.credentialEnvNames({ backend: "kimi-code" }), ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]);
   assert.deepEqual(codex.credentialEnvNames({ backend: "codex" }), ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"]);

@@ -49,7 +49,7 @@ import { renderHuman } from "../../src/commands/onboarding.js";
 
 // ── Template fixtures ────────────────────────────────────────────────────────
 // A faithful miniature of config/agents.example.json: top-level + per-agent
-// _comment* keys, a provider-wrapped claude-code worker, a kimi worker, and a
+// _comment* keys, a credential-bearing deepseek-acp worker, a kimi worker, and a
 // certification matrix covering a subset (mirrors the real template where not
 // every worker has a matrix entry).
 const TEMPLATE = {
@@ -60,16 +60,12 @@ const TEMPLATE = {
     coder_low: {
       _comment: "[Coder-Low] role comment",
       _comment_backend: "backend comment",
-      backend: "claude-code",
-      provider: {
-        protocol: "anthropic-compatible",
-        baseUrl: "https://api.deepseek.com/anthropic",
-        apiKeyEnv: "DEEPSEEK_API_KEY",
-      },
+      backend: "deepseek-acp",
+      credentialEnv: "DEEPSEEK_API_KEY",
       cwd: ".",
       systemPrompt: "config/roles/coder_low.md",
       args: ["--dangerously-skip-permissions"],
-      model: { id: "deepseek-v4-flash", contextWindow: 1000000 },
+      model: { id: "deepseek-v4-flash", providerID: "deepseek-official" },
       reasoning: { effort: "max" },
     },
     coder_mm: {
@@ -326,8 +322,8 @@ test("--apply writes a minimal valid agents.json (one worker, passes normalize)"
   assert.ok(written.certification?.matrix?.some((m) => m.agentId === "coder_low"));
   // No comment leakage in the written file.
   assert.ok(!/_comment/.test(JSON.stringify(written)));
-  // The provider apiKeyEnv NAME is preserved (needed); never a value.
-  assert.equal(written.agents.coder_low.provider.apiKeyEnv, "DEEPSEEK_API_KEY");
+  // The credentialEnv NAME is preserved (needed); never a value.
+  assert.equal(written.agents.coder_low.credentialEnv, "DEEPSEEK_API_KEY");
 });
 
 test("--apply for a worker with no certification matrix entry omits certification (truthful)", async () => {
@@ -721,7 +717,7 @@ test("candidate list carries no credential values or comment keys", () => {
   const list = buildCandidateList(TEMPLATE);
   const serialized = JSON.stringify(list);
   assert.ok(!/_comment/.test(serialized));
-  assert.ok(!/SECRET|sk-|api[_-]?key/i.test(serialized) || /apiKeyEnv/i.test(serialized),
+  assert.ok(!/SECRET|sk-|api[_-]?key(?!Env)/i.test(serialized),
     "candidate list must not leak values");
 });
 
@@ -1091,21 +1087,21 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
 // ── 18. R6-C: lane matrix + environment-adapted recommendations ─────────────
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent), derived
-// PURELY from the tracked template rows (backend / provider.apiKeyEnv / model.id
+// PURELY from the tracked template rows (backend / credential env / model.id
 // / _comment_auth) plus an INJECTED environment probe. Design
 // iron law: no second hand-written lane table, no auto-selection, no config
 // write — the recommendation is advisory and the user keeps the choice.
 // Probing is injectable everywhere; nothing here touches the real environment.
 
-test("R6-C: buildRecommendations derives rows from template rows (backend→CLI, apiKeyEnv, authNote; no lane-purpose field)", async () => {
+test("R6-C: buildRecommendations derives rows from template rows (backend→CLI, credential env, authNote; no lane-purpose field)", async () => {
   const custom = {
     agents: {
       w_key: {
-        backend: "claude-code",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "ZHIPU_API_KEY" },
+        backend: "deepseek-acp",
+        credentialEnv: "ZHIPU_API_KEY",
         model: { id: "glm-5.3[1m]" },
         _comment_task: `适合任务: ${"写".repeat(80)}`,
-        _comment_auth: "官方 Claude OAuth（claude login），不走 wrapper",
+        _comment_auth: "DSH 上游凭据（setx 注入）",
       },
       w_login: {
         backend: "codex",
@@ -1123,16 +1119,16 @@ test("R6-C: buildRecommendations derives rows from template rows (backend→CLI,
   assert.equal(rec.advisory, RECOMMENDATIONS_ADVISORY);
   const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
   // Row generation correctness from template rows.
-  assert.equal(byId.w_key.requiresCli, "claude", "backend→CLI mapping");
-  assert.equal(byId.w_key.requiresKeyEnv, "ZHIPU_API_KEY", "provider.apiKeyEnv carried");
+  assert.equal(byId.w_key.requiresCli, "dsh", "backend→CLI mapping");
+  assert.equal(byId.w_key.requiresKeyEnv, "ZHIPU_API_KEY", "credentialEnv carried");
   assert.equal(byId.w_key.model, "glm-5.3[1m]");
   // 决定 0090：车道用途只写在车道画像——注册表注释 _comment_task 不再进行。
   assert.equal("duty" in byId.w_key, false, "rows carry no lane-purpose field");
-  assert.equal(byId.w_key.authNote, "官方 Claude OAuth（claude login），不走 wrapper");
+  assert.equal(byId.w_key.authNote, "DSH 上游凭据（setx 注入）");
   assert.equal(byId.w_key.readyState, "ready", "user_env key counts as present (bridged at dispatch)");
-  // No provider → no key requirement; login-state family.
+  // No declared credential → no key requirement; login-state family.
   assert.equal(byId.w_login.requiresCli, "codex");
-  assert.equal(byId.w_login.requiresKeyEnv, null, "no provider.apiKeyEnv ⇒ null");
+  assert.equal(byId.w_login.requiresKeyEnv, null, "no credentialEnv ⇒ null");
   assert.equal(byId.w_login.authNote, null, "no _comment_auth ⇒ null (no hand-written fallback)");
   assert.equal(byId.w_login.readyState, "login_based");
 });
@@ -1154,9 +1150,9 @@ test("R6-C: backend→CLI mapping covers all live backends (null = no standalone
 
 test("R6-C: readyState four quadrants for key workers (injected probeEnv)", async () => {
   const custom = {
-    agents: { w: { backend: "claude-code", provider: { apiKeyEnv: "K" }, model: { id: "m" } } },
+    agents: { w: { backend: "deepseek-acp", credentialEnv: "K", model: { id: "m" } } },
   };
-  const candidates = [{ id: "w", backend: "claude-code", model: "m" }];
+  const candidates = [{ id: "w", backend: "deepseek-acp", model: "m" }];
   const run = (cli, key) => buildRecommendations(candidates, custom, {
     hasCli: async () => cli, hasKeyEnv: async () => key,
   });
@@ -1177,7 +1173,7 @@ test("R6-C: no-key workers probe the CLI only (login_based / missing_cli)", asyn
     hasKeyEnv: async () => { keyProbes += 1; return "missing"; },
   });
   assert.equal(rec.rows[0].readyState, "login_based");
-  assert.equal(keyProbes, 0, "no key probe for a worker without provider.apiKeyEnv");
+  assert.equal(keyProbes, 0, "no key probe for a worker without a declared credential env");
   const missing = await buildRecommendations(candidates, custom, {
     hasCli: async () => false, hasKeyEnv: async () => "missing",
   });
@@ -1187,12 +1183,12 @@ test("R6-C: no-key workers probe the CLI only (login_based / missing_cli)", asyn
 test("R6-C: probe exceptions degrade to unknown and never throw", async () => {
   const custom = {
     agents: {
-      a: { backend: "claude-code", provider: { apiKeyEnv: "K" }, model: { id: "m" } },
+      a: { backend: "deepseek-acp", credentialEnv: "K", model: { id: "m" } },
       b: { backend: "codex", model: { id: "m" } },
     },
   };
   const candidates = [
-    { id: "a", backend: "claude-code", model: "m" },
+    { id: "a", backend: "deepseek-acp", model: "m" },
     { id: "b", backend: "codex", model: "m" },
   ];
   // Throwing CLI probe → every row (even the login-state row) degrades to unknown.
@@ -1218,22 +1214,22 @@ test("R6-C: probe exceptions degrade to unknown and never throw", async () => {
 test("R6-C: rows are sorted ready-first (stable within rank)", async () => {
   const custom = {
     agents: {
-      r: { backend: "claude-code", provider: { apiKeyEnv: "K1" }, model: { id: "m" } },
+      r: { backend: "deepseek-acp", credentialEnv: "K1", model: { id: "m" } },
       m1: { backend: "codex", model: { id: "m" } },
-      m2: { backend: "claude-code", provider: { apiKeyEnv: "K2" }, model: { id: "m" } },
+      m2: { backend: "deepseek-acp", credentialEnv: "K2", model: { id: "m" } },
       l: { backend: "kimi-code", model: { id: "m" } },
       u: { backend: "deepseek-harness", model: { id: "m" } },
     },
   };
   const candidates = [
-    { id: "m2", backend: "claude-code", model: "m" },       // missing_key
+    { id: "m2", backend: "deepseek-acp", model: "m" },      // missing_key
     { id: "l", backend: "kimi-code", model: "m" },          // login_based
-    { id: "r", backend: "claude-code", model: "m" },        // ready
+    { id: "r", backend: "deepseek-acp", model: "m" },       // ready
     { id: "m1", backend: "codex", model: "m" },             // missing_cli
     { id: "u", backend: "deepseek-harness", model: "m" },   // 无 CLI 面 → unknown
   ];
   const rec = await buildRecommendations(candidates, custom, {
-    hasCli: async (n) => n === "claude" || n === "kimi", // codex missing
+    hasCli: async (n) => n === "dsh" || n === "kimi", // codex missing
     hasKeyEnv: async (n) => (n === "K1" ? "process_env" : "missing"),
   });
   assert.deepEqual(rec.rows.map((r) => r.id), ["r", "l", "m1", "m2", "u"],
@@ -1253,14 +1249,14 @@ test("R6-C: an unmapped backend row degrades to unknown (cannot verify)", async 
 test("R6-C: one probe per unique CLI/key name (≤4 CLI probes + ≤N key probes per invocation)", async () => {
   const custom = {
     agents: {
-      r1: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "m" } },
-      r2: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "m" } },
+      r1: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "m" } },
+      r2: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "m" } },
       r3: { backend: "kimi-code", model: { id: "m" } },
     },
   };
   const candidates = [
-    { id: "r1", backend: "claude-code", model: "m" },
-    { id: "r2", backend: "claude-code", model: "m" },
+    { id: "r1", backend: "deepseek-acp", model: "m" },
+    { id: "r2", backend: "deepseek-acp", model: "m" },
     { id: "r3", backend: "kimi-code", model: "m" },
   ];
   const calls = { cli: [], key: [] };
@@ -1268,7 +1264,7 @@ test("R6-C: one probe per unique CLI/key name (≤4 CLI probes + ≤N key probes
     hasCli: async (n) => { calls.cli.push(n); return true; },
     hasKeyEnv: async (n) => { calls.key.push(n); return "missing"; },
   });
-  assert.deepEqual(calls.cli, ["claude", "kimi"], "deduped per unique CLI name");
+  assert.deepEqual(calls.cli, ["dsh", "kimi"], "deduped per unique CLI name");
   assert.deepEqual(calls.key, ["DEEPSEEK_API_KEY"], "deduped per unique key name");
   assert.ok(calls.cli.length <= 4, "hard bound: at most 4 CLI probes");
 });
@@ -1300,7 +1296,7 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   assert.ok(text.includes(RECOMMENDATIONS_ADVISORY), "advisory sentence shared with JSON");
   assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。"),
     "tail advisory line hands the choice back to the user");
-  // coder_low is ready (claude CLI + DEEPSEEK_API_KEY), sorted first.
+  // coder_low is ready (dsh CLI + DEEPSEEK_API_KEY), sorted first.
   assert.ok(text.includes("[ready]"), "ready bracket rendered");
   assert.ok(text.includes("[CLI 登录态]"), "login-state rows rendered");
   assert.ok(text.indexOf("[ready]") < text.indexOf("[CLI 登录态]"), "ready rows sorted before login rows");
@@ -1326,10 +1322,10 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
     probeEnv: { hasCli: async () => false, hasKeyEnv: async () => "missing" },
   })).result;
   const textMissing = renderHuman(nothing);
-  assert.ok(textMissing.includes("缺 claude CLI"), "missing_cli label");
+  assert.ok(textMissing.includes("缺 dsh CLI"), "missing_cli label");
   assert.ok(textMissing.includes("缺 DEEPSEEK_API_KEY"), "missing_key label");
   assert.ok(textMissing.includes("缺 kimi CLI"), "kimi missing_cli label");
-  assert.ok(textMissing.includes("缺 claude CLI + 缺 DEEPSEEK_API_KEY"), "missing_both label");
+  assert.ok(textMissing.includes("缺 dsh CLI + 缺 DEEPSEEK_API_KEY"), "missing_both label");
   assert.ok(!textMissing.includes("[ready]"), "nothing is ready in this scenario");
 });
 
@@ -1426,9 +1422,9 @@ test("R6-C2/R9: 矩阵渲染含 backend 列、登录态行写明具体 CLI、分
   // 极简模板：一个 key 型 + 一个登录型（codex）+ 一个 coder 通道（claude-code + ZHIPU key）。
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      w_key: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
       tester: { backend: "codex", _comment_auth: "codex login" },
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" } },
+      coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY" },
     },
   }));
   const fsMod = await import("node:fs/promises");
@@ -1444,7 +1440,7 @@ test("R6-C2/R9: 矩阵渲染含 backend 列、登录态行写明具体 CLI、分
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 3, "模板可读时矩阵必须有三行（fs 注入缺失会正确降级为空——本测试必须注入）");
   // backend 列可见（第一行布局：id 之后）。
-  assert.match(text, /w_key\s+claude-code\s+/, "backend 列必须出现在 id 之后");
+  assert.match(text, /w_key\s+deepseek-acp\s+/, "backend 列必须出现在 id 之后");
   assert.match(text, /tester\s+codex\s+/, "codex worker 的 backend 列可见");
   // 登录态行写明具体 CLI（第二行布局）。
   assert.match(text, /认证: codex CLI 登录态/, "登录态行的认证标签必须写明具体 CLI 名");
@@ -1474,7 +1470,7 @@ test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-d
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      w_key: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
       tester: { backend: "codex" },
     },
   }));
@@ -1515,7 +1511,7 @@ test("R6-C3: 两行布局+表头、认证标签三分支、authNote 括号形状
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+      w_key: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
       w_login: { backend: "codex", _comment_auth: "codex login", model: { id: "gpt-x" } },
       w_none: { backend: "some-future-backend", model: { id: "m" } },
     },
@@ -1536,7 +1532,7 @@ test("R6-C3: 两行布局+表头、认证标签三分支、authNote 括号形状
   assert.match(text, /^ {2}id {23}backend {9}model {15}状态$/m,
     "表头行按显示宽与数据行同列宽");
   // 第一行布局：id/backend/model 后跟状态括号。
-  assert.match(text, /^ {2}w_key\s+claude-code\s+glm-5\.3\[1m\]\s+\[/m,
+  assert.match(text, /^ {2}w_key\s+deepseek-acp\s+glm-5\.3\[1m\]\s+\[/m,
     "第一行 = id/backend/model/状态");
   // 第二行布局：只有认证标签（车道用途不在矩阵里，决定 0090）。
   assert.match(text, /^ {4}认证: /m, "第二行 = 认证");
@@ -1568,7 +1564,7 @@ test("复核 R4: displayWidth 语义 + 矩阵渲染行显示宽上界（回归�
   const longAuth = "很长的认证说明".repeat(12); // 48 CJK = 96 显示格，必触发截断
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" },
+      coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY",
         _comment_auth: longAuth },
       tester: { backend: "codex", _comment_auth: longAuth },
     },
@@ -1633,14 +1629,14 @@ test("R9 需求 1: no-args 与 selected/--apply 两出口都打印分级块（�
   // 与 apply 写路径走真实 tmp 文件，绝无真实派发）。
   const root = tmpTemplate({
     coder_hq: {
-      backend: "claude-code",
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" },
+      backend: "deepseek-acp",
+      credentialEnv: "ZHIPU_API_KEY",
       cwd: ".", systemPrompt: "config/roles/coder_hq.md",
       model: { id: "glm-5.3[1m]", contextWindow: 1000000 }, reasoning: { effort: "max" },
     },
     coder_low: {
-      backend: "claude-code",
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" },
+      backend: "deepseek-acp",
+      credentialEnv: "DEEPSEEK_API_KEY",
       cwd: ".", systemPrompt: "config/roles/coder_low.md",
       model: { id: "deepseek-v4-pro", contextWindow: 1000000 }, reasoning: { effort: "max" },
     },
@@ -1674,8 +1670,8 @@ test("R9 需求 1: no-args 与 selected/--apply 两出口都打印分级块（�
 test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说作者回避使两席建议空转", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
+    coder_low: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" } },
   });
   try {
     // 恰一名可用席位候选（coder_hq ready；coder_low 缺 key）。
@@ -1694,7 +1690,7 @@ test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说
   }
   // 单 worker：唯一 worker 即被审产出作者（0019 §3 回避），两席建议事实空转。
   const solo = tmpTemplate({
-    coder_solo: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    coder_solo: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
   }, "wao-onb-solo-");
   try {
     const r = await runWithTemplate(solo, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
@@ -1711,8 +1707,8 @@ test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说
 test("R9 需求 2/4: 无可用候选 → 跳过提示（--panel-skip-reason 登记句在场）", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
+    coder_low: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => false, hasKeyEnv: async () => "missing" });
@@ -1729,8 +1725,8 @@ test("R9 需求 2/4: 无可用候选 → 跳过提示（--panel-skip-reason 登�
 test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系单一 → 副审建议来自不同族系一行", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_g1: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_g2: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" } },
+    coder_g1: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
+    coder_g2: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.2" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
@@ -1749,7 +1745,7 @@ test("R9 需求 5 / 0065 主提示: 同族提示——≥2 可用但推断族系
 test("R9: login_based 副审（如 auditor）如实展示为登录态未验证，不当已验证讲", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, _comment_auth: "官方 Claude OAuth" },
   });
   try {
@@ -1772,8 +1768,8 @@ test("R9: login_based 副审（如 auditor）如实展示为登录态未验证�
 test("R9: panelReadiness 是加性字段——既有键全保留、JSON 可序列化；模板不可读时人类块不打印", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
+    coder_low: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
@@ -1822,8 +1818,8 @@ test("R9: 分级块每行显示宽 ≤120（与矩阵块同纪律）", async () 
   const root = tmpTemplate({
     coder_dsh_fallback: { backend: "deepseek-harness", model: { id: "deepseek-v4-flash" }, dshConfigPath: "C:/wao-test/dsh.json", credentialEnv: "DEEPSEEK_API_KEY" },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" } },
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
-    coder_mm: { backend: "claude-code", provider: { apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-code/k3" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
+    coder_mm: { backend: "deepseek-acp", credentialEnv: "KIMI_API_KEY", model: { id: "kimi-code/k3" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
@@ -1853,8 +1849,8 @@ test("0065 语义翻转钉（R9-C C-1 历史病灶位）: 角色名键照常计�
   // R9-C C-1 旧语义：researcher=非席位不进计数/建议；0065 终局（0045"角色是
   // 帽子"）：任何车道键都可能任副审——本测试钉死语义翻转，防悄悄退回角色过滤。
   const root = tmpTemplate({
-    researcher: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    researcher: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
   });
   try {
     const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
@@ -1872,7 +1868,7 @@ test("0065 语义翻转钉（R9-C C-1 历史病灶位）: 角色名键照常计�
 test("R9-C C-12: 探测未知如实展示一行（docblock 承诺的展示面兑现）", async () => {
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" } },
   });
   try {
@@ -1898,8 +1894,8 @@ test("R9-C C-12: 探测未知如实展示一行（docblock 承诺的展示面兑
 test("0065: 模板面计数与 declared 无关——任何 ready 行都计入候选（seatRole 字段已废弃为惰性）", async () => {
   const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
   const root = tmpTemplate({
-    my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+    my_reviewer: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
   }, "wao-onb-decl-");
   try {
     const r = await runWithTemplate(root, probeAll);
@@ -1911,8 +1907,8 @@ test("0065: 模板面计数与 declared 无关——任何 ready 行都计入候
   }
   // 同 id 无声明：与带声明同输入同结果（字段惰性——0065 终局钉）。
   const undeclRoot = tmpTemplate({
-    my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" } },
-    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    my_reviewer: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
   }, "wao-onb-undecl-");
   try {
     const r = await runWithTemplate(undeclRoot, probeAll);
@@ -1925,12 +1921,12 @@ test("0065: 模板面计数与 declared 无关——任何 ready 行都计入候
 
 test("0065: 已配置面计数与 declared 无关——私有 registry 行照常计入（席位声明惰性）", async () => {
   const root = tmpTemplate({ ghost_tpl: { backend: "codex" } }, "wao-onb-cfgdecl-");
-  // R10-C C-2 起已配置面逐条过 normalizeAgent——fixture 用完整 provider 形状
-  // （protocol/baseUrl/apiKeyEnv 三字段齐全），与真实可派发 registry 一致。
+  // R10-C C-2 起已配置面逐条过 normalizeAgent——fixture 须过得了它
+  // （credentialEnv 声明齐全）。
   writeFileSync(join(root, "config", "agents.json"), JSON.stringify({
     agents: {
-      my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      my_reviewer: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
+      coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
     },
   }));
   try {
@@ -1949,13 +1945,13 @@ test("R10-B B-2: readiness 块双面切换——absent 模板面；present+reada
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
   const root = tmpTemplate({
-    ghost_tpl: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    ghost_tpl: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
   }, "wao-onb-faces-");
   const priv = {
     agents: {
-      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 provider 形状。
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
-      coder_mm: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "kimi-code/k3" }, seatRole: "adversarial" },
+      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 registry 字段形状。
+      coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      coder_mm: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "kimi-code/k3" }, seatRole: "adversarial" },
     },
   };
   const privPath = join(root, "config", "agents.json");
@@ -2001,7 +1997,7 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
   const root = tmpTemplate({
-    ghost_tpl: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    ghost_tpl: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
   }, "wao-onb-invalid-");
   const privPath = join(root, "config", "agents.json");
   try {
@@ -2010,9 +2006,9 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
     // 双拒的条目不得进已配置面渲染）。
     writeFileSync(privPath, JSON.stringify({
       agents: {
-        coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
-        auditor: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "claude-opus-5" }, seatRole: "adversarial" },
-        bad_seat: { backend: "not-a-real-backend", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" } },
+        coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+        auditor: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "claude-opus-5" }, seatRole: "adversarial" },
+        bad_seat: { backend: "not-a-real-backend", cwd: ".", model: { id: "deepseek-v4-pro" } },
       },
     }));
     const r = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
@@ -2029,7 +2025,7 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
 
     // (2) 全无效：不得被"零行整块不打印"吞掉——提示行仍必须在场。
     writeFileSync(privPath, JSON.stringify({
-      agents: { bad_seat: { backend: "not-a-real-backend", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." } },
+      agents: { bad_seat: { backend: "not-a-real-backend", cwd: "." } },
     }));
     const rAll = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
     assert.equal(rAll.panelFace, "configured");
@@ -2042,7 +2038,7 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
     // (3) 回归：干净 registry → invalidCount 恒 0，无提示行（字节兼容）。
     writeFileSync(privPath, JSON.stringify({
       agents: {
-        coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+        coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
       },
     }));
     const rClean = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
@@ -2084,10 +2080,10 @@ test("R10-B B-2/0065: doctor/onboarding 已配置面数字对账——同一 reg
   const { deriveReadyState, assessPanelReadiness } = await import("../../src/application/panelReadiness.js");
   const registry = {
     agents: {
-      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 provider 形状。
-      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" } },
-      coder_low: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" } },
-      researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" } },
+      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 registry 字段形状。
+      coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", cwd: ".", model: { id: "glm-5.3[1m]" } },
+      coder_low: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", cwd: ".", model: { id: "deepseek-v4-pro" } },
+      researcher: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", cwd: ".", model: { id: "deepseek-v4-flash" } },
     },
   };
   const probeFacts = { hasCli: async () => true, hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing") };
@@ -2100,9 +2096,9 @@ test("R10-B B-2/0065: doctor/onboarding 已配置面数字对账——同一 reg
     model: agent.model?.id ?? null,
     readyState: deriveReadyState({
       requiresCli: BACKEND_CLI[agent.backend] ?? null,
-      requiresKeyEnv: agent.provider?.apiKeyEnv ?? null,
+      requiresKeyEnv: agent.credentialEnv ?? null,
       cli: true,
-      key: agent.provider?.apiKeyEnv ? (agent.provider.apiKeyEnv === "ZHIPU_API_KEY" ? "process_env" : "missing") : undefined,
+      key: agent.credentialEnv ? (agent.credentialEnv === "ZHIPU_API_KEY" ? "process_env" : "missing") : undefined,
     }),
   }));
   const doctorAssessed = assessPanelReadiness(doctorRows);
@@ -2139,11 +2135,11 @@ const PROBE_TEMPLATE_FACE = {
   hasKeyEnv: async (n) => (n === "DEEPSEEK_API_KEY" ? "process_env" : "missing"),
 };
 
-// 私有条目工厂：合法最小形状（backend + provider + cwd + model），seatRole 可选。
-function privEntry(backend = "claude-code", modelId = "deepseek-v4-flash", apiKeyEnv = "DEEPSEEK_API_KEY", extra = {}) {
+// 私有条目工厂：过得了 registry 规范化的最小形状（backend + credentialEnv + cwd + model），seatRole 可选。
+function privEntry(backend = "deepseek-acp", modelId = "deepseek-v4-flash", credentialEnvName = "DEEPSEEK_API_KEY", extra = {}) {
   return {
     backend,
-    provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv },
+    credentialEnv: credentialEnvName,
     cwd: ".",
     model: { id: modelId },
     ...extra,
@@ -2155,7 +2151,7 @@ function privEntry(backend = "claude-code", modelId = "deepseek-v4-flash", apiKe
 // 车道矩阵头到表尾句前；renderHuman 的块尾部空白用 trimEnd 归一。
 const GOLDEN_TEMPLATE_MATRIX = `车道矩阵与当前环境适配（推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置））:
   id                       backend         model               状态
-  coder_low                claude-code     deepseek-v4-flash   [ready]
+  coder_low                deepseek-acp    deepseek-v4-flash   [ready]
     认证: key DEEPSEEK_API_KEY
   coder_mm                 kimi-code       kimi-code/k3        [CLI 登录态]
     认证: kimi CLI 登录态
@@ -2254,13 +2250,13 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
   const priv = {
     agents: {
       // 同 id coder_low 与模板 backend/model 一致 → 不判 drift；registry 顺序 = 展示顺序。
-      coder_hq: privEntry("claude-code", "glm-5.3[1m]", "ZHIPU_API_KEY", { seatRole: "implementation" }),
+      coder_hq: privEntry("deepseek-acp", "glm-5.3[1m]", "ZHIPU_API_KEY", { seatRole: "implementation" }),
       // d′（决定 0044）：effort 入 drift 闭集——"同值不判"的夹具须在新闭集上真同值
       //（模板 coder_low reasoning.effort=max，私有侧补齐；无 effort 的私有席位对
       // 有 effort 的模板行现在如实判 drift，这正是 10-05 漏面要的可见性）。
       // 0062（B9 乙′）同律：seatRole 入闭集——模板 coder_low 无声明，私有侧也
       // 不声明（真同值；coder_hq 模板不携带、不进比对）。
-      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { reasoning: { effort: "max" } }),
+      coder_low: privEntry("deepseek-acp", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { reasoning: { effort: "max" } }),
     },
   };
   const { result } = await memRun({
@@ -2306,7 +2302,7 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
 test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + C-2 提示共存 + 行宽 ≤120", async () => {
   const priv = {
     agents: {
-      coder_low: privEntry("claude-code", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
+      coder_low: privEntry("deepseek-acp", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
       my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有
       bad_seat: privEntry("not-a-real-backend", "deepseek-v4-flash", "ZHIPU_API_KEY"), // 无效 → 剔除
     },
@@ -2336,7 +2332,7 @@ test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + dr
   assert.ok(lines[extraIdx + 1].includes("认证: kimi CLI 登录态"), "私有独有行认证照常");
   assert.ok(!lines[extraIdx + 1].includes("?"), "私有独有行不打 ?");
   assert.ok(text.includes(
-    "drift: coder_low 私有 model=deepseek-v4-pro/backend=claude-code ≠ 模板 deepseek-v4-flash/claude-code"),
+    "drift: coder_low 私有 model=deepseek-v4-pro/backend=deepseek-acp ≠ 模板 deepseek-v4-flash/deepseek-acp"),
     "drift 有界明细形状固定");
   // 三类注记共存：C-2 提示行 + 指针行 + 分级块（R10-B/R10-C 与矩阵改造同屏）。
   assert.ok(text.includes("私有 registry 有 1 条无效条目已剔除"));
@@ -2391,8 +2387,8 @@ test("R11-2 0024 drift 闭集仅 backend + model.id：model 兄弟字段（provi
   const customTpl = {
     agents: {
       keep: {
-        backend: "claude-code",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        backend: "deepseek-acp",
+        credentialEnv: "K_API_KEY",
         cwd: ".",
         model: { providerID: "deepseek", id: "deepseek-v4-pro", variant: "legacy-a", contextWindow: 1000000 },
       },
@@ -2402,14 +2398,14 @@ test("R11-2 0024 drift 闭集仅 backend + model.id：model 兄弟字段（provi
   const priv = {
     agents: {
       keep: {
-        backend: "claude-code",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        backend: "deepseek-acp",
+        credentialEnv: "K_API_KEY",
         cwd: ".",
         model: { providerID: "deepseek", id: "deepseek-v4-pro", contextWindow: 500000 },
       },
       swp: {
-        backend: "claude-code",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        backend: "deepseek-acp",
+        credentialEnv: "K_API_KEY",
         cwd: ".",
         model: { id: "deepseek-v4-pro" },
       },

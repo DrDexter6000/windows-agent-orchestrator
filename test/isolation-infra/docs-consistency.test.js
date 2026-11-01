@@ -719,18 +719,6 @@ test("M8 scorecard 默认 warn 语义固化（SKILL+architecture 不得回退为
     "02-architecture.md 必须反映 M8-1 scorecard 默认 warn 语义");
 });
 
-test("provider-wrapped claude-code worker 必须记录 OAuth 覆盖 provider key 的排查入口", () => {
-  const troubleshooting = read("docs/troubleshooting.md");
-  assert.ok(/CLAUDE_CONFIG_DIR/.test(troubleshooting),
-    "troubleshooting.md 必须说明 provider wrapper 用 CLAUDE_CONFIG_DIR 隔离 Claude OAuth 凭证");
-  assert.ok(/claudeAiOauth|OAuth.*provider key|provider key.*OAuth/i.test(troubleshooting),
-    "troubleshooting.md 必须记录 claude-code OAuth 登录态会覆盖 provider key 的故障模式");
-
-  const onboarding = read("AGENT_ONBOARDING.md");
-  assert.ok(/CLAUDE_CONFIG_DIR|OAuth.*provider/i.test(onboarding),
-    "AGENT_ONBOARDING.md 必须提醒首装 agent provider worker 与 Claude OAuth 凭证隔离");
-});
-
 test("SKILL.md scorecard 示例必须推荐 --scorecard-rules-file，避免 PowerShell/npm inline JSON", () => {
   const skill = read("SKILL.md");
   assert.ok(/--scorecard-rules-file/.test(skill),
@@ -2334,7 +2322,7 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
   assert.ok(/删到只剩|删掉|删除|prune/.test(ob),
     "onboarding 必须说明可按需保留/删除 worker");
   // Compact choice table: native Claude OAuth / DeepSeek / GLM / Codex login / Kimi Code.
-  for (const kw of ["claude login", "DEEPSEEK_API_KEY", "ZHIPU_API_KEY", "codex login", "Kimi"]) {
+  for (const kw of ["claude login", "DEEPSEEK_API_KEY", "codex login", "Kimi"]) {
     assert.ok(ob.includes(kw), `onboarding 选择表必须覆盖：${kw}`);
   }
   // Registry validate/list shown.
@@ -3567,7 +3555,6 @@ test("TD-162 顺带: onboarding 认证表覆盖 registry 模板声明的全部�
   const parsed = JSON.parse(read("config/agents.example.json"));
   const declared = new Set();
   for (const w of Object.values(parsed.agents ?? {})) {
-    if (typeof w?.provider?.apiKeyEnv === "string") declared.add(w.provider.apiKeyEnv);
     if (typeof w?.credentialEnv === "string") declared.add(w.credentialEnv);
   }
   assert.ok(declared.size > 0, "模板未声明任何凭据 env（解析异常？守卫空转）");

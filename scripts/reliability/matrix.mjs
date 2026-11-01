@@ -1,6 +1,3 @@
-// R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import，
-// 与 run-reliability.mjs agentInfo / runManager.matchedCertRecord 同源零漂移。
-import { providerKeyFor } from "../../src/providerFingerprint.js";
 import { matrixCaseLabel } from "../../src/registry.js";
 // 决定 0086：OS 写沙箱能力声明（enforcesWriteSandbox）的读取 SSOT——矩阵构建
 // 按声明选 drill 词汇，共享代码不按运行时名分支。
@@ -123,10 +120,9 @@ function normalizeCase(tc, agent = {}, profileOverride) {
     // 与 :providerKey 同族的教训（TD-133 / TD-169）。行值与 agent 不一致时以 agent 为准并告警。
     providerID: agentIdentity("providerID", agent.model?.providerID ?? null, tc.providerID),
     modelId: agentIdentity("modelId", agent.model?.id ?? null, tc.modelId),
-    // R23-C：providerKey 一律从 registry 的 agent.provider 派生，绝不读行值——
-    // providerID 硬编码行值导致该维度对现网全部 lane 空转的教训（TD-133 同族）。
-    // 无 provider 块 → null（已观察确认无接入方）。
-    providerKey: providerKeyFor(agent.provider),
+    // R23-C → 决定 0106：providerKey 维恒为 null（provider 通道退役），不从
+    // 行值/agent 派生——记录侧继续写显式 null（缺字段会触发 legacy 台账提示）。
+    providerKey: null,
   };
 }
 

@@ -490,6 +490,7 @@ test("M12-7-RC-14: Windows user-env credential bridge reaches the continuation r
   try {
     await seedParent({
       runDir: dir, runId: "run_parent_cred", agentId: "coder_hq", cwd: repo,
+      backend: "deepseek-acp",
       worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
       deliveryCommit: parent.deliveryCommit,
     });
@@ -498,8 +499,8 @@ test("M12-7-RC-14: Windows user-env credential bridge reaches the continuation r
       delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
       runDir: dir,
       registryPath: makeRegistry(dir, { coder_hq: {
-        backend: "claude-code", cwd: repo,
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.invalid", apiKeyEnv: keyName },
+        backend: "deepseek-acp", cwd: repo,
+        credentialEnv: keyName,
       } }),
       authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
       backendFor: () => ({ supportsSessionReuse: true }),

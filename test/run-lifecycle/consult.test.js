@@ -116,18 +116,17 @@ function makeTranscript(runId, { state = "completed", finalText = "", fileWritte
  * 接收路径、返回带 getAgent 的 registry 对象）。r1 曾把 registry 对象本身
  * 当读取函数传入，service 的 try/catch 静默降级 null 而 r1 无断言揭穿；
  * BRICK-1 的原始字段断言钉住这一形状。
- * 席位形状覆盖：seat_a 走 wrapper 形（provider.baseUrl，无 model.providerID）、
- * seat_b 走裸 backend 形（无 provider 块）。
+ * 席位形状覆盖：seat_a 走 providerID 形（deepseek-acp 的 model.providerID）、
+ * seat_b 走裸 backend 形（无路由字段）。
  */
 function stubRegistryRead() {
   return async () => ({
     getAgent: (id) => (id === "seat_b"
       ? { backend: "codex", cwd: ".", model: { id: `model-${id}` } }
       : {
-        backend: "claude-code",
+        backend: "deepseek-acp",
         cwd: ".",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://stub.example/api/anthropic", apiKeyEnv: "STUB_KEY" },
-        model: { id: `model-${id}` },
+        model: { id: `model-${id}`, providerID: "deepseek-official" },
       }),
   });
 }
@@ -767,15 +766,15 @@ test("BRICK-1: runConsult 厂族砖=backend/provider 原始字段直读；regist
     mkdirFn: async () => {},
   }));
   const a = result.seats.find((s) => s.agentId === "seat_a");
-  assert.equal(a.backend, "claude-code", "backend 原始字符串直读");
-  assert.equal(a.provider, "https://stub.example/api/anthropic", "provider 原始标识（wrapper 形=provider.baseUrl）直读");
+  assert.equal(a.backend, "deepseek-acp", "backend 原始字符串直读");
+  assert.equal(a.provider, "deepseek-official", "provider 原始标识（model.providerID）直读");
   const b = result.seats.find((s) => s.agentId === "seat_b");
   assert.equal(b.backend, "codex");
-  assert.equal(b.provider, null, "无 provider 块如实 null——不猜不归类");
+  assert.equal(b.provider, null, "无路由字段如实 null——不猜不归类");
   // 0045 W4c：runtimeFacts 增 registryResolution（"ok"|"failed"|"registry-unreadable"）
   // ——解析失败不再静默吞成与"确无 provider"同形的 null。
   assert.deepEqual(result.bricks.runtimeFacts, [
-    { agentId: "seat_a", backend: "claude-code", provider: "https://stub.example/api/anthropic", registryResolution: "ok" },
+    { agentId: "seat_a", backend: "deepseek-acp", provider: "deepseek-official", registryResolution: "ok" },
     { agentId: "seat_b", backend: "codex", provider: null, registryResolution: "ok" },
   ]);
   assert.ok(!("modelFamily" in a), "席位不再携带族系归类字段（R9 控制面铁律）");
@@ -794,16 +793,11 @@ test("BRICK-1: runConsult 厂族砖=backend/provider 原始字段直读；regist
   ]);
 });
 
-test("BRICK-2: seatRuntimeFacts 纯函数——model.providerID 优先于 provider.baseUrl；缺形状如实 null", () => {
+test("BRICK-2: seatRuntimeFacts 纯函数——model.providerID 直读；缺形状如实 null", () => {
   assert.deepEqual(
-    seatRuntimeFacts({ backend: "zcode", model: { id: "zhipu/glm-5.3", providerID: "zhipu" }, provider: { baseUrl: "https://other.example" } }),
+    seatRuntimeFacts({ backend: "zcode", model: { id: "zhipu/glm-5.3", providerID: "zhipu" } }),
     { backend: "zcode", provider: "zhipu" },
-    "zcode 形 providerID 是首选原始标识",
-  );
-  assert.deepEqual(
-    seatRuntimeFacts({ backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "X_KEY" } }),
-    { backend: "claude-code", provider: "https://open.bigmodel.cn/api/anthropic" },
-    "wrapper 形取 provider.baseUrl——该形状下唯一可区分提供方的原始字段",
+    "providerID 是首选原始标识",
   );
   assert.deepEqual(seatRuntimeFacts({ backend: "codex" }), { backend: "codex", provider: null });
   assert.deepEqual(seatRuntimeFacts({}), { backend: null, provider: null });
@@ -850,7 +844,7 @@ function craftedResult() {
     seats: [
       {
         agentId: "seat_a", runId: "run_a", runState: "completed", formatState: "structured",
-        backend: "claude-code", provider: "https://open.bigmodel.cn/api/anthropic", budgetExpired: false,
+        backend: "deepseek-acp", provider: "deepseek-official", budgetExpired: false,
         attribution: attributeReply("Q1: A 可行\nQ2: 选 B\n"),
         finalText: "Q1: A 可行\nQ2: 选 B\n",
       },
@@ -865,7 +859,7 @@ function craftedResult() {
     fieldValues: { Q1: { seat_a: "A", seat_b: null } },
     bricks: {
       runtimeFacts: [
-        { agentId: "seat_a", backend: "claude-code", provider: "https://open.bigmodel.cn/api/anthropic" },
+        { agentId: "seat_a", backend: "deepseek-acp", provider: "deepseek-official" },
         { agentId: "seat_b", backend: "kimi-code", provider: null },
       ],
       authorInSeats: false,
@@ -891,7 +885,7 @@ test("CLI-1: text 渲染——按问题原序并列、未归类区在场、runId
   assert.ok(text.includes("∉ 席位清单"), "非作者砖事实行在场（authorInSeats=false）");
   assert.ok(text.includes("会话独立性：未提供"), "三块砖之会话独立性如实未提供");
   assert.ok(text.includes("registry 原始字段直读"), "厂族砖声明原始字段直读（不归类）");
-  assert.ok(text.includes("seat_a=claude-code @ https://open.bigmodel.cn/api/anthropic"), "厂族砖 backend/provider 原始值在场");
+  assert.ok(text.includes("seat_a=deepseek-acp @ deepseek-official"), "厂族砖 backend/provider 原始值在场");
   assert.ok(!/\d+ 族）/.test(text), "不做族系计数（R9：归类判断不出现在控制面输出）");
   for (const forbidden of ["一致", "分歧", "agree", "disagree"]) {
     assert.ok(!text.includes(forbidden), `渲染不得含结论词：${forbidden}`);
@@ -972,7 +966,7 @@ test("CLI-4: consult show 从组记录重渲染（只读；问题原序 + 席位
       elapsedMs: 100,
       questions: parseBriefQuestions("## Q1 方案可行吗\nQ2: 首选哪个\n"),
       declaredFields: { Q1: ["A", "B"] },
-      seats: [{ agentId: "seat_a", runId: "run_show_a", runState: "completed", formatState: "structured", backend: "claude-code", provider: "https://open.bigmodel.cn/api/anthropic" }],
+      seats: [{ agentId: "seat_a", runId: "run_show_a", runState: "completed", formatState: "structured", backend: "deepseek-acp", provider: "deepseek-official" }],
       fieldDiff: [],
     };
     writeFileSync(join(consultsDir, "consult_20261002120000000abc123.json"), JSON.stringify(record), "utf8");

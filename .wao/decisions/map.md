@@ -107,3 +107,4 @@
 0103 | 清退计划由 Lead 判定后直接 apply，事后汇报；批准人只写在一处
 0104 | SSOT 四原则以 ssot §2 为家；AGENTS 只留指针并写入精简优先
 0105 | opencode worker 后端退役：代码与测试封存进 tag，专页入档；恢复一律重放、取回一律转录
+0106 | claude-code 的 provider 通道退役：registry 统一拒绝 provider 块，providerKey 维恒 null，封存进 tag

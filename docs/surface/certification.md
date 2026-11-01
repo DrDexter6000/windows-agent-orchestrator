@@ -6,7 +6,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 数据源（现成 SSOT，本文件不含第二真相）：
 
 - 七轴能力：`src/registry.js` `KNOWN_BACKENDS` × `src/backends/factory.js` `BACKEND_CAPABILITY_AXES` / `readBackendCapabilities`（strict `=== true`——未声明读 false，fail-closed）。
-- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生——探针从 `src/backends/factory.js` `POLICY_PROBE_BASES` 登记的最小合法底稿深拷贝出发，一次只改或只加被测的一项（底稿合法性/最小性在生成期校验）；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量。
+- 配置表达力三轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生——探针从 `src/backends/factory.js` `POLICY_PROBE_BASES` 登记的最小合法底稿深拷贝出发，一次只改或只加被测的一项（底稿合法性/最小性在生成期校验）；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量。
 - 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。
 
 漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等。入口合同（2026-09-22 收束包拆分）：`scripts/gen-certification.mjs` 是**纯库**——导出 `renderCertification()` 与探针内核具名导出（`probeExpressivity` / `checkProbeBase`），导入零副作用、零入口探测（任何 argv 形状下 import 都不生成/不检查/不退出）；进程入口是薄 CLI `scripts/gen-certification-cli.mjs`（无参＝写出、恰好 `--check`＝只读比对、其他任何参数＝非零退出且不写不查）——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。
@@ -25,27 +25,26 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 
 ✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴见 §二条件与限制说明。
 
-## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）
+## 二、配置表达力三轴判定（validateAgentPolicy 行为探针派生：底稿＋单项）
 
 判定词（只管 **WAO 接线层**）：每个探针＝登记底稿的深拷贝＋只改/只加被测的一项，因此拒绝可归因到被测项本身。**支持**＝全部探针通过；**条件**＝部分探针通过（条件写在格内，探针派生）；**不支持**＝被测项本身被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/certification-runbook.md`「上游 harness 原语对照（实测）」节）。model 栏判定词为 **必填/可选**（底稿含 model 且去掉即被拒＝必填），后接该 backend 的最小可接受写法（裸 `{id}` / `<provider>/<model>` 引用 / `{providerID, id}` 三种形状按序探测；全被拒时生成失败——探针覆盖不足，不写 `不支持`）。
 
-| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 |
-| --- | --- | --- | --- | --- |
-| claude-code | 可选：裸 `{id}` | 支持 | 条件：仅 provider 路径 | 支持 |
-| codex | 可选：裸 `{id}` | 支持 | 不支持 | 不支持 |
-| kimi-code | 可选：裸 `{id}` | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
-| deepseek-harness | 可选：裸 `{id}` | 条件：effort ∈ {high, max} | 支持 | 不支持 |
-| deepseek-acp | 可选：`{providerID, id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
-| kimi-web | 必填：裸 `{id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
-| zcode | 必填：`<provider>/<model>` 引用 | 支持 | 不支持 | 不支持 |
+| backend | model override（model.id / --model） | reasoning effort | model.contextWindow |
+| --- | --- | --- | --- |
+| claude-code | 可选：裸 `{id}` | 支持 | 不支持 |
+| codex | 可选：裸 `{id}` | 支持 | 不支持 |
+| kimi-code | 可选：裸 `{id}` | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 |
+| deepseek-harness | 可选：裸 `{id}` | 条件：effort ∈ {high, max} | 支持 |
+| deepseek-acp | 可选：`{providerID, id}` | 条件：effort ∈ {low, high, max} | 不支持 |
+| kimi-web | 必填：裸 `{id}` | 条件：effort ∈ {low, high, max} | 不支持 |
+| zcode | 必填：`<provider>/<model>` 引用 | 支持 | 不支持 |
 
 衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——需要路由字段的 backend（deepseek-acp）必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。
 
 ### 条件与限制说明（CAPABILITY_NOTES 单一出处：src/backends/factory.js）
 
 - **claude-code**
-  - model.contextWindow：仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒
-  - provider 块：经 provider wrapper（`baseUrl` / `apiKeyEnv`）表达
+  - model.contextWindow：无 CLI 参数可表达，配了即拒
   - 生命体征与收口：可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内"等不到进展"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征
   - supportsRoleContract（角色合同）：`--append-system-prompt`（内容直传，恰好一次）
   - supportsSessionReuse（会话复用）：`--session-id` / `--resume`（opaque uuid 由控制平面派生）
@@ -54,7 +53,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——CLI 未接线沙箱参数，越界写拦截按 0084（上报侦测，非阻止）
 - **codex**
   - model.contextWindow：无 CLI flag 可表达，配了即拒
-  - provider 块：codex 自有登录（非 anthropic-compatible wrapper），配了即拒
   - 生命体征与收口：可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内"等不到进展"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征
   - supportsRoleContract（角色合同）：`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）
   - supportsSessionReuse（会话复用）：`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝
@@ -62,7 +60,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - enforcesWriteSandbox（OS 写沙箱）：每次 `exec` / `exec resume` 显式传 `-c sandbox_mode="workspace-write"` 等三项（压过用户 config.toml；决定 0086）；可写面 = 运行的工作目录 + 系统临时目录（`%TEMP%` 可写是已知边界），关联工作树的 git 元数据在树外不可写；活体证据 = reliability `sandboxEnforcement`（`codex sandbox -P :workspace` 探测，不经模型）
 - **kimi-code**
   - reasoning effort：effort 编译为 `KIMI_MODEL_THINKING_EFFORT` 子进程 env；`agent.env` 自设同名被拒；档位与模型绑定见判定表（探针派生）
-  - provider 块：kimi 托管认证，配了即拒
   - 生命体征与收口：可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内"等不到进展"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征
   - supportsRoleContract（角色合同）：拼进同一条 prompt（非系统级通道，prompt 级引导）
   - supportsSessionReuse（会话复用）：`kimi -r <session_id>`；id 来自轮末 `session.resume_hint`、runner 运行期补记；resume 轮 id 缺失即派发前拒绝
@@ -70,7 +67,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - enforcesWriteSandbox（OS 写沙箱）：无 OS 写沙箱——CLI 无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）
 - **deepseek-harness**
   - reasoning effort：可省略（未配置不拒）
-  - provider 块：组合由 `dshConfigPath` / `dshProvider` 表达，配 provider 块即拒
   - 生命体征与收口：可读体征：协议帧（握手落 `initialized`，assistant 分片落 `streaming`）。没有轮内"等不到进展"的收口门（请求级 15s 超时除外）；长工具调用期间不落体征事实
   - supportsRoleContract（角色合同）：`DSH_SYSTEM_PROMPT`
   - reportsTokenUsage（token usage）：assistant/message 帧 usage
@@ -79,7 +75,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - model override：只接受 `{ id, providerID }`（ACP 的模型选项值是 provider/model 二元组 JSON，裸 id 表达不了，配了即拒）；经 `session/set_config_option` 下发，值不在 session/new 广告的选项里或响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒；不配时新会话用 profile 缺省、resume 沿用恢复会话的模型
   - reasoning effort：经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒
   - model.contextWindow：无可验证设置通道，配了即拒（model 块只接受 id 与 providerID）
-  - provider 块：组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒
   - 生命体征与收口：可读体征：协议帧（握手落 `initialized`）。没有轮内"等不到进展"的收口门——握手等非 prompt 请求有 60s 超时，prompt 请求本身不设时限；轮内不落体征事实
   - supportsRoleContract（角色合同）：per-dispatch `--patch` personaPrefix（结构化序列化）
   - supportsSessionReuse（会话复用）：ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh
@@ -88,7 +83,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - **kimi-web**
   - model override：空白/纯空白 `model.id` 同样被拒；id 原样直传 prompts body——上游缺 model 时接口返 success 但轮次静默秒败，所以派发前硬拒；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填
   - reasoning effort：effort 直传 prompts body 的 `thinking`（车道声明与 `--reasoning` 覆盖同一通道，resume 轮同样带）；档位见判定表（探针派生），关闭思考不可配；型号与力度的搭配交给服务端校验（不支持的组合上游报 50001，派发失败），WAO 不做型号绑定；effort 缺省不发该字段
-  - provider 块：kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒
   - 生命体征与收口：可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）
   - supportsRoleContract（角色合同）：拼进 prompt 正文前缀，role/task 以 `\n\n---\n\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）
   - supportsSessionReuse（会话复用）：resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）
@@ -98,7 +92,6 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - **zcode**
   - model override：ref 须恰好一个 `/`、两段非空（该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；per-dispatch `--model` 覆盖同样须是 ref（裸 id 无法路由）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）
   - reasoning effort：effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options
-  - provider 块：登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒
   - 生命体征与收口：可读体征：新 part / 工具证据、模型流分片（落 `streaming`）、app-server 后代进程的 CPU / I/O / 生灭（落 `process_active`）、工作目录文件变化（落 `files_changed`）、本轮主轮请求的上游重试等待（`v4/telemetry/event` 的 `model.request.status`：仅本会话、本轮 turnId、`querySource=main_turn` 的 `model_retry_scheduled`，有效到到达时刻+delayMs+30s 余量，落 `provider_retry`；同一安排的重复通知不延长，链上其后出现 started/completed（换 requestId 也算）、turn 结束或换轮即作废且粘住——作废前首见的安排连同其重复通知不再复活续命；failed/stream_stalled 本身不续命；上游上报 maxAttempts=0（重试预算无界）时每个新安排都会重新立窗、没有自动上限，且服务端 retry-after 可把单次退避拉长到远超 300s——有体征运行的去留归 Lead，决定 0067）。三道收口门到点先看体征，全无才收口（约 5–10 分钟）；有体征没有自动上限（决定 0067；重试等待不重置停滞预算时钟——退避窗一过仍无进展即收口）
   - supportsRoleContract（角色合同）：拼进 `session/send` content 前缀，role/task 以 `\n\n---\n\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）
   - supportsSessionReuse（会话复用）：resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/setMode {sessionId, mode:"yolo"}` → `session/send`（setMode 每次派发都发、失败 fail-closed 拒绝——app-server create 默认 build，scorecard 实测写被权限层拦，runs/reliability/run_20261001213724000cy1b3a）——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证：sessions 表每进程一张、setModel 走 requireSession、查表 miss 抛 `Session is not active`、resume 装载注册；跳过 resume 直接 setModel 必失败；依据链与各版本复核见 certification-runbook 原语表 zcode 行）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据自 2026-10-10 B′ 根修起为【身份切片】（锚点=本轮新 user 消息，完成=parent 指向它的新 assistant 末位 step-finish；历史变异=基线 id 序列不再前缀→具名失败；resume 历史缺 info.id→发送前拒绝零 token）——上游消息 info.id/role/parentID 与 part id/messageID 已 live 探针实证在场且跨快照稳定（glm-flash 三轮 fresh/同进程/跨进程 resume，证据 .dev/bprime-evidence/；验收反例组 ⑨h-⑨l/⑫f 在旧位置判据上实证红）；旧判据的「头部插入→旧 stop 右移→假 completed+发射旧答案」残余就此关闭（该残余曾连带击穿 0052 失败即弃与 run_lineage 交付链）

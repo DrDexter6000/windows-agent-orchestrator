@@ -388,8 +388,7 @@ verification 与 Lead decision。该 backend 不支持 provider session reuse，
   runId→前任何 `session.created.backendSessionId`），resume 信封只携带前任 WAO
   runId，ACP sessionId 由 spawn 权威按 runId 绑定读取器取回、in-process 送达
   （绝不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝恢复，绝不静默
-  新会话。`validateAgentPolicy`：provider 块拒绝（组合面固定 `--profile acp` +
-  操作员 patch）；model 块只收 `{ id, providerID }`（ACP 的 model 值是 provider/model 二元组），
+  新会话。`validateAgentPolicy`：model 块只收 `{ id, providerID }`（ACP 的 model 值是 provider/model 二元组），
   会话建立时经 `session/set_config_option` 下发并核对回显，不一致即拒绝派发；不配
   model 时取 profile 缺省；contextWindow 等其它子字段拒绝；reasoning effort 只放行 WAO 六值闭集 ∩
   ACP 广告四档（off/low/high/max）的交集 = low/high/max（无证据支持映射，不
@@ -936,7 +935,7 @@ src/
 ├── backends/
 │   ├── serveStopVerify.js    # L1：serve 型停止验证共享模块（abort 后静默轮询核验）
 │   ├── processBackend.js     # L1：进程式 backend 基类
-│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入。native OAuth 通道凭据双模式：`CLAUDE_CODE_OAUTH_TOKEN` 长期令牌可解析时隔离目录保持空、不拷贝 `~/.claude` 凭据、认证走 env（名字经 envPolicy native 通道继承并进脱敏器）——凭据拷贝与续期令牌单次轮换互斥；令牌缺席回退 spawn 时现拷贝路径）
+│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——OAuth 直连 / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入。OAuth 通道凭据双模式：`CLAUDE_CODE_OAUTH_TOKEN` 长期令牌可解析时隔离目录保持空、不拷贝 `~/.claude` 凭据、认证走 env（名字经 envPolicy 继承并进脱敏器）——凭据拷贝与续期令牌单次轮换互斥；令牌缺席回退 spawn 时现拷贝路径）
 │   ├── codex.js              # L1：codex 后端
 │   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
 │   ├── deepSeekAcp.js        # L1：DSH ACP 集成面后端（dsh --profile acp + --patch containment/role-contract；契约见 §2.5b）

@@ -139,7 +139,7 @@ const CORE_TOP = Object.freeze(new Set([
   // R23-F/A 登记（2026-08-21）：机器级闸路径 SSOT（inflight marker / Round B 验证
   // 租约的目录基座，%LOCALAPPDATA%\wao 派生）。零相对出边（node:path/os/fs only）；
   // 本轮 src 树内零消费者，scripts/canonical-test.mjs 下向 import 不在本守卫
-  // 扫描图内——与 providerFingerprint 登记同型。
+  // 扫描图内。
   "src/machineGatePaths.js",
   "src/metrics.js",
   // 0047 勘误登记（2026-10-07）：防向下派发判定 SSOT。0047 初版误放
@@ -149,9 +149,6 @@ const CORE_TOP = Object.freeze(new Set([
   // src/mcp/server.js（adapters 下向）。判定纯函数本身零变更，仅路径搬家。
   "src/nestedDispatchGuard.js",
   "src/nodeVersionGuard.js",
-  // R23-C 跟进登记（2026-08-21）：providerKey 归一化单一实现，唯一 src 消费方
-  // runManager.js（core 同层 2→2）；scripts 侧下向 import 不在本守卫扫描图内。
-  "src/providerFingerprint.js",
   "src/registry.js",
   "src/runEvidenceAssessment.js",
   "src/runManager.js",

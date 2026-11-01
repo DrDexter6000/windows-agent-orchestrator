@@ -231,7 +231,7 @@ async function runAcpScenario({ drive, task, agentOverrides = {}, containmentTex
 
 // ===== policy / containment / 资产钉 =====
 
-test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Phase 5）；其余固定文案拒；provider 块被拒；model 块须 {id, providerID} 双字段（0046 §3/§5 第④步接线）", () => {
+test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Phase 5）；其余固定文案拒；model 块须 {id, providerID} 双字段（0046 §3/§5 第④步接线）", () => {
   const backend = new DeepSeekAcpBackend();
   // Phase 5（evidence/phase5-config-option-set*.json，2026-09-20 真实 dsh 实测）：
   // session/set_config_option 可设置 reasoning_effort（off/low/max 有直接
@@ -254,12 +254,6 @@ test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Pha
   }
   // 空值（null/undefined）视同未配置——不拒。
   assert.doesNotThrow(() => backend.validateAgentPolicy(agent({ reasoning: { effort: null } })));
-  assert.throws(
-    () => backend.validateAgentPolicy(agent({
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://example.invalid", apiKeyEnv: "OTHER_KEY" },
-    })),
-    /cannot express provider/,
-  );
   // model 块（0046 改写：旧语义"配了即拒"已随 model 接线退役）：ACP 的 model
   // value 是 provider/model 二元组（evidence/phase5-config-option-set.json
   // steps.setModel，provider 段实测 "deepseek-official"）——双字段

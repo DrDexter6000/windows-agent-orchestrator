@@ -47,7 +47,7 @@
       "model": { "id": "<modelId>", "providerID": "deepseek-official" },  // 可选；配则 id 与 providerID 都必填
       "reasoning": { "effort": "low" },      // 可选，仅 low/high/max（见生成层 docs/surface/certification.md 能力表；其余值被拒）
       "cwd": "D:/projects/my-app"
-      // 不配 provider 块：组合面固定，配了被拒。model 块只接受 { id, providerID }
+      // model 块只接受 { id, providerID }
       // 两个子字段，其他子字段（variant/contextWindow 等）配了同样被拒。不配
       // model 时模型取 profile 缺省。
     },

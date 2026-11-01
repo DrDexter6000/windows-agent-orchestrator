@@ -53,7 +53,7 @@ export class KimiCodeBackend extends ProcessBackend {
    * canonical reasoning field into that child-only environment variable.
    *
    * Capability: kimi can express model.id (--model) and K3 reasoning.effort.
-   * It cannot express a WAO contextWindow override or provider policy.
+   * It cannot express a WAO contextWindow override.
    */
   validateAgentPolicy(agent) {
     // 仓库纪律（kimi-web/zcode 同款）：配了表达不了的 model 子字段必须硬拒，不静默
@@ -81,9 +81,6 @@ export class KimiCodeBackend extends ProcessBackend {
     }
     if (agent?.model?.contextWindow) {
       throw new Error("kimi-code backend cannot express model.contextWindow");
-    }
-    if (agent?.provider) {
-      throw new Error("kimi-code backend cannot express provider (uses its own managed auth)");
     }
   }
 

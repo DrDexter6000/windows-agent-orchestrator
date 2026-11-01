@@ -184,7 +184,7 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  *   - 这里只写**派生不出**的条件/限制语义（fail-closed 分叉、通道形状、绑定事实）；
  *     判定词（支持/不支持/条件；model 栏为必填/可选＋写法）与档位集合由生成器对 validateAgentPolicy 的行为
  *     探针派生，不在此复述——静态文本复述探针可派生的集合会制造第二份会漂的值。
- *   - 键集：四个 policy 面（model / reasoning / contextWindow / provider）＋
+ *   - 键集：三个 policy 面（model / reasoning / contextWindow）＋
  *     BACKEND_CAPABILITY_AXES 成员（仅承载额外条件者）。缺席 = 该轴无额外条件
  *     （判定词即全部语义）。
  *   - 成员增补属 Owner 决策：新 backend 必须在此登记条件说明（无则显式空对象）。
@@ -196,8 +196,7 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
  */
 export const CAPABILITY_NOTES = Object.freeze({
   "claude-code": Object.freeze({
-    contextWindow: "仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒",
-    provider: "经 provider wrapper（`baseUrl` / `apiKeyEnv`）表达",
+    contextWindow: "无 CLI 参数可表达，配了即拒",
     supportsSessionReuse: "`--session-id` / `--resume`（opaque uuid 由控制平面派生）",
     supportsRoleContract: "`--append-system-prompt`（内容直传，恰好一次）",
     supportsInFlightCorrection: "stdin stream-json 排队（同一活进程；delivered 证明字节被接受，不证明模型执行了该轮）",
@@ -207,7 +206,6 @@ export const CAPABILITY_NOTES = Object.freeze({
   }),
   codex: Object.freeze({
     contextWindow: "无 CLI flag 可表达，配了即拒",
-    provider: "codex 自有登录（非 anthropic-compatible wrapper），配了即拒",
     supportsSessionReuse: "`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）",
     reportsTokenUsage: "turn.completed 帧 usage",
@@ -216,7 +214,6 @@ export const CAPABILITY_NOTES = Object.freeze({
   }),
   "kimi-code": Object.freeze({
     reasoning: "effort 编译为 `KIMI_MODEL_THINKING_EFFORT` 子进程 env；`agent.env` 自设同名被拒；档位与模型绑定见判定表（探针派生）",
-    provider: "kimi 托管认证，配了即拒",
     supportsSessionReuse: "`kimi -r <session_id>`；id 来自轮末 `session.resume_hint`、runner 运行期补记；resume 轮 id 缺失即派发前拒绝",
     supportsRoleContract: "拼进同一条 prompt（非系统级通道，prompt 级引导）",
     reportsTokenUsage: "stream-json 无 usage——tokenBudget 不生效（TD-87）",
@@ -225,7 +222,6 @@ export const CAPABILITY_NOTES = Object.freeze({
   }),
   "deepseek-harness": Object.freeze({
     reasoning: "可省略（未配置不拒）",
-    provider: "组合由 `dshConfigPath` / `dshProvider` 表达，配 provider 块即拒",
     supportsRoleContract: "`DSH_SYSTEM_PROMPT`",
     reportsTokenUsage: "assistant/message 帧 usage",
     enforcesWriteSandbox: "无 OS 写沙箱——dsh 无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）",
@@ -235,7 +231,6 @@ export const CAPABILITY_NOTES = Object.freeze({
     model: "只接受 `{ id, providerID }`（ACP 的模型选项值是 provider/model 二元组 JSON，裸 id 表达不了，配了即拒）；经 `session/set_config_option` 下发，值不在 session/new 广告的选项里或响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒；不配时新会话用 profile 缺省、resume 沿用恢复会话的模型",
     reasoning: "经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒",
     contextWindow: "无可验证设置通道，配了即拒（model 块只接受 id 与 providerID）",
-    provider: "组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒",
     supportsSessionReuse: "ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh",
     supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",
     reportsTokenUsage: "`PromptResponse` 只带 `stopReason`，`session/update` 的 `usage_update {used, size}` 是上下文占用、不是计量（0.2.1-rc.4 实测，2026-10-29）——声明 false；翻转条件 = 有可验证 token 计量通道",
@@ -248,7 +243,6 @@ export const CAPABILITY_NOTES = Object.freeze({
   "kimi-web": Object.freeze({
     model: "空白/纯空白 `model.id` 同样被拒；id 原样直传 prompts body——上游缺 model 时接口返 success 但轮次静默秒败，所以派发前硬拒；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填",
     reasoning: "effort 直传 prompts body 的 `thinking`（车道声明与 `--reasoning` 覆盖同一通道，resume 轮同样带）；档位见判定表（探针派生），关闭思考不可配；型号与力度的搭配交给服务端校验（不支持的组合上游报 50001，派发失败），WAO 不做型号绑定；effort 缺省不发该字段",
-    provider: "kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒",
     supportsRoleContract: "拼进 prompt 正文前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）",
     supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）",
     supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性：prompts 列表项带 `steeredAt` 与状态枚举（2.4.0 OpenAPI 在册，未 live 实测，仅标注）；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称",
@@ -262,7 +256,6 @@ export const CAPABILITY_NOTES = Object.freeze({
   "zcode": Object.freeze({
     model: "ref 须恰好一个 `/`、两段非空（该形状已 live 验证——backend 拆分后经 `session/setModel` 下发）；per-dispatch `--model` 覆盖同样须是 ref（裸 id 无法路由）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）",
     reasoning: "effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options",
-    provider: "登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒",
     supportsRoleContract: "拼进 `session/send` content 前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）",
     supportsSessionReuse: "resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/setMode {sessionId, mode:\"yolo\"}` → `session/send`（setMode 每次派发都发、失败 fail-closed 拒绝——app-server create 默认 build，scorecard 实测写被权限层拦，runs/reliability/run_20261001213724000cy1b3a）——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证：sessions 表每进程一张、setModel 走 requireSession、查表 miss 抛 `Session is not active`、resume 装载注册；跳过 resume 直接 setModel 必失败；依据链与各版本复核见 certification-runbook 原语表 zcode 行）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据自 2026-10-10 B′ 根修起为【身份切片】（锚点=本轮新 user 消息，完成=parent 指向它的新 assistant 末位 step-finish；历史变异=基线 id 序列不再前缀→具名失败；resume 历史缺 info.id→发送前拒绝零 token）——上游消息 info.id/role/parentID 与 part id/messageID 已 live 探针实证在场且跨快照稳定（glm-flash 三轮 fresh/同进程/跨进程 resume，证据 .dev/bprime-evidence/；验收反例组 ⑨h-⑨l/⑫f 在旧位置判据上实证红）；旧判据的「头部插入→旧 stop 右移→假 completed+发射旧答案」残余就此关闭（该残余曾连带击穿 0052 失败即弃与 run_lineage 交付链）",
     supportsInFlightCorrection: "app-server 协议不开放在途注入：活动轮里再发 `session/send` 返回 -32010 \"A prompt is already running for this session\"（live 实测；bundle 运行时虽有 steer 队列，协议方法表里没有注入活动轮的方法）——如实声明 false；翻转条件 = 协议出现注入活动轮的方法并有 live 证据",

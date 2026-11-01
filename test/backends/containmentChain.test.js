@@ -20,8 +20,6 @@
 //                   file_written 两段；越界同样恒在 intent 段被拦。
 //
 // 不覆盖的后端（原因，不假装覆盖）：
-//   claudeCodeProvider.js——只做 provider 包装的参数推导，不产出事件流；写事件
-//     投影就是 claude-code 的 ClaudeStreamParser，上面已覆盖。
 //   src/backends/ 其余模块（factory / kimiServe* / deepSeekHarness /
 //     serveStopVerify / processActivity / stallBudget / processBackend 共享
 //     传输层）——没有独立的写事件投影面；processBackend 的传输由 kimi-code 组

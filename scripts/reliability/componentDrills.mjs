@@ -59,7 +59,7 @@
 //     下发【配置】给被测（2026-09-20 首次真实运行根因：backend drills 把夹具
 //     llm 的 model 块塞进被测装配 → deepseek-acp 按 fail-closed 语义拒 model 块
 //     → 被测派发自拒 exit 1 → 7 条断言连红）。验 backend 的装配 = 被测 anchor
-//     的净化克隆（其自带 model/provider 就是该 backend 的支持范围）；对侧身份
+//     的净化克隆（其自带 model 就是该 backend 的支持范围）；对侧身份
 //     覆盖只发生在验 llm 方向（那时下发的是【被测 llm】的身份——被测就是要
 //     验证的下发对象，不是夹具）。
 //   - 夹具必须入账：记录显式分 subject 与 fixture 两字段（componentLedger.mjs
@@ -95,8 +95,6 @@ import {
 } from "./componentLedger.mjs";
 // 越界写拦截【事实】读取（纯函数，只取证据不做判定——组件层对该事实仅记录）。
 import { findWorkdirEscapeEvidence } from "./adversarialEscape.mjs";
-// R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
-import { providerKeyFor } from "../../src/providerFingerprint.js";
 // ADR-0025 批次 2：backend 能力声明 SSOT（构造零副作用）。
 import { backendCapabilitySnapshot } from "../../src/backends/factory.js";
 // TD-183：读侧 runId 信封绑定 SSOT——探针完成事实必须绑定当前探针自己的 runId，
@@ -1458,8 +1456,8 @@ export function componentResultFromChecks(checks = []) {
 /**
  * agent 的 llm 身份。providerID 维约定：registry 的 model.providerID；缺失时
  * 以 backend 家族名充当（claude-code/codex/kimi 系自认证 CLI 没有
- * 独立的 provider 登记维度）——接入方区分由 providerKey 维继续承担（第 4 维，
- * providerFingerprint SSOT），族内单射不受影响。无 model.id → null（非 llm 主体）。
+ * 独立的 provider 登记维度）——决定 0106 起 providerKey 维恒为 null
+ * （provider 通道退役），族内单射不受影响。无 model.id → null（非 llm 主体）。
  */
 export function llmIdentityOf(agent) {
   if (!agent || typeof agent !== "object") return null;
@@ -1470,7 +1468,7 @@ export function llmIdentityOf(agent) {
       ? agent.model.providerID
       : (typeof agent.backend === "string" && agent.backend.length > 0 ? agent.backend : null),
     modelId,
-    providerKey: providerKeyFor(agent.provider),
+    providerKey: null,
   };
 }
 
@@ -1760,12 +1758,12 @@ function sanitizeAgentIdSuffix(value) {
 /**
  * 构造夹具装配 agent（纯函数）：
  *   - 验 backend → 装配 = 被测 backend anchor 的净化克隆（backend 侧字段 +
- *     它自己的 model/provider——那是该 backend 的支持范围，操作者在册的真实
- *     可用装配）。【夹具 llm 的 model/provider 绝不下发】：夹具身份只进台账
+ *     它自己的 model——那是该 backend 的支持范围，操作者在册的真实
+ *     可用装配）。【夹具 llm 的 model 绝不下发】：夹具身份只进台账
  *     record.fixture 与资格判定（ADR-0032 §6 账实一致；2026-09-20 首跑根因：
  *     夹具 model 块塞进被测 → deepseek-acp 按既有 fail-closed 语义拒 model 块
  *     → 被测派发自拒 exit 1 → 7 条断言连红）；
- *   - 验 llm → 基底 = 夹具 backend 的 anchor（backend 侧字段），model/provider
+ *   - 验 llm → 基底 = 夹具 backend 的 anchor（backend 侧字段），model
  *     覆盖为【被测 llm】的 anchor 实际配置——被测身份正是要验证的下发对象
  *     （此处下发的是被测，不是夹具）；
  *   - agentId 按 ADR-0032 §6 约定：_fixture_llm_<id> / _fixture_backend_<name>。
@@ -1792,24 +1790,19 @@ export function assembleFixtureAgent({ subject, fixture, registry }) {
   const agentId = `${prefix}${sanitizeAgentIdSuffix(fixtureId)}${joiner}${sanitizeAgentIdSuffix(subjectId)}`;
 
   if (subject.kind === "backend") {
-    // 被测 = backend：净化克隆被测 anchor，model/provider 原样保留（被测自己的
-    // 支持范围；anchor 无 model/provider 则装配同样没有）。零夹具身份注入。
+    // 被测 = backend：净化克隆被测 anchor，model 原样保留（被测自己的
+    // 支持范围；anchor 无 model 则装配同样没有）。零夹具身份注入。
     return { agentId, entry: cleanAgentEntry(subjectAnchor) };
   }
 
-  // 被测 = llm：基底 = 夹具 backend anchor；model/provider 覆盖为被测 llm 的
-  // 实际配置（own-property 克隆；无 provider 块则显式删除——基底自认证 CLI 的
-  // 残留 provider 会造成账实漂移）。
+  // 被测 = llm：基底 = 夹具 backend anchor；model 覆盖为被测 llm 的实际配置
+  // （own-property 克隆）。provider 块已随决定 0106 退役（registry 拒绝载入，
+  // anchor 不可能携带——不再克隆/剥离）。
   const entry = cleanAgentEntry(fixtureAnchor);
   if (subjectAnchor.model && typeof subjectAnchor.model === "object") {
     entry.model = { ...subjectAnchor.model };
   } else {
     delete entry.model;
-  }
-  if (subjectAnchor.provider && typeof subjectAnchor.provider === "object") {
-    entry.provider = { ...subjectAnchor.provider };
-  } else {
-    delete entry.provider;
   }
   return { agentId, entry };
 }

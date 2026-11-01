@@ -188,19 +188,19 @@ export class ProcessBackend {
    * BEFORE any transcript append, runDir creation, worktree, or spawn.
    *
    * FAIL-CLOSED default: if the agent has ANY structured policy (model,
-   * reasoning, provider) and this base class hasn't been overridden, the
+   * reasoning) and this base class hasn't been overridden, the
    * backend cannot express it → reject. Each backend MUST override this to
    * declare exactly which fields it can translate; anything it cannot express
    * must throw. This prevents "config looks set, runtime never received it."
    *
-   * @param {object} agent — normalized agent (canonical model/reasoning/provider)
+   * @param {object} agent — normalized agent (canonical model/reasoning)
    * @throws {Error} if the backend cannot express a configured policy
    */
   validateAgentPolicy(agent) {
-    const hasPolicy = agent?.model || agent?.reasoning || agent?.provider;
+    const hasPolicy = agent?.model || agent?.reasoning;
     if (hasPolicy) {
       throw new Error(
-        "this backend does not declare validateAgentPolicy — cannot confirm it can express the configured model/reasoning/provider policy",
+        "this backend does not declare validateAgentPolicy — cannot confirm it can express the configured model/reasoning policy",
       );
     }
   }

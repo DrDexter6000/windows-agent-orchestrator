@@ -43,9 +43,9 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **Node.js v22**（`engines` 为 `>=22 <23`；v24 的 libuv Windows Job Object 回归会被 WAO 版本守卫拒绝，见 §4 开头的调用纪律）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
 - **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage/lanes.md`「kimi 车道的 worker serve」）
-- **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）。claude-code 的 provider wrapper 通道也吃 `DEEPSEEK_API_KEY`/`ZHIPU_API_KEY`（替代路径）
+- **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
-- **Claude OAuth 隔离**：provider-wrapped claude-code worker 用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证；`opus` 不走 wrapper，使用官方 Claude OAuth。
+- **Claude OAuth 隔离**：claude-code worker 会话运行于 WAO 预备的独立 `CLAUDE_CONFIG_DIR` 隔离目录（承载纯净模式），用户 `~/.claude` 里的全局配置不进 worker 上下文。
 
 ---
 
@@ -118,14 +118,13 @@ Copy-Item config/agents.example.json config/agents.json
 |---|---|---|
 | zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；但 zcode 车道有**承重 env 桥**——`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析。模板两条 zcode 车道均带占位 env 桥：宿主无 ZCode 桌面上下文时须换成真实路径；**若桌面安装已在 User 作用域写入且可解析，删掉整个 env 块**（agent-env 先于 User 作用域，占位值会盖掉有效配置=spawn 必死）。`wao doctor` 承重 env 检查（advisory）会如实报告 |
 | codex | sol / astra | `codex login` |
-| claude-code + 官方 Claude OAuth（无 provider 直连） | opus | `claude login`（原生 OAuth，不走 provider wrapper） |
+| claude-code + 官方 Claude OAuth | opus | `claude login`（原生 OAuth） |
 | Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；token 来源/注入/引号纪律与 serve 启动见 `docs/usage/lanes.md`「kimi 车道的 worker serve」的 KIMI_WEB_TOKEN 节） |
 | DeepSeek key | deepseek-pro / deepseek-flash | `DEEPSEEK_API_KEY`（deepseek-acp 通道，Windows User 环境变量）；另需 `dsh` 在 PATH 与 containment 资产（见 `docs/certification-runbook.md`） |
-| claude-code + provider key（替代路径） | 自建 claude-code provider 车道（新车道键——**勿复用 opus 键改 provider**，会撞 lanes.json 身份断言；新增车道属 Owner 组合权，需自行认证） | `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`（provider wrapper 通道；DeepSeek 用户优先上一行 ACP 原生车道） |
 
-> 探测面说明：`wao onboarding` 裸跑的凭据探测覆盖三类声明名（`provider.apiKeyEnv`/`tokenEnv`/`credentialEnv`，与 doctor 同一权威）。**无 CLI 探测面的车道（kimi-web、zcode）只探 key 名可解析性**——`key 名已解析` **不是就绪声称**（未验证令牌有效性/serve 可达性；zcode 无凭据声明恒为"探测未知"）。深度体检仍以 `wao doctor` 为准。
+> 探测面说明：`wao onboarding` 裸跑的凭据探测覆盖两类声明名（`tokenEnv`/`credentialEnv`，与 doctor 同一权威）。**无 CLI 探测面的车道（kimi-web、zcode）只探 key 名可解析性**——`key 名已解析` **不是就绪声称**（未验证令牌有效性/serve 可达性；zcode 无凭据声明恒为"探测未知"）。深度体检仍以 `wao doctor` 为准。
 
-> 接入新模型 / 新运行时（改 provider/model 字段 vs 换 backend 的分叉）见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。
+> 接入新模型 / 新运行时（改 model 字段 vs 换 backend 的分叉）见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
@@ -144,7 +143,7 @@ npm run cli -- wao doctor --cwd <目标项目>
 各命令的作用见 `npm run cli -- --help`（生成副本：`docs/surface/cli.md`）。
 
 
-**doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的 provider key、agents.json 配置、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
+**doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的凭据 env 名、agents.json 配置、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 
 **（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（6 必需槽位：project.md/decisions/pipeline/handoff/runs/migration），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。inbox 与 state 是可选槽位（init 不预建，已存在的历史 state/ 布局放行）。另：fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
 
@@ -222,7 +221,7 @@ npm run cli -- wao handoff write --from lead --to coder --summary "任务描述"
 
 ## 8. 遇到问题
 
-- **worker 401**：provider key 没配（`wao doctor` 会查出 FAIL 并给 `run:` 修复提示）
+- **worker 401**：凭据 env 没配（`wao doctor` 会查出 FAIL 并给 `run:` 修复提示）
 - **run 失控（烧 token）**：先 `npm run cli -- status <runId>` 看它在做什么（记下输出里的 `observedSeq`），再 `npm run cli -- stop <runId> --observed-seq <n> --reason "<为什么要停>"`，看 `stop_verified`；未验证时按 run 实际 backend 查证残余进程再定点处置（排障见 `docs/troubleshooting.md`）
 - **不确定环境**：跑 `wao doctor`（advisory——HEALTHY/DEGRADED 可直接继续，BROKEN 项按 `run:` 提示处理后由 owner 裁决）
 
@@ -253,7 +252,7 @@ lead_preflight  →  run_dispatch（只读、no-delivery canary）  →  run_awa
 **`run_dispatch` accepted ≠ PASS**：返回 `runId` 只表示派发被接受、开了 transcript，不等于 worker 成功。只有 `run_await_result` 到 `completed` + 非空 assistant 文本 + clean terminal 才算 PASS。
 
 **非 PASS 的四个诊断分支**（映射控制平面 closed-set `DIAGNOSIS_CATEGORIES`，只给事实不给处方）：
-1. **provider / 认证**（`provider_auth` / `config_conflict`）：401、key 缺失/无效、OAuth 与 provider key 优先级冲突。
+1. **provider / 认证**（`provider_auth` / `config_conflict`）：401、key 缺失/无效、登录态失效。
 2. **worker 空停**（`crash` / `no_effect` / `provider_disconnect`）：进程非零退出、有活动无产出、或静默≥120s 后死。
 3. **超时 / 传输窗口到期**（`timeout` / 等待窗口 / MCP 传输断）：**传输或窗口到期 ≠ worker 停止**——是控制器不再等/stdio 断了，worker 进程可能还活着，别当成 crash，先查进程/重新 await。
 4. **PASS**：clean terminal + `completed` + 非空 assistant 文本。

@@ -77,9 +77,8 @@ function syntheticRegistry() {
     agents: {
       researcher: {
         backend: "claude-code",
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://a.example/api", apiKeyEnv: "KEY_A" },
         cwd: ".",
-        model: { id: "glm-5.3-flash[1m]", contextWindow: 1000000 },
+        model: { id: "glm-5.3-flash[1m]" },
       },
       tester: {
         backend: "codex",
@@ -111,7 +110,7 @@ function compositionSummaryFixture({ healthyDaysAgo = 1, runId = "run_green_1" }
         backend: "claude-code",
         providerID: null,
         modelId: "glm-5.3-flash[1m]",
-        providerKey: "https://a.example/api|KEY_A",
+        providerKey: null,
         lastFullHealthyRunAt: iso(-healthyDaysAgo),
         lastHealthyRunAt: iso(-healthyDaysAgo),
       },
@@ -140,15 +139,15 @@ test("subjects: --subject backend → 在册全部 backend（去重排序，键�
   }
 });
 
-test("subjects: --subject llm → 在册全部 llm 身份（providerID 缺失时以 backend 家族名充当，providerKey 区分接入方）", () => {
+test("subjects: --subject llm → 在册全部 llm 身份（providerID 缺失时以 backend 家族名充当；providerKey 恒 null——决定 0106）", () => {
   const { subjects, error } = resolveSubjects({ registry: syntheticRegistry(), subjectArg: "llm", codeRef: CODE_REF });
   assert.equal(error, null);
   assert.deepEqual(
     subjects.map((s) => `${s.providerID}/${s.modelId}`),
     ["claude-code/glm-5.3-flash[1m]", "codex/gpt-5.6-sol", "deepseek/deepseek-v4-pro", "kimi-code/kimi-code/k3"],
   );
-  assert.equal(subjects[0].providerKey, "https://a.example/api|KEY_A");
-  assert.equal(subjects[1].providerKey, null, "无 provider 块 → null（已观察无接入方）");
+  assert.equal(subjects[0].providerKey, null, "providerKey 恒 null（provider 通道退役）");
+  assert.equal(subjects[1].providerKey, null, "无路由字段 → null（已观察无接入方）");
 });
 
 test("subjects: <kind> 精确命中——backend 名 / providerID+modelId / 裸 modelId（唯一时）", () => {
@@ -172,15 +171,17 @@ test("subjects【证伪】: 未知被测 / 裸 modelId 歧义 / 缺 codeRef / �
   const unknown = resolveSubjects({ registry, subjectArg: "zcode", codeRef: CODE_REF });
   assert.match(unknown.error, /matches no backend name and no llm identity/);
 
-  // 歧义：两个接入方跑同一 modelId（providerKey 不同）→ 裸 modelId 拒绝。
+  // 歧义：两条不同身份的车道共一个裸 modelId → 裸 modelId 拒绝。
   const ambiguous = { agents: {
-    laneA: { backend: "claude-code", cwd: ".", model: { id: "same-model" }, provider: { protocol: "anthropic-compatible", baseUrl: "https://a.example/api", apiKeyEnv: "KEY_A" } },
-    laneB: { backend: "claude-code", cwd: ".", model: { id: "same-model" }, provider: { protocol: "anthropic-compatible", baseUrl: "https://b.example/api", apiKeyEnv: "KEY_B" } },
+    laneA: { backend: "claude-code", cwd: ".", model: { id: "same-model" } },
+    laneB: { backend: "codex", cwd: ".", model: { id: "same-model" } },
   } };
   const amb = resolveSubjects({ registry: ambiguous, subjectArg: "same-model", codeRef: CODE_REF });
   assert.match(amb.error, /ambiguous/);
-  // 全形式（providerID/modelId 仍同）→ 也歧义；带 providerKey 区分不在 subject 语法面 → 保持拒绝。
-  assert.match(resolveSubjects({ registry: ambiguous, subjectArg: "claude-code/same-model", codeRef: CODE_REF }).error, /ambiguous/);
+  // 全形式（providerID/modelId）唯一圈定 → 不再歧义（subject 语法面的消歧途径）。
+  const byFull = resolveSubjects({ registry: ambiguous, subjectArg: "codex/same-model", codeRef: CODE_REF });
+  assert.equal(byFull.error, null);
+  assert.deepEqual(byFull.subjects.map((s) => s.providerID), ["codex"]);
 
   assert.match(resolveSubjects({ registry, subjectArg: "backend", codeRef: "" }).error, /codeRef/);
   assert.match(resolveSubjects({ registry, subjectArg: "", codeRef: CODE_REF }).error, /--subject is required/);
@@ -208,7 +209,7 @@ test("fixtures 路径 1: 新鲜组合认证记录 → composition-cert 候选（
   assert.equal(candidates.llm[0].runId, "run_green_42");
   assert.equal(candidates.llm[0].anchorAgentId, "researcher");
   assert.equal(candidates.llm[0].identity.modelId, "glm-5.3-flash[1m]");
-  assert.equal(candidates.llm[0].identity.providerKey, "https://a.example/api|KEY_A");
+  assert.equal(candidates.llm[0].identity.providerKey, null, "providerKey 恒 null（决定 0106）");
   assert.equal(candidates.backend.length, 1);
   assert.equal(candidates.backend[0].identity.backend, "claude-code");
 });

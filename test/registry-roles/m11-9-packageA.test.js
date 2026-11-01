@@ -1,19 +1,18 @@
 // test/m11-9-packageA.test.js
 //
-// M11-9 Package A: Canonical model/reasoning/provider policy + registry boundary.
+// M11-9 Package A: Canonical model/reasoning policy + registry boundary.
 //
 // CTO contract (顶层可选对象):
 //   model?:     { id: string, contextWindow?: positive integer }
 //   reasoning?: { effort: "minimal"|"low"|"medium"|"high"|"xhigh"|"max" }
-//   provider?:  { protocol: "anthropic-compatible", baseUrl: string, apiKeyEnv: string }
 //
 // 硬合同:
 //   - structured 字段与 args/prependArgs 中的 --model/--effort/--default-model
 //     /--context-window 混用 → 固定错误拒绝。
-//   - provider 禁止保存 model/effort/contextWindow(旧形态)。
+//   - provider 块已随决定 0106 退役（统一拒绝，用例见 registry.test.js D0106）。
 //   - model.id 省略表示 runtime default(不必填)。
 //   - reasoning 省略表示 runtime default。
-//   - malformed model/reasoning/provider 在 transcript/spawn 前拒绝,错误不回显恶意值。
+//   - malformed model/reasoning 在 transcript/spawn 前拒绝,错误不回显恶意值。
 //   - legacy-only(无 structured 字段,全在 args)可在单一 normalizer 转 canonical;
 //     mixed(部分 structured + 部分 args 重复)拒绝。
 
@@ -40,22 +39,18 @@ test("A1-structured-native: model+reasoning without provider normalizes cleanly"
   assert.deepEqual(a.args, ["--dangerously-skip-permissions"]);
 });
 
-// ===== A2: structured provider-wrapped Claude =====
+// ===== A2: structured contextWindow sanity（contextWindow 形状仍由 registry 校验）=====
 
-test("A2-structured-provider: connection/model/reasoning separated", () => {
+test("A2-structured-contextWindow: model.id/contextWindow/reasoning normalize as given", () => {
   const a = normalizeAgent("coder_hq", {
     ...VALID_BACKEND,
     model: { id: "glm-5.2", contextWindow: 1000000 },
     reasoning: { effort: "high" },
-    provider: { protocol: "anthropic-compatible", baseUrl: "https://example.com", apiKeyEnv: "MY_KEY" },
     args: ["--dangerously-skip-permissions"],
   });
   assert.equal(a.model.id, "glm-5.2");
   assert.equal(a.model.contextWindow, 1000000);
   assert.equal(a.reasoning.effort, "high");
-  assert.equal(a.provider.baseUrl, "https://example.com");
-  assert.equal(a.provider.apiKeyEnv, "MY_KEY");
-  assert.equal(a.provider.protocol, "anthropic-compatible");
 });
 
 // ===== A3: mixed authority rejection =====
@@ -120,24 +115,6 @@ test("A4c-malformed-contextWindow: non-positive → reject", () => {
   assert.throws(
     () => normalizeAgent("w", { ...VALID_BACKEND, model: { id: "x", contextWindow: 0 } }),
     /context/i,
-  );
-});
-
-test("A4d-malformed-provider: missing baseUrl/apiKeyEnv → reject", () => {
-  assert.throws(
-    () => normalizeAgent("w", { ...VALID_BACKEND, provider: { protocol: "anthropic-compatible" } }),
-    /provider/i,
-  );
-});
-
-test("A4e-provider-old-shape: provider.model present → reject (model must be top-level)", () => {
-  assert.throws(
-    () => normalizeAgent("w", {
-      ...VALID_BACKEND,
-      provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "K", model: "evil" },
-    }),
-    /provider.*model|model.*provider/i,
-    "provider must not carry model",
   );
 });
 

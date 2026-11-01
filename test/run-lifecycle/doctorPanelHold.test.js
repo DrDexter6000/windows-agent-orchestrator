@@ -73,12 +73,11 @@ test("决定 0090: 会审本可配（两名跨族系候选）时，doctor 仍打
   const saved = names.map((n) => process.env[n]);
   for (const n of names) process.env[n] = "dummy";
   try {
-    const provider = (baseUrl, apiKeyEnv) => ({ protocol: "anthropic-compatible", baseUrl, apiKeyEnv });
     writeFileSync(join(root, "agents.json"), JSON.stringify({
       agents: {
         la: { backend: "codex", cwd: root, model: { id: "gpt-x" } },
-        lg: { backend: "claude-code", provider: provider("https://open.bigmodel.cn/api/anthropic", names[0]), model: { id: "glm-5.2" }, cwd: root },
-        lk: { backend: "claude-code", provider: provider("https://api.moonshot.cn/anthropic", names[1]), model: { id: "kimi-k3" }, cwd: root },
+        lg: { backend: "deepseek-acp", credentialEnv: names[0], model: { id: "deepseek-v4-pro", providerID: "deepseek-official" }, cwd: root },
+        lk: { backend: "deepseek-acp", credentialEnv: names[1], model: { id: "glm-5.2", providerID: "deepseek-official" }, cwd: root },
       },
     }), "utf8");
     const panel = await doctorPanel(root, []);

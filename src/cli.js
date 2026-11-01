@@ -111,8 +111,8 @@ async function getConfig() {
   return configCache;
 }
 
-// _doctorParseSmoke / isProviderWrappedClaudeCodeWorker / hasClaudeOauthCredentials /
-// whichCli 已移至 src/commands/doctor.js（TD-98 阶段 2d，随 doctor 族搬迁）。
+// _doctorParseSmoke / whichCli 已移至 src/commands/doctor.js（TD-98 阶段 2d，
+// 随 doctor 族搬迁）。
 
 /**
  * waoCommand 派遣器包装：注入 askHandler（= waoAskCommand）。

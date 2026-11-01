@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readRegistry, normalizeAgent, unknownBackendGuidance } from "../../src/registry.js";
+import { readRegistry, normalizeAgent, unknownBackendGuidance, KNOWN_BACKENDS } from "../../src/registry.js";
 
 test("reads agent registry and applies cwd override", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
@@ -138,12 +138,12 @@ test("混合 registry: kimi-web + claude-code + codex 共存", async () => {
   assert.deepEqual(ids, ["claude", "codex", "kw"]);
 });
 
-// ===== P4 融合项 #3（决策B 全量迁移）：provider 一等字段 =====
-// 决策 0010：model/provider/effort/apiKeyEnv 提为一等字段，消除配置藏在 args/prependArgs
-// 数组里导致的漂移（opus-4.8 类 bug 的温床——同一 model 出现在 wrapper prependArgs 和
-// claude CLI args 两处）。normalizeAgent 认 provider:{baseUrl,apiKeyEnv,model,effort,contextWindow}。
+// ===== 决定 0106：provider 块统一拒绝 =====
+// provider 通道（claude-code 驱动非 Anthropic 模型）已退役：normalizeModelPolicy
+// 对任何 backend 的非 null provider 块抛固定文案。历史（P4 融合项 #3 的一等字段
+// 解析、R23-C 的 anthropic-compatible 形状校验）见 archive/claude-code-provider-channel。
 
-test("P4-T2: claude-code agent 带 canonical model/reasoning/provider 被正确解析", async () => {
+test("D0106: 任何 backend 的 provider 块 → 固定文案拒绝（决定 0106）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
@@ -153,7 +153,7 @@ test("P4-T2: claude-code agent 带 canonical model/reasoning/provider 被正确�
         coder: {
           backend: "claude-code",
           cwd: "D:/proj",
-          model: { id: "glm-5.2", contextWindow: 1000000 },
+          model: { id: "glm-5.2" },
           reasoning: { effort: "high" },
           provider: {
             protocol: "anthropic-compatible",
@@ -165,36 +165,89 @@ test("P4-T2: claude-code agent 带 canonical model/reasoning/provider 被正确�
     }),
   );
   const registry = await readRegistry(registryPath);
-  const agent = registry.getAgent("coder");
-  assert.equal(agent.backend, "claude-code");
-  assert.equal(agent.model.id, "glm-5.2");
-  assert.equal(agent.model.contextWindow, 1000000);
-  assert.equal(agent.reasoning.effort, "high");
-  assert.deepEqual(agent.provider, {
-    protocol: "anthropic-compatible",
-    baseUrl: "https://open.bigmodel.cn/api/anthropic",
-    apiKeyEnv: "ZHIPU_API_KEY",
-  });
+  assert.throws(
+    () => registry.getAgent("coder"),
+    /Agent coder: provider is no longer supported \(decision 0106\) — remove the provider block/,
+    "well-formed anthropic-compatible provider block is rejected with the fixed message",
+  );
 });
 
-test("P4-T2: provider 部分字段可选（只 protocol+baseUrl+apiKeyEnv 也能解析）", async () => {
+test("D0106: 半块/旧形状 provider 同样拒绝（不再做形状校验分流）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
     registryPath,
     JSON.stringify({
       agents: {
-        coder: {
+        half: {
           backend: "claude-code",
           cwd: "D:/proj",
-          model: { id: "m" },
-          provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "KEY" },
+          provider: { baseUrl: "https://x" },
+        },
+        old_shape: {
+          backend: "codex",
+          cwd: "D:/proj",
+          provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "KEY", model: "m" },
         },
       },
     }),
   );
   const registry = await readRegistry(registryPath);
-  const agent = registry.getAgent("coder");
+  assert.throws(
+    () => registry.getAgent("half"),
+    /provider is no longer supported \(decision 0106\)/,
+    "half provider block rejected with the same fixed message",
+  );
+  assert.throws(
+    () => registry.getAgent("old_shape"),
+    /provider is no longer supported \(decision 0106\)/,
+    "old-shape provider on a non-claude backend rejected identically",
+  );
+});
+
+test("D0106: 每个 backend 的任何非 null provider 值 → 同一固定文案", () => {
+  // 各 backend 的最小合法底稿（registry 层必填项）；新增 backend 时在这里补一条。
+  const bases = {
+    "claude-code": {},
+    codex: {},
+    "kimi-code": {},
+    "deepseek-harness": { binary: "D:/dsh/dsh-jsonrpc-agent.exe", dshConfigPath: "D:/dsh/cordis.json", credentialEnv: "DSH_KEY" },
+    "deepseek-acp": { credentialEnv: "DEEPSEEK_API_KEY" },
+    "kimi-web": { model: { id: "k" }, serveUrl: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN" },
+    zcode: { model: { id: "a/b" }, binary: "D:/zcode/zcode.cjs" },
+  };
+  for (const backend of KNOWN_BACKENDS) {
+    const base = { backend, cwd: "D:/proj", ...bases[backend] };
+    assert.doesNotThrow(() => normalizeAgent("w", base), `${backend}: 底稿本身合法`);
+    for (const value of [false, 0, "", [], {}, "x"]) {
+      assert.throws(
+        () => normalizeAgent("w", { ...base, provider: value }),
+        /Agent w: provider is no longer supported \(decision 0106\) — remove the provider block/,
+        `${backend}: provider=${JSON.stringify(value)}`,
+      );
+    }
+  }
+});
+
+test("D0106: provider 为 null/undefined → 照常解析（不受影响）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
+  const registryPath = join(dir, "agents.json");
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      agents: {
+        explicit_null: {
+          backend: "claude-code",
+          cwd: "D:/proj",
+          model: { id: "m" },
+          provider: null,
+        },
+      },
+    }),
+  );
+  const registry = await readRegistry(registryPath);
+  const agent = registry.getAgent("explicit_null");
+  assert.equal(agent.model.id, "m");
   assert.equal(agent.reasoning, undefined);
   assert.equal(agent.model.contextWindow, undefined);
 });

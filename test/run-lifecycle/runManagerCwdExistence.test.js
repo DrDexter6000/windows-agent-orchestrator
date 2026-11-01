@@ -411,9 +411,9 @@ test("RCE-10: bad cwd AND missing required credential → the cwd refusal wins (
     // 1's ordering — so the refusal is the deterministic, env-independent one.
     const registryPath = makeRegistry(dir, {
       coder_low: {
-        backend: "claude-code",
+        backend: "deepseek-acp",
         cwd: PLACEHOLDER_CWD,
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "RCE10_NO_SUCH_KEY" },
+        credentialEnv: "RCE10_NO_SUCH_KEY",
       },
     });
     const manager = makeManager({ registryPath, runDir: join(dir, "runs"), backend });

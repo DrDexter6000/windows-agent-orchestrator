@@ -1,18 +1,13 @@
-import { resolve, dirname, join } from "node:path";
+import { join } from "node:path";
 import { existsSync, mkdtempSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { ProcessBackend } from "./processBackend.js";
 import { ClaudeStreamParser } from "./parsers/claudeCode.js";
-import { resolveProviderArgs } from "./claudeCodeProvider.js";
 import { inheritedEnvNames, CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
-
-// claude-code-provider-wrapper.mjs 的绝对路径（本文件同目录的 ../../scripts/wrappers/）。
-const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "wrappers", "claude-code-provider-wrapper.mjs"));
 
 // M12-14 worker 上下文隔离：provider auto-memory 让 supervised worker 在 WAO 检测
 // workdir_escape 之前编辑了 worktree 之外的全局 memory 文件。对【每一个】claude 子
-// 进程（native OAuth / provider wrapper / start / resume）强制关闭 auto-memory。
+// 进程（native OAuth / start / resume）强制关闭 auto-memory。
 // 经 backend 自己的 runtimeEnv 注入——runtimeEnv 在每次 spawn 都跑，无需 RunManager
 // 或 runtime-name 分支；buildChildEnv 合并序保证它压过同名 agent.env。
 const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
@@ -98,10 +93,6 @@ function activeOauthTokenValue(task) {
  * promptViaStdin，非纠偏运行的提示词在子进程起来后写进它的标准输入；纠偏运行以
  * stream-json 用户消息经同一 stdin 投递。提示词不进命令行，决定 0093。）
  *
- * P4 融合项 #3（决策B）：优先用 agent.provider 一等字段推导参数（wrapper prependArgs +
- * claude CLI flags），单一真相源防漂移（opus-4.8 bug 温床）。无 provider 时向后兼容，
- * 走旧 agent.binary/prependArgs/args（手拼形态）。
- *
  * agent.args：仅作真正 ad-hoc 的 CLI flag 透传（如 ["--dangerously-skip-permissions"]）。
  *
  * M11-5 角色合同（TD-89 修复）：role contract 由 RunManager 经共享加载器
@@ -164,11 +155,8 @@ export class ClaudeCodeBackend extends ProcessBackend {
   /**
    * M11-9 capability: declare exactly what this backend can express.
    *
-   * Provider path (wrapper): model, reasoning, contextWindow, provider — all
-   * translated by resolveProviderArgs.
-   * Native OAuth path (no provider): model, reasoning — translated by buildArgs
-   * directly. contextWindow and provider cannot be expressed natively (no
-   * wrapper to set --context-window; provider without wrapper is meaningless).
+   * Native OAuth path: model + reasoning — translated by buildArgs directly.
+   * contextWindow cannot be expressed natively (no CLI flag to set it).
    */
   validateAgentPolicy(agent) {
     // 仓库纪律（kimi-web/zcode 同款）：配了本 backend 表达不了的 model 子字段必须
@@ -180,14 +168,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
         + "(only model.id is handed to the runtime via `--model` — rejected instead of silently dropping routing fields)",
       );
     }
-    const hasProvider = !!agent?.provider;
-    // Provider path: can express everything else.
-    if (hasProvider) return; // model.id/reasoning/contextWindow/provider all OK.
-    // Native path: model + reasoning OK; contextWindow/provider NOT expressible.
     if (agent?.model?.contextWindow) {
-      throw new Error("claude-code native path (no provider) cannot express model.contextWindow — requires a provider wrapper");
+      throw new Error("claude-code backend cannot express model.contextWindow (no CLI flag for it)");
     }
-    // model.id and reasoning.effort are fine on native path.
+    // model.id and reasoning.effort are fine.
   }
 
   constructor(opts = {}) {
@@ -234,34 +218,22 @@ export class ClaudeCodeBackend extends ProcessBackend {
         if (task.roleContract) {
           args.push("--append-system-prompt", task.roleContract);
         }
-        // 2026-09-19 Owner 裁定：所有 claude-code worker 会话强制纯净模式——
-        // --bare 跳过全局配置面（hooks/LSP/插件同步/自动记忆/后台预取/钥匙串/
-        // CLAUDE.md 自动发现），--strict-mcp-config 跳过一切配置来源的 MCP。
-        // 全局技能/插件/全局 CLAUDE.md 是 worker 的纯 token 税与工具选择干扰
-        // （skillUsage 实证：worker 期零使用）；角色合同经上方显式注入不受影响。
-        // M11-9: provider 判定先于纯净旗标（2026-10-05 起 bare 按通道条件化）。
-        const providerArgs = resolveProviderArgs(agent, WRAPPER_PATH);
-        if (providerArgs) {
-          // provider wrapper 通道：凭据经 wrapper env 注入，bare 字节不变
-          //（2026-09-19 Owner 裁定的原形态）。
-          args.push("--bare", "--strict-mcp-config");
-          args.push(...providerArgs.cliFlags);
-        } else {
-          // native OAuth 通道：bare 与 OAuth 互斥（见 prepareClaudeOauthConfigDir 注释）
-          // ——纯净改由 CLAUDE_CONFIG_DIR 隔离目录承载（spawn 覆写预备、runtimeEnv 注入）；
-          // strict-mcp-config 仍保留（MCP 面与配置目录正交，双保险）。
-          args.push("--strict-mcp-config");
-          // No provider: translate model/reasoning directly to CLI flags.
-          if (agent.model?.id) args.push("--model", agent.model.id);
-          if (agent.reasoning?.effort) args.push("--effort", agent.reasoning.effort);
-        }
+        // 2026-09-19 Owner 裁定：所有 claude-code worker 会话强制纯净模式。
+        // bare 与 OAuth 互斥（见 prepareClaudeOauthConfigDir 注释）——纯净由
+        // CLAUDE_CONFIG_DIR 隔离目录承载（spawn 覆写预备、runtimeEnv 注入）；
+        // --strict-mcp-config 跳过一切配置来源的 MCP（MCP 面与配置目录正交，
+        // 双保险）。角色合同经上方显式注入不受影响。
+        args.push("--strict-mcp-config");
+        // model/reasoning 直接翻译成 CLI flags。
+        if (agent.model?.id) args.push("--model", agent.model.id);
+        if (agent.reasoning?.effort) args.push("--effort", agent.reasoning.effort);
         // ad-hoc CLI flag 透传（如 --dangerously-skip-permissions）
         args.push(...(Array.isArray(agent.args) ? agent.args : []));
         return args;
       },
       // M11-7: delegate to the runtime-neutral env-policy SSOT (no mirrored
-      // algorithm). inheritedEnvNames returns the declared credential name(s)
-      // for claude-code (provider.apiKeyEnv / legacy --api-key-env).
+      // algorithm). inheritedEnvNames returns the declared credential/env
+      // names for claude-code (the native-OAuth long-term token name).
       credentialEnvNames: (agent) => inheritedEnvNames(agent),
       runtimeEnv: (_agent, task) => ({
         CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
@@ -305,13 +277,13 @@ export class ClaudeCodeBackend extends ProcessBackend {
       stripped[name] = value;
     }
     // native OAuth 通道：预备隔离配置目录（见 prepareClaudeOauthConfigDir）。
-    // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策纯由 agent.provider 派生，
-    // 与本字段无耦合——preflight/spawn 两次 buildArgs 调用天然一致）。
+    // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策与本字段无耦合——
+    // preflight/spawn 两次 buildArgs 调用天然一致）。
     // TD-223：目录创建即登记（super.spawn 在其后才跑——ENOENT 等失败时目录已落盘，
     // 靠登记表让 dispose 在 spawn 失败路径也能回收）。
     // TD-229：令牌可解析时目录保持空（token 模式，不拷贝凭据）。
     const taskExtras = {};
-    if (!agent?.provider && task && typeof task === "object") {
+    if (task && typeof task === "object") {
       taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir(activeOauthTokenValue(task));
     }
     const enrichedTask = task && typeof task === "object" ? { ...task, ...taskExtras } : task;
@@ -352,16 +324,6 @@ export class ClaudeCodeBackend extends ProcessBackend {
         // 单目录失败继续其余（TD-223）：一个目录卡死不得阻塞整批清理。
       }
     }
-  }
-
-  // P4 决策B：有 provider 时，binary=node + prependArgs 从 provider 推导（wrapper 调起）。
-  // 无 provider 时走默认（resolveBinary → claude on PATH，旧形态用 agent.binary/prependArgs）。
-  async resolveBinary(agent) {
-    const providerArgs = resolveProviderArgs(agent, WRAPPER_PATH);
-    if (providerArgs) {
-      return { binary: process.execPath, prependArgs: providerArgs.prependArgs };
-    }
-    return super.resolveBinary(agent);
   }
 
   defaultBinary() {

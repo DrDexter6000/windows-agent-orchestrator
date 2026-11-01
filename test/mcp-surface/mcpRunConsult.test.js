@@ -74,16 +74,16 @@ function makeGitRepo(dir) {
   execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
 }
 
-/** 席位注册表：seat_a wrapper 形（provider.baseUrl），seat_b 裸 backend 形。 */
+/** 席位注册表：seat_a 走 providerID 形（model.providerID），seat_b 裸 backend 形。 */
 function makeRegistry(dir) {
   const registryPath = join(dir, "agents.json");
   writeFileSync(registryPath, JSON.stringify({
     agents: {
       seat_a: {
-        backend: "claude-code",
+        backend: "deepseek-acp",
         cwd: dir,
-        provider: { protocol: "anthropic-compatible", baseUrl: "https://stub.example/api/anthropic", apiKeyEnv: "STUB_KEY" },
-        model: { id: "model-seat_a" },
+        credentialEnv: "STUB_KEY",
+        model: { id: "model-seat_a", providerID: "deepseek-official" },
       },
       seat_b: { backend: "codex", cwd: dir, model: { id: "model-seat_b" } },
     },
@@ -244,8 +244,8 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
         assert.ok(!serialized.includes(word), `回执不得携带结论词：${word}`);
       }
 
-      // 三块砖①厂族：registry 原始字段直读（wrapper 形 provider.baseUrl）。
-      assert.equal(p.bricks.runtimeFacts.find((f) => f.agentId === "seat_a").provider, "https://stub.example/api/anthropic");
+      // 三块砖①厂族：registry 原始字段直读（providerID 形 model.providerID）。
+      assert.equal(p.bricks.runtimeFacts.find((f) => f.agentId === "seat_a").provider, "deepseek-official");
       assert.equal(p.bricks.runtimeFacts.find((f) => f.agentId === "seat_b").provider, null);
 
       // 不进 drilldowns 目录（advisory 动作工具，非观察工具；0051 维持六工具闭集）。

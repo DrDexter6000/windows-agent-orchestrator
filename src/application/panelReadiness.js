@@ -43,7 +43,7 @@ export { PANEL_STAGES } from "../waoStage.js";
  *
  * @param {object} input
  * @param {string|null} input.requiresCli — backend 映射的 CLI 名（null = 无 CLI 可探）
- * @param {string|null} input.requiresKeyEnv — 声明的 provider key env 名（null = 登录态型；
+ * @param {string|null} input.requiresKeyEnv — 声明的凭据 env 名（null = 登录态型；
  *   kimiHome 车道传 token 文件路径——映射只看非空性，不消费其值）
  * @param {true|false|"unknown"|undefined} input.cli — CLI 探测结果（undefined 视为 unknown）
  * @param {"process_env"|"user_env"|"token_file"|"missing"|"unknown"|undefined} input.key — key 探测结果
@@ -125,7 +125,7 @@ export function assessPanelReadiness(rows, { dispatchHolds = {} } = {}) {
     .map((e) => e.id);
   const probeUnknown = entries.filter((e) => e.readyState === "unknown").map((e) => e.id);
   const knownFamilies = readySeats.map((e) => e.family).filter((f) => f !== UNKNOWN_FAMILY);
-  // 同 backend+modelId 多键（近似指纹去重——指纹需 provider 块，行形状不携带；
+  // 同 backend+modelId 多键（近似指纹去重——完整指纹另含 providerID 等维，行形状不携带；
   // 展示事实用，不作硬判定）。
   const byAxes = new Map();
   for (const e of readySeats) {

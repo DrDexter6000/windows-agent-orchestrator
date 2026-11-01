@@ -4,8 +4,8 @@
 //
 // 覆盖：令牌可解析（task.resolvedCredentials 优先 / process.env 兜底）→ 隔离目录
 // 保持空（标记在场、无凭据副本——即使凭据源存在），令牌值穿入子进程 env；令牌
-// 缺席/空串 → 回退旧拷贝路径（与 TD-223 行为字节不变）；envPolicy 派生（native
-// 通道才继承令牌名，provider 通道不继承）；令牌值经 inheritedNames 进脱敏器。
+// 缺席/空串 → 回退旧拷贝路径（与 TD-223 行为字节不变）；envPolicy 派生（claude-code
+// 无条件继承令牌名）；令牌值经 inheritedNames 进脱敏器。
 //
 // 凭据纪律：oauthCredentialsSource 注入 fixture——测试绝不复制真实
 // ~/.claude/.credentials.json；CLAUDE_CODE_OAUTH_TOKEN 在每个用例内显式控制
@@ -53,20 +53,6 @@ async function spawnAndCapture(backend, agent, task) {
 
 function nativeAgent(extra = {}) {
   return { id: "w", backend: "claude-code", binary: "fake-claude", cwd: process.cwd(), ...extra };
-}
-
-function providerAgent() {
-  return {
-    id: "w",
-    backend: "claude-code",
-    cwd: process.cwd(),
-    model: { id: "glm-5.2" },
-    provider: {
-      protocol: "anthropic-compatible",
-      baseUrl: "https://provider.example/api/anthropic",
-      apiKeyEnv: "TD229_PROVIDER_KEY",
-    },
-  };
 }
 
 function makeCredentialsFixture(root) {
@@ -253,21 +239,9 @@ test("TD-229 镜像钉②：resolvedCredentials 小写键非空 → 判定 token
   }
 });
 
-test("TD-229 envPolicy 派生：native 通道继承令牌名；provider 通道不继承（防认证优先级被抢）", () => {
+test("TD-229 envPolicy 派生：claude-code 无条件继承令牌名（决定 0106：native OAuth 是唯一通道）", () => {
   const native = inheritedEnvNames(nativeAgent());
-  assert.ok(native.includes(CLAUDE_OAUTH_TOKEN_ENV), `native 通道应含 ${CLAUDE_OAUTH_TOKEN_ENV}`);
-  assert.ok(!native.includes("TD229_PROVIDER_KEY"), "native 通道不带 provider 凭据名");
-
-  const prev = process.env.TD229_PROVIDER_KEY;
-  process.env.TD229_PROVIDER_KEY = "td229-dummy";
-  try {
-    const provider = inheritedEnvNames(providerAgent());
-    assert.ok(provider.includes("TD229_PROVIDER_KEY"), "provider 通道保留自身凭据名");
-    assert.ok(!provider.includes(CLAUDE_OAUTH_TOKEN_ENV), "provider 通道不得继承长期令牌名（wrapper 自带凭据，混入会抢认证优先级）");
-  } finally {
-    if (prev === undefined) delete process.env.TD229_PROVIDER_KEY;
-    else process.env.TD229_PROVIDER_KEY = prev;
-  }
+  assert.ok(native.includes(CLAUDE_OAUTH_TOKEN_ENV), `claude-code 应含 ${CLAUDE_OAUTH_TOKEN_ENV}`);
 });
 
 test("TD-229 脱敏：令牌值经 inheritedNames 进脱敏器，明文永不留在 redact 输出", () => {

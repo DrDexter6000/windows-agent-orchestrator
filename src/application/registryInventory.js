@@ -34,9 +34,6 @@ import { resolveTranscriptPath } from "../projectBuckets.js";
 // application→core 下向纪律）。显示层投影与 P1-1 派发门共用同一判定，
 // 不存在第二套 identity 匹配规则。
 import { matchedCertRecord, selectCertRecord } from "../runManager.js";
-// TD-186：声明侧 providerKey 派生与 matchedCertRecord 记录侧同一 SSOT
-// （src/providerFingerprint.js 单一实现，无第二套归一化）。
-import { providerKeyFor } from "../providerFingerprint.js";
 // TD-283：车道表 dispatchHold（Owner 的暂停派发说明）按车道 id 从
 // config/lanes.json 取——CLI `registry list` 与 MCP `registry_list` 共用本
 // 服务，同一处计算（无第二套 join）。只告知、不拦截。
@@ -105,7 +102,7 @@ export function buildProviderReadiness(credentialAvailability) {
  * M11-9: reads the structured `model.id` field (the canonical source after
  * normalization). The legacy args/prependArgs fallbacks are removed — the
  * normalizer already extracted them to structured fields, so there is no
- * second authority to search. provider.model is gone (forbidden by contract).
+ * second authority to search.
  * @param {object} agent — normalized agent from registry
  * @returns {string}
  */
@@ -764,15 +761,16 @@ function profileContradictionFields(record, profile) {
 /**
  * TD-186 复核 FAIL-A 收口：executionProfile 四元组与当前席位有效配置的逐字段
  * 比对（不含 backend——backend 只活在记录顶层，由调用方单独比对；不含 effort——
- * effort 有专属限制项措辞）。provider 两字段逐字段相等才相等：一侧 null 一侧
- * 非 null ⇒ 不等（mismatched）；两侧同 null（无接入方）⇒ 相等。
+ * effort 有专属限制项措辞）。providerKey：决定 0106 起当前侧恒为 null，记录侧
+ * 非 null 字符串 ⇒ 不等（mismatched）；null ⇒ 相等。
  * @private
  */
 function profileConfigMismatchFields(agent, profile) {
   const dims = [];
   if ((agent.model?.id ?? null) !== profile.modelId) dims.push("modelId");
   if ((agent.model?.providerID ?? null) !== profile.providerID) dims.push("providerID");
-  if (providerKeyFor(agent.provider) !== profile.providerKey) dims.push("providerKey");
+  // 决定 0106：当前侧恒为 null——记录侧带非空 providerKey 即 mismatch。
+  if (profile.providerKey !== null && profile.providerKey !== undefined) dims.push("providerKey");
   return dims;
 }
 
@@ -1032,7 +1030,8 @@ export async function getCertificationEvidenceInventory({
         backend: agent.backend,
         modelId: agent.model?.id ?? null,
         providerID: agent.model?.providerID ?? null,
-        providerKey: providerKeyFor(agent.provider),
+        // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
+        providerKey: null,
         effort: agent.reasoning?.effort ?? null,
       },
       // 列 2：组件观测（component-checks.json 的只读事实，非判定）。

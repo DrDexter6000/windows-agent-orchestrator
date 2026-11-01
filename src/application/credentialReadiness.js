@@ -3,9 +3,10 @@
 // M11-7 (CTO closeout): Worker credential availability + Windows user-env bridge.
 //
 // Assesses whether a worker's REQUIRED credentials (registry-declared via
-// provider.apiKeyEnv / legacy --api-key-env) are available in the launching
-// environment, and bridges values from the Windows Current-User scope into the
-// worker child process when they are absent from process.env.
+// deepseek-harness/deepseek-acp credentialEnv or kimi-web tokenEnv) are
+// available in the launching environment, and bridges values from the Windows
+// Current-User scope into the worker child process when they are absent from
+// process.env.
 //
 // 决定 0074 补充：kimi-web 车道声明 kimiHome 时，凭据面是 <kimiHome>/server.token
 // 文件而非环境变量——kimiHomeTokenFileState 是"文件在且非空"的单一判定，
@@ -32,7 +33,7 @@
 //   - Structured argv (base64-encoded PowerShell command); injectable reader.
 //
 // Honesty: this module only proves a CREDENTIAL blocker, not that the runtime
-// is executable/logged-in/provider-healthy. The field is named
+// is executable/logged-in. The field is named
 // credentialAvailability, not "runtime readiness".
 //
 // Architectural contract: no src/mcp/*, src/commands/*, MCP SDK, or zod imports.
@@ -50,8 +51,7 @@ export { requiredCredentialNames, inheritedEnvNames };
 
 /**
  * 多凭据名探测源聚合为单一 key 态（TD-258：doctor 与 onboarding 共用的唯一
- * 实现——claude-code 的 provider.apiKeyEnv 加 --api-key-env prependArgs 可能
- * 出现多名，聚合语义不得在两个消费面各写一份）。
+ * 实现——聚合语义不得在两个消费面各写一份）。
  *
  * @param {Array<"process_env"|"user_env"|"missing"|"unknown">} sources — 非空数组
  * @returns {"process_env"|"user_env"|"missing"|"unknown"} 全 process_env=process_env；

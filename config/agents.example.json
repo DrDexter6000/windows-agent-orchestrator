@@ -74,7 +74,7 @@
       }
     },
     "opus": {
-      "_comment": "via claude-code（原厂订阅 OAuth，不走 provider wrapper）；用途与限制见 wao lanes。",
+      "_comment": "via claude-code（原厂订阅 OAuth）；用途与限制见 wao lanes。",
       "backend": "claude-code",
       "cwd": ".",
       "model": {

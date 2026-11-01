@@ -7,39 +7,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveProviderArgs } from "../../src/backends/claudeCodeProvider.js";
 
 // ===== Claude Code backend: structured → CLI =====
 
-test("B1-claude-provider: resolveProviderArgs derives wrapper + cli from canonical fields", () => {
-  const agent = {
-    provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "KEY" },
-    model: { id: "glm-5.2", contextWindow: 1000000 },
-    reasoning: { effort: "high" },
-  };
-  const r = resolveProviderArgs(agent, "/wrapper.mjs");
-  assert.ok(r, "returns result when provider present");
-  // wrapper prependArgs include connection + model + effort + context.
-  assert.ok(r.prependArgs.includes("--default-model"), "wrapper gets --default-model");
-  assert.ok(r.prependArgs.includes("glm-5.2"), "wrapper gets model id");
-  assert.ok(r.prependArgs.includes("--effort"), "wrapper gets --effort");
-  assert.ok(r.prependArgs.includes("high"), "wrapper gets effort value");
-  assert.ok(r.prependArgs.includes("--context-window"), "wrapper gets --context-window");
-  // cli flags mirror model + effort.
-  assert.deepEqual(r.cliFlags, ["--model", "glm-5.2", "--effort", "high"]);
-});
-
-test("B2-claude-native: resolveProviderArgs returns null without provider", () => {
-  const agent = {
-    model: { id: "claude-opus-5" },
-    reasoning: { effort: "xhigh" },
-  };
-  const r = resolveProviderArgs(agent, "/wrapper.mjs");
-  assert.equal(r, null, "no provider → null (native OAuth direct-connect path)");
-});
-
-test("B3-claude-native-buildArgs: model + effort from structured fields (no provider)", async () => {
-  // Verify claudeCode buildArgs generates --model/--effort when no provider.
+test("B3-claude-native-buildArgs: model + effort from structured fields", async () => {
+  // Verify claudeCode buildArgs generates --model/--effort from the canonical fields.
   const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
   const backend = new ClaudeCodeBackend();
   // Access the buildArgs function via the internal config.

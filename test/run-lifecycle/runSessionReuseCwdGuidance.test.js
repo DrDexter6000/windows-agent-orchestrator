@@ -14,7 +14,7 @@
 //   ② 模块级：runDispatch.js 导出 SessionReuseWorkspaceRequiredError 且该路径抛其实例
 //      （今天类不存在）。
 //
-// fixture 后端选择：claude-code（无 provider.apiKeyEnv）→ requiredCredentialNames 为空
+// fixture 后端选择：claude-code（无必需凭据）→ requiredCredentialNames 为空
 // → credential preflight 判 not_required，不会先死于 CredentialMissingError
 // （credential preflight 先于 cwd 检查）。
 
@@ -36,7 +36,7 @@ function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-/** 无凭证要求的 sessionReuse agent registry fixture（claude-code，无 provider）。 */
+/** 无凭证要求的 sessionReuse agent registry fixture（claude-code）。 */
 function writeReuseRegistry(dir) {
   const registryPath = join(dir, "agents.json");
   writeFileSync(registryPath, JSON.stringify({

@@ -21,8 +21,8 @@
 //     (registry.js normalizeAgent) — there is no second validator. It reuses the
 //     install-root path concept (installRoot.js) — there is no second resolver.
 //
-// Safety: it never inspects credential VALUES (only the apiKeyEnv NAME from the
-// template), never fabricates certification status (certified/conditional/etc.),
+// Safety: it never inspects credential VALUES (only the credential env NAME
+// from the template), never fabricates certification status (certified/conditional/etc.),
 // and never echoes untrusted/malicious input in fixed safe error messages.
 //
 // R6-C: advisory lane-matrix recommendations (buildRecommendations) are derived
@@ -129,7 +129,7 @@ export function buildCandidateList(template) {
 //
 // Advisory recommendations for a bare `wao onboarding` (no --agent): one row per
 // template worker, derived PURELY from the tracked template rows (backend,
-// provider.apiKeyEnv, model.id, _comment_auth) plus the INJECTED
+// credential env, model.id, _comment_auth) plus the INJECTED
 // environment probe. There is no second hand-written lane table and no
 // auto-selection/auto-write — the choice stays with the user, matching the
 // existing "mutation requires explicit selection" contract.
@@ -152,9 +152,9 @@ export function buildCandidateList(template) {
 //   missing_cli   key present + CLI absent
 //   missing_key   CLI present + key absent
 //   missing_both  CLI absent + key absent
-//   login_based   worker declares no provider key (official OAuth / CLI login
-//                 state — auditor/tester/kimi style): only the CLI is probed;
-//                 the login state itself cannot be verified remotely
+//   login_based   worker declares no required credential env (official OAuth /
+//                 CLI login state — auditor/tester/kimi style): only the CLI is
+//                 probed; the login state itself cannot be verified remotely
 //   unknown       a probe failed, or the backend maps to no CLI (cannot verify)
 
 // backend → CLI 探测映射的唯一权威表见 ./backendCliMap.js（doctor 的 scoped
@@ -377,7 +377,7 @@ export async function buildRecommendations(candidates, template, probeEnv, opts 
     // 已配置面的 agent 可能缺 backend 字段，用候选行车道值兜底（TD-258 同款）。
     const agentMerged = { ...agent, backend: agent.backend ?? c.backend };
     // TD-258：凭据名从 requiredCredentialNames 派生（doctor 同一权威——覆盖
-    // provider.apiKeyEnv / tokenEnv / credentialEnv 三类），消费全部名；display
+    // tokenEnv / credentialEnv 两类），消费全部名；display
     // 字段 requiresKeyEnv 保持首名（形状不变）。
     const credNames = requiredCredentialNames(agentMerged);
     const requiresKeyEnv = credNames.length > 0 ? credNames[0] : null;
@@ -685,7 +685,7 @@ async function loadPrivateRegistry(privateRegistryPath, fs) {
  * R10-B: build the configured-face panel rows from a parsed private registry —
  * the SAME pipeline as the template face (buildCandidateList + the existing
  * buildRecommendations probe implementation; no second probe code). Row key
- * probes come from each entry's provider.apiKeyEnv name, CLI probes from its
+ * probes come from each entry's credential env name, CLI probes from its
  * backend, exactly like the template face. `count` is the true number of worker
  * entries (unbounded by MAX_CANDIDATES — it is a count, not an enumeration).
  *

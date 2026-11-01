@@ -400,7 +400,7 @@ test("TD-186 复核 FAIL-A: provider 一侧 null 一侧非 null ⇒ mismatched�
   try {
     const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
     const runDir = makeRunDir(dir);
-    // 声明侧：无 provider 块（providerKeyFor 派生 null、providerID null）。
+    // 声明侧：无路由字段（providerKey 恒 null、providerID null——决定 0106）。
     // 记录侧画像：providerID 声明了字符串——一侧 null 一侧非 null。
     const profile = matchedWorkerRecord().executionProfile;
     writeSummary(runDir, {

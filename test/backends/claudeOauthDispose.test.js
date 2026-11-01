@@ -3,7 +3,7 @@
 // TD-223（2026-10-07）：ClaudeCodeBackend 的 OAuth 隔离目录生命周期测试。
 //
 // 覆盖：spawn 创建目录 + owner 标记（pid/createdAt）+ 凭据从注入源拷贝；
-// 多 spawn 累积登记；dispose 全删 + 幂等 + 单目录失败继续；provider 通道不建目录；
+// 多 spawn 累积登记；dispose 全删 + 幂等 + 单目录失败继续；
 // 目录名前缀/标记文件名与 sweep 模块（application/oauthDirSweep.js）的约定同步。
 //
 // 凭据纪律：构造参数 oauthCredentialsSource 注入 fixture 副本源——测试绝不
@@ -67,21 +67,6 @@ async function spawnAndCapture(backend, agent, task) {
 
 function nativeAgent(extra = {}) {
   return { id: "w", backend: "claude-code", binary: "fake-claude", cwd: process.cwd(), ...extra };
-}
-
-function providerAgent(extra = {}) {
-  return {
-    id: "w",
-    backend: "claude-code",
-    cwd: process.cwd(),
-    model: { id: "glm-5.2" },
-    provider: {
-      protocol: "anthropic-compatible",
-      baseUrl: "https://provider.example/api/anthropic",
-      apiKeyEnv: "TD223_PROVIDER_KEY",
-    },
-    ...extra,
-  };
 }
 
 // fixture 凭据源：假 JSON（形状同真实 .credentials.json 的顶层键，值全 dummy）。
@@ -183,22 +168,6 @@ test("TD-223 dispose: 多次 spawn 累积多个目录（session 复用形态）�
   } finally {
     for (const d of dirs) safeRm(d);
     rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("TD-223 dispose: provider wrapper 通道不建目录不登记；dispose 无害 no-op", async () => {
-  const prev = process.env.TD223_PROVIDER_KEY;
-  process.env.TD223_PROVIDER_KEY = "td223-dummy";
-  try {
-    const { spawnFn, captures } = makeCapturingSpawn();
-    const backend = new ClaudeCodeBackend({ spawnFn });
-    await spawnAndCapture(backend, providerAgent(), { prompt: "do" });
-    assert.ok(!captures[0].opts.env.CLAUDE_CONFIG_DIR, "provider 通道不注入隔离目录");
-    assert.deepEqual(backend._oauthConfigDirs, [], "provider 通道零登记");
-    await backend.dispose();
-  } finally {
-    if (prev === undefined) delete process.env.TD223_PROVIDER_KEY;
-    else process.env.TD223_PROVIDER_KEY = prev;
   }
 });
 

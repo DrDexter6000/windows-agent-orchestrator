@@ -133,39 +133,3 @@ test("TD-229 doctor：注册表无 native claude worker（缺席 registry）→ 
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-// glm-pro 验收 P2-3（2026-10-07）：registry 在场但只有 provider wrapper claude
-// worker（无 native）→ 同样不出条目（5d 的筛选边界是 backend==="claude-code"
-// && !provider）。
-test("TD-229 doctor：registry 在场但只有 provider claude worker → 不产生条目", async () => {
-  const root = mkdtempSync(join(tmpdir(), "wao-td229-provonly-"));
-  // 必需 provider 键在测试进程内给值：缺失会产生 FAIL 检查（doctor 设
-  // process.exitCode=1）——本测试钉的是 5d 筛选边界，不是键缺失面。
-  const prevKey = process.env.TD229_PROVIDER_KEY;
-  process.env.TD229_PROVIDER_KEY = "td229-doctor-dummy";
-  try {
-    writeFileSync(
-      join(root, "agents.json"),
-      JSON.stringify({
-        agents: {
-          provider_claude: {
-            backend: "claude-code",
-            cwd: root,
-            model: { id: "glm-5.2" },
-            provider: { protocol: "anthropic-compatible", baseUrl: "https://provider.example/api", apiKeyEnv: "TD229_PROVIDER_KEY" },
-          },
-        },
-      }),
-      "utf8",
-    );
-    const checks = await doctorChecks(root);
-    assert.ok(
-      !checks.some((c) => c.name === "claude_oauth_token_mode"),
-      "仅 provider worker 时不出现该检查条目（token 模式只关乎 native 通道）",
-    );
-  } finally {
-    if (prevKey === undefined) delete process.env.TD229_PROVIDER_KEY;
-    else process.env.TD229_PROVIDER_KEY = prevKey;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
