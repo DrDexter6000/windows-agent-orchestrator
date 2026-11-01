@@ -1,7 +1,7 @@
 # 认证 Runbook（认证操作正文唯一权威）
 
 > 状态：运维（Runbook）类。本文件是认证操作正文的**唯一权威**；`docs/usage.md` 原位置只保留原具名标题与指向本文件的单向链接，不保留第二份当前正文（迁移单位是完整正文，不是锚点清单）。
-> 阅读入口：`docs/ssot.md` §0.1 `seat-certify` 行（无条件全文必读五文件之一）；多行动面命中取并集、正文显式依赖继续跟进、读取输出被截断必须补齐。判读 `containmentEvidence`（越界写拦截活体取证）或 `sandboxEnforcement`（OS 写沙箱执行取证）时连读 `docs/02-architecture.md` §4.6 Coder Delivery Contract 与 §4.1 状态机（追加依赖，非独立入口）。
+> 阅读入口：`docs/ssot.md` §0.1 `seat-certify` 行（无条件全文必读三文件之一）；多行动面命中取并集、正文显式依赖继续跟进、读取输出被截断必须补齐。判读 `containmentEvidence`（越界写拦截活体取证）或 `sandboxEnforcement`（OS 写沙箱执行取证）时连读 `docs/02-architecture.md` §4.6 Coder Delivery Contract 与 §4.1 状态机（追加依赖，非独立入口）。
 > 本文件自足承载认证操作正文，**不把必需认证义务路由回 `docs/usage.md`**；命令/参数参考仍在生成层 `docs/surface/`（权威源是代码，随代码再生成）。
 
 ## 认证结果用于派发选择的边界
@@ -9,7 +9,8 @@
 当前派发策略：
 - 真实编码/文件修改/命令执行优先派给经认证的车道——**本行只定规则、不定名单**：当前哪些车道属此列，查 `registry list`（当前配置 × 历史认证的**匹配投影**，不重验运行时；简表把台账缺失/不可读折叠成"无认证记录"，且**投影不含 certificationScope**——delta/full 只在 summary 磁盘层，双指针互补，勿把 `registry list` 当充分条件；需判适用性时用 `registry list --cert-evidence` 与"认证证据绑定执行画像"节）与当前 runDir 下的 `reliability-summary.json` 的 `workers` 字段（认证台账权威），角色划分权威见 `docs/team-roles.md`（席位名单是活配置，写进本文必漂移——负向守卫钉住本节不得出现席位 id）。
 - 角色合同以 `config/roles/*.md` 为准（Lead 的职责与派工原则见 `docs/team-roles.md`），接线以 `config/agents.example.json` 为模板，车道用法见车道画像（`config/lane-traits.json`）。
-- runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准（本行是**选择参考**；认证的门禁语义——MCP advisory、CLI `--require-certified`——见"认证与当前就绪"节，两回事不混写）。
+- runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准（本行是**选择参考**；认证的门禁语义——MCP 默认 advisory、可选认证清单门禁，CLI `--require-certified`——见"认证与当前就绪"节，两回事不混写）。
+- 组合层认证的对象是车道（身份四元组 `{backend, model.id, providerID, providerKey}`），证明的是下文「能力轴分层骨架」所列组合层轴在该车道上走通；角色内容与对新角色的胜任不在认证面内，换角色不触发整套认证，角色适合与否由 Lead 判断（角色合同能否送达模型由组件层探针验证，见「组件层验证」第 3 条）。`reliability-summary.json` 的 `workers` 按车道指纹键（`lane:<16hex>`）聚合，同四元组的多条接线合成一条记录；没有身份事实的 legacy case 归入同一 agentId 最近一次声明的车道键，该 agentId 的 case 全都没有身份事实时才落 `seat:<agentId>` 键。
 
 ## DSH 通道适用限制与能力交叉警告
 
@@ -216,6 +217,8 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --dry-
 node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-age-days 7
 ```
 
+`npm run reliability` 解析出 0 个认证 case 时 exit 2，不报 ALL PASS；矩阵行指向不在册的车道只警告并跳过（`npm run component-check` 的零目标规则见「组件层验证」第 13 条）。
+
 ## delta 认证规程
 
 新（harness × 模型）组合（新 lane）先用 delta 子集认证，通过后再全量重跑升级：
@@ -338,6 +341,8 @@ N/A、strict 证据不足（inconclusive）与 strict 失败仍是 `draft-only`�
 （`scorecardCommandFailureIsCredible` 保留它与观察到的非零退出）；再有放宽须 Owner
 另行显式裁定。
 
+**车道例外条款**（worker 聚合层的裁决，不改 case 自身判定）：登记在 `config/lane-exceptions.json`（git 跟踪），由 `scripts/reliability/certification.mjs` 的 worker 聚合消费。条款按车道四元组命中（backend、modelId 严格相等；providerID、providerKey 条款侧省略即通配，写 `null` 时记录侧 `null` 或缺席都命中）；一个 case 的红检查（`pass:false` 且不是 N/A）全部落在条款 `checks` 里时，该 case 在聚合中按 `conditional`（`supervised-dispatch`）计。检查明细、drill runId、时间戳与 reasonCode 原样保留，`ruling` 记授权出处，条款的 `scope` 字段不参与判定。条款随四元组走：换型号即不再命中。
+
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
 backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先，保留
 `agent.prependArgs`，再附 `--version`；`scripts/reliability/runtimeIdentity.mjs`），
@@ -366,7 +371,7 @@ backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先
      启动失败 / 中途错误 / 等待到期 / 显式停止（按执行形态分车道）、事件与证据转换
      （缺字段/乱序/重复/断流不制造成功证据）。零真实模型即可判定其中大部分探针
      （拒绝类探针在派发前失败）。
-- **组合层轴**（`npm run reliability`，按席位 agentId 认证，承重）：交互闭环——
+- **组合层轴**（`npm run reliability`，按矩阵行的 agentId 跑、按车道身份入账，承重）：交互闭环——
   `complete`（完成诚实）/ `assistantText`（非伪完成）/ 证据族（`commandEvidence` /
   `fileEvidence` / `toolEvidence` / `fileMaterialized` / `readFiles` / `metrics`）/
   `containmentEvidence`（越界写拦截活体取证，决定 0084）/ `sandboxEnforcement`
@@ -467,6 +472,24 @@ advisory-only，`requireCertified=false` 与 CLI 门禁语义原样）。
   决定新增组合、费用与承重用途。
 - **组件层不进派发门禁**——组件结论是 advisory 证据，绝不是 permission gate。
 
+### 组件层验证（单独验证 backend / llm）
+
+入口 `npm run component-check`（`scripts/run-component-check.mjs`；消耗真实 token）。现行规则：
+
+1. 组件层结果闭集只有 `pass / fail / blocked`，不复用组合层的 `certified / conditional`，也不引用组合层状态闭集（`scripts/reliability/componentLedger.mjs` 的 `COMPONENT_RESULTS`；组件代码不 import `certification.mjs` 的状态词）。
+2. 夹具 anchor 配了 `systemPrompt` 时，夹具账记 `contract:{name,version}`（name = 该 `systemPrompt` 路径，version = 验证时 WAO repo 的 codeRef），没配则为 `null`（`componentDrills.mjs` 装配计划写入、`componentLedger.mjs` 归一校验）。
+3. LLM 组件断言集：指令遵循地板（sentinel 值必须由工具侧证据承载——tool_result 输出或 exit-0 命令引用文件，只在回包里搜到不算；末条 assistant 文本解析成 JSON 后 `v` 与 sentinel 全等；多行 JSON 也取 `v`，单行要求归结构化输出另判）、结构化输出（单行 JSON）、工具使用真实证据（scorecard commandsPassed / filesExist / hasEvidence；文件证据 = 存在 + 内容承载 sentinel；禁止用 completed 顶替证据检查）、完成诚实（completed 时有 assistant 文本）、越界配合度（仅记录，不作判定）。角色合同的送达回显是 backend 能力一致性轴的探针（声明 `supportsRoleContract` ⇒ systemPrompt 变体 + 合同内 marker 回显；探针 run 未可证完成如实 inconclusive）——回显证明合同到达模型，不证明角色胜任。
+4. 两层断言边界：进程清理是 backend 生命周期断言、不是模型能力；任务答案正确不证明 backend 机械路径；两层结论不得互换。
+5. 组件层的三个用途：入册前预筛、组合层红时故障归因、backend/parser 回归金丝雀（版本漂移 advisory 即回归信号）。
+6. 夹具资格 = 新鲜的组合认证记录，或 Owner 显式指定的参照装配，二者任一；不要求先有已认证的 LLM（否则形成启动循环）。
+7. 验 backend 挂现成可用模型（装配 = 被测 anchor 的净化克隆，其自带 model 即该 backend 的支持范围，夹具身份不下发为被测配置）；验 LLM 挂有可追溯成功证据的 backend（装配 = 夹具 backend + 被测 model 覆盖）。夹具声明在 Owner 配置的 `certification.fixtures`，不硬编码；台账分 `subject` 与 `fixture` 两字段入账。夹具账字段：`kind`、身份四元组 `identity` 与 `identityKey`、`runtimeVersion`（静态不可知，记 `null`，不伪造）、`adapterVersion`（= codeRef）、`configDigest`（装配条目摘要）、`contract`（见第 2 条）、`environment`（platform 与 node 版本）、实际 `runId`（运行时回填）、资格依据 `qualifiedBy` / `qualifiedAt` / `ownerValidUntil`；未知值一律 `null`。
+8. 组件判定不复用组合层的 `certifyCase()`：唯一实现是 `componentDrills.mjs` 的 `componentResultFromChecks`（judged 检查全 {pass, N/A} 且至少一条 pass 才 pass；全 N/A = fail）。
+9. 组件台账 `runs/component-checks.json` 不写 `workers` 与组合层的 `status` / `recommendedUse` / `lastFullHealthyRunAt`（含 legacy `lastHealthyRunAt`）——写入/序列化/解析三侧由 `assertNoCompositionLayerLeak` 机械把关；时间字段只用 `lastVerifiedAt`。
+10. 组件入口把只含夹具装配的临时注册表经 `--registry` 传给 drill（agentId 用 `_fixture_*` 命名空间），不碰 `config/agents.json` 的 `certification.matrix`；矩阵不覆盖 agent 配置的身份（装配身份一律从 registry 实际配置解析，行内不写身份字面量）。
+11. 组件键：`backend:<name>@<codeRef>`，入口探到运行时指纹时为 `backend:<name>@<codeRef>#<runtimeFingerprint>`（见上文「被测 harness 的运行时身份入账」）；`llm:<providerID>/<modelId>@<providerKey>`，providerKey 为 `null` 时写字面 `null`，未声明即拒绝构造。没有这两个前缀的键不是组件键，与组合层台账的键空间不相交。
+12. 读组件台账得到六态之一（`componentLedger.mjs` 的 `classifyComponent`）：`ledger-missing`（文件或键不存在，显示"未验证"，不红也不绿）、`unparseable`（不可解析、形状非法或含组合层保留键，显式报错，不得静默跳过）、`blocked`（验证时夹具不可用）、`fixture-decayed`（记录已标注，或夹具资格现判过期；记录原样带回，降为 advisory）、`stale`（运行时漂移、codeRef 与当前 HEAD 不符、`lastVerifiedAt` 缺失或不可解析、或默认超过 30 天）、`normal`（记录现行且新鲜）。六态说的是台账可信度，`normal` 记录的 `result` 仍可能是 `fail`。
+13. 零目标显式失败：计划错误（未知被测、歧义、坏的夹具声明），以及解析出 0 个被测或 0 个 drill，都在建临时文件、派发、写台账之前 exit 2，不做无目标的"通过"。
+
 ## 场景 1b：单次派发换模型（--model）
 
 "这一次派发换一个模型跑" 这类**单次生效、不落配置**的模型覆盖：
@@ -555,7 +578,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 
 **语义铁律**：preflight/registry 查询"完成"只表示机械事实（registry 可读、必需凭据 env 名存在/不存在、配置条目存在）可读，**不是** authenticated/entitled/live-checked 的证明。本包不做 provider 网络请求、不读凭据值，所以结构上不可能投影出 `authenticated` / `entitled` / `checked`——MCP schema 的枚举直接派生自这些闭集常量（`src/application/registryInventory.js` 的 `CONFIGURATION_STATUSES` / `AUTHENTICATION_STATUSES` / `ENTITLEMENT_STATUSES` / `LIVE_CHECK_STATUSES`），不存在第二份手工维护列表。真实认证/授权状态只能来自实际运行/诊断（见 `run_diagnose` 的 `code`）。
 
-registry certification 是 **advisory 证据，不是 permission gate**：`registry_list` / `lead_preflight` 把每个 worker 的 `certification` 状态报告给 Lead，MCP dispatch/continuation 以 `requireCertified: false` 调 shared service，**不**强制认证——没有 reliability-summary.json 的 Fresh 克隆同样可派发（lead_preflight 已报告 configured/credential 事实，认证仅作参考）。显式 CLI `--require-certified` 与 RunManager 的 opt-in 认证门保持完整——CLI 或项目治理仍可要求认证。
+registry certification **默认是 advisory 证据，不是 permission gate**：`registry_list` / `lead_preflight` 把每个 worker 的 `certification` 状态报告给 Lead，MCP dispatch/continuation 以 `requireCertified: false` 调 shared service，默认不强制认证——没有 reliability-summary.json 的 Fresh 克隆同样可派发（lead_preflight 已报告 configured/credential 事实，认证仅作参考）。可选在 MCP 边界打开认证清单门禁（怎么开、怎么回退见下节）。显式 CLI `--require-certified` 与 RunManager 的 opt-in 认证门保持完整——CLI 或项目治理仍可要求认证。
 
 **显式 CLI 认证门（`--require-certified`）的现行判定**（读 runDir 下 `reliability-summary.json`）：
 
@@ -569,3 +592,14 @@ registry certification 是 **advisory 证据，不是 permission gate**：`regis
 **lead_preflight 证明边界**：preflight 完成永不意味着任何 worker 已被认证/授权/做过 live check（每个 worker 的 `providerReadiness` 恒为 unknown/not_checked）。
 
 **conditional worker 边界**：Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
+
+## 认证清单门禁（MCP 边界，默认关）
+
+MCP 边界的派发与扇出（`run_dispatch` / `run_consult` / `run_continue`）可选升级为"只派认证清单成员"：
+
+- 开：`setx WAO_MCP_REQUIRE_CERTIFIED 1` 后**重启宿主**（环境变量在 MCP 服务进程 spawn 时定格，模型不可经 tool args 翻转或绕过）；回退：删除该变量 + 重启宿主。
+- 成员资格：`selectCertRecord` 双空间命中（席位键直查 → 车道指纹扫描）且 status ∈ {certified, conditional}——例外条款族的 conditional 是常态；新鲜度不进门（30 天跑步机是展示事实，不是拒绝理由）；持久 effort 漂移（记录画像与车道当前配置不一致）同样不在清单，一次性 model/reasoning 覆盖在门开时被拒。
+- 边界：门禁只驻 MCP 边界（模型可达面）。CLI 保持 Owner/Lead 特权通道——认证 drill 本身经 CLI 自举（`npm run reliability -- --agent <lane>`），全局门 = 自举悖论。
+- fail-closed：台账缺失、不可读或键空间不对 = 拒绝（固定文案含纠正路径）。
+- 门关着时，认证结果按 advisory 语义使用，不因此拒绝派发。
+- 翻转前建议全量刷绿一轮：新车道先认证再开门。

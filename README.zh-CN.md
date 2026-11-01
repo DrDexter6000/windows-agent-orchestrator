@@ -90,7 +90,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 
 **里程碑进度**：以 [`docs/roadmap.md`](docs/roadmap.md) 为唯一权威（每期范围与完成状态都在那里）——README 刻意不复述已完成范围。
 
-认证是关于 worker 已记录可靠性的 advisory 证据，不是派发许可门。两层验证、delta 认证
+认证默认是关于 worker 已记录可靠性的 advisory 证据，不是派发许可门；Owner 可在 MCP 边界打开门禁，只派已认证车道。两层验证、delta 认证
 规程与上游原语复核 SOP 见 [`docs/certification-runbook.md`](docs/certification-runbook.md)；
 每席实时状态：`npm run cli -- registry list`。里程碑：[`docs/roadmap.md`](docs/roadmap.md)；
 在册技术债：[`docs/tech-debt.md`](docs/tech-debt.md)。

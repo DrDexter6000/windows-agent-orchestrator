@@ -3605,9 +3605,9 @@ test("Current documentation heading resolver: missing or ambiguous anchors fail;
 });
 
 test("B3-③: 依赖完整——现行主表行保留 containmentEvidence 追加依赖指针（§4.6/§4.1，非独立入口），且依赖对真实正文成立", () => {
-  // (0)（现行）文件级入口的五文件之外，containmentEvidence 的追加依赖必须以简短指针
+  // (0)（现行）文件级入口的三文件之外，containmentEvidence 的追加依赖必须以简短指针
   //     保留在 §0.1 主表 seat-certify 行内——表述为追加/连读依赖，不是另一条可选入口
-  //     （入口唯一性由 B3-⑥/⑦ 钉住：五文件集合 + 拒绝索引/节选路线）。
+  //     （入口唯一性由 B3-⑥/⑦ 钉住：三文件集合 + 拒绝索引/节选路线）。
   const entry = splitRowCells(seatCertifyMainRowFrom(read("docs/ssot.md")))[2];
   assert.ok(entry.includes("containmentEvidence") && entry.includes("sandboxEnforcement"),
     "主表 seat-certify 行缺 containmentEvidence / sandboxEnforcement 追加依赖触发词（越界写拦截与 OS 沙箱活体取证判读——§0.1 行两词都在场）");
@@ -3638,11 +3638,11 @@ test("B3-③: 依赖完整——现行主表行保留 containmentEvidence 追加
 
 // ============================================================
 // B3 回退后的现行守卫（2026-09-25，TD-187）：seat-certify 文件级入口。
-// §0.1 主表 seat-certify 行是唯一阅读入口：无条件全文必读恰五文件 + 三义务
+// §0.1 主表 seat-certify 行是唯一阅读入口：无条件全文必读恰三文件 + 三义务
 // （多行动面并集 / 正文显式依赖跟进 / 读取截断必须补齐）+ containmentEvidence
 // 追加依赖指针（关系核对在 B3-③）。静态测试只证明规则文本在场，不证明
 // 执行者真读完全文——这是本守卫的固有边界，不是可修的缺口。
-//   ⑥ 入口恰为五文件闭集——缺行 / 漏文件 / 重复替代 / 节选锚替代必红；
+//   ⑥ 入口恰为三文件闭集——缺行 / 漏文件 / 重复替代 / 节选锚替代必红；
 //     找行不借 tier1Paths（它对缺行返回 []，存在性外包给调用侧即假绿），
 //     自带"恰一行"断言
 //   ⑦ 无条件全文措辞 + 三义务在场——条件化 / 节选措辞、恢复索引入口
@@ -3651,16 +3651,12 @@ test("B3-③: 依赖完整——现行主表行保留 containmentEvidence 追加
 // assert.notEqual 证明确已生效，防"变异未生效 ⇒ 假绿"（TD-81 教训）。
 // ============================================================
 
-/** seat-certify 文件级入口的五文件闭集（与 §0.1 主表行对账的期望全集）。
- * 2026-09-26 认证正文迁移：`docs/usage.md` 换为 `docs/certification-runbook.md`
- * （认证操作正文完整迁移；usage 原位置留具名标题与单向链接）。 */
+/** seat-certify 文件级入口的三文件闭集（与 §0.1 主表行对账的期望全集）。
+ * 仍在生效的规则正文都在现行文档：认证操作与组件层验证在 runbook，
+ * 角色库校验在 team-roles，在册限制在 tech-debt（决定档只说明来由，
+ * 不再是阅读集合成员）。 */
 const SEAT_CERTIFY_REQUIRED_FILES = Object.freeze([
   CERT_RUNBOOK_DOC,
-  ".wao/decisions/0032-两层验证与认证.md",
-  // 0045 §3（Owner 签署）：车道键时代五必读换血——0045 合同（车道键/例外重签/
-  // 迁移合同）入列；agents.example.json 转追加依赖（模板权威指针随行，见
-  // seat-certify 行追加依赖句；config/lanes.json 同为数据权威指针非全文必读）。
-  ".wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md",
   "docs/team-roles.md",
   "docs/tech-debt.md",
 ]);
@@ -3675,14 +3671,14 @@ function seatCertifyMainRowFrom(ssotText) {
   return rows[0];
 }
 
-/** ⑥+⑦ 核心：断言主表 seat-certify 行是"无条件全文必读恰五文件 + 三义务 +
+/** ⑥+⑦ 核心：断言主表 seat-certify 行是"无条件全文必读恰三文件 + 三义务 +
  * containmentEvidence 追加依赖指针、无索引/裁量收窄路线"。纯函数（行文本输入），
  * B3-⑥/⑦ 的负对照把变异行喂进来断言必抛——守卫被撤回 ⇒ 变异不再抛 ⇒ 红。 */
 function assertFileLevelSeatRow(row) {
   const cells = splitRowCells(row);
   assert.equal(cells.length, 3, `§0.1 主表 seat-certify 行应为 3 列，实际 ${cells.length}`);
   const entry = cells[2];
-  // —— ⑥ 恰五文件：先计数（漏文件/无锚多余项），再逐项拒节选锚，最后去重集合
+  // —— ⑥ 恰三文件：先计数（漏文件/无锚多余项），再逐项拒节选锚，最后去重集合
   // 对账（重复替代：同路径出现两次顶替缺席者，计数不变，靠集合对账抓红）。
   const paths = [...entry.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
   assert.equal(paths.length, SEAT_CERTIFY_REQUIRED_FILES.length,
@@ -3690,7 +3686,7 @@ function assertFileLevelSeatRow(row) {
   for (const p of paths)
     assert.ok(!/ [§@]/.test(p), `必读项不得带节选锚（全文必读，节选不得替代全文）：${p}`);
   assert.deepEqual([...new Set(paths)].sort(), [...SEAT_CERTIFY_REQUIRED_FILES].sort(),
-    `seat-certify 必读集合必须恰为五文件闭集（重复替代/换文件都红）：${JSON.stringify(paths)}`);
+    `seat-certify 必读集合必须恰为三文件闭集（重复替代/换文件都红）：${JSON.stringify(paths)}`);
   // —— ⑦a 无条件全文措辞：三 token 各自在场（条件化/节选措辞替代全文必红）。
   for (const t of ["无条件", "全文", "必读"])
     assert.ok(entry.includes(t),
@@ -3698,12 +3694,12 @@ function assertFileLevelSeatRow(row) {
   // —— ⑦b 不得恢复索引 / 裁量收窄路线（B3 试点已回退，不保留可选索引入口）。
   assert.ok(!entry.includes("§0.1.1"), "seat-certify 行不得再路由 §0.1.1 索引（试点已回退，不得保留可选索引路线）");
   assert.ok(!/阅读单位\s*=/.test(entry), "seat-certify 行不得再声明『阅读单位 = …』收窄（文件级入口唯一）");
-  assert.ok(!entry.includes("当次界定"), "seat-certify 行不得再授权按 Lead 当次界定收窄五文件（全文必读不可裁量收窄）");
-  assert.ok(entry.includes("不得收窄"), "seat-certify 行必须写明五份不得收窄（防裁量收窄回潮的正向钉）");
+  assert.ok(!entry.includes("当次界定"), "seat-certify 行不得再授权按 Lead 当次界定收窄三文件（全文必读不可裁量收窄）");
+  assert.ok(entry.includes("不得收窄"), "seat-certify 行必须写明三份不得收窄（防裁量收窄回潮的正向钉）");
   // —— ⑦c 三义务在场：多面并集 / 正文显式依赖跟进 / 截断补读。
   assert.ok(entry.includes("并集"), "seat-certify 行缺『多行动面取并集』义务（多面命中不得静默收窄为单面）");
   assert.ok(entry.includes("显式依赖") && entry.includes("跟进"),
-    "seat-certify 行缺『正文显式依赖继续跟进』义务（五文件正文写明的依赖不得断读）");
+    "seat-certify 行缺『正文显式依赖继续跟进』义务（三文件正文写明的依赖不得断读）");
   assert.ok(entry.includes("截断") && entry.includes("补齐"),
     "seat-certify 行缺『读取输出被截断必须补齐』义务（截断不得当读毕）");
   // —— ⑦d containmentEvidence / sandboxEnforcement 追加依赖指针在场（追加/连读表述，
@@ -3711,12 +3707,12 @@ function assertFileLevelSeatRow(row) {
   assert.ok(entry.includes("containmentEvidence") && entry.includes("sandboxEnforcement"),
     "seat-certify 行缺 containmentEvidence / sandboxEnforcement 追加依赖触发词（见 B3-③）");
   assert.ok(/docs\/02-architecture\.md/.test(entry) && entry.includes("§4.6") && entry.includes("§4.1"),
-    "seat-certify 行缺 docs/02-architecture.md §4.6/§4.1 追加依赖指针（五文件外的已知追加依赖）");
+    "seat-certify 行缺 docs/02-architecture.md §4.6/§4.1 追加依赖指针（三文件外的已知追加依赖）");
   assert.ok(/追加|连读/.test(entry),
     "containmentEvidence 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
 }
 
-test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重复替代/节选锚必红（找行不外包 tier1Paths）", () => {
+test("B3-⑥: 现行入口 = 文件级三文件全集——缺行/漏文件/重复替代/节选锚必红（找行不外包 tier1Paths）", () => {
   const ssot = read("docs/ssot.md");
   // 正常输入：现行主表恰一行，且通过文件级守卫全量断言（含 ⑦ 的义务与指针检查）。
   const row = seatCertifyMainRowFrom(ssot);
@@ -3733,12 +3729,12 @@ test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重�
   // 负对照 2——漏文件：计数路径抓红。
   const missing = row.replace("、`docs/tech-debt.md`", "");
   assert.notEqual(missing, row, "夹具失效：漏文件变异未生效");
-  assert.throws(() => assertFileLevelSeatRow(missing), /恰 5 个/, "漏文件必须红");
-  // 负对照 3——重复替代：计数不变（仍 5），去重集合对账抓红。
-  // 0045 §3 五必读换血后变异目标改为 0045 合同（agents.example.json 已不在五行）。
-  const dup = row.replace("`.wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md`", `\`${CERT_RUNBOOK_DOC}\``);
+  assert.throws(() => assertFileLevelSeatRow(missing), /恰 3 个/, "漏文件必须红");
+  // 负对照 3——重复替代：计数不变（仍 3），去重集合对账抓红（变异目标 =
+  // team-roles，被 runbook 路径顶替后集合对账抓缺席者）。
+  const dup = row.replace("`docs/team-roles.md`", `\`${CERT_RUNBOOK_DOC}\``);
   assert.notEqual(dup, row, "夹具失效：重复替代变异未生效");
-  assert.throws(() => assertFileLevelSeatRow(dup), /五文件闭集/, "重复替代必须红");
+  assert.throws(() => assertFileLevelSeatRow(dup), /三文件闭集/, "重复替代必须红");
   // 负对照 4——节选锚替代全文路径（文件级入口退化为节选路由）。
   const excerpt = row.replace(`\`${CERT_RUNBOOK_DOC}\``, `\`${CERT_RUNBOOK_DOC} §delta 认证规程\``);
   assert.notEqual(excerpt, row, "夹具失效：节选锚变异未生效");
@@ -3758,7 +3754,7 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
   // 负对照——恢复索引入口（试点期路由形状拼回）。audit run_20260925221335498wiqpnc：
   // 旧版单条变异靠"替换"删掉了无条件/全文/必读 token，先在 ⑦a token 检查红，其错误
   // 消息又含"阅读单位"碰巧匹配宽泛正则——真撤掉 ⑦b 索引禁用断言后测试仍绿（假绿）。
-  // 修正纪律：两条变异都只"添加"被禁止的路由，无条件/全文/必读、五文件闭集与三义务
+  // 修正纪律：两条变异都只"添加"被禁止的路由，无条件/全文/必读、三文件闭集与三义务
   // 原样保留，使唯一能红的恰是对应索引禁用断言；两条形状互相隔离（各自只含一种被禁
   // 形状，不互相遮挡），错误正则精确指向该断言自身的错误消息。
   // 形状一：仅拼回 §0.1.1 索引锚（不含"阅读单位 ="措辞，不遮挡形状二的断言）。
@@ -3774,7 +3770,7 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
   // 负对照——Lead 裁量收窄回潮（试点期"范围由 Lead 当次界定"形状）。
   const discretion = row.replace("也不得按 Lead 裁量收窄", "范围可由 Lead 当次界定收窄");
   assert.notEqual(discretion, row, "夹具失效：裁量收窄变异未生效");
-  assert.throws(() => assertFileLevelSeatRow(discretion), /当次界定/, "Lead 裁量收窄回潮必须红（五文件全文必读不可裁量收窄）");
+  assert.throws(() => assertFileLevelSeatRow(discretion), /当次界定/, "Lead 裁量收窄回潮必须红（三文件全文必读不可裁量收窄）");
   // 负对照——三义务逐个丢失 + containmentEvidence 追加依赖指针丢失。
   const drops = [
     ["并集", row.replace("多行动面命中取并集；", ""), /并集/],
@@ -3806,6 +3802,7 @@ const CERT_MIGRATION_IN_PLACE_HEADINGS = Object.freeze([
   { page: "docs/usage/lanes.md", anchor: "上游 harness 原语对照" },
   { page: "docs/usage/lanes.md", anchor: "delta 认证规程" },
   { page: "docs/usage/lanes.md", anchor: "认证检查结果五态与能力轴分层" },
+  { page: "docs/usage/lanes.md", anchor: "认证清单门禁" },
   { page: "docs/usage/dispatch.md", anchor: "场景 1b：单次派发换模型" },
   { page: "docs/usage/dispatch.md", anchor: "场景 1c：单次派发换推理力度" },
 ]);

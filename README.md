@@ -112,8 +112,9 @@ See [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 [`docs/roadmap.md`](docs/roadmap.md) — the single authority for milestone
 progress (this README deliberately does not restate the completed range here).
 
-Certification is advisory evidence about a worker's recorded reliability, not a dispatch
-permission gate. Two-tier verification, the delta certification procedure, and the
+By default, certification is advisory evidence about a worker's recorded reliability, not a
+dispatch permission gate; the Owner can switch on an MCP-boundary gate that dispatches only
+certified lanes. Two-tier verification, the delta certification procedure, and the
 upstream-primitive refresh SOP live in
 [`docs/certification-runbook.md`](docs/certification-runbook.md); live per-worker status:
 `npm run cli -- registry list`. Milestone history:

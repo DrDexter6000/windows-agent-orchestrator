@@ -24,7 +24,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 1. 角色与车道解绑：车道键=模型家族短名（清单见 `config/lanes.json`），角色是派发时按任务显式选择的帽子（`--lane <车道> --role <角色>`，角色库=`config/roles/*.md`）。
 2. 新旧 harness 用独立 agentId 并存，禁止原位换。原因：认证历史要隔离、可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness。适用面：禁令针对新旧 harness 双活的切换；旧通道已死（订阅取消/停服）时 Owner 可裁定原位迁移（会话复用机制随迁移重估、认证历史作废重跑）。换 harness 驱动同一模型 = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。模型面 vs runtime 面分叉：接入新模型 = lane 内操作（改既有 backend 的 model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。
-3. 组合权 = Owner，选择权 = Lead。Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane。供应商死亡类突发允许两段式：入册先行 + 切换当刻 smoke 首跑 + 承重前补 delta。这是集合边界与纪律，不是 MCP 门禁（认证不是 permission gate）。
+3. 组合权 = Owner，选择权 = Lead。Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane。供应商死亡类突发允许两段式：入册先行 + 切换当刻 smoke 首跑 + 承重前补 delta。这是集合边界与纪律，不是自动 MCP 门禁（认证默认是 advisory 证据；可选的 MCP 边界认证清单门禁见 `docs/certification-runbook.md`）。
 4. 新 lane 的认证走 delta 子集 → `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`。检查集合与规程见 `docs/certification-runbook.md`「delta 认证规程」。
 
 ## 角色清单
@@ -43,6 +43,12 @@ WAO 是"装一次，开发多个项目"的工具：
 
 职责与边界以合同为准：`config/roles/<角色>.md`，派发时按 `--role` 原样注入 worker，本文不复述。会话复用按角色登记在 `config/roles.json`（语义见 `docs/02-architecture.md` §4.10）。
 
+角色库与角色合同的校验（fail-closed）：
+
+- **格式六项校验**（`src/application/roleContract.js`，start/resume 与 `registry validate` 共用同一加载器）：文件缺失或不可读、不是常规文件（目录）、超 4096 字节、非法 UTF-8、空白即空、含不安全控制字符（C0 除 TAB/LF/CR、DEL、C1）——任一命中即拒，固定安全文案不回显正文与绝对路径。
+- **角色库成员判定**（`src/dispatchResolution.js`）：成员 = `config/roles/*.md` 的文件名 stem 且过身份字母表（`ID_RE`）；`--role` 给路径穿越、绝对路径或自由文本都解析不到成员（`unknown_role`，choices 列出完整合法全集）。
+- **中立性检查**：角色文件不含编排/落盘标记（`$WAO_CLI` / `WAO_TARGET_CWD` / `wao handoff` / `wao decision` / `wao stage`；`test/registry-roles/roleContracts.test.js` 扫全部角色文件），不收 Lead roadmap/pipeline 规则（`test/isolation-infra/docs-consistency.test.js` 按名单核对 researcher、coder、tester、auditor 四个文件里的 `roadmap` / `wao stage` / `wao declare`）；席位身份由控制面身份头注入，角色文件不写 agentId 或 canonical 身份（`roleContracts.test.js` 目前只核对 `config/roles/auditor.md`）。
+
 | 角色 | 定位 | 合同 |
 |---|---|---|
 | `researcher` | 只读调研与分析，交 brief 与 affectedFiles 清单 | `config/roles/researcher.md` |
@@ -52,7 +58,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 ## Lead 派工策略
 
-1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
+1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，默认都不是自动门禁（Owner 可在 MCP 边界打开认证清单门禁，见 `docs/certification-runbook.md`「认证清单门禁（MCP 边界，默认关）」）。
 2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按车道名头衔、prompt 长度、文件数量或预计耗时机械路由。各车道擅长什么、成本多少、Owner 定了哪些规则，看 `lead_preflight` 的 `lanes`；证据与出处看 `npm run cli -- wao lanes`。画像是参考，不是路由；WAO 不排序、不推荐。
 3. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
    **并发**：同一车道同时派 2–4 个任务通常没有问题；各车道的并发取样见 `wao lanes` 的 `concurrency` 行——那是本机一次取样，不是服务方承诺的限额，长任务、大上下文下可能更低。出现超时或限流（运行失败、诊断指向 provider）时，按事实降低并发重派；WAO 不设并发上限，也不代为排队。并发说的是相互独立的运行；同一个复用会话不能重叠派发（复用槽互斥）。并发写同一个检出会互相踩，写任务用隔离工作树；同机的全量交付验证本来就串行（见 `docs/usage/delivery.md` 同机验证串行化闸）。

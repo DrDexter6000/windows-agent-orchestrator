@@ -186,11 +186,4 @@ serve 为每个会话在创建时拉起 6-8 个助手进程（datasource/analyze
 
 ## 认证清单门禁（MCP 边界，默认关）
 
-MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner 指令"派发任务永远派发认证清单中的"的机器化）：
-
-- 开：`setx WAO_MCP_REQUIRE_CERTIFIED 1` 后**重启宿主**（环境变量在 MCP 服务进程 spawn 时定格，模型不可经 tool args 翻转或绕过）；回退：删除该变量 + 重启宿主。
-- 成员资格：`selectCertRecord` 双空间命中（席位键直查 → 车道指纹扫描）且 status ∈ {certified, conditional}——例外条款族的 conditional 是常态；新鲜度不进门（30 天跑步机是展示事实，不是拒绝理由）。
-- 边界：门禁只驻 MCP 边界（模型可达面）。CLI 保持 Owner/Lead 特权通道——认证 drill 本身经 CLI 自举（`npm run reliability -- --agent <lane>`），全局门 = 自举悖论。
-- fail-closed：台账缺失、不可读或键空间不对 = 拒绝（固定文案含纠正路径）。
-- 门关着时，认证结果按 advisory 语义使用，不因此拒绝派发。
-- 翻转前建议全量刷绿一轮：新车道先认证再开门。
+见 `docs/certification-runbook.md` §认证清单门禁（MCP 边界，默认关）（怎么开、怎么回退、成员资格与门禁只在 MCP 边界的理由）。
