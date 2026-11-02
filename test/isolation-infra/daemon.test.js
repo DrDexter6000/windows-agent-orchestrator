@@ -679,7 +679,7 @@ test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终�
 // ============================================================
 // Increment 6 — CLI daemon 命令族 E2E（真实 spawn CLI）
 // ============================================================
-// 纪律：触外部系统（真实 detached 进程 + 真实 pipe），milestone-discipline §4 要求。
+// 纪律：触外部系统（真实 detached 进程 + 真实 pipe），milestone-discipline §6.1 要求。
 // 每测试必须清 daemon 进程（06-18 教训：绝不留孤儿）。
 
 function cliDaemon(args, { cwd, timeout = 10000 } = {}) {

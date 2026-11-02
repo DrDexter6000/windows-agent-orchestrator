@@ -1,7 +1,8 @@
 # Milestone 工作纪律
 
 > 状态：强制执行。
-> 每个 milestone 必须按此纪律执行，不允许跳过 gate 或遗留技术债。
+> "milestone"现只指已全部完成的 M0–M13 历史系列（`docs/roadmap.md`：无进行中项）；现行开发单位是批次（沿 `docs/tech-debt.md` 台账推进）与发版周期（semver + §9 检查单），本纪律对两者同样强制，不允许跳过 gate 或遗留技术债。
+> 各节适用：§2、§5、§7–§9 现行；§1、§3、§6 部分现行——task 拆分、技术债处置与实战经验按批次执行，`M<milestone>-<序号>` 记法与"每个 milestone 收尾"的语境随系列结束（§6.3/§6.7 仍被测试与决定引用）；§4 已无对象，全节收成指针。
 
 ## 1. Task 拆分要求
 
@@ -42,13 +43,7 @@ milestone 完成后，必须审计以下技术债类别。发现的技术债要�
 
 ## 4. 完成定义（milestone 级）
 
-milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
-1. 所有 task 的验收 gate 全绿
-2. 技术债审计完成（已修或已登记）
-3. `npm test` 全绿
-4. 涉及外部系统交互的 milestone，必须有真实运行时证据，不能只靠 mock 报绿：`npm run smoke` 覆盖 claude-code 与 codex；其余后端（zcode、kimi-web、deepseek-acp 等）以该车道的 `npm run reliability` 通过（或经 Owner 豁免）为准，sentinel 演练是其中一项——发版检查单 §9 第 5 步的 reliability 本来就包含这些车道。里程碑若改了 sentinel 碰不到的行为（stop、resume 等），仍按该 task 的验收 gate 取对应的真实证据
-5. 更新 `docs/roadmap.md` 里程碑表
-6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（边界与流程见决定 0034）
+milestone 级完成定义已无对象（M0–M13 全部完成，不再新增）：发版门槛见 §9 与决定 0038；真实运行时证据见 §6.1、§6.7；工作流/阶段闭合见 §8 与决定 0034。
 
 ## 5. 不留技术债的原则
 
@@ -63,7 +58,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 ### 6.1 mock 证明"逻辑对"，真实 smoke 证明"系统能跑"
 
 - mock 抓不到的缺陷真实存在：`.cmd` 包装器导致的 spawn 参数问题、流式输出 parts 追加的竞态。mock 派发用 `process.execPath`（真 exe），mock 消息一次性完整返回——碰不到包装器与流式追加这两个面。
-- 规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑真实运行时验证，覆盖面见 §4 第 4 条。
+- 规则：涉及外部系统（CLI 进程、HTTP serve、文件系统）的 milestone，收尾必跑真实运行时验证：smoke 只覆盖 claude-code 与 codex（见 `docs/smoke-guide.md`），其余后端以该车道的 `npm run reliability` 通过为准（§6.7），不通过只有 Owner 能豁免。改了 sentinel 碰不到的行为（stop、resume 等）时，按该改动的验收 gate 另取对应的真实证据。
 
 ### 6.2 红绿测试纪律
 
@@ -172,7 +167,7 @@ milestone 在 `docs/roadmap.md` 里程碑表标记 ✅ 完成前必须满足：
 1. 改版本号：仓库根 `package.json` 的 `version`（唯一手写处——其余消费者全派生）。先改号、后跑全量、最后打 tag：版本前缀类测试在改号后才会翻红。
 2. 版本面手改同步（全量之前）：README 双语徽章/What's new 标题/快照链接是手写字段被守卫钉到 package.json，不是生成物——升号后必须先手改同步，否则下一步全量必红；MINOR/MAJOR 同时建立 changelog 快照文件（第 6 步只做追加定稿）。
 3. surface 再生成：本轮 MCP surface / CLI help 有变动 → `npm run gen:surface` 并提交 `docs/surface/*` 生成物（ssot.md §1.3 生成参考层纪律）；MCP tool-surface 的 wire 冻结面（字节 SSOT）变动走既有重冻流程并附变更注记。
-4. 全量 `npm test` 绿（§4 第 3 条）。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
+4. 全量 `npm test` 绿。白天命中既有翻绿处置条件时：保留首红证据、按既有流程复跑后再进下一步——资格闭集与复跑规则以 `docs/troubleshooting.md` §8.1 为权威，本节不复制、不扩大为"任意失败皆可重跑"。
 5. `npm run reliability`（真实 token）通过——发版门槛无条件（决定 0038 第 5 条；§6.7 的交付级触发条件不能反向取消发版义务）。如实区分三种状态：通过 / 未完成（缺项登记，不得勾成通过、不得成为下一版先例）/ 豁免。单席增量重认证 ≠ 本次完整矩阵已跑（§6.7 保留语义）。越界写拦截的证据组成不在本节维护（决定 0084、0086）：见 `docs/certification-runbook.md`「delta 认证规程」的「越界写拦截的证据组成与已知上限」条。唯一开口 = Owner 逐次具名豁免：Owner 原话、对应具体版本与具体缺项（跳过哪些矩阵行/理由/日期），落在当次 changelog（PATCH 无 changelog 时落 changelog 存根或 tag 注释）；不常驻、不沿用上一版；豁免记录状态是"豁免"，永不是"通过"；常驻豁免标准属 0038 修订动作，本节不夹带。
 6. changelog 快照定稿（MINOR/MAJOR）：`docs/changelog-<date>-vX.Y.Z.md`——只追加不回改，勘误以追加节补。PATCH 不强制快照（豁免记录除外）。
 7. 1.0.0 额外门槛判定（打 tag 之前）：TD-194 关闭，即全量套件在白天首过稳定（决定 0038 第 4 条可验证线）。0.x 阶段白天套件波动不阻塞发版（由 0038 第 5 条的复跑流程兜底），但阻塞 1.0.0。

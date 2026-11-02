@@ -371,6 +371,56 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
     "m12-containment tier-1 行必须精确保留四份 live authority + ADR-0018；删、增、换序都应红");
 });
 
+// architecture §0 的「改动→阅读索引」是 repo-change 按改动读的路由表：索引点名
+// 的节号/粗体小标题/触发路径任何一条失真，读的人就会被指向不存在的节。关系检查
+// 只断言"点名的目标存在"，不断言各行的内容值（谁该读什么由文档自己维护）。
+test("architecture §0 阅读索引：点名的节号、粗体小标题与路径都真实存在", () => {
+  const arch = read("docs/02-architecture.md");
+  // §0 正文 = "## 0. " 标题到下一个 "## " 标题之间；索引表 = 其中以 "|" 开头的行。
+  const zeroStart = arch.indexOf("\n## 0. ");
+  const zeroEnd = arch.indexOf("\n## ", zeroStart + 1);
+  const rows = arch.slice(zeroStart, zeroEnd).split("\n").filter((l) => l.startsWith("|"));
+  assert.ok(rows.length >= 5, "architecture §0 缺「改动→阅读索引」表");
+  // 编号标题清单（## N. / ### N.M / #### N.Ma）；§4.10 不得因前缀撞上 §4.1 而混过。
+  const headingNums = [...arch.matchAll(/^#{2,4} (\d+(?:\.[0-9A-Za-z]+)?)?\.?\s/gm)].map((m) => m[1]);
+
+  /** 编号 num 的节正文：从其标题行末到下一个同级或更高级标题之前。 */
+  function sectionBody(num) {
+    for (const m of arch.matchAll(/^(#{2,4}) (\d+(?:\.[0-9A-Za-z]+)?)?\.?\s.*$/gm)) {
+      if (m[2] !== num) continue;
+      const after = arch.slice(m.index + m[0].length);
+      const next = after.match(new RegExp(`^#{1,${m[1].length}} `, "m"));
+      return next ? after.slice(0, next.index) : after;
+    }
+    return null;
+  }
+
+  for (const row of rows) {
+    for (const [, num] of row.matchAll(/§(\d+(?:\.\d+)?)/g))
+      assert.ok(headingNums.includes(num), `阅读索引点名 §${num}，architecture 无此编号标题`);
+    // §N「标题」「标题」…：一串粗体小标题只在首个前标 §N，每个都必须出现在 §N 节
+    // 正文里；未挂在任何 §N 下的孤悬标题也抓（否则它逃过正文核对）。
+    const rowTitles = row.match(/「[^」]+」/g)?.length ?? 0;
+    let checkedTitles = 0;
+    for (const [, num, run] of row.matchAll(/§(\d+(?:\.\d+)?)((?:「[^」]+」)+)/g)) {
+      const body = sectionBody(num);
+      assert.ok(body !== null, `阅读索引点名 §${num}，architecture 无此编号标题`);
+      for (const [, title] of run.matchAll(/「([^」]+)」/g)) {
+        checkedTitles += 1;
+        assert.ok(body.includes(`**${title}`), `§${num} 正文找不到粗体小标题「${title}」（粗体须以它开头）`);
+      }
+    }
+    assert.equal(checkedTitles, rowTitles,
+      "阅读索引存在未挂在 §N 下的「标题」——每个粗体小标题都要指明所属节");
+    // 反引号触发路径（含 "/" 的才算路径）：剥掉 /**、/* 与尾斜杠后必须存在。
+    for (const [, raw] of row.matchAll(/`([^`]+)`/g)) {
+      if (!raw.includes("/")) continue;
+      const p = raw.replace(/\/\*\*$/, "").replace(/\/\*$/, "").replace(/\/+$/, "");
+      assert.ok(p.length > 0 && existsSync(join(ROOT, p)), `阅读索引触发路径不存在：${raw}`);
+    }
+  }
+});
+
 test("AGENTS.md 不得用旧的 claude_worker/codex_worker 角色名（已角色化）", () => {
   const a = read("AGENTS.md");
   // 入库模板的键是车道名，角色经 --role 选择。

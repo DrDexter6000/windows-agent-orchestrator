@@ -16,6 +16,32 @@
 
 - TypeScript 风格的伪类型用于描述接口，但实现语言是 **JavaScript ESM**（无 TS）。
 
+**按改动读**：前言（权威边界）与本节每次都读；其余按命中行读（§1 这类大节只读点名的粗体小标题）。行里列的是起点，不是全集：再用 `git grep -n` 在本文件里搜改动的文件名，以及它实现的命令或 MCP 工具名，写到的地方一并读。其余文档何时读见 `docs/ssot.md` §0.1 `repo-change` 行。
+
+| 改动区域 | 触发 | 读 |
+|---|---|---|
+| Backend 与 parser | `src/backends/**`、`src/runEvent.js` | §2 全章 |
+| registry / AgentDef | `src/registry.js`、`src/application/registryInventory.js` | §2.3 |
+| kimi-web worker serve | `src/application/serveMaintenance.js`、`src/commands/serve.js` | §2.6 |
+| 脱敏 | `src/secretRedaction.js` | §2.5「worker 环境与输出边界」、§3.1 |
+| 转录 | `src/transcript.js`、`src/projectBuckets.js`、`src/transcriptEvents.js` | §3 全章 |
+| 状态机与 stop | `src/application/runStop.js`、`src/application/runSettle.js` | §4.1、§1「retained-candidate recovery」 |
+| RunManager 与派发 | `src/runManager.js`、`src/application/runDispatch.js` | §4.2 |
+| 隔离与清退 | `src/isolation.js`、`src/application/worktreeReclaim.js` | §4.3 |
+| daemon 与后台 runner | `src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js` | §4.5 |
+| 交付打包与重封装 | `src/delivery.js`、`src/application/runDeliveryRepackage.js` | §4.6、§4.7、§1「retained-candidate recovery」 |
+| 交付验证与重验 | `src/deliveryVerification.js`、`src/verificationGate.js`、`src/application/runDeliveryReverify.js` | §4.8、§4.9 |
+| 验收记录 | `src/application/runDelivery.js`、`run_delivery_decide` | §4.9 |
+| 会话复用与续接 | `src/application/sessionReuse.js`、`src/application/runContinue.js`、`run_continue` | §4.10 |
+| worker 输入与角色合同 | `src/application/roleContract.js`、`src/canonicalAgentId.js` | §1「Worker 输入不变量」「canonical worker identity」「worker evidence discipline」 |
+| MCP 工具面 | `src/mcp/**`、`src/mcp/toolSurface.js`、`src/hostAdapters/hostDescriptors.js`、`src/application/runCorrection.js` | §1「MCP 工具面」「冻结工具面」「Self-Describing Results」「运行中显式纠正」 |
+| CLI 与共享 application service | `src/commands/**`、`src/cli.js`、`src/cliHelp.js`、`src/application/**` | §1「L4 依赖方向」「共享 services」、§8 |
+| 观察面 | `src/application/runActivity.js`、`src/application/runReadOnlyObservation.js`、`src/application/runScopeObservation.js`、`src/application/runStageProjection.js`、`src/ownerDashboardServer.js` | §1「可观测性」「只读 run 声明」「submitted-stage 与 Owner 详情/通知」「Owner Dashboard active-first / history-on-demand」 |
+| scorecard / metrics / 诊断 | `src/scorecard.js`、`src/metrics.js`、`src/diagnosis.js`、`src/application/runDiagnosis.js` | §6.1、§6.2、§6.3 |
+| 配置 | `src/cli.js`、`config/default.json` | §8 |
+| 新增或移动 src 文件 | `src/` 顶层新文件或子目录 | §1「L4 依赖方向」「方向规则（闭集，机器强制）」、§7 |
+| 多步编排、会审与 playbook | `src/application/playbookCatalog.js`、`src/application/consultService.js`、`src/commands/consult.js`、`playbooks/lead/`、`run_consult` | §5 |
+
 ---
 
 ## 1. 分层总览
@@ -74,7 +100,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   CLI `runs delivery` / `runs diagnose` / `collect` / `status` 均委托共享 service。非 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
 - RunManager / transcript / delivery / Backend 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L2 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向，上向例外白名单为空）由 `test/isolation-infra/layering.test.js` 机器强制。
-- MCP 工具面（当前 inventory；完整 23-tool 冻结清单见下方冻结工具面条目）：
+- **MCP 工具面**（当前 inventory；完整 23-tool 冻结清单见下方冻结工具面条目）：
 
   | 工具 | 性质 | 委托与契约要点 |
   | --- | --- | --- |
@@ -94,7 +120,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
   opaque uuid、Lead id、workspace 路径、active lineage runId 永不出现在 MCP 输出。
 - **只读 run 声明（advisory + 运行中告警，无硬门）**：`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only` 是 Lead 的**声明**而非门——链路为"声明 → 强制隔离 → 观察"。`runDispatch.js` 与 `RunManager.start` 双层拒绝 `readOnly × delivery`（闭集理由码 `read_only_delivery_conflict`；`readOnly × continuable` 被既有 delivery-only 门自然拒绝；`readOnly × correctable` 共存）；声明强制 ephemeral 隔离（覆盖 isolate flag）：非复用轮是源仓的私有克隆，席位默认作用于当前仓库的 git 写入落在克隆里（显式写源仓路径挡不住）（§4.3①，决定 0102）；readOnly×复用轮仍是 persistent 链接工作树（见 usage.md）；建树失败 fail-closed（typed `read_only_worktree_required`，**堵住**降级原 cwd 路径），并在 start 恰一次写 `run.read_only_declared` durable 事实（空 payload；`transcript.js` 幂等 append API 是唯一写入点，前台与 runner 汇聚于 `RunManager.start`）。`runReadOnlyObservation.js` 在同一冻结快照上投影 advisory `readOnlyObservation`（闭集 `no_writes_observed | writes_observed | unknown`，`source:"transcript_file_events"`，`observedFileCount`、`writtenPaths`（脱敏后的安全 repo-relative 路径，上限 25 条）、`writtenPathCount`、`writtenPathsTruncated`）——权威 = 恰一条绑定 `run.started`（绝对 worktreePath）+ 恰一条绑定声明事件；任一 `file_written` 路径不可求值、权威缺失或歧义、声明缺失/重复/跨 run → 整体 `unknown`（fail-closed）。**诚实口径**：status 报当前快照观察（非终态也可 `writes_observed`——运行中告警，呈现≠动作）；`no_writes_observed` 是"未观察到写"（工具上报证据），非"没写"；`complete:true` 仅当快照终态且全部可求值。**Owner 约束**：越界写不停止、不失败、不改写自然终态——纯 advisory，终审归 Lead。观察只在快照含绑定声明事件时挂载（未声明 run 的 `run_activity` 输出字节不变）。
-- 可观测性分成两个消费者面，共用同一事实投影：`runActivity.js` 单快照读取并做 workspace/runId 绑定，`runActivityProjection.js` 负责七类活动事件、secret redaction、控制字符清洗、有界 excerpt 与冻结 cursor；MCP `run_activity` 使用 `audience:"lead"` 的紧凑页面，Owner 组合 service `ownerDashboard.js` 使用更大的 `audience:"owner"` 页面。`runDrilldowns.js` 只向 Lead 返回静态 `availableDrilldowns` 提示，不自动下钻。`ownerDashboardServer.js` 是独立的人类观察边界：只绑定 `127.0.0.1`、每进程随机 bearer、严格 GET/query/CSP/no-store，且只复用上述 application services；`runs dashboard --web` 启动固定静态 UI。Owner 页面不会 stop/retry/continue/repackage/decide，也不改变 Lead 的语义裁决权。两种消费者都不直接解析 JSONL，详细合同与命令见 `docs/usage.md`。`runScopeObservation.js` 在同一快照上投影 advisory `scopeObservation`（闭集 `within_declared_paths | outside_declared_paths | unknown`，`source:"transcript_file_events"`，`observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）、`outsidePathCount`、`outsidePathsTruncated`）——`complete:true` 的准确语义：快照已**终态**，且其中每条确认的 `file_written` 都能在**恰好一个有效合同权威**（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它**不**证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也**不**表示 worker 仍在运行（`complete` 的前提是快照终态）。运行中按当前快照报 `within_declared_paths` / `outside_declared_paths`（`complete:false`）；合同权威缺失、歧义或畸形，或任一确认路径不可求值 → `unknown`。Windows 上绝对路径 containment 证明按平台大小写折叠；输出路径先 exact-secret 脱敏再 bound。
+- **可观测性**分成两个消费者面，共用同一事实投影：`runActivity.js` 单快照读取并做 workspace/runId 绑定，`runActivityProjection.js` 负责七类活动事件、secret redaction、控制字符清洗、有界 excerpt 与冻结 cursor；MCP `run_activity` 使用 `audience:"lead"` 的紧凑页面，Owner 组合 service `ownerDashboard.js` 使用更大的 `audience:"owner"` 页面。`runDrilldowns.js` 只向 Lead 返回静态 `availableDrilldowns` 提示，不自动下钻。`ownerDashboardServer.js` 是独立的人类观察边界：只绑定 `127.0.0.1`、每进程随机 bearer、严格 GET/query/CSP/no-store，且只复用上述 application services；`runs dashboard --web` 启动固定静态 UI。Owner 页面不会 stop/retry/continue/repackage/decide，也不改变 Lead 的语义裁决权。两种消费者都不直接解析 JSONL，详细合同与命令见 `docs/usage.md`。`runScopeObservation.js` 在同一快照上投影 advisory `scopeObservation`（闭集 `within_declared_paths | outside_declared_paths | unknown`，`source:"transcript_file_events"`，`observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）、`outsidePathCount`、`outsidePathsTruncated`）——`complete:true` 的准确语义：快照已**终态**，且其中每条确认的 `file_written` 都能在**恰好一个有效合同权威**（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它**不**证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也**不**表示 worker 仍在运行（`complete` 的前提是快照终态）。运行中按当前快照报 `within_declared_paths` / `outside_declared_paths`（`complete:false`）；合同权威缺失、歧义或畸形，或任一确认路径不可求值 → `unknown`。Windows 上绝对路径 containment 证明按平台大小写折叠；输出路径先 exact-secret 脱敏再 bound。
 - **运行中显式纠正**：`runCorrection.js` 是 workspace-bound application service；`run_dispatch(correctable:true)` 只在 backend 明确声明 in-flight correction 能力时建立 durable correction queue，`run_correct` 以 bounded `correctionId` + prompt 把 Lead 明确指令追加到原 run，再由 runner 串行 claim 并送入同一 provider 进程。requested/claimed/delivered/delivery_failed/rejected 是 transcript 事实；`queued` 不等于 delivered，`delivered` 也不等于模型已理解或执行。该能力不创建 child run、不换 worktree、不扩大 delivery contract、不自动 stop/retry/accept；语义判断仍归 Lead。普通未 opt-in dispatch 字节兼容。
 - **submitted-stage 与 Owner 详情/通知**：`runStageProjection.js` 从单 run transcript 快照投影 `accepted | spawned | active | terminal | unknown` 的事实阶段，只由 durable submitted/started/activity/terminal facts 建立，不预测进度、不判断产品语义。Owner Dashboard 复用同一 application projection 展示选中 run 的 backend/stage/terminal/event count/scope/liveness/timeline；浏览器 Notification 仅在人类点击启用、权限允许、且观察到非终态→终态时发送一次固定安全通知。所有异步详情响应用 `runId + selection epoch` 绑定，旧 selection 不得污染当前视图；页面仍为 loopback、bearer、GET-only 的纯观察面。
 - **Owner Dashboard active-first / history-on-demand**：Owner 观察面默认 Active——只列出当前有新鲜 owner 心跳、经证明 active 的 run。Active 的候选集是当前 `.owner-*` 租约文件——候选枚举只 `readdirSync` 一次 runDir 目录（成本随目录条目总数增长、包括历史 transcript，但仅一次目录读），随后只有当前租约候选者的 transcript 被打开/解析、做 per-run workspace 验证与 `ownerLiveness` 心跳检查（昂贵工作是 O(当前租约数)，无任何历史 transcript 被打开/解析/验证）；`listRuns` 仍是单一应用 SSOT，以 `scanScope`（`active` 枚举租约候选并只保留 proven-active、`history` 按 transcript 派生 `updatedAt` 做有界闭集范围过滤、缺省行为字节不变）+ `historyRange` 扩展，**不是**第二个分类器，并复用既有 `ownerLiveness` 心跳真相与 closed-set activity 分类。Active 响应固定标注 `scanScope=active` 且不携带 `unresolvedCount`（active/history scope 不做全库存 unresolved 分类，故恒缺失而非 0）。历史是显式有界按需：`1h/24h/7d` 预设或有界自定义 from/to（上限 7d），由 `ownerDashboardServer.js` HTTP 闭集严格校验；长驻看板服务进程复用元数据校验 summary 缓存做热读，**无第二个持久索引**。前端 runs 列表绑定 runs-mode epoch（类比 selection epoch），迟到的 Active/History 响应不得覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口消失绝不构成终态迁移、不触发通知。MCP `lead_preflight`/`runs_list` 热路径、CLI 文本看板、transcript writer、delivery 语义与验收权威均不受影响。详细命令与合同见 `docs/usage.md`。
