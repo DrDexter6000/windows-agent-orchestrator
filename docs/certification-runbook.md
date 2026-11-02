@@ -101,7 +101,7 @@ backend 设对应 env——Windows User 环境变量）→ smoke 首跑 → 承�
 **lane 变更同步面（两段式）**：
 
 **第一段 · lane 变更（模型/effort/通道调整）**：
-① live `config/agents.json` 席位块（model/reasoning/通道字段）；
+① live `config/agents.json` 席位块（model/reasoning/通道字段）；改 live 注册表可用 `npm run cli -- registry align --lane <id>` 先预览，再加 `--apply --expect-sha256 <预览给出的 SHA-256>`——逐车道显式采用车道表接线（先不带 --apply 预览，写前自动备份；决定 0108）；
 ② 同文件 `certification.matrix` 行（modelId/label 仍是手写；label 兼任认证 caseId，改名即改
 历史证据关联，慎动）；
 ②′ **lanes.json 断言面同步**：effort/model 任何变更，live registry、`config/lanes.json`、

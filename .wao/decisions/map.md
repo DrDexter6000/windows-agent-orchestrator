@@ -109,3 +109,4 @@
 0105 | opencode worker 后端退役：代码与测试封存进 tag，专页入档；恢复一律重放、取回一律转录
 0106 | claude-code 的 provider 通道退役：registry 统一拒绝 provider 块，providerKey 维恒 null，封存进 tag
 0107 | 技能链接命令 skill link/unlink：核实槽位里的 wao-orchestrator junction（Owner 批准的窄口子）
+0108 | 私有注册表跟随车道表 registry align：只读预览 + 逐车道显式采用，写前备份与哈希护栏

@@ -101,6 +101,9 @@ import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 // 决定 0107：技能槽位盘点（按宿主表 skillSlot 逐槽位、按槽位路径去重；状态闭集
 // 与 link/unlink 共用 skillLink.js 同一份实现——本文件不写第三份状态判定）。
 import { skillSlotInventory } from "../application/skillLink.js";
+// 决定 0108：车道表 × 私有注册表接线一致性诊断（registry align 预览同源单一
+// 实现——本文件不写第二份轴比较规则）。
+import { diagnoseRegistryAlignment } from "../application/registryAlign.js";
 // 0065（0045 §1.2 终局）：0062 B9 乙′的 seatRole 漂移指针行整段删除（席位声明
 // 退役，无可比对对象——0065 决定档 supersession 记录）。
 
@@ -277,6 +280,53 @@ export async function waoDoctorCommand(args, config) {
           fix: `npm run cli -- registry validate --registry ${registryPath} 查看原因`,
         });
       }
+    }
+  }
+
+  // 2c. 决定 0108：车道表 × 私有注册表接线一致性（advisory）。有"接线不一致"
+  //     时 WARN——--lane 派发会以 lane_wiring_mismatch 拒绝——给出 registry
+  //     align 的逐车道预览命令；只有合法差异（表有私无 / 私有有表无 / 矩阵行
+  //     modelId 滞后）时 INFO。诊断单一实现 application/registryAlign.js；
+  //     非法条目已由 2b 的 registry_entry_<id> FAIL 覆盖，这里不重复报；全部
+  //     一致时不产生条目（零 OK 噪音惯例）。非默认 --registry 时车道表停用
+  //    （防跨绑，规则同 run / registry list）——本检查随之跳过。
+  if (registryOk
+    && (options.registry === undefined || resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"))) {
+    try {
+      const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
+      const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc });
+      if (diag.ok && !diag.lanesTableOk) {
+        pushCheck(checks, {
+          name: "lane_wiring",
+          pass: true,
+          level: "warn",
+          detail: `车道表 config/lanes.json 结构校验未过（${diag.lanesDocIssues.length} 项）——--lane 派发会以 lanes_config_invalid 拒绝；修好车道表后再看 npm run cli -- registry align 预览`,
+        });
+      } else if (diag.ok) {
+        const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
+        const legalOnly = diag.onlyInTable.length + diag.onlyInRegistry.length
+          + diag.entries.filter((e) => e.state === "aligned" && e.matrixMismatch).length;
+        if (mismatches.length > 0) {
+          const previewLane = mismatches[0].id;
+          const idList = mismatches.map((e) => e.id).join("、");
+          pushCheck(checks, {
+            name: "lane_wiring",
+            pass: true,
+            level: "warn",
+            detail: `车道 ${idList} 的接线与私有注册表不一致——--lane 派发会以 lane_wiring_mismatch 拒绝（逐轴明细与认证影响见 registry align 预览）；run: npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>）`,
+            fix: `npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>；逐车道采用，没有一键全修）`,
+          });
+        } else if (legalOnly > 0) {
+          pushCheck(checks, {
+            name: "lane_wiring",
+            pass: true,
+            level: "info",
+            detail: `接线轴全部一致，其余差异合法：车道表有私无 ${diag.onlyInTable.length} 条（这些车道用 --lane 派发会被拒；align 不自动添加，要用就照模板同名条目手工添加）、私有有表无 ${diag.onlyInRegistry.length} 条（车道表已不再提供，默认保留）、矩阵行 modelId 滞后 ${diag.entries.filter((e) => e.state === "aligned" && e.matrixMismatch).length} 条；明细: npm run cli -- registry align`,
+          });
+        }
+      }
+    } catch {
+      // 诊断读不了（ lanes 表/注册表竞变等）→ 省略整行（advisory 纪律，同 5c/5d）。
     }
   }
 

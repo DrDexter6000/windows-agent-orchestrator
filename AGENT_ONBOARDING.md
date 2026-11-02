@@ -106,6 +106,7 @@ npm link           # 可选，每台机器一次：暴露全局 `wao` 命令（�
   （checkout 后重跑 `install.ps1` 也行：它跳过 pull，只做 `npm ci` + doctor。）
 - **回滚**：`git checkout <上一个 tag 或提交>`（目标不在本地就先 `git fetch --tags`），之后同样 `npm ci` 再 doctor——依赖随版本变，`node_modules/` 虽不入库也要重装。
 - **升级或回滚之后重启已打开的 MCP 宿主**：MCP 服务进程只在启动时加载代码（见 `docs/usage/host.md`），只换检出不会改变已在运行的服务。
+- **升级后跑一次 `npm run cli -- registry align`**（零写入预览）：升级换了车道表里的型号或 effort 时，你的私有 `config/agents.json` 还是旧接线，`--lane` 派发会以 `lane_wiring_mismatch` 拒绝——预览逐轴列出差异并给出当前文件 SHA-256；要采用就逐车道 `registry align --lane <id> --apply --expect-sha256 <预览的 SHA-256>`（写前自动备份到同目录；逐车道显式采用，没有"一键全修"）。有意自己改车道（不跟车道表）就不动它，改法按 `docs/certification-runbook.md` 的「lane 变更同步面」。
 - **数据目录不受 checkout 影响**：`runs/`（transcript）与 `config/agents.json`（你的私人 registry）都在 `.gitignore` 里，pull / checkout 不碰它们；`.wao/` 除 `decisions/`（随代码入库，升级/回滚会随之更换）外同样被忽略。只有 `-Uninstall` 才动它们（默认先备份到同级 `<Dest>-backup-<时间戳>` 再删仓）。
 
 ### 4b. 装 WAO skill 到 runtime 目录（一次性）

@@ -11,6 +11,10 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
+import { loadLanesConfig } from "../dispatchResolution.js";
+// 决定 0108：registry align 的诊断与写侧单一实现在 application/registryAlign.js
+//（commands 只做 I/O：选项收集、路径解析、文本渲染）。
+import { diagnoseRegistryAlignment, applyRegistryAlignment, DEFAULT_TEMPLATE_PATH } from "../application/registryAlign.js";
 // TD-317: registry 键名是磁盘上的不可信数据——validate 输出绝不回显非法键名
 // （换行可在文本输出里伪造一行）。既定做法同 normalizeAgent 的固定文案 throw。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -65,6 +69,10 @@ async function registryCommand(args, config) {
   const [sub, ...tail] = args;
   if (sub === "validate") {
     await registryValidateCommand(tail, config);
+    return;
+  }
+  if (sub === "align") {
+    await registryAlignCommand(tail, config);
     return;
   }
   const options = parseOptions(args);
@@ -397,6 +405,160 @@ async function registryValidateCommand(args, config) {
     console.log(`\n${checked} agent(s) checked, ${allOk ? "all valid" : "has errors"}`);
   }
   if (!allOk) process.exitCode = 1;
+}
+
+// ===== registry align（决定 0108：私有注册表跟随车道表） =====
+//
+// 预览（不带 --apply）：打印三类事实诊断 + 私有文件 SHA-256，零写入；带 --lane
+// 时显示这些车道会改成什么。--apply：必须带至少一个 --lane 与当前文件一致的
+// --expect-sha256——没有"一键全修"；只把所选车道的四轴改成车道表的值、同名
+// 矩阵行只改 modelId；写前逐字节备份（同名已存在就换名，不覆盖），再原子替换。
+// 输出不回显 env 的值（诊断事实只有 id 与轴值）。
+
+/** 轴值渲染（"-"=null，与 validateLanesAgainstRegistry 的展示约定一致）；值过控制字符转义。 */
+function alignAxesLine(axes) {
+  return `backend=${escapeControlChars(axes.backend ?? "-")} model.id=${escapeControlChars(axes.modelId ?? "-")} providerID=${escapeControlChars(axes.providerID ?? "-")} effort=${escapeControlChars(axes.effort ?? "-")}`;
+}
+
+// 非法键名不回显（TD-317 面）：1 起序号指代（registry validate 同款惯例）。
+function alignDisplayId(id, position) {
+  return isValidCanonicalAgentId(id) ? id : `#${position}（键名不是合法 agent id，不回显）`;
+}
+
+// --lane 可重复收集（align 专属：parseOptions 的 --lane 单值语义不动——run 命令仍单值）。
+function collectLaneIds(args) {
+  const ids = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--lane") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("--")) {
+        ids.push(next);
+        i += 1;
+      }
+    }
+  }
+  return ids;
+}
+
+const CERT_IMPACT_TEXT = {
+  identity: "换了身份（backend/model.id/providerID 有变，四元组指纹变）——旧认证不再适用；重取证档位按 docs/certification-runbook.md（同 backend 换 model 走 delta，换 backend 全量）",
+  "effort-only": "身份不变，只差 effort——按 docs/certification-runbook.md「lane 变更同步面」④ delta 重取证",
+};
+
+async function registryAlignCommand(args, config) {
+  const options = parseOptions(args);
+  const registryPath = resolve(options.registry ?? config.registry);
+  const laneIds = collectLaneIds(args);
+  const selected = [...new Set(laneIds)];
+  // 车道表：align 的目的就是以本仓库车道表为准修私有注册表，防跨绑停用规则
+  // 不适用；config.lanesDocFn 仍是测试缝（夹具车道表注入）。
+  const lanesDoc = config.lanesDocFn ? config.lanesDocFn() : loadLanesConfig();
+  const templatePath = config.alignTemplatePath ?? DEFAULT_TEMPLATE_PATH;
+  const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc });
+  if (!diag.ok) {
+    if (diag.readError) console.log(`✖ ${diag.readError}: ${escapeControlChars(registryPath)}`);
+    if (diag.syntaxError) console.log(`✖ 私有注册表 JSON 解析失败——${diag.syntaxError}；如实报告，不往下做`);
+    if (diag.sha256) console.log(`SHA-256: ${diag.sha256}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (options.apply) {
+    const result = applyRegistryAlignment({
+      registryPath,
+      lanesDoc,
+      templatePath,
+      selectedLaneIds: selected,
+      expectSha256: typeof options.expectSha256 === "string" ? options.expectSha256 : undefined,
+      ...(config.alignNowFn ? { nowFn: config.alignNowFn } : {}),
+    });
+    if (!result.ok) {
+      console.log(`✖ ${escapeControlChars(result.refusal)}`);
+      process.exitCode = 1;
+      return;
+    }
+    for (const c of result.changes) {
+      const display = alignDisplayId(c.id, c.position);
+      const parts = [];
+      if (c.axisChanged) parts.push("四轴已采用车道表接线");
+      if (c.matrixChanged) parts.push("认证矩阵行 modelId 已同步");
+      console.log(`✔ ${display}: ${parts.length > 0 ? parts.join("；") : "已一致（无改动）"}`);
+    }
+    if (result.wrote) {
+      console.log(`备份: ${escapeControlChars(result.backupPath)}（原文件逐字节）`);
+      console.log(`新 SHA-256: ${result.newSha256}`);
+    } else {
+      console.log(`未写盘（${result.message}）`);
+    }
+    return;
+  }
+
+  // ---- 预览（零写入） ----
+  const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
+  const invalid = diag.entries.filter((e) => e.state === "invalid");
+  const matrixOnly = diag.entries.filter((e) => e.state === "aligned" && e.matrixMismatch);
+  console.log("registry align 预览（只读，零写入）");
+  console.log(`私有注册表: ${escapeControlChars(registryPath)}`);
+  console.log(`SHA-256: ${diag.sha256}`);
+  const laneCount = Array.isArray(lanesDoc?.lanes) ? lanesDoc.lanes.length : 0;
+  console.log(`车道表: ${escapeControlChars(diag.lanesTablePath ?? "(未加载)")}（${laneCount} 条车道）`);
+  if (diag.lanesDocIssues.length > 0) {
+    console.log(`⚠ 车道表结构校验未过（${diag.lanesDocIssues.length} 项）——${escapeControlChars(diag.lanesDocIssues.slice(0, 3).join("；"))}`);
+  }
+  const nothing = diag.lanesTableOk && diag.lanesDocIssues.length === 0
+    && mismatches.length === 0 && invalid.length === 0 && matrixOnly.length === 0
+    && diag.onlyInTable.length === 0 && diag.onlyInRegistry.length === 0;
+  if (nothing) {
+    console.log("私有注册表与车道表一致（无接线不一致、无配置不合法、无新增/退役车道差异）");
+  }
+  if (mismatches.length > 0) {
+    console.log("[接线不一致 —— --lane 派发会被拒]");
+    for (const e of mismatches) {
+      console.log(`  lane ${alignDisplayId(e.id, e.position)}:`);
+      console.log(`    车道表 ${alignAxesLine(e.laneAxes)}`);
+      console.log(`    注册表 ${alignAxesLine(e.registryAxes)}`);
+      for (const d of e.diffs) {
+        console.log(`    轴 "${d.axis}": 车道表=${escapeControlChars(d.laneValue ?? "-")} ← 注册表=${escapeControlChars(d.registryValue ?? "-")}`);
+      }
+      console.log(`    认证影响: ${CERT_IMPACT_TEXT[e.certImpact]}`);
+      if (e.matrixMismatch) {
+        console.log(`    矩阵行 modelId=${escapeControlChars(e.matrixMismatch.rowModelId ?? "-")} ≠ 车道表 model.id=${escapeControlChars(e.matrixMismatch.laneModelId)}（--apply 时只改矩阵行 modelId）`);
+      }
+      if (selected.includes(e.id)) {
+        console.log(`    将改为: ${alignAxesLine(e.laneAxes)}`);
+      }
+    }
+  }
+  if (diag.onlyInTable.length > 0 || diag.onlyInRegistry.length > 0) {
+    console.log("[与车道表不同但合法]");
+    for (const id of diag.onlyInTable) {
+      console.log(`  lane ${escapeControlChars(id)}: 车道表有、私有注册表没有——用 --lane 派它会被拒；align 不自动添加（照模板同名条目手工添加）`);
+    }
+    for (const id of diag.onlyInRegistry) {
+      console.log(`  lane ${escapeControlChars(id)}: 私有注册表有、车道表没有——车道表已不再提供该车道；默认保留`);
+    }
+  }
+  if (matrixOnly.length > 0) {
+    for (const e of matrixOnly) {
+      console.log(`[矩阵行滞后 —— 接线轴已一致]`);
+      console.log(`  lane ${alignDisplayId(e.id, e.position)}: 矩阵行 modelId=${escapeControlChars(e.matrixMismatch.rowModelId ?? "-")} ≠ 车道表 model.id=${escapeControlChars(e.matrixMismatch.laneModelId)}（--apply --lane ${alignDisplayId(e.id, e.position)} 时只改矩阵行 modelId）`);
+    }
+  }
+  if (invalid.length > 0) {
+    console.log("[配置不合法]");
+    for (const e of invalid) {
+      console.log(`  ${alignDisplayId(e.id, e.position)}: ${escapeControlChars(e.invalidReason)}`);
+    }
+  }
+  if (!diag.lanesTableOk) {
+    console.log("--apply 现在会被拒（车道表结构校验未过，什么都不写）——先修车道表");
+    return;
+  }
+  const hintLanes = selected.length > 0 && selected.every((id) => mismatches.some((e) => e.id === id) || matrixOnly.some((e) => e.id === id))
+    ? selected.map((id) => `--lane ${id}`).join(" ")
+    : "--lane <id>";
+  console.log(`--apply 用法: npm run cli -- registry align ${hintLanes} --apply --expect-sha256 <上面的 SHA-256>`);
+  console.log("（只改点名车道的四轴与同名矩阵行 modelId；本地字段与 _comment* 不动；写前备份到同目录 agents.json.bak-<UTC时间戳>，同名已存在就换名不覆盖）");
 }
 
 export { registryCommand, registryValidateCommand };

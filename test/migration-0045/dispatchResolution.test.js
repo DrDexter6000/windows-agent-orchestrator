@@ -199,7 +199,13 @@ test("W1 错误：lane_wiring_mismatch——改 lanes.json 模型/力度（G4 �
   const r = R({ lanesDoc: doc, lane: "glm-flash", role: "researcher" });
   assert.equal(r.kind, "error");
   assert.equal(r.code, "lane_wiring_mismatch");
+  // 决定 0108：拒绝文案两条路——升级后私有副本落后 → registry align（逐车道
+  // 显式采用）；有意改车道 → runbook「lane 变更同步面」。不再写"请对齐
+  // lanes.json"（方向反了：车道表是权威断言面，要修的是私有副本）。
   assert.match(r.message, /注册表为准/);
+  assert.match(r.message, /registry align --lane glm-flash/);
+  assert.match(r.message, /docs\/certification-runbook\.md「lane 变更同步面」/);
+  assert.ok(!r.message.includes("请对齐"), `不再指"请对齐 lanes.json"（实际：${JSON.stringify(r.message)}）`);
   // effort 维同拒（auditor R3：不许展示一值执行另一值）
   const doctored2 = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
   doctored2.lanes.find((l) => l.id === "glm-flash").reasoning = { effort: flash.reasoning?.effort === "xhigh" ? "high" : "xhigh" };

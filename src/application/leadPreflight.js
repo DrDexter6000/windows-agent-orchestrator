@@ -72,6 +72,9 @@ import {
 // 画像）。判定注入以便测试；缺省读真实 env/cwd。
 import { nestedDispatchContext } from "../nestedDispatchGuard.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
+// 决定 0108：车道表 × 私有注册表接线不一致的一行事实（facts only；诊断单一
+// 实现 registryAlign.js——与 registry align 预览、doctor 同源）。
+import { laneWiringMismatchFactLine } from "./registryAlign.js";
 
 export {
   CAVEATS_CAP,
@@ -294,6 +297,13 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   (runDir) → count). When the count exceeds PROJECT_BUCKET_HINT_THRESHOLD,
  *   ONE advisory observation is added — facts only, never checkStatus/complete.
  *   A throw or non-finite count omits the line entirely.
+ * @param {Function} [input.laneWiringFactFn] — 0108: injectable lane-wiring
+ *   fact builder (defaults to laneWiringMismatchFactLine — reads the repo lanes
+ *   table + the registry at registryPath). When ANY lane's wiring axes diverge
+ *   from the private registry, ONE bounded observation is added (facts only,
+ *   never checkStatus/complete); otherwise NO line. A throw omits the line
+ *   entirely. Suppressed in a worker context (lane-derived guidance is
+ *   Lead-only, same discipline as the lanes profiles section).
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -311,6 +321,7 @@ export async function aggregateLeadPreflight({
   laneProfilesFn,
   workerContextFn,
   countProjectBucketsFn,
+  laneWiringFactFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
@@ -640,6 +651,25 @@ export async function aggregateLeadPreflight({
     }
   } catch {
     // 桶数读不出 → 不加这一条（不抛、不影响其余结果）。
+  }
+
+  // --- Section 5b: lane wiring mismatch fact (0108; advisory, read-only) ---
+  // ONE bounded observation line when --lane dispatch to this registry would
+  // be refused on axes divergence (lane_wiring_mismatch). Facts only — never
+  // checkStatus/complete. Suppressed in a worker context (lane-derived
+  // guidance is Lead-only, same discipline as the lanes profiles section);
+  // unreadable/absent facts omit the line entirely.
+  try {
+    const wiringContextFn = typeof workerContextFn === "function" ? workerContextFn : nestedDispatchContext;
+    if (wiringContextFn() == null) {
+      const factFn = typeof laneWiringFactFn === "function" ? laneWiringFactFn : laneWiringMismatchFactLine;
+      const line = await factFn({ registryPath });
+      if (typeof line === "string" && line.length > 0 && observations.length < 64) {
+        observations.push(line);
+      }
+    }
+  } catch {
+    // 读不了 → 省略整行（advisory 纪律；绝不影响 preflight 其余部分）。
   }
 
   // --- Section 6: lane profiles (0087; advisory, independent, read-only) ---

@@ -18,6 +18,7 @@ Commands:
   serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：双门判定后优雅 shutdown 并显式重启；--workspace-dir 缺省取车道声明值
   registry list [--registry FILE]                    # 车道清单与各车道的认证状态
   registry validate [--registry FILE] [--format json]  # 静态 schema 校验，不改任何文件
+  registry align [--registry FILE] [--lane <id>]... [--apply --expect-sha256 <hex>]   # 私有注册表跟随车道表：先预览（零写入，给 SHA-256），逐车道显式采用；--apply 必须点名车道并带当前文件哈希
   spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE]
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--run-dir DIR] [--format json]

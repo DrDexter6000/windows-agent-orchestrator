@@ -462,19 +462,22 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
         kind: "error", code: "lane_wiring_mismatch",
         received: { lane: safe(laneName), role: safe(roleName) },
         choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${laneName}" 的接线条目（注册表车道键 ${targetLane.id}）不在注册表。`,
+        message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 的接线条目（注册表车道键 ${escapeControlChars(targetLane.id)}）不在注册表——要用这条车道，照 config/agents.example.json 的同名条目把它加进私有注册表（registry align 只对齐已有条目，不添加）。`,
       };
     }
     if (!axesEqual(laneAxes(targetLane), agentAxes(wiring))) {
       // G4：注册表赢——车道字段只断言不生效，不一致即拒（防"改 lanes.json 换模型"）。
       // TD-318 复核：两侧轴值都是配置来源的自由值（model.id 只要求非空字符串）
       //——拼进拒绝消息前逐值过控制字符转义，固定文案不动。
+      // 决定 0108：指路改两条路——升级后私有副本落后 → registry align 逐车道
+      // 显式采用；有意改车道 → 按 runbook「lane 变更同步面」同改。不再写
+      // "请对齐 lanes.json"（那个方向反了：要修的是私有副本，不是车道表）。
       const la = laneAxes(targetLane); const aa = agentAxes(wiring);
       return {
         kind: "error", code: "lane_wiring_mismatch",
         received: { lane: safe(laneName), role: safe(roleName) },
         choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 声明 (${escapeControlChars(la.backend)}/${escapeControlChars(la.modelId)}/${escapeControlChars(la.effort)}) 与注册表 ${escapeControlChars(targetLane.id)} (${escapeControlChars(aa.backend)}/${escapeControlChars(aa.modelId)}/${escapeControlChars(aa.effort)}) 不一致——注册表为准，请对齐 lanes.json。`,
+        message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 声明 (${escapeControlChars(la.backend)}/${escapeControlChars(la.modelId)}/${escapeControlChars(la.effort)}) 与注册表 ${escapeControlChars(targetLane.id)} (${escapeControlChars(aa.backend)}/${escapeControlChars(aa.modelId)}/${escapeControlChars(aa.effort)}) 不一致——注册表为准。升级后私有副本落后：跑 npm run cli -- registry align --lane ${escapeControlChars(targetLane.id)}（先预览再 --apply）；有意改车道：按 docs/certification-runbook.md「lane 变更同步面」同改。`,
       };
     }
     return {
