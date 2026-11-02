@@ -151,4 +151,4 @@
 | TD-210 | CLI 已钉新版且自动更新已关，wrapper 通道在新版下的回归验证未做 | 2026-11-01：决定 0106——provider 通道连同 wrapper 退役，没有要验证的对象 |
 | TD-327 | MCP run_continue 对 explicit 父档报笼统错误：服务层以 explicit_dispatch_continuable_unsupported 拒绝，该码不在 CONTINUE_REJECTION_REASONS 闭集，MCP 输出 schema 解析失败折成固定文案 | 2026-11-01：码进闭集（MCP 枚举派生自同一 SSOT），Lead 看到 accepted:false + 具名码；docs/surface 再生成，工具面 SHA 与线帽如实重冻（93142→93186，Owner 批准，硬顶内），MCP 层测试钉住 |
 | TD-328 | 别名派发的 run 续跑后自称变了：start 对 explicit 与别名都用结构化 lane/role 身份头，resume 只为 explicit 从钉住的 laneId/roleId 重建，别名退回 agentId 头；runManager 注释也不再成立 | 2026-11-01：resume 对 explicit 与别名都从 run.started 钉住事实重建结构化头（片段缺失/非法仍 identity_pin_invalid 具名拒，零 respawn），报错文案改两种来源通用，过时注释改正，HDR-3/HDR-4 钉住 |
-| TD-332 | `wao worktree remove` 不尊重 `git worktree lock`：强删兜底照删上锁的树；经 junction 删时只删掉 junction，目标仍在却报 `removed` | 2026-11-03：`removeWorktree` 遇上锁的树不删，交付释放、线系关闭与终态清理随之不删；CLI 拒删上锁的树并说明，按 git 登记的路径删，删后目录仍在就报错退出 |
+| TD-332 | `wao worktree remove` 不尊重 `git worktree lock`：强删兜底照删上锁的树；经 junction 删时只删掉 junction，目标仍在却报 `removed` | 2026-11-03：`removeWorktree` 只删 git 认得出、没上锁的链接工作树，交付释放、线系关闭与终态清理随之不删上锁的树；CLI 拒删上锁的树并说明，按 git 登记的路径删，删后目录仍在就报错退出 |

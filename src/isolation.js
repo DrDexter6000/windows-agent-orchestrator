@@ -160,15 +160,16 @@ export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
  * 解法：先试 git worktree remove，失败则 fallback 到 rmSync 强制删目录 +
  * 定向清理本树管理条目。
  *
- * 上了锁（`git worktree lock`）的树不删：git 本就拒删，rmSync 兜底却会照删。
- * 调用方照旧以事后目录仍在判定没删掉。
+ * 只删 git 认得出、没上锁的链接工作树（linkedWorktreeEntry）：上了锁的（`git worktree
+ * lock`）git 本就拒删，rmSync 兜底却会照删；git 认不出的（树里的 .git 丢了或指错、主检出、
+ * 独立仓库、普通目录）看不出锁没锁，兜底同样不碰。调用方照旧以事后目录仍在判定没删掉。
  */
 export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   const path = resolve(wtPath);
   if (!existsSync(path)) return Promise.resolve();
-  if (linkedWorktreeEntry(path)?.locked) return Promise.resolve();
-  // 源仓库自推：读不动 git 元数据（树已半死）时回退到以待删目录为 cwd 的旧
-  // 行为，保持 best-effort。
+  const entry = linkedWorktreeEntry(path);
+  if (!entry || entry.locked) return Promise.resolve();
+  // 源仓库自推：git 刚认出这棵树，推不出几乎不会发生；推不出时以待删目录为 cwd。
   let realCommon = null;
   try {
     const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
@@ -537,7 +538,7 @@ function joinSep(dir, name) {
 /**
  * 列出所有 worktree。
  * @param {string} cwd 仓库路径
- * @returns {Promise<Array<{path: string, branch?: string, head?: string}>>}
+ * @returns {Promise<Array<{path: string, branch?: string, head?: string, locked?: true}>>}
  */
 export function listWorktrees(cwd) {
   const out = execFileSync("git", ["worktree", "list", "--porcelain"], {

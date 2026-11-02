@@ -174,6 +174,22 @@ test("上锁的树不删：git 拒删后不走 rmSync 兜底，目录、登记�
   assert.ok(existsSync(join(repo, ".git", "worktrees", "run_locked", "locked")), "锁原样");
 });
 
+test("git 认不出的不删：.git 指错的上锁树、主检出与普通目录，兜底都不碰", async () => {
+  const repo = await makeRepo();
+  const wt = worktree(repo, "run_locked_broken");
+  git(["worktree", "lock", wt], repo);
+  rmSync(join(wt, ".git")); // git 把它设为隐藏文件，Windows 上不能原地覆写
+  writeFileSync(join(wt, ".git"), `gitdir: ${join(repo, ".git", "worktrees", "no_such_entry")}\n`);
+  const plain = join(repo, "plain-dir");
+  mkdirSync(plain);
+  writeFileSync(join(plain, "keep.txt"), "keep\n");
+  for (const target of [wt, repo, plain]) await removeWorktree(target);
+  assert.ok(existsSync(join(wt, "a.txt")), ".git 指错的上锁树原样");
+  assert.ok(existsSync(join(repo, ".git", "worktrees", "run_locked_broken", "locked")), "锁原样");
+  assert.ok(existsSync(join(repo, "a.txt")), "主检出原样");
+  assert.ok(existsSync(join(plain, "keep.txt")), "普通目录原样");
+});
+
 test("removeWorktreeAdminEntry 归属核对：树在不动；树不在且 gitdir 吻合才删；指向别处不删", async () => {
   const repo = await makeRepo();
   const commonDir = join(repo, ".git");
@@ -214,6 +230,3 @@ test("源仓库自推不依赖调用方：从任意 cwd 调 removeWorktree 仍�
   assert.ok(!existsSync(wt));
   assert.ok(!registeredAdminIds(repo).includes("run_any"));
 });
-
-// mkdirSync 复用占位（保持导入形状稳定）。
-void mkdirSync;
