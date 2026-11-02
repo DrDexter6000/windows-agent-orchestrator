@@ -36,6 +36,10 @@ const GUARD_SCOPE = [
   "src/isolation.js",
 ];
 
+// gitProbeEnv（delivery.js）是 gitChildEnv 去掉 git 的定位变量，注入照旧在场；
+// 它建在 gitChildEnv 之上这一点由下面的定义钉守住。
+const VIA_HELPER = /env:\s*(?:gitChildEnv|gitProbeEnv)\s*\(/;
+
 // 等价 force-last 兜底：gitChildEnv 之外的合法形态（内联 spread 后覆写）。
 // 新代码一律用 gitChildEnv；此兜底只为不让等价旧形态误红。
 const FORCE_LAST = /env:\s*\{\s*\.\.\.[^{}]*GIT_NO_REPLACE_OBJECTS:\s*"1"/;
@@ -66,11 +70,20 @@ test("TD-236 静态守卫：交付完整性模块所有 git 子进程调用经 g
     assert.ok(sites.length > 0, `${rel}: 扫描须找到至少一个 git 子进程调用（扫描器失效即红）`);
     for (const site of sites) {
       assert.ok(
-        /env:\s*gitChildEnv\s*\(/.test(site) || FORCE_LAST.test(site),
+        VIA_HELPER.test(site) || FORCE_LAST.test(site),
         `${rel}: git 子进程调用的 env 必须经 gitChildEnv（或等价 force-last 注入）构造，绕过即红。调用切片：\n${site}`,
       );
     }
   }
+});
+
+test("TD-236 静态守卫：gitProbeEnv 从 gitChildEnv 起步，只删定位变量", () => {
+  const src = read("src/delivery.js");
+  const body = src.slice(src.indexOf("export function gitProbeEnv("));
+  const fn = body.slice(0, body.indexOf("\n}\n") + 2);
+  assert.match(fn, /const env = gitChildEnv\(callerEnv\);/, "gitProbeEnv 须从 gitChildEnv(callerEnv) 起步");
+  assert.doesNotMatch(src.slice(src.indexOf("const GIT_LOCATION_ENV"), src.indexOf("export function gitProbeEnv(")), /GIT_NO_REPLACE_OBJECTS/,
+    "定位变量清单不得包含 GIT_NO_REPLACE_OBJECTS");
 });
 
 test("TD-236 静态守卫：消费模块 import gitChildEnv，不得复制第二份注入实现", () => {
