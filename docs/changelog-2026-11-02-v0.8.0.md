@@ -74,3 +74,23 @@
 - 复核 consult_20261102211540961us7n81（sol、deepseek-flash，都判 FIX_FIRST）：上一轮的文档各条都已修对；守卫只看根目录下 `.git` 是不是文件，子模块、`--separate-git-dir` 仓库和带伪 `.git` 文件的目录仍会被放行删掉（两席各自在临时目录实测）。另指出 `src/runManager.js` 与 `src/registry.js` 各有一处注释还是旧说法，`docs/troubleshooting.md` §4.4 的清理步骤没提私有克隆，`docs/usage/maintenance.md` 的手工检查与 0102 并不同法（连 stash 也查、不查嵌套工作树），而且只看"没有输出"分不清干净与命令失败。修复：守卫改按 git 的判定（工作树顶层、git 目录不是公共目录），测试补上这三种形状；两处注释改成现状；§4.4 加一句指针；手工检查写成三项确认。
 - 第二次复核 consult_20261102213406996esj0cw：sol 判 PASS（实测各形状都对，含子模块仓库自己的链接工作树、带空格与中文的路径、经 junction 到达的路径）；deepseek-flash 判 FIX_FIRST：复制出来的链接工作树（或指向链接树管理目录的伪 `.git` 文件）会被 git 认成原树，守卫照样放行删掉；8.3 短名路径被误拒；`src/registry.js` 那段注释还说 `rawEntries` 只给部分投影用。修复：守卫改问 git 的登记（`git worktree list` 里主工作树之后的条目），路径经 `realpathSync.native` 比较；去掉 git 定位变量的清单从 `skillLink.js` 移到 `gitChildEnv` 旁边，两处共用；测试补上复制的树与带空格、中文的路径；注释改成现状。
 - 第三次复核 consult_20261102220201877jg8482：sol、deepseek-flash 都判 PASS_WITH_NOTES，各自在临时目录实测，各形状都对（含 8.3 短名、复制的树、两种伪 `.git` 文件）；`skillLink` 的资格探测在助手移走前后返回值完全一致。deepseek-flash 指出 TD-236 的扫源守卫 `test/delivery/gitChildEnvGuard.test.js` 只认 `env: gitChildEnv(`，`isolation.js` 新写的 `env: gitProbeEnv()` 会让它变红（Lead 送审前挑测试时漏了它，复跑确认是红的）。修复：守卫同样认 `gitProbeEnv(`，并钉住它从 `gitChildEnv(callerEnv)` 起步、定位变量清单不含 `GIT_NO_REPLACE_OBJECTS`。另记台账 TD-332：强删兜底不尊重 `git worktree lock`，这是 `removeWorktree` 原有的行为，本版不改。判为不改：只在主工作树下嵌套的、已失去 `.git` 的残留树会被放行删掉，而顶层同形状的被拒，两者不对称；残留树本就该清，保守拒绝顶层的也无害。
+
+## 发版门槛证据（2026-11-02，本地实跑；打标后追加）
+
+- 全量 `npm test`：**361/361 通过**（6 波，835 秒，其中 filesystem 波 518 秒；无隔离重跑，runs 守卫干净），跑在 tree 3cf02d76 上，即 tag `v0.8.0` 指向的提交 bf90c1c；插电，持有屏幕常亮，期间没有待机。
+- surface 再生成（§9 第 3 步）：在 bf90c1c 上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致（`git status` 无改动）。
+- `npm run reliability`：从主检出在 bf90c1c 上逐车道跑（`--agent <lane>`），七条车道共约 9 分钟：
+  - sol、astra（strict）：全过，certified。
+  - kimi、deepseek-flash、opus、glm-flash、glm-pro（delta）：全过，评 conditional（delta 子集全过不产生 certified）。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`：claude-code PASS，codex PASS。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.7.0 v0.8.0`；`git rev-list --count v0.7.0..v0.8.0`。
+
+## 总量
+
+29 个提交（含 v0.7.0 打标后的发版记录与本次的四个发版提交），264 个文件，+14,189 / −15,123 行（`git diff --shortstat v0.7.0 v0.8.0`）。
+
+## 发版记录
+
+- tag：`v0.8.0`（annotated → bf90c1c，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩：tag 指向的就是跑过全量的提交本身。
