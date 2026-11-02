@@ -66,19 +66,23 @@ you.
   `wao registry align` lets the private registry follow the lane table one named lane at a
   time, after a read-only preview, with a byte-for-byte backup; doctor and `lead_preflight`
   report wiring drift (0108).
-- **Read-only runs cannot write the shared repository** — they work in a private clone of the
-  source repository, deleted only when it holds no commit the source lacks (0102). Reclaim
-  plans are decided by the Lead and applied directly, with a report afterwards (0103).
+- **Read-only runs keep git writes out of the shared repository by default** — a read-only run
+  that does not reuse a session works in a private clone of the source repository, kept whole
+  when the pre-delete check finds new commits or cannot clear it (0102); read-only runs that
+  reuse a session still use a linked worktree. Reclaim plans are decided by the Lead and
+  applied directly, with a report afterwards (0103).
 - **Two retirements** — the opencode worker backend (0105; OpenCode as an MCP host stays) and
   the claude-code provider channel (0106) leave the tree; each is kept in an `archive/` tag.
-  Registry entries that still use them are refused, and `wao registry check` is gone (use
+  Registry entries that still use them are invalid: until they are removed, strict commands
+  such as `registry list` and CLI `run` fail. `wao registry check` is gone (use
   `registry validate`). Upgrade notes are in the snapshot.
 - **Correctness** — `run_continue` names its refusal of an explicit lane+role parent over MCP,
-  and an alias run keeps its identity header on resume; a full suite takes over a provably dead
-  suite's inflight marker; CLI help lists every implemented subcommand and flag, kept in step
-  by a guard.
+  and an alias run keeps its identity header on resume; a full suite holding the verification
+  lease takes over a provably dead suite's inflight marker; `wao worktree remove` deletes only
+  linked worktrees; CLI help lists every implemented subcommand and flag, kept in step by a
+  guard.
 - **Repository self-checks** — `npm run map` prints the reference map, and a guard requires
-  every tracked file to be reachable from the entry files; the developer must-read set drops
+  every tracked file outside a few convention files to be reachable from the entry files; the developer must-read set drops
   from about 172 KB to 48 KB behind an index in architecture §0.
 - Scope by decision, upgrade notes and release-gate evidence:
   [`docs/changelog-2026-11-02-v0.8.0.md`](docs/changelog-2026-11-02-v0.8.0.md).

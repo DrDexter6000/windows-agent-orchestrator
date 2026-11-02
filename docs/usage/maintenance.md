@@ -131,4 +131,4 @@ git worktree prune --expire 10.minutes
 git worktree remove --force .wao-worktrees/<runId>
 ```
 
-只读 run 的私有克隆不在 worktree 登记里，上面两条对它无效：在克隆里 `git log --all` 确认没有要留的提交后直接删目录。
+只读 run 的私有克隆不在 worktree 登记里，上面两条与 `wao worktree remove` 都不删它。先查克隆里有没有源仓缺的提交（判法同决定 0102 的删前检查，不按远程跟踪引用排除）：`git -C <克隆> rev-list --all HEAD | git -C <源仓> cat-file --batch-check | grep missing`，没有输出再直接删目录。

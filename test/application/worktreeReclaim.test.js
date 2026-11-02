@@ -519,6 +519,40 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   );
 });
 
+test("CLI：worktree remove 只删链接工作树——独立仓库、子目录与普通目录拒删且不动盘", async () => {
+  const s = await scenario();
+  const clone = join(s.base, "private-clone");
+  git(["clone", "--shared", "--no-checkout", s.repo, clone], s.base);
+  const plain = join(s.base, "plain-dir");
+  mkdirSync(plain);
+  writeFileSync(join(plain, "keep.txt"), "keep\n");
+  const wt = s.wt("run_remove_cli");
+  const sub = join(wt, "docs");
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(sub, "keep.txt"), "keep\n");
+  for (const target of [clone, s.repo, plain, sub]) {
+    await assert.rejects(
+      () => worktreeCommand(["remove", target], {}),
+      /只删链接工作树/,
+      `${target} 应被拒`,
+    );
+    assert.ok(existsSync(target), `${target} 拒删后应原样在盘`);
+  }
+  assert.ok(existsSync(join(clone, ".git")), "私有克隆的仓库目录不动");
+  assert.ok(existsSync(join(plain, "keep.txt")), "普通目录的文件不动");
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await worktreeCommand(["remove", wt], {});
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(!existsSync(wt), "链接工作树照删");
+  assert.ok(logs.some((l) => l.includes('"removed"')), "删后打印 removed");
+});
+
 test("CLI：未知子命令报错列出新子命令", async () => {
   await assert.rejects(
     () => worktreeCommand(["frobnicate"], {}),

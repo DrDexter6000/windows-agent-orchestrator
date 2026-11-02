@@ -78,7 +78,7 @@
 
 车道画像、认证简表与就绪探测一屏见 `npm run cli -- wao lanes`（只读参考面）；开工时 `lead_preflight` 带一份紧凑表，证据与样本出处看 `wao lanes`。用非默认 `--registry` 时必须与 `--lanes-file` 成对给出（防跨绑，规则同 run 命令）。
 
-车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截：读车道表的各个面和派发时的 stderr 提示都会带上它；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。它不是接线轴，不参与派发解析的任何裁定。
+车道表（`config/lanes.json`）每条车道可选带 `dispatchHold`：Owner 的暂停派发原话（去首尾空白后非空、≤200 字符、不含控制字符或行分隔符；不合法整表拒载）。WAO 只告知、不拦截：读车道表的各个面和派发时的 stderr 提示都会带上它；派不派由 Lead 决定。CLI 调用给了非默认 `--registry` 时车道表停用（防跨绑，规则同 run 命令）：`registry list` 的 `dispatchHold` 为 null，派发与会审不提示。`registry align` 例外：它总按本仓库的车道表修所指的注册表。它不是接线轴，不参与派发解析的任何裁定。
 
 声明了 `kimiHome` 的 kimi-web 车道，凭据是 `<kimiHome>/server.token` 文件（serve 拉起时生成，见下文「kimi 车道的 worker serve」一节）；这个文件是否就绪在三处可见：
 

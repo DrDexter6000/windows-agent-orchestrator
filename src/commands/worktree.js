@@ -15,7 +15,8 @@
 //   - 共享工具：./shared.js（parseOptions，纯函数）
 //   - node built-in：path（resolve）
 
-import { resolve } from "node:path";
+import { existsSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { listWorktrees, removeWorktree } from "../isolation.js";
 import { planWorktreeReclaim, applyWorktreeReclaim, RECLAIM_REFUSAL_CODES } from "../application/worktreeReclaim.js";
@@ -170,6 +171,16 @@ async function worktreeReclaimCommand(rest, config) {
   }
 }
 
+/** 链接工作树的根：根目录下的 .git 是文件（指向源仓的 gitdir 指针）。.git 是目录
+ * （独立仓库）、缺失或读不出都不算。 */
+function isLinkedWorktreeRoot(path) {
+  try {
+    return lstatSync(join(path, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * worktree 命令：列出/删除/清退 worktree。
  * 能力层（listWorktrees/removeWorktree）早已实现，本命令只是 CLI 暴露。
@@ -186,8 +197,18 @@ async function worktreeCommand(args, config) {
   if (sub === "remove") {
     const target = rest.find((a) => !a.startsWith("--"));
     if (!target) throw new Error("worktree remove requires <path>");
-    await removeWorktree(resolve(target));
-    console.log(JSON.stringify({ removed: resolve(target) }));
+    const path = resolve(target);
+    // removeWorktree 在 git worktree remove 失败时强删目录：独立仓库（只读运行的私有
+    // 克隆、主检出）与普通目录交给它，会不经任何检查被删掉，所以这里只放行链接工作树。
+    // 目录已不在时 removeWorktree 本就什么都不做。
+    if (existsSync(path) && !isLinkedWorktreeRoot(path)) {
+      throw new Error(
+        `worktree remove 只删链接工作树（根目录下 .git 是文件）：${path} 不是，未删除。` +
+        "只读运行的私有克隆怎么清理见 docs/usage/maintenance.md「worktree 清理失败」",
+      );
+    }
+    await removeWorktree(path);
+    console.log(JSON.stringify({ removed: path }));
     return;
   }
   if (sub === "reclaim") {

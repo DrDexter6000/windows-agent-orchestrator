@@ -73,7 +73,7 @@ legacy argv 兼容：旧 profile 参数当作普通未知 flag 忽略，既有 H
 
 registry 源可读但某条目无法 normalize/project 时，走**部分投影**：有效 worker 照常返回，另附有界安全的逐条 `issues`，而非整表失败。`issues` 元素形状固定为 `{ "code": "invalid_id" | "invalid_configuration", "agentId": "<canonical id>" | null }`：`invalid_id` = id 非 canonical；`invalid_configuration` = canonical id 但 backend/cwd/model/provider/sessionReuse/waitTimeout/systemPrompt 校验失败。`agentId` 仅当 id 为 canonical 时投影，否则为 `null`（绝不回显原始 id）；`issues` 绝不携带原始 error 文本、配置、路径或凭据值。条目数上限 32（`REGISTRY_ISSUES_CAP`），超限设 `issuesTruncated:true`（真实 malformed 数无界）。零有效 worker 但有 issues，不等于观察干净的空 registry。WAO 不据此自动停止派发、不自动换 worker、不把坏条目标记为 healthy。
 
-整表源不可读或非法 JSON 是另一类失败：`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果。registry 源每次 MCP 操作只读/解析一次，`lead_preflight` 复用同一快照。严格的 registry 维护路径（CLI `registry validate` / `registry list` 遇首条坏条目即抛错）与这一投影是分开的。
+整表源不可读或非法 JSON 是另一类失败：`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果。registry 源每次 MCP 操作只读/解析一次，`lead_preflight` 复用同一快照。严格的读整表路径与这一投影是分开的（哪些命令走严格路径见 `docs/02-architecture.md` §2.3）。
 
 认证与就绪字段的语义（`certificationReasonCode` / `certificationLastHealthyAt`、凭据可用性 `credentialAvailability`、`providerReadiness`——历史认证与当前凭据、授权、容量的区别）见 `docs/certification-runbook.md` §认证与当前就绪（唯一权威）。
 

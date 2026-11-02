@@ -278,9 +278,12 @@ interface AgentDef {
 
 `registry.js` 的 `normalizeAgent(id, agent)` 是条目规范化的单一真相：校验 id 形状、
 backend 闭集成员与各 backend 必填字段；错误固定安全形状，不回显原始 id。
-`readRegistry` 句柄提供 `listAgents()` / `getAgent(id, overrides)`（严格路径，与
-CLI `registry validate` / `registry list` 一致：遇首条不可 normalize 的条目即抛错）
-和 `rawEntries()`（未过滤、未 normalize 的 `[id, rawConfig]` 对）。
+`readRegistry` 句柄提供 `listAgents()` / `getAgent(id, overrides)`（严格路径：
+`listAgents()` 遇首条不可 normalize 的条目即抛错，`getAgent` 只 normalize 所取的那条）
+和 `rawEntries()`（未过滤、未 normalize 的 `[id, rawConfig]` 对）。走 `listAgents()` 读整表
+的有 CLI `registry list`、`wao lanes`、`serve`、CLI `run` 与 MCP 按车道+角色的派发，所以
+一条坏条目会让它们整体失败；CLI `registry validate` 逐条 normalize、汇总每条的问题，有问题即
+exit 1；MCP `registry_list` / `lead_preflight` 走部分投影（`docs/usage/host.md`）。
 
 部分投影：`getRegistryInventoryWithIssues({registryPath, runDir, ...})` 逐条
 normalize——有效条目经共享 `projectInventoryEntry` 与严格路径**逐字同形**投影
@@ -566,9 +569,9 @@ interface Run {
 
 `packageDeliveryFn`/`verifyDeliveryFn`/`userEnvReader`/`createWorktreeFn` 为可注入测试缝。
 
-**start**：一切可判定的拒绝都在任何转录写入、worktree、spawn 之前（fail-closed、零副作用）——嵌套派发门、registry 读取与 `validateAgentPolicy`、角色合同能力门（`supportsRoleContract === true` 严格）、delivery 校验（须 persistent worktree 隔离）、sessionReuse/correctable 能力门、readOnly×delivery 互斥、派发 cwd 存在性、凭据可用性、调用预算 preflight（`preflightInvocation`）。通过后：建 transcript（runId 校验 + 分桶 decide-once）→ append `run.started` + `state_change(pending)` →（如隔离）建 worktree → `backend.spawn` → append `session.created` + `state_change(submitted)` → 注册 activeRuns → 返回 Run。options 家族：`prompt`/`cwd`/`tags`、`isolate`、`scorecard`/`scorecardMode`、`fireAndForget`、`requireCertified`/`certFreshnessDays`、delivery（见 §4.7）、`sessionReuse`（见 §4.10）、`correctable`、`readOnly`、`modelOverride`/`reasoningOverride`（与 requireCertified、sessionReuse 互斥）。
+**start**：一切可判定的拒绝都在任何转录写入、worktree、spawn 之前（fail-closed、零副作用）——嵌套派发门、registry 读取与 `validateAgentPolicy`、角色合同能力门（`supportsRoleContract === true` 严格）、delivery 校验（须 persistent worktree 隔离）、sessionReuse/correctable 能力门、readOnly×delivery 互斥、派发 cwd 存在性、凭据可用性、调用预算 preflight（`preflightInvocation`）。通过后：建 transcript 对象（runId 校验 + 分桶 decide-once）→（如隔离）建 worktree（不复用会话的只读 run 是私有克隆）→ append `run.started` + `state_change(pending)` → `backend.spawn` → append `session.created` + `state_change(submitted)` → 注册 activeRuns → 返回 Run。options 家族：`prompt`/`cwd`/`tags`、`isolate`、`scorecard`/`scorecardMode`、`fireAndForget`、`requireCertified`/`certFreshnessDays`、delivery（见 §4.7）、`sessionReuse`（见 §4.10）、`correctable`、`readOnly`、`modelOverride`/`reasoningOverride`（与 requireCertified、sessionReuse 互斥）。
 
-**resume**：读 transcript（分桶解析链）；已终态 → 返回 null。读取按 runId 绑定（`session.created`/`run.started`/`prompt.sent` 取绑定首条；无信封 legacy 转录拒绝）。delivery run 从 `run.started` 重建 delivery 上下文并经 `prepareDeliveryRequest` + `proveLinkedWorktree` 复验，失败 → null。进程类 backend 重放 prompt 到新进程（写 `run.rerun`）；HTTP 类重新 attach 会话。scorecard rules、model/reasoning 覆盖、角色（`run.started.rolePin` 钉住路径 + 正文 sha256，正文不符即 `role_contract_drift` 具名拒绝——零 respawn、转录字节不变）从该 run 自己的持久化事实重建。`run_continue` 不重建角色：子 run 按当前 registry 条目构造，父档 rolePin 只用来核对角色正文未变（变了或不可加载即 `role_contract_drift`）；explicit 父档一律拒绝续接（具名闭集码 `explicit_dispatch_continuable_unsupported`，MCP 侧是结构化 `accepted:false` 而非笼统错误）。
+**resume**：读 transcript（分桶解析链）；已终态 → 返回 null。读取按 runId 绑定（`session.created`/`run.started`/`prompt.sent` 取绑定首条；无信封 legacy 转录拒绝）。delivery run 从 `run.started` 重建 delivery 上下文并经 `prepareDeliveryRequest` + `proveLinkedWorktree` 复验，失败 → null。resume 一律重放：把 prompt 重放到新进程或新会话（写 `run.rerun`）。scorecard rules、model/reasoning 覆盖、角色（`run.started.rolePin` 钉住路径 + 正文 sha256，正文不符即 `role_contract_drift` 具名拒绝——零 respawn、转录字节不变）从该 run 自己的持久化事实重建。`run_continue` 不重建角色：子 run 按当前 registry 条目构造，父档 rolePin 只用来核对角色正文未变（变了或不可加载即 `role_contract_drift`）；explicit 父档一律拒绝续接（具名闭集码 `explicit_dispatch_continuable_unsupported`，MCP 侧是结构化 `accepted:false` 而非笼统错误）。
 
 **事件消费循环**（`start`/`resume` 内部启动，不阻塞调用方）：
 ```
