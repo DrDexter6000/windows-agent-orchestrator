@@ -281,6 +281,8 @@ null，能力面不猜）。
 驱动"一个进程 = 一次会话、stdout 流式产出"的 runtime（claude-code / codex /
 kimi-code）。zcode 是独立的 `ZcodeBackend`（`src/backends/zcode.js`），不继承本类。
 
+**zcode 自动收口口径（决定 0067、0069）**：控制面只在运行**完全没有生命体征**时自动收口；有生命体征就没有自动上限。三道收口门（到点先看生命体征）：零 part 阶段的 silentTimeout（配置了就以它为界）与 120 拍思考预算（silentTimeout 缺席时兜底）；已有产出后的停滞预算自适应 300–600s（`min(600s, max(300s, 3×本轮已恢复的最大静默间隙))`）。生命体征（任一成立即不收口）：快照里落了新 part 或既有工具调用落了新证据；最近 60s 收到过模型流分片；工具子进程（如测试、构建、后台任务）30s 观察窗内 CPU ≥20 ms/s、I/O ≥64 KB/s 或有进程新生/退出；同一观察窗内工作目录的改动/未跟踪清单、mtime 或大小变化；本轮主轮请求的上游重试已安排（`model_retry_scheduled`），在它的退避窗内（到达时刻 + delayMs + 余量）三道门都不收口。凭子进程、文件或重试退避续命时转录各落一条 `runtime_activity`（`process_active` / `files_changed` / `provider_retry`，每种至多每分钟一条；模型流在收时每分钟一条 `streaming`）；重试安排的作废与去重规则见 `src/backends/factory.js` 的 vitalSigns。观察得出"没有活动"后再看一拍仍无进展才收口；错误文案写明取到的读数（模型流/子进程/文件变化三面），停滞门文案含 `no vital signs, bounded exit`，本轮主轮请求的上游状态已知时末尾再附有界上游摘要；进程快照瞬时失败下一拍重取、连续三次失败按取不到处理；非 Windows 且非 git 目录时子进程与工作目录两项不适用、立即收口。协议错误、传输关闭等"证据不可信"的失败照旧立即收口。判读与运维见 `docs/troubleshooting.md` §6.9。
+
 ```js
 class ProcessBackend implements Backend {
   constructor({ parserClass, buildArgs }) { ... }
@@ -312,6 +314,10 @@ interface StreamParser {
 RunManager 等待 transcript I/O 时就产出 `message` + `done` 并退出；队列已 closed
 不构成跳过 `done` 的理由。
 
+**完成收口兜底**：进程式 backend 流结束时若无显式 done 事件，按进程 exit code 收口：0 → `done(completed)`，非 0 → `done(failed)`（`run.error` 如 `process exited with code 1`）。exit 0 仅证明传输完成，不是可用产出的证据：什么算可用效应、`completed_empty` 标在哪见 §2.2；这样的 completed 由诊断归类 `no_effect` + `completed_empty`（code 闭集为 `src/diagnosis.js` 的 `DIAGNOSIS_CODES` SSOT，经 `isValidDiagnosisCode` 配对校验；**failed** 的 no_effect run 仍 `code=null`，正常 completed 仍 `none/null`，有效的 tool-only/command-only/file-written 完成仍判 `none`）。ProcessBackend 在流边界对"成功但无可用产出"的完成直接打 `completed_empty` 机器事实（parser `done(completed)` 与 exit-0 兜底两条路径同时生效）。排障判读见 `docs/troubleshooting.md` §6.3。
+
+**静默门（silentTimeout）**：解析顺序为调用参数 → registry 条目 → 全局配置（§8）。进程式 backend 开始读流后超过该时长仍没有任何 parser 事件 → `done(failed)`（"silent timeout"）；kimi-web 提交后超过该时长本轮 turn 仍没出现在 transcript 里 → silent fail，未配置 silentTimeout 时连续 8 拍不见本轮 turn 同样失败收口（turn 出现后由无进展出口接管，见 `src/backends/factory.js` 能力说明的 vitalSigns）。排障判读见 `docs/troubleshooting.md` §6.6。
+
 **worker 环境与输出边界**：
 - 进程式 worker 不整体继承 `process.env`。backend 只拷贝固定的 OS/runtime 允许
   名单、分配给该 backend 的凭据通道、非密钥名的 `agent.env` 和 WAO 控制变量。
@@ -321,9 +327,13 @@ RunManager 等待 transcript I/O 时就产出 `message` + `done` 并退出；队
   raw-capture/stdout/stderr 诊断汇里做精确匹配脱敏。raw capture 用 UTF-8 流式
   脱敏器：跨 chunk 或码点字节拆开的值也能移除。
 - backend 可声明纯字符串 `runtimeEnv(agent, task)` 控制变量；该钩子不承载凭据。
-  Claude Code 用它对所有 WAO worker 禁用 runtime 内建 subagent 与 auto-memory，
-  并仅在 delivery mode 禁用 runtime 自带 Git instructions，避免绕过 WAO 的派发与
-  commit 所有权。
+  Claude Code 用它对所有 WAO worker 禁用 runtime 内建 subagent 与 auto-memory
+  （`CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`、`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`），并仅在 delivery mode 禁用
+  runtime 自带 Git instructions（`CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`），避免
+  绕过 WAO 的派发与 commit 所有权。claude-code backend 启用
+  `--include-partial-messages`；init/streaming/provider retry 投影为 `runtime_activity`
+  （stream delta 按固定间隔采样；投影规则与 cache 指标口径见 §2.2）；普通一次性
+  run 使用 `--no-session-persistence`（显式 session reuse 不使用该 flag）。
 - 这是暴露面收敛，不是强隔离边界：同一 OS 身份下的 worker 仍能查看自己的运行时
   凭据或凭据文件。强隔离需要 broker/身份边界（为什么见决定 0015）。
 
@@ -667,7 +677,7 @@ delivery: {
 
 `delivery` 缺席：不产生任何 delivery Git 调用或事件，行为与普通 run 一致。
 `delivery` present：`mode` 必须为 `git_commit_v1`，并要求 `{type:"worktree", strategy:"persistent"}` 隔离。
-worktree 创建前先经 `prepareDeliveryRequest()` 验证（SSOT 在 `src/delivery.js`）：`allowedPaths`、`verificationCommands`/`verificationUnavailableReason`、`verificationSetupCommands`、`verificationTimeoutMs`（闭界整数 ms，`VERIFICATION_TIMEOUT_MS_MIN=1000`/`VERIFICATION_TIMEOUT_MS_MAX=7200000`，与 MCP zod 同源）。非法值在任何副作用前以 `invalid_verification` 拒绝；`verificationTimeoutMs` 仅在显式声明时持久化，缺失零漂移。
+worktree 创建前先经 `prepareDeliveryRequest()` 验证（SSOT 在 `src/delivery.js`）：`allowedPaths`、`verificationCommands`/`verificationUnavailableReason`、`verificationSetupCommands`、`verificationTimeoutMs`（闭界整数 ms，`VERIFICATION_TIMEOUT_MS_MIN=1000`/`VERIFICATION_TIMEOUT_MS_MAX=7200000`，与 MCP zod 同源）。非法值在任何副作用前以 `invalid_verification` 拒绝；`verificationTimeoutMs` 仅在显式声明时持久化，缺失零漂移。CLI `run --delivery-spec-file` 的文件内容是**内层 delivery 对象本身**（`{"mode":"git_commit_v1",...}`），不带 `{"delivery": ...}` 外层包装——外层是 MCP `run_dispatch` 工具参数的形状；文件内容直接交给同一 SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
 worktree 创建后、backend spawn 前捕获 base commit（full hash）。
 `run.started` 扩展 `delivery: {mode, baseCommit, allowedPaths, verificationCommands|verificationUnavailableReason, verificationSetupCommands?, verificationTimeoutMs?}`（`verificationSetupCommands`/`verificationTimeoutMs` 仅当 Lead 声明时出现）。
 `resume()` 从 `run.started.delivery` 重建 deliveryContext，并重新经同一 SSOT 校验。
@@ -733,7 +743,7 @@ packageDelivery success → transitionState(completed)
   → return {completed:true, delivery:verifiedRef, verificationFailed?, verificationUnavailable?}
 ```
 
-**同机验证串行化闸**（`src/verificationGate.js`）：机器级租约（`%LOCALAPPDATA%\wao\verification.lease`，经 `machineGatePaths.js` SSOT）把生产路径发起的交付验证与直连 canonical 全量串行化——粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。入闸的生产路径：run 内验证（`waitForCompletion`）、`runs delivery reverify`、`runs delivery repackage`、`runs verify-commit`，经 `createCallerGate` 显式开启；canonical 全量（`scripts/canonical-test.mjs`）直接经 `createVerificationGate` 认领。只有依赖默认验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），`gateEngaged()` 收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。排队/等待/降级永不改变验证结果语义、永不计入任何执行预算；`runs gate` 是只读查询 + 文档在案的人工破锁出口。运维语义见 `docs/usage/delivery.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
+**同机验证串行化闸**（`src/verificationGate.js`）：机器级租约（`%LOCALAPPDATA%\wao\verification.lease`，经 `machineGatePaths.js` SSOT）把生产路径发起的交付验证与直连 canonical 全量串行化——粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。租约参数：持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。入闸的生产路径：run 内验证（`waitForCompletion`）、`runs delivery reverify`、`runs delivery repackage`、`runs verify-commit`，经 `createCallerGate` 显式开启；canonical 全量（`scripts/canonical-test.mjs`）直接经 `createVerificationGate` 认领。只有依赖默认验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），`gateEngaged()` 收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。基础设施故障一律 fail-open；排队/等待/降级永不改变验证结果语义、永不计入任何执行预算、不新增失败码；`runs gate` 是只读查询 + 文档在案的人工破锁出口（`--release`）。运维语义见 `docs/usage/delivery.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
 
 **Verification 的 proof 纪律**（`src/deliveryVerification.js`）：
 
@@ -779,7 +789,7 @@ runs delivery <runId> --accept --reason-file FILE [--format json]       # Lead �
 runs delivery <runId> --reject --reason-file FILE [--format json]       # Lead 拒绝
 ```
 
-前台 `run` 命令以 `--delivery-spec-file FILE`（JSON，内层 delivery 对象）声明 delivery。`runs delivery` 另有只读 bounded wait（`--wait-ms N`）与 `review` / `reverify` 子命令；参数与输出形状见 `docs/usage/delivery.md` 和生成层 `docs/surface/`。本节只定义验收决策合同。
+前台 `run` 命令以 `--delivery-spec-file FILE` 声明 delivery（文件形状见 §4.7）。`runs delivery` 另有只读 bounded wait（`--wait-ms N`）与 `review` / `reverify` 子命令；参数与输出形状见 `docs/usage/delivery.md` 和生成层 `docs/surface/`。本节只定义验收决策合同。
 
 **只读查询**返回从 transcript 事件重建的结构化视图：runId、终态、最新 DeliveryRef、verification 状态/failureCode、acceptance 状态及已有决策事件（如有）。Transcript 是 SSOT，不创建额外 current-state 文件。
 

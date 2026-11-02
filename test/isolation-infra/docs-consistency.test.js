@@ -770,7 +770,7 @@ test("tier-1 四大文档保持在 byte cap 内（usage.md 帽盖整本手册）
     "docs/02-architecture.md": 133000, // 改写为现状描述后约 130.3KB，上限留约 2%
     "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
     "docs/usage.md": 226300,          // 整本手册（地图加 docs/usage/ 全部页）的合计；上限留约 2%
-    "docs/troubleshooting.md": 69000, // 改写为现状描述后约 67.6KB，上限留约 2%
+    "docs/troubleshooting.md": 57000, // 66b 去重后约 55.9KB（契约段迁架构、重复收指针），上限留约 2%
   };
   for (const [rel, cap] of Object.entries(caps)) {
     // usage.md 的帽盖整本手册，按 readManual() 读；其余按单文件读。

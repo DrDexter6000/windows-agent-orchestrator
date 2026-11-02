@@ -42,7 +42,7 @@
 
 ## delivery 失败模式 → 正确工具（闭集查表）
 
-> 行为合同权威在 `docs/usage/delivery.md`（`run_delivery`、候选面 candidateInventory、`run_delivery_reverify` 各节）；本表是"现象→动作"runbook，表中枚举值由 docs-consistency 关系型守卫与代码闭集双向对账。
+> 行为合同权威在 `docs/02-architecture.md` §4.6–§4.9（readiness 投影、候选恢复、决策门）与 `docs/usage/delivery.md`（`run_delivery_reverify` / `run_delivery_repackage` / review 各工具操作节）；本表是"现象→动作"runbook，表中枚举值由 docs-consistency 关系型守卫与代码闭集双向对账。
 >
 > 跨切规则：任何 readiness 结果只要带 `candidateInventory`/`candidateKind`，先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage` 结算），不按 readiness 标签直接人工核或重读。
 >
@@ -53,14 +53,14 @@
 | readiness `not_requested`（`deliveryAvailable:false` + `deliveryRequested:false`） | 正常（非 delivery run），无需动作 |
 | readiness `waiting_for_packaging`（非终态请求中） | 带 `waitMs` 重读（`run_delivery` / `runs delivery --wait-ms`）；不要 stop |
 | readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实。例外：若该 run 已 completed 且已有合法 pending 拒绝决策，readiness 会落为 `reviewable`（verification 仍显示 `pending`，acceptance=rejected）——此时无需动作；这是有界结算形态，不是卡死 |
-| completed + verification `pending` 无 outcome、无决策（readiness `waiting_for_verification` 一直不落） | 有界 pending 拒绝：`runs delivery <runId> --reject --reason-file FILE` 显式结算（要求 created ref 显式声明 `verification:"pending"`；legacy 缺失状态不具资格，非 completed 也不具资格）。不 stop/reverify/repackage；结算后 readiness 落为 `reviewable`（verification 仍 `pending`）；迟到的真实 outcome 之后照常显示而 acceptance 恒 rejected。规范见 `docs/02-architecture.md` §4.9 |
+| completed + verification `pending` 无 outcome、无决策（readiness `waiting_for_verification` 一直不落） | 有界 pending 拒绝：`runs delivery <runId> --reject --reason-file FILE` 显式结算（资格闭集、读面语义与迟到 outcome 行为见 `docs/usage/delivery.md` 场景 4c 与 `docs/02-architecture.md` §4.9）；不 stop/reverify/repackage |
 | readiness `isolation_failed`（`isolationFailure.code` 为 `workdir_escape`） | 无任何 salvage 面：不 repackage/reverify/review/decide/stop——重新派发 |
 | readiness `packaging_failed` 且 `deliveryFailure.code` 为 `disallowed_path`（candidateKind `disallowed_scope`，带 candidateInventory） | 读 candidateInventory，Lead 裁定后 `run_delivery_repackage` |
 | readiness `packaging_failed` 且 code 非 `disallowed_path`（其余包装失败码） | 无候选面：读 `deliveryFailure.code` + `run_diagnose`（只给事实），重新派发或人工核 |
 | readiness `ambiguous` 且 candidateKind `backend_failed`（带 candidateInventory） | 候选路径：Lead 裁定后 `run_delivery_repackage` |
 | readiness `ambiguous` 无 candidateInventory | fail-closed 折叠：人工核 transcript |
 | 非终态 + candidateKind `process_missing`（readiness `waiting_for_packaging`，孤进程已证死） | `run_delivery_repackage`（first-terminal-wins 结算 orphan）——绝不等于语义 accept |
-| reviewable + verification failed + reverify 原因 ∈ {`tooling_invalid`/`environment_contaminated`/`dependency_setup_missing`} 且原始失败码 ∈ 资格闭集 {`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`} | `run_delivery_reverify`（同 commit、原始断言不可改、只能追加 setup；attempt 2 是 Lead 显式申请的第二次、也是最后一次机会，从不自动重试）；`artifact_mutated`/`artifact_mismatch` 不具资格 |
+| reviewable + verification failed + reverify 原因 ∈ {`tooling_invalid`/`environment_contaminated`/`dependency_setup_missing`} | `run_delivery_reverify`（同 commit、原始断言不可改、从不自动重试；原始失败码的资格闭集与 attempt 2 语义见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 节——`artifact_mutated` 等内容完整性失败不具资格） |
 | reviewable | 逐页 `run_delivery_review`（fileIndex 至 cursor 尽头）→ `run_delivery_decide` |
 | Host 传输中断/取消 | 什么都不做：point-in-time 重读；绝不推断 run 已停 |
 
@@ -251,31 +251,14 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ### 6.3 ProcessBackend（claude-code/codex）exit 1 → done(failed)（已实现）
 
-- **退出码兜底**：进程式 backend 流结束时若无显式 done 事件，按进程 exit code 收口：
-  0 → `done(completed)`，非 0 → `done(failed)`（`run.error` 如
-  `"process exited with code 1"`，state=failed）。
-- **metrics 缺失（不可避免）**：claude 进程在打印最终 `type:"result"`（含 token usage）
-  **之前**崩溃 → result 事件从未产生 → metrics 无法提取。这不是 WAO bug，是进程崩溃的
-  固有后果（数据源没产生）。
-- **exit 0 ≠ 有用结果（completed-empty）**：进程 exit 0 → `done(completed)` 仅是**传输完成**，
-  不是 worker 产出可用结果的证据。一个 completed run 若只有 transport 活动（runtime
-  initialized/streaming、thinking、zero-usage metrics）而**没有任何可用产出**（assistant
-  文本、命令活动、文件写入、tool_use/tool_result），不再被当成一次正常完成：诊断归类
-  `no_effect` + 事实码 `completed_empty`（`src/diagnosis.js` 的 `NO_EFFECT_DIAGNOSIS_CODES`），
-  主控据此不会把空转 worker 误判为有效 review/delivery。MCP `run_diagnose`/
-  `run_await_result` 把 `category=no_effect` 与 `code=completed_empty` **同时**透出到 wire
-  （`code` 闭集为单一通用 `DIAGNOSIS_CODES` SSOT，经 `isValidDiagnosisCode(category, code)`
-  配对校验；**failed** 的 `no_effect` run 仍 `code=null`，正常 completed 仍 `none/null`）；
-  ProcessBackend 也在流边界对"成功但无可用产出"的完成直接打 `completed_empty` 机器事实
-  （parser `done(completed)` 与 exit-0 兜底两条路径同时生效）。有效的 tool-only /
-  command-only / file-written 完成仍判 `none`。
+- **退出码兜底（合同见架构 §2.5「完成收口兜底」）**：进程式 backend 流结束时若无显式 done 事件，按进程 exit code 收口：0 → `done(completed)`，非 0 → `done(failed)`（`run.error` 如 `"process exited with code 1"`，state=failed）。
+- **metrics 缺失（不可避免）**：claude 进程在打印最终 `type:"result"`（含 token usage）**之前**崩溃 → result 事件从未产生 → metrics 无法提取。这不是 WAO bug，是进程崩溃的固有后果（数据源没产生）。
+- **exit 0 ≠ 有用结果（completed-empty）**：进程 exit 0 → `done(completed)` 仅是**传输完成**，不是 worker 产出可用结果的证据——没有任何可用产出（assistant 文本、命令活动、文件写入、tool_use/tool_result）的 completed 判 `no_effect` + `completed_empty`，主控据此不会把空转 worker 误判为有效 review/delivery。判类闭集、failed/正常完成的 code 取值与 wire 投影见架构 §2.2、§2.5 与 `docs/usage/results.md`「MCP `run_diagnose`」一节。
 
 ### 6.6 静默无响应早失败（silentTimeout）
 
 - **症状**：上游静默拒收（不报错也不回复）。waitTimeout 到期只通知、不终止（ADR-0030），收口要靠下面的判据。
-- **现状**：`silentTimeout`（ms；调用参数优先，其次 registry 条目，再次全局配置）在各 backend 的判据不同：
-  - 进程式 backend：开始读流后超过该时长仍没有任何 parser 事件 → `done(failed)`（"silent timeout"）。
-  - kimi-web：提交后超过该时长，本轮的 turn 仍没出现在 transcript 里 → silent fail；没设 silentTimeout 时，连续 8 拍不见本轮 turn 同样失败收口。turn 出现之后由无进展出口管（见 `src/backends/factory.js` 能力说明的 vitalSigns）。
+- **现状**：`silentTimeout` 的解析顺序（调用参数 → registry 条目 → 全局配置）与各 backend 的收口判据（进程式：读流后超时仍无任何 parser 事件；kimi-web：本轮 turn 迟迟不现，无配置时连续 8 拍）见架构 §2.5「静默门」。
 
 ### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"
 
@@ -294,32 +277,10 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 6.9 zcode 运行什么时候会被控制面自动收口（生命体征口径，决定 0067）
 
 - **口径**：控制面只在运行**完全没有生命体征**时自动收口；只要有生命体征就继续等，
-  放弃与否由 Lead 决定，WAO 只提供事实与建议。
-- **收口门（三道"等不到进展"的门，到点时先看生命体征）**：零 part 阶段的 silentTimeout
-  （配置了就以它为界）与 120 拍思考预算（silentTimeout 缺席时的兜底）；已有产出后的停滞
-  预算（300–600s 自适应：`min(600s, max(300s, 3×本轮已恢复的最大静默间隙))`）。
-- **算生命体征的**（任一成立即不收口）：
-  - **进度**：快照里落了新 part，或既有工具调用落了新证据（开始 / 结束）。
-  - **模型流在收**：最近 60s 内收到过流分片。长思考期间转录里每分钟一条
-    `runtime_activity`（status `streaming`），`run_wait` 显示 `liveness=progress`、
-    `lastActivityKind=runtime_status`。
-  - **工具子进程在干活**：宿主进程的后代进程在 30s 观察窗内 CPU ≥20 ms/s，或 I/O ≥64 KB/s，
-    或有进程新生 / 退出（测试、构建、后台任务属此类）。
-  - **工作目录里有文件变化**：同一观察窗内，已改动 / 未跟踪（未被忽略）文件的清单、
-    mtime 或大小变了。
-
-  凭后两项续命时转录各落一条 `runtime_activity`（`process_active` / `files_changed`，
-  每种至多每分钟一条）。
-- **不算的**：工具挂着但不耗 CPU 也不写文件（`sleep`、等远端且无流量）、流断了且没有
-  子进程在动。观察窗比对得出"没有活动"后再多看一拍，仍无进展才收口；错误文案写明取到
-  的读数（`no model stream chunk…` / `no process activity in the last 30s (cpu +…ms, io +…B
-  across N descendant process(es))` / `no file change in the working tree`），停滞门以
-  `no vital signs, bounded exit` 结尾，零 part 两道门在原文案后附 `— no vital signs: …`。
-  进程快照瞬时失败会在下一拍重取，连续三次失败按取不到处理；非 Windows 且非 git 目录时
-  两项都不适用，立即收口。
-- **"没有自动上限"只指这三道门**：有生命体征的运行不会因"等不到进展"被收掉——没人看着
-  它，就会一直跑到自己结束或生命体征消失，期间占着工作树。协议错误、传输关闭、快照缩短、
-  历史变异等"证据不可信"的失败照旧立即收口。
+  放弃与否由 Lead 决定，WAO 只提供事实与建议。三道收口门（零 part 阶段的
+  silentTimeout/120 拍思考预算、已有产出后 300–600s 自适应停滞预算）、生命体征判据
+  （进度/模型流/工具子进程/工作目录文件变化）与错误文案合同见架构 §2.5「zcode 自动
+  收口口径」；读数与阈值来由见决定 0067，上游重试退避窗（`provider_retry`）见决定 0069。
 - **证词会看错**：与任务无关的插件进程在耗 CPU、反复崩溃重启的 helper、别人在同一个未
   隔离的工作目录里写文件，都会让一个其实没在推进的运行一直"活着"；被 `.gitignore` 排除
   的写入、宿主进程内部的工作、低 CPU 的等待，则读不出活动。所以去留要 Lead 自己看。
@@ -350,8 +311,8 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 7.4 worker 在错误目录干活
 
 - **症状**：worker 在 WAO 工具仓或错误项目干活，不在目标项目
-- **根因**：派发时没带 `--cwd <目标项目>`，worker 用了 agents.json 的默认 cwd `.`——它解析为**发起派发的进程的当前工作目录**（CLI 通道=你敲命令时所在目录；MCP 派发的目标则是本次调用的 `expectedWorkspaceRoot`），不是目标项目（trade-off 详见 §3.1）
-- **修复**：要在目标项目干活就派发时带 `--cwd <目标项目>`（快起路径的最佳实践）；或把 agents.json 里该 worker 的 `cwd` 固定为目标项目路径（必须已存在，见 §3.2）。后台 delivery 不受影响——CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接早拒绝；前台 delivery 不设此门，同样要显式带 `--cwd`（worktree 源仓来自 registry cwd）
+- **根因**：派发时没带 `--cwd <目标项目>`，worker 用了 agents.json 的默认 cwd `.`——`.` 的解析规则、各通道差别（含后台/前台 delivery 的 `--cwd` 门）见 §3.1
+- **修复**：显式 `--cwd <目标项目>`（快起路径的最佳实践）；或把 agents.json 里该 worker 的 `cwd` 固定为目标项目路径（必须已存在，见 §3.2）
 
 ### 7.5 agents.json 配置漂移
 
@@ -363,7 +324,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 7.6 wao doctor 体检
 
 - **何时跑**：部署前、出问题时第一件事、定期
-- **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json] [--strict] [--warn-as-error]`；`--warn-as-error` 只把 WARN 也卡成非零退出（CI 用），不改报告内容；`--strict` 加跑 src/ 的 JS parse smoke
+- **命令**：`npm run cli -- wao doctor`；选项全集（`--registry` / `--cwd` / `--format json` / `--strict` / `--warn-as-error`——后者只把 WARN 也卡成非零退出，`--strict` 加跑 src/ 的 JS parse smoke）以 `src/commands/doctor.js` 为准
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
   - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的凭据 env 名（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
@@ -376,7 +337,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 - **症状**：run `completed=true` 有 metrics，但 `messages` 空 / `assistantTextCount=0` / 命令证据缺失 → 认证 draft-only/rejected，或真实任务 Lead 收不到 worker 回复
 - **第一反应（纪律）**：**别先怀疑模型能力**。"completed 但空"几乎总是**证据提取断链**，不是模型没做。先抓原始 stream-json 看模型到底输出了什么，再判断
-- **现状（parser 行为）**：claudeCode parser 按 message id + content 签名去重——claude-code 对同一 message 的 thinking 块和 text 块分两条 stream-json 行发出、共享同一 id，只按 id 去重会误杀 text 行，因此只有字面完全相同的重发行才被跳过。命令工具识别闭集 Bash/PowerShell/Cmd（Windows 上 claude-code 暴露 PowerShell/Cmd），都产出 command 事件
+- **现状（parser 行为）**：claudeCode parser 按 message id + content 签名去重——claude-code 对同一 message 的 thinking 块和 text 块分两条 stream-json 行发出、共享同一 id，只按 id 去重会误杀 text 行，因此只有字面完全相同的重发行才被跳过。命令工具识别闭集 Bash/PowerShell/Cmd（Windows 上 claude-code 暴露 PowerShell/Cmd），都产出 command 事件。成功 result 事件含非空 `result.result`、且此前未流式输出过相同 assistant 文本时，parser 补发恰好一条 assistant 消息再 done（避免 resume 场景的最终答案丢失）
 - **验证**：直接跑 `claude -p "..." --output-format stream-json` 抓原始输出，对比 transcript——若原始有但 transcript 没，就是 parser 没捕获
 - **教训（决策 0009）**：观测异常（空输出）+ 领域常识（LLM 当然会回复/跑命令）矛盾时，**先查证据链再下结论**
 
@@ -398,12 +359,11 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **症状**：delivery run 因 `backend_error` 或 `backend_stream_ended` 终态失败，没有 DeliveryRef；但 worker 在隔离 worktree 已写入文件。
 - **先查事实**：调用 `run_delivery`。只有返回 `candidateKind:"backend_failed"` 且 `candidateInventory` 完整非空，才表示 WAO 已证明 runtime quiet、exact base、workspace ownership 和候选清单；`candidateKind:null` 不是"无成果"，也不是已证明可采纳。若 retained worktree 仍有候选，只能按 §4.4 的 delivery-run 前提走控制面外人工采纳，并逐项留下绑定、范围、验证和无夹带证据。
 - **恢复**：Lead 审查 inventory 后明确提供完整 `allowedPaths`，调用 `run_delivery_repackage`。它不调用模型、不恢复 provider session，只在原 worktree 机械重算范围、打包并运行原验证声明。
-- **裁决**：重封装后仍逐文件审查，并由 Lead 单独 accept/reject。WAO 不判断候选语义、不自动扩域、不自动重试；缺 `run.stop_verified`、HEAD 漂移、冲突事件、空/截断 inventory 均不提供该恢复路径。
+- **裁决**：重封装后仍逐文件审查，并由 Lead 单独 accept/reject。WAO 不判断候选语义、不自动扩域、不自动重试；前置门不满足（缺 `run.stop_verified`、冲突事件、空/截断 inventory 等）时不投影候选；HEAD 漂移时候选投影为 null，但可证明的漂移仍可经 repackage 救回（资格与这个例外见 `docs/usage/delivery.md` 的候选清单节）。
 
 ### 7.11 Claude Code 新版 partial stream / retry 状态与 cache token
 
-- **现状**：Claude backend 启用 `--include-partial-messages`；init/streaming/provider retry 只投影成 payload-free 闭集 `runtime_activity`；stream delta 按固定间隔采样，原始文本/error/session/model 不落 transcript。cache read/write 使用独立指标字段，不混入 reasoning。
-- **隔离**：WAO Claude worker 设置 `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`；delivery mode 额外设置 `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`。普通一次性 run 使用 `--no-session-persistence`，显式 session reuse 不使用该 flag。
+- **现状与隔离**：argv/env 合同（partial messages、`runtime_activity` 投影、worker 环境变量、一次性 run 不持久化会话）见架构 §2.5「worker 环境与输出边界」，cache 指标口径见 §2.2。
 - **验收边界**：本地 parser/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
 
 ### 7.12 DeepSeek Harness JSON-RPC backend（暂停）
@@ -453,7 +413,7 @@ deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模�
   - **行动**：**安静窗口单发复验通过后走 reverify**（复验前确认无其他全量/验证在本机在跑）。不走 reject——reverify 至多两条链，attempt 2 是 Lead 显式申请的第二次、也是最后一次机会、从不自动重试（语义见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 小节）；链烧完后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
 - **预防（机器级 advisory inflight 标记）**：runner 开跑前（runs-guard 基线快照之前）在**机器级状态目录**（win32 `%LOCALAPPDATA%\wao`，回退 `~/.wao-machine`；经 `src/machineGatePaths.js`——该路径对 harness per-attempt TEMP 注入免疫）放 `wao-canonical-test.inflight` **机器全局 advisory 标记（非锁）**。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则打一行 `[canonical] NOTICE: stale inflight marker`；自己持有同机验证租约的全量随即接管（删前复读，内容没变才删孤儿，再建本次的标记），交付验证里的全量与不经租约的全量只打这一行；pid 活/不可判仍打 WARNING，不产生新失败面；标记在自己拥有的退出路径删除（强杀路径不删，留下的孤儿由下一次自己持租约的全量接管）。
-- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化，后到者排队，排队不计入任何预算，闸的争用与降级不改变验证结果；心跳、接管、`gate.log` 与人工破锁见[交付与验收](usage/delivery.md)场景 4b。inflight 标记保留为**降级态告警层**：fail-open、kill switch（`WAO_VERIFICATION_GATE=off`）、单文件跑等不经闸的场景仍由它兜底告警。运维出口：`npm run cli -- runs gate` 只读查询 free/held/corrupt 与 kill switch；`--release` 人工破锁仅限确认没有验证在跑而租约残留的场景（破除失败 fail-closed 非零退出）。
+- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化；租约参数（30s 心跳/90s 陈旧/130min 接管）、fail-open 与 kill switch 的合同见架构 §4.8，运维语义与破锁见[交付与验收](usage/delivery.md)场景 4b。inflight 标记保留为**降级态告警层**：fail-open、kill switch（`WAO_VERIFICATION_GATE=off`）、单文件跑等不经闸的场景仍由它兜底告警。运维出口：`npm run cli -- runs gate` 只读查询 free/held/corrupt 与 kill switch；`--release` 人工破锁仅限确认没有验证在跑而租约残留的场景（破除失败 fail-closed 非零退出）。
 
 ### 8.2 主仓根跑全量前确认无活跃 worker/daemon（runs-guard 红灯，TD-134）
 

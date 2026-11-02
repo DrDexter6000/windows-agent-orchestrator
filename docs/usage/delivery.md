@@ -18,7 +18,7 @@
 npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
-Spec 文件内容是内层 delivery 对象本身——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，不带 `{"delivery": ...}` 外层包装。外层包装是 MCP `run_dispatch` 工具参数的形状，见[派发](dispatch.md)的 MCP `run_dispatch` 一节。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析；带外层包装会因缺顶层 `mode` 被拒绝。
+Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。
 
 任务书要写明三条边界：
 
@@ -34,14 +34,11 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 
 ### 同机验证串行化闸
 
-同一台机器上并发发起的全量交付验证会互相踩踏：多个验证命令序列同时在跑，彼此拖慢到 `command_timeout`，取证信号被稀释。任何经四条生产路径（run 交付验证、`run_delivery_reverify`、`run_delivery_repackage`、`runs verify-commit`）发起的交付验证，与直连 `npm test` 的 canonical 全量，共用一把机器级租约闸串行化；粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。
+同一台机器上并发发起的全量交付验证会互相踩踏：多个验证命令序列同时在跑，彼此拖慢到 `command_timeout`，取证信号被稀释。任何经四条生产路径（run 交付验证、`run_delivery_reverify`、`run_delivery_repackage`、`runs verify-commit`）发起的交付验证，与直连 `npm test` 的 canonical 全量，共用一把机器级租约闸串行化；租约参数、fail-open、kill switch 与"排队不改结果、不计预算"的合同见[架构](../02-architecture.md) §4.8。
 
-- 并发发起时后到者排队而不是并发踩踏：墙钟总时长可能变长，但每个验证都在自己的完整预算内跑完。排队每约 30 秒向 `%LOCALAPPDATA%\wao\gate.log` 打一条含持有者身份的等待日志；排队不消耗 `verificationTimeoutMs` 或测试预算，也不产生新的交付失败码。
-- 持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。
-- 基础设施故障一律 fail-open：闸的争用、等待、降级不改变任何验证结果语义、不新增失败码。
+- 并发发起时后到者排队而不是并发踩踏：每个验证都在自己的完整预算内跑完（排队会拉长墙钟时长）；排队每约 30 秒向 `%LOCALAPPDATA%\wao\gate.log` 打一条含持有者身份的等待日志。
 - `npm run cli -- runs gate` 只读查询当前持有者 / free / corrupt 与 kill switch 状态；`--release` 是文档在案的人工破锁通道，仅限确认没有验证在跑而租约残留时使用。
 - 交付验证停在 pending 时，CLI `runs delivery <runId>`（含 `--wait-ms`）与 MCP `run_delivery` 把同一份只读闸快照并入输出（CLI 文本多一行 `Verification gate: …`，JSON 与 MCP 多 `verificationGate`）。只报租约事实——谁持有（本 run / 别的持有者，点名）、开始时间、心跳年龄，或无租约——不推断执行状态：租约可能陈旧（看心跳年龄），别人持有不能证明本 run 正在排队，无租约也不能证明验证尚未开始。
-- 设 `WAO_VERIFICATION_GATE=off` 完全绕过闸，回到并发行为；停用后只剩 canonical 套件的 advisory inflight 标记告警层。
 
 ### 写入意图与越界检查
 
@@ -70,7 +67,7 @@ Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.deliv
 
 `run_delivery` 让 MCP host 查询一个 run 的 delivery 状态。只读，不追加 transcript event。MCP 自身不解析 transcript、不 shell-out CLI——只委托同一份 application service。
 
-参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`runId` 必填；`waitMs` 为可选整数（区间与 `waitMs=0` 无效的约束见生成层描述）：省略 → point-in-time 输出；提供 → 触发 bounded read-only readiness wait（见下）。Host 传输丢失/取消不会停止 detached run——调用只是结束，run 继续运行；Lead 应重新 point-in-time 读取观察（`run_delivery`/`run_wait`/`run_await_result`/`run_delivery_review_bundle` 均如此，绝不可据传输中断推断 run 已停止）。安全输出不返回完整 DeliveryRef / raw diff / 文件内容 / reason / commands / results / worktreePath / branch / integration。
+参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`runId` 必填；`waitMs` 为可选整数（区间与 `waitMs=0` 无效的约束见生成层描述）：省略 → point-in-time 输出；提供 → 触发 bounded read-only readiness wait（见下）。Host 传输丢失/取消不会停止 detached run——处置（point-in-time 重读、绝不推断 run 已停）见[排障手册](../troubleshooting.md) §delivery 表。安全输出不返回完整 DeliveryRef / raw diff / 文件内容 / reason / commands / results / worktreePath / branch / integration。
 
 字段语义（形状与闭集枚举见生成层）：
 
@@ -85,7 +82,7 @@ Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.deliv
 
 ### isolation_failed（隔离违反 readiness）
 
-终端（已到终态）且已请求 delivery 的 run，若其唯一较高优先级 delivery 事实是恰好一条 run-bound 的安全 `run.isolation_violation`（顶层 durable `code` 为闭集 `workdir_escape` 字符串），readiness 立即 settle 为 `isolation_failed` 并投影 `isolationFailure:{code:"workdir_escape"}`——这是与 packaging failure（`deliveryFailure`）严格分离的第三类失败形状。任何既有 delivery 事实（delivery_created / verification outcome / packaging failure / Lead decision）优先于隔离事实；isolation_violation 缺失、多于一条、跨 run、code 非安全闭集或顶层 `code` malformed → fail-closed 折叠为 `ambiguous`。`isolation_failed` 意味着无 packaging、无 diff、无 review、无 decision 面——不出现 `candidateInventory`，不触发 repackage/salvage/retry/stop/decision 任何动作，Lead 只能另行派发。`run_await_result` 的 `outcome.delivery.isolationFailureCode` 投影同一事实（无隔离失败时 `null`）。
+终端且已请求 delivery 的 run，唯一较高优先级 delivery 事实是一条 run-bound 安全 `run.isolation_violation`（`code` 为闭集 `workdir_escape`）时，readiness 立即 settle 为 `isolation_failed` 并投影 `isolationFailure:{code:"workdir_escape"}`——与 packaging failure（`deliveryFailure`）严格分离的第三类失败形状：无 packaging/diff/review/decision 面、不出现 `candidateInventory`、不触发任何恢复动作，Lead 只能另行派发。事实优先级、`ambiguous` 折叠条件与投影合同见[架构](../02-architecture.md) §4.6「readiness 投影联动」与 §1 `runDelivery.js` 条目；现象→动作见[排障手册](../troubleshooting.md) §delivery 表。`run_await_result` 的 `outcome.delivery.isolationFailureCode` 投影同一事实（无隔离失败时 `null`）。
 
 ### 无交付、packaging failure 与 candidate inventory
 
@@ -193,7 +190,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 
 `run_delivery` 失败摘要带 `stderrTailInTranscript` 提示位（true = 失败命令 result frame 有非空尾，细节去转录读；投影永不携带尾内容本身）。
 
-审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用可机读锚点，禁止转述交付内容——最低四要素：受审 commit hash（或 runId）、比较基线（base commit）、受影响文件清单（或"git show 自行审阅"的指引）、测试证据所在提交。转述会让计划与实际内容混淆，审计者发现不了差异。
+审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用可机读锚点、禁止转述交付内容——最低四要素与理由见[会审](consult.md)「场景 4e：审计席测试协议」里的「审计任务书纪律」一段。
 
 ## MCP `run_delivery_decide`（持久 Lead 决策）
 

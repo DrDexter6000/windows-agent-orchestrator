@@ -167,9 +167,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 `provider_capacity` 只从 failed 终态的持久 `run.error` 分类；非终态 runtime 的 `rate_limit_event` 不会被升级为失败。所有 code 都是安全事实标签，永不回显原始错误文本/path/command/key/payload。WAO 不根据这些事实自动重试、换 worker 或停止其他 run——处置归 Lead。CLI `runs diagnose` 显示同一 category 与 code。
 
-空转完成（`category=no_effect`，线路 `code=completed_empty`）：进程 exit 0 / parser `done(completed)` 只是传输完成，不是 worker 产出可用结果的证据。一个 completed run 若仅有传输层活动（runtime init/streaming、thinking、zero-usage metrics）而无任何可用产出（非空 assistant 文本、命令活动、文件写入、tool_use/tool_result），判为 `no_effect` + 事实码 `completed_empty`。`run_diagnose` 与 `run_await_result` 都把 `category=no_effect` 与 `code=completed_empty` 同时透出到 wire——`completed_empty` 是可机读的"空转完成"事实。failed 的 run 即使空转，code 恒为 `null`；正常 completed 仍 `category=none` / `code=null`；有效的 tool-only / command-only / file-written 完成仍判 `none`。`completed_empty` 只命名这条机器真相，永不回显 provider 原文/argv/path/prompt/secret。
+空转完成（`category=no_effect`，线路 `code=completed_empty`）：进程 exit 0 / parser `done(completed)` 只是传输完成，不是 worker 产出可用结果的证据——收口与判类合同见[架构](../02-architecture.md) §2.5「完成收口兜底」，排障判读见[排障手册](../troubleshooting.md) §6.3。`run_diagnose` 与 `run_await_result` 都把 `category=no_effect` 与 `code=completed_empty` 同时透出到 wire——`completed_empty` 是可机读的"空转完成"事实，只命名这条机器真相，永不回显 provider 原文/argv/path/prompt/secret。
 
-配套的 parser 行为：claude-code 在成功 result 事件含非空 `result.result`、且此前未流式输出过相同 assistant 文本时，会补发恰好一条 assistant 消息再 done，避免 resume 场景的最终答案丢失；已流式输出相同文本则不重复。
+配套的 parser 行为（message 去重签名、命令工具闭集、result 事件补发最终 assistant 消息）见[排障手册](../troubleshooting.md) §7.7。
 
 ## `availableDrilldowns`：结果自带的下钻提示
 
