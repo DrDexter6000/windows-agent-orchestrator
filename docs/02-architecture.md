@@ -587,7 +587,7 @@ for await (const ev of handle.events):
 
 | 维度 | 机制 |
 |------|------|
-| 文件 | 每个 run 一棵独立树（`<sourceCwd>/.wao-worktrees/<runId>`，分支 `wao/<runId>`）：ephemeral 只读 run 是源仓的私有克隆（分支在克隆里），其余是 git worktree；按策略保留或清理；`.wao-worktrees/` 是 git exclude 稳定规则（树删除后保留） |
+| 文件 | 每个 run 一棵独立树（`<sourceCwd>/.wao-worktrees/<runId>`，分支 `wao/<runId>`）：ephemeral 只读 run 是源仓的私有克隆（分支在克隆里），其余是 git worktree；按策略保留或清理，上了锁（`git worktree lock`）的树，回收、清退与 `wao worktree remove` 都不删；`.wao-worktrees/` 是 git exclude 稳定规则（树删除后保留） |
 | 进程 | Node 内置 Job Object（被动 OS 级：父进程终止→子进程全杀）+ `taskkill /T /F` 主动 abort；不实现自定义 Job Object（为什么见决定 0013） |
 | 网络 | 没有按 run 分配端口的机制 |
 

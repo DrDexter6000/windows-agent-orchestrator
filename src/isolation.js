@@ -159,10 +159,14 @@ export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
  * Windows 上 git worktree remove 偶因文件锁 Permission denied（进程持有句柄）。
  * 解法：先试 git worktree remove，失败则 fallback 到 rmSync 强制删目录 +
  * 定向清理本树管理条目。
+ *
+ * 上了锁（`git worktree lock`）的树不删：git 本就拒删，rmSync 兜底却会照删。
+ * 调用方照旧以事后目录仍在判定没删掉。
  */
 export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   const path = resolve(wtPath);
   if (!existsSync(path)) return Promise.resolve();
+  if (linkedWorktreeEntry(path)?.locked) return Promise.resolve();
   // 源仓库自推：读不动 git 元数据（树已半死）时回退到以待删目录为 cwd 的旧
   // 行为，保持 best-effort。
   let realCommon = null;
@@ -216,14 +220,14 @@ export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
 }
 
 /**
- * wtPath 是不是 git 登记在册的链接工作树：在它里面问 `git worktree list`，它必须是主工作树
+ * wtPath 在 git 登记里对应的链接工作树条目：在它里面问 `git worktree list`，它必须是主工作树
  * 之后的某个条目。主检出、独立仓库、--separate-git-dir 仓库、子模块、复制出来或伪造 .git
  * 指针的目录、工作树的子目录都不在其列。路径经 realpathSync.native（展开 junction 与 8.3
- * 短名）后按 win32 语义大小写折叠比较；git 读不出一律 false。
+ * 短名）后按 win32 语义大小写折叠比较；不是或 git 读不出一律 null。
  * @param {string} wtPath
- * @returns {boolean}
+ * @returns {{path: string, head?: string, branch?: string, locked?: true} | null}
  */
-export function isRegisteredLinkedWorktree(wtPath) {
+export function linkedWorktreeEntry(wtPath) {
   const real = (p) => realpathSync.native(p).toLowerCase();
   try {
     const target = real(resolve(wtPath));
@@ -234,15 +238,15 @@ export function isRegisteredLinkedWorktree(wtPath) {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
-    return parseWorktreeList(out).slice(1).some((entry) => {
+    return parseWorktreeList(out).slice(1).find((entry) => {
       try {
         return real(entry.path) === target;
       } catch {
         return false;
       }
-    });
+    }) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -819,6 +823,8 @@ function parseWorktreeList(porcelain) {
       current.head = line.slice("HEAD ".length).trim();
     } else if (current && line.startsWith("branch ")) {
       current.branch = line.slice("branch ".length).trim();
+    } else if (current && (line === "locked" || line.startsWith("locked "))) {
+      current.locked = true;
     } else if (line.trim() === "") {
       if (current) {
         entries.push(current);

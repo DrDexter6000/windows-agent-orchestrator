@@ -164,6 +164,16 @@ test("兜底路径：git remove 失败退回 rmSync——只删本树管理条�
   assert.ok(admins.includes("run_fb_stale"), "其他树的 stale 登记必须原样保留");
 });
 
+test("上锁的树不删：git 拒删后不走 rmSync 兜底，目录、登记与锁原样", async () => {
+  const repo = await makeRepo();
+  const wt = worktree(repo, "run_locked");
+  git(["worktree", "lock", wt], repo);
+  await removeWorktree(wt);
+  assert.ok(existsSync(join(wt, "a.txt")), "上锁的树目录与文件原样");
+  assert.ok(registeredAdminIds(repo).includes("run_locked"), "登记原样");
+  assert.ok(existsSync(join(repo, ".git", "worktrees", "run_locked", "locked")), "锁原样");
+});
+
 test("removeWorktreeAdminEntry 归属核对：树在不动；树不在且 gitdir 吻合才删；指向别处不删", async () => {
   const repo = await makeRepo();
   const commonDir = join(repo, ".git");

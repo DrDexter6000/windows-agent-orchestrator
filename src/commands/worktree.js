@@ -18,7 +18,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { isRegisteredLinkedWorktree, listWorktrees, removeWorktree } from "../isolation.js";
+import { linkedWorktreeEntry, listWorktrees, removeWorktree } from "../isolation.js";
 import { planWorktreeReclaim, applyWorktreeReclaim, RECLAIM_REFUSAL_CODES } from "../application/worktreeReclaim.js";
 import { readInstallRoot, resolveConfigPath } from "../installRoot.js";
 // TD-319：本命令自己往 stderr 打的报错与提示也走统一渲染（拼进的路径、
@@ -187,17 +187,31 @@ async function worktreeCommand(args, config) {
   if (sub === "remove") {
     const target = rest.find((a) => !a.startsWith("--"));
     if (!target) throw new Error("worktree remove requires <path>");
-    const path = resolve(target);
+    let path = resolve(target);
     // removeWorktree 在 git worktree remove 失败时强删目录：独立仓库（只读运行的私有
     // 克隆、主检出）与普通目录交给它，会不经任何检查被删掉，所以这里只放行链接工作树。
     // 目录已不在时 removeWorktree 本就什么都不做。
-    if (existsSync(path) && !isRegisteredLinkedWorktree(path)) {
-      throw new Error(
-        `worktree remove 只删 git 登记在册的链接工作树：${path} 不是，未删除。` +
-        "只读运行的私有克隆怎么清理见 docs/usage/maintenance.md「worktree 清理失败」",
-      );
+    if (existsSync(path)) {
+      const entry = linkedWorktreeEntry(path);
+      if (!entry) {
+        throw new Error(
+          `worktree remove 只删 git 登记在册的链接工作树：${path} 不是，未删除。` +
+          "只读运行的私有克隆怎么清理见 docs/usage/maintenance.md「worktree 清理失败」",
+        );
+      }
+      if (entry.locked) {
+        throw new Error(`${path} 已用 git worktree lock 上锁，未删除；确要删除先 git worktree unlock`);
+      }
+      // 按 git 登记的路径删：经 junction 给出的路径，强删兜底只会删掉 junction 本身。
+      path = resolve(entry.path);
     }
     await removeWorktree(path);
+    if (existsSync(path)) {
+      throw new Error(
+        `${path} 删除失败，目录仍在（常见是有进程以它为当前目录或占着里面的文件），` +
+        "见 docs/usage/maintenance.md「worktree 清理失败」",
+      );
+    }
     console.log(JSON.stringify({ removed: path }));
     return;
   }

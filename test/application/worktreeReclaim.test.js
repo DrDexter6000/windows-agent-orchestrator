@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { symlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 
 import {
   planWorktreeReclaim, computeTreeFingerprint, untrackedIgnoredManifest,
@@ -572,6 +573,47 @@ test("CLI：worktree remove 只删登记在册的链接工作树——独立仓�
     console.log = origLog;
   }
   assert.ok(!existsSync(spaced), "路径带空格与中文的链接工作树照删");
+});
+
+test("CLI：worktree remove 不删上锁的树；经 junction 给出时删的是登记的树，目录还在就报错", async () => {
+  const s = await scenario();
+  const locked = s.wt("run_remove_locked");
+  git(["worktree", "lock", "--reason", "keep", locked], s.repo);
+  const lockedLink = join(s.base, "locked-link");
+  symlinkSync(locked, lockedLink, "junction");
+  for (const target of [locked, lockedLink]) {
+    await assert.rejects(() => worktreeCommand(["remove", target], {}), /上锁/, `${target} 应被拒`);
+    assert.ok(existsSync(join(locked, "a.txt")), "上锁的树原样在盘");
+  }
+  assert.ok(git(["worktree", "list", "--porcelain"], s.repo).includes("locked keep"), "登记与锁原样");
+
+  // 有进程以树为当前目录：git 与强删兜底都删不掉它，经 junction 给出时兜底只会删掉 junction。
+  const busy = s.wt("run_remove_busy");
+  const busyLink = join(s.base, "busy-link");
+  symlinkSync(busy, busyLink, "junction");
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: busy, stdio: "ignore", windowsHide: true });
+  try {
+    await new Promise((r) => holder.once("spawn", r));
+    await assert.rejects(() => worktreeCommand(["remove", busyLink], {}), /目录仍在/);
+    assert.ok(existsSync(busy), "目标树目录仍在");
+  } finally {
+    holder.kill();
+  }
+
+  const healthy = s.wt("run_remove_via_link");
+  const healthyLink = join(s.base, "healthy-link");
+  symlinkSync(healthy, healthyLink, "junction");
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await worktreeCommand(["remove", healthyLink], {});
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(!existsSync(healthy), "junction 指向的链接工作树照删");
+  const { removed } = JSON.parse(logs[0]);
+  assert.ok(removed.toLowerCase().endsWith("\\.wao-worktrees\\run_remove_via_link"), `报的是登记的树：${removed}`);
 });
 
 test("CLI：未知子命令报错列出新子命令", async () => {

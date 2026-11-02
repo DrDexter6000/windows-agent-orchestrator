@@ -62,7 +62,7 @@ Commands:
   feedback show <id> [--inbox-dir DIR] [--format json]   # 打印一条反馈全文（先找未处理，再找已处理）
   feedback close <id> --note <text> [--inbox-dir DIR] [--format json]   # 标为已处理并写明怎么处理（不改写已有处理说明）
   worktree list [--cwd DIR]
-  worktree remove <path>
+  worktree remove <path>   # 只删 git 登记在册、没上锁的链接工作树；删后目录仍在就报错退出
   worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]   # 只读普查分类写清退计划，打印计划 sha256（--apply 须带同一值）
   worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]   # 执行已批准计划：分支先全量进 bundle，复核后摘树删分支，记录落 runs-archive/
   daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--wait-timeout MS] [--poll-interval MS] [--resume-on-start]
