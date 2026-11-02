@@ -95,13 +95,9 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 - **WAO 行为**：完成判定检测到错误事实即 `done(failed)` 并透传错误，不等超时
 - **修复**：按 statusCode 处理——401 查 key（§1.6 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
 
-### 1.5 kimi-code backend（进程式，阶段 2 新增）
+### 1.5 kimi-code backend（暂停）
 
-- **是什么**：Kimi via `kimi-code` CLI（进程式 backend），官方支持 Kimi，过白名单无需伪装 header。进程死即会话死，没有 serve 型的停止验证问题。Kimi 车道现状（kimi-web / kimi-code）见 `docs/usage/lanes.md`。
-- **配置**：`backend: "kimi-code"`，`cwd` 必填。registry 条目的 `args` 可追加参数，但不要加 `--yolo` 或 `--auto`：`kimi -p` 不能与它们同用，会以 `Cannot combine --prompt with ...` 退出。binary 默认走 PATH 里的 `kimi`。
-- **自带控制**：kimi 自带 max_steps_per_turn=100 + agent_task_timeout_s=900。
-- **已知局限：token 预算硬闸门对 kimi-code 无效**。kimi stream-json 不含 usage/token 字段，进程式 backend 无 session endpoint 可轮询。给 kimi agent 配 tokenBudget 不会报错但不生效。kimi 的成本控制靠：kimi 自带超时 + WAO `waitTimeout`。这是进程式 backend 的固有限制（claude-code/codex 同样无 session endpoint，但 claude-code 的 result 事件含 usage，kimi 不含）。
-- **完成判定**：kimi 无显式 done 事件，靠进程 exit（exit 0 → done(completed)，非 0 → done(failed)），由 ProcessBackend 兜底。注意 exit 0 仅表示传输完成，不等于 worker 产出了可用结果——见 §6.3 末尾的 completed-empty 说明。
+kimi-code 后端暂停使用（决定 0074），模板不含它的车道；现行 Kimi 车道走 kimi-web，其配置与排障见 §1.6 与 `docs/usage/lanes.md`「kimi 车道的 worker serve」。
 
 ### 1.6 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
 
@@ -138,24 +134,12 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 - **根因**：PowerShell 原生参数解析截断多行字符串
 - **修复**：多行 prompt 用 `--prompt-file <path>`（从文件读，完整传递）。单行可用 `--prompt`
 
-### 2.2 CLI run 成功但 exit code 1
-
-- **症状**：`npm run cli -- run ...` 返回 WAO_OK（成功），但 shell 显示 exit code 1
-- **根因**：待诊断（run completed 但 CLI 退出码非 0，可能是 collect/render 路径的异常被吞）
-- **临时绕过**：检查 transcript 确认 run 真实状态，忽略 exit code
-
 ### 2.3 scorecard rules 没生效（PowerShell JSON quoting）
 
 - **症状**：`--scorecard-rules '{"requireEvidence":true}'` 传了，但 `runs scorecard` 返回 "no rules"
-- **根因**：PowerShell 的单引号字符串行为和 bash 不同——单引号 JSON 可能被 shell 解析吃掉。
-  这不是 WAO bug，是 shell quoting 问题。
-- **修复（PowerShell）**：双引号 + 转义，或直接从文件读：
+- **根因**：PowerShell 下 inline JSON 经 `npm run cli --` 转发后不一定完好（随 shell 及其版本而变），"双引号 + 转义"形式经 npm 转发同样到不了完整 JSON。这不是 WAO bug，是 shell quoting 问题（经过与取证见事故复盘 `docs/incidents/2026-06-26-fresh-agent-e2e-frictionlog.md` N2）
+- **修复（PowerShell）**：从文件读，绕开 shell quoting；`--scorecard-rules-file` 与 `--scorecard-rules` 互斥（`src/commands/run.js`）：
   ```powershell
-  # 不行（单引号 JSON 被 PowerShell 吃掉）
-  --scorecard-rules '{"requireEvidence":true}'
-  # 正确（双引号 + 转义）
-  --scorecard-rules "{\"requireEvidence\":true}"
-  # 更稳妥（从文件读，绕开 shell quoting；与 --scorecard-rules 互斥）
   --scorecard-rules-file rules.json
   ```
 - **验证**：transcript 应出现 `scorecard.checked` 事件；`runs scorecard <runId>` 应显示 checks
@@ -400,9 +384,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 - **症状**：`npm run reliability` 报 worker `draft-only`/`rejected`，看起来"模型不会跑命令/不会写文件"
 - **第一反应（纪律）**：**别接受异常结果**。当前主流 LLM 都会跑命令+写文件。draft-only 多半是证据没捕获（见 §7.7），不是能力缺失
-- **典型根因**：parser 漏认 Windows 命令工具（§7.7）→ commandsPassed 永远失败 → 看似"不会跑命令"
-- **验证**：抓认证 drill 的原始 stream-json，确认模型是否真的发了 tool_use（Bash/PowerShell）。发了但 commandsPassed=false = parser bug，不是模型问题
-- **修复**：升级 WAO（parser 现已识别三类命令工具）
+- **验证**：抓认证 drill 的原始 stream-json，确认模型是否真的发了 tool_use（Bash/PowerShell），以及对应的 tool_result 是否成功。`commandsPassed` 怎么判见 `src/scorecard.js`：命令失败要判失败，证据不全（例如拿不到退出码）也判不通过——这是规则本身；对照规则仍对不上，再把原始 stream-json 附上报给 WAO
 
 ### 7.9 agents.json vs agents.example.json 混淆（配置真相源）
 
@@ -424,13 +406,9 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **隔离**：WAO Claude worker 设置 `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`；delivery mode 额外设置 `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`。普通一次性 run 使用 `--no-session-persistence`，显式 session reuse 不使用该 flag。
 - **验收边界**：本地 parser/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
 
-### 7.12 DeepSeek Harness JSON-RPC backend 启动或空结果
+### 7.12 DeepSeek Harness JSON-RPC backend（暂停）
 
-- **先确认边界**：WAO 只 detect/invoke/report，不安装、升级、登录或修复 DSH。GUI 中选择的 preset 不会自动成为 WAO worker；WAO 使用 registry 明确指定的 dedicated `dsh-jsonrpc-agent` + Cordis config。
-- **preflight 报配置错误**：确认 `binary` 可执行、`dshConfigPath` 可读、`credentialEnv` 为非空环境变量名；再用 `registry validate`、`registry list` 自查（各命令的作用见 CLI help）。
-- **runtime identity mismatch / malformed JSON-RPC / transport closed**：这是 DSH composition 或 transport 故障，不是模型语义失败。直接运行同一 binary 做 `initialize` no-model probe；不得改成抓 TUI 文本或把未知输出投影为 completed。
-- **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
-- **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。
+deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模板不含它的车道；现行 DSH 通道是 deepseek-acp，其配置与排障见 `docs/usage/lanes.md`「deepseek 车道的目录权限前提」。
 
 ### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR）
 
