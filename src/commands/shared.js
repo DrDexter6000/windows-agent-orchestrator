@@ -75,6 +75,14 @@ export function parseOptions(args) {
   return options;
 }
 
+// 命令行的等待面旗标原样进 waitForCompletion；silentTimeout / tokenBudget /
+// tokenBudgetMultiplier 是注册表与全局配置的值，不从命令行覆盖——parseOptions 给的是
+// 字符串，透传会遮住注册表的数值、让 token 预算检查失效。
+export function cliWaitOptions(options) {
+  const { silentTimeout: _s, tokenBudget: _b, tokenBudgetMultiplier: _m, ...rest } = options;
+  return rest;
+}
+
 export async function loadPrompt(options) {
   if (options.promptFile) {
     return readFile(resolve(options.promptFile), "utf8");

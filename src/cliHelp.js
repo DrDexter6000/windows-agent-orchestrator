@@ -8,8 +8,10 @@
 //
 // 帮助页是给用户的速查：每条命令一行语法，需要说明的同行一句短话；内部
 // 编号（决定号/TD 号/批次号）不进帮助页，长解释归 docs/usage/。run/spawn
-// 的用法行与 RUN_USAGE_TEXT 列出 src/commands/run.js 读取的面向用户的参数；后台 runner
-// 内部穿线用的 --run-id 不列。
+// 的用法行与 RUN_USAGE_TEXT 列出 src/commands/run.js 读取的面向用户的参数；
+// 程序内部穿线/高级覆盖用的旗标（--run-id、--state-dir 等）统一收在 Notes 的
+// 内部旗标一行，不逐条写进命令行（test/isolation-infra/cliHelpCoverage.test.js
+// 双向守卫子命令与旗标：已实现 ⊆ 帮助）。
 
 export const HELP_TEXT = `Windows Agent Orchestrator PoC
 
@@ -18,20 +20,20 @@ Commands:
   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审：扇出+收集，各席原文并列呈现，不做语义合成
   consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 重渲染一场会审；--seat 取一席完整原文（--out 写进文件）
   consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 继续等一场已扇出的会审（各席到终态或观察窗到期即返回，可反复调用）
-  serve status [--url SERVEURL]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（零副作用）
-  serve sweep [--url SERVEURL] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删）
-  serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N]   # 闲置回收 worker serve：双门判定后优雅 shutdown 并显式重启；--workspace-dir 缺省取车道声明值
-  registry list [--registry FILE]                    # 车道清单与各车道的认证状态
-  registry validate [--registry FILE] [--format json]  # 静态 schema 校验，不改任何文件
+  serve status [--url SERVEURL] [--kimi-home DIR] [--registry FILE]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（零副作用）
+  serve sweep [--url SERVEURL] [--kimi-home DIR] [--registry FILE] [--run-dir DIR] [--apply]   # 清扫 WAO 认领且 worktree 已亡的 kimi 会话（默认 dry-run；--apply 才删）
+  serve recycle [--workspace-dir <dir>] [--kimi-home DIR] [--registry FILE] [--url SERVEURL] [--kimi-exe PATH] [--soak-ms N] [--run-dir DIR]   # 闲置回收 worker serve：双门判定后优雅 shutdown 并显式重启；--workspace-dir 缺省取车道声明值
+  registry list [--registry FILE] [--run-dir DIR] [--format json] [--cert-evidence]   # 车道清单与各车道的认证状态；--cert-evidence 附只读认证证据详情
+  registry validate [--registry FILE] [--format json] [--run-dir DIR]  # 静态 schema 校验，不改任何文件
   registry align [--registry FILE] [--lane <id>]... [--apply --expect-sha256 <hex>]   # 私有注册表跟随车道表：先预览（零写入，给 SHA-256），逐车道显式采用；--apply 必须点名车道并带当前文件哈希
-  spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE]
+  spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--require-certified]   # 单 agent 不带 --wait = 后台托管；--scorecard-mode / --require-certified 只在这条路径生效
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
-  status <runId> [--run-dir DIR] [--format json]
+  status <runId> [--run-dir DIR]   # 输出恒为 JSON
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final [--out FILE]] [--format json] [--run-dir DIR]   # --final --out 把最终回答完整写进文件（多长都写）
-  stop <runId> --observed-seq N --reason TEXT [--run-dir DIR]   # N = status 输出的 observedSeq；先看最新状态再停
-  retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
-  resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker）
+  stop <runId> --observed-seq N --reason TEXT [--run-dir DIR] [--registry FILE]   # N = status 输出的 observedSeq；先看最新状态再停
+  retry <runId> [--wait] [--run-dir DIR] [--registry FILE] [--tag key=value] [--cwd DIR] [--isolate|--no-isolate] [--wait-timeout MS] [--poll-interval MS] [--model ID] [--reasoning EFFORT]
+  resume <runId> [--wait] [--run-dir DIR] [--registry FILE] [--wait-timeout MS] [--poll-interval MS]   # 不带 --wait = detached runner 托管续跑；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker）
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--active] [--state <state>] [--since <duration>] [--project <path|name|@sandbox|@scratch|@unattributed>] [--format json]
   runs summary [--run-dir DIR] [--format json]
   runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 把超龄 run 移到 runs-archive/（不删除，冲突不覆盖）
@@ -46,8 +48,9 @@ Commands:
   runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard
   dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
   runs diagnose <runId> [--run-dir DIR] [--format json]
-  runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json]   # 交付状态查询（只读）；--cwd 指定仓库根（缺省 WAO_TARGET_CWD，再当前目录）供主分支 WAO-Adopted-From 采纳查询
+  runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json] [--wait-ms N]   # 交付状态查询（只读，--wait-ms 为有界等待）；--cwd 指定仓库根（缺省 WAO_TARGET_CWD，再当前目录）供主分支 WAO-Adopted-From 采纳查询
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
+  runs delivery review <runId> --file-index N [--cursor TOKEN] [--format json] [--cwd DIR] [--run-dir DIR]   # 逐文件读交付 diff 片段（≤16KiB/页，--cursor 翻页；未验证/不可用给闭集原因）
   runs delivery reverify <runId> --reason <code> [--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 未变工件审计式重验证；--attempt 2 为第二次（也是最后一次）机会，仅当第一次因环境/工具码失败
   runs wait <runId> [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标，见 docs/usage/supervise.md）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
@@ -59,16 +62,16 @@ Commands:
   feedback show <id> [--inbox-dir DIR] [--format json]   # 打印一条反馈全文（先找未处理，再找已处理）
   feedback close <id> --note <text> [--inbox-dir DIR] [--format json]   # 标为已处理并写明怎么处理（不改写已有处理说明）
   worktree list [--cwd DIR]
-  worktree remove <path> [--cwd DIR]
+  worktree remove <path>
   worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]   # 只读普查分类写清退计划，打印计划 sha256（--apply 须带同一值）
   worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]   # 执行已批准计划：分支先全量进 bundle，复核后摘树删分支，记录落 runs-archive/
-  daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--resume-on-start]
-  daemon run <agentId> --prompt "..." [--run-dir DIR] [--registry FILE] [--prompt-file FILE]
-  daemon stop [--run-dir DIR]
-  daemon ping [--run-dir DIR] [--pipe PIPE]
-  daemon status <runId> [--run-dir DIR] [--pipe PIPE]   # 按 runId 查单个 run；守护进程自身健康用 ping/list
-  daemon list [--run-dir DIR] [--pipe PIPE]
-  daemon supervise [--run-dir DIR] [--registry FILE] [--idle-exit-ms MS]
+  daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--wait-timeout MS] [--poll-interval MS] [--resume-on-start]
+  daemon run <agentId> --prompt "..." [--run-dir DIR] [--pipe PIPE] [--prompt-file FILE] [--timeout MS]
+  daemon stop [--run-dir DIR] [--pipe PIPE] [--timeout MS]
+  daemon ping [--run-dir DIR] [--pipe PIPE] [--timeout MS]
+  daemon status <runId>|--run-id <runId> [--run-dir DIR] [--pipe PIPE] [--timeout MS]   # 按 runId 查单个 run（位置参数或 --run-id）；守护进程自身健康用 ping/list
+  daemon list [--run-dir DIR] [--pipe PIPE] [--timeout MS]
+  daemon supervise [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--idle-exit-ms MS]
   daemon supervisor status|stop [--run-dir DIR]
   daemon health [--run-dir DIR]
 
@@ -79,21 +82,21 @@ MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code,
 
 Skill slot (hosts: claude-code, codex, kimi-code; hosts without a verified slot print manual guidance; host config files are never written):
   skill link --host <host> [--apply]   # default preview: slot, link target, current state; --apply creates the junction to this checkout
-  skill unlink --host <host> [--apply]   # removes only the link that targets this checkout (non-recursive rmdir); --all for uninstall
+  skill unlink (--host <host> | --all) [--apply]   # removes only the link that targets this checkout (non-recursive rmdir); --all for uninstall
 
 Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor), namespaced (wao wao doctor), or npm form (npm run cli -- wao doctor):
-  wao init [--cwd DIR] [--state-dir DIR]
-  wao decision add --title T [--body B | --body-file F] [--context C]
-  wao decision list [--format json]
-  wao decision show <id>
-  wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason 为闭集码）；裸 wao declare 列出现有声明
-  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>]  # 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记）；裸 wao stage 列出进度与缺口
-  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（默认只读并注入边界声明；--mode write 不注入）
-  wao handoff write --from R --to R --summary S [--artifacts a,b]
-  wao handoff read <role> [--format json]   # 最新一份写给该角色的 handoff
-  wao doctor [--cwd DIR] [--format json] [--warn-as-error]   # 环境体检（车道/凭据/工具链）
-  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # 从入库模板生成最小私有 registry；--host 给该宿主的注册指引；不带 --agent = 预览出口
-  wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # 验收落盘（只对终态 run）；--show 只读列出既有记录
+  wao init [--cwd DIR]
+  wao decision add --title T [--body B | --body-file F] [--context C] [--cwd DIR]
+  wao decision list [--format json] [--cwd DIR]
+  wao decision show <id> [--cwd DIR]
+  wao declare --task T --reason <code> [--note N] [--cwd DIR]  # Lead 自做声明（reason 为闭集码）；裸 wao declare 列出现有声明
+  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>] [--registry FILE] [--run-dir DIR] [--cwd DIR]  # 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记）；裸 wao stage 列出进度与缺口
+  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--format json|text]  # 快捷派工（默认只读并注入边界声明；--mode write 不注入）
+  wao handoff write --from R --to R --summary S [--artifacts a,b] [--cwd DIR]
+  wao handoff read <role> [--format json] [--cwd DIR]   # 最新一份写给该角色的 handoff
+  wao doctor [--cwd DIR] [--registry FILE] [--format json] [--warn-as-error] [--strict]   # 环境体检（车道/凭据/工具链）
+  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json] [--registry FILE]  # 从入库模板生成最小私有 registry；--host 给该宿主的注册指引；不带 --agent = 预览出口
+  wao accept --run <runId> (--show | --decision <accepted|rejected> --reason <text>) [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # 验收落盘（只对终态 run）；--show 只读列出既有记录
   wao sweep-claude-config [--apply]  # 清扫 claude-code OAuth 临时配置目录（默认 dry-run，--apply 才删）
   wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读）：接线轴+画像+认证简表+就绪探测
 
@@ -101,6 +104,7 @@ Notes:
   - 完整用法与场景说明见 docs/usage.md 与 docs/usage/ 各专页。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时

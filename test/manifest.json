@@ -53,6 +53,7 @@
       "isolation-infra/backendCapabilityMatrix.test.js",
       "isolation-infra/backendSwitchCensus.test.js",
       "isolation-infra/cliFormatJson.test.js",
+      "isolation-infra/cliHelpCoverage.test.js",
       "isolation-infra/daemonHealth.test.js",
       "isolation-infra/daemonSupervisor.test.js",
       "isolation-infra/dispatchResourceAdvisory.test.js",

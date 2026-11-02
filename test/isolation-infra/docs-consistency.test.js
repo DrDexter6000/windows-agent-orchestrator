@@ -3105,7 +3105,9 @@ test("R12: 认证 runbook retry 继承节记录覆盖继承语义 + 替换 flag 
 
 test("R12: HELP_TEXT retry 命令行携带替换 flag（CLI 面；cli.md 字节由 docsSurface-1 守卫）", async () => {
   const { HELP_TEXT } = await import("../../src/cliHelp.js");
-  assert.match(HELP_TEXT, /^  retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]$/m,
+  // 只钉意图：替换 flag [--model ID] [--reasoning EFFORT] 在 retry 行内、顺序如旧
+  // （行内其余旗标由 cliHelpCoverage 守卫"已实现 ⊆ 帮助"）。
+  assert.match(HELP_TEXT, /^  retry <runId> .*\[--model ID\] \[--reasoning EFFORT\]/m,
     "HELP_TEXT retry 行必须携带 [--model ID] [--reasoning EFFORT]");
   // docs/surface/cli.md 的 retry 行同步钉与 docsSurface-1/4 字节钉（disk ==
   // generate()，HELP_TEXT 逐字嵌入）重复，已删（TD-168 清扫）。

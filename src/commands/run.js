@@ -33,7 +33,7 @@ import { renderRunSummary } from "../cliRunSummary.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
 import { boundReportScope } from "../metrics.js";
-import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall } from "./shared.js";
+import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall, cliWaitOptions } from "./shared.js";
 import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 // 0097 §4：派发时回显所选车道一行事实（只陈列非推荐；fail-open——null 不打印）。
 import { laneFactsLine } from "../application/laneFactsLine.js";
@@ -778,7 +778,7 @@ export function printObservationDeadlineNotice(runId, { waitTimeoutMs, source } 
 export async function runAndWait(run, options) {
   const runId = run.transcript.context.runId;
   const waitOptions = {
-    ...options,
+    ...cliWaitOptions(options),
     ...(options.onObservationDeadline ? {} : {
       onObservationDeadline: (info) => printObservationDeadlineNotice(runId, info),
     }),

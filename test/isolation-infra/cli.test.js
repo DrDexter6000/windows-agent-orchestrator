@@ -145,6 +145,19 @@ test("loadPrompt: 既无 promptFile 也无 prompt 时报错", async () => {
 // runAndWait 必须捕获 throw，转为 {failed:true, error, runId} 结构化结果。
 // ---------------------------------------------------------------------------
 
+test("runAndWait: 命令行的 --silent-timeout / --token-budget / --token-budget-multiplier 不透传进等待层", async () => {
+  let seen = null;
+  const fakeRun = {
+    transcript: { context: { runId: "run_wait_opts" } },
+    waitForCompletion: async (opts) => { seen = opts; return { completed: true, timedOut: false }; },
+  };
+  await runAndWait(fakeRun, { waitTimeout: "5000", silentTimeout: "1", tokenBudget: "1000", tokenBudgetMultiplier: "2" });
+  assert.equal(seen.waitTimeout, "5000", "等待面旗标照常透传");
+  for (const key of ["silentTimeout", "tokenBudget", "tokenBudgetMultiplier"]) {
+    assert.equal(key in seen, false, `${key} 不从命令行覆盖注册表值`);
+  }
+});
+
 test("runAndWait: worker failed 时返回结构化失败结果（不 throw，含 runId + error）", async () => {
   // mock run：waitForCompletion 模拟 done(failed) 抛错
   const fakeRun = {

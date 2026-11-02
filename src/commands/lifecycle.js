@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
-import { parseOptions, loadRun, newRunManager, resolveIsolateFlag } from "./shared.js";
+import { parseOptions, loadRun, newRunManager, resolveIsolateFlag, cliWaitOptions } from "./shared.js";
 // ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
 import { printObservationDeadlineNotice } from "./run.js";
 // R12: the per-dispatch override shape SSOT (hosted in runManager.js with the
@@ -201,7 +201,7 @@ export async function retryCommand(args, config) {
     // 继续等到自然终态。
     const newRunId = run.transcript.context.runId;
     const waitResult = await run.waitForCompletion({
-      ...options,
+      ...cliWaitOptions(options),
       onObservationDeadline: (info) => printObservationDeadlineNotice(newRunId, info),
     });
     console.log(JSON.stringify({ completed: waitResult.completed }, null, 2));
@@ -310,7 +310,7 @@ export async function resumeCommand(args, config) {
   }
   console.log(JSON.stringify({ runId, resumed: true, state: run.state, sessionId: run.result?.backendSessionId }));
   const waitResult = await run.waitForCompletion({
-    ...options,
+    ...cliWaitOptions(options),
     onObservationDeadline: (info) => printObservationDeadlineNotice(runId, info),
   });
   console.log(JSON.stringify({ runId, completed: waitResult.completed }));

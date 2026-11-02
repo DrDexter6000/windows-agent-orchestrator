@@ -324,7 +324,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 7.6 wao doctor 体检
 
 - **何时跑**：部署前、出问题时第一件事、定期
-- **命令**：`npm run cli -- wao doctor`；选项全集（`--registry` / `--cwd` / `--format json` / `--strict` / `--warn-as-error`——后者只把 WARN 也卡成非零退出，`--strict` 加跑 src/ 的 JS parse smoke）以 `src/commands/doctor.js` 为准
+- **命令**：`npm run cli -- wao doctor`；选项全集（`--registry` / `--cwd` / `--format json` / `--strict` / `--warn-as-error`——后者只把 WARN 也卡成非零退出，`--strict` 加跑 src/ 的 JS parse smoke）以 CLI help 与生成层 `docs/surface/cli.md` 为权威
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
   - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的凭据 env 名（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）

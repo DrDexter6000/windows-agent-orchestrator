@@ -2,7 +2,7 @@
 //
 // worktree command family：
 //   worktree list [--cwd DIR]
-//   worktree remove <path> [--cwd DIR]
+//   worktree remove <path>
 //   worktree reclaim [--cwd DIR] [--include <runId>]... --out <plan.json> [--run-dir DIR]
 //   worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]
 //

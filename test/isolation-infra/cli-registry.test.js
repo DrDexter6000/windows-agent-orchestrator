@@ -499,7 +499,10 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   const out = execSync("node src/cli.js help", { cwd: process.cwd(), encoding: "utf8" });
   assert.match(out, /run <agentId> .*--prompt-file FILE/, "help 必须列出 run --prompt-file FILE");
   assert.match(out, /--scorecard-rules-file FILE/, "help 必须列出 --scorecard-rules-file FILE");
-  assert.match(out, /status <runId> .*--format json/, "help 必须列出 status --format json");
+  // 第 67a 批：TD-65 当年补的 status --format json 实为幻影旗标（statusCommand
+  // 从不读 --format，输出恒为 JSON），幻影不得回潮（旗标层另由 cliHelpCoverage 守卫）。
+  assert.match(out, /^  status <runId>/m, "help 必须列出 status");
+  assert.doesNotMatch(out, /status <runId> [^\n#]*--format/, "status 无 --format 旗标（幻影已删，不得回潮；只查语法段，说明文字可提及）");
   // runs 族（M8-2/3 新增，曾漏）
   assert.match(out, /runs dashboard/, "help 必须列出 runs dashboard（main() 路由）");
   assert.match(out, /runs diagnose/, "help 必须列出 runs diagnose（main() 路由）");
