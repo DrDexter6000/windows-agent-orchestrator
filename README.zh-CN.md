@@ -117,7 +117,7 @@ Copy-Item config/agents.example.json config/agents.json
 #    路径的 worker，其余删掉。一个 runtime 就够用 WAO。
 #    各 runtime 的认证方式选择表见 AGENT_ONBOARDING.md。
 #    保留 worker 的 cwd 可留模板值 `.`——目标项目由每次派发的 `--cwd`（CLI）或
-#    host 授权 workspace（MCP）决定；见 AGENT_ONBOARDING.md §4c。
+#    本次调用的 `expectedWorkspaceRoot`（MCP，必传）决定；见 AGENT_ONBOARDING.md §4c。
 
 # 2. 校验 registry（此步不需要任何 runtime）
 # 各 registry 命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
@@ -125,12 +125,17 @@ npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
 
 # 3. 接入 MCP Host（主控制面——决定 0017）
-#    在 WAO 安装根目录（你 clone 的仓库）里跑。把任意 MCP host（Claude Desktop /
-#    Codex / OpenCode）指向这个 stdio 入口；各 host 的绝对命令/args 示例在
+#    正式注册走 `mcp bind`。Codex：它直接写入目标项目的 .codex/config.toml（带
+#    --cwd <目标项目>；不带则依次取 WAO_TARGET_CWD、当前目录）。其余宿主：它打印
+#    注册片段，其中 shim、stdio 入口、registry 与 runDir 都是绝对路径（宿主启动
+#    cwd 不保证在 WAO 仓内），由你并入宿主自己的配置。各宿主步骤见
 #    docs/usage/host.md：
-npm run mcp -- --registry config/agents.json --run-dir runs
-#    会动工作区的调用自带目标（expectedWorkspaceRoot）；roots/list /
-#    workspace_select 只定只读工具范围。下方的 --cwd 只影响 CLI 侧观察。
+npm run cli -- mcp bind --host <host> --cwd <目标项目>   # 或：wao onboarding --host <id>
+#    npm run mcp -- --registry config/agents.json --run-dir runs 不是注册命令
+#    ——只是手工 smoke 入口，且只可在 WAO 安装根目录（你 clone 的仓库）里跑。
+#    会动工作区的调用自带目标（expectedWorkspaceRoot，必传）；roots/list /
+#    workspace_select 只定只读工具范围。CLI 上的 --cwd 决定 run 族命令的目标
+#    项目（CLI 观察面也按它过滤）。
 
 # 4. 用 CLI fallback 跑第一次只读 canary（一个保留的 worker）
 #    把 <agentId> 换成第 2 步 `registry list` 里的任意 worker id——
@@ -177,8 +182,8 @@ WAO 是 MCP-first（决定 0017）；CLI 是人/运维的 fallback，调用同�
 services。
 
 ```powershell
-# MCP server（主控制面——任意 MCP host 指向这里）
-npm run mcp -- --registry config/agents.json --run-dir runs
+# MCP server（主控制面）：用 mcp bind 注册宿主（Codex 直接写 .codex/config.toml；其余宿主打印片段）
+npm run cli -- mcp bind --host <host> --cwd <目标项目>   # `npm run mcp` 仅是安装根目录内的手工 smoke 入口
 
 # CLI fallback——常见 Lead 闭环
 npm run cli -- run <agentId> --prompt "..."             # 派发 + 等待

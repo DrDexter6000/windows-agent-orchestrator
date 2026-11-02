@@ -661,7 +661,7 @@ export async function waoDoctorCommand(args, config) {
             level: "info",
             detail: reuseWorker
               ? `worker ${id} 的 registry cwd 是 "."（sessionReuse worker）：后台族（spawn/run --background/MCP run_dispatch）派发要求绑定 workspace——CLI 后台不带 --cwd 会 typed 早拒绝（SessionReuseWorkspaceRequiredError）；前台 run 不解析 sessionReuse，"." 落在发起派发的进程的 cwd`
-              : `worker ${id} 的 registry cwd 是 "."：不带 --cwd 派发时将落在发起派发的进程的 cwd（CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定）`,
+              : `worker ${id} 的 registry cwd 是 "."：不带 --cwd 派发时将落在发起派发的进程的 cwd（CLI 通道=你敲命令时所在目录；MCP run_dispatch 不用这个 cwd，派发目标是本次调用的 expectedWorkspaceRoot）`,
             fix: `要在目标项目干活就派发时带 --cwd <目标项目>，或把 ${registryPath} 里该 worker 的 cwd 固定为已存在目录`,
           });
         }

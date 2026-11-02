@@ -1149,8 +1149,8 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ ru
       agents: {
         // 本地进程式 backend + 不存在的 cwd → 应 WARN（R8-2 主面）
         researcher: { backend: "claude-code", cwd: badCwd },
-        // "." 解析为发起派发的进程的 cwd（CLI 通道=敲命令时所在目录；MCP 通道
-        // =MCP 服务进程的 cwd，由 host 决定），恒存在 → 不 WARN；R8-C C-8 起
+        // "." 解析为发起派发的进程的 cwd（CLI 通道=敲命令时所在目录；MCP
+        // run_dispatch 用本次调用的 expectedWorkspaceRoot），恒存在 → 不 WARN；R8-C C-8 起
         // 出一条 INFO 静默落点提示（R8-1 后模板值即 "."）
         coder_low: { backend: "claude-code", cwd: "." },
         // HTTP serve backend：cwd 是远端目录提示，与派发层能力豁免对称

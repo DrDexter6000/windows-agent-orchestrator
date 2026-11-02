@@ -167,7 +167,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 ### 3.1 worker 默认 cwd 落在派发进程所在目录，不是目标仓
 
 - **症状**：worker 在 `D:/projects/windows-agent-orchestrator`（或你敲命令时所在的任何目录）干活，而不是你要它改的目标仓库
-- **根因**：registry 模板把所有 worker 的 `cwd` 统一为 `.`（`cwd` 字段必填，缺失在 `registry validate` 即报错）。`.` 解析为**发起派发的进程的当前工作目录**——CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定。从 WAO 仓根跑 CLI，worker 就落在 WAO 仓。每个 worker 的 cwd 应指向它要操作的目标仓。
+- **根因**：registry 模板把所有 worker 的 `cwd` 统一为 `.`（`cwd` 字段必填，缺失在 `registry validate` 即报错）。`.` 解析为**发起派发的进程的当前工作目录**——CLI 通道=你敲命令时所在目录（`--cwd` 可覆盖）；MCP `run_dispatch` 不用它，派发目标是本次调用必传的 `expectedWorkspaceRoot`。从 WAO 仓根跑 CLI，worker 就落在 WAO 仓。每个 worker 的 cwd 应指向它要操作的目标仓。
 - **边界（须知）**：不传 `--cwd` 时 worker **静默落在派发进程 cwd**——`.` 恒存在，不会早拒绝。各通道差别：
   - 后台 delivery 不受影响：CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接抛 `DeliveryCwdRequiredError` 早拒绝。
   - 前台 delivery 不设此门：其 worktree 源仓来自 registry cwd，`.` 时会从操作者当前 shell 所在仓切 worktree——同样必须显式 `--cwd` 指向目标仓。
@@ -366,7 +366,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 7.4 worker 在错误目录干活
 
 - **症状**：worker 在 WAO 工具仓或错误项目干活，不在目标项目
-- **根因**：派发时没带 `--cwd <目标项目>`，worker 用了 agents.json 的默认 cwd `.`——它解析为**发起派发的进程的当前工作目录**（CLI 通道=你敲命令时所在目录，MCP 通道=MCP 服务进程的 cwd，由 host 决定），不是目标项目（trade-off 详见 §3.1）
+- **根因**：派发时没带 `--cwd <目标项目>`，worker 用了 agents.json 的默认 cwd `.`——它解析为**发起派发的进程的当前工作目录**（CLI 通道=你敲命令时所在目录；MCP 派发的目标则是本次调用的 `expectedWorkspaceRoot`），不是目标项目（trade-off 详见 §3.1）
 - **修复**：要在目标项目干活就派发时带 `--cwd <目标项目>`（快起路径的最佳实践）；或把 agents.json 里该 worker 的 `cwd` 固定为目标项目路径（必须已存在，见 §3.2）。后台 delivery 不受影响——CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接早拒绝；前台 delivery 不设此门，同样要显式带 `--cwd`（worktree 源仓来自 registry cwd）
 
 ### 7.5 agents.json 配置漂移

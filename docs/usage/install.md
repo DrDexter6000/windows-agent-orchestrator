@@ -59,7 +59,7 @@ npm link
 
 此后可以从任意目录用全局 `wao <command>` 代替 `npm run cli -- <command>`（写法见[派发](dispatch.md)），例如 `wao dashboard`（见[维护](maintenance.md)的「Owner 本地只读看板」），不必 `cd` 进 WAO 仓库。
 
-经全局 `wao` 命令调用时，`config/default.json`、run 目录（`runs/`）与 agent registry（`config/`）从受信安装根（`npm link` 链接的这份 checkout）解析，而非当前目录。安装根由 `bin/wao.js` 自身位置（`import.meta.url`）派生，作为子进程 env（`WAO_INSTALL_ROOT`）传给 CLI 子进程：不经 argv、不拼 shell 字符串，并覆盖调用方任何同名值。因此 `--cwd` 仍只决定命令观察/过滤哪个 Git 项目；显式 `--run-dir` / `--registry` 覆盖照原样使用、不被重定位；`npm run cli -- ...`（不带该 env）保持从当前目录解析。
+经全局 `wao` 命令调用时，`config/default.json`、run 目录（`runs/`）与 agent registry（`config/`）从受信安装根（`npm link` 链接的这份 checkout）解析，而非当前目录。安装根由 `bin/wao.js` 自身位置（`import.meta.url`）派生，作为子进程 env（`WAO_INSTALL_ROOT`）传给 CLI 子进程：不经 argv、不拼 shell 字符串，并覆盖调用方任何同名值。因此 `--cwd` 只决定命令作用于哪个 Git 项目（run 族的派发目标、观察与过滤面），不改变这三样的解析位置；显式 `--run-dir` / `--registry` 覆盖照原样使用、不被重定位；`npm run cli -- ...`（不带该 env）保持从当前目录解析。
 
 ## 配置
 
@@ -68,7 +68,7 @@ npm link
 Copy-Item config/agents.example.json config/agents.json
 ```
 
-编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`，解析为发起派发的进程的当前工作目录：CLI 通道是你敲命令时所在的目录，MCP 通道是 MCP 服务进程的 cwd（由宿主决定）；恒存在，开箱即跑。要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖。`wao doctor` 对 cwd 为 `.` 的 worker 出一条 INFO 落点提示，不计 DEGRADED。
+编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`：CLI 通道解析为发起派发的进程的当前工作目录（你敲命令时所在的目录），`--cwd` 可显式覆盖；MCP 通道（`run_dispatch`）的派发目标不是 `agent.cwd`，而是本次调用必传的 `expectedWorkspaceRoot`（须为 canonical Git 顶层，不传即拒绝）。要把 CLI 侧目标固定下来就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖。`wao doctor` 对 cwd 为 `.` 的 worker 出一条 INFO 落点提示，不计 DEGRADED。
 
 > 从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段，零手编。正式验收链见 `AGENT_ONBOARDING.md` §9。
 > 已生成 `config/agents.json` 后裸跑 `npm run cli -- wao onboarding`，车道矩阵按双源展示：已配置行（真实状态、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；同 id 但 backend/model 漂移的行挂 `·drift` 并在表后列有界明细；`--apply` 仅适用模板候选行。还没生成（或不可读）时是纯模板面。

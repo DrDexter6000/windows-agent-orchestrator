@@ -2295,6 +2295,14 @@ test("README 是新读者入口：当前工具计数 / 快速开始闭环 / 链�
     "README npm link 说明必须举出全局 wao 命令（如 wao dashboard）");
   assert.ok(/install root/.test(readme),
     "README MCP 步骤必须说明 stdio 命令在 WAO 安装根目录执行");
+  // 正式注册路径钉（防再漂移）：npm run mcp 曾被入口文档写成宿主接入命令，
+  // 真实契约是宿主注册用 mcp bind 生成的绝对路径片段，npm run mcp 仅安装根
+  // 目录手工 smoke（docs/usage/host.md「Host 注册说明」）。
+  const readmeStep3 = readme.slice(readme.indexOf("# 3. Connect an MCP Host"), readme.indexOf("# 4. First read-only canary"));
+  assert.ok(readmeStep3.length > 0 && /^npm run cli -- mcp bind --host /m.test(readmeStep3),
+    "README 快速开始第 3 步必须以 `mcp bind --host <host>` 为正式注册命令");
+  assert.ok(!/^npm run mcp\b/m.test(readmeStep3),
+    "README 快速开始第 3 步不得把 `npm run mcp` 写成命令行（它只是安装根目录内的手工 smoke，不是注册命令）");
 });
 
 test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径（复制模板/一个 runtime 就够/选择表/registry validate/list）", () => {
@@ -2740,6 +2748,13 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
   // R5-D：host 一行注册示例的权威指向（示例不是权威，片段+usage.md 才是）。
   assert.ok(/claude mcp add wao --scope user/.test(ob),
     "onboarding 的 MCP 一行注册示例必须用 --scope user 形状（R5 会审纠正项）");
+  // 正式注册路径钉（防再漂移）：§4e 曾把 npm run mcp 写成宿主接入命令——
+  // 正式注册走 mcp bind，npm run mcp 仅安装根目录手工 smoke。
+  const ob4e = ob.slice(ob.indexOf("### 4e."), ob.indexOf("### 4f."));
+  assert.ok(ob4e.length > 0 && /^npm run cli -- mcp bind --host /m.test(ob4e),
+    "onboarding §4e 的注册命令块必须是 `mcp bind --host <host>`");
+  assert.ok(!/^npm run mcp\b/m.test(ob4e),
+    "onboarding §4e 不得把 `npm run mcp` 写成命令行（它不是注册命令）");
   // 代码侧同形状钉死（TD-191①/决定 0043：示例构造器已迁 hostDescriptors.js
   // 唯一权威——buildHostExamples 只是它的纯映射；示例形状改动必须与文档两处同步）。
   const descriptors = read("src/hostAdapters/hostDescriptors.js");

@@ -144,8 +144,8 @@ Copy-Item config/agents.example.json config/agents.json
 #    path you actually have, delete the rest. One runtime is enough to use WAO.
 #    The per-runtime auth choice table is in AGENT_ONBOARDING.md.
 #    Each kept worker's cwd can stay the template value `.` — the target project is
-#    decided per dispatch by `--cwd` (CLI) or the host-authorized workspace (MCP);
-#    see AGENT_ONBOARDING.md §4c.
+#    decided per dispatch by `--cwd` (CLI) or the call's expectedWorkspaceRoot
+#    (MCP, required); see AGENT_ONBOARDING.md §4c.
 
 # 2. Verify the registry (no runtime needed for this)
 # What each registry command does: npm run cli -- --help (generated copy: docs/surface/cli.md)
@@ -153,13 +153,20 @@ npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
 
 # 3. Connect an MCP Host (primary control surface — Decision 0017)
-#    Run this from the WAO install root (the repo you cloned). Point any MCP
-#    host (Claude Desktop / Codex / OpenCode) at this stdio entry; host-specific
-#    absolute command/args examples live in docs/usage/host.md:
-npm run mcp -- --registry config/agents.json --run-dir runs
-#    Workspace-touching calls name their own target (expectedWorkspaceRoot);
-#    roots/list / workspace_select scope read-only tools only, and --cwd below
-#    steers CLI-side workspace observation.
+#    Formal registration goes through `mcp bind`. For Codex it writes the target
+#    project's .codex/config.toml (pass --cwd <target project>; without it,
+#    WAO_TARGET_CWD and then the current directory are used). For the other
+#    hosts it prints a snippet whose shim, stdio entrypoint, registry and runDir
+#    are absolute paths (a host's launch cwd is not guaranteed to be the repo);
+#    merge it into the host's own config. Host-by-host steps: docs/usage/host.md:
+npm run cli -- mcp bind --host <host> --cwd <target project>   # or: wao onboarding --host <id>
+#    npm run mcp -- --registry config/agents.json --run-dir runs is NOT the
+#    registration command — it is a manual smoke entry and only runs from the
+#    WAO install root (the repo you cloned).
+#    Workspace-touching calls name their own target (expectedWorkspaceRoot,
+#    required); roots/list / workspace_select scope read-only tools only. On
+#    the CLI, --cwd picks the target project of run commands (and the workspace
+#    that CLI observation filters on).
 
 # 4. First read-only canary via the CLI fallback (one retained worker)
 #    Replace <agentId> with one worker id from `registry list` in step 2 — the
@@ -209,8 +216,8 @@ WAO is MCP-first (Decision 0017); the CLI is a human/ops fallback that calls the
 same shared application services.
 
 ```powershell
-# MCP server (primary control surface — point any MCP host here)
-npm run mcp -- --registry config/agents.json --run-dir runs
+# MCP server (primary control surface): register a host with mcp bind (Codex: writes .codex/config.toml; other hosts: prints a snippet)
+npm run cli -- mcp bind --host <host> --cwd <target project>   # `npm run mcp` is an install-root manual smoke entry only
 
 # CLI fallback — common Lead loop
 npm run cli -- run <agentId> --prompt "..."             # dispatch + wait

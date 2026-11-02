@@ -72,6 +72,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Dest D:\wao -Re
 powershell -NoProfile -File install.ps1 -Uninstall   # runs/ .wao/ agents.json 先备份再删仓；-Purge 跳过备份
 ```
 
+`-Ref` 只在目标目录**尚不存在**（首次 clone）时决定检出；已存在的干净检出只做 `git pull --ff-only`、从不 checkout 到 `-Ref`，tag 检出（detached HEAD）连 pull 也跳过——已装检出要换 ref 走下面的「升级与回滚」。
+
 手动等价步骤：
 
 ```powershell
@@ -84,6 +86,29 @@ npm link           # 可选，每台机器一次：暴露全局 `wao` 命令（�
 `npm link` 之后可以从任意目录用全局 `wao <command>` 代替 `npm run cli -- <command>`（如 `wao dashboard`、`wao doctor`），写法见 `docs/usage/dispatch.md`。不 link 时全部命令都用 `npm run cli -- <command>`。
 
 预期内的安装期告警（不是装坏了）：`npm ci` 尾部可能显示 `N vulnerabilities`——全部来自 `@modelcontextprotocol/sdk` 的传递依赖（hono/fast-uri/ip-address 等 HTTP 库）；WAO 以 stdio server 运行、不暴露这些库的网络面，不阻塞上手。若你的默认 node 是 v23/v24，`npm ci` 还会先给一条 `EBADENGINE` 警告（engines 已收紧为仅 v22；npm 默认只警告不阻断）——随后所有 WAO 命令经 `npm run` 走 v22 shim，不受影响。
+
+#### 升级与回滚
+
+升级与回滚没有专门命令，就是 git 检出 + `npm ci` + 自检（`install.ps1` 对已装检出的行为与此一致）：
+
+- **升级（分支检出，如 `main`）**：重跑 `install.ps1`（对干净检出它做 `git pull --ff-only` → `npm ci` → advisory `wao doctor`），或手工等价：
+  ```powershell
+  git pull --ff-only
+  npm ci
+  npm run cli -- wao doctor --cwd <目标项目>
+  ```
+  检出有未提交改动时 `install.ps1` 直接拒绝——先自行 commit / stash / discard 再跑。
+- **升级（tag 检出，detached HEAD）**：`install.ps1` 对 tag 快照跳过 pull（无 ff 可拉），换 ref 要手工 checkout：
+  ```powershell
+  git fetch --tags
+  git checkout <新 tag>
+  npm ci
+  npm run cli -- wao doctor --cwd <目标项目>
+  ```
+  （checkout 后重跑 `install.ps1` 也行：它跳过 pull，只做 `npm ci` + doctor。）
+- **回滚**：`git checkout <上一个 tag 或提交>`（目标不在本地就先 `git fetch --tags`），之后同样 `npm ci` 再 doctor——依赖随版本变，`node_modules/` 虽不入库也要重装。
+- **升级或回滚之后重启已打开的 MCP 宿主**：MCP 服务进程只在启动时加载代码（见 `docs/usage/host.md`），只换检出不会改变已在运行的服务。
+- **数据目录不受 checkout 影响**：`runs/`（transcript）与 `config/agents.json`（你的私人 registry）都在 `.gitignore` 里，pull / checkout 不碰它们；`.wao/` 除 `decisions/`（随代码入库，升级/回滚会随之更换）外同样被忽略。只有 `-Uninstall` 才动它们（默认先备份到同级 `<Dest>-backup-<时间戳>` 再删仓）。
 
 ### 4b. 装 WAO skill 到 runtime 目录（一次性）
 
@@ -126,7 +151,7 @@ Copy-Item config/agents.example.json config/agents.json
 
 > 接入新模型 / 新运行时（改 model 字段 vs 换 backend 的分叉）见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。
 
-删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
+删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板统一为 `.`）：CLI 通道解析为发起派发的进程的当前工作目录（你敲命令时所在目录），`--cwd` 可显式覆盖；MCP 通道（`run_dispatch`）的派发目标与 `agent.cwd` 无关——是本次调用必传的 `expectedWorkspaceRoot`（须为 canonical Git 顶层，不传即拒绝）。若你把 `cwd` 改成了自己的路径，注意对本地进程式 backend，CLI 派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
 > **为会审留车道**：你有多种认证时，裁剪 registry 先保两条不同族系的车道，会审才配得齐（组席规则见 `SKILL.md`，操作见 `docs/usage/consult.md`）。`wao onboarding` 的会审就绪块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境提示：你已生成 `config/agents.json` 后按它的真实行显示（已配置面），还没生成时按模板显示（模板面）。只有一个 worker 时它就是被审产出的作者，会审无从谈起，如实跳过即可。
 
@@ -149,11 +174,13 @@ npm run cli -- wao doctor --cwd <目标项目>
 
 ### 4e. 连接 MCP Host（主控通道，Decision 0017）
 
-在 MCP host（Claude Desktop / Codex CLI / OpenCode / 任意 MCP client）里把 WAO 注册为 stdio server：
+在 MCP host（Claude Desktop / Codex CLI / OpenCode / 任意 MCP client）里把 WAO 注册为 stdio server。正式注册走 `mcp bind`：codex 由它直接写入目标项目的 `.codex/config.toml`（带 `--cwd <目标项目>`，不带则依次取 `WAO_TARGET_CWD`、当前目录；写入后重启或新开 Codex 任务才生效）；其余宿主由它打印宿主形态的注册片段——Node v22 shim `scripts/wao-node.cjs`、`src/mcp/stdio.js`、registry 与 runDir 都是绝对路径（宿主启动 cwd 不保证在 WAO 仓内），由你并入宿主自己的配置：
 
 ```
-npm run mcp -- --registry config/agents.json --run-dir runs
+npm run cli -- mcp bind --host <host> --cwd <目标项目>
 ```
+
+`npm run mcp -- --registry config/agents.json --run-dir runs` 不是注册命令：它只用于在 WAO 安装根目录里手工 smoke。
 
 - 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤）。指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。**"这个 host 上注册了没有"用 `mcp status` 回答**（不带 `--host` 列出全部表内宿主；只读探测宿主自己的配置）；各宿主注册方式一览见 `docs/usage/host.md` 的项目级 Workspace Activation 一节。在册宿主及其验证态以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威——`hostVerified` 逐宿主如实标注（当前七个表内宿主均已真机验证加载，证据锚点在该文件头），验证态≠自动绑定能力（只有 codex 有 autoBind；zcode 走插件系统，kimi-code / opencode / claude-desktop / dsh 是把片段并入配置文件）；无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 与 dsh 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage/host.md` + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
 - **CLI `--cwd` 指定派发目标项目**（run 族：worker 的工作目录，须是已存在目录；workspace 观察/过滤面随之）。
