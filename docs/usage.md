@@ -4,7 +4,7 @@
 
 | 页 | 什么时候读 |
 |---|---|
-| [安装与配置](usage/install.md) | 第一次安装 WAO、写配置、验证安装 |
+| [安装与配置](usage/install.md) | 部署参考：Node v22 约束与切换、可选 runtime 安装、凭据 env 判读、全局 `wao` 安装根、`config/default.json`；从零到可用的步骤在 AGENT_ONBOARDING.md |
 | [车道配置与维护](usage/lanes.md) | 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 车道的 serve、认证入口 |
 | [接入宿主与绑定项目](usage/host.md) | 把 MCP 服务注册进表内七类宿主（宿主表见该页），绑定项目 |
 | [派发](usage/dispatch.md) | 派出一个 worker：前台或后台、并行、工作树隔离、重试与恢复、续跑、纠正 |

@@ -86,7 +86,7 @@ npm run cli -- daemon stop
 
 ## Owner 本地只读看板
 
-人类 Owner 可在 WAO 仓库入口启动本地网页，而不把完整 worker 活动灌入 Lead context。主用命令需一次性 `npm link`，见[安装与配置](install.md)的「安装本工具」：
+人类 Owner 可在 WAO 仓库入口启动本地网页，而不把完整 worker 活动灌入 Lead context。主用命令需一次性 `npm link`（步骤见 `AGENT_ONBOARDING.md` §4a；`npm link` 后全局 `wao` 的安装根解析见[安装与配置](install.md)的「安装本工具」）：
 
 ```powershell
 # 在目标 Git 项目内（或任意目录加 --cwd 指向 Git 项目）

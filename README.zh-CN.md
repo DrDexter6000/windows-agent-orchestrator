@@ -97,64 +97,15 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 
 ## 快速开始
 
-```powershell
-# 一键安装（下述步骤的薄封装；默认装到 %USERPROFILE%\wao）：
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/DrDexter6000/windows-agent-orchestrator/main/install.ps1 | iex"
-# 手动等价步骤：
-git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
-cd D:\projects\windows-agent-orchestrator
-npm ci            # 按入库的 package-lock 安装（npm install 可作回退）
-npm link          # 可选，每机一次：暴露全局 `wao` 命令（如 `wao dashboard`）
+照 [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) 做：
 
-# 1. 配置 agent registry——从一个 worker 起步
-#    推荐自动化路径：从入库模板生成单 worker 的 config/agents.json 并打印 MCP 片段：
-#      npm run cli -- wao onboarding --agent <id> --apply
-#    （在手工复制之前先跑它——已存在 config/agents.json 时它会拒绝覆盖。）
-#    手工等价步骤：
-Copy-Item config/agents.example.json config/agents.json
-#    agents.example.json 是入库模板，config/lanes.json 的每条车道各有一个条目——不要改它。
-#    你复制出的 agents.json 是 gitignored 的、由你裁剪：只保留你真有 runtime/认证
-#    路径的 worker，其余删掉。一个 runtime 就够用 WAO。
-#    各 runtime 的认证方式选择表见 AGENT_ONBOARDING.md。
-#    保留 worker 的 cwd 可留模板值 `.`——目标项目由每次派发的 `--cwd`（CLI）或
-#    本次调用的 `expectedWorkspaceRoot`（MCP，必传）决定；见 AGENT_ONBOARDING.md §4c。
-
-# 2. 校验 registry（此步不需要任何 runtime）
-# 各 registry 命令的作用见 npm run cli -- --help（生成副本：docs/surface/cli.md）
-npm run cli -- registry list --registry config/agents.json
-npm run cli -- registry validate --registry config/agents.json
-
-# 3. 接入 MCP Host（主控制面——决定 0017）
-#    正式注册走 `mcp bind`。Codex：它直接写入目标项目的 .codex/config.toml（带
-#    --cwd <目标项目>；不带则依次取 WAO_TARGET_CWD、当前目录）。其余宿主：它打印
-#    注册片段，其中 shim、stdio 入口、registry 与 runDir 都是绝对路径（宿主启动
-#    cwd 不保证在 WAO 仓内），由你并入宿主自己的配置。各宿主步骤见
-#    docs/usage/host.md：
-npm run cli -- mcp bind --host <host> --cwd <目标项目>   # 或：wao onboarding --host <id>
-#    npm run mcp -- --registry config/agents.json --run-dir runs 不是注册命令
-#    ——只是手工 smoke 入口，且只可在 WAO 安装根目录（你 clone 的仓库）里跑。
-#    会动工作区的调用自带目标（expectedWorkspaceRoot，必传）；roots/list /
-#    workspace_select 只定只读工具范围。CLI 上的 --cwd 决定 run 族命令的目标
-#    项目（CLI 观察面也按它过滤）。
-
-# 4. 用 CLI fallback 跑第一次只读 canary（一个保留的 worker）
-#    把 <agentId> 换成第 2 步 `registry list` 里的任意 worker id——
-#    canary 对任何保留的进程式车道都可用（如 zcode / codex / claude-code；
-#    deepseek-acp 亦进程式，需 `dsh` + containment 资产；kimi 车道需先起 serve）。
-#    --read-only 声明只读观察 run（advisory、强制隔离、不带 delivery）：
-npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <目标项目> --registry config/agents.json --format json --read-only
-#    <目标项目> 必须是本机已存在的目录——全新机器可以临时用 WAO 仓库本身
-#    （带 --read-only 的 canary 对它无副作用）；见 AGENT_ONBOARDING.md §4f。
-```
-
-步骤 1–4 的完整展开（含各 runtime 认证）在
-[`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)。
-
-仅支持 Node **v22**（`node --version`；`engines.node` 为 `>=22 <23`）。v24 目前是
-Active LTS，但被 WAO 的版本守卫拒绝——v24 的 libuv Windows Job Object 回归会杀死
-长寿命子进程。WAO 所有 npm script 都走 v22 shim（`scripts/wao-node.cjs`），所以默认
-v24 的机器只要在约定路径装了 Node 22（或设置了 `WAO_NODE`）即可；见
-AGENT_ONBOARDING.md §3。
+- §3 前置条件——环境检查，含受支持的 Node 版本
+- §4a 装 WAO 本体——一条命令安装器或手动步骤；升级与回滚
+- §4b 把 WAO skill 装进你的 agent runtime
+- §4c 配置一个 worker——registry 模板与各 runtime 认证选择表
+- §4d 校验 registry 与环境自检
+- §4e 接入 MCP 宿主——`mcp bind` 与各宿主注册方式
+- §4f 首次只读 canary
 
 ## 文档地图（单一事实来源）
 
@@ -168,6 +119,7 @@ AGENT_ONBOARDING.md §3。
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
 | **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.7.0](docs/changelog-2026-10-31-v0.7.0.md)） |
 | **跑真实 smoke 测试**（claude/codex） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
+| **判断何时跑全量、何时跑定向测试** | [`docs/testing.md`](docs/testing.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **看需求 / 非目标 / 验收** | [`docs/01-prd.md`](docs/01-prd.md) |
 | **跟里程碑 / 进度** | [`docs/roadmap.md`](docs/roadmap.md) |
@@ -175,40 +127,6 @@ AGENT_ONBOARDING.md §3。
 | **读调研 / 设计决策** | [`docs/research/`](docs/research/) |
 
 仓库贡献规范（原则、代码风格、约束）在 [`AGENTS.md`](AGENTS.md)。
-
-## 命令速览
-
-WAO 是 MCP-first（决定 0017）；CLI 是人/运维的 fallback，调用同一共享 application
-services。
-
-```powershell
-# MCP server（主控制面）：用 mcp bind 注册宿主（Codex 直接写 .codex/config.toml；其余宿主打印片段）
-npm run cli -- mcp bind --host <host> --cwd <目标项目>   # `npm run mcp` 仅是安装根目录内的手工 smoke 入口
-
-# CLI fallback——常见 Lead 闭环
-npm run cli -- run <agentId> --prompt "..."             # 派发 + 等待
-npm run cli -- spawn <agentId> --prompt "..."           # 发后不管
-npm run cli -- status|tail <runId>                      # 观察
-npm run cli -- collect <runId> [--cursor T --format json]   # 有界 worker 输出 + 续读
-npm run cli -- runs diagnose <runId>                    # 失败归类
-npm run cli -- runs delivery <runId>                    # changed-path 投影
-npm run cli -- runs delivery review <runId> --file-index 0   # 一个改动文件的有界/脱敏 diff 审查
-npm run cli -- stop <runId>                             # 停掉失控 worker
-npm run cli -- runs list                                # 恢复清单
-npm run cli -- runs metrics <runId>                     # tokens / 成本
-npm run cli -- runs scorecard <runId>                   # 证据门结果
-npm run cli -- playbook list|show <id>                  # 可选的 Lead playbook 目录
-```
-
-完整命令参考：`npm run cli -- help`；23 工具 MCP 表与路由契约见 [`SKILL.md`](SKILL.md)。
-
-## 测试
-
-```powershell
-npm test            # 全部单元/集成测试（mock 子进程，不需要 API token）
-npm run smoke       # 真实 CLI smoke（claude/codex——消耗 API token）
-npm run reliability # runtime/model 认证矩阵——消耗 API token
-```
 
 ## 许可证
 

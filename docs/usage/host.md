@@ -133,7 +133,13 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 | claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件 |
 | dsh | 把片段的 `insert` 行并入 `~/.dsh/profiles/<profile>/cordis.patch.yml`（YAML，不是 `mcpServers` JSON）；profile 声明 `patchReload: live` 时改完立即生效，否则重启 dsh | 各 profile 的 `cordis.patch.yml` 与 `cordis.yml`（按 id 覆盖、`disabled` 表达式、flow 行记 unknown；bundle 层、`--patch` 叠加与 `cordis:include` 不在探测范围） |
 
-表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威（`AGENT_ONBOARDING.md` §4e 同指）。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态，官方接入命令与排坑见 `AGENT_ONBOARDING.md` §4e；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_wait` / `run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
+表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态（接入步骤与排坑见下方「zcode 接入」一段）；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_wait` / `run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
+
+**一站式指引与一行注册示例**：已装宿主时 `wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤），指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。不带 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 与 dsh 标注 experimental）——示例的 flag 随宿主版本演进，权威形状 = 本页 + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
+
+**未验证宿主的入表清单**（Owner 在场执行，可逆步骤）：宿主表只收真机验证过加载的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
+
+**zcode 接入（hostVerified=true）**：ZCode 的 MCP 唯一实证通路是**插件系统**（`mcp.servers` 直配与手写注册表均无效——会话工具面只从在册插件装配）。官方接入两步：`zcode plugins marketplace add <本地名录目录>`（名录 `source` 的 kind 用 `directory`、路径写**绝对路径**）→ `zcode plugins install wao@wao-local`。名录与插件包源在 `~/.zcode/wao-local-marketplace/`（机器级资产；内容 = `.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射，`mcp bind --host zcode` emit 同款）。新会话加载全部 WAO MCP 工具（前缀 `mcp__plugin_wao_wao__`）。排坑要点：插件注册是四件套（缺 marketplace 名录被静默跳过）、`.mcp.json` 路径须实测 spawn、查询会话工具注意插件命名空间前缀、`.dev` 不可当唯一备份位。
 
 **前置条件**（仅 autoBind/codex 路径）：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
 

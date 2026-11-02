@@ -122,72 +122,15 @@ upstream-primitive refresh SOP live in
 
 ## Quick start
 
-```powershell
-# One-command install (thin wrapper over the steps below; defaults to %USERPROFILE%\wao):
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/DrDexter6000/windows-agent-orchestrator/main/install.ps1 | iex"
-# Manual equivalent:
-git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
-cd D:\projects\windows-agent-orchestrator
-npm ci            # install from the tracked package-lock (npm install works as a fallback)
-npm link          # optional, once per machine: exposes the global `wao` command (e.g. `wao dashboard`)
+Follow [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md):
 
-# 1. Configure the agent registry — start with ONE worker
-#    Automated path (recommended): generates a single-worker config/agents.json
-#    from the tracked template and prints an MCP snippet:
-#      npm run cli -- wao onboarding --agent <id> --apply
-#    (run it BEFORE any manual copy — it refuses to overwrite an existing
-#    config/agents.json). Manual equivalent below:
-Copy-Item config/agents.example.json config/agents.json
-#    agents.example.json is the TRACKED template with one entry per lane in
-#    config/lanes.json — leave it untouched. Your copied agents.json is
-#    gitignored and yours to prune: keep only the workers whose runtime/auth
-#    path you actually have, delete the rest. One runtime is enough to use WAO.
-#    The per-runtime auth choice table is in AGENT_ONBOARDING.md.
-#    Each kept worker's cwd can stay the template value `.` — the target project is
-#    decided per dispatch by `--cwd` (CLI) or the call's expectedWorkspaceRoot
-#    (MCP, required); see AGENT_ONBOARDING.md §4c.
-
-# 2. Verify the registry (no runtime needed for this)
-# What each registry command does: npm run cli -- --help (generated copy: docs/surface/cli.md)
-npm run cli -- registry list --registry config/agents.json
-npm run cli -- registry validate --registry config/agents.json
-
-# 3. Connect an MCP Host (primary control surface — Decision 0017)
-#    Formal registration goes through `mcp bind`. For Codex it writes the target
-#    project's .codex/config.toml (pass --cwd <target project>; without it,
-#    WAO_TARGET_CWD and then the current directory are used). For the other
-#    hosts it prints a snippet whose shim, stdio entrypoint, registry and runDir
-#    are absolute paths (a host's launch cwd is not guaranteed to be the repo);
-#    merge it into the host's own config. Host-by-host steps: docs/usage/host.md:
-npm run cli -- mcp bind --host <host> --cwd <target project>   # or: wao onboarding --host <id>
-#    npm run mcp -- --registry config/agents.json --run-dir runs is NOT the
-#    registration command — it is a manual smoke entry and only runs from the
-#    WAO install root (the repo you cloned).
-#    Workspace-touching calls name their own target (expectedWorkspaceRoot,
-#    required); roots/list / workspace_select scope read-only tools only. On
-#    the CLI, --cwd picks the target project of run commands (and the workspace
-#    that CLI observation filters on).
-
-# 4. First read-only canary via the CLI fallback (one retained worker)
-#    Replace <agentId> with one worker id from `registry list` in step 2 — the
-#    canary works for any retained process lane (such as zcode / codex / claude-code;
-#    deepseek-acp likewise, needing `dsh` + containment assets; the kimi lane needs
-#    a running serve first). --read-only declares the advisory read-only run:
-npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <target-project> --registry config/agents.json --format json --read-only
-#    <target-project> must be an existing directory on this machine — a brand-new
-#    machine can temporarily use the WAO repo itself (the --read-only canary has
-#    no side effects on it); see AGENT_ONBOARDING.md §4f.
-```
-
-Full step-by-step instructions for steps 1–4, including per-runtime auth,
-live in [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md).
-
-Node **v22 only** (`node --version`; `engines.node` is `>=22 <23`). v24 is now the
-Active LTS but is rejected by WAO's version guard — a libuv Windows Job Object
-regression in v24 kills long-lived spawned child processes. All WAO npm scripts
-route through the v22 shim (`scripts/wao-node.cjs`), so a default-v24 machine
-works as long as Node 22 is installed at the conventional path (or `WAO_NODE`
-is set); see AGENT_ONBOARDING.md §3.
+- §3 Prerequisites — environment checks, including the supported Node version
+- §4a Install WAO itself — one-command installer or manual steps; upgrade & rollback
+- §4b Install the WAO skill into your agent runtime
+- §4c Configure ONE worker — registry template and the per-runtime auth choice table
+- §4d Validate the registry and self-check the environment
+- §4e Connect an MCP host — `mcp bind` and per-host registration
+- §4f First read-only canary
 
 ## Documentation map (single source of truth)
 
@@ -201,6 +144,7 @@ is set); see AGENT_ONBOARDING.md §3.
 | **Check live per-worker dispatch certification** | `npm run cli -- registry list` (data: `runs/reliability-summary.json`, gitignored, generated by `npm run reliability`) |
 | **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.7.0](docs/changelog-2026-10-31-v0.7.0.md)) |
 | **Run real smoke tests** (claude/codex) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
+| **Know when to run the full suite vs targeted tests** | [`docs/testing.md`](docs/testing.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **See requirements / non-goals / acceptance** | [`docs/01-prd.md`](docs/01-prd.md) |
 | **Track milestones / progress** | [`docs/roadmap.md`](docs/roadmap.md) |
@@ -209,41 +153,6 @@ is set); see AGENT_ONBOARDING.md §3.
 
 Repository contribution guidelines (principles, coding style, constraints) live in
 [`AGENTS.md`](AGENTS.md).
-
-## Commands (overview)
-
-WAO is MCP-first (Decision 0017); the CLI is a human/ops fallback that calls the
-same shared application services.
-
-```powershell
-# MCP server (primary control surface): register a host with mcp bind (Codex: writes .codex/config.toml; other hosts: prints a snippet)
-npm run cli -- mcp bind --host <host> --cwd <target project>   # `npm run mcp` is an install-root manual smoke entry only
-
-# CLI fallback — common Lead loop
-npm run cli -- run <agentId> --prompt "..."             # dispatch + wait
-npm run cli -- spawn <agentId> --prompt "..."           # fire-and-forget
-npm run cli -- status|tail <runId>                      # observe
-npm run cli -- collect <runId> [--cursor T --format json]   # bounded worker output + continuation
-npm run cli -- runs diagnose <runId>                    # failure category
-npm run cli -- runs delivery <runId>                    # changed-path projection
-npm run cli -- runs delivery review <runId> --file-index 0   # one changed file, bounded/redacted diff
-npm run cli -- stop <runId>                             # stop a runaway worker
-npm run cli -- runs list                                # recovery inventory
-npm run cli -- runs metrics <runId>                     # tokens / cost
-npm run cli -- runs scorecard <runId>                   # evidence gate result
-npm run cli -- playbook list|show <id>                  # optional Lead playbook catalog
-```
-
-Full command reference: `npm run cli -- help`, or [`SKILL.md`](SKILL.md) for the
-23-tool MCP table and routing contract.
-
-## Testing
-
-```powershell
-npm test            # all unit/integration tests (mock subprocesses, no API tokens)
-npm run smoke       # real CLI smoke (claude/codex — consumes API tokens)
-npm run reliability # runtime/model certification matrix — consumes API tokens
-```
 
 ## License
 

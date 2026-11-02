@@ -961,10 +961,10 @@ test("使用手册安装页存在正确的 opencode-ai 安装命令", () => {
   assert.ok(/npm install -g opencode-ai/.test(install), "docs/usage/install.md 必须含 'npm install -g opencode-ai'");
 });
 
-test("使用手册：安装步骤用 npm ci，无 '无 npm install' 陈旧说法", () => {
-  const install = read("docs/usage/install.md");
+test("使用手册：无 '无 npm install' 陈旧说法（npm ci 步骤的家在 AGENT_ONBOARDING §4a）", () => {
+  // 65b 起安装步骤正文收进 AGENT_ONBOARDING §4a（npm ci 在家由 onboarding
+  // closeout 守卫钉住）；安装页退为部署参考，本守卫只保留手册级负向。
   assert.ok(!/无 npm install/.test(readManual()), "使用手册不得再写 '无 npm install'（WAO 含 MCP SDK/zod 依赖）");
-  assert.ok(/npm ci/.test(install), "docs/usage/install.md 必须含 'npm ci' 安装步骤");
 });
 
 test("使用手册 host 页含 OpenCode 项目级配置 schema 关键字段", () => {
@@ -2263,7 +2263,7 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
 // MCP host → read-only canary). Failure → fix the doc, not the test.
 // ============================================================
 
-test("README 是新读者入口：当前工具计数 / 快速开始闭环 / 链接 AGENT_ONBOARDING.md", () => {
+test("README 是新读者入口：当前工具计数 / 快速开始节地图指针 / 链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
   // 当前工具计数与陈旧计数（18/16）负向。
   assert.ok(/23 MCP tools|23 tools/.test(readme),
@@ -2273,36 +2273,26 @@ test("README 是新读者入口：当前工具计数 / 快速开始闭环 / 链�
   // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");
-  // Newcomer entrypoint: prominent AGENT_ONBOARDING.md link + one-worker path.
+  // Newcomer entrypoint: prominent AGENT_ONBOARDING.md link + section map.
   assert.ok(/AGENT_ONBOARDING\.md/.test(readme),
     "README 必须链接 AGENT_ONBOARDING.md（新读者入口）");
-  assert.ok(/config\/agents\.example\.json/.test(readme),
-    "README 快速开始必须复制 agents.example.json 模板");
-  assert.ok(/registry validate/.test(readme) && /registry list/.test(readme),
-    "README 快速开始必须包含 registry validate/list");
   assert.ok(/MCP host|MCP Host/.test(readme),
     "README 必须指向 MCP Host 配置路径");
-  // Correction review (Lead): npm ci canonical (package-lock tracked);
-  // generic <agentId> canary; the npm-link sentence names a global wao command; MCP stdio
-  // command executes from the WAO install root.
-  assert.ok(/npm ci/.test(readme),
-    "README 必须以 npm ci 为克隆/安装规范命令（package-lock 已入库）");
-  assert.ok(/run <agentId>/.test(readme),
-    "README 首次只读 canary 必须用通用 <agentId> 占位（从 registry list 挑）");
-  assert.ok(!/run (coder_low|coder_hq|researcher|auditor|tester|coder_mm)/.test(readme),
-    "README 不得把 canary/命令示例硬编码到具体 worker（首个 canary 对任意保留 worker 可用）");
-  assert.ok(/wao dashboard/.test(readme),
-    "README npm link 说明必须举出全局 wao 命令（如 wao dashboard）");
-  assert.ok(/install root/.test(readme),
-    "README MCP 步骤必须说明 stdio 命令在 WAO 安装根目录执行");
-  // 正式注册路径钉（防再漂移）：npm run mcp 曾被入口文档写成宿主接入命令，
-  // 真实契约是宿主注册用 mcp bind 生成的绝对路径片段，npm run mcp 仅安装根
-  // 目录手工 smoke（docs/usage/host.md「Host 注册说明」）。
-  const readmeStep3 = readme.slice(readme.indexOf("# 3. Connect an MCP Host"), readme.indexOf("# 4. First read-only canary"));
-  assert.ok(readmeStep3.length > 0 && /^npm run cli -- mcp bind --host /m.test(readmeStep3),
-    "README 快速开始第 3 步必须以 `mcp bind --host <host>` 为正式注册命令");
-  assert.ok(!/^npm run mcp\b/m.test(readmeStep3),
-    "README 快速开始第 3 步不得把 `npm run mcp` 写成命令行（它只是安装根目录内的手工 smoke，不是注册命令）");
+  // README 快速开始只是 AGENT_ONBOARDING 的节地图，安装与接入的事实由下方
+  // onboarding closeout 系列守卫在家里查。这里只查指针：中英两份的每个 § 都要
+  // 落到 AGENT_ONBOARDING 真实存在的节。
+  const ob = read("AGENT_ONBOARDING.md");
+  for (const [file, start, end] of [["README.md", "## Quick start", "## Documentation map"],
+    ["README.zh-CN.md", "## 快速开始", "## 文档地图"]]) {
+    const text = read(file);
+    const quick = text.slice(text.indexOf(start), text.indexOf(end));
+    const refs = [...quick.matchAll(/§(\d+[a-z]?)/g)].map((m) => m[1]);
+    assert.ok(refs.length > 0, `${file} 快速开始必须给出 AGENT_ONBOARDING 的节地图`);
+    for (const ref of refs) {
+      assert.ok(new RegExp(`^#{2,3} ${ref}\\. `, "m").test(ob),
+        `${file} 快速开始指向 §${ref}，AGENT_ONBOARDING.md 里没有这一节`);
+    }
+  }
 });
 
 test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径（复制模板/一个 runtime 就够/选择表/registry validate/list）", () => {
@@ -2320,15 +2310,16 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
   for (const kw of ["claude login", "DEEPSEEK_API_KEY", "codex login", "Kimi"]) {
     assert.ok(ob.includes(kw), `onboarding 选择表必须覆盖：${kw}`);
   }
-  // Registry validate/list shown.
-  assert.ok(/registry validate/.test(ob) && /registry list/.test(ob),
-    "onboarding 必须展示 registry validate/list");
+  // Registry validate/list shown in the §4d self-check step.
+  const ob4d = ob.slice(ob.indexOf("### 4d."), ob.indexOf("### 4e."));
+  assert.ok(/registry validate/.test(ob4d) && /registry list/.test(ob4d),
+    "onboarding §4d 必须展示 registry validate/list");
   // Correction review (Lead): generic <agentId> canary (works for ANY retained
   // worker, codex included as a process worker); tracked template vs copied
   // gitignored registry as separate scopes.
   const canary = ob.slice(ob.indexOf("### 4f"), ob.indexOf("## 5"));
-  assert.ok(/run <agentId>/.test(canary) && !/run coder_/.test(canary),
-    "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
+  assert.ok(/run <agentId>/.test(canary) && !/run (coder_\w+|researcher|auditor|tester)\b/.test(canary),
+    "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker 或旧席位名");
   assert.ok(/zcode \/ codex \/ claude-code/.test(canary),
     "canary 的进程式车道必须并列 zcode / codex / claude-code（模板进程式车道代表；deepseek-acp 亦为进程式但需 dsh+containment 资产，§4f 句另行列入；TD-257 起 kimi-code 非模板车道，旧 trio 钉随之更新）");
   assert.ok(/入库/.test(ob) && /车道/.test(ob) && /gitignored/.test(ob),
@@ -2745,9 +2736,12 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
   // R5-B：分级 verdict 与 advisory 定位并存。
   assert.ok(/HEALTHY/.test(ob) && /DEGRADED/.test(ob) && /BROKEN/.test(ob),
     "onboarding 必须文档化三级 verdict（HEALTHY/DEGRADED/BROKEN）");
-  // R5-D：host 一行注册示例的权威指向（示例不是权威，片段+usage.md 才是）。
-  assert.ok(/claude mcp add wao --scope user/.test(ob),
-    "onboarding 的 MCP 一行注册示例必须用 --scope user 形状（R5 会审纠正项）");
+  // R5-D：host 一行注册示例的权威指向（示例不是权威，片段+host.md 才是）。
+  // 65b 起，一行注册示例的事实家从 onboarding §4e 收进 docs/usage/host.md
+  // 「项目级 Workspace Activation」（onboarding §4e 只留指针）。
+  const hostPage = read("docs/usage/host.md");
+  assert.ok(/claude mcp add wao --scope user/.test(hostPage),
+    "docs/usage/host.md 的一行注册示例必须用 --scope user 形状（R5 会审纠正项）");
   // 正式注册路径钉（防再漂移）：§4e 曾把 npm run mcp 写成宿主接入命令——
   // 正式注册走 mcp bind，npm run mcp 仅安装根目录手工 smoke。
   const ob4e = ob.slice(ob.indexOf("### 4e."), ob.indexOf("### 4f."));
@@ -2755,6 +2749,8 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
     "onboarding §4e 的注册命令块必须是 `mcp bind --host <host>`");
   assert.ok(!/^npm run mcp\b/m.test(ob4e),
     "onboarding §4e 不得把 `npm run mcp` 写成命令行（它不是注册命令）");
+  assert.ok(/WAO 安装根目录里手工 smoke/.test(ob4e),
+    "onboarding §4e 必须说明 npm run mcp 手工 smoke 只在 WAO 安装根目录执行（README 指针化后该事实的家）");
   // 代码侧同形状钉死（TD-191①/决定 0043：示例构造器已迁 hostDescriptors.js
   // 唯一权威——buildHostExamples 只是它的纯映射；示例形状改动必须与文档两处同步）。
   const descriptors = read("src/hostAdapters/hostDescriptors.js");
@@ -2981,14 +2977,13 @@ test("R11-2 0024: 矩阵帽与代码 SSOT 对账（TD-120 关系型，不硬编�
   }
 });
 
-test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + 使用手册安装页配置说明（--apply 适用句两处锚）", () => {
+test("R11-2 0024: AGENT_ONBOARDING.md 双源说明（--apply 适用句的家的锚）", () => {
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(ob.includes("矩阵双源"), "AGENT_ONBOARDING.md 必须含矩阵双源说明（决策 0024）");
   assert.ok(ob.includes("`·模板候选`"), "AGENT_ONBOARDING.md 必须点名模板候选尾标");
   assert.ok(ob.includes("`--apply` 仅适用模板候选行"), "AGENT_ONBOARDING.md 必须含 --apply 适用范围句");
-  const install = read("docs/usage/install.md");
-  assert.ok(install.includes("车道矩阵按双源展示"), "使用手册的配置说明必须写明车道矩阵按双源展示");
-  assert.ok(install.includes("`--apply` 仅适用模板候选行"), "docs/usage/install.md 必须含 --apply 适用范围句");
+  // 65b 起 docs/usage/install.md 的双源/适用句投影退役（§2 原则 3：源在家的投影
+  // 随读者退场收回），安装页改指 §4c——家的锚即上方三条，不再双处钉。
 });
 
 // =====================================================================

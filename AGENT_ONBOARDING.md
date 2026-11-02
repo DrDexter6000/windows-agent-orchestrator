@@ -32,7 +32,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 **关键区分**：
 - WAO skill 本身**装在 runtime 目录，不装在被开发项目里**。装到项目目录会污染项目（owner 明确要求不污染）。
 - `.wao/` 建在**被开发的目标项目里**（因为它记的是那个项目的开发状态）。
-- worker 的 `cwd` 是**动态的**——CLI 派发时由 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时由本次调用自带 `expectedWorkspaceRoot`（本项目 Git 顶层）决定，绑定只定只读工具的缺省范围。agents.json 只配 backend/model/认证，不写死 cwd。
+- worker 的 `cwd` 怎么解析、agents.json 为什么不写死派发目标：见 §4c（cwd 语义）与 §4e（CLI `--cwd` 与 MCP `expectedWorkspaceRoot` 的分工）。
 
 **安装形态与"我实际用的是哪份 WAO"**：执行权威=**唯一一份物理检出**。技能发现路径与全局入口应以目录链接（junction）指向它——链接同体，不存在同步义务；任一入口若是物理拷贝而非链接，它就是漂移源（`wao doctor` 如实报告），收敛方式=改为链接或删除，**不维护拷贝同步**。installer 根是**没有开发仓的机器**上的安装形态，不与开发仓在同一台机器上并存。`wao doctor` 的 `invocation_method` 检查项**只报事实不裁决**：PATH 上有无全局 `wao`、版本是否漂移、skills 槽位是链接还是拷贝（链接显示目标）、当前检出根在哪；链接目标恰为当前检出时附报分支与未提交改动数（advisory，不阻断）。多份并存时收敛为一份属 Owner 机器裁定；判断"刚才那条命令用了哪份"以 doctor 报告的检出根 + 实际调用形态为准。为什么这样定，见决定 0049。
 
@@ -40,9 +40,9 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
 
-- **Node.js v22**（`engines` 为 `>=22 <23`；v24 的 libuv Windows Job Object 回归会被 WAO 版本守卫拒绝，见 §4 开头的调用纪律）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
+- **Node.js v22**（`engines` 为 `>=22 <23`；只支持 v22，其余版本被版本守卫拒绝——为什么必须是 v22、怎么装/切换，见 `docs/usage/install.md`「Node 为什么必须 v22」）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
-- **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage/lanes.md`「kimi 车道的 worker serve」）
+- **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage/lanes.md`「kimi 车道的 worker serve」）；各 runtime 怎么装见 `docs/usage/install.md`「可选的 agent runtime」
 - **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth 隔离**：claude-code worker 会话运行于 WAO 预备的独立 `CLAUDE_CONFIG_DIR` 隔离目录（承载纯净模式），用户 `~/.claude` 里的全局配置不进 worker 上下文。
@@ -51,10 +51,8 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 ## 4. 安装步骤
 
-> **怎么调用 WAO 命令（必读）**：本文档所有命令都用 `npm run cli -- <command>`。
-> WAO 必须跑在 **Node v22**（v24 有 libuv Windows Job Object 回归，进程隔离会失效）。
-> 系统 PATH 里的默认 `node` 可能是 v24，**直接 `node <WAO>/src/cli.js` 会被 version guard 拒绝**；
-> `npm run cli` 走 `scripts/wao-node.cjs`（自动用 v22 shim），是唯一可靠的入口。
+> **怎么调用 WAO 命令（必读）**：本文档所有命令都用 `npm run cli -- <command>`，它经 v22 shim 启动；**默认 `node` 不是 v22 时，直接 `node <WAO>/src/cli.js` 会被 version guard 拒绝**。
+> WAO 必须跑在 **Node v22**（为什么是 v22、`npm run` 怎么自动选到 v22、系统默认 node 不是 v22 时怎么切，见 `docs/usage/install.md`「Node 为什么必须 v22」）。
 > 下面命令里的 `<WAO目录>` 指 WAO 仓的根路径，`<目标项目>` 指你要开发的项目根。
 >
 > 第一次必读：**`SKILL.md`**（命令参考、Safety Preflight）和 **`references/safety-incidents.md`**（其背后的真实事故）。不读懂不要派发任务。
@@ -141,11 +139,17 @@ Copy-Item config/agents.example.json config/agents.json
 
 | 你有的 runtime/认证 | 保留的 worker | 认证方式 |
 |---|---|---|
-| zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；但 zcode 车道有**承重 env 桥**——`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析。模板两条 zcode 车道均带占位 env 桥：宿主无 ZCode 桌面上下文时须换成真实路径；**若桌面安装已在 User 作用域写入且可解析，删掉整个 env 块**（agent-env 先于 User 作用域，占位值会盖掉有效配置=spawn 必死）。`wao doctor` 承重 env 检查（advisory）会如实报告 |
+| zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；模板里的 `binary` 与 env 桥是占位，要改（见表后「zcode 车道的占位」） |
 | codex | sol / astra | `codex login` |
 | claude-code + 官方 Claude OAuth | opus | `claude login`（原生 OAuth） |
 | Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；token 来源/注入/引号纪律与 serve 启动见 `docs/usage/lanes.md`「kimi 车道的 worker serve」的 KIMI_WEB_TOKEN 节） |
 | DeepSeek key | deepseek-pro / deepseek-flash | `DEEPSEEK_API_KEY`（deepseek-acp 通道，Windows User 环境变量）；另需 `dsh` 在 PATH 与 containment 资产（见 `docs/certification-runbook.md`） |
+
+> **zcode 车道的占位**（`--apply` 生成的配置同样带着）：
+> - `binary`：改成桌面捆绑 `zcode.cjs` 的绝对路径，默认在 `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`；装在别处就按实际目录。
+> - **承重 env 桥**：`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 与 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两个变量须可解析。**若桌面安装已在 User 作用域写入且可解析，删掉整个 env 块**（agent-env 先于 User 作用域，占位值会盖掉有效配置=spawn 必死）；否则换成真实路径：个人配置是 `%USERPROFILE%\.zcode\v2\provider_config.json`，内置配置是 `%USERPROFILE%\.zcode\v2\runtime\provider\windows-x86_64\<桌面版本>\endpoint-<哈希>\zcode-builtin.json`——选与已装桌面版本同名的目录（旧版本目录不会自动删除，桌面升级后要跟着改）。
+> - `%USERPROFILE%`、`%LOCALAPPDATA%` 只是位置写法：写进 JSON 时换成展开后的绝对路径（如 `C:/Users/<你>/.zcode/v2/provider_config.json`），JSON 里不会展开环境变量。
+> - 改完跑 §4d 的 `wao doctor`：binary 与承重 env 检查（advisory）会如实报告。
 
 > 探测面说明：`wao onboarding` 裸跑的凭据探测覆盖两类声明名（`tokenEnv`/`credentialEnv`，与 doctor 同一权威）。**无 CLI 探测面的车道（kimi-web、zcode）只探 key 名可解析性**——`key 名已解析` **不是就绪声称**（未验证令牌有效性/serve 可达性；zcode 无凭据声明恒为"探测未知"）。深度体检仍以 `wao doctor` 为准。
 
@@ -182,14 +186,9 @@ npm run cli -- mcp bind --host <host> --cwd <目标项目>
 
 `npm run mcp -- --registry config/agents.json --run-dir runs` 不是注册命令：它只用于在 WAO 安装根目录里手工 smoke。
 
-- 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤）。指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。**"这个 host 上注册了没有"用 `mcp status` 回答**（不带 `--host` 列出全部表内宿主；只读探测宿主自己的配置）；各宿主注册方式一览见 `docs/usage/host.md` 的项目级 Workspace Activation 一节。在册宿主及其验证态以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威——`hostVerified` 逐宿主如实标注（当前七个表内宿主均已真机验证加载，证据锚点在该文件头），验证态≠自动绑定能力（只有 codex 有 autoBind；zcode 走插件系统，kimi-code / opencode / claude-desktop / dsh 是把片段并入配置文件）；无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 与 dsh 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage/host.md` + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
+- 逐宿主的注册方式、`mcp status`、`wao onboarding --host <id>`、未验证宿主入表、zcode 插件接入：见 `docs/usage/host.md`「项目级 Workspace Activation」。
 - **CLI `--cwd` 指定派发目标项目**（run 族：worker 的工作目录，须是已存在目录；workspace 观察/过滤面随之）。
 - **MCP 派发的 workspace 来自本次调用**：会动工作区的工具必传 `expectedWorkspaceRoot`（本项目 Git 顶层）；`--workspace-root` / `roots/list` / `workspace_select` 只定只读工具的缺省范围，与 CLI `--cwd` 是两回事，别混。
-- 完整的 host 配置示例见 `docs/usage/host.md`。
-
-**未验证宿主的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收真机验证过加载的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
-
-**zcode 接入（hostVerified=true）**：ZCode 的 MCP 唯一实证通路是**插件系统**（`mcp.servers` 直配与手写注册表均无效——会话工具面只从在册插件装配）。官方接入两步：`zcode plugins marketplace add <本地名录目录>`（名录 `source` 的 kind 用 `directory`、路径写**绝对路径**）→ `zcode plugins install wao@wao-local`。名录与插件包源在 `~/.zcode/wao-local-marketplace/`（机器级资产；内容 = `.claude-plugin/plugin.json` + 根级 `.mcp.json` 扁平 server 映射，`mcp bind --host zcode` emit 同款）。新会话加载全部 23 个工具（前缀 `mcp__plugin_wao_wao__`）。排坑要点：插件注册是四件套（缺 marketplace 名录被静默跳过）、`.mcp.json` 路径须实测 spawn、查询会话工具注意插件命名空间前缀、`.dev` 不可当唯一备份位。
 
 ### 4f. 首次只读 canary
 
