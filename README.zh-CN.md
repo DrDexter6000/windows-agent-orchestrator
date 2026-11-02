@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.7.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-31-v0.7.0.md)
+[![version](https://img.shields.io/badge/version-v0.8.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-02-v0.8.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,25 +51,24 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.7.0 新增（2026-10-31）
+## v0.8.0 新增（2026-11-02）
 
-- **运行收口时 Lead 会知道，不靠宿主推送**——`wao runs wait <runId> --until-settled` 等到运行
-  收口才退出：已终态，有交付时验证与 reverify 也都有了结果；MCP `run_delivery` 带 `waitMs`
-  时同样按收口判定等；没等到收口的等待与受理的派发都附 `nextStep`；四个 MCP 等待类工具缺省
-  45 秒，放得进约一分钟就让工具调用超时的宿主（决定 0095）。能证明待验证交付的验证进程
-  已不在时，等待器以 `verifier_gone` 退出；会审回执说明怎么接着等没到终态的席位（0096）。
-- **选车道的事实送到 Lead 做决定的地方**——车道画像一处给出 Owner 成本档、实测分数与 Owner 规则；
-  `wao lanes` 开头一屏总表，派发回显所选车道的事实，`lead_preflight` 车道行标明能否看视频
-  （0097、0098）。Owner 确认后，实测事实可以替换 Owner 的评语。
-- **交付读得更全，卡住的更少**——`run_delivery` 显示主分支上有没有提交声明采纳了这个运行
-  （`WAO-Adopted-From`，三态；0098）；派发时声明了 `verificationUnavailableReason` 的交付，
-  Lead 审查后可以 accept，不再只能 reject（0101）。
-- **运行存放不再塌**——从链接的开发工作树派发的运行进主项目的桶（0099）；按 runId 查转录扫描
-  全部桶、不设上限，超过 64 个桶时 `lead_preflight` 给一行事实（0100）。
-- **正确性**——会进仓库的文本文件（已跟踪的，加上未跟踪且未忽略的）防控制字节与非 UTF-8；
-  诊断点名 deepseek-acp 的传输失败；MCP 服务的 build 检查只看 `src/`。
-- 按决定分组的范围与发版门槛证据见
-  [`docs/changelog-2026-10-31-v0.7.0.md`](docs/changelog-2026-10-31-v0.7.0.md)。
+- **接入与升级少些手工步骤**——`wao skill link --host <host>` 先预览，加 `--apply` 在宿主核实过的
+  技能槽位里建一个指向本检出的目录链接；`skill unlink` 摘掉它，卸载时先摘链接（决定 0107）。
+  `wao registry align` 让私有注册表逐车道跟上车道表：先只读预览，写前逐字节备份；doctor 与
+  `lead_preflight` 报接线漂移（0108）。
+- **只读运行碰不到共享仓库**——改在源仓的私有克隆里工作，克隆里没有源仓缺的提交才删（0102）。
+  清退计划由 Lead 判定后直接执行，事后汇报（0103）。
+- **两项退役**——opencode worker 后端（0105；OpenCode 作为 MCP 宿主保留）与 claude-code 的
+  provider 通道（0106）移出代码树，各留一个 `archive/` tag。仍用它们的注册表条目会被拒绝，
+  `wao registry check` 已删除（改用 `registry validate`）。升级须知见快照。
+- **正确性**——`run_continue` 拒绝显式车道+角色派发的父运行时，MCP 拿到具名原因；别名运行续接
+  后仍带身份头；全量套件可以接管已证明死掉的套件留下的 inflight 标记；CLI 帮助列全每个已实现的
+  子命令与参数，由守卫保持一致。
+- **仓库自检**——`npm run map` 打印仓库引用图，守卫要求每个跟踪文件都能从入口文件到达；开发改动
+  的必读集合从约 172 KB 降到 48 KB，由 architecture §0 的索引按改动导读。
+- 按决定分组的范围、升级须知与发版门槛证据见
+  [`docs/changelog-2026-11-02-v0.8.0.md`](docs/changelog-2026-11-02-v0.8.0.md)。
 
 ## 当前状态
 
@@ -117,7 +116,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.7.0](docs/changelog-2026-10-31-v0.7.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.8.0](docs/changelog-2026-11-02-v0.8.0.md)） |
 | **跑真实 smoke 测试**（claude/codex） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **判断何时跑全量、何时跑定向测试** | [`docs/testing.md`](docs/testing.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |
