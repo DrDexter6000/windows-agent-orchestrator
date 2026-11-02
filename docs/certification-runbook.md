@@ -25,7 +25,8 @@ backend+model 精确绑定的认证前，registry 会诚实显示 `certification
 `deepseek-acp` 走上游 shipped 的 `dsh --profile acp`：
 WAO 以 `--patch <containment> --patch <role-contract>` 叠加两份覆盖层——containment
 资产**由操作员安装**到 `~/.wao/runtimes/dsh-acp/wao-contain.patch.yml`（内容与版本依据 =
-仓库内 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml`，直接复制即可），缺失或与声明
+仓库内 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml`，直接复制即可；该目录的
+验证资产清单与复现步骤见 `scripts/reliability/dsh-acp/README.md`），缺失或与声明
 不匹配时 backend 在派发前**拒绝**（fail-closed，不静默降级）；角色合同由 WAO 每次派发生成到
 OS temp 独占目录（无凭据、不进 transcript，用后清理）。WAO 只 detect / invoke / report，
 不生成、不升级、不持久修复该资产。能力边界（如实）：compose 层 `disabled` 是唯一真
@@ -341,7 +342,7 @@ N/A、strict 证据不足（inconclusive）与 strict 失败仍是 `draft-only`�
 （`scorecardCommandFailureIsCredible` 保留它与观察到的非零退出）；再有放宽须 Owner
 另行显式裁定。
 
-**车道例外条款**（worker 聚合层的裁决，不改 case 自身判定）：登记在 `config/lane-exceptions.json`（git 跟踪），由 `scripts/reliability/certification.mjs` 的 worker 聚合消费。条款按车道四元组命中（backend、modelId 严格相等；providerID、providerKey 条款侧省略即通配，写 `null` 时记录侧 `null` 或缺席都命中）；一个 case 的红检查（`pass:false` 且不是 N/A）全部落在条款 `checks` 里时，该 case 在聚合中按 `conditional`（`supervised-dispatch`）计。检查明细、drill runId、时间戳与 reasonCode 原样保留，`ruling` 记授权出处，条款的 `scope` 字段不参与判定。条款随四元组走：换型号即不再命中。
+**车道例外条款**（worker 聚合层的裁决，不改 case 自身判定）：登记在 `config/lane-exceptions.json`（git 跟踪），由 `scripts/reliability/certification.mjs` 的 worker 聚合消费。新增或改动一条例外属 Owner 裁定（`docs/ssot.md` §0.1 `owner-decide` 面「放宽 strict 轴」的一类，先例见决定 0036/0037）。条款按车道四元组命中（backend、modelId 严格相等；providerID、providerKey 条款侧省略即通配，写 `null` 时记录侧 `null` 或缺席都命中）；一个 case 的红检查（`pass:false` 且不是 N/A）全部落在条款 `checks` 里时，该 case 在聚合中按 `conditional`（`supervised-dispatch`）计。检查明细、drill runId、时间戳与 reasonCode 原样保留，`ruling` 记授权出处，条款的 `scope` 字段不参与判定。条款随四元组走：换型号即不再命中。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
 backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先，保留

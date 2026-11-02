@@ -284,10 +284,8 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **证词会看错**：与任务无关的插件进程在耗 CPU、反复崩溃重启的 helper、别人在同一个未
   隔离的工作目录里写文件，都会让一个其实没在推进的运行一直"活着"；被 `.gitignore` 排除
   的写入、宿主进程内部的工作、低 CPU 的等待，则读不出活动。所以去留要 Lead 自己看。
-- **Lead 怎么判断去留**：CLI `status <runId>` 在未终态且转录里 ≥30 分钟没有新的动作或正文
-  时附 `advisory` 一行（多久没有、最近活动是什么、中止命令）——它陈述的是转录可见的事
-  实，zcode 的正文到轮末才落转录；MCP 面 `run_status` 带同一事实的 `leadAdvisory`，
-  `run_wait` 带注记 `observation.transcript_quiet`。
+- **Lead 怎么判断去留**：转录长时间没有新的动作或正文时，三个面都会直接给提示（阈值、
+  各面字段、提示写什么与怎么读，见[监督](usage/supervise.md#lead-quiet-supervision)）。
 - **中止**（先看最新状态并写明理由，见 usage）：`stop` / MCP `run_stop`——会话记录带
   `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。会话
   记录里没有 `hostPid` 的运行报 `has no stop route`：核实其 app-server 进程后手动结束进程

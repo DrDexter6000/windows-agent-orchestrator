@@ -17,7 +17,7 @@
   - **kimi-web**：命令与工具调用在输入就绪后落转录、结果在工具结束时落；写文件调用在途先落一条只带路径的预告，证据与结果仍等整轮带正文完成。turn 结构有变化算进度；没有变化时等 60–240 秒问 serve 这一轮是否还活着，不活跃或问不到就收口。但自上次产出增长以来这样续命的静默满 30 分钟仍会收口（只有 steps / 帧 / 文本变多才清零，state 来回变不算）：serve 的"还活着"是自我声明，工具挂死时同样报 active，无别的体征可交叉印证。一条超过 30 分钟、期间不落任何帧的命令会被收掉。
   - **进程式后端**（codex / claude-code / kimi-code / deepseek-*）：没有"轮内等不到进展"的自动收口门——运行到进程退出或 Lead 中止（可选 `silentTimeout` 只管"启动后一条事件都没有"，默认关；deepseek 的握手等请求级超时见 `docs/surface/certification.md` 生命体征条目）。崩溃、协议错误等失败照常收口。codex / claude-code / kimi-code 在转录静默满 5 分钟后取基线、30 秒后再取一次比对，约每 5.5 分钟一轮：读到后代进程在干活落 `process_active`、工作目录有变化落 `files_changed`，没读到什么都不落——只是给 Lead 看的事实，不收口；模型长思考期间读不到体征，deepseek 两个后端未接取样。deepseek-acp 的命令在调用到达时就落一条 `tool_use`（带命令原文），`run_activity` 看得到在跑的命令；codex 等命令时会自己隔一两分钟发一句话，取样很少轮到它。
 
-  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你：CLI `status` 附一行 `advisory`；MCP `run_status` 带 `leadAdvisory`；`run_wait` / `run_await_result` 的 `semanticNotes` 带 `observation.transcript_quiet`。停不停由 Lead 决定。
+  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你。CLI `status` 附一行 `advisory`、MCP `run_status` 带 `leadAdvisory`：写明多久没有、最近活动是什么、要停怎么停（带 `observedSeq` 与理由；MCP 版写先读 `run_activity`，CLI 版写先看最新状态），最近 10 分钟内见过生命体征时还建议没有具体理由先别停。`run_wait` / `run_await_result` 只在 `semanticNotes` 带一条 `observation.transcript_quiet`，说至少 30 分钟没有新的动作或正文。提示陈述的是转录看得到的事实：zcode 的正文到轮末才落转录，长回答期间看起来也是静默的。停不停由 Lead 决定。
 - **宿主例外**：Owner 可明确要求固定频率更新；宿主更高优先级指令要求更短等待/更频繁更新时遵守并简要说明限制，把无变化更新压到最低。不要把某一宿主的频率限制变成 WAO 通用规则，也不承诺本手册覆盖宿主指令。
 - **跨会话续接**：经 Owner 要求或批准，在项目本地工作笔记保留目标、授权范围、已确认事实/待证假设、证据路径、断点、下一步与停止条件，给后续 Lead 留可发现入口；只在事实或决策变化时更新，不抄轮询流水。compaction 摘要是线索，续接前重读笔记并核对 Git、WAO 查询与原始报告；笔记不能冒充运行台账、验收结果或新授权。
 
