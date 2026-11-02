@@ -26,7 +26,7 @@
 
 - `run_continue` 拒绝续接显式车道+角色派发的父运行时，MCP 拿到具名原因 `explicit_dispatch_continuable_unsupported`，不再是笼统错误（TD-327；MCP 工具面 +44 B，Owner 批准重冻）。别名运行续接后仍带车道与角色身份头（TD-328）。
 - 持有验证租约的全量套件可以接管已证明死掉的套件留下的 inflight 标记；波次观测不再把自己的标记报成并发套件。
-- `wao worktree remove` 只删链接工作树（按 git 的判定：目标是工作树的顶层，且有自己的私有 git 目录）：独立仓库（只读运行的私有克隆、主检出、`--separate-git-dir` 仓库）、子模块、工作树的子目录与普通目录一律拒删、不动盘。此前 git 拒绝时它会强删目录，不做任何检查。
+- `wao worktree remove` 只删 git 登记在册的链接工作树（`git worktree list` 里主工作树之后的条目）：独立仓库（只读运行的私有克隆、主检出、`--separate-git-dir` 仓库）、子模块、复制出来的工作树、工作树的子目录与普通目录一律拒删、不动盘。此前 git 拒绝时它会强删目录，不做任何检查。
 - CLI 帮助列出每个已实现的子命令与参数，三个不存在的条目删掉，并有守卫保持代码与帮助一致。CLI 的三条等待路径不再把 `silentTimeout`、`tokenBudget`、`tokenBudgetMultiplier` 传进等待层：它们从来不是 CLI 参数，此前 `--token-budget 1000` 解析成字符串，遮住注册表里的数字，让预算检查静默失效。
 - 车道画像：GLM 高峰只算工作日（北京时间 9:00–18:00），周末与中国法定节假日全天非高峰。
 
@@ -71,4 +71,5 @@
   - 本节"只经中边可达 8 个"有误（见上）。
 - 修复：`wao worktree remove` 只删链接工作树，其余一律拒删、不动盘，并加了测试（去掉守卫即红）。`docs/usage/maintenance.md` 的私有克隆手工清理改用决定 0102 的判法：逐个到源仓查克隆里可达的提交，不按远程跟踪引用排除，0102 否决过那种判法。其余各条按代码改了；registry 严格路径的说明只留在架构 §2.3，`docs/usage/host.md` 改为指针。
 - 判为不改：README 的新版说明是摘要，不单列 GLM 高峰的画像变化；把 map 计数做成生成物（deepseek-flash 的结构意见），本节记录的是一次核查的结果，不值得为它加生成层。
-- 复核 consult_20261102211540961us7n81（sol、deepseek-flash，都判 FIX_FIRST）：上一轮的文档各条都已修对；守卫只看根目录下 `.git` 是不是文件，子模块、`--separate-git-dir` 仓库和带伪 `.git` 文件的目录仍会被放行删掉（两席各自在临时目录实测）。另指出 `src/runManager.js` 与 `src/registry.js` 各有一处注释还是旧说法，`docs/troubleshooting.md` §4.4 的清理步骤没提私有克隆，`docs/usage/maintenance.md` 的手工检查与 0102 并不同法（连 stash 也查、不查嵌套工作树），而且只看"没有输出"分不清干净与命令失败。修复：守卫改按 git 的判定，测试补上这三种形状；两处注释改成现状；§4.4 加一句指针；手工检查写成三项确认。
+- 复核 consult_20261102211540961us7n81（sol、deepseek-flash，都判 FIX_FIRST）：上一轮的文档各条都已修对；守卫只看根目录下 `.git` 是不是文件，子模块、`--separate-git-dir` 仓库和带伪 `.git` 文件的目录仍会被放行删掉（两席各自在临时目录实测）。另指出 `src/runManager.js` 与 `src/registry.js` 各有一处注释还是旧说法，`docs/troubleshooting.md` §4.4 的清理步骤没提私有克隆，`docs/usage/maintenance.md` 的手工检查与 0102 并不同法（连 stash 也查、不查嵌套工作树），而且只看"没有输出"分不清干净与命令失败。修复：守卫改按 git 的判定（工作树顶层、git 目录不是公共目录），测试补上这三种形状；两处注释改成现状；§4.4 加一句指针；手工检查写成三项确认。
+- 第二次复核 consult_20261102213406996esj0cw：sol 判 PASS（实测各形状都对，含子模块仓库自己的链接工作树、带空格与中文的路径、经 junction 到达的路径）；deepseek-flash 判 FIX_FIRST：复制出来的链接工作树（或指向链接树管理目录的伪 `.git` 文件）会被 git 认成原树，守卫照样放行删掉；8.3 短名路径被误拒；`src/registry.js` 那段注释还说 `rawEntries` 只给部分投影用。修复：守卫改问 git 的登记（`git worktree list` 里主工作树之后的条目），路径经 `realpathSync.native` 比较；去掉 git 定位变量的清单从 `skillLink.js` 移到 `gitChildEnv` 旁边，两处共用；测试补上复制的树与带空格、中文的路径；注释改成现状。

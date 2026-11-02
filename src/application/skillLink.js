@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { gitChildEnv } from "../delivery.js";
+import { gitProbeEnv } from "../delivery.js";
 import { HOST_DESCRIPTORS, findHostDescriptor } from "../hostAdapters/hostDescriptors.js";
 
 /** 槽位里的链接名（唯一允许本模块建/删的名字）。 */
@@ -89,21 +89,6 @@ function realOrResolved(p) {
  */
 export function probeCheckoutEligibility(root, gitProbe = defaultGitProbe) {
   return gitProbe(resolve(root));
-}
-
-// git 的定位变量（GIT_DIR、GIT_WORK_TREE 等）会让 rev-parse 回答别处的仓库；资格探测只问
-// 这个目录自己的拓扑，所以在 gitChildEnv() 之上去掉它们。
-const GIT_LOCATION_ENV = new Set([
-  "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-]);
-
-function gitProbeEnv() {
-  const env = gitChildEnv();
-  for (const key of Object.keys(env)) {
-    if (GIT_LOCATION_ENV.has(key.toUpperCase())) delete env[key];
-  }
-  return env;
 }
 
 function defaultGitProbe(root) {

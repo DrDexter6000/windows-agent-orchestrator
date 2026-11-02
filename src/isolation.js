@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve, sep } from "node:path";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { isValidRunId, gitChildEnv, isCanonicalCommitId } from "./delivery.js";
+import { isValidRunId, gitChildEnv, gitProbeEnv, isCanonicalCommitId } from "./delivery.js";
 import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
 /**
@@ -213,6 +213,37 @@ export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   // 不清。
   if (realCommon && !existsSync(path)) removeWorktreeAdminEntry(realCommon, path);
   return Promise.resolve();
+}
+
+/**
+ * wtPath 是不是 git 登记在册的链接工作树：在它里面问 `git worktree list`，它必须是主工作树
+ * 之后的某个条目。主检出、独立仓库、--separate-git-dir 仓库、子模块、复制出来或伪造 .git
+ * 指针的目录、工作树的子目录都不在其列。路径经 realpathSync.native（展开 junction 与 8.3
+ * 短名）后按 win32 语义大小写折叠比较；git 读不出一律 false。
+ * @param {string} wtPath
+ * @returns {boolean}
+ */
+export function isRegisteredLinkedWorktree(wtPath) {
+  const real = (p) => realpathSync.native(p).toLowerCase();
+  try {
+    const target = real(resolve(wtPath));
+    const out = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: resolve(wtPath),
+      env: gitProbeEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return parseWorktreeList(out).slice(1).some((entry) => {
+      try {
+        return real(entry.path) === target;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
 }
 
 // ===== 终态零丢失自动回收（只删树，分支一律保留）============================

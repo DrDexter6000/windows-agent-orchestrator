@@ -6,7 +6,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { symlinkSync } from "node:fs";
 
@@ -519,7 +519,7 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   );
 });
 
-test("CLI：worktree remove 只删链接工作树——独立仓库、子模块、子目录与普通目录拒删且不动盘", async () => {
+test("CLI：worktree remove 只删登记在册的链接工作树——独立仓库、子模块、复制的树、子目录与普通目录拒删且不动盘", async () => {
   const s = await scenario();
   const clone = join(s.base, "private-clone");
   git(["clone", "--shared", "--no-checkout", s.repo, clone], s.base);
@@ -536,14 +536,17 @@ test("CLI：worktree remove 只删链接工作树——独立仓库、子模块�
   git(["init", "-q", superRepo], s.base);
   git(["-c", "protocol.file.allow=always", "submodule", "add", "-q", s.repo, "sub"], superRepo);
   const submodule = join(superRepo, "sub");
+  // 复制出来的链接工作树：.git 指针照旧指向原树的管理目录，git 会把它认成原树。
+  const copied = join(s.base, "copied-worktree");
+  cpSync(s.wt("run_remove_copy_src"), copied, { recursive: true });
   const wt = s.wt("run_remove_cli");
   const sub = join(wt, "docs");
   mkdirSync(sub, { recursive: true });
   writeFileSync(join(sub, "keep.txt"), "keep\n");
-  for (const target of [clone, s.repo, plain, strayGitfile, separate, submodule, sub]) {
+  for (const target of [clone, s.repo, plain, strayGitfile, separate, submodule, copied, sub]) {
     await assert.rejects(
       () => worktreeCommand(["remove", target], {}),
-      /只删链接工作树/,
+      /只删 git 登记在册的链接工作树/,
       `${target} 应被拒`,
     );
     assert.ok(existsSync(target), `${target} 拒删后应原样在盘`);
@@ -561,6 +564,14 @@ test("CLI：worktree remove 只删链接工作树——独立仓库、子模块�
   }
   assert.ok(!existsSync(wt), "链接工作树照删");
   assert.ok(logs.some((l) => l.includes('"removed"')), "删后打印 removed");
+  const spaced = makeLinkedWorktree(s.repo, join(s.base, "带 空格的树"), "dev/spaced");
+  console.log = () => {};
+  try {
+    await worktreeCommand(["remove", spaced], {});
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(!existsSync(spaced), "路径带空格与中文的链接工作树照删");
 });
 
 test("CLI：未知子命令报错列出新子命令", async () => {

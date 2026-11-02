@@ -131,4 +131,4 @@ git worktree prune --expire 10.minutes
 git worktree remove --force .wao-worktrees/<runId>
 ```
 
-只读 run 的私有克隆不在 worktree 登记里，上面两条与 `wao worktree remove` 都不删它。直接删目录之前确认三件事：`git -C <克隆> rev-list --all HEAD | git -C <源仓> cat-file --batch-check` 两条命令都成功，输出里没有 `missing` 行（有就是源仓缺的提交；它连 stash 也查，比决定 0102 的自动检查更保守）；`git -C <克隆> worktree list` 只列出克隆自己；`git -C <克隆> status --short` 里没有要留的改动（删目录会一并丢掉）。
+只读 run 的私有克隆不在 worktree 登记里，上面两条与 `wao worktree remove` 都不删它。直接删目录之前确认三件事：`git -C <克隆> rev-list --all HEAD | git -C <源仓> cat-file --batch-check` 两条命令都没有报错，输出里没有 `missing` 行（有就是源仓缺的提交；它连 stash 也查，比决定 0102 的自动检查更保守）；`git -C <克隆> worktree list` 只列出克隆自己；`git -C <克隆> status --short` 里没有要留的改动（删目录会一并丢掉）。
