@@ -26,7 +26,7 @@
 
 - `run_continue` 拒绝续接显式车道+角色派发的父运行时，MCP 拿到具名原因 `explicit_dispatch_continuable_unsupported`，不再是笼统错误（TD-327；MCP 工具面 +44 B，Owner 批准重冻）。别名运行续接后仍带车道与角色身份头（TD-328）。
 - 持有验证租约的全量套件可以接管已证明死掉的套件留下的 inflight 标记；波次观测不再把自己的标记报成并发套件。
-- `wao worktree remove` 只删链接工作树（根目录下 `.git` 是文件）：独立仓库（只读运行的私有克隆、主检出）、工作树的子目录与普通目录一律拒删、不动盘。此前 git 拒绝时它会强删目录，不做任何检查。
+- `wao worktree remove` 只删链接工作树（按 git 的判定：目标是工作树的顶层，且有自己的私有 git 目录）：独立仓库（只读运行的私有克隆、主检出、`--separate-git-dir` 仓库）、子模块、工作树的子目录与普通目录一律拒删、不动盘。此前 git 拒绝时它会强删目录，不做任何检查。
 - CLI 帮助列出每个已实现的子命令与参数，三个不存在的条目删掉，并有守卫保持代码与帮助一致。CLI 的三条等待路径不再把 `silentTimeout`、`tokenBudget`、`tokenBudgetMultiplier` 传进等待层：它们从来不是 CLI 参数，此前 `--token-budget 1000` 解析成字符串，遮住注册表里的数字，让预算检查静默失效。
 - 车道画像：GLM 高峰只算工作日（北京时间 9:00–18:00），周末与中国法定节假日全天非高峰。
 
@@ -58,7 +58,7 @@
 
 ## SSOT 核查（§9 第 0 步）
 
-- 机械部分（main c243645 上）：`npm run map` 的"完全不可达""只经弱边可达"两栏为空；"只经中边可达"20 个，逐条过目，都是按目录或按文件名加载、设计如此：`docs/archive/m0–m5-audit.md`（docs-consistency 按目录读）、`playbooks/lead/` 的四个 playbook（`playbookCatalog.js`）、`scripts/reliability/dsh-acp/evidence/` 的四份证据、`src/owner-dashboard/` 的两份静态资源、四个测试夹具与 helper。Lead 第一次看报告时截断了输出，记成 8 个；会审 deepseek-flash 实测指出是 20 个，Lead 已逐条补看。横切守卫组 228/228 通过。
+- 机械部分（main c243645 上）：`npm run map` 的"完全不可达""只经弱边可达"两栏为空；"只经中边可达"20 个，逐条过目，都是按目录或按文件名加载、设计如此：`docs/archive/` 的六份 m0–m5 审计稿（docs-consistency 按目录读）、`playbooks/lead/` 的四个 playbook（`playbookCatalog.js`）、`scripts/reliability/dsh-acp/evidence/` 的四份证据、`src/owner-dashboard/` 的两份静态资源、四个测试夹具与 helper。Lead 第一次看报告时截断了输出，记成 8 个；会审 deepseek-flash 实测指出是 20 个，Lead 已逐条补看。横切守卫组 228/228 通过。
 - Lead 扫描：按本周期改动过的事实搜索现行文档——退役名（opencode / opencode-serve、provider 块、provider 通道、`apiKeyEnv`、`baseUrl`、`registry check`）与新事实（`skill link`/`unlink`、`registry align`、`npm run map`、`lane_wiring`、`explicit_dispatch_continuable_unsupported`、私有克隆），并核对示例里的 agent id。没有查出漂移：opencode 只剩 MCP 宿主与历史记录里的提法，`providerKey` 只作恒为 null 的身份字段出现。
 - 会审 consult_20261102202642270kk3ydb（sol、deepseek-flash，都判 FIX_FIRST）查出关键词扫不到的问题：
   - `wao worktree remove` 在 git 拒绝时强删目录，私有克隆、主检出和普通目录都会被不经检查删掉；`docs/troubleshooting.md` §4.4 的清理步骤正指向它（deepseek-flash 在临时克隆里复现）。
@@ -71,3 +71,4 @@
   - 本节"只经中边可达 8 个"有误（见上）。
 - 修复：`wao worktree remove` 只删链接工作树，其余一律拒删、不动盘，并加了测试（去掉守卫即红）。`docs/usage/maintenance.md` 的私有克隆手工清理改用决定 0102 的判法：逐个到源仓查克隆里可达的提交，不按远程跟踪引用排除，0102 否决过那种判法。其余各条按代码改了；registry 严格路径的说明只留在架构 §2.3，`docs/usage/host.md` 改为指针。
 - 判为不改：README 的新版说明是摘要，不单列 GLM 高峰的画像变化；把 map 计数做成生成物（deepseek-flash 的结构意见），本节记录的是一次核查的结果，不值得为它加生成层。
+- 复核 consult_20261102211540961us7n81（sol、deepseek-flash，都判 FIX_FIRST）：上一轮的文档各条都已修对；守卫只看根目录下 `.git` 是不是文件，子模块、`--separate-git-dir` 仓库和带伪 `.git` 文件的目录仍会被放行删掉（两席各自在临时目录实测）。另指出 `src/runManager.js` 与 `src/registry.js` 各有一处注释还是旧说法，`docs/troubleshooting.md` §4.4 的清理步骤没提私有克隆，`docs/usage/maintenance.md` 的手工检查与 0102 并不同法（连 stash 也查、不查嵌套工作树），而且只看"没有输出"分不清干净与命令失败。修复：守卫改按 git 的判定，测试补上这三种形状；两处注释改成现状；§4.4 加一句指针；手工检查写成三项确认。

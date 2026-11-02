@@ -519,18 +519,28 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   );
 });
 
-test("CLI：worktree remove 只删链接工作树——独立仓库、子目录与普通目录拒删且不动盘", async () => {
+test("CLI：worktree remove 只删链接工作树——独立仓库、子模块、子目录与普通目录拒删且不动盘", async () => {
   const s = await scenario();
   const clone = join(s.base, "private-clone");
   git(["clone", "--shared", "--no-checkout", s.repo, clone], s.base);
   const plain = join(s.base, "plain-dir");
   mkdirSync(plain);
   writeFileSync(join(plain, "keep.txt"), "keep\n");
+  // .git 是文件、却不是链接工作树的三种形状：伪指针文件、--separate-git-dir 仓库、子模块。
+  const strayGitfile = join(s.base, "stray-gitfile");
+  mkdirSync(strayGitfile);
+  writeFileSync(join(strayGitfile, ".git"), `gitdir: ${join(s.repo, ".git")}\n`);
+  const separate = join(s.base, "separate-repo");
+  git(["init", "-q", "--separate-git-dir", join(s.base, "separate-gitdir"), separate], s.base);
+  const superRepo = join(s.base, "super");
+  git(["init", "-q", superRepo], s.base);
+  git(["-c", "protocol.file.allow=always", "submodule", "add", "-q", s.repo, "sub"], superRepo);
+  const submodule = join(superRepo, "sub");
   const wt = s.wt("run_remove_cli");
   const sub = join(wt, "docs");
   mkdirSync(sub, { recursive: true });
   writeFileSync(join(sub, "keep.txt"), "keep\n");
-  for (const target of [clone, s.repo, plain, sub]) {
+  for (const target of [clone, s.repo, plain, strayGitfile, separate, submodule, sub]) {
     await assert.rejects(
       () => worktreeCommand(["remove", target], {}),
       /只删链接工作树/,

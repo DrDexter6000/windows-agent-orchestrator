@@ -2102,8 +2102,8 @@ export class RunManager {
       // between start and resume re-spawned into the misleading
       // executable-ENOENT face the R7-AB fix closed at start. Runs BEFORE any
       // append/spawn (transcript bytes unchanged on refusal); HTTP-shape
-      // backends (no preflightInvocation) attach, never re-spawn locally, and
-      // are unaffected.
+      // backends (no preflightInvocation) replay into a new serve session,
+      // not a local process, and are unaffected.
       if (typeof backend.preflightInvocation === "function") {
         assertExistingDispatchCwd({ explicitCwd: undefined, agentCwd: agent.cwd });
       }

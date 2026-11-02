@@ -187,7 +187,8 @@ export async function readRegistry(filePath) {
     // malformed/unsupported entry cannot abort the whole list — the projector
     // normalizes each entry individually and collects bounded safe issues. The
     // strict paths (listAgents / getAgent) remain strict and are NOT weakened:
-    // they still throw on the first bad entry (CLI `registry list`/`validate`).
+    // listAgents still throws on the first bad entry (CLI `registry list`);
+    // CLI `registry validate` normalizes entry by entry and collects issues.
     rawEntries() {
       return Object.entries(agents);
     },

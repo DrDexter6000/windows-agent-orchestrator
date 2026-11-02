@@ -218,7 +218,7 @@ worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktre
 git -C <worktreeRoot> add -A -N
 git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 # 3. Lead 评估补丁后按采纳协议处理（如合入：commit 带 WAO-Adopted-From: <runId> trailer——见 docs/usage/delivery.md 验证失败采纳协议）
-# 4. 清理：npm run cli -- worktree remove <worktreeRoot>（内部即强制清理并重试）
+# 4. 清理：npm run cli -- worktree remove <worktreeRoot>（内部即强制清理并重试；只删链接工作树，只读运行的私有克隆见 docs/usage/maintenance.md）
 ```
 
 边界：本配方是**人工采纳**，不自动接受任何 WIP；价值判断完全归 Lead。**归档/清理历史 runs 前的固定步骤 = 确认无可抢救 WIP**。

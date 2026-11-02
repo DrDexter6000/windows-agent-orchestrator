@@ -15,9 +15,11 @@
 //   - 共享工具：./shared.js（parseOptions，纯函数）
 //   - node built-in：path（resolve）
 
-import { existsSync, lstatSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
+import { gitChildEnv } from "../delivery.js";
 import { listWorktrees, removeWorktree } from "../isolation.js";
 import { planWorktreeReclaim, applyWorktreeReclaim, RECLAIM_REFUSAL_CODES } from "../application/worktreeReclaim.js";
 import { readInstallRoot, resolveConfigPath } from "../installRoot.js";
@@ -171,11 +173,24 @@ async function worktreeReclaimCommand(rest, config) {
   }
 }
 
-/** 链接工作树的根：根目录下的 .git 是文件（指向源仓的 gitdir 指针）。.git 是目录
- * （独立仓库）、缺失或读不出都不算。 */
+/** 两个现存路径是否同一处（realpath 后按 win32 语义大小写折叠）。 */
+function sameRealPath(a, b) {
+  return realpathSync(a).toLowerCase() === realpathSync(b).toLowerCase();
+}
+
+/** 链接工作树的根，按 git 的判定：path 是一棵工作树的顶层，且它的 git 目录不是公共
+ * 目录（链接工作树在 <公共目录>/worktrees/ 下有私有 git 目录；主检出、独立仓库、
+ * --separate-git-dir 仓库与子模块的 git 目录就是公共目录）。git 读不出一律不算。 */
 function isLinkedWorktreeRoot(path) {
+  const env = gitChildEnv();
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) delete env[name];
   try {
-    return lstatSync(join(path, ".git")).isFile();
+    const [top, gitDir, commonDir] = execFileSync("git", [
+      "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir",
+    ], { cwd: path, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true })
+      .split(/\r?\n/).filter((l) => l.length > 0);
+    if (!top || !gitDir || !commonDir) return false;
+    return sameRealPath(top, path) && !sameRealPath(gitDir, commonDir);
   } catch {
     return false;
   }
@@ -203,7 +218,7 @@ async function worktreeCommand(args, config) {
     // 目录已不在时 removeWorktree 本就什么都不做。
     if (existsSync(path) && !isLinkedWorktreeRoot(path)) {
       throw new Error(
-        `worktree remove 只删链接工作树（根目录下 .git 是文件）：${path} 不是，未删除。` +
+        `worktree remove 只删链接工作树（工作树顶层、有自己的私有 git 目录）：${path} 不是，未删除。` +
         "只读运行的私有克隆怎么清理见 docs/usage/maintenance.md「worktree 清理失败」",
       );
     }
