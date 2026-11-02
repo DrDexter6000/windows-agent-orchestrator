@@ -6,7 +6,9 @@ install.ps1 — WAO 一条命令安装（薄壳安装器，R5-A）
   - 默认不改 PATH（无任何 PATH 步骤，无 HKCU/系统 PATH 读写）——要求 8
   - 绝不自动安装 Node（前置检查只检测、只给指引）——要求 4
   - 不执行 npm link（保持文档"可选、每机一次"定位，仅在结尾提示）——要求 7
-  - 不写仓外文件（唯一例外：-Uninstall 的备份目录在 <Dest> 同级，属用户显式安装区）
+  - 不写仓外文件（例外都属卸载语义本身：-Uninstall 的备份目录在 <Dest> 同级，
+    属用户显式安装区；-Uninstall 先跑 skill unlink --all --apply，删除用户主目录
+    下指向本检出的技能链接——只删链接本身，目标检出由后续删仓步骤处理）
 
 用法：
   irm <url> | iex                                # 默认装到 %USERPROFILE%\wao
@@ -408,6 +410,47 @@ function Invoke-WaoUninstall {
     if ($trimmed -match '^[A-Za-z]:$') { WaoFail "拒绝卸载驱动器根目录：$full" }
     $homeTrimmed = "$env:USERPROFILE".TrimEnd('\')
     if ($trimmed -eq $homeTrimmed) { WaoFail "拒绝卸载用户主目录：$full" }
+
+    # 技能链接摘除（决定 0107）：删仓之前先跑 skill unlink --all --apply——只删
+    # 目标恰为这份检出的 junction，别处（指向其它检出）的链接不动。它失败就停止
+    # 卸载、不删仓（已摘掉的链接不恢复）：链接还指向一个即将被删除的目录，留下就是断链。
+    if (Test-Path -LiteralPath (Join-Path $Dest 'package.json')) {
+        Write-WaoStep 'skill unlink --all --apply（只摘目标=本检出的技能链接）'
+        if ($WhatIfPreference) {
+            Write-WaoInfo "[WhatIf] 跳过: skill unlink --all --apply （目录 $Dest）"
+        }
+        else {
+            $npmForUnlink = Get-Command npm.cmd -ErrorAction SilentlyContinue
+            if (-not $npmForUnlink) { $npmForUnlink = Get-Command npm -ErrorAction SilentlyContinue }
+            if (-not $npmForUnlink) {
+                WaoFail "PATH 上没有 npm，无法运行 skill unlink --all ——已中止卸载（未删除任何文件）。`n怎么做：装好 Node v22/npm 后重跑本脚本。"
+            }
+            try {
+                Push-Location -LiteralPath $Dest
+                $unlinkOutput = (& $npmForUnlink.Source run cli --silent -- skill unlink --all --apply 2>&1) | Out-String
+                $unlinkCode = $LASTEXITCODE
+                Write-Host ($unlinkOutput.TrimEnd())
+            }
+            catch {
+                WaoFail "skill unlink --all 运行失败——已中止卸载（仓库未删除；已摘掉的技能链接不会恢复）：$($_.Exception.Message)"
+            }
+            finally {
+                Pop-Location
+            }
+            if ($unlinkCode -ne 0) {
+                WaoFail "skill unlink --all 失败（exit $unlinkCode）——已中止卸载（仓库未删除；已摘掉的技能链接不会恢复）。`n原因：有技能链接没能安全摘除，先删仓会留下断链；按上方输出人工处理后重跑。"
+            }
+        }
+    }
+    else {
+        # 检出不完整就跑不了 skill unlink，也就无法证明没有指向它的链接：中止，不删仓。
+        if ($WhatIfPreference) {
+            Write-WaoInfo "[WhatIf] $Dest 缺 package.json：实际卸载会在这里中止（跑不了 skill unlink --all）"
+        }
+        else {
+            WaoFail "$Dest 缺 package.json，跑不了 skill unlink --all 来摘技能链接——已中止卸载（仓库未删除）。`n怎么做：用非递归 rmdir 摘掉指向 $Dest 的技能链接后，再自行删除该目录。"
+        }
+    }
 
     # npm unlink -g（失败容忍：从未 link 过会失败——预期内，警告后继续）。
     if (Test-Path -LiteralPath (Join-Path $Dest 'package.json')) {

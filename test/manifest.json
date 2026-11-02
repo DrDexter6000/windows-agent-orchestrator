@@ -32,6 +32,7 @@
       "commands/lanesCommand.test.js",
       "commands/runsSettleCli.test.js",
       "commands/registryListDispatchHold.test.js",
+      "commands/skillLink.test.js",
       "delivery/deliveryReview.test.js",
       "delivery/gitChildEnvGuard.test.js",
       "delivery/runDeliverySettlementWait.test.js",

@@ -40,6 +40,23 @@
 //                 docs/usage/host.md。
 //   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话 23 工具；
 //   codex 0.159.2 `codex exec` 调用 wao.workspace_status completed。详见决定 0066。）
+//   skillSlot   — 2026-11-02 Lead 实测（决定 0107）：各候选目录放临时探针技能，
+//                 再无头问宿主看到哪些。claude-code（桌面内置）读 ~/.claude/skills
+//                 （新技能几秒内出现在正在运行的会话），不读 ~/.agents/skills；
+//                 codex 0.165.0 读 ~/.agents/skills 与 ~/.codex/skills；kimi-code
+//                 2.4.0 读 ~/.agents/skills 与 ~/.kimi-code/skills，不读
+//                 ~/.kimi/skills；zcode CLI 0.17.1 未核实（无头 -p 两次报 SQLite
+//                 迁移初始化失败）；opencode / claude-desktop / dsh 未测。
+//
+// 决定 0107（2026-11-02 Owner 批准的窄口子）：可选 skillSlot——该宿主读取技能的
+// 目录（相对用户主目录）+ 核实证据（日期、宿主版本、方法）。纯事实字段
+// （configHint/detectEnv 同类），不是第四根能力轴：hostVerified 仍只表示 MCP 加载。
+// 没有核实证据的宿主不给 skillSlot（不猜）。只有显式的 skill link/unlink 命令
+// 可以在 skillSlot 声明的槽位里建/删名为 wao-orchestrator 的 junction；宿主的
+// 配置文件照旧一律不写。
+//   homeProof   — 可选：证明宿主已安装的用户主目录（相对主目录）。缺省 = dir 的
+//                 首段；共享槽位（.agents/skills）不是任何宿主自己的安装证据，
+//                 必须显式给出宿主自身的主目录。
 //
 // 决定 0066 附加轴（不属三能力矩阵，纯事实字段）：
 //   configHint — 无注册子命令的宿主（文件式注册）要并入片段的配置文件位置；
@@ -137,6 +154,11 @@ function dshCordisPatchShape(entry) {
   };
 }
 
+// 共享技能槽位（决定 0107）：codex 与 kimi-code 都读 ~/.agents/skills——只定义
+// 一次（勿在描述符外写第二份路径字面量），两个宿主引用同一个常量；一条链接
+// 两个宿主同时受益。
+const SKILL_SLOT_AGENTS_DIR = ".agents/skills";
+
 export const HOST_DESCRIPTORS = [
   {
     id: "claude-code",
@@ -149,6 +171,14 @@ export const HOST_DESCRIPTORS = [
     example: (argv) => `claude mcp add wao --scope user -- ${argv}`,
     detectEnv: ["CLAUDECODE"],
     sessionEnv: ["CLAUDE_CODE_SESSION_ID"], // 桌面端内置 Claude Code 的 shell 环境实见（独立 CLI 未核，缺席则按日）
+    skillSlot: {
+      dir: ".claude/skills", // homeProof 缺省取首段 .claude
+      evidence: {
+        date: "2026-11-02",
+        hostVersion: "桌面内置 claude-code",
+        method: "各候选目录放临时探针技能后无头问宿主：~/.claude/skills 的新技能几秒内出现在正在运行的会话；~/.agents/skills 不读",
+      },
+    },
   },
   {
     id: "codex",
@@ -161,6 +191,15 @@ export const HOST_DESCRIPTORS = [
     example: (argv) => `codex mcp add wao -- ${argv}`,
     detectEnv: ["CODEX_THREAD_ID"], // codex exec 0.159.2 的 shell 环境实见
     sessionEnv: ["CODEX_THREAD_ID"],
+    skillSlot: {
+      dir: SKILL_SLOT_AGENTS_DIR, // 与 kimi-code 共享（只定义一次）；~/.codex/skills 同样在读，但不在此重复第二份槽位
+      homeProof: ".codex", // .agents 是共享目录，不证明 codex 装没装——安装证据用宿主自身主目录
+      evidence: {
+        date: "2026-11-02",
+        hostVersion: "codex 0.165.0",
+        method: "各候选目录放临时探针技能后无头问宿主：~/.agents/skills 与 ~/.codex/skills 都读；共享槽位取 .agents/skills",
+      },
+    },
   },
   {
     id: "zcode",
@@ -182,6 +221,15 @@ export const HOST_DESCRIPTORS = [
     stability: "stable",
     renderSnippet: mcpServersShape,
     configHint: "~/.kimi-code/mcp.json",
+    skillSlot: {
+      dir: SKILL_SLOT_AGENTS_DIR, // 与 codex 共享（只定义一次）；~/.kimi-code/skills 同样在读，~/.kimi/skills 不读
+      homeProof: ".kimi-code", // .agents 是共享目录，安装证据用宿主自身主目录
+      evidence: {
+        date: "2026-11-02",
+        hostVersion: "kimi-code 2.4.0",
+        method: "各候选目录放临时探针技能后无头问宿主：~/.agents/skills 与 ~/.kimi-code/skills 都读；~/.kimi/skills 不读",
+      },
+    },
     example: () =>
       "把 mcp bind --host kimi-code emit 的 mcpServers.wao 条目并入 ~/.kimi-code/mcp.json（kimi 无 mcp 注册子命令），开新会话后用 mcp status --host kimi-code 核对",
   },

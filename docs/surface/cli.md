@@ -71,6 +71,10 @@ MCP host registration (the MCP tool surface is host-neutral; hosts: claude-code,
   mcp bind --host <host> [--cwd <git-root>]   # codex: writes the project's .codex/config.toml (needs --cwd); every other host: prints the exact registration command/snippet (WAO never writes their config)
   mcp unbind --host codex --cwd <git-root>
 
+Skill slot (hosts: claude-code, codex, kimi-code; hosts without a verified slot print manual guidance; host config files are never written):
+  skill link --host <host> [--apply]   # default preview: slot, link target, current state; --apply creates the junction to this checkout
+  skill unlink --host <host> [--apply]   # removes only the link that targets this checkout (non-recursive rmdir); --all for uninstall
+
 Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor), namespaced (wao wao doctor), or npm form (npm run cli -- wao doctor):
   wao init [--cwd DIR] [--state-dir DIR]
   wao decision add --title T [--body B | --body-file F] [--context C]

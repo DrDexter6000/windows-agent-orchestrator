@@ -40,6 +40,8 @@ import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
 import { spawnCommand, runCommand, runAndWait } from "./commands/run.js";
 // M10 P0-1: mcp bind/status/unbind 命令族（项目级 workspace activation）。
 import { mcpCommand } from "./commands/mcp.js";
+// 决定 0107：skill link/unlink 命令族（技能槽位 junction 的唯一改动口子）。
+import { skillCommand } from "./commands/skill.js";
 // M11-2B: playbook list/show 命令族（Lead Playbook Catalog 只读 CLI 适配）。
 // 纯 CLI 适配：argv/format/console，数据逻辑委托 ../application/playbookCatalog.js。
 import { playbookCommand } from "./commands/playbook.js";
@@ -217,6 +219,10 @@ async function main(argv) {
   }
   if (command === "mcp") {
     await mcpCommand(rest, config);
+    return;
+  }
+  if (command === "skill") {
+    await skillCommand(rest, config);
     return;
   }
   if (command === "playbook") {

@@ -43,7 +43,7 @@
 // 本模块内部 helper：_doctorParseSmoke、whichCli（均为 doctor 专用，随 doctor
 // 族搬迁）。
 
-import { existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, join, dirname, sep, isAbsolute, parse } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,6 +98,9 @@ import { readWindowsUserEnv as readWindowsUserEnvValue } from "../application/cr
 // TD-223（2026-10-07）：OAuth 临时目录报数复用 sweep 模块 dry-run（判定规则单一
 // 实现；doctor 只报数，永不执行删除）。
 import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
+// 决定 0107：技能槽位盘点（按宿主表 skillSlot 逐槽位、按槽位路径去重；状态闭集
+// 与 link/unlink 共用 skillLink.js 同一份实现——本文件不写第三份状态判定）。
+import { skillSlotInventory } from "../application/skillLink.js";
 // 0065（0045 §1.2 终局）：0062 B9 乙′的 seatRole 漂移指针行整段删除（席位声明
 // 退役，无可比对对象——0065 决定档 supersession 记录）。
 
@@ -829,7 +832,8 @@ export async function waoDoctorCommand(args, config) {
   // 8. invocation_method / 安装权威探测（TD-72 延伸 → TD-191⑥ 如实化，info 级，
   //    永不计入 verdict 判定）：旧版自述"WAO 故意不进 PATH"为绝对句——但
   //    bin/wao.js（npm link）恰是官方全局形态（M12-8F），机器上还可能并存
-  //    陈旧 shim 与 ~/.agents/skills 整仓拷贝。改为**只报事实不裁决**：PATH 上
+  //    陈旧 shim 与技能槽位整仓拷贝（决定 0107 起槽位按宿主表 skillSlot 逐个
+  //    盘点，不再写死 ~/.agents/skills 单槽位）。改为**只报事实不裁决**：PATH 上
   //    有没有 wao、版本是否漂移、skills 拷贝是否同步、本检出根在哪。三份安装
   //    权威收敛为一份属 Owner 机器裁定（TD-191⑥ 机器半），doctor 不替 Owner 选。
   //    TD-318 会审修：installLines 嵌的外部来源值（PATH 上的 wao 路径、
@@ -869,35 +873,84 @@ export async function waoDoctorCommand(args, config) {
   } else {
     installLines.push("PATH 上无全局 \`wao\`——用 \`npm run cli -- <command>\`（走 v22 shim）调用；这是仓内正常调用形态，不是安装缺失。");
   }
-  const skillsSlot = join(homedir(), ".agents", "skills", "wao-orchestrator");
-  const skillsCopySkill = join(skillsSlot, "SKILL.md");
-  const skillsPkg = join(skillsSlot, "package.json");
-  // TD-191⑥ 会审修（2026-10-09，astra+opus 方案会审 + Lead 亲手复核）：skills 槽位
-  // 可能是 junction/symlink 指向主仓（本机实测形态），不是独立整仓拷贝——junction
-  // 与目标同体、天然零拷贝漂移；把 junction 报成"拷贝+可能不同步"是失实。
-  let skillsSlotTarget = null;
-  try {
-    skillsSlotTarget = lstatSync(skillsSlot).isSymbolicLink() ? realpathSync(skillsSlot) : null;
-  } catch { /* 探测失败按普通目录如实继续 */
-  }
+  // 技能槽位盘点（决定 0107）：按宿主表 skillSlot 逐槽位报告（按槽位路径去重），
+  // 替换旧的 ~/.agents/skills 单槽位硬编码探测。全部恒 INFO（5c/5d 纪律：机器
+  // 态不得影响 verdict/退出码——开发机/用户机的槽位态差异会让 doctor 常态
+  // DEGRADED）。对外口径："链接在"不等于"宿主已加载"——宿主是否真读该目录以
+  // 宿主表 skillSlot 的核实证据为准。已安装的槽位照旧喂三根盘点（B 根：
+  // junction=同体零漂移；物理拷贝=漂移源，做 SKILL.md 同步检查，TD-191⑥）。
+  const checkoutRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  // 注入缝（与 userEnvReader/scopedEnvReader 同款惯例）：测试经 config.skillSlotInventory
+  // 喂固定槽位事实，真 doctor 才读真实用户主目录——测试绝不碰主目录。
+  const inventoryFn = config?.skillSlotInventory ?? skillSlotInventory;
+  // 主目录同样可注入（槽位盘点与下方 installer 根探测共用）：测试给临时目录。
+  const doctorHome = config?.homeDir ?? homedir();
+  const slotInventory = inventoryFn({ checkoutRoot, homeDir: doctorHome });
   // 三根盘点（TD-191⑥ 一致性机制，Owner 2026-10-02 裁定 C=日常根）：收集各在场
   // 安装形态的版本事实，末尾统一做一致性裁决报告——只报事实与漂移，不自动选根。
   const rootVersions = [];
-  const skillsVersion = existsSync(skillsPkg)
-    ? (() => { try { return JSON.parse(readFileSync(skillsPkg, "utf8")).version ?? "未知"; } catch { return "未知"; } })()
-    : null;
-  if (existsSync(skillsCopySkill)) {
-    if (skillsSlotTarget !== null) {
-      // 验收修（astra+opus）：不预断目标就是 A（当前检出）——如实显示实际目标，
-      // 是否同一份由读报告的人对照"当前检出"行判断。
-      rootVersions.push(["B skills 槽位（junction）", skillsVersion ?? "未知"]);
-      installLines.push(`skills 槽位是 junction/symlink → ${escapeControlChars(skillsSlotTarget)}（与该目标同体；对照下方"当前检出"行判断是否同一份；TD-191⑥）。`);
+  let hotCheckoutReported = false;
+  for (const slot of slotInventory) {
+    const slotName = `skill_slot_${slot.dir.replace(/[\\/]+/g, "-").replace(/^\./, "")}`;
+    const hostsText = slot.hosts.join("、");
+    const noteTail = "链接在不等于宿主已加载（加载以宿主表 skillSlot 的核实证据为准）。";
+    if (slot.state === "absent") {
+      // 缺槽位是 INFO（未安装指引），不是坏——fresh 机器的正常初态。
+      pushCheck(checks, {
+        name: slotName,
+        pass: true,
+        level: "info",
+        detail: `宿主 ${hostsText} 的技能槽位缺位（${escapeControlChars(slot.slotPath)}）——这个槽位里没有 WAO 链接；run: npm run cli -- skill link --host <宿主>（先预览再 --apply；读这个槽位的宿主：${hostsText}，选你装了的）。${noteTail}`,
+        fix: `npm run cli -- skill link --host ${slot.hosts[0]} --apply（先预览${slot.hosts.length > 1 ? `；也可用 --host ${slot.hosts.slice(1).join(" / ")}，选你装了的宿主` : ""}）`,
+      });
+      continue;
+    }
+    if (slot.state !== "linked-current") {
+      const stateText = {
+        "linked-other": `junction 指向别处（${escapeControlChars(slot.target ?? "读取失败")}）——宿主可能加载另一份 WAO`,
+        "not-a-link": "普通目录或文件（物理拷贝）——不维护拷贝同步，收敛方式=改为链接或删除（AGENT_ONBOARDING §2）",
+        "broken-link": "链接存在但目标不可达——宿主发现不了 WAO skill",
+        "unknown": "状态读不了（权限等）——如实报 unknown，不猜",
+      }[slot.state] ?? `未知状态 ${slot.state}`;
+      const runText = {
+        "linked-other": "人工确认后用非递归 rmdir 摘掉这个链接（不要 Remove-Item -Recurse，会穿透删掉目标），再 skill link",
+        "broken-link": "用非递归 rmdir 摘掉这个断链，再 skill link",
+        "not-a-link": "确认它是 WAO 的物理拷贝或无关文件后删掉（它不是链接，按普通文件或目录删），再 skill link",
+        "unknown": "先查清读不了的原因（如权限），查明之前不要删；查明后按实际状态处理",
+      }[slot.state] ?? "人工检查";
+      pushCheck(checks, {
+        name: slotName,
+        pass: true,
+        level: "info",
+        detail: `宿主 ${hostsText} 的技能槽位（${escapeControlChars(slot.slotPath)}）：${stateText}；run: ${runText}（skill unlink 只删指向本检出的链接，不处理这种状态）。${noteTail}`,
+        fix: `${runText}；之后 npm run cli -- skill link --host ${slot.hosts.length > 1 ? "<宿主>" : slot.hosts[0]}（先预览再 --apply；无 --force${slot.hosts.length > 1 ? `；读这个槽位的宿主：${hostsText}，选你装了的` : ""}）`,
+      });
+    } else {
+      pushCheck(checks, {
+        name: slotName,
+        pass: true,
+        level: "info",
+        detail: `宿主 ${hostsText} 的技能槽位是 junction → 当前检出根（${escapeControlChars(slot.slotPath)}）。${noteTail}`,
+      });
+    }
+    // B 根事实：已安装的槽位读版本进 rootVersions（junction 与拷贝同源读槽位下的 package.json）。
+    const slotSkillMd = join(slot.slotPath, "SKILL.md");
+    if (!existsSync(slotSkillMd)) continue;
+    const slotPkg = join(slot.slotPath, "package.json");
+    const slotVersion = existsSync(slotPkg)
+      ? (() => { try { return JSON.parse(readFileSync(slotPkg, "utf8")).version ?? "未知"; } catch { return "未知"; } })()
+      : null;
+    if (slot.state === "linked-current" || slot.state === "linked-other") {
+      // 验收修（astra+opus，TD-191⑥）：不预断目标就是 A（当前检出）——如实显示
+      // 实际目标；linked-current 已由槽位状态判定，linked-other 显示原目标。
+      rootVersions.push([`B skills 槽位 ${slot.dir}（junction）`, slotVersion ?? "未知"]);
+      installLines.push(`skills 槽位 ${slot.dir} 是 junction/symlink → ${escapeControlChars(slot.target ?? "读取失败")}（与该目标同体、天然零拷贝漂移；对照下方"当前检出"行判断是否同一份；TD-191⑥/决定 0107）。`);
       // 决定 0049 advisory（kimi+opus 会审共同风险项，advisory 不阻断）：junction
       // 换来零漂移的同时丢掉了开发/执行隔离——目标恰为当前检出时，全局入口跑的
       // 就是这份检出的实时状态。如实报告其分支与脏态：非 main 或有未提交改动时
-      // 提醒"全局 wao 正在执行开发中代码"。
-      const checkoutRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-      if (resolve(skillsSlotTarget) === checkoutRoot) {
+      // 提醒"全局入口正在执行开发中代码"。多槽位同目标只报一次（同一份检出）。
+      if (slot.state === "linked-current" && !hotCheckoutReported) {
+        hotCheckoutReported = true;
         let branch = "未知";
         let dirtyCount = -1;
         try {
@@ -910,32 +963,32 @@ export async function waoDoctorCommand(args, config) {
           `junction 目标=当前检出：分支 ${escapeControlChars(branch)}${dirtyCount >= 0 ? `、未提交改动 ${dirtyCount} 处` : ""}${hot ? "——全局入口正在执行开发中代码（决定 0049 advisory，不阻断）" : "（开发面干净）"}。`,
         );
       }
-    } else {
-      rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
-      const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
+    } else if (slot.state === "not-a-link") {
+      rootVersions.push([`B skills 拷贝 ${slot.dir}`, slotVersion ?? "未知"]);
+      const repoSkillPath = join(checkoutRoot, "SKILL.md");
       let inSync = null;
       try {
         const a = await readFile(repoSkillPath, "utf8");
-        const b = await readFile(skillsCopySkill, "utf8");
+        const b = await readFile(slotSkillMd, "utf8");
         inSync = a === b;
       } catch { /* 读失败如实报未探测 */
       }
       installLines.push(
         inSync === null
-          ? `skills 整仓拷贝在场（${escapeControlChars(dirname(skillsCopySkill))}；同步性未探测）。`
+          ? `skills 整仓拷贝在场（${escapeControlChars(slot.slotPath)}；同步性未探测）。`
           : inSync
-            ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${escapeControlChars(skillsVersion ?? "未知")}）。`
-            : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${escapeControlChars(skillsVersion ?? "未知")}）——宿主可能加载旧技能（TD-191⑥）。`,
+            ? `skills 整仓拷贝（${escapeControlChars(slot.dir)}）与当前仓同步（SKILL.md 一致；版本 ${escapeControlChars(slotVersion ?? "未知")}）。`
+            : `skills 整仓拷贝（${escapeControlChars(slot.dir)}）与当前仓**不同步**（SKILL.md 有差异；版本 ${escapeControlChars(slotVersion ?? "未知")}）——宿主可能加载旧技能（TD-191⑥）。`,
       );
     }
   }
   // C 根（installer 形态，AGENT_ONBOARDING §4a 默认 %USERPROFILE%\wao）
-  const installerPkg = join(homedir(), "wao", "package.json");
+  const installerPkg = join(doctorHome, "wao", "package.json");
   if (existsSync(installerPkg)) {
     let cv = "未知";
     try { cv = JSON.parse(readFileSync(installerPkg, "utf8")).version ?? "未知"; } catch { /* 如实未知 */ }
     rootVersions.push(["C installer 根", cv]);
-    installLines.push(`installer 根在场：${escapeControlChars(join(homedir(), "wao"))}（版本 ${escapeControlChars(cv)}；Owner 裁定的日常执行根——TD-191⑥）。`);
+    installLines.push(`installer 根在场：${escapeControlChars(join(doctorHome, "wao"))}（版本 ${escapeControlChars(cv)}；Owner 裁定的日常执行根——TD-191⑥）。`);
   }
   if (shimVersion !== null && shimVersion !== "未知") rootVersions.push(["PATH 全局 shim", shimVersion]);
   installLines.push(`当前检出（安装权威候选之一）：${escapeControlChars(dirname(fileURLToPath(import.meta.url)) + sep + ".." + sep + "..")}（版本 ${escapeControlChars(WAO_VERSION)}）`);

@@ -26,7 +26,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 | 事 | 做几次 | 装在哪 | 是什么 |
 |---|---|---|---|
-| **装 WAO skill** | 一次 | **runtime 的 skill 目录**（如 `~/.codex/skills/`、`~/.claude/skills/`） | 让 runtime 知道 WAO 这个技能存在 |
+| **装 WAO skill** | 一次 | **runtime 的 skill 目录**——用 `skill link --host <host>` 建立指向本检出的 junction（先预览再 `--apply`）；哪些宿主有核实槽位见 §4b | 让 runtime 知道 WAO 这个技能存在 |
 | **初始化目标项目的 .wao/** | 每个被开发项目一次 | **目标项目根目录**（如 `<目标项目>` 仓） | 该项目的状态/决策/交接记录 |
 
 **关键区分**：
@@ -110,13 +110,17 @@ npm link           # 可选，每台机器一次：暴露全局 `wao` 命令（�
 
 ### 4b. 装 WAO skill 到 runtime 目录（一次性）
 
-WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill 发现机制不同：
+WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。**每个有核实技能槽位的宿主跑一次 `skill link --host <host>`：先预览（槽位、链接目标、当前状态），再 `--apply` 建立指向唯一物理检出的 junction**：
 
-- **codex**：按你的 plugin/skill 系统注册（发现槽位以你的 codex 版本文档为准，如 `~/.codex/skills/` 或等价机制）
-- **claude-code**：注册 SKILL.md 到 `~/.claude/skills/wao-orchestrator/SKILL.md`——应为**指向唯一物理检出的 junction**而非物理拷贝（注意：doctor 的技能槽位探测只覆盖 `~/.agents/skills`；junction 的删除必须用非递归 `rmdir`，`Remove-Item -Recurse` 会穿透删掉目标检出）
-- **kimi-code**：`~/.kimi-code/config.toml` 的 `extra_skill_dirs` 指向含 SKILL.md 的目录
-- **zcode**：本机观察到技能从用户级目录 `~/.agents/skills/wao-orchestrator/` 发现（宿主行为观察，非 hostVerified 覆盖面）；该槽位同样应为指向唯一检出的 junction。MCP 接入走插件系统，见 §4e
-- **其它**：按你的 runtime 文档
+```
+npm run cli -- skill link --host <host>          # 预览，零写入
+npm run cli -- skill link --host <host> --apply  # 创建 junction
+```
+
+- 各宿主的槽位路径与核实证据的家是**宿主表**（`src/hostAdapters/hostDescriptors.js` 的 `skillSlot` 字段）——本文档不再逐个列路径，`--apply` 会建在核实过的槽位里；没有核实槽位的宿主（命令会明说）**按该宿主的文档安装**，WAO 不写宿主配置文件。
+- 共享槽位（如 codex 与 kimi-code 都读的用户级目录）只链接一次，两个宿主同时受益——`wao doctor` 的逐槽位报告会列出每个槽位被哪些宿主读。
+- 摘链接用 `npm run cli -- skill unlink --host <host> --apply`：只删链接本身（非递归 rmdir），目标检出不动；物理拷贝（把整仓复制进槽位）是漂移源，`wao doctor` 会如实报告，收敛方式=改为链接或删除，**不维护拷贝同步**（决定 0049）。
+- "链接在"不等于"宿主已加载"：槽位读不读以宿主表的核实证据为准。
 
 **不要把 WAO skill 装到被开发项目目录**（如 `<目标项目>`）——那是目标项目，不是 runtime 目录。装错位置会污染项目。
 

@@ -40,3 +40,5 @@
 - 经 dsh MCP 发起 `run` / `run_consult` 的凭据面未实测：dsh-mcp-client 给 stdio 子进程的是**脱敏后的 ambient env**（名字像凭据的变量会被丢掉）。WAO 的 Windows 用户环境桥覆盖 `credentialEnv` 声明，其余通道的登录态是文件型，预期可用；首次真实派发时确认，若被剥就用片段里的 `env:`（`!!js process.env.X`）显式透传。
 - dsh 仍是 0.2.1-rc.2；升到正式版时 patch 格式与插件配置字段要复核一次。
 - `DSH_SESSION_ID` 的可见性只在当前 dsh 版本上核实过；换版本后若 CLI 子进程不再带它，advisory 只会静默，不会误报。
+
+- 修订（2026-11-02，决定 0107）：skillSlot 与技能链接命令不触碰任何宿主配置文件；dsh 无核实技能槽位（skill link 只打印手工指引）——本决定的探测与片段边界不变。
