@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { proveWorkspace } from "../../src/application/workspaceBinding.js";
+import { proveWorkspace, proveWorkspaceRoot } from "../../src/application/workspaceBinding.js";
 
 // ===== Helpers: create temporary Git repos for testing =====
 
@@ -187,4 +187,59 @@ test("WS-10: workspaceBinding.js does not use shell:true or shell command string
     .join("\n");
   assert.ok(!/shell:\s*true/.test(codeOnly), "must not use shell:true");
   assert.ok(!/execSync\s*\(/.test(codeOnly), "must not use execSync (use execFileSync/execFile)");
+});
+
+// 11–14. proveWorkspaceRoot（TD-138 全量提速批）：与 proveWorkspace 同一校验，
+// 但不跑 `git status`，返回 { root, gitHead }（无 dirty）。
+test("WS-11: proveWorkspaceRoot 与 proveWorkspace 在真实仓库上 root/gitHead 一致", () => {
+  const tmp = makeTempDir();
+  try {
+    const { dir, headCommit } = makeGitRepo(tmp);
+    const full = proveWorkspace(dir);
+    const rootOnly = proveWorkspaceRoot(dir);
+    assert.equal(rootOnly.root, full.root, "root 与全量证明一致");
+    assert.equal(rootOnly.gitHead, full.gitHead, "gitHead 与全量证明一致");
+    assert.equal(rootOnly.gitHead, headCommit, "gitHead 是仓库真实 HEAD");
+  } finally {
+    cleanupDir(tmp);
+  }
+});
+
+test("WS-12: 脏仓库上 proveWorkspaceRoot 照样通过，且结果里没有 dirty", () => {
+  const tmp = makeTempDir();
+  try {
+    makeGitRepo(tmp);
+    writeFileSync(join(tmp, "untracked.txt"), "x", "utf8");
+    writeFileSync(join(tmp, "README.md"), "# modified\n", "utf8");
+    // 全量证明看到 dirty=true（对照组），root-only 证明同样通过。
+    assert.equal(proveWorkspace(tmp).dirty, true, "对照组：同一仓库确实脏");
+    const rootOnly = proveWorkspaceRoot(tmp);
+    assert.ok(!("dirty" in rootOnly), "结果不带 dirty 键（调用方无从误读脏状态）");
+  } finally {
+    cleanupDir(tmp);
+  }
+});
+
+test("WS-13: 空仓库（无提交）proveWorkspaceRoot 与 proveWorkspace 都拒绝", () => {
+  const tmp = makeTempDir();
+  try {
+    execFileSync("git", ["init"], { cwd: tmp, stdio: "pipe" });
+    assert.throws(() => proveWorkspace(tmp), "无提交 → HEAD 不可解析 → 全量证明 fail-closed");
+    assert.throws(() => proveWorkspaceRoot(tmp), "无提交 → HEAD 不可解析 → root-only 证明同样 fail-closed");
+  } finally {
+    cleanupDir(tmp);
+  }
+});
+
+test("WS-14: 子目录 proveWorkspaceRoot 与 proveWorkspace 都拒绝", () => {
+  const tmp = makeTempDir();
+  try {
+    makeGitRepo(tmp);
+    const subdir = join(tmp, "subdir");
+    mkdirSync(subdir);
+    assert.throws(() => proveWorkspace(subdir), "子目录不得静默向上扩权（全量证明）");
+    assert.throws(() => proveWorkspaceRoot(subdir), "子目录不得静默向上扩权（root-only 证明）");
+  } finally {
+    cleanupDir(tmp);
+  }
 });

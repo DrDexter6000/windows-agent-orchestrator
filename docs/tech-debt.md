@@ -34,7 +34,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
-| TD-138 | 全量测试由 filesystem 波决定，该波受机器资源所限：并发 16 时各文件耗时之和约为并发 8 的 1.5 倍。2026-11-01 实测并发 16 接电时快 5%–20%（三组交替，均值约 12%），用电池合盖时却有 10 个文件撞上单文件 1200 秒上限（deliveryVerification 波内 1196 秒），所以维持 8；耗时主要是被测代码本身的真实 git 子进程 | 开放 | 择机：减少最慢几个交付类文件的 git 工作量（共用夹具，或给 src/delivery.js 的打包与恢复加 git 执行器注入缝） | scripts/canonical-test.mjs test/_gitRepoFixture.mjs src/delivery.js |
+| TD-138 | 全量由 filesystem 波决定，并发维持 8（2026-11-01 实测 16 接电均值只快约 12%，电池合盖时有文件撞 1200 s 单文件上限）。该波慢文件里测试准备的 git 只占约一成，主体是被测代码的真实 git，分散在 delivery 与 reclaim 的大量调用点。cli.test.js 已拆成三份，工作区证明已合并 rev-parse、不读 dirty 的调用方改用 proveWorkspaceRoot（2026-11-02 交替实测：process 波约 −33 s，filesystem 波约 −21 s） | 开放 | 择机：合并 src/delivery.js 打包与恢复里的 git 调用 | scripts/canonical-test.mjs src/delivery.js src/application/workspaceBinding.js |
 | TD-139 | MCP 的 run_status 只返回 lastActivity.kind，不含活动摘要文本（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 择机：下次改 MCP 状态面时按 run_activity 同一口径放开摘要 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 择机：每季度核对 v24 libuv 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |

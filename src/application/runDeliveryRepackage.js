@@ -85,7 +85,7 @@ import {
 } from "./candidateInventory.js";
 import { validateProjectedPath } from "./deliveryReview.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
-import { proveWorkspace } from "./workspaceBinding.js";
+import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
 
 // ===== TD-226: closed-set repackage rejection codes (single authority) =====
@@ -534,7 +534,8 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   // 时的幂等重入由已提交 DeliveryRef + provenance 约束。
   let workspaceProof;
   try {
-    workspaceProof = proveWorkspace(bound.worktreePath);
+    // 只读 root+HEAD（headAtBase 判据）；dirty 不参与（TD-138：省一次 git status）。
+    workspaceProof = proveWorkspaceRoot(bound.worktreePath);
   } catch (err) {
     throw new RepackageRejectionError("worktree_unusable", `runDeliveryRepackage: candidate worktree is not provable (${err?.message ?? "unprovable worktree"})`);
   }

@@ -109,9 +109,9 @@ import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
 import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "../application/runQuietAdvisory.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
 // reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
-// Shared workspace authority (proveWorkspace) + registry IDs (readRegistry).
+// Shared workspace authority (proveWorkspaceRoot) + registry IDs (readRegistry).
 import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
-import { proveWorkspace } from "../application/workspaceBinding.js";
+import { proveWorkspaceRoot } from "../application/workspaceBinding.js";
 import { readRegistry } from "../registry.js";
 
 // TD-109: the full legal subcommand set of `runs`. `list` was previously only
@@ -1732,7 +1732,8 @@ export async function runsDashboardCommand(args, config, injections = {}) {
  */
 export async function runDashboardWeb(options, config, injections = {}) {
   const createServer = injections.createServerFn ?? createOwnerDashboardServer;
-  const prove = injections.proveWorkspaceFn ?? proveWorkspace;
+  // dashboard 只读 root；dirty 不参与（TD-138：省一次 git status）。
+  const prove = injections.proveWorkspaceFn ?? proveWorkspaceRoot;
   const readReg = injections.readRegistryFn ?? readRegistry;
   const lifecycle = injections.lifecycle ?? createProcessLifecycle();
   const log = injections.log ?? ((s) => console.log(s));

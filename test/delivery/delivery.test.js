@@ -1168,7 +1168,7 @@ test("2C-09: allowedPaths with trailing slash is accepted and normalized (TD-137
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
     // TD-137④：尾斜杠条目归一化放行（段边界前缀语义），不再拒绝；归一化形状
-    // 与仍非法形状（"src//"、"/"、"./" 等）的钉死在 test/isolation-infra/cli.test.js。
+    // 与仍非法形状（"src//"、"/"、"./" 等）的钉死在 test/isolation-infra/cli-runs.test.js。
     const ref = inspectDelivery(
       baseInput(wtPath, baseCommit, { allowedPaths: ["src/"] }),
     );

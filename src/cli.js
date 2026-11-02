@@ -73,9 +73,9 @@ export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 export { buildDashboard, runsDashboardCommand, runDashboardWeb };
 // resolveArtifactPath 从 wao.js re-export（原 cli.js export，保持符号可见）。
 export { resolveArtifactPath };
-// statusCommand / collectCommand 从 observe.js re-export（test/cli.test.js 依赖）。
+// statusCommand / collectCommand 从 observe.js re-export（test/isolation-infra/cli.test.js 与 cli-runs.test.js 依赖）。
 export { statusCommand, collectCommand };
-// runCommand / runAndWait 从 run.js re-export（test/cli.test.js 依赖）。
+// runCommand / runAndWait 从 run.js re-export（test/isolation-infra/cli.test.js 与 cli-runs.test.js 依赖）。
 export { runCommand, runAndWait };
 
 const hardcodedDefaults = {

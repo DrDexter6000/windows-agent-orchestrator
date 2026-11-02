@@ -105,15 +105,22 @@ function isDirty(cwd, opts) {
 }
 
 /**
- * Prove that a host-authorized path is a Git worktree top-level directory.
+ * Prove that a host-authorized path is a Git worktree top-level directory and
+ * read its canonical root + full HEAD commit — WITHOUT the dirty status
+ * (one `git status` subprocess saved per proof; callers that never read dirty
+ * use this variant). Same validation, same fail-closed semantics as
+ * proveWorkspace.
+ *
+ * TD-138（2026-11-01 全量提速批）：两次 rev-parse 合成一次
+ * `git rev-parse --show-toplevel HEAD`（按行取顶层与 HEAD）。
  *
  * @param {string} pathStr — absolute path to prove
  * @param {{ gitBin?: string }} [opts] — optional git binary override (tests)
- * @returns {{ root: string, gitHead: string, dirty: boolean }}
+ * @returns {{ root: string, gitHead: string }}
  * @throws {Error} if the path is not absolute, not a directory, not a Git top-level,
- *   or any Git command fails
+ *   or any Git command fails (a repo with no commits fails on unresolvable HEAD)
  */
-export function proveWorkspace(pathStr, opts = {}) {
+export function proveWorkspaceRoot(pathStr, opts = {}) {
   if (typeof pathStr !== "string" || pathStr.length === 0) {
     throw new Error("workspace: path must be a non-empty string");
   }
@@ -125,10 +132,17 @@ export function proveWorkspace(pathStr, opts = {}) {
   // If the directory does not exist, realpathSync throws — fail closed.
   const canonicalInput = normalizePath(pathStr);
 
-  // Ask Git for the worktree top-level of this directory.
-  // If this is not inside a Git repo, the command fails — fail closed.
-  const toplevelRaw = git(["rev-parse", "--show-toplevel"], pathStr, opts);
-  const canonicalToplevel = normalizePath(toplevelRaw);
+  // Ask Git for the worktree top-level and the full HEAD commit in ONE call
+  // (line 1 = top-level, line 2 = HEAD). If this is not inside a Git repo, or
+  // HEAD cannot be resolved (empty repo, no commits yet), the command fails —
+  // fail closed either way.
+  const revParseRaw = git(["rev-parse", "--show-toplevel", "HEAD"], pathStr, opts);
+  const revParseLines = revParseRaw.split("\n");
+  if (revParseLines.length !== 2) {
+    throw new Error("workspace: git rev-parse HEAD returned malformed output");
+  }
+  const canonicalToplevel = normalizePath(revParseLines[0]);
+  const gitHead = revParseLines[1];
 
   // The input path MUST be the Git top-level — not a subdirectory.
   // A subdirectory would silently expand authorization, which is forbidden.
@@ -138,19 +152,33 @@ export function proveWorkspace(pathStr, opts = {}) {
     throw new Error("workspace: path must be a Git worktree top-level, not a subdirectory");
   }
 
-  // Read the full HEAD commit (40-char hex on most systems; 64 on SHA-256 repos).
-  const gitHead = git(["rev-parse", "HEAD"], pathStr, opts);
-  // Validate it looks like a commit hash.
+  // Validate HEAD looks like a commit hash (40-char hex; 64 on SHA-256 repos).
   if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(gitHead)) {
     throw new Error("workspace: git rev-parse HEAD returned malformed output");
   }
+
+  return { root: canonicalToplevel, gitHead };
+}
+
+/**
+ * Prove that a host-authorized path is a Git worktree top-level directory.
+ * proveWorkspaceRoot plus the dirty status (tracked + untracked changes).
+ *
+ * @param {string} pathStr — absolute path to prove
+ * @param {{ gitBin?: string }} [opts] — optional git binary override (tests)
+ * @returns {{ root: string, gitHead: string, dirty: boolean }}
+ * @throws {Error} if the path is not absolute, not a directory, not a Git top-level,
+ *   or any Git command fails
+ */
+export function proveWorkspace(pathStr, opts = {}) {
+  const { root, gitHead } = proveWorkspaceRoot(pathStr, opts);
 
   // Check dirty status (tracked + untracked changes). Dirty is report-only;
   // it does NOT block binding because delivery creates an isolated worktree from HEAD.
   const dirty = isDirty(pathStr, opts);
 
   return {
-    root: canonicalToplevel,
+    root,
     gitHead,
     dirty,
   };

@@ -465,7 +465,7 @@ async function waoSweepClaudeConfigCommand(args) {
  *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入，保持依赖方向。
  */
 // wao 命名空间子命令闭集：顶层命令名命中它时直接按 `wao <sub>` 执行（src/cli.js）。
-// 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
+// 与下方 waoCommand 的 dispatch 同步（cli-registry.test.js 有同步守卫）。
 // 0064：+lanes（车道画像只读查询面）。
 export const WAO_SUBCOMMANDS = [
   "init", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",

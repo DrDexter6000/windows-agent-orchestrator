@@ -36,7 +36,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
-import { proveWorkspace } from "./workspaceBinding.js";
+import { proveWorkspace, proveWorkspaceRoot } from "./workspaceBinding.js";
 import { atomicWriteFileSync, removeFileSync } from "../atomicWriteSync.js";
 import {
   codexMcpList,
@@ -619,7 +619,7 @@ export async function bindWorkspace({ host, cwd, hooks }) {
 
 /**
  * Query the workspace binding status.
- * Runs proveWorkspace (canonical proof, not just string matching).
+ * Runs proveWorkspaceRoot (canonical proof, not just string matching).
  */
 export async function statusWorkspace({ host, cwd, hooks, probe, includeUserRegistration = false }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
@@ -658,7 +658,8 @@ export async function statusWorkspace({ host, cwd, hooks, probe, includeUserRegi
 
   let canonicalRoot;
   try {
-    const proof = proveWorkspace(cwd);
+    // status 只读 root；dirty 不参与（TD-138：省一次 git status）。
+    const proof = proveWorkspaceRoot(cwd);
     canonicalRoot = proof.root;
   } catch (err) {
     return withUser({ bound: false, host, status: "invalid_workspace", error: err.message });
@@ -840,8 +841,8 @@ export async function unbindWorkspace({ host, cwd, hooks }) {
 
   const h = { ...defaultHooks(), ...hooks };
 
-  // 1. Prove workspace
-  const proof = proveWorkspace(cwd);
+  // 1. Prove workspace（unbind 只读 root；dirty 不参与——TD-138：省一次 git status）
+  const proof = proveWorkspaceRoot(cwd);
   const canonicalRoot = proof.root;
   const expected = expectedServerContract(canonicalRoot);
   assertLocalCodexPaths(canonicalRoot);

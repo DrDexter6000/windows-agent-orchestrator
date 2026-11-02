@@ -7,9 +7,9 @@
 // `wao handoff read` 未找到时已输出 JSON `{found:false}`，但找到时输出裸 markdown。
 // 本文件用 spawn 级 CLI 测试锁定 JSON 契约（JSON.parse(stdout) 必须成功 + 代表字段），
 // 并为 `wao decision list` / `wao handoff read` 补 CLI 级 text 路径守卫（其余 5 个
-// 命令已有 CLI 级 text 测试：test/runs.test.js 与 test/cli.test.js）。
+// 命令已有 CLI 级 text 测试：test/runs.test.js 与 test/isolation-infra/cli-*.test.js）。
 //
-// 子进程注入 WAO_SKIP_VERSION_GUARD=1（与 cli.test.js 的 runCliOnPathNode 同一
+// 子进程注入 WAO_SKIP_VERSION_GUARD=1（与 _cliTestHelpers.mjs 的 runCliOnPathNode 同一
 // 自包含模式），验证的是 CLI 渲染行为本身，不是 version guard。
 
 import { test } from "node:test";
@@ -267,7 +267,7 @@ test("TD-86: runs list --format json 直接序列化 listRuns 结果", async () 
     assert.ok(Array.isArray(parsed.runs), "runs 数组（listRuns 结果原样）");
     assert.equal(parsed.runs.length, 2);
     assert.equal(parsed.runs[0].runId, "run_aaa",
-      "无 ts 夹具，此处不涉排序 tie-break（排序真契约 updatedAt desc / 时间戳序由 test/isolation-infra/cli.test.js TD-137① + TD-153(d2) 钉承载）");
+      "无 ts 夹具，此处不涉排序 tie-break（排序真契约 updatedAt desc / 时间戳序由 test/isolation-infra/cli-runs.test.js TD-137① + TD-153(d2) 钉承载）");
     assert.equal(parsed.runs[0].state, "completed", "代表字段 state");
     assert.equal(parsed.matchedCount, 2, "matchedCount 透传");
   } finally {

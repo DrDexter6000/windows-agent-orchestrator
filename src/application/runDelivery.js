@@ -47,7 +47,7 @@ import {
   projectIsolationViolationCode,
   SAFE_ISOLATION_VIOLATION_CODES,
 } from "./runSettlement.js";
-import { proveWorkspace } from "./workspaceBinding.js";
+import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
 // 决定 0098：交付读面的 adoption 查询（主分支上声明采纳本运行的提交）。
 import { queryRunAdoption } from "./adoptionQuery.js";
@@ -443,7 +443,7 @@ export function gatherDeliveryView(events, runId, terminalState) {
 //      and a worktreePath;
 //   5. linked-worktree-at-base proof: the persisted worktreePath is a real Git
 //      worktree top-level whose HEAD is EXACTLY the persisted original
-//      baseCommit (proveWorkspace SSOT) — HEAD drift voids the proof.
+//      baseCommit (proveWorkspaceRoot SSOT) — HEAD drift voids the proof.
 // Only then is the reader invoked; a throwing reader also collapses to null.
 
 /**
@@ -467,10 +467,11 @@ function _computeSafeCandidateInventory(events, runId, authorizedWorkspaceRoot, 
     if (!isCanonicalCommitId(delivery.baseCommit)) return null;
     if (!Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0) return null;
     if (typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0) return null;
-    // Linked-worktree-at-base proof (reuses the proveWorkspace SSOT: the path
+    // Linked-worktree-at-base proof (reuses the proveWorkspaceRoot SSOT: the path
     // must be a real Git worktree TOP-LEVEL — never a subdirectory — and all
     // Git failures throw). HEAD must be EXACTLY the persisted original base.
-    const proof = proveWorkspace(bound.worktreePath);
+    // dirty 不参与此证明，读 root+HEAD 即可（TD-138：省一次 git status）。
+    const proof = proveWorkspaceRoot(bound.worktreePath);
     if (proof.gitHead !== delivery.baseCommit) return null;
     const inventory = computeInventoryFn(bound.worktreePath, delivery.baseCommit, delivery.allowedPaths);
     return inventory ?? null;

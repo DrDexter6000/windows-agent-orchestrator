@@ -4,7 +4,7 @@
 //
 // Covers B1 (consumer correctness) and B2 (cursor trust boundary) at the
 // shared application layer. B3 (MCP projection) lives in test/mcpRunCollect.test.js;
-// B4 (CLI parity + audit) lives in test/cli.test.js.
+// B4 (CLI parity + audit) lives in test/isolation-infra/cli-runs.test.js.
 //
 // The pagination algorithm and cursor codec live in
 // src/application/runCollectProjection.js. collectRunMessages is extended to

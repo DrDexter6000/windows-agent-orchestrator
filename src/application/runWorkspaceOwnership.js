@@ -58,7 +58,7 @@
 // ambiguous, conflicting, and cross-run facts remain fail-closed with the
 // same fixed messages.
 
-import { proveWorkspace, pathsMatch, canonicalizeWorkspacePath } from "./workspaceBinding.js";
+import { proveWorkspaceRoot, pathsMatch, canonicalizeWorkspacePath } from "./workspaceBinding.js";
 import { isAbsolute } from "node:path";
 
 /**
@@ -211,7 +211,9 @@ function cwdsAgree(submittedCwd, startedCwd) {
  * @returns {(events: object[], requestedRunId?: string) => {authorized: true, ownershipCwd: string}}
  */
 export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
-  const prove = opts.proveWorkspaceFn ?? proveWorkspace;
+  // TD-138（2026-11-01）：默认证明只读 root，不跑 `git status`——dirty 从不参与
+  // 归属判定（只用于报告），每次建校验器省一个子进程。
+  const prove = opts.proveWorkspaceFn ?? proveWorkspaceRoot;
   const canonicalize = opts.canonicalizeWorkspacePathFn ?? canonicalizeWorkspacePath;
   const match = opts.pathsMatchFn ?? pathsMatch;
   const authorizedProof = prove(authorizedWorkspaceRoot);
@@ -260,7 +262,7 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
  * Accepts the two unambiguous durable shapes for the requested run
  * (background_submitted; foreground run.started), each bound to
  * `requestedRunId` by exact envelope equality, and rejects everything else
- * with fixed messages. The authorized root is proved once via proveWorkspace
+ * with fixed messages. The authorized root is proved once via proveWorkspaceRoot
  * SSOT; the ownership cwd must be absolute and its canonical identity (realpath)
  * must equal the proved root's canonical identity (subdirectories, non-existent
  * paths, and different workspaces fail closed). Uses pathsMatch SSOT for

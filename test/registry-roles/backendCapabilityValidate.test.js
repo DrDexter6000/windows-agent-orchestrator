@@ -271,7 +271,7 @@ test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归�
     assert.match(r.stdout, /✔\s*researcher/, "claude-code 通过");
     assert.match(r.stdout, /✔\s*coder_mm/, "kimi 通过（warning 不 block）");
     assert.match(r.stdout, /✔\s*tester/, "deepseek-harness 通过（warning 不 block）");
-    // TD-87 既有语义零回归（现有 cli.test.js 断言形状复刻）。
+    // TD-87 既有语义零回归（现有 cli-registry.test.js 断言形状复刻）。
     assert.match(r.stdout, /⚠.*coder_mm:.*kimi-code.*tokenBudget.*不生效/, "kimi×tokenBudget ⚠ 保持");
     // TD-117 新 warning。
     assert.match(r.stdout, /⚠.*tester:.*deepseek-harness.*sessionReuse.*supportsSessionReuse/, "deepseek-harness×sessionReuse ⚠（TD-117 前置提示，2026-09-21 由 codex 换承载 backend）");
