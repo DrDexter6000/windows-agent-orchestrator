@@ -23,7 +23,8 @@
     "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
     "component-check": "node scripts/wao-node.cjs scripts/run-component-check.mjs",
     "hygiene": "node scripts/wao-node.cjs scripts/hygiene-cli.mjs",
-    "lane-review-stats": "node scripts/wao-node.cjs scripts/lane-review-stats-cli.mjs"
+    "lane-review-stats": "node scripts/wao-node.cjs scripts/lane-review-stats-cli.mjs",
+    "map": "node scripts/wao-node.cjs scripts/map.mjs"
   },
   "bin": {
     "wao": "bin/wao.js"

@@ -222,6 +222,7 @@
       "isolation-infra/hygieneGitState.test.js",
       "isolation-infra/desensitization.test.js",
       "isolation-infra/controlBytes.test.js",
+      "isolation-infra/workflowReachability.test.js",
       "run-lifecycle/m10pre3FinalGate.test.js",
       "isolation-infra/m11-6-rootsResolver.test.js",
       "isolation-infra/m11-6-sessionWorkspace.test.js",

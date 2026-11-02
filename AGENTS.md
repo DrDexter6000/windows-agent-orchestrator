@@ -34,6 +34,7 @@ Before writing or changing any document, read `docs/ssot.md` §2–§4.
 - `npm run smoke` - real runtime smoke; consumes tokens
 - `npm run reliability` - runtime/model certification; consumes tokens
 - `npm run gen:surface` - regenerate docs/surface/* after MCP surface or CLI help changes; commit the output (tool-surface wire-cap tests may need refreeze)
+- `npm run map` - on-demand workflow reference map: edges and reachability tiers of every tracked file (`-- --json` for full output)
 
 ## Code
 
