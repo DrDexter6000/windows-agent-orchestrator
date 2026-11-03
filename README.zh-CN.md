@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.8.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-02-v0.8.0.md)
+[![version](https://img.shields.io/badge/version-v0.8.1-2f2f2f?style=flat-square)](docs/changelog-2026-11-03-v0.8.1.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,27 +51,23 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.8.0 新增（2026-11-02）
+## v0.8.1 新增（2026-11-03）
 
-- **接入与升级少些手工步骤**——`wao skill link --host <host>` 先预览，加 `--apply` 在宿主核实过的
-  技能槽位里建一个指向本检出的目录链接；`skill unlink` 摘掉它，卸载时先摘链接（决定 0107）。
-  `wao registry align` 让私有注册表逐车道跟上车道表：先只读预览，写前逐字节备份；doctor 与
-  `lead_preflight` 报接线漂移（0108）。
-- **只读运行默认写不到共享仓库**——不复用会话的只读运行改在源仓的私有克隆里工作，删前检查发现
-  新提交或查不清时整个保留（0102）；复用会话的只读运行仍用链接工作树。清退计划由 Lead 判定后
-  直接执行，事后汇报（0103）。
-- **两项退役**——opencode worker 后端（0105；OpenCode 作为 MCP 宿主保留）与 claude-code 的
-  provider 通道（0106）移出代码树，各留一个 `archive/` tag。仍用它们的注册表条目不合法，删光
-  之前 `registry list`、CLI `run` 等严格命令会失败；`wao registry check` 已删除（改用
-  `registry validate`）。升级须知见快照。
-- **正确性**——`run_continue` 拒绝显式车道+角色派发的父运行时，MCP 拿到具名原因；别名运行续接
-  后仍带身份头；持有验证租约的全量套件可以接管已证明死掉的套件留下的 inflight 标记；
-  `wao worktree remove` 只删链接工作树；CLI 帮助列全每个已实现的子命令与参数，由守卫保持一致。
-- **仓库自检**——`npm run map` 打印仓库引用图，守卫要求除几个约定文件外，每个跟踪文件都能从
-  入口文件到达；开发改动的必读集合从约 172 KB 降到 48 KB，由 architecture §0 的索引按改动
-  导读。
-- 按决定分组的范围、升级须知与发版门槛证据见
-  [`docs/changelog-2026-11-02-v0.8.0.md`](docs/changelog-2026-11-02-v0.8.0.md)。
+- **worker 的边界由 WAO 给，不再靠每份任务书手写**——每个只读运行（包括会审席）都在角色之前
+  收到一份只读执行合同：不改项目文件，不对工作目录或任何已有检出跑写仓库的 git 命令，实验只在
+  系统临时目录下新建的目录里做，不读凭据、不打印环境变量，命令跑完再结束回合。交付合同补上写入
+  只在工作树内，以及同样的凭据与收尾条款。复用会话的只读运行 resume 时回到自己的工作树，不再
+  跑回源仓。
+- **会审席写文件能被发现了**——"只读席位写文件即判 FAIL"此前从没触发过；现在按席位隔离树内的
+  工具写入计数，临时目录里的实验不算。
+- **等一场会审只要一条命令**——`consult wait <id> --until-settled` 等到每个席位都收口才返回；
+  `consult show <id> --out-dir DIR` 把每席完整原文各写一个文件。
+- **正确性**——上了锁（`git worktree lock`）的工作树一律不删，`wao worktree remove` 确认登记的
+  树没了才报 `removed`（TD-332）；`runs verify-commit` 的临时树同样处理；codex 的
+  "model is at capacity" 诊断为 `provider_capacity` / `overloaded`（TD-329）。
+- **版本号**——从本版起，0.x 阶段只有升级要动手时才升 MINOR，向后兼容的改动升 PATCH（决定 0109）。
+- 范围、会审记录与发版门槛证据见
+  [`docs/changelog-2026-11-03-v0.8.1.md`](docs/changelog-2026-11-03-v0.8.1.md)。
 
 ## 当前状态
 
@@ -119,7 +115,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.8.0](docs/changelog-2026-11-02-v0.8.0.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.8.1](docs/changelog-2026-11-03-v0.8.1.md)） |
 | **跑真实 smoke 测试**（claude/codex） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **判断何时跑全量、何时跑定向测试** | [`docs/testing.md`](docs/testing.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |

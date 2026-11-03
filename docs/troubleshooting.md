@@ -218,7 +218,7 @@ worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktre
 git -C <worktreeRoot> add -A -N
 git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 # 3. Lead 评估补丁后按采纳协议处理（如合入：commit 带 WAO-Adopted-From: <runId> trailer——见 docs/usage/delivery.md 验证失败采纳协议）
-# 4. 清理：npm run cli -- worktree remove <worktreeRoot>（内部即强制清理并重试；只删链接工作树，只读运行的私有克隆见 docs/usage/maintenance.md）
+# 4. 清理：npm run cli -- worktree remove <worktreeRoot>（内部即强制清理并重试；只删没上锁的链接工作树，只读运行的私有克隆见 docs/usage/maintenance.md）
 ```
 
 边界：本配方是**人工采纳**，不自动接受任何 WIP；价值判断完全归 Lead。**归档/清理历史 runs 前的固定步骤 = 确认无可抢救 WIP**。
@@ -387,6 +387,7 @@ deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模�
 - **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`（用量到顶时归 `provider_capacity`，见下）；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
 - **已知案例**（均为 codex 后端）：
   - 用量到顶：codex 的 JSON 输出里有 `{"type":"error","message":"You've hit your usage limit … try again at <时刻>"}`，WAO 读这一行——原话进终局 `run.error`，`runs diagnose` 据此归 `provider_capacity` / `quota_exhausted`，不再只报 crash。在任意目录跑 `codex exec --skip-git-repo-check --json "<一句无关的话>"` 就能看到原话和恢复时刻；到点之前重派都会失败。
+  - 上游满载：终局 `run.error` 带 `codex: Selected model is at capacity. Please try a different model.`，`runs diagnose` 归 `provider_capacity` / `overloaded`。瞬时状况，稍后原样重派或换车道。
   - 一例退出前零 worker 事件，stderr 带 `codex_models_manager: failed to refresh available models: request timed out`——启动期刷新模型列表超时。
   - 其余退出前已有若干 worker 事件，原因未明。
   - 多例 stderr 都以 `Reading additional input from stdin...` 开头，这是 codex 的常规提示，不是故障签名。除用量到顶外，把原任务原样再派一次，既往案例均成功。

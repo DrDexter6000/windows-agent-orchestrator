@@ -1609,10 +1609,8 @@ test("TD-257: README 版本徽章/What's new 与 package.json 单一来源一致
     assert.ok(badges.length >= 1, `${rel} 缺版本徽章`);
     for (const b of badges) assert.equal(b, v, `${rel} 版本徽章 ${b} ≠ package.json ${v}——发版未同步徽章`);
     const link = txt.match(/\[!\[version\]\([^)]*\)\]\(([^)]+)\)/)?.[1] ?? "";
-    // 0038 快照义务=MINOR/MAJOR——PATCH（0.4.x）允许徽章继续指向当前 MINOR 线最新快照，
-    // 不新增 PATCH 快照义务（sol 验收发现：按完整版本匹配会变相强制 PATCH 快照）。
-    const minorV = v.split(".").slice(0, 2).join(".");
-    assert.ok(link.includes(`-v${minorV}.`), `${rel} 徽章链接须指向 docs/changelog-*-v${minorV}.*.md（MINOR 线快照）`);
+    // 决定 0109：每次发版一份快照——徽章链到当前版本自己的快照。
+    assert.ok(link.endsWith(`-v${v}.md`), `${rel} 徽章链接须指向 docs/changelog-*-v${v}.md（本版快照）`);
     assert.ok(existsSync(join(ROOT, link)), `${rel} 徽章链接目标不存在：${link}`);
     const whatsNew = txt.match(/^## (?:What's new in )?v([\w.]+) /m)?.[1];
     assert.equal(whatsNew, v,

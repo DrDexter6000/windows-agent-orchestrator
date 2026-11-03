@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.8.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-02-v0.8.0.md)
+[![version](https://img.shields.io/badge/version-v0.8.1-2f2f2f?style=flat-square)](docs/changelog-2026-11-03-v0.8.1.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -58,34 +58,28 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.8.0 (2026-11-02)
+## What's new in v0.8.1 (2026-11-03)
 
-- **Fewer hand steps to install and upgrade** — `wao skill link --host <host>` previews, and
-  with `--apply` puts a directory link to this checkout into a host's verified skill slot;
-  `skill unlink` takes it out and the uninstall removes links first (decision 0107).
-  `wao registry align` lets the private registry follow the lane table one named lane at a
-  time, after a read-only preview, with a byte-for-byte backup; doctor and `lead_preflight`
-  report wiring drift (0108).
-- **Read-only runs keep git writes out of the shared repository by default** — a read-only run
-  that does not reuse a session works in a private clone of the source repository, kept whole
-  when the pre-delete check finds new commits or cannot clear it (0102); read-only runs that
-  reuse a session still use a linked worktree. Reclaim plans are decided by the Lead and
-  applied directly, with a report afterwards (0103).
-- **Two retirements** — the opencode worker backend (0105; OpenCode as an MCP host stays) and
-  the claude-code provider channel (0106) leave the tree; each is kept in an `archive/` tag.
-  Registry entries that still use them are invalid: until they are removed, strict commands
-  such as `registry list` and CLI `run` fail. `wao registry check` is gone (use
-  `registry validate`). Upgrade notes are in the snapshot.
-- **Correctness** — `run_continue` names its refusal of an explicit lane+role parent over MCP,
-  and an alias run keeps its identity header on resume; a full suite holding the verification
-  lease takes over a provably dead suite's inflight marker; `wao worktree remove` deletes only
-  linked worktrees; CLI help lists every implemented subcommand and flag, kept in step by a
-  guard.
-- **Repository self-checks** — `npm run map` prints the reference map, and a guard requires
-  every tracked file outside a few convention files to be reachable from the entry files; the developer must-read set drops
-  from about 172 KB to 48 KB behind an index in architecture §0.
-- Scope by decision, upgrade notes and release-gate evidence:
-  [`docs/changelog-2026-11-02-v0.8.0.md`](docs/changelog-2026-11-02-v0.8.0.md).
+- **Workers get their boundaries from WAO, not from each brief** — every read-only run (consult
+  seats included) now receives a read-only execution contract ahead of its role: no project-file
+  edits, no writing git command against the working directory or any existing checkout,
+  experiments only under a new directory in the system temporary directory, no credential reads
+  or environment dumps, and no ending the turn while a command still runs. The delivery contract
+  gains the in-worktree write rule and the same secret and finish rules. A read-only run that
+  reuses a session now resumes in its own worktree, not in the source checkout.
+- **Consult seats that write files are caught** — the rule that fails a read-only seat for
+  writing never fired before; it now counts tool writes inside the seat's tree (experiments in the
+  temporary directory do not count).
+- **Waiting on a consult takes one command** — `consult wait <id> --until-settled` returns once
+  every seat has settled; `consult show <id> --out-dir DIR` writes each seat's full answer to a file.
+- **Correctness** — a locked worktree (`git worktree lock`) is never deleted, and
+  `wao worktree remove` reports `removed` only once the registered tree is gone (TD-332);
+  `runs verify-commit` cleans its temporary tree the same way; codex's "model is at capacity"
+  diagnoses as `provider_capacity` / `overloaded` (TD-329).
+- **Versioning** — from this release, a 0.x version bumps MINOR only when upgrading needs action,
+  and PATCH for everything backward compatible (decision 0109).
+- Scope, review record and release-gate evidence:
+  [`docs/changelog-2026-11-03-v0.8.1.md`](docs/changelog-2026-11-03-v0.8.1.md).
 
 ## Current status
 
@@ -145,7 +139,7 @@ Follow [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md):
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **Check live per-worker dispatch certification** | `npm run cli -- registry list` (data: `runs/reliability-summary.json`, gitignored, generated by `npm run reliability`) |
-| **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.8.0](docs/changelog-2026-11-02-v0.8.0.md)) |
+| **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.8.1](docs/changelog-2026-11-03-v0.8.1.md)) |
 | **Run real smoke tests** (claude/codex) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Know when to run the full suite vs targeted tests** | [`docs/testing.md`](docs/testing.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |

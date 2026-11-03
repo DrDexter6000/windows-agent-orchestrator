@@ -124,7 +124,7 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 ## worktree 清理失败（Permission denied）
 
-Windows 文件锁问题。WAO 已内置 fallback（rmSync + 定向清本树登记；无仓库级 prune——与并发 `worktree add` 有竞争）。若仍有残留，先确认此刻没有 WAO 派发在进行、`runs list` 也无非终态（前台 `run` / `spawn` 先建工作树、后写首条转录，建树那一刻 `runs list` 看不到它——防的就是上面那处竞争），再手工清：
+Windows 文件锁问题。上了锁（`git worktree lock`）的树 WAO 一律不删，确要删先 `git worktree unlock`。WAO 已内置 fallback（rmSync + 定向清本树登记；无仓库级 prune——与并发 `worktree add` 有竞争）。若仍有残留，先确认此刻没有 WAO 派发在进行、`runs list` 也无非终态（前台 `run` / `spawn` 先建工作树、后写首条转录，建树那一刻 `runs list` 看不到它——防的就是上面那处竞争），再手工清：
 
 ```powershell
 git worktree prune --expire 10.minutes
