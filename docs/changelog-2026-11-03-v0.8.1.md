@@ -49,3 +49,23 @@
 - 修复：上述各处按代码与 0109 改正；README 文档地图改指档案门户的快照清单，不再手写最新版本；0109 补一句判据：判 MINOR 只看升级的人是否必须改配置、命令或做法，把错误的取值改对算修复。
 - 判为不改：`runs verify-commit` 的测试在 sol 的沙箱里有三处超时与清理失败（Lead 本机以用户身份跑同一文件是绿的，见下文全量）；`consult wait` 的退出码在 consult 页与 supervise 页各列一遍（两处同义，consult 页写明同义）；MCP `run_consult` 回执里的 `readOnlyViolation` 在生成面看不到（生成层把嵌套字段展平，既有缺口）；"上锁的树不删"在架构、维护、排障三处各有一句，目前一致。
 - 复核 consult_202611031421062449vlrp1（deepseek-flash，PASS_WITH_NOTES）：上一轮各项都已改对，横切守卫组 269/269。备注：档案门户的快照表没有守卫钉住，§9 第 2 步已补一句；README 的例外只写了测试，合同写的是测试与构建（README 是摘要，判为不改）。这一句是在全量之后补改的，只动 `docs/**`，按 `docs/testing.md` 跑了横切守卫组与读这份文档的测试（235/235）。
+
+## 发版门槛证据（2026-11-03，本地实跑；打标后追加）
+
+- 全量 `npm test`：**361/361 通过**（6 波，760 秒，其中 filesystem 波 474 秒；无隔离重跑，runs 守卫干净），跑在 a002130 上。tag `v0.8.1` 指向的 11f409b 在它之上只改了 `docs/**`（本快照与 `docs/milestone-discipline.md` 一句），按 `docs/testing.md` 跑了横切守卫组与读这些文档的测试（235/235）。插电，期间没有待机。
+- surface 再生成（§9 第 3 步）：在 11f409b 上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致。
+- `npm run reliability`：从主检出在 11f409b 上逐车道跑（`--agent <lane>`），七条车道共约 9 分钟（14:37–14:46Z）：
+  - sol、astra（strict）：全过，certified。
+  - kimi、deepseek-flash、opus、glm-flash、glm-pro（delta）：全过，评 conditional（delta 子集全过不产生 certified）。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`：claude-code PASS，codex PASS。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.8.0 v0.8.1`；`git rev-list --count v0.8.0..v0.8.1`。
+
+## 总量
+
+8 个提交（含 v0.8.0 打标后的发版记录与本次的三个发版提交），53 个文件，+1,917 / −523 行（`git diff --shortstat v0.8.0 v0.8.1`）。
+
+## 发版记录
+
+- tag：`v0.8.1`（annotated → 11f409b，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩。
