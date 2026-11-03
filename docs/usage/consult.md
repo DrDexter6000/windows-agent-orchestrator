@@ -25,8 +25,7 @@ npm run cli -- consult show <consultId> --format json
 # 等待预算到期后接着等（可反复调用）
 npm run cli -- consult wait <consultId>
 
-# 一直等到每席 run 都收口才返回（与 --wait-ms 互斥；退出码同 runs wait --until-settled：
-# 0 全收口，3 一席无法收口/验证者已不在，4 转录冲突；失败席位在 stderr 点名）
+# 一直等到每个已派发席位都收口才返回（与 --wait-ms 互斥；退出码见下文）
 npm run cli -- consult wait <consultId> --until-settled
 
 # 取一席的完整原文写进文件

@@ -83,7 +83,7 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 
 `run_delivery_reverify`: only when the original verification failed and the Lead judged a closed-set environment cause (tooling_invalid/environment_contaminated/dependency_setup_missing); it re-verifies the SAME unchanged delivery commit — new setup may be appended, the ORIGINAL assertions can never be modified; the result never auto-decides. Attempt 2 is the Lead's explicit second and final chance; never auto-retried. Before any reverify read `docs/usage/delivery.md` `run_delivery_reverify`（资格闭集；repackage 见同页 `run_delivery_repackage` 小节）；归因必须先于 reverify 调用——规格错误不适用 reverify。
 
-合入 main 或推送采纳结果之前，在最终候选（含已采纳进来的交付）上跑一次全量 `npm test`，绿了才收口；何为最终候选、失败怎么判读、只改画像数据的例外见 `docs/testing.md`。
+合入 main 或推送采纳结果之前，在最终候选（含已采纳进来的交付）上跑一次全量 `npm test`，绿了才收口；何为最终候选、失败怎么判读、哪些情形不必跑全量见 `docs/testing.md`。
 
 ## Advisor / Auditor Discipline
 

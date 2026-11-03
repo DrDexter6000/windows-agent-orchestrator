@@ -203,7 +203,7 @@ npm run cli -- mcp bind --host <host> --cwd <目标项目>
 npm run cli -- run <agentId> --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json --read-only
 ```
 
-进程式 worker 进程死即会话死（OS 进程语义；任何停止的验证仍以 `stop_verified` 为准，见 §6），适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--read-only` 声明只读观察 run（advisory、强制隔离、不带 delivery）。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这三个参数。新机器上还没有别的项目时，可以暂时用 WAO 仓自身作 `<目标项目>`（上面带 `--read-only` 的 canary 对它无副作用）。
+进程式 worker 进程死即会话死（OS 进程语义；任何停止的验证仍以 `stop_verified` 为准，见 §6），适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--read-only` 声明只读观察 run（advisory、强制隔离、注入只读执行合同、不带 delivery）。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这三个参数。新机器上还没有别的项目时，可以暂时用 WAO 仓自身作 `<目标项目>`（上面带 `--read-only` 的 canary 对它无副作用）。
 
 ---
 

@@ -54,13 +54,13 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
 ## v0.8.1 新增（2026-11-03）
 
 - **worker 的边界由 WAO 给，不再靠每份任务书手写**——每个只读运行（包括会审席）都在角色之前
-  收到一份只读执行合同：不改项目文件，不对工作目录或任何已有检出跑写仓库的 git 命令，实验只在
+  收到一份只读执行合同：不改项目文件（任务要求跑的测试产生的报告与缓存除外），不对工作目录或任何已有检出跑写仓库的 git 命令，实验只在
   系统临时目录下新建的目录里做，不读凭据、不打印环境变量，命令跑完再结束回合。交付合同补上写入
   只在工作树内，以及同样的凭据与收尾条款。复用会话的只读运行 resume 时回到自己的工作树，不再
   跑回源仓。
-- **会审席写文件能被发现了**——"只读席位写文件即判 FAIL"此前从没触发过；现在按席位隔离树内的
-  工具写入计数，临时目录里的实验不算。
-- **等一场会审只要一条命令**——`consult wait <id> --until-settled` 等到每个席位都收口才返回；
+- **会审席写文件能被发现了**——"只读席位写文件即判 FAIL"此前从没触发过；现在按席位隔离树内
+  用工具写过的文件计数，临时目录里的实验不算。
+- **等一场会审只要一条命令**——`consult wait <id> --until-settled` 等到每个已派发的席位都收口才返回；
   `consult show <id> --out-dir DIR` 把每席完整原文各写一个文件。
 - **正确性**——上了锁（`git worktree lock`）的工作树一律不删，`wao worktree remove` 确认登记的
   树没了才报 `removed`（TD-332）；`runs verify-commit` 的临时树同样处理；codex 的
@@ -115,7 +115,7 @@ WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
 | **查每席实时派发认证** | `npm run cli -- registry list`（数据：`runs/reliability-summary.json`，gitignored，由 `npm run reliability` 生成） |
-| **看每个版本发了什么** | `docs/changelog-*.md` 快照（最新：[v0.8.1](docs/changelog-2026-11-03-v0.8.1.md)） |
+| **看每个版本发了什么** | `docs/changelog-*.md` 快照，清单见 [docs/archive/README.md](docs/archive/README.md) |
 | **跑真实 smoke 测试**（claude/codex） | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **判断何时跑全量、何时跑定向测试** | [`docs/testing.md`](docs/testing.md) |
 | **理解架构**（分层、接口、状态机） | [`docs/02-architecture.md`](docs/02-architecture.md) |

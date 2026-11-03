@@ -1598,8 +1598,8 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
 // ── TD-257（2026-10-11 onboarding 面漂移批）：版本面与计数声称守卫 ──
 // README 版本徽章曾钉死 v0.2.0 漂移三个版本无人抓——版本单一来源是 package.json
 // （0038），徽章/What's new 是用户面的"当前版本"声称。本守卫把三处声称钉到
-// package.json：徽章版本、徽章链接目标（在场 + 文件名含 -v<版本>，即 0038 的
-// 发版快照纪律被机械化）、What's new 节标题版本。双语 README 同规；删除该节
+// package.json：徽章版本、徽章链接目标（在场 + 文件名以 -v<版本>.md 结尾，即 0109 的
+// 每版一份快照被机械化）、What's new 节标题版本。双语 README 同规；删除该节
 // 须同步删守卫（有意识的动作，不是静默漂移）。
 test("TD-257: README 版本徽章/What's new 与 package.json 单一来源一致（双语）", () => {
   const v = JSON.parse(read("package.json")).version;

@@ -2,7 +2,7 @@
 
 里程碑与当前状态。还没了结的事项在 `docs/tech-debt.md`，为什么这样定在 `.wao/decisions/`。各里程碑的完成定义、验收记录与收尾细节在冻结快照 [`archive/roadmap-2026-10-14.md`](./archive/roadmap-2026-10-14.md)。
 
-版本号以 `package.json` 为准；semver 与 v1.0.0 门槛见决定 0038。
+版本号以 `package.json` 为准；semver 与 v1.0.0 门槛见决定 0038，1.0.0 之前升哪一位见决定 0109。
 
 ## 里程碑
 

@@ -660,7 +660,7 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 
 **readiness 投影联动**：终端 delivery-requested run 且唯一较高优先级 delivery 事实为恰好一条 run-bound 安全 `isolation_violation` → `run_delivery` readiness 投影 `isolation_failed` + `isolationFailure:{code:"workdir_escape"}`（与 packaging failure 严格分离，无 candidateInventory/repackage/salvage/retry/stop/decision 面，Lead 只能另行派发）；缺失/多条/跨 run/非闭集 code → `ambiguous`。投影闭集与判定见 §1 `runDelivery.js` 条目。
 
-**worker 可见的授权清单**：`composeDeliveryExecutionContract({allowedPaths})`（`src/application/roleContract.js`）把 AUTHORIZED WORK SCOPE 块附加到 delivery execution contract——单行 `AUTHORIZED_PATHS_JSON`（`encodeAuthorizedPathsJson` 转义 `U+2028/U+2029 与 DEL/C1（0x7F–0x9F）` 保证恒为一行，路径无法伪造新合同字段）逐字节声明 worker 开工前必须看到的精确写路径契约（segment-boundary 大小写敏感匹配 + 越界时 `SCOPE_EXPANSION_REQUIRED` 上报而非编辑）。块只声明 scope，不替换 packager——packaging containment 不放松。合同还固定声明：工具写入（含临时文件、探针、scratch，scratch 放 `.wao/runs/`）只落在授权 workspace 内、其余写手段不豁免（测试命令在系统临时目录下的产物除外）；不读凭据与密钥库、不枚举环境变量（可用变量并报告是否设置）；已启动的命令收齐输出与退出状态、停掉自起的进程后再作答。
+**worker 可见的授权清单**：`composeDeliveryExecutionContract({allowedPaths})`（`src/application/roleContract.js`）把 AUTHORIZED WORK SCOPE 块附加到 delivery execution contract——单行 `AUTHORIZED_PATHS_JSON`（`encodeAuthorizedPathsJson` 转义 `U+2028/U+2029 与 DEL/C1（0x7F–0x9F）` 保证恒为一行，路径无法伪造新合同字段）逐字节声明 worker 开工前必须看到的精确写路径契约（segment-boundary 大小写敏感匹配 + 越界时 `SCOPE_EXPANSION_REQUIRED` 上报而非编辑）。块只声明 scope，不替换 packager——packaging containment 不放松。合同还固定声明：工具写入（含临时文件、探针、scratch，scratch 放 `.wao/runs/`）只落在授权 workspace 内、其余写手段不豁免（测试命令在系统临时目录下建的仓库与文件除外）；不读凭据与密钥库、不枚举环境变量（可用变量并报告是否设置）；已启动的命令收齐输出与退出状态、停掉自起的进程后再作答。
 
 **两道 containment 门**（时序分明，机械判定，不裁决语义、不自动 stop）：
 
