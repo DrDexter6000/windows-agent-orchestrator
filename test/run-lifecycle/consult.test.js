@@ -98,15 +98,27 @@ function attrOf(text) {
   return attributeReply(text);
 }
 
-/** transcript 事件桩：state_change + assistant 终稿。 */
-function makeTranscript(runId, { state = "completed", finalText = "", fileWrittenCount = 0 } = {}) {
-  const events = [{ type: "run.state_change", to: state, reason: "stub", runId, seq: 1 }];
+/** transcript 事件桩：只读权威（run.started 带 worktreePath）+ 绑定声明 +
+ *  state_change + assistant 终稿。决定 0055 的写入证据走真实事件形状
+ *  （type:"run.event"、kind:"file_written"，路径按只读观察投影的纯词法派生）。 */
+function makeTranscript(runId, { state = "completed", finalText = "", fileWrittenCount = 0, tmpWrittenCount = 0 } = {}) {
+  let seq = 0;
+  const nextSeq = () => { seq += 1; return seq; };
+  const events = [
+    { type: "run.started", worktreePath: "C:\\fake\\wt", runId, seq: nextSeq() },
+    { type: "run.read_only_declared", runId, seq: nextSeq() },
+    { type: "run.state_change", to: state, reason: "stub", runId, seq: nextSeq() },
+  ];
   if (finalText.length > 0) {
-    events.push({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: finalText }], runId, seq: 2 });
+    events.push({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: finalText }], runId, seq: nextSeq() });
   }
-  // 决定 0055：只读席位违规证据=file_written 事件计数。
+  // 工作树内写入 → 违规证据（投影派生相对路径后计数）。
   for (let i = 0; i < fileWrittenCount; i += 1) {
-    events.push({ type: "file_written", path: `C:\\fake\\wt\\f${i}.txt`, runId, seq: 3 + i });
+    events.push({ type: "run.event", kind: "file_written", path: `C:\\fake\\wt\\f${i}.txt`, runId, seq: nextSeq() });
+  }
+  // 系统临时目录里的实验写入 → 不算违规（投影只认工作树内派生路径）。
+  for (let i = 0; i < tmpWrittenCount; i += 1) {
+    events.push({ type: "run.event", kind: "file_written", path: `C:\\wao-tmp\\exp\\f${i}.txt`, runId, seq: nextSeq() });
   }
   return events;
 }
@@ -542,11 +554,14 @@ test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=bri
   }));
   // kimi 诊断会审（2026-10-10）：裸车道席位此前收不到 WQ-03——固定会审合同
   // 始终追加（不依赖角色装配）；brief/视角仍逐字节保留在合同段之前。
+  // 2026-11-03：文件边界收进控制面只读执行合同（task.roleContract）——席位
+  // 边界不再重复"创建或修改文件"。
   const CONTRACT_MARK = "---\n【会审席边界（固定合同，席位级）】";
   for (const c of calls) {
     assert.ok(c.prompt.includes(CONTRACT_MARK), "每席 prompt 都带固定会审合同");
     assert.equal(c.prompt.indexOf(CONTRACT_MARK), c.prompt.lastIndexOf(CONTRACT_MARK), "合同恰一次");
     assert.ok(c.prompt.startsWith(briefText), "brief 逐字节内核在前");
+    assert.ok(!c.prompt.includes("创建或修改文件"), "文件边界由只读合同管，席位边界不再重复");
   }
   assert.ok(calls[0].prompt.endsWith("缺证据时报告缺口。"), "无视角席：合同在尾部");
   assert.ok(calls[1].prompt.includes(`\n\n${perspective}\n\n${CONTRACT_MARK}`), "视角片段原样拼接在 brief 与合同之间");
@@ -1130,15 +1145,20 @@ test("CLI-7: consult wait 经 deps.waitForConsult 注入后被调用；--format 
 });
 
 // 决定 0055（Owner 2026-10-10 批准）：只读席位违规自动判 FAIL。
-test("0055: 席位转录含 file_written → readOnlyViolation FAIL（不改写 runState）", async () => {
+// 2026-11-03 判定权威改接只读观察投影：真实事件形状（run.event/file_written）
+// 的工作树内写入才计数；系统临时目录的实验写入不算违规（旧的自数顶层
+// type:"file_written" 从未匹配过真实转录，判定从未触发过）。
+test("0055: 席位在工作树内有工具写入 → readOnlyViolation FAIL；只在系统临时目录写或零写入 → 不判（不改写 runState）", async () => {
   const { dispatchFn } = makeDispatchStub();
   const { readTranscriptFn } = makeTranscriptStub(new Map([
     ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: 可行\n", fileWrittenCount: 3 })],
     ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: 可行\n" })],
+    ["run_stub_seat_c", makeTranscript("run_stub_seat_c", { finalText: "Q1: 可行\n", tmpWrittenCount: 2 })],
+    ["run_stub_seat_d", makeTranscript("run_stub_seat_d", { finalText: "Q1: 可行\n", fileWrittenCount: 2, tmpWrittenCount: 1 })],
   ]));
   const result = await runConsult(baseInput({
     briefText: "b\n",
-    seats: [{ agentId: "seat_a" }, { agentId: "seat_b" }],
+    seats: [{ agentId: "seat_a" }, { agentId: "seat_b" }, { agentId: "seat_c" }, { agentId: "seat_d" }],
     dispatchFn,
     readTranscriptFn,
     writeFileFn: async () => {},
@@ -1146,9 +1166,15 @@ test("0055: 席位转录含 file_written → readOnlyViolation FAIL（不改写 
   }));
   const seatA = result.seats.find((s) => s.agentId === "seat_a");
   const seatB = result.seats.find((s) => s.agentId === "seat_b");
-  assert.deepEqual(seatA.readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 3 }, "写入席位判 FAIL");
+  const seatC = result.seats.find((s) => s.agentId === "seat_c");
+  assert.deepEqual(seatA.readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 3 }, "工作树内写入席位判 FAIL");
   assert.equal(seatA.runState, "completed", "runState 保持自然终态（不改写）");
   assert.equal(seatB.readOnlyViolation, undefined, "零写入席位无该字段");
+  assert.equal(seatC.readOnlyViolation, undefined, "只写系统临时目录的席位不判违规");
+  assert.equal(seatC.runState, "completed", "实验写入不改写自然终态");
+  const seatD = result.seats.find((s) => s.agentId === "seat_d");
+  assert.deepEqual(seatD.readOnlyViolation, { verdict: "FAIL", fileWrittenCount: 2 },
+    "临时目录的写入不掩盖同一席位在工作树内的写入");
 });
 
 // ===== 整词匹配的两个边角；组记录被替换时的读取 =====
@@ -1384,9 +1410,9 @@ test("CLI-8: consult run 有未终态席位 → 文本末尾 Next step 行 / JSO
     ["run", "brief.md", "--seats", "a,b", "--cwd", "C:/tmp/x"], config, deps,
   ));
   assert.equal(text.outLines.at(-1),
-    "Next step: Seats not terminal yet: run_b. Before ending the turn, wait on each: "
-    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
-    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    "Next step: Seats not terminal yet: run_b. Before ending the turn, attach: "
+    + "wao consult wait consult_20261002120000000abc123 --until-settled (in the background if your host notifies you when background "
+    + "commands finish; otherwise in the foreground), then re-read with wao consult show "
     + "consult_20261002120000000abc123.");
 
   const json = await captureConsult(() => consultCommand(
@@ -1433,9 +1459,9 @@ test("CLI-9: consult show 有未终态席位 → 文本末尾 Next step 行 / JS
   const deps = { loadConsultRecord: async () => record, readTranscript };
   const text = await captureConsult(() => consultCommand(["show", consultId, "--cwd", "C:/tmp/x"], {}, deps));
   assert.equal(text.outLines.at(-1),
-    "Next step: Seats not terminal yet: run_show_r. Before ending the turn, wait on each: "
-    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
-    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    "Next step: Seats not terminal yet: run_show_r. Before ending the turn, attach: "
+    + `wao consult wait ${consultId} --until-settled (in the background if your host notifies you when background `
+    + "commands finish; otherwise in the foreground), then re-read with wao consult show "
     + `${consultId}.`);
 
   const json = await captureConsult(() => consultCommand(["show", consultId, "--format", "json", "--cwd", "C:/tmp/x"], {}, deps));
@@ -1479,9 +1505,9 @@ test("CLI-10: consult wait 有未终态席位 → 文本 Next step / JSON nextSt
   };
   const text = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, deps));
   assert.equal(text.outLines.at(-1),
-    "Next step: Seats not terminal yet: run_wait_r. Before ending the turn, wait on each: "
-    + "wao runs wait <runId> --until-settled (in the background if your host notifies you when background "
-    + "commands finish; otherwise one after another in the foreground), then re-read with wao consult show "
+    "Next step: Seats not terminal yet: run_wait_r. Before ending the turn, attach: "
+    + `wao consult wait ${consultId} --until-settled (in the background if your host notifies you when background `
+    + "commands finish; otherwise in the foreground), then re-read with wao consult show "
     + `${consultId}.`);
   assert.match(text.err, /see the next step below/);
   assert.ok(!text.err.includes("run consult wait again"), "stderr 不再留第二套说法");
@@ -1620,4 +1646,304 @@ test("CLI-15: consult wait 有派发未成立的席位（没有 runId）→ stde
   }));
   assert.match(mixedOut.err, /every dispatched seat reached a terminal state; 1 seat\(s\) were never dispatched/);
   assert.match(mixedOut.err, new RegExp(`consult show ${consultId}`));
+});
+// ═══════════════════════════════════════════════════════════════════════════
+// `consult wait <consultId> --until-settled`（决定 0095 收口等待器的 consult 面）
+// 与 `consult show <consultId> --out-dir`。
+//
+// 退出码与 `runs wait --until-settled` 同义：0 全部已派发席位收口；3 一席不可信
+// 轮连续 4 次（含无法收口的交付事实）或验证者已不在；4 一席转录冲突；130 中断。
+// stderr 点名未收口席位。收口算法分支（轮询/不可信轮/证明/节流）由
+// runsWaitUntilSettled.test.js 在 runs wait 面钉住——这里钉命令面的逐席循环、
+// 退出码映射、席位点名与返回渲染。退出码经 process.exitCode 断言（保存/恢复）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 保存/恢复 process.exitCode 的断言包装（runsWaitUntilSettled.test.js 同纪律）。 */
+async function withExitCode(fn) {
+  const prev = process.exitCode;
+  try {
+    return await fn();
+  } finally {
+    process.exitCode = prev;
+  }
+}
+
+function settledRecord(consultId, seats) {
+  return {
+    consultId,
+    createdAt: "2026-10-02T12:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats,
+    fieldDiff: [],
+  };
+}
+
+const SETTLED_OUTCOME = {
+  kind: "settled",
+  settlement: { status: "settled", reason: "no_delivery_requested", facts: { state: "completed", terminal: true } },
+};
+
+test("SETTLE-1: --until-settled 与 --wait-ms 同用被拒；布尔旗标带值也拒（含旗标写在 consultId 之前的吞词形状）", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  await withExitCode(async () => {
+    await assert.rejects(
+      () => consultCommand(["wait", consultId, "--until-settled", "--wait-ms", "200000"], {}, {}),
+      /--until-settled and --wait-ms are mutually exclusive/,
+    );
+    await assert.rejects(
+      () => consultCommand(["wait", "--until-settled", consultId], {}, {}),
+      /--until-settled is a boolean flag and takes no value/,
+      "旗标写在 consultId 之前把位置参数吞成值——按用法错误拒绝，不猜",
+    );
+    await assert.rejects(
+      () => consultCommand(["wait", consultId, "--until-settled", "5000"], {}, {}),
+      /--until-settled is a boolean flag and takes no value/,
+    );
+    // 两旗标同在时先报互斥（waitMs 在场即互斥，不管 untilSettled 的形状）。
+    await assert.rejects(
+      () => consultCommand(["wait", consultId, "--until-settled", "--wait-ms"], {}, {}),
+      /mutually exclusive/,
+    );
+  });
+});
+
+test("SETTLE-2: 真实等待器 + 真实终态转录——全部收口才返回，退出 0，返回输出与有界 consult wait 一致", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-settle2-"));
+  await withExitCode(async () => {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    writeRealTranscript(runDir, "run_settle_a", makeTranscript("run_settle_a", { finalText: "Q1: A 可行。\n" }));
+    writeRealTranscript(runDir, "run_settle_b", makeTranscript("run_settle_b", { state: "failed", finalText: "Q1: 有风险。\n" }));
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, settledRecord(consultId, [
+      { agentId: "seat_a", runId: "run_settle_a", runState: "running", formatState: "empty" },
+      { agentId: "seat_b", runId: "run_settle_b", runState: "running", formatState: "empty" },
+    ]));
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    assert.ok(process.exitCode === undefined || process.exitCode === 0, `退出码应为 0（未设置），实际 ${process.exitCode}`);
+    assert.match(captured.err, /every dispatched seat reached a terminal state after \d+s/, "stderr 摘要行与有界路径同形");
+    assert.ok(!captured.err.includes("window expired"), "无界等待不说窗口到期");
+    assert.ok(captured.out.includes("Q1: A 可行。"), "正常渲染在场（council-diff 文本）");
+    assert.ok(captured.out.includes("run_settle_a") && captured.out.includes("run_settle_b"), "runId 回链在场");
+    assert.ok(!captured.outLines.some((l) => l.startsWith("Next step: ")), "全部收口没有 nextStep 行");
+    // --format json：wait 块形状与有界路径一致，windowMs=null 表示无界等待。
+    const json = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--format", "json", "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    const parsed = JSON.parse(json.out);
+    assert.equal(parsed.wait.allTerminal, true);
+    assert.equal(parsed.wait.windowMs, null);
+    assert.ok(Number.isFinite(parsed.wait.waitedMs), "waitedMs 在场");
+    assert.equal(parsed.consultId, consultId);
+  }).finally(() => cleanupDir(dir));
+});
+
+test("SETTLE-3: 注入假收口判定——两席按组记录顺序逐席等，都收口才返回（无 runId 席位不等）", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_a", runId: "run_settle_fa", runState: "running", formatState: "empty" },
+    { agentId: "seat_none", runId: null, runState: "dispatch_failed", formatState: "empty" },
+    { agentId: "seat_b", runId: "run_settle_fb", runState: "running", formatState: "empty" },
+  ]);
+  const calls = [];
+  const deps = {
+    loadConsultRecord: async () => record,
+    readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+    waitRunSettlement: async (input) => {
+      calls.push(input.runId);
+      return { ...SETTLED_OUTCOME };
+    },
+  };
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, deps,
+    ));
+    assert.deepEqual(calls, ["run_settle_fa", "run_settle_fb"], "逐席调用共用等待器；runId=null 的席位不调");
+    assert.ok(process.exitCode === undefined || process.exitCode === 0, `退出码应为 0，实际 ${process.exitCode}`);
+    assert.match(captured.err, /every dispatched seat reached a terminal state/);
+    assert.match(captured.err, /1 seat\(s\) were never dispatched/, "派发未成立的席位照有界路径口径计数");
+  });
+});
+
+test("SETTLE-4: 一席无法收口（undeterminable）→ 退出 3 并在 stderr 点名席位；JSON 输出 settled:false + seat", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_a", runId: "run_settle_ok", runState: "running", formatState: "empty" },
+    { agentId: "seat_bad", runId: "run_settle_bad", runState: "running", formatState: "empty" },
+  ]);
+  const deps = {
+    loadConsultRecord: async () => record,
+    readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+    waitRunSettlement: async ({ runId }) => (runId === "run_settle_ok" ? { ...SETTLED_OUTCOME } : {
+      kind: "untrusted",
+      reason: "undeterminable:terminal_delivery_ambiguous",
+      rounds: 4,
+      settlement: { status: "undeterminable", reason: "terminal_delivery_ambiguous", facts: { state: "failed", terminal: true } },
+    }),
+  };
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, deps,
+    ));
+    assert.equal(process.exitCode, 3, "undeterminable 对应 runs wait 的退出码 3");
+    assert.match(captured.err, new RegExp(`\\[consult\\] ${consultId}: seat seat_bad \\(run_settle_bad\\) will not settle:`), "stderr 点名席位");
+    assert.match(captured.err, /Undeterminable: the delivery facts cannot settle \(terminal_delivery_ambiguous\); waiting will not change them\./, "与 runs wait 同义的处置行");
+    assert.match(captured.err, /Diagnostics: wao runs diagnose run_settle_bad; delivery facts: wao runs delivery run_settle_bad/);
+    assert.ok(!captured.out.includes("council-diff"), "失败出口不做整场渲染");
+    assert.ok(!captured.outLines.some((l) => l.startsWith("Next step: ")));
+  });
+  await withExitCode(async () => {
+    const json = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--format", "json", "--cwd", "C:/tmp/x"], {}, deps,
+    ));
+    assert.equal(process.exitCode, 3);
+    const parsed = JSON.parse(json.out);
+    assert.equal(parsed.settled, false);
+    assert.deepEqual(parsed.seat, { agentId: "seat_bad", runId: "run_settle_bad" });
+    assert.equal(parsed.reason, "undeterminable:terminal_delivery_ambiguous");
+    assert.equal(parsed.state, "failed");
+  });
+});
+
+test("SETTLE-5: 一席转录冲突 → 退出 4 并点名席位；verifier_gone → 退出 3 并带 Stuck 行", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_x", runId: "run_settle_conflict", runState: "running", formatState: "empty" },
+  ]);
+  const transcript = async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" });
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, {
+        loadConsultRecord: async () => record,
+        readTranscript: transcript,
+        waitRunSettlement: async () => ({
+          kind: "conflict",
+          settlement: { status: "undeterminable", reason: "packaging_conflict", facts: { state: "completed", terminal: true } },
+        }),
+      },
+    ));
+    assert.equal(process.exitCode, 4, "冲突对应 runs wait 的退出码 4");
+    assert.match(captured.err, /seat seat_x \(run_settle_conflict\) will not settle:/, "点名席位");
+    assert.match(captured.err, /Conflict: run_settle_conflict has multiple distinct transcript copies/);
+  });
+  await withExitCode(async () => {
+    const stuck = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, {
+        loadConsultRecord: async () => record,
+        readTranscript: transcript,
+        waitRunSettlement: async () => ({
+          kind: "verifier_gone",
+          basis: "lease_missing",
+          settlement: { status: "unsettled", reason: "verification_pending", facts: { state: "completed", terminal: true, acceptanceStatus: "pending" } },
+        }),
+      },
+    ));
+    assert.equal(process.exitCode, 3, "verifier_gone 对应 runs wait 的退出码 3");
+    assert.match(stuck.err, /Stuck: the verification of run_settle_conflict has no outcome and no WAO process that could finish it remains \(lease_missing\)/);
+    assert.match(stuck.err, /Next step: Its verification will not finish\./, "带 runs wait 同源的 verifier_gone nextStep");
+  });
+});
+
+test("SETTLE-6: 中断（等待器返回 interrupted）→ 退出 130 并点名当席；零派发记录不等待、直说 no seat was dispatched", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_i", runId: "run_settle_i", runState: "running", formatState: "empty" },
+  ]);
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, {
+        loadConsultRecord: async () => record,
+        readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+        waitRunSettlement: async () => ({ kind: "interrupted", settlement: null, snapshotReadAt: null }),
+      },
+    ));
+    assert.equal(process.exitCode, 130);
+    assert.match(captured.err, /interrupted before seat seat_i \(run_settle_i\) settled/);
+    assert.equal(captured.out, "", "中断出口不渲染整场");
+  });
+  await withExitCode(async () => {
+    const asJson = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--format", "json", "--cwd", "C:/tmp/x"], {}, {
+        loadConsultRecord: async () => record,
+        readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+        waitRunSettlement: async () => {
+          // 冲突与中断同轮：中断压过冲突，退出 130。
+          process.emit("SIGINT");
+          return { kind: "conflict", settlement: null, snapshotReadAt: null };
+        },
+      },
+    ));
+    assert.equal(process.exitCode, 130);
+    const parsed = JSON.parse(asJson.out);
+    assert.equal(parsed.interrupted, true);
+    assert.equal(parsed.settled, false);
+    assert.deepEqual(parsed.seat, { agentId: "seat_i", runId: "run_settle_i" });
+  });
+  await withExitCode(async () => {
+    const none = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, {
+        loadConsultRecord: async () => settledRecord(consultId, [
+          { agentId: "seat_none", runId: null, runState: "dispatch_failed", formatState: "empty" },
+        ]),
+        readTranscript: async () => { throw new Error("should not read"); },
+        waitRunSettlement: async () => { throw new Error("no dispatched seat — the waiter must not be called"); },
+      },
+    ));
+    assert.ok(process.exitCode === undefined || process.exitCode === 0, "无可等席位不是失败");
+    assert.match(none.err, /no seat was dispatched/);
+  });
+});
+
+test("SETTLE-7: --out-dir 为每个席位写完整终稿（目录不存在就建），每席一行同 --seat --out；与 --seat / --out 互斥", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-outdir-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const longText = `Q1: 采纳 A\n${"席位完整终稿，逐字节不截断。".repeat(600)}\n`;
+    assert.ok(longText.length > 4000, "测试前提：正文超过 4000 字符");
+    writeRealTranscript(runDir, "run_out_dir_a", makeTranscript("run_out_dir_a", { finalText: longText }));
+    // seat_none 派发未成立（无 run、无终稿）——照实写空文件，不跳过。
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(consultsDir, settledRecord(consultId, [
+      { agentId: "seat_a", runId: "run_out_dir_a", runState: "completed", formatState: "structured" },
+      { agentId: "seat_none", runId: null, runState: "dispatch_failed", formatState: "empty" },
+    ]));
+    const outDir = join(dir, "nested", "final");
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await consultCommand(
+        ["show", consultId, "--out-dir", outDir, "--cwd", dir, "--run-dir", runDir],
+        {},
+      );
+    } finally {
+      console.log = origLog;
+    }
+    assert.equal(lines.length, 2, "每席恰一行");
+    assert.equal(readFileSync(join(outDir, "seat_a.md"), "utf8"), longText, "文件=该席完整终稿（零截断）");
+    assert.equal(readFileSync(join(outDir, "seat_none.md"), "utf8"), "", "无终稿席位写空文件");
+    assert.ok(lines[0].includes(`): ${longText.length} chars written to ${join(outDir, "seat_a.md")}`), "行格式同 --seat --out（字符数 + 路径）");
+    assert.ok(lines[1].includes("seat_none (no run · dispatch_failed): 0 chars written to"), "无 run 席位照实报行");
+    // 互斥：与 --seat、与 --out 同用都拒；缺目录路径值也拒。
+    await assert.rejects(
+      () => consultCommand(["show", consultId, "--seat", "seat_a", "--out-dir", outDir, "--cwd", dir, "--run-dir", runDir], {}),
+      /--out-dir cannot be combined with --seat/,
+    );
+    await assert.rejects(
+      () => consultCommand(["show", consultId, "--out", join(dir, "x.md"), "--out-dir", outDir, "--cwd", dir, "--run-dir", runDir], {}),
+      /--out-dir cannot be combined with --out/,
+    );
+    await assert.rejects(
+      () => consultCommand(["show", consultId, "--out-dir", "--format", "json", "--cwd", dir, "--run-dir", runDir], {}),
+      /--out-dir requires a directory path/,
+    );
+  } finally {
+    cleanupDir(dir);
+  }
 });

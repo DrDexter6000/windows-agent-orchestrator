@@ -60,8 +60,9 @@
 //   - No argv parsing, no console.log, no process.exit.
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Reuses transcript.js / delivery.js / deliveryVerification.js /
-//     runWorkspaceOwnership.js / nestedDispatchGuard.js SSOTs — no copied
-//     algorithm, no copied boundary constant, no second shell boundary.
+//     runWorkspaceOwnership.js / nestedDispatchGuard.js / isolation.js
+//     SSOTs — no copied algorithm, no copied boundary constant, no second
+//     shell boundary, no second worktree-removal implementation.
 //   - Safe result carries closed-set fields only — never commands, tails,
 //     paths, or env.
 
@@ -102,7 +103,8 @@ import { nestedDispatchContext, nestedDispatchRefusalText } from "../nestedDispa
 import { ensureWaoWorktreeExclude } from "../gitLocalExclude.js";
 // prune --expire 判龄窗（isolation.WORKTREE_PRUNE_EXPIRE，SSOT 注释写明 git 2.50 语义
 // 与 --expire 护不到的 add 微窗）：避免清掉别的会话正在创建的登记。
-import { WORKTREE_PRUNE_EXPIRE } from "../isolation.js";
+// removeWorktree 是仓库删链接树的唯一能力（上锁/认不出的树不删）。
+import { WORKTREE_PRUNE_EXPIRE, removeWorktree } from "../isolation.js";
 
 // CLI 层复用的边界常量（service 是边界权威——no copied boundary constants）。
 export {
@@ -290,30 +292,14 @@ export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
 }
 
 /**
- * 清理临时 worktree：git worktree remove --force（cwd=repoRoot），失败回退
- * rmSync 形强删 + prune；最多 3 次退避重试（isolation.removeWorktree 同款
- * Windows 文件锁纪律）。返回闭集 "ok"|"failed"（目录消失即 ok）。
+ * 清理临时 worktree：委托 isolation.removeWorktree——仓库删链接树的唯一能力
+ * （只删 git 认得出、没上锁的树，上了锁的 git 本就拒删且不走强删兜底；git 删
+ * 不掉时 rmSync 强删 + 定向清本树管理条目，带 Windows 文件锁退避重试）。
+ * 返回闭集 "ok"|"failed"（目录消失即 ok；目录仍在——上锁/删除失败——即
+ * failed，调用方结果照记）。
  */
-async function _removeVerifyWorktree(gitFn, repoRoot, wtPath) {
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      gitFn(["worktree", "remove", "--force", wtPath], { cwd: repoRoot });
-    } catch {
-      try {
-        await rm(wtPath, { recursive: true, force: true });
-      } catch { /* 尽力，走重试 */ }
-      try {
-        gitFn(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE], { cwd: repoRoot });
-      } catch { /* prune 失败不阻塞 */ }
-    }
-    if (!existsSync(wtPath)) {
-      try {
-        gitFn(["worktree", "prune", "--expire", WORKTREE_PRUNE_EXPIRE], { cwd: repoRoot });
-      } catch { /* best-effort */ }
-      return "ok";
-    }
-    await new Promise((r) => setTimeout(r, 100 * attempt));
-  }
+async function _removeVerifyWorktree(wtPath) {
+  await removeWorktree(wtPath);
   return existsSync(wtPath) ? "failed" : "ok";
 }
 
@@ -573,7 +559,7 @@ export async function runVerifyCommit({
     if (interrupt.requested === true) {
       // Ctrl-C 早于 started：未开始即止——不写任何事件（无 started 即无配对
       // 义务），清理后以 aborted 收口、非零退出。
-      cleanupStatus = await _removeVerifyWorktree(_git, authorizedWorkspaceRoot, wtPath);
+      cleanupStatus = await _removeVerifyWorktree(wtPath);
       return {
         runId, checkId, commit,
         status: "aborted",
@@ -657,7 +643,7 @@ export async function runVerifyCommit({
     }
 
     // ===== 清理（结果照记；失败 → cleanup:"failed"） =====
-    cleanupStatus = await _removeVerifyWorktree(_git, authorizedWorkspaceRoot, wtPath);
+    cleanupStatus = await _removeVerifyWorktree(wtPath);
 
     // ===== 裁定②：outcome 事件（清理结果照记；追加失败 → 抛错，只剩 started
     // = 合法不完整证据，绝不读作通过） =====
@@ -690,7 +676,7 @@ export async function runVerifyCommit({
     // 抛错路径（审计写失败/意外异常）的兜底清理——已在上方正常路径清过的，
     // 目录不存在时 remove 是 no-op（existsSync 先行）。
     if (existsSync(wtPath)) {
-      await _removeVerifyWorktree(_git, authorizedWorkspaceRoot, wtPath);
+      await _removeVerifyWorktree(wtPath);
     }
   }
 }

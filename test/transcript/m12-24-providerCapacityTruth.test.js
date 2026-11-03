@@ -90,7 +90,7 @@ test("M12-24-D2: terminal quota/usage-limit errors classify as provider_capacity
 });
 
 test("M12-24-D3: provider-capacity codes are one valid closed category-code set", () => {
-  assert.deepEqual([...PROVIDER_CAPACITY_DIAGNOSIS_CODES], ["rate_limited", "quota_exhausted"]);
+  assert.deepEqual([...PROVIDER_CAPACITY_DIAGNOSIS_CODES], ["rate_limited", "quota_exhausted", "overloaded"]);
   assert.ok(DIAGNOSIS_CATEGORIES.includes("provider_capacity"));
   for (const code of PROVIDER_CAPACITY_DIAGNOSIS_CODES) {
     assert.ok(DIAGNOSIS_CODES.includes(code));
@@ -154,11 +154,31 @@ test("M12-24-D7: local resource limits and stack line numbers are not provider c
     "process exited with code 1; stderr: memory usage limit exceeded",
     "process exited with code 1; stderr: TypeError at bundle.js:429:17",
     "process exited with code 1; stderr: retried operation 429 times",
+    // TD-329 反例：本地资源类 "… at capacity" 措辞不含 model，不得归入 overloaded。
+    "process exited with code 1; stderr: disk at capacity",
+    "process exited with code 1; stderr: memory at capacity",
+    "process exited with code 1; stderr: model cache: disk at capacity",
+    "process exited with code 1; stderr: model context window at capacity",
   ]) {
     const result = diagnoseFailure(failedRunEvents(errorText), "run_capacity");
     assert.equal(result.category, "crash", errorText);
     assert.equal(result.code, null);
   }
+});
+
+test("M12-24-D9: upstream model-at-capacity closeout classifies as provider_capacity/overloaded (TD-329)", () => {
+  // 2026-11-02 真实转录的完整错误形状：终局 run.error 带 stderr 尾巴（无关输出）。
+  const errorText = "process exited with code 1; codex: Selected model is at capacity. Please try a different model.; stderr: Reading additional input from stdin...";
+  const result = diagnoseFailure(failedRunEvents(errorText), "run_capacity");
+  assert.equal(result.category, "provider_capacity", "上游模型满载是 provider 容量事实，不是 crash");
+  assert.equal(result.code, "overloaded");
+  // 大小写不敏感的同族措辞仍归 overloaded。
+  const resultUpper = diagnoseFailure(
+    failedRunEvents("process exited with code 1; codex: Selected Model Is At Capacity."),
+    "run_capacity",
+  );
+  assert.equal(resultUpper.category, "provider_capacity");
+  assert.equal(resultUpper.code, "overloaded");
 });
 
 test("M12-24-D8: another run's later events cannot create a capacity fact for this run", () => {
@@ -241,6 +261,7 @@ test("M12-24-MCP2: tools/list exposes only the intended capacity category and co
     assert.match(schema, /provider_capacity/);
     assert.match(schema, /rate_limited/);
     assert.match(schema, /quota_exhausted/);
+    assert.match(schema, /overloaded/);
   } finally {
     await client.close();
     await server.close();

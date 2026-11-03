@@ -96,11 +96,15 @@ export const PROVIDER_DIAGNOSIS_CODES = Object.freeze([
 
 // M12-24: terminal provider-capacity facts. Credentials and entitlement may be
 // valid while the current provider account is rate-limited or out of quota.
-// Informational runtime rate-limit events are not consumed here; only a failed
-// run with a persisted run.error can carry one of these safe labels.
+// TD-329: `overloaded` labels a transient upstream model-capacity saturation
+// ("model … at capacity") — re-dispatch later or switch lanes is the Lead's
+// call, never an automatic retry. Informational runtime rate-limit events are
+// not consumed here; only a failed run with a persisted run.error can carry one
+// of these safe labels.
 export const PROVIDER_CAPACITY_DIAGNOSIS_CODES = Object.freeze([
   "rate_limited",
   "quota_exhausted",
+  "overloaded",
 ]);
 
 // M12-21: completed-empty truth — the closed-set machine fact that labels a
@@ -303,11 +307,17 @@ const CONFIG_CONFLICT_SIGNAL = /precedence|connectors.{0,30}disabled|auth source
 const QUOTA_EXHAUSTED_SIGNAL = /quota.{0,40}(exhausted|exceeded|depleted|reached)|(?:usage|spending).{0,40}(?:upper\s+)?limit.{0,30}(exceeded|reached|hit)|hit.{0,40}(?:\d+[- ]?hour|usage|message|token).{0,30}limit|(?:\d+[- ]?hour|usage|message|token).{0,40}limit.{0,30}(?:reached|resets?)/i;
 const LOCAL_RESOURCE_LIMIT_SIGNAL = /\b(?:disk|filesystem|file system|storage|cgroup|cpu|memory)\b.{0,40}\b(?:quota|usage|limit)\b|\b(?:quota|usage|limit)\b.{0,40}\b(?:disk|filesystem|file system|storage|cgroup|cpu|memory)\b/i;
 const RATE_LIMIT_SIGNAL = /too many requests|rate[\s_-]*limit(?:ed|ing)?|\b(?:provider|http|status|response|api|request)\b[^\r\n]{0,32}\b429\b|\b429\b[^\r\n]{0,32}too many requests/i;
+// TD-329: 上游模型满载（2026-11-02 真实转录："Selected model is at capacity."）。
+// 窄匹配：只认 "model is at capacity" 这一说法——"model cache: disk at
+// capacity"、"model context window at capacity" 这类本地或上下文容量措辞
+// 落不进来；没见过的措辞不扩。
+const OVERLOADED_SIGNAL = /\bmodel is (?:currently )?at capacity\b/i;
 
 function classifyProviderCapacityCode(error) {
   if (LOCAL_RESOURCE_LIMIT_SIGNAL.test(error)) return null;
   if (QUOTA_EXHAUSTED_SIGNAL.test(error)) return "quota_exhausted";
   if (RATE_LIMIT_SIGNAL.test(error)) return "rate_limited";
+  if (OVERLOADED_SIGNAL.test(error)) return "overloaded";
   return null;
 }
 

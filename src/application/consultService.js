@@ -49,6 +49,9 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
+// 决定 0055 判定权威（2026-10-10 kimi 诊断批引入；2026-11-03 改接只读观察投影）：
+// 席位写入证据不再自数 transcript 事件，复用只读观察投影的工作树内写入事实。
+import { projectReadOnlyObservation } from "./runReadOnlyObservation.js";
 // 决定 0096：有未终态席位时回执带 MCP 面 nextStep（模板与长度上限的家在
 // runNextStep.js，本模块只提供席位判定并转交）。
 import { buildNextStep } from "./runNextStep.js";
@@ -360,10 +363,13 @@ export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTra
   const scope = boundReportScope(events, runId) ?? events;
   const state = findState(scope);
   // kimi 诊断批（2026-10-10，Owner 批准的合同变更）：只读席位违规自动判 FAIL。
-  // 写入证据=transcript 里的 file_written 事件（工具上报；shell 重定向类未上报
-  // 写入是已知盲区，记录在案——worktree 隔离仍是实际兜底）。只计数+叠加判定，
-  // 不改写 runState 自然终态。
-  const fileWrittenCount = events.filter((e) => e && e.type === "file_written").length;
+  // 写入证据=只读观察投影在同一冻结快照上的工作树内写入事实（真实事件形状是
+  // type:"run.event"、kind:"file_written"——旧的顶层 type:"file_written" 自数
+  // 从未匹配过任何真实转录，判定从未触发）。取它数出的工作树内写入文件数
+  //（observedFileCount）：写在系统临时目录里的实验文件不在工作树派生面内，不算
+  // 违规；同一席位另有工作树外的写入时投影 status 变 unknown，但工作树内那几笔
+  // 仍照数，不被临时目录的写入掩盖。只计数+叠加判定，不改写 runState 自然终态。
+  const fileWrittenCount = projectReadOnlyObservation(events, { runId, env }).observedFileCount ?? 0;
   return {
     runState: typeof state === "string" ? state : "unknown",
     terminal: TERMINAL_STATES.includes(state),
@@ -553,7 +559,7 @@ export async function runConsult({
     const seatBody = typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
       ? `${text}\n\n${seat.perspectiveText}`
       : text;
-    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、创建或修改文件、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
+    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
     try {
       // 派发目标取扇出前的那次解析（seatTargets），与身份事实同源。
       const { dispatchAgentId, policy } = seatTargets.get(seat.agentId);

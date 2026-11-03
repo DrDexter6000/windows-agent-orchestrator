@@ -161,9 +161,11 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 诊断码 `code` 是可空闭集字段，按类别配对校验：
 
 - `provider_auth` → `subscription_access_disabled` / `organization_policy_denied` / `api_key_missing` / `unauthorized` / `invalid_credential`
-- `provider_capacity` → `rate_limited` / `quota_exhausted`
+- `provider_capacity` → `rate_limited` / `quota_exhausted` / `overloaded`
 - `no_effect` → `completed_empty`
 - 其余类别恒为 `null`；非法、越集或错配的（类别, 码）组合折叠为 `null`。
+
+`overloaded` 是上游模型满载的瞬时容量事实（如 codex 的 "Selected model is at capacity."）：等一会儿按原任务重派，或换一条车道；WAO 不自动重试、不自动换车道。
 
 `provider_capacity` 只从 failed 终态的持久 `run.error` 分类；非终态 runtime 的 `rate_limit_event` 不会被升级为失败。所有 code 都是安全事实标签，永不回显原始错误文本/path/command/key/payload。WAO 不根据这些事实自动重试、换 worker 或停止其他 run——处置归 Lead。CLI `runs diagnose` 显示同一 category 与 code。
 

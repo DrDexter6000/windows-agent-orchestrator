@@ -20,7 +20,7 @@
 
 **横切守卫组**：`test/isolation-infra/docs-consistency.test.js`、`test/isolation-infra/docsSurface.test.js`、`test/isolation-infra/staticRunsGuard.test.js`、`test/isolation-infra/desensitization.test.js`、`test/isolation-infra/controlBytes.test.js`、`test/mcp-surface/m12-10-tool-surface.test.js`、`test/isolation-infra/cliHelpCoverage.test.js`、`test/isolation-infra/workflowReachability.test.js`。它们检查文档与代码一致、生成层是否需要再生成、测试有没有写进仓库的 `runs/`、被跟踪文件里有没有混进控制字节或非 UTF-8 内容（比如正则里的 `\b` 落成了退格字节）、有没有凭据形状的字面量、MCP 工具面的字节上限、CLI 帮助有没有漏掉实现了的子命令与旗标、每个跟踪文件是否从入口经强边或中边可达，除可达性守卫约 30 秒外都是几秒钟跑完，却最常抓到改动的连带问题。新增这类跨全仓的守卫时，把它加进这张清单。
 
-**最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量。
+**最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量。只补改了 `docs/**` 下的文档时例外（角色合同、`SKILL.md` 这类会被注入或被测试钉住的 `.md` 不算）：跑横切守卫组，加上直接读这些文档的测试文件（`git grep -l '<文档路径>' -- test` 列出），绿了仍算最终候选，全量不必重跑。
 
 全局 `wao` 与宿主的 MCP 注册常常直接指向开发检出（本仓库的维护机器就是这样），main 上的错误会立刻影响正在用 WAO 的会话，所以合入前这一次全量不能省；唯一的例外是上表里只改画像数据的批次。
 

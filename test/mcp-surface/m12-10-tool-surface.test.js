@@ -436,7 +436,11 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 93186;
+const FROZEN_23_WIRE_CEILING = 93212;
+// TD-329（2026-11-03，TD-329 批次合同授权重冻；闭集扩员、additive）：run_diagnose 与
+// run_await_result 出参 code enum 增 overloaded（PROVIDER_CAPACITY_DIAGNOSIS_CODES
+// SSOT 扩员——上游模型满载的瞬时容量事实）：93186→93212（实测；Owner 硬顶 94532 内）。
+// 描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
 // TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
 // enum 增 explicit_dispatch_continuable_unsupported（CONTINUE_REJECTION_REASONS
 // SSOT 扩员）：93142→93186（实测；Owner 硬顶 94532 内）。描述与 inputSchema
@@ -664,8 +668,14 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // costTier 与三格可选 score、run_dispatch 增可选 laneFacts——outputSchema 在
 // stripped 载荷内，SHA 如实翻新（决定 0097，工具面重冻；描述与 inputSchema
 // 零改动，desc/hostVisible 冻结线未动）。
+// TD-329（2026-11-03，TD-329 批次合同授权重冻；闭集扩员、additive）：run_diagnose 与
+// run_await_result 出参 code enum 增 overloaded（PROVIDER_CAPACITY_DIAGNOSIS_CODES
+// SSOT 扩员——上游模型满载的瞬时容量事实）——outputSchema 在 stripped 载荷内，
+// SHA 如实翻新；无描述字节变化；wire 帽同批重冻（93186→93212，帽内 additive）。
+// （历史值：e91d5a6e1fddf5850ff8a9df0514892e69d5f2d20a2b77d324c978809f7776f1
+// 为 TD-327 explicit_dispatch_continuable_unsupported 后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "e91d5a6e1fddf5850ff8a9df0514892e69d5f2d20a2b77d324c978809f7776f1";
+  "5f79ca12afe1d343f606547a5d3fe2d1e2549344e86fda618cdee6c6bbf73d55";
 // TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
 // enum 增 explicit_dispatch_continuable_unsupported（TD-327 具名拒因——
 // CONTINUE_REJECTION_REASONS SSOT 扩员）——outputSchema 在 stripped 载荷内，

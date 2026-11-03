@@ -20,10 +20,8 @@ npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file deliv
 
 Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。
 
-任务书要写明三条边界：
+写入只在授权 worktree 内（越界即 `failed(workdir_escape)`）、scratch 放 `.wao/runs/`：控制面注入的交付执行合同已写明，任务书不必重复。仍建议任务书写明：
 
-- 任何写入或写入意图（含临时文件、探针、scratch）必须落在授权 worktree 内；首个越界即 `failed(workdir_escape)` 终态，不可恢复。
-- scratch 一律建在 `<worktreeRoot>/.wao/runs/` 下（已被忽略，waoLayout 白名单槽位）。
 - 路径语义与越界行为的验证优先用注入 fake fs 的纯函数单测；worktree 内必要的真实文件系统验证不受此限（禁的是越界写与写入意图，不是 in-worktree fs 测试）。focused 验证命令引用的测试路径必须先实测存在。
 
 交付规格凡允许 worker 新增、移动或删除 `*.test.js` 文件，必须同时把 `test/manifest.json` 纳入 `allowedPaths`，并在任务书要求同步登记。否则交付提交独立过 canonical 验证必失败（manifest 漂移 = INVALID ENVIRONMENT），只能 Lead 事后补登记。
@@ -185,7 +183,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 
 - `--commit`：全形 canonical SHA（40/64 小写 hex；短形拒绝，短形只用于期望锚），经 `rev-parse --verify --end-of-options <sha>^{commit}` 等值校验。`--commands-file`：UTF-8 JSON 字符串数组（与 `runs delivery reverify --setup-commands-file` 同一解析器与边界：≤32 条、每条 ≤512 字符；命令含静态可辨绝对路径字面量即拒绝——防越出临时 worktree）。`--timeout-ms`：单值闭区间 `[1000,7200000]`（每命令预算，缺省 300000）。
 - 前置：runId 须为该 workspace 的已终态 delivery run（转录含 `run.delivery_created`）；提交与 run 的关系记事实字段（isDeliveryCommit / containsDeliveryCommit / adoptedFromTrailer）不设拒。
-- 执行：一律走系统唯一有意 shell 边界（`runVerificationCommand`）+ verifier 同款 attempt env 确定性钉 + 同机机器验证闸串行；临时 worktree 在 `<repo>/.wao-worktrees/verify-<nonce>/`（检出 + 用后清理；不进 os.tmpdir()）。
+- 执行：一律走系统唯一有意 shell 边界（`runVerificationCommand`）+ verifier 同款 attempt env 确定性钉 + 同机机器验证闸串行；临时 worktree 在 `<repo>/.wao-worktrees/verify-<nonce>/`（检出 + 用后清理，与 `wao worktree remove` 同一删树能力：上锁（`git worktree lock`）的树不删，目录原样、`cleanup:"failed"` 如实落事件；不进 os.tmpdir()）。
 - 退出码：outcome 为 passed 且 cleanup 为 ok 才是 0；失败/中断/清理失败均非零（结果照记，`cleanup:"failed"` 如实落事件）。
 
 `run_delivery` 失败摘要带 `stderrTailInTranscript` 提示位（true = 失败命令 result frame 有非空尾，细节去转录读；投影永不携带尾内容本身）。

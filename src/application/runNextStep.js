@@ -127,9 +127,12 @@ function render(surface, situation, runId, extras) {
       if (surface === "mcp") {
         text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_wait repeatedly (within the host's tool-call timeout) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
       } else {
-        const tail = "Before ending the turn, wait on each: wao runs wait <runId> --until-settled "
+        // CLI 面：一条 `consult wait <consultId> --until-settled` 等全部席位收口
+        //（逐席 runs wait 是旧用法，命令已提供整场等待）。runId 清单仍是事实陈列
+        //（哪几席还没到），等待动作本身只需 consultId。
+        const tail = "Before ending the turn, attach: wao consult wait " + extras.consultId + " --until-settled "
           + "(in the background if your host notifies you when background commands finish; otherwise "
-          + `one after another in the foreground), then re-read with wao consult show ${extras.consultId}.`;
+          + `in the foreground), then re-read with wao consult show ${extras.consultId}.`;
         const listed = `Seats not terminal yet: ${extras.seatRunIds.join(", ")}. ${tail}`;
         text = listed.length <= NEXT_STEP_MAX_LEN
           ? listed

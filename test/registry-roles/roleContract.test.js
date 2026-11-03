@@ -405,3 +405,96 @@ test("declaredScopeExpansion: 合同指令携带同一标记；只认最终 assi
   assert.equal(declaredScopeExpansion([]), false);
   assert.equal(declaredScopeExpansion(undefined), false);
 });
+
+// ── 控制面执行合同：共用条款 + 只读执行合同 + 交付合同补齐 ───────────────────
+// 会审定稿条款：两条共用条款模块内只定义一次，只读合同与交付合同引用同一份；
+// 条款文字不得改写（改动须走会审定稿）。
+
+const SHARED_CLAUSE_SECRETS_PREFIX = "- Do not read credential or secret stores";
+const SHARED_CLAUSE_FINISH_PREFIX = "- Do not end your turn while a command you started is still running";
+
+test("只读执行合同：三条只读条款 + 两条共用条款在场，交付合同不带只读头", async () => {
+  const { composeReadOnlyExecutionContract, composeDeliveryExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const ro = composeReadOnlyExecutionContract();
+  assert.ok(ro.startsWith("READ-ONLY EXECUTION CONTRACT (WAO control plane"), "只读合同头在场");
+  assert.match(ro, /may narrow these permissions further, never widen them/, "只读合同头声明收窄合法");
+  assert.match(ro, /Do not edit, create or delete project files in your working directory/, "只读条款①：工作目录内不做项目文件写");
+  assert.match(ro, /Running the project's existing test or build commands that the task asks for is allowed/, "只读条款①：任务要求的测试/构建命令放行");
+  assert.match(ro, /run no git command that changes the index, HEAD, refs, configuration, worktrees or remotes/, "只读条款②：改写性 git 命令禁令");
+  assert.match(ro, /Read-only forms \(log, show, diff, grep, status, branch --list, worktree list, config --get\) are fine/, "只读条款②：只读形式放行");
+  assert.match(ro, /create a new directory under the system temporary directory and write only there/, "只读条款③：实验写系统临时目录");
+  assert.match(ro, /Never write to, or run a writing git command against, your working directory, the source repository or any other existing checkout/, "只读条款③：绝不写既有检出");
+  // 两条共用条款逐字在场
+  const roLines = ro.split("\n");
+  assert.ok(roLines.some((l) => l.startsWith(SHARED_CLAUSE_SECRETS_PREFIX)), "共用条款（凭据/环境变量）在场");
+  assert.ok(roLines.some((l) => l.startsWith(SHARED_CLAUSE_FINISH_PREFIX)), "共用条款（命令收尾）在场");
+  // 交付合同不带只读头；只读合同不带交付头
+  const delivery = composeDeliveryExecutionContract();
+  assert.ok(!ro.includes("DELIVERY EXECUTION CONTRACT"), "只读合同不夹带交付合同正文");
+  assert.ok(!delivery.includes("READ-ONLY EXECUTION CONTRACT"), "交付合同不夹带只读合同正文");
+});
+
+test("两条共用条款在只读合同与交付合同里逐字同一份（各出现恰一次）", async () => {
+  const { composeReadOnlyExecutionContract, composeDeliveryExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const ro = composeReadOnlyExecutionContract();
+  const delivery = composeDeliveryExecutionContract();
+  const scoped = composeDeliveryExecutionContract({ allowedPaths: ["src"] });
+  for (const prefix of [SHARED_CLAUSE_SECRETS_PREFIX, SHARED_CLAUSE_FINISH_PREFIX]) {
+    const clause = ro.split("\n").find((l) => l.startsWith(prefix));
+    assert.ok(clause, `只读合同携带共用条款：${prefix}`);
+    assert.ok(delivery.includes(clause), "交付合同逐字包含同一份条款");
+    assert.ok(scoped.includes(clause), "带 allowedPaths 的交付合同同样携带");
+    assert.equal(delivery.split(clause).length - 1, 1, "交付合同内恰一次");
+    assert.equal(ro.split(clause).length - 1, 1, "只读合同内恰一次");
+  }
+  // 共用条款是整行（不是拼进别的条款）
+  assert.ok(delivery.split("\n").some((l) => l === ro.split("\n").find((l2) => l2.startsWith(SHARED_CLAUSE_SECRETS_PREFIX))),
+    "同一份 = 整行逐字相等，不是重写");
+});
+
+test("交付合同补齐：新写入边界行与 git 行扩展在场，共用条款在 allowedPaths 段之前", async () => {
+  const { composeDeliveryExecutionContract, composeReadOnlyExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const base = composeDeliveryExecutionContract();
+  const lines = base.split("\n");
+  // 新增行（逐字在场）
+  assert.ok(lines.some((l) => l === "- Every file you create or modify with your tools, including temporary files, probes and scratch, must be inside it; put scratch under .wao/runs/. A tool write or write intent outside it ends the run as failed (workdir_escape). This check is not an OS sandbox: do not write outside this directory by any other means either, except throwaway repositories and files your test commands create under the system temporary directory."),
+    "写入边界新行逐字在场");
+  // git 行扩展（逐字在场）
+  assert.ok(lines.some((l) => l === "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag. This applies to this workspace and every other existing checkout, not to throwaway repositories your test commands create under the system temporary directory."),
+    "git 禁令行的跨检出/一次性仓库扩展逐字在场");
+  // 既有行字节不变（改动前九行原文逐字保留）
+  const previousLines = [
+    "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
+    "- The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace.",
+    "- Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout.",
+    "- Do NOT move HEAD. Do NOT create any commit, tag, or branch.",
+    "- Keep your authorized file changes as UNSTAGED working-tree changes. Do not stage them.",
+    "- Report only: changed paths, test results, and risks. Do not report a 'Final commit SHA' or claim to have committed.",
+    "- The WAO control plane inspects your working-tree changes, stages them, and creates the single atomic delivery commit. You do not commit.",
+    "- If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only.",
+  ];
+  for (const expected of previousLines) {
+    assert.ok(lines.includes(expected), `既有行字节不变：${expected.slice(0, 50)}…`);
+  }
+  // allowedPaths 段字节不变（四行原文 + 单行 JSON）
+  const scoped = composeDeliveryExecutionContract({ allowedPaths: ["src", "test"] });
+  const scopedLines = scoped.split("\n");
+  const scopeBlock = [
+    "- AUTHORIZED WORK SCOPE (single source of truth — the WAO control plane persists and delivers this exact list before you start; do not infer, widen, or observe scope from the filesystem):",
+    `- AUTHORIZED_PATHS_JSON: ${JSON.stringify(["src", "test"])}`,
+    '- Each changed path must be EXACTLY one of the entries above, or a descendant on a "/" segment boundary: "src" authorizes "src/a.js" and "src/d/b.js", but NOT "src2/a.js" or "srcfoo". Matching is case-sensitive — case-shape is authoritative ("src" does not authorize "SRC/a.js").',
+    "- If your task requires a path NOT covered by the list above, do NOT edit it: STOP, leave your changes as unstaged working-tree changes, report `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`, and await instructions.",
+  ];
+  for (const expected of scopeBlock) {
+    assert.ok(scopedLines.includes(expected), `allowedPaths 段字节不变：${expected.slice(0, 50)}…`);
+  }
+  // 共用条款（末尾）在 allowedPaths 段之前
+  const finishClause = composeReadOnlyExecutionContract().split("\n").find((l) => l.startsWith(SHARED_CLAUSE_FINISH_PREFIX));
+  assert.ok(scoped.indexOf(finishClause) < scoped.indexOf("- AUTHORIZED WORK SCOPE"),
+    "共用条款在 allowedPaths 段之前");
+  // 无 allowedPaths 时 base 也带共用条款（既有调用方字节形状只增不换）
+  assert.ok(base.endsWith(finishClause), "base 合同以共用条款收尾");
+});

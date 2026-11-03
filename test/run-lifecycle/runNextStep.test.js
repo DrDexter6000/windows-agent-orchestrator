@@ -190,8 +190,9 @@ test("NEXT-08: consult_seats_running——MCP 面不落任何具体 id；CLI 面
     surface: "cli", situation: "consult_seats_running", seatRunIds: [RUN_ID], consultId,
   });
   assert.match(cli, new RegExp(`Seats not terminal yet: ${RUN_ID}\\.`));
-  assert.match(cli, /wao runs wait <runId> --until-settled/);
-  assert.match(cli, /in the background if your host notifies you when background commands finish; otherwise one after another in the foreground/);
+  assert.match(cli, new RegExp(`wao consult wait ${consultId} --until-settled`), "CLI 面指向整场收口等待（consult wait --until-settled）");
+  assert.ok(!cli.includes("wao runs wait"), "CLI 面不再让 Lead 逐席 runs wait");
+  assert.match(cli, /in the background if your host notifies you when background commands finish; otherwise in the foreground/);
   assert.match(cli, new RegExp(`re-read with wao consult show ${consultId}\\.$`));
   assert.ok(cli.includes(RUN_ID) && cli.includes(consultId), "CLI 面列 runId 与 consultId");
   assert.ok(cli.length <= NEXT_STEP_MAX_LEN);

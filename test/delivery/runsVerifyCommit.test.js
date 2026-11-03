@@ -284,6 +284,13 @@ test("TD-240 主路径：真实仓核验通过——事件族形状/关系事实
       ? readdirSync(wtRoot).filter((n) => n.startsWith("verify-"))
       : [];
     assert.deepEqual(leftover, [], "verify-* 零残留");
+    // 登记面：目录删净之外，git 的管理条目（.git/worktrees/<id>）也清掉
+    // （removeWorktree 契约；本仓无其他工作树——登记面应整体为空）
+    const adminDir = join(repo.path, ".git", "worktrees");
+    const admins = existsSync(adminDir)
+      ? readdirSync(adminDir).filter((n) => !n.startsWith("."))
+      : [];
+    assert.deepEqual(admins, [], "verify 临时树的 git 管理条目应清掉（无登记残留）");
   } finally {
     cleanupDir(scratch);
   }
@@ -840,29 +847,18 @@ test("TD-240 反例：清理失败——结果照记+cleanup:failed+整体非零
     await writeRunTranscript(runDir, "run_vc_target", repo.path, repo.commitA);
     let nonceCounter = 0;
     const fixedNonce = () => `deadbeef${(nonceCounter += 1)}`;
-    // 注入 gitFn：worktree remove/prune 抛错（逼出 rm 回退路径）；其余 git 调用
-    // 走真实结构化参数执行。
-    const throwingGit = (args, opts) => {
-      if (args[0] === "worktree" && (args[1] === "remove" || args[1] === "prune")) {
-        throw new Error("git worktree blocked (injected)");
-      }
-      return execFileSync("git", args, {
-        cwd: opts?.cwd,
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        maxBuffer: 20 * 1024 * 1024,
-      });
-    };
     const wtPath = join(repo.path, ".wao-worktrees", "verify-deadbeef1");
     const svcPromise = runVerifyCommit(baseInput({
       runDir, runId: "run_vc_target", repo, commit: repo.commitA,
       commands: ["node stallShort.js"],
-    }, { gitFn: throwingGit, randomIdFn: fixedNonce }));
+    }, { randomIdFn: fixedNonce }));
     // 命令运行期间（4s 窗口）：①await sleep 轮询（Atomics.wait 忙等会饿死事件
     // 循环）；②worktree 就绪后放一个 cwd 钉在 worktree 内的 detached 占位进程
-    // （Windows 上删除"某进程当前目录"必败——Node rm 对打开句柄仍可删，实测
-    // r+ 句柄不足以阻断）。
+    // 阻断删除（Windows 上删除"某进程当前目录"必败——git 的 remove 与
+    // removeWorktree 的 rmSync 兜底都删不掉；Node rm 对打开句柄仍可删，实测
+    // r+ 句柄不足以阻断）。删除细节由 isolation 契约自证
+    // （test/isolation-infra/removeWorktreeSourceRepo.test.js），本用例只断言
+    // 可观察结果：cleanup failed + 目录残留。
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const deadline = Date.now() + 15000;
     while (!existsSync(join(wtPath, "README.md")) && Date.now() < deadline) {
@@ -889,6 +885,45 @@ test("TD-240 反例：清理失败——结果照记+cleanup:failed+整体非零
         execFileSync("taskkill", ["/PID", String(holder.pid), "/T", "/F"], { stdio: "ignore" });
       } catch { /* best effort */ }
     }
+    cleanupDir(scratch);
+  }
+}));
+
+test("TD-240 反例：临时树被 git worktree lock 锁住——cleanup:failed，目录与锁原样", withLeadExemptionEnv(async () => {
+  const scratch = makeScratch("vc-lock-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const runDir = join(scratch, "runs");
+    await writeRunTranscript(runDir, "run_vc_target", repo.path, repo.commitA);
+    let nonceCounter = 0;
+    const fixedNonce = () => `feedface${(nonceCounter += 1)}`;
+    const wtPath = join(repo.path, ".wao-worktrees", "verify-feedface1");
+    const svcPromise = runVerifyCommit(baseInput({
+      runDir, runId: "run_vc_target", repo, commit: repo.commitA,
+      commands: ["node stallShort.js"],
+    }, { randomIdFn: fixedNonce }));
+    // 命令运行期间（4s 窗口）给临时树上锁：git 本就拒删上锁的树，清理不得走
+    // 强删兜底（isolation.removeWorktree 契约——上锁/认不出的树不删）——结果
+    // 照记 cleanup:failed，目录与锁原样。
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const deadline = Date.now() + 15000;
+    while (!existsSync(join(wtPath, "README.md")) && Date.now() < deadline) {
+      await sleep(50);
+    }
+    assert.ok(existsSync(join(wtPath, "README.md")), "worktree must be checked out during the command window");
+    gitOf(repo.path, ["worktree", "lock", wtPath]);
+    const result = await svcPromise;
+    assert.equal(result.status, "passed", "命令本身绿色——结果照记");
+    assert.equal(result.cleanup, "failed");
+    assert.equal(result.exitCode, 1, "清理失败 → 整体非零退出");
+    assert.ok(existsSync(join(wtPath, "README.md")), "上锁的树目录与文件原样");
+    assert.ok(existsSync(join(repo.path, ".git", "worktrees", "verify-feedface1", "locked")),
+      "锁原样（.git/worktrees/<id>/locked 在场）");
+    assert.ok(existsSync(join(repo.path, ".git", "worktrees", "verify-feedface1", "gitdir")),
+      "登记原样（.git/worktrees/<id>/gitdir 在场）");
+    const events = await readTranscript(join(runDir, "run_vc_target.jsonl"));
+    assert.equal(findEvent(events, LEAD_COMMIT_CHECK_OUTCOME_TYPE)[0].cleanup, "failed");
+  } finally {
     cleanupDir(scratch);
   }
 }));

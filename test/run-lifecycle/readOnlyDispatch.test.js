@@ -33,7 +33,7 @@
 import { test } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -700,3 +700,247 @@ test("RO-C4: foreground `run --read-only` forces isolation and persists the decl
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// 5. 只读执行合同注入（start + resume，2026-11-03）
+//
+// 只读运行此前没有控制面合同——Lead 每份任务书都得手抄同一批只读边界。
+// 控制面现在在 start 与 resume 把 composeReadOnlyExecutionContract() 前置于
+// 角色合同（与交付合同同一拼法、同一 transport、同一 fail-closed 能力门），
+// 合同不进 rolePin.sha256；resume 只认本 run 绑定的 run.read_only_declared，
+// 且只读 run 只要 run.started 记了 worktreePath，resume 就在那棵树里执行
+//（persistent 复用轮此前会跑回源仓）。
+// =====================================================================
+
+/** 手写转录：run.started（带隔离策略与 worktreePath）+ 绑定声明 + session +
+ *  prompt + 非终态（td262 同款形状——R13-C 绑定读要求每行带 runId+agentId）。 */
+function writeReadOnlyTranscript(dir, runId, agentId, { strategy, worktreePath, declared = true } = {}) {
+  const ev = (obj) => JSON.stringify(obj) + "\n";
+  const lines = [
+    ev({ type: "run.started", runId, agentId, backend: "claude-code", cwd: dir,
+      ...(worktreePath ? { worktreePath, worktreeBranch: `wao/${runId}` } : {}),
+      ...(strategy ? { worktreeStrategy: strategy } : {}),
+      ts: "2026-11-03T00:00:00.000Z", seq: 1 }),
+  ];
+  if (declared) lines.push(ev({ type: "run.read_only_declared", runId, agentId, ts: "2026-11-03T00:00:00.100Z", seq: 2 }));
+  lines.push(
+    ev({ type: "session.created", runId, agentId, backend: "claude-code", backendSessionId: "s_old", ts: "2026-11-03T00:00:00.200Z", seq: 3 }),
+    ev({ type: "prompt.sent", runId, agentId, prompt: "survey only", ts: "2026-11-03T00:00:00.300Z", seq: 4 }),
+    ev({ type: "run.state_change", runId, agentId, from: "pending", to: "submitted", reason: "spawned", ts: "2026-11-03T00:00:00.400Z", seq: 5 }),
+  );
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "runs", `${runId}.jsonl`), lines.join(""), "utf8");
+}
+
+/** resume 用的重放桩管理器（td262 同款 fake backend：replayByRespawn=true）。 */
+function replayManager(dir, registryPath, spawnCapture) {
+  const fakeBackend = {
+    supportsRoleContract: true, sessionOutlivesProcess: false, replayByRespawn: true,
+    async spawn(agent, task) {
+      if (spawnCapture) {
+        spawnCapture.agents = spawnCapture.agents ?? [];
+        spawnCapture.agents.push(agent);
+        spawnCapture.tasks = spawnCapture.tasks ?? [];
+        spawnCapture.tasks.push(task);
+      }
+      return {
+        backend: "claude-code", backendSessionId: "s_new", messageId: "m1", admittedSeq: 9,
+        async *events() { yield { kind: "done", reason: "completed" }; },
+        abort: async () => {},
+        isAlive: () => false,
+      };
+    },
+    defaultBinary() { return "claude"; }, credentialEnvNames: () => [],
+  };
+  return new RunManager({
+    config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
+    readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
+    transcriptDir: join(dir, "runs"), backendFor: () => fakeBackend, userEnvReader: async () => ({}),
+  });
+}
+
+test("RO-RC1: start × readOnly 前置只读合同——带角色时合同在前、角色在后、各恰一次；rolePin 仍取原始角色正文", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc1-"));
+  try {
+    const rolePath = join(dir, "_ro_role.md");
+    writeFileSync(rolePath, "# Surveyor\nRead-only surveyor role body.", "utf8");
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir, systemPrompt: rolePath } });
+    const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
+      readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
+      transcriptDir: join(dir, "runs"),
+      backendFor: () => backend,
+      userEnvReader: async () => ({}),
+      createReadOnlyCloneFn: async () => ({ path: FAKE_WORKTREE, branch: "wao/run_ro_rc1", baseCommit: "a".repeat(40), form: "private_clone" }),
+    });
+    const run = await manager.start("coder_low", { prompt: "survey", readOnly: true });
+    assert.equal(spawns.length, 1);
+    const rc = spawns[0].task.roleContract;
+    assert.ok(rc.startsWith("READ-ONLY EXECUTION CONTRACT"), "只读合同前置在身份头与角色之前");
+    assert.equal(rc.indexOf("READ-ONLY EXECUTION CONTRACT"), rc.lastIndexOf("READ-ONLY EXECUTION CONTRACT"), "只读合同恰一次");
+    assert.equal(rc.indexOf("Read-only surveyor role body."), rc.lastIndexOf("Read-only surveyor role body."), "角色正文恰一次");
+    assert.ok(rc.endsWith("Read-only surveyor role body."), "角色正文在合同之后");
+    const events = await readTranscript(run.transcript.filePath);
+    const started = events.find((e) => e.type === "run.started");
+    const { roleContractSha256 } = await import("../../src/application/roleContract.js");
+    assert.equal(started.rolePin.sha256, roleContractSha256("# Surveyor\nRead-only surveyor role body."),
+      "rolePin.sha256 只取原始角色正文——合同不进哈希");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC2: start × readOnly 无角色 → task.roleContract 恰为只读合同本身", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc2-"));
+  try {
+    makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const manager = makeManager({
+      dir, backend,
+      createReadOnlyCloneFn: async () => ({ path: FAKE_WORKTREE, branch: "wao/run_ro_rc2", baseCommit: "a".repeat(40), form: "private_clone" }),
+    });
+    await manager.start("coder_low", { prompt: "survey", readOnly: true });
+    const { composeReadOnlyExecutionContract } = await import("../../src/application/roleContract.js");
+    assert.equal(spawns[0].task.roleContract, composeReadOnlyExecutionContract(), "无角色 = 只有合同");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC3: 非只读非交付运行不带只读合同（roleContract 缺席，字节兼容）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc3-"));
+  try {
+    makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const manager = makeManager({ dir, backend });
+    await manager.start("coder_low", { prompt: "ordinary" });
+    assert.equal(spawns.length, 1);
+    assert.equal(spawns[0].task.roleContract, undefined, "普通运行不带任何执行合同");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC4: start × readOnly × 后端不声明 supportsRoleContract → 按交付合同同时机 fail closed（零副作用）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc4-"));
+  try {
+    makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const { spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const bare = { ...recordingBackend([]).backend, supportsRoleContract: undefined };
+    const manager = makeManager({ dir, backend: bare });
+    await assert.rejects(
+      () => manager.start("coder_low", { prompt: "x", readOnly: true }),
+      /read-only mode requires role contract injection/,
+      "与交付合同同形状的固定错误",
+    );
+    assert.equal(spawns.length, 0, "零 spawn");
+    const runDir = join(dir, "runs");
+    if (existsSync(runDir)) {
+      const jsonl = execSync("cmd /c dir /b", { cwd: runDir, stdio: "pipe" }).toString().split(/\r?\n/).filter((f) => f.endsWith(".jsonl"));
+      assert.deepEqual(jsonl, [], "零转录写入（拒绝先于一切副作用）");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC5: 只读 run resume 重新前置只读合同恰一次（绑定的 run.read_only_declared 是唯一事实源）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc5-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_ro_rc5";
+    const wt = join(dir, ".wao-worktrees", runId);
+    mkdirSync(wt, { recursive: true });
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    // 真实 start 写出绑定声明 + worktreePath（非终态——不等待完成）。
+    const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
+      readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
+      transcriptDir: join(dir, "runs"),
+      backendFor: () => backend,
+      userEnvReader: async () => ({}),
+      createReadOnlyCloneFn: async () => ({ path: wt, branch: `wao/${runId}`, baseCommit: "a".repeat(40), form: "private_clone" }),
+    });
+    const run = await manager.start("coder_low", { prompt: "survey", readOnly: true, runId });
+    assert.equal(run.runId, runId, "custom runId pinned for the resume lookup");
+    assert.equal(spawns.length, 1);
+    const capture = {};
+    const resuming = replayManager(dir, registryPath, capture);
+    const resumed = await resuming.resume(runId, { runDir: join(dir, "runs"), registry: registryPath });
+    assert.ok(resumed, "resume accepted");
+    assert.equal(capture.tasks.length, 1, "replay spawned once");
+    const rc = capture.tasks[0].roleContract;
+    assert.ok(rc.startsWith("READ-ONLY EXECUTION CONTRACT"), "resume 重新前置同一份只读合同");
+    assert.equal(rc.indexOf("READ-ONLY EXECUTION CONTRACT"), rc.lastIndexOf("READ-ONLY EXECUTION CONTRACT"), "恰一次");
+    assert.equal(resumed.readOnlyDeclared, true, "重建的 Run 透传只读声明");
+    assert.equal(capture.agents[0].cwd, wt, "只读轮 resume 的执行 cwd=隔离树");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC6: 非只读 run resume 不注入只读合同", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc6-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const { backend, spawns } = recordingBackend([{ kind: "done", reason: "completed" }]);
+    const manager = makeManager({ dir, backend });
+    const run = await manager.start("coder_low", { prompt: "ordinary" });
+    assert.equal(spawns.length, 1);
+    const capture = {};
+    const resuming = replayManager(dir, registryPath, capture);
+    const resumed = await resuming.resume(run.runId, { runDir: join(dir, "runs"), registry: registryPath });
+    assert.ok(resumed, "resume accepted");
+    assert.equal(capture.tasks[0].roleContract, undefined, "非只读不带合同");
+    assert.equal(resumed.readOnlyDeclared, false, "非只读重建 Run 无声明");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC7: persistent 只读轮（复用轮）resume 在 run.started 记下的 worktreePath 里执行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc7-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_ro_rc7";
+    const wt = join(dir, ".wao-worktrees", runId);
+    mkdirSync(wt, { recursive: true });
+    writeReadOnlyTranscript(dir, runId, "rc7", { strategy: "persistent", worktreePath: wt });
+    const registryPath = makeRegistry(dir, { rc7: { backend: "claude-code", cwd: dir } });
+    const capture = {};
+    const manager = replayManager(dir, registryPath, capture);
+    const resumed = await manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath });
+    assert.ok(resumed, "resume accepted");
+    assert.equal(capture.agents[0].cwd, wt, "replay spawn 的执行 cwd=persistent 只读树（不再跑回源仓）");
+    assert.equal(resumed.effectiveCwd, wt, "Run 的执行位置=那棵树");
+    assert.equal(resumed.agent.cwd, dir, "Run.agent 仍按源仓解析");
+    assert.ok(capture.tasks[0].roleContract.startsWith("READ-ONLY EXECUTION CONTRACT"), "合同同样前置");
+    assert.equal(resumed.deferredWorktreeRelease, null, "persistent 树无 deferred 释放在场");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-RC8: persistent 只读轮树缺失 → 拒绝 resume（报错形状照 ephemeral 那条，零转录写入）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro-rc8-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_ro_rc8";
+    writeReadOnlyTranscript(dir, runId, "rc8", { strategy: "persistent", worktreePath: join(dir, ".wao-worktrees", runId) });
+    const registryPath = makeRegistry(dir, { rc8: { backend: "claude-code", cwd: dir } });
+    const manager = replayManager(dir, registryPath, null);
+    await assert.rejects(
+      manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath }),
+      /resume_refused: read-only worktree missing/,
+      "树不在=只读隔离合同不可在源仓兑现",
+    );
+    const events = readFileSync(join(dir, "runs", `${runId}.jsonl`), "utf8").trim().split("\n");
+    assert.equal(events.length, 5, "拒绝零转录写入");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+

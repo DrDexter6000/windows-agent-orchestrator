@@ -205,6 +205,16 @@ test("RO-5: absolute event path proven lexically inside the worktree derives the
   assert.deepEqual(r.writtenPaths, ["src/deep/b.js"]);
 });
 
+test("RO-5b: absolute event paths normalize '.' and '..' lexically; climbing out of the worktree stays unknown", () => {
+  const r = ro(base({ extra: [
+    writtenEvent(`${WORKTREE}/./src/e.js`),
+    writtenEvent(`${WORKTREE}\\src\\x\\..\\f.js`),
+  ] }));
+  assert.equal(r.status, "writes_observed");
+  assert.deepEqual(r.writtenPaths, ["src/e.js", "src/f.js"]);
+  assert.equal(ro(base({ extra: [writtenEvent(`${WORKTREE}/../outside.js`)] })).status, "unknown");
+});
+
 test("RO-6: backslash separators normalize to POSIX", () => {
   const r = ro(base({ extra: [writtenEvent(`${WORKTREE}\\src\\c.js`)] }));
   assert.equal(r.status, "writes_observed");

@@ -91,11 +91,16 @@ function makeRegistry(dir) {
   return registryPath;
 }
 
-/** transcript 事件（与 r1 consult 套件同一桩形状：state_change + assistant 终稿）。 */
+/** transcript 事件（与 r1 consult 套件同一桩形状：只读权威 + 绑定声明 +
+ *  state_change + assistant 终稿——0055 违规判定按只读观察投影读真实形状）。 */
 function makeTranscript(runId, { state = "completed", finalText = "" } = {}) {
-  const events = [{ type: "run.state_change", to: state, reason: "stub", runId, seq: 1 }];
+  const events = [
+    { type: "run.started", worktreePath: "C:\\fake\\wt", runId, seq: 1 },
+    { type: "run.read_only_declared", runId, seq: 2 },
+    { type: "run.state_change", to: state, reason: "stub", runId, seq: 3 },
+  ];
   if (finalText.length > 0) {
-    events.push({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: finalText }], runId, seq: 2 });
+    events.push({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: finalText }], runId, seq: 4 });
   }
   return events;
 }
@@ -198,7 +203,7 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
       assert.equal(bCall.readOnly, true, "seat_b sub-run is read-only");
       // kimi 诊断会审（2026-10-10）：席位级固定会审合同始终追加（裸车道
       // 席位此前收不到任何禁令）；brief 与视角仍逐字节保留在前。
-      const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、创建或修改文件、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
+      const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
       assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。${CONTRACT}`, "brief 逐字节 + 视角尾巴 + 固定合同");
       assert.equal(bCall.prompt, `${BRIEF}${CONTRACT}`, "无视角席 = 纯 brief 内核 + 固定合同");
 
@@ -953,7 +958,8 @@ test("MRC-W5: a seat that wrote a file (readOnlyViolation) still yields a readab
     const consultsDir = join(dir, ".wao", "runs", "consults");
     mkdirSync(consultsDir, { recursive: true });
     const events = makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: 可行\n" });
-    events.push({ type: "file_written", path: "C:\\fake\\wt\\x.txt", runId: "run_consult_stub_seat_a", seq: 99 });
+    // 0055 判定权威=只读观察投影：工作树内的真实写入形状（run.event/file_written）。
+    events.push({ type: "run.event", kind: "file_written", path: "C:\\fake\\wt\\x.txt", runId: "run_consult_stub_seat_a", seq: 99 });
     writeTranscript(runDir, "run_consult_stub_seat_a", events);
     const violationId = "consult_20261002120000000violat";
     writeFileSync(join(consultsDir, `${violationId}.json`), JSON.stringify({

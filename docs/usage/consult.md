@@ -25,8 +25,15 @@ npm run cli -- consult show <consultId> --format json
 # 等待预算到期后接着等（可反复调用）
 npm run cli -- consult wait <consultId>
 
+# 一直等到每席 run 都收口才返回（与 --wait-ms 互斥；退出码同 runs wait --until-settled：
+# 0 全收口，3 一席无法收口/验证者已不在，4 转录冲突；失败席位在 stderr 点名）
+npm run cli -- consult wait <consultId> --until-settled
+
 # 取一席的完整原文写进文件
 npm run cli -- consult show <consultId> --seat a --out a.md
+
+# 每席完整终稿各写一个文件（DIR/<agentId>.md，目录不存在就建；与 --seat/--out 互斥）
+npm run cli -- consult show <consultId> --out-dir final/
 ```
 
 **状态两维独立**：每席 `runState`（transcript 真值：pending/running/completed/
@@ -55,13 +62,18 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 180000..600000，consult 自己的等待域，与 `runs wait` 的区间无关），席位可能较慢、预算留足（快慢特性见车道画像）。预算到期只是
 不再等，席位照跑——`budgetExpired` 或空回执**不等于零输出**。扇出一完成，
 `consult run` 就在 stderr 报出 `consultId` 与各席 runId：`consult wait
-<consultId>` 接着等（各席到终态或窗口到期即返回，缺省 270000ms，可反复调用），`consult show
+<consultId>` 接着等（各席到终态或窗口到期即返回，缺省 270000ms，可反复调用），
+`consult wait <consultId> --until-settled` 等到每个已派发席位的 run 收口才返回
+（收口判定与 `runs wait --until-settled` 同一套：run 终态、有交付时验证与
+reverify 链也都有结果；无 runId 的席位——派发未成立——不等；退出码 0/3/4/130
+同义，未收口席位在 stderr 点名；无总时长，只读、不停席位），`consult show
 <consultId>`（MCP 面：`run_consult {consultId}`）按当前转录重新推导，零派发。
 要求窗口内交付，就在任务书里限制工作量（不跑测试、限命令数），代价是席位
 自查深度，取舍归 Lead。每席 prompt 尾部始终带**席位级固定会审合同**（禁实现、
-禁建文件、禁派发）。**只读席位违规自动判 FAIL**：席位 transcript 出现
-`file_written` 事件即该席意见判 FAIL（`readOnlyViolation` 字段，记录与
-`consult show` 可见）；不改写席位 run 的自然终态；未上报的写入（如 shell 重定向）
+禁派发）；席位还收到控制面的只读执行合同（文件边界由它管）。**只读席位违规
+自动判 FAIL**：只读观察投影在席位隔离树内观察到写入即该席意见判 FAIL
+（`readOnlyViolation` 字段，记录与 `consult show` 可见）；不改写席位 run 的
+自然终态；写在系统临时目录里的实验文件不算违规；未上报的写入（如 shell 重定向）
 不计数——worktree 隔离仍是兜底。
 
 ## 场景 4e：审计席测试协议（WAO_ALLOW_NESTED_DISPATCH 命令级授权）
@@ -127,7 +139,7 @@ npm run cli -- wao stage --cwd <目标项目>
 - **读取模式** `{consultId}`（可带 `expectedWorkspaceRoot` 指定项目，缺省跟随会话绑定）：从组记录（该项目的 `.wao/runs/consults/<consultId>.json`，与 CLI `--cwd <工作区>` 同一落点；扇出后即可读）重渲染同一回执形状，零派发——读取路径不触碰 dispatch 通道；runState/formatState 按当前 transcript 真值重导出。
 - **按席分页** `{consultId, seat, page?}`：返回该席最终正文单页（`view:"seatPage"`；`page` 默认 1）——每整页响应 ≤12KiB（序列化 UTF-8 字节，含外壳与转义）；行边界优先切页、单行超帽按码点硬切（不拆代理对）；各页按序拼接逐字节等于该席最终正文；每页携带全文 `textSha256` 版本锚（跨页不一致=正文在读取间隙变化，从第 1 页重读，不跨版本拼接）；`textFinal:false`（非终态席）标记分页边界会漂移。
 
-**还有席位没到终态时的 `nextStep`**：有已派发、未终态、转录读得到的席位（有 runId、`runState` 不在终态闭集、不是 `missing`）时，MCP 回执（创建与读取）带 `nextStep`（≤480 字符，不含任何 id）：对这些席位反复 `run_wait`，再按 consultId 重读。CLI `consult run`/`wait`/`show` 文本模式末尾加 `Next step:` 行、JSON 加 `nextStep` 字段：逐席 `wao runs wait <runId> --until-settled`（能后台就后台，否则前台逐个），再 `wao consult show <consultId>` 重读；超 480 字符时改用不列 runId 的版本。分页视图与全部终态都不带；`consult wait` 到期仍有席位在跑时 stderr 指向这一行，未终态席位全是 `missing`（转录读不到）或派发未成立时没有这一行，stderr 如实说明并指向 `consult show`。
+**还有席位没到终态时的 `nextStep`**：有已派发、未终态、转录读得到的席位（有 runId、`runState` 不在终态闭集、不是 `missing`）时，MCP 回执（创建与读取）带 `nextStep`（≤480 字符，不含任何 id）：对这些席位反复 `run_wait`，再按 consultId 重读。CLI `consult run`/`wait`/`show` 文本模式末尾加 `Next step:` 行、JSON 加 `nextStep` 字段：`wao consult wait <consultId> --until-settled`（能后台就后台，否则前台）等到每席收口，再 `wao consult show <consultId>` 重读（收口判定与退出码见上文场景 4d 的等待段）；超 480 字符时改用不列 runId 的版本。分页视图与全部终态都不带；`consult wait` 到期仍有席位在跑时 stderr 指向这一行，未终态席位全是 `missing`（转录读不到）或派发未成立时没有这一行，stderr 如实说明并指向 `consult show`。
 
 输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席指名拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。创建模式必传 `expectedWorkspaceRoot`——每个席位的 cwd 与组记录都落在该目标下，不读会话绑定与进程目录；读取/分页模式可用它当场指定项目，缺省才跟随会话绑定，两者皆无时拒绝。以上输入拒绝都发生在任何派发之前（派发计数为 0）。之后的失败只回固定文案：创建模式是 `…before any seat was dispatched` 或 `…after seats were dispatched`（席位 run 可能在跑，用 `runs_list` 找）；读取模式区分找不到记录与记录在但渲染失败。
 

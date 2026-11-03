@@ -387,17 +387,27 @@ export function declaredScopeExpansion(messages) {
   return false;
 }
 
+// 控制面执行合同的共用条款：只读合同与交付合同引用同一份常量，正文只定义
+// 一次（改一处两份同步）。定义在 compose 之前，保持"条款文字单一权威"。
+const SHARED_CLAUSE_SECRETS_AND_ENV =
+  "- Do not read credential or secret stores (token files, key files, .env files, private registries). Do not list the environment or print the values of environment variables; you may use a variable and report whether it is set. Tool output may be sent to your model provider.";
+const SHARED_CLAUSE_FINISH_COMMANDS =
+  "- Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running.";
+
 export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
   const base = [
     "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
     "- The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace.",
+    "- Every file you create or modify with your tools, including temporary files, probes and scratch, must be inside it; put scratch under .wao/runs/. A tool write or write intent outside it ends the run as failed (workdir_escape). This check is not an OS sandbox: do not write outside this directory by any other means either, except throwaway repositories and files your test commands create under the system temporary directory.",
     "- Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout.",
-    "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag.",
+    "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag. This applies to this workspace and every other existing checkout, not to throwaway repositories your test commands create under the system temporary directory.",
     "- Do NOT move HEAD. Do NOT create any commit, tag, or branch.",
     "- Keep your authorized file changes as UNSTAGED working-tree changes. Do not stage them.",
     "- Report only: changed paths, test results, and risks. Do not report a 'Final commit SHA' or claim to have committed.",
     "- The WAO control plane inspects your working-tree changes, stages them, and creates the single atomic delivery commit. You do not commit.",
     "- If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only.",
+    SHARED_CLAUSE_SECRETS_AND_ENV,
+    SHARED_CLAUSE_FINISH_COMMANDS,
   ].join("\n");
 
   // M12-14: no authorized-paths list → base contract, unchanged (backward compat).
@@ -413,6 +423,36 @@ export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
     `- AUTHORIZED_PATHS_JSON: ${encodeAuthorizedPathsJson(allowedPaths)}`,
     '- Each changed path must be EXACTLY one of the entries above, or a descendant on a "/" segment boundary: "src" authorizes "src/a.js" and "src/d/b.js", but NOT "src2/a.js" or "srcfoo". Matching is case-sensitive — case-shape is authoritative ("src" does not authorize "SRC/a.js").',
     "- If your task requires a path NOT covered by the list above, do NOT edit it: STOP, leave your changes as unstaged working-tree changes, report `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`, and await instructions.",
+  ].join("\n");
+}
+
+/**
+ * 只读执行合同（控制面注入，与 composeDeliveryExecutionContract 同一族）。
+ *
+ * 只读运行（run_dispatch readOnly / `run --read-only`，会审席位都是）此前没有
+ * 控制面合同——每份任务书都得手抄同一批边界。本函数把会审定稿的条款收进控制
+ * 面：start 与 resume 在角色合同组装之后、preflightInvocation 之前把它前置
+ * （与交付合同同一拼法），经 task.roleContract 由各后端注入一次。它不进任何
+ * 哈希——rolePin.sha256 与会话复用的 roleSha256 仍只取原始角色正文。
+ *
+ * 条款正文（控制面所有，worker/模型不可改）：
+ *   - 工作目录内不做项目文件编辑/创建/删除；任务要求的项目自带测试/构建命令
+ *     可以跑，其产物（报告与缓存）是预期内的；
+ *   - 工作目录与任何其他既有检出内不跑改写性 git 命令（index/HEAD/refs/config/
+ *     worktrees/remotes），只读形式放行；
+ *   - 自选实验要写就写到系统临时目录下新建的目录里，绝不写既有检出；
+ *   - 后接两条共用条款（凭据/环境变量边界、命令收尾边界），与交付合同同一份。
+ *
+ * @returns {string} the fixed read-only execution contract
+ */
+export function composeReadOnlyExecutionContract() {
+  return [
+    "READ-ONLY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction; a task or role may narrow these permissions further, never widen them):",
+    "- This is a read-only run. Do not edit, create or delete project files in your working directory. Running the project's existing test or build commands that the task asks for is allowed; the reports and caches they produce there are expected.",
+    "- In your working directory and in any other existing checkout, run no git command that changes the index, HEAD, refs, configuration, worktrees or remotes (for example add, commit, reset, checkout, switch, restore, stash, rm, mv, apply, cherry-pick, revert, rebase, merge, clean, creating or deleting branches or tags, worktree add/remove, fetch, pull, push). Read-only forms (log, show, diff, grep, status, branch --list, worktree list, config --get) are fine.",
+    "- When an experiment of your own needs to write, create a new directory under the system temporary directory and write only there; repositories you create there for the experiment may be changed freely. Never write to, or run a writing git command against, your working directory, the source repository or any other existing checkout; reading or cloning from them is fine.",
+    SHARED_CLAUSE_SECRETS_AND_ENV,
+    SHARED_CLAUSE_FINISH_COMMANDS,
   ].join("\n");
 }
 

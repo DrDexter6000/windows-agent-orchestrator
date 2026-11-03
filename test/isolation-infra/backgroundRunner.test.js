@@ -356,6 +356,8 @@ test("R4: runBackground readOnly → isolated run + exactly-one declaration; wri
 
     let spawnedCwd = null;
     const fakeBackend = {
+      // 只读运行要注入控制面只读执行合同，后端须声明 supportsRoleContract。
+      supportsRoleContract: true,
       async spawn(agent) {
         spawnedCwd = agent.cwd;
         return {

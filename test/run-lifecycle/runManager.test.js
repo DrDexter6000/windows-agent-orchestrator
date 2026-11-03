@@ -2917,7 +2917,8 @@ test("TD-150-T6a: --read-only 声明 + 零证据活路径 ⇒ 豁免生效（无
   const dir = await makeTd150Dir("td150-ro-exempt-");
   try {
     const runDir = join(dir, "runs");
-    const backend = createMockEvidenceBackend([{ kind: "done", reason: "completed" }]);
+    // 只读运行要注入控制面只读执行合同，后端须声明 supportsRoleContract。
+    const backend = { ...createMockEvidenceBackend([{ kind: "done", reason: "completed" }]), supportsRoleContract: true };
     const manager = makeTd150RoManager(runDir, backend);
     const run = await manager.start("consult_ox", {
       prompt: "survey only",

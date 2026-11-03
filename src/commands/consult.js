@@ -6,8 +6,8 @@
 //   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]...
 //            [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS]
 //            [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]
-//   consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]
-//   consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]
+//   consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]
+//   consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]
 //
 // 纯 CLI 适配：argv 解析、视角片段文件读取、console 渲染；数据逻辑全部委托
 // ../application/consultService.js。文本渲染 = council-diff 并列呈现（按 brief
@@ -17,11 +17,21 @@
 // 渲染零截断：text 视图逐行缩进展示每席全部归组文本；--format json 输出
 // 结构化全量（含每席完整原文）。
 
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
+// 决定 0095：`consult wait --until-settled` 逐席调用与 `runs wait
+// --until-settled` 共用的收口等待器（轮询循环原样上移到家模块，不复制算法）；
+// 不可信轮上限也取自同一模块（"Untrusted: N consecutive rounds" 文案同源）。
+import {
+  waitRunSettlement,
+  SETTLEMENT_MAX_UNTRUSTED_ROUNDS,
+} from "../application/runSettlementWait.js";
+// 决定 0096：验证者缺席证明的 daemon 握手 SSOT 在 adapters 层（daemon.js），
+// 命令层注入给等待器（application 层不得上向导入）——与 runs wait 同款接线。
+import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
 import {
   runConsult,
   loadConsultRecord,
@@ -325,6 +335,29 @@ function writeSeatText(result, options, deps) {
   console.log(text);
 }
 
+/**
+ * `consult show <consultId> --out-dir DIR`：把每个席位的完整终稿写到
+ * DIR/<agentId>.md（目录不存在就建），每席打印一行（格式同 --seat --out 那一行）。
+ * 无 finalText 的席位（缺席/未到终态/派发未成立）写空文件并照常报行——如实，
+ * 不跳过。agentId 直接进文件名，先过一道文件名安全门（不含路径分隔符、不是
+ * 点段），防席位名把写出点带离 DIR。
+ */
+function writeAllSeatTexts(result, options, deps) {
+  const outDir = resolve(options.outDir);
+  (deps.mkdirFn ?? mkdirSync)(outDir, { recursive: true });
+  for (const seat of result.seats) {
+    const agentId = seat.agentId;
+    if (typeof agentId !== "string" || agentId.length === 0
+      || /[\\/]/.test(agentId) || agentId === "." || agentId === "..") {
+      throw new Error(`consult show: --out-dir needs a file-safe agentId, seat "${agentId}" is not`);
+    }
+    const text = typeof seat.finalText === "string" ? seat.finalText : "";
+    const path = join(outDir, `${agentId}.md`);
+    (deps.writeFileSync ?? writeFileSync)(path, text, "utf8");
+    console.log(`${agentId} (${seat.runId ?? "no run"} · ${seat.runState}): ${text.length} chars written to ${path}`);
+  }
+}
+
 async function consultShowCommand(args, config, deps = {}) {
   const consultId = args.find((a) => !a.startsWith("--"));
   if (!consultId) {
@@ -353,7 +386,14 @@ async function consultShowCommand(args, config, deps = {}) {
   if (options.seat !== undefined) {
     if (typeof options.seat !== "string") throw new Error("consult show: --seat requires an agentId");
     if (options.out === true) throw new Error("consult show: --out requires a file path");
+    if (options.outDir !== undefined) throw new Error("consult show: --out-dir cannot be combined with --seat (it writes every seat)");
     writeSeatText(result, options, deps);
+    return;
+  }
+  if (options.outDir !== undefined) {
+    if (typeof options.outDir !== "string") throw new Error("consult show: --out-dir requires a directory path");
+    if (options.out !== undefined) throw new Error("consult show: --out-dir cannot be combined with --out (per-seat --out writes one file)");
+    writeAllSeatTexts(result, options, deps);
     return;
   }
   if (options.out !== undefined) {
@@ -362,6 +402,51 @@ async function consultShowCommand(args, config, deps = {}) {
   const nextStep = consultNextStep(result, { json: format === "json" });
   if (format === "json") {
     console.log(JSON.stringify(nextStep === null ? result : { ...result, nextStep }, null, 2));
+    return;
+  }
+  console.log(renderCouncilDiffText(result));
+  printConsultNextStep(nextStep);
+}
+
+/**
+ * consult wait（有界与 --until-settled 两路共用）的返回输出：stderr 摘要行 +
+ * 正常渲染 / --format json（决定 0096：有未终态席位时 stdout 末尾补 nextStep）。
+ * stderr 只陈列这一次看到的事实。有 runId 的席位：等待或重渲染任一次看到它们
+ * 全部终态，就说全部终态（等待结束到重渲染之间可能刚到终态；等待已看到终态、
+ * 重渲染时转录暂时读不到，也不是"窗口到期"）；否则说窗口到期，会输出
+ * `Next step:` 行才说"see the next step below"。再按数补上转录读不到的席位与
+ * 派发未成立（没有 runId）的席位；一个都没派发出去就直说。有这几类时指向
+ * `consult show`。allTerminal 取等待侧的观察（--until-settled 全收口即 true；
+ * windowMs 传 null 表示无界等待）。
+ */
+function emitConsultWaitResult({ consultId, result, format, allTerminal, waitedMs, windowMs }) {
+  const nextStep = consultNextStep(result, { json: format === "json" });
+  const seats = result.seats ?? [];
+  const dispatchedSeats = seats.filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
+  const undispatched = seats.length - dispatchedSeats.length;
+  const unreadable = dispatchedSeats.filter((seat) => seat.runState === "missing").length;
+  const parts = [];
+  if (dispatchedSeats.length === 0) {
+    parts.push("no seat was dispatched");
+  } else if (allTerminal || dispatchedSeats.every((seat) => TERMINAL_STATES.includes(seat.runState))) {
+    parts.push("every dispatched seat reached a terminal state");
+  } else {
+    parts.push(nextStep !== null
+      ? "the window expired with seats still running — see the next step below"
+      : "the window expired before every dispatched seat was observed terminal");
+  }
+  if (unreadable > 0) parts.push(`${unreadable} seat transcript(s) could not be read`);
+  if (undispatched > 0 && dispatchedSeats.length > 0) parts.push(`${undispatched} seat(s) were never dispatched`);
+  const pointToShow = dispatchedSeats.length === 0 || unreadable > 0 || undispatched > 0;
+  console.error(`[consult] ${consultId}: ${parts.join("; ")}${pointToShow
+    ? ` — see their state with: consult show ${consultId}`
+    : ""} after ${Math.round(waitedMs / 1000)}s`);
+  if (format === "json") {
+    console.log(JSON.stringify({
+      ...result,
+      ...(nextStep === null ? {} : { nextStep }),
+      wait: { allTerminal, waitedMs, windowMs },
+    }, null, 2));
     return;
   }
   console.log(renderCouncilDiffText(result));
@@ -378,8 +463,21 @@ async function consultWaitCommand(args, config, deps = {}) {
   if (format !== "text" && format !== "json") {
     throw new Error("--format must be json or text");
   }
+  // 决定 0095：--until-settled 是布尔旗标（不带值），与 --wait-ms 互斥。
+  // parseOptions 会把"旗标后跟非 -- token"读成字符串值（包括旗标写在 consultId
+  // 之前把位置参数吞成值的形状）——布尔旗标带值按用法错误拒绝，不猜。
+  if (options.untilSettled !== undefined && options.untilSettled !== true) {
+    throw new Error("consult wait: --until-settled is a boolean flag and takes no value (write: consult wait <consultId> --until-settled; the bounded window is --wait-ms)");
+  }
+  if (options.untilSettled !== undefined && options.waitMs !== undefined) {
+    throw new Error("consult wait: --until-settled and --wait-ms are mutually exclusive");
+  }
   const consultsDir = resolveConsultsDir(options, config);
   const runDir = options.runDir ?? config?.runDir ?? "runs";
+  if (options.untilSettled !== undefined) {
+    await consultWaitUntilSettledCommand({ consultId, asJson: format === "json", consultsDir, runDir }, deps);
+    return;
+  }
   const waited = await (deps.waitForConsult ?? waitForConsult)({
     consultId,
     consultsDir,
@@ -394,51 +492,169 @@ async function consultWaitCommand(args, config, deps = {}) {
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
-  // stderr 只陈列这一次看到的事实。有 runId 的席位：等待或重渲染任一次看到它们
-  // 全部终态，就说全部终态（等待结束到重渲染之间可能刚到终态；等待已看到终态、
-  // 重渲染时转录暂时读不到，也不是"窗口到期"）；否则说窗口到期，会输出
-  // `Next step:` 行才说"see the next step below"。再按数补上转录读不到的席位与
-  // 派发未成立（没有 runId）的席位；一个都没派发出去就直说。有这几类时指向
-  // `consult show`。
-  const nextStep = consultNextStep(result, { json: format === "json" });
-  const seats = result.seats ?? [];
-  const dispatchedSeats = seats.filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
-  const undispatched = seats.length - dispatchedSeats.length;
-  const unreadable = dispatchedSeats.filter((seat) => seat.runState === "missing").length;
-  const parts = [];
-  if (dispatchedSeats.length === 0) {
-    parts.push("no seat was dispatched");
-  } else if (waited.allTerminal || dispatchedSeats.every((seat) => TERMINAL_STATES.includes(seat.runState))) {
-    parts.push("every dispatched seat reached a terminal state");
-  } else {
-    parts.push(nextStep !== null
-      ? "the window expired with seats still running — see the next step below"
-      : "the window expired before every dispatched seat was observed terminal");
+  emitConsultWaitResult({
+    consultId,
+    result,
+    format,
+    allTerminal: waited.allTerminal,
+    waitedMs: waited.waitedMs,
+    windowMs: waited.windowMs,
+  });
+}
+
+/**
+ * 决定 0095：`consult wait <consultId> --until-settled`——一直等到这场会审每个
+ * 已派发席位的 run 都收口才返回。逐席调用与 `runs wait <runId> --until-settled`
+ * 共用的等待器（runSettlementWait.js：轮询 + 不可信轮 + 决定 0096 验证者缺席
+ * 证明——不复制算法）；按组记录顺序逐席等，前一席收口才轮到下一席。
+ *
+ * 退出码与 runs wait --until-settled 同义：0 全部收口；3 一席不可信轮连续 4 次
+ *（含无法收口的交付事实）或验证者已证明不在（verifier_gone）；4 一席转录冲突
+ *（多副本内容不同）；130 SIGINT（单一出口：置位后只输出一份中断结果，绝不出
+ * 第二份）。未收口即停在那一席并在 stderr 点名（<agentId> (<runId>)）与给出
+ * 与 runs wait 同义的处置行；没有 runId 的席位（派发未成立）不等。
+ *
+ * 返回（全部收口）时的输出与有界 consult wait 一致：stderr 摘要行 + 正常渲染 /
+ * --format json（wait 块 { allTerminal: true, waitedMs, windowMs: null }——
+ * 无界等待没有窗口）。
+ *
+ * deps 注入缝（测试确定性）：loadConsultRecord / waitRunSettlement /
+ * readTranscript（同时作等待器与重渲染的转录读器）/ pollIntervalMs /
+ * resolveDetailedFn / sleepFn / nowFn / verifierGoneFn / verifierProofDeps /
+ * writeFileSync / mkdirFn。
+ */
+async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, runDir }, deps = {}) {
+  const record = await (deps.loadConsultRecord ?? loadConsultRecord)({ consultId, consultsDir });
+  const dispatched = (record.seats ?? []).filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
+  const waitFn = deps.waitRunSettlement ?? waitRunSettlement;
+  const startedAt = Date.now();
+  // SIGINT 单一出口：只置位；等待器感知后在这里统一输出中断结果并退出 130。
+  let interrupted = false;
+  const onSigint = () => { interrupted = true; };
+  process.on("SIGINT", onSigint);
+  // 等待器的读器缝：daemon 握手 SSOT 在 adapters 层，与 runs wait 同款注入。
+  const seatDeps = {
+    ...(deps.pollIntervalMs !== undefined ? { pollIntervalMs: deps.pollIntervalMs } : {}),
+    ...(deps.resolveDetailedFn ? { resolveDetailedFn: deps.resolveDetailedFn } : {}),
+    ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
+    ...(deps.nowFn ? { nowFn: deps.nowFn } : {}),
+    ...(deps.sleepFn ? { sleepFn: deps.sleepFn } : {}),
+    ...(deps.verifierGoneFn ? { verifierGoneFn: deps.verifierGoneFn } : {}),
+    verifierProofDeps: {
+      nowFn: deps.nowFn ?? Date.now,
+      handshakeReader: readHandshakeDetailed,
+      daemonAliveFn: isDaemonAlive,
+      ...(deps.verifierProofDeps ?? {}),
+    },
+  };
+  const seatName = (seat) => `${seat.agentId} (${seat.runId})`;
+  const failExit = (seat, outcome) => {
+    process.exitCode = outcome.kind === "conflict" ? 4 : 3;
+    const lines = [`[consult] ${consultId}: seat ${seatName(seat)} will not settle:`];
+    if (outcome.kind === "conflict") {
+      lines.push(`Conflict: ${seat.runId} has multiple distinct transcript copies — refusing to pick one.`);
+      lines.push(`Diagnostics: wao runs diagnose ${seat.runId}`);
+    } else if (outcome.kind === "verifier_gone") {
+      lines.push(`Stuck: the verification of ${seat.runId} has no outcome and no WAO process that could finish it remains (${outcome.basis}); waiting will not change this.`);
+      lines.push(`Next step: ${buildNextStep({
+        surface: "cli",
+        situation: "verifier_gone",
+        runId: seat.runId,
+        acceptanceStatus: outcome.settlement.facts.acceptanceStatus,
+      })}`);
+    } else if (outcome.reason.startsWith("undeterminable:")) {
+      lines.push(`Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`);
+      lines.push(`Diagnostics: wao runs diagnose ${seat.runId}; delivery facts: wao runs delivery ${seat.runId}`);
+    } else {
+      lines.push(`Untrusted: ${SETTLEMENT_MAX_UNTRUSTED_ROUNDS} consecutive rounds could not be trusted (last: ${outcome.reason}).`);
+      lines.push(`Diagnostics: wao runs diagnose ${seat.runId}`);
+    }
+    for (const line of lines) console.error(line);
+    if (asJson) {
+      console.log(JSON.stringify({
+        consultId,
+        settled: false,
+        seat: { agentId: seat.agentId, runId: seat.runId },
+        ...(outcome.kind === "conflict" ? { conflict: true } : {}),
+        ...(outcome.kind === "verifier_gone" ? { reason: "verifier_gone", basis: outcome.basis } : {}),
+        ...(outcome.kind === "untrusted" && outcome.reason.startsWith("undeterminable:")
+          ? { reason: outcome.reason, state: outcome.settlement.facts.state }
+          : {}),
+        ...(outcome.kind === "untrusted" && !outcome.reason.startsWith("undeterminable:")
+          ? { reason: outcome.reason, untrustedRounds: outcome.rounds }
+          : {}),
+      }, null, 2));
+    }
+  };
+  const interruptedExit = (seat) => {
+    process.exitCode = 130;
+    console.error(`[consult] ${consultId}: interrupted before seat ${seatName(seat)} settled`);
+    if (asJson) {
+      console.log(JSON.stringify({
+        consultId, settled: false, interrupted: true, seat: { agentId: seat.agentId, runId: seat.runId },
+      }, null, 2));
+    }
+  };
+  try {
+    for (const seat of dispatched) {
+      if (interrupted) {
+        interruptedExit(seat);
+        return;
+      }
+      const outcome = await waitFn({
+        runId: seat.runId,
+        runDir,
+        label: "consult wait",
+        progress: (line) => {
+          // 与 runs wait 同一出血面：文本模式进度写 stdout；JSON 模式进度写
+          // stderr，stdout 只留最终 JSON。
+          if (asJson) console.error(line);
+          else console.log(line);
+        },
+        isInterrupted: () => interrupted,
+        deps: seatDeps,
+      });
+      // 与 runs wait 同纪律：置位后只输出一份中断结果，中断压过同轮的冲突等出口。
+      if (outcome.kind === "interrupted" || interrupted) {
+        interruptedExit(seat);
+        return;
+      }
+      if (outcome.kind !== "settled") {
+        failExit(seat, outcome);
+        return;
+      }
+    }
+    if (interrupted) {
+      // 全部收口之后、返回渲染之前被置位：与 runs wait 同纪律——只输出中断结果。
+      interruptedExit(dispatched[dispatched.length - 1] ?? { agentId: "?", runId: "?" });
+      return;
+    }
+  } finally {
+    process.off("SIGINT", onSigint);
   }
-  if (unreadable > 0) parts.push(`${unreadable} seat transcript(s) could not be read`);
-  if (undispatched > 0 && dispatchedSeats.length > 0) parts.push(`${undispatched} seat(s) were never dispatched`);
-  const pointToShow = dispatchedSeats.length === 0 || unreadable > 0 || undispatched > 0;
-  console.error(`[consult] ${consultId}: ${parts.join("; ")}${pointToShow
-    ? ` — see their state with: consult show ${consultId}`
-    : ""} after ${Math.round(waited.waitedMs / 1000)}s`);
-  if (format === "json") {
-    console.log(JSON.stringify({
-      ...result,
-      ...(nextStep === null ? {} : { nextStep }),
-      wait: { allTerminal: waited.allTerminal, waitedMs: waited.waitedMs, windowMs: waited.windowMs },
-    }, null, 2));
-    return;
-  }
-  console.log(renderCouncilDiffText(result));
-  printConsultNextStep(nextStep);
+  const result = await rerenderConsultFromRecord({
+    record,
+    runDir,
+    consultsDir,
+    ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
+    env: process.env,
+  });
+  emitConsultWaitResult({
+    consultId,
+    result,
+    format: asJson ? "json" : "text",
+    allTerminal: true,
+    waitedMs: Date.now() - startedAt,
+    windowMs: null,
+  });
 }
 
 // TD-319：用法页的行数组是单一事实源——CONSULT_USAGE（join 形，help 打印用）
 // 与未知子命令报错（linesError 显式带出各行，用法页的多行不被当一行转义）同源。
 export const CONSULT_USAGE_LINES = [
   "consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]",
-  "consult show <consultId> [--seat <agentId> [--out FILE]] [--format json|text] [--cwd DIR] [--run-dir DIR]",
-  "consult wait <consultId> [--wait-ms MS] [--format json|text] [--cwd DIR] [--run-dir DIR]",
+  "consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]",
+  "consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "",
   "  --fields        key is Q<n>, the question number in the brief; a declared value matches only as a whole token",
   "                  (letters, digits and _ are word characters; at the same position the longest declared value wins).",
@@ -447,7 +663,13 @@ export const CONSULT_USAGE_LINES = [
   "                  keep running. The consult id is printed on stderr as soon as the seats are dispatched:",
   "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",
   "                  `consult show <id>` reads the current state.",
+  "  --until-settled wait until every dispatched seat's run settles (mutually exclusive with --wait-ms, takes no value).",
+  "                  Exit 0 when every seat settles; 3 when a seat cannot settle (untrusted reads, undeterminable",
+  "                  delivery facts, or its verifier is gone); 4 on a transcript conflict. Seats whose dispatch",
+  "                  produced no run are not waited for. The failing seat is named on stderr.",
   "  --seat --out    write one seat's complete final text to a file (without --out: print it)",
+  "  --out-dir DIR   write every seat's complete final text to DIR/<agentId>.md (directory created if missing), one",
+  "                  line per seat; mutually exclusive with --seat/--out",
 ];
 export const CONSULT_USAGE = CONSULT_USAGE_LINES.join("\n");
 

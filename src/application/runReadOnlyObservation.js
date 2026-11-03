@@ -131,6 +131,22 @@ function lexNormalizePosix(p) {
 }
 
 /**
+ * Lexical normalization of an ABSOLUTE POSIX-form path: the root (drive
+ * "C:/", UNC "//host/share/" or "/") is kept, the rest goes through
+ * lexNormalizePosix. NO filesystem. Returns null when ".." climbs above the
+ * root. Without it an equivalent spelling such as "<wt>/./a.txt" could not
+ * be proven inside the worktree and voided the observation.
+ */
+function lexNormalizeAbs(p) {
+  const m = /^([A-Za-z]:\/|\/\/[^/]+\/[^/]+(?:\/|$)|\/)(.*)$/.exec(p);
+  if (m === null) return null;
+  const rest = lexNormalizePosix(m[2]);
+  if (rest === null) return null;
+  const root = m[1].endsWith("/") ? m[1] : `${m[1]}/`;
+  return root + rest;
+}
+
+/**
  * Derive the worktree-relative POSIX path for one event path, or null when the
  * event path cannot be PROVEN lexically inside the persisted worktreePath (or
  * is not a valid repo-relative path). PURE lexical reasoning — the worktree
@@ -142,18 +158,20 @@ function deriveRelativePath(eventPath, worktreePath) {
   const norm = toPosix(eventPath);
   const wt = toPosix(worktreePath).replace(/\/+$/, ""); // root without trailing slash
   if (isAbsPathText(norm)) {
+    const abs = lexNormalizeAbs(norm);
+    if (abs === null) return null;
     // Absolute event path: proven inside ONLY when it is a descendant of the
     // worktree on a segment boundary. Windows drive and UNC paths use
     // Windows' case-insensitive absolute-path semantics for this containment
     // proof only; the derived Git path still goes through the case-sensitive
     // isValidRepoRelativePath SSOT below.
-    const windowsComparison = isWindowsAbsPathText(norm) && isWindowsAbsPathText(wt);
-    const normForContainment = windowsComparison ? norm.toLowerCase() : norm;
+    const windowsComparison = isWindowsAbsPathText(abs) && isWindowsAbsPathText(wt);
+    const normForContainment = windowsComparison ? abs.toLowerCase() : abs;
     const wtForContainment = windowsComparison ? wt.toLowerCase() : wt;
     // The worktree itself is not a file write.
     if (normForContainment === wtForContainment
       || !normForContainment.startsWith(wtForContainment + "/")) return null;
-    const rel = norm.slice(wt.length + 1);
+    const rel = abs.slice(wt.length + 1);
     if (rel.length === 0) return null;
     return isValidRepoRelativePath(rel) ? rel : null;
   }

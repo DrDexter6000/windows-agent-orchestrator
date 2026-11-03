@@ -15,7 +15,7 @@ import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, composeReadOnlyExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
 import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
@@ -1018,6 +1018,27 @@ export class RunManager {
         : deliveryContract;
     }
 
+    // 只读执行合同（控制面注入）：只读运行（含全部会审席位）不再要求 Lead 在
+    // 每份任务书里手抄只读边界——控制面在同一 transport（task.roleContract）
+    // 上前置同一份固定合同。组装位置与交付合同一致：角色合同组装之后、
+    // preflightInvocation 之前（预检拿到的是最终 argv，预算门看真实正文）。
+    // 后端不能承载角色注入 → 与交付合同同时机同形状 fail closed（零转录、
+    // 零 worktree、零 spawn）。rolePin.sha256 在上方按原始角色正文计算，合同
+    // 不进任何哈希。readOnly×delivery 已在上方互斥硬拒，两个注入块互不叠加。
+    if (readOnly) {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${agentId}: read-only mode requires role contract injection (to deliver the read-only execution contract), ` +
+          `but the selected backend does not support it. ` +
+          `Switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const readOnlyContract = composeReadOnlyExecutionContract();
+      roleContract = roleContract
+        ? `${readOnlyContract}\n\n---\n\n${roleContract}`
+        : readOnlyContract;
+    }
+
     // M11-9 CTO closeout: validate the backend can express the agent's canonical
     // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
     // runs AFTER the role-contract / delivery-contract checks (which are more
@@ -1802,6 +1823,11 @@ export class RunManager {
       return null;
     }
 
+    // 只读 resume 的唯一事实源：本 run 绑定的 run.read_only_declared（start 恰
+    // 一次写入的 durable 事实，findFirstBound 同款 runId 绑定读法）。不从角色、
+    // 注册表、prompt 或隔离策略推断。
+    const resumeReadOnlyDeclared = findFirstBound(events, "run.read_only_declared", runId) !== undefined;
+
     const registryPath = resolve(options.registry ?? this.config.registry);
     const loaded = await this._readRegistryWithGuidance(registryPath);
 
@@ -1869,8 +1895,25 @@ export class RunManager {
           + `collect late output then prune this run instead of resuming`,
       );
     }
+    // 只读 resume 的执行位置补口：带会话复用的只读运行是 persistent 树，此前
+    // resume 只回 ephemeral 树——persistent 只读轮的续跑会跑回源仓。改为：只读
+    // run（绑定声明在场）只要 run.started 记了 worktreePath，就在那棵树里执行
+    //（spawn 时覆写 cwd，Run 的 agent 仍按源仓解析，与 ephemeral 现有做法一致）；
+    // 树不在拒绝 resume（报错形状照 ephemeral 那条）。非只读运行的行为不变。
+    // ephemeral 树是本门的子集（同一 worktreePath，缺失已被上方具名拒绝先拦）。
+    const readOnlyWorktree = resumeReadOnlyDeclared && !deliveryContext
+      && typeof runStarted.worktreePath === "string" && runStarted.worktreePath.length > 0
+      ? runStarted.worktreePath : null;
+    if (readOnlyWorktree && !existsSync(readOnlyWorktree)) {
+      throw new Error(
+        `resume_refused: read-only worktree missing (${runStarted.worktreePath}) — `
+          + `the read-only isolation contract cannot be honored in the source checkout; `
+          + `collect late output then prune this run instead of resuming`,
+      );
+    }
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
-    // 执行位置（replay spawn 的 agent.cwd 覆写）：ephemeral 轮 =隔离树；其余沿
+    // 执行位置（replay spawn 的 agent.cwd 覆写）：ephemeral 轮 =隔离树；只读
+    // persistent 轮 =run.started 记下的那棵树（上方 readOnlyWorktree）；其余沿
     // 既有语义。getAgent/Run.agent 仍按 resumeCwd（源仓）解析。
     // 0045 W4d（R5 §1.3）：重键前档案的 envelope agentId=席位名，注册表已无此键——
     // getAgent 的 Unknown 信号转固定文案具名拒绝（不裸抛、不静默换道）。mock 注册
@@ -2056,6 +2099,24 @@ export class RunManager {
         : deliveryContract;
     }
 
+    // 只读 resume 重新前置控制面只读执行合同（M11-8C Gap A 的只读同款）：事实
+    // 源=上方绑定的 run.read_only_declared；start 与 resume 交付同一份正文、
+    // 同一拼法、恰一次。后端不能承载角色注入 → 与交付 resume 同形状 fail
+    // closed——零 respawn、transcript 字节不变。
+    if (resumeReadOnlyDeclared) {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${transcript.context.agentId}: read-only resume requires role contract injection (to deliver the read-only execution contract), ` +
+          `but the selected backend does not support it. ` +
+          `Switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const readOnlyContract = composeReadOnlyExecutionContract();
+      resumeRoleContract = resumeRoleContract
+        ? `${readOnlyContract}\n\n---\n\n${resumeRoleContract}`
+        : readOnlyContract;
+    }
+
     // M11-7 (CTO closeout): credential availability check on resume too — same
     // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
     // throw (spawn count 0, transcript bytes unchanged). Resolved values are
@@ -2126,7 +2187,9 @@ export class RunManager {
       // 有 Run/cleanupFn 兜底，不回收即泄漏。
       // TD-262（0063）：ephemeral 轮的执行 cwd=隔离树——spawnAgent 只覆写 cwd，
       // Run 收到的 agent 保持源仓解析（分支回收的 git 操作落在源仓）。
-      const spawnAgent = ephemeralWorktree ? { ...agent, cwd: ephemeralWorktree } : agent;
+      // 只读 persistent 树（复用轮）同款：执行 cwd=run.started 记下的那棵树。
+      const resumeCwdOverride = ephemeralWorktree ?? readOnlyWorktree;
+      const spawnAgent = resumeCwdOverride ? { ...agent, cwd: resumeCwdOverride } : agent;
       let newResult;
       try {
         newResult = await backend.spawn(spawnAgent, {
@@ -2172,6 +2235,11 @@ export class RunManager {
             ? { deferredWorktreeForm: ephemeralCloneForm, deferredWorktreeBaseCommit: ephemeralCloneBaseCommit }
             : {}),
         } : {}),
+        // 只读 persistent 树（复用轮）的执行位置=那棵树（无 deferred 释放在场）。
+        ...(readOnlyWorktree && !ephemeralWorktree ? { effectiveCwd: readOnlyWorktree } : {}),
+        // 只读声明是本 run 自己的持久化事实——重建的 Run 照实透传（此前漏传，
+        // TD-150 豁免与合成事件序列在 resume 轮看不到声明）。
+        readOnlyDeclared: resumeReadOnlyDeclared,
         scorecardRules: resumeScorecardRules,
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
@@ -2667,9 +2735,10 @@ export class Run {
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
     // （run.read_only_declared），scorecard 的合成事件序列里没有该事实 → TD-145
-    // 豁免在真实执行路径上永远不生效。resume 重建的 Run 不传此参（fail-closed）：
-    // resume 只为交付 run 恢复 scorecardRules，而 readOnly 与 delivery 在 start()
-    // 处互斥硬拒，故 resume 路径上 scorecard 整块跳过，豁免无从谈起。
+    // 豁免在真实执行路径上永远不生效。resume 重建的 Run 从本 run 绑定的
+    // run.read_only_declared 重建同一事实（readOnly 与 delivery 在 start() 互斥
+    // 硬拒，resume 路径上 scorecardRules 恒 null，豁免无从谈起——事实照实透传，
+    // 不影响任何门）。
     this.readOnlyDeclared = readOnlyDeclared === true;
     // TD-103 Phase 3A: delivery context for packaging after completion.
     this.deliveryContext = deliveryContext;
