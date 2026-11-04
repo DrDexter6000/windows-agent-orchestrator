@@ -1,6 +1,6 @@
 # 运行 WAO 自己的测试
 
-本页是开发 WAO 时"何时跑全量、何时跑定向测试"以及"怎样用真实车道试用分支代码"的唯一权威。失败的判读与处置见 `docs/troubleshooting.md` §8，为什么这样定见决定 0077。
+本页是开发 WAO 时"何时跑全量、何时跑定向测试"以及"怎样用真实车道试用分支代码"的唯一权威。失败的判读与处置见 `docs/troubleshooting.md` §8，为什么这样定见决定 0077、0110。
 
 ## 两种跑法
 
@@ -21,7 +21,7 @@
 
 **横切守卫组**：`test/isolation-infra/docs-consistency.test.js`、`test/isolation-infra/docsSurface.test.js`、`test/isolation-infra/staticRunsGuard.test.js`、`test/isolation-infra/desensitization.test.js`、`test/isolation-infra/controlBytes.test.js`、`test/mcp-surface/m12-10-tool-surface.test.js`、`test/isolation-infra/cliHelpCoverage.test.js`、`test/isolation-infra/workflowReachability.test.js`。它们检查文档与代码一致、生成层是否需要再生成、测试有没有写进仓库的 `runs/`、被跟踪文件里有没有混进控制字节或非 UTF-8 内容（比如正则里的 `\b` 落成了退格字节）、有没有凭据形状的字面量、MCP 工具面的字节上限、CLI 帮助有没有漏掉实现了的子命令与旗标、每个跟踪文件是否从入口经强边或中边可达，除可达性守卫约 30 秒外都是几秒钟跑完，却最常抓到改动的连带问题。新增这类跨全仓的守卫时，把它加进这张清单。
 
-**读这些文档的测试**：`git grep -l '<文档路径>' -- test` 列出的测试文件；改了 `docs/usage.md` 或 `docs/usage/` 下的页面时，再加上 `git grep -l _usageDocs -- test` 列出的（它们经 `test/_usageDocs.mjs` 读整本使用手册，按路径搜不到）。新增别的读法的测试时，把它的找法补在这里。
+**读这些文档的测试**：按文件名搜（`git grep -l -F '<文件名>' -- test`）列出的测试文件，不按完整路径搜，因为有的测试把路径分段拼出来；改了 `docs/usage.md` 或 `docs/usage/` 下的页面时，再加上 `git grep -l _usageDocs -- test` 列出的（它们经 `test/_usageDocs.mjs` 读整本使用手册，按路径搜不到）。新增别的读法的测试时，把它的找法补在这里。
 
 **最终候选**是合入后 main 将会是的那一版：分支已经基于当前 main（快进合入后两者逐字节相同），或者把 worker 交付采纳进来之后、推送之前的集成结果。并行会话先合入了 main 时，先把分支更新到新的 main 再跑。全量之后又改了被跟踪的文件，它就不再是最终候选：要么把改动留到下一批，要么重跑全量；补改的只有文档时，按上表只改文档那一行跑，绿了仍算最终候选。
 
