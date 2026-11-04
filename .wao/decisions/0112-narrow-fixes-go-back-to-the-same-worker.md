@@ -2,7 +2,7 @@
 
 - 日期：2026-11-04
 - 状态：accepted
-- 来源：Owner 2026-11-04："continuable和run_continue是我非常看重的能力……我不认为这是lead agent的问题，我把它看作wao的引导和提示不足的问题，应予解决"；同日预先授权 SKILL.md 按需扩限。方案会审 consult_2026110416480107605yuyn（sol、deepseek-flash 均 FIX_FIRST，已吸收）。
+- 来源：Owner 2026-11-04："continuable和run_continue是我非常看重的能力……我不认为这是lead agent的问题，我把它看作wao的引导和提示不足的问题，应予解决"；同日预先授权 SKILL.md 按需扩限。方案会审 consult_2026110416480107605yuyn（sol、deepseek-flash 均 FIX_FIRST，已吸收）与复核 consult_20261104170452630g1o6mq（sol PASS_WITH_NOTES）；交付会审 consult_202611041854448687uky1l（sol FIX_FIRST、deepseek-flash PASS_WITH_NOTES），必改项经 `run_continue` 交回原 worker 续修。
 - 关系：用 M12-7 的续谱（`continuable` + `run_continue`）；修订 0095 第 3 条（`nextStep` 出现位置）。
 
 ## 背景
@@ -14,7 +14,7 @@
 ## 决定
 
 1. SKILL.md 验收一节加一步：带 `continuable` 派发的运行，评审发现的窄缺陷，裁定前用 `run_continue` 交回原 worker，再审、裁定子交付；`run_continue` 的拒绝是闭集、零副作用；先采纳就续不了；Lead 只手改措辞。派发一节写明交付按 `agentId`、能续的后端带 `continuable: true`。SKILL.md 上限按 Owner 授权上调（数值以 docs-consistency 守卫为准）。
-2. 交付收口、未采纳（未决定或已拒收），且这次运行是带 `continuable` 派发的谱系成员（不是 explicit 车道加角色派发，所在线系未闭合）时，MCP `run_delivery` 带 waitMs 的收口返回与 CLI `runs wait --until-settled` 的收口终行给一句 `nextStep`：这次是带 continuable 派的，窄缺陷可用 `run_continue` 交回同一个 worker 会话，它在动手前先查资格；已采纳的交付不能再续。
+2. 交付收口、未采纳（未决定或已拒收），且这次运行是带 `continuable` 派发的谱系成员（不是 explicit 车道加角色派发，所在线系未闭合）时，MCP `run_delivery` 带 waitMs 的收口返回与 CLI `runs wait --until-settled` 的收口终行给一句 `nextStep`：所在谱系是带 continuable 派发的，窄缺陷可用 `run_continue` 交回同一个 worker 会话，它在动手前先查资格；已采纳的交付不能再续。
    - 只陈述可以从转录查实的事实，不断言 `run_continue` 一定受理：角色正文漂移、registry 或后端变了、会话证据不足、工作树没了，都要到 `run_continue` 自己的资格检查才知道，那里的拒绝零副作用、带闭集原因。
    - 谱系判定与 `run_continue` 资格检查第 5 步共用一个函数，`continueRun` 的拒绝顺序不变。
    - 不建议采纳或拒绝，不自动续。
