@@ -97,5 +97,5 @@ Notes:
   - 完整用法与场景说明见 docs/usage.md 与 docs/usage/ 各专页。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
-  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 ```

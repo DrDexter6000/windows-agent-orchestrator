@@ -9,7 +9,7 @@ import { writeHandoff, readHandoff } from "../../src/waoHandoff.js";
 
 async function makeInitWao() {
   const dir = await mkdtemp(join(tmpdir(), "wao-ho-"));
-  await initWaoDir(dir);
+  await initWaoDir(dir, join(dir, ".wao"), join(dir, ".wao"));
   return dir;
 }
 

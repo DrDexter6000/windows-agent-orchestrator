@@ -16,7 +16,7 @@ import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "../..
 
 async function makeInitWao() {
   const dir = await mkdtemp(join(tmpdir(), "wao-decl-"));
-  await initWaoDir(dir);
+  await initWaoDir(dir, join(dir, ".wao"), join(dir, ".wao"));
   return dir;
 }
 

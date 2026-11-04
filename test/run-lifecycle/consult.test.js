@@ -27,8 +27,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join, basename, resolve } from "node:path";
 
 import {
   parseBriefQuestions,
@@ -40,6 +41,7 @@ import {
   waitForConsult,
   rerenderConsultFromRecord,
   loadConsultRecord,
+  loadConsultRecordWithFallback,
   generateConsultId,
   isValidConsultId,
 } from "../../src/application/consultService.js";
@@ -761,6 +763,104 @@ test("WAIT-4: runId=null 的席位不参与等待（只等真实 run，不为其
     });
     assert.equal(waited.allTerminal, true, "只有真实 run 参与等待且已终态");
     assert.deepEqual(reads, ["run_wait_d"], "不为 runId=null 的席位读转录");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== 决定 0111：按 id 读组记录的回退（状态目录 ENOENT → 改动前落点）=====
+
+test("FB-1: 状态目录没有这份记录（ENOENT）、回退目录有 → 从回退目录读，返回真实目录", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-fb1-"));
+  try {
+    const stateDir = join(dir, "main", "consults");
+    const legacyDir = join(dir, "wt", "consults");
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(legacyDir, { consultId, seats: [] });
+    const { record, consultsDir } = await loadConsultRecordWithFallback({
+      consultId, consultsDir: stateDir, fallbackConsultsDir: legacyDir, sleepFn: () => {},
+    });
+    assert.equal(record.consultId, consultId);
+    assert.equal(consultsDir, resolve(legacyDir), "返回实际读到的目录（回显真实位置）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FB-2: 状态目录直接有这份记录 → 不碰回退目录；两边都没有 → 原样抛 ENOENT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-fb2-"));
+  try {
+    const stateDir = join(dir, "main", "consults");
+    const legacyDir = join(dir, "wt", "consults");
+    const consultId = "consult_20261002120000000abc123";
+    writeConsultRecord(stateDir, { consultId, seats: [] });
+    const seen = [];
+    const trackingRead = async (p, ...rest) => {
+      seen.push(p);
+      return readFile(p, ...rest);
+    };
+    const direct = await loadConsultRecordWithFallback({
+      consultId, consultsDir: stateDir, fallbackConsultsDir: legacyDir,
+      readFileFn: trackingRead, sleepFn: () => {},
+    });
+    assert.equal(direct.consultsDir, resolve(stateDir), "状态目录命中，返回状态目录");
+    assert.ok(seen.every((p) => p.startsWith(stateDir)), "不读回退目录");
+    // 两边都没有：ENOENT 原样抛（回退目录也 ENOENT 时错误不被吞掉）。
+    await assert.rejects(
+      () => loadConsultRecordWithFallback({
+        consultId: "consult_20261002000000000zzzzzz",
+        consultsDir: stateDir, fallbackConsultsDir: legacyDir, sleepFn: () => {},
+      }),
+      (error) => error?.code === "ENOENT",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FB-3: 只有 ENOENT 触发回退——状态目录里这份记录是坏 JSON → 报错，不用回退目录顶掉", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-fb3-"));
+  try {
+    const stateDir = join(dir, "main", "consults");
+    const legacyDir = join(dir, "wt", "consults");
+    const consultId = "consult_20261002120000000abc123";
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, `${consultId}.json`), "{ not json", "utf8");
+    writeConsultRecord(legacyDir, { consultId, seats: [] });
+    await assert.rejects(
+      () => loadConsultRecordWithFallback({
+        consultId, consultsDir: stateDir, fallbackConsultsDir: legacyDir, sleepFn: () => {},
+      }),
+      /consult record unreadable after 5 attempts/,
+      "坏 JSON 照旧报错——读取者要看到真实状态，不被旧目录好记录静默顶掉",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("FB-4: waitForConsult 带 fallbackConsultsDir——回退目录读到记录，返回值带真实目录", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-fb4-"));
+  try {
+    const runDir = join(dir, "runs");
+    const stateDir = join(dir, "main", "consults");
+    const legacyDir = join(dir, "wt", "consults");
+    const consultId = "consult_20261002120000000abc123";
+    // 全员派发未成立（runId=null）：等待立即结束，聚焦回退读取本身。
+    writeConsultRecord(legacyDir, {
+      consultId,
+      seats: [{ agentId: "seat_a", runId: null, runState: "dispatch_failed" }],
+    });
+    const waited = await waitForConsult({
+      consultId,
+      consultsDir: stateDir,
+      fallbackConsultsDir: legacyDir,
+      runDir,
+      sleepFn: () => {},
+    });
+    assert.equal(waited.record.consultId, consultId);
+    assert.equal(waited.consultsDir, resolve(legacyDir), "等待返回实际读到的目录");
+    assert.equal(waited.allTerminal, true, "无已派发席位即全部收口");
   } finally {
     cleanupDir(dir);
   }

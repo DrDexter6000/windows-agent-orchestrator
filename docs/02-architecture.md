@@ -958,3 +958,4 @@ aggregateSummary(runs, runIds = null)        // 跨 run：{ totalRuns, byState, 
 
 优先级链：CLI flag 覆盖 config，config 覆盖 hardcoded defaults。
 隔离解析优先级：`--isolate` flag > `agent.isolation` > `defaultIsolation`；strategy（`persistent`/`ephemeral`）只能在 agent 配置对象里设置，flag 与 config 路径恒为 `persistent`。
+`stateDir` 只提供名字（默认 `.wao`）：链接工作树里除 `decisions/` 外的本地状态落到主工作树的同名目录（决定 0111）；命令行显式给的 `--state-dir` 按 cwd 解析、不重定向。

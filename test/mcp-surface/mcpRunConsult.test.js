@@ -32,6 +32,8 @@
 //       <root>/.wao/runs/consults. No workspace authority at all → fixed
 //       "workspace not bound:" refusal, zero dispatches. Service failures
 //       distinguish before/after any seat was dispatched (fixed texts).
+//       决定 0111：链接工作树目标把组记录重定向到主工作树 .wao；工作树自己的
+//       .wao 是读取模式的 ENOENT 回退。
 //   E — surface truth: roster slot, dispatch-family annotations, description
 //       semantic guards, NOT a drilldown carrier.
 //   F — receipt capacity boundary: metadata-max shape ≤ receipt cap (8KiB,
@@ -414,8 +416,8 @@ test("MRC-C1: read mode re-renders the group record as the SAME receipt shape wi
       assert.equal(unknown.res.isError, true);
       assert.equal(errText(unknown.res),
         "run_consult read failed: no readable consult record with this consultId — records live in "
-        + "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace); "
-        + "check workspace_status and the id");
+        + "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace; "
+        + "a linked worktree uses its main worktree's .wao); check workspace_status and the id");
       assert.equal(dispatchCalls.length, dispatchesAfterCreate, "unknown consultId never dispatches");
     } finally {
       await client.close();
@@ -757,6 +759,84 @@ test("MRC-W3: service failure texts distinguish before/after any seat was dispat
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
+// W4 — 决定 0111：链接工作树目标——组记录落主工作树 .wao，读取经工作树目标找到
+// =====================================================================
+
+test("MRC-W7: linked-worktree target — records go to the MAIN worktree's .wao; read via the worktree target finds them; legacy record in the worktree is the ENOENT fallback", async () => {
+  const x = mkdtempSync(join(tmpdir(), "wao-mrc-w4-x-"));
+  const ybase = mkdtempSync(join(tmpdir(), "wao-mrc-w4-y-"));
+  const aux = mkdtempSync(join(tmpdir(), "wao-mrc-w4-aux-"));
+  try {
+    makeGitRepo(x); // 会话绑定 X（另一仓）
+    const y = join(ybase, "proj");
+    mkdirSync(y, { recursive: true });
+    execSync("git init -b main", { cwd: y, stdio: "pipe" });
+    execSync("git config user.email t@t.com", { cwd: y, stdio: "pipe" });
+    execSync("git config user.name t", { cwd: y, stdio: "pipe" });
+    writeFileSync(join(y, "README.md"), "# t\n", "utf8");
+    execSync("git add README.md", { cwd: y, stdio: "pipe" });
+    execSync("git commit -m init", { cwd: y, stdio: "pipe" });
+    const ywt = join(ybase, "proj-wt");
+    execSync(`git -C ${JSON.stringify(y)} worktree add ${JSON.stringify(ywt)}`, { stdio: "pipe" });
+
+    const registryPath = makeRegistry(aux);
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir: x, registryPath, runDir: join(aux, "runs"),
+    });
+    try {
+      // 创建：显式目标=另一仓 Y 的链接工作树（绑定 X 不参与）→ 记录写、读都在
+      // Y 的主工作树 .wao（决定 0111）。
+      const created = await callConsult(client, {
+        brief: BRIEF, seats: ["seat_a"], waitMs: 0, expectedWorkspaceRoot: ywt,
+      });
+      assert.equal(created.threw, false);
+      assert.notEqual(created.res.isError, true, errText(created.res));
+      assert.equal(dispatchCalls.length, 1);
+      assert.equal(dispatchCalls[0].cwd, canonicalizeWorkspacePath(ywt), "席位派发 cwd 仍是证明过的工作树根");
+      const receipt = created.res.structuredContent;
+      assert.equal(receipt.recordPath, join(y, ".wao", "runs", "consults", `${receipt.consultId}.json`),
+        "组记录落主工作树 .wao/runs/consults");
+      assert.ok(existsSync(receipt.recordPath), "组记录实际落在主工作树");
+      assert.ok(!existsSync(join(ywt, ".wao")), "链接工作树不建 .wao");
+
+      // 读取：目标仍是链接工作树 → 重定向后读得到主工作树那份。
+      const read = await callConsult(client, { consultId: receipt.consultId, expectedWorkspaceRoot: ywt });
+      assert.equal(read.threw, false);
+      assert.notEqual(read.res.isError, true, errText(read.res));
+      assert.equal(read.res.structuredContent.recordPath, receipt.recordPath, "读取回执回显主工作树位置");
+
+      // 回退：改动前的落点（工作树自己的 .wao）有一份旧记录、主工作树没有 →
+      // 经工作树目标读取时按 ENOENT 回退读到，回显工作树真实位置。
+      const legacyId = "consult_20261103000000000legacy1";
+      mkdirSync(join(ywt, ".wao", "runs", "consults"), { recursive: true });
+      writeFileSync(join(ywt, ".wao", "runs", "consults", `${legacyId}.json`), JSON.stringify({
+        consultId: legacyId,
+        createdAt: "2026-11-03T00:00:00.000Z",
+        brief: { path: null, sha256: "0".repeat(64) },
+        budgetMs: 600000,
+        elapsedMs: 1,
+        questions: [{ q: 1, heading: "## Q1 方案可行吗" }],
+        seats: [{ agentId: "seat_a", runId: null, runState: "dispatch_failed", formatState: "empty" }],
+        fieldDiff: [],
+      }), "utf8");
+      const legacy = await callConsult(client, { consultId: legacyId, expectedWorkspaceRoot: ywt });
+      assert.equal(legacy.threw, false);
+      assert.notEqual(legacy.res.isError, true, `旧记录经回退可读：${errText(legacy.res)}`);
+      assert.equal(legacy.res.structuredContent.recordPath,
+        join(ywt, ".wao", "runs", "consults", `${legacyId}.json`),
+        "回退读取回显工作树真实位置");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(x, { recursive: true, force: true });
+    rmSync(ybase, { recursive: true, force: true });
+    rmSync(aux, { recursive: true, force: true });
   }
 });
 

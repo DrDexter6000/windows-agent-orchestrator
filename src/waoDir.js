@@ -10,10 +10,15 @@
  *   1. 顶层槽位封闭：6 必需 + 可选 inbox/state（validateWaoDir 负向断言多余文件）
  *   2. map.md 只放索引（waoDecisions 的写入命令保证）
  *   3. 除 decisions/ 外都在 .gitignore 里（过程性，不进版本控制）
+ *
+ * 决定 0111：`.wao/` 拆成两个目录视角——决定目录（decisions/，getWaoDir，
+ * 随分支提交留在检出）与状态目录（其余槽位，getWaoStateDir；链接工作树里
+ * 重定向到主工作树）。主检出上两者是同一个目录，行为不变。
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { mainWorktreeRoot, productionProjectIo } from "./projectIdentity.js";
 
 // 锁死的 6 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
 // TD-91：pipeline/ 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
@@ -30,6 +35,9 @@ export const WAO_OPTIONAL_TOP_LEVEL_SLOTS = ["inbox", "state"];
 // decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
 const SLOTS_WITH_MAP = ["decisions", "pipeline", "handoff"];
 
+// 决定 0111：状态目录槽位（decisions 随分支提交留在决定目录，其余落状态目录）。
+const STATE_SLOTS = ["project.md", "pipeline", "handoff", "runs", "migration"];
+
 /**
  * 解析 .wao/ 路径。
  * @param {string} cwd 项目根
@@ -40,23 +48,56 @@ export function getWaoDir(cwd, override) {
 }
 
 /**
+ * 解析 .wao 本地状态目录（决定 0111）：链接工作树里除 decisions/ 外的本地
+ * 状态落到主工作树（决定目录仍取 getWaoDir——decisions 随分支提交留在工作树）。
+ * @param {string} cwd 项目根
+ * @param {{explicit?: string, configured?: string}} [opts]
+ *   explicit：命令行显式给的 --state-dir（非空时按 cwd 解析，不重定向）；
+ *   configured：配置里的 stateDir（src/cli.js 默认 ".wao"）——只提供名字，
+ *   不算显式覆盖（默认值重定向、显式值不重定向）。
+ * @param {object} [io] mainWorktreeRoot 的 io（缺省生产读函数）
+ */
+export function getWaoStateDir(cwd, { explicit, configured } = {}, io = productionProjectIo()) {
+  if (typeof explicit === "string" && explicit.length > 0) {
+    return resolve(cwd, explicit);
+  }
+  return resolve(mainWorktreeRoot(resolve(cwd), io), configured ?? ".wao");
+}
+
+/**
  * 初始化 .wao/ 骨架。幂等：重复 init 不破坏已有内容。
  * 创建 6 个必需槽位 + 各 map.md 空文件 + project.md 骨架 + 追加 .wao/ 到 .gitignore。
  * 可选槽位（inbox/state）不预建。
+ *
+ * 决定 0111：收两个显式目录——decisions/ 建、查在决定目录（随分支提交），
+ * 其余槽位在状态目录（链接工作树里=主工作树）；两者相同时（主检出/显式
+ * --state-dir）行为与拆分前完全一样。.gitignore 照旧写在 cwd。
+ * @param {string} cwd 项目根（.gitignore 落点）
+ * @param {string} decisionsDir 决定目录（getWaoDir 的结果）
+ * @param {string} stateDir 状态目录（getWaoStateDir 的结果）
  */
-export async function initWaoDir(cwd, override) {
-  const waoDir = getWaoDir(cwd, override);
-  await mkdir(waoDir, { recursive: true });
+export async function initWaoDir(cwd, decisionsDir, stateDir) {
+  await mkdir(decisionsDir, { recursive: true });
+  await mkdir(stateDir, { recursive: true });
 
-  // 各目录槽位
-  for (const slot of WAO_TOP_LEVEL_SLOTS) {
+  // decisions/ 槽位在决定目录。
+  {
+    const slotDir = join(decisionsDir, "decisions");
+    await mkdir(slotDir, { recursive: true });
+    const mapPath = join(slotDir, "map.md");
+    if (!existsSync(mapPath)) {
+      await writeFile(mapPath, MAP_HEADER.decisions, "utf8");
+    }
+  }
+  // 其余槽位在状态目录。
+  for (const slot of STATE_SLOTS) {
     if (slot === "project.md") {
-      const pPath = join(waoDir, "project.md");
+      const pPath = join(stateDir, "project.md");
       if (!existsSync(pPath)) {
         await writeFile(pPath, PROJECT_TEMPLATE, "utf8");
       }
     } else {
-      const slotDir = join(waoDir, slot);
+      const slotDir = join(stateDir, slot);
       await mkdir(slotDir, { recursive: true });
       // map.md（有索引的槽位）
       if (SLOTS_WITH_MAP.includes(slot)) {
@@ -73,32 +114,57 @@ export async function initWaoDir(cwd, override) {
 }
 
 /**
- * 校验 .wao/ 结构完整性。
+ * 扫一个目录的槽位形状：missing=必需槽位缺哪些，unexpected=允许集之外的条目
+ * （可选槽位 inbox/state 放行）。目录读不了=全部必需槽位缺失（与拆分前语义
+ * 一致：读失败不猜、按缺报）。
+ */
+function scanSlots(dir, required) {
+  let actual = [];
+  try {
+    actual = readdirSync(dir);
+  } catch {
+    return { missing: [...required], unexpected: [] };
+  }
+  const allowed = new Set([...WAO_TOP_LEVEL_SLOTS, ...WAO_OPTIONAL_TOP_LEVEL_SLOTS]);
+  const unexpected = actual.filter((entry) => !allowed.has(entry));
+  const missing = required.filter((slot) => !actual.includes(slot));
+  return { missing, unexpected };
+}
+
+/**
+ * 校验 .wao/ 结构完整性（决定 0111：决定目录与状态目录两个显式目录）。
+ * 两者相同（主检出/显式 --state-dir）→ 单目录全槽位校验，与拆分前逐字节同义；
+ * 两者不同（链接工作树重定向）→ decisions/ 在决定目录查，其余必需槽位在
+ * 状态目录查，missing/unexpected 合并上报。
+ * @param {string} decisionsDir 决定目录（getWaoDir 的结果）
+ * @param {string} stateDir 状态目录（getWaoStateDir 的结果）
  * @returns {{ok: boolean, initialized: boolean, missing: string[], unexpected: string[]}}
  *   - 未 init：{ok:false, initialized:false}
  *   - init 但结构坏：{ok:false, initialized:true, missing/unexpected 非空}
  *   - 合法：{ok:true, initialized:true, missing/unexpected 空}
  */
-export function validateWaoDir(cwd, override) {
-  const waoDir = getWaoDir(cwd, override);
-  if (!existsSync(waoDir)) {
+export function validateWaoDir(decisionsDir, stateDir) {
+  if (decisionsDir === stateDir) {
+    if (!existsSync(decisionsDir)) {
+      return { ok: false, initialized: false, missing: [], unexpected: [] };
+    }
+    const { missing, unexpected } = scanSlots(decisionsDir, WAO_TOP_LEVEL_SLOTS);
+    const ok = missing.length === 0 && unexpected.length === 0;
+    return { ok, initialized: true, missing, unexpected };
+  }
+  const decisionsExists = existsSync(decisionsDir);
+  const stateExists = existsSync(stateDir);
+  if (!decisionsExists && !stateExists) {
     return { ok: false, initialized: false, missing: [], unexpected: [] };
   }
-  const missing = [];
-  const unexpected = [];
-  let actual = [];
-  try {
-    actual = readdirSync(waoDir);
-  } catch {
-    return { ok: false, initialized: true, missing: WAO_TOP_LEVEL_SLOTS, unexpected: [] };
-  }
-  const allowed = new Set([...WAO_TOP_LEVEL_SLOTS, ...WAO_OPTIONAL_TOP_LEVEL_SLOTS]);
-  for (const entry of actual) {
-    if (!allowed.has(entry)) unexpected.push(entry);
-  }
-  for (const slot of WAO_TOP_LEVEL_SLOTS) {
-    if (!actual.includes(slot)) missing.push(slot);
-  }
+  const decisions = decisionsExists
+    ? scanSlots(decisionsDir, ["decisions"])
+    : { missing: ["decisions"], unexpected: [] };
+  const state = stateExists
+    ? scanSlots(stateDir, STATE_SLOTS)
+    : { missing: [...STATE_SLOTS], unexpected: [] };
+  const missing = [...decisions.missing, ...state.missing];
+  const unexpected = [...decisions.unexpected, ...state.unexpected];
   const ok = missing.length === 0 && unexpected.length === 0;
   return { ok, initialized: true, missing, unexpected };
 }

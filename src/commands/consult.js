@@ -22,6 +22,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
+import { getWaoDir, getWaoStateDir } from "../waoDir.js";
 // 决定 0095：`consult wait --until-settled` 逐席调用与 `runs wait
 // --until-settled` 共用的收口等待器（轮询循环原样上移到家模块，不复制算法）；
 // 不可信轮上限也取自同一模块（"Untrusted: N consecutive rounds" 文案同源）。
@@ -34,7 +35,7 @@ import {
 import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
 import {
   runConsult,
-  loadConsultRecord,
+  loadConsultRecordWithFallback,
   rerenderConsultFromRecord,
   waitForConsult,
   selectNonTerminalSeats,
@@ -107,8 +108,16 @@ function parseFields(rawValues) {
   return declared;
 }
 
+// 决定 0111：组记录是 .wao 本地状态——经 getWaoStateDir 解析（链接工作树里
+// 重定向到主工作树）；consult 没有 --state-dir，配置里的 stateDir 只给名字。
 function resolveConsultsDir(options, config) {
-  return join(resolveTargetCwd(options), config?.stateDir ?? ".wao", "runs", "consults");
+  return join(getWaoStateDir(resolveTargetCwd(options), { configured: config?.stateDir }), "runs", "consults");
+}
+
+// 决定 0111：按 id 读记录的回退目录——改动前的落点（按原配置、不重定向算出）。
+// 只有状态目录里没有这份记录（ENOENT）且两边不同时才读它。
+function legacyConsultsDir(options, config) {
+  return join(getWaoDir(resolveTargetCwd(options), options.stateDir ?? config?.stateDir), "runs", "consults");
 }
 
 /**
@@ -370,16 +379,22 @@ async function consultShowCommand(args, config, deps = {}) {
   }
   const consultsDir = resolveConsultsDir(options, config);
   const runDir = options.runDir ?? config?.runDir ?? "runs";
-  const record = await (deps.loadConsultRecord ?? loadConsultRecord)({ consultId, consultsDir });
+  // 决定 0111：先在状态目录读，ENOENT 才回退改动前的落点；回显真实位置。
+  const { record, consultsDir: recordDir } = await loadConsultRecordWithFallback({
+    consultId,
+    consultsDir,
+    fallbackConsultsDir: legacyConsultsDir(options, config),
+    ...(deps.loadConsultRecord ? { loadFn: deps.loadConsultRecord } : {}),
+  });
 
   // 只读重渲染委派 service 层（M13-r2 提炼：CLI consult show 与 MCP run_consult
   // 读取模式共用同一实现；本层只做 console 渲染）。runState/formatState 按当前
   // transcript 真值重导出（show 是当下观察）；组记录中的历史观察值保留在 json
-  // 输出的 record 字段里。
+  // 输出的 record 字段里。consultsDir 用实际读到记录的目录（recordPath 如实）。
   const result = await rerenderConsultFromRecord({
     record,
     runDir,
-    consultsDir,
+    consultsDir: recordDir,
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
@@ -475,12 +490,16 @@ async function consultWaitCommand(args, config, deps = {}) {
   const consultsDir = resolveConsultsDir(options, config);
   const runDir = options.runDir ?? config?.runDir ?? "runs";
   if (options.untilSettled !== undefined) {
-    await consultWaitUntilSettledCommand({ consultId, asJson: format === "json", consultsDir, runDir }, deps);
+    await consultWaitUntilSettledCommand({
+      consultId, asJson: format === "json", consultsDir, fallbackConsultsDir: legacyConsultsDir(options, config), runDir,
+    }, deps);
     return;
   }
+  // 决定 0111：等待也经回退读取找记录；实际读到的目录一路传给重渲染。
   const waited = await (deps.waitForConsult ?? waitForConsult)({
     consultId,
     consultsDir,
+    fallbackConsultsDir: legacyConsultsDir(options, config),
     runDir,
     ...(options.waitMs !== undefined ? { waitMs: Number(options.waitMs) } : {}),
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
@@ -488,7 +507,7 @@ async function consultWaitCommand(args, config, deps = {}) {
   const result = await rerenderConsultFromRecord({
     record: waited.record,
     runDir,
-    consultsDir,
+    consultsDir: waited.consultsDir ?? consultsDir,
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
@@ -523,8 +542,14 @@ async function consultWaitCommand(args, config, deps = {}) {
  * resolveDetailedFn / sleepFn / nowFn / verifierGoneFn / verifierProofDeps /
  * writeFileSync / mkdirFn。
  */
-async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, runDir }, deps = {}) {
-  const record = await (deps.loadConsultRecord ?? loadConsultRecord)({ consultId, consultsDir });
+async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, fallbackConsultsDir, runDir }, deps = {}) {
+  // 决定 0111：先在状态目录读，ENOENT 才回退改动前的落点；实际读到的目录传给重渲染。
+  const { record, consultsDir: recordDir } = await loadConsultRecordWithFallback({
+    consultId,
+    consultsDir,
+    fallbackConsultsDir,
+    ...(deps.loadConsultRecord ? { loadFn: deps.loadConsultRecord } : {}),
+  });
   const dispatched = (record.seats ?? []).filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
   const waitFn = deps.waitRunSettlement ?? waitRunSettlement;
   const startedAt = Date.now();
@@ -635,7 +660,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
   const result = await rerenderConsultFromRecord({
     record,
     runDir,
-    consultsDir,
+    consultsDir: recordDir,
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });

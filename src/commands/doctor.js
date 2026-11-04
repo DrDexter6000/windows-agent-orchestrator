@@ -25,7 +25,8 @@
 // 呈现与信噪比，不是把它变成闸门。verdict 行自带"（advisory，非门禁）"标注。
 //
 // 依赖：
-//   - 外部模块：../waoDir.js（validateWaoDir）
+//   - 外部模块：../waoDir.js（validateWaoDir/getWaoDir/getWaoStateDir）、
+//     ../projectIdentity.js（mainWorktreeRoot——决定 0111 的链接工作树重定向）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
 //   - 凭据读取（M11-7 复用，禁止第二份注册表读取）：../application/credentialReadiness.js
 //     （resolveCredentialEnv——process.env → Windows User 作用域回退 + requiredCredentialNames）
@@ -53,7 +54,8 @@ import { homedir, tmpdir } from "node:os";
 import { WAO_VERSION } from "../version.js";
 import { gitChildEnv } from "../delivery.js";
 
-import { validateWaoDir } from "../waoDir.js";
+import { validateWaoDir, getWaoDir, getWaoStateDir } from "../waoDir.js";
+import { mainWorktreeRoot } from "../projectIdentity.js";
 import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
 import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
@@ -844,7 +846,11 @@ export async function waoDoctorCommand(args, config) {
   //      / 结构混乱有多余(FAIL，给迁移建议) / 未初始化(WARN，preflight 正常初态)。
   // doctor 是 onboarding §4d 的 preflight 第一道——"还没 init"或"fresh clone 缺槽位"
   // 都是 run wao init 之前的预期状态，不应与 401/key 缺/CLI 缺同列让 exit=1。
-  const waoCheck = validateWaoDir(cwd, options.stateDir ?? config.stateDir);
+  // 决定 0111：decisions/ 查决定目录（随分支提交），其余槽位查状态目录（链接
+  // 工作树里=主工作树）；显式 --state-dir 给了就两者同目录（不重定向）。
+  const waoDecisionsDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+  const waoStateDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
+  const waoCheck = validateWaoDir(waoDecisionsDir, waoStateDir);
   if (waoCheck.ok) {
     pushCheck(checks, { name: "wao_init", pass: true, detail: ".wao/ 已初始化" });
   } else if (waoCheck.initialized && waoCheck.unexpected.length === 0 && waoCheck.missing.length > 0) {
@@ -877,6 +883,24 @@ export async function waoDoctorCommand(args, config) {
       detail: `.wao/ 未初始化——preflight 的正常初态，不计入 FAIL；如需项目记录：run: npm run cli -- wao init --cwd ${cwd}`,
       fix: `npm run cli -- wao init --cwd ${cwd}`,
     });
+  }
+  // 决定 0111：cwd 是链接工作树、且改动前的 .wao/ 落点（决定目录）里有
+  // decisions/ 以外的条目时提示一行——这些本地状态留在工作树里，主工作树
+  // （=现在的状态目录）看不到，删树前核对后合并。只提示，不搬、不判失败。
+  if (mainWorktreeRoot(cwd) !== cwd && waoDecisionsDir !== waoStateDir) {
+    let legacyEntries = [];
+    try {
+      legacyEntries = readdirSync(waoDecisionsDir).filter((entry) => entry !== "decisions");
+    } catch { /* 读不了/不存在=没有遗留条目，不提示 */ }
+    if (legacyEntries.length > 0) {
+      pushCheck(checks, {
+        name: "wao_worktree_local_state",
+        pass: true,
+        level: "info",
+        detail: `cwd 是链接工作树，本地状态 [${legacyEntries.join(", ")}] 留在工作树的 ${waoDecisionsDir}——主工作树看不到它们；删这棵树前先核对，把要留的合并到 ${waoStateDir} 对应位置（两边可能都有 map.md）`,
+        fix: `删工作树前把 ${legacyEntries.join("、")} 核对后合并到 ${waoStateDir} 对应位置（两边可能都有 map.md）`,
+      });
+    }
   }
 
   // 8. invocation_method / 安装权威探测（TD-72 延伸 → TD-191⑥ 如实化，info 级，

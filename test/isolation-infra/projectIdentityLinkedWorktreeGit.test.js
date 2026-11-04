@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { identifyProjectFromCwd, projectFactFromCwd, productionProjectIo } from "../../src/projectIdentity.js";
+import { identifyProjectFromCwd, projectFactFromCwd, productionProjectIo, mainWorktreeRoot } from "../../src/projectIdentity.js";
 
 function gitOf(cwd, args) {
   return execFileSync("git", args, {
@@ -171,6 +171,84 @@ test("0099 R8 真git: worktree prune 删了 admin 目录、树目录还在 → �
     gitOf(main, ["worktree", "prune"]);
     renameSync(stash, wt); // 树挪回来：目录在、admin 目录没了
     assert.deepEqual(identify(wt), identifyNoR8(wt), "gitdir 死链（realpath 失败）→ 照旧");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ===== 决定 0111：mainWorktreeRoot（.wao 本地状态目录的重定向）=====
+
+// 主工作树路径的比较基准：mainWorktreeRoot 返回 realpath 后的形状，与 fwd(main)
+// 逐字可能差在盘上规范大小写——两边过同一 production io 的 realpath 再比。
+function samePathByRealpath(a, b) {
+  const io = productionProjectIo();
+  const norm = (p) => {
+    try { return io.realpath(p).replace(/\\/g, "/").toLowerCase(); } catch { return p.replace(/\\/g, "/").toLowerCase(); }
+  };
+  return norm(a) === norm(b);
+}
+
+test("0111 真git: mainWorktreeRoot 链接工作树根 → 主工作树；子目录/主检出原样", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-0111mr-"));
+  try {
+    const main = makeRepo(join(root, "proj"));
+    const wt = join(root, "proj-wt");
+    gitOf(root, ["-C", main, "worktree", "add", wt]);
+    // 重定向结果即主检出根；同输入两次调用稳定。
+    const redirected = mainWorktreeRoot(fwd(wt));
+    assert.equal(typeof redirected, "string");
+    assert.ok(samePathByRealpath(redirected, main), "重定向结果=主检出根");
+    assert.equal(mainWorktreeRoot(fwd(wt)), redirected, "同输入两次调用结果一致");
+    // 子目录：R8 只看工作树根 → 原样返回输入。
+    const sub = join(wt, "src");
+    mkdirSync(sub);
+    assert.equal(mainWorktreeRoot(fwd(sub)), fwd(sub), "工作树子目录原样");
+    // 主检出自身（.git 是目录）：原样。
+    assert.equal(mainWorktreeRoot(fwd(main)), fwd(main), "主检出原样");
+    // Windows 反斜杠输入同义。
+    assert.ok(samePathByRealpath(mainWorktreeRoot(wt), main), "反斜杠输入同义");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("0111 真git: mainWorktreeRoot 对 .wao-worktrees/<run> 路径先 R4 回仓根再 R8", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-0111mw-"));
+  try {
+    const main = makeRepo(join(root, "proj"));
+    const wt = join(root, "proj-wt");
+    gitOf(root, ["-C", main, "worktree", "add", wt]);
+    // 主仓下的隔离工作树：R4 回到主仓根，主仓不是链接工作树 → 返回主仓根。
+    const runUnderMain = join(main, ".wao-worktrees", "run_x");
+    assert.equal(mainWorktreeRoot(fwd(runUnderMain)), fwd(main), "R4 剥离后主仓根原样");
+    // 链接工作树下的隔离工作树（含子路径）：R4 回到树根，再 R8 → 主工作树。
+    const runUnderWt = join(wt, ".wao-worktrees", "run_y");
+    assert.ok(
+      samePathByRealpath(mainWorktreeRoot(fwd(runUnderWt)), main),
+      "R4 → 树根 → R8 → 主工作树",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("0111: mainWorktreeRoot 非 git 目录 / .git 读失败 / 未注入读函数 → 原样返回输入", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-0111mf-"));
+  try {
+    const plain = join(root, "plain");
+    mkdirSync(plain);
+    // 非 git 目录（生产 io 读 .git 抛 ENOENT）。
+    assert.equal(mainWorktreeRoot(fwd(plain)), fwd(plain), "非 git 目录原样");
+    // .git 读失败（io.readGitFile 注入抛错）→ 原样。
+    const failing = {
+      ...productionProjectIo(),
+      readGitFile: () => { throw new Error("boom"); },
+    };
+    assert.equal(mainWorktreeRoot(fwd(plain), failing), fwd(plain), "读失败原样");
+    assert.equal(mainWorktreeRoot(fwd(plain), {}), fwd(plain), "未注入读函数原样（R8 不生效）");
+    // 相对路径与非字符串输入原样。
+    assert.equal(mainWorktreeRoot("relative/path"), "relative/path");
+    assert.equal(mainWorktreeRoot(""), "");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

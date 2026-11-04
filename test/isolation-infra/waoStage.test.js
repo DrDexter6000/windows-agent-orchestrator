@@ -16,7 +16,7 @@ import { addStage, listStages, summarizeStages, STAGE_NUMBERS } from "../../src/
 
 async function makeInitWao() {
   const dir = await mkdtemp(join(tmpdir(), "wao-stage-"));
-  await initWaoDir(dir);
+  await initWaoDir(dir, join(dir, ".wao"), join(dir, ".wao"));
   return dir;
 }
 

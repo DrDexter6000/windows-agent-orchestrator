@@ -249,6 +249,34 @@ export function productionProjectIo() {
 }
 
 /**
+ * 决定 0111：`.wao` 本地状态目录重定向——链接工作树取主工作树。
+ *
+ * 与身份判定（identifyProjectFromCwd）共用 R4 与 R8 的实现（同一份
+ * WORKTREE_SEG_RE 与 linkedWorktreeMainRoot，不写第二份）：先按 R4 把
+ * `<仓>/.wao-worktrees/<run>`（含其子路径）回溯到仓根，再按 R8 判断该根
+ * 恰是链接工作树根时返回主工作树。只做目录重定向，不做身份判定（scratch/
+ * 大小写折叠不参与）；任何读失败、形状不对 → 返回输入原值（调用方照旧按
+ * cwd 落状态，绝不抛错、不起 git 子进程）。非字符串/空输入原样返回。
+ * @param {string} path 绝对路径（调用方 resolve 过的 cwd）
+ * @param {{platform?: NodeJS.Platform, realpath?: (p:string)=>string,
+ *          readGitFile?: (p:string)=>string}} [io] 缺省 productionProjectIo()
+ */
+export function mainWorktreeRoot(path, io = productionProjectIo()) {
+  if (typeof path !== "string" || path.length === 0) return path;
+  const platform = io.platform ?? process.platform;
+  const realpath = io.realpath ?? ((p) => p);
+  // 与 identifyProjectFromCwd 同款分隔符/尾斜杠归一（R4 正则按 / 匹配）。
+  let p = path.replace(/\\/g, "/");
+  if (!/^[A-Za-z]:\/$/.test(p)) p = p.replace(/\/+$/, "");
+  const repoRoot = p.replace(WORKTREE_SEGRE_SAFE(platform), "");
+  const r8MainRoot = linkedWorktreeMainRoot(repoRoot, { platform, realpath, readGitFile: io.readGitFile });
+  if (r8MainRoot !== null) return r8MainRoot;
+  // R8 没命中：R4 命中过（隔离工作树不是项目——状态随仓根，不落回随树删的
+  // 位置）就返回仓根；R4 也没命中则返回输入原值（读不出照旧）。
+  return repoRoot !== p ? repoRoot : path;
+}
+
+/**
  * TD-190 D2-②a（opus 补强#1，2026-10-09 断点续接项②的前半）：把首事件 cwd
  * 判定结果构造成**有界可序列化归属事实**，随 run.started / run.background_submitted
  * 一并落档。读侧（迁移计划器/未来查询）以记录事实为准、不再重推导——规则

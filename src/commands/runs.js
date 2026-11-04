@@ -9,7 +9,7 @@
 //   - 外部模块：../transcript.js（readTranscript/findState）、../metrics.js
 //     （aggregateRunMetrics/aggregateSummary/formatDuration）、../diagnosis.js
 //     （diagnoseFailure）、../waoDir.js
-//     （getWaoDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
+//     （getWaoStateDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
 //     （summarizeStages）
 //   - 共享 service：../application/runWait.js（runs wait 与 MCP run_wait 同一
 //     等待服务）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
@@ -77,7 +77,7 @@ import {
   VERIFY_COMMIT_TIMEOUT_MS_MAX,
 } from "../application/runVerifyCommit.js";
 import { createHash } from "node:crypto";
-import { getWaoDir } from "../waoDir.js";
+import { getWaoStateDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
 // R23-F/B Round B (TD-130): `runs gate` 出口——同机验证串行化闸的只读查询与
@@ -1408,10 +1408,11 @@ export async function runsDashboardCommand(args, config, injections = {}) {
     }
     // TD-82：读 .wao/pipeline/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
     // .wao/ 未 init 时静默跳过（count:0），不阻塞 dashboard。
+    // 决定 0111：pipeline/ 是状态槽位——经 getWaoStateDir 读（链接工作树里=主工作树）。
     let selfDeclared = null;
     let stageProgress = null;
     const cwd = resolveTargetCwd(options);
-    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+    const waoDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
     try {
       selfDeclared = await summarizeDeclares(waoDir);
     } catch { /* .wao/ 未 init，无声明——dashboard 照常显示 */ }

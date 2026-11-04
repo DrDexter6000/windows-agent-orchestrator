@@ -193,7 +193,7 @@ import {
 // ZERO-DISPATCH read mode. Same DI pattern as the other application services.
 import {
   runConsult,
-  loadConsultRecord,
+  loadConsultRecordWithFallback,
   rerenderConsultFromRecord,
   CONSULT_WAIT_MAX_MS,
   CONSULT_PAGE_CAP_BYTES,
@@ -204,6 +204,7 @@ import {
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
 import { readFile } from "node:fs/promises";
+import { getWaoStateDir } from "../waoDir.js";
 import { join } from "node:path";
 import { selectCertRecord } from "../runManager.js";
 import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
@@ -1170,8 +1171,8 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
 const RUN_CONSULT_ERROR_TEXT = "run_consult failed before any seat was dispatched";
 const RUN_CONSULT_READ_ERROR_TEXT =
   "run_consult read failed: no readable consult record with this consultId — records live in " +
-  "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace); " +
-  "check workspace_status and the id";
+  "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace; " +
+  "a linked worktree uses its main worktree's .wao); check workspace_status and the id";
 const RUN_CONSULT_RENDER_ERROR_TEXT =
   "run_consult read failed: the consult record was found, but rendering it failed — " +
   "read the seats directly: run_collect with each seat runId (runs_list shows them)";
@@ -5280,13 +5281,25 @@ export function createWaoMcpServer({
       if (effectiveRoot === null && consultsDir === undefined) {
         return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
       }
-      const recordsDir = consultsDir ?? join(effectiveRoot, ".wao", "runs", "consults");
+      // 决定 0111：组记录是 .wao 本地状态——effectiveRoot 是链接工作树时取其
+      // 主工作树的 .wao（getWaoStateDir 重定向；读不出照旧按根自身）。
+      // legacyRecordsDir = 改动前的落点（<root>/.wao/runs/consults，不重定向），
+      // 只在读模式作 ENOENT 回退。
+      const recordsDir = consultsDir ?? join(getWaoStateDir(effectiveRoot), "runs", "consults");
+      const legacyRecordsDir = effectiveRoot === null
+        ? undefined
+        : join(effectiveRoot, ".wao", "runs", "consults");
 
       if (readMode) {
         // 找不到 / 读不了记录，与记录读到了但重渲染或投影失败，是两回事，分开报。
         let record;
+        let recordDir;
         try {
-          record = await loadConsultRecord({ consultId: input.consultId, consultsDir: recordsDir });
+          ({ record, consultsDir: recordDir } = await loadConsultRecordWithFallback({
+            consultId: input.consultId,
+            consultsDir: recordsDir,
+            fallbackConsultsDir: legacyRecordsDir,
+          }));
         } catch {
           return { isError: true, content: [{ type: "text", text: RUN_CONSULT_READ_ERROR_TEXT }] };
         }
@@ -5294,7 +5307,7 @@ export function createWaoMcpServer({
           const result = await rerenderConsultFromRecord({
             record,
             runDir,
-            consultsDir: recordsDir,
+            consultsDir: recordDir,
             env: process.env,
           });
           if (input.seat !== undefined) {

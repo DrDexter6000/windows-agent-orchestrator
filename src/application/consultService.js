@@ -857,19 +857,60 @@ export async function loadConsultRecord({
 }
 
 /**
+ * 决定 0111：按 id 读组记录的回退读取——CLI `consult show` / `consult wait`
+ * （含 --until-settled）与 MCP run_consult 读取模式共用。
+ *
+ * 先在状态目录（consultsDir——链接工作树里已重定向到主工作树）读；只有文件
+ * 不存在（ENOENT）且 fallbackConsultsDir（改动前的落点：按原配置、不重定向
+ * 算出的目录）与它不同、且那边有这份记录时才从回退目录读。权限错误、坏
+ * JSON 等其它失败不触发回退（loadConsultRecord 原样抛出——不能让一份坏记录
+ * 被旧目录的好记录静默顶掉，读取者要看到真实状态）。
+ *
+ * @returns {Promise<{record: object, consultsDir: string}>}
+ *   consultsDir=实际读到的目录（resolve 后）——回显 recordPath 用真实位置，
+ *   调用方把它继续传给 rerenderConsultFromRecord 等下游。
+ */
+export async function loadConsultRecordWithFallback({
+  consultId,
+  consultsDir,
+  fallbackConsultsDir,
+  loadFn = loadConsultRecord,
+  readFileFn = readFile,
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+}) {
+  // loadFn 是 CLI 的测试缝（deps.loadConsultRecord）；生产恒为 loadConsultRecord。
+  const read = (dir) => loadFn({ consultId, consultsDir: dir, readFileFn, sleepFn });
+  try {
+    const record = await read(consultsDir);
+    return { record, consultsDir: resolve(consultsDir) };
+  } catch (error) {
+    if (typeof fallbackConsultsDir === "string" && fallbackConsultsDir.length > 0
+      && resolve(fallbackConsultsDir) !== resolve(consultsDir) && error?.code === "ENOENT") {
+      const record = await read(fallbackConsultsDir);
+      return { record, consultsDir: resolve(fallbackConsultsDir) };
+    }
+    throw error;
+  }
+}
+
+/**
  * 等一场已经扇出的会审：各席都到终态或观察窗到期即返回（零派发、只读转录）。
  * 会审的等待预算到期之后，用它接着等；可以反复调用。
  * @param {object} input
  * @param {string} input.consultId
  * @param {string} input.consultsDir
+ * @param {string} [input.fallbackConsultsDir] 决定 0111 的回退目录（状态目录里
+ *   没有这份记录且是 ENOENT 时才读它；缺省无回退）
  * @param {string} input.runDir
  * @param {number} [input.waitMs] 观察窗，[CONSULT_WAIT_MIN_MS, CONSULT_WAIT_MAX_MS]；缺省 CONSULT_REWAIT_DEFAULT_MS
  *   （270000）——调用方自己的命令超时往往只有几分钟，缺省不取上限
- * @returns {Promise<{record: object, allTerminal: boolean, waitedMs: number, windowMs: number}>}
+ * @returns {Promise<{record: object, consultsDir: string, allTerminal: boolean, waitedMs: number, windowMs: number}>}
+ *   consultsDir=实际读到组记录的目录（决定 0111——回显真实位置）
  */
 export async function waitForConsult({
   consultId,
   consultsDir,
+  fallbackConsultsDir,
   runDir,
   waitMs = CONSULT_REWAIT_DEFAULT_MS,
   pollIntervalMs = 2000,
@@ -881,7 +922,9 @@ export async function waitForConsult({
   if (!Number.isInteger(waitMs) || waitMs < CONSULT_WAIT_MIN_MS || waitMs > CONSULT_WAIT_MAX_MS) {
     throw new Error(`waitMs must be an integer in [${CONSULT_WAIT_MIN_MS}, ${CONSULT_WAIT_MAX_MS}], got: ${JSON.stringify(waitMs)}`);
   }
-  const record = await loadConsultRecord({ consultId, consultsDir, readFileFn });
+  const { record, consultsDir: usedDir } = await loadConsultRecordWithFallback({
+    consultId, consultsDir, fallbackConsultsDir, readFileFn, sleepFn,
+  });
   const resolvedRunDir = resolve(runDir);
   const started = nowFn();
   const deadline = started + waitMs;
@@ -903,7 +946,13 @@ export async function waitForConsult({
     if (pending.length === 0 || remaining <= 0) break;
     await sleepFn(Math.min(pollIntervalMs, remaining));
   }
-  return { record, allTerminal: pending.length === 0, waitedMs: nowFn() - started, windowMs: waitMs };
+  return {
+    record,
+    consultsDir: usedDir,
+    allTerminal: pending.length === 0,
+    waitedMs: nowFn() - started,
+    windowMs: waitMs,
+  };
 }
 
 /**

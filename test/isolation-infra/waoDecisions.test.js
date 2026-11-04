@@ -9,7 +9,7 @@ import { addDecision, listDecisions, readDecision } from "../../src/waoDecisions
 
 async function makeInitWao() {
   const dir = await mkdtemp(join(tmpdir(), "wao-dec-"));
-  await initWaoDir(dir);
+  await initWaoDir(dir, join(dir, ".wao"), join(dir, ".wao"));
   return dir;
 }
 

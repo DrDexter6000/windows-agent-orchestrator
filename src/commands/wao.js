@@ -24,7 +24,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-import { initWaoDir, getWaoDir } from "../waoDir.js";
+import { initWaoDir, getWaoDir, getWaoStateDir } from "../waoDir.js";
 import { addDecision, listDecisions, readDecision } from "../waoDecisions.js";
 import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "../waoDeclare.js";
 import { addStage, summarizeStages, STAGE_NUMBERS, PANEL_SKIP_REASONS, PANEL_STAGES } from "../waoStage.js";
@@ -90,12 +90,15 @@ export function resolveArtifactPath(artifact, waoRunDir) {
 async function waoInitCommand(args, config) {
   const options = parseOptions(args);
   const cwd = resolveTargetCwd(options);
-  const override = options.stateDir ?? config.stateDir;
-  await initWaoDir(cwd, override);
-  const waoDir = getWaoDir(cwd, override);
+  // 决定 0111：decisions/ 建在决定目录（随分支提交）；其余槽位建在状态目录
+  // （链接工作树里=主工作树）。显式 --state-dir 给了就整体落在那里（不重定向）。
+  const decisionsDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+  const stateDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
+  await initWaoDir(cwd, decisionsDir, stateDir);
   console.log(JSON.stringify({
     initialized: true,
-    waoDir,
+    waoDir: decisionsDir,
+    stateDir,
     slots: ["project.md", "decisions/", "pipeline/", "handoff/", "runs/", "migration/"],
   }, null, 2));
 }
@@ -104,7 +107,8 @@ async function waoHandoffCommand(args, config) {
   const [sub, ...tail] = args;
   const options = parseOptions(tail);
   const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+  // 决定 0111：本地状态槽位落状态目录（链接工作树里=主工作树）。
+  const waoDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
 
   if (sub === "write") {
     if (!options.from || !options.to) throw new Error("wao handoff write requires --from and --to");
@@ -183,7 +187,8 @@ async function waoDecisionCommand(args, config) {
 async function waoDeclareCommand(args, config) {
   const options = parseOptions(args);
   const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+  // 决定 0111：本地状态槽位落状态目录（链接工作树里=主工作树）。
+  const waoDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
 
   if (options.task) {
     // add：写一条声明。--task 必填，--reason 必填且需在枚举内。
@@ -229,7 +234,8 @@ async function waoStageCommand(args, config) {
   const stageArg = args.find((a) => /^\d+$/.test(a));
   const options = parseOptions(args);
   const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+  // 决定 0111：本地状态槽位落状态目录（链接工作树里=主工作树）。
+  const waoDir = getWaoStateDir(cwd, { explicit: options.stateDir, configured: config.stateDir });
 
   if (stageArg !== undefined) {
     const stage = Number(stageArg);

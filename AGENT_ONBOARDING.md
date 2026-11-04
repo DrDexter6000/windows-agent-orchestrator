@@ -179,7 +179,7 @@ npm run cli -- wao doctor --cwd <目标项目>
 
 **doctor 是建议性（advisory）自检报告，不是使用门禁**：它按 registry 里保留的 worker 收窄检查（scoped）——Node 版本、保留 worker 需要的 CLI 在 PATH、保留 worker 声明的凭据 env 名、agents.json 配置、目标项目的 `.wao/` 是否初始化。verdict 分三级：`HEALTHY`（无 FAIL 无 WARN）/ `DEGRADED（N warn）`（仅 WARN）/ `BROKEN（N fail）`（有 FAIL）——HEALTHY/DEGRADED 可直接继续；BROKEN 项按各条 `run:` 提示处理后由 owner 裁决是否继续，不自动阻断。
 
-**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（6 必需槽位：project.md/decisions/pipeline/handoff/runs/migration），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。inbox 与 state 是可选槽位（init 不预建，已存在的历史 state/ 布局放行）。另：fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
+**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（6 必需槽位：project.md/decisions/pipeline/handoff/runs/migration），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。inbox 与 state 是可选槽位（init 不预建，已存在的历史 state/ 布局放行）。另：fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。目标项目是链接工作树（`git worktree add`）时，除 `decisions/` 外的本地状态默认落到主工作树的 `.wao/`（`decisions/` 随分支提交留在工作树）——删工作树前不会丢记录，详见决定 0111。
 
 ### 4e. 连接 MCP Host（主控通道，Decision 0017）
 
