@@ -50,3 +50,7 @@
 - 解析与读取不是同一个原子操作：每轮重解析、收口前再确认，仍不能排除最后那一轮里刚刚出现的分叉。
 - 45 秒是观察预算，不是整个调用的硬时限：consult 串行派发、bundle 读取评审都可能使调用更长。
 - Lead 在等待结束后发起的 reverify、repackage、review、decide 是另一段工作；并发 repackage 在转录上不可见，不在收口判定之内。
+
+## 修订条（0112，2026-11-04）
+
+第 3 条"出现在"加一处：MCP `run_delivery` 带 waitMs、因收口提前返回，且交付未采纳、是带 `continuable` 派发的谱系成员时，也给一句 `nextStep`，说可用 `run_continue` 续修。CLI `runs wait --until-settled` 的收口终行同样补这一句；`run_continue` 没有 CLI 子命令，这一句在 CLI 面点名 MCP 工具。即时查询照旧不给。理由见 0112。
