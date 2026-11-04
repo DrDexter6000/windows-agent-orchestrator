@@ -127,11 +127,11 @@ milestone 级完成定义已无对象（M0–M13 全部完成，不再新增）�
 | ② | `registryInventory.buildCertMap` | `<runDir>/reliability-summary.json` | 已钉（服务层缺失/损坏/存在三形状 + providerKey 透传钉）——勿重复造轮子 | `src/application/registryInventory.js` 的 `buildCertMap`；`test/registry-roles/applicationRegistryInventory.test.js` |
 | ③ | `onboarding --endorse-worker` 读台账 | `reliabilitySummaryPath = <config.runDir>/reliability-summary.json` | 已隔离（服务层测试注入路径） | `src/commands/onboarding.js` 的 `reliabilitySummaryPath` |
 | ④ | 认证门 `--require-certified` 读 summary | `<runDir>/reliability-summary.json` | 已隔离（cli.test.js 认证门用例全部注入 `--run-dir`） | `src/runManager.js` 的 `RunManager.start`（`requireCertified` 分支）；`test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
-| ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()` → `<cwd>/.wao/pipeline/`（DECL-/STAGE- 曝光注入） | 已隔离（cli.test.js 的 runsDashboardCommand 用例与 `test/run-lifecycle/boundReadSweep.test.js` 的两处调用都注入 `--cwd <temp>`）；这一面还没有机械守卫，见 7.5 | `src/commands/runs.js` 的 `runsDashboardCommand`；`src/commands/shared.js` 的 `resolveTargetCwd` |
+| ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()`，经 `getWaoStateDir` 得状态目录下的 `pipeline/`（链接工作树与 `.wao-worktrees/<run>` 里是主工作树的 `.wao/`，决定 0111；DECL-/STAGE- 曝光注入） | 已隔离（cli.test.js 的 runsDashboardCommand 用例与 `test/run-lifecycle/boundReadSweep.test.js` 的两处调用都注入 `--cwd <temp>`）；这一面还没有机械守卫，见 7.5 | `src/commands/runs.js` 的 `runsDashboardCommand`；`src/commands/shared.js` 的 `resolveTargetCwd`；`src/waoDir.js` 的 `getWaoStateDir` |
 | ⑥ | daemon 读 `.wao-worktrees` | worktree 残留计数（健康信号，默认相对路径） | 低风险标注（只读计数、非测试路径依赖；不钉） | `src/daemon.js` 的 `countWorktrees` |
 | ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | 确认无测试裸用默认（registry 用例全部显式 `--registry`） | `config/default.json` 的 `registry`；`src/cli.js` 的 `hardcodedDefaults.registry` |
 | ⑧ | 写面边界声明 | `frictionLog.js` 写 `<runDir>/../.dev/friction-log/` 及同类写面 | 不测（写污染风险高于盲区收益；向真实环境做写注入的方案已否决）——表内明写一行防静默漏 | `src/frictionLog.js` 的 `frictionLogDirFromRunDir` |
-| ⑨ | 半 .wao 形状注记 | `.wao/decisions/` 被 git 跟踪；worktree 实际是"有 decisions、无 pipeline/state"的半形状 | 环境差异以此为准——worktree 并非无 `.wao`，`.wao` 读取面的环境差异按此解读 | `.gitignore` 的 `.wao/*` 与 `!.wao/decisions/` 两行 |
+| ⑨ | 半 .wao 形状注记 | `.wao/decisions/` 被 git 跟踪；worktree 里只有 decisions；pipeline、handoff、会审组记录等本地状态经 `getWaoStateDir` 读写主工作树的 `.wao/`（决定 0111） | 环境差异以此为准——交付验证树与隔离工作树里，不带 `--cwd` 的本地状态读写面看到、写到的是主检出的真实 `.wao/`，测试照 ⑤ 注入 `--cwd <temp>` | `.gitignore` 的 `.wao/*` 与 `!.wao/decisions/` 两行 |
 
 - 规则：每轮触碰环境读取面的 milestone，先重跑四个盘点 grep（reliability-summary / runDir 回落 / .wao 路径 / process.cwd()），枚举表可补不可漏；新面必须落行。
 
