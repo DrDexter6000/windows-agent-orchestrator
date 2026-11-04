@@ -3391,10 +3391,11 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
   const skill = read("SKILL.md");
   assert.match(read("docs/testing.md"), /合入 main 前[^\n]*最终候选上跑一次全量/,
     "docs/testing.md 必须写明：合入 main 前在最终候选上跑一次全量");
-  // 0089 §6：不跑全量的例外只限画像数据文件这一个文件，范围不能被悄悄放宽。
+  // 0089 §6、0110：不跑全量的例外只限画像数据与文档（角色合同除外）两类，范围不能被悄悄放宽。
   const exceptionRows = read("docs/testing.md").split("\n").filter((l) => /不跑全量/.test(l));
-  assert.ok(exceptionRows.length > 0 && exceptionRows.every((l) => l.includes("只改画像数据（`config/lane-traits.json`）")),
-    "docs/testing.md 里不跑全量的例外只限只改 config/lane-traits.json 的批次");
+  assert.ok(exceptionRows.length > 0 && exceptionRows.every((l) => l.includes("只改画像数据（`config/lane-traits.json`）")
+    || (l.includes("只改文档（`.md`") && l.includes("`config/roles/*.md` 除外"))),
+    "docs/testing.md 里不跑全量的例外只限只改 config/lane-traits.json、或只改文档且角色合同除外的批次");
   assert.match(skill, /最终候选[^\n]*上跑一次全量 `npm test`[^\n]*`docs\/testing\.md`/,
     "SKILL.md ## Acceptance 必须在场：合入或集成前在最终候选上跑一次全量，并指向 docs/testing.md");
   assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
