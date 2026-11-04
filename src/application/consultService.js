@@ -886,7 +886,13 @@ export async function loadConsultRecordWithFallback({
   } catch (error) {
     if (typeof fallbackConsultsDir === "string" && fallbackConsultsDir.length > 0
       && resolve(fallbackConsultsDir) !== resolve(consultsDir) && error?.code === "ENOENT") {
-      const record = await read(fallbackConsultsDir);
+      let record;
+      try {
+        record = await read(fallbackConsultsDir);
+      } catch (fallbackError) {
+        // 两边都没有：报状态目录那一份的错（读者找的是现在的落点）。
+        throw fallbackError?.code === "ENOENT" ? error : fallbackError;
+      }
       return { record, consultsDir: resolve(fallbackConsultsDir) };
     }
     throw error;

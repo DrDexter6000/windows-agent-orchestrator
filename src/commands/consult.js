@@ -22,7 +22,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
-import { getWaoDir, getWaoStateDir } from "../waoDir.js";
+import { getWaoStateDir } from "../waoDir.js";
 // 决定 0095：`consult wait --until-settled` 逐席调用与 `runs wait
 // --until-settled` 共用的收口等待器（轮询循环原样上移到家模块，不复制算法）；
 // 不可信轮上限也取自同一模块（"Untrusted: N consecutive rounds" 文案同源）。
@@ -114,10 +114,10 @@ function resolveConsultsDir(options, config) {
   return join(getWaoStateDir(resolveTargetCwd(options), { configured: config?.stateDir }), "runs", "consults");
 }
 
-// 决定 0111：按 id 读记录的回退目录——改动前的落点（按原配置、不重定向算出）。
-// 只有状态目录里没有这份记录（ENOENT）且两边不同时才读它。
+// 决定 0111：按 id 读记录的回退目录——改动前的落点，与改动前的拼法逐字相同
+// （join、只看配置）。只有状态目录里没有这份记录（ENOENT）且两边不同时才读它。
 function legacyConsultsDir(options, config) {
-  return join(getWaoDir(resolveTargetCwd(options), options.stateDir ?? config?.stateDir), "runs", "consults");
+  return join(resolveTargetCwd(options), config?.stateDir ?? ".wao", "runs", "consults");
 }
 
 /**

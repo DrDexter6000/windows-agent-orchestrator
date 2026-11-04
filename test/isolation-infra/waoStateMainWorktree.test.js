@@ -26,6 +26,7 @@ import { waoDoctorCommand } from "../../src/commands/doctor.js";
 import { runsDashboardCommand } from "../../src/commands/runs.js";
 import { consultCommand } from "../../src/commands/consult.js";
 import { validateWaoDir } from "../../src/waoDir.js";
+import { addStage } from "../../src/waoStage.js";
 
 function gitOf(cwd, args) {
   return execFileSync("git", args, {
@@ -84,7 +85,7 @@ test("0111 CLI: 只有配置默认值——consult 组记录目录接到主工�
     let captured = null;
     const lines = await captureLog(() => consultCommand(
       ["run", "brief.md", "--seats", "seat_a", "--cwd", wt, "--format", "json"],
-      {},
+      CONFIG(root),
       {
         runConsult: async (input) => {
           captured = input;
@@ -368,8 +369,11 @@ test("0111 CLI: runs dashboard 在链接工作树里读主工作树的 pipeline 
     const { main, wt } = makeRepoWithWorktree(root);
     writeRegistry(root);
     mkdirSync(join(root, "runs"), { recursive: true });
-    await captureLog(() => waoCommand(["init", "--cwd", wt], CONFIG(root)));
-    await captureLog(() => waoCommand(["stage", "3", "--task", "派发实现", "--cwd", wt], CONFIG(root)));
+    // 两边各种一条不同的阶段：主工作树 3、工作树自己的旧位置 1。读主工作树才得 [3]。
+    mkdirSync(join(main, ".wao", "pipeline"), { recursive: true });
+    mkdirSync(join(wt, ".wao", "pipeline"), { recursive: true });
+    await addStage(join(main, ".wao"), { stage: 3, task: "主工作树的阶段" });
+    await addStage(join(wt, ".wao"), { stage: 1, task: "工作树里的旧阶段" });
     const lines = await captureLog(() => runsDashboardCommand(
       ["--run-dir", join(root, "runs"), "--cwd", wt, "--format", "json"],
       { runDir: join(root, "runs"), stateDir: ".wao" },

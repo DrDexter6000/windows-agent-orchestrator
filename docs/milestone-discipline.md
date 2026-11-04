@@ -98,7 +98,7 @@ milestone 级完成定义已无对象（M0–M13 全部完成，不再新增）�
 ## 7. 交付验证环境盲区纪律
 
 > 背景：交付验证在 git worktree 跑 `npm test`，而 gitignored 环境状态（runs/ 台账、
-> .wao/pipeline、真实 registry）在 worktree 不存在。读这些状态的生产代码对交付
+> 真实 registry）在 worktree 不存在（`.wao/` 本地状态见 7.3 表 ⑨）。读这些状态的生产代码对交付
 > 验证不可见——裸调测试读到的是"碰巧在场"的真实台账，只覆盖到环境的半边形状，
 > worktree 验证全绿、main 集成终验才暴露未覆盖的形状（`registry validate` 的迁移
 > advisory 读 `runs/reliability-summary.json` 即此形态）。闭合手段 = 合成夹具双形状

@@ -7,7 +7,7 @@
 
 ## 决定
 
-1. `.wao/` 里除 `decisions/` 外的本地状态（会审组记录、pipeline、handoff、project.md、migration），在链接工作树里读写主工作树的 `.wao/`。找主工作树用 0099 的 R4 与 R8，只看工作树根，读不出照旧。
+1. `.wao/` 里除 `decisions/` 外的本地状态（会审组记录、pipeline、handoff、project.md、migration），在链接工作树里读写主工作树的 `.wao/`。找主工作树用 0099 的 R4 与 R8，只看工作树根，读不出照旧（R4 已回溯到仓根的，按仓根）。
 2. `decisions/` 随分支提交，留在工作树。
 3. 命令行显式给的 `--state-dir` 照旧按 cwd 解析；配置里的 `stateDir` 只给名字。
 4. 按 id 读会审组记录时，主工作树里没有就读改动前位置的那份（只限文件不存在）；doctor 提示工作树里留下的其余本地状态。

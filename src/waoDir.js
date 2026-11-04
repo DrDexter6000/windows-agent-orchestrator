@@ -36,7 +36,7 @@ export const WAO_OPTIONAL_TOP_LEVEL_SLOTS = ["inbox", "state"];
 const SLOTS_WITH_MAP = ["decisions", "pipeline", "handoff"];
 
 // 决定 0111：状态目录槽位（decisions 随分支提交留在决定目录，其余落状态目录）。
-const STATE_SLOTS = ["project.md", "pipeline", "handoff", "runs", "migration"];
+const STATE_SLOTS = WAO_TOP_LEVEL_SLOTS.filter((slot) => slot !== "decisions");
 
 /**
  * 解析 .wao/ 路径。

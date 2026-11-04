@@ -1338,7 +1338,7 @@ const RUN_CONSULT_DESCRIPTION =
   // textSha256 / restart from page 1 / never synthesizes / ZERO dispatch。
   "Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE " +
   "text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git " +
-  "worktree top-level) is required — every seat's cwd and the record live under it; " +
+  "worktree top-level) is required — seats run in it, records in its main worktree; " +
   "waitMs 0..600000 (default " +
   `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats keep running, never killed or ` +
   "re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — " +
@@ -4022,7 +4022,8 @@ export function createWaoMcpServer({
   runDispatchContractCheckFn,
   // M13-r2: injectable council-consult service (create mode; read mode re-renders
   // from the group record with ZERO dispatch). consultsDir is a test seam: when it
-  // is not given, records live in the calling scope's `.wao/runs/consults` — the
+  // is not given, records live in `runs/consults` under the state directory
+  // (getWaoStateDir, decision 0111: a linked worktree's main worktree .wao) of the
   // call's expectedWorkspaceRoot (create mode always; read mode when supplied) or
   // the resolved session binding (read mode) — the same place the CLI uses with
   // --cwd <workspace>; a read with neither target nor binding refuses.
