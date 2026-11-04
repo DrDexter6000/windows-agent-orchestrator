@@ -98,5 +98,5 @@ Scorecard defaults to `warn`; `--scorecard-mode hard` only when missing evidence
 
 Run truth lives in `runs/<runId>.jsonl` (+`projects/*/`); project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. On demand: architecture `docs/02-architecture.md`; roadmap `docs/roadmap.md`; operations `docs/usage.md` + `npm run cli -- help`; roles `docs/team-roles.md`; diagnosis `docs/troubleshooting.md`; CLI/tool reference `docs/surface/`; 宿主报 WAO 缺陷 `docs/usage/host.md`「反馈收件箱」.
 
-At the end of each batch report one line:
+At the end of each batch, re-run `lead_preflight` and act on its `open item:` lines (close what you can, report the rest), then report one line:
 `mainline: <before> -> <after>; next: <shortest next step>`

@@ -2182,7 +2182,7 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 14400 bytes; Owner reset 2026-09-19 to 12000 — TD-166; +15% 2026-10-02 for TD-191③; +600 2026-11-04 for the continuation step, decision 0112)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 2026-09-19 to 12000 — TD-166; +15% 2026-10-02 for TD-191③; +600 2026-11-04 for the continuation step, decision 0112; +200 the same day for the batch-close open items, decision 0113)", () => {
   // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
   // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
   // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
@@ -2192,11 +2192,12 @@ test("M12-10: SKILL.md stays a slim entrypoint (≤ 14400 bytes; Owner reset 202
   // 2026-10-02（TD-191③）：Owner 明示授权帽 +15%（12000→13800）——宿主条件句
   // 与支持闭集句式需要增量空间；授权原文在 M13 会话记录，消耗情况逐次回填 TD-191 行。
   // 2026-11-04（决定 0112）：Owner 预先授权 Lead 按需扩限，13800→14400——验收一节
-  // 加"窄缺陷裁定前交回原 worker 续修"一步。
+  // 加"窄缺陷裁定前交回原 worker 续修"一步。同日（决定 0113）14400→14600——批次收尾
+  // 先看 lead_preflight 的待收口事项。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
-  assert.ok(bytes <= 14400,
-    `SKILL.md must stay a slim entrypoint ≤ 14400 bytes (got ${bytes}); move detail to authority docs`);
+  assert.ok(bytes <= 14600,
+    `SKILL.md must stay a slim entrypoint ≤ 14600 bytes (got ${bytes}); move detail to authority docs`);
   // TD-191 追加（2026-10-02 SSOT 审计）：帽值唯一权威在本守卫——其它文档只许指针
   // 不许第二份数值（当天实证：守卫抬 13800 后 milestone-discipline §8 的 12,000
   // 字面量变成冲突陈述，被 Owner SSOT 体检点名）。此处反向钉住"无字面量"。
