@@ -87,7 +87,7 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 
 ## Advisor / Auditor Discipline
 
-Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换另一条车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。三席会审是推荐标准（决策 0023、0090，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 至少两名副审（配不齐时一名次之），副审来自不同族系（`lanes` 的 `family`），避开被审产出的作者（0019 §3）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换另一条车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。Lead 在首轮任务书写明必改口径，必改须附现实触发场景，其余记备注；复核一轮后 Lead 收口。三席会审是推荐标准（决策 0023、0090，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 至少两名副审（配不齐时一名次之），副审来自不同族系（`lanes` 的 `family`），避开被审产出的作者（0019 §3）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
 
 ## Scorecard
 
