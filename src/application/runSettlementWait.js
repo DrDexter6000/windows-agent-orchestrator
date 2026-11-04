@@ -55,14 +55,16 @@ export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
  *
  * 返回闭集 outcome（kind 成员与退出码的映射归调用面——runs wait / consult wait
  * 各自同义映射）：
- *   { kind: "settled", settlement, snapshotReadAt }
- *   { kind: "verifier_gone", settlement, basis, snapshotReadAt }
- *   { kind: "conflict", settlement, snapshotReadAt }
- *   { kind: "untrusted", reason, rounds, settlement, snapshotReadAt }
- *   { kind: "interrupted", settlement, snapshotReadAt }
+ *   { kind: "settled", settlement, snapshotReadAt, events }
+ *   { kind: "verifier_gone", settlement, basis, snapshotReadAt, events }
+ *   { kind: "conflict", settlement, snapshotReadAt, events }
+ *   { kind: "untrusted", reason, rounds, settlement, snapshotReadAt, events }
+ *   { kind: "interrupted", settlement, snapshotReadAt, events }
  * settlement 是最近一次收口判定（可能为 null——一次判定都没发生过就中断时），
  * 供调用面的中断/无法判定输出带运行状态；snapshotReadAt 是最后一次成功读快照
- * 的时刻（ms；从未读到为 null）。
+ * 的时刻（ms；从未读到为 null）；events 是最后一次成功读到的快照事件（决定
+ * 0112 起附带，可能为 null——从未读到过），供调用面在同一份快照上做附加判定
+ *（runs wait 的可续提示）——绝不另读一份新快照去替代它。
  *
  * @param {object} input
  * @param {string} input.runId
@@ -116,6 +118,7 @@ export async function waitRunSettlement({
   let outcome = null;
   let lastSettlement = null;
   let lastSnapshotReadAt = null;
+  let lastEventsRead = null;
   let lastUntrustedReason = null;
 
   const safeResolve = () => {
@@ -136,12 +139,13 @@ export async function waitRunSettlement({
       untrustedProgress(`[${label}] round ${round}: ${runId} ${text} (untrusted ${untrustedRounds}/${SETTLEMENT_MAX_UNTRUSTED_ROUNDS})`);
     }
   };
-  // 读一份快照：成功返回事件数组并记下读取时刻；失败返回 null（调用方按
-  // 原有规则算不可信轮）。
+  // 读一份快照：成功返回事件数组并记下读取时刻与事件本体（决定 0112：供调用
+  // 面在同一份快照上做附加判定）；失败返回 null（调用方按原有规则算不可信轮）。
   const readSnapshot = async (resolution) => {
     try {
       const events = await readTranscriptFn(resolution.path);
       lastSnapshotReadAt = nowFn();
+      lastEventsRead = events;
       return events;
     } catch {
       return null;
@@ -311,6 +315,8 @@ export async function waitRunSettlement({
     kind: outcome.kind,
     settlement: outcome.settlement ?? lastSettlement,
     snapshotReadAt: lastSnapshotReadAt,
+    // 决定 0112：最后一次成功读到的快照事件（可能为 null——从未读到过）。
+    events: lastEventsRead,
     ...(outcome.kind === "untrusted" ? { reason: outcome.reason, rounds: outcome.rounds } : {}),
     ...(outcome.kind === "verifier_gone" ? { basis: outcome.basis } : {}),
   };

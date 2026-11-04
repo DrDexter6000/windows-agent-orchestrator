@@ -1177,3 +1177,134 @@ test("W-14: 证明被拒理由参与节流键——理由变了打印一行，�
     cleanupDir(dir);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0112：收口终行的可续提示——delivery_settled、未采纳、且同一份快照判定为
+// continuable 谱系成员时，终行/JSON 的 nextStep 用 delivery_continuable（CLI 面，
+// 点名 MCP run_continue）；否则照旧 settled_line。
+// ═══════════════════════════════════════════════════════════════════════════
+
+function lineageFirst(runId) {
+  return { type: "run.session_reuse", runId, agentId: "coder_low", mode: "run_lineage", turn: "first", rootRunId: runId };
+}
+
+function lineageResume(runId, rootRunId) {
+  return { type: "run.session_reuse", runId, agentId: "coder_low", mode: "run_lineage", turn: "resume", rootRunId };
+}
+
+// 续跑谱系的根转录（闭态检查读它）；closed 时带 bound run.lineage_closed。
+function seedRootLines(dir, rootRunId, { closed = false } = {}) {
+  writeLines(dir, rootRunId, [
+    { type: "run.started", runId: rootRunId, agentId: "coder_low", backend: "claude-code", cwd: "D:/fake/ws" },
+    ...(closed ? [{ type: "run.lineage_closed", runId: rootRunId, agentId: "coder_low", rootRunId, reason: "lead closed", reasonSha256: "0".repeat(64) }] : []),
+  ]);
+}
+
+test("U-12: 可续未决定交付收口 → 终行与 JSON 的 nextStep 用 delivery_continuable", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_u12";
+    const ref = makeRef(runId);
+    writeLines(dir, runId, [
+      started(runId),
+      lineageFirst(runId),
+      created(runId, ref),
+      stateChange(runId, "completed"),
+      outcome(runId, "passed", ref),
+    ]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.equal(r.outLines.length, 3, `终行三行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[0], `Run: ${runId} (completed)`);
+    assert.equal(r.outLines[1], "Settlement: settled (delivery_settled; verification passed)");
+    assert.equal(
+      r.outLines[2],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.`,
+    );
+    // JSON 面：键集不变（{settled,runId,state,settlement,nextStep}），nextStep 同款。
+    const j = await runWaitSettled({ dir, runId, asJson: true });
+    assert.equal(j.exitCode, undefined);
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "runId", "settled", "settlement", "state"]);
+    assert.equal(parsed.settlement.reason, "delivery_settled");
+    assert.match(parsed.nextStep, new RegExp(`the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`));
+    assert.match(parsed.nextStep, /An accepted delivery can no longer be continued\. Verification passed is not acceptance\.$/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-13: 无谱系事件的普通交付收口 → 照旧 settled_line（负例）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_u13";
+    const ref = makeRef(runId);
+    writeLines(dir, runId, [
+      started(runId),
+      created(runId, ref),
+      stateChange(runId, "completed"),
+      outcome(runId, "passed", ref),
+    ]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined);
+    assert.equal(
+      r.outLines[2],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`,
+      "无可续谱系事实 → 旧 settled_line 模板一字不差",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-14: 续跑子运行（turn:resume，根是另一运行）——根转录开着 → 可续终行", async () => {
+  const dir = makeRunDir();
+  try {
+    const ROOT = "run_u14_root";
+    const runId = "run_u14_child";
+    const ref = makeRef(runId);
+    seedRootLines(dir, ROOT, { closed: false });
+    writeLines(dir, runId, [
+      started(runId),
+      lineageResume(runId, ROOT),
+      created(runId, ref),
+      stateChange(runId, "completed"),
+      outcome(runId, "passed", ref),
+    ]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.match(
+      r.outLines[2],
+      new RegExp(`^Next step: Settled\\. Delivery awaits the Lead's review: wao runs delivery ${runId}\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`),
+      "子运行经根转录判未闭合 → 给可续提示（谱系措辞）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-15: 续跑子运行——根转录已闭合 → 照旧 settled_line（负例）", async () => {
+  const dir = makeRunDir();
+  try {
+    const ROOT = "run_u15_root";
+    const runId = "run_u15_child";
+    const ref = makeRef(runId);
+    seedRootLines(dir, ROOT, { closed: true });
+    writeLines(dir, runId, [
+      started(runId),
+      lineageResume(runId, ROOT),
+      created(runId, ref),
+      stateChange(runId, "completed"),
+      outcome(runId, "passed", ref),
+    ]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined);
+    assert.equal(
+      r.outLines[2],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`,
+      "根已闭合 → 旧 settled_line 模板一字不差",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});

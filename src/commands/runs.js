@@ -110,6 +110,8 @@ import {
   SETTLEMENT_MAX_UNTRUSTED_ROUNDS as RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS,
 } from "../application/runSettlementWait.js";
 import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
+// 决定 0112：收口终行的可续提示判定（与 run_continue 资格检查共用谱系事实函数）。
+import { deliveryContinuableHint } from "../application/runContinue.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
 // reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
 // Shared workspace authority (proveWorkspaceRoot) + registry IDs (readRegistry).
@@ -553,12 +555,27 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
   }
   if (outcome.kind === "settled") {
     const s = outcome.settlement;
+    // 决定 0112：delivery_settled、未采纳、且同一份快照判定为可续谱系成员时，
+    // 收口终行改用 delivery_continuable 提示（窄缺陷可用 MCP run_continue 续修）；
+    // 其余照旧 settled_line。判定用等待器读到的同一份快照事件，不另读新快照。
+    let situation = "settled_line";
+    let acceptanceStatus = s.facts.acceptanceStatus;
+    if (s.reason === "delivery_settled" && s.facts.acceptanceStatus !== "accepted"
+      && await deliveryContinuableHint({
+        events: outcome.events, runId, runDir,
+        // 与 service 侧一致：根是别的 run 时经可注入读器读根转录。
+        readTranscriptFn: deps.readTranscriptFn ?? readTranscript,
+      })) {
+      situation = "delivery_continuable";
+      // 服务/收口事实里表示未决定的 "pending" 转成 null（buildNextStep 的合同）。
+      acceptanceStatus = s.facts.acceptanceStatus === "rejected" ? "rejected" : null;
+    }
     const nextStep = buildNextStep({
       surface: "cli",
-      situation: "settled_line",
+      situation,
       runId,
       settlementReason: s.reason,
-      acceptanceStatus: s.facts.acceptanceStatus,
+      acceptanceStatus,
     });
     if (asJson) {
       console.log(JSON.stringify({
@@ -2298,7 +2315,11 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       const result = await readinessService({ runId, runDir, waitMs, adoptionRepoRoot: adoptionRoot });
       const waitGate = await describePendingVerificationGate(result, runId, { createGate: hostDeps?.createGate });
       if (options.format === "json") {
-        console.log(JSON.stringify(waitGate ? { ...result, verificationGate: waitGate } : result, null, 2));
+        // 决定 0112：continuableHint 是服务内部布尔（只给 MCP 适配层选 nextStep
+        // 用），不进 CLI 输出；文本面本就不显示。
+        const wireResult = { ...result };
+        delete wireResult.continuableHint;
+        console.log(JSON.stringify(waitGate ? { ...wireResult, verificationGate: waitGate } : wireResult, null, 2));
       } else {
         _printReadinessText(result);
         if (waitGate) console.log(pendingVerificationGateLine(waitGate));

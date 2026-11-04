@@ -49,6 +49,11 @@ import {
 } from "./runSettlement.js";
 import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
+// 决定 0112：收口且未采纳的可续交付——服务在 settled 提前返回时附带一个内部
+// 布尔（continuableHint），MCP 适配层据此给 delivery_continuable 的 nextStep。
+// 判定在家 runContinue.js（与 continueRun 第 5 步共用谱系事实函数）；本模块
+// 不 import 它会丢掉这份共享，import 它不成环（其传递依赖不含本模块）。
+import { deliveryContinuableHint } from "./runContinue.js";
 // 决定 0098：交付读面的 adoption 查询（主分支上声明采纳本运行的提交）。
 import { queryRunAdoption } from "./adoptionQuery.js";
 
@@ -941,7 +946,10 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  * @param {Function} [input.adoptionGitFn] — injectable adoption git executor
  * @param {number} [input.adoptionTimeoutMs] — per-call adoption git timeout
  * @returns {Promise<object>} { runId, readiness, waitReturnedEarly, terminalState,
- *   deliveryAvailable, deliveryRef, deliveryFailure, verification, acceptance }
+ *   deliveryAvailable, deliveryRef, deliveryFailure, verification, acceptance,
+ *   adoption, [waitWindowHint]（仅到期）, [continuableHint]（决定 0112：仅
+ *   settled/delivery_settled 提前返回——收口且未采纳时可续谱系成员的内部布尔，
+ *   MCP 适配层据此给 delivery_continuable 的 nextStep） }
  */
 export async function getRunDeliveryReadiness({
   runId,
@@ -1022,6 +1030,21 @@ export async function getRunDeliveryReadiness({
     );
     return result;
   };
+  // 决定 0112：settled 且 reason=delivery_settled 的提前返回附带内部布尔
+  // continuableHint（与收口判定同一份快照；不进 buildRunDeliveryPayload 的
+  // BASE 出参，也不进到期/读失败路径——到期未收口照旧只有 waitWindowHint）。
+  // 调用方按 === true 消费；读失败一律 fail-closed 为 false。
+  const finishSettledWithAdoption = async (result) => {
+    if (settlement?.status === "settled" && settlement.reason === "delivery_settled") {
+      result.continuableHint = await deliveryContinuableHint({
+        events,
+        runId,
+        runDir: resolve(runDir),
+        readTranscriptFn: _readTranscript,
+      });
+    }
+    return finishWithAdoption(result);
+  };
 
   // 决定 0095：等待去留——两个等待态照旧等待；终态 run 上 readiness 为
   // reviewable 但收口判定仍 unsettled（验证中拒收 / reverify pending）也等待；
@@ -1029,7 +1052,7 @@ export async function getRunDeliveryReadiness({
   // 非终态的 reviewable）立即返回——等待改变不了它们。
   if (!SETTLEMENT_WAITING_READINESS.has(readiness)
     && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
-    return finishWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
+    return finishSettledWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
   }
 
   // Bounded wait loop (non-busy: sleep between re-reads). Capture the start
@@ -1082,7 +1105,7 @@ export async function getRunDeliveryReadiness({
     // 等；其余（含中途出现的 ambiguous / settled / 非终态 reviewable）立即返回。
     if (!SETTLEMENT_WAITING_READINESS.has(readiness)
       && !(readiness === "reviewable" && settlement.status === "unsettled" && settlement.reason !== "not_terminal")) {
-      return finishWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
+      return finishSettledWithAdoption(_buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts));
     }
 
     // Keepalive: notify the caller that the poll is still alive. The fraction

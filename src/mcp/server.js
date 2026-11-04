@@ -6120,6 +6120,16 @@ export function createWaoMcpServer({
           // nextStep；不带 waitMs 的即时查询不给。
           if (result.waitReturnedEarly === false) {
             payload.nextStep = buildNextStep({ surface: "mcp", situation: "delivery_unsettled" });
+          } else if (result.continuableHint === true) {
+            // 决定 0112：因收口提前返回、且服务在同一份快照上判定了"带
+            // continuable 派发的谱系成员、未采纳、线系未闭合"时给可续提示
+            //（服务侧内部布尔，不进 BASE 出参）。acceptanceStatus 的"pending"
+            //（未决定）转成 null 再传；已采纳时判定恒 false，走不进这里。
+            payload.nextStep = buildNextStep({
+              surface: "mcp",
+              situation: "delivery_continuable",
+              acceptanceStatus: payload.acceptanceStatus === "rejected" ? "rejected" : null,
+            });
           }
           const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {

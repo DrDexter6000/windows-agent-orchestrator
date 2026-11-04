@@ -340,6 +340,237 @@ test("NS-M6: run_delivery 带 waitMs 到期未收口 → nextStep；不带 waitM
 });
 
 // =====================================================================
+// run_delivery — 决定 0112：收口且未采纳的可续交付 → delivery_continuable
+// =====================================================================
+
+// 决定 0112：收口交付 + 可续谱系事实的转录（真实 service 消费，不注入假服务——
+// 负例要证明的是判定本身，不是适配层的 === true 门）。默认谱系根=本 run（first）；
+// lineageTurn:"resume" 时根指向另一个 run（rootRunId 必填，根转录单独落盘）。
+function seedSettledContinuableDelivery(runDir, runId, {
+  workspaceCwd, lineage = true, decision = null, explicit = false, closed = false,
+  verificationPending = false, lineageTurn = "first", rootRunId = null,
+} = {}) {
+  mkdirSync(runDir, { recursive: true });
+  const a = "coder_low";
+  const TS = "2026-11-04T00:00:00.000Z";
+  const ref = {
+    schemaVersion: 1, kind: "git_commit", runId,
+    baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+    branch: `wao/${runId}`, worktreePath: "D:/fake/wt", changedFiles: ["src/a.js"],
+    verification: { status: "pending", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+  const passedRef = {
+    ...ref,
+    verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+  };
+  const lines = [
+    jl({ type: "run.background_submitted", background: true, cwd: workspaceCwd, deliveryRequested: true, ts: TS, runId, agentId: a }),
+    jl({ type: "run.state_change", to: "pending", reason: "created", ts: TS, runId, agentId: a }),
+    jl({ type: "run.state_change", to: "running", reason: "first_event", ts: TS, runId, agentId: a }),
+    jl({
+      type: "run.started", backend: "claude-code", cwd: workspaceCwd, ts: TS, runId, agentId: a,
+      ...(explicit ? { resolvedFrom: "explicit" } : {}),
+      delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    }),
+    ...(lineage ? [jl({
+      type: "run.session_reuse", mode: "run_lineage", turn: lineageTurn,
+      rootRunId: lineageTurn === "first" ? runId : rootRunId, ts: TS, runId, agentId: a,
+    })] : []),
+    jl({ type: "run.delivery_created", runId, agentId: a, ts: TS, delivery: ref }),
+    // 无终态验证结果（verificationPending）= "验证中拒收"形状；否则验证 passed。
+    ...(verificationPending ? [] : [jl({ type: "run.delivery_verification_passed", runId, agentId: a, ts: TS, delivery: passedRef })]),
+    // 终态先于决定（TD-179：pending 拒收要求决定之前已有 bound completed 状态）。
+    jl({ type: "run.completed", ts: TS, runId, agentId: a }),
+    jl({ type: "run.state_change", from: "running", to: "completed", reason: "done", ts: TS, runId, agentId: a }),
+    ...(decision ? [jl({
+      // 决定事实：claimed verification 与最近结果一致（passed 时），pending 拒收
+      // 则声明 pending（TD-179 形状，W-01c 同款）。
+      type: `run.delivery_${decision}`, runId, agentId: a, ts: TS,
+      delivery: {
+        ...(verificationPending ? ref : passedRef),
+        acceptance: { status: decision, reviewerType: "lead_agent" },
+      },
+      deliveryCommit: ref.deliveryCommit, reason: "lead decision",
+    })] : []),
+    ...(closed ? [jl({ type: "run.lineage_closed", runId, agentId: a, ts: TS, rootRunId: runId, reason: "lead closed", reasonSha256: "0".repeat(64) })] : []),
+  ];
+  writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
+}
+
+// 续跑谱系的根转录（resume 子运行的闭态检查读它）：最小转录 + 可选 bound
+// run.lineage_closed（决定 0058 的闭合事实）。
+function seedLineageRoot(runDir, rootRunId, { closed = false } = {}) {
+  mkdirSync(runDir, { recursive: true });
+  const a = "coder_low";
+  const TS = "2026-11-04T00:00:00.000Z";
+  const lines = [
+    jl({ type: "run.started", backend: "claude-code", ts: TS, runId: rootRunId, agentId: a }),
+    ...(closed ? [jl({ type: "run.lineage_closed", runId: rootRunId, agentId: a, ts: TS, rootRunId, reason: "lead closed", reasonSha256: "0".repeat(64) })] : []),
+  ];
+  writeFileSync(join(runDir, `${rootRunId}.jsonl`), lines.join(""), "utf8");
+}
+
+test("NS-M9: run_delivery waitMs 收口提前返回——可续未决定 → 可续提示（真实 service）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m9-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    seedSettledContinuableDelivery(runDir, "run_ns_m9_ok", { workspaceCwd: dir });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m9_ok", waitMs: 1000 } });
+      assert.equal(res.isError, undefined, JSON.stringify(res.content?.[0]?.text ?? ""));
+      const parsed = res.structuredContent;
+      assert.equal(parsed.readiness, "reviewable");
+      assert.equal(parsed.waitReturnedEarly, true, "已收口 → 提前返回");
+      assert.equal(parsed.acceptanceStatus, "pending");
+      assert.equal(parsed.nextStep,
+        "Delivery settled. Its lineage was dispatched continuable and it is not accepted: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.");
+      assert.ok(!parsed.nextStep.includes("run_ns_m9_ok"), "MCP 面不含 runId");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M10: 可续已拒收 → 拒收版模板（真实 service）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m10-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    seedSettledContinuableDelivery(runDir, "run_ns_m10_rej", { workspaceCwd: dir, decision: "rejected" });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m10_rej", waitMs: 1000 } });
+      assert.equal(res.isError, undefined);
+      const parsed = res.structuredContent;
+      assert.equal(parsed.acceptanceStatus, "rejected");
+      assert.equal(parsed.nextStep,
+        "Delivery settled; the Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. Verification passed is not acceptance.");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M11: 判定为 false 的收口交付不给 nextStep——无谱系 / 已采纳 / explicit 派发 / 根已闭合", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m11-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    seedSettledContinuableDelivery(runDir, "run_ns_m11_plain", { workspaceCwd: dir, lineage: false });
+    seedSettledContinuableDelivery(runDir, "run_ns_m11_acc", { workspaceCwd: dir, decision: "accepted" });
+    seedSettledContinuableDelivery(runDir, "run_ns_m11_exp", { workspaceCwd: dir, explicit: true });
+    seedSettledContinuableDelivery(runDir, "run_ns_m11_closed", { workspaceCwd: dir, closed: true });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      for (const runId of ["run_ns_m11_plain", "run_ns_m11_acc", "run_ns_m11_exp", "run_ns_m11_closed"]) {
+        const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 1000 } });
+        assert.equal(res.isError, undefined, `${runId}: ${JSON.stringify(res.content?.[0]?.text ?? "")}`);
+        const parsed = res.structuredContent;
+        assert.equal(parsed.waitReturnedEarly, true, `${runId} 已收口 → 提前返回`);
+        assert.equal("nextStep" in parsed, false, `${runId} 不给 nextStep`);
+      }
+      // 已采纳的形态确认（证明确实走到了 settled 面，而非路径没通）。
+      const acc = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m11_acc", waitMs: 1000 } });
+      assert.equal(acc.structuredContent.acceptanceStatus, "accepted");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M12: 同一份可续未决定转录，即时查询（不带 waitMs）不给 nextStep", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m12-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    seedSettledContinuableDelivery(runDir, "run_ns_m12", { workspaceCwd: dir });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m12" } });
+      assert.equal(res.isError, undefined);
+      assert.equal("nextStep" in res.structuredContent, false, "即时查询照旧不给（0095 不变）");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M13: 验证 pending 时拒收（未收口）→ 到期照旧 delivery_unsettled，不给可续提示", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m13-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    seedSettledContinuableDelivery(runDir, "run_ns_m13_pendrej", { workspaceCwd: dir, decision: "rejected", verificationPending: true });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m13_pendrej", waitMs: 1000 } });
+      assert.equal(res.isError, undefined);
+      const parsed = res.structuredContent;
+      assert.equal(parsed.waitReturnedEarly, false, "验证仍 pending → 等到期（未收口）");
+      assert.equal(parsed.acceptanceStatus, "rejected");
+      assert.match(parsed.nextStep, /Delivery is not settled yet/);
+      assert.match(parsed.nextStep, /Call run_delivery again with waitMs/);
+      assert.ok(!parsed.nextStep.includes("continuable"), "未收口不给可续提示");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M14: 续跑子运行（turn:resume，根是另一运行）——根转录开着 → 给提示", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m14-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    const ROOT = "run_ns_m14_root";
+    const CHILD = "run_ns_m14_child";
+    seedLineageRoot(runDir, ROOT, { closed: false });
+    seedSettledContinuableDelivery(runDir, CHILD, {
+      workspaceCwd: dir, lineageTurn: "resume", rootRunId: ROOT,
+    });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: CHILD, waitMs: 1000 } });
+      assert.equal(res.isError, undefined, JSON.stringify(res.content?.[0]?.text ?? ""));
+      const parsed = res.structuredContent;
+      assert.equal(parsed.waitReturnedEarly, true);
+      assert.match(parsed.nextStep, /^Delivery settled\. Its lineage was dispatched continuable and it is not accepted: /);
+      assert.match(parsed.nextStep, /run_continue can resume the same worker conversation/);
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("NS-M15: 续跑子运行——根转录已闭合（bound run.lineage_closed）→ 不给提示", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m15-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    const ROOT = "run_ns_m15_root";
+    const CHILD = "run_ns_m15_child";
+    seedLineageRoot(runDir, ROOT, { closed: true });
+    seedSettledContinuableDelivery(runDir, CHILD, {
+      workspaceCwd: dir, lineageTurn: "resume", rootRunId: ROOT,
+    });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: CHILD, waitMs: 1000 } });
+      assert.equal(res.isError, undefined, JSON.stringify(res.content?.[0]?.text ?? ""));
+      const parsed = res.structuredContent;
+      assert.equal(parsed.waitReturnedEarly, true, "子运行自身已收口 → 提前返回");
+      assert.equal("nextStep" in parsed, false, "根已闭合 → 不给可续提示");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
 // run_dispatch / run_continue — accepted:true 附静态 nextStep；拒绝不给
 // =====================================================================
 

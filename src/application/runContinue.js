@@ -208,6 +208,85 @@ export function computeContinuationCumulativeScope(worktreePath, baseCommit, chi
   };
 }
 
+/**
+ * 决定 0112：谱系成员判定纯函数——continueRun 第 5 步的资格条件逐条照搬
+ *（不增不减），供资格检查与交付收口时的可续提示（deliveryContinuableHint）
+ * 共用，两处对"什么是 continuable 谱系成员"永不分叉。
+ *
+ * 取绑定本 run 的最后一条 `run.session_reuse`（findLatestBound，与 continueRun
+ * 的既有读法一致），满足全部条件时返回 `{ rootRunId, turn }`，否则返回 null。
+ * Pure：无 I/O，调用方保证 events 是数组。
+ *
+ * @param {object[]} events — transcript 快照（envelope-bearing）
+ * @param {string} runId
+ * @returns {{rootRunId: string, turn: string}|null}
+ */
+export function continuableLineageFact(events, runId) {
+  const lineageEvent = findLatestBound(events, "run.session_reuse", runId);
+  if (!lineageEvent
+    || lineageEvent.runId !== runId
+    || lineageEvent.mode !== "run_lineage"
+    || (lineageEvent.turn !== "first" && lineageEvent.turn !== "resume")
+    || typeof lineageEvent.rootRunId !== "string"
+    || !isValidRunId(lineageEvent.rootRunId)
+    || (lineageEvent.turn === "first" && lineageEvent.rootRunId !== runId)) {
+    return null;
+  }
+  return { rootRunId: lineageEvent.rootRunId, turn: lineageEvent.turn };
+}
+
+/**
+ * 决定 0112：交付收口时的"可续修"提示判定（应用层读侧；MCP 层不读转录，
+ * 服务在此算好一个内部布尔交给适配层）。只陈述可以从转录查实的事实——
+ * "这次运行是带 continuable 派发的谱系成员、交付未采纳、线系未证明已闭合"
+ * ——不断言 run_continue 一定受理：角色正文漂移、registry/后端变化、会话
+ * 证据不足、工作树没了，都要到 run_continue 自己的资格检查才知道。
+ *
+ * 四个条件全部成立才返回 true：
+ *   1. continuableLineageFact(events, runId) 非 null；
+ *   2. 没有绑定本 run 的 run.delivery_accepted（已采纳不可续）；
+ *   3. 绑定本 run 的 run.started 的 resolvedFrom 不是 "explicit"（0045 R3：
+ *      explicit 车道+角色派发不可续）；
+ *   4. 线系未被证明已闭合：根就是本 run 时用 lineageClosedIn(events, runId)；
+ *      根是别的 run 时按 resolveTranscriptPath 读根转录再判，读不出当未闭合
+ *      （与 continueRun 的 lineage_closed 增强门同口径）。
+ *
+ * 只读：零转录写入、零状态变更、零 spawn。读故障的处置只有一个例外：根转录
+ * 读不出当未闭合（返回 true，与 continueRun 的 lineage_closed 增强门同口径——
+ * 闭态检查是增强门，读不出不挡提示）；其余形状不符（无谱系/已采纳/explicit/
+ * 根闭合）一律 false。
+ *
+ * @param {object} input
+ * @param {object[]} input.events — 同一份快照的事件（判定与收口判定共用快照）
+ * @param {string} input.runId
+ * @param {string} input.runDir — runs/ 目录（根是别的 run 时读根转录）
+ * @param {Function} [input.readTranscriptFn] — 可注入读器（测试）
+ * @returns {Promise<boolean>}
+ */
+export async function deliveryContinuableHint({ events, runId, runDir, readTranscriptFn }) {
+  if (!Array.isArray(events)) return false;
+  const fact = continuableLineageFact(events, runId);
+  if (!fact) return false;
+  if (events.some((e) => e && e.type === "run.delivery_accepted" && e.runId === runId)) {
+    return false;
+  }
+  const startedEvent = events.find((e) => e && e.type === "run.started" && e.runId === runId);
+  if (startedEvent?.resolvedFrom === "explicit") return false;
+  // 与 continueRun 内同一动态 import 习惯（同文件、同一依赖、一个写法）。
+  const { lineageClosedIn } = await import("./lineageClose.js");
+  if (fact.rootRunId === runId) {
+    return !lineageClosedIn(events, runId);
+  }
+  try {
+    const rootPath = resolveTranscriptPath(resolve(runDir), fact.rootRunId);
+    const rootEvents = await (readTranscriptFn ?? readTranscript)(rootPath);
+    if (lineageClosedIn(rootEvents, fact.rootRunId)) return false;
+  } catch {
+    // 根不可读/被 prune → 当未闭合（continueRun 的 lineage_closed 门同口径）。
+  }
+  return true;
+}
+
 async function rollbackPreSpawnContinuation({
   worktreePath,
   originalBranch,
@@ -423,19 +502,15 @@ export async function continueRun({
   //    so the swap is provably behavior-identical today (every reachable event
   //    carries runId === parentRunId) — it is function-internal discipline
   //    consistency plus defense-in-depth for a future relaxation of the
-  //    identity gate, not a live fix. The runId clause below is therefore
-  //    tautological after the bound read; kept as belt-and-braces.
-  const lineageEvent = findLatestBound(parentEvents, "run.session_reuse", parentRunId);
-  if (!lineageEvent
-    || lineageEvent.runId !== parentRunId
-    || lineageEvent.mode !== "run_lineage"
-    || (lineageEvent.turn !== "first" && lineageEvent.turn !== "resume")
-    || typeof lineageEvent.rootRunId !== "string"
-    || !isValidRunId(lineageEvent.rootRunId)
-    || (lineageEvent.turn === "first" && lineageEvent.rootRunId !== parentRunId)) {
+  //    identity gate, not a live fix. The runId clause inside the shared
+  //    function is therefore tautological after the bound read; kept as
+  //    belt-and-braces. 决定 0112：条件本体在 continuableLineageFact（与交付
+  //    收口时的可续提示共用，逐条照搬），此处只消费其结果。
+  const lineageFact = continuableLineageFact(parentEvents, parentRunId);
+  if (!lineageFact) {
     return refuse("not_continuable");
   }
-  const rootRunId = lineageEvent.rootRunId;
+  const rootRunId = lineageFact.rootRunId;
 
   // TD-254（决定 0058）：线系闭合拒绝——根转录 bound run.lineage_closed 在场。
   // 根不可读/被 prune → 不拒绝（维持现状；成功闭合后树已删，续接会撞 missing_worktree

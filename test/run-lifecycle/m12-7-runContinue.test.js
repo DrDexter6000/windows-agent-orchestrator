@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
 import { readTranscript, findState, findLatest, JsonlTranscript } from "../../src/transcript.js";
-import { continueRun } from "../../src/application/runContinue.js";
+import { continueRun, continuableLineageFact } from "../../src/application/runContinue.js";
 
 // ----- git + registry + spawn helpers -----
 
@@ -81,6 +81,9 @@ async function seedParent({
   providerSessionId = "provider-session-1",
   boundProviderSessionId = null,
   decision = null,
+  // 决定 0112 顺序测试用：run.started 可携带 0045 §1.3 的角色钉（{systemPrompt,
+  // sha256}），供 continueRun 的 role_contract_drift 门核对。
+  rolePin = null,
 }) {
   mkdirSync(runDir, { recursive: true });
   const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
@@ -90,6 +93,7 @@ async function seedParent({
     backend,
     cwd,
     ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+    ...(rolePin ? { rolePin } : {}),
     ...(withDeliveryContext ? {
       delivery: {
         mode: "git_commit_v1",
@@ -1196,4 +1200,134 @@ test("M12-7 prompt handoff 超时：结束 runner 并回滚，线系可立即重
     assert.equal(retry.accepted, true, "线系没被占住");
     assert.equal(calls.length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0112：continuableLineageFact——continueRun 第 5 步的谱系判定纯函数
+//（条件逐条照搬），与交付收口时的可续提示（deliveryContinuableHint）共用；
+// 外加两条多重不合格的顺序测试，证明 continueRun 的拒绝码不因共用函数改变。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FACT_RUN = "run_20261104000000000fact01";
+const OTHER_RUN = "run_20261104000000000fact02";
+
+test("0112-LIN-1: continuableLineageFact 正反例——first/resume 过；mode/turn/root 形状与缺事件不过", () => {
+  const ev = (o) => ({ runId: FACT_RUN, agentId: "coder_hq", ...o });
+  // first：根是自己。
+  assert.deepEqual(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: FACT_RUN })], FACT_RUN),
+    { rootRunId: FACT_RUN, turn: "first" },
+  );
+  // resume：根是线系里别的 run。
+  assert.deepEqual(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: OTHER_RUN })], FACT_RUN),
+    { rootRunId: OTHER_RUN, turn: "resume" },
+  );
+  // mode 不对（lead_workspace 不是续谱）。
+  assert.equal(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "lead_workspace", turn: "first", rootRunId: FACT_RUN })], FACT_RUN),
+    null,
+  );
+  // turn 不对。
+  assert.equal(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "run_lineage", turn: "bogus", rootRunId: FACT_RUN })], FACT_RUN),
+    null,
+  );
+  // first 的 rootRunId 必须是自己。
+  assert.equal(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: OTHER_RUN })], FACT_RUN),
+    null,
+  );
+  // rootRunId 形状坏（不过 isValidRunId 的保守字符白名单）。
+  assert.equal(
+    continuableLineageFact([ev({ type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "not a run" })], FACT_RUN),
+    null,
+  );
+  // 缺事件（无 run.session_reuse）。
+  assert.equal(continuableLineageFact([ev({ type: "run.started", backend: "claude-code" })], FACT_RUN), null);
+  // 取绑定本 run 的最后一条：前一条合法、后一条损坏 → null（findLatestBound 语义）。
+  assert.equal(
+    continuableLineageFact([
+      ev({ type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: FACT_RUN }),
+      ev({ type: "run.session_reuse", mode: "run_lineage", turn: "bogus", rootRunId: FACT_RUN }),
+    ], FACT_RUN),
+    null,
+  );
+  // 他 run 的谱系事件不参与绑定。
+  assert.equal(
+    continuableLineageFact([{ type: "run.session_reuse", runId: OTHER_RUN, agentId: "coder_hq", mode: "run_lineage", turn: "first", rootRunId: OTHER_RUN }], FACT_RUN),
+    null,
+  );
+});
+
+test("0112-ORD-1: 角色正文漂移 + 无谱系事件 → role_contract_drift（拒绝码不变，前置门先拒）", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-ord1-"));
+  // TD-314 同款：临时角色文件写在 os.tmpdir() 下，绝对路径钉进 rolePin。
+  const roleDir = mkdtempSync(join(tmpdir(), "wao-0112-ord-roles-"));
+  try {
+    const { createHash } = await import("node:crypto");
+    const rolePath = join(roleDir, "_0112_ord_role.md");
+    const content = "# Ord Role\nMARKER_0112_ORD\n";
+    writeFileSync(rolePath, content, "utf8");
+    const sha = createHash("sha256").update(content, "utf8").digest("hex");
+    await seedParent({
+      runDir: dir, runId: "run_parent_ord1", agentId: "coder_hq", cwd: repo,
+      baseCommit: git("rev-parse HEAD", repo), worktreePath: repo, worktreeBranch: "main",
+      withLineage: false, // 双重不合格：同时没有谱系事件
+      rolePin: { systemPrompt: rolePath, sha256: sha },
+    });
+    // 派发后角色正文被改。
+    writeFileSync(rolePath, "# Ord Role TAMPERED\nMARKER_0112_ORD\n", "utf8");
+
+    const r = await continueRun({
+      parentRunId: "run_parent_ord1", prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "s",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "role_contract_drift", "角色漂移门先于 lineage 门，不被 not_continuable 掩盖");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(roleDir, { recursive: true, force: true });
+  }
+});
+
+test("0112-ORD-2: 根已闭合 + 无 session.created → lineage_closed（拒绝码不变，闭合门先于会话门）", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-ord2-"));
+  try {
+    const runId = "run_parent_ord2";
+    await seedParent({
+      runDir: dir, runId, agentId: "coder_hq", cwd: repo,
+      baseCommit: git("rev-parse HEAD", repo), worktreePath: repo, worktreeBranch: "main",
+      withLineage: true, rootRunId: runId, // 根是自己
+      withProviderSession: false, // 双重不合格：同时缺 provider 会话事件
+    });
+    // 根转录带闭合事实（决定 0058 的 run.lineage_closed）。
+    appendFileSync(
+      join(dir, `${runId}.jsonl`),
+      JSON.stringify({
+        type: "run.lineage_closed", runId, agentId: "coder_hq",
+        rootRunId: runId, reason: "lead closed the lineage", reasonSha256: "0".repeat(64),
+      }) + "\n",
+      "utf8",
+    );
+
+    const r = await continueRun({
+      parentRunId: runId, prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "s",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "lineage_closed", "线系闭合门先于 no_provider_session 门");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

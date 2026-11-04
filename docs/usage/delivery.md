@@ -107,9 +107,9 @@ candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，
 - `readiness` 为严格闭集（消费方必须视其为穷举，任何其它值都是 bug；`isolation_failed` 见上）。
 - `reviewable` 仅当存在 durable `delivery_created` 且恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
 - 冲突或不完整的 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created，或 run 已终态但声明的 delivery 没有 created/failed 结果）折叠为 `ambiguous`（fail-closed，不回显动态值）；后者会立即返回，不耗尽 wait 窗口。
-- wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、零 transcript append、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 复用 `run_wait` 的 SDK-native progress/timeout 模式（`notifications/progress` keepalive + `resetTimeoutOnProgress`）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000` / `DELIVERY_WAIT_MS_MAX=300000` 锁定，zod schema 与 service 业务边界都从同一常量构造，不可漂移。
+- wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、零 transcript append、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 的 keepalive 同 `run_wait`（见[监督](supervise.md)）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000` / `DELIVERY_WAIT_MS_MAX=300000` 锁定。
 - pending-at-deadline 是诚实的事实（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。初始读取失败即抛错（不进入 wait）；wait 期间某次 re-read 失败时不把 stale waiting 快照伪装成 deadline 到期，而是 fail-closed 为 `ambiguous` 并提前返回（`waitReturnedEarly:true`，不回显错误、不重试）。
-- 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）；`run_delivery_review` 的 exact-proof / 安全投影 / 错误边界不放松。
+- 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）。
 
 CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` 缺值或非整数/越界在 service 调用前拒绝；省略 `--wait-ms` 时保持 point-in-time 形状，无 `readiness` 字段）。
 

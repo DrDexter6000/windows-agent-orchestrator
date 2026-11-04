@@ -28,7 +28,9 @@ export const NEXT_STEP_SURFACES = Object.freeze(["mcp", "cli"]);
 // 是派发/续跑受理了后台运行；settled_line 是 CLI --until-settled 的收口终行
 //（按 settlementReason 再分四支）；verifier_gone 是等待器证明终态等验证的运行
 // 已无验证进程（只有 CLI 面）；consult_seats_running 是 consult 回执还有未到
-// 终态的席位（MCP 面与 CLI 面各自渲染）。
+// 终态的席位（MCP 面与 CLI 面各自渲染）；delivery_continuable（决定 0112）是
+// 收口且未采纳的可续交付——MCP run_delivery 带 waitMs 因收口提前返回，与 CLI
+// --until-settled 的收口终行各自渲染，提示窄缺陷可用 run_continue 续修。
 export const NEXT_STEP_SITUATIONS = Object.freeze([
   "wait_vital_recent",
   "wait_vital_ageing",
@@ -40,6 +42,7 @@ export const NEXT_STEP_SITUATIONS = Object.freeze([
   "settled_line",
   "verifier_gone",
   "consult_seats_running",
+  "delivery_continuable",
 ]);
 
 /** 只有 CLI 面渲染的情形（等待器证明只在 CLI 面做）。 */
@@ -116,6 +119,19 @@ function render(surface, situation, runId, extras) {
       }
       break;
     }
+    case "delivery_continuable":
+      // 决定 0112：收口且未采纳的可续交付（MCP 面；CLI --until-settled 收口终
+      // 行同款）。只陈述谱系事实，不断言 run_continue 一定受理（资格检查在那
+      // 边，拒绝零副作用、闭集）；不建议采纳或拒收。acceptanceStatus 只有
+      // null（未决定）与 "rejected" 两支（accepted 的交付不可续，提示判定已排除）。
+      text = surface === "mcp"
+        ? (extras.acceptanceStatus === "rejected"
+          ? "Delivery settled; the Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. Verification passed is not acceptance."
+          : "Delivery settled. Its lineage was dispatched continuable and it is not accepted: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.")
+        : (extras.acceptanceStatus === "rejected"
+          ? `Settled. The Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. Verification passed is not acceptance.`
+          : `Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.`);
+      break;
     case "verifier_gone":
       // 终态等验证、验证者已证明不在。出口仍是既有的：未决定时有界拒收，
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
@@ -152,7 +168,9 @@ function render(surface, situation, runId, extras) {
 /**
  * 构造一句 nextStep。surface "cli" 必须给 runId（模板带 runId）；"mcp" 的模板
  * 不含 runId（传了也不会渲染）。settled_line 需要 settlementReason（收口判定
- * 的 settled 类 reason）与可选 acceptanceStatus；verifier_gone 只有 CLI 面；
+ * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
+ * acceptanceStatus 只接受 null（未决定）或 "rejected"，其余抛错（调用方把服务
+ * 里表示未决定的值如 "pending" 转成 null 再传）；verifier_gone 只有 CLI 面；
  * consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount，在 CLI 面
  * 用 seatRunIds/consultId（可再给 cliJson 选不列 runId 的回退说法）。长度超上限
  * 抛错（consult_seats_running 的 CLI 面有文档化的不列 runId 回退）。
@@ -192,6 +210,11 @@ export function buildNextStep({
   }
   if (CLI_ONLY_SITUATIONS.includes(situation) && surface !== "cli") {
     throw new Error(`buildNextStep: situation "${situation}" is CLI-only, got surface ${JSON.stringify(surface)}`);
+  }
+  // 决定 0112：可续提示的 acceptanceStatus 只接受 null（未决定）或 "rejected"；
+  // 服务侧表示未决定的值（如收口事实里的 "pending"）由调用方转成 null 再传。
+  if (situation === "delivery_continuable" && acceptanceStatus !== null && acceptanceStatus !== "rejected") {
+    throw new Error(`buildNextStep: delivery_continuable needs acceptanceStatus null or "rejected", got: ${JSON.stringify(acceptanceStatus)}`);
   }
   if (situation === "consult_seats_running") {
     if (surface === "cli") {

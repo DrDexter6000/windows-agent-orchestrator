@@ -229,6 +229,8 @@ test("CLI：--wait-ms 路径同样带 adoption（文本行 + json 字段）", as
       deliveryRequested: true,
       deliveryFailure: null,
       adoption: fakeAdoption,
+      // 决定 0112：服务结果可能带这个内部布尔——CLI 的任何输出面都不外泄。
+      continuableHint: true,
     });
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
     const text = await captureLog(async () => {
@@ -239,6 +241,7 @@ test("CLI：--wait-ms 路径同样带 adoption（文本行 + json 字段）", as
       );
     });
     assert.match(text, new RegExp(`^Adopted in: ${"a".repeat(40)} \\(WAO-Adopted-From on main\\)$`, "m"));
+    assert.ok(!text.includes("continuableHint"), "文本面不显示内部布尔");
 
     const json = await captureLog(async () => {
       await runsDeliveryCommand(
@@ -248,5 +251,7 @@ test("CLI：--wait-ms 路径同样带 adoption（文本行 + json 字段）", as
       );
     });
     assert.deepEqual(JSON.parse(json).adoption, fakeAdoption);
+    // 决定 0112：continuableHint 是服务内部布尔，JSON 输出必须剔除。
+    assert.equal("continuableHint" in JSON.parse(json), false, "CLI JSON 不外泄 continuableHint");
   } finally { cleanupDir(scratch); }
 });

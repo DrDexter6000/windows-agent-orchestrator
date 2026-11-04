@@ -131,6 +131,11 @@ test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把
     buildNextStep({ surface: "mcp", situation: "delivery_unsettled" }),
     buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }),
     buildNextStep({ surface: "cli", situation: "settled_line", runId: RUN_ID, settlementReason: "delivery_settled" }),
+    // 决定 0112：可续提示四句（两面 × 未决定/已拒收）。
+    buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: null }),
+    buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" }),
+    buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null }),
+    buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" }),
   ];
   for (const text of samples) {
     for (const host of hosts) {
@@ -233,5 +238,52 @@ test("NEXT-09: consult_seats_running CLI 超长回退——8 席不列 runId（�
   assert.throws(
     () => buildNextStep({ surface: "mcp", situation: "consult_seats_running", seatCount: 5 }),
     /seatCount and nonTerminalSeatCount/,
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 决定 0112：delivery_continuable——收口且未采纳的可续交付提示（MCP 面与 CLI
+// --until-settled 收口终行各自渲染；acceptanceStatus 只有 null 与 "rejected"）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-10: delivery_continuable——两面 × 未决定/已拒收四句；acceptanceStatus 闭集；长度", () => {
+  assert.ok(NEXT_STEP_SITUATIONS.includes("delivery_continuable"), "新情形进闭集");
+
+  // MCP 未决定：不含 runId，说"未采纳 + 已采纳不可续"（谱系措辞：子运行自己
+  // 不是带 continuable 派发的，它所在的谱系才是）。
+  const mcpUndecided = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: null });
+  assert.match(mcpUndecided, /^Delivery settled\. Its lineage was dispatched continuable and it is not accepted: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything\. An accepted delivery can no longer be continued\. Verification passed is not acceptance\.$/);
+  assert.ok(!mcpUndecided.includes(RUN_ID), "MCP 面不含 runId");
+
+  // MCP 已拒收：拒收版，不再说"未采纳"。
+  const mcpRejected = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" });
+  assert.match(mcpRejected, /^Delivery settled; the Lead decision is recorded: rejected\. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything\. Verification passed is not acceptance\.$/);
+
+  // CLI 未决定：带 runId（review 指向 + parentRunId）。
+  const cliUndecided = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null });
+  assert.match(cliUndecided, new RegExp(`^Settled\\. Delivery awaits the Lead's review: wao runs delivery ${RUN_ID}\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${RUN_ID}\\) can resume the same worker conversation; it checks eligibility before changing anything\\. An accepted delivery can no longer be continued\\. Verification passed is not acceptance\\.$`));
+
+  // CLI 已拒收。
+  const cliRejected = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" });
+  assert.match(cliRejected, new RegExp(`^Settled\\. The Lead decision is recorded: rejected\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${RUN_ID}\\) can resume the same worker conversation; it checks eligibility before changing anything\\. Verification passed is not acceptance\\.$`));
+
+  for (const text of [mcpUndecided, mcpRejected, cliUndecided, cliRejected]) {
+    assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
+  }
+
+  // acceptanceStatus 闭集：只接受 null / "rejected"；服务侧的 "pending"（未决定）
+  // 与 "accepted" 都必须由调用方转换/排除——这里直接抛错。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "pending" }),
+    /null or "rejected"/,
+  );
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "accepted" }),
+    /null or "rejected"/,
+  );
+  // CLI 面仍需 runId 渲染命令。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "delivery_continuable", acceptanceStatus: null }),
+    /runId/,
   );
 });
