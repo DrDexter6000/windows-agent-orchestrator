@@ -18,7 +18,7 @@
    - 终态、交付事实无法判定收口的运行：个数与至多 5 个 runId，指向 `wao runs diagnose`。
    - 前三类的行里若有派发自别的工作树的运行，提示先用 `workspace_select` 选那棵工作树（或在那里跑 CLI）再查：审查与裁定工具按会话绑定核对归属。
    - 已裁定或没有交付的运行留下的分支：条数，加整个仓库登记在 `.wao-worktrees/` 下的运行树棵数；回收与否以 reclaim 计划为准。
-   - 转录找不到、读不出或有内容不同的副本：计数，指向 `wao worktree reclaim --out <plan.json>` 的只读计划，不猜、不择一。
+   - 转录找不到、读不出、有内容不同的副本，或记下的项目事实损坏：计数，指向 `wao worktree reclaim --out <plan.json>` 的只读计划，不猜、不择一。
 3. 绑定工作区与 MCP 服务所在的 WAO 检出同属一个项目时，加一行收件箱未处理反馈条数：只数 `open/` 目录里的条目文件名，不读内容。
 4. 各来源独立结算：整个来源读不出就省略该行，单条转录读不出计数。
 5. SKILL.md 批次收尾一句改为：先重跑 `lead_preflight`，处理 `open item:` 行，能收的收、收不了的写进报告，再报 mainline 行。SKILL.md 上限按 Owner 授权上调（数值以 docs-consistency 守卫为准）。
