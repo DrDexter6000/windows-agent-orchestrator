@@ -123,7 +123,7 @@ CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` �
 - 不可用结果：binary 或单文件 diff 超限时返回 `available:false`、空 fragment 和 `unavailableReason`（阈值见生成层描述）。只有这类结果才使用 Owner 授权的 repo-local 只读 CLI/Git fallback；正常文本审查不绕过 MCP。
 - 安全边界：路径来自已证明的 DeliveryRef；diff 在完整文本上先做 exact-secret redaction 和控制字符清洗，再分页。失败固定返回 `run_delivery_review failed`，不泄漏路径、Git stderr 或原始错误。
 
-当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw-content 通道：
+CLI 等价（同一 service 与安全投影，不是 raw 通道）：
 
 ```bash
 npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --format json
@@ -155,7 +155,7 @@ Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery
 
 规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。派发前用 `run_dispatch_contract_check` 的 advisory 探针预检引用路径；验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
 
-当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全输出投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw 通道，也不提供 assertion-command override：
+CLI 等价（同一 service 与安全投影，不是 raw 通道，不能改断言命令）：
 
 ```bash
 npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attempt 2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
