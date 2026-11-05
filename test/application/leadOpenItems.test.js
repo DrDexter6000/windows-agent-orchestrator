@@ -1,16 +1,18 @@
 // test/application/leadOpenItems.test.js
 //
-// 决定 0113（第 75 批，会审 sol 修订后）：lead_preflight 待 Lead 收口事项
-// 收集器的分支覆盖。git（分支枚举/运行树列表）与转录读取全部注入；真 git
-// 子进程只出现在临时仓夹具（ROOT 主检出、链接工作树）与 mainWorktreeRoot 的
-// 真实 R8 判定上——全部在 os.tmpdir() 下，不碰真实 runs/ 与真实收件箱。
+// 决定 0113（第 75 批，会审 sol 修订后；第 76 批修订归属口径）：lead_preflight
+// 待 Lead 收口事项收集器的分支覆盖。git（分支枚举/运行树列表）与转录读取全部
+// 注入；真 git 子进程只出现在临时仓夹具（ROOT 主检出、链接工作树）与旧运行按
+// cwd 推导的真实 R8 判定上——全部在 os.tmpdir() 下，不碰真实 runs/ 与真实收件箱。
 //
 // 钉的语义：
 //   - 候选集只认 wao/run_ 前缀且 runId 合法的分支；>50 条只查**最新** 50 条
 //     （假 git 按排序参数返回不同顺序，变异 --sort=committerdate 必红）且行内
 //     写明已查看部分与总条数；
-//   - 归属=同一主工作树（mainWorktreeRoot）：主检出与它的链接工作树都算本
-//     项目，别的项目跳过不计；
+//   - 归属=记录的项目身份（identityOfFirstEvent，0113 修订）：首事件在档
+//     project 事实的 key 与绑定工作区相同才算本项目——开发树删了也认得出
+//     （cwd 是不存在的目录照常计入）；别的 key 跳过、在档事实损坏进"找不到
+//     或冲突"行；没有记录的旧运行按 cwd 推导（链接工作树经 R8 归主工作树）；
 //   - 分类：等裁定（含可续计数正/负例）、终态未收口（验证 pending）、
 //     undeterminable 单独一行（与"还没结果"分开，指向 runs diagnose）、留待
 //     回收（已采纳/已拒收/无交付）、未终态不报、转录缺失只计数；
@@ -34,12 +36,26 @@ import {
   OPEN_ITEM_BRANCH_CAP,
 } from "../../src/application/leadOpenItems.js";
 import { determineRunSettlement } from "../../src/application/runSettlement.js";
+import {
+  deriveProjectBucketSlug,
+  identifyProjectFromCwd,
+  productionProjectIo,
+} from "../../src/projectIdentity.js";
 
 // ===== 夹具基建 =====
 
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 }
+
+// 测试用 projectIdentity io：realpath 与 R8 的读文件用生产实现，但**不启用**
+// scratch 判定（tmpdir 置空）——夹具仓库就建在 os.tmpdir() 下，生产口径会把
+// 它们判成 scratch、盖掉项目归属语义（scratch 判定本身由 projectIdentity
+// 自己的测试钉）。同时验证 projectIo 注入缝生效。
+const TEST_PROJECT_IO = (() => {
+  const io = productionProjectIo();
+  return { platform: process.platform, realpath: io.realpath, tmpdir: "", readGitFile: io.readGitFile };
+})();
 
 function makeGitRepo(dir) {
   execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
@@ -51,8 +67,9 @@ function makeGitRepo(dir) {
   return dir;
 }
 
-// 在 ROOT 里登记一棵链接工作树（真实 `git worktree add`——mainWorktreeRoot 的
-// R8 判定要读它的 .git 文件/gitdir/commondir）。
+// 在 ROOT 里登记一棵链接工作树（真实 `git worktree add`——没有在档事实的旧
+// 运行按 cwd 推导时，identifyProjectFromCwd 的 R8 判定要读它的 .git 文件/
+// gitdir/commondir）。
 function makeLinkedWorktree(root, dir) {
   execFileSync("git", ["worktree", "add", dir, "-b", "wt-fixture"], { cwd: root, stdio: "pipe" });
   return dir;
@@ -61,8 +78,24 @@ function makeLinkedWorktree(root, dir) {
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
 const CROSS_TREE_HINT = "some runs were dispatched from another worktree: workspace_select it (or run the CLI there) first";
-const MISSING_LINE = (n) => `open item: ${n} wao/run_* branch(es) without a readable transcript `
-  + "(not found or conflicting copies; read-only `wao worktree reclaim --out <plan.json>` plan lists the branches)";
+const MISSING_LINE = (n) => `open item: ${n} wao/run_* branch(es) without a usable transcript fact `
+  + "(not found, unreadable, conflicting copies, or a broken recorded project fact; "
+  + "read-only `wao worktree reclaim --out <plan.json>` plan lists the branches)";
+
+// 在档 project 事实（形状与写侧 projectFactFromCwd 一致；bucket 经桶 slug
+// 派生，恒过 identityOfFirstEvent 的校验闭集）。
+function projectFact(key) {
+  return {
+    kind: "project",
+    rulesVersion: "td190-r3",
+    key,
+    bucket: deriveProjectBucketSlug({ kind: "project", key, displayName: "wao" }),
+  };
+}
+// 把事实记进首事件（写侧随 run.started 落档的形状）。
+function withRecordedFact(events, fact) {
+  return events.map((e, i) => (i === 0 ? { ...e, project: fact } : e));
+}
 
 function started(runId, cwd, over = {}) {
   return { type: "run.started", runId, agentId: "coder_low", backend: "claude-code", cwd, ...over };
@@ -190,6 +223,7 @@ async function runCollect(ROOT, { refs, worktrees, eventsByRun, over = {}, sortB
     execGitFn: git.fn,
     resolveTranscriptFn,
     readTranscriptFn,
+    projectIo: TEST_PROJECT_IO,
     // 收件箱：默认"别的项目"（identifyProjectFn 两键不同）→ B 不出行，A 独测。
     identifyProjectFn: (r) => ({ kind: "project", key: r === ROOT ? "proj-a" : "proj-b" }),
     codeCheckoutRoot: join(ROOT, "code-checkout"),
@@ -235,7 +269,8 @@ test("OI-A1: 等裁定 / 终态未收口 / 留待回收（已采纳+已拒收+�
       "open item: 1 terminal run(s) not settled (verification/reverify without a result; "
       + "run_delivery or `wao runs wait <runId> --until-settled`): run_a2");
     assert.equal(lines[2],
-      "open item: 3 decided/no-delivery wao/run_* branch(es) left for reclaim (`wao worktree reclaim` plans it; read-only)");
+      "open item: 3 decided/no-delivery wao/run_* branch(es) left for reclaim "
+      + "(`wao worktree reclaim --out <plan.json>` plans it; read-only)");
     for (const line of lines) {
       assert.ok(!line.includes(CROSS_TREE_HINT), `同根派发不出跨工作树提示: ${line}`);
     }
@@ -273,7 +308,7 @@ test("OI-A1b: undeterminable 单独一行（判不出收口 ≠ 还没结果）�
   } finally { cleanupDir(wt); cleanupDir(root); }
 });
 
-test("OI-A1c: 归属=同一主工作树——链接工作树里派发的运行算本项目（等裁步行点名并带提示）", async () => {
+test("OI-A1c: 旧运行（无在档事实）按 cwd 推导——链接工作树里派发的算本项目（等裁步行点名并带提示），无关目录跳过", async () => {
   const root = mkdtempSync(join(tmpdir(), "wao-oi-a1c-"));
   const wt = mkdtempSync(join(tmpdir(), "wao-oi-a1c-wt-"));
   const foreign = mkdtempSync(join(tmpdir(), "wao-oi-a1c-other-"));
@@ -284,9 +319,10 @@ test("OI-A1c: 归属=同一主工作树——链接工作树里派发的运行�
       refs: ["wao/run_l1", "wao/run_f1"],
       worktrees: [],
       eventsByRun: {
-        // 运行的工作区是 ROOT 的链接工作树 → mainWorktreeRoot 归一到 ROOT → 算本项目。
+        // 首事件没有 project 字段 → identityOfFirstEvent 退回按 cwd 推导：
+        // ROOT 的链接工作树经 R8 归主工作树 → 与绑定根同 key → 算本项目。
         run_l1: settledUndecided("run_l1", wt),
-        // 真正的别的目录 → 跳过不计。
+        // 真正的别的目录 → 推导出的 key 不同 → 跳过不计。
         run_f1: settledUndecided("run_f1", foreign),
       },
     });
@@ -348,7 +384,7 @@ test("OI-A4: 不属于本工作区的运行跳过不计；转录缺失只计数�
       refs: ["wao/run_o1", "wao/run_o2", "wao/run_m1"],
       worktrees: [],
       eventsByRun: {
-        // cwd 是与绑定仓无关的目录 → 不同主工作树 → 跳过（任何类都不进）。
+        // cwd 是与绑定仓无关的目录 → 推导出的项目 key 不同 → 跳过（任何类都不进）。
         run_o1: settledUndecided("run_o1", other),
         // run_o2 / run_m1 不在 eventsByRun → 读失败 → 只计数。
       },
@@ -373,6 +409,72 @@ test("OI-A5: 单条读失败只计数（其余照常分类）", async () => {
     });
     assert.equal(lines.length, 2);
     assert.equal(lines[1], MISSING_LINE(1), "单条读失败计入同一行");
+  } finally { cleanupDir(root); }
+});
+
+// ===== A. 归属=记录的项目身份（0113 修订） =====
+
+test("OI-A12: 派发自已删除工作树的运行——首事件记着与绑定工作区相同的项目 key、cwd 是不存在的目录 → 计入（等裁定行与回收行各一例）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a12-"));
+  try {
+    makeGitRepo(root);
+    const boundKey = identifyProjectFromCwd(root, TEST_PROJECT_IO).key;
+    // 开发树（.dev/wt/<批>）合入后已删：run.started 的 cwd 指向一个不存在的
+    // 目录——在档事实优先，推导（realpath）根本不参与，照常计入。
+    const goneTree = join(root, ".dev", "wt", "b09", ".wao-worktrees", "run_gone");
+    const { lines } = await runCollect(root, {
+      refs: ["wao/run_g1", "wao/run_g2"],
+      worktrees: [],
+      eventsByRun: {
+        run_g1: withRecordedFact(settledUndecided("run_g1", goneTree), projectFact(boundKey)),
+        run_g2: withRecordedFact(
+          [...settledUndecided("run_g2", goneTree), accepted("run_g2")],
+          projectFact(boundKey),
+        ),
+      },
+    });
+    assert.equal(lines.length, 2, `两例都计入: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].startsWith("open item: 1 settled delivery run(s) await a Lead decision "),
+      `等裁定行计入已删树的运行: ${lines[0]}`);
+    assert.ok(lines[0].includes("): run_g1"), "runId 点名");
+    assert.ok(lines[0].includes(CROSS_TREE_HINT),
+      "cwd 指向另一棵（已删的）工作树 → 提示按 cwd 与绑定根比较、照常给出");
+    assert.ok(lines[1].startsWith("open item: 1 decided/no-delivery"), `回收行计入: ${lines[1]}`);
+    assertLineShape(lines);
+  } finally { cleanupDir(root); }
+});
+
+test("OI-A13: 首事件记着别的项目 key → 跳过不计（变异：key 比较改恒真时此测试必红）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a13-"));
+  try {
+    makeGitRepo(root);
+    const other = projectFact("d:/somewhere/else/project");
+    assert.notEqual(other.key, identifyProjectFromCwd(root, TEST_PROJECT_IO).key, "夹具前提：key 不同");
+    const { lines } = await runCollect(root, {
+      refs: ["wao/run_g3"],
+      worktrees: [],
+      eventsByRun: { run_g3: withRecordedFact(settledUndecided("run_g3", root), other) },
+    });
+    assert.deepEqual(lines, [], "别的项目 key → 不进任何行");
+  } finally { cleanupDir(root); }
+});
+
+test("OI-A14: 首事件 project 坏形状（在档事实损坏）→ 不分类、不静默回退 cwd 推导，计入找不到或冲突行", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a14-"));
+  try {
+    makeGitRepo(root);
+    const { lines } = await runCollect(root, {
+      refs: ["wao/run_g4", "wao/run_g5"],
+      worktrees: [],
+      eventsByRun: {
+        // project 在场即事实主张：非 kinded 对象 / 缺 bucket 都是损坏事实
+        // （identityOfFirstEvent 的 factError）——不回退推导、不按事件分类。
+        run_g4: withRecordedFact(settledUndecided("run_g4", root), "junk"),
+        run_g5: withRecordedFact(settledUndecided("run_g5", root), { kind: "project", key: "x" }),
+      },
+    });
+    assert.equal(lines.length, 1, `只出缺失/损坏一行，不出等裁定行: ${JSON.stringify(lines)}`);
+    assert.equal(lines[0], MISSING_LINE(2));
   } finally { cleanupDir(root); }
 });
 
@@ -449,7 +551,7 @@ test("OI-A8: 运行树按全仓口径数——路径以 .wao-worktrees/<合法 r
     assert.equal(lines.length, 1);
     assert.equal(lines[0],
       "open item: 1 decided/no-delivery wao/run_* branch(es) + 2 run worktree(s) under .wao-worktrees/ "
-      + "left for reclaim (`wao worktree reclaim` plans it; read-only)");
+      + "left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only)");
   } finally { cleanupDir(root); }
 });
 
@@ -465,7 +567,7 @@ test("OI-A9: 0 分支但残留运行树 → 仍出留待回收行；worktree lis
     assert.equal(withTrees.lines.length, 1, "0 分支 + 1 棵运行树 → 仍一行");
     assert.equal(withTrees.lines[0],
       "open item: 0 decided/no-delivery wao/run_* branch(es) + 1 run worktree(s) under .wao-worktrees/ "
-      + "left for reclaim (`wao worktree reclaim` plans it; read-only)");
+      + "left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only)");
     // worktree list 失败 → 只有分支数，无运行树数。
     const git = fakeGit({ refs: ["wao/run_w2"] });
     const baseFn = git.fn;
@@ -479,6 +581,7 @@ test("OI-A9: 0 分支但残留运行树 → 仍出留待回收行；worktree lis
       execGitFn: git.fn,
       resolveTranscriptFn: (runDir, runId) => join(runDir, `${runId}.jsonl`),
       readTranscriptFn: async () => [...settledUndecided("run_w2", root), accepted("run_w2")],
+      projectIo: TEST_PROJECT_IO,
       identifyProjectFn: (r) => ({ kind: "project", key: String(r) }),
       codeCheckoutRoot: "elsewhere",
     });
@@ -539,6 +642,7 @@ test("OI-A11: 缺省解析走 resolveTranscriptPathDetailed——桶内正常份
       authorizedWorkspaceRoot: root,
       runDir,
       execGitFn: git.fn,
+      projectIo: TEST_PROJECT_IO,
       identifyProjectFn: (r) => ({ kind: "project", key: r === root ? "proj-a" : "proj-b" }),
       codeCheckoutRoot: join(root, "code-checkout"),
     });
@@ -672,6 +776,7 @@ test("OI-B4: 复数条目用 entries；A 的行在前、收件箱行在后", asy
       execGitFn: fakeGit({ refs: ["wao/run_e1"], worktrees: [] }).fn,
       resolveTranscriptFn: (runDir, runId) => join(runDir, `${runId}.jsonl`),
       readTranscriptFn: async () => noDeliveryTerminal("run_e1", root),
+      projectIo: TEST_PROJECT_IO,
       identifyProjectFn: (r) => (r === root || r === join(root, "code"))
         ? { kind: "project", key: "wao-proj" }
         : { kind: "project", key: "other" },

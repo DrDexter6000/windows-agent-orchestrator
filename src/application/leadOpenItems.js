@@ -16,10 +16,14 @@
 //          结果"分开（事实是"无法判定"，不是"仍在等"）；
 //        - 未终态 → 不报（lead_preflight 的活跃运行一节管）；
 //        - 已裁定，或收口原因是没有交付/打包失败/隔离失败 → 留待回收。
-//      归属口径是**同一主工作树**（会审 sol 修订）：运行的工作区与绑定工作区
-//      经 mainWorktreeRoot（决定 0099 R8）归到同一主工作树即算本项目——WAO
-//      开发 Lead 常把交付派进同仓库的链接工作树（.dev/wt/<批>），按绑定根逐字
-//      核对会漏掉它们。该口径只用于本节的计数与 runId，不改
+//      归属口径是**记录的项目身份**（2026-11-05 修订）：转录首事件在档的
+//      project 事实优先（identityOfFirstEvent，与 `runs list --project` 同一
+//      语义——派发时算好落档，开发树 .dev/wt/<批> 合入后删掉也认得出），
+//      没有记录的旧运行由它退回按 cwd 推导；与绑定工作区的身份
+//      （identifyProjectFromCwd）比稳定键，两侧都是 kind:"project" 且 key
+//      相同才算本项目，否则跳过不计。在档事实损坏（factError 非空）不计入
+//      本项目，与转录读不出一起进"找不到或冲突"行。该口径只用于本节的计数
+//      与 runId，不改
 //      verifyRunWorkspaceOwnership 本身、不改其它工具的归属授权——审查与
 //      裁定工具按**会话绑定**核对归属（run_delivery_review_bundle /
 //      run_delivery 不收 expectedWorkspaceRoot，wao runs wait 不收 --cwd），
@@ -61,7 +65,7 @@ import { isValidRunId } from "../delivery.js";
 import { resolveTranscriptPathDetailed } from "../projectBuckets.js";
 import {
   identifyProjectFromCwd,
-  mainWorktreeRoot,
+  identityOfFirstEvent,
   productionProjectIo,
 } from "../projectIdentity.js";
 import { readTranscript } from "../transcript.js";
@@ -120,15 +124,15 @@ function joinRunIdsBounded(ids, budget, cap) {
 }
 
 // 路径归一：分隔符统一 + 尾斜杠剥除 + win32 大小写折叠（projectIdentity R2
-// 同款）。sameMainWorktree 用于归属（两侧各经 mainWorktreeRoot 之后）与
-// "派发自不同工作树"判定（原始 cwd 对绑定根）——只比形状，不 realpath。
+// 同款）。sameNormalizedPath 只用于"派发自不同工作树"提示（原始 cwd 对绑定
+// 根比形状，不 realpath）——归属本身已改按记录的项目身份（见 3b）。
 function normalizedPath(p) {
   let s = p.replace(/\\/g, "/");
   if (!/^[A-Za-z]:\/$/.test(s)) s = s.replace(/\/+$/, "");
   return process.platform === "win32" ? s.toLowerCase() : s;
 }
 
-function sameMainWorktree(a, b) {
+function sameNormalizedPath(a, b) {
   if (typeof a !== "string" || typeof b !== "string" || a.length === 0 || b.length === 0) return false;
   return normalizedPath(a) === normalizedPath(b);
 }
@@ -162,7 +166,7 @@ async function collectRunBranchOpenItems({
   execGitFn = defaultExecGit,
   resolveTranscriptFn,
   readTranscriptFn = readTranscript,
-  mainWorktreeRootFn = mainWorktreeRoot,
+  projectIo = productionProjectIo(),
   parseWorktreePorcelainFn = parseWorktreePorcelain,
 }) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return [];
@@ -201,13 +205,15 @@ async function collectRunBranchOpenItems({
     ? resolveTranscriptFn
     : (dir, runId) => resolveTranscriptPathDetailed(dir, runId);
 
-  // 3) 归属基准：绑定根的主工作树，一次归一（#1）。归不出来（异常）→ 全跳过
-  //    （核不了归属就不归任何类，宁缺勿错）。
-  let boundMain;
+  // 3) 归属基准（0113 修订）：绑定工作区的项目身份，一次算好（生产 io 含
+  //    realpath/tmpdir/R8）。判不出（非项目或异常）→ 全跳过（核不了归属就
+  //    不归任何类，宁缺勿错）。
+  let boundKey = null;
   try {
-    boundMain = mainWorktreeRootFn(authorizedWorkspaceRoot);
+    const boundIdentity = identifyProjectFromCwd(authorizedWorkspaceRoot, projectIo);
+    if (boundIdentity?.kind === "project") boundKey = boundIdentity.key;
   } catch {
-    boundMain = null;
+    boundKey = null;
   }
 
   const awaitingDecision = [];
@@ -245,22 +251,28 @@ async function collectRunBranchOpenItems({
       missingTranscripts += 1;
       continue;
     }
-    // 3b) 归属（同一主工作树口径，#1）：运行的工作区（run.started 的 cwd /
-    //     派发目标）与绑定根归到同一主工作树才算本项目；提取不出或不同 →
-    //     跳过不计。原始 cwd 与绑定根不同（同仓的另一棵工作树）→ 该类别的
-    //     行要带跨工作树提示。
-    if (boundMain == null) continue;
-    let runMain = null;
+    // 3b) 归属（记录的项目身份，0113 修订）：首事件在档的 project 事实优先
+    //     （identityOfFirstEvent，与 `runs list --project` 同语义——派发时算
+    //     好落档，开发树删了也认得出），没有记录的旧运行由它退回按 cwd 推导
+    //     （不另写第二份回退）。factError 非空 = 在档事实损坏 → 不分类，计入
+    //     "找不到或冲突"行；任一侧不是 kind:"project" 或 key 不同 → 跳过不计。
+    const { identity, factError } = identityOfFirstEvent(events[0], projectIo);
+    if (factError != null) {
+      missingTranscripts += 1;
+      continue;
+    }
+    if (boundKey == null || identity?.kind !== "project" || identity.key !== boundKey) continue;
+    // 跨工作树提示口径不变：按运行的 cwd（findRunWorkspaceOwnership 的归属
+    // 事实）与绑定根比较；归属事实缺失/读不出 → 当同树、不提示（归属判定
+    // 本身已不依赖它）。
     let runCwd = null;
     try {
-      const fact = findRunWorkspaceOwnership(events, runId);
-      runCwd = fact.cwd;
-      runMain = mainWorktreeRootFn(fact.cwd);
+      runCwd = findRunWorkspaceOwnership(events, runId)?.cwd ?? null;
     } catch {
-      continue; // 归属事实缺失/malformed/歧义 → 跳过
+      runCwd = null;
     }
-    if (!sameMainWorktree(runMain, boundMain)) continue;
-    const fromAnotherWorktree = !sameMainWorktree(runCwd, authorizedWorkspaceRoot);
+    const fromAnotherWorktree = typeof runCwd === "string" && runCwd.length > 0
+      && !sameNormalizedPath(runCwd, authorizedWorkspaceRoot);
     // 3c) 先收口判定，再裁定。
     const settlement = determineRunSettlement(events, runId);
     if (!settlement.facts.terminal) continue; // 未终态 → 活跃运行一节管，不报
@@ -352,15 +364,17 @@ async function collectRunBranchOpenItems({
       : "";
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${reclaimBranches} decided/no-delivery wao/run_* branch(es)${wt} `
-      + `left for reclaim (\`wao worktree reclaim\` plans it; read-only)${truncSuffix}`,
+      + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only)${truncSuffix}`,
     ));
   }
   if (missingTranscripts > 0) {
-    // 缺失口径含未找到与冲突/不可读副本（#1/#3）；reclaim CLI 只打印可回收项，
-    // 这些分支在 --out 计划文件的条目里。
+    // 缺失口径含未找到、冲突/不可读副本与在档项目事实损坏（0113 修订——转录
+    // 读得出但事实坏了同样没法归类）；reclaim CLI 只打印可回收项，这些分支在
+    // --out 计划文件的条目里。
     lines.push(boundedLine(
-      `${OPEN_ITEM_PREFIX}${missingTranscripts} wao/run_* branch(es) without a readable transcript `
-      + `(not found or conflicting copies; read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)${truncSuffix}`,
+      `${OPEN_ITEM_PREFIX}${missingTranscripts} wao/run_* branch(es) without a usable transcript fact `
+      + `(not found, unreadable, conflicting copies, or a broken recorded project fact; `
+      + `read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)${truncSuffix}`,
     ));
   }
   return lines;
@@ -422,8 +436,9 @@ async function collectInboxOpenItem({
  *   缺省 resolveTranscriptPathDetailed（统一入口：全桶查重，conflict/
  *   unreadable 不静默择一）；注入返回 detailed 形状或路径字符串（=found）
  * @param {Function} [input.readTranscriptFn] — (path) => Promise<events[]>
- * @param {Function} [input.mainWorktreeRootFn] — mainWorktreeRoot 注入缝（#1
- *   同一主工作树归属口径）
+ * @param {object} [input.projectIo] — projectIdentity 的 io（realpath/tmpdir/
+ *   readGitFile），归属两侧共用：绑定根的 identifyProjectFromCwd 与首事件的
+ *   identityOfFirstEvent（0113 修订口径）；缺省 productionProjectIo()
  * @param {Function} [input.parseWorktreePorcelainFn] — porcelain 解析注入缝
  * @param {Function} [input.identifyProjectFn] — (root) => identity 注入缝
  * @param {string} [input.codeCheckoutRoot] — MCP 服务所在的 WAO 代码检出根
