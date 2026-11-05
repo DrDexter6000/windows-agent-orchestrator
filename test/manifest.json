@@ -218,6 +218,7 @@
       "delivery/adoptionQuery.test.js",
       "delivery/runsDeliveryAdoption.test.js",
       "application/lineageClose.test.js",
+      "application/leadOpenItems.test.js",
       "registry-roles/candidateInventory.test.js",
       "isolation-infra/hygieneGitState.test.js",
       "isolation-infra/desensitization.test.js",

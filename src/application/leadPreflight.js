@@ -75,6 +75,10 @@ import { loadLanesConfig } from "../dispatchResolution.js";
 // 决定 0108：车道表 × 私有注册表接线不一致的一行事实（facts only；诊断单一
 // 实现 registryAlign.js——与 registry align 预览、doctor 同源）。
 import { laneWiringMismatchFactLine } from "./registryAlign.js";
+// 决定 0113：待 Lead 收口事项（open item: 行）——wao/run_* 分支的收口/裁定
+// 状态、.wao-worktrees/ 运行树、同项目时的收件箱未处理条数。只读收集器在
+// leadOpenItems.js；这里只消费行（advisory，不动 checkStatus/complete）。
+import { collectLeadOpenItems } from "./leadOpenItems.js";
 
 export {
   CAVEATS_CAP,
@@ -304,6 +308,13 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   never checkStatus/complete); otherwise NO line. A throw omits the line
  *   entirely. Suppressed in a worker context (lane-derived guidance is
  *   Lead-only, same discipline as the lanes profiles section).
+ * @param {Function} [input.openItemsFn] — 0113: injectable open-items collector
+ *   (defaults to collectLeadOpenItems — enumerates the bound repo's wao/run_*
+ *   branches, reads transcripts read-only, and counts the same-project feedback
+ *   inbox). Called ONLY when the workspace is bound and NOT in a worker context
+ *   (same discipline as the lanes profiles section); returned `open item: `
+ *   lines are pushed into observations under the 64-line cap. Facts only —
+ *   never checkStatus/warnings/complete; a throw omits the whole section.
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -322,6 +333,7 @@ export async function aggregateLeadPreflight({
   workerContextFn,
   countProjectBucketsFn,
   laneWiringFactFn,
+  openItemsFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
@@ -670,6 +682,30 @@ export async function aggregateLeadPreflight({
     }
   } catch {
     // 读不了 → 省略整行（advisory 纪律；绝不影响 preflight 其余部分）。
+  }
+
+  // --- Section 5c: Lead open items (0113; advisory, read-only, independent) ---
+  // 待 Lead 收口事项的事实行（`open item: ` 开头）：等裁定的交付、终态未收口
+  // 的运行、留待回收的分支与运行树、同项目时的收件箱未处理条数。facts only
+  // ——不进 checkStatus、不影响 complete、不动手；只读收集在 leadOpenItems.js
+  // （其内部按来源独立结算），这里的 catch 只兜意外。与车道画像同一判法：
+  // 仅在工作区已绑定且不在 worker 上下文时调用（WAO 不向 worker 投影）。
+  // 排在车道画像一节之前，让这些行先占 64 行预算的前排。
+  try {
+    const openItemsContextFn = typeof workerContextFn === "function" ? workerContextFn : nestedDispatchContext;
+    if (workspace && workspace.bound && openItemsContextFn() == null) {
+      const fn = typeof openItemsFn === "function" ? openItemsFn : collectLeadOpenItems;
+      const openItemLines = await fn({
+        authorizedWorkspaceRoot: workspaceBinding.root,
+        runDir,
+      });
+      for (const line of (Array.isArray(openItemLines) ? openItemLines : [])) {
+        if (observations.length >= 64) break;
+        if (typeof line === "string" && line.length > 0) observations.push(line);
+      }
+    }
+  } catch {
+    // 读不出 → 整段省略（advisory 纪律；绝不影响 preflight 其余部分）。
   }
 
   // --- Section 6: lane profiles (0087; advisory, independent, read-only) ---

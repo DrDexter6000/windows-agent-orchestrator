@@ -578,3 +578,67 @@ test("BK-G4: lane omissions that would fill the 64-line cap → still 64 lines, 
   assert.ok(bucketAt >= 0, "the bucket line survives a full lane section");
   assert.ok(firstLaneAt > bucketAt, "the lane section fills the slots left after the bucket line");
 });
+
+// ===== O. open items wiring (decision 0113; facts-only observations) =====
+
+test("OI-O1: bound + non-worker context → collector called with root+runDir, lines appended; complete/checkStatus untouched", async () => {
+  let calledWith = null;
+  const result = await aggregateLeadPreflight(baseInput({
+    // 本文件可能继承 worker 运行的 env 标记（nestedDispatchContext 非空），
+    // 显式声明非 worker 上下文保持确定性（BK-G4 同款）。
+    workerContextFn: () => null,
+    openItemsFn: async (args) => {
+      calledWith = args;
+      return ["open item: 2 settled delivery run(s) await a Lead decision (run_delivery_review_bundle): run_x", "open item: 1 unprocessed feedback entry in the WAO inbox (`wao feedback list`)"];
+    },
+  }));
+  assert.ok(calledWith && calledWith.authorizedWorkspaceRoot === "/A", "collector receives the bound workspace root");
+  assert.equal(calledWith.runDir, "/runs", "collector receives runDir");
+  const openItemLines = result.observations.filter((o) => o.startsWith("open item: "));
+  for (const line of openItemLines) {
+    assert.ok(line.length <= 512, "open item lines stay within the observation cap");
+  }
+  assert.equal(openItemLines.length, 2,
+    `both open item lines appended: ${JSON.stringify(result.observations)}`);
+  assert.equal(result.complete, true, "facts only — complete untouched");
+  assert.deepEqual(result.checkStatus, { workspace: "observed", workers: "observed", activeRuns: "observed" },
+    "checkStatus untouched by the open items section");
+  assert.equal(result.warnings.length, 0, "open items never emit warnings");
+});
+
+test("OI-O2: worker context → collector NOT called (same discipline as lanes)", async () => {
+  let called = false;
+  const result = await aggregateLeadPreflight(baseInput({
+    workerContextFn: () => ({ kind: "worker" }),
+    openItemsFn: async () => { called = true; return ["open item: must not appear"]; },
+  }));
+  assert.equal(called, false, "worker context suppresses the open items section");
+  assert.ok(!result.observations.some((o) => o.startsWith("open item: ")));
+});
+
+test("OI-O3: unbound workspace → collector NOT called", async () => {
+  let called = false;
+  const result = await aggregateLeadPreflight(baseInput({
+    workspaceBinding: { bound: false },
+    openItemsFn: async () => { called = true; return ["open item: must not appear"]; },
+  }));
+  assert.equal(called, false, "unbound → no open items collection");
+  assert.ok(!result.observations.some((o) => o.startsWith("open item: ")));
+});
+
+test("OI-O4: collector throws → section omitted, rest of the preflight unchanged (complete stays true)", async () => {
+  const result = await aggregateLeadPreflight(baseInput({
+    gateStatusFn: async () => ({ free: true }),
+    openItemsFn: async () => { throw new Error("boom"); },
+  }));
+  assert.ok(!result.observations.some((o) => o.startsWith("open item: ")), "throw omits the whole section");
+  assert.equal(result.complete, true);
+  assert.ok(result.observations.some((o) => o === "verification gate: free"), "other sections unaffected");
+});
+
+test("OI-O5: default collector (no injection) → any open item lines it emits are well-formed or absent, never a throw", async () => {
+  const result = await aggregateLeadPreflight(baseInput());
+  for (const o of result.observations.filter((x) => x.startsWith("open item: "))) {
+    assert.ok(o.length <= 512 && o.length > "open item: ".length, `well-formed line: ${o}`);
+  }
+});
