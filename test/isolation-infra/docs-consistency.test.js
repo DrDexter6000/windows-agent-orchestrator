@@ -356,7 +356,7 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
     assert.ok(!readSection.includes(copied), `AGENTS.md 不得复制 tier-1 清单成员 ${copied}`);
   }
 
-  for (const id of ["repo-change", "m12-containment", "contract-edit", "user-first-use", "user-config", "user-troubleshoot", "user-daily", "harness-certify", "seat-certify", "owner-decide"])
+  for (const id of ["repo-change", "worker-repo-change", "m12-containment", "contract-edit", "user-first-use", "user-config", "user-troubleshoot", "user-daily", "harness-certify", "seat-certify", "owner-decide"])
     assert.ok(tier1Paths(id).length > 0, `docs/ssot.md tier-1 表缺行动面 ${id}`);
   // 认证两面（2026-09-21 双层认证落地）：新增行动面的指针必须是活的——两层认证
   // 机制已存在而 §0.1 零路由是实际发生过的状态（本次登记前 ssot.md 对
@@ -367,6 +367,10 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
       assert.ok(existsSync(join(ROOT, rel)), `${id} tier-1 路径不存在：${rel}`);
   for (const rel of tier1Paths("m12-containment"))
     assert.ok(existsSync(join(ROOT, rel)), `m12-containment tier-1 路径不存在：${rel}`);
+  // 第 79 批 A3：worker 阅读行同规矩——行内反引号路径必须真实存在，死指针与
+  // owner-decide/harness-certify 同族。
+  for (const rel of tier1Paths("worker-repo-change"))
+    assert.ok(existsSync(join(ROOT, rel)), `worker-repo-change tier-1 路径不存在：${rel}`);
   assert.deepEqual(M12_AUTHORITY_PATHS, EXPECTED_M12_AUTHORITY_PATHS,
     "m12-containment tier-1 行必须精确保留四份 live authority + ADR-0018；删、增、换序都应红");
 });

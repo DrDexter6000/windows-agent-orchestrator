@@ -6,7 +6,7 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 
 ## Invariants
 
-1. WAO run state comes from the run's transcript (`runs/<runId>.jsonl` legacy flat, or `runs/projects/<slug>/<runId>.jsonl` since D2-②b — resolved via `src/projectBuckets.js`); agent memory may provide context but never overrides transcript facts.
+1. WAO run state comes from the run's own transcript; agent memory may provide context but never overrides transcript facts.
 2. Workers receive a bounded task and role contract, not Lead orchestration context. The control plane owns dispatch, state, delivery, and handoff records.
 3. Runtime-specific behavior stays behind a Backend and parser. Shared orchestration code does not branch on runtime.
 4. The control plane stays deterministic. Semantic decomposition, failure response, and final acceptance belong to the Lead.
@@ -18,10 +18,10 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 Use the action-matched tier-1 row in `docs/ssot.md` §0.1. That table is the only
 file list: read the union of rows your action matches, including each stated
 condition. `SKILL.md` remains conditional on actually operating WAO.
+Workers dispatched with a task brief use the `worker-repo-change` row; the Lead
+and independent development agents without one use `repo-change`.
 
 For aggregation, parsing, or classification changes, green unit tests are not enough; smoke the result against real transcripts before declaring completion.
-
-**WAO development Lead only**: start work by checking `wao feedback list` (how: `docs/usage/host.md` §反馈收件箱); each open entry either enters the ledger or is closed with a written reason. Workers do not do this.
 
 ## Documentation
 
@@ -44,7 +44,11 @@ Plain JavaScript ESM, named exports, two-space indentation, and async/await. Mat
 
 - Use the npm scripts for WAO entrypoints so they select Node 22; do not change the system-wide Node version.
 - On Windows, use an explicit absolute temporary path or `os.tmpdir()`; never use ambiguous POSIX `/tmp` paths.
-- Keep WAO independent from `D:\projects\talking-cli`.
-- Keep at most one active continuation entry; on workstream close, archive its logs (hash-verified same-depth move + tombstone pointer) instead of growing or rewriting them (ADR 0034).
+- Keep WAO independent from the talking-cli project.
+- The continuation entry is `.strategy/AGENTS.md`: it points to the single live handoff page under `.wao/runs/` (`npm run hygiene` W3 checks it); keep at most one live page, and on workstream close archive that page (hash-verified same-depth move + tombstone pointer) and close the entry — never grow or rewrite archived logs (ADR 0034).
 - No GUI or automatic merge/release behavior unless explicitly requested.
 - Never commit `config/agents.json`, `runs/`, `.wao-worktrees/`, credentials, or secrets.
+
+## WAO Development Lead Only (workers skip)
+
+Start work by checking `wao feedback list` (how: `docs/usage/host.md` §反馈收件箱); each open entry either enters the ledger or is closed with a written reason. Workers do not do this.
