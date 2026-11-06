@@ -54,6 +54,9 @@ import { serveCommand } from "./commands/serve.js";
 // 本机反馈收件箱（宿主项目 Lead 报 WAO 缺陷 → WAO 开发 Lead 收口）：纯 CLI 适配，
 // 数据逻辑委托 application/feedbackInbox.js（收件箱根从代码位置解析，不看 cwd）。
 import { feedbackCommand } from "./commands/feedback.js";
+// 决定 0115：wao manual 命令族（在任何目录按页/按节读使用手册）：纯 CLI 适配，
+// 数据逻辑委托 application/manual.js（手册根从代码位置解析，不看 cwd）。
+import { manualCommand } from "./commands/manual.js";
 // P4-乙 Phase 1a：help 文本抽到 src/cliHelp.js（命名导出 HELP_TEXT，字节不变）。
 // cli.js 底部自执行 main()，生成器（scripts/gen-surface.mjs）不能 import 本文件——
 // 它改 import 无副作用的 cliHelp.js，CLI 打印的仍是同一份 SSOT。
@@ -231,6 +234,10 @@ async function main(argv) {
   }
   if (command === "feedback") {
     await feedbackCommand(rest, config);
+    return;
+  }
+  if (command === "manual") {
+    await manualCommand(rest, config);
     return;
   }
   if (command === "consult") {

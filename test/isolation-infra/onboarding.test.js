@@ -1043,8 +1043,8 @@ test("R5-D: buildHostExamples derives one-liners from the snippet with stable/ex
   assert.equal(codex.stability, "experimental",
     "codex mcp family is experimental — stability travels with the example");
   assert.match(codex.command, /^codex mcp add wao -- node /);
-  assert.ok(HOST_EXAMPLES_AUTHORITY.includes("docs/usage/host.md"),
-    "authority pointer names docs/usage/host.md as the shape authority");
+  assert.ok(HOST_EXAMPLES_AUTHORITY.includes("wao manual host"),
+    "authority pointer names wao manual host as the shape authority");
   assert.deepEqual(buildHostExamples(undefined), [], "garbage input never throws, yields empty list");
 });
 

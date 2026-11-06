@@ -469,8 +469,8 @@ export async function waoDoctorCommand(args, config) {
       pushCheck(checks, {
         name: `kimi_token_file_${id}`,
         pass: false,
-        detail: `kimi-web worker ${id} 的 token 文件缺失或为空: ${tokenFile}（kimiHome 车道的派发凭据=该文件，缺失或为空时派发在建会话之前即被拒）；run: 在该主目录拉起一次 kimi web serve 生成 server.token（第一次在该主目录拉起时自动生成——见 docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
-        fix: `在该 kimiHome 主目录拉起一次 kimi web serve 生成 ${tokenFile}（docs/usage/lanes.md 的「kimi 车道的 worker serve」一节）`,
+        detail: `kimi-web worker ${id} 的 token 文件缺失或为空: ${tokenFile}（kimiHome 车道的派发凭据=该文件，缺失或为空时派发在建会话之前即被拒）；run: 在该主目录拉起一次 kimi web serve 生成 server.token（第一次在该主目录拉起时自动生成——见 wao manual lanes "kimi 车道的 worker serve"）`,
+        fix: `在该 kimiHome 主目录拉起一次 kimi web serve 生成 ${tokenFile}（wao manual lanes "kimi 车道的 worker serve"）`,
       });
     }
   }
@@ -494,8 +494,8 @@ export async function waoDoctorCommand(args, config) {
           name: `zcode_binary_${id}`,
           pass: true,
           level: "warn",
-          detail: `zcode worker ${id} 的 binary ${binary} 是不带盘符的根路径——派发时按运行目录所在盘解析，doctor 无法确认文件是否在；run: 改成带盘符的完整路径或 UNC 路径（docs/usage/lanes.md 的 registry 示例）`,
-          fix: `把 ${registryPath} 里该 worker 的 binary 改成带盘符的完整路径或 UNC 路径（docs/usage/lanes.md 的 registry 示例）`,
+          detail: `zcode worker ${id} 的 binary ${binary} 是不带盘符的根路径——派发时按运行目录所在盘解析，doctor 无法确认文件是否在；run: 改成带盘符的完整路径或 UNC 路径（wao manual lanes "registry 配置详解"）`,
+          fix: `把 ${registryPath} 里该 worker 的 binary 改成带盘符的完整路径或 UNC 路径（wao manual lanes "registry 配置详解"）`,
         });
         continue;
       }
@@ -512,8 +512,8 @@ export async function waoDoctorCommand(args, config) {
       pushCheck(checks, {
         name: `zcode_binary_${id}`,
         pass: false,
-        detail: `zcode worker ${id} 的 binary ${shown} 缺失、非绝对路径或不是文件——派发时 node 加载不到 binary，app-server 起不来（node <binary> app-server；桌面更新后安装路径会漂移）；run: 改成桌面捆绑 zcode.cjs 的真实绝对路径（docs/usage/lanes.md 的 registry 示例）`,
-        fix: `把 ${registryPath} 里该 worker 的 binary 改成桌面捆绑 zcode.cjs 的真实绝对路径（docs/usage/lanes.md 的 registry 示例）`,
+        detail: `zcode worker ${id} 的 binary ${shown} 缺失、非绝对路径或不是文件——派发时 node 加载不到 binary，app-server 起不来（node <binary> app-server；桌面更新后安装路径会漂移）；run: 改成桌面捆绑 zcode.cjs 的真实绝对路径（wao manual lanes "registry 配置详解"）`,
+        fix: `把 ${registryPath} 里该 worker 的 binary 改成桌面捆绑 zcode.cjs 的真实绝对路径（wao manual lanes "registry 配置详解"）`,
       });
     }
   }

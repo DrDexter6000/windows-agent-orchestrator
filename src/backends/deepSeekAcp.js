@@ -316,7 +316,7 @@ const SANDBOX_GRANT_DENIED_NOTE = "deepseek-acp: a command failed while the harn
   + "does not own the workspace directory or lacks full control of it; other sandboxed commands here are likely "
   + "to fail the same way. Lane-level fix, set once for all projects: declare the harness permission mode in the "
   + "registry entry (env DSH_PERMISSION_MODE=danger-full-access; commands then run outside the harness sandbox). "
-  + "See docs/usage/lanes.md, deepseek lane prerequisites, for this and for keeping the sandbox instead.";
+  + "See wao manual lanes \"deepseek 车道的目录权限前提\" for this and for keeping the sandbox instead.";
 
 // 工具结果里的全部文本：ACP 线上的真实形状是嵌套块
 // （{type:"content", content:{type:"text", text}}），平铺的 {type:"text", text} 也认。

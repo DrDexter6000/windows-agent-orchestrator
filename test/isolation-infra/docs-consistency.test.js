@@ -20,6 +20,14 @@ import { dirname, join } from "node:path";
 import { TOOLS } from "../../src/mcp/toolSurface.js";
 import { readUsageDocs, usagePageFiles } from "../_usageDocs.mjs";
 import { CONTINUE_REJECTION_REASONS } from "../../src/application/runContinue.js";
+import {
+  extractManualPointers,
+  fenceMarkerOf,
+  findManualPage,
+  isPureFenceCloser,
+  readManualIndex,
+  resolveManualSection,
+} from "../../src/application/manual.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -833,35 +841,92 @@ test("tier-1 四大文档保持在 byte cap 内（usage.md 帽盖整本手册）
   }
 });
 
-test("使用手册地图列出 docs/usage/ 下的每一页，列出的页都存在，每页开头指回地图", () => {
+test("使用手册地图列出 docs/usage/ 下的每一页，列出的页都存在，每页结构合格并指回地图", () => {
   const map = readFileSync(join(ROOT, "docs/usage.md"), "utf8");
   const listed = [...map.matchAll(/\]\(usage\/([a-z-]+\.md)\)/g)].map((m) => m[1]);
   const pages = usagePageFiles(ROOT);
   assert.ok(pages.length >= 2, "docs/usage/ 下应有按任务拆出的页");
   assert.equal(new Set(listed).size, listed.length, "地图里同一页只列一次");
   assert.deepEqual([...listed].sort(), pages, "地图列出的页与 docs/usage/ 下的文件必须一一对应");
-  for (const page of pages) {
-    const head = readFileSync(join(ROOT, "docs/usage", page), "utf8").split("\n").slice(0, 4).join("\n");
-    assert.match(head, /^# \S/, `docs/usage/${page} 第一行应是页标题`);
-    assert.ok(head.includes("](../usage.md)"), `docs/usage/${page} 开头应指回地图 docs/usage.md`);
+  // 页结构守卫（决定 0115）：frontmatter 合格 → 第一行非空内容是 `# ` 标题 →
+  // 标题后几行内有回指地图的链接。frontmatter 与标题由解析器守（畸形即抛，
+  // 与 `wao manual` 命令、地图页表生成器同一个解析器，不写第二份判定）。
+  const index = readManualIndex({ packageRoot: ROOT });
+  assert.deepEqual(index.pages.map((page) => `${page.name}.md`), pages,
+    "readManualIndex 解析出的页与 docs/usage/ 下的文件必须一一对应");
+  for (const page of index.pages) {
+    const head = page.text.slice(page.titleStart).split("\n").slice(0, 5).join("\n");
+    assert.ok(head.includes("](../usage.md)"),
+      `docs/usage/${page.name}.md 标题后几行应指回地图 docs/usage.md`);
   }
-  // 页面在 docs/usage/ 下，相对链接按页面所在目录解析；代码块里的不算链接。代码块由
-  // ``` 或 ~~~ 开栏，只有同一字符、长度不短于开栏的那一行才收栏。
+  // 页面在 docs/usage/ 下，相对链接按页面所在目录解析；代码块里的不算链接。围栏
+  // 判定与 manual.js 共用同一份（fenceMarkerOf/isPureFenceCloser）：只有纯收栏行
+  // （同字符、不短于开栏、后随仅空白）才收栏，带信息串的行（```js）只开栏。
   for (const rel of ["docs/usage.md", ...pages.map((page) => `docs/usage/${page}`)]) {
     let fence = null;
     for (const line of readFileSync(join(ROOT, rel), "utf8").split("\n")) {
-      const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
-      if (fence === null && marker) { fence = marker; continue; }
-      if (fence !== null) {
-        if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+      const marker = fenceMarkerOf(line);
+      if (marker) {
+        if (fence === null) fence = marker.chars;
+        else if (isPureFenceCloser(marker, fence)) fence = null;
         continue;
       }
+      if (fence !== null) continue;
       for (const [, target] of line.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
         if (/^(https?:|mailto:|#)/.test(target)) continue;
         assert.ok(existsSync(join(ROOT, dirname(rel), target.split("#")[0])), `${rel} 的链接 ${target} 指向不存在的文件`);
       }
     }
   }
+});
+
+test("src/、scripts/、docs/usage/ 与 SKILL.md 的每处 wao manual 指针都解析为存在且唯一的页与节", () => {
+  // 决定 0115：手册指针统一写成 `wao manual <页>` / `wao manual <页> "<节>"`。
+  // 每一处都经 src/application/manual.js（与命令、地图页表生成器同一个解析器）
+  // 验证：页存在；给了节名的还必须唯一命中（零命中/多命中即红）——节名改动会
+  // 在这里暴露，不会静默指向错误内容。
+  const index = readManualIndex({ packageRoot: ROOT });
+  const targets = [];
+  const walk = (rel) => {
+    for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) walk(child);
+      else if (/\.(js|mjs|cjs)$/.test(entry.name)) targets.push(child);
+    }
+  };
+  walk("src");
+  walk("scripts");
+  targets.push("SKILL.md");
+  for (const page of usagePageFiles(ROOT)) targets.push(`docs/usage/${page}`);
+  // 逐文件核两件事：①每个指针的页/节都解析；②带节名的指针一个都没漏核——
+  // 语法上带节名（页名后跟裸引号或转义引号 \"，后者是 JS 双引号串源码文本）
+  // 的出现次数，必须等于守卫实际核到节的指针数。数目对不上即红：这钉住
+  // "只核到页名"的漏认形状（转义引号曾漏认 8 处）。
+  const SYNTACTIC_SECTION = /wao manual [a-z0-9][a-z0-9-]*[ \t]+(?:"|\\")/g;
+  let pointers = 0;
+  let withSection = 0;
+  for (const rel of targets) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const found = extractManualPointers(text);
+    const syntactic = [...text.matchAll(SYNTACTIC_SECTION)].length;
+    const checked = found.filter((p) => p.section !== undefined).length;
+    assert.equal(checked, syntactic,
+      `${rel}: 语法上带节名的指针 ${syntactic} 处，守卫只核到 ${checked} 处（转义形状漏认？）`);
+    for (const p of found) {
+      pointers += 1;
+      if (p.section !== undefined) withSection += 1;
+      try {
+        const page = findManualPage(index, p.page);
+        if (p.section !== undefined) resolveManualSection(page, p.section);
+      } catch (err) {
+        assert.fail(`${rel} 的手册指针 "wao manual ${p.page}${p.section !== undefined ? ` \"${p.section}\"` : ""}" 解析失败: ${err.message}`);
+      }
+    }
+  }
+  assert.ok(pointers >= 12,
+    `指针守卫失明：应至少有 12 处 wao manual 指针（实扫 ${pointers} 处）`);
+  assert.ok(withSection >= 8,
+    `指针守卫失明：应至少有 8 处带节名的指针被核到节（实核 ${withSection} 处）`);
 });
 
 test("派发页列出的 run_continue 拒绝原因与代码闭集 CONTINUE_REJECTION_REASONS 一致", () => {

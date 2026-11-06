@@ -67,6 +67,7 @@
       "isolation-infra/layering.test.js",
       "isolation-infra/m12-13-isolation-failure.test.js",
       "isolation-infra/machineGatePaths.test.js",
+      "isolation-infra/manual.test.js",
       "isolation-infra/metrics.test.js",
       "isolation-infra/modelFamily.test.js",
       "isolation-infra/nodeVersionGuard.test.js",

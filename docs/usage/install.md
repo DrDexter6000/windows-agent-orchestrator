@@ -1,6 +1,9 @@
+---
+read_when: 部署参考：Node v22 约束与切换、可选 runtime 安装、凭据 env 判读、全局 `wao` 安装根、`config/default.json`；从零到可用的步骤在 AGENT_ONBOARDING.md
+---
 # 安装与配置
 
-> [使用手册](../usage.md)的一页：部署参考。从零到可用的操作步骤（每步跑什么、按什么顺序、这一步离了就做不了的规则）在 [`AGENT_ONBOARDING.md`](../../AGENT_ONBOARDING.md)；本页只保留步骤展开后需要的参考细节。
+> [使用手册](../usage.md)
 
 ## 前置要求
 

@@ -1,6 +1,9 @@
+---
+read_when: run 在跑时：等待、看状态和活动、停止
+---
 # 监督
 
-> [使用手册](../usage.md)的一页：run 在跑时怎么等、怎么看状态和活动、怎么停。
+> [使用手册](../usage.md)
 
 本页四个 MCP 工具（`run_status`、`run_activity`、`run_stop`、`run_wait`）的参数与形状以生成层 `docs/surface/mcp-tools.md` 为准（权威源是代码，随代码再生成）；本页写完成监督需要的用法、默认值、闭集取值和边界。状态机与事件定义见 `docs/02-architecture.md`，事件表见 [transcript 格式](transcript.md)。
 

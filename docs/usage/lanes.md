@@ -1,6 +1,9 @@
+---
+read_when: 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 车道的 serve、认证入口
+---
 # 车道配置与维护
 
-> [使用手册](../usage.md)的一页：配置一条车道（registry 字段、kimi 与 deepseek 车道的前提），维护 kimi 车道的 serve，找到认证入口。
+> [使用手册](../usage.md)
 
 ## registry 配置详解
 

@@ -3,8 +3,10 @@
 //
 // 薄入口（TD-185，2026-09-27）——docs/surface/ 下 gen-surface 生成文件
 // （mcp-tools.md、cli.md、transcript-events.md）的唯一进程入口，照
-// gen-certification-cli.mjs 的同款拆分。渲染逻辑全部在纯库
-// scripts/gen-surface.mjs（generate()/render()，导入零副作用、零入口探测）；本
+// gen-certification-cli.mjs 的同款拆分；2026-11 起同一入口还重写 docs/usage.md
+// 里一对标记之间的页表区域（决定 0115：区域从各页 frontmatter 生成，其余正文
+// 手写、原样保留）。渲染逻辑全部在纯库
+// scripts/gen-surface.mjs（generate()/render()/generateUsageMap()，导入零副作用、零入口探测）；本
 // 文件只做参数分发与文件 IO，不判断自身身份（无 import.meta.main / argv[1] 比对
 // / realpath-ino 判定——被删除的旧 fail-open 正是 `import.meta.main` 在
 // Node 22.x < 22.18 上为 undefined 所致）。
@@ -28,7 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { generate } from "./gen-surface.mjs";
+import { generate, generateUsageMap, USAGE_MD } from "./gen-surface.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -42,6 +44,16 @@ if (args.length === 0) {
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content, "utf8");
     console.log(`[gen-surface] wrote ${rel} (${Buffer.byteLength(content, "utf8")} bytes)`);
+  }
+  // docs/usage.md 不是整文件生成：只重写一对标记之间的页表区域（其余正文手写，
+  // 原样保留；决定 0115）。内容未变就不落盘（字节与 mtime 都不动）。
+  const usageTarget = join(REPO_ROOT, USAGE_MD);
+  const usageNext = generateUsageMap(REPO_ROOT);
+  if (usageNext !== readFileSync(usageTarget, "utf8")) {
+    writeFileSync(usageTarget, usageNext, "utf8");
+    console.log(`[gen-surface] rewrote ${USAGE_MD} page table (generated from page frontmatter)`);
+  } else {
+    console.log(`[gen-surface] ${USAGE_MD} page table is up to date`);
   }
 } else if (args.length === 1 && args[0] === "--check") {
   // 只读比对分支：两份逐一检查（都检查完才退出，让一次运行报出全部漂移）；
@@ -64,6 +76,24 @@ if (args.length === 0) {
       continue;
     }
     console.log(`[gen-surface] ${rel} is up to date (${Buffer.byteLength(content, "utf8")} bytes)`);
+  }
+  // docs/usage.md 页表区域同样有新鲜度契约（区域生成、正文手写）。
+  const usageTarget = join(REPO_ROOT, USAGE_MD);
+  let usageOnDisk;
+  try {
+    usageOnDisk = readFileSync(usageTarget, "utf8");
+  } catch {
+    console.error(`[gen-surface] ${USAGE_MD} does not exist — run npm run gen:surface and commit the output`);
+    failed = true;
+  }
+  if (usageOnDisk !== undefined) {
+    const usageNext = generateUsageMap(REPO_ROOT).replace(/\r\n/g, "\n");
+    if (usageOnDisk.replace(/\r\n/g, "\n") !== usageNext) {
+      console.error(`[gen-surface] ${USAGE_MD} page table is stale — run npm run gen:surface and commit the output`);
+      failed = true;
+    } else {
+      console.log(`[gen-surface] ${USAGE_MD} page table is up to date`);
+    }
   }
   if (failed) process.exit(1);
 } else {

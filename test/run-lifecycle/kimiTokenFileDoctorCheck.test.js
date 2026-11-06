@@ -70,7 +70,7 @@ test("决定 0074: token 文件缺失 → FAIL（点名路径与生成方式）"
     assert.equal(check.status, "fail", "缺失=FAIL（派发必失败口径）");
     assert.ok(check.detail.includes(join(root, "home", "server.token")), "detail 点名 token 文件路径");
     assert.match(check.detail, /server\.token/, "文件名在场");
-    assert.ok(check.fix && check.fix.includes("docs/usage/lanes.md"), "fix 指路生成方式文档");
+    assert.ok(check.fix && check.fix.includes('wao manual lanes "kimi 车道的 worker serve"'), "fix 指路生成方式文档");
     assert.match(report.verdict, /BROKEN/, "FAIL 计入 verdict");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -156,7 +156,7 @@ test("NEXT-07: verifier_gone——只有 CLI 面；按 acceptanceStatus 两支�
     surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "pending",
   });
   assert.match(pending, /Its verification will not finish\. Reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\./);
-  assert.match(pending, /adopt the delivery commit by hand under the adoption protocol \(docs\/usage\/delivery\.md\); wao runs delivery run_\S+ shows the commit\./);
+  assert.match(pending, /adopt the delivery commit by hand under the adoption protocol \(wao manual delivery "验证失败采纳协议"\); wao runs delivery run_\S+ shows the commit\./);
   assert.ok(pending.length <= NEXT_STEP_MAX_LEN, `${pending.length}`);
 
   const rejected = buildNextStep({

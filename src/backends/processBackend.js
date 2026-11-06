@@ -738,7 +738,7 @@ export function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredenti
   if (forbiddenBypassKey) {
     throw new Error(
       `nested-dispatch bypass marker in agent.env is not allowed: ${forbiddenBypassKey}` +
-      "（豁免仅 Lead 命令级授权，见 docs/usage/consult.md 场景 4e 审计席测试协议）",
+      "（豁免仅 Lead 命令级授权，见 wao manual consult \"场景 4e\"）",
     );
   }
   const requested = new Set(

@@ -1,6 +1,9 @@
+---
+read_when: delivery 模式派发、审查、重验证、验收或拒收、重打包
+---
 # 交付与验收
 
-> [使用手册](../usage.md)的一页：用 delivery 模式派发，审查交付、重验证、验收或拒收、重打包。
+> [使用手册](../usage.md)
 
 ## 场景 4b：delivery 模式（foreground run + 原子交付 commit）
 

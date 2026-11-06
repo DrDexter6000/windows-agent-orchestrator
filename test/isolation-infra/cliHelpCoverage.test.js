@@ -226,6 +226,7 @@ const FLAG_MODULE_COMMANDS = {
   "src/commands/feedback.js": ["feedback submit", "feedback list", "feedback show", "feedback close"],
   "src/commands/lanes.js": ["wao lanes"],
   "src/commands/lifecycle.js": ["retry", "resume"],
+  "src/commands/manual.js": ["manual"],
   "src/commands/mcp.js": ["mcp status", "mcp bind", "mcp unbind"],
   "src/commands/observe.js": ["status", "tail", "collect"],
   "src/commands/onboarding.js": ["wao onboarding"],

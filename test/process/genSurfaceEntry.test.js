@@ -108,6 +108,11 @@ function buildFixture(home) {
   // playbooks/lead 是 src/application/playbookCatalog.js 的加载期必读目录
   // （src/mcp/server.js 的 import 链在模块加载时就校验闭集目录）。
   copyFixtureTree(join(REPO_ROOT, "playbooks"), join(root, "playbooks"));
+  // 使用手册（决定 0115）：gen-surface 的 usage-map 步骤读 docs/usage.md 与
+  // docs/usage/ 各页的 frontmatter，重写地图页表区域。
+  mkdirSync(join(root, "docs"), { recursive: true });
+  writeFileSync(join(root, "docs", "usage.md"), readFileSync(join(REPO_ROOT, "docs", "usage.md")));
+  copyFixtureTree(join(REPO_ROOT, "docs", "usage"), join(root, "docs", "usage"));
   mkdirSync(join(root, "scripts"), { recursive: true });
   for (const name of ["gen-surface.mjs", "gen-surface-cli.mjs"]) {
     writeFileSync(join(root, "scripts", name), readFileSync(join(REPO_ROOT, "scripts", name)));
@@ -162,10 +167,12 @@ async function importFixtureLib(fixtureRoot) {
 }
 
 // ===== 场景 1：目标缺失 + 无参生成 → 递归建目录并写出两份，内容 == 真实派生结果 =====
-test("entry-1: docs/ 整体缺失 + 无参 → 递归建目录写出两份，内容逐字等于 generate() 输出", async () => {
+test("entry-1: docs/surface/ 缺失 + 无参 → 递归建目录写出三份，内容逐字等于 generate() 输出", async () => {
   const { home, fixture, cwd } = setup();
   try {
-    rmSync(join(fixture, "docs"), { recursive: true, force: true }); // 连 docs/ 一起删，证明 mkdir -p
+    // 只删 docs/surface（usage.md 不是整文件生成——区域重写依赖手写正文在场，
+    // 决定 0115；递归建目录的证明面是 surface 目录）。
+    rmSync(join(fixture, "docs", "surface"), { recursive: true, force: true });
     const lib = await importFixtureLib(fixture);
     const expected = await lib.generate();
     const r = runCli(cwd, fixture, []);
@@ -481,13 +488,14 @@ test("entry-8: import 库 / 直接运行库 / -e 导入且 argv 伪装 → 无�
     assert.equal(rDisguised2.stderr, "");
     assert.deepEqual(readFileSync(mcp), before, "过期文件必须逐字节原样");
 
-    // (e) 纯库导出面：恰好 generate 与 render；render 是纯同步渲染（不建 server、
-    //     不触网络、不写盘）——最小 tools 输入冒烟 + 与 generate() 的 cli.md 一致。
+    // (e) 纯库导出面：恰好 generate、render 与 usage-map 三件（常量 + 行渲染 +
+    //     区域重写；决定 0115）；render 是纯同步渲染（不建 server、不触网络、
+    //     不写盘）——最小 tools 输入冒烟 + 与 generate() 的 cli.md 一致。
     const lib = await importFixtureLib(fixture);
     assert.deepEqual(
       Object.keys(lib).sort(),
-      ["generate", "render"],
-      "纯库只导出 generate 与 render",
+      ["USAGE_MAP_CLOSE", "USAGE_MAP_OPEN", "USAGE_MD", "generate", "generateUsageMap", "render", "renderUsageMapRows"],
+      "纯库只导出 generate/render 与 usage-map 面",
     );
     const smokeTool = {
       name: "smoke_tool",
@@ -504,6 +512,87 @@ test("entry-8: import 库 / 直接运行库 / -e 导入且 argv 伪装 → 无�
     const full = await lib.generate();
     assert.equal(rendered[CLI_KEY], full[CLI_KEY], "render 与 generate 的 cli.md 一致（同一 SSOT）");
     assert.equal(rendered[EVENTS_KEY], full[EVENTS_KEY], "render 与 generate 的 transcript-events.md 一致（登记表不依赖 tools）");
+  } finally {
+    rmrfRetry(home);
+  }
+});
+
+// ===== 场景 10：usage-map 区域（决定 0115）：过期→只重写区域；缺标记→fail-loud =====
+test("entry-10: docs/usage.md 页表区域过期 → 只重写标记对之间；缺标记 → 非零退出不修复", async () => {
+  const { home, fixture, cwd } = setup();
+  const usagePath = join(fixture, "docs", "usage.md");
+  try {
+    const lib = await importFixtureLib(fixture);
+    const expectedUsage = lib.generateUsageMap(fixture);
+    const fresh = readFileSync(usagePath, "utf8");
+    assert.equal(fresh, expectedUsage, "夹具自检：真仓复制的地图本就新鲜");
+
+    // (a) 手改标记对之间的一行（模拟手写页表漂移）：无参 → 只重写区域，
+    //     标记对之外的正文逐字节保留；再跑一次幂等（不落盘、报 up to date）。
+    const stale = fresh.replace("| [会审](usage/consult.md) |", "| [手写会审](usage/consult.md) |");
+    assert.notEqual(stale, fresh, "夹具自检：过期副本必须真的不同");
+    writeFileSync(usagePath, stale, "utf8");
+    const r1 = runCli(cwd, fixture, []);
+    assertSpawnClean(r1, "entry-10 rewrite");
+    assert.equal(r1.status, 0, `stderr: ${r1.stderr}`);
+    assert.match(r1.stdout, /rewrote docs\/usage\.md page table/, "应有区域重写声明");
+    assert.equal(readFileSync(usagePath, "utf8"), expectedUsage, "重写后 == 生成器输出");
+    const r2 = runCli(cwd, fixture, []);
+    assertSpawnClean(r2, "entry-10 idempotent");
+    assert.equal(r2.status, 0, `stderr: ${r2.stderr}`);
+    assert.match(r2.stdout, /docs\/usage\.md page table is up to date/, "第二次应报 up to date");
+    assert.equal(readFileSync(usagePath, "utf8"), expectedUsage, "幂等：字节不变");
+
+    // (a2) 行序是手写阅读决策：生成器沿用区域里已有行的顺序，新页按页名序追加
+    //     在末尾——不退回字母序。夹具新页 zz-newpage（字母序在最后，效果等同），
+    //     再造一个字母序本应排最前的 aa-newpage：若生成器按字母序重排，install
+    //     不会是第一行、aa-newpage 会插队；必须保持现状并把两个新页都追加在后。
+    const regionOrderBefore = [...readFileSync(usagePath, "utf8")
+      .matchAll(/\]\(usage\/([a-z0-9-]+)\.md\)/g)].map((m) => m[1]);
+    assert.equal(regionOrderBefore[0], "install", "夹具自检：真仓页表第一行应是 install（恢复原阅读顺序后）");
+    for (const name of ["zz-newpage", "aa-newpage"]) {
+      writeFileSync(join(fixture, "docs", "usage", `${name}.md`),
+        `---\nread_when: ${name} 何时读\n---\n# ${name}\n\n> [使用手册](../usage.md)\n`, "utf8");
+    }
+    const rOrder = runCli(cwd, fixture, []);
+    assertSpawnClean(rOrder, "entry-10 order");
+    assert.equal(rOrder.status, 0, `stderr: ${rOrder.stderr}`);
+    const regionOrderAfter = [...readFileSync(usagePath, "utf8")
+      .matchAll(/\]\(usage\/([a-z0-9-]+)\.md\)/g)].map((m) => m[1]);
+    assert.deepEqual(
+      regionOrderAfter,
+      [...regionOrderBefore, "aa-newpage", "zz-newpage"],
+      "已有页保持区域行序，新页按页名序追加在末尾",
+    );
+    // 清掉两个新页，恢复与 expectedUsage 可比的状态（重删文件后重生成）。
+    rmSync(join(fixture, "docs", "usage", "zz-newpage.md"), { force: true });
+    rmSync(join(fixture, "docs", "usage", "aa-newpage.md"), { force: true });
+    const rRestore = runCli(cwd, fixture, []);
+    assertSpawnClean(rRestore, "entry-10 restore");
+    assert.equal(rRestore.status, 0, `stderr: ${rRestore.stderr}`);
+    assert.equal(readFileSync(usagePath, "utf8"), lib.generateUsageMap(fixture), "删新页后回到与生成器一致");
+
+    // (b) --check 对区域过期：exit 1 指明 stale，不修复。
+    writeFileSync(usagePath, stale, "utf8");
+    const rChk = runCli(cwd, fixture, ["--check"]);
+    assertSpawnClean(rChk, "entry-10 check stale");
+    assert.equal(rChk.status, 1, `区域过期 --check 应 exit 1；stdout: ${rChk.stdout}`);
+    assert.match(rChk.stderr, /docs\/usage\.md page table is stale/, "stderr 应指明页表区域 stale");
+    assert.equal(readFileSync(usagePath, "utf8"), stale, "--check 不得修复");
+
+    // (c) 缺起始标记（手写页表、没放标记对）：生成与检查都非零退出，文件原样。
+    const noMarkers = fresh.replace(lib.USAGE_MAP_OPEN, "<!-- someone deleted the marker -->");
+    assert.notEqual(noMarkers, fresh, "夹具自检：去标记副本必须真的不同");
+    writeFileSync(usagePath, noMarkers, "utf8");
+    const rNoOpen = runCli(cwd, fixture, []);
+    assertSpawnClean(rNoOpen, "entry-10 no marker write");
+    assert.notEqual(rNoOpen.status, 0, "缺标记必须非零退出（fail-loud，绝不静默跳过）");
+    assert.ok(rNoOpen.stderr.includes("起始标记"), "失败原因应点名缺标记");
+    assert.equal(readFileSync(usagePath, "utf8"), noMarkers, "生成失败文件原样");
+    const rNoOpenChk = runCli(cwd, fixture, ["--check"]);
+    assertSpawnClean(rNoOpenChk, "entry-10 no marker check");
+    assert.notEqual(rNoOpenChk.status, 0, "缺标记下 --check 也非零退出");
+    assert.equal(readFileSync(usagePath, "utf8"), noMarkers, "检查失败文件原样");
   } finally {
     rmrfRetry(home);
   }

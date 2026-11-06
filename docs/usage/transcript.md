@@ -1,6 +1,9 @@
+---
+read_when: transcript 的位置与事件清单入口（清单在生成层）
+---
 # transcript 格式
 
-> [使用手册](../usage.md)的一页：transcript 放在哪、记哪些事件、怎么把平铺的旧 transcript 迁进项目桶。
+> [使用手册](../usage.md)
 
 > 事件名与说明的真值源是代码里的登记表 `TRANSCRIPT_EVENT_REGISTRY`（`src/transcriptEvents.js`，冻结闭集——改事件名/说明只改这一处）。本页不维护事件表；完整清单（每个事件一行：何时写、载荷约束、legacy 标记）读生成层 `docs/surface/transcript-events.md`（`npm run gen:surface` 再生成）。写入侧守卫（`src/transcript.js` 的共用事件序列化 + 严格模式）保证代码写出的每种事件都已登记；其它文档（SKILL.md 等）也只指向生成清单，不维护第二份表。
 

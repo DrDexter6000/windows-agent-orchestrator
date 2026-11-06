@@ -136,8 +136,8 @@ function render(surface, situation, runId, extras) {
       // 终态等验证、验证者已证明不在。出口仍是既有的：未决定时有界拒收，
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
       text = extras.acceptanceStatus === "rejected"
-        ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (docs/usage/delivery.md)."
-        : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (docs/usage/delivery.md); wao runs delivery ${runId} shows the commit.`;
+        ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\")."
+        : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\"); wao runs delivery ${runId} shows the commit.`;
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {

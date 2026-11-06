@@ -1,6 +1,9 @@
+---
+read_when: 清理历史 run 与工作树、daemon、Owner 看板
+---
 # 维护
 
-> [使用手册](../usage.md)的一页：清理历史 run 与工作树，跑 daemon，开 Owner 看板。
+> [使用手册](../usage.md)
 
 ## 管理历史 run
 

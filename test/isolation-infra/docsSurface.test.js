@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { generate } from "../../scripts/gen-surface.mjs";
+import { generate, generateUsageMap, USAGE_MD } from "../../scripts/gen-surface.mjs";
 import { renderCertification } from "../../scripts/gen-certification.mjs";
 import { HELP_TEXT } from "../../src/cliHelp.js";
 import { TOOLS } from "../../src/mcp/toolSurface.js";
@@ -83,6 +83,20 @@ test("docsSurface-4: HELP_TEXT is a non-empty long string; cli.md embeds it verb
   assert.ok(
     onDisk.includes("```text\n" + HELP_TEXT + "```"),
     "cli.md embeds HELP_TEXT verbatim inside the fenced code block",
+  );
+});
+
+// 决定 0115：docs/usage.md 不是整文件生成——一对标记之间的页表区域从各页
+// frontmatter（read_when）生成，其余正文手写。钉法与 docsSurface-1 同纪律：
+// 磁盘（CRLF 归一化后）== generateUsageMap() 重渲染，即区域新鲜；标记缺失时
+// generateUsageMap 抛错，本测试也红（fail-closed，不静默跳过）。
+test("docsSurface-6: committed docs/usage.md page-table region equals generateUsageMap() output", async () => {
+  const onDisk = await readNormalized(USAGE_MD);
+  const generated = generateUsageMap().replace(/\r\n/g, "\n");
+  assert.equal(
+    onDisk,
+    generated,
+    `${USAGE_MD} page table is stale — run npm run gen:surface and commit the output`,
   );
 });
 

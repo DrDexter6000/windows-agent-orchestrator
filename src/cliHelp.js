@@ -7,7 +7,7 @@
 // other consumer import HELP_TEXT from here instead, with zero side effects.
 //
 // 帮助页是给用户的速查：每条命令一行语法，需要说明的同行一句短话；内部
-// 编号（决定号/TD 号/批次号）不进帮助页，长解释归 docs/usage/。run/spawn
+// 编号（决定号/TD 号/批次号）不进帮助页，长解释归使用手册（wao manual）。run/spawn
 // 的用法行与 RUN_USAGE_TEXT 列出 src/commands/run.js 读取的面向用户的参数；
 // 程序内部穿线/高级覆盖用的旗标（--run-id、--state-dir 等）统一收在 Notes 的
 // 内部旗标一行，不逐条写进命令行（test/isolation-infra/cliHelpCoverage.test.js
@@ -52,11 +52,12 @@ Commands:
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery review <runId> --file-index N [--cursor TOKEN] [--format json] [--cwd DIR] [--run-dir DIR]   # 逐文件读交付 diff 片段（≤16KiB/页，--cursor 翻页；未验证/不可用给闭集原因）
   runs delivery reverify <runId> --reason <code> [--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 未变工件审计式重验证；--attempt 2 为第二次（也是最后一次）机会，仅当第一次因环境/工具码失败
-  runs wait <runId> [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标，见 docs/usage/supervise.md）
+  runs wait <runId> [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标，见 wao manual supervise "等待到收口"）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
   runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
   playbook show <id> [--format json]   # 展示一个完整 Lead playbook（只读）
+  manual [<页> [<节>]] [--all]   # 读使用手册（安装根 docs/usage，任何目录可读）：裸调用列各页；<页>列节；<页> <节>读一节；<页> --all 读整页
   feedback submit --file <md> [--title <text>] [--inbox-dir DIR] [--format json]   # 宿主 Lead 报 WAO 缺陷/别扭到本机收件箱（不联网、不调用模型）
   feedback list [--all] [--inbox-dir DIR] [--format json]   # WAO 开发 Lead：列出未处理反馈；--all 含已处理
   feedback show <id> [--inbox-dir DIR] [--format json]   # 打印一条反馈全文（先找未处理，再找已处理）
@@ -101,20 +102,20 @@ Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor
   wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读）：接线轴+画像+认证简表+就绪探测
 
 Notes:
-  - 完整用法与场景说明见 docs/usage.md 与 docs/usage/ 各专页。
+  - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
   - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 20 名；与 HELP_TEXT 的关系是
+// （如 `run status ...`）做 did-you-mean 提示。恰 21 名；与 HELP_TEXT 的关系是
 // 双向守卫（HELP_TEXT 每个两空格命令行首词必须在闭集内，闭集每个成员在
 // HELP_TEXT 有行锚定条目）；不含 help（HELP_TEXT 无 help 命令行）。
 export const COMMAND_NAMES = Object.freeze([
   "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
   "stop", "runs", "dashboard", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
-  "feedback", "skill",
+  "feedback", "skill", "manual",
 ]);
 
 // A-2（friction 2026-08-15 #2）：`run --help` 用法页。顶层 HELP_TEXT 字节冻结

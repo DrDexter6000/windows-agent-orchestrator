@@ -1,6 +1,9 @@
+---
+read_when: 多席只读会审、会审席位记录、审计席测试协议
+---
 # 会审
 
-> [使用手册](../usage.md)的一页：召集多席只读会审，记录会审席位，让审计席跑派发族测试。
+> [使用手册](../usage.md)
 
 ## 场景 4d：多席只读会审（wao consult，决定 0039）
 
@@ -64,9 +67,8 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 `consult run` 就在 stderr 报出 `consultId` 与各席 runId：`consult wait
 <consultId>` 接着等（各席到终态或窗口到期即返回，缺省 270000ms，可反复调用），
 `consult wait <consultId> --until-settled` 等到每个已派发席位的 run 收口才返回
-（收口判定与 `runs wait --until-settled` 同一套：run 终态、有交付时验证与
-reverify 链也都有结果；无 runId 的席位——派发未成立——不等；退出码 0/3/4/130
-同义，未收口席位在 stderr 点名；无总时长，只读、不停席位），`consult show
+（收口判定与退出码同 `runs wait --until-settled`，见 `wao manual supervise "等待到收口"`；
+无 runId 的席位——派发未成立——不等；未收口席位在 stderr 点名），`consult show
 <consultId>`（MCP 面：`run_consult {consultId}`）按当前转录重新推导，零派发。
 要求窗口内交付，就在任务书里限制工作量（不跑测试、限命令数），代价是席位
 自查深度，取舍归 Lead。每席 prompt 尾部始终带**席位级固定会审合同**（禁实现、

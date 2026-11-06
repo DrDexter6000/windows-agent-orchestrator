@@ -3,7 +3,7 @@
 
 Audience: repository-level agents and humans; the online Lead reads SKILL.md + per-result semanticNotes instead.
 
-Every event type any production write outlet may write, one row each. The single editable home for event names and descriptions is the frozen registry `TRANSCRIPT_EVENT_REGISTRY` in `src/transcriptEvents.js` (legacy marker kept on types with no current production writer, kept only for reading old transcripts). The shared event serializer in `src/transcript.js` checks the registry on every write, so a type written but not registered fails the deterministic suite (WAO_TRANSCRIPT_EVENT_STRICT=1). `docs/02-architecture.md` §3.2 and `docs/usage/transcript.md` point here; neither keeps a table.
+Every event type any production write outlet may write, one row each. The single editable home for event names and descriptions is the frozen registry `TRANSCRIPT_EVENT_REGISTRY` in `src/transcriptEvents.js` (legacy marker kept on types with no current production writer, kept only for reading old transcripts). The shared event serializer in `src/transcript.js` checks the registry on every write, so a type written but not registered fails the deterministic suite (WAO_TRANSCRIPT_EVENT_STRICT=1). `docs/02-architecture.md` §3.2 and `docs/usage/transcript.md` (`wao manual transcript`) points here; neither keeps a table.
 
 | type | 说明 |
 | --- | --- |

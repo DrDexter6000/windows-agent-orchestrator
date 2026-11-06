@@ -207,7 +207,7 @@ async function worktreeCommand(args, config) {
       if (!entry) {
         throw new Error(
           `worktree remove 只删 git 登记在册的链接工作树：${path} 不是，未删除。` +
-          "只读运行的私有克隆怎么清理见 docs/usage/maintenance.md「worktree 清理失败」",
+          "只读运行的私有克隆怎么清理见 wao manual maintenance \"worktree 清理失败\"",
         );
       }
       if (entry.locked) {
@@ -220,7 +220,7 @@ async function worktreeCommand(args, config) {
     if (existsSync(path)) {
       throw new Error(
         `${path} 删除失败，目录仍在（常见是有进程以它为当前目录或占着里面的文件），` +
-        "见 docs/usage/maintenance.md「worktree 清理失败」",
+        "见 wao manual maintenance \"worktree 清理失败\"",
       );
     }
     console.log(JSON.stringify({ removed: path }));
