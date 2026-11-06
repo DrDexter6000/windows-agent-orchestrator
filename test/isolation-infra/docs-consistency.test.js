@@ -949,17 +949,14 @@ test("派发页列出的 run_continue 拒绝原因与代码闭集 CONTINUE_REJEC
   assert.deepEqual(unknown, [], "派发页列了代码闭集里没有的拒绝原因");
 });
 
-test("使用手册 host 页与 SKILL 记录 workspace 工具（workspace_status/workspace_select/--workspace-root）", () => {
+test("使用手册 host 页与 team-roles 记录 workspace 工具（SKILL 不再维护工具名单）", () => {
   const host = read("docs/usage/host.md");
-  const skill = read("SKILL.md");
   assert.ok(host.includes("workspace_status"), "docs/usage/host.md must document workspace_status tool");
   assert.ok(host.includes("--workspace-root"), "docs/usage/host.md must mention --workspace-root startup flag");
-  // SKILL.md must list it in the tool table
-  assert.ok(skill.includes("workspace_status"), "SKILL.md tool table must include workspace_status");
   assert.ok(host.includes("workspace_select"), "docs/usage/host.md must document workspace_select tool");
-  assert.ok(skill.includes("workspace_select"), "SKILL.md tool table must include workspace_select");
-  // SKILL.md 当前工具数由 toolSurface 派生守卫从 TOOLS.length 推导钉住，此处不再钉计数。
-  assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
+  // 79 批 A2：SKILL 按批流程重排后不再写工具名单（宿主自己列出工具），原先
+  // "tool table must include …" 的三条名单钉随名单一起退役；工具面权威是
+  // src/mcp/toolSurface.js 与生成层，计数若写必须等于 TOOLS.length（TD-120 守卫）。
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -1645,13 +1642,21 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
   const n = TOOLS.length;
-  // (?<!\d) guards against e.g. "122 tools" matching the n=22 probe; the
-  // stale-claim negative also derives (n+1) so adding a tool never deadlocks
-  // the guard (panel audit 2026-08-15).
-  assert.ok(new RegExp(`(?<!\\d)${n} MCP tools|(?<!\\d)${n} tools`, "i").test(skill),
-    `SKILL.md Minimal MCP Loop 当前工具数必须与 toolSurface TOOLS.length=${n} 一致（M12-10 playbook 转 resources；M12-16 加 run_correct）`);
-  assert.ok(!new RegExp(`(?<!\\d)${n + 1} MCP tools|(?<!\\d)${n + 1} tools`, "i").test(skill),
-    `SKILL.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
+  // 79 批 A2：SKILL 按批流程重排后不再写工具名单与计数——宿主自己列出工具，
+  // 名单由 toolSurface 与生成层 docs/surface/mcp-tools.md 权威承载。守卫改守
+  // 两件事（同一件事的新形状）：①若写计数，必须等于 TOOLS.length（探针从 SSOT
+  // 派生，正负漂移都在这里红，比旧的正负双探针更严）；②名单形状不得回潮——
+  // roster 行是 4 个以上反引号标识符的逗号枚举，流程句不会长这样。
+  for (const m of skill.matchAll(/(?<!\d)(\d+)\s+(?:MCP\s+)?tools\b/gi)) {
+    assert.equal(Number(m[1]), n,
+      `SKILL.md 若写工具计数（当前 "${m[0]}"）必须等于 toolSurface TOOLS.length=${n}——或不写计数（宿主自己列出工具）`);
+  }
+  for (const m of skill.matchAll(/(?<!\d)(\d+)\s*个(?:\s*MCP\s*)?工具/g)) {
+    assert.equal(Number(m[1]), n,
+      `SKILL.md 若写中文工具计数（当前 "${m[0]}"）必须等于 toolSurface TOOLS.length=${n}——或不写计数`);
+  }
+  assert.ok(!/(?:`[a-z0-9_]+`,\s*){3,}`[a-z0-9_]+`/.test(skill),
+    "SKILL.md 不得再写工具名单（4+ 个反引号名的逗号枚举是 roster 形状；工具面权威是 toolSurface 与生成层）");
   // architecture 的 server.js "N tools + roster" 注释行已随 §7
   // 手写目录树退役——工具数与 roster 名序的权威是 src/mcp/toolSurface.js 与生成层
   // docs/surface/mcp-tools.md（headings == TOOLS 由 docsSurface-3 钉），此处不再
@@ -2167,11 +2172,18 @@ test("M12-6 docs: exact verifier env does NOT inherit worker node_modules — Le
 test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间并限定使用条件", async () => {
   const skill = read("SKILL.md");
   const { REVERIFY_REASONS } = await import("../../src/application/runDeliveryReverify.js");
-  // (1) Tool-table order: run_delivery_reverify sits between run_delivery and
-  // run_delivery_decide (same discipline as the review tools).
-  assert.ok(skill.indexOf("`run_delivery_reverify`") > skill.indexOf("`run_delivery`")
-    && skill.indexOf("`run_delivery_reverify`") < skill.indexOf("`run_delivery_decide`"),
-    "SKILL 工具表把 reverify 放在 run_delivery 与 run_delivery_decide 之间");
+  // (1) 流程语义（79 批 A2 重排后 SKILL 不再有工具表）：续修（run_continue）与
+  // reverify（run_delivery_reverify）的入口都必须出现在裁定步骤（裁定与收尾）之前
+  // ——窄缺陷先交回原 worker、环境类失败先归因重验，然后才决定。锚在裁定步骤名
+  // 而不是 `run_delivery_decide` 的首次字面出现：交付真相一步的"打包失败不得调
+  // review/decide"路由句（M11-12C 钉）也点名 decide，但它不是裁定动作本身。
+  assert.ok(skill.includes("`run_continue`") && skill.includes("`run_delivery_reverify`"),
+    "SKILL.md 必须点名 run_continue 与 run_delivery_reverify");
+  assert.ok(skill.indexOf("裁定与收尾") !== -1,
+    "SKILL.md 必须有裁定步骤（裁定与收尾）");
+  assert.ok(skill.indexOf("`run_continue`") < skill.indexOf("裁定与收尾")
+    && skill.indexOf("`run_delivery_reverify`") < skill.indexOf("裁定与收尾"),
+    "SKILL.md 里续修与 reverify 都出现在裁定之前（先修/先归因重验，后决定）");
   // (2) Use only when the ORIGINAL verification FAILED and the Lead has judged a
   // closed-set environment cause.
   assert.ok(/original verification.*failed|原.*verification.*failed|原始终态.*failed|original.*失败/i.test(skill),
@@ -2261,7 +2273,7 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 2026-09-19 to 12000 — TD-166; +15% 2026-10-02 for TD-191③; +600 2026-11-04 for the continuation step, decision 0112; +200 the same day for the batch-close open items, decision 0113)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 2026-09-19 to 12000 — TD-166; +15% 2026-10-02 for TD-191③; +600 2026-11-04 for the continuation step, decision 0112; +200 the same day for the batch-close open items, decision 0113; 2026-11-06 batch 79 A2 restructure 14600→13800 (13564B), same-day continuation restored gates & split step 3 → 14498B, +2% exceeds the original cap so the cap returns to 14600, never above it)", () => {
   // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
   // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
   // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
@@ -2273,6 +2285,11 @@ test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 202
   // 2026-11-04（决定 0112）：Owner 预先授权 Lead 按需扩限，13800→14400——验收一节
   // 加"窄缺陷裁定前交回原 worker 续修"一步。同日（决定 0113）14400→14600——批次收尾
   // 先看 lead_preflight 的待收口事项。
+  // 2026-11-06（第 79 批 A2，决定 0115 后续）：SKILL.md 重排为"一个批次的路径"
+  // （七步 + 条件分支 + 情形表），手册指针改 `wao manual`，工具名单与计数删除，
+  // 重排后 13564 字节、帽降 13800。同日续修（会审必改项）：先读门回到所属步骤
+  // 首句、第 3 步拆子项并补回硬参数细则、七步/分支标题双语——14498 字节，
+  // 新字节数 + 约 2% 已超原帽，帽回到 14600（续修授权明言不得超过原帽）。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
   assert.ok(bytes <= 14600,
@@ -2287,7 +2304,7 @@ test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 202
     "milestone-discipline 的 SKILL 帽句必须指向本守卫（防第二份陈述再生）");
 });
 
-test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路径存在且关键锚点可命中（关系型守卫，非值指纹）", () => {
+test("TD-166: SKILL.md 指针完整性——docs//references/ 路径存在，承重手册指针在场且可解析（关系型守卫，非值指纹）", () => {
   // TD-166（2026-09-19 激活）：SKILL.md 重构为路由+指针后，指针就是承重结构——
   // 指向不存在的文件/锚点 = 决策时刻读不到纪律。守卫断言关系（路径存在 + 锚点词
   // 在目标文件中出现），不断言字节数以外的内容值（TD-120 原则）。
@@ -2300,15 +2317,31 @@ test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路�
   for (const p of uniquePaths) {
     assert.ok(existsSync(join(ROOT, p)), `SKILL.md 指针目标不存在：${p}`);
   }
-  // 2) 带节标签的指针锚点必须能在目标文件中命中（防止节名漂移后指针变死链）。
-  const usage = read("docs/usage/delivery.md");
-  for (const anchor of ["场景 4b", "场景 4c", "## MCP `run_delivery_reverify`", "## MCP `run_delivery_repackage`"]) {
-    assert.ok(usage.includes(anchor), `docs/usage/delivery.md 缺 SKILL.md 指针所引的锚点：${anchor}`);
+  // 2) 承重手册指针（79 批 A2：手册指针统一 `wao manual <页> "<节>"`，解析由 0115
+  //    指针守卫承载——它已扫描 SKILL.md 并逐指针核到节）。原先核对 delivery.md /
+  //    dispatch.md 节名在场的部分，改成要求 SKILL 里对应的指针存在；指针在 +
+  //    0115 守卫解析 = 指向真实且唯一的节。此处再解析一次（同一解析器）使本守卫
+  //    自足：摘走指针或节名漂移都在这里红。
+  const index = readManualIndex({ packageRoot: ROOT });
+  const pointers = extractManualPointers(skill);
+  const expectedManualPointers = [
+    { page: "delivery", section: "场景 4b" }, // 派发合同（派交付前读）
+    { page: "delivery", section: "场景 4c" }, // Lead 验收细则
+    { page: "delivery", section: "MCP run_delivery_reverify" }, // reverify 资格闭集
+    { page: "delivery", section: "MCP run_delivery_repackage" }, // 重打包
+    { page: "dispatch", section: "MCP run_dispatch" }, // 派发字段语义
+    { page: "supervise", section: "等待到收口" }, // 等待纪律
+  ];
+  for (const expected of expectedManualPointers) {
+    const label = `wao manual ${expected.page} "${expected.section}"`;
+    assert.ok(pointers.some((p) => p.page === expected.page && p.section === expected.section),
+      `SKILL.md 缺承重手册指针 "${label}"`);
+    resolveManualSection(findManualPage(index, expected.page), expected.section);
   }
-  assert.ok(read("docs/usage/dispatch.md").includes("## MCP `run_dispatch`"), "docs/usage/dispatch.md 缺 SKILL.md 指针所引的 MCP run_dispatch 小节");
-  // 3) 节级内容绑定（审计复核补强 2026-09-19）：SKILL 指针所指的小节必须真的
-  // 承载所指内容——全文关键词命中不证明"节存在且内容在节内"。reverify 指针所指
-  // 的 §四 run_delivery_reverify 小节必须携带资格闭集与环境原因闭集。
+  // 3) 节级内容绑定（审计复核补强 2026-09-19；79 批 A2 保留）：SKILL 指针所指的
+  // 小节必须真的承载所指内容——全文关键词命中不证明"节存在且内容在节内"。
+  // reverify 指针所指的 run_delivery_reverify 小节必须携带资格闭集与环境原因闭集。
+  const usage = read("docs/usage/delivery.md");
   const reverifySection = usage.slice(
     usage.indexOf("## MCP `run_delivery_reverify`"),
     usage.indexOf("## MCP `run_delivery_decide`"),
@@ -2319,6 +2352,28 @@ test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路�
   }
   const ts = read("docs/troubleshooting.md");
   assert.ok(ts.includes("8.2"), "docs/troubleshooting.md 缺 §8.2 锚点（SKILL 集成终验指针）");
+});
+
+// 79 批 A2 续修（会审必改项）：先读门回到所属步骤的首句。会审实证过盲区——
+// 安全预读只存在于情形表行时，把那行删掉 188 条测试仍全绿，门退化为可静默
+// 删除的索引。守卫钉两件事：每道门以 **Before …: read …** 形状在场；属步骤的
+// 门位于该步骤主规则句之前（reverify 门按续修裁定保留在失败处置分支内，只钉在场）。
+test("79 批 A2 续修: 先读门是所属步骤的首句（安全预读/任务书 4b/监督/reverify）", () => {
+  const skill = read("SKILL.md");
+  const positioned = [
+    ['**Before writing a delivery task prompt**: read `wao manual delivery "场景 4b"`', "A worker prompt contains only the bounded task"],
+    ["**Before unattended/stop-sensitive work**: read `references/safety-incidents.md`", "**A live run needs a live wait**"],
+    ['**Before supervision**: read `wao manual supervise "Lead 安静监督与续接"`', "**A live run needs a live wait**"],
+  ];
+  for (const [gate, anchor] of positioned) {
+    const gateAt = skill.indexOf(gate);
+    assert.ok(gateAt !== -1, `SKILL.md 缺先读门 "${gate.slice(0, 50)}…"`);
+    const anchorAt = skill.indexOf(anchor);
+    assert.ok(anchorAt !== -1 && gateAt < anchorAt,
+      `先读门 "${gate.slice(0, 40)}…" 必须位于所属步骤主规则句之前（会审实证：退化为情形表行可被静默删除）`);
+  }
+  assert.ok(skill.includes('**Before any reverify**: read `wao manual delivery "MCP run_delivery_reverify"`'),
+    "SKILL.md 失败处置分支缺 reverify 先读门");
 });
 
 test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () => {
