@@ -424,7 +424,7 @@ test("runs metrics <runId> 显示 state/duration/tokens", async () => {
   const dir = await makeRunDir();
   try {
     await writeJsonl(dir, "run_met", [
-      { type: "run.started", ts: "2026-06-15T10:00:00.000Z" },
+      { type: "run.started", backend: "claude-code", ts: "2026-06-15T10:00:00.000Z" },
       { type: "run.state_change", to: "completed" },
       { type: "run.metrics", tokens: { input: 100, output: 50 }, costUsd: 0.02 },
       { type: "run.completed", ts: "2026-06-15T10:00:30.000Z" },
@@ -443,13 +443,13 @@ test("runs metrics --summary 聚合多 run", async () => {
   const dir = await makeRunDir();
   try {
     await writeJsonl(dir, "run_a", [
-      { type: "run.started", ts: "2026-06-15T10:00:00.000Z" },
+      { type: "run.started", backend: "claude-code", ts: "2026-06-15T10:00:00.000Z" },
       { type: "run.state_change", to: "completed" },
       { type: "run.metrics", tokens: { input: 100, output: 50 } },
       { type: "run.completed", ts: "2026-06-15T10:00:30.000Z" },
     ]);
     await writeJsonl(dir, "run_b", [
-      { type: "run.started", ts: "2026-06-15T11:00:00.000Z" },
+      { type: "run.started", backend: "claude-code", ts: "2026-06-15T11:00:00.000Z" },
       { type: "run.state_change", to: "failed" },
       { type: "run.metrics", tokens: { input: 200, output: 0 } },
       { type: "run.completed", ts: "2026-06-15T11:00:10.000Z" },
@@ -468,7 +468,7 @@ test("runs metrics --format json 输出 JSON", async () => {
   const dir = await makeRunDir();
   try {
     await writeJsonl(dir, "run_j", [
-      { type: "run.started", ts: "2026-06-15T10:00:00.000Z" },
+      { type: "run.started", backend: "claude-code", ts: "2026-06-15T10:00:00.000Z" },
       { type: "run.state_change", to: "completed" },
       { type: "run.metrics", tokens: { input: 10 }, costUsd: 0.001 },
       { type: "run.completed", ts: "2026-06-15T10:00:05.000Z" },
@@ -478,16 +478,267 @@ test("runs metrics --format json 输出 JSON", async () => {
     assert.equal(parsed.runId, "run_j");
     assert.equal(parsed.state, "completed");
     assert.equal(parsed.tokens.input, 10);
+    assert.equal(parsed.usageScope, "run");
+    assert.deepEqual(parsed.selfTokens, { input: 10 });
     assert.equal(parsed.costUsd, 0.001);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// --- F2/C1: stop 命令对进程型 run 的支持 ---
-// 原 bug：stop 只认 serve session（找 serveUrl），进程型 run（backendSessionId=proc_<pid>）
-// 曾报 "no session metadata"，无法叫停失控的进程型 worker。
-// 修复：stop 检测到进程型 session 时走 taskkill 路径，不报错。
+test("runs metrics <runId> 输出自身用量、缓存占比与首个请求缓存占比", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_self", [
+      { type: "run.started", backend: "kimi-web", ts: "2026-06-15T10:00:00.000Z" },
+      { type: "run.state_change", to: "completed" },
+      {
+        type: "run.metrics",
+        tokens: { input: 90, output: 10, cacheRead: 10 },
+        usageScope: "run",
+        firstRequest: { input: 20, cacheRead: 5 },
+      },
+      { type: "run.completed", ts: "2026-06-15T10:00:05.000Z" },
+    ]);
+    const output = cli(["runs", "metrics", "run_self"], dir);
+    assert.match(output, /scope:\s+this run/);
+    assert.match(output, /self:\s+input=90 output=10 cacheRead=10/);
+    assert.match(output, /cache:\s+10\.0%/);
+    assert.match(output, /first:\s+input=20 cacheRead=5 cache=20\.0%/);
+    const parsed = JSON.parse(cli(["runs", "metrics", "run_self", "--format", "json"], dir));
+    assert.equal(parsed.usageScope, "run");
+    assert.deepEqual(parsed.selfTokens, { input: 90, output: 10, cacheRead: 10 });
+    assert.equal(parsed.cacheRatio, 0.1);
+    assert.deepEqual(parsed.firstRequest, { input: 20, cacheRead: 5 });
+    assert.equal(parsed.firstRequestCacheRatio, 0.2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function lineageEvents({ rootId = "run_lin_root" } = {}) {
+  const root = [
+    { type: "run.started", backend: "zcode", ts: "2026-06-15T10:00:00.000Z" },
+    { type: "session.created", backend: "zcode", backendSessionId: "sess_lineage" },
+    { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: rootId },
+    {
+      type: "run.metrics",
+      tokens: { input: 100, output: 10, cacheRead: 0 },
+      usageScope: "session",
+      firstRequest: { input: 90, cacheRead: 0 },
+    },
+    { type: "run.completed", ts: "2026-06-15T10:00:30.000Z" },
+  ];
+  const child = (parentId, input, output, ts) => [
+    { type: "run.started", backend: "zcode", ts },
+    { type: "session.created", backend: "zcode", backendSessionId: "sess_lineage" },
+    { type: "run.background_submitted", continuation: true, parentRunId: parentId, rootRunId: rootId },
+    { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: rootId },
+    { type: "run.metrics", tokens: { input, output, cacheRead: 0 }, usageScope: "session" },
+    { type: "run.completed", ts },
+  ];
+  return { root, child };
+}
+
+async function seedLineage(dir) {
+  const { root, child } = lineageEvents();
+  await writeJsonl(dir, "run_lin_root", root);
+  await writeJsonl(dir, "run_lin_child1", child("run_lin_root", 160, 12, "2026-06-15T10:01:00.000Z"));
+  await writeJsonl(dir, "run_lin_child2", child("run_lin_child1", 200, 14, "2026-06-15T10:02:00.000Z"));
+}
+
+test("runs metrics --lineage 从根到最新列出各轮并给自身用量合计", async () => {
+  const dir = await makeRunDir();
+  try {
+    await seedLineage(dir);
+    const text = cli(["runs", "metrics", "run_lin_child2", "--lineage"], dir);
+    const lines = text.split(/\r?\n/);
+    const rootLine = lines.findIndex((line) => line.startsWith("run_lin_root"));
+    const child1Line = lines.findIndex((line) => line.startsWith("run_lin_child1"));
+    const child2Line = lines.findIndex((line) => line.startsWith("run_lin_child2"));
+    assert.ok(rootLine >= 0 && child1Line > rootLine && child2Line > child1Line,
+      "谱系从根到最新排序");
+    assert.match(text, /lineage:\s+3 run\(s\)/);
+    assert.match(text, /Self usage unknown: 0 run\(s\)/);
+
+    const parsed = JSON.parse(cli(["runs", "metrics", "run_lin_child2", "--lineage", "--format", "json"], dir));
+    assert.equal(parsed.rootRunId, "run_lin_root");
+    assert.deepEqual(parsed.lineage.map((row) => row.runId),
+      ["run_lin_root", "run_lin_child1", "run_lin_child2"]);
+    assert.deepEqual(parsed.lineage.map((row) => row.selfTokens),
+      [{ input: 100, output: 10, cacheRead: 0 }, { input: 60, output: 2, cacheRead: 0 }, { input: 40, output: 2, cacheRead: 0 }]);
+    assert.deepEqual(parsed.total, {
+      selfTokens: { input: 200, output: 14, cacheRead: 0 },
+      unknownSelfUsageCount: 0,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runs metrics <runId> 会话累计续轮减父运行；父转录缺失 → 自身未知", async () => {
+  const dir = await makeRunDir();
+  try {
+    await seedLineage(dir);
+    const childText = cli(["runs", "metrics", "run_lin_child1"], dir);
+    assert.match(childText, /scope:\s+session cumulative/);
+    assert.match(childText, /self:\s+input=60 output=2 cacheRead=0/);
+
+    await writeJsonl(dir, "run_lin_orphan", [
+      { type: "run.started", backend: "zcode", ts: "2026-06-15T10:03:00.000Z" },
+      { type: "session.created", backend: "zcode", backendSessionId: "sess_orphan" },
+      { type: "run.background_submitted", continuation: true, parentRunId: "run_lin_missing", rootRunId: "run_lin_missing" },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "run_lin_missing" },
+      { type: "run.metrics", tokens: { input: 300, output: 20 }, usageScope: "session" },
+    ]);
+    const orphanText = cli(["runs", "metrics", "run_lin_orphan"], dir);
+    assert.match(orphanText, /self:\s+unknown \(no_prior_turn\)/);
+    assert.match(orphanText, /cache:\s+\(unknown\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runs metrics --summary 按自身用量相加：会话累计三轮合计 200 不是 460", async () => {
+  const dir = await makeRunDir();
+  try {
+    await seedLineage(dir);
+    const text = cli(["runs", "metrics", "--summary"], dir);
+    assert.match(text, /Tokens \(self\): input=200 output=14/);
+    assert.ok(!text.includes("input=460"), "会话累计不得重复计入");
+    assert.match(text, /Self usage unknown: 0 run\(s\)/);
+    const parsed = JSON.parse(cli(["runs", "metrics", "--summary", "--format", "json"], dir));
+    assert.equal(parsed.totalTokens.input, 200);
+    assert.equal(parsed.unknownSelfUsageCount, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("runs metrics --lineage 只采信 runId 与转录一致的事件（同文件无信封伪造 root 不纳入）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await seedLineage(dir);
+    const otherId = "run_other";
+    const lines = [
+      JSON.stringify({
+        type: "run.started", runId: otherId, agentId: "test", backend: "zcode",
+        ts: "2026-06-15T11:00:00.000Z",
+      }),
+      JSON.stringify({
+        type: "run.metrics", runId: otherId, agentId: "test",
+        tokens: { input: 900, output: 1 }, usageScope: "run",
+        ts: "2026-06-15T11:00:10.000Z",
+      }),
+      // 无 runId 的伪造行：声称属于根线系，但不可绑定到本转录运行。
+      JSON.stringify({
+        type: "run.session_reuse", mode: "run_lineage", turn: "first",
+        rootRunId: "run_lin_root", ts: "2026-06-15T11:00:20.000Z",
+      }),
+    ];
+    await writeFile(join(dir, `${otherId}.jsonl`), `${lines.join("\n")}\n`, "utf8");
+
+    const parsed = JSON.parse(cli(["runs", "metrics", "run_lin_root", "--lineage", "--format", "json"], dir));
+    assert.deepEqual(parsed.lineage.map((row) => row.runId),
+      ["run_lin_root", "run_lin_child1", "run_lin_child2"],
+      "无 runId 的伪造 root 事实不得把 run_other 纳入线系");
+    assert.equal(parsed.total.selfTokens.input, 200, "合计仍是 100+60+40，不是 +900");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runs metrics <runId> 停止的兄弟轮无 metrics → 后续轮自身未知（按会话紧邻前一轮）", async () => {
+  const dir = await makeRunDir();
+  try {
+    const session = (runId, ts) => ({ type: "session.created", backend: "zcode", backendSessionId: "sess_sibling", ts });
+    await writeJsonl(dir, "run_sib_root", [
+      { type: "run.started", backend: "zcode", ts: "2026-06-15T10:00:00.000Z" },
+      session("run_sib_root", "2026-06-15T10:00:00.000Z"),
+      { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: "run_sib_root" },
+      { type: "run.metrics", tokens: { input: 219059, output: 1 }, usageScope: "session" },
+    ]);
+    await writeJsonl(dir, "run_sib_stopped", [
+      { type: "run.started", backend: "zcode", ts: "2026-06-15T10:01:00.000Z" },
+      session("run_sib_stopped", "2026-06-15T10:01:00.000Z"),
+      { type: "run.background_submitted", continuation: true, parentRunId: "run_sib_root", rootRunId: "run_sib_root" },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "run_sib_root" },
+      // 被用户停止：没有 run.metrics。
+    ]);
+    await writeJsonl(dir, "run_sib_next", [
+      { type: "run.started", backend: "zcode", ts: "2026-06-15T10:02:00.000Z" },
+      session("run_sib_next", "2026-06-15T10:02:00.000Z"),
+      { type: "run.background_submitted", continuation: true, parentRunId: "run_sib_root", rootRunId: "run_sib_root" },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "run_sib_root" },
+      { type: "run.metrics", tokens: { input: 300948, output: 2 }, usageScope: "session" },
+    ]);
+
+    const text = cli(["runs", "metrics", "run_sib_next"], dir);
+    assert.match(text, /self:\s+unknown \(prior_usage_unreadable\)/,
+      "紧邻前一轮（停止的兄弟轮）没有 metrics → 未知，不拿更早的父轮冒充");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("runs metrics 谱系中间轮读不出 native id → 单运行与 --lineage 都不越过它减根轮", async () => {
+  const dir = await makeRunDir();
+  try {
+    const session = (runId, id, ts) => ({ type: "session.created", backend: "codex", backendSessionId: id, ts });
+    await writeJsonl(dir, "run_stop_root", [
+      { type: "run.started", backend: "codex", ts: "2026-06-15T10:00:00.000Z" },
+      session("run_stop_root", "thread_stop", "2026-06-15T10:00:00.000Z"),
+      { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: "run_stop_root" },
+      { type: "run.metrics", tokens: { input: 100 }, usageScope: "session" },
+    ]);
+    await writeJsonl(dir, "run_stop_middle", [
+      { type: "run.started", backend: "codex", ts: "2026-06-15T10:01:00.000Z" },
+      // 被停止的进程型中间轮：只剩 proc_<pid>，没有 native 绑定事实。
+      session("run_stop_middle", "proc_123", "2026-06-15T10:01:00.000Z"),
+      { type: "run.background_submitted", continuation: true, parentRunId: "run_stop_root", rootRunId: "run_stop_root" },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "run_stop_root" },
+      // 无 metrics。
+    ]);
+    await writeJsonl(dir, "run_stop_next", [
+      { type: "run.started", backend: "codex", ts: "2026-06-15T10:02:00.000Z" },
+      session("run_stop_next", "thread_stop", "2026-06-15T10:02:00.000Z"),
+      { type: "run.background_submitted", continuation: true, parentRunId: "run_stop_root", rootRunId: "run_stop_root" },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: "run_stop_root" },
+      { type: "run.metrics", tokens: { input: 200 }, usageScope: "session" },
+    ]);
+
+    const text = cli(["runs", "metrics", "run_stop_next"], dir);
+    assert.match(text, /self:\s+unknown \(prior_session_unreadable\)/,
+      "紧邻前一轮读不出会话 id → 未知，不得越过它减根轮得 100");
+
+    const parsed = JSON.parse(cli(["runs", "metrics", "run_stop_next", "--lineage", "--format", "json"], dir));
+    assert.deepEqual(parsed.lineage.map((row) => row.runId),
+      ["run_stop_root", "run_stop_middle", "run_stop_next"]);
+    assert.equal(parsed.lineage.find((row) => row.runId === "run_stop_next").selfTokens, null);
+    assert.deepEqual(parsed.total.selfTokens, { input: 100 }, "合计只含根轮，不含下一轮的跨轮消耗");
+    assert.equal(parsed.total.unknownSelfUsageCount, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runs metrics 文本缓存分母按后端声明：codex input 含缓存 → 分母写 input", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_codex_cache", [
+      { type: "run.started", backend: "codex", ts: "2026-06-15T10:00:00.000Z" },
+      { type: "run.metrics", tokens: { input: 200, output: 10, cacheRead: 120 }, usageScope: "session" },
+    ]);
+    const text = cli(["runs", "metrics", "run_codex_cache"], dir);
+    assert.match(text, /cache:\s+60\.0% \(cacheRead=120 \/ input=200\)/);
+    assert.ok(!text.includes("input+cacheRead=320"), "展示分母必须与算比例用的分母同源");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 
 test("stop on process-type run: 不报 'no session metadata'，走 taskkill 路径", async () => {
   const dir = await makeRunDir();
@@ -603,7 +854,7 @@ test("TD-102: runs metrics --summary excludes wf_* transcripts", async () => {
   const dir = await makeRunDir();
   try {
     await writeJsonl(dir, "run_x", [
-      { type: "run.started", ts: "2026-07-10T10:00:00.000Z" },
+      { type: "run.started", backend: "claude-code", ts: "2026-07-10T10:00:00.000Z" },
       { type: "run.state_change", to: "completed" },
       { type: "run.metrics", tokens: { input: 100, output: 50 } },
       { type: "run.completed", ts: "2026-07-10T10:01:00.000Z" },

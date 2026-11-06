@@ -160,6 +160,25 @@ test("TD-76: assistant 无 text 块（纯 thinking）emit thinking 心跳（非 
   assert.ok(!("thinking" in events[0]), "不存内容");
 });
 
+test("首条 assistant 消息 usage → run.metrics.firstRequest；后续 assistant 不覆盖", () => {
+  const p = new ClaudeStreamParser();
+  p.feed(
+    '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"hi"}],'
+    + '"usage":{"input_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2,"output_tokens":3}}}\n',
+  );
+  p.feed(
+    '{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"more"}],'
+    + '"usage":{"input_tokens":99,"cache_read_input_tokens":50}}}\n',
+  );
+  const events = p.feed(
+    '{"type":"result","subtype":"success","is_error":false,'
+    + '"usage":{"input_tokens":120,"output_tokens":9,"cache_read_input_tokens":60}}\n',
+  );
+  const metrics = events.find((event) => event.kind === "metrics");
+  assert.deepEqual(metrics.firstRequest, { input: 20, cacheRead: 5 },
+    "只记第一个请求的 input/cacheRead（不拿第二个请求或总计覆盖）");
+});
+
 test("result 含 usage → emit metrics + done", () => {
   const p = new ClaudeStreamParser();
   const events = p.feed(

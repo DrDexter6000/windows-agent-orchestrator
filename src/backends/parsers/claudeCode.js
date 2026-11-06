@@ -57,6 +57,11 @@ export class ClaudeStreamParser extends LineStreamParser {
     // of every emitted assistant message and skip a result fallback whose text
     // is identical. Bounded: one entry per assistant message in this run.
     this._emittedAssistantTexts = new Set();
+    // 第一个请求的用量：第一条 assistant 消息的 message.usage（每个 assistant
+    // 消息对应一次模型请求；input/cache_read 是分开的计数，input 不含缓存）。
+    // 只看第一条 assistant 行，后面的请求不覆盖。
+    this._firstRequest = null;
+    this._firstRequestSeen = false;
   }
 
   handleLine(obj) {
@@ -76,6 +81,23 @@ export class ClaudeStreamParser extends LineStreamParser {
     if (obj.type === "assistant") {
       const content = obj.message?.content;
       if (!Array.isArray(content)) return [];
+      // 首个请求用量（见构造函数注释）。usage 在 message.usage；只记上游报出
+      // 的 input_tokens 与 cache_read_input_tokens。
+      if (!this._firstRequestSeen) {
+        this._firstRequestSeen = true;
+        const usage = obj.message?.usage;
+        if (usage && typeof usage === "object") {
+          const firstRequest = {};
+          if (typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens)) {
+            firstRequest.input = usage.input_tokens;
+          }
+          if (typeof usage.cache_read_input_tokens === "number"
+            && Number.isFinite(usage.cache_read_input_tokens)) {
+            firstRequest.cacheRead = usage.cache_read_input_tokens;
+          }
+          if (Object.keys(firstRequest).length > 0) this._firstRequest = firstRequest;
+        }
+      }
       // TD-12 去重（回归修复 2026-06-24）：原实现按 message.id 去重，但 claude-code 对
       // 同一 message 的 thinking 块和 text 块分两条 stream-json 行发出，共享同一 message.id。
       // 仅按 id 去重会误杀 text 行（content 不同但 id 相同）→ assistant text 全丢。
@@ -140,13 +162,15 @@ export class ClaudeStreamParser extends LineStreamParser {
       // 提取 token usage（M4）
       const u = obj.usage;
       if (u) {
-        events.push(metricsEvent({
+        const metrics = metricsEvent({
           input: u.input_tokens,
           output: u.output_tokens,
           cacheRead: u.cache_read_input_tokens,
           cacheWrite: u.cache_creation_input_tokens,
           costUsd: typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : undefined,
-        }));
+        });
+        if (this._firstRequest) metrics.firstRequest = this._firstRequest;
+        events.push(metrics);
       }
       if (obj.is_error || obj.subtype === "error") {
         events.push(doneEvent("failed", obj.result ?? obj.subtype ?? "claude error"));

@@ -843,6 +843,49 @@ test("M4-3: metrics 事件被消费并写入 transcript", async () => {
   }
 });
 
+test("TD-333 写侧: run.metrics 带后端声明的 usageScope/firstRequest；codex 式 input 保留总量使闸门按原值触发", async () => {
+  const dir = await makeTempDir();
+  try {
+    const mock = {
+      backend: {
+        usageScope: "session",
+        inputIncludesCacheRead: true,
+        async spawn() {
+          return {
+            backend: "process",
+            backendSessionId: "proc_td333",
+            events: async function* () {
+              yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "working" }] };
+              yield {
+                kind: "metrics",
+                tokens: { input: 200, output: 10, cacheRead: 120 },
+                firstRequest: { input: 100, cacheRead: 20 },
+              };
+              yield { kind: "done", reason: "completed" };
+            },
+            abort: async () => {},
+          };
+        },
+      },
+    };
+    const manager = budgetManager(dir, mock, { tokenBudget: 150, tokenBudgetMultiplier: 1 });
+    const run = await manager.start("a", { prompt: "go" });
+    const result = await run.waitForCompletion({ pollInterval: 5 });
+    assert.equal(result.budgetExceeded, true,
+      "input 保留 200（+output 10）才超 150；若被减成 80 则不会触发");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const metricsEvent = events.find((event) => event.type === "run.metrics");
+    assert.ok(metricsEvent, "transcript 应有 run.metrics 事件");
+    assert.equal(metricsEvent.usageScope, "session", "写侧带上后端声明的范围");
+    assert.deepEqual(metricsEvent.firstRequest, { input: 100, cacheRead: 20 },
+      "有逐请求用量时写侧带上第一个请求");
+    assert.equal(metricsEvent.tokens.input, 200, "input 保留上游总量");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("M4-3: 无 metrics 事件时 waitResult.metrics 为 null（不崩溃）", async () => {
   const dir = await makeTempDir();
   try {

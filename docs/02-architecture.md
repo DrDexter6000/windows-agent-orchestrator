@@ -208,7 +208,8 @@ type RunEvent =
   | { kind: "thinking" }                                      // payload-free reasoning heartbeat
   | { kind: "runtime_activity",
       status: "initialized"|"streaming"|"provider_retry"|"process_active"|"files_changed"|"serve_active" } // payload-free
-  | { kind: "metrics", tokens?: TokenUsage, costUsd?: number, durationMs?: number }
+  | { kind: "metrics", tokens?: TokenUsage, costUsd?: number, durationMs?: number,
+      usageScope?: "run"|"session"|"unknown", firstRequest?: { input?: number, cacheRead?: number } }
   | { kind: "done", reason: "completed"|"failed", error?: string, marker?: "completed_empty" };
 ```
 
@@ -240,7 +241,13 @@ stream delta、retry error、session/model id 和延迟数据不得进入 RunEve
 普通成功——thinking / runtime_activity / metrics 是传输活性，不是可用效应。abort
 的终态 aborted 属 RunManager 状态机（§4），不是 done 事件的 reason。
 `cacheRead`/`cacheWrite` 与 `reasoning` 是不同计量维度；Claude 的 cache creation
-token 不得伪装成 reasoning token。
+token 不得伪装成 reasoning token。`tokens.input` 保留上游原值；后端类声明
+`inputIncludesCacheRead`（input 是否已含缓存读取），缓存占比按声明算——含：
+`cacheRead ÷ input`，不含：`cacheRead ÷ (input + cacheRead)`；声明未知 → 未知。
+`usageScope` 标明该 `run.metrics` 是本运行（`run`）还是会话累计（`session`）——旧转录
+没有该字段时按所用 backend 类的 `usageScope` 声明解释；该类也解析不出时按记下的数
+（历史读法）。`firstRequest` 只在后端看得到逐请求用量时出现，记第一个请求的
+input/cacheRead（决定 0114）。
 
 ### 2.3 AgentDef（registry 条目规范化后）
 

@@ -128,10 +128,16 @@ export class CodexStreamParser extends LineStreamParser {
       const events = [];
       const u = obj.usage;
       if (u) {
+        // input 轴保留上游 input_tokens 原值（总输入，含缓存子集）——tokenBudget
+        // 闸门的比对值与改动前相同。cached_input_tokens / cache_write_input_tokens
+        // 是其中的缓存子集（Codex CLI TokenUsage 形状），1:1 映射进 cacheRead /
+        // cacheWrite；缓存占比由读侧按后端声明 inputIncludesCacheRead=true 计算。
         events.push(metricsEvent({
           input: u.input_tokens,
           output: u.output_tokens,
           reasoning: u.reasoning_output_tokens,
+          cacheRead: typeof u.cached_input_tokens === "number" ? u.cached_input_tokens : undefined,
+          cacheWrite: typeof u.cache_write_input_tokens === "number" ? u.cache_write_input_tokens : undefined,
         }));
       }
       events.push(doneEvent("completed"));

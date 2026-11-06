@@ -340,7 +340,11 @@ test("kimi-web ③ ⑥: resume——会话已有历史 turn + 新 prompt 的 tur
   assert.equal(messages[1].role, "assistant");
   assert.deepEqual(messages[1].parts, [{ type: "text", text: "new answer" }]);
   // usage 只计新 turn 的 steps（9999 不混入）。
-  assert.deepEqual(events[2], { kind: "metrics", tokens: { input: 40, output: 6, cacheRead: 2, cacheWrite: 1 } });
+  assert.deepEqual(events[2], {
+    kind: "metrics",
+    tokens: { input: 40, output: 6, cacheRead: 2, cacheWrite: 1 },
+    firstRequest: { input: 40, cacheRead: 2 },
+  });
   assert.equal(polls(), 1, "首拍即终态（新 turn 已 completed）");
 });
 
@@ -573,7 +577,16 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   // inputCacheCreation→cacheWrite；reasoning/costUsd 无 kimi 对应字段——省略）。
   assert.deepEqual(
     events[10],
-    { kind: "metrics", tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 } },
+    {
+      kind: "metrics",
+      tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 },
+      firstRequest: { input: 100, cacheRead: 10 },
+    },
+  );
+  assert.deepEqual(
+    events[10].firstRequest,
+    { input: 100, cacheRead: 10 },
+    "首个请求用量取本轮 steps[0] 的 usage（不是合计、也不是后面 step）",
   );
   assert.equal(events[11].reason, "completed");
   assert.equal(polls(), 1, "首拍即终态——轮次原语无需等待窗口/稳定性重读");
@@ -701,6 +714,29 @@ test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 d
     );
     assert.ok(!events.some((e) => e.kind === "file_written"));
   }
+});
+
+test("kimi-web ⑤ ⑩: usage 只报 input/output → metrics 不补 cacheRead/cacheWrite 0（缓存占比未知）", async () => {
+  const turn = turnItem({
+    steps: [stepItem({
+      usage: { inputOther: 100, output: 7 },
+      frames: [{ kind: "text", text: "answer without cache counters", role: "assistant" }],
+    })],
+  });
+  const { handler, markSpawned } = turnScriptServer("session_c3", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  const metrics = events.find((event) => event.kind === "metrics");
+  assert.deepEqual(metrics.tokens, { input: 100, output: 7 },
+    "上游没报的缓存分量不补 0");
+  assert.equal("cacheRead" in metrics.tokens, false);
+  assert.equal("cacheWrite" in metrics.tokens, false);
 });
 
 test("kimi-web ⑤ ⑩: completed 轮 steps 无 usage 数据 → 不发 metrics 事件（绝不虚构零值通道）", async () => {

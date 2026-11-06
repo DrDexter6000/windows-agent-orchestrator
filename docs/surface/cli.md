@@ -35,7 +35,7 @@ Commands:
   runs lineage-close --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 显式放弃一条交付线系：按门释放保留 worktree（本命令不删分支；默认 dry-run）
   runs settle [--run-dir DIR]   # 列出可结算的 runner 已死非终态运行（只读；各给闭集拒绝理由）
   runs settle --run-id <runId> --reason-file <FILE> [--apply] [--run-dir DIR]   # 结算 runner 已死的非终态运行为 failed/process_missing（逐门事实 dry-run；--apply 才写）
-  runs metrics <runId>|--summary [--run-dir DIR] [--format json]
+  runs metrics <runId>|--summary [--lineage] [--run-dir DIR] [--format json]   # --lineage 列整条续修谱系各轮与自身用量合计；--summary 按自身用量相加（会话累计不重复计）
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
   runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard

@@ -428,6 +428,37 @@ function metricsEventFromUsage(usage) {
   return seen ? metricsEvent(sums) : null;
 }
 
+function usageNumber(...values) {
+  return values.find((value) => typeof value === "number" && Number.isFinite(value));
+}
+
+// 本轮第一个请求的用量：本轮 assistant 消息里首个 step-finish part 的 tokens。
+// step-finish 的 tokens 是**该步**的计量（AI-SDK/opencode 形状：
+// `{input, output, reasoning, cache:{read, write}}`；这里按上游实际形状读
+// `input` 与 `cache.read`，并容忍扁平别名），不是会话累计——只取第一份，
+// 后面的 step 不属于第一个请求。input 轴同样按「未命中缓存的输入」解释。
+function firstRequestFromStepParts(newMsgs, anchorId) {
+  for (const { ident, message } of newMsgs) {
+    if (ident.role !== "assistant" || ident.parentID !== anchorId) continue;
+    for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+      if (part?.type !== "step-finish" || !part.tokens || typeof part.tokens !== "object") continue;
+      const tokens = part.tokens;
+      const input = usageNumber(tokens.input, tokens.inputTokens);
+      const cacheRead = usageNumber(
+        tokens.cache?.read,
+        tokens.cacheRead,
+        tokens.cacheReadTokens,
+        tokens.cachedInputTokens,
+      );
+      const firstRequest = {};
+      if (input !== undefined) firstRequest.input = input;
+      if (cacheRead !== undefined) firstRequest.cacheRead = cacheRead;
+      return Object.keys(firstRequest).length > 0 ? firstRequest : null;
+    }
+  }
+  return null;
+}
+
 // ===== 本轮主轮请求链（第四种生命体征的读数面，2026-10-15） =====
 //
 // 上游事实（桌面捆绑安装包里的 app-server 实现 zcode.cjs——即 agent.binary 指向
@@ -808,6 +839,15 @@ export class ZcodeBackend {
   // 一次 → metrics 事件。会话级累计（非增量）：RunManager 预算闸门按累计值比对
   // （会话级累计语义）；resume 轮的 usage 含前任轮用量，如实。
   reportsTokenUsage = true;
+
+  // 用量计量范围（TD-333，决定 0114 §3）：session/usage 是**会话累计**（非增量，
+  // resume 轮含前任轮用量）；读侧要减同一会话上一轮才是本轮自身。usage 的
+  // totalTokens 是各分量之和（inputTokens/outputTokens/reasoningTokens/
+  // cacheReadTokens/cacheCreationTokens），input 不含缓存，缓存占比按
+  // cacheRead ÷ (input + cacheRead) 计算。
+  usageScope = "session";
+  // totalTokens 是各分量之和，inputTokens 不含 cacheReadTokens/cacheCreationTokens。
+  inputIncludesCacheRead = false;
 
   // 命令退出码：live 闭集（text|step-finish）无退出码；bundle 核证的 tool part
   // state schema（nor：pending|running|completed|error）也无退出码字段——无已证实
@@ -1839,7 +1879,12 @@ export class ZcodeBackend {
     }
     yield messageEvent("assistant", [{ type: "text", text }]);
     const metrics = metricsEventFromUsage(usageResult);
-    if (metrics !== null) yield metrics;
+    if (metrics !== null) {
+      // 首个请求的用量（有逐步 tokens 才写；缺就不写字段）。
+      const firstRequest = firstRequestFromStepParts(newMsgs, anchor.id);
+      if (firstRequest !== null) metrics.firstRequest = firstRequest;
+      yield metrics;
+    }
     yield doneEvent("completed");
   }
 

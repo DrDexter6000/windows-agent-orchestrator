@@ -177,6 +177,16 @@ export class ProcessBackend {
   // 消费者：registry validate 静态交叉校验 tokenBudget 配置 × 本声明（不 spawn）。
   reportsTokenUsage = false;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：本运行 / 会话累计 / 未知。基类
+  // fail-closed 默认 unknown；子类按自己实际消费的上游用量通道声明。读侧
+  // （src/metrics.js）只在旧转录缺 usageScope 时回退到本声明，不按后端名分支。
+  usageScope = "unknown";
+
+  // 上游 usage 的 input 是否已包含缓存读取（TD-333 会审必改项）：true 时缓存
+  // 占比 = cacheRead ÷ input；false 时 = cacheRead ÷ (input + cacheRead)。
+  // 基类 fail-closed 默认 unknown（声明未知 → 缓存占比未知，不猜口径）。
+  inputIncludesCacheRead = "unknown";
+
   // 决定 0086：backend 在每次调用时显式强制 OS 写沙箱（workspace-write）的
   // 声明轴。基类 fail-closed 默认 false——进程族默认没有 OS 沙箱，越界写拦截
   // 仍按 0084（上报侦测，非阻止）。子类按实现 opt-in（codex）。reliability 的

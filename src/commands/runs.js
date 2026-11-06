@@ -7,7 +7,7 @@
 //
 // 依赖：
 //   - 外部模块：../transcript.js（readTranscript/findState）、../metrics.js
-//     （aggregateRunMetrics/aggregateSummary/formatDuration）、../diagnosis.js
+//     （aggregateRunUsages/aggregateSummary/formatDuration）、../diagnosis.js
 //     （diagnoseFailure）、../waoDir.js
 //     （getWaoStateDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
 //     （summarizeStages）
@@ -22,13 +22,20 @@
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
 import { unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { join, resolve, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 
 import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
-import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
+import {
+  aggregateRunUsages,
+  aggregateSummary,
+  formatDuration,
+  boundReportScope,
+  runUsageFacts,
+} from "../metrics.js";
 // R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
 // isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
 // 模块——commands → core 下向边，无环）。
@@ -1198,6 +1205,242 @@ async function runsGrepCommand(args, config) {
   console.log(`Matched ${matches} run(s)`);
 }
 
+function tokenText(tokens, keys = ["input", "output", "reasoning", "cacheRead", "cacheWrite"]) {
+  if (!tokens || typeof tokens !== "object") return "";
+  const parts = [];
+  for (const key of keys) {
+    if (typeof tokens[key] === "number" && Number.isFinite(tokens[key])) {
+      parts.push(`${key}=${tokens[key]}`);
+    }
+  }
+  return parts.join(" ");
+}
+
+function ratioPercent(ratio) {
+  return typeof ratio === "number" ? `${(ratio * 100).toFixed(1)}%` : "-";
+}
+
+function addTokens(total, tokens) {
+  for (const [key, value] of Object.entries(tokens ?? {})) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      total[key] = (total[key] ?? 0) + value;
+    }
+  }
+}
+
+function sumSelfRows(rows) {
+  const total = {};
+  let unknownSelfUsageCount = 0;
+  for (const row of rows) {
+    if (row.selfTokens === null) {
+      unknownSelfUsageCount += 1;
+      continue;
+    }
+    addTokens(total, row.selfTokens);
+  }
+  return { total, unknownSelfUsageCount };
+}
+
+function scopeText(scope) {
+  if (scope === "session") return "session cumulative (recorded totals include earlier turns)";
+  if (scope === "run") return "this run";
+  return "unknown";
+}
+
+function selfText(result) {
+  if (result.selfTokens === null) {
+    return `unknown (${result.selfUsageUnknownReason})`;
+  }
+  return tokenText(result.selfTokens) || "(no components recorded)";
+}
+
+function cacheText(result) {
+  if (result.cacheRatio === null) return "(unknown)";
+  const tokens = result.selfTokens ?? {};
+  const input = typeof tokens.input === "number" ? tokens.input : null;
+  const read = typeof tokens.cacheRead === "number" ? tokens.cacheRead : null;
+  // 展示的分母必须与算比例时选的分母同源：input 含缓存读取时是 input，
+  // 否则是 input+cacheRead（后端声明未知时比例已是未知，不会走到这里）。
+  let denominator = "";
+  if (input !== null && read !== null) {
+    if (result.inputIncludesCacheRead === true) denominator = ` / input=${input}`;
+    else if (result.inputIncludesCacheRead === false) {
+      denominator = ` / input+cacheRead=${input + read}`;
+    }
+  }
+  return `${ratioPercent(result.cacheRatio)} (cacheRead=${read ?? "?"}${denominator})`;
+}
+
+function firstRequestText(result) {
+  const first = result.firstRequest;
+  if (!first) return null;
+  const base = tokenText(first, ["input", "cacheRead"]) || "(no components recorded)";
+  return result.firstRequestCacheRatio === null
+    ? base
+    : `${base} cache=${ratioPercent(result.firstRequestCacheRatio)}`;
+}
+
+// 线系成员枚举只读每份转录的开头：线系归属事实（run.session_reuse /
+// run.background_submitted 的 rootRunId）在 spawn 前就落盘，读到就停，不整读
+// 非成员的历史文件。有界 200 行——读不到就当非成员（不猜）。只采信 runId
+// 与该转录运行一致的事件（同一转录尾部追加的无信封事实不得改变归属）。
+async function readLineageRootPrefix(filePath, runId) {
+  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let rootRunId = null;
+  let lineCount = 0;
+  try {
+    for await (const line of lines) {
+      lineCount += 1;
+      if (lineCount > 200) break;
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        break;
+      }
+      if (event.runId !== runId) continue;
+      if (event.type === "run.session_reuse" && typeof event.rootRunId === "string") {
+        rootRunId = event.rootRunId;
+      } else if (event.type === "run.background_submitted" && typeof event.rootRunId === "string") {
+        rootRunId = event.rootRunId;
+      }
+      if (rootRunId !== null) break;
+    }
+  } catch {
+    // 读不到就当非成员（线系枚举是只读报表；不因一份坏的/消失的文件整条命令失败）。
+    rootRunId = null;
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return rootRunId;
+}
+
+function isBindableProviderSessionId(value) {
+  return typeof value === "string" && value.length > 0 && !/^proc_\d+$/.test(value);
+}
+
+// 单 run 的会话成员发现：只读开头拿到 backend/agentId、是否有复用事实与
+// 头部的 native session id；同 backend+agent 且可能与当前同会话的候选才整读，
+// 用 runUsageFacts 的 providerSessionId 复核。返回含当前 run 的成员列表。
+async function readRunHeadFacts(filePath, runId) {
+  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let backend = null;
+  let agentId = null;
+  let nativeSessionId = null;
+  let hasReuse = false;
+  let lineCount = 0;
+  try {
+    for await (const line of lines) {
+      lineCount += 1;
+      if (lineCount > 200) break;
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        break;
+      }
+      if (event.runId !== runId) continue;
+      if (event.type === "run.started") {
+        if (typeof event.backend === "string") backend = event.backend;
+        if (typeof event.agentId === "string") agentId = event.agentId;
+      } else if (event.type === "run.session_reuse") {
+        hasReuse = true;
+      } else if (event.type === "run.background_submitted" && event.continuation === true) {
+        hasReuse = true;
+      } else if (event.type === "session.created"
+        && isBindableProviderSessionId(event.backendSessionId)) {
+        nativeSessionId = event.backendSessionId;
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return { backend, agentId, nativeSessionId, hasReuse };
+}
+
+async function loadSessionUsageRuns(runDir, runId, events, facts) {
+  const members = [{ runId, events }];
+  if (facts.scopeState !== "session" || !facts.continuation) return members;
+  // 谱系成员按线系根成链：中间轮即使只留下 proc_<pid> 也要留在链上，下一轮
+  // 才能看见“紧邻前一轮读不出”而不是跳过它去减更早的根轮。
+  if (facts.rootRunId !== null) {
+    const lineage = await loadLineageMembers(runDir, runId, events);
+    return lineage.members;
+  }
+  if (facts.providerSessionId === null) return members;
+  const files = await loadRunOnlyFiles(runDir);
+  for (const file of files) {
+    const id = basename(file, ".jsonl");
+    if (id === runId) continue;
+    const head = await readRunHeadFacts(file, id);
+    if (head === null) continue;
+    if (head.backend !== facts.backend || head.agentId !== facts.agentId) continue;
+    // 头部已有 native id 时它就是该 run 的 provider 会话（zcode/kimi-web/ACP）；
+    // 头部是 proc 占位或没有 session.created 的，才需要整读去取晚绑定事实。
+    if (head.nativeSessionId !== null && head.nativeSessionId !== facts.providerSessionId) continue;
+    if (head.nativeSessionId === null && !head.hasReuse) continue;
+    let candidateEvents;
+    try {
+      candidateEvents = await readTranscript(file);
+    } catch {
+      continue;
+    }
+    const candidateFacts = runUsageFacts(candidateEvents, id);
+    if (candidateFacts.backend !== facts.backend) continue;
+    if (candidateFacts.providerSessionId !== facts.providerSessionId) continue;
+    members.push({ runId: id, events: candidateEvents });
+  }
+  return members;
+}
+
+async function loadLineageMembers(runDir, runId, events) {
+  const currentFacts = runUsageFacts(events, runId);
+  const rootRunId = currentFacts.rootRunId;
+  if (rootRunId === null) return { rootRunId, members: [{ runId, events }] };
+  const files = await loadRunOnlyFiles(runDir);
+  const members = [];
+  const seen = new Set();
+  for (const file of files) {
+    const id = basename(file, ".jsonl");
+    if (seen.has(id)) continue;
+    let memberEvents;
+    if (id === runId) {
+      memberEvents = events;
+    } else {
+      const prefixRoot = id === rootRunId ? rootRunId : await readLineageRootPrefix(file, id);
+      if (prefixRoot !== rootRunId) continue;
+      try {
+        memberEvents = await readTranscript(file);
+      } catch {
+        continue;
+      }
+    }
+    members.push({ runId: id, events: memberEvents });
+    seen.add(id);
+  }
+  if (!seen.has(runId)) members.push({ runId, events });
+  members.sort((left, right) => {
+    const leftRoot = left.runId === rootRunId ? 0 : 1;
+    const rightRoot = right.runId === rootRunId ? 0 : 1;
+    if (leftRoot !== rightRoot) return leftRoot - rightRoot;
+    const leftFacts = runUsageFacts(left.events, left.runId);
+    const rightFacts = runUsageFacts(right.events, right.runId);
+    const leftAt = leftFacts.startedAt ?? Number.POSITIVE_INFINITY;
+    const rightAt = rightFacts.startedAt ?? Number.POSITIVE_INFINITY;
+    if (leftAt !== rightAt) return leftAt - rightAt;
+    return left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0;
+  });
+  return { rootRunId, members };
+}
+
 async function runsMetricsCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
@@ -1215,7 +1458,7 @@ async function runsMetricsCommand(args, config) {
     // R19 (TD-128 W1 报表污染类，会审补登；L1 勘误：原注释误标 W2——按 TD-128
     // 登记表真实编号，--summary 逐文件聚合属 R18 W1 报表污染类同族)：调用方逐
     // 文件读取，【文件名 stem 即权威 runId】（与 runsGrep 的 runId 推导同款）
-    // ——逐文件传入绑定读者（aggregateSummary → aggregateRunMetrics →
+    // ——逐文件传入绑定读者（aggregateSummary → runUsageFacts →
     // boundReportScope 单一定义处，R18 导出复用不新写）。单文件内的外 run/
     // 伪造尾条不再污染 --summary 聚合；全无信封的 legacy 文件经 boundReportScope
     // 规则保持历史读法（合法路径零变化）。修正旧注释"无权威 runId"的不实措辞
@@ -1233,8 +1476,11 @@ async function runsMetricsCommand(args, config) {
     console.log(`Avg duration: ${formatDuration(s.avgDurationMs)}`);
     const t = s.totalTokens;
     if (Object.keys(t).length > 0) {
-      console.log(`Tokens: input=${t.input ?? 0} output=${t.output ?? 0} reasoning=${t.reasoning ?? 0}`);
+      console.log(`Tokens (self): ${tokenText(t)}`);
+    } else {
+      console.log(`Tokens (self): (none recorded)`);
     }
+    console.log(`Self usage unknown: ${s.unknownSelfUsageCount} run(s) (not included)`);
     return;
   }
 
@@ -1253,22 +1499,91 @@ async function runsMetricsCommand(args, config) {
   }
   const filePath = resolveTranscriptPath(runDir, runId);
   const events = await readTranscript(filePath);
+  const currentFacts = runUsageFacts(events, runId);
+
+  if (options.lineage) {
+    let rootRunId;
+    let rows;
+    if (currentFacts.rootRunId === null) {
+      // 非续修谱系：只展示本 run，但自身用量仍按同一 provider 会话里紧邻的
+      // 前一轮计算（专家复用续轮也能得到正确的自身用量）。
+      rootRunId = runId;
+      const sessionMembers = await loadSessionUsageRuns(runDir, runId, events, currentFacts);
+      const sessionRows = aggregateRunUsages(
+        sessionMembers.map((member) => member.events),
+        sessionMembers.map((member) => member.runId),
+      );
+      rows = [sessionRows.find((row) => row.runId === runId) ?? sessionRows[0]];
+    } else {
+      const lineage = await loadLineageMembers(runDir, runId, events);
+      rootRunId = lineage.rootRunId;
+      rows = aggregateRunUsages(
+        lineage.members.map((member) => member.events),
+        lineage.members.map((member) => member.runId),
+      );
+    }
+    const { total, unknownSelfUsageCount } = sumSelfRows(rows);
+    if (options.format === "json") {
+      console.log(JSON.stringify({
+        runId,
+        rootRunId,
+        lineage: rows,
+        total: { selfTokens: total, unknownSelfUsageCount },
+      }, null, 2));
+      return;
+    }
+    console.log(`runId:    ${runId}`);
+    console.log(`root:     ${rootRunId}`);
+    console.log(`lineage:  ${rows.length} run(s), root -> latest`);
+    console.log(
+      `${"runId".padEnd(30)} ${"seat".padEnd(16)} ${"scope".padEnd(8)} `
+      + `${"self-input".padEnd(12)} ${"self-output".padEnd(12)} ${"cache".padEnd(8)} first-cache`,
+    );
+    for (const row of rows) {
+      const self = row.selfTokens ?? {};
+      console.log(
+        `${row.runId.padEnd(30)} ${String(row.agentId ?? "-").padEnd(16)} `
+        + `${row.usageScope.padEnd(8)} ${String(self.input ?? "-").padEnd(12)} `
+        + `${String(self.output ?? "-").padEnd(12)} ${ratioPercent(row.cacheRatio).padEnd(8)} `
+        + ratioPercent(row.firstRequestCacheRatio),
+      );
+    }
+    console.log(
+      `${"total".padEnd(30)} ${"-".padEnd(16)} ${"-".padEnd(8)} `
+      + `${String(total.input ?? "-").padEnd(12)} ${String(total.output ?? "-").padEnd(12)}`,
+    );
+    console.log(`Self usage unknown: ${unknownSelfUsageCount} run(s) (not included)`);
+    return;
+  }
+
   // R18 (TD-128 W1)：聚合事实读取绑定到本 run 信封（boundReportScope 单一定
   // 义处）——外 run/伪造尾条不再污染 state/tokens/cost/duration。
-  const m = aggregateRunMetrics(events, runId);
+  // 自身用量与 --lineage/--summary 共用 aggregateRunUsages：同 provider 会话的
+  // 成员一起传入，紧邻前一轮才可减（不按请求的父运行、不按文件名猜）。
+  const sessionMembers = await loadSessionUsageRuns(runDir, runId, events, currentFacts);
+  const sessionRows = aggregateRunUsages(
+    sessionMembers.map((member) => member.events),
+    sessionMembers.map((member) => member.runId),
+  );
+  const m = sessionRows.find((row) => row.runId === runId) ?? sessionRows[0];
   if (options.format === "json") {
     console.log(JSON.stringify({ runId, ...m }, null, 2));
     return;
   }
   console.log(`runId:    ${runId}`);
   console.log(`state:    ${m.state}`);
+  console.log(`scope:    ${scopeText(m.usageScope)}`);
   console.log(`duration: ${formatDuration(m.durationMs)}`);
   const t = m.tokens;
   if (Object.keys(t).length > 0) {
-    console.log(`tokens:   input=${t.input ?? 0} output=${t.output ?? 0} reasoning=${t.reasoning ?? 0}`);
+    console.log(`tokens:   ${tokenText(t)}`);
   } else {
     console.log(`tokens:   (none recorded)`);
   }
+  console.log(`self:     ${selfText(m)}`);
+  console.log(`cache:    ${cacheText(m)}`);
+  const first = firstRequestText(m);
+  if (first !== null) console.log(`first:    ${first}`);
   if (m.costUsd !== undefined) {
     console.log(`cost:     ${m.costUsd.toFixed(4)}`);
   }

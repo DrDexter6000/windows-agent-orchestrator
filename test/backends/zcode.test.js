@@ -636,6 +636,11 @@ test("zcode ④: step-finish(stop) → user echo + assistant text + metrics + do
     { input: 60, output: 30, reasoning: 5, cacheRead: 4, cacheWrite: 2 },
     "分量 1:1 映射（上游字段 cacheReadTokens/cacheCreationTokens——zcode.cjs:15259；totalTokens 合计不重复计；modelRequestCount 无轴）",
   );
+  assert.deepEqual(
+    metrics[0].firstRequest,
+    { input: 60 },
+    "首个请求用量取本轮第一个 step-finish 的 tokens（没有 cache 分量就不写）",
+  );
   const done = events.at(-1);
   assert.equal(done.kind, "done");
   assert.equal(done.reason, "completed");

@@ -32,6 +32,7 @@ import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "./d
 import { REASONING_EFFORTS } from "./registry.js";
 export { REASONING_EFFORTS };
 import { holdAwake } from "./keepAwake.js";
+import { normalizeUsageScope, normalizeFirstRequest } from "./metrics.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -3007,8 +3008,18 @@ export class Run {
           await this.transcript.append("run.event", { kind, ...msgRest });
         } else if (ev.kind === "metrics") {
           await markRunningOnce(STATE_CHANGE_REASON.first_event);
-          metrics = ev;
-          await this.transcript.append("run.metrics", { tokens: ev.tokens, ...(ev.costUsd !== undefined ? { costUsd: ev.costUsd } : {}) });
+          // TD-333（决定 0114 §3）：把后端声明的用量计量范围与首个请求用量
+          // 随 run.metrics 落盘。旧事件没有这两个字段时，读侧按 backend 类
+          // 声明解释范围；首个请求只有后端看得到逐请求用量才写。
+          const usageScope = normalizeUsageScope(this.backend?.usageScope);
+          const firstRequest = normalizeFirstRequest(ev.firstRequest);
+          metrics = { ...ev, usageScope, ...(firstRequest ? { firstRequest } : {}) };
+          await this.transcript.append("run.metrics", {
+            tokens: ev.tokens,
+            usageScope,
+            ...(typeof ev.costUsd === "number" ? { costUsd: ev.costUsd } : {}),
+            ...(firstRequest ? { firstRequest } : {}),
+          });
           // 预算闸门检查：累计 effective tokens，超限即标记并打断循环。
           // tokens 是 session 级累计值（非增量），直接比对即可。
           if (typeof tokenBudget === "number" && ev.tokens) {

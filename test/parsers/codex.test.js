@@ -120,6 +120,22 @@ test("turn.completed 含 usage → emit metrics + done", () => {
   assert.equal(events[1].reason, "completed");
 });
 
+test("turn.completed 含缓存输入 → cacheRead/cacheWrite 映射；input 保留上游原值（tokenBudget 口径不变）", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed(
+    '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":120,"cache_write_input_tokens":10,"output_tokens":80,"reasoning_output_tokens":15}}\n',
+  );
+  assert.equal(events[0].kind, "metrics");
+  assert.deepEqual(events[0].tokens, {
+    input: 200,
+    output: 80,
+    reasoning: 15,
+    cacheRead: 120,
+    cacheWrite: 10,
+  });
+  assert.equal(events[1].reason, "completed");
+});
+
 test("turn.completed 无 usage → 只 emit done", () => {
   const p = new CodexStreamParser();
   const events = p.feed('{"type":"turn.completed"}\n');

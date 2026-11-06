@@ -44,6 +44,18 @@ export class CodexBackend extends ProcessBackend {
   // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
   reportsTokenUsage = true;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：同会话累计。上游 turn.completed 的
+  // usage 是该 turn 的 input/output；真实同一 codex 会话两轮（都不调工具）实测：
+  // 第一轮 run_20261008225720847eclese input 23978 / output 12，续轮
+  // run_202610082257455883rr4bg input 48002 / output 54——48002 = 23978 + 24024、
+  // 54 = 12 + 42，续轮 usage 是会话累计而非本运行增量。读侧按同一 provider
+  // 会话紧邻前一轮相减。
+  usageScope = "session";
+  // Codex/OpenAI 形状的 input_tokens 是总输入，cached_input_tokens /
+  // cache_write_input_tokens 是其中的缓存子集（本机 codex.exe 的 TokenUsage
+  // 字段形状）；input 轴保留上游原值，不减缓存子集。
+  inputIncludesCacheRead = true;
+
   // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——codex --json 的
   // item.completed (command_execution) 帧 wire 原生携带 exit_code（parser 投影
   // commandEvent(command, item.exit_code)），数值退出码直接进 command 证据。

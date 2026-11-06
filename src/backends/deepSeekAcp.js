@@ -384,6 +384,12 @@ export class DeepSeekAcpBackend {
   // declared=true, input=null）→ 声明改为 false。与 supportsSessionReuse=false 同源纪律：
   // 能力声明表示 WAO 今天能完成什么，不是上游协议具备什么。翻转条件 = 有可验证的 token 计量通道。
   reportsTokenUsage = false;
+
+  // 用量计量范围（TD-333，决定 0114 §3）：没有任何 live 用量通道
+  // （reportsTokenUsage=false，PromptResponse.usage 实测一直缺席）——按决定
+  // “没有通道就记未知”标 unknown。input 是否含缓存同样无证据。
+  usageScope = "unknown";
+  inputIncludesCacheRead = "unknown";
   // ADR-0032 §8 批次（2026-09-21）：WAO 今天无法经本 backend 产出命令退出码证据——
   // 语义 = "WAO 能否产出证据"，非"上游协议有无该信息"。静态核查（零 token，
   // evidence/phase7-exit-code-wire.json）：dsh-acp 0.1.5-rc.2 的 tool_call_update

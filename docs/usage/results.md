@@ -5,25 +5,18 @@
 ## 查看指标
 
 ```powershell
-# 单个 run 的 token / 耗时 / 成本
-npm run cli -- runs metrics <runId>
-
-# 跨 run 聚合
-npm run cli -- runs metrics --summary
+npm run cli -- runs metrics <runId>            # 本 run
+npm run cli -- runs metrics <runId> --lineage  # 整条续修谱系
+npm run cli -- runs metrics --summary          # 跨 run 合计
 ```
 
-输出示例：
-```
-runId:    run_20260615223814523
-state:    completed
-duration: 5.1s
-tokens:   input=5518 output=7 reasoning=3761
-cost:     $0.0576
-```
+`tokens` 是转录里记的原值；`usageScope`（文本 `scope`）说明它是本运行（`run`）、会话累计（`session`）还是未知。`selfTokens`（文本 `self`）是**自身用量**：同一 provider 会话第一轮取记下的数，后续轮减同一会话紧邻的前一轮；前一轮无 metrics、范围不同或会话 id 读不到 → `unknown (原因码)`，不猜。
+`cacheRatio`（文本 `cache`）是缓存占比：后端声明 input 已含缓存读取时 `cacheRead ÷ input`，否则 `cacheRead ÷ (input + cacheRead)`；声明未知 → 未知。后端看得到逐请求用量时 `firstRequest`（文本 `first`）给出第一个请求的 input/cacheRead 及其缓存占比；只报每轮合计的后端没有这一项。
+`--lineage` 从根到最新列出 runId、席位、范围、自身 input/output、缓存占比与第一个请求的缓存占比，并给自身用量合计。`--summary` 按自身用量相加，会话累计不重复计；自身用量未知的 run 单列 `Self usage unknown: N run(s)`，不以 0 计入。三者都支持 `--format json`。
 
-`runs metrics <runId>` 与 `runs scorecard <runId>` 的事实读取（state/tokens/cost/duration/scorecard 与 reason）按 runId 绑定：尾部追加的外 run 或伪造行不进报表值。两命令的 `runId` 在拼接 transcript 路径前过合法性校验，非法以固定文案拒绝，不回显输入。全无信封的旧 transcript 照常出报表。`run` 前台命令汇总的 scorecard 段与 `npm run smoke` 的 scorecard 判定走同一绑定；`runs metrics --summary` 的逐文件聚合同样绑定，文件名即权威 runId。
+报表读取按 runId 绑定（`docs/02-architecture.md` §6.2）；非法 runId 固定文案拒绝。
 
-评分规则里的 `requireCommands` 要求命中的命令事件带数值退出码 0。后端没有声明 `reportsCommandExitCode` 时，WAO 不从"工具调用成功"推断退出码；zcode、kimi-web、deepseek-acp 的命令事件不带数值退出码，这条规则在它们上面通不过，改用 `requireAcceptance` 或 `mode:"warn"`（`wao registry validate` 会给出 ⚠）。细则见 `docs/certification-runbook.md`。
+`requireCommands` 的退出码推断规则见 `docs/certification-runbook.md`。
 
 ## 被脚本或 LLM 驱动
 

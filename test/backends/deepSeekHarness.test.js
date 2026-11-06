@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   DeepSeekHarnessBackend,
   DeepSeekHarnessEventQueue,
+  projectDshEvent,
 } from "../../src/backends/deepSeekHarness.js";
 import { normalizeAgent } from "../../src/registry.js";
 import { inheritedEnvNames, requiredCredentialNames } from "../../src/envPolicy.js";
@@ -33,6 +34,27 @@ async function collect(handle) {
   for await (const event of handle.events(new AbortController().signal)) events.push(event);
   return events;
 }
+
+test("projectDshEvent: 首个 assistant/message usage → firstRequest；后续消息不覆盖", () => {
+  const state = { seen: false, value: null };
+  const first = projectDshEvent({
+    type: "assistant/message",
+    data: {
+      message: { content: [] },
+      usage: { input_tokens: 10, cache_read_input_tokens: 3, output_tokens: 2 },
+    },
+  }, new Map(), state);
+  const second = projectDshEvent({
+    type: "assistant/message",
+    data: {
+      message: { content: [] },
+      usage: { input_tokens: 99, cache_read_input_tokens: 50, output_tokens: 5 },
+    },
+  }, new Map(), state);
+  assert.deepEqual(first[0].firstRequest, { input: 10, cacheRead: 3 });
+  assert.deepEqual(second[0].firstRequest, { input: 10, cacheRead: 3 },
+    "第一个请求的用量不被后续请求覆盖");
+});
 
 test("DSH policy accepts flash/max/1m and rejects unsupported effort", () => {
   const backend = new DeepSeekHarnessBackend();

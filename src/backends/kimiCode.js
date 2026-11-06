@@ -38,6 +38,11 @@ export class KimiCodeBackend extends ProcessBackend {
   // registry validate 据此对 tokenBudget 配置输出 ⚠（不阻塞）。
   reportsTokenUsage = false;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：stream-json 没有任何 usage/token
+  // 字段，没有可判定的计量通道——未知。将来上游补上 usage 时连同本声明一起改。
+  usageScope = "unknown";
+  inputIncludesCacheRead = "unknown";
+
   // 命令退出码证据不可产出（决定 0073，2026-10-13 由 true 翻为 false）：kimi
   // stream-json 的 command 事件不带数值退出码；tool_result 虽以 tool_call id 关联，
   // 但 parser 的 isError 是对输出文本的关键词匹配（parsers/kimiCode.js 的

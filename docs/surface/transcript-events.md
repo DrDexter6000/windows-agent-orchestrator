@@ -16,7 +16,7 @@ Every event type any production write outlet may write, one row each. The single
 | `run.provider_session_bound` | delivery+sessionReuse run 在终态分派前，把 wire 上观察到的 runtime native provider id（kimi `session.resume_hint`、codex `thread.started`）与原 spawn 身份（`backend`+`backendSessionId`，进程式为 `proc_<pid>`）关联记录的独立有界绑定事实——不补第二条 `session.created`（process_missing 恢复依赖唯一 `proc_<pid>` 身份）；共享续接读取器（`resolvePriorProviderSessionId`/`resolvePriorProviderSessionIdFromEvents`）优先采信并严格校验（runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份一致），坏/重复/冲突事实 fail-closed 拒绝、绝不回落旧 `session.created` 值遮蔽。 |
 | `prompt.sent` | prompt 投递（含完整 prompt 文本，append 前脱敏）。 |
 | `run.submitted` | 投递完成，进入等待。 |
-| `run.metrics` | token 用量、成本与耗时事实；旁路，不触发状态转移。 |
+| `run.metrics` | token 用量、成本与耗时事实；含 `usageScope`（`run` 本运行 / `session` 会话累计 / `unknown`，决定 0114）与可选 `firstRequest`（后端看得到逐请求用量时的首个请求 input/cacheRead）；旁路，不触发状态转移。 |
 | `run.event` | RunEvent 透传（message/command/tool/write telemetry 等；含 write_intent、file_written、tool_use、tool_result——write_intent 仅是未确认的 containment telemetry）。 |
 | `run.wait_policy` | 实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/disabled）。默认 disabled（waitTimeoutMs 为 null）。 |
 | `run.observation_deadline_reached` | 等待窗到期的观察事实，载荷恰为 {waitTimeoutMs, source}（有界，不回显路径/环境）。到期不终止 worker（通知不杀）：前台 CLI 打印一行指引后继续等，后台 runner 继续监督到自然终态。每 run 至多一条（多等待者按 run 级标志幂等去重）。advisory 事实：落盘失败被吞，不改变监督语义。 |

@@ -135,6 +135,16 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // executed the turn.
   supportsInFlightCorrection = true;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：stream-json 的 result 帧 usage 是
+  // 本次 CLI 调用自己的合计（每次 run 一个进程，resume 也另起进程），不含
+  // 更早的 WAO run——本运行范围。input_tokens 与 cache_read_input_tokens /
+  // cache_creation_input_tokens 是分开的计数（Anthropic 形状），input 不
+  // 含缓存，因此缓存占比直接用 cacheRead ÷ (input + cacheRead)。
+  usageScope = "run";
+  // Anthropic 形状的 input_tokens 不含 cache_read_input_tokens /
+  // cache_creation_input_tokens（三者在 usage 里分开计数）。
+  inputIncludesCacheRead = false;
+
   // 非纠偏运行的提示词也走标准输入（`-p` 不带位置参数），不占 Windows 命令行预算；
   // 角色合同仍在命令行上（--append-system-prompt）。
   promptViaStdin = true;

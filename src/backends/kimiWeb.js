@@ -259,6 +259,12 @@ export class KimiWebBackend {
   // metrics 事件（metricsEventFromTurn）；tokenBudget 闸门自此对该 backend 生效。
   reportsTokenUsage = true;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：completed 轮只累加**本轮**
+  // steps[].usage（历史轮不在该 turn 的 steps 里）——本运行范围。kimi 的
+  // inputOther 是非缓存输入，inputCacheRead 单独计量，input 不含缓存。
+  usageScope = "run";
+  inputIncludesCacheRead = false;
+
   // 消息形状（content 分段数组）中未证实退出码通道——命令退出码证据不产出。
   reportsCommandExitCode = false;
 
@@ -1617,7 +1623,7 @@ function turnSignature(turn) {
 // usage 数字在场才发事件（全缺席 ⇒ null——绝不虚构零值通道）。只计本轮 steps
 // ——历史轮 usage 按构造不可能混入。
 function metricsEventFromTurn(turn) {
-  const sums = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const sums = {};
   let seen = false;
   for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
     const usage = step?.usage;
@@ -1625,12 +1631,29 @@ function metricsEventFromTurn(turn) {
     for (const [kimiField, axis] of USAGE_FIELDS) {
       const value = usage[kimiField];
       if (typeof value === "number" && Number.isFinite(value)) {
-        sums[axis] += value;
+        sums[axis] = (sums[axis] ?? 0) + value;
         seen = true;
       }
     }
   }
-  return seen ? metricsEvent(sums) : null;
+  if (!seen) return null;
+  // 只写上游报出的分量：缓存分量缺失时不补 0（缓存占比按未知处理）。
+  const event = metricsEvent(sums);
+  // 首个请求的用量：本轮 steps[0] 自己的 usage（每个 step 是一次模型请求；
+  // 只取第一个 step，后面 step 的缓存命中不属于第一个请求）。上游报 0 就记 0，
+  // 缺字段就不写——不推算。
+  const firstUsage = turn?.steps?.[0]?.usage;
+  if (firstUsage && typeof firstUsage === "object") {
+    const firstRequest = {};
+    if (typeof firstUsage.inputOther === "number" && Number.isFinite(firstUsage.inputOther)) {
+      firstRequest.input = firstUsage.inputOther;
+    }
+    if (typeof firstUsage.inputCacheRead === "number" && Number.isFinite(firstUsage.inputCacheRead)) {
+      firstRequest.cacheRead = firstUsage.inputCacheRead;
+    }
+    if (Object.keys(firstRequest).length > 0) event.firstRequest = firstRequest;
+  }
+  return event;
 }
 
 // GET prompts 的 active / queued 条目 → prompt id。2.4.0 实测条目是对象，id 在 prompt_id

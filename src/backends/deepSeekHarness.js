@@ -81,6 +81,15 @@ export class DeepSeekHarnessBackend {
   // 投影为 metrics token 事实）——tokenBudget 闸门对该 backend 有效。
   reportsTokenUsage = true;
 
+  // 用量计量范围（TD-333，决定 0114 §3）：assistant/message 帧的 usage 可能
+  // 是**单条 assistant 消息**的计量；一个 run 有多条 assistant/message 时，
+  // `run.metrics` 记的是最后一条（RunManager 取末条），既不是本运行合计、也
+  // 不是会话累计——没有证据支持任一确定范围，如实标未知。usage 键名是
+  // Anthropic 形状（input_tokens / cache_read_input_tokens /
+  // cache_creation_input_tokens），三者分开计数。
+  usageScope = "unknown";
+  inputIncludesCacheRead = "unknown";
+
   // 命令退出码证据不可产出（决定 0073，2026-10-13 由 true 翻为 false）：command
   // 事件不带数值退出码；tool_result 以 callId 关联、isError 取自结果帧的 error
   // 字段，但"shell 非零退出必然置 error"没有任何实测证据（真实转录里没有本后端的
@@ -182,6 +191,8 @@ export class DeepSeekHarnessBackend {
     let stderrTail = "";
     let cleanupStarted = false;
     const pendingWrites = new Map();
+    // 首个 assistant/message 的 usage = 第一个请求的用量（后续消息不覆盖）。
+    const firstRequestState = { seen: false, value: null };
 
     const cleanup = async () => {
       if (cleanupStarted) return;
@@ -243,7 +254,8 @@ export class DeepSeekHarnessBackend {
           if (streamingSeen) return;
           streamingSeen = true;
         }
-        const projected = projectDshEvent(event, pendingWrites).map((value) => redactor.redact(value));
+        const projected = projectDshEvent(event, pendingWrites, firstRequestState)
+          .map((value) => redactor.redact(value));
         if (projected.length > 0) queue.push(...projected);
         return;
       }
@@ -425,7 +437,7 @@ export class DeepSeekHarnessBackend {
   }
 }
 
-export function projectDshEvent(event, pendingWrites = new Map()) {
+export function projectDshEvent(event, pendingWrites = new Map(), firstRequestState = null) {
   if (!event || typeof event !== "object") return [];
   if (event.type === "assistant/chunk") return [runtimeActivityEvent("streaming")];
   if (event.type === "assistant/message") {
@@ -436,14 +448,29 @@ export function projectDshEvent(event, pendingWrites = new Map()) {
       : [];
     const events = parts.length > 0 ? [messageEvent("assistant", parts)] : [];
     const usage = event.data?.usage;
+    // 第一个 assistant/message 就是第一个请求；它没有 usage 时也把位置占住，
+    // 绝不让第二个请求的 usage 冒充「第一个请求」。
+    const isFirstAssistantMessage = firstRequestState !== null && !firstRequestState.seen;
+    if (firstRequestState !== null) firstRequestState.seen = true;
     if (usage && typeof usage === "object") {
-      events.push(metricsEvent({
-        input: numberFrom(usage.inputTokens, usage.input_tokens),
+      const input = numberFrom(usage.inputTokens, usage.input_tokens);
+      const cacheRead = numberFrom(usage.cacheReadTokens, usage.cache_read_input_tokens);
+      const metrics = metricsEvent({
+        input,
         output: numberFrom(usage.outputTokens, usage.output_tokens),
         reasoning: numberFrom(usage.reasoningTokens, usage.reasoning_tokens),
-        cacheRead: numberFrom(usage.cacheReadTokens, usage.cache_read_input_tokens),
+        cacheRead,
         cacheWrite: numberFrom(usage.cacheWriteTokens, usage.cache_creation_input_tokens),
-      }));
+      });
+      // 只记上游报出的数（缺字段就不写，不推算）。
+      if (isFirstAssistantMessage) {
+        const firstRequest = {};
+        if (typeof input === "number") firstRequest.input = input;
+        if (typeof cacheRead === "number") firstRequest.cacheRead = cacheRead;
+        if (Object.keys(firstRequest).length > 0) firstRequestState.value = firstRequest;
+      }
+      if (firstRequestState?.value) metrics.firstRequest = firstRequestState.value;
+      events.push(metrics);
     }
     return events;
   }

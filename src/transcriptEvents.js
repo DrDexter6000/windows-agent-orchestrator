@@ -71,7 +71,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.metrics",
-    description: "token 用量、成本与耗时事实；旁路，不触发状态转移。",
+    description: "token 用量、成本与耗时事实；含 `usageScope`（`run` 本运行 / `session` 会话累计 / `unknown`，决定 0114）与可选 `firstRequest`（后端看得到逐请求用量时的首个请求 input/cacheRead）；旁路，不触发状态转移。",
   },
   {
     type: "run.event",
