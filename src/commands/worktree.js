@@ -55,7 +55,11 @@ async function worktreeReclaimCommand(rest, config) {
     : resolveConfigPath(config.runDir ?? "runs", readInstallRoot());
   if (options.apply) {
     if (!options.expectSha256) {
-      throw new Error("worktree reclaim --apply requires --expect-sha256 <hex>（生成计划时打印的 sha256）");
+      // b78：报错里写出命令形状——Lead 不该靠猜拼参数（值见生成计划时打印的整行命令）。
+      throw new Error(
+        "worktree reclaim --apply requires --expect-sha256 <hex>（生成计划时打印的 sha256）；"
+        + "命令形状：wao worktree reclaim --apply <plan.json> --expect-sha256 <hex> --run-dir <生成时的 run-dir>",
+      );
     }
     const result = await applyWorktreeReclaim({
       planPath: resolve(options.apply),
@@ -129,6 +133,13 @@ async function worktreeReclaimCommand(rest, config) {
   const kept = Object.entries(byCategory).filter(([c]) => c !== "reclaim").reduce((n, [, v]) => n + v, 0);
   console.log(`[worktree reclaim] 计划写出：${resolve(options.out)}（只读，未动任何树/分支/转录）`);
   console.log(`  计划 sha256：${planSha256}（--apply 须带同一值，且 --run-dir 须与生成时一致）`);
+  // b78 续修：可照抄的 apply 命令（实际值）——路径用双引号括起，含空格的路径
+  // 照抄才能跑（PowerShell/cmd/Git Bash 都认双引号）；sha256 是十六进制，无需
+  // 引号。路径里出现双引号时无法安全包裹，就不打印照抄行（sha256 行仍在）。
+  const planPath = resolve(options.out);
+  if (!planPath.includes('"') && !runDir.includes('"')) {
+    console.log(`  照抄执行：wao worktree reclaim --apply "${planPath}" --expect-sha256 ${planSha256} --run-dir "${runDir}"`);
+  }
   console.log(`  普查：worktrees ${plan.counts.worktrees}，wao/* 分支 ${plan.counts.waoBranches}；保留 ${kept}，回收 ${byCategory.reclaim ?? 0}`);
   const summary = Object.entries(byCategory).filter(([, v]) => v > 0).map(([c, v]) => `${c}=${v}`).join(" ");
   console.log(`  分类计数（按 runId，含无独立条目的共享成员）：${summary}`);

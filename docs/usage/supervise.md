@@ -60,7 +60,7 @@
 
 停止路由由会话记录的事实决定：`proc_<pid>` 占位 id 或带 `hostPid` 的会话（进程式后端，如 zcode）走进程树击杀并核验；带 `serveUrl` 的走服务端中止——kimi-web 中止会话正在跑和排队的 prompt，鉴权用 registry 里派发该运行的 agent（`run.started.agentId`）；会话记录没有 `backend` 字段时不发任何请求（停止路由无法解析，固定文案 `unresolved`）。该 agent 取不到（registry 不可读/不在册）、token 取不到（token 文件或环境变量：先进程环境、再 Windows 用户环境）、与会话记录对不上（backend/`serveUrl` 不同），或 backend 无服务端中止时：什么都不发、不认领终态，记 `run.stop_unverified`（`outcome:"stop_route_unavailable"`）并告警，返回 `terminalAccepted:false`、原状态、`sideEffectAttempted:false`——worker 还在跑，需修好 registry 再停或手动处理（CLI 另带该 outcome 与固定说明）。resume 重放过的运行目标取 `run.rerun` 的新会话/新进程，不取旧进程；皆无时报 `has no stop route` 并点名后端，需手动结束进程树。会话查找与 agentId 读取都是 runId 绑定读取（末条绑定），外 run 伪造 `session.created` 夺不走 kill 目标；信封前的 legacy transcript 落入 `no session metadata` 拒绝面。
 
-CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 取 `status <runId>` 输出的 `observedSeq`；缺任一项即报错并给出这两步）。
+CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 同第 3 步，缺项即报错）。
 
 ## MCP `run_wait`（长等待）
 

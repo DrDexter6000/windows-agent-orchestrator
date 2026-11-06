@@ -499,10 +499,10 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   const out = execSync("node src/cli.js help", { cwd: process.cwd(), encoding: "utf8" });
   assert.match(out, /run <agentId> .*--prompt-file FILE/, "help 必须列出 run --prompt-file FILE");
   assert.match(out, /--scorecard-rules-file FILE/, "help 必须列出 --scorecard-rules-file FILE");
-  // 第 67a 批：TD-65 当年补的 status --format json 实为幻影旗标（statusCommand
-  // 从不读 --format，输出恒为 JSON），幻影不得回潮（旗标层另由 cliHelpCoverage 守卫）。
-  assert.match(out, /^  status <runId>/m, "help 必须列出 status");
-  assert.doesNotMatch(out, /status <runId> [^\n#]*--format/, "status 无 --format 旗标（幻影已删，不得回潮；只查语法段，说明文字可提及）");
+  // 第 67a 批：TD-65 的 status --format json 幻影曾整批删除；第 78 批 --format
+  // 成为真实实现（line 单行出口；json 依 results.md 契约与缺省逐字节相同），
+  // 语法段必须钉住两个合法值（值层由 cli-runs.test.js 的 b78 系列钉）。
+  assert.match(out, /^  status <runId> \[--format json\|line\] \[--run-dir DIR\]/m, "help 必须列出 status 与其 --format json|line 旗标");
   // runs 族（M8-2/3 新增，曾漏）
   assert.match(out, /runs dashboard/, "help 必须列出 runs dashboard（main() 路由）");
   assert.match(out, /runs diagnose/, "help 必须列出 runs diagnose（main() 路由）");

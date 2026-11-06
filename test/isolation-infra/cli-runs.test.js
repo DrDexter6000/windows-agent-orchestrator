@@ -150,15 +150,33 @@ test("WF-6: run --background 返回 runId 前必须已建立 status 可读 trans
     assert.ok(parsed.runId);
     assert.ok(existsSync(parsed.transcript), "CLI 返回 runId 时 transcript 必须已存在，status 才不会 ENOENT");
 
-    const status = spawnSync(process.execPath, [
+    // b78 续修：--format json 是既有契约（results.md——被接受且与缺省逐字节相同，
+    // Lead 与宿主脚本在用），不能报错。WF-6 恢复带旗标调用并钉住逐字节相同。
+    // 这里的转录是活的：detached runner 可能恰在两次读取之间落事件，终态后
+    // executionStage.secondsSince 也在走秒——逐字节相同以"成对读取、至多重试"
+    // 断言（任一对相同即证两条路径打同一份字节；确定性逐字节由 b78-line-4 的
+    // 静态夹具钉）。
+    const statusSpawn = (extra) => spawnSync(process.execPath, [
       "src/cli.js",
       "status", parsed.runId,
       "--run-dir", runDir,
-      "--format", "json",
+      ...extra,
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
 
-    assert.equal(status.status, 0, `status 必须立即可读: ${status.stderr}`);
-    const statusJson = JSON.parse(status.stdout);
+    let statusJson = null;
+    let identical = false;
+    let lastPair = null;
+    for (let attempt = 0; attempt < 3 && !identical; attempt += 1) {
+      const bare = statusSpawn([]);
+      assert.equal(bare.status, 0, `status 必须立即可读: ${bare.stderr}`);
+      const asJson = statusSpawn(["--format", "json"]);
+      assert.equal(asJson.status, 0, `status --format json 必须可用: ${asJson.stderr}`);
+      lastPair = { bare: bare.stdout, asJson: asJson.stdout };
+      identical = asJson.stdout === bare.stdout;
+    }
+    assert.ok(identical,
+      `--format json 与不带 --format 输出逐字节相同（3 对读取均不同，最后一对：${JSON.stringify(lastPair)}）`);
+    statusJson = JSON.parse(lastPair.asJson);
     assert.equal(statusJson.runId, parsed.runId);
     assert.ok(["pending", "submitted", "running", "failed", "completed", "timed_out", "aborted"].includes(statusJson.state));
   } finally {
@@ -389,6 +407,207 @@ test("TD150B-C2: status 全过 scorecard → JSON.scorecard.verdict=passed；门
     const parsedN = cliJsonBlock(elementsN);
     assert.equal("scorecard" in parsedN, false, "无 scorecard 事件 → JSON 字段 absent");
     assert.ok(!cliScorecardLines(elementsN).length, "无摘要行");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ── b78：status --format line 单行出口 ───────────────────────────────────────
+// 显式 --format line 时只打一行，字段取现有 JSON 已打印的字段（值同一快照）；
+// 只有 null/缺失写 unknown（空串是事实 ""，照写）；缺省（无 --format）与
+// --format json 输出逐字节相同（json 是 results.md 既有契约，WF-6 钉）。
+
+// b78 续修：行尾自由文本字段（lastActivityKind/lastActivitySummary/advisory）的
+// 值是 JSON 字符串（带引号与转义，空串 ""）或 unknown——按 JSON 字符串文法逐段
+// 解析（不是合法 JSON 字符串也不是 unknown 就红），机器字段是裸 key=value。
+const LINE_JSON_STRING_RE = /^"(?:[^"\\]|\\.)*"/;
+function readLineFreeText(rest, line) {
+  if (rest.startsWith("unknown")) return { value: "unknown", rest: rest.slice("unknown".length) };
+  const m = rest.match(LINE_JSON_STRING_RE);
+  assert.ok(m, `自由文本字段须为 JSON 字符串或 unknown: ${line}`);
+  return { value: JSON.parse(m[0]), rest: rest.slice(m[0].length) };
+}
+function parseStatusLine(line) {
+  const head = line.match(
+    /^runId=(\S+) state=(\S+) executionStage=(\S+) secondsSinceActivity=(\S+) observedSeq=(\S+)/,
+  );
+  assert.ok(head, `机器字段前缀（裸 key=value）: ${line}`);
+  const fields = {
+    runId: head[1],
+    state: head[2],
+    executionStage: head[3],
+    secondsSinceActivity: head[4],
+    observedSeq: head[5],
+  };
+  let rest = line.slice(head[0].length);
+  for (const key of ["lastActivityKind", "lastActivitySummary"]) {
+    assert.ok(rest.startsWith(` ${key}=`), `行尾自由文本按序 ${key} 在场: ${line}`);
+    const r = readLineFreeText(rest.slice(key.length + 2), line);
+    fields[key] = r.value;
+    rest = r.rest;
+  }
+  if (rest.startsWith(" advisory=")) {
+    const r = readLineFreeText(rest.slice(" advisory=".length), line);
+    fields.advisory = r.value;
+    rest = r.rest;
+  }
+  assert.equal(rest, "", `advisory 之后无残余: ${line}`);
+  return fields;
+}
+
+test("b78-line-1: --format line 一行、字段齐全，值与缺省 JSON 同一快照", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-line-1-"));
+  try {
+    // run.event（command）供 lastActivityKind/Summary/secondsSinceActivity；ts 取
+    // 当前时刻——非安静 run（<30 分钟），行尾无 advisory，结尾断言确定。
+    const now = new Date().toISOString();
+    writeFileSync(join(dir, "run_l1.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: now }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "running", ts: now }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "command", command: "npm test", ts: now }) + "\n");
+    // 缺省输出：多行 JSON（既有路径），拿它对照单行取值。
+    const jsonElements = await captureElements(async () => {
+      await statusCommand(["run_l1", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = cliJsonBlock(jsonElements);
+    assert.equal(parsed.state, "running");
+    assert.equal(parsed.lastActivityKind, "跑命令");
+    assert.equal(parsed.lastActivitySummary, "npm test");
+
+    const lineElements = await captureElements(async () => {
+      await statusCommand(["run_l1", "--run-dir", dir, "--format", "line"], { runDir: dir });
+    });
+    assert.equal(lineElements.length, 1, "--format line 恰输出一行");
+    const line = lineElements[0];
+    assert.ok(!line.includes("\n"), "单行不含换行");
+    // 自由文本字段的 JSON 字符串形式直接钉在行文里（带引号）。
+    assert.ok(line.endsWith('lastActivityKind="跑命令" lastActivitySummary="npm test"'),
+      `行尾两个自由文本字段是 JSON 字符串: ${line}`);
+    const fields = parseStatusLine(line);
+    assert.ok(fields.secondsSinceActivity !== "unknown" && fields.observedSeq !== "unknown",
+      "有心跳事件的 run 两个机器字段都有值");
+    assert.ok(!("advisory" in fields), "非安静 run 不追加 advisory");
+    // 单行取值与缺省 JSON 同一快照（对照断言，不另抄期望）。时间派生字段两次读取
+    // 差一秒以内（各自取 now），容差 1。
+    assert.equal(fields.runId, parsed.runId);
+    assert.equal(fields.state, parsed.state);
+    assert.equal(fields.executionStage, parsed.executionStage.phase);
+    assert.ok(Math.abs(Number(fields.secondsSinceActivity) - parsed.secondsSinceActivity) <= 1,
+      "secondsSinceActivity 与 JSON 同值（±1s 读取间隔）");
+    assert.equal(fields.observedSeq, String(parsed.observedSeq));
+    assert.equal(fields.lastActivityKind, parsed.lastActivityKind);
+    assert.equal(fields.lastActivitySummary, parsed.lastActivitySummary);
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("b78-line-2: 空串摘要照写 \"\"、含空格的 lastActivityKind 带引号（tool_use）——各字段与 JSON 一致", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-line-2-"));
+  try {
+    // tool_use 且 input 里没有可识别字段：kind=用工具 TaskOutput（含空格）、
+    // summary=""（空串）——会审实测的 run_2026100214230874084s9ji 形态。
+    const now = new Date().toISOString();
+    writeFileSync(join(dir, "run_l2.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: now }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "running", ts: now }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_use", tool: "TaskOutput", input: {}, ts: now }) + "\n");
+    const jsonElements = await captureElements(async () => {
+      await statusCommand(["run_l2", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = cliJsonBlock(jsonElements);
+    assert.equal(parsed.lastActivityKind, "用工具 TaskOutput", "夹具前提：kind 含空格");
+    assert.equal(parsed.lastActivitySummary, "", "夹具前提：摘要空串（JSON 面 \"\"）");
+
+    const lineElements = await captureElements(async () => {
+      await statusCommand(["run_l2", "--run-dir", dir, "--format", "line"], { runDir: dir });
+    });
+    assert.equal(lineElements.length, 1);
+    const line = lineElements[0];
+    assert.ok(line.endsWith('lastActivityKind="用工具 TaskOutput" lastActivitySummary=""'),
+      `空串摘要是 "" 不是 unknown；含空格的 kind 带引号: ${line}`);
+    const fields = parseStatusLine(line);
+    assert.equal(fields.lastActivityKind, parsed.lastActivityKind);
+    assert.equal(fields.lastActivitySummary, parsed.lastActivitySummary);
+    assert.equal(fields.runId, parsed.runId);
+    assert.equal(fields.state, parsed.state);
+    assert.equal(fields.executionStage, parsed.executionStage.phase);
+    assert.equal(fields.observedSeq, String(parsed.observedSeq));
+    assert.ok(Math.abs(Number(fields.secondsSinceActivity) - parsed.secondsSinceActivity) <= 1);
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("b78-line-3: null/缺失写 unknown（无 run.event）；advisory 有则行尾追加、无则不追加", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-line-3-"));
+  try {
+    // 只有提交与状态事件：lastActivityKind/Summary/secondsSinceActivity 全 null →
+    // unknown。两份 fixture 钉死 advisory 两个分支：ts=1 小时前（未终态 → 必安静
+    // → 有 advisory）与 ts=当前（必不安静 → 无）。
+    const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+    const now = new Date().toISOString();
+    for (const [runId, ts] of [["run_l3q", hourAgo], ["run_l3n", now]]) {
+      writeFileSync(join(dir, `${runId}.jsonl`),
+        JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts }) + "\n" +
+        JSON.stringify({ type: "run.state_change", to: "running", ts }) + "\n");
+    }
+    const line = (runId) => captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir, "--format", "line"], { runDir: dir });
+    });
+    const quietElements = await line("run_l3q");
+    assert.equal(quietElements.length, 1);
+    const quietFields = parseStatusLine(quietElements[0]);
+    assert.equal(quietFields.secondsSinceActivity, "unknown", "无 run.event → secondsSinceActivity unknown");
+    assert.equal(quietFields.lastActivityKind, "unknown", "null kind → unknown");
+    assert.equal(quietFields.lastActivitySummary, "unknown", "null summary → unknown");
+    assert.ok(typeof quietFields.advisory === "string", "安静 run 行尾追加 advisory");
+    const jsonQuiet = await captureElements(async () => {
+      await statusCommand(["run_l3q", "--run-dir", dir], { runDir: dir });
+    });
+    const parsedQuiet = cliJsonBlock(jsonQuiet);
+    assert.ok(typeof parsedQuiet.advisory === "string", "夹具前提：1 小时无动作的未终态 run 必有 advisory");
+    assert.equal(quietFields.advisory, parsedQuiet.advisory, "advisory 解析后与 JSON 同值");
+
+    const freshElements = await line("run_l3n");
+    assert.equal(freshElements.length, 1);
+    const freshFields = parseStatusLine(freshElements[0]);
+    assert.ok(!("advisory" in freshFields), "不安静不追加 advisory");
+    assert.ok(freshElements[0].endsWith("lastActivityKind=unknown lastActivitySummary=unknown"),
+      "null 自由文本写 unknown（无引号）收尾");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("b78-line-4: 缺省与 --format json 逐字节相同（in-process 静态夹具）；未知/缺值 --format 报错", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-line-4-"));
+  try {
+    // 静态夹具：恰一条 run.submitted（ts=当前时刻）——无状态事件（executionStage
+    // phase unknown、secondsSince null）无 run.event（心跳 null）且不安静（无
+    // advisory）。所有字段不随墙钟走，两次读取逐字节相同是确定性的。
+    writeFileSync(join(dir, "run_l4.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: new Date().toISOString() }) + "\n");
+    const bare = await captureElements(async () => {
+      await statusCommand(["run_l4", "--run-dir", dir], { runDir: dir });
+    });
+    const asJson = await captureElements(async () => {
+      await statusCommand(["run_l4", "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    assert.equal(bare.length, 1, "缺省仍恰一个输出块");
+    assert.deepEqual(asJson, bare, "--format json 与缺省输出逐字节相同（静态夹具，确定性）");
+    assert.ok(bare[0].startsWith("{\n"), "缺省输出是多行 JSON 块");
+    assert.equal(JSON.stringify(JSON.parse(bare[0]), null, 2), bare[0], "JSON 块自洽（无行模式残留）");
+    assert.ok(!bare[0].startsWith("runId="), "缺省不是单行格式");
+    // 未知值 / 缺值：沿用 collect 投影面的 fail-fast 文案风格（json|line 是闭集）。
+    await assert.rejects(
+      () => statusCommand(["run_l4", "--run-dir", dir, "--format", "text"], { runDir: dir }),
+      /status: --format only supports json\|line/,
+    );
+    await assert.rejects(
+      () => statusCommand(["run_l4", "--run-dir", dir, "--format"], { runDir: dir }),
+      /status: --format requires a value/,
+    );
   } finally {
     rmrfRetry(dir);
   }

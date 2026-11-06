@@ -72,7 +72,7 @@ import { readTranscript } from "../transcript.js";
 import { determineRunSettlement } from "./runSettlement.js";
 import { deliveryContinuableHint } from "./runContinue.js";
 import { findRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
-import { parseWorktreePorcelain } from "./worktreeReclaim.js";
+import { parseWorktreePorcelain, RECENT_BOUND_EVENT_MS } from "./worktreeReclaim.js";
 import {
   FEEDBACK_FILE_RE,
   defaultPackageRoot,
@@ -362,9 +362,14 @@ async function collectRunBranchOpenItems({
     const wt = worktreeCount != null && worktreeCount > 0
       ? ` + ${worktreeCount} run worktree(s) under .wao-worktrees/`
       : "";
+    // b78：写明"能否回收以回收计划为准"——计划保留最近 RECENT_BOUND_EVENT_MS
+    // 内有事件的运行，Lead 做出空计划不是出错；分钟数由常量派生，不另写数字。
+    const keptRecentMinutes = Math.round(RECENT_BOUND_EVENT_MS / 60_000);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${reclaimBranches} decided/no-delivery wao/run_* branch(es)${wt} `
-      + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only)${truncSuffix}`,
+      + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only; `
+      + `the plan decides what is reclaimable — an empty plan can be normal, `
+      + `runs with an event in the last ${keptRecentMinutes} minutes are kept)${truncSuffix}`,
     ));
   }
   if (missingTranscripts > 0) {

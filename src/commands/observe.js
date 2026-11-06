@@ -63,14 +63,57 @@ function boundLongStrings(value) {
   return value;
 }
 
+// b78：`status --format line` 的单行投影——只取现有 JSON 已打印的字段（值同一
+// 份 getRunStatus 快照），只有 null/缺失写 unknown、不补猜测（空串是事实 ""，
+// 照写，与 JSON 面一致）。自由文本字段（lastActivityKind、lastActivitySummary、
+// advisory）用 JSON 字符串形式（带引号与转义）排在行尾——值里可以有空格，脚本
+// 按 JSON.parse 取回；前面的机器字段仍是裸 key=value，可 `grep -o 'state=[^ ]*'`
+// 直取。lastActivitySummary 沿用 service 端 describeActivity 的既有截短（80
+// 字符），本显示层不另写第二套；executionStage 取 phase（单行里的可读值）。
+function statusLineValue(v) {
+  return v === null || v === undefined ? "unknown" : String(v);
+}
+
+function statusLineFreeText(v) {
+  return v === null || v === undefined ? "unknown" : JSON.stringify(v);
+}
+
+function statusLine(status) {
+  let line = [
+    `runId=${statusLineValue(status.runId)}`,
+    `state=${statusLineValue(status.state)}`,
+    `executionStage=${statusLineValue(status.executionStage?.phase)}`,
+    `secondsSinceActivity=${statusLineValue(status.secondsSinceActivity)}`,
+    `observedSeq=${statusLineValue(status.observedSeq)}`,
+  ].join(" ");
+  line += ` lastActivityKind=${statusLineFreeText(status.lastActivityKind)}`;
+  line += ` lastActivitySummary=${statusLineFreeText(status.lastActivitySummary)}`;
+  if (status.leadAdvisory) line += ` advisory=${statusLineFreeText(status.leadAdvisory)}`;
+  return line;
+}
+
 export async function statusCommand(args, config) {
   const [runId, ...tail] = args;
   const options = parseOptions(tail);
   const runDir = resolve(options.runDir ?? config.runDir);
+  // b78 续修：--format json 与缺省逐字节相同（results.md 既有契约——Lead 与宿主
+  // 脚本在用 --format json，不能报错）；line 走单行出口；其余值 fail-fast
+  // （沿用 collect 投影面风格：读取前拒绝，不静默落回 JSON）。
+  if (options.format === true) {
+    throw new Error("status: --format requires a value");
+  }
+  if (options.format !== undefined && options.format !== "line" && options.format !== "json") {
+    throw new Error("status: --format only supports json|line");
+  }
   // M9-3A: aggregation delegated to shared application service. The CLI prints
   // the existing TD-75 field subset (byte-compatible output); the service also
   // returns machine fields for MCP that the CLI does not print.
   const status = await getRunStatus({ runId, runDir });
+  // b78：显式 --format line 走单行出口；缺省路径（无 --format）逐字节不变。
+  if (options.format === "line") {
+    console.log(statusLine(status));
+    return;
+  }
   // TD-150 批B + 审计修正：scorecard.checked 成为末事件时，裸 `last` 会把
   // evidence/detail 自由文本一并回显（非泄漏形状被旧字段绕过）。CLI 显示层把该
   // 形态投影为闭集安全视图；其余末事件原样保留。

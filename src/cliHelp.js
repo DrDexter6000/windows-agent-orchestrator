@@ -28,7 +28,7 @@ Commands:
   registry align [--registry FILE] [--lane <id>]... [--apply --expect-sha256 <hex>]   # 私有注册表跟随车道表：先预览（零写入，给 SHA-256），逐车道显式采用；--apply 必须点名车道并带当前文件哈希
   spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--require-certified]   # 单 agent 不带 --wait = 后台托管；--scorecard-mode / --require-certified 只在这条路径生效
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
-  status <runId> [--run-dir DIR]   # 输出恒为 JSON
+  status <runId> [--format json|line] [--run-dir DIR]   # 缺省多行 JSON（--format json 同缺省）；line 打单行（自由文本带引号，null/缺失=unknown）
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final [--out FILE]] [--format json] [--run-dir DIR]   # --final --out 把最终回答完整写进文件（多长都写）
   stop <runId> --observed-seq N --reason TEXT [--run-dir DIR] [--registry FILE]   # N = status 输出的 observedSeq；先看最新状态再停

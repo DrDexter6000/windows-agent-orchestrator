@@ -35,6 +35,7 @@ import {
   OPEN_ITEM_MAX_CHARS,
   OPEN_ITEM_BRANCH_CAP,
 } from "../../src/application/leadOpenItems.js";
+import { RECENT_BOUND_EVENT_MS } from "../../src/application/worktreeReclaim.js";
 import { determineRunSettlement } from "../../src/application/runSettlement.js";
 import {
   deriveProjectBucketSlug,
@@ -78,6 +79,11 @@ function makeLinkedWorktree(root, dir) {
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
 const CROSS_TREE_HINT = "some runs were dispatched from another worktree: workspace_select it (or run the CLI there) first";
+// b78：留待回收行的固定尾巴——"能否回收以回收计划为准 + 空计划可能正常"；分钟数
+// 从 worktreeReclaim 的 RECENT_BOUND_EVENT_MS 派生（改常量时文案跟着变，不抄数字）。
+const RECLAIM_TAIL = " left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only; "
+  + `the plan decides what is reclaimable — an empty plan can be normal, `
+  + `runs with an event in the last ${Math.round(RECENT_BOUND_EVENT_MS / 60_000)} minutes are kept)`;
 const MISSING_LINE = (n) => `open item: ${n} wao/run_* branch(es) without a usable transcript fact `
   + "(not found, unreadable, conflicting copies, or a broken recorded project fact; "
   + "read-only `wao worktree reclaim --out <plan.json>` plan lists the branches)";
@@ -269,8 +275,7 @@ test("OI-A1: 等裁定 / 终态未收口 / 留待回收（已采纳+已拒收+�
       "open item: 1 terminal run(s) not settled (verification/reverify without a result; "
       + "run_delivery or `wao runs wait <runId> --until-settled`): run_a2");
     assert.equal(lines[2],
-      "open item: 3 decided/no-delivery wao/run_* branch(es) left for reclaim "
-      + "(`wao worktree reclaim --out <plan.json>` plans it; read-only)");
+      "open item: 3 decided/no-delivery wao/run_* branch(es)" + RECLAIM_TAIL);
     for (const line of lines) {
       assert.ok(!line.includes(CROSS_TREE_HINT), `同根派发不出跨工作树提示: ${line}`);
     }
@@ -550,8 +555,7 @@ test("OI-A8: 运行树按全仓口径数——路径以 .wao-worktrees/<合法 r
     });
     assert.equal(lines.length, 1);
     assert.equal(lines[0],
-      "open item: 1 decided/no-delivery wao/run_* branch(es) + 2 run worktree(s) under .wao-worktrees/ "
-      + "left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only)");
+      "open item: 1 decided/no-delivery wao/run_* branch(es) + 2 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
   } finally { cleanupDir(root); }
 });
 
@@ -566,8 +570,7 @@ test("OI-A9: 0 分支但残留运行树 → 仍出留待回收行；worktree lis
     });
     assert.equal(withTrees.lines.length, 1, "0 分支 + 1 棵运行树 → 仍一行");
     assert.equal(withTrees.lines[0],
-      "open item: 0 decided/no-delivery wao/run_* branch(es) + 1 run worktree(s) under .wao-worktrees/ "
-      + "left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only)");
+      "open item: 0 decided/no-delivery wao/run_* branch(es) + 1 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
     // worktree list 失败 → 只有分支数，无运行树数。
     const git = fakeGit({ refs: ["wao/run_w2"] });
     const baseFn = git.fn;

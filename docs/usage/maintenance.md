@@ -39,9 +39,9 @@ npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算�
 
 四步：
 
-1. 生成计划（只读）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、分类计数与逐条回收项的审批事实（嵌套项另打目标与父树）；不传 `--run-dir` 时缺省安装根的运行目录。
+1. 生成计划（只读）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、可照抄 apply 命令、分类计数与逐条回收项的审批事实（嵌套项另打目标与父树）；不传 `--run-dir` 时缺省安装根的运行目录。
 2. 审阅与判定：谁判定、哪些要用户同意，见 `docs/02-architecture.md` §4.3「人工清退」。`include_required` 类保留项（未并入 main，且 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用或只有分支没有树且三处无转录）判定可以回收的，带 `--include <runId>` 重新生成计划。
-3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，一律用计划里的运行目录（另传不同 `--run-dir` 整体拒绝）；分支先进 bundle（完整历史，list-heads 含各 tip）；树逐棵复核——嵌套项先重证范围（父树仍在册同仓、路径未变、逐级无链接；旧形状嵌套项不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落盘；记录写失败、遇目录缺失登记或删分支阶段登记读不出以非零退出码结束并如实列出已删除部分。
+3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，一律用计划里的运行目录（`--run-dir` 不一致整体拒绝）；分支先进 bundle（完整历史，list-heads 含各 tip）；树逐棵复核——嵌套项先重证范围（父树仍在册同仓、路径未变、逐级无链接；旧形状嵌套项不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落盘；记录写失败、遇目录缺失登记或删分支阶段登记读不出以非零退出码结束并如实列出已删除部分。
 4. 收口：`npm run hygiene`。
 
 清退范围：主检出与每个经核验的关联工作树（在册、同 common git dir、目录在、路径无链接/junction）下各自的 `.wao-worktrees/` 一级 `<runId>` 子目录；嵌套项在计划里记范围证明（父树真实路径、common git dir、目标真实路径）。

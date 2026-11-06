@@ -514,9 +514,88 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   const fileSha = createHash("sha256").update(readFileSync(outPath)).digest("hex");
   assert.equal(printed, fileSha, "打印的 sha256 应绑定写出的计划文件字节");
 
+  // b78 续修：sha256 行之后打印可照抄的 apply 命令（实际值，路径带双引号——
+  // 含空格的路径照抄才能跑）——计划文件路径、sha256、run-dir 与本次生成一一
+  // 对应，Lead 不用猜参数名。
+  const applyLine = logs.find((l) => l.includes("wao worktree reclaim --apply"));
+  assert.ok(applyLine, `应打印可照抄的 apply 命令行: ${JSON.stringify(logs)}`);
+  assert.ok(applyLine.includes(`wao worktree reclaim --apply "${outPath}"`), `命令带实际计划路径（双引号括起）: ${applyLine}`);
+  assert.ok(applyLine.includes(`--expect-sha256 ${fileSha}`), `命令带实际 sha256: ${applyLine}`);
+  assert.ok(applyLine.includes(`--run-dir "${resolve(s.runDir)}"`), `命令带生成时的 run-dir（双引号括起）: ${applyLine}`);
+
+  // b78：--apply 缺 --expect-sha256 的报错写出命令形状（占位值）。
   await assert.rejects(
     () => worktreeCommand(["reclaim", "--apply", outPath], { runDir: s.runDir }),
-    /--expect-sha256/,
+    /wao worktree reclaim --apply <plan\.json> --expect-sha256 <hex> --run-dir <生成时的 run-dir>/,
+  );
+});
+
+// b78 续修：可照抄的 apply 命令在路径含空格时也要真能照抄——两席实测未加引号
+// 时拆词出错（plan_unreadable）。双引号在 PowerShell/cmd/Git Bash 里的拆词规则
+// 一致：引号内空格不断词。这里按该规则把打印行拆回参数，交给 worktreeCommand
+// 执行，apply 必须成功。
+test("b78 续修 CLI：计划路径与 run-dir 都含空格——照抄命令带双引号，按引号规则拆参执行 apply 成功", async () => {
+  const base = await mkdtemp("wao-reclaim-quote-");
+  bases.push(base);
+  const { repo, mainCommit } = await makeRepo("wao-reclaim-quote-repo-");
+  const runDir = join(base, "runs with spaces");
+  mkdirSync(runDir, { recursive: true });
+  const plansDir = join(base, "plans with spaces");
+  mkdirSync(plansDir, { recursive: true });
+  const outPath = join(plansDir, "reclaim plan.json");
+  const wt = makeWorktree(repo, "run_quote");
+  seedTranscript(runDir, "run_quote", decidedRunEvents({
+    repo, wt, branch: "wao/run_quote", baseCommit: mainCommit, decision: "accepted",
+  }));
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await worktreeCommand(["reclaim", "--cwd", repo, "--out", outPath, "--run-dir", runDir], { runDir });
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(existsSync(outPath), "计划文件应写出");
+  const applyLine = logs.find((l) => l.includes("wao worktree reclaim --apply"));
+  assert.ok(applyLine, `应打印可照抄的 apply 命令行: ${JSON.stringify(logs)}`);
+  assert.ok(applyLine.includes(`--apply "${outPath}"`), `计划路径用双引号括起: ${applyLine}`);
+  assert.ok(applyLine.includes(`--run-dir "${runDir}"`), `run-dir 用双引号括起: ${applyLine}`);
+
+  // 按带引号的规则拆回参数：双引号成对包裹、引号内空格不断词。
+  const cmd = applyLine.slice(applyLine.indexOf("wao worktree reclaim"));
+  const tokens = [];
+  let cur = "";
+  let inQuotes = false;
+  for (const ch of cmd) {
+    if (ch === '"') { inQuotes = !inQuotes; continue; }
+    if (ch === " " && !inQuotes) {
+      if (cur) { tokens.push(cur); cur = ""; }
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) tokens.push(cur);
+  assert.deepEqual(tokens.slice(0, 3), ["wao", "worktree", "reclaim"], "拆出的前三个词是 wao worktree reclaim");
+  assert.ok(tokens.includes(outPath), "拆出的计划路径还原为原始含空格路径");
+  assert.ok(tokens.includes(runDir), "拆出的 run-dir 还原为原始含空格路径");
+
+  // 拆出的参数直接执行（等价于 Lead 在 shell 里照抄运行）——必须成功。
+  const applyLogs = [];
+  const prevExit = process.exitCode;
+  console.log = (...a) => applyLogs.push(a.join(" "));
+  try {
+    await worktreeCommand(tokens.slice(2), { runDir });
+  } finally {
+    console.log = origLog;
+    process.exitCode = prevExit;
+  }
+  assert.equal(process.exitCode, prevExit, "apply 成功：不设非零退出码");
+  assert.ok(applyLogs.some((l) => l.includes("完成")), `apply 走到完成行: ${JSON.stringify(applyLogs)}`);
+  assert.ok(!existsSync(wt), "照抄命令执行后运行树已删");
+  assert.ok(
+    !git(["for-each-ref", "--format=%(refname:short)", "refs/heads/wao/"], repo).includes("wao/run_quote"),
+    "照抄命令执行后 wao/run_* 分支已删（先进 bundle）",
   );
 });
 
