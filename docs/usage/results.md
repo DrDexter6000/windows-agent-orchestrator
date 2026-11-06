@@ -69,7 +69,7 @@ LLM 编排器或外部脚本的最短驱动闭环：
 
 ## MCP `run_collect`：取回 worker 的回答
 
-`run_collect` 让 MCP host 收集一个 run 的 worker 产出。它与 CLI `collect` 共用同一 application service，不 shell-out CLI。目标必传 `expectedWorkspaceRoot`（run 必须属于它）——归属核验按转录 cwd 的规范路径在任何读取副作用前 fail-closed，不符（另一项目、子目录/非 Git cwd 派出的 run、无归属事实的旧转录）时固定文案拒绝、零写入。非只读非幂等：每次成功调用向 transcript 追加一条 `messages.collected` 审计事件（不改变 terminal state）。
+`run_collect` 让 MCP host 收集一个 run 的 worker 产出。它与 CLI `collect` 共用同一 application service，不 shell-out CLI。目标必传 `expectedWorkspaceRoot`（run 必须属于它；归属核验与拒绝形状见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`）——不符时在任何读取副作用前固定文案拒绝、零写入。非只读非幂等：每次成功调用向 transcript 追加一条 `messages.collected` 审计事件（不改变 terminal state）。
 
 参数与形状见 [docs/surface/mcp-tools.md](../surface/mcp-tools.md)（生成层，随代码再生成）。模型可传 `runId`、可选 `cursor`（opaque continuation token，仅 full 模式可带，值来自上一页的 `nextCursor`）、可选 `mode`（`full|compact`，省略即 `full`）。`runDir`、`limit`、`serveUrl`、`sessionId`、`raw`、`includeTools` 等是 server-owned 配置，模型不能传。
 
@@ -250,7 +250,7 @@ CLI 只做 argv/format/console，数据逻辑与 MCP resource 委托同一 servi
 
 恰好四个 standalone 只读成功结果——`run_wait`/`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条）。每条恰好三键 `{ id, meaning, doesNotMean }`：`id` 是冻结的 namespaced 闭集值（`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）；`meaning` 是一句确定性事实；`doesNotMean` 是 0..2 条确定性非含义。没有 `scope` 字段、没有 per-entry `semanticsRef`；详情 URI 机械派生 `wao://semantics/{id}`。
 
-notes 完全由既有机器事实决定（observation outcome / termination source、diagnosis category、delivery readiness / verification status），由单一选择器挑出：永不回显 transcript/provider/path/prompt/command/session，永不建议 accept/reject/repackage/stop/retry/dispatch。关键不变量：`observation.read_failure` 不产生任何终止 note；delivery note 明确 verification passed 不是 Lead acceptance；diagnosis note 只陈述事实、不给处方。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
+notes 完全由既有机器事实决定，由单一选择器挑出：永不回显 transcript/provider/path/prompt/command/session，永不建议 accept/reject/repackage/stop/retry/dispatch——每条的 `meaning`/`doesNotMean` 已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
 
 两个只读 resources（`resources/read`，mimeType `application/json`）：
 

@@ -356,8 +356,11 @@ function orderPagesByRegion(pages, regionText) {
  * 重写 docs/usage.md 里一对 USAGE_MAP 标记之间的页表区域，其余正文（含 MCP 速查
  * 表）原样保留。区域内容由各页 frontmatter 的 read_when 生成（决定 0115：页首
  * read_when 是"何时读"的唯一来源，页表是它的投影）；行序沿用区域现状（见
- * orderPagesByRegion）。缺标记/缺手册 → 抛错（绝不静默跳过）。与 render() 同一
- * 确定性契约：同输入 ⇒ 逐字节相同输出，"\n" 连接。
+ * orderPagesByRegion）。缺标记、任一标记在整个文件里出现不止一次、收尾标记出现在
+ * 起始标记之前、标记与正文同行、区域里解析不出表格（表头+分隔行+页行）、缺手册
+ * → 一律抛错，绝不静默跳过或照写（否则区域重写会吞掉标记同行的正文、或把手写
+ * 正文当表重建）。与 render() 同一确定性契约：同输入 ⇒ 逐字节相同输出，
+ * "\n" 连接。
  *
  * @param {string} [root] — 安装根（默认本模块所在检出根；测试夹具显式传入）
  * @returns {string} docs/usage.md 的新全文
@@ -369,9 +372,42 @@ export function generateUsageMap(root = repoRoot()) {
   if (openAt === -1) {
     throw new Error(`${USAGE_MD} 缺少页表起始标记（${USAGE_MAP_OPEN}）——标记对之间才是生成区，别手写页表`);
   }
+  if (raw.indexOf(USAGE_MAP_OPEN, openAt + 1) !== -1) {
+    throw new Error(`${USAGE_MD} 的页表起始标记出现不止一次——一对标记之间才是生成区，重复标记会让第二处被静默吞掉`);
+  }
   const closeAt = raw.indexOf(USAGE_MAP_CLOSE, openAt);
   if (closeAt === -1) {
     throw new Error(`${USAGE_MD} 缺少页表收尾标记（${USAGE_MAP_CLOSE}）`);
+  }
+  if (raw.indexOf(USAGE_MAP_CLOSE) !== closeAt) {
+    // 第一处收尾标记不在起始标记之后（起始之前还有一份）：整个文件必须恰好一对
+    // 标记且收尾在开始之后，前置/重复的收尾标记都会让区域判定失真。
+    throw new Error(`${USAGE_MD} 的页表收尾标记出现在起始标记之前或不止一次——整个文件必须恰好一对标记、收尾在开始之后`);
+  }
+  if (raw.indexOf(USAGE_MAP_CLOSE, closeAt + 1) !== -1) {
+    throw new Error(`${USAGE_MD} 的页表收尾标记出现不止一次——一对标记之间才是生成区`);
+  }
+  // 标记必须独占一行：标记与正文同行时，区域重写会静默吞掉同行正文——报错不写。
+  const lineOf = (at) => {
+    const start = raw.lastIndexOf("\n", at) + 1;
+    let end = raw.indexOf("\n", at);
+    if (end === -1) end = raw.length;
+    return raw.slice(start, end);
+  };
+  if (lineOf(openAt).trim() !== USAGE_MAP_OPEN) {
+    throw new Error(`${USAGE_MD} 的页表起始标记必须独占一行（与正文同行会被区域重写吞掉）`);
+  }
+  if (lineOf(closeAt).trim() !== USAGE_MAP_CLOSE) {
+    throw new Error(`${USAGE_MD} 的页表收尾标记必须独占一行（与正文同行会被区域重写吞掉）`);
+  }
+  // 区域里必须解析得出表格：表头一行 + 分隔行（|---| 形状）一行 + 至少一行数据。
+  const regionRows = raw.slice(openAt + USAGE_MAP_OPEN.length, closeAt)
+    .split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const isSeparatorRow = (l) => /^\|[\s:|-]*\|$/.test(l) && l.includes("-");
+  if (regionRows.length < 3
+    || regionRows.some((l) => !/^\|.*\|$/.test(l))
+    || !isSeparatorRow(regionRows[1])) {
+    throw new Error(`${USAGE_MD} 的页表区域解析不出表格——标记对之间只放生成的页表（表头+分隔行+页行），别手写正文`);
   }
   const ordered = orderPagesByRegion(pages, raw.slice(openAt, closeAt));
   const lineStart = raw.lastIndexOf("\n", openAt) + 1;

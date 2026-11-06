@@ -123,7 +123,7 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 席位看板（board）视图是 mode-bar 上 `list ⇄ board` 的纯呈现切换：消费同一份当前 scope 的 `/api/runs` 数据（不重发请求、不重置已选窗口、不动选中 run）。board 按运行身份分组为泳道：显式 lane/role 派发的 run 进自己的 `车道/角色` 泳道（标注 explicit lane/role dispatch——not a seat，其 agentId 是接线事实不是身份），别名派发的 run 随席位泳道；席位名 + 固定身份色轨（确定性调色板：同席位跨刷新同色、同屏可见席位互不同色；色轨只是装饰性强化，身份由席位名文字承载）+ run 卡片（状态芯片 + 相对时长 + runId 尾段，点击复用既有详情面板）；非终态 run 靠前强调、终态弱化；泳道按最新活动排序（平局按泳道名字典序），无手动排序。诚实契约：board 顶部常驻当前 scope 标签与窗口截断提示（matched vs returned），并常驻一句提醒——窗口内无 run 不代表该席位空闲；agentId 未过 registry 校验（或席位已移除）的 run 归入显式 unknown 泳道（置底、注明是数据限制、非真实席位、不占调色板槽位）。看板服务端按 registry 解析席位 id；registry 损坏或单条畸形时软降级为 unknown，不崩。无障碍：身份/状态不只靠颜色区分、卡片为真实按钮可键盘操作且有可见焦点、正文文字对比度 ≥4.5:1（测试实测钉住）；窄视口下泳道区内部滚动（与列表同界）。
 
-安全边界：服务只监听 `127.0.0.1`，API 要求每进程随机 bearer；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。服务仅接受 GET 和严格有界 query，固定静态资源、no-store/nosniff/no-referrer、严格 CSP、无 CORS opt-in。页面没有 mutation 控件：不会 stop/retry/continue/repackage/decide，也不会写 transcript、worktree 或配置。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。
+安全边界：loopback + 每进程随机 bearer + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）——分层合同见[架构](../02-architecture.md) §1 的可观测性条；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。
 
 ## worktree 清理失败（Permission denied）
 

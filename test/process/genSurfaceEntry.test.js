@@ -593,6 +593,58 @@ test("entry-10: docs/usage.md 页表区域过期 → 只重写标记对之间；
     assertSpawnClean(rNoOpenChk, "entry-10 no marker check");
     assert.notEqual(rNoOpenChk.status, 0, "缺标记下 --check 也非零退出");
     assert.equal(readFileSync(usagePath, "utf8"), noMarkers, "检查失败文件原样");
+
+    // (d) 区域反例三件（决定 0115 上一批复核席指出的遗留点）：起始标记重复、
+    //     标记与正文同行、区域里解析不出表格——旧生成器会照写（吞掉同行正文、
+    //     把手写正文当表重建）；现在一律报错不写，文件逐字节原样。注意顺序写出
+    //     语义：docs/surface/ 三份可能已更新，本场景只钉 usage.md 不被碰。
+    const dupOpen = `${fresh}\n${lib.USAGE_MAP_OPEN}\n`;
+    writeFileSync(usagePath, dupOpen, "utf8");
+    const rDup = runCli(cwd, fixture, []);
+    assertSpawnClean(rDup, "entry-10 dup open");
+    assert.notEqual(rDup.status, 0, "起始标记重复必须非零退出");
+    assert.ok(rDup.stderr.includes("不止一次"), "失败原因应点名重复标记");
+    assert.equal(readFileSync(usagePath, "utf8"), dupOpen, "重复标记：usage.md 原样");
+
+    const inline = fresh.replace(lib.USAGE_MAP_OPEN, `${lib.USAGE_MAP_OPEN} 手写正文`);
+    writeFileSync(usagePath, inline, "utf8");
+    const rInline = runCli(cwd, fixture, []);
+    assertSpawnClean(rInline, "entry-10 marker shares line");
+    assert.notEqual(rInline.status, 0, "标记与正文同行必须非零退出");
+    assert.ok(rInline.stderr.includes("独占一行"), "失败原因应点名标记须独占一行");
+    assert.equal(readFileSync(usagePath, "utf8"), inline, "标记同行：usage.md 原样（同行正文不被吞）");
+
+    const prose = fresh.replace("| 页 | 什么时候读 |", "这里是手写正文，不是表格");
+    writeFileSync(usagePath, prose, "utf8");
+    const rProse = runCli(cwd, fixture, []);
+    assertSpawnClean(rProse, "entry-10 region not a table");
+    assert.notEqual(rProse.status, 0, "区域解析不出表格必须非零退出");
+    assert.ok(rProse.stderr.includes("解析不出表格"), "失败原因应点名区域解析不出表格");
+    assert.equal(readFileSync(usagePath, "utf8"), prose, "非表格区域：usage.md 原样");
+    const rProseChk = runCli(cwd, fixture, ["--check"]);
+    assertSpawnClean(rProseChk, "entry-10 region not a table check");
+    assert.notEqual(rProseChk.status, 0, "区域反例下 --check 也非零退出");
+    assert.equal(readFileSync(usagePath, "utf8"), prose, "检查失败文件原样");
+
+    // (e) 再两件畸形（A1b 续修会审）：起始标记之前多一个收尾标记（整个文件必须
+    //     恰好一对标记、收尾在开始之后）；区域缺分隔行（只有表头+数据行，每行都
+    //     以 | 包围——旧校验放过，照写）。两者都非零退出、文件逐字节原样。
+    const preClose = `${lib.USAGE_MAP_CLOSE}\n${fresh}`;
+    writeFileSync(usagePath, preClose, "utf8");
+    const rPreClose = runCli(cwd, fixture, []);
+    assertSpawnClean(rPreClose, "entry-10 close marker before open");
+    assert.notEqual(rPreClose.status, 0, "起始标记之前的收尾标记必须非零退出");
+    assert.ok(rPreClose.stderr.includes("之前"), "失败原因应点名收尾标记在起始之前");
+    assert.equal(readFileSync(usagePath, "utf8"), preClose, "前置收尾标记：usage.md 原样");
+
+    const noSep = fresh.replace("|---|---|", "| 手写甲 | 手写乙 |");
+    assert.notEqual(noSep, fresh, "夹具自检：去分隔行副本必须真的不同");
+    writeFileSync(usagePath, noSep, "utf8");
+    const rNoSep = runCli(cwd, fixture, []);
+    assertSpawnClean(rNoSep, "entry-10 region without separator row");
+    assert.notEqual(rNoSep.status, 0, "区域缺分隔行必须非零退出");
+    assert.ok(rNoSep.stderr.includes("解析不出表格"), "失败原因应点名区域解析不出表格");
+    assert.equal(readFileSync(usagePath, "utf8"), noSep, "缺分隔行：usage.md 原样");
   } finally {
     rmrfRetry(home);
   }

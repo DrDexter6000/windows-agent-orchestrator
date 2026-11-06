@@ -31,7 +31,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 前台与后台共用一套生命周期规则：
 
-- 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期是通知，不是终止：WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后继续等到自然终态；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。
+- 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期只通知不终止：前台 CLI 打一行指引后继续等到自然终态，`--background` 同样只记事实、继续监督。到期即通知的机制与三钟分离（派发侧等待窗 ≠ Lead 观察等待 ≠ 后端请求超时）见[架构](../02-architecture.md)的「三钟分离」；等待的读数与边界见 `wao manual supervise "MCP run_wait（长等待）"`。
 - 终止 worker 只有两个来源：Lead 显式 `stop`；硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
 - 前台等到失败终态时（`run`、`spawn --wait`）不抛裸错误，返回 `{runId, completed:false, failed:true, timedOut:false, error, transcript, diagnosis?}`：`error` 超过 500 字符时截断并注明总长，`diagnosis` 是同一 runId 的诊断（同 `runs diagnose`）。
@@ -64,15 +64,15 @@ npm run cli -- tail <runId>          # 看最后几个事件
 npm run cli -- tail <runId> --follow # 实时跟踪
 
 # 阻塞等待 run 到终态（或观察窗口到期）
-npm run cli -- runs wait <runId>                     # 默认窗口 270000 ms，text 摘要
-npm run cli -- runs wait <runId> --wait-ms 600000    # 窗口 30000..600000 ms
+npm run cli -- runs wait <runId>                     # text 摘要；窗口区间与缺省见监督页
+npm run cli -- runs wait <runId> --wait-ms 600000
 npm run cli -- runs wait <runId> --format json       # 完整服务结果 + semanticNotes + nextStep
 npm run cli -- runs wait <runId> --until-settled     # 轮询到收口才退出（与 --wait-ms 互斥）
 ```
 
 runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
-`runs wait` 与 MCP `run_wait` 共用同一等待服务（只读长轮询，不写 transcript）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期（`terminal:false`）是正常结果——正常打印、exit 0，不代表 worker 停止或失败；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码（0/3/4/130）与诚实边界见 [supervise.md「等待到收口」](supervise.md#等待到收口runs-wait---until-settled-与-nextstep决定-0095)。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
+`runs wait` 与 MCP `run_wait` 共用同一等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP run_wait（长等待）"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`：本地进程式 backend 两层都查，HTTP serve backend——kimi-web 豁免）；两层=前台执行通道（RunManager start/resume）与后台派发通道（dispatchRun，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
@@ -113,7 +113,7 @@ npm run cli -- run glm-flash --prompt "..." --isolate
 
 工作树检出的是源仓库 HEAD 里已提交的版本（MCP 派发时是派发前证明过的那个提交）：已跟踪的文件以提交时的内容出现，Lead 工作区里未提交的改动和未跟踪的文件都不在里面。要 worker 看到，先提交。
 
-WAO 在创建首个 worktree 前，会在仓库本地 `.git/info/exclude` 写入恰好一条根忽略规则 `/.wao-worktrees/`，使持久 worktree 目录不出现在源工作树的普通 `git status --porcelain` 输出。这是一条稳定 repository-local hygiene 规则：不编辑 tracked `.gitignore`、不隐藏任意 worker 产出，worktree 删除后仍保留。WAO 保留既有 exclude 字节（含 BOM、CRLF/LF、用户规则），对已存在的精确规则幂等。`git worktree add` 失败时保留该稳定规则、不回滚——规则只在 exclude ensure 自身失败（write/read-back verify）时回滚到调用前字节。该规则与 host activation（如 Codex `mcp bind`）的 marker block 互相独立，移除一个不会影响另一个。
+创建首个 worktree 前，WAO 在仓库本地 `.git/info/exclude` 写一条稳定的 repository-local hygiene 规则 `/.wao-worktrees/`（不编辑 tracked `.gitignore`、树删除后保留、`git worktree add` 失败也不回滚、与 host activation 的 marker block 互相独立；字节保留/幂等等机制见[架构](../02-architecture.md) §4.3），持久 worktree 目录不出现在源工作树的 `git status --porcelain`。
 
 ## 场景 5：重试 / 恢复
 
@@ -165,24 +165,19 @@ kimi-code 与 deepseek-harness 两个后端当前暂停使用（为什么见决�
 
 `delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容在未声明 OS 写沙箱的车道是侦测不是沙箱（写后侦测非写前阻止；codex 车道例外——见 `docs/02-architecture.md` §4.6）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
 
-单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用。它不是 `run_wait` / `run_await_result` 的观察窗口——它约束 exact verifier 的逐条 setup/assertion 命令执行。语义：
-
-- 验证先于副作用：非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn。
-- 零漂移：仅在显式声明时持久化（`run.started.delivery.verificationTimeoutMs`、`delivery_created` ref、verification outcome ref 都保留该值）；未声明则任何事件/ref 都不出现该字段，消费者才用默认值。
-- 持久值权威：贯穿 start / resume（resume 重新经 SSOT 校验，持久值损坏则 resume 直接拒绝）、profile 折叠（profile 只供命令，Lead 声明的预算保留）、MCP/CLI 转发、`run_dispatch_contract_check` advisory 校验、`run_delivery_repackage` 原值重建与 verifier 调用、reverify 继承（省略 `timeoutMs` 时继承 ref 上持久化的预算，持久值损坏则 fail closed；显式值同样必须落在共享闭界内）。repackage 中字段缺失仍交给 verifier 默认值，字段存在但损坏则在 inventory/Git/transcript/verify 前拒绝。
-- 无自动动作：从不自动加宽、从不重试、从不因超时自动 stop/decision——超时结果如实投影为闭集 `command_timeout` / `setup_timeout`。
+单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用；它不是 `run_wait` / `run_await_result` 的观察窗口——只约束 exact verifier 的逐条 setup/assertion 命令。非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn。仅在显式声明时持久化（事件/ref 零漂移）；持久值贯穿 resume / profile 折叠 / 转发 / repackage / reverify 继承的完整合同见[架构](../02-architecture.md) §4.8 第 6 条。超时结果如实投影为闭集 `command_timeout` / `setup_timeout`，无自动加宽、无自动重试、无超时自动 stop/decision。
 
 continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"continuable": true`（与 `delivery` 同级），标记为可续谱系的根。CLI 等价：`run --background` + `--delivery-spec-file` 顶层 `"continuable": true`（前台拒绝）。dispatch 以 `run_lineage` / `turn:first` 建立 provider-native 会话（opaque uuid 与路由键由谱系自身钉住的事实派生：目标 cwd + canonical agentId + rootRunId + 车道内容指纹 + 角色正文 sha256；不含 Lead 会话），保留 retained worktree。explicit 车道+角色派发同样可作续谱根；续修子运行按根钉住的车道/角色重建。日后 Lead 审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 续一个修正回合（见下节）。wire 广告 native id（kimi `session.resume_hint` / codex `thread.started`）时，终态前记 `run.provider_session_bound`（`session.created` 仍唯一 `proc_<pid>`），供续修取回真实会话。`continuable` 默认 `false`（省略字节兼容）；必须配 `delivery`（delivery-only，否则 fail-closed）。WAO 从不自动续跑——由 Lead 事后显式 `run_continue`。
 
 `continuable` 的后端资格以后端类声明（`supportsSessionReuse`）为准——人读投影见生成层 `docs/surface/certification.md` 能力列（registry 的 `sessionReuse` 条目是路由配置，不是能力证明）。资格拒绝携带固定原因码 `continuable_backend_unsupported`，缺 delivery 拒绝携带 `continuable_delivery_only`（固定文案，不回显席位/workspace/backend 名）。
 
-只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`），控制面另注入只读执行合同（见[架构](../02-architecture.md) §1）。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制隔离——非复用轮是 ephemeral 私有克隆（席位默认作用于当前仓库的 git 写入落在克隆里、不进源仓；停止确认且没有新提交才删，规则见[架构](../02-architecture.md) §4.3①）；sessionReuse 复用轮是 persistent 链接工作树（kimi 会话 server 侧 cwd 钉在首轮树）；建树失败时 fail-closed 拒绝派发（typed `read_only_worktree_required`，不走普通 run 的降级原 cwd 路径）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见[监督](supervise.md)的 `run_activity` 一节）。`readOnly` 与 `delivery` 块互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，不是"没写"），不是全知监控；② 强制隔离与越界侦测在未声明 OS 写沙箱的车道是侦测机制不是 OS 沙箱——降低误写面、不物理阻止（codex 例外见本页 delivery 一节）；③ 观察是 advisory 非门——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）是两回事：那是不可验证、无持久事实的 prompt 约定；控制面 `readOnly` 声明有 durable 事实事件 + 基于上报证据的观察投影。
+只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`），控制面另注入只读执行合同（见[架构](../02-architecture.md) §1）。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制隔离——非复用轮是 ephemeral 私有克隆（席位默认作用于当前仓库的 git 写入落在克隆里、不进源仓；停止确认且没有新提交才删，规则见[架构](../02-architecture.md) §4.3①）；sessionReuse 复用轮是 persistent 链接工作树（kimi 会话 server 侧 cwd 钉在首轮树）；建树失败时 fail-closed 拒绝派发（typed `read_only_worktree_required`，不走普通 run 的降级原 cwd 路径）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（怎么读见 `wao manual supervise "MCP run_activity（活动时间线下钻）"`）。`readOnly` 与 `delivery` 块互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 是"未观察到写"，不是"没写"），advisory 非门——观察到越界写不自动停止、不改写 run 的自然终态，终审归 Lead；未声明 OS 写沙箱车道的侦测非沙箱（codex 例外）见本页 delivery 一节，完整口径与 fail-closed 机制见[架构](../02-architecture.md)的只读声明段。与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）是两回事：那是不可验证、无持久事实的 prompt 约定；控制面 `readOnly` 声明有 durable 事实事件 + 基于上报证据的观察投影。
 
 单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则见 `docs/certification-runbook.md` §场景 1b / §场景 1c（与 CLI 覆盖正文合并维护；单向链接；唯一权威）。
 
 verification 环境合同：可选声明 `verificationSetupCommands: string[]`——在 assertion 命令（`verificationCommands`）之前顺序执行的环境准备命令（如 `npm ci` 安装依赖、生成构建产物）。exact-artifact verifier 运行在独立的 per-attempt 临时环境，依赖不继承：selected / worker worktree 的 `node_modules` 等 ignored / untracked 依赖不会自动出现在 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。setup/assertion 的分开验证与投影闭集、逐命令后 re-proof、漂移即 `artifact_mutated`、per-attempt temp 注入等完整合同见[架构](../02-architecture.md) §4.8 第 5 条。
 
-派发目标只来自本次调用：`run_dispatch` 必传 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径），经 `proveWorkspace` 证明——缺参或证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。会话选择、MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。
+派发目标只来自本次调用：`run_dispatch` 必传 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径），经 `proveWorkspace` 证明——缺参或证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。会话选择、MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。归属核验比 cwd 规范路径、不看桶名：另一项目、子目录或非 Git cwd 派出的 run，以及 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过——读面工具（collect / delivery / decide 等）用同一核验。
 
 输出（成功/拒绝同形，MCP `content` + `structuredContent`）：字段清单见生成层。返回的 `agentId`（transcript envelope 盖戳的 canonical worker 身份）必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
 
@@ -214,7 +209,7 @@ Lead 语义唯一，WAO 不推断：correction 的存在、范围、verification
 
 retained-worktree 转换（幂等、崩溃安全）：把父的 retained worktree 重新钉到 base 上、切到 child 分支 `wao/<childRunId>`，把父的 delivery/candidate 字节保留为 unstaged 工作改动；父 commit 对象永不删除，仍可按 SHA 审阅。child 从 base 打包自己的 delivery。
 
-目标必传 `expectedWorkspaceRoot`；父 run 不属于它即 `workspace_mismatch`（`run_collect`/`decide` 用同一核验，以固定文案拒绝）。归属核验比 cwd 规范路径、不看桶名：只有 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过。
+目标必传 `expectedWorkspaceRoot`；父 run 不属于它即 `workspace_mismatch`（归属核验见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`；`run_collect`/`decide` 用同一核验，以固定文案拒绝）。
 
 ## MCP `run_correct`（运行中显式纠正）
 

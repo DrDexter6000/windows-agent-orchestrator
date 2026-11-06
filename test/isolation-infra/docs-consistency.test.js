@@ -25,6 +25,7 @@ import {
   fenceMarkerOf,
   findManualPage,
   isPureFenceCloser,
+  manualPointerCoverageMatches,
   readManualIndex,
   resolveManualSection,
 } from "../../src/application/manual.js";
@@ -829,6 +830,9 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
 
 test("tier-1 四大文档保持在 byte cap 内（usage.md 帽盖整本手册）", () => {
   const caps = {
+    // 79 批 A1b（含会审续修）后：架构约 133.0KB、整本手册约 225.4KB、排障 55.9KB
+    // 未动。三处净减都不到 2%，"新字节数 + 约 2%"会高于现帽（抬帽归 Owner，
+    // ssot §4），故三帽维持原值；手册再减到 ≈221.9KB 以下时才够按公式降帽。
     "docs/02-architecture.md": 133000, // 改写为现状描述后约 130.3KB，上限留约 2%
     "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
     "docs/usage.md": 226300,          // 整本手册（地图加 docs/usage/ 全部页）的合计；上限留约 2%
@@ -858,6 +862,12 @@ test("使用手册地图列出 docs/usage/ 下的每一页，列出的页都存�
     const head = page.text.slice(page.titleStart).split("\n").slice(0, 5).join("\n");
     assert.ok(head.includes("](../usage.md)"),
       `docs/usage/${page.name}.md 标题后几行应指回地图 docs/usage.md`);
+    // 节标题去标记后不得为空（决定 0115 上一批复核席指出的遗留点）：空节名配上
+    // 空查询的边界靠 resolveManualSection 前置拒绝，这里先让畸形标题红出来。
+    for (const s of page.sections) {
+      assert.ok(s.key.length > 0,
+        `docs/usage/${page.name}.md 存在去标记后为空的节标题（原文 "${s.heading}"）——空节名会让节匹配退化`);
+    }
   }
   // 页面在 docs/usage/ 下，相对链接按页面所在目录解析；代码块里的不算链接。围栏
   // 判定与 manual.js 共用同一份（fenceMarkerOf/isPureFenceCloser）：只有纯收栏行
@@ -899,19 +909,19 @@ test("src/、scripts/、docs/usage/ 与 SKILL.md 的每处 wao manual 指针都�
   targets.push("SKILL.md");
   for (const page of usagePageFiles(ROOT)) targets.push(`docs/usage/${page}`);
   // 逐文件核两件事：①每个指针的页/节都解析；②带节名的指针一个都没漏核——
-  // 语法上带节名（页名后跟裸引号或转义引号 \"，后者是 JS 双引号串源码文本）
-  // 的出现次数，必须等于守卫实际核到节的指针数。数目对不上即红：这钉住
-  // "只核到页名"的漏认形状（转义引号曾漏认 8 处）。
-  const SYNTACTIC_SECTION = /wao manual [a-z0-9][a-z0-9-]*[ \t]+(?:"|\\")/g;
+  // 计数互检由 manual.js 的 manualPointerCoverageMatches 承载（同一实现有
+  // test/isolation-infra/manual.test.js 的单元测试钉住，删互检即红）。
   let pointers = 0;
   let withSection = 0;
   for (const rel of targets) {
     const text = readFileSync(join(ROOT, rel), "utf8");
     const found = extractManualPointers(text);
-    const syntactic = [...text.matchAll(SYNTACTIC_SECTION)].length;
-    const checked = found.filter((p) => p.section !== undefined).length;
-    assert.equal(checked, syntactic,
-      `${rel}: 语法上带节名的指针 ${syntactic} 处，守卫只核到 ${checked} 处（转义形状漏认？）`);
+    // 计数互检（带节名的指针个数 = 核到节的个数）经 manual.js 的同一实现
+    // （manualPointerCoverageMatches——决定 0115 上一批复核席指出的遗留点）；
+    // 转义/未闭合引号等抽取器认不出的形状在这里红。
+    const coverage = manualPointerCoverageMatches(text);
+    assert.ok(coverage.matches,
+      `${rel}: 语法上带节名的指针 ${coverage.syntactic} 处，守卫只核到 ${coverage.checked} 处（转义形状漏认？）`);
     for (const p of found) {
       pointers += 1;
       if (p.section !== undefined) withSection += 1;

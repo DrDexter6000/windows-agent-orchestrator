@@ -289,16 +289,17 @@ function listSections(sections) {
  */
 export function resolveManualSection(page, query) {
   const q = stripInlineMarkdown(String(query));
+  if (q.length === 0) {
+    // 显式空查询先于一切匹配按零命中处理：若某节标题去标记后为空，"" 不得被
+    // 当成完全匹配而成功，也绝不能走子串分支（空串 includes 命中一切）。
+    throw new ManualError("section-not-found",
+      `${page.name} 没有节匹配 ""；该页的节: ${listSections(page.sections)}`);
+  }
   const exact = page.sections.filter((s) => s.key === q);
   if (exact.length === 1) return exact[0];
   if (exact.length > 1) {
     throw new ManualError("section-ambiguous",
       `"${q}" 与 ${page.name} 的多个节完全同名，无法区分: ${listSections(exact)}`);
-  }
-  if (q.length === 0) {
-    // 显式空查询绝不能走子串分支（空串 includes 命中一切）：按零命中处理。
-    throw new ManualError("section-not-found",
-      `${page.name} 没有节匹配 ""；该页的节: ${listSections(page.sections)}`);
   }
   const lower = q.toLowerCase();
   const hits = page.sections.filter((s) => s.key.toLowerCase().includes(lower));
@@ -327,4 +328,19 @@ export function extractManualPointers(text) {
     out.push({ page: m[1], section: m[2] ?? m[3] });
   }
   return out;
+}
+
+/**
+ * 指针覆盖互检（docs-consistency 守卫调用）：语法上带节名的 `wao manual` 指针
+ * （页名后跟裸引号或转义引号 \"——后者是 JS 双引号串源码文本）出现次数，必须等于
+ * extractManualPointers 实际核到节的指针数。数目不一致（如转义/未闭合引号形状没被
+ * 抽取器认出）返回 matches:false——这钉住"只核到页名"的漏认形状（转义引号曾漏认
+ * 8 处）；删掉互检会让守卫失明，单元测试同时变红。
+ */
+export function manualPointerCoverageMatches(text) {
+  const source = String(text);
+  const found = extractManualPointers(source);
+  const syntactic = [...source.matchAll(/wao manual [a-z0-9][a-z0-9-]*[ \t]+(?:"|\\")/g)].length;
+  const checked = found.filter((p) => p.section !== undefined).length;
+  return { matches: checked === syntactic, syntactic, checked };
 }

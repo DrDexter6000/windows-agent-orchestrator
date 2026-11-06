@@ -140,7 +140,7 @@ pwsh -File scripts/kimi-serve.ps1 -KimiHome <主目录> -Port 58628 -WorkspaceDi
 
 - 主目录 = 车道的 `kimiHome`，缺省 `~/.kimi-code`。
 - 工作区 = 稳定目录 `D:\projects\.kimi-serve-worker-ws`。不要用可删的临时目录。
-- serve 的环境剔除规则（WAO 拉起与手动脚本同一套）：密钥类、`WAO_*`（不分大小写）、Lead 宿主的会话变量（`CLAUDE*` / `ANTHROPIC*`，不分大小写）不进 serve 环境；`KIMI_CODE_HOME` 与 `WAO_IN_WORKER=1` 显式注入。serve 会把 env 传给它的 MCP 子进程与工具 shell，因此 worker 自助派发被拒：席位内 run_dispatch 被拒且报 `Detected worker context: env-marker`；工具 shell 里 `WAO_IN_WORKER` 非空。
+- serve 的环境剔除与注入（密钥类、`WAO_*`、Lead 宿主的 `CLAUDE*`/`ANTHROPIC*`——一律不分大小写，且 WAO 拉起与手动脚本同一套规则——不进 serve 环境；`KIMI_CODE_HOME` 与 `WAO_IN_WORKER=1` 注入；机制见[架构](../02-architecture.md) §2.6）把 env 传给它的 MCP 子进程与工具 shell，因此 worker 自助派发被拒：席位内 run_dispatch 被拒且报 `Detected worker context: env-marker`；工具 shell 里 `WAO_IN_WORKER` 非空。
 - Owner 人类用主 serve（默认端口 58627，不带 `WAO_IN_WORKER` 标记）。
 - 车道写了 `serveWorkspaceDir` 时，派发发现 serve 没在跑会自动拉起；没写就手动拉起。
 - WAO 拉起的 serve（按需拉起与 `serve recycle` 重启）空闲一段时间后由看护进程优雅关停，下一次派发会重新拉起；派发的第一条 system 说明写着看护的 pid，`serve recycle` 的结果带 `idleWatch`。判定与边界见 `docs/02-architecture.md` §2.6。手动脚本拉起的 serve 没有看护，一直运行到有人关掉；要让 serve 常驻就用脚本拉起。

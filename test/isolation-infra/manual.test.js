@@ -21,6 +21,7 @@ import {
   defaultManualRoot,
   extractManualPointers,
   findManualPage,
+  manualPointerCoverageMatches,
   parseManualPage,
   readManualIndex,
   resolveManualSection,
@@ -319,6 +320,53 @@ test("指针抽取：转义形状 \"节名\" 也核到节；不存在的节名�
       (err) => err instanceof ManualError && err.code === "section-not-found",
       "不存在的节名必须解析失败（守卫负向）",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("计数互检：解析不出的节名形状必须报不一致（互检被删时这里红）", () => {
+  // 语法上带节名（页名后跟引号）但抽取器解析不出节名的形状——引号未闭合——
+  // 语法计数 1、实核 0，必须 matches:false。docs-consistency 的守卫调用的是
+  // 同一个 manualPointerCoverageMatches，删掉互检这测试就失去了对它的钉。
+  const unparseable = "x = `wao manual supervise \"等待到收口`"; // 引号未闭合
+  const bad = manualPointerCoverageMatches(unparseable);
+  assert.equal(bad.syntactic, 1, "夹具自检：语法形状应数到 1 处");
+  assert.equal(bad.checked, 0, "夹具自检：抽取器确实解析不出节名");
+  assert.equal(bad.matches, false, "解析不出的节名形状必须报不一致");
+  // 两种合法形状（裸引号与转义引号）都一致；只指页的指针不计入分子。
+  const good = 'a(`wao manual supervise "等待到收口"`); b("wao manual lanes \\"registry 配置详解\\""); c = wao manual host';
+  const ok = manualPointerCoverageMatches(good);
+  assert.equal(ok.syntactic, 2);
+  assert.equal(ok.checked, 2);
+  assert.equal(ok.matches, true, "合法形状计数必须一致");
+  assert.equal(manualPointerCoverageMatches("没有指针的文本").matches, true);
+});
+
+test("空查询先于一切匹配按零命中处理：即使某节标题去标记后为空也不得命中", () => {
+  const root = makeManualRoot();
+  try {
+    // 夹具页：某节标题只由行内标记（反引号）构成，去标记后为空（页结构守卫会
+    // 另红；这里钉的是解析层边界——空查询 "" 绝不能被它当成完全匹配而成功）。
+    const tricky = [
+      "---",
+      "read_when: 空标记页",
+      "---",
+      "# Tricky",
+      "",
+      "> [使用手册](../usage.md)",
+      "",
+      "## ``",
+      "",
+      "body",
+      "",
+    ].join("\n");
+    writeFileSync(join(root, "docs", "usage", "tricky.md"), tricky, "utf8");
+    const page = findManualPage(readManualIndex({ packageRoot: root }), "tricky");
+    assert.equal(page.sections.length, 1);
+    assert.equal(page.sections[0].key, "", "夹具自检：该节去标记后确为空");
+    assertManualError(() => resolveManualSection(page, ""), "section-not-found");
+    assertManualError(() => resolveManualSection(page, "``"), "section-not-found");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
