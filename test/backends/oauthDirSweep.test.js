@@ -24,8 +24,10 @@ import {
   sweepClaudeOauthDirs,
   defaultIsPidAlive,
   OAUTH_DIR_PREFIX,
+  SESSION_DIR_PREFIX,
   OWNER_MARKER_FILE,
   SWEEP_LEGACY_AGE_MS,
+  SESSION_DIR_MAX_IDLE_MS,
 } from "../../src/application/oauthDirSweep.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -49,6 +51,19 @@ function makeOauthDir(root, name, { marker = { pid: 424242 }, ageMs = 0, credent
     writeFileSync(join(dir, OWNER_MARKER_FILE), JSON.stringify(marker), "utf8");
   }
   if (credentials) writeFileSync(join(dir, ".credentials.json"), "{}", "utf8");
+  utimesSync(dir, new Date(nowRef - ageMs), new Date(nowRef - ageMs));
+  return dir;
+}
+
+// 决定 0114：会话复用目录（wao-claude-session-*）——标记里的 usedAt 是最近使用
+// 时间（每次 spawn 刷新）；无标记时回落到目录 mtime。
+function makeSessionDir(root, name, { pid = 424242, ageMs = 0, marker = true, nowRef = Date.now() } = {}) {
+  const dir = join(root, name);
+  mkdirSync(dir);
+  if (marker) {
+    const usedAt = new Date(nowRef - ageMs).toISOString();
+    writeFileSync(join(dir, OWNER_MARKER_FILE), JSON.stringify({ pid, createdAt: usedAt, usedAt }), "utf8");
+  }
   utimesSync(dir, new Date(nowRef - ageMs), new Date(nowRef - ageMs));
   return dir;
 }
@@ -135,6 +150,110 @@ test("TD-223 sweep: 非目录条目 skip not-a-dir；非前缀条目不计入 sc
     assert.equal(res.byReason["not-a-dir"], 1);
     assert.equal(res.deleted, 0);
     assert.ok(existsSync(untouched), "无前缀目录不被扫描/删除");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("0114 sweep: 会话目录按最近使用清扫——14 天内跳过、超期删除、运行中的不删", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sweep-session-"));
+  const now = Date.now();
+  try {
+    assert.equal(SESSION_DIR_MAX_IDLE_MS, 14 * 24 * HOUR, "会话目录最近使用窗口常量 = 14 天");
+    const recent = makeSessionDir(root, `${SESSION_DIR_PREFIX}recent`, { ageMs: HOUR, nowRef: now });
+    const edge = makeSessionDir(root, `${SESSION_DIR_PREFIX}edge`, { ageMs: SESSION_DIR_MAX_IDLE_MS, nowRef: now });
+    const expired = makeSessionDir(root, `${SESSION_DIR_PREFIX}expired`, {
+      ageMs: SESSION_DIR_MAX_IDLE_MS + HOUR,
+      nowRef: now,
+    });
+    const active = makeSessionDir(root, `${SESSION_DIR_PREFIX}active`, {
+      pid: 777,
+      ageMs: SESSION_DIR_MAX_IDLE_MS + HOUR,
+      nowRef: now,
+    });
+
+    const dry = sweepClaudeOauthDirs({ baseDir: root, now, isPidAlive: (pid) => pid === 777, apply: false });
+    assert.equal(dry.scanned, 4);
+    assert.equal(dry.deleted, 0, "dry-run 零删除");
+    assert.deepEqual(
+      { ...dry.byReason },
+      { "owner-alive": 1, "session-recent": 2, "dry-run": 1 },
+      "活 run 在用 + 未满 14 天（含边界）跳过；超期会话目录是唯一将删项",
+    );
+    for (const dir of [recent, edge, expired, active]) assert.ok(existsSync(dir), "dry-run 不真删");
+
+    const applied = sweepClaudeOauthDirs({ baseDir: root, now, isPidAlive: (pid) => pid === 777, apply: true });
+    assert.equal(applied.deleted, 1);
+    assert.ok(!existsSync(expired), "超过 14 天无使用的会话目录被删");
+    assert.ok(existsSync(recent) && existsSync(edge), "14 天内（含恰在边界）保留");
+    assert.ok(existsSync(active), "正在运行的那一轮使用的目录不删（即使已超龄）");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("0114 sweep: 无标记会话目录回落目录 mtime 判龄；无前缀目录不受影响", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sweep-session-nomarker-"));
+  const now = Date.now();
+  try {
+    const old = makeSessionDir(root, `${SESSION_DIR_PREFIX}old`, {
+      marker: false,
+      ageMs: SESSION_DIR_MAX_IDLE_MS + HOUR,
+      nowRef: now,
+    });
+    const young = makeSessionDir(root, `${SESSION_DIR_PREFIX}young`, {
+      marker: false,
+      ageMs: HOUR,
+      nowRef: now,
+    });
+    const unrelated = join(root, "unrelated-session-dir");
+    mkdirSync(unrelated);
+
+    const res = sweepClaudeOauthDirs({ baseDir: root, now, isPidAlive: () => false, apply: true });
+    assert.equal(res.scanned, 2, "只扫描两个前缀");
+    assert.equal(res.deleted, 1);
+    assert.ok(!existsSync(old), "无标记但超龄的会话目录被删");
+    assert.ok(existsSync(young), "无标记但最近用过的会话目录保留");
+    assert.equal(res.byReason["session-recent"], 1);
+    assert.ok(existsSync(unrelated), "无前缀目录不被扫描/删除");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("0114 sweep: 判定可删后标记被续修刷新 → 删除前复读发现变化，跳过不删", () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-sweep-session-refresh-"));
+  const now = Date.now();
+  const stalePid = 555;
+  try {
+    const dir = makeSessionDir(root, `${SESSION_DIR_PREFIX}refreshed`, {
+      pid: stalePid,
+      ageMs: SESSION_DIR_MAX_IDLE_MS + HOUR,
+      nowRef: now,
+    });
+    let refreshed = false;
+    // 用 isPidAlive 注入点确定性模拟跨进程交错：清扫读到旧标记并探测旧 pid 时，
+    // 续修轮恰好刷新同一目录的 pid/usedAt。
+    const res = sweepClaudeOauthDirs({
+      baseDir: root,
+      now,
+      isPidAlive: (pid) => {
+        if (!refreshed && pid === stalePid) {
+          refreshed = true;
+          writeFileSync(join(dir, OWNER_MARKER_FILE), JSON.stringify({
+            pid: 777,
+            createdAt: new Date(now).toISOString(),
+            usedAt: new Date(now).toISOString(),
+          }), "utf8");
+        }
+        return pid === 777;
+      },
+      apply: true,
+    });
+    assert.equal(refreshed, true, "前置：交错已发生（标记被刷新）");
+    assert.equal(res.deleted, 0, "标记刷新后不得删除");
+    assert.equal(res.byReason["session-refreshed"], 1, "复读发现变化 → session-refreshed");
+    assert.ok(existsSync(dir), "目录仍在，续修轮可继续使用");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

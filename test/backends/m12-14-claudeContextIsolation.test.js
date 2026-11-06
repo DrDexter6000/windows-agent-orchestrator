@@ -13,8 +13,9 @@
 // 捕获手段：ProcessBackend 的 spawnFn 注入缝（M11-7），直接读 spawn 收到的真实
 // child env / argv，不起真实进程、不调模型。
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -27,6 +28,12 @@ import { CLAUDE_OAUTH_TOKEN_ENV } from "../../src/envPolicy.js";
 // 机制。宿主迁移长期令牌后 process.env 若带 CLAUDE_CODE_OAUTH_TOKEN，spawn 切
 // token 模式（不拷贝），下方"凭据在场性=源在场性"断言假红——测试期强制删值，
 // 跑完恢复（与 claudeOauthDispose.test.js 同款纪律）。
+// 决定 0114：会话目录父目录注入本文件临时根并整体清理——测试不得在真实 %TEMP%
+// 留 wao-claude-session-* 目录。凭据源同样注入 fixture：普通运行路径只从这里
+// 拷贝假凭据，绝不复制真实 ~/.claude/.credentials.json。
+let sessionDirRoot = null;
+let credentialsSource = null;
+const backends = [];
 let restoreProcessToken = () => {};
 before(() => {
   const prev = Object.getOwnPropertyDescriptor(process.env, CLAUDE_OAUTH_TOKEN_ENV);
@@ -35,10 +42,30 @@ before(() => {
     if (prev === undefined) delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
     else process.env[CLAUDE_OAUTH_TOKEN_ENV] = prev.value;
   };
+  sessionDirRoot = mkdtempSync(join(tmpdir(), "wao-m1214-session-root-"));
+  credentialsSource = join(sessionDirRoot, "fixture.credentials.json");
+  writeFileSync(credentialsSource, JSON.stringify({ claudeAiOauth: { accessToken: "dummy-not-a-real-token" } }), "utf8");
 });
-after(() => restoreProcessToken());
+after(async () => {
+  for (const backend of backends) await backend.dispose();
+  restoreProcessToken();
+  if (sessionDirRoot) rmSync(sessionDirRoot, { recursive: true, force: true });
+});
+
+function makeClaudeBackend(options = {}) {
+  const backend = new ClaudeCodeBackend({
+    sessionConfigDirRoot: sessionDirRoot,
+    oauthCredentialsSource: credentialsSource,
+    ...options,
+  });
+  backends.push(backend);
+  return backend;
+}
 
 const MANAGED = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+// 决定 0114：sessionReuse 的稳定配置目录只在长期令牌模式下建立；本文件钉的是
+// auto-memory/env 隔离，给 sessionReuse 用例一个显式假令牌（不触真实凭据）。
+const SESSION_REUSE_TOKEN = "m1214-session-dummy-token";
 
 // 捕获 spawnFn：记录 (binary, argv, opts)，返回一个立即 'spawn' → 'close'(0) 的
 // 假子进程，让 backend 完整跑完 env 组装与 argv 编译，无需真实子进程或模型。
@@ -83,7 +110,7 @@ function envEntriesCaseInsensitive(env, name) {
 
 test("M12-14: native OAuth 路径（无 provider）子进程 env 含 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   assert.equal(captures.length, 1, "恰好一次 spawn");
   assert.equal(captures[0].opts.env[MANAGED], "1", "native 直连子进程必须关闭 auto-memory");
@@ -91,11 +118,12 @@ test("M12-14: native OAuth 路径（无 provider）子进程 env 含 CLAUDE_CODE
 
 test("M12-14: 会话复用 first turn（--session-id）子进程 env 含 flag，argv 复用语义不变", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   const uuid = "11111111-2222-4333-8444-555555555555";
   await spawnAndCapture(backend, nativeAgent(), {
     prompt: "do",
     sessionReuse: { turn: "first", opaqueUuid: uuid },
+    resolvedCredentials: { [CLAUDE_OAUTH_TOKEN_ENV]: SESSION_REUSE_TOKEN },
   });
   const cap = captures[0];
   assert.equal(cap.opts.env[MANAGED], "1", "first turn 子进程必须关闭 auto-memory");
@@ -108,11 +136,12 @@ test("M12-14: 会话复用 first turn（--session-id）子进程 env 含 flag，
 
 test("M12-14: 会话复用 resume turn（--resume）子进程 env 含 flag，argv 复用语义不变", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   const uuid = "11111111-2222-4333-8444-555555555555";
   await spawnAndCapture(backend, nativeAgent(), {
     prompt: "do",
     sessionReuse: { turn: "resume", opaqueUuid: uuid },
+    resolvedCredentials: { [CLAUDE_OAUTH_TOKEN_ENV]: SESSION_REUSE_TOKEN },
   });
   const cap = captures[0];
   assert.equal(cap.opts.env[MANAGED], "1", "resume turn 子进程必须关闭 auto-memory");
@@ -124,7 +153,7 @@ test("M12-14: 会话复用 resume turn（--resume）子进程 env 含 flag，arg
 
 test("M12-14: 无会话复用（--no-session-persistence）子进程 env 含 flag", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   const cap = captures[0];
   assert.equal(cap.opts.env[MANAGED], "1");
@@ -135,14 +164,14 @@ test("M12-14: 无会话复用（--no-session-persistence）子进程 env 含 fla
 
 test("M12-14: agent.env 精确名反设 '0' 被 backend 安全值覆盖", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent({ env: { [MANAGED]: "0" } }), { prompt: "do" });
   assert.equal(captures[0].opts.env[MANAGED], "1", "backend runtimeEnv 必须压过 agent.env");
 });
 
 test("M12-14: agent.env 大小写变体反设被剥离（Windows env 大小写不敏感）", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(
     backend,
     nativeAgent({ env: { claude_code_disable_auto_memory: "0", Claude_Code_Disable_Auto_Memory: "0" } }),
@@ -157,7 +186,7 @@ test("M12-14: agent.env 大小写变体反设被剥离（Windows env 大小写�
 
 test("M12-14: role contract 注入保持（--append-system-prompt 恰好一次）且 env 含 flag", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do", roleContract: "ROLE_BODY" });
   const cap = captures[0];
   assert.equal(cap.opts.env[MANAGED], "1");
@@ -168,7 +197,7 @@ test("M12-14: role contract 注入保持（--append-system-prompt 恰好一次�
 
 test("M12-14: deliveryMode 下既有 runtimeEnv 条目不被新 flag 挤掉", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do", deliveryMode: true });
   const env = captures[0].opts.env;
   assert.equal(env[MANAGED], "1", "新隔离 flag 在");
@@ -181,7 +210,7 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
   // 纯净模式取代：--bare + --strict-mcp-config 进 argv（claude-code 无对应 env 开关），
   // env 侧隔离（auto-memory/git-instructions）保留不变。本钉更新为裁定后的精确形状。
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   assert.deepEqual(captures[0].args, [
     "-p",
@@ -196,7 +225,7 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
 
 test("M12-14: 不泄漏敏感值 —— flag 是常量 '1'，凭据值只出现在其声明 env 名下", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   // claude-code 继承的凭据名只有长期令牌名（envPolicy）——别的名字进不了子进程 env。
   await spawnAndCapture(backend, nativeAgent(), {
     prompt: "do",
@@ -228,7 +257,7 @@ test("M12-14: kimi-code 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", a
 // ── 2026-10-05（auditor_claude 席位批）：native OAuth 通道的隔离目录机制钉 ────
 test("2026-10-05: native 通道 spawn → env 带 CLAUDE_CONFIG_DIR 指向仅含凭据拷贝的隔离目录；argv 无 bare", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
   const [capture] = captures;
   assert.ok(!capture.args.includes("--bare"), "native 通道不再带 bare（OAuth 互斥）");
@@ -236,18 +265,15 @@ test("2026-10-05: native 通道 spawn → env 带 CLAUDE_CONFIG_DIR 指向仅含
   const dir = capture.opts.env.CLAUDE_CONFIG_DIR;
   assert.ok(typeof dir === "string" && dir.length > 0, "env 注入隔离目录路径");
   const { existsSync, readFileSync } = await import("node:fs");
-  assert.ok(existsSync(join(dir, ".credentials.json")) === existsSync(join(homedir(), ".claude", ".credentials.json")),
-    "凭据文件在场性与源一致（源在场=拷贝在场；源缺席=空目录留给 CLI 如实报未登录）");
-  if (existsSync(join(dir, ".credentials.json"))) {
-    const src = JSON.parse(readFileSync(join(homedir(), ".claude", ".credentials.json"), "utf8"));
-    const copy = JSON.parse(readFileSync(join(dir, ".credentials.json"), "utf8"));
-    assert.deepEqual(Object.keys(copy), Object.keys(src), "拷贝结构同源（值不比对不展示）");
-  }
+  assert.ok(existsSync(join(dir, ".credentials.json")), "凭据从注入 fixture 拷贝（不触真实 HOME）");
+  const src = JSON.parse(readFileSync(credentialsSource, "utf8"));
+  const copy = JSON.parse(readFileSync(join(dir, ".credentials.json"), "utf8"));
+  assert.deepEqual(copy, src, "副本内容与注入 fixture 一致（不触真实 HOME）");
 });
 
 test("2026-10-05: agent.env 反设 CLAUDE_CONFIG_DIR 被剥离（任意大小写），backend 预备值是唯一权威", async () => {
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new ClaudeCodeBackend({ spawnFn });
+  const backend = makeClaudeBackend({ spawnFn });
   const agent = { ...nativeAgent(), env: { "claude_config_dir": "C:/evil/override" } };
   await spawnAndCapture(backend, agent, { prompt: "do" });
   const env = captures[0].opts.env;

@@ -452,6 +452,9 @@ export class ProcessBackend {
         // 识别在解析器里，共享层只读取、归一、脱敏、限长（先脱敏、后截断，保留开头）。
         // 不实现/返回 null 时，退出报错文案与此前逐字相同。
         getFailureReason: () => readFailureReason(parser, redactor),
+        // 解析器的可选退出兜底文案接口（如 claude-code 的会话查找失败）：CLI 没发
+        // result 帧、只在 stderr/stdout 留原文时由解析器给固定句，共享层不搬运原文。
+        getExitFailureText: (tails) => readExitFailureText(parser, tails),
       }),
       abort: async () => this._kill(child),
       isAlive: () => child.exitCode === null && child.signalCode === null,
@@ -518,7 +521,7 @@ export class ProcessBackend {
     }
   }
 
-  async *_streamEvents({ queue, child, cwd = null, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "", getFailureReason = () => null }) {
+  async *_streamEvents({ queue, child, cwd = null, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "", getFailureReason = () => null, getExitFailureText = () => null }) {
     let emittedDone = false;
     let anyEventSeen = false;
     // M12-21: track whether the stream produced any USABLE model effect before
@@ -589,11 +592,21 @@ export class ProcessBackend {
               // 原因本身（如 codex 的额度原话），stderr 往往只是常规提示。原话先脱敏再截到
               // 共享上限（保留开头）后成 "process exited with code N; <runtime>: <原话>"，
               // stderr 尾附在其后；没有原话时文案逐字不变。
-              yield doneEvent("failed", formatExitDetail({
+              // 运行时解析器的可选退出兜底文案：CLI 没发 result 帧、只把已知的
+              // provider 原文写进 stderr/stdout 后非零退出时，由解析器给出固定
+              // 文案（不回显尾部原文，例如含 opaque uuid 的会话查找失败）。共享层
+              // 只读这个可选接口，不认识任何运行时。
+              const stderrTailNow = getStderrTail();
+              const stdoutTailNow = getStdoutTail();
+              const exitFailureText = getExitFailureText({
+                stderr: stderrTailNow,
+                stdout: stdoutTailNow,
+              });
+              yield doneEvent("failed", exitFailureText ?? formatExitDetail({
                 code,
                 reason: getFailureReason(),
-                stderr: getStderrTail(),
-                stdout: getStdoutTail(),
+                stderr: stderrTailNow,
+                stdout: stdoutTailNow,
               }));
             }
           }
@@ -940,6 +953,17 @@ function readFailureReason(parser, redactor) {
     runtime: typeof raw.runtime === "string" ? raw.runtime.trim() : "",
     message,
   };
+}
+
+/**
+ * 读取解析器的可选退出兜底文案接口（LineStreamParser 子类可覆写 exitFailureText）。
+ * 返回非空字符串时整条 run.error 用它（固定句，不回显 stderr/stdout 尾部原文）；
+ * 未覆写/返回空 → null，退出文案保持既有 formatExitDetail 逐字不变。
+ */
+function readExitFailureText(parser, tails) {
+  if (typeof parser.exitFailureText !== "function") return null;
+  const raw = parser.exitFailureText(tails);
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
 /**

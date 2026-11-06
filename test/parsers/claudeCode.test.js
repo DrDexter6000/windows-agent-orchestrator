@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
+import { ClaudeStreamParser, PROVIDER_SESSION_NOT_FOUND_ERROR } from "../../src/backends/parsers/claudeCode.js";
 import { commandEvent, fileWrittenEvent, toolUseEvent, toolResultEvent } from "../../src/runEvent.js";
 
 // 真实 claude stream-json 样本（基于实测，已精简到关键字段）
@@ -527,4 +527,74 @@ test("M12-21: error result with result text → done(failed), NO fallback assist
   assert.equal(events.filter((e) => e.kind === "message").length, 0);
   assert.equal(events.at(-1).kind, "done");
   assert.equal(events.at(-1).reason, "failed");
+});
+
+// 决定 0114：续修目标会话不存在（真实 CLI result 形状）→ 固定句 done(failed)，
+// provider errors 原文里的 opaque uuid 绝不进事件流。
+test("0114: result.errors 含 No conversation found → done(failed) 固定句，不回显 uuid", () => {
+  const uuid = "7f3c2b1a-9d8e-4f6a-8b5c-1d2e3f4a5b6c";
+  const p = new ClaudeStreamParser();
+  const events = p.feed(JSON.stringify({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    duration_ms: 2,
+    num_turns: 1,
+    total_cost_usd: 0,
+    errors: [`No conversation found with session ID: ${uuid}`],
+  }) + "\n");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.equal(done.error, PROVIDER_SESSION_NOT_FOUND_ERROR, "固定句（可被诊断按前缀识别）");
+  assert.ok(!JSON.stringify(events).includes(uuid), "opaque uuid 永不进事件流");
+  assert.ok(!/No conversation found/.test(done.error), "provider 原文不回显");
+});
+
+test("0114: 同一句只出现在错误帧的 result.result（无 errors）也按固定句失败", () => {
+  const uuid = "7f3c2b1a-9d8e-4f6a-8b5c-1d2e3f4a5b6c";
+  const p = new ClaudeStreamParser();
+  const events = p.feed(JSON.stringify({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    result: `No conversation found with session ID: ${uuid}`,
+  }) + "\n");
+  assert.equal(events.at(-1).kind, "done");
+  assert.equal(events.at(-1).reason, "failed");
+  assert.equal(events.at(-1).error, PROVIDER_SESSION_NOT_FOUND_ERROR);
+  assert.ok(!JSON.stringify(events).includes(uuid));
+});
+
+// 会审 opus 反例（决定 0114）：成功的 result 正文恰好提到这句原文，也不得被
+// 判成 provider 会话不存在——成功就是成功。
+test("0114: success result 正文含 No conversation found → 仍是 completed", () => {
+  const uuid = "7f3c2b1a-9d8e-4f6a-8b5c-1d2e3f4a5b6c";
+  const p = new ClaudeStreamParser();
+  const events = p.feed(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: `For reference the provider says: No conversation found with session ID: ${uuid}`,
+  }) + "\n");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed", "成功帧不因正文提到该句而失败");
+  assert.ok(!events.some((e) => e.kind === "done" && e.reason === "failed"));
+  assert.equal(events.some((e) => e.error === PROVIDER_SESSION_NOT_FOUND_ERROR), false);
+});
+
+test("0114: is_error:false 但 subtype 以 error 开头的 errors 原文 → 仍按固定句失败", () => {
+  const uuid = "7f3c2b1a-9d8e-4f6a-8b5c-1d2e3f4a5b6c";
+  const p = new ClaudeStreamParser();
+  const events = p.feed(JSON.stringify({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: false,
+    errors: [`No conversation found with session ID: ${uuid}`],
+  }) + "\n");
+  assert.equal(events.at(-1).kind, "done");
+  assert.equal(events.at(-1).reason, "failed");
+  assert.equal(events.at(-1).error, PROVIDER_SESSION_NOT_FOUND_ERROR);
+  assert.ok(!JSON.stringify(events).includes(uuid));
 });

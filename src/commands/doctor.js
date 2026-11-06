@@ -575,24 +575,24 @@ export async function waoDoctorCommand(args, config) {
     }
   }
 
-  // 5c. TD-223（2026-10-07）：claude-code native OAuth 临时配置目录体检（advisory，
-  //     永不执行删除——本命令头部铁律）。复用 sweep 模块 dry-run（判定规则单一
-  //     实现：owner 标记 pid 存活不删；无标记遗留 >24h 可删）。健康面零目录时
-  //     不产生条目（budget_* 惯例：只在有信号时出现）。**恒 INFO**（验收修
-  //     2026-10-07，opus 验收第 4 条预言成真）：%TEMP% 实时状态不得影响 doctor
-  //     verdict/退出码——WARN 会让开发机常态 DEGRADED、--warn-as-error 常态
-  //     exit 1（cli.test.js 四连红实证）。可清理数与 fix 指引保留在 detail/fix
-  //     字段里；行动面是 wao sweep-claude-config。本检查只读 .wao-owner.json
-  //     与 stat，不碰凭据内容。
+  // 5c. TD-223（2026-10-07）：claude-code 隔离配置目录体检（advisory，永不执行
+  //     删除——本命令头部铁律）。复用 sweep 模块 dry-run（判定规则单一实现：
+  //     owner 标记 pid 存活不删；无标记 OAuth 遗留 >24h 可删；决定 0114 起会话
+  //     目录按最近使用时间 >14 天可删）。健康面零目录时不产生条目（budget_*
+  //     惯例：只在有信号时出现）。**恒 INFO**（验收修 2026-10-07，opus 验收第 4
+  //     条预言成真）：%TEMP% 实时状态不得影响 doctor verdict/退出码——WARN 会让
+  //     开发机常态 DEGRADED、--warn-as-error 常态 exit 1（cli.test.js 四连红实证）。
+  //     可清理数与 fix 指引保留在 detail/fix 字段里；行动面是
+  //     wao sweep-claude-config。本检查只读 .wao-owner.json 与 stat，不碰凭据内容。
   {
     const sweep = sweepClaudeOauthDirs({ baseDir: tmpdir(), apply: false });
     if (sweep.scanned > 0) {
       const deletable = sweep.byReason["dry-run"] ?? 0;
       const alive = sweep.byReason["owner-alive"] ?? 0;
-      const legacyYoung = sweep.byReason["legacy-young"] ?? 0;
-      const detail = `os.tmpdir() 下 ${sweep.scanned} 个 wao-claude-oauth-* 目录`
-        + `（含 ~/.claude/.credentials.json 副本）：可清理 ${deletable}（创建进程已退出或遗留超 24h）`
-        + `、活 run 在用 ${alive}、遗留未满 24h ${legacyYoung}${deletable > 0 ? "；目录含凭据副本，建议清扫" : ""}`;
+      const notExpired = (sweep.byReason["legacy-young"] ?? 0) + (sweep.byReason["session-recent"] ?? 0);
+      const detail = `os.tmpdir() 下 ${sweep.scanned} 个 claude-code 隔离配置目录：可清理 ${deletable}`
+        + `（普通 OAuth 目录=创建进程已退出即删；会话目录=闲置超过 14 天才删）`
+        + `、活 run 在用 ${alive}、未到清扫期 ${notExpired}${deletable > 0 ? "；目录可能含凭据副本或会话状态，建议清扫" : ""}`;
       pushCheck(checks, {
         name: "claude_oauth_temp_dirs",
         pass: true,

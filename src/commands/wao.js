@@ -433,10 +433,11 @@ async function waoAcceptCommand(args, config) {
 }
 
 /**
- * wao sweep-claude-config（TD-223，2026-10-07）：清扫 os.tmpdir() 下 claude-code
- * native OAuth 临时配置目录（wao-claude-oauth-*，含凭据副本）。默认 dry-run 只
- * 报告；--apply 才真删。判定规则在 application/oauthDirSweep.js（单一实现）：
- * owner 标记 pid 存活 → 不删（活 run 的目录）；无标记遗留目录 >24h → 可删。
+ * wao sweep-claude-config（TD-223，2026-10-07；决定 0114 扩到会话目录）：清扫
+ * os.tmpdir() 下 claude-code 隔离配置目录（普通 OAuth wao-claude-oauth-*，含凭据
+ * 副本；复用/续修会话目录 wao-claude-session-*）。默认 dry-run 只报告；--apply 才
+ * 真删。判定规则在 application/oauthDirSweep.js（单一实现）：owner 标记 pid 存活
+ * → 不删；普通遗留目录 >24h 可删；会话目录最近 14 天用过则不删。
  */
 async function waoSweepClaudeConfigCommand(args) {
   const options = parseOptions(args);

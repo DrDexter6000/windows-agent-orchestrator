@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "groups": {
     "pure": [
+      "application/claudeSessionNotFoundDiagnosis.test.js",
       "application/ownerLivenessIdentity.test.js",
       "application/runSettle.test.js",
       "application/lanesView.test.js",
@@ -24,6 +25,7 @@
       "backends/kimiWeb.test.js",
       "backends/serveStopVerify.test.js",
       "backends/m12-14-claudeContextIsolation.test.js",
+      "backends/claudeSessionConfigDir.test.js",
       "backends/processActivity.test.js",
       "backends/processBackend.test.js",
       "backends/providerSessionReuse.test.js",

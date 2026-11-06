@@ -18,6 +18,37 @@ const MAX_PENDING_WRITE_INTENTS = 256;
 const UNKNOWN_TOOL_CALL_ID = "unknown";
 const STREAM_ACTIVITY_SAMPLE_INTERVAL = 64;
 
+// 决定 0114：续修目标会话在 provider 侧不存在（真实样本：result 事件的 errors
+// 里有 "No conversation found with session ID: <uuid>"，subtype=error_during_
+// execution，0 token）。错误文本必须是固定句——provider 原文含 opaque uuid，
+// 绝不能进转录或 MCP 输出。诊断按这个固定前缀把它归成具名原因（见 diagnosis.js）。
+export const PROVIDER_SESSION_NOT_FOUND_ERROR =
+  "provider session not found: the provider has no record of the resumed conversation";
+const NO_CONVERSATION_FOUND_MARKER = "No conversation found with session ID";
+
+// 只有出错帧才允许进入"会话不存在"收口：success 的正文/errors 无论写了什么，
+// 都照常按成功路径处理（会审 opus 反例：success result 正文提到这句原文时被
+// 误判成失败）。出错帧判定沿用 CLI 自己的字段。
+function isErrorResultFrame(obj) {
+  return obj?.is_error === true
+    || (typeof obj?.subtype === "string" && obj.subtype.startsWith("error"));
+}
+
+function resultReportsMissingProviderSession(obj) {
+  if (!isErrorResultFrame(obj)) return false;
+  const texts = [];
+  if (Array.isArray(obj.errors)) {
+    for (const error of obj.errors) {
+      if (typeof error === "string") texts.push(error);
+      else if (typeof error?.message === "string") texts.push(error.message);
+    }
+  }
+  // 出错帧的 result.result 也可能是同一句（不同 CLI 版本把原话放这里）；同样按
+  // 固定句收口，避免任何路径把 uuid 带进转录。
+  if (typeof obj.result === "string") texts.push(obj.result);
+  return texts.some((text) => text.includes(NO_CONVERSATION_FOUND_MARKER));
+}
+
 /**
  * Claude Code stream-json 解析器（M2-3，M4 加 token 提取，M6-3 加证据链）。
  *
@@ -30,6 +61,11 @@ const STREAM_ACTIVITY_SAMPLE_INTERVAL = 64;
  *                                              answer and no identical assistant text was
  *                                              streamed, emit one assistant message first
  *                                              (M12-21 completed-empty recovery)
+ *   type:"result" + 出错帧（is_error 或 subtype 以 error 开头）的 errors/result
+ *                                              含 No conversation found with session ID
+ *                                             → metricsEvent(usage) + doneEvent("failed",
+ *                                              PROVIDER_SESSION_NOT_FOUND_ERROR)——固定句，
+ *                                              不回显 provider 原文里的 opaque uuid（0114）
  *   type:"result" + error                     → metricsEvent(usage) + doneEvent("failed")
  *   system init/api_retry                     → payload-free runtime activity
  *   stream_event                              → sampled payload-free activity
@@ -62,6 +98,21 @@ export class ClaudeStreamParser extends LineStreamParser {
     // 只看第一条 assistant 行，后面的请求不覆盖。
     this._firstRequest = null;
     this._firstRequestSeen = false;
+  }
+
+  /**
+   * 可选接口（ProcessBackend 的非零退出兜底路径调用）：CLI 没发 result 帧、只把
+   * "No conversation found with session ID: <uuid>" 写进 stderr 后非零退出时，
+   * run.error 必须用同一固定句收口——stderr 尾部里的 uuid 绝不进转录。
+   * 返回 null 时退出文案与既有逻辑逐字相同。
+   */
+  exitFailureText({ stderr = "", stdout = "" } = {}) {
+    for (const text of [stderr, stdout]) {
+      if (typeof text === "string" && text.includes(NO_CONVERSATION_FOUND_MARKER)) {
+        return PROVIDER_SESSION_NOT_FOUND_ERROR;
+      }
+    }
+    return null;
   }
 
   handleLine(obj) {
@@ -171,6 +222,13 @@ export class ClaudeStreamParser extends LineStreamParser {
         });
         if (this._firstRequest) metrics.firstRequest = this._firstRequest;
         events.push(metrics);
+      }
+      // 决定 0114：续修目标会话不存在——只在出错帧（is_error 或 subtype 以 error
+      // 开头）且带这句原文时用固定句收口（provider 原话里的 opaque uuid 绝不进
+      // 转录）；success 帧无论正文写了什么都照常成功。
+      if (resultReportsMissingProviderSession(obj)) {
+        events.push(doneEvent("failed", PROVIDER_SESSION_NOT_FOUND_ERROR));
+        return events;
       }
       if (obj.is_error || obj.subtype === "error") {
         events.push(doneEvent("failed", obj.result ?? obj.subtype ?? "claude error"));

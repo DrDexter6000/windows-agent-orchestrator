@@ -15,6 +15,7 @@
 |------|--------|
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
 | `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-run) |
+| claude-code 续修轮启动即失败，报 provider 会话不存在 | [§1.8](#18-claude-code-续修报-provider-会话不存在) |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
 | `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
@@ -123,6 +124,12 @@ kimi-code 后端暂停使用（决定 0074），模板不含它的车道；现�
   - 绑定事实损坏（重复/空/占位值/与原 spawn 身份不一致）——fail-closed 拒绝，绝不回落占位值。
 - **验证**：查父转录（经解析链定位）：应恰有一条 `session.created`（`backendSessionId` 形如 `proc_<pid>`）且恰有一条 `run.provider_session_bound`（`providerSessionId` 为 kimi `session.resume_hint` / codex `thread.started` 广告的 native id）。
 - **修复/规避**：对旧父 run，让 Lead 以新的 `run_dispatch`（`continuable:true`）重新交付并接手冻结候选；新 run 会记录绑定事实，之后 `run_continue` 即用真实 native id 续接。claude-code 父 run 不受影响（resume 编译 opaque uuid，proc 身份不是阻断）；ACP 的 native `session.created` 照常可续接。
+
+### 1.8 claude-code 续修报 provider 会话不存在
+
+- **症状**：续修轮（`turn:resume`）启动即失败（约 2 秒、0 token）；`run.error` 固定句 `provider session not found`，`runs diagnose` 给同名事实（category `crash`），不回显 opaque uuid。
+- **根因**：每轮必须共用同一个 `CLAUDE_CONFIG_DIR`（CLI 的会话记录在里面）。本版按 opaque uuid 的 sha256 在 `os.tmpdir()` 建稳定目录（`wao-claude-session-*`），`dispose()` 不删，14 天无使用才清扫；目录被手工删、换机器或升级前旧谱系都会接不回。
+- **处置**：确认 `CLAUDE_CODE_OAUTH_TOKEN` 可解析（会话目录只在长期令牌模式建；拷贝模式带 `sessionReuse` 的 spawn 启动前固定失败，TD-229）。旧谱系重新派发 `continuable` 根；先 `wao sweep-claude-config` dry-run 看清单。
 
 ---
 

@@ -1,5 +1,14 @@
 import { join } from "node:path";
-import { existsSync, mkdtempSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  copyFileSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { ProcessBackend } from "./processBackend.js";
 import { ClaudeStreamParser } from "./parsers/claudeCode.js";
@@ -35,10 +44,67 @@ const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 // 脱敏器，且其名字本身匹配 secret 名正则——双保险）。
 const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
 const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
-// TD-223（2026-10-07）：目录内的 owner 标记文件——内容仅 {pid, createdAt}，供
-// sweep（application/oauthDirSweep.js）判定"创建者进程还在不在"；不是凭据，不含
-// 任何 secret。名字与 sweep 模块的 OWNER_MARKER_FILE 同一约定（值同步靠测试钉）。
+// 目录内的 owner 标记文件——普通 OAuth 目录内容仅 {pid, createdAt}，会话复用
+// 目录另带 {usedAt}（每次 spawn 刷新，供 sweep 判定最近使用时间）；不是凭据，
+// 不含任何 secret。名字与 sweep 模块的 OWNER_MARKER_FILE 同一约定（值同步靠测试钉）。
 const OAUTH_OWNER_MARKER_FILE = ".wao-owner.json";
+
+// 决定 0114：复用/续修（task.sessionReuse）的隔离配置目录必须跨轮稳定——CLI 把
+// 会话记录存在 CLAUDE_CONFIG_DIR 里，每次 mkdtemp 会让续修轮找不到会话。目录名
+// 只放 opaque uuid 的 sha256 摘要（不放 uuid 本身，保持 opaque 纪律）；首轮建、
+// 后续轮复用，终态不删（久不使用由 wao sweep-claude-config 按 14 天清扫）。
+// 该目录只在长期令牌模式（CLAUDE_CODE_OAUTH_TOKEN 可解析）下建立：拷贝凭据模式
+// 的长期副本会与令牌轮换冲突（TD-229），故带 sessionReuse 的 spawn 在启动 CLI
+// 前具名失败，绝不静默退回每次新建目录（那样仍接不回，只是更晚失败）。
+export const SESSION_CONFIG_DIR_PREFIX = "wao-claude-session-";
+export const SESSION_REUSE_REQUIRES_TOKEN_ERROR =
+  "claude-code session reuse requires a long-term OAuth token: set CLAUDE_CODE_OAUTH_TOKEN "
+  + "(credential-copy mode cannot keep a durable provider session config directory; TD-229)";
+export const SESSION_REUSE_INVALID_ROUTING_ERROR =
+  "claude-code session reuse requires a validated opaque uuid";
+
+function writeOwnerMarker(dir, options) {
+  // 会话复用目录要先读旧标记再写新标记；路径由调用方给出。
+  const now = new Date().toISOString();
+  if (!options?.session) {
+    writeFileSync(
+      join(dir, OAUTH_OWNER_MARKER_FILE),
+      JSON.stringify({ pid: process.pid, createdAt: now }),
+      "utf8",
+    );
+    return;
+  }
+  let createdAt = now;
+  try {
+    const previous = JSON.parse(readFileSync(join(dir, OAUTH_OWNER_MARKER_FILE), "utf8"));
+    if (previous && typeof previous.createdAt === "string"
+      && Number.isFinite(Date.parse(previous.createdAt))) {
+      createdAt = previous.createdAt;
+    }
+  } catch {
+    // 首次建立（或标记不可读）：createdAt 就是本次时间。
+  }
+  writeFileSync(
+    join(dir, OAUTH_OWNER_MARKER_FILE),
+    JSON.stringify({ pid: process.pid, createdAt, usedAt: now }),
+    "utf8",
+  );
+}
+
+function sessionConfigDirFor(opaqueUuid, root = tmpdir()) {
+  const digest = createHash("sha256").update(opaqueUuid, "utf8").digest("hex");
+  return join(root, SESSION_CONFIG_DIR_PREFIX + digest);
+}
+
+function prepareClaudeSessionConfigDir({ opaqueUuid, root } = {}) {
+  const dir = sessionConfigDirFor(opaqueUuid, root);
+  // 目录名由 uuid 摘要决定，首轮建、后续轮复用（mkdir recursive 幂等）。目录里
+  // 只放本次标记与 CLI 自己的会话状态——不拷贝凭据、不放 settings/hooks/插件/
+  // CLAUDE.md（纯净模式不变）。
+  mkdirSync(dir, { recursive: true });
+  writeOwnerMarker(dir, { session: true });
+  return dir;
+}
 
 function prepareClaudeOauthConfigDir(
   { credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE), oauthToken = null, onDirCreated } = {},
@@ -50,11 +116,7 @@ function prepareClaudeOauthConfigDir(
   if (typeof onDirCreated === "function") onDirCreated(dir);
   // TD-223：标记先于一切后续步骤写入——即使后续失败，目录也带 owner 标记，
   // sweep 不会把它误判成"无标记遗留目录"。
-  writeFileSync(
-    join(dir, OAUTH_OWNER_MARKER_FILE),
-    JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }),
-    "utf8",
-  );
+  writeOwnerMarker(dir);
   // TD-229：令牌可解析（非空字符串）= token 模式——目录保持空，不拷贝凭据
   // （拷贝与续期轮换互斥，见头注释）。令牌缺席 = 回退旧拷贝路径；凭据源缺席
   // （未登录）照常返回空目录，spawn 后由 CLI 如实报认证失败。
@@ -256,11 +318,17 @@ export class ClaudeCodeBackend extends ProcessBackend {
       }),
       ...opts,
     });
-    // TD-223（2026-10-07）：本实例创建的 native OAuth 隔离目录登记表 + 可注入的
-    // 凭据源路径（默认 ~/.claude/.credentials.json；测试注入 fixture 路径——
-    // 测试绝不复制真实凭据）。session 复用/多 turn 会多次 spawn 累积多个目录，
-    // 全记，终态 dispose() 一次清空。
+    // TD-223（2026-10-07）：本实例创建的普通 native OAuth 隔离目录登记表 + 可注入
+    // 的凭据源路径（默认 ~/.claude/.credentials.json；测试注入 fixture 路径——
+    // 测试绝不复制真实凭据）。多 turn 会多次 spawn 累积多个普通目录，全记，终态
+    // dispose() 一次清空。决定 0114：sessionReuse 的稳定会话目录不在本表（终态不删）。
     this._oauthCredentialsSource = opts.oauthCredentialsSource ?? null;
+    // 决定 0114：会话目录的父目录。生产为 os.tmpdir()；测试注入自建临时根（像
+    // oauthCredentialsSource 一样），测试用后整体清理，绝不在真实 %TEMP% 留目录。
+    this._sessionConfigDirRoot = typeof opts.sessionConfigDirRoot === "string"
+      && opts.sessionConfigDirRoot.length > 0
+      ? opts.sessionConfigDirRoot
+      : tmpdir();
     this._oauthConfigDirs = [];
   }
 
@@ -289,12 +357,28 @@ export class ClaudeCodeBackend extends ProcessBackend {
     // native OAuth 通道：预备隔离配置目录（见 prepareClaudeOauthConfigDir）。
     // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策与本字段无耦合——
     // preflight/spawn 两次 buildArgs 调用天然一致）。
-    // TD-223：目录创建即登记（super.spawn 在其后才跑——ENOENT 等失败时目录已落盘，
-    // 靠登记表让 dispose 在 spawn 失败路径也能回收）。
+    // TD-223：普通目录创建即登记（super.spawn 在其后才跑——ENOENT 等失败时目录已
+    // 落盘，靠登记表让 dispose 在 spawn 失败路径也能回收）。
     // TD-229：令牌可解析时目录保持空（token 模式，不拷贝凭据）。
+    // 决定 0114：sessionReuse 运行改用一个按 opaque uuid 派生的稳定目录（首轮建、
+    // 后续轮复用，终态不删）；它只在长期令牌模式下建立——拷贝凭据模式的长期副本
+    // 会与令牌轮换冲突，因此在 spawn 启动 CLI 前具名失败（不静默退回新目录）。
     const taskExtras = {};
     if (task && typeof task === "object") {
-      taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir(activeOauthTokenValue(task));
+      const oauthToken = activeOauthTokenValue(task);
+      if (task.sessionReuse) {
+        if (!oauthToken) throw new Error(SESSION_REUSE_REQUIRES_TOKEN_ERROR);
+        const opaqueUuid = task.sessionReuse.opaqueUuid;
+        if (typeof opaqueUuid !== "string" || opaqueUuid.length === 0) {
+          throw new Error(SESSION_REUSE_INVALID_ROUTING_ERROR);
+        }
+        taskExtras.claudeOauthConfigDir = prepareClaudeSessionConfigDir({
+          opaqueUuid,
+          root: this._sessionConfigDirRoot,
+        });
+      } else {
+        taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir(oauthToken);
+      }
     }
     const enrichedTask = task && typeof task === "object" ? { ...task, ...taskExtras } : task;
     return super.spawn(removed ? { ...agent, env: stripped } : agent, enrichedTask);
@@ -317,11 +401,13 @@ export class ClaudeCodeBackend extends ProcessBackend {
   }
 
   /**
-   * TD-223（2026-10-07）：删除本实例创建的全部 OAuth 隔离目录（含凭据副本）。
+   * TD-223（2026-10-07）：删除本实例创建的普通 OAuth 隔离目录（含凭据副本）。
    * 生命周期：RunManager 把它组合进 run 终态 cleanupFn（start/resume 两站点），
    * spawn 失败/终态路径都会触发。设计注：dispose 只在 run 终态触发；同 run 中间
    * turn 的目录活到终态一起删——run 进行中目录必须存活（子进程正在读），这是
    * 可接受的泄漏窗口（run 崩溃不终态的残留由 wao sweep-claude-config 清扫）。
+   * 决定 0114：sessionReuse 的稳定会话目录【不在】删除表里——跨轮续修要靠它，
+   * 终态不删；久不使用的由清扫按最近使用时间删除。
    * 幂等：重复调用无害（表已清空即 no-op）；单目录删除失败继续其余，永不抛出。
    */
   async dispose() {

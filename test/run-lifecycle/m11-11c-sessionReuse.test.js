@@ -34,7 +34,7 @@
 // Causal chain proven: dispatchRun → detached runner argv → runBackground →
 // RunManager → Claude backend compilation (not only a helper).
 
-import { test } from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
@@ -57,6 +57,45 @@ import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { RunManager } from "../../src/runManager.js";
 import { runBackground, runMain } from "../../src/backgroundRunner.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { CLAUDE_OAUTH_TOKEN_ENV } from "../../src/envPolicy.js";
+
+// 决定 0114：claude-code 的 sessionReuse 稳定配置目录只在长期令牌模式下建立。
+// 本文件所有 claude 复用用例都走真实 backend，测试期给一个假令牌（宿主是否已
+// 迁移长期令牌不得改变结局），跑完恢复。
+const SESSION_REUSE_TOKEN = "m11c-session-dummy-token";
+// 决定 0114：会话目录父目录注入本文件临时根并整体清理——测试不得在真实 %TEMP%
+// 留 wao-claude-session-* 目录。凭据源同样注入 fixture：普通运行路径只从这里
+// 拷贝假凭据，绝不复制真实 ~/.claude/.credentials.json；终态统一 dispose。
+let sessionDirRoot = null;
+let credentialsSource = null;
+const backends = [];
+let restoreProcessToken = () => {};
+before(() => {
+  const prev = Object.getOwnPropertyDescriptor(process.env, CLAUDE_OAUTH_TOKEN_ENV);
+  process.env[CLAUDE_OAUTH_TOKEN_ENV] = SESSION_REUSE_TOKEN;
+  restoreProcessToken = () => {
+    if (prev === undefined) delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
+    else process.env[CLAUDE_OAUTH_TOKEN_ENV] = prev.value;
+  };
+  sessionDirRoot = mkdtempSync(join(tmpdir(), "wao-m11c-session-root-"));
+  credentialsSource = join(sessionDirRoot, "fixture.credentials.json");
+  writeFileSync(credentialsSource, JSON.stringify({ claudeAiOauth: { accessToken: "dummy-not-a-real-token" } }), "utf8");
+});
+after(async () => {
+  for (const backend of backends) await backend.dispose();
+  restoreProcessToken();
+  if (sessionDirRoot) cleanupDir(sessionDirRoot);
+});
+
+function makeClaudeBackend(options = {}) {
+  const backend = new ClaudeCodeBackend({
+    sessionConfigDirRoot: sessionDirRoot,
+    oauthCredentialsSource: credentialsSource,
+    ...options,
+  });
+  backends.push(backend);
+  return backend;
+}
 
 // ===== Helpers =====
 
@@ -860,7 +899,7 @@ test("M11-11C ARGV-1: first turn → claude argv has --session-id <uuid> exactly
   const dir = mkdtempSync(join(tmpdir(), "wao-m11c-argv1-"));
   const { spawnFn, captures } = makeCapturingSpawn();
   try {
-    const backend = new ClaudeCodeBackend({ spawnFn });
+    const backend = makeClaudeBackend({ spawnFn });
     const uuid = deriveOpaqueUuid({ leadSession: "lead-A", workspace: dir, agentId: "researcher" });
     await backend.spawn(reusableClaudeAgent(dir), { prompt: "hi", sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "first" } });
     const args = captures[0].args;
@@ -881,7 +920,7 @@ test("M11-11C ARGV-2: resume turn → claude argv has --resume <uuid> exactly on
   const dir = mkdtempSync(join(tmpdir(), "wao-m11c-argv2-"));
   const { spawnFn, captures } = makeCapturingSpawn();
   try {
-    const backend = new ClaudeCodeBackend({ spawnFn });
+    const backend = makeClaudeBackend({ spawnFn });
     const uuid = deriveOpaqueUuid({ leadSession: "lead-A", workspace: dir, agentId: "researcher" });
     await backend.spawn(reusableClaudeAgent(dir), {
       prompt: "more",
@@ -902,7 +941,7 @@ test("M11-11C ARGV-3: no sessionReuse task ⇒ neither --session-id nor --resume
   const dir = mkdtempSync(join(tmpdir(), "wao-m11c-argv3-"));
   const { spawnFn, captures } = makeCapturingSpawn();
   try {
-    const backend = new ClaudeCodeBackend({ spawnFn });
+    const backend = makeClaudeBackend({ spawnFn });
     await backend.spawn(reusableClaudeAgent(dir), { prompt: "hi" });
     const args = captures[0].args;
     assert.equal(args.indexOf("--session-id"), -1);
@@ -916,7 +955,7 @@ test("M12-Claude ENV-1: delivery mode disables Claude built-in agents and Git in
   const dir = mkdtempSync(join(tmpdir(), "wao-claude-env-delivery-"));
   const { spawnFn, captures } = makeCapturingSpawn();
   try {
-    const backend = new ClaudeCodeBackend({ spawnFn });
+    const backend = makeClaudeBackend({ spawnFn });
     await backend.spawn(reusableClaudeAgent(dir), { prompt: "delivery", deliveryMode: true });
     const env = captures[0].opts.env;
     assert.equal(env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
@@ -928,7 +967,7 @@ test("M12-Claude ENV-2: ordinary mode disables built-in agents but leaves Git in
   const dir = mkdtempSync(join(tmpdir(), "wao-claude-env-ordinary-"));
   const { spawnFn, captures } = makeCapturingSpawn();
   try {
-    const backend = new ClaudeCodeBackend({ spawnFn });
+    const backend = makeClaudeBackend({ spawnFn });
     await backend.spawn(reusableClaudeAgent(dir), { prompt: "ordinary" });
     const env = captures[0].opts.env;
     assert.equal(env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
@@ -962,7 +1001,7 @@ test("M12-Claude TRANSCRIPT-1: latest stream activity and cache metrics persist 
       prompt: "no-model transcript probe",
       registry: { agents: { researcher: reusableClaudeAgent(dir) } },
       runDir: dir,
-      backendFor: () => new ClaudeCodeBackend({ spawnFn }),
+      backendFor: () => makeClaudeBackend({ spawnFn }),
       waitTimeout: 5000,
       pollInterval: 10,
     });
@@ -1029,7 +1068,7 @@ test("M11-11C CHAIN-1: dispatchRun runner argv → runBackground → RunManager 
         registry: { agents: { researcher: reusableClaudeAgent(bgDir, { cwd: bgDir }) } },
         runDir: bgDir,
         sessionReuse: routingFromArgv,
-        backendFor: () => new ClaudeCodeBackend({ spawnFn: capSpawn }),
+        backendFor: () => makeClaudeBackend({ spawnFn: capSpawn }),
         waitTimeout: 5000,
         pollInterval: 10,
       });
@@ -1061,7 +1100,7 @@ test("M11-11C CHAIN-2: resume routing through runBackground → claude --resume 
       registry: { agents: { researcher: reusableClaudeAgent(bgDir, { cwd: bgDir }) } },
       runDir: bgDir,
       sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "resume", priorRunId: "run_prior_chain2" },
-      backendFor: () => new ClaudeCodeBackend({ spawnFn: capSpawn }),
+      backendFor: () => makeClaudeBackend({ spawnFn: capSpawn }),
       waitTimeout: 5000,
       pollInterval: 10,
     });

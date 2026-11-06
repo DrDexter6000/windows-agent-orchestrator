@@ -58,6 +58,7 @@ import { findState, TERMINAL_STATES, STATE_CHANGE_REASON, PROCESS_MISSING_CONFIR
 import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { isObservedVitalSign } from "./runEvent.js";
+import { PROVIDER_SESSION_NOT_FOUND_ERROR } from "./backends/parsers/claudeCode.js";
 
 /**
  * Frozen category enum SSOT — the complete set of diagnosis categories.
@@ -1109,6 +1110,22 @@ function diagnoseFailureInner(events, expectedRunId) {
         return { category: "provider_disconnect", evidence };
       }
     }
+  }
+
+  // 4.65) 决定 0114：claude-code 续修目标会话在 provider 侧不存在。解析器已把
+  //      provider 原文（含 opaque uuid）收口成固定句；这里绑定本运行最后一条
+  //      run.error，给具名原因（category 用既有 crash：backend 执行失败，且不新增
+  //      category/code——MCP 工具体面与诊断语义表保持字节兼容）。事实只写固定
+  //      短语，绝不回显 uuid 或 provider 原文。
+  if (state === "failed" && lastErrorEvent !== null
+    && lastErrorEvent.error.startsWith(PROVIDER_SESSION_NOT_FOUND_ERROR)) {
+    return {
+      category: "crash",
+      evidence: [{
+        eventType: "run.error",
+        fact: "provider 会话不存在（provider session not found）：续修目标会话在 provider 侧没有记录——claude-code result errors 报 No conversation found with session ID（opaque uuid 不回显）",
+      }],
+    };
   }
 
   // 4.7) TD-95 #4 no_effect：worker 读了上下文但没产出（无 file_written + 无 command exit0）。
