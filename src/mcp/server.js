@@ -1411,8 +1411,9 @@ function consultSeatPageMeasure(consultId) {
 // no automatic retry/fallback/accept/reject. Eligibility is decided read-only with a
 // closed-set rejectionReason BEFORE any mutation; review/accept/reject of the child
 // delivery stays with the Lead (run_delivery_review / run_delivery_decide). Continuable
-// lineage scope = (Lead session + workspace + agent + ROOT runId), reused across one
-// lineage only — NOT project-wide coder reuse.
+// lineage scope = (workspace + agent + ROOT runId + the lane fingerprint and role
+// contract sha pinned by root dispatch), reused across one lineage only — NOT
+// project-wide coder reuse and not keyed by the Lead session.
 
 const CONTINUE_ERROR_TEXT = "run_continue failed";
 // M12-9: run_continue does not support execution profiles, so its delivery must
@@ -3962,9 +3963,12 @@ export function createWaoMcpServer({
   // getRegistryInventoryFn 模式；缺省=聚合器默认读真实文件与真实 env/cwd）。
   laneProfilesFn,
   workerContextFn,
-  // 0097 §4：可注入的派发回显行（测试缝，同 laneProfilesFn 模式；缺省=真实
+  // 0097 §4：可注入的派发回显行（测试缝，同 laneFactsLineFn 模式；缺省=真实
   // laneFactsLine——fail-open，返回 null 时受理回执不带 laneFacts）。
   laneFactsLineFn,
+  // 0045 §1.4：车道表读取缝（测试注入别名夹具；缺省 loadLanesConfig——生产恒读
+  // 仓库 config/lanes.json）。派发目标解析与 consult 共用。
+  loadLanesConfigFn,
   // ADR-0032 修订（2026-09-22）：可注入的认证证据详情服务（默认真实
   // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
   getCertificationEvidenceFn,
@@ -4125,6 +4129,7 @@ export function createWaoMcpServer({
     ? leadSession
     : randomUUID();
   const dispatcher = dispatchRunFn ?? dispatchRun;
+  const readLanesDoc = typeof loadLanesConfigFn === "function" ? loadLanesConfigFn : loadLanesConfig;
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
@@ -4665,39 +4670,58 @@ export function createWaoMcpServer({
       let resolvedLane;
       let resolvedRole;
       let resolvedRoleId;
+      let resolvedFrom;
       // 0097 §4：回显行用解析所得车道键（explicit/alias 都有 laneId；agentId 直派
       // 时席位键即车道键）。laneFactsLine 只陈列事实，fail-open。
       let factsLaneId = agentId;
-      if (lane !== undefined || role !== undefined || agentId === undefined) {
-        const lanesDoc = loadLanesConfig();
-        const registry = await readRegistry(registryPath);
-        const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
-        const resolution = resolveDispatchTarget({
-          agentId, lane, role,
-          lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
-        });
-        if (resolution.kind === "error") {
-          return {
-            isError: true,
-            content: [{ type: "text", text: dispatchSelectorErrorText(resolution) }],
-          };
+      {
+        // 决定 0114 修订：仅 {agentId} 的旧形态也要过解析器——别名必须解析成
+        // 车道+别名角色执行（否则 runner 拿不到 --role，材料两侧不同源）。
+        // 解析器不可用/不认的旧 agentId 回落既有 dispatchRun 语义；显式
+        // {lane,role} 或解析器错误仍按既有固定选择器文案拒绝。
+        let resolution = null;
+        try {
+          const lanesDoc = readLanesDoc();
+          const registry = await readRegistry(registryPath);
+          const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
+          resolution = resolveDispatchTarget({
+            agentId, lane, role,
+            lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+          });
+        } catch (error) {
+          if (lane !== undefined || role !== undefined || agentId === undefined) throw error;
         }
-        if (resolution.source === "explicit") {
-          effectiveAgentId = resolution.agentId; // 接线席位（过渡）；runner 侧重解析生效
-          resolvedLane = lane;
-          resolvedRole = role;
+        if (resolution && resolution.kind === "error") {
+          // 显式 {lane,role} / 无目标 / 非法字母表：保持既有固定选择器文案。
+          if (lane !== undefined || role !== undefined || agentId === undefined) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: dispatchSelectorErrorText(resolution) }],
+            };
+          }
+          // 仅 {agentId} 的旧调用：解析器不认时回到旧语义（registry/形状门裁决），
+          // 但合法规范 id 仍保持字节兼容。
+          if (!isValidCanonicalAgentId(agentId)) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+            };
+          }
+          resolution = null;
         }
-        // 0045 W4b：生效复用策略按角色取——alias 派发的角色注记也透传（显式路径
-        // 本就被洞②真门排除复用，resolvedRoleId 仅为统一语义）。
-        resolvedRoleId = resolution.roleId ?? undefined;
-        if (resolution.kind === "resolved" && typeof resolution.laneId === "string") {
-          factsLaneId = resolution.laneId;
+        if (resolution) {
+          if (resolution.source === "explicit" || resolution.source === "alias") {
+            effectiveAgentId = resolution.agentId; // 接线席位（过渡）；runner 侧重解析生效
+            // 决定 0114 修订：别名与显式都按“车道 + 角色”执行——同一解析结果
+            // 同时进 runner 的 --lane/--role 与冻结材料，别名再保留来源注记。
+            resolvedLane = resolution.laneId;
+            resolvedRole = resolution.roleId;
+            resolvedFrom = resolution.source === "alias" ? "alias" : undefined;
+          }
+          // 0045 W4b：生效复用策略按执行角色取（别名/显式同一角色值）。
+          resolvedRoleId = resolution.roleId ?? undefined;
+          if (typeof resolution.laneId === "string") factsLaneId = resolution.laneId;
         }
-      } else if (!isValidCanonicalAgentId(agentId)) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
-        };
       }
       const agentIdInput = effectiveAgentId;
       // 0046 §5 步⑨（D10 认证清单门禁——部署级开关，默认关）：
@@ -4891,6 +4915,7 @@ export function createWaoMcpServer({
           ...(resolvedLane !== undefined ? { resolvedLane } : {}),
           ...(resolvedRole !== undefined ? { resolvedRole } : {}),
           ...(resolvedRoleId !== undefined ? { resolvedRoleId } : {}),
+          ...(resolvedFrom !== undefined ? { resolvedFrom } : {}),
           // 0052 P0-3：fresh 逃生口透传（lead_workspace 复用会话重置）。
           ...(fresh === true ? { fresh: true } : {}),
           // M10-pre2/server-proven canonical workspace root as cwd.
@@ -5432,7 +5457,7 @@ export function createWaoMcpServer({
           // fallthrough 到别名解析
         }
         try {
-          const lanesDoc = loadLanesConfig();
+          const lanesDoc = readLanesDoc();
           const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
           const resolution = resolveDispatchTarget({
             agentId: id, lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
@@ -5610,7 +5635,6 @@ export function createWaoMcpServer({
           runDir,
           registryPath,
           authorizedWorkspaceRoot: workspaceCwd,
-          leadSession: resolveLeadSession,
           userEnvReader: resolveUserEnv,
           // Certification advisory (same contract as run_dispatch): registry
           // certification is evidence, never a permission gate. Server-owned —

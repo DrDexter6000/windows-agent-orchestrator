@@ -73,6 +73,10 @@ import { scanResumableRuns, scanAllRuns, handleRequest } from "../../src/daemon.
 import { runBackground, runMain } from "../../src/backgroundRunner.js";
 // R18（TD-128 W1/W2/W3 观测面卫生包）：被测面 + CLI 探针用的 runCommand 导出。
 import { loadScorecardFromTranscript } from "../../src/commands/run.js";
+
+// 决定 0114：lineage 身份只取谱系自身钉住的事实——探针用同一组固定输入。
+const LINEAGE_LANE_FP = "lane:" + "ab".repeat(8);
+const LINEAGE_ROLE_SHA = "none";
 import { runAwaitResult } from "../../src/application/runAwaitResult.js";
 // R19（TD-128 廉价尾巴清扫）：runWait 状态投影绑定探针。
 // R20-C（TD-128 终审返工）：summarizeLiveness 进度计数绑定探针。
@@ -250,6 +254,9 @@ async function seedLineageParent(dir, runId) {
   const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentId: "coder_hq" });
   await t.append("run.background_submitted", { background: true, cwd: dir, deliveryRequested: true });
   await t.transitionState(null, "pending", "background_spawned");
+  // 决定 0114：谱系身份从根 run.started 的钉住事实派生（backend/model + rolePin），
+  // 无这一条就不是可证明的谱系根。
+  await t.append("run.started", { backend: "claude-code", cwd: dir });
   await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: runId });
   await t.transitionState("pending", "completed", "done");
   return t;
@@ -515,8 +522,9 @@ test("R15-LIN-P6: lineage 续接 busy 门 — 在飞 owner + 外 run 尾条 comp
   try {
     // (a) 篡改方向：在飞 owner + 外 run 伪 completed 尾条 → 必须保持 busy。
     await resolveLineageFirstTurn({
-      runDir: dir, runId: "run_root_p6a", leadSession: "lead-P6a",
+      runDir: dir, runId: "run_root_p6a",
       workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6a",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     const ta = new JsonlTranscript(join(dir, "run_root_p6a.jsonl"), { runId: "run_root_p6a", agentId: "coder_hq" });
     await ta.append("run.started", { backend: "claude-code" });
@@ -531,7 +539,8 @@ test("R15-LIN-P6: lineage 续接 busy 门 — 在飞 owner + 外 run 尾条 comp
     });
     const contA = await resolveLineageContinuationTurn({
       runDir: dir, runId: "run_child_p6a", parentRunId: "run_root_p6a", rootRunId: "run_root_p6a",
-      leadSession: "lead-P6a", workspace: "D:/proj", agentId: "coder_hq",
+      workspace: "D:/proj", agentId: "coder_hq",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     assert.equal(contA.kind, "busy",
       "绑定过滤后 owner 仍非终态 → busy（外 run completed 尾条不再把 lineage 续接门翻成 resume）");
@@ -539,8 +548,9 @@ test("R15-LIN-P6: lineage 续接 busy 门 — 在飞 owner + 外 run 尾条 comp
 
     // (b) 反向：终态 owner + 外 run 伪 running 尾条 → 正常续接（不再被伪尾条阻断）。
     await resolveLineageFirstTurn({
-      runDir: dir, runId: "run_root_p6r", leadSession: "lead-P6r",
+      runDir: dir, runId: "run_root_p6r",
       workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6r",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     const tb = new JsonlTranscript(join(dir, "run_root_p6r.jsonl"), { runId: "run_root_p6r", agentId: "coder_hq" });
     await tb.append("run.started", { backend: "claude-code" });
@@ -553,7 +563,8 @@ test("R15-LIN-P6: lineage 续接 busy 门 — 在飞 owner + 外 run 尾条 comp
     });
     const contB = await resolveLineageContinuationTurn({
       runDir: dir, runId: "run_child_p6r", parentRunId: "run_root_p6r", rootRunId: "run_root_p6r",
-      leadSession: "lead-P6r", workspace: "D:/proj", agentId: "coder_hq",
+      workspace: "D:/proj", agentId: "coder_hq",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     assert.equal(contB.kind, "resume",
       "绑定过滤后 owner 终态 → 正常续接（伪 running 尾条不采信，不再误拒合法 continuation）");
@@ -568,8 +579,9 @@ test("R15-LIN-P6b: first 认领门 — 非终态 prior owner + 外 run 尾条 co
     // prior-owner 路径：新鲜根正常不可能有前任，对立复用/对抗形状可达——
     // 函数文档注释明示该路径）。
     await resolveLineageFirstTurn({
-      runDir: dir, runId: "run_squatter", leadSession: "lead-P6b",
+      runDir: dir, runId: "run_squatter",
       workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6b",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     const t = new JsonlTranscript(join(dir, "run_squatter.jsonl"), { runId: "run_squatter", agentId: "coder_hq" });
     await t.append("run.started", { backend: "claude-code" });
@@ -585,8 +597,9 @@ test("R15-LIN-P6b: first 认领门 — 非终态 prior owner + 外 run 尾条 co
     });
 
     const claim = await resolveLineageFirstTurn({
-      runDir: dir, runId: "run_root_p6b", leadSession: "lead-P6b",
+      runDir: dir, runId: "run_root_p6b",
       workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6b",
+      laneFingerprint: LINEAGE_LANE_FP, roleSha256: LINEAGE_ROLE_SHA,
     });
     assert.equal(claim.kind, "busy",
       "绑定过滤后 prior owner 仍非终态 → busy（外 run 尾条不再把 first 认领门翻成认领）");

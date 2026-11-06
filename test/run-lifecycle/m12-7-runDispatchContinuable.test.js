@@ -80,11 +80,16 @@ test("M12-7-DCT-01: continuable:true establishes the lineage first turn (argv en
     assert.equal(routing.mode, "run_lineage");
     assert.equal(routing.turn, "first");
     assert.match(routing.opaqueUuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    // The opaque uuid is the deterministic lineage key (Lead session + workspace +
-    // agent + ROOT runId) — verifiable from public inputs alone.
+    // The opaque uuid is the deterministic lineage key (canonical workspace +
+    // agent + ROOT runId + the lane fingerprint and role sha frozen by THIS
+    // dispatch) — verifiable from the frozen reuse material alone; no Lead
+    // session is part of it.
+    const material = JSON.parse(argVal(calls, "--reuse-material-json"));
     assert.equal(
       routing.opaqueUuid,
-      deriveLineageOpaqueUuid({ leadSession: "lead-session-dct", workspace: repo, agentId: "coder_hq", rootRunId: r.runId }),
+      deriveLineageOpaqueUuid({
+        workspace: repo, agentId: "coder_hq", rootRunId: r.runId, ...material,
+      }),
       "opaque uuid is the deterministic lineage key",
     );
     // Delivery-only lineage root: argv ships the delivery + isolates.

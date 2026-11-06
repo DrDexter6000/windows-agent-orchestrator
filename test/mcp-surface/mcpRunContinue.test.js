@@ -7,10 +7,10 @@
 //   - tool discovery (current tool count, run_continue present) + annotations +
 //     strict input (parentRunId/prompt/delivery required; extra keys rejected)
 //   - workspace-bound authorization (no binding → service never called)
-//   - service threading: authorizedWorkspaceRoot = bound root, server-owned
-//     leadSession, advisory requireCertified:false (certification is recorded
-//     reliability evidence, never a permission gate), backendFor capability
-//     resolver
+//   - service threading: authorizedWorkspaceRoot = bound root, advisory
+//     requireCertified:false (certification is recorded reliability evidence,
+//     never a permission gate), backendFor capability resolver; the server-owned
+//     Lead session is NOT part of lineage continuation (decision 0114)
 //   - structured success output (dispatch identity + parentRunId + continuation +
 //     rootRunId) and refusal output (closed-set rejectionReason)
 //   - redaction: the opaque provider uuid, Lead session id, workspace path, and
@@ -172,7 +172,7 @@ test("M12-7-MRC-M3: unbound workspace → service never called, fixed error", as
 // Group 3: service threading + structured success output + redaction
 // =====================================================================
 
-test("M12-7-MRC-M4: service threaded with bound workspace + leadSession + requireCertified; structured success output; no leaks", async () => {
+test("M12-7-MRC-M4: service threaded with bound workspace + requireCertified (no Lead session); structured success output; no leaks", async () => {
   const dir = makeGitDir("m127-mrc-m4-");
   try {
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -192,7 +192,8 @@ test("M12-7-MRC-M4: service threaded with bound workspace + leadSession + requir
       assert.equal(call.parentRunId, "run_parent_ok");
       assert.equal(call.prompt, "correct the bug");
       assert.equal(toFwd(call.authorizedWorkspaceRoot), toFwd(dir), "bound workspace root threaded");
-      assert.equal(call.leadSession, SENTINEL_LEAD, "server-owned Lead session threaded");
+      // 决定 0114：谱系身份只取谱系自身事实——run_continue 不再携带 Lead 会话。
+      assert.equal(Object.hasOwn(call, "leadSession"), false, "no Lead session threaded into lineage continuation");
       assert.equal(call.requireCertified, false, "certification is advisory: MCP never forces it (not a permission gate)");
       assert.equal(call.runDir, dir);
       assert.equal(call.globalWaitTimeout, 60000, "global wait timeout threaded");
@@ -283,12 +284,11 @@ test("M12-7-MRC-M6: busy refusal redacts the active lineage runId (label only)",
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
 
-// TD-327（2026-11-01）：explicit 父档的拒绝码进了 CONTINUE_REJECTION_REASONS
-// 闭集——MCP 输出 schema（z.enum 派生自同一 SSOT）解析通过，Lead 看到
-// accepted:false + 具名码，不再折成 isError 笼统文案。服务层实拒带 detail，
-// 该字段不在 handler 的投影字段里，不得漏到线上。
-test("TD-327: explicit_dispatch_continuable_unsupported → structured accepted:false + named code (not isError)", async () => {
-  const dir = makeGitDir("wao-td327-mrc-");
+// 决定 0114：explicit_dispatch_continuable_unsupported 已从闭集删除（explicit
+// 父档可续）。本腿保留原覆盖面：一个闭集内的具名拒绝仍以结构化 accepted:false
+// 输出（schema enum 派生自同一 SSOT，不是 isError），服务层 detail 不进线上。
+test("0114: closed-set refusal (role_contract_drift) → structured accepted:false + named code; detail never leaks", async () => {
+  const dir = makeGitDir("wao-0114-mrc-");
   try {
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
     const { server } = makeServer({
@@ -297,8 +297,8 @@ test("TD-327: explicit_dispatch_continuable_unsupported → structured accepted:
         accepted: false,
         parentRunId: args.parentRunId,
         continuation: true,
-        rejectionReason: "explicit_dispatch_continuable_unsupported",
-        detail: "the parent run was dispatched as an explicit lane+role combination; a silent hat switch",
+        rejectionReason: "role_contract_drift",
+        detail: "the role contract pinned by the lineage root has changed since dispatch",
       }),
     });
     const client = await buildInMemoryClient(server);
@@ -312,13 +312,13 @@ test("TD-327: explicit_dispatch_continuable_unsupported → structured accepted:
       assert.equal(parsed.accepted, false);
       assert.equal(parsed.parentRunId, "run_parent_explicit");
       assert.equal(parsed.continuation, true);
-      assert.equal(parsed.rejectionReason, "explicit_dispatch_continuable_unsupported");
+      assert.equal(parsed.rejectionReason, "role_contract_drift");
       assert.equal(parsed.runId, null);
       assert.equal(parsed.agentId, null);
       assert.equal(parsed.rootRunId, null);
       assert.equal(parsed.state, null);
       const dumped = JSON.stringify(r);
-      assert.ok(!dumped.includes("silent hat switch"), "service detail text never in MCP output");
+      assert.ok(!dumped.includes("has changed since dispatch"), "service detail text never in MCP output");
     } finally { await client.close(); await server.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });

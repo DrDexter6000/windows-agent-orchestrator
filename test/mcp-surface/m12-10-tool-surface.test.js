@@ -674,8 +674,13 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // SHA 如实翻新；无描述字节变化；wire 帽同批重冻（93186→93212，帽内 additive）。
 // （历史值：e91d5a6e1fddf5850ff8a9df0514892e69d5f2d20a2b77d324c978809f7776f1
 // 为 TD-327 explicit_dispatch_continuable_unsupported 后的冻结值。）
+// 0114（2026-11-05，决定 0114）：run_continue 出参 rejectionReason enum 删除
+// explicit_dispatch_continuable_unsupported（explicit 父档可续；CONTINUE_REJECTION_REASONS
+// SSOT 缩员）——outputSchema 在 stripped 载荷内，SHA 如实翻新；描述与 inputSchema
+// 零改动（desc/hostVisible 冻结线未动）。（历史值：5f79ca12afe1d343f606547a5d3fe2d1e2549344e86fda618cdee6c6bbf73d55
+// 为 TD-329 后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "5f79ca12afe1d343f606547a5d3fe2d1e2549344e86fda618cdee6c6bbf73d55";
+  "8c2971bcdf120528f5ccbe796a8a8e0fc11e93253668fc30bc9eb8c1fb857cde";
 // TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
 // enum 增 explicit_dispatch_continuable_unsupported（TD-327 具名拒因——
 // CONTINUE_REJECTION_REASONS SSOT 扩员）——outputSchema 在 stripped 载荷内，

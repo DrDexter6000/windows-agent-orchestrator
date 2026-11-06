@@ -14,10 +14,13 @@
 // infers correction, scope, verification, retry, or acceptance — the Lead owns
 // all of those. Review/accept/reject of the child delivery stays with the Lead.
 //
-// Lineage scope: the resumed provider session is keyed by (Lead session +
-// canonical workspace + canonical agentId + ROOT runId), reused across one
-// lineage only — NOT project-wide coder reuse (that is the lead_workspace
-// policy). The opaque provider UUID never leaves the routing envelope.
+// Lineage scope: the resumed provider session is keyed by (canonical workspace
+// + canonical agentId + ROOT runId + the lane content fingerprint and role
+// contract sha256 pinned when the root was dispatched) — reused across one
+// lineage only, NOT project-wide coder reuse (that is the lead_workspace
+// policy) and NOT keyed by the Lead session, so a restarted host re-derives the
+// same provider conversation. The opaque provider UUID never leaves the
+// routing envelope.
 //
 // Architectural contract (mirrors runDispatch.js):
 //   - No argv parsing, no console.log, no process.exit.
@@ -66,10 +69,13 @@ import { validateProjectedPath } from "./deliveryReview.js";
 import { INVENTORY_PATHS_LIMIT } from "./candidateInventory.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { readRegistry } from "../registry.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { CredentialMissingError } from "./runDispatch.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
+import { deriveStartedIdentity, laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
+import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
 
 // Reuse the dispatch application service's startup-failure error type so the MCP
@@ -114,7 +120,6 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "worker_configuration_changed", // current backend/model/provider differs from the parent session
   "role_contract_drift", // 0045 R4 洞①：父钉住的角色正文与当前文件不一致/不可加载——同谱系静默换帽拒绝
   "legacy_dispatch_continuable_unsupported", // 0045 W4d：父 envelope agentId=重键前席位名——跨版本谱系拒绝
-  "explicit_dispatch_continuable_unsupported", // 0045 R3 H3：父为 explicit（车道+角色）派发——续接不携角色会静默换帽，具名拒绝
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
@@ -242,19 +247,17 @@ export function continuableLineageFact(events, runId) {
  * ——不断言 run_continue 一定受理：角色正文漂移、registry/后端变化、会话
  * 证据不足、工作树没了，都要到 run_continue 自己的资格检查才知道。
  *
- * 四个条件全部成立才返回 true：
+ * 三个条件全部成立才返回 true：
  *   1. continuableLineageFact(events, runId) 非 null；
  *   2. 没有绑定本 run 的 run.delivery_accepted（已采纳不可续）；
- *   3. 绑定本 run 的 run.started 的 resolvedFrom 不是 "explicit"（0045 R3：
- *      explicit 车道+角色派发不可续）；
- *   4. 线系未被证明已闭合：根就是本 run 时用 lineageClosedIn(events, runId)；
+ *   3. 线系未被证明已闭合：根就是本 run 时用 lineageClosedIn(events, runId)；
  *      根是别的 run 时按 resolveTranscriptPath 读根转录再判，读不出当未闭合
  *      （与 continueRun 的 lineage_closed 增强门同口径）。
  *
  * 只读：零转录写入、零状态变更、零 spawn。读故障的处置只有一个例外：根转录
  * 读不出当未闭合（返回 true，与 continueRun 的 lineage_closed 增强门同口径——
- * 闭态检查是增强门，读不出不挡提示）；其余形状不符（无谱系/已采纳/explicit/
- * 根闭合）一律 false。
+ * 闭态检查是增强门，读不出不挡提示）；其余形状不符（无谱系/已采纳/根闭合）
+ * 一律 false。
  *
  * @param {object} input
  * @param {object[]} input.events — 同一份快照的事件（判定与收口判定共用快照）
@@ -270,8 +273,6 @@ export async function deliveryContinuableHint({ events, runId, runDir, readTrans
   if (events.some((e) => e && e.type === "run.delivery_accepted" && e.runId === runId)) {
     return false;
   }
-  const startedEvent = events.find((e) => e && e.type === "run.started" && e.runId === runId);
-  if (startedEvent?.resolvedFrom === "explicit") return false;
   // 与 continueRun 内同一动态 import 习惯（同文件、同一依赖、一个写法）。
   const { lineageClosedIn } = await import("./lineageClose.js");
   if (fact.rootRunId === runId) {
@@ -339,6 +340,28 @@ function toPublicDelivery(validated) {
   };
 }
 
+// A lineage's identity is pinned by its ROOT run's own run.started facts: the
+// lane content fingerprint (from the recorded lane axes — never the current
+// registry) and the role-contract sha256 recorded in rolePin ("none" when the
+// root had no role). This is the SAME material the root dispatch derived its
+// turn:first opaque uuid from, so every continuation re-derives that exact
+// provider conversation (no Lead session in the material).
+const LINEAGE_ROLE_SHA_RE = /^(?:[0-9a-f]{64}|none)$/;
+
+function lineageIdentityFromStarted(started) {
+  const identity = deriveStartedIdentity(started);
+  if (identity === null) return null;
+  const pin = started?.rolePin;
+  let roleSha256 = "none";
+  if (pin !== undefined && pin !== null) {
+    if (typeof pin !== "object" || typeof pin.sha256 !== "string" || !LINEAGE_ROLE_SHA_RE.test(pin.sha256)) {
+      return null;
+    }
+    roleSha256 = pin.sha256;
+  }
+  return { laneFingerprint: laneFingerprintOf(identity), roleSha256 };
+}
+
 /**
  * Resolve a Lead-authorized correction continuation of a terminal parent run.
  *
@@ -349,7 +372,6 @@ function toPublicDelivery(validated) {
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {string} input.registryPath — path to agents.json
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding (canonical git root)
- * @param {string} input.leadSession — server-owned Lead session identity (lineage key input)
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
  * @param {number} [input.promptHandoffTimeoutMs] — injectable prompt-handoff bound (tests)
  * @param {Function} [input.backendFor] — injectable (agent) => backend instance (tests)
@@ -374,7 +396,6 @@ export async function continueRun({
   runDir,
   registryPath,
   authorizedWorkspaceRoot,
-  leadSession,
   spawnFn,
   promptHandoffTimeoutMs,
   backendFor,
@@ -404,7 +425,6 @@ export async function continueRun({
   if (typeof runDir !== "string" || runDir.length === 0) return refuse("malformed_input");
   if (typeof registryPath !== "string" || registryPath.length === 0) return refuse("malformed_input");
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return refuse("malformed_input");
-  if (typeof leadSession !== "string" || leadSession.length === 0) return refuse("malformed_input");
 
   // 2. Child delivery contract (the Lead's scope authority for the correction).
   let validatedDelivery;
@@ -445,27 +465,9 @@ export async function continueRun({
     return refuse("parent_accepted");
   }
 
-  // 0045 R3 裁定 H3：explicit（车道+角色组合）派发的父 run 不可被 continue——
-  // 续接链路从 registry 重建子 run 且不携带角色，会静默把 explicit 帽换回接线
-  // 席位的默认帽（R1 关闭的同族洞）。父档形态从 run.started 一眼可知，故此门
-  // 先于 lineage/delivery 门（避免 not_continuable 掩盖真实原因）；legacy 父
-  // （无 resolvedFrom 字段）不受影响。直到身份钉住传到 run_continue（0045 §6
-  // 第 3 步收口）为止具名拒绝。
-  {
-    const parentStarted = parentEvents.find((e) => e && e.type === "run.started" && e.runId === parentRunId);
-    if (parentStarted?.resolvedFrom === "explicit") {
-      return refuse("explicit_dispatch_continuable_unsupported", {
-        detail: "the parent run was dispatched as an explicit lane+role combination; run_continue "
-          + "rebuilds the child from the registry entry without the explicit role (a silent "
-          + "hat switch). Dispatch by agentId for continuable work until 0045 step-3 identity "
-          + "pinning reaches run_continue",
-      });
-    }
-  }
-
   // 0045 R4 洞①关门（P1 只关了 resume 臂）：父 run 钉住的角色正文 sha 与当前
   // 角色文件不一致 → 拒绝续接——否则子 run 会在同一 provider 谱系会话上静默
-  // 换帽。父事实一眼可知，故与 H3 同置于 lineage/delivery 门之前（防
+  // 换帽。父事实一眼可知，故置于 lineage/delivery 门之前（防
   // not_continuable/no_delivery 掩盖真实原因）。钉缺席（P1 前的 legacy 父）跳过
   // 本维（record-side-undefined-skip）。
   {
@@ -512,17 +514,75 @@ export async function continueRun({
   }
   const rootRunId = lineageFact.rootRunId;
 
-  // TD-254（决定 0058）：线系闭合拒绝——根转录 bound run.lineage_closed 在场。
-  // 根不可读/被 prune → 不拒绝（维持现状；成功闭合后树已删，续接会撞 missing_worktree
-  // ——残余仅"释放失败且根后被 prune"形态，0058 在案）。锁侧封口归 lineage-close
-  // 的根锁+槽新鲜度门；此处 check→claim 微窗残余显式记录（0058）。
-  try {
-    const rootPathForClose = resolveTranscriptPath(resolvedRunDir, rootRunId);
-    if (existsSync(rootPathForClose)) {
-      const rootEventsForClose = await readTranscript(rootPathForClose);
-      const { lineageClosedIn } = await import("./lineageClose.js");
-      if (lineageClosedIn(rootEventsForClose, rootRunId)) return refuse("lineage_closed");
+  // The lineage identity material comes ONLY from the ROOT run's pinned facts.
+  // The root transcript is also where TD-254's closure fact lives, so read it
+  // once. A root whose run.started cannot be read/projected is not a provable
+  // lineage root (refuse; never fall back to the current config or Lead session).
+  let rootEvents = parentEvents;
+  if (rootRunId !== parentRunId) {
+    try {
+      rootEvents = await readTranscript(resolveTranscriptPath(resolvedRunDir, rootRunId));
+    } catch {
+      return refuse("not_continuable");
     }
+  }
+  const rootStarted = rootEvents.find((e) => e && e.type === "run.started" && e.runId === rootRunId);
+  const lineageIdentity = rootStarted ? lineageIdentityFromStarted(rootStarted) : null;
+  if (!lineageIdentity) {
+    return refuse("not_continuable");
+  }
+  let lineageLaneRole = null;
+  if (rootStarted.resolvedFrom === "explicit" || rootStarted.resolvedFrom === "alias") {
+    if (!isValidCanonicalAgentId(rootStarted.laneId) || !isValidCanonicalAgentId(rootStarted.roleId)) {
+      return refuse("not_continuable");
+    }
+    lineageLaneRole = { laneId: rootStarted.laneId, roleId: rootStarted.roleId };
+  }
+  const rootRolePin = rootStarted.rolePin && typeof rootStarted.rolePin === "object"
+    ? rootStarted.rolePin
+    : null;
+  // A root != parent lineage root pin is re-checked against the current role
+  // file exactly like the parent pin above (0045 R4); a parent/root pin
+  // mismatch is a silent hat switch on the resumed provider session.
+  if (rootRunId !== parentRunId) {
+    const parentStartedForPin = parentEvents.find((e) => e && e.type === "run.started" && e.runId === parentRunId);
+    const parentRolePin = parentStartedForPin?.rolePin && typeof parentStartedForPin.rolePin === "object"
+      ? parentStartedForPin.rolePin
+      : null;
+    if (parentRolePin && rootRolePin
+      && (parentRolePin.systemPrompt !== rootRolePin.systemPrompt || parentRolePin.sha256 !== rootRolePin.sha256)) {
+      return refuse("role_contract_drift", {
+        detail: "the parent run's pinned role differs from the lineage root's pinned role; a continuation would resume the SAME provider lineage under a different role — start a new run instead",
+      });
+    }
+    if (rootRolePin) {
+      if (typeof rootRolePin.systemPrompt !== "string" || typeof rootRolePin.sha256 !== "string") {
+        return refuse("role_contract_drift", {
+          detail: "the lineage root's pinned role is malformed; a continuation must not silently drop the role",
+        });
+      }
+      let currentRootRoleSha = null;
+      try {
+        currentRootRoleSha = roleContractSha256(loadRoleContract(rootRolePin.systemPrompt));
+      } catch {
+        return refuse("role_contract_drift", {
+          detail: `the role contract pinned by the lineage root (${rootRolePin.systemPrompt}) is no longer loadable; a continuation must not silently drop the role`,
+        });
+      }
+      if (currentRootRoleSha !== rootRolePin.sha256) {
+        return refuse("role_contract_drift", {
+          detail: `the role contract pinned by the lineage root (${rootRolePin.systemPrompt}) has changed since dispatch; a continuation would run the SAME provider lineage under a different role — start a new run instead`,
+        });
+      }
+    }
+  }
+
+  // TD-254（决定 0058）：线系闭合拒绝——根转录 bound run.lineage_closed 在场。
+  // 锁侧封口归 lineage-close 的根锁+槽新鲜度门；此处 check→claim 微窗残余显式
+  // 记录（0058）。
+  try {
+    const { lineageClosedIn } = await import("./lineageClose.js");
+    if (lineageClosedIn(rootEvents, rootRunId)) return refuse("lineage_closed");
   } catch {
     // 读取故障不阻断（闭态检查是增强门，非授权门——授权门在 decide/闭合侧）。
   }
@@ -591,6 +651,42 @@ export async function continueRun({
     || (started.providerKey !== undefined
       && started.providerKey !== null)) {
     return refuse("worker_configuration_changed");
+  }
+  // The child is rebuilt from the lineage ROOT's pinned role source — never the
+  // current registry default. A different current source (seat systemPrompt
+  // added/removed/repointed) is a silent hat switch on the resumed provider
+  // session: refuse with the existing drift reason.
+  const pinnedRoleSource = typeof rootRolePin?.systemPrompt === "string" ? rootRolePin.systemPrompt : null;
+  const rebuiltRoleSource = lineageLaneRole
+    ? `config/roles/${lineageLaneRole.roleId}.md`
+    : (agent.systemPrompt || null);
+  if (rebuiltRoleSource !== pinnedRoleSource) {
+    return refuse("role_contract_drift", {
+      detail: "the role source this continuation would rebuild differs from the role pinned by the lineage root; a continuation must not silently switch roles",
+    });
+  }
+  // An explicit/alias lineage rebuilds its child through the SAME explicit
+  // resolution the runner applies (--lane/--role). Prove it BEFORE any mutation:
+  // a rewired lanes.json / registry (or a lane that no longer resolves to the
+  // same wiring seat) is `worker_configuration_changed`, not a doomed child.
+  if (lineageLaneRole) {
+    const registryAgents = Object.fromEntries(
+      (typeof registry.listAgents === "function" ? registry.listAgents() : []).map((a) => [a.id, a]),
+    );
+    const resolution = resolveDispatchTarget({
+      lane: lineageLaneRole.laneId,
+      role: lineageLaneRole.roleId,
+      lanesDoc: loadLanesConfig(),
+      registryAgents,
+      roleLibrary: listRoleLibrary(),
+    });
+    if (resolution.kind === "error"
+      || resolution.source !== "explicit"
+      || resolution.agentId !== agentId
+      || resolution.laneId !== lineageLaneRole.laneId
+      || resolution.roleId !== lineageLaneRole.roleId) {
+      return refuse("worker_configuration_changed");
+    }
   }
   const backend = typeof backendFor === "function" ? backendFor(agent) : null;
   if (!backend || backend.supportsSessionReuse !== true) {
@@ -730,7 +826,18 @@ export async function continueRun({
     "--delivery-json", JSON.stringify(publicDelivery),
     "--reuse-worktree-json", JSON.stringify({ path: worktreePath, branch: childBranch }),
     "--session-reuse-json", JSON.stringify(sessionReuseRouting),
+    // 决定 0114 修订：续修把根派发时冻结的同一组身份材料交给 runner 复核
+    // （与 run_dispatch 的 --reuse-material-json 同一核对）。资格检查之后、
+    // backend spawn 之前若角色正文或车道接线又变了，runner 以既有
+    // reuse_material_mismatch 具名失败收口——不得带旧会话换新帽。
+    "--reuse-material-json", JSON.stringify(lineageIdentity),
   ];
+  // The child is rebuilt from the ROOT's pinned lane+role through the SAME
+  // explicit resolution the runner applies (never the seat default role).
+  if (lineageLaneRole) {
+    runnerArgs.push("--lane", lineageLaneRole.laneId);
+    runnerArgs.push("--role", lineageLaneRole.roleId);
+  }
   if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
     runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
   }
@@ -765,9 +872,9 @@ export async function continueRun({
       runId: childRunId,
       parentRunId,
       rootRunId,
-      leadSession,
       workspace: authorizedWorkspaceRoot,
       agentId,
+      ...lineageIdentity,
       validatePriorRunId: async (finalPriorRunId) => {
         try {
           const recovered = await resolvePriorProviderSessionId({

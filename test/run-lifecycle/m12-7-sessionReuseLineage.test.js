@@ -5,9 +5,11 @@
 //
 // These tests pin the lineage-scoped session routing contract that lives in
 // src/application/sessionReuse.js alongside the existing lead_workspace policy:
-//   - the opaque provider UUID is derived from (Lead session + canonical
-//     workspace + canonical agentId + ROOT runId), so it is stable across one
-//     lineage and isolated across lineages;
+//   - the opaque provider UUID and routing key are derived from the lineage's
+//     OWN pinned facts (canonical workspace + canonical agentId + ROOT runId +
+//     the lane content fingerprint and role-contract sha pinned at root
+//     dispatch) — no Lead session — so it is stable across one lineage (even
+//     across a host restart) and isolated across lineages;
 //   - the routing envelope {mode:"run_lineage", opaqueUuid, turn} validates
 //     through the SAME closed-shape authority as lead_workspace;
 //   - the per-key lock/busy logic is REUSED: first turn claims, continuation
@@ -39,6 +41,12 @@ const LEAD = "lead-session-uuid-1";
 const WS = "D:/repos/example";
 const AGENT = "coder_hq";
 const ROOT = "run_root_20260801";
+const LANE_FP = "lane:" + "ab".repeat(8);
+const ROLE_SHA = "none";
+const LINEAGE = Object.freeze({
+  workspace: WS, agentId: AGENT, rootRunId: ROOT,
+  laneFingerprint: LANE_FP, roleSha256: ROLE_SHA,
+});
 
 function tmpRunDir() {
   return mkdtempSync(join(tmpdir(), "wao-m127-lineage-"));
@@ -57,27 +65,33 @@ function memStore() {
   };
 }
 
-test("M12-7-LIN-01: lineage opaque uuid is deterministic and root-scoped", () => {
-  const a = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
-  const a2 = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+test("M12-7-LIN-01: lineage opaque uuid is deterministic, root-scoped, and Lead-session-free", () => {
+  const a = deriveLineageOpaqueUuid(LINEAGE);
+  const a2 = deriveLineageOpaqueUuid(LINEAGE);
   // RFC 4122 v4 shaped.
   assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(a, a2, "same lineage inputs -> same opaque uuid");
+  // The Lead session is NOT part of the lineage material (host restart safe).
+  assert.equal(deriveLineageOpaqueUuid({ ...LINEAGE, leadSession: LEAD }), a);
+  assert.equal(deriveLineageOpaqueUuid({ ...LINEAGE, leadSession: "another-host-session" }), a);
 
   // Different root -> different uuid (lineage isolation).
-  const b = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: "run_root_other" });
+  const b = deriveLineageOpaqueUuid({ ...LINEAGE, rootRunId: "run_root_other" });
   assert.notEqual(a, b, "different rootRunId -> different opaque uuid");
+  // Different lane fingerprint / role body -> different uuid (silent hat switch closed).
+  assert.notEqual(deriveLineageOpaqueUuid({ ...LINEAGE, laneFingerprint: "lane:" + "cd".repeat(8) }), a);
+  assert.notEqual(deriveLineageOpaqueUuid({ ...LINEAGE, roleSha256: "f".repeat(64) }), a);
 });
 
 test("M12-7-LIN-02: lineage uuid never collides with lead_workspace uuid for the same triple", () => {
-  const lineage = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+  const lineage = deriveLineageOpaqueUuid(LINEAGE);
   const policy = deriveOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT });
   assert.notEqual(lineage, policy, "lineage and lead_workspace reuse must be distinct keyspaces");
 });
 
 test("M12-7-LIN-03: lineage reuse key hash is sha256 of the opaque uuid (no uuid on disk path)", () => {
-  const opaque = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
-  const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+  const opaque = deriveLineageOpaqueUuid(LINEAGE);
+  const key = deriveLineageReuseKeyHash(LINEAGE);
   assert.match(key, /^[0-9a-f]{64}$/);
   assert.ok(!key.includes(opaque), "key hash must not contain the opaque uuid verbatim");
   // Distinct from the lead_workspace key for the same triple.
@@ -86,7 +100,7 @@ test("M12-7-LIN-03: lineage reuse key hash is sha256 of the opaque uuid (no uuid
 });
 
 test("M12-7-LIN-04: validateSessionReuseRouting accepts run_lineage envelope (closed shape)", () => {
-  const opaque = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+  const opaque = deriveLineageOpaqueUuid(LINEAGE);
   // §3.6/R2：resume 轮携带 priorRunId（前任 WAO runId）；first 轮禁止。
   const ok = validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "resume", priorRunId: ROOT });
   assert.equal(ok.mode, "run_lineage");
@@ -113,14 +127,14 @@ test("M12-7-LIN-06: first turn claims the lineage slot and reports turn:first", 
   try {
     const store = memStore();
     const r = await resolveLineageFirstTurn({
-      runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: store, now: 1000,
+      runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 1000,
     });
     assert.equal(r.kind, "first");
     assert.equal(r.routing.mode, "run_lineage");
     assert.equal(r.routing.turn, "first");
     assert.match(r.routing.opaqueUuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     // Slot claimed for the root run.
-    const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+    const key = deriveLineageReuseKeyHash({ workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA });
     assert.equal(store._entries.get(key).runId, ROOT);
   } finally {
     rmSync(runDir, { recursive: true, force: true });
@@ -132,13 +146,13 @@ test("M12-7-LIN-07: continuation resumes with the SAME opaque id as the first tu
   try {
     const store = memStore();
     const first = await resolveLineageFirstTurn({
-      runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: store, now: 1000,
+      runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 1000,
     });
     // Parent (root) is terminal with a session.created -> eligible to resume.
     await seedTerminalTranscript(runDir, ROOT, AGENT);
     const cont = await resolveLineageContinuationTurn({
       runDir, runId: "run_child_1", parentRunId: ROOT, rootRunId: ROOT,
-      leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: store, now: 2000,
+      workspace: WS, agentId: AGENT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 2000,
     });
     assert.equal(cont.kind, "resume");
     assert.equal(cont.routing.turn, "resume");
@@ -155,13 +169,13 @@ test("M12-7-LIN-08: a non-terminal lineage owner is busy (no concurrent driving)
   try {
     const store = memStore();
     await resolveLineageFirstTurn({
-      runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: store, now: 1000,
+      runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 1000,
     });
     // Root still non-terminal (running) -> continuation must be busy.
     await seedNonTerminalTranscript(runDir, ROOT, AGENT);
     const cont = await resolveLineageContinuationTurn({
       runDir, runId: "run_child_1", parentRunId: ROOT, rootRunId: ROOT,
-      leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: store, now: 2000,
+      workspace: WS, agentId: AGENT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 2000,
     });
     assert.equal(cont.kind, "busy");
     assert.equal(cont.activeRunId, ROOT);
@@ -175,20 +189,20 @@ test("M12-7-LIN-09: concurrent duplicate continuation of the same parent -> lose
   try {
     const store = memStore();
     await resolveLineageFirstTurn({
-      runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: store, now: 1000,
+      runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 1000,
     });
     await seedTerminalTranscript(runDir, ROOT, AGENT);
     // First continuation claims the slot as a non-terminal child.
     const c1 = await resolveLineageContinuationTurn({
       runDir, runId: "run_child_1", parentRunId: ROOT, rootRunId: ROOT,
-      leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: store, now: 2000,
+      workspace: WS, agentId: AGENT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 2000,
     });
     assert.equal(c1.kind, "resume");
     // The child it spawned is non-terminal (no transcript yet / running) -> a
     // second concurrent continuation must observe it as busy, not fork a rival.
     const c2 = await resolveLineageContinuationTurn({
       runDir, runId: "run_child_2", parentRunId: ROOT, rootRunId: ROOT,
-      leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: store, now: 3000,
+      workspace: WS, agentId: AGENT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: store, now: 3000,
     });
     assert.equal(c2.kind, "busy");
     assert.equal(c2.activeRunId, "run_child_1");
@@ -200,14 +214,14 @@ test("M12-7-LIN-09: concurrent duplicate continuation of the same parent -> lose
 test("M12-7-LIN-10: 损坏的 lineage 条目时间戳（未来/负/非数）⇒ 拒绝，绝不回收或续接槽位（窄复核第 3 轮 [高]）", async () => {
   const runDir = tmpRunDir();
   try {
-    const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+    const key = deriveLineageReuseKeyHash({ workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA });
     for (const badTs of [1000 + 60_000, -1, "broken", NaN]) {
       // (a) first-turn: 条目指向别的 owner，转录缺失 —— 修复前会判 first 并覆写槽位
       const s1 = memStore();
       s1._entries.set(key, { runId: "run_owner", updatedAt: badTs });
       await assert.rejects(
         () => resolveLineageFirstTurn({
-          runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: s1, now: 1000,
+          runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: s1, now: 1000,
         }),
         /routing entry.*damaged/s,
         `lineage first turn, updatedAt=${String(badTs)} must refuse`,
@@ -217,7 +231,7 @@ test("M12-7-LIN-10: 损坏的 lineage 条目时间戳（未来/负/非数）⇒ 
       s2._entries.set(key, { runId: ROOT, updatedAt: badTs });
       await assert.rejects(
         () => resolveLineageFirstTurn({
-          runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: s2, now: 1000,
+          runDir, runId: ROOT, workspace: WS, agentId: AGENT, rootRunId: ROOT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: s2, now: 1000,
         }),
         /routing entry.*damaged/s,
         `lineage self-runId, updatedAt=${String(badTs)} must refuse`,
@@ -228,7 +242,7 @@ test("M12-7-LIN-10: 损坏的 lineage 条目时间戳（未来/负/非数）⇒ 
       await assert.rejects(
         () => resolveLineageContinuationTurn({
           runDir, runId: "run_child_1", parentRunId: "run_owner", rootRunId: ROOT,
-          leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: s3, now: 1000,
+          workspace: WS, agentId: AGENT, laneFingerprint: LANE_FP, roleSha256: ROLE_SHA, reuseStore: s3, now: 1000,
         }),
         /routing entry.*damaged/s,
         `lineage continuation, updatedAt=${String(badTs)} must refuse`,

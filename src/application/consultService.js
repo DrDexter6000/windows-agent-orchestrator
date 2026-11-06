@@ -573,7 +573,13 @@ export async function runConsult({
       const seatPolicy = seatPolicies.get(seat.agentId);
       const result = await dispatchFn({
         agentId: dispatchAgentId,
-        ...(seatPolicy?.roleId ? { resolvedRoleId: seatPolicy.roleId } : {}),
+        // 决定 0114 修订：会审别名席位按“车道 + 别名角色”执行——`--lane/--role`
+        // 与冻结材料必须来自同一个角色值；`resolvedFrom` 保留 alias 注记。
+        ...(seatPolicy?.laneId ? { resolvedLane: seatPolicy.laneId } : {}),
+        ...(seatPolicy?.roleId
+          ? { resolvedRole: seatPolicy.roleId, resolvedRoleId: seatPolicy.roleId }
+          : {}),
+        ...(seatPolicy?.resolvedTarget?.source === "alias" ? { resolvedFrom: "alias" } : {}),
         prompt,
         registryPath: resolvedRegistry,
         runDir: resolvedRunDir,

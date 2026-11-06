@@ -81,6 +81,54 @@ test("BG-3: 无 lane/role 的 dispatchRun argv 无新旗标（字节兼容）", 
   } finally { cleanupDir(dir); }
 });
 
+test("BG-4（0114）：别名后台派发同样带 lane/role 执行，run.started 仍记 resolvedFrom=alias", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bg4-"));
+  const researcherMd = readFileSync(join(REPO_ROOT, "config", "roles", "researcher.md"), "utf8");
+  try {
+    makeGitRepo(dir);
+    const runDir = join(dir, "runs");
+    const registry = { agents: {
+      "opus": { backend: OPUS_LANE.backend, model: OPUS_LANE.model, reasoning: OPUS_LANE.reasoning, cwd: dir },
+    } };
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(runDir, { recursive: true });
+    const { runBackground } = await import("../../src/backgroundRunner.js");
+    let spawnHappened = false;
+    const result = await runBackground({
+      agentId: "opus", prompt: "t", runDir, runId: "run_0045_bg4",
+      registry, lane: "opus", role: "researcher", resolvedFrom: "alias",
+      backendFor: () => ({
+        supportsRoleContract: true, sessionOutlivesProcess: false,
+        async spawn() {
+          spawnHappened = true;
+          return {
+            backend: "claude-code", backendSessionId: "s1", messageId: "m1", admittedSeq: 5,
+            async *events() { yield { kind: "done", reason: "completed" }; },
+            abort: async () => {},
+          };
+        },
+        defaultBinary() { return "node"; }, credentialEnvNames: () => [], validateAgentPolicy() {},
+      }),
+    });
+    assert.equal(result.completed, true, String(result.error ?? ""));
+    assert.equal(spawnHappened, true, "别名后台派发真实 spawn（角色/车道都在场）");
+    const started = (() => {
+      for (const line of readFileSync(join(runDir, "run_0045_bg4.jsonl"), "utf8").split("\n")) {
+        try { const o = JSON.parse(line); if (o.type === "run.started") return o; } catch { /* skip */ }
+      }
+      return null;
+    })();
+    assert.equal(started.resolvedFrom, "alias", "身份来源仍是 alias（不退化成 explicit）");
+    assert.equal(started.laneId, "opus");
+    assert.equal(started.roleId, "researcher");
+    assert.equal(started.sessionReuseDecision, undefined, "alias 没有 fresh 注记");
+    assert.equal(started.rolePin.systemPrompt, "config/roles/researcher.md");
+    assert.equal(started.rolePin.sha256, sha(researcherMd));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落档；解析失败=具名 fail-closed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-bg2-"));
   // TD-314：只读地用角色库真实角色 researcher（解析层固定从 config/roles/<id>.md

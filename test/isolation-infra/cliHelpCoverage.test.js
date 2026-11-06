@@ -267,7 +267,7 @@ const FLAG_MODULE_EXTRA_SOURCES = {
 const PROGRAMMATIC_OPTION_KEYS = {
   "src/commands/run.js": {
     scorecardRulesSource: "loadScorecardRules 写入的来源注记（--scorecard-rules-file/--scorecard-rules 二选一标记），非命令行旗标",
-    resolvedRoleId: "runCommand 解析 alias 派发后写回 options 的角色 id（传给后台 runner），非命令行旗标",
+    resolvedRoleId: "runCommand 解析 explicit/alias 派发后写回 options 的角色 id（传给后台 runner），非命令行旗标",
     onObservationDeadline: "runAndWait 注入 waitForCompletion 的进程内回调，非命令行旗标",
   },
 };

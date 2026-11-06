@@ -378,8 +378,15 @@ test("M12-7-RC-10: busy lineage slot refused as busy (concurrent continuation), 
   try {
     await seedParent({ runDir: dir, runId: "run_parent_busy", agentId: "coder_hq", cwd: repo, worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base, deliveryCommit: parent.deliveryCommit });
     // Pre-seed the lineage store with a non-terminal owner (an in-flight child).
-    const { resolveLineageFirstTurn } = await import("../../src/application/sessionReuse.js");
-    await resolveLineageFirstTurn({ runDir: dir, runId: "run_parent_busy", leadSession: "lead-session-1", workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_busy", now: 1000 });
+    // 决定 0114：谱系身份只取根运行钉住的事实（run.started 的 backend/model +
+    // rolePin）——这里按 seedParent 写入的 run.started 派生同一组材料。
+    const { resolveLineageFirstTurn, deriveLineageReuseKeyHash } = await import("../../src/application/sessionReuse.js");
+    const { deriveStartedIdentity, laneFingerprint } = await import("../../src/application/identityProjection.js");
+    const lineageMaterial = {
+      laneFingerprint: laneFingerprint(deriveStartedIdentity({ backend: "claude-code" })),
+      roleSha256: "none",
+    };
+    await resolveLineageFirstTurn({ runDir: dir, runId: "run_parent_busy", workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_busy", ...lineageMaterial, now: 1000 });
     // A non-terminal child occupying the slot.
     const ct = new JsonlTranscript(join(dir, "run_child_inflight.jsonl"), { runId: "run_child_inflight", agentId: "coder_hq" });
     await ct.append("run.started", { backend: "claude-code" });
@@ -388,10 +395,8 @@ test("M12-7-RC-10: busy lineage slot refused as busy (concurrent continuation), 
     // Overwrite the lineage entry to point at the in-flight child (non-terminal owner).
     const { default: fsp } = await import("node:fs/promises");
     const { join: j } = await import("node:path");
-    const { createHash } = await import("node:crypto");
     // Recompute the lineage key the same way the module does, then write the entry.
-    const { deriveLineageReuseKeyHash } = await import("../../src/application/sessionReuse.js");
-    const key = deriveLineageReuseKeyHash({ leadSession: "lead-session-1", workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_busy" });
+    const key = deriveLineageReuseKeyHash({ workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_busy", ...lineageMaterial });
     await fsp.mkdir(j(dir, ".lineage-reuse"), { recursive: true });
     await fsp.writeFile(j(dir, ".lineage-reuse", `${key}.json`), JSON.stringify({ runId: "run_child_inflight", updatedAt: 2000 }));
 
@@ -1065,9 +1070,15 @@ test("TD188-R1-RC-6: 槽内实际前任 B（≠请求父 A）不可续接 → no
   const { fakeSpawn, calls } = makeFakeSpawn();
   const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
   const { resolveLineageFirstTurn, deriveLineageReuseKeyHash } = await import("../../src/application/sessionReuse.js");
+  const { deriveStartedIdentity, laneFingerprint } = await import("../../src/application/identityProjection.js");
   const OWNER = "run_r1_owner_b";
   const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
   const LEAD = "lead-session-1";
+  // 决定 0114：谱系材料=根 run.started 记录的车道轴 + 角色钉（此父 run 无角色）。
+  const lineageMaterial = {
+    laneFingerprint: laneFingerprint(deriveStartedIdentity({ backend: "kimi-code" })),
+    roleSha256: "none",
+  };
   try {
     // 请求父 A：有效（kimi + 绑定事实）——9b 预检通过，证明后续拒绝来自槽内实际前任 B。
     await seedParent({
@@ -1079,8 +1090,8 @@ test("TD188-R1-RC-6: 槽内实际前任 B（≠请求父 A）不可续接 → no
     });
     // 真实 store：lineage 槽前 owner = B（≠ A），终态但只有 proc 占位身份（无可续接证据）。
     await resolveLineageFirstTurn({
-      runDir: dir, runId: OWNER, leadSession: LEAD, workspace: repo,
-      agentId: "coder_hq", rootRunId: "run_parent_r1_a", now: 1000,
+      runDir: dir, runId: OWNER, workspace: repo,
+      agentId: "coder_hq", rootRunId: "run_parent_r1_a", ...lineageMaterial, now: 1000,
     });
     const bt = new JsonlTranscript(join(dir, `${OWNER}.jsonl`), { runId: OWNER, agentId: "coder_hq" });
     await bt.append("run.started", { backend: "kimi-code" });
@@ -1089,7 +1100,7 @@ test("TD188-R1-RC-6: 槽内实际前任 B（≠请求父 A）不可续接 → no
     await bt.transitionState("pending", "completed", "done");
 
     // 快照：entry 原始字节 + 工作树分支/HEAD/字节。
-    const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_r1_a" });
+    const key = deriveLineageReuseKeyHash({ workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_r1_a", ...lineageMaterial });
     const entryPath = join(dir, ".lineage-reuse", `${key}.json`);
     const entryBefore = readFileSync(entryPath, "utf8");
     const headBefore = git("rev-parse HEAD", parent.wt);
@@ -1123,9 +1134,14 @@ test("TD188-R1-RC-7: 槽内实际前任 B 有效（绑定事实）→ 续接接�
   const { fakeSpawn, calls } = makeFakeSpawn();
   const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
   const { resolveLineageFirstTurn } = await import("../../src/application/sessionReuse.js");
+  const { deriveStartedIdentity, laneFingerprint } = await import("../../src/application/identityProjection.js");
   const OWNER = "run_r1_owner_pos";
   const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
   const LEAD = "lead-session-1";
+  const lineageMaterial = {
+    laneFingerprint: laneFingerprint(deriveStartedIdentity({ backend: "kimi-code" })),
+    roleSha256: "none",
+  };
   try {
     await seedParent({
       runDir: dir, runId: "run_parent_r1_pos", agentId: "coder_hq", cwd: repo,
@@ -1136,8 +1152,8 @@ test("TD188-R1-RC-7: 槽内实际前任 B 有效（绑定事实）→ 续接接�
     });
     // 槽前 owner B：终态 + 有效绑定事实（resume 实际要读的前任就是它）。
     await resolveLineageFirstTurn({
-      runDir: dir, runId: OWNER, leadSession: LEAD, workspace: repo,
-      agentId: "coder_hq", rootRunId: "run_parent_r1_pos", now: 1000,
+      runDir: dir, runId: OWNER, workspace: repo,
+      agentId: "coder_hq", rootRunId: "run_parent_r1_pos", ...lineageMaterial, now: 1000,
     });
     const bt = new JsonlTranscript(join(dir, `${OWNER}.jsonl`), { runId: OWNER, agentId: "coder_hq" });
     await bt.append("run.started", { backend: "kimi-code" });

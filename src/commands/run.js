@@ -49,6 +49,9 @@ import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // R11-1: assertValidReasoningOverride is the same SSOT discipline for the
 // per-dispatch --reasoning effort override (closed REASONING_EFFORTS set).
 import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assertValidReasoningOverride } from "../application/runDispatch.js";
+// M12-7/0114：CLI background continuable 与 MCP 同一能力门——共享工厂构造的
+// backend 实例用于 supportsSessionReuse 判定（构造零副作用）。
+import { backendFor as factoryBackendFor } from "../backends/factory.js";
 // ADR 0035 S3: dispatch-startup advisory line renderer (repo resource counts;
 // fail-open — any git failure/timeout omits the line entirely).
 import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
@@ -130,6 +133,10 @@ async function loadDeliverySpec(options) {
   return {
     mode: validated.mode,
     allowedPaths: validated.allowedPaths,
+    // 决定 0114：CLI 的 `--background` + delivery spec 顶层 `continuable: true`
+    // 与 MCP `run_dispatch` 的顶层 continuable 同义（delivery-only 谱系根）。
+    // 非布尔 true 不冒充（缺省/畸形一律不建谱系）。
+    ...(parsed.continuable === true ? { continuable: true } : {}),
     ...(validated.verification.commands.length > 0
       ? { verificationCommands: validated.verification.commands }
       : { verificationUnavailableReason: validated.verification.unavailableReason }),
@@ -181,15 +188,18 @@ export async function loadScorecardFromTranscript(transcriptPath, runId = null) 
 // P2（M7）→ M9-2A：fork detached runner 托管一个 background run。
 // 派发逻辑已提取到共享 application service (dispatchRun)；本函数只负责 CLI 适配——
 // 选项整理 + 把 service 结构化结果映射到既有 JSON 输出契约（不变）。
-async function spawnBackgroundRunner(agentId, options, config, delivery) {
+async function spawnBackgroundRunner(agentId, options, config, delivery, resolvedFrom) {
   if (options.scorecardRules) {
     parseScorecardRules(options.scorecardRules, options.scorecardRulesSource);
   }
   // TD-98 阶段 2e-3 路径修正：本模块在 src/commands/，backgroundRunner.js 在 src/。
   const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "backgroundRunner.js");
+  // 测试缝（同 loadLanesConfigFn / readRegistry 模式）：CLI 适配层只做选项整理与
+  // 输出映射，允许注入共享 service 以断言穿线形状而不 fork 真实 runner。
+  const runDispatch = typeof config?.dispatchRunFn === "function" ? config.dispatchRunFn : dispatchRun;
   let result;
   try {
-    result = await dispatchRun({
+    result = await runDispatch({
       agentId,
       prompt: options.prompt ?? "",
       registryPath: resolve(options.registry ?? config.registry),
@@ -211,6 +221,18 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       readOnly: resolveReadOnlyFlag(options),
       // M9-7A: forward validated delivery request for background delivery runs.
       delivery,
+      // 决定 0114：CLI 的 delivery spec 顶层 continuable 与 MCP 顶层 continuable
+      // 同义——由共享 service 建立 run_lineage 根（delivery-only 由 service 强制）。
+      ...(delivery?.continuable === true
+        ? {
+          continuable: true,
+          // M12-7/0114：continuable 能力门与 MCP 同源——由共享工厂构造的
+          // backend 声明判定 supportsSessionReuse（构造零副作用，不按名分支）。
+          backendFor: (agent) => factoryBackendFor(agent),
+        }
+        : {}),
+      // 0045 W4d：别名派发同样走 lane/role 执行，但身份注记仍是 alias。
+      ...(resolvedFrom === "alias" ? { resolvedFrom: "alias" } : {}),
       // R10-A: per-dispatch model override (already shape-gated + certified-
       // exclusive up in runCommand). undefined when absent = byte-compatible.
       modelOverride: options.model,
@@ -583,12 +605,26 @@ export async function runCommand(args, config) {
     }
     if (resolution.source === "explicit") {
       agentId = resolution.agentId; // 前台路径的接线席位（过渡）；后台路径 runner 侧重解析
+      // 后台路径把解析所得的车道+角色（canonical 形式）与 resolvedRoleId 穿给
+      // 共享 service：根身份材料的角色 sha 必须与 runner 角色库钉住同源，否则
+      // 会记成 "none"（决定 0114）。
+      if (typeof resolution.laneId === "string") options.lane = resolution.laneId;
+      if (typeof resolution.roleId === "string") {
+        options.role = resolution.roleId;
+        options.resolvedRoleId = resolution.roleId;
+      }
       if (!options.background) resolvedTarget = resolution;
     } else if (resolution.source === "alias") {
       // W4d：别名=执行——agentId 换为车道键（接线条目），角色经 resolvedTarget。
       agentId = resolution.agentId;
       resolvedTarget = resolution;
-      if (typeof resolution.roleId === "string") options.resolvedRoleId = resolution.roleId; // 后台政策语义
+      // 后台 alias 同样要带 --lane/--role 给 runner（否则角色不进 run.started、
+      // 冻结材料也对不上）；resolvedFrom 另行保留 alias 注记。
+      if (typeof resolution.laneId === "string") options.lane = resolution.laneId;
+      if (typeof resolution.roleId === "string") {
+        options.role = resolution.roleId;
+        options.resolvedRoleId = resolution.roleId; // 后台政策/身份材料语义
+      }
     }
     // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
     // TD-283：按最终派发目标（解析所得 laneId，或裸键=车道键本身）取暂停说明。
@@ -603,14 +639,13 @@ export async function runCommand(args, config) {
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
   const delivery = earlyDeliveryRef.value;
-  // 0045 R3 裁定 H3（派发侧臂）：explicit × continuable 拒绝——continue 重建子 run
-  // 不带角色=静默换帽（runContinue 侧父臂已拒；此处把组合在派发面也关死）。
-  if (resolvedTarget?.source === "explicit" && delivery && delivery.continuable) {
+  // 决定 0114：explicit/别名派发也可作续谱根（子运行按根钉住的车道+角色重建）。
+  // continuable 需要 background runner 建立 run_lineage 首轮；前台 CLI 走
+  // RunManager.start，没有谱系路由——具名拒绝而不是静默忽略 spec 字段。
+  if (delivery?.continuable === true && !options.background) {
     throw new Error(
-      "explicit lane/role dispatch cannot be continuable in this increment "
-      + "(explicit_continuable_unsupported, 0045 R3 裁定 H3): the continue path rebuilds the "
-      + "child from the registry entry without the explicit role — a silent hat switch. "
-      + "Dispatch by agentId for continuable work until identity pinning reaches run_continue",
+      "continuable requires --background: a provider-session lineage root is established "
+      + "by the background dispatch service; the foreground CLI run does not create one",
     );
   }
   // Delivery requires --isolate; reject before spawn.
@@ -652,7 +687,7 @@ export async function runCommand(args, config) {
   if (options.background) {
     options.prompt = await loadPrompt(options);
     await loadScorecardRules(options);
-    return spawnBackgroundRunner(agentId, options, config, delivery);
+    return spawnBackgroundRunner(agentId, options, config, delivery, resolvedTarget?.source);
   }
   options.wait = true;
   await loadScorecardRules(options);

@@ -95,6 +95,12 @@ function makeObjectRegistry(registryObj) {
  * @param {string} [opts.reasoningOverride] — R11-1 per-dispatch reasoning
  *   effort (--reasoning); RunManager.start synthesizes it over the registry
  *   reasoning policy (only `.effort` replaced)
+ * @param {"alias"|undefined} [opts.resolvedFrom] — 0045 W4d 身份来源注记：
+ *   alias 派发也走 lane/role 执行，但 run.started.resolvedFrom 仍记 alias
+ * @param {string} [opts.reuseMaterial] — 派发冻结的身份材料 JSON（runMain 从
+ *   --reuse-material-json 原样转发；启动前与当前注册表重算值比对）
+ * @param {Function} [opts.loadRoleContractFn] — 启动前材料复核的角色正文
+ *   读取缝（缺省 loadRoleContract；测试模拟派发后正文变更，不写共享角色库）
  * @returns {Promise<{runId, completed, failed, timedOut, error, observationDeadlineReached}>}
  *   ADR-0030（TD-151）：observationDeadlineReached=true 表示等待窗到期事实已落盘
  *   （run.observation_deadline_reached）——到期不杀 worker，completed/failed 是
@@ -140,6 +146,18 @@ export async function runBackground(opts = {}) {
   writeOwnerHeartbeat(runDir, runId);
   const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, runId), OWNER_HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref?.();
+  // 入口已起拍 ownership 心跳；spawn 前的 fail-closed 收口也必须撤拍并删
+  // `.owner-<runId>`（否则死进程的心跳文件会被 daemon 误当活 owner）。
+  const failClosedBeforeStart = async (code, message) => {
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, runId);
+    return failClosedResolution(runDir, runId, agentId, code, message, transcriptDir);
+  };
+  // 材料复核读取的角色正文缝：生产恒为 loadRoleContract；测试可注入以模拟
+  // “派发后角色正文被改”，不触碰共享 config/roles。
+  const loadRoleContractForRecheck = typeof opts.loadRoleContractFn === "function"
+    ? opts.loadRoleContractFn
+    : loadRoleContract;
 
   // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
   const waoCliPath = getWaoCliPath();
@@ -176,14 +194,17 @@ export async function runBackground(opts = {}) {
     // 0045 W3c（R4"runner 钉前比对"）：--reuse-material-json 在场（复用/谱系路由
     // 派发）时，runner 从注册表重算车道指纹+角色 sha 并与派发冻结值比对——不
     // 等=派发与起动间注册表被改，具名 fail-closed（W2b 收口同款，零 spawn）。
-    if (opts["reuse-material-json"]) {
+    // runMain 把原始 argv 值作为 reuseMaterial 传进来；直接调用 runBackground
+    // 的测试/嵌入面仍可用原 flag 键。
+    const frozenMaterialRaw = opts.reuseMaterial ?? opts["reuse-material-json"];
+    if (frozenMaterialRaw) {
       let frozenMaterial = null;
-      try { frozenMaterial = JSON.parse(opts["reuse-material-json"]); } catch { frozenMaterial = null; }
+      try { frozenMaterial = JSON.parse(frozenMaterialRaw); } catch { frozenMaterial = null; }
       const regM = await registryResolver(registryPath ?? "config/agents.json");
       const agentEntry = typeof regM.getAgent === "function" && agentId ? regM.getAgent(agentId) : null;
       if (!frozenMaterial || !agentEntry) {
-        return await failClosedResolution(runDir, runId, agentId,
-          "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent", transcriptDir);
+        return await failClosedBeforeStart(
+          "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent");
       }
       // 0052 P0-2：与派发侧同公式——角色指纹取【本次派发的角色】（--role →
       // 角色库），席位 systemPrompt 仅 legacy 兜底。角色文件在读侧缺失/不可载
@@ -194,12 +215,12 @@ export async function runBackground(opts = {}) {
       let recomputedRoleSha;
       try {
         recomputedRoleSha = roleShaSource
-          ? roleContractSha256(loadRoleContract(roleShaSource))
+          ? roleContractSha256(loadRoleContractForRecheck(roleShaSource))
           : "none";
       } catch {
-        return await failClosedResolution(runDir, runId, agentId,
+        return await failClosedBeforeStart(
           "reuse_material_mismatch",
-          "role contract unresolvable at runner start (dispatch-time role file changed or removed)", transcriptDir);
+          "role contract unresolvable at runner start (dispatch-time role file changed or removed)");
       }
       const recomputed = {
         laneFingerprint: laneFingerprintOf({
@@ -213,9 +234,9 @@ export async function runBackground(opts = {}) {
       };
       if (recomputed.laneFingerprint !== frozenMaterial.laneFingerprint
         || recomputed.roleSha256 !== frozenMaterial.roleSha256) {
-        return await failClosedResolution(runDir, runId, agentId,
+        return await failClosedBeforeStart(
           "reuse_material_mismatch",
-          "registry wiring changed between dispatch and runner start (lane fingerprint or role content sha mismatch)", transcriptDir);
+          "registry wiring changed between dispatch and runner start (lane fingerprint or role content sha mismatch)");
       }
     }
     let run;
@@ -255,6 +276,12 @@ export async function runBackground(opts = {}) {
       }
       if (resolution.source === "explicit") startAgentId = resolution.agentId;
       if (resolution.source === "explicit" || resolution.source === "alias") resolvedTarget = resolution;
+      // 0045 W4d：别名派发也经 --lane/--role 执行（角色必须随行），但身份注记
+      // 仍是 alias——CLI 用 --resolved-from alias 显式保留来源，不让 run.started
+      // 把别名派发误记成 explicit（决定 0114 的续修材料需要同一执行轴）。
+      if (resolvedTarget && opts.resolvedFrom === "alias" && resolvedTarget.source === "explicit") {
+        resolvedTarget = { ...resolvedTarget, source: "alias" };
+      }
     }
     run = await manager.start(startAgentId, {
       prompt,
@@ -513,7 +540,7 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
  *   node backgroundRunner.js <agentId> --prompt "..." --run-dir D --registry F [--wait-timeout N]
  *   node backgroundRunner.js --resume-run-id <runId> --run-dir D --registry F [--wait-timeout N]
  */
-export async function runMain(argv = process.argv.slice(2), { stdin = process.stdin } = {}) {
+export async function runMain(argv = process.argv.slice(2), { stdin = process.stdin, backendFor, loadRoleContractFn } = {}) {
   // TD-40：detached runner 是直接 spawn worker 子进程的点，必须在 v24（回归）上拒绝——
   // 否则子进程树可能被 OS Job Object bug 误杀，产生半完成的孤儿 transcript。
   // WAO_SKIP_VERSION_GUARD=1 绕过（仅测试用）。
@@ -672,6 +699,10 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     runDir: opts["run-dir"],
     runId: opts["run-id"],
     cwd: opts.cwd,
+    // 测试缝（缺省=生产路径）：runBackground 本来支持注入 backend/loader，
+    // runMain 之前没有把它们透传——材料复核/启动测试需要。
+    ...(typeof backendFor === "function" ? { backendFor } : {}),
+    ...(typeof loadRoleContractFn === "function" ? { loadRoleContractFn } : {}),
     transcriptDir: opts["transcript-dir"],
     waitTimeout: opts["wait-timeout"] !== undefined ? Number(opts["wait-timeout"]) : undefined,
     // M10-pre closeout: server-owned global config.waitTimeout (from --global-wait-timeout).
@@ -682,9 +713,14 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     scorecardMode: opts["scorecard-mode"],
     requireCertified: argv.includes("--require-certified"),
     // 0045 W2b：显式车道+角色派发（--lane/--role 从 dispatchRun argv 穿线；
-    // runBackground 侧重解析后生效）。
+    // runBackground 侧重解析后生效）。别名同样走这两个旗标；resolvedFrom
+    // 只保留身份来源注记。
     lane: opts.lane,
     role: opts.role,
+    resolvedFrom: opts["resolved-from"],
+    // 0045 W3c/决定 0114：派发冻结的身份材料原样交给 runBackground 的启动前
+    // 复核（此前只在直接调用 runBackground 的测试面可见——runMain 未转发）。
+    reuseMaterial: opts["reuse-material-json"],
     delivery: parsedDelivery,
     // 隔离三态：--isolate→true / --no-isolate→false / 都不给→undefined（沿用
     // 配置）。delivery/readOnly 的强制 --isolate 走 true 分支。

@@ -336,10 +336,12 @@ export async function dispatchRun({
   delivery,
   resolvedCredentials,
   userEnvReader,
-  // M11-11C: server-owned Lead session identity. Required when the agent is
-  // configured for sessionReuse; ignored otherwise. Generated/injected by the
-  // MCP server (stable per server/Lead session) — never supplied by the model,
-  // never returned via MCP. CLI callers pass a one-shot id (always first turn).
+  // M11-11C: server-owned Lead session identity. Required for a
+  // lead_workspace reuse dispatch only (a run_lineage root derives its identity
+  // from the lineage's own pinned facts, never the Lead session). Generated/
+  // injected by the MCP server (stable per server/Lead session) — never supplied
+  // by the model, never returned via MCP. CLI callers pass a one-shot id
+  // (always first turn).
   leadSession,
   // M12-6 (P1-A): server-proven frozen HEAD (the MCP boundary's binding.gitHead),
   // threaded to the detached runner as --frozen-git-head so RunManager.start can
@@ -410,7 +412,13 @@ export async function dispatchRun({
   resolvedLane = null,
   resolvedRole = null,
   // 0045 W4b：别名/显式派发的解析角色（生效复用策略按角色取——R4 裁定归角色）。
+  // 决定 0114 修订：只给此值不给 resolvedRole 时，同一值也进 runner 的 --role
+  // 与冻结材料——runner 复核的角色必须就是它实际执行的角色。
   resolvedRoleId = null,
+  // 0045 W4d：解析来源注记。别名派发也走 --lane/--role（执行语义）时由 CLI
+  // 显式带上 "--resolved-from alias"，runner 仍把 run.started.resolvedFrom 记成
+  // alias（身份注记不退化成 explicit）；缺席=不传、字节兼容。
+  resolvedFrom = null,
   // 0052 P0-3：fresh 逃生口——Lead 裁量的会话重置（强制 first + epoch+1）。
   // 只作用于 lead_workspace 复用决策；delivery 本就永远 fresh（无操作语义）；
   // 不旁路 busy（Contract 6）。对 continuable 谱系无操作（谱系代数=谱系自辖）。
@@ -549,6 +557,14 @@ export async function dispatchRun({
   // 本身就是分级开关（显式 role 派发读 roles.json[roleId]，lane-only/裸派对齐
   // 席位兼容语义）。delivery 永远 fresh 不变；护栏（失败即弃/epoch/fresh）在
   // resolveReuseTurn 内。
+  // 决定 0114 修订（材料复核同源）：runner 实际执行的角色是唯一的权威值——
+  // 调用方给了 resolvedRole 就用它；只给 resolvedRoleId（如会审别名席位）时，
+  // 同一个值既进 runner 的 --role，也进冻结材料，不再让派发侧与 runner 复核
+  // 侧各算一个角色（角色政策仍按 resolvedRoleId 注解取）。无角色 dispatch
+  // 仍回落席位 systemPrompt。
+  const executedRoleId = resolvedRole !== null && resolvedRole !== undefined
+    ? resolvedRole
+    : (resolvedRoleId !== null && resolvedRoleId !== undefined ? resolvedRoleId : null);
   const effectiveReuse = effectiveSessionReuse({
     roleId: resolvedRoleId,
     agent,
@@ -557,12 +573,10 @@ export async function dispatchRun({
   // 0045 §1.6/R4 键材料升维（只增不减）：可复用/可续接的新 run，键材料追加
   // 车道内容指纹 + 角色正文指纹（无角色="none" 显式标记）。派发时刻从注册表
   // 冻结（run.started 尚未写）——角色文件不可载在此具名失败（零转录零 fork）。
-  // 0052 P0-2：角色指纹改取【本次派发的角色】正文（resolvedRoleId → 角色库），
-  // 席位 systemPrompt 降为 legacy 兜底——席位已无 systemPrompt，旧公式恒
-  // "none"，开门后同车道不同角色帽会共用 provider 会话（红队实证）。
-  // runner 侧（backgroundRunner 复核块）同公式重算比对。
-  const roleShaSource = resolvedRoleId !== null && resolvedRoleId !== undefined
-    ? `config/roles/${resolvedRoleId}.md`
+  // 0052 P0-2：角色指纹取【这次实际交给 runner 执行的角色】正文，席位
+  // systemPrompt 只作无角色 dispatch 的 legacy 兜底。
+  const roleShaSource = executedRoleId !== null
+    ? `config/roles/${executedRoleId}.md`
     : (agent.systemPrompt || null);
   const reuseIdentityMaterial = (reuseEligible || continuable)
     ? {
@@ -716,19 +730,18 @@ export async function dispatchRun({
   }
 
   // M12-7: continuable delivery = lineage ROOT. Establish the lineage provider
-  // session (turn:first) under the lineage key (Lead session + workspace +
-  // agent + rootRunId). A future Lead-authorized run_continue resumes the SAME
-  // provider conversation (turn:resume) against this rootRunId, reusing the
-  // retained worktree. Mutually exclusive with lead_workspace above (that gate
-  // is non-delivery-only). Fail-closed: continuable is delivery-only, and a busy
+  // session (turn:first) under the lineage key (canonical workspace + agent +
+  // rootRunId + the lane fingerprint and role sha pinned by THIS dispatch). A
+  // future Lead-authorized run_continue resumes the SAME provider conversation
+  // (turn:resume) against this rootRunId, reusing the retained worktree. The
+  // key carries no Lead session, so a restarted host still resumes it.
+  // Mutually exclusive with lead_workspace above (that gate is
+  // non-delivery-only). Fail-closed: continuable is delivery-only, and a busy
   // lineage slot refuses before any transcript write or fork.
   let lineageRootRunId = null;
   if (continuable) {
     if (!publicDelivery) {
       throw new ContinuableDeliveryOnlyError();
-    }
-    if (typeof leadSession !== "string" || leadSession.length === 0) {
-      throw new Error("dispatchRun: leadSession is required for a continuable delivery (server-owned Lead session identity)");
     }
     if (typeof cwd !== "string" || cwd.length === 0) {
       throw new Error("dispatchRun: bound workspace (cwd) is required for a continuable delivery");
@@ -740,7 +753,6 @@ export async function dispatchRun({
     const firstTurn = await resolveLineageFirstTurn({
       runDir: resolvedRunDir,
       runId: finalRunId,
-      leadSession,
       workspace: cwd,
       agentId,
       ...reuseIdentityMaterial,
@@ -812,8 +824,11 @@ export async function dispatchRun({
   if (resolvedLane !== undefined && resolvedLane !== null) {
     runnerArgs.push("--lane", resolvedLane);
   }
-  if (resolvedRole !== undefined && resolvedRole !== null) {
-    runnerArgs.push("--role", resolvedRole);
+  if (executedRoleId !== null) {
+    runnerArgs.push("--role", executedRoleId);
+  }
+  if (resolvedFrom === "alias") {
+    runnerArgs.push("--resolved-from", "alias");
   }
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);

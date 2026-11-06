@@ -455,7 +455,7 @@ test("NS-M10: 可续已拒收 → 拒收版模板（真实 service）", async ()
   } finally { cleanupDir(dir); }
 });
 
-test("NS-M11: 判定为 false 的收口交付不给 nextStep——无谱系 / 已采纳 / explicit 派发 / 根已闭合", async () => {
+test("NS-M11: 判定为 false 的收口交付不给 nextStep——无谱系 / 已采纳 / 根已闭合；explicit 派发改给（决定 0114）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ns-m11-"));
   const runDir = join(dir, "runs");
   try {
@@ -466,13 +466,19 @@ test("NS-M11: 判定为 false 的收口交付不给 nextStep——无谱系 / �
     seedSettledContinuableDelivery(runDir, "run_ns_m11_closed", { workspaceCwd: dir, closed: true });
     const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
     try {
-      for (const runId of ["run_ns_m11_plain", "run_ns_m11_acc", "run_ns_m11_exp", "run_ns_m11_closed"]) {
+      for (const runId of ["run_ns_m11_plain", "run_ns_m11_acc", "run_ns_m11_closed"]) {
         const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 1000 } });
         assert.equal(res.isError, undefined, `${runId}: ${JSON.stringify(res.content?.[0]?.text ?? "")}`);
         const parsed = res.structuredContent;
         assert.equal(parsed.waitReturnedEarly, true, `${runId} 已收口 → 提前返回`);
         assert.equal("nextStep" in parsed, false, `${runId} 不给 nextStep`);
       }
+      // 决定 0114：explicit 车道+角色父档可续，收口提示不再是"不给"。
+      const exp = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m11_exp", waitMs: 1000 } });
+      assert.equal(exp.structuredContent.waitReturnedEarly, true);
+      assert.equal(exp.structuredContent.acceptanceStatus, "pending");
+      assert.match(exp.structuredContent.nextStep, /dispatched continuable/);
+      assert.match(exp.structuredContent.nextStep, /run_continue/);
       // 已采纳的形态确认（证明确实走到了 settled 面，而非路径没通）。
       const acc = await client.callTool({ name: "run_delivery", arguments: { runId: "run_ns_m11_acc", waitMs: 1000 } });
       assert.equal(acc.structuredContent.acceptanceStatus, "accepted");

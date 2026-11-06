@@ -39,16 +39,27 @@ test("KEY-1: 缺席新组件=旧材料形状（键连续性冻结钉）；新组
   assert.notEqual(noneSeat, upgraded, "无角色显式标记 none（非空串）");
 });
 
-test("KEY-2: 谱系键同批升维（含 root 隔离）；形状校验闭（坏指纹/空串角色拒）", async () => {
+test("KEY-2: 谱系键只由谱系自身事实派生（root 隔离；Lead 会话不入材料）；形状校验闭（坏指纹/空串角色拒）", async () => {
   const { deriveLineageOpaqueUuid, deriveOpaqueUuid } = await import("../../src/application/sessionReuse.js");
-  const base = { leadSession: "ls-1", workspace: "/wsp", agentId: "coder_low", laneFingerprint: "lane:" + "ab".repeat(8), roleSha256: "none" };
+  const base = { workspace: "/wsp", agentId: "coder_low", laneFingerprint: "lane:" + "ab".repeat(8), roleSha256: "none" };
   const l1 = deriveLineageOpaqueUuid({ ...base, rootRunId: "run_20261005_aaaaaaaa" });
   const l2 = deriveLineageOpaqueUuid({ ...base, rootRunId: "run_20261005_bbbbbbbb" });
   assert.notEqual(l1, l2, "root 隔离保留");
-  assert.notEqual(l1, deriveOpaqueUuid(base), "模式键空间隔离保留");
-  assert.throws(() => deriveOpaqueUuid({ ...base, laneFingerprint: "not-a-fp" }), /laneFingerprint/);
-  assert.throws(() => deriveOpaqueUuid({ ...base, roleSha256: "" }), /roleSha256/);
+  assert.equal(
+    deriveLineageOpaqueUuid({ ...base, rootRunId: "run_20261005_aaaaaaaa", leadSession: "ls-other" }),
+    l1,
+    "Lead 会话不进谱系派生（宿主重启同会话）",
+  );
+  assert.notEqual(
+    l1,
+    deriveOpaqueUuid({ leadSession: "ls-1", workspace: "/wsp", agentId: "coder_low", laneFingerprint: base.laneFingerprint, roleSha256: base.roleSha256 }),
+    "模式键空间隔离保留",
+  );
+  assert.throws(() => deriveOpaqueUuid({ ...base, leadSession: "ls-1", laneFingerprint: "not-a-fp" }), /laneFingerprint/);
+  assert.throws(() => deriveOpaqueUuid({ ...base, leadSession: "ls-1", roleSha256: "" }), /roleSha256/);
   assert.throws(() => deriveLineageOpaqueUuid({ ...base, rootRunId: "bad id" }), /rootRunId/);
+  assert.throws(() => deriveLineageOpaqueUuid({ ...base, rootRunId: "run_x", laneFingerprint: "not-a-fp" }), /laneFingerprint/);
+  assert.throws(() => deriveLineageOpaqueUuid({ ...base, rootRunId: "run_x", roleSha256: "" }), /roleSha256/);
 });
 
 function makeGitRepo(dir) {
@@ -119,7 +130,9 @@ test("HOLE-B（0052 修订）: dispatchRun——explicit（resolvedLane/Role）�
       agentId: "reuse-seat", prompt: "t",
       registryPath, runDir: join(dir, "runs"), runId: "run_0045_hole_b",
       leadSession: "stable-lead-session", cwd: dir,
-      resolvedLane: "x-lane", resolvedRole: "x-role",
+      // 决定 0114 修订：材料按实际交给 runner 的角色冻结——用真实角色库成员，
+      // 避免 fake role 在材料冻结阶段被当作可加载角色。
+      resolvedLane: "x-lane", resolvedRole: "researcher",
       spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
       runnerPath: join(dir, "fake-runner.mjs"),
     });

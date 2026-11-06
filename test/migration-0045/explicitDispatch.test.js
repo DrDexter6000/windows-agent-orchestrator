@@ -6,12 +6,13 @@
 // （--explain / 错误全集文案 / 混用拒绝）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const ROLES_DIR = join(REPO_ROOT, "config", "roles");
@@ -156,7 +157,7 @@ test("EXPL-3: 无 resolvedTarget → run.started 无新字段（字节兼容）"
   } finally { cleanupDir(dir); }
 });
 
-test("CONT-1: explicit 父 run 不可 continue——具名拒绝（H3）", async () => {
+test("CONT-1: explicit 父 run 不再被 H3 门拒绝——推进到下一资格门（no_delivery）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-cont1-"));
   try {
     makeGitRepo(dir);
@@ -186,8 +187,9 @@ test("CONT-1: explicit 父 run 不可 continue——具名拒绝（H3）", async
       backendFor: () => ({ supportsSessionReuse: true }),
     });
     assert.equal(result.accepted, false);
-    assert.equal(result.rejectionReason, "explicit_dispatch_continuable_unsupported");
-    assert.match(result.detail, /silent hat switch/);
+    // 决定 0114：explicit 车道+角色父档可续（子运行按 root 钉住的车道/角色重建）；
+    // 旧的具名拒绝已删除，本父档缺 delivery 上下文 → 既有下一道资格门如实拒绝。
+    assert.equal(result.rejectionReason, "no_delivery");
   } finally { cleanupDir(dir); }
 });
 
@@ -252,6 +254,157 @@ test("CLI-3: agentId 与 lane/role 混用 → dispatch_selector_invalid", async 
     assert.ok(threw.includes("dispatch_selector_invalid"), "混用被拒");
     assert.ok(threw.includes("合法形态"), "二选一形态说明在场");
   } finally { cleanupDir(dir); }
+});
+
+// 决定 0114：CLI background 的 delivery spec 顶层 continuable 与 MCP 顶层
+// continuable 同义；explicit/alias 根都经共享 dispatchRun 建立 run_lineage 首轮。
+async function runCliWithConfig(args, config) {
+  const { runCommand } = await import("../../src/commands/run.js");
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await runCommand(args, config);
+    return { threw: null, logs };
+  } catch (e) {
+    return { threw: e.message, logs };
+  } finally {
+    console.log = origLog;
+  }
+}
+
+function writeContinuableSpec(dir) {
+  const specPath = join(dir, "delivery.json");
+  writeFileSync(specPath, JSON.stringify({
+    mode: "git_commit_v1",
+    allowedPaths: ["src"],
+    verificationCommands: ["node --test"],
+    continuable: true,
+  }), "utf8");
+  return specPath;
+}
+
+function makeCliDispatchConfig({ dir, repo, registryPath, lanesDoc }) {
+  const captured = [];
+  const config = {
+    registry: registryPath,
+    runDir: join(dir, "runs"),
+    waitTimeout: 1000,
+    pollInterval: 10,
+    dispatchRunFn: async (args) => {
+      captured.push(args);
+      return {
+        accepted: true,
+        runId: "run_cli_continuable_fake",
+        agentId: args.agentId,
+        transcriptPath: join(dir, "runs", "run_cli_continuable_fake.jsonl"),
+      };
+    },
+  };
+  if (lanesDoc) config.loadLanesConfigFn = () => lanesDoc;
+  return { config, captured, repo };
+}
+
+test("CLI-4（0114）：explicit 车道+角色带 continuable 的 CLI background 派发——resolvedRoleId 与 continuable 同源穿线", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli4-"));
+  const repo = join(dir, "repo");
+  const lanes = loadLanesConfig();
+  const opusLane = lanes.lanes.find((l) => l.id === "opus");
+  try {
+    mkdirSync(repo, { recursive: true });
+    makeGitRepo(repo);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      opus: { backend: opusLane.backend, model: opusLane.model, reasoning: opusLane.reasoning, cwd: repo },
+    } }), "utf8");
+    const spec = writeContinuableSpec(dir);
+    const { config, captured } = makeCliDispatchConfig({ dir, repo, registryPath });
+    const { threw } = await runCliWithConfig([
+      "--lane", "opus", "--role", "researcher", "--background", "--isolate",
+      "--cwd", repo, "--delivery-spec-file", spec, "--prompt", "do it",
+    ], config);
+    assert.equal(threw, null, "old H3 refusal is gone");
+    assert.equal(captured.length, 1, "shared dispatch service called once");
+    const call = captured[0];
+    assert.equal(call.continuable, true, "delivery-spec continuable threaded to the service");
+    assert.equal(call.resolvedLane, "opus");
+    assert.equal(call.resolvedRole, "researcher");
+    assert.equal(call.resolvedRoleId, "researcher", "root material role sha uses the dispatched role file (not seat default)");
+    assert.equal(typeof call.backendFor, "function", "capability resolver threaded (supportsSessionReuse gate)");
+    assert.equal(call.delivery?.continuable, true, "validated delivery keeps the continuable marker");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("CLI-5（0114）：别名派发带 continuable 的 CLI background 派发——runner 收到同一 lane/role，身份来源仍是 alias", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli5-"));
+  const repo = join(dir, "repo");
+  const lanes = loadLanesConfig();
+  const opusLane = lanes.lanes.find((l) => l.id === "opus");
+  try {
+    mkdirSync(repo, { recursive: true });
+    makeGitRepo(repo);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      "alias-lane": { backend: opusLane.backend, model: opusLane.model, reasoning: opusLane.reasoning, cwd: repo },
+    } }), "utf8");
+    const lanesDoc = {
+      ok: true,
+      sha256: "alias-fixture",
+      issues: [],
+      rolesHint: ["researcher"],
+      lanes: [{
+        id: "alias-lane",
+        backend: opusLane.backend,
+        model: opusLane.model,
+        reasoning: opusLane.reasoning,
+        aliases: { legacy_alias: { role: "researcher" } },
+      }],
+    };
+    const spec = writeContinuableSpec(dir);
+    const { config, captured } = makeCliDispatchConfig({ dir, repo, registryPath, lanesDoc });
+    const { threw } = await runCliWithConfig([
+      "legacy_alias", "--background", "--isolate",
+      "--cwd", repo, "--delivery-spec-file", spec, "--prompt", "do it",
+    ], config);
+    assert.equal(threw, null);
+    assert.equal(captured.length, 1);
+    const call = captured[0];
+    assert.equal(call.agentId, "alias-lane", "alias resolves to the lane-keyed wiring entry");
+    assert.equal(call.resolvedLane, "alias-lane", "runner gets --lane so it can load the same role file");
+    assert.equal(call.resolvedRole, "researcher", "runner gets --role (no reuse_material_mismatch)");
+    assert.equal(call.resolvedRoleId, "researcher");
+    assert.equal(call.resolvedFrom, "alias", "identity source stays alias in run.started, not explicit");
+    assert.equal(call.continuable, true);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("CLI-6（0114）：continuable 只能在 --background 建立谱系——前台具名拒绝且零派发", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cli6-"));
+  const repo = join(dir, "repo");
+  const lanes = loadLanesConfig();
+  const opusLane = lanes.lanes.find((l) => l.id === "opus");
+  try {
+    mkdirSync(repo, { recursive: true });
+    makeGitRepo(repo);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      opus: { backend: opusLane.backend, model: opusLane.model, reasoning: opusLane.reasoning, cwd: repo },
+    } }), "utf8");
+    const spec = writeContinuableSpec(dir);
+    const { config, captured } = makeCliDispatchConfig({ dir, repo, registryPath });
+    const { threw } = await runCliWithConfig([
+      "--lane", "opus", "--role", "researcher", "--isolate",
+      "--cwd", repo, "--delivery-spec-file", spec, "--prompt", "do it",
+    ], config);
+    assert.match(threw, /continuable requires --background/);
+    assert.equal(captured.length, 0, "no dispatch service call for a foreground continuable");
+  } finally {
+    cleanupDir(dir);
+  }
 });
 
 // ── W3b 身份头（R4 裁定：explicit 结构化身份、无接线括注、resume 从钉住值重建）──

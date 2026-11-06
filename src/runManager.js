@@ -1501,7 +1501,9 @@ export class RunManager {
           roleId: resolvedTarget.roleId ?? null,
           resolvedFrom: resolvedTarget.source,
           lanesSha256: resolvedTarget.lanesSha256 ?? null,
-          ...(resolvedTarget.source === "explicit"
+          // 决定 0114 修订：只有真正开新身份（first 轮）才记 fresh；续修子运行
+          // （turn:resume）实际接回同一 provider 会话，不得记成换新身份。
+          ...(resolvedTarget.source === "explicit" && !(sessionReuse && sessionReuse.turn === "resume")
             ? { sessionReuseDecision: "fresh_identity_transition" }
             : {}),
         }

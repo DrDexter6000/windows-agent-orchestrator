@@ -444,7 +444,7 @@ deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模�
 - **这是刻意的 fail-closed**：ADR-0031 §3.6 要求"缺失/损坏时**拒绝**恢复，绝不静默新建会话"。看到拒绝**不要**当成故障去绕——静默新会话正是这条契约要防的。
 - **状态在哪**：`<runDir>/.session-reuse/<sha256(opaqueUuid)>.json`（有界事实 `{runId, updatedAt}`；不含 provider session id——真源是前任转录的 `session.created.backendSessionId`）；lineage 面在 `.lineage-reuse/` 同构。
 - **operator 恢复（唯一受支持的动作）**：确认无在飞 run 后，删除对应的那**一个**条目文件，下次同身份派发按"条目缺失"回到 `first`。不要手编条目内容（写入是原子 rename+校验，手编绕过校验），也不要删整个目录（一次丢掉全部身份关联）。
-- **怎么定位是哪个 hash**：条目文件名即 `sha256(opaqueUuid)`（Lead 会话 + canonical workspace + agentId 派生，lineage 再加 `rootRunId`），磁盘不含原值（安全设计）无法反查——按最近被拒派发时间（`updatedAt`）缩小范围删对应条目。
+- **怎么定位是哪个 hash**：条目文件名即 `sha256(opaqueUuid)`（身份材料见 `docs/02-architecture.md` §4.10，专家复用与谱系续接身份不同；磁盘不含原值，安全设计无法反查）——按最近被拒派发时间（`updatedAt`）缩小范围删对应条目。
 - **已知不可达（非本节对象）**：条目被删（ENOENT）按合同回到 `first`——降级不是拒绝，不在 §3.6 fail-closed 范围（ADR-0031 §3.6 范围注）。
 - **仍未闭合（已登记债务）**：resume 失败会永久孤儿化关联链（单槽指针被覆盖后按"终态无 session.created ⇒ first"降级，无显式断链信号）；本节 runbook 是当前唯一人工出口。
 

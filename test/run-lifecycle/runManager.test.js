@@ -3117,3 +3117,75 @@ test("D2-②b M1b: project-kind 自决桶 → 事实沿冻结 slug（≠现行�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("0114：续修子运行（sessionReuse turn=resume）的 run.started 不记 fresh_identity_transition；first 轮仍记", async () => {
+  const dir = await makeTempDir();
+  try {
+    const priorRunId = "run_0114_resume_prior";
+    const prior = new JsonlTranscript(join(dir, `${priorRunId}.jsonl`), { runId: priorRunId, agentId: "test" });
+    await prior.append("run.started", { backend: "mock", cwd: dir });
+    await prior.append("session.created", { backend: "mock", backendSessionId: "native-1", serveUrl: null });
+    await prior.transitionState(null, "pending", "seed");
+    await prior.transitionState("pending", "completed", "done");
+
+    const backend = {
+      supportsSessionReuse: true,
+      supportsRoleContract: true,
+      sessionOutlivesProcess: false,
+      defaultBinary() { return "node"; },
+      credentialEnvNames: () => [],
+      validateAgentPolicy() {},
+      async spawn() {
+        return {
+          backend: "mock", backendSessionId: "proc_1", messageId: "m1", admittedSeq: 5,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+        };
+      },
+    };
+    const readRegistry = async () => ({
+      getAgent: (id) => ({ id, backend: "mock", cwd: dir, model: { id: "m" } }),
+      listAgents: () => [],
+    });
+    const manager = new RunManager({
+      config: { registry: "config/agents.json", runDir: dir, pollInterval: 5, waitTimeout: 1000, timeout: 2000, retries: 0, defaultIsolation: "none" },
+      readRegistry,
+      backendFor: () => backend,
+    });
+    const resolvedTarget = {
+      kind: "resolved", source: "explicit", agentId: "test_agent",
+      laneId: "test-lane", roleId: "researcher", lanesSha256: "ab".repeat(32),
+    };
+
+    const startResume = await manager.start("test_agent", {
+      prompt: "fix", runId: "run_0114_resume_child",
+      resolvedTarget,
+      sessionReuse: {
+        mode: "run_lineage", opaqueUuid: "11111111-2222-4333-8444-555555555555",
+        turn: "resume", priorRunId,
+      },
+    });
+    try { await startResume.waitForCompletion({ pollInterval: 5 }); } catch { /* tolerate */ }
+    const resumeStarted = (await readTranscript(resolveTranscriptPath(dir, "run_0114_resume_child")))
+      .find((e) => e.type === "run.started");
+    assert.equal(resumeStarted.resolvedFrom, "explicit");
+    assert.equal(resumeStarted.sessionReuseDecision, undefined,
+      "continuation resumed the same provider session — not a fresh identity transition");
+
+    const startFirst = await manager.start("test_agent", {
+      prompt: "new lineage", runId: "run_0114_first_child",
+      resolvedTarget,
+      sessionReuse: {
+        mode: "run_lineage", opaqueUuid: "22222222-3333-4444-8555-666666666666",
+        turn: "first",
+      },
+    });
+    try { await startFirst.waitForCompletion({ pollInterval: 5 }); } catch { /* tolerate */ }
+    const firstStarted = (await readTranscript(resolveTranscriptPath(dir, "run_0114_first_child")))
+      .find((e) => e.type === "run.started");
+    assert.equal(firstStarted.sessionReuseDecision, "fresh_identity_transition",
+      "a genuine first turn still records the fresh transition");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

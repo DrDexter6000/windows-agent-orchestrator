@@ -29,7 +29,7 @@ function makeGitRepo(dir) {
 }
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
 
-async function withServer(fn) {
+async function withServer(fn, { lanesDoc } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpw5-"));
   try {
     makeGitRepo(dir);
@@ -42,6 +42,7 @@ async function withServer(fn) {
     const dispatches = [];
     const server = createWaoMcpServer({
       registryPath, runDir: dir, workspaceRoot: dir,
+      ...(lanesDoc ? { loadLanesConfigFn: () => lanesDoc } : {}),
       dispatchRunFn: async (input) => {
         dispatches.push(input);
         return { accepted: true, runId: "run_0045_w5_fake", agentId: input.agentId, state: "pending", providerSessionRouting: "not_used" };
@@ -95,6 +96,31 @@ test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修�
     assert.match(mixed.content[0].text, /dispatch_selector_invalid/);
     assert.equal(dispatches.length, 0, "零派发（两种错误都不触达 dispatcher）");
   });
+});
+
+test("W5-4（0114）：MCP 别名 {agentId} 按车道+别名角色执行，dispatcher 收 resolvedFrom=alias", async () => {
+  const lanesDoc = {
+    ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: ["researcher"],
+    lanes: [{
+      id: "opus", backend: OPUS_LANE.backend, model: OPUS_LANE.model, reasoning: OPUS_LANE.reasoning,
+      aliases: { review_expert: { role: "researcher" } },
+    }],
+  };
+  await withServer(async ({ dir, client, dispatches }) => {
+    const res = await client.callTool({
+      name: "run_dispatch",
+      arguments: { agentId: "review_expert", prompt: "review this", expectedWorkspaceRoot: dir },
+    });
+    assert.equal(res.isError, undefined, `unexpected error: ${JSON.stringify(res.content ?? res).slice(0, 200)}`);
+    assert.equal(dispatches.length, 1);
+    const call = dispatches[0];
+    assert.equal(call.agentId, "opus", "alias resolves to the lane-keyed wiring entry");
+    assert.equal(call.resolvedLane, "opus", "runner gets the lane");
+    assert.equal(call.resolvedRole, "researcher", "runner gets the alias role");
+    assert.equal(call.resolvedRoleId, "researcher", "material/policy use the same role value");
+    assert.equal(call.resolvedFrom, "alias", "alias provenance is preserved");
+    assert.equal(res.structuredContent.agentId, "opus", "output identity is the lane key");
+  }, { lanesDoc });
 });
 
 test("W5-3: 旧调用 {agentId} 字节兼容——无 lane/role 时 dispatcher 收原值、无解析字段", async () => {

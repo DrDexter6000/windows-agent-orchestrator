@@ -303,6 +303,7 @@
       "registry-roles/m11-9-capability.test.js",
       "delivery/m12-6-verificationSetup.test.js",
       "run-lifecycle/m12-7-continuationWorktree.test.js",
+      "run-lifecycle/lineageIdentity.test.js",
       "run-lifecycle/m12-7-runContinue.test.js",
       "delivery/m12-13-verification-timeout.test.js",
       "registry-roles/m12-14-workerScopeContract.test.js",
