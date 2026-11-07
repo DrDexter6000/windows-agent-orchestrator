@@ -52,6 +52,7 @@ import { createSecretRedactor } from "../secretRedaction.js";
 import { assertDeliveryCommitInRepository, isValidRunId, gitChildEnv } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
 import { projectDeliveryReadiness } from "./runDelivery.js";
+import { continuableLineageFact } from "./runContinue.js";
 import { REVIEW_PENDING_REASON } from "./reviewUnavailableReasons.js";
 // F5 (2026-10-08): typed cursor-rejection signal — the SAME class run_activity
 // (M12-19) defined and exported. One class definition keeps instanceof identity
@@ -73,6 +74,196 @@ function validateFileIndex(fileIndex, fileCount) {
   }
 }
 
+// =====================================================================
+// Decision 0116 --since-parent: the review base override for continuation
+// child runs. The parent delivery commit is resolved ONLY from this run's
+// own transcript continuation facts and proven through the SAME delivery
+// facts / workspace ownership / Git proof kernel as the run itself. No
+// external entry point (MCP tool input, CLI parameter) accepts a commit:
+// the sole switch is the literal boolean sinceParent, so an arbitrary
+// commit can never enter the diff base.
+//
+// Continuation-round hardening (consult b2f2f9d review): the ONLY parent
+// fact source is `run.background_submitted` (the sole production event that
+// writes parentRunId), it must be runId-bound, `continuation:true`, and
+// EXACTLY ONE such fact may exist (duplicates refuse — the same uniqueness
+// discipline as delivery facts). Parent fields on `run.started` are NEVER
+// recognized, so a forged appended run.started cannot hijack the base. The
+// fact's rootRunId must agree with THIS run's own run.session_reuse lineage
+// root (decision 0112 SSOT), and the parent must belong to the same lineage.
+// =====================================================================
+
+const SINCE_PARENT_NO_PARENT_TEXT =
+  "--since-parent is only available for a continuation child run: no bound parent run fact";
+const SINCE_PARENT_AMBIGUOUS_TEXT =
+  "--since-parent rejected: ambiguous continuation facts (expected exactly one bound run.background_submitted continuation fact)";
+const SINCE_PARENT_WORKSPACE_TEXT =
+  "--since-parent rejected: the parent run does not belong to the authorized workspace";
+const SINCE_PARENT_LINEAGE_TEXT =
+  "--since-parent rejected: lineage mismatch (rootRunId does not match the parent lineage)";
+const SINCE_PARENT_NO_DELIVERY_TEXT =
+  "--since-parent rejected: the parent run has no proven delivery commit";
+const SINCE_PARENT_EMPTY_DELTA_TEXT =
+  "--since-parent rejected: this round has no changes relative to the parent delivery";
+
+/**
+ * Closed-set marker on the six fixed --since-parent rejection errors, so the
+ * CLI --all adapter can surface exactly these fixed texts while folding every
+ * OTHER unexpected exception into the generic review failure copy.
+ * @private
+ */
+function sinceParentRejection(text) {
+  const error = new Error(text);
+  error.waoSinceParentRejection = true;
+  return error;
+}
+
+/**
+ * Count the runId-BOUND run.background_submitted continuation facts. Shared by
+ * the getRunDeliveryReview gate (so a duplicated fact is classified as the
+ * closed-set ambiguity rejection BEFORE the workspace-ownership verifier would
+ * reject the same transcript for a less specific reason) and by
+ * resolveContinuationParent (the authoritative shape checks).
+ * @private
+ */
+function continuationFactCandidates(events, runId) {
+  const candidates = [];
+  for (const e of events) {
+    if (!e || e.runId !== runId) continue;
+    if (e.type !== "run.background_submitted" || e.continuation !== true) continue;
+    candidates.push(e);
+  }
+  return candidates;
+}
+
+/**
+ * Resolve the PROVEN parent delivery commit for a continuation child run.
+ * Fixed-text rejections (closed set): no parent fact / unreadable parent
+ * transcript; ambiguous (duplicated) continuation facts; parent not in the
+ * authorized workspace; lineage mismatch (fact root vs own session_reuse
+ * root, or vs the parent's lineage root); parent without a proven delivery
+ * commit (final verification outcome required — passed/failed/unavailable
+ * all qualify; only pending does not). None of them echo paths, run ids,
+ * commits, or Git errors.
+ *
+ * @param {object} input
+ * @param {string} input.runId — the child run id (facts are read bound to it)
+ * @param {object[]} input.events — the child transcript snapshot
+ * @param {string} input.runDir
+ * @param {string} input.authorizedWorkspaceRoot
+ * @param {Function} [input.readTranscriptFn]
+ * @returns {Promise<{parentRunId: string, deliveryCommit: string}>}
+ */
+async function resolveContinuationParent({
+  runId, events, runDir, authorizedWorkspaceRoot, readTranscriptFn,
+}) {
+  // 1. The continuation fact: runId-BOUND run.background_submitted with
+  //    continuation:true — count them ALL; exactly one is acceptable.
+  //    run.started parent fields are never a fact source. AND that fact must
+  //    be THIS run's FIRST transcript event: runContinue step 15 writes it
+  //    before anything else (before the runner starts), so a continuation
+  //    fact appended later — a foreground run, or an ordinary background
+  //    dispatch — is a forgery, refused as "no parent run".
+  const candidates = continuationFactCandidates(events, runId);
+  if (candidates.length > 1) {
+    throw sinceParentRejection(SINCE_PARENT_AMBIGUOUS_TEXT);
+  }
+  const factEvent = candidates[0];
+  if (!factEvent
+    || events[0] !== factEvent
+    || typeof factEvent.parentRunId !== "string" || !isValidRunId(factEvent.parentRunId)
+    || typeof factEvent.rootRunId !== "string" || !isValidRunId(factEvent.rootRunId)
+    || factEvent.parentRunId === runId) {
+    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
+  }
+  const fact = { parentRunId: factEvent.parentRunId, rootRunId: factEvent.rootRunId };
+
+  // 2. The child's own lineage fact must agree: the continuation fact's
+  //    rootRunId must equal the root of THIS run's bound run.session_reuse
+  //    (decision 0112 SSOT — no second membership algorithm).
+  const childLineage = continuableLineageFact(events, runId);
+  if (!childLineage || childLineage.rootRunId !== fact.rootRunId) {
+    throw sinceParentRejection(SINCE_PARENT_LINEAGE_TEXT);
+  }
+
+  // 3. Read the parent transcript (unreadable/malformed = no parent run).
+  let parentEvents;
+  try {
+    parentEvents = await (readTranscriptFn ?? readTranscript)(
+      resolveTranscriptPath(runDir, fact.parentRunId),
+    );
+  } catch {
+    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
+  }
+  if (!Array.isArray(parentEvents)) {
+    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
+  }
+
+  // 4. The parent must belong to the SAME authorized workspace (before any
+  //    Git proof, same gate order as the child).
+  try {
+    verifyRunWorkspaceOwnership(parentEvents, authorizedWorkspaceRoot, fact.parentRunId);
+  } catch {
+    throw sinceParentRejection(SINCE_PARENT_WORKSPACE_TEXT);
+  }
+
+  // 5. The parent must be a member of the SAME lineage (its own lineage root
+  //    equals the fact's rootRunId — a root run satisfies this trivially).
+  const parentLineage = continuableLineageFact(parentEvents, fact.parentRunId);
+  if (!parentLineage || parentLineage.rootRunId !== fact.rootRunId) {
+    throw sinceParentRejection(SINCE_PARENT_LINEAGE_TEXT);
+  }
+
+  // 6. Parent delivery facts + full durable identity binding — the SAME
+  //    validateDeliveryFacts SSOT and binding discipline as the child. A
+  //    FINAL verification outcome is required (passed/failed/unavailable all
+  //    qualify); a pending parent is not a proven delivery.
+  const pf = validateDeliveryFacts(parentEvents, { expectedRunId: fact.parentRunId });
+  if (!pf.valid || pf.verificationStatus === "pending") {
+    throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
+  }
+  if (
+    pf.createdEventRunId !== fact.parentRunId
+    || pf.verificationEventRunId !== fact.parentRunId
+    || !pf.createdRef || pf.createdRef.runId !== fact.parentRunId
+    || !pf.latestRef || pf.latestRef.runId !== fact.parentRunId
+  ) {
+    throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
+  }
+
+  // 7. Exact parent delivery commit proof in the authorized source repo —
+  //    the SAME kernel as the child proof (delivery events alone are not
+  //    enough: the commit must exist and match the ref).
+  let parentProof;
+  try {
+    parentProof = assertDeliveryCommitInRepository({
+      repoRoot: authorizedWorkspaceRoot,
+      deliveryRef: pf.latestRef,
+    });
+  } catch {
+    throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
+  }
+  return { parentRunId: fact.parentRunId, deliveryCommit: parentProof.deliveryCommit };
+}
+
+/**
+ * List the changed files between two proven commits (sorted). Structured
+ * argv, --no-renames + -z (same path discipline as the delivery kernel's
+ * file listing); bounded by the same 256 KiB raw cap; any Git failure or
+ * overflow fails closed with the fixed review failure text.
+ * @private
+ */
+function listDeltaFiles(base, delivery, cwd) {
+  const res = gitReadBounded(
+    ["--literal-pathspecs", "diff", "--no-renames", "--name-only", "-r", "-z", base, delivery],
+    cwd,
+  );
+  if (!res.ok) {
+    throw new Error("run_delivery_review failed");
+  }
+  return res.out.split("\0").filter((p) => p.length > 0).sort();
+}
+
 /**
  * Resolve the review target for one verified delivery file. Read-only: creates
  * no transcript event, no filesystem mutation, no Git mutation.
@@ -87,11 +278,19 @@ function validateFileIndex(fileIndex, fileCount) {
  * @param {string} input.authorizedWorkspaceRoot — canonical source repo root
  *   from the host workspace binding
  * @param {number} input.fileIndex — index into the verified sorted changedFiles
+ * @param {boolean} [input.sinceParent] — decision 0116 internal base override:
+ *   only the literal `true`; resolves + proves the parent delivery commit from
+ *   this run's own continuation facts and makes it the diff base (the changed
+ *   list becomes the parent→delivery delta). External callers cannot pass a
+ *   commit through this or any other parameter.
  * @param {Function} [input.readTranscriptFn] — injectable for deterministic tests
  * @returns {Promise<object>} resolved target:
  *   { runId, deliveryCommit, baseCommit, changedFiles, changedFileCount,
  *     fileIndex, changedPath, verificationStatus }
- *   — NEVER includes diff/fragment/content/worktree/branch.
+ *   — with sinceParent, baseCommit IS the proven parent delivery commit, the
+ *   changed list is the parent→delivery delta, and parentRunId /
+ *   parentDeliveryCommit are added. NEVER includes diff/fragment/content/
+ *   worktree/branch.
  * @throws {Error} on any eligibility, ownership, proof, or index failure
  */
 export async function resolveRunDeliveryReviewTarget({
@@ -99,8 +298,14 @@ export async function resolveRunDeliveryReviewTarget({
   runDir,
   authorizedWorkspaceRoot,
   fileIndex,
+  sinceParent,
   readTranscriptFn,
 }) {
+  // The base override is a boolean, not a value: anything but the literal
+  // true is refused, so no caller can smuggle a commit-shaped input.
+  if (sinceParent !== undefined && sinceParent !== true) {
+    throw new Error("sinceParent must be the literal true");
+  }
   // 1. runId must be well-formed BEFORE any path join (no traversal).
   if (!isValidRunId(runId)) {
     throw new Error("invalid runId");
@@ -176,21 +381,42 @@ export async function resolveRunDeliveryReviewTarget({
     deliveryRef,
   });
 
+  // 6b. Decision 0116 --since-parent base override: resolve + prove the
+  //     parent delivery commit from THIS run's continuation facts, then make
+  //     it the diff base and replace the changed-file list with the
+  //     parent→delivery delta (a continuation child packages CUMULATIVE
+  //     results against the lineage base; the delta is this round's work).
+  let parent = null;
+  let sortedFiles = [...proof.changedFiles].sort();
+  if (sinceParent) {
+    parent = await resolveContinuationParent({
+      runId,
+      events,
+      runDir,
+      authorizedWorkspaceRoot,
+      ...(readTranscriptFn ? { readTranscriptFn } : {}),
+    });
+    sortedFiles = listDeltaFiles(parent.deliveryCommit, proof.deliveryCommit, authorizedWorkspaceRoot);
+    if (sortedFiles.length === 0) {
+      throw sinceParentRejection(SINCE_PARENT_EMPTY_DELTA_TEXT);
+    }
+  }
+
   // 7. fileIndex addresses a verified changed file. The path returned to the
   //    caller comes ONLY from the verified sorted list, never from model input.
-  const sortedFiles = [...proof.changedFiles].sort();
   validateFileIndex(fileIndex, sortedFiles.length);
   const changedPath = sortedFiles[fileIndex];
 
   return {
     runId,
     deliveryCommit: proof.deliveryCommit,
-    baseCommit: proof.baseCommit,
+    baseCommit: parent ? parent.deliveryCommit : proof.baseCommit,
     changedFiles: sortedFiles,
     changedFileCount: sortedFiles.length,
     fileIndex,
     changedPath,
     verificationStatus: facts.verificationStatus,
+    ...(parent ? { parentRunId: parent.parentRunId, parentDeliveryCommit: parent.deliveryCommit } : {}),
   };
 }
 
@@ -521,6 +747,11 @@ function projectChangedPath(path, redactor) {
  * @param {string} input.authorizedWorkspaceRoot
  * @param {number} input.fileIndex
  * @param {string} [input.cursor] — opaque continuation token
+ * @param {boolean} [input.sinceParent] — decision 0116 internal base override;
+ *   literal `true` only (no commit value can enter). The diff base becomes the
+ *   PROVEN parent delivery commit and the changed list the parent→delivery
+ *   delta. The pending gate is unchanged: a pending run gets the same advisory
+ *   with ZERO diff regardless of this flag.
  * @param {object} [hostDependencies] — test-only injection
  * @param {object} [hostDependencies.env] — env for the secret redactor
  * @param {Function} [hostDependencies.readTranscriptFn]
@@ -532,7 +763,7 @@ function projectChangedPath(path, redactor) {
  * @returns {Promise<object>} safe structured review result
  */
 export async function getRunDeliveryReview(
-  { runId, runDir, authorizedWorkspaceRoot, fileIndex, cursor },
+  { runId, runDir, authorizedWorkspaceRoot, fileIndex, cursor, sinceParent },
   hostDependencies = {},
 ) {
   // M11-12A: not-yet-reviewable truth. If exact delivery verification has not
@@ -562,6 +793,11 @@ export async function getRunDeliveryReview(
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
     throw new Error("authorizedWorkspaceRoot must be a non-empty string");
   }
+  // Same boolean gate as the resolver: the base override accepts no value —
+  // a commit-shaped input can never become the diff base.
+  if (sinceParent !== undefined && sinceParent !== true) {
+    throw new Error("sinceParent must be the literal true");
+  }
   const _readTranscriptForGate = hostDependencies.readTranscriptFn ?? readTranscript;
   const _gateFilePath = resolveTranscriptPath(runDir, runId);
   let _gateEvents;
@@ -573,8 +809,16 @@ export async function getRunDeliveryReview(
   if (!Array.isArray(_gateEvents)) {
     throw new Error("transcript malformed");
   }
-  // Workspace ownership FIRST — a cross-workspace request must never reach the
-  // readiness probe, the Git proof, or any content read.
+  // Duplicated continuation facts are classified as the closed-set --since-
+  // parent ambiguity rejection BEFORE the workspace-ownership verifier (which
+  // would reject the same transcript for "more than one background_submitted"
+  // — true, but the specific reason matters to the Lead). 0/1 candidates
+  // proceed; the full fact validation lives in resolveContinuationParent.
+  if (sinceParent && continuationFactCandidates(_gateEvents, runId).length > 1) {
+    throw sinceParentRejection(SINCE_PARENT_AMBIGUOUS_TEXT);
+  }
+  // Workspace ownership FIRST — a cross-workspace request must never reach
+  // the readiness probe, the Git proof, or any content read.
   verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot, runId);
 
   const _readiness = projectDeliveryReadiness(_gateEvents, runId);
@@ -623,12 +867,16 @@ export async function getRunDeliveryReview(
   }
 
   // 1. Eligibility + exact target (M11-3A). All runId/ownership/proof/fileIndex
-  //    gates run here, before any diff content is read.
+  //    gates run here, before any diff content is read. sinceParent only swaps
+  //    the diff base to the PROVEN parent delivery commit — every later stage
+  //    (binary detect, diff read, redaction, sanitization, caps, pagination)
+  //    is the SAME pipeline on that base.
   const target = await resolveRunDeliveryReviewTarget({
     runId,
     runDir,
     authorizedWorkspaceRoot,
     fileIndex,
+    ...(sinceParent ? { sinceParent } : {}),
     ...(hostDependencies.readTranscriptFn ? { readTranscriptFn: hostDependencies.readTranscriptFn } : {}),
   });
   const gitExec = hostDependencies.gitExecFileSyncFn;

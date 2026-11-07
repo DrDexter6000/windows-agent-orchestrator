@@ -132,6 +132,15 @@ CLI 等价（同一 service 与安全投影，不是 raw 通道）：
 npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --format json
 ```
 
+一次读全（决定 0116；同一 service 与投影）：
+
+```bash
+npm run cli -- runs delivery review <runId> --all [--out FILE]   # 整份交付一次读完
+npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子运行只看相对父交付的增量
+```
+
+`--all` 与 `--file-index`/`--cursor` 互斥；`--out FILE` 把全文写进文件、stdout 只打一行摘要（回显路径经同一秘密脱敏）；`--since-parent` 只对续修子运行可用，父交付提交由谱系事实证明（“已证明”指提交已证明存在，不要求其验证通过），不可传入提交号，无父运行、跨工作区、跨谱系、父无已证明交付或本轮无增量均以固定文案拒绝。
+
 ## MCP `run_delivery_review_bundle`（readiness + 单文件一页组合）
 
 `run_delivery_review_bundle` 是默认的低摩擦 delivery 首屏查询：一个调用先等待 delivery readiness，再仅在 readiness 为 `reviewable` 时读取 Lead 指定的一个文件页。它机械组合既有 `getRunDeliveryReadiness`、`run_delivery` 安全投影和 `getRunDeliveryReview`/`projectReviewResult`，不引入第二份 delivery/readiness/review 判定。
