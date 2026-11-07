@@ -284,13 +284,13 @@
           "basis": "measured",
           "n": 5,
           "score": { "hits": 5, "total": 8, "label": "关键缺陷找到" },
-          "evidence": "同题横评（2026-10-29，K3.1 Pro，5 个含真缺陷的会审题×1 轮，按答案键人工判分）；运行如 run_20261029032116699xqj24a；实际会审 `npm run lane-review-stats -- --since 2026-10-29`",
-          "note": "判先修 4/5（同轮 deepseek-flash 6/8、5/5）；中位用时 9.2 分钟；10-29 起实际会审作答 13 次，同场配对从不比别席松"
+          "evidence": "同题横评（2026-10-29，K3.1 Pro，5 个含真缺陷的会审题×1 轮，按答案键人工判分）；运行如 run_20261029032116699xqj24a；实际会审 `npm run lane-review-stats -- --since 2026-10-29`；b81 三席同审见 consult_20261107082131876oo95dt",
+          "note": "判先修 4/5（同轮 deepseek-flash 6/8、5/5）；实际会审判定不比同场松，但 b81 所找缺陷少于 deepseek-flash、opus"
         },
         "design": {
           "stars": 4,
           "basis": "owner",
-          "note": "有格局、有创意；方案 advisor、头脑风暴"
+          "note": "有格局、有创意；方案 advisor、头脑风暴、方案审计"
         },
         "longHorizon": {
           "stars": null,
