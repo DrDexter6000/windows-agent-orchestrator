@@ -27,7 +27,10 @@
 //                                   KIMI_WEB_SILENT_CLOSEOUT_GATES）：serve 作证本轮
 //                                   不活跃 / 输出到封顶 → provider_disconnect；
 //                                   serve 不应答（状态未知）→ unknown。zcode 的文案
-//                                   不带摘要 → 本类（收口本身不带上游原因）；带摘要
+//                                   不带摘要 → 本类（收口本身不带上游原因）；带
+//                                   session/messages 未应答段（决定 0117：收口时
+//                                   快照请求仍在途，控制面没看到会话——不是流中断，
+//                                   事实写已等秒数）→ unknown；带摘要
 //                                   且链尾（本轮最后一个主轮请求）failed、状态码在
 //                                   认证/限流闭集（429/401/403）→ 先升级 provider_
 //                                   capacity/provider_auth（升级出的类别与通用规则
@@ -365,6 +368,15 @@ const SILENT_CLOSEOUT_GATE_FACTS = Object.freeze({
   silent_timeout: "silent_timeout 门：silentTimeout 到点仍零 turn part",
   zero_part: "zero_part 门：零 part 阶段思考预算拍数用尽（silentTimeout 缺席）",
   stalled: "stalled 门：已有产出后的停滞预算到点",
+});
+
+// 决定 0117：三道门收口文案里「快照请求在途未应答」段（backend 生成，置于上游
+// 摘要之前）。诊断只取段里的整数秒数，不回显原文。
+const ZCODE_POLL_UNANSWERED_RE = /; session\/messages unanswered for (\d+)s/;
+// 同段固定句式事实（unknown 归类与 evidence_passed_backend_failed 的补充事实共用）。
+const zcodePollUnansweredFact = (seconds) => ({
+  eventType: "run.error",
+  fact: `收口时 app-server 已 ${seconds} 秒没有应答 session/messages（会话快照请求），会话的真实状态未知`,
 });
 
 // kimi-web 静默收口文案 → 逐门判定（src/backends/kimiWeb.js 的收口门文案）。kimi-web
@@ -953,6 +965,12 @@ function diagnoseFailureInner(events, expectedRunId) {
       // 收口带 started/completed 链尾的摘要时（不升级、不归流中断）附中性摘要
       // 事实——只陈述链尾，结论仍是「有产出需人工确认」。
       if (pendingUpstreamFact !== null) evidence.push(pendingUpstreamFact);
+      // 决定 0117：终位收口文案带 unanswered 段时附同款事实——归类仍是本类（有
+      // 产出的运行归它），收口时没看到会话只是补充事实。
+      if (lastErrorEvent !== null) {
+        const unansweredSeconds = lastErrorEvent.error.match(ZCODE_POLL_UNANSWERED_RE)?.[1];
+        if (unansweredSeconds !== undefined) evidence.push(zcodePollUnansweredFact(unansweredSeconds));
+      }
       return { category: "evidence_passed_backend_failed", evidence };
     }
   }
@@ -1007,6 +1025,23 @@ function diagnoseFailureInner(events, expectedRunId) {
       // "无生命体征"只在收口文案自己带着取样结论时才写：进程活动取样不可用时，零 part 两道
       // 门的文案不带这一句。
       const silence = /no vital signs/.test(lastErrorEvent.error) ? "无生命体征的静默后" : "静默到点后";
+      // 决定 0117：收口时 session/messages 仍在途未应答 → unknown——控制面没看到
+      // 会话，真实状态未知，不虚构「上游流中断」。4.4 的上游摘要升级先于本槽、
+      // 照旧生效；事实只取段里的整数秒数，不回显原文。
+      const unansweredSeconds = lastErrorEvent.error.match(ZCODE_POLL_UNANSWERED_RE)?.[1];
+      if (unansweredSeconds !== undefined) {
+        evidence.push({
+          eventType: "run.error",
+          fact: `zcode 有界收口（${SILENT_CLOSEOUT_GATE_FACTS[gate.gate]}）：${silence}由控制面收口，run 以 failed 终态`,
+        });
+        evidence.push(zcodePollUnansweredFact(unansweredSeconds));
+        // 带未升级的摘要（4.4 先于本槽，能到这里的链尾都不是 429/401/403 failed）
+        // 时附中性链尾事实——只陈述链尾，结论仍是「真实状态未知」。
+        if (lastUpstream !== null) {
+          evidence.push({ eventType: "run.error", fact: upstreamNeutralFact(lastUpstream) });
+        }
+        return { category: "unknown", evidence };
+      }
       evidence.push({
         eventType: "run.error",
         fact: `zcode 有界收口（${SILENT_CLOSEOUT_GATE_FACTS[gate.gate]}）：${silence}由控制面收口，run 以 failed 终态`,

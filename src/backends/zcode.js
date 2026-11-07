@@ -80,7 +80,8 @@
 //     `--resume sess_<id>`——v1 不用（无模型选择 flag），仅作参照。
 //
 // 完成判定（B′ 根修 2026-10-10 起为【身份切片】；v1-v4 的位置式判据退役）：
-// 每拍一次 `session/messages`，本轮 = 基线消息 id 集**之外**的消息；锚点 U =
+// 快照取自唯一在途的 `session/messages`（决定 0117），本轮 = 基线消息 id 集
+// **之外**的消息；锚点 U =
 // 本轮新 user 消息（多条时以 sentContent 精确等值回显消歧，live 实证 echo
 // t≈1s 在场）；完成 = 存在新 assistant 消息 A（A.parentID === U.id）且 A 的
 // 末位 part 是 step-finish(stop|error)。历史变异（基线消息 id 有序序列不再是
@@ -858,7 +859,7 @@ export class ZcodeBackend {
   // false）——无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）。
   enforcesWriteSandbox = false;
 
-  constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null, deliverableProbe = null } = {}) {
+  constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null, deliverableProbe = null, requestTimeoutMs = null } = {}) {
     // 可注入 spawn（测试检查 child env/argv 而不启动真实进程——M11-7 同款缝）。
     this._spawnFn = spawnFn;
     // 可注入击杀（测试确定性观察"进程树兜底"被触发；缺省 taskkill 树杀，生产行为
@@ -881,6 +882,9 @@ export class ZcodeBackend {
         : async () => null);
     this._deliverableProbe = deliverableProbe
       ?? (spawnFn === spawn ? (cwd) => fingerprintWorkingTree(cwd) : async () => null);
+    // 请求级缺省超时（测试接缝）：wire request 的缺省值。轮询请求显式传 0
+    // （不设超时，决定 0117），create 60s / stop 5s 不受它影响。
+    this._requestTimeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   }
 
   /**
@@ -1092,7 +1096,7 @@ export class ZcodeBackend {
       child.stdin.write(JSON.stringify(obj) + "\n", (error) => (error ? reject(error) : resolve()));
     });
 
-    const request = (method, params, timeoutMs = REQUEST_TIMEOUT_MS) => new Promise((resolve, reject) => {
+    const request = (method, params, timeoutMs = this._requestTimeoutMs) => new Promise((resolve, reject) => {
       if (fatalError) { reject(fatalError); return; }
       if (closedFact) { reject(transportClosedError()); return; }
       const id = nextRequestId++;
@@ -1452,7 +1456,7 @@ export class ZcodeBackend {
 
   /**
    * 轮询生成器（完成/失败/兜底判定归这里；signal 仅作 abort 静默退出与进程击杀，
-   * 不承担终态）。每拍恰一次 session/messages：
+   * 不承担终态）。session/messages 只留一个在途、不设请求超时（决定 0117）：
    *   - 新 part 增长 = 进展（无进展计数清零）；完成 = 本轮（序号 >= baselineParts）
    *     出现 step-finish(reason stop|error) 且其后无新 part（快照最后一位）。
    *   - stop → 发射 tool part 证据（本轮 type:"tool" 帧投影——
@@ -1466,8 +1470,10 @@ export class ZcodeBackend {
    *     生效——silentTimeout 在场只以它为界，缺席以 ZERO_PART_POLL_LIMIT
    *     思考预算（120 拍）有界（首 part 延迟实证 run_20261001195259045cle1ft；
    *     kimiWeb R9 F3 同族）。
-   *   - 轮询失败（请求超时/传输关闭/进程死/致命协议错误）→ done(failed)（stdio
-   *     无 HTTP 重试面：通信失败 = 进程死）。
+   *   - 一拍没等到应答 = 该拍无进展（不判完成、不产新证据），下一拍接着等同一
+   *     个请求；收口时仍在途则三道门文案写明已等秒数。
+   *   - 轮询被拒（传输关闭/进程死/致命协议错误/写 stdin 失败）→ done(failed)
+   *     （stdio 无 HTTP 重试面：通信失败 = 进程死）。
    */
   async *_streamEvents({
     wire, child, sessionId, cwd, baselineParts, baselineMessageIds, sentAt, sentContent,
@@ -1515,6 +1521,25 @@ export class ZcodeBackend {
     let windowBaseline = null;
     let probeFailures = 0;
     let closeEvidence = null;
+    // 在途轮询（决定 0117）：session/messages 只留一个在途（timeoutMs 0 = 不设
+    // 请求超时）。发出时只包一次结果——race 复用同一个包装，不每拍在同一个
+    // promise 上新挂 .then；发出时刻与停滞门同一只钟。没等到应答的拍按无进展
+    // 计，下一拍接着等同一个请求。
+    let pollInFlight = null; // { result: Promise<{answered,value}|{answered,error}> , sentAt }
+    // 流分片读数推进（应答拍与未应答拍共用）：计数前进时刷新分片时刻，按节流窗
+    // 决定是否发射零载荷 streaming 事实。
+    const noteStreamActivity = function* () {
+      const streamChunks = streamChunksOf();
+      if (streamChunks <= lastStreamChunks) return;
+      lastStreamChunks = streamChunks;
+      lastStreamChunkAt = stallNow();
+      // 让 Lead 看得见：流在收即节流发射一条零载荷的 streaming 事实。
+      if (lastStreamEmitAt === null
+        || lastStreamChunkAt - lastStreamEmitAt >= STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS) {
+        lastStreamEmitAt = lastStreamChunkAt;
+        yield runtimeActivityEvent("streaming");
+      }
+    };
     // 最近一次观察窗比对读到的体征（闭集 runtime status），与上次落事实的时刻。
     let observedSigns = [];
     let lastVitalSignEmitAt = null;
@@ -1588,130 +1613,160 @@ export class ZcodeBackend {
         if (typeof onPollTick === "function") {
           try { await onPollTick(); } catch { /* best-effort */ }
         }
-        let result;
-        try {
-          result = await wire.request("session/messages", { sessionId });
-        } catch (error) {
-          finish();
-          yield doneEvent(
-            "failed",
-            `zcode polling failed: ${bounded(error?.message ?? error)}`,
-          );
-          return;
+        // 没有在途请求才发一个 session/messages（timeoutMs 0 = 不设计时器），结果
+        // 只包一次存进 pollInFlight.result。
+        if (pollInFlight === null) {
+          const pollRequest = wire.request("session/messages", { sessionId }, 0);
+          pollInFlight = {
+            result: pollRequest.then(
+              (value) => ({ answered: true, value }),
+              (error) => ({ answered: false, error }),
+            ),
+            sentAt: stallNow(),
+          };
         }
-        if (!result || !Array.isArray(result.messages)) {
-          finish();
-          yield doneEvent(
-            "failed",
-            "zcode session/messages response malformed (result.messages array is required — refusing to guess)",
-          );
-          return;
-        }
-        const msgs = result.messages;
-        const parts = flattenParts(msgs);
-        const streamChunks = streamChunksOf();
-        if (streamChunks > lastStreamChunks) {
-          lastStreamChunks = streamChunks;
-          lastStreamChunkAt = stallNow();
-          // 让 Lead 看得见：流在收即节流发射一条零载荷的 streaming 事实。
-          if (lastStreamEmitAt === null
-            || lastStreamChunkAt - lastStreamEmitAt >= STREAM_ACTIVITY_EMIT_MIN_INTERVAL_MS) {
-            lastStreamEmitAt = lastStreamChunkAt;
-            yield runtimeActivityEvent("streaming");
+        // 每拍最多等一个轮询间隔：在途请求的结果、一个 pollInterval 的计时、
+        // wire.waitClosed() 三者先到者为准；请求先到时清掉计时器，不留悬挂定时器。
+        let pollAnswered = false;
+        let pollResult = null;
+        {
+          let tickTimer = null;
+          const tickElapsed = new Promise((resolve) => { tickTimer = setTimeout(resolve, pollInterval); });
+          const raced = await Promise.race([
+            pollInFlight.result,
+            tickElapsed.then(() => ({ elapsed: true })),
+            wire.waitClosed().then(() => ({ closed: true })),
+          ]);
+          clearTimeout(tickTimer);
+          if (!raced.answered && raced.elapsed !== true && raced.closed !== true) {
+            // 请求被拒（传输关闭/进程退出/协议错误/写 stdin 失败）→ 与旧口径
+            // 相同：通信失败 = 进程死，立即收口。
+            pollInFlight = null;
+            finish();
+            yield doneEvent(
+              "failed",
+              `zcode polling failed: ${bounded(raced.error?.message ?? raced.error)}`,
+            );
+            return;
+          }
+          if (raced.answered) {
+            pollInFlight = null;
+            pollAnswered = true;
+            pollResult = raced.value;
           }
         }
-        if (parts.length < highWaterParts) {
-          finish();
-          yield doneEvent(
-            "failed",
-            `zcode session/messages snapshot shrank (${parts.length} < ${highWaterParts}) — evidence attribution unreliable, refusing to guess`,
-          );
-          return;
-        }
-        highWaterParts = Math.max(highWaterParts, parts.length);
-        // ===== B′ 根修（2026-10-10 身份切片）：历史变异检测 + 本轮归属 =====
-        // 变异 = 基线消息 id 有序序列不再是当前快照的前缀（头部插入/重排/删除/
-        // compaction 改写历史都会击穿前缀）——一旦确认，完成与证据归属都不再
-        // 可信，具名失败（与"快照缩短即失败"同一纪律），绝不静默续用错位快照。
-        const idents = msgs.map((m) => messageIdent(m));
-        let historyMutated = false;
-        for (let i = 0; i < baselineIds.length; i += 1) {
-          if (idents[i]?.id !== baselineIds[i]) { historyMutated = true; break; }
-        }
-        if (historyMutated) {
-          finish();
-          yield doneEvent(
-            "failed",
-            "zcode history mutated non-append (baseline message ids are no longer a prefix of the snapshot — turn attribution is unreliable, refusing to guess)",
-          );
-          return;
-        }
-        // 本轮消息 = 基线 id 集之外的消息（缺 id 的新消息不可归属，保守跳过——
-        // 锚点不成立由有界收口兜底）。
-        const newMsgs = [];
-        for (let i = 0; i < msgs.length; i += 1) {
-          if (!idents[i] || baselineIdSet.has(idents[i].id)) continue;
-          newMsgs.push({ ident: idents[i], message: msgs[i] });
-        }
-        // TD-199：每拍台账扫描——工具证据在轮询期即落盘（身份键去重；头部插入
-        // 下旧轮 part 因宿主消息在基线集内而不进扫描面）。纯文本/思考段仍零
-        // run.event（诚实边界：本修复只治愈工具活跃期）。
-        const toolEvents = projectTurnToolEvents(newMsgs, toolLedger);
-        for (const event of toolEvents) {
-          yield event;
-        }
-        const partsGrew = parts.length > lastPartsCount;
-        if (partsGrew) {
-          lastPartsCount = parts.length;
-          anyNewPart = true;
-        }
-        // 进度 = 新 part 落地，或既有 tool part 原位落了新证据（工具调用的开始 /
-        // 结束是状态原位变化，不一定改变 part 个数）。
-        if (partsGrew || toolEvents.length > 0) {
-          noProgressPolls = 0;
-          stallTracker.noteProgress();
-          lifeAttestations = 0;
-          inGraceEpisode = false;
-          resetObservation();
-        } else {
+        if (!pollAnswered) {
+          // 这一拍没等到应答：没有快照可处理——不判完成、不产新 part 证据；按无
+          // 进展计（零 part 思考预算也数这一拍）；流分片计数与 streaming 事实照常；
+          // 三道收口门与生命体征判据照常走（下方代码路径不变）。等待已占这一拍，
+          // 结尾不再额外睡一个 pollInterval；下一拍接着等同一个请求，不另发。
+          yield* noteStreamActivity();
           noProgressPolls += 1;
-        }
-        // 完成判据（身份式）：锚点 U = 本轮新 user 消息（回显优先消歧）；完成 =
-        // 存在新 assistant 消息 A（A.parentID === U.id）且 A 的末位 part 是
-        // step-finish(stop|error)。旧位置式判据（全局尾部 + 序号 ≥ 基线）在头部
-        // 插入下可被旧 stop 右移击穿——B′ 关闭；parent 不匹配的新 assistant
-        // （⑨k）不构成完成，续等由有界收口兜底。
-        const anchor = resolveTurnAnchor(newMsgs, sentContent);
-        let finishReason = null;
-        if (anchor !== null) {
-          for (const { ident, message } of newMsgs) {
-            if (ident.role !== "assistant" || ident.parentID !== anchor.id) continue;
-            const own = Array.isArray(message?.parts) ? message.parts : [];
-            const lastOwn = own.length > 0 ? own[own.length - 1] : null;
-            if (lastOwn?.type === "step-finish"
-              && (lastOwn.reason === "stop" || lastOwn.reason === "error")) {
-              finishReason = lastOwn.reason;
-              break;
+        } else {
+          if (!pollResult || !Array.isArray(pollResult.messages)) {
+            finish();
+            yield doneEvent(
+              "failed",
+              "zcode session/messages response malformed (result.messages array is required — refusing to guess)",
+            );
+            return;
+          }
+          const msgs = pollResult.messages;
+          const parts = flattenParts(msgs);
+          yield* noteStreamActivity();
+          if (parts.length < highWaterParts) {
+            finish();
+            yield doneEvent(
+              "failed",
+              `zcode session/messages snapshot shrank (${parts.length} < ${highWaterParts}) — evidence attribution unreliable, refusing to guess`,
+            );
+            return;
+          }
+          highWaterParts = Math.max(highWaterParts, parts.length);
+          // ===== B′ 根修（2026-10-10 身份切片）：历史变异检测 + 本轮归属 =====
+          // 变异 = 基线消息 id 有序序列不再是当前快照的前缀（头部插入/重排/删除/
+          // compaction 改写历史都会击穿前缀）——一旦确认，完成与证据归属都不再
+          // 可信，具名失败（与"快照缩短即失败"同一纪律），绝不静默续用错位快照。
+          const idents = msgs.map((m) => messageIdent(m));
+          let historyMutated = false;
+          for (let i = 0; i < baselineIds.length; i += 1) {
+            if (idents[i]?.id !== baselineIds[i]) { historyMutated = true; break; }
+          }
+          if (historyMutated) {
+            finish();
+            yield doneEvent(
+              "failed",
+              "zcode history mutated non-append (baseline message ids are no longer a prefix of the snapshot — turn attribution is unreliable, refusing to guess)",
+            );
+            return;
+          }
+          // 本轮消息 = 基线 id 集之外的消息（缺 id 的新消息不可归属，保守跳过——
+          // 锚点不成立由有界收口兜底）。
+          const newMsgs = [];
+          for (let i = 0; i < msgs.length; i += 1) {
+            if (!idents[i] || baselineIdSet.has(idents[i].id)) continue;
+            newMsgs.push({ ident: idents[i], message: msgs[i] });
+          }
+          // TD-199：每拍台账扫描——工具证据在轮询期即落盘（身份键去重；头部插入
+          // 下旧轮 part 因宿主消息在基线集内而不进扫描面）。纯文本/思考段仍零
+          // run.event（诚实边界：本修复只治愈工具活跃期）。
+          const toolEvents = projectTurnToolEvents(newMsgs, toolLedger);
+          for (const event of toolEvents) {
+            yield event;
+          }
+          const partsGrew = parts.length > lastPartsCount;
+          if (partsGrew) {
+            lastPartsCount = parts.length;
+            anyNewPart = true;
+          }
+          // 进度 = 新 part 落地，或既有 tool part 原位落了新证据（工具调用的开始 /
+          // 结束是状态原位变化，不一定改变 part 个数）。
+          if (partsGrew || toolEvents.length > 0) {
+            noProgressPolls = 0;
+            stallTracker.noteProgress();
+            lifeAttestations = 0;
+            inGraceEpisode = false;
+            resetObservation();
+          } else {
+            noProgressPolls += 1;
+          }
+          // 完成判据（身份式）：锚点 U = 本轮新 user 消息（回显优先消歧）；完成 =
+          // 存在新 assistant 消息 A（A.parentID === U.id）且 A 的末位 part 是
+          // step-finish(stop|error)。旧位置式判据（全局尾部 + 序号 ≥ 基线）在头部
+          // 插入下可被旧 stop 右移击穿——B′ 关闭；parent 不匹配的新 assistant
+          // （⑨k）不构成完成，续等由有界收口兜底。
+          const anchor = resolveTurnAnchor(newMsgs, sentContent);
+          let finishReason = null;
+          if (anchor !== null) {
+            for (const { ident, message } of newMsgs) {
+              if (ident.role !== "assistant" || ident.parentID !== anchor.id) continue;
+              const own = Array.isArray(message?.parts) ? message.parts : [];
+              const lastOwn = own.length > 0 ? own[own.length - 1] : null;
+              if (lastOwn?.type === "step-finish"
+                && (lastOwn.reason === "stop" || lastOwn.reason === "error")) {
+                finishReason = lastOwn.reason;
+                break;
+              }
             }
           }
-        }
-        if (finishReason === "stop") {
-          yield* this._completeTurn({
-            wire, child, sessionId, newMsgs, anchor, sentContent, finish, toolLedger,
-          });
-          return;
-        }
-        if (finishReason === "error") {
-          finish();
-          // zcode 自己以失败结束本轮的路径：part 不带错误明细（不虚构），但本轮
-          // 主轮请求链的最后状态已知时照三道门同款追加有界上游摘要（同款格式，
-          // 诊断按它归因）。
-          yield doneEvent(
-            "failed",
-            "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one)"
-              + (upstreamRequests.summarySuffix() ?? ""),
-          );
-          return;
+          if (finishReason === "stop") {
+            yield* this._completeTurn({
+              wire, child, sessionId, newMsgs, anchor, sentContent, finish, toolLedger,
+            });
+            return;
+          }
+          if (finishReason === "error") {
+            finish();
+            // zcode 自己以失败结束本轮的路径：part 不带错误明细（不虚构），但本轮
+            // 主轮请求链的最后状态已知时照三道门同款追加有界上游摘要（同款格式，
+            // 诊断按它归因）。
+            yield doneEvent(
+              "failed",
+              "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one)"
+                + (upstreamRequests.summarySuffix() ?? ""),
+            );
+            return;
+          }
         }
         // 无进展/静默兜底（kimiWeb R9 F3 同族分相；两相宽松度各按 live 实证分账）：
         //   - 零 part 阶段（anyNewPart=false：本轮基线后尚无任何产出）——停滞门
@@ -1744,8 +1799,9 @@ export class ZcodeBackend {
         } else if (streamRecent) {
           outcome = "alive";
         } else if (closeEvidence !== null) {
-          // 上一拍比对的结论是没有活动。取样占用了时间，所以多看了这一拍：快照
-          // 没有新进度（否则走不到这里）、流也没来——执行收口。
+          // 上一拍比对的结论是没有活动。取样占用了时间，所以多看了这一拍：没有
+          // 新进度（这一拍可能没等到应答、或快照无新 part——有进度走不到这里）、
+          // 流也没来——执行收口。
           outcome = closeEvidence;
         } else {
           const observed = await observeWindow();
@@ -1793,16 +1849,21 @@ export class ZcodeBackend {
           // 本轮主轮请求链的最后状态已知时，文案末尾追加有界上游摘要（闭集
           // status + 整数 statusCode + attempt/maxAttempts；未知就不加，上面的
           // 文案逐字不变）——诊断按这段摘要归因，额度耗尽不再写成"无法区分"。
+          // 收口时快照请求仍在途未应答：先于摘要写明已等秒数（自发出起整秒数、
+          // 四舍五入，与停滞门同一只钟）；没有在途请求时文案逐字节不变。
           const upstreamNote = upstreamRequests.summarySuffix() ?? "";
+          const unansweredNote = pollInFlight !== null
+            ? `; session/messages unanswered for ${Math.round((stallNow() - pollInFlight.sentAt) / 1000)}s`
+            : "";
           if (closeGate === "silent_timeout") {
             yield doneEvent(
               "failed",
-              `silent timeout: no turn parts observed within ${silentTimeout}ms (provider may have silently rejected)${sampled}${upstreamNote}`,
+              `silent timeout: no turn parts observed within ${silentTimeout}ms (provider may have silently rejected)${sampled}${unansweredNote}${upstreamNote}`,
             );
           } else if (closeGate === "zero_part") {
             yield doneEvent(
               "failed",
-              `zcode thinking budget exceeded (no turn parts observed for ${ZERO_PART_POLL_LIMIT} consecutive polls, silentTimeout absent — bounded exit)${sampled}${upstreamNote}`,
+              `zcode thinking budget exceeded (no turn parts observed for ${ZERO_PART_POLL_LIMIT} consecutive polls, silentTimeout absent — bounded exit)${sampled}${unansweredNote}${upstreamNote}`,
             );
           } else {
             const d = stallTracker.diagnostics();
@@ -1811,7 +1872,7 @@ export class ZcodeBackend {
               `zcode turn stalled (${streamFact}; ${outcome}${lifeAttestations > 0 ? `; ${lifeAttestations} earlier attestation(s) since the last progress` : ""}; `
                 + `silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
                 + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
-                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — no vital signs, bounded exit)${upstreamNote}`,
+                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — no vital signs, bounded exit)${unansweredNote}${upstreamNote}`,
             );
           }
           return;
@@ -1819,8 +1880,11 @@ export class ZcodeBackend {
           // 门未到点 / 取证中（pending）：本拍没有续命——续命段结束，下段重计。
           inGraceEpisode = false;
         }
-        // 等待下一拍：interval 上界 + 进程死亡即时唤醒。
-        await Promise.race([sleep(pollInterval), wire.waitClosed()]);
+        // 等待下一拍：interval 上界 + 进程死亡即时唤醒。没等到应答的拍等待已经
+        // 占了这一拍，不再额外睡。
+        if (pollAnswered) {
+          await Promise.race([sleep(pollInterval), wire.waitClosed()]);
+        }
       }
     } finally {
       signal?.removeEventListener("abort", onAbort);

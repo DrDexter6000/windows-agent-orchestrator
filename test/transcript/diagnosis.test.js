@@ -432,6 +432,115 @@ test("zcode 静默收口排序: 早前瞬时 429 + 终态收口文案 → provid
 });
 
 // ---------------------------------------------------------------------------
+// 2026-11-07：决定 0117 / TD-335——收口文案带「session/messages unanswered」段
+//
+// 快照请求只留一个在途、不设超时后，三道门在无生命体征时仍会收口；收口时
+// 请求仍在途未应答的，backend 在门文案里（上游摘要之前）写明已等秒数。控制
+// 面没看到会话——归 unknown，不虚构「上游流中断」；事实写门名 + 已等秒数
+// （只取段里整数，不回显原文）。4.4 的上游摘要升级（429/401/403）先于本槽、
+// 照旧生效；不带该段的收口文案归类与此前逐字相同（上方用例已在守）。
+// ---------------------------------------------------------------------------
+
+test("zcode 未应答收口: stalled 门文案带 unanswered 段 → unknown（非 provider_disconnect），事实含已等秒数", () => {
+  const runId = "run_zcode_unanswered_stalled";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T02:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-11-07T02:00:30.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-11-07T02:08:00.000Z",
+      error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling; max recovered gap this turn 0ms — no vital signs, bounded exit); session/messages unanswered for 270s",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T02:08:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "unknown", "收口时没看到会话——真实状态未知，不虚构流中断");
+  assert.notEqual(d.category, "provider_disconnect");
+  assert.equal(d.code, null);
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /stalled 门/, "证据仍写明哪一道门收口");
+  assert.match(joined, /收口时 app-server 已 270 秒没有应答 session\/messages（会话快照请求），会话的真实状态未知/, "事实含段里的整数秒数，不回显原文");
+  assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("zcode 未应答收口: zero_part 与 silent_timeout 门文案带 unanswered 段 → 同归 unknown", () => {
+  const zeroPart = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId: "r_zp", ts: "2026-11-07T02:00:01.000Z" },
+    {
+      type: "run.error", phase: "wait", runId: "r_zp", ts: "2026-11-07T02:03:00.000Z",
+      error: "zcode thinking budget exceeded (no turn parts observed for 120 consecutive polls, silentTimeout absent — bounded exit) — no vital signs: no model stream chunk observed this turn; no process activity in the last 30s (cpu +0ms, io +0B across 2 descendant process(es)); session/messages unanswered for 61s",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId: "r_zp", ts: "2026-11-07T02:03:00.000Z" },
+  ], "r_zp");
+  assert.equal(zeroPart.category, "unknown");
+  assert.match(zeroPart.evidence.map((e) => e.fact).join(" "), /zero_part 门/);
+  assert.match(zeroPart.evidence.map((e) => e.fact).join(" "), /已 61 秒没有应答/);
+
+  const silentTimeout = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId: "r_st", ts: "2026-11-07T02:00:01.000Z" },
+    {
+      type: "run.error", phase: "wait", runId: "r_st", ts: "2026-11-07T02:16:00.000Z",
+      error: "silent timeout: no turn parts observed within 900000ms (provider may have silently rejected); session/messages unanswered for 915s",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId: "r_st", ts: "2026-11-07T02:16:00.000Z" },
+  ], "r_st");
+  assert.equal(silentTimeout.category, "unknown");
+  assert.match(silentTimeout.evidence.map((e) => e.fact).join(" "), /silent_timeout 门/);
+  assert.match(silentTimeout.evidence.map((e) => e.fact).join(" "), /已 915 秒没有应答/);
+});
+
+test("zcode 未应答收口排序: 带 unanswered 段又带 429 failed 上游摘要 → 仍是 provider_capacity（4.4 升级先于本槽）", () => {
+  const runId = "run_zcode_unanswered_429";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T02:00:01.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-11-07T02:08:00.000Z",
+      error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); session/messages unanswered for 270s; upstream: last main-turn request model_request_failed (statusCode 429, attempt 11/11)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T02:08:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "provider_capacity", "上游终态失败是更具体的根因，升级照旧先于 unknown 槽");
+  assert.equal(d.code, "rate_limited");
+});
+
+test("zcode 未应答收口: 带未升级的上游摘要（stream_stalled 链尾）→ unknown 仍附中性链尾事实", () => {
+  const runId = "run_zcode_unanswered_stalled_stream";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T04:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-11-07T04:00:30.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-11-07T04:08:00.000Z",
+      error: "zcode turn stalled (12 model stream chunk(s) seen this turn, none in the last 60s; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); session/messages unanswered for 270s; upstream: last main-turn request model_stream_stalled (attempt 3/11)",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T04:08:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "unknown", "stream_stalled 链尾不升级（非 429/401/403 failed）——仍归 unknown");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /收口时 app-server 已 270 秒没有应答/, "已等秒数事实在场");
+  assert.match(joined, /上游主轮请求摘要：最后状态 model_stream_stalled/, "中性链尾事实不因 unknown 归类丢失");
+});
+
+test("zcode 未应答收口: 有通过的证据审计 → 仍归 evidence_passed_backend_failed，但附已等秒数事实", () => {
+  const runId = "run_zcode_unanswered_evidence";
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T05:00:01.000Z" },
+    { type: "run.event", kind: "tool_use", tool: "Bash", runId, ts: "2026-11-07T05:01:00.000Z" },
+    { type: "run.evidence_audit", passed: true, runId, ts: "2026-11-07T05:07:00.000Z" },
+    {
+      type: "run.error", phase: "wait", runId, ts: "2026-11-07T05:08:00.000Z",
+      error: "zcode turn stalled (no model stream chunk observed this turn; process activity unavailable; silent stretch 480000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling — no vital signs, bounded exit); session/messages unanswered for 270s",
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T05:08:00.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "evidence_passed_backend_failed", "有产出的运行归本类——与其它 zcode 收口同一顺序（Lead 裁定）");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /证据通过/, "主事实仍是「有产出需人工确认」");
+  assert.match(joined, /收口时 app-server 已 270 秒没有应答 session\/messages/, "unanswered 段的已等秒数事实附在 evidence 里");
+});
+
+// ---------------------------------------------------------------------------
 // 2026-10-15：zcode 收口文案的上游主轮请求摘要（backend 自本轮起追加）
 //
 // backend 消费 `v4/telemetry/event` 的 model.request.status（仅本会话、本轮

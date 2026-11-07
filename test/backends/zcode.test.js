@@ -39,6 +39,7 @@ import {
 } from "../../src/backends/zcode.js";
 import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
+import { diagnoseFailure } from "../../src/diagnosis.js";
 
 const SESSION_ID = "sess_zcode_test_1";
 
@@ -110,7 +111,9 @@ function fakeZcodePeer(child, {
   setModelError = null,      // {code, message} → setModel 返回错误（zod 教学形状）
   setModeError = null,       // {code, message} → setMode 返回错误（fail-closed 测试）
   accepted = true,           // session/send 的 accepted 值
-  messages = () => [],       // (pollCount) => messages[]
+  messages = () => [],       // (pollCount) => messages[] | null——null = 不应答这一
+                             // 帧（决定 0117 在途轮询测试；挂在 fake 对端，由
+                             // answerHungMessages 补答）
   // 上游 CRn 实际字段名（zcode.cjs:15259）：cache 系带 Tokens 后缀（auditor #2）。
   usage = { totalTokens: 101, inputTokens: 60, outputTokens: 30, reasoningTokens: 5, cacheReadTokens: 4, cacheCreationTokens: 2, modelRequestCount: 2 },
   usageError = null,         // {code, message} → session/usage 返回错误帧（⑫g：终态后 usage 失败路径）
@@ -126,6 +129,7 @@ function fakeZcodePeer(child, {
   const activeSessions = new Set();
   const clientFrames = [];
   let polls = 0;
+  let hungMessagesFrame = null; // 最近一条未应答的 session/messages 帧（决定 0117）
   const send = (obj) => child.stdout.write(JSON.stringify(obj) + "\n");
   const requireActive = (frame) => {
     const sid = frame.params?.sessionId;
@@ -216,7 +220,12 @@ function fakeZcodePeer(child, {
     if (frame.method === "session/messages") {
       if (!requireActive(frame)) return;
       polls += 1;
-      send({ id: frame.id, result: { messages: messages(polls) } });
+      const reply = messages(polls);
+      if (reply === null) {
+        hungMessagesFrame = frame;
+        return;
+      }
+      send({ id: frame.id, result: { messages: reply } });
       return;
     }
     if (frame.method === "session/usage") {
@@ -240,6 +249,15 @@ function fakeZcodePeer(child, {
     clientFrames,
     polls: () => polls,
     framesOf: (method) => clientFrames.filter((f) => f.method === method),
+    // 决定 0117：挂着未应答的 session/messages 帧——补答后清掉。
+    hungMessages: () => hungMessagesFrame !== null,
+    answerHungMessages: (msgs) => {
+      if (hungMessagesFrame === null) return false;
+      const { id } = hungMessagesFrame;
+      hungMessagesFrame = null;
+      send({ id, result: { messages: msgs } });
+      return true;
+    },
     notify: (method, params) => send({ method, params }),
     serverRequest: (id, method, params) => send({ id, method, params }),
     closeTransport: (code = 0) => { child.stdout.end(); child.end(code); },
@@ -1564,6 +1582,249 @@ test("zcode ⑥h: 零 part 阶段流在收 → 思考预算让位；流一停照
   child.kill();
 });
 
+// ===== ⑥j 在途轮询（2026-11-07，决定 0117 / TD-335：session/messages 只留一个
+// 在途、不设请求超时——慢应答不再等于失败）=====
+//
+// 长会话的单次 session/messages 应答会变慢（快照整份取回）。旧口径 30s 请求
+// 超时一到就 done(failed)，不看生命体征、不经三道门（2026-11-06 续修
+// run_20261106101004854tw1j83）。新口径：没有在途请求才发一个（timeoutMs 0 =
+// 不设计时器）；每拍最多等一个 pollInterval；没等到 = 该拍无进展，照走三道门
+// 与生命体征判据；下一拍接着等**同一个**请求；被拒（传输关闭/进程退出/协议
+// 错误/写 stdin 失败）才照旧立即失败。收口时仍在途的，三道门文案写明已等秒数。
+
+test("zcode ⑥j: 轮询请求跨拍不应答、期间流分片照到 → 运行不失败；应答后正常 completed；全程只发过一个 session/messages", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    // n=1 spawn 基线快照照答；n=2（首个轮询拍）起挂起不应答。
+    peerOptions: { messages: (n) => (n <= 1 ? [] : null) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick <= 10) peer.notify(...streamChunk());
+      // 第 5 拍起补答最近挂着的那一帧（正确实现下就是唯一的那个请求）。断言全
+      // 部放在 collect 之后——backend 对本钩子 best-effort 吞异常，钩内断言失败
+      // 会被吞掉。
+      if (tick >= 5) peer.answerHungMessages([userMsg("do the task"), assistantMsg("done text", "stop")]);
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "慢应答的拍只是无进展，不是失败");
+  assert.ok(events.some((e) => e.kind === "runtime_activity" && e.status === "streaming"), "在途期间流分片照到、streaming 事实照落");
+  // 基线 1 帧 + 轮询 1 帧：在途期间绝没有第二个 session/messages。回退成"每拍
+  // 新发一个"时补答永远答不到当拍在等的那个请求，流停后由 zero_part 预算收口
+  // （帧数远超 2）——本用例在帧数断言上变红，不挂死。
+  assert.equal(peer.framesOf("session/messages").length, 2, "整个过程只发过一个轮询请求");
+  child.kill();
+});
+
+test("zcode ⑥j: 请求挂着跨过停滞门、期间每拍都有流分片 → 不收口；之后补答 stop 完成快照 → completed（未应答拍照样推进流分片读数）", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    // n=1 基线空、n=2 落 part（停滞门武装）、n>=3 挂起；停滞门（300s floor）自
+    // 第 11 拍起每拍到点，但每拍都有流分片 ⇒ 续命。
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), stepStartMsg()];
+        return null;
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      peer.notify(...streamChunk());
+      // 第 30 拍（远过停滞门杀点）补答最近挂着的那一帧：一份 stop 完成快照。
+      if (tick === 30) peer.answerHungMessages([userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]);
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "流分片每拍都在收——未应答的拍不是收口理由，停滞门到点也不收");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "控制面从未判停滞");
+  assert.equal(peer.framesOf("session/messages").length, 3, "基线 + 落 part + 唯一在途，恰三个请求");
+  child.kill();
+});
+
+test("zcode ⑥j: 零 part 阶段、不配 silentTimeout、请求一直不应答、没有生命体征 → zero_part 门收口且文案写明已等秒数（未应答拍计入 120 拍预算）", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const controller = new AbortController();
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 1 ? [] : null) },
+  });
+  const events = [];
+  for await (const event of handle.events(controller.signal, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      // 兜底出口：预算失效（变异）时运行永不收口——第 200 拍外部中止，让用例
+      // 以断言变红，而不是挂死。
+      if (tick >= 200) controller.abort();
+    },
+  })) {
+    events.push(event);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.ok(done.error.startsWith("zcode thinking budget exceeded ("), "经 zero_part 门收口（未应答拍也数一拍）");
+  // 第 1 拍（t=30s）发出、第 120 拍（t=3600s）预算到点 → 已等 round(3570)s。
+  assert.match(done.error, /; session\/messages unanswered for 3570s$/);
+  assert.equal(peer.framesOf("session/messages").length, 2, "基线 + 唯一在途的轮询请求，绝无第二个");
+  child.kill();
+});
+
+test("zcode ⑥j: 链尾 429 failed 的上游摘要与 unanswered 段共存 → 段在摘要之前；真实文案交 diagnoseFailure → provider_capacity/rate_limited", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), stepStartMsg()];
+        return null;
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 11, statusCode: 429, retryable: false }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  // 两段的先后（unanswered 在 upstream 之前）：交换插值后此断言变红；摘要不再
+  // 锚在句尾时诊断也会丢升级。
+  assert.match(
+    done.error,
+    /; session\/messages unanswered for 270s; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 11\/11\)$/,
+  );
+  // 同一条真实文案装进转录交给诊断：429 摘要升级先于 unanswered 槽。
+  const runId = "run_zcode_6j_upstream";
+  const d = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T03:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", runId, ts: "2026-11-07T03:00:30.000Z" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-07T03:08:00.000Z", error: done.error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T03:08:00.000Z" },
+  ], runId);
+  assert.equal(d.category, "provider_capacity", "链尾 429 failed 的升级先于 unanswered 的 unknown 槽");
+  assert.equal(d.code, "rate_limited");
+  child.kill();
+});
+
+test("zcode ⑥j: requestTimeoutMs 注入缝——缺省超时设成 20ms，轮询请求挂过许多拍也不失败（轮询不设超时）", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const child = makeFakeChild();
+  const kill = fakeKill();
+  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn, requestTimeoutMs: 20 });
+  const peer = fakeZcodePeer(child, { messages: (n) => (n <= 1 ? [] : null) });
+  const agent = makeAgent();
+  const handle = await backend.spawn(agent, { prompt: "do the task" });
+  const events = [];
+  for await (const event of handle.events(new AbortController().signal, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      tick += 1;
+      if (tick >= 40) peer.answerHungMessages([userMsg("do the task"), assistantMsg("done text", "stop")]);
+    },
+  })) {
+    events.push(event);
+  }
+  // 40 拍 × 2ms ≈ 80ms 真实时间，远过 20ms 的缺省超时：轮询请求显式 0 超时，
+  // 挂着不等于失败；第 40 拍补答后正常完成。
+  assert.equal(events.at(-1).reason, "completed", "缺省请求超时不适用于轮询请求");
+  child.kill();
+});
+
+test("zcode ⑥j: 轮询请求一直不应答、没有生命体征 → 经现有停滞门收口，文案以原门前缀开头并写明已等秒数（N 与注入钟一致）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    // n=1 基线空、n=2 落 part（本轮有产出，停滞门武装）、n>=3 挂起不应答。
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), stepStartMsg()];
+        return null;
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  // 三道门文案开头不变（原门前缀）， unanswered 段在句尾（无上游摘要可附）。
+  assert.ok(done.error.startsWith("zcode turn stalled ("), "原门前缀逐字节不变");
+  // 注入钟：n=3 的请求在第 2 拍（t=60s）发出；停滞门在第 11 拍（t=330s）到点
+  // （静默 300s floor）→ 已等 round((330-60)/1) = 270s。
+  assert.match(done.error, /; session\/messages unanswered for 270s$/, "已等秒数与注入钟一致");
+  assert.equal(peer.framesOf("session/messages").length, 3, "基线 + 落 part + 在途，恰三个请求");
+  child.kill();
+});
+
+test("zcode ⑥j: 轮询在途时传输关闭 → 立即 failed，文案照旧以 zcode polling failed: 开头", async () => {
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 1 ? [] : null) },
+  });
+  const collectPromise = collect(handle, { pollInterval: 2 });
+  assert.ok(await waitUntil(() => peer.hungMessages()), "首个轮询请求已挂在途");
+  peer.closeTransport(1);
+  const events = await collectPromise;
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.ok(done.error.startsWith("zcode polling failed:"), "与旧口径同款前缀");
+  assert.match(done.error, /transport closed \(exit code: 1\)/);
+  child.kill();
+});
+
+test("zcode ⑥j: 没有在途请求时三道门收口文案逐字节不变（不带 unanswered 段）", async () => {
+  // 应答拍里收口：请求已应答、无在途——文案不得多出任何字符（含 unanswered 段）。
+  let fakeNow = 0;
+  let tick = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick >= 3 && tick <= 6) peer.notify(...streamChunk()); // 只在前四拍有流
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.ok(!done.error.includes("unanswered"), "无在途请求时绝无 unanswered 段");
+  // 与决定 0117 之前的文案逐字节相同（⑥g 同款夹具同款杀点 n=13）。
+  assert.equal(peer.polls(), 13);
+  assert.equal(
+    done.error,
+    "zcode turn stalled (4 model stream chunk(s) seen this turn, none in the last 60s; process activity unavailable; silent stretch 300000ms exceeded adaptive budget 300000ms floor / ×3 / 600000ms ceiling; max recovered gap this turn 0ms — no vital signs, bounded exit)",
+  );
+  child.kill();
+});
+
 // ===== ⑥i 本轮主轮请求链（2026-10-15，TD-291 探针事实 + bundle 核证） =====
 //
 // 额度耗尽的长静默形态：zcode 在按 delayMs 退避重试本轮主轮请求（通知
@@ -2876,12 +3137,13 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 13 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
-  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l。加/删构造必须同步更新此数字——不更新即红。
+  // P2②b：严格相等。当前实际 = 14 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
+  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l / ⑥j(requestTimeoutMs)。加/删构造必须
+  // 同步更新此数字——不更新即红。
   assert.equal(
     constructions.length,
-    13,
-    `守卫扫描应找到恰 13 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    14,
+    `守卫扫描应找到恰 14 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l/⑥j），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,
