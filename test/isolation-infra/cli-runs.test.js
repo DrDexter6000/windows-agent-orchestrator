@@ -152,10 +152,12 @@ test("WF-6: run --background 返回 runId 前必须已建立 status 可读 trans
 
     // b78 续修：--format json 是既有契约（results.md——被接受且与缺省逐字节相同，
     // Lead 与宿主脚本在用），不能报错。WF-6 恢复带旗标调用并钉住逐字节相同。
-    // 这里的转录是活的：detached runner 可能恰在两次读取之间落事件，终态后
-    // executionStage.secondsSince 也在走秒——逐字节相同以"成对读取、至多重试"
-    // 断言（任一对相同即证两条路径打同一份字节；确定性逐字节由 b78-line-4 的
-    // 静态夹具钉）。
+    // 这里的转录是活的：detached runner 可能恰在两次读取之间落事件——逐字节相同
+    // 以"成对读取、至多重试"断言（任一对相同即证两条路径打同一份字节；确定性
+    // 逐字节由 b78-line-4 的静态夹具钉）。secondsSince / secondsSinceActivity
+    // 是读取时刻算出的秒数，两个子进程之间跨过秒边界就不同（负载高时每对都跨），
+    // 比对前把这两个读数归零。
+    const steady = (text) => text.replace(/"(secondsSince|secondsSinceActivity)": \d+/g, '"$1": 0');
     const statusSpawn = (extra) => spawnSync(process.execPath, [
       "src/cli.js",
       "status", parsed.runId,
@@ -172,7 +174,7 @@ test("WF-6: run --background 返回 runId 前必须已建立 status 可读 trans
       const asJson = statusSpawn(["--format", "json"]);
       assert.equal(asJson.status, 0, `status --format json 必须可用: ${asJson.stderr}`);
       lastPair = { bare: bare.stdout, asJson: asJson.stdout };
-      identical = asJson.stdout === bare.stdout;
+      identical = steady(asJson.stdout) === steady(bare.stdout);
     }
     assert.ok(identical,
       `--format json 与不带 --format 输出逐字节相同（3 对读取均不同，最后一对：${JSON.stringify(lastPair)}）`);

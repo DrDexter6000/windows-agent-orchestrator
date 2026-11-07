@@ -1617,7 +1617,7 @@ test("zcode ⑥j: 轮询请求跨拍不应答、期间流分片照到 → 运行
   assert.ok(events.some((e) => e.kind === "runtime_activity" && e.status === "streaming"), "在途期间流分片照到、streaming 事实照落");
   // 基线 1 帧 + 轮询 1 帧：在途期间绝没有第二个 session/messages。回退成"每拍
   // 新发一个"时补答永远答不到当拍在等的那个请求，流停后由 zero_part 预算收口
-  // （帧数远超 2）——本用例在帧数断言上变红，不挂死。
+  // （帧数远超 2）——本用例在 completed 或帧数断言上变红，不挂死。
   assert.equal(peer.framesOf("session/messages").length, 2, "整个过程只发过一个轮询请求");
   child.kill();
 });
@@ -1636,7 +1636,9 @@ test("zcode ⑥j: 请求挂着跨过停滞门、期间每拍都有流分片 → 
       },
     },
   });
-  const events = await collect(handle, {
+  const controller = new AbortController();
+  const events = [];
+  for await (const event of handle.events(controller.signal, {
     pollInterval: 2,
     stallClock: () => fakeNow,
     onPollTick: () => {
@@ -1645,8 +1647,13 @@ test("zcode ⑥j: 请求挂着跨过停滞门、期间每拍都有流分片 → 
       peer.notify(...streamChunk());
       // 第 30 拍（远过停滞门杀点）补答最近挂着的那一帧：一份 stop 完成快照。
       if (tick === 30) peer.answerHungMessages([userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]);
+      // 兜底出口：回退成"每拍新发一个"时补答落在旧请求上，流分片又让运行一直有
+      // 生命体征、合法地永不收口——第 200 拍外部中止，让用例以断言变红而不是挂死。
+      if (tick >= 200) controller.abort();
     },
-  });
+  })) {
+    events.push(event);
+  }
   const done = events.at(-1);
   assert.equal(done.reason, "completed", "流分片每拍都在收——未应答的拍不是收口理由，停滞门到点也不收");
   assert.ok(!JSON.stringify(events).includes("turn stalled"), "控制面从未判停滞");
@@ -1727,18 +1734,20 @@ test("zcode ⑥j: 链尾 429 failed 的上游摘要与 unanswered 段共存 → 
   child.kill();
 });
 
-test("zcode ⑥j: requestTimeoutMs 注入缝——缺省超时设成 20ms，轮询请求挂过许多拍也不失败（轮询不设超时）", async () => {
+test("zcode ⑥j: requestTimeoutMs 注入缝——缺省超时设成 250ms，轮询请求挂约 1s 也不失败（轮询不设超时）", async () => {
   let fakeNow = 0;
   let tick = 0;
   const child = makeFakeChild();
   const kill = fakeKill();
-  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn, requestTimeoutMs: 20 });
+  // 250ms 而不是更小：启动期的其它请求（基线快照等）也用这个缺省值，太小时机器
+  // 一忙就会误超时。
+  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn, requestTimeoutMs: 250 });
   const peer = fakeZcodePeer(child, { messages: (n) => (n <= 1 ? [] : null) });
   const agent = makeAgent();
   const handle = await backend.spawn(agent, { prompt: "do the task" });
   const events = [];
   for await (const event of handle.events(new AbortController().signal, {
-    pollInterval: 2,
+    pollInterval: 25,
     stallClock: () => fakeNow,
     onPollTick: () => {
       fakeNow += 1_000;
@@ -1748,8 +1757,9 @@ test("zcode ⑥j: requestTimeoutMs 注入缝——缺省超时设成 20ms，轮�
   })) {
     events.push(event);
   }
-  // 40 拍 × 2ms ≈ 80ms 真实时间，远过 20ms 的缺省超时：轮询请求显式 0 超时，
-  // 挂着不等于失败；第 40 拍补答后正常完成。
+  // 未应答的拍各等满一个 pollInterval：40 拍 × 25ms ≈ 1s 真实时间（机器越忙越长），
+  // 远过 250ms 的缺省超时：轮询请求显式 0 超时，挂着不等于失败；第 40 拍补答后
+  // 正常完成。
   assert.equal(events.at(-1).reason, "completed", "缺省请求超时不适用于轮询请求");
   child.kill();
 });
