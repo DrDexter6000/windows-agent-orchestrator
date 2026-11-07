@@ -1109,7 +1109,7 @@ test("范围：主检出、仓内关联工作树、仓外合法关联工作树�
   assert.equal(oneItem(plan, "devin").reason, "outside_worktrees_dir");
   assert.equal(oneItem(plan, "devout").reason, "outside_worktrees_dir");
   // 从关联工作树里生成计划：与主检出一致（普查与范围从 porcelain[0] 推导，与
-  // 调用 cwd 无关；generatedAt 来自时钟缝、逐次调用有毫秒差，不比）。
+  // 调用 cwd 无关；generatedAt 来自时钟缝，换注入时钟时可能不同，不比）。
   const fromDev = await planWorktreeReclaim({ repoCwd: devOut, runDir: s.runDir, now: fixedNow });
   const stripClock = ({ generatedAt, ...rest }) => rest;
   assert.deepEqual(stripClock(fromDev.plan), stripClock(plan));
@@ -1402,4 +1402,10 @@ test("分类：alternates 指向别处的克隆（转录谎报 private_clone）�
   const item = oneItem(plan, "run_alt");
   assert.equal(item.action, "keep");
   assert.equal(item.reason, "foreign_worktree");
+});
+
+test("夹具：fixedNow 在一个测试进程内不前进（每次重读真实时钟时，写心跳到判新鲜一慢就过期）", async () => {
+  const t0 = fixedNow();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(fixedNow(), t0);
 });

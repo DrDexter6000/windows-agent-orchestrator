@@ -30,7 +30,6 @@
 | TD-124 | 静态规则可被单行 join 逃逸、白名单非行内容锚定、深度2写者未覆盖 | 开放 | 等样本：首次真实逃逸实证；触碰守卫/白名单时顺带收紧 | src/application/sessionReuse.js |
 | TD-125 | prune 归档有 TOCTOU 覆盖窗、无逐文件容错，子目录语料与顶层日志不在清扫面 | 开放 | 等样本：TOCTOU 真实冲突实证；子目录策略 Owner 需要时另立 | docs/usage.md |
 | TD-128 | 读绑定清扫大部分已修，但维持清单仍有约十处无绑定读面：写侧 CAS 三门、seq 水位族、events[0] 类等，外 run 伪造行仍可污染观测或锁死交付决策 | 开放 | 等样本：触发条件入册（非人调用方、程序化消费输出、pre-envelope 存量变非零） | src/transcript.js src/runManager.js src/backgroundRunner.js |
-| TD-130 | 全量测试套件存在多文件多波环境性 isolation_pass 假失败，根因未定位，靠串行闸与复跑缓解 | 开放 | 等样本：T1/T2/T3 重开后闸独占下仍现 isolation_pass 假失败 | docs/research/td130-root-cause.md src/verificationGate.js src/machineGatePaths.js |
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
@@ -48,14 +47,12 @@
 | TD-164 | 结构化信封试点获 Owner 批准后只跑了首臂，判死条件还没评估（跨模型 KV 直传已裁定不适用） | 开放 | 择机：试点随主线批次；三个重看条件任一满足即重评 |  |
 | TD-168 | 测试冗余清扫主体已落地，35 个删并候选仍待人工逐条定谳 | 开放 | 择机：候选逐条定谳；cli.test.js 下次大改时顺带整理 | test/fixtures/mcpWireKeySets.js test/isolation-infra/reporter.test.js |
 | TD-169 | 认证通道零 case 已改显式失败（拒跑 exit 2）；selected/executed 等执行计数与 strict drill 覆盖不足可归 full 两项未做 | 开放 | 择机：阶段 2 处理 | scripts/run-reliability.mjs |
-| TD-170 | 全量测试各波的时长没有基线和漂移告警（上次靠人工比对才发现 390s 涨到 600s） | 开放 | 等样本：环境漂移再次污染验证结论时建波时长基线与告警 |  |
 | TD-171 | deliveryVerification.test.js 曾在并发下从约 246 秒涨到约 600 秒，原因没查清；2026-10-16/17 的全量里是 207–215 秒，没有复现 | 开放 | 等样本：再复现时查 | test/delivery/deliveryVerification.test.js |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 择机：触碰派发任务书或 workdir_escape 提示面时做分类提示与诊断标注 | 0062 |
 | TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 等样本：四项独立触发（接线 model、改文档、auditor 无 verdict、排查断链） | docs/troubleshooting.md |
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落结果即死的交付没有正式验收出口：等待器在后台形态可证明时已退出（决定 0096），但只能有界拒收后手工采纳；记中断事实、reverify 重跑 pending 形态未做。09-01 至 10-30 共 1 例，为前台 | 开放 | 等样本：后台形态出现，或 Lead 需要正式验收这种交付时 | .wao/decisions/0096-waiter-exits-when-the-verifier-is-gone.md |
 | TD-180 | codex 后端启动期退出、零写入零 verdict：用量到顶已能识别（codex 自报的原话进终局 run.error，诊断归 provider_capacity），其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 等样本：再遇启动期退出样本，先查 codex JSON 输出有无原话 | 0067 docs/troubleshooting.md |
-| TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 开放 | 等样本：跨波失败再现时按 docs/troubleshooting.md §8.1 安静窗口单发复验收敛归因 |  |
 | TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 等样本：下一次真实恢复 drill 运行 |  |
 | TD-183 | 完成门只在角色合同探针上（roleProbeRunCompletion）；等待到期与 llm 侧各检查不校验探针 run 是否完成即判定，传输层失败仍可能记成假红 | 开放 | 等样本：provider 抖动打到未覆盖探针时补完成门，或 Owner 裁定推广 | scripts/reliability/componentDrills.mjs src/transcript.js |
 | TD-184 | 复用证据已还清；遗留 dsh drill 路由键重算失效待修、codex 转录照不到部分工具调用等小项 | 开放 | 择机：dsh drill 路由键修复待排期；原语表 30 天期限钟持续刷新 | 0045 scripts/reliability/session-reuse-drill.mjs |
@@ -64,7 +61,7 @@
 | TD-190 | 各项目的运行记录已按项目分桶，但都放在 WAO 安装根下，能读该根的本机会话仍可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 等样本：出现需要按项目隔离读取的宿主 | 0060 |
 | TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查 | 开放 | 等样本：各残余自带触发（宿主命令注册、advisory 失效宿主、codex 工具缺失再现） | 0066 0043 |
 | TD-193 | kimi-web 后端的 WS 事件流与 seq 游标重放已静态确认但未接线；中止已改走 REST 的 `prompts/{id}:abort` | 开放 | 等样本：REST 轮询的延迟或断线后补读成为实际问题 | docs/incidents/2026-09-30-kimi-web-wiring.md src/backends/kimiWeb.js |
-| TD-194 | 跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除。2026-11-07 三例，均首轮红单跑绿：01:50Z 夜间另一项目有 4 个 worker 在跑，`worktreeReclaimApply.test.js`；白天用电池，`processBackend.test.js`；白天接电、没有其它 WAO 运行，仍是 `worktreeReclaimApply.test.js`。filesystem 波 611–1088 s（平时约 290 s） | 开放 | 已满 3 例：立专案，逐案直跑复现加机器态取证 |  |
+| TD-194 | 全量套件随机无关用例首轮红、单跑绿（isolation_pass）。已知两条机制：同机两套全量并发互踩（TD-130 研究，已有验证闸）；`worktreeReclaim*` 的 fixedNow 每次重读真实时钟，写心跳到判新鲜（阈 10 s）一慢就超（11-07 修）。processBackend 一例未归因。波时长随机器漂移（filesystem 波 10-29 288 s、11 月 557–1794 s；同日起进程耗时差几倍），原因未查 | 开放 | 再遇首轮红按 troubleshooting §8.1 处置，先查用例有无真实时钟窗口；要判漂移先留下各波时长历史（test-results.json 每次覆盖） | docs/research/td130-root-cause.md src/verificationGate.js |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
 | TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 等样本：下次受督的长运行或 zcode 交付运行 | docs/usage.md |

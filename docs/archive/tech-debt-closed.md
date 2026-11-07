@@ -155,3 +155,6 @@
 | TD-329 | codex 报 `Selected model is at capacity.` 时诊断成 `evidence_passed_backend_failed`，Lead 看不出该等还是该修 | 2026-11-03：provider_capacity 加码 `overloaded`，只认 model 与 at capacity 短距共现的措辞；11-02 的真实转录复验为 `provider_capacity/overloaded` |
 | TD-333 | zcode 的 token 用量是会话累计：续跑与复用会话的后续轮，`run.metrics` 含前几轮，`runs metrics --summary` 重复计入 | 2026-11-05：决定 0114 §3——后端声明 `usageScope` 并随 `run.metrics` 落盘；`runs metrics` 给自身用量（减同一会话上一轮，读不到即未知）、缓存占比与首个请求，`--lineage` 列谱系，`--summary` 按自身用量相加 |
 | TD-335 | zcode 轮询一次 `session/messages` 超过 30 秒即判运行失败并清理 worker，即使 worker 仍有生命体征；每次轮询取整份会话快照，续修的长会话快照越来越大；`runs diagnose` 认不出这类失败（`unknown`） | 2026-11-07：决定 0117——`session/messages` 只留一个在途、不设超时，没应答的拍按无进展计；收口时仍未应答的文案写明已等秒数，诊断写明（无通过的证据审计时归 `unknown`） |
+| TD-130 | 全量测试套件存在多文件多波环境性 isolation_pass 假失败，根因未定位，靠串行闸与复跑缓解 | 2026-11-07：同一现象并入 TD-194（那里记已知机制与剩余工作，本条的研究与验证闸指针随行） |
+| TD-170 | 全量测试各波的时长没有基线和漂移告警（上次靠人工比对才发现 390s 涨到 600s） | 2026-11-07：并入 TD-194（波时长漂移与剩余工作记在那一行；test-results.json 每次覆盖、没有历史） |
+| TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 2026-11-07：同一现象并入 TD-194（§8.1 处置指针随行） |

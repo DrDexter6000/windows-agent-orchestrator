@@ -14,10 +14,22 @@ import { baseRepoFixture, copyGitRepo } from "./_gitRepoFixture.mjs";
 /** 远旧于任何新鲜阈的事件时间戳。 */
 export const OLD_TS = "2026-01-01T00:00:00.000Z";
 
-/** 固定时钟（计划生成用；比真实时钟略前，recent 断言两边一致）。 */
+/** 固定时钟（计划生成与 apply 用；进程启动时刻 + 60 s 的常量，recent 断言两边一致）。
+ * 每个测试进程只取一次真实时钟：每次调用都重读时，写心跳与 apply 判新鲜（阈 10 s）之间机器一慢
+ * 就超过阈值，"有新鲜心跳 → 跳过"一类断言随之失败。 */
+const FIXED_NOW = Date.now() + 60_000;
 export function fixedNow() {
-  return Date.now() + 60_000;
+  return FIXED_NOW;
 }
+
+// makeRepo 复制出的场景仓由本模块登记、进程退出时删除（与 _gitRepoFixture 删母仓
+// 同一做法）——调用方（含直接调 makeRepo 造外来仓的场景）不必各自清理。
+const createdRepos = new Set();
+process.on("exit", () => {
+  for (const dir of createdRepos) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
 
 export function git(args, cwd) {
   return execFileSync("git", args, {
@@ -49,7 +61,9 @@ export async function makeRepo(prefix = "wao-reclaim-", { ignoreWaoWorktrees = t
       return git(["rev-parse", "HEAD"], dir);
     },
   );
-  return { repo: copyGitRepo(base.dir, prefix), mainCommit: base.value };
+  const repo = copyGitRepo(base.dir, prefix);
+  createdRepos.add(repo);
+  return { repo, mainCommit: base.value };
 }
 
 export async function mkdtemp(prefix) {
