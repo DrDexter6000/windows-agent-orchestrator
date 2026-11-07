@@ -64,7 +64,7 @@
 | TD-190 | 各项目的运行记录已按项目分桶，但都放在 WAO 安装根下，能读该根的本机会话仍可跨项目读到任务书与产出；`agent?.cwd` 归属疑点未复核 | 开放 | 等样本：出现需要按项目隔离读取的宿主 | 0060 |
 | TD-191 | 宿主接入面仍未全通：三宿主无一条命令注册、派发 advisory 对若干宿主不生效、codex 偶发工具缺失未查 | 开放 | 等样本：各残余自带触发（宿主命令注册、advisory 失效宿主、codex 工具缺失再现） | 0066 0043 |
 | TD-193 | kimi-web 后端的 WS 事件流与 seq 游标重放已静态确认但未接线；中止已改走 REST 的 `prompts/{id}:abort` | 开放 | 等样本：REST 轮询的延迟或断线后补读成为实际问题 | docs/incidents/2026-09-30-kimi-web-wiring.md src/backends/kimiWeb.js |
-| TD-194 | 并发跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除。2026-11-07 01:50Z 夜间一例：交付验证独占闸、另一项目有 4 个 worker 在跑、接电无待机，`worktreeReclaimApply.test.js` 首轮红单跑绿，filesystem 波 611 s（平时约 290 s） | 开放 | 等样本：白天 flake 再现时逐案直跑复现加机器态取证，累计 3 例立专案 |  |
+| TD-194 | 跑全量测试套件时随机无关用例抖动（isolation_pass 或空 tail 失败），根因未定，worktree 数量相关性未排除。2026-11-07 三例，均首轮红单跑绿：01:50Z 夜间另一项目有 4 个 worker 在跑，`worktreeReclaimApply.test.js`；白天用电池，`processBackend.test.js`；白天接电、没有其它 WAO 运行，仍是 `worktreeReclaimApply.test.js`。filesystem 波 611–1088 s（平时约 290 s） | 开放 | 已满 3 例：立专案，逐案直跑复现加机器态取证 |  |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
 | TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
 | TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 等样本：下次受督的长运行或 zcode 交付运行 | docs/usage.md |
