@@ -48,11 +48,12 @@
 
 - package.json `version` 0.8.1 → 0.8.2（PATCH：本周期没有要用户改配置、命令或做法的变化，决定 0109）。
 
-## reliability 豁免（Owner 具名，只对 v0.8.2）
+## reliability 与 smoke 豁免（Owner 具名，只对 v0.8.2）
 
 - sol、astra（strict）：Owner 原话（2026-11-08）："说到跑可靠性门，sol和astra那边已经周额度用完了，所以这次可能它们两个车道通不过，可以豁免，请知悉"。理由：两条车道的周额度用完。
 - deepseek-pro（delta）：Lead 问"可靠性门里的 deepseek-pro 那一行……v0.8.2 这一行是照样豁免，还是你想先解除暂停再跑？"，Owner 答"继续豁免"。理由：该车道带 Owner 的暂停派发说明（"调试中，暂勿派发"），不派发也不探测。
-- 三行状态都是"豁免"，不是"通过"；不常驻，不沿用到下一版。
+- codex smoke（`npm run smoke` 的 codex 一行）：Lead 问"v0.8.2 发版门槛里的 smoke：claude-code 通过，codex 失败，原因是 codex 账号周额度用完……这一行怎么处理？"，Owner 选"豁免，今晚打标"。理由：与 sol、astra 同一个 codex 周额度用完；失败的那次运行里 codex 进程起来了、报错被读出并命名，只是没跑到真回复。额度恢复后补跑一次，结果另记。
+- 四行状态都是"豁免"，不是"通过"；不常驻，不沿用到下一版。
 
 ## SSOT 核查（§9 第 0 步）
 
@@ -62,14 +63,22 @@
 - 判为不改或留到发版后：守卫钉住的投影与家（SKILL 的 1200000 句、`npm run mcp` 在入职手册 §4e）；isolation_failed 的三处陈述（契约、操作含义、现象→动作各在其家）；其余重复与缺口进台账 TD-344，runner 无声死亡进 TD-341，`runs settle` 位置参数进 TD-342，`lead_preflight` 描述补 open item 进 TD-343（要 Owner 批准工具面重冻）。
 - 第 86 批：地图建议 E1（worker 交付验证只跑定向测试）经 Owner 同意写成决定 0118，随本版发布，只改文档。复核 consult_20261108153641474abtc8a（deepseek-flash，PASS_WITH_NOTES）：口号与夹具一条字面冲突、交付表漏了测试文件增删与按目录读的守卫、快照把它放在"判为不改"下，已改；`docs/usage/dispatch.md` 的 delivery 示例用 `npm test` 加 1200000，属合法的运行器类写法，判为不改。
 
-## 发版门槛证据（打标前写入）
+## 发版门槛证据（2026-11-08，本地实跑；打标后追加）
 
-（待填：全量、surface 再生成、reliability 逐车道、smoke）
+- 全量 `npm test`：**368/368 通过**（6 波，1085 秒，其中 filesystem 波 729 秒；无隔离重跑，runs 守卫干净），跑在 c5a5a31 上。tag `v0.8.2` 指向的 97be473 在它之上只改了 `docs/**` 与 `.wao/decisions/**`（第 86 批，决定 0118），按 `docs/testing.md` 跑了横切守卫组与读这些文档的测试（359/359）。插电，期间没有待机。
+- surface 再生成（§9 第 3 步）：在 97be473 上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致。
+- `npm run reliability`：从主检出在 c5a5a31 上逐车道跑（`--agent <lane>`），五条车道共约 6 分钟（15:37–15:43Z）：
+  - kimi、deepseek-flash、opus、glm-flash、glm-pro（delta）：全过，评 conditional（delta 子集全过不产生 certified）。
+  - sol、astra、deepseek-pro：按上文豁免，未跑。
+  - 97be473 只改文档，不改运行时代码。
+- `npm run smoke`（主检出 c5a5a31，15:45Z）：claude-code PASS；codex FAIL，codex 账号周额度用完（"try again at Nov 9th, 2026 1:19 PM"），按上文豁免。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.8.1 v0.8.2`；`git rev-list --count v0.8.1..v0.8.2`。
 
 ## 总量
 
-（待填：`git diff --shortstat v0.8.1 v0.8.2`、`git rev-list --count v0.8.1..v0.8.2`）
+62 个提交（含 v0.8.1 打标后的发版记录与本次的发版提交），177 个文件，+13,606 / −1,123 行（`git diff --shortstat v0.8.1 v0.8.2`）。
 
 ## 发版记录
 
-（待填）
+- tag：`v0.8.2`（annotated → 97be473，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩。
