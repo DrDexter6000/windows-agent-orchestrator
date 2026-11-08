@@ -409,6 +409,13 @@ export class ProcessBackend {
     // failure: the child cannot receive its task, so we kill it and reject.
     if (correctable) {
       const stdin = child.stdin;
+      // 子进程先退出时，初始写入与后续 _sendCorrection 写入的回调收到 EPIPE 的
+      // 同时，管道还会发出 'error' 事件——没有常驻监听就是未捕获异常，整个
+      // runner 无声退出（2026-11-07 现场同族：EPIPE 先于 close 到达）。写失败
+      // 本身已由各自的回调收口（初始写入走 kill+throw，纠正写入返回
+      // send_failed），这个监听只负责让本进程不崩（与下面 promptOnStdin 分支、
+      // zcode/deepSeek 两线同款）。
+      stdin?.on("error", () => {});
       try {
         const line = `${this.encodeUserMessage(task.prompt)}\n`;
         await new Promise((resolve, reject) => {

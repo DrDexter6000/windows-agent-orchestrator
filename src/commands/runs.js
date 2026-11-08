@@ -486,25 +486,33 @@ async function runsWaitCommand(args, config, deps = {}) {
 /**
  * 决定 0095：`wao runs wait <runId> --until-settled`——收口等待器的 CLI 面。
  * 轮询循环（解析 → 读新快照 → 收口判定 + 生命体征 → 节流进度行，含决定 0096
- * 的验证者缺席证明）原样上移到 src/application/runSettlementWait.js——
- * `consult wait <consultId> --until-settled` 逐席调用同一算法，不复制。本命令
- * 只保留两面的事：SIGINT 注册（application 层不碰进程信号）与按闭集 outcome
- * 渲染终行 + 退出码（0 收口；3 不可信轮连续 4 次或 verifier_gone；4 持久冲突；
- * 130 SIGINT——单一出口：置位后即便已判收口也只输出一份中断结果）。
+ * 的验证者缺席证明与第 83 批 B 的 runner 缺席证明）原样上移到
+ * src/application/runSettlementWait.js——`consult wait <consultId>
+ * --until-settled` 逐席调用同一算法，不复制。本命令只保留两面的事：SIGINT 注册
+ *（application 层不碰进程信号）与按闭集 outcome 渲染终行 + 退出码（0 收口；
+ * 3 不可信轮连续 4 次、verifier_gone 或 runner_gone；4 持久冲突；130 SIGINT
+ * ——单一出口：置位后即便已判收口也只输出一份中断结果）。runner 缺席证明只有
+ * 本命令开启（consult wait 的渲染面未接 runner_gone，等待器缺省关闭）。
  *
  * deps 注入缝（测试确定性，原样透传给等待器）：resolveDetailedFn /
  * readTranscriptFn / nowFn / sleepFn / pollIntervalMs / verifierGoneFn /
- * verifierProofDeps。
+ * verifierProofDeps / runnerGoneFn / runnerProofDeps。
  */
 async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {}) {
   // 决定 0096：验证者已不在的证明。daemon 握手 SSOT 在 adapters 层（daemon.js），
   // 由本命令注入（application 层不得上向导入）；其余读器与 settle 同一套，测试
-  // 可经 verifierProofDeps 覆写。
+  // 可经 verifierProofDeps 覆写。第 83 批 B：runner 缺席证明同款注入。
   const verifierProofDeps = {
     nowFn: deps.nowFn ?? Date.now,
     handshakeReader: readHandshakeDetailed,
     daemonAliveFn: isDaemonAlive,
     ...(deps.verifierProofDeps ?? {}),
+  };
+  const runnerProofDeps = {
+    nowFn: deps.nowFn ?? Date.now,
+    handshakeReader: readHandshakeDetailed,
+    daemonAliveFn: isDaemonAlive,
+    ...(deps.runnerProofDeps ?? {}),
   };
   // SIGINT 单一出口：只置位；等待器循环顶部感知后经统一的最终输出点退出（130）。
   let interrupted = false;
@@ -516,6 +524,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     outcome = await waitRunSettlement({
       runId,
       runDir,
+      runnerGoneProof: true,
       progress: (line) => {
         // 文本模式进度写 stdout；JSON 模式进度写 stderr，stdout 只留最终 JSON。
         if (asJson) console.error(line);
@@ -530,6 +539,8 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
         sleepFn: deps.sleepFn,
         verifierGoneFn: deps.verifierGoneFn,
         verifierProofDeps,
+        runnerGoneFn: deps.runnerGoneFn,
+        runnerProofDeps,
       },
     });
   } finally {
@@ -627,6 +638,28 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     } else {
       console.log(`Run: ${runId} (${s.facts.state})`);
       console.log(`Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (${outcome.basis}); waiting will not change this.`);
+      console.log(`Next step: ${nextStep}`);
+    }
+    return;
+  }
+  if (outcome.kind === "runner_gone") {
+    // 第 83 批 B：runner 缺席证明成立且重读仍非终态。退出码 3（不可重试）；
+    // 证据是 settle 六道门的只读干跑，无单一 basis 可回显——事实句说清"无活
+    // owner 心跳、无可能仍在驱动它的进程"，不回显 pid/路径/命令行。
+    process.exitCode = 3;
+    const s = outcome.settlement;
+    const nextStep = buildNextStep({ surface: "cli", situation: "runner_gone", runId });
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: false,
+        runId,
+        state: s.facts.state,
+        reason: "runner_gone",
+        nextStep,
+      }, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${s.facts.state})`);
+      console.log(`Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`);
       console.log(`Next step: ${nextStep}`);
     }
     return;

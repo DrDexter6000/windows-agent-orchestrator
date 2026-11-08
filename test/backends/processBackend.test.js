@@ -1013,6 +1013,32 @@ test("M12-16: sendCorrection synchronous write throw → {ok:false, reason:'send
   assert.equal(cap.child.stdin.listenerCount("error"), beforeErr, "sync-throw path detaches the error listener too");
 });
 
+// 第 83 批 A：子进程死后写 stdin（EPIPE）不得打死 runner。现场（2026-11-07）同族：
+// 子进程退出后下一次 stdin 写的回调收 EPIPE，**同时**管道发出无人监听的 'error'
+// 事件——runner 整个进程退出码 1。correctable 分支的初始 prompt 写入失败本就走
+// kill + 有界 throw 收口；本例钉的是：回调收错的同时管道发 'error' 事件（与真实
+// 流同一次序：先回调、后事件；close 随后），spawn 仍有界拒绝、测试进程不崩。删掉
+// processBackend correctable 分支的常驻 stdin 'error' 监听 → 未捕获异常 → 本文件
+// 判红。
+test("correctable 初始 prompt 写入失败（EPIPE 先于 close）→ 有界 spawn 失败，进程不崩", async () => {
+  const cap = makeCapturingChild();
+  const backend = new ClaudeCodeBackend({ spawnFn: () => cap.child });
+  cap.child.stdin.write = (_chunk, cb) => {
+    const error = new Error("write EPIPE");
+    setImmediate(() => {
+      cap.child.exitCode = 0; // EPIPE 先到，close 随后；_kill 对已退出进程是 no-op
+      (typeof cb === "function" ? cb : () => {})(error);
+      cap.child.stdin.emit("error", error);
+      cap.child.emit("close", 0, null);
+    });
+    return true;
+  };
+  await assert.rejects(
+    backend.spawn(makeAgent(), { prompt: "doomed", correctable: true }),
+    /correctable spawn failed to write initial prompt to stdin: write EPIPE/,
+  );
+});
+
 test("非 correctable 路径 — -p 不带位置参数，提示词以纯文本写进 stdin 后关闭，无 sendCorrection", async () => {
   const cap = makeCapturingChild();
   const argv = [];

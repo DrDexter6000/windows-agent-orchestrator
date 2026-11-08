@@ -88,14 +88,14 @@ test("NEXT-04: 输入校验——未知 surface/situation 抛错；CLI 面缺 ru
 
 test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超长 runId 触发守卫）", () => {
   // 所有情形 × 两面 × 大龄数字均在限内（新情形按各自需要的入参渲染；
-  // verifier_gone 只有 CLI 面，MCP 面必须拒绝）。
+  // verifier_gone 与 runner_gone 只有 CLI 面，MCP 面必须拒绝）。
   for (const situation of NEXT_STEP_SITUATIONS) {
     for (const surface of ["mcp", "cli"]) {
-      if (situation === "verifier_gone" && surface === "mcp") {
+      if ((situation === "verifier_gone" || situation === "runner_gone") && surface === "mcp") {
         assert.throws(
           () => buildNextStep({ surface, situation }),
           /CLI-only/,
-          "verifier_gone 在 MCP 面拒绝",
+          `${situation} 在 MCP 面拒绝`,
         );
         continue;
       }
@@ -284,6 +284,28 @@ test("NEXT-10: delivery_continuable——两面 × 未决定/已拒收四句；a
   // CLI 面仍需 runId 渲染命令。
   assert.throws(
     () => buildNextStep({ surface: "cli", situation: "delivery_continuable", acceptanceStatus: null }),
+    /runId/,
+  );
+});
+
+// 第 83 批 B：runner_gone——非终态运行已无 runner 进程（CLI 面）。出口是
+// settle（先 dry-run 看门、--apply 才写，记 failed / process_missing）或 stop，
+// 只在 Lead 决定时用；交付请求过的运行，工作树里未提交的改动仍在，先看再定。
+test("NEXT-11: runner_gone——只有 CLI 面；含 settle/stop 出口与 worktree 提醒，≤480", () => {
+  const text = buildNextStep({ surface: "cli", situation: "runner_gone", runId: RUN_ID });
+  assert.match(text, new RegExp(`^Nothing on this machine can still drive this run\\. The exits are wao runs settle --run-id ${RUN_ID} --reason-file <FILE> \\(the dry run lists the gate facts first; --apply writes them, recording failed / process_missing\\) or wao stop — only on an explicit Lead decision\\.`));
+  assert.match(text, /If a delivery was requested, uncommitted changes may still be in the worktree: inspect them before deciding\.$/);
+  assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
+  // 措辞纪律：不建议 accept/reject，不出现宿主名。
+  assert.ok(!/accept|reject/i.test(text), "不建议采纳/拒收");
+  // MCP 面拒绝（CLI-only 情形——证明只在 CLI 等待器里做）。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "runner_gone" }),
+    /CLI-only/,
+  );
+  // CLI 面仍需 runId 渲染命令。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "runner_gone" }),
     /runId/,
   );
 });

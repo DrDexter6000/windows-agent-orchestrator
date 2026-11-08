@@ -1179,6 +1179,194 @@ test("W-14: 证明被拒理由参与节流键——理由变了打印一行，�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 第 83 批 B：等待器证明 runner 已不在（非终态轮；前置筛 = 最后一条绑定事件早于
+// 15 分钟静默窗；节流 5 分钟；证明 = settleRun 只读干跑，六道门不复制）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 非终态安静运行：pending + background_submitted（runner 在建会话前死亡的 settle
+// 形状），事件 ts 固定在 PROOF_TS（距真实 now 天然超过 15 分钟静默窗）。
+function runnerGoneEvents(runId) {
+  return [
+    { ...started(runId, { delivery: false }), ts: PROOF_TS },
+    { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: PROOF_TS },
+  ];
+}
+
+// runner 证明的注入集：与 settle 同一套读器全桩（零真实进程/PowerShell；缺省
+// 全"不在"→ settleRun 干跑 eligible）。settleRun 自己解析并读取转录（真文件）。
+const runnerProofDeps = {
+  runnerProofDeps: {
+    ownerLeaseReader: () => ({ present: false }),
+    identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+    runnerScanFn: async () => ({ alive: false }),
+    handshakeReader: () => ({ present: false }),
+    daemonAliveFn: () => false,
+  },
+};
+
+test("R-01: 静默不足 15 分钟不证明——proof 零调用，照常等到收口", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg01";
+    // 事件 ts 距注入 now 只有 5 分钟：前置筛（照 settle 门 4 的口径）不过。
+    const base = Date.parse("2026-10-20T12:00:00.000Z");
+    writeLines(dir, runId, [
+      { ...started(runId, { delivery: false }), ts: new Date(base).toISOString() },
+      { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: new Date(base).toISOString() },
+    ]);
+    let appended = false;
+    let proofCalls = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        nowFn: () => base + 5 * 60_000,
+        runnerGoneFn: async () => { proofCalls += 1; return { gone: true }; },
+        sleepFn: async () => {
+          if (!appended) {
+            appended = true;
+            appendLines(dir, runId, [stateChange(runId, "completed")]);
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "结果落地后照常收口退出 0");
+    assert.equal(proofCalls, 0, "静默不足 15 分钟：一次证明都不发起");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R-02: 证明成立且重读仍非终态 → 退出 3（Run/Stuck/Next step 三行终行）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg02";
+    writeLines(dir, runId, runnerGoneEvents(runId));
+    const r = await runWaitSettled({ dir, runId, deps: runnerProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 3, `只输出三行终行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[0], `Run: ${runId} (running)`);
+    assert.equal(
+      r.outLines[1],
+      `Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`,
+    );
+    assert.match(r.outLines[2], new RegExp(`^Next step: Nothing on this machine can still drive this run\\. The exits are wao runs settle --run-id ${runId} --reason-file <FILE>`));
+    assert.match(r.outLines[2], /or wao stop — only on an explicit Lead decision\./);
+    assert.match(r.outLines[2], /uncommitted changes may still be in the worktree: inspect them before deciding\.$/);
+    assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R-02b: JSON 模式——{settled,runId,state,reason,nextStep}，进度不上 stdout", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg02b";
+    writeLines(dir, runId, runnerGoneEvents(runId));
+    const r = await runWaitSettled({ dir, runId, asJson: true, deps: runnerProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 1, "stdout 只留最终 JSON");
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "reason", "runId", "settled", "state"]);
+    assert.equal(parsed.settled, false);
+    assert.equal(parsed.runId, runId);
+    assert.equal(parsed.state, "running");
+    assert.equal(parsed.reason, "runner_gone");
+    assert.equal(typeof parsed.nextStep, "string");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R-03: 证明成立但重读时已收口 → 照常退出 0，不报 runner_gone", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg03";
+    writeLines(dir, runId, runnerGoneEvents(runId));
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return runnerGoneEvents(runId);
+      return [...runnerGoneEvents(runId), stateChange(runId, "completed")];
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { ...runnerProofDeps, readTranscriptFn } });
+    assert.equal(r.exitCode, undefined, "重读已收口 → 退出 0");
+    assert.equal(reads, 2, "一轮正常读 + 证明后一次重读");
+    assert.match(r.out, /Settlement: settled \(no_delivery_requested\)/);
+    assert.ok(!/runner_gone|Stuck: the runner/.test(r.out), "不出现 runner_gone 输出");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R-04: 证明不成立（owner 心跳新鲜）→ 照常等待，闭集理由进进度行", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg04";
+    writeLines(dir, runId, runnerGoneEvents(runId));
+    let appended = false;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        runnerProofDeps: {
+          ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: Date.now(), pid: 100 }),
+          identifyFn: async () => ({ verdict: "same", basis: "identity_confirmed" }),
+          runnerScanFn: async () => ({ alive: false }),
+          handshakeReader: () => ({ present: false }),
+          daemonAliveFn: () => false,
+        },
+        sleepFn: async () => {
+          if (!appended) {
+            appended = true;
+            appendLines(dir, runId, [stateChange(runId, "completed")]);
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "证明不成立 → 继续等，结果落地后退出 0");
+    assert.ok(r.outLines.some((l) => l.includes("not settled (not_terminal)")), "照常打未收口进度");
+    assert.ok(r.outLines.some((l) => l.includes("runner proof: owner_fresh")), "证明被拒的理由进进度行明细");
+    assert.ok(!/runner_gone|Stuck: the runner/.test(r.out), "不输出 runner_gone");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R-05: 节流——同一等待器两次 runner 证明至少间隔 5 分钟（时钟注入）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg05";
+    const clockBase = Date.parse("2026-10-15T12:00:00.000Z");
+    // 事件 ts 早于注入钟 20 分钟：从第 1 轮起前置筛就过。
+    const events = runnerGoneEvents(runId).map((e) => ({ ...e, ts: new Date(clockBase - 20 * 60_000).toISOString() }));
+    writeLines(dir, runId, events);
+    let clock = clockBase;
+    let proofCalls = 0;
+    let reads = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        nowFn: () => clock,
+        sleepFn: async () => { clock += 15000; },
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads < 26 ? events : [...events, stateChange(runId, "completed")];
+        },
+        runnerGoneFn: async () => {
+          proofCalls += 1;
+          return { gone: false, refusal: "runner_alive" };
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined, "第 26 轮结果落地后收口");
+    assert.equal(reads, 26);
+    assert.equal(proofCalls, 2, "首轮一次 + 满 5 分钟（第 21 轮）一次；5 分钟内不重复");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 决定 0112：收口终行的可续提示——delivery_settled、未采纳、且同一份快照判定为
 // continuable 谱系成员时，终行/JSON 的 nextStep 用 delivery_continuable（CLI 面，
 // 点名 MCP run_continue）；否则照旧 settled_line。

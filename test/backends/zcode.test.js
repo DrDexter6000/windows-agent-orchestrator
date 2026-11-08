@@ -261,6 +261,10 @@ function fakeZcodePeer(child, {
     notify: (method, params) => send({ method, params }),
     serverRequest: (id, method, params) => send({ id, method, params }),
     closeTransport: (code = 0) => { child.stdout.end(); child.end(code); },
+    // 摘掉假对端挂在 child.stdin 上的 readline：readline 自带一个会抛错的
+    // 'error' 监听（真实现从不在 stdin 上放 readline），不断管测试里它会盖过
+    // 被测的常驻监听。
+    detachStdinReader: () => lines.close(),
   };
 }
 
@@ -2626,6 +2630,52 @@ test("zcode ⑦: 轮询中进程死 → done(failed, transport closed)", async (
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /transport closed/);
+});
+
+// 第 83 批 A：子进程死后写 stdin（EPIPE）不得打死 runner。
+//
+// 现场（2026-11-07）：zcode app-server 退出后，下一次 child.stdin.write 的回调
+// 收到 EPIPE，**同时** stdin 发出无人监听的 'error' 事件——后台 runner 整个进程
+// 退出码 1，转录停在 running。writeLine 的回调本就拒掉在途请求（轮询循环按
+// "请求被拒"收口 failed），⑦d 钉的是：子进程已死而 close 尚未到达（EPIPE 先于
+// close，与现场同时序）时，写失败照常以 failed 收口、测试进程不崩。删掉 zcode.js
+// 的常驻 stdin 'error' 监听后，helper 里的 emit("error") 无监听 → 未捕获异常 →
+// 本测试文件判红。
+function breakStdin(child) {
+  // 断管：就地破坏同一个 stdin 对象（对象身份不变——backend 在 spawn 时挂上的
+  // 常驻 'error' 监听正是挂在它上面；换对象会把监听留在旧流上，测不到实现）。
+  // 每次 write 的回调收到错误，同时（与真实流同一次序：先回调、后事件）发出
+  // 'error' 事件；EPIPE 之后才轮到 close。真实流的错误由 OS 异步送达，这里用
+  // setImmediate 模拟同样的异步时序。
+  const stdin = child.stdin;
+  stdin.write = (_data, cb) => {
+    const error = new Error("write EPIPE");
+    setImmediate(() => {
+      child.exitCode = 0; // EPIPE 先到，close 随后（_kill 对已退出进程是幂等 no-op）
+      (typeof cb === "function" ? cb : () => {})(error);
+      stdin.emit("error", error);
+      // close 再晚一拍：让写回调的拒绝先被消费（现场的 EPIPE 也先于 close 到达）。
+      setImmediate(() => child.emit("close", 0, null));
+    });
+    return true;
+  };
+}
+
+test("zcode ⑦d: 轮询中子进程死、stdin 断（EPIPE 先于 close）→ 照常 done(failed, zcode polling failed)，进程不崩", async () => {
+  const { child, peer, handle } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const collectPromise = collect(handle);
+  // 等首个轮询拍落定，然后"子进程死亡"：stdin 断（不先 emit close——现场里
+  // EPIPE 比子进程的 close 事件先到）。
+  assert.ok(await waitUntil(() => peer.polls() >= 1), "先有正常轮询拍");
+  peer.detachStdinReader();
+  breakStdin(child);
+  const events = await collectPromise;
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /^zcode polling failed:.*EPIPE/,
+    "失败文本照现有口径（请求被拒 = 进程死）");
 });
 
 test("zcode ⑦b: spawn 握手期进程死 → spawn 上抛（transport closed）；失败清理走注入 killFn", async () => {

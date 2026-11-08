@@ -183,6 +183,10 @@ function fakeAcpPeer(child, {
       send({ jsonrpc: "2.0", id, method, params });
     },
     closeTransport(code = 0) { child.stdout.end(); child.end(code); },
+    // 摘掉假对端挂在 child.stdin 上的 readline：readline 自带一个会抛错的
+    // 'error' 监听（真实现从不在 stdin 上放 readline），不断管测试里它会盖过
+    // 被测的常驻监听。
+    detachStdinReader() { lines.close(); },
   };
 }
 
@@ -964,6 +968,54 @@ test("ACP 断链：transport 先于终态关闭 → done failed（不投影为 c
   assert.equal(done.reason, "failed");
   assert.match(done.error, /transport closed before completion/);
   assert.ok(events.some((e) => e.kind === "message" && e.parts.some((p) => p.text === "partial")));
+});
+
+// 第 83 批 A：子进程死后写 stdin（EPIPE）不得打死 runner。现场（2026-11-07）同族：
+// 子进程退出后下一次 stdin 写的回调收 EPIPE，**同时**管道发出无人监听的 'error'
+// 事件——runner 整个进程退出码 1。写失败已由写回调拒掉在途请求（session/close 由
+// _shutdown 的 catch 收口），本例钉的是：子进程已死而 close 尚未到达（EPIPE 先于
+// close，与现场同时序）时，终态照常 failed 收口、测试进程不崩。删掉 deepSeekAcp.js
+// 的常驻 stdin 'error' 监听后，helper 里的 emit("error") 无监听 → 未捕获异常 →
+// 本测试文件判红。
+function breakStdin(child) {
+  // 断管：就地破坏同一个 stdin 对象（对象身份不变——backend 在 spawn 时挂上的
+  // 常驻 'error' 监听正是挂在它上面；换对象会把监听留在旧流上，测不到实现）。
+  // 每次 write 的回调收到错误，同时（与真实流同一次序：先回调、后事件）发出
+  // 'error' 事件；EPIPE 之后才轮到 close。真实流的错误由 OS 异步送达，这里用
+  // setImmediate 模拟同样的异步时序。exitCode 同步置位，_kill 对已退出进程是
+  // 幂等 no-op（绝不对假 pid 跑真 taskkill）。
+  const stdin = child.stdin;
+  stdin.write = (_data, cb) => {
+    const error = new Error("write EPIPE");
+    setImmediate(() => {
+      child.exitCode = 0;
+      (typeof cb === "function" ? cb : () => {})(error);
+      stdin.emit("error", error);
+      // close 再晚一拍：让写回调的拒绝先被消费（现场的 EPIPE 也先于 close 到达）。
+      setImmediate(() => child.emit("close", 0, null));
+    });
+    return true;
+  };
+}
+
+test("ACP EPIPE：子进程死、stdin 断（close 未到）→ 终态路径照常 failed 收口，进程不崩", async () => {
+  const { events, child } = await runAcpScenario({
+    drive: async ({ peer, child: c, promptRequest }) => {
+      // 握手完成、prompt 已发出（不等待响应——与真实 wire 一致）。然后"子进程
+      // 死亡"：stdin 断（不 emit close——现场里 EPIPE 先于 close 到达）。
+      await waitUntil(() => Boolean(promptRequest()));
+      peer.detachStdinReader();
+      breakStdin(c);
+      // 未知 sessionUpdate 类型 → queueTerminal(failed) → _shutdown 写
+      // session/close → EPIPE（写回调拒掉该请求，_shutdown 的 catch 收口）。
+      peer.notify({ sessionUpdate: "mystery_kind" });
+    },
+  });
+  assert.equal(child.exitCode, 0, "EPIPE 后 close 到达，进程死事实落定");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /unknown session update type: mystery_kind/);
 });
 
 // ===== §3.3/§3.6 能力面 =====

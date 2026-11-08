@@ -178,6 +178,13 @@ export class DeepSeekHarnessBackend {
       child.once("error", reject);
     });
 
+    // 子进程先退出后，后续 stdin 写的回调收到 EPIPE 的同时，管道还会发出 'error'
+    // 事件——没有监听就是未捕获异常，整个 runner 无声退出（2026-11-07 现场同族：
+    // EPIPE 先于 close 到达）。写失败本身已由 request 写回调拒掉在途请求
+    //（shutdown 由 _shutdown 的 catch 收口），这个监听只负责让本进程不崩，不另造
+    // 失败路径（processBackend promptOnStdin 分支同款）。
+    child.stdin?.on("error", () => {});
+
     const queue = new EventQueue();
     const pending = new Map();
     const buffered = [];

@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import readline from "node:readline";
 
 import {
   DeepSeekHarnessBackend,
@@ -216,4 +219,99 @@ test("DSH registry, credential policy, and production backend factory share the 
     () => normalizeAgent("bad", { ...agent(), credentialEnv: "" }),
     /credentialEnv/,
   );
+});
+
+// ── 第 83 批 A：子进程死后写 stdin（EPIPE）不得打死 runner ──────────────────
+//
+// 现场（2026-11-07）同族：子进程退出后下一次 stdin 写的回调收 EPIPE，**同时**管道
+// 发出无人监听的 'error' 事件——runner 整个进程退出码 1。写失败已由 request 的写
+// 回调拒掉在途请求（shutdown 由 _shutdown 的 catch 收口），本例钉的是：子进程已死
+// 而 close 尚未到达（EPIPE 先于 close，与现场同时序）时，终态照常 failed 收口、
+// 测试进程不崩。删掉 deepSeekHarness.js 的常驻 stdin 'error' 监听后，helper 里的
+// emit("error") 无监听 → 未捕获异常 → 本测试文件判红。
+// 本文件其余用例跑真实 fake runtime 子进程；这一例走注入 spawnFn 的 fake 子进程，
+// 以便在"进程已死、close 未到"的窗口里确定性地断掉 stdin。
+
+/** fake 子进程（deepSeekAcp.test.js 同款）：PassThrough 三流 + spawn 即成功。 */
+function makeFakeChild() {
+  const child = new EventEmitter();
+  child.pid = 424244;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdin = new PassThrough();
+  const originalOnce = child.once.bind(child);
+  child.once = (event, listener) => {
+    originalOnce(event, listener);
+    if (event === "spawn") queueMicrotask(() => listener());
+    return child;
+  };
+  child.end = (code = 0) => {
+    if (child.exitCode !== null) return;
+    child.exitCode = code;
+    child.emit("close", code, null);
+  };
+  return child;
+}
+
+/** 断管：就地破坏同一个 stdin 对象（对象身份不变——backend 在 spawn 时挂上的
+ * 常驻 'error' 监听正是挂在它上面；换对象会把监听留在旧流上，测不到实现）。
+ * 每次 write 的回调收到错误，同时（与真实流同一次序：先回调、后事件）发出
+ * 'error' 事件；EPIPE 之后才轮到 close。真实流的错误由 OS 异步送达，这里用
+ * setImmediate 模拟同样的异步时序。exitCode 同步置位，_kill 对已退出进程是
+ * 幂等 no-op（绝不对假 pid 跑真 taskkill）。 */
+function breakStdin(child) {
+  const stdin = child.stdin;
+  stdin.write = (_data, cb) => {
+    const error = new Error("write EPIPE");
+    setImmediate(() => {
+      child.exitCode = 0;
+      (typeof cb === "function" ? cb : () => {})(error);
+      stdin.emit("error", error);
+      // close 再晚一拍：让写回调的拒绝先被消费（现场的 EPIPE 也先于 close 到达）。
+      setImmediate(() => child.emit("close", 0, null));
+    });
+    return true;
+  };
+}
+
+test("DSH EPIPE：子进程死、stdin 断（close 未到）→ 终态路径照常 failed 收口，进程不崩", async () => {
+  const child = makeFakeChild();
+  const backend = new DeepSeekHarnessBackend({ spawnFn: () => child });
+  let stdinBroke = false;
+  // 迷你对端：initialize / session/prompt 照答（runtime 身份 + prompt 回执），
+  // prompt 应答后立刻以该会话为父推 subagent.started（queueTerminal(failed) 的
+  // 最短路径，不需要 prompt 回执之外的任何事件形状）。
+  const lines = readline.createInterface({ input: child.stdin });
+  lines.on("line", (line) => {
+    if (!line.trim()) return;
+    const frame = JSON.parse(line);
+    if (frame.method === "initialize") {
+      child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { serverInfo: { name: "deepseek-harness-sdk-runtime" } } }) + "\n");
+      return;
+    }
+    if (frame.method === "session/prompt") {
+      child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { messageId: "m_epipe_1" } }) + "\n");
+      // 先摘掉本对端挂在 child.stdin 上的 readline：readline 自带一个会抛错的
+      // 'error' 监听（真实现从不在 stdin 上放 readline），不断管它会盖过被测的
+      // 常驻监听。然后子进程"死亡"：stdin 断（不 emit close——现场里 EPIPE 先于
+      // close 到达）。
+      lines.close();
+      breakStdin(child);
+      stdinBroke = true;
+      // 终态触发：未授权内部 subagent → queueTerminal(failed) → _shutdown 写
+      // shutdown 请求 → EPIPE（写回调拒掉该请求，_shutdown 的 catch 收口）。
+      child.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "subagent.started", params: { parentSessionId: frame.params?.sessionId, childSessionId: "child-1" } }) + "\n");
+    }
+  });
+
+  const handle = await backend.spawn(agent(), { prompt: "probe", roleContract: "bounded role" });
+  const events = await collect(handle);
+  assert.ok(stdinBroke, "断管已装上（prompt 写入之后）");
+  assert.equal(child.exitCode, 0, "EPIPE 后 close 到达，进程死事实落定");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /unauthorized internal subagent/);
 });

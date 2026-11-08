@@ -6,24 +6,25 @@
 // 复用，命令面各自保留自己的渲染与退出码）。
 //
 // 本模块只负责"等到收口/判死/冲突/中断"这件事：轮询、不可信轮计数、收口后再
-// 解析确认、终态等验证的验证者缺席证明（0096 节流）、进度行节流。它不做任何
-// 渲染决策、不设 process.exitCode、不碰 process 信号——输出与中断归调用面
-//（progress / isInterrupted 注入；SIGINT 注册留在 commands 层，daemon 握手
+// 解析确认、终态等验证的验证者缺席证明（0096 节流）、非终态轮的 runner 缺席
+// 证明（第 83 批 B，节流；只读干跑 settleRun，不复制六道门）、进度行节流。它不
+// 做任何渲染决策、不设 process.exitCode、不碰 process 信号——输出与中断归调用
+// 面（progress / isInterrupted 注入；SIGINT 注册留在 commands 层，daemon 握手
 // 读器同样由 commands 层注入——application 层不得 import daemon.js）。
 //
 // Architectural contract:
 //   - No argv parsing, no console.log/error（进度经注入的 progress 输出）,
 //     no process.exit / process.exitCode / process.on.
 //   - 收口判定复用 determineRunSettlement（runSettlement.js）——不复制判定。
-//   - daemon 握手读器不在本层：verifierProofDeps 原样透传给 verifierGoneFn，
-//     缺注入 = 接线错误，由 proveVerifierGone 响亮失败（循环照旧当探测失败，
-//     不构成死亡证明）。
+//   - daemon 握手读器不在本层：verifierProofDeps / runnerProofDeps 原样透传给
+//     verifierGoneFn / runnerGoneFn，缺注入 = 接线错误，由 proveVerifierGone /
+//     settleRun 响亮失败（循环照旧当探测失败，不构成死亡证明）。
 
 import { readTranscript } from "../transcript.js";
 import { resolveTranscriptPathDetailed } from "../projectBuckets.js";
 import { boundReportScope } from "../metrics.js";
 import { determineRunSettlement } from "./runSettlement.js";
-import { proveVerifierGone } from "./runSettle.js";
+import { proveVerifierGone, settleRun, SETTLE_QUIET_WINDOW_MS } from "./runSettle.js";
 import { runWaitNextStep } from "./runNextStep.js";
 import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "./runQuietAdvisory.js";
 
@@ -33,10 +34,35 @@ import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "./runQuietAdvisory.
 // 逐轮一行（每小时 240 行）只是白耗上下文。
 // 决定 0096：终态等验证的轮每 5 分钟至多证明一次验证者已不在；证明成立后重新
 // 解析、重读、再判一次：已收口照常退出 0，仍等验证才退出 3。
+// 第 83 批 B：非终态轮的 runner 缺席证明同款节流（同一 5 分钟值，独立计数）。
 export const SETTLEMENT_POLL_INTERVAL_MS = 15000;
 export const SETTLEMENT_MAX_UNTRUSTED_ROUNDS = 4;
 export const SETTLEMENT_PROGRESS_EVERY_MS = 5 * 60 * 1000;
 export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
+export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_MS;
+
+/**
+ * 第 83 批 B：runner 已不在的证明（只读）。以只读干跑调 settleRun（apply:false）
+ * ——六道门全在 settleRun 里，这里不复制；eligible:true 即"非终态、owner 心跳
+ * 不在、本机无 runner 进程、静默窗、会话形状、无活 daemon"全部成立。settleRun
+ * 自己重新解析并读取转录（不用等待器的快照：门的判定本来就该看证明时刻的最新
+ * 事实）。daemon 握手读器由调用面经 deps 注入（application 不 import daemon.js）
+ * ——缺注入时 settleRun 响亮失败，由等待器按探测失败处理：继续等，不构成死亡
+ * 证明。reasonText 只是 dry-run 的入参校验用的占位（结算决定仍归 Lead，出口在
+ * nextStep 里指明）。
+ */
+async function proveRunnerGone({ runId, runDir, deps }) {
+  const result = await settleRun({
+    runId,
+    runDir,
+    reasonText: "runner_gone proof (read-only dry-run from the settlement wait; settle only on an explicit Lead decision)",
+    apply: false,
+    deps,
+  });
+  return result.eligible === true
+    ? { gone: true }
+    : { gone: false, refusal: result.refused ?? "unknown" };
+}
 
 /**
  * 等一个运行收口（只读：不改任何状态、不停 worker、不设总时长；永不沿用旧快照
@@ -53,10 +79,18 @@ export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
  * conflict，解析变了算不可信轮，不变才返回 verifier_gone；重读的解析/读取失败
  * 照原有规则算不可信轮。证明被拒的理由并入本轮进度行明细并参与节流键。
  *
+ * 第 83 批 B：runnerGoneProof=true 时（runs wait 开启；consult wait 的渲染面
+ * 未接这道证明，缺省关闭、字节兼容），可信、**非终态**的轮加一道同形证明：最后
+ * 一条绑定事件早于 SETTLE_QUIET_WINDOW_MS 才值得探测（照 settle 门 4 的口径省
+ * 掉注定拒绝的干跑），每 5 分钟至多一次，以只读干跑调 settleRun。成立后重新
+ * 解析、重读、再判一次：已收口照常返回 settled；仍非终态才返回 runner_gone
+ *（等待器只陈述事实，结算/停止仍归 Lead）；被拒的闭集理由同样进进度行明细。
+ *
  * 返回闭集 outcome（kind 成员与退出码的映射归调用面——runs wait / consult wait
  * 各自同义映射）：
  *   { kind: "settled", settlement, snapshotReadAt, events }
  *   { kind: "verifier_gone", settlement, basis, snapshotReadAt, events }
+ *   { kind: "runner_gone", settlement, snapshotReadAt, events }
  *   { kind: "conflict", settlement, snapshotReadAt, events }
  *   { kind: "untrusted", reason, rounds, settlement, snapshotReadAt, events }
  *   { kind: "interrupted", settlement, snapshotReadAt, events }
@@ -70,19 +104,23 @@ export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
  * @param {string} input.runId
  * @param {string} input.runDir
  * @param {string} [input.label="runs wait"] — 进度行前缀（[<label>] round N: …）
+ * @param {boolean} [input.runnerGoneProof=false] — 开启非终态轮的 runner 缺席
+ *   证明（第 83 批 B）。缺省关闭：consult wait 共用本循环而其渲染面未接
+ *   runner_gone，保持字节兼容。
  * @param {Function} [input.progress] — 进度行出口（文本面通常 stdout，JSON 面
  *   通常 stderr；由调用面决定）
  * @param {Function} [input.isInterrupted] — 每轮顶部与打印前询问；返回 true 即
  *   以 interrupted 收口（单一出口：已判收口的一轮也会被它覆盖）
  * @param {object} [input.deps] — { pollIntervalMs, resolveDetailedFn,
- *   readTranscriptFn, nowFn, sleepFn, verifierGoneFn, verifierProofDeps } 测试
- *   确定性注入缝
+ *   readTranscriptFn, nowFn, sleepFn, verifierGoneFn, verifierProofDeps,
+ *   runnerGoneFn, runnerProofDeps } 测试确定性注入缝
  * @returns {Promise<object>} 闭集 outcome（见上）
  */
 export async function waitRunSettlement({
   runId,
   runDir,
   label = "runs wait",
+  runnerGoneProof = false,
   progress = () => {},
   isInterrupted = () => false,
   deps = {},
@@ -100,10 +138,19 @@ export async function waitRunSettlement({
     ...(deps.verifierProofDeps ?? {}),
   };
   let lastVerifierProofAt = null;
+  // 第 83 批 B：runner 已不在的证明（settleRun 只读干跑）。注入纪律同上：daemon
+  // 读器由调用面经 runnerProofDeps 注入，缺注入 = settleRun 响亮失败 → 探测失败。
+  const runnerGoneFn = deps.runnerGoneFn ?? proveRunnerGone;
+  const runnerProofDeps = {
+    nowFn,
+    ...(deps.runnerProofDeps ?? {}),
+  };
+  let lastRunnerProofAt = null;
   // 建议（会审）：证明被拒的理由并入进度行明细与节流键——sticky 到下一次证明
   // 给出新理由；理由变化立即打印一行，不变时仍按 5 分钟节流。不回显 pid、路径
-  // 与命令行。
+  // 与命令行。runner 证明同款（第 83 批 B）。
   let lastProofRefusal = null;
+  let lastRunnerRefusal = null;
 
   // 可信未收口轮的进度节流（见上方常量）。不可信轮每轮都打，打过之后下一个
   // 可信轮无条件再打一行。
@@ -274,6 +321,92 @@ export async function waitRunSettlement({
               }
             }
           }
+          // 第 83 批 B：runner 缺席证明——只对开启它的调用面（runs wait）与可信、
+          // 非终态的轮生效（终态等验证的轮有上面的验证者证明，两者互斥）。前置筛
+          // 照 settle 门 4 的口径：最后一条绑定事件早于 SETTLE_QUIET_WINDOW_MS 才
+          // 值得探测（省掉注定拒于 quiet_window 的干跑）；节流 5 分钟。证明成立后
+          // 重新解析、重读、再判一次（0096 同一纪律——绝不把旧快照当成仍非终态）。
+          if (runnerGoneProof && !settlement.facts.terminal) {
+            const proofNow = nowFn();
+            const proofBound = events.filter((e) => e && e.runId === runId);
+            const lastBoundTs = Date.parse(proofBound[proofBound.length - 1]?.ts);
+            const proofDue = Number.isFinite(lastBoundTs)
+              && proofNow - lastBoundTs >= SETTLE_QUIET_WINDOW_MS
+              && (lastRunnerProofAt === null
+                || proofNow - lastRunnerProofAt >= SETTLEMENT_RUNNER_PROOF_EVERY_MS);
+            if (proofDue) {
+              lastRunnerProofAt = proofNow;
+              let proof;
+              try {
+                proof = await runnerGoneFn({ runId, runDir, deps: runnerProofDeps });
+              } catch {
+                proof = null; // 探测自身的意外失败不构成死亡证明：继续等
+              }
+              if (proof?.gone === false && typeof proof.refusal === "string") {
+                lastRunnerRefusal = proof.refusal;
+              }
+              if (proof?.gone === true) {
+                lastRunnerRefusal = null; // 最新一次证明已成立，旧拒收理由不再挂着
+                // 证明成立：重新解析、重读、再判一次。解析变更/读取失败按原有
+                // 规则算不可信轮——绝不把旧快照当成仍非终态。
+                const reResolution = safeResolve();
+                if (reResolution.conflict) {
+                  outcome = { kind: "conflict" };
+                  break;
+                }
+                if (!reResolution.found) {
+                  const [reason, text] = reResolution.unreadable
+                    ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+                    : ["not_found", "transcript not found"];
+                  markUntrusted(round, reason, text);
+                  progressAllowed = false;
+                } else {
+                  const reEvents = await readSnapshot(reResolution);
+                  if (reEvents === null) {
+                    markUntrusted(round, "snapshot_read_failed", "snapshot read failed");
+                    progressAllowed = false;
+                  } else {
+                    const reSettlement = determineRunSettlement(reEvents, runId);
+                    lastSettlement = reSettlement;
+                    if (reSettlement.status === "undeterminable") {
+                      markUntrusted(round, `undeterminable:${reSettlement.reason}`, `settlement undeterminable (${reSettlement.reason})`);
+                      progressAllowed = false;
+                    } else if (reSettlement.status === "settled") {
+                      // 与既有收口出口同一确认：收口后再解析一次。
+                      const confirm = safeResolve();
+                      if (confirm.conflict || !confirm.found || confirm.path !== reResolution.path) {
+                        markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
+                        progressAllowed = false;
+                      } else {
+                        outcome = { kind: "settled", settlement: reSettlement };
+                        break;
+                      }
+                    } else if (!reSettlement.facts.terminal) {
+                      // 重读仍非终态：照收口出口再解析一次——冲突立即 conflict；
+                      // 路径变了/未找到算不可信轮继续；不变才 runner_gone。
+                      const confirm = safeResolve();
+                      if (confirm.conflict) {
+                        outcome = { kind: "conflict" };
+                        break;
+                      }
+                      if (!confirm.found || confirm.path !== reResolution.path) {
+                        markUntrusted(round, "resolution_changed_after_runner_gone", "runner proven gone but transcript resolution changed; continuing");
+                        progressAllowed = false;
+                      } else {
+                        outcome = { kind: "runner_gone", settlement: reSettlement };
+                        break;
+                      }
+                    } else {
+                      // 重读后变成终态等验证等别的可信未收口形态：照常等待，进度
+                      // 行按新判定与新快照打印（那形态归上面的验证者证明管）。
+                      settlement = reSettlement;
+                      progressEvents = reEvents;
+                    }
+                  }
+                }
+              }
+            }
+          }
           const now = nowFn();
           // 拒收理由注脚只在"终态等验证"的形态上挂着（sticky：直到下一次证明
           // 给出新理由或形态离开）；形态离开即清，复活等别的形态不带旧注脚。
@@ -283,17 +416,23 @@ export async function waitRunSettlement({
             ? `; verifier proof: ${lastProofRefusal}`
             : "";
           let detail = `; delivery state: wao runs delivery ${runId}${proofNote}`;
+          // runner 证明的拒收注脚只在非终态形态上挂着（与 verifier 注脚互斥；
+          // sticky 同款：直到下一次证明给出新理由或形态离开）。
+          if (settlement.facts.terminal) lastRunnerRefusal = null;
+          const runnerNote = !settlement.facts.terminal && lastRunnerRefusal !== null
+            ? `; runner proof: ${lastRunnerRefusal}`
+            : "";
           let quiet = false;
           if (!settlement.facts.terminal) {
             const ageMs = vitalSignAgeMs(boundReportScope(progressEvents, runId) ?? progressEvents, now);
             quiet = ageMs !== null && ageMs >= LEAD_ADVISORY_QUIET_SECONDS * 1000;
             detail = ageMs === null
-              ? `; vital sign age unknown${proofNote}`
+              ? `; vital sign age unknown${proofNote}${runnerNote}`
               : quiet
-                ? `; ${runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: ageMs, runId })}${proofNote}`
-                : `; last vital sign ${Math.floor(ageMs / 60000)} min ago${proofNote}`;
+                ? `; ${runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: ageMs, runId })}${proofNote}${runnerNote}`
+                : `; last vital sign ${Math.floor(ageMs / 60000)} min ago${proofNote}${runnerNote}`;
           }
-          const progressKey = `${settlement.facts.state}|${settlement.reason}|${quiet}|${proofNote}`;
+          const progressKey = `${settlement.facts.state}|${settlement.reason}|${quiet}|${proofNote}|${runnerNote}`;
           if (progressAllowed && !isInterrupted() && (progressKey !== lastProgressKey || lastProgressAt === null
             || now - lastProgressAt >= SETTLEMENT_PROGRESS_EVERY_MS)) {
             progress(`[${label}] round ${round}: ${runId} state=${settlement.facts.state} not settled (${settlement.reason})${detail}`);
