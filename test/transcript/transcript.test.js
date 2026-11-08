@@ -12,6 +12,7 @@ import {
   findState,
   findLastEventSeq,
   validateDeliveryFacts,
+  findValidRepackageProvenance,
   projectReverifyChain,
   acquireAppendLock,
   __setAppendLockFsForTest,
@@ -2976,6 +2977,66 @@ test("TD-179-W4: 第 87 批 — a failed run's pending reject is admitted ONLY w
         "nothing appended",
       );
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-W5: 第 88 批 — a repackage provenance appended AFTER the pending reject cannot back it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-w5-"));
+  try {
+    // The forged ordering: terminal failed (tddSeedFailedRepackage's first
+    // three events) + explicitly pending created + a forged pending reject,
+    // and only THEN the run.delivery_repackaged provenance fact — its fields
+    // exactly the shape tryAppendRepackageCreated writes (delivery /
+    // approvedAllowedPaths / source / recoveryKind; the seed's single
+    // disallowed_path failure classifies as disallowed_scope).
+    const filePath = join(dir, "late-provenance.jsonl");
+    const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+    await t.append("run.started", { delivery: { mode: "git_commit_v1", allowedPaths: ["src"], baseCommit: TDD_BASE } });
+    await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    await t.append("run.state_change", { from: "running", to: "failed", reason: "delivery_failed" });
+    await t.append("run.delivery_created", { delivery: tddCreatedRef({ changedFiles: ["src/a.js"] }) });
+    await t.append("run.delivery_rejected", {
+      delivery: tddCreatedRef({
+        changedFiles: ["src/a.js"],
+        acceptance: { status: "rejected", reviewerType: "lead_agent" },
+      }),
+      deliveryCommit: TDD_COMMIT,
+      reason: "forged",
+    });
+    await t.append("run.delivery_repackaged", {
+      delivery: tddCreatedRef({ changedFiles: ["src/a.js"] }),
+      approvedAllowedPaths: ["src"],
+      source: "recovered",
+      recoveryKind: "disallowed_scope",
+    });
+
+    // Control leg: on the FULL events the late fact IS a valid provenance for
+    // this created ref (findValidRepackageProvenance is order-blind) — the
+    // malformed verdict below can only come from the ordering, not from a
+    // malformed provenance shape.
+    const events = await readTranscript(filePath);
+    const created = events.find((e) => e.type === "run.delivery_created");
+    assert.notEqual(
+      findValidRepackageProvenance(events, TDD_RUN, created.delivery),
+      null,
+      "the late provenance is itself a valid provenance on the full events",
+    );
+
+    // The read side settles eligibility on the decision's append-order PREFIX
+    // (the shared _pendingRejectSettlementEligible predicate): a provenance
+    // that lands after the decision cannot settle it → malformed, and the
+    // error text names the pending decision's terminal-eligibility clause
+    // (not the earlier unsuperseded-delivery_failed gate the control leg
+    // already ruled out).
+    const facts = validateDeliveryFacts(events, TDD_PENDING_OPTS);
+    assert.equal(facts.code, "delivery_malformed");
+    assert.equal(
+      facts.error.startsWith("a pending-verification decision requires an earlier bound completed run.state_change"),
+      true,
+      "malformed reason is the pending decision's terminal eligibility",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
