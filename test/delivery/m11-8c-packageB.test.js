@@ -63,10 +63,12 @@ function makeRegistry(dir, agents) {
 }
 
 // A transcript with a durable run.delivery_failed (base_commit_mismatch) and
-// NO run.delivery_created — the production RED shape.
-function deliveryFailedFixture(runId, code = "base_commit_mismatch") {
+// NO run.delivery_created — the production RED shape. TD-324（83 批 W2）：cwd 可
+// 参数化（缺省 "/p" 保持既有调用方逐字节不变）——MCP run_delivery 即时查询的
+// 用例传绑定的 dir（同项目运行），归属核验才放行。
+function deliveryFailedFixture(runId, code = "base_commit_mismatch", cwd = "/p") {
   return [
-    ev({ type: "run.started", backend: "claude-code", cwd: "/p", delivery: { mode: "git_commit_v1", baseCommit: "a".repeat(40), allowedPaths: ["src"] }, ts: "2026-07-24T20:00:00.000Z", runId, agentId: "coder_hq", seq: 1 }),
+    ev({ type: "run.started", backend: "claude-code", cwd, delivery: { mode: "git_commit_v1", baseCommit: "a".repeat(40), allowedPaths: ["src"] }, ts: "2026-07-24T20:00:00.000Z", runId, agentId: "coder_hq", seq: 1 }),
     ev({ type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-07-24T20:00:01.000Z", runId, agentId: "coder_hq", seq: 2 }),
     ev({ type: "run.state_change", from: "submitted", to: "completed", reason: "done", ts: "2026-07-24T20:30:00.000Z", runId, agentId: "coder_hq", seq: 3 }),
     ev({ type: "run.completed", backendSessionId: "s1", messageCount: 1, ts: "2026-07-24T20:30:00.100Z", runId, agentId: "coder_hq", seq: 4 }),
@@ -207,7 +209,8 @@ test("PB-RED7: MCP run_delivery returns structured failure variant", async () =>
   try {
     makeGitRepo(dir);
     const runId = "run_pb7";
-    writeTranscript(join(dir, "runs"), runId, deliveryFailedFixture(runId));
+    // TD-324：归属 cwd 传绑定的 dir（同项目运行）——即时查询核验归属后放行。
+    writeTranscript(join(dir, "runs"), runId, deliveryFailedFixture(runId, "base_commit_mismatch", dir));
     const registryPath = makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
     const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });

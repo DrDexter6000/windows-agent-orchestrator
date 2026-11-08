@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 
 import { runsDeliveryCommand } from "../../src/commands/runs.js";
 import {
@@ -826,5 +827,59 @@ test("TD-324-CLI: other service failure → original raw error shape unchanged",
     );
   } finally {
     cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// TD-324 必改 2（会审 consult_20261108110156831sz3w0l）：--cwd 给仓库子目录 /
+// 非 Git 目录时，失败点是目标根证明（proveWorkspaceRoot 在 assert 的打标区之外
+// 原样上抛），CLI 照旧透传原始错误形状——绝不能报归属拒绝文案
+// （"run_delivery_reverify refused: … another project…"会误导 Lead 去换项目根，
+// 而真实原因是 --cwd 本身不可证明）。真实服务链（不注入）。
+// =====================================================================
+
+test("TD-324 必改 2: --cwd subdirectory / non-Git dir → raw root-proof failure, NOT the ownership-refusal text", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "td324-root-repo-"));
+  const nonGit = mkdtempSync(join(tmpdir(), "td324-root-ng-"));
+  const runDir = mkdtempSync(join(tmpdir(), "td324-root-runs-"));
+  const subdir = join(repo, "nested");
+  try {
+    execSync("git init -q", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "t@t"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "T"', { cwd: repo, stdio: "ignore" });
+    execSync("git commit --allow-empty -q -m init", { cwd: repo, stdio: "ignore" });
+    mkdirSync(subdir, { recursive: true });
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_td324_root";
+    const jl = (o) => JSON.stringify(o) + "\n";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.started", backend: "claude-code", cwd: repo, ts: "2026-11-08T00:00:00.000Z", runId, agentId: "w", seq: 1 }),
+      jl({ type: "run.background_submitted", background: true, cwd: repo, runId, agentId: "w", ts: "2026-11-08T00:00:01.000Z", seq: 2 }),
+    ].join(""), "utf8");
+
+    // 子目录：--cwd 不是 Git 顶层——根证明失败原样透传，并如实点名真实原因。
+    await assert.rejects(
+      () => runsDeliveryCommand(["reverify", runId, "--reason", "tooling_invalid", "--cwd", subdir], { runDir }),
+      (err) => {
+        assert.ok(!/run_delivery_reverify refused/.test(err.message), "subdir: 绝不报归属拒绝文案");
+        assert.match(err.message, /subdirectory/, "subdir: 原样透传根证明失败的原始错误形状");
+        return true;
+      },
+      "subdirectory --cwd rejects with the raw root-proof failure",
+    );
+    // 非 Git 目录：同款——git rev-parse 失败的原始错误，非归属拒绝。
+    await assert.rejects(
+      () => runsDeliveryCommand(["reverify", runId, "--reason", "tooling_invalid", "--cwd", nonGit], { runDir }),
+      (err) => {
+        assert.ok(!/run_delivery_reverify refused/.test(err.message), "non-Git: 绝不报归属拒绝文案");
+        assert.match(err.message, /git rev-parse/, "non-Git: 原样透传 git 失败的原始错误形状");
+        return true;
+      },
+      "non-Git --cwd rejects with the raw root-proof failure",
+    );
+  } finally {
+    cleanupDir(repo);
+    cleanupDir(nonGit);
+    cleanupDir(runDir);
   }
 });

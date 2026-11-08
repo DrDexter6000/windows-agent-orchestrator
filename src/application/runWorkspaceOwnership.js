@@ -61,6 +61,21 @@
 import { proveWorkspaceRoot, pathsMatch, canonicalizeWorkspacePath } from "./workspaceBinding.js";
 import { isAbsolute } from "node:path";
 
+// TD-324 必改 2（83 批 W2，会审 consult_20261108110156831sz3w0l）：归属比较的
+// 拒绝（六类）与"其它失败"的机器分类边界。本模块归属比较路径（findRunWorkspace-
+// Ownership 与 verifier 闭包）抛出的错误统一为 WorkspaceOwnershipError——message
+// 逐字节保持既有固定文案（CLI 面照旧读到具体原因）；typed / assert 两个形态只对
+// 它打 code="workspace_not_authorized"。绑定根本身证明失败（proveWorkspaceRoot
+// 在 createRunWorkspaceVerifier 构造时抛出，处于两个形态的打标区之外）与意外
+// 异常（如事件形状导致的 TypeError）不属于归属拒绝：原样上抛，由各入口折叠成
+// 原有笼统失败（CLI reverify 照旧透传原始错误形状）。
+class WorkspaceOwnershipError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "WorkspaceOwnershipError";
+  }
+}
+
 /**
  * Find the workspace ownership fact for the requested run from transcript
  * events.
@@ -123,22 +138,22 @@ export function findRunWorkspaceOwnership(events, requestedRunId) {
   }
 
   if (submitted.length > 1) {
-    throw new Error("ambiguous ownership: multiple run.background_submitted events");
+    throw new WorkspaceOwnershipError("ambiguous ownership: multiple run.background_submitted events");
   }
 
   if (submitted.length === 1) {
     // ── background: run.background_submitted is the ownership authority ──
     const cwd = submitted[0].cwd;
     if (typeof cwd !== "string" || cwd.length === 0) {
-      throw new Error("malformed ownership: run.background_submitted.cwd is missing or empty");
+      throw new WorkspaceOwnershipError("malformed ownership: run.background_submitted.cwd is missing or empty");
     }
     for (const s of started) {
       if (s.cwd === undefined) continue; // backgroundRunner shape: no cwd recorded
       if (typeof s.cwd !== "string" || s.cwd.length === 0) {
-        throw new Error("malformed ownership: run.started.cwd is missing or empty");
+        throw new WorkspaceOwnershipError("malformed ownership: run.started.cwd is missing or empty");
       }
       if (!cwdsAgree(cwd, s.cwd)) {
-        throw new Error("conflicting ownership: run.started cwd does not agree with run.background_submitted cwd");
+        throw new WorkspaceOwnershipError("conflicting ownership: run.started cwd does not agree with run.background_submitted cwd");
       }
     }
     return { cwd, via: "run.background_submitted" };
@@ -147,7 +162,7 @@ export function findRunWorkspaceOwnership(events, requestedRunId) {
   // ── foreground: no background_submitted — run.started is the authority ──
   if (started.length === 0) return null; // no ownership fact at all
   if (started.length > 1) {
-    throw new Error("ambiguous ownership: multiple run.started events without run.background_submitted");
+    throw new WorkspaceOwnershipError("ambiguous ownership: multiple run.started events without run.background_submitted");
   }
   const cwd = started[0].cwd;
   if (typeof cwd !== "string" || cwd.length === 0) {
@@ -225,14 +240,14 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
   return function verify(events, requestedRunId) {
     const fact = findRunWorkspaceOwnership(events, requestedRunId);
     if (!fact) {
-      throw new Error("missing ownership: no run.background_submitted or run.started ownership event");
+      throw new WorkspaceOwnershipError("missing ownership: no run.background_submitted or run.started ownership event");
     }
 
     // A relative cwd carries no identity: canonicalizing it would resolve
     // against the PROCESS cwd, never the run's workspace — fail closed before
     // any canonicalization.
     if (!isAbsolute(fact.cwd)) {
-      throw new Error("unprovable ownership workspace");
+      throw new WorkspaceOwnershipError("unprovable ownership workspace");
     }
 
     let canonical = canonicalCache.get(fact.cwd);
@@ -246,10 +261,10 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
     }
 
     if (canonical == null) {
-      throw new Error("unprovable ownership workspace");
+      throw new WorkspaceOwnershipError("unprovable ownership workspace");
     }
     if (!match(canonical, authorizedProof.root)) {
-      throw new Error("workspace mismatch: run ownership does not match authorized workspace");
+      throw new WorkspaceOwnershipError("workspace mismatch: run ownership does not match authorized workspace");
     }
     return { authorized: true, ownershipCwd: fact.cwd };
   };
@@ -281,31 +296,39 @@ export function verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, req
 }
 
 /**
- * 0097 五′：读侧归属核验——同一判定（verify），但给运行归属比较抛出的 Error 标
- * code="workspace_not_authorized"，让 MCP 边界按 TYPE（e.code）把"运行属于
- * 另一个项目"折叠成归属拒绝专属文案，而不是笼统失败。绑定根本身证明失败
- * （目录不在、Git 证明失败）在打标区之外抛出、不标 code——那不是"运行属于
- * 另一个项目"，照旧走笼统失败。消息原文保留（CLI 面照旧读到具体原因）；供
- * 只读观察工具（run_activity / run_wait / run_await_result / run_delivery
- * 等待路径）使用——写面用 assert 同款语义。
+ * 0097 五′：读侧归属核验——同一判定（verify），但给运行归属比较抛出的
+ * WorkspaceOwnershipError 标 code="workspace_not_authorized"，让 MCP 边界按
+ * TYPE（e.code）把"运行属于另一个项目"折叠成归属拒绝专属文案，而不是笼统失
+ * 败。TD-324 必改 2：打标收窄到归属比较本身——绑定根本身证明失败（目录不在、
+ * Git 证明失败，proveWorkspaceRoot 在构造时抛出、处于 try 之外）与意外异常
+ * （如事件形状导致的 TypeError）不标 code，照旧走笼统失败。消息原文保留
+ * （CLI 面照旧读到具体原因）；供只读观察工具（run_activity / run_wait /
+ * run_await_result / run_delivery 两条路径、run_delivery_review）使用——写面
+ * 用 assert 同款语义。
  */
 export function verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, requestedRunId) {
   const verify = createRunWorkspaceVerifier(authorizedWorkspaceRoot);
   try {
     return verify(events, requestedRunId);
   } catch (e) {
-    if (e && typeof e === "object") e.code = "workspace_not_authorized";
+    if (e instanceof WorkspaceOwnershipError) e.code = "workspace_not_authorized";
     throw e;
   }
 }
 
 /**
  * Fail-closed ownership gate for the MCP write surfaces that must name WHY
- * they refused (run_collect / run_delivery_decide). Same verifier and same
- * refusals as verifyRunWorkspaceOwnership; the only difference is the closed
- * error code `workspace_not_authorized` on the thrown Error, which the MCP
- * adapter maps to a fixed refusal text. The message carries no path, cwd, or
- * dynamic value.
+ * they refused (run_collect / run_delivery_decide / run_stop / run_delivery_
+ * reverify). Same verifier and same refusals as verifyRunWorkspaceOwnership;
+ * the only difference is the closed error code `workspace_not_authorized` on
+ * the thrown Error, which the MCP adapter maps to a fixed refusal text. The
+ * message carries no path, cwd, or dynamic value.
+ *
+ * TD-324 必改 2：verifier 构造（含 proveWorkspaceRoot 根证明）在 try 之外——
+ * 绑定根本身证明失败原样上抛、不折成归属拒绝（CLI `runs delivery reverify
+ * --cwd <子目录/非 Git>` 因此照旧透传原始错误形状）；catch 也收窄到归属比较
+ * 抛出的 WorkspaceOwnershipError，其它异常（如事件形状导致的 TypeError）原样
+ * 上抛。
  *
  * @param {object[]} events
  * @param {string} authorizedWorkspaceRoot — per-call proved target root
@@ -315,9 +338,11 @@ export function verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot
  *   malformed, ambiguous, cross-run, conflicting, unprovable, or mismatched
  */
 export function assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, requestedRunId) {
+  const verify = createRunWorkspaceVerifier(authorizedWorkspaceRoot);
   try {
-    return verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, requestedRunId);
-  } catch {
+    return verify(events, requestedRunId);
+  } catch (e) {
+    if (!(e instanceof WorkspaceOwnershipError)) throw e;
     const err = new Error("run workspace ownership does not authorize this project");
     err.code = "workspace_not_authorized";
     throw err;

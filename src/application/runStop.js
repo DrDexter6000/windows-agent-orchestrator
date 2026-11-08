@@ -225,8 +225,8 @@ export async function stopRun(input) {
   // HTTP stop, or alert. Authorization failure = zero events, zero side effects.
   if (authorizedWorkspaceRoot !== undefined) {
     try {
-      // TD-324（83 批 W2）：assert 形态（closed code + 固定消息）——authorizationError
-      // 不再携带具体子类原因，统一为归属拒绝固定消息。
+      // TD-324（83 批 W2）：assert 形态（closed code + 固定消息）——归属比较的拒绝
+      // 在 authorizationError 里统一为归属拒绝固定消息；根证明失败照旧带原始消息。
       assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
     } catch (err) {
       return {

@@ -1162,3 +1162,40 @@ test("P3B-17: missing/noncanonical/different top-level deliveryCommit on request
     } finally { await ctx.dispose(); }
   }
 });
+
+// =====================================================================
+// TD-324 必改 2（会审 consult_20261108110156831sz3w0l）：`workspace_not_authorized`
+// 只覆盖"运行归属比较"的拒绝。目标根本身证明失败（--cwd 是仓库子目录 / 非 Git
+// 目录）不得打成归属拒绝——assert 的 verifier 构造（含 proveWorkspaceRoot）在
+// 打标区之外，原样上抛，e.code !== "workspace_not_authorized"。
+// =====================================================================
+
+test("TD-324 必改 2: unprovable target root is NOT an ownership refusal (service layer)", async () => {
+  const { repo } = await makeRepo("m12p3b-unprov-");
+  const runDir = await mkdtemp(join(tmpdir(), "m12p3b-unprov-runs-"));
+  const nonGit = await mkdtemp(join(tmpdir(), "m12p3b-unprov-ng-"));
+  const subdir = join(repo, "nested");
+  try {
+    await mkdir(runDir, { recursive: true });
+    await mkdir(subdir, { recursive: true });
+    const runId = "run_unprov_root";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    // 可读、归属形状完整的同项目转录——唯一失败点是目标根证明。
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.started", backend: "claude-code", cwd: repo, ts: "2026-11-08T00:00:00.000Z", runId, agentId: "w", seq: 1 }),
+      jl({ type: "run.background_submitted", background: true, cwd: repo, runId, agentId: "w", ts: "2026-11-08T00:00:01.000Z", seq: 2 }),
+    ].join(""), "utf8");
+    for (const [label, target] of [["subdirectory", subdir], ["non-Git dir", nonGit]]) {
+      const err = await runDeliveryReverify({
+        runId, runDir, reason: "tooling_invalid", authorizedWorkspaceRoot: target,
+      }).then(() => null, (e) => e);
+      assert.ok(err, `${label}: refuses`);
+      assert.notEqual(err?.code, "workspace_not_authorized",
+        `${label}: root-proof failure is NOT an ownership refusal (no code)`);
+    }
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
+    await rm(nonGit, { recursive: true, force: true });
+  }
+});

@@ -355,21 +355,25 @@ test("CLOSEOUT-C3: MCP run_delivery success and failure variants never mix shape
     const registryPath = makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
 
-    // Failure variant: delivery_failed bound to this run.
+    // Failure variant: delivery_failed bound to this run. TD-324（83 批 W2）：即时
+    // 查询也核验归属——夹具按本文件既有写法补 run.started 归属事实（cwd=绑定的
+    // dir，同项目运行），用例意图（成功/失败两形状不混）不变。
     const failRun = "run_cl_c3_fail";
     writeTranscript(join(dir, "runs"), failRun, [
-      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-25T00:00:00.000Z", runId: failRun, agentId: "coder_hq", seq: 1 }),
-      ev({ type: "run.delivery_failed", deliveryCode: "base_commit_mismatch", message: "x", ts: "2026-07-25T00:00:01.000Z", runId: failRun, agentId: "coder_hq", seq: 2 }),
+      ev({ type: "run.started", backend: "claude-code", cwd: dir, ts: "2026-07-25T00:00:00.000Z", runId: failRun, agentId: "coder_hq", seq: 1 }),
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-25T00:00:01.000Z", runId: failRun, agentId: "coder_hq", seq: 2 }),
+      ev({ type: "run.delivery_failed", deliveryCode: "base_commit_mismatch", message: "x", ts: "2026-07-25T00:00:02.000Z", runId: failRun, agentId: "coder_hq", seq: 3 }),
     ].join(""));
 
-    // Success variant: a committed DeliveryRef.
+    // Success variant: a committed DeliveryRef. 同上：补归属事实。
     const base = "a".repeat(40);
     const dc = "b".repeat(40);
     const okRun = "run_cl_c3_ok";
     writeTranscript(join(dir, "runs"), okRun, [
-      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-25T00:00:00.000Z", runId: okRun, agentId: "coder_hq", seq: 1 }),
-      ev({ type: "run.delivery_created", delivery: { schemaVersion: 1, kind: "git_commit", repoRoot: "/p", runId: okRun, baseCommit: base, deliveryCommit: dc, changedFiles: ["src/a.js"], verification: { status: "passed" } }, ts: "2026-07-25T00:00:01.000Z", runId: okRun, agentId: "coder_hq", seq: 2 }),
-      ev({ type: "run.delivery_verification_passed", delivery: { schemaVersion: 1, kind: "git_commit", repoRoot: "/p", runId: okRun, baseCommit: base, deliveryCommit: dc, changedFiles: ["src/a.js"], verification: { status: "passed" } }, ts: "2026-07-25T00:00:02.000Z", runId: okRun, agentId: "coder_hq", seq: 3 }),
+      ev({ type: "run.started", backend: "claude-code", cwd: dir, ts: "2026-07-25T00:00:00.000Z", runId: okRun, agentId: "coder_hq", seq: 1 }),
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-25T00:00:01.000Z", runId: okRun, agentId: "coder_hq", seq: 2 }),
+      ev({ type: "run.delivery_created", delivery: { schemaVersion: 1, kind: "git_commit", repoRoot: "/p", runId: okRun, baseCommit: base, deliveryCommit: dc, changedFiles: ["src/a.js"], verification: { status: "passed" } }, ts: "2026-07-25T00:00:02.000Z", runId: okRun, agentId: "coder_hq", seq: 3 }),
+      ev({ type: "run.delivery_verification_passed", delivery: { schemaVersion: 1, kind: "git_commit", repoRoot: "/p", runId: okRun, baseCommit: base, deliveryCommit: dc, changedFiles: ["src/a.js"], verification: { status: "passed" } }, ts: "2026-07-25T00:00:03.000Z", runId: okRun, agentId: "coder_hq", seq: 4 }),
     ].join(""));
 
     const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });

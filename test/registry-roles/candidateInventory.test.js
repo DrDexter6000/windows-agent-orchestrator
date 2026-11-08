@@ -288,7 +288,7 @@ test("M12-1S1-SVC-01: disallowed_path failure projects inventory; transcript/Git
   }
 });
 
-test("M12-1S1-SVC-02: cross-workspace authority fails BEFORE any worktree/Git read (0 inventory reads)", async () => {
+test("M12-1S1-SVC-02: cross-workspace authority refuses (typed) BEFORE any worktree/Git read (0 inventory reads)", async () => {
   const { repo, baseCommit } = await makeRepo();
   const { repo: otherRepo } = await makeRepo("m12s1-other-");
   const runDir = await mkdtemp(join(tmpdir(), "m12s1-runs-"));
@@ -298,15 +298,16 @@ test("M12-1S1-SVC-02: cross-workspace authority fails BEFORE any worktree/Git re
 
     let inventoryReads = 0;
     const countingFn = () => { inventoryReads += 1; return null; };
-    const view = await getRunDelivery({
+    // TD-324（83 批 W2）：即时查询与等待路径同样核验归属——跨工作区授权不再
+    // "返回基础视图、inventory 为 null"，而是整个查询以 typed
+    // workspace_not_authorized 拒绝（适配层据此报归属拒绝专属文案）。零读取的
+    // 意图不变：inventory 读取器仍一次都不被调用。
+    const err = await getRunDelivery({
       runId: RUN_ID, runDir,
       authorizedWorkspaceRoot: otherRepo, // run belongs to `repo`, authority is `otherRepo`
       computeInventoryFn: countingFn,
-    });
-    // The base delivery view is still returned (existing semantics), but the
-    // inventory is null and the inventory reader was NEVER invoked.
-    assert.equal(view.deliveryFailure.code, "disallowed_path");
-    assert.equal(view.candidateInventory, null, "no inventory across workspace authority");
+    }).then(() => null, (e) => e);
+    assert.equal(err?.code, "workspace_not_authorized", "cross-workspace authority refuses the whole query (typed)");
     assert.equal(inventoryReads, 0, "ownership proof fails before any inventory Git read");
   } finally {
     await cleanupDir(repo);
