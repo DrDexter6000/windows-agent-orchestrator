@@ -327,7 +327,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 
 ### 10.2 本地验证闭环
 
-- `npm test`：canonical 分波全量跑（约 14 分钟）、mock 子进程、零外部依赖、不消耗 token。合入 main 前在最终候选上跑一次；何时跑全量、何时跑定向测试、失败怎么判读，见 `docs/testing.md`。
+- `npm test`：canonical 分波全量跑、mock 子进程、零外部依赖、不消耗 token。合入 main 前在最终候选上跑一次；何时跑全量、何时跑定向测试、失败怎么判读，见 `docs/testing.md`。
 - 改 **delivery / 解析 / 分类**逻辑时，绿测试**不够**：必须对照真实 transcript 冒烟后再宣告完成（`AGENTS.md` 的铁律）。
 
 ### 10.3 读文档的顺序

@@ -383,7 +383,7 @@ export function renderCertification() {
   lines.push("## 三、认证台账（指针；严禁嵌入 live 值）");
   lines.push("");
   lines.push("- **组件层台账**：`runs/component-checks.json`（gitignored 运行时状态）——backend/llm 单独验证记录（组件键含 runtimeIdentity 指纹，版本漂移降 advisory）。刷新：`npm run component-check`。");
-  lines.push("- **组合层台账**：`runs/reliability-summary.json`（gitignored 运行时状态）——按车道指纹键（`lane:<16hex>`；没有车道事实的旧记录回退到席位键）聚合的 certified/conditional/draft-only 台账。刷新：`npm run reliability`。");
+  lines.push("- **组合层台账**：`runs/reliability-summary.json`（gitignored 运行时状态）——按车道指纹键（`lane:<16hex>`，键规则见 `docs/certification-runbook.md`）聚合的 certified/conditional/draft-only 台账。刷新：`npm run reliability`。");
   lines.push("- 台账是**运行时状态**，由上述命令产出与刷新；本生成文件只承载静态能力/配置表达力事实（§一/§二）——嵌入台账 live 值会把它变成会过期的快照，禁止。");
   lines.push("- 认证检查结果五态判定纪律（pass / fail / not-applicable / blocked / inconclusive）与能力轴分层：`docs/certification-runbook.md`；组件层验证（单独验证 backend / llm）的现行规则：`docs/certification-runbook.md` §组件层验证（单独验证 backend / llm）。");
   return lines.join("\n") + "\n";

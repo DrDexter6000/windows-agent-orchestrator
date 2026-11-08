@@ -118,7 +118,7 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 方案（stage 2）与交付物验收（stage 4）可登记会审 panel 记录。组席规则见 `SKILL.md`；强烈推荐但非强制，跳过需登记显式理由：
 
 ```powershell
-# 登记自报副审席位（registry 存在性校验；自报、未验证——评审旁证走 --artifacts 的 runs/<runId>.jsonl）
+# 登记自报副审席位（registry 存在性校验；自报、未验证——评审旁证走 --artifacts 的转录文件）
 npm run cli -- wao stage 2 --task "方案定稿" --panel-seats a,b --artifacts docs/plan.md
 # 登记跳过理由（闭集码；与 --panel-seats 互斥，非法码 fail-fast）
 npm run cli -- wao stage 4 --task "交付验收" --panel-skip-reason low_risk_small_task

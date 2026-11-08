@@ -33,5 +33,5 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 | 派发 | `run_dispatch` | `run <agentId> …` | MCP 无前台阻塞语义，CLI run 前台等待 |
 | 验收/交付查询与决策 | `run_delivery` / `run_delivery_decide` | `runs delivery <runId> [--accept/--reject]` | CLI 覆盖查询与 accept/reject；review 见下行 |
 | 交付审查（diff/review） | `run_delivery_review` / `run_delivery_review_bundle` | `runs delivery review <runId> --file-index N` | review 等价；bundle（readiness 加单文件一页）无 CLI 等价 |
-| 停止 | `run_stop` | `stop <runId> --observed-seq <n> --reason "<理由>"` | 等价（前置要求见监督页「停止」） |
+| 停止 | `run_stop` | `stop <runId> --observed-seq <n> --reason "<理由>"` | 等价（前置要求见监督页 run_stop 节） |
 | 台账诊断 | `run_diagnose` | `runs diagnose` | 等价（MCP 返回含 state/terminal；CLI JSON 分支刻意不含） |

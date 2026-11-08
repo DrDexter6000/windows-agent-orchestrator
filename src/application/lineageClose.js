@@ -1,7 +1,7 @@
 // src/application/lineageClose.js
 //
 // TD-254（决定 0058，2026-10-11）：交付线系闭合出口——Lead 显式放弃一条线系，
-// 释放其保留 worktree（分支永不删）与（可释的）上游会话。会审
+// 按门释放其保留 worktree（分支永不删）；会话释放不在本出口（0058，由 sweep 覆盖）。会审
 // consult_20261011085852683tcae2e（opus+sol）修正案全量落地：
 //   - 成员枚举 = bound（e.runId===文件 runId，TD-128 族）的 run.session_reuse
 //     {rootRunId} ∪ run.background_submitted {rootRunId}（续接 claim→转录窗口，
@@ -254,7 +254,7 @@ export async function closeRunLineage({
     members: members.map((m) => ({ runId: m.runId, state: m.state })),
     alreadyClosed: lineageClosedIn(targetEvents.events, rootRunId),
     worktrees: worktreePlans,
-    note: "dry-run（--apply 执行：写闭合事实+按门释放树/会话）",
+    note: "dry-run（--apply 执行：写闭合事实+按门释放保留的树）",
   };
   if (!apply) return dryRun;
 

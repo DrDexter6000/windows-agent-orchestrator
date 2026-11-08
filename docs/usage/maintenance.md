@@ -17,7 +17,7 @@ npm run cli -- runs prune --older-than 7d   # 清理 7 天前的 run
 npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run（移动不删除）
 npm run cli -- runs settle                  # 列出没有新鲜心跳的非终态运行，逐道门给出能否结算（只读）
 npm run cli -- runs settle --run-id <id> --reason-file <f> [--apply]   # 结算成 failed（process_missing）；不带 --apply 是 dry-run
-npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 关闭续修谱系、释放保留的树与会话；不带 --apply 是 dry-run
+npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 关闭续修谱系、按门释放保留的树（不删分支，不释放会话）；不带 --apply 是 dry-run
 ```
 
 `runs settle` 的进程扫描也认前台 `wao resume <runId>`：带 `--run-id`、`--resume-run-id` 或 `resume <runId>` 的进程都算 runner 还活着，结算即拒。后台运行的扫描对读不到命令行的 node 进程按创建时间收窄：只把创建不早于派发事实的（留 5 秒时钟偏差）计入，更早的进程命令行不可能带本运行的 runId；前台运行不收窄。

@@ -15,7 +15,7 @@ npm run cli -- <command> [options]
 
 执行过一次性 `npm link` 后，优先用全局 `wao` 命令：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 写法等价（同一个 CLI、同一个 v22 shim；全局 `wao` 从安装根解析配置与 `runs/`，见[安装](install.md)），可从任意目录调用。本文写 `wao X` 时 `wao` 指全局 shim。顶层命令（serve/run/registry/consult/…）的写法就是 `wao X`；wao 命名空间子命令（doctor/onboarding/…）可以直接裸写——全局 `wao doctor` 与 `npm run cli -- doctor` 都能执行，两段式 `wao wao doctor` 也照旧可用。把顶层命令写进命名空间（如 `wao wao serve`）会收到 Unknown 指路。
 
-脚本化消费（管道/jq）：`npm run cli --` 的 stdout 带 npm 横幅行，直接 `| jq` 会炸——加 `-s`（silent）得干净输出：`npm run cli -s -- <command> --format json | jq`。`--format json` 的诊断输出含 `state` 与 `terminal`（非终态与"无失败事实"不再混淆）。读结果优先用 projection JSON（`collect --format json`）——那是路径无关形状；直读转录（`runs/<runId>.jsonl`）或 raw collect 才需要按 kind 解析。转录事件是平铺形状：载荷字段合并进信封顶层（`{kind, role, parts, ts, seq, runId, agentId, type}` 一层平铺），没有嵌套的 `payload` 键；信封字段（ts/seq/runId/agentId/type）权威、载荷不得覆盖；`run.error` 的 `error`/`phase` 同样在顶层。
+脚本化消费（管道/jq）：`npm run cli --` 的 stdout 带 npm 横幅行，直接 `| jq` 会炸——加 `-s`（silent）得干净输出：`npm run cli -s -- <command> --format json | jq`。`--format json` 的诊断输出含 `state` 与 `terminal`（非终态与"无失败事实"不再混淆）。读结果优先用 projection JSON（`collect --format json`）——那是路径无关形状；直读转录文件或 raw collect 才需要按 kind 解析。转录事件是平铺形状：载荷字段合并进信封顶层（`{kind, role, parts, ts, seq, runId, agentId, type}` 一层平铺），没有嵌套的 `payload` 键；信封字段（ts/seq/runId/agentId/type）权威、载荷不得覆盖；`run.error` 的 `error`/`phase` 同样在顶层。
 
 kimi-web run 的 collect 从转录事件重建（与 process backend 同路），不访问活服务。活 run 的 collect 返回截至当前已落盘内容的快照，不是实时拉取。raw 模式输出重建条目（`reconstructed:true, backend:"kimi-web"`，backend 身份自 session.created 派生）；projection / `--format json` 面的字段结构不变，`evidenceCounts` 是真实计数。无效或跨版本的 cursor 按 fail-closed 语义拒绝（快照摘要不匹配），从第 1 页重读即可。停止验证消费者的 `handle.messages` 活会话探针不受影响。
 
