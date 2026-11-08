@@ -53,8 +53,8 @@
 |---|---|
 | readiness `not_requested`（`deliveryAvailable:false` + `deliveryRequested:false`） | 正常（非 delivery run），无需动作 |
 | readiness `waiting_for_packaging`（非终态请求中） | 带 `waitMs` 重读（`run_delivery` / `runs delivery --wait-ms`）；不要 stop |
-| readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实。例外：若该 run 已 completed 且已有合法 pending 拒绝决策，readiness 会落为 `reviewable`（verification 仍显示 `pending`，acceptance=rejected）——此时无需动作；这是有界结算形态，不是卡死 |
-| completed + verification `pending` 无 outcome、无决策（readiness `waiting_for_verification` 一直不落） | 有界 pending 拒绝：`runs delivery <runId> --reject --reason-file FILE` 显式结算（资格闭集、读面语义与迟到 outcome 行为见 `docs/usage/delivery.md` 场景 4c 与 `docs/02-architecture.md` §4.9）；不 stop/reverify/repackage |
+| readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实。例外：若该 run 已有合法 pending 拒绝决策，readiness 会落为 `reviewable`（verification 仍显示 `pending`，acceptance=rejected）——此时无需动作；这是有界结算形态，不是卡死 |
+| completed（或重新打包后 failed）+ verification `pending` 无 outcome、无决策（readiness `waiting_for_verification` 一直不落） | 有界 pending 拒绝：`runs delivery <runId> --reject --reason-file FILE` 显式结算（资格闭集、读面语义与迟到 outcome 行为见 `docs/usage/delivery.md` 场景 4c 与 `docs/02-architecture.md` §4.9）；不 stop/reverify/repackage |
 | readiness `isolation_failed`（`isolationFailure.code` 为 `workdir_escape`） | 无任何 salvage 面：不 repackage/reverify/review/decide/stop——重新派发 |
 | readiness `packaging_failed` 且 `deliveryFailure.code` 为 `disallowed_path`（candidateKind `disallowed_scope`，带 candidateInventory） | 读 candidateInventory，Lead 裁定后 `run_delivery_repackage` |
 | readiness `packaging_failed` 且 code 非 `disallowed_path`（其余包装失败码） | 无候选面：读 `deliveryFailure.code` + `run_diagnose`（只给事实），重新派发或人工核 |

@@ -160,3 +160,4 @@
 | TD-181 | 全量测试跨波间歇性失败（波内红、单跑绿、同提交复跑即绿）仍未归因 | 2026-11-07：同一现象并入 TD-194（§8.1 处置指针随行） |
 | TD-324 | MCP 工具与 CLI 对"运行不能证明属于本项目"的报法没对齐：多数报成笼统 failed，原因清单不全，`run_delivery` 即时查询不核验归属 | 2026-11-08：typed / assert 归属核验加各工具专属文案，原因清单由 `WORKSPACE_MISMATCH_REASONS_TEXT` 单一持有；`run_continue`、`run_correct` 的闭集原因保留 |
 | TD-338 | `runs lineage-close --run-id <子运行>` 把 `run.lineage_closed`（信封 runId 写成根）追加进子运行的转录，而续修门与回收计划只读根转录，线系实际没关；2026-11-06 第 77 批收口时 D2 用子运行 id 关闭即如此，改用根 id 重关才生效 | 2026-11-08：推出的根与传入 id 不同时，存在性检查、读取、锁内重读与追加都换到根运行的转录，结果带 `requestedRunId`；补了用子运行 id 关闭的测试 |
+| TD-343 | `lead_preflight` 的 MCP 工具描述没写 open item 行（决定 0113）；描述字节冻结在实测值上，加一句要 Owner 批准重冻 | 2026-11-08：Owner 批准重冻，第 87 批给描述补一句 open item 行；冻结线 description 12063→12219、wire 93212→93324、hostVisible 23270→23426，都在 Owner 硬顶内 |
