@@ -20,7 +20,7 @@
 //   budget                      — run.state_change reason:budget_exceeded
 //   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
 //   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
-//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据四条：
+//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据五条：
 //                                 ① worker 活跃工作后静默≥120s 且 exit≠0；
 //                                 ② zcode/kimi-web 静默收口文案——backend 在静默到点后
 //                                   有界收口。kimi-web 逐门判定（见
@@ -48,7 +48,11 @@
 //                                   一条 run.error 是 backend 控制面前缀的 prompt
 //                                   失败文案且报文带 transport failed 标记：harness
 //                                   到上游的传输断了（只读席有活动、无产出，此前
-//                                   被 no_effect 误读）
+//                                   被 no_effect 误读）；
+//                                 ⑤ 本运行最后一条 run.error 含网络不可达信号
+//                                   （DNS 解析失败/连接被拒/连接被断/连接超时/请求
+//                                   未发出，闭集见 NETWORK_UNREACHABLE_SIGNAL）——
+//                                   本机网络中断与上游不可达在本转录内无法区分
 //   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
 //   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
 //   aborted_manual              — run.aborted 事件
@@ -467,6 +471,21 @@ const DEEPSEEK_ACP_TRANSPORT_FAILED_FACTS = Object.freeze([
   "deepseek-acp 本轮 prompt 请求以 JSON-RPC 内部错误（-32603）失败，harness 报文带 transport failed 标记——其到上游的传输断了，run 以 failed 终态",
   "上游（provider 侧）传输失败由 harness 明确报告；网络中断与 provider 侧断流等更细原因在本转录内无法区分（provider 流中断）",
 ]);
+
+// 连不上上游的网络不可达信号 → provider_disconnect。真实转录 9 例（2026-11-07
+// 批）全部被误读成 crash / no_effect，原话形如：claude-code "API Error: Can't
+// reach the API server — check your internet or DNS (ENOTFOUND)"；kimi-web
+// "fetch failed"、"kimi turn failed (turn state=failed, error: OAuth request
+// to https://auth.kimi.com/api/oauth/token failed: fetch failed: Connect
+// Timeout Error …)"。信号闭集（大小写不敏感、按词边界）：DNS 解析失败
+// （ENOTFOUND / EAI_AGAIN / getaddrinfo）、连接被拒或被断（ECONNREFUSED /
+// ECONNRESET）、连接超时（ETIMEDOUT）、请求未发出（fetch failed / Can't
+// reach the API server）。只绑定本运行最后一条 run.error（与其它 4.6 槽规则
+// 同一绑定）；事实为固定句式，不回显错误原文。
+const NETWORK_UNREACHABLE_SIGNAL =
+  /\b(?:enotfound|eai_again|getaddrinfo|econnrefused|econnreset|etimedout|fetch\s+failed|can't\s+reach\s+the\s+api\s+server)\b/i;
+const NETWORK_UNREACHABLE_FACT =
+  "运行时报告连不上上游（DNS 解析失败、连接被拒、连接超时或请求未发出）——本机网络中断与上游不可达在本转录内无法区分（provider 流中断）";
 
 // zcode 收口/失败文案末尾的上游主轮请求摘要（backend summarySuffix 生成，格式
 // 锚定在句尾）：`; upstream: last main-turn request <status> (statusCode N,
@@ -1113,6 +1132,20 @@ function diagnoseFailureInner(events, expectedRunId) {
     for (const fact of DEEPSEEK_ACP_TRANSPORT_FAILED_FACTS) {
       evidence.push({ eventType: "run.error", fact });
     }
+    return { category: "provider_disconnect", evidence };
+  }
+
+  //      ⑤ 本运行最后一条 run.error 含网络不可达信号（NETWORK_UNREACHABLE_SIGNAL，
+  //      与 deepseek-acp 传输失败规则同槽相邻、同一 lastErrorEvent 绑定；文本先剥
+  //      上游摘要再匹配——摘要不是上游错误文本）：运行时自己报告连不上上游（DNS
+  //      解析失败、连接被拒、连接超时或请求未发出），此前这类 run 落 crash /
+  //      no_effect。排序：认证/额度/配置冲突等更具体的规则先判（同一条文本里同时
+  //      有 401/429 等信号时按原有规则走）、evidence_passed_backend_failed 仍先于
+  //      本条（有产出的运行归它，与其它 provider_disconnect 规则同序）、
+  //      no_effect/crash 在本条之后。证据只写固定句式事实，不回显原文。
+  if (state === "failed" && lastErrorEvent !== null
+    && NETWORK_UNREACHABLE_SIGNAL.test(stripUpstreamSummary(lastErrorEvent.error))) {
+    evidence.push({ eventType: "run.error", fact: NETWORK_UNREACHABLE_FACT });
     return { category: "provider_disconnect", evidence };
   }
 

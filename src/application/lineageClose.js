@@ -205,6 +205,19 @@ export async function closeRunLineage({
   const rootEvents = await readEventsSafe(rootPath);
   if (!rootEvents.ok) return { refuse: "root_missing" };
   const rootRunId = lineageRootFromEvents(rootEvents.events, runId) ?? runId;
+  // TD-338：传入子运行 id 时推导出的 rootRunId ≠ 传入 id——闭合事实与闭态检查必须
+  // 落在根运行自己的转录（续修门 runContinue 与回收计划 worktreeReclaim 都只读根
+  // 转录）；rootPath 不跟着换会把 run.lineage_closed 追加进子运行转录，线系实际
+  // 没关。存在性检查、读取、锁内重读与追加都换成根文件；根转录缺失/不可读 →
+  // 既有 root_missing 拒绝。传根 id 时 targetPath 逐字节等于 rootPath，行为不变。
+  let targetPath = rootPath;
+  let targetEvents = rootEvents;
+  if (rootRunId !== runId) {
+    targetPath = resolve(runDir, rootRunId);
+    if (!existsFn(targetPath)) return { refuse: "root_missing" };
+    targetEvents = await readEventsSafe(targetPath);
+    if (!targetEvents.ok) return { refuse: "root_missing" };
+  }
   const files = lineageMemberFiles(runDir).files;
   const enum1 = await enumerateLineageMembers(rootRunId, files);
   if (enum1.refuse) return { refuse: enum1.refuse };
@@ -237,23 +250,25 @@ export async function closeRunLineage({
 
   const dryRun = {
     rootRunId,
+    ...(rootRunId !== runId ? { requestedRunId: runId } : {}),
     members: members.map((m) => ({ runId: m.runId, state: m.state })),
-    alreadyClosed: lineageClosedIn(rootEvents.events, rootRunId),
+    alreadyClosed: lineageClosedIn(targetEvents.events, rootRunId),
     worktrees: worktreePlans,
     note: "dry-run（--apply 执行：写闭合事实+按门释放树/会话）",
   };
   if (!apply) return dryRun;
 
   return withLineageRootLock(runDir, rootRunId, async () => {
-    // 锁内重读根（close-vs-close）。
-    const rootRe = await readEventsSafe(rootPath);
+    // 锁内重读根（close-vs-close）。TD-338：重读与追加都在根运行自己的转录文件上
+    //（targetPath——传入子 id 时已换成根文件；传根 id 时就是 rootPath 本身）。
+    const rootRe = await readEventsSafe(targetPath);
     if (!rootRe.ok) return { refuse: "root_missing" };
     const alreadyClosed = lineageClosedIn(rootRe.events, rootRunId);
     let closedNow = false;
     if (!alreadyClosed) {
       const { JsonlTranscript } = await import("../transcript.js");
       const seqBase = rootRe.events.length;
-      const transcript = new JsonlTranscript(rootPath, {
+      const transcript = new JsonlTranscript(targetPath, {
         runId: rootRunId,
         agentId: rootRe.events[0]?.agentId ?? "unknown",
         initialSeq: rootRe.events[rootRe.events.length - 1]?.seq ?? seqBase,
@@ -298,6 +313,7 @@ export async function closeRunLineage({
     }
     return {
       rootRunId,
+      ...(rootRunId !== runId ? { requestedRunId: runId } : {}),
       alreadyClosed,
       closedNow,
       members: members.map((m) => ({ runId: m.runId, state: m.state })),

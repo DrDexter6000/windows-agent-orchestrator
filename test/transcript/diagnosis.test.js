@@ -1960,6 +1960,131 @@ test("deepseek-acp 上游传输失败排序: 报文带真 401 文本 → 仍 pro
 });
 
 // ---------------------------------------------------------------------------
+// 2026-11-07：连不上上游的网络不可达信号 → provider_disconnect（批 83 W1）。
+//
+// 真实转录 9 例全部误读成 crash / no_effect，原话形如：claude-code "API Error:
+// Can't reach the API server — check your internet or DNS (ENOTFOUND)"；
+// kimi-web "fetch failed"、"kimi turn failed (turn state=failed, error: OAuth
+// request to https://auth.kimi.com/api/oauth/token failed: fetch failed:
+// Connect Timeout Error …)"。契约：最后一条 run.error 命中信号闭集（词边界、
+// 大小写不敏感）→ provider_disconnect，一条固定句式事实，不回显原文；同文本带
+// 401 → provider_auth、带 429 额度文本 → provider_capacity（更具体的规则先判）；
+// 有通过的证据审计 → evidence_passed_backend_failed；不含信号的崩溃文本归类与
+// 现在相同；信号只在较早的 run.error、最后一条是别的 → 不归本条。
+// ---------------------------------------------------------------------------
+
+const NET_UNREACHABLE_RUN = "run_net_unreachable";
+
+function netUnreachableEvents(error, extra = [
+  { type: "run.event", kind: "tool_use", tool: "Read", input: {}, runId: NET_UNREACHABLE_RUN, ts: "2026-11-07T10:01:00.000Z" },
+]) {
+  return [
+    { type: "run.state_change", to: "running", reason: "start", runId: NET_UNREACHABLE_RUN, ts: "2026-11-07T10:00:01.000Z" },
+    ...extra,
+    { type: "run.error", phase: "wait", runId: NET_UNREACHABLE_RUN, ts: "2026-11-07T10:04:55.000Z", error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId: NET_UNREACHABLE_RUN, ts: "2026-11-07T10:04:55.000Z" },
+  ];
+}
+
+function netUnreachableDiagnosis(error, extra) {
+  return diagnoseFailure(netUnreachableEvents(error, extra), NET_UNREACHABLE_RUN);
+}
+
+const NETWORK_UNREACHABLE_FACT_TEXT =
+  "运行时报告连不上上游（DNS 解析失败、连接被拒、连接超时或请求未发出）——本机网络中断与上游不可达在本转录内无法区分（provider 流中断）";
+
+// 每信号一例，样本各自只含一个信号（改窄闭集时对应的例变红）；大小写不敏感由
+// enotfound 小写例钉住。
+const NETWORK_SIGNAL_SAMPLES = [
+  ["ENOTFOUND", "API Error: dns lookup failed (ENOTFOUND)"],
+  ["EAI_AGAIN", "dns resolution error EAI_AGAIN, will retry"],
+  ["getaddrinfo", "name resolution stopped at getaddrinfo"],
+  ["ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:443"],
+  ["ECONNRESET", "read ECONNRESET during upstream response"],
+  ["ETIMEDOUT", "upstream request failed: ETIMEDOUT"],
+  ["fetch failed", "OAuth request to https://auth.kimi.com/api/oauth/token failed: fetch failed"],
+  ["Can't reach the API server", "API Error: Can't reach the API server — check your internet or DNS"],
+  ["大小写不敏感", "upstream error: enotfound"],
+];
+
+for (const [label, errorText] of NETWORK_SIGNAL_SAMPLES) {
+  test(`网络不可达信号[${label}]: 最后一条 run.error → provider_disconnect，事实为固定句`, () => {
+    const d = netUnreachableDiagnosis(errorText);
+    assert.equal(d.category, "provider_disconnect", "连不上上游 → provider 流中断，不再误读 no_effect/crash");
+    assert.equal(d.code, null, "provider_disconnect 不带 code");
+    assert.equal(d.evidence.length, 1, "一条固定句式事实");
+    assert.equal(d.evidence[0].eventType, "run.error", "证据指向 run.error");
+    assert.equal(d.evidence[0].fact, NETWORK_UNREACHABLE_FACT_TEXT, "事实逐字等于固定句");
+    assert.ok(!JSON.stringify(d.evidence).includes(errorText), "不回显错误原文");
+    assert.ok(!JSON.stringify(d.evidence).match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+  });
+}
+
+test("网络不可达: 真实 claude-code 原话（Can't reach + ENOTFOUND 双信号）→ provider_disconnect", () => {
+  const d = netUnreachableDiagnosis("API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)");
+  assert.equal(d.category, "provider_disconnect");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.ok(!joined.includes("API Error") && !joined.includes("check your internet"),
+    "原文（API Error… / check your internet…）不得进证据");
+});
+
+test("网络不可达: 真实 kimi-web 原话（OAuth fetch failed + Connect Timeout Error）→ provider_disconnect", () => {
+  const d = netUnreachableDiagnosis(
+    "kimi turn failed (turn state=failed, error: OAuth request to https://auth.kimi.com/api/oauth/token failed: fetch failed: Connect Timeout Error)",
+  );
+  assert.equal(d.category, "provider_disconnect");
+  assert.ok(!d.evidence.some((e) => e.fact.includes("OAuth") || e.fact.includes("auth.kimi.com")),
+    "原文（OAuth… / auth.kimi.com…）不得进证据");
+});
+
+test("网络不可达词边界: ENOTFOUNDXX / prefetch failed 不命中（词边界内不误贴）→ 照原路径走", () => {
+  for (const errorText of ["dns lookup failed (ENOTFOUNDXX)", "prefetch failed for upstream batch"]) {
+    const d = netUnreachableDiagnosis(errorText);
+    assert.notEqual(d.category, "provider_disconnect", `词边界外不命中：${errorText}`);
+    assert.ok(!d.evidence.some((e) => e.fact === NETWORK_UNREACHABLE_FACT_TEXT), "不得带网络不可达事实");
+  }
+});
+
+test("网络不可达排序: 同文本带 401 → 仍 provider_auth（更具体的认证规则先判）", () => {
+  const d = netUnreachableDiagnosis("upstream call failed: fetch failed, then 401 Unauthorized");
+  assert.equal(d.category, "provider_auth", "同一条文本里同时有 401 → 按原有认证规则走");
+  assert.equal(d.code, "unauthorized");
+});
+
+test("网络不可达排序: 同文本带 429 额度文本 → 仍 provider_capacity（额度规则先判）", () => {
+  const d = netUnreachableDiagnosis("upstream call failed: fetch failed, too many requests (rate limit, 429)");
+  assert.equal(d.category, "provider_capacity", "同一条文本里同时有 429 额度信号 → 按原有额度规则走");
+  assert.equal(d.code, "rate_limited");
+});
+
+test("网络不可达排序: 有通过的证据审计 → 仍 evidence_passed_backend_failed（有产出的运行归它）", () => {
+  const d = netUnreachableDiagnosis("API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)", [
+    { type: "run.evidence_audit", passed: true, runId: NET_UNREACHABLE_RUN, ts: "2026-11-07T10:04:56.000Z" },
+  ]);
+  assert.equal(d.category, "evidence_passed_backend_failed", "有产出的运行仍归「证据通过需人工确认」");
+  assert.ok(!d.evidence.some((e) => e.fact === NETWORK_UNREACHABLE_FACT_TEXT), "网络事实不抢分类");
+});
+
+test("网络不可达回归: 不含信号的崩溃文本 → 归类与现在相同（crash）", () => {
+  const d = netUnreachableDiagnosis("process exited with code 1", []);
+  assert.equal(d.category, "crash", "无信号的进程退出仍归 crash");
+  assert.ok(!d.evidence.some((e) => e.fact === NETWORK_UNREACHABLE_FACT_TEXT));
+});
+
+test("网络不可达绑定: 信号只在较早的 run.error、最后一条是进程退出 → 不归本条（crash 照旧）", () => {
+  const runId = NET_UNREACHABLE_RUN;
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-07T10:00:01.000Z" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-07T10:01:00.000Z", error: "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-07T10:04:55.000Z", error: "process exited with code 1" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-07T10:04:55.000Z" },
+  ];
+  const d = diagnoseFailure(events, runId);
+  assert.equal(d.category, "crash", "最后一条 run.error 不含信号 → 不归本条，照原路径");
+  assert.ok(!d.evidence.some((e) => e.fact === NETWORK_UNREACHABLE_FACT_TEXT), "不得带网络不可达事实");
+});
+
+// ---------------------------------------------------------------------------
 // runs settle 结算的 process_missing 运行（终态 failed + 理由 process_missing
 // + 确认事实）：归 unknown，证据只给两条事实——结算的由来与原因不在转录内。
 // ---------------------------------------------------------------------------

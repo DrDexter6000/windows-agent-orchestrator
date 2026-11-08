@@ -9,7 +9,7 @@
 // 的主张——行为主张全部由显式断言承担。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -144,6 +144,99 @@ test("lineageSlotClaimBusy 导出：成员新鲜认领 busy、非成员/陈旧�
     assert.equal(otherMember.busy, false, "非成员认领不堵");
     const stale = await lineageSlotClaimBusy(runDir, new Set(["run_m"]), { nowMs: () => now + 400_000 });
     assert.equal(stale.busy, false, "陈旧认领不堵");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── TD-338 修复钉：传入子运行 id 时，闭合事实必须读写根运行自己的转录 ──
+// 旧缺陷：rootRunId 推导正确，但 rootPath 没跟着换——run.lineage_closed 追加进
+// 子运行转录，而续修门（runContinue 读根转录）与回收计划（worktreeReclaim 读根
+// 转录）都看不到，线系实际没关。续修资格断言用 runContinue 的
+// deliveryContinuableHint（同一闭态判定 SSOT：根是别的 run 时读根转录）。
+test("TD-338: 子运行 id close——run.lineage_closed 落根转录、子转录不增行，续修资格读到已关闭", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "lc-child-"));
+  try {
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+    execSync("git init -q && git config user.email t@t && git config user.name t", { cwd: repo, stdio: "ignore" });
+    writeFileSync(join(repo, "a.txt"), "a\n");
+    execSync("git add . && git commit -qm init", { cwd: repo, stdio: "ignore" });
+    const base = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    const wt = join(repo, ".wao-worktrees", "run_root2");
+    execSync(`git worktree add -b wao/run_root2 "${wt}" ${base}`, { cwd: repo, stdio: "ignore" });
+    const rootFile = join(runDir, "run_root2.jsonl");
+    writeFileSync(rootFile, [
+      { type: "run.started", runId: "run_root2", agentId: "sol", backend: "codex", worktreePath: wt, cwd: repo, delivery: { baseCommit: base }, seq: 1 },
+      { type: "run.session_reuse", runId: "run_root2", rootRunId: "run_root2", mode: "run_lineage", turn: "first", seq: 2 },
+      { type: "run.state_change", runId: "run_root2", to: "completed", seq: 3 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const childFile = join(runDir, "run_child2.jsonl");
+    writeFileSync(childFile, [
+      { type: "run.started", runId: "run_child2", agentId: "sol", backend: "codex", worktreePath: null, cwd: repo, seq: 1 },
+      { type: "run.session_reuse", runId: "run_child2", rootRunId: "run_root2", mode: "run_lineage", turn: "resume", seq: 2 },
+      { type: "run.state_change", runId: "run_child2", to: "failed", seq: 3 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const childBefore = readFileSync(childFile, "utf8");
+
+    // 续修资格（根是别的 run → 读根转录判闭态）：闭合前可续。
+    const { deliveryContinuableHint } = await import("../../src/application/runContinue.js");
+    const { readTranscript } = await import("../../src/transcript.js");
+    assert.equal(
+      await deliveryContinuableHint({ events: await readTranscript(childFile), runId: "run_child2", runDir }),
+      true,
+      "闭合前：根转录无 run.lineage_closed，线系未关",
+    );
+
+    const dry = await closeRunLineage({ runId: "run_child2", runDir, reasonText: "TD-338 子 id 闭合", apply: false });
+    assert.equal(dry.rootRunId, "run_root2", "从子转录推导出根 id");
+    assert.equal(dry.requestedRunId, "run_child2", "干跑报出实际请求的是子 id");
+    assert.equal(dry.alreadyClosed, false, "闭态读的是根转录");
+    assert.deepEqual(dry.worktrees.map((w) => w.outcome), ["planned"]);
+
+    const app = await closeRunLineage({ runId: "run_child2", runDir, reasonText: "TD-338 子 id 闭合：事实必须落根转录", apply: true });
+    assert.equal(app.closedNow, true);
+    assert.equal(app.rootRunId, "run_root2");
+    assert.equal(app.requestedRunId, "run_child2");
+    assert.deepEqual(app.worktrees.map((w) => w.outcome), ["released"]);
+
+    // 闭合事实在根转录里（信封绑定 rootRunId）……
+    const rootAfter = await readTranscript(rootFile);
+    const closedFacts = rootAfter.filter((e) => e && e.type === "run.lineage_closed");
+    assert.equal(closedFacts.length, 1, "run.lineage_closed 恰一条");
+    assert.equal(closedFacts[0].runId, "run_root2", "事实信封绑定根 run");
+    // ……子运行转录逐字节不变（不增行）。
+    assert.equal(readFileSync(childFile, "utf8"), childBefore, "子转录不被追加");
+
+    // 续修资格读到已关闭（读根转录）。
+    assert.equal(
+      await deliveryContinuableHint({ events: await readTranscript(childFile), runId: "run_child2", runDir }),
+      false,
+      "闭合后：根转录 bound run.lineage_closed 在场，线系已关",
+    );
+
+    // 传根 id：结果不带 requestedRunId（行为逐字节不变钉），且能看到已闭合。
+    const dryRoot = await closeRunLineage({ runId: "run_root2", runDir, reasonText: "根 id 重入干跑", apply: false });
+    assert.equal(dryRoot.requestedRunId, undefined, "根 id 干跑不出现 requestedRunId");
+    assert.equal(dryRoot.alreadyClosed, true, "根转录里的闭态被看到");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("TD-338: 子运行 id close——根转录缺失 → root_missing 拒绝（不往读不回来的地方写事实）", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "lc-childmiss-"));
+  try {
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+    // 只有子转录指向一个不存在的根；成员枚举也找不到根。
+    writeFileSync(join(runDir, "run_orphan3.jsonl"), [
+      { type: "run.started", runId: "run_orphan3", agentId: "sol", backend: "codex", seq: 1 },
+      { type: "run.session_reuse", runId: "run_orphan3", rootRunId: "run_ghost3", mode: "run_lineage", turn: "resume", seq: 2 },
+      { type: "run.state_change", runId: "run_orphan3", to: "completed", seq: 3 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const r = await closeRunLineage({ runId: "run_orphan3", runDir, reasonText: "根缺失钉", apply: false });
+    assert.equal(r.refuse, "root_missing");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
