@@ -54,18 +54,7 @@ clone、`npm ci`、可选 `npm link` 的操作步骤（含 `install.ps1` 一条�
 ## 配置
 
 1. worker registry（`config/agents.json`）的配置步骤——从入库模板复制、裁剪到一个能认证的 worker、`wao onboarding --agent <id> --apply` 自动化——见 `AGENT_ONBOARDING.md` §4c。派发选择怎么用认证结果，见 `docs/certification-runbook.md` §认证结果用于派发选择的边界。
-2. （可选）编辑 `config/default.json` 调整全局默认值：
-```jsonc
-{
-  "registry": "config/agents.json",
-  "runDir": "runs",              // transcript 存放目录
-  "pollInterval": 5000,          // 轮询间隔 ms
-  "waitTimeout": null,           // 派发侧等待窗 ms；null=禁用。到期只通知不终止——观察预算，非执行死线；设值须在 1000..600000
-  "timeout": 30000,              // HTTP 请求超时 ms
-  "defaultIsolation": "none",    // 默认不隔离（可选 "worktree"）
-  "worktreeDir": null            // worktree 存放目录（null = <cwd>/.wao-worktrees）
-}
-```
+2. （可选）编辑 `config/default.json` 调整全局默认值，缺省值以该文件为准（`waitTimeout` 的语义见派发页，设值须在 1000..600000；`worktreeDir` 为 `null` 时用 `<cwd>/.wao-worktrees`）。
 
 ## 验证安装
 

@@ -77,7 +77,7 @@ Lead 收到需求
   → Lead 整合，汇报 owner
 ```
 
-Worker 通过最终 assistant response 交付结果。控制面 / Lead 负责记录和传递。Tester 的轮询反馈给 Lead，异常时 Lead 介入。同一 auditor 会话连审方案与交付两阶段会侵蚀独立性（ADR 0019 §3）；两阶段分席更稳。
+Tester 的轮询反馈给 Lead，异常时 Lead 介入。同一 auditor 会话连审方案与交付两阶段会侵蚀独立性（ADR 0019 §3）；两阶段分席更稳。
 
 ## 车道与角色的事实在哪里
 

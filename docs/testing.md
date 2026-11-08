@@ -4,7 +4,7 @@
 
 ## 两种跑法
 
-- **全量**：`npm test`。`scripts/canonical-test.mjs` 按 `test/manifest.json` 把全部测试文件分波跑完，再把失败文件单独重跑一次做隔离判定。约 10 分钟。每个测试文件在 manifest 里恰好归入一个资源组（pure / git / worktree / process / lock / timeout / mcp），运行器按组分波；单跑复核只给首轮失败加上 `stable_fail` / `isolation_pass` / `environment_invalid` 分类，不会把它改判为通过。结果写在 `test-results.json`：每个文件的 `durationMs`（文件内各测试耗时之和，不含模块加载）和复核条目的 `isolationDurationMs` 只作观测，缺失时为 `null`，不影响结论。同一台机器上的全量与交付验证共用一把串行化闸，后到者排队，排队不计入任何预算（见[交付与验收](usage/delivery.md)场景 4b）。全量期间 WAO 会向 Windows 申请保持唤醒（尽力而为；`WAO_KEEP_AWAKE=0` 关闭，行为见 `docs/02-architecture.md` §4.5，决定 0093）。
+- **全量**：`npm test`。`scripts/canonical-test.mjs` 按 `test/manifest.json` 把全部测试文件分波跑完，再把失败文件单独重跑一次做隔离判定。耗时随机器负载在十几到四十分钟之间（样本见 `docs/tech-debt.md` TD-194）。每个测试文件在 manifest 里恰好归入一个资源组（pure / git / worktree / process / lock / timeout / mcp），运行器按组分波；单跑复核只给首轮失败加上 `stable_fail` / `isolation_pass` / `environment_invalid` 分类，不会把它改判为通过。结果写在 `test-results.json`：每个文件的 `durationMs`（文件内各测试耗时之和，不含模块加载）和复核条目的 `isolationDurationMs` 只作观测，缺失时为 `null`，不影响结论。同一台机器上的全量与交付验证共用一把串行化闸，后到者排队，排队不计入任何预算（见[交付与验收](usage/delivery.md)场景 4b）。全量期间 WAO 会向 Windows 申请保持唤醒（尽力而为；`WAO_KEEP_AWAKE=0` 关闭，行为见 `docs/02-architecture.md` §4.5，决定 0093）。
 - **定向**：`npm run test:one -- <测试文件…>`。它与全量用同一套子进程环境与超时，文件名拼错或匹配不到会直接失败。不用它而直接调 `node --test` 时，必须带 `--test-timeout=600000`，否则挂死的测试没有上限；子进程被版本守卫拒绝时设 `WAO_SKIP_VERSION_GUARD=1`。大批定向测试不要与全量同时在一台机器上跑。
 
 `npm run test:report` 是裸 `node --test`，不是验收证据。
@@ -50,7 +50,7 @@
 
 | 交付改动的范围 | 验证命令 |
 |---|---|
-| 只改测试文件或文档（`*.md`、`docs/**`），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组与读这些文档的测试；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
+| 只改测试文件或文档（`*.md`、`docs/**`；角色合同 `config/roles/*.md` 除外，算共享核心），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组与读这些文档的测试；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
 | 只改画像数据（`config/lane-traits.json`） | `test/registry-roles/laneTraits.test.js`、`test/application/laneProfile.test.js` 加横切守卫组 |
 | 触及共享核心：测试、文档与画像数据以外的一切改动（`src/**`、`config/**`、`scripts/**` 等），以及公共夹具 | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
 

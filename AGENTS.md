@@ -30,11 +30,14 @@ Before writing or changing any document, read `docs/ssot.md` §2–§4.
 ## Commands
 
 - `npm test` - deterministic local test suite; no API tokens
+- `npm run test:one -- <file>` - one test file (targeted checks)
 - `npm run cli -- <command>` - WAO CLI
 - `npm run smoke` - real runtime smoke; consumes tokens
 - `npm run reliability` - runtime/model certification; consumes tokens
 - `npm run gen:surface` - regenerate docs/surface/* after MCP surface or CLI help changes; commit the output (tool-surface wire-cap tests may need refreeze)
 - `npm run map` - on-demand workflow reference map: edges and reachability tiers of every tracked file (`-- --json` for full output)
+- `npm run hygiene` - workflow closeout checks
+- `node scripts/wao-node.cjs scripts/measure-mcp-surface.mjs` - measure the MCP tool-surface bytes before a cap refreeze (decision 0078)
 
 ## Code
 

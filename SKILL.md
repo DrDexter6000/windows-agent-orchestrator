@@ -71,5 +71,5 @@ WAO tools are always registered for every host that completes MCP onboarding (an
 
 ## State 与批次收尾 (State & batch close)
 
-Run truth lives in `runs/<runId>.jsonl` (+`projects/*/`); project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. CLI 入口：`npm run cli -- help`。At the end of each batch, re-run `lead_preflight` and act on its `open item:` lines (close what you can, report the rest), then report one line:
+Run truth lives in `runs/projects/*/<runId>.jsonl`; project decisions/handoffs use `.wao/` commands — no parallel handwritten state files. CLI 入口：`npm run cli -- help`。At the end of each batch, re-run `lead_preflight` and act on its `open item:` lines (close what you can, report the rest), then report one line:
 `mainline: <before> -> <after>; next: <shortest next step>`

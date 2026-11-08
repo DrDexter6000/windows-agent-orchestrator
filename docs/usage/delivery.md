@@ -184,6 +184,7 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 3. 独立审计强制：采纳必须经独立审计席回审，证据规格：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog。禁止 Lead 单方闭环。
 4. 集成后终验：集成结果就是最终候选，按 `docs/testing.md` 的批次规则验证（一般是一次全量，跑前按 `docs/troubleshooting.md` §8.2 错峰），绿后方可推送。
 5. 集成前工作区纪律：cherry-pick 交付提交前 Lead 工作区必须干净（未提交改动先提交），否则与本地改动触碰同一文件时会冲突中止。
+6. 续修轮的交付是父轮加本轮的累计候选，默认集成最终子交付；父交付已先集成时，用 `git diff <父交付> <子交付> > <补丁>` 再 `git apply --index <补丁>` 取增量，不要 cherry-pick 子交付。
 
 ### 读面 adoption 三态
 

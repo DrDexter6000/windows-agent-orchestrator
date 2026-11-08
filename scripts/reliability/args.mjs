@@ -32,7 +32,7 @@ export const USAGE = `WAO Reliability Suite（真实 runtime 认证；消耗 tok
                 [--wait-timeout <ms>] [--poll-interval <ms>]
 
   --agent <id>        只认证该 agent（增量刷新常用形态）
-  --profile <name>    覆盖矩阵 profile（如 delta = sentinel+scorecard+containmentEvidence）
+  --profile <name>    覆盖矩阵 profile（如 delta；各 profile 的子集见 docs/certification-runbook.md）
   --registry <file>   注册表路径（默认 config/agents.json）
   其余参数见 docs/certification-runbook.md。
 
