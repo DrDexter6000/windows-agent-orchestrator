@@ -779,7 +779,7 @@ packageDelivery success → transitionState(completed)
   → return {completed:true, delivery:verifiedRef, verificationFailed?, verificationUnavailable?}
 ```
 
-**同机验证串行化闸**（`src/verificationGate.js`）：机器级租约（`%LOCALAPPDATA%\wao\verification.lease`，经 `machineGatePaths.js` SSOT）把生产路径发起的交付验证与直连 canonical 全量串行化——粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。租约参数：持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。入闸的生产路径：run 内验证（`waitForCompletion`）、`runs delivery reverify`、`runs delivery repackage`、`runs verify-commit`，经 `createCallerGate` 显式开启；canonical 全量（`scripts/canonical-test.mjs`）直接经 `createVerificationGate` 认领。只有依赖默认验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），`gateEngaged()` 收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。基础设施故障一律 fail-open；排队/等待/降级永不改变验证结果语义、永不计入任何执行预算、不新增失败码；`runs gate` 是只读查询 + 文档在案的人工破锁出口（`--release`）。运维语义见 `docs/usage/delivery.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
+**同机验证串行化闸**（`src/verificationGate.js`）：机器级租约（`%LOCALAPPDATA%\wao\verification.lease`，经 `machineGatePaths.js` SSOT）把生产路径发起的交付验证与直连 canonical 全量串行化——粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()。租约参数：持有方每约 30 秒心跳续期；心跳陈旧约 90 秒、或单次持锁超过 130 分钟，即允许接管。入闸的生产路径：run 内验证（`waitForCompletion`）、`runs delivery reverify`、`run_delivery_repackage`、`runs verify-commit`，经 `createCallerGate` 显式开启；canonical 全量（`scripts/canonical-test.mjs`）直接经 `createVerificationGate` 认领。只有依赖默认验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），`gateEngaged()` 收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。基础设施故障一律 fail-open；排队/等待/降级永不改变验证结果语义、永不计入任何执行预算、不新增失败码；`runs gate` 是只读查询 + 文档在案的人工破锁出口（`--release`）。运维语义见 `docs/usage/delivery.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
 
 **Verification 的 proof 纪律**（`src/deliveryVerification.js`）：
 
