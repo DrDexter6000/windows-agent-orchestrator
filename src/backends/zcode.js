@@ -1246,11 +1246,28 @@ export class ZcodeBackend {
       streamChunkCount: (id) => streamChunkCounts.get(id) ?? 0,
       fatal: () => fatalError,
       closedError: transportClosedError,
-      // 进程死亡即时唤醒轮询等待（否则最长相邻两拍的死区）。
-      waitClosed: () => new Promise((resolve) => {
-        if (closedFact || fatalError) resolve();
-        else closedWaiters.push(resolve);
-      }),
+      // 进程死亡即时唤醒轮询等待（否则最长相邻两拍的死区）。返回 { promise,
+      // cancel }：每次等待用完必须 cancel，把登记的唤醒函数从 closedWaiters 摘掉。
+      // 摘不掉的话，每拍留下一个永不兑现的 promise，它挂着的 race 反应链连同那
+      // 一拍的 session/messages 快照一直留在内存里（第 83 批实测：大会话每拍一份
+      // 快照，runner 7–33 分钟撑满 Node 堆上限、无声退出）。
+      waitClosed: () => {
+        let wake = null;
+        const promise = new Promise((resolve) => {
+          if (closedFact || fatalError) { resolve(); return; }
+          wake = resolve;
+          closedWaiters.push(resolve);
+        });
+        return {
+          promise,
+          cancel: () => {
+            if (wake === null) return;
+            const at = closedWaiters.indexOf(wake);
+            if (at >= 0) closedWaiters.splice(at, 1);
+            wake = null;
+          },
+        };
+      },
     };
 
     // ===== 握手 + 提交（任何失败：杀进程 + 上抛——绝不留半握手进程）=====
@@ -1627,17 +1644,25 @@ export class ZcodeBackend {
         }
         // 每拍最多等一个轮询间隔：在途请求的结果、一个 pollInterval 的计时、
         // wire.waitClosed() 三者先到者为准；请求先到时清掉计时器，不留悬挂定时器。
+        // 请求跨拍未应答时，每拍的 race 仍会在同一个 pollInFlight.result 上新挂反
+        // 应（每拍几百字节、不含快照），应答或关闭时一并释放。
         let pollAnswered = false;
         let pollResult = null;
         {
           let tickTimer = null;
           const tickElapsed = new Promise((resolve) => { tickTimer = setTimeout(resolve, pollInterval); });
-          const raced = await Promise.race([
-            pollInFlight.result,
-            tickElapsed.then(() => ({ elapsed: true })),
-            wire.waitClosed().then(() => ({ closed: true })),
-          ]);
-          clearTimeout(tickTimer);
+          const closedWait = wire.waitClosed();
+          let raced;
+          try {
+            raced = await Promise.race([
+              pollInFlight.result,
+              tickElapsed.then(() => ({ elapsed: true })),
+              closedWait.promise.then(() => ({ closed: true })),
+            ]);
+          } finally {
+            clearTimeout(tickTimer);
+            closedWait.cancel();
+          }
           if (!raced.answered && raced.elapsed !== true && raced.closed !== true) {
             // 请求被拒（传输关闭/进程退出/协议错误/写 stdin 失败）→ 与旧口径
             // 相同：通信失败 = 进程死，立即收口。
@@ -1883,7 +1908,12 @@ export class ZcodeBackend {
         // 等待下一拍：interval 上界 + 进程死亡即时唤醒。没等到应答的拍等待已经
         // 占了这一拍，不再额外睡。
         if (pollAnswered) {
-          await Promise.race([sleep(pollInterval), wire.waitClosed()]);
+          const closedWait = wire.waitClosed();
+          try {
+            await Promise.race([sleep(pollInterval), closedWait.promise]);
+          } finally {
+            closedWait.cancel();
+          }
         }
       }
     } finally {

@@ -1835,6 +1835,43 @@ test("zcode ⑥j: 没有在途请求时三道门收口文案逐字节不变（�
   child.kill();
 });
 
+// 第 83/84 批：拍内 race 的关闭等待没摘掉时，每拍留下一个永不兑现的 promise，
+// 连同那一拍的快照一起留在内存里——生产每 5 s 一拍，大会话的快照解析后十几到
+// 几十 MB，runner 7–33 分钟撑满 Node 堆上限、无声退出（四次实录：zcode 进程与
+// runner 同时消失、转录停在 running）。本例用 ~200 KB 的会话快照跑 300 拍，比
+// GC 后的堆读数（被计量的是后端每拍 JSON.parse 出的新副本；实测修后约 0.1 MB，
+// 回退到 64ba083 约 59 MB）。只钉拍内 race：应答后 sleep 那处留下的是 undefined，
+// 堆读数分辨不出。
+test("zcode ⑥j: 大快照会话跑几百拍，堆不随拍数增长（拍内 race 的关闭等待用完即摘）", async () => {
+  const v8 = await import("node:v8");
+  const vm = await import("node:vm");
+  v8.setFlagsFromString("--expose-gc");
+  const gc = vm.runInNewContext("gc");
+  const history = userMsg("x".repeat(200 * 1024));
+  const echo = userMsg("do the task");
+  const step = stepStartMsg();
+  const heap = [];
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n === 50 || n === 350) { gc(); heap.push(process.memoryUsage().heapUsed); }
+        return n <= 1 ? [history] : [history, echo, step];
+      },
+    },
+  });
+  const ac = new AbortController();
+  const drain = (async () => {
+    for await (const event of handle.events(ac.signal, { pollInterval: 1 })) void event;
+  })();
+  assert.ok(await waitUntil(() => peer.polls() >= 351, 60_000), "跑满 350 拍");
+  ac.abort();
+  child.kill();
+  await drain.catch(() => {});
+  assert.equal(heap.length, 2);
+  const grewMB = (heap[1] - heap[0]) / 1024 / 1024;
+  assert.ok(grewMB < 20, `300 拍后堆增长 ${grewMB.toFixed(1)} MB（不摘等待时约 60 MB）`);
+});
+
 // ===== ⑥i 本轮主轮请求链（2026-10-15，TD-291 探针事实 + bundle 核证） =====
 //
 // 额度耗尽的长静默形态：zcode 在按 delayMs 退避重试本轮主轮请求（通知
