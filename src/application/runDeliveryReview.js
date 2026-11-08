@@ -47,7 +47,10 @@ import { createHash } from "node:crypto";
 import { readTranscript } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { validateDeliveryFacts } from "../transcript.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// TD-324（83 批 W2）：只读审查面用 typed 形态——归属比较抛出的 Error 标
+// code="workspace_not_authorized"，MCP/CLI 适配层按 TYPE 折叠成归属拒绝专属文案，
+// 不再是笼统 failed。绑定根本身证明失败在打标区之外（不是归属拒绝，照旧）。
+import { verifyRunWorkspaceOwnership, verifyRunWorkspaceOwnershipTyped } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { assertDeliveryCommitInRepository, isValidRunId, gitChildEnv } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
@@ -369,8 +372,9 @@ export async function resolveRunDeliveryReviewTarget({
 
   // 5. Workspace ownership — the run must belong to the authorized source repo.
   //    This must pass BEFORE the Git proof, so a cross-workspace request never
-  //    reaches the object database.
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  //    reaches the object database. TD-324: typed form — the adapter folds the
+  //    code into the ownership-refusal fixed text.
+  verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, runId);
 
   // 6. Exact delivery commit proof in the authorized source repo. The kernel
   //    uses explicit commit args (not HEAD), so a dirty or advanced source
@@ -818,8 +822,9 @@ export async function getRunDeliveryReview(
     throw sinceParentRejection(SINCE_PARENT_AMBIGUOUS_TEXT);
   }
   // Workspace ownership FIRST — a cross-workspace request must never reach
-  // the readiness probe, the Git proof, or any content read.
-  verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot, runId);
+  // the readiness probe, the Git proof, or any content read. TD-324: typed
+  // form — the adapter folds the code into the ownership-refusal fixed text.
+  verifyRunWorkspaceOwnershipTyped(_gateEvents, authorizedWorkspaceRoot, runId);
 
   const _readiness = projectDeliveryReadiness(_gateEvents, runId);
   // TD-179: is this reviewable ONLY because of a settled pending rejection?

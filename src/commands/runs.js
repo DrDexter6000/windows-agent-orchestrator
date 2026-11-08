@@ -61,6 +61,8 @@ import {
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview, resolveRunDeliveryReviewTarget } from "../application/runDeliveryReview.js";
+// TD-324（83 批 W2）：归属拒绝固定文案共用的原因清单片段（ownership SSOT 导出）。
+import { WORKSPACE_MISMATCH_REASONS_TEXT } from "../application/runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 // F5 (2026-10-08): typed cursor-rejection signal (run_activity M12-19 定义、
 // runDeliveryReview 解码路径改抛的同一类)——CLI 在此折叠为专属文案。
@@ -1974,6 +1976,20 @@ function createProcessLifecycle() {
 const REVIEW_CURSOR_REJECTED_TEXT =
   "runs delivery review cursor rejected: the cursor is invalid or expired — re-run " +
   "without --cursor to restart from page 1; a cursor token is opaque and must never be hand-modified";
+// TD-324（83 批 W2）：归属拒绝专属 CLI 固定文案——运行的转录记录对不上 --cwd 给
+// 的工作区（另一项目、子目录、非 Git、相对或已消失、缺/重复/缺 cwd/冲突的归属事
+// 实，清单由 ownership SSOT 的 WORKSPACE_MISMATCH_REASONS_TEXT 单一持有）时，单文
+// 件与 --all 都报它（非零退出），不再只报笼统 "run_delivery_review failed"。静态
+// 文案：--cwd 字样是静态的，不回显路径或任何动态值。
+const REVIEW_WORKSPACE_MISMATCH_CLI_TEXT =
+  "run_delivery_review refused: this run cannot be shown to belong to the workspace given by "
+  + `--cwd (default: the current directory) — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  + "Pass --cwd with the run's own project root and retry.";
+// TD-324：reverify CLI 同款（写面：结尾写明没有验证、零追加）。
+const REVERIFY_WORKSPACE_MISMATCH_CLI_TEXT =
+  "run_delivery_reverify refused: this run cannot be shown to belong to the workspace given by "
+  + `--cwd (default: the current directory) — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  + "No verification was run and nothing was appended; pass --cwd with the run's own project root and retry.";
 
 async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   // M11-3C closeout: strict flag parsing — every flag value must be non-empty /
@@ -2064,7 +2080,8 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
 
   const service = hostDeps.getRunDeliveryReviewFn ?? getRunDeliveryReview;
   // F5: 服务层解码/校验路径抛出的 CursorRejectedError 折叠为专属恢复文案；
-  // 其余错误原样上抛（保持既有失败形状）。
+  // TD-324（83 批 W2）：归属拒绝（服务层 typed code）折叠为归属拒绝专属文案
+  //（非零退出）；其余错误原样上抛（保持既有失败形状）。
   let raw;
   try {
     raw = await service({
@@ -2077,6 +2094,9 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   } catch (error) {
     if (error instanceof CursorRejectedError) {
       throw new Error(REVIEW_CURSOR_REJECTED_TEXT);
+    }
+    if (error?.code === "workspace_not_authorized") {
+      throw new Error(REVIEW_WORKSPACE_MISMATCH_CLI_TEXT);
     }
     throw error;
   }
@@ -2124,7 +2144,8 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
  * 只列闭集原因不拼正文。pending 不出任何 diff：带 --out 时只打一行"验证未出结
  * 果，未写文件"，不带时照单文件模式报 advisory。--out 把同样的字节写进文件，
  * stdout 只打一行摘要（回显路径经同一秘密脱敏）。异常折叠：坏 cursor 走专属恢
- * 复文案，闭集 --since-parent 拒绝按各自固定文案透出，其余一切异常固定为
+ * 复文案，闭集 --since-parent 拒绝按各自固定文案透出，归属拒绝（TD-324，服务层
+ * typed code）走归属拒绝专属文案，其余一切异常固定为
  * "run_delivery_review failed"，不泄漏路径、Git stderr 或原始错误。
  */
 async function runsDeliveryReviewAll(args) {
@@ -2134,6 +2155,10 @@ async function runsDeliveryReviewAll(args) {
     if (error instanceof CursorRejectedError) throw new Error(REVIEW_CURSOR_REJECTED_TEXT);
     // 闭集 --since-parent 拒绝：固定文案原样透出（文案本身不含动态值）。
     if (error && error.waoSinceParentRejection === true) throw new Error(error.message);
+    // TD-324（83 批 W2）：归属拒绝（服务层 typed code）→ 归属拒绝专属文案。
+    if (error?.code === "workspace_not_authorized") {
+      throw new Error(REVIEW_WORKSPACE_MISMATCH_CLI_TEXT);
+    }
     // 其余一切异常（服务内部错误、resolver 失败、写文件失败……）折叠成固定
     // 审查失败文案，与单文件服务失败的对外形状一致。
     throw new Error("run_delivery_review failed");
@@ -2405,15 +2430,25 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   const runDir = resolve(flags.runDir ?? config.runDir);
 
   const service = hostDeps.runDeliveryReverifyFn ?? runDeliveryReverify;
-  const raw = await service({
-    runId,
-    runDir,
-    authorizedWorkspaceRoot: cwd,
-    reason: flags.reason,
-    ...(attempt !== undefined ? { attempt } : {}),
-    ...(setupCommands !== undefined ? { setupCommands } : {}),
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-  });
+  // TD-324（83 批 W2）：归属拒绝（服务层 Phase 0 的 typed code，先于任何追加与
+  // 验证执行）折叠为归属拒绝专属文案；其余错误原样上抛（保持既有失败形状）。
+  let raw;
+  try {
+    raw = await service({
+      runId,
+      runDir,
+      authorizedWorkspaceRoot: cwd,
+      reason: flags.reason,
+      ...(attempt !== undefined ? { attempt } : {}),
+      ...(setupCommands !== undefined ? { setupCommands } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+  } catch (error) {
+    if (error?.code === "workspace_not_authorized") {
+      throw new Error(REVERIFY_WORKSPACE_MISMATCH_CLI_TEXT);
+    }
+    throw error;
+  }
 
   // Safe projection: the SAME closed-set fields the MCP tool approves, each
   // validated through its closed set. Any violation fails closed — no

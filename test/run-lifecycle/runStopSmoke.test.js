@@ -165,7 +165,12 @@ test("SMOKE-NEG: cross-workspace stop rejected, process survives", async () => {
     try {
       const res = await client.callTool({ name: "run_stop", arguments: { runId, expectedWorkspaceRoot: dirB, ...stopProof(runDir, runId) } });
       assert.ok(res.isError, "must be rejected for cross-workspace");
-      assert.equal(res.content[0].text, "run_stop failed");
+      // TD-324（83 批 W2）：归属拒绝专属固定文案（不再折叠成笼统 "run_stop failed"）。
+      assert.match(
+        res.content[0].text,
+        /^run_stop refused: this run cannot be shown to belong to the workspace given by expectedWorkspaceRoot/,
+        "ownership-refusal fixed text",
+      );
     } finally {
       await client.close();
       await server.close();

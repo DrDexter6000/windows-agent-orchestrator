@@ -637,3 +637,59 @@ test("M11-3C-CLOSE-3-SMOKE: real default service MCP + CLI parity, inventory unc
     cleanupDir(runDir);
   }
 });
+
+// =====================================================================
+// TD-324（83 批 W2）：归属拒绝专属固定文案——属于另一个项目的运行 → 专属文案
+//（真实服务链：服务层 typed code → 适配层按 TYPE 折叠），不再折叠成笼统
+// "run_delivery_review failed"。"其它失败 → 原有文案"由 M11-3C-05（服务抛
+// 非类型化错误 → 固定 "run_delivery_review failed"）覆盖。
+// =====================================================================
+
+test("TD-324: cross-workspace run → ownership-refusal fixed text (real service)", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "td324-rev-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "td324-rev-b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "td324-rev-rd-"));
+  try {
+    for (const d of [dirA, dirB]) {
+      execSync("git init -b main", { cwd: d, stdio: "ignore" });
+      execSync('git config user.email "t@t"', { cwd: d, stdio: "ignore" });
+      execSync('git config user.name "t"', { cwd: d, stdio: "ignore" });
+      execSync("git commit --allow-empty -m init", { cwd: d, stdio: "ignore" });
+    }
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_td324_review";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-11-08T00:00:00.000Z", runId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-11-08T00:00:01.000Z", runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dirA, runId, agentId: "coder_low" }),
+    ].join(""), "utf8");
+    // 会话绑定到 dirB；运行属于 dirA —— 真实 getRunDeliveryReview 服务在归属门
+    //（先于 readiness 探针、Git 证明与任何内容读取）以 typed code 拒绝。
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_review", arguments: { runId, fileIndex: 0 } });
+      assert.equal(res.isError, true, "cross-workspace review is an error");
+      assert.ok(!res.structuredContent, "no structuredContent on error");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /^run_delivery_review refused: this run cannot be shown to belong to the bound workspace/,
+        "归属拒绝专属固定文案");
+      assert.match(text, /duplicated, incomplete \(no cwd\) or in conflict/, "原因清单为完整的六类");
+      assert.ok(!text.includes("run_delivery_review failed"), "不再折叠成笼统失败文案");
+      assert.ok(!text.includes(runId), "不回显 runId");
+      const dumped = JSON.stringify(res);
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.split("\\").join("/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dirA);
+    cleanupDir(dirB);
+    cleanupDir(runDir);
+  }
+});

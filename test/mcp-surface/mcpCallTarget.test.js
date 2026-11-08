@@ -426,6 +426,10 @@ test("CT-6: runId A-class tools — target≠ownership refuses, target=ownership
       assert.equal(badCollect.isError, true, "ownership mismatch refuses run_collect");
       const badText = (badCollect.content ?? []).map((b) => b.text ?? "").join(" ");
       assert.match(badText, /does not belong to the project/, "fixed text names the ownership cause");
+      // TD-324（83 批 W2）：原因清单补全为 ownership SSOT 的六类——此前只列三类，
+      // 相对或已消失（vanished）、重复（duplicated）、冲突（in conflict）也须在列。
+      assert.match(badText, /non-Git, relative or vanished path/, "原因含相对或已消失");
+      assert.match(badText, /duplicated, incomplete \(no cwd\) or in conflict/, "原因含重复、缺 cwd、冲突");
       assert.ok(!badText.includes(fwd(other)) && !badText.includes(other),
         "the refusal never echoes an absolute path");
       assert.equal(readFileSync(collectPath, "utf8"), before, "refused collect writes nothing");
@@ -460,6 +464,32 @@ test("CT-6: runId A-class tools — target≠ownership refuses, target=ownership
     } finally {
       await client3.close();
       await server3.close();
+    }
+
+    // TD-324（83 批 W2）：decide 归属拒绝（真实服务）——运行属于 `owned`，调用命名
+    // `other` → 专属文案（原因清单=ownership SSOT 六类），零写入零释放（转录逐字
+    // 节不变）。此前 decide 的归属文案只列了部分原因。
+    const server4 = createWaoMcpServer({ registryPath, runDir, workspaceRoot: owned });
+    const client4 = await buildClient(server4);
+    try {
+      const decidePath = resolveTranscriptPath(runDir, "run_ct6");
+      const before4 = readFileSync(decidePath, "utf8");
+      const bad = await client4.callTool({
+        name: "run_delivery_decide",
+        arguments: { runId: "run_ct6", decision: "accepted", reason: "r", expectedWorkspaceRoot: other },
+      });
+      assert.equal(bad.isError, true, "ownership mismatch refuses run_delivery_decide");
+      const text4 = (bad.content ?? []).map((b) => b.text ?? "").join(" ");
+      assert.match(text4, /run_delivery_decide refused: this run does not belong to the project given by expectedWorkspaceRoot/,
+        "归属拒绝专属固定文案");
+      assert.match(text4, /duplicated, incomplete \(no cwd\) or in conflict/, "原因清单补全为六类");
+      assert.match(text4, /No decision and no session release happened; retry with the run's own project root/,
+        "结尾说法不变（零决策、零释放、换根重试）");
+      assert.ok(!text4.includes(fwd(other)) && !text4.includes(other), "不回显绝对路径");
+      assert.equal(readFileSync(decidePath, "utf8"), before4, "refused decide writes nothing");
+    } finally {
+      await client4.close();
+      await server4.close();
     }
   } finally {
     cleanupDir(owned); cleanupDir(other); cleanupDir(aux);

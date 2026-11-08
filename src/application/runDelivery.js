@@ -655,8 +655,9 @@ async function _safeAdoption(runId, repoRoot, gitFn, timeoutMs) {
  * @param {object} input
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
- * @param {string} [input.authorizedWorkspaceRoot] — M12-1S1: authority for the
- *   read-only candidate inventory (omitted => candidateInventory null, no read)
+ * @param {string} [input.authorizedWorkspaceRoot] — TD-324: 归属核验权威（供给时
+ *   即时查询也核验归属，typed code 拒绝——与等待路径同款）；兼作 M12-1S1 只读
+ *   candidate inventory 的授权根（缺省 => 不核验、candidateInventory null、不读）
  * @param {Function} [input.computeInventoryFn] — M12-1S1: injectable inventory
  *   reader; the service never defaults the kernel reader
  * @param {Function} [input.readTranscriptFn] — injectable for testing
@@ -693,6 +694,14 @@ export async function getRunDelivery({
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const filePath = resolveTranscriptPath(runDir, runId);
   const events = await _readTranscript(filePath);
+
+  // TD-324（83 批 W2）：即时查询与等待路径（getRunDeliveryReadiness 初始读同款）
+  // 一样核验归属——authorizedWorkspaceRoot 供给时 fail-closed（typed code 供适配
+  // 层给归属拒绝专属文案），先于任何投影/盘点/adoption 读取。CLI 调用方不传该参
+  // 数（human/ops 无绑定），行为不变。
+  if (authorizedWorkspaceRoot !== undefined) {
+    verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, runId);
+  }
 
   // R20 (TD-128 M5)：point-in-time 查询的 terminalState 绑定到请求 runId
   // （R15 范式，projectDeliveryReadiness :364 同款——文件内最后一处无绑定

@@ -49,6 +49,9 @@ import {
 // pattern as READ_FAILURE_REASONS); no second hand-maintained list can drift.
 import { CERTIFICATION_REASON_CODES } from "../application/certificationReasons.js";
 import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN, REASONING_EFFORTS } from "../application/runDispatch.js";
+// TD-324（83 批 W2）：归属拒绝固定文案共用的原因清单片段（ownership SSOT 导出，
+// 六类拒绝逐类写）——各工具专属 mismatch 文案拼接它，不再各写一份清单。
+import { WORKSPACE_MISMATCH_REASONS_TEXT } from "../application/runWorkspaceOwnership.js";
 // M12-7: Lead-authorized correction continuation. The service spawns a NEW child
 // run/transcript that resumes the parent's provider-native conversation IN the
 // parent's retained worktree. The MCP boundary resolves the workspace + Lead
@@ -1778,13 +1781,15 @@ const RUN_STATUS_DESCRIPTION =
 // （静态后缀不破坏"绝不泄漏原始异常"契约；collect 取回失败 ≠ 运行失败——
 // run_diagnose 给的是已记录的运行状态与失败证据，不承诺解释取回故障本身）。
 const COLLECT_ERROR_TEXT = "run_collect failed — call run_diagnose for the recorded run state and failure evidence";
-// 归属拒绝专属固定文案：目标证明通过，但转录记录的归属不属于它（另一项目 /
-// 子目录或非 Git cwd / 无归属事实的旧转录）。核验在读之后、serve 取回与审计
-// 追加之前 fail-closed（零写入）。固定文案，不回显绝对路径或任何动态值。
+// 归属拒绝专属固定文案：目标证明通过，但转录记录的归属不属于它。核验在读之后、
+// serve 取回与审计追加之前 fail-closed（零写入）。固定文案，不回显绝对路径或任何
+// 动态值。TD-324（83 批 W2）：原因清单补全为 ownership SSOT 的六类（此前只列了
+// 另一项目/子目录或非 Git/legacy 三类，漏了相对或已消失、重复、缺 cwd、冲突），
+// 清单本体由 WORKSPACE_MISMATCH_REASONS_TEXT 单一持有；结尾"零写入、换根重试"
+// 的说法不变。
 const COLLECT_WORKSPACE_MISMATCH_TEXT =
   "run_collect refused: this run does not belong to the project given by "
-  + "expectedWorkspaceRoot — its transcript records a cwd in another project, a "
-  + "subdirectory or non-Git path, or no ownership fact at all (legacy transcript). "
+  + `expectedWorkspaceRoot — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
   + "Nothing was written; retry with the run's own project root.";
 // F5 (2026-10-08 friction batch): 坏 cursor 专属拒绝文案。解码/校验路径抛出的
 // CursorRejectedError（instanceof 分类，沿 run_activity M12-19 纪律——不透子类型：
@@ -1800,14 +1805,14 @@ const CURSOR_REJECTED_GUIDANCE =
 // lead_preflight 选定项目）下的只读观察工具照 run_collect 的写法给同款固定文案
 // ——Lead 必须能分清"归属拒绝"与"一般失败"。单一构造器生成，各工具一份常量，
 // 不回显路径或 runId。run_status 不做归属核验（statusService 无绑定入参），无此分支。
-// 原因按 runWorkspaceOwnership.js 的六类拒绝逐类写：不匹配（另一项目、子目录、
-// 非 Git 路径）、证明不了（相对或已消失的路径）、没有、重复、缺 cwd、冲突（提交
-// 与开跑记下的 cwd 不一致）。换项目只对"属于另一个项目"有用，所以写成条件句。
+// 原因按 runWorkspaceOwnership.js 的六类拒绝逐类写（TD-324 起清单本体由该 SSOT
+// 导出的 WORKSPACE_MISMATCH_REASONS_TEXT 单一持有，本构造器只拼前后缀）：不匹配
+// （另一项目、子目录、非 Git 路径）、证明不了（相对或已消失的路径）、没有、重复、
+// 缺 cwd、冲突（提交与开跑记下的 cwd 不一致）。换项目只对"属于另一个项目"有用，
+// 所以写成条件句。
 const boundWorkspaceMismatchText = (tool) =>
-  `${tool} refused: this run cannot be shown to belong to the bound workspace — its transcript's `
-  + "ownership facts name a cwd in another project, a subdirectory, or a non-Git, relative or "
-  + "vanished path, or they are missing (legacy transcript), duplicated, incomplete (no cwd) or "
-  + "in conflict. Read-only; nothing was written. If the run belongs to another project, "
+  `${tool} refused: this run cannot be shown to belong to the bound workspace — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  + "Read-only; nothing was written. If the run belongs to another project, "
   + "select it (workspace_select / lead_preflight workspaceRoot) and retry.";
 const COLLECT_CURSOR_REJECTED_TEXT = `run_collect failed — ${CURSOR_REJECTED_GUIDANCE}`;
 // TD-224 (2026-10-08): compact too_large degradation guidance — the D1-D3
@@ -2673,10 +2678,12 @@ function buildRunDeliveryPayload(runId, view) {
 const DELIVERY_DECIDE_ERROR_TEXT = "run_delivery_decide failed";
 // 归属拒绝专属固定文案（同 run_collect）：目标证明通过但 run 不属于它——核验在
 // 锁内追加与会话释放之前 fail-closed（零写入、零释放）。固定文案，不回显绝对路径。
+// TD-324（83 批 W2）：原因清单补全为 ownership SSOT 的六类（清单本体由
+// WORKSPACE_MISMATCH_REASONS_TEXT 单一持有）；结尾"零决策、零释放、换根重试"
+// 的说法不变。
 const DELIVERY_DECIDE_WORKSPACE_MISMATCH_TEXT =
   "run_delivery_decide refused: this run does not belong to the project given by "
-  + "expectedWorkspaceRoot — its transcript records a cwd in another project, a "
-  + "subdirectory or non-Git path, or no ownership fact at all (legacy transcript). "
+  + `expectedWorkspaceRoot — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
   + "No decision and no session release happened; retry with the run's own project root.";
 
 const RUN_DELIVERY_DECIDE_INPUT = z.object({
@@ -2736,6 +2743,15 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
 // still owns the decision.
 
 const DELIVERY_REVERIFY_ERROR_TEXT = "run_delivery_reverify failed";
+// TD-324（83 批 W2）：写面归属拒绝专属固定文案——服务层 Phase 0 以 typed code
+// workspace_not_authorized 抛出（先于任何转录追加与验证执行），适配层按 code 折
+// 叠。同一原因清单（WORKSPACE_MISMATCH_REASONS_TEXT），结尾写明零副作用并换该
+// 运行自己的项目根重试（run_collect 文案的结尾写法）。固定文案，不回显路径或任
+// 何动态值。
+const DELIVERY_REVERIFY_WORKSPACE_MISMATCH_TEXT =
+  "run_delivery_reverify refused: this run cannot be shown to belong to the workspace given by "
+  + `expectedWorkspaceRoot — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  + "No verification was run and nothing was appended; retry with the run's own project root.";
 
 const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   runId: z.string().min(1),
@@ -3139,6 +3155,15 @@ const LEAD_PREFLIGHT_DESCRIPTION =
 // ===== run_stop (workspace-bound destructive) constants =====
 
 const RUN_STOP_ERROR_TEXT = "run_stop failed";
+// TD-324（83 批 W2）：写面归属拒绝专属固定文案——服务层以 authorized:false 结果
+// 形态回报（唯一成因就是归属核验，先于任何终态认领/事件追加/击杀），适配层据此
+// 给专属文案。同一原因清单（WORKSPACE_MISMATCH_REASONS_TEXT），结尾写明零副作
+// 用并换该运行自己的项目根重试（run_collect 文案的结尾写法）。固定文案，不回显
+// 路径或任何动态值。
+const RUN_STOP_WORKSPACE_MISMATCH_TEXT =
+  "run_stop refused: this run cannot be shown to belong to the workspace given by "
+  + `expectedWorkspaceRoot — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  + "Nothing was stopped and no stop event was appended; retry with the run's own project root.";
 
 // 决定 0069（Owner 2026-10-13）：中止前必须先探明 worker 的最新状态并说明理由。
 // reason = 为什么要停；observedSeq = run_activity 最新一条的 seq（没有条目填 0）。
@@ -3836,6 +3861,9 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
 // that the inline version lacked.
 
 const DELIVERY_REVIEW_ERROR_TEXT = "run_delivery_review failed";
+// TD-324（83 批 W2）：归属拒绝专属固定文案（服务层 typed code；会话绑定语义，
+// 见 boundWorkspaceMismatchText）——Lead 分得清"属于另一项目"与一般失败。
+const DELIVERY_REVIEW_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_delivery_review");
 // F5 (2026-10-08): 坏 cursor 专属拒绝文案（instanceof CursorRejectedError 折叠；
 // 共享指引句见 CURSOR_REJECTED_GUIDANCE，不透子类型，零 structuredContent）。
 const DELIVERY_REVIEW_CURSOR_REJECTED_TEXT =
@@ -3896,6 +3924,10 @@ const DELIVERY_REVIEW_DESCRIPTION =
 // semantic reviewer: it never selects/traverses files or cursors and never
 // stop/retry/repackage/accept/rejects. Atomic tools remain available.
 const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
+// TD-324（83 批 W2）：归属拒绝专属固定文案（readiness 与 review 服务均 typed
+// code；会话绑定语义，见 boundWorkspaceMismatchText）。
+const DELIVERY_REVIEW_BUNDLE_WORKSPACE_MISMATCH_TEXT =
+  boundWorkspaceMismatchText("run_delivery_review_bundle");
 // F5 (2026-10-08): 坏 cursor 专属拒绝文案（同上，组合工具同款折叠）。
 const DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT =
   `run_delivery_review_bundle failed — ${CURSOR_REJECTED_GUIDANCE}`;
@@ -6354,11 +6386,13 @@ export function createWaoMcpServer({
           deps: { userEnvReader: resolveUserEnv },
         });
         // Build safe output payload — use the request runId, not service return.
-        // Collapse authorization failure to fixed error (don't leak ownership details).
+        // TD-324（83 批 W2）：authorized:false 的唯一成因是归属核验（服务在任何
+        // 终态认领/事件追加/击杀之前 fail-closed）——归属拒绝专属固定文案，不再
+        // 折叠成笼统 failed；固定文案，不回显归属细节。
         if (result.authorized === false) {
           return {
             isError: true,
-            content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
+            content: [{ type: "text", text: RUN_STOP_WORKSPACE_MISMATCH_TEXT }],
           };
         }
         // 决定 0069：理由 / 观察位置不满足——固定文案的拒绝，零副作用。
@@ -7062,6 +7096,14 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: DELIVERY_REVIEW_CURSOR_REJECTED_TEXT }],
           };
         }
+        // TD-324（83 批 W2）：归属拒绝专属固定文案（run_activity 同款纪律；服务层
+        // typed code，先于任何 Git 证明与内容读取）——不再折叠成笼统 failed。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }],
@@ -7198,6 +7240,14 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT }],
+          };
+        }
+        // TD-324（83 批 W2）：归属拒绝专属固定文案——readiness 与 review 两个服务
+        // 都以 typed code 拒绝（先于任何 Git 证明与内容读取），不再折叠成笼统 failed。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_WORKSPACE_MISMATCH_TEXT }],
           };
         }
         return {
@@ -7372,6 +7422,10 @@ export function createWaoMcpServer({
             structuredContent: pending,
           };
         }
+        // TD-324：withBoundedWait 把服务拒绝按值返回（TD-215 迟拒合同；TD-226 在
+        // repackage 面的同款补丁）——先把原始错误原样重抛，让下方 typed 分类看见
+        // 本来的 code（归属拒绝），而不是被 "runId mismatch" 掩盖成笼统文案。
+        if (result instanceof Error) throw result;
         // Build a NEW payload from the service result — validate every field
         // through closed sets. Any violation throws → fixed safe error with no
         // structuredContent; no command/path/stderr/event/credential is echoed.
@@ -7410,7 +7464,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // TD-324（83 批 W2）：归属拒绝专属固定文案——服务层 Phase 0 的 typed code
+        // （先于任何转录追加与验证执行，零副作用），不再折叠成笼统 failed。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVERIFY_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVERIFY_ERROR_TEXT }],

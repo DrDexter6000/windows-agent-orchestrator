@@ -527,7 +527,9 @@ test("0116-SP-FIRST: an appended continuation fact is refused — it must be the
     // Case 2: ORDINARY background run (first event background_submitted
     // WITHOUT continuation) + the same appended forged fact. The appended
     // fact corrupts ownership first (two bound background_submitted), so the
-    // refusal surfaces as the folded fixed review-failure text.
+    // refusal surfaces as the ownership-refusal text — TD-324（83 批 W2）起归属
+    // 拒绝（含"duplicated"这一类）在 CLI --all 上报专属文案，不再折叠成笼统
+    // "run_delivery_review failed"。
     writeTranscript(runDir, CHILD_RUN, [
       { type: "run.background_submitted", runId: CHILD_RUN, ts: "2026-01-02T00:00:00Z", seq: 1, cwd: repo, background: true, deliveryRequested: true },
       { type: "run.started", runId: CHILD_RUN, ts: "2026-01-02T00:00:00Z", seq: 2, cwd: repo },
@@ -535,7 +537,7 @@ test("0116-SP-FIRST: an appended continuation fact is refused — it must be the
       forgedFact(),
       appendedReuse,
     ]);
-    await assert.rejects(() => runSince(), /run_delivery_review failed/, "ordinary background run with an appended continuation fact is refused");
+    await assert.rejects(() => runSince(), /run_delivery_review refused: this run cannot be shown to belong to the workspace given by --cwd/, "ordinary background run with an appended continuation fact is refused");
   } finally {
     await cleanupRepo(repo);
     cleanupDir(runDir);
@@ -714,4 +716,40 @@ test("0116-SP-04: no entry point accepts an arbitrary commit; unexpected --all f
     /run_delivery_review failed/,
     "unexpected --all failures fold to the fixed review-failure text",
   );
+});
+
+// =====================================================================
+// TD-324（83 批 W2）：CLI --all 的归属拒绝专属固定文案——typed code → 专属文案
+//（不再折叠成笼统 "run_delivery_review failed"；上方的 nowhere-repo 用例继续钉
+// "其它失败"的笼统折叠）。
+// =====================================================================
+
+test("TD-324-CLI: --all ownership refusal → dedicated fixed text, not the generic fold", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "td324-cli-all-"));
+  try {
+    const config = { runDir: dir };
+    const typedRefusal = () => {
+      const e = new Error("workspace mismatch: run ownership does not match authorized workspace");
+      e.code = "workspace_not_authorized";
+      throw e;
+    };
+    await assert.rejects(
+      () => runsDeliveryCommand(
+        ["review", "run_td324all", "--all"],
+        config,
+        { getRunDeliveryReviewFn: typedRefusal },
+      ),
+      (err) => {
+        assert.match(err.message, /^run_delivery_review refused: this run cannot be shown to belong to the workspace given by --cwd \(default: the current directory\)/,
+          "归属拒绝专属 CLI 固定文案");
+        assert.match(err.message, /Pass --cwd with the run's own project root and retry\.$/, "结尾指引换根重试");
+        assert.ok(!err.message.includes("run_delivery_review failed"), "不再折叠成笼统失败文案");
+        assert.ok(!err.message.includes(dir), "不回显路径");
+        return true;
+      },
+      "--all ownership refusal rejects with the dedicated fixed text",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
 });

@@ -146,13 +146,16 @@ test("MCP-03: safe output — no PID/path/session/command/stderr", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("MCP-04: other workspace → run_stop failed, zero side effect", async () => {
+test("MCP-04: other workspace → TD-324 ownership-refusal fixed text, zero side effect", async () => {
   const dirA = mkdtempSync(join(tmpdir(), "wao-mcp-04a-"));
   const dirB = mkdtempSync(join(tmpdir(), "wao-mcp-04b-"));
   try {
     makeGitRepo(dirA);
     makeGitRepo(dirB);
     await seedRun(dirA, "run_mcp04", dirA, 44444);
+    const { readFileSync } = await import("node:fs");
+    const transcriptPath = join(dirA, "run_mcp04.jsonl");
+    const transcriptBefore = readFileSync(transcriptPath, "utf8");
     const { server, getKillCalls } = createServerWithFakeStop({ runDir: dirA, workspaceRoot: dirB });
     const client = await buildClient(server);
     try {
@@ -161,8 +164,19 @@ test("MCP-04: other workspace → run_stop failed, zero side effect", async () =
       const res = await client.callTool({ name: "run_stop", arguments: { runId: "run_mcp04", expectedWorkspaceRoot: dirB, ...stopProof(dirA, "run_mcp04") } });
       assert.ok(res.isError, "must be error");
       const text = res.content[0].text;
-      assert.equal(text, "run_stop failed");
+      // TD-324（83 批 W2）：归属拒绝专属固定文案——同一原因清单，结尾写明零副作用；
+      // 不再折叠成笼统 "run_stop failed"（"其它失败"仍走笼统文案，见
+      // runStopCloseout.test.js 的 RUNID-05 invalid-runId 用例）。
+      assert.match(text, /^run_stop refused: this run cannot be shown to belong to the workspace given by expectedWorkspaceRoot/,
+        "归属拒绝专属固定文案");
+      assert.match(text, /Nothing was stopped and no stop event was appended; retry with the run's own project root/,
+        "结尾写明零副作用与换根重试");
+      assert.ok(!text.includes("run_stop failed"), "不再折叠成笼统失败文案");
+      assert.ok(!text.includes(dirA) && !text.includes(dirB), "不回显工作区路径");
       assert.equal(getKillCalls(), 0, "zero kills for other workspace");
+      // 写面零副作用：转录逐字节不变（没有停止事件、没有终态认领）。
+      assert.equal(readFileSync(transcriptPath, "utf8"), transcriptBefore,
+        "refused stop appends nothing to the transcript");
     } finally {
       await client.close();
       await server.close();

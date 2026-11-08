@@ -63,7 +63,10 @@ import {
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyDelivery, createCallerGate } from "../deliveryVerification.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// TD-324（83 批 W2）：写面用 assert 同款语义（closed code + 固定消息）——MCP/CLI
+// 适配层按 code="workspace_not_authorized" 折叠成归属拒绝专属文案，不再是笼统
+// failed；核验仍在任何转录追加与验证执行之前（零副作用）。
+import { assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 export {
   REVERIFY_REASONS,
@@ -232,7 +235,7 @@ function _proveReverifyPreconditions(events, runId, authorizedWorkspaceRoot) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
     throw new Error("runDeliveryReverify: authorizedWorkspaceRoot is required");
   }
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
 
   // No existing decision — once the Lead decided, reverify is not allowed.
   const decision = events.find(

@@ -323,3 +323,14 @@ export function assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, req
     throw err;
   }
 }
+
+// TD-324（83 批 W2）：归属拒绝固定文案共用的"原因清单"片段——按本模块的六类拒绝
+// 逐类写（不匹配[另一项目/子目录/非 Git]、证明不了[相对或已消失]、没有[legacy]、
+// 重复、缺 cwd、冲突）。MCP（boundWorkspaceMismatchText 族与 run_collect /
+// run_delivery_decide / run_stop / run_delivery_reverify 专属文案）与 CLI（runs
+// delivery review / reverify）各工具文案拼接它，避免多份清单各写一遍漂移。静态
+// 文本：不含路径、cwd、runId 或任何动态值。
+export const WORKSPACE_MISMATCH_REASONS_TEXT =
+  "its transcript's ownership facts name a cwd in another project, a subdirectory, "
+  + "or a non-Git, relative or vanished path, or they are missing (legacy transcript), "
+  + "duplicated, incomplete (no cwd) or in conflict";

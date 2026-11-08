@@ -15,7 +15,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -613,4 +613,67 @@ test("3B2a-RV-12: out-of-range / non-integer attempt is rejected by the schema (
       await server.close();
     }
   } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// TD-324（83 批 W2）：归属拒绝专属固定文案——属于另一个项目的运行 → 专属文案
+//（真实服务链：Phase 0 的 assert 归属核验以 typed code 抛出，先于任何转录追加
+// 与验证执行），零副作用（转录逐字节不变），不再折叠成笼统
+// "run_delivery_reverify failed"。"其它失败 → 原有文案"由 3B2a-RV-05/06（服务
+// 抛错/坏值 → 固定 "run_delivery_reverify failed"）覆盖。
+// =====================================================================
+
+test("TD-324: cross-workspace run → ownership-refusal fixed text, zero side effects (real service)", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "td324-rv-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "td324-rv-b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "td324-rv-rd-"));
+  try {
+    makeGitRepo(dirA);
+    makeGitRepo(dirB);
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_td324_reverify";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    writeFileSync(transcriptPath, [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-11-08T00:00:00.000Z", runId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-11-08T00:00:01.000Z", runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dirA, runId, agentId: "coder_low" }),
+    ].join(""), "utf8");
+    const { readFileSync } = await import("node:fs");
+    const transcriptBefore = readFileSync(transcriptPath, "utf8");
+    // 调用命名 dirB 为目标；运行属于 dirA —— 真实 runDeliveryReverify 服务在
+    // Phase 0 归属核验（先于资格判定、Git 读取与锁内追加）以 typed code 拒绝。
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_delivery_reverify",
+        arguments: { runId, reason: "tooling_invalid", expectedWorkspaceRoot: dirB },
+      });
+      assert.equal(res.isError, true, "cross-workspace reverify is an error");
+      assert.ok(!res.structuredContent, "no structuredContent on error");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /^run_delivery_reverify refused: this run cannot be shown to belong to the workspace given by expectedWorkspaceRoot/,
+        "归属拒绝专属固定文案");
+      assert.match(text, /No verification was run and nothing was appended; retry with the run's own project root/,
+        "结尾写明零副作用与换根重试");
+      assert.ok(!text.includes("run_delivery_reverify failed"), "不再折叠成笼统失败文案");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(runId), "不回显 runId");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.split("\\").join("/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+      // 写面零副作用：没有 reverify 请求事件、转录逐字节不变。
+      assert.equal(readFileSync(transcriptPath, "utf8"), transcriptBefore,
+        "refused reverify appends nothing to the transcript");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dirA);
+    cleanupDir(dirB);
+    cleanupDir(runDir);
+  }
 });

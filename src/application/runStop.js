@@ -37,7 +37,10 @@ import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W3）：已拒路径回显 terminalState 的绑定作用域——metrics.js
 // 单一定义处（runList.js 同款 import 族）。
 import { boundReportScope } from "../metrics.js";
-import { findRunWorkspaceOwnership, verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// TD-324（83 批 W2）：写面用 assert 同款语义（closed code + 固定消息）——MCP 适配
+// 层按 authorized:false（唯一成因=归属核验）给归属拒绝专属文案。下方的
+// findOwnershipFact / verifyWorkspaceOwnership re-export 不受影响（直接自模块再导出）。
+import { assertRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // M12-19: the conservative process-alive probe now lives in ownerLiveness (the
 // liveness SSOT), shared with the process_missing recovery proof. Imported here
 // and re-exported below so commands/stop.js and existing tests keep working.
@@ -222,7 +225,9 @@ export async function stopRun(input) {
   // HTTP stop, or alert. Authorization failure = zero events, zero side effects.
   if (authorizedWorkspaceRoot !== undefined) {
     try {
-      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+      // TD-324（83 批 W2）：assert 形态（closed code + 固定消息）——authorizationError
+      // 不再携带具体子类原因，统一为归属拒绝固定消息。
+      assertRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
     } catch (err) {
       return {
         runId,

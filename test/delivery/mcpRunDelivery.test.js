@@ -1528,3 +1528,45 @@ test("0097 五′: run_delivery waitMs cross-workspace → ownership-refusal fix
     rmSync(runDir, { recursive: true, force: true });
   }
 });
+
+// TD-324（83 批 W2）：即时查询（不带 waitMs）与等待路径同样核验归属——属于另
+// 一项目的运行返回同一归属拒绝专属文案（DELIVERY_QUERY_WORKSPACE_MISMATCH_TEXT），
+// 不再"不核验直接出结果"，也不折叠成笼统 "run_delivery failed"。
+test("TD-324: run_delivery point-in-time cross-workspace → ownership-refusal fixed text", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "td324-dq-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "td324-dq-b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "td324-dq-rd-"));
+  try {
+    await makeGitRepo(dirA);
+    await makeGitRepo(dirB);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_td324_delivery";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-11-08T00:00:00.000Z", runId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-11-08T00:00:01.000Z", runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dirA, runId, agentId: "coder_low" }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-11-08T00:00:02.000Z", runId }),
+    ].join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId } });
+      const dumped = JSON.stringify(res);
+      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to the bound workspace/,
+        "即时查询的归属拒绝专属固定文案（与等待路径同款）");
+      assert.ok(!dumped.includes("run_delivery failed"), "不再折叠成笼统失败文案");
+      assert.ok(!res.structuredContent, "no structuredContent on error");
+      const text = res.content.map((c) => c.text ?? "").join("\n");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.split("\\").join("/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});

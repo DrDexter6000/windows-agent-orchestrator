@@ -919,3 +919,55 @@ test("M12-3B-12: bundle description states waitMs range, 0 invalid, transport-lo
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// =====================================================================
+// TD-324（83 批 W2）：归属拒绝专属固定文案——属于另一个项目的运行 → 专属文案
+//（真实 readiness 服务：初始读后的归属核验以 typed code 拒绝，先于等待轮询与
+// review 服务），不再折叠成笼统 "run_delivery_review_bundle failed"。"其它失败 →
+// 原有文案"由既有的服务抛错折叠用例（"run_delivery_review_bundle failed"）覆盖。
+// =====================================================================
+
+test("TD-324: cross-workspace run → ownership-refusal fixed text (real readiness service)", async () => {
+  const dirA = makeGitDir("td324-bun-a-");
+  const dirB = makeGitDir("td324-bun-b-");
+  const runDir = mkdtempSync(join(tmpdir(), "td324-bun-rd-"));
+  try {
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_td324_bundle";
+    const jl = (obj) => JSON.stringify(obj) + "\n";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-11-08T00:00:00.000Z", runId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-11-08T00:00:01.000Z", runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dirA, runId, agentId: "coder_low" }),
+    ].join(""), "utf8");
+    // 会话绑定到 dirB；运行属于 dirA。显式 waitMs:1000 —— 归属核验在等待循环
+    // 之前 fail-closed，不会真的等满。
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirB });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_delivery_review_bundle",
+        arguments: { runId, fileIndex: 0, waitMs: 1000 },
+      });
+      assert.equal(res.isError, true, "cross-workspace bundle is an error");
+      assert.ok(!res.structuredContent, "no structuredContent on error");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /^run_delivery_review_bundle refused: this run cannot be shown to belong to the bound workspace/,
+        "归属拒绝专属固定文案");
+      assert.ok(!text.includes("run_delivery_review_bundle failed"), "不再折叠成笼统失败文案");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(runId), "不回显 runId");
+      for (const p of [dirA, dirB]) {
+        assert.ok(!text.includes(p) && !text.includes(p.split("\\").join("/"))
+          && !dumped.includes(JSON.stringify(p).slice(1, -1)), "不回显工作区路径");
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});

@@ -279,3 +279,61 @@ test("M11-3C-CLI-RUNDIR: --run-dir passes through to service", async () => {
     cleanupDir(customRunDir);
   }
 });
+
+// =====================================================================
+// TD-324（83 批 W2）：CLI 单文件 review 的归属拒绝专属固定文案——运行不属于
+// --cwd（缺省当前目录）给的工作区时打印「run_delivery_review refused: … pass
+// --cwd with the run's own project root」并抛错（cli.js 顶层 catch 置非零退
+// 出）；其它失败照旧原样上抛（既有失败形状不变）。
+// =====================================================================
+
+test("TD-324-CLI: ownership refusal → dedicated fixed text, non-zero exit shape", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "td324-cli-rev-"));
+  try {
+    const config = { runDir: dir };
+    // 服务层以 typed code 拒绝（真实链由 MCP 面的 TD-324 用例证明；此处钉 CLI 折叠）。
+    const typedRefusal = () => {
+      const e = new Error("workspace mismatch: run ownership does not match authorized workspace");
+      e.code = "workspace_not_authorized";
+      throw e;
+    };
+    await assert.rejects(
+      () => runsDeliveryCommand(
+        ["review", "run_td324", "--file-index", "0"],
+        config,
+        { getRunDeliveryReviewFn: typedRefusal },
+      ),
+      (err) => {
+        assert.match(err.message, /^run_delivery_review refused: this run cannot be shown to belong to the workspace given by --cwd \(default: the current directory\)/,
+          "归属拒绝专属 CLI 固定文案");
+        assert.match(err.message, /duplicated, incomplete \(no cwd\) or in conflict/, "原因清单为完整的六类");
+        assert.match(err.message, /Pass --cwd with the run's own project root and retry\.$/, "结尾指引换根重试");
+        assert.ok(!err.message.includes("run_delivery_review failed"), "不再报笼统失败文案");
+        assert.ok(!err.message.includes(dir), "不回显路径");
+        return true;
+      },
+      "ownership refusal rejects with the dedicated fixed text",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-324-CLI: other service failure → original raw error shape unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "td324-cli-rev2-"));
+  try {
+    const config = { runDir: dir };
+    // 非归属失败（如资格不足）照旧原样上抛——单文件模式的既有失败形状不变。
+    await assert.rejects(
+      () => runsDeliveryCommand(
+        ["review", "run_td324b", "--file-index", "0"],
+        config,
+        { getRunDeliveryReviewFn: async () => { throw new Error("delivery facts not reviewable: no usable delivery_created"); } },
+      ),
+      /delivery facts not reviewable/,
+      "other failures keep the original raw error message",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});

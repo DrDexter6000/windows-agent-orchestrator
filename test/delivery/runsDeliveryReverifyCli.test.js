@@ -772,3 +772,59 @@ test("FR07-CLI-21: a service result without a valid attempt fails closed (no out
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// TD-324（83 批 W2）：CLI reverify 的归属拒绝专属固定文案——typed code → 专属文
+// 案（写面：结尾写明没有验证、零追加），不再透传笼统的归属错误消息；其它失败照
+// 旧原样上抛（既有失败形状不变）。真实链（Phase 0 typed 抛出）由 MCP 面的
+// TD-324 用例证明；此处钉 CLI 折叠。
+// =====================================================================
+
+test("TD-324-CLI: ownership refusal → dedicated fixed text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "td324-cli-rv-"));
+  try {
+    const config = { runDir: dir };
+    const typedRefusal = () => {
+      const e = new Error("run workspace ownership does not authorize this project");
+      e.code = "workspace_not_authorized";
+      throw e;
+    };
+    await assert.rejects(
+      () => runsDeliveryCommand(
+        ["reverify", "run_td324rv", "--reason", "tooling_invalid"],
+        config,
+        { runDeliveryReverifyFn: typedRefusal },
+      ),
+      (err) => {
+        assert.match(err.message, /^run_delivery_reverify refused: this run cannot be shown to belong to the workspace given by --cwd \(default: the current directory\)/,
+          "归属拒绝专属 CLI 固定文案");
+        assert.match(err.message, /No verification was run and nothing was appended; pass --cwd with the run's own project root and retry\.$/,
+          "结尾写明零副作用与换根重试");
+        assert.ok(!err.message.includes(dir), "不回显路径");
+        return true;
+      },
+      "ownership refusal rejects with the dedicated fixed text",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-324-CLI: other service failure → original raw error shape unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "td324-cli-rv2-"));
+  try {
+    const config = { runDir: dir };
+    // 非归属失败（如服务资格拒绝）照旧原样上抛——既有失败形状不变。
+    await assert.rejects(
+      () => runsDeliveryCommand(
+        ["reverify", "run_td324rv2", "--reason", "tooling_invalid"],
+        config,
+        { runDeliveryReverifyFn: async () => { throw new Error("runDeliveryReverify: a decision already exists for this run"); } },
+      ),
+      /a decision already exists/,
+      "other failures keep the original raw error message",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
