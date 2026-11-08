@@ -112,7 +112,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 项目桶超过 64 个时，`observations` 多一行 `run buckets: …`（桶数与阈值；按 runId 解析要逐桶查），不影响 `complete`。
 
-`open item:` 行是待 Lead 收口的事实行，候选集为绑定仓库的 `wao/run_*` 分支；只告知事实与去向，不动手（见决定 0113）。
+`open item:` 行是待 Lead 收口的事实行，候选集为绑定仓库的 `wao/run_*` 分支，以及 unresolved 里最新 5 个、runner 经证明已不在的运行（证明见监督页 `runner_gone`）；只告知事实与去向，不动手（见决定 0113）。
 
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 

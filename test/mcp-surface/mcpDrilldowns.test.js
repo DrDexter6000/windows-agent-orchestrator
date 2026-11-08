@@ -42,16 +42,17 @@ function makeGitRepo(dir) {
 
 function jl(obj) { return JSON.stringify(obj) + "\n"; }
 
+// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
+// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
+// 经它一律"证明不成立"，测试不起任何真实进程扫描。
 const REFUSING_RUNNER_GONE_DEPS = {
   handshakeReader: () => ({ present: false }),
   daemonAliveFn: () => false,
   identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
   runnerScanFn: async () => ({ alive: true }),
 };
+
 function seedTranscript(runDir, runId, { agentId = "coder_low", messages = [], terminal = false, workspaceCwd, extraLines = [] } = {}) {
-// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
-// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
-// 经它一律"证明不成立"，测试不起任何真实进程扫描。
   mkdirSync(runDir, { recursive: true });
   const lines = [
     jl({ type: "run.submitted", agentId, ts: "2026-07-28T00:00:00.000Z", runId }),
