@@ -52,7 +52,8 @@
 |---|---|
 | 只改测试文件或文档（`*.md`、`docs/**`；角色合同 `config/roles/*.md` 除外，算共享核心），不碰公共夹具（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`） | 被改的测试文件；改了文档时加上横切守卫组与读这些文档的测试；新增、移动或删除了测试文件时再加上 `test/isolation-infra/canonicalRunner.test.js` |
 | 只改画像数据（`config/lane-traits.json`） | `test/registry-roles/laneTraits.test.js`、`test/application/laneProfile.test.js` 加横切守卫组 |
-| 触及共享核心：测试、文档与画像数据以外的一切改动（`src/**`、`config/**`、`scripts/**` 等），以及公共夹具 | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
+| 触及共享核心：测试、文档与画像数据以外的一切改动（`src/**`、`config/**`、`scripts/**` 等） | 逐个列出：被改模块的直接测试、读被改文件的测试、`test/isolation-infra/layering.test.js` 与横切守卫组；全量只在最终候选上跑一次（决定 0118） |
+| 公共夹具与测试运行器（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`、`scripts/canonical-test.mjs`、`scripts/test-one.mjs`） | `npm test`，并声明 `verificationTimeoutMs ≥ 1200000` |
 
 - 任务书把 worker 自检命令与 `verificationCommands` 分开写。worker 自检一律定向，汇报写明"这些文件通过，其余未测"。
 - 交付规格的其它要求（`allowedPaths`、新增测试文件时的 manifest 登记）见[交付与验收](usage/delivery.md)场景 4b。
