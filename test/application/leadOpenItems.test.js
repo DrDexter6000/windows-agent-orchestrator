@@ -37,6 +37,7 @@ import {
 } from "../../src/application/leadOpenItems.js";
 import { RECENT_BOUND_EVENT_MS } from "../../src/application/worktreeReclaim.js";
 import { determineRunSettlement } from "../../src/application/runSettlement.js";
+import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 import {
   deriveProjectBucketSlug,
   identifyProjectFromCwd,
@@ -171,6 +172,35 @@ function settledUndecided(runId, cwd) {
 }
 function terminalVerificationPending(runId, cwd) {
   return [startedWithDelivery(runId, cwd), running(runId), terminal(runId), created(runId)];
+}
+// 第 87 批续修：终态 failed + 重打包 + 验证 pending 的形状——事件全部经生产 CAS
+// 写出（tryAppendRepackageCreated / tryAppendDecision，与 transcript.test.js
+// TD-179-W4 同一构造路径），不手写事件形状。decided 时追加一条 pending 拒收。
+async function failedRepackagedPending(runId, cwd, { decided = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-oi-repkg-"));
+  try {
+    const filePath = join(dir, `${runId}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId, agentId: "coder_low" });
+    await t.append("run.started", {
+      backend: "claude-code",
+      cwd,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    });
+    await t.append("run.state_change", { from: "pending", to: "running", reason: "first_event" });
+    await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    await t.append("run.state_change", { from: "running", to: "failed", reason: "delivery_failed" });
+    const repackaged = await t.tryAppendRepackageCreated({
+      delivery: makeRef(runId),
+      approvedAllowedPaths: ["src"],
+      source: "recovered",
+    });
+    assert.equal(repackaged.created, true);
+    if (decided) {
+      const decision = await t.tryAppendDecision({ decision: "rejected", reason: "superseded" });
+      assert.equal(decision.accepted, true);
+    }
+    return await readTranscript(filePath);
+  } finally { cleanupDir(dir); }
 }
 // undeterminable：终态 + 恰好两条绑定 delivery_failed → packaging_conflict
 //（SETTLE-05 同款形状——"判不出收口"，不是"还没结果"）。
@@ -337,6 +367,35 @@ test("OI-A1c: 旧运行（无在档事实）按 cwd 推导——链接工作树�
     assert.ok(lines[0].includes(CROSS_TREE_HINT), "该行列出的运行派发自另一棵工作树 → 带可执行提示");
     assert.ok(!/[A-Za-z]:[\\/]/.test(lines[0]), "行内无绝对路径");
   } finally { cleanupDir(wt); cleanupDir(foreign); cleanupDir(root); }
+});
+
+test("OI-A1d: 终态 failed + 重打包 + 验证 pending——已拒收的不进终态未收口、计入留待回收；同形状未裁定仍进终态未收口", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a1d-"));
+  try {
+    makeGitRepo(root);
+    const undecided = await failedRepackagedPending("run_d1", root);
+    assert.equal(determineRunSettlement(undecided, "run_d1").reason, "verification_pending",
+      "夹具前提：验证 pending 未收口");
+    const decided = await failedRepackagedPending("run_d2", root, { decided: true });
+    const settlement = determineRunSettlement(decided, "run_d2");
+    assert.equal(settlement.reason, "verification_pending", "收口语义不变（0095）：拒收后仍 unsettled");
+    assert.equal(settlement.facts.acceptanceStatus, "rejected", "夹具前提：已拒收");
+
+    const { lines } = await runCollect(root, {
+      refs: ["wao/run_d1", "wao/run_d2"],
+      worktrees: [],
+      eventsByRun: { run_d1: undecided, run_d2: decided },
+    });
+    assertLineShape(lines);
+    assert.equal(lines.length, 2, `恰好两行: ${JSON.stringify(lines)}`);
+    assert.equal(lines[0],
+      "open item: 1 terminal run(s) not settled (verification/reverify without a result; "
+      + "run_delivery or `wao runs wait <runId> --until-settled`): run_d1",
+      "未裁定的仍在终态未收口行；已拒收的不在（run_d2 未被点名）");
+    assert.equal(lines[1],
+      "open item: 1 decided/no-delivery wao/run_* branch(es)" + RECLAIM_TAIL,
+      "已拒收的计入留待回收");
+  } finally { cleanupDir(root); }
 });
 
 test("OI-A2: 可续计数正例（谱系在、未采纳、未闭合）在等裁步行内另计", async () => {

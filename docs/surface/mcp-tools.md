@@ -71,7 +71,7 @@ Output:
 
 ## lead_preflight
 
-Advisory single-call preflight: workspace binding, worker credentials, active runs, lane profiles (per-dimension star ratings, not routing rules; wao lanes has full profiles). Optional workspaceRoot selects the project, same authority as workspace_select (read-tool default scope only, shared per server instance). ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle independently, re-verify via the original tools.
+Advisory single-call preflight: workspace binding, worker credentials, active runs, lane profiles (per-dimension star ratings, not routing rules; wao lanes has full profiles). Optional workspaceRoot selects the project, same authority as workspace_select (read-tool default scope only, shared per server instance). ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle independently, re-verify via the original tools. `open item:` observation lines list what awaits Lead closeout (unsettled deliveries, reclaimable worktrees/branches, feedback inbox) with the next command.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=true, openWorldHint=false
 

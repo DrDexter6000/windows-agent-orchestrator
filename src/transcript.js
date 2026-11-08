@@ -573,15 +573,30 @@ function _lastBoundStateChangeBefore(events, runId, beforeIndex) {
 }
 
 /**
- * TD-179: is the LAST run.state_change bound to runId a transition to
- * `expected`? A transcript with NO bound state_change yields false — legacy
- * last-event inference is never sufficient (appending a decision event would
- * itself become the last event and regress a legacy-inferred terminal state).
+ * TD-179 (batch-87 relaxation): the durable terminal settlement a bounded
+ * pending reject requires, judged on the events STRICTLY BEFORE `beforeIndex`.
+ * The decision writer (tryAppendDecision) passes events.length + 1 (the whole
+ * current transcript); the read-side decision validator
+ * (_validateBoundDecisionEvent) passes the decision's own index (its
+ * append-order prefix) — both therefore settle the same prefix and share ONE
+ * predicate, so a pending reject the writer admitted can never be judged
+ * malformed on the next read. Exactly two shapes qualify:
+ *   - the LAST bound run.state_change is a transition to `completed`; OR
+ *   - it is a transition to `failed` AND that prefix carries a valid
+ *     repackage provenance for the created ref (findValidRepackageProvenance)
+ *     — the repackaged delivery whose verification never settled.
+ * A transcript with NO bound state_change, or a nonterminal last one, never
+ * qualifies — legacy last-event inference stays insufficient (appending a
+ * decision event would itself become the last event and regress a
+ * legacy-inferred terminal state).
  * @private
  */
-function _lastBoundStateChangeIs(events, runId, expected) {
-  const to = _lastBoundStateChangeBefore(events, runId, events.length + 1);
-  return to === expected;
+function _pendingRejectSettlementEligible(events, runId, beforeIndex, createdRef) {
+  const to = _lastBoundStateChangeBefore(events, runId, beforeIndex);
+  if (to === "completed") return true;
+  if (to !== "failed") return false;
+  const prefix = events.slice(0, Math.min(beforeIndex, events.length));
+  return findValidRepackageProvenance(prefix, runId, createdRef) !== null;
 }
 
 // 决定 0101：任何信封里的 reverify 事实（`run.delivery_reverification_*` 是
@@ -636,10 +651,13 @@ export function isDeclaredUnverifiableDelivery(events, runId, createdRef) {
  *   - the decision's verification status must be present and known — missing
  *     or unknown is always invalid;
  *   - a PENDING decision can only be a reject: explicitly stamped rejected,
- *     created explicitly declared pending, a bound completed state_change
- *     EARLIER in append order, and no original outcome before the decision
- *     (a later real outcome stays a legal display fact). A pending accepted
- *     can never be legalized — not even by a later pass;
+ *     created explicitly declared pending, a durable terminal settlement
+ *     EARLIER in append order — the last bound state_change is completed, or
+ *     failed with a valid repackage provenance for the created ref (the
+ *     shared _pendingRejectSettlementEligible predicate) — and no original
+ *     outcome before the decision (a later real outcome stays a legal
+ *     display fact). A pending accepted can never be legalized — not even by
+ *     a later pass;
  *   - a NONPENDING decision needs an earlier matching original outcome or a
  *     valid (complete) reverify backing in its transcript prefix — the
  *     NEAREST complete reverify chain before the decision is the backing
@@ -697,8 +715,8 @@ function _validateBoundDecisionEvent(decision, {
     if (createdRef.verification?.status !== "pending") {
       return "a pending-verification decision requires delivery_created to explicitly declare verification.status \"pending\"";
     }
-    if (_lastBoundStateChangeBefore(events, runId, decisionIndex) !== "completed") {
-      return "a pending-verification decision requires a bound completed run.state_change earlier in the transcript";
+    if (!_pendingRejectSettlementEligible(events, runId, decisionIndex, createdRef)) {
+      return "a pending-verification decision requires an earlier bound completed run.state_change, or a failed one with a valid repackage provenance";
     }
     for (let index = 0; index < decisionIndex; index += 1) {
       const event = events[index];
@@ -1309,10 +1327,13 @@ export class JsonlTranscript {
    *     unavailableReason, exactly one bound original unavailable outcome, no
    *     reverify facts) — the same rule on the normal completed and the
    *     recovery paths;
-   *   - TD-179: reject is ALSO allowed for a pending verification, but ONLY on
-   *     a completed run whose created ref EXPLICITLY declares
-   *     verification.status "pending" with no outcome and no decision — the
-   *     bounded pending rejection. It does not interrupt or infer anything
+   *   - TD-179: reject is ALSO allowed for a pending verification — the bounded
+   *     pending rejection — but ONLY with no outcome and no decision, on a
+   *     created ref that EXPLICITLY declares verification.status "pending", and
+   *     with a durable terminal settlement: the last bound run.state_change is
+   *     a transition to completed, or a transition to failed backed by a valid
+   *     repackage provenance for that created ref (a repackaged delivery whose
+   *     verification never settled). It does not interrupt or infer anything
    *     about the verifier; a late real outcome stays visible while the
    *     acceptance remains rejected.
    *
@@ -1417,17 +1438,24 @@ export class JsonlTranscript {
         // path. The authority already proved the shape (exactly one bound
         // usable created that EXPLICITLY declares verification "pending",
         // zero outcomes, no decision, no conflicting chain). Permission still
-        // requires a DURABLE completed run: the LAST bound run.state_change
-        // must be a transition to completed. Legacy last-event inference is
-        // never sufficient — appending this decision would itself become the
-        // last event and regress a legacy-inferred completed back to running.
-        // No verifier liveness is inferred and nothing is interrupted: a late
-        // real outcome still lands and stays visible while acceptance remains
-        // rejected.
-        if (!_lastBoundStateChangeIs(events, this.context.runId, "completed")) {
+        // requires a DURABLE terminal settlement via the shared predicate
+        // (_pendingRejectSettlementEligible — the same one the read-side
+        // decision validation uses): the LAST bound run.state_change is a
+        // transition to completed, OR — batch-87 relaxation — a transition to
+        // failed backed by a valid repackage provenance for the created ref
+        // (the repackaged delivery whose verification never settled; without
+        // that provenance such a run could never be decided). Legacy
+        // last-event inference is never sufficient — appending this decision
+        // would itself become the last event and regress a legacy-inferred
+        // terminal state. No verifier liveness is inferred and nothing is
+        // interrupted: a late real outcome still lands and stays visible
+        // while acceptance remains rejected.
+        if (!_pendingRejectSettlementEligible(
+          events, this.context.runId, events.length + 1, facts.createdRef,
+        )) {
           throw new DeliveryDecisionPolicyError(
             "terminal_not_eligible",
-            "Cannot reject: delivery verification is pending and the run has no durable bound completed run.state_change (a pending-verification reject requires a completed run)",
+            "Cannot reject: delivery verification is pending and the run has no durable settlement (a pending-verification reject requires a bound completed run.state_change, or a failed one with a valid repackage provenance)",
           );
         }
       } else {

@@ -2177,10 +2177,12 @@ test("TD-71: a metadata-write non-transient error after a successful open cleans
 //     waiting in the pending-aware mode; legacy absent status (or a claimed
 //     final status with no backing outcome) never gains pending validity.
 //   - A pending-verification decision can ONLY be a reject, explicitly stamped
-//     rejected, on a created that explicitly declared pending, with a bound
-//     completed state_change EARLIER in append order and no original outcome
-//     before the decision. A late real outcome (passed/failed/unavailable)
-//     stays a legal display fact; acceptance stays rejected.
+//     rejected, on a created that explicitly declared pending, with a durable
+//     terminal settlement EARLIER in append order — the last bound
+//     state_change is completed, or failed with a valid repackage provenance
+//     for the created ref (batch 87) — and no original outcome before the
+//     decision. A late real outcome (passed/failed/unavailable) stays a legal
+//     display fact; acceptance stays rejected.
 //   - A nonpending decision needs earlier matching original or valid reverify
 //     backing; accepted must be passed, EXCEPT a delivery the 决定 0101
 //     predicate declares unverifiable (its accepted snapshot may claim
@@ -2190,7 +2192,8 @@ test("TD-71: a metadata-write non-transient error after a successful open cleans
 //     top-level deliveryCommit/seq/verifiedCommit historical optional values.
 //   - tryAppendDecision validates facts BEFORE returning already_decided and
 //     returns a validated existing decision BEFORE the new-action gates; the
-//     ONLY new rejection path is completed + explicit pending + no outcome.
+//     ONLY new rejection paths are explicit pending + no outcome on a durably
+//     settled run (completed, or failed + a valid repackage provenance).
 // ============================================================
 
 const TDD_RUN = "run_td179_facts";
@@ -2273,6 +2276,26 @@ function tddDecision(type, claimedStatus, over = {}) {
 }
 
 const TDD_PENDING_OPTS = { expectedRunId: TDD_RUN, allowVerificationPending: true };
+
+/**
+ * 第 87 批种子：终态 failed 的 run 经 run_delivery_repackage 重打包（created 显式
+ * pending + 来源事实），验证从未落结果。重打包事件一律经生产 CAS
+ * （tryAppendRepackageCreated，即 M12-1S2 用的同一构造路径）写出，不手写形状。
+ */
+async function tddSeedFailedRepackage(dir, name) {
+  const filePath = join(dir, `${name}.jsonl`);
+  const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+  await t.append("run.started", { delivery: { mode: "git_commit_v1", allowedPaths: ["src"], baseCommit: TDD_BASE } });
+  await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+  await t.append("run.state_change", { from: "running", to: "failed", reason: "delivery_failed" });
+  const created = await t.tryAppendRepackageCreated({
+    delivery: tddCreatedRef({ changedFiles: ["src/a.js"] }),
+    approvedAllowedPaths: ["src"],
+    source: "recovered",
+  });
+  assert.equal(created.created, true);
+  return { filePath, t };
+}
 
 test("TD-179-closeout: new decisions from legacy outcomes remain readable and idempotent", async () => {
   const dir = await mkdtemp(join(tmpdir(), "td179-closure-"));
@@ -2724,7 +2747,7 @@ test("TD-179-A2: legal reverify-pass acceptance stays valid through the authorit
   assert.equal(facts.decisionEvent?.type, "run.delivery_accepted");
 });
 
-test("TD-179-W1: tryAppendDecision — the ONLY new rejection path is completed + explicit pending + no outcome", async () => {
+test("TD-179-W1: tryAppendDecision — the completed-run pending rejection path (explicit pending + no outcome)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "td179-w1-"));
   try {
     const filePath = join(dir, `${TDD_RUN}.jsonl`);
@@ -2858,6 +2881,101 @@ test("TD-179-W3: an impossible pending ACCEPTED on disk is a durable conflict �
     }
     const events = await readTranscript(filePath);
     assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0, "nothing appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-W4: 第 87 批 — a failed run's pending reject is admitted ONLY with a valid repackage provenance", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-w4-"));
+  try {
+    // The batch-87 shape: terminal failed + valid repackage provenance +
+    // created explicitly pending + zero outcomes → reject settles it.
+    {
+      const { filePath, t } = await tddSeedFailedRepackage(dir, "main");
+      assert.equal(
+        validateDeliveryFacts(await readTranscript(filePath), TDD_PENDING_OPTS).valid, true,
+        "seeded failed+repackage chain is valid pending",
+      );
+
+      // Accept on the same shape still refuses — pending never accepts.
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "accepted", reason: "nope" }),
+        (err) => err instanceof DeliveryDecisionPolicyError && err.code === "verification_failed",
+      );
+
+      const result = await t.tryAppendDecision({ decision: "rejected", reason: "repackaged; verification never settled" });
+      assert.equal(result.accepted, true, "failed+repackage pending reject succeeds");
+      assert.equal(result.event.type, "run.delivery_rejected");
+      assert.equal(result.event.deliveryCommit, TDD_COMMIT);
+      assert.equal(result.event.delivery.verification.status, "pending", "decision snapshot keeps verification pending");
+      assert.equal(result.event.delivery.acceptance.status, "rejected", "explicitly stamped rejected");
+
+      // Read back through the SAME shared predicate: the written reject is valid.
+      const facts = validateDeliveryFacts(await readTranscript(filePath), TDD_PENDING_OPTS);
+      assert.equal(facts.valid, true, "written pending reject reads back valid");
+      assert.equal(facts.verificationStatus, "pending");
+      assert.equal(facts.decisionEvent?.type, "run.delivery_rejected");
+
+      // A LATE real outcome still lands and displays; acceptance stays rejected.
+      const recorded = await t.tryAppendRepackageVerification({
+        delivery: tddCreatedRef({
+          changedFiles: ["src/a.js"],
+          verification: { status: "passed", commands: ["npm test"], verifiedCommit: TDD_COMMIT, results: [] },
+        }),
+        outcome: "passed",
+      });
+      assert.equal(recorded.recorded, true, "late outcome recorded");
+      const lateFacts = validateDeliveryFacts(await readTranscript(filePath), TDD_PENDING_OPTS);
+      assert.equal(lateFacts.valid, true, "late outcome keeps the transcript valid");
+      assert.equal(lateFacts.verificationStatus, "passed", "late outcome displays as the verification fact");
+      assert.equal(lateFacts.decisionEvent?.type, "run.delivery_rejected", "acceptance stays rejected");
+    }
+
+    // Terminal failed WITHOUT a repackage provenance → still terminal_not_eligible;
+    // on the read side a pending reject over that prefix is malformed.
+    {
+      const filePath = join(dir, "noprov.jsonl");
+      const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+      await t.append("run.started", { delivery: { mode: "git_commit_v1", allowedPaths: ["src"], baseCommit: TDD_BASE } });
+      await t.append("run.state_change", { from: "running", to: "failed", reason: "backend_error" });
+      await t.append("run.delivery_created", { delivery: tddCreatedRef({ changedFiles: ["src/a.js"] }) });
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "rejected", reason: "x" }),
+        (err) => err instanceof DeliveryDecisionPolicyError && err.code === "terminal_not_eligible",
+        "failed without provenance refuses the pending reject",
+      );
+      await t.append("run.delivery_rejected", {
+        delivery: tddCreatedRef({
+          changedFiles: ["src/a.js"],
+          acceptance: { status: "rejected", reviewerType: "lead_agent" },
+        }),
+        deliveryCommit: TDD_COMMIT,
+        reason: "forged",
+      });
+      assert.equal(
+        validateDeliveryFacts(await readTranscript(filePath), TDD_PENDING_OPTS).code,
+        "delivery_malformed",
+        "pending reject on a provenance-less failed prefix is malformed",
+      );
+    }
+
+    // A valid provenance but a LAST bound state_change that is neither failed
+    // nor completed (running) → still terminal_not_eligible, nothing appended.
+    {
+      const { filePath, t } = await tddSeedFailedRepackage(dir, "running-last");
+      await t.append("run.state_change", { from: "failed", to: "running", reason: "first_event" });
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "rejected", reason: "x" }),
+        (err) => err instanceof DeliveryDecisionPolicyError && err.code === "terminal_not_eligible",
+        "running-last refuses the pending reject",
+      );
+      assert.equal(
+        (await readTranscript(filePath)).filter((e) => e.type === "run.delivery_rejected").length,
+        0,
+        "nothing appended",
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

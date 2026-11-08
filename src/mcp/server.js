@@ -3145,12 +3145,15 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 const LEAD_PREFLIGHT_DESCRIPTION =
   // 必须保留：advisory + not a gate（M12-10-G 钉）；分节独立沉降、原工具复验。
   // unboundReason 的语义只写在 workspace_status 的 description 里，这里不复述。
+  // 决定 0113：open item 观察行一句话（行本体由 leadOpenItems.js 生成）。
   "Advisory single-call preflight: workspace binding, worker credentials, active runs, " +
   "lane profiles (per-dimension star ratings, not routing rules; wao lanes has full " +
   "profiles). Optional workspaceRoot selects the project, same authority as " +
   "workspace_select (read-tool default scope only, shared per server instance). " +
   "ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle " +
-  "independently, re-verify via the original tools.";
+  "independently, re-verify via the original tools. `open item:` observation lines " +
+  "list what awaits Lead closeout (unsettled deliveries, reclaimable worktrees/" +
+  "branches, feedback inbox) with the next command.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 

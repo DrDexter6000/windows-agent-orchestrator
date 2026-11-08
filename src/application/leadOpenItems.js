@@ -11,7 +11,8 @@
 //      run.delivery_accepted / run.delivery_rejected）：
 //        - 收口且原因 delivery_settled、未裁定 → 等 Lead 裁定（其中 0112 的
 //          deliveryContinuableHint 为 true 的另计数）；
-//        - 终态但验证/reverify 还没结果 → 终态未收口；
+//        - 终态但验证/reverify 还没结果、未裁定 → 终态未收口（已裁定的除外，
+//          按已裁定走留待回收）；
 //        - 终态但交付事实判不出收口（undeterminable）→ 单独一行，与"还没
 //          结果"分开（事实是"无法判定"，不是"仍在等"）；
 //        - 未终态 → 不报（lead_preflight 的活跃运行一节管）；
@@ -300,9 +301,17 @@ async function collectRunBranchOpenItems({
         reclaimBranches += 1;
       }
     } else if (settlement.status === "unsettled") {
-      // 验证/reverify 还没结果 → 终态未收口。
-      terminalUnsettled.push(runId);
-      if (fromAnotherWorktree) crossTree.unsettled = true;
+      // 已有 Lead 决定（第 87 批的 pending 拒收：验证永无结果、拒收已定）→ 按
+      // 已裁定留待回收：迟到的验证结果只改显示，Lead 无事可做；收口语义仍归
+      // 决定 0095（已拒收也要等结果），不在这里改。
+      if (settlement.facts.acceptanceStatus === "accepted"
+        || settlement.facts.acceptanceStatus === "rejected") {
+        reclaimBranches += 1;
+      } else {
+        // 验证/reverify 还没结果 → 终态未收口。
+        terminalUnsettled.push(runId);
+        if (fromAnotherWorktree) crossTree.unsettled = true;
+      }
     } else {
       // undeterminable：交付事实判不出收口——与"还没结果"分开（#2），单独
       // 一行指向诊断。

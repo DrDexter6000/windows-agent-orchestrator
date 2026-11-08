@@ -436,7 +436,11 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 93212;
+const FROZEN_23_WIRE_CEILING = 93324;
+// 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
+// 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
+// （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
+// JSON-RPC 响应整行 vs JSON.stringify({tools}) 的封套差，非面变更。）
 // TD-329（2026-11-03，TD-329 批次合同授权重冻；闭集扩员、additive）：run_diagnose 与
 // run_await_result 出参 code enum 增 overloaded（PROVIDER_CAPACITY_DIAGNOSIS_CODES
 // SSOT 扩员——上游模型满载的瞬时容量事实）：93186→93212（实测；Owner 硬顶 94532 内）。
@@ -790,7 +794,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
-const FROZEN_23_DESC_CEILING = 12063;
+const FROZEN_23_DESC_CEILING = 12219;
+// 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
+// 行：12063→12219（实测；Owner 硬顶 12347 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
 // 席位时带 nextStep"：11990→12063（实测；Owner 硬顶 12347 内）。
 // 0095（2026-10-29，Owner 批准重冻）：run_wait 描述改写区间/缺省并加 nextStep
@@ -805,7 +811,9 @@ const FROZEN_23_DESC_CEILING = 12063;
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 23270;
+const FROZEN_23_HOSTVISIBLE_CEILING = 23426;
+// 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
+// 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句
 // 进 hostVisible：23197→23270（实测）。
 // 0095（2026-10-29，Owner 批准重冻）：与 wire/desc 同批——nextStep 输出字段与
