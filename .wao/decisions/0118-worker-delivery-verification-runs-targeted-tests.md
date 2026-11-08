@@ -1,4 +1,4 @@
-# 0118 worker 交付验证跑定向测试，全量只在最终候选上跑一次
+# 0118 worker 交付验证跑定向测试，批次的全量只在最终候选上跑一次
 
 - 日期：2026-11-08
 - 状态：accepted
@@ -12,9 +12,9 @@
 
 ## 决定
 
-1. 触及共享核心的 worker 交付，`verificationCommands` 逐个列出测试文件：被改模块的直接测试、读被改文件的测试（按文件名搜）、`test/isolation-infra/layering.test.js` 与横切守卫组；不用跨文件通配。
-2. 公共夹具与测试运行器（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`、`scripts/canonical-test.mjs`、`scripts/test-one.mjs`）的改动影响列不全，这类交付仍用 `npm test`，并声明 `verificationTimeoutMs ≥ 1200000`。
-3. 全量照 0077 第 1 条只在最终候选上跑一次。最终候选的全量红了，照批次规则处理：窄缺陷交回原 worker 续修或由 Lead 修，修完在新的最终候选上再跑一次。
+1. 触及共享核心的 worker 交付，`verificationCommands` 逐个列出测试文件：被改模块的直接测试、读被改文件的测试（按文件名搜）与横切守卫组，不用跨文件通配；具体加哪些守卫以 `docs/testing.md` 的交付表为准。
+2. 公共夹具与测试运行器（`test/fixtures/**`、`test/_*.mjs`、`test/reporter.mjs`、`scripts/canonical-test.mjs`、`scripts/test-one.mjs`）的交付仍用 `npm test`，并声明 `verificationTimeoutMs ≥ 1200000`：运行器的改动影响每一次全量与定向运行，被改的定向运行器也不能自己验证自己；公共夹具读者多，按文件名搜容易漏。
+3. 批次的全量照 0077 第 1 条只在最终候选上跑一次，第 2 条那类交付的验证另计。最终候选的全量红了，照批次规则处理：窄缺陷交回原 worker 续修或由 Lead 修，修完在新的最终候选上再跑一次。
 
 ## 被否方案
 

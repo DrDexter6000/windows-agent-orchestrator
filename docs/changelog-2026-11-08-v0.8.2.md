@@ -36,7 +36,7 @@
 ### 规则与文档
 
 - 只改文档的批次不跑全量，改跑横切守卫组与读这些文档的测试（决定 0110，角色合同除外）。
-- 触及共享核心的 worker 交付验证改跑逐个列出的定向测试，公共夹具与测试运行器的改动仍跑全量；全量只在最终候选上跑一次（决定 0118，修订 0077 第 3 条）。
+- 触及共享核心的 worker 交付验证改跑逐个列出的定向测试，公共夹具与测试运行器的改动仍跑全量；批次的全量只在最终候选上跑一次（决定 0118，修订 0077 第 3 条）。
 - 采纳协议补续修集成的取法；手册、认证表与五份决定的修订指针按第二轮 workflow 地图的会审结果改正（第 85 批）。
 
 ## 升级须知
@@ -59,7 +59,8 @@
 - 机械部分（main cd069c7 上）：`npm run map` 的"完全不可达""只经弱边可达"两栏为空；"只经中边可达"20 个逐个过目：14 个是代码按目录或文件名加载的资产（playbook、看板页面、认证证据、测试夹具），6 个是经 docs-consistency 目录边可达的 `docs/archive/m0–m5-audit.md`，都不是孤儿。横切守卫组通过。
 - 人工判断：workflow 地图第二轮。六条支线各一个只读 worker 走查 main cd069c7，402 条引句经脚本核对；Lead 合并出地图、11 条场景线与建议。会审 consult_20261108142341850czfiif（kimi、deepseek-flash、opus，三席都判 FIX_FIRST）查出地图自己的数字与命令错，以及七条建议与守卫或决定相反（`npm run mcp` 与 SKILL 的 1200000 句有守卫钉家、`lead_preflight` 描述字节冻结要 Owner 重冻、dsh-acp README 是带日期的证据记录、续修集成默认取累计的子交付等），已全部改正后才动仓库。
 - 修复：第 85 批（9b0ffcc、6938479），以本周期改动过的事实为主：采纳协议补续修集成的取法；testing.md 的角色合同例外与全量耗时；手册不再照抄 `config/default.json`（旧副本缺两个键）、补 `runs lineage-close`、改掉两处旧平铺转录路径；SKILL 的转录位置；AGENTS 命令表；认证表的台账键说法改指 runbook（生成器模板改动并再生成）；`lineage-close` 不释放会话的说法统一到决定 0058；五份决定追加修订指针（0087 已到字节上限，指针留在 0097 的关系行）。会审 consult_20261108145345929fvzuon（deepseek-flash、opus，都判 FIX_FIRST，六项必改全收）；复核 consult_20261108151429093gluw73（opus，PASS_WITH_NOTES）。
-- 判为不改或留到发版后：守卫钉住的投影与家（SKILL 的 1200000 句、`npm run mcp` 在入职手册 §4e）；isolation_failed 的三处陈述（契约、操作含义、现象→动作各在其家）；其余重复与缺口进台账 TD-344，runner 无声死亡进 TD-341，`runs settle` 位置参数进 TD-342，`lead_preflight` 描述补 open item 进 TD-343（要 Owner 批准工具面重冻）。worker 交付验证改为只跑定向测试：Owner 同意，写成决定 0118（修订 0077 第 3 条），随本版发布（第 86 批，只改文档）。
+- 判为不改或留到发版后：守卫钉住的投影与家（SKILL 的 1200000 句、`npm run mcp` 在入职手册 §4e）；isolation_failed 的三处陈述（契约、操作含义、现象→动作各在其家）；其余重复与缺口进台账 TD-344，runner 无声死亡进 TD-341，`runs settle` 位置参数进 TD-342，`lead_preflight` 描述补 open item 进 TD-343（要 Owner 批准工具面重冻）。
+- 第 86 批：地图建议 E1（worker 交付验证只跑定向测试）经 Owner 同意写成决定 0118，随本版发布，只改文档。复核 consult_20261108153641474abtc8a（deepseek-flash，PASS_WITH_NOTES）：口号与夹具一条字面冲突、交付表漏了测试文件增删与按目录读的守卫、快照把它放在"判为不改"下，已改；`docs/usage/dispatch.md` 的 delivery 示例用 `npm test` 加 1200000，属合法的运行器类写法，判为不改。
 
 ## 发版门槛证据（打标前写入）
 
