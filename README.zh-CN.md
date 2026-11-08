@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.8.1-2f2f2f?style=flat-square)](docs/changelog-2026-11-03-v0.8.1.md)
+[![version](https://img.shields.io/badge/version-v0.8.2-2f2f2f?style=flat-square)](docs/changelog-2026-11-08-v0.8.2.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,23 +51,21 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.8.1 新增（2026-11-03）
+## v0.8.2 新增（2026-11-08）
 
-- **worker 的边界由 WAO 给，不再靠每份任务书手写**——每个只读运行（包括会审席）都在角色之前
-  收到一份只读执行合同：不改项目文件（任务要求跑的测试产生的报告与缓存除外），不对工作目录或任何已有检出跑写仓库的 git 命令，实验只在
-  系统临时目录下新建的目录里做，不读凭据、不打印环境变量，命令跑完再结束回合。交付合同补上写入
-  只在工作树内，以及同样的凭据与收尾条款。复用会话的只读运行 resume 时回到自己的工作树，不再
-  跑回源仓。
-- **会审席写文件能被发现了**——"只读席位写文件即判 FAIL"此前从没触发过；现在按席位隔离树内
-  用工具写过的文件计数，临时目录里的实验不算。
-- **等一场会审只要一条命令**——`consult wait <id> --until-settled` 等到每个已派发的席位都收口才返回；
-  `consult show <id> --out-dir DIR` 把每席完整原文各写一个文件。
-- **正确性**——上了锁（`git worktree lock`）的工作树一律不删，`wao worktree remove` 确认登记的
-  树没了才报 `removed`（TD-332）；`runs verify-commit` 的临时树同样处理；codex 的
-  "model is at capacity" 诊断为 `provider_capacity` / `overloaded`（TD-329）。
-- **版本号**——从本版起，0.x 阶段只有升级要动手时才升 MINOR，向后兼容的改动升 PATCH（决定 0109）。
+- **窄缺陷交回原 worker**——可续谱系的交付收口时会说明窄缺陷可经 `run_continue` 交回，续修
+  接回原 worker 会话（车道加角色的派发也可续），每个续修轮各自报用量（决定 0112、0114）。
+- **一次读完整份交付**——`runs delivery review <runId> --all [--out FILE]`；`--since-parent`
+  只看续修轮改了什么（决定 0116）。
+- **Lead 少跑几趟**——`lead_preflight` 列出等 Lead 处理的事项（决定 0113）；`wao manual <页> "<节>"`
+  在任何项目里按节读手册（决定 0115）。
+- **运行不再无声地死**——长时间的 zcode 运行不再每拍留住一份会话快照（此前 7–33 分钟耗尽内存）；
+  写子进程 stdin 失败不再打死 runner；没有进程还能驱动运行时，`runs wait --until-settled` 以
+  退出码 3 `runner_gone` 退出；zcode 轮询没应答的一拍按无进展计，不再判失败（决定 0117）。
+- **正确性**——网络失败诊断为 `provider_disconnect`；`runs lineage-close` 收到子运行 id 时关闭根谱系；
+  核验归属的各工具都给出带原因的拒绝。
 - 范围、会审记录与发版门槛证据见
-  [`docs/changelog-2026-11-03-v0.8.1.md`](docs/changelog-2026-11-03-v0.8.1.md)。
+  [`docs/changelog-2026-11-08-v0.8.2.md`](docs/changelog-2026-11-08-v0.8.2.md)。
 
 ## 当前状态
 

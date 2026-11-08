@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.8.1-2f2f2f?style=flat-square)](docs/changelog-2026-11-03-v0.8.1.md)
+[![version](https://img.shields.io/badge/version-v0.8.2-2f2f2f?style=flat-square)](docs/changelog-2026-11-08-v0.8.2.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -58,28 +58,25 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.8.1 (2026-11-03)
+## What's new in v0.8.2 (2026-11-08)
 
-- **Workers get their boundaries from WAO, not from each brief** — every read-only run (consult
-  seats included) now receives a read-only execution contract ahead of its role: no project-file
-  edits (reports and caches of the tests it is asked to run excepted), no writing git command against the working directory or any existing checkout,
-  experiments only under a new directory in the system temporary directory, no credential reads
-  or environment dumps, and no ending the turn while a command still runs. The delivery contract
-  gains the in-worktree write rule and the same secret and finish rules. A read-only run that
-  reuses a session now resumes in its own worktree, not in the source checkout.
-- **Consult seats that write files are caught** — the rule that fails a read-only seat for
-  writing never fired before; it now counts the files the seat wrote with its tools inside its tree
-  (experiments in the temporary directory do not count).
-- **Waiting on a consult takes one command** — `consult wait <id> --until-settled` returns once
-  every dispatched seat has settled; `consult show <id> --out-dir DIR` writes each seat's full answer to a file.
-- **Correctness** — a locked worktree (`git worktree lock`) is never deleted, and
-  `wao worktree remove` reports `removed` only once the registered tree is gone (TD-332);
-  `runs verify-commit` cleans its temporary tree the same way; codex's "model is at capacity"
-  diagnoses as `provider_capacity` / `overloaded` (TD-329).
-- **Versioning** — from this release, a 0.x version bumps MINOR only when upgrading needs action,
-  and PATCH for everything backward compatible (decision 0109).
+- **A narrow fix goes back to the same worker** — a settled delivery from a continuable lineage
+  says a narrow fix can go back through `run_continue`, and the continuation resumes the original
+  worker conversation (lane+role dispatches included); each continuation turn reports its own
+  usage (decisions 0112, 0114).
+- **One read for a whole delivery** — `runs delivery review <runId> --all [--out FILE]`, and
+  `--since-parent` shows only what a continuation round changed (decision 0116).
+- **Fewer round trips for the Lead** — `lead_preflight` lists the open items waiting on the Lead
+  (decision 0113); `wao manual <page> "<section>"` reads the manual by section from any project
+  (decision 0115).
+- **Runs no longer die silently** — long zcode runs stop keeping one session snapshot per poll
+  (they ran out of memory 7–33 minutes in); a failed write to a worker child's stdin no longer
+  crashes the runner; `runs wait --until-settled` exits 3 with `runner_gone` when no process can
+  still drive a run; an unanswered zcode poll is a no-progress tick, not a failure (decision 0117).
+- **Correctness** — network failures diagnose as `provider_disconnect`; `runs lineage-close` with a
+  child run id closes the root lineage; every tool that checks ownership names the refusal.
 - Scope, review record and release-gate evidence:
-  [`docs/changelog-2026-11-03-v0.8.1.md`](docs/changelog-2026-11-03-v0.8.1.md).
+  [`docs/changelog-2026-11-08-v0.8.2.md`](docs/changelog-2026-11-08-v0.8.2.md).
 
 ## Current status
 
