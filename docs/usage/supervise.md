@@ -99,7 +99,7 @@ CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由
 
 绝不返回原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。`content` 的 JSON 与 `structuredContent` 语义一致。
 
-**归属拒绝**：会话绑定下，`run_activity`、`run_wait`、`run_await_result` 与带 `waitMs` 的 `run_delivery`（即时查询不核验归属）读到不能证明属于绑定工作区的运行时，返回 `<工具> refused: this run cannot be shown to belong to the bound workspace …` 固定文案：归属事实指向另一项目、子目录、非 Git、相对或已消失的路径，或缺失、重复、缺 cwd、互相冲突；只读、零写入；运行属于另一项目时，用 `workspace_select` 或 `lead_preflight` 的 `workspaceRoot` 选中它再重试。不回显路径或 runId。其余 service 失败返回固定安全文案（如 `run_wait failed`），不泄漏 zod 校验信息。
+**归属拒绝**：会话绑定下，`run_activity`、`run_wait`、`run_await_result`、`run_delivery`、`run_delivery_review` 与 `run_delivery_review_bundle` 读到不能证明属于绑定工作区的运行时，返回 `<工具> refused: this run cannot be shown to belong to the bound workspace …` 固定文案：归属事实指向另一项目、子目录、非 Git、相对或已消失的路径，或缺失、重复、缺 cwd、互相冲突；只读、零写入；运行属于另一项目时，用 `workspace_select` 或 `lead_preflight` 的 `workspaceRoot` 选中它再重试。不回显路径或 runId。其余 service 失败返回固定安全文案（如 `run_wait failed`），不泄漏 zod 校验信息。
 
 transport keepalive：MCP SDK 的请求超时可能短于观察窗口。client 通过 `onprogress` 请求进度时，server 每次 poll 后向该 `progressToken` 发标准 `notifications/progress`；client 设 `resetTimeoutOnProgress:true` 则每条进度重置自身计时器。标准 MCP 机制，不 patch host、不改全局 timeout；最大总超时仍由 host 决定。host 不请求进度时 server 不发通知。
 
