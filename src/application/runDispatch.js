@@ -1089,10 +1089,12 @@ export async function dispatchRun({
     // 既有事实形状与文案；spawn 抛错保留原始错误对象（M12-7-RC-16 同款语义在
     // 调用侧不变）。
     if (launch.reason === "runner_kill_unconfirmed") {
-      const text = runnerLaunchFailureText(launch.reason);
+      // 文字点名 runId：Lead 要拿它去 settle（MCP 报错面不带 runId）。
+      const text = `${runnerLaunchFailureText(launch.reason)}（run ${finalRunId}）`;
       await transcript.append("run.error", { phase: "runner_start", error: text });
       const unconfirmed = new Error(text);
       unconfirmed.reasonCode = launch.reason;
+      unconfirmed.runId = finalRunId;
       throw unconfirmed;
     }
     const isPromptHandoff = launch.reason === "handoff_timeout" || launch.reason === "prompt_handoff_timeout";

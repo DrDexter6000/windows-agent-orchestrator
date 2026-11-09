@@ -318,7 +318,7 @@ export function defaultWmiSpawnBroker({ commandLine, cwd, timeoutMs, psSpawnFn =
 function defaultTaskkill(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return { called: false, exitCode: null };
   try {
-    const r = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "pipe" });
+    const r = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "pipe", timeout: 5000 });
     return { called: true, exitCode: r.status };
   } catch {
     return { called: true, exitCode: null };

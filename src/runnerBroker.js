@@ -16,11 +16,11 @@
 //      缺省 DACL 给 Everyone 读权限、管道名可被列举——握手不对，父端一个载荷
 //      字节都不发，抢先连上的只读客户端拿不到任何东西）；父端核对一致后回一帧
 //      载荷 {execPath, args, env, cwd, prompt, stderrPath, deadlineAt}；
-//   2. 过了 deadlineAt（父端总期限）就不再起 runner；期限内以 append 打开 stderr
+//   2. 离 deadlineAt（父端总期限）不足 2 秒就不再起 runner；期限内以 append 打开 stderr
 //      文件（失败退回 "ignore"，照第 89 批），detached spawn runner（spawn 抛错
 //      **或异步 error 事件**——cwd/execPath 不存在时 Node 不抛、只发 error——都按
 //      spawn_failed 收口），spawn 后关闭自己的 fd，prompt 经 stdin 交接
-//      （writeRunnerPrompt，超时用 deadlineAt − 现在）；
+//      （writeRunnerPrompt，超时用 deadlineAt − 2 秒 − 现在）；
 //   3. 回一帧 {runnerPid, handoff}，unref runner，退出。
 // 任何失败都不回显 env 与 prompt——错误只落固定闭集理由（stderr 文件 / 退出码）。
 //
@@ -40,6 +40,11 @@ import { FrameDecoder, encodeFrame, validateBrokerPayload } from "./application/
 // 自己的连接/读帧期限：父端总期限（PROMPT_HANDOFF_TIMEOUT_MS）先到时会拆掉
 // 管道，桥在这里到点自动退出——父端关管道后桥拿不到载荷，绝不悬空挂着。
 const BROKER_DEADLINE_MS = PROMPT_HANDOFF_TIMEOUT_MS;
+
+// 桥对 deadlineAt 留的余量：交接超时比父端总期限早这么多到点，"timeout" 回帧
+// 才赶得上在父端定时器之前到达（父端据此按 runnerPid 结束 runner、报
+// handoff_timeout）；剩不到这么多时间就不再起 runner。
+const BRIDGE_REPLY_MARGIN_MS = 2000;
 
 // 失败收口：固定闭集理由写进 runner 的 stderr 证据文件（桥唯一的诊断出口——
 // WMI 起的进程没有可用的 stdout/stderr），退出码 1。绝不带任何载荷内容。
@@ -144,8 +149,8 @@ async function main() {
       ? payload.stderrPath : null);
     return;
   }
-  // 按父端的期限办事（续修 3）：过了 deadlineAt 不再起 runner。
-  if (Date.now() > validated.deadlineAt) {
+  // 按父端的期限办事（续修 3）：离 deadlineAt 不足余量就不再起 runner。
+  if (Date.now() > validated.deadlineAt - BRIDGE_REPLY_MARGIN_MS) {
     try { socket.destroy(); } catch { /* 已关 */ }
     fail("frame_timeout", validated.stderrPath);
     return;
@@ -185,10 +190,10 @@ async function main() {
     try { closeSync(stderrFd); } catch { /* runner 已继承句柄，本进程的副本关掉 */ }
   }
 
-  // 5. prompt 经 stdin 交接（与派发方直起时同一实现）；超时用父端期限的剩余
-  //    时间（至少 1 毫秒）——桥不替父端另设时限。
+  // 5. prompt 经 stdin 交接（与派发方直起时同一实现）；超时用父端期限减去余量
+  //    后的剩余时间（至少 1 毫秒）——桥不替父端另设时限。
   const handoff = await writeRunnerPrompt(runner, validated.prompt ?? "", {
-    timeoutMs: Math.max(1, validated.deadlineAt - Date.now()),
+    timeoutMs: Math.max(1, validated.deadlineAt - BRIDGE_REPLY_MARGIN_MS - Date.now()),
   });
 
   // 6. 回帧 → unref → 退出。handoff 为 "timeout" 时 runner 还活着不读提示词，

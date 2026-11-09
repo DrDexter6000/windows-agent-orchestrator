@@ -286,6 +286,11 @@ export async function forkResumeRunner(
     if (launch.reason === "spawn_error" && launch.detail instanceof Error) {
       throw launch.detail;
     }
+    if (launch.reason === "runner_kill_unconfirmed") {
+      // resume 的目标运行通常已不在 pending（已有 session.created/run.started），
+      // 不借用派发那句"运行保持 pending"。
+      throw new Error(`后台 runner 可能已经启动，WAO 未能确认它已结束；运行 ${runId} 的状态未改动，用 wao runs settle 判定。`);
+    }
     throw new Error(runnerLaunchFailureText(launch.reason));
   }
   return { runId, runnerPath };

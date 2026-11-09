@@ -783,6 +783,7 @@ test("dispatchRun：结束未确认（launchRunnerFn 注入）→ 只写 run.err
     const err = findLatest(events, "run.error");
     assert.equal(err.phase, "runner_start");
     assert.ok(err.error.includes("未能确认它已结束"), "run.error 用固定文字");
+    assert.ok(err.error.includes(`（run ${seenInputs[0].runId}）`), "run.error 点名 runId，Lead 拿它去 settle");
     // findState 对裸 run.error 有 legacy failed 兜底——按"没有任何终态转移"断言。
     assert.ok(
       !events.some((e) => e.type === "run.state_change" && ["failed", "completed", "aborted", "timed_out"].includes(e.to)),
@@ -853,7 +854,8 @@ test("forkResumeRunner：结束未确认（launchRunnerFn 注入）→ 抛固定
         undefined,
         async () => ({ outcome: "start_failed", runnerPid: 9, reason: "runner_kill_unconfirmed", detail: "handoff_timeout", killConfirmed: false, killScanOk: true }),
       ),
-      /运行保持 pending，用 wao runs settle 判定/,
+      // resume 的目标运行通常已不在 pending：不借用派发那句"运行保持 pending"。
+      /未能确认它已结束；运行 run_fork_ku 的状态未改动，用 wao runs settle 判定/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
