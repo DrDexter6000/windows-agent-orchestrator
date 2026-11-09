@@ -340,12 +340,12 @@ function _evaluateQuietWindowGate(bound, now, facts) {
   const quietMs = Number.isFinite(lastTs) ? now - lastTs : NaN;
   if (!Number.isFinite(quietMs) || quietMs < SETTLE_QUIET_WINDOW_MS) {
     const described = Number.isFinite(quietMs)
-      ? `最后一条绑定事件距今 ${Math.max(0, Math.round(quietMs / 1000))}s（须 ≥ ${SETTLE_QUIET_WINDOW_MS / 60000}min）`
-      : "最后一条绑定事件缺时间戳";
+      ? `最后一条计入静默窗的绑定事件距今 ${Math.max(0, Math.round(quietMs / 1000))}s（须 ≥ ${SETTLE_QUIET_WINDOW_MS / 60000}min）`
+      : "最后一条计入静默窗的绑定事件缺时间戳";
     _gateFactsPush(facts, "quiet_window", false, described);
     return { ok: false, refusal: "quiet_window" };
   }
-  _gateFactsPush(facts, "quiet_window", true, `最后一条绑定事件距今 ${Math.round(quietMs / 60000)}min`);
+  _gateFactsPush(facts, "quiet_window", true, `最后一条计入静默窗的绑定事件距今 ${Math.round(quietMs / 60000)}min`);
   return { ok: true };
 }
 
@@ -507,7 +507,7 @@ async function _evaluateGates(events, runId, runDir, d) {
   } else {
     const target = _resolveSessionPidAndAnchor(events, runId);
     if (!target) {
-      _gateFactsPush(facts, "session", false, "重放记录与会话记录对不上，取不出唯一的 pid 与时刻锚");
+      _gateFactsPush(facts, "session", false, "取不出唯一的本机进程 pid 与时刻锚（会话 id 不是 proc_<pid> 且未记 hostPid，或重放记录与会话记录对不上）");
       return { ok: false, refusal: "session_ambiguous", facts };
     }
     const identity = await d.identifyFn(target.pid, target.anchorAt);

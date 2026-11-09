@@ -80,7 +80,7 @@ export async function proveRunnerGone({ runId, runDir, deps }) {
  * @param {number} input.now — epoch ms
  * @param {object} [input.deps] — { heartbeatReader }（缺省 checkOwnerLiveness）
  * @returns {{pass:true, quietMs:number}|{pass:false, reason:string}}
- *   quietMs = 最后一条绑定事件距今毫秒（通过时 ≥ SETTLE_QUIET_WINDOW_MS，供
+ *   quietMs = 最后一条计入静默窗的绑定事件距今毫秒（通过时 ≥ SETTLE_QUIET_WINDOW_MS，供
  *   模板取整数分钟）。
  */
 export function runnerGonePrefilter({ events, runId, runDir, now, deps = {} }) {

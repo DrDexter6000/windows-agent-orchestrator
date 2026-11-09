@@ -349,6 +349,12 @@ export async function stopRun(input) {
     const rawPid = session.backendSessionId.slice("proc_".length);
     const pid = Number(rawPid);
     if (!Number.isInteger(pid) || pid <= 0) {
+      // B92 续修 2：与进程/serveUrl 两条路径同一顺序——先判终态（认领仲裁同一
+      // 判据 claimedTerminalState）：已终态走认领被拒（rejectedStop：审计对、
+      // 不告警、不写 stop_unverified）；非终态才记 invalid_pid。
+      if (claimedTerminalState(events) !== null) {
+        return await rejectedStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, backend: "process" });
+      }
       return await invalidPidStop({
         transcript, session, fromState, runId, deps, stopRequestedAttempt, rawPid,
         runDir: resolvedRunDir,
@@ -372,9 +378,16 @@ export async function stopRun(input) {
   if (!session?.serveUrl) {
     // B92：会话既无 hostPid 也无 serveUrl（deepseek-acp 在记录 hostPid 之前派发的
     // 运行就是这个形状——会话 id 是上游原生 UUID，解析不出要击杀的本机进程）。
-    // 停止目标解析不出来时按既有合同如实返回（同 serverStop 的目标解析失败）：
-    // 不认领终态、零击杀、零服务端请求；不抛——抛会让 MCP 面只剩固定文案
-    // "run_stop failed"，Lead 看不到运行的真实状态。
+    // 不抛——抛会让 MCP 面只剩固定文案 "run_stop failed"。续修 2：与进程/serveUrl
+    // 两条路径同一顺序，先判终态（认领仲裁同一判据 claimedTerminalState）：已终态
+    // 走认领被拒（rejectedStop：审计对、不告警、不写 stop_unverified）；非终态才
+    // 按"停止目标解析不出"的既有合同如实返回（不认领终态、零击杀、零服务端请求）。
+    if (claimedTerminalState(events) !== null) {
+      return await rejectedStop({
+        transcript, session, fromState, runId, deps, stopRequestedAttempt,
+        backend: serverStopBackendOf(session),
+      });
+    }
     return await stopRouteUnavailable({
       transcript, session, fromState, runId, deps, stopRequestedAttempt,
       routeError: STOP_NO_ROUTE_TEXT,
@@ -411,6 +424,31 @@ export async function stopRun(input) {
     transcript, session, fromState, runId, deps, stopRequestedAttempt, target,
     runDir: resolvedRunDir,
   });
+}
+
+// ── rejectedStop (B92 续修 2：无路由/invalidPid 分支的已终态路径) ────────────
+
+/**
+ * 已终态运行到达"停止目标解析不出"的两条路（无 hostPid/serveUrl、invalid pid）时，
+ * 与 processStop/serverStop 的 loser 同一条认领被拒路：发起注定被 first-terminal-
+ * wins 拒绝的认领，原子留下 stop_requested + run.state_change_rejected 审计对，
+ * 返回 rejected 结果——不告警、不写 stop_unverified、零副作用。判据与 serveUrl 分
+ * 支的目标解析门同一个（claimedTerminalState——它准确预言认领会不会被拒；legacy
+ * 旧式终态事实不挡认领，那条形状照旧走非终态的如实返回路）。
+ */
+async function rejectedStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, backend }) {
+  const termResult = await transcript.transitionState(fromState, "aborted", STATE_CHANGE_REASON.stop_requested, {
+    attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
+  });
+  return {
+    runId,
+    rejected: true,
+    terminalAccepted: false,
+    terminalState: termResult.state,
+    sideEffectAttempted: false,
+    stopVerified: null,
+    ...(backend !== undefined && backend !== null ? { backend } : {}),
+  };
 }
 
 // ── processStop (extracted from stop.js) ─────────────────────────────────────

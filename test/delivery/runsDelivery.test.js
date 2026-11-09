@@ -832,21 +832,22 @@ test("3C2-PRE-B: missing verification outcome → accept fails closed, reject se
 
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
     const { ACCEPT_VERIFICATION_FAILED_HINT } = await import("../../src/application/runDelivery.js");
-    // B92：accept 拒于 verification_failed（pending 也归它）不再上抛——既有报错
-    // 后多一行采纳协议提示，退出码 1。
+    // B92 续修 3：pending（验证还在跑，结果缺失）拒因虽是 verification_failed，
+    // 但有效状态不是 failed——不附采纳协议提示（Lead 该等验证跑完），照旧上抛。
     const errors = [];
     const origError = console.error;
     console.error = (...a) => errors.push(a.map(String).join(" "));
-    const prevExitCode = process.exitCode;
     try {
-      await runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {});
+      await assert.rejects(
+        () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
+        /verification|cannot accept/i,
+        "accept with missing verification must fail",
+      );
     } finally {
       console.error = origError;
     }
-    assert.match(errors[0], /cannot accept/i, "accept with missing verification must fail");
-    assert.equal(errors[1], ACCEPT_VERIFICATION_FAILED_HINT, "提示行在既有报错之后");
-    assert.equal(process.exitCode, 1);
-    process.exitCode = prevExitCode ?? 0;
+    assert.equal(errors.length, 0, "命令内零输出（含提示行——pending 不带提示）");
+    assert.ok(errors.join("\n") !== ACCEPT_VERIFICATION_FAILED_HINT);
     const out = await captureLog(async () => {
       await runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
     });

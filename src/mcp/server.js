@@ -6380,9 +6380,14 @@ export function createWaoMcpServer({
           };
           RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
           // B92：accept 被 verification_failed 拒时追加第二个 text 项放固定提示
-          //（指向验证失败采纳协议——已带自己的修正合入内容的登记出口）。第一个
-          // text 项与 structuredContent 逐字不变；别的拒因与 reject 决策不带。
-          const hint = rejectionReason === "verification_failed" && decision === "accepted"
+          //（指向验证失败采纳协议——已带自己的修正合入内容的登记出口）。续修 3：
+          // 只在**有效**验证状态实际是 failed 时附提示（错误对象携带 transcript
+          // 判定门附上的 effectiveVerificationStatus）——pending（验证还在跑，该
+          // 等）与 unavailable 不把 Lead 引去手工采纳。第一个 text 项与
+          // structuredContent 逐字不变；别的拒因与 reject 决策不带。
+          const hint = rejectionReason === "verification_failed"
+            && decision === "accepted"
+            && err?.effectiveVerificationStatus === "failed"
             ? ACCEPT_VERIFICATION_FAILED_HINT
             : null;
           return {

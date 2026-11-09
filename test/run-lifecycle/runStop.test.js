@@ -817,6 +817,84 @@ test("B92: deepseek-acp 带 hostPid（新形状）——停止目标解析到承
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// B92 续修 2：无路由 / invalidPid 两条"目标解析不出"路与进程/serveUrl 路同一
+// 顺序——先判终态：已终态走认领被拒（rejected、审计对、不告警、不写
+// stop_unverified）；非终态照续修前的合同（上面两条 B92 测试钉住）。
+test("B92 续修 2: 已终态、无路由的运行 stop → 认领被拒，不写 stop_unverified、不告警", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b92-term-noroute-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_b92_termnr";
+    const tp = await seedAcpUuidRun(dir, runId, dir);
+    const t = new JsonlTranscript(tp, { runId, agentId: "test-agent", initialSeq: 7 });
+    await t.append("run.completed", { backendSessionId: "75c13e12-ce24-4409-b88e-59669cc70712" });
+    await t.transitionState("running", "completed", "done");
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const alerts = [];
+    const events = await readTranscript(tp);
+    const observedSeq = events.filter((e) => Number.isInteger(e.seq)).at(-1).seq;
+    const result = await stopRun({
+      runId, runDir: dir,
+      justification: { reason: "已终态，核对停止面", observedSeq },
+      deps: defaultDeps({ alert: async (...a) => { alerts.push(a); } }),
+    });
+    assert.equal(result.rejected, true, "与进程/serveUrl 路同款认领被拒");
+    assert.equal(result.terminalAccepted, false);
+    assert.equal(result.sideEffectAttempted, false);
+    assert.equal(result.terminalState, "completed", "回显实际终态");
+    assert.equal(result.stopVerified, null, "loser 形态的 stopVerified=null（不是 false）");
+    const after = await readTranscript(tp);
+    assert.equal(after.filter((e) => e.type === "run.stop_unverified").length, 0, "不写 stop_unverified");
+    assert.equal(after.filter((e) => e.type === "run.state_change_rejected").length, 1, "留下认领被拒审计");
+    assert.ok(after.some((e) => e.type === "run.stop_requested"), "stop_requested 与 state_change_rejected 同批");
+    assert.equal(alerts.length, 0, "不告警");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("B92 续修 2: 已终态、invalid pid 的运行 stop → 认领被拒（同一顺序）；非终态照旧 invalid_pid", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b92-term-invalid-"));
+  try {
+    makeGitRepo(dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    // 已终态：completed 转移已落盘，会话 id 是 proc_not-a-number。
+    const runId = "run_b92_termiv";
+    const tp = join(dir, `${runId}.jsonl`);
+    const t = new JsonlTranscript(tp, { runId, agentId: "a" });
+    await t.append("run.started", { backend: "claude-code" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_not-a-number" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "running", "first_event");
+    await t.transitionState("running", "completed", "done");
+    const alerts = [];
+    const result = await stopRun({
+      runId, runDir: dir,
+      deps: defaultDeps({ alert: async (...a) => { alerts.push(a); } }),
+    });
+    assert.equal(result.rejected, true, "已终态先走认领被拒，不再记 invalid_pid");
+    assert.equal(result.invalidPid, undefined);
+    assert.equal(result.terminalState, "completed");
+    const after = await readTranscript(tp);
+    assert.equal(after.filter((e) => e.type === "run.stop_unverified").length, 0, "不写 stop_unverified");
+    assert.equal(after.filter((e) => e.type === "run.state_change_rejected").length, 1, "留下认领被拒审计");
+    assert.equal(alerts.length, 0, "不告警");
+    // 非终态：照旧 invalid_pid 合同（SVC-04 同款结果形状）。
+    const runId2 = "run_b92_ntiv";
+    const t2 = new JsonlTranscript(join(dir, `${runId2}.jsonl`), { runId: runId2, agentId: "a" });
+    await t2.append("run.started", { backend: "claude-code" });
+    await t2.append("run.background_submitted", { background: true, cwd: dir });
+    await t2.append("session.created", { backend: "process", backendSessionId: "proc_not-a-number" });
+    await t2.transitionState(null, "pending", "created");
+    await t2.transitionState("pending", "running", "first_event");
+    const result2 = await stopRun({
+      runId: runId2, runDir: dir,
+      deps: defaultDeps({ alert: async () => {} }),
+    });
+    assert.equal(result2.invalidPid, true, "非终态照旧 invalid_pid");
+    assert.equal(result2.terminalAccepted, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── Architecture boundary ────────────────────────────────────────────────────
 
 test("ARCH-01: runStop.js does not import commands/mcp/SDK/zod", async () => {

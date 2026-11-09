@@ -2972,7 +2972,10 @@ async function runsDeliveryCommand(args, config, hostDeps) {
   // 路径与同文件其它读点同源（config.registry ?? config/agents.json）。
   // B92：accept 被 verification_failed 拒时，在既有报错输出（顶层 catch 的
   // renderErrorText，这里逐字复刻）之后多打一行固定提示——指向验证失败采纳
-  // 协议（已带自己的修正合入其内容的登记出口）。别的拒因照旧原样上抛。
+  // 协议（已带自己的修正合入其内容的登记出口）。续修 3：只在**有效**验证状态
+  // 实际是 failed 时附提示（错误对象携带 transcript 判定门附上的
+  // effectiveVerificationStatus）——pending（验证还在跑，该等）与 unavailable
+  // 不把 Lead 引去手工采纳。别的拒因照旧原样上抛。
   let result;
   try {
     result = await decideRunDelivery({
@@ -2985,7 +2988,9 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       }),
     });
   } catch (err) {
-    if (decision === "accepted" && classifyDeliveryDecisionRejection(err) === "verification_failed") {
+    if (decision === "accepted"
+      && classifyDeliveryDecisionRejection(err) === "verification_failed"
+      && err?.effectiveVerificationStatus === "failed") {
       console.error(renderErrorText(err));
       console.error(ACCEPT_VERIFICATION_FAILED_HINT);
       process.exitCode = 1;

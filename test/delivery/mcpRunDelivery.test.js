@@ -845,6 +845,25 @@ test("B92: accept refused with verification_failed — second text item carries 
         assert.match(texts[1].text, /wao manual delivery "验证失败采纳协议"/, "提示给出手册读法");
       } finally { await client.close(); await server.close(); }
     }
+    // 续修 3：pending（验证还在跑——created 显式声明 pending、零结果）拒因同是
+    // verification_failed，但有效状态不是 failed → 不带提示（Lead 该等验证跑完）。
+    {
+      const pendingDir = mkdtempSync(join(tmpdir(), "m-b92-pending-"));
+      try {
+        await makeGitRepo(pendingDir);
+        const { runDir: pRunDir, rp: pRp } = await setupPendingDeliveryRun(pendingDir, "run_b92pend");
+        const server = createWaoMcpServer({ registryPath: pRp, runDir: pRunDir });
+        const client = await buildInMemoryClient(server);
+        try {
+          const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_b92pend", decision: "accepted", reason: "x", expectedWorkspaceRoot: pendingDir } });
+          const texts = res.content.filter((b) => b.type === "text");
+          assert.equal(texts.length, 1, "pending 不带提示——只有一个 text 项");
+          const p = JSON.parse(texts[0].text);
+          assert.equal(p.rejectionReason, "verification_failed", "拒因码不变");
+          assert.ok(!JSON.stringify(res).includes(ACCEPT_VERIFICATION_FAILED_HINT), "无提示");
+        } finally { await client.close(); await server.close(); }
+      } finally { cleanupDir(pendingDir); }
+    }
     // 别的拒因（delivery_unavailable：无交付事实）→ 只有一个 text 项、无提示。
     {
       const { JsonlTranscript } = await import("../../src/transcript.js");

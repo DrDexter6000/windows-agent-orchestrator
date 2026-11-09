@@ -1236,6 +1236,47 @@ test("R-01: 静默不足 15 分钟不证明——proof 零调用，照常等到�
   }
 });
 
+// B92 续修 5：等待器 quietDue 与门 4 同一取法（lastQuietWindowBoundMs）——最后
+// 一条绑定事件是被拒的重打包审计（不算活动）、更早一条已满静默窗时，照样发起
+// runner 缺席证明（证明用桩，不跑真实扫描）。
+test("R-01b: 最后一条是被拒的重打包审计 → 照样发起 runner 缺席证明", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg01b";
+    const base = Date.parse("2026-10-20T12:00:00.000Z");
+    // 计入静默窗的最后一条是 base 的派发事实（距 now 20 分钟，已满窗）；其后
+    // 1 分钟前追加被拒的重打包审计。
+    writeLines(dir, runId, [
+      { ...started(runId, { delivery: false }), ts: new Date(base).toISOString() },
+      { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: new Date(base).toISOString() },
+      {
+        type: "run.delivery_repackage_rejected", runId, agentId: "coder_low",
+        rejectionReason: "lease_held", ts: new Date(base + 19 * 60_000).toISOString(),
+      },
+    ]);
+    let proofCalls = 0;
+    let appended = false;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: {
+        nowFn: () => base + 20 * 60_000,
+        runnerGoneFn: async () => { proofCalls += 1; return { gone: true }; },
+        sleepFn: async () => {
+          // 防挂兜底：若 quietDue 误读被拒审计为活动（证明没发起），下一轮补终态退出。
+          if (!appended) {
+            appended = true;
+            appendLines(dir, runId, [stateChange(runId, "completed")]);
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, 3, "证明照常发起并成立 → runner_gone 退出 3");
+    assert.equal(proofCalls, 1, "被拒审计不重置等待器的 15 分钟静默窗");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("R-02: 证明成立且重读仍非终态 → 退出 3（Run/Stuck/Runner stderr tail/Next step 四行终行）", async () => {
   const dir = makeRunDir();
   try {

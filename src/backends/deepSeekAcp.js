@@ -1141,9 +1141,11 @@ export class DeepSeekAcpBackend {
     return {
       backend: BACKEND_NAME,
       backendSessionId: acpSessionId,
-      // 承载本会话的本机进程（session.created.hostPid，照 zcode 同款形状）：
-      // ACP 会话 id 是上游原生 UUID、不含 pid——settle 门 5 与 run_stop 的停止
-      // 目标解析靠这个字段锚到本机进程（B92；缺它时 runner 死掉的运行收不了口）。
+      // session.created.hostPid（照 zcode 同款形状）：ACP 会话 id 是上游原生
+      // UUID、不含 pid——settle 门 5 与 run_stop 的停止目标解析靠这个字段锚到
+      // 本机进程（B92；缺它时 runner 死掉的运行收不了口）。注意 child.pid 是
+      // spawn 的直接子进程：binary 解析到 .cmd 时它是 cmd.exe 包装进程而非
+      // dsh 本体——按进程树击杀（taskkill /T）与树根存活判断仍成立。
       ...(Number.isInteger(child.pid) && child.pid > 0 ? { hostPid: child.pid } : {}),
       redact: (value) => redactor.redact(value),
       events: (signal) => this._events(queue, child, signal),

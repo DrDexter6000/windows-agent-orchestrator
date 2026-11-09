@@ -980,6 +980,32 @@ test("TD-341-C1: 证明成立且重读仍非终态 → 新模板（第 15–30 �
   }
 });
 
+// B92 续修 1：静默分钟数与证明门 4 同一取法（lastQuietWindowBoundMs）——最后一条
+// 绑定事件是被拒的重打包审计（不算活动）时，分钟数从更早的计入事件算起。
+test("B92 续修 1: 最后一条是被拒的重打包审计 → 静默分钟数从更早的计入事件算", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-quiet-"));
+  try {
+    // 计入静默窗的最后一条是 09:20 的 run.event；10:19 追加被拒重打包审计。
+    // now = 10:20 —— 证明成立（门 4 按计入事件放行），静默分钟数 = 60，不是 1。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:20:00.000Z" })
+      + ev({
+        type: "run.delivery_repackage_rejected", ts: "2026-10-12T10:19:00.000Z", seq: 5,
+        runId: RG_RUN, agentId: "coder_low", rejectionReason: "lease_held",
+      }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: rgProofDeps(),
+    });
+    assert.equal(status.runnerGone, true, "被拒审计不重置证明窗——证明照常成立");
+    assert.match(status.leadAdvisory, /转录静默已满 60 分钟/, "分钟数从计入事件（09:20）算起");
+    assert.ok(!status.leadAdvisory.includes("已满 1 分钟"), "不是从被拒审计（10:19）算的 1 分钟");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("TD-341-C1: 证明后重读已终态 → 退回普通投影（无 advisory、无 runnerGone）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-b-"));
   try {

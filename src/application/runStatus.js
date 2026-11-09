@@ -40,6 +40,8 @@ import {
 // TD-341（第 89 批 C）：runner 已不在的证明入口 + 读面节流（前置筛选 + 缓存 +
 // 在飞共用）。daemon 读器由调用面（MCP/CLI 适配层）注入——本模块不上向导入。
 import { probeRunnerGoneCached } from "./runnerGoneProof.js";
+// B92 续修 1：静默分钟数与证明门 4 同一取法（被拒的重打包审计不算活动）。
+import { lastQuietWindowBoundMs } from "./runSettle.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -309,9 +311,11 @@ export async function getRunStatus({
         const reState = findState(reScope);
         if (!TERMINAL_STATES.includes(reState)) {
           runnerGone = true;
-          // N = 静默整数分钟，取绑定事件末条（与证明门 4 同口径），投影用重读快照。
+          // N = 静默整数分钟，取最后一条计入静默窗的绑定事件（与证明门 4 同一
+          // 取法 lastQuietWindowBoundMs——被拒的重打包审计不算活动，不把静默
+          // 分钟数压到窗下），投影用重读快照。
           const reBound = reEvents.filter((e) => e && e.runId === runId);
-          const lastBoundTs = Date.parse(reBound[reBound.length - 1]?.ts);
+          const lastBoundTs = lastQuietWindowBoundMs(reBound);
           if (Number.isFinite(lastBoundTs)) {
             runnerGoneQuietMinutes = Math.max(0, Math.floor((_now() - lastBoundTs) / 60000));
           }

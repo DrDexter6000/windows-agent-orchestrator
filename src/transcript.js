@@ -1417,7 +1417,15 @@ export class JsonlTranscript {
         );
         if (verificationStatus !== "passed" && !declaredUnverifiable) {
           // M12-9: typed policy rejection; message kept for diagnostics only.
-          throw new DeliveryDecisionPolicyError("verification_failed", `Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
+          // B92 续修 3：附带**有效**验证状态（reverify 之后的那份）——CLI/MCP 的
+          // 采纳协议提示据此只在实际 failed 时出现；pending（验证还在跑）与
+          // unavailable 不该把 Lead 引去手工采纳。拒因码与消息不变。
+          const rejection = new DeliveryDecisionPolicyError(
+            "verification_failed",
+            `Cannot accept: delivery verification is ${verificationStatus}, must be passed`,
+          );
+          rejection.effectiveVerificationStatus = verificationStatus;
+          throw rejection;
         }
         // M12-1S2: widen the terminal gate to admit an explicit recovery accept.
         // A terminally-failed run whose durable failure is exactly disallowed_path
