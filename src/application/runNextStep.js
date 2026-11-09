@@ -138,9 +138,15 @@ function render(surface, situation, runId, extras) {
     case "verifier_gone":
       // 终态等验证、验证者已证明不在。出口仍是既有的：未决定时有界拒收，
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
+      // B91：completed 形状不可重试（验证者死了就是死了）；终态 failed——只有
+      // 重新打包的交付会走到这里——且未决定时可再调 MCP 工具
+      // run_delivery_repackage（相同 runId 与 allowedPaths）接着验证，不产生
+      // 第二个提交；已拒收后 repackage 会拒绝，两条形状同用现有 rejected 文案。
       text = extras.acceptanceStatus === "rejected"
         ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\")."
-        : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\"); wao runs delivery ${runId} shows the commit.`;
+        : extras.terminalState === "failed"
+          ? `Its verification is no longer running. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit. Or reject it while pending-reject is available: wao runs delivery ${runId} --reject --reason-file <FILE>.`
+          : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\"); wao runs delivery ${runId} shows the commit.`;
       break;
     case "runner_gone":
       // 非终态、runner 已证明不在（第 83 批 B）。等待不会改变事实；结算或停止都
@@ -181,7 +187,9 @@ function render(surface, situation, runId, extras) {
  * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
  * acceptanceStatus 只接受 null（未决定）或 "rejected"，其余抛错（调用方把服务
  * 里表示未决定的值如 "pending" 转成 null 再传）；verifier_gone 与 runner_gone
- * 只有 CLI 面；consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount，
+ * 只有 CLI 面（verifier_gone 可另给 terminalState——运行终态：failed 且未决定
+ * 时渲染重新打包交付的续验文案，其余值渲染 completed 形状的既有文案）；
+ * consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount，
  * 在 CLI 面用 seatRunIds/consultId（可再给 cliJson 选不列 runId 的回退说法）。
  * 长度超上限抛错（consult_seats_running 的 CLI 面有文档化的不列 runId 回退）。
  *
@@ -192,6 +200,8 @@ function render(surface, situation, runId, extras) {
  * @param {number|null} [input.vitalSignAgeMs] — 毫秒（vitalSignAgeMs 共享函数的输出）
  * @param {string|null} [input.settlementReason]
  * @param {string|null} [input.acceptanceStatus]
+ * @param {string|null} [input.terminalState] — verifier_gone 用：收口事实里的
+ *   运行终态（"failed" → 重新打包形状的续验文案；其余/completed → 既有文案）
  * @param {string[]} [input.seatRunIds] — CLI consult：未终态席位的 runId 清单
  * @param {string} [input.consultId] — CLI consult：重读用的 consultId
  * @param {boolean} [input.cliJson] — CLI consult 回退说法用 JSON 面措辞
@@ -206,6 +216,7 @@ export function buildNextStep({
   vitalSignAgeMs = null,
   settlementReason = null,
   acceptanceStatus = null,
+  terminalState = null,
   seatRunIds = null,
   consultId = null,
   cliJson = false,
@@ -249,6 +260,7 @@ export function buildNextStep({
     vitalSignAgeMs,
     settlementReason,
     acceptanceStatus,
+    terminalState,
     seatRunIds: Array.isArray(seatRunIds) ? seatRunIds : [],
     consultId,
     cliJson: cliJson === true,

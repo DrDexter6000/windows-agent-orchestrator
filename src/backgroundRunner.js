@@ -31,8 +31,7 @@ import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_
 
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
-import { writeFileSync, unlinkSync, statSync } from "node:fs";
+import { unlinkSync, statSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
 import { laneFingerprint as laneFingerprintOf } from "./application/identityProjection.js";
@@ -40,24 +39,16 @@ import { loadRoleContract, roleContractSha256 } from "./application/roleContract
 import { PROMPT_STDIN_FLAG, promptDigest, readRunnerPrompt } from "./runnerPrompt.js";
 // TD-341（第 89 批 A）：runner stderr 证据文件的路径 SSOT（adapters→application 下向）。
 import { runnerStderrPath } from "./application/runnerStderr.js";
-
-// D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
+// B91（TD-337/TD-345）：owner 心跳租约的写/释放收进 application 层（原子替换写，
+// 读法 SSOT 仍在 ownerLiveness.js）。runner 与 run_delivery_repackage 的验证
+// 期间共用同一套；本文件是 adapters，下向 import 合法（runnerStderr.js 同款）。
+// D-F3 修复：daemon --resume-on-start 用 .owner-<runId> {pid, heartbeatAt} 判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
-// runner 启动写 .owner-<runId> {pid, heartbeatAt}，存活期间更新心跳，退出删。
-// ownership 是短命进程注册表（同 daemon.json 性质），不存 run 状态（transcript 是真相源）。
-const OWNER_HEARTBEAT_INTERVAL_MS = 2000;
-
-function writeOwnerHeartbeat(runDir, runId) {
-  try {
-    writeFileSync(join(runDir, `.owner-${runId}`), JSON.stringify({ pid: process.pid, heartbeatAt: Date.now() }), "utf8");
-  } catch {
-    // 写失败（runDir 被删等）不杀 runner
-  }
-}
-
-function clearOwner(runDir, runId) {
-  try { unlinkSync(join(runDir, `.owner-${runId}`)); } catch { /* 已不在 */ }
-}
+import {
+  clearOwner,
+  writeOwnerHeartbeat,
+  OWNER_HEARTBEAT_INTERVAL_MS,
+} from "./application/ownerLeaseWrite.js";
 
 // TD-341（第 89 批 A；二轮续修 1 收紧）：runner stderr 证据文件的进程级有序退出
 // 钩子。**只在退出码为 0 且文件为空时**同步删除——非空一律留着：之前的崩溃证据

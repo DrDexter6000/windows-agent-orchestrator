@@ -87,6 +87,9 @@ import { validateProjectedPath } from "./deliveryReview.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
+// B91（TD-337/TD-345）：验证期间持 owner 心跳租约的缺省实现（写进调用方传入的
+// runDir；测试可经 ownerLeaseHolder 注入缝换桩或指向临时目录）。
+import { createOwnerLeaseHolder } from "./ownerLeaseWrite.js";
 
 // ===== TD-226: closed-set repackage rejection codes (single authority) =====
 //
@@ -585,6 +588,7 @@ async function _repackageAllPhases({
   nowFn,
   isAliveFn,
   ownerLeaseReader,
+  ownerLeaseHolder,
 }) {
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const _resolve = resolveDeliveryCommitFn ?? resolveDeliveryCommit;
@@ -799,23 +803,36 @@ async function _repackageAllPhases({
   // machine gate — but ONLY on the default verifier. An injected
   // verifyDeliveryFn (every existing test / internal reuse) never contends for
   // the real lease; createCallerGate folds in kill switch + HELD anti-self-lock.
-  const gate = createCallerGate({
-    usesDefaultVerifier: verifyDeliveryFn === undefined,
-    identity: { owner: "runDeliveryRepackage", sessionId: null, runId }, // leadSession 仅 MCP handler 层持有
-  });
-  const verifyResult = await _verify(
-    authoritativeRef,
-    // M12-13: supply the ORIGINAL declared per-command budget as the authoritative
-    // timeout. Absent → no timeoutMs key (verifyDelivery applies its consumer
-    // default), preserving zero drift. Idempotent existing-created paths remain
-    // bound to authoritativeRef; only the budget opts differ by presence.
-    {
-      ...(original.verificationTimeoutMs !== undefined
-        ? { timeoutMs: original.verificationTimeoutMs }
-        : {}),
-      ...(gate ? { gate } : {}),
-    },
-  );
+  // B91（TD-337/TD-345）：验证期间持 owner 心跳租约——验证者是调用 repackage 的
+  // 这个进程，进闸（排队也算验证时间）前起拍、每 2s 续写；验证返回或抛错都在
+  // finally 停拍并释放。进程被换掉后租约随之死亡，等待器据此证明验证者已不在
+  //（proveVerifierGone 的重新打包形状），Lead 用相同 runId 与 allowedPaths 再调
+  // 一次 repackage 就接着验证（本状态机可重入：已有 created 不重新打包）。已有
+  // 结果的重试分支在上方已提前返回，不碰租约。
+  const leaseHolder = ownerLeaseHolder ?? createOwnerLeaseHolder({ runDir, runId });
+  leaseHolder.start();
+  let verifyResult;
+  try {
+    const gate = createCallerGate({
+      usesDefaultVerifier: verifyDeliveryFn === undefined,
+      identity: { owner: "runDeliveryRepackage", sessionId: null, runId }, // leadSession 仅 MCP handler 层持有
+    });
+    verifyResult = await _verify(
+      authoritativeRef,
+      // M12-13: supply the ORIGINAL declared per-command budget as the authoritative
+      // timeout. Absent → no timeoutMs key (verifyDelivery applies its consumer
+      // default), preserving zero drift. Idempotent existing-created paths remain
+      // bound to authoritativeRef; only the budget opts differ by presence.
+      {
+        ...(original.verificationTimeoutMs !== undefined
+          ? { timeoutMs: original.verificationTimeoutMs }
+          : {}),
+        ...(gate ? { gate } : {}),
+      },
+    );
+  } finally {
+    leaseHolder.stop();
+  }
   const verificationResult = await transcript.tryAppendRepackageVerification({
     delivery: verifyResult.delivery,
     outcome: verifyResult.outcome,
@@ -875,6 +892,9 @@ async function _recordRejectionAudit({ filePath, events, runId, code, transcript
  * @param {Function} [input.nowFn] — M12-19: injectable clock for the process_missing liveness proof
  * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID probe
  * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease reader
+ * @param {object} [input.ownerLeaseHolder] — B91: injectable verification-time
+ *   owner-lease holder ({start, stop}); default createOwnerLeaseHolder over the
+ *   caller's runDir. Tests stub it or point the real one at a temp directory.
  * @returns {Promise<{runId, deliveryCommit, verificationStatus, outcome, source, created, verificationRecorded}>}
  * @throws {RepackageRejectionError} (TD-226 closed-set code) on any expected
  *   precondition / scope / inventory / proof rejection — after a readable
@@ -900,6 +920,7 @@ export async function runDeliveryRepackage({
   nowFn,
   isAliveFn,
   ownerLeaseReader,
+  ownerLeaseHolder,
 }) {
   if (!runId || typeof runId !== "string") {
     throw new RepackageRejectionError("malformed_input", "runDeliveryRepackage: runId is required");
@@ -972,6 +993,7 @@ export async function runDeliveryRepackage({
         nowFn,
         isAliveFn,
         ownerLeaseReader,
+        ownerLeaseHolder,
       });
     } catch (err) {
       // Convert only the dedicated CAS type + known code within the audited try.

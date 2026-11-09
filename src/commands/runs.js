@@ -620,7 +620,10 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     return;
   }
   if (outcome.kind === "verifier_gone") {
-    // 决定 0096：证明成立且重读仍是终态等验证。退出码 3（不可重试），
+    // 决定 0096：证明成立且重读仍是终态等验证。退出码 3。completed 形状不可
+    // 重试（验证者死了就是死了）；终态 failed 的形状——只有重新打包的交付会
+    // 走到这里——可再调 MCP 工具 run_delivery_repackage（相同 runId 与
+    // allowedPaths）接着验证，nextStep 按收口事实里的终态分支（B91）。
     // JSON 以 reason 与本轮的不可信面区分；只给闭集 basis，不回显 pid/路径。
     process.exitCode = 3;
     const s = outcome.settlement;
@@ -629,6 +632,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       situation: "verifier_gone",
       runId,
       acceptanceStatus: s.facts.acceptanceStatus,
+      terminalState: s.facts.state,
     });
     if (asJson) {
       console.log(JSON.stringify({

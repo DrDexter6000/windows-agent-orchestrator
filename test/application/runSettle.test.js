@@ -1445,3 +1445,167 @@ test("TD-341-续修5: 并发调用、不同 seq → 各发各的证明（在飞�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B91（TD-345）：proveVerifierGone 覆盖重新打包的形状——绑定状态 failed、最后
+// 一条绑定的 state_change 是到 failed、created 带有效的重新打包来源、created
+// 显式 pending、无结果、无 reverify。验证者是调用 run_delivery_repackage 的
+// 进程：不要求 background_submitted、不拒绝 rerun、不过 daemon 门；扫描锚是
+// created 的 ts。completed 形状的既有用例全绿（上方 SET-34…SET-56）。
+// 证明在测试里一律注入桩，不跑真实进程扫描。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CREATED_TS = "2026-09-05T00:00:00.000Z"; // 重新打包落盘 created 的时刻
+
+/**
+ * 重新打包形状的转录：disallowed_scope 恢复候选（恰一条绑定的
+ * run.delivery_failed{disallowed_path}）+ 到 failed 的终态 + created（显式
+ * pending）+ 有效 provenance。opts 控制前提的变形。缺省【没有】
+ * run.background_submitted（前提 2 对该形状豁免的正面用例）。
+ */
+function seedRepackagePendingRun(tp, runId, opts = {}) {
+  const ref = opts.ref ?? makePendingRef(runId);
+  const events = [
+    ev(runId, 1, "run.started", OLD, {
+      backend: "claude-code",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    }),
+    ev(runId, 2, "run.delivery_failed", OLD, { deliveryCode: "disallowed_path", message: "changes outside allowedPaths" }),
+    ev(runId, 3, "run.state_change", OLD, { from: "running", to: "failed", reason: "delivery_failed" }),
+    ev(runId, 4, "run.delivery_created", CREATED_TS, { delivery: ref }),
+    ev(runId, 5, "run.delivery_repackaged", CREATED_TS, {
+      delivery: ref,
+      approvedAllowedPaths: ["src"],
+      source: "packaged",
+      recoveryKind: "disallowed_scope",
+    }),
+  ];
+  if (opts.background) events.splice(1, 0, ev(runId, 50, "run.background_submitted", OLD, { background: true }));
+  if (opts.rerun) {
+    events.push(ev(runId, 6, "run.rerun", OLD, {
+      originalSessionId: "proc_1111", newSessionId: "proc_9999", reason: "replay", hostPid: 9999,
+    }));
+  }
+  if (opts.dropProvenance) {
+    const index = events.findIndex((e) => e.type === "run.delivery_repackaged");
+    events.splice(index, 1);
+  }
+  writeLines(tp, events);
+  return ref;
+}
+
+async function proveRepackageWith(seedOpts, depsOverrides) {
+  const dir = tempDir("wao-vg-b91-");
+  const runId = "run_vg_b91";
+  try {
+    const tp = join(dir, `${runId}.jsonl`);
+    seedRepackagePendingRun(tp, runId, seedOpts);
+    const events = await readSeed(tp);
+    return await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps(depsOverrides) });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("SET-57 (B91): 重新打包形状证明成立——failed + 有效 provenance + created pending、无 background_submitted，租约缺失 + 扫描无命中 + 过静默窗 → gone", async () => {
+  assert.deepEqual(await proveRepackageWith({}, {}), { gone: true, basis: "lease_missing" });
+  // 有 background_submitted 同样成立（前提 2 豁免——在或不在都不挡）。
+  assert.deepEqual(await proveRepackageWith({ background: true }, {}), { gone: true, basis: "lease_missing" });
+});
+
+test("SET-58 (B91): 扫描收到的时间锚 = created 的 ts（不是 background_submitted）", async () => {
+  const dir = tempDir("wao-vg-b91-scan-");
+  const runId = "run_vg_b91_scan";
+  try {
+    const tp = join(dir, `${runId}.jsonl`);
+    seedRepackagePendingRun(tp, runId, { background: true });
+    const events = await readSeed(tp);
+    const seen = [];
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps({
+      runnerScanFn: async (id, notBeforeMs) => {
+        seen.push(notBeforeMs);
+        return { alive: false };
+      },
+    }) });
+    assert.deepEqual(r, { gone: true, basis: "lease_missing" });
+    assert.equal(seen[0], Date.parse(CREATED_TS), "收窄锚是绑定的 run.delivery_created 的 ts");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-59 (B91): daemon 门不参与重新打包形状——活 daemon 也不挡；读器根本不被调", async () => {
+  // 活 daemon（新鲜握手、判活）照旧 gone：该形状不过 verifier 的 daemon 门。
+  const freshHandshake = {
+    handshakeReader: () => ({ present: true, unreadable: false, handshake: { pid: 930, startedAt: NOW - 1000, heartbeatAt: NOW - 500 } }),
+    daemonAliveFn: () => true,
+  };
+  assert.deepEqual(await proveRepackageWith({}, freshHandshake), { gone: true, basis: "lease_missing" });
+  // 更强的钉：该形状下握手读器一次都不该被调。
+  const probeThrows = {
+    handshakeReader: () => { throw new Error("daemon gate must not run for the repackage shape"); },
+    daemonAliveFn: () => { throw new Error("daemon gate must not run for the repackage shape"); },
+  };
+  assert.deepEqual(await proveRepackageWith({}, probeThrows), { gone: true, basis: "lease_missing" });
+});
+
+test("SET-60 (B91): run.rerun 不挡重新打包形状（前提 3 豁免——验证者是 repackage 调用方）", async () => {
+  assert.deepEqual(await proveRepackageWith({ rerun: true }, {}), { gone: true, basis: "lease_missing" });
+});
+
+test("SET-61 (B91): 重新打包形状的门照旧——新鲜租约 → owner_fresh；扫描命中 → runner_alive", async () => {
+  assert.deepEqual(await proveRepackageWith({}, {
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: NOW - 1000, pid: 100 }),
+  }), { gone: false, refusal: "owner_fresh" }, "持租约者在验证中 → 继续等");
+  assert.deepEqual(await proveRepackageWith({}, {
+    runnerScanFn: async () => ({ alive: true }),
+  }), { gone: false, refusal: "runner_alive" });
+  assert.deepEqual(await proveRepackageWith({}, {
+    runnerScanFn: async () => ({ failed: true }),
+  }), { gone: false, refusal: "runner_scan_failed" });
+});
+
+test("SET-62 (B91): not_pending——无有效 provenance / 已有结果 / 已有 reverify / legacy 未显式 pending", async () => {
+  // 无有效 provenance（dropped）：failures>0 无 provenance → 交付事实 malformed。
+  assert.deepEqual(await proveRepackageWith({ dropProvenance: true }, {}),
+    { gone: false, refusal: "not_pending" });
+  // 已有原始结果：验证已 settle，不在等待形状。
+  {
+    const dir = tempDir("wao-vg-b91-outcome-");
+    const runId = "run_vg_b91_outcome";
+    try {
+      const tp = join(dir, `${runId}.jsonl`);
+      const ref = seedRepackagePendingRun(tp, runId);
+      const events = await readSeed(tp);
+      events.push(ev(runId, 200, "run.delivery_verification_passed", OLD, {
+        delivery: { ...ref, verification: { status: "passed", commands: [], verifiedCommit: DELIVERED, results: [] } },
+      }));
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  // 已有 reverify 事实。
+  {
+    const dir = tempDir("wao-vg-b91-reverify-");
+    const runId = "run_vg_b91_reverify";
+    try {
+      const tp = join(dir, `${runId}.jsonl`);
+      const ref = seedRepackagePendingRun(tp, runId);
+      const events = await readSeed(tp);
+      events.push(ev(runId, 200, "run.delivery_reverification_requested", OLD, {
+        delivery: ref, deliveryCommit: DELIVERED, reason: "tooling_invalid",
+      }));
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  // legacy created 未显式 pending。
+  {
+    const dir = tempDir("wao-vg-b91-legacy-");
+    const runId = "run_vg_b91_legacy";
+    try {
+      const tp = join(dir, `${runId}.jsonl`);
+      const legacyRef = makePendingRef(runId, { verification: { commands: [], verifiedCommit: DELIVERED, results: [] } });
+      seedRepackagePendingRun(tp, runId, { ref: legacyRef });
+      const events = await readSeed(tp);
+      const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+      assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});

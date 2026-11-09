@@ -3,6 +3,7 @@
   "groups": {
     "pure": [
       "application/claudeSessionNotFoundDiagnosis.test.js",
+      "application/ownerLeaseWrite.test.js",
       "application/ownerLivenessIdentity.test.js",
       "application/runSettle.test.js",
       "application/runnerStderr.test.js",

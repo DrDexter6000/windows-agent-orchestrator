@@ -1531,3 +1531,89 @@ test("R-02c: 有 .runner-<runId>.stderr 文件 → 文本与 JSON 都附展示�
     cleanupDir(dir);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B91（TD-345）：重新打包的形状（终态 failed、交付来自重新打包、验证显式
+// pending、无结果、无 reverify）。等待器用真实 proveVerifierGone + 全桩探测
+//（不跑真实进程扫描）：证明成立 → 退出 3、reason verifier_gone、nextStep 是
+// 指向再调 run_delivery_repackage 的新文案；证明后重读已有结果仍收口退出 0。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 重新打包形状的转录：disallowed_scope 恢复候选 + created（显式 pending）+
+// 有效 provenance。没有 run.background_submitted（前提 2 对该形状豁免）。
+function repackagePendingEvents(runId) {
+  const ref = makeRef(runId);
+  const events = [
+    { ...started(runId), ts: PROOF_TS },
+    { type: "run.delivery_failed", runId, agentId: "coder_low", deliveryCode: "disallowed_path", message: "changes outside allowedPaths", ts: PROOF_TS },
+    { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "failed", reason: "delivery_failed", ts: PROOF_TS },
+    { ...created(runId, ref), ts: PROOF_TS },
+    { type: "run.delivery_repackaged", runId, agentId: "coder_low", delivery: ref, approvedAllowedPaths: ["src"], source: "packaged", recoveryKind: "disallowed_scope", ts: PROOF_TS },
+  ];
+  return { ref, events };
+}
+
+test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向再调 run_delivery_repackage（新文案）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg07";
+    const { events } = repackagePendingEvents(runId);
+    writeLines(dir, runId, events);
+    const r = await runWaitSettled({ dir, runId, deps: verifierProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 3, `只输出三行终行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[0], `Run: ${runId} (failed)`);
+    assert.equal(
+      r.outLines[1],
+      `Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (lease_missing); waiting will not change this.`,
+    );
+    assert.match(r.outLines[2], /^Next step: Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit\. Or reject it while pending-reject is available: wao runs delivery run_wg07 --reject --reason-file <FILE>\.$/);
+    assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-07b (B91): 重新打包形状 JSON——{settled:false,state:failed,reason:verifier_gone,basis,nextStep}", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg07b";
+    const { events } = repackagePendingEvents(runId);
+    writeLines(dir, runId, events);
+    const r = await runWaitSettled({ dir, runId, asJson: true, deps: verifierProofDeps });
+    assert.equal(r.exitCode, 3);
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual(Object.keys(parsed).sort(), ["basis", "nextStep", "reason", "runId", "settled", "state"]);
+    assert.equal(parsed.settled, false);
+    assert.equal(parsed.state, "failed");
+    assert.equal(parsed.reason, "verifier_gone");
+    assert.equal(parsed.basis, "lease_missing");
+    assert.match(parsed.nextStep, /run_delivery_repackage again with the same runId and allowedPaths/);
+    assert.ok(parsed.nextStep.includes("will not create a second commit"));
+    assert.ok(parsed.nextStep.includes("--reject --reason-file <FILE>"), "pending 拒收出口仍在");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("W-07c (B91): 重新打包形状证明成立但重读已有结果 → 照常收口退出 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_wg07c";
+    const { ref, events } = repackagePendingEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      if (reads === 1) return events;
+      return [...events, outcome(runId, "passed", ref)];
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { ...verifierProofDeps, readTranscriptFn } });
+    assert.equal(r.exitCode, undefined, "重读已有结果 → 收口退出 0");
+    assert.equal(reads, 2, "一轮正常读 + 证明后一次重读");
+    assert.match(r.out, /Settlement: settled \(delivery_settled/);
+    assert.ok(!/verifier_gone|Stuck:/.test(r.out), "不报 verifier_gone");
+  } finally {
+    cleanupDir(dir);
+  }
+});

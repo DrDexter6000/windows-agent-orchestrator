@@ -25,10 +25,13 @@
 //      serveUrl 拒（该用 wao stop）；
 //   6. 没有活着的 daemon（resume-on-start 会接管 orphan）。
 //
-// 同模块另导出只读的 proveVerifierGone：终态 completed + 验证显式 pending 的
-// 运行，其后台验证者进程是否已不在。它与 settle 的门 2/3/4/6 共用同一套读器与
-// 判定（_evaluateOwnerLeaseGate / _evaluateRunnerScanGate /
-// _evaluateQuietWindowGate；daemon 判定按验证者的形状另写，见下）。
+// 同模块另导出只读的 proveVerifierGone：终态、交付验证显式 pending 的运行，
+// 其验证者进程是否已不在——覆盖两个形状：completed 的后台运行（决定 0096，
+// 验证者是 runner）与终态 failed、交付来自重新打包的运行（B91，TD-345，验证者
+// 是调用 run_delivery_repackage 的进程，验证期间持 owner 心跳租约）。它与
+// settle 的门 2/3/4 共用同一套读器与判定（_evaluateOwnerLeaseGate /
+// _evaluateRunnerScanGate / _evaluateQuietWindowGate；completed 形状的 daemon
+// 判定按验证者的形状另写，见下；重新打包形状不过 daemon 门）。
 //
 // --apply 的写入带 expectedLastSeq 守卫：证明开始时记下的最后 seq 与锁内实读
 // 不一致即拒（observed_seq_changed）——防证明之后出现的新事件（例如 daemon 在
@@ -53,6 +56,7 @@ import {
   findLastEventSeq,
   findLatestBound,
   validateDeliveryFacts,
+  findValidRepackageProvenance,
   JsonlTranscript,
   RUN_STATES,
   TERMINAL_STATES,
@@ -352,6 +356,21 @@ function _completedAtMs(events, runId) {
 }
 
 /**
+ * 最后一条绑定的 run.state_change 的 `to`（没有绑定的 state_change 返回 null）。
+ * 只供 proveVerifierGone 的形状判定取用（重新打包形状要求最后一条是到 failed）。
+ * @returns {string|null}
+ */
+function _lastBoundStateChangeTo(events, runId) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event && event.type === "run.state_change" && event.runId === runId) {
+      return event.to;
+    }
+  }
+  return null;
+}
+
+/**
  * proveVerifierGone 的 daemon 判定（与 settle 门 6 不同）：daemon 跳过终态
  * 运行，所以只有在本运行到达 completed **之前**（含同一时刻——同一时刻不算
  * "之后"，仍按之前启动继续判新鲜度与身份）就已启动的 daemon 才可能在驱动
@@ -494,24 +513,33 @@ export const VERIFIER_GONE_REFUSALS = Object.freeze([
 ]);
 
 /**
- * 只读证明：一个终态 completed、交付已验证创建但仍 pending 的后台运行，其验证
- * 进程是否**已经不在**（等待器据此如实退出）。
+ * 只读证明：一个终态、交付已验证创建但仍 pending 的运行，其验证进程是否
+ * **已经不在**（等待器据此如实退出）。覆盖两种形状：
  *
- * 前提（不满足即拒，不进入昂贵探测）：
- *   1. 绑定状态恰为 completed，且有一条**绑定的** `run.state_change → completed`
- *      （本证明只覆盖终态 completed 的后台运行——证明成立后 nextStep 指的拒收
- *      命令走有界 pending 拒收的 completed 分支，这条事实仍必需，legacy 末事件
- *      推断不算。终态 failed 的重新打包交付由调用 run_delivery_repackage 的进程
- *      验证（闸开着时先在闸前排队），这里证明不了那个进程是否还在，不覆盖，见
- *      台账 TD-345）；
- *      validateDeliveryFacts（pending 感知、runId 绑定）valid、原始验证 pending、
- *      无 reverify 事实；
- *   2. 恰好一条绑定的 run.background_submitted（前台运行在 Lead 自己的 wao run
- *      进程里跑验证，转录不记它的 pid，无从证明）；
- *   3. 没有绑定的 run.rerun（驱动进程换过，租约主人不一定是验证者）。
+ *   - completed 形状（决定 0096 原有）：绑定状态恰为 completed，且有一条
+ *     **绑定的** `run.state_change → completed`（证明成立后 nextStep 指的拒收
+ *     命令走有界 pending 拒收的 completed 分支，这条事实仍必需，legacy 末事件
+ *     推断不算）。验证者是驱动它的 runner。
+ *   - 重新打包形状（B91，TD-345）：绑定状态 failed、最后一条绑定的
+ *     run.state_change 是到 failed、run.delivery_created 带有效的重新打包来源
+ *    （findValidRepackageProvenance——有界 pending 拒收用的同一判定）、created
+ *     显式 verification.status "pending"、无结果、无 reverify。验证者是调用
+ *     run_delivery_repackage 的进程（验证期间持 owner 心跳租约，见
+ *     ownerLeaseWrite.js），不是原 runner。
+ *
+ * 两种形状共同的交付前提：validateDeliveryFacts（pending 感知、runId 绑定）
+ * valid、原始验证 pending、无 reverify 事实、created 显式声明 pending。
+ *
+ * 重新打包形状的形状豁免（验证者不是原 runner）：
+ *   - 不要求恰好一条 run.background_submitted、不拒绝 run.rerun——租约主人
+ *    （持租约的 repackage 调用方）就是验证者，与派发/续跑历史无关；
+ *   - 不过 verifier 的 daemon 门（_evaluateVerifierDaemonGate 依赖 completed
+ *     时刻；daemon 在终态前就跳过运行，不会调 repackage）。
  *
  * 证明（依次；任一不成立即拒）：owner 租约（门 2 同一实现）→ 静默窗（门 4）
- * → 没有可能在驱动它的 daemon → 本机进程扫描（门 3）。
+ * →（仅 completed 形状）没有可能在驱动它的 daemon → 本机进程扫描（门 3）。
+ * 扫描的按创建时间收窄锚：completed 形状用 run.background_submitted 的时刻；
+ * 重新打包形状用绑定的 run.delivery_created 事件的 ts（ts 读不出就不传）。
  *
  * 成立返回 { gone:true, basis }，basis ∈ {lease_missing, pid_exited,
  * rebooted_since_anchor, pid_reused}；不回显 pid、路径或命令行。
@@ -542,34 +570,50 @@ export async function proveVerifierGone({ events, runId, runDir, deps = {} } = {
   const now = d.nowFn();
   const bound = events.filter((e) => e && e.runId === runId);
 
-  // 前提 1：终态 completed + 绑定的 state_change→completed + 交付显式 pending
-  // 且无结果、无 reverify。这里只证明终态 completed 的后台运行的验证者（驱动
-  // 它的 runner）已不在；绑定的 completed 事实仍必需——证明成立后 nextStep 指
-  // 的拒收命令走有界 pending 拒收的 completed 分支（legacy 末事件推断不算）。
-  // 终态 failed 的重新打包交付由调用 run_delivery_repackage 的进程验证（闸开
-  // 着时先在闸前排队），这里证明不了那个进程是否还在，不覆盖（见台账 TD-345）。
+  // 共同的交付前提：交付显式 pending、无结果、无 reverify。
   const completedAt = _completedAtMs(events, runId);
   const state = findState(bound);
   const deliveryFacts = validateDeliveryFacts(events, {
     expectedRunId: runId,
     allowVerificationPending: true,
   });
-  if (state !== "completed"
-    || !Number.isFinite(completedAt)
-    || !deliveryFacts.valid
-    || deliveryFacts.verificationStatus !== "pending"
-    || deliveryFacts.reverifyStatus !== "none") {
+  const factsPending = deliveryFacts.valid
+    && deliveryFacts.verificationStatus === "pending"
+    && deliveryFacts.reverifyStatus === "none"
+    && deliveryFacts.createdRef?.verification?.status === "pending";
+
+  // 形状判定。重新打包形状的来源判定与有界 pending 拒收共用同一个
+  // findValidRepackageProvenance（恰好一条绑定的 created 在 bound 模式下由
+  // validateDeliveryFacts 保证；这里再取事件本体拿扫描锚的 ts）。
+  const createdEvents = bound.filter((e) => e.type === "run.delivery_created");
+  const repackageProvenance = factsPending && createdEvents.length === 1
+    ? findValidRepackageProvenance(events, runId, deliveryFacts.createdRef)
+    : null;
+  const repackageShape = state === "failed"
+    && _lastBoundStateChangeTo(events, runId) === "failed"
+    && factsPending
+    && repackageProvenance !== null;
+
+  // 前提 1（completed 形状）：终态 completed + 绑定的 state_change→completed
+  //（legacy 末事件推断不算）。两形状都不满足即 not_pending。
+  if (!repackageShape
+    && (state !== "completed"
+      || !Number.isFinite(completedAt)
+      || !factsPending)) {
     return { gone: false, refusal: "not_pending" };
   }
 
-  // 前提 2：恰好一条绑定的后台派发（前台运行的验证进程无 pid 可证）。
-  if (bound.filter((e) => e.type === "run.background_submitted").length !== 1) {
-    return { gone: false, refusal: "foreground_verifier" };
-  }
-
-  // 前提 3：没有绑定的 rerun（驱动进程换过，租约主人不一定是验证者）。
-  if (bound.some((e) => e.type === "run.rerun")) {
-    return { gone: false, refusal: "resumed" };
+  // 前提 2/3（仅 completed 形状）：恰好一条绑定的后台派发（前台运行的验证
+  // 进程无 pid 可证）；没有绑定的 rerun（驱动进程换过，租约主人不一定是
+  // 验证者）。重新打包形状豁免——它的验证者（repackage 调用方）与派发/
+  // 续跑历史无关，租约就是验证者自己写的（ownerLeaseWrite.js）。
+  if (!repackageShape) {
+    if (bound.filter((e) => e.type === "run.background_submitted").length !== 1) {
+      return { gone: false, refusal: "foreground_verifier" };
+    }
+    if (bound.some((e) => e.type === "run.rerun")) {
+      return { gone: false, refusal: "resumed" };
+    }
   }
 
   // 证明 1：owner 租约。
@@ -580,13 +624,21 @@ export async function proveVerifierGone({ events, runId, runDir, deps = {} } = {
   const quietGate = _evaluateQuietWindowGate(bound, now, facts);
   if (!quietGate.ok) return { gone: false, refusal: quietGate.refusal };
 
-  // 证明 3：没有可能在驱动的 daemon（completedAt 由前提 1 保证可解析）。
-  const daemonGate = await _evaluateVerifierDaemonGate(completedAt, now, runDir, d, facts);
-  if (!daemonGate.ok) return { gone: false, refusal: daemonGate.refusal };
+  // 证明 3（仅 completed 形状）：没有可能在驱动的 daemon（completedAt 由前提
+  // 1 保证可解析）。重新打包形状不过这道门：它依赖 completed 时刻，而 daemon
+  // 在终态前就跳过运行、不会调 repackage。
+  if (!repackageShape) {
+    const daemonGate = await _evaluateVerifierDaemonGate(completedAt, now, runDir, d, facts);
+    if (!daemonGate.ok) return { gone: false, refusal: daemonGate.refusal };
+  }
 
-  // 证明 4：本机进程扫描（最贵，放最后）。后台派发事实的时刻给扫描按创建时间
-  // 收窄（前提 2 已保证恰好一条；ts 读不出就不传）。
-  const scanNotBefore = _backgroundSubmittedMs(bound);
+  // 证明 4：本机进程扫描（最贵，放最后）。completed 形状用后台派发事实的时刻
+  // 收窄（前提 2 已保证恰好一条；ts 读不出就不传）；重新打包形状的时间锚是
+  // 绑定的 run.delivery_created 事件的 ts（验证者在落盘 created 之后才进验证；
+  // ts 读不出就不传）。
+  const scanNotBefore = repackageShape
+    ? Date.parse(createdEvents[0].ts)
+    : _backgroundSubmittedMs(bound);
   const scanGate = await _evaluateRunnerScanGate(runId, d, facts,
     Number.isFinite(scanNotBefore) ? scanNotBefore : undefined);
   if (!scanGate.ok) return { gone: false, refusal: scanGate.refusal };

@@ -52,6 +52,7 @@ import {
   REPACKAGE_CAS_POLICY_CODES, validateDeliveryFacts, findValidRepackageProvenance,
 } from "../../src/transcript.js";
 import { baseRepoFixture, copyGitRepo } from "../_gitRepoFixture.mjs";
+import { ownerFilePath, readOwnerLease } from "../../src/application/ownerLiveness.js";
 
 const RUN_ID = "run_m12s2_test";
 const AGENT_ID = "coder_hq";
@@ -2659,5 +2660,117 @@ test("TD-236: --graft 伪造单父被禁用 replace 阻断（父链检查层独�
       (e) => e instanceof Error && !/unexpected internal/.test(String(e.message)),
       "graft 替身不得骗过父链/内容任一层",
     );
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B91（TD-337/TD-345）：验证期间持 owner 心跳租约。验证者是调用 repackage 的
+// 这个进程：进闸前起拍、验证返回或抛错都在 finally 停拍释放；已有结果的重试
+// 分支不碰租约。探测全部走真实租约文件（runDir 是临时目录）或计数桩，零真实
+// 进程扫描、不起真实子进程。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("B91-LEASE-HELD: verification holds a fresh own-pid lease and releases it when verify resolves", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    let leaseDuringVerify = null;
+    const slowVerifier = async (deliveryRef) => {
+      leaseDuringVerify = readOwnerLease(s.runDir, RUN_ID, Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return passedVerifier(deliveryRef);
+    };
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: slowVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(result.verificationStatus, "passed");
+    // 验证进行中：租约在、新鲜、pid 是本进程（等待器据此判 owner_fresh 继续等）。
+    assert.equal(leaseDuringVerify?.present, true, "验证期间租约在");
+    assert.equal(leaseDuringVerify.wellFormed, true, "租约格式正确");
+    assert.equal(leaseDuringVerify.fresh, true, "租约新鲜");
+    assert.equal(leaseDuringVerify.pid, process.pid, "租约 pid 是本进程");
+    // 验证返回后：租约已释放（finally 停拍）。
+    assert.equal(existsSync(ownerFilePath(s.runDir, RUN_ID)), false, "verify 返回后租约已释放");
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+test("B91-LEASE-THROWN: a throwing verifier still releases the lease in finally", async () => {
+  const s = await setupBackendFailureScenario({ privateRepo: true });
+  try {
+    let leaseDuringVerify = null;
+    const slowThrowingVerifier = async (deliveryRef) => {
+      leaseDuringVerify = readOwnerLease(s.runDir, RUN_ID, Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      throw new Error("verifier crashed");
+    };
+    await assert.rejects(
+      () => runDeliveryRepackage({
+        runId: RUN_ID, runDir: s.runDir,
+        allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: slowThrowingVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }),
+      /verifier crashed/,
+    );
+    assert.equal(leaseDuringVerify?.present, true, "抛错前租约在");
+    assert.equal(leaseDuringVerify.pid, process.pid, "租约 pid 是本进程");
+    // 抛错路径同样在 finally 里释放：不留下死进程形状的新鲜租约。
+    assert.equal(existsSync(ownerFilePath(s.runDir, RUN_ID)), false, "verify 抛错后租约已释放");
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+test("B91-LEASE-RETRY: the existing-outcome idempotent retry never touches the lease", async () => {
+  const s = await setupBackendFailureScenario({ privateRepo: true });
+  try {
+    const first = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(first.verificationStatus, "passed");
+    // 已有结果的重试分支（early return）不 start 也不 stop——计数桩为 0。
+    const holderCalls = { start: 0, stop: 0 };
+    const retry = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+      ownerLeaseHolder: {
+        start() { holderCalls.start += 1; },
+        stop() { holderCalls.stop += 1; },
+      },
+    });
+    assert.equal(retry.created, false);
+    assert.equal(retry.verificationRecorded, false);
+    assert.deepEqual(holderCalls, { start: 0, stop: 0 }, "已有结果的重试不写租约");
+    assert.equal(existsSync(ownerFilePath(s.runDir, RUN_ID)), false, "租约文件也不存在");
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+test("B91-LEASE-SEAM: the ownerLeaseHolder seam brackets gate+verify with exactly one start/stop", async () => {
+  const s = await setupBackendFailureScenario({ privateRepo: true });
+  try {
+    const order = [];
+    const holder = {
+      start() { order.push("start"); },
+      stop() { order.push("stop"); },
+    };
+    const verifier = async (deliveryRef) => {
+      order.push("verify");
+      return passedVerifier(deliveryRef);
+    };
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: verifier,
+      computeInventoryFn: computeCandidateInventory,
+      ownerLeaseHolder: holder,
+    });
+    assert.equal(result.verificationStatus, "passed");
+    // 起拍在验证之前（排队也算验证时间）、释放恰一次且在验证之后。
+    assert.deepEqual(order, ["start", "verify", "stop"]);
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });

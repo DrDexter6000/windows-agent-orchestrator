@@ -2790,6 +2790,12 @@ const DELIVERY_PENDING_GUIDANCE = Object.freeze([
   "do_not_reenter_reentry_reexecutes_verification",
 ]);
 
+// TD-337/TD-345（B91）：有界等待的缺省窗。宿主对单次工具调用的上限约 60s——
+// 旧缺省 300s 比它长，宿主先报超时而打包/验证其实已在进行。窗必须落在宿主上限
+// 之内；WAO_DELIVERY_WAIT_MS 覆写不变。导出仅为测试钉缺省值（缺省路径的 45s
+// 行为没法在测试里真等）。
+export const DELIVERY_BOUNDED_WAIT_DEFAULT_MS = 45_000;
+
 const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
   // TD-215：status 枚举（同 REPACKAGE——"pending"=超窗续跑，poll run_delivery）。
   status: z.enum(["ok", "pending"]),
@@ -4210,7 +4216,7 @@ export function createWaoMcpServer({
   // 扩展；窗内完成=status:"ok" 同步契约原样）。可调：WAO_DELIVERY_WAIT_MS。
   const DELIVERY_BOUNDED_WAIT_MS = (() => {
     const raw = Number.parseInt(String(process.env.WAO_DELIVERY_WAIT_MS ?? ""), 10);
-    return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
+    return Number.isFinite(raw) && raw > 0 ? raw : DELIVERY_BOUNDED_WAIT_DEFAULT_MS;
   })();
   // 补席审计修正：窗内完成即清 timer（否则拖住进程到窗口尽头——实测每个走默认
   // 窗的测试文件多挂 ~5min）；超窗后服务侧若 reject，吞掉并记录（pending 文案不再
@@ -7345,8 +7351,11 @@ export function createWaoMcpServer({
             content: [{
               type: "text",
               text: `run_delivery_repackage pending: verification still running after the bounded wait `
-                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification typically continues `
-                + "server-side (detached-server architecture — same-day evidence); poll run_delivery with "
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification continues in this MCP `
+                + "server process; if that process is replaced, the verification stops — wao runs wait "
+                + `${runId} --until-settled then exits with reason verifier_gone, and calling `
+                + "run_delivery_repackage again with the same runId and allowedPaths resumes the "
+                + "verification without creating a second commit. Poll run_delivery with "
                 + `{ runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
                 + "Do NOT blind-retry while a run is in flight — reentry re-executes verification side effects.",
             }],
@@ -7456,7 +7465,8 @@ export function createWaoMcpServer({
             content: [{
               type: "text",
               text: `run_delivery_reverify pending: re-verification still running after the bounded wait `
-                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). It typically continues server-side; poll `
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The re-verification continues in this MCP `
+                + `server process; if that process is replaced, it stops. Poll `
                 + `run_delivery with { runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
                 + "Avoid concurrent re-calls while the first is in flight — reentry re-executes verification.",
             }],

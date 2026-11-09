@@ -1,14 +1,16 @@
 // test/mcp-surface/deliveryBoundedWait.test.js
 //
-// TD-215 钉：repackage/reverify 有界等待——服务超窗=text-only pending 回执（验证
-// 继续于服务进程）；窗内完成=既有契约原样。冻结 output schema 零触碰。
+// TD-215 钉：repackage/reverify 有界等待——服务超窗=text-only pending 回执（B91
+// 起：验证继续于**本 MCP 服务进程**，进程被换掉验证即停）；窗内完成=既有契约
+// 原样。冻结 output schema 零触碰。B91：缺省窗降到 45s（宿主单次调用上限约
+// 60s 之内）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { createWaoMcpServer, DELIVERY_BOUNDED_WAIT_DEFAULT_MS } from "../../src/mcp/server.js";
 
 function makeGitRepo(dir) {
   execSync("git init", { cwd: dir, stdio: "pipe" });
@@ -67,9 +69,15 @@ test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、stru
         && res.structuredContent.guidance.includes("poll_run_delivery_with_waitMs_for_settled_outcome"),
       "pending 指引必须进 structuredContent（claude 失明修复）");
       assert.match(text, /run_delivery_repackage pending/);
-      assert.match(text, /typically continues server-side/);
+      // B91：pending 文案如实——验证在本 MCP 服务进程里继续；进程被换掉验证即停，
+      // 此时 runs wait 以 verifier_gone 退出、同 runId/allowedPaths 再调 repackage
+      // 接着验证不产生第二个提交。盲目重试警告保留。
+      assert.match(text, /continues in this MCP server process/);
+      assert.match(text, /if that process is replaced, the verification stops/);
+      assert.match(text, /wao runs wait run_\S+ --until-settled then exits with reason verifier_gone/);
+      assert.match(text, /calling\s+run_delivery_repackage again with the same runId and allowedPaths resumes the\s+verification without creating a second commit/);
       assert.match(text, /Do NOT blind-retry/);
-      assert.match(text, /poll run_delivery/);
+      assert.match(text, /[Pp]oll run_delivery/);
     } finally {
       if (prev === undefined) delete process.env.WAO_DELIVERY_WAIT_MS;
       else process.env.WAO_DELIVERY_WAIT_MS = prev;
@@ -108,5 +116,52 @@ test("TD-215 ②: 窗内完成 → 既有契约原样（payload 字段齐全）"
       assert.equal(sc.verificationStatus, "passed");
       assert.equal(sc.deliveryCommit, "a".repeat(40));
     } finally { await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// B91：缺省窗 45s——落在宿主单次工具调用上限（约 60s）之内，宿主不再先报超时。
+// 缺省路径没法在测试里真等 45s，钉的是导出的缺省常量（server.js 的 IIFE 引用
+// 同一常量，env 覆写路径由上面 TD-215 ① 的 WAO_DELIVERY_WAIT_MS=50 覆盖）。
+test("B91-DEFAULT-WINDOW: 有界等待缺省 45000 ms（宿主上限之内）", () => {
+  assert.equal(DELIVERY_BOUNDED_WAIT_DEFAULT_MS, 45000);
+});
+
+// B91：reverify 的 pending 文案同样如实——验证在本 MCP 服务进程里继续，进程被
+// 换掉验证即停。structuredContent 形状不变（status:pending + 闭集 guidance）。
+test("B91-REVERIFY-PENDING-TEXT: reverify 超窗回执如实说明验证所在进程", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bw-rv-"));
+  try {
+    makeGitRepo(dir);
+    const prev = process.env.WAO_DELIVERY_WAIT_MS;
+    process.env.WAO_DELIVERY_WAIT_MS = "50";
+    const server = createWaoMcpServer({
+      registryPath: join(dir, "agents.json"),
+      runDir: join(dir, "runs"),
+      workspaceRoot: dir,
+      runDeliveryReverifyFn: () => new Promise(() => {}), // 永不完成（模拟长验证）
+    });
+    try {
+      const client = await buildClient(server);
+      const res = await client.callTool({
+        name: "run_delivery_reverify",
+        arguments: { runId: "run_202611090900000000000000", reason: "tooling_invalid", expectedWorkspaceRoot: dir },
+      });
+      const text = res.content?.find((b) => b.type === "text")?.text ?? "";
+      assert.notEqual(res.isError, true, "pending 不是错误");
+      assert.equal(res.structuredContent?.status, "pending");
+      assert.deepEqual(
+        Object.keys(res.structuredContent ?? {}).sort(),
+        ["guidance", "runId", "status"],
+      );
+      assert.match(text, /run_delivery_reverify pending/);
+      assert.match(text, /The re-verification continues in this MCP server process/);
+      assert.match(text, /if that process is replaced, it stops/);
+      assert.match(text, /[Pp]oll run_delivery/);
+      assert.match(text, /Avoid concurrent re-calls/);
+    } finally {
+      if (prev === undefined) delete process.env.WAO_DELIVERY_WAIT_MS;
+      else process.env.WAO_DELIVERY_WAIT_MS = prev;
+      await server.close();
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

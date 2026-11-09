@@ -309,3 +309,42 @@ test("NEXT-11: runner_gone——只有 CLI 面；含 settle/stop 出口与 workt
     /runId/,
   );
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B91：verifier_gone 按 terminalState 分支——终态 failed（只有重新打包的交付
+// 走到这里）且未决定时渲染指向再调 run_delivery_repackage 的新文案；completed
+// 形状与已拒收文案逐字不变。仍只有 CLI 面、仍 ≤480。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决定的新文案；completed 两支逐字不变", () => {
+  // 终态 failed、未决定：新文案（再调 run_delivery_repackage 接着验证 + pending 拒收出口）。
+  const failed = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID,
+    acceptanceStatus: "pending", terminalState: "failed",
+  });
+  assert.match(failed, /^Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit\. Or reject it while pending-reject is available: wao runs delivery run_\S+ --reject --reason-file <FILE>\.$/);
+  assert.ok(failed.length <= NEXT_STEP_MAX_LEN, `${failed.length}`);
+
+  // completed、未决定：旧文案逐字不变（terminalState 缺省即 completed 形状）。
+  const completedPending = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "pending",
+  });
+  assert.match(completedPending, /^Its verification will not finish\. Reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\./);
+  assert.ok(!completedPending.includes("run_delivery_repackage"), "completed 形状不指向 repackage");
+
+  // 已拒收：failed 与 completed 同用现有 rejected 文案（已有决定后 repackage 会拒绝）。
+  const rejectedFailed = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID,
+    acceptanceStatus: "rejected", terminalState: "failed",
+  });
+  const rejectedCompleted = buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: RUN_ID,
+    acceptanceStatus: "rejected",
+  });
+  assert.match(rejectedFailed, /already rejected; nothing is left to wait for/);
+  assert.equal(rejectedFailed, rejectedCompleted, "已拒收两条形状同文案");
+  assert.ok(!rejectedFailed.includes("run_delivery_repackage"), "已拒收不再指向 repackage");
+
+  // 仍只有 CLI 面。
+  assert.throws(() => buildNextStep({ surface: "mcp", situation: "verifier_gone", terminalState: "failed" }), /CLI-only/);
+});
