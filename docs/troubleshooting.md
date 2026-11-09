@@ -295,8 +295,8 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
   各面字段、提示写什么与怎么读，见[监督](usage/supervise.md#lead-quiet-supervision)）。
 - **中止**（先看最新状态并写明理由，见 usage）：`stop` / MCP `run_stop`——会话记录带
   `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。会话
-  记录里没有 `hostPid` 的运行报 `has no stop route`：核实其 app-server 进程后手动结束进程
-  树，转录会以 `transport closed` 落 failed。
+  记录既无 pid 也无 `serveUrl` 的运行停不下：核实其进程后手动结束进程树，runner 在时转录
+  以 `transport closed` 落 failed。
 - **诚实边界**：流分片是上游内部遥测，只在 zcode CLI 0.16.9 上验证过；进程活跃度阈值
   （空闲 CPU 0–2.5 ms/s、I/O 4–9 KB/s）来自一次真机探针，不是长期统计。读数与来由见
   决定 0067。
