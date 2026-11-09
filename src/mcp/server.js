@@ -7350,12 +7350,13 @@ export function createWaoMcpServer({
           return {
             content: [{
               type: "text",
-              text: `run_delivery_repackage pending: verification still running after the bounded wait `
-                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification continues in this MCP `
-                + "server process; if that process is replaced, the verification stops — wao runs wait "
-                + `${runId} --until-settled then exits with reason verifier_gone, and calling `
-                + "run_delivery_repackage again with the same runId and allowedPaths resumes the "
-                + "verification without creating a second commit. Poll run_delivery with "
+              text: `run_delivery_repackage pending: still packaging or verifying after the bounded wait `
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification runs in this MCP `
+                + "server process; if that process is replaced, the verification stops. wao runs wait "
+                + `${runId} --until-settled can then exit with reason verifier_gone once it proves the verifier `
+                + "gone (the transcript must have been quiet for 15 minutes); calling run_delivery_repackage "
+                + "again with the same input then runs the verification again without creating a second "
+                + "commit. Poll run_delivery with "
                 + `{ runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
                 + "Do NOT blind-retry while a run is in flight — reentry re-executes verification side effects.",
             }],

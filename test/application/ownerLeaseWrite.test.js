@@ -117,3 +117,24 @@ test("OLW-04: 未 start 就 stop 是 no-op——不写也不删（没有租约�
     assert.equal(existsSync(ownerFilePath(dir, RUN_ID)), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("OLW-05: 同一进程对同一运行的两个持有者——先停的不删租约，最后一个停下才释放", () => {
+  const dir = tempDir("wao-olw-05-");
+  try {
+    const a = createOwnerLeaseHolder({ runDir: dir, runId: RUN_ID });
+    const b = createOwnerLeaseHolder({ runDir: dir, runId: RUN_ID });
+    a.start();
+    b.start();
+    a.stop();
+    const during = readOwnerLease(dir, RUN_ID, Date.now());
+    assert.equal(during.present, true, "b 还在验证：a 停下不得删掉共用的租约");
+    assert.equal(during.pid, process.pid);
+    b.stop();
+    assert.equal(existsSync(ownerFilePath(dir, RUN_ID)), false, "最后一个持有者停下才释放");
+    // 计数随释放归零：再起一个持有者，停下照常释放。
+    const c = createOwnerLeaseHolder({ runDir: dir, runId: RUN_ID });
+    c.start();
+    c.stop();
+    assert.equal(existsSync(ownerFilePath(dir, RUN_ID)), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

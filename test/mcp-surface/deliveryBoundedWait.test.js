@@ -69,13 +69,15 @@ test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、stru
         && res.structuredContent.guidance.includes("poll_run_delivery_with_waitMs_for_settled_outcome"),
       "pending 指引必须进 structuredContent（claude 失明修复）");
       assert.match(text, /run_delivery_repackage pending/);
-      // B91：pending 文案如实——验证在本 MCP 服务进程里继续；进程被换掉验证即停，
-      // 此时 runs wait 以 verifier_gone 退出、同 runId/allowedPaths 再调 repackage
-      // 接着验证不产生第二个提交。盲目重试警告保留。
-      assert.match(text, /continues in this MCP server process/);
+      // B91：pending 文案如实——超窗时可能还在打包或验证；验证在本 MCP 服务
+      // 进程里，进程被换掉验证即停；runs wait 要证明成立（静默满 15 分钟）才以
+      // verifier_gone 退出；同样输入再调 repackage 重跑验证、不产生第二个提交。
+      // 盲目重试警告保留。
+      assert.match(text, /still packaging or verifying after the bounded wait/);
+      assert.match(text, /The verification runs in this MCP server process/);
       assert.match(text, /if that process is replaced, the verification stops/);
-      assert.match(text, /wao runs wait run_\S+ --until-settled then exits with reason verifier_gone/);
-      assert.match(text, /calling\s+run_delivery_repackage again with the same runId and allowedPaths resumes the\s+verification without creating a second commit/);
+      assert.match(text, /wao runs wait run_\S+ --until-settled can then exit with reason verifier_gone once it proves the verifier gone \(the transcript must have been quiet for 15 minutes\)/);
+      assert.match(text, /calling run_delivery_repackage again with the same input then runs the verification again without creating a second commit/);
       assert.match(text, /Do NOT blind-retry/);
       assert.match(text, /[Pp]oll run_delivery/);
     } finally {

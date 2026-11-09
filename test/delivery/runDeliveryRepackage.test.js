@@ -2774,3 +2774,41 @@ test("B91-LEASE-SEAM: the ownerLeaseHolder seam brackets gate+verify with exactl
     assert.deepEqual(order, ["start", "verify", "stop"]);
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });
+
+test("B91-LEASE-RETRY-CREATED: a retry with created but no outcome takes the lease again and holds it until the outcome is written", async () => {
+  const s = await setupBackendFailureScenario({ privateRepo: true });
+  try {
+    // First call: created lands, the verifier throws — no outcome.
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: async () => { throw new Error("verify boom"); },
+      computeInventoryFn: computeCandidateInventory,
+    }), /verify boom/);
+    assert.equal(existsSync(ownerFilePath(s.runDir, RUN_ID)), false, "the throwing call released its lease");
+
+    // Retry: the holder sees start, then stop only after the outcome is on disk.
+    const order = [];
+    const holder = {
+      start() { order.push("start"); },
+      stop() {
+        const outcomes = readFileSync(join(s.runDir, RUN_ID + ".jsonl"), "utf8")
+          .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+          .filter((e) => e.type === "run.delivery_verification_passed").length;
+        order.push(`stop:outcomes=${outcomes}`);
+      },
+    };
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir,
+      allowedPaths: ["src"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: async (ref) => { order.push("verify"); return passedVerifier(ref); },
+      computeInventoryFn: computeCandidateInventory,
+      ownerLeaseHolder: holder,
+    });
+    assert.equal(result.created, false);
+    assert.equal(result.verificationStatus, "passed");
+    assert.deepEqual(order, ["start", "verify", "stop:outcomes=1"]);
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});

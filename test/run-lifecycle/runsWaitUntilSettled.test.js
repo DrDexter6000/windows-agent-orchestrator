@@ -1567,7 +1567,7 @@ test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向�
       r.outLines[1],
       `Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (lease_missing); waiting will not change this.`,
     );
-    assert.match(r.outLines[2], /^Next step: Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit\. Or reject it while pending-reject is available: wao runs delivery run_wg07 --reject --reason-file <FILE>\.$/);
+    assert.match(r.outLines[2], /^Next step: Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit\. Or reject it while it is pending: wao runs delivery run_wg07 --reject --reason-file <FILE>\.$/);
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
   } finally {
     cleanupDir(dir);
@@ -1588,7 +1588,7 @@ test("W-07b (B91): 重新打包形状 JSON——{settled:false,state:failed,reas
     assert.equal(parsed.state, "failed");
     assert.equal(parsed.reason, "verifier_gone");
     assert.equal(parsed.basis, "lease_missing");
-    assert.match(parsed.nextStep, /run_delivery_repackage again with the same runId and allowedPaths/);
+    assert.match(parsed.nextStep, /run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot/);
     assert.ok(parsed.nextStep.includes("will not create a second commit"));
     assert.ok(parsed.nextStep.includes("--reject --reason-file <FILE>"), "pending 拒收出口仍在");
   } finally {

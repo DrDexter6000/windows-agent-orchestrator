@@ -28,6 +28,11 @@ import { ownerFilePath, readOwnerLease } from "./ownerLiveness.js";
 /** 心跳节拍：runner 与重打包验证期间都是每 2000 ms 续写一次。 */
 export const OWNER_HEARTBEAT_INTERVAL_MS = 2000;
 
+/** 一次心跳写的改名重试预算：原子写遇到被占用会同步重试，心跳在持有进程的
+ *  主线程上每 2 秒一次，不能让一次被占用卡住事件循环 2 秒；这一拍写不成，
+ *  下一拍再写。 */
+const HEARTBEAT_WRITE_BUDGET_MS = 200;
+
 /**
  * 写一次心跳：{ pid: process.pid, heartbeatAt } 原子替换进 .owner-<runId>。
  * 写失败（runDir 被删等）不杀持有进程。
@@ -36,7 +41,11 @@ export const OWNER_HEARTBEAT_INTERVAL_MS = 2000;
  */
 export function writeOwnerHeartbeat(runDir, runId) {
   try {
-    atomicWriteFileSync(ownerFilePath(runDir, runId), JSON.stringify({ pid: process.pid, heartbeatAt: Date.now() }));
+    atomicWriteFileSync(
+      ownerFilePath(runDir, runId),
+      JSON.stringify({ pid: process.pid, heartbeatAt: Date.now() }),
+      { budgetMs: HEARTBEAT_WRITE_BUDGET_MS },
+    );
   } catch {
     // 写失败（runDir 被删等）不杀 runner
   }
@@ -67,9 +76,11 @@ export function clearOwner(runDir, runId) {
  */
 export function createOwnerLeaseHolder({ runDir, runId, intervalMs = OWNER_HEARTBEAT_INTERVAL_MS } = {}) {
   let timer = null;
+  const path = ownerFilePath(runDir, runId);
   return {
     start() {
       if (timer) return;
+      activeHolders.set(path, (activeHolders.get(path) ?? 0) + 1);
       writeOwnerHeartbeat(runDir, runId);
       timer = setInterval(() => writeOwnerHeartbeat(runDir, runId), intervalMs);
       timer.unref?.();
@@ -78,7 +89,18 @@ export function createOwnerLeaseHolder({ runDir, runId, intervalMs = OWNER_HEART
       if (!timer) return;
       clearInterval(timer);
       timer = null;
+      const left = (activeHolders.get(path) ?? 1) - 1;
+      if (left > 0) {
+        activeHolders.set(path, left);
+        return;
+      }
+      activeHolders.delete(path);
       clearOwner(runDir, runId);
     },
   };
 }
+
+// 同一进程里对同一运行同时在飞的持有者数（按租约路径）。两次 repackage 并发
+// 时它们写的是同一份租约（同一 pid）：先结束的那个不能把还在验证的那个的租约
+// 删掉，否则等待器会在两拍之间看到"没有租约"。只有最后一个停下时才释放。
+const activeHolders = new Map();

@@ -322,7 +322,7 @@ test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决�
     surface: "cli", situation: "verifier_gone", runId: RUN_ID,
     acceptanceStatus: "pending", terminalState: "failed",
   });
-  assert.match(failed, /^Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit\. Or reject it while pending-reject is available: wao runs delivery run_\S+ --reject --reason-file <FILE>\.$/);
+  assert.match(failed, /^Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit\. Or reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\.$/);
   assert.ok(failed.length <= NEXT_STEP_MAX_LEN, `${failed.length}`);
 
   // completed、未决定：旧文案逐字不变（terminalState 缺省即 completed 形状）。

@@ -145,7 +145,7 @@ function render(surface, situation, runId, extras) {
       text = extras.acceptanceStatus === "rejected"
         ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\")."
         : extras.terminalState === "failed"
-          ? `Its verification is no longer running. Call the MCP tool run_delivery_repackage again with the same runId and allowedPaths: it resumes the verification and will not create a second commit. Or reject it while pending-reject is available: wao runs delivery ${runId} --reject --reason-file <FILE>.`
+          ? `Its verification is no longer running. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit. Or reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>.`
           : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\"); wao runs delivery ${runId} shows the commit.`;
       break;
     case "runner_gone":

@@ -804,20 +804,20 @@ async function _repackageAllPhases({
   // verifyDeliveryFn (every existing test / internal reuse) never contends for
   // the real lease; createCallerGate folds in kill switch + HELD anti-self-lock.
   // B91（TD-337/TD-345）：验证期间持 owner 心跳租约——验证者是调用 repackage 的
-  // 这个进程，进闸（排队也算验证时间）前起拍、每 2s 续写；验证返回或抛错都在
-  // finally 停拍并释放。进程被换掉后租约随之死亡，等待器据此证明验证者已不在
+  // 这个进程，进闸（排队也算验证时间）前起拍、每 2s 续写；结果落盘后、或任一步
+  // 抛错，都在 finally 停拍并释放。进程被换掉后租约随之死亡，等待器据此证明验证者已不在
   //（proveVerifierGone 的重新打包形状），Lead 用相同 runId 与 allowedPaths 再调
   // 一次 repackage 就接着验证（本状态机可重入：已有 created 不重新打包）。已有
   // 结果的重试分支在上方已提前返回，不碰租约。
   const leaseHolder = ownerLeaseHolder ?? createOwnerLeaseHolder({ runDir, runId });
   leaseHolder.start();
-  let verifyResult;
+  let verificationResult;
   try {
     const gate = createCallerGate({
       usesDefaultVerifier: verifyDeliveryFn === undefined,
       identity: { owner: "runDeliveryRepackage", sessionId: null, runId }, // leadSession 仅 MCP handler 层持有
     });
-    verifyResult = await _verify(
+    const verifyResult = await _verify(
       authoritativeRef,
       // M12-13: supply the ORIGINAL declared per-command budget as the authoritative
       // timeout. Absent → no timeoutMs key (verifyDelivery applies its consumer
@@ -830,13 +830,15 @@ async function _repackageAllPhases({
         ...(gate ? { gate } : {}),
       },
     );
+    // 结果落盘也在持租约期间：先停拍再写结果，中间会有一段"没有租约、也没有
+    // 结果"的空档。
+    verificationResult = await transcript.tryAppendRepackageVerification({
+      delivery: verifyResult.delivery,
+      outcome: verifyResult.outcome,
+    });
   } finally {
     leaseHolder.stop();
   }
-  const verificationResult = await transcript.tryAppendRepackageVerification({
-    delivery: verifyResult.delivery,
-    outcome: verifyResult.outcome,
-  });
 
   return {
     runId,

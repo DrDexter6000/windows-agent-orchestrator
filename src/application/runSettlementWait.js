@@ -231,8 +231,9 @@ export async function waitRunSettlement({
           // 不用首次的 events。
           let progressEvents = events;
           if (settlement.facts.terminal && settlement.reason === "verification_pending") {
-            // 决定 0096：终态 completed、验证显式 pending、无结果、无 reverify——
-            // 后台验证者可能已经不在了。节流：同一等待器 5 分钟至多证明一次。
+            // 决定 0096 / 0119：终态等验证（completed 的后台运行，或终态 failed、
+            // 交付来自重新打包）、验证显式 pending、无结果、无 reverify——验证者
+            // 可能已经不在了。节流：同一等待器 5 分钟至多证明一次。
             const proofNow = nowFn();
             const proofDue = lastVerifierProofAt === null
               || proofNow - lastVerifierProofAt >= SETTLEMENT_VERIFIER_PROOF_EVERY_MS;
