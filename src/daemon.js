@@ -657,8 +657,9 @@ export function parseDaemonFlags(argv) {
   return opts;
 }
 
-// 直接作为入口运行时（detached daemon 子进程）。
-const isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+// 直接作为入口运行时（detached daemon 子进程）。`node --eval` 等没有入口脚本时
+// argv[1] 缺席：此时不是入口（MCP 适配层也导入本模块取 daemon 读器，第 89 批）。
+const isMain = typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   daemonMain().catch((e) => {
     process.stderr.write(`daemon error: ${e.message}\n`);
