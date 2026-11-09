@@ -27,11 +27,10 @@
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Depends on transcript.js, delivery.js, sessionReuse.js,
 //     runWorkspaceOwnership.js, registry.js, credentialReadiness.js, envPolicy.js,
-//     and child_process.spawn (injectable for testing).
+//     and runnerLaunch.js (detached runner 的唯一启动口；spawnFn 注入缝经它传递).
 
-import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
-import { closeSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -76,8 +75,11 @@ import { CredentialMissingError } from "./runDispatch.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 import { deriveStartedIdentity, laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
-import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
-import { openRunnerStderrFd } from "./runnerStderr.js";
+import { PROMPT_HANDOFF_TIMEOUT_MS, PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs } from "../runnerPrompt.js";
+import { openRunnerStderrFd, runnerStderrPath } from "./runnerStderr.js";
+// TD-347（第 93 批）：runner 的唯一启动口（WMI 启动桥 / 本进程 spawn，见
+// runnerLaunch.js 头注）。同层 application import。
+import { launchRunner, runnerLaunchFailureText } from "./runnerLaunch.js";
 
 // Reuse the dispatch application service's startup-failure error type so the MCP
 // boundary collapses a missing credential to the same fixed actionable text.
@@ -799,7 +801,6 @@ export async function continueRun({
 
   // 12. Construct every static spawn input BEFORE lineage/worktree/transcript
   //     mutation. A bad argv is a request failure, not a half-created child run.
-  const _spawn = spawnFn ?? spawn;
   const _execPath = execPath ?? process.execPath;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
   // TD-341：runner stderr 打开器注入缝（缺省真实打开；测试注入失败形状）。
@@ -963,35 +964,33 @@ export async function continueRun({
     });
 
     const runnerEnv = { ...process.env, ...finalCredentials };
-    // TD-341（第 89 批 A）：runner stderr 落每运行文件 .runner-<runId>.stderr——
-    // 打开失败不能阻止派发，退回 "ignore"；父进程在 spawn 之后（spawn 抛错时也
-    // 要，下方 catch 走派发前回滚）关闭自己的 fd。runner 以码 0 退出且文件为空
-    // 时由其退出钩子删除该文件，其余情形（非空、失败、被杀、V8 abort）都留下。
-    let runnerStderrFd = null;
-    try {
-      runnerStderrFd = _openRunnerStderrFd(resolvedRunDir, childRunId);
-    } catch {
-      runnerStderrFd = null; // 打开失败 → 退回 "ignore"，不阻止派发
-    }
-    let runner;
-    try {
-      runner = _spawn(_execPath, runnerArgs, {
-        detached: true,
-        stdio: ["pipe", "ignore", runnerStderrFd === null ? "ignore" : runnerStderrFd],
-        env: runnerEnv,
-      });
-    } finally {
-      if (runnerStderrFd !== null) {
-        try { closeSync(runnerStderrFd); } catch { /* spawn 失败路径已随句柄关闭 */ }
+    // TD-347（第 93 批）：spawn 的形状与提示词/stderr 交接收进启动模块
+    // runnerLaunch（Windows 缺省经 WMI 启动桥，spawnFn 注入 / 开关 / 非 Windows
+    // 走本进程直起）。TD-341 的 stderr 证据文件语义不变。
+    const launch = await launchRunner({
+      execPath: _execPath,
+      args: runnerArgs,
+      env: runnerEnv,
+      cwd: process.cwd(),
+      prompt,
+      stderrPath: runnerStderrPath(resolvedRunDir, childRunId),
+      runId: childRunId,
+      timeoutMs: promptHandoffTimeoutMs ?? PROMPT_HANDOFF_TIMEOUT_MS,
+      spawnFn,
+      openStderrFn: () => _openRunnerStderrFd(resolvedRunDir, childRunId),
+    });
+    if (launch.outcome !== "started") {
+      // 任何启动失败都抛出走下方派发前回滚；可能已起的 runner 已由启动模块先
+      // 结束并确认（回滚之前 runner 必须已经结束）。提示词交接超时沿用既有文案；
+      // spawn 抛错保留原始错误对象（M12-7-RC-16 的拒绝语义不变）。
+      if (launch.reason === "handoff_timeout" || launch.reason === "prompt_handoff_timeout") {
+        throw new Error(PROMPT_HANDOFF_TIMEOUT_TEXT);
       }
+      if (launch.reason === "spawn_error" && launch.detail instanceof Error) {
+        throw launch.detail;
+      }
+      throw new Error(runnerLaunchFailureText(launch.reason));
     }
-    const handoff = await writeRunnerPrompt(runner, prompt, promptHandoffTimeoutMs ? { timeoutMs: promptHandoffTimeoutMs } : {});
-    if (handoff === "timeout") {
-      // runner 活着却一直不读提示词：结束它（它还没起 worker），抛出后走下方的派发前回滚。
-      try { runner.kill(); } catch { /* 已退出 */ }
-      throw new Error(PROMPT_HANDOFF_TIMEOUT_TEXT);
-    }
-    runner.unref();
   } catch (error) {
     await rollbackPreSpawnContinuation({
       worktreePath,

@@ -96,6 +96,10 @@ const ADAPTER_TOP = Object.freeze(new Set([
   "src/daemon.js",
   "src/daemonSupervisor.js",
   "src/backgroundRunner.js",
+  // TD-347（第 93 批）：WMI 启动桥入口（与 backgroundRunner 同层的短命入口脚本）。
+  // 只 import 叶子：node 内置 + src/runnerPrompt.js（shared）+
+  // src/application/runnerFrame.js（application 下向）。
+  "src/runnerBroker.js",
 ]));
 
 // core(2) 的 src 顶层成员（src/** 其余的顶层显式清单；新顶层文件不在任何

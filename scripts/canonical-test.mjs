@@ -2035,10 +2035,14 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
     // TD-229（2026-10-07，全量实战暴露）：MCP 认证门禁是部署级开关（User 作用域
     // setx，宿主 spawn 时定格）——若宿主 User env 带它，套件子进程继承后
     // run_dispatch 族夹具车道（无认证记录）全被门拒绝（16 文件 stable_fail 实证；
-    // 上午发版套件绿是因跑在 setx 前启动的长命 shell 里）。套件契约=确定性：
+    // 上午发版套件绿是跑在 setx 前启动的长命 shell 里）。套件契约=确定性：
     // 钉 "0"（默认关）；门禁自身行为由 mcpCertGate.test.js 自设环境变量覆盖，
     // 不受此钉影响。
     WAO_MCP_REQUIRE_CERTIFIED: "0",
+    // TD-347（第 93 批）：套件里大量真实派发要保持确定、不依赖 WMI——子进程环境
+    // 缺省钉 WAO_RUNNER_LAUNCH=spawn（本进程直起 runner）。只有本批新加的
+    // runnerLaunch 族测试显式走 WMI 路径（它们自带自己的子进程 env）。
+    WAO_RUNNER_LAUNCH: "spawn",
     // 决定 0093：测试里构造的后台进程与验证命令不各自起保持唤醒的子进程——
     // 全量入口自己已经保持着；定向入口跑得短，不需要。
     [KEEP_AWAKE_ENV]: "0",
