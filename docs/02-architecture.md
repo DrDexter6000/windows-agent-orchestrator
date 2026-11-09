@@ -68,7 +68,7 @@
 adapters ──→ application ──→ core ──→ backends ──→ shared（最底层）
 ```
 
-- **adapters**（所有外部面/入口）：`src/mcp/**`、`src/commands/**`、`src/cli.js`、`src/ownerDashboardServer.js`（第三个网络面：loopback HTTP 观察边界）、`src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js`。
+- **adapters**（所有外部面/入口）：`src/mcp/**`、`src/commands/**`、`src/cli.js`、`src/ownerDashboardServer.js`（第三个网络面：loopback HTTP 观察边界）、`src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js`、`src/runnerBroker.js`。
 - **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared/core 成员例外清单内者。
 - **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（含转录分桶路径权威 `src/projectBuckets.js`——新 run 写 `runs/projects/<slug>/<runId>.jsonl`，旧平铺只读兼容，定位一律经其三级解析链；与 transcript.js 同层=路径权威对）（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
@@ -371,7 +371,7 @@ RunManager 等待 transcript I/O 时就产出 `message` + `done` 并退出；队
   （stream delta 按固定间隔采样；投影规则与 cache 指标口径见 §2.2）；普通一次性
   run 使用 `--no-session-persistence`（显式 session reuse 不使用该 flag）。
 - 这是暴露面收敛，不是强隔离边界：同一 OS 身份下的 worker 仍能查看自己的运行时
-  凭据或凭据文件。强隔离需要 broker/身份边界（为什么见决定 0015）。
+  凭据或凭据文件。强隔离需要 broker/身份边界（决定 0015）。
 
 #### 2.5a DeepSeekHarnessBackend（DSH JSON-RPC 线）
 
@@ -392,7 +392,7 @@ verification 与 Lead decision。该 backend 不支持 provider session reuse，
 `DeepSeekAcpBackend`（`src/backends/deepSeekAcp.js`）驱动上游 shipped 的
 `dsh --profile acp --patch <containment> --patch <role-contract>`，经 stdio 讲 ACP
 （JSON-RPC 2.0、换行分隔）。与 §2.5a 的 WAO 自建 composition 并存：旧线保留至
-新线认证通过，之后由 Owner 决定去留（为什么见决定 0031）。
+新线认证通过，之后由 Owner 决定去留（决定 0031）。
 
 - **协议面**：`initialize` / `session/new` / `session/prompt` / `session/close`
   （abort 路径加 `session/cancel`，真取消）。`session/prompt` 的响应只在整轮结束
@@ -529,7 +529,7 @@ type RunState =
   | "completed" | "failed" | "aborted" | "timed_out";
 ```
 
-`timed_out` 不是可达终态。等待窗到期是通知不是终止（为什么见决定 0030）：到期只写 `run.observation_deadline_reached` 观察事实（见 §3.2）并通知调用方（前台 CLI 打印一行指引），监督继续到自然终态；终止只剩 Lead 显式 stop 与硬安全线。状态值保留在类型与 `TERMINAL_STATES` 中，仅为读取 legacy 转录（findState/诊断/投影不得回归）。
+`timed_out` 不是可达终态。等待窗到期是通知不是终止（决定 0030）：到期只写 `run.observation_deadline_reached` 观察事实（见 §3.2）并通知调用方（前台 CLI 打印一行指引），监督继续到自然终态；终止只剩 Lead 显式 stop 与硬安全线。状态值保留在类型与 `TERMINAL_STATES` 中，仅为读取 legacy 转录（findState/诊断/投影不得回归）。
 
 **转移规则（代码判定，绝不依赖 LLM）**：
 - `pending→submitted`：`backend.spawn` 成功返回
@@ -595,7 +595,7 @@ for await (const ev of handle.events):
 | 维度 | 机制 |
 |------|------|
 | 文件 | 每个 run 一棵独立树（`<sourceCwd>/.wao-worktrees/<runId>`，分支 `wao/<runId>`）：ephemeral 只读 run 是源仓的私有克隆（分支在克隆里），其余是 git worktree；按策略保留或清理，上了锁（`git worktree lock`）的树，回收、清退、`wao worktree remove` 与 `runs verify-commit` 的临时树清理都不删；`.wao-worktrees/` 是 git exclude 稳定规则：创建首个 worktree 前在仓库本地 `.git/info/exclude` 写入恰好一条根忽略规则（不编辑 tracked `.gitignore`、不隐藏任意 worker 产出、树删除后保留；保留既有 exclude 字节含 BOM/CRLF/LF、对已存在的精确规则幂等；`git worktree add` 失败保留不回滚，仅 exclude ensure 自身 write/read-back verify 失败才回滚到调用前字节；与 host activation 的 marker block 互相独立） |
-| 进程 | Node 内置 Job Object（被动 OS 级：父进程终止→子进程全杀）+ `taskkill /T /F` 主动 abort；不实现自定义 Job Object（为什么见决定 0013） |
+| 进程 | Node 内置 Job Object（被动 OS 级：父进程终止→子进程全杀）+ `taskkill /T /F` 主动 abort；不实现自定义 Job Object（决定 0013） |
 | 网络 | 没有按 run 分配端口的机制 |
 
 **Worktree 策略与回收路径**（config 可选；解析优先级见 §8）：树的自动回收有四条路径。① `ephemeral`（readOnly 非复用强制隔离用）——树是源仓的私有克隆（`git clone --shared`，借源仓对象，自有 config、refs 与工作树登记；`run.started` 记 `worktreeForm: "private_clone"` 与完整基点 `worktreeBaseCommit`；决定 0102）。终态且停止确认后（未确认记 `run.worktree_release_skipped`）先查证据再删：克隆里除 `refs/stash` 外全部引用与 HEAD 可达、基点不可达的提交在源仓对象库里都找得到（只认对象在哪，不认克隆里引用的值）、HEAD 附着在 `wao/<runId>`、克隆里没有别的工作树登记，才删整个目录（不查脏，删不掉记 `still_present`）；否则保留并记 `run.worktree_branch_kept`（`uniqueCommits` 或闭集 `reason`）。Run 构造之前退出的路径（pending 被拒、认证门、fire-and-forget 护栏、spawn 失败）没有可核验的句柄，直接走同一处置；spawn 后才被拒的不删。没有 `worktreeForm` 的旧转录是链接树：释放树并回收零独有提交的 `wao/<runId>`（`git branch -d`，best-effort）。没删掉的克隆在回收计划里归 `tree_protection`/`private_clone` 保留，不自动删。② 交付验收——`run.delivery_accepted` 后释放线系树（tip/路径证明门控，分支保留）。③ `runs lineage-close`——线系关闭时释放成员树（分支保留）。④ 终态自动回收（只删树，分支一律保留）——普通 `persistent` 隔离树在 run 终态收尾（停止验证之后、`run.cleanup_done` 之前）自动释放；适用对象：派发时无 sessionReuse 路由、不是任何 run_lineage 线系成员、无绑定 `run.delivery_created`（打包成功的交付——undecided/rejected/accepted——一律不碰；打包失败而树全净的在适用对象内）。删除条件全部成立才删：树路径取自本 run 绑定的 `run.started.worktreePath` 且身份可证（父段名 `.wao-worktrees`、目录名即 runId、路径链无 symlink/junction、在 git worktree 登记、非源工作树、真实路径等于本 run 绑定 `run.started.cwd`（派发目录）真实路径下的 `.wao-worktrees/<runId>`——createWorktree 恒建在该处，从关联工作树派发的树同样可证、与绑定源仓库同 common git dir）；本 run 绑定终态已落盘且停止已确认；内容全净——`git status --porcelain=v1 -z --untracked-files=all --ignored=matching` 为空，被 ignore 的产物也算内容（与①不查脏的标准不同），skip-worktree/assume-unchanged/子模块等清点不了的形态一律保留；HEAD 附着在 `wao/<runId>` 且等于分支 tip（detached/漂移保留）；树下无嵌套运行树（在册或未登记但有内容）；不在使用中——删除前扫运行存储的全部转录（属主取文件名里的 runId；位置只认 runner 写下的 `run.started`，头读证得在树外就排除，其余整读、坏行跳过，已终态不占用）：别的未终态 run 的 `run.started.cwd` 或 `worktreePath` 在本树内（真实路径比较，win32 大小写折叠；不在盘上的路径按词法比较）→ 保留（`tree_in_use`，带占用者 runId）；没有可用 `run.started` 的未终态 run，提交时的 cwd 在本树内也算占用；位置证不了、存储读不出或路径解析出错也保留，记 `occupancy_unprovable`（fail-closed，细节见决定 0085）。任一条读不出或不成立就保留并记闭集原因（`run.worktree_release_skipped{reason}`）。删除用 `git worktree remove` 不加 force（失败或删后目录仍在记 `still_present` 保留）；`persistent` 树不满足条件时保留，便于检查产出。
@@ -612,7 +612,7 @@ for await (const ev of handle.events):
 
 WAO 提供两种进程形态，共用同一套 RunManager/transcript 生命周期：
 
-**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（`detached` + `unref()`，提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证命令与 canonical 全量期间保持唤醒（`src/keepAwake.js`，决定 0093；`WAO_KEEP_AWAKE=0` 关闭）。
+**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（经 WMI 启动桥脱离宿主作业，决定 0120；提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证命令与 canonical 全量期间保持唤醒（`src/keepAwake.js`，决定 0093；`WAO_KEEP_AWAKE=0` 关闭）。
 
 **持久 daemon**：`src/daemon.js` 是长期存活的 detached 进程，持有多个 in-flight run（复用 runBackground 核心驱动），经命名管道暴露窄协议 IPC（默认 `\\.\pipe\wao-daemon`，JSON-line over `node:net`：一行请求、一行响应；只在本机，不可远程触达；选型见决定 0012）。心跳写 runDir 的 handshake（`daemon.json`），CLI 重连判活；优雅退出清 handshake + 关 pipe。daemon start 内部走 `RunManager.start`，不按 backend 名分支。
 
@@ -743,7 +743,7 @@ backend done:completed
 - 成功：`{completed:true, failed:false, aborted:false, timedOut:false, messages, evidence, metrics, delivery}`——`delivery` 是完整 DeliveryRef。
 - 打包失败：`{completed:false, failed:true, aborted:false, timedOut:false, messages, evidence, metrics, deliveryError:{code, message, errorClass?}}`——结构化非抛出；`errorClass` 为可选键，取值闭集的单一权威在 `src/deliveryErrorClass.js`。
 - budget 超限、abort、hard scorecard fail 返回同一结构化 terminal 形状，且不调用 packager。accepted 的 backend failure 是例外路径：持久化 `run.error` + terminal `failed` 后抛出。
-- 等待窗到期不是终态（为什么见决定 0030）：定时器是纯通知器（写 `run.observation_deadline_reached` + 回调 `onObservationDeadline`），不 abort、不产生 `timed_out`；到期后终态仍是自然的 completed/failed（或外部 stop 的 aborted）。`timedOut:true` 只对 legacy timed_out 终态转录出现（loser 结果沿用既有终态，读取兼容）。到期事实在 CLI/runner 结果上以 `observationDeadlineReached:true` 呈现（additive）。
+- 等待窗到期不是终态（决定 0030）：定时器是纯通知器（写 `run.observation_deadline_reached` + 回调 `onObservationDeadline`），不 abort、不产生 `timed_out`；到期后终态仍是自然的 completed/failed（或外部 stop 的 aborted）。`timedOut:true` 只对 legacy timed_out 终态转录出现（loser 结果沿用既有终态，读取兼容）。到期事实在 CLI/runner 结果上以 `observationDeadlineReached:true` 呈现（additive）。
 
 **事件排序**：
 - 成功：`scorecard.checked`（如有）→ `run.delivery_created` → `run.completed` → `run.state_change completed`（seq 连续）。
