@@ -255,6 +255,49 @@ test("MCP-07: run_stop 把启动配置的 registryPath 传给 stop 服务；kimi
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// B92：宿主项目 Lead 撞到的形状——deepseek-acp、runner 已死、UUID 会话 id 且无
+// hostPid、非终态、无 owner 租约、最后事件 run.event。修复前服务在"无停止路由"
+// 分支抛错，MCP 面只剩固定文案 "run_stop failed"；修后照既有合同如实返回。
+test("MCP-08 (B92): deepseek-acp 无 hostPid 的非终态运行——结构化回执而非 run_stop failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcp-08-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_mcp08";
+    const tp = join(dir, `${runId}.jsonl`);
+    const t = new JsonlTranscript(tp, { runId, agentId: "coder_dsh" });
+    await t.append("run.started", {
+      backend: "deepseek-acp",
+      worktreeForm: "private_clone",
+      worktreePath: join(dir, ".wao-worktrees", runId),
+      worktreeBranch: `wao/${runId}`,
+    });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", { backend: "deepseek-acp", backendSessionId: "75c13e12-ce24-4409-b88e-59669cc70712" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "submitted", "spawned");
+    await t.transitionState("submitted", "running", "first_event");
+    await t.append("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "partial" }] });
+
+    const { server } = createServerWithFakeStop({ runDir: dir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_stop", arguments: { runId, expectedWorkspaceRoot: dir, ...stopProof(dir, runId) } });
+      assert.ok(!res.isError, "不再是固定 run_stop failed 文案");
+      assert.deepEqual(res.structuredContent, {
+        runId,
+        terminalAccepted: false,
+        terminalState: "running",
+        sideEffectAttempted: false,
+        stopVerified: false,
+      });
+      assert.equal((await readTranscript(tp)).find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("MCP-06: annotations — destructiveHint true, idempotentHint false", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcp-06-"));
   try {

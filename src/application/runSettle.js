@@ -15,8 +15,9 @@
 //   1. 状态是已知的非终态；
 //   2. owner 租约缺失可以；过期则 owner pid 须判 gone；新鲜或损坏都拒；
 //   3. 本机没有命令行带 --run-id <runId> / --resume-run-id <runId> 或前台
-//      `wao resume <runId>` 的进程（runner 已死的正面证据——心跳写入失败会被
-//      runner 吞掉，单凭租约缺失加静默不能证明 runner 已死）。读不到命令行的
+//      `wao resume <runId>` 的进程（只认 node 进程——Git Bash 包装进程的命令行
+//      也带同一 runId，见 defaultRunnerScan；runner 已死的正面证据——心跳写入
+//      失败会被 runner 吞掉，单凭租约缺失加静默不能证明 runner 已死）。读不到命令行的
 //      node 进程按创建时间收窄：只有创建不早于本运行那条 run.background_submitted
 //      的（留 5s 时钟偏差）才计入盲区；读不到创建时间的照旧计入；前台运行没有
 //      这条事实，不收窄；
@@ -70,6 +71,33 @@ import { parseProcPid } from "./processRecovery.js";
 
 /** 候选筛用的静默窗：最后一条绑定事件须早于该时长之前。 */
 export const SETTLE_QUIET_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * 不计入静默窗的绑定事件类型闭集（B92）：`run.delivery_repackage_rejected` 是
+ * Lead 调 `run_delivery_repackage` 被拒时 WAO 追加的审计事实，不经 runner——
+ * 被拒本身不证明任何进程还在活动。把它算进"最后一条绑定事件"会让静默窗被
+ * 重新计时，收口证明因此永远凑不满。只含这一项；别的审计事件照旧计入。
+ */
+export const QUIET_WINDOW_IGNORED_EVENT_TYPES = Object.freeze(["run.delivery_repackage_rejected"]);
+
+/**
+ * 最后一条**计入静默窗**的绑定事件的时刻（epoch ms）。settle 门 4 /
+ * proveVerifierGone 的静默窗、runnerGonePrefilter 的前置筛选与收口等待器的
+ * quietDue 共用这一个取法，不另写一份——跳过 QUIET_WINDOW_IGNORED_EVENT_TYPES，
+ * 从尾往前找第一条不在闭集里的绑定事件。没有可计事件或其 ts 读不出时返回 NaN
+ * （调用方按静默窗未满处理，fail-closed）。
+ * @param {object[]} bound — 已绑定到目标 runId 的事件（调用方已过滤）
+ * @returns {number}
+ */
+export function lastQuietWindowBoundMs(bound) {
+  for (let index = bound.length - 1; index >= 0; index -= 1) {
+    const event = bound[index];
+    if (event && !QUIET_WINDOW_IGNORED_EVENT_TYPES.includes(event.type)) {
+      return Date.parse(event.ts);
+    }
+  }
+  return NaN;
+}
 
 /** 结算理由正文的有界长度（照 run.lineage_closed 的写法）。 */
 export const SETTLE_REASON_BOUND = 500;
@@ -152,6 +180,11 @@ export function parseRunnerScanOutput(stdout) {
  * 祖先链带防环与步数上限（pid 复用可以让父链成环）。
  * 三种匹配：`--run-id <id>`、`--resume-run-id <id>`，以及前台续跑的
  * `wao resume <id> [--wait]`（其命令行不带 run-id 旗标）。
+ * 命中（$hit）只算 `Name -like 'node*'` 的进程：runner 与续跑进程都是 node
+ *（含 node-v22.exe 这类改名的 node）。Git Bash 起的命令祖先链在 MSYS 的 fork
+ * 助手处断开，排除扫描者祖先的防线因此够不着外层 bash/npm 包装进程——它们的
+ * 命令行里带着同一个 runId，不按进程名过滤就会把结算调用者自己判成
+ * runner_alive。
  * `notBeforeMs`（epoch ms，可选）：命令行读不到的 node 进程（如提权运行的
  * 进程）只有 `CreationDate`（转 UTC）不早于 `notBeforeMs − 5000` 的才计入
  * blind——本运行开始之前就已创建的进程，命令行不可能带本运行的 runId；读不到
@@ -183,7 +216,7 @@ export function defaultRunnerScan(runId, execFileFn = execFile, notBeforeMs = nu
       "  $q=Get-CimInstance Win32_Process -Filter ('ProcessId='+$pp);",
       "  if (-not $q) { break }; $pp=$q.ParentProcessId };",
       "$all=@(Get-CimInstance Win32_Process | Where-Object { $ex -notcontains [string]$_.ProcessId });",
-      `$hit=@($all | Where-Object { $_.CommandLine -like ${pattern("--run-id")} -or $_.CommandLine -like ${pattern("--resume-run-id")} -or $_.CommandLine -like ${pattern("resume")} }).Count;`,
+      `$hit=@($all | Where-Object { $_.Name -like 'node*' -and ($_.CommandLine -like ${pattern("--run-id")} -or $_.CommandLine -like ${pattern("--resume-run-id")} -or $_.CommandLine -like ${pattern("resume")}) }).Count;`,
       blindLine,
       "'wao-scan-ok:' + $hit + ':' + $blind",
     ].join(" ");
@@ -297,13 +330,13 @@ async function _evaluateRunnerScanGate(runId, d, facts, notBeforeMs) {
 }
 
 /**
- * 门 4（settle 与 proveVerifierGone 共用）：最后一条绑定事件至少
- * SETTLE_QUIET_WINDOW_MS 之前。
+ * 门 4（settle 与 proveVerifierGone 共用）：最后一条计入静默窗的绑定事件（见
+ * lastQuietWindowBoundMs——被拒的重打包审计不算活动）至少 SETTLE_QUIET_WINDOW_MS
+ * 之前。
  * @returns {{ok:true}|{ok:false,refusal:string}}
  */
 function _evaluateQuietWindowGate(bound, now, facts) {
-  const lastBound = bound[bound.length - 1];
-  const lastTs = lastBound ? Date.parse(lastBound.ts) : NaN;
+  const lastTs = lastQuietWindowBoundMs(bound);
   const quietMs = Number.isFinite(lastTs) ? now - lastTs : NaN;
   if (!Number.isFinite(quietMs) || quietMs < SETTLE_QUIET_WINDOW_MS) {
     const described = Number.isFinite(quietMs)

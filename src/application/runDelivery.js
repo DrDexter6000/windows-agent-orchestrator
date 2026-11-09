@@ -1260,6 +1260,18 @@ export const DELIVERY_DECISION_REJECTION_CODES = Object.freeze([
 ]);
 
 /**
+ * B92：accept 被 verification_failed 拒时，CLI（既有输出后追加一行）与 MCP
+ * （content 里追加第二个 text 项）共用**同一句**固定提示——验证没过，WAO 不能
+ * 把交付记为 accepted；已带自己的修正合入了它的内容的，按验证失败采纳协议
+ * 登记。固定文本（手册页读法见 docs/usage/delivery.md 的同名节）；别的拒因
+ * 与 reject 决策都不带。
+ */
+export const ACCEPT_VERIFICATION_FAILED_HINT =
+  "Verification did not pass, so WAO cannot record this delivery as accepted. "
+  + "If you already merged its content with corrections of your own, register that under the "
+  + "verification-failed adoption protocol instead: wao manual delivery \"验证失败采纳协议\"";
+
+/**
  * Classify a thrown policy error into the closed-set rejection code, or null
  * when the error is not a recognized policy rejection (unexpected/internal —
  * the caller keeps it a fixed safe error).

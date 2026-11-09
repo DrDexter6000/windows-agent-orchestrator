@@ -38,7 +38,7 @@ import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factor
 import { normalizeAgent } from "../../src/registry.js";
 import { inheritedEnvNames, requiredCredentialNames } from "../../src/envPolicy.js";
 import { runBackground } from "../../src/backgroundRunner.js";
-import { JsonlTranscript } from "../../src/transcript.js";
+import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
 const REFERENCE_CONTAINMENT = readFileSync(
   new URL("../../scripts/reliability/dsh-acp/wao-contain-safe.patch.yml", import.meta.url),
@@ -1307,6 +1307,53 @@ test("ACP §3.6 链路：runBackground(runManager.start) 按 priorRunId 绑定�
 });
 
 // ===== argv 组装 / 角色合同 patch / 清理责任 =====
+
+// B92：deepseek-acp 会话 id 是上游原生 UUID、不含 pid——spawn 句柄照 zcode 同款
+// 带 hostPid（承载会话的本机进程），RunManager 据此把它写进 session.created；
+// settle 门 5 与 run_stop 的停止目标解析靠这个字段锚定本机进程。
+test("ACP hostPid：fresh 派发的 session.created 落盘承载会话的本机进程 pid", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-hostpid-"));
+  try {
+    const containmentPath = join(dir, "wao-contain.patch.yml");
+    writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const child = makeFakeChild();
+    const backend = new DeepSeekAcpBackend({
+      containmentPatchPath: containmentPath,
+      spawnFn: () => child,
+    });
+    const peer = fakeAcpPeer(child);
+    // 异步驱动：prompt 请求一出现即应答 end_turn（runBackground 在等终态）。
+    const driver = setInterval(() => {
+      const pr = peer.clientRequests.find((m) => m.method === "session/prompt");
+      if (pr) {
+        peer.respond(pr.id, { stopReason: "end_turn" });
+        clearInterval(driver);
+      }
+    }, 10);
+    const runId = "run_acp_hostpid";
+    const result = await runBackground({
+      runId,
+      agentId: "coder_low_dsh",
+      prompt: "do the task",
+      registry: { agents: { coder_low_dsh: agent({ cwd: dir }) } },
+      runDir,
+      backendFor: () => backend,
+      waitTimeout: 8000,
+      pollInterval: 10,
+    });
+    clearInterval(driver);
+    assert.equal(result.completed, true, "runBackground 驱动到 completed");
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const created = events.filter((e) => e.type === "session.created");
+    assert.equal(created.length, 1, "恰一条 session.created");
+    assert.equal(created[0].backendSessionId, "sess-acp-1", "会话 id 是上游 UUID");
+    assert.equal(created[0].hostPid, 424242, "session.created 记下承载会话的本机进程 pid");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("ACP argv：--profile acp + containment --patch + 角色合同 --patch；合同结构化序列化；用后清理", async () => {
   const roleContract = "bounded role\nline2 with \"quotes\" and \\backslashes";

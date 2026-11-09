@@ -109,6 +109,9 @@ import {
   // everything else stays a fixed safe MCP error.
   DELIVERY_DECISION_REJECTION_CODES,
   classifyDeliveryDecisionRejection,
+  // B92：accept 被 verification_failed 拒时追加的第二个 text 项（固定提示，
+  // 指向验证失败采纳协议）——CLI 与 MCP 同一句。
+  ACCEPT_VERIFICATION_FAILED_HINT,
   // M12-9 Package C: the shared delivery status closed sets. Consumed by the
   // run_delivery projection AND the run_await_result terminal-outcome schema so
   // the two cannot drift on verification/acceptance/decision status values.
@@ -6376,8 +6379,17 @@ export function createWaoMcpServer({
             rejectionReason,
           };
           RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
+          // B92：accept 被 verification_failed 拒时追加第二个 text 项放固定提示
+          //（指向验证失败采纳协议——已带自己的修正合入内容的登记出口）。第一个
+          // text 项与 structuredContent 逐字不变；别的拒因与 reject 决策不带。
+          const hint = rejectionReason === "verification_failed" && decision === "accepted"
+            ? ACCEPT_VERIFICATION_FAILED_HINT
+            : null;
           return {
-            content: [{ type: "text", text: JSON.stringify(payload) }],
+            content: [
+              { type: "text", text: JSON.stringify(payload) },
+              ...(hint !== null ? [{ type: "text", text: hint }] : []),
+            ],
             structuredContent: payload,
           };
         }

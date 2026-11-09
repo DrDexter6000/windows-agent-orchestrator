@@ -45,8 +45,9 @@ import { diagnoseFailure } from "../diagnosis.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { planProjectsMigration, applyProjectsMigration, verifyProjectsMigration } from "../application/runsMigrateProjects.js";
 // TD-319：`runs wait` 的"报错 + 用法"两行有意分行——linesError 构造（.message
-// 与改前逐字一致），CLI 输出口按行转义。
-import { linesError } from "../safeText.js";
+// 与改前逐字一致），CLI 输出口按行转义。B92：accept 被拒的提示路径还要用
+// renderErrorText 在本命令里复刻顶层报错渲染（提示行接在既有输出之后）。
+import { linesError, renderErrorText } from "../safeText.js";
 // TD-250（A1b，决定 0056）：验收后线系上游会话卫生（kimi-web 能力位门控）。
 import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import { productionProjectIo } from "../projectIdentity.js";
@@ -58,6 +59,10 @@ import {
   getRunDeliveryReadiness,
   DELIVERY_WAIT_MS_MIN,
   DELIVERY_WAIT_MS_MAX,
+  // B92：accept 被 verification_failed 拒时，既有报错后追加一行固定提示——
+  // 指向验证失败采纳协议（与 MCP run_delivery_decide 同一句）。
+  classifyDeliveryDecisionRejection,
+  ACCEPT_VERIFICATION_FAILED_HINT,
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview, resolveRunDeliveryReviewTarget } from "../application/runDeliveryReview.js";
@@ -2965,15 +2970,29 @@ async function runsDeliveryCommand(args, config, hostDeps) {
   // Delegate to shared service — tryAppendDecision does in-lock validation.
   // TD-250（A1b，决定 0056）：accepted 后 best-effort 释放线系上游会话——注册表
   // 路径与同文件其它读点同源（config.registry ?? config/agents.json）。
-  const result = await decideRunDelivery({
-    runId,
-    runDir,
-    decision,
-    reason,
-    sessionRelease: makeAcceptedSessionRelease({
-      registryPath: resolve(config.registry ?? "config/agents.json"),
-    }),
-  });
+  // B92：accept 被 verification_failed 拒时，在既有报错输出（顶层 catch 的
+  // renderErrorText，这里逐字复刻）之后多打一行固定提示——指向验证失败采纳
+  // 协议（已带自己的修正合入其内容的登记出口）。别的拒因照旧原样上抛。
+  let result;
+  try {
+    result = await decideRunDelivery({
+      runId,
+      runDir,
+      decision,
+      reason,
+      sessionRelease: makeAcceptedSessionRelease({
+        registryPath: resolve(config.registry ?? "config/agents.json"),
+      }),
+    });
+  } catch (err) {
+    if (decision === "accepted" && classifyDeliveryDecisionRejection(err) === "verification_failed") {
+      console.error(renderErrorText(err));
+      console.error(ACCEPT_VERIFICATION_FAILED_HINT);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
 
   if (options.format === "json") {
     if (result.accepted) {

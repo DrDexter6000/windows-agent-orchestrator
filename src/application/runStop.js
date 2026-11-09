@@ -370,10 +370,15 @@ export async function stopRun(input) {
 
   // ── Server-side abort path ────────────────────────────────────────────────
   if (!session?.serveUrl) {
-    throw new Error(
-      `Run ${runId} has no stop route: its session (backend ${session.backend ?? "unknown"}) records neither a host process id nor a serveUrl — `
-      + "the worker process has to be ended manually (runs dispatched before the host process was recorded are in this state)",
-    );
+    // B92：会话既无 hostPid 也无 serveUrl（deepseek-acp 在记录 hostPid 之前派发的
+    // 运行就是这个形状——会话 id 是上游原生 UUID，解析不出要击杀的本机进程）。
+    // 停止目标解析不出来时按既有合同如实返回（同 serverStop 的目标解析失败）：
+    // 不认领终态、零击杀、零服务端请求；不抛——抛会让 MCP 面只剩固定文案
+    // "run_stop failed"，Lead 看不到运行的真实状态。
+    return await stopRouteUnavailable({
+      transcript, session, fromState, runId, deps, stopRequestedAttempt,
+      routeError: STOP_NO_ROUTE_TEXT,
+    });
   }
   // 先解析停止目标，再认领终态：目标解析不出来（需要鉴权的后端取不到派发该运行
   // 的 registry agent 或它的 token、agent 与会话记录对不上、该后端没有服务端中止）
@@ -663,12 +668,22 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
 
 // ── stopRouteUnavailable (server-side stop target not resolvable) ────────────
 
-async function stopRouteUnavailable({ transcript, session, fromState, runId, deps, stopRequestedAttempt, error }) {
+// B92：会话既无 hostPid 也无 serveUrl 的固定文案（无停止路由——deepseek-acp 在
+// 记录 hostPid 之前派发的运行）。固定文本，不回显 runId、路径或任何动态值。
+const STOP_NO_ROUTE_TEXT =
+  "stop route unavailable: this session records neither a host process id nor a serveUrl — no stop request was sent "
+  + "and the run was not marked aborted; the worker process has to be ended manually (runs dispatched before the host "
+  + "process was recorded are in this state)";
+
+async function stopRouteUnavailable({ transcript, session, fromState, runId, deps, stopRequestedAttempt, error, routeError }) {
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
-  // 只回显 factory 的固定文案；其余抛出值不进转录、告警或返回（可能带路径等细节）。
-  const routeError = Object.values(SERVER_STOP_ROUTE_TEXT).includes(error?.message)
-    ? error.message
-    : SERVER_STOP_ROUTE_TEXT.unresolved;
+  // 只回显 factory 的固定文案（或调用方给出的固定文案，如 STOP_NO_ROUTE_TEXT）；
+  // 其余抛出值不进转录、告警或返回（可能带路径等细节）。
+  const resolvedRouteError = typeof routeError === "string"
+    ? routeError
+    : Object.values(SERVER_STOP_ROUTE_TEXT).includes(error?.message)
+      ? error.message
+      : SERVER_STOP_ROUTE_TEXT.unresolved;
   const backend = serverStopBackendOf(session);
 
   // 同 invalidPidStop：不认领终态——只记 stop_requested + stop_unverified。
@@ -680,7 +695,7 @@ async function stopRouteUnavailable({ transcript, session, fromState, runId, dep
     taskkillCalled: false,
   });
   await alert("stop_unverified",
-    `stop ${runId} not sent, run not marked aborted: ${routeError}`,
+    `stop ${runId} not sent, run not marked aborted: ${resolvedRouteError}`,
     { runId, logPath: join(dirname(transcript.filePath), "ALERTS.log") },
   ).catch(() => { /* alert failure doesn't affect the result */ });
 
@@ -694,7 +709,7 @@ async function stopRouteUnavailable({ transcript, session, fromState, runId, dep
     backend,
     outcome: "stop_route_unavailable",
     taskkillCalled: false,
-    routeError,
+    routeError: resolvedRouteError,
   };
 }
 

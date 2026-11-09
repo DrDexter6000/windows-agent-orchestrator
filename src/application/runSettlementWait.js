@@ -24,7 +24,7 @@ import { readTranscript } from "../transcript.js";
 import { resolveTranscriptPathDetailed } from "../projectBuckets.js";
 import { boundReportScope } from "../metrics.js";
 import { determineRunSettlement } from "./runSettlement.js";
-import { proveVerifierGone, SETTLE_QUIET_WINDOW_MS } from "./runSettle.js";
+import { proveVerifierGone, SETTLE_QUIET_WINDOW_MS, lastQuietWindowBoundMs } from "./runSettle.js";
 // TD-341（第 89 批 B）：proveRunnerGone 上移到 runSettle 旁的共享模块（本等待器、
 // run_status、lead_preflight 共用同一证明入口与前置筛选，不复制）。
 import { proveRunnerGone, runnerGonePrefilter } from "./runnerGoneProof.js";
@@ -327,8 +327,10 @@ export async function waitRunSettlement({
           // 更新记录的理由。
           if (runnerGoneProof && !settlement.facts.terminal) {
             const proofNow = nowFn();
+            // 静默窗与 settle 门 4 / 前置筛选同一取法（lastQuietWindowBoundMs）：
+            // 被拒的重打包审计不算活动，不重置这 15 分钟。
             const proofBound = events.filter((e) => e && e.runId === runId);
-            const lastBoundTs = Date.parse(proofBound[proofBound.length - 1]?.ts);
+            const lastBoundTs = lastQuietWindowBoundMs(proofBound);
             const quietDue = Number.isFinite(lastBoundTs)
               && proofNow - lastBoundTs >= SETTLE_QUIET_WINDOW_MS;
             const throttleDue = lastRunnerProofAt === null

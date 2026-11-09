@@ -143,6 +143,13 @@ async function worktreeReclaimCommand(rest, config) {
   console.log(`  普查：worktrees ${plan.counts.worktrees}，wao/* 分支 ${plan.counts.waoBranches}；保留 ${kept}，回收 ${byCategory.reclaim ?? 0}`);
   const summary = Object.entries(byCategory).filter(([, v]) => v > 0).map(([c, v]) => `${c}=${v}`).join(" ");
   console.log(`  分类计数（按 runId，含无独立条目的共享成员）：${summary}`);
+  // B92：分类计数只显示 running=N，看不出里面有多少是"最近 15 分钟内有事件"的
+  // 保留项（例如刚 lineage-close 的成员）——它们不是回收不了，只是要等静默窗过
+  // 去。有这类项时多打一行固定说明；没有时输出逐字不变。
+  const recentEventKept = plan.items.filter((i) => i.reason === "recent_event").length;
+  if (recentEventKept > 0) {
+    console.log(`  其中 ${recentEventKept} 项最近 15 分钟内有事件（例如刚关闭谱系），15 分钟后重新生成计划即可按规则判定`);
+  }
   // 逐条打印回收项——审阅计划时要看的审批事实（同一 runId 的树/
   // 分支条目只打一行；已并入与 cherry 数沿用条目 info 字段）。
   const reclaimRuns = new Map();

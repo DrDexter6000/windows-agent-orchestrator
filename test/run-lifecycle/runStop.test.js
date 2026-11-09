@@ -742,6 +742,81 @@ test("KW-06: token 只在 Windows 用户环境里——停止按派发时的同�
   }
 });
 
+// ── B92：deepseek-acp 的两种会话形状 ─────────────────────────────────────────
+
+/** 宿主项目 Lead 撞到的形状：后台派发、私有克隆、deepseek-acp、UUID 会话 id、
+ * 无 hostPid（记录该字段之前的运行）、非终态、无 owner 租约、最后事件 run.event。 */
+async function seedAcpUuidRun(runDir, runId, workspaceCwd, { hostPid = null } = {}) {
+  const tp = join(runDir, `${runId}.jsonl`);
+  const t = new JsonlTranscript(tp, { runId, agentId: "test-agent" });
+  await t.append("run.started", {
+    backend: "deepseek-acp",
+    worktreeForm: "private_clone",
+    worktreePath: join(workspaceCwd, ".wao-worktrees", runId),
+    worktreeBranch: `wao/${runId}`,
+  });
+  await t.append("run.background_submitted", { background: true, cwd: workspaceCwd });
+  await t.append("session.created", {
+    backend: "deepseek-acp",
+    backendSessionId: "75c13e12-ce24-4409-b88e-59669cc70712",
+    ...(hostPid !== null ? { hostPid } : {}),
+  });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  await t.append("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "partial" }] });
+  return tp;
+}
+
+test("B92: deepseek-acp 无 hostPid 的非终态运行——不抛错，按 stopRouteUnavailable 合同如实返回", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b92-noroute-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_b92_noroute";
+    const tp = await seedAcpUuidRun(dir, runId, dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const observedSeq = (await readTranscript(tp)).filter((e) => Number.isInteger(e.seq)).at(-1).seq;
+    const result = await stopRun({
+      runId, runDir: dir,
+      justification: { reason: "runner 已死，只读会审席位收口", observedSeq },
+      deps: defaultDeps({ alert: async () => {} }),
+    });
+    assert.equal(result.stopRouteUnavailable, true, "停止目标解析不出 → 既有 stopRouteUnavailable 面");
+    assert.equal(result.terminalAccepted, false);
+    assert.equal(result.sideEffectAttempted, false);
+    assert.equal(result.terminalState, "running", "回显原状态，不认领终态");
+    assert.equal(result.outcome, "stop_route_unavailable");
+    assert.equal(result.backend, "deepseek-acp");
+    const after = await readTranscript(tp);
+    assert.equal(findState(after), "running", "未认领终态");
+    assert.equal(after.find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("B92: deepseek-acp 带 hostPid（新形状）——停止目标解析到承载进程，走进程树击杀", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b92-hostpid-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_b92_hostpid";
+    await seedAcpUuidRun(dir, runId, dir, { hostPid: 424242 });
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const killed = [];
+    let alive = true;
+    const result = await stopRun({
+      runId, runDir: dir,
+      deps: defaultDeps({
+        kill: (pid) => { killed.push(pid); alive = false; return { called: true, exitCode: 0 }; },
+        isAlive: () => alive,
+      }),
+    });
+    assert.equal(result.terminalAccepted, true);
+    assert.equal(result.terminalState, "aborted");
+    assert.equal(result.pid, 424242, "pid 取 session.created.hostPid（UUID 解析不出 pid）");
+    assert.equal(result.backend, "deepseek-acp");
+    assert.deepEqual(killed, [424242], "击杀目标 = 承载会话的本机进程");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── Architecture boundary ────────────────────────────────────────────────────
 
 test("ARCH-01: runStop.js does not import commands/mcp/SDK/zod", async () => {

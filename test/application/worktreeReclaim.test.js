@@ -530,6 +530,40 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   );
 });
 
+// B92：分类计数只显示 running=N——里面"最近 15 分钟内有事件"的保留项（例如刚
+// lineage-close）不是回收不了，只是要等静默窗过去。有这类项时摘要多一行固定
+// 说明；没有时输出逐字不变。
+test("CLI：计划摘要——recent_event 保留项多一行固定说明；无这类项时不打这行", async () => {
+  const s = await scenario();
+  const outPath = join(s.base, "plan-recent-cli.json");
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    // 基线（无 recent_event 项）：干净终态 run，事件都落在 OLD_TS。
+    const wtPlain = s.wt("run_cli_plain");
+    s.seed("run_cli_plain", cleanRunEvents({ repo: s.repo, wt: wtPlain, branch: "wao/run_cli_plain" }));
+    await worktreeCommand(["reclaim", "--cwd", s.repo, "--out", outPath, "--run-dir", s.runDir], { runDir: s.runDir });
+    assert.ok(!logs.some((l) => l.includes("最近 15 分钟内有事件")), "无 recent_event 项时不打说明行");
+    // 有 recent_event 项：最后一条绑定事件 30 秒前（CLI 不注入时钟，用真实时钟）。
+    logs.length = 0;
+    const wtRecent = s.wt("run_cli_recent");
+    s.seed("run_cli_recent", cleanRunEvents({ repo: s.repo, wt: wtRecent, branch: "wao/run_cli_recent" })
+      .map((e) => (e.type === "run.state_change" && e.to === "completed" ? null : e))
+      .filter(Boolean)
+      .concat([{ type: "run.state_change", from: "running", to: "completed", reason: "done", ts: new Date(Date.now() - 30_000).toISOString() }]));
+    await worktreeCommand(["reclaim", "--cwd", s.repo, "--out", outPath, "--run-dir", s.runDir], { runDir: s.runDir });
+    assert.ok(
+      logs.includes("  其中 1 项最近 15 分钟内有事件（例如刚关闭谱系），15 分钟后重新生成计划即可按规则判定"),
+      `说明行逐字打出: ${JSON.stringify(logs)}`,
+    );
+    const countLine = logs.find((l) => l.includes("分类计数"));
+    assert.ok(countLine.includes("running=1"), `分类计数里 running=1（说明行解释的就是它）: ${countLine}`);
+  } finally {
+    console.log = origLog;
+  }
+});
+
 // b78 续修：可照抄的 apply 命令在路径含空格时也要真能照抄——两席实测未加引号
 // 时拆词出错（plan_unreadable）。双引号在 PowerShell/cmd/Git Bash 里的拆词规则
 // 一致：引号内空格不断词。这里按该规则把打印行拆回参数，交给 worktreeCommand

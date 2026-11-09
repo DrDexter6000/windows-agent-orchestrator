@@ -272,23 +272,29 @@ test("TD265-01: 原生会话 id + hostPid → 击杀该进程树并核验，事�
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("TD265-02: 既无 hostPid 也无 serveUrl → 拒绝并点名后端，零事件零副作用", async () => {
+// B92：无停止路由不再抛错——按 stopRouteUnavailable 既有合同如实返回（MCP 面
+// 此前只剩固定文案 "run_stop failed"）：不认领终态、零击杀，留 stop_requested +
+// stop_unverified 审计（与 invalidPid / 目标解析失败同款）。
+test("TD265-02: 既无 hostPid 也无 serveUrl → 不认领终态、零击杀，如实返回 stopRouteUnavailable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td265-02-"));
   try {
     makeGitRepo(dir);
     await seedSessionRun(dir, "run_td265_02", dir, { backend: "zcode", backendSessionId: "sess_native_2" });
     const { stopRun } = await import("../../src/application/runStop.js");
     let killCalls = 0;
-    const before = (await readTranscript(join(dir, "run_td265_02.jsonl"))).length;
-    await assert.rejects(
-      () => stopRun({
-        runId: "run_td265_02", runDir: dir, authorizedWorkspaceRoot: dir,
-        deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; } }),
-      }),
-      /has no stop route: its session \(backend zcode\) records neither a host process id nor a serveUrl/,
-    );
+    const result = await stopRun({
+      runId: "run_td265_02", runDir: dir, authorizedWorkspaceRoot: dir,
+      deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; } }),
+    });
+    assert.equal(result.stopRouteUnavailable, true);
+    assert.equal(result.terminalAccepted, false);
+    assert.equal(result.sideEffectAttempted, false);
+    assert.equal(result.backend, "zcode", "结果如实回显会话记录的后端");
+    assert.equal(result.outcome, "stop_route_unavailable");
     assert.equal(killCalls, 0);
-    assert.equal((await readTranscript(join(dir, "run_td265_02.jsonl"))).length, before, "拒绝早于任何写入");
+    const events = await readTranscript(join(dir, "run_td265_02.jsonl"));
+    assert.equal(events.find((e) => e.type === "run.stop_unverified").outcome, "stop_route_unavailable");
+    assert.ok(!events.some((e) => e.type === "run.aborted"), "没有认领终态");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -317,10 +323,11 @@ test("TD265-03: 有 serveUrl 的会话不因带 hostPid 改走进程路由；非
     const viaServe = await stopRun({ runId: "run_td265_03a", runDir: dir, authorizedWorkspaceRoot: dir, registryPath, deps });
     assert.equal(serveStops, 1);
     assert.equal(viaServe.terminalState, "aborted");
-    await assert.rejects(
-      () => stopRun({ runId: "run_td265_03b", runDir: dir, authorizedWorkspaceRoot: dir, deps }),
-      /has no stop route/,
-    );
+    // B92：字符串形的 hostPid 不是整数，不采信——照 stopRouteUnavailable 合同
+    // 如实返回（不抛、不认领、零击杀）。
+    const noRoute = await stopRun({ runId: "run_td265_03b", runDir: dir, authorizedWorkspaceRoot: dir, deps });
+    assert.equal(noRoute.stopRouteUnavailable, true);
+    assert.equal(noRoute.terminalAccepted, false);
     assert.equal(killCalls, 0, "字符串形的 hostPid 不是整数，不采信");
   } finally {
     delete process.env[tokenEnv];
@@ -365,7 +372,7 @@ test("TD265-04: resume 重放之后 stop 的目标是重放记录的新进程，
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("TD265-05: 重放记录没带 hostPid（原生会话 id）→ 不沿用旧 pid，拒绝并零副作用", async () => {
+test("TD265-05: 重放记录没带 hostPid（原生会话 id）→ 不沿用旧 pid，stopRouteUnavailable 零击杀", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td265-05-"));
   try {
     makeGitRepo(dir);
@@ -375,13 +382,13 @@ test("TD265-05: 重放记录没带 hostPid（原生会话 id）→ 不沿用旧 
     await t.append("run.rerun", { originalSessionId: "sess_native", newSessionId: "sess_native", reason: "replay" });
     const { stopRun } = await import("../../src/application/runStop.js");
     let killCalls = 0;
-    await assert.rejects(
-      () => stopRun({
-        runId: "run_td265_05", runDir: dir, authorizedWorkspaceRoot: dir,
-        deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; }, isAlive: () => true }),
-      }),
-      /has no stop route/,
-    );
+    const result = await stopRun({
+      runId: "run_td265_05", runDir: dir, authorizedWorkspaceRoot: dir,
+      deps: defaultDeps({ kill: () => { killCalls += 1; return { called: true, exitCode: 0 }; }, isAlive: () => true }),
+    });
+    // B92：解析不出停止目标不再抛错——如实返回，不认领、零击杀。
+    assert.equal(result.stopRouteUnavailable, true);
+    assert.equal(result.terminalAccepted, false);
     assert.equal(killCalls, 0, "旧进程的 pid 不再代表这次运行");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

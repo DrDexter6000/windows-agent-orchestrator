@@ -32,7 +32,7 @@
 //     （findState/TERMINAL_STATES/findLastEventSeq）。
 
 import { findState, findLastEventSeq, TERMINAL_STATES } from "../transcript.js";
-import { settleRun, SETTLE_QUIET_WINDOW_MS } from "./runSettle.js";
+import { settleRun, SETTLE_QUIET_WINDOW_MS, lastQuietWindowBoundMs } from "./runSettle.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 
 /** 前置筛选的闭集不通过理由（映射 settle 的门 1/门 2 心跳面/门 4）。 */
@@ -98,9 +98,9 @@ export function runnerGonePrefilter({ events, runId, runDir, now, deps = {} }) {
   } catch {
     // 心跳读失败按"不新鲜"处理（settle 门 2 自有更细的租约判定；这里只是省干跑）。
   }
-  // 门 4 面：最后一条绑定事件已满结算静默窗。
-  const lastBound = bound[bound.length - 1];
-  const lastTs = lastBound ? Date.parse(lastBound.ts) : NaN;
+  // 门 4 面：最后一条计入静默窗的绑定事件（与 settle 门 4 同一取法——被拒的
+  // 重打包审计不算活动，见 lastQuietWindowBoundMs）已满结算静默窗。
+  const lastTs = lastQuietWindowBoundMs(bound);
   const quietMs = Number.isFinite(lastTs) ? now - lastTs : NaN;
   if (!Number.isFinite(quietMs) || quietMs < SETTLE_QUIET_WINDOW_MS) {
     return { pass: false, reason: "quiet_window" };

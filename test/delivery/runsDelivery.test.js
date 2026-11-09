@@ -183,7 +183,7 @@ test("3C2-A03: reject creates one rejected event", async () => {
  * with verificationUnavailableReason (declared unverifiable, 决定 0101) is
  * acceptable — see 3C2-A04b below.
  */
-test("3C2-A04: accept refused when verification failed", async () => {
+test("3C2-A04: accept refused when verification failed — 报错后带验证失败采纳协议提示行", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-a04-");
   try {
     await writeFullDeliveryLifecycle(transcript, {
@@ -194,15 +194,62 @@ test("3C2-A04: accept refused when verification failed", async () => {
     writeFileSync(reasonPath, "looks good to me", "utf8");
 
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
-    await assert.rejects(
-      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {}),
-      /verification.*passed|cannot accept/i,
-      "accept should be refused when verification is failed",
-    );
+    const { ACCEPT_VERIFICATION_FAILED_HINT } = await import("../../src/application/runDelivery.js");
+    // B92：既有报错照旧打（顶层 catch 的同一渲染），其后多一行固定提示指向
+    // 验证失败采纳协议；退出码 1 不变。
+    const errors = [];
+    const origError = console.error;
+    console.error = (...a) => errors.push(a.map(String).join(" "));
+    const prevExitCode = process.exitCode;
+    try {
+      await runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
+    } finally {
+      console.error = origError;
+    }
+    assert.match(errors[0], /cannot accept/i, "第一行仍是既有报错");
+    assert.equal(errors[1], ACCEPT_VERIFICATION_FAILED_HINT, "第二行是固定提示（与 MCP 同一句）");
+    assert.equal(errors.length, 2, "只有报错行 + 提示行");
+    assert.equal(process.exitCode, 1, "退出码 1（与改前一致）");
+    process.exitCode = prevExitCode ?? 0;
 
     const events = await readTranscript(transcript.filePath);
     assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0,
       "no accepted event should be written");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+// B92：别的拒因（这里：没有交付事实的 delivery_unavailable）不带提示行，
+// 照旧原样上抛。
+test("3C2-A04c: accept refused for a non-verification reason — 原样上抛、零提示行", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-a04c-");
+  try {
+    // 终态运行、无任何交付事实 → tryAppendDecision 以 delivery_unavailable 拒。
+    await transcript.append("run.started", { backend: "claude-code" });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "looks good to me", "utf8");
+
+    const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+    const { ACCEPT_VERIFICATION_FAILED_HINT } = await import("../../src/application/runDelivery.js");
+    const errors = [];
+    const origError = console.error;
+    console.error = (...a) => errors.push(a.map(String).join(" "));
+    try {
+      await assert.rejects(
+        () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {}),
+        (err) => {
+          assert.ok(!/cannot accept/i.test(err.message), "拒因不是 verification_failed 的报错");
+          return true;
+        },
+        "非 verification_failed 拒因照旧上抛",
+      );
+    } finally {
+      console.error = origError;
+    }
+    assert.equal(errors.length, 0, "没有提示行（也没有本命令自打的报错行）");
+    assert.ok(errors.join("\n") !== ACCEPT_VERIFICATION_FAILED_HINT);
   } finally {
     await cleanupDir(dir);
   }
@@ -784,11 +831,22 @@ test("3C2-PRE-B: missing verification outcome → accept fails closed, reject se
     writeFileSync(reasonPath, "some reason", "utf8");
 
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
-    await assert.rejects(
-      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
-      /verification|cannot accept/i,
-      "accept with missing verification must fail",
-    );
+    const { ACCEPT_VERIFICATION_FAILED_HINT } = await import("../../src/application/runDelivery.js");
+    // B92：accept 拒于 verification_failed（pending 也归它）不再上抛——既有报错
+    // 后多一行采纳协议提示，退出码 1。
+    const errors = [];
+    const origError = console.error;
+    console.error = (...a) => errors.push(a.map(String).join(" "));
+    const prevExitCode = process.exitCode;
+    try {
+      await runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {});
+    } finally {
+      console.error = origError;
+    }
+    assert.match(errors[0], /cannot accept/i, "accept with missing verification must fail");
+    assert.equal(errors[1], ACCEPT_VERIFICATION_FAILED_HINT, "提示行在既有报错之后");
+    assert.equal(process.exitCode, 1);
+    process.exitCode = prevExitCode ?? 0;
     const out = await captureLog(async () => {
       await runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
     });

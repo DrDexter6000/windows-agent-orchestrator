@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -817,6 +817,52 @@ test("M9-6B-15: failed verification blocks accept as a STRUCTURED rejection, all
     const events = await readTranscript(join(runDir, "run_i15.jsonl"));
     assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1);
     assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0);
+  } finally { cleanupDir(dir); }
+});
+
+// B92：accept 被 verification_failed 拒时，content 追加第二个 text 项放固定
+// 提示（与 CLI 同一句）——第一个 text 项与 structuredContent 逐字不变；别的
+// 拒因不带。
+test("B92: accept refused with verification_failed — second text item carries the adoption-protocol hint; other reasons carry none", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m-b92-decide-hint-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_b92hint", "failed");
+    const { ACCEPT_VERIFICATION_FAILED_HINT } = await import("../../src/application/runDelivery.js");
+    // accept + verification_failed → 两个 text 项；payload 逐字不变。
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_b92hint", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
+        assert.equal(res.isError, undefined, "policy rejection is a normal structured outcome");
+        const texts = res.content.filter((b) => b.type === "text");
+        assert.equal(texts.length, 2, "accept + verification_failed → 第二个 text 项是提示");
+        const p = JSON.parse(texts[0].text);
+        assert.equal(p.decisionAccepted, false);
+        assert.equal(p.rejectionReason, "verification_failed");
+        assert.deepEqual(res.structuredContent, p, "structuredContent 与第一个 text 项逐字一致");
+        assert.equal(texts[1].text, ACCEPT_VERIFICATION_FAILED_HINT, "提示与 CLI 同一句");
+        assert.match(texts[1].text, /wao manual delivery "验证失败采纳协议"/, "提示给出手册读法");
+      } finally { await client.close(); await server.close(); }
+    }
+    // 别的拒因（delivery_unavailable：无交付事实）→ 只有一个 text 项、无提示。
+    {
+      const { JsonlTranscript } = await import("../../src/transcript.js");
+      const runDir2 = join(dir, "runs2");
+      mkdirSync(runDir2, { recursive: true });
+      const t2 = new JsonlTranscript(join(runDir2, "run_b92none.jsonl"), { runId: "run_b92none", agentId: "w" });
+      await t2.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: dir });
+      await t2.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+      const server = createWaoMcpServer({ registryPath: rp, runDir: runDir2 });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_b92none", decision: "accepted", reason: "x", expectedWorkspaceRoot: dir } });
+        const texts = res.content.filter((b) => b.type === "text");
+        assert.equal(texts.length, 1, "别的拒因只有一个 text 项");
+        assert.equal(JSON.parse(texts[0].text).rejectionReason, "delivery_unavailable");
+        assert.ok(!JSON.stringify(res).includes(ACCEPT_VERIFICATION_FAILED_HINT), "无提示泄漏");
+      } finally { await client.close(); await server.close(); }
+    }
   } finally { cleanupDir(dir); }
 });
 

@@ -33,6 +33,7 @@ import {
   SETTLE_REJECTION_REASONS,
   VERIFIER_GONE_REFUSALS,
   SETTLE_QUIET_WINDOW_MS,
+  QUIET_WINDOW_IGNORED_EVENT_TYPES,
   parseRunnerScanOutput,
   defaultRunnerScan,
 } from "../../src/application/runSettle.js";
@@ -265,6 +266,43 @@ test("SET-11: 门 4 拒绝——最后一条绑定事件太新 → quiet_window�
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// B92：Lead 调 run_delivery_repackage 被拒时 WAO 追加 run.delivery_repackage_rejected
+// 审计（不经 runner）。被拒不证明任何进程还在活动——静默窗不因它重新计时。
+test("SET-11b (B92): 被拒的重打包审计不重置静默窗；闭集只含这一项", async () => {
+  assert.deepEqual(QUIET_WINDOW_IGNORED_EVENT_TYPES, ["run.delivery_repackage_rejected"],
+    "不计入静默窗的事件类型闭集恰好一项");
+  const dir = tempDir("wao-set-11b-");
+  try {
+    const runId = "run_set11b";
+    const recent = new Date(NOW - 60_000).toISOString();
+    // 最后一条绑定事件是被拒审计；它之前的事件已远超 15 分钟 → 门 4 按前一条放行。
+    writeLines(join(dir, `${runId}.jsonl`), [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+      ev(runId, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+      ev(runId, 5, "run.delivery_repackage_rejected", recent, { rejectionReason: "lease_held" }),
+    ]);
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps() });
+    assert.equal(r.eligible, true, "被拒审计之后无别的活动 → 按已满 15 分钟的前一条放行");
+    assert.equal(r.sessionShape, "process_session");
+    assert.equal(r.gates.find((g) => g.gate === "quiet_window").ok, true);
+
+    // 被拒审计之后又有别的绑定事件 → 照那条算（闭集不豁免后续活动）。
+    const runId2 = "run_set11b2";
+    writeLines(join(dir, `${runId2}.jsonl`), [
+      ev(runId2, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId2, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId2, 3, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+      ev(runId2, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+      ev(runId2, 5, "run.delivery_repackage_rejected", OLD, { rejectionReason: "lease_held" }),
+      ev(runId2, 6, "run.event", recent, { kind: "message", data: "x" }),
+    ]);
+    const r2 = await settleRun({ runId: runId2, runDir: dir, reasonText: REASON, deps: settleDeps() });
+    assert.equal(r2.refused, "quiet_window", "别的绑定事件照旧计时");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── 门 5：会话 ────────────────────────────────────────────────────────────────
 
 test("SET-12: 门 5 通过——无会话但有 background_submitted → no_session（建会话前死亡）", async () => {
@@ -318,6 +356,30 @@ test("SET-15: 门 5 拒绝——native 会话 id 取不出 pid → session_ambig
     ]);
     const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps() });
     assert.equal(r.refused, "session_ambiguous");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// B92：deepseek-acp 记下 hostPid 后（backend 变更），其会话形状是"上游 UUID
+// 会话 id + hostPid"——门 5 靠 hostPid 锚到本机进程，判 gone 即通过（无 hostPid
+// 的旧形状照旧 session_ambiguous，见 SET-15）。
+test("SET-15b (B92): deepseek-acp 会话（UUID + hostPid）过得了门 5", async () => {
+  const dir = tempDir("wao-set-15b-");
+  try {
+    const runId = "run_set15b";
+    const uuidSessionId = "75c13e12-ce24-4409-b88e-59669cc70712";
+    let seenPid = null;
+    writeLines(join(dir, `${runId}.jsonl`), [
+      ev(runId, 1, "run.started", OLD, { backend: "deepseek-acp" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "session.created", OLD, { backend: "deepseek-acp", backendSessionId: uuidSessionId, hostPid: 4321 }),
+      ev(runId, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+    ]);
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      identifyFn: async (pid) => { seenPid = pid; return { verdict: "gone", basis: "pid_exited" }; },
+    }) });
+    assert.equal(r.eligible, true, "UUID 会话 id + hostPid → 门 5 可锚定");
+    assert.equal(r.sessionShape, "process_session");
+    assert.equal(seenPid, 4321, "pid 取 session.created.hostPid（UUID 解析不出 pid）");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1108,27 +1170,30 @@ test("SET-51: legacy completed（只有 run.completed、没有绑定 state_chang
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("SET-52: 扫描命令——notBeforeMs 给出时按 CreationDate 收窄；缺省时命令文本与旧版逐字节相同", async () => {
+test("SET-52: 扫描命令——命中只认 node 进程；notBeforeMs 给出时按 CreationDate 收窄", async () => {
   const calls = [];
   const fakeExec = (stdout) => (file, args, opts, cb) => {
     calls.push({ file, command: args[args.length - 1] });
     cb(null, stdout);
   };
   const runId = "run_20260101000000000abcdef";
-  // 缺省：与收窄前的命令逐字节相同（含旧版 blind 行、无 $cut）。
-  const legacyCommand = [
+  // 缺省命令逐字节钉住：$hit 的命中条件先按进程名过滤 Name -like 'node*'——
+  // Git Bash 包装进程（bash/npm/cmd 链）的命令行同样带 runId，祖先排除在 MSYS
+  // fork 助手处断链够不着它们，不按进程名过滤会把结算调用者自己判成活 runner。
+  const expectedCommand = [
     "$ErrorActionPreference='Stop';",
     "$ex=@(); $pp=$PID; $n=0;",
     "while ($pp -and ($ex -notcontains [string]$pp) -and $n -lt 64) { $ex+=[string]$pp; $n++;",
     "  $q=Get-CimInstance Win32_Process -Filter ('ProcessId='+$pp);",
     "  if (-not $q) { break }; $pp=$q.ParentProcessId };",
     "$all=@(Get-CimInstance Win32_Process | Where-Object { $ex -notcontains [string]$_.ProcessId });",
-    `$hit=@($all | Where-Object { $_.CommandLine -like '*--run-id ${runId}*' -or $_.CommandLine -like '*--resume-run-id ${runId}*' -or $_.CommandLine -like '*resume ${runId}*' }).Count;`,
+    `$hit=@($all | Where-Object { $_.Name -like 'node*' -and ($_.CommandLine -like '*--run-id ${runId}*' -or $_.CommandLine -like '*--resume-run-id ${runId}*' -or $_.CommandLine -like '*resume ${runId}*') }).Count;`,
     "$blind=@($all | Where-Object { $_.Name -like 'node*' -and -not $_.CommandLine }).Count;",
     "'wao-scan-ok:' + $hit + ':' + $blind",
   ].join(" ");
   await defaultRunnerScan(runId, fakeExec("wao-scan-ok:0:0"));
-  assert.equal(calls[0].command, legacyCommand, "notBeforeMs 缺省 = 旧命令逐字节");
+  assert.equal(calls[0].command, expectedCommand, "缺省命令逐字节（$hit 带 node 名过滤）");
+  assert.match(calls[0].command, /\$hit=@\(\$all \| Where-Object \{ \$_\.Name -like 'node\*' -and \(\$/, "$hit 先过滤 node 进程名再看命令行");
   // 收窄：$cut 用 epoch ms − 5000 换算；blind 行按 CreationDate（转 UTC）过滤，
   // 读不到 CreationDate 的照旧计入；命令行原文仍不出 PowerShell，回传仍只有计数。
   const notBefore = Date.parse("2026-10-30T08:00:00.000Z");
@@ -1144,6 +1209,7 @@ test("SET-52: 扫描命令——notBeforeMs 给出时按 CreationDate 收窄；�
   assert.ok(!narrowed.includes("-and -not $_.CommandLine }).Count;"), "旧版 blind 行不再出现");
   assert.match(narrowed, /'wao-scan-ok:' \+ \$hit \+ ':' \+ \$blind/, "回传仍只有计数");
   assert.match(narrowed, /CommandLine -like/, "匹配仍在 PowerShell 内做");
+  assert.match(narrowed, /\$hit=@\(\$all \| Where-Object \{ \$_\.Name -like 'node\*' -and \(\$/, "收窄命令同样只认 node 进程");
 });
 
 test("SET-53: 扫描的收窄锚只取那条 run.background_submitted 的时刻；前台运行、多条或读不出就不传", async () => {
@@ -1302,6 +1368,43 @@ test("TD-341-B: 前置筛选各拒——非数组/终态/心跳新鲜/静默未�
         deps: { heartbeatReader: () => ({ fresh: false }) },
       }),
       { pass: true, quietMs: NOW - Date.parse(OLD) },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// B92：前置筛选与门 4 同一取法（lastQuietWindowBoundMs）——被拒的重打包审计
+// 不重置静默窗。
+test("TD-341-B (B92): 前置筛选——被拒的重打包审计不算活动", () => {
+  const dir = tempDir("wao-td341b-quiet-");
+  try {
+    const runId = "run_td341_quiet";
+    const recent = new Date(NOW - 60_000).toISOString();
+    // 最后一条是被拒审计、其前一条已满 15 分钟 → 前置筛选放行（值得发证明）。
+    const events = [
+      ...prefilterEvents(runId),
+      ev(runId, 4, "run.delivery_repackage_rejected", recent, { rejectionReason: "lease_held" }),
+    ];
+    assert.deepEqual(
+      runnerGonePrefilter({
+        events, runId, runDir: dir, now: NOW,
+        deps: { heartbeatReader: () => ({ fresh: false }) },
+      }),
+      { pass: true, quietMs: NOW - Date.parse(OLD) },
+    );
+    // 被拒审计之后又有别的绑定事件 → 照那条算。
+    const eventsAfter = [
+      ...prefilterEvents(runId),
+      ev(runId, 4, "run.delivery_repackage_rejected", OLD, { rejectionReason: "lease_held" }),
+      ev(runId, 5, "run.event", recent, { kind: "message" }),
+    ];
+    assert.deepEqual(
+      runnerGonePrefilter({
+        events: eventsAfter, runId, runDir: dir, now: NOW,
+        deps: { heartbeatReader: () => ({ fresh: false }) },
+      }),
+      { pass: false, reason: "quiet_window" },
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
