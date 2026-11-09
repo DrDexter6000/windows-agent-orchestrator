@@ -1175,17 +1175,29 @@ async function runsPruneCommand(args, config) {
     const ts = last?.ts ? new Date(last.ts).getTime() : 0;
     // 第 90 批：runner stderr 文件（runnerStderrPath——基础 runDir 下，不在
     // projects/<slug>/ 桶里）随它的转录一并处置：判龄与转录相同（转录超龄才动），
-    // 没有对应转录的 stderr 文件不碰。计数行只数转录，不变。
+    // 没有对应转录的 stderr 文件不碰。计数行只数转录。会审修正：stderr 先于转录
+    // 处置——它删不掉、移不动（别的进程不带删除共享地开着它）或归档目标已存在时，
+    // 这一对都不动，下次 prune 仍能找到；绝不留下没有转录可认领的 stderr 文件。
+    // ENOENT（runner 的退出钩子刚删掉它）按已不在处理。
     const stderrPath = runnerStderrPath(runDir, pruneRunId);
+    const stderrName = basename(stderrPath);
     const hasStderr = existsSync(stderrPath);
     if (ts < cutoff) {
       if (!archiveMode) {
+        if (hasStderr) {
+          try {
+            await unlink(stderrPath);
+            console.log(`Pruned ${stderrName}`);
+          } catch (err) {
+            if (err?.code !== "ENOENT") {
+              console.log(`Kept ${basename(file)} (${stderrName} could not be removed: ${err?.code ?? "error"}; neither file was deleted)`);
+              kept += 1;
+              continue;
+            }
+          }
+        }
         await unlink(file);
         console.log(`Pruned ${basename(file)}`);
-        if (hasStderr) {
-          await unlink(stderrPath);
-          console.log(`Pruned .runner-${pruneRunId}.stderr`);
-        }
         pruned += 1;
       } else {
         // R23-B1 归档：<dirname(runDir)>/runs-archive/<yyyy-mm>/<原文件名>。
@@ -1196,25 +1208,33 @@ async function runsPruneCommand(args, config) {
         // 决定 0050：归档根从基础 runDir 推导（file 现为绝对路径——目标名取 basename，原文件名锚不变）。
         const targetDir = join(dirname(runDir), "runs-archive", month);
         const target = join(targetDir, basename(file));
+        // stderr 文件与转录同月同目录、文件名不变；它的目标冲突也算这一对冲突。
+        const stderrTarget = join(targetDir, stderrName);
         if (existsSync(target)) {
           console.log(`Skipped ${basename(file)} (conflict: runs-archive/${month}/${basename(file)} already exists)`);
           skipped += 1;
+        } else if (hasStderr && existsSync(stderrTarget)) {
+          console.log(`Skipped ${basename(file)} (conflict: runs-archive/${month}/${stderrName} already exists)`);
+          skipped += 1;
         } else {
           await mkdir(targetDir, { recursive: true });
-          await rename(file, target);
-          console.log(`Archived ${basename(file)} -> runs-archive/${month}/${basename(file)}`);
+          let stderrStuck = null;
           if (hasStderr) {
-            // stderr 文件与转录同月同目录、文件名不变；目标冲突同款 fail-safe
-            //（留在原处，只报一行）。
-            const stderrTarget = join(targetDir, basename(stderrPath));
-            if (existsSync(stderrTarget)) {
-              console.log(`Skipped ${basename(stderrPath)} (conflict: runs-archive/${month}/${basename(stderrPath)} already exists)`);
-            } else {
+            try {
               await rename(stderrPath, stderrTarget);
-              console.log(`Archived ${basename(stderrPath)} -> runs-archive/${month}/${basename(stderrPath)}`);
+              console.log(`Archived ${stderrName} -> runs-archive/${month}/${stderrName}`);
+            } catch (err) {
+              if (err?.code !== "ENOENT") stderrStuck = err?.code ?? "error";
             }
           }
-          archived += 1;
+          if (stderrStuck !== null) {
+            console.log(`Skipped ${basename(file)} (${stderrName} could not be moved: ${stderrStuck}; neither file was moved)`);
+            skipped += 1;
+          } else {
+            await rename(file, target);
+            console.log(`Archived ${basename(file)} -> runs-archive/${month}/${basename(file)}`);
+            archived += 1;
+          }
         }
       }
     } else {

@@ -22,9 +22,9 @@ npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 
 
 `runs settle` 的进程扫描也认前台 `wao resume <runId>`：带 `--run-id`、`--resume-run-id` 或 `resume <runId>` 的进程都算 runner 还活着，结算即拒。后台运行的扫描对读不到命令行的 node 进程按创建时间收窄：只把创建不早于派发事实的（留 5 秒时钟偏差）计入，更早的进程命令行不可能带本运行的 runId；前台运行不收窄。
 
-`runs prune --older-than` 的删除判龄只读本 run 自身信封绑定事件（transcript 文件名 stem 即权威 runId）的末条 `ts`。尾部追加的外 run 或伪造旧 `ts` 的行，不会把在役 run 翻成可修剪；unlink 前被阻断。全无信封的 legacy transcript 按末事件 `ts` 照常判龄、照常参与清理。runDir 下该运行的 runner stderr 文件（`.runner-<runId>.stderr`）随转录一并删除或归档，冲突时同样不动。
+`runs prune --older-than` 的删除判龄只读本 run 自身信封绑定事件（transcript 文件名 stem 即权威 runId）的末条 `ts`。尾部追加的外 run 或伪造旧 `ts` 的行，不会把在役 run 翻成可修剪；unlink 前被阻断。全无信封的 legacy transcript 按末事件 `ts` 照常判龄、照常参与清理。runDir 下的 `.runner-<runId>.stderr` 先于转录删除或归档，删不掉、移不动或目标已存在时这一对都不动。
 
-`--archive` 把超龄 transcript 移动（而非删除）到与 runDir 同级的 `runs-archive/<yyyy-mm>/<原文件名>`。文件名原样保留——技术债与摩擦记录多以 runId 文件名为证据锚，改名即锚灭失。`<yyyy-mm>` 按判龄所用 `ts` 的月份分层，`ts` 无效或为 0 时按文件 mtime 的月份兜底。目标同名文件已存在时不移动、不覆盖，输出冲突行并计入 skipped——宁可不动，不可丢数据。判龄、扫描面（runDir 顶层与 `projects/*` 桶内的 `.jsonl`）、legacy 语义与不带 `--archive` 时完全一致。
+`--archive` 把超龄 transcript 移动（而非删除）到与 runDir 同级的 `runs-archive/<yyyy-mm>/<原文件名>`。文件名原样保留——技术债与摩擦记录多以 runId 文件名为证据锚，改名即锚灭失。`<yyyy-mm>` 按判龄所用 `ts` 的月份分层，`ts` 无效或为 0 时按文件 mtime 的月份兜底。目标同名文件已存在时不移动、不覆盖，输出冲突行并计入 skipped——宁可不动，不可丢数据。判龄、扫描面、legacy 语义与不带 `--archive` 时完全一致。
 
 归档后的 run 不再出现在 `runs list`、`runs metrics --summary`、`runs dashboard`、`runs grep`；按 runId 直读（status/tail/collect 等）会 ENOENT。法医取证进 `runs-archive/` 按原文件名查。
 
@@ -35,7 +35,7 @@ npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 
 3. 关闭所有占用 runs/ 文件的编辑器和 tail——归档循环无逐文件容错，Windows 上文件被占用会让 rename EPERM 中断整批。已输出的 `Archived` 行即恢复痕迹，续跑即可。
 4. 逐条保留输出的 `Archived ... -> ...` 行，这是唯一的迁移审计轨迹。
 
-清扫面边界：runDir 顶层与 `projects/*` 桶内的 `.jsonl`；桶内文件归档后同样落在 `runs-archive/<yyyy-mm>/<原文件名>`，不保留桶目录。其它子目录语料（`smoke/`、`verify/` 等）、顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 都不在清扫面内。`runs/reliability/` 认证转录的删除走独立通道，见 `docs/certification-runbook.md`。
+清扫面边界：runDir 顶层与 `projects/*` 桶内的 `.jsonl` 及随其处置的 `.runner-<runId>.stderr`；桶内文件归档后同样落在 `runs-archive/<yyyy-mm>/<原文件名>`，不保留桶目录。其它子目录语料（`smoke/`、`verify/` 等）、顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 都不在清扫面内。`runs/reliability/` 认证转录的删除走独立通道，见 `docs/certification-runbook.md`。
 
 ## 批量清退 worktree 与分支（`wao worktree reclaim`）
 

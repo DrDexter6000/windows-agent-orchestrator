@@ -1095,12 +1095,22 @@ test("M12-1S2-CREATED-VERIFY-THROWS-BACKEND: backend_failed retry does NOT re-pa
     assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 0);
 
     // Second call: must NOT re-package (same commit), just verify + record outcome.
+    // A re-run of packaging could land on the same commit (recover branch, or an
+    // identical commit-tree within the same second), so count the packaging and
+    // inventory calls instead of trusting HEAD alone.
+    let packagingCalls = 0;
+    let inventoryCalls = 0;
     const result = await runDeliveryRepackage({
       runId: RUN_ID, runDir, allowedPaths: ["src"],
-      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
-      verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      authorizedWorkspaceRoot: repo,
+      resolveDeliveryCommitFn: (ctx) => { packagingCalls += 1; return resolveDeliveryCommit(ctx); },
+      verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: (...a) => { inventoryCalls += 1; return computeCandidateInventory(...a); },
     });
+    assert.equal(packagingCalls, 0, "retry does not package again");
+    assert.equal(inventoryCalls, 0, "retry does not recompute the inventory");
     assert.equal(result.deliveryCommit, commitAfterFirst, "no second delivery commit");
+    assert.equal(git(["rev-parse", "HEAD"], worktreePath), commitAfterFirst);
     assert.equal(result.created, false, "created already existed");
 
     events = await readEvents(runDir);
@@ -1138,14 +1148,22 @@ test("M12-1S2-CREATED-VERIFY-THROWS-ORPHAN: process_missing retry does NOT re-pa
     assert.equal(events.filter((e) => e.type === "run.process_missing_confirmed").length, 1, "settled exactly once");
     assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "failed").length, 1, "terminal exactly once");
 
-    // Second call: must NOT re-settle and NOT re-package (same commit).
+    // Second call: must NOT re-settle and NOT re-package (same commit). Count the
+    // packaging and inventory calls — HEAD alone cannot tell a skip from a re-run.
+    let packagingCalls = 0;
+    let inventoryCalls = 0;
     const result = await runDeliveryRepackage({
       runId: RUN_ID, runDir, allowedPaths: ["src"],
-      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
-      verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      authorizedWorkspaceRoot: repo,
+      resolveDeliveryCommitFn: (ctx) => { packagingCalls += 1; return resolveDeliveryCommit(ctx); },
+      verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: (...a) => { inventoryCalls += 1; return computeCandidateInventory(...a); },
       ...orphanInput,
     });
+    assert.equal(packagingCalls, 0, "retry does not package again");
+    assert.equal(inventoryCalls, 0, "retry does not recompute the inventory");
     assert.equal(result.deliveryCommit, commitAfterFirst, "no second delivery commit");
+    assert.equal(git(["rev-parse", "HEAD"], worktreePath), commitAfterFirst);
     assert.equal(result.created, false, "created already existed");
 
     events = await readEvents(runDir);

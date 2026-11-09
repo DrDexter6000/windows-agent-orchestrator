@@ -362,7 +362,7 @@ test("B90: runs prune 删超龄转录时一并删它的 runner stderr 文件；�
     await writeFile(join(dir, ".runner-run_orphan.stderr"), "no transcript\n", "utf8");
 
     const lines = cli(["runs", "prune", "--older-than", "7d"], dir).split(/\r?\n/);
-    assert.deepEqual(lines, ["Pruned run_old.jsonl", "Pruned .runner-run_old.stderr", "Pruned 1, kept 1"]);
+    assert.deepEqual(lines, ["Pruned .runner-run_old.stderr", "Pruned run_old.jsonl", "Pruned 1, kept 1"]);
     assert.ok(!existsSync(join(dir, ".runner-run_old.stderr")));
     assert.ok(existsSync(join(dir, ".runner-run_recent.stderr")), "未超龄的留下");
     assert.ok(existsSync(join(dir, ".runner-run_orphan.stderr")), "没有转录的不碰");
@@ -371,7 +371,7 @@ test("B90: runs prune 删超龄转录时一并删它的 runner stderr 文件；�
   }
 });
 
-test("B90: runs prune --archive 把 runner stderr 文件移进转录的同一月份目录；目标冲突时留在原处", async () => {
+test("B90: runs prune --archive 把 runner stderr 文件先于转录移进同一月份目录；stderr 目标冲突时这一对都不动", async () => {
   const { root, runDir, archiveRoot } = await makeRunTree();
   try {
     await writeJsonl(runDir, "run_a", [{ type: "run.started", ts: "2026-03-15T00:00:00.000Z" }]);
@@ -383,16 +383,57 @@ test("B90: runs prune --archive 把 runner stderr 文件移进转录的同一月
 
     const lines = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir).split(/\r?\n/);
     assert.deepEqual(lines, [
-      "Archived run_a.jsonl -> runs-archive/2026-03/run_a.jsonl",
       "Archived .runner-run_a.stderr -> runs-archive/2026-03/.runner-run_a.stderr",
-      "Archived run_b.jsonl -> runs-archive/2026-03/run_b.jsonl",
-      "Skipped .runner-run_b.stderr (conflict: runs-archive/2026-03/.runner-run_b.stderr already exists)",
-      "Archived 2, skipped 0 (conflict), kept 0",
+      "Archived run_a.jsonl -> runs-archive/2026-03/run_a.jsonl",
+      "Skipped run_b.jsonl (conflict: runs-archive/2026-03/.runner-run_b.stderr already exists)",
+      "Archived 1, skipped 1 (conflict), kept 0",
     ]);
+    assert.ok(existsSync(join(runDir, "run_b.jsonl")), "转录也留在原处，下次清扫仍能找到这一对");
     assert.equal(await readFile(join(archiveRoot, "2026-03", ".runner-run_a.stderr"), "utf8"), "a\n");
     assert.ok(!existsSync(join(runDir, ".runner-run_a.stderr")));
     assert.equal(await readFile(join(runDir, ".runner-run_b.stderr"), "utf8"), "b\n", "冲突时原处保留");
     assert.equal(await readFile(join(archiveRoot, "2026-03", ".runner-run_b.stderr"), "utf8"), "pre-existing\n", "预置目标未被覆盖");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("B90: runs prune 删不掉 runner stderr 文件时转录也不删（Kept 行写明原因），绝不留下孤立的 stderr 文件", async () => {
+  const dir = await makeRunDir();
+  try {
+    const oldTs = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    await writeJsonl(dir, "run_held", [{ type: "run.started", ts: oldTs }]);
+    // 用同名目录代替文件：unlink 必定失败（Windows 上是 EPERM），模拟被别的进程
+    // 不带删除共享地开着的文件。
+    await mkdir(join(dir, ".runner-run_held.stderr"));
+
+    const lines = cli(["runs", "prune", "--older-than", "7d"], dir).split(/\r?\n/);
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /^Kept run_held\.jsonl \(\.runner-run_held\.stderr could not be removed: E[A-Z]+; neither file was deleted\)$/);
+    assert.equal(lines[1], "Pruned 0, kept 1");
+    assert.ok(existsSync(join(dir, "run_held.jsonl")), "转录留着");
+    assert.ok(existsSync(join(dir, ".runner-run_held.stderr")), "stderr 留着");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B90: runs prune --archive 对 projects/<slug>/ 桶里的转录，从基础 runDir 带走它的 runner stderr 文件", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    const bucket = join(runDir, "projects", "demo-0000aaaa");
+    await mkdir(bucket, { recursive: true });
+    await writeJsonl(bucket, "run_d", [{ type: "run.started", ts: "2026-03-15T00:00:00.000Z" }]);
+    await writeFile(join(runDir, ".runner-run_d.stderr"), "d\n", "utf8");
+
+    const lines = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir).split(/\r?\n/);
+    assert.deepEqual(lines, [
+      "Archived .runner-run_d.stderr -> runs-archive/2026-03/.runner-run_d.stderr",
+      "Archived run_d.jsonl -> runs-archive/2026-03/run_d.jsonl",
+      "Archived 1, skipped 0 (conflict), kept 0",
+    ]);
+    assert.equal(await readFile(join(archiveRoot, "2026-03", ".runner-run_d.stderr"), "utf8"), "d\n");
+    assert.ok(!existsSync(join(bucket, "run_d.jsonl")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

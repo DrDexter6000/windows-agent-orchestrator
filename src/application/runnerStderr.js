@@ -150,8 +150,9 @@ export function readRunnerStderrTailDisplay(runDir, runId, { maxBytes = RUNNER_S
 }
 
 /**
- * CLI 面的尾部呈现（一处格式化，observe.js 的 `wao status` 与 runs.js 的
- * `runs wait --until-settled` runner_gone 出口共用）：无文件 →"无 runner
+ * CLI 面的尾部呈现（一处格式化，observe.js 的 `wao status`、runs.js 的
+ * `runs wait --until-settled` 与 consult.js 的 `consult wait --until-settled`
+ * runner_gone 出口共用）：无文件 →"无 runner
  * stderr 记录"；空文件 →"runner stderr 文件为空"；有内容 → 展示处理后的尾部
  *（被截时前缀省略号）。窗口里没有完整行可展示时返回裸 "…"（文件不空、只是
  * 被窗口起点整窗丢弃——不说"文件为空"）。固定文案，不含自由文本拼接。
