@@ -317,7 +317,7 @@ test("NEXT-11: runner_gone——只有 CLI 面；含 settle/stop 出口与 workt
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决定的新文案；completed 两支逐字不变", () => {
-  // 终态 failed、未决定：新文案（再调 run_delivery_repackage 接着验证 + pending 拒收出口）。
+  // 终态 failed、未决定：新文案（再调 run_delivery_repackage 重跑验证 + pending 拒收出口）。
   const failed = buildNextStep({
     surface: "cli", situation: "verifier_gone", runId: RUN_ID,
     acceptanceStatus: "pending", terminalState: "failed",

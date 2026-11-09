@@ -163,5 +163,5 @@
 | TD-343 | `lead_preflight` 的 MCP 工具描述没写 open item 行（决定 0113）；描述字节冻结在实测值上，加一句要 Owner 批准重冻 | 2026-11-08：Owner 批准重冻，第 87 批给描述补一句 open item 行；冻结线 description 12063→12219、wire 93212→93324、hostVisible 23270→23426，都在 Owner 硬顶内 |
 | TD-341 | 后台 runner 的 stdout/stderr 被丢弃，内存耗尽或未捕获异常时无声退出、转录停在 running；MCP 读面不说 runner 已不在 | 2026-11-08 第 89 批：stderr 落 `.runner-<runId>.stderr`（退出码 0 且为空时删除），CLI `status` 与 `runs wait` 的 runner_gone 附脱敏尾部；`run_status`、`lead_preflight` 用同一 settle 干跑证明说出 runner 已不在 |
 | TD-342 | `runs settle <runId>` 写成位置参数时不报错，改列全部候选；`--apply <词>` 把词吞成值、变成干跑 | 2026-11-09 第 90 批：位置参数一律报用法错并指向 `--run-id`，`--apply` 不取值 |
-| TD-337 | `run_delivery_repackage` 在 MCP 请求里同步打包并验证，有界等待 300 秒长过宿主约 60 秒的请求上限，宿主先报超时（打包实际成功）；验证随 MCP 服务进程消失时交付停在 pending | 2026-11-09 第 91 批：有界等待缺省降到 45 秒（reverify 同），超窗回执如实说验证在这个服务进程里；进程没了由等待器证明（见 TD-345），再调一次 repackage 接着验证 |
+| TD-337 | `run_delivery_repackage` 在 MCP 请求里同步打包并验证，有界等待 300 秒长过宿主约 60 秒的请求上限，宿主先报超时（打包实际成功）；验证随 MCP 服务进程消失时交付停在 pending | 2026-11-09 第 91 批：有界等待缺省降到 45 秒（reverify 同），超窗回执如实说验证在这个服务进程里；进程没了由等待器证明（见 TD-345），再调一次 repackage 重跑验证 |
 | TD-345 | 终态 failed、交付来自重新打包、验证无结果的运行，`runs wait --until-settled` 证明不了验证者已不在，一直等 | 2026-11-09 第 91 批：重新打包的验证期间调用方持 owner 心跳租约（写改原子替换、只删自己 pid 的租约）；`proveVerifierGone` 覆盖这一形状（不要求后台派发、不过 daemon 门，扫描锚取 created），nextStep 指再调 repackage 或有界拒收 |

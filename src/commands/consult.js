@@ -533,7 +533,7 @@ async function consultWaitCommand(args, config, deps = {}) {
  * 退出码与 runs wait --until-settled 同义：0 全部收口；3 一席不可信轮连续 4 次
  *（含无法收口的交付事实）或验证者或 runner 已证明不在（verifier_gone /
  * runner_gone；verifier_gone 的 completed 形状不可重试，终态 failed 的重新打包
- * 交付可再调 run_delivery_repackage 接着验证——nextStep 按终态分支，B91）；
+ * 交付可再调 run_delivery_repackage 重跑验证——nextStep 按终态分支，B91）；
  * 4 一席转录冲突（多副本内容不同）；130 SIGINT（单一出口：置位后
  * 只输出一份中断结果，绝不出第二份）。未收口即停在那一席并在 stderr 点名
  *（<agentId> (<runId>)）与给出与 runs wait 同义的处置行；没有 runId 的席位
@@ -608,7 +608,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         runId: seat.runId,
         acceptanceStatus: outcome.settlement.facts.acceptanceStatus,
         // B91：终态 failed（重新打包的交付）且未决定时 nextStep 指向再调
-        // run_delivery_repackage 接着验证；completed 形状照旧不可重试。
+        // run_delivery_repackage 重跑验证；completed 形状照旧不可重试。
         terminalState: outcome.settlement.facts.state,
       })}`);
     } else if (outcome.kind === "runner_gone") {

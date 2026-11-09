@@ -140,7 +140,7 @@ function render(surface, situation, runId, extras) {
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
       // B91：completed 形状不可重试（验证者死了就是死了）；终态 failed——只有
       // 重新打包的交付会走到这里——且未决定时可再调 MCP 工具
-      // run_delivery_repackage（相同 runId 与 allowedPaths）接着验证，不产生
+      // run_delivery_repackage（相同输入）重跑验证，不产生
       // 第二个提交；已拒收后 repackage 会拒绝，两条形状同用现有 rejected 文案。
       text = extras.acceptanceStatus === "rejected"
         ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\")."
