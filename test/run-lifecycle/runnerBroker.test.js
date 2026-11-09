@@ -88,9 +88,11 @@ test("启动桥真进程：argv（超长/特殊字符）、env（含大小写 PA
     const prompt = "任务书：do the work — 中文 + % ! & ^ \" quotes";
     const unique = `broker-e2e-${Date.now()}`;
 
-    // 直接 spawn 真桥（替代 PowerShell+WMI 那一跳；父端管道/帧/收口全是真实现）。
-    const spawnRealBroker = (pipeName) => new Promise((resolveSpawn) => {
-      const child = spawn(process.execPath, [BROKER_PATH, "--pipe", pipeName, "--run-id", "run_broker_e2e"], {
+    // 直接 spawn 真桥（替代 PowerShell+WMI 那一跳；父端管道/握手/帧/收口全是真实现）。
+    const spawnRealBroker = (handoff) => new Promise((resolveSpawn) => {
+      const child = spawn(process.execPath, [
+        BROKER_PATH, "--pipe", handoff.pipeName, "--nonce", handoff.nonce, "--run-id", "run_broker_e2e",
+      ], {
         windowsHide: true,
         stdio: "ignore",
       });
@@ -179,8 +181,10 @@ test("启动桥真进程：resume 形（prompt=null）——stdin=ignore 也照�
       `writeFileSync(${JSON.stringify(marker)}, "started pid=" + process.pid, "utf8");`,
     ].join("\n"), "utf8");
 
-    const spawnRealBroker = (pipeName) => new Promise((resolveSpawn) => {
-      const child = spawn(process.execPath, [BROKER_PATH, "--pipe", pipeName, "--run-id", "run_broker_resume"], {
+    const spawnRealBroker = (handoff) => new Promise((resolveSpawn) => {
+      const child = spawn(process.execPath, [
+        BROKER_PATH, "--pipe", handoff.pipeName, "--nonce", handoff.nonce, "--run-id", "run_broker_resume",
+      ], {
         windowsHide: true,
         stdio: "ignore",
       });
@@ -217,6 +221,126 @@ test("启动桥真进程：resume 形（prompt=null）——stdin=ignore 也照�
     restoreSpawnSwitch(prevSwitch);
     if (brokerPid) killTree(brokerPid);
     if (runnerPidFromLaunch) killTree(runnerPidFromLaunch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 桥自身行为（独立驱动：测试进程当父端，真管道 + 真桥进程）──────────────────
+
+/** 独立驱动真桥：开管道 → spawn 桥（--pipe/--nonce/--run-id）→ 等握手帧并核对 →
+ *  发一帧载荷 → 等桥退出。返回 { exitCode, handshake, payloadDelivered }。 */
+async function driveRealBroker({ dir, runId, payload, handshakeExpect = "ok", timeoutMs = 10000 }) {
+  const { createServer } = await import("node:net");
+  const { randomBytes } = await import("node:crypto");
+  const { FrameDecoder, encodeFrame } = await import("../../src/application/runnerFrame.js");
+  const pipeName = "\\\\.\\pipe\\wao-broker-drive-" + runId + "-" + randomBytes(8).toString("hex");
+  const nonce = randomBytes(16).toString("hex");
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(pipeName, resolve);
+  });
+  const child = spawn(process.execPath, [BROKER_PATH, "--pipe", pipeName, "--nonce", nonce, "--run-id", runId], {
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  const result = { exitCode: null, handshake: null, payloadDelivered: false };
+  try {
+    const exchange = await new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      let decoder = new FrameDecoder();
+      const finish = (r) => { clearTimeout(timer); try { socket?.destroy(); } catch { /* 已关 */ } resolve(r); };
+      let socket = null;
+      const timer = setTimeout(() => finish("timeout"), Math.max(1, deadline - Date.now()));
+      server.once("connection", (sock) => {
+        socket = sock;
+        try { server.close(); } catch { /* 已关 */ }
+        sock.on("data", (chunk) => {
+          try {
+            const r = decoder.push(chunk);
+            if (r.status !== "frame") return;
+            if (result.handshake === null) {
+              result.handshake = r.value && r.value.nonce === nonce ? "ok" : "mismatch";
+              if (result.handshake !== handshakeExpect) { finish("handshake"); return; }
+              decoder = new FrameDecoder();
+              sock.write(encodeFrame(payload));
+              result.payloadDelivered = true;
+            }
+          } catch {
+            finish("bad-frame");
+          }
+        });
+        sock.once("close", () => finish("closed"));
+        sock.once("error", () => finish("closed"));
+      });
+    });
+    result.exchange = exchange;
+    result.exitCode = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve("no-exit"), timeoutMs);
+      t.unref();
+      child.once("close", (code) => { clearTimeout(t); resolve(code); });
+      if (child.exitCode !== null) { clearTimeout(t); resolve(child.exitCode); }
+    });
+  } finally {
+    try { server.close(); } catch { /* 已关 */ }
+    try { child.kill(); } catch { /* 已退出 */ }
+  }
+  return result;
+}
+
+test("桥行为：过了 deadlineAt 不再起 runner（frame_timeout 证据，续修 3）", { skip: !IS_WINDOWS && "真桥仅 Windows" }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-broker-dl-"));
+  const stderrPath = join(dir, ".runner-run_broker_dl.stderr");
+  const runnerScript = join(dir, "never.mjs");
+  writeFileSync(runnerScript, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], 'ran', 'utf8');\n", "utf8");
+  try {
+    const r = await driveRealBroker({
+      dir,
+      runId: "run_broker_dl",
+      payload: {
+        execPath: process.execPath,
+        args: [runnerScript, join(dir, "ran.txt")],
+        env: { PATH: process.env.PATH ?? "" },
+        cwd: dir,
+        prompt: null,
+        stderrPath,
+        deadlineAt: Date.now() - 1000, // 已过期的父端期限
+      },
+    });
+    t.diagnostic(`exchange=${r.exchange} exit=${r.exitCode} handshake=${r.handshake}`);
+    assert.equal(r.handshake, "ok", "握手照常");
+    assert.equal(r.exitCode, 1, "桥以非零退出");
+    await waitUntil(() => existsSync(stderrPath), 3000);
+    assert.ok(String(readFileSync(stderrPath, "utf8")).includes("runnerBroker: frame_timeout"), "证据：过了 deadlineAt 按 frame_timeout 收口");
+    assert.ok(!existsSync(join(dir, "ran.txt")), "runner 没有被起起来");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("桥行为：runner 的异步 error 事件（execPath 不存在）→ spawn_failed 证据，桥不崩（续修 4）", { skip: !IS_WINDOWS && "真桥仅 Windows" }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-broker-se-"));
+  const stderrPath = join(dir, ".runner-run_broker_se.stderr");
+  try {
+    const r = await driveRealBroker({
+      dir,
+      runId: "run_broker_se",
+      payload: {
+        execPath: "Z:\definitely\missing\wao-broker-se.exe",
+        args: ["irrelevant.js"],
+        env: { PATH: process.env.PATH ?? "" },
+        cwd: dir,
+        prompt: null,
+        stderrPath,
+        deadlineAt: Date.now() + 20000,
+      },
+    });
+    t.diagnostic(`exchange=${r.exchange} exit=${r.exitCode} handshake=${r.handshake}`);
+    assert.equal(r.handshake, "ok", "握手照常");
+    assert.equal(r.exitCode, 1, "桥以非零退出（error 事件被接住，不是崩溃挂死）");
+    await waitUntil(() => existsSync(stderrPath), 3000);
+    assert.ok(String(readFileSync(stderrPath, "utf8")).includes("runnerBroker: spawn_failed"), "证据：异步 spawn 失败按 spawn_failed 收口");
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

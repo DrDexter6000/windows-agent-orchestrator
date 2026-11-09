@@ -376,6 +376,7 @@ function lineageIdentityFromStarted(started) {
  * @param {string} input.registryPath — path to agents.json
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding (canonical git root)
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
+ * @param {Function} [input.launchRunnerFn] — injectable runner-launch module (tests; default launchRunner)
  * @param {number} [input.promptHandoffTimeoutMs] — injectable prompt-handoff bound (tests)
  * @param {Function} [input.backendFor] — injectable (agent) => backend instance (tests)
  * @param {Function} [input.prepareContinuationWorktreeFn] — injectable transition (tests)
@@ -400,6 +401,8 @@ export async function continueRun({
   registryPath,
   authorizedWorkspaceRoot,
   spawnFn,
+  // 第 93 批续修 1：启动模块注入缝（测试用；缺省 launchRunner）。
+  launchRunnerFn,
   promptHandoffTimeoutMs,
   backendFor,
   prepareContinuationWorktreeFn = prepareContinuationWorktree,
@@ -802,6 +805,8 @@ export async function continueRun({
   // 12. Construct every static spawn input BEFORE lineage/worktree/transcript
   //     mutation. A bad argv is a request failure, not a half-created child run.
   const _execPath = execPath ?? process.execPath;
+  // 第 93 批续修 1：启动模块注入缝（缺省真实 launchRunner；测试注入失败形状）。
+  const _launchRunner = launchRunnerFn ?? launchRunner;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
   // TD-341：runner stderr 打开器注入缝（缺省真实打开；测试注入失败形状）。
   const _openRunnerStderrFd = openRunnerStderrFn ?? openRunnerStderrFd;
@@ -967,7 +972,7 @@ export async function continueRun({
     // TD-347（第 93 批）：spawn 的形状与提示词/stderr 交接收进启动模块
     // runnerLaunch（Windows 缺省经 WMI 启动桥，spawnFn 注入 / 开关 / 非 Windows
     // 走本进程直起）。TD-341 的 stderr 证据文件语义不变。
-    const launch = await launchRunner({
+    const launch = await _launchRunner({
       execPath: _execPath,
       args: runnerArgs,
       env: runnerEnv,
@@ -980,9 +985,20 @@ export async function continueRun({
       openStderrFn: () => _openRunnerStderrFd(resolvedRunDir, childRunId),
     });
     if (launch.outcome !== "started") {
-      // 任何启动失败都抛出走下方派发前回滚；可能已起的 runner 已由启动模块先
-      // 结束并确认（回滚之前 runner 必须已经结束）。提示词交接超时沿用既有文案；
-      // spawn 抛错保留原始错误对象（M12-7-RC-16 的拒绝语义不变）。
+      // 结束未确认（runner_kill_unconfirmed，续修 1）：runner 可能还活着，**不回滚**
+      // （不重置工作树、不删子转录、不放续修位）——下方 catch 见 reasonCode 原样
+      // 放行；转录留在 pending，交给 wao runs settle 判定。抛出文字点名子运行。
+      // 其余失败码抛出走下方派发前回滚——走到回滚的失败要么确定没起、要么结束
+      // 已被启动模块确认（kill_unconfirmed 之外不存在"边回滚边活着"的路径）。
+      // 提示词交接超时沿用既有文案；spawn 抛错保留原始错误对象（M12-7-RC-16
+      // 的拒绝语义不变）。
+      if (launch.reason === "runner_kill_unconfirmed") {
+        const unconfirmed = new Error(
+          `${runnerLaunchFailureText(launch.reason)}（child run ${childRunId}）`,
+        );
+        unconfirmed.reasonCode = launch.reason;
+        throw unconfirmed;
+      }
       if (launch.reason === "handoff_timeout" || launch.reason === "prompt_handoff_timeout") {
         throw new Error(PROMPT_HANDOFF_TIMEOUT_TEXT);
       }
@@ -992,6 +1008,12 @@ export async function continueRun({
       throw new Error(runnerLaunchFailureText(launch.reason));
     }
   } catch (error) {
+    // 结束未确认：runner 可能还活着，回滚（重置工作树/删子转录/放续修位）会造成
+    // "活 runner 在被回滚的工作树上继续干活 + Lead 再续修一次 = 第二个 runner"。
+    // 原样抛出不回滚（续修 1）。
+    if (error && error.reasonCode === "runner_kill_unconfirmed") {
+      throw error;
+    }
     await rollbackPreSpawnContinuation({
       worktreePath,
       originalBranch: worktreeProof.branch,

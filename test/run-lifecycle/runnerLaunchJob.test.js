@@ -66,7 +66,7 @@ const beat = () => { try { appendFileSync(serviceHeart, "."); } catch { /* 忽�
 beat();
 setInterval(beat, 200);
 // 1) 对照组：本进程直接 detached spawn 的子进程——旧行为，应随作业死。
-const control = spawn(nodeExe, ["-e", "setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" });
+const control = spawn(nodeExe, ["-e", "setInterval(()=>{},1000)"], { detached: true, stdio: "ignore", windowsHide: true });
 control.unref();
 // 2) 经启动模块起假 runner（Windows 缺省 = WMI 启动桥）——应活过作业关闭。
 let launch;
@@ -103,7 +103,7 @@ let prompt = "";
 for await (const c of process.stdin) prompt += c;
 const grand = spawn(process.execPath, ["-e",
   'const fs=require("fs");const f=' + JSON.stringify(grandHeartFile) + ';let n=0;setInterval(()=>{try{fs.appendFileSync(f,"g"+(++n)+"\\\\n")}catch{}},200);setInterval(()=>{},1<<30);'],
-  { stdio: "ignore" });
+  { stdio: "ignore", windowsHide: true });
 appendFileSync(heartFile, JSON.stringify({ grandPid: grand.pid, promptLen: prompt.length, unique: process.env.WAO_JOB_TEST_UNIQUE ?? null }) + "\\n");
 let n = 0;
 setInterval(() => { try { appendFileSync(heartFile, "h" + (++n) + "\\n"); } catch { /* 忽略 */ } }, 200);

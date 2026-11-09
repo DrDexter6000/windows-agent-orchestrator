@@ -99,15 +99,17 @@ export class FrameDecoder {
 }
 
 /**
- * 桥端校验载荷形状（父端发来的 {execPath, args, env, cwd, prompt, stderrPath}）。
+ * 桥端校验载荷形状（父端发来的 {execPath, args, env, cwd, prompt, stderrPath,
+ * deadlineAt}）。deadlineAt 是父端总期限的绝对时刻（epoch 毫秒）：桥过了它就不再
+ * 起 runner（第 93 批续修 3——桥按父端的期限办事，不自设交接时限）。
  * 只认形状，不看语义；任何不合形状都抛 FrameFormatError——桥不猜、不补默认值。
  * @returns {{execPath:string, args:string[], env:Record<string,string>, cwd:string,
- *            prompt:string|null, stderrPath:string}}
+ *            prompt:string|null, stderrPath:string, deadlineAt:number}}
  */
 export function validateBrokerPayload(payload) {
   const bad = (why) => new FrameFormatError(`payload: ${why}`);
   if (payload === null || typeof payload !== "object") throw bad("not an object");
-  const { execPath, args, env, cwd, prompt, stderrPath } = payload;
+  const { execPath, args, env, cwd, prompt, stderrPath, deadlineAt } = payload;
   if (typeof execPath !== "string" || execPath.length === 0) throw bad("execPath");
   if (!Array.isArray(args) || args.some((a) => typeof a !== "string")) throw bad("args");
   if (env === null || typeof env !== "object" || Array.isArray(env)
@@ -117,7 +119,8 @@ export function validateBrokerPayload(payload) {
   if (typeof cwd !== "string" || cwd.length === 0) throw bad("cwd");
   if (prompt !== null && typeof prompt !== "string") throw bad("prompt");
   if (typeof stderrPath !== "string" || stderrPath.length === 0) throw bad("stderrPath");
-  return { execPath, args, env, cwd, prompt, stderrPath };
+  if (!(Number.isInteger(deadlineAt) && deadlineAt > 0)) throw bad("deadlineAt");
+  return { execPath, args, env, cwd, prompt, stderrPath, deadlineAt };
 }
 
 /**

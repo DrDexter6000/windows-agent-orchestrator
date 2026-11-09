@@ -236,8 +236,13 @@ export async function retryCommand(args, config) {
  * @param {object} config - CLI config（runDir/registry/pollInterval 默认值来源）
  * @param {Function} [spawnFn] - 注入缝（测试用；注入即走本进程 spawn 路径，缺省
  *   由启动模块决定——Windows 生产缺省 WMI 启动桥，TD-347）
+ * @param {Function} [openRunnerStderrFn] - stderr 打开器注入缝（测试用）
+ * @param {Function} [launchRunnerFn] - 启动模块注入缝（测试用；缺省 launchRunner，
+ *   第 93 批续修 1）
  */
-export async function forkResumeRunner(runId, options, config, spawnFn, openRunnerStderrFn = openRunnerStderrFd) {
+export async function forkResumeRunner(
+  runId, options, config, spawnFn, openRunnerStderrFn = openRunnerStderrFd, launchRunnerFn = launchRunner,
+) {
   const runDir = resolve(options.runDir ?? config.runDir);
   const registryPath = resolve(options.registry ?? config.registry);
   // M10-pre closeout-3 同款边界校验：--wait-timeout 进入 runner argv 前过
@@ -266,7 +271,7 @@ export async function forkResumeRunner(runId, options, config, spawnFn, openRunn
   // TD-341（第 89 批续修 4）：stderr 落每运行文件 .runner-<runId>.stderr（append，
   //   接在之前的证据后面）；打开失败退回 "ignore"，不阻止接管。runner 的退出钩子
   //   已认 --resume-run-id。
-  const launch = await launchRunner({
+  const launch = await launchRunnerFn({
     execPath: process.execPath,
     args: runnerArgs,
     env: { ...process.env },

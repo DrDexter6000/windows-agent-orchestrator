@@ -315,6 +315,7 @@ function generateRunId() {
  * @param {string} [input.scorecardMode]
  * @param {boolean} [input.requireCertified=false] — propagated to runner + RunManager
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
+ * @param {Function} [input.launchRunnerFn] — injectable runner-launch module (tests; default launchRunner)
  * @param {number} [input.promptHandoffTimeoutMs] — injectable prompt-handoff bound (tests)
  * @param {string} [input.runnerPath] — override detached runner path
  * @param {string} [input.execPath] — override node executable (defaults to process.execPath)
@@ -334,6 +335,8 @@ export async function dispatchRun({
   scorecardMode,
   requireCertified = false,
   spawnFn,
+  // 第 93 批续修 1：启动模块注入缝（测试用；缺省 launchRunner）。
+  launchRunnerFn,
   promptHandoffTimeoutMs,
   runnerPath,
   execPath,
@@ -777,6 +780,8 @@ export async function dispatchRun({
   // durable fact is written — otherwise a rejected dispatch leaves an
   // orphaned pending transcript with no owner.
   const _execPath = execPath ?? process.execPath;
+  // 第 93 批续修 1：启动模块注入缝（缺省真实 launchRunner；测试注入失败形状）。
+  const _launchRunner = launchRunnerFn ?? launchRunner;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
   // TD-341：runner stderr 打开器注入缝（缺省真实打开；测试注入失败形状）。
   const _openRunnerStderrFd = openRunnerStderrFn ?? openRunnerStderrFd;
@@ -1064,7 +1069,7 @@ export async function dispatchRun({
   //   凭据经 env 进载荷（WMI 路径）或直接进 spawn env（spawn 路径），绝不出现在
   //   桥的命令行里。
   const runnerEnv = { ...process.env, ...finalCredentials };
-  const launch = await launchRunner({
+  const launch = await _launchRunner({
     execPath: _execPath,
     args: runnerArgs,
     env: runnerEnv,
@@ -1077,9 +1082,19 @@ export async function dispatchRun({
     openStderrFn: () => _openRunnerStderrFd(resolvedRunDir, finalRunId),
   });
   if (launch.outcome !== "started") {
-    // 启动失败统一收口（可能已起的 runner 已由启动模块结束并确认）：run.error +
-    // failed + 抛错，不留 pending 转录。提示词交接超时沿用既有事实形状与文案；
-    // spawn 抛错保留原始错误对象（M12-7-RC-16 同款语义在调用侧不变）。
+    // 结束未确认（runner_kill_unconfirmed，续修 1）：runner 可能还活着——只写
+    // run.error，**不转 failed**（转录保持 pending，交给 wao runs settle 判定），
+    // 抛固定文字。其余失败码统一收口（可能已起的 runner 已由启动模块结束并
+    // 确认）：run.error + failed + 抛错，不留 pending 转录。提示词交接超时沿用
+    // 既有事实形状与文案；spawn 抛错保留原始错误对象（M12-7-RC-16 同款语义在
+    // 调用侧不变）。
+    if (launch.reason === "runner_kill_unconfirmed") {
+      const text = runnerLaunchFailureText(launch.reason);
+      await transcript.append("run.error", { phase: "runner_start", error: text });
+      const unconfirmed = new Error(text);
+      unconfirmed.reasonCode = launch.reason;
+      throw unconfirmed;
+    }
     const isPromptHandoff = launch.reason === "handoff_timeout" || launch.reason === "prompt_handoff_timeout";
     const thrown = launch.reason === "spawn_error" && launch.detail instanceof Error
       ? launch.detail

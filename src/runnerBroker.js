@@ -10,11 +10,17 @@
 // 起的进程（父进程是 WmiPrvSE.exe）落在另一个允许脱离的作业里，服务重启后存活。
 //
 // 所以控制面（src/application/runnerLaunch.js）不再直接 spawn runner，而是经
-// WMI 起本桥：命令行只有 node、本脚本、--pipe <管道名>、--run-id <runId>——
-// 不带凭据、不带 runner 的长 argv。桥：
-//   1. 连父进程的命名管道，读一帧载荷 {execPath, args, env, cwd, prompt, stderrPath}；
-//   2. 以 append 打开 stderr 文件（失败退回 "ignore"，照第 89 批），detached spawn
-//      runner，spawn 后关闭自己的 fd，prompt 经 stdin 交接（writeRunnerPrompt）；
+// WMI 起本桥：命令行只有 node、本脚本、--pipe <管道名>、--nonce <握手随机数>、
+// --run-id <runId>——不带凭据、不带 runner 的长 argv。桥：
+//   1. 连父进程的命名管道，**先发一帧 {nonce}**（第 93 批续修 6：node 起的管道
+//      缺省 DACL 给 Everyone 读权限、管道名可被列举——握手不对，父端一个载荷
+//      字节都不发，抢先连上的只读客户端拿不到任何东西）；父端核对一致后回一帧
+//      载荷 {execPath, args, env, cwd, prompt, stderrPath, deadlineAt}；
+//   2. 过了 deadlineAt（父端总期限）就不再起 runner；期限内以 append 打开 stderr
+//      文件（失败退回 "ignore"，照第 89 批），detached spawn runner（spawn 抛错
+//      **或异步 error 事件**——cwd/execPath 不存在时 Node 不抛、只发 error——都按
+//      spawn_failed 收口），spawn 后关闭自己的 fd，prompt 经 stdin 交接
+//      （writeRunnerPrompt，超时用 deadlineAt − 现在）；
 //   3. 回一帧 {runnerPid, handoff}，unref runner，退出。
 // 任何失败都不回显 env 与 prompt——错误只落固定闭集理由（stderr 文件 / 退出码）。
 //
@@ -31,7 +37,7 @@ import { connect } from "node:net";
 import { PROMPT_HANDOFF_TIMEOUT_MS, writeRunnerPrompt } from "./runnerPrompt.js";
 import { FrameDecoder, encodeFrame, validateBrokerPayload } from "./application/runnerFrame.js";
 
-// 自己的读帧/回帧期限：父端总期限（PROMPT_HANDOFF_TIMEOUT_MS）先到时会拆掉
+// 自己的连接/读帧期限：父端总期限（PROMPT_HANDOFF_TIMEOUT_MS）先到时会拆掉
 // 管道，桥在这里到点自动退出——父端关管道后桥拿不到载荷，绝不悬空挂着。
 const BROKER_DEADLINE_MS = PROMPT_HANDOFF_TIMEOUT_MS;
 
@@ -53,6 +59,7 @@ function parseArgv(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--pipe") out.pipe = argv[i + 1];
+    else if (argv[i] === "--nonce") out.nonce = argv[i + 1];
     else if (argv[i] === "--run-id") out.runId = argv[i + 1];
   }
   return out;
@@ -67,6 +74,7 @@ function withDeadline(ms, onTimeout) {
 async function main() {
   const opts = parseArgv(process.argv.slice(2));
   if (typeof opts.pipe !== "string" || opts.pipe.length === 0
+    || typeof opts.nonce !== "string" || opts.nonce.length === 0
     || typeof opts.runId !== "string" || opts.runId.length === 0) {
     // 连 stderrPath 都没有——没有证据位，只能裸退出。
     process.exit(1);
@@ -74,7 +82,8 @@ async function main() {
   }
   // --run-id 只为让 settle 的进程扫描在启动窗口内也认得出本桥；桥自身不用它。
 
-  // 1. 连父进程的管道（载荷没到之前 stderrPath 未知——这段失败只有退出码）。
+  // 1. 连父进程的管道，先发握手帧 {nonce}（载荷没到之前 stderrPath 未知——
+  //    这段失败只有退出码）。
   const socket = connect(opts.pipe);
   const connected = await new Promise((resolve) => {
     const cancel = withDeadline(BROKER_DEADLINE_MS, () => resolve(false));
@@ -82,7 +91,14 @@ async function main() {
     socket.once("error", () => { cancel(); try { socket.destroy(); } catch { /* 已关 */ } resolve(false); });
   });
   if (!connected) {
-    process.exit(1);
+    process.exit(1); // connect_failed
+    return;
+  }
+  try {
+    socket.write(encodeFrame({ nonce: opts.nonce }));
+  } catch {
+    try { socket.destroy(); } catch { /* 已关 */ }
+    process.exit(1); // 连上了却发不出握手帧：父端等不到正确 nonce，同样按未验证收口
     return;
   }
 
@@ -128,6 +144,12 @@ async function main() {
       ? payload.stderrPath : null);
     return;
   }
+  // 按父端的期限办事（续修 3）：过了 deadlineAt 不再起 runner。
+  if (Date.now() > validated.deadlineAt) {
+    try { socket.destroy(); } catch { /* 已关 */ }
+    fail("frame_timeout", validated.stderrPath);
+    return;
+  }
 
   // 3. 打开 stderr 证据文件（失败退回 "ignore"，不阻止启动——照第 89 批）。
   let stderrFd = null;
@@ -139,6 +161,8 @@ async function main() {
 
   // 4. detached spawn runner：env/cwd 在创建进程时就生效（NODE_OPTIONS、import
   //    时读的变量都对）；argv 不过 cmd（% ! & ^ " 与超长参数原样到达）。
+  //    cwd/execPath 不存在时 Node 不抛错、异步发 error 事件（续修 4）——必须
+  //    接住，否则桥带着未处理 error 事件崩掉，谁都不知道为什么。
   let runner;
   try {
     runner = spawn(validated.execPath, validated.args, {
@@ -153,12 +177,19 @@ async function main() {
     fail("spawn_failed", validated.stderrPath);
     return;
   }
+  runner.once("error", () => {
+    // 异步 spawn 失败（ENOENT / cwd 不存在等）：写证据退出（幂等——fail 只走一次）。
+    fail("spawn_failed", validated.stderrPath);
+  });
   if (stderrFd !== null) {
     try { closeSync(stderrFd); } catch { /* runner 已继承句柄，本进程的副本关掉 */ }
   }
 
-  // 5. prompt 经 stdin 交接（与派发方直起时同一实现）。
-  const handoff = await writeRunnerPrompt(runner, validated.prompt ?? "");
+  // 5. prompt 经 stdin 交接（与派发方直起时同一实现）；超时用父端期限的剩余
+  //    时间（至少 1 毫秒）——桥不替父端另设时限。
+  const handoff = await writeRunnerPrompt(runner, validated.prompt ?? "", {
+    timeoutMs: Math.max(1, validated.deadlineAt - Date.now()),
+  });
 
   // 6. 回帧 → unref → 退出。handoff 为 "timeout" 时 runner 还活着不读提示词，
   //    结束权在父端（父端按 runnerPid taskkill /T /F——桥不该替父端做决定）。

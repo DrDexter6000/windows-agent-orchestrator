@@ -8,9 +8,12 @@
 // 两条路径：
 //   - WMI 路径（Windows 缺省）：控制面经 powershell → Invoke-CimMethod
 //     Win32_Process.Create 只起短命桥 src/runnerBroker.js（父进程 WmiPrvSE.exe，
-//     不在宿主的 KILL_ON_JOB_CLOSE 作业里）；runner 的 execPath/argv/env/cwd/
-//     prompt/stderrPath 经命名管道一帧载荷交给桥，桥 detached spawn runner 后
-//     回帧 {runnerPid, handoff} 即退。宿主重启 MCP 服务不再连坐 runner。
+//     不在宿主的 KILL_ON_JOB_CLOSE 作业里）。桥命令行由 buildBrokerCommandLine
+//     在父端拼好（含 --nonce 握手随机数）整条交给 WMI；runner 的 execPath/argv/
+//     env/cwd/prompt/stderrPath/deadlineAt 经命名管道一帧载荷交给桥，桥 detached
+//     spawn runner 后回帧 {runnerPid, handoff} 即退。宿主重启 MCP 服务不再连坐
+//     runner。载荷含凭据值：管道握手（桥先发 {nonce}、父端核对一致才发载荷，
+//     续修 6）保证抢先连上的只读客户端拿不到任何载荷字节。
 //   - spawn 路径：本进程直接 detached spawn（原三处写法收进一处）。走它的情形：
 //     非 Windows；WAO_RUNNER_LAUNCH=spawn（显式关闭开关）；调用方注入 spawnFn
 //     （现有测试注入缝，保持不变）。
@@ -18,12 +21,19 @@
 // 启动失败的收口语义（不得有第二个 runner）：
 //   - WMI 建不了进程（ReturnValue≠0 / PowerShell 起不来 / 创建前失败）→
 //     start_failed(wmi_create_failed)，确定没起来，不自动退回 spawn；
-//   - 期限内桥没连上管道 → 关闭管道（迟到的桥拿不到载荷自己退出）→
-//     start_failed(bridge_timeout)；
+//   - 期限内桥没连上管道 → 关闭管道 → start_failed(bridge_timeout)；WMI 已给出
+//     桥 pid 时尽力 taskkill 它（迟到的桥拿不到载荷本会自己退出，这只是收干净）；
+//   - 握手没过（没收到 {nonce} 帧 / 坏帧 / nonce 不一致）→ start_failed
+//     (bridge_unverified)：载荷未发出、runner 未启动（桥 pid 尽力结束）；
 //   - 载荷已发出、回帧没收到 / 回帧坏 / handoff=timeout → runner 可能已在：
-//     按 runnerPid / 桥 pid taskkill /T /F，再按命令行带 --run-id <runId> 且
-//     创建时间不早于本次启动的 node 进程扫描兜底（取法照 runSettle 的
-//     defaultRunnerScan），确认结束后才 start_failed。
+//     先 taskkill /T /F 已知 pid（桥 pid、runnerPid），再按命令行带 --run-id
+//     <runId> 且创建时间不早于本次启动的 node 进程扫描、逐个结束，然后再扫一次
+//     （取法照 runSettle 的 defaultRunnerScan）；已知 pid 全部不在、第二次扫描
+//     成功且无命中才算"结束确认"（整个结束阶段一个 15 秒总预算，续修 2）。
+//     确认 → 原因码 bridge_reply_missing / bridge_reply_invalid / handoff_timeout
+//     （"已被结束并确认"此时才真）；没确认 → 一律 runner_kill_unconfirmed（原
+//     因放 detail），调用方不得收口成 failed/回滚——运行保持 pending，交给
+//     `wao runs settle` 判定（续修 1）。
 //   - spawn 路径：spawn 抛错 → start_failed(spawn_error)（detail 带原始错误，
 //     调用方照旧抛原错误）；提示词交接超时 → 结束 runner → start_failed
 //     (prompt_handoff_timeout)。
@@ -59,29 +69,37 @@ export const DEFAULT_BROKER_PATH = join(
 /** 关闭开关的环境变量名（"spawn" = 显式改回本进程直起）。 */
 export const RUNNER_LAUNCH_SPAWN_ENV = "WAO_RUNNER_LAUNCH";
 
+/** 兜底结束阶段的总预算（ms；两次扫描共用，续修 2）。 */
+export const RUNNER_KILL_BUDGET_MS = 15000;
+
 /** 结果闭集。 */
 export const RUNNER_LAUNCH_OUTCOMES = Object.freeze(["started", "start_failed"]);
 
 /**
- * 启动失败原因闭集（各调用方按现有启动失败收口处理；文本见
- * runnerLaunchFailureText）。payload_too_large / pipe_listen_failed 是 WMI 路径
- * 起任何进程之前的本地失败——确定没有第二个 runner。
+ * 启动失败原因闭集（各调用方按启动失败收口处理；文本见
+ * runnerLaunchFailureText）。wmi_create_failed / payload_too_large /
+ * pipe_listen_failed / bridge_timeout / bridge_unverified 都发生在载荷发出之前
+ * ——确定没有第二个 runner；bridge_reply_missing / bridge_reply_invalid /
+ * handoff_timeout 只在结束已确认时返回（没确认一律折叠成 runner_kill_unconfirmed）。
  */
 export const RUNNER_LAUNCH_FAIL_REASONS = Object.freeze([
   "wmi_create_failed", // WMI（经 PowerShell）没能创建桥进程：确定没起来，不自动退回 spawn
   "payload_too_large", // 载荷帧超过大小上限（进程未起）
   "pipe_listen_failed", // 命名管道建不起来（进程未起）
-  "bridge_timeout", // 总期限内桥没有连上管道：关管道，迟到的桥自己退出
-  "bridge_reply_missing", // 载荷已发、回帧没收到：runner 可能已在 → 已结束并确认
+  "bridge_timeout", // 总期限内桥没有连上管道：关管道（桥 pid 尽力结束）
+  "bridge_unverified", // 管道握手没过（没收到/坏帧/nonce 不一致）：载荷未发出，runner 未启动
+  "bridge_reply_missing", // 载荷已发、回帧没收到：可能已起的进程已被结束并确认
   "bridge_reply_invalid", // 回帧收到但解析/形状不对：同上
   "handoff_timeout", // 回帧说 runner 活着但一直不读提示词：同上
+  "runner_kill_unconfirmed", // 兜底结束没确认（原原因在 detail）：运行保持 pending，交 settle 判定
   "prompt_handoff_timeout", // spawn 路径：提示词交接超时，runner 已被结束
   "spawn_error", // spawn 路径：spawn 抛错（detail 带原始错误）
 ]);
 
 /**
  * 各失败原因的固定报错文本（调用方写 run.error / 抛错都用它，不自由发挥）。
- * wmi_create_failed 的原文点名开关——WMI 起不了时 Lead 的唯一出路。
+ * wmi_create_failed 的原文点名开关——WMI 起不了时 Lead 的唯一出路；
+ * runner_kill_unconfirmed 的原文指引 settle——运行保持 pending，不能收口成 failed。
  */
 export function runnerLaunchFailureText(reason) {
   switch (reason) {
@@ -93,12 +111,16 @@ export function runnerLaunchFailureText(reason) {
       return "后台 runner 启动管道创建失败，runner 未启动。";
     case "bridge_timeout":
       return "后台 runner 启动桥在期限内没有连上管道，runner 未启动。";
+    case "bridge_unverified":
+      return "后台 runner 启动桥没能通过管道握手核对；载荷未发出，runner 未启动。";
     case "bridge_reply_missing":
       return "后台 runner 启动桥没有回帧；可能已起的进程已被结束并确认。";
     case "bridge_reply_invalid":
       return "后台 runner 启动桥的回帧无法判读；可能已起的进程已被结束并确认。";
     case "handoff_timeout":
       return PROMPT_HANDOFF_TIMEOUT_TEXT;
+    case "runner_kill_unconfirmed":
+      return "后台 runner 可能已经启动，WAO 未能确认它已结束；运行保持 pending，用 wao runs settle 判定。";
     case "prompt_handoff_timeout":
       return PROMPT_HANDOFF_TIMEOUT_TEXT;
     case "spawn_error":
@@ -176,32 +198,31 @@ async function launchViaSpawn({
 
 // ── WMI 路径：PowerShell + Win32_Process.Create 起桥 ─────────────────────────
 
-/** b64（UTF-8）：路径/管道名以 base64 进 PS 脚本，零引号拼接。 */
+/** b64（UTF-8）：命令行与路径以 base64 进 PS 脚本，零引号拼接。 */
 function psB64(value) {
   return Buffer.from(String(value), "utf8").toString("base64");
 }
 
 /**
- * 桥的命令行（纯函数）：`"<execPath>" "<brokerPath>" --pipe <pipe> --run-id <runId>`。
- * 不含凭据、不含 runner 长 argv；runId 过闭字母表后嵌入安全。
+ * 桥的命令行（纯函数，生产唯一拼装处——WMI 脚本只是转发它，续修 7）：
+ * `"<execPath>" "<brokerPath>" --pipe <pipe> --nonce <hex> --run-id <runId>`。
+ * 不含凭据、不含 runner 长 argv；runId 过闭字母表、pipe/nonce 是随机十六进制，
+ * 嵌入安全。
  */
-export function buildBrokerCommandLine({ execPath, brokerPath, pipeName, runId }) {
-  return `"${execPath}" "${brokerPath}" --pipe ${pipeName} --run-id ${runId}`;
+export function buildBrokerCommandLine({ execPath, brokerPath, pipeName, nonce, runId }) {
+  return `"${execPath}" "${brokerPath}" --pipe ${pipeName} --nonce ${nonce} --run-id ${runId}`;
 }
 
 /**
- * WMI 创建脚本（纯函数）。命令行与路径全部经 base64 交给 PowerShell（不手拼引号）；
- * 这里本来就不含凭据。ShowWindow=0 不弹窗；输出一行哨兵 wao-launch:<ReturnValue>:<ProcessId>。
+ * WMI 创建脚本（纯函数）。父端拼好的整条桥命令行与 cwd 经 base64 交给 PowerShell
+ * （不手拼引号）；这里本来就不含凭据。ShowWindow=0 不弹窗；输出一行哨兵
+ * wao-launch:<ReturnValue>:<ProcessId>。
  */
-export function buildWmiCreateScript({ execPath, brokerPath, pipeName, runId, cwd }) {
+export function buildWmiCreateScript({ commandLine, cwd }) {
   return [
     "$ErrorActionPreference='Stop';",
-    `$exe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(execPath)}'));`,
-    `$brk=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(brokerPath)}'));`,
-    `$pipe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(pipeName)}'));`,
-    `$rid=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(runId)}'));`,
+    `$cmd=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(commandLine)}'));`,
     `$dir=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psB64(cwd)}'));`,
-    "$cmd='\"'+$exe+'\" \"'+$brk+'\" --pipe '+$pipe+' --run-id '+$rid;",
     // ShowWindow 是 uint16：PS 的整数字面量是 int32，直接给会 0x80041005 类型
     // 不匹配（实测）——显式 [UInt16]0。
     "$si=New-CimInstance -ClassName Win32_ProcessStartup -Property @{ShowWindow=[UInt16]0} -ClientOnly;",
@@ -231,17 +252,16 @@ export function parseLaunchSentinel(stdout) {
 
 /**
  * 缺省"起桥"实现：powershell.exe -NoProfile -NonInteractive -EncodedCommand 调
- * Invoke-CimMethod Win32_Process.Create。有界等待（timeoutMs），按哨兵判读；
- * 起不来 / 哨兵缺失 / ReturnValue≠0 → {ok:false, detail}（detail 是固定码/码值，
- * PS 的 stderr 尾部至多 512 字节——脚本里只有 base64 的路径与管道名，无凭据）。
+ * Invoke-CimMethod Win32_Process.Create（命令行已在 handoff.commandLine 拼好）。
+ * 有界等待（timeoutMs），按哨兵判读；起不来 / 哨兵缺失 / ReturnValue≠0 →
+ * {ok:false, detail}（detail 是固定码/码值，PS 的 stderr 尾部至多 512 字节——
+ * 脚本里只有 base64 的桥命令行与 cwd，无凭据）。
+ * @param {{commandLine:string, cwd:string, timeoutMs:number, psSpawnFn?:Function}} handoff
  * @returns {Promise<{ok:true, pid:number}|{ok:false, detail:string}>}
  */
-export function defaultWmiSpawnBroker(pipeName, {
-  execPath, brokerPath, runId, cwd, timeoutMs,
-  psSpawnFn = nodeSpawn,
-} = {}) {
+export function defaultWmiSpawnBroker({ commandLine, cwd, timeoutMs, psSpawnFn = nodeSpawn } = {}) {
   return new Promise((resolve) => {
-    const script = buildWmiCreateScript({ execPath, brokerPath, pipeName, runId, cwd });
+    const script = buildWmiCreateScript({ commandLine, cwd });
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     let child;
     try {
@@ -292,7 +312,7 @@ export function defaultWmiSpawnBroker(pipeName, {
   });
 }
 
-// ── WMI 路径失败兜底：结束可能已起的 runner，确认后再报失败 ──────────────────
+// ── WMI 路径失败兜底：结束可能已起的 runner ──────────────────────────────────
 
 /** taskkill /T /F（runStop.js 同款形状）：结束进程树，永不抛。 */
 function defaultTaskkill(pid) {
@@ -303,6 +323,13 @@ function defaultTaskkill(pid) {
   } catch {
     return { called: true, exitCode: null };
   }
+}
+
+/** 尽力结束单个 pid（killDeps.taskkillFn 可注入；不影响任何结果码）。 */
+function bestEffortTaskkill(killDeps, pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  const fn = killDeps && typeof killDeps.taskkillFn === "function" ? killDeps.taskkillFn : defaultTaskkill;
+  fn(pid);
 }
 
 /**
@@ -359,13 +386,16 @@ export function defaultKillScan(runId, notBeforeMs, { execFileFn = execFile, tim
   });
 }
 
-const defaultSleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
-
 /**
- * 结束可能已起的 runner（不得有第二个 runner）：先按已知 pid（runnerPid/桥 pid）
- * taskkill /T /F；再兜底扫描（命令行带 runId、创建时间不早于本次启动的 node
- * 进程）逐个结束；有界轮询确认全部退出。taskkill 对已退出 pid 返回非零——状态
- * 忽略，以判活为准。
+ * 结束可能已起的 runner（不得有第二个 runner）。顺序与"确认"的含义（续修 2）：
+ *   ① taskkill /T /F 已知 pid（桥 pid、runnerPid）——先于任何扫描：扫描快照可能
+ *      早于桥 spawn runner，先杀已知者把窗口压到最小；
+ *   ② 第一次扫描（命令行带 runId、创建时间不早于本次启动的 node 进程），命中即结束；
+ *   ③ 第二次扫描：确认干净。
+ * "结束确认" = 已结束的 pid 全部判死 && 第二次扫描成功 && 零命中。整个结束阶段
+ * 一个总预算（缺省 RUNNER_KILL_BUDGET_MS=15s，两次扫描共用），预算用完按
+ * scanOk=false——不确认、不谎称干净。taskkill 对已退出 pid 返回非零——状态忽略，
+ * 以判活为准。
  * @returns {Promise<{confirmed:boolean, killedPids:number[], scanOk:boolean}>}
  */
 async function killPossiblyStartedRunner({
@@ -373,37 +403,49 @@ async function killPossiblyStartedRunner({
   taskkillFn = defaultTaskkill,
   scanFn = defaultKillScan,
   isAliveFn = isPidAlive,
-  sleepFn = defaultSleep,
+  budgetMs = RUNNER_KILL_BUDGET_MS,
 }) {
+  const deadline = Date.now() + Math.max(1, budgetMs);
+  const remaining = () => deadline - Date.now();
   const killedPids = [];
-  for (const pid of [runnerPid, bridgePid]) {
+  const killOne = (pid) => {
     if (Number.isInteger(pid) && pid > 0 && !killedPids.includes(pid)) killedPids.push(pid);
-  }
-  let scanOk = true;
-  if (typeof runId === "string" && isValidRunId(runId)) {
-    const scanned = await scanFn(runId, notBeforeMs);
-    if (scanned && scanned.ok) {
-      for (const pid of scanned.pids) {
-        if (!killedPids.includes(pid)) killedPids.push(pid);
+    else return;
+    taskkillFn(pid);
+  };
+  for (const pid of [bridgePid, runnerPid]) killOne(pid);
+
+  let scanOk;
+  let secondScanClean = false;
+  if (typeof runId !== "string" || !isValidRunId(runId)) {
+    scanOk = false; // 没有可用的扫描键：证明不了"没有第二个 runner"
+  } else {
+    if (remaining() > 0) {
+      const first = await scanFn(runId, notBeforeMs);
+      if (first && first.ok) {
+        for (const pid of first.pids) killOne(pid);
       }
+    }
+    if (remaining() > 0) {
+      const second = await scanFn(runId, notBeforeMs);
+      scanOk = Boolean(second && second.ok);
+      secondScanClean = scanOk && second.pids.length === 0;
     } else {
-      scanOk = false; // 扫描失败：不能证明"没有第二个 runner"，如实上报
+      scanOk = false; // 预算用完：没做成第二次扫描
     }
   }
-  for (const pid of killedPids) taskkillFn(pid);
-  for (let round = 0; round < 10; round += 1) {
-    const alive = killedPids.filter((pid) => isAliveFn(pid));
-    if (alive.length === 0) return { confirmed: true, killedPids, scanOk };
-    await sleepFn(300);
-  }
-  return { confirmed: false, killedPids, scanOk };
+  const confirmed = scanOk === true && secondScanClean && killedPids.every((pid) => !isAliveFn(pid));
+  return { confirmed, killedPids, scanOk };
 }
 
-// ── WMI 路径：管道 + 帧交换 ──────────────────────────────────────────────────
+// ── WMI 路径：管道 + 握手 + 帧交换 ───────────────────────────────────────────
 
-/** 等桥连上（只接受第一个连接，随即停止监听）；期限内没连上/服务先关 → 失败。
- * 监听器必须先于"起桥"装上：net 服务对无 connection 监听时到达的连接会直接
- * 销毁——桥若在 PowerShell 退出前抢先连上，迟到装监听会把它丢掉。 */
+/**
+ * 等桥连上（只接受第一个连接，随即停止监听）；期限内没连上/服务先关 → 失败。
+ * 监听器必须先于"起桥"装上：会审实测（Node 22）无 connection 监听时到达的连接
+ * 并不会被 net 销毁，只是 'connection' 事件无人消费——这条连接再也无法交给后续
+ * 装上的监听者，效果上同样丢失；先装监听再起桥，消除这个纯时序竞态（续修 8）。
+ */
 function awaitBridgeConnection(server, deadlineMs) {
   return new Promise((resolve) => {
     let settled = false;
@@ -431,13 +473,19 @@ function awaitBridgeConnection(server, deadlineMs) {
 }
 
 /**
- * 发载荷、收回帧。回帧缺失（对端先关/错误/到期）与回帧坏（解析/形状失败）分开
- * 报——两者的失败原因码不同，兜底结束动作相同。
- * @returns {Promise<{received:true, value:object}|{received:false, kind:"reply_missing"|"reply_invalid"}>}
+ * 握手 → 发载荷 → 收回帧（一个总期限，续修 6）：
+ *   ① 等桥的第一帧 {nonce}，核对一致才写载荷——不一致 / 坏帧 / 没收到（对端先
+ *      关 / 到期）→ unverified，载荷一个字节都不发（抢先连上的只读客户端拿不到
+ *      任何载荷内容）；
+ *   ② 发载荷后等回帧；回帧缺失（对端先关/错误/到期）与回帧坏（解析失败）分开报
+ *      ——两者的失败原因码不同，兜底结束动作相同。
+ * @returns {Promise<{kind:"unverified"}|{received:true, value:object}|
+ *   {received:false, kind:"reply_missing"|"reply_invalid"}>}
  */
-function exchangeFrames(socket, payloadBuffer, deadlineMs) {
+function handshakeAndExchange(socket, expectedNonce, payloadBuffer, deadlineMs) {
   return new Promise((resolve) => {
-    const decoder = new FrameDecoder();
+    let decoder = new FrameDecoder();
+    let nonceVerified = false;
     let settled = false;
     const finish = (r) => {
       if (settled) return;
@@ -449,26 +497,37 @@ function exchangeFrames(socket, payloadBuffer, deadlineMs) {
       try { socket.destroy(); } catch { /* 已关 */ }
       resolve(r);
     };
-    const timer = setTimeout(() => finish({ received: false, kind: "reply_missing" }), Math.max(0, deadlineMs - Date.now()));
+    const timer = setTimeout(() => finish({ kind: nonceVerified ? "reply_missing" : "unverified" }), Math.max(0, deadlineMs - Date.now()));
     const onData = (chunk) => {
       try {
         const r = decoder.push(chunk);
-        if (r.status === "frame") finish({ received: true, value: r.value });
+        if (r.status !== "frame") return;
+        if (!nonceVerified) {
+          if (r.value && typeof r.value === "object" && r.value.nonce === expectedNonce) {
+            nonceVerified = true;
+            decoder = new FrameDecoder(); // 单帧解码器：回帧用新的一个
+            socket.write(payloadBuffer); // 核对通过之前，载荷从未离开本进程
+          } else {
+            finish({ kind: "unverified" });
+          }
+          return;
+        }
+        finish({ received: true, value: r.value });
       } catch {
-        finish({ received: false, kind: "reply_invalid" });
+        finish({ kind: nonceVerified ? "reply_invalid" : "unverified" });
       }
     };
-    const onError = () => finish({ received: false, kind: "reply_missing" });
-    const onClose = () => finish({ received: false, kind: "reply_missing" });
+    const onError = () => finish({ kind: nonceVerified ? "reply_missing" : "unverified" });
+    const onClose = () => finish({ kind: nonceVerified ? "reply_missing" : "unverified" });
     socket.on("data", onData);
     socket.once("error", onError);
     socket.once("close", onClose);
-    socket.write(payloadBuffer);
   });
 }
 
 /**
- * WMI 路径主体。一个总期限覆盖全部步骤（开管道 → 起桥 → 等连接 → 发载荷 → 等回帧）。
+ * WMI 路径主体。一个总期限覆盖全部步骤（开管道 → 起桥 → 等连接 → 握手 → 发
+ * 载荷 → 等回帧）；同一期限以 deadlineAt 随载荷交给桥（续修 3）。
  */
 async function launchViaWmi({
   execPath, args, env, cwd, prompt, stderrPath, runId, timeoutMs,
@@ -480,14 +539,21 @@ async function launchViaWmi({
   // 载荷先编码：超限在起任何进程之前失败。
   let payloadBuffer;
   try {
-    payloadBuffer = encodeFrame({ execPath, args, env, cwd, prompt: prompt ?? null, stderrPath });
+    payloadBuffer = encodeFrame({
+      execPath, args, env, cwd, prompt: prompt ?? null, stderrPath,
+      deadlineAt: deadlineMs,
+    });
   } catch (e) {
     if (e instanceof FrameTooLargeError) return startFailed("payload_too_large", { detail: e.message });
     throw e;
   }
 
   // 开管道：\\.\pipe\wao-runner-<runId>-<128bit 随机十六进制>；只接受第一个连接。
+  // 握手 nonce（另一个 128bit 随机十六进制）只进桥命令行与本进程内存——别的账户
+  // 读不到他人进程的命令行，只读客户端也发不出正确的 {nonce} 帧。
   const pipeName = `\\\\.\\pipe\\wao-runner-${runId}-${randomBytes(16).toString("hex")}`;
+  const nonce = randomBytes(16).toString("hex");
+  const brokerCommandLine = buildBrokerCommandLine({ execPath, brokerPath, pipeName, nonce, runId });
   const server = createServer();
   const listenOutcome = await new Promise((resolve) => {
     server.once("error", (e) => resolve({ ok: false, error: e }));
@@ -499,15 +565,17 @@ async function launchViaWmi({
   }
 
   try {
-    // 先装连接监听、再起桥（缺省 PowerShell + WMI）——见 awaitBridgeConnection
-    // 头注：无监听时到达的连接会被 net 直接销毁。
+    // 先装连接监听、再起桥——见 awaitBridgeConnection 头注（时序竞态）。
     const connPromise = awaitBridgeConnection(server, deadlineMs);
 
-    // 起桥。ReturnValue≠0 / 起不来 → 确定没起来。这条早退路径上 connPromise 无人
-    // 消费：finally 的 server.close() 让它经 'close' 落定；若极端时序下桥仍连上
-    // 了，兜底销毁该连接（拿不到载荷的桥自己会退出）。
-    const created = await wmiSpawnBrokerFn(pipeName, {
-      execPath, brokerPath, runId, cwd, timeoutMs: Math.max(1, deadlineMs - Date.now()),
+    // 起桥（缺省 PowerShell + WMI，命令行已由 buildBrokerCommandLine 拼好整条
+    // 交给它）。ReturnValue≠0 / 起不来 → 确定没起来。这条早退路径上 connPromise
+    // 无人消费：finally 的 server.close() 让它经 'close' 落定；若极端时序下桥仍
+    // 连上了，兜底销毁该连接（拿不到载荷的桥自己会退出）。
+    const created = await wmiSpawnBrokerFn({
+      commandLine: brokerCommandLine,
+      execPath, brokerPath, pipeName, nonce, runId, cwd,
+      timeoutMs: Math.max(1, deadlineMs - Date.now()),
     });
     if (!created || created.ok !== true) {
       connPromise.then((r) => {
@@ -517,30 +585,43 @@ async function launchViaWmi({
     }
     const bridgePid = Number.isInteger(created.pid) && created.pid > 0 ? created.pid : null;
 
-    // 等桥连接。期限内没连上：关管道（迟到的桥拿不到载荷会自己退出）→ 失败。
+    // 等桥连接。期限内没连上：关管道；WMI 已给出桥 pid 时尽力结束它（迟到的桥
+    // 拿不到载荷本会自己退出，这里只是收干净，不影响结果码——续修 5）。
     const conn = await connPromise;
     if (!conn.connected) {
+      bestEffortTaskkill(killDeps, bridgePid);
       return startFailed("bridge_timeout");
     }
 
-    // 发载荷、收回帧。缺失/坏帧：runner 可能已经在了 → 结束并确认后失败。
-    const reply = await exchangeFrames(conn.socket, payloadBuffer, deadlineMs);
+    // 握手 → 载荷 → 回帧。握手没过：载荷未发出、runner 未启动；桥 pid 尽力结束。
+    const exchange = await handshakeAndExchange(conn.socket, nonce, payloadBuffer, deadlineMs);
+    if (exchange.kind === "unverified") {
+      bestEffortTaskkill(killDeps, bridgePid);
+      return startFailed("bridge_unverified");
+    }
+
+    // 回帧缺失/坏、handoff=timeout：runner 可能已在 → 结束并确认后失败。确认了
+    // 才用原原因码；没确认一律折叠成 runner_kill_unconfirmed（原原因进 detail，
+    // 续修 1）——调用方不得把它收口成 failed/回滚。
     const kill = (runnerPid) => killPossiblyStartedRunner({ runId, runnerPid, bridgePid, notBeforeMs, ...killDeps });
-    const killExtras = (killResult) => ({ killConfirmed: killResult.confirmed, killScanOk: killResult.scanOk });
-    if (!reply.received) {
-      const killResult = await kill(null);
-      return startFailed(reply.kind === "reply_invalid" ? "bridge_reply_invalid" : "bridge_reply_missing", killExtras(killResult));
+    const killOutcome = (originalReason, killResult) => (killResult.confirmed === true && killResult.scanOk === true
+      ? startFailed(originalReason, { killConfirmed: true, killScanOk: true })
+      : startFailed("runner_kill_unconfirmed", {
+        detail: originalReason,
+        killConfirmed: killResult.confirmed,
+        killScanOk: killResult.scanOk,
+      }));
+    if (!exchange.received) {
+      return killOutcome(exchange.kind === "reply_invalid" ? "bridge_reply_invalid" : "bridge_reply_missing", await kill(null));
     }
     let validated;
     try {
-      validated = validateBrokerReply(reply.value);
+      validated = validateBrokerReply(exchange.value);
     } catch {
-      const killResult = await kill(null);
-      return startFailed("bridge_reply_invalid", killExtras(killResult));
+      return killOutcome("bridge_reply_invalid", await kill(null));
     }
     if (validated.handoff === "timeout") {
-      const killResult = await kill(validated.runnerPid);
-      return startFailed("handoff_timeout", killExtras(killResult));
+      return killOutcome("handoff_timeout", await kill(validated.runnerPid));
     }
     // "written" | "runner_exited"：runner 已起（runner_exited = 起过又退出，它的
     // 启动失败路径自己落盘——与 spawn 路径口径一致）。桥自行退出，不需要收尾。
@@ -563,17 +644,19 @@ async function launchViaWmi({
  * @param {string|null} input.prompt — 任务书（resume 为 null）
  * @param {string} input.stderrPath — .runner-<runId>.stderr 的绝对路径
  * @param {string} input.runId
- * @param {number} [input.timeoutMs=PROMPT_HANDOFF_TIMEOUT_MS] — 总期限（覆盖 WMI 路径全部步骤 / spawn 路径的提示词交接）
+ * @param {number} [input.timeoutMs=PROMPT_HANDOFF_TIMEOUT_MS] — 总期限（WMI 路径全部步骤 + 随载荷交给桥的 deadlineAt / spawn 路径的提示词交接）
  * @param {Function} [input.spawnFn] — 注入即走 spawn 路径（现有测试缝）
  * @param {Function} [input.openStderrFn] — spawn 路径 stderr 打开器（缺省真实打开；测试注入失败形状）
- * @param {Function} [input.wmiSpawnBrokerFn] — 起桥实现（缺省 PowerShell+WMI；测试注入）
- * @param {object} [input.killDeps] — 兜底结束的注入件 {taskkillFn, scanFn, isAliveFn, sleepFn}
+ * @param {Function} [input.wmiSpawnBrokerFn] — 起桥实现（缺省 PowerShell+WMI；测试注入。收到
+ *   {commandLine, execPath, brokerPath, pipeName, nonce, runId, cwd, timeoutMs}——绝不含 env/prompt/runner argv）
+ * @param {object} [input.killDeps] — 兜底结束的注入件 {taskkillFn, scanFn, isAliveFn, budgetMs}
  * @param {string} [input.brokerPath]
  * @returns {Promise<{outcome:"started", runnerPid:number|null}|
  *   {outcome:"start_failed", runnerPid:number|null, reason:string, detail?:*,
  *    killConfirmed:boolean|null, killScanOk:boolean|null}>}（killConfirmed/killScanOk
- *   只在"runner 可能已起、已做兜底结束"的失败上非 null：confirmed=已知 pid 全部
- *   确认退出；scanOk=false=兜底扫描失败，不能证明没有第二个 runner。）
+ *   只在"runner 可能已起"的失败上非 null：confirmed=结束已确认；scanOk=false=兜底
+ *   扫描/预算失败，不能证明没有第二个 runner。reason=runner_kill_unconfirmed 时
+ *   detail 是被折叠的原原因码。）
  */
 export async function launchRunner({
   execPath, args, env, cwd, prompt, stderrPath, runId,
