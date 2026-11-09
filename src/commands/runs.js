@@ -650,7 +650,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // 证据是 settle 六道门的只读干跑，无单一 basis 可回显——事实句说清"无活
     // owner 心跳、无可能仍在驱动它的进程"，不回显 pid/路径/命令行。
     // TD-341（第 89 批 C3）：附 runner stderr 尾部（展示处理后的文本，限长）；
-    // 无文件/空文件分固定文案（resume 接管与旧派发形态本就没有文件）。
+    // 无文件/空文件分固定文案（第 89 批之前派发、未经 resume 接管的运行没有文件）。
     process.exitCode = 3;
     const s = outcome.settlement;
     const nextStep = buildNextStep({ surface: "cli", situation: "runner_gone", runId });

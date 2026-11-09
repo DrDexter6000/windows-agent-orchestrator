@@ -20,8 +20,8 @@
 //      不在。会话形状由门 5 权威判定，前置筛选不复制。
 //   3. createRunnerGoneProofCache / probeRunnerGoneCached —— run_status 读面的
 //      进程内节流：按 runId 缓存证明结果（键含转录最后 seq；seq 变化或心跳变
-//      新鲜即失效；时长 RUNNER_GONE_PROOF_CACHE_TTL_MS）；同一 runId 的并发调用
-//      共用一次在飞的证明。缓存实例由调用面（server 闭包）持有——application
+//      新鲜即失效；时长 RUNNER_GONE_PROOF_CACHE_TTL_MS）；同一 runId、同一 lastSeq
+//      的并发调用共用一次在飞的证明。缓存实例由调用面（server 闭包）持有——application
 //      层不存全局/持久状态。
 //
 // Architectural contract:
@@ -155,7 +155,7 @@ export function createRunnerGoneProofCache() {
  * 前置筛选 + 缓存 + 在飞共用 + 证明的组合读面（run_status / preflight 候选共用）：
  *   1. 前置筛选不过 → { gone:false, prefilter }（不碰缓存、不发证明）；
  *   2. 缓存命中（未过 TTL 且 seq 未变）→ 直接返回；
- *   3. 有在飞证明 → 共用同一次；
+ *   3. 有同一 lastSeq 的在飞证明 → 共用同一次（seq 不同各发各的）；
  *   4. 否则发证明（proveFn 可注入），结果进缓存后返回。
  * 证明抛错按"探测失败"处理：gone:false，不缓存（下一次读面可重试）。
  *

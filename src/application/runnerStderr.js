@@ -5,8 +5,9 @@
 // 真实事故：一次内存泄漏让 runner 堆耗尽、V8 直接 abort——stdio 全 ignore，
 // 没有任何痕迹，转录停在 running，Lead 的后台等待白等。本模块把派发侧打开的
 // `.runner-<runId>.stderr`（与 `.owner-<runId>` 同目录同风格）作为唯一诊断
-// 证据位：runner 干净退出（退出码 0）时由 backgroundRunner 的进程级退出钩子
-// 同步删除；失败、被强杀、V8 abort 不走或非 0 退出，文件自然留下。
+// 证据位：runner 以退出码 0 退出且文件为空时，由 backgroundRunner 的进程级退出
+// 钩子同步删除；非空（之前的崩溃证据、本进程的报错、Node 警告）、非 0 退出、
+// 被强杀、V8 abort（不走退出钩子），文件都留下。
 //
 // 这个文件只作诊断证据，不参与任何状态判定（settle 六道门、收口判定、liveness
 // 投影都不读它）。原始 stderr 落盘不截断、不脱敏（捕获 V8 abort 只能这样）；
@@ -29,7 +30,7 @@ import { tailOfRedactedText } from "./runActivityProjection.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 
 /** 尾部读取的缺省字节数（原始字节，展示处理前；也是展示文本的字符上限——
- *  UTF-8 下字符数不超过字节数，读进来的窗口展示时不会再被截掉有效内容）。 */
+ *  UTF-8 下字符数不超过字节数，只有脱敏标签比原值长时展示才会再截）。 */
 export const RUNNER_STDERR_TAIL_DEFAULT_BYTES = 4096;
 
 /** 文件不在/读不到时的固定说明（CLI 面）。 */

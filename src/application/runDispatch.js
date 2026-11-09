@@ -1053,8 +1053,8 @@ export async function dispatchRun({
   // unref so the parent does not wait for it.
   // TD-341（第 89 批 A）：stderr 落每运行文件 .runner-<runId>.stderr——打开失败
   // 不能阻止派发，退回 "ignore"；父进程在 spawn 之后（spawn 抛错时也要）关闭
-  // 自己的 fd，runner 侧继承的句柄不受影响。runner 干净退出（码 0）时由其退出
-  // 钩子删除该文件，失败/被杀/V8 abort 自然留下。
+  // 自己的 fd，runner 侧继承的句柄不受影响。runner 以码 0 退出且文件为空时由
+  // 其退出钩子删除该文件，其余情形（非空、失败、被杀、V8 abort）都留下。
   // M11-7: thread resolved credential VALUES into the runner's env (NOT argv —
   // values must never appear in argv). The runner's ProcessBackend then inherits
   // them via process.env (buildChildEnv) and redacts them (createSecretRedactor).

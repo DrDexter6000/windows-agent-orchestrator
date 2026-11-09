@@ -412,8 +412,9 @@ export async function waitRunSettlement({
                 lastRunnerProofAt = proofNow;
                 lastRunnerRefusal = "owner_fresh";
               }
-              // 其余拒绝理由（terminal 在本分支不可达——外层已筛非终态；no_events、
-              // quiet_window 在 quietDue 已含）：照旧不发证明、不更新记录的理由。
+              // 其余拒绝理由在本分支都不可达（terminal：外层已筛非终态；no_events：
+              // events 必是数组；quiet_window：quietDue 已含）：照旧不发证明、不更新
+              // 记录的理由。
             }
           }
           const now = nowFn();

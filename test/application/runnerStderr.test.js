@@ -76,7 +76,7 @@ test("TD-341-A: 尾部读取按字节窗（缺省 4096）；文件不在 → nul
   }
 });
 
-test("TD-341-A: 展示处理——CRLF 规整为 LF、exact/形状脱敏、控制字符清洗、限长=读取窗口", async () => {
+test("TD-341-A: 展示处理——CRLF 规整为 LF、exact/形状脱敏、控制字符清洗、读取窗口截断", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td341a-disp-"));
   try {
     const CRLF = String.fromCharCode(13) + "\n";
