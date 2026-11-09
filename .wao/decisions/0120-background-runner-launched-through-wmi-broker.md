@@ -13,6 +13,8 @@
 3. 经 WMI `Win32_Process.Create` 起的进程（父进程 `WmiPrvSE.exe`）落在另一个作业（`0x1800`，无 kill-on-close，无内存与进程数上限），服务重启后存活；与调用者同会话、同用户，`taskkill /T /F` 能结束它。
 4. 一个 MCP 服务由多个 Code 会话共用，一个会话的超时会带走别的会话、别的项目的 worker。
 
+合入（df75aded）后在真实宿主上验证：经新代码的 MCP 服务派发的运行，runner 的父链是 服务 → PowerShell → `WmiPrvSE.exe` → 启动桥（已退出）→ runner；随后一次请求超时让宿主重启服务（服务进程退出），runner 与其下的 dsh、keep-awake 进程都活着，运行照常跑到 `run.completed`。
+
 ## 决定
 
 1. 三处起后台 runner 的地方（派发、续修、resume 接管）共用一个启动模块。Windows 上的缺省路径：父进程开一次性命名管道（名字带 128 位随机数，只接受第一个连接），经 PowerShell 调 WMI 起一个短命的启动桥（命令行只有 node、桥脚本、管道名、`--run-id` 与一次性 nonce，不带凭据与 runner 的长 argv）；桥连上后先发 nonce，父端核对一致才发一帧载荷 `{execPath, args, env, cwd, prompt, stderrPath, deadlineAt}`（上限 4 MiB）；桥在期限内按原来的形状起 runner（env 在创建进程时生效、提示词经 stdin、stderr 落 `.runner-<runId>.stderr`），回 `{runnerPid, handoff}` 后退出。node 的管道缺省 DACL 给 Everyone 读权限、名字又能被列举，nonce 挡住别的账户只读连上拿走载荷（它们读不到他人进程的命令行）。
