@@ -502,8 +502,8 @@ export const VERIFIER_GONE_REFUSALS = Object.freeze([
  *      （本证明只覆盖终态 completed 的后台运行——证明成立后 nextStep 指的拒收
  *      命令走有界 pending 拒收的 completed 分支，这条事实仍必需，legacy 末事件
  *      推断不算。终态 failed 的重新打包交付由调用 run_delivery_repackage 的进程
- *      在验证闸下排队并验证，这里证明不了那个进程是否还在，不覆盖，见台账
- *      TD-345）；
+ *      验证（闸开着时先在闸前排队），这里证明不了那个进程是否还在，不覆盖，见
+ *      台账 TD-345）；
  *      validateDeliveryFacts（pending 感知、runId 绑定）valid、原始验证 pending、
  *      无 reverify 事实；
  *   2. 恰好一条绑定的 run.background_submitted（前台运行在 Lead 自己的 wao run
@@ -546,8 +546,8 @@ export async function proveVerifierGone({ events, runId, runDir, deps = {} } = {
   // 且无结果、无 reverify。这里只证明终态 completed 的后台运行的验证者（驱动
   // 它的 runner）已不在；绑定的 completed 事实仍必需——证明成立后 nextStep 指
   // 的拒收命令走有界 pending 拒收的 completed 分支（legacy 末事件推断不算）。
-  // 终态 failed 的重新打包交付由调用 run_delivery_repackage 的进程在验证闸下
-  // 排队并验证，这里证明不了那个进程是否还在，不覆盖（见台账 TD-345）。
+  // 终态 failed 的重新打包交付由调用 run_delivery_repackage 的进程验证（闸开
+  // 着时先在闸前排队），这里证明不了那个进程是否还在，不覆盖（见台账 TD-345）。
   const completedAt = _completedAtMs(events, runId);
   const state = findState(bound);
   const deliveryFacts = validateDeliveryFacts(events, {

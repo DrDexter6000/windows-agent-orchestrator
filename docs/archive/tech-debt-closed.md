@@ -162,3 +162,4 @@
 | TD-338 | `runs lineage-close --run-id <子运行>` 把 `run.lineage_closed`（信封 runId 写成根）追加进子运行的转录，而续修门与回收计划只读根转录，线系实际没关；2026-11-06 第 77 批收口时 D2 用子运行 id 关闭即如此，改用根 id 重关才生效 | 2026-11-08：推出的根与传入 id 不同时，存在性检查、读取、锁内重读与追加都换到根运行的转录，结果带 `requestedRunId`；补了用子运行 id 关闭的测试 |
 | TD-343 | `lead_preflight` 的 MCP 工具描述没写 open item 行（决定 0113）；描述字节冻结在实测值上，加一句要 Owner 批准重冻 | 2026-11-08：Owner 批准重冻，第 87 批给描述补一句 open item 行；冻结线 description 12063→12219、wire 93212→93324、hostVisible 23270→23426，都在 Owner 硬顶内 |
 | TD-341 | 后台 runner 的 stdout/stderr 被丢弃，内存耗尽或未捕获异常时无声退出、转录停在 running；MCP 读面不说 runner 已不在 | 2026-11-08 第 89 批：stderr 落 `.runner-<runId>.stderr`（退出码 0 且为空时删除），CLI `status` 与 `runs wait` 的 runner_gone 附脱敏尾部；`run_status`、`lead_preflight` 用同一 settle 干跑证明说出 runner 已不在 |
+| TD-342 | `runs settle <runId>` 写成位置参数时不报错，改列全部候选；`--apply <词>` 把词吞成值、变成干跑 | 2026-11-09 第 90 批：位置参数一律报用法错并指向 `--run-id`，`--apply` 不取值 |
