@@ -4,6 +4,8 @@
 // "转录里多久没有新的动作或正文"这一事实只在这里推导（纯函数、零 I/O、转录零
 // 写入）：CLI status 的 advisory 行、MCP run_status 的 leadAdvisory、run_wait /
 // run_await_result 的 observation.transcript_quiet 语义注记共用它。
+// TD-341（第 89 批 C）：runner 已被证明不在时的 advisory 双语模板同在本模块
+//（runnerGoneAdvisoryText / runnerGoneAdvisoryWireText）——advisory 文本单一 SSOT。
 //
 // "动作或正文"与 completed_empty 判定同一口径（runEventIsUsableEffect）；
 // runtime_activity / thinking 只说明运行时还活着。陈述的是转录可见的事实：有的
@@ -118,4 +120,39 @@ export function leadAdvisoryWireText({ secondsSinceEffect, lastActivityEventKind
   return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
     + recent
     + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
+}
+
+/**
+ * TD-341（第 89 批 C）：runner 已被证明不在时的 advisory 文本（MCP 面固定英文
+ * 模板 + 整数；CLI 面对应中文）。口径与决定 0068 同族：固定模板 + 整数 + 闭集
+ * 标签，不含 stderr、异常消息或任何自由文本。**不说"转录永不再前进"**——
+ * settle、resume 都能合法追加；说的是"观察时没有 WAO 进程能继续驱动它"。
+ * 是否结算由 Lead 决定，出口指明先干跑、再加 --apply。
+ *
+ * 英文模板（wire；runId 以 <id> 占位符出现——模板整体逐字节固定）。
+ *
+ * @param {object} facts
+ * @param {number} facts.quietMinutes — 静默已满的整数分钟（≥ 结算静默窗）
+ * @returns {string}
+ */
+export function runnerGoneAdvisoryWireText({ quietMinutes }) {
+  const minutes = Math.max(0, Math.floor(quietMinutes));
+  return `At observation time no WAO process can still drive this run (owner heartbeat gone, no runner process on this machine, transcript quiet for ${minutes} min). `
+    + "Continued waiting will not settle it on its own. Whether to settle is the Lead's decision: "
+    + "first dry-run wao runs settle --run-id <id> --reason-file <file>, then add --apply.";
+}
+
+/**
+ * 同一条 advisory 的 CLI 面（中文固定模板；命令带实际 runId，与既有安静
+ * advisory 的 `wao stop ${runId}` 写法同款）。
+ *
+ * @param {object} facts
+ * @param {string} facts.runId
+ * @param {number} facts.quietMinutes
+ * @returns {string}
+ */
+export function runnerGoneAdvisoryText({ runId, quietMinutes }) {
+  const minutes = Math.max(0, Math.floor(quietMinutes));
+  return `观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 ${minutes} 分钟），继续等待不会自行收口。`
+    + `是否结算由 Lead 决定：先干跑 wao runs settle --run-id ${runId} --reason-file <文件>，确认后再加 --apply。`;
 }

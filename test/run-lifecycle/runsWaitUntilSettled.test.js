@@ -1236,22 +1236,24 @@ test("R-01: 静默不足 15 分钟不证明——proof 零调用，照常等到�
   }
 });
 
-test("R-02: 证明成立且重读仍非终态 → 退出 3（Run/Stuck/Next step 三行终行）", async () => {
+test("R-02: 证明成立且重读仍非终态 → 退出 3（Run/Stuck/Runner stderr tail/Next step 四行终行）", async () => {
   const dir = makeRunDir();
   try {
     const runId = "run_rg02";
     writeLines(dir, runId, runnerGoneEvents(runId));
     const r = await runWaitSettled({ dir, runId, deps: runnerProofDeps });
     assert.equal(r.exitCode, 3);
-    assert.equal(r.outLines.length, 3, `只输出三行终行，实际: ${JSON.stringify(r.outLines)}`);
+    // TD-341（第 89 批 C3）：Runner stderr tail 行插在 Stuck 与 Next step 之间。
+    assert.equal(r.outLines.length, 4, `只输出四行终行，实际: ${JSON.stringify(r.outLines)}`);
     assert.equal(r.outLines[0], `Run: ${runId} (running)`);
     assert.equal(
       r.outLines[1],
       `Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`,
     );
-    assert.match(r.outLines[2], new RegExp(`^Next step: Nothing on this machine can still drive this run\\. The exits are wao runs settle --run-id ${runId} --reason-file <FILE>`));
-    assert.match(r.outLines[2], /or wao stop — only on an explicit Lead decision\./);
-    assert.match(r.outLines[2], /uncommitted changes may still be in the worktree: inspect them before deciding\.$/);
+    assert.equal(r.outLines[2], "Runner stderr tail: 无 runner stderr 记录", "无文件时写明无记录");
+    assert.match(r.outLines[3], new RegExp(`^Next step: Nothing on this machine can still drive this run\\. The exits are wao runs settle --run-id ${runId} --reason-file <FILE>`));
+    assert.match(r.outLines[3], /or wao stop — only on an explicit Lead decision\./);
+    assert.match(r.outLines[3], /uncommitted changes may still be in the worktree: inspect them before deciding\.$/);
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
   } finally {
     cleanupDir(dir);
@@ -1267,11 +1269,13 @@ test("R-02b: JSON 模式——{settled,runId,state,reason,nextStep}，进度不�
     assert.equal(r.exitCode, 3);
     assert.equal(r.outLines.length, 1, "stdout 只留最终 JSON");
     const parsed = JSON.parse(r.out);
-    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "reason", "runId", "settled", "state"]);
+    // TD-341（第 89 批 C3）：+ runnerStderrTail（展示处理后的尾部；无文件时为"无 runner stderr 记录"）。
+    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "reason", "runId", "runnerStderrTail", "settled", "state"]);
     assert.equal(parsed.settled, false);
     assert.equal(parsed.runId, runId);
     assert.equal(parsed.state, "running");
     assert.equal(parsed.reason, "runner_gone");
+    assert.equal(parsed.runnerStderrTail, "无 runner stderr 记录", "无文件时写明无记录");
     assert.equal(typeof parsed.nextStep, "string");
   } finally {
     cleanupDir(dir);
@@ -1299,22 +1303,21 @@ test("R-03: 证明成立但重读时已收口 → 照常退出 0，不报 runner
   }
 });
 
-test("R-04: 证明不成立（owner 心跳新鲜）→ 照常等待，闭集理由进进度行", async () => {
+test("R-04: 心跳新鲜挡下证明 → 照常等待，owner_fresh 理由进进度行（前置筛路径）", async () => {
   const dir = makeRunDir();
   try {
     const runId = "run_rg04";
     writeLines(dir, runId, runnerGoneEvents(runId));
+    // 二轮续修 4：心跳新鲜由**前置筛选**读真实 .owner 文件挡下（ownerLiveness 现有
+    // 读法）——本该发证明的那轮不发证明、不扫进程，但拒绝理由按 settle 门 2 的
+    // 闭集标签 owner_fresh 进进度行注脚（相对 061d565d 的可见行为保住）。
+    writeFileSync(join(dir, `.owner-${runId}`), JSON.stringify({ pid: process.pid, heartbeatAt: Date.now() }), "utf8");
+    let proofCalls = 0;
     let appended = false;
     const r = await runWaitSettled({
       dir, runId,
       deps: {
-        runnerProofDeps: {
-          ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: Date.now(), pid: 100 }),
-          identifyFn: async () => ({ verdict: "same", basis: "identity_confirmed" }),
-          runnerScanFn: async () => ({ alive: false }),
-          handshakeReader: () => ({ present: false }),
-          daemonAliveFn: () => false,
-        },
+        runnerGoneFn: async () => { proofCalls += 1; return { gone: true }; },
         sleepFn: async () => {
           if (!appended) {
             appended = true;
@@ -1323,9 +1326,10 @@ test("R-04: 证明不成立（owner 心跳新鲜）→ 照常等待，闭集理�
         },
       },
     });
-    assert.equal(r.exitCode, undefined, "证明不成立 → 继续等，结果落地后退出 0");
+    assert.equal(r.exitCode, undefined, "证明不发起 → 继续等，结果落地后退出 0");
+    assert.equal(proofCalls, 0, "证明桩一次都没被调（前置筛挡下，不扫进程）");
     assert.ok(r.outLines.some((l) => l.includes("not settled (not_terminal)")), "照常打未收口进度");
-    assert.ok(r.outLines.some((l) => l.includes("runner proof: owner_fresh")), "证明被拒的理由进进度行明细");
+    assert.ok(r.outLines.some((l) => l.includes("runner proof: owner_fresh")), "owner_fresh 理由进进度行明细");
     assert.ok(!/runner_gone|Stuck: the runner/.test(r.out), "不输出 runner_gone");
   } finally {
     cleanupDir(dir);
@@ -1492,6 +1496,37 @@ test("U-15: 续跑子运行——根转录已闭合 → 照旧 settled_line（�
       `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`,
       "根已闭合 → 旧 settled_line 模板一字不差",
     );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 C3）：runner_gone 出口附 runner stderr 尾部（展示处理后）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("R-02c: 有 .runner-<runId>.stderr 文件 → 文本与 JSON 都附展示处理后的尾部", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_rg02c";
+    writeLines(dir, runId, runnerGoneEvents(runId));
+    // 形状秘密 + 控制字符：展示出口必须脱敏清洗（原始落盘不脱敏，展示才处理）。
+    writeFileSync(
+      join(dir, `.runner-${runId}.stderr`),
+      "FATAL: heap OOM\nAuthorization: Bearer abcdef1234567890abcdef1234567890\r\nlast line\b\x00",
+      "utf8",
+    );
+    const r = await runWaitSettled({ dir, runId, deps: runnerProofDeps });
+    assert.equal(r.exitCode, 3);
+    assert.equal(r.outLines.length, 4);
+    assert.ok(r.outLines[2].startsWith("Runner stderr tail: FATAL: heap OOM"), "尾部正文出现");
+    assert.ok(!r.outLines[2].includes("abcdef1234567890"), "Bearer 令牌值被脱敏");
+    assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(r.outLines[2]), "控制字符被清洗");
+    const j = await runWaitSettled({ dir, runId, asJson: true, deps: runnerProofDeps });
+    const parsed = JSON.parse(j.out);
+    assert.ok(parsed.runnerStderrTail.includes("FATAL: heap OOM"));
+    assert.ok(!parsed.runnerStderrTail.includes("abcdef1234567890"), "JSON 面同样脱敏");
+    assert.ok(parsed.runnerStderrTail.includes("Bearer [REDACTED]"), "形状脱敏标签保留");
   } finally {
     cleanupDir(dir);
   }

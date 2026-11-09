@@ -34,8 +34,12 @@ import { projectExecutionStage } from "./runStageProjection.js";
 import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 import {
   LEAD_ADVISORY_QUIET_SECONDS, VITAL_SIGN_RECENT_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText,
+  runnerGoneAdvisoryText, runnerGoneAdvisoryWireText,
   vitalSignAgeMs,
 } from "./runQuietAdvisory.js";
+// TD-341（第 89 批 C）：runner 已不在的证明入口 + 读面节流（前置筛选 + 缓存 +
+// 在飞共用）。daemon 读器由调用面（MCP/CLI 适配层）注入——本模块不上向导入。
+import { probeRunnerGoneCached } from "./runnerGoneProof.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -235,6 +239,12 @@ function projectScorecardSummary(scopeEvents) {
  * @param {string} input.runDir — runs/ directory (server/CLI-owned)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.nowFn] — injectable clock for deterministic age
+ * @param {object} [input.runnerGoneDeps] — TD-341: runner-absence proof deps
+ *   ({ handshakeReader, daemonAliveFn, … }; daemon SSOT lives in the adapters
+ *   layer — the MCP/CLI adapter injects the real readers, tests inject stubs).
+ *   Absent → the proof never runs (byte-compatible for every existing caller).
+ * @param {object} [input.runnerGoneCache] — TD-341: optional per-process proof
+ *   cache instance (createRunnerGoneProofCache(); held by the adapter, not here).
  * @returns {Promise<object>} structured status (CLI prints a subset; MCP a safe subset)
  */
 export async function getRunStatus({
@@ -242,6 +252,8 @@ export async function getRunStatus({
   runDir,
   readTranscriptFn,
   nowFn,
+  runnerGoneDeps,
+  runnerGoneCache,
 }) {
   if (!runId || typeof runId !== "string") {
     throw new Error("getRunStatus: runId is required");
@@ -260,8 +272,54 @@ export async function getRunStatus({
   const filePath = resolveTranscriptPath(runDir, runId);
 
   // Read-only: readTranscript throws if the file does not exist (fail-closed).
-  // The service must NOT create the file.
-  const events = await _readTranscript(filePath);
+  // The service must NOT create the file.（TD-341：证明成立且重读仍非终态时，
+  // 下方以重读快照替换 events——所以是 let。）
+  let events = await _readTranscript(filePath);
+
+  // TD-341（第 89 批 C）：runner 已不在的证明（只读；读面说出"runner 已不在"）。
+  // 仅当适配层注入了证明 deps 才跑；前置筛选（非终态、owner 心跳不新鲜、满结算
+  // 静默窗——与 runnerGoneProof.js 同口径，不筛后台派发）不过就不碰证明。证明成
+  // 立后**重新解析、重读一次转录**（照等待器
+  // runSettlementWait 的纪律——绝不把旧快照当成仍非终态）：重读仍非终态才作数，
+  // 且后续投影改用这份更新的快照；重读已终态或读失败 → 退回普通投影（下面的
+  // events 保持首读快照）。
+  let runnerGone = false;
+  let runnerGoneQuietMinutes = null;
+  if (runnerGoneDeps && typeof runnerGoneDeps.handshakeReader === "function"
+    && typeof runnerGoneDeps.daemonAliveFn === "function") {
+    const probeDeps = { nowFn: _now, ...runnerGoneDeps };
+    const probe = await probeRunnerGoneCached({
+      runId,
+      runDir,
+      events,
+      cache: runnerGoneCache ?? null,
+      deps: probeDeps,
+      nowFn: _now,
+    });
+    if (probe.gone === true) {
+      let reEvents = null;
+      try {
+        const reFilePath = resolveTranscriptPath(runDir, runId);
+        reEvents = await _readTranscript(reFilePath);
+      } catch {
+        reEvents = null; // 重读失败：证明不算数，退回首读快照
+      }
+      if (reEvents !== null) {
+        const reScope = boundReportScope(reEvents, runId) ?? reEvents;
+        const reState = findState(reScope);
+        if (!TERMINAL_STATES.includes(reState)) {
+          runnerGone = true;
+          // N = 静默整数分钟，取绑定事件末条（与证明门 4 同口径），投影用重读快照。
+          const reBound = reEvents.filter((e) => e && e.runId === runId);
+          const lastBoundTs = Date.parse(reBound[reBound.length - 1]?.ts);
+          if (Number.isFinite(lastBoundTs)) {
+            runnerGoneQuietMinutes = Math.max(0, Math.floor((_now() - lastBoundTs) / 60000));
+          }
+          events = reEvents;
+        }
+      }
+    }
+  }
 
   // R20 (TD-128 M1，末簇观测投影)：state/terminal/last/lastActivity 补齐本函数
   // 既有绑定纪律（agentId/executionStage 自 M11-8B/M12-17 起已绑定）。经
@@ -321,18 +379,27 @@ export async function getRunStatus({
   const observedSeq = Number.isInteger(last?.seq) ? last.seq : 0;
   const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
   const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
-  const leadAdvisory = quiet
-    ? `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`
-    : null;
+  // TD-341（第 89 批 C）：advisory 在场条件改为 quiet || runnerGone——证明只要求
+  // 结算静默窗（15 分钟），普通 advisory 门槛是 30 分钟；不改的话第 15–30 分钟
+  // 证明成立也不返回。runner 已被证明不在时用新的固定模板（双语，模板在
+  // runQuietAdvisory.js），不说"转录永不再前进"（settle/resume 都能合法追加）。
+  const advisoryPresent = quiet || runnerGone;
+  const leadAdvisory = !advisoryPresent
+    ? null
+    : runnerGone
+      ? runnerGoneAdvisoryText({ runId, quietMinutes: runnerGoneQuietMinutes ?? 0 })
+      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`;
   // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）。
-  const leadAdvisoryWire = quiet
-    ? leadAdvisoryWireText({
-        secondsSinceEffect,
-        lastActivityEventKind: lastActivity?.kind ?? null,
-        lastRuntimeStatus: lastActivity?.status ?? null,
-        secondsSinceActivity,
-      })
-    : null;
+  const leadAdvisoryWire = !advisoryPresent
+    ? null
+    : runnerGone
+      ? runnerGoneAdvisoryWireText({ quietMinutes: runnerGoneQuietMinutes ?? 0 })
+      : leadAdvisoryWireText({
+          secondsSinceEffect,
+          lastActivityEventKind: lastActivity?.kind ?? null,
+          lastRuntimeStatus: lastActivity?.status ?? null,
+          secondsSinceActivity,
+        });
 
   return {
     runId,
@@ -361,6 +428,9 @@ export async function getRunStatus({
     ...(scorecardSummary ? { scorecardSummary } : {}),
     // 条件展开：没有 advisory 的 run 字段 absent，既有消费者的形状逐字节不变。
     ...(leadAdvisory ? { secondsSinceEffect, leadAdvisory, leadAdvisoryWire } : {}),
+    // TD-341：runner 已被证明不在的机器事实（CLI 面据此附 stderr 尾部；MCP 面
+    // 不新增输出字段——工具面字节冻结，适配层只消费不透传）。absent = 未证明。
+    ...(runnerGone ? { runnerGone: true } : {}),
   };
 }
 

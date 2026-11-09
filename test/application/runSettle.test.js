@@ -1230,3 +1230,218 @@ test("SET-55: daemon 握手 pid 判 unknown → daemon_owned", async () => {
 test("SET-56: 两条 background_submitted → foreground_verifier（恰好一条的前提）", async () => {
   assert.deepEqual(await proveWith({ doubleBackground: true }, {}), { gone: false, refusal: "foreground_verifier" });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 B）：共享证明入口 runnerGoneProof.js——前置筛选、进程内节流
+// 缓存（run_status 读面）、在飞共用、proveRunnerGone 搬家透传。证明在测试里一律
+// 注入桩，不跑真实进程扫描。
+// ═══════════════════════════════════════════════════════════════════════════
+
+import {
+  runnerGonePrefilter,
+  proveRunnerGone,
+  probeRunnerGoneCached,
+  createRunnerGoneProofCache,
+  RUNNER_GONE_PROOF_CACHE_TTL_MS,
+  RUNNER_GONE_PREFILTER_REASONS,
+} from "../../src/application/runnerGoneProof.js";
+import { ownerFilePath } from "../../src/application/ownerLiveness.js";
+
+/** 前置筛通用夹具：非终态、有后台派发、事件 ts 可解析（默认远早于静默窗）。 */
+function prefilterEvents(runId, { terminal = false, background = true, ts = OLD } = {}) {
+  const lines = [ev(runId, 1, "run.started", ts, { backend: "claude-code" })];
+  if (background) lines.push(ev(runId, 2, "run.background_submitted", ts, { background: true }));
+  lines.push(ev(runId, 3, "run.state_change", ts, { from: null, to: "pending", reason: "background_spawned" }));
+  if (terminal) lines.push(ev(runId, 4, "run.state_change", ts, { from: "pending", to: "failed", reason: "backend_error" }));
+  return lines;
+}
+
+test("TD-341-B: 前置筛选各拒——非数组/终态/心跳新鲜/静默未满", () => {
+  const dir = tempDir("wao-td341b-pre-");
+  try {
+    const runId = "run_td341_pre";
+    assert.deepEqual(
+      runnerGonePrefilter({ events: null, runId, runDir: dir, now: NOW }),
+      { pass: false, reason: "no_events" },
+      "events 不是数组 → no_events（调用方形状错误）",
+    );
+    assert.deepEqual(
+      runnerGonePrefilter({ events: prefilterEvents(runId, { terminal: true }), runId, runDir: dir, now: NOW }),
+      { pass: false, reason: "terminal" },
+    );
+    // 心跳新鲜：写真实 .owner 文件（复用 ownerLiveness 现有读法）。
+    writeFileSync(ownerFilePath(dir, runId), JSON.stringify({ pid: 4321, heartbeatAt: NOW }), "utf8");
+    assert.deepEqual(
+      runnerGonePrefilter({ events: prefilterEvents(runId), runId, runDir: dir, now: NOW }),
+      { pass: false, reason: "owner_heartbeat_fresh" },
+    );
+    // 删掉心跳后：静默未满（事件 ts 距 now 仅 5 分钟）。
+    rmSync(ownerFilePath(dir, runId), { force: true });
+    const recent = new Date(NOW - 5 * 60_000).toISOString();
+    assert.deepEqual(
+      runnerGonePrefilter({ events: prefilterEvents(runId, { ts: recent }), runId, runDir: dir, now: NOW }),
+      { pass: false, reason: "quiet_window" },
+    );
+    // 心跳读器可注入（确定性；同 ownerLiveness 契约）。
+    assert.deepEqual(
+      runnerGonePrefilter({
+        events: prefilterEvents(runId), runId, runDir: dir, now: NOW,
+        deps: { heartbeatReader: () => ({ fresh: false }) },
+      }),
+      { pass: true, quietMs: NOW - Date.parse(OLD) },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 续修 1（Lead 审后）：前置筛选不筛"有无后台派发"——settle 门 5 允许"有会话、
+// 会话进程判 gone"的前台运行结算；筛了等待器就证明不了前台运行的 runner 已不在。
+test("TD-341-B: 前台运行（有 session.created、无 background_submitted）静默满 + 心跳不新鲜 → 前置筛通过，证明被调", async () => {
+  const dir = tempDir("wao-td341b-fg-");
+  try {
+    const runId = "run_td341_fg";
+    // 前台形状：无 background_submitted，有 proc 会话（门 5 的 no_session 拒不适用）。
+    const events = [
+      ev(runId, 1, "run.started", OLD, { backend: "claude-code" }),
+      ev(runId, 2, "session.created", OLD, { backend: "process", backendSessionId: "proc_4321" }),
+      ev(runId, 3, "run.state_change", OLD, { from: null, to: "pending", reason: "created" }),
+      ev(runId, 4, "run.state_change", OLD, { from: "pending", to: "running", reason: "first_event" }),
+    ];
+    const pre = runnerGonePrefilter({ events, runId, runDir: dir, now: NOW });
+    assert.deepEqual(pre, { pass: true, quietMs: NOW - Date.parse(OLD) }, "前台运行的前置筛照过（会话形状归门 5）");
+    let proofCalls = 0;
+    const result = await probeRunnerGoneCached({
+      runId, runDir: dir, events,
+      deps: { heartbeatReader: () => ({ fresh: false }), handshakeReader: () => ({ present: false }), daemonAliveFn: () => false },
+      proveFn: async () => { proofCalls += 1; return { gone: true }; },
+      nowFn: () => NOW,
+    });
+    assert.equal(proofCalls, 1, "证明被调（注入桩计数）");
+    assert.equal(result.gone, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-341-B: 前置筛选不通过就不调证明（注入证明桩零调用）", async () => {
+  const dir = tempDir("wao-td341b-noprobe-");
+  try {
+    const runId = "run_td341_noprobe";
+    const events = prefilterEvents(runId, { ts: new Date(NOW - 60_000).toISOString() }); // 静默未满
+    let proofCalls = 0;
+    const result = await probeRunnerGoneCached({
+      runId, runDir: dir, events,
+      deps: { heartbeatReader: () => ({ fresh: false }), handshakeReader: () => ({ present: false }), daemonAliveFn: () => false },
+      proveFn: async () => { proofCalls += 1; return { gone: true }; },
+      nowFn: () => NOW,
+    });
+    assert.equal(proofCalls, 0, "前置筛不过 → 一次证明都不发起");
+    assert.equal(result.gone, false);
+    assert.equal(result.prefilter, "quiet_window");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-341-B: proveRunnerGone 搬家透传——干跑 eligible → gone；拒绝 → 闭集理由", async () => {
+  const dir = tempDir("wao-td341b-moved-");
+  try {
+    const runId = "run_td341_moved";
+    seedNoSession(join(dir, `${runId}.jsonl`), runId);
+    const goneDeps = {
+      nowFn: () => NOW,
+      ownerLeaseReader: () => ({ present: false }),
+      identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+      runnerScanFn: async () => ({ alive: false }),
+      handshakeReader: () => ({ present: false }),
+      daemonAliveFn: () => false,
+    };
+    assert.deepEqual(await proveRunnerGone({ runId, runDir: dir, deps: goneDeps }), { gone: true });
+    const refusedDeps = { ...goneDeps, ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: NOW, pid: 1 }) };
+    assert.deepEqual(await proveRunnerGone({ runId, runDir: dir, deps: refusedDeps }), { gone: false, refusal: "owner_fresh" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-341-B: 节流缓存——命中不重复证明；seq 变化或 TTL 过期即失效；在飞共用", async () => {
+  const dir = tempDir("wao-td341b-cache-");
+  try {
+    const runId = "run_td341_cache";
+    const deps = { heartbeatReader: () => ({ fresh: false }), handshakeReader: () => ({ present: false }), daemonAliveFn: () => false };
+    let proofCalls = 0;
+    const proveFn = async () => { proofCalls += 1; return { gone: true }; };
+    let clock = NOW;
+    const events = prefilterEvents(runId);
+    const cache = createRunnerGoneProofCache();
+    const first = await probeRunnerGoneCached({ runId, runDir: dir, events, cache, deps, proveFn, nowFn: () => clock });
+    assert.equal(first.gone, true);
+    assert.equal(proofCalls, 1);
+    // 命中：同 seq、TTL 内 → 不再证明。
+    await probeRunnerGoneCached({ runId, runDir: dir, events, cache, deps, proveFn, nowFn: () => clock });
+    assert.equal(proofCalls, 1, "缓存命中不重复调证明");
+    // TTL 过期 → 重证。
+    clock = NOW + RUNNER_GONE_PROOF_CACHE_TTL_MS + 1;
+    await probeRunnerGoneCached({ runId, runDir: dir, events, cache, deps, proveFn, nowFn: () => clock });
+    assert.equal(proofCalls, 2, "TTL 过期重新证明");
+    // seq 变化 → 失效（转录长过：事实面可能已变）。
+    const grown = [...events, ev(runId, 9, "run.event", new Date(clock - 20 * 60_000).toISOString(), { kind: "command", command: "x" })];
+    // 末条绑定事件仍早于静默窗（-20min），前置筛照过、seq 不同 → 重证。
+    await probeRunnerGoneCached({ runId, runDir: dir, events: grown, cache, deps, proveFn, nowFn: () => clock });
+    assert.equal(proofCalls, 3, "seq 变化使缓存失效");
+    // 在飞共用：清缓存后并发两调只发一次证明。
+    const freshCache = createRunnerGoneProofCache();
+    const slowProve = () => new Promise((resolve) => setTimeout(() => resolve({ gone: true }), 20));
+    let slowCalls = 0;
+    const [a, b] = await Promise.all([
+      probeRunnerGoneCached({ runId, runDir: dir, events, cache: freshCache, deps, proveFn: async () => { slowCalls += 1; return slowProve(); }, nowFn: () => clock }),
+      probeRunnerGoneCached({ runId, runDir: dir, events, cache: freshCache, deps, proveFn: async () => { slowCalls += 1; return slowProve(); }, nowFn: () => clock }),
+    ]);
+    assert.equal(slowCalls, 1, "同一 runId 的并发调用共用一次在飞的证明");
+    assert.equal(a.gone, true);
+    assert.equal(b.gone, true);
+    // 闭集理由钉：预筛选理由成员。
+    assert.deepEqual([...RUNNER_GONE_PREFILTER_REASONS], ["terminal", "no_events", "owner_heartbeat_fresh", "quiet_window"]);
+    assert.equal(RUNNER_GONE_PROOF_CACHE_TTL_MS, 60_000, "缓存时长 60 秒左右（常量写清）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 续修 5（二轮会审 deepseek 复现）：在飞证明只在同一 lastSeq 时共用——第二个
+// 调用带着更新的快照（seq 已变）加入时共用旧结果会把过时事实面当成当前。
+test("TD-341-续修5: 并发调用、不同 seq → 各发各的证明（在飞不跨 seq 共用）", async () => {
+  const dir = tempDir("wao-td341r2-seq-");
+  try {
+    const runId = "run_td341_seq";
+    const deps = { heartbeatReader: () => ({ fresh: false }), handshakeReader: () => ({ present: false }), daemonAliveFn: () => false };
+    const events = prefilterEvents(runId);
+    const grown = [...events, ev(runId, 9, "run.event", new Date(Date.parse(OLD)).toISOString(), { kind: "command", command: "x" })];
+    const cache = createRunnerGoneProofCache();
+    let proofCalls = 0;
+    const proveFn = async () => {
+      proofCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 15)); // 慢证明：让两个调用重叠
+      return { gone: true };
+    };
+    const [a, b] = await Promise.all([
+      probeRunnerGoneCached({ runId, runDir: dir, events, cache, deps, proveFn, nowFn: () => NOW }),
+      probeRunnerGoneCached({ runId, runDir: dir, events: grown, cache, deps, proveFn, nowFn: () => NOW }),
+    ]);
+    assert.equal(proofCalls, 2, "seq 不同（4 vs 9）的并发调用各发各的证明");
+    assert.equal(a.gone, true);
+    assert.equal(b.gone, true);
+    // 同 seq 的并发照旧共用（上一用例已钉；这里再钉一次最小形状）。
+    const cache2 = createRunnerGoneProofCache();
+    let calls2 = 0;
+    const prove2 = async () => { calls2 += 1; await new Promise((resolve) => setTimeout(resolve, 15)); return { gone: false, refusal: "runner_alive" }; };
+    await Promise.all([
+      probeRunnerGoneCached({ runId, runDir: dir, events, cache: cache2, deps, proveFn: prove2, nowFn: () => NOW }),
+      probeRunnerGoneCached({ runId, runDir: dir, events, cache: cache2, deps, proveFn: prove2, nowFn: () => NOW }),
+    ]);
+    assert.equal(calls2, 1, "同 seq 的并发调用共用一次在飞证明");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

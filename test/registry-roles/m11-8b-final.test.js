@@ -38,6 +38,15 @@ function makeGitRepo(dir) {
   execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
 }
 
+// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
+// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
+// 经它一律"证明不成立"，测试不起任何真实进程扫描。
+const REFUSING_RUNNER_GONE_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+};
 function writeTranscript(dir, runId, lines) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${runId}.jsonl`), lines, "utf8");
@@ -123,6 +132,7 @@ test("FINAL-RED1a: service returns a DIFFERENT valid id (tester) → fixed error
     };
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, dispatchRunFn: fakeDispatch,
     });
     const client = await buildInMemoryClient(server);
@@ -167,6 +177,7 @@ test("FINAL-RED1b: service returns injected/missing/unknown agentId → fixed er
         };
       };
       const server = createWaoMcpServer({
+        runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
         registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, dispatchRunFn: fakeDispatch,
       });
       const client = await buildInMemoryClient(server);
@@ -207,6 +218,7 @@ test("FINAL-RED1c: normal coder_low → coder_low succeeds", async () => {
     };
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, dispatchRunFn: fakeDispatch,
     });
     const client = await buildInMemoryClient(server);
@@ -246,6 +258,7 @@ test("FINAL-REDC1-tightened: injected service agentId collapses to fixed error (
     };
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, dispatchRunFn: injectDispatch,
     });
     const client = await buildInMemoryClient(server);
@@ -285,7 +298,7 @@ test("FINAL-READ: corrupt transcript status → agentId unknown, tool still usab
     writeTranscript(join(dir, "runs"), runId, lines);
     const registryPath = makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -318,7 +331,7 @@ test("FINAL-SCHEMA: dispatch and read agentId wire schemas are distinct (dispatc
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();

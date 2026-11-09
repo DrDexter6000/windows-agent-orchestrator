@@ -31,7 +31,7 @@
 
 import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -77,6 +77,7 @@ import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 import { deriveStartedIdentity, laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
+import { openRunnerStderrFd } from "./runnerStderr.js";
 
 // Reuse the dispatch application service's startup-failure error type so the MCP
 // boundary collapses a missing credential to the same fixed actionable text.
@@ -408,6 +409,9 @@ export async function continueRun({
   globalWaitTimeout,
   pollInterval,
   skipCredentialCheck = false,
+  // TD-341（第 89 批 A）：runner stderr 文件打开器注入缝（缺省 openRunnerStderrFd；
+  // 测试注入"打开失败"形状）。返回值作为 spawn stdio[2] 的 fd。
+  openRunnerStderrFn,
 }) {
   const refuse = (rejectionReason, extra = {}) => ({
     accepted: false,
@@ -798,6 +802,8 @@ export async function continueRun({
   const _spawn = spawnFn ?? spawn;
   const _execPath = execPath ?? process.execPath;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
+  // TD-341：runner stderr 打开器注入缝（缺省真实打开；测试注入失败形状）。
+  const _openRunnerStderrFd = openRunnerStderrFn ?? openRunnerStderrFd;
   const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
   const childBranch = `wao/${childRunId}`;
 
@@ -957,7 +963,28 @@ export async function continueRun({
     });
 
     const runnerEnv = { ...process.env, ...finalCredentials };
-    const runner = _spawn(_execPath, runnerArgs, { detached: true, stdio: ["pipe", "ignore", "ignore"], env: runnerEnv });
+    // TD-341（第 89 批 A）：runner stderr 落每运行文件 .runner-<runId>.stderr——
+    // 打开失败不能阻止派发，退回 "ignore"；父进程在 spawn 之后（spawn 抛错时也
+    // 要，下方 catch 走派发前回滚）关闭自己的 fd。runner 干净退出（码 0）时由
+    // 其退出钩子删除该文件，失败/被杀/V8 abort 自然留下。
+    let runnerStderrFd = null;
+    try {
+      runnerStderrFd = _openRunnerStderrFd(resolvedRunDir, childRunId);
+    } catch {
+      runnerStderrFd = null; // 打开失败 → 退回 "ignore"，不阻止派发
+    }
+    let runner;
+    try {
+      runner = _spawn(_execPath, runnerArgs, {
+        detached: true,
+        stdio: ["pipe", "ignore", runnerStderrFd === null ? "ignore" : runnerStderrFd],
+        env: runnerEnv,
+      });
+    } finally {
+      if (runnerStderrFd !== null) {
+        try { closeSync(runnerStderrFd); } catch { /* spawn 失败路径已随句柄关闭 */ }
+      }
+    }
     const handoff = await writeRunnerPrompt(runner, prompt, promptHandoffTimeoutMs ? { timeoutMs: promptHandoffTimeoutMs } : {});
     if (handoff === "timeout") {
       // runner 活着却一直不读提示词：结束它（它还没起 worker），抛出后走下方的派发前回滚。

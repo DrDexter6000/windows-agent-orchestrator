@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { runCommand, statusCommand, collectCommand } from "../../src/cli.js";
+import { getRunStatus } from "../../src/application/runStatus.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 import { spawnCommand } from "../../src/commands/run.js";
 import { readRegistry as readRegistryFile } from "../../src/registry.js";
@@ -3158,6 +3159,108 @@ test("CLI 全链: 两个 --tag 都进后台 run.started.tags，形状与前台�
       }
     }
     assert.deepEqual(fgStarted?.tags, { team: "alpha", work: "fix" }, "前台同 flags 产出同形状 tags（后台与前台的 start 形状一致）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ── TD-341（第 89 批 C3）：status 在 runner 被证明不在时附 stderr 尾部 ──────
+// 服务经 deps.getRunStatusFn 注入桩（真实形状：runnerGone:true + 双语新模板）；
+// 尾部文件用真实 .runner-<runId>.stderr——展示处理（脱敏/清洗/限长）走真模块。
+
+test("TD-341-C3: status runnerGone → JSON 带 runnerGone+runnerStderrTail；line 行尾附同一尾部", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341c3-status-"));
+  try {
+    const runId = "run_td341_status";
+    writeFileSync(join(dir, `${runId}.jsonl`), "", "utf8");
+    writeFileSync(join(dir, `.runner-${runId}.stderr`),
+      "FATAL: heap OOM\nAuthorization: Bearer abcdef1234567890abcdef1234567890\r\n", "utf8");
+    const fakeStatus = async () => ({
+      runId,
+      agentId: "coder_hq",
+      state: "running",
+      terminal: false,
+      executionStage: { phase: "active", sinceTs: "2026-11-08T10:00:00.000Z", secondsSince: 1200 },
+      last: null,
+      lastActivityTs: null,
+      secondsSinceActivity: null,
+      lastActivityKind: null,
+      lastActivitySummary: null,
+      lastEventType: null,
+      lastEventTs: null,
+      lastActivityEventKind: null,
+      observedSeq: 3,
+      secondsSinceEffect: 1200,
+      leadAdvisory: "观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 20 分钟），继续等待不会自行收口。是否结算由 Lead 决定：先干跑 wao runs settle --run-id run_td341_status --reason-file <文件>，确认后再加 --apply。",
+      leadAdvisoryWire: "wire",
+      runnerGone: true,
+    });
+    const jsonElements = await captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir], { runDir: dir }, { getRunStatusFn: fakeStatus });
+    });
+    const parsed = cliJsonBlock(jsonElements);
+    assert.equal(parsed.runnerGone, true);
+    assert.ok(parsed.runnerStderrTail.includes("FATAL: heap OOM"), "JSON 面带展示处理后的尾部");
+    assert.ok(!parsed.runnerStderrTail.includes("abcdef1234567890"), "JSON 面尾部脱敏");
+    assert.ok(parsed.runnerStderrTail.includes("Bearer [REDACTED]"));
+    assert.ok(parsed.advisory.startsWith("观察时没有 WAO 进程能继续驱动这个运行"), "CLI 面中文新模板");
+
+    const lineElements = await captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir, "--format", "line"], { runDir: dir }, { getRunStatusFn: fakeStatus });
+    });
+    assert.equal(lineElements.length, 1);
+    const line = lineElements[0];
+    assert.ok(line.includes("runnerStderrTail="), "line 行尾附 runnerStderrTail");
+    assert.ok(!line.includes("abcdef1234567890"), "line 面同样脱敏");
+    const m = line.match(/ runnerStderrTail=(".*")$/);
+    assert.ok(m, "runnerStderrTail 是行尾 JSON 字符串字段");
+    assert.ok(JSON.parse(m[1]).includes("FATAL: heap OOM"));
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-341-C3: runnerGone 但无 stderr 文件 → runnerStderrTail 写明\"无 runner stderr 记录\"", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341c3-none-"));
+  try {
+    const runId = "run_td341_none";
+    writeFileSync(join(dir, `${runId}.jsonl`), "", "utf8");
+    const fakeStatus = async () => ({
+      runId, agentId: "coder_hq", state: "running", terminal: false,
+      executionStage: { phase: "active", sinceTs: null, secondsSince: null },
+      last: null, lastActivityTs: null, secondsSinceActivity: null,
+      lastActivityKind: null, lastActivitySummary: null,
+      lastEventType: null, lastEventTs: null, lastActivityEventKind: null,
+      observedSeq: 0,
+      leadAdvisory: "观察时没有 WAO 进程能继续驱动这个运行……",
+      leadAdvisoryWire: "wire",
+      runnerGone: true,
+    });
+    const elements = await captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir], { runDir: dir }, { getRunStatusFn: fakeStatus });
+    });
+    const parsed = cliJsonBlock(elements);
+    assert.equal(parsed.runnerStderrTail, "无 runner stderr 记录");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-341-C3: 未证明 runnerGone 的普通 run → 输出形状逐字节不变（无新字段）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341c3-plain-"));
+  try {
+    const runId = "run_td341_plain";
+    writeFileSync(join(dir, `${runId}.jsonl`),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-11-08T00:00:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-11-08T00:01:00.000Z" }) + "\n");
+    const elements = await captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir], { runDir: dir }, {
+        getRunStatusFn: async (input) => getRunStatus({ ...input, runnerGoneDeps: undefined }),
+      });
+    });
+    const parsed = cliJsonBlock(elements);
+    assert.equal("runnerGone" in parsed, false);
+    assert.equal("runnerStderrTail" in parsed, false);
   } finally {
     rmrfRetry(dir);
   }

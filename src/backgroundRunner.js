@@ -32,12 +32,14 @@ import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { writeFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync, statSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
 import { laneFingerprint as laneFingerprintOf } from "./application/identityProjection.js";
 import { loadRoleContract, roleContractSha256 } from "./application/roleContract.js";
 import { PROMPT_STDIN_FLAG, promptDigest, readRunnerPrompt } from "./runnerPrompt.js";
+// TD-341（第 89 批 A）：runner stderr 证据文件的路径 SSOT（adapters→application 下向）。
+import { runnerStderrPath } from "./application/runnerStderr.js";
 
 // D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
@@ -55,6 +57,48 @@ function writeOwnerHeartbeat(runDir, runId) {
 
 function clearOwner(runDir, runId) {
   try { unlinkSync(join(runDir, `.owner-${runId}`)); } catch { /* 已不在 */ }
+}
+
+// TD-341（第 89 批 A；二轮续修 1 收紧）：runner stderr 证据文件的进程级有序退出
+// 钩子。**只在退出码为 0 且文件为空时**同步删除——非空一律留着：之前的崩溃证据
+//（V8 abort 的 FATAL ERROR——resume 接管以 append 打开同一文件，接管的 runner
+// 干净跑完也不能抹掉它）、本进程写的报错（appendDurableResumeFailure 写不进转录
+// 时只落 stderr）、Node 警告都算。被强杀、V8 abort 不走退出钩子，文件自然留下。
+// 刻意不挂在 clearOwner 上：clearOwner 也在失败路径先执行，之后顶层 catch 才写
+// stderr，删早了最后的报错会写进已删除的文件。
+/**
+ * 退出钩子本体（导出供测试）：code === 0 **且**文件大小为 0 → 同步删除
+ * .runner-<runId>.stderr。同步-only（process "exit" 钩子合同）；stat 或 unlink
+ * 失败照旧吞掉（文件本就不在、删不掉：留着无害）。
+ * @param {number} code
+ * @param {string} runDir
+ * @param {string} runId
+ */
+export function cleanupRunnerStderrOnExit(code, runDir, runId) {
+  if (code !== 0) return;
+  const path = runnerStderrPath(runDir, runId);
+  try {
+    if (statSync(path).size !== 0) return; // 非空：证据在，留着
+  } catch {
+    return; // stat 不到（不在/读不了）：不动
+  }
+  try { unlinkSync(path); } catch { /* 删不掉：留着无害 */ }
+}
+
+// 同一 (runDir, runId) 只注册一次（测试进程内多次调 runMain 不叠加监听器）。
+const armedRunnerStderrCleanups = new Set();
+
+/**
+ * 在目标进程上挂退出钩子（runMain 调用；测试可传假 process 捕获注册动作）。
+ * @param {object} targetProcess — 须有 .on("exit", fn)
+ * @param {string} runDir
+ * @param {string} runId
+ */
+export function armRunnerStderrCleanup(targetProcess, runDir, runId) {
+  const key = `${runDir}\u0000${runId}`;
+  if (armedRunnerStderrCleanups.has(key)) return;
+  armedRunnerStderrCleanups.add(key);
+  targetProcess.on("exit", (code) => cleanupRunnerStderrOnExit(code, runDir, runId));
 }
 
 // 测试用：registry 以对象形式注入时，构造一个内存 readRegistry（与 registry.js 同结构）。
@@ -554,6 +598,18 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
   const args = argv.filter((a) => !a.startsWith("--"));
   const opts = parseSimpleFlags(argv);
   const agentId = args[0];
+  // TD-341（第 89 批 A；续修 4 起 dispatch 与 resume 两种形状的派发侧都落此文件）：
+  // 退出钩子在**退出码 0 且文件为空**时才同步删除 .runner-<runId>.stderr（二轮续修
+  // 1 收紧——非空的崩溃/报错证据一律留下）。注册在解析 argv 之后、任何可能写
+  // stderr 的路径之前。
+  {
+    const stderrRunId = opts["resume-run-id"] ?? opts["run-id"];
+    const stderrRunDir = opts["run-dir"];
+    if (typeof stderrRunId === "string" && stderrRunId.length > 0
+      && typeof stderrRunDir === "string" && stderrRunDir.length > 0) {
+      armRunnerStderrCleanup(process, stderrRunDir, stderrRunId);
+    }
+  }
   // 派发方经标准输入交来提示词（runDispatch / runContinue），argv 带它的摘要；直接带
   // --prompt 起 runner 的仍可用。读 stdin 出错或摘要对不上，都说明交接不完整（派发方
   // 写到一半退出），不启动 worker：落 run.error + failed 收口（delivery-json 解析失败的

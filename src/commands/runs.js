@@ -111,6 +111,9 @@ import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
 // selector — no copied algorithm, no copied catalog.
 import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
 import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
+// TD-341（第 89 批 C3）：runner 被证明不在时附 runner stderr 尾部（展示处理后的
+// 文本；无文件/空文件分固定文案——格式化收拢在 runnerStderrTailText 单一出口）。
+import { runnerStderrTailText } from "../application/runnerStderr.js";
 // 决定 0095/0096：`runs wait --until-settled` 与 `consult wait
 // --until-settled` 共用的收口等待器（轮询循环 + 验证者缺席证明），家在
 // runSettlementWait.js；收口判定与 proveVerifierGone 的家分别在
@@ -646,20 +649,25 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // 第 83 批 B：runner 缺席证明成立且重读仍非终态。退出码 3（不可重试）；
     // 证据是 settle 六道门的只读干跑，无单一 basis 可回显——事实句说清"无活
     // owner 心跳、无可能仍在驱动它的进程"，不回显 pid/路径/命令行。
+    // TD-341（第 89 批 C3）：附 runner stderr 尾部（展示处理后的文本，限长）；
+    // 无文件/空文件分固定文案（resume 接管与旧派发形态本就没有文件）。
     process.exitCode = 3;
     const s = outcome.settlement;
     const nextStep = buildNextStep({ surface: "cli", situation: "runner_gone", runId });
+    const stderrText = runnerStderrTailText(runDir, runId);
     if (asJson) {
       console.log(JSON.stringify({
         settled: false,
         runId,
         state: s.facts.state,
         reason: "runner_gone",
+        runnerStderrTail: stderrText,
         nextStep,
       }, null, 2));
     } else {
       console.log(`Run: ${runId} (${s.facts.state})`);
       console.log(`Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`);
+      console.log(`Runner stderr tail: ${stderrText}`);
       console.log(`Next step: ${nextStep}`);
     }
     return;

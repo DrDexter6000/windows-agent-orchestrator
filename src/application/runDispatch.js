@@ -16,6 +16,7 @@
 //   - prompt stays a bounded task prompt — never injects Lead orchestration context.
 
 import { spawn } from "node:child_process";
+import { closeSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +33,7 @@ import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
 import { PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs, writeRunnerPrompt } from "../runnerPrompt.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
+import { openRunnerStderrFd } from "./runnerStderr.js";
 import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride, resolvePredictedDispatchCwd } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
 // L4 layering SSOT (backends sits deeper than application). Used only to read
@@ -423,6 +425,9 @@ export async function dispatchRun({
   // 只作用于 lead_workspace 复用决策；delivery 本就永远 fresh（无操作语义）；
   // 不旁路 busy（Contract 6）。对 continuable 谱系无操作（谱系代数=谱系自辖）。
   fresh = false,
+  // TD-341（第 89 批 A）：runner stderr 文件打开器注入缝（缺省 openRunnerStderrFd；
+  // 测试注入"打开失败"形状）。返回值作为 spawn stdio[2] 的 fd。
+  openRunnerStderrFn,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -772,6 +777,8 @@ export async function dispatchRun({
   const _spawn = spawnFn ?? spawn;
   const _execPath = execPath ?? process.execPath;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
+  // TD-341：runner stderr 打开器注入缝（缺省真实打开；测试注入失败形状）。
+  const _openRunnerStderrFd = openRunnerStderrFn ?? openRunnerStderrFd;
   // M10-pre: only pass --wait-timeout to runner when explicitly set.
   // RunManager resolves timeout from agent > config > default internally.
   const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
@@ -1042,13 +1049,34 @@ export async function dispatchRun({
   }
 
   // detached: runner survives CLI/MCP process exit; stdin carries the prompt
-  // (written and closed here), stdout/stderr ignored (runner writes transcript);
+  // (written and closed here), stdout ignored (runner writes transcript).
   // unref so the parent does not wait for it.
+  // TD-341（第 89 批 A）：stderr 落每运行文件 .runner-<runId>.stderr——打开失败
+  // 不能阻止派发，退回 "ignore"；父进程在 spawn 之后（spawn 抛错时也要）关闭
+  // 自己的 fd，runner 侧继承的句柄不受影响。runner 干净退出（码 0）时由其退出
+  // 钩子删除该文件，失败/被杀/V8 abort 自然留下。
   // M11-7: thread resolved credential VALUES into the runner's env (NOT argv —
   // values must never appear in argv). The runner's ProcessBackend then inherits
   // them via process.env (buildChildEnv) and redacts them (createSecretRedactor).
   const runnerEnv = { ...process.env, ...finalCredentials };
-  const runner = _spawn(_execPath, runnerArgs, { detached: true, stdio: ["pipe", "ignore", "ignore"], env: runnerEnv });
+  let runnerStderrFd = null;
+  try {
+    runnerStderrFd = _openRunnerStderrFd(resolvedRunDir, finalRunId);
+  } catch {
+    runnerStderrFd = null; // 打开失败 → 退回 "ignore"，不阻止派发
+  }
+  let runner;
+  try {
+    runner = _spawn(_execPath, runnerArgs, {
+      detached: true,
+      stdio: ["pipe", "ignore", runnerStderrFd === null ? "ignore" : runnerStderrFd],
+      env: runnerEnv,
+    });
+  } finally {
+    if (runnerStderrFd !== null) {
+      try { closeSync(runnerStderrFd); } catch { /* spawn 失败路径已随句柄关闭 */ }
+    }
+  }
   const handoff = await writeRunnerPrompt(runner, prompt, promptHandoffTimeoutMs ? { timeoutMs: promptHandoffTimeoutMs } : {});
   if (handoff === "timeout") {
     // runner 活着却一直不读提示词：结束它（它还没起 worker），按启动失败收口，不留 pending 转录。

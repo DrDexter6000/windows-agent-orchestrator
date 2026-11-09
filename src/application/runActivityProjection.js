@@ -480,11 +480,27 @@ function toolInputDetail(input, redactor) {
 // 的条目做（见 projectRunActivity 的收尾）。truncated = 脱敏清洗后的文本长于上限，
 // 即尾部之前还有内容。
 function outputTail(output, redactor) {
-  const text = outputText(output);
-  if (text.length === 0) return { tail: "", truncated: false };
+  return tailOfRedactedText(outputText(output), redactor, ACTIVITY_OUTPUT_TAIL_CAP);
+}
+
+// TD-341（第 89 批 A）：上方 outputTail 的 redact（exact）→ redactSecretShapes
+// （形状）→ sanitizeControls（控制字符，LF/TAB 保留）→ 取尾限长管道抽成参数化
+// 上限的导出形态；runner stderr 尾部的展示复用同一条管道——安全顺序只有这一份。
+/**
+ * 同一条安全尾部的参数化上限形态：exact-secret 脱敏 + 形状脱敏 + 控制字符清洗
+ * 后取尾部（不从代理对的后半个开始）。truncated = 清洗后文本长于上限，即尾部
+ * 之前还有内容。text 必须是完整原文（不预切窗——两层脱敏需要全量上下文）。
+ *
+ * @param {string} text 完整原始文本
+ * @param {object} redactor createSecretRedactor() 实例
+ * @param {number} maxChars 尾部字符上限
+ * @returns {{tail: string, truncated: boolean}}
+ */
+export function tailOfRedactedText(text, redactor, maxChars) {
+  if (typeof text !== "string" || text.length === 0) return { tail: "", truncated: false };
   const safe = sanitizeControls(redactSecretShapes(redactor.redactString(text))).trimEnd();
-  if (safe.length <= ACTIVITY_OUTPUT_TAIL_CAP) return { tail: safe, truncated: false };
-  let start = safe.length - ACTIVITY_OUTPUT_TAIL_CAP;
+  if (safe.length <= maxChars) return { tail: safe, truncated: false };
+  let start = safe.length - maxChars;
   const first = safe.charCodeAt(start);
   if (first >= 0xDC00 && first <= 0xDFFF) start += 1; // 不从代理对的后半个开始
   return { tail: safe.slice(start), truncated: true };

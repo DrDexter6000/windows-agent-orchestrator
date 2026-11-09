@@ -1168,3 +1168,57 @@ test("TD-256: 扫源钉——src/ 零处 authorizedWorkspaceRoot: null（active 
   walk(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src"));
   assert.deepEqual(offenders, [], `active 门死形状再现：${offenders.join(", ")}`);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 C2）：unresolved 候选的有界保留——同一次扫描收集，按
+// updatedAt 新到旧、上限截断；不设置选项时返回形状逐字节不变。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("TD-341-C2: unresolvedCandidatesCap → 有界候选（新到旧、上限截断）；缺省不携带", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td341c2-list-"));
+  // 续修 7：`\T`/`\R` 在字符串里会被吃掉（实际值成了 C:TargetRepo）——转义。
+  const ROOT = "C:\\Target\\Repo";
+  try {
+    // 7 个非终态运行（全部无新鲜心跳 → unresolved），updatedAt 各不相同；
+    // m1215Events 的 ts 固定，这里在 reader 层逐 run 变 ts 以拉开 updatedAt。
+    const stamps = {
+      run_td341_l1: "2026-07-01T01:00:00Z",
+      run_td341_l2: "2026-07-01T06:00:00Z",
+      run_td341_l3: "2026-07-01T03:00:00Z",
+      run_td341_l4: "2026-07-01T07:00:00Z",
+      run_td341_l5: "2026-07-01T02:00:00Z",
+      run_td341_l6: "2026-07-01T05:00:00Z",
+      run_td341_l7: "2026-07-01T04:00:00Z",
+    };
+    for (const runId of Object.keys(stamps)) m1215EmptyRunFile(runDir, runId);
+    const eventsByFile = new Map(Object.entries(stamps).map(([runId, ts]) => {
+      const events = m1215Events(runId, ROOT, "running").map((e) => ({ ...e, ts }));
+      return [`${runId}.jsonl`, events];
+    }));
+    const liveness = m1215LivenessSpy(Object.fromEntries(
+      Object.keys(stamps).map((runId) => [runId, { fresh: false, heartbeatAt: 1 }]),
+    ));
+    const base = {
+      runDir, nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: m1215Reader(eventsByFile),
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    };
+    // 缺省：返回不带 unresolvedCandidates（runs list 的 CLI/MCP 输出形状不变）。
+    const plain = await listRuns(base);
+    assert.equal(plain.unresolvedCount, 7);
+    assert.equal("unresolvedCandidates" in plain, false, "缺省不携带候选字段");
+    // 上限 5：新到旧的前 5 个（l4 06:00、l2 06:00? 按 ts 降序：l4 07>l2 06>l7 04? 重算：
+    // ts 降序 = l4(07) l2(06) l6(05) l7(04) l3(03) l5(02) l1(01) → 前 5 = l4 l2 l6 l7 l3。
+    const capped = await listRuns({ ...base, unresolvedCandidatesCap: 5 });
+    assert.equal(capped.unresolvedCount, 7, "计数仍是全量（在截断之前）");
+    assert.deepEqual(
+      capped.unresolvedCandidates.map((c) => c.runId),
+      ["run_td341_l4", "run_td341_l2", "run_td341_l6", "run_td341_l7", "run_td341_l3"],
+      "按 updatedAt 新到旧取前 5；超出上限的照旧只计入 unresolvedCount",
+    );
+    for (const c of capped.unresolvedCandidates) {
+      assert.deepEqual(Object.keys(c).sort(), ["runId", "updatedAt"], "候选只有 {runId, updatedAt}");
+    }
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});

@@ -13,7 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, fstatSync } from "node:fs";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,14 +96,81 @@ test("M9-2A-01: accepted dispatch writes initial durable facts and spawns detach
     assert.ok(stateChange, "pending state_change written");
     assert.equal(stateChange.reason, "background_spawned", "pending reason is background_spawned");
 
-    // Spawn exactly once, detached; stdin carries the prompt, stdout/stderr ignored.
+    // Spawn exactly once, detached; stdin carries the prompt, stdout ignored;
+    // stderr 是打开的 .runner-<runId>.stderr fd（TD-341 第 89 批 A），派发侧在
+    // spawn 之后已关闭自己的句柄。
     assert.equal(calls.length, 1, "spawn called exactly once");
     const { opts: spawnOpts } = calls[0];
     assert.equal(spawnOpts.detached, true, "detached:true");
-    assert.deepEqual(spawnOpts.stdio, ["pipe", "ignore", "ignore"], "stdin pipe, stdout/stderr ignore");
+    assert.equal(spawnOpts.stdio[0], "pipe", "stdin pipe");
+    assert.equal(spawnOpts.stdio[1], "ignore", "stdout ignore");
+    assert.equal(typeof spawnOpts.stdio[2], "number", "stderr 是打开的 fd（.runner-<runId>.stderr）");
+    assert.ok(existsSync(join(runDir, `.runner-${result.runId}.stderr`)), "stderr 证据文件已在 runDir 创建");
+    let fdClosed = false;
+    try { fstatSync(spawnOpts.stdio[2]); } catch { fdClosed = true; }
+    assert.ok(fdClosed, "父进程在 spawn 之后关闭了自己的 fd");
     assert.equal(calls[0].stdinText, "do the task", "prompt written to the runner's stdin");
     assert.equal(calls[0].stdinEnded, true, "stdin closed after the prompt");
     // unref must be called — fakeSpawn returns an object with unref; verify no throw.
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// TD-341（第 89 批 A）：runner stderr 落每运行文件——spawn 传 fd、父进程关闭、
+// 打开失败退回 ignore（不阻止派发）。
+// ---------------------------------------------------------------------
+
+test("TD-341-A: 打开失败 → stdio[2] 退回 \"ignore\"，派发照常接受", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341a-fb-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "task",
+      registryPath,
+      runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      openRunnerStderrFn: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
+    });
+    assert.equal(result.accepted, true, "打开失败不阻止派发");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].opts.stdio[2], "ignore", "退回 ignore");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-341-A: spawn 抛错时父进程也关闭 fd（不泄漏句柄）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341a-th-"));
+  const seenFds = [];
+  const throwingSpawn = (_cmd, _args, opts) => {
+    seenFds.push(opts.stdio[2]);
+    throw new Error("spawn boom");
+  };
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "coder_low",
+        prompt: "task",
+        registryPath,
+        runDir: join(dir, "runs"),
+        spawnFn: throwingSpawn,
+      }),
+      /spawn boom/,
+    );
+    assert.equal(seenFds.length, 1);
+    assert.equal(typeof seenFds[0], "number", "spawn 看到的是 fd");
+    let fdClosed = false;
+    try { fstatSync(seenFds[0]); } catch { fdClosed = true; }
+    assert.ok(fdClosed, "spawn 抛错路径父进程同样关闭了自己的 fd");
   } finally {
     cleanupDir(dir);
   }

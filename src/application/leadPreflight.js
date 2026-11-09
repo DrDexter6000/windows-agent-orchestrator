@@ -79,6 +79,12 @@ import { laneWiringMismatchFactLine } from "./registryAlign.js";
 // 状态、.wao-worktrees/ 运行树、同项目时的收件箱未处理条数。只读收集器在
 // leadOpenItems.js；这里只消费行（advisory，不动 checkStatus/complete）。
 import { collectLeadOpenItems } from "./leadOpenItems.js";
+// TD-341（第 89 批 C2）：疑似死掉的运行的 runner 缺席证明——候选来自 listRuns
+// 的同一次扫描（unresolved 候选），逐个串行做前置筛选 + 证明；成立的汇成一条
+// `open item: ` 观察行（与决定 0113 同口径）。daemon 读器由调用面注入。
+import { probeRunnerGoneCached, createRunnerGoneProofCache } from "./runnerGoneProof.js";
+import { readTranscript } from "../transcript.js";
+import { resolveTranscriptPath } from "../projectBuckets.js";
 
 export {
   CAVEATS_CAP,
@@ -141,6 +147,17 @@ export {
 export const ACTIVE_RUNS_CAP = 10;
 // Cap on workers returned (defensive against a pathological registry).
 export const WORKERS_CAP = 64;
+// TD-341（第 89 批 C2）：runner 缺席证明的 unresolved 候选上限（listRuns 同一
+// 次扫描里有界保留，按 updatedAt 新到旧）。超出上限的照旧只计入
+// unresolvedRunCount，不做证明、不进 open item 行。
+export const UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP = 5;
+// TD-341（二轮续修 6）：Section 3b 串行证明的总时间预算。进程扫描单次超时 30s、
+// 身份判定 10s，无预算时最坏会超过宿主的 MCP 请求超时（约 60s）。已用满预算就
+// 不再发起新的证明；未证明的候选不列入 open item 行，也不另加任何行或字段。
+export const RUNNER_GONE_PREFLIGHT_BUDGET_MS = 20000;
+// TD-341：open item 行的字符上限（与 observations 的 wire 上限同值，这里在构造
+// 侧强制截断 runId 清单，不依赖 wire 兜底）。
+export const RUNNER_GONE_OPEN_ITEM_MAX_LEN = 512;
 // Closed set of unbound workspace reasons (M12-19 recovery truth). The smallest
 // truthful set distinguishing: (a) a lead_session whose Git proof now fails,
 // (b) an explicit server_config whose proof fails, (c) no usable workspace
@@ -198,6 +215,27 @@ function renderGateHolder(holder, knownAgentIds) {
 // call so machineGatePaths observes env overrides live (nothing cached).
 function defaultGateStatus() {
   return createVerificationGate().status();
+}
+
+// TD-341（第 89 批 C2）：runner 已被证明不在的运行的 open item 行（固定英文模板
+// + runId 清单 + 结算命令形状）。runId 清单超长时截断并标注剩余数（超上限的候选
+// 本就不做证明——这里的截断只是字数兜底）；整行超 RUNNER_GONE_OPEN_ITEM_MAX_LEN
+// 时逐步收缩清单，仍超则返回 null（构造侧失败不 push，不靠 wire 兜底）。
+function buildRunnerGoneOpenItemLine(runIds) {
+  const shown = runIds.slice();
+  let omitted = 0;
+  let line = null;
+  for (;;) {
+    const list = shown.join(", ");
+    line = `open item: ${runIds.length} run(s) proven to have no WAO process that can still drive them `
+      + "(owner heartbeat gone, no runner process on this machine): "
+      + `${list}${omitted > 0 ? ` (+${omitted} more)` : ""}. `
+      + "Settling is the Lead's decision - first dry-run wao runs settle --run-id <id> --reason-file <file>, then add --apply.";
+    if (line.length <= RUNNER_GONE_OPEN_ITEM_MAX_LEN || shown.length === 0) break;
+    omitted += 1;
+    shown.pop();
+  }
+  return line !== null && line.length <= RUNNER_GONE_OPEN_ITEM_MAX_LEN ? line : null;
 }
 
 // 0087: default lane-profiles projection — reads the repo-tracked lanes table
@@ -315,6 +353,18 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   (same discipline as the lanes profiles section); returned `open item: `
  *   lines are pushed into observations under the 64-line cap. Facts only —
  *   never checkStatus/warnings/complete; a throw omits the whole section.
+ * @param {object} [input.runnerGoneDeps] — TD-341: runner-absence proof deps
+ *   ({ handshakeReader, daemonAliveFn } — daemon SSOT lives in the adapters
+ *   layer; the MCP adapter injects the real readers, tests inject stubs).
+ *   Absent → the runner-gone open-item section is skipped entirely (advisory).
+ * @param {object} [input.runnerGoneCache] — TD-341: optional proof cache
+ *   instance shared with run_status (adapter-held; absent → a per-call instance
+ *   with no cross-call caching).
+ * @param {Function} [input.runnerGoneProbeFn] — TD-341: injectable per-candidate
+ *   probe (defaults to read-transcript + prefilter + cached proof). Signature:
+ *   ({ runId, runDir, cache, deps }) → Promise<{gone:boolean}>.
+ * @param {Function} [input.runnerGoneNowFn] — TD-341（二轮续修 6）: injectable
+ *   clock for the Section 3b time budget (defaults to Date.now).
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
@@ -334,6 +384,10 @@ export async function aggregateLeadPreflight({
   countProjectBucketsFn,
   laneWiringFactFn,
   openItemsFn,
+  runnerGoneDeps,
+  runnerGoneCache,
+  runnerGoneProbeFn,
+  runnerGoneNowFn,
   knownAgentIds = [],
 }) {
   const warnings = [];
@@ -571,6 +625,10 @@ export async function aggregateLeadPreflight({
   // produced activeRuns — the Lead must NOT rescan. null = unknown (unreadable),
   // NEVER faked as 0, so "could not confirm" stays distinct from "confirmed none".
   let unresolvedRunCount = null;
+  // TD-341（第 89 批 C2）：同一次扫描有界保留的 unresolved 候选（listRuns 内部
+  // 收集；注入的 listRunsFn 不带该字段时为 null——本节 no-op）。只供下方 3b 的
+  // runner 缺席证明用，不进任何输出字段。
+  let unresolvedCandidates = null;
   if (workspace && workspace.bound && typeof listRunsFn === "function") {
     try {
       const result = await listRunsFn({
@@ -579,7 +637,13 @@ export async function aggregateLeadPreflight({
         latest: ACTIVE_RUNS_CAP,
         authorizedWorkspaceRoot: workspaceBinding.root,
         knownAgentIds,
+        // TD-341：候选与 unresolvedCount 同一次扫描收集（上限见常量；调用面
+        // 注入的 listRunsFn 不识别该选项时不返回该字段，本节自然 no-op）。
+        unresolvedCandidatesCap: UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP,
       });
+      unresolvedCandidates = Array.isArray(result.unresolvedCandidates)
+        ? result.unresolvedCandidates
+        : null;
       const all = result.runs ?? [];
       activeRunCount = typeof result.matchedCount === "number" ? result.matchedCount : all.length;
       unresolvedRunCount = typeof result.unresolvedCount === "number" ? result.unresolvedCount : null;
@@ -619,6 +683,60 @@ export async function aggregateLeadPreflight({
   } else {
     // workspace unknown (resolver threw) → cannot determine; leave activeRuns null.
     checkStatus.activeRuns = "unknown";
+  }
+
+  // --- Section 3b: proven runner-gone unresolved runs (TD-341; advisory, read-only) ---
+  // 疑似死掉的运行不在 activeRuns 里（无新鲜心跳），此前只剩 unresolvedRunCount 一条
+  // 计数。这里对 listRuns 同一次扫描保留的有界 unresolved 候选逐个**串行**做前置
+  // 筛选 + 只读证明；成立的汇成一条 `open item: ` 观察行（决定 0113 同口径——等
+  // Lead 处理的事，只告知事实与去向，不动手）。超出候选上限的照旧只计入
+  // unresolvedRunCount。二轮续修 6：串行证明受 RUNNER_GONE_PREFLIGHT_BUDGET_MS
+  // 总预算约束（时钟可注入），预算用尽即停——宿主的 MCP 请求超时（约 60s）不被
+  // 最坏情形（5 × 30s 扫描 + 身份判定）击穿。facts only：不进 checkStatus、不影
+  // 响 complete；读不出/证明失败/缺注入 → 整段静默省略（advisory 纪律）。worker
+  // 上下文抑制（WAO 不向 worker 投影 Lead 收口事项，与 0113 open items 同判法）。
+  try {
+    const runnerGoneContextFn = typeof workerContextFn === "function" ? workerContextFn : nestedDispatchContext;
+    if (workspace && workspace.bound && unresolvedCandidates !== null && unresolvedCandidates.length > 0
+      && runnerGoneContextFn() == null
+      && runnerGoneDeps && typeof runnerGoneDeps.handshakeReader === "function"
+      && typeof runnerGoneDeps.daemonAliveFn === "function") {
+      const proofCache = runnerGoneCache ?? createRunnerGoneProofCache();
+      // 二轮续修 6：本段的总时间预算——每个候选开始前检查，已用满就不再发起新的
+      // 证明（未证明的候选不列入 open item 行，也不另加任何行或字段）。时钟可注入。
+      const clockFn = typeof runnerGoneNowFn === "function" ? runnerGoneNowFn : Date.now;
+      const sectionStartedAt = clockFn();
+      const probe = typeof runnerGoneProbeFn === "function"
+        ? runnerGoneProbeFn
+        : async ({ runId: candidateRunId }) => {
+          // 缺省探针：读该候选的转录快照 → 共享的前置筛选 + 缓存 + 证明。
+          const events = await readTranscript(resolveTranscriptPath(runDir, candidateRunId));
+          return probeRunnerGoneCached({
+            runId: candidateRunId,
+            runDir,
+            events,
+            cache: proofCache,
+            deps: { nowFn: clockFn, ...runnerGoneDeps },
+          });
+        };
+      const provenGone = [];
+      for (const candidate of unresolvedCandidates) {
+        if (typeof candidate?.runId !== "string" || candidate.runId.length === 0) continue;
+        if (clockFn() - sectionStartedAt >= RUNNER_GONE_PREFLIGHT_BUDGET_MS) break; // 预算用尽
+        try {
+          const verdict = await probe({ runId: candidate.runId, runDir, cache: proofCache, deps: runnerGoneDeps });
+          if (verdict?.gone === true) provenGone.push(candidate.runId);
+        } catch {
+          // 单个候选读不出/证明失败：跳过（不构成死亡证明，也不拖垮其余候选）。
+        }
+      }
+      if (provenGone.length > 0 && observations.length < 64) {
+        const line = buildRunnerGoneOpenItemLine(provenGone);
+        if (line !== null) observations.push(line);
+      }
+    }
+  } catch {
+    // 整段意外失败 → 省略（advisory 纪律；绝不影响 preflight 其余部分）。
   }
 
   // --- Section 4: verification gate status (machine-local, read-only, independent) ---

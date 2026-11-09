@@ -24,7 +24,10 @@ import { readTranscript } from "../transcript.js";
 import { resolveTranscriptPathDetailed } from "../projectBuckets.js";
 import { boundReportScope } from "../metrics.js";
 import { determineRunSettlement } from "./runSettlement.js";
-import { proveVerifierGone, settleRun, SETTLE_QUIET_WINDOW_MS } from "./runSettle.js";
+import { proveVerifierGone, SETTLE_QUIET_WINDOW_MS } from "./runSettle.js";
+// TD-341（第 89 批 B）：proveRunnerGone 上移到 runSettle 旁的共享模块（本等待器、
+// run_status、lead_preflight 共用同一证明入口与前置筛选，不复制）。
+import { proveRunnerGone, runnerGonePrefilter } from "./runnerGoneProof.js";
 import { runWaitNextStep } from "./runNextStep.js";
 import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "./runQuietAdvisory.js";
 
@@ -42,27 +45,10 @@ export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
 export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_MS;
 
 /**
- * 第 83 批 B：runner 已不在的证明（只读）。以只读干跑调 settleRun（apply:false）
- * ——六道门全在 settleRun 里，这里不复制；eligible:true 即"非终态、owner 心跳
- * 不在、本机无 runner 进程、静默窗、会话形状、无活 daemon"全部成立。settleRun
- * 自己重新解析并读取转录（不用等待器的快照：门的判定本来就该看证明时刻的最新
- * 事实）。daemon 握手读器由调用面经 deps 注入（application 不 import daemon.js）
- * ——缺注入时 settleRun 响亮失败，由等待器按探测失败处理：继续等，不构成死亡
- * 证明。reasonText 只是 dry-run 的入参校验用的占位（结算决定仍归 Lead，出口在
- * nextStep 里指明）。
+ * （第 83 批 B 引入；TD-341 第 89 批 B 上移）runner 已不在的证明（只读）——
+ * proveRunnerGone 现居 ./runnerGoneProof.js（settleRun 旁），与 run_status、
+ * lead_preflight 共用同一入口；证明语义与注入纪律见该模块。
  */
-async function proveRunnerGone({ runId, runDir, deps }) {
-  const result = await settleRun({
-    runId,
-    runDir,
-    reasonText: "runner_gone proof (read-only dry-run from the settlement wait; settle only on an explicit Lead decision)",
-    apply: false,
-    deps,
-  });
-  return result.eligible === true
-    ? { gone: true }
-    : { gone: false, refusal: result.refused ?? "unknown" };
-}
 
 /**
  * 等一个运行收口（只读：不改任何状态、不停 worker、不设总时长；永不沿用旧快照
@@ -80,11 +66,14 @@ async function proveRunnerGone({ runId, runDir, deps }) {
  * 照原有规则算不可信轮。证明被拒的理由并入本轮进度行明细并参与节流键。
  *
  * 第 83 批 B：runnerGoneProof=true 时（runs wait 开启；consult wait 的渲染面
- * 未接这道证明，缺省关闭、字节兼容），可信、**非终态**的轮加一道同形证明：最后
- * 一条绑定事件早于 SETTLE_QUIET_WINDOW_MS 才值得探测（照 settle 门 4 的口径省
- * 掉注定拒绝的干跑），每 5 分钟至多一次，以只读干跑调 settleRun。成立后重新
- * 解析、重读、再判一次：已收口照常返回 settled；仍非终态才返回 runner_gone
- *（等待器只陈述事实，结算/停止仍归 Lead）；被拒的闭集理由同样进进度行明细。
+ * 未接这道证明，缺省关闭、字节兼容），可信、**非终态**的轮加一道同形证明：
+ * 共享前置筛选 runnerGonePrefilter（非终态、owner 心跳不新鲜、最后一条绑定事件
+ * 满 SETTLE_QUIET_WINDOW_MS——与 runnerGoneProof.js 同口径，不再筛后台派发），
+ * 每轮节流按旧规则（静默窗已满 + 距上次证明满 5 分钟），以只读干跑调 settleRun。
+ * 本该发证明的那轮若被心跳新鲜挡下，拒绝理由按 settle 门 2 的闭集标签
+ * owner_fresh 进进度行明细（二轮续修 4）。成立后重新解析、重读、再判一次：
+ * 已收口照常返回 settled；仍非终态才返回 runner_gone（等待器只陈述事实，
+ * 结算/停止仍归 Lead）；被拒的闭集理由同样进进度行明细。
  *
  * 返回闭集 outcome（kind 成员与退出码的映射归调用面——runs wait / consult wait
  * 各自同义映射）：
@@ -323,18 +312,30 @@ export async function waitRunSettlement({
           }
           // 第 83 批 B：runner 缺席证明——只对开启它的调用面（runs wait）与可信、
           // 非终态的轮生效（终态等验证的轮有上面的验证者证明，两者互斥）。前置筛
-          // 照 settle 门 4 的口径：最后一条绑定事件早于 SETTLE_QUIET_WINDOW_MS 才
-          // 值得探测（省掉注定拒于 quiet_window 的干跑）；节流 5 分钟。证明成立后
-          // 重新解析、重读、再判一次（0096 同一纪律——绝不把旧快照当成仍非终态）。
+          // 用共享的 runnerGonePrefilter（TD-341 第 89 批 B 起：非终态、owner 心跳
+          // 不新鲜、最后一条绑定事件满 SETTLE_QUIET_WINDOW_MS——任一不满足就不值
+          // 得探测，省掉注定拒绝的干跑；二轮续修 1 起不再筛后台派发，会话形状归
+          // settle 门 5）；节流 5 分钟。证明成立后重新解析、重读、再判一次（0096
+          // 同一纪律——绝不把旧快照当成仍非终态）。
+          // 二轮续修 4：节流口径回到旧规则（静默窗已满 + 距上次满 5 分钟就"本该
+          // 发证明"）；该发的那一轮若前置筛选拒于 owner_heartbeat_fresh，则记
+          // lastRunnerProofAt 并把拒绝理由记为 owner_fresh（settle 门 2 对新鲜心跳
+          // 的闭集标签）——不发证明、不扫进程，进度行的 `runner proof: owner_fresh`
+          // 注脚保住（相对 061d565d 的可见行为）。其余拒绝理由照旧：不发证明、不
+          // 更新记录的理由。
           if (runnerGoneProof && !settlement.facts.terminal) {
             const proofNow = nowFn();
             const proofBound = events.filter((e) => e && e.runId === runId);
             const lastBoundTs = Date.parse(proofBound[proofBound.length - 1]?.ts);
-            const proofDue = Number.isFinite(lastBoundTs)
-              && proofNow - lastBoundTs >= SETTLE_QUIET_WINDOW_MS
-              && (lastRunnerProofAt === null
-                || proofNow - lastRunnerProofAt >= SETTLEMENT_RUNNER_PROOF_EVERY_MS);
-            if (proofDue) {
+            const quietDue = Number.isFinite(lastBoundTs)
+              && proofNow - lastBoundTs >= SETTLE_QUIET_WINDOW_MS;
+            const throttleDue = lastRunnerProofAt === null
+              || proofNow - lastRunnerProofAt >= SETTLEMENT_RUNNER_PROOF_EVERY_MS;
+            if (quietDue && throttleDue) {
+              const pre = runnerGonePrefilter({
+                events, runId, runDir, now: proofNow, deps: runnerProofDeps,
+              });
+              if (pre.pass) {
               lastRunnerProofAt = proofNow;
               let proof;
               try {
@@ -405,6 +406,14 @@ export async function waitRunSettlement({
                   }
                 }
               }
+              } else if (pre.reason === "owner_heartbeat_fresh") {
+                // 二轮续修 4：本该发证明的这轮被心跳新鲜挡下——按同一节流记账，
+                // 拒绝理由记 settle 门 2 的闭集标签 owner_fresh；不发证明、不扫进程。
+                lastRunnerProofAt = proofNow;
+                lastRunnerRefusal = "owner_fresh";
+              }
+              // 其余拒绝理由（terminal 在本分支不可达——外层已筛非终态；no_events、
+              // quiet_window 在 quietDue 已含）：照旧不发证明、不更新记录的理由。
             }
           }
           const now = nowFn();

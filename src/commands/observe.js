@@ -26,6 +26,11 @@ import { readTranscript } from "../transcript.js";
 import { parseOptions, loadRun } from "./shared.js";
 // M9-3A: status aggregation delegated to shared application service.
 import { getRunStatus } from "../application/runStatus.js";
+// TD-341（第 89 批 C3）：status 的 runner 缺席证明读器（daemon SSOT 在 adapters
+// 层，CLI 命令层注入——与 runs settle / runs wait 同款接线）与 stderr 尾部展示
+//（格式化收拢在 runnerStderrTailText 单一出口）。
+import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
+import { runnerStderrTailText, NO_RUNNER_STDERR_RECORD_TEXT } from "../application/runnerStderr.js";
 // M9-4A: collection delegated to shared application service.
 import { collectRunMessages } from "../application/runCollect.js";
 // F5 (2026-10-08): 投影层解码/校验路径抛出的类型化 cursor 拒绝信号——CLI 折叠
@@ -89,10 +94,13 @@ function statusLine(status) {
   line += ` lastActivityKind=${statusLineFreeText(status.lastActivityKind)}`;
   line += ` lastActivitySummary=${statusLineFreeText(status.lastActivitySummary)}`;
   if (status.leadAdvisory) line += ` advisory=${statusLineFreeText(status.leadAdvisory)}`;
+  // TD-341：runner 被证明不在时附 stderr 尾部（自由文本字段同款 JSON 串形态，
+  // 行尾空格/换行取回由 JSON.parse 保证）。
+  if (status.runnerGone) line += ` runnerStderrTail=${statusLineFreeText(status.runnerStderrTail)}`;
   return line;
 }
 
-export async function statusCommand(args, config) {
+export async function statusCommand(args, config, deps = {}) {
   const [runId, ...tail] = args;
   const options = parseOptions(tail);
   const runDir = resolve(options.runDir ?? config.runDir);
@@ -108,7 +116,20 @@ export async function statusCommand(args, config) {
   // M9-3A: aggregation delegated to shared application service. The CLI prints
   // the existing TD-75 field subset (byte-compatible output); the service also
   // returns machine fields for MCP that the CLI does not print.
-  const status = await getRunStatus({ runId, runDir });
+  // TD-341（第 89 批 C3）：注入 runner 缺席证明读器（daemon SSOT 在 adapters 层，
+  // CLI 命令层接线——与 runs settle / runs wait 同款）。CLI 单次调用不持节流缓存。
+  // deps.getRunStatusFn / deps.runnerGoneDeps 为测试注入缝（生产缺省真实接线）。
+  const statusService = deps.getRunStatusFn ?? getRunStatus;
+  const status = await statusService({
+    runId,
+    runDir,
+    runnerGoneDeps: deps.runnerGoneDeps ?? { handshakeReader: readHandshakeDetailed, daemonAliveFn: isDaemonAlive },
+  });
+  // TD-341：runner 被证明不在时附 stderr 尾部（展示处理后的文本，限长）；无文件/
+  // 空文件分固定文案。absent（未证明）时输出形状逐字节不变。
+  if (status.runnerGone === true) {
+    status.runnerStderrTail = runnerStderrTailText(runDir, runId);
+  }
   // b78：显式 --format line 走单行出口；缺省路径（无 --format）逐字节不变。
   if (options.format === "line") {
     console.log(statusLine(status));
@@ -151,6 +172,11 @@ export async function statusCommand(args, config) {
     ...(scorecard ? { scorecard } : {}),
     // 决定 0067：很久没有新动作/正文的未终态 run 附一句 advisory（去留由 Lead 定）。
     ...(status.leadAdvisory ? { advisory: status.leadAdvisory } : {}),
+    // TD-341：runner 被证明不在的事实 + stderr 尾部（条件展开；未证明的 run 输出
+    // 逐字节不变）。
+    ...(status.runnerGone === true
+      ? { runnerGone: true, runnerStderrTail: status.runnerStderrTail ?? NO_RUNNER_STDERR_RECORD_TEXT }
+      : {}),
   }, null, 2));
 }
 

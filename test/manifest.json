@@ -5,6 +5,7 @@
       "application/claudeSessionNotFoundDiagnosis.test.js",
       "application/ownerLivenessIdentity.test.js",
       "application/runSettle.test.js",
+      "application/runnerStderr.test.js",
       "application/lanesView.test.js",
       "application/laneProfile.test.js",
       "application/laneFactsLine.test.js",

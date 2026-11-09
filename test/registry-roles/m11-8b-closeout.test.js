@@ -47,6 +47,15 @@ function makeGitRepo(dir) {
   execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
 }
 
+// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
+// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
+// 经它一律"证明不成立"，测试不起任何真实进程扫描。
+const REFUSING_RUNNER_GONE_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+};
 function writeTranscript(dir, runId, lines) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${runId}.jsonl`), lines, "utf8");
@@ -211,6 +220,7 @@ test("CLOSEOUT-REDC1: MCP run_dispatch with malformed service agentId collapses 
     };
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath, runDir: join(dir, "runs"), workspaceRoot: dir,
       dispatchRunFn: injectDispatch,
     });
@@ -248,7 +258,7 @@ test("CLOSEOUT-REDC2: MCP run_status returns a parsed safe object (agentId valid
     writeTranscript(join(dir, "runs"), runId, lines);
     const registryPath = makeRegistry(dir, { tester: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -275,7 +285,7 @@ test("CLOSEOUT-REDC3: MCP run_status with corrupt transcript → agentId unknown
     writeTranscript(join(dir, "runs"), runId, lines);
     const registryPath = makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: dir } });
     const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });

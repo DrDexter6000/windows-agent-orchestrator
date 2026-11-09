@@ -15,12 +15,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, fstatSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { runAndWait, printObservationDeadlineNotice } from "../../src/commands/run.js";
 import { forkResumeRunner, resumeCommand } from "../../src/commands/lifecycle.js";
@@ -105,9 +105,11 @@ test("TD-151 resume 挂起脸钉(a): fork 形状 = detached + stdio ignore + unr
     calls.push({ execPath, args, opts });
     return { unref() { calls.at(-1).unrefCalled = true; } };
   };
+  const tmp = await mkdtemp(join(os.tmpdir(), "wao-td341r-fork-"));
+  try {
   await forkResumeRunner(
     "run_td151_fork",
-    { runDir: "runs-x", registry: "reg-x.json", waitTimeout: "2000", pollInterval: "250" },
+    { runDir: tmp, registry: "reg-x.json", waitTimeout: "2000", pollInterval: "250" },
     { runDir: "runs-default", registry: "reg-default.json", pollInterval: 1000 },
     fakeSpawn,
   );
@@ -117,12 +119,44 @@ test("TD-151 resume 挂起脸钉(a): fork 形状 = detached + stdio ignore + unr
   assert.ok(call.args.includes("--resume-run-id"));
   assert.equal(call.args[call.args.indexOf("--resume-run-id") + 1], "run_td151_fork");
   assert.ok(call.args.includes("--run-dir"));
-  assert.ok(call.args[call.args.indexOf("--run-dir") + 1].endsWith("runs-x"), "显式 runDir 优先");
+  assert.ok(call.args[call.args.indexOf("--run-dir") + 1].endsWith(basename(tmp)), "显式 runDir 优先");
   assert.ok(call.args.includes("--wait-timeout"));
   assert.equal(call.args[call.args.indexOf("--wait-timeout") + 1], "2000");
   assert.equal(call.opts.detached, true, "必须 detached（runner 脱离 CLI 存活）");
-  assert.equal(call.opts.stdio, "ignore", "必须 stdio ignore（CLI 不持有 runner 管道）");
+  // TD-341（续修 4）：stdin/stdout 照旧 ignore（resume 接管无提示词交接，CLI 不持
+  // 管道）；stderr 是打开的 .runner-<runId>.stderr fd，fork 后父进程已关闭句柄。
+  assert.equal(call.opts.stdio[0], "ignore", "stdin ignore（无提示词交接）");
+  assert.equal(call.opts.stdio[1], "ignore", "stdout ignore");
+  assert.equal(typeof call.opts.stdio[2], "number", "stderr 是打开的 fd");
+  let fdClosed = false;
+  try { fstatSync(call.opts.stdio[2]); } catch { fdClosed = true; }
+  assert.ok(fdClosed, "父进程在 spawn 之后关闭了自己的 fd");
+  assert.ok(existsSync(join(tmp, ".runner-run_td151_fork.stderr")), "stderr 证据文件已创建");
   assert.equal(call.unrefCalled, true, "必须 unref（CLI 不等待 runner）");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// TD-341（续修 4）：stderr 打开失败 → stdio[2] 退回 "ignore"，接管照常 fork。
+test("TD-341-续修4: forkResumeRunner stderr 打开失败 → 退回 ignore，不阻止接管", async () => {
+  const calls = [];
+  const fakeSpawn = (execPath, args, opts) => {
+    calls.push({ execPath, args, opts });
+    return { unref() {} };
+  };
+  const throwingOpener = () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); };
+  await forkResumeRunner(
+    "run_td341_fb",
+    { runDir: "runs-y", registry: "reg-y.json" },
+    { runDir: "runs-default", registry: "reg-default.json", pollInterval: 1000 },
+    fakeSpawn,
+    throwingOpener,
+  );
+  assert.equal(calls.length, 1, "打开失败不阻止接管");
+  assert.equal(calls[0].opts.stdio[2], "ignore", "退回 ignore");
+  assert.equal(calls[0].opts.stdio[0], "ignore");
+  assert.equal(calls[0].opts.stdio[1], "ignore");
 });
 
 test("TD-151 resume 挂起脸钉(a): 非法 --wait-timeout 在 fork 前被拒（零 fork）", async () => {

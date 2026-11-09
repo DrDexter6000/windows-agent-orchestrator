@@ -224,6 +224,11 @@ import { REVIEW_UNAVAILABLE_REASONS, REVIEW_PENDING_REASON } from "../applicatio
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 import { LEAD_ADVISORY_WIRE_MAX_LEN } from "../application/runQuietAdvisory.js";
+// TD-341（第 89 批 B/C）：run_status / lead_preflight 的 runner 缺席证明读器与
+// 进程内节流缓存。daemon 握手 SSOT 在 adapters 层（daemon.js）——由本适配层注入
+// （application 层不上向导入）；缓存每 server 实例一份（闭包持有，跨工具共享）。
+import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
+import { createRunnerGoneProofCache } from "../application/runnerGoneProof.js";
 import {
   projectRunActivity,
   ACTIVITY_CATEGORIES,
@@ -4077,12 +4082,28 @@ export function createWaoMcpServer({
   // workspace binding, knownAgentIds, owner heartbeat, activeOnly, sorting and
   // limit against those facts.
   runSummaryCache,
+  // TD-341（第 89 批 C2）：lead_preflight 的 runner 缺席证明探针注入缝（测试桩；
+  // 缺省走共享证明入口——真实 daemon 读器 + 本实例节流缓存）。
+  leadPreflightRunnerGoneProbe,
+  // TD-341（续修 5）：runner 缺席证明 deps 注入缝（run_status 与 lead_preflight
+  // 共用）。缺省仍是真实 daemon 读器；测试注入桩（handshakeReader/daemonAliveFn/
+  // runnerScanFn/identifyFn），不起任何真实进程扫描。不影响工具面 schema/描述。
+  runnerGoneDeps: injectedRunnerGoneDeps,
 }) {
   // M12-18: one cache instance per server. Handlers receive a facts reader
   // that serves the metadata-validated run facts; listRuns re-applies the
-  // current binding, registry, heartbeat and filters against them per query.
+  // current binding, registry, knownAgentIds, heartbeat and filters against them per query.
   const summaryCache = runSummaryCache ?? createRunSummaryCache();
   const cachedRunFactsReader = (filePath) => summaryCache.read(filePath);
+  // TD-341：runner 缺席证明的进程内节流缓存（run_status 与 lead_preflight 共享；
+  // 键含转录最后 seq，TTL 见 runnerGoneProof.js）。
+  const runnerGoneProofCache = createRunnerGoneProofCache();
+  // 证明读器（daemon SSOT 在 adapters 层，只在这里接线）。缺省真实；测试经
+  // runnerGoneDeps 注入桩（续修 5）。
+  const runnerGoneDeps = injectedRunnerGoneDeps ?? {
+    handshakeReader: readHandshakeDetailed,
+    daemonAliveFn: isDaemonAlive,
+  };
   // 0046 §5 步⑨（D10 认证清单门禁——部署级开关，默认关）公共判定（三席会审双洞
   // 修补：run_dispatch 与 run_consult 共用；成员资格=selectCertRecord 双空间命中
   // 且 status ∈ {certified, conditional}——例外条款族的 conditional 是常态；新鲜度
@@ -4216,6 +4237,9 @@ export function createWaoMcpServer({
   // (the SAME injectable dispatchRunFn seam every dispatch-bearing tool uses);
   // the READ mode below never threads it — zero dispatch is structural there.
   const consultService = runConsultFn ?? runConsult;
+  // TD-341：lead_preflight 的 runner 缺席证明探针注入缝（测试桩；缺省走共享
+  // 证明入口，见 leadPreflight.js Section 3b）。
+  const leadPreflightRunnerGoneProbeFn = leadPreflightRunnerGoneProbe;
 
   // M12-7: backend capability resolver for the continuation service's
   // supportsSessionReuse gate (and M12-16 correctable). 2026-10-04 drift fix:
@@ -4626,6 +4650,13 @@ export function createWaoMcpServer({
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
             ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,
+          // TD-341：runner 缺席证明（unresolved 候选 → open item 行）的读器、
+          // 缓存与测试注入缝（preflight 级 probe 桩；缺省走共享证明入口）。
+          runnerGoneDeps,
+          runnerGoneCache: runnerGoneProofCache,
+          ...(typeof leadPreflightRunnerGoneProbeFn === "function"
+            ? { runnerGoneProbeFn: leadPreflightRunnerGoneProbeFn }
+            : {}),
         });
         // 0087: settle the lanes section INDEPENDENTLY before the full output
         // validation — a projection that fails the sub-schema is nulled with
@@ -5826,7 +5857,14 @@ export function createWaoMcpServer({
       // SDK's detailed Output validation error (which can include field names,
       // expected types, or internal structure).
       try {
-        const status = await statusService({ runId, runDir });
+        // TD-341：runner 缺席证明读器 + 节流缓存注入（适配层接线；application
+        // 层不上向导入 daemon.js）。前置筛选不过的运行零证明、字节不变。
+        const status = await statusService({
+          runId,
+          runDir,
+          runnerGoneDeps,
+          runnerGoneCache: runnerGoneProofCache,
+        });
         // Normalize timestamps defensively: a legacy/malformed transcript event
         // may have lastEventType present but lastEventTs null/NaN/non-string.
         // Incomplete pairs collapse to null rather than producing a payload that

@@ -42,7 +42,16 @@ function makeGitRepo(dir) {
 
 function jl(obj) { return JSON.stringify(obj) + "\n"; }
 
+const REFUSING_RUNNER_GONE_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+};
 function seedTranscript(runDir, runId, { agentId = "coder_low", messages = [], terminal = false, workspaceCwd, extraLines = [] } = {}) {
+// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
+// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
+// 经它一律"证明不成立"，测试不起任何真实进程扫描。
   mkdirSync(runDir, { recursive: true });
   const lines = [
     jl({ type: "run.submitted", agentId, ts: "2026-07-28T00:00:00.000Z", runId }),
@@ -91,7 +100,7 @@ test("MD-01: seven output schemas REQUIRE availableDrilldowns with the exact bou
   const dir = mkdtempSync(join(tmpdir(), "wao-md01-"));
   try {
     makeGitRepo(dir);
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
@@ -166,7 +175,7 @@ test("MD-02: run_status returns availableDrilldowns; legacy fields unchanged", a
     seedTranscript(runDir, "run_s", { workspaceCwd: dir, messages: ["hi"], terminal: false });
     const tp = join(runDir, "run_s.jsonl");
     const before = readFileSync(tp, "utf8");
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId: "run_s" } });
@@ -210,7 +219,7 @@ test("MD-03: run_status on a failed terminal run advertises diagnosis + activity
         jl({ type: "run.state_change", to: "failed", reason: "error", ts: "2026-07-28T00:05:01.000Z", runId: "run_f", agentId: "coder_low" }),
       ],
     });
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId: "run_f" } });
@@ -240,7 +249,7 @@ test("MD-04: run_await_result — terminal compact → activity+full collect; no
       + jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-07-28T00:00:03.000Z", runId: "run_rf", agentId: "coder_low" })
       + "null\n42\n[1,2,3]\n", "utf8");
     const tp = join(runDir, "run_t.jsonl");
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const t = await client.callTool({ name: "run_await_result", arguments: { runId: "run_t", waitMs: 0 } });
@@ -269,7 +278,7 @@ test("MD-05: run_await_result too_large → full collect primary; empty → acti
     // too_large: last assistant text > 4000 chars (compact cap).
     seedTranscript(runDir, "run_big", { workspaceCwd: dir, messages: ["x".repeat(4100)], terminal: true });
     seedTranscript(runDir, "run_empty", { workspaceCwd: dir, messages: [], terminal: true });
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const big = await client.callTool({ name: "run_await_result", arguments: { runId: "run_big", waitMs: 0 } });
@@ -288,6 +297,7 @@ test("MD-06: run_diagnose — delivery_packaging_failed → delivery+activity; p
   try {
     makeGitRepo(dir);
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDiagnosisFn: async () => ({
         runId: "run_x", state: "failed", terminal: true,
@@ -307,6 +317,7 @@ test("MD-06: run_diagnose — delivery_packaging_failed → delivery+activity; p
       }
     } finally { await client.close(); await server.close(); }
     const server2 = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDiagnosisFn: async () => ({
         runId: "run_y", state: "failed", terminal: true,
@@ -331,7 +342,7 @@ test("MD-07: run_collect — full page with cursor → continue+activity; compac
     const messages = Array.from({ length: 55 }, (_, i) => `m-${i}`);
     seedTranscript(runDir, "run_c", { workspaceCwd: dir, messages, terminal: true });
     const tp = join(runDir, "run_c.jsonl");
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       // Full page 1 (12 messages → paginated, cursor present).
@@ -374,6 +385,7 @@ test("MD-08: run_delivery — reviewable → delivery_review+activity; packaging
   try {
     makeGitRepo(dir);
     const mk = (view) => createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDeliveryFn: async () => view,
     });
@@ -439,6 +451,7 @@ test("MD-08: run_delivery — reviewable → delivery_review+activity; packaging
     // WAIT path (waitMs): the readiness handshake payload must carry the same
     // bounded metadata. reviewable → delivery review + activity.
     const s4 = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDeliveryReadinessFn: async () => ({
         runId: "run_w", terminalState: "completed", deliveryAvailable: true,
@@ -463,6 +476,7 @@ test("MD-08: run_delivery — reviewable → delivery_review+activity; packaging
 
     // WAIT path settled as packaging_failed → activity + diagnosis.
     const s5 = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDeliveryReadinessFn: async () => ({
         runId: "run_w2", terminalState: "failed", deliveryAvailable: false,
@@ -493,7 +507,7 @@ test("MD-09: run_activity — terminal → compact collect; non-terminal → sta
     });
     seedTranscript(runDir, "run_na", { workspaceCwd: dir, messages: ["x"], terminal: false });
     const tp = join(runDir, "run_a.jsonl");
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const t = await client.callTool({ name: "run_activity", arguments: { runId: "run_a", pageSize: 1 } });
@@ -524,7 +538,7 @@ test("MD-10: drilldown metadata never triggers nested tool invocation or extra a
     seedTranscript(runDir, "run_all", { workspaceCwd: dir, messages: ["final"], terminal: true });
     const tp = join(runDir, "run_all.jsonl");
     const auditsBefore = countAudits(tp);
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildClient(server);
     try {
       const calls = [
@@ -563,6 +577,7 @@ test("MD-12: run_diagnose trust boundary — an unknown/extra injected field col
     // and the whole response collapses to the fixed safe error — never a
     // partial structuredContent, never a leak of the unknown field.
     const server = createWaoMcpServer({
+      runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS,
       registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
       getRunDiagnosisFn: async () => ({
         runId: "run_z", state: "failed", terminal: true,

@@ -2,11 +2,12 @@ import test, { before, after } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import { writeFileSync as _writeFileSync, existsSync } from "node:fs";
+import path, { join as _join } from "node:path";
 import { execSync } from "node:child_process";
 import { runBackground, parseSimpleFlags } from "../../src/backgroundRunner.js";
+import { cleanupRunnerStderrOnExit, armRunnerStderrCleanup } from "../../src/backgroundRunner.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 import {
@@ -573,6 +574,64 @@ test("runBackground 标签: 数组与字符串形状都进 run.started.tags（�
     events = await readTranscript(path.join(dir, `${none.runId}.jsonl`));
     started = events.find((e) => e.type === "run.started");
     assert.equal(started?.tags, undefined, "不给标签 → run.started 无 tags 键");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 A；二轮续修 1 收紧）：runner stderr 证据文件的进程级退出钩子
+// ——退出码 0 **且文件为空**才删（干净退出且无任何诊断内容）；非 0 留、码 0 但
+// 非空也留（V8 崩溃证据、resume 接管 append 进来的旧证据、写不进转录时的报错、
+// Node 警告都算）。注册器按 (runDir, runId) 去重。V8 abort/被强杀不走退出钩子，
+// 无法在进程内单测，属设计行为（文件自然留下）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("TD-341-二轮1: 退出码 0 且文件为空才删；码 0 但非空留；非 0 留", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-td341r2-exit-"));
+  try {
+    const runId = "run_td341_exit";
+    const file = _join(dir, `.runner-${runId}.stderr`);
+    // 非 0：非空证据照留。
+    _writeFileSync(file, "#< Fatal JavaScript invalid... heap OOM>", "utf8");
+    cleanupRunnerStderrOnExit(1, dir, runId);
+    assert.ok(existsSync(file), "非 0 退出码不删——诊断证据留下");
+    // 码 0 但非空：留——resume 接管的 runner 干净跑完也不能抹掉之前的崩溃证据
+    //（append 打开同一文件），本进程写进 stderr 的报错、Node 警告同理。
+    cleanupRunnerStderrOnExit(0, dir, runId);
+    assert.ok(existsSync(file), "码 0 但非空不删——append 累积的证据在");
+    // 码 0 且为空：删。
+    _writeFileSync(file, "", "utf8");
+    cleanupRunnerStderrOnExit(0, dir, runId);
+    assert.ok(!existsSync(file), "码 0 且空 → 同步删除");
+    // 文件本就不在时是 no-op（stat 不到不动）。
+    cleanupRunnerStderrOnExit(0, dir, runId);
+    cleanupRunnerStderrOnExit(0, dir, "run_td341_never");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-341-A: armRunnerStderrCleanup 在目标进程上注册 exit 钩子（同键去重）", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-td341a-arm-"));
+  try {
+    const runId = "run_td341_arm";
+    const file = _join(dir, `.runner-${runId}.stderr`);
+    _writeFileSync(file, "boom", "utf8");
+    const registered = [];
+    const fakeProcess = { on: (event, handler) => registered.push({ event, handler }) };
+    armRunnerStderrCleanup(fakeProcess, dir, runId);
+    armRunnerStderrCleanup(fakeProcess, dir, runId); // 同键第二次 → 去重
+    assert.equal(registered.length, 1, "同一 (runDir, runId) 只注册一次");
+    assert.equal(registered[0].event, "exit");
+    registered[0].handler(0);
+    assert.ok(existsSync(file), "码 0 但非空 → 钩子不动文件（二轮续修 1）");
+    _writeFileSync(file, "", "utf8");
+    registered[0].handler(0);
+    assert.ok(!existsSync(file), "码 0 且空 → 钩子删除文件");
+    _writeFileSync(file, "boom", "utf8");
+    registered[0].handler(3);
+    assert.ok(existsSync(file), "钩子对非 0 退出码不动文件");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

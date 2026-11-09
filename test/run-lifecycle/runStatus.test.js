@@ -917,3 +917,164 @@ test("0069-A1: 最近一次生命体征已过 10 分钟 → advisory 不带\"建
     assert.equal("leadAdvisory" in early, false);
   } finally { cleanupDir(dir); }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 C1）：runner 已不在 → run_status 说出它。证明一律注入桩
+//（daemon 读器 + 全套 settle 读器），不跑真实进程扫描。
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { createRunnerGoneProofCache } from "../../src/application/runnerGoneProof.js";
+
+const RG_RUN = "run_td341_c1";
+
+/** 非终态、有后台派发、静默已满结算窗的夹具（lastBoundTs 决定静默分钟数）。 */
+function rgEvents({ lastTs = "2026-10-12T10:00:00.000Z", quietTs = null } = {}) {
+  const base = { runId: RG_RUN, agentId: "coder_low" };
+  const quiet = quietTs ?? lastTs;
+  return [
+    ev({ type: "run.background_submitted", ts: quiet, seq: 1, ...base }),
+    ev({ type: "run.state_change", to: "pending", reason: "background_spawned", ts: quiet, seq: 2, ...base }),
+    ev({ type: "run.state_change", to: "running", reason: "started", ts: quiet, seq: 3, ...base }),
+    ev({ type: "run.event", kind: "command", command: "npm test", ts: lastTs, seq: 4, ...base }),
+  ].join("");
+}
+
+/** 全过的证明 deps（daemon 读器 + settle 读器全桩；心跳读器桩不新鲜）。 */
+function rgProofDeps({ eligible = true, refusal = "owner_fresh" } = {}) {
+  return {
+    handshakeReader: () => ({ present: false }),
+    daemonAliveFn: () => false,
+    heartbeatReader: () => ({ fresh: false }),
+    ownerLeaseReader: () => ({ present: false }),
+    identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+    runnerScanFn: async () => (eligible ? { alive: false } : { alive: true }),
+    _refusalForTest: refusal,
+  };
+}
+
+test("TD-341-C1: 证明成立且重读仍非终态 → 新模板（第 15–30 分钟也给）+ runnerGone 机器字段", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-a-"));
+  try {
+    // lastBound = 10:00，now = 10:20 —— 静默 20 分钟：≥15 分钟证明窗、<30 分钟
+    // 普通 advisory 门槛。不改成 quiet||runnerGone 就不会返回。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T10:00:00.000Z" }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: rgProofDeps(),
+    });
+    assert.equal(status.runnerGone, true, "runnerGone 机器字段在场");
+    assert.equal(status.leadAdvisory,
+      "观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 20 分钟），继续等待不会自行收口。"
+      + `是否结算由 Lead 决定：先干跑 wao runs settle --run-id ${RG_RUN} --reason-file <文件>，确认后再加 --apply。`,
+      "CLI 面中文固定模板（整数分钟 + runId）");
+    assert.equal(status.leadAdvisoryWire,
+      "At observation time no WAO process can still drive this run (owner heartbeat gone, no runner process on this machine, transcript quiet for 20 min). "
+      + "Continued waiting will not settle it on its own. Whether to settle is the Lead's decision: "
+      + "first dry-run wao runs settle --run-id <id> --reason-file <file>, then add --apply.",
+      "MCP 面英文固定模板（整数分钟 + <id> 占位）");
+    assert.ok(status.leadAdvisoryWire.length <= 480, "wire 模板 ≤480 字符（LEAD_ADVISORY_WIRE_MAX_LEN）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-341-C1: 证明后重读已终态 → 退回普通投影（无 advisory、无 runnerGone）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-b-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents());
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      // 首读（含证明内部干跑前的快照）非终态；证明成立后的重读已终态。
+      if (reads === 1) {
+        return [{ type: "run.background_submitted", ts: "2026-10-12T10:00:00.000Z", seq: 1, runId: RG_RUN, agentId: "coder_low" },
+          { type: "run.state_change", to: "running", reason: "started", ts: "2026-10-12T10:00:01.000Z", seq: 2, runId: RG_RUN, agentId: "coder_low" }];
+      }
+      return [{ type: "run.background_submitted", ts: "2026-10-12T10:00:00.000Z", seq: 1, runId: RG_RUN, agentId: "coder_low" },
+        { type: "run.state_change", to: "running", reason: "started", ts: "2026-10-12T10:00:01.000Z", seq: 2, runId: RG_RUN, agentId: "coder_low" },
+        { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-10-12T10:01:00.000Z", seq: 3, runId: RG_RUN, agentId: "coder_low" }];
+    };
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      readTranscriptFn,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: rgProofDeps(),
+    });
+    assert.equal("runnerGone" in status, false, "重读已终态 → 不算数");
+    assert.equal("leadAdvisory" in status, false, "首读快照未满 30 分钟 → 无 advisory");
+    // 退回普通投影 = 首读快照的形状（非终态照实）；重读的终态只用于否决证明。
+    assert.equal(status.state, "running");
+    assert.equal(status.terminal, false);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-341-C1: 证明不成立（扫描见活 runner）→ 旧安静模板逐字不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-c-"));
+  try {
+    // 静默 31 分钟（≥30 分钟门槛）：证明拒于 runner_alive，advisory 落回安静模板。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const now = Date.parse("2026-10-12T10:20:00.000Z");
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => now,
+      runnerGoneDeps: rgProofDeps({ eligible: false }),
+    });
+    assert.equal("runnerGone" in status, false, "证明不成立 → 无机器字段");
+    assert.ok(status.leadAdvisory.startsWith("转录里已 35 分钟没有新的动作或正文"), "旧安静模板照旧");
+    assert.equal(status.leadAdvisoryWire,
+      "No new worker action or text in the transcript for 35 min (last activity: command, 2100s ago). "
+      + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.",
+      "wire 面旧模板逐字不变（无生命体征近窗提示段）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-341-C1: 节流命中不重复调证明；心跳新鲜根本不进证明", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-d-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents());
+    const cache = createRunnerGoneProofCache();
+    let scans = 0;
+    const deps = rgProofDeps();
+    deps.runnerScanFn = async () => { scans += 1; return { alive: false }; };
+    const now = () => Date.parse("2026-10-12T10:20:00.000Z");
+    const first = await getRunStatus({ runId: RG_RUN, runDir: dir, nowFn: now, runnerGoneDeps: deps, runnerGoneCache: cache });
+    assert.equal(first.runnerGone, true);
+    assert.equal(scans, 1, "第一次调用真实证明一次");
+    const second = await getRunStatus({ runId: RG_RUN, runDir: dir, nowFn: now, runnerGoneDeps: deps, runnerGoneCache: cache });
+    assert.equal(second.runnerGone, true);
+    assert.equal(scans, 1, "缓存命中（同 seq、TTL 内）不再证明");
+    // 心跳新鲜（监督进程还在）→ 前置筛直接不调证明（缓存也不咨询）。
+    const freshDeps = rgProofDeps();
+    freshDeps.heartbeatReader = () => ({ fresh: true });
+    freshDeps.runnerScanFn = async () => { scans += 1; return { alive: false }; };
+    const third = await getRunStatus({ runId: RG_RUN, runDir: dir, nowFn: now, runnerGoneDeps: freshDeps, runnerGoneCache: cache });
+    assert.equal("runnerGone" in third, false, "心跳新鲜 → 不声称 runner 已不在（缓存里旧的 gone 不复活）");
+    assert.equal(scans, 1, "心跳新鲜连证明都不发起");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-341-C1: 不注入证明 deps → 行为字节不变（advisory 在场条件不受影响）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-e-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+    });
+    assert.equal("runnerGone" in status, false);
+    assert.ok(status.leadAdvisory.startsWith("转录里已 35 分钟"), "无 deps → 旧路径（安静模板）");
+  } finally {
+    cleanupDir(dir);
+  }
+});

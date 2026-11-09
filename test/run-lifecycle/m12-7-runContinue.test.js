@@ -17,7 +17,7 @@ import { test } from "node:test";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, fstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -330,9 +330,17 @@ test("M12-7-RC-09: committed parent → child resumes in retained worktree; pare
     assert.equal(result.state, "pending");
 
     // Spawned exactly once, detached; the prompt goes over stdin, not argv.
+    // TD-341（第 89 批 A）：stderr 是打开的 .runner-<childRunId>.stderr fd，派发
+    // 侧在 spawn 之后已关闭自己的句柄。
     assert.equal(calls.length, 1, "spawned once");
     assert.equal(calls[0].opts.detached, true);
-    assert.deepEqual(calls[0].opts.stdio, ["pipe", "ignore", "ignore"]);
+    assert.equal(calls[0].opts.stdio[0], "pipe");
+    assert.equal(calls[0].opts.stdio[1], "ignore");
+    assert.equal(typeof calls[0].opts.stdio[2], "number", "stderr 是打开的 fd（.runner-<childRunId>.stderr）");
+    assert.ok(existsSync(join(dir, `.runner-${result.runId}.stderr`)), "stderr 证据文件已在 runDir 创建");
+    let fdClosed = false;
+    try { fstatSync(calls[0].opts.stdio[2]); } catch { fdClosed = true; }
+    assert.ok(fdClosed, "父进程在 spawn 之后关闭了自己的 fd");
     assert.ok(calls[0].args.includes("--prompt-stdin"));
     assert.ok(!calls[0].args.includes("correct the bug"), "prompt not on the runner's command line");
     assert.equal(calls[0].stdinText, "correct the bug");
@@ -368,6 +376,28 @@ test("M12-7-RC-09: committed parent → child resumes in retained worktree; pare
     assert.equal(reuseEvt.mode, "run_lineage");
     assert.equal(reuseEvt.turn, "resume");
     assert.equal(findState(childEvents), "pending");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD-341-A（runContinue）: stderr 打开失败 → stdio[2] 退回 \"ignore\"，续接照常接受", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_sefb");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td341a-rcfb-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    await seedParent({ runDir: dir, runId: "run_parent_sefb", agentId: "coder_hq", cwd: repo, worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base, deliveryCommit: parent.deliveryCommit });
+    const result = await continueRun({
+      parentRunId: "run_parent_sefb", prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "s",
+      spawnFn: fakeSpawn,
+      backendFor: () => ({ supportsSessionReuse: true }),
+      openRunnerStderrFn: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
+    });
+    assert.equal(result.accepted, true, "打开失败不阻止续接派发");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].opts.stdio[2], "ignore", "退回 ignore");
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
 

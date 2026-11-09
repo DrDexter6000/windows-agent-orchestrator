@@ -80,6 +80,16 @@ function ev(obj) {
   return JSON.stringify(obj) + "\n";
 }
 
+// TD-341（续修 5，随前置筛放宽外溢）：runner 缺席证明的拒绝桩——经
+// createWaoMcpServer 的 runnerGoneDeps 注入缝传入。非终态、静默已满的夹具
+// 经它一律"证明不成立"，测试不起任何真实进程扫描。
+const REFUSING_RUNNER_GONE_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+};
+
 // A transcript where the durable agentId is "coder_hq" but the assistant
 // free-text self-reports "/root" — a classic identity-spoofing attempt.
 // The structured agentId MUST stay "coder_hq" regardless of worker text.
@@ -269,7 +279,7 @@ test("M11-8B-A8: MCP run_status output schema declares + returns agentId", async
     const runId = "run_m118b_mcpstatus_007";
     writeTranscript(join(dir, "runs"), runId, spoofingFixture(runId, "coder_low"));
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();
@@ -298,7 +308,7 @@ test("M11-8B-A9: MCP run_dispatch output schema declares + returns agentId", asy
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const runDir = join(dir, "runs");
     makeSummary(runDir, { coder_low: { status: "certified", manualOverride: null } });
-    const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();
@@ -331,7 +341,7 @@ test("M11-8B-A10: MCP run_wait + run_collect outputSchema declare agentId", asyn
     const runId = "run_m118b_schemas_008";
     writeTranscript(join(dir, "runs"), runId, spoofingFixture(runId, "tester"));
     const registryPath = makeRegistry(dir, { tester: { backend: "claude-code", cwd: dir } });
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();
@@ -366,7 +376,7 @@ test("M11-8B-A11: MCP run_collect structuredContent agentId ignores worker text"
     ].join("");
     writeTranscript(join(dir, "runs"), runId, lines);
     const registryPath = makeRegistry(dir, { researcher: { backend: "claude-code", cwd: dir } });
-    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
+    const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs"), workspaceRoot: dir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const result = await client.callTool({ name: "run_collect", arguments: { runId, expectedWorkspaceRoot: dir } });

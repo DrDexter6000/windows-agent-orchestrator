@@ -303,6 +303,11 @@ export async function listRuns(input) {
     // → 项目键精确匹配；裸名 → displayName/slug 大小写不敏感匹配）。零布局
     // 变化：只过滤查询结果，不移动/不改写任何转录。
     projectFilter,
+    // TD-341（第 89 批 C2）：可选——同一次扫描里额外保留有界的 unresolved 候选
+    //（{runId, updatedAt}，按 updatedAt 新到旧，上限即此值）。只供 lead_preflight
+    // 内部做 runner 缺席证明用；不设置时返回形状逐字节不变（runs list 的 CLI/MCP
+    // 输出不携带它）。
+    unresolvedCandidatesCap,
   } = input;
   const _readTranscript = input.readTranscriptFn ?? readTranscript;
   // M12-15: one nowMs snapshot per call (truthful "is it active RIGHT NOW").
@@ -423,6 +428,10 @@ export async function listRuns(input) {
 
   const summaries = [];
   let unresolvedCount = 0;
+  // TD-341（第 89 批 C2）：同一次扫描里顺带收集 unresolved 候选（只在调用方
+  // 显式要求时；与 unresolvedCount 同一判定点，零第二次扫描）。
+  const collectUnresolved = Number.isInteger(unresolvedCandidatesCap) && unresolvedCandidatesCap > 0;
+  const unresolvedCandidates = [];
   for (const { runId, filePath } of candidates) {
     // Validate runId from filename / lease-name (active candidates are already
     // pre-filtered; this is a no-op for them and kept for default/history).
@@ -541,7 +550,14 @@ export async function listRuns(input) {
         // unresolvedCount is the FULL-INVENTORY health signal — it is only
         // meaningful in the default scope (the only scope that scans the whole
         // inventory). active/history intentionally do not surface it.
-        if (scanScope === undefined) unresolvedCount += 1;
+        if (scanScope === undefined) {
+          unresolvedCount += 1;
+          // TD-341：unresolved 候选与计数同一判定点收集（缺 updatedAt 如实为
+          // null，排序垫底；上限截断在收尾做，这里先收全量内存内小数组）。
+          if (collectUnresolved) {
+            unresolvedCandidates.push({ runId, updatedAt: facts.updatedAt ?? null });
+          }
+        }
       }
     }
 
@@ -586,6 +602,22 @@ export async function listRuns(input) {
   // inventory is intentionally not scanned in active, and history is a bounded
   // window — neither is the full-inventory health signal).
   if (scanScope === undefined) {
+    // TD-341：候选只在显式要求时随结果返回（内部用途；updatedAt 新到旧、null
+    // 垫底、runId 升序破平，按上限截断——超出上限的照旧只计入 unresolvedCount）。
+    if (collectUnresolved) {
+      unresolvedCandidates.sort((a, b) => {
+        const tsA = a.updatedAt ?? "";
+        const tsB = b.updatedAt ?? "";
+        if (tsA !== tsB) return tsB.localeCompare(tsA); // descending（null/空垫底）
+        return a.runId.localeCompare(b.runId); // ascending tiebreak
+      });
+      return {
+        runs: summaries,
+        matchedCount,
+        unresolvedCount,
+        unresolvedCandidates: unresolvedCandidates.slice(0, unresolvedCandidatesCap),
+      };
+    }
     return { runs: summaries, matchedCount, unresolvedCount };
   }
   return { runs: summaries, matchedCount, scanScope };

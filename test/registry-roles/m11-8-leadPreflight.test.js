@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { aggregateLeadPreflight } from "../../src/application/leadPreflight.js";
+import { aggregateLeadPreflight, UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP } from "../../src/application/leadPreflight.js";
 import { REGISTRY_ISSUES_CAP, REGISTRY_ISSUE_CODES } from "../../src/application/registryInventory.js";
 import { isValidCanonicalAgentId } from "../../src/canonicalAgentId.js";
 
@@ -1037,4 +1037,127 @@ test("M12-25-PRE-6: injected >cap issues with issuesTruncated:false → bounded 
   assert.ok(!JSON.stringify(result).includes("EVIL_OUT_OF_SET_CODE"), "out-of-set code never leaks");
   assert.ok(!JSON.stringify(result).includes("rawError"), "raw error text never leaks");
   assert.ok(!JSON.stringify(result).includes("sk-leak"), "credential bait never leaks");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TD-341（第 89 批 C2）：unresolved 候选 → runner 缺席证明 → open item 行。
+// 证明一律注入桩（runnerGoneProbeFn），不跑真实进程扫描。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RG_WS = { bound: true, source: "lead_session", root: "/repo", gitHead: "d".repeat(40), dirty: false };
+
+// rgPreflightInput 的 listRunsFn 收到的调用参数（续修 7：断言候选上限用）。
+const seenListRunsArgs = [];
+
+function rgPreflightInput({ candidates, probeFn, listResult } = {}) {
+  return {
+    workspaceBinding: RG_WS,
+    registryPath: "/r.json",
+    runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    // 记下 listRunsFn 收到的调用参数，供断言候选上限（与 unresolvedCount 同一次
+    // 扫描的口径——续修 7 补上此前只写在注释里的断言）。
+    listRunsFn: async (args) => {
+      seenListRunsArgs.push(args);
+      return {
+        runs: [], matchedCount: 0,
+        unresolvedCount: (candidates ?? []).length,
+        ...(candidates ? { unresolvedCandidates: candidates } : {}),
+        ...(listResult ?? {}),
+      };
+    },
+    ...(probeFn !== undefined ? { runnerGoneProbeFn: probeFn } : {}),
+    runnerGoneDeps: { handshakeReader: () => ({ present: false }), daemonAliveFn: () => false },
+    // 确定性：本节与 0113 open items 同判法，worker 上下文抑制——显式注入非 worker。
+    workerContextFn: () => null,
+  };
+}
+
+test("TD-341-C2: 候选经证明成立 → 一条 open item 行（固定模板 + runId 清单 + 结算命令形状）", async () => {
+  const probeCalls = [];
+  const result = await aggregateLeadPreflight(rgPreflightInput({
+    candidates: [
+      { runId: "run_gone_a", updatedAt: "2026-11-08T09:00:00.000Z" },
+      { runId: "run_alive_b", updatedAt: "2026-11-08T08:00:00.000Z" },
+    ],
+    probeFn: async ({ runId }) => {
+      probeCalls.push(runId);
+      return { gone: runId === "run_gone_a" };
+    },
+  }));
+  // 续修 7：listRunsFn 收到候选上限（UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP 同源）。
+  assert.equal(seenListRunsArgs.at(-1)?.unresolvedCandidatesCap, UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP,
+    "listRuns 收到 unresolvedCandidatesCap（同一次扫描有界保留候选）");
+  assert.deepEqual(probeCalls, ["run_gone_a", "run_alive_b"], "逐个串行探测");
+  const lines = result.observations.filter((o) => o.startsWith("open item: "));
+  assert.equal(lines.length, 1, "恰好一条 open item 行");
+  assert.equal(lines[0],
+    "open item: 1 run(s) proven to have no WAO process that can still drive them (owner heartbeat gone, no runner process on this machine): run_gone_a. "
+    + "Settling is the Lead's decision - first dry-run wao runs settle --run-id <id> --reason-file <file>, then add --apply.",
+    "固定英文模板 + runId 清单 + 结算命令形状");
+  assert.ok(lines[0].length <= 512, "≤512 字符（observations wire 上限）");
+  // facts only：不动 checkStatus/complete。
+  assert.equal(result.checkStatus.activeRuns, "observed");
+  assert.equal(result.complete, true);
+});
+
+test("TD-341-C2: 证明都不成立 / 无候选 / 缺注入 → 无 open item 行；行为逐字节同旧", async () => {
+  const allAlive = await aggregateLeadPreflight(rgPreflightInput({
+    candidates: [{ runId: "run_alive_x", updatedAt: null }],
+    probeFn: async () => ({ gone: false }),
+  }));
+  assert.equal(allAlive.observations.filter((o) => o.startsWith("open item: ")).length, 0);
+  // 无候选（注入的 listRunsFn 不返回该字段——旧形状）。
+  const noCandidates = await aggregateLeadPreflight(rgPreflightInput({ candidates: null }));
+  assert.equal(noCandidates.observations.filter((o) => o.startsWith("open item: ")).length, 0);
+  // 缺 daemon 读器注入 → 整段省略（advisory）。
+  const noDeps = await aggregateLeadPreflight({
+    ...rgPreflightInput({ candidates: [{ runId: "run_gone_y", updatedAt: null }] }),
+    runnerGoneDeps: undefined,
+  });
+  assert.equal(noDeps.observations.filter((o) => o.startsWith("open item: ")).length, 0);
+});
+
+test("TD-341-C2: worker 上下文抑制（WAO 不向 worker 投影 Lead 收口事项）", async () => {
+  const result = await aggregateLeadPreflight({
+    ...rgPreflightInput({
+      candidates: [{ runId: "run_gone_w", updatedAt: null }],
+      probeFn: async () => ({ gone: true }),
+    }),
+    workerContextFn: () => ({ kind: "worker" }),
+  });
+  assert.equal(result.observations.filter((o) => o.startsWith("open item: ")).length, 0, "worker 上下文不出 open item 行");
+});
+
+// 续修 6（二轮会审）：Section 3b 的串行证明受 RUNNER_GONE_PREFLIGHT_BUDGET_MS
+// 总预算约束——桩探针每次推进假时钟 15 秒，预算 20 秒 → 只证明前两个候选；未证明
+// 的候选不列入 open item 行，也不另加任何行或字段。
+test("TD-341-续修6: 预算用尽即停——假时钟每次 +15s，只证明前两个候选", async () => {
+  let clock = 1000;
+  const probed = [];
+  const result = await aggregateLeadPreflight({
+    ...rgPreflightInput({
+      candidates: [
+        { runId: "run_gone_b1", updatedAt: "2026-11-08T09:00:00.000Z" },
+        { runId: "run_alive_b2", updatedAt: "2026-11-08T08:00:00.000Z" },
+        { runId: "run_gone_b3", updatedAt: "2026-11-08T07:00:00.000Z" },
+        { runId: "run_alive_b4", updatedAt: "2026-11-08T06:00:00.000Z" },
+      ],
+      probeFn: async ({ runId }) => {
+        probed.push(runId);
+        clock += 15000; // 每次证明推进假时钟 15 秒
+        return { gone: runId.startsWith("run_gone") };
+      },
+    }),
+    runnerGoneNowFn: () => clock,
+  });
+  assert.deepEqual(probed, ["run_gone_b1", "run_alive_b2"], "预算 20s：第三个候选开始前（已用 30s）用尽，只证明前两个");
+  const lines = result.observations.filter((o) => o.startsWith("open item: "));
+  assert.equal(lines.length, 1, "仍恰一条 open item 行");
+  assert.ok(lines[0].includes("run_gone_b1"), "已证明的列入");
+  assert.ok(!lines[0].includes("run_gone_b3"), "预算内未证明的不列入");
+  assert.ok(!lines[0].includes("run_alive_b4"));
+  // 不另加任何行或字段：checkStatus/complete 不动。
+  assert.equal(result.checkStatus.activeRuns, "observed");
+  assert.equal(result.complete, true);
 });

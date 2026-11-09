@@ -18,11 +18,15 @@
 // forkResumeRunner 是测试注入缝（spawnFn 可替换）；retry/resumeCommand 仍非测试面。
 
 import { spawn } from "node:child_process";
+import { closeSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
+// TD-341（第 89 批续修 4）：resume 接管的 runner stderr 证据文件（adapters →
+// application 下向）。
+import { openRunnerStderrFd } from "../application/runnerStderr.js";
 import { parseOptions, loadRun, newRunManager, resolveIsolateFlag, cliWaitOptions } from "./shared.js";
 // ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
 import { printObservationDeadlineNotice } from "./run.js";
@@ -231,7 +235,7 @@ export async function retryCommand(args, config) {
  * @param {object} config - CLI config（runDir/registry/pollInterval 默认值来源）
  * @param {Function} [spawnFn] - 注入缝（测试用；默认 node child_process.spawn）
  */
-export async function forkResumeRunner(runId, options, config, spawnFn = spawn) {
+export async function forkResumeRunner(runId, options, config, spawnFn = spawn, openRunnerStderrFn = openRunnerStderrFd) {
   const runDir = resolve(options.runDir ?? config.runDir);
   const registryPath = resolve(options.registry ?? config.registry);
   // M10-pre closeout-3 同款边界校验：--wait-timeout 进入 runner argv 前过
@@ -252,9 +256,29 @@ export async function forkResumeRunner(runId, options, config, spawnFn = spawn) 
   if (options.waitTimeout !== undefined && options.waitTimeout !== null) {
     runnerArgs.push("--wait-timeout", String(Number(options.waitTimeout)));
   }
-  // detached: runner 在 CLI 退出后存活；stdio ignore（runner 写 transcript）；
+  // detached: runner 在 CLI 退出后存活；stdin 原本就不用（resume 接管无提示词交接）；
   // unref 让父进程不等待它——与 dispatchRun 的 fork 形状一致（runDispatch.js）。
-  spawnFn(process.execPath, runnerArgs, { detached: true, stdio: "ignore" }).unref();
+  // TD-341（第 89 批续修 4）：stderr 落每运行文件 .runner-<runId>.stderr（append，
+  // 接在之前的证据后面）；打开失败退回 "ignore"，不阻止接管；父进程在 spawn 之后
+  //（抛错时也要）关闭自己的 fd。runner 的退出钩子已认 --resume-run-id。
+  let runnerStderrFd = null;
+  try {
+    runnerStderrFd = openRunnerStderrFn(runDir, runId);
+  } catch {
+    runnerStderrFd = null; // 打开失败 → 退回 "ignore"，不阻止接管
+  }
+  let runner;
+  try {
+    runner = spawnFn(process.execPath, runnerArgs, {
+      detached: true,
+      stdio: ["ignore", "ignore", runnerStderrFd === null ? "ignore" : runnerStderrFd],
+    });
+  } finally {
+    if (runnerStderrFd !== null) {
+      try { closeSync(runnerStderrFd); } catch { /* spawn 失败路径已随句柄关闭 */ }
+    }
+  }
+  runner.unref();
   return { runId, runnerPath };
 }
 

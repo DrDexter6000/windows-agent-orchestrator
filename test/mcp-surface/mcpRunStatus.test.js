@@ -63,6 +63,16 @@ function makeGitRepo(dir) {
   execSync('git commit -m init', { cwd: dir, stdio: 'pipe' });
 }
 
+// TD-341（续修 5）：runner 缺席证明的拒绝桩——经 createWaoMcpServer 的
+// runnerGoneDeps 注入缝传入（缺省是真实 daemon 读器 + 真实进程扫描）。非终态、
+// 静默已满的夹具经它一律"证明不成立"，测试不起任何进程、advisory 走旧安静模板。
+const REFUSING_RUNNER_GONE_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+};
+
 async function buildInMemoryClient(server) {
   const { Client } = await import("@modelcontextprotocol/sdk/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -165,7 +175,7 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
     const runDir = join(dir, "runs");
     writeTranscript(runDir, runId, sensitiveFixture(runId));
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -395,7 +405,7 @@ test("M9-3B-06: repeated status calls leave transcript unchanged", async () => {
     const transcriptPath = resolveTranscriptPath(runDir, runId);
     const before = readFileSync(transcriptPath, "utf8");
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       await client.callTool({ name: "run_status", arguments: { runId } });
@@ -437,7 +447,7 @@ test("M12-17-M1: run_status exposes executionStage (active / terminal) via struc
       ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:05.000Z", runId: doneRun, agentId: "w", seq: 4 }),
     );
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const active = await client.callTool({ name: "run_status", arguments: { runId: activeRun } });
@@ -552,7 +562,7 @@ test("TD150B-M1: warn run 的 scorecardSummary 上 wire，drilldowns 指向 diag
       ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-24T00:00:03.000Z", runId, agentId: "w", seq: 4 }),
     );
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -600,7 +610,7 @@ test("TD150B-M2 非泄漏钉: acceptance 失败 detail 的独特 stderr 字符�
       ev({ type: "run.state_change", to: "failed", reason: "scorecard_failed", ts: "2026-08-24T00:00:03.000Z", runId, agentId: "w", seq: 5 }),
     );
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -632,7 +642,7 @@ test("TD150B-M3: 无 scorecard 事件的 run —— scorecardSummary 字段 abse
     const runDir = join(dir, "runs");
     writeTranscript(runDir, runId, sensitiveFixture(runId));
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -707,7 +717,7 @@ test("TD153-M4a: 合法字符串但非闭集成员（真实 transcript）→ run
       ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-09-18T00:00:03.000Z", runId, agentId: "w", seq: 4 }),
     );
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -761,7 +771,7 @@ test("TD153-M4c: 六成员逐一经真实 transcript 透传（投影 + wire 全�
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-m4c-"));
   try {
     const runDir = join(dir, "runs");
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       for (let i = 0; i < SCORECARD_CHECK_NAMES.length; i += 1) {
@@ -813,7 +823,7 @@ test("TD153-M4d: 7 个合法名（超目录派生上限）→ 崩为 fixed safe 
       }),
     );
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
@@ -928,7 +938,7 @@ test("0068-M1: 刚有动作的 run / 已终态的 run —— leadAdvisory 缺席
       ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:03.000Z", runId: ended, agentId: "w", seq: 2 }),
     ].join(""));
 
-    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir, runnerGoneDeps: REFUSING_RUNNER_GONE_DEPS });
     const client = await buildInMemoryClient(server);
     try {
       for (const runId of [fresh, ended]) {
@@ -942,5 +952,53 @@ test("0068-M1: 刚有动作的 run / 已终态的 run —— leadAdvisory 缺席
     }
   } finally {
     cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// TD-341（第 89 批 C1）：runner 已不在时 leadAdvisory 换新固定模板上 wire；
+// 不加任何输出字段（工具面字节冻结——runnerGone 机器事实只被适配层消费）。
+// ---------------------------------------------------------------------
+
+test("TD-341-C1: runnerGone 的新 advisory 上 wire，输出键集合不增（runnerGone 不透传）", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunStatusFn: async (input) => ({
+      runId: input.runId,
+      agentId: "w",
+      state: "running",
+      terminal: false,
+      executionStage: { phase: "active", sinceTs: "2026-11-08T10:00:00.000Z", secondsSince: 1200 },
+      last: null,
+      lastActivityTs: null,
+      secondsSinceActivity: null,
+      lastActivityKind: null,
+      lastActivitySummary: null,
+      lastEventType: null,
+      lastEventTs: null,
+      lastActivityEventKind: null,
+      secondsSinceEffect: 1200,
+      leadAdvisory: "观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 20 分钟），继续等待不会自行收口。是否结算由 Lead 决定：先干跑 wao runs settle --run-id run_x --reason-file <文件>，确认后再加 --apply。",
+      leadAdvisoryWire: "At observation time no WAO process can still drive this run (owner heartbeat gone, no runner process on this machine, transcript quiet for 20 min). Continued waiting will not settle it on its own. Whether to settle is the Lead's decision: first dry-run wao runs settle --run-id <id> --reason-file <file>, then add --apply.",
+      // 服务端的机器事实：适配层消费，不上 wire。
+      runnerGone: true,
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_status", arguments: { runId: "run_x" } });
+    const parsed = res.structuredContent;
+    assert.ok(parsed.leadAdvisory.startsWith("At observation time no WAO process can still drive this run"),
+      "runnerGone 的英文固定模板上 wire");
+    assert.ok(parsed.leadAdvisory.includes("transcript quiet for 20 min"), "整数分钟嵌入模板");
+    assert.ok(!parsed.leadAdvisory.includes("never"), "不说\"转录永不再前进\"");
+    // 键集合与既有完全一致——runnerGone 机器字段被适配层拦下，不加输出字段。
+    assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
+      "runnerGone 不新增任何 wire 字段");
+    assert.equal("runnerGone" in parsed, false);
+  } finally {
+    await client.close();
+    await server.close();
   }
 });
