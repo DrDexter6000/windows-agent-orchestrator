@@ -528,7 +528,8 @@ export const VERIFIER_GONE_REFUSALS = Object.freeze([
  *     ownerLeaseWrite.js），不是原 runner。
  *
  * 两种形状共同的交付前提：validateDeliveryFacts（pending 感知、runId 绑定）
- * valid、原始验证 pending、无 reverify 事实、created 显式声明 pending。
+ * valid、原始验证 pending、无 reverify 事实（valid 已蕴含 created 显式声明
+ * pending：没有显式声明的 legacy ref 在该模式下判 invalid）。
  *
  * 重新打包形状的形状豁免（验证者不是原 runner）：
  *   - 不要求恰好一条 run.background_submitted、不拒绝 run.rerun——租约主人
@@ -570,17 +571,19 @@ export async function proveVerifierGone({ events, runId, runDir, deps = {} } = {
   const now = d.nowFn();
   const bound = events.filter((e) => e && e.runId === runId);
 
-  // 共同的交付前提：交付显式 pending、无结果、无 reverify。
+  // 共同的交付前提：验证 pending、无结果、无 reverify。
   const completedAt = _completedAtMs(events, runId);
   const state = findState(bound);
   const deliveryFacts = validateDeliveryFacts(events, {
     expectedRunId: runId,
     allowVerificationPending: true,
   });
+  // valid + pending 已蕴含 created 显式声明 verification.status "pending"：
+  // validateDeliveryFacts 的 pending 感知模式对没有显式声明的 legacy ref 判
+  // invalid（delivery_unavailable），两种形状都因此拒于 not_pending。
   const factsPending = deliveryFacts.valid
     && deliveryFacts.verificationStatus === "pending"
-    && deliveryFacts.reverifyStatus === "none"
-    && deliveryFacts.createdRef?.verification?.status === "pending";
+    && deliveryFacts.reverifyStatus === "none";
 
   // 形状判定。重新打包形状的来源判定与有界 pending 拒收共用同一个
   // findValidRepackageProvenance（恰好一条绑定的 created 在 bound 模式下由

@@ -739,6 +739,19 @@ function proofDeps(overrides = {}) {
   return settleDeps(overrides);
 }
 
+test("SET-35b: completed 形状的 legacy ref（未显式声明 pending）照 B91 之前拒于 not_pending——交付事实校验就判它 invalid", async () => {
+  const dir = tempDir("wao-vg-35b-");
+  try {
+    const runId = "run_vg35b";
+    const tp = join(dir, `${runId}.jsonl`);
+    const legacy = makePendingRef(runId, { verification: { commands: [], verifiedCommit: DELIVERED, results: [] } });
+    seedVerifierGoneRun(tp, runId, { ref: legacy });
+    const events = await readSeed(tp);
+    const r = await proveVerifierGone({ events, runId, runDir: dir, deps: proofDeps() });
+    assert.deepEqual(r, { gone: false, refusal: "not_pending" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("SET-34: VERIFIER_GONE_REFUSALS 闭集", () => {
   assert.deepEqual(VERIFIER_GONE_REFUSALS, [
     "not_pending", "foreground_verifier", "resumed",
