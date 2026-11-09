@@ -57,6 +57,22 @@ async function capture(fn) {
   return lines.join("\n");
 }
 
+// TD-342 用法错断言用：抛错也要拿到已打印的输出（证明"不列候选"）。
+async function captureRejection(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...args) => lines.push(args.join(" "));
+  let err = null;
+  try {
+    await fn();
+  } catch (e) {
+    err = e;
+  } finally {
+    console.log = orig;
+  }
+  return { err, out: lines.join("\n") };
+}
+
 test("CLI-SETTLE-0: 子命令登记", () => {
   assert.ok(RUNS_SUBCOMMANDS.includes("settle"));
 });
@@ -202,6 +218,43 @@ test("CLI-SETTLE-6: CLI 注入真实三态读器——runDir 里残留读不出�
     assert.equal(parsed.refused, "daemon_owned");
     const daemonFact = parsed.gates.find((g) => g.gate === "daemon");
     assert.match(daemonFact.detail, /握手文件在但读不出/);
+  } finally {
+    process.exitCode = undefined;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI-SETTLE-7: 位置参数 → 用法错，不列候选、不读理由文件（TD-342）", async () => {
+  const dir = tempDir("wao-cli-settle7-");
+  try {
+    seedCandidate(dir, "run_cli_g");
+    const reasonFile = join(dir, "reason.txt");
+    writeFileSync(reasonFile, "理由正文。\n", "utf8");
+    const message = "runs settle takes no positional arguments; name the run with --run-id <runId>";
+    // `settle <runId>`：以前 parseOptions 跳过光词，会静默当成"列出全部候选"。
+    const bare = await captureRejection(() => runsCommand(
+      ["settle", "run_cli_g", "--run-dir", dir], { runDir: dir }, cliDeps(),
+    ));
+    assert.equal(bare.err.message, message);
+    assert.equal(bare.out, "", "不列候选（零输出）");
+    // `settle <runId> --reason-file f`（TD-342 的原形状）同错。
+    const withReason = await captureRejection(() => runsCommand(
+      ["settle", "run_cli_g", "--reason-file", reasonFile, "--run-dir", dir],
+      { runDir: dir }, cliDeps(),
+    ));
+    assert.equal(withReason.err.message, message);
+    assert.equal(withReason.out, "");
+    // `--apply <词>`：以前词被吞成 apply 的值变成干跑；现在词是光词 → 用法错。
+    const withApply = await captureRejection(() => runsCommand(
+      ["settle", "--run-id", "run_cli_g", "--reason-file", reasonFile, "--apply", "yes", "--run-dir", dir],
+      { runDir: dir }, cliDeps(),
+    ));
+    assert.equal(withApply.err.message, message);
+    assert.equal(withApply.out, "");
+    // 三次都没结算：转录里没有确认事实与终态。
+    const lines = readFileSync(join(dir, "run_cli_g.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(!lines.some((e) => e.type === "run.process_missing_confirmed" || (e.type === "run.state_change" && e.to === "failed")), "零结算写入");
+    assert.equal(process.exitCode, undefined, "用法错走抛错路径，不是 refused 的退出码 1");
   } finally {
     process.exitCode = undefined;
     rmSync(dir, { recursive: true, force: true });

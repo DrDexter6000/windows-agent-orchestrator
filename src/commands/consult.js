@@ -43,6 +43,9 @@ import {
 // 决定 0096：有未终态席位时，consult 的三条命令在输出末尾附 CLI 面 nextStep
 //（模板与长度上限的家在 runNextStep.js）。
 import { buildNextStep } from "../application/runNextStep.js";
+// TD-340 前半：runner_gone 出口附 runner stderr 尾部——格式化收拢在
+// runnerStderrTailText 单一出口（与 runs wait 同一呈现函数）。
+import { runnerStderrTailText } from "../application/runnerStderr.js";
 import { TERMINAL_STATES } from "../transcript.js";
 // TD-319：未知子命令的"报错 + 用法"两行有意分行——linesError 构造（.message
 // 与改前逐字一致），CLI 输出口按行转义。
@@ -528,10 +531,12 @@ async function consultWaitCommand(args, config, deps = {}) {
  * 证明——不复制算法）；按组记录顺序逐席等，前一席收口才轮到下一席。
  *
  * 退出码与 runs wait --until-settled 同义：0 全部收口；3 一席不可信轮连续 4 次
- *（含无法收口的交付事实）或验证者已证明不在（verifier_gone）；4 一席转录冲突
- *（多副本内容不同）；130 SIGINT（单一出口：置位后只输出一份中断结果，绝不出
- * 第二份）。未收口即停在那一席并在 stderr 点名（<agentId> (<runId>)）与给出
- * 与 runs wait 同义的处置行；没有 runId 的席位（派发未成立）不等。
+ *（含无法收口的交付事实）或验证者或 runner 已证明不在（verifier_gone /
+ * runner_gone）；4 一席转录冲突（多副本内容不同）；130 SIGINT（单一出口：置位后
+ * 只输出一份中断结果，绝不出第二份）。未收口即停在那一席并在 stderr 点名
+ *（<agentId> (<runId>)）与给出与 runs wait 同义的处置行；没有 runId 的席位
+ *（派发未成立）不等。runner_gone 的 stderr 三行与 JSON 字段照 runs wait 的同名
+ * 出口逐字渲染（runId 换成该席的；TD-340 前半）。
  *
  * 返回（全部收口）时的输出与有界 consult wait 一致：stderr 摘要行 + 正常渲染 /
  * --format json（wait 块 { allTerminal: true, waitedMs, windowMs: null }——
@@ -540,7 +545,7 @@ async function consultWaitCommand(args, config, deps = {}) {
  * deps 注入缝（测试确定性）：loadConsultRecord / waitRunSettlement /
  * readTranscript（同时作等待器与重渲染的转录读器）/ pollIntervalMs /
  * resolveDetailedFn / sleepFn / nowFn / verifierGoneFn / verifierProofDeps /
- * writeFileSync / mkdirFn。
+ * runnerGoneFn / runnerProofDeps / writeFileSync / mkdirFn。
  */
 async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, fallbackConsultsDir, runDir }, deps = {}) {
   // 决定 0111：先在状态目录读，ENOENT 才回退改动前的落点；实际读到的目录传给重渲染。
@@ -558,6 +563,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
   const onSigint = () => { interrupted = true; };
   process.on("SIGINT", onSigint);
   // 等待器的读器缝：daemon 握手 SSOT 在 adapters 层，与 runs wait 同款注入。
+  // TD-340 前半：runner 缺席证明同款接线（runnerGoneFn 有注入才带）。
   const seatDeps = {
     ...(deps.pollIntervalMs !== undefined ? { pollIntervalMs: deps.pollIntervalMs } : {}),
     ...(deps.resolveDetailedFn ? { resolveDetailedFn: deps.resolveDetailedFn } : {}),
@@ -565,16 +571,29 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
     ...(deps.nowFn ? { nowFn: deps.nowFn } : {}),
     ...(deps.sleepFn ? { sleepFn: deps.sleepFn } : {}),
     ...(deps.verifierGoneFn ? { verifierGoneFn: deps.verifierGoneFn } : {}),
+    ...(deps.runnerGoneFn ? { runnerGoneFn: deps.runnerGoneFn } : {}),
     verifierProofDeps: {
       nowFn: deps.nowFn ?? Date.now,
       handshakeReader: readHandshakeDetailed,
       daemonAliveFn: isDaemonAlive,
       ...(deps.verifierProofDeps ?? {}),
     },
+    runnerProofDeps: {
+      nowFn: deps.nowFn ?? Date.now,
+      handshakeReader: readHandshakeDetailed,
+      daemonAliveFn: isDaemonAlive,
+      ...(deps.runnerProofDeps ?? {}),
+    },
   };
   const seatName = (seat) => `${seat.agentId} (${seat.runId})`;
   const failExit = (seat, outcome) => {
     process.exitCode = outcome.kind === "conflict" ? 4 : 3;
+    // TD-340 前半：runner_gone 的 outcome 没有 reason 字段，分支必须排在读
+    // outcome.reason 的分支之前；stderr 尾部文本两处（stderr 行与 JSON 字段）
+    // 同源，取等待器拿到的同一 runDir。措辞照 runs wait 的 runner_gone 出口逐字。
+    const runnerStderrTail = outcome.kind === "runner_gone"
+      ? runnerStderrTailText(runDir, seat.runId)
+      : null;
     const lines = [`[consult] ${consultId}: seat ${seatName(seat)} will not settle:`];
     if (outcome.kind === "conflict") {
       lines.push(`Conflict: ${seat.runId} has multiple distinct transcript copies — refusing to pick one.`);
@@ -586,6 +605,14 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         situation: "verifier_gone",
         runId: seat.runId,
         acceptanceStatus: outcome.settlement.facts.acceptanceStatus,
+      })}`);
+    } else if (outcome.kind === "runner_gone") {
+      lines.push(`Stuck: the runner of ${seat.runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`);
+      lines.push(`Runner stderr tail: ${runnerStderrTail}`);
+      lines.push(`Next step: ${buildNextStep({
+        surface: "cli",
+        situation: "runner_gone",
+        runId: seat.runId,
       })}`);
     } else if (outcome.reason.startsWith("undeterminable:")) {
       lines.push(`Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`);
@@ -602,6 +629,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         seat: { agentId: seat.agentId, runId: seat.runId },
         ...(outcome.kind === "conflict" ? { conflict: true } : {}),
         ...(outcome.kind === "verifier_gone" ? { reason: "verifier_gone", basis: outcome.basis } : {}),
+        ...(outcome.kind === "runner_gone" ? { reason: "runner_gone", runnerStderrTail } : {}),
         ...(outcome.kind === "untrusted" && outcome.reason.startsWith("undeterminable:")
           ? { reason: outcome.reason, state: outcome.settlement.facts.state }
           : {}),
@@ -630,6 +658,8 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         runId: seat.runId,
         runDir,
         label: "consult wait",
+        // TD-340 前半：runner 缺席证明与 runs wait 同开——席位 runner 死了不再白等。
+        runnerGoneProof: true,
         progress: (line) => {
           // 与 runs wait 同一出血面：文本模式进度写 stdout；JSON 模式进度写
           // stderr，stdout 只留最终 JSON。
@@ -690,8 +720,8 @@ export const CONSULT_USAGE_LINES = [
   "                  `consult show <id>` reads the current state.",
   "  --until-settled wait until every dispatched seat's run settles (mutually exclusive with --wait-ms, takes no value).",
   "                  Exit 0 when every seat settles; 3 when a seat cannot settle (untrusted reads, undeterminable",
-  "                  delivery facts, or its verifier is gone); 4 on a transcript conflict. Seats whose dispatch",
-  "                  produced no run are not waited for. The failing seat is named on stderr.",
+  "                  delivery facts, or its verifier or runner is gone); 4 on a transcript conflict. Seats whose",
+  "                  dispatch produced no run are not waited for. The failing seat is named on stderr.",
   "  --seat --out    write one seat's complete final text to a file (without --out: print it)",
   "  --out-dir DIR   write every seat's complete final text to DIR/<agentId>.md (directory created if missing), one",
   "                  line per seat; mutually exclusive with --seat/--out",

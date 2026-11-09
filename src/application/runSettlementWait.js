@@ -65,8 +65,8 @@ export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_
  * conflict，解析变了算不可信轮，不变才返回 verifier_gone；重读的解析/读取失败
  * 照原有规则算不可信轮。证明被拒的理由并入本轮进度行明细并参与节流键。
  *
- * 第 83 批 B：runnerGoneProof=true 时（runs wait 开启；consult wait 的渲染面
- * 未接这道证明，缺省关闭、字节兼容），可信、**非终态**的轮加一道同形证明：
+ * 第 83 批 B：runnerGoneProof=true 时（runs wait 与 consult wait 都开启——
+ * TD-340 前半起；缺省仍关闭），可信、**非终态**的轮加一道同形证明：
  * 共享前置筛选 runnerGonePrefilter（非终态、owner 心跳不新鲜、最后一条绑定事件
  * 满 SETTLE_QUIET_WINDOW_MS——与 runnerGoneProof.js 同口径，不再筛后台派发），
  * 每轮节流按旧规则（静默窗已满 + 距上次证明满 5 分钟），以只读干跑调 settleRun。
@@ -94,8 +94,8 @@ export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_
  * @param {string} input.runDir
  * @param {string} [input.label="runs wait"] — 进度行前缀（[<label>] round N: …）
  * @param {boolean} [input.runnerGoneProof=false] — 开启非终态轮的 runner 缺席
- *   证明（第 83 批 B）。缺省关闭：consult wait 共用本循环而其渲染面未接
- *   runner_gone，保持字节兼容。
+ *   证明（第 83 批 B）。runs wait 与 consult wait（TD-340 前半起）都开启；
+ *   缺省仍关闭——共用本循环的新调用面接 runner_gone 渲染面时才打开。
  * @param {Function} [input.progress] — 进度行出口（文本面通常 stdout，JSON 面
  *   通常 stderr；由调用面决定）
  * @param {Function} [input.isInterrupted] — 每轮顶部与打印前询问；返回 true 即
@@ -310,7 +310,8 @@ export async function waitRunSettlement({
               }
             }
           }
-          // 第 83 批 B：runner 缺席证明——只对开启它的调用面（runs wait）与可信、
+          // 第 83 批 B：runner 缺席证明——只对开启它的调用面（runs wait 与
+          // consult wait，TD-340 前半起两个共用面同开）与可信、
           // 非终态的轮生效（终态等验证的轮有上面的验证者证明，两者互斥）。前置筛
           // 用共享的 runnerGonePrefilter（TD-341 第 89 批 B 起：非终态、owner 心跳
           // 不新鲜、最后一条绑定事件满 SETTLE_QUIET_WINDOW_MS——任一不满足就不值

@@ -113,7 +113,7 @@ import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
 import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
 // TD-341（第 89 批 C3）：runner 被证明不在时附 runner stderr 尾部（展示处理后的
 // 文本；无文件/空文件分固定文案——格式化收拢在 runnerStderrTailText 单一出口）。
-import { runnerStderrTailText } from "../application/runnerStderr.js";
+import { runnerStderrTailText, runnerStderrPath } from "../application/runnerStderr.js";
 // 决定 0095/0096：`runs wait --until-settled` 与 `consult wait
 // --until-settled` 共用的收口等待器（轮询循环 + 验证者缺席证明），家在
 // runSettlementWait.js；收口判定与 proveVerifierGone 的家分别在
@@ -494,8 +494,9 @@ async function runsWaitCommand(args, config, deps = {}) {
  * --until-settled` 逐席调用同一算法，不复制。本命令只保留两面的事：SIGINT 注册
  *（application 层不碰进程信号）与按闭集 outcome 渲染终行 + 退出码（0 收口；
  * 3 不可信轮连续 4 次、verifier_gone 或 runner_gone；4 持久冲突；130 SIGINT
- * ——单一出口：置位后即便已判收口也只输出一份中断结果）。runner 缺席证明只有
- * 本命令开启（consult wait 的渲染面未接 runner_gone，等待器缺省关闭）。
+ * ——单一出口：置位后即便已判收口也只输出一份中断结果）。runner 缺席证明两个
+ * 共用面同开（TD-340 前半起 consult wait 也传 runnerGoneProof: true 并注入
+ * runnerProofDeps，其渲染面接同一个 runner_gone 出口）。
  *
  * deps 注入缝（测试确定性，原样透传给等待器）：resolveDetailedFn /
  * readTranscriptFn / nowFn / sleepFn / pollIntervalMs / verifierGoneFn /
@@ -1141,8 +1142,9 @@ async function runsPruneCommand(args, config) {
   const runDir = resolve(options.runDir ?? config.runDir);
   // R23-B1：--archive 归档模式——判龄、扫描面、legacy 语义与删除路径完全一致
   // （下方同一段 R20-C 判龄代码，本函数内分支，无第二份判龄分叉）；差别只在
-  // 超龄后的处置：移动到归档目录而非 unlink。不带 --archive 时本函数输出与
-  // 行为逐字节不变（既有三个 prune 测试钉住）。
+  // 超龄后的处置：移动到归档目录而非 unlink。没有 runner stderr 文件的 run，
+  // 输出与行为逐字节不变（既有 prune 测试钉住；第 90 批起超龄转录的 stderr
+  // 文件随转录一并删除/归档，各多一行报告）。
   // truthy 判定（非严格 === true）：parseOptions 对 `--archive 值` 形状会给
   // options.archive 赋字符串值——若严格比对会静默落回删除路径（与用户意图相
   // 反）。--archive 是布尔 flag，只要出现即归档（fail-safe 方向：宁可归档，
@@ -1171,10 +1173,19 @@ async function runsPruneCommand(args, config) {
     const scope = boundReportScope(events, pruneRunId) ?? events;
     const last = scope.at(-1);
     const ts = last?.ts ? new Date(last.ts).getTime() : 0;
+    // 第 90 批：runner stderr 文件（runnerStderrPath——基础 runDir 下，不在
+    // projects/<slug>/ 桶里）随它的转录一并处置：判龄与转录相同（转录超龄才动），
+    // 没有对应转录的 stderr 文件不碰。计数行只数转录，不变。
+    const stderrPath = runnerStderrPath(runDir, pruneRunId);
+    const hasStderr = existsSync(stderrPath);
     if (ts < cutoff) {
       if (!archiveMode) {
         await unlink(file);
         console.log(`Pruned ${basename(file)}`);
+        if (hasStderr) {
+          await unlink(stderrPath);
+          console.log(`Pruned .runner-${pruneRunId}.stderr`);
+        }
         pruned += 1;
       } else {
         // R23-B1 归档：<dirname(runDir)>/runs-archive/<yyyy-mm>/<原文件名>。
@@ -1192,6 +1203,17 @@ async function runsPruneCommand(args, config) {
           await mkdir(targetDir, { recursive: true });
           await rename(file, target);
           console.log(`Archived ${basename(file)} -> runs-archive/${month}/${basename(file)}`);
+          if (hasStderr) {
+            // stderr 文件与转录同月同目录、文件名不变；目标冲突同款 fail-safe
+            //（留在原处，只报一行）。
+            const stderrTarget = join(targetDir, basename(stderrPath));
+            if (existsSync(stderrTarget)) {
+              console.log(`Skipped ${basename(stderrPath)} (conflict: runs-archive/${month}/${basename(stderrPath)} already exists)`);
+            } else {
+              await rename(stderrPath, stderrTarget);
+              console.log(`Archived ${basename(stderrPath)} -> runs-archive/${month}/${basename(stderrPath)}`);
+            }
+          }
           archived += 1;
         }
       }
@@ -2996,7 +3018,33 @@ async function runsLineageCloseCommand(args, config) {
  * 把 runner 已死的非终态运行结算成 failed（理由 process_missing + 确认事实）。
  * 数据逻辑全部在 ../application/runSettle.js；本函数只做 argv/输出。
  */
+// TD-342：runs settle 不收位置参数。parseOptions 跳过不带 -- 的词（写法
+// `runs settle <runId>` 会被静默当成"列出全部候选"），还会给布尔旗标 --apply
+// 吞值（`--apply <词>` 把词吞成值变成干跑）。解析前按旗标规则走一遍参数：
+// 取值旗标各取下一个词作值，--apply 不取值，别的 -- 旗标照 parseOptions 规则
+//（下一个词不以 -- 开头就是它的值）——剩下的光词一律用法错，不列候选、不读
+// 理由文件（runsGateCommand 同纪律）。
+const SETTLE_VALUE_FLAGS = new Set(["--run-id", "--reason-file", "--run-dir"]);
+
 async function runsSettleCommand(args, config, deps = {}) {
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (!a.startsWith("--")) {
+      positionals.push(a);
+      continue;
+    }
+    if (a === "--apply") continue;
+    const next = args[i + 1];
+    if (SETTLE_VALUE_FLAGS.has(a)) {
+      if (i + 1 < args.length) i += 1; // 取下一个词作值
+      continue;
+    }
+    if (next && !next.startsWith("--")) i += 1;
+  }
+  if (positionals.length > 0) {
+    throw new Error("runs settle takes no positional arguments; name the run with --run-id <runId>");
+  }
   const options = parseOptions(args);
   const { settleRun, listSettleCandidates } = await import("../application/runSettle.js");
   const runDir = resolve(options.runDir ?? config.runDir ?? "runs");

@@ -14,9 +14,12 @@
 // 展示时才处理：exact-secret 脱敏 + 形状脱敏 + 控制字符清洗，再限长——顺序复用
 // runActivityProjection.js 的同一条管道（tailOfRedactedText），不另写一份。
 //
-// 任何扫描、prune、清理器都不许删 `.runner-*.stderr`：Windows 上文件被持有时
-// unlink 也会成功，之后的写入就丢了。现有 transcript 枚举只收 `.jsonl`（prune
-// 走同一枚举），本文件对它们不可见，不需要也不应该改动那些枚举。
+// 清理边界（第 90 批起收紧为一条例外）：只有 `runs prune` 在删/归档某个转录时
+// 把该 runId 的 `.runner-*.stderr` 随转录一并删除或归档（runs-archive/<月>，
+// 文件名不变；判龄与转录相同）——转录是它唯一的关联证据锚，转录没了留孤立文件
+// 只会是无人认领的堆积。除此之外，任何扫描、清理器仍不许碰它：Windows 上文件
+// 被持有时 unlink 也会成功，之后的写入就丢了。现有 transcript 枚举只收 `.jsonl`
+//（prune 之外的清理面走同一枚举），本文件对它们不可见。
 //
 // Architectural contract:
 //   - No argv parsing, no console.log, no process.exit.

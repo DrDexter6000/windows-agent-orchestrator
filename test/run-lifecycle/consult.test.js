@@ -1949,6 +1949,105 @@ test("SETTLE-5: 一席转录冲突 → 退出 4 并点名席位；verifier_gone 
   });
 });
 
+test("SETTLE-5b: runner_gone（注入等待器）→ 退出 3、stderr 三行与 runs wait 逐字一致；JSON 带 reason+runnerStderrTail；等待器收到 runnerGoneProof: true", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_r", runId: "run_settle_rg", runState: "running", formatState: "empty" },
+  ]);
+  // stderr 尾部走真实 runnerStderrTailText（run-dir 指向没有 stderr 文件的临时
+  // 目录 → "无 runner stderr 记录"——固定文案，不伪造空证据）。
+  const runDir = mkdtempSync(join(tmpdir(), "wao-consult-settle5b-"));
+  const seen = [];
+  const deps = {
+    loadConsultRecord: async () => record,
+    readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+    waitRunSettlement: async (input) => {
+      seen.push(input);
+      return {
+        kind: "runner_gone",
+        settlement: { status: "unsettled", reason: "not_terminal", facts: { state: "running", terminal: false } },
+      };
+    },
+  };
+  try {
+    await withExitCode(async () => {
+      const captured = await captureConsult(() => consultCommand(
+        ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x", "--run-dir", runDir], {}, deps,
+      ));
+      assert.equal(process.exitCode, 3, "runner_gone 对应 runs wait 的退出码 3");
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].runnerGoneProof, true, "等待器收到 runnerGoneProof: true");
+      assert.equal(seen[0].runId, "run_settle_rg");
+      assert.equal(seen[0].runDir, runDir);
+      // stderr 四行：点名行 + 与 runs wait runner_gone 出口逐字一致的三行。
+      assert.deepEqual(captured.errLines, [
+        `[consult] ${consultId}: seat seat_r (run_settle_rg) will not settle:`,
+        "Stuck: the runner of run_settle_rg is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.",
+        `Runner stderr tail: 无 runner stderr 记录`,
+        `Next step: ${buildNextStep({ surface: "cli", situation: "runner_gone", runId: "run_settle_rg" })}`,
+      ]);
+      assert.ok(!captured.outLines.some((l) => l.startsWith("Next step: ")), "失败出口不渲染整场");
+    });
+    await withExitCode(async () => {
+      const json = await captureConsult(() => consultCommand(
+        ["wait", consultId, "--until-settled", "--format", "json", "--cwd", "C:/tmp/x", "--run-dir", runDir], {}, deps,
+      ));
+      assert.equal(process.exitCode, 3);
+      const parsed = JSON.parse(json.out);
+      assert.equal(parsed.settled, false);
+      assert.deepEqual(parsed.seat, { agentId: "seat_r", runId: "run_settle_rg" });
+      assert.equal(parsed.reason, "runner_gone");
+      assert.equal(parsed.runnerStderrTail, "无 runner stderr 记录", "JSON 面同一段尾部文本");
+      assert.equal(seen.length, 2, "JSON 路径同样带 runnerGoneProof: true");
+      assert.equal(seen[1].runnerGoneProof, true);
+    });
+  } finally {
+    cleanupDir(runDir);
+  }
+});
+
+test("SETTLE-5c: runner_gone（真实等待器 + runnerGoneFn 桩，零真实进程扫描）→ 退出 3、stderr 尾部读真实文件", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-settle5c-"));
+  const consultId = "consult_20261002120000000abc123";
+  const runId = "run_settle_real";
+  const runDir = join(dir, "runs");
+  const consultsDir = join(dir, ".wao", "runs", "consults");
+  // 非终态安静运行：事件 ts 固定在 QUIET_TS（距注入 now 1 小时 > 15 分钟静默窗）。
+  const quietTs = "2026-09-01T00:00:00.000Z";
+  writeRealTranscript(runDir, runId, [
+    { type: "run.started", worktreePath: "C:\\fake\\wt", runId, ts: quietTs },
+    { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: quietTs },
+  ]);
+  writeFileSync(join(runDir, `.runner-${runId}.stderr`), "FATAL: heap OOM\n", "utf8");
+  writeConsultRecord(consultsDir, settledRecord(consultId, [
+    { agentId: "seat_r", runId, runState: "running", formatState: "empty" },
+  ]));
+  // 前置筛选的心跳读器全桩（无租约文件）；证明本体打桩——不跑真实进程扫描。
+  let proofCalls = 0;
+  const deps = {
+    nowFn: () => Date.parse("2026-09-01T01:00:00.000Z"),
+    runnerGoneFn: async () => { proofCalls += 1; return { gone: true }; },
+    runnerProofDeps: { heartbeatReader: () => ({ present: false, fresh: false }) },
+  };
+  try {
+    await withExitCode(async () => {
+      const captured = await captureConsult(() => consultCommand(
+        ["wait", consultId, "--until-settled", "--cwd", dir, "--run-dir", runDir], {}, deps,
+      ));
+      assert.equal(process.exitCode, 3, "证明成立且重读仍非终态 → 退出 3");
+      assert.equal(proofCalls, 1, "证明恰一次（第一轮即成立）");
+      assert.deepEqual(captured.errLines, [
+        `[consult] ${consultId}: seat seat_r (${runId}) will not settle:`,
+        `Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`,
+        "Runner stderr tail: FATAL: heap OOM",
+        `Next step: ${buildNextStep({ surface: "cli", situation: "runner_gone", runId })}`,
+      ]);
+    });
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("SETTLE-6: 中断（等待器返回 interrupted）→ 退出 130 并点名当席；零派发记录不等待、直说 no seat was dispatched", async () => {
   const consultId = "consult_20261002120000000abc123";
   const record = settledRecord(consultId, [

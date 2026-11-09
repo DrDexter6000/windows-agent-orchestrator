@@ -1073,6 +1073,95 @@ test("M12-1S2-CREATED-VERIFY-THROWS: retry does NOT re-package after created per
   }
 });
 
+// 第 90 批：同一条"created 已落、验证抛错 → 重试只补验证结果、不重新打包"的
+// 契约对另两类恢复候选（backend_failed / process_missing）同样成立——沿上面的
+// M12-1S2-CREATED-VERIFY-THROWS 形状，输入照 TD-231 循环（td231Input +
+// allowedPaths ["src"]；process_missing 另带进程探针三桩）。
+
+test("M12-1S2-CREATED-VERIFY-THROWS-BACKEND: backend_failed retry does NOT re-package after created persisted", async () => {
+  const { repo, runDir, worktreePath } = await setupBackendFailureScenario();
+  try {
+    // First call: created appended, but the verifier throws.
+    const throwingVerifier = async () => { throw new Error("verify boom"); };
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: throwingVerifier, computeInventoryFn: computeCandidateInventory,
+    }), /verify boom/);
+
+    const commitAfterFirst = git(["rev-parse", "HEAD"], worktreePath);
+    let events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_created").length, 1, "created persisted");
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 0);
+
+    // Second call: must NOT re-package (same commit), just verify + record outcome.
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(result.deliveryCommit, commitAfterFirst, "no second delivery commit");
+    assert.equal(result.created, false, "created already existed");
+
+    events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_created").length, 1, "still exactly one created");
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 1);
+    const provenance = events.filter((e) => e.type === "run.delivery_repackaged");
+    assert.equal(provenance.length, 1);
+    assert.equal(provenance[0].recoveryKind, "backend_failed", "recoveryKind unchanged");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("M12-1S2-CREATED-VERIFY-THROWS-ORPHAN: process_missing retry does NOT re-package after created persisted", async () => {
+  const { repo, runDir, worktreePath } = await setupOrphanScenario("m12s2-orphan-");
+  const orphanInput = {
+    nowFn: NOW, isAliveFn: deadProbe, ownerLeaseReader: missingLease,
+  };
+  try {
+    // First call: settled the orphan (confirmation + terminal failed), appended
+    // created — then the verifier throws.
+    const throwingVerifier = async () => { throw new Error("verify boom"); };
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: throwingVerifier, computeInventoryFn: computeCandidateInventory,
+      ...orphanInput,
+    }), /verify boom/);
+
+    const commitAfterFirst = git(["rev-parse", "HEAD"], worktreePath);
+    let events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_created").length, 1, "created persisted");
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 0);
+    assert.equal(events.filter((e) => e.type === "run.process_missing_confirmed").length, 1, "settled exactly once");
+    assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "failed").length, 1, "terminal exactly once");
+
+    // Second call: must NOT re-settle and NOT re-package (same commit).
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
+      ...orphanInput,
+    });
+    assert.equal(result.deliveryCommit, commitAfterFirst, "no second delivery commit");
+    assert.equal(result.created, false, "created already existed");
+
+    events = await readEvents(runDir);
+    assert.equal(events.filter((e) => e.type === "run.delivery_created").length, 1, "still exactly one created");
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 1);
+    const provenance = events.filter((e) => e.type === "run.delivery_repackaged");
+    assert.equal(provenance.length, 1);
+    assert.equal(provenance[0].recoveryKind, "process_missing", "recoveryKind unchanged");
+    assert.equal(events.filter((e) => e.type === "run.process_missing_confirmed").length, 1, "retry does not re-settle");
+    assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "failed").length, 1, "retry does not re-transition");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
 test("M12-1S2-VERIFY-APPEND-FAIL: retry records outcome without re-packaging; exactly one outcome", async () => {
   const { repo, runDir, worktreePath } = await setupDisallowedScenario();
   try {
