@@ -72,6 +72,7 @@
   - sol、astra、deepseek-pro：按上文豁免，未跑。
   - 97be473 只改文档，不改运行时代码。
 - `npm run smoke`（主检出 c5a5a31，15:45Z）：claude-code PASS；codex FAIL，codex 账号周额度用完（"try again at Nov 9th, 2026 1:19 PM"），按上文豁免。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 补跑 `npm run smoke`（额度恢复后，主检出 4c456a91，2026-11-09 12:21Z）：claude-code PASS，codex PASS（回复 `smoke ok`）。codex 一行的豁免至此补齐；4c456a91 晚于 v0.8.2 标签，补跑证明的是 codex 后端在额度恢复后可用。
 - 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.8.1 v0.8.2`；`git rev-list --count v0.8.1..v0.8.2`。
 
 ## 总量
