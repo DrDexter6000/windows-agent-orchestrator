@@ -421,13 +421,15 @@ async function killPossiblyStartedRunner({
     scanOk = false; // 没有可用的扫描键：证明不了"没有第二个 runner"
   } else {
     if (remaining() > 0) {
-      const first = await scanFn(runId, notBeforeMs);
+      // 每次扫描的超时取剩余预算：PowerShell 扫描一次要几秒，各自 15 秒的超时
+      // 会让结束阶段越过总预算，整次启动逼近宿主约 60 秒的请求上限。
+      const first = await scanFn(runId, notBeforeMs, { timeoutMs: Math.max(1, remaining()) });
       if (first && first.ok) {
         for (const pid of first.pids) killOne(pid);
       }
     }
     if (remaining() > 0) {
-      const second = await scanFn(runId, notBeforeMs);
+      const second = await scanFn(runId, notBeforeMs, { timeoutMs: Math.max(1, remaining()) });
       scanOk = Boolean(second && second.ok);
       secondScanClean = scanOk && second.pids.length === 0;
     } else {

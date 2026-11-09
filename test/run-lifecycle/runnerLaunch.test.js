@@ -131,9 +131,9 @@ function makeFakeKillDeps({ scanResults = null, scanPids = [], alivePids = [], b
   let scanCalls = 0;
   const deps = {
     taskkillFn: (pid) => { events.push(`taskkill:${pid}`); killed.push(pid); return { called: true, exitCode: 0 }; },
-    scanFn: async (runId, notBeforeMs) => {
+    scanFn: async (runId, notBeforeMs, opts) => {
       scanCalls += 1;
-      scanned.push({ runId, notBeforeMs, call: scanCalls });
+      scanned.push({ runId, notBeforeMs, call: scanCalls, timeoutMs: opts?.timeoutMs });
       events.push(`scan${scanCalls}`);
       if (scanResults) return scanResults[Math.min(scanCalls - 1, scanResults.length - 1)];
       return { ok: true, pids: scanCalls === 1 ? [...scanPids] : [] };
@@ -676,9 +676,9 @@ test("兜底结束：预算用完（第二次扫描没做成）→ killScanOk=fa
   const kill = makeFakeKillDeps({ budgetMs: 1 });
   // 第一次扫描真睡 50ms：预算（1ms）在它做完时就没了 → 不做第二次扫描。
   const realScan = kill.deps.scanFn;
-  kill.deps.scanFn = async (runId, notBeforeMs) => {
+  kill.deps.scanFn = async (runId, notBeforeMs, opts) => {
     await new Promise((res) => { setTimeout(res, 50); });
-    return realScan(runId, notBeforeMs);
+    return realScan(runId, notBeforeMs, opts);
   };
   const { wmiSpawnBrokerFn } = makeFakeBroker({ pid: 8809, onPayload: (_p, socket) => { socket.destroy(); } });
   try {
@@ -691,6 +691,8 @@ test("兜底结束：预算用完（第二次扫描没做成）→ killScanOk=fa
     assert.equal(r.reason, "runner_kill_unconfirmed");
     assert.equal(r.killScanOk, false, "预算用完按扫描不成功处理");
     assert.equal(kill.scanned.length, 1, "只做了第一次扫描");
+    assert.ok(Number.isInteger(kill.scanned[0].timeoutMs) && kill.scanned[0].timeoutMs >= 1
+      && kill.scanned[0].timeoutMs <= 1, "扫描的超时取剩余预算（这里预算只有 1ms）");
     assert.deepEqual(kill.events, ["taskkill:8809", "scan1"], "已知 pid 的结束不受预算影响");
   } finally {
     restore();
