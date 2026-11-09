@@ -348,6 +348,76 @@ test("R23-B1: runs prune --archive 不碰非 .jsonl 文件与子目录", async (
   }
 });
 
+// --- 第 90 批：runner stderr 文件（.runner-<runId>.stderr，基础 runDir 下）随转录处置 ---
+
+test("B90: runs prune 删超龄转录时一并删它的 runner stderr 文件；未超龄的与没有转录的不碰", async () => {
+  const dir = await makeRunDir();
+  try {
+    const oldTs = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    const recentTs = new Date().toISOString();
+    await writeJsonl(dir, "run_old", [{ type: "run.started", ts: oldTs }]);
+    await writeJsonl(dir, "run_recent", [{ type: "run.started", ts: recentTs }]);
+    await writeFile(join(dir, ".runner-run_old.stderr"), "old crash\n", "utf8");
+    await writeFile(join(dir, ".runner-run_recent.stderr"), "recent warning\n", "utf8");
+    await writeFile(join(dir, ".runner-run_orphan.stderr"), "no transcript\n", "utf8");
+
+    const lines = cli(["runs", "prune", "--older-than", "7d"], dir).split(/\r?\n/);
+    assert.deepEqual(lines, ["Pruned run_old.jsonl", "Pruned .runner-run_old.stderr", "Pruned 1, kept 1"]);
+    assert.ok(!existsSync(join(dir, ".runner-run_old.stderr")));
+    assert.ok(existsSync(join(dir, ".runner-run_recent.stderr")), "未超龄的留下");
+    assert.ok(existsSync(join(dir, ".runner-run_orphan.stderr")), "没有转录的不碰");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B90: runs prune --archive 把 runner stderr 文件移进转录的同一月份目录；目标冲突时留在原处", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_a", [{ type: "run.started", ts: "2026-03-15T00:00:00.000Z" }]);
+    await writeJsonl(runDir, "run_b", [{ type: "run.started", ts: "2026-03-16T00:00:00.000Z" }]);
+    await writeFile(join(runDir, ".runner-run_a.stderr"), "a\n", "utf8");
+    await writeFile(join(runDir, ".runner-run_b.stderr"), "b\n", "utf8");
+    await mkdir(join(archiveRoot, "2026-03"), { recursive: true });
+    await writeFile(join(archiveRoot, "2026-03", ".runner-run_b.stderr"), "pre-existing\n", "utf8");
+
+    const lines = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir).split(/\r?\n/);
+    assert.deepEqual(lines, [
+      "Archived run_a.jsonl -> runs-archive/2026-03/run_a.jsonl",
+      "Archived .runner-run_a.stderr -> runs-archive/2026-03/.runner-run_a.stderr",
+      "Archived run_b.jsonl -> runs-archive/2026-03/run_b.jsonl",
+      "Skipped .runner-run_b.stderr (conflict: runs-archive/2026-03/.runner-run_b.stderr already exists)",
+      "Archived 2, skipped 0 (conflict), kept 0",
+    ]);
+    assert.equal(await readFile(join(archiveRoot, "2026-03", ".runner-run_a.stderr"), "utf8"), "a\n");
+    assert.ok(!existsSync(join(runDir, ".runner-run_a.stderr")));
+    assert.equal(await readFile(join(runDir, ".runner-run_b.stderr"), "utf8"), "b\n", "冲突时原处保留");
+    assert.equal(await readFile(join(archiveRoot, "2026-03", ".runner-run_b.stderr"), "utf8"), "pre-existing\n", "预置目标未被覆盖");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("B90: runs prune --archive 转录因冲突被跳过时，它的 runner stderr 文件也不动", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_c", [{ type: "run.started", ts: "2026-03-15T00:00:00.000Z" }]);
+    await writeFile(join(runDir, ".runner-run_c.stderr"), "c\n", "utf8");
+    await mkdir(join(archiveRoot, "2026-03"), { recursive: true });
+    await writeFile(join(archiveRoot, "2026-03", "run_c.jsonl"), "{}\n", "utf8");
+
+    const lines = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir).split(/\r?\n/);
+    assert.deepEqual(lines, [
+      "Skipped run_c.jsonl (conflict: runs-archive/2026-03/run_c.jsonl already exists)",
+      "Archived 0, skipped 1 (conflict), kept 0",
+    ]);
+    assert.equal(await readFile(join(runDir, ".runner-run_c.stderr"), "utf8"), "c\n");
+    assert.ok(!existsSync(join(archiveRoot, "2026-03", ".runner-run_c.stderr")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("R23-B1: --archive 带值形状（--archive yes）仍走归档而非静默删除（auditor F3 钉）", async () => {
   // parseOptions 对 `--archive 值` 会给 options.archive 赋字符串值——实现用
   // Boolean(options.archive) 判定（宁可归档不可误删）。本测试钉住该 truthy
