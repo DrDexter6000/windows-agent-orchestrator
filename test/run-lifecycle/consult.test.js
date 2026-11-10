@@ -635,11 +635,12 @@ test("FLOW-7: 扇出后立刻落组记录并回调 onFanOut——回调时记录
     const info = fanOutCalls[0];
     assert.equal(info.consultId, fixedId);
     assert.equal(info.recordPath, join(consultsDir, `${fixedId}.json`));
+    // 第 96 批：派发未成立席位的回调席位对象带加工后的原因（有 runId 的不带）。
     assert.deepEqual(info.seats, [
       { agentId: "seat_a", runId: "run_stub_seat_a" },
-      { agentId: "seat_b", runId: null },
+      { agentId: "seat_b", runId: null, dispatchError: "credential missing: X_KEY" },
     ]);
-    // 早期记录：席位到 runId 的映射在场；成功席 pending、派发失败席 dispatch_failed + runId null。
+    // 早期记录：席位到 runId 的映射在场；成功席 pending、派发失败席 dispatch_failed + runId null + 原因。
     const earlyMapping = Object.fromEntries(earlyRecord.seats.map((s) => [s.agentId, s.runId]));
     assert.equal(earlyMapping.seat_a, "run_stub_seat_a");
     assert.equal(earlyMapping.seat_b, null);
@@ -647,11 +648,415 @@ test("FLOW-7: 扇出后立刻落组记录并回调 onFanOut——回调时记录
     const earlyB = earlyRecord.seats.find((s) => s.agentId === "seat_b");
     assert.equal(earlyB.runState, "dispatch_failed");
     assert.equal(earlyB.runId, null);
-    // 收集结束后：同一路径被完整观察覆盖。
+    assert.equal(earlyB.dispatchError, "credential missing: X_KEY", "扇出时的记录就带原因");
+    // 收集结束后：同一路径被完整观察覆盖（原因保留）。
     assert.equal(result.recordPath, info.recordPath);
     const finalRecord = JSON.parse(readFileSync(info.recordPath, "utf8"));
     assert.equal(finalRecord.seats.find((s) => s.agentId === "seat_a").runState, "completed");
     assert.equal(finalRecord.seats.find((s) => s.agentId === "seat_b").runState, "dispatch_failed");
+    assert.equal(finalRecord.seats.find((s) => s.agentId === "seat_b").dispatchError, "credential missing: X_KEY");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ── 第 96 批：派发失败原因——取因时就地加工（脱敏→控制字符→限长）、进组记
+// 录（两次写）、重渲染带出、文本行显示。锚点：2026-11-10 分支工作树两席派发
+// 全失败，原因（缺 --registry 的 ENOENT）只在 --format json 里可见。 ────────
+
+test("DERR-1: 原因进结果与组记录（扇出时+收尾两次写都带）；有 runId 的席位不带", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr1-"));
+  try {
+    const consultsDir = join(dir, "consults");
+    const reason = "ENOENT: no such file or directory, open 'C:\\wt\\config\\agents.json'";
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnPartial = async (input) => {
+      if (input.agentId === "seat_b") throw new Error(reason);
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const writes = [];
+    const snapshots = [];
+    const result = await runConsult(baseInput({
+      consultsDir,
+      dispatchFn: dispatchFnPartial,
+      readTranscriptFn,
+      idFn: () => "consult_20261110080000000derr101",
+      writeFileFn: async (p, data) => {
+        writes.push(p);
+        snapshots.push(JSON.parse(data));
+        mkdirSync(consultsDir, { recursive: true });
+        writeFileSync(p, data, "utf8");
+      },
+      mkdirFn: async () => {},
+    }));
+    const seatB = result.seats.find((s) => s.agentId === "seat_b");
+    assert.equal(seatB.runId, null);
+    assert.equal(seatB.runState, "dispatch_failed");
+    assert.equal(seatB.dispatchError, reason, "加工后原因进结果（env 无密钥/无控制字符/未超长 → 原样）");
+    assert.ok(!("dispatchError" in result.seats.find((s) => s.agentId === "seat_a")), "有 runId 的席位不带该字段");
+    assert.equal(writes.length, 2, "扇出时与收尾各写一次（收尾那份经改名换上）");
+    for (const [snapshot, label] of [[snapshots[0], "扇出时"], [snapshots[1], "收尾"]]) {
+      const recordB = snapshot.seats.find((s) => s.agentId === "seat_b");
+      assert.equal(recordB.dispatchError, reason, `${label}的组记录都带原因`);
+      assert.ok(!("dispatchError" in snapshot.seats.find((s) => s.agentId === "seat_a")), `${label}的组记录：有 runId 的席位不带`);
+    }
+    // 改名换上之后磁盘上的最终文件就是收尾那份。
+    const onDisk = JSON.parse(readFileSync(writes[0], "utf8"));
+    assert.equal(onDisk.seats.find((s) => s.agentId === "seat_b").dispatchError, reason);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("DERR-2: 脱敏——错误文本里的注入 env 密钥值，结果、组记录、文本输出只见替换标记", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr2-"));
+  try {
+    const consultsDir = join(dir, "consults");
+    // 密钥值运行时拼出（不写凭据形状字面量——desensitization 守卫）；名字命中
+    // 密钥名规则、值不短于 8 字符 → 脱敏器认识它。
+    const envName = "CONSULT_TEST_TOKEN";
+    const secretValue = "stub-" + "credential-" + "material-" + "424242";
+    const env = { [envName]: secretValue };
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnPartial = async (input) => {
+      if (input.agentId === "seat_b") throw new Error(`connect EACCES using ${secretValue} at registry`);
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const snapshots = [];
+    const result = await runConsult(baseInput({
+      consultsDir,
+      env,
+      dispatchFn: dispatchFnPartial,
+      readTranscriptFn,
+      idFn: () => "consult_20261110080000000derr201",
+      writeFileFn: async (p, data) => {
+        snapshots.push(JSON.parse(data));
+        mkdirSync(consultsDir, { recursive: true });
+        writeFileSync(p, data, "utf8");
+      },
+      mkdirFn: async () => {},
+    }));
+    const marker = `[REDACTED:${envName}]`;
+    const seatB = result.seats.find((s) => s.agentId === "seat_b");
+    assert.ok(seatB.dispatchError.includes(marker), "结果只见替换标记");
+    assert.ok(!seatB.dispatchError.includes(secretValue), "结果不泄漏原值");
+    assert.equal(snapshots.length, 2, "扇出时与收尾各写一次组记录");
+    for (const [snapshot, label] of [[snapshots[0], "扇出时"], [snapshots[1], "收尾"]]) {
+      const recordB = snapshot.seats.find((s) => s.agentId === "seat_b");
+      assert.ok(recordB.dispatchError.includes(marker), `${label}的组记录只见替换标记`);
+      assert.ok(!recordB.dispatchError.includes(secretValue), `${label}的组记录不泄漏原值`);
+    }
+    const text = renderCouncilDiffText(result);
+    assert.ok(text.includes(`派发未成立：connect EACCES using ${marker} at registry`), "文本输出（stateLine/回链行）只见替换标记");
+    assert.ok(!text.includes(secretValue), "文本输出不泄漏原值");
+    // stateLine 精确匹配——只满足于回链行的 includes 断言挡不住"stateLine 丢原因"。
+    const stateLineB = text.split("\n").find((line) => line.startsWith("── seat_b（"));
+    assert.equal(stateLineB,
+      `── seat_b（（无 run——派发未成立：connect EACCES using ${marker} at registry） · dispatch_failed/empty）`,
+      "stateLine 逐字带原因");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("DERR-3: 限长与顺序——超 400 码元截到 400（… 收尾）、代理对不切开、跨截断点的密钥先被完整脱敏、控制字符被清洗", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr3-"));
+  try {
+    const consultsDir = join(dir, "consults");
+    const envName = "CONSULT_TEST_SECRET";
+    const secretValue = "hf" + "-token-" + "1234567890abcdef"; // 25 码元，运行时拼出
+    const env = { [envName]: secretValue };
+    // 密钥值跨在 400 截断点上：raw 的 395..419 码元是密钥（先脱敏后截断的靶子）。
+    const secretStraddle = "ECONNRESET at " + "x".repeat(381) + secretValue + "y".repeat(300);
+    const longPlain = "ENOENT: no such file or directory, open '".concat("p".repeat(500), "'");
+    const surrogateStraddle = "a".repeat(398) + "\u{1F680}" + "b".repeat(50);
+    const withControls = "spawn failed \u0007bell\u001b[2K end";
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnBySeat = async (input) => {
+      if (input.agentId === "seat_b") throw new Error(secretStraddle);
+      if (input.agentId === "seat_c") throw new Error(longPlain);
+      if (input.agentId === "seat_d") throw new Error(surrogateStraddle);
+      if (input.agentId === "seat_e") throw new Error(withControls);
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const result = await runConsult(baseInput({
+      seats: [
+        { agentId: "seat_a" }, { agentId: "seat_b" }, { agentId: "seat_c" },
+        { agentId: "seat_d" }, { agentId: "seat_e" },
+      ],
+      consultsDir,
+      env,
+      dispatchFn: dispatchFnBySeat,
+      readTranscriptFn,
+      idFn: () => "consult_20261110080000000derr301",
+      writeFileFn: async () => {},
+      mkdirFn: async () => {},
+    }));
+    const stored = (agentId) => result.seats.find((s) => s.agentId === agentId).dispatchError;
+    // 普通超长：恰 400 码元，= 前 399 码元 + …（精确匹配，防"至少包含"软断言）。
+    const seatC = stored("seat_c");
+    assert.equal(seatC.length, 400, "限长帽=400 码元（含 …）");
+    assert.ok(seatC.endsWith("…"));
+    assert.equal(seatC, longPlain.slice(0, 399) + "…");
+    // 跨截断点的密钥：脱敏先于截断——截断位置上是替换标记的前缀 "[RED"，
+    // 不是原值前缀 "hf-t"；任何一段原值都不在存储值里。
+    const seatB = stored("seat_b");
+    assert.equal(seatB.length, 400);
+    assert.ok(seatB.endsWith("…"));
+    assert.equal(seatB, "ECONNRESET at " + "x".repeat(381) + "[RED…",
+      "截断点上是被截的替换标记前缀（证明先脱敏后截断）");
+    assert.ok(!seatB.includes(secretValue));
+    assert.ok(!seatB.includes(secretValue.slice(0, 4)));
+    assert.ok(!seatB.includes("1234567890abcdef"));
+    // 截断点落在代理对中间：整体让出一格，不切开代理对。
+    const seatD = stored("seat_d");
+    assert.equal(seatD, "a".repeat(398) + "…", "截断点回退到码点边界，… 收尾");
+    assert.ok(!/[\uD800-\uDFFF]/.test(seatD), "存储值里没有落单代理");
+    // 控制字符（C0/DEL 段）替换为 U+FFFD（复用本模块 sanitizeControls 的语义）。
+    assert.equal(stored("seat_e"), "spawn failed \uFFFDbell\uFFFD[2K end");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("DERR-4: consult show 重渲染带原因——stateLine、runId 回链行、--out-dir 与 --seat --out 的行都带；旧记录照常渲染", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr4-"));
+  try {
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    writeRealTranscript(runDir, "run_derr_a", makeTranscript("run_derr_a", { finalText: "Q1: A 可行。\n" }));
+    const consultId = "consult_20261110080000000derr401";
+    const reason = "ENOENT: no such file or directory, open 'C:\\wt\\config\\agents.json'";
+    writeConsultRecord(consultsDir, {
+      consultId,
+      createdAt: "2026-11-10T08:00:00.000Z",
+      brief: { path: null, sha256: "ab".repeat(32) },
+      budgetMs: 600000,
+      elapsedMs: 100,
+      questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+      seats: [
+        { agentId: "seat_a", runId: "run_derr_a", runState: "completed", formatState: "structured" },
+        { agentId: "seat_b", runId: null, runState: "dispatch_failed", formatState: "empty", dispatchError: reason },
+      ],
+      fieldDiff: [],
+    });
+    const outDir = join(dir, "final");
+    const outDirOut = await captureConsult(() => consultCommand(
+      ["show", consultId, "--out-dir", outDir, "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    assert.match(outDirOut.out, /seat_b \(no run · dispatch_failed: ENOENT[^)]*\): 0 chars written to/, "--out-dir 每席一行带原因");
+    // 普通全量渲染（不带 --out-dir/--seat）：stateLine 与 runId 回链行带原因。
+    const captured = await captureConsult(() => consultCommand(
+      ["show", consultId, "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    assert.ok(captured.out.includes(`（无 run——派发未成立：${reason}）`), "stateLine 带原因");
+    assert.ok(captured.out.includes(`seat_b: （无 run——派发未成立：${reason}）`), "runId 回链行带原因");
+    // --seat --out 同一行格式（writeSeatText）。
+    const outFile = join(dir, "seat-b.md");
+    const seatOut = await captureConsult(() => consultCommand(
+      ["show", consultId, "--seat", "seat_b", "--out", outFile, "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    assert.match(seatOut.out, /seat_b \(no run · dispatch_failed: ENOENT[^)]*\): 0 chars written to/, "--seat --out 行带原因");
+    assert.equal(readFileSync(outFile, "utf8"), "", "无终稿席位照写空文件");
+    // 旧记录（无 dispatchError）：渲染形状与改动前逐字一致。
+    const legacyId = "consult_20261110080000000derr402";
+    writeConsultRecord(consultsDir, {
+      consultId: legacyId,
+      createdAt: "2026-11-10T08:00:00.000Z",
+      brief: { path: null, sha256: "ab".repeat(32) },
+      budgetMs: 600000,
+      elapsedMs: 100,
+      questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+      seats: [{ agentId: "seat_none", runId: null, runState: "dispatch_failed", formatState: "empty" }],
+      fieldDiff: [],
+    });
+    const legacyOut = await captureConsult(() => consultCommand(
+      ["show", legacyId, "--cwd", dir, "--run-dir", runDir], {}, {},
+    ));
+    assert.ok(legacyOut.out.includes("（无 run——派发未成立）"), "旧记录照常渲染无原因标签");
+    assert.ok(!legacyOut.out.includes("派发未成立："), "旧记录不带原因尾巴");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("DERR-5: rerenderConsultFromRecord 只做类型检查——字符串才带、非字符串按缺席、不再二次加工（超 400 含控制字符的记录值逐字读出）", async () => {
+  // 组记录里放一个超 400 码元、带控制字符的原因：读取侧若再加工（脱敏/折叠/
+  // 限长任一）都会改变它——本断言钉住"读取只做类型检查"。
+  const rawRecorded = "r".repeat(380) + "\u0007" + "s".repeat(40);
+  assert.ok(rawRecorded.length > 400, "测试前提：记录里的原因超过限长帽");
+  const record = JSON.parse(JSON.stringify({
+    consultId: "consult_20261110080000000derr501",
+    createdAt: "2026-11-10T08:00:00.000Z",
+    budgetMs: 600000,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    seats: [
+      { agentId: "seat_b", runId: null, runState: "dispatch_failed", formatState: "empty", dispatchError: "ENOENT stub" },
+      { agentId: "seat_bad", runId: null, runState: "dispatch_failed", formatState: "empty", dispatchError: 42 },
+      { agentId: "seat_raw", runId: null, runState: "dispatch_failed", formatState: "empty", dispatchError: rawRecorded },
+    ],
+    fieldDiff: [],
+  }));
+  const result = await rerenderConsultFromRecord({
+    record,
+    runDir: join(tmpdir(), "wao-consult-derr5", "runs"),
+    consultsDir: join(tmpdir(), "wao-consult-derr5", "consults"),
+    readTranscriptFn: async () => { throw new Error("ENOENT stub transcript"); },
+    env: {},
+  });
+  assert.equal(result.seats.find((s) => s.agentId === "seat_b").dispatchError, "ENOENT stub", "字符串原样带出");
+  assert.ok(!("dispatchError" in result.seats.find((s) => s.agentId === "seat_bad")), "非字符串按缺席");
+  assert.equal(result.seats.find((s) => s.agentId === "seat_raw").dispatchError, rawRecorded,
+    "超 400 含控制字符的记录值逐字返回——读取侧不再二次加工");
+});
+
+test("DERR-6: 扇出 stderr started 行带原因（dispatch_failed: <原因>）；无原因的旧形状照旧只写 dispatch_failed", async () => {
+  const config = {
+    registry: join(tmpdir(), "wao-consult-derr6", "agents.json"),
+    runDir: join(tmpdir(), "wao-consult-derr6", "runs"),
+  };
+  const fanOutSeats = (seatB) => ({
+    runConsult: async (input) => {
+      input.onFanOut({
+        consultId: "consult_20261110080000000derr601",
+        recordPath: "stub-record.json",
+        seats: [{ agentId: "a", runId: "run_a" }, seatB],
+      });
+      return craftedResult();
+    },
+  });
+  const withReason = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--cwd", "C:/tmp/x"], config,
+    fanOutSeats({
+      agentId: "b", runId: null,
+      dispatchError: "ENOENT: no such file or directory, open 'C:\\wt\\config\\agents.json'",
+    }),
+  ));
+  assert.match(withReason.err, /\[consult\] consult_\w+ started — seats: a=run_a b=dispatch_failed: ENOENT/,
+    "started 行把原因跟在 dispatch_failed 后（行尾）");
+  const withoutReason = await captureConsult(() => consultCommand(
+    ["run", "brief.md", "--seats", "a,b", "--cwd", "C:/tmp/x"], config,
+    fanOutSeats({ agentId: "b", runId: null }),
+  ));
+  assert.match(withoutReason.err, /b=dispatch_failed(?::|\n)/, "无原因照旧只写 dispatch_failed");
+  assert.ok(!withoutReason.err.includes("dispatch_failed:"), "无原因不出现冒号形");
+});
+
+test("DERR-7: consult wait 的 no seat was dispatched / never dispatched 提示带原因；无原因的旧形状不变", async () => {
+  const consultId = "consult_20261110080000000derr701";
+  const base = {
+    consultId,
+    createdAt: "2026-11-10T08:00:00.000Z",
+    brief: { path: null, sha256: "ab".repeat(32) },
+    budgetMs: 600000,
+    elapsedMs: 100,
+    questions: parseBriefQuestions("## Q1 方案可行吗\n"),
+    fieldDiff: [],
+  };
+  const reason = "ENOENT: no such file or directory, open 'C:\\wt\\config\\agents.json'";
+  const failedSeat = { agentId: "seat_x", runId: null, runState: "dispatch_failed", formatState: "empty", dispatchError: reason };
+  const none = { ...base, seats: [failedSeat] };
+  const noneOut = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, {
+    waitForConsult: async () => ({ record: none, allTerminal: true, waitedMs: 0, windowMs: 270000 }),
+    readTranscript: async () => [],
+  }));
+  assert.match(noneOut.err, /no seat was dispatched \(seat_x: dispatch_failed: ENOENT[^)]*\)/, "零派发提示带原因");
+  const mixed = { ...base, seats: [
+    { agentId: "seat_a", runId: "run_wait_derr", runState: "running", formatState: "partial" }, failedSeat,
+  ] };
+  const mixedOut = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, {
+    waitForConsult: async () => ({ record: mixed, allTerminal: true, waitedMs: 1000, windowMs: 270000 }),
+    readTranscript: async () => makeTranscript("run_wait_derr", { finalText: "Q1: 可行。\n" }),
+  }));
+  assert.match(mixedOut.err, /1 seat\(s\) were never dispatched \(seat_x: dispatch_failed: ENOENT[^)]*\)/, "计数提示带原因");
+  // 旧记录（无 dispatchError）：提示形状与改动前逐字一致。
+  const plain = { ...base, seats: [{ agentId: "seat_x", runId: null, runState: "dispatch_failed", formatState: "empty" }] };
+  const plainOut = await captureConsult(() => consultCommand(["wait", consultId, "--cwd", "C:/tmp/x"], {}, {
+    waitForConsult: async () => ({ record: plain, allTerminal: true, waitedMs: 0, windowMs: 270000 }),
+    readTranscript: async () => [],
+  }));
+  assert.match(plainOut.err, /no seat was dispatched(?! \()/, "无原因提示形状与改动前一致");
+  assert.ok(!plainOut.err.includes("dispatch_failed:"), "无原因不出现冒号形");
+});
+
+test("DERR-8: 限长边界——恰 400 码元原样返回（不补 …），401 截到 400（补 …）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr8-"));
+  try {
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnBySeat = async (input) => {
+      if (input.agentId === "seat_b") throw new Error("y".repeat(400));
+      if (input.agentId === "seat_c") throw new Error("y".repeat(401));
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const result = await runConsult(baseInput({
+      seats: [{ agentId: "seat_a" }, { agentId: "seat_b" }, { agentId: "seat_c" }],
+      dispatchFn: dispatchFnBySeat,
+      readTranscriptFn,
+      writeFileFn: async () => {},
+      mkdirFn: async () => {},
+    }));
+    const stored = (agentId) => result.seats.find((s) => s.agentId === agentId).dispatchError;
+    assert.equal(stored("seat_b"), "y".repeat(400), "恰 400 码元：原样返回，不补 …");
+    assert.equal(stored("seat_c"), "y".repeat(399) + "…", "401 码元：截到 400（399 码元 + …）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("DERR-9: 原文退回链（空 message→code→name、无 message 对象→code）与空白折叠（\\r\\n\\t 连同两侧空格折成单个空格）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-consult-derr9-"));
+  try {
+    const errorWithEmptyMessageAndCode = new Error("");
+    errorWithEmptyMessageAndCode.code = "ENOENT";
+    const errorWithEmptyMessageOnly = new Error(""); // 无 code：落到 name（"Error"）
+    const multiline = "spawn failed\n\tat child (line 3)\r\n  exit 1";
+    const { dispatchFn } = makeDispatchStub();
+    const dispatchFnBySeat = async (input) => {
+      if (input.agentId === "seat_b") throw errorWithEmptyMessageAndCode;
+      if (input.agentId === "seat_c") throw errorWithEmptyMessageOnly;
+      if (input.agentId === "seat_d") throw { code: "EACCES" }; // 无 message 的普通对象
+      if (input.agentId === "seat_e") throw new Error(multiline);
+      return dispatchFn(input);
+    };
+    const { readTranscriptFn } = makeTranscriptStub(new Map([
+      ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: A\n" })],
+    ]));
+    const result = await runConsult(baseInput({
+      seats: [
+        { agentId: "seat_a" }, { agentId: "seat_b" }, { agentId: "seat_c" },
+        { agentId: "seat_d" }, { agentId: "seat_e" },
+      ],
+      dispatchFn: dispatchFnBySeat,
+      readTranscriptFn,
+      writeFileFn: async () => {},
+      mkdirFn: async () => {},
+    }));
+    const stored = (agentId) => result.seats.find((s) => s.agentId === agentId).dispatchError;
+    assert.equal(stored("seat_b"), "ENOENT", "空 message → 退回 code");
+    assert.equal(stored("seat_c"), "Error", "空 message 且无 code → 退回 name");
+    assert.equal(stored("seat_d"), "EACCES", "无 message 的对象 → 退回 code（不是 [object Object]）");
+    assert.equal(stored("seat_e"), "spawn failed at child (line 3) exit 1", "\\r\\n\\t 连同两侧空格折成单个空格");
+    for (const agentId of ["seat_b", "seat_c", "seat_d", "seat_e"]) {
+      assert.ok(!/[\r\n\t]/.test(stored(agentId)), `${agentId} 的原因不含换行/制表符`);
+    }
+    // 渲染出的各行都不含换行：stateLine 逐字等于单行期望。
+    const text = renderCouncilDiffText(result);
+    const stateLineE = text.split("\n").find((line) => line.startsWith("── seat_e（"));
+    assert.equal(stateLineE,
+      "── seat_e（（无 run——派发未成立：spawn failed at child (line 3) exit 1） · dispatch_failed/empty）",
+      "多行报错折叠后在 stateLine 里仍是单行");
   } finally {
     cleanupDir(dir);
   }

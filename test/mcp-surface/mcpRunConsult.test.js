@@ -337,6 +337,50 @@ test("MRC-B1: waitMs=0 is valid; non-terminal seat observes truthfully (budgetEx
   }
 });
 
+test("MRC-B3: dispatch-failure reason (dispatchError) rides the create receipt, the stored record, and the read receipt; runId seats never carry it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-b3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: "Q1: A\n\nQ2: B\n" }));
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir, failSeat: "seat_b",
+    });
+    try {
+      // create 回执带加工后的原因；有 runId 的席位不带。
+      const created = await callConsult(client, { brief: BRIEF, seats: ["seat_a", "seat_b"], waitMs: 0, expectedWorkspaceRoot: dir });
+      assert.equal(created.threw, false);
+      assert.notEqual(created.res.isError, true, errText(created.res));
+      const receipt = created.res.structuredContent;
+      const seatB = receipt.seats.find((s) => s.agentId === "seat_b");
+      assert.equal(seatB.runState, "dispatch_failed");
+      assert.equal(seatB.runId, null);
+      assert.equal(seatB.dispatchError, "stub dispatch failure", "create 回执带原因");
+      assert.ok(!("dispatchError" in receipt.seats.find((s) => s.agentId === "seat_a")), "有 runId 席位不带");
+      // 收尾后的组记录同样带（读取模式的事实源）。
+      const record = JSON.parse(readFileSync(receipt.recordPath, "utf8"));
+      assert.equal(record.seats.find((s) => s.agentId === "seat_b").dispatchError, "stub dispatch failure");
+      assert.ok(!("dispatchError" in record.seats.find((s) => s.agentId === "seat_a")));
+      // 读取模式（零派发）：原因从组记录重渲染透出，同形回执。
+      const readsBefore = dispatchCalls.length;
+      const read = await callConsult(client, { consultId: receipt.consultId });
+      assert.equal(read.threw, false);
+      assert.notEqual(read.res.isError, true, errText(read.res));
+      const readReceipt = read.res.structuredContent;
+      assert.equal(readReceipt.view, "receipt");
+      assert.equal(readReceipt.seats.find((s) => s.agentId === "seat_b").dispatchError, "stub dispatch failure", "读取回执带原因");
+      assert.equal(dispatchCalls.length, readsBefore, "read mode dispatch count stays 0");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("MRC-B2: malformed (unstructured prose) seat — prose paged verbatim, zero re-send, no penalty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-b2-"));
   try {

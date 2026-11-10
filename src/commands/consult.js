@@ -162,8 +162,33 @@ function seatEntryText(entries) {
   return entries.map((e) => e.text).join("\n");
 }
 
+// 派发未成立席位的原因（第 96 批）：dispatchError 是唯一事实源（取因时已按
+// 脱敏→折叠→控制字符→限长加工成单行长串，渲染不再二次处理）；有原因才带。
+// 原因的位置随行而异：runId 回链行与扇出 started 行把它放在行尾；stateLine
+// 把它放在括号内、状态段之前；--seat/--out-dir 写出行把它放在括号内、状态段
+// 之后、字符数之前。中文行用"派发未成立：<原因>"，英文行用
+// "dispatch_failed: <原因>"。
+function noRunLabel(seat) {
+  return typeof seat.dispatchError === "string" && seat.dispatchError.length > 0
+    ? `（无 run——派发未成立：${seat.dispatchError}）`
+    : "（无 run——派发未成立）";
+}
+
+function dispatchFailedLabel(seat) {
+  return typeof seat.dispatchError === "string" && seat.dispatchError.length > 0
+    ? `dispatch_failed: ${seat.dispatchError}`
+    : "dispatch_failed";
+}
+
+/** 席位 runState 标（派发未成立且有原因时把原因跟在状态后面——写出行的括号内、字符数之前）。 */
+function runStateLabel(seat) {
+  return typeof seat.dispatchError === "string" && seat.dispatchError.length > 0
+    ? `${seat.runState}: ${seat.dispatchError}`
+    : `${seat.runState}`;
+}
+
 function stateLine(seat) {
-  const runId = seat.runId ?? "（无 run——派发未成立）";
+  const runId = seat.runId ?? noRunLabel(seat);
   return `── ${seat.agentId}（${runId} · ${seat.runState}/${seat.formatState}${seat.budgetExpired ? " · 预算到期" : ""}）`;
 }
 
@@ -270,7 +295,7 @@ export function renderCouncilDiffText(result) {
   lines.push("");
   lines.push("—— runId 回链（意见-决策回链锚点，供 decisions/declare 引用）——");
   for (const seat of result.seats) {
-    lines.push(`${seat.agentId}: ${seat.runId ?? "（无 run——派发未成立）"}`);
+    lines.push(`${seat.agentId}: ${seat.runId ?? noRunLabel(seat)}`);
   }
   lines.push(`组记录：${result.recordPath ?? "（show 重渲染——见原记录）"}`);
   return lines.join("\n");
@@ -320,7 +345,7 @@ async function consultRunCommand(args, config, deps = {}) {
         options.cwd ? ` --cwd ${JSON.stringify(options.cwd)}` : "",
         options.runDir ? ` --run-dir ${JSON.stringify(options.runDir)}` : "",
       ].join("");
-      console.error(`[consult] ${consultId} started — seats: ${seats.map((s) => `${s.agentId}=${s.runId ?? "dispatch_failed"}`).join(" ")}`);
+      console.error(`[consult] ${consultId} started — seats: ${seats.map((s) => `${s.agentId}=${s.runId ?? dispatchFailedLabel(s)}`).join(" ")}`);
       console.error(`[consult] read now: consult show ${consultId}${where} · keep waiting after the budget: consult wait ${consultId}${where}`);
     },
   });
@@ -341,7 +366,7 @@ function writeSeatText(result, options, deps) {
   const text = typeof seat.finalText === "string" ? seat.finalText : "";
   if (typeof options.out === "string") {
     (deps.writeFileSync ?? writeFileSync)(resolve(options.out), text, "utf8");
-    console.log(`${seat.agentId} (${seat.runId ?? "no run"} · ${seat.runState}): ${text.length} chars written to ${resolve(options.out)}`);
+    console.log(`${seat.agentId} (${seat.runId ?? "no run"} · ${runStateLabel(seat)}): ${text.length} chars written to ${resolve(options.out)}`);
     return;
   }
   console.log(text);
@@ -366,7 +391,7 @@ function writeAllSeatTexts(result, options, deps) {
     const text = typeof seat.finalText === "string" ? seat.finalText : "";
     const path = join(outDir, `${agentId}.md`);
     (deps.writeFileSync ?? writeFileSync)(path, text, "utf8");
-    console.log(`${agentId} (${seat.runId ?? "no run"} · ${seat.runState}): ${text.length} chars written to ${path}`);
+    console.log(`${agentId} (${seat.runId ?? "no run"} · ${runStateLabel(seat)}): ${text.length} chars written to ${path}`);
   }
 }
 
@@ -441,11 +466,17 @@ function emitConsultWaitResult({ consultId, result, format, allTerminal, waitedM
   const nextStep = consultNextStep(result, { json: format === "json" });
   const seats = result.seats ?? [];
   const dispatchedSeats = seats.filter((seat) => typeof seat.runId === "string" && seat.runId.length > 0);
-  const undispatched = seats.length - dispatchedSeats.length;
+  const undispatchedSeats = seats.filter((seat) => !(typeof seat.runId === "string" && seat.runId.length > 0));
+  const undispatched = undispatchedSeats.length;
   const unreadable = dispatchedSeats.filter((seat) => seat.runState === "missing").length;
+  // 派发未成立席位的原因（有原因才带；附在提示段尾，可能很长）。
+  const dispatchReasons = undispatchedSeats
+    .filter((seat) => typeof seat.dispatchError === "string" && seat.dispatchError.length > 0)
+    .map((seat) => `${seat.agentId}: ${dispatchFailedLabel(seat)}`);
+  const reasonNote = dispatchReasons.length > 0 ? ` (${dispatchReasons.join("; ")})` : "";
   const parts = [];
   if (dispatchedSeats.length === 0) {
-    parts.push("no seat was dispatched");
+    parts.push(`no seat was dispatched${reasonNote}`);
   } else if (allTerminal || dispatchedSeats.every((seat) => TERMINAL_STATES.includes(seat.runState))) {
     parts.push("every dispatched seat reached a terminal state");
   } else {
@@ -454,7 +485,7 @@ function emitConsultWaitResult({ consultId, result, format, allTerminal, waitedM
       : "the window expired before every dispatched seat was observed terminal");
   }
   if (unreadable > 0) parts.push(`${unreadable} seat transcript(s) could not be read`);
-  if (undispatched > 0 && dispatchedSeats.length > 0) parts.push(`${undispatched} seat(s) were never dispatched`);
+  if (undispatched > 0 && dispatchedSeats.length > 0) parts.push(`${undispatched} seat(s) were never dispatched${reasonNote}`);
   const pointToShow = dispatchedSeats.length === 0 || unreadable > 0 || undispatched > 0;
   console.error(`[consult] ${consultId}: ${parts.join("; ")}${pointToShow
     ? ` — see their state with: consult show ${consultId}`

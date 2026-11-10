@@ -307,6 +307,53 @@ function sanitizeControls(text) {
   return String(text).replace(UNSAFE_CONTROL_RE, "\uFFFD");
 }
 
+// 派发失败原因的限长帽（UTF-16 码元，含末尾省略号）。spawn 报错可能整段几百字，
+// 文本行与组记录都不该被它撑爆；帽值是工程裕度选择，不是推导值。
+const DISPATCH_ERROR_MAX_UNITS = 400;
+
+/** 限长（UTF-16 码元；超长截到 maxUnits-1 个码元后补 …，帽含省略号；截断点
+ * 落在代理对中间时整体让出一格，不切开代理对）。 */
+function truncateCodeUnits(text, maxUnits) {
+  if (text.length <= maxUnits) return text;
+  let keep = maxUnits - 1; // 留一个码元给 …
+  const last = text.charCodeAt(keep - 1);
+  if (last >= 0xd800 && last <= 0xdbff) keep -= 1;
+  return `${text.slice(0, keep)}…`;
+}
+
+/** 派发错误的原文取法：非空字符串 message 优先，其次 code、name（字符串且
+ * 非空才用），最后 String(error) 兜底。系统错误的 code（如 ENOENT）与无
+ * message 对象的 name 比 "[object Object]" 有用；message 为空串的 Error 由此
+ * 落到 name（"Error"），不再是空串。 */
+function dispatchErrorRawText(error) {
+  for (const field of ["message", "code", "name"]) {
+    const value = error?.[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return String(error);
+}
+
+// 折叠空白：连续的 \r、\n、\t 连同两侧空格折成一个空格。sanitizeControls 有意
+// 保留这三个字符（正文零加工红线），多行报错会把 stateLine、started 行、wait
+// 提示拆成多行——派发原因这条链在进入去控制字符之前先折行，正文链不动。
+const REASON_WHITESPACE_RE = /[ \t]*[\r\n\t]+[ \t]*/g;
+
+function foldReasonWhitespace(text) {
+  return String(text).replace(REASON_WHITESPACE_RE, " ");
+}
+
+/**
+ * 派发失败原因的单一加工链（取原因时就地做好，后面所有面——结果、组记录、
+ * MCP 回执、文本行——只用这一个值）：脱敏（env 密钥值整段替换）→ 折叠空白
+ * （\r\n\t 连同两侧空格折成单个空格）→ 去控制字符 → 限长。顺序不能反：先截断
+ * 再脱敏会让跨在截断点上的密钥漏掉一半（截断后的半段匹配不到整段密钥，替换
+ * 失效）；先折叠再脱敏同理——折行可能把整段密钥切碎。
+ */
+function prepareDispatchError(error, env) {
+  const redacted = createSecretRedactor(env ?? process.env).redactString(dispatchErrorRawText(error));
+  return truncateCodeUnits(sanitizeControls(foldReasonWhitespace(redacted)), DISPATCH_ERROR_MAX_UNITS);
+}
+
 /**
  * 从 transcript 事件快照提取最终 assistant 文本（只读、脱敏、不截断）。
  * @param {Array<object>} events transcript 事件序列
@@ -407,7 +454,9 @@ export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTra
  * @param {Function} [input.readFileFn] / [input.writeFileFn] / [input.mkdirFn]
  * @param {Function} [input.nowFn] / [input.sleepFn] / [input.idFn]
  * @param {Function} [input.onFanOut] 扇出完成、组记录已落盘时调用一次：
- *   ({consultId, recordPath, seats: [{agentId, runId}]})。调用面用它提前报出 consultId。
+ *   ({consultId, recordPath, seats: [{agentId, runId, dispatchError?}]})——
+ *   dispatchError 仅派发未成立（runId:null）的席位携带（已按加工链处理）。
+ *   调用面用它提前报出 consultId。
  * @returns {Promise<object>} council-diff 结果（含 record 与 render 所需全量事实）
  */
 export async function runConsult({
@@ -591,7 +640,8 @@ export async function runConsult({
       });
       dispatchStates.push({ agentId: seat.agentId, runId: result?.runId ?? null, accepted: result?.accepted === true });
     } catch (error) {
-      dispatchStates.push({ agentId: seat.agentId, runId: null, accepted: false, dispatchError: error?.message ?? String(error) });
+      // 取原因时就按脱敏→控制字符→限长加工（第 96 批）——后面所有面只用这个值。
+      dispatchStates.push({ agentId: seat.agentId, runId: null, accepted: false, dispatchError: prepareDispatchError(error, env) });
     }
   }
 
@@ -618,13 +668,25 @@ export async function runConsult({
       ...(typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
         ? { perspectiveSnippet: seat.perspectiveText }
         : {}),
+      // 派发未成立（runId:null）的席位存加工后的原因；有 runId 的席位不带。
+      ...(dispatchStates[i].runId === null && dispatchStates[i].dispatchError
+        ? { dispatchError: dispatchStates[i].dispatchError }
+        : {}),
       budgetExpired: false,
     })),
     fieldDiff: [],
     ...(typeof reviewedRunId === "string" && reviewedRunId.length > 0 ? { reviewedRunId } : {}),
   }, null, 2), "utf8");
   if (typeof onFanOut === "function") {
-    onFanOut({ consultId, recordPath, seats: dispatchStates.map((s) => ({ agentId: s.agentId, runId: s.runId })) });
+    onFanOut({
+      consultId,
+      recordPath,
+      seats: dispatchStates.map((s) => ({
+        agentId: s.agentId,
+        runId: s.runId,
+        ...(s.dispatchError ? { dispatchError: s.dispatchError } : {}),
+      })),
+    });
   }
 
   // 轮询：各 run transcript 至终态或总预算。读失败按瞬时处理（下轮重试），
@@ -698,7 +760,8 @@ export async function runConsult({
         : {}),
       budgetExpired,
       ...(fileWrittenCount !== null ? { readOnlyViolation: { verdict: "FAIL", fileWrittenCount } } : {}),
-      // result 层字段（不进组记录）：
+      // result 层字段（不进组记录；dispatchError 例外——派发未成立席位的
+      // 原因也进组记录，见下方 record.seats 的同名展开）：
       attribution,
       ...(finalText !== null ? { finalText } : {}),
       ...(dispatchState.dispatchError ? { dispatchError: dispatchState.dispatchError } : {}),
@@ -741,6 +804,8 @@ export async function runConsult({
       provider: s.provider,
       ...(s.perspectiveSnippet ? { perspectiveSnippet: s.perspectiveSnippet } : {}),
       ...(s.budgetExpired ? { budgetExpired: true } : {}),
+      // 派发未成立（runId:null）的席位存加工后的原因；有 runId 的席位不带。
+      ...(s.runId === null && s.dispatchError ? { dispatchError: s.dispatchError } : {}),
     })),
     fieldDiff,
     ...(typeof reviewedRunId === "string" && reviewedRunId.length > 0 ? { reviewedRunId } : {}),
@@ -1028,6 +1093,9 @@ export async function rerenderConsultFromRecord({
       provider: seat.provider ?? null,
       ...(seat.perspectiveSnippet ? { perspectiveSnippet: seat.perspectiveSnippet } : {}),
       budgetExpired: observation ? !observation.terminal && !withinBudget : !withinBudget,
+      // 组记录里派发未成立席位的原因（写入侧已按脱敏→控制字符→限长加工，
+      // 读取只做类型检查——字符串才带，不再二次加工；旧记录按缺席）。
+      ...(typeof seat.dispatchError === "string" ? { dispatchError: seat.dispatchError } : {}),
       ...(fileWrittenCount !== null ? { readOnlyViolation: { verdict: "FAIL", fileWrittenCount } } : {}),
       attribution,
       ...(observation ? { finalText: observation.finalText } : {}),
@@ -1131,7 +1199,8 @@ export const CONSULT_PAGE_CAP_BYTES = 12 * 1024;
  * MRC-F1，验收批修订 2026-10-09：中文标题+字段值实测下 6KiB 不可证、视角
  * snippet 携全文故整体剥离）：≤5 席 × ≤32 字席位 id × ≤10 问 × ≤120 字中文
  * 标题 × 短字段值、无视角原文（recordPath 取）——schema 上限超界或字段值
- * 病态长可破帽（已知未收紧）；正文体积完全无关。 */
+ * 病态长可破帽（已知未收紧）；正文体积完全无关。派发失败原因每席至多 400
+ * 码元，不在这个成立边界内。 */
 export const CONSULT_RECEIPT_CAP_BYTES = 8 * 1024;
 
 /** 席位正文 sha256（hex）——分页版本锚：跨页拼接时调用方比对每页的
