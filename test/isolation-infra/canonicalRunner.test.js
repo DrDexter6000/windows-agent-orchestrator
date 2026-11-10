@@ -1561,7 +1561,7 @@ test("TD-165 budgets: 生产默认值钉死（1200s per-test / 3000s 波级兜�
   // 474s、墙钟 606s；旧 600s 上限因此**误杀波尾的合法慢测试**（全部 isolation_pass），
   // 与该常量自述的保护意图冲突。新值 = 波内峰值 ~2x / 单跑峰值 ~4.7x。
   assert.equal(TEST_TIMEOUT_MS, 1200000, "R1：1200s（2026-09-21 重推导，TD-173：波内峰值 606s ≈ 旧 600s 上限）");
-  assert.equal(WAVE_WATCHDOG_MS, 3000000, "R2：3000s（TD-138，11-10 Owner 批准：插电时合法波长 828–1335 s，电池约再翻倍）");
+  assert.equal(WAVE_WATCHDOG_MS, 3000000, "R2：3000s（TD-138：插电时合法波长 828–1335 s，电池上更长）");
   assert.equal(WAVE_ALARM_MS, 1800000, "R3：1800s 信息告警（须高于插电时的健康波、低于兜底）");
   assert.ok(WAVE_WATCHDOG_MS > TEST_TIMEOUT_MS, "兜底必须严格大于 per-test 上限 + 排队余量（先 R1 后 R2）");
   assert.ok(WAVE_ALARM_MS < WAVE_WATCHDOG_MS, "告警先于兜底");

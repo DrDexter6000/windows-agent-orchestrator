@@ -157,7 +157,7 @@ Kimi 车道模型策略：registry 用结构化 `model.id` 与 `reasoning.effort
     "allowedPaths": ["src"],
     "verificationSetupCommands": ["npm ci"],
     "verificationCommands": ["npm test"],
-    "verificationTimeoutMs": 1200000
+    "verificationTimeoutMs": 3600000
   }
 }
 ```

@@ -3535,8 +3535,8 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
     "docs/testing.md 里不跑全量的例外只限只改 config/lane-traits.json、或只改文档且角色合同除外的批次");
   assert.match(skill, /最终候选[^\n]*上跑一次全量 `npm test`[^\n]*`docs\/testing\.md`/,
     "SKILL.md ## Acceptance 必须在场：合入或集成前在最终候选上跑一次全量，并指向 docs/testing.md");
-  assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
-    "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 1200000（默认 300000 对约 14.5 分钟全量必 command_timeout；2026-08-20 实测 869s）");
+  assert.match(skill, /verificationTimeoutMs ≥ 3600000/,
+    "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 3600000（默认 300000 对全量必 command_timeout；2026-11-10 插电实测全量 1210–1903 s）");
 });
 
 // ---------------------------------------------------------------------------

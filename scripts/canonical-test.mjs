@@ -306,17 +306,17 @@ export const TEST_TIMEOUT_MS = 1200000;
 
 // R2 wave watchdog (wall-clock backstop per spawned child): strictly greater than
 // the per-test cap plus intra-wave queueing margin, so the backstop fires only
-// when R1 could not collect the hang itself, and above the longest legal wave.
-// Raised from 1800 s with the Owner's approval on 2026-11-10 (TD-138): the same
-// code run four times back to back on mains power gave filesystem waves of
-// 828-1335 s, and battery runs take about twice as long.
+// when R1 could not collect the hang itself, and above the longest legal wave
+// measured on mains power: four full suites of the same code back to back on
+// 2026-11-10 gave filesystem waves of 828-1335 s (TD-138). Battery runs are
+// slower still, and there R1 tends to fire first (see the concurrency note).
 export const WAVE_WATCHDOG_MS = 3000000;
 
 // R3 slow-wave alarm (informational only): must sit between a healthy wave's
 // completion and the watchdog — early enough to flag a stall in the operator's
-// terminal, late enough to stay quiet on a legal wave on mains power. Re-derived
-// with R2 (TD-138): healthy filesystem waves measured 828-1335 s on 2026-11-10,
-// so the old 900 s alarm fired on every legal run.
+// terminal, late enough to stay quiet on a legal wave on mains power (828-1335 s
+// measured on 2026-11-10, TD-138). Below a 3000 s watchdog it prints at most one
+// line per wave.
 export const WAVE_ALARM_MS = 1800000;
 
 // Fix round (TD-165 audit, residual must-fix): the watchdog's killTreeFn call

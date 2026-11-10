@@ -422,7 +422,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ### 8.3 `npm test` 波次挂死或长滞（看门狗分诊）
 
-- **症状**：全量在某波长时间无进展；stderr 每 30 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。三层看门狗把无限等待变成有界等待，并指名肇事文件/波。
+- **症状**：全量在某波长时间无进展；stderr 满 30 分钟时一行（兜底前至多一行）`[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。三层看门狗把无限等待变成有界等待，并指名肇事文件/波。
 - **三层防线（预算：per-test 1200s / 波级兜底 3000s / 告警 1800s）**：
   - **R1 per-test 超时**（`--test-timeout`，主防线）：单个测试挂死（含同步死循环——Node 在文件级从父进程执行超时）按普通失败收杀；该文件记非 pass（超时测试不产生完成事件 ⇒ 报告中多为 `missing`），**同波其他文件不受影响**，波正常收尾。
   - **R2 波级兜底看门狗**（墙钟 3000s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
