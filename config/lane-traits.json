@@ -423,7 +423,7 @@
         }
       },
       "ratedAgainst": null,
-      "costTier": null,
+      "costTier": 5,
       "cost": "Claude 订阅（OAuth 长期 token）；视套餐与席位档，Fable 用量可能改计 usage credits（套餐自带额度之外）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
       "caveats": [
         "无头（-p）运行时，若 Fable 用量要计 usage credits，Claude Code 不经确认直接扣（官方文档）",
