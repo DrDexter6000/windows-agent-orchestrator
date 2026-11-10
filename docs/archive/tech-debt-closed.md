@@ -166,3 +166,4 @@
 | TD-337 | `run_delivery_repackage` 在 MCP 请求里同步打包并验证，有界等待 300 秒长过宿主约 60 秒的请求上限，宿主先报超时（打包实际成功）；验证随 MCP 服务进程消失时交付停在 pending | 2026-11-09 第 91 批：有界等待缺省降到 45 秒（reverify 同），超窗回执如实说验证在这个服务进程里；进程没了由等待器证明（见 TD-345），再调一次 repackage 重跑验证 |
 | TD-345 | 终态 failed、交付来自重新打包、验证无结果的运行，`runs wait --until-settled` 证明不了验证者已不在，一直等 | 2026-11-09 第 91 批：重新打包的验证期间调用方持 owner 心跳租约（写改原子替换、只删自己 pid 的租约）；`proveVerifierGone` 覆盖这一形状（不要求后台派发、不过 daemon 门，扫描锚取 created），nextStep 指再调 repackage 或有界拒收 |
 | TD-347 | 宿主重启 WAO MCP 服务时，它派发的后台 runner 连同其下进程一并消失（宿主把服务放在只有 kill-on-close、不许脱离的作业里） | 2026-11-09 第 93 批（决定 0120）：Windows 上经 WMI 起的启动桥起 runner，runner 落在没有 kill-on-close 的作业里；WMI 起不了按启动失败收口，`WAO_RUNNER_LAUNCH=spawn` 改回直起 |
+| TD-346 | zcode 停滞门按父进程走树，经 Git Bash 跑 `#!/usr/bin/env bash` 脚本（npm、npx）时 MSYS 连续 exec 让父子链断开，测试子进程在干活却被判无体征（第 90 批误收） | 2026-11-09 第 94 批（决定 0121，仅 Windows）：app-server 起来后挂一个不许脱离的作业，停滞门同时读作业的累计 CPU/I/O/进程数 |
