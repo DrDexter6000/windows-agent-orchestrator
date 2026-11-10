@@ -25,7 +25,6 @@ import {
 import { prepareDeliveryRequest, isPathAllowed, inspectDelivery } from "../../src/delivery.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 
 // ----- shared helpers -------------------------------------------------------
 
@@ -287,10 +286,10 @@ test("M12-14-E2: non-delivery run delivers NO roleContract and no scope block (a
 
 // ===== F. buildArgs inject the contract exactly once; .cmd/.exe budget gates ====
 
-test("M12-14-F1: claude/codex/kimi buildArgs each carry the scope contract exactly once", () => {
+test("M12-14-F1: claude/codex buildArgs each carry the scope contract exactly once", () => {
   const contract = composeDeliveryExecutionContract({ allowedPaths: ["src", "lib"] });
   const task = { prompt: "TASK", roleContract: contract };
-  for (const BackendClass of [ClaudeCodeBackend, CodexBackend, KimiCodeBackend]) {
+  for (const BackendClass of [ClaudeCodeBackend, CodexBackend]) {
     const backend = new BackendClass();
     const args = backend.buildArgs({ backend: "claude-code" }, task);
     const hits = args.filter((a) => typeof a === "string" && a.includes("AUTHORIZED_PATHS_JSON"));

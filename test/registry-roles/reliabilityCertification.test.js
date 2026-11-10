@@ -438,7 +438,7 @@ test("summarizeCertification: counts 反映 per-agent 最终状态（非 per-cas
 
 // --- summarizeWorkers: identity 迁移语义（backend+model 绑定不被旧 identity 掩盖） ---
 // 缺陷：summarizeWorkers 按 agentId 聚合全部历史 case 并保留"首个"case 的 backend/model，
-// 导致后来认证的 deepseek-harness case 被旧 claude-code identity 掩盖。
+// 导致后来认证的 zcode case 被旧 claude-code identity 掩盖。
 // 修复语义：agent 的 active identity = 最近一次观察到的 backend+providerID+modelId；
 // 只聚合 active identity 的 case（status/capabilities/cases），历史 case 保留在 summary.cases。
 
@@ -453,11 +453,11 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
       modelId: "sonnet-4.5",
       checks: [check("completed", false, "core")],
     },
-    // 当前：deepseek-harness 身份，全过 → certified（最近观察）
+    // 当前：zcode 身份，全过 → certified（最近观察）
     {
       caseId: "coder_low deepseek-harness",
       agentId: "coder_low",
-      backend: "deepseek-harness",
+      backend: "zcode",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       checks: [
@@ -473,7 +473,7 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
   // 各留各的记录（原 case/结果分别保留，R2 裁定）；当前车道不被拖低。
   const allRecords = Object.values(summary.workers);
   assert.equal(allRecords.length, 2, "两 identity=两条车道记录");
-  const w = allRecords.find((r) => r.backend === "deepseek-harness");
+  const w = allRecords.find((r) => r.backend === "zcode");
   const legacy = allRecords.find((r) => r.backend === "claude-code");
   assert.ok(w && legacy, "当前+历史车道记录都在");
   assert.equal(w.providerID, "deepseek");
@@ -492,7 +492,7 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
 
 test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；旧 identity 历史 case 不进入", () => {
   const summary = summarizeCertification([
-    // 最早：claude-code 身份（历史，不该进入 deepseek-harness active 聚合）
+    // 最早：claude-code 身份（历史，不该进入 zcode active 聚合）
     {
       caseId: "coder_low claude",
       agentId: "coder_low",
@@ -501,11 +501,11 @@ test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；�
       modelId: "sonnet-4.5",
       checks: [check("completed", true, "core", { capability: "complete" })],
     },
-    // 最近观察的 identity 组：deepseek-harness 两个同 identity case，应整体聚合
+    // 最近观察的 identity 组：zcode 两个同 identity case，应整体聚合
     {
       caseId: "coder_low dh isolate",
       agentId: "coder_low",
-      backend: "deepseek-harness",
+      backend: "zcode",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       checks: [
@@ -516,7 +516,7 @@ test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；�
     {
       caseId: "coder_low dh strict",
       agentId: "coder_low",
-      backend: "deepseek-harness",
+      backend: "zcode",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       checks: [
@@ -527,8 +527,8 @@ test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；�
     },
   ]);
 
-  // 0045 R5（W4a）：两 identity=两条车道记录；w=当前 deepseek-harness 车道。
-  const w = Object.values(summary.workers).find((r) => r.backend === "deepseek-harness");
+  // 0045 R5（W4a）：两 identity=两条车道记录；w=当前 zcode 车道。
+  const w = Object.values(summary.workers).find((r) => r.backend === "zcode");
   assert.ok(w, "当前车道记录在");
   assert.equal(w.providerID, "deepseek");
   assert.equal(w.modelId, "deepseek-v4-flash");
@@ -663,10 +663,10 @@ test("pruneStaleCases T4 认证级：清算后 worker 级聚合升 certified（�
     check("metricsNonZero", true, "observability", { capability: "metrics" }),
   ];
   const prior = [
-    { caseId: "kimi-for-coding via kimi-code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
-    { caseId: "Kimi K3 via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
-    { caseId: "Kimi K3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
-    { caseId: "kimi-code/k3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks },
+    { caseId: "kimi-for-coding via kimi-code CLI（多模态）", agentId: "coder_mm", backend: "kimi-web", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "Kimi K3 via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-web", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "Kimi K3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-web", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "kimi-code/k3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-web", modelId: "kimi-code/k3", checks: greenChecks },
   ];
   const withoutPrune = summarizeCertification(mergeCaseResults(prior, []));
   assert.equal(recordOf(withoutPrune, "coder_mm").status, "conditional", "前置断言：不 prune 时复现实况（最差聚合）");

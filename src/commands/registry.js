@@ -112,7 +112,7 @@ async function registryCommand(args, config) {
 }
 
 /**
- * ADR-0025 批次 2（TD-87/TD-117）：registry 配置 × backend 类闭集能力声明的
+ * ADR-0025 批次 2（TD-87）：registry 配置 × backend 类闭集能力声明的
  * 静态交叉校验。输入 capabilities 为 backendCapabilitySnapshot 的产物（或测试
  * 注入的伪造形状）；null（未知 backend）时零 warning——"unknown backend" 是
  * hard issue，由 validate 主循环另行报告。
@@ -134,15 +134,15 @@ export function capabilityCrossCheckWarnings(agent, capabilities) {
   // token 事实，配置静默无效。沿用既有 warning 输出模式（不 block）。
   if (typeof agent?.tokenBudget === "number" && capabilities.reportsTokenUsage !== true) {
     warnings.push(
-      `${agent.backend} 配了 tokenBudget 但不生效——该 backend 类能力声明未上报 usage/token（reportsTokenUsage 非 true，WAO 预算闸门收不到 token 事实；TD-87：kimi-code stream-json 无 usage 字段即此形状）。成本兜底靠 backend 自带控制 + WAO waitTimeout，不靠 WAO tokenBudget`,
+      `${agent.backend} 配了 tokenBudget 但不生效——该 backend 类能力声明未上报 usage/token（reportsTokenUsage 非 true，WAO 预算闸门收不到 token 事实；TD-87：deepseek-acp 无可验证 token 计量通道即此形状）。成本兜底靠 backend 自带控制 + WAO waitTimeout，不靠 WAO tokenBudget`,
     );
   }
-  // TD-117（dsh sessionReuse 提前提示）：sessionReuse 配置 × backend 类未声明
+  // sessionReuse 配置 × backend 类未声明
   // supportsSessionReuse（未声明按 false 读，fail-closed）→ 派发会在 spawn 前
   // 被运行时硬门拒绝。这里只把失败提前到 validate 静态阶段，不改运行时行为。
   if (agent?.sessionReuse != null && capabilities.supportsSessionReuse !== true) {
     warnings.push(
-      `${agent.backend} 配了 sessionReuse 但该 backend 类未声明 supportsSessionReuse（未声明按 false 读）——派发会在 spawn 前被运行时 fail-closed 门拒绝（TD-117 形状）；换声明支持的 backend 或移除 sessionReuse 配置`,
+      `${agent.backend} 配了 sessionReuse 但该 backend 类未声明 supportsSessionReuse（未声明按 false 读）——派发会在 spawn 前被运行时 fail-closed 门拒绝；换声明支持的 backend 或移除 sessionReuse 配置`,
     );
   }
   // 决定 0072：scorecard.rules.requireCommands × backend 类未声明能产出命令退出码
@@ -307,8 +307,8 @@ async function registryValidateCommand(args, config) {
     checked += 1;
     if (issues.length === 0) {
       const model = agent.model ? `${agent.model.id}` : (agent.backend === "claude-code" ? "claude" : "default");
-      // TD-87（kimi tokenBudget 静默无效陷阱）+ TD-117（dsh sessionReuse 前置提示），
-      // ADR-0025 批次 2 起泛化：不再硬编码 backend 名分支，改读 backend 类闭集能力
+      // TD-87（tokenBudget 静默无效陷阱）等能力 × 配置交叉提示：
+      // ADR-0025 批次 2 起泛化：不硬编码 backend 名分支，读 backend 类闭集能力
       // 声明交叉校验。backendCapabilitySnapshot 构造 backend 实例本身零副作用（不
       // spawn、不联网），validate 保持纯静态。
       // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
@@ -340,11 +340,10 @@ async function registryValidateCommand(args, config) {
         parsed?.certification?.matrix,
         summaryWorkers?.[id],
       ));
-      // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
-      // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
+      // M11-5（TD-89 修复）：声明 supportsRoleContract 的 backend（claude-code/codex
+      // 等）消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
       // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是
-      // warning，而是 ✖ 阻止派发）。旧的"codex/kimi 不消费 systemPrompt"warning
-      // 已删除（不再适用）。
+      // warning，而是 ✖ 阻止派发）。
       if (agent.systemPrompt) {
         try {
           // Package C1: loadRoleContract resolves the path relative to the WAO

@@ -14,7 +14,7 @@ read_when: 部署参考：Node v22 约束与切换、可选 runtime 安装、凭
 
 ### Node 为什么必须 v22
 
-WAO 进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harness / deepseek-acp）的"进程死即会话死"隔离，依赖 Node 自 v18+ 内置的 Windows Job Object：父进程退出，OS 自动杀掉全部子进程树。Node v24 上这个内置机制回归（会误杀长进程），v23 非 LTS，其余 major 未经认证，所以守卫只放行 v22。cli / daemon / background-runner 入口在启动时硬拒绝 v22 以外的一切版本（`help` / `version` 例外），并指引切 v22。为什么见决定 0013。
+WAO 进程式 backend（claude-code / codex / zcode / deepseek-acp）的"进程死即会话死"隔离，依赖 Node 自 v18+ 内置的 Windows Job Object：父进程退出，OS 自动杀掉全部子进程树。Node v24 上这个内置机制回归（会误杀长进程），v23 非 LTS，其余 major 未经认证，所以守卫只放行 v22。cli / daemon / background-runner 入口在启动时硬拒绝 v22 以外的一切版本（`help` / `version` 例外），并指引切 v22。为什么见决定 0013。
 
 - v24 上启动会看到 `WAO 拒绝启动：Node v24.x 被拒绝：v24 has a libuv Windows Job Object regression ... 请用 v22`，exit 1。
 - `npm test`、`npm run cli` 等 npm scripts 经 `scripts/wao-node.cjs` 启动器自动选 v22：先看 env `WAO_NODE`，再找共享安装 `%LOCALAPPDATA%\Programs\nodejs-v22\node.exe`，最后探测 PATH 上的 node 并经守卫判定。开发 WAO 时怎么跑测试见 `docs/testing.md`。
@@ -35,15 +35,14 @@ WAO 进程式 backend（claude-code / codex / kimi-code / zcode / deepseek-harne
 | DeepSeek Harness | 见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | 暂停使用，由下一行的 ACP 面接替。实验性 stdio JSON-RPC backend；需自行准备 dedicated `dsh-jsonrpc-agent` composition 与 `DEEPSEEK_API_KEY`，WAO 不安装或修复 runtime |
 | DeepSeek Harness（ACP 面） | `dsh` CLI ≥ 0.1.5-rc（见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)） | `deepseek-acp` backend：`dsh --profile acp` + 操作员安装的 containment 覆盖层 + `DEEPSEEK_API_KEY`；WAO 只 detect / invoke / report。安装步骤与限制见 `docs/certification-runbook.md`「DSH 通道适用限制与能力交叉警告」 |
 
-kimi-code 与 DSH stdio 面为何暂停，见决定 0074。
 
 你不需要全装，装一个就能用。不同 agent 可以用不同 backend。
 
-claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔离配置目录：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的会话不可见（设计行为，含 `--add-dir` 逃生门）。见 `docs/troubleshooting.md` §7.13。
+claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔离配置目录：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的会话不可见（设计行为，含 `--add-dir` 逃生门）。见 `docs/troubleshooting.md` §7.12。
 
 ### 凭据 env（credentialEnv / tokenEnv 车道需要）
 
-声明 `credentialEnv`（deepseek-acp）或 `tokenEnv`（kimi-web）的车道从 env 读 key。按你用的车道配：`DEEPSEEK_API_KEY` / `KIMI_WEB_TOKEN`。key 的验证与排错见 `docs/troubleshooting.md` §1.1/§1.6。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。各车道该设哪个 env 名见 `AGENT_ONBOARDING.md` §4c 的认证选择表。
+声明 `credentialEnv`（deepseek-acp）或 `tokenEnv`（kimi-web）的车道从 env 读 key。按你用的车道配：`DEEPSEEK_API_KEY` / `KIMI_WEB_TOKEN`。key 的验证与排错见 `docs/troubleshooting.md` §1.1/§1.5。`npm run cli -- wao doctor` 按 registry 里 worker 声明的 env 名查 key：进程 env 命中为 OK；仅在 Windows User 作用域命中为 INFO（派发时由凭据桥从 User 作用域注入，不必为 WAO 重启终端）；都没有为 FAIL（附 setx 修复提示）。各车道该设哪个 env 名见 `AGENT_ONBOARDING.md` §4c 的认证选择表。
 
 ## 安装本工具
 

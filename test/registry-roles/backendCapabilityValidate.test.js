@@ -5,18 +5,17 @@
 // "无交叉校验时假绿"的场景：
 //
 //   F1（TD-87 泛化）：伪造"声明不上报 usage（reportsTokenUsage=false）但配置了
-//       tokenBudget"的形状 → validate 输出 ⚠。用【非 kimi 的伪造 backend 名】
-//       驱动纯函数——旧的 `backend === "kimi-code"` 名字分支对这个形状是假绿，
+//       tokenBudget"的形状 → validate 输出 ⚠。用【伪造 backend 名】
+//       驱动纯函数——旧的按名字硬编码分支对这个形状是假绿，
 //       只有读类声明的路径才会红。
-//   F2（TD-117）：sessionReuse 配置 × supportsSessionReuse=false → ⚠（不阻塞，
+//   F2：sessionReuse 配置 × supportsSessionReuse=false → ⚠（不阻塞，
 //       运行时 fail-closed 门保留）。
 //   FC（fail-closed 默认钉住）：未声明新字段的 backend（ProcessBackend 基类 /
 //       未 opt-in 的子类 / truthy 非 true 值）一律不得被读成"支持"。
 //   MATRIX：五个工厂 backend 的能力快照与当前类声明一致（防单侧漂移，
 //       backendCapabilityMatrix.test.js 同款纪律）。
-//   CLI-1/2：端到端（真 CLI 子进程，text + --format json 两模式）——kimi
-//       tokenBudget ⚠ 语义零回归 + sessionReuse×false 新 ⚠ + claude-code
-//       （声明支持）零 ⚠ 正向对照。
+//   CLI-1/2：端到端（真 CLI 子进程，text + --format json 两模式）——
+//       tokenBudget ⚠ 语义零回归 + claude-code（声明支持）零 ⚠ 正向对照。
 //   R23-D（2026-08-21）：迁移 advisory 的环境形状矩阵（text 腿）——legacy 台账
 //       恰两条 ⚠ 逐字钉 + corrupt 台账 fail-silent + R23-C 后形状阴性对照；
 //       合成台账一律写 temp run-dir（环境盲区闭合，JSON 腿在 cliFormatJson.test.js）。
@@ -44,9 +43,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // F1 / F2: 纯函数腿——伪造能力形状直接驱动交叉校验
 // =====================================================================
 
-test("ADR25-B2-F1: 伪造 reportsTokenUsage=false × tokenBudget → ⚠（非 kimi 名，名字分支对它假绿）", () => {
-  // 伪造形状：一个【非 kimi-code】的 backend 声明不上报 usage 但配置了 tokenBudget。
-  // 旧的硬编码 `backend === "kimi-code"` 分支对此形状不报警（假绿）——只有读
+test("ADR25-B2-F1: 伪造 reportsTokenUsage=false × tokenBudget → ⚠（伪造名，名字分支对它假绿）", () => {
+  // 伪造形状：一个【伪造名】的 backend 声明不上报 usage 但配置了 tokenBudget。
+  // 旧的按名字硬编码分支对此形状不报警（假绿）——只有读
   // 类声明的交叉校验路径才会红。
   const fakeAgent = { backend: "fake-harness", cwd: "D:/x", tokenBudget: 100000 };
   const warnings = capabilityCrossCheckWarnings(fakeAgent, {
@@ -188,8 +187,7 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
   //   supportsInFlightCorrection —— claude-code（stdin stream-json 在途排队）与
   //     kimi-web（prompts 排队 + steer）。
   //   reportsCommandExitCode —— codex wire 原生数值；claude-code 经
-  //     toolCallId↔tool_result 推断通道（逐条证明过）；kimi-code / deepseek-harness
-  //     决定 0073 起 false（前者 isError 是关键词匹配，后者缺负向证据）；
+  //     toolCallId↔tool_result 推断通道（逐条证明过）；
   //     deepseek-acp false（evidence/phase7-exit-code-wire.json：tool_call_update
   //     不填 rawOutput、退出码只在非零退出的自由文本标记里）。
   //   enforcesWriteSandbox —— 仅 codex（每次 exec/exec resume 显式传 workspace-write
@@ -197,8 +195,6 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
   const expected = {
     "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true, enforcesWriteSandbox: false },
     "codex": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true, enforcesWriteSandbox: true },
-    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: false, enforcesWriteSandbox: false },
-    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false, enforcesWriteSandbox: false },
     // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
     // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
     // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。
@@ -241,24 +237,18 @@ function runCli(args) {
   });
 }
 
-/** 三 agent 夹具：正向对照（claude-code 全配）+ 两条交叉不符（kimi×tokenBudget / deepseek-harness×sessionReuse）。
- *  2026-09-21：sessionReuse ⚠ 的承载 backend 由 codex 换成 deepseek-harness——codex/kimi 已接线
- *  provider 会话复用（supportsSessionReuse=true），配 sessionReuse 不再是配置错误；⚠ 语义本身不变，
- *  继续钉在仍未声明该能力的 backend 上。 */
+/** 两 agent 夹具：正向对照（claude-code 全配）+ 一条交叉不符（deepseek-acp×tokenBudget——
+ *  在用后端里唯一 reportsTokenUsage=false 的真实类）。sessionReuse×false 的 ⚠ 语义由
+ *  纯函数腿 F2 用伪造能力形状钉住：在用后端全部声明 supportsSessionReuse=true，真实
+ *  注册表不再能产生该形状。 */
 function makeCrossCheckRegistry(dir) {
   return {
     researcher: { backend: "claude-code", cwd: dir, tokenBudget: 100000, sessionReuse: "lead_workspace" },
-    coder_mm: { backend: "kimi-code", cwd: dir, tokenBudget: 100000 },
-    tester: {
-      backend: "deepseek-harness", cwd: dir, sessionReuse: "lead_workspace",
-      // deepseek-harness 的注册表必填面（validate 硬校验）：能力对照与 sessionReuse ⚠ 无关，
-      // 但缺字段会变成 hard error 抢走断言焦点。
-      dshConfigPath: join(dir, "dsh-config.json"), credentialEnv: "DSH_API_KEY",
-    },
+    coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DEEPSEEK_API_KEY", tokenBudget: 100000 },
   };
 }
 
-test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归）、deepseek-harness×sessionReuse ⚠、claude-code 零 ⚠，全部 ✔ exit 0", () => {
+test("ADR25-B2-CLI-1: text 模式——deepseek-acp×tokenBudget ⚠（TD-87 零回归）、claude-code 零 ⚠，全部 ✔ exit 0", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-b2val-text-"));
   try {
     const registryPath = join(dir, "agents.json");
@@ -266,18 +256,15 @@ test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归�
 
     // R23-C §5 隔离：同 cliFormatJson——空 run-dir 隔离真实台账。
     const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
-    assert.equal(r.status, 0, "warning 不阻塞：三条目全部合法 → exit 0");
-    // 三个 agent 都通过（✔）。
+    assert.equal(r.status, 0, "warning 不阻塞：两条目全部合法 → exit 0");
+    // 两个 agent 都通过（✔）。
     assert.match(r.stdout, /✔\s*researcher/, "claude-code 通过");
-    assert.match(r.stdout, /✔\s*coder_mm/, "kimi 通过（warning 不 block）");
-    assert.match(r.stdout, /✔\s*tester/, "deepseek-harness 通过（warning 不 block）");
+    assert.match(r.stdout, /✔\s*coder_mm/, "deepseek-acp 通过（warning 不 block）");
     // TD-87 既有语义零回归（现有 cli-registry.test.js 断言形状复刻）。
-    assert.match(r.stdout, /⚠.*coder_mm:.*kimi-code.*tokenBudget.*不生效/, "kimi×tokenBudget ⚠ 保持");
-    // TD-117 新 warning。
-    assert.match(r.stdout, /⚠.*tester:.*deepseek-harness.*sessionReuse.*supportsSessionReuse/, "deepseek-harness×sessionReuse ⚠（TD-117 前置提示，2026-09-21 由 codex 换承载 backend）");
+    assert.match(r.stdout, /⚠.*coder_mm:.*deepseek-acp.*tokenBudget.*不生效/, "deepseek-acp×tokenBudget ⚠ 保持");
     // 正向对照：claude-code 声明两个能力都支持 → 无 ⚠ 行提及 researcher。
     assert.doesNotMatch(r.stdout, /⚠.*researcher/, "claude-code（声明支持）× 两配置 → 零 ⚠");
-    assert.match(r.stdout, /3 agent\(s\) checked, all valid/, "汇总行不变");
+    assert.match(r.stdout, /2 agent\(s\) checked, all valid/, "汇总行不变");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -292,19 +279,14 @@ test("ADR25-B2-CLI-2: --format json——两条新 warning 语义进 warnings[]�
     const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
     assert.equal(r.status, 0);
     const parsed = JSON.parse(r.stdout);
-    assert.equal(parsed.checked, 3);
+    assert.equal(parsed.checked, 2);
     assert.equal(parsed.valid, true, "warning 不影响 valid");
     const byId = Object.fromEntries(parsed.agents.map((a) => [a.id, a]));
 
     assert.deepEqual(byId.researcher.warnings, [], "claude-code 正向对照：零 warning");
-    assert.equal(byId.coder_mm.ok, true, "kimi 仍 ok（TD-87 warning 不阻塞）");
-    assert.ok(byId.coder_mm.warnings.some((w) => /kimi-code.*tokenBudget.*不生效/.test(w)),
+    assert.equal(byId.coder_mm.ok, true, "deepseek-acp 仍 ok（TD-87 warning 不阻塞）");
+    assert.ok(byId.coder_mm.warnings.some((w) => /deepseek-acp.*tokenBudget.*不生效/.test(w)),
       "TD-87 warning 进 warnings[]");
-    assert.equal(byId.tester.ok, true, "deepseek-harness 仍 ok（TD-117 warning 不阻塞）");
-    assert.ok(byId.tester.warnings.some((w) => /deepseek-harness.*sessionReuse.*supportsSessionReuse/.test(w)),
-      "TD-117 warning 进 warnings[]");
-    assert.ok(byId.tester.warnings.every((w) => !/tokenBudget/.test(w)),
-      "tester 未配 tokenBudget → 不误报 tokenBudget warning");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -88,11 +88,9 @@ import { readTranscript } from "../../src/transcript.js";
 import { RunManager } from "../../src/runManager.js";
 import { runBackground } from "../../src/backgroundRunner.js";
 import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError, ModelOverrideConflictError, ReasoningOverrideConflictError } from "../../src/application/runDispatch.js";
-// R11-1: REAL backend instances for the natural policy-refusal group (RO-8) —
-// deepseek-harness limits reasoning.effort to high|max, kimi-code gates it on
-// the K3 model id.
-import { DeepSeekHarnessBackend } from "../../src/backends/deepSeekHarness.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
+// R11-1: REAL backend instance for the natural policy-refusal group (RO-8) —
+// deepseek-acp limits reasoning.effort to the ACP-advertised intersection.
+import { DeepSeekAcpBackend } from "../../src/backends/deepSeekAcp.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -1157,8 +1155,8 @@ test("MO-10: a policy refusal under an active override names --model (start + re
   try {
     // A backend that refuses the contextWindow shape — the auditor's face:
     // the operator typed --model and got a registry-shape error that never
-    // mentioned the override (backend model-shape / kimiCode.js
-    // effort-pairing refusals read the same way).
+    // mentioned the override (backend model-shape / effort-subset
+    // refusals read the same way).
     const rejectingBackend = {
       validateAgentPolicy(agent) {
         if (agent?.model?.contextWindow !== undefined) {
@@ -1227,8 +1225,8 @@ test("MO-10: a policy refusal under an active override names --model (start + re
 //   - the value is a CLOSED SET (registry.js REASONING_EFFORTS —
 //     minimal/low/medium/high/xhigh/max), not a shape contract;
 //   - the override replaces ONLY reasoning.effort; sibling fields survive;
-//   - NO capability boolean: conditional (kimi K3-only, dsh high|max)
-//     policies refuse via the existing
+//   - NO capability boolean: conditional subset policies (e.g. the
+//     deepseek-acp advertised-effort intersection) refuse via the existing
 //     per-backend validateAgentPolicy gate over the synthesized object;
 //   - the same two hard mutual exclusions as the model override (certified /
 //     provider-session reuse), with "ANY override present" semantics and a
@@ -1628,7 +1626,7 @@ test("RO-7: RunManager.start authoritative refusals — certified conflict, reus
   }
 });
 
-test("RO-8: natural per-backend policy refusals — deepseek-harness minimal, kimi non-K3 (hint names --reasoning)", async () => {
+test("RO-8: natural per-backend policy refusal — deepseek-acp minimal (hint names --reasoning)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ro8-"));
   try {
     const runDir = join(dir, "runs");
@@ -1639,37 +1637,24 @@ test("RO-8: natural per-backend policy refusals — deepseek-harness minimal, ki
       backendFor: () => backend,
     });
 
-    // (1) deepseek-harness × minimal: the policy limits effort to high|max
-    // (deepSeekHarness.js) — a conditional subset refuses naturally.
+    // deepseek-acp × minimal: the policy limits effort to the ACP-advertised
+    // intersection (deepSeekAcp.js) — a conditional subset refuses naturally.
     await assert.rejects(
       () => makeManager(
         {
-          backend: "deepseek-harness", cwd: dir,
-          model: { id: "deepseek-v4-pro" },
-          dshConfigPath: "dsh.json", credentialEnv: "DSH_TOKEN",
+          backend: "deepseek-acp", cwd: dir,
+          credentialEnv: "DSH_TOKEN",
         },
-        new DeepSeekHarnessBackend(),
+        new DeepSeekAcpBackend(),
       ).start("a", { prompt: "p", reasoningOverride: "minimal" }),
       (e) => {
-        assert.equal(e.message, "deepseek-harness reasoning.effort must be high or max when present" + REASONING_HINT,
+        assert.equal(e.message,
+          "deepseek-acp reasoning.effort must be one of the accepted intersection values (low, high, max; "
+          + "low/max are set-confirmed on the real ACP wire by Phase 5, high is the advertised session/new default "
+          + "and is enforced by the spawn-time response check) — the ACP session advertises off/low/high/max and "
+          + "WAO's registry enum is minimal/low/medium/high/xhigh/max, so only the intersection is accepted; "
+          + "no value mapping is invented" + REASONING_HINT,
           "subset policy refuses with the --reasoning hint");
-        return true;
-      },
-    );
-
-    // (2) kimi-code × non-K3 model + effort: the K3×{low,high,max} pairing
-    // gate (kimiCode.js) refuses an effort on a non-K3 model id.
-    await assert.rejects(
-      () => makeManager(
-        { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k2" } },
-        new KimiCodeBackend({ waoCliPath: "/x/wao-cli.cmd" }),
-      ).start("a", { prompt: "p", reasoningOverride: "high" }),
-      (e) => {
-        assert.equal(
-          e.message,
-          "kimi-code backend does not support the configured reasoning.effort for this model" + REASONING_HINT,
-          "conditional model×effort pairing refuses with the --reasoning hint",
-        );
         return true;
       },
     );

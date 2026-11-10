@@ -158,7 +158,7 @@ export function buildCandidateList(template) {
 //   unknown       a probe failed, or the backend maps to no CLI (cannot verify)
 
 // backend → CLI 探测映射的唯一权威表见 ./backendCliMap.js（doctor 的 scoped
-// 检查与本模块共用同一份；含无独立 CLI 的 deepseek-harness=null）。re-export
+// 检查与本模块共用同一份）。re-export
 // 供既有导入点（测试钉映射形状）继续从本模块取。
 export { BACKEND_CLI };
 

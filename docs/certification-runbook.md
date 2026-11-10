@@ -14,14 +14,6 @@
 
 ## DSH 通道适用限制与能力交叉警告
 
-`deepseek-harness` 配置只负责 detect/invoke/report：WAO 要求 `binary` 指向一个可启动的
-DSH SDK JSON-RPC runtime，`dshConfigPath` 可读，`credentialEnv` 只写环境变量名；凭据值仍由
-现有 Windows user-env bridge 注入子进程。DSH composition 应关闭内部 subagent、workflow、
-approval UI、background job 和 TUI，把模型、PowerShell/编辑工具与 JSONL session storage 显式
-装配进去。WAO 不生成、升级或持久修复该外部 runtime。该 backend 无 session reuse / in-flight
-correction，且本仓模板不把它设为默认 worker；通过 `npm run reliability` 取得与当前
-backend+model 精确绑定的认证前，registry 会诚实显示 `certification:null`。
-
 `deepseek-acp` 走上游 shipped 的 `dsh --profile acp`：
 WAO 以 `--patch <containment> --patch <role-contract>` 叠加两份覆盖层——containment
 资产**由操作员安装**到 `~/.wao/runtimes/dsh-acp/wao-contain.patch.yml`（内容与版本依据 =
@@ -55,8 +47,8 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 进程或网络请求）。配置 × 声明不符时三条提示：
 
 - `tokenBudget` 配置 × 该 backend 类未声明 usage/token 上报（`reportsTokenUsage` 非 true，
-  未声明按 false 读）→ `⚠` "配了 tokenBudget 但不生效"（kimi-code stream-json 无
-  usage 字段即此形状——WAO 预算闸门收不到 token 事实，成本兜底只剩 backend 自带控制；
+  未声明按 false 读）→ `⚠` "配了 tokenBudget 但不生效"（deepseek-acp 无可验证 token 计量
+  通道即此形状——WAO 预算闸门收不到 token 事实，成本兜底只剩 backend 自带控制；
   `waitTimeout` 到期只通知不终止，不构成成本兜底）。
 - `sessionReuse` 配置 × backend 类未声明 `supportsSessionReuse`（未声明同样按 false 读，
   fail-closed）→ `⚠` 提示该派发会在 spawn 前被运行时硬门拒绝；换声明支持的
@@ -69,7 +61,7 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 三条都是提示层：tokenBudget 的运行时闸门、sessionReuse 的 spawn 前 fail-closed 门与 scorecard
 在运行结束时的评分（`src/runManager.js`）语义不变——validate 只把不符提前到静态阶段并让它可见，不替代运行时判定。
 
-reliability 认证的 `metricsNonZero` 检查按 backend 能力声明条件适用：判定源与上述 `⚠` 交叉校验同源（`backendCapabilitySnapshot`；纯内核 `scripts/reliability/metricsCheck.mjs` 消费）。backend 类声明不上报 usage（`reportsTokenUsage` 非 true——kimi-code 即此形状）的 lane，此检查记 **N/A + 原因**（不置绿、不算失败，满足必需类目的覆盖语义），kimi 形状 lane 不因此落 `conditional`。声明上报 usage 的 backend 断言不变——`input` token 非空照常断言（它对这类 lane 是 parser 回归金丝雀：流格式变化致 metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-categories 机制不变，无 "skipped" 状态值；能力缺口事实由能力声明 + validate `⚠` 独立承载。检查结果五态的判定纪律见下文「认证检查结果五态与能力轴分层」节。
+reliability 认证的 `metricsNonZero` 检查按 backend 能力声明条件适用：判定源与上述 `⚠` 交叉校验同源（`backendCapabilitySnapshot`；纯内核 `scripts/reliability/metricsCheck.mjs` 消费）。backend 类声明不上报 usage（`reportsTokenUsage` 非 true——deepseek-acp 即此形状）的 lane，此检查记 **N/A + 原因**（不置绿、不算失败，满足必需类目的覆盖语义），该形状 lane 不因此落 `conditional`。声明上报 usage 的 backend 断言不变——`input` token 非空照常断言（它对这类 lane 是 parser 回归金丝雀：流格式变化致 metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-categories 机制不变，无 "skipped" 状态值；能力缺口事实由能力声明 + validate `⚠` 独立承载。检查结果五态的判定纪律见下文「认证检查结果五态与能力轴分层」节。
 
 ## 接入新模型 / 新运行时（lane 内操作 vs Owner 决策）
 
@@ -136,13 +128,11 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 |---|---|---|---|---|---|
 | claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册；2.1.321 上 opus 冒烟、opus 会审与 fable 车道 delta 认证通过，原语未复核；官方 latest 2.1.322 只加 Vertex 快速模式，未升，2026-11-10） | stdin stream-json 排队 | 已接线（supportsInFlightCorrection=true） | npm `@anthropic-ai/claude-code`（native 同序列）＋ github.com/anthropics/claude-code CHANGELOG.md |
 | codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`；0.165.0 复跑跨 run drill 通过，2026-10-28；0.167.0 升级后 sol 冒烟通过、原语未复核，2026-11-10）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息；0.158.0 起本地在册） | **exec 通道实测阴性（2026-09-30，三次探针）**：消息入队被接受，但 headless `codex exec` 活轮次不消费、exec 单轮结束即退出不续跑；`instant_interrupt`（0.159.0 引入，官方标注 under-development）两端开启后仍无效。queue 预期面向常驻会话面（TUI/app-server）。0.165.0 复测（2026-10-29）仍阴性：`codex queue` 返回已入队，exec 活动轮照旧不消费；上游 app-server 协议在册 `turn/steer`、`turn/interrupt`（`codex app-server generate-json-schema`，未 live 实测），WAO 未接线——要把 codex 后端改走 app-server 通道（TD-321） | npm `@openai/codex` ＋ GitHub releases |
-| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`；2.4.0 复跑跨 run drill 通过，2026-10-28；已随宿主升到 2.5.2，本后端停用（TD-117）未复测，2026-11-10）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | `kimi web` 本地 HTTP API：`POST /api/v1/sessions/{id}/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（本地 2.4.0 OpenAPI 仍在册，2026-10-28） | **实测阳性（2026-09-30）**：`steered:true` 后纠偏消息在同一活会话被消费、模型紧邻轮立即响应（原生成流跑完当轮，打断发生在轮边界）——语义同 claude-code stdin 排队（delivered 即入列，不证明截断当轮生成） | `@moonshot-ai/kimi-code`（官方 docs 记载包名）＋ GitHub MoonshotAI/kimi-code releases；`kimi upgrade` 无只读 check（跑=真升级） |
-| deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — | 候选包名 `@deepseek-ai/dsh-jsonrpc-agent` 查询 E404（候选名未经官方确认——E404 首先说明候选渠道未确认）；变更信息源未知 |
 | deepseek-acp | ACP `session/resume`（0.2.1-rc.4 的 initialize 仍广告 `sessionCapabilities` close/list/resume，2026-10-28 直跑） | 已接线（ADR-0031 §3.6）；跨 run 恢复的真实派发证据见 `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`（2026-10-28 在 rc.4 上重取）；官方 0.2.2-rc.1 未升（待 Owner 决定，TD-351），2026-11-10 | 上游无（ACP 无在途消息改写，F7 实测；0.2.1-rc.4 的 initialize 同样没有在途注入能力，2026-10-28） | 上游无此能力 | npm `@deepseek-ai/dsh`（dist-tag 全是预发布：latest 与 next 0.2.2-rc.1、alpha 0.2.2-alpha.3，本机装 0.2.1-rc.4；2026-11-10 核验）＋ GitHub deepseek-ai/deepseek-harness releases（tag 形如 `dsh-v0.2.1-rc.2`） |
-| kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；2.4.0 起有 prompt 级中止 `POST …/prompts/{promptId}:abort`：2026-10-29 实测该轮转为 cancelled，这一轮已启动的命令进程要删会话才收；2.1.1 时 8 个动作名实测阴性） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`；2.4.0 实派与 OpenAPI 核对通过，所用 9 个端点仍在册，2026-10-28；2.5.0 起删了 WS subscribe、快照、status 与 task 端点，WAO 均未用到，会话形状仍带 busy/main_turn_active；2.5.2 上实派冒烟与 delta 认证（conditional）通过，会话复用 drill 未复测，2026-11-10） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） | 宿主同 kimi-code（同二进制同渠道；服务身份证据走执行检查单的认证探针脚本，不占本列） |
+| kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；2.4.0 起有 prompt 级中止 `POST …/prompts/{promptId}:abort`：2026-10-29 实测该轮转为 cancelled，这一轮已启动的命令进程要删会话才收；2.1.1 时 8 个动作名实测阴性） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`；2.4.0 实派与 OpenAPI 核对通过，所用 9 个端点仍在册，2026-10-28；2.5.0 起删了 WS subscribe、快照、status 与 task 端点，WAO 均未用到，会话形状仍带 busy/main_turn_active；2.5.2 上实派冒烟与 delta 认证（conditional）通过，会话复用 drill 未复测，2026-11-10） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） | kimi 二进制自身的渠道：npm `@moonshot-ai/kimi-code` ＋ GitHub MoonshotAI/kimi-code releases（`kimi web` 与 CLI 同包同源；服务身份证据走执行检查单的认证探针脚本，不占本列） |
 | zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；**live 逐测 2026-10-10**：跨进程 resume 真跑实证——B′ 探针 turn3 + 生产冒烟两轮 + 桥验证派发，bundle b816e386/15647 行〔3.15.1，当日桌面自更〕，消息/part 身份原语同日实证） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"；3.16.3（捆绑 CLI 0.17.0）bundle 复核：`Session is not active` 与每进程一张的 sessions 表仍在（行号已漂移），resume 次序依据成立，2026-10-29；桌面 3.17.2（捆绑 CLI 0.17.1）为官方最新，原语未复核，2026-11-10） | 协议未见在途注入原语：0.17.0 的 `session/send` 遇活动轮仍抛 -32010，`turn.steerQueued` 等转向事件只在桌面端内部（2026-10-29 bundle 核查） | 上游无此能力 | 官网 changelog（zcode.z.ai，产品版本锚）＋应用内更新通道（只提示、不自动下载；各版本元数据在 `cdn-zcode.z.ai/zcode/electron/releases/<版本>/windows-x64/latest.yml`，含 sha512）；捆绑 CLI 0.17.1（3.17.2）为内部序列，随桌面走 |
 
-**读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉。②**复用只在 MCP 通道可用**：CLI 后台通道每次派发用一次性 leadSession（`src/commands/run.js`：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给。③**上游有原语 ≠ WAO 已声明支持**：声明 `supportsSessionReuse=true` 要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据（证据登记在 `scripts/reliability/componentDrills.mjs` 的 `SESSION_REUSE_EVIDENCE_SOURCES`：deepseek-acp 用 `scripts/reliability/dsh-acp/wao-reuse-drill.mjs`，同一 ACP 会话跨两次 run 加三项 fail-closed 负对照；codex / kimi-code 用 `scripts/reliability/session-reuse-drill.mjs`，暗号差分对照 + 链深 2 + fail-closed 负对照）。证据覆盖边界 = non-delivery 的 lead_workspace 车道（delivery 复用走 `run.provider_session_bound` 写侧，不在本证据范围）；证据绑定运行时指纹，运行时升级后按既有语义翻 inconclusive，重跑 drill 刷新。④**渠道列不设列级时钟**：鲜度跟随各行的实测口径，渠道内容有变动时行内注明核验日。原语表守卫只检查行集 / 原语锚点 / 表头日期——**不检查渠道列**，渠道内容随 harness 版本巡检人工刷新；"厂商换 npm scope / 迁 changelog 地址"类事件在本机无可观察面，期限钟是唯一兜底。
+**读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉。②**复用只在 MCP 通道可用**：CLI 后台通道每次派发用一次性 leadSession（`src/commands/run.js`：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给。③**上游有原语 ≠ WAO 已声明支持**：声明 `supportsSessionReuse=true` 要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据（证据登记在 `scripts/reliability/componentDrills.mjs` 的 `SESSION_REUSE_EVIDENCE_SOURCES`：deepseek-acp 用 `scripts/reliability/dsh-acp/wao-reuse-drill.mjs`，同一 ACP 会话跨两次 run 加三项 fail-closed 负对照；codex 用 `scripts/reliability/session-reuse-drill.mjs`，暗号差分对照 + 链深 2 + fail-closed 负对照）。证据覆盖边界 = non-delivery 的 lead_workspace 车道（delivery 复用走 `run.provider_session_bound` 写侧，不在本证据范围）；证据绑定运行时指纹，运行时升级后按既有语义翻 inconclusive，重跑 drill 刷新。④**渠道列不设列级时钟**：鲜度跟随各行的实测口径，渠道内容有变动时行内注明核验日。原语表守卫只检查行集 / 原语锚点 / 表头日期——**不检查渠道列**，渠道内容随 harness 版本巡检人工刷新；"厂商换 npm scope / 迁 changelog 地址"类事件在本机无可观察面，期限钟是唯一兜底。
 
 ### harness 版本巡检（原语表守卫的人读规程）
 
@@ -162,6 +152,13 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 - ④ **Owner 决定升级 → 缺项补齐全查**：升级后当轮除走"实测补证"外，对照缺项清单逐项重查——清单 = 本表"未测"格 + 生成层 `docs/surface/certification.md` 的 false/条件能力轴 + 本表"上游无原语"结论。差异清单出现原语面变化时优先复核对应行（升级正是"未测"该被填、"上游无"该被重看的时机）；上游出现值得接线的新原语 → 走"接线"分叉（动代码须 repo-change 行动面；WAO 侧能力轴只经接线 + 重认证翻转，不因上游升级自动变绿）。补齐事实只有实测可进本表。
 
 全员走完 ≠ 全员已确认最新：latest 不可探、渠道未知、本地身份未确认、原语未复核的行**不得计入**"已 latest"或"零差异"（未知被汇总吞掉是已发生过的反例）。**汇总格式三档分列**：已确认 latest ｜ 非 latest ｜ 不可判——归档细则：凡有证据证明本地 ≠ 任一官方渠道头 tag 即入"非 latest"（通道语义 / Owner 裁定注记随行）；不可判仅限"无差异事实可判"的行（本地身份未确认、latest 不可探、渠道未知）。每行结论只能是"有证据的结论"或"明确未知"，不可判行不入前两档。全行有结论（含明确未知）即完成盘点，按"仅刷新"出口收口；零变化也要翻基线日写注记，防"忘了盘"与"盘了无差异"无法区分；仅盘点不更新未做的实测结论。
+
+**未接线通道观察表**（决定 0123）。下表的通道与在用通道同属一个产品，WAO 已退役对它们的接线。巡检读在用通道的更新说明（前置盘点③）时顺带对照"接回条件"，出现即报 Owner，提议走"接线"分叉。本表不属闭集，不设原语行与守卫。
+
+| 通道 | 同产品的在用通道 | 退役时的缺口 | 接回条件（出现即报 Owner） | 存档 tag |
+|---|---|---|---|---|
+| kimi 无头命令行（`kimi -p … --output-format stream-json`） | kimi-web | 输出不报 token 用量；工具失败只能按输出关键词判 | stream-json 报 token 用量，且工具结果带结构化的错误或退出码 | `archive/kimi-code-backend` |
+| dsh 的 JSON-RPC 入口（`dsh-jsonrpc-agent`） | deepseek-acp | 找不到官方发行渠道（候选 npm 包 E404）；不支持会话复用 | 官方发行这个入口，且支持跨进程续接会话 | `archive/deepseek-harness-backend` |
 
 **动作分叉**（每条都是合法出口——维持现状、暂缓升级、未测、受阻、暂停投入皆为正当复核结论，不为走完循环强行升级或接线）：
 - 仅刷新（版本/原语无变化）：跳到收口，**零变化也要翻基线日并写注记**，否则下次无法区分"忘了复核"与"复核了无变化"。
@@ -313,7 +310,7 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
   不是质量失败，是证据面不可用，不满足类目覆盖）；**inconclusive** 不覆盖类目
   （fail-closed 降 conditional）。
 - **现行判定规则**：backend 类声明不上报 usage（`reportsTokenUsage` 非 true——
-  kimi-code 即此形状）的 lane，`metricsNonZero` 检查不适用，记 N/A + 原因；serve
+  deepseek-acp 即此形状）的 lane，`metricsNonZero` 检查不适用，记 N/A + 原因；serve
   不可达时 `silentTimeout` 记 N/A + 原因；`hasSentinel` 只认 **assistant 回显**
   （tool_result/用户消息里搜到 sentinel 不算回显）；scorecard 的文件证据 = 文件
   存在 + 内容承载 sentinel；`scorecardChecksFromResult` 缺 scorecard 时记红（不用
@@ -323,9 +320,7 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 声明成员，语义 = **WAO 今天能否产出命令退出码证据**（含 scorecard 的
 toolCallId↔tool_result 0/1 推断通道，非仅 wire 原生数值）。当前声明：codex（wire
 原生数值）、claude-code（逐条证明过的推断通道）为 true；zcode / kimi-web /
-kimi-code / deepseek-harness / deepseek-acp 为 false。false 的依据如实：kimi-code 的
-`isError` 是对输出文本的关键词匹配（输出 `Process exited with code 7` 会被读成成功）；
-deepseek-harness 没有"非零退出必置 error"的实测；deepseek-acp 的 `tool_call_update`
+deepseek-acp 为 false。false 的依据如实：deepseek-acp 的 `tool_call_update`
 不填协议自带的 `rawOutput`，退出码只以 `[exit code: N]` 自由文本标记出现且仅非零退出
 有痕（静态核查：`scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json`）。
 声明 false ⇒ strict/scorecard 的 `commandsPassed` 类检查在证据不可取得时记 **N/A +
@@ -363,7 +358,7 @@ backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先
      `replayByRespawn` / `reportsTokenUsage` / `reportsCommandExitCode` /
      `enforcesWriteSandbox`）逐轴对账：
      declared=true ⇒ 正向实测证据（sessionReuse 须真实跨 run 恢复证据——已登记证据
-     的 backend 见 `SESSION_REUSE_EVIDENCE_SOURCES`：deepseek-acp / codex / kimi-code，
+     的 backend 见 `SESSION_REUSE_EVIDENCE_SOURCES`：deepseek-acp / codex，
      未登记证据的 backend 如实红；roleContract 须合同内 marker 的模型回显；exitCode
      须探针 run 的 scorecard commandsPassed；tokenUsage 须 input 双向一致）；
      declared=false ⇒ 配置面必须明确拒绝（systemPrompt / sessionReuse 的 spawn
@@ -536,7 +531,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 
 - **只替换 `reasoning.effort`**：注册表里 reasoning 是嵌套对象（canonical `{effort}`）。覆盖只改 `.effort`，合成发生在 `validateAgentPolicy` 与 `run.started` 落盘之前——策略校验照常跑合成后的对象；`run.started` 的 `reasoning` 字段即合成后策略（无论有无覆盖都落盘，静态 reasoning 同样可审计），并**另加显式 `reasoningOverride` 字段**（审计可区分"改注册表"与"一次性覆盖"）。
 - **闭集值域**：`minimal / low / medium / high / xhigh / max`（`registry.js` 的 `REASONING_EFFORTS` SSOT，六值导出）。集外值（含大小写变体如 `HIGH`）以固定文案 fail-fast（不回显原值）。MCP `run_dispatch` 的 `reasoning` 参数走同一 SSOT——wire schema 直接序列化闭集枚举（zod enum，比正则更严）。
-- **无能力布尔（设计决策）**：条件不支持（kimi 仅 K3 模型 × {low,high,max}；deepseek-harness 仅 high|max）走**既有 per-backend policy 门自然拒绝**——合成后的对象照常过 `validateAgentPolicy`，拒绝时追加指对 `--reasoning` 旗标的固定提示句（不回显值）。平面"能力布尔"编码不了这些条件支持，故不设。
+- **无能力布尔（设计决策）**：条件不支持（如 deepseek-acp 仅接受其 ACP 会话广告档位的交集 low/high/max）走**既有 per-backend policy 门自然拒绝**——合成后的对象照常过 `validateAgentPolicy`，拒绝时追加指对 `--reasoning` 旗标的固定提示句（不回显值）。平面"能力布尔"编码不了这些条件支持，故不设。
 - **与 `--model` 可同用**：两个覆盖各改各的字段（`.id` / `.effort`），互不干扰；前台回显合并为一行 `effective model: {...}, reasoning: {...}`（advisory：展示 WAO 实际下发了什么，不证明 provider 接受）。
 - **resume 继承覆盖事实**：`resume`（含 daemon `--resume-on-start` 接管）从 `run.started.reasoningOverride` 同源重建覆盖——后台派发带 `--reasoning` 后 runner 崩溃、daemon 接管续跑时，后半程仍跑派发时的力度。合成与闭集门与 start 同一道；持久化值非法则拒绝 resume（fail-closed，零 re-spawn）；resume 不接受调用方新传的覆盖。
 - **两道硬互斥（fail-fast，零副作用，"任一覆盖在场即拒"）**：

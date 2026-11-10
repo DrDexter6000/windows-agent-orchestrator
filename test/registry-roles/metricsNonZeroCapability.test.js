@@ -3,13 +3,13 @@
 // TD-87 认证面症状解除（2026-08-20，Owner 批准）：metricsNonZero 检查能力化
 // ——证伪优先（falsification-first）测试。
 //
-// 背景：kimi-code stream-json 无 usage 字段（TD-87），metricsNonZero 断言 input
+// 背景：不上报 usage 的 backend（如 deepseek-acp 无可验证 token 计量通道，TD-87），metricsNonZero 断言 input
 // 非空使 coder_mm 每轮落 conditional、lastHealthyRunAt 永远 null。旧代码用
 // `providerID !== "kimi-for-coding"` 名字分支整个省略检查 → observability 必需
 // 类目缺失 → conditional（missing certification checks）。能力化后：检查恒落账，
 // 判定源是 ADR-0025 批次 2 的 backendCapabilitySnapshot SSOT。
 //
-//   T1（能力跳过）：声明 reportsTokenUsage=false（kimi 形状，真 SSOT 路径或
+//   T1（能力跳过）：声明 reportsTokenUsage=false（deepseek-acp 形状，真 SSOT 路径或
 //       快照注入）+ input=null → 检查通过且 detail 明示 not applicable。
 //       变异对照：去掉能力门（还原为无条件断言）→ T1 红。
 //   T1B（症状解除，认证级）：kernel 产出进 checks → certifyCase 不再因
@@ -35,12 +35,12 @@ import { certifyCase } from "../../scripts/reliability/certification.mjs";
 
 // ════ T1: 能力跳过——声明不上报 usage 的 lane 检查记 N/A（带原因，不置绿）════
 
-test("TD87-CERT-T1: kimi 形状（真 SSOT 路径）+ input=null → not-applicable + 原因含声明值与 input 事实", () => {
+test("TD87-CERT-T1: deepseek-acp 形状（真 SSOT 路径）+ input=null → not-applicable + 原因含声明值与 input 事实", () => {
   // 真 registry 条目形状（backendCapabilitySnapshot 只读 agent.backend，
   // 构造零副作用）——不注入快照，走的就是 run-reliability 生产路径。
   // ADR-0032 §8（2026-09-21）：不适用不再记 pass:true + capability:"metrics"
   //（伪装能力绿的坏模式）——如实记五态 N/A + 原因。
-  const c = metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: null });
+  const c = metricsNonZeroCheck({ agent: { backend: "deepseek-acp", cwd: "D:/x" }, metricsInput: null });
   assert.equal(c.name, "metricsNonZero");
   assert.equal(c.state, "not-applicable", "声明不上报 usage → 检查记 N/A");
   assert.equal(c.pass, false, "N/A 绝不置绿（ADR-0032 §8）");
@@ -56,7 +56,7 @@ test("TD87-CERT-T1: kimi 形状（真 SSOT 路径）+ input=null → not-applica
   assert.notEqual(c.optional, true, "N/A 不得编码为 optional（类目覆盖语义独立承载）");
 
   // 投影给出 0（而非 null）的同形状：同样 N/A——判定源是声明，不是本 run 巧合。
-  const zero = metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: 0 });
+  const zero = metricsNonZeroCheck({ agent: { backend: "deepseek-acp", cwd: "D:/x" }, metricsInput: 0 });
   assert.equal(zero.state, "not-applicable");
   assert.match(zero.detail, /not applicable/);
 });
@@ -81,7 +81,7 @@ test("TD87-CERT-T1: 未知 backend（snapshot=null）→ 严格 !== true 读为 
 
 // ════ T1B: 认证级症状解除——checks 恒含 metricsNonZero（N/A）不再缺类目 ════
 
-test("TD87-CERT-T1B: kernel 产出进 checks → kimi 形状 case 全绿时 certifyCase 为 certified（非 conditional），能力绿不再伪造", () => {
+test("TD87-CERT-T1B: kernel 产出进 checks → deepseek-acp 形状 case 全绿时 certifyCase 为 certified（非 conditional），能力绿不再伪造", () => {
   const checks = [
     { name: "completed", pass: true, category: "core", capability: "complete" },
     { name: "hasAssistantText", pass: true, category: "core", capability: "assistantText" },
@@ -89,7 +89,7 @@ test("TD87-CERT-T1B: kernel 产出进 checks → kimi 形状 case 全绿时 cert
     { name: "sentinelB", pass: true, category: "core", capability: "readFiles" },
     { name: "commandsPassed", pass: true, category: "strict", capability: "commandEvidence" },
     { name: "isolation", pass: true, category: "operational", capability: "isolation" },
-    metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: null }),
+    metricsNonZeroCheck({ agent: { backend: "deepseek-acp", cwd: "D:/x" }, metricsInput: null }),
   ];
   const result = certifyCase({
     caseId: "kimi-lane",
@@ -183,7 +183,7 @@ test("TD87-CERT-T3: 源级钉——metricsCheck.mjs 的判定源是 backendCapab
   const kernel = readFileSync(new URL("../../scripts/reliability/metricsCheck.mjs", import.meta.url), "utf8");
   assert.match(kernel, /import\s*\{\s*backendCapabilitySnapshot\s*\}\s*from\s*"\.\.\/\.\.\/src\/backends\/factory\.js"/,
     "kernel 必须消费 ADR-0025 批次 2 SSOT（src/backends/factory.js）");
-  assert.ok(!/"(?:kimi-code|claude-code|codex|deepseek-harness)"/.test(kernel),
+  assert.ok(!/"(?:claude-code|codex|deepseek-acp|kimi-web|zcode)"/.test(kernel),
     "kernel 代码不得含 backend 名字字面量分支（声明是唯一判定源；注释提及形状不算分支）");
   assert.ok(!/\bproviderID\b/.test(kernel), "kernel 不得读 providerID（名字分支复活即红）");
 });
@@ -192,10 +192,10 @@ test("TD87-CERT-T3: 五 backend 真实矩阵不漂移仍由 ADR25-B2-MATRIX 承�
   // 真实矩阵断言（五个 backend 的 snapshot = 类声明）已在
   // test/registry-roles/backendCapabilityValidate.test.js 的 ADR25-B2-MATRIX——
   // 本文件只引用。此钉守住"引用仍存在且覆盖五 backend"（被删/被收窄即红，
-  // 提示本文件的 kimi/claude 形状前提失去真实矩阵锚）。
+  // 提示本文件的 deepseek-acp/claude 形状前提失去真实矩阵锚）。
   const matrixTest = readFileSync(new URL("./backendCapabilityValidate.test.js", import.meta.url), "utf8");
   assert.match(matrixTest, /ADR25-B2-MATRIX/, "ADR25-B2-MATRIX 矩阵断言必须存在");
-  for (const backend of ["claude-code", "codex", "kimi-code", "deepseek-harness"]) {
+  for (const backend of ["claude-code", "codex", "deepseek-acp", "kimi-web", "zcode"]) {
     assert.ok(matrixTest.includes(`"${backend}"`), `MATRIX 断言必须覆盖 ${backend}`);
   }
 });

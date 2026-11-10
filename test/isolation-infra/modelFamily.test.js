@@ -36,8 +36,9 @@ test("R9: 无 model 块的 worker 按 backend 名兜底（tester/codex 形状）
   assert.equal(modelFamilyOf({ backend: "codex" }), "gpt",
     "无 model 块的 codex 车道兜底为 GPT 族系——与写了 gpt 型号的 codex 车道同族（决定 0090）");
   assert.equal(modelFamilyOf({ backend: "claude-code" }), "claude");
-  assert.equal(modelFamilyOf({ backend: "kimi-code" }), "kimi");
-  assert.equal(modelFamilyOf({ backend: "deepseek-harness" }), "deepseek");
+  // 已退役 backend 名（决定 0123 前的旧转录）不再命中兜底表 → UNKNOWN（不抛）。
+  assert.equal(modelFamilyOf({ backend: "kimi-code" }), UNKNOWN_FAMILY);
+  assert.equal(modelFamilyOf({ backend: "deepseek-harness" }), UNKNOWN_FAMILY);
 });
 
 test("R9: 未识别 → 未知族系（不猜）；model 优先于 backend 兜底", () => {
@@ -112,12 +113,12 @@ test("R9 守卫: 模块头声明展示专用非契约（防未来被当门控引
   assert.ok(text.includes("不得据此门控"), "模块头必须禁止据此门控");
 });
 
-// 2026-10-04 census 抓获补漏的行为钉：kimi-web 与 kimi-code 同族（同二进制同
-// K 血统）——缺席曾使 kimi-web 席族系显示 UNKNOWN。zcode 有意 UNKNOWN
+// 2026-10-04 census 抓获补漏的行为钉：kimi-web 与 Kimi 同族（同二进制同
+// K 血统）。zcode 有意 UNKNOWN
 // （多 provider 宿主，无单一族系缺省——见 modelFamily.js 表注）。
 test("2026-10-04: kimi-web 后端兜底族系 = kimi（census 补漏）；zcode 兜底 = 诚实 UNKNOWN", () => {
   assert.equal(modelFamilyOf({ backend: "kimi-web" }), "kimi",
-    "kimi-web 席位 modelId 不可解析时兜底到 kimi 族（与 kimi-code 同族）");
+    "kimi-web 席位 modelId 不可解析时兜底到 kimi 族");
   assert.equal(modelFamilyOf({ backend: "zcode" }), UNKNOWN_FAMILY,
     "zcode 多 provider 宿主无单一缺省族系——UNKNOWN 是诚实值，不是漏登");
 });

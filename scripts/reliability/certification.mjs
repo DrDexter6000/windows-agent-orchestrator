@@ -447,7 +447,7 @@ function summarizeWorkers(cases, matrixAgentIds, matrixLaneKeys) {
   for (const [laneKey, agentCases] of byLane) {
     // active identity = 该 agent 最近一次观察到的 backend+providerID+modelId。
     // 只把 active identity 的 case 聚合进 worker summary；历史旧 identity 的 case
-    // 不进入 status/capabilities/cases 聚合（避免旧 claude-code 掩盖新 deepseek-harness），
+    // 不进入 status/capabilities/cases 聚合（避免旧身份掩盖新身份），
     // 但仍保留在 summarizeCertification 的 summary.cases（可审计历史）。
     const active = findActiveIdentity(agentCases);
     const agentIds = [...new Set(agentCases.map((c) => c.agentId))];

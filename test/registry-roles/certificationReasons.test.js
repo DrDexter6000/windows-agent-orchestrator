@@ -252,7 +252,7 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
     {
       caseId: "active-red",
       agentId: "iw",
-      backend: "deepseek-harness",
+      backend: "zcode",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       checks: [{ name: "completed", pass: false, category: "core" }],
@@ -263,7 +263,7 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
   //（deepseek）车道 rejected 且不继承旧 claude 全绿时间；历史车道保留 certified 事实。
   const recs = Object.values(identity.workers).filter((r) => Array.isArray(r.agentIds) && r.agentIds.includes("iw"));
   assert.equal(recs.length, 2, "两 identity=两记录");
-  const activeRec = recs.find((r) => r.backend === "deepseek-harness");
+  const activeRec = recs.find((r) => r.backend === "zcode");
   const legacyRec = recs.find((r) => r.backend === "claude-code");
   assert.equal(activeRec.status, "rejected");
   assert.equal(activeRec.reasonCode, "core_checks_failed");

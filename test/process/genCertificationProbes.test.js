@@ -19,8 +19,6 @@ import assert from "node:assert/strict";
 
 import { checkProbeBase, probeExpressivity } from "../../scripts/gen-certification.mjs";
 
-const K3 = "fake-k3";
-
 // ===== 假 backend 工厂：每只只实现 validateAgentPolicy =====
 
 /** 全接受（底稿校验的最小基线：空底稿对它是合法且最小的）。 */
@@ -69,18 +67,6 @@ function pairOnlyBackend() {
       }
       if (agent?.reasoning?.effort !== undefined && !["low", "high", "max"].includes(agent.reasoning.effort)) {
         throw new Error("effort must be low/high/max");
-      }
-    },
-  };
-}
-
-/** kimi-code 形：reasoning 仅在 model.id === K3 且 effort ∈ {low, high} 时接受。 */
-function k3GatedBackend() {
-  return {
-    validateAgentPolicy(agent) {
-      const effort = agent?.reasoning?.effort;
-      if (effort !== undefined && (agent?.model?.id !== K3 || !["low", "high"].includes(effort))) {
-        throw new Error("effort requires K3 model and low/high");
       }
     },
   };
@@ -143,7 +129,6 @@ test("probe-base: 合法且最小的底稿通过（空底稿；多键底稿逐�
 
 test("probe-model: 底稿含 model 且去掉即被拒 → 必填＋最小可接受写法", () => {
   const r = probeExpressivity(kimiWebLikeBackend(), {
-    k3ModelId: K3,
     base: { model: { id: "x" }, serveUrl: "http://127.0.0.1:9", tokenEnv: "T" },
   });
   assert.equal(r.model.verdict, "必填");
@@ -151,18 +136,17 @@ test("probe-model: 底稿含 model 且去掉即被拒 → 必填＋最小可接�
 });
 
 test("probe-model: 底稿不含 model → 可选；形状按 裸→引用→二元组 的次序取首个通过者", () => {
-  const bare = probeExpressivity(acceptAllBackend(), { k3ModelId: K3, base: {} });
+  const bare = probeExpressivity(acceptAllBackend(), { base: {} });
   assert.equal(bare.model.verdict, "可选");
   assert.equal(bare.model.condition, "裸 `{id}`", "裸 id 先通过即取裸（引用形状也会通过，但不是最小写法）");
 
   const refOnly = probeExpressivity(refOnlyBackend(), {
-    k3ModelId: K3,
     base: { model: { id: "p/m" } },
   });
   assert.equal(refOnly.model.verdict, "必填");
   assert.equal(refOnly.model.condition, "`<provider>/<model>` 引用");
 
-  const pairOnly = probeExpressivity(pairOnlyBackend(), { k3ModelId: K3, base: {} });
+  const pairOnly = probeExpressivity(pairOnlyBackend(), { base: {} });
   assert.equal(pairOnly.model.verdict, "可选");
   assert.equal(pairOnly.model.condition, "`{providerID, id}`");
 });
@@ -174,7 +158,7 @@ test("probe-model: 底稿不带 model、三种形状全被拒 → 抛错：探�
     },
   };
   assert.throws(
-    () => probeExpressivity(noModelAtAll, { k3ModelId: K3, base: {}, backendKey: "fake-no-model" }),
+    () => probeExpressivity(noModelAtAll, { base: {}, backendKey: "fake-no-model" }),
     /none of the model probe shapes .* is accepted by "fake-no-model" .* probe coverage is insufficient/,
   );
   // model 可选、但一旦配了就要求 model.region：预设形状都不带 region。
@@ -184,7 +168,7 @@ test("probe-model: 底稿不带 model、三种形状全被拒 → 抛错：探�
     },
   };
   assert.throws(
-    () => probeExpressivity(optionalModelNeedsRegion, { k3ModelId: K3, base: {}, backendKey: "fake-optional-region" }),
+    () => probeExpressivity(optionalModelNeedsRegion, { base: {}, backendKey: "fake-optional-region" }),
     /none of the model probe shapes .* is accepted by "fake-optional-region"/,
   );
 });
@@ -200,8 +184,7 @@ test("probe-model: 底稿的 model 合法、三种预设形状却全被拒（必
   };
   assert.throws(
     () => probeExpressivity(backend, {
-      k3ModelId: K3,
-      base: { model: { id: "x", region: "r" } },
+        base: { model: { id: "x", region: "r" } },
       backendKey: "fake-region",
     }),
     /none of the model probe shapes .* is accepted by "fake-region" on top of its POLICY_PROBE_BASES entry .* probe coverage is insufficient/,
@@ -221,33 +204,14 @@ test("probe-contextWindow: 底稿带 model 时只在底稿的 model 上加 conte
       }
     },
   };
-  const r = probeExpressivity(backend, { k3ModelId: K3, base: { model: { id: "special/model" } } });
+  const r = probeExpressivity(backend, { base: { model: { id: "special/model" } } });
   assert.equal(r.model.verdict, "必填");
   assert.equal(r.contextWindow.verdict, "支持");
 });
 
-// ===== probeExpressivity：reasoning 栏（K3 伴随条件） =====
+// ===== probeExpressivity：reasoning 栏（子集条件） =====
 
-test("probe-reasoning: 底稿＋effort 被拒、model 换成 K3 后通过 → 条件＋须绑定 K3", () => {
-  const r = probeExpressivity(k3GatedBackend(), { k3ModelId: K3, base: {} });
-  assert.equal(r.reasoning.verdict, "条件");
-  assert.equal(r.reasoning.condition, `effort ∈ {low, high}，须绑定 ${K3}`);
-});
-
-test("probe-reasoning: 六档都只在 K3 下通过 → 条件：须绑定 K3（档位全过也不丢绑定条件）", () => {
-  const backend = {
-    validateAgentPolicy(agent) {
-      if (agent?.reasoning?.effort !== undefined && agent?.model?.id !== K3) {
-        throw new Error("effort requires K3 model");
-      }
-    },
-  };
-  const r = probeExpressivity(backend, { k3ModelId: K3, base: {} });
-  assert.equal(r.reasoning.verdict, "条件");
-  assert.equal(r.reasoning.condition, `须绑定 ${K3}`);
-});
-
-test("probe-reasoning: effort 只要求带任意 model（不限 K3）→ 抛错，不误写成「须绑定 K3」", () => {
+test("probe-reasoning: effort 只要求带任意 model → 抛错（模型伴随条件渲染不了，不猜）", () => {
   const backend = {
     validateAgentPolicy(agent) {
       if (agent?.reasoning?.effort !== undefined && typeof agent?.model?.id !== "string") {
@@ -256,7 +220,7 @@ test("probe-reasoning: effort 只要求带任意 model（不限 K3）→ 抛错�
     },
   };
   assert.throws(
-    () => probeExpressivity(backend, { k3ModelId: K3, base: {}, backendKey: "fake-any-model" }),
+    () => probeExpressivity(backend, { base: {}, backendKey: "fake-any-model" }),
     /"fake-any-model" accepts reasoning efforts under model conditions the table cannot render .*=anyModel/,
   );
 });
@@ -272,50 +236,22 @@ test("probe-reasoning: effort 只在带 providerID 的 model 下通过（裸 id 
     },
   };
   assert.throws(
-    () => probeExpressivity(backend, { k3ModelId: K3, base: {}, backendKey: "fake-pair-effort" }),
+    () => probeExpressivity(backend, { base: {}, backendKey: "fake-pair-effort" }),
     /"fake-pair-effort" accepts reasoning efforts under model conditions the table cannot render .*=anyModel/,
   );
 });
 
-test("probe-reasoning: effort 要求 K3 且带 providerID（裸 id 是最小写法）→ 条件：须绑定 K3（k3 探针同样试遍合法 model）", () => {
-  const backend = {
-    validateAgentPolicy(agent) {
-      if (agent?.reasoning?.effort !== undefined
-        && (agent?.model?.id !== K3 || typeof agent?.model?.providerID !== "string")) {
-        throw new Error("effort requires K3 with providerID");
-      }
-    },
-  };
-  const r = probeExpressivity(backend, { k3ModelId: K3, base: {} });
-  assert.equal(r.reasoning.verdict, "条件");
-  assert.equal(r.reasoning.condition, `须绑定 ${K3}`);
-});
-
-test("probe-reasoning: 部分档位不带 K3 也过、部分必须 K3 → 抛错，不把绑定扩到全部档位", () => {
-  const backend = {
-    validateAgentPolicy(agent) {
-      const effort = agent?.reasoning?.effort;
-      if (effort === undefined || effort === "high") return;
-      if (effort !== "max" || agent?.model?.id !== K3) throw new Error("max requires K3; others refused");
-    },
-  };
-  assert.throws(
-    () => probeExpressivity(backend, { k3ModelId: K3, base: {}, backendKey: "fake-mixed" }),
-    /"fake-mixed" accepts reasoning efforts under model conditions the table cannot render .*high=plain, max=k3/,
-  );
-});
-
-test("probe-reasoning: 底稿＋effort 全过 → 支持，不渲染 K3 伴随（即使 K3 伴随也能过）", () => {
+test("probe-reasoning: 底稿＋effort 全过 → 支持，无伴随条件", () => {
   const backend = {
     validateAgentPolicy() {},
   };
-  const r = probeExpressivity(backend, { k3ModelId: K3, base: {} });
+  const r = probeExpressivity(backend, { base: {} });
   assert.equal(r.reasoning.verdict, "支持");
   assert.equal(r.reasoning.condition, null);
 });
 
 test("probe-reasoning: 部分档位过且不需模型伴随 → 条件不带“须绑定”", () => {
-  const r = probeExpressivity(pairOnlyBackend(), { k3ModelId: K3, base: {} });
+  const r = probeExpressivity(pairOnlyBackend(), { base: {} });
   assert.equal(r.reasoning.verdict, "条件");
   assert.equal(r.reasoning.condition, "effort ∈ {low, high, max}");
 });
@@ -328,7 +264,6 @@ test("probe-attribution: 被测项本身被接受时不因别的必填字段缺�
   // 来自底稿（连接字段已在）＋单项：reasoningNeedsServeUrl 接受 reasoning
   // （只要求底稿带 serveUrl），必须渲染为通过而不是“不支持”。
   const r = probeExpressivity(reasoningNeedsServeUrlBackend(), {
-    k3ModelId: K3,
     base: { serveUrl: "http://127.0.0.1:9" },
   });
   // 该 backend 只接受 low：六值闭集部分通过 → 条件，而不是“不支持”。
@@ -338,7 +273,7 @@ test("probe-attribution: 被测项本身被接受时不因别的必填字段缺�
 
 test("probe-attribution: “不支持”只在被测项本身被拒时出现（底稿在场的单项拒绝）", () => {
   const base = { model: { id: "x" }, serveUrl: "http://127.0.0.1:9", tokenEnv: "T" };
-  const r = probeExpressivity(kimiWebLikeBackend(), { k3ModelId: K3, base });
+  const r = probeExpressivity(kimiWebLikeBackend(), { base });
   assert.equal(r.reasoning.verdict, "不支持");
   assert.equal(r.contextWindow.verdict, "不支持");
   assert.notEqual(r.model.verdict, "不支持", "model 本身可表达（必填：裸）——同格其余“不支持”不可能再来自缺 model.id");
@@ -353,6 +288,6 @@ test("probe-discipline: 探针是底稿的深拷贝——跑完探针后底稿�
     tokenEnv: "T",
   });
   const snapshot = JSON.stringify(base);
-  probeExpressivity(kimiWebLikeBackend(), { k3ModelId: K3, base });
+  probeExpressivity(kimiWebLikeBackend(), { base });
   assert.equal(JSON.stringify(base), snapshot, "探针不得改动底稿（含嵌套对象）");
 });

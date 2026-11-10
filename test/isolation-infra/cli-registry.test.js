@@ -358,13 +358,13 @@ test("registry list 无 summary 时不报错（cert 列显示 -）", () => {
   }
 });
 
-test("WF-8: registry list 对 kimi/codex 默认模型显示非 '-'", () => {
+test("WF-8: registry list 对 deepseek-acp/codex 默认模型显示非 '-'", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-reglist-default-model-"));
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        coder_mm: { backend: "kimi-code", cwd: dir },
+        coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DSH_TEST_TOKEN" },
         tester: { backend: "codex", cwd: dir, args: [] },
       },
     }), "utf8");
@@ -408,20 +408,20 @@ test("F17: registry list --format json 输出可解析 JSON（dogfood round 4 �
   }
 });
 
-test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（静默无效陷阱）", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-regval-kimi-budget-"));
+test("TD-87: registry validate 对 deepseek-acp 配 tokenBudget 给 ⚠ warning（静默无效陷阱）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-regval-acp-budget-"));
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        coder_mm: { backend: "kimi-code", cwd: dir, tokenBudget: 100000 },
+        coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DSH_TEST_TOKEN", tokenBudget: 100000 },
       },
     }), "utf8");
 
     const out = runCliOnPathNode(`registry validate --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
-    // validate 通过（✔），但有 ⚠ warning 提示 tokenBudget 对 kimi 无效
-    assert.match(out, /✔\s*coder_mm/, "kimi worker validate 通过");
-    assert.match(out, /⚠.*kimi-code.*tokenBudget.*不生效/, "配了 tokenBudget 的 kimi worker 应有 ⚠ warning");
+    // validate 通过（✔），但有 ⚠ warning 提示 tokenBudget 对该 backend 无效
+    assert.match(out, /✔\s*coder_mm/, "worker validate 通过");
+    assert.match(out, /⚠.*deepseek-acp.*tokenBudget.*不生效/, "配了 tokenBudget 的 worker 应有 ⚠ warning");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -430,16 +430,14 @@ test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（�
 test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all backends, fail-closed on bad role file", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-regval-sysprompt-"));
   try {
-    // M11-5 后：所有三个 process backend 都消费 systemPrompt。旧的"kimi/codex 不消费
+    // M11-5 后：声明 supportsRoleContract 的 backend 都消费 systemPrompt。旧的"kimi/codex 不消费
     // systemPrompt"warning 已删除。registry validate 用共享加载器对所有配 systemPrompt
     // 的 backend 统一 fail-closed 验证（缺失/目录/空/超限/非法 UTF-8/NUL）。
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        // kimi-code + valid systemPrompt → 应 pass（不再 warn）
-        // TD-242（2026-10-09）：coder_mm.md 已随 0046 席位矩阵重构除名，夹具
-        // 改指向现行角色文件 coder.md（陈旧引用是本测试慢性红的真凶——非 PATH）。
-        coder_mm: { backend: "kimi-code", cwd: dir, systemPrompt: "config/roles/coder.md" },
+        // deepseek-acp + valid systemPrompt → 应 pass（不再 warn）
+        coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DSH_TEST_TOKEN", systemPrompt: "config/roles/coder.md" },
         // codex + valid systemPrompt → 应 pass（不再 warn）
         tester: { backend: "codex", cwd: dir, systemPrompt: "config/roles/tester.md" },
         // claude-code + valid systemPrompt → 应 pass
@@ -449,7 +447,7 @@ test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all bac
 
     const out = runCliOnPathNode(`registry validate --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
     // 三个都 pass（无 ✖，无旧 ⚠ "不消费 systemPrompt" warning）
-    assert.match(out, /✔\s*coder_mm/, "kimi-code + systemPrompt passes");
+    assert.match(out, /✔\s*coder_mm/, "deepseek-acp + systemPrompt passes");
     assert.match(out, /✔\s*tester/, "codex + systemPrompt passes");
     assert.match(out, /✔\s*researcher/, "claude-code + systemPrompt passes");
     // 不再有"不消费 systemPrompt"warning

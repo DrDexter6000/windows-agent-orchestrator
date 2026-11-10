@@ -86,9 +86,10 @@ function syntheticRegistry() {
         model: { id: "gpt-5.6-sol" },
       },
       coder_mm: {
-        backend: "kimi-code",
+        backend: "zcode",
         cwd: ".",
-        model: { id: "kimi-code/k3" },
+        binary: "C:/wao-test/zcode.cjs",
+        model: { id: "bigmodel-api/GLM-5.3" },
       },
       fallback: {
         backend: "deepseek-acp",
@@ -130,7 +131,7 @@ function check_(name, pass, extra = {}) {
 test("subjects: --subject backend → 在册全部 backend（去重排序，键含 codeRef）", () => {
   const { subjects, error } = resolveSubjects({ registry: syntheticRegistry(), subjectArg: "backend", codeRef: CODE_REF });
   assert.equal(error, null);
-  assert.deepEqual(subjects.map((s) => s.name), ["claude-code", "codex", "deepseek-acp", "kimi-code"]);
+  assert.deepEqual(subjects.map((s) => s.name), ["claude-code", "codex", "deepseek-acp", "zcode"]);
   for (const s of subjects) {
     assert.equal(s.kind, "backend");
     assert.equal(s.key, `backend:${s.name}@${CODE_REF}`);
@@ -144,7 +145,7 @@ test("subjects: --subject llm → 在册全部 llm 身份（providerID 缺失时
   assert.equal(error, null);
   assert.deepEqual(
     subjects.map((s) => `${s.providerID}/${s.modelId}`),
-    ["claude-code/glm-5.3-flash[1m]", "codex/gpt-5.6-sol", "deepseek/deepseek-v4-pro", "kimi-code/kimi-code/k3"],
+    ["claude-code/glm-5.3-flash[1m]", "codex/gpt-5.6-sol", "deepseek/deepseek-v4-pro", "zcode/bigmodel-api/GLM-5.3"],
   );
   assert.equal(subjects[0].providerKey, null, "providerKey 恒 null（provider 通道退役）");
   assert.equal(subjects[1].providerKey, null, "无路由字段 → null（已观察无接入方）");
@@ -161,14 +162,14 @@ test("subjects: <kind> 精确命中——backend 名 / providerID+modelId / 裸 
   const byBareModel = resolveSubjects({ registry, subjectArg: "gpt-5.6-sol", codeRef: CODE_REF });
   assert.deepEqual(byBareModel.subjects.map((s) => s.providerID), ["codex"]);
 
-  // modelId 含 "/"（kimi-code/k3）的裸形态也命中。
-  const bySlashModel = resolveSubjects({ registry, subjectArg: "kimi-code/k3", codeRef: CODE_REF });
-  assert.deepEqual(bySlashModel.subjects.map((s) => s.backend ?? s.modelId), ["kimi-code/k3"]);
+  // modelId 含 "/"（bigmodel-api/GLM-5.3）的裸形态也命中。
+  const bySlashModel = resolveSubjects({ registry, subjectArg: "bigmodel-api/GLM-5.3", codeRef: CODE_REF });
+  assert.deepEqual(bySlashModel.subjects.map((s) => s.backend ?? s.modelId), ["bigmodel-api/GLM-5.3"]);
 });
 
 test("subjects【证伪】: 未知被测 / 裸 modelId 歧义 / 缺 codeRef / 缺 subject 全部显式 error", () => {
   const registry = syntheticRegistry();
-  const unknown = resolveSubjects({ registry, subjectArg: "zcode", codeRef: CODE_REF });
+  const unknown = resolveSubjects({ registry, subjectArg: "no-such-backend", codeRef: CODE_REF });
   assert.match(unknown.error, /matches no backend name and no llm identity/);
 
   // 歧义：两条不同身份的车道共一个裸 modelId → 裸 modelId 拒绝。
@@ -371,7 +372,7 @@ function cleanupRunEntry(result) {
 }
 
 test("entry【子进程】: 未知被测 → exit 2，台账零副作用（绝不空转报通过）", () => {
-  const { r, ledgerPath, dir } = runEntry(["--subject", "zcode"]);
+  const { r, ledgerPath, dir } = runEntry(["--subject", "no-such-backend"]);
   try {
     assert.equal(r.status, 2, `stderr: ${r.stderr}`);
     assert.match(r.stderr, /matches no backend name and no llm identity/);
@@ -1284,8 +1285,8 @@ test("component ledger glue F9: stable refresh replaces prior, newly drifted his
     "the duplicate-producing full-prior concatenation must not return");
 });
 
-test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp/codex/kimi-code → phase6）", () => {
-  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp", "codex", "kimi-code"]);
+test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp/codex → phase6）", () => {
+  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp", "codex"]);
   assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), Object.keys(PHASE6_BACKEND_SHAPES),
     "证据登记表与形状表必须逐键 1:1——登记了证据就必须有判定形状，反之亦然");
   const source = SESSION_REUSE_EVIDENCE_SOURCES["deepseek-acp"];
@@ -1297,10 +1298,10 @@ test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径�
     "真实 drill 重跑后仍必须生成自足证据，不能把文件覆盖回外部转录依赖形状");
   assert.match(drillSource, /probeRuntimeIdentity/,
     "真实 drill 必须把运行时身份写入证据，未来重跑不能丢失身份绑定");
-  // TD-184（2026-10-09）：codex / kimi-code 共享 drill。两份证据+共享 drill 脚本
+  // TD-184（2026-10-09）：codex drill。证据+共享 drill 脚本
   // 必须真实在场；脚本必须保留自足证据形状与身份绑定（与 dsh 先例同钉）。
   const sharedDrill = "scripts/reliability/session-reuse-drill.mjs";
-  for (const backend of ["codex", "kimi-code"]) {
+  for (const backend of ["codex"]) {
     const entry = SESSION_REUSE_EVIDENCE_SOURCES[backend];
     assert.equal(entry.drill, sharedDrill);
     assert.ok(existsSync(join(REPO_ROOT, entry.path)), `${backend} 证据文件必须真实存在`);
@@ -1433,10 +1434,9 @@ test("kernel: TD-184 CLI 形状验证器——合成正例通过 + 材料不得�
   assert.equal(pass.accepted, true, `synthetic cli evidence must pass: ${pass.detail}`);
   assert.match(pass.detail, /fresh-lead differential control/);
 
-  // 错登拒绝：codex 材料按 kimi-code 形状判 → backend 声明不匹配。
-  const wrongKey = sessionReuseEvidenceFromPhase6File(cliEvidenceBase(), { backendName: "kimi-code" });
+  // 错登拒绝：codex 材料按 deepseek-acp 形状判 → backend 声明不匹配。
+  const wrongKey = sessionReuseEvidenceFromPhase6File(cliEvidenceBase(), { backendName: "deepseek-acp" });
   assert.equal(wrongKey.accepted, false);
-  assert.match(wrongKey.detail, /declares backend/);
 
   // dsh 历史证据按 codex 形状判 → 无 backend 声明，拒绝（防错登）。
   const dshReal = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
@@ -1508,14 +1508,10 @@ test("kernel: TD-184 CLI 形状验证器——暗号泄漏/占位 id/差分缺�
   const r5 = sessionReuseEvidenceFromPhase6File(badShape, { backendName: "codex" });
   assert.equal(r5.accepted, false);
 
-  // kimi-code 形状：同款合成材料按 kimi 拒绝文本也能通过（形状表分发生效）。
-  const kimi = cliEvidenceBase({ backend: "kimi-code", distribution: "kimi" });
-  kimi.negativeC.spawnError = 'Session "11111111-2222-4333-8444-555555555555" not found';
-  for (const c of kimi.embeddedEvidence.negativeControls) {
-    if (c.id === "negativeC") c.refusal.errorMessage = kimi.negativeC.spawnError;
-  }
-  const r6 = sessionReuseEvidenceFromPhase6File(kimi, { backendName: "kimi-code" });
-  assert.equal(r6.accepted, true, `kimi synthetic evidence must pass: ${r6.detail}`);
+  // 已退役 backend 名（决定 0123）：无登记形状 → 拒绝判定（不猜）。
+  const retired = sessionReuseEvidenceFromPhase6File(cliEvidenceBase(), { backendName: "kimi-code" });
+  assert.equal(retired.accepted, false);
+  assert.match(retired.detail, /no phase6 evidence shape registered/);
 });
 
 // 验收修反例（2026-10-09 astra+opus 验收会审可复现误放行，双席各复现一部分）：
@@ -1604,7 +1600,7 @@ test("kernel: 配置传递按支持范围——装配带 model → 值必须送�
 
 test("kernel: stop 执行形态判定——装配携带 serveUrl → serve；无 serveUrl → process（缺 serveUrl 是进程形常态，绝非判负理由）", () => {
   assert.equal(backendStopFormOf({ serveUrl: "http://127.0.0.1:4297", backend: "kimi-web" }), "serve");
-  // 进程式 backend（claude-code/codex/kimi-code/deepseek-acp）装配无 serveUrl。
+  // 进程式 backend（claude-code/codex/deepseek-acp/zcode）装配无 serveUrl。
   assert.equal(backendStopFormOf({ backend: "deepseek-acp", cwd: "." }), "process");
   assert.equal(backendStopFormOf({ backend: "claude-code", model: { id: "glm-5.3[1m]" } }), "process");
   // 空串/空白 serveUrl 不算 serve 证据；装配不可读（null）→ fail-closed 落 process
@@ -2217,18 +2213,18 @@ test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不�
   registry.certification = { fixtures: { llm: [{ agentId: "fallback" }] } };
   const plan = planComponentChecks({
     registry,
-    subjectArg: "kimi-code",
+    subjectArg: "zcode",
     codeRef: CODE_REF,
     compositionSummary: null,
     now: NOW,
   });
   assert.equal(plan.subjects.length, 1);
   const assembly = plan.tempRegistry.agents[plan.subjects[0].fixtureAgentId];
-  // 基底 = 被测 backend（kimi-code）anchor 的净化克隆；model/provider 保持被测
+  // 基底 = 被测 backend（zcode）anchor 的净化克隆；model/provider 保持被测
   // 自己的实际配置（那就是它的支持范围）——夹具 llm（fallback 的
   // deepseek/deepseek-v4-pro）不得以任何形态进入装配。
-  assert.equal(assembly.backend, "kimi-code");
-  assert.equal(assembly.model.id, "kimi-code/k3", "model = 被测 anchor 自己的配置");
+  assert.equal(assembly.backend, "zcode");
+  assert.equal(assembly.model.id, "bigmodel-api/GLM-5.3", "model = 被测 anchor 自己的配置");
   assert.equal(assembly.provider, undefined, "夹具 llm 的 provider 不得注入被测装配");
   assert.ok(!JSON.stringify(assembly).includes("deepseek-v4-pro"), "夹具 modelId 不得出现在被测装配");
   assert.ok(!JSON.stringify(assembly).includes("deepseek"), "夹具 providerID 不得出现在被测装配");
@@ -2249,7 +2245,7 @@ test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不�
     now: NOW,
   });
   const assembly2 = plan2.tempRegistry.agents[plan2.subjects[0].fixtureAgentId];
-  assert.equal(assembly2.backend, "kimi-code", "基底 = 夹具 backend（coder_mm 的 kimi-code）");
+  assert.equal(assembly2.backend, "zcode", "基底 = 夹具 backend（coder_mm 的 zcode）");
   assert.equal(assembly2.model.id, "deepseek-v4-pro", "model = 被测 llm 的实际配置");
 });
 

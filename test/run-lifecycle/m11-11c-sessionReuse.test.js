@@ -1193,23 +1193,23 @@ async function driveDeliveryLineageRoot({ backendName, BackendClass, frames, nat
   return run;
 }
 
-test("TD188 CHAIN-3: kimi delivery 续谱根（真实 parser 帧）→ 晚绑定 run.provider_session_bound → resolver 取回 native id → continueRun 接受", async () => {
+test("TD188 CHAIN-3: codex delivery 续谱根（真实 parser 帧）→ 晚绑定 run.provider_session_bound → resolver 取回 native id → continueRun 接受", async () => {
   const repo = await makeGitRepo("wao-td188-c3-repo-");
   const dir = mkdtempSync(join(tmpdir(), "wao-td188-c3-"));
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const { CodexBackend } = await import("../../src/backends/codex.js");
   const { resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } = await import("../../src/application/sessionReuse.js");
   const { continueRun } = await import("../../src/application/runContinue.js");
-  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
-  const runId = "run_td188_kimi_root";
-  const registryPath = makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo, binary: process.execPath } });
+  const NATIVE = "01a0c56d-981d-7ad3-9613-0050e1546f8d";
+  const runId = "run_td188_codex_root";
+  const registryPath = makeRegistry(dir, { coder_hq: { backend: "codex", cwd: repo, binary: process.execPath } });
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     await driveDeliveryLineageRoot({
-      backendName: "kimi-code", BackendClass: KimiCodeBackend, runId, dir, repo, registryPath,
+      backendName: "codex", BackendClass: CodexBackend, runId, dir, repo, registryPath,
       pid: 43244, nativeId: NATIVE,
       frames: [
-        { role: "assistant", content: "did the work" },
-        { role: "meta", type: "session.resume_hint", session_id: NATIVE, command: `kimi -r ${NATIVE}`, content: "resume" },
+        { type: "thread.started", thread_id: NATIVE },
+        { type: "item.completed", item: { type: "agent_message", text: "did the work" } },
       ],
     });
 
@@ -1240,10 +1240,10 @@ const t = new JsonlTranscript(resolveTranscriptPath(dir, runId), { runId, agentI
       delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
       runDir: dir, registryPath,
       authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
-      backendFor: () => new KimiCodeBackend(),
+      backendFor: () => new CodexBackend(),
       spawnFn: fakeSpawn,
     });
-    assert.equal(r.accepted, true, "绑定事实就绪后，Kimi continuable 交付可用真实 provider 会话续接");
+    assert.equal(r.accepted, true, "绑定事实就绪后，codex continuable 交付可用真实 provider 会话续接");
     assert.equal(calls.length, 1);
     const routing = JSON.parse(calls[0].args[calls[0].args.indexOf("--session-reuse-json") + 1]);
     assert.equal(routing.turn, "resume");
@@ -1284,15 +1284,14 @@ test("TD188 CHAIN-4: codex delivery 续谱根（真实 parser 帧）→ 同一�
 // ===== TD188 返工（合并第二席）：RunManager.start 直接 resume 的真实 backend 反例/正例 =====
 //
 // 包 1 的 start 侧钩子此前只有 claude 正例（CHAIN-2）间接覆盖；本节用真实
-// KimiCodeBackend/CodexBackend 直接驱动 start 的 resume 轮：
+// CodexBackend 直接驱动 start 的 resume 轮：
 //   - 反例：proc-only 前任 → start 侧钩子拒绝（断言钩子专属文案"process placeholder
 //     identity"，证明不是 buildArgs 兜底），零 spawn、零 child 转录；
-//   - 正例：有效绑定前任 → 真实 backend buildArgs argv 携带 -r <native> /
-//     exec resume <native>（proc 占位绝不进 argv）。
-// 非 delivery 形状（无工作树/Git 依赖），按风险挑最少足够用例（kimi/codex × 反/正）。
+//   - 正例：有效绑定前任 → 真实 backend buildArgs argv 携带 exec resume <native>
+//     （proc 占位绝不进 argv）。
+// 非 delivery 形状（无工作树/Git 依赖），按风险挑最少足够用例（codex × 反/正）。
 
 const TD188_REUSE_UUID = "11111111-2222-4333-8444-555555555555";
-const TD188_KIMI_NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
 const TD188_CODEX_THREAD = "01a0c56d-981d-7ad3-9613-0050e1546f8d";
 
 function makeReuseResumeManager({ runDir, backend, backendName }) {
@@ -1322,30 +1321,6 @@ async function seedReusePrior(runDir, runId, { backendName, spawnSessionId, bind
   await t.transitionState("pending", "completed", "done");
 }
 
-test("TD188-START-1: start 直接 resume（真实 KimiCodeBackend）proc-only 前任 → start 侧钩子拒绝，零 spawn/零 child 转录", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-td188-st1-"));
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const { spawnFn, captures } = makeScriptedProcessSpawn([], { pid: 1, exitCode: 0 });
-  try {
-    await seedReusePrior(dir, "run_st1_prior", { backendName: "kimi-code", spawnSessionId: "proc_43244" });
-    const mgr = makeReuseResumeManager({ runDir: dir, backend: new KimiCodeBackend({ spawnFn }), backendName: "kimi-code" });
-    await assert.rejects(
-      () => mgr.start("coder_hq", {
-        prompt: "follow up", cwd: dir, runId: "run_st1_child", runDir: dir,
-        sessionReuse: { mode: "run_lineage", opaqueUuid: TD188_REUSE_UUID, turn: "resume", priorRunId: "run_st1_prior" },
-      }),
-      /process placeholder identity/,
-      "start 侧钩子专属文案（buildArgs 兜底文案是 requires the prior provider session id——以此区分拒点）",
-    );
-    assert.equal(captures.length, 0, "零 spawn（钩子在 preflight/spawn 之前）");
-    assert.deepEqual(
-      readdirSync(dir).filter((n) => n.endsWith(".jsonl")),
-      ["run_st1_prior.jsonl"],
-      "零 child 转录（钩子在 transcript 创建之前）",
-    );
-  } finally { cleanupDir(dir); }
-});
-
 test("TD188-START-2: start 直接 resume（真实 CodexBackend）proc-only 前任 → 同一 start 侧拒绝，零 spawn/零 child 转录", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td188-st2-"));
   const { CodexBackend } = await import("../../src/backends/codex.js");
@@ -1366,29 +1341,6 @@ test("TD188-START-2: start 直接 resume（真实 CodexBackend）proc-only 前�
       ["run_st2_prior.jsonl"],
       "零 child 转录",
     );
-  } finally { cleanupDir(dir); }
-});
-
-test("TD188-START-3: start 直接 resume（真实 KimiCodeBackend）有效绑定前任 → 真实 buildArgs argv 携带 -r <native>", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-td188-st3-"));
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const { spawnFn, captures } = makeScriptedProcessSpawn([], { pid: 3, exitCode: 0 });
-  try {
-    await seedReusePrior(dir, "run_st3_prior", {
-      backendName: "kimi-code",
-      spawnSessionId: "proc_43244",
-      binding: { backend: "process", backendSessionId: "proc_43244", providerSessionId: TD188_KIMI_NATIVE },
-    });
-    const mgr = makeReuseResumeManager({ runDir: dir, backend: new KimiCodeBackend({ spawnFn }), backendName: "kimi-code" });
-    const run = await mgr.start("coder_hq", {
-      prompt: "follow up", cwd: dir, runId: "run_st3_child", runDir: dir,
-      sessionReuse: { mode: "run_lineage", opaqueUuid: TD188_REUSE_UUID, turn: "resume", priorRunId: "run_st3_prior" },
-    });
-    assert.ok(run, "有效绑定前任 → start 接受");
-    assert.equal(captures.length, 1);
-    const args = captures[0].args;
-    assert.equal(args[args.indexOf("-r") + 1], TD188_KIMI_NATIVE, "kimi argv 以真实 native id 续接");
-    assert.ok(!args.some((a) => String(a).includes("proc_43244")), "proc 占位绝不进 argv");
   } finally { cleanupDir(dir); }
 });
 

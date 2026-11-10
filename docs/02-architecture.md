@@ -139,7 +139,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
 - Worker 接收 bounded task prompt。
 - Worker 可以接收稳定 role contract 和必要安全/运行时约束。
-  - **角色合同注入**：由 **backend 能力声明** 驱动——RunManager 仅当 `backend.supportsRoleContract === true` 才允许带角色（严格相等，字符串/数字/对象/null/undefined 一律 fail closed），**不按 runtime 名称分支**。`systemPrompt` 路径由共享 `roleContract.js` 的 `resolveRoleContractPath` **相对 WAO 安装根**（从模块 URL 推导，非 `process.cwd()`）解析，所以同一份全局 registry + 角色文件可从任意目标项目目录使用。**加载时序**：start 在创建 transcript 和 spawn 前加载验证角色；resume 在读取既有 transcript 后、任何 append/spawn 前加载（失败时 transcript 字节不变）。不支持注入的 backend 配了 `systemPrompt` 在这两个时点 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。七个 backend 各自注入：claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 与 kimi-web 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导）；deepseek-harness 用 `DSH_SYSTEM_PROMPT`；deepseek-acp 用 per-dispatch `--patch` personaPrefix；zcode 拼进 `session/send` content 前缀。注入条件逐 backend 见 `src/backends/factory.js` 能力说明（生成面 `docs/surface/`）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。**WAO 不把角色合同保存为 `prompt.sent`/控制面输入**——transcript 只持久化原始 task prompt。（注意：worker 输出可能在回答中引用或复述角色内容，这由模型决定，因此不能宣称 transcript 永远不含角色正文。）
+  - **角色合同注入**：由 **backend 能力声明** 驱动——RunManager 仅当 `backend.supportsRoleContract === true` 才允许带角色（严格相等，字符串/数字/对象/null/undefined 一律 fail closed），**不按 runtime 名称分支**。`systemPrompt` 路径由共享 `roleContract.js` 的 `resolveRoleContractPath` **相对 WAO 安装根**（从模块 URL 推导，非 `process.cwd()`）解析，所以同一份全局 registry + 角色文件可从任意目标项目目录使用。**加载时序**：start 在创建 transcript 和 spawn 前加载验证角色；resume 在读取既有 transcript 后、任何 append/spawn 前加载（失败时 transcript 字节不变）。不支持注入的 backend 配了 `systemPrompt` 在这两个时点 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。各 backend 注入：claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-web 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导）；deepseek-acp 用 per-dispatch `--patch` personaPrefix；zcode 拼进 `session/send` content 前缀。注入条件逐 backend 见 `src/backends/factory.js` 能力说明（生成面 `docs/surface/`）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。**WAO 不把角色合同保存为 `prompt.sent`/控制面输入**——transcript 只持久化原始 task prompt。（注意：worker 输出可能在回答中引用或复述角色内容，这由模型决定，因此不能宣称 transcript 永远不含角色正文。）
   - **canonical worker identity**：身份闭集 SSOT 是 `src/canonicalAgentId.js`（`isValidCanonicalAgentId` + `safeProjectAgentId`：合法字符仅 `[A-Za-z0-9._-]`、长度 1..128；dependency-free、root-level）。`roleContract.js` 的 `composeRoleContractWithIdentity` 是唯一组合函数，**只接受已验证的 canonical id**——非法 id（含 newline/whitespace/injection）不得以任何形式进入模型提示词（不"压成同一行"，而是直接拒绝加身份头，只返回角色正文）。start 和 resume 都走它，结果一致、角色合同恰好注入一次。只有本就配了角色合同的 agent 加身份头；未配 systemPrompt 的行为不变。身份头不伪装成 Lead task prompt（`prompt.sent` 仍只存原始 task prompt）。registry normalization（`registry.js`）用同一 SSOT：非法 registry id 在 transcript/spawn 前以**固定安全错误**拒绝（不回显恶意 id；是配置合法性校验，不是语义门禁）。结构化身份提取是 `transcript.js` 的 `extractCanonicalAgentId(events, expectedRunId)`：**只有每个事件都具备与 `expectedRunId` 一致的 `runId` 且同一个合法 canonical agentId** 才返回该 id；缺失、冲突、非法或跨 run 一律返回 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。status/wait/collect 传入其请求 runId，并复用各自已读的同一份 transcript 快照（身份不额外读 transcript/registry/文件系统）。`run_dispatch`/`run_status`/`run_wait`/`run_collect` 的 MCP output schema 都用共享长度/字符合同声明 `agentId`、根对象 strict，并返回 `OUTPUT.parse(payload)` 的结果；malformed/extra/超长/injection service output 折叠为既有固定安全错误。显式 lane+role 与别名派发的身份头由解析出的 lane 与 role 生成（结构化 `lane=<laneId> role=<roleId>` 头，接线席位名不入头），`run.started` 同步记 `laneId`/`roleId`/`resolvedFrom` 注记；resume 对 explicit 与别名 run 都从这组钉住事实重建该头（缺失或不合字母表即 `identity_pin_invalid`）；legacy 派发保持 agentId 头。
   - **worker evidence discipline**：同一 SSOT 组合函数 `composeRoleContractWithIdentity` 在身份头与角色正文之间恰好一次地注入一个固定的控制面所有证据纪律块（导出常量 `WORKER_EVIDENCE_DISCIPLINE`；唯一正文权威在 `src/application/roleContract.js`，本段只述语义不复制正文）。(1) **WQ-01 grounding**——对仓库路径/端点/符号/模块/API 形状/测试行为做具体断言前，先检查相关仓库证据，并在最终报告中给出支撑的 repo-relative 路径/符号/测试；未验证的断言必须显式标为 unverified/uncertain，不得当事实陈述。(2) **WQ-02 async/state**——改动 async/有状态 UI 或 query-gating 行为时，枚举适用状态（normal、loading、error、missing、unparseable、stale-data-plus-error），测试每个适用状态及高风险组合；省略某状态须说明为何不适用。该块是 **worker 执行/汇报纪律，不是语义验收规则**：不引入 parser、scorecard、自动重试/自动打回、自动门或接受决策，**Lead 仍是唯一语义裁判**。只对已有非空 role contract 且 agentId 合法的 worker 生效（start/resume 同一 SSOT，恰好一次）；无 role contract 或非法 agentId 行为不变；块随既有 roleContract transport 注入，不新增能力门，也不强制不支持 role 注入的 backend 承载它；六种正式 canonical 身份的组成串除 agentId 令牌外逐字节一致（无 runtime 名称/worker 席位分支）。
 - Transcript 与控制面仍由 WAO/Lead 所有。
@@ -155,8 +155,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 ### 2.1 Backend 接口（核心）
 
-七个 runtime（claude-code / codex / kimi-code /
-deepseek-harness / deepseek-acp / kimi-web / zcode）实现同一接口。
+五个 runtime（claude-code / codex / deepseek-acp / kimi-web / zcode）实现同一接口。
 上层只面对这个接口，永远不碰传输细节（HTTP / stdio）。
 
 ```js
@@ -254,26 +253,22 @@ input/cacheRead（决定 0114）。
 ```js
 interface AgentDef {
   id: string;                    // canonical：[A-Za-z0-9._-]，1..128
-  backend: "claude-code" | "codex" | "kimi-code" | "deepseek-harness"
-         | "deepseek-acp" | "kimi-web" | "zcode"; // 闭集：成员增补属 Owner 决策，评估过的候选与裁定见 ADR-0028
+  backend: "claude-code" | "codex" | "deepseek-acp" | "kimi-web"
+         | "zcode"; // 闭集：成员增减属 Owner 决策，评估过的候选与裁定见 ADR-0028
   cwd: string;                   // 必须是非空字符串
   // kimi-web：serveUrl、model.id、tokenEnv（bearer token 的 env 名）必填；
   // kimiHome、serveWorkspaceDir 可选（绝对路径）
   serveUrl?: string;
   tokenEnv?: string;
-  // 进程式 backend（claude-code / codex / kimi-code）：binary、args 可选
+  // 进程式 backend（claude-code / codex）：binary、args 可选
   // （缺省走 PATH）；serveUrl/model 非必填
   binary?: string;               // zcode 必填：zcode.cjs 绝对路径（桌面更新会改安装路径）
   args?: string[];               // 额外启动参数；zcode 的 model.id 必填且为
                                  // <providerId>/<modelId> ref 形状（恰好一个 "/"，两段非空）
-  // deepseek-harness：dshConfigPath（可读 Cordis config）与 credentialEnv 必填；
-  // dshProvider 可选（缺省 deepseek-official）
-  dshConfigPath?: string;
-  credentialEnv?: string;        // 只声明 env 名，值不进 registry
-  dshProvider?: string;
-  // deepseek-acp：credentialEnv 必填；组合面固定为 dsh --profile acp
-  // --patch <containment> --patch <role-contract>——dshConfigPath/dshProvider 是
-  // 旧线字段，本线不用；binary 可选（缺省 dsh）；model 块只收 { id, providerID }，
+  credentialEnv?: string;        // deepseek-acp 必填：只声明 env 名，值不进 registry
+  // deepseek-acp：组合面固定为 dsh --profile acp
+  // --patch <containment> --patch <role-contract>——本线不消费 dshConfigPath/dshProvider；
+  // binary 可选（缺省 dsh）；model 块只收 { id, providerID }，
   // reasoning.effort 只收 low / high / max，其余由 validateAgentPolicy 拒绝
   // sessionReuse：闭集。当前唯一成员 "lead_workspace"——同一 MCP Lead 会话在同一
   // 同一 Git workspace（按调用目标）内再次询问同一配置的专家时，复用 provider 会话
@@ -307,15 +302,15 @@ JSON 仍由 `readRegistry` 抛错——另一类失败，绝不伪造成部分�
 
 `src/backends/factory.js` 的 `backendFor(agent)` 是唯一构造工厂：闭集每个成员返回
 对应 backend 类（kimi-web 构造可注入 fetch；claude-code / codex /
-kimi-code / zcode 注入 waoCliPath；deepseek 两线零参构造），未知 backend 抛错。
+zcode 注入 waoCliPath；deepseek-acp 零参构造），未知 backend 抛错。
 所有构造点（daemon / backgroundRunner / commands 层）共用它；构造零副作用。
 `backendCapabilitySnapshot(agent)` 静态构造并读取闭集能力声明（未知 backend →
 null，能力面不猜）。
 
 ### 2.5 ProcessBackend（进程式 runtime）
 
-驱动"一个进程 = 一次会话、stdout 流式产出"的 runtime（claude-code / codex /
-kimi-code）。zcode 是独立的 `ZcodeBackend`（`src/backends/zcode.js`），不继承本类。
+驱动"一个进程 = 一次会话、stdout 流式产出"的 runtime（claude-code / codex）。
+zcode 是独立的 `ZcodeBackend`（`src/backends/zcode.js`），不继承本类。
 
 **zcode 自动收口口径（决定 0067、0069、0117）**：控制面只在运行**完全没有生命体征**时自动收口；有生命体征就没有自动上限。三道收口门：零 part 阶段的 silentTimeout 与 120 拍思考预算（未配置前者时）；已有产出后的停滞预算（`min(600s, max(300s, 3×本轮已恢复的最大静默间隙))`）。生命体征（任一成立即不收口）：快照里落了新 part 或既有工具调用落了新证据；最近 60s 收到过模型流分片；工具子进程（含作业，决定 0121）30s 观察窗内 CPU ≥20 ms/s、I/O ≥64 KB/s 或有进程新生/退出；同一观察窗内工作目录的改动/未跟踪清单、mtime 或大小变化；本轮主轮请求的上游重试已安排（`model_retry_scheduled`），在它的退避窗内（到达时刻 + delayMs + 余量）三道门都不收口。凭子进程、文件或重试退避续命时转录各落一条 `runtime_activity`（`process_active` / `files_changed` / `provider_retry`，每种至多每分钟一条；模型流在收时每分钟一条 `streaming`）；重试安排的作废与去重见 `src/backends/factory.js` 的 vitalSigns。观察得出"没有活动"后再看一拍仍无进展才收口；错误文案写明取到的读数（模型流/子进程/文件变化三面），停滞门文案含 `no vital signs, bounded exit`，本轮主轮请求的上游状态已知时末尾再附有界上游摘要；进程快照瞬时失败下一拍重取、连续三次失败按取不到处理；非 Windows 且非 git 目录时子进程与工作目录两项不适用、立即收口。协议错误、传输关闭等"证据不可信"的失败照旧立即收口；轮询只留一个 `session/messages` 在途、不设超时，一拍没应答按无进展计，收口时仍未应答则文案写明已等秒数。判读与运维见 `docs/troubleshooting.md` §6.9。
 

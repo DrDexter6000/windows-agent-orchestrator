@@ -11,9 +11,8 @@
 //      inheritance + the secret redactor.
 //
 //   2. requiredCredentialNames(agent) — env names the REGISTRY explicitly
-//      declares as REQUIRED (deepseek-harness/deepseek-acp credentialEnv,
-//      kimi-web tokenEnv). Only these participate in the credential-missing
-//      gate.
+//      declares as REQUIRED (deepseek-acp credentialEnv, kimi-web tokenEnv).
+//      Only these participate in the credential-missing gate.
 //
 // This is the single source: backend inheritance (src/backends/*) and
 // readiness assessment (src/application/credentialReadiness.js) both delegate
@@ -65,9 +64,7 @@ export function kimiServerTokenFile(agent) {
 const INHERITED_ENV_NAMES = {
   "claude-code": null,
   codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
-  "kimi-code": ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
-  "deepseek-harness": [],
-  // ADR-0031：ACP 线凭据面与旧线同形——只继承 registry 声明的 credentialEnv，
+  // ADR-0031：ACP 线凭据面——只继承 registry 声明的 credentialEnv，
   // 无额外可选 env。
   "deepseek-acp": [],
   // 第 8 个 backend「zcode」（2026-10-01）：登录态与 ZCode 桌面版共享（live
@@ -81,8 +78,8 @@ const INHERITED_ENV_NAMES = {
 
 /**
  * Explicitly-declared REQUIRED credential env names for an agent
- * (deepseek-harness/deepseek-acp credentialEnv, kimi-web tokenEnv — a
- * kimiHome lane reads its token from a file, not env). A static backend-wide
+ * (deepseek-acp credentialEnv, kimi-web tokenEnv — a kimiHome lane reads its
+ * token from a file, not env). A static backend-wide
  * list is NEVER assumed required.
  * @param {object} agent — normalized agent from registry
  * @returns {string[]} required credential env names (deduped, may be empty)
@@ -90,7 +87,7 @@ const INHERITED_ENV_NAMES = {
 export function requiredCredentialNames(agent) {
   if (!agent || typeof agent !== "object") return [];
   const names = [];
-  const configured = agent.backend === "deepseek-harness" || agent.backend === "deepseek-acp"
+  const configured = agent.backend === "deepseek-acp"
     ? agent.credentialEnv
     : agent.backend === "kimi-web"
       // 决定 0074：声明了 kimiHome 的车道，token 来自文件——不是环境凭据，不进这张表。

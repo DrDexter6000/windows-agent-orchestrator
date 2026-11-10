@@ -208,16 +208,17 @@ test("entry-4: --check 过期/缺失/垃圾 → 非零退出；不修复、不�
 });
 
 // ===== 场景 5：渲染失败（注入坏夹具）→ 非零退出，旧文件保持原样 =====
-test("entry-5: 渲染失败（kimiCode KIMI_K3_MODEL_ID 源常量被改名）→ 非零退出，旧文件原样", () => {
+test("entry-5: 渲染失败（CAPABILITY_NOTES 的 vitalSigns 登记被改名）→ 非零退出，旧文件原样", () => {
   const fixture = buildFixture();
   const cwd = buildUnrelatedCwd();
   try {
-    // 注入坏夹具：源常量标识符整体改名（模块仍可解析加载——隔离渲染失败，
-    // 不是模块加载失败），extractKimiK3ModelId 的正则锚点即失配抛错。
-    const kimi = join(fixture, "src", "backends", "kimiCode.js");
-    const src = readFileSync(kimi, "utf8");
-    assert.match(src, /const KIMI_K3_MODEL_ID = "/, "夹具自检：kimiCode.js 应含源常量");
-    writeFileSync(kimi, src.replaceAll("KIMI_K3_MODEL_ID", "KIMI_K3_MODEL_ID_BROKEN"), "utf8");
+    // 注入坏夹具：把 factory.js 里 CAPABILITY_NOTES 的 vitalSigns 键整体改名
+    // （模块仍可解析加载——隔离渲染失败，不是模块加载失败），渲染期的
+    // vitalSigns 必填守卫即抛错。
+    const factory = join(fixture, "src", "backends", "factory.js");
+    const src = readFileSync(factory, "utf8");
+    assert.match(src, /vitalSigns: "/, "夹具自检：factory.js 应含 vitalSigns 登记");
+    writeFileSync(factory, src.replaceAll("vitalSigns:", "vitalSignsBroken:"), "utf8");
 
     const target = join(fixture, CERT_REL);
     writeFileSync(target, "OLD CONTENT — MUST SURVIVE\n", "utf8");

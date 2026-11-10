@@ -118,14 +118,13 @@ test("probe【证伪】: 未知 backend 名 → unknown（无描述符，不猜�
   assert.match(id.reason, /no harness probe descriptor/);
 });
 
-test("HARNESS_VERSION_PROBES F5: 七 backend 全覆盖，所有 process backend honor agent.binary", () => {
-  const knownBackends = ["claude-code", "codex", "kimi-code", "kimi-web", "deepseek-acp", "deepseek-harness", "zcode"];
+test("HARNESS_VERSION_PROBES F5: 五 backend 全覆盖，所有 process backend honor agent.binary", () => {
+  const knownBackends = ["claude-code", "codex", "kimi-web", "deepseek-acp", "zcode"];
   assert.deepEqual([...Object.keys(HARNESS_VERSION_PROBES)].sort(), [...knownBackends].sort());
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({}), "dsh");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({ binary: "C:/custom/dsh.exe" }), "C:/custom/dsh.exe");
   assert.equal(HARNESS_VERSION_PROBES["claude-code"].binary({ binary: "C:/custom/claude-wrapper.exe" }), "C:/custom/claude-wrapper.exe");
   assert.equal(HARNESS_VERSION_PROBES.codex.binary({ binary: "C:/custom/codex-wrapper.exe" }), "C:/custom/codex-wrapper.exe");
-  assert.equal(HARNESS_VERSION_PROBES["kimi-code"].binary({ binary: "C:/custom/kimi-wrapper.exe" }), "C:/custom/kimi-wrapper.exe");
   // kimi-web：HTTP 服务但宿主 kimi 二进制承载。
   assert.equal(HARNESS_VERSION_PROBES["kimi-web"].binary({}), "kimi");
   assert.equal(HARNESS_VERSION_PROBES["kimi-web"].binary({ binary: "C:/custom/kimi-wrapper.exe" }), "C:/custom/kimi-wrapper.exe");

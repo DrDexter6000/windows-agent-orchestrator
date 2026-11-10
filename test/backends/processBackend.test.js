@@ -7,7 +7,6 @@ import path from "node:path";
 import { ProcessBackend } from "../../src/backends/processBackend.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
 import { CodexStreamParser } from "../../src/backends/parsers/codex.js";
 import { diagnoseFailure } from "../../src/diagnosis.js";
@@ -769,7 +768,6 @@ test("TD-104: worker environment includes assigned credential but excludes unrel
 
 test("TD-104: process backends declare only their assigned credential channels", () => {
   const claude = new ClaudeCodeBackend();
-  const kimi = new KimiCodeBackend();
   const codex = new CodexBackend();
 
   // credentialEnvNames delegates to the env-policy SSOT, which keys off
@@ -777,7 +775,6 @@ test("TD-104: process backends declare only their assigned credential channels",
   // TD-229（2026-10-07）+ 决定 0106：claude-code（唯一 OAuth 通道）无条件继承
   // 长期令牌名——OPTIONAL（缺席不阻断）。
   assert.deepEqual(claude.credentialEnvNames({ backend: "claude-code" }), ["CLAUDE_CODE_OAUTH_TOKEN"]);
-  assert.deepEqual(kimi.credentialEnvNames({ backend: "kimi-code" }), ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]);
   assert.deepEqual(codex.credentialEnvNames({ backend: "codex" }), ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"]);
 });
 
@@ -1302,7 +1299,7 @@ test("M12-21: runEventIsUsableEffect — five effect kinds + non-blank assistant
 // 开始返回 messageId，夹具不变、该断言不红，"后端家族开始写 messageId"无任何
 // 测试会察觉。本哨兵直接断言【后端真实产物】：ProcessBackend.spawn 返回体
 // messageId/admittedSeq === undefined（processBackend.js 显式写死）。红 = 家族
-// 开始真实返回 messageId（HTTP 家族 deepseek-harness 的形状），
+// 开始真实返回 messageId（HTTP 家族的形状），
 // 提示重新评估 R13-C 的全部 D 形状结论（cli.test.js R13-CLI-3 注释指向此处）。
 //
 // 断言取值不取键：spawn 返回体上键【存在】且值为 undefined（显式
@@ -1321,12 +1318,11 @@ test("R14-W3: 真实契约哨兵 — ProcessBackend 家族 spawn 结果 messageI
   // drain 真实子进程，不留孤儿。
   for await (const _ev of handle.events(new AbortController().signal)) { /* drain */ }
 
-  // (2) 家族成员（claude-code / kimi-code / codex 均 extends ProcessBackend，
+  // (2) 家族成员（claude-code / codex 均 extends ProcessBackend，
   //     其 spawn 返回体由 ProcessBackend.spawn 统一构造）。注入捕获型假 child
   //     只替换进程层——被测的返回体形状仍是真实 backend 代码的产物。
   const family = [
     ["claude-code", ClaudeCodeBackend],
-    ["kimi-code", KimiCodeBackend],
     ["codex", CodexBackend],
   ];
   for (const [name, Klass] of family) {

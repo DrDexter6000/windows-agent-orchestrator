@@ -70,20 +70,20 @@ function walkJs(dir, out) {
 //   backends/factory.js       — full-set-SSOT：构造闭集（capabilityMatrix 交叉钉）。
 //   registry.js               — full-set-SSOT：normalize 必填字段校验
 //                               （knownBackendsSsot 交叉钉；else 臂兜其余成员）。
-//   application/backendCliMap.js — CLI 探测映射轴：harness 自管进程的 backend
-//                               显式 null（注释在册）；kimi-web（HTTP attach）
-//                               与 zcode（registry 提供绝对 binary）不走 PATH
-//                               CLI 探测，在 BACKEND_CLI 缺席=缺省 null，合法；
-//                               二者各一次=BACKEND_OWN_READINESS 冻结表（doctor
-//                               自有就绪检查轴，键带引号以便本普查可见）。
+//   application/backendCliMap.js — CLI 探测映射轴：有 PATH CLI 可探的 backend
+//                               各一次；kimi-web（HTTP attach）与 zcode（registry
+//                               提供绝对 binary）不走 PATH CLI 探测，在 BACKEND_CLI
+//                               缺席=缺省 null，合法；二者各一次=
+//                               BACKEND_OWN_READINESS 冻结表（doctor 自有就绪
+//                               检查轴，键带引号以便本普查可见）。
 //   application/modelFamily.js  — 族系回退轴：modelId 不可解析时的展示缺省。
-//                               kimi-web→kimi（同 kimi-code 族）；codex→gpt（决定
+//                               kimi-web→kimi（K 血统）；codex→gpt（决定
 //                               0090：与写了 gpt 型号的 codex 车道同族，不再自成
 //                               一族）；zcode 有意不加（多 provider 宿主，缺省
 //                               UNKNOWN 是诚实）。
 //   application/registryInventory.js — 模型展示回退轴："(default)" 列表=normalize
-//                               不强制 model.id 的后端（恰为五老进程族后端；
-//                               kimi-web/zcode 在 normalize 强制 model.id，
+//                               不强制 model.id 的后端（claude-code/codex/
+//                               deepseek-acp；kimi-web/zcode 在 normalize 强制 model.id，
 //                               故不在列表——见 registryInventory.js:106 注释）。
 //   application/runStop.js     — （零身份串：服务端中止实现与停止事实的缺省
 //                               backend 均由 factory.js 的 serverStopTargetFor /
@@ -94,23 +94,25 @@ function walkJs(dir, out) {
 //                               残余字面=按后端差异化展示/校验轴。
 //   commands/doctor.js         — doctor 探测映射轴；zcode 一次=5a′ binary 文件
 //                               体检（zcode/kimi-web 经 BACKEND_OWN_READINESS
-//                               免 backend_map WARN，kimi-web 走 token/key 检查）。
+//                               免 backend_map WARN，kimi-web 走 token/key 检查）；
+//                               claude-code 一次=5d 认证模式检查。
 //   commands/onboarding.js     — zcode/kimi-web 无 CLI 探测面的显示覆盖轴。
 //   envPolicy.js               — env 允许清单轴（各后端凭据/环境变量策略）。
 //   hostAdapters/codexMcpConfig.js — codex 宿主适配轴。
 //   hostAdapters/hostDescriptors.js — 宿主描述符示例命令轴（宿主 id，非后端全集；
-//                               决定 0066 入表 kimi-code——与后端名同字面，
-//                               此处是 MCP 宿主身份而非 worker 后端分叉）。
+//                               决定 0066 入表的 kimi-code 宿主 id 曾与后端名同
+//                               字面——后端退役后该宿主 id 不在 KNOWN_BACKENDS，
+//                               本普查不再可见（宿主身份面由 mcpBind 等测试钉）。
 //   hostAdapters/hostRegistrationProbe.js — 决定 0066 宿主注册只读探测表的键
-//                               （claude-code / kimi-code 两个带引号的宿主 id；
-//                               同上，宿主身份轴，不参与 worker 后端分派）。
-//   smoke.js                   — 刻意最小探测面（factory.js 头注先例：无 kimi-
-//                               code 等亦然，kimi-web/zcode 不入最小面）。
+//                               （claude-code 宿主 id 带引号；宿主身份轴，
+//                               不参与 worker 后端分派）。
+//   smoke.js                   — 刻意最小探测面（factory.js 头注先例；
+//                               kimi-web/zcode 不入最小面）。
 //   owner-dashboard/*          — （当前零身份串；如未来出现按登记）。
 const REGISTERED_CENSUS = {
-  "application/backendCliMap.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, zcode: 1, "kimi-web": 1 },
-  "application/modelFamily.js": { codex: 2, "claude-code": 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1, "kimi-web": 1 },
-  "application/registryInventory.js": { "claude-code": 1, codex: 1, "kimi-code": 1, "deepseek-harness": 1, "deepseek-acp": 1 },
+  "application/backendCliMap.js": { "claude-code": 1, codex: 1, "deepseek-acp": 1, zcode: 1, "kimi-web": 1 },
+  "application/modelFamily.js": { codex: 2, "claude-code": 1, "deepseek-acp": 1, "kimi-web": 1 },
+  "application/registryInventory.js": { "claude-code": 1, codex: 1, "deepseek-acp": 1 },
   // 0056（TD-250，2026-10-11）：serveMaintenance 的清扫认领门——只认领
   // session.created 里 backend==="kimi-web" 的会话（轴向=会话归属声明消费，
   // 不选 backend、不分叉运行时行为；能力面由 supportsSessionRelease 承载）。
@@ -124,7 +126,6 @@ const REGISTERED_CENSUS = {
   // 沙箱身份标注（桶归属 fact），不选 backend、不分叉运行时行为。
   "projectIdentity.js": { codex: 1 },
   "backends/deepSeekAcp.js": { "deepseek-acp": 1 },
-  "backends/deepSeekHarness.js": { "deepseek-harness": 1 },
   "backends/kimiWeb.js": { "kimi-web": 1 },
   "backends/zcode.js": { zcode: 1 },
   // codex 解析器给自报失败原话打的运行时标签（ProcessBackend 拼进 run.error，
@@ -142,7 +143,7 @@ const REGISTERED_CENSUS = {
   // 0065（2026-10-12）：KNOWN_CLIS 改从 BACKEND_CLI 值域派生（修手抄漏 dsh 的
   // 两面口径分叉）——原数组字面里的 CLI 名 "codex" 随之离开本文件（doctor 的
   // 后端身份串轴不变）。
-  "commands/doctor.js": { "claude-code": 1, "deepseek-harness": 1, "kimi-code": 1, zcode: 1 },
+  "commands/doctor.js": { "claude-code": 1, zcode: 1 },
   // TD-258（2026-10-11）：recommendationReadyLabel 加 zcode/kimi-web 显示覆盖
   // （"无 CLI 探测面"/"serve 探测未覆盖"——轴向=无 CLI 面车道的错标修正，非
   // runtime 分叉）。
@@ -153,11 +154,11 @@ const REGISTERED_CENSUS = {
   // provider 分支随通道退役删除（2 处身份串离开本文件）。
   // 决定 0074（2026-10-13）：kimiServerTokenFile 按 backend==="kimi-web" 认领 kimiHome
   // 字段（凭据来源声明——同一文件既有的 per-backend 凭据名表的延伸，非运行时分叉）。
-  "envPolicy.js": { "claude-code": 2, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "kimi-web": 2 },
+  "envPolicy.js": { "claude-code": 2, "deepseek-acp": 2, zcode: 1, "kimi-web": 2 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
-  "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1, "kimi-code": 1 },
-  "hostAdapters/hostRegistrationProbe.js": { "claude-code": 1, "kimi-code": 1 },
-  "smoke.js": { "claude-code": 4, codex: 6, "deepseek-harness": 1 },
+  "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1 },
+  "hostAdapters/hostRegistrationProbe.js": { "claude-code": 1 },
+  "smoke.js": { "claude-code": 4, codex: 6 },
 };
 
 test("census 正身：src/ 后端身份串普查逐文件逐名字逐次数等于登记表（full-set 两文件豁免抄件）", () => {

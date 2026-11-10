@@ -32,12 +32,10 @@ const configuredBinary = (fallback) => (agent) => agent?.binary ?? fallback;
 export const HARNESS_VERSION_PROBES = Object.freeze({
   "claude-code": Object.freeze({ distribution: "claude", binary: configuredBinary("claude") }),
   "codex": Object.freeze({ distribution: "codex", binary: configuredBinary("codex") }),
-  "kimi-code": Object.freeze({ distribution: "kimi", binary: configuredBinary("kimi") }),
   // kimi-web：本地 HTTP 服务由宿主 kimi CLI 二进制承载（`kimi web`），`kimi --version`
   // 与服务器 banner 同源同版——探宿主二进制是诚实的运行时身份。
   "kimi-web": Object.freeze({ distribution: "kimi-web", binary: configuredBinary("kimi") }),
   "deepseek-acp": Object.freeze({ distribution: "dsh", binary: configuredBinary("dsh") }),
-  "deepseek-harness": Object.freeze({ distribution: "dsh-jsonrpc-agent", binary: configuredBinary("dsh-jsonrpc-agent") }),
   // zcode：桌面捆绑 zcode.cjs（node 脚本）。席位配置必填 binary（安装路径随桌面
   // 更新漂移）；无席位 fallback 裸名不在 PATH → honest unknown。真实探测依赖
   // backend resolveInvocationPrefix 提供 node 入口前缀（component-check 已接线）。

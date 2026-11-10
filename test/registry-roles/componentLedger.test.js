@@ -64,7 +64,7 @@ function fixtureLlm(overrides = {}) {
   return {
     kind: "llm",
     identity: {
-      backend: "deepseek-harness",
+      backend: "zcode",
       providerID: "deepseek",
       modelId: "deepseek-v4-flash",
       providerKey: PKEY,
@@ -72,7 +72,7 @@ function fixtureLlm(overrides = {}) {
     runtimeVersion: "node v22.x",
     adapterVersion: "dsh-acp@0.1",
     configDigest: "sha256:cafe1234",
-    contract: { name: "deepseek-harness-events", version: "1.2.0" },
+    contract: { name: "zcode-events", version: "1.2.0" },
     environment: "win32",
     runId: "run_fixture_001",
     qualifiedBy: "composition-cert",
@@ -84,7 +84,7 @@ function fixtureLlm(overrides = {}) {
 function backendPassRecord(overrides = {}) {
   return recordComponentCheck({
     kind: "backend",
-    name: "deepseek-harness",
+    name: "zcode",
     codeRef: HEAD,
     result: "pass",
     reason: "contract checks passed",
@@ -108,11 +108,11 @@ function llmPassRecord(overrides = {}) {
     checks: [{ name: "tool-result-read", pass: true, detail: "random value read from tool result" }],
     fixture: {
       kind: "backend",
-      identity: { backend: "deepseek-harness", providerID: "deepseek", modelId: "deepseek-v4-flash", providerKey: PKEY },
+      identity: { backend: "zcode", providerID: "deepseek", modelId: "deepseek-v4-flash", providerKey: PKEY },
       runtimeVersion: "node v22.x",
       adapterVersion: "dsh-acp@0.1",
       configDigest: "sha256:cafe1234",
-      contract: { name: "deepseek-harness-events", version: "1.2.0" },
+      contract: { name: "zcode-events", version: "1.2.0" },
       environment: "win32",
       runId: "run_fixture_002",
       qualifiedBy: "composition-cert",
@@ -149,8 +149,8 @@ function writeLedger(name, records, options = {}) {
 // ── 1. 键构造两族 ────────────────────────────────────────────────────────────
 
 test("keys: backend 族键形 backend:<name>@<codeRef>（codeRef = 验证时 git HEAD）", () => {
-  const key = backendComponentKey({ name: "deepseek-harness", codeRef: HEAD });
-  assert.equal(key, `backend:deepseek-harness@${HEAD}`);
+  const key = backendComponentKey({ name: "zcode", codeRef: HEAD });
+  assert.equal(key, `backend:zcode@${HEAD}`);
   assert.match(key, /^backend:[^@]+@[^@]+$/);
   assert.equal(componentKeyKind(key), "backend");
 });
@@ -194,7 +194,7 @@ test("keys: kind 命名空间与 ADR-0026 四元组键空间（workers 映射的
   for (const agentId of ["researcher", "coder_hq", "coder_low", "auditor"]) {
     assert.equal(componentKeyKind(agentId), null, `agentId "${agentId}" 不得被误认成组件键`);
   }
-  const backendKey = backendComponentKey({ name: "deepseek-harness", codeRef: HEAD });
+  const backendKey = backendComponentKey({ name: "zcode", codeRef: HEAD });
   const llmKey = llmComponentKey({ providerID: "deepseek", modelId: "m", providerKey: PKEY });
   assert.notEqual(backendKey, llmKey, "两族键恒不相等（前缀不同）");
   assert.deepEqual(COMPONENT_KINDS, ["backend", "llm"]);
@@ -205,7 +205,7 @@ test("keys: kind 命名空间与 ADR-0026 四元组键空间（workers 映射的
 test("record: 显式分 subject 与 fixture（§4 夹具入账：四元组+版本+摘要+环境+runId+资格依据）", () => {
   const record = backendPassRecord();
   assert.equal(record.subject.kind, "backend");
-  assert.equal(record.subject.name, "deepseek-harness");
+  assert.equal(record.subject.name, "zcode");
   assert.equal(record.subject.codeRef, HEAD);
   const fixture = record.fixture;
   assert.equal(fixture.kind, "llm", "验 backend → 夹具是对侧 llm");
@@ -216,7 +216,7 @@ test("record: 显式分 subject 与 fixture（§4 夹具入账：四元组+版�
   );
   assert.equal(fixture.runId, "run_fixture_001");
   assert.equal(fixture.qualifiedBy, "composition-cert");
-  assert.deepEqual(fixture.contract, { name: "deepseek-harness-events", version: "1.2.0" });
+  assert.deepEqual(fixture.contract, { name: "zcode-events", version: "1.2.0" });
   assert.equal(fixture.configDigest, "sha256:cafe1234");
   assert.equal(fixture.environment, "win32");
   assert.equal(record.caseId, record.key, "mergeCaseResults 复用的合并键 = 组件键");
@@ -403,14 +403,14 @@ test("merge: 同键刷新、未重跑保留、全新键追加（复用 mergeCase
   assert.equal(byKey.get(old.key).result, "pass", "重验证刷新同键记录");
   assert.equal(byKey.get(other.key).result, "pass", "未重跑的其它组件记录保留");
   const appended = mergeComponentRecords(merged, [
-    recordComponentCheck({ kind: "backend", name: "kimi-code", codeRef: HEAD, result: "fail", lastVerifiedAt: NOW }),
+    recordComponentCheck({ kind: "backend", name: "codex", codeRef: HEAD, result: "fail", lastVerifiedAt: NOW }),
   ]);
   assert.equal(appended.length, 3, "全新键追加");
 });
 
 test("prune: 同 kind 键级僵尸清理；kind 未被清单覆盖的记录不动（scope 守卫）", () => {
   const backendOld = recordComponentCheck({
-    kind: "backend", name: "deepseek-harness", codeRef: OTHER_HEAD, result: "pass", lastVerifiedAt: NOW,
+    kind: "backend", name: "zcode", codeRef: OTHER_HEAD, result: "pass", lastVerifiedAt: NOW,
   });
   const backendCur = backendPassRecord();
   const llm = llmPassRecord();
@@ -427,7 +427,7 @@ test("prune: 同 kind 键级僵尸清理；kind 未被清单覆盖的记录不�
 test("summarize: counts 按组件层三值闭集、versioned、generatedAt 可注入、allPassed 语义", () => {
   const pass = backendPassRecord();
   const fail = recordComponentCheck({
-    kind: "backend", name: "kimi-code", codeRef: HEAD, result: "fail", lastVerifiedAt: NOW,
+    kind: "backend", name: "codex", codeRef: HEAD, result: "fail", lastVerifiedAt: NOW,
   });
   const blocked = llmPassRecord({ result: "blocked" });
   const summary = summarizeComponentLedger([pass, fail, blocked], { generatedAt: NOW });
@@ -673,7 +673,7 @@ test("annotateRuntimeDrift: 同 (name, codeRef) 异指纹的历史记录降 runt
   const prior = [
     recordComponentCheck({ kind: "backend", name: "codex", codeRef: "abc123", runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old0" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
     recordComponentCheck({ kind: "backend", name: "codex", codeRef: "other", runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old1" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
-    recordComponentCheck({ kind: "backend", name: "kimi-code", codeRef: "abc123", runtimeIdentity: { distribution: "kimi", version: "1", fingerprint: "v1-old2" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
+    recordComponentCheck({ kind: "backend", name: "kimi-web", codeRef: "abc123", runtimeIdentity: { distribution: "kimi-web", version: "1", fingerprint: "v1-old2" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
     recordComponentCheck({ kind: "llm", providerID: "p", modelId: "m", providerKey: null, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }] }),
   ];
   const fresh = [recordComponentCheck({

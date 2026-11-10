@@ -775,7 +775,7 @@ test("R5-B: doctor scoped——registry 无 worker 时 CLI/key 全部 INFO 跳�
     assert.equal(parsed.advisory, true, "JSON 顶层应有 advisory=true");
     assert.equal(parsed.verdict, "HEALTHY（advisory，非门禁）", "无 FAIL 无 WARN → HEALTHY + 非门禁标注");
     assert.equal(result.status, 0);
-    for (const cli of ["claude", "codex", "dsh", "kimi"]) {
+    for (const cli of ["claude", "codex", "dsh"]) {
       const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
       assert.ok(c, `应有 cli_${cli} 检查项`);
       assert.equal(c.status, "info", `无 worker 需要 ${cli} → INFO 跳过`);
@@ -872,45 +872,6 @@ test("R5-B: doctor scoped key——只查保留 worker 声明的 env 名；缺�
   }
 });
 
-test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 kimi API key", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-kimi-key-"));
-  try {
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: {
-        coder_mm: { backend: "kimi-code", cwd: dir },
-        coder_hq: {
-          backend: "deepseek-acp",
-          credentialEnv: "KIMI_API_KEY",
-          cwd: dir,
-        },
-      },
-    }), "utf8");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js", "wao", "doctor",
-      "--registry", registryPath,
-      "--cwd", dir,
-      "--format", "json",
-    ], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      env: { ...process.env, KIMI_API_KEY: "fake-kimi-key" },
-      timeout: 10000,
-    });
-    const parsed = JSON.parse(result.stdout);
-    const kimiChecks = parsed.checks.filter((c) => c.name === "key_KIMI_API_KEY");
-    // R5 审计 P1-2：kimi 登录态特例只作用于 kimi-code worker 自身（envPolicy 零声明）；
-    // 其他 worker 声明的 KIMI_API_KEY 是该 worker 真正需要的 env，必须照常检查
-    // （进程 env 已注入 fake-kimi-key → OK）。有真实检查在场时不再叠同名 INFO 说明项。
-    assert.equal(kimiChecks.length, 1, "声明的 KIMI_API_KEY 恰一条真实检查（无同名 INFO 叠加）");
-    assert.equal(kimiChecks[0].pass, true);
-    assert.equal(kimiChecks[0].status, "ok", "fake-kimi-key 已注入进程 env → 存在性检查 OK（未被特例吞掉）");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示，不退回全量 FAIL", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-doctor-no-registry-"));
   try {
@@ -926,7 +887,7 @@ test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示�
     assert.ok(reg, "缺位回退应有 registry INFO 项");
     assert.equal(reg.status, "info");
     assert.match(reg.detail, /onboarding --agent <id> --apply/);
-    for (const cli of ["claude", "codex", "dsh", "kimi"]) {
+    for (const cli of ["claude", "codex", "dsh"]) {
       const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
       assert.ok(c && c.status === "info", "registry 缺失时 CLI 检查全部 INFO");
     }
@@ -945,7 +906,7 @@ test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示�
 // 不改退出码（0023 红线）。fixture 目录先 wao init 把 verdict 隔离到被测面
 // （wao_init WARN 不混入断言）；HOME/USERPROFILE 指向空目录隔离本机 OAuth 凭据；
 // dummy key 沿 TD-107 doctorSpawnEnv。
-// CLI 探测沿既有套件假设（claude/kimi/dsh CLI 在 PATH——与本文件其它 doctor 测试一致）。
+// CLI 探测沿既有套件假设（claude/codex/dsh CLI 在 PATH——与本文件其它 doctor 测试一致）。
 
 
 test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（无条目）", () => {
@@ -991,10 +952,10 @@ test("R9-C C-3: doctor 两席 → panel_readiness INFO 打印、不计 DEGRADED�
 test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展示行（登录态/探测未知）", () => {
   const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-none-", {
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
-    coder_mm: { backend: "kimi-code", model: { id: "kimi-code/k3" }, cwd: "." },
-    // deepseek-harness 归一化必填 dshConfigPath+credentialEnv（0065 起 doctor
-    // panel 行过归一化门——夹具用合法形状）。
-    coder_dsh: { backend: "deepseek-harness", model: { id: "deepseek-v4-pro" }, cwd: ".", dshConfigPath: "C:/wao-test/dsh.json", credentialEnv: "DEEPSEEK_API_KEY" },
+    coder_mm: { backend: "codex", model: { id: "gpt-6-astra" }, cwd: "." },
+    // kimi-web 无 PATH CLI 面、凭据走 tokenEnv（doctorSpawnEnv 注入 KIMI_WEB_TOKEN）
+    // ——归一化必填 serveUrl/model/tokenEnv 齐备。
+    coder_kw: { backend: "kimi-web", serveUrl: "http://127.0.0.1:58628", model: { id: "kimi-code/k3" }, tokenEnv: "KIMI_WEB_TOKEN", cwd: "." },
   });
   try {
     const r = doctorPanelRun(dir, registryPath);
@@ -1006,13 +967,12 @@ test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展�
     assert.match(panel.detail, /no_reviewer_available/, "闭集码列在提示内");
     assert.match(panel.detail, /登录态未验证（不计入可用）：auditor、coder_mm/,
       "login_based 席位如实展示（auditor+coder_mm）");
-    // 0065/TD-258：deepseek-harness 无 CLI 映射但声明 credentialEnv → key_only 面
+    // 0065/TD-258：kimi-web 无 CLI 映射但声明 tokenEnv → key_only 面
     // （不是探测未知——key 名可解析是如实展示位，两者不同桶）。
-    assert.match(panel.detail, /key 名已解析但无 CLI 探测面（未验证令牌\/serve 可达性，不计入可用）：coder_dsh/,
-      "C-12：key_only 面如实展示（deepseek-harness 无 CLI 映射+凭据声明）");
-    // deepseek-harness 触发 backend_map WARN → verdict DEGRADED，但无 FAIL：
-    // WARN/INFO 都不改 advisory 退出码。
-    assert.equal(r.status, 0, "WARN/INFO 面不改退出码（无 FAIL）");
+    assert.match(panel.detail, /key 名已解析但无 CLI 探测面（未验证令牌\/serve 可达性，不计入可用）：coder_kw/,
+      "C-12：key_only 面如实展示（kimi-web 无 CLI 映射+tokenEnv 声明）");
+    // INFO 面不改 advisory 退出码。
+    assert.equal(r.status, 0, "INFO 面不改退出码（无 FAIL）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1548,8 +1508,8 @@ test("TD-75: status 终态 failed run 也输出心跳（Lead 据此判死前是�
 // ---------------------------------------------------------------------------
 // R13（2026-08-18，TD-127）：retry 任务文本取法绑定修复。
 // R13-C（同日验收会审返工，auditor P1-1）：删除 R13 的 messageId 优先收窄，
-// 回归纯 findLatestBound。复核依据：claudeCode.js:35 / kimiCode.js:24 /
-// codex.js:13 全部 extends ProcessBackend，其 spawn 结果 messageId === undefined
+// 回归纯 findLatestBound。复核依据：claudeCode.js /
+// codex.js 全部 extends ProcessBackend，其 spawn 结果 messageId === undefined
 // （processBackend.js:340），transcript.append 的 JSON.stringify 丢 undefined 键
 // （transcript.js:670）→ 该家族合法 TD-54 双写【两条都无 messageId】——
 // "同 runId 无 messageId 伪造被收窄挡下"的宣称对该家族完全不成立（探针 D：

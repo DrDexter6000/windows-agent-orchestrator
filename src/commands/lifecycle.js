@@ -50,7 +50,7 @@ import { assertValidModelOverride, assertValidReasoningOverride, isValidModelOve
  *     shape-identical to a legal append and the attacker already has runs/
  *     write power. R13 tried a "prefer the last event WITH a messageId"
  *     narrowing on top; R13-C REMOVED it: for the ProcessBackend family
- *     (claudeCode.js / kimiCode.js / codex.js all extend ProcessBackend)
+ *     (claudeCode.js / codex.js all extend ProcessBackend)
  *     the spawn result carries messageId: undefined, which transcript
  *     serialization drops — BOTH legal writes land bare, so the narrowing
  *     was dead code for that family (a bare forged tail beat it via the

@@ -24,7 +24,6 @@
 | TD-106 | Tester 上下文效率属 Codex 产品与订阅配额问题，WAO 刻意不吸收该职责 | 设计性约束 | 未定 |  |
 | TD-108 | evidence fallback 调用未按 expectedRunId 过滤，跨 run 证据污染仍是理论风险 | 开放 | 等样本：跨 run 证据污染实证，或需接受混合历史 transcript |  |
 | TD-115 | lastHealthyRunAt 非 sticky，重跑失败后新鲜度归空，失败场景拿不到上次健康时间 | 开放 | 等样本：Lead 实际需要失败场景的历史新鲜度 |  |
-| TD-117 | kimi-code 与 deepseek-harness 两个后端暂停使用、不配车道：kimi-code 不上报用量，deepseek-harness 不支持会话复用；在用的是 kimi-web 与 deepseek-acp | 等待裁定 | 待 Owner 决定是否退役（2026-11-10 巡检 Lead 建议两个都退役，按决定 0105 的做法）；若保留，再等巡检确认能力补足且明显优于在用后端 | 0074 0105 src/backends/kimiCode.js src/backends/deepSeekHarness.js |
 | TD-118 | 技能安装是指向仓库根的 junction，改动写盘即生效于所有会话，无提交闸门 | 设计性约束 | fresh clone 后需重新安装 | SKILL.md |
 | TD-123 | 全行扫描正则对注释/字符串有假阳性面，application 的 bare 包出边未入方向矩阵 | 开放 | 等样本：首次全行扫描假红实证；触碰 layering 矩阵时顺带补 bare 包出边 |  |
 | TD-124 | 静态规则可被单行 join 逃逸、白名单非行内容锚定、深度2写者未覆盖 | 开放 | 等样本：首次真实逃逸实证；触碰守卫/白名单时顺带收紧 | src/application/sessionReuse.js |

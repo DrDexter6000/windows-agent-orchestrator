@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
+import { ZcodeBackend } from "../../src/backends/zcode.js";
 import { CLAUDE_OAUTH_TOKEN_ENV } from "../../src/envPolicy.js";
 
 // TD-229（2026-10-07，sol 验收 P2-1）：本文件钉 native 通道【拷贝路径】的隔离目录
@@ -76,6 +76,12 @@ function makeCapturingSpawn() {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    // stdio 协议族（zcode/claude-code）会向 stdin 写行/收尾——假写入立即成功，
+    // 行不被消费；end/destroy 无操作（close 事件另行触发）。
+    child.stdin = new EventEmitter();
+    child.stdin.write = (_data, cb) => (typeof cb === "function" ? cb() : undefined);
+    child.stdin.end = (cb) => (typeof cb === "function" ? cb() : undefined);
+    child.stdin.destroy = () => {};
     child.pid = 6262 + captures.length;
     child.exitCode = null;
     child.signalCode = null;
@@ -247,11 +253,21 @@ test("M12-14: codex 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async
   assert.equal(envEntriesCaseInsensitive(captures[0].opts.env, MANAGED).length, 0, "codex 不接收 claude-only 变量");
 });
 
-test("M12-14: kimi-code 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async () => {
+test("M12-14: zcode 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async () => {
+  // spawnFn 在握手前被调用——env 组装事实此刻已定格；假子进程随即 close，
+  // 握手按 transport-closed 拒绝（预期拒绝，不影响已捕获的 env 断言）。
   const { spawnFn, captures } = makeCapturingSpawn();
-  const backend = new KimiCodeBackend({ spawnFn });
-  await spawnAndCapture(backend, { id: "k", backend: "kimi-code", binary: "fake-kimi", cwd: process.cwd() }, { prompt: "do" });
-  assert.equal(envEntriesCaseInsensitive(captures[0].opts.env, MANAGED).length, 0, "kimi 不接收 claude-only 变量");
+  const backend = new ZcodeBackend({ spawnFn });
+  const agent = {
+    id: "z",
+    backend: "zcode",
+    binary: "C:/fake/zcode.cjs",
+    cwd: process.cwd(),
+    model: { id: "bigmodel-api/GLM-5.3" },
+  };
+  await assert.rejects(() => backend.spawn(agent, { prompt: "do" }));
+  assert.equal(captures.length, 1, "恰好一次 spawn");
+  assert.equal(envEntriesCaseInsensitive(captures[0].opts.env, MANAGED).length, 0, "zcode 不接收 claude-only 变量");
 });
 
 // ── 2026-10-05（auditor_claude 席位批）：native OAuth 通道的隔离目录机制钉 ────

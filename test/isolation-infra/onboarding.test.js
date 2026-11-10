@@ -49,7 +49,7 @@ import { renderHuman } from "../../src/commands/onboarding.js";
 
 // ── Template fixtures ────────────────────────────────────────────────────────
 // A faithful miniature of config/agents.example.json: top-level + per-agent
-// _comment* keys, a credential-bearing deepseek-acp worker, a kimi worker, and a
+// _comment* keys, a credential-bearing deepseek-acp worker, a codex worker, and a
 // certification matrix covering a subset (mirrors the real template where not
 // every worker has a matrix entry).
 const TEMPLATE = {
@@ -70,10 +70,10 @@ const TEMPLATE = {
     },
     coder_mm: {
       _comment: "[Coder-MM] role comment",
-      backend: "kimi-code",
+      backend: "codex",
       cwd: ".",
       systemPrompt: "config/roles/coder_mm.md",
-      model: { id: "kimi-code/k3" },
+      model: { id: "gpt-6-astra" },
     },
     auditor: {
       _comment: "[Auditor] role comment",
@@ -99,7 +99,7 @@ const TEMPLATE = {
       },
       {
         agentId: "coder_mm",
-        label: "Kimi K3",
+        label: "GPT Astra",
         profile: "strict",
         drills: ["sentinel", "scorecard"],
       },
@@ -1134,14 +1134,12 @@ test("R6-C: buildRecommendations derives rows from template rows (backend→CLI,
 });
 
 // R6-C3（P2-4）：映射收敛到 src/application/backendCliMap.js 单一来源（本模块
-// re-export），并补上此前两份重复表都漏掉的活 backend deepseek-harness——
-// JSON-RPC 适配器无独立 CLI 可探，显式 null。
-test("R6-C: backend→CLI mapping covers all live backends (null = no standalone CLI)", () => {
+// re-export）。zcode/kimi-web 不在表里（无 PATH CLI 可探，doctor 自有就绪检查
+// 覆盖，见 BACKEND_OWN_READINESS）。
+test("R6-C: backend→CLI mapping covers all CLI-probe backends", () => {
   assert.deepEqual(BACKEND_CLI, {
     "claude-code": "claude",
     codex: "codex",
-    "kimi-code": "kimi",
-    "deepseek-harness": null,
     // ADR-0031：ACP 线直接驱动上游 dsh CLI（CLI 在场 ≠ 就绪，还需操作员安装
     // containment 覆盖层——见 docs/usage.md）。
     "deepseek-acp": "dsh",
@@ -1217,19 +1215,19 @@ test("R6-C: rows are sorted ready-first (stable within rank)", async () => {
       r: { backend: "deepseek-acp", credentialEnv: "K1", model: { id: "m" } },
       m1: { backend: "codex", model: { id: "m" } },
       m2: { backend: "deepseek-acp", credentialEnv: "K2", model: { id: "m" } },
-      l: { backend: "kimi-code", model: { id: "m" } },
-      u: { backend: "deepseek-harness", model: { id: "m" } },
+      l: { backend: "claude-code", model: { id: "m" } },
+      u: { backend: "zcode", model: { id: "p/m" } },
     },
   };
   const candidates = [
     { id: "m2", backend: "deepseek-acp", model: "m" },      // missing_key
-    { id: "l", backend: "kimi-code", model: "m" },          // login_based
+    { id: "l", backend: "claude-code", model: "m" },        // login_based
     { id: "r", backend: "deepseek-acp", model: "m" },       // ready
     { id: "m1", backend: "codex", model: "m" },             // missing_cli
-    { id: "u", backend: "deepseek-harness", model: "m" },   // 无 CLI 面 → unknown
+    { id: "u", backend: "zcode", model: "p/m" },            // 无 CLI 面 → unknown
   ];
   const rec = await buildRecommendations(candidates, custom, {
-    hasCli: async (n) => n === "dsh" || n === "kimi", // codex missing
+    hasCli: async (n) => n === "dsh" || n === "claude", // codex missing
     hasKeyEnv: async (n) => (n === "K1" ? "process_env" : "missing"),
   });
   assert.deepEqual(rec.rows.map((r) => r.id), ["r", "l", "m1", "m2", "u"],
@@ -1251,20 +1249,20 @@ test("R6-C: one probe per unique CLI/key name (≤4 CLI probes + ≤N key probes
     agents: {
       r1: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "m" } },
       r2: { backend: "deepseek-acp", credentialEnv: "DEEPSEEK_API_KEY", model: { id: "m" } },
-      r3: { backend: "kimi-code", model: { id: "m" } },
+      r3: { backend: "codex", model: { id: "m" } },
     },
   };
   const candidates = [
     { id: "r1", backend: "deepseek-acp", model: "m" },
     { id: "r2", backend: "deepseek-acp", model: "m" },
-    { id: "r3", backend: "kimi-code", model: "m" },
+    { id: "r3", backend: "codex", model: "m" },
   ];
   const calls = { cli: [], key: [] };
   await buildRecommendations(candidates, custom, {
     hasCli: async (n) => { calls.cli.push(n); return true; },
     hasKeyEnv: async (n) => { calls.key.push(n); return "missing"; },
   });
-  assert.deepEqual(calls.cli, ["dsh", "kimi"], "deduped per unique CLI name");
+  assert.deepEqual(calls.cli, ["dsh", "codex"], "deduped per unique CLI name");
   assert.deepEqual(calls.key, ["DEEPSEEK_API_KEY"], "deduped per unique key name");
   assert.ok(calls.cli.length <= 4, "hard bound: at most 4 CLI probes");
 });
@@ -1324,7 +1322,7 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   const textMissing = renderHuman(nothing);
   assert.ok(textMissing.includes("缺 dsh CLI"), "missing_cli label");
   assert.ok(textMissing.includes("缺 DEEPSEEK_API_KEY"), "missing_key label");
-  assert.ok(textMissing.includes("缺 kimi CLI"), "kimi missing_cli label");
+  assert.ok(textMissing.includes("缺 codex CLI"), "codex missing_cli label");
   assert.ok(textMissing.includes("缺 dsh CLI + 缺 DEEPSEEK_API_KEY"), "missing_both label");
   assert.ok(!textMissing.includes("[ready]"), "nothing is ready in this scenario");
 });
@@ -1818,7 +1816,7 @@ test("R9: 分级块每行显示宽 ≤120（与矩阵块同纪律）", async () 
   const { displayWidth } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const root = tmpTemplate({
-    coder_dsh_fallback: { backend: "deepseek-harness", model: { id: "deepseek-v4-flash" }, dshConfigPath: "C:/wao-test/dsh.json", credentialEnv: "DEEPSEEK_API_KEY" },
+    coder_zcode_fallback: { backend: "zcode", binary: "C:/wao-test/zcode.cjs", model: { id: "bigmodel-api/GLM-5.3" } },
     auditor: { backend: "claude-code", model: { id: "claude-opus-5" } },
     coder_hq: { backend: "deepseek-acp", credentialEnv: "ZHIPU_API_KEY", model: { id: "glm-5.3[1m]" } },
     coder_mm: { backend: "deepseek-acp", credentialEnv: "KIMI_API_KEY", model: { id: "kimi-code/k3" } },
@@ -2155,8 +2153,8 @@ const GOLDEN_TEMPLATE_MATRIX = `车道矩阵与当前环境适配（推荐按你
   id                       backend         model               状态
   coder_low                deepseek-acp    deepseek-v4-flash   [ready]
     认证: key DEEPSEEK_API_KEY
-  coder_mm                 kimi-code       kimi-code/k3        [CLI 登录态]
-    认证: kimi CLI 登录态
+  coder_mm                 codex           gpt-6-astra         [CLI 登录态]
+    认证: codex CLI 登录态
   auditor                  claude-code     claude-opus-5       [CLI 登录态]
     认证: claude CLI 登录态（官方 Claude OAuth（claude logi…
   各车道擅长什么、有什么限制：npm run cli -- wao lanes
@@ -2305,7 +2303,7 @@ test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + dr
   const priv = {
     agents: {
       coder_low: privEntry("deepseek-acp", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
-      my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有
+      my_extra: { backend: "codex", cwd: ".", model: { id: "gpt-6-astra" } }, // 私有独有
       bad_seat: privEntry("not-a-real-backend", "deepseek-v4-flash", "ZHIPU_API_KEY"), // 无效 → 剔除
     },
   };
@@ -2331,7 +2329,7 @@ test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + dr
   const extraIdx = lines.findIndex((l) => l.startsWith("  my_extra "));
   assert.ok(extraIdx !== -1);
   assert.ok(!lines[extraIdx].includes("·模板候选"), "私有独有行不打模板候选标");
-  assert.ok(lines[extraIdx + 1].includes("认证: kimi CLI 登录态"), "私有独有行认证照常");
+  assert.ok(lines[extraIdx + 1].includes("认证: codex CLI 登录态"), "私有独有行认证照常");
   assert.ok(!lines[extraIdx + 1].includes("?"), "私有独有行不打 ?");
   assert.ok(text.includes(
     "drift: coder_low 私有 model=deepseek-v4-pro/backend=deepseek-acp ≠ 模板 deepseek-v4-flash/deepseek-acp"),
@@ -2394,7 +2392,7 @@ test("R11-2 0024 drift 闭集仅 backend + model.id：model 兄弟字段（provi
         cwd: ".",
         model: { providerID: "deepseek", id: "deepseek-v4-pro", variant: "legacy-a", contextWindow: 1000000 },
       },
-      swp: { backend: "kimi-code", cwd: ".", model: { providerID: "kimi", id: "kimi-code/k3" } },
+      swp: { backend: "codex", cwd: ".", model: { id: "gpt-6-astra" } },
     },
   };
   const priv = {
@@ -2426,8 +2424,8 @@ test("R11-2 0024 drift 闭集仅 backend + model.id：model 兄弟字段（provi
   const swp = r.recommendations.rows.find((x) => x.id === "swp");
   assert.equal(keep.drift, undefined, "providerID/contextWindow/variant 形状差异 ≠ drift");
   assert.ok(swp.drift, "backend 差异 = drift");
-  assert.equal(swp.drift.templateBackend, "kimi-code");
-  assert.equal(swp.drift.templateModel, "kimi-code/k3");
+  assert.equal(swp.drift.templateBackend, "codex");
+  assert.equal(swp.drift.templateModel, "gpt-6-astra");
 });
 
 test("R11-2 0024 私有 ≥ 帽：私有先占 64、模板显 0 + 尾注指向模板文件 + 溢出事实在场", async () => {

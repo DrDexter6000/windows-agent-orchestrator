@@ -5,7 +5,7 @@
 // Proves that a configured `agent.systemPrompt` (role contract) is loaded by
 // a shared, backend-neutral loader, validated before transcript/spawn, and
 // delivered exactly once to each process backend (claude-code / codex /
-// kimi-code) without leaking into the transcript or letting the Lead/model
+// the process backends) without leaking into the transcript or letting the Lead/model
 // override it.
 
 import { test } from "node:test";
@@ -17,7 +17,6 @@ import { join, resolve } from "node:path";
 import { loadRoleContract } from "../../src/application/roleContract.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 
 // ===== Helpers =====
 
@@ -234,32 +233,11 @@ test("M11-5-B2b: codex multi-line role contract — newline/CR/tab escaped for v
 });
 
 // ---------------------------------------------------------------------
-// B3: kimi-code combines role + task with fixed delimiter; role first,
-//     task second, each exactly once.
-// ---------------------------------------------------------------------
-test("M11-5-B3: kimi-code buildArgs combines role+task, role first, task second, each once", () => {
-  const backend = new KimiCodeBackend();
-  const buildArgs = getBuildArgs(backend);
-  const agent = {};
-  const task = { prompt: "TASK_MARKER", roleContract: "ROLE_MARKER_KIMI" };
-  const args = buildArgs(agent, task);
-  // find the combined prompt arg (the one containing both)
-  const combined = args.find((a) => typeof a === "string" && a.includes("ROLE_MARKER_KIMI") && a.includes("TASK_MARKER"));
-  assert.ok(combined, "role and task combined into one prompt arg");
-  // role before task
-  assert.ok(combined.indexOf("ROLE_MARKER_KIMI") < combined.indexOf("TASK_MARKER"),
-    "role appears before task");
-  // each exactly once
-  assert.equal(combined.split("ROLE_MARKER_KIMI").length - 1, 1, "role exactly once");
-  assert.equal(combined.split("TASK_MARKER").length - 1, 1, "task exactly once");
-});
-
-// ---------------------------------------------------------------------
 // B4: no roleContract → all three backends behave identically to legacy
 //     (argv unchanged, no role-related flags).
 // ---------------------------------------------------------------------
 test("M11-5-B4: no roleContract → all three backends legacy-compatible argv", () => {
-  for (const BackendClass of [ClaudeCodeBackend, CodexBackend, KimiCodeBackend]) {
+  for (const BackendClass of [ClaudeCodeBackend, CodexBackend]) {
     const backend = new BackendClass();
     const buildArgs = getBuildArgs(backend);
     const agent = {};

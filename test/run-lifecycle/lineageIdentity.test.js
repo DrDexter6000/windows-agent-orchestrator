@@ -10,7 +10,7 @@
 //     opaque uuid 与路由键；
 //   - 换 Lead 会话（模拟宿主重启）身份不变；谱系有非终态续修子运行时，
 //     换 Lead 会话再续修仍 busy；
-//   - 原生 id 车道（kimi-code）：换 Lead 会话后仍按父转录取回 native id；
+//   - 原生 id 车道（codex）：换 Lead 会话后仍按父转录取回 native id；
 //   - explicit 父档可续：子运行 argv 带父钉住的车道/角色；角色正文漂移 →
 //     role_contract_drift；
 //   - 专家复用（lead_workspace）不变：同 Lead 会话 resume、换 Lead 会话 first。
@@ -40,7 +40,7 @@ import {
 import { loadRoleContract, roleContractSha256 } from "../../src/application/roleContract.js";
 import { readRegistry } from "../../src/registry.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
+import { CodexBackend } from "../../src/backends/codex.js";
 
 const LANE = "opus";
 const ROLE = "auditor";
@@ -372,16 +372,16 @@ test("0114-LI-3: an in-flight continuation is still busy for a restarted host (b
 // =====================================================================
 
 test("0114-LI-4: native-id lane recovers the parent transcript's native id after a host restart", async () => {
-  const RUN = "run_0114_li_kimi_root";
-  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
+  const RUN = "run_0114_li_codex_root";
+  const NATIVE = "01a0c56d-981d-7ad3-9613-0050e1546f8d";
   const repo = makeRepo();
   const parent = buildParentWorktree(repo, RUN);
-  const dir = mkdtempSync(join(tmpdir(), "wao-0114-li-kimi-"));
-  const registryPath = makeRegistry(dir, { kimi_worker: { backend: "kimi-code", cwd: repo } });
+  const dir = mkdtempSync(join(tmpdir(), "wao-0114-li-codex-"));
+  const registryPath = makeRegistry(dir, { codex_worker: { backend: "codex", cwd: repo } });
   try {
     const { fakeSpawn: dispatchSpawn, calls: dispatchCalls } = makeFakeSpawn();
     const dispatched = await dispatchRun({
-      agentId: "kimi_worker",
+      agentId: "codex_worker",
       prompt: "deliver",
       registryPath,
       runDir: dir,
@@ -397,19 +397,19 @@ test("0114-LI-4: native-id lane recovers the parent transcript's native id after
     const firstRouting = JSON.parse(argVal(dispatchCalls, "--session-reuse-json"));
     const material = JSON.parse(argVal(dispatchCalls, "--reuse-material-json"));
     await seedRootLifecycle({
-      dir, repo, runId: RUN, agentId: "kimi_worker", parent,
-      backend: "kimi-code",
+      dir, repo, runId: RUN, agentId: "codex_worker", parent,
+      backend: "codex",
       session: {
-        backend: "kimi-code",
+        backend: "codex",
         backendSessionId: "proc_43244",
         boundProviderSessionId: NATIVE,
       },
     });
     // 父转录取回的是运行期绑定的 native id（不是 proc_ 占位）。
     assert.equal(await resolvePriorProviderSessionId({ runDir: dir, priorRunId: RUN }), NATIVE);
-    const kimi = new KimiCodeBackend();
-    assert.equal(kimi.canResumeWithRecoveredSessionId(NATIVE), true);
-    assert.equal(kimi.canResumeWithRecoveredSessionId("proc_43244"), false);
+    const codex = new CodexBackend();
+    assert.equal(codex.canResumeWithRecoveredSessionId(NATIVE), true);
+    assert.equal(codex.canResumeWithRecoveredSessionId("proc_43244"), false);
 
     const { fakeSpawn, calls } = makeFakeSpawn();
     const r = await continueRun({
@@ -420,7 +420,7 @@ test("0114-LI-4: native-id lane recovers the parent transcript's native id after
       registryPath,
       authorizedWorkspaceRoot: repo,
       spawnFn: fakeSpawn,
-      backendFor: () => kimi,
+      backendFor: () => codex,
       skipCredentialCheck: true,
       leadSession: "restarted-host-lead",
     });
@@ -430,7 +430,7 @@ test("0114-LI-4: native-id lane recovers the parent transcript's native id after
     assert.equal(routing.priorRunId, RUN, "runner reads the native id from the parent transcript via priorRunId");
     assert.ok(!JSON.stringify(routing).includes(NATIVE), "native provider id never enters the routing envelope/argv");
 
-    const key = deriveLineageReuseKeyHash({ workspace: repo, agentId: "kimi_worker", rootRunId: RUN, ...material });
+    const key = deriveLineageReuseKeyHash({ workspace: repo, agentId: "codex_worker", rootRunId: RUN, ...material });
     const entry = JSON.parse(readFileSync(join(dir, ".lineage-reuse", `${key}.json`), "utf8"));
     assert.equal(entry.runId, r.runId);
   } finally {

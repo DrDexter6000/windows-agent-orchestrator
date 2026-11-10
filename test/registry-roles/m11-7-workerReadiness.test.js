@@ -62,9 +62,6 @@ function makeGitRepo(dir) {
 // ===== RED-1: real-registry probe (no false blockers) =====
 
 test("M11-7-R1a: optional env names are NOT required (no false blocker)", () => {
-  const kimi = { backend: "kimi-code", id: "coder_mm" };
-  assert.deepEqual(requiredCredentialNames(kimi), [], "kimi-code has NO required creds");
-  assert.ok(inheritedEnvNames(kimi).includes("KIMI_BASE_URL"), "KIMI_BASE_URL is inherited (optional)");
   const codex = { backend: "codex", id: "tester" };
   assert.deepEqual(requiredCredentialNames(codex), [], "codex has NO required creds");
   assert.ok(inheritedEnvNames(codex).includes("CODEX_HOME"), "CODEX_HOME is inherited (optional)");
@@ -164,10 +161,10 @@ test("M11-7-OP2: inventory reads NO optional env for not_required agents", async
   const { getRegistryInventory } = await import("../../src/application/registryInventory.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-op2-"));
   try {
-    for (const n of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]) delete process.env[n];
+    for (const n of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CLAUDE_CODE_OAUTH_TOKEN"]) delete process.env[n];
     const registryPath = makeRegistry(dir, {
       tester: { backend: "codex", cwd: dir },
-      coder_mm: { backend: "kimi-code", cwd: dir },
+      coder_mm: { backend: "claude-code", cwd: dir },
     });
     const counts = {};
     const reader = async (name) => { counts[name] = (counts[name] ?? 0) + 1; return undefined; };
@@ -205,19 +202,19 @@ test("M11-7-OP4: dispatch bridges optional inherited env into runner env", async
   const { dispatchRun } = await import("../../src/application/runDispatch.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-op4-"));
   try {
-    // kimi agent: KIMI_BASE_URL is optional inherited. Put it in user env only.
-    delete process.env.KIMI_API_KEY;
-    delete process.env.KIMI_BASE_URL;
-    delete process.env.KIMI_MODEL_NAME;
-    const registryPath = makeRegistry(dir, { w: { backend: "kimi-code", cwd: dir } });
+    // codex agent: CODEX_HOME is optional inherited. Put it in user env only.
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_BASE_URL;
+    delete process.env.CODEX_HOME;
+    const registryPath = makeRegistry(dir, { w: { backend: "codex", cwd: dir } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     let capturedEnv = null;
     await dispatchRun({
       agentId: "w", prompt: "do", registryPath, runDir,
       spawnFn: (exe, args, opts) => { capturedEnv = opts.env; return { unref() {} }; },
-      userEnvReader: fakeUserEnvReader({ KIMI_BASE_URL: "test-key-opt-url" }),
+      userEnvReader: fakeUserEnvReader({ CODEX_HOME: "C:/test/key-opt-home" }),
     });
-    assert.equal(capturedEnv.KIMI_BASE_URL, "test-key-opt-url", "optional inherited env bridged into runner env");
+    assert.equal(capturedEnv.CODEX_HOME, "C:/test/key-opt-home", "optional inherited env bridged into runner env");
   } finally {
     cleanupDir(dir);
   }

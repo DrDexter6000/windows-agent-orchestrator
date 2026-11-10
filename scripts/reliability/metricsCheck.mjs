@@ -5,9 +5,10 @@
 // 不再以 pass:true + capability:"metrics" 伪装能力绿。
 //
 // 背景：reliability 认证的 metricsNonZero 检查（observability 类目）断言 run
-// metrics 的 input token 非空。kimi-code 的 stream-json 无 usage 字段（TD-87），
-// 导致 coder_mm 每一轮都因此落 conditional、lastHealthyRunAt 永远 null、严格门
-// 永久拒绝——测的是一个已知的 backend 静态属性，不是组合质量。
+// metrics 的 input token 非空。不声明 reportsTokenUsage 的 backend（如
+// deepseek-acp）没有 token 计量通道（TD-87），这类 lane 若硬断言会每一轮都落
+// conditional、lastHealthyRunAt 永远 null、严格门永久拒绝——测的是一个已知的
+// backend 静态属性，不是组合质量。
 //
 // 语义（Owner 裁定 2026-08-20 + ADR-0032 §8 五态化 2026-09-21）：
 //   - 判定源是 ADR-0025 批次 2 的 backendCapabilitySnapshot SSOT

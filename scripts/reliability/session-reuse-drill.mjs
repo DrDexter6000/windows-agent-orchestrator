@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/reliability/session-reuse-drill.mjs
 //
-// TD-184：codex / kimi-code 会话复用关联面 —— 真实 WAO 派发 drill。
+// TD-184：codex 会话复用关联面 —— 真实 WAO 派发 drill。
 // 形状对齐 ADR-0031 §3.6 Phase 6 先例 scripts/reliability/dsh-acp/wao-reuse-drill.mjs
 //（deepseek-acp），并按 2026-10-09 astra+opus 方案会审四项修正升级：
 //   ① 进程式后端每个复用 run 有两条 session.created（spawn 占位 proc_<pid> +
@@ -18,11 +18,10 @@
 //      run.provider_session_bound"。上游在会话查找阶段拒绝（模型调用前），
 //      本轮无 usage 事实，不宣称"零 token"。
 //
-// 复现（消耗真实 token，保持最小；每个后端各跑一次）：
+// 复现（消耗真实 token，保持最小）：
 //   node scripts/wao-node.cjs scripts/reliability/session-reuse-drill.mjs --backend codex
-//   node scripts/wao-node.cjs scripts/reliability/session-reuse-drill.mjs --backend kimi-code
 // 前置：
-//   - codex 在 PATH 且已登录；kimi 在 PATH（~/.kimi-code/bin）且已登录；
+//   - codex 在 PATH 且已登录；
 //   - 主仓 config/agents.json 可读（只读复制，不改任何既有条目——scratch 车道
 //     由脚本自建注入，不依赖外层注册表已有专用车道）。
 //
@@ -50,14 +49,6 @@ const DRILL_BACKENDS = Object.freeze({
     evidenceRel: join("scripts", "reliability", "codex", "evidence", "phase6-session-reuse.json"),
     negativeCFakeId: "11111111-2222-4333-8444-555555555555",
     negativeCError: /no rollout found/i,
-  }),
-  "kimi-code": Object.freeze({
-    identityBackend: "kimi-code",
-    agentId: "kimi_code_reuse_probe",
-    lane: Object.freeze({ backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" }, sessionReuse: "lead_workspace" }),
-    evidenceRel: join("scripts", "reliability", "kimi-code", "evidence", "phase6-session-reuse.json"),
-    negativeCFakeId: "11111111-2222-4333-8444-555555555555",
-    negativeCError: /Session .* not found/i,
   }),
 });
 

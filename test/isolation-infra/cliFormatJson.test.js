@@ -74,7 +74,7 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
     writeFileSync(registryPath, JSON.stringify({
       agents: {
         coder_low: { backend: "claude-code", cwd: dir, model: { id: "deepseek-v4-flash" } },
-        coder_mm: { backend: "kimi-code", cwd: dir, tokenBudget: 100000 },
+        coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DSH_TEST_TOKEN", tokenBudget: 100000 },
         bad_worker: { backend: "claude-code", model: { id: "x" } }, // 缺 cwd → issue
       },
     }), "utf8");
@@ -96,7 +96,7 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
     // TD-87 的 kimi tokenBudget 静默无效陷阱 → warnings 字段承载（非阻塞）
     const mm = parsed.agents.find((a) => a.id === "coder_mm");
     assert.equal(mm.ok, true, "kimi 配 tokenBudget 仍 ok（warning 不阻塞）");
-    assert.ok(mm.warnings.some((w) => /kimi-code.*tokenBudget/.test(w)),
+    assert.ok(mm.warnings.some((w) => /deepseek-acp.*tokenBudget/.test(w)),
       "kimi tokenBudget warning 进 warnings 数组");
 
     const bad = parsed.agents.find((a) => a.id === "bad_worker");

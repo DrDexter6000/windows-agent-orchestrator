@@ -225,22 +225,25 @@ test("2026-10-04: kimi-web + continuable (REAL factory resolver) passes the capa
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("2026-10-04: deepseek-harness + continuable (REAL factory resolver) → typed ContinuableBackendUnsupportedError, zero side effects", async () => {
+test("2026-10-04: backend without session reuse + continuable → typed ContinuableBackendUnsupportedError, zero side effects", async () => {
+  // 在用后端全部声明 supportsSessionReuse=true——真实工厂解析器不再能产生
+  // "不支持"形状；本用例改注入不声明该能力的 backend，钉住派发门本身与
+  // 零副作用契约（typed error name 供 MCP 边界固定文案键）。
   const repo = makeRepo();
-  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-dsh-"));
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-noreuse-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     await assert.rejects(
       () => dispatchRun({
-        agentId: "dsh",
+        agentId: "coder_low",
         prompt: "do the work",
-        registryPath: makeRegistry(dir, { dsh: { backend: "deepseek-harness", cwd: repo, dshConfigPath: "C:/inert/dsh.json", credentialEnv: "DSH_TEST_TOKEN" } }),
+        registryPath: makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: repo } }),
         runDir: dir,
         cwd: repo,
         delivery: DELIVERY,
         continuable: true,
         leadSession: "lead-session-drift",
-        backendFor: factoryBackendFor,
+        backendFor: () => ({}),
         skipCredentialCheck: true,
         spawnFn: fakeSpawn,
       }),

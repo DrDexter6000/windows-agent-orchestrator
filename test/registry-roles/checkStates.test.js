@@ -130,7 +130,7 @@ test("certifyCase: inconclusive 不覆盖类目 → conditional missing（fail-c
 });
 
 test("metricsNonZeroCheck: 声明不上报 → N/A 检查（带原因 + 声明值 + input 事实透明）", () => {
-  const c = metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: null });
+  const c = metricsNonZeroCheck({ agent: { backend: "deepseek-acp", cwd: "D:/x" }, metricsInput: null });
   assert.equal(c.name, "metricsNonZero");
   assert.equal(c.state, "not-applicable");
   assert.equal(c.pass, false, "N/A 绝不置绿");

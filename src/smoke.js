@@ -20,7 +20,6 @@ import { readRegistry } from "./registry.js";
 import { RunManager } from "./runManager.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
-import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
 import { readTranscript, findFirstBound, STATE_CHANGE_REASON } from "./transcript.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （src 同层边，与既有 transcript.js import 同族）。
@@ -43,7 +42,6 @@ function cliAvailable(name) {
 function backendFor(agent) {
   if (agent.backend === "claude-code") return new ClaudeCodeBackend();
   if (agent.backend === "codex") return new CodexBackend();
-  if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
   throw new Error(`unknown backend ${agent.backend}`);
 }
 

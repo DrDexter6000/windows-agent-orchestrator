@@ -210,8 +210,6 @@ test("D0106: 每个 backend 的任何非 null provider 值 → 同一固定文�
   const bases = {
     "claude-code": {},
     codex: {},
-    "kimi-code": {},
-    "deepseek-harness": { binary: "D:/dsh/dsh-jsonrpc-agent.exe", dshConfigPath: "D:/dsh/cordis.json", credentialEnv: "DSH_KEY" },
     "deepseek-acp": { credentialEnv: "DEEPSEEK_API_KEY" },
     "kimi-web": { model: { id: "k" }, serveUrl: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN" },
     zcode: { model: { id: "a/b" }, binary: "D:/zcode/zcode.cjs" },

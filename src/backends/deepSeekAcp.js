@@ -2,9 +2,8 @@
 //
 // ADR-0031（B-2）：DSH ACP 集成面 backend。
 //
-// 与旧线 deepSeekHarness.js（WAO 自建 JSON-RPC composition）同一 DSH runtime 家族，
-// 但走的是上游 shipped 的 `--profile acp`（ACP = Agent Client Protocol，JSON-RPC 2.0
-// 经 stdio、换行分隔）。本文件纪律与旧线同源：
+// 驱动 DSH runtime 的上游 shipped `--profile acp`（ACP = Agent Client Protocol，
+// JSON-RPC 2.0 经 stdio、换行分隔）。本文件纪律：
 //   - WAO 只 detect / invoke / report：不改 DSH 安装、不生成/升级 containment 资产；
 //     操作员安装的 `~/.wao/runtimes/dsh-acp/wao-contain.patch.yml` 缺失或与声明
 //     不匹配 → 派发前拒绝（fail-closed，不静默降级）。
@@ -550,7 +549,7 @@ export class DeepSeekAcpBackend {
     // spawn 使用 compileInvocation 的**产物**（compiled.args）——win32 + .cmd/.bat
     // 时产物是 `ComSpec /d /s /c <cmdLine>`（verbatim）。绕过产物直接喂 builtArgs
     // 会得到 `cmd.exe --profile acp …` 死链（审计阻塞项 1，上一轮假绿根因）；
-    // 对照旧线 deepSeekHarness.js 同款 `compiled.args` 纪律。
+    // 同款 `compiled.args` 纪律。
     const compiled = await this._compileInvocation(agent, rolePatchPath);
     const child = this._spawnFn(compiled.binary, compiled.args, {
       cwd: agent.cwd,

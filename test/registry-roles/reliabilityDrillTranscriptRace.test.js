@@ -47,7 +47,7 @@ function certCase(caseId, runId) {
   return {
     caseId,
     agentId: "auditor",
-    backend: "deepseek-harness",
+    backend: "zcode",
     providerID: "deepseek",
     modelId: "deepseek-v3.2",
     providerKey: null,

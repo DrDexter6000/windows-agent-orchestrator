@@ -24,14 +24,12 @@ const KNOWN_FAMILIES = Object.freeze([
 ]);
 
 /** 无 model 块时的 backend → 族系兜底表（可推断 provider 族系的 backend 才列）。
- * 2026-10-04 census 抓获补漏：kimi-web 与 kimi-code 同族（同二进制同 K 血统），
- * 缺席曾使 kimi-web 席族系显示 UNKNOWN。zcode 有意不列：多 provider 宿主
- * （桌面可切换 provider），无单一族系缺省——modelId 不可解析时 UNKNOWN 是诚实。 */
+ * kimi-web 与 deepseek-acp 按其宿主程序族系列示。zcode 有意不列：多 provider 宿主
+ * （桌面可切换 provider），无单一族系缺省——modelId 不可解析时 UNKNOWN 是诚实。
+ * 旧转录里已退役的 backend 名未命中本表 → UNKNOWN_FAMILY（读侧不猜、不抛）。 */
 const BACKEND_FAMILY_FALLBACK = Object.freeze({
   "claude-code": "claude",
-  "kimi-code": "kimi",
   "kimi-web": "kimi",
-  "deepseek-harness": "deepseek",
   "deepseek-acp": "deepseek",
   "codex": "gpt",
 });

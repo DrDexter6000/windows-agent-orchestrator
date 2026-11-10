@@ -14,13 +14,13 @@
 | 症状 | 去哪看 |
 |------|--------|
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
-| `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-run) |
-| claude-code 续修轮启动即失败，报 provider 会话不存在 | [§1.8](#18-claude-code-续修报-provider-会话不存在) |
+| `run_continue` 拒 `no_provider_session`（Codex continuable 父 run） | [§1.6](#16-run_continue-返回-no_provider_sessioncodex-continuable-父-run) |
+| claude-code 续修轮启动即失败，报 provider 会话不存在 | [§1.7](#17-claude-code-续修报-provider-会话不存在) |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
 | `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
 | zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
-| 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.15](#715-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
+| 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.14](#714-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
 | 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
@@ -28,7 +28,7 @@
 | worker 完成判定不可靠（过早 completed 或该完成没完成） | [§6 完成判定](#6-完成判定) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
 | agents.json 配置过时/缺 tokenBudget | [§7.5](#75-agentsjson-配置漂移) |
-| claude-code worker 看不到用户级 skills | [§7.13](#713-claude-code-worker-看不到用户级-skills临时-claude_config_dir) |
+| claude-code worker 看不到用户级 skills | [§7.12](#712-claude-code-worker-看不到用户级-skills临时-claude_config_dir) |
 | 不确定环境是否就绪 | [§7.6 wao doctor](#76-wao-doctor-体检) |
 | run completed 但 messages 空 / 无 assistant text | [§7.7 证据链断链](#77-worker-输出证据为空但-run-completed证据链断链高危) |
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
@@ -96,11 +96,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 - **WAO 行为**：完成判定检测到错误事实即 `done(failed)` 并透传错误，不等超时
 - **修复**：按 statusCode 处理——401 查 key（§1.6 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
 
-### 1.5 kimi-code backend（暂停）
-
-kimi-code 后端暂停使用（决定 0074），模板不含它的车道；现行 Kimi 车道走 kimi-web，其配置与排障见 §1.6 与 `docs/usage/lanes.md`「kimi 车道的 worker serve」。
-
-### 1.6 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
+### 1.5 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
 
 - **症状**：派发秒报 typed 错误 `credential missing: OPENROUTER_API_KEY`（registry 条目声明了 `credentialEnv`）；转录零写入、零 fork。PowerShell 查 User 作用域明明有值。
 - **判读**：凭据解析顺序是 process.env → Windows Current-User registry（`HKCU\Environment`）→ missing，两个源都找不到才报。每次派发现读注册表、无跨次缓存：setx 之后不用重启宿主，下一次派发即生效；解析到的值由控制面注入 worker 子进程 env（值只进子进程 env 与脱敏器，不进 argv/日志/转录）。仍会报 missing 的情形：值只写在 Machine 作用域（解析不读它），或声明的 env 名与实际设置的名字不一致。
@@ -115,9 +111,9 @@ kimi-code 后端暂停使用（决定 0074），模板不含它的车道；现�
   ```
 - **修复**：把值写进 User 作用域（或当前进程 env）并核对名字与 registry 声明一致，然后直接重派。只有宿主进程自身直接消费该 env 的场景（不经控制面桥接拉起的进程）才需要重启宿主或写进 shell profile。
 
-### 1.7 `run_continue` 返回 `no_provider_session`（Kimi/Codex continuable 父 run）
+### 1.6 `run_continue` 返回 `no_provider_session`（Codex continuable 父 run）
 
-- **症状**：对一个 kimi-code/codex 后端的终态 continuable delivery 调 `run_continue`，被 `no_provider_session` 拒绝；或复用 resume 派发在 runner 侧以固定文案拒绝（"recorded only the process placeholder identity (proc_<pid>)"）。
+- **症状**：对一个 codex 后端的终态 continuable delivery 调 `run_continue`，被 `no_provider_session` 拒绝；或复用 resume 派发在 runner 侧以固定文案拒绝（"recorded only the process placeholder identity (proc_<pid>)"）。
 - **根因（按形状分）**：
   - 父 run 转录只有 `proc_<pid>` 占位 `session.created`，没有 `run.provider_session_bound` 绑定事实（早期 Kimi/Codex 父 run）——明确不可续接，不迁移旧数据；
   - 父 run 是新 run 但 runtime 未在 wire 上广告 native id（无绑定事实）——同上不可续接，重新派发新 continuable run；
@@ -125,7 +121,7 @@ kimi-code 后端暂停使用（决定 0074），模板不含它的车道；现�
 - **验证**：查父转录（经解析链定位）：应恰有一条 `session.created`（`backendSessionId` 形如 `proc_<pid>`）且恰有一条 `run.provider_session_bound`（`providerSessionId` 为 kimi `session.resume_hint` / codex `thread.started` 广告的 native id）。
 - **修复/规避**：对旧父 run，让 Lead 以新的 `run_dispatch`（`continuable:true`）重新交付并接手冻结候选；新 run 会记录绑定事实，之后 `run_continue` 即用真实 native id 续接。claude-code 父 run 不受影响（resume 编译 opaque uuid，proc 身份不是阻断）；ACP 的 native `session.created` 照常可续接。
 
-### 1.8 claude-code 续修报 provider 会话不存在
+### 1.7 claude-code 续修报 provider 会话不存在
 
 - **症状**：续修轮（`turn:resume`）启动即失败（约 2 秒、0 token）；`run.error` 固定句 `provider session not found`，`runs diagnose` 给同名事实（category `crash`），不回显 opaque uuid。
 - **根因**：每轮必须共用同一个 `CLAUDE_CONFIG_DIR`（CLI 的会话记录在里面）。本版按 opaque uuid 的 sha256 在 `os.tmpdir()` 建稳定目录（`wao-claude-session-*`），`dispose()` 不删，14 天无使用才清扫；目录被手工删、换机器或升级前旧谱系都会接不回。
@@ -303,14 +299,14 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ---
 
-## 7. 进程式 backend + 部署（claude-code/kimi-code/codex）
+## 7. 进程式 backend + 部署（claude-code/codex/zcode）
 
 进程式 backend 是主力路径。本章覆盖进程式路径的坑与实机部署问题。
 
 ### 7.3 opus 车道（claude-code 官方通道）401
 
 - **症状**：`opus`、`fable` 车道的运行报 401
-- **根因**：这类车道用官方 Claude OAuth，需要 claude-code 自己的登录态（`claude login`；或长期令牌 `CLAUDE_CODE_OAUTH_TOKEN`，见 §7.14）
+- **根因**：这类车道用官方 Claude OAuth，需要 claude-code 自己的登录态（`claude login`；或长期令牌 `CLAUDE_CODE_OAUTH_TOKEN`，见 §7.13）
 - **修复**：`claude login` 完成官方认证
 
 ### 7.4 worker 在错误目录干活
@@ -331,7 +327,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor`；选项全集（`--registry` / `--cwd` / `--format json` / `--strict` / `--warn-as-error`——后者只把 WARN 也卡成非零退出，`--strict` 加跑 src/ 的 JS parse smoke）以 CLI help 与生成层 `docs/surface/cli.md` 为权威
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的凭据 env 名（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.14）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.14）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的凭据 env 名（进程 env 或 Windows User 作用域）；registry 条目校验（已知 backend 的条目过不了派发同款 normalizeAgent 校验即 FAIL——派发解析期即拒；键名不是合法 agent id 的条目只报个数、不回显）；zcode worker 的 binary 是否指向存在的文件（缺失或不是文件即 FAIL；不带盘符的根路径 WARN——落在哪个盘取决于派发时的运行目录）；agents.json 完整性；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§3.2/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（按 spawn 解析序 agent.env → 进程 env → User 作用域检查；file 类查路径存在，缺失即 FAIL——该 backend spawn 期会死）；claude OAuth 临时目录报数（doctor 只报数不删除，清理见 §7.12）；claude OAuth 认证模式（长期令牌 / 凭据拷贝，见 §7.13）。环境类检查落 doctor 而非 `registry validate`（validate 的范围见 CLI help）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -371,17 +367,13 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **现状与隔离**：argv/env 合同（partial messages、`runtime_activity` 投影、worker 环境变量、一次性 run 不持久化会话）见架构 §2.5「worker 环境与输出边界」，cache 指标口径见 §2.2。
 - **验收边界**：本地 parser/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
 
-### 7.12 DeepSeek Harness JSON-RPC backend（暂停）
-
-deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模板不含它的车道；现行 DSH 通道是 deepseek-acp，其配置与排障见 `docs/usage/lanes.md`「deepseek 车道的目录权限前提」。
-
-### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR）
+### 7.12 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
 - **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为（实现与动机见 src/backends/claudeCode.js 头注释）。
 - **逃生门**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
 
-### 7.14 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥）
+### 7.13 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥）
 
 - **症状**：native 车道启动即 `OAuth session expired and could not be refreshed`，重新登录只管几小时；`~/.claude/.credentials.json` 周期性被清空。
 - **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录。
@@ -389,7 +381,7 @@ deepseek-harness（JSON-RPC 接线）后端暂停使用（决定 0074），模�
 - **迁移（Owner 一次性）**：`claude setup-token` 生成长期令牌 → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`；`wao doctor` 的 `claude_oauth_token_mode` 显示"长期令牌模式"即生效；迁移后跑一次全量 `npm test` 复验。迁移前勿派 native run——副本内续期会作废当前登录。
 - **残留清理**：run 终态会删除本 run 创建的临时目录；进程崩溃等残留由 `npm run cli -- wao sweep-claude-config` 清扫（先不带 `--apply` 看清单）。
 
-### 7.15 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
+### 7.14 启动期退出：进程起来不久就退出，worker 一件事都没做（TD-180）
 
 - **症状**：进程式后端启动后数秒到数分钟以 `process exited with code 1` 失败。`runs diagnose` 归 `crash`（用量到顶时归 `provider_capacity`，见下）；退出前零 worker 事件时另列一条"进程退出前未观察到任何 worker 事件（会话建立后 Ns 退出）"——这条事实不限于启动期，任何退出前没有 worker 事件的崩溃都会附，秒数说明它离启动有多远。
 - **已知案例**（均为 codex 后端）：

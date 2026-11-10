@@ -135,7 +135,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 |------|------|
 | Backend 接口（spawn / messages / abort / healthCheck / waitForCompletion） | [S] |
 | 统一消息流 `AsyncIterable<RunEvent>`（屏蔽 HTTP 轮询 / stdio 流式差异） | [S] |
-| 进程式 backend（claude-code / codex / kimi-code，走 stdio） | [S] |
+| 进程式 backend（claude-code / codex / zcode / deepseek-acp，走 stdio） | [S] |
 | Registry 加载与规范化 | [S] |
 | Transcript（JSONL，事件追加） | [S] |
 

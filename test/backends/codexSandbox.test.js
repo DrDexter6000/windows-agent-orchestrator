@@ -210,8 +210,6 @@ test("能力面：codex 声明 enforcesWriteSandbox=true 且独有 probeWriteSan
 
   const others = [
     "claude-code",
-    "kimi-code",
-    "deepseek-harness",
     "deepseek-acp",
     "kimi-web",
     "zcode",

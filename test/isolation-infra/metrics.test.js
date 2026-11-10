@@ -327,7 +327,7 @@ test("会话第一轮：自身用量按记下的数（无范围字段/后端不�
 
 test("显式 unknown 范围：第一轮也记未知", () => {
   const events = [
-    { type: "run.started", backend: "kimi-code", ts: "2026-06-15T10:00:00.000Z" },
+    { type: "run.started", backend: "codex", ts: "2026-06-15T10:00:00.000Z" },
     { type: "run.metrics", tokens: { input: 100 }, usageScope: "unknown" },
   ];
   const m = aggregateRunMetrics(events);
@@ -386,15 +386,17 @@ test("runUsageFacts: 旧转录按后端声明解释范围，不按名字在共�
   assert.equal(explicit.usageScope, "session");
 });
 
-test("usageScopeForBackend: 七个后端的计量范围声明（读类声明，不在共享代码按名字分支）", () => {
+test("usageScopeForBackend: 在用后端的计量范围声明（读类声明，不在共享代码按名字分支）；已退役后端名照常可读", () => {
   assert.equal(usageScopeForBackend("claude-code"), "run");
   assert.equal(usageScopeForBackend("codex"), "session");
-  assert.equal(usageScopeForBackend("kimi-code"), "unknown");
-  assert.equal(usageScopeForBackend("deepseek-harness"), "unknown");
   assert.equal(usageScopeForBackend("deepseek-acp"), "unknown");
   assert.equal(usageScopeForBackend("kimi-web"), "run");
   assert.equal(usageScopeForBackend("zcode"), "session");
   assert.equal(usageScopeForBackend("no-such-backend"), "unknown");
+  // 旧转录可读性钉（决定 0123）：已退役的 backend 名解析不出类 → 如实 unknown，
+  // 读侧不抛、不猜——旧 run 的 metrics 读路径照常工作。
+  assert.equal(usageScopeForBackend("kimi-code"), "unknown");
+  assert.equal(usageScopeForBackend("deepseek-harness"), "unknown");
 });
 
 test("aggregateSummary: 空 runs", () => {

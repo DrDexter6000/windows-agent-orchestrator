@@ -31,10 +31,10 @@
       "reasoning": { "effort": "max" }
     },
     "coder_mm": {
-      "backend": "kimi-code",
+      "backend": "claude-code",
       "cwd": ".",
       "systemPrompt": "config/roles/coder_mm.md",
-      "model": { "id": "kimi-code/k3" }
+      "model": { "id": "claude-opus-5-5" }
     },
     "tester": {
       "backend": "codex",

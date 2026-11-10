@@ -2506,7 +2506,7 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
   assert.ok(/run <agentId>/.test(canary) && !/run (coder_\w+|researcher|auditor|tester)\b/.test(canary),
     "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker 或旧席位名");
   assert.ok(/zcode \/ codex \/ claude-code/.test(canary),
-    "canary 的进程式车道必须并列 zcode / codex / claude-code（模板进程式车道代表；deepseek-acp 亦为进程式但需 dsh+containment 资产，§4f 句另行列入；TD-257 起 kimi-code 非模板车道，旧 trio 钉随之更新）");
+    "canary 的进程式车道必须并列 zcode / codex / claude-code（模板进程式车道代表；deepseek-acp 亦为进程式但需 dsh+containment 资产，§4f 句另行列入）");
   assert.ok(/入库/.test(ob) && /车道/.test(ob) && /gitignored/.test(ob),
     "onboarding 必须区分入库模板（0046 车道键形状）与 gitignored 私人 agents.json 副本（0065：seatRole 声明已退役）");
 });
@@ -3625,7 +3625,11 @@ test("TD-184 守卫: 上游 harness 原语表覆盖闭集 + 基线日在刷新�
   assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「上游 harness 原语对照（实测）」节`);
   const rest = runbook.slice(start + heading.length);
   const next = rest.indexOf("\n## ");
-  const section = next === -1 ? rest : rest.slice(0, next);
+  let section = next === -1 ? rest : rest.slice(0, next);
+  // 决定 0123：节内「未接线通道观察表」不属闭集、不设原语行——表内容（行首也是
+  // "|"）不得进入本守卫的行集与锚点扫描，扫描面截到观察表标记为止。
+  const obsIdx = section.indexOf("**未接线通道观察表**");
+  if (obsIdx !== -1) section = section.slice(0, obsIdx);
   const tableLines = section.split("\n").filter((l) => l.startsWith("|"));
   assert.ok(tableLines.length >= 3, "上游原语表解析异常（表行不足 3 行）");
   const rows = new Map();
@@ -3637,7 +3641,7 @@ test("TD-184 守卫: 上游 harness 原语表覆盖闭集 + 基线日在刷新�
   }
   assert.deepEqual([...rows.keys()].sort(), [...KNOWN_BACKENDS].sort(),
     "上游原语表行集必须与 registry.js KNOWN_BACKENDS 一致（新增 backend 必须同行补上游事实）");
-  for (const anchor of ["codex exec resume", "kimi -r"])
+  for (const anchor of ["codex exec resume"])
     assert.ok(section.includes(anchor), "上游原语表缺已实测的上游原语 " + anchor);
   const asOf = section.match(/基线日（as-of）：(\d{4}-\d{2}-\d{2})/);
   assert.ok(asOf, "上游原语表必须写明基线日（as-of）");

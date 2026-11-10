@@ -34,7 +34,6 @@ import { RunManager } from "../../src/runManager.js";
 import { readRegistry, normalizeAgent } from "../../src/registry.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 
 // ===== Helpers =====
 
@@ -129,8 +128,6 @@ test("M11-5-A2-CAP1: backends declare supportsRoleContract capability", () => {
     "claude-code supports role contract");
   assert.equal(new CodexBackend().supportsRoleContract, true,
     "codex supports role contract");
-  assert.equal(new KimiCodeBackend().supportsRoleContract, true,
-    "kimi-code supports role contract");
 });
 
 // ---------------------------------------------------------------------
@@ -439,7 +436,7 @@ test("M11-5-A2-ARCH1: runManager role-contract region is capability-driven, no r
   const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(roleSourcePath\)/);
   assert.ok(startRoleBlock, "found start role-contract block");
   const block = startRoleBlock[0];
-  assert.ok(!/claude-code|codex|kimi-code/.test(block),
+  assert.ok(!/claude-code|codex|kimi-web|zcode/.test(block),
     "start role-contract block has NO runtime-name branch");
   assert.ok(/supportsRoleContract/.test(block),
     "start role-contract block uses supportsRoleContract capability");
@@ -459,7 +456,7 @@ test("M11-5-A2-ARCH2: resume role-contract region is capability-driven, no silen
   const resumeRoleBlock = src.match(/let resumeRoleSource[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
   assert.ok(resumeRoleBlock, "found resume role-contract block");
   const block = resumeRoleBlock[0];
-  assert.ok(!/claude-code|codex|kimi-code/.test(block),
+  assert.ok(!/claude-code|codex|kimi-web|zcode/.test(block),
     "resume role-contract block has NO runtime-name branch");
   assert.ok(/supportsRoleContract/.test(block),
     "resume role-contract block uses supportsRoleContract capability");

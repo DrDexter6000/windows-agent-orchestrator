@@ -962,16 +962,13 @@ test("resolver parity: server-threaded backendFor covers every KNOWN_BACKENDS; u
         const b = resolver({ backend: id });
         assert.ok(b, `resolver must construct the "${id}" backend — factory parity (mirror drift was the 2026-10-04 bug)`);
       }
-      // Capability truth over the closed set (class-level declarations).
-      const reuseTrue = ["claude-code", "codex", "kimi-code", "kimi-web", "zcode", "deepseek-acp"];
-      const reuseNotTrue = ["deepseek-harness"];
-      for (const id of reuseTrue) {
+      // Capability truth over the closed set (class-level declarations): 在用
+      // backend 全部声明 supportsSessionReuse=true。"未声明复用"的拒收形状由
+      // resolveBackendFor 的 fail-closed null（下一断言）与 dispatch 侧注入形状
+      // 测试承载（m12-7-runDispatchContinuable）——闭集里不再有非 true 成员。
+      for (const id of KNOWN_BACKENDS) {
         assert.equal(resolver({ backend: id }).supportsSessionReuse, true,
           `${id} declares provider session reuse — continuable must pass its gate`);
-      }
-      for (const id of reuseNotTrue) {
-        assert.notEqual(resolver({ backend: id }).supportsSessionReuse, true,
-          `${id} does not declare provider session reuse — honest refusal stays`);
       }
       // Unknown backend: fail-closed null at the wrapper boundary (the factory
       // itself throws for unknown ids — the wrapper owns the closed-set contract).

@@ -348,7 +348,7 @@ test("kimi-web ③ ⑥: resume——会话已有历史 turn + 新 prompt 的 tur
   assert.equal(polls(), 1, "首拍即终态（新 turn 已 completed）");
 });
 
-test("kimi-web ③: resume 轮缺 prior id / proc_ 占位 / 空串 → 派发前拒绝且零请求（镜像 kimiCode 实现）", async () => {
+test("kimi-web ③: resume 轮缺 prior id / proc_ 占位 / 空串 → 派发前拒绝且零请求（resume 关联面合同）", async () => {
   const { calls, fetchImpl } = kimiServer(() => { throw new Error("no requests expected"); });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const task = (prior) => ({

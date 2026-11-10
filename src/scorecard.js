@@ -218,9 +218,8 @@ async function checkAcceptance(scriptPath, cwd) {
 // 推断；这不是 runtime 编排分支，是数据来源可靠性声明（单一真相在本模块）。
 // 决定 0072：checkScorecard 自己的推断另由调用方按 backend 类的
 // reportsCommandExitCode 声明门控（见 checkScorecard）。决定 0073 起两道门在效果上
-// 一致：kimi-code（isError 是对输出文本的关键词匹配）与 deepseek-harness（缺"非零
-// 退出必置 error"的证据）的声明已翻为 false，声明 true 的只剩自带数值退出码的
-// codex（推断不触发）和本闭集里的 claude-code。两处实现没有并轨：
+// 一致：声明 true 的只剩自带数值退出码的 codex（推断不触发）和本闭集里的
+// claude-code。两处实现没有并轨：
 // 活动投影按转录里的 backend 名查本闭集，评分按 backend 实例读声明。
 export const EXIT_CODE_INFERENCE_PROVEN_BACKENDS = Object.freeze(
   new Set(["claude-code"]),

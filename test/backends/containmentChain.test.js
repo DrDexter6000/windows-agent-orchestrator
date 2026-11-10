@@ -12,18 +12,18 @@
 //                   两段；越界恒在 intent 段被拦（file_written 的 path 取自同一
 //                   intent 帧捕获的 path，词法越界必然先在 intent 段判出）。
 //   codex           CodexStreamParser.feed()——只有终态 file_written。
-//   kimi-code       KimiCodeBackend + spawnFn 假子进程（解析器不产 done，经
-//                   ProcessBackend 的 exit-0 兜底收口）；只有调用帧 file_written。
+//   codex 传输层    CodexBackend + spawnFn 假子进程——同一 codex 事件经
+//                   ProcessBackend 共享传输层穿真实类；帧不带 turn.completed，
+//                   经 exit-0 兜底收口（本文件唯一穿过共享传输层的组）。
 //   kimi-web        KimiWebBackend + fetchImpl 假服务器；只有终态 file_written。
 //   zcode           ZcodeBackend + spawnFn 假 app-server；只有终态 file_written。
 //   deepseek-acp    DeepSeekAcpBackend + 内存 peer.notify——write_intent +
 //                   file_written 两段；越界同样恒在 intent 段被拦。
 //
 // 不覆盖的后端（原因，不假装覆盖）：
-//   src/backends/ 其余模块（factory / kimiServe* / deepSeekHarness /
-//     serveStopVerify / processActivity / stallBudget / processBackend 共享
-//     传输层）——没有独立的写事件投影面；processBackend 的传输由 kimi-code 组
-//     经真实类穿过。
+//   src/backends/ 其余模块（factory / kimiServe* /
+//     serveStopVerify / processActivity / stallBudget）——没有独立的写事件投影面；
+//     processBackend 的共享传输层由 codex 传输层组经真实类穿过。
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -39,7 +39,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
 import { ZcodeBackend } from "../../src/backends/zcode.js";
 import { DeepSeekAcpBackend } from "../../src/backends/deepSeekAcp.js";
-import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
+import { CodexBackend } from "../../src/backends/codex.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
 import { CodexStreamParser } from "../../src/backends/parsers/codex.js";
 import { Run } from "../../src/runManager.js";
@@ -395,51 +395,42 @@ test("containment chain / codex: 界内写正对照——file_written 落盘、p
   }
 });
 
-// ===== kimi-code：KimiCodeBackend + spawnFn 假子进程 =====
+// ===== codex 传输层：CodexBackend + spawnFn 假子进程（穿 ProcessBackend 共享传输层）=====
 
-const kimiCodeWriteCall = (callId, path) => ({
-  role: "assistant",
-  tool_calls: [{
-    type: "function",
-    id: callId,
-    function: { name: "Write", arguments: JSON.stringify({ path }) },
-  }],
-});
-
-async function kimiCodeScenario({ effectiveCwd, frames }) {
+async function codexTransportScenario({ effectiveCwd, frames }) {
   const child = fakeProcessChild();
-  const backend = new KimiCodeBackend({ spawnFn: () => child });
+  const backend = new CodexBackend({ spawnFn: () => child });
   const handle = await backend.spawn(
-    { id: "coder_kimi_code", backend: "kimi-code", cwd: effectiveCwd, binary: process.execPath, model: { id: "kimi-code/k3" } },
+    { id: "coder_codex_transport", backend: "codex", cwd: effectiveCwd, binary: process.execPath },
     { prompt: "do the task" },
   );
   child.stdout.write(frames.map(jsonFrame).join(""));
   // 让 backend 的 stdout data 监听器先消化这些帧，再收进程（假子的 close 是同步
-  // emit，不隔一个 tick 会抢在 data 事件之前关掉队列）。
+  // emit，不隔一个 tick 会抢在 data 事件之前关掉队列）。帧不带 turn.completed——
+  // done 经 ProcessBackend 的 exit-0 兜底收口，正是本组要穿的共享路径。
   await delay(50);
   child.end(0);
   return handle;
 }
 
-test("containment chain / kimi-code: 源级钉——Write/Edit 取 args.path（arguments 二次 parse）", () => {
+test("containment chain / codex 传输层: 源级钉——exit-0 兜底收口（无 done 时按退出码收口）", () => {
   assertSourcePins([
-    ["src/backends/parsers/kimiCode.js", "return fileWrittenEvent(parsedArgs.path);"],
+    ["src/backends/processBackend.js", 'yield doneEvent("completed", undefined, hasUsableEffect ? undefined : completedEmptyMarker);'],
   ]);
 });
 
 for (const [label, pathFactory, marker] of [
-  ["relative ../ escape", () => "../kimicode_escape_rel.js", "kimicode_escape_rel"],
-  ["absolute outside escape", ({ root }) => join(root, "outside-kimicode", "escaped.js"), "outside-kimicode"],
+  ["relative ../ escape", () => "../codex_transport_escape_rel.js", "codex_transport_escape_rel"],
+  ["absolute outside escape", ({ root }) => join(root, "outside-codex-transport", "escaped.js"), "outside-codex-transport"],
 ]) {
-  test(`containment chain / kimi-code: ${label} → file_written 段拦截，reason 闭集成员 file_written_lexical_outside`, async () => {
+  test(`containment chain / codex 传输层: ${label} → file_written 段拦截，reason 闭集成员 file_written_lexical_outside`, async () => {
     const fixture = await makeDeliveryRunFixture({
-      backendName: "kimi-code",
-      spawnHandle: ({ effectiveCwd, root }) => kimiCodeScenario({
+      backendName: "codex",
+      spawnHandle: ({ effectiveCwd, root }) => codexTransportScenario({
         effectiveCwd,
         frames: [
-          kimiCodeWriteCall("kc_esc", pathFactory({ root })),
-          { role: "tool", tool_call_id: "kc_esc", content: "wrote" },
-          { role: "assistant", content: "done writing" },
+          codexFileChangeFrame(pathFactory({ root })),
+          { type: "item.completed", item: { type: "agent_message", text: "wrote it" } },
         ],
       }),
     });
@@ -456,26 +447,25 @@ for (const [label, pathFactory, marker] of [
   });
 }
 
-test("containment chain / kimi-code: 界内写正对照——file_written 落盘、path 逐字节保真、零 write_intent、exit-0 兜底收口后打包照常", async () => {
+test("containment chain / codex 传输层: 界内写正对照——file_written 落盘、path 逐字节保真、零 write_intent、exit-0 兜底收口后打包照常", async () => {
   const fixture = await makeDeliveryRunFixture({
-    backendName: "kimi-code",
-    spawnHandle: ({ effectiveCwd }) => kimiCodeScenario({
+    backendName: "codex",
+    spawnHandle: ({ effectiveCwd }) => codexTransportScenario({
       effectiveCwd,
       frames: [
-        kimiCodeWriteCall("kc_ok", "out/inside-kimicode.txt"),
-        { role: "tool", tool_call_id: "kc_ok", content: "wrote" },
-        { role: "assistant", content: "done writing" },
+        codexFileChangeFrame("out/inside-codex-transport.txt"),
+        { type: "item.completed", item: { type: "agent_message", text: "wrote it" } },
       ],
     }),
   });
-  await createInsideFile(fixture.effectiveCwd, "out/inside-kimicode.txt");
+  await createInsideFile(fixture.effectiveCwd, "out/inside-codex-transport.txt");
   try {
     const output = await finishRun(fixture);
     assertPositivePackaged(fixture, output, { expectWriteIntent: false });
     const written = output.events.find(
       (event) => event.type === "run.event" && event.kind === "file_written",
     );
-    assert.equal(written?.path, "out/inside-kimicode.txt", "path 与帧内原值逐字节相同");
+    assert.equal(written?.path, "out/inside-codex-transport.txt", "path 与帧内原值逐字节相同");
   } finally {
     await cleanupFixture(fixture);
   }

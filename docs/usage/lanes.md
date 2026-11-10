@@ -30,18 +30,6 @@ read_when: 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 
       "cwd": "."
     },
 
-    // ── deepseek-harness（暂停使用，为什么见决定 0074；不要从 GUI preset/TUI 抓输出）──
-    "coder_dsh_experimental": {
-      "backend": "deepseek-harness",
-      "binary": "C:/path/to/dsh-jsonrpc-agent.cmd",
-      "dshConfigPath": "C:/path/to/wao-coder.cordis.yml",
-      "credentialEnv": "DEEPSEEK_API_KEY",
-      "dshProvider": "deepseek-official",
-      "model": { "id": "deepseek-v4-flash", "contextWindow": 1000000 },
-      "reasoning": { "effort": "max" },
-      "cwd": "D:/projects/my-app"
-    },
-
     // ── deepseek-acp（shipped ACP profile + 操作员安装的 containment）──
     "coder_dsh_acp": {
       "backend": "deepseek-acp",
@@ -91,7 +79,7 @@ read_when: 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 
 
 没有声明 `kimiHome` 的 kimi-web 车道不受影响，仍按 `tokenEnv` 探测环境变量。
 
-deepseek-harness / deepseek-acp 通道的适用限制、`registry validate` 能力交叉 `⚠` 警告与 metrics 判读见 `docs/certification-runbook.md` §DSH 通道适用限制与能力交叉警告（唯一权威）。
+deepseek-acp 通道的适用限制、`registry validate` 能力交叉 `⚠` 警告与 metrics 判读见 `docs/certification-runbook.md` §DSH 通道适用限制与能力交叉警告（唯一权威）。
 
 ## 认证正文总落点（certification runbook）
 

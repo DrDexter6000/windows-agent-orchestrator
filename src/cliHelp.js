@@ -182,7 +182,8 @@ Notes:
     one reasoning effort); when combined with --model against a reuse agent,
     the refusal names the override actually at fault. A backend that cannot
     express the effort or only a conditional subset
-    (kimi-code K3-only, deepseek-harness high|max) refuses the dispatch
+    (e.g. deepseek-acp accepts only the efforts its ACP session advertises)
+    refuses the dispatch
     through its existing policy gate with a hint naming --reasoning. The
     echoed "effective reasoning" is advisory in the same sense as the model
     echo. --reasoning exists only on run and retry (not

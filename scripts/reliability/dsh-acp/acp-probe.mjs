@@ -3,7 +3,7 @@
  * B-2 技术验证探针（WAO 侧客户端视角）
  *
  * 目的：证明 dsh（B-2 验证时为 0.1.5-rc.2）可通过 **ACP 集成面** 驱动 DeepSeek，
- *       并具备 **跨进程 session/resume** 能力 —— 即 WAO TD-117 卡点的正解。
+ *       并具备 **跨进程 session/resume** 能力。
  *
  * 约束：零依赖（只用 node: 内置模块），与 WAO「不新增生产依赖」的不变量一致。
  *      本探针只做验证，不改动 WAO 的 provider/model 配置。

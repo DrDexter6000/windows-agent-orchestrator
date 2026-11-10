@@ -83,8 +83,7 @@ import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, ag
 // TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
 // 值不回显）。kimiServerTokenFile：kimiHome 车道 token 文件路径（决定 0074 SSOT）。
 import { CLAUDE_OAUTH_TOKEN_ENV, kimiServerTokenFile } from "../envPolicy.js";
-// R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
-// 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
+// R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表。
 // BACKEND_OWN_READINESS：无 PATH CLI 但 doctor 自有就绪检查的 backend（zcode/
 // kimi-web）——不进"无法映射"的 backend_map WARN 面。
 import { BACKEND_CLI, BACKEND_OWN_READINESS } from "../application/backendCliMap.js";
@@ -143,16 +142,14 @@ async function whichCli(name) {
   }
 }
 
-// backend → CLI 探测映射：单一权威表在 ../application/backendCliMap.js（R6-C3 收敛，
-// 含无独立 CLI 的 "deepseek-harness": null）。无法映射（null 或未列出）的 backend
-// 由调用方 WARN（不静默）；例外 = BACKEND_OWN_READINESS 在册的 backend（zcode/
-// kimi-web）——doctor 有自己的就绪检查覆盖，不是"无法映射"。
+// backend → CLI 探测映射：单一权威表在 ../application/backendCliMap.js（R6-C3 收敛）。
+// 无法映射（未列出）的 backend 由调用方 WARN（不静默）；例外 = BACKEND_OWN_READINESS
+// 在册的 backend（zcode/kimi-web）——doctor 有自己的就绪检查覆盖，不是"无法映射"。
 
 // 各 CLI 的官方安装方式（run: 修复提示用，只打印永不执行）。
 const CLI_INSTALL_HINT = {
   claude: "npm install -g @anthropic-ai/claude-code",
   codex: "npm install -g @openai/codex",
-  kimi: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
   dsh: "安装 dsh CLI（deepseek-acp 线驱动上游 dsh --profile acp；见 docs/certification-runbook.md §DSH 通道）",
 };
 
@@ -336,7 +333,6 @@ export async function waoDoctorCommand(args, config) {
   const neededClis = new Set();
   const keyNames = new Set();
   const unmappableBackends = [];
-  let hasKimiWorker = false;
   let credWorkerCount = 0;
   // R9：CLI/key 探测事实的收集面（panel_readiness 输入；见步骤 4/5 的填充点）。
   const cliFound = new Map();
@@ -357,7 +353,6 @@ export async function waoDoctorCommand(args, config) {
         // 无法映射的 backend → WARN（不静默）：该 worker 的 CLI/key 检查无法覆盖。
         unmappableBackends.push({ id, backend });
       }
-      if (backend === "kimi-code") hasKimiWorker = true;
       const names = requiredCredentialNames(agent);
       if (names.length > 0) credWorkerCount += 1;
       for (const name of names) keyNames.add(name);
@@ -390,8 +385,7 @@ export async function waoDoctorCommand(args, config) {
   //    （不写死名单）。进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用
   //    域再查（reader 经 config.userEnvReader 注入缝——与 5b/5d 同款）：命中 → INFO
   //    （派发时凭据桥从 User 作用域注入，不依赖进程继承——与 registry_list 的
-  //    credentialAvailability 同判 available）；仍无 → FAIL。kimi-code 靠 CLI 登录态，
-  //    不查任何 kimi key。
+  //    credentialAvailability 同判 available）；仍无 → FAIL。
   if (!registryOk) {
     pushCheck(checks, { name: "keys", pass: true, level: "info", detail: "未配置（跳过）" });
     // R8-2：registry 缺位（--apply 前）或解析失败时，cwd 检查与 CLI/key 同款
@@ -401,7 +395,7 @@ export async function waoDoctorCommand(args, config) {
     // R9：panel_readiness 沿同一 U1 INFO 跳过模式（registry 缺位/parse-fail 都
     // 不计算分级，形状与 cli_*/keys/cwd 一致）。
     pushCheck(checks, { name: "panel_readiness", pass: true, level: "info", detail: "未配置（跳过）" });
-  } else if (credWorkerCount === 0 && !hasKimiWorker) {
+  } else if (credWorkerCount === 0) {
     pushCheck(checks, {
       name: "keys",
       pass: true,
@@ -409,20 +403,7 @@ export async function waoDoctorCommand(args, config) {
       detail: "registry 无需要凭据 env 的 worker（key 检查全部跳过）",
     });
   } else {
-    if (hasKimiWorker && !keyNames.has("KIMI_API_KEY")) {
-      // 说明项仅在"没有任何 worker 声明 KIMI_API_KEY"时出现——若有 worker 声明了它
-      // （真实需要），下方存在性检查在场，说明项冗余且会同名重复。
-      pushCheck(checks, {
-        name: "key_KIMI_API_KEY",
-        pass: true,
-        level: "info",
-        detail: "kimi-code 使用 CLI 登录态，不查 API key",
-      });
-    }
     for (const name of [...keyNames].sort()) {
-      // R5 审计 P1-2：不做 kimi 跨 worker 抑制——kimi-code worker 经 envPolicy 本就
-      // 声明零 key（登录态认证）；而其他 worker 声明的 KIMI_API_KEY 若是它真正
-      // 需要的 env，必须照常检查（registry 级布尔会吞掉它）。
       const r = await resolveCredentialEnv(name, { userEnvReader: config.userEnvReader });
       keySource.set(name, r.source); // R9：panel_readiness 输入事实（不二次解析）
       if (r.source === "process_env") {

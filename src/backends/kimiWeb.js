@@ -145,8 +145,8 @@ import { IDLE_WATCH_IDLE_THRESHOLD_MS, startServeIdleWatch } from "./kimiServeId
 import { createSecretRedactor } from "../secretRedaction.js";
 import { createStallTracker } from "./stallBudget.js";
 
-// role/task 分隔符对齐 kimiCode.js 的 ROLE_TASK_SEPARATOR（"\n\n---\n\n"）——
-// 两个 prompt 级通道的 backend 用同一分隔形状，避免两套事实并存。
+// role/task 分隔符（"\n\n---\n\n"）——prompt 级 role-contract 通道的 backend
+// （kimi-web / zcode）共用同一分隔形状，避免两套事实并存。
 const ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
 // transcript 端点的 agent_id 查询参数（实测：必填，缺则 40001；"main" 有效、
@@ -222,13 +222,13 @@ export class KimiWebBackend {
   sessionOutlivesProcess = true;
 
   // 角色合同拼进 prompt 正文前缀（role 在前、task 在后、恰好一次，分隔符
-  // ROLE_TASK_SEPARATOR 对齐 kimiCode.js）——与 kimiCode.js 的 prompt 级通道
-  // 同款：上游无 system message 通道，这是 prompt 级引导而非系统级隔离
+  // ROLE_TASK_SEPARATOR）——prompt 级通道：
+  // 上游无 system message 通道，这是 prompt 级引导而非系统级隔离
   // （边界声明同 M11-5 TD-89）。
   supportsRoleContract = true;
 
   // resume 轮不 POST /sessions 建新会话，直接向前任 session id POST prompts 续接。
-  // 前任 id 的取法镜像 kimiCode.js 的 resume 轮实现：task.priorProviderSessionId
+  // 前任 id 的取法：task.priorProviderSessionId
   // （spawn 权威从转录取回、in-process 送达），缺失/占位（proc_<pid>）在**派发前**
   // 抛错——绝不静默开一段全新会话。
   supportsSessionReuse = true;
@@ -369,7 +369,7 @@ export class KimiWebBackend {
   async spawnSession(agent, task, opts, serveStartNote) {
     let sessionId;
     if (task.sessionReuse?.turn === "resume") {
-      // 镜像 kimiCode.js 的 resume 轮实现：前任 provider session id 缺失/空/占位
+      // resume 轮实现：前任 provider session id 缺失/空/占位
       // 进程号（proc_<pid>）一律派发前拒绝——绝不静默新会话。id 语义同源：
       // 前任 run 的 session.created.backendSessionId（kimi-web 的该值就是服务器
       // 自产的 session_ id，不是进程占位）。
@@ -401,7 +401,7 @@ export class KimiWebBackend {
       interval: opts?.pollInterval,
     });
     // 角色合同 = prompt 正文前缀（role 在前、task 在后），恰好注入一次；有
-    // roleContract 时以 ROLE_TASK_SEPARATOR 衔接（对齐 kimiCode.js）。
+    // roleContract 时以 ROLE_TASK_SEPARATOR 衔接。
     const prompt = task.roleContract
       ? `${task.roleContract}${ROLE_TASK_SEPARATOR}${task.prompt}`
       : task.prompt;

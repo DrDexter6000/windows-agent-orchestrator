@@ -157,7 +157,7 @@ import { attachProcessJob } from "./processJob.js";
 
 const BACKEND_NAME = "zcode";
 
-// role/task 分隔符对齐 kimiCode.js / kimiWeb.js 的 ROLE_TASK_SEPARATOR——三个
+// role/task 分隔符对齐 kimiWeb.js 的 ROLE_TASK_SEPARATOR——两个
 // prompt 级角色合同通道的 backend 用同一分隔形状，避免两套事实并存。
 export const ZCODE_ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
@@ -819,7 +819,7 @@ function defaultTreeKill(child) {
 
 export class ZcodeBackend {
   // 角色合同：拼进 content 前缀恰好一次（role 在前、task 在后，分隔符
-  // ZCODE_ROLE_TASK_SEPARATOR）——同 kimiCode/kimiWeb 的 prompt 级先例。协议未
+  // ZCODE_ROLE_TASK_SEPARATOR）——同 kimi-web 的 prompt 级先例。协议未
   // 证实系统级通道（session/create 未见证 system prompt 面）——prompt 级引导，
   // 非 system 级隔离（边界声明同 M11-5 TD-89）。
   supportsRoleContract = true;
@@ -830,7 +830,7 @@ export class ZcodeBackend {
   // setModel 走 requireSession、15245 查表 miss 抛 "Session is not active"、15256
   // wRn 装载注册；跳过 resume 的 setModel 必失败），成功后才 setModel→send；resume
   // 帧失败/未知形状一律 fail-closed 拒绝派发（固定错误）。前任 id 缺失/占位即派发前
-  // 拒绝（镜像 kimiCode 关联面形状——绝不静默开新会话）。backendSessionId 在 spawn
+  // 拒绝（绝不静默开新会话）。backendSessionId 在 spawn
   // 时刻即上游原生 sess_ id（无 proc_<pid> 占位中间态，ACP 同款形状）。
   supportsSessionReuse = true;
 

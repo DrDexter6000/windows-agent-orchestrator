@@ -258,7 +258,7 @@ test("run --background: malformed --scorecard-rules-file fail-fast，不返回 r
   }
 });
 
-test("P0-1: 裸 spawn 进程式 backend（claude-code/kimi）不受护栏限制（进程死即会话死）", () => {
+test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制（进程死即会话死）", () => {
   // 进程式 backend 的 session = 子进程；WAO 进程退出时子进程也会被回收
   // （taskkill /T 兜底 + 进程死即会话死的核心假设）。裸 spawn 对它们是安全的。
   // 护栏不得误伤进程式 backend —— 这是 runtime-agnostic 的体现
@@ -268,13 +268,10 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/kimi）不受护栏限制�
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        kimi_worker: {
-          backend: "kimi-code",
+        codex_worker: {
+          backend: "codex",
           binary: "node",
           cwd: dir,
-          // 裸 model id：kimi-code 的 validateAgentPolicy 拒绝 model.providerID
-          // （配了即拒，策略校验先于本测试的护栏到达点）。
-          model: { id: "kimi-for-coding" },
         },
       },
     }), "utf8");
@@ -282,7 +279,7 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/kimi）不受护栏限制�
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "spawn", "kimi_worker",
+      "spawn", "codex_worker",
       "--prompt", "x",
       "--registry", registryPath,
       "--run-dir", runDir,
@@ -295,7 +292,7 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/kimi）不受护栏限制�
 
     const out = (result.stdout || "") + (result.stderr || "");
     // 关键：不得出现 fire-and-forget 拒绝信息（进程式 backend 放行）。
-    // 注意：kimi 可能因 binary 缺失等原因失败，但失败原因不应是 fire-and-forget 护栏。
+    // 注意：worker 可能因 binary 缺失等原因失败，但失败原因不应是 fire-and-forget 护栏。
     assert.ok(!/06-18|fire-and-forget|session.*outlive/i.test(out),
       "进程式 backend 不应被 fire-and-forget 护栏拦截（sessionOutlivesProcess=false）");
   } finally {

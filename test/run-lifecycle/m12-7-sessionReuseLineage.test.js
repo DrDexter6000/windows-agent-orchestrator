@@ -336,7 +336,7 @@ test("TD188-LIN-03: 坏绑定事实全拒（不回落旧值遮蔽）——空/�
     { ...base, providerSessionId: "proc_43244" },
     { ...base, providerSessionId: "proc_99" },
     { backend: "process", backendSessionId: "proc_999", providerSessionId: KIMI_NATIVE }, // 关联的 spawn 身份与 session.created 不一致
-    { backend: "kimi-code", backendSessionId: "proc_43244", providerSessionId: KIMI_NATIVE }, // backend 身份不一致
+    { backend: "codex", backendSessionId: "proc_43244", providerSessionId: KIMI_NATIVE }, // backend 身份不一致
   ];
   for (const binding of badBindings) {
     const events = [

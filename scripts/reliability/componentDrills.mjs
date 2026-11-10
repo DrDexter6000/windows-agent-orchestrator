@@ -383,7 +383,7 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
     drill: "scripts/reliability/dsh-acp/wao-reuse-drill.mjs",
     note: "ADR-0031 §3.6 Phase 6 real-dispatch drill (date and dsh version in the evidence file): same ACP session across two runs + three fail-closed negatives",
   }),
-  // TD-184（2026-10-09）：codex / kimi-code 真实派发 drill 证据。进程式 CLI
+  // TD-184（2026-10-09）：codex 真实派发 drill 证据。进程式 CLI
   // 形状（详见 PHASE6_BACKEND_SHAPES）：暗号差分对照 + 链深 2 + N-C 无 native
   // id。覆盖边界 = non-delivery 的 lead_workspace 车道（delivery 复用 run 走
   // run.provider_session_bound 写侧，不在此证据范围）。
@@ -392,17 +392,12 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
     drill: "scripts/reliability/session-reuse-drill.mjs",
     note: "TD-184 real-dispatch drill (2026-10-09, codex): exec resume across run1→run2→run3 (chain depth 2) + fresh-lead differential control + three fail-closed negatives; non-delivery lead_workspace lane only",
   }),
-  "kimi-code": Object.freeze({
-    path: "scripts/reliability/kimi-code/evidence/phase6-session-reuse.json",
-    drill: "scripts/reliability/session-reuse-drill.mjs",
-    note: "TD-184 real-dispatch drill (2026-10-09, kimi): -r resume across run1→run2→run3 (chain depth 2) + fresh-lead differential control + three fail-closed negatives; non-delivery lead_workspace lane only",
-  }),
 });
 
 // Phase 6 证据判定的按后端形状表（2026-10-09 astra+opus 方案会审修）。
 // 调用方（component check）传入 subject backend 名选择形状——材料不得自选
 // 更宽松的规则。deepseek-acp 保持 v1 全杠（ACP system resume fact + sid 同一 +
-// errorCode -32602）；codex / kimi-code 是进程式 CLI 后端，判据 =
+// errorCode -32602）；codex 是进程式 CLI 后端，判据 =
 //   - 暗号差分对照（N-D fresh 会话答不出暗号 + run1 零工具断言），
 //   - 链深 ≥2（run3 续 run2，native id 可再取回），
 //   - N-C 无 native id 且无 provider_session_bound + 上游拒绝文本形状，
@@ -426,15 +421,6 @@ export const PHASE6_BACKEND_SHAPES = Object.freeze({
     distribution: "codex",
     legacy: false,
     negativeCErrorMessage: /no rollout found/i,
-    negativeCNoNativeId: true,
-    requireSameProviderSession: false,
-    requireResumeSystemFact: false,
-    requireFreshDifferential: true,
-  }),
-  "kimi-code": Object.freeze({
-    distribution: "kimi",
-    legacy: false,
-    negativeCErrorMessage: /Session .* not found/i,
     negativeCNoNativeId: true,
     requireSameProviderSession: false,
     requireResumeSystemFact: false,
@@ -745,7 +731,7 @@ export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdenti
   );
 }
 
-// 进程式 CLI 后端（codex / kimi-code）的 Phase 6 证据校验（纯函数；形状由
+// 进程式 CLI 后端（codex）的 Phase 6 证据校验（纯函数；形状由
 // PHASE6_BACKEND_SHAPES 选择，调用方 sessionReuseEvidenceFromPhase6File 分发；
 // 材料不自选规则）。判据设计见形状表注释——与 legacy 的三点差异：
 //   1. 无 ACP system resume fact：resume 证明 = 暗号差分对照（N-D fresh 会话
@@ -2303,7 +2289,7 @@ export function createComponentDrills(deps) {
     //      - 进程形：owning-supervisor 车道真实驱动 stop——daemon 持有 run
     //        （daemon run），优雅停机（daemon stop → abortAll → handle.abort →
     //        worker 进程树终止 → run.aborted fact + aborted 终态）。对
-    //        claude-code/codex/kimi-code/deepseek-acp 统一适用（不按 backend 名
+    //        claude-code/codex/deepseek-acp 统一适用（不按 backend 名
     //        分支）；进程被终止 + 终态事实一致 + seq 单调由 backendStopChecks
     //        按形态断言，无跳过/不适用通道（ADR-0032 §8）。
     //    spawn 车道的 --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配

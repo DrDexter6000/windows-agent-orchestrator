@@ -39,9 +39,9 @@
 
 ---
 
-## 为什么 opencode 比 claude-code/kimi-code 危险
+## 为什么 opencode 比 claude-code/codex 危险
 
-| 维度 | opencode（HTTP） | claude-code / kimi-code（进程式） |
+| 维度 | opencode（HTTP） | claude-code / codex（进程式） |
 |---|---|---|
 | 会话生命周期 | HTTP session，stop 可能虚假成功 | 进程死即会话死（OS 保证） |
 | 失控后能停吗 | abort + 有界静默验证；无法证明时告警并由 Lead 决策 | kill 进程即彻底停 |

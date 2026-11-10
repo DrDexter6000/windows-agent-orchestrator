@@ -43,7 +43,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **Node.js v22**（`engines` 为 `>=22 <23`；只支持 v22，其余版本被版本守卫拒绝——为什么必须是 v22、怎么装/切换，见 `docs/usage/install.md`「Node 为什么必须 v22」）——WAO 是 Node ESM，生产依赖仅 `@modelcontextprotocol/sdk` + `zod`（限 `src/mcp/**`），用 `npm ci` 安装（`npm install` 作放宽回退）
 - **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
 - **worker 可执行面**：**一条你能认证的车道就够**，不需要装齐。按车道形态分三类：进程 CLI 需在 PATH（claude-code 车道要 `claude`、codex 车道要 `codex`、deepseek-acp 车道要 `dsh`）；zcode 车道用桌面捆绑的 `zcode.cjs` **绝对路径**（registry `binary` 字段，不依赖 PATH）；kimi-web 车道需要本地 serve 已启动（启动/端口见 `docs/usage/lanes.md`「kimi 车道的 worker serve」）；各 runtime 怎么装见 `docs/usage/install.md`「可选的 agent runtime」
-- **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）；kimi-code backend 暂停使用（决定 0074；模板不含该车道）
+- **认证任选其一**（各认证对应哪些车道见 §4c 选择表）：zcode 桌面登录态、官方 Claude OAuth `claude login`、`codex login`、`KIMI_WEB_TOKEN`（kimi-web 通道）、或 DeepSeek key `DEEPSEEK_API_KEY`（ACP 通道）
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth 隔离**：claude-code worker 会话运行于 WAO 预备的独立 `CLAUDE_CONFIG_DIR` 隔离目录（承载纯净模式），用户 `~/.claude` 里的全局配置不进 worker 上下文。
 

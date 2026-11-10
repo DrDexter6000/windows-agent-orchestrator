@@ -1370,7 +1370,7 @@ function craftedResult() {
       },
       {
         agentId: "seat_b", runId: "run_b", runState: "completed", formatState: "unstructured",
-        backend: "kimi-code", provider: null, budgetExpired: false,
+        backend: "kimi-web", provider: null, budgetExpired: false,
         attribution: attributeReply("整体可行，就这样吧。\n"),
         finalText: "整体可行，就这样吧。\n",
       },
@@ -1380,7 +1380,7 @@ function craftedResult() {
     bricks: {
       runtimeFacts: [
         { agentId: "seat_a", backend: "deepseek-acp", provider: "deepseek-official" },
-        { agentId: "seat_b", backend: "kimi-code", provider: null },
+        { agentId: "seat_b", backend: "kimi-web", provider: null },
       ],
       authorInSeats: false,
       reviewedAgentId: "coder_x",

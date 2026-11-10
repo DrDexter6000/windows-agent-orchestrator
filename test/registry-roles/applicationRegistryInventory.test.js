@@ -108,7 +108,7 @@ test("M9-0-04: explicit model and process backend (default) fallback", async () 
   try {
     const registryPath = makeRegistry(dir, {
       coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
-      coder_mm: { backend: "kimi-code", cwd: dir },
+      coder_mm: { backend: "codex", cwd: dir },
       tester: { backend: "codex", cwd: dir, args: [] },
     });
     const runDir = join(dir, "runs");
@@ -119,7 +119,7 @@ test("M9-0-04: explicit model and process backend (default) fallback", async () 
     const mm = result.find((a) => a.id === "coder_mm");
     const tester = result.find((a) => a.id === "tester");
     assert.equal(hq.model, "glm-5.2", "explicit model from --model arg");
-    assert.equal(mm.model, "(default)", "kimi-code with no model → (default)");
+    assert.equal(mm.model, "(default)", "codex with no model → (default)");
     assert.equal(tester.model, "(default)", "codex with no model → (default)");
   } finally {
     cleanupDir(dir);
@@ -180,9 +180,8 @@ test("M9-0-06b: certification is not inherited after backend or model changes", 
   try {
     const registryPath = makeRegistry(dir, {
       coder_low: {
-        backend: "deepseek-harness",
+        backend: "deepseek-acp",
         cwd: dir,
-        dshConfigPath: join(dir, "dsh.yml"),
         credentialEnv: "DEEPSEEK_API_KEY",
         model: { id: "deepseek-v4-flash" },
       },

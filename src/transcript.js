@@ -2829,8 +2829,8 @@ export function findLatest(events, type) {
  * Order semantics mirror the two established bound disciplines:
  *   - findLatestBound: LAST bound match. Required where the legal writer
  *     appends the authoritative fact LAST (TD-54 double prompt.sent — the
- *     second event carries messageId/admittedSeq on the HTTP family ONLY
- *     (deepseek-harness 同形); the ProcessBackend family's legal
+ *     second event carries messageId/admittedSeq on the HTTP family ONLY;
+ *     the ProcessBackend family's legal
  *     double write lands BARE on both legs — its spawn result carries
  *     messageId/admittedSeq === undefined and JSON serialization drops the
  *     keys, pinned by the R14-W3 real contract sentinel in

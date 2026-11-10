@@ -12,7 +12,7 @@
 //     ENOENT-blames-the-executable trap lives there);
 //   - every backend WITHOUT it never spawns a local process — it threads
 //     agent.cwd as a REMOTE directory hint (HTTP serve API).
-// Today the partition is exact (ProcessBackend family + deepseek-harness on
+// Today the partition is exact (ProcessBackend family + deepseek-acp + zcode on
 // one side, kimi-web on the other), but nothing declared the binding —
 // any one-sided drift (a capability added to the HTTP backend, or removed
 // from a process backend) would silently break the cwd gate's scoping. This
@@ -21,7 +21,7 @@
 //
 // Maintenance boundary: a backend type newly added to the factory MUST get a
 // case below (the hardcoded expected partitions enumerate the current factory
-// branches; `registry.js` normalizeAgent's known-backend set is the same seven).
+// branches; `registry.js` normalizeAgent's known-backend set is the same five).
 //
 // Pure group: object construction + injectable seams only. The process-family
 // spawn is recorded through the established `_spawnFn` injection point and
@@ -70,18 +70,6 @@ function factoryCases(dir) {
   return [
     { key: "claude-code", agent: { backend: "claude-code", cwd: "D:/matrix/claude", binary: "node" } },
     { key: "codex", agent: { backend: "codex", cwd: "D:/matrix/codex", binary: "node" } },
-    { key: "kimi-code", agent: { backend: "kimi-code", cwd: "D:/matrix/kimi", binary: "node" } },
-    {
-      key: "deepseek-harness",
-      agent: {
-        backend: "deepseek-harness",
-        cwd: "D:/matrix/dsh",
-        // Absolute binary skips the where.exe probe; the spawn is stubbed anyway.
-        binary: "D:/matrix/tools/dsh-stub.exe",
-        dshConfigPath: join(dir, "dsh-config.json"),
-        credentialEnv: "DSH_MATRIX_KEY",
-      },
-    },
     {
       key: "deepseek-acp",
       agent: {
@@ -126,9 +114,6 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
   const prevMatrixToken = process.env.KIMI_WEB_MATRIX_TOKEN;
   process.env.KIMI_WEB_MATRIX_TOKEN = "matrix-token-value";
   try {
-    // deepseek-harness's preflight proves dshConfigPath is readable — a real
-    // tmp file (the fixture must satisfy the same SSOT contract production does).
-    writeFileSync(join(dir, "dsh-config.json"), "{}", "utf8");
     // deepseek-acp's preflight proves the operator-installed containment overlay
     // matches the declared one — install the in-repo reference copy into the tmp
     // fixture dir and point the backend at it (same SSOT contract production does;
@@ -213,7 +198,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     // becoming a local spawner — moves a key between these lists and goes red.
     assert.deepEqual(
       [...localSpawnKeys].sort(),
-      ["claude-code", "codex", "deepseek-acp", "deepseek-harness", "kimi-code", "zcode"],
+      ["claude-code", "codex", "deepseek-acp", "zcode"],
       "the local-spawn family is exactly the preflightInvocation-declaring family",
     );
     assert.deepEqual(
@@ -228,7 +213,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
   }
 });
 
-test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's seven cases are the closed factory surface)", () => {
+test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's five cases are the closed factory surface)", () => {
   assert.throws(
     () => backendFor({ backend: "bogus-runtime", cwd: "D:/matrix/bogus" }),
     /Unsupported backend/,

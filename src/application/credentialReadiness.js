@@ -3,7 +3,7 @@
 // M11-7 (CTO closeout): Worker credential availability + Windows user-env bridge.
 //
 // Assesses whether a worker's REQUIRED credentials (registry-declared via
-// deepseek-harness/deepseek-acp credentialEnv or kimi-web tokenEnv) are
+// deepseek-acp credentialEnv or kimi-web tokenEnv) are
 // available in the launching environment, and bridges values from the Windows
 // Current-User scope into the worker child process when they are absent from
 // process.env.

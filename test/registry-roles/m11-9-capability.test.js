@@ -122,81 +122,28 @@ test("CAP-A3d-codex: model.providerID / model.variant → reject; bare model.id 
   assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "x" } }));
 });
 
-// ===== A4: Kimi validator =====
-
-test("CAP-A4-kimi: model accepted", async () => {
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const backend = new KimiCodeBackend();
-  assert.doesNotThrow(() => backend.validateAgentPolicy({
-    model: { id: "kimi-code/k3" },
-  }));
-});
-
-test("CAP-A4b-kimi: supported reasoning max → accept", async () => {
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const backend = new KimiCodeBackend();
-  assert.doesNotThrow(
-    () => backend.validateAgentPolicy({
-      model: { id: "kimi-code/k3" },
-      reasoning: { effort: "max" },
-    }),
-  );
-});
-
-test("CAP-A4b2-kimi: unsupported reasoning xhigh → reject", async () => {
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const backend = new KimiCodeBackend();
-  assert.throws(
-    () => backend.validateAgentPolicy({ reasoning: { effort: "xhigh" } }),
-    /cannot express|not supported|reasoning/i,
-  );
-});
-
-test("CAP-A4c-kimi: contextWindow → reject", async () => {
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const backend = new KimiCodeBackend();
-  assert.throws(
-    () => backend.validateAgentPolicy({ model: { id: "x", contextWindow: 200000 } }),
-    /cannot express|not supported|contextWindow/i,
-  );
-});
-
-test("CAP-A4d-kimi: model.providerID / model.variant → reject; bare model.id still passes", async () => {
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-  const backend = new KimiCodeBackend();
-  assert.throws(
-    () => backend.validateAgentPolicy({ model: { id: "kimi-code/k3", providerID: "moonshot" } }),
-    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
-  );
-  assert.throws(
-    () => backend.validateAgentPolicy({ model: { id: "kimi-code/k3", variant: "stable" } }),
-    /cannot express model\.providerID\/model\.variant[\s\S]*--model/,
-  );
-  assert.doesNotThrow(() => backend.validateAgentPolicy({ model: { id: "kimi-code/k3" } }));
-});
-
 // ===== B: RunManager causality — real Kimi + reasoning → zero side effects =====
 
-test("CAP-B1: RunManager.start with Kimi + reasoning → reject, zero transcript/runDir/worktree/spawn", async () => {
+test("CAP-B1: RunManager.start with deepseek-acp + reasoning → reject, zero transcript/runDir/worktree/spawn", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-cap-b1-"));
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
-      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "xhigh" } } },
+      agents: { coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DEEPSEEK_TEST_TOKEN", reasoning: { effort: "xhigh" } } },
     }), "utf8");
     const runDir = join(dir, "runs");
 
     const { RunManager } = await import("../../src/runManager.js");
-    const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+    const { DeepSeekAcpBackend } = await import("../../src/backends/deepSeekAcp.js");
     let spawnCount = 0;
-    const realKimi = new KimiCodeBackend();
-    const origSpawn = realKimi.spawn.bind(realKimi);
-    realKimi.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
+    const realAcp = new DeepSeekAcpBackend();
+    const origSpawn = realAcp.spawn.bind(realAcp);
+    realAcp.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
     const manager = new RunManager({
       config: { registry: registryPath, runDir, defaultIsolation: "none" },
       readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
-      transcriptDir: runDir, backendFor: () => realKimi, userEnvReader: async () => ({}),
+      transcriptDir: runDir, backendFor: () => realAcp, userEnvReader: async () => ({}),
     });
     await assert.rejects(
       () => manager.start("coder_mm", { prompt: "x", runDir, registry: registryPath, fireAndForget: false }),
@@ -254,13 +201,11 @@ test("CAP-C1: tracked synthetic six-worker fixture passes validateAgentPolicy", 
   const { readRegistry } = await import("../../src/registry.js");
   const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
   const { CodexBackend } = await import("../../src/backends/codex.js");
-  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
   const { KimiWebBackend } = await import("../../src/backends/kimiWeb.js");
   const registry = await readRegistry("test/fixtures/agents.six.json");
   const backends = {
     "claude-code": new ClaudeCodeBackend(),
     "codex": new CodexBackend(),
-    "kimi-code": new KimiCodeBackend(),
     "kimi-web": new KimiWebBackend(),
   };
   for (const agent of registry.listAgents()) {
@@ -275,7 +220,7 @@ test("CAP-C1: tracked synthetic six-worker fixture passes validateAgentPolicy", 
 
 // ===== B3: RunManager.resume + Kimi + reasoning → zero side effects =====
 
-test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript bytes unchanged, zero append/spawn", async () => {
+test("CAP-B3: RunManager.resume with deepseek-acp + reasoning → reject, transcript bytes unchanged, zero append/spawn", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-cap-b3-"));
   try {
     makeGitRepo(dir);
@@ -285,12 +230,12 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
     execSync(`git worktree add "${wtPath}" -b wao/${runId}`, { cwd: dir, stdio: "pipe" });
     const base = execSync("git rev-parse HEAD", { cwd: wtPath, encoding: "utf8" }).trim();
 
-    // Build an existing non-terminal transcript for a kimi-code delivery run.
+    // Build an existing non-terminal transcript for a deepseek-acp delivery run.
     const transcriptPath = join(dir, "runs", `${runId}.jsonl`);
     mkdirSync(join(dir, "runs"), { recursive: true });
     const events = [
-      { type: "run.started", backend: "kimi-code", cwd: dir, worktreePath: wtPath, worktreeBranch: `wao/${runId}`, delivery: { mode: "git_commit_v1", baseCommit: base, allowedPaths: ["src"], verificationCommands: ["echo ok"], scorecardRules: { requireEvidence: true, mode: "warn" } }, scorecardConfigured: true, ts: "2026-07-26T00:00:00.000Z", runId, agentId: "coder_mm", seq: 1 },
-      { type: "session.created", backend: "kimi-code", backendSessionId: "s1", ts: "2026-07-26T00:00:00.200Z", runId, agentId: "coder_mm", seq: 2 },
+      { type: "run.started", backend: "deepseek-acp", cwd: dir, worktreePath: wtPath, worktreeBranch: `wao/${runId}`, delivery: { mode: "git_commit_v1", baseCommit: base, allowedPaths: ["src"], verificationCommands: ["echo ok"], scorecardRules: { requireEvidence: true, mode: "warn" } }, scorecardConfigured: true, ts: "2026-07-26T00:00:00.000Z", runId, agentId: "coder_mm", seq: 1 },
+      { type: "session.created", backend: "deepseek-acp", backendSessionId: "s1", ts: "2026-07-26T00:00:00.200Z", runId, agentId: "coder_mm", seq: 2 },
       { type: "prompt.sent", prompt: "do it", ts: "2026-07-26T00:00:00.300Z", runId, agentId: "coder_mm", seq: 3 },
       { type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-07-26T00:00:00.400Z", runId, agentId: "coder_mm", seq: 4 },
     ];
@@ -298,26 +243,26 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
     writeFileSync(transcriptPath, transcriptContent, "utf8");
     const bytesBefore = readFileSync(transcriptPath, "utf8").length;
 
-    // Registry: coder_mm requests an effort K3 cannot express.
+    // Registry: coder_mm requests an effort the ACP settable intersection cannot express.
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
-      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "xhigh" } } },
+      agents: { coder_mm: { backend: "deepseek-acp", cwd: dir, credentialEnv: "DEEPSEEK_TEST_TOKEN", reasoning: { effort: "xhigh" } } },
     }), "utf8");
 
     const { RunManager } = await import("../../src/runManager.js");
-    const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
-    // Use the REAL KimiCodeBackend (not a hand-written check) so the test
+    const { DeepSeekAcpBackend } = await import("../../src/backends/deepSeekAcp.js");
+    // Use the REAL DeepSeekAcpBackend (not a hand-written check) so the test
     // exercises the actual policy validator.
     let spawnCount = 0;
-    const realKimi = new KimiCodeBackend();
+    const realAcp = new DeepSeekAcpBackend();
     // Wrap spawn to count (the validator throws before spawn is reached).
-    const origSpawn = realKimi.spawn.bind(realKimi);
-    realKimi.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
+    const origSpawn = realAcp.spawn.bind(realAcp);
+    realAcp.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
 
     const manager = new RunManager({
       config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
       readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
-      transcriptDir: join(dir, "runs"), backendFor: () => realKimi, userEnvReader: async () => ({}),
+      transcriptDir: join(dir, "runs"), backendFor: () => realAcp, userEnvReader: async () => ({}),
     });
 
     // Snapshot the worktree list BEFORE resume (proves no worktree change).
@@ -327,7 +272,7 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
     await assert.rejects(
       () => manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath }),
       /reasoning|cannot express|not supported/i,
-      "resume with kimi + reasoning must reject",
+      "resume with deepseek-acp + reasoning must reject",
     );
 
     // Causality assertions: zero side effects.

@@ -368,8 +368,8 @@ function isConfirmableToolCallId(value) {
 // R10-C C-3: when a per-dispatch model override is active and the backend
 // refuses the (synthesized) policy, the operator sees a registry-shape error
 // for a dispatch they made with --model — the two facts never connect in the
-// message (a backend's model-shape text, kimi-code's effort/model pairing
-// both read as pure registry complaints). Append ONE bounded sentence naming
+// message (a backend's model-shape text or effort/model pairing both read as
+// pure registry complaints). Append ONE bounded sentence naming
 // the override whenever it is in play. The verdict itself is untouched: same
 // throw, same backend decision, only the message gains the hint (fixed text —
 // never echoes the supplied model id).
@@ -799,8 +799,8 @@ export class RunManager {
     // (same getAgent shallow-merge caveat — never a getAgent override). The
     // value is gated by the CLOSED-SET SSOT (isValidReasoningOverride above,
     // REASONING_EFFORTS from registry.js). No capability boolean exists by
-    // design: inexpressible policies and conditional subsets
-    // (kimi K3-only, deepseek-harness high|max) refuse naturally through the
+    // design: inexpressible policies and conditional subsets (e.g. deepseek-acp
+    // accepting only its ACP-advertised efforts) refuse naturally through the
     // existing per-backend validateAgentPolicy gate over the synthesized
     // object. Mutually exclusive with requireCertified and sessionReuse by the
     // same reasoning as modelOverride (any override present voids the claim);
@@ -891,8 +891,7 @@ export class RunManager {
     // above) — the same post-getAgent, pre-validation slot as the model
     // synthesis. The synthesized object flows through validateAgentPolicy
     // below unchanged: zero NEW validation surface; a backend that cannot
-    // express the effort or only a conditional subset
-    // (kimi-code K3-only, deepseek-harness high|max) refuses exactly as it
+    // express the effort or only a conditional subset refuses exactly as it
     // would for the same registry-declared shape. For a registry entry without
     // any reasoning this synthesizes a bare {effort}.
     if (reasoningOverride !== null && reasoningOverride !== undefined) {
@@ -1173,7 +1172,7 @@ export class RunManager {
     // Capability-scoped, provider-neutral: keyed on the SAME declared
     // capability the M12-14 preflightInvocation gate below uses — a backend
     // that implements preflightInvocation composes a LOCAL OS invocation and
-    // spawns with cwd: agent.cwd (processBackend.js spawn / deepSeekHarness),
+    // spawns with cwd: agent.cwd (processBackend.js spawn),
     // so a missing directory hits Node's classic ENOENT-blames-the-executable
     // trap there. HTTP 型 backend（无 preflightInvocation 能力）把 agent.cwd
     // 作为远端目录提示透传给 serve API——无本地 spawn、无本地 ENOENT 陷阱，

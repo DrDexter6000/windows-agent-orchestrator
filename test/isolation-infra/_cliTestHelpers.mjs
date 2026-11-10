@@ -66,7 +66,7 @@ export function doctorPanelRun(dir, registryPath) {
 // R12 共用夹具：fake backend 捕获 spawn 的合成 policy；registry agent 带齐
 // model+reasoning 静态策略（含兄弟字段，验证"只替换 .id/.effort"）。
 // R13-C 诚实修正：自称 claude-code 的假 backend 不得返回 messageId/admittedSeq——
-// 真实 claudeCode/kimiCode/codex 都 extends ProcessBackend，其 spawn 结果带
+// 真实 claudeCode/codex 都 extends ProcessBackend，其 spawn 结果带
 // messageId: undefined（processBackend.js:340），transcript.append 的
 // JSON.stringify 丢 undefined 键 → 该家族的合法 TD-54 双写【两条都无
 // messageId】。旧夹具返回 messageId 掩盖了"messageId 优先收窄对该家族是死
