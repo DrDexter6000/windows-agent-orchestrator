@@ -1372,19 +1372,19 @@ test("R6-C: recommendations over the REAL tracked template derive all rows from 
   const raw = readFileSync(join("config", "agents.example.json"), "utf8");
   const template = JSON.parse(raw);
   const candidates = buildCandidateList(template);
-  assert.equal(candidates.length, 8, "0046 real template has the eight lanes");
+  assert.equal(candidates.length, 9, "the real template has the nine lanes (b98 added fable)");
   const rec = await buildRecommendations(candidates, template, {
     hasCli: async () => true,
     hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing"),
   });
-  assert.equal(rec.rows.length, 8);
+  assert.equal(rec.rows.length, 9);
   const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
   // TD-258：凭据名改从 requiredCredentialNames 派生（doctor 同一权威）——tokenEnv/
   // credentialEnv 车道如实携带声明的名；无凭据声明车道（zcode=承重桥非凭据）仍 null。
   assert.equal(byId.kimi.requiresKeyEnv, "KIMI_WEB_TOKEN", "kimi 行携带 tokenEnv 声明名");
   assert.equal(byId["deepseek-pro"].requiresKeyEnv, "DEEPSEEK_API_KEY", "deepseek-pro 行携带 credentialEnv 声明名");
   assert.equal(byId["deepseek-flash"].requiresKeyEnv, "DEEPSEEK_API_KEY", "deepseek-flash 行携带 credentialEnv 声明名");
-  for (const id of ["glm-pro", "glm-flash", "sol", "astra", "opus"]) {
+  for (const id of ["glm-pro", "glm-flash", "sol", "astra", "opus", "fable"]) {
     assert.equal(byId[id]?.requiresKeyEnv, null, `${id} 无凭据声明（登录态/承重桥面）`);
   }
   // CLI 探测映射（BACKEND_CLI SSOT）：codex→codex、claude-code→claude、deepseek-acp→dsh；
@@ -1392,6 +1392,7 @@ test("R6-C: recommendations over the REAL tracked template derive all rows from 
   assert.equal(byId.sol.requiresCli, "codex");
   assert.equal(byId.astra.requiresCli, "codex");
   assert.equal(byId.opus.requiresCli, "claude");
+  assert.equal(byId.fable.requiresCli, "claude");
   assert.equal(byId["deepseek-pro"].requiresCli, "dsh");
   assert.equal(byId["deepseek-flash"].requiresCli, "dsh");
   assert.equal(byId["glm-pro"].requiresCli, null);

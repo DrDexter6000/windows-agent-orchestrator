@@ -87,6 +87,20 @@
         "--dangerously-skip-permissions"
       ]
     },
+    "fable": {
+      "_comment": "via claude-code（原厂订阅 OAuth）；用途与限制见 wao lanes。需要 Claude Code CLI 2.1.321 或更高。",
+      "backend": "claude-code",
+      "cwd": ".",
+      "model": {
+        "id": "claude-fable-5-2"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "args": [
+        "--dangerously-skip-permissions"
+      ]
+    },
     "deepseek-pro": {
       "_comment": "via deepseek-acp（ACP stdio 通道；model=双字段 {id, providerID} 形状）；用途与限制见 wao lanes。",
       "backend": "deepseek-acp",
@@ -187,6 +201,17 @@
         "label": "claude-opus-5-5 via claude-code（模板行）",
         "profile": "delta",
         "modelId": "claude-opus-5-5",
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "containmentEvidence"
+        ]
+      },
+      {
+        "agentId": "fable",
+        "label": "claude-fable-5-2 via claude-code（模板行）",
+        "profile": "delta",
+        "modelId": "claude-fable-5-2",
         "drills": [
           "sentinel",
           "scorecard",

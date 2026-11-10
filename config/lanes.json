@@ -92,6 +92,17 @@
         "effort": "high"
       },
       "aliases": {}
+    },
+    {
+      "id": "fable",
+      "backend": "claude-code",
+      "model": {
+        "id": "claude-fable-5-2"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "aliases": {}
     }
   ]
 }

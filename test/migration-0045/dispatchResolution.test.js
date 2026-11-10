@@ -39,9 +39,9 @@ const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
 
-test("W1 活体：config/lanes.json 8 车道/0 别名/4 角色，结构零 issue（0046 步⑧ -gpt-sol-56）", () => {
+test("W1 活体：config/lanes.json 9 车道/0 别名/4 角色，结构零 issue（0046 步⑧ -gpt-sol-56；第 98 批 +fable）", () => {
   assert.ok(LIVE.ok, `结构 issues 必须为空，实际：${JSON.stringify(LIVE.issues)}`);
-  assert.equal(LIVE.lanes.length, 8);
+  assert.equal(LIVE.lanes.length, 9);
   const aliases = LIVE.lanes.flatMap((l) => Object.keys(l.aliases ?? {}));
   assert.equal(aliases.length, 0, "0046 步⑥：旧席位名别名表全数清空（机制保留=空表合法）");
   assert.deepEqual(ROLES.sort(), ["auditor", "coder", "researcher", "tester"],
@@ -82,6 +82,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "medium", aliases: {} },
     { id: "deepseek-flash", backend: "deepseek-acp", modelId: "deepseek-flash", effort: "max", aliases: {} },
     { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
+    { id: "fable", backend: "claude-code", modelId: "claude-fable-5-2", effort: "high", aliases: {} },
     { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: {} },
     { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: {} },
     { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3.1-pro", effort: null, aliases: {} },

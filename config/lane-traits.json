@@ -6,7 +6,8 @@
     "sol、astra（codex 车道）只做会审，不派实现、测试或调研；会审要查 bug 时优选 sol；astra 只用于疑难杂症",
     "要真跑一次 deepseek-acp 后端（如验证该后端的改动）用 deepseek-flash；deepseek-pro 暂停期间连最小探测也不派",
     "实现任务默认 glm-pro：它能完成的都优先交给它，不按任务形态另分车道；GLM 高峰期间（时段见 glm-pro 的 cost）优先 glm-flash",
-    "能省则省，质量和效率优先；不必为省钱刻意避开 DeepSeek 高峰"
+    "能省则省，质量和效率优先；不必为省钱刻意避开 DeepSeek 高峰",
+    "fable 仅在方案设计/头脑风暴阶段引入会审"
   ],
   "scale": {
     "1": "不适合",
@@ -389,6 +390,55 @@
         "source": "official"
       },
       "concurrencyNote": "同车道 3 个并发全部完成（measured 2026-10-13：最小单命令任务，本机一次取样；更高并发未测）"
+    },
+    "fable": {
+      "ratings": {
+        "research": {
+          "stars": null,
+          "basis": null
+        },
+        "code": {
+          "stars": null,
+          "basis": null
+        },
+        "review": {
+          "stars": null,
+          "basis": null
+        },
+        "design": {
+          "stars": null,
+          "basis": null
+        },
+        "longHorizon": {
+          "stars": null,
+          "basis": null
+        },
+        "writing": {
+          "stars": null,
+          "basis": null
+        },
+        "visual": {
+          "stars": null,
+          "basis": null
+        }
+      },
+      "ratedAgainst": null,
+      "costTier": null,
+      "cost": "Claude 订阅（OAuth 长期 token）；无头模式按官方文档计入使用额度（usage credits）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
+      "caveats": [
+        "无头（-p）运行的 Fable 请求按官方文档直接计入使用额度（usage credits），不经确认",
+        "需要 Claude Code CLI 2.1.321 或更高（本机 2026-11-10 已升级）",
+        "安全分类器拦下的请求（多为网络安全、生物）会自动改由 Opus 重跑（官方文档）"
+      ],
+      "contextWindow": {
+        "tokens": 1000000,
+        "source": "official"
+      },
+      "multimodal": {
+        "image": true,
+        "video": false,
+        "source": "official"
+      }
     },
     "deepseek-pro": {
       "ratings": {

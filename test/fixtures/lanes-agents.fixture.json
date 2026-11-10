@@ -79,6 +79,16 @@
         "effort": "high"
       },
       "cwd": "."
+    },
+    "fable": {
+      "backend": "claude-code",
+      "model": {
+        "id": "claude-fable-5-2"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "cwd": "."
     }
   }
 }
