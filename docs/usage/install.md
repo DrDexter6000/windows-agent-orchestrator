@@ -31,7 +31,7 @@ WAO 进程式 backend（claude-code / codex / zcode / deepseek-acp）的"进程�
 | zcode（ZCode 桌面版） | 从 [ZCode 官网](https://zcode.z.ai) 下载安装并登录 | 进程式 backend：GLM 车道用桌面捆绑的 `zcode.cjs`，registry 怎么填见 `AGENT_ONBOARDING.md` §4c；也可作 MCP 宿主（[接入宿主与绑定项目](host.md)） |
 | claude code | 见 [anthropic 官方](https://docs.anthropic.com/en/docs/claude-code) | 进程式 backend（需登录：`claude login`） |
 | codex | `npm i -g @openai/codex` | 进程式 backend（需登录：`codex login`） |
-| kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | kimi-web 车道的宿主程序：车道连它的 `kimi web` 本地服务（私有主目录先 `kimi login` 一次；serve 何时自动拉起见[车道](lanes.md)）；也可作 MCP 宿主（[接入宿主与绑定项目](host.md)） |
+| kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | kimi-web 车道的宿主程序：车道连它的 `kimi web` 本地服务（私有主目录先 `kimi login` 一次、用脚本拉起一次生成 `server.token`；serve 何时自动拉起见[车道](lanes.md)）；也可作 MCP 宿主（[接入宿主与绑定项目](host.md)） |
 | DeepSeek Harness（ACP 面） | `dsh` CLI ≥ 0.1.5-rc（见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)） | `deepseek-acp` backend：`dsh --profile acp` + 操作员安装的 containment 覆盖层 + `DEEPSEEK_API_KEY`；WAO 只 detect / invoke / report。安装步骤与限制见 `docs/certification-runbook.md`「DSH 通道适用限制与能力交叉警告」 |
 
 

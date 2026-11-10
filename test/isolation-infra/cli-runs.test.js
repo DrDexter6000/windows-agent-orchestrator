@@ -305,11 +305,8 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制
 // 拦）/ failed（门拦下）；括号只列检查 name。无 scorecard.checked 不打印——
 // 既有纯 JSON 输出逐字节不变（TD-75 系列的 JSON.parse(out) 即 absent 钉）。
 
-// 捕获解析辅助：cli.js import 时自执行的 main()（argv 为测试 runner 参数）会
-// 竞态地打印一次 HELP_TEXT（既有 TD-75 系列同受影响，见终报 blocker）。
-// statusCommand 的每次 console.log 是捕获数组的一个元素——JSON 块（多行
-// pretty-print，整体一个元素）与 Scorecard 行各自成元素，按首字符精确定位即可
-// 对该竞态免疫。
+// 捕获解析辅助：statusCommand 的每次 console.log 是捕获数组的一个元素——JSON 块
+// （多行 pretty-print，整体一个元素）与 Scorecard 行各自成元素，按首字符定位。
 async function captureElements(fn) {
   const elements = [];
   const orig = console.log;

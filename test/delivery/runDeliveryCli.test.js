@@ -474,11 +474,6 @@ test("3C1-08: JSON output preserves verified DeliveryRef and verification flags"
  * 3C1-09: help exposes the new option exactly once.
  */
 test("3C1-09: help exposes --delivery-spec-file exactly once", async () => {
-  const out = await captureLog(async () => {
-    const { printHelp } = await import("../../src/cli.js");
-    // printHelp is not exported — use the CLI process instead
-  }).catch(() => null);
-
   // Use the actual CLI process for help
   const result = execSync("node src/cli.js --help 2>&1", {
     cwd: resolve(process.cwd()),

@@ -115,8 +115,8 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 
 - **症状**：对一个 codex 后端的终态 continuable delivery 调 `run_continue`，被 `no_provider_session` 拒绝；或复用 resume 派发在 runner 侧以固定文案拒绝（"recorded only the process placeholder identity (proc_<pid>)"）。
 - **根因（按形状分）**：
-  - 父 run 转录只有 `proc_<pid>` 占位 `session.created`，没有 `run.provider_session_bound` 绑定事实（早期 Kimi/Codex 父 run）——明确不可续接，不迁移旧数据；
-  - 父 run 是新 run 但 runtime 未在 wire 上广告 native id（无绑定事实）——同上不可续接，重新派发新 continuable run；
+  - 父 run 转录只有 `proc_<pid>` 占位 `session.created`，没有 `run.provider_session_bound` 绑定事实（早期 Codex 父 run）——明确不可续接，不迁移旧数据；
+  - 父 run 是新的 Codex run，但 wire 上没有广告 native id（无绑定事实）——同上不可续接，重新派发新 continuable run；
   - 绑定事实损坏（重复/空/占位值/与原 spawn 身份不一致）——fail-closed 拒绝，绝不回落占位值。
 - **验证**：查父转录（经解析链定位）：应恰有一条 `session.created`（`backendSessionId` 形如 `proc_<pid>`）且恰有一条 `run.provider_session_bound`（`providerSessionId` 为 codex `thread.started` 广告的 native id）。
 - **修复/规避**：对旧父 run，让 Lead 以新的 `run_dispatch`（`continuable:true`）重新交付并接手冻结候选；新 run 会记录绑定事实，之后 `run_continue` 即用真实 native id 续接。claude-code 父 run 不受影响（resume 编译 opaque uuid，proc 身份不是阻断）；ACP 的 native `session.created` 照常可续接。

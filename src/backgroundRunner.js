@@ -108,8 +108,8 @@ function makeObjectRegistry(registryObj) {
 }
 
 // backend 构造收敛于共享工厂 src/backends/factory.js（daemon / runner / shared 共用）。
-// 不复用 cli.js 的真实约束：cli.js 顶层无条件执行 main() 且拉入整棵命令树，不可被
-// import；本模块是被 CLI 按路径 fork 的 detached 独立进程入口，从工厂 import 构造器。
+// 不复用 cli.js：它拉入整棵命令树；本模块是被 CLI 按路径 fork 的 detached 独立进程
+// 入口，从工厂 import 构造器。
 
 /**
  * 进程内核心：驱动一个 run 到终态。可单测，也可被 detached 进程入口调用。
