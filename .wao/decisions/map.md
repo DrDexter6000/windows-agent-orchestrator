@@ -124,3 +124,4 @@
 0120 | 后台 runner 经 WMI 起的启动桥启动，不随宿主重启 MCP 服务而死
 0121 | zcode 停滞门用一个作业对象认运行的进程（Windows 临时方案）
 0122 | 保持唤醒期间按用户的屏保设置代为启动屏保
+0123 | kimi-code 与 deepseek-harness 两个 worker 后端退役，巡检留未接线通道观察表
