@@ -2,9 +2,8 @@
 //
 // The CLI help text as a named, importable constant.
 //
-// WHY a separate module: src/cli.js ends with a self-executing main() — importing
-// it RUNS the CLI. The docs/surface generator (scripts/gen-surface.mjs) and any
-// other consumer import HELP_TEXT from here instead, with zero side effects.
+// WHY a separate module: the docs/surface generator (scripts/gen-surface.mjs) and
+// any other consumer import HELP_TEXT from here without loading the whole CLI.
 //
 // 帮助页是给用户的速查：每条命令一行语法，需要说明的同行一句短话；内部
 // 编号（决定号/TD 号/批次号）不进帮助页，长解释归使用手册（wao manual）。run/spawn

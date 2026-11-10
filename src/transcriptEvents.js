@@ -59,7 +59,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.provider_session_bound",
-    description: "delivery+sessionReuse run 在终态分派前，把 wire 上观察到的 runtime native provider id（kimi `session.resume_hint`、codex `thread.started`）与原 spawn 身份（`backend`+`backendSessionId`，进程式为 `proc_<pid>`）关联记录的独立有界绑定事实——不补第二条 `session.created`（process_missing 恢复依赖唯一 `proc_<pid>` 身份）；共享续接读取器（`resolvePriorProviderSessionId`/`resolvePriorProviderSessionIdFromEvents`）优先采信并严格校验（runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份一致），坏/重复/冲突事实 fail-closed 拒绝、绝不回落旧 `session.created` 值遮蔽。",
+    description: "delivery+sessionReuse run 在终态分派前，把 wire 上观察到的 runtime native provider id（codex `thread.started`）与原 spawn 身份（`backend`+`backendSessionId`，进程式为 `proc_<pid>`）关联记录的独立有界绑定事实——不补第二条 `session.created`（process_missing 恢复依赖唯一 `proc_<pid>` 身份）；共享续接读取器（`resolvePriorProviderSessionId`/`resolvePriorProviderSessionIdFromEvents`）优先采信并严格校验（runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份一致），坏/重复/冲突事实 fail-closed 拒绝、绝不回落旧 `session.created` 值遮蔽。",
   },
   {
     type: "prompt.sent",

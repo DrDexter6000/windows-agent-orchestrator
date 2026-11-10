@@ -311,8 +311,8 @@ const PRIOR_SESSION_UNADDRESSABLE_TEXT = "sessionReuse: prior run has a bound se
 // ProcessBackend wrote it (backendSessionId "proc_<pid>") — M12-19 process-missing
 // recovery requires that unique process identity (classifyProcessMissingCandidate:
 // exactly one bound session.created whose backendSessionId parses as proc_<pid>).
-// When the runtime advertises its native provider id on the wire (kimi
-// session.resume_hint / codex thread.started), the runner appends ONE separate
+// When the runtime advertises its native provider id on the wire (codex
+// thread.started), the runner appends ONE separate
 // bounded binding fact that associates the native id with that original spawn
 // identity. The reader below prefers the binding fact and validates it strictly;
 // a bad/duplicated/conflicting fact is DAMAGE (refuse) — it must never fall back

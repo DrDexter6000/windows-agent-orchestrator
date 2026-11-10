@@ -333,6 +333,7 @@
       "isolation-infra/cli-runs.test.js",
       "isolation-infra/cli.test.js",
       "isolation-infra/cliDeadline.test.js",
+      "isolation-infra/cliEntryGuard.test.js",
       "isolation-infra/daemon.test.js",
       "isolation-infra/gitLocalExcludeCloseout.test.js",
       "isolation-infra/installPs1.test.js",

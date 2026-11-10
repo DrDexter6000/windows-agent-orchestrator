@@ -270,7 +270,7 @@ test("ADR25-B2-CLI-1: text 模式——deepseek-acp×tokenBudget ⚠（TD-87 零
   }
 });
 
-test("ADR25-B2-CLI-2: --format json——两条新 warning 语义进 warnings[]，ok 不变", () => {
+test("ADR25-B2-CLI-2: --format json——tokenBudget warning 进 warnings[]，ok 不变", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-b2val-json-"));
   try {
     const registryPath = join(dir, "agents.json");

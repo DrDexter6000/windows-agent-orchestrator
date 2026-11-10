@@ -111,12 +111,7 @@ export function makeRetryInheritFixture(dir) {
 }
 
 /**
- * 解析 retry 输出的单个 pretty-printed JSON 对象。
- * 使用它的测试文件 import 了 src/cli.js——其自执行 main() 的异步 printHelp()
- * 可能落进首个执行测试的捕获窗口（既有套件级怪癖，对不做整体 JSON.parse 的
- * 测试无害）。
- * retryCommand 恰打印一个 JSON 对象且 HELP_TEXT 不含花括号，故从首个 "{" 切到
- * 末个 "}" 即可确定性还原（容忍前后污染）。
+ * 解析 retry 输出的单个 pretty-printed JSON 对象（从首个 "{" 切到末个 "}"）。
  */
 export function parseRetryJson(out) {
   const start = out.indexOf("{");

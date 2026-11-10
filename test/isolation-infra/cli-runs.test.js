@@ -2313,17 +2313,6 @@ test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ �
 // ③ runId 内嵌时间戳为 UTC 的双通道文档补充。④ allowedPaths 接受目录条目
 //    （写路径入口归一化至多一个结尾斜杠；matcher 与 workdir_escape 零改动）。
 
-/**
- * TD-137① 前置排水：本文件顶部 import 了 src/cli.js，其底部无条件
- * `main(process.argv.slice(2))` 在测试进程里也会启动——runner 子进程的 argv
- * 为空/help 形状时它会在若干个事件轮次后 printHelp()。若该续体恰好落在某个
- * captureLog 窗口内，捕获输出就被 HELP_TEXT 污染（JSON.parse 炸）。
- * 这里先让出事件轮次把它排干，再开任何捕获窗口。
- */
-async function drainStrayCliMain() {
-  await new Promise((r) => setTimeout(r, 50));
-}
-
 /** TD-137① 夹具：写一个最小 run transcript（首事件带 agentId，末事件 ts 即 updatedAt）。 */
 function writeTd137ListFixture(runDir, runId, lastTs) {
   const events = [
@@ -2338,7 +2327,6 @@ test("TD-137① 裸 runs list 默认最新优先：updatedAt 新的在前（text
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td137-list-"));
   try {
-    await drainStrayCliMain();
     // 判别性夹具：字典序更小的 run_aaa 反而更旧——旧行为升序会把它排第一。
     writeTd137ListFixture(dir, "run_aaa", "2026-08-23T00:01:00.000Z");
     writeTd137ListFixture(dir, "run_bbb", "2026-08-23T02:00:00.000Z");
@@ -2362,7 +2350,6 @@ test("TD-137① --latest N 截取与全量排序不变（updatedAt desc，无信
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td137-latest-"));
   try {
-    await drainStrayCliMain();
     writeTd137ListFixture(dir, "run_old", "2026-08-23T00:01:00.000Z");
     writeTd137ListFixture(dir, "run_new", "2026-08-23T02:00:00.000Z");
     // legacy 无信封事件（无 runId）→ updatedAt 由末事件 ts 兜底推导；夹具取
@@ -2693,7 +2680,6 @@ async function captureLogAndErr(fn) {
 test("TD-153(b) collect --final × --format json：stdout 四态文本逐字节不变，stderr 恰一行警告指路分页投影", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-final-"));
   try {
-    await drainStrayCliMain();
     // available 态夹具（对齐 collectFinal.test.js 已绿形状：进程分支 + 最后一条 assistant）。
     const runId = "run_td153final";
     const line = (p) => JSON.stringify(p);
@@ -2727,7 +2713,6 @@ test("TD-153(b) collect --final × --format json：stdout 四态文本逐字节�
 test("TD-153(b) 错误态：--final × --format json 且 run 不存在 → 照旧抛错、无 stdout、警告不抢在错误前", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-finalerr-"));
   try {
-    await drainStrayCliMain();
     let threw = null;
     const cap = await captureLogAndErr(() =>
       collectCommand(["run_td153_missing", "--run-dir", dir, "--final", "--format", "json"], { runDir: dir })
@@ -2743,7 +2728,6 @@ test("TD-153(c) runs list --active：仅透传服务层 activeOnly（心跳新�
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-active-"));
   try {
-    await drainStrayCliMain();
     // 三态夹具（复用 writeTd137RunTranscript：终态/非终态最小信封 transcript）。
     writeTd137RunTranscript(dir, "run_td153done", true);
     writeTd137RunTranscript(dir, "run_td153unres", false);
@@ -2813,7 +2797,6 @@ test("TD-153(d2) runs grep 输出序：经 loadRunFiles 时间戳排序（自定
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-grep-"));
   try {
-    await drainStrayCliMain();
     const writeNeedle = (runId, ts) => writeFileSync(join(dir, `${runId}.jsonl`),
       JSON.stringify({ seq: 1, ts, type: "run.started", runId, agentId: "coder_low", backend: "claude-code", prompt: "needle" }) + "\n", "utf8");
     // 字典序旧序：run_1dev < run_2026*（'1'<'2'）→ 自定义 id 排最前；新序殿后。
@@ -2862,7 +2845,6 @@ test("TD-153 runs list --state：闭集校验报错列全闭集；--active × --
   const { RUN_STATES } = await import("../../src/transcript.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-state-"));
   try {
-    await drainStrayCliMain();
     // 非法值：报错文案列出闭集全部成员（与 RUN_STATES SSOT 零漂移）+ 示例
     await assert.rejects(
       runsCommand(["list", "--run-dir", dir, "--state", "succeeded", "--format", "json"], {}),
@@ -2898,7 +2880,6 @@ test("TD-153 runs list --since/--state 参数形状：duration 语法与 prune �
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-shape-"));
   try {
-    await drainStrayCliMain();
     // duration 语法与 prune --older-than 同源（同一 parseDuration、同一报错）
     await assert.rejects(
       runsCommand(["list", "--run-dir", dir, "--since", "abc", "--format", "json"], {}),
@@ -2930,7 +2911,6 @@ test("TD-153 runs list --state/--since 过滤与组合正交：行集叠加、JS
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td153-filter-"));
   try {
-    await drainStrayCliMain();
     // 夹具相对真实 now（与 prune 测试同款鲁棒性：测试任何日期运行都成立）
     const now = Date.now();
     const at = (msAgo) => new Date(now - msAgo).toISOString();
