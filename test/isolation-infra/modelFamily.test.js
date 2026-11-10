@@ -59,7 +59,7 @@ test("R9: familyLabel 展示标签闭集；未知 token 一律未知族系", () 
   assert.equal(familyLabel(undefined), UNKNOWN_FAMILY);
 });
 
-test("R9: 真实入库模板八车道的族系事实（doc↔config 对账锚；0046 车道键）", () => {
+test("R9: 真实入库模板九车道的族系事实（doc↔config 对账锚；0046 车道键，第 98 批 +fable）", () => {
   const parsed = JSON.parse(readFileSync(join(ROOT, "config", "agents.example.json"), "utf8"));
   const expect = {
     // 0046 §5 步⑥：模板=车道键形状（模型名席位），族系事实按车道对账。
@@ -69,6 +69,7 @@ test("R9: 真实入库模板八车道的族系事实（doc↔config 对账锚；
     sol: "gpt", // gpt-6.1-sol（0046 §1.5 升主力）
     astra: "gpt", // gpt-6-astra（auditor 家族落点）
     opus: "claude",
+    fable: "claude",
     "deepseek-pro": "deepseek",
     "deepseek-flash": "deepseek",
   };

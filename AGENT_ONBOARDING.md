@@ -146,7 +146,7 @@ Copy-Item config/agents.example.json config/agents.json
 |---|---|---|
 | zcode 桌面版（已登录） | glm-pro / glm-flash | 无需 API key（登录态与桌面共享）；模板里的 `binary` 与 env 桥是占位，要改（见表后「zcode 车道的占位」） |
 | codex | sol / astra | `codex login` |
-| claude-code + 官方 Claude OAuth | opus | `claude login`（原生 OAuth） |
+| claude-code + 官方 Claude OAuth | opus / fable | `claude login`（原生 OAuth）；fable 需 CLI 2.1.321+ |
 | Kimi web 通道 | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer；token 来源/注入/引号纪律与 serve 启动见 `docs/usage/lanes.md`「kimi 车道的 worker serve」的 KIMI_WEB_TOKEN 节） |
 | DeepSeek key | deepseek-pro / deepseek-flash | `DEEPSEEK_API_KEY`（deepseek-acp 通道，Windows User 环境变量）；另需 `dsh` 在 PATH 与 containment 资产（见 `docs/certification-runbook.md`） |
 

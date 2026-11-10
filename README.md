@@ -31,7 +31,7 @@ you.
   stays small and cheap.
 - **First-party harnesses** — WAO drives each vendor's own CLI directly (no protocol
   re-implementation): ZCode for GLM, the Kimi desktop web channel, Codex CLI, DeepSeek
-  over ACP. All 8 seats in the reference fleet run on first-party harnesses; 7 backend
+  over ACP. All 9 seats in the reference fleet run on first-party harnesses; 7 backend
   adapters are supported in total — per-axis facts in the generated
   [capability matrix](docs/surface/certification.md).
 - **Transcript is the source of truth** — every run reconstructable from

@@ -1403,6 +1403,7 @@ test("R6-C: recommendations over the REAL tracked template derive all rows from 
   // zcode 无 CLI 面且无凭据声明=unknown（承重桥不是凭据）。
   assert.equal(byId.sol.readyState, "login_based");
   assert.equal(byId.opus.readyState, "login_based");
+  assert.equal(byId.fable.readyState, "login_based");
   assert.equal(byId["deepseek-flash"].readyState, "missing_key", "deepseek 声明 DEEPSEEK_API_KEY 且夹具 missing");
   assert.equal(byId["glm-pro"].readyState, "unknown", "zcode 无 CLI 映射且无凭据声明=无法验证（不假装已覆盖）");
   assert.equal(byId.kimi.readyState, "key_only_missing", "kimi 无 CLI 面+tokenEnv 声明+夹具 missing");

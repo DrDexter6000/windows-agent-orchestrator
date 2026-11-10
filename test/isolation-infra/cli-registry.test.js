@@ -900,7 +900,7 @@ test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级
   assert.equal(refused.status, 1, "refused outcome 必须 exit 1（脚本/CI 门控语义不变）");
   // preview 路径：模板真实存在的席位（零写）→ exit 0，且 selected 分支打印分级块。
   // TD-242（2026-10-09）：tester 已随 0046 席位矩阵重构从入库模板除名（现行
-  // 候选=车道键 glm-pro/glm-flash/kimi/sol/astra/opus/deepseek-pro/deepseek-flash），
+  // 候选=车道键 glm-pro/glm-flash/kimi/sol/astra/opus/fable/deepseek-pro/deepseek-flash），
   // 改用现行席位 sol——"tester 不在模板"导致的 REFUSED exit 1 是本测试慢性红
   // 的真凶（非 PATH、非解释器版本）。
   const preview = spawnSync(process.execPath,

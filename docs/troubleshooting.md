@@ -309,8 +309,8 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ### 7.3 opus 车道（claude-code 官方通道）401
 
-- **症状**：`opus` 车道的运行报 401
-- **根因**：`opus` 车道用官方 Claude OAuth，需要 claude-code 自己的登录态（`claude login`；或长期令牌 `CLAUDE_CODE_OAUTH_TOKEN`，见 §7.14）
+- **症状**：`opus`、`fable` 车道的运行报 401
+- **根因**：这类车道用官方 Claude OAuth，需要 claude-code 自己的登录态（`claude login`；或长期令牌 `CLAUDE_CODE_OAUTH_TOKEN`，见 §7.14）
 - **修复**：`claude login` 完成官方认证
 
 ### 7.4 worker 在错误目录干活

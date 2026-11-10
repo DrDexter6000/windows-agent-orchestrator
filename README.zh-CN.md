@@ -28,7 +28,7 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
 
 - **账单路由**——worker 跑在各自的 provider 配额上，Lead 的上下文保持小而便宜。
 - **原厂 harness**——WAO 直接驱动各厂商自己的 CLI，不做协议重实现：ZCode 驱动 GLM、
-  Kimi 桌面 web 通道、Codex CLI、DeepSeek over ACP。参考机队的全部 8 个席位都运行在
+  Kimi 桌面 web 通道、Codex CLI、DeepSeek over ACP。参考机队的全部 9 个席位都运行在
   原厂 harness 上；共支持 7 个 backend 适配器——逐轴事实见生成的
   [能力矩阵](docs/surface/certification.md)。
 - **Transcript 即事实来源**——每个 run 都可以从其转录完整重建（新档在 `runs/projects/<slug>/<runId>.jsonl`，旧档平铺 `runs/<runId>.jsonl`）；

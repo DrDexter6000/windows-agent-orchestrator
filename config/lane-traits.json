@@ -424,11 +424,11 @@
       },
       "ratedAgainst": null,
       "costTier": null,
-      "cost": "Claude 订阅（OAuth 长期 token）；无头模式按官方文档计入使用额度（usage credits）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
+      "cost": "Claude 订阅（OAuth 长期 token）；视套餐与席位档，Fable 用量可能改计 usage credits（套餐自带额度之外）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
       "caveats": [
-        "无头（-p）运行的 Fable 请求按官方文档直接计入使用额度（usage credits），不经确认",
-        "需要 Claude Code CLI 2.1.321 或更高（本机 2026-11-10 已升级）",
-        "安全分类器拦下的请求（多为网络安全、生物）会自动改由 Opus 重跑（官方文档）"
+        "无头（-p）运行时，若 Fable 用量要计 usage credits，Claude Code 不经确认直接扣（官方文档）",
+        "需要 Claude Code CLI 2.1.321 或更高",
+        "安全分类器拦下请求时改由 Opus 接手（生物→Opus 5，网络安全→Opus 4.8），本次运行余下部分都在 Opus 上，WAO 运行面看不出（官方文档）"
       ],
       "contextWindow": {
         "tokens": 1000000,
@@ -437,7 +437,7 @@
       "multimodal": {
         "image": true,
         "video": false,
-        "source": "official"
+        "source": "official（平台模型总览：现行模型都支持文本与图片输入）"
       }
     },
     "deepseek-pro": {
