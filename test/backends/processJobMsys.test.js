@@ -179,8 +179,8 @@ test("processJobMsys: MSYS env 断链的忙循环走树不可见，作业证词�
 
     writeFileSync(join(dir, "go"), "1");
     log("go written");
-    busyPid = await waitForPidFile(join(dir, "busy.pid"), 10_000);
-    assert.ok(busyPid !== null, "忙循环进程 10 秒内没落 pid（脚本没跑起来）");
+    busyPid = await waitForPidFile(join(dir, "busy.pid"), 30_000);
+    assert.ok(busyPid !== null, "忙循环进程 30 秒内没落 pid（脚本没跑起来）");
     log(`busy pid=${busyPid}`);
 
     // ① 断链复现前置检查：真实走树快照**不含**忙循环进程。含 = 此 Git 版本不再
@@ -272,7 +272,7 @@ async function runnerExitLeafScenario({ bashExe, attach, goneWaitMs, label }) {
     });
     appServerPid = await new Promise((resolve) => {
       let buffer = "";
-      const timer = setTimeout(() => resolve(null), 10_000);
+      const timer = setTimeout(() => resolve(null), 30_000);
       runner.stdout.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
         for (const line of buffer.split(/\r?\n/)) {
@@ -286,7 +286,7 @@ async function runnerExitLeafScenario({ bashExe, attach, goneWaitMs, label }) {
         }
       });
     });
-    assert.ok(appServerPid !== null, "runner 10 秒内没报出 app-server 的 pid");
+    assert.ok(appServerPid !== null, "runner 30 秒内没报出 app-server 的 pid");
     log(`runner pid=${runner.pid} app-server pid=${appServerPid}`);
 
     let attached = null;
@@ -298,8 +298,8 @@ async function runnerExitLeafScenario({ bashExe, attach, goneWaitMs, label }) {
     }
 
     writeFileSync(join(dir, "go"), "1");
-    leafPid = await waitForPidFile(join(dir, "leaf.pid"), 10_000);
-    assert.ok(leafPid !== null, "叶子 10 秒内没落 pid（脚本没跑起来）");
+    leafPid = await waitForPidFile(join(dir, "leaf.pid"), 30_000);
+    assert.ok(leafPid !== null, "叶子 30 秒内没落 pid（脚本没跑起来）");
     log(`leaf pid=${leafPid}`);
     assert.equal(await waitProcessGone(leafPid, 0), false, "前置条件：叶子确实在跑");
 

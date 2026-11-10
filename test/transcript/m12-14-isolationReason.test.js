@@ -645,6 +645,36 @@ test("M12-14-W15: normalization can STITCH a secret literal, so the persisted re
   }
 });
 
+test("M12-14-W16: the write_intent branch also withholds the path when the raw path is redactable", async () => {
+  const fixture = await makeFixture({
+    redact: (value) => (typeof value === "string"
+      ? value.replaceAll("mark//er", "REDACTED-SLASH")
+      : value),
+  });
+  fixture.setEvents(async function* events() {
+    // W14's laundering shape on the write_intent branch: the NUL byte makes
+    // lstat fail with a non-ENOENT error, so the intent stays physically
+    // unresolved and the classifier offers the folded "mark/er" relative
+    // path; layer 1 must withhold it because the raw path is redactable.
+    yield { kind: "write_intent", path: "src/mark//er\0.js", toolCallId: "w16_intent", correlationStatus: "tracked" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "write_intent",
+      reason: "write_intent_physical_unresolved",
+      errorCode: "other",
+      observedErrorCode: "ERR_INVALID_ARG_VALUE",
+    });
+    assert.ok(!output.rawTranscript.includes("mark//er"), "the raw double-slash marker never reaches the transcript");
+    assert.ok(!output.rawTranscript.includes("mark/er"), "the folded single-slash form never reaches it either");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 // =====================================================================
 // Section T — transient filesystem-error retry (both verdict functions)
 // =====================================================================

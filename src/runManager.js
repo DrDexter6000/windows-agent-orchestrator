@@ -566,8 +566,9 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
   if (outcome.verdict !== "physical_unresolved") return { verdict: outcome.verdict };
   // Retries only bought time: once they are exhausted the verdict is unchanged
   // (fail closed) and the last observed failure is recorded — the closed-set
-  // code plus, when it was reduced to "other", the well-formed raw code and
-  // the workspace-relative path of the reported target.
+  // code, the workspace-relative path of the reported target (absent when the
+  // target IS the worktree root) and, only when the code was reduced to
+  // "other", the well-formed raw code.
   const errorCode = normalizeIsolationPhysicalErrorCode(outcome.errorCode);
   return {
     verdict: outcome.verdict,
@@ -3249,7 +3250,7 @@ export class Run {
       // errorCode: it is persisted only for a physical_unresolved reason and
       // only as an ISOLATION_PHYSICAL_ERROR_CODES member (an unexpected code was
       // already normalized to "other" at classification time). Reasons without a
-      // confirmed-in-worktree target (lexical_outside / physical_outside /
+      // lexically contained target (lexical_outside / physical_outside /
       // correlation) never carry a path — an outside path is not quoted back.
       // The persisted path is UNTRUSTED worker text (JSON-escaped when written):
       // any future display surface must sanitize control characters and bound
