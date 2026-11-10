@@ -24,7 +24,7 @@
 | TD-106 | Tester 上下文效率属 Codex 产品与订阅配额问题，WAO 刻意不吸收该职责 | 设计性约束 | 未定 |  |
 | TD-108 | evidence fallback 调用未按 expectedRunId 过滤，跨 run 证据污染仍是理论风险 | 开放 | 等样本：跨 run 证据污染实证，或需接受混合历史 transcript |  |
 | TD-115 | lastHealthyRunAt 非 sticky，重跑失败后新鲜度归空，失败场景拿不到上次健康时间 | 开放 | 等样本：Lead 实际需要失败场景的历史新鲜度 |  |
-| TD-117 | kimi-code 与 deepseek-harness 两个后端能力不全（不上报用量、不支持会话复用等），暂停使用、不配车道 | 开放 | 等样本：巡检确认能力补足且明显优于 kimi-web / deepseek-acp；2026-11-10 巡检 Lead 建议两个后端都退役（同决定 0105 做法），待 Owner 决定 | 0074 src/backends/deepSeekHarness.js |
+| TD-117 | kimi-code 与 deepseek-harness 两个后端暂停使用、不配车道：kimi-code 不上报用量，deepseek-harness 不支持会话复用；在用的是 kimi-web 与 deepseek-acp | 等待裁定 | 待 Owner 决定是否退役（2026-11-10 巡检 Lead 建议两个都退役，按决定 0105 的做法）；若保留，再等巡检确认能力补足且明显优于在用后端 | 0074 0105 src/backends/kimiCode.js src/backends/deepSeekHarness.js |
 | TD-118 | 技能安装是指向仓库根的 junction，改动写盘即生效于所有会话，无提交闸门 | 设计性约束 | fresh clone 后需重新安装 | SKILL.md |
 | TD-123 | 全行扫描正则对注释/字符串有假阳性面，application 的 bare 包出边未入方向矩阵 | 开放 | 等样本：首次全行扫描假红实证；触碰 layering 矩阵时顺带补 bare 包出边 |  |
 | TD-124 | 静态规则可被单行 join 逃逸、白名单非行内容锚定、深度2写者未覆盖 | 开放 | 等样本：首次真实逃逸实证；触碰守卫/白名单时顺带收紧 | src/application/sessionReuse.js |
@@ -103,4 +103,4 @@
 | TD-348 | 第 92 批之前派发的 deepseek-acp 运行，会话记录只有上游会话 UUID、没有本机 pid：runner 死后 settle 门 5 拒于 `session_ambiguous`，stop 也没有路由，运行永远停在非终态（2026-11-09 宿主项目一个只读会审席位） | 开放 | 等样本：再遇到时考虑"本机重启晚于会话创建即放行门 5"（`ownerLiveness.js` 已有 `rebooted_since_anchor` 判据） | src/application/runSettle.js |
 | TD-349 | 定向测试并发跑时偶发 1 条失败：第 90 批本地 `cli-runs.test.js` 的 `run --format json: --scorecard-rules-file` 读到的不是 JSON；第 92 批交付验证同组命令 1/334 失败（只留尾部，认不出是哪条），reverify 通过 | 开放 | 等样本：再遇到时抓完整输出定位用例 | test/isolation-infra/cli-runs.test.js |
 | TD-350 | 第 93 批首次 WMI 路径冒烟（2026-11-09）：一个后台派发的 runner 起来后第 9 秒仍活着却没写任何事件，5 分钟内消失，没留 `.runner-<runId>.stderr`，事件日志无崩溃；之后同样的命令 6 次全过，会审从代码排除了 stdin 等不到 EOF | 开放 | 再出现时：第 9 秒看 `.owner-<runId>` 有没有、是否新鲜（判它卡在读提示词前还是建工作树），记下 runner 的父进程与命令行、stderr 文件是否存在 | src/runnerBroker.js src/backgroundRunner.js |
-| TD-351 | dsh 官方 0.2.2-rc.1（latest/next）是否升级待 Owner 决定。2026-11-10 巡检 Lead 建议暂缓：对 WAO 的收益只有续接压缩会话不再卡住、坏工具参数先拦、失败工具输出留存等少数修复；风险在越界防护按工具编号关闭，新版的实验插件（如可转交本机 Codex/Claude 的 subagent_oar）可能不在名单内 | 开放 | Owner 决定升级时：装到单独目录，用临时注册表跑 ACP 探针、工具清单采样与 delta 认证，确认防护名单完整再替换 | src/backends/deepSeekAcp.js scripts/reliability/dsh-acp/ |
+| TD-351 | dsh 是否升到官方新版（版本见认证手册原语表 deepseek-acp 行）待 Owner 决定。2026-11-10 巡检 Lead 建议暂缓：收益只有续接压缩会话不再卡住、坏工具参数先拦等少数修复；风险在越界防护按工具编号关闭，新实验插件（如可转交本机 Codex/Claude 的 subagent_oar）可能不在名单内（依据 dsh-v0.2.2-rc.1 发布说明） | 等待裁定 | 升级：另装一份，用临时注册表跑 ACP 探针、工具清单采样与 delta 认证，防护名单完整再替换；暂缓：下次巡检重盘 | src/backends/deepSeekAcp.js docs/certification-runbook.md |
