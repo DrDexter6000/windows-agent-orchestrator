@@ -612,7 +612,7 @@ for await (const ev of handle.events):
 
 WAO 提供两种进程形态，共用同一套 RunManager/transcript 生命周期：
 
-**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（经 WMI 启动桥脱离宿主作业，决定 0120；提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证命令与 canonical 全量期间保持唤醒（`src/keepAwake.js`，决定 0093；`WAO_KEEP_AWAKE=0` 关闭）。
+**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（经 WMI 启动桥脱离宿主作业，决定 0120；提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证与全量期间保持唤醒（`src/keepAwake.js`，决定 0093、0122；`WAO_KEEP_AWAKE=0` 关闭）。
 
 **持久 daemon**：`src/daemon.js` 是长期存活的 detached 进程，持有多个 in-flight run（复用 runBackground 核心驱动），经命名管道暴露窄协议 IPC（默认 `\\.\pipe\wao-daemon`，JSON-line over `node:net`：一行请求、一行响应；只在本机，不可远程触达；选型见决定 0012）。心跳写 runDir 的 handshake（`daemon.json`），CLI 重连判活；优雅退出清 handshake + 关 pipe。daemon start 内部走 `RunManager.start`，不按 backend 名分支。
 
