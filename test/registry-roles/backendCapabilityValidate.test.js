@@ -71,7 +71,7 @@ test("ADR25-B2-F1: 伪造 reportsTokenUsage=false × tokenBudget → ⚠（伪�
   );
 });
 
-test("ADR25-B2-F2: 伪造 supportsSessionReuse=false × sessionReuse 配置 → ⚠（不叠加、不阻塞语义由 CLI 腿钉）", () => {
+test("ADR25-B2-F2: 伪造 supportsSessionReuse=false × sessionReuse 配置 → ⚠（不叠加；不阻塞的端到端渲染由 CLI-1/CLI-2 的 tokenBudget 腿钉）", () => {
   const fakeAgent = { backend: "fake-harness", cwd: "D:/x", sessionReuse: "lead_workspace" };
   const warnings = capabilityCrossCheckWarnings(fakeAgent, {
     reportsTokenUsage: true,

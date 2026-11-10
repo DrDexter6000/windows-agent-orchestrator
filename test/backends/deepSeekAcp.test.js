@@ -2,7 +2,7 @@
 //
 // ADR-0031（B-2）：deepseek-acp backend 确定性单测。
 //
-// 照 deepSeekHarness.test.js 的注入式 fake spawn/transport 纪律：零真实 dsh、
+// 注入式 fake spawn/transport 纪律：零真实 dsh、
 // 零模型调用、零网络。child 是 PassThrough 流拼的 fake（stdin 可读出 backend 发出的
 // JSON-RPC 帧、stdout 由测试喂帧），wire 事实形状取自
 // scripts/reliability/dsh-acp/evidence/*.json（F2–F8）。
@@ -1425,7 +1425,7 @@ test("serializeRoleContractPatch 输出 dsh patch-list 要求的顶层 YAML 数�
 // dsh builtArgs**——实际执行 `cmd.exe --profile acp …`，永远起不来 dsh.cmd。
 // 只测假 .exe 探不到该路径（.exe 时 compile 产物恰好透传 builtArgs）。
 // 修正形态：附加参数在 compile **之前**进 builtArgs，spawn 用 compileInvocation
-// 产物（compiled.args，含 /d /s /c 包裹），与旧线 deepSeekHarness.js 同款。
+// 产物（compiled.args，含 /d /s /c 包裹）。
 
 test("ACP Windows 启动链：win32 + .cmd → spawn 恰为 compileInvocation 产物（ComSpec /d /s /c <cmdLine>，verbatim）", async () => {
   const scenario = await runAcpScenario({

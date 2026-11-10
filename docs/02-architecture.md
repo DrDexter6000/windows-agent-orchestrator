@@ -328,7 +328,7 @@ class ProcessBackend implements Backend {
 ```
 
 **parser** 是 ProcessBackend 的核心差异点：不同 runtime 的 stdout 格式不同，格式
-逻辑全在注入的 parserClass（`src/backends/parsers/`：claudeCode / codex / kimiCode /
+逻辑全在注入的 parserClass（`src/backends/parsers/`：claudeCode / codex /
 lineStream）。提取不到结构化证据（如 tool_use）时降级为 message 事件，不让整个
 run 失败——降级而非崩溃。
 
@@ -368,26 +368,11 @@ RunManager 等待 transcript I/O 时就产出 `message` + `done` 并退出；队
 - 这是暴露面收敛，不是强隔离边界：同一 OS 身份下的 worker 仍能查看自己的运行时
   凭据或凭据文件。强隔离需要 broker/身份边界（决定 0015）。
 
-#### 2.5a DeepSeekHarnessBackend（DSH JSON-RPC 线）
-
-不解析人类 TUI，也不依赖 DSH GUI 当前选中的 preset。启动由用户单独安装配置的
-`dsh-jsonrpc-agent`，以 stdio JSON-RPC 调用 `initialize` 和 `session/prompt`，再把
-绑定当前 `sessionId` 与 prompt receipt `messageId` 的通知投影为同一套 `RunEvent`。
-只有已绑定 receipt 之后的 assistant/message、tool、usage 和 turn/end 才可进入
-WAO transcript；对应 idle 才完成 run。transport 提前关闭、runtime identity 不符、
-未绑定事件或 DSH 内部 subagent 活动均 fail closed。
-
-DSH 只拥有单次模型/tool loop；WAO 继续独占 worktree、transcript、stop、delivery、
-verification 与 Lead decision。该 backend 不支持 provider session reuse，也不支持
-运行中 correction；恢复只能把 durable prompt 重放到新 DSH 进程。车道配置与适用
-限制见 `docs/usage/lanes.md` 与 `docs/certification-runbook.md`。
-
-#### 2.5b DeepSeekAcpBackend（DSH ACP 集成面）
+#### 2.5a DeepSeekAcpBackend（DSH ACP 集成面）
 
 `DeepSeekAcpBackend`（`src/backends/deepSeekAcp.js`）驱动上游 shipped 的
 `dsh --profile acp --patch <containment> --patch <role-contract>`，经 stdio 讲 ACP
-（JSON-RPC 2.0、换行分隔）。与 §2.5a 的 WAO 自建 composition 并存：旧线保留至
-新线认证通过，之后由 Owner 决定去留（决定 0031）。
+（JSON-RPC 2.0、换行分隔）。
 
 - **协议面**：`initialize` / `session/new` / `session/prompt` / `session/close`
   （abort 路径加 `session/cancel`，真取消）。`session/prompt` 的响应只在整轮结束

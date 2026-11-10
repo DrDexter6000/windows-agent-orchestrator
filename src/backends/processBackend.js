@@ -159,7 +159,7 @@ export class ProcessBackend {
   // 调度层不按 backend 名分支、也不升成认证能力轴。基类答案：ProcessBackend 的
   // spawn 身份就是子进程本身，"proc_<pid>" 占位（或非字符串/空值）不是 provider
   // 可寻址的会话 id → fail-closed 拒绝，且必须发生在该 id 被线程给 provider 之前。
-  // 子类分工：运行时自产 native id 的 runtime（kimi -r / codex exec resume）继承
+  // 子类分工：运行时自产 native id 的 runtime（codex exec resume）继承
   // 本判定；resume lane 从不消费该 id 的 backend（claude-code 编译 routing
   // .opaqueUuid）覆写为恒 true；非进程式 backend（ACP）不继承本类——无此方法即
   // 意味着调用方保持其既有 native id 语义（session.created 本身就是 nativeID）。
@@ -173,7 +173,7 @@ export class ProcessBackend {
   // 的事件流携带 metrics token 事实——RunManager 的 tokenBudget 硬闸门只在
   // ev.tokens 存在时累计预算（runManager.js），无 token 事实 = 闸门静默无效。
   // FAIL-CLOSED 默认 false：子类未显式 opt-in 时"未声明"绝不读成"支持"
-  // （02-architecture 既有约定；kimi stream-json 无 usage 字段即此形状，TD-87）。
+  // （02-architecture 既有约定）。
   // 消费者：registry validate 静态交叉校验 tokenBudget 配置 × 本声明（不 spawn）。
   reportsTokenUsage = false;
 

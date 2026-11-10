@@ -179,7 +179,7 @@ test("kimi-web ②: roleContract 作为 prompt 前缀（ROLE_TASK_SEPARATOR 衔�
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   await backend.spawn(makeAgent(), { prompt: "task body", roleContract: "ROLE CONTRACT" });
   const promptBody = JSON.parse(calls[3].body);
-  // 修复 G：分隔符对齐 kimiCode.js 的 ROLE_TASK_SEPARATOR（"\n\n---\n\n"）。
+  // 修复 G：role 与 task 用固定分隔符（"\n\n---\n\n"）拼接。
   assert.equal(promptBody.content[0].text, "ROLE CONTRACT\n\n---\n\ntask body");
   assert.equal(promptBody.content.length, 1, "role 与 task 同在唯一 text 分段里（恰好一次）");
 });

@@ -209,7 +209,7 @@ export async function getRegistryInventory({
   // M11-7 (operation closeout): ONE operation-scoped resolver shared across all
   // workers, and resolve ONLY the required credential names (registry_list shows
   // credentialAvailability, which depends solely on required names). Optional
-  // inherited env (OPENAI_BASE_URL, CODEX_HOME, KIMI_MODEL_NAME, ...) is NOT read
+  // inherited env (OPENAI_BASE_URL, CODEX_HOME, ...) is NOT read
   // here — it is irrelevant to the availability status and would add unnecessary
   // cold-start cost. Two workers sharing a required name read it at most ONCE.
   const resolver = createEnvResolver(userEnvReader);

@@ -182,7 +182,7 @@ Notes:
     one reasoning effort); when combined with --model against a reuse agent,
     the refusal names the override actually at fault. A backend that cannot
     express the effort or only a conditional subset
-    (e.g. deepseek-acp accepts only the efforts its ACP session advertises)
+    (e.g. deepseek-acp: low|high|max only)
     refuses the dispatch
     through its existing policy gate with a hint naming --reasoning. The
     echoed "effective reasoning" is advisory in the same sense as the model

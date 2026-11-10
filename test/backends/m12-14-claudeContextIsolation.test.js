@@ -254,8 +254,7 @@ test("M12-14: codex 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async
 });
 
 test("M12-14: zcode 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async () => {
-  // spawnFn 在握手前被调用——env 组装事实此刻已定格；假子进程随即 close，
-  // 握手按 transport-closed 拒绝（预期拒绝，不影响已捕获的 env 断言）。
+  // spawnFn 在握手前被调用——env 组装事实此刻已定格；之后握手成败与本断言无关。
   const { spawnFn, captures } = makeCapturingSpawn();
   const backend = new ZcodeBackend({ spawnFn });
   const agent = {
@@ -265,7 +264,7 @@ test("M12-14: zcode 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", async
     cwd: process.cwd(),
     model: { id: "bigmodel-api/GLM-5.3" },
   };
-  await assert.rejects(() => backend.spawn(agent, { prompt: "do" }));
+  try { await backend.spawn(agent, { prompt: "do" }); } catch { /* 假子进程随即关闭，握手失败属预期 */ }
   assert.equal(captures.length, 1, "恰好一次 spawn");
   assert.equal(envEntriesCaseInsensitive(captures[0].opts.env, MANAGED).length, 0, "zcode 不接收 claude-only 变量");
 });

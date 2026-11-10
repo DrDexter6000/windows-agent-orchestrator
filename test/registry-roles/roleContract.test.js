@@ -233,10 +233,10 @@ test("M11-5-B2b: codex multi-line role contract — newline/CR/tab escaped for v
 });
 
 // ---------------------------------------------------------------------
-// B4: no roleContract → all three backends behave identically to legacy
+// B4: no roleContract → both process backends behave identically to legacy
 //     (argv unchanged, no role-related flags).
 // ---------------------------------------------------------------------
-test("M11-5-B4: no roleContract → all three backends legacy-compatible argv", () => {
+test("M11-5-B4: no roleContract → both process backends legacy-compatible argv", () => {
   for (const BackendClass of [ClaudeCodeBackend, CodexBackend]) {
     const backend = new BackendClass();
     const buildArgs = getBuildArgs(backend);

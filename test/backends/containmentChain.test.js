@@ -199,7 +199,7 @@ function assertSourcePins(pins) {
   }
 }
 
-// ===== 共享 fake 子进程（zcode / deepseek-acp / kimi-code 三组的注入缝载体）=====
+// ===== 共享 fake 子进程（zcode / deepseek-acp / codex 传输层三组的注入缝载体）=====
 
 function fakeProcessChild(pid = 424200 + ++runSeq) {
   const child = new EventEmitter();

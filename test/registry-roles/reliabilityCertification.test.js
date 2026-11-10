@@ -455,7 +455,7 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
     },
     // 当前：zcode 身份，全过 → certified（最近观察）
     {
-      caseId: "coder_low deepseek-harness",
+      caseId: "coder_low zcode",
       agentId: "coder_low",
       backend: "zcode",
       providerID: "deepseek",
@@ -480,7 +480,7 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
   assert.equal(w.modelId, "deepseek-v4-flash");
   assert.equal(w.status, "certified", "旧 claude rejected 不拖低当前车道状态");
   assert.equal(w.capabilities.isolation, true);
-  assert.deepEqual(w.cases, ["coder_low deepseek-harness"], "当前车道只聚合自身 case");
+  assert.deepEqual(w.cases, ["coder_low zcode"], "当前车道只聚合自身 case");
   assert.equal(legacy.status, "rejected", "历史车道保留其真实结果（不洗白不掩盖）");
   assert.deepEqual(legacy.cases, ["coder_low claude legacy"]);
   // counts 按车道计：certified:1 + rejected:1（各车道最终状态）

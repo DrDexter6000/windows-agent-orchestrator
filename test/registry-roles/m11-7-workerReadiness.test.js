@@ -3,7 +3,7 @@
 // M11-7 (CTO closeout): Worker credential availability + Windows user-env bridge.
 //
 // Covers the four RED requirements:
-//   1. Real-registry probe: optional config (KIMI_BASE_URL etc.) does NOT block;
+//   1. Real-registry probe: optional config (OPENAI_BASE_URL etc.) does NOT block;
 //      only an explicitly-declared missing REQUIRED credential blocks.
 //   2. Foreground start + resume bridge resolved values into ProcessBackend;
 //      missing REQUIRED credential is rejected before transcript/spawn.

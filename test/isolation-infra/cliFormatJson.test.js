@@ -93,11 +93,11 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
     assert.deepEqual(low.issues, [], "无 issue");
     assert.deepEqual(low.warnings, [], "无 warning");
 
-    // TD-87 的 kimi tokenBudget 静默无效陷阱 → warnings 字段承载（非阻塞）
+    // TD-87 的 tokenBudget 静默无效陷阱 → warnings 字段承载（非阻塞）
     const mm = parsed.agents.find((a) => a.id === "coder_mm");
-    assert.equal(mm.ok, true, "kimi 配 tokenBudget 仍 ok（warning 不阻塞）");
+    assert.equal(mm.ok, true, "deepseek-acp 配 tokenBudget 仍 ok（warning 不阻塞）");
     assert.ok(mm.warnings.some((w) => /deepseek-acp.*tokenBudget/.test(w)),
-      "kimi tokenBudget warning 进 warnings 数组");
+      "deepseek-acp tokenBudget warning 进 warnings 数组");
 
     const bad = parsed.agents.find((a) => a.id === "bad_worker");
     assert.equal(bad.ok, false, "缺 cwd → ok:false");

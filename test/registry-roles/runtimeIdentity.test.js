@@ -9,7 +9,7 @@
 //      稳定（同输入同指纹——身份可比对）；
 //   2. unknown 明确 verified=false，且同一探测目标的未验证键稳定（不制造新键噪声）；
 //   3. 未知 backend 名 → unknown（无描述符，不猜）；
-//   4. HARNESS_VERSION_PROBES 是身份元数据表（七 backend 全覆盖）；
+//   4. HARNESS_VERSION_PROBES 是身份元数据表（闭集全覆盖）；
 //   6. 版本解析：stdout 首个非空行、超长截断、多行 banner 取首行。
 
 import { test } from "node:test";

@@ -129,12 +129,12 @@ async function registryCommand(args, config) {
 export function capabilityCrossCheckWarnings(agent, capabilities) {
   const warnings = [];
   if (!capabilities) return warnings;
-  // TD-87（kimi tokenBudget 静默无效陷阱，泛化）：backend 类声明不上报
+  // TD-87（tokenBudget 静默无效陷阱，泛化）：backend 类声明不上报
   // usage/token（reportsTokenUsage 非 true）× 配了 tokenBudget → 闸门收不到
   // token 事实，配置静默无效。沿用既有 warning 输出模式（不 block）。
   if (typeof agent?.tokenBudget === "number" && capabilities.reportsTokenUsage !== true) {
     warnings.push(
-      `${agent.backend} 配了 tokenBudget 但不生效——该 backend 类能力声明未上报 usage/token（reportsTokenUsage 非 true，WAO 预算闸门收不到 token 事实；TD-87：deepseek-acp 无可验证 token 计量通道即此形状）。成本兜底靠 backend 自带控制 + WAO waitTimeout，不靠 WAO tokenBudget`,
+      `${agent.backend} 配了 tokenBudget 但不生效——该 backend 类能力声明未上报 usage/token（reportsTokenUsage 非 true，WAO 预算闸门收不到 token 事实；deepseek-acp 无可验证 token 计量通道即此形状）。成本兜底靠 backend 自带控制 + WAO waitTimeout，不靠 WAO tokenBudget`,
     );
   }
   // sessionReuse 配置 × backend 类未声明

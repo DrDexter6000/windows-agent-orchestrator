@@ -1257,7 +1257,7 @@ function diagnoseFailureInner(events, expectedRunId) {
         : "";
       evidence.push({
         eventType: "run.error",
-        fact: `进程退出前未观察到任何 worker 事件${life}；未观察到事件不等于没有副作用（零 worker 事件退出的既往案例见 docs/troubleshooting.md §7.15）`,
+        fact: `进程退出前未观察到任何 worker 事件${life}；未观察到事件不等于没有副作用（零 worker 事件退出的既往案例见 docs/troubleshooting.md §7.14）`,
       });
     }
     return { category: "crash", evidence };

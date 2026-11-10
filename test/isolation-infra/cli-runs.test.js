@@ -702,6 +702,32 @@ test("TD-77A: 空 run（无任何 run.event）→ data:[] 不抛", async () => {
   }
 });
 
+test("决定 0123: 已退役后端（kimi-code / deepseek-harness）的旧转录照常可读——status 与 collect 不抛", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-retired-backend-"));
+  try {
+    for (const backend of ["kimi-code", "deepseek-harness"]) {
+      const runId = `run_retired_${backend.replace("-", "_")}`;
+      const base = { runId, agentId: "coder_old" };
+      writeFileSync(join(dir, `${runId}.jsonl`), [
+        { type: "run.submitted", agentId: "coder_old", ts: "2026-10-01T00:00:00.000Z" },
+        { type: "session.created", backend: "process", backendSessionId: "proc_4242", ...base },
+        { type: "run.started", backend, ts: "2026-10-01T00:00:01.000Z", ...base },
+        { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "old answer" }], ts: "2026-10-01T00:00:30.000Z", ...base },
+        { type: "run.metrics", tokens: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 }, ts: "2026-10-01T00:00:31.000Z", ...base },
+        { type: "run.completed", ts: "2026-10-01T00:00:31.000Z", ...base },
+        { type: "run.state_change", to: "completed", reason: "done", ts: "2026-10-01T00:00:31.000Z", ...base },
+      ].map((e) => JSON.stringify(e)).join("\n") + "\n");
+      const status = cliJsonBlock(await captureElements(() => statusCommand([runId, "--run-dir", dir], { runDir: dir })));
+      assert.equal(status.state, "completed", `${backend}: status 读出终态`);
+      const collected = JSON.parse(await captureLog(() => collectCommand([runId, "--run-dir", dir], { runDir: dir })));
+      const msg = collected.data.find((e) => e.kind === "message");
+      assert.deepEqual(msg?.parts, [{ type: "text", text: "old answer" }], `${backend}: collect 重建消息`);
+    }
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 // ===== M11-4 B4: CLI collect --cursor parity + audit append =====
 
 // A process transcript with N assistant messages for CLI continuation tests.

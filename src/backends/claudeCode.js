@@ -338,8 +338,8 @@ export class ClaudeCodeBackend extends ProcessBackend {
    * buildChildEnv 让 runtimeEnv（waoEnv 段）压过【同名】agent.env，但 Windows
    * env 大小写不敏感：agent.env 里的小写/混合大小写变体会与权威值并存进子进程
    * env block，解析结果不确定。spawn 前把 agent.env 中该名字的任意大小写变体
-   * 剥离，让 runtimeEnv 成为唯一权威来源（同 KimiCodeBackend.spawn 的
-   * backend-owned env 模式）。不改变凭据优先级，不读取、不暴露任何 env 值。
+   * 剥离，让 runtimeEnv 成为唯一权威来源（backend-owned env
+   * 模式）。不改变凭据优先级，不读取、不暴露任何 env 值。
    */
   async spawn(agent, task) {
     const agentEnv = agent?.env ?? {};

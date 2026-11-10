@@ -94,7 +94,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 - **症状**：worker 快速 `done(failed)`，error 含 "provider error [401]" / "身份验证失败" / "quota"
 - **根因**：provider API 返回错误，worker runtime 把错误包进失败响应
 - **WAO 行为**：完成判定检测到错误事实即 `done(failed)` 并透传错误，不等超时
-- **修复**：按 statusCode 处理——401 查 key（§1.6 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
+- **修复**：按 statusCode 处理——401 查 key（§1.5 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
 
 ### 1.5 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
 
@@ -370,7 +370,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 ### 7.12 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
-- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为（实现与动机见 src/backends/claudeCode.js 头注释）。
+- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录——拷贝模式只含凭据副本、令牌模式全空（§7.13），其余全空是设计行为（实现与动机见 src/backends/claudeCode.js 头注释）。
 - **逃生门**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
 
 ### 7.13 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥）

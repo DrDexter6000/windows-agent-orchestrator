@@ -938,6 +938,7 @@ test("TD188-RC-2: Codex 父 run 仅 proc_ 占位身份 → no_provider_session�
     assert.equal(r.accepted, false);
     assert.equal(r.rejectionReason, "no_provider_session");
     assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "no lineage claim written");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "worktree untouched");
     assert.deepEqual(childTranscriptsFor(dir, "run_parent_codex_proconly"), [], "zero child transcripts");
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

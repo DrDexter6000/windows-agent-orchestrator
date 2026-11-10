@@ -6,7 +6,7 @@
 // config is never mistaken for a required credential:
 //
 //   1. inheritedEnvNames(agent) — env names a backend MAY inherit into the
-//      worker child process (e.g. OPENAI_BASE_URL, CODEX_HOME, KIMI_MODEL_NAME).
+//      worker child process (e.g. OPENAI_BASE_URL, CODEX_HOME).
 //      OPTIONAL; absence never blocks dispatch. Feeds ProcessBackend child-env
 //      inheritance + the secret redactor.
 //

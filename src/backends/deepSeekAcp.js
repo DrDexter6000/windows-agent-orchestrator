@@ -75,7 +75,7 @@ import { buildChildEnv, compileInvocation } from "./processBackend.js";
 const BACKEND_NAME = "deepseek-acp";
 
 // initialize 响应里的 agentInfo.name（scripts/reliability/dsh-acp/evidence/*.json）。
-// 身份不符 → fail-closed（同旧线 RUNTIME_NAME 纪律）。
+// 身份不符 → fail-closed。
 const ACP_RUNTIME_NAME = "deepseek-harness-acp";
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BINARY = "dsh";
@@ -149,10 +149,10 @@ function assertPermissionModeEnv(agent) {
   }
 }
 
-// shell 类工具（与旧线 projectDshEvent 同集）：终态时投影为 command 证据；调用到达
+// shell 类工具：终态时投影为 command 证据；调用到达
 // 时先落一条 tool_use，让在途的命令看得见（决定 0072）。
 const SHELL_TOOL_NAMES = Object.freeze(["pwsh", "powershell", "bash", "shell"]);
-// 文件写类工具（与旧线同集）：tool_use + write_intent（关联成功才 file_written）。
+// 文件写类工具：tool_use + write_intent（关联成功才 file_written）。
 const WRITE_TOOL_NAMES = Object.freeze(["str_replace_editor", "write", "edit", "multiedit"]);
 
 // containment 覆盖层声明（内容与版本依据 = 仓库内

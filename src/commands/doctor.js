@@ -608,7 +608,7 @@ export async function waoDoctorCommand(args, config) {
           ? `claude-code native worker（${nativeClaudeWorkers.join(",")}）走凭据拷贝模式：与 OAuth 续期令牌轮换互斥（TD-229——副本内续期会作废 ~/.claude 原件登录），建议迁移长期令牌`
           : `claude-code native worker（${nativeClaudeWorkers.join(",")}）走长期令牌模式（CLAUDE_CODE_OAUTH_TOKEN 已解析，来源 ${token.source === "user_env" ? "Windows 用户环境" : "进程环境"}；隔离目录保持空，不拷贝凭据）`,
         ...(token.source === "missing"
-          ? { fix: "claude setup-token 生成长期令牌，然后 setx CLAUDE_CODE_OAUTH_TOKEN \"<token>\"（详见 docs/troubleshooting.md §7.14）" }
+          ? { fix: "claude setup-token 生成长期令牌，然后 setx CLAUDE_CODE_OAUTH_TOKEN \"<token>\"（详见 docs/troubleshooting.md §7.13）" }
           : {}),
       });
     }
