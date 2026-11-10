@@ -245,23 +245,19 @@ test("processJobMsys: MSYS env 断链的忙循环走树不可见，作业证词�
   if (bodyError !== null) throw bodyError;
 });
 
-test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结束（不再静默脱离 libuv 作业，决定 0121 如实边界）", async (t) => {
-  if (process.platform !== "win32") {
-    t.skip("非 Windows——作业不适用");
-    return;
-  }
-  const bashExe = findGitBash();
-  if (bashExe === null) {
-    t.skip("无法建立前置条件：找不到 Git 的 bin\\bash.exe（常见路径与注册表都查过）");
-    return;
-  }
+// 一套"runner 退出看叶子"的场景（对照臂与正向臂共用）：替身 runner（不带
+// detached）起替身 app-server → 可选挂作业 → app-server 经 Git bash -c -l
+// "./leaf.sh" 起长时 node 叶子（env 式脚本，断链后成孤儿）→ 只杀 runner（不带
+// /T）→ 有界等叶子消失。返回 { attached, leafGone, leafDone }；清场在内部做完。
+async function runnerExitLeafScenario({ bashExe, attach, goneWaitMs, label }) {
   const dir = await mkdtemp(join(tmpdir(), "wao-job-leaf-"));
-  const log = (stage) => console.log(`[processJobMsys-leaf] ${stage}`);
+  const log = (stage) => console.log(`[processJobMsys-leaf:${label}] ${stage}`);
   log(`tmpdir=${dir}`);
   let runner = null;
   let appServerPid = null;
   let leafPid = null;
   let bodyError = null;
+  let result = null;
   try {
     writeFileSync(join(dir, "leaf.sh"), burnerSh(process.execPath, "leaf"), "utf8");
     writeFileSync(join(dir, "appserver.cjs"), appServerCjs("leaf.sh"), "utf8");
@@ -293,21 +289,21 @@ test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结�
     assert.ok(appServerPid !== null, "runner 10 秒内没报出 app-server 的 pid");
     log(`runner pid=${runner.pid} app-server pid=${appServerPid}`);
 
-    // 挂作业（真实 attachProcessJob——加入作业前不起叶子）。
-    const attached = await attachProcessJob(appServerPid);
-    log(`attach=${JSON.stringify(attached)}`);
-    assert.ok(attached?.ok === true, `attach 必须成功：${JSON.stringify(attached)}`);
+    let attached = null;
+    if (attach) {
+      // 真实 attachProcessJob——加入作业前不起叶子。
+      attached = await attachProcessJob(appServerPid);
+      log(`attach=${JSON.stringify(attached)}`);
+      assert.ok(attached?.ok === true, `attach 必须成功：${JSON.stringify(attached)}`);
+    }
 
-    // app-server 经 Git bash -c -l "./leaf.sh" 起长时 node 叶子（断链后成孤儿）。
     writeFileSync(join(dir, "go"), "1");
     leafPid = await waitForPidFile(join(dir, "leaf.pid"), 10_000);
     assert.ok(leafPid !== null, "叶子 10 秒内没落 pid（脚本没跑起来）");
-    log(`leaf pid=${leafPid}（走树外确认其存在）`);
+    log(`leaf pid=${leafPid}`);
     assert.equal(await waitProcessGone(leafPid, 0), false, "前置条件：叶子确实在跑");
 
-    // 只杀 runner（taskkill /F 单进程，不带 /T——树杀不参与）。runner 的 libuv
-    // 作业随其退出关闭；挂了不许脱离的内层作业后，断链叶子不再静默脱离，应随
-    // 之结束（runner 死 ≠ 叶子死才是旧行为）。
+    // 只杀 runner（taskkill /F 单进程，不带 /T——树杀不参与）。
     killPid(runner.pid);
     await new Promise((resolve) => {
       if (runner.exitCode !== null) { resolve(); return; }
@@ -315,10 +311,11 @@ test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结�
       runner.once("close", () => { clearTimeout(timer); resolve(); });
     });
     log("runner killed (no /T)");
-    const leafGone = await waitProcessGone(leafPid, 10_000);
-    log(`leaf gone=${leafGone}`);
-    assert.ok(leafGone, `runner 退出后 10 秒内叶子 pid=${leafPid} 仍在——作业没能把它留在 libuv 作业里（决定 0121 的如实边界失效）`);
-    assert.ok(await waitProcessGone(appServerPid, 5_000), "app-server 随 runner 一起结束（libuv 作业成员）");
+    const leafGone = await waitProcessGone(leafPid, goneWaitMs);
+    // 叶子自己跑完（stop 文件 / 60 秒上限）会写 leaf.done；被作业带走则不会。
+    const leafDone = existsSync(join(dir, "leaf.done"));
+    log(`leaf gone=${leafGone} done=${leafDone}`);
+    result = { attached, leafGone, leafDone };
   } catch (error) {
     bodyError = error;
   } finally {
@@ -326,7 +323,6 @@ test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结�
       try {
         writeFileSync(join(dir, "leaf.stop"), "1");
       } catch { /* 目录可能已不可写——pid 兜底在后面 */ }
-      // runner 可能已死；残留按记录 pid 收（叶子若意外存活必须收掉）。
       if (runner !== null && runner.exitCode === null) killPid(runner.pid);
       if (appServerPid !== null) killPid(appServerPid);
       if (leafPid !== null) killPid(leafPid);
@@ -338,8 +334,32 @@ test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结�
       log("cleanup done");
     } catch (cleanupError) {
       if (bodyError === null) bodyError = cleanupError;
-      else console.log(`[processJobMsys-leaf] cleanup error suppressed by body failure: ${cleanupError}`);
+      else console.log(`[processJobMsys-leaf:${label}] cleanup error suppressed by body failure: ${cleanupError}`);
     }
   }
   if (bodyError !== null) throw bodyError;
+  return result;
+}
+
+test("processJobMsys: 挂作业后 runner 退出 ⇒ MSYS 断链叶子随之结束（不再静默脱离 libuv 作业，决定 0121 如实边界）", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("非 Windows——作业不适用");
+    return;
+  }
+  const bashExe = findGitBash();
+  if (bashExe === null) {
+    t.skip("无法建立前置条件：找不到 Git 的 bin\\bash.exe（常见路径与注册表都查过）");
+    return;
+  }
+  // 对照臂：不挂作业时叶子静默脱离 runner 的 libuv 作业，runner 退出后仍活着。
+  // 对照不成立（叶子也死了），正向臂就证明不了因果——如实 skip，不当通过。
+  const control = await runnerExitLeafScenario({ bashExe, attach: false, goneWaitMs: 5_000, label: "control" });
+  if (control.leafGone) {
+    t.skip(`对照不成立：不挂作业时叶子也随 runner 结束了（done=${control.leafDone}）——无法证明作业的效果`);
+    return;
+  }
+  // 正向臂：挂作业后叶子不再脱离，runner 退出时随之结束，且不是自己跑完。
+  const attached = await runnerExitLeafScenario({ bashExe, attach: true, goneWaitMs: 10_000, label: "attached" });
+  assert.ok(attached.leafGone, "挂作业后 runner 退出 10 秒内叶子应已结束（决定 0121 的如实边界）");
+  assert.equal(attached.leafDone, false, "叶子是被带走的，不是自己跑完（没有 leaf.done）");
 });

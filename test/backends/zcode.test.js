@@ -1938,6 +1938,66 @@ test("zcode ⑥k: 作业读数不可用 → 先 pending 重读；读到有效读
   child.kill();
 });
 
+// 会审复核（第 94 批）：上一条用例在"有效读数清零"被删掉时仍会通过（窗间 alive
+// 走 resetObservation 也会清零）。这两条在**同一个窗内**钉住两个分支：删掉其一，
+// 窗尾那次失败就会让计数直接到 3、降级收口。
+const jobScriptScenario = async (script) => {
+  let fakeNow = 0;
+  let probes = 0;
+  let jobCpu = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      deliverableProbe: async () => null,
+      runProcessProbe: async () => {
+        const step = script[probes] ?? "good";
+        probes += 1;
+        if (step === "bad") {
+          return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), null, "job query unavailable (win32 error 2)");
+        }
+        if (step === "regressed") {
+          return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800, 50_000, 5, 5));
+        }
+        jobCpu += 5000;
+        return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800 + jobCpu, 50_000, 5, 5));
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  child.kill();
+  return { events, probes };
+};
+
+test("zcode ⑥k: 同一窗内读到有效基线即清零——窗尾再坏一次只算第 1 次，重读后照常判活动", async () => {
+  // 坏(1) → 坏(2) → 好(基线，清零) → 坏(窗尾，计数 1，pending) → 好(比对) ⇒ 续命。
+  // 若有效读数不清零：窗尾那次坏 = 3 ⇒ 降级、作业证词不可用、走树静止 ⇒ 收口。
+  const { events } = await jobScriptScenario(["bad", "bad", "good", "bad", "good"]);
+  assert.equal(events.at(-1).reason, "completed", "有效基线清零后，窗尾一次瞬时失败不降级");
+  const statuses = events.filter((e) => e.kind === "runtime_activity").map((e) => e.status);
+  assert.equal(statuses[0], "process_active", "第一窗靠重读后的作业读数续命");
+});
+
+test("zcode ⑥k: 窗尾判出计数回退先 pending 重读，读到有效读数照常判活动", async () => {
+  // 好(基线) → 回退(窗尾，计数 1，pending 重读) → 好(比对) ⇒ 续命。
+  // 若回退不走 pending：这一窗作业证词即不可用、走树静止 ⇒ 收口。
+  const { events, probes } = await jobScriptScenario(["good", "regressed", "good"]);
+  assert.equal(events.at(-1).reason, "completed", "一次计数回退不当作无活动收口");
+  const statuses = events.filter((e) => e.kind === "runtime_activity").map((e) => e.status);
+  assert.equal(statuses[0], "process_active");
+  assert.ok(probes >= 3, "基线、回退、重读至少三次取样");
+});
+
 // 就绪屏障次序：attach 挂起时绝不发 resume/create。用同一个 helper 构造（守卫 ⑪
 // 的字面量只此一处），fresh 与 resume 两形状各跑一遍。
 async function spawnHoldingAttach(task) {
