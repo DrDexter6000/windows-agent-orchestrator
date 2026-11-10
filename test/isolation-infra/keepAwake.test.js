@@ -92,20 +92,31 @@ test("脚本：申请系统与显示都需要的持续状态，按用户屏保�
   exact("[void][Wao.WaoKeepAwake]::SetThreadExecutionState([uint32]2147483651)", "申请持续状态行");
   assert.equal(2147483651, (0x80000000 | 0x1 | 0x2) >>> 0);
   exact("try { $parent = Get-Process -Id 4242 -ErrorAction Stop } catch { exit 0 }", "取父进程行");
-  exact("while (-not $parent.WaitForExit(15000)) {", "轮询行");
-  exact("    $desk = Get-ItemProperty -Path 'HKCU:\\Control Panel\\Desktop' -ErrorAction Stop", "读注册表行");
-  exact("    [int]$timeoutSec = $desk.ScreenSaveTimeOut", "注册表超时行");
-  exact("    $saverExe = [Environment]::ExpandEnvironmentVariables([string]$desk.'SCRNSAVE.EXE')", "展开环境变量行");
-  exact("    $mine = ($null -ne $saver) -and (-not $saver.HasExited)", "上次代启检查行");
-  exact("    $idleOk = [uint64]([Wao.WaoKeepAwake]::IdleMs()) -ge ([uint64]$timeoutSec * 1000)", "空闲比较行");
-  const outer = exact("    if ([Environment]::UserInteractive -and (\"$($desk.ScreenSaveActive)\" -eq '1') -and ($timeoutSec -gt 0) -and ($saverExe.Length -gt 0) -and $idleOk -and (-not $mine) -and (Test-Path -LiteralPath $saverExe -PathType Leaf)) {", "外层条件行");
-  const inner = exact("      if ((-not $spi) -and ($scr -eq 0)) {", "内层条件行");
-  const spi = exact("      [void][Wao.WaoKeepAwake]::SystemParametersInfo(0x0072, 0, [ref]$spi, 0)", "SPI 行");
-  const scr = exact("      $scr = @(Get-Process | Where-Object { $_.Path -and $_.Path -like '*.scr' }).Count", "扫进程行");
-  assert.ok(spi > outer && spi < inner, "SPI 行应在外层 if 之后、内层 if 之前");
-  assert.ok(scr > outer && scr < inner, "扫进程行应在外层 if 之后、内层 if 之前");
-  exact("        $saver = Start-Process -FilePath $saverExe -ArgumentList '/s' -PassThru", "代启行");
-  exact("  } catch {}", "循环体 try/catch 收尾行");
+  exact("$saver = $null", "代启记录初值行");
+  // 整段比对循环体：位置、缩进与增删行一次钉住。opus 复核时，把代启行挪出内层 if、
+  // 把 $idleOk 挪进外层 if、删掉 $spi 初值，逐行断言都还全绿。
+  const loopBody = [
+    "while (-not $parent.WaitForExit(15000)) {",
+    "  try {",
+    "    $desk = Get-ItemProperty -Path 'HKCU:\\Control Panel\\Desktop' -ErrorAction Stop",
+    "    [int]$timeoutSec = $desk.ScreenSaveTimeOut",
+    "    $saverExe = [Environment]::ExpandEnvironmentVariables([string]$desk.'SCRNSAVE.EXE')",
+    "    $mine = ($null -ne $saver) -and (-not $saver.HasExited)",
+    "    $idleOk = [uint64]([Wao.WaoKeepAwake]::IdleMs()) -ge ([uint64]$timeoutSec * 1000)",
+    "    if ([Environment]::UserInteractive -and (\"$($desk.ScreenSaveActive)\" -eq '1') -and ($timeoutSec -gt 0) -and ($saverExe.Length -gt 0) -and $idleOk -and (-not $mine) -and (Test-Path -LiteralPath $saverExe -PathType Leaf)) {",
+    "      $spi = $false",
+    "      [void][Wao.WaoKeepAwake]::SystemParametersInfo(0x0072, 0, [ref]$spi, 0)",
+    "      $scr = @(Get-Process | Where-Object { $_.Path -and $_.Path -like '*.scr' }).Count",
+    "      if ((-not $spi) -and ($scr -eq 0)) {",
+    "        $saver = Start-Process -FilePath $saverExe -ArgumentList '/s' -PassThru",
+    "      }",
+    "    }",
+    "  } catch {}",
+    "}",
+  ];
+  const loopStart = lines.indexOf(loopBody[0]);
+  assert.ok(loopStart !== -1, "轮询行不在脚本里或逐字不符");
+  assert.deepEqual(lines.slice(loopStart), loopBody, "循环体逐行一致，直到脚本末尾");
   // 空闲毫秒在 C# 里算，uint 回绕安全；脚本内嵌的 C# 与测试共用同一常量
   assert.ok(script.includes(KEEP_AWAKE_CS));
   assert.match(KEEP_AWAKE_CS, /unchecked\(GetTickCount\(\) - li\.dwTime\)/);
