@@ -52,7 +52,7 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 
 **组记录**：每次扇出后即在 `<项目根>/.wao/runs/consults/<consultId>.json` 落一份
 组记录（席位-runId 映射，是意见到决策的回链锚点，供 decisions/declare 引用），
-收集结束后覆盖为完整观察。链接工作树时落主工作树（决定 0111）。组记录不写 `runs/`
+收集结束后覆盖为完整观察。派发未成立的席位另记 `dispatchError`（取因时已脱敏、去控制字符、限长 400），`consult run`、`show`、`wait` 的文本输出在"派发未成立"旁写出它。链接工作树时落主工作树（决定 0111）。组记录不写 `runs/`
 （防 metrics 聚合双计）、不写认证
 台账、不产生任何 delivery 事件。席位子 run 本身是普通只读 run（`readOnly` 声明
 + 强制隔离），回复正文的唯一权威在各 run transcript，经 runId 回链。呈现尾部附
