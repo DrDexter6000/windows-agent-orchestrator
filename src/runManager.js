@@ -448,6 +448,20 @@ function resolveLexicallyContainedWrite(rawPath, effectiveCwd) {
   return isPathInside(base, target) ? { base, target } : false;
 }
 
+// A physical_unresolved verdict is only reachable when the lexical check held,
+// so the workspace-relative form of the reported target ("/"-separated) rides
+// along on every unresolved verdict for the durable fact; the target BEING the
+// worktree root carries no path. TD-336: without it an unresolved failure used
+// to be persisted without any pointer to which reported write stayed unproven.
+function physicalUnresolved({ base, target }, errorCode) {
+  const rel = relative(base, target);
+  return {
+    verdict: "physical_unresolved",
+    errorCode,
+    ...(rel !== "" ? { path: rel.split(sep).join("/") } : {}),
+  };
+}
+
 // file_written is post-write evidence, so inability to prove the target's
 // physical location fails closed for delivery runs (physical_unresolved).
 function classifyReportedWriteContainmentOnce(rawPath, effectiveCwd, { realpath }) {
@@ -459,7 +473,7 @@ function classifyReportedWriteContainmentOnce(rawPath, effectiveCwd, { realpath 
     const physicalTarget = realpath(lexical.target);
     return { verdict: isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside" };
   } catch (error) {
-    return { verdict: "physical_unresolved", errorCode: error?.code };
+    return physicalUnresolved(lexical, error?.code);
   }
 }
 
@@ -470,7 +484,7 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
   try {
     physicalBase = realpath(lexical.base);
   } catch (error) {
-    return { verdict: "physical_unresolved", errorCode: error?.code };
+    return physicalUnresolved(lexical, error?.code);
   }
   try {
     // lstat distinguishes a genuinely missing target from a dangling link.
@@ -478,7 +492,7 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
     lstat(lexical.target);
   } catch (error) {
     if (error?.code !== "ENOENT") {
-      return { verdict: "physical_unresolved", errorCode: error?.code };
+      return physicalUnresolved(lexical, error?.code);
     }
     let ancestor = dirname(lexical.target);
     while (true) {
@@ -489,12 +503,12 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
         // An ENOENT while climbing is the normal "not created yet" shape, not
         // a failed call: keep climbing. Any other code fails closed.
         if (ancestorError?.code !== "ENOENT") {
-          return { verdict: "physical_unresolved", errorCode: ancestorError?.code };
+          return physicalUnresolved(lexical, ancestorError?.code);
         }
         const parent = dirname(ancestor);
         // Every ancestor reported ENOENT up to the filesystem root: still
         // unprovable. The last observed failure is the recorded code.
-        if (parent === ancestor) return { verdict: "physical_unresolved", errorCode: "ENOENT" };
+        if (parent === ancestor) return physicalUnresolved(lexical, "ENOENT");
         ancestor = parent;
       }
     }
@@ -505,28 +519,36 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
   } catch (error) {
     // Existing but unresolvable targets (for example dangling links) fail
     // closed; ancestor walking is reserved for lstat ENOENT above.
-    return { verdict: "physical_unresolved", errorCode: error?.code };
+    return physicalUnresolved(lexical, error?.code);
   }
 }
 
-// A target can be momentarily unresolvable while a writer replaces it (temp
-// write + rename, pending delete): the failing code is then EBUSY/EPERM/EACCES/
-// ENOENT. Such a verdict is not final — the WHOLE classification is re-run
-// after the waits below (a redo sees the replacement window closed and uses the
-// existing nearest-existing-ancestor branch). Codes a real path problem
-// produces (ELOOP/ENOTDIR/EINVAL/…), a missing code, and the confirmed
-// inside/lexical_outside/physical_outside verdicts are final immediately.
+// TD-336: a physical_unresolved verdict means the physical location could not
+// be PROVEN, not that it is outside — and Windows has repeatedly produced
+// transient failure shapes outside any code whitelist (run_20261105150050472aqb094:
+// a just-written in-worktree target failed once with an unlisted code and the
+// run died on it). So no code is classified as final from a single observation:
+// every physical_unresolved — any code, or none at all — re-runs the WHOLE
+// classification after the waits below (a redo sees the replacement window
+// closed and uses the existing nearest-existing-ancestor branch). Only the
+// confirmed inside/lexical_outside/physical_outside verdicts are final
+// immediately. The retry costs at most ~375 ms and only on the failing path; a
+// code that persists past it still fails closed, with the raw code recorded.
 const PHYSICAL_RETRY_DELAYS_MS = Object.freeze([25, 100, 250]);
 
-function isRetryablePhysicalErrorCode(code) {
-  return code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "ENOENT";
-}
-
-// The recorded code is a closed-set member ONLY; a missing or unexpected code
-// is "other" — the raw value never reaches the transcript.
+// The errorCode FIELD only ever carries a closed-set member; a missing or
+// unexpected code is "other". The raw code itself can still surface on the
+// durable fact as the shape-bounded observedErrorCode (below) — but only when
+// it was normalized to "other".
 function normalizeIsolationPhysicalErrorCode(code) {
   return typeof code === "string" && ISOLATION_PHYSICAL_ERROR_CODES.includes(code) ? code : "other";
 }
+
+// TD-336: the raw last-failure code rides on an unresolved verdict ONLY as a
+// bounded wire-safe token (letters/digits/underscore, ≤32 chars) AND when the
+// closed set reduced it to "other" — codes inside the closed set never repeat
+// themselves as the observed value.
+const OBSERVED_FS_ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,31}$/;
 
 function sleepMs(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -536,7 +558,6 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
   let outcome = classifyOnce();
   let retries = 0;
   while (outcome.verdict === "physical_unresolved"
-    && isRetryablePhysicalErrorCode(outcome.errorCode)
     && retries < PHYSICAL_RETRY_DELAYS_MS.length) {
     await sleep(PHYSICAL_RETRY_DELAYS_MS[retries]);
     retries += 1;
@@ -544,8 +565,20 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
   }
   if (outcome.verdict !== "physical_unresolved") return { verdict: outcome.verdict };
   // Retries only bought time: once they are exhausted the verdict is unchanged
-  // (fail closed) and the last observed failure is recorded.
-  return { verdict: "physical_unresolved", errorCode: normalizeIsolationPhysicalErrorCode(outcome.errorCode) };
+  // (fail closed) and the last observed failure is recorded — the closed-set
+  // code plus, when it was reduced to "other", the well-formed raw code and
+  // the workspace-relative path of the reported target.
+  const errorCode = normalizeIsolationPhysicalErrorCode(outcome.errorCode);
+  return {
+    verdict: outcome.verdict,
+    errorCode,
+    ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+    ...(errorCode === "other"
+      && typeof outcome.errorCode === "string"
+      && OBSERVED_FS_ERROR_CODE_RE.test(outcome.errorCode)
+      ? { observedErrorCode: outcome.errorCode }
+      : {}),
+  };
 }
 
 /**
@@ -555,10 +588,13 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
  * @param {{realpath?: Function, lstat?: Function, sleep?: Function}} [deps]
  *   lstat is accepted for signature parity with the intent classifier below;
  *   a post-write verdict resolves the reported target only.
- * @returns {Promise<{verdict: string, errorCode?: string}>} verdict ∈
- *   inside | lexical_outside | physical_outside | physical_unresolved; errorCode
- *   (a closed-set ISOLATION_PHYSICAL_ERROR_CODES member) is present only on
- *   physical_unresolved.
+ * @returns {Promise<{verdict: string, errorCode?: string, path?: string,
+ *   observedErrorCode?: string}>} verdict ∈ inside | lexical_outside |
+ *   physical_outside | physical_unresolved. On physical_unresolved: errorCode
+ *   (a closed-set ISOLATION_PHYSICAL_ERROR_CODES member), path (the
+ *   workspace-relative "/"-separated target; absent when the target IS the
+ *   worktree root) and — only when errorCode reduced to "other" — the
+ *   well-formed raw last-failure code as observedErrorCode.
  */
 export async function classifyReportedWriteContainment(
   rawPath,
@@ -573,11 +609,12 @@ export async function classifyReportedWriteContainment(
 
 /**
  * Containment verdict for a reported write intent, with the same retry contract
- * as classifyReportedWriteContainment above.
+ * and physical_unresolved result shape as classifyReportedWriteContainment above.
  * @param {string} rawPath reported intent path
  * @param {string} effectiveCwd authorized workspace
  * @param {{realpath?: Function, lstat?: Function, sleep?: Function}} [deps]
- * @returns {Promise<{verdict: string, errorCode?: string}>}
+ * @returns {Promise<{verdict: string, errorCode?: string, path?: string,
+ *   observedErrorCode?: string}>}
  */
 export async function classifyReportedWriteIntentContainment(
   rawPath,
@@ -2921,11 +2958,17 @@ export class Run {
     let isolationViolationKind = null;
     let isolationViolationReason = null;
     let isolationViolationErrorCode = null;
+    // TD-336: the workspace-relative reported path and the raw last-failure
+    // code, present only for a physical_unresolved reason (see the payload
+    // gates below).
+    let isolationViolationPath = null;
+    let isolationViolationObservedErrorCode = null;
     const pendingDeliveryWriteToolCallIds = new Set();
     // M12-14: classify WHY a reported write fails the delivery containment
     // gate. Returns null when the event is not a violating write, otherwise
     // { reason } — a closed-set ISOLATION_VIOLATION_REASONS member — plus, for a
-    // physical_unresolved verdict, the closed-set { errorCode }. Non-delivery
+    // physical_unresolved verdict, the closed-set { errorCode } and the TD-336
+    // { path, observedErrorCode } extras from the classifier result. Non-delivery
     // runs are never gated (unchanged). Correlation failures are checked BEFORE
     // the path checks, mirroring the prior boolean short-circuit exactly — the
     // gate itself (what fails closed) is unchanged; only the truthful reason is
@@ -2933,6 +2976,14 @@ export class Run {
     // is retried (see classifyWithPhysicalRetry) before it is final.
     const classifyDeliveryWriteViolation = async (rawEvent) => {
       if (!this.deliveryContext) return null;
+      // 会审修正（TD-336）第一层：落盘的相对 path 是 resolve() 规整后的产物——
+      // 分隔符与 "." 段已被改写，密钥值里含 `\`、`//`、`/./` 时字面已对不上，
+      // 脱敏的字面替换会失手。所以只在原始报告路径无可脱敏内容（redact 原样
+      // 返回）时才把相对 path 往下传；其余情况宁可弃 path。errorCode /
+      // observedErrorCode 不受影响（错误码不是路径文本）。
+      const gatePersistedPath = (rawPath, path) => (
+        path !== undefined && this._redact(rawPath) === rawPath ? { path } : {}
+      );
       if (rawEvent?.kind === "write_intent") {
         if (rawEvent.correlationStatus !== WRITE_INTENT_CORRELATION_STATUS.TRACKED) {
           switch (rawEvent.correlationStatus) {
@@ -2955,18 +3006,32 @@ export class Run {
         if (pendingDeliveryWriteToolCallIds.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS) {
           return { reason: "write_intent_pending_limit" };
         }
-        const { verdict, errorCode } = await classifyReportedWriteIntentContainment(
+        const { verdict, errorCode, path, observedErrorCode } = await classifyReportedWriteIntentContainment(
           rawEvent.path,
           this.effectiveCwd,
         );
-        return verdict === "inside" ? null : { reason: `write_intent_${verdict}`, errorCode };
+        return verdict === "inside"
+          ? null
+          : {
+            reason: `write_intent_${verdict}`,
+            errorCode,
+            observedErrorCode,
+            ...gatePersistedPath(rawEvent.path, path),
+          };
       }
       if (rawEvent?.kind === "file_written") {
-        const { verdict, errorCode } = await classifyReportedWriteContainment(
+        const { verdict, errorCode, path, observedErrorCode } = await classifyReportedWriteContainment(
           rawEvent.path,
           this.effectiveCwd,
         );
-        return verdict === "inside" ? null : { reason: `file_written_${verdict}`, errorCode };
+        return verdict === "inside"
+          ? null
+          : {
+            reason: `file_written_${verdict}`,
+            errorCode,
+            observedErrorCode,
+            ...gatePersistedPath(rawEvent.path, path),
+          };
       }
       return null;
     };
@@ -3071,6 +3136,8 @@ export class Run {
             isolationViolationKind = rawEvent.kind;
             isolationViolationReason = writeViolation.reason;
             isolationViolationErrorCode = writeViolation.errorCode ?? null;
+            isolationViolationPath = writeViolation.path ?? null;
+            isolationViolationObservedErrorCode = writeViolation.observedErrorCode ?? null;
             break;
           }
           await markRunningOnce(STATE_CHANGE_REASON.first_event);
@@ -3172,13 +3239,21 @@ export class Run {
     }
 
     if (isolationViolationKind) {
-      // M12-14: persist ONLY the closed-set code/eventKind/reason — never the
-      // rejected raw path. The additive reason is persisted only when it is an
-      // exact closed-set member; readers treat an absent reason as unknown. The
-      // same closed-set rule governs the additive errorCode: it is persisted
-      // only for a physical_unresolved reason and only as an
-      // ISOLATION_PHYSICAL_ERROR_CODES member (an unexpected code was already
-      // normalized to "other" at classification time).
+      // M12-14: persist ONLY the closed-set code/eventKind/reason — plus, since
+      // TD-336, a physical_unresolved reason also carries the workspace-relative
+      // reported path (redacted by the same this._redact the run.event stream
+      // goes through — never the absolute raw path) and the raw last-failure
+      // code as a bounded well-formed token. The additive reason is persisted
+      // only when it is an exact closed-set member; readers treat an absent
+      // reason as unknown. The same closed-set rule governs the additive
+      // errorCode: it is persisted only for a physical_unresolved reason and
+      // only as an ISOLATION_PHYSICAL_ERROR_CODES member (an unexpected code was
+      // already normalized to "other" at classification time). Reasons without a
+      // confirmed-in-worktree target (lexical_outside / physical_outside /
+      // correlation) never carry a path — an outside path is not quoted back.
+      // The persisted path is UNTRUSTED worker text (JSON-escaped when written):
+      // any future display surface must sanitize control characters and bound
+      // its length itself.
       const isolationReasonPayload = ISOLATION_VIOLATION_REASONS.includes(isolationViolationReason)
         ? { reason: isolationViolationReason }
         : {};
@@ -3186,6 +3261,21 @@ export class Run {
         && isolationViolationReason.endsWith("_physical_unresolved")
         && ISOLATION_PHYSICAL_ERROR_CODES.includes(isolationViolationErrorCode)
         ? { errorCode: isolationViolationErrorCode }
+        : {};
+      // 会审修正（TD-336）第二层：即使第一层放行，resolve() 的规整也可能把原本
+      // 不匹配的文本拼成密钥字面（例如 mark//er → mark/er），所以落盘前仍要过
+      // 同一个 this._redact——两层各挡一种绕法。
+      const isolationPathPayload = typeof isolationViolationReason === "string"
+        && isolationViolationReason.endsWith("_physical_unresolved")
+        && typeof isolationViolationPath === "string"
+        && isolationViolationPath.length > 0
+        ? { path: this._redact(isolationViolationPath) }
+        : {};
+      const isolationObservedCodePayload = typeof isolationViolationReason === "string"
+        && isolationViolationReason.endsWith("_physical_unresolved")
+        && typeof isolationViolationObservedErrorCode === "string"
+        && OBSERVED_FS_ERROR_CODE_RE.test(isolationViolationObservedErrorCode)
+        ? { observedErrorCode: isolationViolationObservedErrorCode }
         : {};
       const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.workdir_escape, {
         factEvents: [
@@ -3196,6 +3286,8 @@ export class Run {
               eventKind: isolationViolationKind,
               ...isolationReasonPayload,
               ...isolationErrorCodePayload,
+              ...isolationPathPayload,
+              ...isolationObservedCodePayload,
             },
           },
           {

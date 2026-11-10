@@ -203,10 +203,13 @@ export const ISOLATION_VIOLATION_REASONS = Object.freeze([
 ]);
 
 // The frozen closed-set SSOT of filesystem error codes an isolation violation may
-// record when the physical location of a reported write stayed unprovable. Only
-// these tokens (and the catch-all "other") ever reach the durable fact: an
-// exception without a code, or with any code outside this set, is recorded as
-// "other" — the raw value is never echoed. Hosted HERE for the same reason as
+// record when the physical location of a reported write stayed unprovable. Both
+// the closed-set errorCode field and the diagnosis fact wording use ONLY these
+// tokens (plus the catch-all "other"): an exception without a code, or with any
+// code outside this set, is recorded as "other". Since TD-336 the raw code can
+// ADDITIONALLY appear on the fact event itself as the shape-bounded
+// observedErrorCode — but only when it normalized to "other". Hosted HERE for
+// the same reason as
 // ISOLATION_VIOLATION_REASONS above: this module must stay import-pure while the
 // write side (runManager's containment gate) and the read side (this module's
 // fact wording) both need the one set.

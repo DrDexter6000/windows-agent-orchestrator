@@ -135,9 +135,9 @@ async function createInsideFile(effectiveCwd, relPath, content = "confirmed") {
 }
 
 /**
- * 越界用例的统一断言面：终态 failed、闭集 reason、违规事实不带 path、被拒的
- * 写事件本身不落 transcript、打包零调用。marker 是被拒路径里独有的子串——
- * deepseek-acp 例外（见其用例注释）。
+ * 越界用例的统一断言面：终态 failed、闭集 reason、越界类违规事实不带 path、
+ * 被拒的写事件本身不落 transcript、打包零调用。marker 是被拒路径里独有的
+ * 子串——deepseek-acp 例外（见其用例注释）。
  */
 function assertEscapeBlocked(fixture, output, { eventKind, reason, marker }) {
   assert.equal(fixture.getPackageCount(), 0, "packager must not run on an escaped write");
