@@ -428,7 +428,7 @@
       "caveats": [
         "无头（-p）运行时，若 Fable 用量要计 usage credits，Claude Code 不经确认直接扣（官方文档）",
         "需要 Claude Code CLI 2.1.321 或更高",
-        "安全分类器拦下请求时改由 Opus 接手（生物→Opus 5，网络安全→Opus 4.8），本次运行余下部分都在 Opus 上，WAO 运行面看不出（官方文档）"
+        "安全分类器拦下请求（多为生物、网络安全）时改由 Opus 接手（生物→Opus 5，网络安全→Opus 4.8），本次运行余下部分都在 Opus 上，WAO 运行面看不出（官方文档）"
       ],
       "contextWindow": {
         "tokens": 1000000,
