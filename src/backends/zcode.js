@@ -146,7 +146,14 @@ import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { buildChildEnv, compileInvocation, isProcessPlaceholderSessionId } from "./processBackend.js";
 import { performance } from "node:perf_hooks";
 import { createStallTracker } from "./stallBudget.js";
-import { describeProcessActivity, fingerprintWorkingTree, snapshotDescendants } from "./processActivity.js";
+import {
+  describeProcessActivity,
+  describeProcessJobActivity,
+  fingerprintWorkingTree,
+  snapshotDescendants,
+  snapshotRunProcesses,
+} from "./processActivity.js";
+import { attachProcessJob } from "./processJob.js";
 
 const BACKEND_NAME = "zcode";
 
@@ -859,7 +866,11 @@ export class ZcodeBackend {
   // false）——无沙箱参数面，越界写拦截按 0084（上报侦测，非阻止）。
   enforcesWriteSandbox = false;
 
-  constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null, deliverableProbe = null, requestTimeoutMs = null } = {}) {
+  constructor({
+    spawnFn = spawn, killFn = null, waoCliPath = null, platform, processProbe = null,
+    deliverableProbe = null, processJobAttach = null, runProcessProbe = null,
+    requestTimeoutMs = null,
+  } = {}) {
     // 可注入 spawn（测试检查 child env/argv 而不启动真实进程——M11-7 同款缝）。
     this._spawnFn = spawnFn;
     // 可注入击杀（测试确定性观察"进程树兜底"被触发；缺省 taskkill 树杀，生产行为
@@ -882,6 +893,18 @@ export class ZcodeBackend {
         : async () => null);
     this._deliverableProbe = deliverableProbe
       ?? (spawnFn === spawn ? (cwd) => fingerprintWorkingTree(cwd) : async () => null);
+    // 作业证词（决定 0121，只观测、不击杀——合同见 processJob.js）：
+    //   processJobAttach(pid) → 一次性挂接；null=不适用，{ok,name}|{ok,code,win32}。
+    //   runProcessProbe(pid, jobName) → 进程表+作业读数合并快照；null=不适用，
+    //   瞬时失败抛错（与 processProbe 同规矩；注入了 spawnFn 的测试缺省"不适用"）。
+    this._processJobAttach = processJobAttach
+      ?? (spawnFn === spawn
+        ? (pid) => attachProcessJob(pid, { platform: this._platform })
+        : async () => null);
+    this._runProcessProbe = runProcessProbe
+      ?? (spawnFn === spawn
+        ? (pid, jobName) => snapshotRunProcesses(pid, { jobName, platform: this._platform })
+        : async () => null);
     // 请求级缺省超时（测试接缝）：wire request 的缺省值。轮询请求显式传 0
     // （不设超时，决定 0117），create 60s / stop 5s 不受它影响。
     this._requestTimeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
@@ -1285,8 +1308,33 @@ export class ZcodeBackend {
     let sentAt;
     let terminalEmitted = false;
     let sessionId;
+    // 就绪屏障处的作业名与转录说明（决定 0121）——events 流开头落一条 system 消息。
+    let jobName = null;
+    let jobSystemText = null;
     try {
       await spawned;
+      // ===== 作业就绪屏障（决定 0121，只观测）=====
+      // 真实 spawn 之后、session/resume|create **之前**挂一次性作业：此后 zcode 的
+      // 一切子进程（含 MSYS env 式断链的孤儿链——npm/npx 脚本形状）创建时即继承
+      // 作业成员资格，父进程中途退出不丢；停滞门据此取证（见 observeWindow）。有界
+      // （attachProcessJob 缺省 15s）；**失败或超时绝不挡派发**——退回只用走树
+      // （现状），照常记一条带失败码的 system 消息。不适用（非 Windows）→ 无消息。
+      try {
+        const attached = await this._processJobAttach(child.pid);
+        if (attached !== null && attached.ok === true) {
+          jobName = attached.name;
+          // 如实陈述（第 94 批续修，会审结论）：WAO 不经作业主动击杀，但挂上后
+          // app-server 之后起的子孙不再静默脱离 runner 的 libuv 作业，会随 runner
+          // 一起结束（详见 processJob.js 文件头）。
+          jobSystemText = `zcode process job attached: ${attached.name} (observation-only; processes started after attach end with the runner — decision 0121)`;
+        } else if (attached !== null) {
+          jobSystemText = `zcode process job unavailable (code ${attached.code}, win32 ${attached.win32 ?? "n/a"}) — process-tree evidence only`;
+        }
+      } catch {
+        // attachProcessJob 的合同是"一切失败都返回 {ok:false}"；这里的兜底只挡
+        // 注入实现自身的意外抛错（code 闭集内的诚实归类）。
+        jobSystemText = "zcode process job unavailable (code spawn_failed, win32 n/a) — process-tree evidence only";
+      }
       if (resumeSessionId !== null) {
         // resume 轮（第三轮 auditor #1）：不 session/create（绝不静默新会话），但
         // **必须先 session/resume {sessionId}**——上游会话表是每进程一张
@@ -1464,6 +1512,8 @@ export class ZcodeBackend {
         sentContent: content,
         upstreamRequests,
         signal,
+        jobName,
+        jobSystemText,
         interval: opts.pollInterval,
         silentTimeout: opts.silentTimeout,
         onPollTick: opts.onPollTick,
@@ -1502,7 +1552,8 @@ export class ZcodeBackend {
    */
   async *_streamEvents({
     wire, child, sessionId, cwd, baselineParts, baselineMessageIds, sentAt, sentContent,
-    upstreamRequests, signal, interval, silentTimeout, onPollTick, markTerminal, stallClock,
+    upstreamRequests, signal, jobName = null, jobSystemText = null, interval, silentTimeout,
+    onPollTick, markTerminal, stallClock,
   }) {
     const pollInterval = Number.isFinite(interval) && interval > 0
       ? interval
@@ -1573,39 +1624,104 @@ export class ZcodeBackend {
       probeFailures = 0;
       closeEvidence = null;
     };
-    // 门到点且流不在收时每拍调用。返回 "pending"（基线刚取 / 窗未满 / 取样瞬时
-    // 失败——继续轮询）、"alive"（窗内有进程活动或工作树变化）、null（两项证词
-    // 都不适用，没有取样发生）、或一段写进收口文案的取证事实。
+    // 门到点且流不在收时每拍调用。返回 "pending"（基线刚取 / 窗未满 / 取样或
+    // 作业读数瞬时失败——继续轮询）、"alive"（窗内有进程活动、作业活动或工作树
+    // 变化）、null（所有证词都不适用，没有取样发生）、或一段写进收口文案的取证
+    // 事实。
+    // 有作业名时改用合并取样（进程表 + 作业读数同一次 PowerShell——决定 0121）：
+    // 走树读数照旧从同一次快照的进程表算，作业读数另成一条证词；process_active
+    // = 走树有活动或作业有活动（同一闭集成员）。作业读数一时不可用（job,
+    // unavailable、缺行、坏行、计数回退）与整次快照抛错**共用同一个连续失败
+    // 计数**（probeFailures，上限 3）：先按瞬时失败返回 pending 重读，连续达到
+    // 上限才降级——快照抛错降级走树+工作树+作业全不可用；仅作业读数不可用只
+    // 降级作业证词（走树与工作树照常），收口文案照旧带
+    // `process job unavailable (<原因>)`，绝不当"无活动"。读到有效作业读数时
+    // 计数清零；无界重试不存在（每拍至多一次取样）。
     const observeWindow = async () => {
       if (windowBaseline !== null && stallNow() - windowBaseline.at < PROCESS_ACTIVITY_WINDOW_MS) return "pending";
-      let tree;
+      let tree = null;
+      let hostRow = null;
+      let jobRow = null;
+      let jobNote = null;
       let treeNote = "process activity unavailable";
       let treeFailed = false;
+      let snapshotThrew = false;
+      let jobUnreadable = false;
+      // 进场时的连续失败计数：比对判"计数回退"也算一次失败尝试，要在此基数上
+      // 累计（读数有效时下面会先清零——回退判定随后撤销该清零再 +1，连续失败
+      // 才跨拍成立）。
+      const failuresAtRead = probeFailures;
       try {
-        tree = await this._processProbe(child.pid);
-        probeFailures = 0;
+        if (jobName !== null) {
+          const snap = await this._runProcessProbe(child.pid, jobName);
+          if (snap !== null) {
+            tree = snap.tree;
+            hostRow = snap.host ?? null;
+            jobRow = snap.job ?? null;
+            jobNote = snap.jobNote ?? null;
+          } else {
+            jobNote = "run process snapshot unavailable";
+          }
+          if (jobRow === null) jobUnreadable = true;
+        } else {
+          tree = await this._processProbe(child.pid);
+        }
       } catch {
-        probeFailures += 1;
+        snapshotThrew = true;
+      }
+      if (snapshotThrew || jobUnreadable) {
+        probeFailures = failuresAtRead + 1;
         if (probeFailures < PROCESS_PROBE_MAX_FAILURES) return "pending";
-        tree = null;
-        treeFailed = true;
-        treeNote = `process activity unavailable (${probeFailures} consecutive snapshot failures)`;
+        if (snapshotThrew) {
+          tree = null;
+          hostRow = null;
+          jobRow = null;
+          jobNote = `${probeFailures} consecutive snapshot failures`;
+          treeFailed = true;
+          treeNote = `process activity unavailable (${probeFailures} consecutive snapshot failures)`;
+        }
+        // 仅作业读数不可用达上限：只降级作业证词——jobNote 已是原因（job,
+        // unavailable / malformed / missing / run process snapshot unavailable），
+        // 走树与工作树读数照常参与。
+      } else {
+        probeFailures = 0;
       }
       const files = await this._deliverableProbe(cwd);
       if (windowBaseline === null) {
-        if (tree === null && files === null) return treeFailed ? treeNote : null;
-        windowBaseline = { at: stallNow(), tree, files };
+        if (tree === null && files === null && jobRow === null) return treeFailed ? treeNote : null;
+        windowBaseline = { at: stallNow(), tree, files, host: hostRow, job: jobRow, jobNote };
         return "pending";
       }
       const facts = [];
       observedSigns = [];
+      let processActive = false;
       if (tree !== null && windowBaseline.tree !== null) {
         const activity = describeProcessActivity(windowBaseline.tree, tree, stallNow() - windowBaseline.at);
-        if (activity.active) observedSigns.push("process_active");
+        if (activity.active) processActive = true;
         facts.push(`no process activity in the last ${Math.round(activity.windowMs / 1000)}s (cpu +${activity.cpuMs}ms, io +${activity.ioBytes}B across ${tree.size} descendant process(es))`);
       } else {
         facts.push(treeNote);
       }
+      if (jobName !== null) {
+        const verdict = describeProcessJobActivity(
+          windowBaseline,
+          { host: hostRow, job: jobRow, jobNote },
+          stallNow() - windowBaseline.at,
+        );
+        if (!verdict.available && verdict.note === "counters regressed") {
+          // 窗尾计数回退 = 这一拍的作业读数不可信，与读不到同类：撤销本拍的清零、
+          // 按失败累计——先 pending 重读，连续达上限才在本窗降级（文案照记原因）。
+          probeFailures = failuresAtRead + 1;
+          if (probeFailures < PROCESS_PROBE_MAX_FAILURES) return "pending";
+        }
+        if (verdict.available) {
+          if (verdict.active) processActive = true;
+          facts.push(`no process job activity in the last ${Math.round(verdict.windowMs / 1000)}s (job cpu +${verdict.cpuMs}ms, io +${verdict.ioBytes}B, processes ${verdict.totalProcesses[0]}->${verdict.totalProcesses[1]})`);
+        } else {
+          facts.push(`process job unavailable (${verdict.note})`);
+        }
+      }
+      if (processActive) observedSigns.push("process_active");
       if (files !== null && windowBaseline.files !== null) {
         if (files !== windowBaseline.files) observedSigns.push("files_changed");
         else facts.push("no file change in the working tree");
@@ -1621,6 +1737,11 @@ export class ZcodeBackend {
     const onAbort = () => this._kill(child);
     signal?.addEventListener("abort", onAbort);
     try {
+      // 作业挂接事实先于一切轮询落转录（决定 0121；deepseek-acp harness
+      // permission mode 同款 system 消息形状——不新增事件类型）。不适用时无消息。
+      if (typeof jobSystemText === "string" && jobSystemText.length > 0) {
+        yield messageEvent("system", [{ type: "text", text: jobSystemText }]);
+      }
       while (!signal?.aborted) {
         const fatal = wire.fatal();
         if (fatal) {

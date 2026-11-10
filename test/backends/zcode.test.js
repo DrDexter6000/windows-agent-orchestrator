@@ -1586,6 +1586,402 @@ test("zcode ⑥h: 零 part 阶段流在收 → 思考预算让位；流一停照
   child.kill();
 });
 
+// ===== ⑥k 作业证词（2026-11-09，决定 0121 / TD-346：MSYS env 式断链的补证） =====
+//
+// zcode 跑 `#!/usr/bin/env bash` 脚本（npm/npx 皆此形状）时，bash fork 的子进程
+// exec env、env 再 exec bash 后退出，新链的父 pid 指向已退出进程——走树看不到
+// （第 90 批实测：约 4 分钟每 30s 窗全判"无体征"）。真进程形状由
+// test/backends/processJobMsys.test.js 钉；这里全部注入桩：
+//   processJobAttach — spawn 就绪屏障处的一次性挂接（成功 {ok,name} / 失败
+//   {ok:false,code,win32} / null=不适用）；
+//   runProcessProbe — 有作业名时的合并取样（{tree, host, job, jobNote}）。
+const JOB_NAME = "Local\\wao-job-424243-" + "ab".repeat(16);
+const jobWindowRow = (cpuMs, ioBytes, total, active) => ({
+  cpu100ns: cpuMs * 10_000, ioBytes, totalProcesses: total, activeProcesses: active,
+});
+const jobSnap = (tree, host, job, jobNote = null) => ({ tree, host, job, jobNote });
+const hostSnap = (cpuMs, ioBytes) => ({ cpu100ns: cpuMs * 10_000, ioBytes });
+const attachOk = async () => ({ ok: true, name: JOB_NAME });
+
+test("zcode ⑥k: 走树静止但作业 CPU 越线 → 不收口、记 process_active，且先落 attach 的 system 消息", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child, peer } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      runProcessProbe: async () => {
+        probes += 1;
+        // 走树恒静止；宿主恒静止；作业累计每次读 +5000ms CPU（断链链在作业里）。
+        return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800 + probes * 5000, 50_000 + probes * 100, 5, 5));
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "断链的工具子进程在干活——不是停滞");
+  const system = events.filter((e) => e.kind === "message" && e.role === "system");
+  assert.equal(system.length, 1, "恰好一条作业 system 消息");
+  // 如实陈述（第 94 批续修）：不说"no kill-on-close"这类会误导的话——挂上后
+  // 子孙随 runner 一起结束是真实效果，消息里写明。
+  assert.equal(system[0].parts[0].text, `zcode process job attached: ${JOB_NAME} (observation-only; processes started after attach end with the runner — decision 0121)`);
+  // 决定 0068：凭作业活动续命落 process_active（与走树同一闭集成员）。
+  assert.deepEqual(
+    events.filter((e) => e.kind === "runtime_activity").map((e) => e.status),
+    ["process_active", "process_active"],
+  );
+  assert.ok(probes >= 4, "两个观察窗各取基线 + 比对");
+  child.kill();
+});
+
+test("zcode ⑥k: 只有 app-server 自身 CPU/I/O 在涨 → 不算活动，照旧收口且文案带作业读数", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child, peer } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      deliverableProbe: async () => "fp-constant",
+      runProcessProbe: async () => {
+        probes += 1;
+        // 单成员作业形状：作业累计只涨宿主自身那一份——净增量必须为 0。
+        return jobSnap(treeSnapshot(1200), hostSnap(1000 + probes * 500, 100_000 + probes * 50_000), jobWindowRow(1500 + probes * 500, 200_000 + probes * 50_000, 5, 5));
+      },
+    },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 0, "宿主自身读数不作证");
+  assert.match(done.error, /no process job activity in the last 30s \(job cpu \+0ms, io \+0B, processes 5->5\)/,
+    "扣宿主后的净增量如实写进收口文案");
+  assert.equal(peer.polls(), 15, "n=13 基线、n=14 比对、n=15 再看一拍后收口（与走树同节奏）");
+  child.kill();
+});
+
+test("zcode ⑥k: 窗内进程生又灭（ActiveProcesses 不变、TotalProcesses 涨）→ 有活动，不收口", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      runProcessProbe: async () => {
+        probes += 1;
+        // 走树/宿主/作业 CPU 全静止；只有 TotalProcesses 每窗 +2（短命进程的形状）。
+        return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800, 50_000, 5 + probes * 2, 5));
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "生又灭的短命进程 = 窗内有活动");
+  assert.deepEqual(
+    events.filter((e) => e.kind === "runtime_activity").map((e) => e.status),
+    ["process_active", "process_active"],
+  );
+  child.kill();
+});
+
+test("zcode ⑥k: 计数回退 / job,unavailable / 宿主行缺失 → 作业证词不可用（不当无活动），走树与工作树照常收口", async () => {
+  // 三种不可用形状共用：走树静止 + 工作树静止 + 作业证词缺失 ⇒ 收口，文案写明
+  // "process job unavailable (<原因>)"——绝不把它写成 "no process job activity"。
+  const closeCase = async (secondSnap) => {
+    let fakeNow = 0;
+    let probes = 0;
+    const { handle, child } = await runScenario({
+      backendOptions: {
+        processJobAttach: attachOk,
+        deliverableProbe: async () => "fp-constant",
+        runProcessProbe: async () => {
+          probes += 1;
+          if (probes === 1) return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800, 50_000, 5, 5));
+          return secondSnap;
+        },
+      },
+      peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+    });
+    const events = await collect(handle, {
+      pollInterval: 2,
+      stallClock: () => fakeNow,
+      onPollTick: () => { fakeNow += 30_000; },
+    });
+    assert.equal(events.at(-1).reason, "failed");
+    assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 0);
+    return events.at(-1).error;
+  };
+  assert.match(
+    await closeCase(jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(799, 50_000, 5, 5))),
+    /process job unavailable \(counters regressed\)/,
+  );
+  assert.match(
+    await closeCase(jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), null, "job query unavailable (win32 error 2)")),
+    /process job unavailable \(job query unavailable \(win32 error 2\)\)/,
+  );
+  assert.match(
+    await closeCase(jobSnap(treeSnapshot(1200), null, jobWindowRow(900, 60_000, 6, 5))),
+    /process job unavailable \(host row missing\)/,
+    "宿主行缺失读不了扣除基准——不可用，而 6>5 的 TotalProcesses 增量不当活动",
+  );
+});
+
+test("zcode ⑥k: 走树取样失败（tree 缺席）不遮蔽有效作业活动", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      // 走树不可用（tree: null——合并快照取不到进程表形状），作业读数照常在。
+      runProcessProbe: async () => {
+        probes += 1;
+        return jobSnap(null, hostSnap(800, 50_000), jobWindowRow(800 + probes * 5000, 50_000, 5, 5));
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 30) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "走树失明不遮蔽作业证词");
+  assert.deepEqual(
+    events.filter((e) => e.kind === "runtime_activity").map((e) => e.status),
+    ["process_active", "process_active"],
+  );
+  child.kill();
+});
+
+test("zcode ⑥k: 三者全静止 → 收口文案同时有走树与作业两类读数", async () => {
+  let fakeNow = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      deliverableProbe: async () => "fp-constant",
+      runProcessProbe: async () => jobSnap(treeSnapshot(1200, 4096, [5001, 5002]), hostSnap(800, 50_000), jobWindowRow(800, 50_000, 5, 5)),
+    },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /no process activity in the last 30s \(cpu \+0ms, io \+0B across 2 descendant process\(es\)\)/);
+  assert.match(done.error, /no process job activity in the last 30s \(job cpu \+0ms, io \+0B, processes 5->5\)/);
+  assert.match(done.error, /no file change in the working tree/);
+  child.kill();
+});
+
+test("zcode ⑥k: attach 失败/超时不挡派发，落带失败码与 Win32 错误号的 system 消息；不适用 → 无消息", async () => {
+  const completeMessages = (n) => (n <= 1 ? [] : [userMsg("do the task"), assistantMsg("answer")]);
+  const failed = await runScenario({
+    backendOptions: { processJobAttach: async () => ({ ok: false, code: "timeout", win32: null }) },
+    peerOptions: { messages: completeMessages },
+  });
+  const failedEvents = await collect(failed.handle);
+  assert.equal(failedEvents.at(-1).reason, "completed", "attach 失败照常派发（退回只用走树）");
+  assert.deepEqual(
+    failedEvents.filter((e) => e.kind === "message" && e.role === "system"),
+    [{
+      kind: "message",
+      role: "system",
+      parts: [{ type: "text", text: "zcode process job unavailable (code timeout, win32 n/a) — process-tree evidence only" }],
+    }],
+  );
+  failed.child.kill();
+
+  const win32Case = await runScenario({
+    backendOptions: { processJobAttach: async () => ({ ok: false, code: "open_process", win32: 87 }) },
+    peerOptions: { messages: completeMessages },
+  });
+  const win32Events = await collect(win32Case.handle);
+  assert.equal(win32Events.at(-1).reason, "completed");
+  assert.ok(
+    win32Events.some((e) => e.kind === "message" && e.role === "system" && e.parts.some((p) => p.text.includes("code open_process, win32 87"))),
+    "步骤码 + Win32 错误号都在消息里",
+  );
+  win32Case.child.kill();
+
+  // 不适用（注入 spawnFn 的测试缺省——非 Windows 同形）→ 零 system 消息，行为不变。
+  const notApplicable = await runScenario({ peerOptions: { messages: completeMessages } });
+  const naEvents = await collect(notApplicable.handle);
+  assert.equal(naEvents.filter((e) => e.kind === "message" && e.role === "system").length, 0);
+  assert.equal(naEvents.at(-1).reason, "completed");
+  notApplicable.child.kill();
+
+  // attach 注入实现自己抛错（合同外）→ 兜底归 spawn_failed，照常派发。
+  const threw = await runScenario({
+    backendOptions: { processJobAttach: async () => { throw new Error("attach blew up"); } },
+    peerOptions: { messages: completeMessages },
+  });
+  const threwEvents = await collect(threw.handle);
+  assert.equal(threwEvents.at(-1).reason, "completed", "attach 抛错不挡派发");
+  assert.ok(
+    threwEvents.some((e) => e.kind === "message" && e.role === "system" && e.parts.some((p) => p.text.includes("code spawn_failed, win32 n/a"))),
+    "系统消息走 spawn_failed 那条",
+  );
+  threw.child.kill();
+});
+
+// ===== ⑥k 续修（第 94 批会审结论）：作业读数的瞬时失败计数 =====
+//
+// 已挂作业时，作业读数一时不可用与整次快照抛错**共用同一个连续失败计数**
+// （上限 3）：先 pending 重读，连续达到上限才降级（快照抛错 → 走树+工作树+作业全
+// 不可用；仅作业读数不可用 → 只降级作业证词，走树照常），读到有效读数清零。
+
+test("zcode ⑥k: 合并快照连续抛错 → pending 两拍、第 3 次降级收口，文案两类读数都在", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  const { handle, child, peer } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      deliverableProbe: async () => "fp-constant",
+      runProcessProbe: async () => {
+        probes += 1;
+        throw new Error("snapshot timed out");
+      },
+    },
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(events.filter((e) => e.kind === "runtime_activity").length, 0);
+  // n=13、14 两次抛错 pending；n=15 第三次（3）降级取基线；n=16 窗满再抛（4）降级
+  // 比对落 closeEvidence；n=17 再看一拍后收口——文案如实写第 4 次。
+  assert.match(done.error, /process activity unavailable \(4 consecutive snapshot failures\)/);
+  assert.match(done.error, /process job unavailable \(4 consecutive snapshot failures\)/);
+  assert.equal(peer.polls(), 17);
+  assert.equal(probes, 4);
+  child.kill();
+});
+
+test("zcode ⑥k: 作业读数不可用 → 先 pending 重读；读到有效读数计数清零（第二个窗再不可用仍从头数）", async () => {
+  let fakeNow = 0;
+  let probes = 0;
+  // 两个观察窗的读数脚本：各为 [坏, 坏, 好(基线), 好(比对)]——坏 = job,unavailable
+  // 形状（tree 照常静止），好 = 作业 CPU 越线。若"有效后清零"没实现，第二窗的
+  // 两次坏会让计数从 2 直接到 4（≥3）→ 降级 → 静止收口；实现正确则第二窗照样
+  // 凭作业活动续命到完成。
+  const script = [false, false, true, true, false, false, true, true];
+  let jobCpu = 0;
+  const { handle, child } = await runScenario({
+    backendOptions: {
+      processJobAttach: attachOk,
+      deliverableProbe: async () => null,
+      runProcessProbe: async () => {
+        const good = script[probes] ?? true;
+        probes += 1;
+        if (good) {
+          jobCpu += 5000;
+          return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), jobWindowRow(800 + jobCpu, 50_000, 5, 5));
+        }
+        return jobSnap(treeSnapshot(1200), hostSnap(800, 50_000), null, "job query unavailable (win32 error 2)");
+      },
+    },
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n < 35) return [userMsg("do the task"), stepStartMsg()];
+        return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "completed", "两次瞬时不可用各 pending 两拍后读到有效读数——两个窗都凭作业活动续命");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.deepEqual(
+    events.filter((e) => e.kind === "runtime_activity").map((e) => e.status),
+    ["process_active", "process_active"],
+    "两个窗各续命一次（第二窗若不清零会被降级收口）",
+  );
+  assert.equal(probes, 8, "每窗恰 4 次取样：坏、坏、基线、比对");
+  child.kill();
+});
+
+// 就绪屏障次序：attach 挂起时绝不发 resume/create。用同一个 helper 构造（守卫 ⑪
+// 的字面量只此一处），fresh 与 resume 两形状各跑一遍。
+async function spawnHoldingAttach(task) {
+  const child = makeFakeChild();
+  const kill = fakeKill();
+  let releaseAttach = null;
+  const attachCalls = [];
+  const backend = new ZcodeBackend({
+    spawnFn: () => child,
+    killFn: kill.killFn,
+    processJobAttach: (pid) => {
+      attachCalls.push(pid);
+      return new Promise((resolve) => { releaseAttach = resolve; });
+    },
+  });
+  const peer = fakeZcodePeer(child, { messages: () => [] });
+  const spawnPromise = backend.spawn(makeAgent(), task);
+  await waitUntil(() => attachCalls.length === 1, 2000);
+  return { child, peer, attachCalls, releaseAttach, spawnPromise, killCalls: kill.calls };
+}
+
+test("zcode ⑥k: 就绪屏障——attach 未结束前不发 session/create|resume，resolve 后才走握手", async () => {
+  // fresh 轮：create 之前 attach 必须已结束
+  const fresh = await spawnHoldingAttach({ prompt: "x" });
+  assert.equal(fresh.attachCalls[0], 424243, "attach 收到 child.pid");
+  assert.equal(fresh.peer.framesOf("session/create").length, 0, "attach 挂起期间零 create 帧");
+  fresh.releaseAttach({ ok: true, name: JOB_NAME });
+  await fresh.spawnPromise;
+  assert.equal(fresh.peer.framesOf("session/create").length, 1);
+  const clientFrames = fresh.peer.clientFrames;
+  const sendAt = clientFrames.findIndex((f) => f.method === "session/send");
+  const createAt = clientFrames.findIndex((f) => f.method === "session/create");
+  assert.ok(createAt >= 0 && sendAt > createAt, "create → … → send 次序保持");
+  fresh.child.kill();
+
+  // resume 轮：resume 同样在屏障之后（spawn 之后、session/resume 之前）
+  const resume = await spawnHoldingAttach({ prompt: "x", sessionReuse: { turn: "resume" }, priorProviderSessionId: "sess_prior_1" });
+  assert.equal(resume.peer.framesOf("session/resume").length, 0, "attach 挂起期间零 resume 帧");
+  resume.releaseAttach({ ok: false, code: "no_sentinel", win32: null });
+  await resume.spawnPromise;
+  assert.equal(resume.peer.framesOf("session/resume").length, 1, "失败也放行——照常 resume");
+  resume.child.kill();
+});
+
 // ===== ⑥j 在途轮询（2026-11-07，决定 0117 / TD-335：session/messages 只留一个
 // 在途、不设请求超时——慢应答不再等于失败）=====
 //
@@ -3234,13 +3630,14 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 14 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
-  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l / ⑥j(requestTimeoutMs)。加/删构造必须
-  // 同步更新此数字——不更新即红。
+  // P2②b：严格相等。当前实际 = 15 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
+  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l / ⑥j(requestTimeoutMs) /
+  // ⑥k(spawnHoldingAttach——就绪屏障次序)。加/删构造必须同步更新此数字——
+  // 不更新即红。
   assert.equal(
     constructions.length,
-    14,
-    `守卫扫描应找到恰 14 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l/⑥j），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    15,
+    `守卫扫描应找到恰 15 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l/⑥j/⑥k），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,

@@ -12,6 +12,13 @@
 // 故 TD-40 重定义：不实现自定义 Job Object，而是靠 engines+启动校验确保只在 v22（及未来修复版 v24）
 // 上跑——让 Node 内置 Job Object 提供 OS 级"进程死即会话死"保证，taskkill /T/F 保留为主动 abort 路径。
 //
+// 决定 0121 边界注记：zcode 停滞门获批一个**只观测**的作业对象
+// （src/backends/processJob.js——powershell Add-Type P/Invoke，零第三方依赖），
+// 用于 MSYS env 式断链后代的取证；WAO 不经它主动击杀任何进程（不设
+// kill-on-close、不调 TerminateJobObject），但挂上后 app-server 之后起的子孙
+// 不再静默脱离 runner 的 libuv 作业，会随 runner 一起结束——与"进程死即会话死"
+// 同向（实测与如实陈述见 processJob.js 文件头）。仅限 Windows。
+//
 // 数据驱动：BLOCKED_RANGES / ALLOWED_FIXED_VERSIONS 两个常量，便于官方发修复版后维护。
 // 纯函数 checkNodeVersion(versionString, {allowedFixed?}) → {ok, blocked?, reason?}，可单测。
 

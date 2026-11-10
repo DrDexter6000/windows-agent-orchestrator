@@ -20,6 +20,14 @@
 //   - 父子关系取自 Win32_Process.ParentProcessId。父进程退出后子进程仍带着旧父
 //     pid：祖先链断了的活跃后代看不到；旧父 pid 被系统复用时树的归属可能错判
 //     ——未做创建时间校验。两次取样之间出生又退出的短命进程也看不到。
+//     （2026-11-09 实测，第 94 批：zcode 跑 `#!/usr/bin/env bash` 脚本——npm/npx
+//     皆此形状——时，bash fork 的子进程 exec env、env 再 exec bash 后自己退出
+//     （几毫秒），新 bash 的父 pid 指向已退出进程，整条链挂不上树；MSYS 的 ps
+//     表也补不上这一跳。第 90 批的 `npm run test:one` 复现：约 4 分钟里每个
+//     30s 窗都被判"无体征"，测试子进程其实一直在耗 CPU。zcode 停滞门自此另有
+//     作业证词补这一跳——决定 0121，attach 见 src/backends/processJob.js、取样
+//     见本文件 snapshotRunProcesses；其余消费方（进程式后端的静默期取样器）仍
+//     只有走树。）
 //   - 后代读数是全体求和：与任务无关的插件进程持续耗 CPU / I/O、反复崩溃重启
 //     的 helper，都会被读成"有活动"。
 //   - 取不到分两种：不适用（非 Windows、pid 非法）返回 null——调用方当作"没有
@@ -103,6 +111,110 @@ export async function snapshotDescendants(rootPid, { run = defaultRun, platform 
   return found;
 }
 
+// ── 作业取样（决定 0121，只观测；MSYS env 式断链的补证通道） ─────────────────
+//
+// snapshotRunProcesses 在**同一次** PowerShell 里先输出现有的进程表行，再在有
+// jobName 时按名打开作业（attach 见 src/backends/processJob.js）并
+// QueryInformationJobObject 查累计读数，多输出一行
+// `job,<cpu100ns>,<ioBytes>,<totalProcesses>,<activeProcesses>`；打不开或查询
+// 失败输出 `job,unavailable,<Win32 错误号>`。
+//
+// 结构体偏移 = JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION 的 x64 布局
+// （2026-11-09 本机实测探针：该类缓冲区恰收 96 字节；BasicInfo 48 字节——含
+// ThisPeriodTotalUserTime/ThisPeriodTotalKernelTime 两个 8 字节字段——其中
+// TotalUserTime@0、TotalKernelTime@8、TotalProcesses@36、ActiveProcesses@40；
+// IoInfo 自 48 起，三项 TransferCount（读/写/其他）在 72/80/88。探测时作业
+// 查询类的枚举值在本机内核上为 8——9 号类是另一个 144 字节、几乎全零的结构，
+// 不要按记忆改回 9）。
+
+// OpenJobObjectW 只要 JOB_OBJECT_QUERY(0x4)；查询类 8、缓冲 96 字节（见上）。
+// 作业段（Add-Type 与查询）整体包 try/catch——编译或查询硬失败时输出固定码
+// （13 = ERROR_INVALID_DATA，作为"作业段自身意外失败"的固定哨兵），进程表行
+// 照常输出、命令照常成功退出：两段互不拖累（第 94 批续修，会审结论）。
+function buildJobQueryCommand(jobName) {
+  const source = "using System; using System.Runtime.InteropServices; "
+    + "public static class WaoRunJob { "
+    + "[DllImport(\"kernel32.dll\", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr OpenJobObjectW(uint dwDesiredAccess, bool bInheritHandle, string lpName); "
+    + "[DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool QueryInformationJobObject(IntPtr hJob, int JobObjectInformationClass, byte[] lpJobObjectInformation, int cbJobObjectInformationLength, IntPtr lpReturnLength); }";
+  return "try {\n"
+    + "Add-Type -TypeDefinition '" + source + "'\n"
+    + `$name = '${jobName}'\n`
+    + "$job = [WaoRunJob]::OpenJobObjectW(4, $false, $name)\n"
+    + "if ($job -eq [IntPtr]::Zero) {\n"
+    + "  'job,unavailable,' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()\n"
+    + "} else {\n"
+    + "  $buf = New-Object byte[] 96\n"
+    + "  if (-not [WaoRunJob]::QueryInformationJobObject($job, 8, $buf, 96, [IntPtr]::Zero)) {\n"
+    + "    'job,unavailable,' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()\n"
+    + "  } else {\n"
+    + "    'job,' + ([BitConverter]::ToUInt64($buf, 0) + [BitConverter]::ToUInt64($buf, 8)) + ',' "
+    + "+ ([BitConverter]::ToUInt64($buf, 72) + [BitConverter]::ToUInt64($buf, 80) + [BitConverter]::ToUInt64($buf, 88)) + ',' "
+    + "+ [BitConverter]::ToUInt32($buf, 36) + ',' + [BitConverter]::ToUInt32($buf, 40)\n"
+    + "  }\n"
+    + "}\n"
+    + "} catch {\n"
+    + "  'job,unavailable,13'\n"
+    + "}";
+}
+
+/**
+ * 解析输出里的 `job,` 行（纯函数；进程表行由 parseProcessTable 自行跳过——
+ * job 行的列数不是 4）。正常 → { job, jobNote: null }；unavailable → 带原因；
+ * 坏行 / 缺行同理（job: null，绝不虚构读数）。数值上限 2^64：> 2^53 后损失
+ * 低位精度，对阈值比对（增量级）无影响。
+ */
+export function parseJobSnapshotLine(text) {
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("job,")) continue;
+    const cells = trimmed.split(",");
+    if (cells.length === 5 && cells.slice(1).every((n) => /^\d+$/.test(n))) {
+      return {
+        job: { cpu100ns: Number(cells[1]), ioBytes: Number(cells[2]), totalProcesses: Number(cells[3]), activeProcesses: Number(cells[4]) },
+        jobNote: null,
+      };
+    }
+    if (cells.length === 3 && cells[1] === "unavailable" && /^\d+$/.test(cells[2])) {
+      return { job: null, jobNote: `job query unavailable (win32 error ${Number(cells[2])})` };
+    }
+    return { job: null, jobNote: "malformed job line" };
+  }
+  return { job: null, jobNote: "job line missing" };
+}
+
+/**
+ * 进程表 + 作业读数的合并快照（zcode 停滞门在有作业名时用它替代
+ * snapshotDescendants 的单调用；snapshotDescendants 本身签名与返回不变——
+ * 进程式后端的静默期取样器还在用）。
+ * @param {number} rootPid — 宿主进程（走树根 + 作业 CPU/I/O 的扣除基准）
+ * @param {object} [opts]
+ * @param {string} [opts.jobName] — 缺席 = 没这项证词（job: null, jobNote: null）；
+ *   在场但不符合生成格式（^Local\wao-job-…）= 不查作业、按不可用处理
+ *   （jobNote: "invalid job name"），进程表照常
+ * @returns {Promise<{tree: Map<number,{cpu100ns:number,ioBytes:number}>, host:{cpu100ns:number,ioBytes:number}|null, job:{cpu100ns:number,ioBytes:number,totalProcesses:number,activeProcesses:number}|null, jobNote:string|null}|null>}
+ *   不适用（非 Windows / pid 非法）→ null
+ * @throws 快照命令失败/超时，或结果里找不到宿主进程（瞬时故障，可重取）
+ */
+// 作业名先按生成格式校验（attachProcessJob 产出的形状）；不符不查作业、按不可
+// 用处理——这也是把名字嵌进 PowerShell 单引号串前的注入防线。
+const JOB_NAME_PATTERN = /^Local\\wao-job-\d+-[0-9a-f]{32}$/;
+
+export async function snapshotRunProcesses(rootPid, { jobName, run = defaultRun, platform = process.platform } = {}) {
+  if (platform !== "win32" || !Number.isInteger(rootPid) || rootPid <= 0) return null;
+  const useJob = typeof jobName === "string" && jobName.length > 0;
+  const validName = useJob && JOB_NAME_PATTERN.test(jobName);
+  const text = await run(validName ? `${SNAPSHOT_COMMAND}; ${buildJobQueryCommand(jobName)}` : SNAPSHOT_COMMAND);
+  const table = parseProcessTable(text);
+  // 缺席 = 没这项证词（jobNote: null）；在场但格式不符 = 不查作业、按不可用处理。
+  const { job, jobNote } = !useJob
+    ? { job: null, jobNote: null }
+    : (validName ? parseJobSnapshotLine(text) : { job: null, jobNote: "invalid job name" });
+  const tree = descendantsOf(table, rootPid);
+  if (tree === null) throw new Error("host process not found in the process table");
+  const hostRow = table.get(rootPid);
+  return { tree, host: { cpu100ns: hostRow.cpu100ns, ioBytes: hostRow.ioBytes }, job, jobNote };
+}
+
 // 活跃判据（任一成立即算有活动）。探针里空闲后代 CPU 0-2.5 ms/s、I/O 4.2-8.7 KB/s，
 // 忙循环 CPU ≈990 ms/s——阈值取在空闲读数的数倍之上。
 export const PROCESS_ACTIVE_CPU_MS_PER_S = 20;
@@ -134,6 +246,53 @@ export function describeProcessActivity(before, after, windowMs) {
     || cpuMs / seconds >= PROCESS_ACTIVE_CPU_MS_PER_S
     || ioBytes / seconds >= PROCESS_ACTIVE_IO_BYTES_PER_S;
   return { active, cpuMs: Math.round(cpuMs), ioBytes, born, exited, windowMs: Math.round(windowMs) };
+}
+
+/**
+ * 两次快照之间作业证词的活动量（决定 0121）。before/after 各取
+ * snapshotRunProcesses 的 { host, job, jobNote }。宿主自身的 CPU/I/O 从作业累计
+ * 里扣除（控制面每拍经 stdio 轮询宿主，其自身计数恒涨，不能作证）；差值为负
+ * 钳为 0。任一累计计数（CPU/I/O/TotalProcesses）回退 = 作业被重建或读数不可信
+ * ——证词**不可用**（不当"无活动"）。判据与走树同阈值：cpu/窗秒 ≥
+ * PROCESS_ACTIVE_CPU_MS_PER_S、io/窗秒 ≥ PROCESS_ACTIVE_IO_BYTES_PER_S、
+ * born > 0（TotalProcesses 是累计值，只活几毫秒的进程也计入）或
+ * ActiveProcesses 变化（两个方向都是活动）。
+ * @returns {{available:true, active:boolean, cpuMs:number, ioBytes:number, born:number, windowMs:number, activeChanged:boolean, totalProcesses:[number,number]}
+ *   | {available:false, note:string}}
+ */
+export function describeProcessJobActivity(before, after, windowMs) {
+  if (before?.job == null || after?.job == null) {
+    return { available: false, note: after?.jobNote ?? before?.jobNote ?? "job query unavailable" };
+  }
+  if (before.host == null || after.host == null) {
+    return { available: false, note: "host row missing" };
+  }
+  const base = before.job;
+  const now = after.job;
+  if (now.cpu100ns < base.cpu100ns || now.ioBytes < base.ioBytes || now.totalProcesses < base.totalProcesses) {
+    return { available: false, note: "counters regressed" };
+  }
+  const hostCpu = Math.max(0, after.host.cpu100ns - before.host.cpu100ns);
+  const hostIo = Math.max(0, after.host.ioBytes - before.host.ioBytes);
+  const cpu100ns = Math.max(0, (now.cpu100ns - base.cpu100ns) - hostCpu);
+  const ioBytes = Math.max(0, (now.ioBytes - base.ioBytes) - hostIo);
+  const born = now.totalProcesses - base.totalProcesses;
+  const activeChanged = now.activeProcesses !== base.activeProcesses;
+  const cpuMs = cpu100ns / 10_000;
+  const seconds = Math.max(windowMs, 1) / 1000;
+  const active = born > 0 || activeChanged
+    || cpuMs / seconds >= PROCESS_ACTIVE_CPU_MS_PER_S
+    || ioBytes / seconds >= PROCESS_ACTIVE_IO_BYTES_PER_S;
+  return {
+    available: true,
+    active,
+    cpuMs: Math.round(cpuMs),
+    ioBytes,
+    born,
+    windowMs: Math.round(windowMs),
+    activeChanged,
+    totalProcesses: [base.totalProcesses, now.totalProcesses],
+  };
 }
 
 // 逐文件取 mtime/大小的上限：超出部分只以文件名清单参与指纹。
