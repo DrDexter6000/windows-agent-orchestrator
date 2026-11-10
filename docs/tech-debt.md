@@ -32,7 +32,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
-| TD-138 | 全量由 filesystem 波决定，越来越慢：插电时 11-01 为 474–528 s（96 文件），11-10 空闲为 1126 s（102 文件），离 1800 s 波看门狗不远；按文件耗时合计 10-11 为 1090 s（81 文件），11-10 为 8336 s。电池约慢一倍，会审席同跑再加，交付验证因此多次超时。慢在 delivery 与 reclaim 的真实 git。文件与用例只多两成多，没找到单点回归，原因未查明：单条用例变慢、并发争用、机器漂移都有可能 | 等待裁定 | Owner 定方向：调波看门狗、测试目录换 Dev Drive 做对照、减被测代码的 git 调用 | scripts/canonical-test.mjs src/delivery.js |
+| TD-138 | 全量由 filesystem 波决定，且变慢了。主要在机器、不在代码：10-11 的提交今天单跑与 HEAD 一样慢，是它当天在波内用时的两倍多；同一批文件相对纯 CPU 的 pure 波，10-11 到 10-27 慢了一倍。同一代码连跑四次波长 828–1335 s（插电），电池约再翻倍；看门狗已调到 3000 s。临时目录换 Dev Drive 无改善；起进程慢（git 86 ms、node 115 ms） | 等待裁定 | 机器侧候选：10-13 累积更新与 Lenovo 驱动、10-14 Defender 平台更新，查不查由 Owner 定；仓库侧减测试与被测代码的 git 调用 | scripts/canonical-test.mjs src/delivery.js |
 | TD-139 | MCP 的 run_status 只返回 lastActivity.kind，不含活动摘要文本（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 择机：下次改 MCP 状态面时按 run_activity 同一口径放开摘要 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 择机：每季度核对 v24 libuv 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |

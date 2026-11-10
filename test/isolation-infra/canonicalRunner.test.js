@@ -1555,14 +1555,14 @@ test("B5 RED isolationDurationMs 透传：isolator 的 durationMs 进入 isolati
 // 不再附带通过兄弟夹具、不再依赖该时序前提。
 // ────────────────────────────────────────────────────────────────────────────
 
-test("TD-165 budgets: 生产默认值钉死（1200s per-test / 1800s 波级兜底 / 900s 告警；兜底必须大于 per-test 上限）", () => {
+test("TD-165 budgets: 生产默认值钉死（1200s per-test / 3000s 波级兜底 / 1800s 告警；兜底必须大于 per-test 上限）", () => {
   // TD-173（2026-09-21）重推导：旧基准（最慢文件 133s / 波峰 207s ⇒ 600s 余量 3-4.5x）
   // 已被现测推翻——同一文件单跑 253s、波内 ~598s，filesystem 波 70 文件 @16 容量地板
   // 474s、墙钟 606s；旧 600s 上限因此**误杀波尾的合法慢测试**（全部 isolation_pass），
   // 与该常量自述的保护意图冲突。新值 = 波内峰值 ~2x / 单跑峰值 ~4.7x。
   assert.equal(TEST_TIMEOUT_MS, 1200000, "R1：1200s（2026-09-21 重推导，TD-173：波内峰值 606s ≈ 旧 600s 上限）");
-  assert.equal(WAVE_WATCHDOG_MS, 1800000, "R2：1800s（1.5× per-test 上限，严格大于 R1 + 排队余量）");
-  assert.equal(WAVE_ALARM_MS, 900000, "R3：900s 信息告警（须高于健康波 ~606s、低于兜底）");
+  assert.equal(WAVE_WATCHDOG_MS, 3000000, "R2：3000s（TD-138，11-10 Owner 批准：插电时合法波长 828–1335 s，电池约再翻倍）");
+  assert.equal(WAVE_ALARM_MS, 1800000, "R3：1800s 信息告警（须高于插电时的健康波、低于兜底）");
   assert.ok(WAVE_WATCHDOG_MS > TEST_TIMEOUT_MS, "兜底必须严格大于 per-test 上限 + 排队余量（先 R1 后 R2）");
   assert.ok(WAVE_ALARM_MS < WAVE_WATCHDOG_MS, "告警先于兜底");
   assert.ok(WAVE_ALARM_MS > 0 && TEST_TIMEOUT_MS > 0 && WAVE_WATCHDOG_MS > 0);
