@@ -1,6 +1,6 @@
 // cliEntryGuard.test.js
 //
-// 入口判断（src/entryPoint.js）：src/cli.js 与四个后台子进程模块只在被当作入口运行时
+// 入口判断（src/entryPoint.js）：src/cli.js、MCP stdio 服务与四个后台子进程模块只在被当作入口运行时
 // 执行 main。cli.js 从前 import 即执行：无参 main 在若干事件轮次后打印帮助，帮助落进
 // 别的测试的 console 捕获窗口时，那条测试就 JSON 解析失败（TD-194 的一种首轮红）。
 
@@ -63,18 +63,20 @@ test("src 里读 process.argv[1] 的只有 entryPoint.js；各入口模块的 if
   }
 });
 
-test("后台模块作为入口时确实进入 main：直接路径与经 junction 的路径都一样", () => {
+test("后台模块与 MCP stdio 服务作为入口时确实进入 main：直接路径与经 junction 的路径都一样", () => {
   const cases = [
     ["daemon.js", /daemon error: daemonMain: --run-dir required/],
     ["daemonSupervisor.js", /supervisor error: runSupervisor: runDir required/],
+    // MCP stdio 服务：相对路径的 --workspace-root 在参数解析就失败（不读配置），走启动失败的固定文案。
+    ["mcp/stdio.js", /\[wao-mcp\] fatal: startup failed/, ["--workspace-root", "relative"]],
   ];
   const dir = mkdtempSync(join(tmpdir(), "wao-entry-link-"));
   const link = join(dir, "src-link");
   try {
     symlinkSync(join(ROOT, "src"), link, "junction");
-    for (const [name, mainError] of cases) {
+    for (const [name, mainError, args = []] of cases) {
       for (const base of [join(ROOT, "src"), link]) {
-        const r = spawnSync(process.execPath, [join(base, name)], { cwd: ROOT, encoding: "utf8", timeout: 60000 });
+        const r = spawnSync(process.execPath, [join(base, name), ...args], { cwd: ROOT, encoding: "utf8", timeout: 60000 });
         assert.equal(r.status, 1, `${base}/${name}: ${r.stderr}`);
         assert.match(r.stderr, mainError, `${base}/${name}`);
       }
