@@ -37,16 +37,12 @@ export const REASONING_EFFORTS = Object.freeze([
 // 与能力映射各自承载不同语义，不在单点修改承诺内。
 export const KNOWN_BACKENDS = Object.freeze([
   "claude-code", "codex",
-  // ADR-0031（B-2）：DSH ACP 集成面 backend（dsh --profile acp）。闭集 5→6
-  // 扩员由 ADR-0031 提议，待 Owner 裁定 accepted（Owner 未决——不声称已授权）。
+  // deepseek-acp：DSH ACP 集成面（dsh --profile acp，ADR-0031）。
   "deepseek-acp",
-  // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的 Kimi Code
-  // 官方 REST API）。闭集 6→7 扩员经 Owner 2026-09-30 批准。
+  // kimi-web：HTTP attach，`kimi web` 本地服务器的 Kimi Code 官方 REST API。
   "kimi-web",
-  // 第 8 个 backend「zcode」（进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑
-  // CLI 的 ZCode Protocol v1，目标模型 GLM-5.3/GLM-5.3-Flash）。闭集 7→8 扩员经
-  // Owner 2026-10-01 批准接线（此前 ADR-0028 曾按"app-server 通道在、在途注入+
-  // 公开承诺缺"维持不入册——本轮 Owner 复核后批准，见 .wao/decisions/0028）。
+  // zcode：进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑 CLI 的 ZCode
+  // Protocol v1（ADR-0028）。
   "zcode",
 ]);
 
@@ -257,8 +253,8 @@ export function normalizeAgent(id, agent) {
     // 进程式 backend：serveUrl/model 非必填（进程自带模型配置）。
     // binary 可选（默认走 PATH 里的 claude/codex）。
   } else if (agent.backend === "deepseek-acp") {
-    // ADR-0031：组合面固定为 `dsh --profile acp --patch <containment>`——
-    // 本线不消费 dshConfigPath/dshProvider；binary 可选（缺省 dsh）。
+    // ADR-0031：组合面固定为 `dsh --profile acp --patch <containment>`；
+    // binary 可选（缺省 dsh）。
     if (typeof agent.credentialEnv !== "string" || agent.credentialEnv.trim().length === 0) {
       throw new Error(`Agent ${id}: credentialEnv is required and must be a non-blank string`);
     }

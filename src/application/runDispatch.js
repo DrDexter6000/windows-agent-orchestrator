@@ -533,7 +533,7 @@ export async function dispatchRun({
   // (zero transcript, zero fork). The resolved VALUES are threaded into the
   // runner env so the worker child inherits them (and the redactor scrubs them).
   // Dispatch resolves ALL inherited env names (required + optional) so optional
-  // Kimi/Codex config is bridged too — unlike registry_list, which only reads
+  // Codex config is bridged too — unlike registry_list, which only reads
   // required names. One operation-scoped resolver per dispatch (no cross-op cache).
   //
   // M11-11C: the agent is ALWAYS resolved here (not only when credential

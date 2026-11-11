@@ -705,7 +705,7 @@ export async function continueRun({
   // 9b. TD188 (2026-09-27): COMPLETE resumability preflight — the SAME shared
   //     reader + backend-owned availability judgment the spawn authority
   //     (RunManager.start) applies at resume time, so the two authorities can
-  //     never disagree about what the parent transcript licenses. A Kimi/Codex
+  //     never disagree about what the parent transcript licenses. A Codex
   //     parent that only ever recorded the process placeholder identity
   //     (proc_<pid>) is refused HERE with the existing no_provider_session
   //     reason — BEFORE the lineage claim, any worktree transition, the child

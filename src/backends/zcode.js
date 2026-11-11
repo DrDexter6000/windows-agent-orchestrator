@@ -1,8 +1,7 @@
 // src/backends/zcode.js
 //
-// 第 8 个 backend「zcode」（进程式 stdio app-server）：驱动智谱 ZCode 桌面版
-// 捆绑 CLI 的 `app-server` 子命令（ZCode Protocol v1，行分隔 JSON）。闭集 7→8
-// 扩员经 Owner 2026-10-01 批准接线。
+// zcode backend（进程式 stdio app-server）：驱动智谱 ZCode 桌面版捆绑 CLI 的
+// `app-server` 子命令（ZCode Protocol v1，行分隔 JSON）。
 //
 // 上游协议事实（live 事实 = 2026-10-01 本机实测 zcode.cjs 0.16.9，探针
 // %TEMP%\wao-probe-20260930\zcode-probe*.cjs 只读参照；bundle 源码事实 =
@@ -1373,7 +1372,7 @@ export class ZcodeBackend {
       // 不了摘要。武装后、send 帧写完（markSent）前到达的 turn.started 只记基
       // 线，不算本轮（判据见 createUpstreamRequestTracker 采纳条件注释）。
       upstreamRequests.activate(sessionId);
-      // setModel（fresh 与 resume 都发——配置的模型必须对每次派发生效，kimi/codex
+      // setModel（fresh 与 resume 都发——配置的模型必须对每次派发生效，codex
       // 恒传 --model 的同款惯例；resume 轮在 session/resume 装载之后发，此时会话
       // 已注册进本进程表，requireSession 不会 miss）。effort 缺省不传 options
       // （live 事实：缺 reasoningLevel 仅部分模型报错——配置了才发，语义完整）。
@@ -1489,7 +1488,7 @@ export class ZcodeBackend {
 
     return {
       backend: BACKEND_NAME,
-      // native sess_ id 在 spawn 时刻即已知（区别于 kimi/codex 的 proc_<pid> 占位 +
+      // native sess_ id 在 spawn 时刻即已知（区别于 codex 的 proc_<pid> 占位 +
       // 运行期补记两段式）——session.created.backendSessionId 直接就是 resume 轮
       // 可用的 provider 会话 id（deepSeekAcp 同款形状）。
       backendSessionId: sessionId,

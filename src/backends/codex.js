@@ -99,7 +99,7 @@ export class CodexBackend extends ProcessBackend {
         // 前任 run 的会话。id 缺失/不可用在此**派发前**拒绝（双重拒绝点：spawn
         // 权威已先拒一次）——绝不静默开一段全新对话。
         // TD188（2026-09-27）：占位进程号（proc_<pid>）同样拒绝——它不是 codex
-        // thread id（与 Kimi 同类代码路径；本轮 Codex 未真实复现，按同构防线
+        // thread id（与已退役的 kimi-code 同类代码路径；本轮 Codex 未真实复现，按同构防线
         // fail-closed）。proc_<pid> 是 ProcessBackend 的本地子进程身份。
         const args = [];
         if (task.sessionReuse?.turn === "resume") {

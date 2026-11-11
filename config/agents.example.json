@@ -88,7 +88,7 @@
       ]
     },
     "fable": {
-      "_comment": "via claude-code（原厂订阅 OAuth）；用途与限制见 wao lanes。需要 Claude Code CLI 2.1.321 或更高。",
+      "_comment": "via claude-code（原厂订阅 OAuth）；用途与限制见 wao lanes。",
       "backend": "claude-code",
       "cwd": ".",
       "model": {

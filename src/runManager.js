@@ -1132,8 +1132,8 @@ export class RunManager {
     // runtime-name branch, NOT a certification axis). Production incident
     // (run_20260926235905551efnojy): a Kimi delivery parent recorded only the
     // process placeholder (proc_43244) and the id was threaded straight into
-    // `kimi -r` → upstream "Session not found", zero tool execution. Kimi/Codex
-    // (runtime-self-produced ids) inherit the base hook and refuse a
+    // `kimi -r` → upstream "Session not found", zero tool execution. Codex
+    // (runtime-self-produced ids) inherits the base hook and refuses a
     // placeholder BEFORE it reaches the provider; claude-code overrides the
     // hook to true (its resume compiles routing.opaqueUuid and never consumes
     // this id — the legal opaque path must not be hurt by a global proc-prefix
@@ -1199,7 +1199,7 @@ export class RunManager {
     // are passed to backend.spawn so the worker child inherits them and the
     // redactor scrubs them. Values never enter argv/transcript/MCP output.
     // Start resolves ALL inherited env names (required + optional) so optional
-    // Kimi/Codex config is bridged. One operation-scoped resolver per start.
+    // Codex config is bridged. One operation-scoped resolver per start.
     const credentialReadiness = await assessWorkerReadiness({
       agent, resolver: createEnvResolver(this.userEnvReader), names: inheritedEnvNames(agent),
     });
@@ -3185,7 +3185,7 @@ export class Run {
     // 共同边界：①只对复用 run 生效（非复用 run 保持恰好一条 session.created）；
     // ②本 Run 至多写一次（_providerSessionFactWritten 防并发等待者重复）；
     // ③未观察到 id 或已终态则不记——静默不写胜过写一个不可归因的 id：下次
-    // resume 会 fail-closed 拒绝（Kimi/Codex 的 proc-only 缺证据由 backend 钩子/
+    // resume 会 fail-closed 拒绝（Codex 的 proc-only 缺证据由 backend 钩子/
     // continueRun 预检拒成 no_provider_session 或 start 侧固定拒绝）。
     if (this.sessionReuse && !TERMINAL_STATES.includes(this.state)
       && !this._providerSessionFactWritten
@@ -3869,7 +3869,7 @@ export class Run {
       // C6（TD-38，审计 P0 收口）：serve 类 backend 的 abort 可能虚假成功（06-18 事故根因）。
       // _runCleanup 是 waitForCompletion 终态后的兜底路径（TD-35 修），此处的 abort 同样要验证。
       // 复用 verifyStopQuiet：abort 后轮询 session/message，未停则标记 + 告警（不阻断终态）。
-      // 只对有 session/messages 方法的 backend（serve 类）验证；进程式（claude-code/kimi/codex）
+      // 只对有 session/messages 方法的 backend（serve 类）验证；进程式（claude-code/codex）
       // abort 是 no-op 且进程已死，跳过验证。
       await this._verifyStopQuietIfCapable().catch(() => { /* 验证失败不影响终态 */ });
     }

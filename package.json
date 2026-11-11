@@ -1,6 +1,6 @@
 {
   "name": "windows-agent-orchestrator",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Windows-native, headless, runtime-agnostic orchestrator for local agent runtimes.",

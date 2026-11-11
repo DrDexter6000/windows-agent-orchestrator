@@ -1,8 +1,7 @@
 // src/backends/kimiWeb.js
 //
-// 第 7 个 backend「kimi-web」（HTTP attach 型）：驱动 `kimi web` 本地服务器的
-// Kimi Code 官方 REST API（入册时 kimi 2.1.1，现为 2.4.0）。闭集 6→7 扩员经 Owner
-// 2026-09-30 批准。
+// kimi-web backend（HTTP attach 型）：驱动 `kimi web` 本地服务器的 Kimi Code 官方
+// REST API（入册时 kimi 2.1.1；在用版本见 docs/certification-runbook.md 原语表）。
 //
 // 上游 API 事实（未标版本的条目是 2026-09-30 对本机 kimi 2.1.1 的直跑实测，标 2.4.0
 // 的是 2026-10-28/29 的实测；本注释即依据）：

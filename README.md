@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.8.2-2f2f2f?style=flat-square)](docs/changelog-2026-11-08-v0.8.2.md)
+[![version](https://img.shields.io/badge/version-v0.9.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-11-v0.9.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -58,25 +58,27 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.8.2 (2026-11-08)
+## What's new in v0.9.0 (2026-11-11)
 
-- **A narrow fix goes back to the same worker** — a settled delivery from a continuable lineage
-  says a narrow fix can go back through `run_continue`, and the continuation resumes the original
-  worker conversation (lane+role dispatches included); each continuation turn reports its own
-  usage (decisions 0112, 0114).
-- **One read for a whole delivery** — `runs delivery review <runId> --all [--out FILE]`, and
-  `--since-parent` shows only what a continuation round changed (decision 0116).
-- **Fewer round trips for the Lead** — `lead_preflight` lists the open items waiting on the Lead
-  (decision 0113); `wao manual <page> "<section>"` reads the manual by section from any project
-  (decision 0115).
-- **Runs no longer die silently** — long zcode runs stop keeping one session snapshot per poll
-  (they ran out of memory 7–33 minutes in); a failed write to a worker child's stdin no longer
-  crashes the runner; `runs wait --until-settled` exits 3 with `runner_gone` when no process can
-  still drive a run; an unanswered zcode poll is a no-progress tick, not a failure (decision 0117).
-- **Correctness** — network failures diagnose as `provider_disconnect`; `runs lineage-close` with a
-  child run id closes the root lineage; every tool that checks ownership names the refusal.
+- **Upgrade action** — the `kimi-code` and `deepseek-harness` worker backends are retired
+  (decision 0123): delete any private registry entry that still names them. A delivery whose
+  verification runs the full `npm test` declares `verificationTimeoutMs` of at least 3600000.
+- **Workers survive an MCP server restart** — background runners start through a WMI-created
+  bridge, so a host that restarts the WAO MCP server after a request timeout no longer takes the
+  running workers with it (decision 0120); repackage and reverify waits fit inside the host's
+  request limit (decision 0119).
+- **The Lead can tell a runner is gone** — the runner's stderr stays on disk; `status` and
+  `run_status` say so once a quiet run's runner is provably absent, and `consult wait
+  --until-settled` exits 3 with `runner_gone` as `runs wait` does.
+- **Fewer false verdicts** — the zcode stall gate also watches a Windows job on its app-server, so
+  children started through npm or npx no longer look stalled (decision 0121); unresolved
+  write-boundary checks are retried.
+- **Keep-awake respects the screen saver** — while WAO holds the display on, it starts the user's
+  own screen saver after the user's idle timeout (decision 0122).
+- **New fable lane** — Claude Fable 5.2 via claude-code, for design and brainstorm reviews only
+  (needs Claude Code CLI 2.1.321 or later).
 - Scope, review record and release-gate evidence:
-  [`docs/changelog-2026-11-08-v0.8.2.md`](docs/changelog-2026-11-08-v0.8.2.md).
+  [`docs/changelog-2026-11-11-v0.9.0.md`](docs/changelog-2026-11-11-v0.9.0.md).
 
 ## Current status
 

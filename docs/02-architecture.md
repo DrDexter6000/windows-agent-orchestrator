@@ -267,7 +267,7 @@ interface AgentDef {
                                  // <providerId>/<modelId> ref 形状（恰好一个 "/"，两段非空）
   credentialEnv?: string;        // deepseek-acp 必填：只声明 env 名，值不进 registry
   // deepseek-acp：组合面固定为 dsh --profile acp
-  // --patch <containment> --patch <role-contract>——本线不消费 dshConfigPath/dshProvider；
+  // --patch <containment> --patch <role-contract>；
   // binary 可选（缺省 dsh）；model 块只收 { id, providerID }，
   // reasoning.effort 只收 low / high / max，其余由 validateAgentPolicy 拒绝
   // sessionReuse：闭集。当前唯一成员 "lead_workspace"——同一 MCP Lead 会话在同一
@@ -575,7 +575,7 @@ for await (const ev of handle.events):
 | 维度 | 机制 |
 |------|------|
 | 文件 | 每个 run 一棵独立树（`<sourceCwd>/.wao-worktrees/<runId>`，分支 `wao/<runId>`）：ephemeral 只读 run 是源仓的私有克隆（分支在克隆里），其余是 git worktree；按策略保留或清理，上了锁（`git worktree lock`）的树，回收、清退、`wao worktree remove` 与 `runs verify-commit` 的临时树清理都不删；`.wao-worktrees/` 是 git exclude 稳定规则：创建首个 worktree 前在仓库本地 `.git/info/exclude` 写入恰好一条根忽略规则（不编辑 tracked `.gitignore`、不隐藏任意 worker 产出、树删除后保留；保留既有 exclude 字节含 BOM/CRLF/LF、对已存在的精确规则幂等；`git worktree add` 失败保留不回滚，仅 exclude ensure 自身 write/read-back verify 失败才回滚到调用前字节；与 host activation 的 marker block 互相独立） |
-| 进程 | Node 内置 Job Object（被动 OS 级：父进程终止→子进程全杀）+ `taskkill /T /F` 主动 abort；不实现自定义 Job Object（决定 0013、0121） |
+| 进程 | Node 内置 Job Object（被动 OS 级：父进程终止→子进程全杀）+ `taskkill /T /F` 主动 abort；隔离与击杀不实现自定义 Job Object（决定 0013）；zcode 停滞门另挂一个只观测的作业，仅 Windows（决定 0121） |
 | 网络 | 没有按 run 分配端口的机制 |
 
 **Worktree 策略与回收路径**（config 可选；解析优先级见 §8）：树的自动回收有四条路径。① `ephemeral`（readOnly 非复用强制隔离用）——树是源仓的私有克隆（`git clone --shared`，借源仓对象，自有 config、refs 与工作树登记；`run.started` 记 `worktreeForm: "private_clone"` 与完整基点 `worktreeBaseCommit`；决定 0102）。终态且停止确认后（未确认记 `run.worktree_release_skipped`）先查证据再删：克隆里除 `refs/stash` 外全部引用与 HEAD 可达、基点不可达的提交在源仓对象库里都找得到（只认对象在哪，不认克隆里引用的值）、HEAD 附着在 `wao/<runId>`、克隆里没有别的工作树登记，才删整个目录（不查脏，删不掉记 `still_present`）；否则保留并记 `run.worktree_branch_kept`（`uniqueCommits` 或闭集 `reason`）。Run 构造之前退出的路径（pending 被拒、认证门、fire-and-forget 护栏、spawn 失败）没有可核验的句柄，直接走同一处置；spawn 后才被拒的不删。没有 `worktreeForm` 的旧转录是链接树：释放树并回收零独有提交的 `wao/<runId>`（`git branch -d`，best-effort）。没删掉的克隆在回收计划里归 `tree_protection`/`private_clone` 保留，不自动删。② 交付验收——`run.delivery_accepted` 后释放线系树（tip/路径证明门控，分支保留）。③ `runs lineage-close`——线系关闭时释放成员树（分支保留）。④ 终态自动回收（只删树，分支一律保留）——普通 `persistent` 隔离树在 run 终态收尾（停止验证之后、`run.cleanup_done` 之前）自动释放；适用对象：派发时无 sessionReuse 路由、不是任何 run_lineage 线系成员、无绑定 `run.delivery_created`（打包成功的交付——undecided/rejected/accepted——一律不碰；打包失败而树全净的在适用对象内）。删除条件全部成立才删：树路径取自本 run 绑定的 `run.started.worktreePath` 且身份可证（父段名 `.wao-worktrees`、目录名即 runId、路径链无 symlink/junction、在 git worktree 登记、非源工作树、真实路径等于本 run 绑定 `run.started.cwd`（派发目录）真实路径下的 `.wao-worktrees/<runId>`——createWorktree 恒建在该处，从关联工作树派发的树同样可证、与绑定源仓库同 common git dir）；本 run 绑定终态已落盘且停止已确认；内容全净——`git status --porcelain=v1 -z --untracked-files=all --ignored=matching` 为空，被 ignore 的产物也算内容（与①不查脏的标准不同），skip-worktree/assume-unchanged/子模块等清点不了的形态一律保留；HEAD 附着在 `wao/<runId>` 且等于分支 tip（detached/漂移保留）；树下无嵌套运行树（在册或未登记但有内容）；不在使用中——删除前扫运行存储的全部转录（属主取文件名里的 runId；位置只认 runner 写下的 `run.started`，头读证得在树外就排除，其余整读、坏行跳过，已终态不占用）：别的未终态 run 的 `run.started.cwd` 或 `worktreePath` 在本树内（真实路径比较，win32 大小写折叠；不在盘上的路径按词法比较）→ 保留（`tree_in_use`，带占用者 runId）；没有可用 `run.started` 的未终态 run，提交时的 cwd 在本树内也算占用；位置证不了、存储读不出或路径解析出错也保留，记 `occupancy_unprovable`（fail-closed，细节见决定 0085）。任一条读不出或不成立就保留并记闭集原因（`run.worktree_release_skipped{reason}`）。删除用 `git worktree remove` 不加 force（失败或删后目录仍在记 `still_present` 保留）；`persistent` 树不满足条件时保留，便于检查产出。
@@ -592,7 +592,7 @@ for await (const ev of handle.events):
 
 WAO 提供两种进程形态，共用同一套 RunManager/transcript 生命周期：
 
-**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（经 WMI 启动桥脱离宿主作业，决定 0120；提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证与全量期间保持唤醒（`src/keepAwake.js`，决定 0093、0122；`WAO_KEEP_AWAKE=0` 关闭）。
+**可重入单进程（CLI）**：每次 CLI 调用读 transcript 恢复状态；前台 run（`run`、`spawn --wait`）进程存活期间持有活跃 run，Ctrl+C（SIGINT）abort。后台 run（`spawn` 不带 `--wait`、MCP `run_dispatch`）由 detached runner（`src/backgroundRunner.js`）承载：分离子进程（经 WMI 启动桥脱离宿主作业，决定 0120；提示词经 stdin 交接）驱动 `waitForCompletion` 并写转录，派发进程退出不影响它。runner stderr 落 runDir 的 `.runner-<runId>.stderr`（退出码 0 且为空时删除）：只作诊断证据、不参与状态判定，原样落盘，展示时脱敏、限长。运行、交付验证与全量期间保持唤醒，持有期间按用户的屏保设置代启屏保（`src/keepAwake.js`，决定 0093、0122；`WAO_KEEP_AWAKE=0` 关闭）。
 
 **持久 daemon**：`src/daemon.js` 是长期存活的 detached 进程，持有多个 in-flight run（复用 runBackground 核心驱动），经命名管道暴露窄协议 IPC（默认 `\\.\pipe\wao-daemon`，JSON-line over `node:net`：一行请求、一行响应；只在本机，不可远程触达；选型见决定 0012）。心跳写 runDir 的 handshake（`daemon.json`），CLI 重连判活；优雅退出清 handshake + 关 pipe。daemon start 内部走 `RunManager.start`，不按 backend 名分支。
 

@@ -67,7 +67,7 @@ const INHERITED_ENV_NAMES = {
   // ADR-0031：ACP 线凭据面——只继承 registry 声明的 credentialEnv，
   // 无额外可选 env。
   "deepseek-acp": [],
-  // 第 8 个 backend「zcode」（2026-10-01）：登录态与 ZCode 桌面版共享（live
+  // zcode：登录态与 ZCode 桌面版共享（live
   // 实测无需额外认证）——凭据不在 env 面；登录态落位走 SAFE_INHERITED_ENV 已含
   // 的 APPDATA/LOCALAPPDATA/USERPROFILE 系。
   // ZCODE_BUILTIN_PROVIDER_CONFIG_FILE：ZCode 桌面端安装时写入的用户级变量，指向

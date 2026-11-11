@@ -39,8 +39,7 @@ import { getWaoCliPath } from "../waoCliPath.js";
  *   未注入时内部调 getWaoCliPath() 解析（TD-90）。
  */
 export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
-  // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的官方 REST
-  // API；闭集 6→7 扩员经 Owner 2026-09-30 批准）。构造零副作用；fetchImpl 注入
+  // kimi-web（HTTP attach，`kimi web` 本地服务器的官方 REST API）。构造零副作用；fetchImpl 注入
   // 是 HTTP 家族的测试缝（HTTP 家族不需要 waoCliPath）。
   if (agent.backend === "kimi-web") {
     return new KimiWebBackend(fetchImpl ? { fetchImpl } : {});
@@ -52,8 +51,8 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
   // containment 资产 detect / resume fail-closed / argv 预算都在
   // preflightInvocation（spawn 前、transcript 前）执行。
   if (agent.backend === "deepseek-acp") return new DeepSeekAcpBackend();
-  // 第 8 个 backend「zcode」（进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑
-  // CLI 的 ZCode Protocol v1；闭集 7→8 扩员经 Owner 2026-10-01 批准）。进程式
+  // zcode（进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑 CLI 的 ZCode
+  // Protocol v1）。进程式
   // 家族：与 claude-code/codex 同款注入 waoCliPath（构造零副作用）。
   if (agent.backend === "zcode") return new ZcodeBackend({ waoCliPath: cliPath });
   throw new Error(`Unsupported backend: ${agent.backend}`);
@@ -218,7 +217,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     enforcesWriteSandbox: "无 OS 写沙箱（进程级）——containment 走操作员安装的 ACP 补丁面，WAO 不在调用层强制 OS 沙箱，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：协议帧（握手落 `initialized`）。没有轮内\"等不到进展\"的收口门——握手等非 prompt 请求有 60s 超时，prompt 请求本身不设时限；轮内不落体征事实",
   }),
-  // 第 7 个 backend（Owner 2026-09-30 批准入册）。上游事实 = 2026-09-30 对本机
+  // kimi-web。上游事实 = 2026-09-30 对本机
   // kimi 2.1.1 `kimi web` REST API 的直跑实测，中止与 thinking 取 kimi 2.4.0 的实测
   // （详见 src/backends/kimiWeb.js 文件头；v8 完成判定 = transcript 轮次终态原语）。
   "kimi-web": Object.freeze({
@@ -231,7 +230,7 @@ export const CAPABILITY_NOTES = Object.freeze({
     enforcesWriteSandbox: "无 OS 写沙箱——HTTP attach 远端 serve，写发生在服务器侧进程，本机调用层无沙箱面，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）",
   }),
-  // 第 8 个 backend（Owner 2026-10-01 批准入册）。上游事实 = 2026-10-01 对本机
+  // zcode。上游事实 = 2026-10-01 对本机
   // zcode 0.16.9 捆绑 CLI app-server（ZCode Protocol v1）的 live 实测（详见
   // src/backends/zcode.js 文件头）；0.17.0 的复核见 docs/certification-runbook.md 原语表。
   "zcode": Object.freeze({
