@@ -61,3 +61,29 @@
   - 代码注释去掉后端闭集的序号、扩员计数与批准记录，已退役的 kimi-code 不再当作在用的进程式后端；
   - fable 的 CLI 版本要求从注册表模板注释删掉（家在车道画像与 onboarding）；TD-138 不再复写看门狗数值。
 - 判为不改：消费 `dispatchError` 的组记录说明留在 MCP 回执字段表（唯一出处）；SKILL 的 3600000 句与守卫按现状保留；`docs/testing.md` 的全量耗时区间仍覆盖本次实测。
+
+## reliability 豁免（Owner 具名，只对 v0.9.0）
+
+- deepseek-pro（delta）：Lead 问"v0.9.0 发版要过可靠性门（真实 token）。deepseek-pro 车道仍挂着你的暂停说明（"调试中，暂勿派发"），按规矩豁免只对一个版本有效，每次发版都要你重新点名。这一版的 deepseek-pro 这一行怎么处理？"，Owner 选"继续豁免"。理由：该车道带 Owner 的暂停派发说明，不派发也不探测。
+- 状态是"豁免"，不是"通过"；不常驻，不沿用到下一版。
+
+## 发版门槛证据（2026-11-11，本地实跑；打标后追加）
+
+- 全量 `npm test`：**374/374 通过**（6 波，854 秒，其中 filesystem 波 498 秒；无隔离重跑，runs 守卫干净），跑在 8730c3f5 上，即 tag `v0.9.0` 指向的提交。插电。这是 00:31Z 更新重启后的第一套全量；前一天同一批代码的 filesystem 波是 701–1335 秒，差别在机器开了 13 天没重启（TD-138）。
+- surface 再生成（§9 第 3 步）：在同一候选上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致。
+- `npm run reliability`：从主检出在 8730c3f5 上逐车道跑（`--agent <lane>`），八条车道共约 10 分钟（08:06–08:16Z）：
+  - sol、astra：certified（full，含越界写被 OS 沙箱拒绝的检查）。
+  - kimi、deepseek-flash、opus、fable、glm-flash、glm-pro：全过，评 conditional（delta 子集全过不产生 certified）。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`（主检出 8730c3f5，08:16Z）：claude-code PASS，codex PASS（回复 `smoke ok`）。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 1.0.0 额外门槛（§9 第 7 步）：不适用，本版仍是 0.x；TD-194 未关。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.8.2 v0.9.0`；`git rev-list --count v0.8.2..v0.9.0`。
+
+## 总量
+
+64 个提交（含 v0.8.2 打标后的 smoke 补跑记录与本次的发版提交），207 个文件，+11,817 / −3,851 行（`git diff --shortstat v0.8.2 v0.9.0`）。
+
+## 发版记录
+
+- tag：`v0.9.0`（annotated → 8730c3f5，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩。
