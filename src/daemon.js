@@ -20,7 +20,8 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, createConnection as netCreateConnection } from "node:net";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { isEntryModule } from "./entryPoint.js";
 import { dirname } from "node:path";
 import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "./projectBuckets.js";
@@ -659,7 +660,7 @@ export function parseDaemonFlags(argv) {
 
 // 直接作为入口运行时（detached daemon 子进程）。`node --eval` 等没有入口脚本时
 // argv[1] 缺席：此时不是入口（MCP 适配层也导入本模块取 daemon 读器，第 89 批）。
-const isMain = typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isEntryModule(import.meta.url, { ifUnknown: false });
 if (isMain) {
   daemonMain().catch((e) => {
     process.stderr.write(`daemon error: ${e.message}\n`);

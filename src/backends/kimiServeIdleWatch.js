@@ -23,7 +23,8 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { isEntryModule } from "../entryPoint.js";
 import { listServeSessions, readServeInstances, shutdownServe } from "./kimiServeOps.js";
 import {
   acquireServeStartLock,
@@ -234,11 +235,7 @@ export function startServeIdleWatch({ port, pid, kimiHome = null, env = process.
 // 用真实依赖跑核心循环；结束时退出码 0（看护退出不是错误——原因在返回值里，调用方
 // 已经拿过 startServeIdleWatch 的结果）。参数形状不对（唯一调用方不会发生）→ 什么都不
 // 做直接退出 0。异常也退出 0：看护是 best-effort，serve 不因看护崩溃而受影响。
-const invokedDirectly = (() => {
-  try {
-    return typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
-  } catch { return false; }
-})();
+const invokedDirectly = isEntryModule(import.meta.url, { ifUnknown: false });
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const flag = (name) => {

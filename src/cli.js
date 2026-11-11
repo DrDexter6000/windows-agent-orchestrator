@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { isEntryModule } from "./entryPoint.js";
 // M12-8F: trusted installation-root resolver. Only the global `wao` bin opts in
 // (via WAO_INSTALL_ROOT); the legacy `npm run cli` path keeps cwd resolution.
 import { readInstallRoot, resolveConfigPath, rebaseConfigPaths } from "./installRoot.js";
@@ -367,23 +366,8 @@ function printHelp() {
 }
 
 // 只在本文件被当作入口运行时执行 main（`node src/cli.js`、`npm run cli`、全局 `wao`
-// 都是）；被测试或别的模块 import 时不执行。两边都取真实路径再比（经 junction 或
-// 符号链接启动也认得出），Windows 上不分大小写；判断不出来时照旧执行，CLI 不会
-// 静默失效。
-export function invokedAsEntry(entryPath = process.argv[1], selfPath = fileURLToPath(import.meta.url)) {
-  if (!entryPath) return true;
-  try {
-    const canonical = (p) => {
-      const real = realpathSync.native(resolve(p));
-      return process.platform === "win32" ? real.toLowerCase() : real;
-    };
-    return canonical(entryPath) === canonical(selfPath);
-  } catch {
-    return true;
-  }
-}
-
-if (invokedAsEntry()) {
+// 都是）；被测试或别的模块 import 时不执行。判断不出来时照旧执行，CLI 不会静默失效。
+if (isEntryModule(import.meta.url, { ifUnknown: true })) {
   main(process.argv.slice(2)).catch((error) => {
     console.error(renderErrorText(error));
     process.exitCode = 1;

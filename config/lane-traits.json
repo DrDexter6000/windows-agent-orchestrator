@@ -59,7 +59,6 @@
         "providerID": null,
         "effort": "high"
       },
-      "reviewPending": "2026-11-10 codex 0.165.0→0.167.0：sol 冒烟通过；review 格待新版上一次实际会审，结果与原评级相符才解除，不符按新数据改格",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -317,7 +316,7 @@
         "providerID": null,
         "effort": null
       },
-      "reviewPending": "2026-11-10 kimi 2.4.0→2.5.2（web 接口有删改，WAO 所用端点仍在）：冒烟与 delta 认证（conditional）通过；research、code、review 待新版实际任务，与原评级相符才解除，不符改格",
+      "reviewPending": "2026-11-10 kimi 2.4.0→2.5.2（web 接口有删改，所用端点仍在）：冒烟与 delta 认证通过；review 在 2.5.2 上实际会审相符（第 105 批方案会审）；research、code 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [

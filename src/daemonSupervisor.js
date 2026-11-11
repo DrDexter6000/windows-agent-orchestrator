@@ -15,7 +15,8 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { isEntryModule } from "./entryPoint.js";
 import { isDaemonAlive, readHandshake, scanAllRuns, connectDaemon, DEFAULT_LIVENESS_THRESHOLD_MS } from "./daemon.js";
 
 /**
@@ -201,8 +202,8 @@ export async function runSupervisor(opts = {}) {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-// 直接作为入口运行时（detached 子进程）。
-const isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+// 直接作为入口运行时（detached 子进程）；被 import 时不跑。
+const isMain = isEntryModule(import.meta.url, { ifUnknown: false });
 if (isMain) {
   const opts = parseSupervisorFlags(process.argv.slice(2));
   runSupervisor(opts).catch((e) => {

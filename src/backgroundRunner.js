@@ -30,7 +30,8 @@ import { resolveTranscriptPath } from "./projectBuckets.js";
 import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
 
 import { checkNodeVersion } from "./nodeVersionGuard.js";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { isEntryModule } from "./entryPoint.js";
 import { unlinkSync, statSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
@@ -871,9 +872,8 @@ async function appendDurableResumeFailure(runId, runDir, reasonText) {
   }
 }
 
-// 直接作为入口运行时（detached 子进程）：node backgroundRunner.js ...
-// Windows 上 process.argv[1] 是普通路径，import.meta.url 是 file:///，须 pathToFileURL 比对。
-const isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+// 直接作为入口运行时（detached 子进程）：node backgroundRunner.js ...；被 import 时不跑。
+const isMain = isEntryModule(import.meta.url, { ifUnknown: false });
 if (isMain) {
   runMain().catch((e) => {
     process.stderr.write(`backgroundRunner error: ${e.message}\n`);
