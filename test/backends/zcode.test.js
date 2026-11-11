@@ -706,6 +706,8 @@ test("zcode ④b: 中间 step-finish(非 stop|error) 不算完成；step-finish(
 
 // bundle qZe tool 臂 + nor state 联合的形状复刻（.strict() 字段集）：
 // {partId, sessionId, messageId, type:"tool", callId, tool, state:{status, input, …}}。
+// 身份键用 3.17 线上的 id / messageID，callId 用 schema 拼写（3.17 线上实为 callID，
+// 3.18 线上才是 callId）——有意混用，覆盖面见 to318 用例。
 // B′ 根修（2026-10-10 探针实证 live 形状）：part 身份键 = id（part_*）；同一
 // 逻辑工具调用的状态翻转（running→completed）跨拍【同 id】——身份台账据此去重。
 const toolPart = ({ callId, tool, status, input, output, error, raw }) => ({
@@ -813,6 +815,7 @@ test("zcode 3.18 拼写：messageId/parentMessageId 与 partId 下完成判据�
     "3.18 拼写下事件序列与 3.17 相同：证据 → user echo → assistant 文本 → metrics → done",
   );
   assert.deepEqual(events[0], { kind: "file_written", path: "D:/wao-test/zcode-ws/out/wao_318.txt" });
+  assert.equal(events[1].tool, "call_wao_318_write", "3.18 的 callId 进 tool_result");
   assert.equal(events[3].parts[0].text, "wrote the file");
   assert.equal(events.at(-1).reason, "completed");
   child.kill();
@@ -832,6 +835,44 @@ test("zcode 3.18 拼写：resume 历史只带 messageId 也认，不按缺身份
   const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
   assert.equal(assistant[0].parts[0].text, "answer", "只投影本轮 answer——历史不重放");
   child.kill();
+});
+
+test("zcode 3.18 拼写：parentMessageId 错挂旧轮 → 不构成完成，停滞门有界收口（⑨k 的 3.18 版）", async () => {
+  const history = [userMsg("old question"), assistantMsg("old answer")];
+  const u1 = userMsg("continue");
+  const aWrong = assistantMsg("stale reply");
+  aWrong.info.parentID = history[0].info.id;
+  const steady = to318([...history, u1, aWrong]);
+  const history318 = to318(history);
+  let fakeNow = 1_000;
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_318" },
+    peerOptions: { messages: (n) => (n <= 1 ? history318 : steady) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "failed", "parent 不匹配的新 assistant 绝不构成完成");
+  assert.match(events.at(-1).error, /turn stalled/);
+  assert.equal(events.filter((e) => e.kind === "message").length, 0);
+  child.kill();
+});
+
+test("zcode 两种拼写同时在场且不一致 → 按缺身份处理：resume 历史派发前拒绝", async () => {
+  const child = makeFakeChild();
+  const kill = fakeKill();
+  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn });
+  const history = [userMsg("old question"), assistantMsg("old answer")];
+  history[0].info.messageId = "msg_conflicting";
+  const peer = fakeZcodePeer(child, { messages: () => history });
+  await assert.rejects(
+    () => backend.spawn(makeAgent(), { prompt: "x", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" }),
+    /lacks message identity/,
+    "id 与 messageId 不一致不猜，按缺身份拒派发",
+  );
+  assert.equal(peer.framesOf("session/send").length, 0, "零发送、零 token");
 });
 
 test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工具 → toolUseEvent；error state → tool_result isError:true", async () => {
@@ -3755,14 +3796,14 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 15 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
+  // P2②b：严格相等。当前实际 = 16 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
   // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b / ⑨l / ⑥j(requestTimeoutMs) /
-  // ⑥k(spawnHoldingAttach——就绪屏障次序)。加/删构造必须同步更新此数字——
+  // ⑥k(spawnHoldingAttach——就绪屏障次序) / 3.18 两种拼写不一致。加/删构造必须同步更新此数字——
   // 不更新即红。
   assert.equal(
     constructions.length,
-    15,
-    `守卫扫描应找到恰 15 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l/⑥j/⑥k），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    16,
+    `守卫扫描应找到恰 16 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b/⑨l/⑥j/⑥k/3.18 拼写不一致），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,

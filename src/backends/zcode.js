@@ -85,7 +85,7 @@
 // t≈1s 在场）；完成 = 存在新 assistant 消息 A（A.parentID === U.id）且 A 的
 // 末位 part 是 step-finish(stop|error)。历史变异（基线消息 id 有序序列不再是
 // 当前快照前缀——头部插入/重排/删除/compaction 改写都会击穿）→ 具名失败
-// "history mutated non-append"，绝不静默续用错位快照。resume 历史缺 info.id
+// "history mutated non-append"，绝不静默续用错位快照。resume 历史缺消息身份
 // → 发送之前拒绝（session/send 帧数为 0，零 token）。依据链：live 探针实证
 // （2026-10-10，glm-flash 真机三轮 fresh→同进程→跨进程 resume，消息
 // info.id/role/parentID、part id/messageID/sessionID 全数在场且跨快照稳定，
@@ -108,7 +108,8 @@
 // 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/传输关闭同路径）。
 //
 // **TD-199（2026-10-02）证据投影同乘追加假设**：增量台账按 part 序号键控
-// （live 实证 callId 缺席、partId 跨快照稳定性未证实——见 projectTurnToolEvents
+// （live 实证 callId 缺席——3.17 线上拼写是 callID，WAO 不读，回落工具名；3.18 起
+// 线上就是 callId——partId 跨快照稳定性未证实——见 projectTurnToolEvents
 // 注释），头插同样使台账错位（漏发/重发证据）；可检测的**缩短**已 fail-closed
 // （snapshot shrank → done(failed)），不可检测的头插与完成判据同残余等级。
 //
@@ -377,24 +378,33 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** 消息身份（info.id 或 info.messageId、role、info.parentID 或 info.parentMessageId；
+// 同一身份的两种拼写（3.17 旧名、3.18 新名）取在场的那个；两个都在场却不一致时
+// 不猜哪个对，按缺身份处理。
+function oneIdentity(oldSpelling, newSpelling) {
+  const a = nonEmptyString(oldSpelling);
+  const b = nonEmptyString(newSpelling);
+  if (a !== null && b !== null && a !== b) return null;
+  return a ?? b;
+}
+
+/** 消息身份（info.id / info.messageId、role、info.parentID / info.parentMessageId；
  * 缺 id → null——调用方决定语义：历史缺 id =派发前拒，新消息缺 id =本轮锚点不可解
  * 由有界收口兜底）。 */
 function messageIdent(m) {
   const info = m?.info;
-  const id = nonEmptyString(info?.id) ?? nonEmptyString(info?.messageId);
+  const id = oneIdentity(info?.id, info?.messageId);
   if (id === null) return null;
   return {
     id,
     role: typeof info.role === "string" ? info.role : null,
-    parentID: nonEmptyString(info.parentID) ?? nonEmptyString(info.parentMessageId),
+    parentID: oneIdentity(info.parentID, info.parentMessageId),
   };
 }
 
-/** part 身份（id 或 partId，非空字符串才可用；缺身份的 part 在台账面保守跳过——
- * 完成判据只依赖消息级身份，不依赖 part id）。 */
+/** part 身份（id / partId；缺身份的 part 在台账面保守跳过——完成判据只依赖消息级
+ * 身份，不依赖 part id）。 */
 function partIdOf(part) {
-  return nonEmptyString(part?.id) ?? nonEmptyString(part?.partId);
+  return oneIdentity(part?.id, part?.partId);
 }
 
 /**
@@ -650,7 +660,8 @@ function createUpstreamRequestTracker() {
 //     `{partId, sessionId, messageId, type:"tool", callId:Ru(string), tool:Ru(string),
 //     state:nor, metadata?}`——`tool` = 工具名（本 bundle 工具注册表 metadata.name
 //     实证："Write"/"Edit"/"Bash"；无 "Shell"/"MultiEdit"，规则按归一化超集取），
-//     `callId` = 运行时工具调用 id。
+//     `callId` = 运行时工具调用 id。ZCode 3.18 起线上字段就是这套拼写；3.17 线上是
+//     id / messageID / callID。
 //   - state 联合 `nor = discriminatedUnion("status", …)`（全部 .strict()）：
 //       `{status:"pending",   input, raw}` |
 //       `{status:"running",   input, title?, metadata?, startedAt}` |
@@ -1430,10 +1441,10 @@ export class ZcodeBackend {
       baselineParts = flattenParts(baseline.messages).length;
       baselineMessageIds = baseline.messages.map((m) => messageIdent(m)?.id ?? null);
       if (baselineMessageIds.some((id) => id === null)) {
-        // ⑨l（会审验收项）：历史消息缺 info.id = 身份归属不可解——resume 轮的
+        // ⑨l（会审验收项）：历史消息缺身份（info.id / info.messageId）= 身份归属不可解——resume 轮的
         // 完成/证据归属都靠它。发送之前拒绝（session/send 帧数为 0，零 token）。
         throw new Error(
-          "zcode resume history lacks message identity (info.id) — attribution would be positional-only and exposed to non-append history mutation; refusing to dispatch (B′ guard)",
+          "zcode resume history lacks message identity (info.id / info.messageId) — attribution would be positional-only and exposed to non-append history mutation; refusing to dispatch (B′ guard)",
         );
       }
       // 角色合同拼前缀恰好一次（prompt 级通道——见 supportsRoleContract 注释）。
