@@ -20,7 +20,7 @@
 //   node scripts/wao-node.cjs src/mcp/stdio.js [--registry PATH] [--run-dir PATH]
 
 import { resolve, dirname, join, isAbsolute } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -29,6 +29,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { createWaoMcpServer } from "./server.js";
 import { armMcpParentImage } from "./parentImage.js";
+import { isEntryModule } from "../entryPoint.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
@@ -187,9 +188,7 @@ async function main() {
 }
 
 // Only run when invoked directly as an entrypoint, not when imported by tests.
-// Compare via file URLs to stay platform-agnostic (Windows drive letters, slashes).
-const entryUrl = pathToFileURL(resolve(process.argv[1] ?? "")).href;
-const invokedDirectly = entryUrl === import.meta.url;
+const invokedDirectly = isEntryModule(import.meta.url, { ifUnknown: false });
 
 if (invokedDirectly) {
   main().catch(() => {

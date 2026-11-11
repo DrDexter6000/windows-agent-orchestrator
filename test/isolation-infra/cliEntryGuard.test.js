@@ -25,19 +25,24 @@ test("isEntryModule: 本文件为真（Windows 上大小写不同也认），别
     assert.equal(isEntryModule(cliUrl, { ifUnknown, entryPath: "" }), ifUnknown, "没有入口脚本（真实的 node --eval 见下一条）");
     assert.equal(isEntryModule(cliUrl, { ifUnknown, entryPath: join(ROOT, "src", "no-such-entry.js") }), ifUnknown, "路径解析不了");
     if (process.platform === "win32") assert.equal(isEntryModule(cliUrl, { ifUnknown, entryPath: CLI.toUpperCase() }), true);
+    // 路径解析不了时退回逐字的 URL 比较：同一个（不存在的）路径仍认得出。
+    const ghost = join(ROOT, "src", "no-such-entry.js");
+    assert.equal(isEntryModule(pathToFileURL(ghost).href, { ifUnknown, entryPath: ghost }), true, "解析失败但逐字相同");
   }
+  assert.throws(() => isEntryModule(cliUrl, { entryPath: CLI }), TypeError, "漏写 ifUnknown 要报错，不静默当成 false");
 });
 
-// 四个后台子进程模块被当作入口才跑 main；被 import 时（含 node --eval 这种没有入口
-// 脚本的场合）不跑 main、不抛错。
+// MCP stdio 服务与四个后台子进程模块被当作入口才跑 main；被 import 时（含 node
+// --eval 这种没有入口脚本的场合）不跑 main、不抛错。
 const BACKGROUND_MODULES = [
+  join(ROOT, "src", "mcp", "stdio.js"),
   join(ROOT, "src", "backgroundRunner.js"),
   join(ROOT, "src", "daemon.js"),
   join(ROOT, "src", "daemonSupervisor.js"),
   join(ROOT, "src", "backends", "kimiServeIdleWatch.js"),
 ];
 
-test("四个后台子进程模块在没有入口脚本时（node --eval）可以被 import，不跑 main、不抛错", () => {
+test("MCP stdio 服务与四个后台子进程模块在没有入口脚本时（node --eval）可以被 import，不跑 main、不抛错", () => {
   for (const file of BACKGROUND_MODULES) {
     const code = `await import(${JSON.stringify(pathToFileURL(file).href)}); console.log("IMPORTED");`;
     const r = spawnSync(process.execPath, ["--input-type=module", "--eval", code], { cwd: ROOT, encoding: "utf8", timeout: 60000 });
@@ -47,11 +52,36 @@ test("四个后台子进程模块在没有入口脚本时（node --eval）可以
   }
 });
 
-test("src 里的入口判断都经 isEntryModule：不再有拿 argv[1] 直接拼 URL 比较的写法", () => {
-  const r = spawnSync("git", ["grep", "-n", "-F", "pathToFileURL(process.argv[1])", "--", "src"], { cwd: ROOT, encoding: "utf8" });
-  assert.equal(r.stdout.trim(), "", r.stdout);
-  for (const file of [CLI, ...BACKGROUND_MODULES]) {
-    assert.match(readFileSync(file, "utf8"), /isEntryModule\(import\.meta\.url, \{ ifUnknown: (true|false) \}\)/, file);
+test("src 里读 process.argv[1] 的只有 entryPoint.js；各入口模块的 ifUnknown 取值钉死", () => {
+  const r = spawnSync("git", ["grep", "-n", "-F", "process.argv[1]", "--", "src"], { cwd: ROOT, encoding: "utf8" });
+  assert.equal(r.status, 0, `git grep 没跑成或一处都没找到：${r.stderr}`);
+  const files = [...new Set(r.stdout.trim().split("\n").map((line) => line.split(":")[0]))];
+  assert.deepEqual(files, ["src/entryPoint.js"], r.stdout);
+  const expected = new Map([[CLI, true], ...BACKGROUND_MODULES.map((file) => [file, false])]);
+  for (const [file, ifUnknown] of expected) {
+    assert.ok(readFileSync(file, "utf8").includes(`isEntryModule(import.meta.url, { ifUnknown: ${ifUnknown} })`), file);
+  }
+});
+
+test("后台模块作为入口时确实进入 main：直接路径与经 junction 的路径都一样", () => {
+  const cases = [
+    ["daemon.js", /daemon error: daemonMain: --run-dir required/],
+    ["daemonSupervisor.js", /supervisor error: runSupervisor: runDir required/],
+  ];
+  const dir = mkdtempSync(join(tmpdir(), "wao-entry-link-"));
+  const link = join(dir, "src-link");
+  try {
+    symlinkSync(join(ROOT, "src"), link, "junction");
+    for (const [name, mainError] of cases) {
+      for (const base of [join(ROOT, "src"), link]) {
+        const r = spawnSync(process.execPath, [join(base, name)], { cwd: ROOT, encoding: "utf8", timeout: 60000 });
+        assert.equal(r.status, 1, `${base}/${name}: ${r.stderr}`);
+        assert.match(r.stderr, mainError, `${base}/${name}`);
+      }
+    }
+  } finally {
+    try { unlinkSync(link); } catch { /* 链接没建成 */ }
+    if (!existsSync(link)) rmSync(dir, { recursive: true, force: true });
   }
 });
 

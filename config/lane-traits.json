@@ -316,7 +316,7 @@
         "providerID": null,
         "effort": null
       },
-      "reviewPending": "2026-11-10 kimi 2.4.0→2.5.2（web 接口有删改，所用端点仍在）：冒烟与 delta 认证通过；review 在 2.5.2 上实际会审相符（第 105 批方案会审）；research、code 待新版实际任务，相符才解除，不符改格",
+      "reviewPending": "2026-11-10 kimi 2.4.0→2.5.2（web 接口有删改，所用端点仍在）：冒烟与 delta 认证（conditional）通过；review 在 2.5.2 上实际会审相符（第 105 批方案会审）；research、code 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [

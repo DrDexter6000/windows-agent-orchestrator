@@ -80,8 +80,9 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/keepAwake.js",
   "src/runnerPrompt.js",
   // 入口判断（是不是 `node <文件>` 启动的那个模块）。零相对出边（node:fs/path/url
-  // only）；消费方 cli.js、backgroundRunner.js、daemon.js、daemonSupervisor.js
-  // （adapters）与 backends/kimiServeIdleWatch.js（backends），故归最底层 shared。
+  // only）；消费方 cli.js、mcp/stdio.js、backgroundRunner.js、daemon.js、
+  // daemonSupervisor.js（adapters）与 backends/kimiServeIdleWatch.js（backends），
+  // 故归最底层 shared。
   "src/entryPoint.js",
 ]));
 
