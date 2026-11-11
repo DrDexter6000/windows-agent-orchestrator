@@ -869,10 +869,54 @@ test("zcode 两种拼写同时在场且不一致 → 按缺身份处理：resume
   const peer = fakeZcodePeer(child, { messages: () => history });
   await assert.rejects(
     () => backend.spawn(makeAgent(), { prompt: "x", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" }),
-    /lacks message identity/,
+    /lacks message identity \(info\.id \/ info\.messageId\)/,
     "id 与 messageId 不一致不猜，按缺身份拒派发",
   );
   assert.equal(peer.framesOf("session/send").length, 0, "零发送、零 token");
+});
+
+test("zcode 两种拼写不一致：新 assistant 的 parentID 与 parentMessageId 不同 → 不构成完成，停滞门有界收口", async () => {
+  const u1 = userMsg("do the task");
+  const a1 = assistantMsg("done");
+  a1.info.parentMessageId = "msg_conflicting_parent";
+  let fakeNow = 1_000;
+  const { handle, child } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 1 ? [] : [u1, a1]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
+  assert.equal(events.at(-1).reason, "failed", "parent 两种拼写不一致 = 归属不可解，绝不构成完成");
+  assert.match(events.at(-1).error, /turn stalled/);
+  child.kill();
+});
+
+test("zcode 两种拼写不一致：tool part 的 id 与 partId 不同 → 不进证据台账", async () => {
+  const writePart = {
+    ...toolPart({
+      callId: "call_conflict",
+      tool: "Write",
+      status: "completed",
+      input: { file_path: "D:/wao-test/zcode-ws/out/conflict.txt", content: "x" },
+      output: "Created file",
+    }),
+    partId: "part_conflicting",
+  };
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        assistantPartsMsg([writePart, { type: "text", text: "wrote it" }, { type: "step-finish", reason: "stop", tokens: {} }]),
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  assert.equal(events.at(-1).reason, "completed", "消息身份完好，轮次照常完成");
+  assert.equal(events.filter((e) => e.kind === "file_written").length, 0, "part 身份不一致不猜，证据不入台账");
+  assert.equal(events.filter((e) => e.kind === "tool_result").length, 0);
+  child.kill();
 });
 
 test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工具 → toolUseEvent；error state → tool_result isError:true", async () => {
@@ -3593,7 +3637,7 @@ test("⑨k B′: 新 assistant parent 错挂旧轮（parentID 指向 U0）→ �
   child.kill();
 });
 
-test("⑨l B′: resume 历史缺 info.id → 派发前拒绝（session/send 帧数为 0，零 token）", async () => {
+test("⑨l B′: resume 历史缺消息身份 → 派发前拒绝（session/send 帧数为 0，零 token）", async () => {
   const child = makeFakeChild();
   const kill = fakeKill();
   const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn });
@@ -3603,7 +3647,7 @@ test("⑨l B′: resume 历史缺 info.id → 派发前拒绝（session/send 帧
   });
   await assert.rejects(
     () => backend.spawn(makeAgent(), { prompt: "x", sessionReuse: RESUME_ROUTING, priorProviderSessionId: "sess_prior_run_1" }),
-    /lacks message identity/,
+    /lacks message identity \(info\.id \/ info\.messageId\)/,
     "历史缺 id = 位置式归属 = B′ 暴露面——发送之前拒绝",
   );
   assert.equal(peer.framesOf("session/send").length, 0, "零发送、零 token");
