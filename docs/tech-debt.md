@@ -32,7 +32,7 @@
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
 | TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
-| TD-138 | 全量由 filesystem 波决定且变慢了，大部分在机器侧，代码侧未排除。两份文件在 10-11 提交与 HEAD 上单跑，一份持平、一份 HEAD 慢约 17%，都约是当天波内的两倍；81 个共有文件相对 pure 波，10-11 到 10-28 慢一倍，到 11-10 再慢三到五成。插电连跑四次波长 828–1335 s；电池更慢，单文件先撞 per-test 1200 s。临时目录换 Dev Drive 无稳定改善。机器侧（10-13 累积更新与 Lenovo 驱动、10-14 Defender 平台）不查，per-test 上限不动（Owner 11-11） | 开放 | 减测试与被测代码的 git 调用 | scripts/canonical-test.mjs src/delivery.js |
+| TD-138 | 全量由 filesystem 波决定，慢主要在机器侧：开机越久越慢，11-10（开机 13 天）波长 828–1335 s，11-11 重启后 331–498 s；内存吃紧时起进程变慢，联想 Vantage 一个后台插件单进程吞吐 0.5–5 GB 内存（Owner 已把该服务改为手动）。代码侧：最慢的测试文件每个起 1,200–2,600 个 git 进程；第 105 批合并交付证明里相邻的只读查询，8 个最慢文件少 5.9%。Dev Drive 无效；per-test 上限不动（Owner 11-11） | 开放 | 按 git trace 再定：reclaim 与 isolation 的相邻读取、测试夹具 | scripts/canonical-test.mjs src/delivery.js |
 | TD-139 | MCP 的 run_status 只返回 lastActivity.kind，不含活动摘要文本（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 择机：下次改 MCP 状态面时按 run_activity 同一口径放开摘要 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 择机：每季度核对 v24 libuv 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
 | TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |

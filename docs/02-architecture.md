@@ -791,7 +791,7 @@ packageDelivery success → transitionState(completed)
 
 **身份 SSOT**（`src/delivery.js`）：
 
-`assertDeliveryIdentity(cwd, deliveryCode)` 是 author + committer 身份检查的单一 SSOT，由 `verifyPostCommitIntegrity`（packaging，`commit_integrity`）和 `assertCommittedDeliveryRef`（verification proof，`artifact_mismatch`）共用。
+author + committer 身份的比较只有一处（`assertWaoIdentityFields`）：`verifyPostCommitIntegrity`（packaging，`commit_integrity`）经 `assertDeliveryIdentity` 读 HEAD 的四个身份字段；已知提交的证明（`assertCommittedDeliveryRef` 经内核、交付恢复，`artifact_mismatch`）用一次 `git show` 同时读消息与身份，先比消息再比身份。
 
 `verifyDeliveryFn` 构造函数参数（默认 `verifyDelivery`）仅供测试/组合注入。
 

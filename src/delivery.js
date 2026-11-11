@@ -445,7 +445,7 @@ function readWorktreeTopology(cwd, shapeErrorCode) {
       `merged topology query (${TOPOLOGY_REV_PARSE_ARGS.join(" ")}) in ${cwd} returned a malformed shape; refusing to interpret it`,
     );
   }
-  // 非零退出：部分 stdout 一律不用；逐条单问只为判断失败点，产出不归一化。
+  // 非零退出：部分 stdout 一律不用；逐条单问只为判断失败点，后两问的产出不用。
   const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
   if (toplevelRaw === null) return { toplevel: null };
   const toplevel = normAbs(String(toplevelRaw).trim());
@@ -485,13 +485,13 @@ export function proveLinkedWorktree(input) {
       `worktreePath is not a git repository: ${worktreePath}`,
     );
   }
-  const { gitDir, commonDir } = topology;
   if (topology.toplevel !== normAbs(worktreePath)) {
     throw new DeliveryError(
       "worktree_path_mismatch",
       `git toplevel (${topology.toplevel}) does not match worktreePath (${normAbs(worktreePath)})`,
     );
   }
+  const { gitDir, commonDir } = topology;
   if (gitDir === commonDir) {
     throw new DeliveryError(
       "primary_checkout",
