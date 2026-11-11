@@ -363,6 +363,9 @@ function flattenParts(messages) {
 //     user 消息（=轮次锚点）；assistant info 另带 anchor.turnId/orderedMessageIds
 //     与 time.created/completed（上游原生轮次身份原语——B′ 关闭条件满足）。
 //   - part：id（part_*）+ messageID（宿主回指）+ sessionID 全数在场。
+//   - ZCode 3.18.0 起同一批身份字段换了拼写：消息 info.messageId / info.parentMessageId，
+//     part partId / messageId / sessionId（实测 2026-11-11，捆绑 CLI 自报版本仍是
+//     0.17.1）。messageIdent 与 partIdOf 两种拼写都认，判据本身不变。
 //   - 跨快照稳定：生成中途连拍 ⊆ 终拍、顺序保持（追加语义下的 id 稳定）。
 // 完成判据/证据台账自本批起按【身份】归属：本轮 = 宿主 user 消息不在基线 id 集
 // 且 parent 指向它的 assistant 消息；历史变异（基线 id 序列不再前缀）具名失败。
@@ -370,22 +373,28 @@ function flattenParts(messages) {
 // 移击穿（发射旧答案并假 completed，还会连带击穿 0052 失败即弃——假 completed
 // 让下一轮照常 resume 半死会话）——身份切片从构造上关死该窗口。
 
-/** 消息身份（info.id/role/parentID；缺 id → null——调用方决定语义：历史缺 id
- * =派发前拒，新消息缺 id =本轮锚点不可解由有界收口兜底）。 */
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** 消息身份（info.id 或 info.messageId、role、info.parentID 或 info.parentMessageId；
+ * 缺 id → null——调用方决定语义：历史缺 id =派发前拒，新消息缺 id =本轮锚点不可解
+ * 由有界收口兜底）。 */
 function messageIdent(m) {
   const info = m?.info;
-  if (!info || typeof info.id !== "string" || info.id.length === 0) return null;
+  const id = nonEmptyString(info?.id) ?? nonEmptyString(info?.messageId);
+  if (id === null) return null;
   return {
-    id: info.id,
+    id,
     role: typeof info.role === "string" ? info.role : null,
-    parentID: typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : null,
+    parentID: nonEmptyString(info.parentID) ?? nonEmptyString(info.parentMessageId),
   };
 }
 
-/** part 身份（id 非空字符串才可用；缺 id 的 part 在台账面保守跳过——完成判据
- * 只依赖消息级身份，不依赖 part id）。 */
+/** part 身份（id 或 partId，非空字符串才可用；缺身份的 part 在台账面保守跳过——
+ * 完成判据只依赖消息级身份，不依赖 part id）。 */
 function partIdOf(part) {
-  return typeof part?.id === "string" && part.id.length > 0 ? part.id : null;
+  return nonEmptyString(part?.id) ?? nonEmptyString(part?.partId);
 }
 
 /**

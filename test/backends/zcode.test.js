@@ -769,6 +769,71 @@ test("zcode ④c: completed 轮 tool(write) part → file_written + tool_result�
   child.kill();
 });
 
+// ZCode 3.18.0 的身份拼写（实测 2026-11-11）：消息 info.messageId / info.parentMessageId，
+// part partId / messageId / sessionId。把既有夹具改写成这套拼写，旧拼写字段一并去掉。
+const to318 = (messages) => messages.map((m) => {
+  const { id, parentID, sessionID, ...info } = m.info ?? {};
+  return {
+    ...m,
+    info: {
+      ...info,
+      ...(id !== undefined ? { messageId: id } : {}),
+      ...(parentID !== undefined ? { parentMessageId: parentID } : {}),
+      ...(sessionID !== undefined ? { sessionId: sessionID } : {}),
+    },
+    parts: (m.parts ?? []).map(({ id: partId, messageID, sessionID: partSession, ...part }) => ({
+      ...part,
+      ...(partId !== undefined ? { partId } : {}),
+      ...(messageID !== undefined ? { messageId: messageID } : {}),
+      ...(partSession !== undefined ? { sessionId: partSession } : {}),
+    })),
+  };
+});
+
+test("zcode 3.18 拼写：messageId/parentMessageId 与 partId 下完成判据与工具证据照常", async () => {
+  const writePart = toolPart({
+    callId: "call_wao_318_write",
+    tool: "Write",
+    status: "completed",
+    input: { file_path: "D:/wao-test/zcode-ws/out/wao_318.txt", content: "payload" },
+    output: "Created file D:/wao-test/zcode-ws/out/wao_318.txt",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : to318([
+        userMsg("do the task"),
+        assistantPartsMsg([writePart, { type: "text", text: "wrote the file" }, { type: "step-finish", reason: "stop", tokens: {} }]),
+      ])),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["file_written", "tool_result", "message", "message", "metrics", "done"],
+    "3.18 拼写下事件序列与 3.17 相同：证据 → user echo → assistant 文本 → metrics → done",
+  );
+  assert.deepEqual(events[0], { kind: "file_written", path: "D:/wao-test/zcode-ws/out/wao_318.txt" });
+  assert.equal(events[3].parts[0].text, "wrote the file");
+  assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+test("zcode 3.18 拼写：resume 历史只带 messageId 也认，不按缺身份拒派发", async () => {
+  const prior = "sess_prior_run_318";
+  const history = to318(RESUME_HISTORY);
+  const { handle, child } = await runScenario({
+    task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: prior },
+    peerOptions: {
+      messages: (n) => (n <= 1 ? history : [...history, ...to318([userMsg("continue"), assistantMsg("answer")])]),
+    },
+  });
+  const events = await collect(handle);
+  assert.equal(events.at(-1).reason, "completed");
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant[0].parts[0].text, "answer", "只投影本轮 answer——历史不重放");
+  child.kill();
+});
+
 test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工具 → toolUseEvent；error state → tool_result isError:true", async () => {
   const bashDone = toolPart({
     callId: "call_bash_ok",
