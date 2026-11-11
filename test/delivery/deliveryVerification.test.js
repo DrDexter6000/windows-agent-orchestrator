@@ -1244,16 +1244,21 @@ test("CB-1: cleanupDir removes nested non-repo fixture without pruning ancestor 
   }
 });
 
-// ===== ID-B*：身份检查批量化回归（单次结构化 Git 查询）=====
+// ===== ID-B*：已知提交元数据检查（单次结构化 Git 查询）=====
 //
-// assertDeliveryIdentity（SSOT）收敛为每检查一次 `git show -s
-// --format=%an%x00%ae%x00%cn%x00%ce`（NUL 四字段）。本组经公共生产入口
-// verifyDelivery 钉住完整语义：
-//   · ID-B3 四个身份字段逐一出错（真实 Git 锻造）各自被拒——精确比较不变；
-//   · ID-B4 输出畸形（截断/空/多字段）以 artifact_mismatch 失败关闭——
-//     窄 mock（node:child_process.execFileSync + syncBuiltinESMExports，
-//     finally 恢复）仅拦截组合格式查询，其余全部走真实 Git；
-//   · ID-B5 合法字段带边界空白仍被接受——String/trim 语义逐字段保留。
+// 内核（assertDeliveryCommitInRepository，经公共生产入口 verifyDelivery 调
+// assertCommittedDeliveryRef 触达）的消息+身份检查是一次
+// `git show -s --format=%an%x00%ae%x00%cn%x00%ce%x00%B`（NUL 五段，消息在
+// 末段）。本组经公共生产入口 verifyDelivery 钉住完整语义：
+//   · ID-B3 四个身份字段逐一出错（真实 Git 锻造）各自被拒——精确比较；
+//   · ID-B4 输出畸形以 artifact_mismatch 失败关闭：缺分隔符/空输出是形状
+//     拒绝（/fewer than five/）；消息后多出一段切分合法、被消息精确比较
+//     拒绝（/message mismatch/）——窄 mock（node:child_process.execFileSync
+//     + syncBuiltinESMExports，finally 恢复）仅拦截合并格式查询，其余全部
+//     走真实 Git；
+//   · ID-B4b 消息与身份同时错误时先报消息的拒绝（先消息后身份的校验顺序）；
+//   · ID-B5 合法字段带边界空白仍被接受——String/trim 语义逐字段保留，
+//     mock 命中计数防"没注入也绿"的静默失明。
 
 test("ID-B3: each of the four identity fields independently wrong -> artifact_mismatch (real Git)", async () => {
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb3-");
@@ -1299,21 +1304,24 @@ test("ID-B3: each of the four identity fields independently wrong -> artifact_mi
   }
 });
 
-test("ID-B4: malformed identity query output (truncated/empty/extra fields) -> artifact_mismatch fail-closed", async () => {
+test("ID-B4: malformed metadata query output -> artifact_mismatch fail-closed (shape rejection distinct from message mismatch)", async () => {
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb4-");
   const require = createRequire(import.meta.url);
   const childProcess = require("node:child_process");
   const realExecFileSync = childProcess.execFileSync;
-  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce";
+  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce%x00%B";
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
     const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    // [label, payload, expected error-message shape]。前两形是形状拒绝（不足
+    // 五段）；第三形切分合法（消息=「…run_vertest001\0stray」，消息内容不影
+    // 响切分），实际由消息精确比较拒绝。
     const malformed = [
-      ["truncated: 3 fields", "WAO Delivery\0wao-delivery@local\0WAO Delivery"],
-      ["empty output", ""],
-      ["extra: 5 fields", "WAO Delivery\0wao-delivery@local\0WAO Delivery\0wao-delivery@local\0extra"],
+      ["missing separator: 3 segments", "WAO Delivery\0wao-delivery@local\0WAO Delivery", /fewer than five/],
+      ["empty output", "", /fewer than five/],
+      ["stray segment after the message (rejected by the exact message match)", `WAO Delivery\0wao-delivery@local\0WAO Delivery\0wao-delivery@local\0wao-delivery: ${RUN_ID}\0stray`, /message mismatch/],
     ];
-    for (const [label, payload] of malformed) {
+    for (const [label, payload, messageShape] of malformed) {
       childProcess.execFileSync = (cmd, args, opts) => {
         if (cmd === "git" && Array.isArray(args) && args.includes(COMBINED)) {
           return Buffer.from(payload, "utf8");
@@ -1323,10 +1331,43 @@ test("ID-B4: malformed identity query output (truncated/empty/extra fields) -> a
       syncBuiltinESMExports();
       await assert.rejects(
         () => verifyDelivery(ref),
-        (err) => err.deliveryCode === "artifact_mismatch",
-        `malformed identity output (${label}) must fail closed with the supplied code`,
+        (err) => err.deliveryCode === "artifact_mismatch" && messageShape.test(err.message),
+        `malformed metadata output (${label}) must fail closed with the supplied code and message shape`,
       );
     }
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupDir(repo);
+  }
+});
+
+test("ID-B4b: message and identity both wrong -> the MESSAGE rejection is reported first (check order unchanged)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb4b-");
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce%x00%B";
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    // 消息与身份同时错误：合并读取后校验顺序仍是先消息、再 author、再
+    // committer——必须报消息的拒绝，不得先报身份。
+    const payload = "Attacker\0attacker@evil\0WAO Delivery\0wao-delivery@local\0totally wrong message";
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args.includes(COMBINED)) {
+        return Buffer.from(payload, "utf8");
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(
+      () => verifyDelivery(ref),
+      (err) => err.deliveryCode === "artifact_mismatch"
+        && /message mismatch/.test(err.message)
+        && !/identity/.test(err.message),
+      "both wrong -> the message-mismatch rejection must surface first, not the identity one",
+    );
   } finally {
     childProcess.execFileSync = realExecFileSync;
     syncBuiltinESMExports();
@@ -1339,22 +1380,27 @@ test("ID-B5: legal identity fields with boundary whitespace remain accepted (Str
   const require = createRequire(import.meta.url);
   const childProcess = require("node:child_process");
   const realExecFileSync = childProcess.execFileSync;
-  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce";
+  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce%x00%B";
+  let intercepted = 0;
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
     const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
-    // 四个字段全为合法值，但各自带边界空白（含真实的尾随换行形态）——
-    // trim 后精确相等 ⇒ 必须接受。真实 Git 会剥除 ident 里的空白，故经
-    // 同一窄 mock 注入（其余查询全部走真实 Git）。
-    const payload = "  WAO Delivery \0\twao-delivery@local\t\0\n WAO Delivery \n\0 wao-delivery@local\n";
+    // 四个身份字段全为合法值但各自带边界空白（含真实的尾随换行形态），
+    // 消息为精确合法值——trim 后精确相等 ⇒ 必须接受。真实 Git 会剥除 ident
+    // 里的空白，故经同一窄 mock 注入（其余查询全部走真实 Git）。命中计数
+    // 防"mock 没注入也绿"的静默失明。
+    const payload = `  WAO Delivery \0\twao-delivery@local\t\0\n WAO Delivery \n\0 wao-delivery@local\n\0wao-delivery: ${RUN_ID}`;
     childProcess.execFileSync = (cmd, args, opts) => {
       if (cmd === "git" && Array.isArray(args) && args.includes(COMBINED)) {
+        intercepted += 1;
         return Buffer.from(payload, "utf8");
       }
       return realExecFileSync(cmd, args, opts);
     };
     syncBuiltinESMExports();
     const result = await verifyDelivery(ref);
+    assert.ok(intercepted >= 1,
+      "narrow mock must actually intercept the merged metadata query (else this test proves nothing)");
     assert.equal(result.outcome, "passed",
       "boundary-whitespace-wrapped legal identity fields must be accepted after per-field trim");
     assert.equal(result.delivery.verification.status, "passed");

@@ -12,6 +12,9 @@ import {
   prepareDeliveryRequest,
   detectAbsolutePathLiteral,
   listWorktreeChangedPaths,
+  resolveDeliveryCommit,
+  assertCommittedDeliveryRef,
+  proveContinuationWorktree,
   DeliveryError,
 } from "../../src/delivery.js";
 import { baseRepoFixture, copyGitRepo, git as fixtureGit, initGitRepo } from "../_gitRepoFixture.mjs";
@@ -1843,6 +1846,344 @@ test("ID-B1: packageDelivery identity check issues exactly ONE git query (NUL-ba
     ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"],
     "the single query must be the structured NUL four-field form against the same ref (HEAD)",
   );
+});
+
+// ===== TD-138 A：交付证明点的合并拓扑读取 =====
+//
+// proveLinkedWorktree / assertCommittedDeliveryRef / proveContinuationWorktree /
+// recoverDeliveryCommit 的三个只读拓扑事实（toplevel / 绝对 git dir / common
+// git dir）由一次 `git rev-parse --show-toplevel --absolute-git-dir
+// --git-common-dir` 读取。本组钉住：进程数（经委托 spy 数真实子进程调用，
+// 不是速度阈值）、合并调用的精确 argv（A1 deepEqual，参数顺序即字段顺序）、
+// 失败路径的语义（非零退出的部分 stdout 不用；逐条单问按 toplevel → 比对
+// 路径 → 后两问的先后复现失败点；退出 0 形状不对按各调用方自己的错误码
+// 失败关闭）。跨步骤的重新证明（每次调用重新读）由既有真实 Git 用例覆盖，
+// 不在本组。
+
+/** 合并拓扑询问的精确 argv（退出 0 的输出按位置解析，参数顺序即字段顺序）。 */
+const MERGED_TOPOLOGY_ARGS = ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"];
+
+/** 判定一次 git 调用是否合并拓扑询问 / 单问拓扑询问（rev-parse 三问之一）。 */
+function classifyTopologyQuery(args) {
+  if (!Array.isArray(args) || args[0] !== "rev-parse") return "other";
+  const has = (flag) => args.includes(flag);
+  if (has("--show-toplevel") && has("--absolute-git-dir") && has("--git-common-dir")) return "merged";
+  if (args.length === 2
+    && ["--show-toplevel", "--absolute-git-dir", "--git-common-dir"].includes(args[1])) {
+    return "single";
+  }
+  return "other";
+}
+
+/** 装一个只数拓扑查询的委托 spy；返回 [counts, uninstall]。mergedArgs 逐次记录合并询问的 argv。 */
+function installTopologySpy() {
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const counts = { merged: 0, single: 0, mergedArgs: [] };
+  childProcess.execFileSync = (cmd, args, opts) => {
+    if (cmd === "git") {
+      const kind = classifyTopologyQuery(args);
+      if (kind === "merged") {
+        counts.merged += 1;
+        counts.mergedArgs.push(args);
+      } else if (kind === "single") {
+        counts.single += 1;
+      }
+    }
+    return realExecFileSync(cmd, args, opts);
+  };
+  syncBuiltinESMExports();
+  return [counts, () => {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+  }];
+}
+
+test("TD-138-A1: proveLinkedWorktree (via inspectDelivery) issues exactly ONE merged topology query with the exact argv, no single-question fallback", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const [counts, uninstall] = installTopologySpy();
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    const ref = inspectDelivery(baseInput(wtPath, baseCommit));
+    assert.equal(ref.deliveryCommit, null, "inspection must succeed under the spy");
+  } finally {
+    uninstall();
+    await cleanupRepo(repo);
+  }
+  assert.equal(counts.merged, 1,
+    `linked-worktree proof must issue exactly ONE merged topology query (observed ${counts.merged})`);
+  assert.deepEqual(counts.mergedArgs, [MERGED_TOPOLOGY_ARGS],
+    "the merged query must carry the exact argv, order included (positional parsing)");
+  assert.equal(counts.single, 0,
+    `happy path must not fall back to single-question topology queries (observed ${counts.single})`);
+});
+
+test("TD-138-A2: recoverDeliveryCommit (via resolveDeliveryCommit) issues exactly ONE merged topology query and ONE merged metadata show", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const counts = { mergedTopology: 0, mergedMetadata: 0, legacyIdentity: 0, legacyMessage: 0 };
+  try {
+    // Package FIRST (under real execFileSync) so the spy only sees the recover
+    // pass — resolveDeliveryCommit sees HEAD past base and takes the recover
+    // branch.
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    const packaged = packageDelivery(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] }));
+    assert.ok(packaged.deliveryCommit, "packaging precondition");
+
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args)) {
+        const kind = classifyTopologyQuery(args);
+        if (kind === "merged") counts.mergedTopology += 1;
+        if (args.includes("--format=%an%x00%ae%x00%cn%x00%ce%x00%B")) counts.mergedMetadata += 1;
+        if (args.includes("--format=%an%x00%ae%x00%cn%x00%ce")) counts.legacyIdentity += 1;
+        if (args.includes("--format=%B")) counts.legacyMessage += 1;
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const resolved = resolveDeliveryCommit(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] }));
+    assert.equal(resolved.source, "recovered", "must take the recover branch (HEAD past base)");
+    assert.equal(resolved.ref.deliveryCommit, packaged.deliveryCommit);
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+  // 合并后：拓扑一次、已知提交元数据（消息+身份）一次；旧格式零残留。
+  assert.equal(counts.mergedTopology, 1, `recover 拓扑恰好一次合并询问`);
+  assert.equal(counts.mergedMetadata, 1, `recover 元数据恰好一次合并 show`);
+  assert.equal(counts.legacyIdentity, 0, "不得再出现旧的四字段身份 show");
+  assert.equal(counts.legacyMessage, 0, "不得再出现旧的 %B 消息 show");
+});
+
+test("TD-138-A3: merged topology query fails -> partial stdout unused, single-query fallback replays, and all-succeed still refuses", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  // 真实 worktree：合并询问被注入非零退出（带部分 stdout，execFileSync 错误
+  // 形态），逐条单问走真实 Git——三问全成 ⇒ 绝不放行，抛合并调用的原始错误。
+  const injected = Object.assign(new Error("injected merged rev-parse failure (128)"), {
+    status: 128,
+    stdout: Buffer.from("C:/partial-toplevel\n", "utf8"),
+  });
+  let singles = 0;
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && classifyTopologyQuery(args) === "merged") throw injected;
+      if (cmd === "git" && classifyTopologyQuery(args) === "single") singles += 1;
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    let caught = null;
+    try {
+      inspectDelivery(baseInput(wtPath, baseCommit));
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught, "the failed merged topology read must fail the proof");
+    assert.equal(caught, injected,
+      "single-query fallback that all succeeds must still rethrow the MERGED call's original error (never pass)");
+    assert.equal(singles, 3,
+      `fallback must replay the three single questions in order (observed ${singles})`);
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+});
+
+test("TD-138-A4: merged topology query exit-0 malformed shapes fail closed (no defaults, no first-3-lines)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    // 退出 0 但：空输出 / 少行 / 多行 / 空字段（行数对但中间为空）。
+    const shapes = [
+      ["empty output", ""],
+      ["too few lines", "C:/toplevel\nC:/gitdir"],
+      ["too many lines", "C:/toplevel\nC:/gitdir\nC:/common\nextra\n"],
+      ["empty middle field", "C:/toplevel\n\nC:/common\n"],
+    ];
+    for (const [label, payload] of shapes) {
+      childProcess.execFileSync = (cmd, args, opts) => {
+        if (cmd === "git" && classifyTopologyQuery(args) === "merged") {
+          return Buffer.from(payload, "utf8");
+        }
+        return realExecFileSync(cmd, args, opts);
+      };
+      syncBuiltinESMExports();
+      assert.throws(
+        () => inspectDelivery(baseInput(wtPath, baseCommit)),
+        (err) => err.deliveryCode === "not_a_git_repo" && /malformed shape/.test(err.message),
+        `exit-0 malformed topology output (${label}) must fail closed without defaults`,
+      );
+    }
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+});
+
+test("TD-138-A7: exit-0 malformed merged topology output fails closed with each proof point's own delivery code", async () => {
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  // 少行形状（两行）——四个调用点共用同一读取器，各自按自己的错误码失败关闭。
+  const malformed = Buffer.from("C:/toplevel\nC:/gitdir\n", "utf8");
+  const installMalformedMerged = () => {
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && classifyTopologyQuery(args) === "merged") return malformed;
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+  };
+  const uninstall = () => {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+  };
+  const assertShapeRefusal = (label, fn, code) => {
+    let caught = null;
+    try {
+      fn();
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught, `${label}: malformed shape must be refused`);
+    assert.equal(caught.deliveryCode, code,
+      `${label}: shape refusal must use this proof point's own code (got ${caught.deliveryCode}: ${caught.message})`);
+    assert.match(caught.message, /malformed shape/, `${label}: shape-refusal message`);
+  };
+
+  // assertCommittedDeliveryRef -> artifact_mismatch
+  {
+    const { repo, baseCommit } = await makeRepo();
+    const wtPath = makeWorktree(repo);
+    try {
+      await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+      const ref = packageDelivery(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] }));
+      installMalformedMerged();
+      assertShapeRefusal("assertCommittedDeliveryRef", () => assertCommittedDeliveryRef(ref), "artifact_mismatch");
+    } finally {
+      uninstall();
+      await cleanupRepo(repo);
+    }
+  }
+
+  // proveContinuationWorktree -> not_a_git_repo
+  {
+    const { repo, baseCommit } = await makeRepo();
+    const wtPath = makeWorktree(repo);
+    try {
+      installMalformedMerged();
+      assertShapeRefusal(
+        "proveContinuationWorktree",
+        () => proveContinuationWorktree(wtPath, { baseCommit, deliveryCommit: null }),
+        "not_a_git_repo",
+      );
+    } finally {
+      uninstall();
+      await cleanupRepo(repo);
+    }
+  }
+
+  // recoverDeliveryCommit (via resolveDeliveryCommit, HEAD past base) -> artifact_mismatch
+  {
+    const { repo, baseCommit } = await makeRepo();
+    const wtPath = makeWorktree(repo);
+    try {
+      await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+      packageDelivery(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] }));
+      installMalformedMerged();
+      assertShapeRefusal(
+        "recoverDeliveryCommit",
+        () => resolveDeliveryCommit(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] })),
+        "artifact_mismatch",
+      );
+    } finally {
+      uninstall();
+      await cleanupRepo(repo);
+    }
+  }
+});
+
+test("TD-138-A8: merged failure + toplevel single answers a mismatching path -> caller's path-mismatch refusal, later single questions never asked", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const injected = Object.assign(new Error("injected merged rev-parse failure (128)"), { status: 128 });
+  const singles = [];
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git") {
+        const kind = classifyTopologyQuery(args);
+        if (kind === "merged") throw injected;
+        if (kind === "single") singles.push(args[1]);
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    // cwd = worktree 的子目录：toplevel 单问成功但答复的是 worktree 根，与传入
+    // 路径不符——复现路径到此为止，调用方抛它原来的 worktree_path_mismatch，
+    // git-dir / common-dir 两问不得发生。
+    assertDeliveryError(
+      () => inspectDelivery(baseInput(join(wtPath, "src"), baseCommit)),
+      "worktree_path_mismatch",
+    );
+    assert.deepEqual(singles, ["--show-toplevel"],
+      "only the toplevel single question may run when it already answers a mismatching path");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== TD-138 A：真实 Git 拓扑回归（合并询问下的拒绝类别）=====
+
+test("TD-138-A5: subdirectory of the worktree fails closed (toplevel mismatch)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    // 合并拓扑询问从子目录回答的是 worktree 根，不等于传入路径 ——
+    // worktree_path_mismatch。
+    assertDeliveryError(
+      () => inspectDelivery(baseInput(join(wtPath, "src"), baseCommit)),
+      "worktree_path_mismatch",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("TD-138-A6: calling from inside the main repo's .git directory fails closed as not_a_git_repo", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  try {
+    // 在 .git 目录内：合并询问因 --show-toplevel 排第一而整体失败（它先于
+    // --absolute-git-dir 出错，不产生半截 stdout）；逐条单问复现 —— toplevel
+    // 单问同样失败 —— 照旧按 not_a_git_repo 拒绝。
+    assertDeliveryError(
+      () => inspectDelivery(baseInput(join(repo, ".git"), baseCommit)),
+      "not_a_git_repo",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
 });
 
 

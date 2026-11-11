@@ -893,18 +893,21 @@ test("M11-3A-COUNT: merge fixture (first-parent=base, count>1) fails on commit-c
   }
 });
 
-// ===== ID-B*: kernel identity check batching (single structured git query) =====
+// ===== ID-B*: kernel metadata check (single structured git query) =====
 //
 // Same SSOT contract as ID-B1 in delivery.test.js, proven through the kernel
 // entrypoint with its EXPLICIT full delivery commit (not HEAD): exactly ONE git
-// child query per identity check, NUL-batched four fields, same ref/cwd. The
-// count is of real child invocations via a narrowly-scoped delegating spy
-// (node:child_process.execFileSync + syncBuiltinESMExports, restored in finally).
+// child query per proof covers message AND identity — the merged NUL form
+// (%an%x00%ae%x00%cn%x00%ce%x00%B, message last) against that commit in the
+// repo root cwd. The count is of real child invocations via a narrowly-scoped
+// delegating spy (node:child_process.execFileSync + syncBuiltinESMExports,
+// restored in finally).
 
-/** Identity-query detector: legacy per-field formats + the NUL-batched form. */
+/** Metadata-query detector: legacy per-field / four-field / %B-only formats + the merged five-segment form. */
 const IDENTITY_QUERY_FORMATS = new Set([
-  "--format=%an", "--format=%ae", "--format=%cn", "--format=%ce",
+  "--format=%an", "--format=%ae", "--format=%cn", "--format=%ce", "--format=%B",
   "--format=%an%x00%ae%x00%cn%x00%ce",
+  "--format=%an%x00%ae%x00%cn%x00%ce%x00%B",
 ]);
 
 test("ID-B2: kernel identity check issues exactly ONE git query against the explicit delivery commit", async () => {
@@ -931,10 +934,51 @@ test("ID-B2: kernel identity check issues exactly ONE git query against the expl
     await cleanupRepo(repo);
   }
   assert.equal(queries.length, 1,
-    `identity check must issue exactly ONE git child query (observed ${queries.length})`);
+    `metadata check must issue exactly ONE git child query (observed ${queries.length})`);
   assert.deepEqual(
     queries[0],
-    ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", deliveryRef.deliveryCommit],
-    "the single query must target the explicit full delivery commit (same-ref), not HEAD",
+    ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", deliveryRef.deliveryCommit],
+    "the single query must be the merged message+identity form against the explicit full delivery commit (same-ref), not HEAD",
   );
+});
+
+// ===== TD-138 K：assertCommittedDeliveryRef 的合并拓扑读取 =====
+//
+// 验证包装（assertCommittedDeliveryRef）的三个拓扑事实（toplevel / git dir /
+// common dir）一次合并 rev-parse 读取；其委托的内核
+// （assertDeliveryCommitInRepository）有意只问 toplevel 的单问读取——它不证
+// 明 linked worktree、HEAD、branch。两个事实都钉住：包装恰好一次合并询问，
+// 内核恰好一次 toplevel 单问。
+test("TD-138-K1: assertCommittedDeliveryRef issues exactly ONE merged topology query (kernel keeps its intentional single toplevel read)", async () => {
+  const { repo, deliveryRef } = await buildDeliveryScenario("wao-m113a-td138k-");
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const counts = { merged: 0, singleToplevel: 0 };
+  try {
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args[0] === "rev-parse") {
+        const has = (flag) => args.includes(flag);
+        if (has("--show-toplevel") && has("--absolute-git-dir") && has("--git-common-dir")) {
+          counts.merged += 1;
+        } else if (args.length === 2 && args[1] === "--show-toplevel") {
+          counts.singleToplevel += 1;
+        }
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const { assertCommittedDeliveryRef } = await import("../../src/delivery.js");
+    const proof = assertCommittedDeliveryRef(deliveryRef);
+    assert.equal(proof.deliveryCommit, deliveryRef.deliveryCommit,
+      "proof must succeed unchanged under the delegating spy");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+  assert.equal(counts.merged, 1,
+    `wrapper topology must issue exactly ONE merged query (observed ${counts.merged})`);
+  assert.equal(counts.singleToplevel, 1,
+    `kernel keeps exactly ONE intentional single toplevel read (observed ${counts.singleToplevel})`);
 });

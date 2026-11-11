@@ -256,42 +256,20 @@ function parseNul(output) {
 // ===== Delivery identity SSOT (shared by package post-commit + assertCommittedDeliveryRef) =====
 
 /**
- * Verify that a commit has both author AND committer set to the WAO Delivery
- * process identity. This is the single SSOT for identity checks used by both
- * verifyPostCommitIntegrity (packaging) and assertCommittedDeliveryRef /
- * assertDeliveryCommitInRepository (verification proof).
+ * The single COMPARISON SSOT for the four WAO identity fields (per-field trim
+ * is applied by the caller — read-shape stays with each read path). Both read
+ * paths share it so their comparison semantics can never diverge:
+ *   - assertDeliveryIdentity (HEAD read, verifyPostCommitIntegrity/packaging);
+ *   - assertCommitMessageAndIdentity (merged known-commit read, kernel/recover).
  *
- * Batched query: ONE `git show -s` per check returns all four identity fields
- * NUL-separated (%an%x00%ae%x00%cn%x00%ce) for the SAME ref in the SAME cwd as
- * the historical per-field queries. Per-field String/trim semantics and the
- * exact comparisons are unchanged; Git execution errors propagate identically.
- * The output must carry exactly four fields — truncated, empty, or extra-field
- * output fails closed with the supplied errorDeliveryCode.
- *
- * @param {string} cwd — repository/worktree path
+ * @param {string} authorName — trimmed author name
+ * @param {string} authorEmail — trimmed author email
+ * @param {string} committerName — trimmed committer name
+ * @param {string} committerEmail — trimmed committer email
  * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
- *   ("commit_integrity" for packaging, "artifact_mismatch" for verification)
- * @param {string} [commitRef="HEAD"] — the commit to check. Defaults to HEAD for
- *   packaging/linked-worktree callers; the source-repo kernel passes an explicit
- *   full delivery commit hash so the check is independent of the working tree.
- * @throws {DeliveryError} if author or committer identity does not match, or the
- *   query output is not exactly four NUL-separated fields
+ * @throws {DeliveryError} if author or committer identity does not match
  */
-function assertDeliveryIdentity(cwd, errorDeliveryCode, commitRef = "HEAD") {
-  const ref = commitRef;
-  const fields = String(
-    git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", ref], { cwd }),
-  ).split("\0");
-  if (fields.length !== 4) {
-    throw new DeliveryError(
-      errorDeliveryCode,
-      `identity query for ${ref} returned ${fields.length} fields (expected 4)`,
-    );
-  }
-  const authorName = fields[0].trim();
-  const authorEmail = fields[1].trim();
-  const committerName = fields[2].trim();
-  const committerEmail = fields[3].trim();
+function assertWaoIdentityFields(authorName, authorEmail, committerName, committerEmail, errorDeliveryCode) {
   if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
     throw new DeliveryError(
       errorDeliveryCode,
@@ -304,6 +282,178 @@ function assertDeliveryIdentity(cwd, errorDeliveryCode, commitRef = "HEAD") {
       `committer identity (${committerName} <${committerEmail}>) != WAO identity`,
     );
   }
+}
+
+/**
+ * HEAD identity check (packaging's verifyPostCommitIntegrity): ONE `git show -s`
+ * returns all four identity fields NUL-separated (%an%x00%ae%x00%cn%x00%ce) for
+ * HEAD. The output must carry exactly four fields — truncated, empty, or
+ * extra-field output fails closed with the supplied errorDeliveryCode.
+ *
+ * @param {string} cwd — repository/worktree path
+ * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
+ *   ("commit_integrity" for packaging, "artifact_mismatch" for verification)
+ * @throws {DeliveryError} if author or committer identity does not match, or the
+ *   query output is not exactly four NUL-separated fields
+ */
+function assertDeliveryIdentity(cwd, errorDeliveryCode) {
+  const fields = String(
+    git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"], { cwd }),
+  ).split("\0");
+  if (fields.length !== 4) {
+    throw new DeliveryError(
+      errorDeliveryCode,
+      `identity query for HEAD returned ${fields.length} fields (expected 4)`,
+    );
+  }
+  assertWaoIdentityFields(
+    fields[0].trim(), fields[1].trim(), fields[2].trim(), fields[3].trim(),
+    errorDeliveryCode,
+  );
+}
+
+/**
+ * Known-commit metadata read: ONE `git show -s` returns the commit message AND
+ * all four identity fields (%an%x00%ae%x00%cn%x00%ce%x00%B) for an explicit
+ * full commit hash. The output is cut at the FIRST four NULs — the message is
+ * the last segment and its content never affects the split (extra NULs past
+ * the fourth, if any, stay inside the message).
+ *
+ * @param {string} cwd — repository/worktree path
+ * @param {string} commitRef — explicit full commit hash
+ * @returns {{message: string, authorName: string, authorEmail: string,
+ *   committerName: string, committerEmail: string}|null} null when the output
+ *   carries fewer than four NULs (truncated/empty) — caller fails closed
+ */
+function readCommitMessageAndIdentity(cwd, commitRef) {
+  const out = String(
+    git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", commitRef], { cwd }),
+  );
+  const fields = [];
+  let rest = out;
+  for (let i = 0; i < 4; i += 1) {
+    const nul = rest.indexOf("\0");
+    if (nul === -1) return null;
+    fields.push(rest.slice(0, nul));
+    rest = rest.slice(nul + 1);
+  }
+  return {
+    message: rest,
+    authorName: fields[0],
+    authorEmail: fields[1],
+    committerName: fields[2],
+    committerEmail: fields[3],
+  };
+}
+
+/**
+ * Known-commit proof tail shared by the kernel (assertDeliveryCommitInRepository)
+ * and recoverDeliveryCommit: ONE merged show, then message first (whole-value
+ * trim + exact equality, each caller supplies its own rejection text), then
+ * author, then committer (per-field trim, shared comparison SSOT).
+ *
+ * @param {string} cwd — repository/worktree path
+ * @param {string} commitRef — explicit full commit hash
+ * @param {string} expectedMessage — exact expected commit message
+ * @param {string} errorDeliveryCode — DeliveryCode to throw on any failure
+ * @param {string} messageMismatchText — caller's message-mismatch rejection text
+ * @throws {DeliveryError} on a malformed read (fewer than five segments), a
+ *   message mismatch, or an identity mismatch — always with errorDeliveryCode
+ */
+function assertCommitMessageAndIdentity(cwd, commitRef, expectedMessage, errorDeliveryCode, messageMismatchText) {
+  const meta = readCommitMessageAndIdentity(cwd, commitRef);
+  if (meta === null) {
+    throw new DeliveryError(
+      errorDeliveryCode,
+      `message+identity query for ${commitRef} returned fewer than five NUL-separated segments`,
+    );
+  }
+  if (meta.message.trim() !== expectedMessage) {
+    throw new DeliveryError(errorDeliveryCode, messageMismatchText);
+  }
+  assertWaoIdentityFields(
+    meta.authorName.trim(), meta.authorEmail.trim(),
+    meta.committerName.trim(), meta.committerEmail.trim(),
+    errorDeliveryCode,
+  );
+}
+
+// ===== Merged worktree-topology read =====
+
+/**
+ * 合并拓扑询问的固定 argv。退出 0 的输出按位置解析：第一行 toplevel、第
+ * 二行绝对 git dir、第三行 common git dir——参数顺序即字段顺序。
+ */
+const TOPOLOGY_REV_PARSE_ARGS = Object.freeze([
+  "rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
+]);
+
+/**
+ * 一次只读 `git rev-parse` 拿三个拓扑事实（toplevel / 绝对 git dir / common
+ * git dir），供四个交付证明点（proveLinkedWorktree、assertCommittedDeliveryRef、
+ * proveContinuationWorktree、recoverDeliveryCommit）共用。经现有 git 包装与
+ * gitChildEnv；只读，绝不写仓库状态。每次调用重新读取，不做跨调用缓存。
+ *
+ * 形状契约（失败关闭，不补默认值）：
+ *   - 退出 0：恰好三行、每行 trim 后非空。行尾换行按现有 trim 习惯处理
+ *     （最后一个换行是行终止符的产物，不是一行；中间空行仍算一行，不得
+ *     filter、不得"取前三行"）。少行、多行、空字段一律失败关闭。
+ *   - 非零退出：部分 stdout 一律不用。按原先后顺序逐条单问，只为判断
+ *     失败点：gitSafe 问 toplevel，为 null → 返回 {toplevel: null}（调用方
+ *     抛它自己的"不是仓库"类别）；toplevel 不等于 normAbs(cwd) → 返回
+ *     {toplevel}，不再问后两项（调用方抛它自己的路径不符类别）；toplevel
+ *     相符 → 依次 git() 问 `--absolute-git-dir`、`--git-common-dir`，失败
+ *     照旧抛 git() 原始错误；两问都成功也绝不放行，抛合并调用的原始错误。
+ *
+ * 三个字段沿用 trim、normAbs 与相对 commonDir 的 resolve(cwd, …) 处理，不用
+ * realpath 或另一套身份算法。
+ *
+ * @param {string} cwd — 被证明的 worktree/仓库路径（与调用方比对 toplevel
+ *   所用的路径同一个）
+ * @param {string} shapeErrorCode — 退出 0 但形状不对时失败关闭用的 DeliveryCode
+ *   （各证明点自己的证明失败类别）
+ * @returns {{toplevel: string, gitDir: string, commonDir: string}|{toplevel: string}|{toplevel: null}}
+ *   toplevel 已 normAbs；gitDir/commonDir 仅在合并读取成功时在场
+ * @throws {DeliveryError} 退出 0 但形状不对；非零退出后逐条单问全成时抛
+ *   合并调用的原始错误（非 DeliveryError）；后两问失败时抛 git() 原始错误
+ */
+function readWorktreeTopology(cwd, shapeErrorCode) {
+  let out = null;
+  let mergedError = null;
+  try {
+    out = git(TOPOLOGY_REV_PARSE_ARGS, { cwd });
+  } catch (err) {
+    mergedError = err;
+  }
+  if (mergedError === null) {
+    const raw = String(out);
+    // 只剥一个行终止符产物（结尾单个换行）；结尾 "\n\n" 剥一个后仍多出空行
+    // → 多行 → 失败。不得 filter 空行、不得取前三行。
+    const lines = (raw.endsWith("\n") ? raw.slice(0, -1) : raw).split("\n");
+    if (lines.length === 3
+      && lines.every((line) => line.trim().length > 0)) {
+      let commonDirRaw = lines[2].trim();
+      if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
+      return {
+        toplevel: normAbs(lines[0].trim()),
+        gitDir: normAbs(lines[1].trim()),
+        commonDir: normAbs(commonDirRaw),
+      };
+    }
+    throw new DeliveryError(
+      shapeErrorCode,
+      `merged topology query (${TOPOLOGY_REV_PARSE_ARGS.join(" ")}) in ${cwd} returned a malformed shape; refusing to interpret it`,
+    );
+  }
+  // 非零退出：部分 stdout 一律不用；逐条单问只为判断失败点，产出不归一化。
+  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
+  if (toplevelRaw === null) return { toplevel: null };
+  const toplevel = normAbs(String(toplevelRaw).trim());
+  if (toplevel !== normAbs(cwd)) return { toplevel };
+  git(["rev-parse", "--absolute-git-dir"], { cwd }); // 失败照旧抛 git() 原始错误
+  git(["rev-parse", "--git-common-dir"], { cwd }); // 同上
+  // 后两问都成功——绝不放行，抛合并调用自己的原始错误。
+  throw mergedError;
 }
 
 // ===== Persistent linked-worktree proof =====
@@ -323,39 +473,25 @@ export function proveLinkedWorktree(input) {
   const { runId, worktreePath, baseCommit, isolation } = input;
   const expectedBranch = `wao/${runId}`;
 
-  // 1. Must be a git repository
-  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], {
-    cwd: worktreePath,
-  });
-  if (toplevelRaw === null) {
+  // 1–3. One merged topology read. Must be a git repository; toplevel must
+  //    resolve to the requested worktree path; must be a linked worktree, not
+  //    the primary checkout. Primary checkout: git-dir == common-dir. Linked
+  //    worktree: they differ (git-dir = <worktree>/.git, common-dir =
+  //    <main-repo>/.git).
+  const topology = readWorktreeTopology(worktreePath, "not_a_git_repo");
+  if (topology.toplevel === null) {
     throw new DeliveryError(
       "not_a_git_repo",
       `worktreePath is not a git repository: ${worktreePath}`,
     );
   }
-
-  // 2. Toplevel must resolve to the requested worktree path
-  const toplevel = normAbs(toplevelRaw.trim());
-  if (toplevel !== normAbs(worktreePath)) {
+  const { gitDir, commonDir } = topology;
+  if (topology.toplevel !== normAbs(worktreePath)) {
     throw new DeliveryError(
       "worktree_path_mismatch",
-      `git toplevel (${toplevel}) does not match worktreePath (${normAbs(worktreePath)})`,
+      `git toplevel (${topology.toplevel}) does not match worktreePath (${normAbs(worktreePath)})`,
     );
   }
-
-  // 3. Must be a linked worktree, not the primary checkout.
-  //    --absolute-git-dir is always absolute. --git-common-dir may be relative
-  //    (e.g. ".git") and is resolved relative to the cwd (worktreePath).
-  //    Primary checkout: git-dir == common-dir. Linked worktree: they differ
-  //    (git-dir = <worktree>/.git, common-dir = <main-repo>/.git).
-  const gitDir = normAbs(
-    String(git(["rev-parse", "--absolute-git-dir"], { cwd: worktreePath })).trim(),
-  );
-  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd: worktreePath })).trim();
-  if (!isAbsolute(commonDirRaw)) {
-    commonDirRaw = resolve(worktreePath, commonDirRaw);
-  }
-  const commonDir = normAbs(commonDirRaw);
   if (gitDir === commonDir) {
     throw new DeliveryError(
       "primary_checkout",
@@ -552,14 +688,11 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
     throw new DeliveryError("artifact_mismatch", "committed files do not match deliveryRef.changedFiles");
   }
 
-  // 6. Commit message must be exact.
-  const msg = String(git(["show", "-s", "--format=%B", canonicalDelivery], { cwd })).trim();
-  if (msg !== expectedMessage) {
-    throw new DeliveryError("artifact_mismatch", "commit message mismatch");
-  }
-
-  // 7. Author/committer must be WAO identity (SSOT, explicit commit).
-  assertDeliveryIdentity(cwd, "artifact_mismatch", canonicalDelivery);
+  // 6+7. Commit message must be exact, then author/committer must be WAO
+  //    identity — one merged show (message checked first).
+  assertCommitMessageAndIdentity(
+    cwd, canonicalDelivery, expectedMessage, "artifact_mismatch", "commit message mismatch",
+  );
 
   return {
     deliveryCommit: canonicalDelivery,
@@ -599,20 +732,16 @@ export function assertCommittedDeliveryRef(deliveryRef) {
   const cwd = deliveryRef.worktreePath;
   const expectedBranch = `wao/${deliveryRef.runId}`;
 
-  // 1. Must be a git repository
-  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
-  if (toplevelRaw === null) {
+  // 1+2. One merged topology read. Must be a git repository whose toplevel is
+  //    exactly worktreePath, and a linked worktree (not primary).
+  const topology = readWorktreeTopology(cwd, "artifact_mismatch");
+  if (topology.toplevel === null) {
     throw new DeliveryError("artifact_mismatch", `worktreePath is not a git repository: ${cwd}`);
   }
-  if (normAbs(toplevelRaw.trim()) !== normAbs(cwd)) {
+  if (topology.toplevel !== normAbs(cwd)) {
     throw new DeliveryError("artifact_mismatch", "git toplevel does not match worktreePath");
   }
-
-  // 2. Must be a linked worktree
-  const gitDir = normAbs(String(git(["rev-parse", "--absolute-git-dir"], { cwd })).trim());
-  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
-  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
-  if (gitDir === normAbs(commonDirRaw)) {
+  if (topology.gitDir === topology.commonDir) {
     throw new DeliveryError("artifact_mismatch", "worktree is primary checkout, not linked");
   }
 
@@ -1369,20 +1498,16 @@ function rollbackToBase(cwd, canonicalBase) {
  * @throws {DeliveryError} on any proof failure (before any mutation)
  */
 export function proveContinuationWorktree(cwd, { baseCommit, deliveryCommit }) {
-  // 1. Must be a git repository whose toplevel is exactly this worktree.
-  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
-  if (toplevelRaw === null) {
+  // 1+2. One merged topology read. Must be a git repository whose toplevel is
+  //    exactly this worktree, and a linked worktree (not the primary checkout).
+  const topology = readWorktreeTopology(cwd, "not_a_git_repo");
+  if (topology.toplevel === null) {
     throw new DeliveryError("not_a_git_repo", `worktreePath is not a git repository: ${cwd}`);
   }
-  if (normAbs(toplevelRaw.trim()) !== normAbs(cwd)) {
+  if (topology.toplevel !== normAbs(cwd)) {
     throw new DeliveryError("worktree_path_mismatch", `git toplevel does not match worktreePath: ${cwd}`);
   }
-
-  // 2. Must be a linked worktree, not the primary checkout.
-  const gitDir = normAbs(String(git(["rev-parse", "--absolute-git-dir"], { cwd })).trim());
-  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
-  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
-  if (gitDir === normAbs(commonDirRaw)) {
+  if (topology.gitDir === topology.commonDir) {
     throw new DeliveryError("primary_checkout", `worktreePath is the primary checkout, not an isolated linked worktree: ${cwd}`);
   }
 
@@ -1900,18 +2025,16 @@ function recoverDeliveryCommit(input) {
     throw new DeliveryError("artifact_mismatch", "HEAD does not resolve to a canonical commit object");
   }
 
-  // Linked worktree on wao/<runId> (not primary, right branch).
-  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
-  if (toplevelRaw === null) {
+  // Linked worktree on wao/<runId> (not primary, right branch). One merged
+  // topology read.
+  const topology = readWorktreeTopology(cwd, "artifact_mismatch");
+  if (topology.toplevel === null) {
     throw new DeliveryError("artifact_mismatch", "worktreePath is not a git repository");
   }
-  if (normAbs(toplevelRaw.trim()) !== normAbs(cwd)) {
+  if (topology.toplevel !== normAbs(cwd)) {
     throw new DeliveryError("artifact_mismatch", "git toplevel does not match worktreePath");
   }
-  const gitDir = normAbs(String(git(["rev-parse", "--absolute-git-dir"], { cwd })).trim());
-  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
-  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
-  if (gitDir === normAbs(commonDirRaw)) {
+  if (topology.gitDir === topology.commonDir) {
     throw new DeliveryError("artifact_mismatch", "worktree is primary checkout, not linked");
   }
   const branchRaw = gitSafe(["symbolic-ref", "--short", "HEAD"], { cwd });
@@ -1961,15 +2084,11 @@ function recoverDeliveryCommit(input) {
     );
   }
 
-  // Exact message.
-  const msg = String(git(["show", "-s", "--format=%B", canonicalHead], { cwd })).trim();
+  // Exact message, then WAO identity — one merged show (message checked first).
   const expectedMessage = `wao-delivery: ${validated.runId}`;
-  if (msg !== expectedMessage) {
-    throw new DeliveryError("artifact_mismatch", "recovered commit message mismatch");
-  }
-
-  // WAO identity (SSOT, explicit commit).
-  assertDeliveryIdentity(cwd, "artifact_mismatch", canonicalHead);
+  assertCommitMessageAndIdentity(
+    cwd, canonicalHead, expectedMessage, "artifact_mismatch", "recovered commit message mismatch",
+  );
 
   // Clean worktree.
   const porcelain = String(git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));

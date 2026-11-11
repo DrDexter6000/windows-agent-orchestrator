@@ -17,6 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,4 +186,47 @@ test("M12-7-WT-05: non-canonical base/delivery commit fails closed before mutati
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+// TD-138 C：续接证明（proveContinuationWorktree，经 prepareContinuationWorktree
+// 的只读证明段触达）的三个拓扑事实（toplevel / git dir / common dir）一次合
+// 并 rev-parse 读取——经委托 spy 数真实子进程调用，不是速度阈值。
+test("TD-138-C1: proveContinuationWorktree issues exactly ONE merged topology query per proof", () => {
+  const repo = makeRepo();
+  const parentRunId = "run_parent_td138";
+  const wt = addWorktree(repo, parentRunId);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const counts = { merged: 0, single: 0 };
+  try {
+    const base = git("rev-parse HEAD", repo);
+    writeFileSync(join(wt, "keep.txt"), "keep-changed\n", "utf8");
+    git("add -A", wt);
+    git("commit -m delivery", wt);
+    const deliveryCommit = git("rev-parse HEAD", wt);
+
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args[0] === "rev-parse") {
+        const has = (flag) => args.includes(flag);
+        if (has("--show-toplevel") && has("--absolute-git-dir") && has("--git-common-dir")) counts.merged += 1;
+        else if (args.length === 2
+          && ["--show-toplevel", "--absolute-git-dir", "--git-common-dir"].includes(args[1])) counts.single += 1;
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const res = prepareContinuationWorktree(wt, {
+      parentRunId, childRunId: "run_child_td138", baseCommit: base, deliveryCommit,
+    });
+    assert.equal(res.branch, "wao/run_child_td138", "transition must succeed unchanged under the spy");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    rmSync(repo, { recursive: true, force: true });
+  }
+  assert.equal(counts.merged, 1,
+    `continuation proof must issue exactly ONE merged topology query (observed ${counts.merged})`);
+  assert.equal(counts.single, 0,
+    `happy path must not fall back to single-question topology queries (observed ${counts.single})`);
 });
