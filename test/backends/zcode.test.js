@@ -1129,9 +1129,10 @@ test("zcode ⑥b: silentTimeout 在场且零新 part → 只以 silentTimeout �
     peerOptions: { messages: () => [] },
   });
   // 补强（2026-10-01 零 part 分相修复；同日第二轮停滞门 8→60 同步本钉）：
-  // silentTimeout 放宽到 1000ms，实证收口前已远超 60 拍——停滞门在零 part 阶段
-  // 不生效。
-  const events = await collect(handle, { pollInterval: 5, silentTimeout: 1000 });
+  // silentTimeout 放宽到 3000ms，实证收口前已远超 60 拍——停滞门在零 part 阶段
+  // 不生效。silentTimeout 是真实时钟：1000ms 时机器一忙每拍超过 16ms 就只剩
+  // 58 拍（11-12 全量首轮红、隔离绿，TD-194），3000ms 给到每拍 50ms。
+  const events = await collect(handle, { pollInterval: 5, silentTimeout: 3000 });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /silent timeout/, "无 turn 等待的上界是 silentTimeout，不是停滞门");
