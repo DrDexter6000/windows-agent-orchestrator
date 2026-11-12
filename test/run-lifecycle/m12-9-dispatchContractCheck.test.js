@@ -788,7 +788,7 @@ test("b108-CONTRACT-OTHER-PATH: any invalid_allowed_paths gets the same rule tex
     readRegistryFn: fakeRegistry(["coder_low"]),
   });
   assert.equal(bad.contractValid, false);
-  assert.match(bad.observations.join(" "), /no absolute paths, '\.\.' or globs/);
+  assert.match(bad.observations.join(" "), /'\.\.' segment/);
   const good = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
@@ -798,5 +798,21 @@ test("b108-CONTRACT-OTHER-PATH: any invalid_allowed_paths gets the same rule tex
     readRegistryFn: fakeRegistry(["coder_low"]),
   });
   assert.equal(good.contractValid, true);
-  assert.ok(!good.observations.join(" ").includes("globs"));
+  assert.ok(!good.observations.join(" ").includes("no glob"));
+});
+
+test("b108-PROBE-GLOB-BASE: a refused glob entry is still probed by its concrete base (the TD-157 suffix strip)", async () => {
+  const probe = (existing) => runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["lib-typo/deep/**"], verificationCommands: ["npm test"] },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(existing),
+  });
+  const missing = await probe([]);
+  assert.equal(missing.contractValid, false, "the glob itself is a contract defect");
+  assert.ok(missing.issueCodes.includes("referenced_path_probe_miss"), "lib-typo/deep and lib-typo both missing: the base was probed");
+  const present = await probe(["lib-typo/deep", "lib-typo"]);
+  assert.ok(!present.issueCodes.includes("referenced_path_probe_miss"), "base exists: no miss");
 });

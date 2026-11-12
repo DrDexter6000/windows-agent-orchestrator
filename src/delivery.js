@@ -223,22 +223,30 @@ function validateAllowedPaths(allowedPaths) {
 }
 
 /**
+ * The allowedPaths rule in one sentence, for refusals that must not echo the
+ * entry (run_dispatch, run_dispatch_contract_check).
+ */
+export const ALLOWED_PATHS_RULE_TEXT =
+  "each allowedPaths entry is a repo-relative file or directory path - no absolute or rooted path, no empty, "
+  + "'.' or '..' segment, no NUL, no glob (* ?); a directory allows everything under it: write tests, not tests/**";
+
+/**
  * allowedPaths entries match literally (isPathAllowed below), so a glob such as
- * "tests/**" matches nothing. Refuse * and ? where the Lead supplies
- * allowedPaths: prepareDeliveryRequest (dispatch, contract check, CLI run,
- * continuation, resume) and the repackage scope. Packaging does not re-check,
- * so a run dispatched with a glob before this rule still packages what its
- * other entries cover. "[" stays legal: it is a real file-name character
- * ("app/[id]/page.tsx").
- * @param {string[]} paths — entries already accepted by validateAllowedPaths
+ * "tests/**" matches nothing. A new delivery request refuses * and ?
+ * (prepareDeliveryRequest: dispatch, contract check, CLI run, continuation).
+ * Persisted contracts are not re-checked (resume, packaging, repackage), so a
+ * run dispatched with a glob before this rule carries on as before; its glob
+ * entry never covered anything. "[" stays legal: it is a real file-name
+ * character ("app/[id]/page.tsx").
+ * @param {string[]} paths - entries already accepted by validateAllowedPaths
  * @throws {DeliveryError} invalid_allowed_paths on the first glob entry
  */
-export function assertNoAllowedPathGlobs(paths) {
+function assertNoAllowedPathGlobs(paths) {
   const glob = paths.find((p) => /[*?]/.test(p));
   if (glob !== undefined) {
     throw new DeliveryError(
       "invalid_allowed_paths",
-      `invalid allowedPath: ${JSON.stringify(glob)} - allowedPaths takes exact paths, not globs; a directory allows everything under it (write "tests", not "tests/**")`,
+      `invalid allowedPath: ${JSON.stringify(glob)} is a glob; ${ALLOWED_PATHS_RULE_TEXT}`,
     );
   }
 }
@@ -1279,10 +1287,12 @@ function normalizeVerificationTimeoutMs(value) {
  * creation). Validates mode, allowedPaths, and verification declaration only.
  *
  * @param {object} delivery — { mode, allowedPaths, verificationCommands?, verificationUnavailableReason? }
+ * @param {{persisted?: boolean}} [options] - persisted: revalidating a contract
+ *   already recorded on run.started (resume); skips rules added after it was accepted
  * @returns {{mode:string, allowedPaths:string[], verification:{commands:string[], unavailableReason:string|null}}}
  * @throws {DeliveryError} on any contract violation
  */
-export function prepareDeliveryRequest(delivery) {
+export function prepareDeliveryRequest(delivery, { persisted = false } = {}) {
   if (!delivery || typeof delivery !== "object") {
     throw new DeliveryError("invalid_input", "delivery must be an object");
   }
@@ -1297,7 +1307,7 @@ export function prepareDeliveryRequest(delivery) {
 
   // allowedPaths — reuse the same SSOT validator
   const allowedPaths = validateAllowedPaths(delivery.allowedPaths);
-  assertNoAllowedPathGlobs(allowedPaths);
+  if (!persisted) assertNoAllowedPathGlobs(allowedPaths);
 
   // verification — same trim-aware check as validateInput
   const hasCommands =

@@ -2314,8 +2314,8 @@ test("b108-01: prepareDeliveryRequest refuses * and ? entries with invalid_allow
       () => prepareDeliveryRequest({ mode: "git_commit_v1", allowedPaths: ["src", glob], verificationCommands: ["npm test"] }),
       (err) => err.name === "DeliveryError"
         && err.deliveryCode === "invalid_allowed_paths"
-        && err.message.includes(JSON.stringify(glob))
-        && err.message.includes('write "tests", not "tests/**"'),
+        && err.message.includes(`${JSON.stringify(glob)} is a glob`)
+        && err.message.includes("write tests, not tests/**"),
       glob,
     );
   }
@@ -2331,9 +2331,23 @@ test("b108-03: packaging does not re-check globs - a run dispatched before the r
   const wtPath = makeWorktree(repo);
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    const ref = inspectDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", "tests/**"] }));
+    const ref = packageDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", "tests/**"] }));
     assert.deepEqual(ref.changedFiles, ["src/a.js"]);
+    assert.match(ref.deliveryCommit, /^[0-9a-f]{40}$/);
   } finally {
     await cleanupRepo(repo);
   }
+});
+
+test("b108-04: a persisted contract is revalidated without the glob rule (resume of a run dispatched before it)", () => {
+  const out = prepareDeliveryRequest(
+    { mode: "git_commit_v1", allowedPaths: ["src", "tests/**"], verificationCommands: ["npm test"] },
+    { persisted: true },
+  );
+  assert.deepEqual(out.allowedPaths, ["src", "tests/**"]);
+  assert.throws(
+    () => prepareDeliveryRequest({ mode: "git_commit_v1", allowedPaths: ["../x"], verificationCommands: ["npm test"] }, { persisted: true }),
+    (err) => err.deliveryCode === "invalid_allowed_paths",
+    "the older path rules still apply to a persisted contract",
+  );
 });

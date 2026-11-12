@@ -1901,7 +1901,7 @@ export class RunManager {
           ...(deliveryContext.verificationTimeoutMs !== undefined
             ? { verificationTimeoutMs: deliveryContext.verificationTimeoutMs }
             : {}),
-        });
+        }, { persisted: true });
         proveLinkedWorktree(deliveryContext);
       } catch {
         // Validation failed — do not spawn/attach

@@ -56,6 +56,7 @@ import {
 import {
   prepareDeliveryRequest,
   tokenHasAbsolutePathLiteral,
+  ALLOWED_PATHS_RULE_TEXT,
 } from "../delivery.js";
 import { readRegistry } from "../registry.js";
 
@@ -87,12 +88,6 @@ export const CONTRACT_CHECK_ISSUE_CODES = Object.freeze([
 // sections map from this, and the MCP output schema derives its bounded lengths
 // (e.g. observations.max) from it — so "what sections exist" is defined once.
 export const CONTRACT_CHECK_SECTIONS = Object.freeze(["workspace", "registry", "contract"]);
-
-// Fixed text (never echoes the entry) for an allowedPaths rejection; the same
-// rule run_dispatch states when it refuses invalid_allowed_paths.
-const ALLOWED_PATHS_RULE_TEXT =
-  "allowedPaths entries are repo-relative files or directories - no absolute paths, '..' or globs (* ?); "
-  + "a directory allows everything under it: write tests, not tests/**";
 
 const CONTRACT_LEVEL_CODES = new Set([
   "profile_unknown",

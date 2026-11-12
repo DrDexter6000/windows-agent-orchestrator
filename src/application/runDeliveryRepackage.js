@@ -73,7 +73,6 @@ import {
   isValidRunId,
   isCanonicalCommitId,
   isPathAllowed,
-  assertNoAllowedPathGlobs,
   resolveDeliveryCommit,
   DeliveryError,
   VERIFICATION_TIMEOUT_MS_MIN,
@@ -937,11 +936,6 @@ export async function runDeliveryRepackage({
 
   // Validate + normalize the Lead's new scope BEFORE any read (fail closed).
   const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
-  try {
-    assertNoAllowedPathGlobs(newAllowedPaths);
-  } catch (err) {
-    throw new RepackageRejectionError("malformed_input", `runDeliveryRepackage: ${err.message}`);
-  }
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
   // D2-②b：跨层未命中映射回既有 run_not_found 闭集拒绝（不误建平铺）；孪生

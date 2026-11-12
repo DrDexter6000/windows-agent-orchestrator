@@ -368,6 +368,7 @@ import {
   isValidRunId,
   VERIFICATION_TIMEOUT_MS_MIN,
   VERIFICATION_TIMEOUT_MS_MAX,
+  ALLOWED_PATHS_RULE_TEXT,
 } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES, DIAGNOSIS_CODES, isValidDiagnosisCode, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
@@ -709,10 +710,7 @@ const DISPATCH_INVALID_VERIFICATION_PATH_TEXT =
   "(workspace-relative paths, URLs, or flags — no absolute paths).";
 
 // b108: fixed, actionable text for invalid_allowed_paths (never echoes the entry).
-const DISPATCH_INVALID_ALLOWED_PATHS_TEXT =
-  "run_dispatch refused: invalid_allowed_paths. Each delivery.allowedPaths entry is a repo-relative file or " +
-  "directory path - no absolute paths, '..' or globs (* ?). A directory allows everything under it: write tests, " +
-  "not tests/**.";
+const DISPATCH_INVALID_ALLOWED_PATHS_TEXT = `run_dispatch refused: invalid_allowed_paths: ${ALLOWED_PATHS_RULE_TEXT}.`;
 
 // Round 4 Bundle B: fixed, actionable error when a dispatch declares BOTH
 // readOnly and a delivery block. A read-only run is advisory observation,

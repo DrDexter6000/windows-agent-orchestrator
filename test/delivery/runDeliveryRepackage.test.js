@@ -2812,17 +2812,3 @@ test("B91-LEASE-RETRY-CREATED: a retry with created but no outcome takes the lea
     assert.deepEqual(order, ["start", "verify", "stop:outcomes=1"]);
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });
-
-// ===== b108: the Lead's new repackage scope follows the same no-glob rule =====
-
-test("b108-REPACKAGE-GLOB: a glob in the new allowedPaths is malformed_input before any read, with no audit", async () => {
-  const { repo, runDir } = await setupDisallowedScenario();
-  try {
-    const before = await readEvents(runDir);
-    await assert.rejects(() => runDeliveryRepackage({
-      runId: RUN_ID, runDir, allowedPaths: ["src", "tests/**"], authorizedWorkspaceRoot: repo,
-      verifyDeliveryFn: passedVerifier, computeInventoryFn: computeCandidateInventory,
-    }), (err) => isCode("malformed_input")(err) && /not globs/.test(err.message));
-    assert.deepEqual(await readEvents(runDir), before, "no audit for malformed_input");
-  } finally { await cleanupDir(repo); await cleanupDir(runDir); }
-});

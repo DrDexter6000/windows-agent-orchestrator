@@ -842,3 +842,53 @@ test("VT-14: MCP run_delivery_reverify schema accepts the shared upper bound and
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// b108: resume revalidates the persisted contract with the rules it was
+//       accepted under - a glob entry recorded before the no-glob rule
+//       does not block resume (it never covered anything)
+// =====================================================================
+
+test("b108-RESUME: a persisted allowedPaths glob from before the rule does not block resume", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b108r-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_b108r";
+    const wt = makeWorktree(dir, `wao/${runId}`);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, runId, [
+      jl({ type: "run.started", backend: "claude-code", cwd: dir, worktreePath: wt.path, worktreeBranch: wt.branch, delivery: { mode: "git_commit_v1", baseCommit: wt.baseCommit, allowedPaths: ["src", "tests/**"], verificationCommands: ["echo ok"] }, ts: "2026-08-05T00:00:00.000Z", runId, agentId: "coder_low", seq: 1 }),
+      jl({ type: "session.created", backend: "claude-code", backendSessionId: "s1", ts: "2026-08-05T00:00:00.200Z", runId, agentId: "coder_low", seq: 2 }),
+      jl({ type: "prompt.sent", prompt: "do it", ts: "2026-08-05T00:00:00.300Z", runId, agentId: "coder_low", seq: 3 }),
+      jl({ type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-08-05T00:00:00.400Z", runId, agentId: "coder_low", seq: 4 }),
+    ]);
+    const verifyCalls = [];
+    const { RunManager } = await import("../../src/runManager.js");
+    const { backend, spawnCount } = makeBackend({
+      eventsGenerator: writeAndDoneGenerator({ runDir, runId }),
+    });
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir, defaultIsolation: "none" },
+      readRegistry: async () => {
+        const { readRegistry } = await import("../../src/registry.js");
+        return readRegistry(registryPath);
+      },
+      transcriptDir: runDir,
+      backendFor: () => backend,
+      userEnvReader: async () => ({}),
+      verifyDeliveryFn: makePassingVerify(verifyCalls),
+    });
+
+    const resumed = await manager.resume(runId, { runDir, registry: registryPath });
+    assert.ok(resumed, "a persisted glob entry must NOT block resume");
+    const result = await resumed.waitForCompletion({ pollInterval: 1 });
+    assert.equal(result.completed, true, "resumed run completes normally");
+    assert.equal(spawnCount(), 1, "resume spawns exactly once");
+    const { readTranscript } = await import("../../src/transcript.js");
+    const events = await readTranscript(resolveTranscriptPath(runDir, runId));
+    assert.ok(events.find((e) => e.type === "run.delivery_created"), "the src change still packages");
+  } finally {
+    cleanupDir(dir);
+  }
+});
