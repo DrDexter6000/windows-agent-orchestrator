@@ -498,14 +498,17 @@ async function runsWaitCommand(args, config, deps = {}) {
  * src/application/runSettlementWait.js——`consult wait <consultId>
  * --until-settled` 逐席调用同一算法，不复制。本命令只保留两面的事：SIGINT 注册
  *（application 层不碰进程信号）与按闭集 outcome 渲染终行 + 退出码（0 收口；
- * 3 不可信轮连续 4 次、verifier_gone 或 runner_gone；4 持久冲突；130 SIGINT
- * ——单一出口：置位后即便已判收口也只输出一份中断结果）。runner 缺席证明两个
+ * 3 不可信轮连续 4 次、verifier_gone 或 runner_gone；4 持久冲突；5 runner_
+ * unproven——静默满 30 分钟但 runner 缺席证明被"未知类"闭集理由拒绝，报警交
+ * Lead 决定（第 107 批）；130 SIGINT——单一出口：置位后即便已判收口也只输出
+ * 一份中断结果）。runner 缺席证明两个
  * 共用面同开（TD-340 前半起 consult wait 也传 runnerGoneProof: true 并注入
  * runnerProofDeps，其渲染面接同一个 runner_gone 出口）。
  *
  * deps 注入缝（测试确定性，原样透传给等待器）：resolveDetailedFn /
  * readTranscriptFn / nowFn / sleepFn / pollIntervalMs / verifierGoneFn /
- * verifierProofDeps / runnerGoneFn / runnerProofDeps。
+ * verifierProofDeps / runnerGoneFn / runnerProofDeps / bootTimeFn（只喂
+ * runner_unproven 的重启关系读数）。
  */
 async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {}) {
   // 决定 0096：验证者已不在的证明。daemon 握手 SSOT 在 adapters 层（daemon.js），
@@ -550,6 +553,7 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
         verifierProofDeps,
         runnerGoneFn: deps.runnerGoneFn,
         runnerProofDeps,
+        bootTimeFn: deps.bootTimeFn,
       },
     });
   } finally {
@@ -678,6 +682,41 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       console.log(`Run: ${runId} (${s.facts.state})`);
       console.log(`Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`);
       console.log(`Runner stderr tail: ${stderrText}`);
+      console.log(`Next step: ${nextStep}`);
+    }
+    return;
+  }
+  if (outcome.kind === "runner_unproven") {
+    // 第 107 批：静默满 30 分钟、owner 心跳不新鲜、但本轮 runner 缺席证明被
+    // "未知类"理由拒绝（RUNNER_UNPROVEN_REFUSALS）——证明不了 runner 已不在，
+    // 也证明不了它还在。退出码 5 报警，由 Lead 决定；WAO 不改运行状态。措辞
+    // 纪律：不说 "waiting will not change this"、不断言 runner 已死；重启关系
+    // 成立时照实陈述（开机晚于最后活动——重启前的 runner 活不过重启，但开机后
+    // 有人续跑不能排除）。
+    process.exitCode = 5;
+    const s = outcome.settlement;
+    const quietMinutes = Math.max(0, Math.floor(outcome.quietMs / 60000));
+    const nextStep = buildNextStep({ surface: "cli", situation: "runner_unproven", runId });
+    if (asJson) {
+      console.log(JSON.stringify({
+        settled: false,
+        runId,
+        state: s.facts.state,
+        reason: "runner_unproven",
+        refusal: outcome.refusal,
+        quietMinutes,
+        rebootedSinceLastActivity: outcome.rebooted === null ? null : {
+          bootAt: new Date(outcome.rebooted.bootAt).toISOString(),
+          lastActivityAt: new Date(outcome.rebooted.lastActivityAt).toISOString(),
+        },
+        nextStep,
+      }, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${s.facts.state})`);
+      console.log(`Unproven: the owner heartbeat is not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${outcome.refusal}); the run is still ${s.facts.state}, and waiting longer may still see it change.`);
+      if (outcome.rebooted !== null) {
+        console.log(`Reboot: this machine booted at ${new Date(outcome.rebooted.bootAt).toISOString()}, after the run's last activity (${new Date(outcome.rebooted.lastActivityAt).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
+      }
       console.log(`Next step: ${nextStep}`);
     }
     return;

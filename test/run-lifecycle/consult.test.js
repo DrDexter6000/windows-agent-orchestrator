@@ -2453,6 +2453,85 @@ test("SETTLE-5c: runner_gone（真实等待器 + runnerGoneFn 桩，零真实进
   }
 });
 
+test("SETTLE-5d: runner_unproven（注入等待器）→ 退出 5、点名席位与 runId；JSON 带 reason/refusal/quietMinutes/rebootedSinceLastActivity", async () => {
+  const consultId = "consult_20261002120000000abc123";
+  const record = settledRecord(consultId, [
+    { agentId: "seat_r", runId: "run_settle_ru", runState: "running", formatState: "empty" },
+  ]);
+  const deps = {
+    loadConsultRecord: async () => record,
+    readTranscript: async (path) => makeTranscript(basename(path, ".jsonl"), { finalText: "Q1: 意见。\n" }),
+    waitRunSettlement: async () => ({
+      kind: "runner_unproven",
+      settlement: { status: "unsettled", reason: "not_terminal", facts: { state: "running", terminal: false } },
+      refusal: "runner_scan_failed",
+      quietMs: 31 * 60_000,
+      rebooted: null,
+    }),
+  };
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, deps,
+    ));
+    assert.equal(process.exitCode, 5, "runner_unproven 对应退出码 5（报警，不是 3）");
+    // stderr 三行：点名行 + 与 runs wait runner_unproven 出口同源的两行。
+    assert.deepEqual(captured.errLines, [
+      `[consult] ${consultId}: seat seat_r (run_settle_ru) will not settle:`,
+      "Unproven: the owner heartbeat is not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.",
+      `Next step: ${buildNextStep({ surface: "cli", situation: "runner_unproven", runId: "run_settle_ru" })}`,
+    ]);
+    assert.ok(!captured.out, "失败出口不渲染整场");
+  });
+  await withExitCode(async () => {
+    const json = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--format", "json", "--cwd", "C:/tmp/x"], {}, deps,
+    ));
+    assert.equal(process.exitCode, 5);
+    const parsed = JSON.parse(json.out);
+    assert.deepEqual(Object.keys(parsed).sort(), [
+      "consultId", "quietMinutes", "reason", "rebootedSinceLastActivity", "refusal", "seat", "settled",
+    ]);
+    assert.equal(parsed.settled, false);
+    assert.deepEqual(parsed.seat, { agentId: "seat_r", runId: "run_settle_ru" });
+    assert.equal(parsed.reason, "runner_unproven");
+    assert.equal(parsed.refusal, "runner_scan_failed");
+    assert.equal(parsed.quietMinutes, 31);
+    assert.equal(parsed.rebootedSinceLastActivity, null);
+  });
+  // rebooted 成立：文本多一行 Reboot、JSON 带两个 ISO 时刻（与 runs wait 同源）。
+  const bootAt = Date.parse("2026-10-20T08:00:00.000Z");
+  const lastActivityAt = Date.parse("2026-10-20T07:00:00.000Z");
+  const depsRebooted = {
+    ...deps,
+    waitRunSettlement: async () => ({
+      kind: "runner_unproven",
+      settlement: { status: "unsettled", reason: "not_terminal", facts: { state: "running", terminal: false } },
+      refusal: "runner_scan_failed",
+      quietMs: 31 * 60_000,
+      rebooted: { bootAt, lastActivityAt },
+    }),
+  };
+  await withExitCode(async () => {
+    const captured = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--cwd", "C:/tmp/x"], {}, depsRebooted,
+    ));
+    assert.equal(process.exitCode, 5);
+    assert.equal(captured.errLines.length, 4, "点名 + Unproven + Reboot + Next step");
+    assert.equal(
+      captured.errLines[2],
+      `Reboot: this machine booted at ${new Date(bootAt).toISOString()}, after the run's last activity (${new Date(lastActivityAt).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`,
+    );
+    const json = await captureConsult(() => consultCommand(
+      ["wait", consultId, "--until-settled", "--format", "json", "--cwd", "C:/tmp/x"], {}, depsRebooted,
+    ));
+    const parsed = JSON.parse(json.out);
+    assert.deepEqual(parsed.rebootedSinceLastActivity, {
+      bootAt: new Date(bootAt).toISOString(),
+      lastActivityAt: new Date(lastActivityAt).toISOString(),
+    });
+  });
+});
+
 test("SETTLE-6: 中断（等待器返回 interrupted）→ 退出 130 并点名当席；零派发记录不等待、直说 no seat was dispatched", async () => {
   const consultId = "consult_20261002120000000abc123";
   const record = settledRecord(consultId, [

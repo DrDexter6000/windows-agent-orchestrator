@@ -88,10 +88,10 @@ test("NEXT-04: 输入校验——未知 surface/situation 抛错；CLI 面缺 ru
 
 test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超长 runId 触发守卫）", () => {
   // 所有情形 × 两面 × 大龄数字均在限内（新情形按各自需要的入参渲染；
-  // verifier_gone 与 runner_gone 只有 CLI 面，MCP 面必须拒绝）。
+  // verifier_gone、runner_gone 与 runner_unproven 只有 CLI 面，MCP 面必须拒绝）。
   for (const situation of NEXT_STEP_SITUATIONS) {
     for (const surface of ["mcp", "cli"]) {
-      if ((situation === "verifier_gone" || situation === "runner_gone") && surface === "mcp") {
+      if ((situation === "verifier_gone" || situation === "runner_gone" || situation === "runner_unproven") && surface === "mcp") {
         assert.throws(
           () => buildNextStep({ surface, situation }),
           /CLI-only/,
@@ -347,4 +347,36 @@ test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决�
 
   // 仍只有 CLI 面。
   assert.throws(() => buildNextStep({ surface: "mcp", situation: "verifier_gone", terminalState: "failed" }), /CLI-only/);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 107 批：runner_unproven——证明不了 runner 已不在（静默满 30 分钟 + 未知类
+// 拒绝，退出码 5）。先看状态、再干跑 settle 看门事实（不写任何东西）；停/结算/
+// 重挂都归 Lead。只有 CLI 面。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-13: runner_unproven——只有 CLI 面；先 status 再干跑 settle，出口归 Lead，≤480", () => {
+  assert.ok(NEXT_STEP_SITUATIONS.includes("runner_unproven"), "新情形进闭集");
+  const text = buildNextStep({ surface: "cli", situation: "runner_unproven", runId: RUN_ID });
+  assert.match(text, new RegExp(`^The runner's absence cannot be proven, so the run may still change\\. First check wao status ${RUN_ID}, then dry-run wao runs settle --run-id ${RUN_ID} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
+  assert.match(text, /The Lead then decides: stop it \(wao stop; for a continuable run, fix it with run_continue\), settle it, or attach the wait again\.$/);
+  assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
+  // 措辞纪律：不断言 runner 已死、不说等待不会改变事实；不建议 accept/reject。
+  assert.ok(!/gone|dead|will not change/i.test(text), "不断言已死/等待无效");
+  assert.ok(!/run_delivery_decide|\b(accept|accepts|reject|rejects)\b/i.test(text), "不建议 accept/reject");
+  // MCP 面拒绝（CLI-only 情形——报警等待器只在 CLI 面）。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "runner_unproven" }),
+    /CLI-only/,
+  );
+  // CLI 面仍需 runId 渲染命令。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "runner_unproven" }),
+    /runId/,
+  );
+  // 超长 runId 触发上限守卫（模板内嵌两次 runId）。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "runner_unproven", runId: "r".repeat(240) }),
+    /exceeds 480/,
+  );
 });

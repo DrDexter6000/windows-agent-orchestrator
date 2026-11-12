@@ -67,8 +67,12 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 `consult run` 就在 stderr 报出 `consultId` 与各席 runId：`consult wait
 <consultId>` 接着等（各席到终态或窗口到期即返回，缺省 270000ms，可反复调用），
 `consult wait <consultId> --until-settled` 等到每个已派发席位的 run 收口才返回
-（收口判定与退出码同 `runs wait --until-settled`，见 `wao manual supervise "等待到收口"`；
-无 runId 的席位——派发未成立——不等；未收口席位在 stderr 点名），`consult show
+（收口判定与退出码同 `runs wait --until-settled`，见 `wao manual supervise "等待到收口"`，
+含退出码 5 `runner_unproven`——某席位静默满 30 分钟但缺席证明被"未知类"理由
+拒绝时报警退出、点名席位与 runId，后续归 Lead。席位按组记录顺序**逐席串行等待**：后面
+的席位要等前面的收口（或等待退出）后才开始检查，不是并行轮询；无 runId 的席位——派发
+未成立——不等；未收口席位在 stderr 点名），
+`consult show
 <consultId>`（MCP 面：`run_consult {consultId}`）按当前转录重新推导，零派发。
 要求窗口内交付，就在任务书里限制工作量（不跑测试、限命令数），代价是席位
 自查深度，取舍归 Lead。每席 prompt 尾部始终带**席位级固定会审合同**（禁实现、

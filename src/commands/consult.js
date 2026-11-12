@@ -565,11 +565,13 @@ async function consultWaitCommand(args, config, deps = {}) {
  *（含无法收口的交付事实）或验证者或 runner 已证明不在（verifier_gone /
  * runner_gone；verifier_gone 的 completed 形状不可重试，终态 failed 的重新打包
  * 交付可再调 run_delivery_repackage 重跑验证——nextStep 按终态分支，B91）；
- * 4 一席转录冲突（多副本内容不同）；130 SIGINT（单一出口：置位后
- * 只输出一份中断结果，绝不出第二份）。未收口即停在那一席并在 stderr 点名
- *（<agentId> (<runId>)）与给出与 runs wait 同义的处置行；没有 runId 的席位
- *（派发未成立）不等。runner_gone 的 stderr 三行与 JSON 字段照 runs wait 的同名
- * 出口逐字渲染（runId 换成该席的；TD-340 前半）。
+ * 4 一席转录冲突（多副本内容不同）；5 一席 runner_unproven（静默满 30 分钟、
+ * owner 心跳不新鲜、但缺席证明被"未知类"闭集理由拒绝——报警交 Lead，第 107 批；
+ * 行文与 JSON 字段照 runs wait 同名出口，点名席位与 runId）；130 SIGINT（单一
+ * 出口：置位后只输出一份中断结果，绝不出第二份）。未收口即停在那一席并在
+ * stderr 点名（<agentId> (<runId>)）与给出与 runs wait 同义的处置行；没有
+ * runId 的席位（派发未成立）不等。runner_gone 的 stderr 三行与 JSON 字段照
+ * runs wait 的同名出口逐字渲染（runId 换成该席的；TD-340 前半）。
  *
  * 返回（全部收口）时的输出与有界 consult wait 一致：stderr 摘要行 + 正常渲染 /
  * --format json（wait 块 { allTerminal: true, waitedMs, windowMs: null }——
@@ -578,7 +580,8 @@ async function consultWaitCommand(args, config, deps = {}) {
  * deps 注入缝（测试确定性）：loadConsultRecord / waitRunSettlement /
  * readTranscript（同时作等待器与重渲染的转录读器）/ pollIntervalMs /
  * resolveDetailedFn / sleepFn / nowFn / verifierGoneFn / verifierProofDeps /
- * runnerGoneFn / runnerProofDeps / writeFileSync / mkdirFn。
+ * runnerGoneFn / runnerProofDeps / bootTimeFn（只喂 runner_unproven 的重启
+ * 关系读数）/ writeFileSync / mkdirFn。
  */
 async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, fallbackConsultsDir, runDir }, deps = {}) {
   // 决定 0111：先在状态目录读，ENOENT 才回退改动前的落点；实际读到的目录传给重渲染。
@@ -605,6 +608,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
     ...(deps.sleepFn ? { sleepFn: deps.sleepFn } : {}),
     ...(deps.verifierGoneFn ? { verifierGoneFn: deps.verifierGoneFn } : {}),
     ...(deps.runnerGoneFn ? { runnerGoneFn: deps.runnerGoneFn } : {}),
+    ...(deps.bootTimeFn ? { bootTimeFn: deps.bootTimeFn } : {}),
     verifierProofDeps: {
       nowFn: deps.nowFn ?? Date.now,
       handshakeReader: readHandshakeDetailed,
@@ -620,7 +624,9 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
   };
   const seatName = (seat) => `${seat.agentId} (${seat.runId})`;
   const failExit = (seat, outcome) => {
-    process.exitCode = outcome.kind === "conflict" ? 4 : 3;
+    // 第 107 批：runner_unproven 退出码 5（报警交 Lead，WAO 不改运行状态）；
+    // conflict 4；其余 3。
+    process.exitCode = outcome.kind === "conflict" ? 4 : outcome.kind === "runner_unproven" ? 5 : 3;
     // TD-340 前半：runner_gone 的 outcome 没有 reason 字段，分支必须排在读
     // outcome.reason 的分支之前；stderr 尾部文本两处（stderr 行与 JSON 字段）
     // 同源，取等待器拿到的同一 runDir。措辞照 runs wait 的 runner_gone 出口逐字。
@@ -650,6 +656,20 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         situation: "runner_gone",
         runId: seat.runId,
       })}`);
+    } else if (outcome.kind === "runner_unproven") {
+      // 第 107 批：与 runs wait 的 runner_unproven 出口同源（点名席位与 runId）；
+      // 不说 "waiting will not change this"、不断言 runner 已死；重启关系成立时
+      // 照实陈述。JSON 带 reason 与同名字段，不落进下面通用的 untrusted 分支。
+      const quietMinutes = Math.max(0, Math.floor(outcome.quietMs / 60000));
+      lines.push(`Unproven: the owner heartbeat is not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${outcome.refusal}); the run is still ${outcome.settlement.facts.state}, and waiting longer may still see it change.`);
+      if (outcome.rebooted !== null) {
+        lines.push(`Reboot: this machine booted at ${new Date(outcome.rebooted.bootAt).toISOString()}, after the run's last activity (${new Date(outcome.rebooted.lastActivityAt).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
+      }
+      lines.push(`Next step: ${buildNextStep({
+        surface: "cli",
+        situation: "runner_unproven",
+        runId: seat.runId,
+      })}`);
     } else if (outcome.reason.startsWith("undeterminable:")) {
       lines.push(`Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`);
       lines.push(`Diagnostics: wao runs diagnose ${seat.runId}; delivery facts: wao runs delivery ${seat.runId}`);
@@ -666,6 +686,15 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         ...(outcome.kind === "conflict" ? { conflict: true } : {}),
         ...(outcome.kind === "verifier_gone" ? { reason: "verifier_gone", basis: outcome.basis } : {}),
         ...(outcome.kind === "runner_gone" ? { reason: "runner_gone", runnerStderrTail } : {}),
+        ...(outcome.kind === "runner_unproven" ? {
+          reason: "runner_unproven",
+          refusal: outcome.refusal,
+          quietMinutes: Math.max(0, Math.floor(outcome.quietMs / 60000)),
+          rebootedSinceLastActivity: outcome.rebooted === null ? null : {
+            bootAt: new Date(outcome.rebooted.bootAt).toISOString(),
+            lastActivityAt: new Date(outcome.rebooted.lastActivityAt).toISOString(),
+          },
+        } : {}),
         ...(outcome.kind === "untrusted" && outcome.reason.startsWith("undeterminable:")
           ? { reason: outcome.reason, state: outcome.settlement.facts.state }
           : {}),
@@ -755,9 +784,11 @@ export const CONSULT_USAGE_LINES = [
   "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",
   "                  `consult show <id>` reads the current state.",
   "  --until-settled wait until every dispatched seat's run settles (mutually exclusive with --wait-ms, takes no value).",
-  "                  Exit 0 when every seat settles; 3 when a seat cannot settle (untrusted reads, undeterminable",
-  "                  delivery facts, or its verifier or runner is gone); 4 on a transcript conflict. Seats whose",
-  "                  dispatch produced no run are not waited for. The failing seat is named on stderr.",
+  "                  Seats are waited for one at a time, in record order: a later seat is first checked after the",
+  "                  seat before it settles. Exit 0 when every seat settles; 3 when a seat cannot settle (untrusted",
+  "                  reads, undeterminable delivery facts, or its verifier or runner is gone); 4 on a transcript",
+  "                  conflict; 5 when a seat's runner absence cannot be proven (silent 30+ min, unknown refusal).",
+  "                  Seats whose dispatch produced no run are not waited for. The failing seat is named on stderr.",
   "  --seat --out    write one seat's complete final text to a file (without --out: print it)",
   "  --out-dir DIR   write every seat's complete final text to DIR/<agentId>.md (directory created if missing), one",
   "                  line per seat; mutually exclusive with --seat/--out",

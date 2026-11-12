@@ -29,10 +29,12 @@ export const NEXT_STEP_SURFACES = Object.freeze(["mcp", "cli"]);
 //（按 settlementReason 再分四支）；verifier_gone 是等待器证明终态等验证的运行
 // 已无验证进程（只有 CLI 面）；runner_gone（第 83 批 B）是等待器证明非终态
 // 运行已无 runner 进程——出口是 settle/stop、只在 Lead 决定时用（只有 CLI 面）；
-// consult_seats_running 是 consult 回执还有未到终态的席位（MCP 面与 CLI 面各自
-// 渲染）；delivery_continuable（决定 0112）是收口且未采纳的可续交付——MCP
-// run_delivery 带 waitMs 因收口提前返回，与 CLI --until-settled 的收口终行各自
-// 渲染，提示窄缺陷可用 run_continue 续修。
+// runner_unproven（第 107 批）是等待器证明不了 runner 已不在、以退出码 5 报警
+//（静默满 30 分钟 + 未知类拒绝；只有 CLI 面）——先看状态、再干跑 settle 看
+// 门事实，停/结算/重挂都归 Lead；consult_seats_running 是 consult 回执还有未
+// 到终态的席位（MCP 面与 CLI 面各自渲染）；delivery_continuable（决定 0112）
+// 是收口且未采纳的可续交付——MCP run_delivery 带 waitMs 因收口提前返回，与
+// CLI --until-settled 的收口终行各自渲染，提示窄缺陷可用 run_continue 续修。
 export const NEXT_STEP_SITUATIONS = Object.freeze([
   "wait_vital_recent",
   "wait_vital_ageing",
@@ -44,12 +46,13 @@ export const NEXT_STEP_SITUATIONS = Object.freeze([
   "settled_line",
   "verifier_gone",
   "runner_gone",
+  "runner_unproven",
   "consult_seats_running",
   "delivery_continuable",
 ]);
 
 /** 只有 CLI 面渲染的情形（等待器证明只在 CLI 面做）。 */
-const CLI_ONLY_SITUATIONS = Object.freeze(["verifier_gone", "runner_gone"]);
+const CLI_ONLY_SITUATIONS = Object.freeze(["verifier_gone", "runner_gone", "runner_unproven"]);
 
 /** CLI consult 的 nextStep 在列出 runId 会超限时改用的说法。 */
 const CONSULT_RUNNING_FALLBACK = Object.freeze({
@@ -155,6 +158,13 @@ function render(surface, situation, runId, extras) {
       // 只陈述事实与出口，不断言内容好坏、不建议验收。
       text = `Nothing on this machine can still drive this run. The exits are wao runs settle --run-id ${runId} --reason-file <FILE> (the dry run lists the gate facts first; --apply writes them, recording failed / process_missing) or wao stop — only on an explicit Lead decision. If a delivery was requested, uncommitted changes may still be in the worktree: inspect them before deciding.`;
       break;
+    case "runner_unproven":
+      // 第 107 批：证明不了 runner 已不在（静默满 30 分钟 + 未知类拒绝，退出码
+      // 5）。运行可能仍在变化——不说"等待不会改变事实"。先看当前状态、再干跑
+      // settle 看门事实（不写任何东西）；停掉（可续的用 run_continue 续修）、
+      // 结算还是重新挂等待，都归 Lead。
+      text = `The runner's absence cannot be proven, so the run may still change. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts (it writes nothing). The Lead then decides: stop it (wao stop; for a continuable run, fix it with run_continue), settle it, or attach the wait again.`;
+      break;
     case "consult_seats_running": {
       if (surface === "mcp") {
         text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_wait repeatedly (within the host's tool-call timeout) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
@@ -186,9 +196,10 @@ function render(surface, situation, runId, extras) {
  * 不含 runId（传了也不会渲染）。settled_line 需要 settlementReason（收口判定
  * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
  * acceptanceStatus 只接受 null（未决定）或 "rejected"，其余抛错（调用方把服务
- * 里表示未决定的值如 "pending" 转成 null 再传）；verifier_gone 与 runner_gone
- * 只有 CLI 面（verifier_gone 可另给 terminalState——运行终态：failed 且未决定
- * 时渲染重新打包交付的续验文案，其余值渲染 completed 形状的既有文案）；
+ * 里表示未决定的值如 "pending" 转成 null 再传）；verifier_gone、runner_gone
+ * 与 runner_unproven 只有 CLI 面（verifier_gone 可另给 terminalState——运行
+ * 终态：failed 且未决定时渲染重新打包交付的续验文案，其余值渲染 completed
+ * 形状的既有文案）；
  * consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount，
  * 在 CLI 面用 seatRunIds/consultId（可再给 cliJson 选不列 runId 的回退说法）。
  * 长度超上限抛错（consult_seats_running 的 CLI 面有文档化的不列 runId 回退）。

@@ -1104,3 +1104,136 @@ test("TD-341-C1: 不注入证明 deps → 行为字节不变（advisory 在场�
     cleanupDir(dir);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 107 批：重启关系陈述——非终态、普通静默 advisory 已在场（≥30 分钟）、
+// runner 未被证明不在、且 rebootedSinceLastActivity 成立时，中文 advisory 末尾
+// 加一句、wire 换用固定英文变体模板。开机时刻经 runnerGoneDeps.bootTimeFn 注入。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("第 107 批: 重启晚于最后活动且 runner 未被证明不在 → 中文加句、wire 换变体模板", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reboot-adv-"));
+  try {
+    // lastBound = 09:45，now = 10:20 —— 静默 35 分钟；证明拒于 runner_alive
+    //（未证明不在）；开机 10:15（晚于最后活动 09:45，早于 now）。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: {
+        ...rgProofDeps({ eligible: false }),
+        bootTimeFn: () => Date.parse("2026-10-12T10:15:00.000Z"),
+      },
+    });
+    assert.equal("runnerGone" in status, false, "证明不成立 → 无机器字段");
+    assert.equal(
+      status.leadAdvisory,
+      "转录里已 35 分钟没有新的动作或正文（最近活动：跑命令，2100s 前）。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行："
+        + `wao stop ${RG_RUN} --observed-seq 4 --reason "<理由>"`
+        + "本机 5 分钟前开机，晚于该运行最后活动（35 分钟前）；重启前的 runner 活不过重启，是否有开机后续跑的进程未经证明。",
+      "中文普通模板逐字不变，末尾追加重启关系句",
+    );
+    assert.equal(
+      status.leadAdvisoryWire,
+      "No new worker action or text in the transcript for 35 min (last activity: command, 2100s ago). "
+        + "This machine booted 5 min ago, after the run's last activity 35 min ago; a pre-reboot runner cannot have survived it, but a runner started after the boot is not ruled out. "
+        + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.",
+      "wire 换用重启变体模板（不叠加普通模板的完整正文）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("第 107 批: 重启不成立（开机早于最后活动）→ 两面 advisory 与旧模板逐字节相同", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reboot-adv-neg-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: {
+        ...rgProofDeps({ eligible: false }),
+        bootTimeFn: () => Date.parse("2026-10-12T09:00:00.000Z"),
+      },
+    });
+    assert.equal(
+      status.leadAdvisory,
+      "转录里已 35 分钟没有新的动作或正文（最近活动：跑命令，2100s 前）。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行："
+        + `wao stop ${RG_RUN} --observed-seq 4 --reason "<理由>"`,
+      "中文不带重启句（逐字节与旧模板一致）",
+    );
+    assert.equal(
+      status.leadAdvisoryWire,
+      "No new worker action or text in the transcript for 35 min (last activity: command, 2100s ago). "
+        + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.",
+      "wire 用普通模板（逐字节一致）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("第 107 批: runner 已被证明不在时不叠加——沿用 runnerGone 模板，重启句不出现", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reboot-adv-gone-"));
+  try {
+    // 证明成立（eligible）且开机晚于最后活动：advisory 仍是 runnerGone 双语模板。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: {
+        ...rgProofDeps(),
+        bootTimeFn: () => Date.parse("2026-10-12T10:15:00.000Z"),
+      },
+    });
+    assert.equal(status.runnerGone, true);
+    assert.equal(status.leadAdvisory,
+      "观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 35 分钟），继续等待不会自行收口。"
+      + `是否结算由 Lead 决定：先干跑 wao runs settle --run-id ${RG_RUN} --reason-file <文件>，确认后再加 --apply。`);
+    assert.ok(!status.leadAdvisory.includes("重启"), "runnerGone 模板不叠加重启句");
+    assert.ok(!status.leadAdvisoryWire.includes("reboot"), "wire 面 runnerGone 模板同样不叠加");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("第 107 批: 租约心跳晚于事件时最后活动取心跳；wire 变体极端整数仍 ≤480", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reboot-adv-hb-"));
+  try {
+    // 事件 09:45；租约心跳 09:50（stale，证明照旧不成立面）；开机 09:55 →
+    // 晚于两者才成立；09:47 开机晚于事件但早于心跳 → 不成立。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const lease = { present: true, wellFormed: true, fresh: false, heartbeatAt: Date.parse("2026-10-12T09:50:00.000Z"), pid: 4242 };
+    const base = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => lease };
+    const holds = await getRunStatus({
+      runId: RG_RUN, runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T09:55:00.000Z") },
+    });
+    assert.ok(holds.leadAdvisory.includes("本机 25 分钟前开机，晚于该运行最后活动（30 分钟前）"),
+      `分钟数从心跳（09:50）起算: ${holds.leadAdvisory}`);
+    const notHolds = await getRunStatus({
+      runId: RG_RUN, runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T09:47:00.000Z") },
+    });
+    assert.ok(!notHolds.leadAdvisory.includes("重启"), "开机晚于事件但早于心跳 → 不成立，不加句");
+  } finally {
+    cleanupDir(dir);
+  }
+  // 变体模板长度上限：极端整数（分/秒取最大位数）也在 LEAD_ADVISORY_WIRE_MAX_LEN 内。
+  const { leadAdvisoryRebootWireText, LEAD_ADVISORY_WIRE_MAX_LEN } = await import("../../src/application/runQuietAdvisory.js");
+  const long = leadAdvisoryRebootWireText({
+    secondsSinceEffect: 9_999_999 * 60,
+    lastActivityEventKind: "runtime_activity",
+    lastRuntimeStatus: "provider_retry",
+    secondsSinceActivity: 99_999_999,
+    bootMinutesAgo: 99_999_999,
+    activityMinutesAgo: 99_999_999,
+  });
+  assert.ok(long.length <= LEAD_ADVISORY_WIRE_MAX_LEN, `长度 ${long.length}`);
+});

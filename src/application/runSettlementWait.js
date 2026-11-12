@@ -7,7 +7,9 @@
 //
 // 本模块只负责"等到收口/判死/冲突/中断"这件事：轮询、不可信轮计数、收口后再
 // 解析确认、终态等验证的验证者缺席证明（0096 节流）、非终态轮的 runner 缺席
-// 证明（第 83 批 B，节流；只读干跑 settleRun，不复制六道门）、进度行节流。它不
+// 证明（第 83 批 B，节流；只读干跑 settleRun，不复制六道门；第 107 批：证明被
+// 未知类闭集理由拒绝且静默满 30 分钟时以 runner_unproven 报警退出）、进度行
+// 节流。它不
 // 做任何渲染决策、不设 process.exitCode、不碰 process 信号——输出与中断归调用
 // 面（progress / isInterrupted 注入；SIGINT 注册留在 commands 层，daemon 握手
 // 读器同样由 commands 层注入——application 层不得 import daemon.js）。
@@ -30,6 +32,9 @@ import { proveVerifierGone, SETTLE_QUIET_WINDOW_MS, lastQuietWindowBoundMs } fro
 import { proveRunnerGone, runnerGonePrefilter } from "./runnerGoneProof.js";
 import { runWaitNextStep } from "./runNextStep.js";
 import { vitalSignAgeMs, LEAD_ADVISORY_QUIET_SECONDS } from "./runQuietAdvisory.js";
+// 第 107 批：runner_unproven 出口的重启关系陈述（开机时刻 + 纯函数判定 + 租约
+// 心跳读法；读失败按 null，见下方 computeRebooted）。
+import { machineBootTimeMs, rebootedSinceLastActivity, readOwnerLease } from "./ownerLiveness.js";
 
 // 决定 0095：轮询参数。间隔 15 秒；不可信轮连续 4 次退出 3；持久冲突立即退出 4；
 // SIGINT 退出 130。不设总时长。可信未收口轮的进度行只在首轮、状态或原因变化、
@@ -43,6 +48,26 @@ export const SETTLEMENT_MAX_UNTRUSTED_ROUNDS = 4;
 export const SETTLEMENT_PROGRESS_EVERY_MS = 5 * 60 * 1000;
 export const SETTLEMENT_VERIFIER_PROOF_EVERY_MS = 5 * 60 * 1000;
 export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_MS;
+
+/**
+ * 第 107 批：触发 runner_unproven（CLI 退出码 5）的"未知类"拒绝理由闭集。
+ * owner 心跳不新鲜、运行已静默满 30 分钟、**本轮**确实发了 runner 缺席证明、
+ * 却被下列理由之一拒绝时，等待器退出并交回 Lead 决定——挂着的后台等待既不
+ * 退出也不告警，正是这组理由造成的。成员是 settle 六道门里"证明不了"（而非
+ * "正面证据说还在"）的拒绝：扫描失败（本机有排除不掉、命令行读不到的 node）、
+ * pid 身份判不了、租约损坏、会话锚取不出、证明自身抛错（probe_failed——
+ * 本等待器把抛错折成的固定理由，仍不构成死亡证明）。owner_fresh / owner_alive /
+ * runner_alive / process_alive / daemon_owned / foreground_no_session /
+ * session_has_stop_route 等"正面存活/归属证据"或前置筛选拒绝都不在内：那些
+ * 形状照旧一直等（见 docs/usage/supervise.md 的诚实边界）。
+ */
+export const RUNNER_UNPROVEN_REFUSALS = Object.freeze([
+  "runner_scan_failed",
+  "process_identity_unknown",
+  "owner_lease_corrupt",
+  "session_ambiguous",
+  "probe_failed",
+]);
 
 /**
  * （第 83 批 B 引入；TD-341 第 89 批 B 上移）runner 已不在的证明（只读）——
@@ -75,11 +100,18 @@ export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_
  * 已收口照常返回 settled；仍非终态才返回 runner_gone（等待器只陈述事实，
  * 结算/停止仍归 Lead）；被拒的闭集理由同样进进度行明细。
  *
+ * 第 107 批：证明抛错记为固定理由 probe_failed；owner 心跳不新鲜、静默已满
+ * LEAD_ADVISORY_QUIET_SECONDS（30 分钟）、**本轮**证明却被"未知类"闭集理由
+ * （RUNNER_UNPROVEN_REFUSALS）拒绝时，照同一纪律重读再判后仍非终态则返回
+ * runner_unproven（CLI 退出码 5，由 Lead 决定后续；WAO 不改运行状态）。证明
+ * 成立仍走 runner_gone；验证者缺席证明不动。
+ *
  * 返回闭集 outcome（kind 成员与退出码的映射归调用面——runs wait / consult wait
  * 各自同义映射）：
  *   { kind: "settled", settlement, snapshotReadAt, events }
  *   { kind: "verifier_gone", settlement, basis, snapshotReadAt, events }
  *   { kind: "runner_gone", settlement, snapshotReadAt, events }
+ *   { kind: "runner_unproven", settlement, refusal, quietMs, rebooted, snapshotReadAt, events }
  *   { kind: "conflict", settlement, snapshotReadAt, events }
  *   { kind: "untrusted", reason, rounds, settlement, snapshotReadAt, events }
  *   { kind: "interrupted", settlement, snapshotReadAt, events }
@@ -102,7 +134,8 @@ export const SETTLEMENT_RUNNER_PROOF_EVERY_MS = SETTLEMENT_VERIFIER_PROOF_EVERY_
  *   以 interrupted 收口（单一出口：已判收口的一轮也会被它覆盖）
  * @param {object} [input.deps] — { pollIntervalMs, resolveDetailedFn,
  *   readTranscriptFn, nowFn, sleepFn, verifierGoneFn, verifierProofDeps,
- *   runnerGoneFn, runnerProofDeps } 测试确定性注入缝
+ *   runnerGoneFn, runnerProofDeps, bootTimeFn } 测试确定性注入缝
+ *   （bootTimeFn 只喂 runner_unproven 的重启关系读数）
  * @returns {Promise<object>} 闭集 outcome（见上）
  */
 export async function waitRunSettlement({
@@ -134,6 +167,9 @@ export async function waitRunSettlement({
     nowFn,
     ...(deps.runnerProofDeps ?? {}),
   };
+  // 第 107 批：runner_unproven 出口的重启关系读的开机时刻（缺省真读
+  // machineBootTimeMs；测试经 deps.bootTimeFn 注入）。
+  const bootTimeFn = typeof deps.bootTimeFn === "function" ? deps.bootTimeFn : machineBootTimeMs;
   let lastRunnerProofAt = null;
   // 建议（会审）：证明被拒的理由并入进度行明细与节流键——sticky 到下一次证明
   // 给出新理由；理由变化立即打印一行，不变时仍按 5 分钟节流。不回显 pid、路径
@@ -183,6 +219,28 @@ export async function waitRunSettlement({
       lastSnapshotReadAt = nowFn();
       lastEventsRead = events;
       return events;
+    } catch {
+      return null;
+    }
+  };
+  // 第 107 批：runner_unproven 出口的重启关系（纯陈述，见 ownerLiveness 的
+  // rebootedSinceLastActivity）。最后活动 = 该快照计入静默窗的最后一条绑定事件
+  //（lastQuietWindowBoundMs 同一取法）与 owner 租约心跳（经 runnerProofDeps.
+  // ownerLeaseReader 注入，缺省真读 readOwnerLease）中有限值的较晚者；开机时刻
+  // 经 deps.bootTimeFn 注入（缺省 machineBootTimeMs）。任一读取失败 → null。
+  const computeRebootedSinceLastActivity = (snapshotEvents) => {
+    try {
+      const at = nowFn();
+      const leaseReader = typeof runnerProofDeps.ownerLeaseReader === "function"
+        ? runnerProofDeps.ownerLeaseReader
+        : readOwnerLease;
+      const lease = leaseReader(runDir, runId, at);
+      return rebootedSinceLastActivity({
+        bootAt: bootTimeFn(),
+        lastEventAt: lastQuietWindowBoundMs((Array.isArray(snapshotEvents) ? snapshotEvents : []).filter((e) => e && e.runId === runId)),
+        heartbeatAt: lease?.present === true && lease?.wellFormed === true ? lease.heartbeatAt : undefined,
+        now: at,
+      });
     } catch {
       return null;
     }
@@ -340,76 +398,117 @@ export async function waitRunSettlement({
                 events, runId, runDir, now: proofNow, deps: runnerProofDeps,
               });
               if (pre.pass) {
-              lastRunnerProofAt = proofNow;
-              let proof;
-              try {
-                proof = await runnerGoneFn({ runId, runDir, deps: runnerProofDeps });
-              } catch {
-                proof = null; // 探测自身的意外失败不构成死亡证明：继续等
-              }
-              if (proof?.gone === false && typeof proof.refusal === "string") {
-                lastRunnerRefusal = proof.refusal;
-              }
-              if (proof?.gone === true) {
-                lastRunnerRefusal = null; // 最新一次证明已成立，旧拒收理由不再挂着
-                // 证明成立：重新解析、重读、再判一次。解析变更/读取失败按原有
-                // 规则算不可信轮——绝不把旧快照当成仍非终态。
-                const reResolution = safeResolve();
-                if (reResolution.conflict) {
-                  outcome = { kind: "conflict" };
-                  break;
+                lastRunnerProofAt = proofNow;
+                let proof;
+                try {
+                  proof = await runnerGoneFn({ runId, runDir, deps: runnerProofDeps });
+                } catch {
+                  // 第 107 批：本轮证明抛错记为固定理由 probe_failed（进闭集、可
+                  // 触发 runner_unproven）；仍不构成死亡证明——证明成功与否都不
+                  // 影响继续等待的路径。
+                  proof = { gone: false, refusal: "probe_failed" };
                 }
-                if (!reResolution.found) {
-                  const [reason, text] = reResolution.unreadable
-                    ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
-                    : ["not_found", "transcript not found"];
-                  markUntrusted(round, reason, text);
-                  progressAllowed = false;
-                } else {
-                  const reEvents = await readSnapshot(reResolution);
-                  if (reEvents === null) {
-                    markUntrusted(round, "snapshot_read_failed", "snapshot read failed");
+                if (proof?.gone === false && typeof proof.refusal === "string") {
+                  lastRunnerRefusal = proof.refusal;
+                }
+                // 第 107 批：runner_unproven——本轮确实发了证明（前置筛已过）、被
+                // "未知类"闭集理由拒绝、且最后一条计入静默窗的绑定事件距今已满
+                // LEAD_ADVISORY_QUIET_SECONDS（30 分钟；前置筛只要求结算静默窗
+                // 15 分钟）。只用本轮证明结果判定：不用跨轮累计器、不拿粘住的
+                // lastRunnerRefusal 当证据。证明节流 5 分钟，所以最早在最后活动
+                // 后 30 分钟那轮证明退出、最晚约 35 分钟。
+                const unprovenQuietMs = proofNow - lastBoundTs;
+                const exitUnproven = proof?.gone === false
+                  && typeof proof.refusal === "string"
+                  && RUNNER_UNPROVEN_REFUSALS.includes(proof.refusal)
+                  && Number.isFinite(unprovenQuietMs)
+                  && unprovenQuietMs >= LEAD_ADVISORY_QUIET_SECONDS * 1000;
+                if (proof?.gone === true || exitUnproven) {
+                  const proofMode = proof.gone === true ? "gone" : "unproven";
+                  if (proof.gone === true) {
+                    lastRunnerRefusal = null; // 最新一次证明已成立，旧拒收理由不再挂着
+                  }
+                  // 证明成立（gone）或该退出报警（unproven）：都照同一纪律重新解析、
+                  // 重读、再判一次。解析变更/读取失败按原有规则算不可信轮——绝不
+                  // 把旧快照当成仍非终态。
+                  const reResolution = safeResolve();
+                  if (reResolution.conflict) {
+                    outcome = { kind: "conflict" };
+                    break;
+                  }
+                  if (!reResolution.found) {
+                    const [reason, text] = reResolution.unreadable
+                      ? ["copy_unreadable", "transcript copy unreadable (one of several copies failed to hash)"]
+                      : ["not_found", "transcript not found"];
+                    markUntrusted(round, reason, text);
                     progressAllowed = false;
                   } else {
-                    const reSettlement = determineRunSettlement(reEvents, runId);
-                    lastSettlement = reSettlement;
-                    if (reSettlement.status === "undeterminable") {
-                      markUntrusted(round, `undeterminable:${reSettlement.reason}`, `settlement undeterminable (${reSettlement.reason})`);
+                    const reEvents = await readSnapshot(reResolution);
+                    if (reEvents === null) {
+                      markUntrusted(round, "snapshot_read_failed", "snapshot read failed");
                       progressAllowed = false;
-                    } else if (reSettlement.status === "settled") {
-                      // 与既有收口出口同一确认：收口后再解析一次。
-                      const confirm = safeResolve();
-                      if (confirm.conflict || !confirm.found || confirm.path !== reResolution.path) {
-                        markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
-                        progressAllowed = false;
-                      } else {
-                        outcome = { kind: "settled", settlement: reSettlement };
-                        break;
-                      }
-                    } else if (!reSettlement.facts.terminal) {
-                      // 重读仍非终态：照收口出口再解析一次——冲突立即 conflict；
-                      // 路径变了/未找到算不可信轮继续；不变才 runner_gone。
-                      const confirm = safeResolve();
-                      if (confirm.conflict) {
-                        outcome = { kind: "conflict" };
-                        break;
-                      }
-                      if (!confirm.found || confirm.path !== reResolution.path) {
-                        markUntrusted(round, "resolution_changed_after_runner_gone", "runner proven gone but transcript resolution changed; continuing");
-                        progressAllowed = false;
-                      } else {
-                        outcome = { kind: "runner_gone", settlement: reSettlement };
-                        break;
-                      }
                     } else {
-                      // 重读后变成终态等验证等别的可信未收口形态：照常等待，进度
-                      // 行按新判定与新快照打印（那形态归上面的验证者证明管）。
-                      settlement = reSettlement;
-                      progressEvents = reEvents;
+                      const reSettlement = determineRunSettlement(reEvents, runId);
+                      lastSettlement = reSettlement;
+                      if (reSettlement.status === "undeterminable") {
+                        markUntrusted(round, `undeterminable:${reSettlement.reason}`, `settlement undeterminable (${reSettlement.reason})`);
+                        progressAllowed = false;
+                      } else if (reSettlement.status === "settled") {
+                        // 与既有收口出口同一确认：收口后再解析一次。
+                        const confirm = safeResolve();
+                        if (confirm.conflict || !confirm.found || confirm.path !== reResolution.path) {
+                          markUntrusted(round, "resolution_changed_after_settled", "settled but transcript resolution changed; continuing");
+                          progressAllowed = false;
+                        } else {
+                          outcome = { kind: "settled", settlement: reSettlement };
+                          break;
+                        }
+                      } else if (!reSettlement.facts.terminal) {
+                        // 重读仍非终态：照收口出口再解析一次——冲突立即 conflict；
+                        // 路径变了/未找到算不可信轮继续；不变才按本轮证明形态出口
+                        //（gone → runner_gone；unproven → runner_unproven 并带上
+                        // 本轮拒绝理由、静默毫秒与重启关系陈述）。
+                        const confirm = safeResolve();
+                        if (confirm.conflict) {
+                          outcome = { kind: "conflict" };
+                          break;
+                        }
+                        if (!confirm.found || confirm.path !== reResolution.path) {
+                          markUntrusted(
+                            round,
+                            proofMode === "gone"
+                              ? "resolution_changed_after_runner_gone"
+                              : "resolution_changed_after_runner_unproven",
+                            proofMode === "gone"
+                              ? "runner proven gone but transcript resolution changed; continuing"
+                              : "runner unproven but transcript resolution changed; continuing",
+                          );
+                          progressAllowed = false;
+                        } else if (proofMode === "gone") {
+                          outcome = { kind: "runner_gone", settlement: reSettlement };
+                          break;
+                        } else {
+                          outcome = {
+                            kind: "runner_unproven",
+                            settlement: reSettlement,
+                            refusal: proof.refusal,
+                            quietMs: unprovenQuietMs,
+                            // 重启关系只陈述事实（开机晚于最后可见活动，不证明此刻
+                            // 没有新 runner）；读失败按 null。最后活动取重读快照里
+                            // 计入静默窗的最后一条绑定事件与 owner 租约心跳的较晚者。
+                            rebooted: computeRebootedSinceLastActivity(reEvents),
+                          };
+                          break;
+                        }
+                      } else {
+                        // 重读后变成终态等验证等别的可信未收口形态：照常等待，进度
+                        // 行按新判定与新快照打印（那形态归上面的验证者证明管）。
+                        settlement = reSettlement;
+                        progressEvents = reEvents;
+                      }
                     }
                   }
                 }
-              }
               } else if (pre.reason === "owner_heartbeat_fresh") {
                 // 二轮续修 4：本该发证明的这轮被心跳新鲜挡下——按同一节流记账，
                 // 拒绝理由记 settle 门 2 的闭集标签 owner_fresh；不发证明、不扫进程。
@@ -472,5 +571,11 @@ export async function waitRunSettlement({
     events: lastEventsRead,
     ...(outcome.kind === "untrusted" ? { reason: outcome.reason, rounds: outcome.rounds } : {}),
     ...(outcome.kind === "verifier_gone" ? { basis: outcome.basis } : {}),
+    // 第 107 批：runner_unproven（CLI 退出码 5）的报警事实——本轮拒绝理由、
+    // 静默毫秒（≥ LEAD_ADVISORY_QUIET_SECONDS * 1000）与重启关系（null = 不
+    // 成立或读取失败）。WAO 不改运行状态，交回 Lead 决定。
+    ...(outcome.kind === "runner_unproven"
+      ? { refusal: outcome.refusal, quietMs: outcome.quietMs, rebooted: outcome.rebooted }
+      : {}),
   };
 }

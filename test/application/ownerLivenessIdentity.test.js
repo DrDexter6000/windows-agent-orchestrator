@@ -16,6 +16,8 @@ import assert from "node:assert/strict";
 import {
   identifyProcessIdentity,
   isFreshHeartbeat,
+  machineBootTimeMs,
+  rebootedSinceLastActivity,
   DEFAULT_OWNER_LIVENESS_THRESHOLD_MS,
   PID_IDENTITY_TOLERANCE_MS,
   PID_IDENTITY_VERDICTS,
@@ -200,4 +202,70 @@ test("ID-12: 开机时刻读不出（非有限值）→ 跳过该判据、落到
     creationTimeFn: async () => ANCHOR + PID_IDENTITY_TOLERANCE_MS + 1,
   }));
   assert.deepEqual(r, { verdict: "gone", basis: "pid_reused" });
+});
+
+// =====================================================================
+// 第 107 批：machineBootTimeMs（开机时刻算式）与 rebootedSinceLastActivity
+//（重启关系纯陈述）。全部注入，零真实时钟/零真实 uptime。
+// =====================================================================
+
+test("BOOT-01: machineBootTimeMs = nowFn() - uptimeFn() * 1000（注入算式）", () => {
+  assert.equal(machineBootTimeMs({ nowFn: () => 1_000_000, uptimeFn: () => 12.5 }), 1_000_000 - 12_500);
+  assert.equal(machineBootTimeMs({ nowFn: () => 500, uptimeFn: () => 0 }), 500, "uptime 0 = 刚开机");
+});
+
+test("REBOOT-01: 晚于/等于/早于三向——严格大于才算成立（等于不算，无容差）", () => {
+  const facts = { lastEventAt: 1_000_000, heartbeatAt: 900_000, now: 2_000_000 };
+  // 晚于 → 成立，返回 { bootAt, lastActivityAt }。
+  assert.deepEqual(
+    rebootedSinceLastActivity({ ...facts, bootAt: 1_200_000 }),
+    { bootAt: 1_200_000, lastActivityAt: 1_000_000 },
+    "最后活动取事件（较晚者）",
+  );
+  // 等于最后活动 → null（严格大于，把 > 写成 >= 会被这条抓红）。
+  assert.equal(rebootedSinceLastActivity({ ...facts, bootAt: 1_000_000 }), null);
+  // 早于最后活动 → null。
+  assert.equal(rebootedSinceLastActivity({ ...facts, bootAt: 999_999 }), null);
+  // 心跳晚于事件时取心跳：开机晚于事件但早于心跳 → null。
+  assert.equal(rebootedSinceLastActivity({
+    bootAt: 950_000, lastEventAt: 900_000, heartbeatAt: 1_000_000, now: 2_000_000,
+  }), null);
+  assert.deepEqual(
+    rebootedSinceLastActivity({
+      bootAt: 1_000_500, lastEventAt: 900_000, heartbeatAt: 1_000_000, now: 2_000_000,
+    }),
+    { bootAt: 1_000_500, lastActivityAt: 1_000_000 },
+    "最后活动取心跳（较晚者）",
+  );
+});
+
+test("REBOOT-02: 只有事件 / 只有心跳 / 两者都无效", () => {
+  // 只有事件（心跳 undefined）→ 可成立。
+  assert.deepEqual(
+    rebootedSinceLastActivity({ bootAt: 1_100, lastEventAt: 1_000, heartbeatAt: undefined, now: 2_000 }),
+    { bootAt: 1_100, lastActivityAt: 1_000 },
+  );
+  // 只有心跳（事件 NaN）→ 可成立。
+  assert.deepEqual(
+    rebootedSinceLastActivity({ bootAt: 1_100, lastEventAt: NaN, heartbeatAt: 1_050, now: 2_000 }),
+    { bootAt: 1_100, lastActivityAt: 1_050 },
+  );
+  // 两者都无效（NaN/字符串/undefined）→ null（没有可比较的最后活动）。
+  assert.equal(rebootedSinceLastActivity({ bootAt: 1_100, lastEventAt: NaN, heartbeatAt: "soon", now: 2_000 }), null);
+  assert.equal(rebootedSinceLastActivity({ bootAt: 1_100, lastEventAt: undefined, heartbeatAt: undefined, now: 2_000 }), null);
+});
+
+test("REBOOT-03: bootAt 非有限 / 晚于 now / now 非有限 → null（bootAt == now 不算晚于）", () => {
+  const base = { lastEventAt: 1_000, heartbeatAt: 900, now: 2_000 };
+  assert.equal(rebootedSinceLastActivity({ ...base, bootAt: NaN }), null);
+  assert.equal(rebootedSinceLastActivity({ ...base, bootAt: Infinity }), null);
+  assert.equal(rebootedSinceLastActivity({ ...base, bootAt: "2026" }), null, "字符串数字不算");
+  assert.equal(rebootedSinceLastActivity({ ...base, bootAt: 2_001 }), null, "开机晚于 now（时钟未跟上）");
+  // 规格只拒"晚于 now"：等于 now 且晚于最后活动 → 成立（边界按字面实现）。
+  assert.deepEqual(
+    rebootedSinceLastActivity({ ...base, bootAt: 2_000 }),
+    { bootAt: 2_000, lastActivityAt: 1_000 },
+    "等于 now 不算晚于 now",
+  );
+  assert.equal(rebootedSinceLastActivity({ bootAt: 1_500, lastEventAt: 1_000, heartbeatAt: 900, now: NaN }), null);
 });

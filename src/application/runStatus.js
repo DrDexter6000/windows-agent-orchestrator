@@ -35,6 +35,7 @@ import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 import {
   LEAD_ADVISORY_QUIET_SECONDS, VITAL_SIGN_RECENT_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText,
   runnerGoneAdvisoryText, runnerGoneAdvisoryWireText,
+  leadAdvisoryRebootWireText, rebootRelationAdvisoryText,
   vitalSignAgeMs,
 } from "./runQuietAdvisory.js";
 // TD-341（第 89 批 C）：runner 已不在的证明入口 + 读面节流（前置筛选 + 缓存 +
@@ -42,6 +43,8 @@ import {
 import { probeRunnerGoneCached } from "./runnerGoneProof.js";
 // B92 续修 1：静默分钟数与证明门 4 同一取法（被拒的重打包审计不算活动）。
 import { lastQuietWindowBoundMs } from "./runSettle.js";
+// 第 107 批：重启关系陈述（开机时刻 + 纯函数判定 + 租约心跳读法，全在共享层）。
+import { machineBootTimeMs, rebootedSinceLastActivity, readOwnerLease } from "./ownerLiveness.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -245,6 +248,8 @@ function projectScorecardSummary(scopeEvents) {
  *   ({ handshakeReader, daemonAliveFn, … }; daemon SSOT lives in the adapters
  *   layer — the MCP/CLI adapter injects the real readers, tests inject stubs).
  *   Absent → the proof never runs (byte-compatible for every existing caller).
+ *   第 107 批追加两个可选读器（供重启关系陈述，测试确定性）：bootTimeFn（缺省
+ *   machineBootTimeMs）与 ownerLeaseReader（缺省 readOwnerLease）——不注入时真读。
  * @param {object} [input.runnerGoneCache] — TD-341: optional per-process proof
  *   cache instance (createRunnerGoneProofCache(); held by the adapter, not here).
  * @returns {Promise<object>} structured status (CLI prints a subset; MCP a safe subset)
@@ -383,27 +388,71 @@ export async function getRunStatus({
   const observedSeq = Number.isInteger(last?.seq) ? last.seq : 0;
   const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
   const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
+  // 第 107 批：重启关系陈述——非终态、普通静默 advisory 已在场、runner 未被
+  // 证明不在、且 rebootedSinceLastActivity 成立时附加（中文末尾一句 + wire 变体
+  // 模板，见 runQuietAdvisory.js）。最后活动与 B92 同一取法
+  //（lastQuietWindowBoundMs——被拒的重打包审计不算活动），另取 owner 租约心跳
+  // 的较晚者；开机时刻经 runnerGoneDeps.bootTimeFn 注入缝可测（缺省真读
+  // machineBootTimeMs）；任一读取失败 → 不陈述（rebooted 为 null，输出字节不
+  // 变）。它只陈述"本机开机晚于该运行最后可见活动"，不证明此刻没有新 runner。
+  let rebootMinutes = null;
+  if (quiet && !runnerGone) {
+    try {
+      const at = _now();
+      const bootTimeFn = typeof runnerGoneDeps?.bootTimeFn === "function"
+        ? runnerGoneDeps.bootTimeFn
+        : machineBootTimeMs;
+      const leaseReader = typeof runnerGoneDeps?.ownerLeaseReader === "function"
+        ? runnerGoneDeps.ownerLeaseReader
+        : readOwnerLease;
+      const lease = leaseReader(runDir, runId, at);
+      const rebooted = rebootedSinceLastActivity({
+        bootAt: bootTimeFn(),
+        lastEventAt: lastQuietWindowBoundMs(events.filter((e) => e && e.runId === runId)),
+        heartbeatAt: lease?.present === true && lease?.wellFormed === true ? lease.heartbeatAt : undefined,
+        now: at,
+      });
+      if (rebooted !== null) {
+        rebootMinutes = {
+          bootMinutesAgo: Math.max(0, Math.floor((at - rebooted.bootAt) / 60000)),
+          activityMinutesAgo: Math.max(0, Math.floor((at - rebooted.lastActivityAt) / 60000)),
+        };
+      }
+    } catch {
+      rebootMinutes = null;
+    }
+  }
   // TD-341（第 89 批 C）：advisory 在场条件改为 quiet || runnerGone——证明只要求
   // 结算静默窗（15 分钟），普通 advisory 门槛是 30 分钟；不改的话第 15–30 分钟
   // 证明成立也不返回。runner 已被证明不在时用新的固定模板（双语，模板在
-  // runQuietAdvisory.js），不说"转录永不再前进"（settle/resume 都能合法追加）。
+  // runQuietAdvisory.js），不说"转录永不再前进"（settle/resume 都能合法追加），
+  // 也不叠加第 107 批的重启关系句（已证明不在时它不再增加信息）。
   const advisoryPresent = quiet || runnerGone;
   const leadAdvisory = !advisoryPresent
     ? null
     : runnerGone
       ? runnerGoneAdvisoryText({ runId, quietMinutes: runnerGoneQuietMinutes ?? 0 })
-      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`;
-  // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）。
+      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"${rebootMinutes !== null ? rebootRelationAdvisoryText(rebootMinutes) : ""}`;
+  // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）；
+  // 重启关系成立时换用第 107 批的变体模板（同一批事实，长度守 480）。
   const leadAdvisoryWire = !advisoryPresent
     ? null
     : runnerGone
       ? runnerGoneAdvisoryWireText({ quietMinutes: runnerGoneQuietMinutes ?? 0 })
-      : leadAdvisoryWireText({
-          secondsSinceEffect,
-          lastActivityEventKind: lastActivity?.kind ?? null,
-          lastRuntimeStatus: lastActivity?.status ?? null,
-          secondsSinceActivity,
-        });
+      : quiet && rebootMinutes !== null
+        ? leadAdvisoryRebootWireText({
+            secondsSinceEffect,
+            lastActivityEventKind: lastActivity?.kind ?? null,
+            lastRuntimeStatus: lastActivity?.status ?? null,
+            secondsSinceActivity,
+            ...rebootMinutes,
+          })
+        : leadAdvisoryWireText({
+            secondsSinceEffect,
+            lastActivityEventKind: lastActivity?.kind ?? null,
+            lastRuntimeStatus: lastActivity?.status ?? null,
+            secondsSinceActivity,
+          });
 
   return {
     runId,

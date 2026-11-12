@@ -51,6 +51,53 @@ export function isFreshHeartbeat(heartbeatAt, now, thresholdMs = DEFAULT_OWNER_L
 }
 
 /**
+ * 第 107 批：本机开机时刻（epoch ms）——nowFn() - uptimeFn() * 1000。
+ * identifyProcessIdentity 的缺省 bootTimeFn 自此走这一个算式（行为不变），
+ * 等待器 runner_unproven 出口与 run_status 的重启关系陈述也共用它。
+ * nowFn / uptimeFn 可注入（测试确定性）；缺省 Date.now / os.uptime。
+ *
+ * @param {{nowFn?:Function, uptimeFn?:Function}} [deps]
+ * @returns {number}
+ */
+export function machineBootTimeMs({ nowFn = Date.now, uptimeFn = os.uptime } = {}) {
+  return nowFn() - uptimeFn() * 1000;
+}
+
+/**
+ * 第 107 批：本机是否在"该运行最后可见活动"之后开机（纯陈述，不证明没有新
+ * runner）。最后活动取 lastEventAt（本 runId 最后一条绑定事件的 ts，epoch ms）
+ * 与 heartbeatAt（owner 租约，epoch ms）中有限值的较晚者；两者都无效 → null。
+ * bootAt 不是有限数、晚于 now、或不**严格**晚于最后活动 → null；不加容差。
+ * 成立时返回 { bootAt, lastActivityAt }。
+ *
+ * 语义边界（调用方照实转述，不扩大）：它只陈述"本机开机晚于该运行最后可见
+ * 活动"，不能证明此刻没有新 runner——开机后有人为同一 runId 续跑（命令行读
+ * 不到的进程）与它不矛盾。Windows Fast Startup 关机不重置 os.uptime()，那种
+ * 关机后本判据不成立（读到的"开机时刻"仍在关机前）。
+ *
+ * @param {object} facts
+ * @param {number} facts.bootAt — 开机时刻（epoch ms；machineBootTimeMs 的输出）
+ * @param {number} facts.lastEventAt — 最后一条绑定事件的 ts（epoch ms；可无效）
+ * @param {number} facts.heartbeatAt — owner 租约心跳（epoch ms；可无效/缺省）
+ * @param {number} facts.now — 当前时刻（epoch ms）
+ * @returns {{bootAt:number, lastActivityAt:number}|null}
+ */
+export function rebootedSinceLastActivity({ bootAt, lastEventAt, heartbeatAt, now }) {
+  if (typeof now !== "number" || !Number.isFinite(now)) return null;
+  if (typeof bootAt !== "number" || !Number.isFinite(bootAt)) return null;
+  if (bootAt > now) return null;
+  let lastActivityAt = null;
+  for (const t of [lastEventAt, heartbeatAt]) {
+    if (typeof t === "number" && Number.isFinite(t) && (lastActivityAt === null || t > lastActivityAt)) {
+      lastActivityAt = t;
+    }
+  }
+  if (lastActivityAt === null) return null;
+  if (!(bootAt > lastActivityAt)) return null; // 不严格晚于最后活动 → 不成立（无容差）
+  return { bootAt, lastActivityAt };
+}
+
+/**
  * Get the owner heartbeat file path for a run.
  * @param {string} runDir
  * @param {string} runId
@@ -299,10 +346,11 @@ export async function identifyProcessIdentity(pid, anchorAt, deps = {}) {
   if (!alive) return { verdict: "gone", basis: "pid_exited" };
 
   // 2) A boot after the anchor means every process from before the anchor is
-  // gone, whatever holds the pid now.
+  // gone, whatever holds the pid now. 第 107 批起缺省走 machineBootTimeMs
+  //（同一算式，单一取法）。
   if (typeof deps.bootTimeFn !== "function") {
     if (typeof nowFn !== "function") return unknown;
-    deps = { ...deps, bootTimeFn: () => nowFn() - os.uptime() * 1000 };
+    deps = { ...deps, bootTimeFn: () => machineBootTimeMs({ nowFn }) };
   }
   let bootAt;
   try {

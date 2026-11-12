@@ -66,11 +66,15 @@ function makeGitRepo(dir) {
 // TD-341（续修 5）：runner 缺席证明的拒绝桩——经 createWaoMcpServer 的
 // runnerGoneDeps 注入缝传入（缺省是真实 daemon 读器 + 真实进程扫描）。非终态、
 // 静默已满的夹具经它一律"证明不成立"，测试不起任何进程、advisory 走旧安静模板。
+// 第 107 批：另注入 bootTimeFn（epoch 0 开机）——夹具 ts 久远而本测试不注入时钟，
+// 不钉住的话真机"晚于夹具活动重启过"会把 leadAdvisory 换成重启关系变体模板，
+// 下方锚定的模板断言随机翻红。钉 0 = 重启关系永不成立，wire 文本字节稳定。
 const REFUSING_RUNNER_GONE_DEPS = {
   handshakeReader: () => ({ present: false }),
   daemonAliveFn: () => false,
   identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
   runnerScanFn: async () => ({ alive: true }),
+  bootTimeFn: () => 0,
 };
 
 async function buildInMemoryClient(server) {
@@ -945,6 +949,49 @@ test("0068-M1: 刚有动作的 run / 已终态的 run —— leadAdvisory 缺席
         const res = await client.callTool({ name: "run_status", arguments: { runId } });
         const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS, runId);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// 第 107 批：静默 + 重启关系成立时 leadAdvisory 换固定英文变体模板；输出键
+// 集合不变（无新增 MCP 字段——重启关系只进 leadAdvisory 文本，不另立字段）。
+// ---------------------------------------------------------------------
+
+test("第 107 批 M1b: 静默 + 开机晚于最后活动 → leadAdvisory 是重启变体模板，键集合不变、≤480", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0068-m1b-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_reboot_0107";
+    const lastTs = new Date(Date.now() - 40 * 60_000).toISOString();
+    writeTranscript(runDir, runId, [
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: lastTs, runId, agentId: "w", seq: 1 }),
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: lastTs, runId, agentId: "w", seq: 2 }),
+    ].join(""));
+    // 证明拒于 runner_alive（未被证明不在）；开机读数注入为最后活动后 5 分钟
+    //（本测试不注入时钟，分钟数随真实钟走，断言用 \d+）。
+    const server = createWaoMcpServer({
+      registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }),
+      runDir,
+      runnerGoneDeps: { ...REFUSING_RUNNER_GONE_DEPS, bootTimeFn: () => Date.now() - 35 * 60_000 },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
+        "键集合与 0068 完全一致——重启关系不新增 MCP 输出字段");
+      assert.match(parsed.leadAdvisory,
+        /^No new worker action or text in the transcript for \d+ min \(last activity: command, \d+s ago\)\. This machine booted \d+ min ago, after the run's last activity \d+ min ago; a pre-reboot runner cannot have survived it, but a runner started after the boot is not ruled out\. Whether to keep waiting is the Lead's decision\. Before stopping: read run_activity, then run_stop with observedSeq and a reason\.$/);
+      assert.ok(parsed.leadAdvisory.length <= 480, `${parsed.leadAdvisory.length}`);
+      if (res.structuredContent) {
+        assert.deepEqual(res.structuredContent, parsed, "structuredContent mirrors");
       }
     } finally {
       await client.close();

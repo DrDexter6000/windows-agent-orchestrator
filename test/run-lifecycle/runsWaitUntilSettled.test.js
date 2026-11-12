@@ -600,7 +600,15 @@ test("U-11: quiet non-terminal round names the exits; terminal rounds carry no v
     };
     const r = await runWaitSettled({
       dir, runId,
-      deps: { readTranscriptFn, nowFn: () => lastEventMs + 31 * 60_000 },
+      deps: {
+        readTranscriptFn,
+        nowFn: () => lastEventMs + 31 * 60_000,
+        // 第 107 批补注：本用例测进度行形状，不测证明——缺省证明会真跑 PowerShell
+        // 扫描，且本机扫描失败（runner_scan_failed）自第 107 批起会触发报警出口
+        // 的重读、吃掉一次夹具读。注入非闭集拒绝桩：不发报警、不重读，也免去
+        // 真实扫描（时序与本用例原断言一致）。
+        runnerGoneFn: async () => ({ gone: false, refusal: "foreground_no_session" }),
+      },
     });
     assert.equal(r.exitCode, undefined);
     const progressLines = r.outLines.filter((l) => l.startsWith("[runs wait]"));
@@ -1654,6 +1662,332 @@ test("W-07c (B91): 重新打包形状证明成立但重读已有结果 → 照�
     assert.equal(reads, 2, "一轮正常读 + 证明后一次重读");
     assert.match(r.out, /Settlement: settled \(delivery_settled/);
     assert.ok(!/verifier_gone|Stuck:/.test(r.out), "不报 verifier_gone");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 107 批：runner_unproven——静默满 30 分钟、owner 心跳不新鲜、本轮 runner
+// 缺席证明被"未知类"闭集理由拒绝（RUNNER_UNPROVEN_REFUSALS）时以退出码 5 报警。
+// 证明/时钟/开机时刻全注入，零真实进程扫描；只在"本轮确实发了证明"时判定，
+// 不用跨轮累计器。证明成立仍是 runner_gone（3）；不在闭集的拒绝不退出。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 非终态安静运行（同 runnerGoneEvents 形状），ts 固定；注入钟 base+31min 让静默
+// 满 30 分钟（证明前置筛的 15 分钟随之满足）。bootAt 缺省早于最后活动 → 不成立。
+const UP_TS = Date.parse("2026-11-01T00:00:00.000Z");
+function unprovenEvents(runId) {
+  const iso = new Date(UP_TS).toISOString();
+  return [
+    { ...started(runId, { delivery: false }), ts: iso },
+    { type: "run.background_submitted", runId, agentId: "coder_low", background: true, ts: iso },
+  ];
+}
+// 本节通用 deps：钟停在 base+31min；证明桩由用例给；开机时刻一律注入钉住
+//（缺省会真读 machineBootTimeMs——真机 boot 与 base 的先后不可控）。
+function unprovenDeps({ refusal, bootTimeFn = () => UP_TS - 60 * 60_000, runnerGoneFn, nowMs = UP_TS + 31 * 60_000, ...rest } = {}) {
+  return {
+    nowFn: () => nowMs,
+    bootTimeFn,
+    ...(runnerGoneFn ? { runnerGoneFn } : refusal
+      ? { runnerGoneFn: async () => ({ gone: false, refusal }) }
+      : {}),
+    ...rest,
+  };
+}
+
+test("UP-01: 静默满 30 分钟且本轮拒于 runner_scan_failed → 退出 5（文本终行与措辞纪律）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up01";
+    writeLines(dir, runId, unprovenEvents(runId));
+    const r = await runWaitSettled({ dir, runId, deps: unprovenDeps({ refusal: "runner_scan_failed" }) });
+    assert.equal(r.exitCode, 5);
+    assert.equal(r.outLines.length, 3, `三行终行（无重启行），实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[0], `Run: ${runId} (running)`);
+    assert.equal(
+      r.outLines[1],
+      `Unproven: the owner heartbeat is not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.`,
+    );
+    assert.match(r.outLines[2], new RegExp(`^Next step: The runner's absence cannot be proven, so the run may still change\\. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
+    assert.match(r.outLines[2], /The Lead then decides: stop it \(wao stop; for a continuable run, fix it with run_continue\), settle it, or attach the wait again\.$/);
+    // 措辞纪律：不说"等待不会改变事实"，不断言 runner 已死。
+    assert.ok(!r.out.includes("waiting will not change this"), "不得写 waiting will not change this");
+    assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "报警即退：不打印未收口进度行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-01b: JSON 面——键集 {settled,runId,state,reason,refusal,quietMinutes,rebootedSinceLastActivity,nextStep}；rebooted 不成立 → null", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up01b";
+    writeLines(dir, runId, unprovenEvents(runId));
+    const r = await runWaitSettled({
+      dir, runId, asJson: true,
+      deps: unprovenDeps({ refusal: "process_identity_unknown" }),
+    });
+    assert.equal(r.exitCode, 5);
+    assert.equal(r.outLines.length, 1, "stdout 只留最终 JSON");
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual(
+      Object.keys(parsed).sort(),
+      ["nextStep", "quietMinutes", "reason", "rebootedSinceLastActivity", "refusal", "runId", "settled", "state"],
+    );
+    assert.equal(parsed.settled, false);
+    assert.equal(parsed.runId, runId);
+    assert.equal(parsed.state, "running");
+    assert.equal(parsed.reason, "runner_unproven");
+    assert.equal(parsed.refusal, "process_identity_unknown");
+    assert.equal(parsed.quietMinutes, 31);
+    assert.equal(parsed.rebootedSinceLastActivity, null, "开机早于最后活动 → null");
+    assert.equal(typeof parsed.nextStep, "string");
+    assert.ok(!r.out.includes("waiting will not change this"));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-01c: rebooted 成立 → 文本加 Reboot 行、JSON 带两个 ISO 时刻；等待前后转录字节不变", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up01c";
+    writeLines(dir, runId, unprovenEvents(runId));
+    const before = readFileSync(join(dir, `${runId}.jsonl`));
+    // 开机晚于最后活动 5 分钟；注入钟 base+31min。
+    const bootAt = UP_TS + 5 * 60_000;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({
+        refusal: "session_ambiguous",
+        bootTimeFn: () => bootAt,
+      }),
+    });
+    assert.equal(r.exitCode, 5);
+    assert.equal(r.outLines.length, 4, "多一行 Reboot");
+    assert.equal(
+      r.outLines[2],
+      `Reboot: this machine booted at ${new Date(bootAt).toISOString()}, after the run's last activity (${new Date(UP_TS).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`,
+    );
+    const j = await runWaitSettled({
+      dir, runId, asJson: true,
+      deps: unprovenDeps({ refusal: "session_ambiguous", bootTimeFn: () => bootAt }),
+    });
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(parsed.rebootedSinceLastActivity, {
+      bootAt: new Date(bootAt).toISOString(),
+      lastActivityAt: new Date(UP_TS).toISOString(),
+    }, "时刻用 ISO 字符串");
+    // 只读不变量：等待不写转录一字节。
+    const after = readFileSync(join(dir, `${runId}.jsonl`));
+    assert.ok(after.equals(before), "转录字节不变");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-02: 静默 29 分 59 秒时本轮拒于 runner_scan_failed 不退出；随后收口 0（阈值证伪）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up02";
+    const events = unprovenEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    let proofCalls = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({
+        nowMs: UP_TS + (30 * 60_000 - 1000), // 29:59 < 30 分钟：不触发
+        runnerGoneFn: async () => { proofCalls += 1; return { gone: false, refusal: "runner_scan_failed" }; },
+        readTranscriptFn: async () => {
+          reads += 1;
+          // 第 2 轮读返回终态（钟不走，节流挡住第二次证明）→ 收口退出 0。
+          return reads === 1 ? events : [...events, stateChange(runId, "completed")];
+        },
+      }),
+    });
+    assert.equal(r.exitCode, undefined, "未满 30 分钟不退出 5；随后收口退出 0");
+    assert.equal(proofCalls, 1, "本轮确实发了证明（前置筛 15 分钟已过）");
+    assert.ok(r.outLines.some((l) => l.includes("runner proof: runner_scan_failed")), "拒绝理由照旧进进度行注脚");
+    assert.ok(!/runner_unproven|Unproven:/.test(r.out), "不出现 runner_unproven 输出");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// 闭集每个理由各一例（含证明抛错 → probe_failed）。全部静默满 30 分钟、本轮证明。
+test("UP-03: 闭集每个理由各一例（含抛错 → probe_failed）→ 退出 5、refusal 正确", async () => {
+  const cases = [
+    ["runner_scan_failed", { refusal: "runner_scan_failed" }],
+    ["process_identity_unknown", { refusal: "process_identity_unknown" }],
+    ["owner_lease_corrupt", { refusal: "owner_lease_corrupt" }],
+    ["session_ambiguous", { refusal: "session_ambiguous" }],
+    ["probe_failed", { runnerGoneFn: async () => { throw new Error("probe exploded"); } }],
+  ];
+  for (const [label, depOverrides] of cases) {
+    const dir = makeRunDir();
+    try {
+      const runId = `run_up03_${label}`;
+      writeLines(dir, runId, unprovenEvents(runId));
+      const r = await runWaitSettled({
+        dir, runId, asJson: true,
+        deps: unprovenDeps(depOverrides),
+      });
+      assert.equal(r.exitCode, 5, `${label} → 退出 5`);
+      const parsed = JSON.parse(r.out);
+      assert.equal(parsed.reason, "runner_unproven", `${label}`);
+      assert.equal(parsed.refusal, label, `${label} 的 refusal 原样上报`);
+    } finally {
+      cleanupDir(dir);
+    }
+  }
+});
+
+test("UP-04: 不在闭集的拒绝满 30 分钟也不退出——owner_fresh（前置筛）/runner_alive/process_alive/daemon_owned", async () => {
+  // owner_fresh：真实 .owner 文件的心跳写在注入钟上 → 前置筛挡下，证明零调用。
+  const freshDir = makeRunDir();
+  try {
+    const runId = "run_up04a";
+    writeLines(freshDir, runId, unprovenEvents(runId));
+    writeFileSync(join(freshDir, `.owner-${runId}`), JSON.stringify({ pid: process.pid, heartbeatAt: UP_TS + 31 * 60_000 }), "utf8");
+    let proofCalls = 0;
+    let appended = false;
+    const r = await runWaitSettled({
+      dir: freshDir, runId,
+      deps: unprovenDeps({
+        runnerGoneFn: async () => { proofCalls += 1; return { gone: true }; },
+        sleepFn: async () => {
+          if (!appended) {
+            appended = true;
+            appendLines(freshDir, runId, [stateChange(runId, "completed")]);
+          }
+        },
+      }),
+    });
+    assert.equal(r.exitCode, undefined, "owner_fresh 不触发退出 5");
+    assert.equal(proofCalls, 0, "前置筛挡下：不发证明");
+    assert.ok(r.outLines.some((l) => l.includes("runner proof: owner_fresh")), "理由照旧进注脚");
+  } finally {
+    cleanupDir(freshDir);
+  }
+  // runner_alive / process_alive / daemon_owned：本轮证明被拒但非闭集 → 不退出 5。
+  for (const refusal of ["runner_alive", "process_alive", "daemon_owned"]) {
+    const dir = makeRunDir();
+    try {
+      const runId = `run_up04_${refusal}`;
+      const events = unprovenEvents(runId);
+      writeLines(dir, runId, events);
+      let reads = 0;
+      const r = await runWaitSettled({
+        dir, runId,
+        deps: unprovenDeps({
+          refusal,
+          readTranscriptFn: async () => {
+            reads += 1;
+            return reads === 1 ? events : [...events, stateChange(runId, "completed")];
+          },
+        }),
+      });
+      assert.equal(r.exitCode, undefined, `${refusal} 满静默 30 分钟也不退出 5`);
+      assert.ok(!/runner_unproven|Unproven:/.test(r.out), `${refusal} 不出现 runner_unproven 输出`);
+    } finally {
+      cleanupDir(dir);
+    }
+  }
+});
+
+test("UP-05: 同样静默满 30 分钟，证明成立仍走 runner_gone（退出 3），不是 5", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up05";
+    writeLines(dir, runId, unprovenEvents(runId));
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({ runnerGoneFn: async () => ({ gone: true }) }),
+    });
+    assert.equal(r.exitCode, 3, "证明成立 → runner_gone 退出 3");
+    assert.match(r.out, /Stuck: the runner of run_up05 is gone/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-06: 触发条件成立、重读时已收口 → 照常退出 0，不报 runner_unproven", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up06";
+    const events = unprovenEvents(runId);
+    writeLines(dir, runId, events);
+    let reads = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({
+        refusal: "runner_scan_failed",
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads === 1 ? events : [...events, stateChange(runId, "completed")];
+        },
+      }),
+    });
+    assert.equal(r.exitCode, undefined, "重读已收口 → 退出 0");
+    assert.equal(reads, 2, "一轮正常读 + 报警出口的重读");
+    assert.match(r.out, /Settlement: settled \(no_delivery_requested\)/);
+    assert.ok(!/runner_unproven|Unproven:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-07: 触发条件成立、重读后确认解析冲突 → 仍按冲突退出 4", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up07";
+    writeLines(dir, runId, unprovenEvents(runId));
+    let calls = 0;
+    const real = realResolver(dir);
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({
+        refusal: "runner_scan_failed",
+        resolveDetailedFn: (rd, rid) => {
+          calls += 1;
+          if (calls === 3) return { path: null, found: false, conflict: true };
+          return real(rd, rid);
+        },
+      }),
+    });
+    assert.equal(r.exitCode, 4, "退出前的确认解析冲突按冲突出口");
+    assert.equal(calls, 3, "解析三次：首轮、重读前、退出前确认");
+    assert.match(r.out, /multiple distinct transcript copies/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-08: 证明期间 SIGINT → 单一出口 130，只输出一份中断结果（压过报警出口）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up08";
+    writeLines(dir, runId, unprovenEvents(runId));
+    const base = process.listenerCount("SIGINT");
+    const r = await runWaitSettled({
+      dir, runId, asJson: true,
+      deps: unprovenDeps({
+        runnerGoneFn: async () => {
+          process.emit("SIGINT");
+          return { gone: false, refusal: "runner_scan_failed" };
+        },
+      }),
+    });
+    assert.equal(r.exitCode, 130, "中断以 130 退出");
+    assert.equal(r.outLines.length, 1, `只输出一份最终结果，实际: ${JSON.stringify(r.outLines)}`);
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.interrupted, true);
+    assert.equal(parsed.settled, false);
+    assert.ok(!/runner_unproven|Unproven:/.test(r.out), "中断路径不出报警终行");
+    assert.equal(process.listenerCount("SIGINT"), base, "SIGINT handler 注销（无泄漏）");
   } finally {
     cleanupDir(dir);
   }

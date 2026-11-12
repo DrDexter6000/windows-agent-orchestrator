@@ -6,6 +6,9 @@
 // run_await_result 的 observation.transcript_quiet 语义注记共用它。
 // TD-341（第 89 批 C）：runner 已被证明不在时的 advisory 双语模板同在本模块
 //（runnerGoneAdvisoryText / runnerGoneAdvisoryWireText）——advisory 文本单一 SSOT。
+// 第 107 批：静默 advisory 之上的重启关系陈述（rebootedSinceLastActivity 成立
+// 时）：中文追加句 rebootRelationAdvisoryText + wire 变体模板
+// leadAdvisoryRebootWireText（判定本身是 ownerLiveness 的纯函数，这里只有模板）。
 //
 // "动作或正文"与 completed_empty 判定同一口径（runEventIsUsableEffect）；
 // runtime_activity / thinking 只说明运行时还活着。陈述的是转录可见的事实：有的
@@ -97,6 +100,19 @@ export function isTranscriptQuiet(events, runId, nowMs) {
 }
 
 /**
+ * wire 模板共用的"最近活动"回显：闭集 kind（runtime_activity 再带闭集 status）
+ * + 整数秒；闭集外一律不回显（"none"）。0068 纪律的单一实现。
+ */
+function lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity) {
+  const kind = RUN_EVENT_KINDS.includes(lastActivityEventKind) ? lastActivityEventKind : null;
+  const status = kind === "runtime_activity" && RUNTIME_ACTIVITY_STATUSES.includes(lastRuntimeStatus)
+    ? `/${lastRuntimeStatus}`
+    : "";
+  const age = Number.isFinite(secondsSinceActivity) ? `, ${secondsSinceActivity}s ago` : "";
+  return kind ? `${kind}${status}${age}` : "none";
+}
+
+/**
  * MCP 面的 advisory 文本：固定英文模板 + 整数 + 闭集标签，不含任何转录文本。
  * 闭集外的 kind / status 一律不回显。
  *
@@ -108,18 +124,51 @@ export function isTranscriptQuiet(events, runId, nowMs) {
  * @returns {string}
  */
 export function leadAdvisoryWireText({ secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity }) {
-  const kind = RUN_EVENT_KINDS.includes(lastActivityEventKind) ? lastActivityEventKind : null;
-  const status = kind === "runtime_activity" && RUNTIME_ACTIVITY_STATUSES.includes(lastRuntimeStatus)
-    ? `/${lastRuntimeStatus}`
-    : "";
-  const age = Number.isFinite(secondsSinceActivity) ? `, ${secondsSinceActivity}s ago` : "";
-  const last = kind ? `${kind}${status}${age}` : "none";
+  const last = lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity);
   const recent = Number.isFinite(secondsSinceActivity) && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS
     ? `A vital sign was seen within the last ${VITAL_SIGN_RECENT_SECONDS / 60} min: WAO advises against stopping now without a specific reason. `
     : "";
   return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
     + recent
     + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
+}
+
+/**
+ * 第 107 批：静默 advisory + 重启关系成立时的 wire 变体模板（决定 0068 的写法：
+ * 固定英文模板 + 整数 + 闭集标签，长度守 LEAD_ADVISORY_WIRE_MAX_LEN——测试用
+ * 极端整数钉住）。语义边界与 rebootedSinceLastActivity 同源：只陈述"本机开机
+ * 晚于该运行最后（计入静默窗的）活动"，不证明此刻没有新 runner——重启前的
+ * runner 活不过重启，开机后有人续跑不能排除。为守住长度上限，本变体不带
+ * 普通模板的生命体征近窗提示段（重启事实占用该预算；去留仍归 Lead）。
+ *
+ * @param {object} facts — leadAdvisoryWireText 的四个字段，另加：
+ * @param {number} facts.bootMinutesAgo — 距开机多少整数分钟
+ * @param {number} facts.activityMinutesAgo — 距最后活动多少整数分钟
+ * @returns {string}
+ */
+export function leadAdvisoryRebootWireText({
+  secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity,
+  bootMinutesAgo, activityMinutesAgo,
+}) {
+  const last = lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity);
+  return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
+    + `This machine booted ${Math.max(0, Math.floor(bootMinutesAgo))} min ago, after the run's last activity ${Math.max(0, Math.floor(activityMinutesAgo))} min ago; `
+    + "a pre-reboot runner cannot have survived it, but a runner started after the boot is not ruled out. "
+    + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
+}
+
+/**
+ * 第 107 批：同一条重启关系的 CLI 面（中文固定句，追加在既有中文 advisory 末尾；
+ * 不含 runId——整句是事实陈述，不指向命令）。语义同 wire 变体：不证明没有
+ * 开机后续跑的进程。
+ *
+ * @param {object} facts
+ * @param {number} facts.bootMinutesAgo
+ * @param {number} facts.activityMinutesAgo
+ * @returns {string}
+ */
+export function rebootRelationAdvisoryText({ bootMinutesAgo, activityMinutesAgo }) {
+  return `本机 ${Math.max(0, Math.floor(bootMinutesAgo))} 分钟前开机，晚于该运行最后活动（${Math.max(0, Math.floor(activityMinutesAgo))} 分钟前）；重启前的 runner 活不过重启，是否有开机后续跑的进程未经证明。`;
 }
 
 /**
