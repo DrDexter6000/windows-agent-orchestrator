@@ -287,7 +287,8 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
-      timeout: 8000,
+      // 机器忙时这条 CLI 单跑就要 5–7 秒（2026-11-12 电池上实测），8 秒会在派发途中杀掉它。
+      timeout: 60000,
     });
 
     const out = (result.stdout || "") + (result.stderr || "");
@@ -296,7 +297,18 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制
     assert.ok(!/06-18|fire-and-forget|session.*outlive/i.test(out),
       "进程式 backend 不应被 fire-and-forget 护栏拦截（sessionOutlivesProcess=false）");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // 不带 --wait 时 runner 经 WMI 启动桥起、不是本进程的子进程，CLI 退出后它还要再写
+    // 2–3 秒：先等它释放认领（.claims 下出现 .released，最多 30 秒），再带重试清理
+    //（2026-11-12 全量三次在清理处 ENOTEMPTY）。
+    const claims = join(dir, "runs", ".claims");
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      let released = false;
+      try { released = readdirSync(claims).some((f) => f.endsWith(".released")); } catch { /* 还没建 */ }
+      if (released) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
 });
 
