@@ -789,6 +789,16 @@ test("b108-CONTRACT-OTHER-PATH: any invalid_allowed_paths gets the same rule tex
   });
   assert.equal(bad.contractValid, false);
   assert.match(bad.observations.join(" "), /'\.\.' segment/);
+  const dot = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["."], verificationCommands: ["npm test"] },
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+  });
+  assert.equal(dot.contractValid, false);
+  assert.match(dot.observations.join(" "), /no empty, '\.' or '\.\.' segment/, "'.' is named, not only absolute, '..' and globs");
   const good = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
