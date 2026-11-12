@@ -1708,10 +1708,10 @@ test("UP-01: 静默满 30 分钟且本轮拒于 runner_scan_failed → 退出 5�
     assert.equal(r.outLines[0], `Run: ${runId} (running)`);
     assert.equal(
       r.outLines[1],
-      `Unproven: the owner heartbeat is not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.`,
+      `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.`,
     );
     assert.match(r.outLines[2], new RegExp(`^Next step: The runner's absence cannot be proven, so the run may still change\\. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
-    assert.match(r.outLines[2], /The Lead then decides: stop it \(wao stop; for a continuable run, fix it with run_continue\), settle it, or attach the wait again\.$/);
+    assert.match(r.outLines[2], /The Lead then decides: stop it \(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\), settle it, or attach the wait again\.$/);
     // 措辞纪律：不说"等待不会改变事实"，不断言 runner 已死。
     assert.ok(!r.out.includes("waiting will not change this"), "不得写 waiting will not change this");
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "报警即退：不打印未收口进度行");
@@ -1886,7 +1886,9 @@ test("UP-04: 不在闭集的拒绝满 30 分钟也不退出——owner_fresh（�
           refusal,
           readTranscriptFn: async () => {
             reads += 1;
-            return reads === 1 ? events : [...events, stateChange(runId, "completed")];
+            // 会审续修：前两次读都保持非终态——若闭集误收了这个理由，第二次读（报警前的
+            // 重读）仍非终态，错误的退出 5 就能被看见；第三次读才收口。
+            return reads <= 2 ? events : [...events, stateChange(runId, "completed")];
           },
         }),
       });
@@ -1935,6 +1937,35 @@ test("UP-06: 触发条件成立、重读时已收口 → 照常退出 0，不报
     assert.equal(reads, 2, "一轮正常读 + 报警出口的重读");
     assert.match(r.out, /Settlement: settled \(no_delivery_requested\)/);
     assert.ok(!/runner_unproven|Unproven:/.test(r.out));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("UP-06b: 首读静默满 30 分钟、证明期间长出新事件 → 重读快照复检不报警，照常等到收口", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_up06b";
+    const events = unprovenEvents(runId);
+    writeLines(dir, runId, events);
+    // 证明期间写下的新事件：距注入钟 1 分钟（开机后续跑写下第一条事件的形状）。
+    const fresh = { type: "run.event", runId, agentId: "coder_low", ts: new Date(UP_TS + 30 * 60_000).toISOString() };
+    let reads = 0;
+    const r = await runWaitSettled({
+      dir, runId,
+      deps: unprovenDeps({
+        refusal: "runner_scan_failed",
+        readTranscriptFn: async () => {
+          reads += 1;
+          if (reads === 1) return events;
+          if (reads === 2) return [...events, fresh];
+          return [...events, fresh, stateChange(runId, "completed")];
+        },
+      }),
+    });
+    assert.equal(r.exitCode, undefined, "重读快照只静默 1 分钟 → 不退出 5，后来收口 → 0");
+    assert.equal(reads, 3, "首读 + 报警前的重读 + 下一轮读到收口");
+    assert.ok(!/runner_unproven|Unproven:/.test(r.out), "不出现 runner_unproven 输出");
   } finally {
     cleanupDir(dir);
   }

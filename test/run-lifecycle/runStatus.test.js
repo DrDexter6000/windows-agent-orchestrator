@@ -1089,7 +1089,7 @@ test("TD-341-C1: 节流命中不重复调证明；心跳新鲜根本不进证明
   }
 });
 
-test("TD-341-C1: 不注入证明 deps → 行为字节不变（advisory 在场条件不受影响）", async () => {
+test("TD-341-C1: 不注入证明 deps → 证明不跑（advisory 在场条件不受影响）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-rgc1-e-"));
   try {
     writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
@@ -1129,10 +1129,11 @@ test("第 107 批: 重启晚于最后活动且 runner 未被证明不在 → 中
     assert.equal("runnerGone" in status, false, "证明不成立 → 无机器字段");
     assert.equal(
       status.leadAdvisory,
-      "转录里已 35 分钟没有新的动作或正文（最近活动：跑命令，2100s 前）。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行："
-        + `wao stop ${RG_RUN} --observed-seq 4 --reason "<理由>"`
-        + "本机 5 分钟前开机，晚于该运行最后活动（35 分钟前）；重启前的 runner 活不过重启，是否有开机后续跑的进程未经证明。",
-      "中文普通模板逐字不变，末尾追加重启关系句",
+      "转录里已 35 分钟没有新的动作或正文（最近活动：跑命令，2100s 前）。"
+        + "本机 5 分钟前开机，晚于该运行最后活动（35 分钟前）；重启前的 runner 活不过重启，是否有开机后续跑的进程未经证明。"
+        + "是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行："
+        + `wao stop ${RG_RUN} --observed-seq 4 --reason "<理由>"`,
+      "重启关系句放在\"是否继续等待\"之前，停止命令仍在末尾",
     );
     assert.equal(
       status.leadAdvisoryWire,
@@ -1141,6 +1142,32 @@ test("第 107 批: 重启晚于最后活动且 runner 未被证明不在 → 中
         + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.",
       "wire 换用重启变体模板（不叠加普通模板的完整正文）",
     );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("第 107 批: 重启成立时替下\"最近 10 分钟内有生命体征\"的建议（两面同一取舍）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reboot-vital-"));
+  try {
+    // 最后动作 09:45（静默 35 分钟）；生命体征 10:13（7 分钟前，旧模板会建议别停）；
+    // 开机 10:15（晚于体征）——重启前的体征不再说明 runner 还活着。
+    const base = { runId: RG_RUN, agentId: "coder_low" };
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+      + ev({ type: "run.event", kind: "runtime_activity", status: "streaming", ts: "2026-10-12T10:13:00.000Z", seq: 5, ...base }));
+    const status = await getRunStatus({
+      runId: RG_RUN,
+      runDir: dir,
+      nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+      runnerGoneDeps: {
+        ...rgProofDeps({ eligible: false }),
+        bootTimeFn: () => Date.parse("2026-10-12T10:15:00.000Z"),
+      },
+    });
+    assert.ok(status.leadAdvisory.includes("本机 5 分钟前开机"), status.leadAdvisory);
+    assert.ok(!status.leadAdvisory.includes("建议不要随意中止"), "重启后不再建议别停");
+    assert.ok(status.leadAdvisoryWire.includes("This machine booted 5 min ago"), status.leadAdvisoryWire);
+    assert.ok(!status.leadAdvisoryWire.includes("advises against stopping"), "wire 面同样不建议别停");
   } finally {
     cleanupDir(dir);
   }

@@ -68,9 +68,8 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 <consultId>` 接着等（各席到终态或窗口到期即返回，缺省 270000ms，可反复调用），
 `consult wait <consultId> --until-settled` 等到每个已派发席位的 run 收口才返回
 （收口判定与退出码同 `runs wait --until-settled`，见 `wao manual supervise "等待到收口"`，
-含退出码 5 `runner_unproven`——某席位静默满 30 分钟但缺席证明被"未知类"理由
-拒绝时报警退出、点名席位与 runId，后续归 Lead。席位按组记录顺序**逐席串行等待**：后面
-的席位要等前面的收口（或等待退出）后才开始检查，不是并行轮询；无 runId 的席位——派发
+含退出码 5 `runner_unproven`，点名席位与 runId。席位按组记录顺序**逐席串行等待**：前一席收口才检查下一席；任一席未收口（证明成立、报警、冲突、不可信或中断）
+命令即退出，后面的席位不再检查，不是并行轮询；无 runId 的席位——派发
 未成立——不等；未收口席位在 stderr 点名），
 `consult show
 <consultId>`（MCP 面：`run_consult {consultId}`）按当前转录重新推导，零派发。

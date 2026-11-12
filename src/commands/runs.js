@@ -127,7 +127,7 @@ import {
   waitRunSettlement,
   SETTLEMENT_MAX_UNTRUSTED_ROUNDS as RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS,
 } from "../application/runSettlementWait.js";
-import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
+import { runWaitNextStep, buildNextStep, runnerUnprovenReport } from "../application/runNextStep.js";
 // 决定 0112：收口终行的可续提示判定（与 run_continue 资格检查共用谱系事实函数）。
 import { deliveryContinuableHint } from "../application/runContinue.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
@@ -695,7 +695,9 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // 有人续跑不能排除）。
     process.exitCode = 5;
     const s = outcome.settlement;
-    const quietMinutes = Math.max(0, Math.floor(outcome.quietMs / 60000));
+    const report = runnerUnprovenReport({
+      state: s.facts.state, refusal: outcome.refusal, quietMs: outcome.quietMs, rebooted: outcome.rebooted,
+    });
     const nextStep = buildNextStep({ surface: "cli", situation: "runner_unproven", runId });
     if (asJson) {
       console.log(JSON.stringify({
@@ -703,20 +705,12 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
         runId,
         state: s.facts.state,
         reason: "runner_unproven",
-        refusal: outcome.refusal,
-        quietMinutes,
-        rebootedSinceLastActivity: outcome.rebooted === null ? null : {
-          bootAt: new Date(outcome.rebooted.bootAt).toISOString(),
-          lastActivityAt: new Date(outcome.rebooted.lastActivityAt).toISOString(),
-        },
+        ...report.fields,
         nextStep,
       }, null, 2));
     } else {
       console.log(`Run: ${runId} (${s.facts.state})`);
-      console.log(`Unproven: the owner heartbeat is not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${outcome.refusal}); the run is still ${s.facts.state}, and waiting longer may still see it change.`);
-      if (outcome.rebooted !== null) {
-        console.log(`Reboot: this machine booted at ${new Date(outcome.rebooted.bootAt).toISOString()}, after the run's last activity (${new Date(outcome.rebooted.lastActivityAt).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
-      }
+      for (const line of report.lines) console.log(line);
       console.log(`Next step: ${nextStep}`);
     }
     return;

@@ -247,7 +247,7 @@ function projectScorecardSummary(scopeEvents) {
  * @param {object} [input.runnerGoneDeps] — TD-341: runner-absence proof deps
  *   ({ handshakeReader, daemonAliveFn, … }; daemon SSOT lives in the adapters
  *   layer — the MCP/CLI adapter injects the real readers, tests inject stubs).
- *   Absent → the proof never runs (byte-compatible for every existing caller).
+ *   Absent → the proof never runs; the reboot sentence still reads the real boot time and lease.
  *   第 107 批追加两个可选读器（供重启关系陈述，测试确定性）：bootTimeFn（缺省
  *   machineBootTimeMs）与 ownerLeaseReader（缺省 readOwnerLease）——不注入时真读。
  * @param {object} [input.runnerGoneCache] — TD-341: optional per-process proof
@@ -432,7 +432,7 @@ export async function getRunStatus({
     ? null
     : runnerGone
       ? runnerGoneAdvisoryText({ runId, quietMinutes: runnerGoneQuietMinutes ?? 0 })
-      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"${rebootMinutes !== null ? rebootRelationAdvisoryText(rebootMinutes) : ""}`;
+      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${rebootMinutes !== null ? rebootRelationAdvisoryText(rebootMinutes) : secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`;
   // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）；
   // 重启关系成立时换用第 107 批的变体模板（同一批事实，长度守 480）。
   const leadAdvisoryWire = !advisoryPresent

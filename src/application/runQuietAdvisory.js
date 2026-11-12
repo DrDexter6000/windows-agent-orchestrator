@@ -158,7 +158,7 @@ export function leadAdvisoryRebootWireText({
 }
 
 /**
- * 第 107 批：同一条重启关系的 CLI 面（中文固定句，追加在既有中文 advisory 末尾；
+ * 第 107 批：同一条重启关系的 CLI 面（中文固定句，放在既有中文 advisory 的"是否继续等待"之前，并替下"最近 10 分钟内有生命体征"那句——与 wire 变体同一取舍；
  * 不含 runId——整句是事实陈述，不指向命令）。语义同 wire 变体：不证明没有
  * 开机后续跑的进程。
  *

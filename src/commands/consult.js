@@ -42,7 +42,7 @@ import {
 } from "../application/consultService.js";
 // 决定 0096：有未终态席位时，consult 的三条命令在输出末尾附 CLI 面 nextStep
 //（模板与长度上限的家在 runNextStep.js）。
-import { buildNextStep } from "../application/runNextStep.js";
+import { buildNextStep, runnerUnprovenReport } from "../application/runNextStep.js";
 // TD-340 前半：runner_gone 出口附 runner stderr 尾部——格式化收拢在
 // runnerStderrTailText 单一出口（与 runs wait 同一呈现函数）。
 import { runnerStderrTailText } from "../application/runnerStderr.js";
@@ -633,7 +633,15 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
     const runnerStderrTail = outcome.kind === "runner_gone"
       ? runnerStderrTailText(runDir, seat.runId)
       : null;
-    const lines = [`[consult] ${consultId}: seat ${seatName(seat)} will not settle:`];
+    // runner_unproven 不是"不会收口"——运行仍可能变化：首行用中性说法。
+    const lines = [outcome.kind === "runner_unproven"
+      ? `[consult] ${consultId}: seat ${seatName(seat)} has not settled and the wait stops here:`
+      : `[consult] ${consultId}: seat ${seatName(seat)} will not settle:`];
+    const unproven = outcome.kind === "runner_unproven"
+      ? runnerUnprovenReport({
+        state: outcome.settlement.facts.state, refusal: outcome.refusal, quietMs: outcome.quietMs, rebooted: outcome.rebooted,
+      })
+      : null;
     if (outcome.kind === "conflict") {
       lines.push(`Conflict: ${seat.runId} has multiple distinct transcript copies — refusing to pick one.`);
       lines.push(`Diagnostics: wao runs diagnose ${seat.runId}`);
@@ -660,11 +668,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
       // 第 107 批：与 runs wait 的 runner_unproven 出口同源（点名席位与 runId）；
       // 不说 "waiting will not change this"、不断言 runner 已死；重启关系成立时
       // 照实陈述。JSON 带 reason 与同名字段，不落进下面通用的 untrusted 分支。
-      const quietMinutes = Math.max(0, Math.floor(outcome.quietMs / 60000));
-      lines.push(`Unproven: the owner heartbeat is not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${outcome.refusal}); the run is still ${outcome.settlement.facts.state}, and waiting longer may still see it change.`);
-      if (outcome.rebooted !== null) {
-        lines.push(`Reboot: this machine booted at ${new Date(outcome.rebooted.bootAt).toISOString()}, after the run's last activity (${new Date(outcome.rebooted.lastActivityAt).toISOString()}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
-      }
+      lines.push(...unproven.lines);
       lines.push(`Next step: ${buildNextStep({
         surface: "cli",
         situation: "runner_unproven",
@@ -686,15 +690,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
         ...(outcome.kind === "conflict" ? { conflict: true } : {}),
         ...(outcome.kind === "verifier_gone" ? { reason: "verifier_gone", basis: outcome.basis } : {}),
         ...(outcome.kind === "runner_gone" ? { reason: "runner_gone", runnerStderrTail } : {}),
-        ...(outcome.kind === "runner_unproven" ? {
-          reason: "runner_unproven",
-          refusal: outcome.refusal,
-          quietMinutes: Math.max(0, Math.floor(outcome.quietMs / 60000)),
-          rebootedSinceLastActivity: outcome.rebooted === null ? null : {
-            bootAt: new Date(outcome.rebooted.bootAt).toISOString(),
-            lastActivityAt: new Date(outcome.rebooted.lastActivityAt).toISOString(),
-          },
-        } : {}),
+        ...(outcome.kind === "runner_unproven" ? { reason: "runner_unproven", ...unproven.fields } : {}),
         ...(outcome.kind === "untrusted" && outcome.reason.startsWith("undeterminable:")
           ? { reason: outcome.reason, state: outcome.settlement.facts.state }
           : {}),

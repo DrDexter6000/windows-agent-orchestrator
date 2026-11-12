@@ -2476,8 +2476,8 @@ test("SETTLE-5d: runner_unproven（注入等待器）→ 退出 5、点名席位
     assert.equal(process.exitCode, 5, "runner_unproven 对应退出码 5（报警，不是 3）");
     // stderr 三行：点名行 + 与 runs wait runner_unproven 出口同源的两行。
     assert.deepEqual(captured.errLines, [
-      `[consult] ${consultId}: seat seat_r (run_settle_ru) will not settle:`,
-      "Unproven: the owner heartbeat is not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.",
+      `[consult] ${consultId}: seat seat_r (run_settle_ru) has not settled and the wait stops here:`,
+      "Unproven: the owner heartbeat is missing or not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.",
       `Next step: ${buildNextStep({ surface: "cli", situation: "runner_unproven", runId: "run_settle_ru" })}`,
     ]);
     assert.ok(!captured.out, "失败出口不渲染整场");

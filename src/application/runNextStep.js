@@ -161,9 +161,9 @@ function render(surface, situation, runId, extras) {
     case "runner_unproven":
       // 第 107 批：证明不了 runner 已不在（静默满 30 分钟 + 未知类拒绝，退出码
       // 5）。运行可能仍在变化——不说"等待不会改变事实"。先看当前状态、再干跑
-      // settle 看门事实（不写任何东西）；停掉（可续的用 run_continue 续修）、
-      // 结算还是重新挂等待，都归 Lead。
-      text = `The runner's absence cannot be proven, so the run may still change. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts (it writes nothing). The Lead then decides: stop it (wao stop; for a continuable run, fix it with run_continue), settle it, or attach the wait again.`;
+      // settle 看门事实（不写任何东西）；停掉（停掉后可续谱系才能用 MCP 工具
+      // run_continue——它只接终态的父运行）、结算还是重新挂等待，都归 Lead。
+      text = `The runner's absence cannot be proven, so the run may still change. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts (it writes nothing). The Lead then decides: stop it (wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue), settle it, or attach the wait again.`;
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {
@@ -220,6 +220,32 @@ function render(surface, situation, runId, extras) {
  * @param {number} [input.nonTerminalSeatCount] — MCP consult：未终态席位数
  * @returns {string}
  */
+/**
+ * 第 107 批：runner_unproven 出口的固定事实文本与 JSON 字段——runs wait 与
+ * consult wait 共用这一份（只陈述：证明不了 runner 已不在、运行仍可能变化；
+ * 重启关系成立时说明开机晚于最后活动，不排除开机后的续跑）。
+ *
+ * @param {object} input
+ * @param {string} input.state — 重读快照的运行状态
+ * @param {string} input.refusal — 本轮证明的拒绝理由（RUNNER_UNPROVEN_REFUSALS）
+ * @param {number} input.quietMs — 重读快照计入静默窗的最后绑定事件距今毫秒
+ * @param {{bootAt:number, lastActivityAt:number}|null} input.rebooted
+ * @returns {{lines:string[], fields:{refusal:string, quietMinutes:number, rebootedSinceLastActivity:object|null}}}
+ */
+export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
+  const quietMinutes = Math.max(0, Math.floor(quietMs / 60000));
+  const iso = rebooted === null
+    ? null
+    : { bootAt: new Date(rebooted.bootAt).toISOString(), lastActivityAt: new Date(rebooted.lastActivityAt).toISOString() };
+  const lines = [
+    `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${refusal}); the run is still ${state}, and waiting longer may still see it change.`,
+  ];
+  if (iso !== null) {
+    lines.push(`Reboot: this machine booted at ${iso.bootAt}, after the run's last activity (${iso.lastActivityAt}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
+  }
+  return { lines, fields: { refusal, quietMinutes, rebootedSinceLastActivity: iso } };
+}
+
 export function buildNextStep({
   surface,
   situation,

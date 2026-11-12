@@ -488,17 +488,26 @@ export async function waitRunSettlement({
                           outcome = { kind: "runner_gone", settlement: reSettlement };
                           break;
                         } else {
-                          outcome = {
-                            kind: "runner_unproven",
-                            settlement: reSettlement,
-                            refusal: proof.refusal,
-                            quietMs: unprovenQuietMs,
-                            // 重启关系只陈述事实（开机晚于最后可见活动，不证明此刻
-                            // 没有新 runner）；读失败按 null。最后活动取重读快照里
-                            // 计入静默窗的最后一条绑定事件与 owner 租约心跳的较晚者。
-                            rebooted: computeRebootedSinceLastActivity(reEvents),
-                          };
-                          break;
+                          // 会审续修：门槛在重读快照上复检，静默毫秒与重启行的
+                          // 最后活动取同一份快照——证明期间长出新事件（开机后续跑
+                          // 写下第一条事件的窗口）就不报警，照常等。
+                          const reQuietMs = nowFn() - lastQuietWindowBoundMs(reEvents.filter((e) => e && e.runId === runId));
+                          if (!(Number.isFinite(reQuietMs) && reQuietMs >= LEAD_ADVISORY_QUIET_SECONDS * 1000)) {
+                            settlement = reSettlement;
+                            progressEvents = reEvents;
+                          } else {
+                            outcome = {
+                              kind: "runner_unproven",
+                              settlement: reSettlement,
+                              refusal: proof.refusal,
+                              quietMs: reQuietMs,
+                              // 重启关系只陈述事实（开机晚于最后可见活动，不证明此刻
+                              // 没有新 runner）；读失败按 null。最后活动取重读快照里
+                              // 计入静默窗的最后一条绑定事件与 owner 租约心跳的较晚者。
+                              rebooted: computeRebootedSinceLastActivity(reEvents),
+                            };
+                            break;
+                          }
                         }
                       } else {
                         // 重读后变成终态等验证等别的可信未收口形态：照常等待，进度
