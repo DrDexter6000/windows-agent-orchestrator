@@ -823,6 +823,8 @@ test("b108-PROBE-GLOB-BASE: a refused glob entry is still probed by its concrete
   const missing = await probe([]);
   assert.equal(missing.contractValid, false, "the glob itself is a contract defect");
   assert.ok(missing.issueCodes.includes("referenced_path_probe_miss"), "lib-typo/deep and lib-typo both missing: the base was probed");
-  const present = await probe(["lib-typo/deep", "lib-typo"]);
-  assert.ok(!present.issueCodes.includes("referenced_path_probe_miss"), "base exists: no miss");
+  // Only the stripped base's parent exists: probing "lib-typo/deep" (parent present) does not fire,
+  // while an unstripped "lib-typo/deep/**" (parent "lib-typo/deep" missing) would.
+  const parentOnly = await probe(["lib-typo"]);
+  assert.ok(!parentOnly.issueCodes.includes("referenced_path_probe_miss"), "the /** suffix is stripped before probing");
 });
