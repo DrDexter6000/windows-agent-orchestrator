@@ -708,6 +708,12 @@ const DISPATCH_INVALID_VERIFICATION_PATH_TEXT =
   "absolute path literal, which is not workspace-portable. Re-issue the delivery with portable verification commands " +
   "(workspace-relative paths, URLs, or flags — no absolute paths).";
 
+// b108: fixed, actionable text for invalid_allowed_paths (never echoes the entry).
+const DISPATCH_INVALID_ALLOWED_PATHS_TEXT =
+  "run_dispatch refused: invalid_allowed_paths. Each delivery.allowedPaths entry is a repo-relative file or " +
+  "directory path - no absolute paths, '..' or globs (* ?). A directory allows everything under it: write tests, " +
+  "not tests/**.";
+
 // Round 4 Bundle B: fixed, actionable error when a dispatch declares BOTH
 // readOnly and a delivery block. A read-only run is advisory observation,
 // never a delivery — the combination is contradictory. The literal closed-set
@@ -5137,6 +5143,12 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_INVALID_VERIFICATION_PATH_TEXT }],
+          };
+        }
+        if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_allowed_paths") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_INVALID_ALLOWED_PATHS_TEXT }],
           };
         }
         // R7-C (C-4): the R7-AB layer-1 cwd existence refusal — the exact

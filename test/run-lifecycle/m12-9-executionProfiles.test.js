@@ -127,7 +127,7 @@ test("B3: resolveDeliveryVerification — no profile, inline verification passes
   const r = resolveDeliveryVerification({
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["npm test"],
     },
     executionProfileId: undefined,
@@ -142,7 +142,7 @@ test("B3: resolveDeliveryVerification — no profile, inline verification passes
 
 test("B3: resolveDeliveryVerification — profile selected, delivery has NO inline → source:profile", () => {
   const r = resolveDeliveryVerification({
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "node-npm-test-v1",
   });
   assert.equal(r.ok, true);
@@ -155,7 +155,7 @@ test("B3: resolveDeliveryVerification — profile selected, delivery has NO inli
 
 test("B3: resolveDeliveryVerification — profile with setup commands (node-npm-ci-test-v1)", () => {
   const r = resolveDeliveryVerification({
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "node-npm-ci-test-v1",
   });
   assert.equal(r.ok, true);
@@ -166,7 +166,7 @@ test("B3: resolveDeliveryVerification — profile with setup commands (node-npm-
 
 test("B3: unknown profile id is stably rejected with code profile_unknown", () => {
   const r = resolveDeliveryVerification({
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "rust-cargo-test-v1",
   });
   assert.equal(r.ok, false);
@@ -177,7 +177,7 @@ test("B3: profile + inline verificationCommands is a conflict (mutual exclusivit
   const r = resolveDeliveryVerification({
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["npm test"],
     },
     executionProfileId: "node-npm-test-v1",
@@ -190,7 +190,7 @@ test("B3: profile + inline verificationSetupCommands is a conflict", () => {
   const r = resolveDeliveryVerification({
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["npm test"],
       verificationSetupCommands: ["npm ci"],
     },
@@ -204,7 +204,7 @@ test("B3: profile + inline verificationUnavailableReason is a conflict", () => {
   const r = resolveDeliveryVerification({
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationUnavailableReason: "manual review only",
     },
     executionProfileId: "node-npm-test-v1",
@@ -235,7 +235,7 @@ test("B3: no profile and no delivery resolves to source:none with empty verifica
 test("B3: resolver never throws — unknown/conflict/non-delivery are stable {ok:false,code}", () => {
   // Defensive: a non-string id must not crash, must be treated as unknown.
   const r = resolveDeliveryVerification({
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: { evil: true },
   });
   assert.equal(r.ok, false);
@@ -244,7 +244,7 @@ test("B3: resolver never throws — unknown/conflict/non-delivery are stable {ok
 
 test("B3: success verification object is a fresh copy — mutating it never touches the frozen catalog", () => {
   const r = resolveDeliveryVerification({
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "node-npm-ci-test-v1",
   });
   r.verification.commands.push("INJECTED");

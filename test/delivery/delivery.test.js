@@ -2305,3 +2305,35 @@ test("私有索引副本：split-index 仓库里不删真实索引引用的共�
     await cleanupRepo(repo);
   }
 });
+
+// ===== b108: allowedPaths are literal paths, not globs =====
+
+test("b108-01: prepareDeliveryRequest refuses * and ? entries with invalid_allowed_paths and says how to write a directory", () => {
+  for (const glob of ["tests/**", "src/*.js", "*", "docs/a?.md"]) {
+    assert.throws(
+      () => prepareDeliveryRequest({ mode: "git_commit_v1", allowedPaths: ["src", glob], verificationCommands: ["npm test"] }),
+      (err) => err.name === "DeliveryError"
+        && err.deliveryCode === "invalid_allowed_paths"
+        && err.message.includes(JSON.stringify(glob))
+        && err.message.includes('write "tests", not "tests/**"'),
+      glob,
+    );
+  }
+});
+
+test("b108-02: a bracket is a file-name character, not a glob - app/[id] stays legal", () => {
+  const out = prepareDeliveryRequest({ mode: "git_commit_v1", allowedPaths: ["app/[id]"], verificationCommands: ["npm test"] });
+  assert.deepEqual(out.allowedPaths, ["app/[id]"]);
+});
+
+test("b108-03: packaging does not re-check globs - a run dispatched before the rule still packages what its other entries cover", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = inspectDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", "tests/**"] }));
+    assert.deepEqual(ref.changedFiles, ["src/a.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});

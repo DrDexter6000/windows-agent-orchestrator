@@ -684,7 +684,7 @@ worker 进程完成 ≠ code delivery 完成。
 ```js
 delivery: {
   mode: "git_commit_v1",             // 目前唯一支持的模式
-  allowedPaths: ["src", "test/"],     // SSOT 验证同 src/delivery.js
+  allowedPaths: ["src", "test/"],     // 文件或目录，按字面匹配，目录放行其下全部；含 * ? 的条目被拒（不是通配）
   verificationCommands: ["npm test"], // 或 verificationUnavailableReason: "..."
   verificationSetupCommands: ["..."], // 可选：assertion 前顺序执行的环境准备命令
   verificationTimeoutMs: 600000       // 可选：per-command 执行预算（整数 [1000,7200000]）

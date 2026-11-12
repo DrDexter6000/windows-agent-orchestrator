@@ -654,3 +654,34 @@ test("M12-6 P1-A: run_dispatch threads the server-proven frozenGitHead to the di
     cleanupDir(aux);
   }
 });
+
+// ===== b108: an allowedPaths glob is refused at run_dispatch with the rule, before any transcript =====
+
+test("b108-MCP-GLOB: run_dispatch with tests/** is refused as invalid_allowed_paths with fixed text, no transcript", async () => {
+  const { repo, aux, registryPath, runDir } = setup();
+  try {
+    const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: repo });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: repo,
+          delivery: { mode: "git_commit_v1", allowedPaths: ["tools/b108-unique/**"], verificationCommands: ["npm test"] },
+        },
+      });
+      assert.equal(res.isError, true);
+      const text = textOf(res);
+      assert.match(text, /invalid_allowed_paths/);
+      assert.match(text, /write tests, not tests\/\*\*/);
+      assert.ok(!JSON.stringify(res).includes("b108-unique"), "the entry is not echoed");
+      assert.equal(readdirSafe(runDir).length, 0, "no transcript written before the refusal");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(repo);
+    cleanupDir(aux);
+  }
+});

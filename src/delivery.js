@@ -223,6 +223,27 @@ function validateAllowedPaths(allowedPaths) {
 }
 
 /**
+ * allowedPaths entries match literally (isPathAllowed below), so a glob such as
+ * "tests/**" matches nothing. Refuse * and ? where the Lead supplies
+ * allowedPaths: prepareDeliveryRequest (dispatch, contract check, CLI run,
+ * continuation, resume) and the repackage scope. Packaging does not re-check,
+ * so a run dispatched with a glob before this rule still packages what its
+ * other entries cover. "[" stays legal: it is a real file-name character
+ * ("app/[id]/page.tsx").
+ * @param {string[]} paths — entries already accepted by validateAllowedPaths
+ * @throws {DeliveryError} invalid_allowed_paths on the first glob entry
+ */
+export function assertNoAllowedPathGlobs(paths) {
+  const glob = paths.find((p) => /[*?]/.test(p));
+  if (glob !== undefined) {
+    throw new DeliveryError(
+      "invalid_allowed_paths",
+      `invalid allowedPath: ${JSON.stringify(glob)} - allowedPaths takes exact paths, not globs; a directory allows everything under it (write "tests", not "tests/**")`,
+    );
+  }
+}
+
+/**
  * Check whether a changed path is covered by any allowed path entry
  * (exact match or descendant on a path-segment boundary).
  *
@@ -1276,6 +1297,7 @@ export function prepareDeliveryRequest(delivery) {
 
   // allowedPaths — reuse the same SSOT validator
   const allowedPaths = validateAllowedPaths(delivery.allowedPaths);
+  assertNoAllowedPathGlobs(allowedPaths);
 
   // verification — same trim-aware check as validateInput
   const hasCommands =

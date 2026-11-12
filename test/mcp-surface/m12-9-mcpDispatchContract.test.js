@@ -133,7 +133,7 @@ test("B4: precheck returns bounded advisory result over the wire — closed-set,
       arguments: {
         agentId: "coder_low",
         prompt: "secret-prompt-text",
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-ci-test-v1",
       },
     });
@@ -280,7 +280,7 @@ test("B4 (MCP boundary, production parity): missing agentId over the wire → re
       arguments: {
         agentId: "coder_mm", // absent from the real { coder_low } registry
         prompt: "x",
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       },
     });
     assert.equal(res.isError, undefined, "advisory structured result — not an MCP error");
@@ -299,7 +299,7 @@ test("B4: precheck issueCodes is the frozen closed set; availableProfiles only w
       arguments: {
         agentId: "coder_low",
         prompt: "x",
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       },
     });
     const r = res.structuredContent ?? JSON.parse(res.content.find((b) => b.type === "text").text);
@@ -328,7 +328,7 @@ test("B1: precheck has zero side effect — a dispatch spy that throws is never 
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -351,7 +351,7 @@ test("B1: run_dispatch works without any prior precheck call (independence)", as
         agentId: "coder_low",
         prompt: "do work",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       },
     });
     assert.equal(res.isError, undefined, "run_dispatch succeeds without precheck");
@@ -379,7 +379,7 @@ test("B3: run_dispatch with executionProfileId folds profile verification into t
         prompt: "do work",
         expectedWorkspaceRoot: dir,
         // delivery has NO inline verification — the profile supplies it.
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-ci-test-v1",
       },
     });
@@ -399,7 +399,7 @@ test("B3: run_dispatch with executionProfileId folds profile verification into t
   assert.deepEqual(captured.delivery.verificationCommands, ["npm test"]);
   assert.deepEqual(captured.delivery.verificationSetupCommands, ["npm ci"]);
   assert.equal(captured.delivery.mode, "git_commit_v1");
-  assert.deepEqual(captured.delivery.allowedPaths, ["src/**"]);
+  assert.deepEqual(captured.delivery.allowedPaths, ["src"]);
 });
 
 // ===== B3: run_dispatch rejects bad contracts with the fixed error, count 0 =====
@@ -413,7 +413,7 @@ test("B3: run_dispatch with unknown profile id → fixed error, dispatcher count
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "rust-cargo-test-v1",
       },
     });
@@ -434,7 +434,7 @@ test("B3: run_dispatch with profile + inline verification conflict → fixed err
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -476,7 +476,7 @@ test("B3: run_dispatch with delivery but no verification and no profile → fixe
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
       },
     });
     assert.equal(res.isError, true);
@@ -496,7 +496,7 @@ test("B1: precheck reports an unknown profile as advisory code, never throws/gat
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "rust-cargo-test-v1",
       },
     });
@@ -548,7 +548,7 @@ test("B4/output-boundary: a malformed service result (unknown internal field) co
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -575,7 +575,7 @@ test("B4/output-boundary: an oversized issueCodes array collapses (cap = CONTRAC
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -601,7 +601,7 @@ test("B4/output-boundary: an oversized observations array collapses (cap = CONTR
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-test-v1",
       },
     });
@@ -627,7 +627,7 @@ test("B4/output-boundary: an oversized availableProfiles array collapses (cap = 
         agentId: "coder_low",
         prompt: "x",
         expectedWorkspaceRoot: dir,
-        delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
         executionProfileId: "node-npm-test-v1",
       },
     });

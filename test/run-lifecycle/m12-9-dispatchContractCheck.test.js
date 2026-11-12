@@ -71,7 +71,7 @@ test("B4: output shape is bounded — advisory true, closed-set sections, profil
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "do work",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "node-npm-ci-test-v1",
     workspaceBinding: BOUND,
     registryPath: "ignored",
@@ -103,7 +103,7 @@ test("B4: with no profile selected, bounded availableProfiles (id+counts+summary
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     workspaceBinding: BOUND,
     registryPath: "ignored",
     readRegistryFn: fakeRegistry(["coder_low"]),
@@ -131,7 +131,7 @@ test("B3/B4: unknown profile id → contract section observed, issueCode profile
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "rust-cargo-test-v1",
     workspaceBinding: BOUND,
     registryPath: null,
@@ -145,7 +145,7 @@ test("B3/B4: profile + inline verification conflict → issueCode profile_inline
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     executionProfileId: "node-npm-test-v1",
     workspaceBinding: BOUND,
     registryPath: null,
@@ -173,7 +173,7 @@ test("B4: invalid verification path → issueCode invalid_verification_path (sha
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["/etc/passwd"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["/etc/passwd"] },
     workspaceBinding: BOUND,
     registryPath: null,
   });
@@ -185,7 +185,7 @@ test("B4: sections settle independently — registry read failure is unknown, no
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     workspaceBinding: BOUND,
     registryPath: join(tmpdir(), "definitely-missing-agents.json"),
   });
@@ -202,7 +202,7 @@ test("B4: workspace resolver threw → workspace section unknown (not faked unbo
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     workspaceBinding: null, // resolver threw
     registryPath: null,
   });
@@ -216,7 +216,7 @@ test("B4: unbound workspace → workspace observed, issueCode workspace_unbound 
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     workspaceBinding: { bound: false },
     registryPath: null,
   });
@@ -233,7 +233,7 @@ test("B4 (production-parity fake): agent not in snapshot → registry observed +
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
     workspaceBinding: BOUND,
     registryPath: "ignored",
     readRegistryFn: fakeRegistry(["coder_mm"]),
@@ -255,7 +255,7 @@ test("B4 (real registry): present agent → registry observed, no agent_not_foun
     const r = await runDispatchContractCheck({
       agentId: "coder_low",
       prompt: "x",
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       workspaceBinding: BOUND,
       registryPath,
       readRegistryFn: readRegistry,
@@ -273,7 +273,7 @@ test("B4 (real registry): missing agent → registry observed + agent_not_found 
     const r = await runDispatchContractCheck({
       agentId: "coder_mm", // absent — production getAgent("coder_mm") would THROW
       prompt: "x",
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       workspaceBinding: BOUND,
       registryPath,
       readRegistryFn: readRegistry,
@@ -296,7 +296,7 @@ test("B4 (real registry): malformed agent entry → registry_unreadable (genuine
     const r = await runDispatchContractCheck({
       agentId: "coder_low",
       prompt: "x",
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"], verificationCommands: ["npm test"] },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
       workspaceBinding: BOUND,
       registryPath,
       readRegistryFn: readRegistry,
@@ -316,7 +316,7 @@ test("B1: zero side effect — no transcript write, no dispatch, no fork", async
     const r = await runDispatchContractCheck({
       agentId: "coder_low",
       prompt: "x",
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
       executionProfileId: "node-npm-test-v1",
       workspaceBinding: BOUND,
       registryPath: "ignored",
@@ -354,7 +354,7 @@ test("B4: profile selected + delivery valid → contractValid true and profile c
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "python-pytest-v1",
     workspaceBinding: BOUND,
     registryPath: null,
@@ -379,7 +379,7 @@ test("M12-13-CONTRACT-TIMEOUT-OK: a valid contract-check verificationTimeoutMs r
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["npm test"],
       verificationTimeoutMs: 600000,
     },
@@ -408,7 +408,7 @@ test("M12-13-CONTRACT-TIMEOUT-OK-PROFILE: a valid verificationTimeoutMs survives
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationTimeoutMs: 600000,
     },
     executionProfileId: "node-npm-test-v1",
@@ -429,7 +429,7 @@ test("M12-13-CONTRACT-TIMEOUT-INVALID: an invalid contract-check verificationTim
       prompt: "x",
       delivery: {
         mode: "git_commit_v1",
-        allowedPaths: ["src/**"],
+        allowedPaths: ["src"],
         verificationCommands: ["npm test"],
         verificationTimeoutMs: bad,
       },
@@ -538,7 +538,7 @@ test("TD-157-SVC-PASS: referenced paths that exist under the bound root emit NO 
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["node scripts/gen.mjs", "bash scripts/setup.sh"],
     },
     workspaceBinding: PROBE_WS,
@@ -555,7 +555,7 @@ test("TD-157-SVC-MISS: a missing referenced path emits the code AND contractVali
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["node tools/report/gen.mjs"],
     },
     workspaceBinding: PROBE_WS,
@@ -583,7 +583,7 @@ test("TD-157-SVC-SETUP: verificationSetupCommands are probed exactly like assert
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationSetupCommands: ["bash ops/bootstrap/seed.sh"],
       verificationCommands: ["npm test"],
     },
@@ -598,7 +598,7 @@ test("TD-157-SVC-SETUP: verificationSetupCommands are probed exactly like assert
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationSetupCommands: ["bash ops/bootstrap/seed.sh"],
       verificationCommands: ["npm test"],
     },
@@ -618,7 +618,7 @@ test("TD-157-SVC-PROFILE: profile-resolved commands reach the probe (not just in
   const r = await runDispatchContractCheck({
     agentId: "coder_low",
     prompt: "x",
-    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
     executionProfileId: "custom-mechanical-v1",
     resolveVerificationFn: () => ({
       ok: true,
@@ -653,7 +653,7 @@ test("TD-157-SVC-ALLOWEDPATH: entry + parent both missing is a strong typo signa
     pathExistsFn: fakeWorkspaceFs(existing),
   });
 
-  const typo = await call(["lib-typo/deep/**"], ["src"]);
+  const typo = await call(["lib-typo/deep"], ["src"]);
   assert.ok(typo.issueCodes.includes("referenced_path_probe_miss"),
     "neither the entry base nor its parent exists → strong typo signal");
 
@@ -672,7 +672,7 @@ test("TD-157-SVC-DEDUPE: many simultaneous misses still emit the code exactly on
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["lib-typo/deep/**"],
+      allowedPaths: ["lib-typo/deep"],
       verificationCommands: ["node gone/a.mjs"],
       verificationSetupCommands: ["bash gone/b.sh"],
     },
@@ -694,7 +694,7 @@ test("TD-157-SVC-FILOPEN: fs errors are silently skipped — uncertainty never b
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["node gone/a.mjs"],
     },
     workspaceBinding: PROBE_WS,
@@ -710,7 +710,7 @@ test("TD-157-SVC-FILOPEN: fs errors are silently skipped — uncertainty never b
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["src/**"],
+      allowedPaths: ["src"],
       verificationCommands: ["node gone/a.mjs gone/b.mjs"],
     },
     workspaceBinding: PROBE_WS,
@@ -729,7 +729,7 @@ test("TD-157-SVC-GATE: no probe without a usable contract or a bound root", asyn
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["gone/deep/**"],
+      allowedPaths: ["gone/deep"],
       verificationCommands: ["node gone/a.mjs"],
     },
     workspaceBinding: { bound: false },
@@ -745,7 +745,7 @@ test("TD-157-SVC-GATE: no probe without a usable contract or a bound root", asyn
     prompt: "x",
     delivery: {
       mode: "git_commit_v1",
-      allowedPaths: ["gone/deep/**"],
+      allowedPaths: ["gone/deep"],
       verificationCommands: ["node gone/a.mjs"],
     },
     executionProfileId: "node-npm-test-v1",
@@ -756,4 +756,47 @@ test("TD-157-SVC-GATE: no probe without a usable contract or a bound root", asyn
   assert.ok(conflict.issueCodes.includes("profile_inline_conflict"));
   assert.ok(!conflict.issueCodes.includes("referenced_path_probe_miss"),
     "when the resolver rejects the contract there are no resolved commands to probe");
+});
+
+// ===== b108: an allowedPaths glob is a contract defect, and the check says why =====
+
+test("b108-CONTRACT-GLOB: a glob entry makes contractValid false and the observation states the rule without echoing the entry", async () => {
+  for (const allowedPaths of [["tools/**", "tests/**"], ["src/*.js"]]) {
+    const r = await runDispatchContractCheck({
+      agentId: "coder_low",
+      prompt: "x",
+      delivery: { mode: "git_commit_v1", allowedPaths, verificationCommands: ["npm test"] },
+      workspaceBinding: BOUND,
+      registryPath: "ignored",
+      readRegistryFn: fakeRegistry(["coder_low"]),
+    });
+    assert.equal(r.contractValid, false, JSON.stringify(allowedPaths));
+    assert.ok(r.issueCodes.includes("delivery_invalid"));
+    const said = r.observations.join(" ");
+    assert.match(said, /write tests, not tests\/\*\*/);
+    assert.ok(!said.includes(allowedPaths[0]), "the entry itself is not echoed");
+  }
+});
+
+test("b108-CONTRACT-OTHER-PATH: any invalid_allowed_paths gets the same rule text; a valid directory gets none", async () => {
+  const bad = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["../outside"], verificationCommands: ["npm test"] },
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+  });
+  assert.equal(bad.contractValid, false);
+  assert.match(bad.observations.join(" "), /no absolute paths, '\.\.' or globs/);
+  const good = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["tests"], verificationCommands: ["npm test"] },
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+  });
+  assert.equal(good.contractValid, true);
+  assert.ok(!good.observations.join(" ").includes("globs"));
 });

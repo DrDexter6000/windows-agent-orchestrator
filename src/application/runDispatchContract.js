@@ -88,6 +88,12 @@ export const CONTRACT_CHECK_ISSUE_CODES = Object.freeze([
 // (e.g. observations.max) from it — so "what sections exist" is defined once.
 export const CONTRACT_CHECK_SECTIONS = Object.freeze(["workspace", "registry", "contract"]);
 
+// Fixed text (never echoes the entry) for an allowedPaths rejection; the same
+// rule run_dispatch states when it refuses invalid_allowed_paths.
+const ALLOWED_PATHS_RULE_TEXT =
+  "allowedPaths entries are repo-relative files or directories - no absolute paths, '..' or globs (* ?); "
+  + "a directory allows everything under it: write tests, not tests/**";
+
 const CONTRACT_LEVEL_CODES = new Set([
   "profile_unknown",
   "profile_requires_delivery",
@@ -470,6 +476,7 @@ export async function runDispatchContractCheck({
   }
 
   // ===== Section 3: contract (resolver + prepareDeliveryRequest SSOT) =====
+  let contractObservation = null;
   // The resolver is the shared authority with run_dispatch: profile vs inline
   // mutual exclusivity, known/unknown/conflict/non-delivery. It never throws.
   const resolved = resolveVerification({ delivery, executionProfileId });
@@ -496,13 +503,16 @@ export async function runDispatchContractCheck({
         issueCodes.push("invalid_verification_path");
       } else {
         issueCodes.push("delivery_invalid");
+        if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_allowed_paths") {
+          contractObservation = ALLOWED_PATHS_RULE_TEXT;
+        }
       }
     }
   }
 
   // One contract observation preserves the MCP one-per-section output bound,
   // including when both TD-227 codes and the TD-157 path probe fire together.
-  const verificationObservations = [];
+  const verificationObservations = contractObservation ? [contractObservation] : [];
   const verificationCommands = resolved.ok ? [
     ...(resolved.verification.commands ?? []),
     ...(resolved.verification.setupCommands ?? []),
