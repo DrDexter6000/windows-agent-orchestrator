@@ -192,6 +192,32 @@ function render(surface, situation, runId, extras) {
 }
 
 /**
+ * 第 107 批：runner_unproven 出口的固定事实文本与 JSON 字段——runs wait 与
+ * consult wait 共用这一份（只陈述：证明不了 runner 已不在、运行仍可能变化；
+ * 重启关系成立时说明开机晚于最后活动，不排除开机后的续跑）。
+ *
+ * @param {object} input
+ * @param {string} input.state — 重读快照的运行状态
+ * @param {string} input.refusal — 本轮证明的拒绝理由（RUNNER_UNPROVEN_REFUSALS）
+ * @param {number} input.quietMs — 重读快照计入静默窗的最后绑定事件距今毫秒
+ * @param {{bootAt:number, lastActivityAt:number}|null} input.rebooted
+ * @returns {{lines:string[], fields:{refusal:string, quietMinutes:number, rebootedSinceLastActivity:object|null}}}
+ */
+export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
+  const quietMinutes = Math.max(0, Math.floor(quietMs / 60000));
+  const iso = rebooted === null
+    ? null
+    : { bootAt: new Date(rebooted.bootAt).toISOString(), lastActivityAt: new Date(rebooted.lastActivityAt).toISOString() };
+  const lines = [
+    `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${refusal}); the run is still ${state}, and waiting longer may still see it change.`,
+  ];
+  if (iso !== null) {
+    lines.push(`Reboot: this machine booted at ${iso.bootAt}, after the run's last activity (${iso.lastActivityAt}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
+  }
+  return { lines, fields: { refusal, quietMinutes, rebootedSinceLastActivity: iso } };
+}
+
+/**
  * 构造一句 nextStep。surface "cli" 必须给 runId（模板带 runId）；"mcp" 的模板
  * 不含 runId（传了也不会渲染）。settled_line 需要 settlementReason（收口判定
  * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
@@ -220,32 +246,6 @@ function render(surface, situation, runId, extras) {
  * @param {number} [input.nonTerminalSeatCount] — MCP consult：未终态席位数
  * @returns {string}
  */
-/**
- * 第 107 批：runner_unproven 出口的固定事实文本与 JSON 字段——runs wait 与
- * consult wait 共用这一份（只陈述：证明不了 runner 已不在、运行仍可能变化；
- * 重启关系成立时说明开机晚于最后活动，不排除开机后的续跑）。
- *
- * @param {object} input
- * @param {string} input.state — 重读快照的运行状态
- * @param {string} input.refusal — 本轮证明的拒绝理由（RUNNER_UNPROVEN_REFUSALS）
- * @param {number} input.quietMs — 重读快照计入静默窗的最后绑定事件距今毫秒
- * @param {{bootAt:number, lastActivityAt:number}|null} input.rebooted
- * @returns {{lines:string[], fields:{refusal:string, quietMinutes:number, rebootedSinceLastActivity:object|null}}}
- */
-export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
-  const quietMinutes = Math.max(0, Math.floor(quietMs / 60000));
-  const iso = rebooted === null
-    ? null
-    : { bootAt: new Date(rebooted.bootAt).toISOString(), lastActivityAt: new Date(rebooted.lastActivityAt).toISOString() };
-  const lines = [
-    `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for ${quietMinutes} min, but the runner's absence cannot be proven (${refusal}); the run is still ${state}, and waiting longer may still see it change.`,
-  ];
-  if (iso !== null) {
-    lines.push(`Reboot: this machine booted at ${iso.bootAt}, after the run's last activity (${iso.lastActivityAt}); a runner from before the reboot cannot have survived it, but a runner started after the boot cannot be ruled out.`);
-  }
-  return { lines, fields: { refusal, quietMinutes, rebootedSinceLastActivity: iso } };
-}
-
 export function buildNextStep({
   surface,
   situation,

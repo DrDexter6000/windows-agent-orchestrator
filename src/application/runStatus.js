@@ -389,8 +389,8 @@ export async function getRunStatus({
   const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
   const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
   // 第 107 批：重启关系陈述——非终态、普通静默 advisory 已在场、runner 未被
-  // 证明不在、且 rebootedSinceLastActivity 成立时附加（中文末尾一句 + wire 变体
-  // 模板，见 runQuietAdvisory.js）。最后活动与 B92 同一取法
+  // 证明不在、且 rebootedSinceLastActivity 成立时附加（中文一句，放在"是否继续等待"
+  // 之前并替下生命体征建议；wire 换变体模板，见 runQuietAdvisory.js）。最后活动与 B92 同一取法
   //（lastQuietWindowBoundMs——被拒的重打包审计不算活动），另取 owner 租约心跳
   // 的较晚者；开机时刻经 runnerGoneDeps.bootTimeFn 注入缝可测（缺省真读
   // machineBootTimeMs）；任一读取失败 → 不陈述（rebooted 为 null，输出字节不

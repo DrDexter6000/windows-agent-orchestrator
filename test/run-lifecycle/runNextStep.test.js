@@ -359,7 +359,7 @@ test("NEXT-13: runner_unproven——只有 CLI 面；先 status 再干跑 settle
   assert.ok(NEXT_STEP_SITUATIONS.includes("runner_unproven"), "新情形进闭集");
   const text = buildNextStep({ surface: "cli", situation: "runner_unproven", runId: RUN_ID });
   assert.match(text, new RegExp(`^The runner's absence cannot be proven, so the run may still change\\. First check wao status ${RUN_ID}, then dry-run wao runs settle --run-id ${RUN_ID} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
-  assert.match(text, /The Lead then decides: stop it \(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\), settle it, or attach the wait again\.$/);
+  assert.match(text, new RegExp(`The Lead then decides: stop it \\(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\\), settle it, or attach the wait again\\.$`));
   assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
   // 措辞纪律：不断言 runner 已死、不说等待不会改变事实；不建议 accept/reject。
   assert.ok(!/gone|dead|will not change/i.test(text), "不断言已死/等待无效");

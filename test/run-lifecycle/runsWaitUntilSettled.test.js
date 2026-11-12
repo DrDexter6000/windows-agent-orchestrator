@@ -1711,7 +1711,7 @@ test("UP-01: 静默满 30 分钟且本轮拒于 runner_scan_failed → 退出 5�
       `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.`,
     );
     assert.match(r.outLines[2], new RegExp(`^Next step: The runner's absence cannot be proven, so the run may still change\\. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
-    assert.match(r.outLines[2], /The Lead then decides: stop it \(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\), settle it, or attach the wait again\.$/);
+    assert.match(r.outLines[2], new RegExp(`The Lead then decides: stop it \\(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\\), settle it, or attach the wait again\\.$`));
     // 措辞纪律：不说"等待不会改变事实"，不断言 runner 已死。
     assert.ok(!r.out.includes("waiting will not change this"), "不得写 waiting will not change this");
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "报警即退：不打印未收口进度行");
@@ -1966,6 +1966,7 @@ test("UP-06b: 首读静默满 30 分钟、证明期间长出新事件 → 重读
     assert.equal(r.exitCode, undefined, "重读快照只静默 1 分钟 → 不退出 5，后来收口 → 0");
     assert.equal(reads, 3, "首读 + 报警前的重读 + 下一轮读到收口");
     assert.ok(!/runner_unproven|Unproven:/.test(r.out), "不出现 runner_unproven 输出");
+    assert.match(r.out, /last vital sign 1 min ago/, "进度行按重读快照（新事件 1 分钟前）打印，不沿用首读的 31 分钟");
   } finally {
     cleanupDir(dir);
   }

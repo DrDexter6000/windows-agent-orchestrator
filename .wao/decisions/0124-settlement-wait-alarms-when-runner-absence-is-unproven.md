@@ -14,7 +14,7 @@ runner 缺席证明是 `runs settle` 的只读干跑。事故里它拒于 `runne
 
 ## 决定
 
-1. 等待器新增结果 `runner_unproven`，CLI 退出码 5（`runs wait --until-settled` 与 `consult wait --until-settled` 同一套）。条件：本轮确实发了证明（owner 心跳不新鲜、满结算静默窗），证明被"证明不了"一类的闭集理由拒绝（`runner_scan_failed`、`process_identity_unknown`、`owner_lease_corrupt`、`session_ambiguous`、证明抛错记成的 `probe_failed`），且重读快照里计入静默窗的最后绑定事件已满 30 分钟（`LEAD_ADVISORY_QUIET_SECONDS`）。正面存活证据（心跳新鲜、仍见 runner 或会话进程、有活 daemon）、前台无会话与有停止通道的形状照旧一直等。
+1. 等待器新增结果 `runner_unproven`，CLI 退出码 5（`runs wait --until-settled` 与 `consult wait --until-settled` 同一套）。条件：本轮确实发了证明（owner 心跳不新鲜、满结算静默窗），证明被"证明不了"一类的闭集理由拒绝（`runner_scan_failed`、`process_identity_unknown`、`owner_lease_corrupt`、`session_ambiguous`、证明抛错记成的 `probe_failed`），且计入静默窗的最后绑定事件已满 30 分钟（`LEAD_ADVISORY_QUIET_SECONDS`）——证明那一轮的快照与报警前重读的快照都要满足，重读时长出新事件就不报警。正面存活证据（心跳新鲜、仍见 runner 或会话进程、有活 daemon）、前台无会话与有停止通道的形状照旧一直等。
 2. 退出时只陈述：证明不了 runner 已不在，运行仍可能变化；不写"等下去也不会变"。下一步先看 `wao status`，再干跑 `runs settle` 看门事实；停掉、结算或重挂由 Lead 决定。WAO 不改运行状态。
 3. 本机开机晚于该运行最后可见活动（最后绑定事件与 owner 租约心跳取较晚者）时，退出输出与 `run_status` 的静默 advisory 各说一句：重启前的 runner 活不过重启，开机后有没有续跑未经证明。它是陈述，不是证明。
 

@@ -7,7 +7,7 @@
 // TD-341（第 89 批 C）：runner 已被证明不在时的 advisory 双语模板同在本模块
 //（runnerGoneAdvisoryText / runnerGoneAdvisoryWireText）——advisory 文本单一 SSOT。
 // 第 107 批：静默 advisory 之上的重启关系陈述（rebootedSinceLastActivity 成立
-// 时）：中文追加句 rebootRelationAdvisoryText + wire 变体模板
+// 时）：中文句 rebootRelationAdvisoryText（替下生命体征建议）+ wire 变体模板
 // leadAdvisoryRebootWireText（判定本身是 ownerLiveness 的纯函数，这里只有模板）。
 //
 // "动作或正文"与 completed_empty 判定同一口径（runEventIsUsableEffect）；
