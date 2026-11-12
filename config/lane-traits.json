@@ -182,7 +182,7 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "2026-11-11 ZCode 3.17.2→3.18.0（身份字段改拼写，第 104 批两种都认）：delta 认证与续修冒烟通过；code 在 3.18.0 实际任务相符（第 105 批）；research、review 待新版实际任务，相符才解除，不符改格",
+      "reviewPending": "ZCode 3.17.2→3.18.0（11-11，身份字段改拼写）→3.18.2（11-12）：delta 认证通过；code 在 3.18.0 实际任务相符（第 105 批）；research、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 1,
       "cost": "GLM 订阅；GLM 高峰（工作日北京 9:00–18:00，即 UTC 01:00–10:00；周末与中国法定节假日全天不算高峰）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口",
       "caveats": [
@@ -249,7 +249,7 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "2026-11-11 ZCode 桌面 3.17.2→3.18.0（消息与 part 身份字段改拼写，第 104 批两种都认）：delta 认证（conditional）与续修冒烟通过；research、code、review 待新版实际任务，与原评级相符才解除，不符改格",
+      "reviewPending": "ZCode 3.17.2→3.18.0（11-11，身份字段改拼写）→3.18.2（11-12）：delta 认证通过；research、code、review 待新版实际任务，与原评级相符才解除，不符改格",
       "costTier": 0.5,
       "cost": "GLM 订阅",
       "caveats": [],
