@@ -3,11 +3,11 @@
   "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
   "costTierScale": "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数，取非高峰的基础档，高峰倍率看各车道 cost",
   "ownerRules": [
-    "sol、astra（codex 车道）只做会审，不派实现、测试或调研；会审要查 bug 时优选 sol；astra 只用于疑难杂症",
+    "sol、astra（codex 车道）只做会审，不派实现、测试或调研；会审要查 bug 时优选 sol",
     "要真跑一次 deepseek-acp 后端（如验证该后端的改动）用 deepseek-flash；deepseek-pro 暂停期间连最小探测也不派",
     "实现任务默认 glm-pro：它能完成的都优先交给它，不按任务形态另分车道；GLM 高峰期间（时段见 glm-pro 的 cost）优先 glm-flash",
     "能省则省，质量和效率优先；不必为省钱刻意避开 DeepSeek 高峰",
-    "fable 仅在方案设计/头脑风暴阶段引入会审"
+    "fable 与 astra 只用于疑难杂症、影响面广、难度高或要求创意的会审，寻常会审不请；fable 只在方案设计/头脑风暴阶段"
   ],
   "scale": {
     "1": "不适合",
