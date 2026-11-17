@@ -59,6 +59,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "reviewPending": "codex 0.167.0→0.169.0（11-17）：认证 certified 与跨 run drill 通过；measured 格待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -118,6 +119,7 @@
         "providerID": null,
         "effort": "medium"
       },
+      "reviewPending": "codex 0.167.0→0.169.0（11-17）：同一程序 sol 已认证并跑 drill；本车道待下次实际会审冒烟，通过即解除",
       "costTier": 5,
       "cost": "codex 订阅额度",
       "caveats": [
@@ -378,6 +380,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "reviewPending": "claude-code 2.1.321→2.1.326（11-17）：delta 认证与真实续修冒烟通过；抓 bug/把关待新版实际会审，相符才解除，不符改格",
       "costTier": 3,
       "cost": "Claude 订阅（OAuth 长期 token）",
       "caveats": [
@@ -437,6 +440,7 @@
         "tokens": 1000000,
         "source": "official"
       },
+      "reviewPending": "claude-code 2.1.321→2.1.326（11-17）：同一程序 opus 已认证并做续修冒烟；本车道待下次实际会审冒烟，通过即解除",
       "multimodal": {
         "image": true,
         "video": false,
