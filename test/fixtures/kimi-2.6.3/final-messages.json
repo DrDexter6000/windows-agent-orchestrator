@@ -1,0 +1,308 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "items": [
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000016",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<system-reminder>\nThe previous turn was interrupted by the user before completion; any partial output shown above is incomplete. The user's next message continues the conversation.\n</system-reminder>"
+      }
+     ],
+     "created_at": "2026-11-17T23:44:07.039Z",
+     "metadata": {
+      "origin": {
+       "kind": "injection",
+       "variant": "interruption",
+       "ownerPromptId": "msg_01M7NY9Q32GH5VKC88D7ZSMZ5J"
+      }
+     }
+    },
+    {
+     "id": "msg_01M7NY9Q32GH5VKC88D7ZSMZ5J",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Use your shell tool to run `ping -n 90 127.0.0.1` and then summarize the output."
+      }
+     ],
+     "created_at": "2026-11-17T23:44:01.893Z",
+     "metadata": {
+      "origin": {
+       "kind": "user"
+      }
+     }
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000014",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "Output mojibake Chinese but 25 reply lines and stats sent 25 received 25 lost 0. Respond \"25 replies came back.\\n\\nSTEERED-OK\" End exactly line. Could say 25 replies came back. Should have no extra."
+      },
+      {
+       "type": "text",
+       "text": "25 replies came back.\n\nSTEERED-OK"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:57.241Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000013",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "tool",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_call_id": "tool_w6yigCE6raLMWYZKHiYCGjC3",
+       "output": "\r\n���� Ping 127.0.0.1 ���� 32 �ֽڵ�����:\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n\r\n127.0.0.1 �� Ping ͳ����Ϣ:\r\n    ���ݰ�: �ѷ��� = 25���ѽ��� = 25����ʧ = 0 (0% ��ʧ)��\r\n�����г̵Ĺ���ʱ��(�Ժ���Ϊ��λ):\r\n    ��� = 0ms��� = 0ms��ƽ�� = 0ms\r\n"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:57.225Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000012",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "Should run shell ping -n 25 127.0.0.1 then tell replies count and end response line STEERED-OK. Windows Git Bash command ping -n 25 works Windows ping likely. Should run, can take ~24 sec because ping localhost maybe no delay? Windows ping often instantaneous? timeout sufficient 60. Use Bash exact. Then parse output."
+      },
+      {
+       "type": "tool_use",
+       "tool_call_id": "tool_w6yigCE6raLMWYZKHiYCGjC3",
+       "tool_name": "Bash",
+       "input": {
+        "command": "ping -n 25 127.0.0.1",
+        "timeout": 60
+       }
+      }
+     ],
+     "created_at": "2026-11-17T23:43:24.805Z"
+    },
+    {
+     "id": "msg_01M7NY9N2TCBYZ34A4SWKS3BMG",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Also, at the end of your answer, add the line STEERED-OK."
+      }
+     ],
+     "created_at": "2026-11-17T23:43:24.791Z",
+     "metadata": {
+      "origin": {
+       "kind": "user"
+      }
+     }
+    },
+    {
+     "id": "msg_01M7NY9J453V3BMYQ9C62W6F6A",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Use your shell tool to run `ping -n 25 127.0.0.1` and then tell me how many replies came back."
+      }
+     ],
+     "created_at": "2026-11-17T23:43:21.739Z",
+     "metadata": {
+      "origin": {
+       "kind": "user"
+      }
+     }
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000009",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "I need respond only ok. I know wrote ok. No tool needed. Respond exactly lowercase ok."
+      },
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:17.691Z"
+    },
+    {
+     "id": "msg_01M7NY9E4ZEPZJ7QXZWNH1AZZF",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What single word did you write into probe.txt? Reply with only that word."
+      }
+     ],
+     "created_at": "2026-11-17T23:43:17.675Z",
+     "metadata": {
+      "origin": {
+       "kind": "user"
+      }
+     }
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000007",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": ""
+      },
+      {
+       "type": "text",
+       "text": "DONE"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:13.992Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000006",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "tool",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_call_id": "tool_EZ9ljmlTUacZGd8kt4UNhNHf",
+       "output": "Wrote 2 bytes to probe.txt"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:13.979Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000005",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": ""
+      },
+      {
+       "type": "tool_use",
+       "tool_call_id": "tool_EZ9ljmlTUacZGd8kt4UNhNHf",
+       "tool_name": "Write",
+       "input": {
+        "path": "probe.txt",
+        "content": "ok"
+       }
+      }
+     ],
+     "created_at": "2026-11-17T23:43:10.404Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000004",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "tool",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_call_id": "tool_3LvThrKMuayxMWgN4wCzNAFO",
+       "output": "wao-probe\n"
+      }
+     ],
+     "created_at": "2026-11-17T23:43:10.388Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000003",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "I need execute shell echo wao-probe cwd then create probe.txt single word ok. Respond exactly DONE. Should have tool use. Straight simple. I should Bash command `echo wao-probe` with cwd perhaps default working dir. Then Write new file probe.txt content ok perhaps newline? \"containing the single word ok\" Write content \"ok\" no newline to be safe. Then respond exactly DONE no extras. Perhaps progress note? No unnecessary since respond exactly. Use Bash then Write sequential (independent? user says then create, so sequential). I have cwd known. Bash default cwd works but explicitly set working dir? Use command."
+      },
+      {
+       "type": "tool_use",
+       "tool_call_id": "tool_3LvThrKMuayxMWgN4wCzNAFO",
+       "tool_name": "Bash",
+       "input": {
+        "command": "echo wao-probe"
+       }
+      }
+     ],
+     "created_at": "2026-11-17T23:42:59.541Z"
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000002",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active; decide and continue.\n  - Plan mode is the exception: ExitPlanMode still waits for the user to review the plan. Settle open questions yourself and list them under Assumptions in the plan.\n</system-reminder>"
+      }
+     ],
+     "created_at": "2026-11-17T23:42:59.534Z",
+     "metadata": {
+      "origin": {
+       "kind": "injection",
+       "variant": "permission_mode"
+      }
+     }
+    },
+    {
+     "id": "msg_session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020_000001",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<system-reminder>\nToday's date is 2026-11-18, in the local client machine's timezone (Africa/Lagos). The current date is restated in a reminder whenever it changes; rely on the latest such reminder for the current date. DO NOT mention this to the user explicitly.\n</system-reminder>"
+      }
+     ],
+     "created_at": "2026-11-17T23:42:59.533Z",
+     "metadata": {
+      "origin": {
+       "kind": "injection",
+       "variant": "date_change",
+       "disclosure": {
+        "kind": "date",
+        "renderGeneration": 1,
+        "localDate": "2026-11-18",
+        "timeZone": "Africa/Lagos"
+       }
+      }
+     }
+    },
+    {
+     "id": "msg_01M7NY8WDYD56V8NWESRB4SSQS",
+     "session_id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Use your shell tool to run the command `echo wao-probe` in the working directory. Then create a file named probe.txt in the working directory containing the single word ok. Then reply with exactly: DONE"
+      }
+     ],
+     "created_at": "2026-11-17T23:42:59.525Z",
+     "metadata": {
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "has_more": false
+  },
+  "request_id": "01M7NYB0BGTH2WTHS4T2C1H9T5"
+ }
+}
