@@ -1,0 +1,37 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "id": "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020",
+   "workspace_id": "wd_cwd_c13af0444b07",
+   "title": "wao-b109-probe",
+   "created_at": "2026-11-17T23:42:59.420Z",
+   "updated_at": "2026-11-17T23:42:59.420Z",
+   "busy": false,
+   "main_turn_active": false,
+   "pending_interaction": "none",
+   "archived": false,
+   "metadata": {
+    "cwd": "C:\\wao-probe\\cwd"
+   },
+   "agent_config": {
+    "model": "kimi-code/kimi-for-coding"
+   },
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "total_cost_usd": 0,
+    "context_tokens": 0,
+    "context_limit": 0,
+    "turn_count": 0
+   },
+   "permission_rules": [],
+   "message_count": 0
+  },
+  "request_id": "01M7NY8WDRM3HCV9DHHF1NRDHG"
+ }
+}

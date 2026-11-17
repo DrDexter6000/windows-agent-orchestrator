@@ -1,0 +1,11 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "aborted": true
+  },
+  "request_id": "01M7NYAYBSQZGC41V94CWGRX1E"
+ }
+}

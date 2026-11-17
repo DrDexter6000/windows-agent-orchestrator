@@ -1,0 +1,314 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "turns": [
+    {
+     "turn_id": "t_3c706a99b62e",
+     "ordinal": 0,
+     "kind": "agent",
+     "status": "ended",
+     "turn_number": 0,
+     "started_at": "2026-11-17T23:42:59.525Z",
+     "steps": [
+      {
+       "index": 1,
+       "outcome": "completed",
+       "started_at": "2026-11-17T23:42:59.541Z",
+       "ended_at": "2026-11-17T23:43:10.390Z",
+       "finish_reason": "tool_use",
+       "usage": {
+        "input_other": 253,
+        "output": 186,
+        "input_cache_read": 16640,
+        "input_cache_creation": 0
+       }
+      },
+      {
+       "index": 2,
+       "outcome": "completed",
+       "started_at": "2026-11-17T23:43:10.404Z",
+       "ended_at": "2026-11-17T23:43:13.981Z",
+       "finish_reason": "tool_use",
+       "usage": {
+        "input_other": 215,
+        "output": 67,
+        "input_cache_read": 16896,
+        "input_cache_creation": 0
+       }
+      },
+      {
+       "index": 3,
+       "outcome": "completed",
+       "started_at": "2026-11-17T23:43:13.992Z",
+       "ended_at": "2026-11-17T23:43:17.286Z",
+       "finish_reason": "end_turn",
+       "usage": {
+        "input_other": 338,
+        "output": 17,
+        "input_cache_read": 16896,
+        "input_cache_creation": 0
+       }
+      }
+     ],
+     "items": [
+      {
+       "type": "user_message",
+       "item_id": "msg_01M7NY8WDYD56V8NWESRB4SSQS",
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:42:59.525Z",
+       "prompt_ids": [
+        "msg_01M7NY8WDYD56V8NWESRB4SSQS"
+       ],
+       "placement": "opener",
+       "origin": {
+        "kind": "user"
+       },
+       "text": "Use your shell tool to run the command `echo wao-probe` in the working directory. Then create a file named probe.txt in the working directory containing the single word ok. Then reply with exactly: DONE",
+       "attachments": [],
+       "skills": []
+      },
+      {
+       "type": "reasoning",
+       "item_id": "620298ac-cac4-492b-8017-1d4da989e9d7:0",
+       "step_index": 1,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:04.526Z",
+       "text": "I need execute shell echo wao-probe cwd then create probe.txt single word ok. Respond exactly DONE. Should have tool use. Straight simple. I should Bash command `echo wao-probe` with cwd perhaps default working dir. Then Write new file probe.txt content ok perhaps newline? \"containing the single word ok\" Write content \"ok\" no newline to be safe. Then respond exactly DONE no extras. Perhaps progress note? No unnecessary since respond exactly. Use Bash then Write sequential (independent? user says then create, so sequential). I have cwd known. Bash default cwd works but explicitly set working dir? Use command.",
+       "started_at": "2026-11-17T23:43:04.526Z",
+       "duration_ms": 5644
+      },
+      {
+       "type": "tool_call",
+       "item_id": "tool_3LvThrKMuayxMWgN4wCzNAFO",
+       "step_index": 1,
+       "status": "ended",
+       "created_at": "2026-11-17T23:43:10.192Z",
+       "name": "Bash",
+       "input": {
+        "command": "echo wao-probe"
+       },
+       "display": {
+        "kind": "command",
+        "command": "echo wao-probe",
+        "cwd": "C:\\wao-probe\\cwd",
+        "language": "bash"
+       },
+       "started_at": "2026-11-17T23:43:10.192Z",
+       "outcome": "completed",
+       "output": "wao-probe\n",
+       "ended_at": "2026-11-17T23:43:10.388Z"
+      },
+      {
+       "type": "reasoning",
+       "item_id": "822658b0-efde-41d5-a877-20852f45eb22:0",
+       "step_index": 2,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:13.226Z",
+       "text": "",
+       "started_at": "2026-11-17T23:43:13.226Z",
+       "duration_ms": 0
+      },
+      {
+       "type": "tool_call",
+       "item_id": "tool_EZ9ljmlTUacZGd8kt4UNhNHf",
+       "step_index": 2,
+       "status": "ended",
+       "created_at": "2026-11-17T23:43:13.945Z",
+       "name": "Write",
+       "input": {
+        "path": "probe.txt",
+        "content": "ok"
+       },
+       "display": {
+        "kind": "file_io",
+        "operation": "write",
+        "path": "C:/wao-probe/cwd/probe.txt",
+        "content": "ok"
+       },
+       "started_at": "2026-11-17T23:43:13.945Z",
+       "outcome": "completed",
+       "output": "Wrote 2 bytes to probe.txt",
+       "note": "<system>The change is applied; there is no need to Read the file back to check it.</system>",
+       "ended_at": "2026-11-17T23:43:13.979Z"
+      },
+      {
+       "type": "reasoning",
+       "item_id": "3a7a9ab9-f569-4652-abb0-873bedd71ea3:0",
+       "step_index": 3,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:17.277Z",
+       "text": "",
+       "started_at": "2026-11-17T23:43:17.277Z",
+       "duration_ms": 0
+      },
+      {
+       "type": "assistant_message",
+       "item_id": "3a7a9ab9-f569-4652-abb0-873bedd71ea3:1",
+       "step_index": 3,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:17.277Z",
+       "text": "DONE"
+      }
+     ],
+     "usage": {
+      "input_other": 806,
+      "output": 270,
+      "input_cache_read": 50432,
+      "input_cache_creation": 0
+     },
+     "outcome": "completed",
+     "ended_at": "2026-11-17T23:43:17.287Z",
+     "duration_ms": 17761
+    },
+    {
+     "turn_id": "t_e90c0d159aad",
+     "ordinal": 1,
+     "kind": "agent",
+     "status": "ended",
+     "turn_number": 1,
+     "started_at": "2026-11-17T23:43:17.675Z",
+     "steps": [
+      {
+       "index": 1,
+       "outcome": "completed",
+       "started_at": "2026-11-17T23:43:17.691Z",
+       "ended_at": "2026-11-17T23:43:21.486Z",
+       "finish_reason": "end_turn",
+       "usage": {
+        "input_other": 133,
+        "output": 37,
+        "input_cache_read": 17152,
+        "input_cache_creation": 0
+       }
+      }
+     ],
+     "items": [
+      {
+       "type": "user_message",
+       "item_id": "msg_01M7NY9E4ZEPZJ7QXZWNH1AZZF",
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:17.675Z",
+       "prompt_ids": [
+        "msg_01M7NY9E4ZEPZJ7QXZWNH1AZZF"
+       ],
+       "placement": "opener",
+       "origin": {
+        "kind": "user"
+       },
+       "text": "What single word did you write into probe.txt? Reply with only that word.",
+       "attachments": [],
+       "skills": []
+      },
+      {
+       "type": "reasoning",
+       "item_id": "45301cc4-3eff-47fc-bfde-0cfa3bd26327:0",
+       "step_index": 1,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:20.431Z",
+       "text": "I need respond only ok. I know wrote ok. No tool needed. Respond exactly lowercase ok.",
+       "started_at": "2026-11-17T23:43:20.431Z",
+       "duration_ms": 1032
+      },
+      {
+       "type": "assistant_message",
+       "item_id": "45301cc4-3eff-47fc-bfde-0cfa3bd26327:1",
+       "step_index": 1,
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:21.463Z",
+       "text": "ok"
+      }
+     ],
+     "usage": {
+      "input_other": 133,
+      "output": 37,
+      "input_cache_read": 17152,
+      "input_cache_creation": 0
+     },
+     "outcome": "completed",
+     "ended_at": "2026-11-17T23:43:21.486Z",
+     "duration_ms": 3811
+    },
+    {
+     "turn_id": "t_08e37d6e3696",
+     "ordinal": 2,
+     "kind": "agent",
+     "status": "ended",
+     "turn_number": 2,
+     "started_at": "2026-11-17T23:43:21.739Z",
+     "steps": [
+      {
+       "index": 1,
+       "outcome": "interrupted",
+       "started_at": "2026-11-17T23:43:21.751Z",
+       "ended_at": "2026-11-17T23:43:24.788Z",
+       "finish_reason": "interrupted"
+      }
+     ],
+     "items": [
+      {
+       "type": "user_message",
+       "item_id": "msg_01M7NY9J453V3BMYQ9C62W6F6A",
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:21.739Z",
+       "prompt_ids": [
+        "msg_01M7NY9J453V3BMYQ9C62W6F6A"
+       ],
+       "placement": "opener",
+       "origin": {
+        "kind": "user"
+       },
+       "text": "Use your shell tool to run `ping -n 25 127.0.0.1` and then tell me how many replies came back.",
+       "attachments": [],
+       "skills": []
+      }
+     ],
+     "outcome": "completed",
+     "ended_at": "2026-11-17T23:43:24.788Z",
+     "duration_ms": 3048
+    },
+    {
+     "turn_id": "t_9d618a968436",
+     "ordinal": 3,
+     "kind": "agent",
+     "status": "running",
+     "turn_number": 3,
+     "started_at": "2026-11-17T23:43:24.791Z",
+     "steps": [],
+     "items": [
+      {
+       "type": "user_message",
+       "item_id": "msg_01M7NY9N2TCBYZ34A4SWKS3BMG",
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:43:24.791Z",
+       "prompt_ids": [
+        "msg_01M7NY9N2TCBYZ34A4SWKS3BMG"
+       ],
+       "placement": "opener",
+       "origin": {
+        "kind": "user"
+       },
+       "text": "Also, at the end of your answer, add the line STEERED-OK.",
+       "attachments": [],
+       "skills": []
+      }
+     ]
+    }
+   ],
+   "has_more": false
+  },
+  "request_id": "01M7NY9Q2M661GB011E3FCTY4Q"
+ }
+}

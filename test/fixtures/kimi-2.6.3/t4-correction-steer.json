@@ -1,0 +1,14 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "steered": true,
+   "prompt_ids": [
+    "msg_01M7NY9N2TCBYZ34A4SWKS3BMG"
+   ]
+  },
+  "request_id": "01M7NY9N3BBEDB8ZQ54D14YNGZ"
+ }
+}

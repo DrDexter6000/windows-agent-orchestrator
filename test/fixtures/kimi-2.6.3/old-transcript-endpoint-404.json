@@ -1,0 +1,8 @@
+{
+ "http": 404,
+ "json": {
+  "message": "Route GET:/api/v1/sessions/session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020/transcript?agent_id=main not found",
+  "error": "Not Found",
+  "statusCode": 404
+ }
+}

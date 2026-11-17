@@ -1,0 +1,36 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "active": {
+    "prompt_id": "msg_01M7NY9J453V3BMYQ9C62W6F6A",
+    "user_message_id": "msg_01M7NY9J453V3BMYQ9C62W6F6A",
+    "status": "running",
+    "content": [
+     {
+      "type": "text",
+      "text": "Use your shell tool to run `ping -n 25 127.0.0.1` and then tell me how many replies came back."
+     }
+    ],
+    "created_at": "2026-11-17T23:43:21.737Z"
+   },
+   "queued": [
+    {
+     "prompt_id": "msg_01M7NY9N2TCBYZ34A4SWKS3BMG",
+     "user_message_id": "msg_01M7NY9N2TCBYZ34A4SWKS3BMG",
+     "status": "queued",
+     "content": [
+      {
+       "type": "text",
+       "text": "Also, at the end of your answer, add the line STEERED-OK."
+      }
+     ],
+     "created_at": "2026-11-17T23:43:24.772Z"
+    }
+   ]
+  },
+  "request_id": "01M7NY9N37MCWNH9ZZ1JG54P1X"
+ }
+}

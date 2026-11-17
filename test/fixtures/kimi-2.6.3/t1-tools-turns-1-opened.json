@@ -1,0 +1,41 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "turns": [
+    {
+     "turn_id": "t_3c706a99b62e",
+     "ordinal": 0,
+     "kind": "agent",
+     "status": "running",
+     "turn_number": 0,
+     "started_at": "2026-11-17T23:42:59.525Z",
+     "steps": [],
+     "items": [
+      {
+       "type": "user_message",
+       "item_id": "msg_01M7NY8WDYD56V8NWESRB4SSQS",
+       "status": "ended",
+       "outcome": "completed",
+       "created_at": "2026-11-17T23:42:59.525Z",
+       "prompt_ids": [
+        "msg_01M7NY8WDYD56V8NWESRB4SSQS"
+       ],
+       "placement": "opener",
+       "origin": {
+        "kind": "user"
+       },
+       "text": "Use your shell tool to run the command `echo wao-probe` in the working directory. Then create a file named probe.txt in the working directory containing the single word ok. Then reply with exactly: DONE",
+       "attachments": [],
+       "skills": []
+      }
+     ]
+    }
+   ],
+   "has_more": false
+  },
+  "request_id": "01M7NY8WEW6FS2PB4KH0W67XQZ"
+ }
+}
