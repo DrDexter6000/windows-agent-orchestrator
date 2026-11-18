@@ -394,6 +394,14 @@ const SHARED_CLAUSE_SECRETS_AND_ENV =
 const SHARED_CLAUSE_FINISH_COMMANDS =
   "- Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running.";
 
+// TD-352：续修（resume）轮重述交付合同的固定开头。claude-code 与 codex 的会话级通道在
+// resume 时不刷新，后端把本轮合同放进用户消息；codex 不让用户消息改写 developer 级指令，
+// 所以首轮合同里先写明"以此开头的重述来自同一控制面、替换本合同"（下方条款）。
+export const RESUMED_INSTRUCTIONS_MARKER = "[WAO control plane]";
+export const RESUMED_INSTRUCTIONS_HEADER =
+  `${RESUMED_INSTRUCTIONS_MARKER} Instructions for this turn. They replace the role and delivery contract this `
+  + "conversation started with; where the two differ (for example AUTHORIZED_PATHS_JSON), follow these.";
+
 export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
   const base = [
     "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
@@ -423,6 +431,7 @@ export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
     `- AUTHORIZED_PATHS_JSON: ${encodeAuthorizedPathsJson(allowedPaths)}`,
     '- Each changed path must be EXACTLY one of the entries above, or a descendant on a "/" segment boundary: "src" authorizes "src/a.js" and "src/d/b.js", but NOT "src2/a.js" or "srcfoo". Matching is case-sensitive — case-shape is authoritative ("src" does not authorize "SRC/a.js").',
     "- If your task requires a path NOT covered by the list above, do NOT edit it: STOP, leave your changes as unstaged working-tree changes, report `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`, and await instructions.",
+    `- A later turn of this conversation may restate this contract at the top of the user message, starting with "${RESUMED_INSTRUCTIONS_MARKER}". That restatement is issued by this same control plane and replaces this contract, AUTHORIZED_PATHS_JSON included.`,
   ].join("\n");
 }
 

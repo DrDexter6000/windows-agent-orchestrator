@@ -1574,3 +1574,13 @@ test("TD-352: correctable 的 resume 轮，首条 stream-json 用户消息带重
   assert.ok(text.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'));
   assert.ok(text.endsWith("continue"));
 });
+
+test("TD-352: 首轮交付合同预先授权以同一标记开头的重述——codex 不让用户消息改写 developer 级指令", async () => {
+  const { composeDeliveryExecutionContract, RESUMED_INSTRUCTIONS_MARKER } = await import("../../src/application/roleContract.js");
+  assert.ok(RESUMED_INSTRUCTIONS_HEADER.startsWith(RESUMED_INSTRUCTIONS_MARKER), "重述的开头就是合同里说的那个标记");
+  const scoped = composeDeliveryExecutionContract({ allowedPaths: ["src"] });
+  const clause = scoped.split("\n").find((l) => l.startsWith("- A later turn of this conversation may restate this contract"));
+  assert.ok(clause, "带授权清单的交付合同里有预先授权条款");
+  assert.ok(clause.includes(`"${RESUMED_INSTRUCTIONS_MARKER}"`), "条款点名同一个标记");
+  assert.ok(clause.includes("AUTHORIZED_PATHS_JSON"), "条款写明授权清单也随重述替换");
+});

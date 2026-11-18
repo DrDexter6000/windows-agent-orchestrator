@@ -7,6 +7,7 @@ import {
 } from "./processActivity.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { NESTED_DISPATCH_BYPASS_ENV } from "../envPolicy.js";
+import { RESUMED_INSTRUCTIONS_HEADER } from "../application/roleContract.js";
 
 const SAFE_INHERITED_ENV = new Set([
   "ALL_PROXY", "APPDATA", "COLORTERM", "COMSPEC", "HOMEDRIVE", "HOMEPATH",
@@ -83,17 +84,13 @@ class EventQueue {
  *   (b) taskkill /pid /T /F（主动）：abort 时主动杀进程树（行业最佳实践，tree-kill/execa 底层同此）。
  * 不实现自定义 Job Object：违反零依赖（需 N-API/FFI 原生模块）且业界无人这样做（内置已够用，见 ADR 0013）。
  */
-// TD-352：resume 轮重述本轮指令的固定开头。会话级通道里还是建会话时那份角色与交付
-// 合同，这里说清以哪份为准。
-export const RESUMED_INSTRUCTIONS_HEADER =
-  "[WAO control plane] Instructions for this turn. They replace the role and delivery contract this "
-  + "conversation started with; where the two differ (for example AUTHORIZED_PATHS_JSON), follow these.";
-
 /**
  * 本轮写进标准输入的提示词。声明 resumeKeepsSessionInstructions 的后端在 resume 轮把
  * task.roleContract（交付合同 + 角色合同，与首轮同一拼法）重述在前面；其余情形原样返回。
  * 转录的 prompt.sent 只记 Lead 的提示词，不受影响。
  */
+export { RESUMED_INSTRUCTIONS_HEADER };
+
 export function turnPrompt(backend, task) {
   const restate = backend?.resumeKeepsSessionInstructions === true
     && task?.sessionReuse?.turn === "resume"
