@@ -31,7 +31,7 @@
     "astra": {
       "backend": "codex",
       "model": {
-        "id": "gpt-6-astra"
+        "id": "gpt-6.2-astra"
       },
       "reasoning": {
         "effort": "medium"
@@ -41,7 +41,7 @@
     "sol": {
       "backend": "codex",
       "model": {
-        "id": "gpt-6.1-sol"
+        "id": "gpt-6.2-sol"
       },
       "reasoning": {
         "effort": "high"

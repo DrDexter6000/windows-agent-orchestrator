@@ -79,7 +79,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
   })).sort((a, b) => (a.id < b.id ? -1 : 1));
   assert.deepEqual(snapshot, [
-    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "medium", aliases: {} },
+    { id: "astra", backend: "codex", modelId: "gpt-6.2-astra", effort: "medium", aliases: {} },
     { id: "deepseek-flash", backend: "deepseek-acp", modelId: "deepseek-flash", effort: "max", aliases: {} },
     { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
     { id: "fable", backend: "claude-code", modelId: "claude-fable-5-2", effort: "high", aliases: {} },
@@ -87,7 +87,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: {} },
     { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3.1-pro", effort: null, aliases: {} },
     { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: {} },
-    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: {} },
+    { id: "sol", backend: "codex", modelId: "gpt-6.2-sol", effort: "high", aliases: {} },
   ]);
   // 0046 §5 步②（2026-10-06）：车道键模型名化重键（kimi-k3→kimi/gpt-astra→astra/
   // gpt-sol-61→sol/claude-opus→opus/ds-acp→deepseek-pro；glm 系与 gpt-sol-56 不变，
