@@ -3166,6 +3166,143 @@ test("kimi-web 答案：相邻的同样文本原样保留（旧帧流的去重�
   assert.ok(!events.some((e) => e.kind === "message" && e.role === "system"));
 });
 
+// ===== 会审补测（第 109 批）=====
+
+test("kimi-web 会审①: 纠偏 prompt id 来自响应体——'已转入但没有轮执行它'的失败文案与'未执行'的 system 消息里 token 值都被清洗", async () => {
+  const tokenId = `msg_${TOKEN_VALUE}`;
+  const script = [[runningTurn()], [kimiTurn({ answer: "first answer" })]];
+  const steered = await runCorrected("session_rv1a", {
+    script,
+    corrections: [correctionReceipt(tokenId)],
+    steers: [envelope({ steered: true })],
+  });
+  assert.equal(steered.events.at(-1).reason, "failed");
+  assert.match(steered.events.at(-1).error, /correction prompt msg_<redacted> was steered into the session but no turn ran it/);
+  assert.ok(!JSON.stringify(steered.events).includes(TOKEN_VALUE), "失败文案无 token");
+  const acceptedOnly = await runCorrected("session_rv1b", {
+    script,
+    corrections: [correctionReceipt(tokenId)],
+    steers: [envelope(null, { code: 40402, msg: "no active prompt to steer into" })],
+  });
+  const system = acceptedOnly.events.filter((e) => e.kind === "message" && e.role === "system");
+  assert.equal(system.length, 1);
+  assert.match(system[0].parts[0].text, /correction prompt msg_<redacted> was not executed/);
+  assert.ok(!JSON.stringify(acceptedOnly.events).includes(TOKEN_VALUE), "system 消息无 token");
+  assert.equal(acceptedOnly.events.at(-1).reason, "completed");
+});
+
+test("kimi-web 会审②: firstRequest = 第一个归属轮 index 最小那一步；那一步没有 usage 就不写，不往后找带 usage 的步", async () => {
+  const turn = kimiTurn({
+    steps: [
+      stepItem({ index: 1, outcome: "interrupted", finish_reason: "interrupted", usage: undefined }),
+      stepItem({ index: 2, usage: { input_other: 999, output: 1, input_cache_read: 777, input_cache_creation: 0 } }),
+    ],
+    answer: "ok",
+  });
+  const { events } = await runScript("session_rv2", { script: [[turn]] });
+  assert.deepEqual(events.find((e) => e.kind === "metrics"), {
+    kind: "metrics",
+    tokens: { input: 999, output: 1, cacheRead: 777, cacheWrite: 0 },
+  }, "第 2 步不是第一个请求——不写 firstRequest");
+  // steps 乱序给出时按 index 取最小的那一步。
+  const reordered = kimiTurn({
+    steps: [
+      stepItem({ index: 2, usage: { input_other: 5, output: 1, input_cache_read: 6, input_cache_creation: 0 } }),
+      stepItem({ index: 1, usage: { input_other: 7, output: 1, input_cache_read: 8, input_cache_creation: 0 } }),
+    ],
+    answer: "ok",
+  });
+  const second = await runScript("session_rv2b", { script: [[reordered]] });
+  assert.deepEqual(second.events.find((e) => e.kind === "metrics").firstRequest, { input: 7, cacheRead: 8 });
+});
+
+test("kimi-web 会审③: 纠偏的计时原点是它自己的提交 / 转入时刻——派发早已超过 silentTimeout 之后才提交的纠偏不会立即到界", async () => {
+  // 派发的提交时刻摆在 10 分钟前（silentTimeout 60s 早已过去；派发本身已入轮、已结算）。
+  // 纠偏在拍 2 提交：已转入的那条与 steer 失败的那条都在拍 3 才出现在轮里——用派发的
+  // 原点计时会在拍 2 就判到界。
+  for (const steer of [envelope({ steered: true }), envelope(null, { code: 40402, msg: "no active prompt" })]) {
+    const run = createRunPrompts({ promptId: "msg_q1", submittedAt: Date.now() - 600_000 });
+    const dispatchTurn = kimiTurn({ turn_id: "t_d", ordinal: 0, answer: "first" });
+    const correctionTurn = kimiTurn({ turn_id: "t_c", ordinal: 1, promptIds: ["msg_c"], prompt: "fix", answer: "corrected" });
+    const scripts = [[runningTurn({ turn_id: "t_d" })], [dispatchTurn], [dispatchTurn, correctionTurn]];
+    let tick = 0;
+    const { fetchImpl } = kimiServer((url, init = {}) => {
+      const method = init.method ?? "GET";
+      if (method === "GET" && url.endsWith("/prompts")) { tick += 1; return promptsEnvelope(); }
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope(scripts[Math.min(tick, scripts.length) - 1]);
+      if (method === "POST" && url.endsWith("/prompts")) return correctionReceipt("msg_c");
+      if (url.endsWith("/prompts:steer")) return steer;
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const agent = makeAgent();
+    const events = [];
+    for await (const ev of backend.streamEvents(agent, "ses_origin", {
+      interval: 5,
+      silentTimeout: 60_000,
+      runPrompts: run,
+      onPollTick: async () => { if (tick === 1) await backend.sendCorrection(agent, "ses_origin", "fix", run); },
+    })) events.push(ev);
+    assert.equal(events.at(-1).reason, "completed", JSON.stringify(events.at(-1)));
+    assert.equal(events.find((e) => e.role === "assistant").parts[0].text, "corrected");
+    assert.ok(!events.some((e) => e.role === "system"), "没有被判成未执行");
+  }
+});
+
+test("kimi-web 会审④: 相邻页重复同一 turn_id（before_ordinal 含边界的形状）→ 按 turn_id 去重，只计一轮：usage 与工具证据都不重复", async () => {
+  const run = createRunPrompts({ promptId: "msg_d", boundaryOrdinal: 5 });
+  run.prompts.set("msg_c", { kind: "correction", submittedAt: Date.now(), steeredAt: Date.now(), waitPolls: 0, notExecuted: false });
+  const dispatchTurn = kimiTurn({
+    turn_id: "t8", ordinal: 8, promptIds: ["msg_d"], prompt: "dispatch",
+    items: [userMessageItem(["msg_d"], "dispatch"), toolCallItem({ item_id: "tc_dup", input: { command: "npm test" }, output: "ok" })],
+  });
+  const correctionTurn = kimiTurn({ turn_id: "t9", ordinal: 9, promptIds: ["msg_c"], prompt: "fix", answer: "final" });
+  const pages = {
+    "": turnsEnvelope([dispatchTurn, correctionTurn], { hasMore: true }),
+    "?before_ordinal=8": turnsEnvelope([kimiTurn({ turn_id: "t6", ordinal: 6, promptIds: ["msg_x"] }), kimiTurn({ turn_id: "t7", ordinal: 7, promptIds: ["msg_y"] }), dispatchTurn], { hasMore: true }),
+    "?before_ordinal=6": turnsEnvelope([kimiTurn({ turn_id: "t5", ordinal: 5, promptIds: ["msg_old"] })], { hasMore: true }),
+  };
+  const { fetchImpl } = kimiServer((url) => {
+    if (url.endsWith("/prompts")) return promptsEnvelope();
+    const at = url.indexOf("/agents/main/turns");
+    if (at >= 0) return pages[url.slice(at + "/agents/main/turns".length)];
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const events = [];
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_dup", { interval: 5, runPrompts: run })) events.push(ev);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.deepEqual(events.find((e) => e.kind === "metrics").tokens, { input: 200, output: 14, cacheRead: 20, cacheWrite: 6 }, "t8 只计一次");
+  assert.equal(events.filter((e) => e.kind === "command").length, 1);
+  assert.equal(events.filter((e) => e.kind === "tool_result" && e.tool === "tc_dup").length, 1);
+  assert.deepEqual(events.filter((e) => e.kind === "message").map((e) => e.parts[0].text), ["dispatch", "final"]);
+});
+
+test("kimi-web 会审⑤: 跨轮工具证据——较早的归属轮有 Bash 与 Write、最终轮才有回答：整次成功时命令、结果与 Write 的 file_written 都在；整次失败时 file_written 不落", async () => {
+  const bash = toolCallItem({ item_id: "tc_bash", input: { command: "npm test" }, output: "# pass 1" });
+  const write = toolCallItem({
+    item_id: "tc_write", step_index: 1, name: "Write", input: { path: "out.txt", content: "x" },
+    display: { kind: "file_io", operation: "write", path: "D:/w/out.txt" }, output: "Wrote 1 bytes",
+  });
+  // 派发那一轮被纠偏打断、无回答结束（2.6.3 的 t3 形状），工作已做了一半。
+  const interrupted = kimiTurn({ turn_id: "t_d", ordinal: 0, items: [userMessageItem(), bash, write] });
+  const finalTurn = (extra) => kimiTurn({ turn_id: "t_c", ordinal: 1, promptIds: ["msg_c"], prompt: "fix it", ...extra });
+  const run = (sessionId, extra) => runCorrected(sessionId, {
+    script: [[runningTurn({ turn_id: "t_d" })], [interrupted], [interrupted, finalTurn(extra)]],
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope({ steered: true })],
+  });
+  const ok = (await run("session_rv5a", { answer: "done after correction" })).events;
+  assert.equal(ok.at(-1).reason, "completed");
+  assert.deepEqual(ok.filter((e) => e.kind === "command").map((e) => e.command), ["npm test"]);
+  assert.deepEqual(ok.filter((e) => e.kind === "tool_result").map((e) => e.tool).sort(), ["tc_bash", "tc_write"]);
+  assert.deepEqual(ok.filter((e) => e.kind === "file_written").map((e) => e.path), ["D:/w/out.txt"], "较早那一轮的写文件证据在整次成功后落");
+  const failed = (await run("session_rv5b", { answer: null, outcome: "failed", error: "boom" })).events;
+  assert.equal(failed.at(-1).reason, "failed");
+  assert.deepEqual(failed.filter((e) => e.kind === "command").map((e) => e.command), ["npm test"], "在途已落的命令留下");
+  assert.ok(!failed.some((e) => e.kind === "file_written"), "整次失败：file_written 不落");
+});
+
 // ===== 收尾：kimi 2.6.3 实测目录覆盖（须是本文件最后一个测试——前面的测试先读完）=====
 
 test("kimi 2.6.3 实测：目录里每个文件都被本文件读到（README 写明了采集方式）", () => {

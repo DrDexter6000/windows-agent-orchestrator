@@ -61,6 +61,9 @@
 // blocked/failed，或仅接纳的纠偏到界未出现按"未执行"），最终轮 ended，且集合里
 // 没有 id 还在 active/queued，才按 outcome 收口。细则见 streamEvents。
 //
+// 答案拼接：2.6.3 的回答是独立的 assistant_message 条目（各有 item_id），不再是可能
+// 重复下发的流式文本帧——旧帧流的"相邻重复文本帧"去重启发式及其 system 说明已删除。
+//
 // 未实测、只按文档防御的形状：turn outcome "failed" 与 error 的结构（按
 // {code,message} 或字符串读）、prompt status blocked/failed、在途 tool_call 的
 // status 值、page_size/before_ordinal 的翻页（只实测过单页 has_more:false）、
@@ -550,8 +553,13 @@ export class KimiWebBackend {
    * 中止会话正在跑和排队的 prompt：GET prompts，先对 queued 里的每一条、再对 active
    * POST …/prompts/{promptId}:abort（只停活动的，排队那条会立刻接着跑）。然后稍等
    * （abortSettleMs）再读 prompts 与会话详情——2.6 中止活动轮不清已转入、还没开轮的
-   * 纠偏，它会在中止后自己开一轮。又出现活动 / 排队的 prompt，或 main_turn_active 不是
-   * false → 再中止一轮，最多 ABORT_ROUNDS 轮，仍停不下按 "abort not acknowledged" 失败。
+   * 纠偏，它会在中止后自己开一轮。又出现活动 / 排队的 prompt，或 busy / main_turn_active
+   * 不是严格 false（与 sessionStatus 的停止投影同一口径）→ 再中止一轮，最多 ABORT_ROUNDS
+   * 轮，仍停不下按 "abort not acknowledged" 失败。
+   * 有界耗时：循环里的读（prompts 列表、会话详情）不重试，每个请求以 this.timeout 为界；
+   * :abort 是 POST，只在 ECONNREFUSED 时按 request() 的规则重试。最坏耗时 = 首读 1×timeout
+   * + ABORT_ROUNDS × (条数 × :abort 单发上界 + abortSettleMs + 2×timeout)；serve 挂死时
+   * 首读即超时，一个 timeout 后失败。
    * 单条 :abort 未获确认（40402 已停等竞态）不单独判，以复查看到的实际状态为准。会话
    * 已不存在（40401）视为已停。其余上游拒绝、传输失败或列表畸形 → 固定文案错误（不回显
    * 上游原文、token 或 URL）。绝不调服务器级 /api/v1/shutdown。
@@ -559,7 +567,8 @@ export class KimiWebBackend {
   async abortActivePrompt(agent, sessionId) {
     const base = `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`;
     try {
-      let listed = await this.promptsList(agent, sessionId);
+      const once = { retries: 0 };
+      let listed = await this.promptsList(agent, sessionId, once);
       for (let round = 1; ; round += 1) {
         // 排队的先停：只停活动的，排队那条在 200 ms 内就成为新的活动轮（2.4.0 实测）。
         for (const entry of [...listed.queued, ...(listed.active === null ? [] : [listed.active])]) {
@@ -571,9 +580,10 @@ export class KimiWebBackend {
           } catch { /* 未获确认：由下面的复查定 */ }
         }
         await sleep(this.abortSettleMs);
-        listed = await this.promptsList(agent, sessionId);
-        const detail = await this.sessionDetail(agent, sessionId);
-        if (listed.active === null && listed.queued.length === 0 && detail.main_turn_active === false) return;
+        listed = await this.promptsList(agent, sessionId, once);
+        const detail = await this.sessionDetail(agent, sessionId, once);
+        if (listed.active === null && listed.queued.length === 0
+          && detail.busy === false && detail.main_turn_active === false) return;
         if (round >= ABORT_ROUNDS) throw new Error("abort not acknowledged");
       }
     } catch (error) {
@@ -591,11 +601,12 @@ export class KimiWebBackend {
    * （fail-closed，事件流与中止面共用）：缺 active 或 queued、queued 不是数组、条目不是
    * 带非空 prompt_id 的对象 ⇒ 抛固定错误——不可观察绝不当成"没有排队"。
    */
-  async promptsList(agent, sessionId) {
+  async promptsList(agent, sessionId, requestOpts) {
     const response = await this.request(
       agent,
       `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`,
       { method: "GET" },
+      requestOpts,
     );
     const data = response?.data;
     const entryOf = (value) => (value && typeof value === "object"
@@ -733,11 +744,12 @@ export class KimiWebBackend {
    * 值级严格性归状态机/sessionStatus（A3——非布尔视为未知，绝不推断 idle）。
    * 两层分工：在场性是结构契约（这里硬拒）；值形状是观测语义（严格相等判定）。
    */
-  async sessionDetail(agent, sessionId) {
+  async sessionDetail(agent, sessionId, requestOpts) {
     const response = await this.request(
       agent,
       `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}`,
       { method: "GET" },
+      requestOpts,
     );
     const data = response?.data;
     if (!data || typeof data !== "object"
@@ -976,7 +988,7 @@ export class KimiWebBackend {
           return;
         }
         // 只接纳的纠偏还在 active/queued 里：服务端还拿着它，不计时。
-        if (entry.kind === "correction" && entry.steeredAt === null && listedStatus !== undefined) {
+        if (entry.kind === "correction" && entry.steeredAt === null && listed.statusById.has(id)) {
           pending = true;
           continue;
         }
@@ -1001,15 +1013,15 @@ export class KimiWebBackend {
         if (entry.steeredAt !== null) {
           yield doneEvent(
             "failed",
-            `kimi-web backend: correction prompt ${String(id)} was steered into the session but no turn ran it within ${bound} of the steer`,
+            redact(`kimi-web backend: correction prompt ${String(id)} was steered into the session but no turn ran it within ${bound} of the steer`),
           );
           return;
         }
         entry.notExecuted = true;
         yield messageEvent("system", [{
           type: "text",
-          text: `kimi-web backend: correction prompt ${String(id)} was not executed — its steer had failed and `
-            + `${bound} after its submission it is in no turn of this run and no longer active or queued`,
+          text: redact(`kimi-web backend: correction prompt ${String(id)} was not executed — its steer had failed and `
+            + `${bound} after its submission it is in no turn of this run and no longer active or queued`),
         }]);
       }
       const final = attributed.at(-1) ?? null;
@@ -1161,12 +1173,13 @@ export class KimiWebBackend {
    * 串的抛出值 JSON.stringify（循环引用回落 String）后清洗；null/undefined 抛出
    * 值原样抛出（见 sanitizeError 注释——F6：事件流消费前由 errorText 包成固定
    * 文案，本方法行为不变）。这是 backend 侧防御层；transcript 正式
-   * 脱敏仍由控制面 redactor 承担。
+   * 脱敏仍由控制面 redactor 承担。retries 可按调用覆盖（中止复查的读传 0，见
+   * abortActivePrompt 的有界耗时）。
    */
-  async request(agent, url, init = {}) {
+  async request(agent, url, init = {}, { retries = this.retries } = {}) {
     const token = resolveBearerToken(agent);
     let lastError;
-    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
         const controller = new AbortController();
         // #8：计时器不随 headers 返回而解除——正文读取（text/json）期间挂起时，
@@ -1241,7 +1254,7 @@ export class KimiWebBackend {
             // 瞬态，永不重试（消息子串不可作为瞬态依据：正文可含任意词）。
             : (error.name === "AbortError"
               || (error.waoHttpStatus === undefined && isTransient(error)));
-        if (!retryable || attempt === this.retries) break;
+        if (!retryable || attempt === retries) break;
         await sleep(1000 * 2 ** attempt);
       }
     }
@@ -1520,8 +1533,9 @@ function turnSignature(turn) {
 
 // usage → metrics 事件（reportsTokenUsage=true 的通道）：各归属轮的轮级 usage 按
 // USAGE_FIELDS 求和（不再叠加步骤——轮级等于各步之和）；任一数字在场才发（全缺席 ⇒
-// null，绝不虚构零值通道）。firstRequest = 第一个归属轮里 index 最小、带 usage 的那一
-// 步自己的 input 与 cacheRead（每步是一次模型请求；上游报 0 记 0，缺字段不写）。
+// null，绝不虚构零值通道）。firstRequest = 本运行第一个请求的用量：第一个归属轮里
+// index 最小的那一步自己的 input 与 cacheRead（每步是一次模型请求）。那一步没有 usage
+// 就不写——不往后找带 usage 的步（那不是第一个请求）。上游报 0 记 0，缺字段不写。
 function metricsEventFromTurns(turns) {
   const sums = {};
   let seen = false;
@@ -1542,10 +1556,9 @@ function metricsEventFromTurns(turns) {
   const stepIndex = (step) => (Number.isFinite(step?.index) ? step.index : Infinity);
   let firstStep = null;
   for (const step of arrayOf(turns[0]?.steps)) {
-    if (!step?.usage || typeof step.usage !== "object") continue;
     if (firstStep === null || stepIndex(step) < stepIndex(firstStep)) firstStep = step;
   }
-  if (firstStep !== null) {
+  if (firstStep?.usage && typeof firstStep.usage === "object") {
     const firstRequest = {};
     const { input_other: input, input_cache_read: cacheRead } = firstStep.usage;
     if (typeof input === "number" && Number.isFinite(input)) firstRequest.input = input;
