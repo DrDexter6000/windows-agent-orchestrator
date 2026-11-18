@@ -169,7 +169,9 @@ export class ProcessBackend {
   // （2026-11-18）claude `--resume` 不采用新的 `--append-system-prompt`，codex
   // `exec resume` 不采用新的 `-c developer_instructions`：续修轮放宽的交付合同到不了
   // worker。声明为 true 的后端在 resume 轮把本轮的角色合同重述在提示词前面（见
-  // turnPrompt）。缺省 false；共享层只读这个 boolean，不认运行时名。
+  // turnPrompt）。缺省 false；共享层只读这个 boolean，不认运行时名。它是传输细节，
+  // 不是认证能力轴（不进 BACKEND_CAPABILITY_AXES）；只在提示词走标准输入时生效
+  // （promptViaStdin 或 correctable），提示词放命令行的后端声明它也不会重述。
   resumeKeepsSessionInstructions = false;
 
   // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21）：进程式后端的会话 id 由

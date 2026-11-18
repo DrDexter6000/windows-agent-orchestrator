@@ -286,3 +286,57 @@ test("0114: CLI 无 result 帧、stderr 写会话不存在原文后非零退出 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("TD-352: ClaudeCodeBackend 真实 spawn——首轮 stdin 原样；续修轮 stdin 以重述开头，命令行仍恰好一次带 --append-system-prompt", async () => {
+  const { composeDeliveryExecutionContract, RESUMED_INSTRUCTIONS_HEADER } = await import("../../src/application/roleContract.js");
+  const root = mkdtempSync(join(tmpdir(), "wao-td352-claude-"));
+  const uuid = randomUUID();
+  const turns = [];
+  const spawnFn = (binary, args) => {
+    const turn = { args: [...args], stdin: [] };
+    turns.push(turn);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = (chunk) => { if (chunk !== undefined) turn.stdin.push(String(chunk)); };
+    child.pid = 7352 + turns.length;
+    child.exitCode = null;
+    child.signalCode = null;
+    setImmediate(() => {
+      child.emit("spawn");
+      setImmediate(() => {
+        child.exitCode = 0;
+        child.emit("close", 0);
+      });
+    });
+    return child;
+  };
+  const backend = new ClaudeCodeBackend({ spawnFn, sessionConfigDirRoot: root });
+  try {
+    await spawnAndCapture(backend, nativeAgent(), {
+      prompt: "first turn",
+      roleContract: composeDeliveryExecutionContract({ allowedPaths: ["src"] }),
+      sessionReuse: { mode: "run_lineage", turn: "first", opaqueUuid: uuid },
+      resolvedCredentials: { [CLAUDE_OAUTH_TOKEN_ENV]: DUMMY_TOKEN },
+    });
+    const widened = composeDeliveryExecutionContract({ allowedPaths: ["docs", "src"] });
+    await spawnAndCapture(backend, nativeAgent(), {
+      prompt: "continuation",
+      roleContract: widened,
+      sessionReuse: { mode: "run_lineage", turn: "resume", opaqueUuid: uuid, priorRunId: "run_prior" },
+      resolvedCredentials: { [CLAUDE_OAUTH_TOKEN_ENV]: DUMMY_TOKEN },
+    });
+    assert.equal(turns[0].stdin.join(""), "first turn", "首轮 stdin 只有 Lead 的提示词");
+    const resumed = turns[1].stdin.join("");
+    assert.ok(resumed.startsWith(RESUMED_INSTRUCTIONS_HEADER), "续修轮 stdin 以重述开头");
+    assert.ok(resumed.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'), "放宽的清单随提示词到达");
+    assert.ok(resumed.endsWith("continuation"));
+    for (const turn of turns) {
+      assert.equal(turn.args.filter((a) => a === "--append-system-prompt").length, 1, "会话级通道照旧恰好一次");
+    }
+    await backend.dispose();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

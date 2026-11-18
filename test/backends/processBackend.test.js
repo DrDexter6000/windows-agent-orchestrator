@@ -1533,6 +1533,42 @@ test("TD-352: turnPrompt 只在声明了能力的后端、resume 轮、有角色
   assert.equal(turnPrompt(flagged, { prompt: "do it", sessionReuse: TD352_RESUME }), "do it", "没有角色合同不重述");
   assert.equal(turnPrompt({}, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME }), "do it", "未声明能力的后端不重述");
   assert.equal(turnPrompt({ resumeKeepsSessionInstructions: "yes" }, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME }), "do it", "能力按 === true 读取");
+  assert.equal(turnPrompt(flagged, { prompt: "do it", roleContract: "", sessionReuse: TD352_RESUME }), "do it", "空的角色合同不重述");
+});
+
+test("TD-352: 重述开头的措辞——替换对话里更早的每一份合同（系统指令与此前消息），点名只读合同与授权清单", () => {
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /^\[WAO control plane\] /);
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /replace every earlier copy/);
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /read-only contract/);
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /in your system instructions and in earlier messages/);
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /AUTHORIZED_PATHS_JSON/);
+  assert.match(RESUMED_INSTRUCTIONS_HEADER, /follow these\.$/);
+});
+
+test("TD-352: 声明了重述的后端都走标准输入送提示词（否则重述不会生效）", () => {
+  for (const backend of [new ClaudeCodeBackend({}), new CodexBackend({})]) {
+    assert.equal(backend.resumeKeepsSessionInstructions, true);
+    assert.equal(backend.promptViaStdin, true);
+  }
+});
+
+test("TD-352: CodexBackend 真实 spawn 的 resume 轮——stdin 以重述开头，命令行仍恰好一次带 developer_instructions", async () => {
+  const cap = makeCapturingChild();
+  const argv = [];
+  const backend = new CodexBackend({ spawnFn: (binary, args) => { argv.push([...args]); return cap.child; } });
+  await backend.spawn(makeAgent({ backend: "codex" }), {
+    prompt: "continue the work",
+    roleContract: TD352_CONTRACT,
+    sessionReuse: TD352_RESUME,
+    priorProviderSessionId: "01a0c56d-981d-7ad3-9613-0050e1546f8d",
+  });
+  const written = cap.stdinText();
+  assert.ok(written.startsWith(RESUMED_INSTRUCTIONS_HEADER));
+  assert.ok(written.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'));
+  assert.ok(written.endsWith("continue the work"));
+  const devArgs = argv[0].filter((a) => a.startsWith("developer_instructions="));
+  assert.equal(devArgs.length, 1, "会话级通道照旧恰好一次");
+  assert.ok(argv[0].includes("resume"), "确实是 exec resume");
 });
 
 class Td352Backend extends ProcessBackend {
