@@ -494,70 +494,70 @@ const kimiDetailEnvelope = (sessionId) => kimiEnvelope({
   last_turn_reason: null,
   usage: {},
 });
-const kimiTranscriptEnvelope = (items) => kimiEnvelope({ items, seq: 7, has_more: false });
+const kimiTurnsEnvelope = (turns) => kimiEnvelope({ turns, has_more: false });
 
-/** completed 轮夹具：steps[].frames 里一个终态 Write tool 帧 + assistant text。 */
-function kimiWriteTurn({ input, prompt = "do the task" }) {
+/**
+ * ended/completed 轮夹具（kimi 2.6.3 turns 形状）：一个终态 Write tool_call 条目 +
+ * assistant_message。写路径取 display.path（实测为绝对路径），没有再取 input.path。
+ */
+function kimiWriteTurn({ displayPath, inputPath, prompt = "do the task" }) {
   return {
-    kind: "turn",
-    turnId: "t0",
-    triggerPromptId: "msg_q1",
+    turn_id: "t_chain",
     ordinal: 0,
-    state: "completed",
-    prompt,
-    endedAt: "2026-10-16T12:00:00.000Z",
-    durationMs: 1234,
-    error: null,
+    kind: "agent",
+    status: "ended",
+    outcome: "completed",
     steps: [{
-      stepId: "s0",
-      turnId: "t0",
-      ordinal: 0,
-      state: "completed",
-      usage: { inputOther: 10, output: 4, inputCacheRead: 1, inputCacheCreation: 1 },
-      llmTiming: { firstTokenMs: 120, totalMs: 900 },
-      frames: [
-        {
-          kind: "tool",
-          frameId: "f_w",
-          toolCallId: "tc_write",
-          name: "Write",
-          state: "done",
-          input,
-          output: "wrote",
-        },
-        { kind: "text", text: "wrote the file", role: "assistant" },
-      ],
+      index: 1,
+      outcome: "completed",
+      finish_reason: "end_turn",
+      usage: { input_other: 10, output: 4, input_cache_read: 1, input_cache_creation: 1 },
     }],
+    items: [
+      { type: "user_message", item_id: "msg_q1", prompt_ids: ["msg_q1"], placement: "opener", text: prompt },
+      {
+        type: "tool_call",
+        item_id: "tool_write",
+        step_index: 1,
+        status: "ended",
+        name: "Write",
+        input: { ...(inputPath === undefined ? {} : { path: inputPath }), content: "x" },
+        display: { kind: "file_io", operation: "write", ...(displayPath === undefined ? {} : { path: displayPath }) },
+        outcome: "completed",
+        output: "wrote",
+      },
+      { type: "assistant_message", item_id: "a_1", step_index: 1, text: "wrote the file" },
+    ],
+    usage: { input_other: 10, output: 4, input_cache_read: 1, input_cache_creation: 1 },
   };
 }
 
 /**
- * spawn 阶段路由 + 事件轮脚本：提交前 transcript 读返回空；markSpawned() 之后
- * 每拍回放 script（同 test/backends/kimiWeb.test.js 的 turnScriptServer 形状）。
+ * spawn 阶段路由 + 事件轮脚本：提交前 turns 读返回空；markSpawned() 之后每拍回放
+ * script；prompts 列表恒空（同 test/fixtures/kimiWebServe.js 的 turnScriptServer 形状）。
  */
 function kimiWebServer(sessionId, { script = [] } = {}) {
   let spawned = false;
-  const fetchImpl = async (url) => {
+  const fetchImpl = async (url, init = {}) => {
     const urlStr = String(url);
-    if (urlStr === `http://127.0.0.1:4311/api/v1/sessions`) return kimiEnvelope({ id: sessionId });
-    if (urlStr === `http://127.0.0.1:4311/api/v1/sessions/${sessionId}`) {
-      return kimiDetailEnvelope(sessionId);
+    const base = `http://127.0.0.1:4311/api/v1/sessions`;
+    if (urlStr === base) return kimiEnvelope({ id: sessionId });
+    if (urlStr === `${base}/${sessionId}`) return kimiDetailEnvelope(sessionId);
+    if (urlStr === `${base}/${sessionId}/agents/main/turns`) {
+      return kimiTurnsEnvelope(spawned ? script : []);
     }
-    if (urlStr === `http://127.0.0.1:4311/api/v1/sessions/${sessionId}/transcript?agent_id=main`) {
-      if (!spawned) return kimiTranscriptEnvelope([]);
-      return kimiTranscriptEnvelope(script);
-    }
-    if (urlStr.endsWith(`/api/v1/sessions/${sessionId}/prompts`)) {
-      return kimiEnvelope({ prompt_id: "msg_q1", status: "running" });
+    if (urlStr === `${base}/${sessionId}/prompts`) {
+      if ((init.method ?? "GET") === "GET") return kimiEnvelope({ active: null, queued: [] });
+      return kimiEnvelope({ prompt_id: "msg_q1", user_message_id: "msg_q1", status: "running" });
     }
     throw new Error(`unexpected ${urlStr}`);
   };
   return { fetchImpl, markSpawned: () => { spawned = true; } };
 }
 
-async function kimiWebScenario({ effectiveCwd, writeInput }) {
+async function kimiWebScenario({ effectiveCwd, write }) {
   const { fetchImpl, markSpawned } = kimiWebServer("session_kimiweb_chain", {
-    script: [kimiWriteTurn({ input: writeInput })],
+    script: [kimiWriteTurn(write)],
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(
@@ -575,9 +575,10 @@ async function kimiWebScenario({ effectiveCwd, writeInput }) {
   return handle;
 }
 
-test("containment chain / kimi-web: 源级钉——写路径取键链 filePath ?? file_path ?? path（kimiWritePath 与终态投影同链）", () => {
+test("containment chain / kimi-web: 源级钉——写路径取 display.path，没有再取 input.path（在途预告与终态投影同一函数）", () => {
   assertSourcePins([
-    ["src/backends/kimiWeb.js", "const filePath = input.filePath ?? input.file_path ?? input.path;"],
+    ["src/backends/kimiWeb.js", "const displayPath = item?.display?.path;"],
+    ["src/backends/kimiWeb.js", "const inputPath = item?.input?.path;"],
   ]);
 });
 
@@ -590,7 +591,7 @@ for (const [label, pathFactory, marker] of [
       backendName: "kimi-web",
       spawnHandle: ({ effectiveCwd, root }) => kimiWebScenario({
         effectiveCwd,
-        writeInput: { filePath: pathFactory({ root }) },
+        write: { displayPath: pathFactory({ root }) },
       }),
     });
     try {
@@ -606,16 +607,12 @@ for (const [label, pathFactory, marker] of [
   });
 }
 
-test("containment chain / kimi-web: 界内写正对照——filePath 优先于 file_path/path 双诱饵、path 逐字节保真、零 write_intent、打包照常", async () => {
+test("containment chain / kimi-web: 界内写正对照——display.path 优先于 input.path 诱饵、path 逐字节保真、零 write_intent、打包照常", async () => {
   const fixture = await makeDeliveryRunFixture({
     backendName: "kimi-web",
     spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
       effectiveCwd,
-      writeInput: {
-        filePath: "out/inside-kimieweb.txt",
-        file_path: "out/decoy-a-kimieweb.txt",
-        path: "out/decoy-b-kimieweb.txt",
-      },
+      write: { displayPath: "out/inside-kimieweb.txt", inputPath: "out/decoy-kimieweb.txt" },
     }),
   });
   await createInsideFile(fixture.effectiveCwd, "out/inside-kimieweb.txt");
@@ -625,9 +622,28 @@ test("containment chain / kimi-web: 界内写正对照——filePath 优先于 f
     const written = output.events.find(
       (event) => event.type === "run.event" && event.kind === "file_written",
     );
-    assert.equal(written?.path, "out/inside-kimieweb.txt", "取键链首选 filePath，path 与帧内原值逐字节相同");
-    assert.notEqual(written?.path, "out/decoy-a-kimieweb.txt");
-    assert.notEqual(written?.path, "out/decoy-b-kimieweb.txt");
+    assert.equal(written?.path, "out/inside-kimieweb.txt", "取 display.path，path 与条目原值逐字节相同");
+    assert.notEqual(written?.path, "out/decoy-kimieweb.txt");
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain / kimi-web: display.path 缺席时取 input.path——界外相对路径同样在 file_written 段拦截", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      write: { inputPath: "../kimieweb_escape_input.txt" },
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertEscapeBlocked(fixture, output, {
+      eventKind: "file_written",
+      reason: "file_written_lexical_outside",
+      marker: "kimieweb_escape_input",
+    });
   } finally {
     await cleanupFixture(fixture);
   }

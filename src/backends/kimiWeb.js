@@ -1,130 +1,81 @@
 // src/backends/kimiWeb.js
 //
 // kimi-web backend（HTTP attach 型）：驱动 `kimi web` 本地服务器的 Kimi Code 官方
-// REST API（入册时 kimi 2.1.1；在用版本见 docs/certification-runbook.md 原语表）。
+// REST API。只支持 kimi 2.6+（turns 端点；2.6 已删除旧的 GET …/transcript，实测
+// 回 HTTP 404 路由不存在）。在用版本见 docs/certification-runbook.md 原语表。
 //
-// 上游 API 事实（未标版本的条目是 2026-09-30 对本机 kimi 2.1.1 的直跑实测，标 2.4.0
-// 的是 2026-10-28/29 的实测；本注释即依据）：
+// 上游 API 事实（标 2.6.3 的是 2026-11-17 的实测，原始响应在
+// test/fixtures/kimi-2.6.3/；标 2.4.0 / 2.1.1 的是更早的实测，2.6.3 未见反证）：
 //   - 所有请求需 Authorization: Bearer <token>；响应统一包 {code,msg,data}，
 //     code!==0 即失败（msg 含原因）。
 //   - POST /api/v1/sessions {title?, metadata:{cwd}} → data.id（session_ 前缀）；
-//     metadata.cwd 或 workspace_id 必填（缺则 40001）——WAO 侧用 agent.cwd 填。
+//     metadata.cwd 或 workspace_id 必填（2.1.1：缺则 40001）——WAO 侧用 agent.cwd 填。
 //   - POST /api/v1/sessions/{id}/prompts {content:[{type:"text",text}], model,
-//     thinking?}（thinking 见下方 2.4.0 节）→ data.prompt_id、data.status:"running"。两个实测坑：content 必须是分段
-//     数组形状（裸字符串直接 40001）；model 必填——缺 model 时接口照样返
-//     success/running，但轮次**静默秒败**。v8 起（transcript 轮次原语）该失败是
-//     一等公民事实：轮次以 state:"failed" + error:"Model not set" 落在
-//     transcript 里，事件流首拍即 done(failed, error)——不再需要任何推断。
-//   - **GET /api/v1/sessions/{id}/transcript?agent_id=main → data.items[]（轮
-//     粒度）**：{kind:"turn", turnId:"t0", triggerPromptId:"msg_…", ordinal,
-//     state, prompt, endedAt, durationMs, error, steps:[{stepId, turnId,
-//     ordinal, state, usage:{inputOther,output,inputCacheRead,inputCacheCreation},
-//     llmTiming, frames:[{kind:"thinking"|"text", text, role?}|
-//     {kind:"tool", frameId, toolCallId, name, state, input, output}]}]}。
-//       · **tool 帧形状 = 2026-10-01 live 探针（delta 认证证据链）**：v1 曾误以为
-//         frames 是 thinking|text 闭集——实测另有 kind:"tool"（name=工具名；
-//         input 形状随工具变化；state 有 done 等终态）。按
-//         kimiToolProjectionEvents 投影为证据事件，证据先于 assistant 文本发射；
-//         决定 0071 起命令 / 工具调用在轮询期即落（projectKimiToolFrames），
-//         写文件证据仍等整轮带着正文完成（决定 0072 起在途先预告一条只带路径
-//         的 tool_use）。
-//       · **state 闭集：queued|running|completed|failed|cancelled**（终态 = 后
-//         三个）。
-//       · **triggerPromptId === POST prompts 返回的 prompt_id**（live 双验证：
-//         completed 轮与 failed 轮都命中）——v8 完成判定的唯一归属键。
-//       · agent_id 查询参数**必填**：缺则 40001；实测 "main" 有效、"default"
-//         返回空——客户端恒发 agent_id=main（TRANSCRIPT_AGENT_ID）。
-//       · 另有 data.seq 水位与 GET …/transcript/ops?since_seq= 增量对账通道
-//         ——v8 不用（全量单页轮询已足够），留作 v1.1+ 备用。
-//       · data.has_more + before_turn/after_turn 翻页——v8 单页不翻页（声明：
-//         超长会话的早期轮可能不在首页；归属键匹配不到时由 silentTimeout /
-//         无进展出口有界收口，绝不静默翻页猜测）。
+//     permission_mode:"auto", thinking?} → data {prompt_id, user_message_id, status,
+//     content, created_at}（2.6.3：prompt_id === user_message_id；开轮即 status
+//     "running"，有活动轮时 "queued"；文档另列 blocked/failed = 提交前就失败，未实测）。
+//     2.1.1 的两个坑沿用：content 必须是分段数组（裸字符串 40001）；model 必填——缺
+//     model 时接口照样返回成功，但轮次静默秒败（validateAgentPolicy 在派发前拒绝）。
+//   - **GET /api/v1/sessions/{id}/agents/main/turns（2.6.3）**→ data {turns[],
+//     has_more}：按 ordinal 从旧到新；不带参数取最新一页（含在跑的轮）；
+//     before_ordinal 往回翻，page_size 1–200（默认 50；WAO 不发，用默认）。
+//       · 轮：turn_id、ordinal、kind（只见过 "agent"）、status（running|ended）、
+//         outcome（ended 才有：completed|interrupted；文档另列 failed，未实测）、
+//         end_reason（见过 "user_cancelled"）、error（未见非空值）、usage
+//         {input_other, output, input_cache_read, input_cache_creation}（等于各步
+//         usage 之和）、steps[]{index, outcome, finish_reason, usage?}、items[]。
+//       · 条目按 type 判别：user_message {prompt_ids[], placement:"opener", text}、
+//         reasoning {step_index, text}、tool_call {item_id, step_index, name,
+//         input, display, status, outcome, output}、assistant_message {step_index,
+//         text}。写文件的 display.path 是绝对路径、input.path 是相对路径。在途
+//         tool_call 的 status 值没有实测样本（只见过 "ended"）：非 "ended" 一律
+//         按在途处理。
+//   - **纠偏语义（2.6.3）**：活动轮在跑时提交的 prompt 进队列（status "queued"）；
+//     POST …/prompts:steer {prompt_ids} → data {steered:true, prompt_ids}。转入后
+//     那条 prompt 离开队列，当前轮被打断、以 outcome "completed" 无回答结束，被
+//     转入的 prompt 作为下一轮的开场消息开轮并做完工作（t3/t4 实测）——所以一次
+//     运行可以跨多轮。无活动轮时 steer 回 40402（2.1.1）。
+//   - GET /api/v1/sessions/{id}/prompts → data {active, queued[]}：条目 {prompt_id,
+//     user_message_id, status, content, created_at}（2.6.3）；无活动时 active:null。
+//   - 中止：POST /api/v1/sessions/{id}/prompts/{promptId}:abort（body {}）→
+//     data {aborted:true}；那一轮以 outcome "interrupted"、end_reason
+//     "user_cancelled" 结束；对已停的 prompt 再 :abort → code 40402（2.6.3）。只停
+//     这一轮：排队的 prompt 随即成为新的活动轮（2.4.0）；已转入、还没开轮的纠偏同样
+//     不被清掉，中止后会自己开一轮（2.6 文档）。这一轮已启动的 shell 命令进程跑到
+//     自己结束（2.4.0）。另有 POST /api/v1/shutdown（服务器级，杀全部会话）——
+//     abort() 绝不调它。
 //   - GET /api/v1/sessions/{id} → data{busy, main_turn_active, last_turn_reason,
-//     usage{…}, …}——v8 起只承担两职：spawn 提交前静默门 + 停止验证探针
-//     （sessionStatus busy 投影）；**不参与完成判定**。
-//   - GET /api/v1/sessions/{id}/messages → data.items[]（**newest-first**，实测
-//     如此）——**v8 起不再参与完成判定**（handle.messages 仅供停止验证消费者，
-//     按 serveStopVerify.sample 的调用形状 (serveUrl, sessionId, {cwd}) 读取）。
-//   - POST /api/v1/sessions/{id}/prompts:steer {prompt_ids:["msg_…"]}
-//     → data.steered===true 即成功；无活动轮时 40402 "no active prompt to steer
-//     into"（fail-closed）。
-//   - 中止面：2026-09-30 对 2.1.1 实测时 REST 无会话级/轮次级中止端点
-//     （tasks:cancel/stop/abort 等 8 个候选动作名全部 40001 "unsupported action"）。
-//     **kimi 2.4.0（Lead 实测）**：`POST /api/v1/sessions/{id}/prompts/{promptId}:abort`
-//     （body {}；OpenAPI operationId promptAction "Abort a running prompt or steer a
-//     queued prompt"，响应 data {aborted, at_seq?}）→ code 0 {aborted:true}，那一轮
-//     transcript state 变 cancelled；之后 `GET /api/v1/sessions/{id}/prompts` →
-//     data {active:null, queued:[]}；有活动轮时 active 是对象 {prompt_id,
-//     user_message_id, status, content, created_at}，prompt_id 即 POST prompts 回执
-//     的 id。对已停的 prompt 再 :abort → code 40402。会话里还有排队的 prompt 时只中止
-//     活动轮，排队那条在 200 ms 内成为新的活动轮、会话重新变忙；对排队的 prompt
-//     :abort 同样返回 {aborted:true} 并把它移出队列。中止只停模型这一轮：这一轮已
-//     启动的 shell 命令进程跑到自己结束（实测中止后 45 秒仍在）；删除会话会连带
-//     收掉。另有 POST /api/v1/shutdown（服务器级，杀全部会话）——backend 的
-//     abort() 绝不允许调它：共享服务器上会误杀无关会话。
-//   - **thinking（kimi 2.4.0，Lead 实测）**：prompts body 的 thinking 是力度字符串；
-//     "max"、"low" 被接受并正常完成，"high" 被接受（10-29）；非法值 → code 50001 "Thinking effort "<v>" is
-//     not supported by model "kimi-code/k3.1-pro". Supported efforts: off, low, high,
-//     max."。官方文档：K3.1 Pro 只支持思考模式，关闭思考会被上游拒绝。
-//   - **TD-250 会话生命周期面（2026-10-10 live 探针，决定 0056 依据）**：
-//     `POST /api/v1/sessions/{id}:delete`（body {}）→ code 0 {deleted:true}，
-//     连带删 serve events 文件；对已不存在会话 → HTTP 200 + code 40401
-//     "session … does not exist"。`DELETE /api/v1/workspaces/{id}` 同样有效。
-//     v2 面只有 `sessions:archive`/`:restore`（bulk）。**两者都不拆进程荚**：
-//     serve 为每会话在创建时（空会话即拉）启动一组助手进程（datasource/
-//     analyzer/officecli/mcp.json 条目），无空闲 GC、删除不回收——唯一全量
-//     拆除原语 = 优雅 `POST /api/v1/shutdown`（实测：serve+荚+实例元数据全清，
-//     零孤儿；重启 ~2s 重绑、token 不变、旧会话转录内容可读、不回荚）。
+//     …}（2.6.3 形状不变）：提交前静默门、停滞证词、中止后复查与停止验证探针。
+//   - GET /api/v1/sessions/{id}/messages → data.items[]（newest-first；2.6.3 形状
+//     不变，见 final-messages.json）：只供停止验证消费者，不参与完成判定。
+//   - thinking（2.4.0）：prompts body 的力度字符串；"low"/"high"/"max" 被接受；非法
+//     值 → code 50001。K3.1 Pro 只支持思考模式，关闭思考会被上游拒绝。
+//   - 会话生命周期（TD-250，2.1.1，决定 0056）：POST /api/v1/sessions/{id}:delete
+//     （body {}）→ {deleted:true}；会话不存在 → HTTP 200 + code 40401。删除不回收
+//     serve 为会话拉起的助手进程，唯一全量拆除原语 = 优雅 POST /api/v1/shutdown。
 //
-// v8 完成判定（第八轮结构性重写）：**原厂 transcript 轮次终态原语**取代全部
-// 旧启发式。events 每拍 GET transcript?agent_id=main，找 triggerPromptId ===
-// promptId 的 turn（本轮唯一归属——历史轮/前任轮的 triggerPromptId 永不等于
-// 本轮 prompt_id，误归属与历史重放按构造不可能）：
-//   - 未找到（提交滞后）→ 等；silentTimeout（相对提交时刻）到期仍无 → silent
-//     fail（R9 F3：silentTimeout 在场时这是无 turn 等待的唯一上界——8 拍无进展
-//     兜底不抢先，仅 silentTimeout 缺席形状生效）。
-//   - state=queued|running → 等；无进展兜底：该 turn 连续 ≥8 拍
-//     （NO_PROGRESS_POLL_LIMIT）state 不变且 steps/frames 无增长 → done(failed,
-//     "turn stalled (no progress)")。闭集外未知 state → R9 F4 独立有界处置：
-//     一律非终态、绝不猜终态，但连续 ≥8 拍仍闭集外 → done(failed,
-//     "unsupported turn state")——客户端已知该 state 不受支持，等待增长没有
-//     意义（增长不清零该计数）。
-//   - state=completed → 从该 turn 的 steps[].frames 取 kind==="text" 且
-//     role==="assistant"（或无 role 的 text 帧，按实测宽容）按序拼接；**发射前
-//     复检非空**（空则按 failed 收口——N1 教训：传输成功不是可用答案，绝不伪造
-//     完成）；**先发射 tool 帧证据**（kind:"tool" 帧逐帧投影，2026-10-01 补齐
-//     ——delta scorecard 的证据面），再发射 user echo（turn.prompt）+ assistant
-//     text + usage（steps[].usage 求和 → metrics 事件）+ done(completed)。
-//     **只发射该 turn 的内容——历史重放按构造不可能**。
-//   - state=failed|cancelled → done(failed, error 字段或固定文案；R9 F2：拼装
-//     结果过与 request 层同一 redactToken 清洗——turn.error 是 HTTP 200 成功
-//     路径的上游回显文本，不经 sanitizeError 出口，token 值绝不原样进事件流)。
-// 删除面（v7→v8，被 turn 归属整体取代）：preSubmitIds 消息快照、preSubmitReason
-// 锚、活动转移观测（WAIT-ACTIVE/IN-TURN/SETTLE 状态机）、messages 双读稳定性
-// （F2）——messages 端点退出完成判定。
+// 一次运行 = 一个提示集合（spawn 建、sendCorrection 与事件流共用）：派发的 prompt
+// + 每条被 POST prompts 接纳的纠偏（"已接纳"），其中 steer 回 steered:true 的另记
+// "已转入"。某轮的 user_message.prompt_ids 含集合里的 id，该轮归本运行；最终轮 =
+// 归属轮里 ordinal 最大的。每个 id 都结算了（出现在归属轮里，或 prompts 列表报
+// blocked/failed，或仅接纳的纠偏到界未出现按"未执行"），最终轮 ended，且集合里
+// 没有 id 还在 active/queued，才按 outcome 收口。细则见 streamEvents。
 //
-// 停止杠杆声明（诚实面）：abort() 中止会话正在跑和排队的 prompt（GET prompts，先对
-// queued 逐条、再对 active POST …/prompts/{promptId}:abort；两样都没有视为已停；失败抛固定
-// 文案，原因由控制面记入 run.aborted.error）；停止验证经 handle 探针（session/
-// sessionStatus/messages，sessionStatus 为 busy 投影——中止后会话不忙）；
-// reportsTokenUsage=true（transcript steps[].usage 实测非零）——tokenBudget 闸门
-// 生效。已知边界：中止不收这一轮已经启动的命令进程（它们跑到自己结束）；会话
-// 按原规则保留（failed/aborted 的会话留作取证源，不删）。
+// 未实测、只按文档防御的形状：turn outcome "failed" 与 error 的结构（按
+// {code,message} 或字符串读）、prompt status blocked/failed、在途 tool_call 的
+// status 值、page_size/before_ordinal 的翻页（只实测过单页 has_more:false）、
+// kind 非 agent 的轮（不按 kind 过滤，只按 prompt_ids 归属）。
 //
-// 翻页截断声明（v8）：transcript 单页不翻页（见上）；messages 探针页同理（仅供
-// 停止验证计数，不翻页）。
+// 形状不符取舍：turns / prompts / 会话详情的形状门不满足 ⇒ fail-closed 立即失败，
+// 不重试、不回落 [] / {}——把"不可观察"当成"没有轮 / 没有排队"会虚报健康观测。
 //
-// 单 actor 会话假设：WAO 独占其派发的 session（同会话无其他提交方）。提交前静默
-// 门（spawn，v7 F3 保留）之后的残余竞窗——静默观测刚确认 idle、POST prompts 落地
-// 之前恰有其他 actor 提交——依赖该假设；假设破裂时（他人 prompt 抢先触发新轮）
-// 归属判据仍 fail-closed：我们的 promptId 匹配不到任何 turn ⇒ 走 silent /
-// 无进展有界出口，绝不误领他人轮次。
+// 单 actor 会话假设：WAO 独占其派发的 session。提交前静默门之后的残余竞窗依赖该
+// 假设；假设破裂时归属仍 fail-closed——他人的轮不含我们的 prompt id，不会被误领。
 //
-// 形状不符取舍（v7 F4 裁定延续，v8 换观测源）：transcript 缺 items 数组 /
-// detail 缺 id 或 busy/main_turn_active 在场门不满足 ⇒ fail-closed **立即**失败
-// （事件流 done(failed) 固定错误 / spawn 侧上抛），暂时性缺失不重试、无恢复路径
-// ——这是有意的可用性取舍：形状不可信即整体不可信，回落 [] / {} 会把"不可观察"
-// 虚报成健康观测（空会话/静止会话），与"绝不把不可观察当健康"的取向一致。
+// 停止杠杆（诚实面）：abort() 中止会话正在跑和排队的 prompt 并有界复查（见
+// abortActivePrompt）；停止验证经 handle 探针（session/sessionStatus/messages）；
+// reportsTokenUsage=true（turn.usage 实测非零）。已知边界：中止不收这一轮已经启动的
+// 命令进程；failed/aborted 的会话留作取证源，不删。
 
 import {
   messageEvent,
@@ -148,9 +99,15 @@ import { createStallTracker } from "./stallBudget.js";
 // （kimi-web / zcode）共用同一分隔形状，避免两套事实并存。
 const ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
-// transcript 端点的 agent_id 查询参数（实测：必填，缺则 40001；"main" 有效、
-// "default" 返回空）——客户端恒发 "main"，绝不缺省。
-const TRANSCRIPT_AGENT_ID = "main";
+// 2.6 turns 端点的 agent 段：WAO 只读主 agent。
+const TURNS_AGENT = "main";
+
+// prompt 状态里表示"提交前就失败、不会执行"的值（2.6 文档；未实测）。
+const PROMPT_FAILED_STATUSES = new Set(["blocked", "failed"]);
+// ended 轮的 outcome 闭集（completed|interrupted 实测；failed 文档在册）。
+const TURN_OUTCOMES = new Set(["completed", "interrupted", "failed"]);
+// 中止的有界复查：最多几轮"中止 → 稍等 → 再读 prompts 与会话详情"。
+const ABORT_ROUNDS = 3;
 
 // TD-250（2026-10-10 live 探针）：会话级 40401 = "session … does not exist"——
 // releaseSession 把它分派为 already_gone（HTTP 200 + code 40401 信封，非路由 404）。
@@ -160,17 +117,10 @@ const KIMI_SESSION_GONE_CODE = 40401;
 // 关闭思考对 K3.1 Pro 会被上游拒绝；WAO 的 effort 闭集里也没有 off）。
 const KIMI_WEB_THINKING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
-// 无进展出口阈值（named const；v8 语义收窄到 turn 归属）：归属 turn 连续 ≥8 拍
-// state 不变且 steps/frames 无增长（首见拍建立基线——turn 出现即进展，提交滞后
-// 的解除不算停滞）→ done(failed, "turn stalled (no progress)")。R9 分工：
-// silentTimeout 在场时无 turn 等待只以 silentTimeout 为界（F3——本兜底不抢先）；
-// silentTimeout 缺席的防御形状（turn 永不出现）仍被该出口有界覆盖，绝不无限
-// 等待。同一阈值另作 R9 F4 闭集外 state 的独立有界计数（增长不清零——见
-// streamEvents 分支注释）。
-// R9 F3/F4 形状漂移界（原 NO_PROGRESS_POLL_LIMIT 的存留职责）：F3 = 无 turn
-// 兜底（仅 silentTimeout 缺席的防御形状生效——正常路径由 silentTimeout 界定）、
-// F4 = 闭集外 state 的连续拍界（等待增长无意义，形状问题不是进度问题）。两者
-// 都不是"进度停滞"检测，维持 8 拍紧界——TD-197① 拆分（auditor Q5）。
+// 形状漂移界（R9 F3/F4）：F3 = 提示未出现在任何轮里的兜底（仅 silentTimeout 缺席的
+// 防御形状生效——正常路径由 silentTimeout 界定）；F4 = 最终轮 status/outcome 闭集外的
+// 连续拍界（等待增长无意义，形状问题不是进度问题）。两者都不是"进度停滞"检测，维持
+// 8 拍紧界——TD-197① 拆分（auditor Q5）。
 const SHAPE_DRIFT_POLL_LIMIT = 8;
 // 在途进度呈现的最小发射间隔（防刷屏：1s 轮询 × 快速增长帧也至多 12 次/分钟）。
 const KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS = 5000;
@@ -201,23 +151,20 @@ const NO_PROGRESS_CEILING_MS = 240_000;
 // 别的体征可以交叉印证，所以单段静默仍在此值收口。
 const LIVENESS_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
 
-// completed 轮 usage 求和的字段映射（kimi usage 四计数 → metrics 轴）：
-// inputOther→input、output→output、inputCacheRead→cacheRead、
-// inputCacheCreation→cacheWrite（1:1 语义映射，不发明聚合；reasoning/costUsd
-// 无 kimi 对应字段，省略——metrics 事件只带实测通道）。
+// usage 的字段映射（kimi 2.6 轮级 usage 四计数 → metrics 轴，1:1 语义映射，不发明
+// 聚合；reasoning/costUsd 无 kimi 对应字段，省略）。
 const USAGE_FIELDS = Object.freeze([
-  ["inputOther", "input"],
+  ["input_other", "input"],
   ["output", "output"],
-  ["inputCacheRead", "cacheRead"],
-  ["inputCacheCreation", "cacheWrite"],
+  ["input_cache_read", "cacheRead"],
+  ["input_cache_creation", "cacheWrite"],
 ]);
 
 export class KimiWebBackend {
   // 会话活在 WAO 进程之外的 `kimi web` 服务器里（HTTP attach 型，TD-39 同款语义：
   // WAO 进程退出 ≠ session 死）。停止杠杆（诚实声明，见文件头）：abort 中止排队与
   // 活动的 prompt（不收这一轮已经启动的命令进程）；停止验证经 handle 探针观测会话
-  // busy 状态；tokenBudget 闸门生效（reportsTokenUsage=true——transcript
-  // steps[].usage 实测非零）。
+  // busy 状态；tokenBudget 闸门生效（reportsTokenUsage=true——turn.usage 实测非零）。
   sessionOutlivesProcess = true;
 
   // 角色合同拼进 prompt 正文前缀（role 在前、task 在后、恰好一次，分隔符
@@ -238,12 +185,10 @@ export class KimiWebBackend {
   // 方法形状，不按 runtime 名分支（不变量 3）。
   supportsSessionRelease = true;
 
-  // 在途纠偏 = 先 POST prompts 排队拿 prompt_id，再 POST prompts:steer 转入活动轮。
-  // delivered（steered===true）证明纠偏已转入活动轮，**不证明模型截断了当轮生成**
-  // ——上游实测：纠偏在轮边界被模型消费（原生成流跑完当轮）。消费可见性：prompts
-  // 列表项带 steeredAt 与状态枚举（2.4.0 OpenAPI 在册，未 live 实测——仅标注，不据
-  // 此做任何判定）。不对称声明（保留）：排队成功但
-  // steer 失败（如 40402 无活动轮）时，上游可能仍会在后续轮消费该排队消息——
+  // 在途纠偏 = 先 POST prompts 排队拿 prompt_id，再 POST prompts:steer 转入。
+  // delivered（steered===true）= 已转入：2.6.3 实测当前轮被打断、无回答结束，纠偏开
+  // 下一轮做完工作——运行在纠偏那一轮收口（见 streamEvents）。不对称声明：排队成功但
+  // steer 失败（如 40402 无活动轮）时，上游可能仍会在后续轮执行该排队消息——
   // send_failed ≠ 一定未执行，Lead 重发前须知此不对称。
   supportsInFlightCorrection = true;
 
@@ -251,16 +196,14 @@ export class KimiWebBackend {
   // （supportsSessionReuse），本层不承担跨 run 重放。
   replayByRespawn = true;
 
-  // v8 翻转（false→true）：2026-09-30 live 实测 transcript 轮次 steps[].usage 的
-  // inputOther/output/inputCacheRead/inputCacheCreation 可非零——可验证的 token
-  // 计量通道成立（v7 声明 false 的依据"会话详情 usage 可为全零"不再是唯一通道，
-  // 该翻转条件自此满足）。发射 = completed 轮 steps[].usage 求和（仅本轮）→
-  // metrics 事件（metricsEventFromTurn）；tokenBudget 闸门自此对该 backend 生效。
+  // turns 端点的轮级 usage（input_other/output/input_cache_read/input_cache_creation）
+  // 2.6.3 实测非零：完成时各归属轮 usage 求和 → metrics 事件（metricsEventFromTurns）；
+  // tokenBudget 闸门对该 backend 生效。
   reportsTokenUsage = true;
 
-  // 用量计量范围（TD-333，决定 0114 §3）：completed 轮只累加**本轮**
-  // steps[].usage（历史轮不在该 turn 的 steps 里）——本运行范围。kimi 的
-  // inputOther 是非缓存输入，inputCacheRead 单独计量，input 不含缓存。
+  // 用量计量范围（TD-333，决定 0114 §3）：只累加本运行的归属轮（历史轮不含本运行的
+  // prompt id）——本运行范围。kimi 的 input_other 是非缓存输入，input_cache_read 单独
+  // 计量，input 不含缓存。
   usageScope = "run";
   inputIncludesCacheRead = false;
 
@@ -327,7 +270,9 @@ export class KimiWebBackend {
   }
 
   // 构造零副作用（registry validate 会静态构造——backendCapabilitySnapshot 同款要求）。
-  constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2, ensureServeFn = ensureServeRunning } = {}) {
+  constructor({
+    fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2, ensureServeFn = ensureServeRunning, abortSettleMs = 500,
+  } = {}) {
     if (!fetchImpl) {
       throw new Error("fetch is required");
     }
@@ -336,6 +281,8 @@ export class KimiWebBackend {
     this.retries = retries;
     // 决定 0075：派发前的 serve 在场保证（注入缝——单测不起真进程）。
     this.ensureServeFn = ensureServeFn;
+    // 中止后复查前的等待（见 abortActivePrompt；测试注入缝）。
+    this.abortSettleMs = abortSettleMs;
   }
 
   async spawn(agent, task, opts = {}) {
@@ -387,7 +334,7 @@ export class KimiWebBackend {
       sessionId = await this.createSession(agent);
     }
     // F3 提交前静默门（v7 保留）：GET detail，busy/main_turn_active 任一严格
-    // true 即轮询等待，直到两者**严格 false** 才进入提交前 transcript 读。
+    // true 即轮询等待，直到两者**严格 false** 才进入提交前 turns 读。
     // 消除的主暴露面：前任轮仍在跑时提交（排队/steer 语义会把新 prompt 折进
     // 前任活动轮，归属面无谓复杂化）。残余窗口（静默观测后、POST 落地前有其
     // 他 actor 提交）依赖单 actor 会话假设（WAO 独占 session，文件头已声明）。
@@ -404,30 +351,19 @@ export class KimiWebBackend {
     const prompt = task.roleContract
       ? `${task.roleContract}${ROLE_TASK_SEPARATOR}${task.prompt}`
       : task.prompt;
-    // 提交前 transcript 读（v8 时序：POST prompts 之前）：记 preSubmitTurnIds
-    // （已有 turnId 集合）——**不参与任何判定分支**（triggerPromptId ===
-    // promptId 的归属键已覆盖一切：历史轮的 triggerPromptId 永不等于本轮
-    // prompt_id，误归属与历史重放按构造不可能）；保留为日志/调试观察锚，且
-    // 这里的 data.seq 水位/翻页形状已实测留档（v1.1+ 增量对账备用，见文件头）。
-    // resume 轮同一段逻辑天然工作：既有会话的历史 turn 在此被观测一遍，新
-    // prompt 触发的新 turn 由归属键唯一圈定。
-    const preTurns = await this.transcript(agent, sessionId);
-    const preSubmitTurnIds = [];
-    for (const item of preTurns.items) {
-      if (typeof item?.turnId === "string" && item.turnId.length > 0) {
-        preSubmitTurnIds.push(item.turnId);
-      }
-    }
+    // 提交前读一次 turns（最新一页）：当时最大的 ordinal 作翻页边界（没有轮为 -1）。
+    // 事件流每拍从最新页往回翻到这条边界为止；resume 轮的历史轮同样只作边界，归属只看
+    // prompt id——历史轮不含本运行的 id，按构造不会被误领或重放。
+    const boundaryOrdinal = latestOrdinal(await this.turnsPage(agent, sessionId, null));
     const admitted = await this.sendPrompt(agent, sessionId, prompt);
-    // prompt_id = v8 归属键（POST 回执与 transcript turn.triggerPromptId 同一
-    // id 空间，live 双验证：completed 轮与 failed 轮都命中）。缺失形状（上游
-    // 违约返回无 prompt_id）不发明归属启发式：匹配不到任何 turn ⇒ 由
-    // silentTimeout / 无进展出口有界收口（见 streamEvents）。
-    const promptId = typeof admitted?.prompt_id === "string" && admitted.prompt_id.length > 0
-      ? admitted.prompt_id
-      : null;
-    // 轮次归属锚：随 events 工厂透传给 streamEvents（完成判定唯一事实源）。
-    const turnAnchor = { promptId, submitAt: Date.now(), preSubmitTurnIds };
+    // 运行的提示集合（sendCorrection 与事件流共用）。回执缺 prompt_id（上游违约）不发明
+    // 归属：派发记在永不匹配的键下，由 silentTimeout / 无进展出口有界收口。回执状态
+    // blocked/failed 由事件流在首拍之前直接收口（不轮询）。
+    const runPrompts = createRunPrompts({
+      promptId: typeof admitted?.prompt_id === "string" && admitted.prompt_id.length > 0 ? admitted.prompt_id : null,
+      status: admitted?.status,
+      boundaryOrdinal,
+    });
     const cwd = agent.cwd;
     // 决定 0074 会审（sol）：本次运行实际使用的 bearer 进入转录的精确值脱敏——主目录
     // 文件里的 token 不在进程环境里，按环境名构造的缺省脱敏器认不出它；经 user-env 桥
@@ -454,7 +390,7 @@ export class KimiWebBackend {
         interval: opts?.pollInterval,
         silentTimeout: opts?.silentTimeout,
         onPollTick: opts?.onPollTick,
-        turnAnchor,
+        runPrompts,
         // TD-197① test seam: injectable monotonic clock for the stall budget.
         stallClock: opts?.stallClock,
         serveStartNote,
@@ -462,7 +398,7 @@ export class KimiWebBackend {
       // 停止面（abort / session / messages / sessionStatus）与 wao stop 共用同一实现。
       ...this.stopTarget(agent, sessionId),
       // M12-16 handle 级纠偏钩子（runManager provider 中立消费，见 _pollCorrections）。
-      sendCorrection: (text) => this.sendCorrection(agent, sessionId, text),
+      sendCorrection: (text) => this.sendCorrection(agent, sessionId, text, runPrompts),
     };
   }
 
@@ -611,76 +547,96 @@ export class KimiWebBackend {
   }
 
   /**
-   * 中止会话正在跑和排队的 prompt（2.4.0 实测，见文件头）：GET prompts，先对 queued 里
-   * 的每一条、再对 active POST …/prompts/{promptId}:abort——只停活动的，排队那条会立刻
-   * 接着跑起来。两样都没有 → 视为已停，不报错；有 :abort 未获确认时再读一次列表，两样
-   * 都已没有也算已停。其余上游拒绝或传输失败 → 固定文案错误（不回显上游原文、token 或
-   * URL）。绝不调服务器级 /api/v1/shutdown。
+   * 中止会话正在跑和排队的 prompt：GET prompts，先对 queued 里的每一条、再对 active
+   * POST …/prompts/{promptId}:abort（只停活动的，排队那条会立刻接着跑）。然后稍等
+   * （abortSettleMs）再读 prompts 与会话详情——2.6 中止活动轮不清已转入、还没开轮的
+   * 纠偏，它会在中止后自己开一轮。又出现活动 / 排队的 prompt，或 main_turn_active 不是
+   * false → 再中止一轮，最多 ABORT_ROUNDS 轮，仍停不下按 "abort not acknowledged" 失败。
+   * 单条 :abort 未获确认（40402 已停等竞态）不单独判，以复查看到的实际状态为准。会话
+   * 已不存在（40401）视为已停。其余上游拒绝、传输失败或列表畸形 → 固定文案错误（不回显
+   * 上游原文、token 或 URL）。绝不调服务器级 /api/v1/shutdown。
    */
   async abortActivePrompt(agent, sessionId) {
     const base = `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`;
-    const listPrompts = async () => {
-      const listed = await this.request(agent, base, { method: "GET" });
-      const data = listed?.data;
-      if (!data || typeof data !== "object" || !("active" in data)
-        || (data.queued !== undefined && !Array.isArray(data.queued))) {
-        throw new Error("prompts list malformed");
-      }
-      return { active: data.active ?? null, queued: data.queued ?? [] };
-    };
-    const abortPrompt = async (promptId) => {
-      try {
-        const aborted = await this.request(agent, `${base}/${encodeURIComponent(promptId)}:abort`, {
-          method: "POST",
-          body: JSON.stringify({}),
-        });
-        return aborted?.data?.aborted === true;
-      } catch {
-        return false;
-      }
-    };
     try {
-      const { active, queued } = await listPrompts();
-      // 排队的先停：只停活动的，排队那条在 200 ms 内就成为新的活动轮（2.4.0 实测）。
-      const promptIds = [...queued, ...(active === null ? [] : [active])].map(activePromptId);
-      if (promptIds.includes(null)) throw new Error("prompt id missing");
-      let acknowledged = true;
-      for (const promptId of promptIds) {
-        if (!(await abortPrompt(promptId))) acknowledged = false;
+      let listed = await this.promptsList(agent, sessionId);
+      for (let round = 1; ; round += 1) {
+        // 排队的先停：只停活动的，排队那条在 200 ms 内就成为新的活动轮（2.4.0 实测）。
+        for (const entry of [...listed.queued, ...(listed.active === null ? [] : [listed.active])]) {
+          try {
+            await this.request(agent, `${base}/${encodeURIComponent(entry.promptId)}:abort`, {
+              method: "POST",
+              body: JSON.stringify({}),
+            });
+          } catch { /* 未获确认：由下面的复查定 */ }
+        }
+        await sleep(this.abortSettleMs);
+        listed = await this.promptsList(agent, sessionId);
+        const detail = await this.sessionDetail(agent, sessionId);
+        if (listed.active === null && listed.queued.length === 0 && detail.main_turn_active === false) return;
+        if (round >= ABORT_ROUNDS) throw new Error("abort not acknowledged");
       }
-      if (!acknowledged) {
-        // 竞态：GET 之后这一轮自己结束了，:abort 得到 40402 或 aborted:false。再读一次
-        // 列表：活动与排队都已没有即视为已停；还有才按失败处置。
-        const after = await listPrompts();
-        if (after.active !== null || after.queued.length > 0) throw new Error("abort not acknowledged");
-      }
-    } catch {
+    } catch (error) {
+      if (error?.waoCode === KIMI_SESSION_GONE_CODE) return;
       throw new Error(
         "kimi-web abort failed: the server did not confirm aborting the active prompt "
-        + "(upstream rejected the request, the request failed or timed out, or the prompts list was malformed)",
+        + "(upstream rejected the request, the request failed or timed out, the prompts list was malformed, "
+        + `or a prompt was still running after ${ABORT_ROUNDS} abort rounds)`,
       );
     }
   }
 
   /**
-   * 在途纠偏（supportsInFlightCorrection 的实现）：POST prompts 排队拿 prompt_id
-   * → POST prompts:steer 转入活动轮。steered===true → {ok:true}；任何失败（HTTP
-   * 错 / code!==0 / 40402 无活动轮）→ {ok:false, reason:"send_failed"}（M12-16
-   * 闭集 reason）。delivered 证明已转入活动轮，不证明模型截断了当轮生成。
-   * 不对称声明：排队成功但 steer 失败（如 40402 无活动轮）时，上游可能仍会在
-   * 后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称。
-   * 有界拒绝：错误细节不透传（token 值绝不进消息）。
+   * GET prompts → {active, queued, statusById}（条目归一为 {promptId, status}）。形状门
+   * （fail-closed，事件流与中止面共用）：缺 active 或 queued、queued 不是数组、条目不是
+   * 带非空 prompt_id 的对象 ⇒ 抛固定错误——不可观察绝不当成"没有排队"。
    */
-  async sendCorrection(agent, sessionId, text) {
+  async promptsList(agent, sessionId) {
+    const response = await this.request(
+      agent,
+      `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`,
+      { method: "GET" },
+    );
+    const data = response?.data;
+    const entryOf = (value) => (value && typeof value === "object"
+      && typeof value.prompt_id === "string" && value.prompt_id.length > 0
+      ? { promptId: value.prompt_id, status: value.status }
+      : null);
+    if (data && typeof data === "object" && "active" in data && Array.isArray(data.queued)) {
+      const active = data.active === null ? null : entryOf(data.active);
+      const queued = data.queued.map(entryOf);
+      if ((data.active === null || active !== null) && !queued.includes(null)) {
+        const entries = active === null ? queued : [...queued, active];
+        return { active, queued, statusById: new Map(entries.map((entry) => [entry.promptId, entry.status])) };
+      }
+    }
+    throw new Error(
+      "kimi web prompts list malformed (data.active and a data.queued array, entries with prompt_id, are required — refusing to guess)",
+    );
+  }
+
+  /**
+   * 在途纠偏（supportsInFlightCorrection 的实现）：POST prompts 排队拿 prompt_id →
+   * POST prompts:steer 转入活动轮。steered===true → {ok:true}；任何失败（HTTP 错 /
+   * code!==0 / 40402 无活动轮 / 回执 blocked|failed）→ {ok:false, reason:"send_failed"}
+   * （M12-16 闭集 reason）。有界拒绝：错误细节不透传（token 值绝不进消息）。
+   * 运行级记账（runPrompts，spawn 建、事件流共用）：POST prompts 被接纳（有 prompt_id、
+   * 回执状态不是 blocked/failed）即记"已接纳"，不论随后 steer 成败——steer 失败的那条
+   * 仍可能在之后的轮里执行（send_failed ≠ 一定未执行，Lead 重发前须知此不对称）；steer
+   * 回 steered:true 再记"已转入"与转入时刻。
+   */
+  async sendCorrection(agent, sessionId, text, runPrompts = null) {
     if (typeof text !== "string" || text.length === 0) {
       return { ok: false, reason: "send_failed" };
     }
     try {
       const queued = await this.sendPrompt(agent, sessionId, text);
       const promptId = queued?.prompt_id;
-      if (typeof promptId !== "string" || promptId.length === 0) {
+      if (typeof promptId !== "string" || promptId.length === 0 || PROMPT_FAILED_STATUSES.has(queued?.status)) {
         return { ok: false, reason: "send_failed" };
       }
+      const accepted = { kind: "correction", submittedAt: Date.now(), steeredAt: null, waitPolls: 0, notExecuted: false };
+      runPrompts?.prompts.set(promptId, accepted);
       const steered = await this.request(
         agent,
         `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts:steer`,
@@ -689,18 +645,18 @@ export class KimiWebBackend {
           body: JSON.stringify({ prompt_ids: [promptId] }),
         },
       );
-      return steered?.data?.steered === true
-        ? { ok: true }
-        : { ok: false, reason: "send_failed" };
+      if (steered?.data?.steered !== true) return { ok: false, reason: "send_failed" };
+      accepted.steeredAt = Date.now();
+      return { ok: true };
     } catch {
       return { ok: false, reason: "send_failed" };
     }
   }
 
+
   /**
-   * GET messages（v8 起职责收窄：**仅供停止验证消费者**——handle.messages 按
-   * serveStopVerify.sample 的页形状返回；完成判定已整体迁移到 transcript
-   * 轮次原语，本端点不再参与任何判定分支）。A4（缺数据虚报停止）：缺 items
+   * GET messages（仅供停止验证消费者——handle.messages 按 serveStopVerify.sample 的
+   * 页形状返回；本端点不参与任何完成判定）。A4（缺数据虚报停止）：缺 items
    * 数组 ⇒ 抛固定错误（fail-closed，绝不回落 []——空数组会被消费者当成"会话
    * 真的没有消息"的健康观测，虚报停止面）。
    */
@@ -719,28 +675,56 @@ export class KimiWebBackend {
   }
 
   /**
-   * GET 轮次 transcript（v8 完成判定的唯一观测源；形状锚见文件头）。agent_id
-   * 查询参数必填（缺则 40001；实测 "main" 有效、"default" 返回空）——客户端
-   * 恒发 TRANSCRIPT_AGENT_ID，绝不缺省。A4 fail-closed 门：响应缺 data.items
-   * 数组 ⇒ 抛固定错误，绝不回落猜测形状（空数组会被当成"会话无轮次"的健康
-   * 观测，虚报归属面）。返回整个 data（items + seq/has_more 水位——v8 只消费
-   * items；seq/ops 增量对账与翻页留 v1.1+，见文件头声明）。
+   * GET turns 一页（2.6.3，形状见文件头）：beforeOrdinal 为 null 取最新一页。形状门
+   * （fail-closed）：data.turns 须是数组、has_more 须是布尔、每个轮须有非空 turn_id 与
+   * 整数 ordinal ⇒ 否则抛固定错误（回落 [] 会把"不可观察"当成"没有轮"）。
    */
-  async transcript(agent, sessionId) {
+  async turnsPage(agent, sessionId, beforeOrdinal) {
+    const query = beforeOrdinal === null ? "" : `?before_ordinal=${beforeOrdinal}`;
     const response = await this.request(
       agent,
-      `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}`
-      + `/transcript?agent_id=${TRANSCRIPT_AGENT_ID}`,
+      `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/agents/${TURNS_AGENT}/turns${query}`,
       { method: "GET" },
     );
     const data = response?.data;
-    if (!data || typeof data !== "object" || !Array.isArray(data.items)) {
+    if (!data || typeof data !== "object" || !Array.isArray(data.turns) || typeof data.has_more !== "boolean"
+      || !data.turns.every((turn) => typeof turn?.turn_id === "string" && turn.turn_id.length > 0
+        && Number.isInteger(turn.ordinal))) {
       throw new Error(
-        "kimi web transcript response malformed (data.items array is required — refusing to guess)",
+        "kimi web turns response malformed (data.turns entries with turn_id and an integer ordinal, "
+        + "and a boolean data.has_more, are required — refusing to guess)",
       );
     }
     return data;
   }
+
+  /**
+   * 本运行可能涉及的全部轮：从最新页往回翻（before_ordinal = 本页最早轮的 ordinal），
+   * 直到本页最早的轮 ordinal ≤ 提交前边界或 has_more:false；按 turn_id 去重、按 ordinal
+   * 升序返回。翻不到边界（has_more 却给空页、往回翻没有前进）⇒ 抛错——不完整的轮不能
+   * 当成整个运行的事实（调用方按观测失败收口）。
+   */
+  async collectTurns(agent, sessionId, boundaryOrdinal) {
+    const byId = new Map();
+    let before = null;
+    for (;;) {
+      const page = await this.turnsPage(agent, sessionId, before);
+      for (const turn of page.turns) {
+        if (!byId.has(turn.turn_id)) byId.set(turn.turn_id, turn);
+      }
+      if (!page.has_more) break;
+      const earliest = Math.min(...page.turns.map((turn) => turn.ordinal));
+      if (earliest <= boundaryOrdinal) break;
+      if (!Number.isFinite(earliest) || (before !== null && earliest >= before)) {
+        throw new Error(
+          "kimi web turns paging incomplete (has_more:true but no older turns before the boundary — refusing to judge on a partial page set)",
+        );
+      }
+      before = earliest;
+    }
+    return [...byId.values()].sort((a, b) => a.ordinal - b.ordinal);
+  }
+
 
   /**
    * GET 会话详情（A4 fail-closed 门）：响应缺 id 或 busy/main_turn_active 字段
@@ -895,69 +879,55 @@ export class KimiWebBackend {
   }
 
   /**
-   * 轮询生成器（v8 结构性重写：**原厂 transcript 轮次终态原语**；职责划分镜像
-   * 轮询流惯例——完成/失败/超时判定归这里，signal 仅作 abort
-   * 静默退出，不承担任何终止兜底）。每拍恰一次 GET transcript?agent_id=main，
-   * 按 triggerPromptId === promptId 圈定本轮唯一 turn（锚 = spawn 记录的
-   * turnAnchor.promptId/submitAt；历史轮/前任轮按构造不可能被误归属或重放）：
+   * 轮询生成器（完成/失败/超时判定归这里；signal 只作 abort 静默退出）。每拍：先跑
+   * onPollTick（纠偏投递钩子，best-effort——抛错绝不杀流），再读 GET prompts、再翻
+   * turns（先看队列再看轮：prompt 从队列走进轮，这个次序不会两头都错过它）。
    *
-   *   - turn 未出现（提交滞后）→ 等；silentTimeout（相对提交时刻）到期仍无 →
-   *     silent fail（上游静默拒收的诚实退出）。R9 F3：silentTimeout 在场时这是
-   *     无 turn 等待的**唯一**上界——8 拍无进展兜底不抢先（仅 silentTimeout
-   *     缺席形状生效：turn 永不出现也有界，绝不无限等待）。
-   *   - state=queued|running → 等；无进展兜底：连续 ≥8 拍
-   *     （NO_PROGRESS_POLL_LIMIT）state 不变且 steps/frames 无增长 →
-   *     done(failed, "turn stalled (no progress)")（首见拍建立基线——turn
-   *     出现即进展；增长/state 变化任一发生即清零）。
-   *   - 闭集外未知 state（R9 F4）→ 一律非终态、绝不猜终态，但独立有界：连续
-   *     ≥8 拍 turn 在场且 state 仍闭集外 → done(failed, "unsupported turn
-   *     state")——增长不清零该计数（客户端已知该 state 不受支持，等待增长没有
-   *     意义）；state 恢复闭集内即回正常路径（计数清零）。
-   *   - state=completed → steps[].frames 取 kind==="text" 且 role==="assistant"
-   *     （或无 role 的 text 帧，按实测宽容）按序拼接；**发射前复检非空**——
-   *     空/纯空白 ⇒ done(failed) 收口（N1 教训：传输成功不是可用答案，绝不
-   *     伪造完成）；先发射 tool 帧证据（kind:"tool" 帧逐帧投影——
-   *     projectKimiToolFrames，证据先行），再发射 user echo（turn.prompt，
-   *     在场且非空才发）+ assistant text + usage（steps[].usage 求和 → metrics
-   *     事件）+ done(completed)。**只发射该 turn 的内容**。
-   *   - state=failed|cancelled → done(failed, turn.error 字段或固定文案；R9 F2：
-   *     拼装后过与 request 层同一 redactToken 清洗——token 值绝不经此路径进
-   *     事件流)。
-   *
-   *   - onPollTick 每拍恰一次（correctable run 的纠偏投递钩子——runManager 经
-   *     events 工厂传入；best-effort，钩子抛错绝不杀死事件流）。
-   *   - 轮询 HTTP 失败（request 内重试耗尽后抛出）→ done(failed, 错误消息)；
-   *     transcript 缺 items 数组的固定错误同路径（fail-closed，绝不回落猜测
-   *     形状）；null/undefined 等非 Error 抛出值在消费前包成固定文案
-   *     （errorText——"request failed with non-error throw"；request() 自身仍
-   *     原样抛出）。
-   *   - signal.aborted → 静默 return（不 emit done，终态归 RunManager）。
-   * metrics（reportsTokenUsage=true）：completed 轮发射恰一次 metrics 事件
-   * （steps[].usage 四计数求和映射，见 metricsEventFromTurn；usage 数据全缺席
-   * 则不发——绝不虚构零值通道）。事件顺序：tool 帧证据（逐帧）→ user echo →
-   * assistant text → metrics → done(completed)。
+   *   - 归属：轮的任一 user_message.prompt_ids 含运行提示集合里的 id；最终轮 = 归属
+   *     轮里 ordinal 最大的。
+   *   - 结算（每个 id）：出现在归属轮里 = 已结算；prompts 列表报 blocked/failed ⇒
+   *     done(failed) 写明哪条、什么状态。其余各按自己的计时原点等，上界 =
+   *     silentTimeout（缺席时连续 SHAPE_DRIFT_POLL_LIMIT 拍）：
+   *       · 派发：原点 = 提交时刻；到界仍不在任何轮里 ⇒ silent timeout 失败。
+   *       · 已转入的纠偏：原点 = 转入时刻；prompts 里看不到它也算未结算；到界 ⇒
+   *         失败（转入了但没有轮执行它）。
+   *       · 只接纳（steer 失败）的纠偏：原点 = 它自己的提交时刻，只在它既不在轮里
+   *         也不在 active/queued 时计；到界 ⇒ 按"未执行"结算并发一条 system 消息，
+   *         之后若出现在某轮里照常归属。
+   *   - 收口：全部结算、最终轮 status "ended"、集合里没有 id 还在 active/queued ⇒
+   *     按 outcome：completed → 最终轮的 assistant_message 拼成答案（空 ⇒ failed，
+   *     绝不伪造完成），先补齐全部归属轮的工具证据，再发 user echo（第一个归属轮的
+   *     开场 user_message）、答案、metrics（各归属轮 usage 之和）、done(completed)；
+   *     interrupted ⇒ failed（end_reason）；failed ⇒ failed（error）。来自响应体的
+   *     诊断文字一律过 redactToken。
+   *   - 闭集外的 status / outcome ⇒ 一律非终态，最终轮连续 SHAPE_DRIFT_POLL_LIMIT 拍
+   *     仍闭集外 ⇒ done(failed, "unsupported turn state")（增长不清零该计数）。
+   *   - 等待中：各归属轮的工具调用在途落证据（决定 0071/0072）；停滞门看最终轮的签名
+   *     （换了最终轮算一次进展，产出量最高水位与证词累计按新轮重建）。
+   *   - 读失败 / 形状不符 / 翻页不完整 ⇒ done(failed, 错误消息)；signal.aborted ⇒
+   *     静默 return（终态归 RunManager）。
    */
   async *streamEvents(agent, sessionId, {
-    signal, interval = 1000, silentTimeout, onPollTick, turnAnchor, stallClock, serveStartNote,
+    signal, interval = 1000, silentTimeout, onPollTick, runPrompts, stallClock, serveStartNote,
   } = {}) {
     // 决定 0075：本次派发拉起过（或等过）worker serve——告诉 Lead。
     if (typeof serveStartNote === "string" && serveStartNote.length > 0) {
       yield messageEvent("system", [{ type: "text", text: serveStartNote }]);
     }
-    // 归属键：spawn 传入的 promptId（非空字符串才可匹配；缺失/直调防御形状
-    // 匹配不到任何 turn ⇒ 由 silentTimeout / 无进展出口有界收口，绝不发明归属
-    // 启发式）。anchorTime = 提交时刻（silentTimeout 的计时原点）。
-    const promptId = typeof turnAnchor?.promptId === "string" && turnAnchor.promptId.length > 0
-      ? turnAnchor.promptId
-      : null;
-    const anchorTime = typeof turnAnchor?.submitAt === "number" ? turnAnchor.submitAt : Date.now();
-    // 无进展计数：turn 首见拍建立基线（清零——turn 出现 = 进展，提交滞后的解除
-    // 不算停滞）；此后 signature（state + steps/frames 结构投影）不变即累进。
-    // TD-197① 拆分：该计数现只喂 F3（无 turn 兜底，silentTimeout 缺席时）；
-    // 受支持非终态的"进度停滞"改由下方 tracker 的时间预算判定。
-    let noProgressPolls = 0;
-    let turnSeen = false;
-    let lastSignature = null;
+    // 直调防御形状（没有 spawn 建的集合）：派发记在永不匹配的键下，由有界出口收口。
+    const run = runPrompts ?? createRunPrompts();
+    // 响应体里的文字（error、end_reason、状态值）走的是 HTTP 200 成功路径，不经
+    // request() 的 sanitizeError 出口——拼装后过同一 redactToken。token 取不到时清洗
+    // 退化为无操作（能走到读请求必然取得到，缺席只是防御形状）。
+    let tokenValue = null;
+    try { tokenValue = resolveBearerToken(agent); } catch { /* 清洗退化为无操作 */ }
+    const redact = (text) => redactToken(text, tokenValue);
+    if (PROMPT_FAILED_STATUSES.has(run.dispatchStatus)) {
+      yield doneEvent("failed", redact(
+        `kimi prompt ${run.dispatchId ?? "(no prompt_id)"} was ${run.dispatchStatus} at submission (the serve will not run it)`,
+      ));
+      return;
+    }
     // TD-197①：无进展停滞门的时间化（shared stallBudget 纯算法，单调钟；
     // stallClock 为测试注入缝，缺省 performance.now()）。
     const stallTracker = createStallTracker({
@@ -968,231 +938,207 @@ export class KimiWebBackend {
     });
     let attestedSilentMs = 0;
     let livenessAttestations = 0;
-    // 本轮已见过的产出量最高水位（硬顶清零的判据，见常量注释）。
+    // 最终轮已见过的产出量最高水位（硬顶清零的判据，见常量注释）。
     let volumeHighWater = -1;
-    // Owner 2026-10-10 问2 修复（kimi 诊断会审 opus/sol 方案）：在途进度呈现。
-    // 归属 turn 的结构投影增长节气流发射 runtime_activity("streaming")——
-    // 闭集状态、零 payload、不算证据、不碰完成路径；历史 turn 不重放（只看
-    // 归属 turn 的 signature 变化）。节流=同签名天然不重复 + 最小发射间隔。
+    let finalTurnId = null;
+    let lastSignature = null;
+    // 在途进度呈现：最终轮签名变化即节流发射 runtime_activity("streaming")（闭集状态、
+    // 零 payload、不算证据、不碰完成路径）。
     let lastProgressEmitAt = -Infinity;
-    // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
-    // **连续**拍数（turn 消失或 state 回闭集内即清零）。steps/frames 增长**不**
-    // 清零此计数（与普通停滞门分工：那守"受支持的非终态停滞"，这守"状态本身
-    // 不受支持"——等待增长没有意义）。
+    // 闭集外 status/outcome 的连续拍数（最终轮回到闭集内或不在场即清零；增长不清零）。
     let unsupportedStatePolls = 0;
-    // 决定 0071：tool 帧证据的台账（帧身份 → 已落的部分）。证据在轮询期即落盘——
-    // 此前要到整轮结束才投影，一条跑几分钟的命令在途时 Lead 看不到它。
+    // 决定 0071：工具调用证据的台账（item_id → 已落的部分），跨最终轮切换保留。
     const toolLedger = new Map();
     while (!signal?.aborted) {
-      // onPollTick 每拍恰一次，置于轮询观察之前；best-effort——钩子抛错绝不
-      // 杀死事件流。
       if (typeof onPollTick === "function") {
         try { await onPollTick(); } catch { /* best-effort: never kill the event stream */ }
       }
-      let items;
+      let listed;
+      let turns;
       try {
-        items = (await this.transcript(agent, sessionId)).items;
+        listed = await this.promptsList(agent, sessionId);
+        turns = await this.collectTurns(agent, sessionId, run.boundaryOrdinal);
       } catch (error) {
         yield doneEvent("failed", errorText(error));
         return;
       }
-      const turn = promptId === null ? null : findTurnByPromptId(items, promptId);
-      if (turn === null) {
-        // 提交滞后：turn 尚未出现在 transcript——等；silentTimeout（相对提交
-        // 时刻）到期仍无 → silent fail。
-        if (silentTimeout && (Date.now() - anchorTime) > silentTimeout) {
+      const attributed = turns.filter((turn) => turnPromptIds(turn).some((id) => run.prompts.has(id)));
+      const seen = new Set(attributed.flatMap(turnPromptIds));
+      // 结算：每个 id 各按自己的原点计（初次派发的原点绝不用于纠偏）。
+      let pending = false;
+      for (const [id, entry] of run.prompts) {
+        if (seen.has(id) || entry.notExecuted) continue;
+        const listedStatus = listed.statusById.get(id);
+        if (PROMPT_FAILED_STATUSES.has(listedStatus)) {
+          yield doneEvent("failed", redact(
+            `kimi prompt ${String(id)} (${entry.kind}) is ${listedStatus} in the serve's prompts list (it will not run)`,
+          ));
+          return;
+        }
+        // 只接纳的纠偏还在 active/queued 里：服务端还拿着它，不计时。
+        if (entry.kind === "correction" && entry.steeredAt === null && listedStatus !== undefined) {
+          pending = true;
+          continue;
+        }
+        entry.waitPolls += 1;
+        const origin = entry.steeredAt ?? entry.submittedAt;
+        const expired = silentTimeout
+          ? Date.now() - origin > silentTimeout
+          : entry.waitPolls >= SHAPE_DRIFT_POLL_LIMIT;
+        if (!expired) {
+          pending = true;
+          continue;
+        }
+        const bound = silentTimeout
+          ? `${silentTimeout}ms`
+          : `${SHAPE_DRIFT_POLL_LIMIT} consecutive polls (silentTimeout absent)`;
+        if (entry.kind === "dispatch") {
+          yield doneEvent("failed", silentTimeout
+            ? `silent timeout: turn for this prompt not observed within ${silentTimeout}ms (provider may have silently rejected)`
+            : `turn stalled (no progress): turn not observed for ${SHAPE_DRIFT_POLL_LIMIT} consecutive polls (bounded exit, silentTimeout absent)`);
+          return;
+        }
+        if (entry.steeredAt !== null) {
           yield doneEvent(
             "failed",
-            `silent timeout: turn for this prompt not observed within ${silentTimeout}ms (provider may have silently rejected)`,
+            `kimi-web backend: correction prompt ${String(id)} was steered into the session but no turn ran it within ${bound} of the steer`,
           );
           return;
         }
-        // R9 F3：silentTimeout 在场时，无 turn 等待**只**以 silentTimeout 为界
-        //——8 拍无进展兜底绝不抢先（旧形状：silentTimeout=60s、interval=1s 时
-        // 第 8 秒即失败，把"慢出现的合法 turn"误杀成失败）。兜底仅在
-        // silentTimeout 缺席（null/undefined——防御形状，如直调/测试注入）时
-        // 生效：turn 永不出现也有界，绝不无限等待。
-        if (!silentTimeout) {
-          noProgressPolls += 1;
-          if (noProgressPolls >= SHAPE_DRIFT_POLL_LIMIT) {
-            yield doneEvent(
-              "failed",
-              `turn stalled (no progress): turn not observed for ${SHAPE_DRIFT_POLL_LIMIT} consecutive polls (bounded exit, silentTimeout absent)`,
-            );
-            return;
-          }
-        }
-        // turn 不在场不是"闭集外 state"的延续——F4 连续计数在此清零。
+        entry.notExecuted = true;
+        yield messageEvent("system", [{
+          type: "text",
+          text: `kimi-web backend: correction prompt ${String(id)} was not executed — its steer had failed and `
+            + `${bound} after its submission it is in no turn of this run and no longer active or queued`,
+        }]);
+      }
+      const final = attributed.at(-1) ?? null;
+      if (final === null) {
+        // 还没有归属轮：派发的上界由上面的结算出口管。
         unsupportedStatePolls = 0;
         await sleep(interval);
         continue;
       }
-      const state = turn.state;
-      if (state === "failed" || state === "cancelled") {
-        // 终态（闭集后三之二）：error 字段在场则透传（实测形状："Model not
-        // set"），缺席用固定文案——不虚构原因。R9 F2：turn.error 是上游回显
-        // 文本，走的是 HTTP 200 成功路径（transcript 信封 code===0），不经
-        // request() 的 sanitizeError 出口——失败文案拼装后必须过与 request 层
-        // 同一 redactToken 清洗（token 值 → "<redacted>"）。token 解析缺席时
-        // 传 null（redactToken 对空 token 原样透传——清洗层绝不抛错改写终态
-        // 路径；能走到这里必然已成功请求过 transcript，缺席只是防御形状）。
-        let redactTokenValue = null;
-        try {
-          redactTokenValue = resolveBearerToken(agent);
-        } catch { /* env 缺席：清洗退化为无操作 */ }
-        yield doneEvent("failed", turnFailureText(turn, redactTokenValue));
-        return;
-      }
-      if (state === "completed") {
-        // 答案切片：仅该 turn 的 steps[].frames（kind==="text" 且 role===
-        // "assistant" 或无 role——实测宽容，两形状都见过），按 step/frame 顺序
-        // 拼接为单条 assistant text；thinking 帧不投影（v8 无需求）。
-        const text = assistantTextOfTurn(turn);
-        if (text.trim().length === 0) {
-          // 发射前复检非空（N1 教训）：completed 轮无 assistant text ⇒ 不伪造
-          // 完成，按 failed 收口。这里不补发证据（决定 0071 之后，在途时看到的命令 /
-          // 工具调用已经落过；写文件证据仍只在成功路径投影）。
-          yield doneEvent(
-            "failed",
-            "kimi turn completed without assistant text (state=completed, no text frames — refusing to fabricate completion)",
-          );
-          return;
-        }
-        // tool 帧证据投影（2026-10-01 补齐，证据先行——证据
-        // 事件先于消息投影）：归属 turn 的 steps[].frames 里 kind==="tool" 的帧
-        // 逐帧投影为证据事件。delta 证据链动机：v1 误以为 frames 是 thinking|text
-        // 闭集，模型真写了文件但 WAO 无 file_written 事件——delta scorecard 的
-        // hasEvidence/filesExist 误红。决定 0071 起证据在轮询期即落盘，这里只
-        // 补还没落过的部分（台账去重，同一帧不重复发射）。
-        for (const ev of projectKimiToolFrames(turn, toolLedger, { final: true })) {
-          yield ev;
-        }
-        if (typeof turn.prompt === "string" && turn.prompt.length > 0) {
-          yield messageEvent("user", [{ type: "text", text: turn.prompt }]);
-        }
-        const duplicateFrames = duplicateTextFramesOfTurn(turn);
-        if (duplicateFrames > 0) {
-          yield messageEvent("system", [{
-            type: "text",
-            text: `kimi-web backend: the serve sent ${duplicateFrames} text frame(s) identical to the one before; the repeat is left out of the answer below`,
-          }]);
-        }
-        yield messageEvent("assistant", [{ type: "text", text }]);
-        const metrics = metricsEventFromTurn(turn);
-        if (metrics !== null) {
-          yield metrics;
-        }
-        yield doneEvent("completed");
-        return;
-      }
-      // R9 F4：闭集外未知 state（queued|running|completed|failed|cancelled 之外
-      //——上游升级/形状漂移）：一律非终态、绝不猜终态，但**独立有界处置**——
-      // 客户端已知该 state 不受支持，等待内容增长没有意义（增长 ≠ 将到达受支持
-      // 终态；旧形状把闭集外值折进普通等待分支，steps/frames 增长会清零停滞计数
-      // 且 silentTimeout 不覆盖 turn 已出现的分支 → 永等）。连续 ≥8 拍
-      // （NO_PROGRESS_POLL_LIMIT）turn 在场且 state 仍闭集外 → done(failed,
-      // "unsupported turn state")；**增长不清零此计数**。state 恢复闭集内（下方
-      // queued|running 分支/上方终态分支）即回正常路径（计数清零）。
-      if (state !== "queued" && state !== "running") {
+      const supported = final.status === "running"
+        || (final.status === "ended" && TURN_OUTCOMES.has(final.outcome));
+      if (!supported) {
         unsupportedStatePolls += 1;
         if (unsupportedStatePolls >= SHAPE_DRIFT_POLL_LIMIT) {
-          yield doneEvent(
-            "failed",
-            `unsupported turn state: ${String(state)} (outside the supported closed set `
-            + `queued|running|completed|failed|cancelled — bounded exit after ${SHAPE_DRIFT_POLL_LIMIT} `
-            + "consecutive polls; growth does not extend this bound because the client already "
+          yield doneEvent("failed", redact(
+            `unsupported turn state: status=${String(final.status)} outcome=${String(final.outcome)} `
+            + "(outside the supported closed set running | ended with completed|interrupted|failed — bounded exit after "
+            + `${SHAPE_DRIFT_POLL_LIMIT} consecutive polls; growth does not extend this bound because the client already `
             + "knows this state is unsupported)",
-          );
+          ));
           return;
         }
         await sleep(interval);
         continue;
       }
       unsupportedStatePolls = 0;
-      // 决定 0071：在途的 tool 帧就绪即落证据（命令 / 工具调用在输入对象就绪时，
-      // 结果在帧到终态时）。
-      for (const ev of projectKimiToolFrames(turn, toolLedger)) yield ev;
-      // queued | running（受支持的非终态）：等（绝不猜终态）。无进展兜底
-      // （TD-197① 观测自适应时间门）：signature（state + steps/frames 结构
-      // 投影）变化/首见 = 进度（tracker.noteProgress + 计数清零）；静默段 ≥
-      // budgetMs → done(failed)。budget = min(240s, max(60s, 3 × 本轮已恢复的
-      // 最大静默间隙))——floor 60s 直接保护刚提交 turn 的排队/慢启动（当日三
-      // 杀实录见常量注释），轮内节奏自放大，硬顶保有界（顶约束静默段而非墙钟）。
-      const signature = turnSignature(turn);
-      if (!turnSeen || signature !== lastSignature) {
-        turnSeen = true;
+      const ourPromptListed = [...run.prompts.keys()].some((id) => listed.statusById.has(id));
+      if (final.status === "ended" && !pending && !ourPromptListed) {
+        if (final.outcome !== "completed") {
+          yield doneEvent("failed", redact(turnFailureText(final)));
+          return;
+        }
+        const text = answerOfTurn(final);
+        if (text.trim().length === 0) {
+          // N1 教训：传输成功不是可用答案——completed 轮没有回答按 failed 收口。这里不
+          // 补发证据（在途已落的命令 / 工具调用留着；写文件证据只在成功路径落）。
+          yield doneEvent(
+            "failed",
+            "kimi turn completed without assistant text (outcome=completed, no assistant_message text — refusing to fabricate completion)",
+          );
+          return;
+        }
+        // 证据先行：全部归属轮（纠偏会让工作跨轮）还没落过的工具证据在这里补齐。
+        for (const turn of attributed) {
+          for (const ev of projectKimiToolCalls(turn, toolLedger, { final: true })) yield ev;
+        }
+        const echo = openerText(attributed[0]);
+        if (echo !== null) yield messageEvent("user", [{ type: "text", text: echo }]);
+        yield messageEvent("assistant", [{ type: "text", text }]);
+        const metrics = metricsEventFromTurns(attributed);
+        if (metrics !== null) yield metrics;
+        yield doneEvent("completed");
+        return;
+      }
+      // 决定 0071：在途的工具调用就绪即落证据（命令 / 工具调用在输入就绪时，结果在
+      // 条目 ended 时）；写文件类只预告路径（决定 0072）。
+      for (const turn of attributed) {
+        for (const ev of projectKimiToolCalls(turn, toolLedger)) yield ev;
+      }
+      // 无进展停滞门（TD-197① 观测自适应时间门）：最终轮签名变化 / 换了最终轮 = 进度；
+      // 静默段 ≥ budgetMs → 先取 serve 证词。budget = min(240s, max(60s, 3 × 已恢复的
+      // 最大静默间隙))。
+      const signature = turnSignature(final);
+      const switched = final.turn_id !== finalTurnId;
+      if (switched || signature !== lastSignature) {
+        if (switched) {
+          // 换了最终轮（纠偏开了新一轮）：产出量最高水位与证词累计按新轮重建。
+          finalTurnId = final.turn_id;
+          volumeHighWater = -1;
+        }
         lastSignature = signature;
-        noProgressPolls = 0;
         stallTracker.noteProgress();
-        // 产出增长才清零证词续命的计数与累计静默。签名变化但产出没有超过最高
-        // 水位（state 往返、改写）仍是停滞门的进度，不清硬顶。
-        const volume = turnVolume(turn);
+        // 产出增长才清零证词续命的计数与累计静默。签名变化但产出没有超过最高水位
+        // （状态往返、改写）仍是停滞门的进度，不清硬顶。
+        const volume = turnVolume(final);
         if (volume > volumeHighWater) {
           volumeHighWater = volume;
           attestedSilentMs = 0;
           livenessAttestations = 0;
         }
-        // 在途进度呈现（见声明处注释）：增长即节流发射 streaming 事实。
         const nowMs = Date.now();
         if (nowMs - lastProgressEmitAt >= KIMI_PROGRESS_EMIT_MIN_INTERVAL_MS) {
           lastProgressEmitAt = nowMs;
           yield runtimeActivityEvent("streaming");
         }
-      } else {
-        noProgressPolls += 1;
-        if (stallTracker.stallMs() >= stallTracker.budgetMs()) {
-          const d = stallTracker.diagnostics();
-          // 0046 B5：活体证词先行——serve 说 turn 还在跑（main_turn_active/busy 任一
-          // 严格 true）就不是停滞：重置静默段继续等（硬墙钟顶另收口）。证词请求
-          // 失败/形状不符（sessionDetail 抛错）= 无证词 = 照杀（fail-closed）。
-          // TD-213 收窄版（2026-10-06 三方会审）：证词两态分辨进文案——serve 明确说
-          // 不活跃（inactive）与证词取不到（unavailable）是不同事实，折叠会让 Lead
-          // 误判"服务器死了"vs"探针失败"。
-          let attestationState = "unavailable";
-          try {
-            const detail = await this.sessionDetail(agent, sessionId);
-            const active = detail?.main_turn_active === true || detail?.busy === true;
-            // 补席审计修正：inactive 需 serve 显式 boolean false（null/形状不符=不可判
-            // 定，归 unavailable——未知绝不冒充"明确不活跃"）。
-            const explicitInactive = detail?.main_turn_active === false && detail?.busy === false;
-            attestationState = active ? "active" : (explicitInactive ? "inactive" : "unavailable");
-          } catch {
-            attestationState = "unavailable";
-          }
-          if (attestationState !== "active") {
-            yield doneEvent(
-              "failed",
-              `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
-                + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
-                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
-                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s) since the last output growth` : ""}; `
-                + `attestation: ${attestationState} — ${attestationState === "inactive"
-                  ? "the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)"
-                  : "the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)"})`,
-            );
-            return;
-          }
-          livenessAttestations += 1;
-          attestedSilentMs += stallTracker.stallMs();
-          if (attestedSilentMs >= LIVENESS_ATTESTED_SILENT_CAP_MS) {
-            yield doneEvent(
-              "failed",
-              `turn stalled: serve-attested silence since the last output growth exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
-                + `(${Math.round(attestedSilentMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
-                + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness `
-                + "(the serve keeps attesting an active turn that never lands output)",
-            );
-            return;
-          }
-          // 续命凭的是 serve 的证词——落成转录事实，Lead 下钻时看得见（决定 0069：
-          // 让收口门续命的体征一律留痕；复核周期即当前预算，≥60s 一次）。
-          yield runtimeActivityEvent("serve_active");
-          // 证词续命：resetSilent 清静默段但不喂自适应学习（opus 补席审计：noteProgress
-          // 会把续命段记成已恢复间隙，预算自放大后真挂死发现退到 180-240s）。不重置
-          // signature 基线——后续拍若仍零帧会再次走本门、再次取证词；复核周期=
-          // 当前预算（floor 起步，随真实恢复间隙自适应，证词不参与放大）。
-          stallTracker.resetSilent();
+      } else if (stallTracker.stallMs() >= stallTracker.budgetMs()) {
+        const d = stallTracker.diagnostics();
+        // 0046 B5：活体证词先行——serve 说轮还在跑（main_turn_active/busy 任一严格
+        // true）就不是停滞：重置静默段继续等（硬顶另收口）。证词请求失败/形状不符 =
+        // 无证词 = 照杀（fail-closed）。TD-213：不活跃（inactive）与取不到
+        // （unavailable）分开写进文案。
+        let attestationState = "unavailable";
+        try {
+          const detail = await this.sessionDetail(agent, sessionId);
+          const active = detail?.main_turn_active === true || detail?.busy === true;
+          const explicitInactive = detail?.main_turn_active === false && detail?.busy === false;
+          attestationState = active ? "active" : (explicitInactive ? "inactive" : "unavailable");
+        } catch {
+          attestationState = "unavailable";
         }
+        if (attestationState !== "active") {
+          yield doneEvent(
+            "failed",
+            `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+              + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
+              + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
+              + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s) since the last output growth` : ""}; `
+              + `attestation: ${attestationState} — ${attestationState === "inactive"
+                ? "the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)"
+                : "the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)"})`,
+          );
+          return;
+        }
+        livenessAttestations += 1;
+        attestedSilentMs += stallTracker.stallMs();
+        if (attestedSilentMs >= LIVENESS_ATTESTED_SILENT_CAP_MS) {
+          yield doneEvent(
+            "failed",
+            `turn stalled: serve-attested silence since the last output growth exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+              + `(${Math.round(attestedSilentMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
+              + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness `
+              + "(the serve keeps attesting an active turn that never lands output)",
+          );
+          return;
+        }
+        // 续命凭的是 serve 的证词——落成转录事实（决定 0069）。
+        yield runtimeActivityEvent("serve_active");
+        // resetSilent 清静默段但不喂自适应学习（证词不参与预算放大）。
+        stallTracker.resetSilent();
       }
       await sleep(interval);
     }
@@ -1270,9 +1216,12 @@ export class KimiWebBackend {
             }
           }
           if (body && typeof body === "object" && body.code !== undefined && body.code !== 0) {
-            throw new Error(
+            const err = new Error(
               `kimi web request failed (code ${body.code}): ${redactToken(String(body.msg ?? "unknown error"), token)}`,
             );
+            // 信封 code 随错误带出（调用方按 40401 会话已不存在分派；sanitizeError 保留）。
+            err.waoCode = body.code;
+            throw err;
           }
           return body;
         } finally {
@@ -1347,285 +1296,237 @@ function resolveBearerToken(agent) {
   return value;
 }
 
-// 归属键匹配（v8 完成判定的唯一入口）：items[] 里 triggerPromptId === promptId
-// 的 turn（live 形状：kind:"turn"——文档化形状之外的条目 fail-closed 不匹配，
-// 由有界出口兜底）。prompt_id 唯一 ⇒ 至多一个命中；首个命中即归属。
-function findTurnByPromptId(items, promptId) {
-  if (!Array.isArray(items)) return null;
-  for (const item of items) {
-    if (item?.kind === "turn" && item.triggerPromptId === promptId) {
-      return item;
+// 回执缺 prompt_id 的派发记在这个键下：它永不等于轮里的 prompt id，不发明归属，
+// 由 silentTimeout / 无进展出口有界收口。
+const NO_PROMPT_ID = Symbol("kimi-web dispatch without prompt_id");
+
+/**
+ * 一次运行的提示集合（spawn 建一份，sendCorrection 与 streamEvents 共用）。
+ * prompts: id → {kind:"dispatch"|"correction", submittedAt, steeredAt, waitPolls,
+ * notExecuted}；steeredAt 非 null = 已转入。boundaryOrdinal = 提交前最大的轮
+ * ordinal（没有轮为 -1），事件流往回翻页到它为止。
+ */
+export function createRunPrompts({ promptId = null, status, boundaryOrdinal = -1, submittedAt = Date.now() } = {}) {
+  return {
+    boundaryOrdinal,
+    dispatchId: promptId,
+    dispatchStatus: status,
+    prompts: new Map([[promptId ?? NO_PROMPT_ID, {
+      kind: "dispatch", submittedAt, steeredAt: null, waitPolls: 0, notExecuted: false,
+    }]]),
+  };
+}
+
+function arrayOf(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+// 一页里最大的轮 ordinal（没有轮为 -1）。
+function latestOrdinal(page) {
+  return arrayOf(page?.turns).reduce((max, turn) => Math.max(max, turn.ordinal), -1);
+}
+
+// 轮的全部 user_message.prompt_ids（归属的唯一依据）。
+function turnPromptIds(turn) {
+  const ids = [];
+  for (const item of arrayOf(turn?.items)) {
+    if (item?.type !== "user_message") continue;
+    for (const id of arrayOf(item.prompt_ids)) {
+      if (typeof id === "string" && id.length > 0) ids.push(id);
     }
   }
-  return null;
+  return ids;
 }
 
-// completed 轮答案切片：该 turn 全部 steps（按序）的全部 frames（按序）里
-// kind==="text" 且（role==="assistant" 或无 role——实测宽容，两形状都见过）的
-// text 直接拼接为单条 assistant text。thinking 帧不投影（v8 无 thinking 投影
-// 需求）；kind==="tool" 帧不入文本拼接，由 projectKimiToolFrames 单独
-// 投影为证据事件（2026-10-01 live 实测：frames 并非 thinking|text 闭集）；非
-// 字符串 text 的帧跳过（形状不可用，不计入拼接——空结果由调用侧的发射前复检
-// 收口）。
-//
-// 重复帧：serve 偶发把同一段答案连发两帧（实测见于并发派发）。与上一帧逐字相同、
-// 且不短于 DUPLICATE_FRAME_MIN_CHARS 的文本帧不再拼进答案；短帧（"好的"之类）原样
-// 保留，不猜。丢掉了几帧由 duplicateTextFramesOfTurn 报给调用侧写进事件流。
-const DUPLICATE_FRAME_MIN_CHARS = 200;
+// 用户回显：轮的开场 user_message 的 text（没有 placement 字段时取第一条 user_message）。
+function openerText(turn) {
+  const messages = arrayOf(turn?.items).filter((item) => item?.type === "user_message");
+  const opener = messages.find((item) => item.placement === "opener") ?? messages[0];
+  return typeof opener?.text === "string" && opener.text.length > 0 ? opener.text : null;
+}
 
-//
-// 分步：一个 step 是一次模型调用。同一步里的文本帧首尾相接；不同步的文本之间隔一个
-// 空行——模型在两次工具调用之间说的话和最后的答案是分开说的，粘成一行会让答案里
-// 行首的 `Q1:` 这类锚点落到上一句话的句尾。
-function assistantTextFramesOfTurn(turn) {
-  const stepTexts = [];
-  let dropped = 0;
-  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
-    const kept = [];
-    // 只认"紧挨着的上一帧"：同一步里、中间没有隔着任何别的帧（工具帧、思考帧、别的
-    // 角色的文本帧）。隔了别的帧或换了一步之后再说一遍同样的话，是模型自己说的，保留。
-    let previous = null;
-    for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
-      const isAssistantText = frame?.kind === "text"
-        && (frame.role === undefined || frame.role === null || frame.role === "assistant")
-        && typeof frame.text === "string";
-      if (!isAssistantText) {
-        previous = null;
-        continue;
-      }
-      if (frame.text.length >= DUPLICATE_FRAME_MIN_CHARS && previous === frame.text) {
-        dropped += 1;
-        continue;
-      }
-      previous = frame.text;
-      kept.push(frame.text);
+// 答案：轮的 assistant_message 条目按出现顺序；同一 step_index 首尾相接，不同步之间
+// 空一行——模型在两次工具调用之间说的话和最后的答案是分开说的，粘成一行会让答案里
+// 行首的 `Q1:` 这类锚点落到上一句话的句尾。reasoning 不进答案。
+function answerOfTurn(turn) {
+  const chunks = [];
+  let step;
+  for (const item of arrayOf(turn?.items)) {
+    if (item?.type !== "assistant_message" || typeof item.text !== "string") continue;
+    if (chunks.length > 0 && item.step_index === step) {
+      chunks[chunks.length - 1] += item.text;
+    } else {
+      chunks.push(item.text);
+      step = item.step_index;
     }
-    if (kept.length > 0) stepTexts.push(kept.join(""));
   }
-  return { stepTexts, dropped };
+  return chunks.filter((chunk) => chunk.length > 0).join("\n\n");
 }
 
-function assistantTextOfTurn(turn) {
-  return assistantTextFramesOfTurn(turn).stepTexts.join("\n\n");
-}
-
-function duplicateTextFramesOfTurn(turn) {
-  return assistantTextFramesOfTurn(turn).dropped;
-}
-
-// tool 帧证据的增量投影（决定 0071；2026-10-01 的整轮投影是它的 final 形态）：
-// 该 turn 全部 steps（按序）的全部 frames（按序）里 kind==="tool" 的帧，按台账
-// 只发射还没落过的部分——只吃本轮 frames，历史轮按构造不可能混入。
-//
-// 在途帧的形状（2026-10-13 live 探针，Bash 跑 sleep 45）：
-//   首见：{frameId, toolCallId, name, state:"running", inputText}——没有 input，
-//         参数还在流式拼装；
-//   约 2s 后：input 就绪（{command, timeout}），state 仍是 "running"；
-//   结束：state:"done"，output 在场。
-// 所以"投影事件"等输入就绪才发（否则 Bash 会因为还没有 input.command 被错分成
-// tool_use），"结果事件"等终态才发。写文件类的帧在途只预告、不落证据：file_written 是交付
-// 相关的证据，维持"只在这一轮带着正文完成时才落"的既有保证（N1：没有正文的
-// completed 轮、失败的轮不落写文件证据）。final=true（整轮带着正文完成）时把还没
-// 落过的全部补齐：每个事件的形状与此前的整轮投影相同，但跨帧的先后不再等于帧
-// 序——在途已落的命令会排在更早的写文件帧之前（台账为空时两者逐字节相同）。
-// 失败路径不调用 final——那里只留下在途时已经落过的命令 / 工具调用及其结果。
-// 去重靠帧的身份（toolCallId / frameId）；两者都没有的帧在途不投影。
-function projectKimiToolFrames(turn, ledger, { final = false } = {}) {
+// 工具调用证据的增量投影（决定 0071）：轮的 items 里 type "tool_call" 的条目，按台账
+// （item_id → 已落的部分）只发射还没落过的部分。规则：
+//   - shell 类（name 小写 bash/shell）有 input.command → command 事件（kimi 无已证实
+//     的退出码通道，exitCode 恒省略；item_id 进 meta 关联 tool_result）；
+//   - 写文件类（write/edit/multiedit）→ file_written(path)，path 取 display.path（绝对
+//     路径），没有再取 input.path；没有路径不虚构。在途只预告一条只带路径的
+//     tool_use（决定 0072），file_written 只在整轮带回答成功收口时落（final=true）——
+//     失败轮、无回答的 completed 轮都不落（N1）；
+//   - 其余 → tool_use(name, input)；
+//   - 条目 status "ended" 时追加一次 tool_result，outcome 不是 "completed" 记为错误。
+// 在途的投影事件等输入就绪才发（Bash 在 input.command 到之前会被错分成 tool_use）。
+// final=true 把还没落过的全部补齐。没有 item_id 的条目在途不投影（下标不是身份），
+// 整轮带回答完成时按整轮投影落。
+function projectKimiToolCalls(turn, ledger, { final = false } = {}) {
   const events = [];
-  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
-    for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
-      if (frame?.kind !== "tool") continue;
-      if (!final && isFileWriteToolKey(String(frame.name ?? "").toLowerCase())) {
-        // 写文件类的帧在途只预告"在写哪个文件"（决定 0072）：一条只带路径的
-        // tool_use，不带内容、不落 file_written、不落结果——写文件证据的落盘时机
-        // 不变。没有身份或路径还没到的帧照旧跳过。
-        const writeEntry = kimiLedgerEntry(ledger, frame);
-        const writePath = kimiWritePath(frame);
-        if (writeEntry !== null && !writeEntry.announced && writePath !== null) {
-          events.push(toolUseEvent(String(frame.name), { path: writePath }));
-          writeEntry.announced = true;
+  for (const item of arrayOf(turn?.items)) {
+    if (item?.type !== "tool_call") continue;
+    const id = typeof item.item_id === "string" && item.item_id.length > 0 ? item.item_id : null;
+    const terminal = item.status === "ended";
+    if (!final && isFileWriteToolKey(kimiToolKey(item))) {
+      const writePath = kimiWritePath(item);
+      if (id !== null && writePath !== null) {
+        const entry = kimiLedgerEntry(ledger, id);
+        if (!entry.announced) {
+          events.push(toolUseEvent(String(item.name), { path: writePath }));
+          entry.announced = true;
         }
-        continue;
       }
-      const terminal = isTerminalKimiToolState(frame.state);
-      const entry = kimiLedgerEntry(ledger, frame);
-      if (entry === null) {
-        // 没有任何身份的帧在途不投影——下标不是身份，帧被插入 / 重排时会把一个帧
-        // 的发射状态套到另一个帧上（会审 sol 的反例）。整轮带着正文完成时照此前
-        // 的整轮投影落。
-        if (!final) continue;
-        events.push(...kimiToolProjectionEvents(frame));
-        if (terminal) events.push(kimiToolResultEvent(frame));
-        continue;
-      }
-      if (!entry.projected && (final || terminal || kimiToolInputReady(frame))) {
-        events.push(...kimiToolProjectionEvents(frame));
-        entry.projected = true;
-      }
-      if (terminal && !entry.resulted) {
-        events.push(kimiToolResultEvent(frame));
-        entry.resulted = true;
-      }
+      continue;
+    }
+    if (id === null) {
+      if (!final) continue;
+      events.push(...kimiToolProjectionEvents(item));
+      if (terminal) events.push(kimiToolResultEvent(item));
+      continue;
+    }
+    const entry = kimiLedgerEntry(ledger, id);
+    if (!entry.projected && (final || terminal || kimiToolInputReady(item))) {
+      events.push(...kimiToolProjectionEvents(item));
+      entry.projected = true;
+    }
+    if (terminal && !entry.resulted) {
+      events.push(kimiToolResultEvent(item));
+      entry.resulted = true;
     }
   }
   return events;
 }
 
-// 帧在台账里的条目：toolCallId 与 frameId 都登记到同一个条目上，哪个先到、哪个
-// 后补都认得出是同一帧。两个都没有 → null（调用方在途跳过）。
-function kimiLedgerEntry(ledger, frame) {
-  const ids = [];
-  if (typeof frame.toolCallId === "string" && frame.toolCallId.length > 0) ids.push(`c:${frame.toolCallId}`);
-  if (typeof frame.frameId === "string" && frame.frameId.length > 0) ids.push(`f:${frame.frameId}`);
-  if (ids.length === 0) return null;
-  let entry = null;
-  for (const id of ids) entry = ledger.get(id) ?? entry;
-  entry ??= { projected: false, resulted: false, announced: false };
-  for (const id of ids) ledger.set(id, entry);
+function kimiLedgerEntry(ledger, id) {
+  let entry = ledger.get(id);
+  if (entry === undefined) {
+    entry = { projected: false, resulted: false, announced: false };
+    ledger.set(id, entry);
+  }
   return entry;
 }
 
-// 在途帧的输入是否已经到了可以定下投影事件形状的地步：input 是非空对象；shell 类
-// 另要求 command 是非空字符串。这是形状判据，不是"参数已经完整、此后不再变"的
-// 证明——探针里只见过"先没有 input、之后一次到齐"，没有见过分段到齐或就绪后
-// 改写；真发生的话，落下的是当时看到的那一版。（写文件类的帧在途只预告路径，走不到
-// 这里；帧到终态时不看这个判据，没有输入的终态帧照此前的规则投影。）
-function kimiToolInputReady(frame) {
-  const toolKey = String(frame?.name ?? "").toLowerCase();
-  const input = frame?.input;
+function kimiToolKey(item) {
+  return String(item?.name ?? "").toLowerCase();
+}
+
+// 在途条目的输入是否已经到了可以定下投影事件形状的地步：input 是非空对象；shell 类
+// 另要求 command 是非空字符串。这是形状判据，不是"参数已经完整"的证明。
+function kimiToolInputReady(item) {
+  const input = item?.input;
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const toolKey = kimiToolKey(item);
   if (toolKey === "bash" || toolKey === "shell") return typeof input.command === "string" && input.command.trim().length > 0;
   return Object.keys(input).length > 0;
 }
 
-// 写文件类帧的目标路径（与 kimiToolProjectionEvents 取同一组键）；输入还没到或
-// 没有路径 → null。
-function kimiWritePath(frame) {
-  const input = frame?.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  const filePath = input.filePath ?? input.file_path ?? input.path;
-  return typeof filePath === "string" && filePath.length > 0 ? filePath : null;
+// 写文件类条目的目标路径：display.path（2.6.3 实测为绝对路径），没有再取 input.path
+// （相对路径）；都没有 → null。
+function kimiWritePath(item) {
+  const displayPath = item?.display?.path;
+  if (typeof displayPath === "string" && displayPath.length > 0) return displayPath;
+  const inputPath = item?.input?.path;
+  return typeof inputPath === "string" && inputPath.length > 0 ? inputPath : null;
 }
 
-// 单个 tool 帧的投影规则（证据事件先于终态词判定；差异仅限帧形状与终态词）。
-// 形状来源 = 2026-10-01 live 探针（delta 证据链）：
-//   {kind:"tool", frameId, toolCallId, name:"Write", state:"done",
-//    input:{path:"wao_perm_probe.txt", content:"…"}, output:"Wrote 8 bytes to …"}
-// （name 是工具名；input 形状随工具变化；state 有 done 等终态）。规则：
-//   - name 归一化小写后 bash/shell 类且有 input.command → commandEvent
-//     （kimi 无已证实的命令退出码通道——reportsCommandExitCode=false，
-//     exitCode 恒省略，绝不虚构；toolCallId 进 meta 关联 tool_result）；
-//   - write/edit/multiedit 类且有 input.path/file_path → fileWrittenEvent(path)
-//     （path 缺席不虚构 file_written）；
-//   - 其余 → toolUseEvent(name, input)；
-//   - state 终态（done|error|failed）再追加 toolResultEvent(toolCallId, output,
-//     isError 按 state 判)——投影事件在前、结果事件在后（逐 part 的
-//     双事件形状一致（结果事件由 kimiToolResultEvent 单独构造；两者何时发射
-//     见 projectKimiToolFrames）。
-function kimiToolCallId(frame) {
-  return typeof frame?.toolCallId === "string" && frame.toolCallId.length > 0
-    ? frame.toolCallId
-    : String(frame?.name ?? "unknown");
+function kimiToolCallId(item) {
+  return typeof item?.item_id === "string" && item.item_id.length > 0 ? item.item_id : String(item?.name ?? "unknown");
 }
 
-function kimiToolResultEvent(frame) {
-  return toolResultEvent(kimiToolCallId(frame), frame?.output, frame?.state === "error" || frame?.state === "failed");
+function kimiToolResultEvent(item) {
+  return toolResultEvent(kimiToolCallId(item), item?.output, item?.outcome !== "completed");
 }
 
-function kimiToolProjectionEvents(frame) {
-  const tool = String(frame?.name ?? "unknown");
+function kimiToolProjectionEvents(item) {
+  const tool = String(item?.name ?? "unknown");
   const toolKey = tool.toLowerCase();
-  const input = frame?.input ?? {};
-  const callId = kimiToolCallId(frame);
-  const events = [];
+  const input = item?.input ?? {};
   if ((toolKey === "bash" || toolKey === "shell") && typeof input.command === "string") {
-    events.push(commandEvent(input.command, undefined, { toolCallId: callId }));
-  } else if (isFileWriteToolKey(toolKey)) {
-    const filePath = input.filePath ?? input.file_path ?? input.path;
-    if (typeof filePath === "string") {
-      events.push(fileWrittenEvent(filePath));
-    }
-  } else {
-    events.push(toolUseEvent(tool, input));
+    return [commandEvent(input.command, undefined, { toolCallId: kimiToolCallId(item) })];
   }
-  return events;
+  if (isFileWriteToolKey(toolKey)) {
+    const filePath = kimiWritePath(item);
+    return filePath === null ? [] : [fileWrittenEvent(filePath)];
+  }
+  return [toolUseEvent(tool, input)];
 }
 
-// tool 帧 state 的终态闭集（live 探针实测 done；error/failed 为错误终态）——
-// 闭集外（含非终态/未知 state）绝不追加 tool_result、绝不猜终态。终态词
-// 闭集与各后端各自实测对齐（kimi 实测是
-// "done"，闭集按各自 live 形状取，不复用。
-function isTerminalKimiToolState(state) {
-  return state === "done" || state === "error" || state === "failed";
-}
-
-// isFileWriteTool 同款谓词（各后端各自一份
-// 语义，注释互指）。
+// isFileWriteTool 同款谓词（各后端各自一份语义，注释互指）。
 function isFileWriteToolKey(toolKey) {
   return toolKey === "write" || toolKey === "edit" || toolKey === "multiedit";
 }
 
-// 终态失败文案（failed|cancelled 轮的 done(failed) 错误）：turn.error 字段在场
-// 则透传（实测形状：缺 model 秒败轮的 error:"Model not set"），缺席用固定文案
-// ——不虚构原因。R9 F2：拼装结果过 redactToken（与 request 层**同一**模块级
-// 实现，不复制第二份）——turn.error 是上游回显文本，走 HTTP 200 成功路径，
-// 不经 request()/sanitizeError 出口，token 值可能藏在其中，绝不原样进
-// done.error/事件流。token 形参 null/undefined 时 redactToken 原样透传（清洗
-// 退化为无操作）。
-function turnFailureText(turn, token) {
-  const state = turn?.state;
-  const verb = state === "cancelled" ? "cancelled" : "failed";
-  const error = typeof turn?.error === "string" && turn.error.length > 0 ? turn.error : null;
-  const text = error === null
-    ? `kimi turn ${verb} (turn state=${String(state)}, no error field upstream)`
-    : `kimi turn ${verb} (turn state=${String(state)}, error: ${error})`;
-  return redactToken(text, token);
+// ended 轮非 completed 的失败文案（调用方过 redactToken）：interrupted 写 end_reason，
+// failed 写 error（{code,message} 或字符串——形状未实测，按文档读）；缺席写明缺席，
+// 不虚构原因。
+function turnFailureText(turn) {
+  const id = String(turn?.turn_id);
+  if (turn?.outcome === "interrupted") {
+    const reason = typeof turn.end_reason === "string" && turn.end_reason.length > 0 ? turn.end_reason : null;
+    return `kimi turn interrupted (turn ${id}, ${reason === null ? "no end_reason upstream" : `end_reason: ${reason}`})`;
+  }
+  const error = turnErrorText(turn?.error);
+  return `kimi turn failed (turn ${id}, ${error === null ? "no error field upstream" : `error: ${error}`})`;
 }
 
-// 无进展 signature：turn 的结构投影（state + steps 数 + 每 step 的 stepId/state/
-// frames 数与文本总量）。steps/frames 增长、frame 文本增长或 state 变化都会改变
-// signature（= 进展，计数清零）；usage 不入 signature（无进展判据钉死在
-// "state 不变且 steps/frames 无增长"）。
-// turn 的产出量：steps 数 + 各 step 的帧数 + 帧文本总量。只增不减地看它的最高
-// 水位，用来判"产出有没有增长"（硬顶清零的判据；与 signature 取同一批字段，但
-// 不含 state / stepId——那些会变却不代表多了产出）。
+function turnErrorText(error) {
+  if (typeof error === "string") return error.length > 0 ? error : null;
+  if (!error || typeof error !== "object") return null;
+  const parts = [error.code, error.message]
+    .filter((value) => (typeof value === "string" && value.length > 0) || typeof value === "number")
+    .map(String);
+  return parts.length > 0 ? parts.join(": ") : stringifyValue(error);
+}
+
+// 轮的产出量：步数 + 条目数 + 条目文本与工具输出的总长。只看它的最高水位判"产出有没有
+// 增长"（硬顶清零的判据；不含状态——状态会变却不代表多了产出）。
 function turnVolume(turn) {
-  const steps = Array.isArray(turn?.steps) ? turn.steps : [];
-  let volume = steps.length;
-  for (const step of steps) {
-    const frames = Array.isArray(step?.frames) ? step.frames : [];
-    volume += frames.length;
-    for (const frame of frames) {
-      if (typeof frame?.text === "string") volume += frame.text.length;
-    }
+  const items = arrayOf(turn?.items);
+  let volume = arrayOf(turn?.steps).length + items.length;
+  for (const item of items) {
+    if (typeof item?.text === "string") volume += item.text.length;
+    if (typeof item?.output === "string") volume += item.output.length;
   }
   return volume;
 }
 
+// 无进展签名：轮的结构投影（status/outcome + 各步 index/outcome + 各条目
+// type/status/文本长/输出长）。任何增长或状态变化都改变签名（= 进展）；usage 不入签名。
 function turnSignature(turn) {
-  const steps = Array.isArray(turn?.steps) ? turn.steps : [];
-  const parts = [];
-  for (const step of steps) {
-    const frames = Array.isArray(step?.frames) ? step.frames : [];
-    let textLength = 0;
-    for (const frame of frames) {
-      if (typeof frame?.text === "string") textLength += frame.text.length;
-    }
-    parts.push(`${String(step?.stepId ?? "?")}:${String(step?.state ?? "?")}:${frames.length}:${textLength}`);
-  }
-  return `${String(turn?.state ?? "?")}|${steps.length}|${parts.join(",")}`;
+  const steps = arrayOf(turn?.steps).map((step) => `${String(step?.index ?? "?")}:${String(step?.outcome ?? "?")}`);
+  const items = arrayOf(turn?.items).map((item) => [
+    String(item?.type ?? "?"),
+    String(item?.status ?? "?"),
+    typeof item?.text === "string" ? item.text.length : 0,
+    typeof item?.output === "string" ? item.output.length : 0,
+  ].join(":"));
+  return `${String(turn?.status ?? "?")}|${String(turn?.outcome ?? "?")}|${steps.join(",")}|${items.join(",")}`;
 }
 
-// completed 轮 usage 求和 → metrics 事件（reportsTokenUsage=true 的通道）：该
-// turn 全部 steps[].usage 按 USAGE_FIELDS 映射求和（1:1 语义映射，不发明聚合；
-// reasoning/costUsd 无 kimi 对应字段——metricsEvent 省略，只带实测通道）。任一
-// usage 数字在场才发事件（全缺席 ⇒ null——绝不虚构零值通道）。只计本轮 steps
-// ——历史轮 usage 按构造不可能混入。
-function metricsEventFromTurn(turn) {
+// usage → metrics 事件（reportsTokenUsage=true 的通道）：各归属轮的轮级 usage 按
+// USAGE_FIELDS 求和（不再叠加步骤——轮级等于各步之和）；任一数字在场才发（全缺席 ⇒
+// null，绝不虚构零值通道）。firstRequest = 第一个归属轮里 index 最小、带 usage 的那一
+// 步自己的 input 与 cacheRead（每步是一次模型请求；上游报 0 记 0，缺字段不写）。
+function metricsEventFromTurns(turns) {
   const sums = {};
   let seen = false;
-  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
-    const usage = step?.usage;
+  for (const turn of turns) {
+    const usage = turn?.usage;
     if (!usage || typeof usage !== "object") continue;
     for (const [kimiField, axis] of USAGE_FIELDS) {
       const value = usage[kimiField];
@@ -1638,34 +1539,22 @@ function metricsEventFromTurn(turn) {
   if (!seen) return null;
   // 只写上游报出的分量：缓存分量缺失时不补 0（缓存占比按未知处理）。
   const event = metricsEvent(sums);
-  // 首个请求的用量：本轮 steps[0] 自己的 usage（每个 step 是一次模型请求；
-  // 只取第一个 step，后面 step 的缓存命中不属于第一个请求）。上游报 0 就记 0，
-  // 缺字段就不写——不推算。
-  const firstUsage = turn?.steps?.[0]?.usage;
-  if (firstUsage && typeof firstUsage === "object") {
+  const stepIndex = (step) => (Number.isFinite(step?.index) ? step.index : Infinity);
+  let firstStep = null;
+  for (const step of arrayOf(turns[0]?.steps)) {
+    if (!step?.usage || typeof step.usage !== "object") continue;
+    if (firstStep === null || stepIndex(step) < stepIndex(firstStep)) firstStep = step;
+  }
+  if (firstStep !== null) {
     const firstRequest = {};
-    if (typeof firstUsage.inputOther === "number" && Number.isFinite(firstUsage.inputOther)) {
-      firstRequest.input = firstUsage.inputOther;
-    }
-    if (typeof firstUsage.inputCacheRead === "number" && Number.isFinite(firstUsage.inputCacheRead)) {
-      firstRequest.cacheRead = firstUsage.inputCacheRead;
-    }
+    const { input_other: input, input_cache_read: cacheRead } = firstStep.usage;
+    if (typeof input === "number" && Number.isFinite(input)) firstRequest.input = input;
+    if (typeof cacheRead === "number" && Number.isFinite(cacheRead)) firstRequest.cacheRead = cacheRead;
     if (Object.keys(firstRequest).length > 0) event.firstRequest = firstRequest;
   }
   return event;
 }
 
-// GET prompts 的 active / queued 条目 → prompt id。2.4.0 实测条目是对象，id 在 prompt_id
-// （与 POST prompts 回执同键）；id、promptId 只作形状变化时的兜底。取不到 → null
-// （调用方按失败处置，不猜）。
-function activePromptId(active) {
-  if (typeof active === "string") return active.length > 0 ? active : null;
-  if (!active || typeof active !== "object") return null;
-  for (const key of ["prompt_id", "id", "promptId"]) {
-    if (typeof active[key] === "string" && active[key].length > 0) return active[key];
-  }
-  return null;
-}
 
 // F6（v7 起保留）：request() 对 null/undefined 抛出值原样抛出（保留"这本来就不
 // 是错误对象"的类型事实），但事件流消费侧直接读 error.message 会在
@@ -1744,6 +1633,7 @@ function sanitizeError(error, token) {
     if (error.cause !== undefined) {
       clean.cause = sanitizeCause(error.cause, token);
     }
+    if (Number.isInteger(error.waoCode)) clean.waoCode = error.waoCode;
     return clean;
   }
   if (typeof error === "string") {

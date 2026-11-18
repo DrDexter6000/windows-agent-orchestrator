@@ -133,19 +133,18 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
         fetchImpl: async (url) => {
           const urlStr = String(url);
           fetchCalls.push(urlStr);
-          // kimi-web v8 起 spawn 序列（POST /sessions → GET 会话详情（提交前
-          // 静默门）→ GET transcript?agent_id=main（preSubmitTurnIds 观察锚）→
-          // POST prompts）走 fail-closed 形状门（A4）：transcript 需 items 数组、
-          // detail 需 id 与 busy/main_turn_active 在场；其余端点维持默认
-          // `{data:{id}}` 形状。
-          if (urlStr.includes("/transcript?agent_id=")) {
-            const transcriptBody = { data: { items: [], seq: 1, has_more: false } };
+          // kimi-web spawn 序列（POST /sessions → GET 会话详情（提交前静默门）→
+          // GET agents/main/turns（提交前边界读）→ POST prompts）走 fail-closed
+          // 形状门（A4）：turns 需 turns 数组与布尔 has_more、detail 需 id 与
+          // busy/main_turn_active 在场；其余端点维持默认 `{data:{id}}` 形状。
+          if (urlStr.endsWith("/agents/main/turns")) {
+            const turnsBody = { data: { turns: [], has_more: false } };
             return {
               ok: true, status: 200,
-              json: async () => transcriptBody,
+              json: async () => turnsBody,
               // kimi-web 非 JSON 守卫（2026-10-02 900446c）后成功路径先
               // response.text() 再 JSON.parse——桩必须同时提供 text 与 json。
-              text: async () => JSON.stringify(transcriptBody),
+              text: async () => JSON.stringify(turnsBody),
             };
           }
           if (/\/api\/v1\/sessions\/[^/]+$/.test(urlStr)) {

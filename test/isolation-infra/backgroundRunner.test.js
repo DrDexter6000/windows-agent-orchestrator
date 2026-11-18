@@ -14,9 +14,9 @@ import {
   runServer,
   envelope,
   detailEnvelope,
-  transcriptEnvelope,
-  turnItem,
-  stepItem,
+  turnsEnvelope,
+  kimiTurn,
+  runningTurn,
   KIMI_TEST_SERVE_URL,
   KIMI_TEST_TOKEN_ENV,
   KIMI_TEST_TOKEN_VALUE,
@@ -39,7 +39,7 @@ after(() => {
 
 function makeMockFetch({ assistantDelayMs = 0 } = {}) {
   // kimi-web 假服务器（提交后 assistantDelayMs 毫秒
-  // "bg done" 才出现在 transcript 轮里——延迟挂轮询，不挂提交）。
+  // "bg done" 才出现在 turns 轮里——延迟挂轮询，不挂提交）。
   return runServer(KIMI_TEST_SERVE_URL, { delayMs: assistantDelayMs, replies: ["bg done"] }).fetchImpl;
 }
 
@@ -168,7 +168,7 @@ test("P2 CLI --background: 立即返回 + detached runner 推进状态机到终�
 test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "wao-owner-"));
   try {
-    // slow mock：transcript 轮先空跑几拍（turn 在 running，让 run 卡 running），
+    // slow mock：turns 轮先空跑几拍（轮在 running，让 run 卡 running），
     // 第 4 拍起 completed 带 assistant 文本（让 run 完成）——这样能在 run 进行中
     // 观测到 ownership 文件。
     // 停止验证三面必须可观察且稳定（sessionStatus/detail 投影 idle + 稳定 messages）：
@@ -192,22 +192,20 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
       if (method === "GET" && urlStr === `${sessionSlow}/messages`) {
         return envelope({ items: [] });
       }
-      if (method === "GET" && urlStr === `${sessionSlow}/transcript?agent_id=main`) {
-        if (!submitted) return transcriptEnvelope([]);
-        polls += 1;
+      if (method === "GET" && urlStr === `${sessionSlow}/agents/main/turns`) {
+        if (!submitted) return turnsEnvelope([]);
         const done = polls > 3;
-        return transcriptEnvelope([turnItem({
-          turnId: "t0",
-          triggerPromptId: "msg_slow",
-          state: done ? "completed" : "running",
-          steps: done ? [stepItem({ frames: [{ kind: "text", text: "done", role: "assistant" }] })] : [],
-        })]);
+        return turnsEnvelope([done
+          ? kimiTurn({ promptIds: ["msg_slow"], answer: "done" })
+          : runningTurn({ promptIds: ["msg_slow"] })]);
       }
       if (method === "POST" && urlStr.endsWith(`${sessionSlow}/prompts`)) {
         submitted = true;
         return envelope({ prompt_id: "msg_slow", status: "running" });
       }
       if (method === "GET" && urlStr === `${sessionSlow}/prompts`) {
+        // 事件流每拍先读 prompts：拍数在这里计。
+        if (submitted) polls += 1;
         return envelope({ active: polls > 3 ? null : { prompt_id: "msg_slow" }, queued: [] });
       }
       if (method === "POST" && urlStr === `${sessionSlow}/prompts/msg_slow:abort`) {

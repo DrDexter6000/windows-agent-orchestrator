@@ -1,47 +1,23 @@
 // test/backends/kimiWeb.test.js
 //
-// 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的官方 REST
-// API）的离线单元测试：注入 fetchImpl 的假服务器构造全部上游形状，零真实服务器、
-// 零网络。上游事实锚点 =
-// 2026-09-30 对本机 kimi 2.1.1 的直跑实测（src/backends/kimiWeb.js 文件头）。
+// 「kimi-web」backend（HTTP attach，`kimi web` 本地服务器的官方 REST API）的离线单元
+// 测试：注入 fetchImpl 的假服务器构造全部上游形状，零真实服务器、零网络。上游事实锚点
+// = kimi 2.6.3 的实测响应（test/fixtures/kimi-2.6.3/，src/backends/kimiWeb.js 文件头）。
 //
-// 第八轮交付（完成判定迁移到**原厂 transcript 轮次终态原语**）适配：完成判定 =
-// triggerPromptId === prompt_id 的 turn 归属（live 双验证）+ state 终态闭集
-// （completed|failed|cancelled；state 闭集 queued|running|…）。每拍恰一次 GET
-// transcript?agent_id=main（agent_id 必填——缺则 40001；实测 "main" 有效、
-// "default" 返回空，客户端恒发 main）；messages/detail 端点退出完成判定
-//（messages 仅供停止验证探针；detail 仅供提交前静默门与探针）。v7 的全部
-// 启发式（preSubmitIds 消息快照 / preSubmitReason 锚 / WAIT-ACTIVE→IN-TURN→
-// SETTLE 活动转移 / messages 双读稳定性）及其测试删除（删除清单见交付汇报）。
-// 保留面（第四步不变项）：F3 提交前静默门、sendCorrection
-// 排队+steer 协议、token 递归清洗、POST 仅 ECONNREFUSED 重试、探针消费者形状、
-// fail-closed 形状门（transcript 响应缺 items 数组 ⇒ 固定错误）。
-// 能力翻转：reportsTokenUsage false→true（transcript steps[].usage 实测非零；
-// completed 轮 usage 求和 → metrics 事件）。
-//
-// 第九轮交付（R9 定点修复 + 六审盲区反例；transcript 核心架构不动——归属/终态/
-// 拼接/usage 既有实现保持）：F1 sessionStatus 非布尔形状 → busy 保守投影（消费侧
-// isKnownStatus(null)===true 会虚记 stop_verified——serveStopVerify.js）；
-// F2 turnFailureText 过与 request 层同一 redactToken（HTTP 200 成功路径的
-// turn.error 不再绕开清洗）；F3 无 turn 分支只以 silentTimeout 为界（8 拍兜底仅
-// silentTimeout 缺席时生效）；F4 闭集外 state 独立有界出口（连续 8 拍、增长不清
-// 零）。反例补齐：停滞门增长重置必要性（跨过无重置失败点的确定性构造）、queued
-// 单列、提交前静默门 busy 到界零提交、transcript 不可解析 JSON、先见 running 后
-// 请求连续失败不复用旧 turn。
-//
-// 第十轮小交付（2026-10-01 delta 认证证据链补齐）：completed 轮 steps[].frames
-// 里 kind:"tool" 的帧（形状 = 2026-10-01 live 探针：{kind:"tool", frameId,
-// toolCallId, name, state, input, output}）投影为证据事件（证据先行：
-// bash/shell+command → command、
-// write/edit/multiedit+path/file_path → file_written、其余 → tool_use、终态
-// done|error|failed 追加 tool_result），证据先于 assistant 文本发射。v1 误以为
-// frames 是 thinking|text 闭集：模型真写了文件但 WAO 无 file_written 事件，
-// delta scorecard 误红 hasEvidence/filesExist——本轮补齐证据面。
+// 完成判定（第 109 批）：GET …/agents/main/turns 的轮按 user_message.prompt_ids 归属到
+// 运行的提示集合（派发 + 被接纳的纠偏）；每个 id 结算后，最终轮（归属轮里 ordinal 最大的）
+// ended 才按 outcome 收口。纠偏会让一次运行跨两轮（2.6.3 实测：被转入的纠偏打断当前轮，
+// 自己开下一轮做完工作）。每拍先读 GET …/prompts 再翻 turns。解析测试直接回放
+// kimi-2.6.3 目录里的真实响应，其余用 test/fixtures/kimiWebServe.js 的 2.6 形状构造。
+// 保留面：提交前静默门、sendCorrection 排队+steer 协议、token 递归清洗、POST 仅
+// ECONNREFUSED 重试、停止探针消费者形状、fail-closed 形状门、停滞门（时间预算 + serve
+// 证词 + 30min 硬顶）、在途工具证据（决定 0071/0072）。
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
 
-import { KimiWebBackend } from "../../src/backends/kimiWeb.js";
+import { KimiWebBackend, createRunPrompts } from "../../src/backends/kimiWeb.js";
 import { backendFor, backendCapabilitySnapshot } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
 import { verifyStopQuiet } from "../../src/backends/serveStopVerify.js";
@@ -54,9 +30,14 @@ import {
   envelope,
   jsonResponse,
   detailEnvelope,
-  transcriptEnvelope,
-  turnItem,
+  turnsEnvelope,
+  promptsEnvelope,
+  kimiTurn,
+  runningTurn,
   stepItem,
+  userMessageItem,
+  assistantItem,
+  toolCallItem,
   spawnOkRoutes,
   turnScriptServer,
 } from "../fixtures/kimiWebServe.js";
@@ -84,14 +65,315 @@ function makeAgent(overrides = {}) {
 }
 
 /**
- * 直调 streamEvents 的最小锚（真实派发恒经 spawn 自带归属锚；此形状仅用于错误
- * 路径等与锚内容无关的用例）。promptId 是 v8 的唯一归属键。
+ * 直调 streamEvents 的运行提示集合（真实派发恒经 spawn 自建；此形状用于错误路径等与
+ * 归属无关的用例，或需要手工摆好纠偏状态的用例）。
  */
-function bareAnchor() {
-  return { promptId: "msg_q1", submitAt: Date.now() };
+function bareRun(promptId = "msg_q1", boundaryOrdinal = -1) {
+  return createRunPrompts({ promptId, boundaryOrdinal });
 }
 
-// ===== ① validateAgentPolicy：通过分支 + 六个拒绝分支 =====
+/** turnScriptServer + spawn + 跑完事件流（pollInterval 5ms）。 */
+async function runScript(sessionId, serverOpts = {}, eventOpts = {}) {
+  const { handler, markSpawned, polls } = turnScriptServer(sessionId, serverOpts);
+  const { fetchImpl, calls } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5, ...eventOpts })) events.push(ev);
+  return { events, polls: polls(), calls, handle };
+}
+
+// ===== kimi 2.6.3 真实响应（test/fixtures/kimi-2.6.3/）=====
+// 每个文件都必须被本文件的某个测试读到（见末尾的覆盖断言）。
+
+const KIMI_263_DIR = new URL("../fixtures/kimi-2.6.3/", import.meta.url);
+const kimi263Read = new Set();
+/** 读一份实测响应：{http, json}。 */
+function kimi263(name) {
+  kimi263Read.add(name);
+  return JSON.parse(readFileSync(new URL(name, KIMI_263_DIR), "utf8"));
+}
+/** 实测响应原样回放（HTTP 状态与正文都按录到的）。 */
+function replay263(name) {
+  const { http, json } = kimi263(name);
+  return jsonResponse(json, http);
+}
+const KIMI_263_SESSION = "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020";
+const KIMI_263_BASE = `http://127.0.0.1:4310/api/v1/sessions/${KIMI_263_SESSION}`;
+
+/**
+ * 按拍回放实测响应的假服务器：spawn 期 POST /sessions → create-session、GET 会话详情 →
+ * detail（缺省 session-detail-fresh）、GET turns → preTurns、POST prompts → submit；之后
+ * 第 i 拍（一拍 = 一次 GET prompts）回放 ticks[i-1] 的 {prompts, turns}（超出恒重复最后
+ * 一拍）；纠偏的 POST prompts / steer 按 corrections 队列回放。值可以是 fixture 文件名或
+ * 现成的 Response。旧的 transcript 路由答录到的 404。
+ */
+function kimi263Server({ preTurns, submit, ticks, corrections = [], steers = [], detail = "session-detail-fresh.json" }) {
+  const answer = (value) => (typeof value === "string" ? replay263(value) : value);
+  let spawned = false;
+  let tick = 0;
+  const correctionQueue = [...corrections];
+  const steerQueue = [...steers];
+  return kimiServer((url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (method === "POST" && url === "http://127.0.0.1:4310/api/v1/sessions") return replay263("create-session.json");
+    if (url === KIMI_263_BASE) return answer(typeof detail === "function" ? detail(tick) : detail);
+    if (url.startsWith(`${KIMI_263_BASE}/transcript`)) return replay263("old-transcript-endpoint-404.json");
+    if (method === "GET" && url === `${KIMI_263_BASE}/prompts`) {
+      if (spawned) tick += 1;
+      return answer(ticks[Math.min(tick, ticks.length) - 1].prompts);
+    }
+    if (method === "GET" && url === `${KIMI_263_BASE}/agents/main/turns`) {
+      if (!spawned) return answer(preTurns);
+      return answer(ticks[Math.min(Math.max(tick, 1), ticks.length) - 1].turns);
+    }
+    if (method === "POST" && url === `${KIMI_263_BASE}/prompts`) {
+      if (!spawned) {
+        spawned = true;
+        return answer(submit);
+      }
+      return answer(correctionQueue.shift());
+    }
+    if (method === "POST" && url === `${KIMI_263_BASE}/prompts:steer`) return answer(steerQueue.shift());
+    throw new Error(`unexpected ${method} ${url}`);
+  });
+}
+
+/** 一份 turns 实测页的某几个轮（按 ordinal 选）——用来摆出录到的两拍之间的形状。 */
+function turnsOf(name, keep) {
+  const turns = kimi263(name).json.data.turns.filter((turn) => keep(turn.ordinal));
+  return turnsEnvelope(turns);
+}
+
+async function collect(handle, opts = {}) {
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5, ...opts })) events.push(ev);
+  return events;
+}
+
+test("kimi 2.6.3 实测·工具轮：命令 + 写文件 + 回答 DONE → 证据、答案、metrics 与 firstRequest 取实测值；旧 transcript 端点不再请求", async () => {
+  const { calls, fetchImpl } = kimi263Server({
+    preTurns: turnsEnvelope([]),
+    submit: "t1-tools-submit.json",
+    ticks: [
+      { prompts: "t1-tools-prompts-running.json", turns: "t1-tools-turns-1-opened.json" },
+      { prompts: "t1-tools-prompts-after.json", turns: "t1-tools-turns-9-ended.json" },
+    ],
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "probe" });
+  assert.equal(handle.backendSessionId, KIMI_263_SESSION, "会话 id 取自录到的建会话回执");
+  const events = await collect(handle);
+  assert.deepEqual(events.map((e) => e.kind), [
+    "runtime_activity", // 拍 1：轮已开、只有开场消息
+    "command", "tool_result", "file_written", "tool_result",
+    "message", "message", "metrics", "done",
+  ]);
+  assert.deepEqual(events[1], { kind: "command", command: "echo wao-probe", toolCallId: "tool_3LvThrKMuayxMWgN4wCzNAFO" });
+  assert.deepEqual(events[2], { kind: "tool_result", tool: "tool_3LvThrKMuayxMWgN4wCzNAFO", output: "wao-probe\n", isError: false });
+  assert.deepEqual(events[3], { kind: "file_written", path: "C:/wao-probe/cwd/probe.txt" }, "写路径取 display.path（绝对路径）");
+  assert.deepEqual(events[4], { kind: "tool_result", tool: "tool_EZ9ljmlTUacZGd8kt4UNhNHf", output: "Wrote 2 bytes to probe.txt", isError: false });
+  assert.equal(events[5].role, "user");
+  assert.match(events[5].parts[0].text, /^Use your shell tool to run the command `echo wao-probe`/);
+  assert.deepEqual(events[6], { kind: "message", role: "assistant", parts: [{ type: "text", text: "DONE" }] });
+  assert.ok(!JSON.stringify(events).includes("I need execute shell"), "reasoning 不进事件流");
+  assert.deepEqual(events[7], {
+    kind: "metrics",
+    tokens: { input: 806, output: 270, cacheRead: 50432, cacheWrite: 0 },
+    firstRequest: { input: 253, cacheRead: 16640 },
+  }, "轮级 usage；firstRequest = index 最小那一步");
+  assert.equal(events[8].reason, "completed");
+  assert.ok(!calls.some((c) => c.url.includes("transcript")), "2.6 已删除的 transcript 端点不再请求");
+  // 录到的旧端点答复：路由级 404（不是信封错误）。
+  await assert.rejects(
+    () => backend.request(makeAgent(), `${KIMI_263_BASE}/transcript?agent_id=${"main"}`, { method: "GET" }),
+    /kimi web request failed 404: .*Route GET/,
+  );
+  // 停止探针读录到的会话详情：在跑时 busy，跑完 idle。
+  const details = ["t1-tools-session-running.json", "t1-tools-session-after.json"];
+  const probe = kimiServer(() => replay263(details.shift()));
+  const target = new KimiWebBackend({ fetchImpl: probe.fetchImpl, timeout: 5000, retries: 0 }).stopTarget(makeAgent(), KIMI_263_SESSION);
+  assert.deepEqual(await target.sessionStatus(), { type: "busy" });
+  assert.deepEqual(await target.sessionStatus(), { type: "idle" });
+});
+
+test("kimi 2.6.3 实测·续接轮：历史轮在提交前边界之内——只发射新一轮（答案 ok、用量只计新轮）", async () => {
+  const { calls, fetchImpl } = kimi263Server({
+    preTurns: "t1-tools-turns-9-ended.json",
+    submit: "t2-resume-submit.json",
+    ticks: [{ prompts: "t1-tools-prompts-after.json", turns: "t2-resume-turns-ended.json" }],
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), {
+    prompt: "What single word did you write into probe.txt? Reply with only that word.",
+    sessionReuse: { turn: "resume", priorRunId: "run_prior" },
+    priorProviderSessionId: KIMI_263_SESSION,
+  });
+  assert.ok(!calls.some((c) => c.method === "POST" && c.url.endsWith("/api/v1/sessions")), "续接不建新会话");
+  const events = (await collect(handle)).filter((e) => e.kind !== "runtime_activity");
+  assert.deepEqual(events.map((e) => e.kind), ["message", "message", "metrics", "done"], "历史轮的工具证据不重放");
+  assert.equal(events[0].parts[0].text, "What single word did you write into probe.txt? Reply with only that word.");
+  assert.equal(events[1].parts[0].text, "ok");
+  assert.ok(!JSON.stringify(events).includes("DONE"), "前一轮的答案不重放");
+  assert.deepEqual(events[2], {
+    kind: "metrics",
+    tokens: { input: 133, output: 37, cacheRead: 17152, cacheWrite: 0 },
+    firstRequest: { input: 133, cacheRead: 17152 },
+  });
+});
+
+test("kimi 2.6.3 实测·纠偏链：t4 转入后 t3 那一轮无回答结束——不在 t3 上提前收口，运行在 t4 那一轮完成、答案取 t4", async () => {
+  const t3Active = kimi263("t4-correction-prompts-queued.json").json.data.active;
+  let tick = 0;
+  let correction = null;
+  const { calls, fetchImpl } = kimi263Server({
+    preTurns: "t2-resume-turns-ended.json",
+    submit: "t3-steer-target-submit.json",
+    corrections: ["t4-correction-queued-submit.json"],
+    steers: ["t4-correction-steer.json"],
+    ticks: [
+      // 拍 1：t3 在跑。
+      { prompts: promptsEnvelope(t3Active), turns: "t3-steer-target-turns-running.json" },
+      // 拍 2（本拍先投递纠偏）：t4 已转入、离开队列；t3 已无回答结束；t4 的轮还没出现。
+      { prompts: "t1-tools-prompts-after.json", turns: turnsOf("t3-steer-target-turns-after-steer.json", (o) => o <= 2) },
+      // 拍 3：t4 开了下一轮、在跑。
+      { prompts: "t3-steer-target-prompts-after.json", turns: "t3-steer-target-turns-after-steer.json" },
+      // 拍 4：t4 那一轮完成（录到的终页里另有一个不属于本运行的中止轮）。
+      { prompts: "t1-tools-prompts-after.json", turns: "final-turns-all.json" },
+    ],
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "ping" });
+  const events = await collect(handle, {
+    onPollTick: async () => {
+      tick += 1;
+      if (tick === 2) correction = await handle.sendCorrection("Also, at the end of your answer, add the line STEERED-OK.");
+    },
+  });
+  assert.deepEqual(correction, { ok: true }, "steered:true → 已转入");
+  const steer = calls.find((c) => c.url.endsWith("/prompts:steer"));
+  assert.deepEqual(JSON.parse(steer.body), { prompt_ids: ["msg_01M7NY9N2TCBYZ34A4SWKS3BMG"] });
+  assert.equal(tick, 4, "拍 2（t3 已结束、t4 不可见）与拍 3（t4 在跑）都没有收口");
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed");
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.deepEqual(assistant.map((e) => e.parts[0].text), ["25 replies came back.\n\nSTEERED-OK"]);
+  const user = events.find((e) => e.kind === "message" && e.role === "user");
+  assert.match(user.parts[0].text, /^Use your shell tool to run `ping -n 25 127\.0\.0\.1`/, "用户回显取第一个归属轮（t3）的开场消息");
+  assert.deepEqual(events.filter((e) => e.kind === "command").map((e) => e.command), ["ping -n 25 127.0.0.1"], "t4 那一轮的工具证据");
+  assert.ok(!JSON.stringify(events).includes("ping -n 90"), "不属于本运行的轮不发射");
+  assert.deepEqual(events.find((e) => e.kind === "metrics"), {
+    kind: "metrics",
+    tokens: { input: 1608, output: 239, cacheRead: 34304, cacheWrite: 0 },
+  }, "各归属轮 usage 之和（t3 被打断那一步没有 usage）；第一个归属轮没有带 usage 的步 → 不写 firstRequest");
+});
+
+test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cancelled → failed；中止面读录到的 :abort、40402、会话详情与 messages", async () => {
+  const { fetchImpl } = kimi263Server({
+    preTurns: "t3-steer-target-turns-after-steer.json",
+    submit: "t5-abort-submit.json", // 录到的回执是 status "queued"（前一轮还在跑）——不是失败
+    ticks: [{ prompts: "t1-tools-prompts-after.json", turns: "t5-abort-turns-ended.json" }],
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "ping 90" });
+  const events = await collect(handle);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].reason, "failed");
+  assert.equal(events[0].error, "kimi turn interrupted (turn t_2bacb896b753, end_reason: user_cancelled)");
+
+  // 中止面：GET prompts 有活动 → :abort（录到的 aborted:true）→ 复查：列表空、会话详情
+  // （录到的中止后详情）main_turn_active:false → 已停。再中止一次：列表已空，不发 :abort。
+  // 对已停的 prompt 再 :abort 录到 40402。messages 读录到的终态页（形状不变）。
+  let aborts = 0;
+  const abortFetch = kimiServer((url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (method === "GET" && url === `${KIMI_263_BASE}/prompts`) {
+      return aborts === 0 ? promptsEnvelope("msg_01M7NY9Q32GH5VKC88D7ZSMZ5J") : replay263("t1-tools-prompts-after.json");
+    }
+    if (method === "POST" && url.endsWith(":abort")) {
+      aborts += 1;
+      return replay263(aborts === 1 ? "t5-abort.json" : "t5-abort-again-40402.json");
+    }
+    if (url === KIMI_263_BASE) return replay263("t5-abort-session-after.json");
+    if (url === `${KIMI_263_BASE}/messages`) return replay263("final-messages.json");
+    throw new Error(`unexpected ${method} ${url}`);
+  });
+  const stopper = new KimiWebBackend({ fetchImpl: abortFetch.fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
+  await stopper.stopTarget(makeAgent(), KIMI_263_SESSION).abort();
+  assert.equal(aborts, 1);
+  await stopper.abortActivePrompt(makeAgent(), KIMI_263_SESSION); // 列表已空：不再发 :abort
+  assert.equal(aborts, 1);
+  const again = await stopper.request(makeAgent(), `${KIMI_263_BASE}/prompts/msg_01M7NY9Q32GH5VKC88D7ZSMZ5J:abort`, { method: "POST", body: "{}" })
+    .then(() => null, (error) => error);
+  assert.match(again.message, /code 40402/);
+  const target = stopper.stopTarget(makeAgent(), KIMI_263_SESSION);
+  assert.deepEqual(await target.sessionStatus(), { type: "idle" });
+  const page = await target.messages();
+  assert.equal(page.data[0].metadata.origin.variant, "interruption", "messages 形状不变（newest-first）");
+  assert.ok(page.data.length > 10);
+});
+
+/** 事件流的一拍 = 一次 GET prompts（每拍先读 prompts 再翻 turns）。假钟按它推进。 */
+function isTickRequest(url, init = {}) {
+  return (init.method ?? "GET") === "GET" && url.endsWith("/prompts");
+}
+
+/** 假钟每拍推进 stepMs，spawn 后跑完事件流（停滞门测试用）。 */
+async function runClocked(handler, markSpawned, stepMs) {
+  let fakeNow = 0;
+  const { fetchImpl } = kimiServer((url, init, n) => {
+    if (isTickRequest(url, init)) fakeNow += stepMs;
+    return handler(url, init, n);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  return collect(handle, { pollInterval: 1, stallClock: () => fakeNow });
+}
+
+// 决定 0071/0072 的在途证据用例：在跑的轮 / 结束的轮（条目前补开场消息）。
+function running0071(items) {
+  return [runningTurn({ items: [userMessageItem(), ...items] })];
+}
+function ended0071(items, extra = {}) {
+  return [kimiTurn({ items: [userMessageItem(), ...items], ...extra })];
+}
+async function collect0071(sessionId, script) {
+  const { events } = await runScript(sessionId, { script });
+  // streaming 事实按节流发射，与这组断言无关。
+  return events.filter((e) => e.kind !== "runtime_activity");
+}
+
+const SESSION_URL = "http://127.0.0.1:4310/api/v1/sessions/session_new";
+const PROMPTS_URL = `${SESSION_URL}/prompts`;
+
+/**
+ * spawn 路由 + 中止路由：GET prompts 缺省在发过 :abort 之后答 afterAbort（中止生效），
+ * 之前答 promptsData；onList(abortPosts) 整体接管列表。POST :abort 交给 onAbort（缺省
+ * aborted:true）。会话详情由 detail(abortPosts) 给（缺省不在跑）。
+ */
+function abortServer({
+  promptsData, afterAbort = { active: null, queued: [] }, onAbort = () => envelope({ aborted: true }), onList,
+  detail = () => detailEnvelope("session_new", false, false, null),
+}) {
+  let abortPosts = 0;
+  return kimiServer((url, init = {}) => {
+    if (url.includes("/api/v1/shutdown")) {
+      throw new Error("server-level shutdown must never be called by the backend");
+    }
+    if (url === PROMPTS_URL && (init.method ?? "GET") === "GET") {
+      if (onList) return onList(abortPosts);
+      return envelope(abortPosts > 0 ? afterAbort : promptsData);
+    }
+    if (url.endsWith(":abort")) {
+      abortPosts += 1;
+      return onAbort(url, init);
+    }
+    if (url === SESSION_URL) return detail(abortPosts);
+    return spawnOkRoutes()(url);
+  });
+}
 
 test("kimi-web ①: validateAgentPolicy 通过分支与全部拒绝分支（无 model.id / 空白 model.id / providerID / variant / reasoning / contextWindow / provider / 无 serveUrl / 无 tokenEnv）", () => {
   const backend = new KimiWebBackend({ fetchImpl: async () => { throw new Error("no network expected"); } });
@@ -131,7 +413,7 @@ test("kimi-web ①: validateAgentPolicy 通过分支与全部拒绝分支（无 
 
 // ===== ② spawn（fresh 轮）请求形状 =====
 
-test("kimi-web ②: spawn fresh 轮——POST /sessions → GET detail（F3 静默门）→ GET transcript?agent_id=main（preSubmitTurnIds 观察锚）→ POST prompts（时序锚定）；body 形状与 Bearer 头", async () => {
+test("kimi-web ②: spawn fresh 轮——POST /sessions → GET detail（F3 静默门）→ GET agents/main/turns（提交前边界读）→ POST prompts（时序锚定）；body 形状与 Bearer 头", async () => {
   const { calls, fetchImpl } = kimiServer(spawnOkRoutes());
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "Read README only." });
@@ -143,7 +425,7 @@ test("kimi-web ②: spawn fresh 轮——POST /sessions → GET detail（F3 静�
   assert.equal(typeof handle.events, "function");
   assert.equal(typeof handle.abort, "function");
   assert.equal(typeof handle.sendCorrection, "function");
-  assert.equal(calls.length, 4, "fresh 轮恰四个请求：建会话 + 提交前静默门 detail + 提交前 transcript 读 + 发 prompt");
+  assert.equal(calls.length, 4, "fresh 轮恰四个请求：建会话 + 提交前静默门 detail + 提交前 turns 读 + 发 prompt");
 
   assert.equal(calls[0].url, "http://127.0.0.1:4310/api/v1/sessions");
   assert.equal(calls[0].method, "POST");
@@ -153,12 +435,11 @@ test("kimi-web ②: spawn fresh 轮——POST /sessions → GET detail（F3 静�
     metadata: { cwd: "D:/projects/worktree" },
   });
   // F3 静默门先行：建会话后先 GET detail 确认 busy/main_turn_active 严格 false，
-  // transcript 读才在门后落定。
+  // turns 读才在门后落定。
   assert.equal(calls[1].url, "http://127.0.0.1:4310/api/v1/sessions/session_new");
   assert.equal(calls[1].method, "GET");
-  // 提交前 transcript 读必须在 POST prompts 之前（v8 时序）：agent_id 查询参数
-  // 恒在场（实测缺则 40001；"main" 有效、"default" 返回空——绝不缺省）。
-  assert.equal(calls[2].url, "http://127.0.0.1:4310/api/v1/sessions/session_new/transcript?agent_id=main");
+  // 提交前 turns 读必须在 POST prompts 之前（记下翻页边界）。
+  assert.equal(calls[2].url, "http://127.0.0.1:4310/api/v1/sessions/session_new/agents/main/turns");
   assert.equal(calls[2].method, "GET");
 
   assert.equal(calls[3].url, "http://127.0.0.1:4310/api/v1/sessions/session_new/prompts");
@@ -221,7 +502,7 @@ test("kimi-web ②: spawn 前置策略门——坏配置在首个 HTTP 请求前
 
 // ===== ③ resume 轮（session 复用） =====
 
-test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门）→ GET transcript?agent_id=main（历史 turn 观测锚）→ 向前任 id 发 prompts", async () => {
+test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门）→ GET agents/main/turns（提交前边界读）→ 向前任 id 发 prompts", async () => {
   const { calls, fetchImpl } = kimiServer((url) => {
     if (url === "http://127.0.0.1:4310/api/v1/sessions") {
       throw new Error("resume turn must not create a new session");
@@ -229,8 +510,8 @@ test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门�
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior") {
       return detailEnvelope("session_prior", false, false, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/api/v1/sessions/session_prior/prompts")) {
       return envelope({ prompt_id: "msg_q2", status: "running" });
@@ -244,10 +525,10 @@ test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门�
     priorProviderSessionId: "session_prior",
   });
   assert.equal(handle.backendSessionId, "session_prior");
-  assert.equal(calls.length, 3, "resume 轮恰三个请求：提交前静默门 detail + 提交前 transcript 读 + 发 prompt");
+  assert.equal(calls.length, 3, "resume 轮恰三个请求：提交前静默门 detail + 提交前 turns 读 + 发 prompt");
   assert.deepEqual(calls.map((c) => c.method), ["GET", "GET", "POST"]);
   assert.equal(calls[0].url, "http://127.0.0.1:4310/api/v1/sessions/session_prior");
-  assert.equal(calls[1].url, "http://127.0.0.1:4310/api/v1/sessions/session_prior/transcript?agent_id=main");
+  assert.equal(calls[1].url, "http://127.0.0.1:4310/api/v1/sessions/session_prior/agents/main/turns");
   assert.equal(calls[2].url, "http://127.0.0.1:4310/api/v1/sessions/session_prior/prompts");
   assert.deepEqual(JSON.parse(calls[2].body), {
     content: [{ type: "text", text: "continue" }],
@@ -261,8 +542,8 @@ test("kimi-web ③: resume 轮同样带 thinking（车道声明或 --reasoning �
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior") {
       return detailEnvelope("session_prior", false, false, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_prior/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/api/v1/sessions/session_prior/prompts")) {
       return envelope({ prompt_id: "msg_q2", status: "running" });
@@ -284,32 +565,16 @@ test("kimi-web ③: resume 轮同样带 thinking（车道声明或 --reasoning �
   });
 });
 
-test("kimi-web ③ ⑥: resume——会话已有历史 turn + 新 prompt 的 turn → 只发射新 turn 内容、usage 只计新 turn（triggerPromptId 归属，历史重放按构造不可能）", async () => {
-  // 前任轮：triggerPromptId=msg_old（永不等于本轮 prompt_id——误归属与历史重放
-  // 按构造不可能，无需任何基线吸收）；usage 刻意取大值（9999）钉"只计新轮"。
-  const priorTurn = turnItem({
-    turnId: "t_prev",
-    triggerPromptId: "msg_old",
-    ordinal: 0,
-    prompt: "prior question",
-    steps: [stepItem({
-      stepId: "s_prev",
-      turnId: "t_prev",
-      frames: [{ kind: "text", text: "prior answer", role: "assistant" }],
-      usage: { inputOther: 9999, output: 9999, inputCacheRead: 9999, inputCacheCreation: 9999 },
-    })],
+test("kimi-web ③ ⑥: resume——会话已有历史轮 + 新 prompt 的轮 → 只发射新轮内容、usage 只计新轮（prompt_ids 归属：历史轮不含本运行的 id）", async () => {
+  // 前任轮：prompt_ids=[msg_old]（永不等于本运行的 prompt id——误归属与历史重放按构造
+  // 不可能）；usage 刻意取大值（9999）钉"只计新轮"。
+  const priorTurn = kimiTurn({
+    turn_id: "t_prev", ordinal: 0, promptIds: ["msg_old"], prompt: "prior question", answer: "prior answer",
+    steps: [stepItem({ usage: { input_other: 9999, output: 9999, input_cache_read: 9999, input_cache_creation: 9999 } })],
   });
-  const newTurn = turnItem({
-    turnId: "t_new",
-    triggerPromptId: "msg_q2",
-    ordinal: 1,
-    prompt: "continue",
-    steps: [stepItem({
-      stepId: "s_new",
-      turnId: "t_new",
-      frames: [{ kind: "text", text: "new answer", role: "assistant" }],
-      usage: { inputOther: 40, output: 6, inputCacheRead: 2, inputCacheCreation: 1 },
-    })],
+  const newTurn = kimiTurn({
+    turn_id: "t_new", ordinal: 1, promptIds: ["msg_q2"], prompt: "continue", answer: "new answer",
+    steps: [stepItem({ usage: { input_other: 40, output: 6, input_cache_read: 2, input_cache_creation: 1 } })],
   });
   const { handler, markSpawned, polls } = turnScriptServer("session_prior", {
     promptId: "msg_q2",
@@ -324,28 +589,19 @@ test("kimi-web ③ ⑥: resume——会话已有历史 turn + 新 prompt 的 tur
     priorProviderSessionId: "session_prior",
   });
   markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+  const events = await collect(handle);
   assert.deepEqual(events.map((e) => e.kind), ["message", "message", "metrics", "done"]);
   assert.equal(events.at(-1).reason, "completed");
-  // 历史轮永不重放：前任 turn 的 prompt/答案都不进事件流。
   assert.ok(!JSON.stringify(events).includes("prior answer"), "前任 assistant 文本不重放");
   assert.ok(!JSON.stringify(events).includes("prior question"), "前任 user prompt 不重放");
-  const messages = events.filter((e) => e.kind === "message");
-  assert.equal(messages.length, 2, "本轮 user echo（turn.prompt）+ assistant 各一条");
-  assert.equal(messages[0].role, "user");
-  assert.deepEqual(messages[0].parts, [{ type: "text", text: "continue" }]);
-  assert.equal(messages[1].role, "assistant");
-  assert.deepEqual(messages[1].parts, [{ type: "text", text: "new answer" }]);
-  // usage 只计新 turn 的 steps（9999 不混入）。
+  assert.deepEqual(events[0].parts, [{ type: "text", text: "continue" }]);
+  assert.deepEqual(events[1].parts, [{ type: "text", text: "new answer" }]);
   assert.deepEqual(events[2], {
     kind: "metrics",
     tokens: { input: 40, output: 6, cacheRead: 2, cacheWrite: 1 },
     firstRequest: { input: 40, cacheRead: 2 },
   });
-  assert.equal(polls(), 1, "首拍即终态（新 turn 已 completed）");
+  assert.equal(polls(), 1, "首拍即终态（新轮已 ended）");
 });
 
 test("kimi-web ③: resume 轮缺 prior id / proc_ 占位 / 空串 → 派发前拒绝且零请求（resume 关联面合同）", async () => {
@@ -375,8 +631,8 @@ test("kimi-web ④: sendCorrection——POST prompts 排队 + POST prompts:steer
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c") {
       return detailEnvelope("session_c", false, false, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/prompts:steer")) {
       steerBodies.push({ body: JSON.parse(init.body), headers: init.headers ?? {} });
@@ -407,7 +663,7 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c") {
         return detailEnvelope("session_c", false, false, null);
       }
-      if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([]);
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope([]);
       if (url.endsWith("/prompts:steer")) {
         return envelope(null, { code: 40402, msg: "no active prompt to steer into" });
       }
@@ -429,7 +685,7 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c") {
         return detailEnvelope("session_c", false, false, null);
       }
-      if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([]);
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope([]);
       if (url.endsWith("/prompts:steer")) return jsonResponse({ code: 0, msg: "boom", data: null }, 500);
       if (url.endsWith("/prompts")) return envelope({ prompt_id: "msg_q", status: "running" });
       throw new Error(`unexpected ${url}`);
@@ -445,7 +701,7 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_c") {
         return detailEnvelope("session_c", false, false, null);
       }
-      if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([]);
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope([]);
       if (url.endsWith("/prompts:steer")) return envelope({ steered: false });
       if (url.endsWith("/prompts")) return envelope({ prompt_id: "msg_q", status: "running" });
       throw new Error(`unexpected ${url}`);
@@ -464,531 +720,188 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
 });
 
 
-// ===== ⑤ events 轮询生成器：transcript 轮次终态原语（triggerPromptId 归属 +
-// state 终态闭集） =====
+// ===== ⑤ events 轮询生成器：turns 轮按 prompt_ids 归属、最终轮 ended 按 outcome 收口 =====
 
-test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带 assistant text → 首拍发射 tool 帧证据 + 全文 + usage + completed（thinking 帧不投影、无 role 的 text 帧宽容计入；tool 帧证据先行）", async () => {
-  // tool 帧形状 = 2026-10-01 live 探针（delta 证据链）：{kind:"tool", frameId,
-  // toolCallId, name, state, input, output}。四类投影各占一帧：Write(done)、
-  // Bash(done)、Read(未知类)、Bash(state=error)——逐条 deepEqual 见断言区。
-  const turn = turnItem({
+test("kimi-web ⑤ ①: 完成轮——工具证据先行（Write / Bash / Read / 出错的 Bash）→ 用户回显 → 答案（跨步空一行）→ metrics（轮级 usage）→ completed；reasoning 不投影", async () => {
+  const turn = kimiTurn({
     steps: [
-      stepItem({
-        stepId: "s0",
-        frames: [
-          { kind: "thinking", text: "(internal reasoning)" },
-          {
-            kind: "tool", frameId: "f_w", toolCallId: "tc_write", name: "Write", state: "done",
-            input: { path: "wao_perm_probe.txt", content: "probe" },
-            output: "Wrote 5 bytes to wao_perm_probe.txt",
-          },
-          { kind: "text", text: "Hello", role: "assistant" },
-        ],
-        usage: { inputOther: 100, output: 7, inputCacheRead: 10, inputCacheCreation: 3 },
+      stepItem({ index: 1, finish_reason: "tool_use", usage: { input_other: 100, output: 7, input_cache_read: 10, input_cache_creation: 3 } }),
+      stepItem({ index: 2, usage: { input_other: 50, output: 5, input_cache_read: 10, input_cache_creation: 3 } }),
+    ],
+    items: [
+      userMessageItem(["msg_q1"], "hi"),
+      { type: "reasoning", item_id: "r_1", step_index: 1, status: "ended", text: "(internal reasoning)" },
+      toolCallItem({
+        item_id: "tc_write", name: "Write", input: { path: "wao_perm_probe.txt", content: "probe" },
+        display: { kind: "file_io", operation: "write", path: "D:/projects/worktree/wao_perm_probe.txt" },
+        output: "Wrote 5 bytes to wao_perm_probe.txt",
       }),
-      stepItem({
-        stepId: "s1",
-        ordinal: 1,
-        frames: [
-          {
-            kind: "tool", frameId: "f_b", toolCallId: "tc_bash", name: "Bash", state: "done",
-            input: { command: "node scripts/probe.mjs" }, output: "probe ok",
-          },
-          {
-            kind: "tool", frameId: "f_r", toolCallId: "tc_read", name: "Read", state: "done",
-            input: { path: "README.md" }, output: "readme body",
-          },
-          {
-            kind: "tool", frameId: "f_e", toolCallId: "tc_err", name: "Bash", state: "error",
-            input: { command: "node scripts/failing.mjs" }, output: "exit status 1",
-          },
-          { kind: "text", text: " world" }, // 无 role 的 text 帧（实测宽容形状）
-        ],
-        usage: { inputOther: 50, output: 5, inputCacheRead: 10, inputCacheCreation: 3 },
-      }),
+      assistantItem("Hello", 1),
+      toolCallItem({ item_id: "tc_bash", step_index: 2, input: { command: "node scripts/probe.mjs" }, output: "probe ok" }),
+      toolCallItem({ item_id: "tc_read", step_index: 2, name: "Read", input: { path: "README.md" }, display: { kind: "file_io", operation: "read" }, output: "readme body" }),
+      toolCallItem({ item_id: "tc_err", step_index: 2, input: { command: "node scripts/failing.mjs" }, outcome: "failed", output: "exit status 1" }),
+      assistantItem(" world", 2),
     ],
   });
-  const { handler, markSpawned, polls } = turnScriptServer("session_c1", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  // 事件顺序（证据先行）：tool 帧证据逐帧（投影事件 + 终态
-  // tool_result）→ user echo → assistant text → metrics → done(completed)。
-  assert.deepEqual(
-    events.map((e) => e.kind),
-    [
-      "file_written", "tool_result", // s0: Write 帧（done）
-      "command", "tool_result", // s1: Bash 帧（done）
-      "tool_use", "tool_result", // s1: Read 帧（非 bash/write 类 → toolUseEvent）
-      "command", "tool_result", // s1: Bash 帧（state=error → isError:true）
-      "message", "message", "metrics", "done",
-    ],
-    "tool 帧证据先行（8 条）→ user echo → assistant text → metrics → done",
-  );
-  // Write 帧 → fileWrittenEvent 带 path（live 探针形状：input.path）。
-  assert.deepEqual(events[0], { kind: "file_written", path: "wao_perm_probe.txt" });
-  assert.deepEqual(
-    events[1],
-    { kind: "tool_result", tool: "tc_write", output: "Wrote 5 bytes to wao_perm_probe.txt", isError: false },
-  );
-  // bash 帧 → commandEvent（kimi 无已证实退出码通道——reportsCommandExitCode=
-  // false，exitCode 恒省略；toolCallId 关联 tool_result）。
-  assert.deepEqual(
-    events[2],
-    { kind: "command", command: "node scripts/probe.mjs", toolCallId: "tc_bash" },
-  );
-  assert.deepEqual(
-    events[3],
-    { kind: "tool_result", tool: "tc_bash", output: "probe ok", isError: false },
-  );
-  // 未知工具（非 bash/shell、非 write/edit/multiedit）→ toolUseEvent(name, input)。
+  const { events, polls } = await runScript("session_c1", { script: [[turn]] });
+  assert.deepEqual(events.map((e) => e.kind), [
+    "file_written", "tool_result", // Write（display.path）
+    "command", "tool_result", // Bash
+    "tool_use", "tool_result", // Read（非 shell / 写文件类 → tool_use）
+    "command", "tool_result", // 出错的 Bash（outcome 非 completed → isError）
+    "message", "message", "metrics", "done",
+  ]);
+  assert.deepEqual(events[0], { kind: "file_written", path: "D:/projects/worktree/wao_perm_probe.txt" }, "路径取 display.path，不取 input.path");
+  assert.deepEqual(events[1], { kind: "tool_result", tool: "tc_write", output: "Wrote 5 bytes to wao_perm_probe.txt", isError: false });
+  assert.deepEqual(events[2], { kind: "command", command: "node scripts/probe.mjs", toolCallId: "tc_bash" });
   assert.deepEqual(events[4], { kind: "tool_use", tool: "Read", input: { path: "README.md" } });
-  assert.deepEqual(
-    events[5],
-    { kind: "tool_result", tool: "tc_read", output: "readme body", isError: false },
-  );
-  // 错误 state（error）→ toolResultEvent isError:true。
-  assert.deepEqual(
-    events[6],
-    { kind: "command", command: "node scripts/failing.mjs", toolCallId: "tc_err" },
-  );
-  assert.deepEqual(
-    events[7],
-    { kind: "tool_result", tool: "tc_err", output: "exit status 1", isError: true },
-  );
-  // 消息投影不变：user echo → assistant text（跨 step 按序拼接；tool/thinking
-  // 帧不入文本）。
-  assert.equal(events[8].role, "user");
+  assert.deepEqual(events[7], { kind: "tool_result", tool: "tc_err", output: "exit status 1", isError: true });
   assert.deepEqual(events[8].parts, [{ type: "text", text: "hi" }]);
-  assert.equal(events[9].role, "assistant");
-  assert.deepEqual(
-    events[9].parts,
-    [{ type: "text", text: "Hello\n\n world" }],
-    "两 step 的 text 帧按序拼接为单条 assistant text，不同 step 之间隔一个空行",
-  );
-  assert.ok(!JSON.stringify(events).includes("internal reasoning"), "thinking 帧内容不进事件流");
-  // ⑩ reportsTokenUsage=true 的 metrics 事件形状：steps[].usage 求和（1:1 映射
-  // inputOther→input / output→output / inputCacheRead→cacheRead /
-  // inputCacheCreation→cacheWrite；reasoning/costUsd 无 kimi 对应字段——省略）。
-  assert.deepEqual(
-    events[10],
-    {
-      kind: "metrics",
-      tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 },
-      firstRequest: { input: 100, cacheRead: 10 },
-    },
-  );
-  assert.deepEqual(
-    events[10].firstRequest,
-    { input: 100, cacheRead: 10 },
-    "首个请求用量取本轮 steps[0] 的 usage（不是合计、也不是后面 step）",
-  );
+  assert.deepEqual(events[9].parts, [{ type: "text", text: "Hello\n\n world" }], "不同步之间空一行");
+  assert.ok(!JSON.stringify(events).includes("internal reasoning"), "reasoning 不进事件流");
+  assert.deepEqual(events[10], {
+    kind: "metrics",
+    tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 },
+    firstRequest: { input: 100, cacheRead: 10 },
+  }, "轮级 usage 求和；firstRequest 取 index 最小那一步");
   assert.equal(events[11].reason, "completed");
-  assert.equal(polls(), 1, "首拍即终态——轮次原语无需等待窗口/稳定性重读");
+  assert.equal(polls, 1);
 });
 
-test("kimi-web ⑤: 混合帧 completed 轮（thinking + tool + text）→ tool 帧证据先于 assistant message（证据先行；thinking 帧不投影）", async () => {
-  const turn = turnItem({
-    steps: [stepItem({
-      stepId: "s0",
-      frames: [
-        { kind: "thinking", text: "(plan the probe write)" },
-        {
-          kind: "tool", frameId: "f_m", toolCallId: "tc_mixed", name: "Write", state: "done",
-          input: { path: "out/probe.txt", content: "payload" },
-          output: "Wrote 7 bytes to out/probe.txt",
-        },
-        { kind: "text", text: "wrote the probe file", role: "assistant" },
+
+test("kimi-web ⑤: 工具调用非终态 / 写文件缺路径 → status 非 ended 不追加 tool_result；没有路径不虚构 file_written", async () => {
+  {
+    const turn = kimiTurn({
+      steps: [stepItem({ usage: undefined })],
+      items: [
+        userMessageItem(),
+        toolCallItem({ item_id: "tc_run", status: "running", input: { command: "node scripts/watch.mjs" }, outcome: undefined, output: undefined }),
+        assistantItem("still working"),
       ],
-      usage: { inputOther: 10, output: 4, inputCacheRead: 1, inputCacheCreation: 1 },
-    })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_mix", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.deepEqual(
-    events.map((e) => e.kind),
-    ["file_written", "tool_result", "message", "message", "metrics", "done"],
-    "顺序锁死：tool 帧证据（file_written + tool_result）→ user echo → assistant message → metrics → done",
-  );
-  const assistantIndex = events.findIndex((e) => e.kind === "message" && e.role === "assistant");
-  const evidenceIndexes = events
-    .map((e, i) => (["command", "file_written", "tool_use", "tool_result"].includes(e.kind) ? i : -1))
-    .filter((i) => i >= 0);
-  assert.ok(evidenceIndexes.length > 0, "tool 帧证据事件在场");
-  assert.ok(
-    evidenceIndexes.every((i) => i < assistantIndex),
-    "全部 tool 帧证据事件先于 assistant message",
-  );
-  assert.deepEqual(events[0], { kind: "file_written", path: "out/probe.txt" });
-  assert.deepEqual(
-    events[1],
-    { kind: "tool_result", tool: "tc_mixed", output: "Wrote 7 bytes to out/probe.txt", isError: false },
-  );
-  assert.deepEqual(events[3].parts, [{ type: "text", text: "wrote the probe file" }]);
-  assert.ok(!JSON.stringify(events).includes("plan the probe write"), "thinking 帧内容不进事件流");
-  assert.equal(events.at(-1).reason, "completed");
-  assert.equal(polls(), 1);
-});
-
-test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 done|error|failed 之外不追加 tool_result、无 path 不虚构 file_written（terminal-status 门）", async () => {
-  // 腿 1：bash 帧 state:"running"（终态闭集外的任意非终态值代表形状）→ 只投影
-  // commandEvent，无 tool_result——闭集外 state 绝不猜成终态。
-  {
-    const turn = turnItem({
-      steps: [stepItem({
-        usage: undefined,
-        frames: [
-          {
-            kind: "tool", frameId: "f_r", toolCallId: "tc_run", name: "Bash", state: "running",
-            input: { command: "node scripts/watch.mjs" },
-          },
-          { kind: "text", text: "still working", role: "assistant" },
-        ],
-      })],
     });
-    const { handler, markSpawned } = turnScriptServer("session_tr", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.deepEqual(
-      events.map((e) => e.kind),
-      ["command", "message", "message", "done"],
-      "非终态 tool 帧：投影事件在场、tool_result 缺席",
-    );
-    assert.deepEqual(
-      events[0],
-      { kind: "command", command: "node scripts/watch.mjs", toolCallId: "tc_run" },
-    );
-    assert.ok(!events.some((e) => e.kind === "tool_result"));
-    assert.equal(events.at(-1).reason, "completed");
+    const { events } = await runScript("session_tr", { script: [[turn]] });
+    assert.deepEqual(events.map((e) => e.kind), ["command", "message", "message", "done"]);
+    assert.deepEqual(events[0], { kind: "command", command: "node scripts/watch.mjs", toolCallId: "tc_run" });
   }
-  // 腿 2：Write 帧 input 缺 path/file_path → 不虚构 file_written；终态
-  // tool_result 仍按 state 投影（逐 part 双事件形状）。
   {
-    const turn = turnItem({
-      steps: [stepItem({
-        usage: undefined,
-        frames: [
-          {
-            kind: "tool", frameId: "f_np", toolCallId: "tc_nopath", name: "Write", state: "done",
-            input: { content: "no target path" }, output: "nothing written",
-          },
-          { kind: "text", text: "no path case", role: "assistant" },
-        ],
-      })],
+    const turn = kimiTurn({
+      steps: [stepItem({ usage: undefined })],
+      items: [
+        userMessageItem(),
+        toolCallItem({ item_id: "tc_nopath", name: "Write", input: { content: "no target path" }, display: { kind: "file_io" }, output: "nothing written" }),
+        assistantItem("no path case"),
+      ],
     });
-    const { handler, markSpawned } = turnScriptServer("session_np", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.deepEqual(
-      events.map((e) => e.kind),
-      ["tool_result", "message", "message", "done"],
-      "无 path 的 Write 帧：零 file_written、终态 tool_result 在场",
-    );
-    assert.deepEqual(
-      events[0],
-      { kind: "tool_result", tool: "tc_nopath", output: "nothing written", isError: false },
-    );
-    assert.ok(!events.some((e) => e.kind === "file_written"));
+    const { events } = await runScript("session_np", { script: [[turn]] });
+    assert.deepEqual(events.map((e) => e.kind), ["tool_result", "message", "message", "done"]);
+    assert.deepEqual(events[0], { kind: "tool_result", tool: "tc_nopath", output: "nothing written", isError: false });
   }
 });
 
 test("kimi-web ⑤ ⑩: usage 只报 input/output → metrics 不补 cacheRead/cacheWrite 0（缓存占比未知）", async () => {
-  const turn = turnItem({
-    steps: [stepItem({
-      usage: { inputOther: 100, output: 7 },
-      frames: [{ kind: "text", text: "answer without cache counters", role: "assistant" }],
-    })],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_c3", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+  const turn = kimiTurn({ answer: "answer without cache counters", usage: { input_other: 100, output: 7 } });
+  const { events } = await runScript("session_c3", { script: [[turn]] });
   const metrics = events.find((event) => event.kind === "metrics");
-  assert.deepEqual(metrics.tokens, { input: 100, output: 7 },
-    "上游没报的缓存分量不补 0");
-  assert.equal("cacheRead" in metrics.tokens, false);
-  assert.equal("cacheWrite" in metrics.tokens, false);
+  assert.deepEqual(metrics.tokens, { input: 100, output: 7 }, "上游没报的缓存分量不补 0");
 });
 
-test("kimi-web ⑤ ⑩: completed 轮 steps 无 usage 数据 → 不发 metrics 事件（绝不虚构零值通道）", async () => {
-  const turn = turnItem({
-    steps: [stepItem({
-      usage: undefined,
-      frames: [{ kind: "text", text: "answer without usage", role: "assistant" }],
-    })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_c2", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.deepEqual(
-    events.map((e) => e.kind),
-    ["message", "message", "done"],
-    "usage 数据全缺席 ⇒ 零 metrics 事件（reportsTokenUsage=true 只在有实测数据时发射）",
-  );
-  assert.equal(events.at(-1).reason, "completed");
+test("kimi-web ⑤ ⑩: 归属轮都没有 usage → 不发 metrics 事件（绝不虚构零值通道）", async () => {
+  const turn = kimiTurn({ answer: "answer without usage", steps: [stepItem({ usage: undefined })] });
+  const { events, polls } = await runScript("session_c2", { script: [[turn]] });
+  assert.deepEqual(events.map((e) => e.kind), ["message", "message", "done"]);
   assert.deepEqual(events[1].parts, [{ type: "text", text: "answer without usage" }]);
-  assert.equal(polls(), 1);
+  assert.equal(polls, 1);
 });
 
-test("kimi-web ⑤ ②: failed 轮（state=failed + error:'Model not set'——live 实测形状）→ 首拍 done(failed, error)，缺 model 静默秒败是一等公民事实", async () => {
-  const turn = turnItem({
-    state: "failed",
-    error: "Model not set",
-    endedAt: "2026-09-30T12:00:01.000Z",
-    durationMs: 12,
-    steps: [],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_f1", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
+test("kimi-web ⑤ ②: outcome failed（文档在册、未实测）→ 首拍 done(failed)，error 的 code/message 写进文案", async () => {
+  const turn = kimiTurn({ outcome: "failed", error: { code: "model_not_set", message: "Model not set" }, answer: null, steps: [] });
   const start = Date.now();
-  for await (const ev of handle.events(undefined, { pollInterval: 5, silentTimeout: 60_000 })) {
-    events.push(ev);
-  }
-  assert.equal(events.length, 1, "failed 轮恰一个 done 事件");
+  const { events, polls } = await runScript("session_f1", { script: [[turn]] }, { silentTimeout: 60_000 });
+  assert.equal(events.length, 1);
   assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /Model not set/, "turn.error 字段原样透传");
-  assert.match(events[0].error, /turn state=failed/);
-  assert.equal(polls(), 1, "秒级收口——终态原语，无需归属推断/等待窗口/超时兜底");
+  assert.equal(events[0].error, "kimi turn failed (turn t_0, error: model_not_set: Model not set)");
+  assert.equal(polls, 1);
   assert.ok(Date.now() - start < 2000);
 });
 
-test("kimi-web ⑤: cancelled 轮（终态闭集成员）→ done(failed, 固定文案)；error 字段缺席不虚构原因（failed/cancelled 两腿）", async () => {
-  // 腿 1：cancelled 且 error=null（缺席）——固定文案，绝不虚构原因。
-  {
-    const turn = turnItem({ state: "cancelled", error: null, steps: [] });
-    const { handler, markSpawned } = turnScriptServer("session_cc", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.equal(events.length, 1);
-    assert.equal(events[0].reason, "failed", "cancelled 也是终态——按 failed 收口");
-    assert.match(events[0].error, /kimi turn cancelled/);
-    assert.match(events[0].error, /no error field upstream/);
-  }
-  // 腿 2：failed 且 error=null——同一固定文案形状。
-  {
-    const turn = turnItem({ state: "failed", error: null, steps: [] });
-    const { handler, markSpawned } = turnScriptServer("session_fn", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
+test("kimi-web ⑤: interrupted / failed 缺原因字段 → done(failed, 固定文案)，不虚构原因；error 为字符串原样写", async () => {
+  const legs = [
+    [kimiTurn({ outcome: "interrupted", answer: null }), "kimi turn interrupted (turn t_0, no end_reason upstream)"],
+    [kimiTurn({ outcome: "failed", error: null, answer: null }), "kimi turn failed (turn t_0, no error field upstream)"],
+    [kimiTurn({ outcome: "failed", error: "upstream exploded", answer: null }), "kimi turn failed (turn t_0, error: upstream exploded)"],
+  ];
+  for (const [turn, text] of legs) {
+    const { events } = await runScript("session_cc", { script: [[turn]] });
     assert.equal(events.length, 1);
     assert.equal(events[0].reason, "failed");
-    assert.match(events[0].error, /kimi turn failed/);
-    assert.match(events[0].error, /no error field upstream/);
+    assert.equal(events[0].error, text);
   }
 });
 
-test("kimi-web ⑤ ③: running→completed 两拍转移——首拍等待（非终态）、次拍终态发射", async () => {
-  const running = turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
+test("kimi-web ⑤ ③: running→ended 两拍转移——首拍等待（在途事实）、次拍终态发射", async () => {
+  const { events, polls } = await runScript("session_rc", {
+    script: [[runningTurn()], [kimiTurn({ answer: "slow answer" })]],
   });
-  const completed = turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "slow answer", role: "assistant" }] })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_rc", {
-    script: [[running], [completed]],
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  // 问2 在途呈现（2026-10-10）：首见 running（签名建立）发射一条 streaming 事实。
   assert.deepEqual(events.map((e) => e.kind), ["runtime_activity", "message", "message", "metrics", "done"]);
   assert.equal(events[0].status, "streaming");
-  assert.equal(events.at(-1).reason, "completed");
   assert.deepEqual(events[2].parts, [{ type: "text", text: "slow answer" }]);
-  assert.equal(events[3].kind, "metrics");
-  assert.equal(polls(), 2, "恰两拍：拍 1 running（等待+在途事实）、拍 2 completed（终态发射）");
+  assert.equal(polls, 2);
 });
 
-test("kimi-web ⑤ ④: 提交滞后——首拍无本轮 turn（他人 turn 在场也不误领）、silentTimeout 到期仍无 → silent fail（相对提交时刻）", async () => {
-  // 他人/前任轮：triggerPromptId=msg_FOREIGN ≠ 本轮 msg_q1——归属键不命中，
-  // 绝不误领（单 actor 假设破裂形状的 fail-closed 出口）。
-  const foreign = turnItem({
-    turnId: "t_fx",
-    triggerPromptId: "msg_FOREIGN",
-    prompt: "someone else's question",
-    steps: [stepItem({
-      stepId: "s_fx",
-      turnId: "t_fx",
-      frames: [{ kind: "text", text: "foreign answer", role: "assistant" }],
-      usage: { inputOther: 1, output: 1, inputCacheRead: 1, inputCacheCreation: 1 },
-    })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_lag", {
-    script: [[foreign]], // 恒无本轮 turn（提交滞后的持续形状）
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
+test("kimi-web ⑤ ④: 提交滞后——本运行的 prompt 不在任何轮里（他人轮在场也不误领）、silentTimeout 到期 → silent fail（相对提交时刻）", async () => {
+  const foreign = kimiTurn({ turn_id: "t_fx", promptIds: ["msg_FOREIGN"], prompt: "someone else's question", answer: "foreign answer" });
   const start = Date.now();
-  // pollInterval 30ms：silentTimeout=120ms 的静默退出在第 ~5 拍触发。
-  for await (const ev of handle.events(undefined, { pollInterval: 30, silentTimeout: 120 })) {
-    events.push(ev);
-  }
+  const { events, polls } = await runScript("session_lag", { script: [[foreign]] }, { pollInterval: 30, silentTimeout: 120 });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error ?? "", /silent timeout: turn for this prompt not observed within 120ms/);
+  assert.match(done.error, /silent timeout: turn for this prompt not observed within 120ms/);
   assert.ok(events.length === 1 && !JSON.stringify(events).includes("foreign answer"), "他人轮内容绝不误领/发射");
-  assert.ok(polls() >= 2, `持续等待多拍（实际 ${polls()} 拍）后诚实退出`);
+  assert.ok(polls >= 2);
   assert.ok(Date.now() - start < 2000);
 });
 
-test("kimi-web ⑤ ⑤a (TD-197①): queued/慢启动静默不再被 8 拍门误杀；静默段 ≥ 自适应预算（60s floor）才 bounded fail", async () => {
-  const stalled = turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_st", { script: [[stalled]] });
-  // TD-197① 时钟注入缝：假钟在每拍 transcript 轮询请求时推进 10s（停滞轮不产
-  // 出事件，钟必须由轮询驱动而非事件驱动）。首拍 turn 现身=进展（noteProgress
-  // 基线）；此后每拍静默 +10s——第 6 拍 50s < 60s floor 仍存活（旧 8 拍门在第
-  // 9 拍早已误杀），第 7 拍 60s ≥ floor 才收口。
+test("kimi-web ⑤ ⑤a (TD-197①): 慢启动静默不被拍数门误杀；静默段 ≥ 自适应预算（60s floor）且 serve 说不活跃才 bounded fail", async () => {
+  const { handler, markSpawned, polls } = turnScriptServer("session_st", { script: [[runningTurn()]] });
+  // 时钟注入缝：每拍（一次 GET prompts）推进 10s。拍 1 最终轮现身 = 基线；拍 7 静默 60s ≥ floor。
   let fakeNow = 0;
-  const clock = () => fakeNow;
-  const clockedHandler = (url) => {
-    if (url.includes("/transcript")) fakeNow += 10_000;
-    return handler(url);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
+  const { fetchImpl } = kimiServer((url, init) => {
+    if (isTickRequest(url, init)) fakeNow += 10_000;
+    return handler(url, init);
+  });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   markSpawned();
-  const events = [];
   const start = Date.now();
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: clock })) {
-    events.push(ev);
-  }
-  // 问2 在途呈现：首拍 turn 现身（签名基线）发射一条 streaming——停滞轮
-  // 此后签名不变不再发射。事件序列=[streaming, done(failed)]。
-  assert.equal(events.length, 2, "在途事实一条 + done 事件（零 message）");
+  const events = await collect(handle, { pollInterval: 1, stallClock: () => fakeNow });
+  assert.equal(events.length, 2);
   assert.equal(events[0].kind, "runtime_activity");
-  const done = events[1];
-  assert.equal(done.reason, "failed");
-  assert.match(done.error, /turn stalled \(no progress\)/);
-  assert.match(done.error, /adaptive budget/);
-  assert.match(done.error, /60000ms floor/);
-  assert.equal(polls(), 7, "首拍基线 + 6 拍 50s 内存活 + 第 7 拍 60s≥floor 收口");
+  assert.equal(events[1].reason, "failed");
+  assert.match(events[1].error, /turn stalled \(no progress\)/);
+  assert.match(events[1].error, /60000ms floor/);
+  assert.match(events[1].error, /attestation: inactive/);
+  assert.equal(polls(), 7);
   assert.ok(Date.now() - start < 2000, "假钟驱动，零真实等待");
 });
 
 
 
-test("kimi-web ⑤ ⑤b: 有增长 → 计数清零不误触发——每拍 frames 文本增长（>8 拍仍在写），第 9 拍 completed 正常完成（绝不 no-progress 误杀）", async () => {
-  // 每拍文本 +1 字符（signature 变化 = 进展 = 清零）；若无清零，第 8 拍已误触
-  // 发 no-progress——本用例的存在即证明清零发生。（script 函数成员返回 items
-  // 数组——见 turnScriptServer 契约。）
-  const growing = (poll) => [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({
-      state: "running",
-      frames: [{ kind: "text", text: "x".repeat(poll), role: "assistant" }],
-    })],
-  })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "xxxxxxxx", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_gr", {
-    script: [growing, growing, growing, growing, growing, growing, growing, growing, completed],
+test("kimi-web ⑤ ⑤b: 每拍答案文本增长（>8 拍仍在写）→ 第 9 拍 ended 正常完成（绝不误杀）", async () => {
+  const growing = (poll) => [runningTurn({ items: [userMessageItem(), assistantItem("x".repeat(poll))] })];
+  const { events, polls } = await runScript("session_gr", {
+    script: [...Array(8).fill(growing), [kimiTurn({ answer: "xxxxxxxx" })]],
   });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const done = events.at(-1);
-  assert.equal(done.reason, "completed", "8+ 拍持续增长的健康轮绝不 no-progress 误杀");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走无进展出口");
-  const messages = events.filter((e) => e.kind === "message");
-  assert.equal(messages.length, 2);
-  assert.deepEqual(messages[1].parts, [{ type: "text", text: "xxxxxxxx" }]);
-  assert.equal(polls(), 9, "8 拍增长 + 第 9 拍终态");
+  assert.equal(events.at(-1).reason, "completed");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.deepEqual(events.filter((e) => e.kind === "message")[1].parts, [{ type: "text", text: "xxxxxxxx" }]);
+  assert.equal(polls, 9);
 });
 
-test("kimi-web ⑤ ⑨: onPollTick 每拍恰一次（tick 数 = transcript 轮询拍数）——首 tick 抛错不杀流（best-effort）", async () => {
-  const running = turnItem({ state: "running", endedAt: null, durationMs: null, steps: [] });
-  const completed = turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "done", role: "assistant" }] })],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_tk", {
-    script: [[running], [running], [completed]],
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
+test("kimi-web ⑤ ⑨: onPollTick 每拍恰一次且先于观测读——首 tick 抛错不杀流（best-effort）", async () => {
   let ticks = 0;
   let tickThrew = false;
-  for await (const ev of handle.events(undefined, {
-    pollInterval: 5,
-    // 注入 fake onPollTick——第一次抛错，验证 best-effort 语义。
+  const { events, polls } = await runScript("session_tk", {
+    script: [[runningTurn()], [runningTurn()], [kimiTurn({ answer: "done" })]],
+  }, {
     onPollTick: async () => {
       ticks += 1;
       if (ticks === 1) {
@@ -996,143 +909,81 @@ test("kimi-web ⑤ ⑨: onPollTick 每拍恰一次（tick 数 = transcript 轮�
         throw new Error("tick blew up (must be best-effort)");
       }
     },
-  })) {
-    events.push(ev);
-  }
-  assert.ok(tickThrew, "第一次 tick 确实抛错");
-  assert.equal(events.at(-1).reason, "completed", "钩子抛错是 best-effort，不杀死事件流");
-  assert.equal(ticks, polls(), "每拍恰一次（tick 数 = transcript 轮询拍数）");
+  });
+  assert.ok(tickThrew);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(ticks, polls);
   assert.equal(ticks, 3);
 });
 
-test("kimi-web ⑤ ⑦: completed 但 frames 无 assistant text（仅 thinking / 纯空白 text / role=user 的 text / 仅 tool 帧）→ 不伪造完成——done(failed) 收口（N1 教训），零 message 事件", async () => {
-  // 腿 1：steps 只有 thinking 帧（无 text）。
-  {
-    const turn = turnItem({
-      steps: [stepItem({ frames: [{ kind: "thinking", text: "(only reasoning)" }] })],
-    });
-    const { handler, markSpawned, polls } = turnScriptServer("session_e1", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.equal(events.length, 1, "传输成功不是可用答案——绝不伪造完成");
+test("kimi-web ⑤ ⑦: completed 但没有回答（仅 reasoning / 纯空白 / 只有开场消息 / 只有工具调用）→ done(failed)（N1：绝不伪造完成），零证据", async () => {
+  const legs = [
+    [userMessageItem(), { type: "reasoning", item_id: "r", step_index: 1, text: "(only reasoning)" }],
+    [userMessageItem(), assistantItem("   "), assistantItem(" ", 2)],
+    [userMessageItem()],
+    [userMessageItem(), toolCallItem({ item_id: "tc_w2", name: "Write", input: { path: "probe.txt", content: "probe" }, display: { path: "D:/w/probe.txt" }, output: "Wrote 5 bytes" })],
+  ];
+  for (const items of legs) {
+    const { events, polls } = await runScript("session_e1", { script: [[kimiTurn({ items })]] });
+    assert.equal(events.length, 1, JSON.stringify(items));
     assert.equal(events[0].reason, "failed");
     assert.match(events[0].error, /completed without assistant text/);
-    assert.equal(polls(), 1);
-  }
-  // 腿 2：text 帧恒为纯空白（拼接后 trim 为空）。
-  {
-    const turn = turnItem({
-      steps: [stepItem({ frames: [
-        { kind: "text", text: "   ", role: "assistant" },
-        { kind: "text", text: " " },
-      ] })],
-    });
-    const { handler, markSpawned } = turnScriptServer("session_e2", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.equal(events.length, 1);
-    assert.equal(events[0].reason, "failed");
-    assert.match(events[0].error, /completed without assistant text/);
-  }
-  // 腿 3：text 帧带 role="user"（非 assistant、role 在场）——宽容规则不收入。
-  {
-    const turn = turnItem({
-      steps: [stepItem({ frames: [{ kind: "text", text: "user echo frame", role: "user" }] })],
-    });
-    const { handler, markSpawned } = turnScriptServer("session_e3", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.equal(events.length, 1);
-    assert.equal(events[0].reason, "failed");
-    assert.match(events[0].error, /completed without assistant text/);
-  }
-  // 腿 4（tool 帧证据投影的空文本门在先）：completed 轮有 tool 帧（模型真干了
-  // 活）但零 assistant text → 仍按 failed 收口、**零证据发射**（N1 语义不因证据
-  // 面扩张而松动：无文本的 completed 轮是失败形状，证据只在成功发射路径投影）。
-  {
-    const turn = turnItem({
-      steps: [stepItem({
-        frames: [
-          {
-            kind: "tool", frameId: "f_w2", toolCallId: "tc_w2", name: "Write", state: "done",
-            input: { path: "wao_perm_probe.txt", content: "probe" }, output: "Wrote 5 bytes",
-          },
-        ],
-      })],
-    });
-    const { handler, markSpawned } = turnScriptServer("session_e4", { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    assert.equal(events.length, 1, "tool 帧不改变空文本门的零发射语义");
-    assert.equal(events[0].reason, "failed");
-    assert.match(events[0].error, /completed without assistant text/);
-    assert.ok(!events.some((e) => e.kind === "file_written"), "空文本门在证据投影之前——零 file_written");
+    assert.equal(polls, 1);
   }
 });
 
-test("kimi-web ⑤ ⑧: transcript 响应缺 items 数组 → 固定错误 fail-closed（事件流 done(failed) 腿 + spawn 提交前读上抛腿）", async () => {
-  // 腿 1：事件流轮询读——transcript 信封缺 data.items。
-  {
+test("kimi-web ⑤ ⑧: 形状门 fail-closed——turns 缺数组 / has_more 非布尔 / 轮缺 turn_id；prompts 列表缺 queued / queued 非数组 / 条目缺 prompt_id / 缺 active（不当成没有排队）；spawn 提交前读同样上抛", async () => {
+  const turnsLegs = [
+    envelope({ has_more: false }),
+    envelope({ turns: [] }),
+    envelope({ turns: [{ ordinal: 0 }], has_more: false }),
+    envelope({ turns: [{ turn_id: "t", ordinal: "0" }], has_more: false }),
+  ];
+  for (const reply of turnsLegs) {
     const { fetchImpl } = kimiServer((url) => {
-      if (url.endsWith("/transcript?agent_id=main")) return envelope({ seq: 7, has_more: false });
+      if (url.endsWith("/prompts")) return promptsEnvelope();
+      if (url.endsWith("/agents/main/turns")) return reply;
       throw new Error(`unexpected ${url}`);
     });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
     const events = [];
-    for await (const ev of backend.streamEvents(makeAgent(), "ses_m8", { interval: 5, turnAnchor: bareAnchor() })) {
-      events.push(ev);
-    }
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_m8", { interval: 5, runPrompts: bareRun() })) events.push(ev);
     assert.equal(events.length, 1);
     assert.equal(events[0].reason, "failed");
-    assert.match(events[0].error, /transcript response malformed/);
-    assert.match(events[0].error, /items array is required/);
+    assert.match(events[0].error, /turns response malformed/);
   }
-  // 腿 2：spawn 提交前 transcript 读——同一固定错误在 spawn 侧上抛（绝不回落
-  // 猜测形状继续提交）。
-  {
+  const promptsLegs = [
+    { active: null },
+    { queued: [] },
+    { active: null, queued: "msg_q2" },
+    { active: null, queued: [{ status: "queued" }] },
+    { active: { status: "running" }, queued: [] },
+    { active: "msg_q1", queued: [] },
+  ];
+  for (const data of promptsLegs) {
     const { calls, fetchImpl } = kimiServer((url) => {
-      if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_m9" });
-      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_m9") {
-        return detailEnvelope("session_m9", false, false, null);
-      }
-      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_m9/transcript?agent_id=main") {
-        return envelope({ seq: 7 });
-      }
+      if (url.endsWith("/prompts")) return envelope(data);
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope([kimiTurn()]);
       throw new Error(`unexpected ${url}`);
     });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    await assert.rejects(
-      () => backend.spawn(makeAgent(), { prompt: "hi" }),
-      /transcript response malformed/,
-    );
-    assert.ok(
-      calls.every((c) => c.method === "GET" || c.url.endsWith("/api/v1/sessions")),
-      "形状不可信即整体不可信——缺 items 后零 POST prompts",
-    );
+    const events = [];
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_m8p", { interval: 5, runPrompts: bareRun() })) events.push(ev);
+    assert.equal(events.length, 1, JSON.stringify(data));
+    assert.equal(events[0].reason, "failed", "完成的轮就在那里，也不能当成没有排队而收口");
+    assert.match(events[0].error, /prompts list malformed/);
+    assert.ok(!calls.some((c) => c.url.endsWith("/turns")), "列表读不可信即收口");
+  }
+  {
+    const { calls, fetchImpl } = kimiServer((url) => {
+      if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_m9" });
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_m9") return detailEnvelope("session_m9", false, false, null);
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_m9/agents/main/turns") return envelope({ has_more: false });
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    await assert.rejects(() => backend.spawn(makeAgent(), { prompt: "hi" }), /turns response malformed/);
+    assert.ok(calls.every((c) => c.method === "GET" || c.url.endsWith("/api/v1/sessions")), "形状不可信即整体不可信——零 POST prompts");
   }
 });
 
@@ -1145,97 +996,291 @@ test("kimi-web ⑤: 轮询 HTTP 连续失败（重试耗尽）→ done(failed, �
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const events = [];
-  for await (const ev of backend.streamEvents(makeAgent(), "ses_x", { interval: 5, turnAnchor: bareAnchor() })) {
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_x", { interval: 5, runPrompts: bareRun() })) {
     events.push(ev);
   }
   assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "done");
   assert.equal(events[0].reason, "failed");
   assert.ok(events[0].error.includes("fetch failed"));
 });
 
-test("kimi-web ⑤ ⑪: code!==0 信封（40001——agent_id 查询参数缺省时的服务器形状；客户端恒发 agent_id=main 绝不自伤，见 ② 的 URL 锚定）→ done(failed, 含 code 与 msg)", async () => {
+test("kimi-web ⑤ ⑪: turns 读回 code!==0 信封 → done(failed, 含 code 与 msg)", async () => {
   const { fetchImpl } = kimiServer((url) => {
-    if (url.endsWith("/transcript?agent_id=main")) {
-      return envelope(null, { code: 40001, msg: "agent_id is required" });
-    }
+    if (url.endsWith("/prompts")) return promptsEnvelope();
+    if (url.endsWith("/agents/main/turns")) return envelope(null, { code: 40001, msg: "bad request" });
     throw new Error(`unexpected ${url}`);
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const events = [];
-  for await (const ev of backend.streamEvents(makeAgent(), "ses_code", { interval: 5, turnAnchor: bareAnchor() })) {
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_code", { interval: 5, runPrompts: bareRun() })) {
     events.push(ev);
   }
   assert.equal(events[0].reason, "failed");
   assert.match(events[0].error, /code 40001/);
-  assert.match(events[0].error, /agent_id is required/);
+  assert.match(events[0].error, /bad request/);
 });
 
 test("kimi-web ⑤: signal.aborted → 静默结束（不 emit done）", async () => {
-  const running = turnItem({ state: "running", endedAt: null, durationMs: null, steps: [] });
   const { fetchImpl } = kimiServer((url) => {
-    if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([running]);
+    if (url.endsWith("/prompts")) return promptsEnvelope("msg_q1");
+    if (url.endsWith("/agents/main/turns")) return turnsEnvelope([runningTurn()]);
     throw new Error(`unexpected ${url}`);
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const controller = new AbortController();
   const events = [];
   setTimeout(() => controller.abort(), 30);
-  for await (const ev of backend.streamEvents(makeAgent(), "ses_a", {
-    interval: 5,
-    signal: controller.signal,
-    turnAnchor: bareAnchor(),
-  })) {
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_a", { interval: 5, signal: controller.signal, runPrompts: bareRun() })) {
     events.push(ev);
   }
-  assert.ok(events.every((e) => e.kind === "runtime_activity"), "abort 前只可能在途事实（问2），绝无 message/done——终态归 RunManager");
+  assert.ok(events.every((e) => e.kind === "runtime_activity"), "abort 前只可能有在途事实，绝无 message/done——终态归 RunManager");
 });
 
-test("kimi-web ⑤: 闭集外未知 state 值 → 一律非终态（fail-closed 等待，绝不猜终态），由 R9 F4 unsupported-state 有界出口收口", async () => {
-  // state 闭集 = queued|running|completed|failed|cancelled（live 实测）；
-  // 闭集外值（上游升级/形状漂移）既不判完成也不判失败——等，但有界：R9 F4
-  // 连续 8 拍仍闭集外 → done(failed, "unsupported turn state")（首拍即计数——
-  // turn 出现任不能算"闭集外 state 的进展"）。
-  const weird = turnItem({ state: "banana", steps: [] });
-  const { handler, markSpawned, polls } = turnScriptServer("session_wz", { script: [[weird]] });
-  const { fetchImpl } = kimiServer(handler);
+test("kimi-web ⑤: 闭集外的 status / outcome → 一律非终态，连续 8 拍后 unsupported-state 有界出口收口", async () => {
+  for (const [turn, pattern] of [
+    [kimiTurn({ status: "banana" }), /unsupported turn state: status=banana outcome=completed/],
+    [kimiTurn({ outcome: "exploded" }), /unsupported turn state: status=ended outcome=exploded/],
+    [kimiTurn({ status: "queued", outcome: undefined, answer: null }), /unsupported turn state: status=queued outcome=undefined/],
+  ]) {
+    const { events, polls } = await runScript("session_wz", { script: [[turn]] });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, "failed");
+    assert.match(events[0].error, pattern);
+    assert.equal(polls, 8);
+  }
+});
+
+// ===== 运行的提示集合：纠偏记账、逐条结算、翻页、最终轮切换（第 109 批）=====
+
+/**
+ * 纠偏用的假服务器：spawn 回 msg_q1；之后的 POST prompts 依次回 corrections 里的回执，
+ * steer 依次回 steers 里的答复；GET prompts / turns 按拍回放（同 turnScriptServer）。
+ */
+function correctionServer(sessionId, { script, prompts = null, corrections = [], steers = [] }) {
+  const inner = turnScriptServer(sessionId, { script, prompts });
+  let spawned = false;
+  const handler = (url, init = {}, n) => {
+    const method = init.method ?? "GET";
+    if (spawned && method === "POST" && url.endsWith(`/sessions/${sessionId}/prompts`)) return corrections.shift();
+    if (method === "POST" && url.endsWith("/prompts:steer")) return steers.shift();
+    return inner.handler(url, init, n);
+  };
+  return { handler, markSpawned: () => { spawned = true; inner.markSpawned(); }, polls: inner.polls };
+}
+
+async function runCorrected(sessionId, opts, { correctAt = 2, text = "fix it", ...eventOpts } = {}) {
+  const { handler, markSpawned, polls } = correctionServer(sessionId, opts);
+  const { fetchImpl, calls } = kimiServer(handler);
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.equal(events.length, 1);
-  assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /unsupported turn state: banana/);
-  assert.equal(polls(), 8, "连续 8 拍闭集外即退出——未知状态绝不无限等待也绝不猜终态");
-});
-
-// ===== ⑥ abort：中止当前活动的 prompt（kimi 2.4.0） =====
-
-const PROMPTS_URL = "http://127.0.0.1:4310/api/v1/sessions/session_new/prompts";
-
-/** spawn 路由 + abort 路由：GET prompts 返回 promptsData；POST :abort 交给 onAbort。 */
-function abortServer({ promptsData, onAbort, onList }) {
-  return kimiServer((url, init) => {
-    if (url.includes("/api/v1/shutdown")) {
-      throw new Error("server-level shutdown must never be called by the backend");
-    }
-    if (url === PROMPTS_URL && (init.method ?? "GET") === "GET") {
-      return onList ? onList(init) : envelope(promptsData);
-    }
-    if (url.endsWith(":abort")) return onAbort(url, init);
-    return spawnOkRoutes()(url);
+  let ticks = 0;
+  let sent = null;
+  const events = await collect(handle, {
+    onPollTick: async () => {
+      ticks += 1;
+      if (ticks === correctAt) sent = await handle.sendCorrection(text);
+    },
+    ...eventOpts,
   });
+  return { events, polls: polls(), sent, calls };
 }
 
-test("kimi-web ⑥: abort——GET prompts 取 active 的 prompt id → POST …/prompts/{promptId}:abort（body {}）；绝不调 /api/v1/shutdown", async () => {
+const correctionReceipt = (id, status = "queued") => envelope({ prompt_id: id, user_message_id: id, status });
+
+test("kimi-web 纠偏①: 已转入的纠偏在 prompts 里看不到、它的轮还没出现 → 不收口（哪怕派发那一轮已带回答结束）；纠偏开轮后运行在那一轮收口", async () => {
+  const dispatchTurn = kimiTurn({ turn_id: "t_d", ordinal: 0, answer: "first answer" });
+  const correctionTurn = kimiTurn({ turn_id: "t_c", ordinal: 1, promptIds: ["msg_c"], prompt: "fix it", answer: "corrected answer" });
+  const { events, polls, sent } = await runCorrected("session_cr1", {
+    script: [[runningTurn({ turn_id: "t_d" })], [dispatchTurn], [dispatchTurn], [dispatchTurn, correctionTurn]],
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope({ steered: true, prompt_ids: ["msg_c"] })],
+  });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(polls, 4, "拍 2、3：派发轮已结束、纠偏既不在列表也不在轮里——等");
+  assert.equal(events.at(-1).reason, "completed");
+  const texts = events.filter((e) => e.kind === "message").map((e) => `${e.role}:${e.parts[0].text}`);
+  assert.deepEqual(texts, ["user:hi", "assistant:corrected answer"], "答案取最终轮；回显取第一个归属轮的开场消息");
+  assert.deepEqual(events.find((e) => e.kind === "metrics").tokens, { input: 200, output: 14, cacheRead: 20, cacheWrite: 6 }, "两轮 usage 之和");
+});
+
+test("kimi-web 纠偏②: 已转入的纠偏一直不出现 → 从它被转入的时刻起算（不用派发的原点），到界失败并写明", async () => {
+  // silentTimeout 缺席 → 每条提示各自数 8 拍。派发在拍 1 已入轮；纠偏在拍 3 转入（那时
+  // 派发轮已带回答结束），拍 3..10 数满 8 拍 → 拍 10 失败。
+  const script = [[runningTurn()], [runningTurn()], [kimiTurn({ answer: "first answer" })]];
+  const { events, polls, sent } = await runCorrected("session_cr2", {
+    script,
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope({ steered: true })],
+  }, { correctAt: 3 });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(polls, 10);
+  assert.equal(events.at(-1).reason, "failed");
+  assert.match(events.at(-1).error, /correction prompt msg_c was steered into the session but no turn ran it within 8 consecutive polls/);
+  // silentTimeout 在场：上界相对转入时刻。
+  const timed = await runCorrected("session_cr2b", {
+    script,
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope({ steered: true })],
+  }, { correctAt: 3, pollInterval: 20, silentTimeout: 100 });
+  assert.match(timed.events.at(-1).error, /no turn ran it within 100ms of the steer/);
+});
+
+test("kimi-web 纠偏③: steer 失败的纠偏（仅接纳）——还在 queued 里不计时；既不在轮里也不在列表里，从它自己的提交时刻起数到界 → 按未执行结算、发 system 消息，运行照常收口", async () => {
+  const { events, polls, sent } = await runCorrected("session_cr3", {
+    script: [[runningTurn()], [kimiTurn({ answer: "first answer" })]],
+    // 拍 2..11 它在 queued 里（服务端还拿着它），之后消失、也没有开轮。
+    prompts: (poll) => (poll >= 2 && poll <= 11 ? { active: null, queued: ["msg_c"] } : { active: null, queued: [] }),
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope(null, { code: 40402, msg: "no active prompt to steer into" })],
+  });
+  assert.deepEqual(sent, { ok: false, reason: "send_failed" }, "返回值含义不变");
+  assert.equal(polls, 19, "拍 2..11 在队列里不计；拍 12..19 数满 8 拍");
+  const system = events.filter((e) => e.kind === "message" && e.role === "system");
+  assert.equal(system.length, 1);
+  assert.match(system[0].parts[0].text, /correction prompt msg_c was not executed — its steer had failed/);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(events.find((e) => e.role === "assistant").parts[0].text, "first answer");
+});
+
+test("kimi-web 纠偏④: steer 失败的纠偏之后自己开了一轮 → 照常归属，运行在那一轮收口", async () => {
+  const later = kimiTurn({ turn_id: "t_c", ordinal: 1, promptIds: ["msg_c"], prompt: "fix it", answer: "late correction answer" });
+  const { events, polls } = await runCorrected("session_cr4", {
+    script: [[runningTurn()], [kimiTurn({ answer: "first" })], [kimiTurn({ answer: "first" })], [kimiTurn({ answer: "first" }), later]],
+    prompts: (poll) => (poll === 2 || poll === 3 ? { active: null, queued: ["msg_c"] } : { active: null, queued: [] }),
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope({ steered: false })],
+  });
+  assert.equal(polls, 4);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(events.find((e) => e.role === "assistant").parts[0].text, "late correction answer");
+});
+
+test("kimi-web 纠偏⑤: 回执 blocked/failed 的纠偏不入账（send_failed）；集合里的 id 在 prompts 列表里报 blocked/failed → 运行失败并写明哪条", async () => {
+  const blocked = await runCorrected("session_cr5", {
+    script: [[runningTurn()], [kimiTurn({ answer: "first" })]],
+    corrections: [correctionReceipt("msg_c", "blocked")],
+    steers: [],
+  }, { correctAt: 1 });
+  assert.deepEqual(blocked.sent, { ok: false, reason: "send_failed" });
+  assert.ok(!blocked.calls.some((c) => c.url.endsWith("/prompts:steer")), "不对提交即失败的 prompt steer");
+  assert.equal(blocked.events.at(-1).reason, "completed", "没入账的纠偏不挡收口");
+  const listed = await runCorrected("session_cr5b", {
+    script: [[kimiTurn({ answer: "first" })]],
+    prompts: (poll) => (poll >= 2 ? { active: null, queued: [{ prompt_id: "msg_c", status: "blocked" }] } : { active: null, queued: [] }),
+    corrections: [correctionReceipt("msg_c")],
+    steers: [envelope(null, { code: 40402, msg: "no active prompt" })],
+  }, { correctAt: 1 });
+  assert.equal(listed.events.at(-1).reason, "failed");
+  assert.match(listed.events.at(-1).error, /kimi prompt msg_c \(correction\) is blocked in the serve's prompts list/);
+});
+
+test("kimi-web 提交即失败: 派发回执 status blocked/failed → 首拍前直接以失败收口（不轮询）", async () => {
+  for (const status of ["blocked", "failed"]) {
+    const { events, polls } = await runScript("session_sub", { script: [[]], submitStatus: status });
+    assert.deepEqual(events.map((e) => e.kind), ["done"]);
+    assert.equal(events[0].reason, "failed");
+    assert.equal(events[0].error, `kimi prompt msg_q1 was ${status} at submission (the serve will not run it)`);
+    assert.equal(polls, 0);
+  }
+  // 我们的 prompt 还在 active/queued 里：最终轮哪怕已 ended 也不收口。
+  const { events, polls } = await runScript("session_listed", {
+    script: [[kimiTurn({ answer: "done" })]],
+    prompts: (poll) => (poll <= 2 ? { active: "msg_q1", queued: [] } : { active: null, queued: [] }),
+  });
+  assert.equal(polls, 3);
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("kimi-web 翻页: 最新页 has_more:true → before_ordinal 往回翻到提交前边界；按 turn_id 去重；派发在第二页也能归属，用量两轮求和", async () => {
+  const run = createRunPrompts({ promptId: "msg_d", boundaryOrdinal: 5 });
+  run.prompts.set("msg_c", { kind: "correction", submittedAt: Date.now(), steeredAt: Date.now(), waitPolls: 0, notExecuted: false });
+  const dispatchTurn = kimiTurn({ turn_id: "t6", ordinal: 6, promptIds: ["msg_d"], prompt: "dispatch", answer: null });
+  const other = kimiTurn({ turn_id: "t7", ordinal: 7, promptIds: ["msg_x"], answer: "other" });
+  const correctionTurn = kimiTurn({ turn_id: "t9", ordinal: 9, promptIds: ["msg_c"], prompt: "fix", answer: "final" });
+  const pages = {
+    "": turnsEnvelope([kimiTurn({ turn_id: "t8", ordinal: 8, promptIds: ["msg_y"] }), correctionTurn], { hasMore: true }),
+    "?before_ordinal=8": turnsEnvelope([dispatchTurn, other], { hasMore: true }),
+    "?before_ordinal=6": turnsEnvelope([kimiTurn({ turn_id: "t4", ordinal: 4, promptIds: ["msg_old"] }), kimiTurn({ turn_id: "t5", ordinal: 5, promptIds: ["msg_old2"] })], { hasMore: true }),
+  };
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url.endsWith("/prompts")) return promptsEnvelope();
+    const turns = url.indexOf("/agents/main/turns");
+    if (turns >= 0) return pages[url.slice(turns + "/agents/main/turns".length)];
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const events = [];
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_pages", { interval: 5, runPrompts: run })) events.push(ev);
+  assert.deepEqual(calls.filter((c) => c.url.includes("/turns")).map((c) => c.url.split("/turns")[1]), ["", "?before_ordinal=8", "?before_ordinal=6"],
+    "翻到本页最早的轮 ordinal ≤ 边界为止");
+  assert.equal(events.at(-1).reason, "completed");
+  assert.deepEqual(events.filter((e) => e.kind === "message").map((e) => e.parts[0].text), ["dispatch", "final"]);
+  assert.deepEqual(events.find((e) => e.kind === "metrics").tokens, { input: 200, output: 14, cacheRead: 20, cacheWrite: 6 });
+});
+
+test("kimi-web 翻页: 翻不到边界（has_more:true 却给空页 / 往回翻没有前进 / 某页读失败）→ 本拍按观测失败收口，绝不用不完整的轮收口或发 metrics", async () => {
+  const legs = [
+    { "": turnsEnvelope([kimiTurn({ turn_id: "t9", ordinal: 9 })], { hasMore: true }), "?before_ordinal=9": turnsEnvelope([], { hasMore: true }) },
+    { "": turnsEnvelope([kimiTurn({ turn_id: "t9", ordinal: 9 })], { hasMore: true }), "?before_ordinal=9": turnsEnvelope([kimiTurn({ turn_id: "t9b", ordinal: 9 })], { hasMore: true }) },
+    { "": turnsEnvelope([kimiTurn({ turn_id: "t9", ordinal: 9 })], { hasMore: true }), "?before_ordinal=9": jsonResponse({ code: 0, msg: "down", data: null }, 500) },
+  ];
+  for (const pages of legs) {
+    const { fetchImpl } = kimiServer((url) => {
+      if (url.endsWith("/prompts")) return promptsEnvelope();
+      const turns = url.indexOf("/agents/main/turns");
+      if (turns >= 0) return pages[url.slice(turns + "/agents/main/turns".length)];
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const events = [];
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_partial", { interval: 5, runPrompts: bareRun("msg_q1", 2) })) events.push(ev);
+    assert.deepEqual(events.map((e) => e.kind), ["done"]);
+    assert.equal(events[0].reason, "failed");
+    assert.match(events[0].error, /paging incomplete|request failed 500/);
+  }
+});
+
+test("kimi-web 停滞: 最终轮换了（纠偏开了新一轮）算一次进展，产出量最高水位与证词累计按新轮重建", async () => {
+  // 假钟每拍 +310s、serve 恒报 active：轮 A（产出量大）冻结 5 次证词（1550s）后，纠偏的
+  // 轮 B（产出量小于 A 的最高水位）接手、再冻结 5 次证词。不按新轮重建的话，B 的产出
+  // 永远不超过 A 的水位，累计在 B 的第一次证词就过 30min。
+  const run = createRunPrompts({ promptId: "msg_q1" });
+  run.prompts.set("msg_c", { kind: "correction", submittedAt: Date.now(), steeredAt: Date.now(), waitPolls: 0, notExecuted: false });
+  const turnA = kimiTurn({ turn_id: "tA", ordinal: 0, items: [userMessageItem(), assistantItem("a".repeat(500))] });
+  const turnB = runningTurn({ turn_id: "tB", ordinal: 1, promptIds: ["msg_c"], prompt: "c" });
+  const script = [
+    ...Array(6).fill([turnA]),
+    ...Array(6).fill([turnA, turnB]),
+    [turnA, kimiTurn({ turn_id: "tB", ordinal: 1, promptIds: ["msg_c"], prompt: "c", answer: "b-done" })],
+  ];
+  let tick = 0;
+  let fakeNow = 0;
+  let detailCalls = 0;
+  const { fetchImpl } = kimiServer((url) => {
+    if (url.endsWith("/prompts")) { tick += 1; fakeNow += 310_000; return promptsEnvelope(); }
+    if (url.endsWith("/agents/main/turns")) return turnsEnvelope(script[Math.min(tick, script.length) - 1]);
+    if (url.endsWith("/ses_switch")) { detailCalls += 1; return detailEnvelope("ses_switch", true, true, null); }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const events = [];
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_switch", { interval: 1, runPrompts: run, stallClock: () => fakeNow })) events.push(ev);
+  assert.equal(events.at(-1).reason, "completed", "两段各 1550s < 30min，合计超出也不收口");
+  assert.equal(events.find((e) => e.role === "assistant").parts[0].text, "b-done");
+  assert.ok(detailCalls >= 10, `两段都吃到证词续命（实际 ${detailCalls}）`);
+});
+
+
+// ===== ⑥ abort：中止排队与活动的 prompt，并有界复查（2.4.0 / 2.6） =====
+
+
+test("kimi-web ⑥: abort——GET prompts 取 active 的 prompt id → POST …/prompts/{promptId}:abort（body {}）→ 稍等后复查 prompts 与会话详情；绝不调 /api/v1/shutdown", async () => {
   const { calls, fetchImpl } = abortServer({
     promptsData: { active: { prompt_id: "msg_q1", status: "running" }, queued: [] },
     onAbort: () => envelope({ aborted: true, at_seq: 12 }),
   });
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   const before = calls.length;
   await handle.abort();
@@ -1243,50 +1288,81 @@ test("kimi-web ⑥: abort——GET prompts 取 active 的 prompt id → POST …
   assert.deepEqual(abortCalls.map((c) => [c.method, c.url]), [
     ["GET", PROMPTS_URL],
     ["POST", `${PROMPTS_URL}/msg_q1:abort`],
+    ["GET", PROMPTS_URL],
+    ["GET", SESSION_URL],
   ]);
   assert.deepEqual(JSON.parse(abortCalls[1].body), {});
   for (const call of abortCalls) assert.equal(call.headers.authorization, `Bearer ${TOKEN_VALUE}`);
   assert.ok(!calls.some((c) => c.url.includes("/api/v1/shutdown")), "绝不请求服务器级 shutdown（共享服务器会误杀无关会话）");
 });
 
-test("kimi-web ⑥: abort——active 键名 id / promptId / 裸字符串同样取到 prompt id", async () => {
-  for (const active of [{ id: "msg_a" }, { promptId: "msg_a" }, "msg_a"]) {
-    const { calls, fetchImpl } = abortServer({
-      promptsData: { active, queued: [] },
-      onAbort: () => envelope({ aborted: true }),
-    });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    await handle.abort();
-    assert.equal(calls.at(-1).url, `${PROMPTS_URL}/msg_a:abort`, JSON.stringify(active));
-  }
+test("kimi-web ⑥: 中止后的窗口——已转入、还没开轮的纠偏在中止后自己开了一轮 → 复查看到新的活动 prompt，再中止一次", async () => {
+  // 2.6：中止活动轮不清已转入的纠偏；它在中止后成为新的活动轮。
+  const listings = [
+    { active: { prompt_id: "msg_q1" }, queued: [] },
+    { active: { prompt_id: "msg_steered" }, queued: [] }, // 第一次复查：纠偏自己开了一轮
+    { active: null, queued: [] },
+  ];
+  let reads = 0;
+  const { calls, fetchImpl } = abortServer({
+    onList: () => envelope(listings[Math.min(reads++, listings.length - 1)]),
+    detail: () => detailEnvelope("session_new", false, reads >= 1 && reads < 3, null),
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  const before = calls.length;
+  await handle.abort();
+  assert.deepEqual(calls.slice(before).filter((c) => c.method === "POST").map((c) => c.url), [
+    `${PROMPTS_URL}/msg_q1:abort`,
+    `${PROMPTS_URL}/msg_steered:abort`,
+  ]);
+  // 列表空了但会话详情仍说 main_turn_active:true（又一轮正在起来）→ 同样再查；有界：
+  // 最多 3 轮，仍停不下按 abort 失败。
+  let armed = false; // spawn 的静默门要求 idle；之后才一直报在跑
+  const stubborn = abortServer({
+    promptsData: { active: null, queued: [] },
+    detail: () => detailEnvelope("session_new", armed, armed, null),
+  });
+  const stubbornBackend = new KimiWebBackend({ fetchImpl: stubborn.fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
+  const stubbornHandle = await stubbornBackend.spawn(makeAgent(), { prompt: "hi" });
+  armed = true;
+  const mark = stubborn.calls.length;
+  await assert.rejects(() => stubbornHandle.abort(), /^Error: kimi-web abort failed: .*after 3 abort rounds/);
+  const reread = stubborn.calls.slice(mark).filter((c) => c.method === "GET" && c.url === PROMPTS_URL).length;
+  assert.equal(reread, 4, "首读 + 3 轮复查");
 });
 
-test("kimi-web ⑥: abort——没有活动 prompt（active:null）视为已停：不报错、不发 :abort", async () => {
+test("kimi-web ⑥: abort——没有活动 prompt（active:null）且会话不在跑：不发 :abort、复查后视为已停", async () => {
   const { calls, fetchImpl } = abortServer({
     promptsData: { active: null, queued: [] },
     onAbort: () => { throw new Error("abort must not be posted without an active prompt"); },
   });
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   await handle.abort();
   assert.ok(!calls.some((c) => c.url.endsWith(":abort")));
 });
 
-test("kimi-web ⑥: abort 失败腿——上游拒绝 / HTTP 错 / aborted 非 true（复查仍有活动 prompt）/ 列表畸形 / active 无 id → 固定文案，不含上游原文、token 或 URL", async () => {
+test("kimi-web ⑥: abort 失败腿——上游拒绝 / HTTP 错 / aborted 非 true 且复查仍在跑 / 列表读被拒 / 列表畸形（缺 active、条目缺 prompt_id、旧的 id/promptId/裸字符串形状）/ 传输失败 → 固定文案，不含上游原文、token 或 URL", async () => {
   const echo = `token ${TOKEN_VALUE} at http://127.0.0.1:4310/secret upstream-detail`;
+  const live = { active: { prompt_id: "msg_q1" }, queued: [] };
   const legs = [
-    { name: "code!==0", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => envelope(null, { code: 40001, msg: echo }) },
-    { name: "HTTP 500", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => jsonResponse({ code: 0, msg: echo }, 500) },
-    { name: "aborted:false", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => envelope({ aborted: false }) },
-    { name: "list rejected", onList: () => envelope(null, { code: 40401, msg: echo }), onAbort: () => envelope({ aborted: true }) },
-    { name: "list malformed", promptsData: { queued: [] }, onAbort: () => envelope({ aborted: true }) },
-    { name: "active without id", promptsData: { active: { status: "running" } }, onAbort: () => envelope({ aborted: true }) },
-    { name: "transport", promptsData: { active: { prompt_id: "msg_q1" } }, onAbort: () => { throw new TypeError(`fetch failed ${echo}`); } },
+    { name: "code!==0", promptsData: live, afterAbort: live, onAbort: () => envelope(null, { code: 40001, msg: echo }) },
+    { name: "HTTP 500", promptsData: live, afterAbort: live, onAbort: () => jsonResponse({ code: 0, msg: echo }, 500) },
+    { name: "aborted:false", promptsData: live, afterAbort: live, onAbort: () => envelope({ aborted: false }) },
+    { name: "list rejected", onList: () => envelope(null, { code: 40001, msg: echo }) },
+    { name: "list malformed", promptsData: { queued: [] } },
+    { name: "active without id", promptsData: { active: { status: "running" }, queued: [] } },
+    { name: "legacy id key", promptsData: { active: { id: "msg_a" }, queued: [] } },
+    { name: "legacy promptId key", promptsData: { active: { promptId: "msg_a" }, queued: [] } },
+    { name: "bare string", promptsData: { active: "msg_a", queued: [] } },
+    { name: "queued not array", promptsData: { active: null, queued: "msg_q2" } },
+    { name: "queued without id", promptsData: { active: null, queued: [{ status: "queued" }] } },
+    { name: "transport", promptsData: live, afterAbort: live, onAbort: () => { throw new TypeError(`fetch failed ${echo}`); } },
   ];
   for (const leg of legs) {
     const { fetchImpl } = abortServer(leg);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
     const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
     await assert.rejects(() => handle.abort(), (error) => {
       assert.match(error.message, /^kimi-web abort failed: /, leg.name);
@@ -1299,18 +1375,10 @@ test("kimi-web ⑥: abort 失败腿——上游拒绝 / HTTP 错 / aborted 非 t
   }
 });
 
-test("kimi-web ⑥: abort 竞态——:abort 未获确认（40402 / aborted:false）时复查列表：已无活动 prompt → 视为已停；复查失败或畸形 → 固定文案", async () => {
-  const unacknowledged = [
-    () => envelope(null, { code: 40402, msg: "no active prompt" }),
-    () => envelope({ aborted: false }),
-  ];
-  for (const onAbortReply of unacknowledged) {
-    let abortPosted = false;
-    const { calls, fetchImpl } = abortServer({
-      onList: () => envelope(abortPosted ? { active: null, queued: [] } : { active: { prompt_id: "msg_q1" }, queued: [] }),
-      onAbort: () => { abortPosted = true; return onAbortReply(); },
-    });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+test("kimi-web ⑥: abort 竞态——:abort 未获确认（实测 40402 / aborted:false）时以复查为准：已无活动 prompt → 已停；会话已不存在（40401）→ 已停；复查畸形或被拒 → 固定文案", async () => {
+  for (const onAbort of [() => envelope(null, { code: 40402, msg: "prompt msg_q1 not found" }), () => envelope({ aborted: false })]) {
+    const { calls, fetchImpl } = abortServer({ promptsData: { active: { prompt_id: "msg_q1" }, queued: [] }, onAbort });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
     const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
     const before = calls.length;
     await handle.abort();
@@ -1318,29 +1386,37 @@ test("kimi-web ⑥: abort 竞态——:abort 未获确认（40402 / aborted:fals
       ["GET", PROMPTS_URL],
       ["POST", `${PROMPTS_URL}/msg_q1:abort`],
       ["GET", PROMPTS_URL],
+      ["GET", SESSION_URL],
     ]);
   }
-  for (const relist of [() => envelope({ queued: [] }), () => envelope(null, { code: 40401, msg: "gone" })]) {
-    let abortPosted = false;
+  {
     const { fetchImpl } = abortServer({
-      onList: () => (abortPosted ? relist() : envelope({ active: { prompt_id: "msg_q1" }, queued: [] })),
-      onAbort: () => { abortPosted = true; return envelope(null, { code: 40402, msg: "no active prompt" }); },
+      promptsData: { active: { prompt_id: "msg_q1" }, queued: [] },
+      afterAbort: null,
+      onList: (abortPosts) => (abortPosts > 0
+        ? envelope(null, { code: 40401, msg: "session does not exist" })
+        : envelope({ active: { prompt_id: "msg_q1" }, queued: [] })),
     });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
     const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    await assert.rejects(() => handle.abort(), (error) => {
-      assert.match(error.message, /^kimi-web abort failed: /);
-      return true;
+    await handle.abort();
+  }
+  for (const relist of [() => envelope({ queued: [] }), () => envelope(null, { code: 40001, msg: "nope" })]) {
+    const { fetchImpl } = abortServer({
+      onList: (abortPosts) => (abortPosts > 0 ? relist() : envelope({ active: { prompt_id: "msg_q1" }, queued: [] })),
+      onAbort: () => envelope(null, { code: 40402, msg: "no active prompt" }),
     });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    await assert.rejects(() => handle.abort(), /^Error: kimi-web abort failed: /);
   }
 });
 
 test("kimi-web ⑥: abort 先逐条中止排队的 prompt、再中止活动的——只停活动的，排队那条会接着跑（2.4.0 实测）", async () => {
   const { calls, fetchImpl } = abortServer({
     promptsData: { active: { prompt_id: "msg_live" }, queued: [{ prompt_id: "msg_q2" }, { prompt_id: "msg_q3" }] },
-    onAbort: () => envelope({ aborted: true }),
   });
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   const before = calls.length;
   await handle.abort();
@@ -1349,43 +1425,27 @@ test("kimi-web ⑥: abort 先逐条中止排队的 prompt、再中止活动的�
     ["POST", `${PROMPTS_URL}/msg_q2:abort`],
     ["POST", `${PROMPTS_URL}/msg_q3:abort`],
     ["POST", `${PROMPTS_URL}/msg_live:abort`],
+    ["GET", PROMPTS_URL],
+    ["GET", SESSION_URL],
   ]);
 });
 
-test("kimi-web ⑥: abort——没有活动轮、只有排队的也逐条中止；queued 不是数组或条目缺 id → 固定文案", async () => {
-  {
-    const { calls, fetchImpl } = abortServer({
-      promptsData: { active: null, queued: [{ prompt_id: "msg_q2" }] },
-      onAbort: () => envelope({ aborted: true }),
-    });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    const before = calls.length;
-    await handle.abort();
-    assert.deepEqual(calls.slice(before).map((c) => [c.method, c.url]), [
-      ["GET", PROMPTS_URL],
-      ["POST", `${PROMPTS_URL}/msg_q2:abort`],
-    ]);
-  }
-  for (const promptsData of [
-    { active: { prompt_id: "msg_live" }, queued: "msg_q2" },
-    { active: null, queued: [{ status: "queued" }] },
-  ]) {
-    const { fetchImpl } = abortServer({ promptsData, onAbort: () => envelope({ aborted: true }) });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    await assert.rejects(() => handle.abort(), (error) => {
-      assert.match(error.message, /^kimi-web abort failed: /, JSON.stringify(promptsData));
-      return true;
-    });
-  }
+test("kimi-web ⑥: abort——没有活动轮、只有排队的也逐条中止", async () => {
+  const { calls, fetchImpl } = abortServer({ promptsData: { active: null, queued: [{ prompt_id: "msg_q2" }] } });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  const before = calls.length;
+  await handle.abort();
+  assert.deepEqual(calls.slice(before).map((c) => [c.method, c.url]), [
+    ["GET", PROMPTS_URL],
+    ["POST", `${PROMPTS_URL}/msg_q2:abort`],
+    ["GET", PROMPTS_URL],
+    ["GET", SESSION_URL],
+  ]);
 });
 
 test("kimi-web ⑥: abort 超时 → 固定文案（不含 token）", async () => {
-  const { fetchImpl: base } = abortServer({
-    promptsData: { active: { prompt_id: "msg_q1" } },
-    onAbort: () => envelope({ aborted: true }),
-  });
+  const { fetchImpl: base } = abortServer({ promptsData: { active: { prompt_id: "msg_q1" }, queued: [] } });
   let hang = false;
   const fetchImpl = (url, init = {}) => {
     if (hang && url.endsWith(":abort")) {
@@ -1397,7 +1457,7 @@ test("kimi-web ⑥: abort 超时 → 固定文案（不含 token）", async () =
     }
     return base(url, init);
   };
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 50, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 50, retries: 0, abortSettleMs: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   hang = true;
   await assert.rejects(() => handle.abort(), (error) => {
@@ -1409,30 +1469,25 @@ test("kimi-web ⑥: abort 超时 → 固定文案（不含 token）", async () =
 
 test("kimi-web ⑥: abort 幂等——二次调用复用首次结果（成功不重发请求；失败原样重放同一拒绝）", async () => {
   {
-    const { calls, fetchImpl } = abortServer({
-      promptsData: { active: { prompt_id: "msg_q1" } },
-      onAbort: () => envelope({ aborted: true }),
-    });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const { calls, fetchImpl } = abortServer({ promptsData: { active: { prompt_id: "msg_q1" }, queued: [] } });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
     const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
     const before = calls.length;
     await Promise.all([handle.abort(), handle.abort()]);
     await handle.abort();
-    assert.equal(calls.length - before, 2, "恰一次 GET prompts + 一次 :abort");
+    assert.equal(calls.length - before, 4, "GET prompts + :abort + 复查 prompts 与详情各一次");
   }
   {
-    const { calls, fetchImpl } = abortServer({
-      promptsData: { active: { prompt_id: "msg_q1" } },
-      onAbort: () => envelope(null, { code: 40001, msg: "nope" }),
-    });
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const live = { active: { prompt_id: "msg_q1" }, queued: [] };
+    const { calls, fetchImpl } = abortServer({ promptsData: live, afterAbort: live, onAbort: () => envelope(null, { code: 40001, msg: "nope" }) });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
     const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
     const before = calls.length;
     const first = await handle.abort().catch((e) => e);
     const second = await handle.abort().catch((e) => e);
     assert.ok(first instanceof Error);
     assert.equal(second, first, "同一拒绝原样重放");
-    assert.equal(calls.length - before, 3, "GET prompts + :abort + 复查 GET 各一次；失败也不重发");
+    assert.equal(calls.length - before, 10, "首读 + 3 轮（:abort + 复查 prompts + 详情）；失败也不重发");
   }
 });
 
@@ -1441,21 +1496,20 @@ test("kimi-web ⑥: 中止前会话忙、中止后不忙——sessionStatus busy
   let aborted = false;
   const { fetchImpl } = kimiServer((url, init) => {
     if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_new" });
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_new") {
-      // spawn 期静默门要求 idle；提交后直到中止前都在忙。
+    if (url === SESSION_URL) {
       const busy = submitted && !aborted;
       return detailEnvelope("session_new", busy, busy, null);
     }
-    if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope([]);
+    if (url.endsWith("/agents/main/turns")) return turnsEnvelope([]);
     if (url === PROMPTS_URL && init.method === "POST") {
       submitted = true;
       return envelope({ prompt_id: "msg_q1", status: "running" });
     }
-    if (url === PROMPTS_URL) return envelope({ active: aborted ? null : { prompt_id: "msg_q1" }, queued: [] });
+    if (url === PROMPTS_URL) return promptsEnvelope(aborted ? null : "msg_q1");
     if (url.endsWith(":abort")) { aborted = true; return envelope({ aborted: true }); }
     throw new Error(`unexpected ${url}`);
   });
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   const probe = () => handle.sessionStatus(handle.serveUrl, handle.backendSessionId, { cwd: handle.cwd });
   assert.deepEqual(await probe(), { type: "busy" });
@@ -1463,7 +1517,7 @@ test("kimi-web ⑥: 中止前会话忙、中止后不忙——sessionStatus busy
   assert.deepEqual(await probe(), { type: "idle" });
 });
 
-test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面（wao stop 用）：abort 走 GET prompts → :abort 带 agent 的 Bearer、幂等；探针读会话详情与消息", async () => {
+test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面（wao stop 用）：abort 走 GET prompts → :abort → 复查，带 agent 的 Bearer、幂等；探针读会话详情与消息", async () => {
   let aborted = false;
   const { calls, fetchImpl } = kimiServer((url) => {
     if (url.includes("/api/v1/shutdown")) throw new Error("server-level shutdown must never be called");
@@ -1471,13 +1525,11 @@ test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面�
       return detailEnvelope("session_old", !aborted, !aborted, aborted ? "cancelled" : null);
     }
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/messages") return envelope({ items: [{ id: "m1" }] });
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts") {
-      return envelope({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
-    }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts") return promptsEnvelope(aborted ? null : "msg_live");
     if (url.endsWith("/prompts/msg_live:abort")) { aborted = true; return envelope({ aborted: true }); }
     throw new Error(`unexpected ${url}`);
   });
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
   const target = backend.stopTarget(makeAgent({ serveUrl: "http://127.0.0.1:4310/" }), "session_old");
   assert.deepEqual(Object.keys(target).sort(), ["abort", "messages", "session", "sessionStatus"]);
   assert.deepEqual(await target.sessionStatus("ignored", "ignored", {}), { type: "busy" });
@@ -1487,7 +1539,8 @@ test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面�
   assert.deepEqual(abortCalls.map((c) => [c.method, c.url]), [
     ["GET", "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts"],
     ["POST", "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts/msg_live:abort"],
-  ], "同一目标恰一次 GET prompts + 一次 :abort");
+    ["GET", "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts"],
+  ], "同一目标恰一次中止（一次 :abort + 一次复查）");
   for (const call of calls) assert.equal(call.headers.authorization, `Bearer ${TOKEN_VALUE}`);
   assert.deepEqual(await target.sessionStatus(), { type: "idle" });
   assert.equal((await target.session()).busy, false);
@@ -1563,11 +1616,12 @@ test("kimi-web ②: --reasoning 覆盖经 RunManager 合成进 agent.reasoning �
   const { RunManager } = await import("../../src/runManager.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-kimiweb-reasoning-"));
   try {
-    // 提交后 transcript 即给出本轮的 completed turn，run 自然收口（不留后台轮询）。
+    // 提交后 turns 即给出本运行 ended 的轮，run 自然收口（不留后台轮询）。
     let submitted = false;
     const { calls, fetchImpl } = kimiServer((url, init) => {
-      if (url.endsWith("/transcript?agent_id=main")) return transcriptEnvelope(submitted ? [turnItem({ steps: [stepItem()] })] : []);
+      if (url.endsWith("/agents/main/turns")) return turnsEnvelope(submitted ? [kimiTurn()] : []);
       if (url === PROMPTS_URL && init.method === "POST") submitted = true;
+      else if (url === PROMPTS_URL) return promptsEnvelope();
       if (url.endsWith(":delete")) return envelope({ deleted: true });
       return spawnOkRoutes()(url);
     });
@@ -1600,7 +1654,7 @@ test("kimi-web ②: --reasoning 覆盖经 RunManager 合成进 agent.reasoning �
 });
 
 test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + messages 页形状；serveUrl 形参可忽略", async () => {
-  // F3 静默门后夹具分相：spawn 期（静默门 + transcript 读）idle 放行；探针期翻
+  // F3 静默门后夹具分相：spawn 期（静默门 + turns 读）idle 放行；探针期翻
   // busy——"探针可观察 busy"的意图不变（静默门只约束提交前）。
   let probePhase = false;
   const { calls, fetchImpl } = kimiServer((url) => {
@@ -1611,8 +1665,8 @@ test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形�
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_p") {
       return detailEnvelope("session_p", probePhase, probePhase, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_p/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_p/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/api/v1/sessions/session_p/messages")) {
       return envelope({ items: [{ id: "msg_x", role: "user", content: [] }] });
@@ -1637,7 +1691,7 @@ test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形�
   const page = await handle.messages(wrongServeUrl, handle.backendSessionId, { cwd: handle.cwd });
   assert.ok(Array.isArray(page?.data), "messages 返回 {data} 页形状（sample 读 page?.data 计数）");
   assert.equal(page.data.length, 1);
-  // 探针是只读 GET（spawn 的建会话 POST + 静默门 detail GET + 提交前 transcript
+  // 探针是只读 GET（spawn 的建会话 POST + 静默门 detail GET + 提交前 turns
   // GET + 发 prompt POST 之后不再有写请求）。
   assert.equal(calls.length, 7);
   assert.deepEqual(calls.slice(4).map((c) => c.method), ["GET", "GET", "GET"]);
@@ -1655,8 +1709,8 @@ test("kimi-web ⑥: verifyStopQuiet 真实消费者闭环——idle 静默会话
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v") {
         return detailEnvelope("session_v", false, false, "completed");
       }
-      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v/transcript?agent_id=main") {
-        return transcriptEnvelope([]);
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v/agents/main/turns") {
+        return turnsEnvelope([]);
       }
       if (url.endsWith("/api/v1/sessions/session_v/messages")) {
         return envelope({ items: [{ id: "msg_x", role: "user", content: [] }] });
@@ -1685,8 +1739,8 @@ test("kimi-web ⑥: verifyStopQuiet 真实消费者闭环——idle 静默会话
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v2") {
         return detailEnvelope("session_v2", busyPhase, busyPhase, null);
       }
-      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v2/transcript?agent_id=main") {
-        return transcriptEnvelope([]);
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v2/agents/main/turns") {
+        return turnsEnvelope([]);
       }
       if (url.endsWith("/api/v1/sessions/session_v2/messages")) {
         return envelope({ items: [] });
@@ -1755,10 +1809,10 @@ test("kimi-web ⑦: 错误文本含 token 值 → 抛出前全量替换 <redacte
     assert.ok(events[0].error.includes("<redacted>"), "token 值已替换为 <redacted>");
     assert.ok(!JSON.stringify(events).includes(TOKEN_VALUE), "事件流全量不含 token 值");
   }
-  // 腿 2：code!==0 的 msg 含 token（v8 起首请求是 GET transcript——同一信封形状）。
+  // 腿 2：code!==0 的 msg 含 token（每拍首个请求是 GET prompts——同一信封形状）。
   {
     const { fetchImpl } = kimiServer((url) => {
-      if (url.endsWith("/transcript?agent_id=main") || url.endsWith("/api/v1/sessions/ses_t2")) {
+      if (url.endsWith("/prompts") || url.endsWith("/agents/main/turns")) {
         return envelope(null, { code: 40001, msg: `bad token ${TOKEN_VALUE}` });
       }
       throw new Error(`unexpected ${url}`);
@@ -1951,10 +2005,6 @@ test("kimi-web ⑧: 超时覆盖正文读取——headers 立即返回、正文�
 });
 
 // ===== ⑫-⑮ 保留面（A4 残余形状门 / A5 深层清洗 / ⑮ 重试单 POST 重申） =====
-// v8 删除面（被 transcript 轮次归属取代，测试随之删除，清单见交付汇报）：
-// ⑨ A1 messages/detail 竞窗、⑩ A2 回执 ID 屏蔽、⑪ A3 detail 非布尔不转移
-//（detail 已退出完成判定）、⑭ #4 reason 变化归属两腿、⑰ F2 messages 双读
-// 稳定性、⑱ F1 全状态无进展出口（收窄为 turn 停滞出口，见 ⑤⑤a/⑤⑤b）。
 
 test("kimi-web ⑫ A4 缺数据不虚报：detail 缺 id 或 busy/main_turn_active（spawn 静默门读）→ spawn 拒绝；messages 缺 items（探针路径）→ messages() 抛固定错误；sessionStatus 缺形状/不可得/非布尔 → null", async () => {
   // 腿 1：detail 缺 busy/main_turn_active（仅有 id）→ spawn 静默门首读即拒
@@ -2087,7 +2137,7 @@ test("kimi-web ⑬ A5 深层清洗：cause 三层嵌套每层含 token（含 nam
     const { fetchImpl } = kimiServer(async () => { throw makeChain(); });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
     const events = [];
-    for await (const ev of backend.streamEvents(makeAgent(), "ses_deep2", { interval: 5, turnAnchor: bareAnchor() })) {
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_deep2", { interval: 5, runPrompts: bareRun() })) {
       events.push(ev);
     }
     assert.equal(events[0].reason, "failed");
@@ -2122,8 +2172,8 @@ test("kimi-web ⑮ 重试场景单 POST：retries≥1 配置下 POST /prompts �
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r15") {
       return detailEnvelope("session_r15", false, false, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r15/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r15/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/api/v1/sessions/session_r15/prompts")) {
       promptPosts += 1;
@@ -2142,7 +2192,7 @@ test("kimi-web ⑲ F6 非 Error 抛出值包裹：fetch 抛 null / undefined →
     const { fetchImpl } = kimiServer(async () => { throw null; });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
     const events = [];
-    for await (const ev of backend.streamEvents(makeAgent(), "ses_null19", { interval: 5, turnAnchor: bareAnchor() })) {
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_null19", { interval: 5, runPrompts: bareRun() })) {
       events.push(ev);
     }
     assert.equal(events.length, 1);
@@ -2156,7 +2206,7 @@ test("kimi-web ⑲ F6 非 Error 抛出值包裹：fetch 抛 null / undefined →
     const { fetchImpl } = kimiServer(async () => { throw undefined; });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
     const events = [];
-    for await (const ev of backend.streamEvents(makeAgent(), "ses_undef19", { interval: 5, turnAnchor: bareAnchor() })) {
+    for await (const ev of backend.streamEvents(makeAgent(), "ses_undef19", { interval: 5, runPrompts: bareRun() })) {
       events.push(ev);
     }
     assert.equal(events.length, 1);
@@ -2186,8 +2236,8 @@ test("kimi-web R9 F1: sessionStatus 非布尔形状（detail 在场、值形状�
         ? envelope({ id: "session_f1", busy: "weird", main_turn_active: "weird", last_turn_reason: null, usage: {} })
         : detailEnvelope("session_f1", false, false, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_f1/transcript?agent_id=main") {
-      return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_f1/agents/main/turns") {
+      return turnsEnvelope([]);
     }
     if (url.endsWith("/api/v1/sessions/session_f1/messages")) {
       return envelope({ items: [] });
@@ -2219,231 +2269,70 @@ test("kimi-web R9 F1: sessionStatus detail 不可得（HTTP 500）→ 保持 nul
   assert.equal(await backend.sessionStatus(makeAgent(), "ses_f1e"), null, "detail 不可得 → null 保持");
 });
 
-test("kimi-web R9 F2: failed 轮 error 字段含 token 值 → done.error 过 redactToken（<redacted> 在场），事件流全程无 token", async () => {
-  // turn.error 走 HTTP 200 成功路径（transcript 信封 code===0），不经 request()/
-  // sanitizeError 出口——F2 前这是 token 清洗的绕行面。
-  const turn = turnItem({
-    state: "failed",
-    error: `upstream auth rejected Bearer ${TOKEN_VALUE}`,
-    steps: [],
-  });
-  const { handler, markSpawned, polls } = turnScriptServer("session_f2t", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
+test("kimi-web R9 F2: 响应体里的诊断文字含 token 值 → 拼装后过 redactToken（failed 的 error、interrupted 的 end_reason、闭集外状态值、prompts 列表的 failed 条目）", async () => {
+  const legs = [
+    { script: [[kimiTurn({ outcome: "failed", error: { code: 401, message: `upstream auth rejected Bearer ${TOKEN_VALUE}` }, answer: null })]], pattern: /kimi turn failed .*error: 401: upstream auth rejected Bearer <redacted>/ },
+    { script: [[kimiTurn({ outcome: "interrupted", end_reason: `cancelled by ${TOKEN_VALUE}`, answer: null })]], pattern: /end_reason: cancelled by <redacted>/ },
+    { script: [[kimiTurn({ status: `odd-${TOKEN_VALUE}` })]], pattern: /unsupported turn state: status=odd-<redacted>/ },
+  ];
+  for (const leg of legs) {
+    const { events } = await runScript("session_f2t", { script: leg.script });
+    assert.equal(events.at(-1).reason, "failed");
+    assert.match(events.at(-1).error, leg.pattern);
+    assert.ok(!JSON.stringify(events).includes(TOKEN_VALUE), "事件流全程无 token 值");
   }
-  assert.equal(events.length, 1, "failed 轮恰一个 done 事件");
-  assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /turn state=failed/);
-  assert.ok(events[0].error.includes("<redacted>"), "turn.error 里的 token 值已替换为 <redacted>");
-  assert.ok(!JSON.stringify(events).includes(TOKEN_VALUE), "事件流全程无 token 值");
-  assert.equal(polls(), 1);
+  // 回执状态与列表状态本身不会带 token（闭集比对），但 prompt id 来自响应体：一并清洗。
+  const tokenId = `msg_${TOKEN_VALUE}`;
+  const { events } = await runScript("session_f2p", {
+    promptId: tokenId,
+    script: [[]],
+    prompts: { active: null, queued: [{ prompt_id: tokenId, status: "failed" }] },
+  });
+  assert.match(events.at(-1).error, /kimi prompt msg_<redacted> \(dispatch\) is failed in the serve's prompts list/);
+  assert.ok(!JSON.stringify(events).includes(TOKEN_VALUE));
 });
 
-test("kimi-web R9 F3: silentTimeout=60000 在场时无 turn 分支只以 silentTimeout 为界——turn 第 9 拍才出现 → 正常完成（第 8 拍绝不失败）", async () => {
-  // 反例锚定旧缺陷：silentTimeout=60s、interval=1s 时第 8 秒即被无进展兜底误杀。
-  // 这里 8 拍恒无 turn（8 拍 < silentTimeout），第 9 拍 turn 出现且 completed。
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "late turn", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_f3a", {
-    script: [[], [], [], [], [], [], [], [], completed],
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5, silentTimeout: 60_000 })) {
-    events.push(ev);
-  }
-  assert.equal(events.at(-1).reason, "completed", "第 9 拍出现的 turn 正常完成——慢出现不是失败");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"), "8 拍无进展兜底不抢先");
-  assert.ok(!JSON.stringify(events).includes("silent timeout"), "未到 silentTimeout 界");
-  assert.equal(polls(), 9, "恰 9 拍：8 拍无 turn + 第 9 拍终态");
+test("kimi-web R9 F3: silentTimeout=60000 在场时提示未入轮只以 silentTimeout 为界——轮第 9 拍才出现 → 正常完成（第 8 拍绝不失败）", async () => {
+  const { events, polls } = await runScript("session_f3a", {
+    script: [[], [], [], [], [], [], [], [], [kimiTurn({ answer: "late turn" })]],
+  }, { silentTimeout: 60_000 });
+  assert.equal(events.at(-1).reason, "completed");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.ok(!JSON.stringify(events).includes("silent timeout"));
+  assert.equal(polls, 9);
 });
 
-test("kimi-web R9 F3: silentTimeout 缺席 → 8 拍无 turn 兜底保留（turn 恒不出现也有界，绝不无限等待）", async () => {
-  const { handler, markSpawned, polls } = turnScriptServer("session_f3b", { script: [[]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+test("kimi-web R9 F3: silentTimeout 缺席 → 8 拍兜底保留（提示恒不入轮也有界）", async () => {
+  const { events, polls } = await runScript("session_f3b", { script: [[]] });
   assert.equal(events.length, 1);
   assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /turn stalled \(no progress\)/);
   assert.match(events[0].error, /turn not observed for 8 consecutive polls/);
   assert.match(events[0].error, /silentTimeout absent/);
-  assert.equal(polls(), 8, "防御形状：第 8 拍有界退出");
+  assert.equal(polls, 8);
 });
 
-test("kimi-web R9 F4: state=\"banana\" + frames 持续增长 → 第 8 拍 failed（增长不清零 unsupported 计数——旧形状此构造会永等）", async () => {
-  // 每拍 frames 文本增长：旧形状闭集外值折进普通等待分支，signature 每拍变化
-  // → 停滞计数恒被清零 → 永等（六审盲区本体）。F4 独立计数不吃增长清零。
-  const bananaGrowing = (poll) => [turnItem({
-    state: "banana",
-    steps: [stepItem({
-      state: "banana",
-      frames: [{ kind: "text", text: "y".repeat(poll), role: "assistant" }],
-    })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_f4a", { script: [bananaGrowing] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+test("kimi-web R9 F4: status=\"banana\" + 内容持续增长 → 第 8 拍 failed（增长不清零 unsupported 计数）", async () => {
+  const bananaGrowing = (poll) => [kimiTurn({ status: "banana", items: [userMessageItem(), assistantItem("y".repeat(poll))] })];
+  const { events, polls } = await runScript("session_f4a", { script: [bananaGrowing] });
   assert.equal(events.length, 1);
-  assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /unsupported turn state: banana/);
-  assert.equal(polls(), 8, "连续 8 拍闭集外即退出（增长不延长此界）");
+  assert.match(events[0].error, /unsupported turn state: status=banana/);
+  assert.equal(polls, 8);
 });
 
-test("kimi-web R9 F4: state 恢复闭集内即清零 unsupported 计数（banana×2 → running×2 无增长 → banana×6 → completed；删除 kimiWeb.js:716 清零赋值后本测试必红）", async () => {
-  // 逐拍推导（u = unsupportedStatePolls，初值 0；"有清零"列 = 现实现，
-  // "无清零"列 = 删除 kimiWeb.js:716 `unsupportedStatePolls = 0` 后的变异形状）：
-  //
-  //   拍  |  items   | 有清零 u | 无清零 u
-  //   ----+----------+---------+---------
-  //    1  | banana   |    1    |    1
-  //    2  | banana   |    2    |    2
-  //    3  | running  |    0    |    2    ← 恢复点：现实现在此清零；变异形状停累不清零
-  //    4  | running  |    0    |    2      （running 段无 steps/frames 变化——恢复是
-  //    5  | banana   |    1    |    3       状态事件而非内容增长事件；变异形状旧计数
-  //    6  | banana   |    2    |    4       从 2 起继续累加）
-  //    7  | banana   |    3    |    5
-  //    8  | banana   |    4    |    6
-  //    9  | banana   |    5    |    7
-  //   10  | banana   |    6    |    8 ≥ NO_PROGRESS_POLL_LIMIT(8)
-  //        → 无清零形状在此 done(failed, "unsupported turn state: banana")，停轮
-  //   11  | completed |  仅"有清零"路径到达：两段闭集外各连续 2/6 拍 < 8，
-  //         有界出口不触发，第 11 拍正常完成
-  //
-  // 证明力：删除 kimiWeb.js:716 的清零赋值后，残留 2 + 第二段 6 = 8，第 10 拍
-  // 即 failed，下方 completed / 无 unsupported / polls=11 三断言全红——"恢复清零"
-  // 的必要性被本测试钉死。（v10 形状 banana×2 → running → completed 在同款
-  // 变异下计数停在 2 且再无闭集外拍，永远到不了 8，测试仍绿——七审缺口 2。
-  // 注意 running 段的停滞计数 noProgressPolls 与 u 是两个独立变量，716 变异
-  // 不影响它；本构造的判据只经 u 走。）
-  const banana = [turnItem({ state: "banana", steps: [] })];
-  const running = [turnItem({ state: "running", endedAt: null, durationMs: null, steps: [] })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "recovered twice", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_f4b", {
-    script: [
-      banana, banana,
-      running, running,
-      banana, banana, banana, banana, banana, banana,
-      completed,
-    ],
+test("kimi-web R9 F4: status 恢复闭集内即清零 unsupported 计数（banana×2 → running×2 → banana×6 → ended；不清零则第 10 拍已失败）", async () => {
+  const banana = [kimiTurn({ status: "banana", answer: null })];
+  const running = [runningTurn()];
+  const { events, polls } = await runScript("session_f4b", {
+    script: [banana, banana, running, running, banana, banana, banana, banana, banana, banana, [kimiTurn({ answer: "recovered twice" })]],
   });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.equal(events.at(-1).reason, "completed", "恢复清零生效：两段闭集外各 <8 拍，正常完成");
-  assert.ok(!JSON.stringify(events).includes("unsupported turn state"), "无清零变异形状第 10 拍即 failed——到达本断言即证明清零发生");
-  assert.equal(polls(), 11, "恰 11 拍（无清零变异形状第 10 拍即 failed，polls 停在 10）");
+  assert.equal(events.at(-1).reason, "completed");
+  assert.ok(!JSON.stringify(events).includes("unsupported turn state"));
+  assert.equal(polls, 11);
 });
 
-test("kimi-web R9 ⑫: 停滞门增长重置的必要性——拍 4 steps 增长清零计数后连续 7 拍无增长仍完成（删除 kimiWeb.js:725 清零赋值后本测试必红）", async () => {
-  // 逐拍推导（n = noProgressPolls，初值 0；"有清零"列 = 现实现，"无清零"列 =
-  // 删除 kimiWeb.js:725 `noProgressPolls = 0` 后的变异形状——增长拍只停累不清零）：
-  //
-  //   拍  |  steps   | 有清零 n | 无清零 n
-  //   ----+----------+---------+---------
-  //    1  | 1 step   |  0 基线 |  0 基线
-  //    2  | 1 step   |    1    |    1
-  //    3  | 1 step   |    2    |    2
-  //    4  | 2 steps  |    0    |    2    ← 增长拍（signature 变化）：现实现在此
-  //    5  | 2 steps  |    1    |    3      清零；变异形状走同一分支但不重置，
-  //    6  | 2 steps  |    2    |    4      计数停在 2 继续累加
-  //    7  | 2 steps  |    3    |    5
-  //    8  | 2 steps  |    4    |    6
-  //    9  | 2 steps  |    5    |    7
-  //   10  | 2 steps  |    6    |    8 ≥ NO_PROGRESS_POLL_LIMIT(8)
-  //        → 无清零形状在此 done(failed, "turn stalled (no progress)")，停轮
-  //   11  | 2 steps  |    7    |  （已 failed，不再轮询）
-  //   12  | completed |  仅"有清零"路径到达：增长后连续无增长 7 拍 < 8，正常完成
-  //
-  // 证明力：删除 kimiWeb.js:725 的清零赋值后，2（跨增长残留）+ 增长后 6 拍 = 8，
-  // 第 10 拍即 failed，下方 completed / 无 stalled / polls=12 三断言全红——"增长
-  // 清零"的必要性被本测试钉死。（v10 形状增长后仅 4 拍无增长，无清零时计数最多
-  // 累至 7 < 8，第 10 拍直接 completed，测试仍绿——七审缺口 1。）
-  const baseSteps = () => [stepItem({ stepId: "s0", state: "running", frames: [] })];
-  const grownSteps = () => [
-    stepItem({ stepId: "s0", state: "running", frames: [] }),
-    stepItem({ stepId: "s1", ordinal: 1, state: "running", frames: [] }),
-  ];
-  const running = (steps) => [turnItem({ state: "running", endedAt: null, durationMs: null, steps })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "resumed after reset", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_r912", {
-    script: [
-      running(baseSteps()), running(baseSteps()), running(baseSteps()),
-      running(grownSteps()),
-      running(grownSteps()), running(grownSteps()), running(grownSteps()),
-      running(grownSteps()), running(grownSteps()), running(grownSteps()),
-      running(grownSteps()),
-      completed,
-    ],
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.equal(events.at(-1).reason, "completed", "增长清零后跨过无清零形状的失败点（第 10 拍），第 12 拍正常完成");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走无进展出口");
-  assert.equal(polls(), 12, "恰 12 拍（无清零变异形状第 10 拍即 failed，polls 停在 10）");
-  const messages = events.filter((e) => e.kind === "message");
-  assert.equal(messages.length, 2);
-});
 
-test("kimi-web R9 ⑬: queued state 单列用例——与 running 分支行为一致但独立断言（queued×2 → completed，等待不误杀、不猜终态）", async () => {
-  const queued = () => [turnItem({ state: "queued", endedAt: null, durationMs: null, steps: [] })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "queued then done", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_r913", {
-    script: [queued(), queued(), completed],
-  });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  // 问2 在途呈现（2026-10-10）：首见 queued（签名基线）发射一条 streaming。
-  assert.deepEqual(events.map((e) => e.kind), ["runtime_activity", "message", "message", "metrics", "done"]);
-  assert.equal(events.at(-1).reason, "completed", "queued 是受支持的非终态——等待后正常完成");
-  assert.deepEqual(events[2].parts, [{ type: "text", text: "queued then done" }]);
-  assert.equal(polls(), 3, "拍 1-2 queued（等待+在途事实）、拍 3 终态");
-});
 
-test("kimi-web R9 ⑭: 提交前静默门 busy 持续至上界 → 固定错误 + 零提交（门未过不读 transcript、不发 prompt）", async () => {
+test("kimi-web R9 ⑭: 提交前静默门 busy 持续至上界 → 固定错误 + 零提交（门未过不读 turns、不发 prompt）", async () => {
   let detailCalls = 0;
   const { calls, fetchImpl } = kimiServer((url) => {
     if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_busy" });
@@ -2451,7 +2340,7 @@ test("kimi-web R9 ⑭: 提交前静默门 busy 持续至上界 → 固定错误 
       detailCalls += 1;
       return detailEnvelope("session_busy", true, true, "prior turn still running");
     }
-    if (url.includes("/transcript")) throw new Error("transcript must not be read while the gate holds");
+    if (url.includes("/agents/main/turns")) throw new Error("turns must not be read while the gate holds");
     if (url.endsWith("/prompts")) throw new Error("must not submit over a still-running turn");
     throw new Error(`unexpected ${url}`);
   });
@@ -2467,10 +2356,10 @@ test("kimi-web R9 ⑭: 提交前静默门 busy 持续至上界 → 固定错误 
   );
   assert.ok(detailCalls >= 2, `静默门轮询多拍后才到界（实际 ${detailCalls} 拍）`);
   assert.ok(!calls.some((c) => c.url.endsWith("/prompts")), "零提交——绝不向仍在跑的会话叠提交");
-  assert.ok(!calls.some((c) => c.url.includes("/transcript")), "门未过不读 transcript（时序：门在前）");
+  assert.ok(!calls.some((c) => c.url.includes("/agents/main/turns")), "门未过不读 turns（时序：门在前）");
 });
 
-test("kimi-web R9 ⑮: transcript 返回不可解析 JSON（HTTP 200、body 非法）→ done(failed) 有界收口（非崩溃、非静默等待）", async () => {
+test("kimi-web R9 ⑮: 轮询读返回不可解析 JSON（HTTP 200、body 非法）→ done(failed) 有界收口（非崩溃、非静默等待）", async () => {
   // HTTP 200 + json() 抛 SyntaxError：request() 的非 2xx/code!==0 信封判定都
   // 不触及——唯一出口是异常沿重试分类（不可重试）→ sanitizeError → 事件流
   // done(failed)。反例意义：不可解析 ≠ 空 items ≠ 健康观测，绝不回落猜测形状。
@@ -2486,7 +2375,7 @@ test("kimi-web R9 ⑮: transcript 返回不可解析 JSON（HTTP 200、body 非�
   }));
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const events = [];
-  for await (const ev of backend.streamEvents(makeAgent(), "ses_r915", { interval: 5, turnAnchor: bareAnchor() })) {
+  for await (const ev of backend.streamEvents(makeAgent(), "ses_r915", { interval: 5, runPrompts: bareRun() })) {
     events.push(ev);
   }
   assert.equal(events.length, 1, "恰一个 done 事件——流有界终止");
@@ -2498,48 +2387,34 @@ test("kimi-web R9 ⑮: transcript 返回不可解析 JSON（HTTP 200、body 非�
   assert.match(events[0].error, /non-JSON body \(status 200/, "typed 错误进 done.error");
 });
 
-test("kimi-web R9 ⑯: 先见 running 后请求连续失败 → done(failed)（绝不复用旧 turn 判完成，也不无限等待）", async () => {
-  // 反例锚定：拍 1 已见 running turn；拍 2 起 transcript 请求连续失败（重试耗尽）
-  // ——完成判定只认**当拍观测**，缓存的旧 turn 既不能用来继续等（观测已断流）
-  // 也不能用来伪造完成。
-  const running = turnItem({ state: "running", endedAt: null, durationMs: null, steps: [] });
+test("kimi-web R9 ⑯: 先见 running 后 turns 请求连续失败 → done(failed)（绝不复用旧轮判完成，也不无限等待）", async () => {
   let spawned = false;
   let polls = 0;
-  const handler = (url) => {
+  const { fetchImpl } = kimiServer((url, init = {}) => {
     if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_r916" });
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r916") {
-      return detailEnvelope("session_r916", false, false, null);
-    }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r916/transcript?agent_id=main") {
-      if (!spawned) return transcriptEnvelope([]);
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_r916") return detailEnvelope("session_r916", false, false, null);
+    if (url.endsWith("/session_r916/agents/main/turns")) {
+      if (!spawned) return turnsEnvelope([]);
       polls += 1;
-      if (polls === 1) return transcriptEnvelope([running]);
+      if (polls === 1) return turnsEnvelope([runningTurn()]);
       const error = new TypeError("fetch failed");
       error.cause = new Error("ECONNRESET");
       error.cause.code = "ECONNRESET";
       throw error;
     }
-    if (url.endsWith("/api/v1/sessions/session_r916/prompts")) {
-      return envelope({ prompt_id: "msg_q1", status: "running" });
+    if (url.endsWith("/session_r916/prompts")) {
+      return (init.method ?? "GET") === "GET" ? promptsEnvelope("msg_q1") : envelope({ prompt_id: "msg_q1", status: "running" });
     }
     throw new Error(`unexpected ${url}`);
-  };
-  const { fetchImpl } = kimiServer(handler);
+  });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   spawned = true;
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  assert.equal(events.length, 2, "在途事实一条（问2：首见 running）+ 恰一个 done 事件");
-  assert.equal(events[0].kind, "runtime_activity");
-  assert.equal(events[0].status, "streaming");
-  assert.equal(events[1].kind, "done");
+  const events = await collect(handle);
+  assert.deepEqual(events.map((e) => e.kind), ["runtime_activity", "done"]);
   assert.equal(events[1].reason, "failed");
   assert.match(events[1].error, /fetch failed/);
-  assert.equal(polls, 2, "拍 1 见 running、拍 2 请求失败即收口");
-  assert.ok(!events.some((e) => e.kind === "message"), "绝不复用旧 turn 发射内容");
+  assert.equal(polls, 2);
 });
 
 // ===== 注册面（factory / registry 闭集接线） =====
@@ -2554,7 +2429,7 @@ test("kimi-web 注册: factory 构造 + 能力闭集快照 + sessionOutlivesProc
     supportsSessionReuse: true,
     supportsInFlightCorrection: true,
     replayByRespawn: true,
-    // v8 翻转：transcript 轮次 steps[].usage 实测非零（2026-09-30 live）。
+    // turns 端点的轮级 usage 实测非零（2.6.3）。
     reportsTokenUsage: true,
     reportsCommandExitCode: false,
     enforcesWriteSandbox: false,
@@ -2621,50 +2496,24 @@ test("kimi-web ⑫: envPolicy 把 tokenEnv 纳入必需凭据面（readiness 门
 });
 
 test("kimi-web ⑤ TD-197① 预算自放大（auditor FAIL 修复回归钉）：观测间隙抬升预算，更长的同轮静默不再误杀", async () => {
-  // 时间线（假钟在每个 transcript 请求时 +30s；spawn 期有恰好一次 transcript
-  // 调用，见 [dbg] 实测）：spawn 调用 t=30（unspawned → preTurns，不建基线）；
-  // poll1 t=60 turn 现身 frames "x"（PRIME——首见建立基线，不算静默）；
-  // poll2 t=90 frames "xx"（进展——已恢复静默 30s，成为观测值 → 预算 =
-  // max(60s, 3×30s)=90s；固定 60s 门在预算上与之区分）；poll3 t=120 静默 30s、
-  // poll4 t=150 静默 60s（固定 60s 门此刻即杀——本钉的对照面）、poll5 t=180
-  // 静默 90s < 90s？否——恰 ≥ 90s 收口。若预算不放大：poll4 已杀；若放大：
-  // poll5 收口。断言 polls=5 且 maxGap=30000ms 双证。
-  const growing = (poll) => [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(poll), role: "assistant" }] })],
-  })];
-  const stalled = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "xx", role: "assistant" }] })],
-  })];
-  const { handler, markSpawned, polls } = turnScriptServer("session_ad", {
-    script: [growing, growing, stalled],
-  });
+  // 假钟每拍（一次 GET prompts）+30s：拍 1 基线；拍 2 增长（已恢复静默 30s → 预算
+  // max(60s, 3×30s)=90s）；拍 3/4 静默 30/60s（固定 60s 门在拍 4 已杀）；拍 5 静默 90s 收口。
+  const growing = (poll) => [runningTurn({ items: [userMessageItem(), assistantItem("x".repeat(poll))] })];
+  const stalled = [runningTurn({ items: [userMessageItem(), assistantItem("xx")] })];
+  const { handler, markSpawned, polls } = turnScriptServer("session_ad", { script: [growing, growing, stalled] });
   let fakeNow = 0;
-  const clock = () => fakeNow;
-  const clockedHandler = (url) => {
-    if (url.includes("/transcript")) fakeNow += 30_000;
-    return handler(url);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
+  const { fetchImpl } = kimiServer((url, init) => {
+    if (isTickRequest(url, init)) fakeNow += 30_000;
+    return handler(url, init);
+  });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: clock })) {
-    events.push(ev);
-  }
+  const events = await collect(handle, { pollInterval: 1, stallClock: () => fakeNow });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /adaptive budget/);
-  assert.match(done.error, /max recovered gap this turn 30000ms/, "30s 已恢复静默成为观测值");
-  // poll1 基线（60）+ poll2 进展（90，gap 30 记录）+ poll3 静默 30（120）+
-  // poll4 静默 60（150——固定 60s 门的杀点，对照面）+ poll5 静默 90（180）≥ 90 收口。
-  assert.equal(polls(), 5, "预算 3×30s=90s：poll4 的 60s 静默存活（固定门必杀），poll5 才收口");
+  assert.match(done.error, /max recovered gap this turn 30000ms/);
+  assert.equal(polls(), 5, "预算 3×30s=90s：拍 4 的 60s 静默存活（固定门必杀），拍 5 才收口");
 });
 
 // ── 2026-10-04 会审精度钉（consult_202610042037269516qqzn9）──────────────────
@@ -2730,264 +2579,96 @@ function attestedScriptServer(sessionId, { script, detailMode = "active" }) {
 }
 
 test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续命不杀，最终 completed", async () => {
-  // 场景=当日四杀实录：turn 在场、state running、steps/frames 零增长（K3 首 拍
-  // 重思考零帧），静默段超预算——但 serve 说 turn 活着 → noteProgress 续命，
-  // 多轮静默多次续命后 transcript 终态完成。
-  const frozen = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
-  })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "long-thought-answer", role: "assistant" }] })],
-  })];
-  // 15 拍冻结（假钟每拍 transcript +10s：第 7 拍首超 60s 预算、其后每 7 拍左右
-  // 再超一次=多轮续命），第 16 拍完成。
-  const script = [...Array(15).fill(frozen), completed];
+  const frozen = [runningTurn()];
+  const script = [...Array(15).fill(frozen), [kimiTurn({ answer: "long-thought-answer" })]];
   const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5a", { script, detailMode: "active" });
-  const fakeNow = { v: 0 };
-  const clockedHandler = (url, init, n) => {
-    if (url.includes("/transcript")) fakeNow.v += 10_000;
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
-  const done = events.at(-1);
-  assert.equal(done.reason, "completed", "活轮绝不因零帧静默被误杀（证词续命）");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走停滞出口");
-  // 自适应预算在证词续命后会放大（3×已恢复间隙），本脚本长度内可能只复核一次——
-  // 断言语义：≥1 次证词 + 轮询越过原必死点（无证词时第 7 拍已死，16 拍完成）。
-  assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
-  // 决定 0069：凭 serve 证词续命的每一次都落成转录事实（Lead 下钻时看得见）。
+  const events = await runClocked(handler, markSpawned, 10_000);
+  assert.equal(events.at(-1).reason, "completed", "活轮绝不因零产出静默被误杀（证词续命）");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.ok(detailCalls() >= 1);
   assert.equal(
     events.filter((e) => e.kind === "runtime_activity" && e.status === "serve_active").length,
     detailCalls(),
-    "一次证词续命一条 serve_active",
+    "一次证词续命一条 serve_active（决定 0069）",
   );
 });
 
-test("kimi-web B5②: 证词活着但自上次产出增长以来被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
-  const frozen = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
-  })];
-  const { handler, markSpawned } = attestedScriptServer("session_b5b", { script: [frozen], detailMode: "active" });
-  const fakeNow = { v: 0 };
-  const clockedHandler = (url, init, n) => {
-    // 每拍 +310s：第 2 拍起每拍击预算→证词→续命（每周期累计 ~310s 静默），
-    // 第 6 次证词时累计 ≥1800s → 收口。
-    if (url.includes("/transcript")) fakeNow.v += 310_000;
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
+test("kimi-web B5②: 证词活着但自上次产出增长以来被续命静默 ≥30min → 收口 failed（真锁死保护）", async () => {
+  const { handler, markSpawned } = attestedScriptServer("session_b5b", { script: [[runningTurn()]], detailMode: "active" });
+  const events = await runClocked(handler, markSpawned, 310_000);
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /serve-attested silence since the last output growth exceeded the 30min cap/);
   assert.match(done.error, /never lands output/);
 });
 
-test("kimi-web B5②c（会审 sol）: 零产出的 turn 靠 state 往返改签名 → 不清硬顶，照样在 30min 收口", async () => {
-  // 始终零 steps、零帧；state 每三拍在 running / queued 之间往返；serve 始终报 active。
-  // 签名每三拍变一次（停滞门的进度），但产出量没有超过最高水位——硬顶不清零。
-  const snapshot = (state) => [turnItem({ state, endedAt: null, durationMs: null, steps: [] })];
-  const script = Array.from({ length: 40 }, (_, i) => snapshot(Math.floor(i / 3) % 2 === 0 ? "running" : "queued"));
-  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5c2", { script, detailMode: "active" });
-  const fakeNow = { v: 0 };
-  let polls = 0;
-  const clockedHandler = (url, init, n) => {
-    if (url.includes("/transcript")) { fakeNow.v += 310_000; polls += 1; }
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
+test("kimi-web B5②c（会审 sol）: 零产出的轮靠条目状态往返改签名 → 不清硬顶，照样在 30min 收口", async () => {
+  // 工具调用条目的 status 每三拍在 running / pending 之间往返：签名变（停滞门的进度），
+  // 产出量没有超过最高水位——硬顶不清零。
+  const snapshot = (status) => [runningTurn({
+    items: [userMessageItem(), toolCallItem({ status, outcome: undefined, output: undefined, input: { command: "sleep 600" } })],
+  })];
+  const script = Array.from({ length: 40 }, (_, i) => snapshot(Math.floor(i / 3) % 2 === 0 ? "running" : "pending"));
+  const { handler, markSpawned, detailCalls, polls } = attestedScriptServer("session_b5c2", { script, detailMode: "active" });
+  const events = await runClocked(handler, markSpawned, 310_000);
   const done = events.at(-1);
-  assert.equal(done.reason, "failed", "签名抖动不能让零产出的 turn 无限续命");
+  assert.equal(done.reason, "failed", "签名抖动不能让零产出的轮无限续命");
   assert.match(done.error, /serve-attested silence since the last output growth exceeded the 30min cap/);
-  assert.ok(polls < 40, `在脚本耗尽之前收口（实际第 ${polls} 拍）`);
-  assert.ok(detailCalls() >= 6, `至少 6 次证词才累计满 30min（实际 ${detailCalls()}）`);
+  assert.ok(polls() < 40, `在脚本耗尽之前收口（实际第 ${polls()} 拍）`);
+  assert.ok(detailCalls() >= 6);
 });
 
-test("kimi-web B5②b（决定 0068）: 中途有进度 → 硬顶清零重计；两段静默合计超 30min 也不收口", async () => {
-  const frozen = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
-  })];
-  // 落了一帧（签名变化 = 进度），之后再次冻结。
-  const frozenAfterProgress = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "partial", role: "assistant" }] })],
-  })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "final-answer", role: "assistant" }] })],
-  })];
-  // 每拍 +310s。第 1 拍建基线；第 2–5 拍 4 次证词续命（1240s）；第 6 拍签名变化
-  // （清零）；第 7–11 拍 5 次证词续命（1550s）；第 12 拍完成。两段合计 2790s >
-  // 1800s——按整 turn 累计的旧口径会在第 6 次证词（第 8 拍）收口。
-  const script = [...Array(5).fill(frozen), ...Array(6).fill(frozenAfterProgress), completed];
+test("kimi-web B5②b（决定 0068）: 中途有产出 → 硬顶清零重计；两段静默合计超 30min 也不收口", async () => {
+  const frozen = [runningTurn()];
+  const frozenAfterProgress = [runningTurn({ items: [userMessageItem(), assistantItem("partial")] })];
+  const script = [...Array(5).fill(frozen), ...Array(6).fill(frozenAfterProgress), [kimiTurn({ answer: "final-answer" })]];
   const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5b2", { script, detailMode: "active" });
-  const fakeNow = { v: 0 };
-  const clockedHandler = (url, init, n) => {
-    if (url.includes("/transcript")) fakeNow.v += 310_000;
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
-  assert.equal(events.at(-1).reason, "completed", "进度之后硬顶重新起算");
+  const events = await runClocked(handler, markSpawned, 310_000);
+  assert.equal(events.at(-1).reason, "completed", "产出之后硬顶重新起算");
   assert.ok(!JSON.stringify(events).includes("turn stalled"));
-  assert.ok(detailCalls() >= 7, `两段静默里的证词合计超过旧口径的收口点（实际 ${detailCalls()}）`);
+  assert.ok(detailCalls() >= 7);
 });
 
 test("kimi-web B5③: 预算击发 + 证词请求失败 → 照杀（fail-closed：无证词=无续命）", async () => {
-  const frozen = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [] })],
-  })];
-  const { handler, markSpawned } = attestedScriptServer("session_b5c", { script: [frozen], detailMode: "throw" });
-  const fakeNow = { v: 0 };
-  const clockedHandler = (url, init, n) => {
-    if (url.includes("/transcript")) fakeNow.v += 10_000;
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
-  const done = events.at(-1);
-  assert.equal(done.reason, "failed");
-  assert.match(done.error, /turn stalled \(no progress\)/);
+  const { handler, markSpawned } = attestedScriptServer("session_b5c", { script: [[runningTurn()]], detailMode: "throw" });
+  const events = await runClocked(handler, markSpawned, 10_000);
+  assert.equal(events.at(-1).reason, "failed");
+  assert.match(events.at(-1).error, /turn stalled \(no progress\)/);
+  assert.match(events.at(-1).error, /attestation: unavailable/);
 });
 
-test("kimi-web B5④: 健康长跑（墙钟>30min 持续产出）后的收尾静默段 → 证词续命不收口（验收轮咬出的边界）", async () => {
-  // 产出期：每拍 frames 增长（签名变化=进展，停滞门从不击发），假钟推进累计
-  // >31min 墙钟；随后冻结静默（收尾重思考）→ 预算击发 → 证词活着 → 累计静默
-  // 仍小（单段）→ 不收口 → completed。按 turn 墙钟计顶的旧语义会在此精确斩杀。
-  const growing = (poll) => [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(poll), role: "assistant" }] })],
-  })];
-  const frozen = [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(40), role: "assistant" }] })],
-  })];
-  const completed = [turnItem({
-    steps: [stepItem({ frames: [{ kind: "text", text: "long-run-final-answer", role: "assistant" }] })],
-  })];
+test("kimi-web B5④: 健康长跑（墙钟>30min 持续产出）后的收尾静默段 → 证词续命不收口", async () => {
+  const growing = (n) => [runningTurn({ items: [userMessageItem(), assistantItem("x".repeat(n))] })];
+  const frozen = [runningTurn({ items: [userMessageItem(), assistantItem("x".repeat(40))] })];
   const script = [
-    ...Array.from({ length: 8 }, (_, i) => growing(i + 1)), // 产出期：8 拍 × 260s ≈ 34.7min 墙钟
-    frozen, frozen, frozen, frozen, frozen, frozen, frozen,  // 收尾静默 ~80s > 60s 预算
-    completed,
+    ...Array.from({ length: 8 }, (_, i) => growing(i + 1)),
+    ...Array(7).fill(frozen),
+    [kimiTurn({ answer: "long-run-final-answer" })],
   ];
   const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5d", { script, detailMode: "active" });
-  const fakeNow = { v: 0 };
-  const clockedHandler = (url, init, n) => {
-    if (url.includes("/transcript")) fakeNow.v += 260_000;
-    return handler(url, init, n);
-  };
-  const { fetchImpl } = kimiServer(clockedHandler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
-    events.push(ev);
-  }
-  const done = events.at(-1);
-  assert.equal(done.reason, "completed", "健康长跑后的收尾思考不被墙钟顶斩杀（累计静默语义）");
-  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走停滞出口");
-  assert.ok(detailCalls() >= 1, "收尾静默段吃到至少一次证词续命");
+  const events = await runClocked(handler, markSpawned, 260_000);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.ok(detailCalls() >= 1);
 });
 // ===== Owner 2026-10-10 问2：在途进度呈现（kimi 诊断会审 opus/sol 方案） =====
 // 声称：归属 turn 的结构增长 → 节流发射 runtime_activity("streaming")；
 // 完成路径的正文/证据发射不变；同签名/节流窗内不重复。
 
-test("kimi-web 问2: 归属 turn 增长 → 在途 runtime_activity(streaming)；完成正文/证据照旧", async () => {
-  // 三拍脚本：running(1 step) → running(2 steps，签名增长) → completed。
-  const growing = (n) => turnItem({
-    state: "running",
-    steps: Array.from({ length: n }, (_, i) => ({ id: `s${i}`, frames: [{ id: `f${i}`, kind: "text", role: "assistant", text: "chunk" }] })),
-  });
-  const done = turnItem({
-    state: "completed",
-    steps: [{ id: "s0", frames: [{ id: "f0", kind: "text", role: "assistant", text: "最终答案" }] }],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_prog", { script: [[growing(1)], [growing(2)], [done]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+test("kimi-web 问2: 最终轮增长 → 在途 runtime_activity(streaming)；完成正文照旧", async () => {
+  const growing = (n) => runningTurn({ items: [userMessageItem(), ...Array.from({ length: n }, (_, i) => assistantItem("chunk", i + 1))] });
+  const { events } = await runScript("session_prog", { script: [[growing(1)], [growing(2)], [kimiTurn({ answer: "最终答案" })]] });
   const streaming = events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming");
-  assert.equal(streaming.length >= 1, true, "增长拍至少发射一条在途事实");
-  // 完成路径不受影响：assistant 正文 + done(completed) 原样在场。
+  assert.ok(streaming.length >= 1);
   const finalText = events.find((e) => e.kind === "message" && e.role === "assistant");
-  assert.ok(finalText, "完成正文照旧发射");
-  const doneEv = events.at(-1);
-  assert.equal(doneEv.kind, "done");
-  assert.equal(doneEv.reason, "completed");
-  // 在途事实先于最终正文（进度=运行中可见）。
-  assert.ok(events.indexOf(streaming[0]) < events.indexOf(finalText), "在途事实先于完成正文");
+  assert.deepEqual(finalText.parts, [{ type: "text", text: "最终答案" }]);
+  assert.equal(events.at(-1).reason, "completed");
+  assert.ok(events.indexOf(streaming[0]) < events.indexOf(finalText));
 });
 
 test("kimi-web 问2: 签名不变/节流窗内不重复发射（静态 running 拍零在途新增）", async () => {
-  // 两拍同签名 running（无增长）+完成——增长只发生一次（首见）。
-  const running = turnItem({ state: "running", steps: [{ id: "s0", frames: [] }] });
-  const done = turnItem({ state: "completed", steps: [{ id: "s0", frames: [{ id: "f0", kind: "text", role: "assistant", text: "ok" }] }] });
-  const { handler, markSpawned } = turnScriptServer("session_quiet", { script: [[running], [running], [done]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const streaming = events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming");
-  assert.equal(streaming.length, 1, "首见+无增长=恰一条（节流与同签名去重）");
+  const { events } = await runScript("session_quiet", { script: [[runningTurn()], [runningTurn()], [kimiTurn({ answer: "ok" })]] });
+  assert.equal(events.filter((e) => e.kind === "runtime_activity" && e.status === "streaming").length, 1);
 });
 
 // ===== TD-250（决定 0056）：releaseSession——终态上游会话卫生（A1/A1b 的 backend 原语）=====
@@ -3103,208 +2784,153 @@ test("TD-250: 参数形状不符（缺 serveUrl / 空 sessionId / token 缺席�
   assert.equal(calls.length, 0, "形状/凭据缺席=零网络请求");
 });
 
-// ===== 决定 0071：tool 帧证据在轮询期即落盘 =====
+// ===== 决定 0071：工具调用证据在轮询期即落盘 =====
 
-function runningTurn0071(frames) {
-  return [turnItem({
-    state: "running",
-    endedAt: null,
-    durationMs: null,
-    steps: [stepItem({ state: "running", usage: undefined, frames })],
-  })];
-}
 
-async function collectKimiEvents0071(sessionId, script) {
-  const { handler, markSpawned } = turnScriptServer(sessionId, { script });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) events.push(ev);
-  // streaming 事实按节流发射，与本组断言无关。
-  return events.filter((e) => e.kind !== "runtime_activity");
-}
-
-test("kimi-web 0071①: 命令在输入就绪时落、结果在帧到终态时落、写文件只在终态落；整轮结束不重复", async () => {
-  // 帧形状取自 2026-10-13 live 探针：首见没有 input（参数还在流式拼装），约 2s 后
-  // input 就绪而 state 仍是 running，结束时 state:"done" 且 output 在场。
-  const readDone = { kind: "tool", frameId: "f_r", toolCallId: "tc_r", name: "Read", state: "done", input: { path: "README.md" }, output: "hello" };
-  const bashStart = { kind: "tool", frameId: "f_b", toolCallId: "tc_b", name: "Bash", state: "running", inputText: '{"comm' };
+test("kimi-web 0071①: 命令在输入就绪时落、结果在条目 ended 时落、写文件只在带回答完成时落；整轮结束不重复", async () => {
+  const readDone = toolCallItem({ item_id: "tc_r", name: "Read", input: { path: "README.md" }, display: { kind: "file_io" }, output: "hello" });
+  const bashStart = toolCallItem({ item_id: "tc_b", status: "running", input: undefined, display: undefined, outcome: undefined, output: undefined });
   const bashReady = { ...bashStart, input: { command: "npm test", timeout: 600 } };
-  const bashDone = { ...bashReady, state: "done", output: "# pass 3" };
-  const writeRunning = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "running", input: { path: "out.txt", content: "x" } };
-  const writeDone = { ...writeRunning, state: "done", output: "Wrote 1 bytes" };
-  const perPoll = [];
-  const script = [
-    runningTurn0071([readDone, bashStart]),
-    runningTurn0071([readDone, bashReady]),
-    runningTurn0071([readDone, bashReady]),
-    runningTurn0071([readDone, bashDone, writeRunning]),
-    [turnItem({ steps: [stepItem({ frames: [readDone, bashDone, writeDone, { kind: "text", text: "all done", role: "assistant" }] })] })],
-  ];
-  void perPoll;
-  const events = await collectKimiEvents0071("session_0071a", script);
+  const bashDone = { ...bashReady, status: "ended", outcome: "completed", output: "# pass 3" };
+  const writeRunning = toolCallItem({ item_id: "tc_w", name: "Write", status: "running", input: { path: "out.txt", content: "x" }, display: { kind: "file_io", path: "D:/w/out.txt" }, outcome: undefined, output: undefined });
+  const writeDone = { ...writeRunning, status: "ended", outcome: "completed", output: "Wrote 1 bytes" };
+  const events = await collect0071("session_0071a", [
+    running0071([readDone, bashStart]),
+    running0071([readDone, bashReady]),
+    running0071([readDone, bashReady]),
+    running0071([readDone, bashDone, writeRunning]),
+    ended0071([readDone, bashDone, writeDone, assistantItem("all done")]),
+  ]);
   assert.deepEqual(
     events.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
     [
-      "tool_use", "tool_result:tc_r", // Read 首见即终态：投影 + 结果
-      "command", // Bash：输入就绪才落（首见那一拍没有 input → 不落，也不被错分成 tool_use）
-      "tool_result:tc_b", // Bash 到终态
+      "tool_use", "tool_result:tc_r", // Read 首见即 ended：投影 + 结果
+      "command", // Bash：输入就绪才落（首见没有 input → 不落，也不被错分成 tool_use）
+      "tool_result:tc_b",
       "tool_use", // Write：在途只预告路径（决定 0072）
-      "file_written", "tool_result:tc_w", // Write 的证据与结果：整轮带着正文完成时才落
+      "file_written", "tool_result:tc_w", // 写文件证据与结果：整轮带回答完成时才落
       "message", "message", "metrics", "done",
     ],
   );
   assert.equal(events.find((e) => e.kind === "command").command, "npm test");
-  assert.equal(events.filter((e) => e.kind === "command").length, 1, "同一帧不重复发射");
-  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(events.filter((e) => e.kind === "command").length, 1);
+  assert.equal(events.find((e) => e.kind === "file_written").path, "D:/w/out.txt");
 });
 
-test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的命令；写文件证据仍只在带正文完成时落（N1 不变）", async () => {
-  const bashReady = { kind: "tool", frameId: "f_b", toolCallId: "tc_b", name: "Bash", state: "running", input: { command: "npm test" } };
-  const bashDone = { ...bashReady, state: "done", output: "# fail 1" };
-  const writeDone = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "done", input: { path: "out.txt", content: "x" }, output: "Wrote 1 bytes" };
-  // 失败轮：在途时落了命令；失败那一拍什么都不补，直接报 failed。
-  const failed = await collectKimiEvents0071("session_0071b", [
-    runningTurn0071([bashReady]),
-    [turnItem({ state: "failed", error: "upstream exploded", steps: [stepItem({ frames: [bashDone, writeDone] })] })],
+test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的命令；写文件证据仍只在带回答完成时落（N1 不变）", async () => {
+  const bashReady = toolCallItem({ item_id: "tc_b", status: "running", input: { command: "npm test" }, outcome: undefined, output: undefined });
+  const bashDone = { ...bashReady, status: "ended", outcome: "completed", output: "# fail 1" };
+  const writeDone = toolCallItem({ item_id: "tc_w", name: "Write", input: { path: "out.txt", content: "x" }, display: { path: "D:/w/out.txt" }, output: "Wrote 1 bytes" });
+  const failed = await collect0071("session_0071b", [
+    running0071([bashReady]),
+    ended0071([bashDone, writeDone], { outcome: "failed", error: "upstream exploded" }),
   ]);
   assert.deepEqual(failed.map((e) => e.kind), ["command", "done"]);
   assert.equal(failed.at(-1).reason, "failed");
-  // 在途时写文件帧已经 done：仍不落 file_written（等这一轮带着正文完成）。
-  const emptyAfterWrite = await collectKimiEvents0071("session_0071c", [
-    runningTurn0071([writeDone, bashReady]),
-    [turnItem({ steps: [stepItem({ frames: [writeDone, bashDone] })] })],
+  const emptyAfterWrite = await collect0071("session_0071c", [
+    running0071([writeDone, bashReady]),
+    ended0071([writeDone, bashDone]),
   ]);
-  assert.deepEqual(emptyAfterWrite.map((e) => e.kind), ["tool_use", "command", "done"], "没有正文的 completed 轮：只有在途的预告与命令，不补证据、不落 file_written");
-  assert.equal(emptyAfterWrite.at(-1).reason, "failed");
+  assert.deepEqual(emptyAfterWrite.map((e) => e.kind), ["tool_use", "command", "done"], "没有回答的 completed 轮：只有在途的预告与命令，不补证据、不落 file_written");
   assert.match(emptyAfterWrite.at(-1).error, /completed without assistant text/);
-  // 只在最后一拍才看到的轮（从未在途观察过）：与此前完全相同——零证据。
-  const neverSeen = await collectKimiEvents0071("session_0071d", [
-    [turnItem({ steps: [stepItem({ frames: [bashDone] })] })],
-  ]);
+  const neverSeen = await collect0071("session_0071d", [ended0071([bashDone])]);
   assert.deepEqual(neverSeen.map((e) => e.kind), ["done"]);
 });
 
-test("kimi-web 0071③（会审 sol）: 帧的身份靠 toolCallId / frameId——后补、插入、重排都不重复不漏；两者都没有的帧在途不投影", async () => {
-  const text = { kind: "text", text: "all done", role: "assistant" };
-  // 身份后补：首拍只有 toolCallId，下一拍才有 frameId——仍是同一帧，只落一次。
-  const bashCallOnly = { kind: "tool", toolCallId: "tc_b", name: "Bash", state: "running", input: { command: "npm test" } };
-  const bashBoth = { ...bashCallOnly, frameId: "f_b" };
-  const bashDone = { ...bashBoth, state: "done", output: "# pass 3" };
-  const lateId = await collectKimiEvents0071("session_0071e", [
-    runningTurn0071([bashCallOnly]),
-    runningTurn0071([bashBoth]),
-    [turnItem({ steps: [stepItem({ frames: [bashDone, text] })] })],
-  ]);
-  assert.deepEqual(lateId.filter((e) => e.kind === "command").map((e) => e.command), ["npm test"]);
-  assert.equal(lateId.filter((e) => e.kind === "tool_result").length, 1);
-  // 插入与重排：完成拍在已落的 Bash 前面插入一个 Write，再把顺序打乱——各自只落自己的。
-  const readDone = { kind: "tool", frameId: "f_r", toolCallId: "tc_r", name: "Read", state: "done", input: { path: "a.txt" }, output: "A" };
-  const writeDone = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "done", input: { path: "out.txt", content: "x" }, output: "Wrote 1 bytes" };
-  const reordered = await collectKimiEvents0071("session_0071f", [
-    runningTurn0071([bashBoth, readDone]),
-    [turnItem({ steps: [stepItem({ frames: [writeDone, readDone, bashDone, text] })] })],
+test("kimi-web 0071③（会审 sol）: 条目身份靠 item_id——插入、重排都不重复不漏；没有 item_id 的条目在途不投影", async () => {
+  const bashRunning = toolCallItem({ item_id: "tc_b", status: "running", input: { command: "npm test" }, outcome: undefined, output: undefined });
+  const bashDone = { ...bashRunning, status: "ended", outcome: "completed", output: "# pass 3" };
+  const readDone = toolCallItem({ item_id: "tc_r", name: "Read", input: { path: "a.txt" }, display: { kind: "file_io" }, output: "A" });
+  const writeDone = toolCallItem({ item_id: "tc_w", name: "Write", input: { path: "out.txt", content: "x" }, display: { path: "D:/w/out.txt" }, output: "Wrote 1 bytes" });
+  const reordered = await collect0071("session_0071f", [
+    running0071([bashRunning, readDone]),
+    ended0071([writeDone, readDone, bashDone, assistantItem("all done")]),
   ]);
   assert.deepEqual(
     reordered.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
     [
-      "command", "tool_use", "tool_result:tc_r", // 在途：Bash 的命令、Read 的调用与结果
-      // 完成拍：按帧序补还没落过的——Write 的两条排在在途已落的命令之后（跨帧先后不再等于帧序），Bash 只补结果。
+      "command", "tool_use", "tool_result:tc_r",
       "file_written", "tool_result:tc_w", "tool_result:tc_b",
       "message", "message", "metrics", "done",
     ],
   );
-  // 没有任何身份的帧：在途跳过（下标不是身份），整轮带着正文完成时才落。
-  const anonymous = { kind: "tool", name: "Bash", state: "running", input: { command: "ls" } };
-  const anonDone = { ...anonymous, state: "done", output: "a.txt" };
-  const noId = await collectKimiEvents0071("session_0071g", [
-    runningTurn0071([anonymous]),
-    runningTurn0071([readDone, anonymous]),
-    [turnItem({ steps: [stepItem({ frames: [readDone, anonDone, text] })] })],
+  const anonymous = { ...bashRunning, item_id: undefined, input: { command: "ls" } };
+  const anonDone = { ...anonymous, status: "ended", outcome: "completed", output: "a.txt" };
+  const noId = await collect0071("session_0071g", [
+    running0071([anonymous]),
+    running0071([readDone, anonymous]),
+    ended0071([readDone, anonDone, assistantItem("all done")]),
   ]);
   assert.deepEqual(noId.filter((e) => e.kind === "command").map((e) => e.command), ["ls"], "只在完成拍落一次");
-  assert.deepEqual(
-    noId.map((e) => e.kind).slice(0, 4),
-    ["tool_use", "tool_result", "command", "tool_result"],
-    "Read 在途已落；无身份的 Bash 等到完成拍",
-  );
+  assert.deepEqual(noId.map((e) => e.kind).slice(0, 4), ["tool_use", "tool_result", "command", "tool_result"]);
 });
 
-test("kimi-web 0071④（会审 sol）: 就绪是形状判据——空对象 / 数组 / 空命令不算就绪，帧到终态时照旧投影", async () => {
-  const text = { kind: "text", text: "all done", role: "assistant" };
+test("kimi-web 0071④（会审 sol）: 就绪是形状判据——空对象 / 数组 / 空命令不算就绪，条目 ended 时照旧投影", async () => {
+  const inFlight = { status: "running", outcome: undefined, output: undefined, display: undefined };
   const notReady = [
-    { kind: "tool", frameId: "f_1", toolCallId: "tc_1", name: "Read", state: "running", input: {} },
-    { kind: "tool", frameId: "f_2", toolCallId: "tc_2", name: "Grep", state: "running", input: ["x"] },
-    { kind: "tool", frameId: "f_3", toolCallId: "tc_3", name: "Bash", state: "running", input: { command: "   " } },
+    toolCallItem({ ...inFlight, item_id: "tc_1", name: "Read", input: {} }),
+    toolCallItem({ ...inFlight, item_id: "tc_2", name: "Grep", input: ["x"] }),
+    toolCallItem({ ...inFlight, item_id: "tc_3", name: "Bash", input: { command: "   " } }),
   ];
   const settled = [
-    { ...notReady[0], state: "done", input: { path: "README.md" }, output: "hello" },
-    { ...notReady[1], state: "done", input: { pattern: "x" }, output: "1 match" },
-    { ...notReady[2], state: "done", input: { command: "echo final" }, output: "final" },
+    { ...notReady[0], status: "ended", outcome: "completed", input: { path: "README.md" }, output: "hello" },
+    { ...notReady[1], status: "ended", outcome: "completed", input: { pattern: "x" }, output: "1 match" },
+    { ...notReady[2], status: "ended", outcome: "completed", input: { command: "echo final" }, output: "final" },
   ];
-  const events = await collectKimiEvents0071("session_0071h", [
-    runningTurn0071(notReady),
-    runningTurn0071(notReady),
-    [turnItem({ steps: [stepItem({ frames: [...settled, text] })] })],
+  const events = await collect0071("session_0071h", [
+    running0071(notReady),
+    running0071(notReady),
+    ended0071([...settled, assistantItem("all done")]),
   ]);
   const projections = events.filter((e) => e.kind === "tool_use" || e.kind === "command");
-  assert.equal(projections.length, 3, "在途两拍都没落；完成拍各落一次");
-  assert.deepEqual(projections[0].input, { path: "README.md" }, "落下的是就绪之后的输入，不是空对象");
+  assert.equal(projections.length, 3);
+  assert.deepEqual(projections[0].input, { path: "README.md" });
   assert.deepEqual(projections[1].input, { pattern: "x" });
   assert.equal(projections[2].command, "echo final");
 });
 
-// ===== 决定 0072：写文件类的帧在途预告 =====
+// ===== 决定 0072：写文件类的条目在途预告 =====
 
-test("kimi-web 0072: 写文件帧在途只预告路径（一条 tool_use，不带内容）；file_written 仍只在带正文完成时落", async () => {
-  const text = { kind: "text", text: "all done", role: "assistant" };
-  const writeStart = { kind: "tool", frameId: "f_w", toolCallId: "tc_w", name: "Write", state: "running", inputText: '{"pa' };
-  const writeReady = { ...writeStart, input: { path: "src/out.txt", content: "FILE-BODY-0072" } };
-  const writeDone = { ...writeReady, state: "done", output: "Wrote 14 bytes" };
-  const completed = await collectKimiEvents0071("session_0072a", [
-    runningTurn0071([writeStart]), // 路径还没到：不预告
-    runningTurn0071([writeReady]),
-    runningTurn0071([writeReady]), // 同一帧不重复预告
-    runningTurn0071([writeDone]), // 帧到终态、这一轮还没完：仍不落 file_written / 结果
-    [turnItem({ steps: [stepItem({ frames: [writeDone, text] })] })],
+test("kimi-web 0072: 写文件条目在途只预告路径（一条 tool_use，不带内容；路径取 display.path，没有再取 input.path）；file_written 仍只在带回答完成时落", async () => {
+  const writeStart = toolCallItem({ item_id: "tc_w", name: "Write", status: "running", input: undefined, display: undefined, outcome: undefined, output: undefined });
+  const writeReady = { ...writeStart, input: { path: "src/out.txt", content: "FILE-BODY-0072" }, display: { kind: "file_io", operation: "write", path: "D:/w/src/out.txt", content: "FILE-BODY-0072" } };
+  const writeDone = { ...writeReady, status: "ended", outcome: "completed", output: "Wrote 14 bytes" };
+  const completed = await collect0071("session_0072a", [
+    running0071([writeStart]),
+    running0071([writeReady]),
+    running0071([writeReady]),
+    running0071([writeDone]),
+    ended0071([writeDone, assistantItem("all done")]),
   ]);
   assert.deepEqual(
     completed.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
     ["tool_use", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
   );
   const announced = completed.find((e) => e.kind === "tool_use");
-  assert.equal(announced.tool, "Write");
-  assert.deepEqual(announced.input, { path: "src/out.txt" }, "只带路径");
-  assert.ok(!JSON.stringify(announced).includes("FILE-BODY-0072"), "文件内容不进预告");
-  assert.equal(completed.find((e) => e.kind === "file_written").path, "src/out.txt");
-
-  // 失败的轮：预告留下，写文件证据与结果都不落（N1 不变）。
-  const failed = await collectKimiEvents0071("session_0072b", [
-    runningTurn0071([writeDone]),
-    [turnItem({ state: "failed", error: "upstream exploded", steps: [stepItem({ frames: [writeDone] })] })],
+  assert.deepEqual(announced, { kind: "tool_use", tool: "Write", input: { path: "D:/w/src/out.txt" } }, "只带路径");
+  assert.ok(!JSON.stringify(announced).includes("FILE-BODY-0072"));
+  assert.equal(completed.find((e) => e.kind === "file_written").path, "D:/w/src/out.txt");
+  // display 缺席：退到 input.path。
+  const inputOnly = { ...writeDone, display: { kind: "file_io" } };
+  const fallback = await collect0071("session_0072e", [running0071([inputOnly]), ended0071([inputOnly, assistantItem("ok")])]);
+  assert.deepEqual(fallback.find((e) => e.kind === "tool_use").input, { path: "src/out.txt" });
+  assert.equal(fallback.find((e) => e.kind === "file_written").path, "src/out.txt");
+  // 失败的轮：预告留下，写文件证据与结果都不落。
+  const failed = await collect0071("session_0072b", [
+    running0071([writeDone]),
+    ended0071([writeDone], { outcome: "failed", error: "upstream exploded" }),
   ]);
   assert.deepEqual(failed.map((e) => e.kind), ["tool_use", "done"]);
-  assert.equal(failed.at(-1).reason, "failed");
-
-  // 没有身份的写文件帧在途不预告（与 0071 的身份规则一致）；没有路径的也不预告。
-  const anonymous = { kind: "tool", name: "Edit", state: "running", input: { file_path: "a.js", old_string: "x", new_string: "y" } };
-  const noPath = { kind: "tool", frameId: "f_n", toolCallId: "tc_n", name: "Write", state: "running", input: { content: "x" } };
-  const skipped = await collectKimiEvents0071("session_0072c", [
-    runningTurn0071([anonymous, noPath]),
-    [turnItem({ state: "failed", error: "boom", steps: [stepItem({ frames: [anonymous, noPath] })] })],
+  // 没有 item_id 或没有路径的写文件条目在途不预告。
+  const anonymous = { ...writeReady, item_id: undefined, name: "Edit" };
+  const noPath = toolCallItem({ item_id: "tc_n", name: "Write", status: "running", input: { content: "x" }, display: { kind: "file_io" }, outcome: undefined, output: undefined });
+  const skipped = await collect0071("session_0072c", [
+    running0071([anonymous, noPath]),
+    ended0071([anonymous, noPath], { outcome: "failed", error: "boom" }),
   ]);
   assert.deepEqual(skipped.map((e) => e.kind), ["done"]);
-
-  // 只在最后一拍才看到的轮：与此前完全相同（没有预告）。
-  const neverSeen = await collectKimiEvents0071("session_0072d", [
-    [turnItem({ steps: [stepItem({ frames: [writeDone, text] })] })],
-  ]);
-  assert.deepEqual(
-    neverSeen.map((e) => e.kind),
-    ["file_written", "tool_result", "message", "message", "metrics", "done"],
-  );
+  const neverSeen = await collect0071("session_0072d", [ended0071([writeDone, assistantItem("all done")])]);
+  assert.deepEqual(neverSeen.map((e) => e.kind), ["file_written", "tool_result", "message", "message", "metrics", "done"]);
 });
 
 // ===== 决定 0074：车道声明 kimiHome → 服务器 token 取自该主目录的 server.token =====
@@ -3339,7 +2965,7 @@ test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.to
     // 文件在场：请求带的是文件里的 token（去掉首尾空白），不是环境变量的值。
     writeFile(joinPath(home, "server.token"), `${fileToken}\r\n`, "utf8");
     const { handler, markSpawned } = turnScriptServer("session_0074a", {
-      script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+      script: [[kimiTurn({ answer: "ok" })]],
     });
     const { fetchImpl, calls } = kimiServer(handler);
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
@@ -3360,7 +2986,7 @@ test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.to
     assert.ok(JSON.stringify(scrubbed).includes("[REDACTED:"));
     // 没声明 kimiHome 的车道：经桥解析到的环境 token 同样进脱敏。
     const envLane = turnScriptServer("session_0074b", {
-      script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+      script: [[kimiTurn({ answer: "ok" })]],
     });
     const envServer = kimiServer(envLane.handler);
     const envBackend = new KimiWebBackend({ fetchImpl: envServer.fetchImpl, timeout: 5000, retries: 0 });
@@ -3385,7 +3011,7 @@ test("kimi-web 0074: kimiHome 在场时 bearer token 取自 <kimiHome>/server.to
 test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 → 派发前调一次在场保证，拉起过就给 Lead 留一条 system 说明；拉不起来派发即失败", async () => {
   const ws = process.platform === "win32" ? "D:\\wao-serve-ws" : "/wao-serve-ws";
   const oneTurn = () => ({
-    script: [[turnItem({ steps: [stepItem({ frames: [{ kind: "text", text: "ok", role: "assistant" }] })] })]],
+    script: [[kimiTurn({ answer: "ok" })]],
   });
   const runWith = async (sessionId, agentOverrides, ensureResult) => {
     const ensureCalls = [];
@@ -3514,193 +3140,37 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
 
 // ===== 分步拼接：同一步的文本帧首尾相接，不同步之间隔一个空行 =====
 
-test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同 step → 答案里行首的 Q1: 仍在行首；同一步的帧首尾相接", async () => {
-  const turn = turnItem({
-    steps: [
-      stepItem({ stepId: "s0", frames: [{ kind: "text", text: "Now let me check the files.", role: "assistant" }] }),
-      stepItem({ stepId: "s1", frames: [
-        { kind: "text", text: "Q1: FIX_", role: "assistant" },
-        { kind: "text", text: "FIRST\n理由。", role: "assistant" },
-      ] }),
+test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同 step → 答案里行首的 Q1: 仍在行首；同一步的 assistant_message 首尾相接", async () => {
+  const turn = kimiTurn({
+    items: [
+      userMessageItem(),
+      assistantItem("Now let me check the files.", 1),
+      toolCallItem({ item_id: "tc_ls", step_index: 1 }),
+      assistantItem("Q1: FIX_", 2),
+      assistantItem("FIRST\n理由。", 2),
     ],
   });
-  const { handler, markSpawned } = turnScriptServer("session_steps1", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
+  const { events } = await runScript("session_steps1", { script: [[turn]] });
   const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
   assert.equal(assistant.length, 1);
   assert.equal(assistant[0].parts[0].text, "Now let me check the files.\n\nQ1: FIX_FIRST\n理由。");
-  assert.ok(assistant[0].parts[0].text.split("\n").includes("Q1: FIX_FIRST"), "答案的锚点行独占一行");
 });
 
-// ===== 重复文本帧（会审链路）：serve 偶发把同一段答案连发两帧——只保留一次 =====
+// ===== 答案拼接：旧帧流的重复帧去重已删除 =====
 
-test("kimi-web 重复帧①: completed 轮同段长文本（≥200 字符）连发两帧 → assistant 消息只出现一次，其前有一条 system 消息说明略去 1 帧", async () => {
-  const dup = "同一段不短的答案文本，逐字相同。".repeat(20); // ≥200 字符
-  assert.ok(dup.length >= 200, "测试前提：重复段不短于 200 字符");
-  const turn = turnItem({
-    steps: [stepItem({
-      stepId: "s0",
-      frames: [
-        { kind: "text", text: dup, role: "assistant" },
-        { kind: "text", text: dup, role: "assistant" },
-      ],
-    })],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_dup1", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(assistant.length, 1, "恰一条 assistant 消息");
-  assert.deepEqual(assistant[0].parts, [{ type: "text", text: dup }], "正文只含一次（重复帧不拼入）");
-  // system 消息（说明略去 1 帧）在 assistant 消息之前。
-  const assistantIdx = events.indexOf(assistant[0]);
-  const systemIdx = events.findIndex((e) => e.kind === "message" && e.role === "system");
-  assert.ok(systemIdx !== -1, "有一条 system 消息");
-  assert.ok(systemIdx < assistantIdx, "system 消息在 assistant 消息之前");
-  assert.match(events[systemIdx].parts[0].text, /1 text frame\(s\) identical to the one before/);
-  // 完成路径收尾照旧。
-  const done = events.at(-1);
-  assert.equal(done.kind, "done");
-  assert.equal(done.reason, "completed");
-});
-
-test("kimi-web 重复帧②: 两段相同短文本（<200 字符）都保留、无 system 说明", async () => {
-  const short = "好的，就这样。";
-  const turn = turnItem({
-    steps: [stepItem({
-      stepId: "s0",
-      frames: [
-        { kind: "text", text: short, role: "assistant" },
-        { kind: "text", text: short, role: "assistant" },
-      ],
-    })],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_dup2", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(assistant.length, 1);
-  assert.equal(assistant[0].parts[0].text, short + short, "短帧重复原样保留（不猜）");
-  assert.equal(
-    events.some((e) => e.kind === "message" && e.role === "system"),
-    false,
-    "无 system 说明",
-  );
-  const done = events.at(-1);
-  assert.equal(done.kind, "done");
-  assert.equal(done.reason, "completed");
-});
-
-test("kimi-web 重复帧③: 两段相同长文本中间隔着另一帧不同文本 → 都保留（去重只认紧邻重复），无 system 说明", async () => {
-  const long = "很长但只是一段的答案文本。".repeat(30); // ≥200 字符
-  assert.ok(long.length >= 200);
-  const middle = "中间一帧不同文本。";
-  const turn = turnItem({
-    steps: [stepItem({
-      stepId: "s0",
-      frames: [
-        { kind: "text", text: long, role: "assistant" },
-        { kind: "text", text: middle, role: "assistant" },
-        { kind: "text", text: long, role: "assistant" },
-      ],
-    })],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_dup3", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(assistant.length, 1);
-  assert.equal(assistant[0].parts[0].text, long + middle + long, "两段相同长文本都保留（非紧邻不去重）");
-  assert.equal(
-    events.some((e) => e.kind === "message" && e.role === "system"),
-    false,
-    "无 system 说明（零帧被略去）",
-  );
-  const done = events.at(-1);
-  assert.equal(done.kind, "done");
-  assert.equal(done.reason, "completed");
-});
-
-test("kimi-web 重复帧④: 同样的长文本中间隔着工具帧、或分在不同 step → 都保留（只认同一步里紧挨着的重复）", async () => {
+test("kimi-web 答案：相邻的同样文本原样保留（旧帧流的去重启发式已删除），没有 system 说明", async () => {
   const dup = "同一段不短的答案文本，逐字相同。".repeat(20);
-  const toolFrame = { kind: "tool", name: "Read", state: "done", frameId: "f_tool", toolCallId: "tc_1", input: { file_path: "a.txt" }, output: "ok" };
-  const sameStep = turnItem({
-    steps: [stepItem({ stepId: "s0", frames: [
-      { kind: "text", text: dup, role: "assistant" },
-      toolFrame,
-      { kind: "text", text: dup, role: "assistant" },
-    ] })],
-  });
-  const acrossSteps = turnItem({
-    steps: [
-      stepItem({ stepId: "s0", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
-      stepItem({ stepId: "s1", frames: [{ ...toolFrame, frameId: "f_tool2", toolCallId: "tc_2" }] }),
-      stepItem({ stepId: "s2", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
-    ],
-  });
-  for (const [label, turn, expected] of [
-    ["同一步隔着工具帧", sameStep, dup + dup],
-    ["不同 step", acrossSteps, `${dup}\n\n${dup}`],
-  ]) {
-    const { handler, markSpawned } = turnScriptServer(`session_dup4_${label.length}`, { script: [[turn]] });
-    const { fetchImpl } = kimiServer(handler);
-    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-    markSpawned();
-    const events = [];
-    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-      events.push(ev);
-    }
-    const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-    assert.equal(assistant.length, 1, label);
-    assert.equal(assistant[0].parts[0].text, expected, `${label}：两段都保留`);
-    assert.equal(events.filter((e) => e.kind === "message" && e.role === "system" && /identical to the one before/.test(e.parts[0].text)).length, 0, `${label}：没有略去帧的说明`);
-  }
+  const turn = kimiTurn({ items: [userMessageItem(), assistantItem(dup, 1), assistantItem(dup, 1)] });
+  const { events } = await runScript("session_dup", { script: [[turn]] });
+  assert.equal(events.find((e) => e.kind === "message" && e.role === "assistant").parts[0].text, `${dup}${dup}`);
+  assert.ok(!events.some((e) => e.kind === "message" && e.role === "system"));
 });
 
-test("kimi-web 重复帧⑤: 相邻两个 step 各只有一帧同样的长文本（中间没有别的帧）→ 都保留——换一步就不算重复", async () => {
-  const dup = "同一段不短的答案文本，逐字相同。".repeat(20);
-  const turn = turnItem({
-    steps: [
-      stepItem({ stepId: "s0", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
-      stepItem({ stepId: "s1", frames: [{ kind: "text", text: dup, role: "assistant" }] }),
-    ],
-  });
-  const { handler, markSpawned } = turnScriptServer("session_dup5", { script: [[turn]] });
-  const { fetchImpl } = kimiServer(handler);
-  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
-  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
-  markSpawned();
-  const events = [];
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
-    events.push(ev);
-  }
-  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(assistant[0].parts[0].text, `${dup}\n\n${dup}`);
-  assert.equal(events.filter((e) => e.kind === "message" && e.role === "system" && /identical to the one before/.test(e.parts[0].text)).length, 0);
+// ===== 收尾：kimi 2.6.3 实测目录覆盖（须是本文件最后一个测试——前面的测试先读完）=====
+
+test("kimi 2.6.3 实测：目录里每个文件都被本文件读到（README 写明了采集方式）", () => {
+  assert.match(readFileSync(new URL("README.md", KIMI_263_DIR), "utf8"), /agents\/main\/turns/);
+  kimi263Read.add("README.md");
+  const files = readdirSync(KIMI_263_DIR).sort();
+  assert.deepEqual(files.filter((name) => !kimi263Read.has(name)), [], "未被读到的实测文件");
 });

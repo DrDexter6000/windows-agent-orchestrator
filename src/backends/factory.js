@@ -217,18 +217,18 @@ export const CAPABILITY_NOTES = Object.freeze({
     enforcesWriteSandbox: "无 OS 写沙箱（进程级）——containment 走操作员安装的 ACP 补丁面，WAO 不在调用层强制 OS 沙箱，越界写拦截按 0084（上报侦测，非阻止）",
     vitalSigns: "可读体征：协议帧（握手落 `initialized`）。没有轮内\"等不到进展\"的收口门——握手等非 prompt 请求有 60s 超时，prompt 请求本身不设时限；轮内不落体征事实",
   }),
-  // kimi-web。上游事实 = 2026-09-30 对本机
-  // kimi 2.1.1 `kimi web` REST API 的直跑实测，中止与 thinking 取 kimi 2.4.0 的实测
-  // （详见 src/backends/kimiWeb.js 文件头；v8 完成判定 = transcript 轮次终态原语）。
+  // kimi-web。上游事实：只支持 kimi 2.6+——完成判定读 `GET …/agents/main/turns`（2.6.3
+  // 实测，原始响应在 test/fixtures/kimi-2.6.3/）；中止与 thinking 取 2.4.0 的实测（详见
+  // src/backends/kimiWeb.js 文件头）。
   "kimi-web": Object.freeze({
     model: "空白/纯空白 `model.id` 同样被拒；id 原样直传 prompts body——上游缺 model 时接口返 success 但轮次静默秒败，所以派发前硬拒；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填",
     reasoning: "effort 直传 prompts body 的 `thinking`（车道声明与 `--reasoning` 覆盖同一通道，resume 轮同样带）；档位见判定表（探针派生），关闭思考不可配；型号与力度的搭配交给服务端校验（不支持的组合上游报 50001，派发失败），WAO 不做型号绑定；effort 缺省不发该字段",
     supportsRoleContract: "拼进 prompt 正文前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（非系统级通道，prompt 级引导）",
-    supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）",
-    supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性：prompts 列表项带 `steeredAt` 与状态枚举（2.4.0 OpenAPI 在册，未 live 实测，仅标注）；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称",
-    reportsTokenUsage: "transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；abort 中止会话正在跑和排队的 prompt（`GET prompts`，先对 queued 逐条、再对 active `POST …/prompts/{promptId}:abort`——只停活动的，排队那条会立刻接着跑；两样都没有视为已停；上游拒绝/传输失败抛固定文案；绝不调服务器级 `/api/v1/shutdown`；幂等，二次调用复用首次结果），停止验证经停止探针观测会话 busy 状态（中止后会话不忙）；`wao stop` / `run_stop` 同走这条中止与验证，鉴权取 registry 里派发该运行的 agent（`run.started.agentId`，须同为 kimi-web 且 serveUrl 与会话记录一致），agent 或它的 token 取不到（token 按派发时的同一条路解析）、或对不上时不发请求、不认领终态（`run.stop_unverified` 的 outcome 为 `stop_route_unavailable`）——已知边界：中止只停模型这一轮，这一轮已经启动的命令进程跑到自己结束，会话按原规则保留（failed/aborted 的会话留作取证源）；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（60–240s 自适应预算 + serve 证词，见本后端的 `vitalSigns`），两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）",
+    supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（turns 端点的轮按 `user_message.prompt_ids` 归属本运行的提示，历史轮不含这些 id，永不重放/误归属；提交前记下最大 ordinal 作翻页边界，往回翻到它为止）",
+    supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入（`steered:true` 即 delivered）；2.6.3 实测：转入后当前轮被打断、无回答结束，纠偏作为下一轮的开场消息开轮做完工作——运行在纠偏那一轮收口（答案取它，用量与工具证据跨两轮累计）；每条被接纳的纠偏都要结算：已转入的从转入时刻起等、上界同 silentTimeout，到界没有轮执行它即运行失败；steer 失败（如 40402 无活动轮）的那条上游可能仍会在后续轮执行——send_failed ≠ 一定未执行，Lead 重发前须知此不对称；它出现在某轮里照常归属，到界既不在轮里也不在队列里则按未执行结算并留一条 system 说明",
+    reportsTokenUsage: "turns 端点的轮级 `usage`（input_other/output/input_cache_read/input_cache_creation）实测非零（2.6.3）；通道 = 完成时本运行各归属轮 usage 求和 → metrics 事件（首个请求取第一个归属轮 index 最小、带 usage 的那一步），tokenBudget 闸门生效；abort 中止会话正在跑和排队的 prompt（`GET prompts`，先对 queued 逐条、再对 active `POST …/prompts/{promptId}:abort`——只停活动的，排队那条会立刻接着跑），之后稍等再读 prompts 与会话详情：2.6 中止不清已转入、还没开轮的纠偏，它会自己开一轮——又见活动的 prompt 或 `main_turn_active` 不是 false 就再中止，最多 3 轮，仍停不下抛固定文案；会话已不存在视为已停；上游拒绝/传输失败抛固定文案；绝不调服务器级 `/api/v1/shutdown`；幂等，二次调用复用首次结果），停止验证经停止探针观测会话 busy 状态（中止后会话不忙）；`wao stop` / `run_stop` 同走这条中止与验证，鉴权取 registry 里派发该运行的 agent（`run.started.agentId`，须同为 kimi-web 且 serveUrl 与会话记录一致），agent 或它的 token 取不到（token 按派发时的同一条路解析）、或对不上时不发请求、不认领终态（`run.stop_unverified` 的 outcome 为 `stop_route_unavailable`）——已知边界：中止只停模型这一轮，这一轮已经启动的命令进程跑到自己结束，会话按原规则保留（failed/aborted 的会话留作取证源）；事件流有界终止 = 每条提示的结算上界（silentTimeout，提交滞后不入轮即 silent fail）+ 无进展出口（60–240s 自适应预算 + serve 证词，见本后端的 `vitalSigns`），两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）",
     enforcesWriteSandbox: "无 OS 写沙箱——HTTP attach 远端 serve，写发生在服务器侧进程，本机调用层无沙箱面，越界写拦截按 0084（上报侦测，非阻止）",
-    vitalSigns: "可读体征：turn 结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提交后 turn 迟迟不出现：`silentTimeout`，未配置时 8 拍。有 turn 无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）",
+    vitalSigns: "可读体征：最终轮结构变化（落 `streaming`）、serve 证词（落 `serve_active`）。提示提交后迟迟不入轮：`silentTimeout`，未配置时 8 拍。有最终轮无变化满 60–240s 自适应预算问 serve：不活跃或问不到即收口；活跃则续命，自上次产出增长起续命静默满 30min 仍收口（换了最终轮按新轮重计）——证词是服务端自述、无法交叉印证，口径的已登记例外（决定 0068）",
   }),
   // zcode。上游事实 = 2026-10-01 对本机
   // zcode 0.16.9 捆绑 CLI app-server（ZCode Protocol v1）的 live 实测（详见
