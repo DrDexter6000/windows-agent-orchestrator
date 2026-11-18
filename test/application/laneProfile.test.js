@@ -884,8 +884,10 @@ test("0097 真实数据：进了 score 的那组数字不再出现在同格 note
   const proj = projectLaneProfiles({ lanesDoc: loadLanesConfig(), traitsResult: r });
   const cases = [
     ["glm-pro", "research", "137/174"],
+    // 写代码一格从第 115 批起计实际交付谱系（一次落地/谱系数），横评数字留在 note。
+    ["glm-pro", "code", "56/159"],
     ["glm-flash", "research", "68/99"],
-    ["glm-flash", "code", "27/28"],
+    ["glm-flash", "code", "14/23"],
     ["glm-flash", "review", "1/8"],
     ["kimi", "research", "68/99"],
     // kimi.code：本格数字 26/28 与同轮 deepseek-flash 恰好同分，note 里保留的
@@ -894,8 +896,9 @@ test("0097 真实数据：进了 score 的那组数字不再出现在同格 note
     ["kimi", "code", "隐藏测试 26/28"],
     ["kimi", "review", "5/8"],
     ["deepseek-flash", "research", "277/396"],
-    ["deepseek-flash", "code", "107/112"],
+    ["deepseek-flash", "code", "14/23"],
     ["deepseek-flash", "review", "24/32"],
+    ["opus", "code", "8/14"],
   ];
   for (const [laneId, dim, num] of cases) {
     const row = proj.rows.find((x) => x.id === laneId);
