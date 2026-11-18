@@ -169,3 +169,4 @@
 | TD-346 | zcode 停滞门按父进程走树，经 Git Bash 跑 `#!/usr/bin/env bash` 脚本（npm、npx）时 MSYS 连续 exec 让父子链断开，测试子进程在干活却被判无体征（第 90 批误收） | 2026-11-09 第 94 批（决定 0121，仅 Windows）：app-server 起来后挂一个不许脱离的作业，停滞门同时读作业的累计 CPU/I/O/进程数 |
 | TD-336 | 写入意图的物理路径确认与 worker 的并发写入赛跑，误判 `workdir_escape`（2026-11-05：错误码不在 TD-305 的四码名单里，没有重试；事件不记路径与原码） | 2026-11-10 第 95 批：词法在 worktree 内而物理位置确认不了时，不论错误码都重做判定（最多 3 次）；违规事件记 worktree 内相对路径与闭集外的原码 |
 | TD-117 | kimi-code 与 deepseek-harness 两个后端暂停使用、不配车道：kimi-code 不上报用量，deepseek-harness 不支持会话复用；在用的是 kimi-web 与 deepseek-acp | 2026-11-10 第 101 批（决定 0123）：两个后端退役出闭集（KNOWN_BACKENDS 7→5），通道留观察表；存档 tag archive/kimi-code-backend / archive/deepseek-harness-backend |
+| TD-352 | claude-code 续修轮看不到新的交付合同：`claude --resume` 沿用建会话时的系统提示，放宽的 allowedPaths 对 worker 不可见 | 2026-11-18 第 110 批：codex `exec resume` 同样沿用（实测），两个后端声明 resumeKeepsSessionInstructions，resume 轮由 ProcessBackend 把本轮合同重述进提示词；deepseek-acp 实测能看到新合同，zcode、kimi 的合同本就随每轮提示词 |

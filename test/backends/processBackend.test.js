@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ProcessBackend } from "../../src/backends/processBackend.js";
+import { ProcessBackend, turnPrompt, RESUMED_INSTRUCTIONS_HEADER } from "../../src/backends/processBackend.js";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
@@ -1505,4 +1505,72 @@ test("0070-B5（会审 sol）: 取样探针还在跑的时候进程退出了 →
   await consume;
   assert.ok(Date.now() - closedAt < 3000, `收尾用了 ${Date.now() - closedAt}ms——不是等 60s 的取样定时器`);
   assert.equal(events.at(-1).kind, "done");
+});
+
+// ── TD-352：resume 轮不刷新会话级指令的后端，把本轮合同重述进提示词 ───────────────
+//
+// claude `--resume` 不采用新的 `--append-system-prompt`，codex `exec resume` 不采用新的
+// `-c developer_instructions`（2026-11-18 实测）。续修轮放宽的 allowedPaths 只能随提示词
+// 到达 worker。
+
+const TD352_CONTRACT = "DELIVERY EXECUTION CONTRACT\n- AUTHORIZED_PATHS_JSON: [\"docs\",\"src\"]\n\n---\n\nROLE: coder";
+const TD352_RESUME = { mode: "run_lineage", turn: "resume", opaqueUuid: "00000000-0000-4000-8000-000000000352", priorRunId: "run_prior" };
+
+test("TD-352: capability 声明——base ProcessBackend=false，ClaudeCodeBackend 与 CodexBackend=true", () => {
+  const base = new ProcessBackend({ parserClass: ClaudeStreamParser, buildArgs: () => [] });
+  assert.equal(base.resumeKeepsSessionInstructions, false);
+  assert.equal(new ClaudeCodeBackend({}).resumeKeepsSessionInstructions, true);
+  assert.equal(new CodexBackend({}).resumeKeepsSessionInstructions, true);
+});
+
+test("TD-352: turnPrompt 只在声明了能力的后端、resume 轮、有角色合同时重述；其余原样", () => {
+  const flagged = { resumeKeepsSessionInstructions: true };
+  const restated = turnPrompt(flagged, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME });
+  assert.equal(restated, `${RESUMED_INSTRUCTIONS_HEADER}\n\n${TD352_CONTRACT}\n\n---\n\ndo it`);
+  assert.ok(restated.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'), "本轮的授权清单随提示词到达");
+  assert.equal(turnPrompt(flagged, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: { ...TD352_RESUME, turn: "first" } }), "do it", "首轮走会话级通道，不重述");
+  assert.equal(turnPrompt(flagged, { prompt: "do it", roleContract: TD352_CONTRACT }), "do it", "非复用运行不重述");
+  assert.equal(turnPrompt(flagged, { prompt: "do it", sessionReuse: TD352_RESUME }), "do it", "没有角色合同不重述");
+  assert.equal(turnPrompt({}, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME }), "do it", "未声明能力的后端不重述");
+  assert.equal(turnPrompt({ resumeKeepsSessionInstructions: "yes" }, { prompt: "do it", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME }), "do it", "能力按 === true 读取");
+});
+
+class Td352Backend extends ProcessBackend {
+  resumeKeepsSessionInstructions = true;
+  promptViaStdin = true;
+  supportsInFlightCorrection = true;
+}
+
+test("TD-352: resume 轮经标准输入写入的提示词带重述的合同（promptViaStdin 路径）", async () => {
+  const cap = makeCapturingChild();
+  const backend = new Td352Backend({ parserClass: ClaudeStreamParser, buildArgs: () => [], spawnFn: () => cap.child });
+  await backend.spawn(makeAgent(), { prompt: "continue the work", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME });
+  const written = cap.stdinText();
+  assert.ok(written.startsWith(RESUMED_INSTRUCTIONS_HEADER), "重述在前");
+  assert.ok(written.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'));
+  assert.ok(written.endsWith("continue the work"), "Lead 的提示词在后");
+});
+
+test("TD-352: 首轮经标准输入写入的提示词不带重述（字节不变）", async () => {
+  const cap = makeCapturingChild();
+  const backend = new Td352Backend({ parserClass: ClaudeStreamParser, buildArgs: () => [], spawnFn: () => cap.child });
+  await backend.spawn(makeAgent(), { prompt: "start the work", roleContract: TD352_CONTRACT, sessionReuse: { ...TD352_RESUME, turn: "first" } });
+  assert.equal(cap.stdinText(), "start the work");
+});
+
+test("TD-352: correctable 的 resume 轮，首条 stream-json 用户消息带重述的合同", async () => {
+  const cap = makeCapturingChild();
+  const backend = new Td352Backend({
+    parserClass: ClaudeStreamParser,
+    buildArgs: () => [],
+    spawnFn: () => cap.child,
+    encodeUserMessage: (text) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } }),
+  });
+  await backend.spawn(makeAgent(), { prompt: "continue", roleContract: TD352_CONTRACT, sessionReuse: TD352_RESUME, correctable: true });
+  const lines = cap.stdinText().split("\n").filter((l) => l.length > 0);
+  assert.equal(lines.length, 1, "恰好一条初始用户消息");
+  const text = JSON.parse(lines[0]).message.content[0].text;
+  assert.ok(text.startsWith(RESUMED_INSTRUCTIONS_HEADER));
+  assert.ok(text.includes('AUTHORIZED_PATHS_JSON: ["docs","src"]'));
+  assert.ok(text.endsWith("continue"));
 });

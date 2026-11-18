@@ -71,6 +71,11 @@ export class CodexBackend extends ProcessBackend {
   // 命令行预算；角色合同仍在命令行上（-c developer_instructions）。
   promptViaStdin = true;
 
+  // TD-352（2026-11-18 实测，codex-cli 0.169.0）：`exec resume` 沿用建会话时的
+  // developer instructions，新的 `-c developer_instructions` 不生效。resume 轮由
+  // ProcessBackend 把本轮合同重述进提示词。
+  resumeKeepsSessionInstructions = true;
+
   /**
    * M11-9 capability: Codex can express model (--model) and reasoning
    * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag).

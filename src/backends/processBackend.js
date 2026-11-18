@@ -83,6 +83,26 @@ class EventQueue {
  *   (b) taskkill /pid /T /F（主动）：abort 时主动杀进程树（行业最佳实践，tree-kill/execa 底层同此）。
  * 不实现自定义 Job Object：违反零依赖（需 N-API/FFI 原生模块）且业界无人这样做（内置已够用，见 ADR 0013）。
  */
+// TD-352：resume 轮重述本轮指令的固定开头。会话级通道里还是建会话时那份角色与交付
+// 合同，这里说清以哪份为准。
+export const RESUMED_INSTRUCTIONS_HEADER =
+  "[WAO control plane] Instructions for this turn. They replace the role and delivery contract this "
+  + "conversation started with; where the two differ (for example AUTHORIZED_PATHS_JSON), follow these.";
+
+/**
+ * 本轮写进标准输入的提示词。声明 resumeKeepsSessionInstructions 的后端在 resume 轮把
+ * task.roleContract（交付合同 + 角色合同，与首轮同一拼法）重述在前面；其余情形原样返回。
+ * 转录的 prompt.sent 只记 Lead 的提示词，不受影响。
+ */
+export function turnPrompt(backend, task) {
+  const restate = backend?.resumeKeepsSessionInstructions === true
+    && task?.sessionReuse?.turn === "resume"
+    && typeof task.roleContract === "string"
+    && task.roleContract.length > 0;
+  if (!restate) return task?.prompt;
+  return `${RESUMED_INSTRUCTIONS_HEADER}\n\n${task.roleContract}\n\n---\n\n${task.prompt ?? ""}`;
+}
+
 export class ProcessBackend {
   // A dead process-backed run can only be recovered by replaying its durable
   // prompt into a fresh process. RunManager consumes this provider-neutral
@@ -147,6 +167,13 @@ export class ProcessBackend {
   // overriding this to true AND supplying an encodeUserMessage constructor opt.
   // Shared orchestration reads this boolean — never the runtime name.
   supportsInFlightCorrection = false;
+
+  // TD-352：resume 轮是否仍沿用建会话时的会话级指令（角色合同所走的通道）。实测
+  // （2026-11-18）claude `--resume` 不采用新的 `--append-system-prompt`，codex
+  // `exec resume` 不采用新的 `-c developer_instructions`：续修轮放宽的交付合同到不了
+  // worker。声明为 true 的后端在 resume 轮把本轮的角色合同重述在提示词前面（见
+  // turnPrompt）。缺省 false；共享层只读这个 boolean，不认运行时名。
+  resumeKeepsSessionInstructions = false;
 
   // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21）：进程式后端的会话 id 由
   // **运行时自产**（claude-code 那种控制面自选 `--session-id` 的路子不适用），故
@@ -401,6 +428,8 @@ export class ProcessBackend {
     // 若 spawn 本身失败（ENOENT），这里 reject，调用方 catch
     await spawned;
 
+    const prompt = turnPrompt(this, task);
+
     // M12-16: deliver the initial prompt as the FIRST stream-json user message
     // on stdin (the correctable wire). The process reads its prompt from stdin
     // (claude -p --input-format stream-json), so this is byte-equivalent to the
@@ -417,7 +446,7 @@ export class ProcessBackend {
       // zcode/deepSeek 两线同款）。
       stdin?.on("error", () => {});
       try {
-        const line = `${this.encodeUserMessage(task.prompt)}\n`;
+        const line = `${this.encodeUserMessage(prompt)}\n`;
         await new Promise((resolve, reject) => {
           const ok = stdin.write(line, (err) => (err ? reject(err) : resolve()));
           // backpressure: drain before resolving so the full line is queued
@@ -431,7 +460,7 @@ export class ProcessBackend {
       // 子进程先退出时写入会报 EPIPE：那次退出照常由事件流收口，这里不另报。
       // （真实 spawn 的管道必有 stdin；测试注入的假子进程可以没有。）
       child.stdin?.on("error", () => {});
-      child.stdin?.end(task.prompt ?? "");
+      child.stdin?.end(prompt ?? "");
     }
 
     return {

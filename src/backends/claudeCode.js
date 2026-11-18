@@ -211,6 +211,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // 角色合同仍在命令行上（--append-system-prompt）。
   promptViaStdin = true;
 
+  // TD-352（2026-11-18 实测，CLI 2.1.326）：`--resume` 沿用建会话时的系统提示，新的
+  // `--append-system-prompt` 不生效。resume 轮由 ProcessBackend 把本轮合同重述进提示词。
+  resumeKeepsSessionInstructions = true;
+
   // ADR-0025 批次 2（TD-87）：claude stream-json 的 result 帧携带 usage
   // （ClaudeStreamParser 产出 metrics token 事实）——tokenBudget 闸门对该
   // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。

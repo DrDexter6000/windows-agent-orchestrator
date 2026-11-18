@@ -42,7 +42,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - **claude-code**
   - model.contextWindow：无 CLI 参数可表达，配了即拒
   - 生命体征与收口：可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内"等不到进展"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征
-  - supportsRoleContract（角色合同）：`--append-system-prompt`（内容直传，恰好一次）
+  - supportsRoleContract（角色合同）：`--append-system-prompt`（内容直传，恰好一次）；`--resume` 不采用新值，resume 轮另把本轮合同重述在提示词前面（TD-352）
   - supportsSessionReuse（会话复用）：`--session-id` / `--resume`（opaque uuid 由控制平面派生）
   - supportsInFlightCorrection（在途纠偏）：stdin stream-json 排队（同一活进程；delivered 证明字节被接受，不证明模型执行了该轮）
   - reportsTokenUsage（token usage）：result 帧 usage
@@ -50,7 +50,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - **codex**
   - model.contextWindow：无 CLI flag 可表达，配了即拒
   - 生命体征与收口：可读体征：stdout 事件；转录静默满 5 分钟起取样——后代进程在干活落 `process_active`、工作目录文件变化落 `files_changed`（只供观察）。没有轮内"等不到进展"的收口门（可选 `silentTimeout` 只管启动后零事件，默认关）：取样读到什么都不收口；长思考期间读不到体征
-  - supportsRoleContract（角色合同）：`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）
+  - supportsRoleContract（角色合同）：`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）；`exec resume` 不采用新值，resume 轮另把本轮合同重述在提示词前面（TD-352）
   - supportsSessionReuse（会话复用）：`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝
   - reportsTokenUsage（token usage）：turn.completed 帧 usage
   - enforcesWriteSandbox（OS 写沙箱）：每次 `exec` / `exec resume` 显式传 `-c sandbox_mode="workspace-write"` 等三项（压过用户 config.toml；决定 0086）；可写面 = 运行的工作目录 + 系统临时目录（`%TEMP%` 可写是已知边界），关联工作树的 git 元数据在树外不可写；活体证据 = reliability `sandboxEnforcement`（`codex sandbox -P :workspace` 探测，不经模型）
