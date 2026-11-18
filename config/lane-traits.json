@@ -59,7 +59,7 @@
         "providerID": null,
         "effort": "high"
       },
-      "reviewPending": "codex 0.167.0→0.169.0（11-17）：认证 certified 与跨 run drill 通过；measured 格待新版实际任务，相符才解除，不符改格",
+      "reviewPending": "换型号 gpt-6.1-sol→gpt-6.2-sol（11-18）：画像格仍是按 gpt-6.1-sol 评的；measured 格待按新身份重测（横评至少一轮）或改回未评，处理完更新 ratedAgainst 再解除",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -119,7 +119,7 @@
         "providerID": null,
         "effort": "medium"
       },
-      "reviewPending": "codex 0.167.0→0.169.0（11-17）：同一程序 sol 已认证并跑 drill；本车道待下次实际会审冒烟，通过即解除",
+      "reviewPending": "换型号 gpt-6-astra→gpt-6.2-astra（11-18）：分项评分只用 Owner 手动输入，格仍是按 gpt-6-astra 给的；待 Owner 确认沿用或改回未评，再更新 ratedAgainst 并解除",
       "costTier": 5,
       "cost": "codex 订阅额度",
       "caveats": [

@@ -56,7 +56,7 @@
       "backend": "codex",
       "cwd": ".",
       "model": {
-        "id": "gpt-6.1-sol"
+        "id": "gpt-6.2-sol"
       },
       "reasoning": {
         "effort": "high"
@@ -67,7 +67,7 @@
       "backend": "codex",
       "cwd": ".",
       "model": {
-        "id": "gpt-6-astra"
+        "id": "gpt-6.2-astra"
       },
       "reasoning": {
         "effort": "medium"
@@ -174,9 +174,9 @@
       },
       {
         "agentId": "sol",
-        "label": "gpt-6.1-sol via codex（模板行）",
+        "label": "gpt-6.2-sol via codex（模板行）",
         "profile": "strict",
-        "modelId": "gpt-6.1-sol",
+        "modelId": "gpt-6.2-sol",
         "drills": [
           "sentinel",
           "scorecard",
@@ -186,9 +186,9 @@
       },
       {
         "agentId": "astra",
-        "label": "gpt-6-astra via codex（模板行）",
+        "label": "gpt-6.2-astra via codex（模板行）",
         "profile": "strict",
-        "modelId": "gpt-6-astra",
+        "modelId": "gpt-6.2-astra",
         "drills": [
           "sentinel",
           "scorecard",
