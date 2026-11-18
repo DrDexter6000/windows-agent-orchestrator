@@ -59,6 +59,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "reviewPending": "codex 0.169.0→0.170.0（11-18）：认证 certified、跨 run drill 与真实续修冒烟通过；review 格待新版实际会审，相符才解除，不符改格",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
