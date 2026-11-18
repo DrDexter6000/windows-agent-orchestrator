@@ -508,7 +508,12 @@ test("KW-01: kimi-web 会话的 stop——GET prompts → POST :abort 带 agent 
     assert.deepEqual(promptCalls.map((c) => [c.method, c.url]), [
       ["GET", `${KW_SESSION_URL}/prompts`],
       ["POST", `${KW_SESSION_URL}/prompts/msg_live:abort`],
+      // b109: kimi 2.6 re-checks after stopping the turn (a steered correction can open a new turn).
+      ["GET", `${KW_SESSION_URL}/prompts`],
     ]);
+    const afterAbort = calls.slice(calls.findIndex((c) => c.method === "POST"));
+    assert.ok(afterAbort.some((c) => c.method === "GET" && c.url === KW_SESSION_URL),
+      "the re-check also reads session detail (busy and main_turn_active both false count as stopped)");
     for (const call of calls) assert.equal(call.authorization, `Bearer ${KW_TOKEN}`);
     assert.equal(captured.length, 0, "已核实停止不告警");
 
