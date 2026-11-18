@@ -5,8 +5,8 @@
   "ownerRules": [
     "sol、astra（codex 车道）只做会审，不派实现、测试或调研；会审要查 bug 时优选 sol",
     "要真跑一次 deepseek-acp 后端（如验证该后端的改动）用 deepseek-flash；deepseek-pro 暂停期间连最小探测也不派",
-    "实现任务默认 glm-pro：它能完成的都优先交给它，不按任务形态另分车道；GLM 高峰期间（时段见 glm-pro 的 cost）优先 glm-flash",
-    "能省则省，质量和效率优先；不必为省钱刻意避开 DeepSeek 高峰",
+    "写代码/实现按序选：glm-pro（GLM 高峰用 glm-flash，时段见其 cost）→ 没完成、额度用尽或明显超出其能力时换 deepseek-flash → 再不行才用 opus；跳级时在给 Owner 的汇报里写一句理由",
+    "能省则省；上面的顺序本身就是质量与成本的平衡，不以“质量优先”为由直接跳到贵车道；不必为省钱刻意避开 DeepSeek 高峰",
     "fable 与 astra 只用于疑难杂症、影响面广、难度高或要求创意的会审，寻常会审不请；fable 只在方案设计/头脑风暴阶段"
   ],
   "scale": {
