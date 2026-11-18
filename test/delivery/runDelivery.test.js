@@ -3056,7 +3056,7 @@ test("3B2-12: user abort → verifierCount===0", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-12-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b212-"));
   let verifyCount = 0;
-  // transcript 轮恒 running——永不发出 done
+  // 轮恒 running——永不发出 done
   const hangingFetch = runServer(KIMI_TEST_SERVE_URL, { delayMs: Infinity }).fetchImpl;
   try {
     const mgr = makeManagerWithPackager(
@@ -3070,9 +3070,12 @@ test("3B2-12: user abort → verifierCount===0", async () => {
     });
     const ac = new AbortController();
     const waitPromise = run.waitForCompletion({ signal: ac.signal, pollInterval: 10, waitTimeout: 10000 });
-    // Abort after a short delay
-    setTimeout(() => mgr.abort("run_3b2_test_12", "user"), 100);
+    // Abort after a short delay. The kimi abort re-checks the session after it stops the turn
+    // (b109), so wait for it to finish before the run directory is removed.
+    let abortPromise = null;
+    setTimeout(() => { abortPromise = mgr.abort("run_3b2_test_12", "user"); }, 100);
     try { await waitPromise; } catch { /* expected abort */ }
+    if (abortPromise !== null) await abortPromise.catch(() => {});
     assert.equal(verifyCount, 0, "verifier must not be called on user abort");
   } finally {
     await cleanupDir(repo);
