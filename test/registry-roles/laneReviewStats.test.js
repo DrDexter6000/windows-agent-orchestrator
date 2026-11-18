@@ -737,7 +737,8 @@ test("CLI：--json 钉住 standaloneReviews 与 withTwoPlusRatedSeats；位置�
   } finally { cleanupDir(dir); }
 });
 
-test("CLI：无盘符 project.key 指向当前盘真实目录也不收", () => {
+// 盘符规则只在 Windows 上生效（非 Windows 上无盘符的绝对路径是合法 key）。
+test("CLI：无盘符 project.key 指向当前盘真实目录也不收", { skip: process.platform !== "win32" }, () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-lrs-nodrive-"));
   try {
     const t = "2026-11-02T08:00:00.000Z";
