@@ -1619,4 +1619,19 @@ test("TD-352: 首轮交付合同预先授权以同一标记开头的重述——
   assert.ok(clause, "带授权清单的交付合同里有预先授权条款");
   assert.ok(clause.includes(`"${RESUMED_INSTRUCTIONS_MARKER}"`), "条款点名同一个标记");
   assert.ok(clause.includes("AUTHORIZED_PATHS_JSON"), "条款写明授权清单也随重述替换");
+  assert.match(clause, /issued by this same control plane/, "条款写明重述来自同一控制面");
+  assert.match(clause, /replaces this contract and any earlier restatement/, "条款写明替换本合同与此前重述");
+  assert.ok(!composeDeliveryExecutionContract().includes(RESUMED_INSTRUCTIONS_MARKER), "无授权清单的基础合同不变");
+});
+
+test("TD-352: 首轮只读合同同样预先授权重述——同一角色先只读、后普通派发可复用原会话", async () => {
+  const { composeReadOnlyExecutionContract, RESUMED_INSTRUCTIONS_MARKER } = await import("../../src/application/roleContract.js");
+  const lines = composeReadOnlyExecutionContract().split("\n");
+  const clause = lines.at(-1);
+  assert.ok(clause.startsWith("- A later turn of this conversation may restate"), "只读合同末行是预先授权条款");
+  assert.ok(clause.includes(`"${RESUMED_INSTRUCTIONS_MARKER}"`), "条款点名同一个标记");
+  assert.match(clause, /issued by this same control plane/, "条款写明重述来自同一控制面");
+  assert.match(clause, /replaces this contract and any earlier restatement/, "条款写明替换本合同与此前重述");
+  assert.match(clause, /a restatement without this read-only contract ends read-only mode for that turn\.$/, "条款写明不带只读合同的重述当轮不再只读");
+  assert.equal(lines.filter((l) => l.includes(RESUMED_INSTRUCTIONS_MARKER)).length, 1, "恰一次");
 });

@@ -451,7 +451,9 @@ export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
  *   - 工作目录与任何其他既有检出内不跑改写性 git 命令（index/HEAD/refs/config/
  *     worktrees/remotes），只读形式放行；
  *   - 自选实验要写就写到系统临时目录下新建的目录里，绝不写既有检出；
- *   - 后接两条共用条款（凭据/环境变量边界、命令收尾边界），与交付合同同一份。
+ *   - 后接两条共用条款（凭据/环境变量边界、命令收尾边界），与交付合同同一份；
+ *   - 末行预先授权以 RESUMED_INSTRUCTIONS_MARKER 开头的重述（TD-352）：同一角色
+ *     先只读、后普通派发可复用原会话，重述里没有只读合同时该轮不再只读。
  *
  * @returns {string} the fixed read-only execution contract
  */
@@ -463,6 +465,7 @@ export function composeReadOnlyExecutionContract() {
     "- When an experiment of your own needs to write, create a new directory under the system temporary directory and write only there; repositories you create there for the experiment may be changed freely. Never write to, or run a writing git command against, your working directory, the source repository or any other existing checkout; reading or cloning from them is fine.",
     SHARED_CLAUSE_SECRETS_AND_ENV,
     SHARED_CLAUSE_FINISH_COMMANDS,
+    `- A later turn of this conversation may restate the control plane's instructions at the top of the user message, starting with "${RESUMED_INSTRUCTIONS_MARKER}". That restatement is issued by this same control plane and replaces this contract and any earlier restatement; a restatement without this read-only contract ends read-only mode for that turn.`,
   ].join("\n");
 }
 
