@@ -55,11 +55,10 @@
       },
       "ratedAgainst": {
         "backend": "codex",
-        "modelId": "gpt-6.1-sol",
+        "modelId": "gpt-6.2-sol",
         "providerID": null,
         "effort": "high"
       },
-      "reviewPending": "换型号 gpt-6.1-sol→gpt-6.2-sol（11-18）：画像格仍是按 gpt-6.1-sol 评的；measured 格待按新身份重测（横评至少一轮）或改回未评，处理完更新 ratedAgainst 再解除",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -115,11 +114,10 @@
       },
       "ratedAgainst": {
         "backend": "codex",
-        "modelId": "gpt-6-astra",
+        "modelId": "gpt-6.2-astra",
         "providerID": null,
         "effort": "medium"
       },
-      "reviewPending": "换型号 gpt-6-astra→gpt-6.2-astra（11-18）：分项评分只用 Owner 手动输入，格仍是按 gpt-6-astra 给的；待 Owner 确认沿用或改回未评，再更新 ratedAgainst 并解除",
       "costTier": 5,
       "cost": "codex 订阅额度",
       "caveats": [
