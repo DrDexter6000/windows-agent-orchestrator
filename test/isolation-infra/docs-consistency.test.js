@@ -1675,7 +1675,7 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
   // 批 119 复核：逐处核验——每一处"N 个 MCP 工具"都必须等于 TOOLS.length
   //（此前只查"存在一处 n"与 n±1，导航表写别的数会漏）。
   const readmeZh = read("README.zh-CN.md");
-  const zhCounts = [...readmeZh.matchAll(/(\d+) 个 MCP 工具/g)].map((m) => Number(m[1]));
+  const zhCounts = [...readmeZh.matchAll(/(\d+)\s*个\s*MCP\s*工具/g)].map((m) => Number(m[1]));
   assert.ok(zhCounts.length > 0, "README.zh-CN.md 必须声明 MCP 工具数");
   assert.deepEqual(zhCounts.filter((c) => c !== n), [],
     `README.zh-CN.md 每一处"N 个 MCP 工具"都必须等于 TOOLS.length=${n}（实际 ${zhCounts.join("/")}）`);
