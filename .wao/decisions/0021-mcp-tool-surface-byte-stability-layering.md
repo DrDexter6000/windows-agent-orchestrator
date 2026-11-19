@@ -55,3 +55,22 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
 - schema 面：八个 runId 工具与 `run_consult` 的 inputSchema 各增**可选** `expectedWorkspaceRoot` 字段（additive）；`run_dispatch` 的同名字段由"可选断言"改为 handler 内必传（固定文案拒绝，缺参零副作用）——schema 保持 optional 是因为 `RUN_DISPATCH_INPUT` 与 `run_dispatch_contract_check` 共享，schema 级必填会连带后者；后者现在自己消费该字段（给了就按它检查并在出参 `workspaceScope` 写明范围），`run_consult` 的读取/分页模式同样接受该字段（给了就按它定位组记录）。原不带目标的合法调用自此被拒：各宿主 Lead 的首次 A 类调用会被拒一次，文案指明该传什么，补参重试即恢复（`SKILL.md`/`docs/usage/host.md` 同批更新）。其余 additive 成员：`workspaceProof.source` 闭集增 `call_target`（证明来源如实标注）；`lead_preflight` workspace 增 `projectBucket`、`runs_list` 增 `scope`（只读结果的范围可见性）；`run_dispatch_contract_check` 出参增 `workspaceScope`。
 - 依据：Owner 2026-10-15 批准（Lead 两项请批——"会动工作区的工具必须写明目标项目、不写就拒；MCP 工具描述的字节冻结线随之重冻"，Owner 答复"我同意两件都批"）。
 - 手续执行：FROZEN_23_WIRE_CEILING 85101→88048、FROZEN_23_DESC_CEILING 10125→11783（描述各加一句必传目标说明与范围可见性说明；Owner 硬顶 12347 内）、FROZEN_23_HOSTVISIBLE_CEILING 20699→22941，DESC_STRIPPED_CONTRACT_SHA 重测重冻（m12-10 注释链如实记录）。同批会审修复再动描述与 schema（consult 读取目标、contract_check 范围、run_stop 描述）后按实测重冻到上述值。
+
+## 追加记录：2026-11-19 减面 23 → 20（第 119 批，决定 0125）
+
+- **L2**：删除共享项目选择（`workspace_select` 与 `lead_session` 绑定来源）。
+  - Owner 明示（2026-11-19："收掉两个多余的工具 —— 不要等，该做就做"）。
+  - `02-architecture.md` 冻结工具面一节"没有任何能力被永久移除或弱化"句，已按本档修订为列出能力承接点。
+- **L1**：`workspace_status`、MCP `run_wait` 撤出工具面。承接点是另外的工具（`lead_preflight.workspace`、`run_await_result`、CLI `runs wait`），不是第 4 条先例里的 MCP resources。
+- **schema**：
+  - `lead_preflight`：
+    - 输入 `workspaceRoot` 改名为 `expectedWorkspaceRoot`（移除加新增，属破坏性）；
+    - 删除 `workspaceSelection`；
+    - `source` 闭集删 `lead_session`、增 `call_target`；
+    - `workspace` 节增 `workspaceRoot`；
+    - annotations 的 `readOnlyHint` 改为 true。第 2 条说宿主据 annotations 自动批准；改 true 是因为这个工具已不再写任何状态。
+  - `run_status`/`run_diagnose` 增可选 `expectedWorkspaceRoot`（additive）。
+- **手续执行**：
+  - 三条天花板按实测下调：`FROZEN_20_WIRE_CEILING` 93849→87149，`FROZEN_20_DESC_CEILING` 12219→11291，`FROZEN_20_HOSTVISIBLE_CEILING` 23937→22436；
+  - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻；
+  - m12-10 注释链如实记录。

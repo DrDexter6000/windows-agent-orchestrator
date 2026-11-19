@@ -126,3 +126,4 @@
 0122 | 保持唤醒期间按用户的屏保设置代为启动屏保
 0123 | kimi-code 与 deepseek-harness 两个 worker 后端退役，巡检留未接线通道观察表
 0124 | 收口等待证明不了 runner 已不在时以退出码 5 报警；开机事实只陈述、不放行
+0125 | MCP 工具面 23 → 20：删除共享项目选择，撤出 workspace_status 与 run_wait
