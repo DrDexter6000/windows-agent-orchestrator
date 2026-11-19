@@ -89,6 +89,7 @@ import { diagnoseFailure, DIAGNOSIS_CATEGORIES, isValidDiagnosisCode, ISOLATION_
 // projector so the run_await_result schema is built from ONE closed set, with
 // no import cycle (runWait imports it from the projector too).
 import { projectObservation } from "./runObservationProjection.js";
+import { determineRunSettlement } from "./runSettlement.js";
 import { isTranscriptQuiet } from "./runQuietAdvisory.js";
 import {
   gatherDeliveryView,
@@ -618,6 +619,9 @@ export async function runAwaitResult(input) {
       // M12-14: additive closed-set isolation reason (null unless a safe
       // workdir_escape settlement with an exact-member reason was persisted).
       isolationFailureReason: projectIsolationFailureReason(events, runId, state),
+      // 批 119：收口判定（决定 0095 的同一 SSOT）——终态而交付仍未收口时 MCP
+      // 适配层据此给出 run_delivery 等待下钻。只供下钻选择，不进 wire。
+      deliverySettlementPending: determineRunSettlement(events, runId).status === "unsettled",
       observation,
       termination,
     };
@@ -756,6 +760,8 @@ export async function runAwaitResult(input) {
         outcome: projectTerminalOutcome(currentEvents, runId, currentState),
         // M12-14: additive closed-set isolation reason from the same snapshot.
         isolationFailureReason: projectIsolationFailureReason(currentEvents, runId, currentState),
+        // 批 119：同上（收口判定 SSOT；只供下钻选择，不进 wire）。
+        deliverySettlementPending: determineRunSettlement(currentEvents, runId).status === "unsettled",
         observation,
         termination,
       };

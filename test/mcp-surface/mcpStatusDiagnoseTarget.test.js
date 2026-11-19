@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { getRunStatus } from "../../src/application/runStatus.js";
 
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
 
@@ -65,7 +66,13 @@ for (const tool of ["run_status", "run_diagnose"]) {
       makeGitRepo(owned);
       const runDir = join(aux, "runs");
       seedOwnedRun(runDir, RUN_ID, owned);
-      const server = createWaoMcpServer({ registryPath: makeRegistry(aux), runDir });
+      // 复核（sol）：run_status 的年龄字段按秒取整，两次调用跨过取整边界会偶发
+      // 不等——固定观察时刻，等价断言只比较入参差异。
+      const FIXED_NOW = Date.parse("2026-11-19T00:10:00.000Z");
+      const server = createWaoMcpServer({
+        registryPath: makeRegistry(aux), runDir,
+        getRunStatusFn: (input) => getRunStatus({ ...input, nowFn: () => FIXED_NOW }),
+      });
       const client = await buildClient(server);
       try {
         const res = await client.callTool({ name: tool, arguments: { runId: RUN_ID, expectedWorkspaceRoot: owned } });

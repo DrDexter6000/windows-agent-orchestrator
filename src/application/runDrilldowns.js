@@ -205,16 +205,19 @@ function selectForRunAwaitResult(f) {
   // include stop/retry/repackage/accept/reject. Outcome facts are absent on the
   // legacy fact matrix and on any caller that did not project an outcome, so
   // these branches fall through cleanly to the result-status branches below.
+  // 批 119：终态而交付仍未收口（收口判定 SSOT，决定 0095：等验证、验证中拒收、
+  // reverify pending）——先指引带 waitMs 调 run_delivery 等收口（deliveryWait）。
+  // 已有可审 diff（reviewable）时审查条目随后。
+  if (f.deliverySettlementPending === true) {
+    return f.outcomeReadiness === "reviewable"
+      ? ["deliveryWait", "deliveryReview", "activity"]
+      : ["deliveryWait", "activity"];
+  }
   if (f.outcomeReadiness === "reviewable") {
     return ["deliveryReview", "delivery", "activity"];
   }
   if (f.outcomeVerificationStatus === "failed") {
     return ["deliveryReview", "diagnose", "activity"];
-  }
-  // 119 续修 3：终态但未收口（打包/验证还在进行）——指引带 waitMs 调
-  // run_delivery 等收口（deliveryWait 条目），activity 照旧在列。
-  if (f.outcomeReadiness === "waiting_for_packaging" || f.outcomeReadiness === "waiting_for_verification") {
-    return ["deliveryWait", "activity"];
   }
   if (f.outcomeReadiness === "packaging_failed" || f.outcomeDeliveryFailureCode != null) {
     return ["diagnose", "delivery", "activity"];

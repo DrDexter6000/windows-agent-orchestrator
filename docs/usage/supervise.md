@@ -72,7 +72,7 @@ MCP 面用 `run_await_result` 等待终态或 liveness 摘要，避免 busy `run
 - 省略：以首次读取时的最大 `seq` 为基线——只统计窗口内的新进展，不把历史误报为 progress。
 - 显式 `0` 或正整数：统计 `seq > afterSeq` 的全部进展（含历史），用于续读——把上次返回的 `cursor` 传回即可。
 
-`waitMs` 是 Lead 的单次观察窗口（区间与缺省见生成层；`waitMs:0` 是 point-in-time 读取）。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口，不跳过 `run_delivery`（终态而未收口时 `availableDrilldowns` 会给出指向 `run_delivery` 的等待条目）。
+`waitMs` 是 Lead 的单次观察窗口（区间与缺省见生成层；`waitMs:0` 是 point-in-time 读取）。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口，不跳过 `run_delivery`。
 
 状态投影与 liveness 计数都按 runId 绑定（全无信封的 legacy 快照除外，其活动计数仍按全部事件统计）：`run_await_result` 只看本 run 信封事件（初始读与每次 poll 同一过滤）——外 run 高 seq 活动行不伪造 `progress`，尾部伪造 `run.state_change` 不把等待翻成终态、也不阻断终态观察。全无信封的 legacy transcript 状态投影降级 `pending`，不可归属永不投影为终态——不 throw、不转 read_failure，窗口如实耗尽后返回非终态。CLI `runs wait` 的 Ctrl-C 中断快照同款绑定。
 

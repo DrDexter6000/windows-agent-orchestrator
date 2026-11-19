@@ -21,8 +21,8 @@
    - 证明失败时不给项目内容。
    - `readOnlyHint` 改为 true。
    - `run_status`、`run_diagnose` 加可选的 `expectedWorkspaceRoot`。
-3. **MCP `run_wait` 撤出（L1）**：MCP 面反复调 `run_await_result`（单次 ≤270 秒）到终态；终态而交付还在打包或验证时，它的 `availableDrilldowns` 指向 `run_delivery`，带 `waitMs` 等收口；要一直挂到收口，用 CLI `runs wait --until-settled`（决定 0095）。CLI 等待服务、语义目录键 `run_wait` 与 CLI nextStep 不动。
-4. 破坏性变更，版本升 v0.10.0（决定 0109）。三条描述字节线按实测下调重冻。
+3. **MCP `run_wait` 撤出（L1）**：MCP 面反复调 `run_await_result`（单次 ≤270 秒）到终态；终态而交付尚未收口时（按决定 0095 的收口判定：等验证、验证中拒收、reverify 未出结果），它的 `availableDrilldowns` 先给 `run_delivery` 等待条目，带 `waitMs` 等收口；要一直挂到收口，用 CLI `runs wait --until-settled`（决定 0095）。CLI 等待服务、语义目录键 `run_wait` 与 CLI nextStep 不动。
+4. 破坏性变更，发版时升 v0.10.0（决定 0109；本批提交时 `package.json` 仍是 0.9.0）。工具列表、描述、宿主可见三条字节天花板按实测下调重冻。
 
 ## 不采纳
 

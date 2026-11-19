@@ -61,7 +61,7 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
 - **L2**：删除共享项目选择（`workspace_select` 与 `lead_session` 绑定来源）。
   - Owner 明示（2026-11-19："收掉两个多余的工具 —— 不要等，该做就做"）。
   - `02-architecture.md` 冻结工具面一节"没有任何能力被永久移除或弱化"句，已按本档修订为列出能力承接点。
-- **L1**：`workspace_status`、MCP `run_wait` 撤出工具面。承接点是另外的工具（`lead_preflight.workspace`、`run_await_result`、CLI `runs wait`），不是第 4 条先例里的 MCP resources。
+- **L1**：`workspace_status`、MCP `run_wait` 撤出工具面。承接点是现有工具（`lead_preflight.workspace`；`run_await_result` 到终态、`run_delivery` 带 `waitMs` 到交付收口、CLI `runs wait --until-settled`），不是 MCP resources。第 4 条 L1 的"能力改由 MCP resources 承载"据此修订为"能力改由现有工具或 MCP resources 承接"。
 - **schema**：
   - `lead_preflight`：
     - 输入 `workspaceRoot` 改名为 `expectedWorkspaceRoot`（移除加新增，属破坏性）；

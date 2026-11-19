@@ -69,7 +69,8 @@ const FACT_MATRIX = [
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "snapshot_unavailable", liveness: "unknown", resultStatus: "unavailable" }],
   ["run_await_result", { state: "failed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable" }],
   // 119 续修 3：终态但交付未收口 → deliveryWait（带 waitMs 等收口）+ activity。
-  ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null }],
+  ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null, deliverySettlementPending: true }],
+  ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "available", outcomeReadiness: "reviewable", outcomeVerificationStatus: "failed", deliverySettlementPending: true }],
   ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_packaging", outcomeVerificationStatus: null }],
   ["run_await_result", { state: "failed", terminal: true, observationOutcome: "terminal", readFailureReason: null, liveness: "terminal", outcomeReadiness: "isolation_failed", outcomeVerificationStatus: null, resultStatus: null }],
   // run_diagnose
@@ -301,7 +302,12 @@ test("U-06: representative context-sensitive selections (facts-driven, no infere
   // too_large → full collect is primary.
   expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "too_large" }, ["run_collect", "run_activity"]);
   // 119 续修 3：终态未收口 → 指引带 waitMs 调 run_delivery 等收口。
-  expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null }, ["run_delivery", "run_activity"]);
+  expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null, deliverySettlementPending: true }, ["run_delivery", "run_activity"]);
+  // 批 119：收口判定说未收口而 readiness 已是 reviewable（验证中拒收 / reverify
+  // pending）→ 先等收口，审查条目随后。
+  expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "available", outcomeReadiness: "reviewable", outcomeVerificationStatus: "failed", deliverySettlementPending: true }, ["run_delivery", "run_delivery_review", "run_activity"]);
+  // 收口判定说已收口（或事实缺席）时 readiness 的 waiting_* 不再单独触发等待条目。
+  expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null }, ["run_status", "run_activity"]);
   // failure category → activity/collect facts.
   expect("run_diagnose", { state: "failed", terminal: true, category: "provider_auth" }, ["run_activity", "run_collect"]);
   // delivery packaging failure → delivery facts + activity.

@@ -1,9 +1,9 @@
 // test/runWait.test.js
 //
 // M10-pre3 Batch B: run_wait service tests（CLI runs wait 面）。
-// 批 119：MCP run_wait 工具已真删除——原 MCP adapter 段（MCP-WAIT-*、
-// RED-01/02、WAIT-13、KEEPALIVE-*、0097 归属拒绝的 MCP 面）随工具退役；
-// 等待机制在 MCP 面的覆盖由 mcpRunAwaitResult.test.js 承接（keepalive 同款）。
+// 批 119：MCP run_wait 工具已真删除——原 MCP adapter 段（MCP-WAIT-*、RED-02、
+// KEEPALIVE-*、0097 归属拒绝的 MCP 面）随工具退役；纯服务的 RED-01 与 WAIT-13
+// 保留在本文件。MCP 面的等待覆盖由 mcpRunAwaitResult.test.js 承接。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -516,4 +516,3 @@ test("WAIT-13 (P2-B): two concurrent runWait calls → zero durable writes", asy
     assert.deepEqual(after, before, "concurrent runWait must not write any transcript bytes");
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
-

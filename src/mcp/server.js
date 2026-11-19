@@ -6555,6 +6555,8 @@ export function createWaoMcpServer({
           outcomeReadiness: payload.outcome?.delivery?.readiness ?? null,
           outcomeVerificationStatus: payload.outcome?.delivery?.verificationStatus ?? null,
           outcomeDeliveryFailureCode: payload.outcome?.delivery?.failureCode ?? null,
+          // 批 119：终态而交付仍未收口（收口判定 SSOT）——下钻指向 run_delivery 等收口。
+          deliverySettlementPending: payload.terminal === true && result.deliverySettlementPending === true,
         });
         // M12-12: self-describing notes — a pure function of the M12-11
         // observation outcome + termination source, plus (on a terminal run) the

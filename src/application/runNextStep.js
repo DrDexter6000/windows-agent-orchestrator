@@ -317,7 +317,7 @@ export function buildNextStep({
  * 已算 quiet（同 advisory 的 >= 口径）。
  *
  * @param {object} input
- * @param {"mcp"|"cli"} input.surface — 等待族只接受 "cli"（MCP 面无调用方）
+ * @param {"cli"} input.surface — 等待族只有 CLI 面（MCP 面无调用方；传 "mcp" 会被 CLI_ONLY_SITUATIONS 拒绝）
  * @param {boolean} input.terminal
  * @param {number|null} input.vitalSignAgeMs
  * @param {string} [input.runId]

@@ -646,6 +646,55 @@ test("MAR-DD-119: terminal + verification pending → drilldowns carry the run_d
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
+test("MAR-DD-119b: terminal + rejected while verification pending (unsettled) → run_delivery wait entry first", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar-dd119b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar-dd119b-rd-"));
+  try {
+    makeGitRepo(dir);
+    const id = "run_dd119b";
+    const agentId = "coder_low";
+    const TS = "2026-11-19T00:00:00.000Z";
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId: id,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${id}`, worktreePath: "D:/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    // 决定 0095：验证中拒收仍要等验证结果——收口判定 unsettled。
+    const lines = [
+      jl({ type: "run.background_submitted", background: true, cwd: dir, deliveryRequested: true, ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", to: "pending", reason: "created", ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: TS, runId: id, agentId }),
+      jl({
+        type: "run.started", backend: "claude-code", cwd: dir, ts: TS, runId: id, agentId,
+        delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      }),
+      jl({ type: "run.delivery_created", runId: id, agentId, ts: TS, delivery: ref }),
+      jl({ type: "run.completed", ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", from: "running", to: "completed", reason: "done", ts: TS, runId: id, agentId }),
+      jl({
+        type: "run.delivery_rejected", runId: id, agentId, ts: TS,
+        delivery: { ...ref, acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+        deliveryCommit: ref.deliveryCommit, reason: "rejected before verification finished",
+      }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: id, waitMs: 0 } });
+      assert.equal(res.isError, undefined, "service must succeed");
+      const parsed = res.structuredContent;
+      assert.equal(parsed.terminal, true, "terminal run");
+      assert.equal(parsed.availableDrilldowns[0].tool, "run_delivery", "the wait entry comes first");
+      assert.match(parsed.availableDrilldowns[0].purpose, /run_delivery with waitMs/);
+      assert.equal("deliverySettlementPending" in parsed, false, "the settlement fact is selection-only, not on the wire");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});
+
 // =====================================================================
 // 119 续修 10（建议）：afterSeq 透传——省略与显式 0 在服务入参上不同
 //（省略 → 键缺席，服务按首读基线；显式 0 → 原样转发，计入全部历史）。
