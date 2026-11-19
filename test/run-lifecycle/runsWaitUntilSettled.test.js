@@ -8,15 +8,23 @@
 //   - 收口后再解析发现变化 → 不可信轮继续；
 //   - 与 --wait-ms 互斥；JSON 模式进度在 stderr、stdout 只留最终 JSON；
 //   - SIGINT：置位后单一出口，只输出一份最终结果（标注快照读取时间），130。
+// 第 118 批 B 加多目标（M-*）：先到先返回、停表后即时判定、Still waiting/
+// Re-arm 两行、{multi,results,remaining,rearmCommand}、退出码聚合 4>5>3>0、
+// 去重（含 a a 仍走单目标面）、17 个拒绝、与 --wait-ms/无旗标拒绝、SIGINT 130。
+// 续修（会审 consult_20261119105652657wri9nw）：停表唤醒睡眠、停表后不再开始
+// 新证明、证明串行错峰、收尾期 SIGINT（只列未出结局目标）、重挂照抄 --run-dir/
+// --format json、确认阶段冲突当仍在等、退出码补组合、16 目标接受、M-10 改屏障
+// 确定性。
 // 退出码经 process.exitCode 断言（测试内保存/恢复）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runsCommand } from "../../src/commands/runs.js";
+import { judgeRunSettlementOnce } from "../../src/application/runSettlementWait.js";
 
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
@@ -2020,6 +2028,635 @@ test("UP-08: 证明期间 SIGINT → 单一出口 130，只输出一份中断结
     assert.equal(parsed.settled, false);
     assert.ok(!/runner_unproven|Unproven:/.test(r.out), "中断路径不出报警终行");
     assert.equal(process.listenerCount("SIGINT"), base, "SIGINT handler 注销（无泄漏）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 118 批 B：多目标 `runs wait <runId> [<runId>...] --until-settled`——
+// 每目标并发跑同一收口等待器，先到先返回；停表后对其余目标做一次即时判定
+//（judgeRunSettlementOnce，无轮询无证明）；一份最终输出（逐目标单目标同款终行
+// + Still waiting/Re-arm 两行或 {multi,results,remaining,rearmCommand}）；退出码
+// 聚合 4 > 5 > 3 > 0；SIGINT 130 全量中断快照。去重后 1 个目标仍走单目标面。
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runWaitSettledMulti({ dir, runIds, asJson = false, deps = {} }) {
+  const prev = process.exitCode;
+  let result;
+  try {
+    process.exitCode = undefined;
+    result = await captureBoth(() => runsCommand(
+      ["wait", ...runIds, "--until-settled", ...(asJson ? ["--format", "json"] : []), "--run-dir", dir],
+      { runDir: dir },
+      { pollIntervalMs: 0, resolveDetailedFn: realResolver(dir), ...deps },
+    ));
+    return { ...result, exitCode: process.exitCode };
+  } finally {
+    process.exitCode = prev;
+  }
+}
+
+test("M-01: 两个目标、一个先收口 → 终行 + Still waiting + Re-arm，退出码 0", async () => {
+  const dir = makeRunDir();
+  try {
+    const settled = "run_m01a";
+    const pending = "run_m01b";
+    writeLines(dir, settled, [started(settled, { delivery: false }), stateChange(settled, "completed")]);
+    writeLines(dir, pending, [started(pending, { delivery: false })]);
+    const r = await runWaitSettledMulti({ dir, runIds: [settled, pending] });
+    assert.equal(r.exitCode, undefined, "本轮唯一结局是收口 → 不设退出码（0）");
+    assert.ok(r.outLines.includes(`Run: ${settled} (completed)`), JSON.stringify(r.outLines));
+    assert.ok(r.outLines.some((l) => /^Settlement: settled \(no_delivery_requested\)$/.test(l)));
+    assert.ok(r.outLines.some((l) => l.startsWith("Next step: ")));
+    assert.ok(r.outLines.includes(`Still waiting: ${pending}`), JSON.stringify(r.outLines));
+    assert.ok(r.outLines.includes(`Re-arm: wao runs wait ${pending} --until-settled --run-dir ${dir}`), JSON.stringify(r.outLines));
+    // 仍在等的目标不出终行；重挂行收尾。
+    assert.ok(!r.outLines.some((l) => l.startsWith(`Run: ${pending}`)), "未收口目标无终行");
+    assert.equal(r.outLines.at(-1), `Re-arm: wao runs wait ${pending} --until-settled --run-dir ${dir}`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-02: 一个 runner_unproven（5）、另一个同轮收口 → 两个结局都打印，退出码 5", async () => {
+  const dir = makeRunDir();
+  try {
+    const unprovenId = "run_m02a";
+    const settledId = "run_m02b";
+    writeLines(dir, unprovenId, unprovenEvents(unprovenId));
+    writeLines(dir, settledId, [started(settledId, { delivery: false }), stateChange(settledId, "completed")]);
+    let unprovenProofStarted = false;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [unprovenId, settledId],
+      deps: {
+        ...unprovenDeps({ refusal: "runner_scan_failed" }),
+        runnerGoneFn: async () => {
+          unprovenProofStarted = true;
+          return { gone: false, refusal: "runner_scan_failed" };
+        },
+        // 续修 1 下停表会拦下尚未开始的证明，5 必须先落地：收口目标的读被屏障
+        // 挡到证明开始之后（证明已开始就照常跑完出结局），0 随后同轮落地。
+        readTranscriptFn: async (p) => {
+          if (String(p).includes(settledId)) {
+            while (!unprovenProofStarted) await new Promise((res) => setImmediate(res));
+          }
+          const { readTranscript } = await import("../../src/transcript.js");
+          return readTranscript(p);
+        },
+        sleepFn: () => new Promise(() => {}),
+      },
+    });
+    assert.equal(r.exitCode, 5, "5 压过 0");
+    assert.ok(r.outLines.some((l) => l.startsWith(`Run: ${unprovenId} (running)`)), JSON.stringify(r.outLines));
+    assert.ok(r.outLines.some((l) => l.startsWith("Unproven: ")), "报警终行在场");
+    assert.ok(r.outLines.includes(`Run: ${settledId} (completed)`), "同轮收口的结局一并打印");
+    assert.ok(r.outLines.some((l) => /^Settlement: settled \(no_delivery_requested\)$/.test(l)));
+    assert.ok(!r.outLines.some((l) => l.startsWith("Still waiting")), "全部有结局：不打 Still waiting");
+    assert.ok(!r.outLines.some((l) => l.startsWith("Re-arm:")), "全部有结局：不打 Re-arm");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-03: 同轮 4（冲突）与 5（runner_unproven）→ 退出码 4（优先级 4 > 5 > 3 > 0）", async () => {
+  const dir = makeRunDir();
+  try {
+    const conflictId = "run_m03a";
+    const unprovenId = "run_m03b";
+    // 续修 1 之后停表会拦下尚未开始的证明，所以 5 必须先落地：冲突目标的等待
+    // 器首轮只看到"未找到"（不可信一轮后睡到被停，不先出结局）；A 的证明照常
+    // 跑完出 5 → 停表 → 冲突目标交即时判定，首解即冲突 → 4。两个结局同轮，4 压 5。
+    writeLines(dir, unprovenId, unprovenEvents(unprovenId));
+    let conflictResolves = 0;
+    const real = realResolver(dir);
+    const r = await runWaitSettledMulti({
+      dir, runIds: [unprovenId, conflictId],
+      deps: {
+        ...unprovenDeps({ refusal: "runner_scan_failed" }),
+        resolveDetailedFn: (rd, rid) => {
+          if (rid === conflictId) {
+            conflictResolves += 1;
+            return conflictResolves >= 2
+              ? { path: null, found: false, conflict: true }
+              : { path: null, found: false, conflict: false };
+          }
+          return real(rd, rid);
+        },
+        sleepFn: () => new Promise(() => {}),
+      },
+    });
+    assert.equal(r.exitCode, 4, "4 压过 5");
+    assert.ok(r.outLines.some((l) => l.startsWith("Unproven: ")), "5 的结局同样打印");
+    assert.ok(r.outLines.some((l) => l.startsWith(`Conflict: ${conflictId} has multiple distinct transcript copies`)), JSON.stringify(r.outLines));
+    assert.ok(!r.outLines.some((l) => l.startsWith("Still waiting")));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-04: 全部同轮有结局 → 不打 Still waiting/Re-arm；JSON remaining 空、rearmCommand null", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m04a";
+    const b = "run_m04b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false }), stateChange(b, "completed")]);
+    const r = await runWaitSettledMulti({ dir, runIds: [a, b] });
+    assert.equal(r.exitCode, undefined, "两个收口 → 0");
+    assert.ok(r.outLines.includes(`Run: ${a} (completed)`));
+    assert.ok(r.outLines.includes(`Run: ${b} (completed)`));
+    assert.ok(!r.outLines.some((l) => l.startsWith("Still waiting")));
+    assert.ok(!r.outLines.some((l) => l.startsWith("Re-arm:")));
+    const j = await runWaitSettledMulti({ dir, runIds: [a, b], asJson: true });
+    const parsed = JSON.parse(j.out);
+    assert.equal(j.outLines.length, 1, "stdout 只留最终 JSON");
+    assert.equal(parsed.multi, true);
+    assert.deepEqual(parsed.remaining, []);
+    assert.equal(parsed.rearmCommand, null);
+    assert.equal(parsed.results.length, 2);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-05: JSON 形状 {multi,results,remaining,rearmCommand}；进度带 runId 走 stderr", async () => {
+  const dir = makeRunDir();
+  try {
+    const settled = "run_m05a";
+    const pending = "run_m05b";
+    // 收口目标首轮也未收口（终态在 sleep 间隙由外部世界追加）：第 1 轮不可能有
+    // 停表，两个目标的进度行都确定先落 stderr，再由第 2 轮的收口停表。
+    writeLines(dir, settled, [started(settled, { delivery: false })]);
+    writeLines(dir, pending, [started(pending, { delivery: false })]);
+    let appended = false;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [settled, pending], asJson: true,
+      deps: {
+        sleepFn: async () => {
+          if (!appended) {
+            appended = true;
+            appendLines(dir, settled, [stateChange(settled, "completed")]);
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, undefined);
+    assert.equal(r.outLines.length, 1, "stdout 只留最终 JSON");
+    const parsed = JSON.parse(r.out);
+    assert.deepEqual(Object.keys(parsed), ["multi", "results", "remaining", "rearmCommand"]);
+    assert.equal(parsed.multi, true);
+    assert.equal(parsed.results.length, 1);
+    assert.deepEqual(Object.keys(parsed.results[0]).sort(), ["nextStep", "runId", "settled", "settlement", "state"], "results 每项与单目标 JSON 同形");
+    assert.equal(parsed.results[0].runId, settled);
+    assert.deepEqual(parsed.remaining, [pending]);
+    assert.equal(parsed.rearmCommand, `wao runs wait ${pending} --until-settled --run-dir ${dir} --format json`);
+    assert.ok(r.errLines.some((l) => l.startsWith("[runs wait]") && l.includes(pending)), "进度行带 runId 在 stderr");
+    assert.ok(r.errLines.some((l) => l.startsWith("[runs wait]") && l.includes(settled)), "先收口目标的进度同样在 stderr");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-06: 重复 id 去重——a b a 按 a b 走；a a 去重后仍走单目标面", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m06a";
+    const b = "run_m06b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false })]);
+    const r = await runWaitSettledMulti({ dir, runIds: [a, b, a], asJson: true });
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.multi, true, "a b a → 两目标多面");
+    assert.deepEqual(parsed.remaining, [b], "a 只算一次");
+    assert.equal(parsed.results.length, 1);
+    assert.equal(parsed.results[0].runId, a);
+    // a a → 去重后 1 个 → 单目标面：JSON 无 multi 键，与单目标同形。
+    const s = await runWaitSettledMulti({ dir, runIds: [a, a], asJson: true });
+    const single = JSON.parse(s.out);
+    assert.equal(single.multi, undefined, "a a 是单目标面，无 multi 键");
+    assert.deepEqual(Object.keys(single).sort(), ["nextStep", "runId", "settled", "settlement", "state"]);
+    assert.equal(single.settled, true);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-07: 去重后 17 个目标拒绝（最多 16）", async () => {
+  const dir = makeRunDir();
+  try {
+    const ids = Array.from({ length: 17 }, (_, i) => `run_m07_${String(i).padStart(2, "0")}`);
+    await assert.rejects(
+      () => runsCommand(["wait", ...ids, "--until-settled", "--run-dir", dir], { runDir: dir }),
+      /at most 16 runIds \(got 17 after dedup\)/,
+    );
+    // 17 个里有重复、去重后 16 个：放行（走多目标面，转录缺失 → 即时判不出结局，
+    // 但第一个目标的等待器要 4 轮不可信才出结局——用假钟与 0 间隔跑完）。
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-08: 多目标与 --wait-ms 同用拒绝；只给多个 id 不给旗标拒绝", async () => {
+  const dir = makeRunDir();
+  try {
+    await assert.rejects(
+      () => runsCommand(["wait", "run_x", "run_y", "--until-settled", "--wait-ms", "30000"], { runDir: dir }),
+      /mutually exclusive/,
+    );
+    await assert.rejects(
+      () => runsCommand(["wait", "run_x", "run_y", "--wait-ms", "30000"], { runDir: dir }),
+      /multiple runIds require --until-settled/,
+    );
+    await assert.rejects(
+      () => runsCommand(["wait", "run_x", "run_y"], { runDir: dir }),
+      /multiple runIds require --until-settled/,
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-09: SIGINT → 每目标中断快照 + 全量重挂行，退出码 130，只有一份输出", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m09a";
+    const b = "run_m09b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "running")]);
+    writeLines(dir, b, [started(b, { delivery: false }), stateChange(b, "running")]);
+    const base = process.listenerCount("SIGINT");
+    let emitted = false;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b], asJson: true,
+      deps: {
+        sleepFn: async () => {
+          if (!emitted) {
+            emitted = true;
+            process.emit("SIGINT");
+          }
+        },
+      },
+    });
+    assert.equal(r.exitCode, 130, "SIGINT 退出码 130");
+    assert.equal(r.outLines.length, 1, `stdout 只留最终 JSON，实际: ${JSON.stringify(r.outLines)}`);
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.multi, true);
+    assert.equal(parsed.results.length, 2, "每个目标一份中断快照");
+    for (const res of parsed.results) {
+      assert.equal(res.interrupted, true);
+      assert.equal(res.settled, false);
+      assert.equal(typeof res.snapshotReadAt, "string", "标注快照读取时间");
+    }
+    assert.deepEqual(parsed.remaining, [a, b], "中断轮没有目标得到结局：全部仍在等");
+    assert.equal(parsed.rearmCommand, `wao runs wait ${a} ${b} --until-settled --run-dir ${dir} --format json`);
+    assert.equal(process.listenerCount("SIGINT"), base, "SIGINT handler 注销（无泄漏）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-10: 停表后即时判定发现第二个目标已收口 → 一并算进本轮（确定性钉住即时判定路径）", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m10a";
+    const b = "run_m10b";
+    // A 预置已收口（首轮即结局，不睡）；B 的文件已是收口形状，但等待器首轮读到
+    // 的是未收口快照，随后入睡。注入的 sleepFn 永不自行了结——唯一出口是被停
+    // 表唤醒，所以 B 的等待器必然恰好读一次，第二次读只能来自即时判定。
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false }), stateChange(b, "completed")]);
+    const bPending = [JSON.parse(line(started(b, { delivery: false })))];
+    const bSettled = [JSON.parse(line(started(b, { delivery: false }))), JSON.parse(line(stateChange(b, "completed")))];
+    let bReads = 0;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b],
+      deps: {
+        readTranscriptFn: async (p) => {
+          if (String(p).includes(b)) {
+            bReads += 1;
+            return bReads === 1 ? bPending : bSettled;
+          }
+          const { readTranscript } = await import("../../src/transcript.js");
+          return readTranscript(p);
+        },
+        // 永不自行了结的睡眠：若停表不能唤醒睡眠，本用例会一直挂到超时。
+        sleepFn: () => new Promise(() => {}),
+      },
+    });
+    assert.equal(r.exitCode, undefined, "两个收口 → 0");
+    assert.equal(bReads, 2, "B 恰好两次读：等待器首轮一次 + 即时判定一次");
+    assert.ok(r.outLines.includes(`Run: ${a} (completed)`), JSON.stringify(r.outLines));
+    assert.ok(r.outLines.includes(`Run: ${b} (completed)`), "即时判定的收口一并打印");
+    assert.ok(!r.outLines.some((l) => l.startsWith("Still waiting")), "无仍在等的目标");
+    assert.ok(!r.outLines.some((l) => l.startsWith("Re-arm:")));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 续修（会审 consult_20261119105652657wri9nw 必改项）：停表即停（唤醒睡眠、
+// 不再开始新证明）、证明跨目标串行错峰、收尾期 SIGINT、重挂行照抄旗标、
+// 即时判定确认阶段冲突当仍在等、退出码补组合、16 目标接受。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("M-11: 停表唤醒在睡的等待器——首个结局后不等满轮询间隔就输出", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m11a";
+    const b = "run_m11b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false })]);
+    const t0 = Date.now();
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b],
+      // B 的睡眠要 4 秒才自行了结——唯一能提前结束它的是停表唤醒。
+      deps: { sleepFn: () => new Promise((res) => setTimeout(res, 4000)) },
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(r.exitCode, undefined, "A 收口 → 0");
+    assert.ok(r.outLines.includes(`Still waiting: ${b}`));
+    assert.ok(elapsed < 2000, `停表要立刻唤醒在睡的等待器（实测 ${elapsed}ms，应远小于 4000ms 间隔）`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-12: 停表后不再开始新的缺席证明（屏障同步 A 的收口读）", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m12a";
+    const b = "run_m12b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, unprovenEvents(b)); // 静默满 30 分钟的形状：若无停表必发证明
+    let aReadDone = false;
+    let proofCalls = 0;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b],
+      deps: {
+        ...unprovenDeps({ refusal: "runner_scan_failed" }),
+        readTranscriptFn: async (p) => {
+          if (String(p).includes(a)) {
+            const { readTranscript } = await import("../../src/transcript.js");
+            const events = await readTranscript(p);
+            aReadDone = true; // 读完成才放行屏障：其后的判定/确认/停表全在微任务链上
+            return events;
+          }
+          // B 的读显式等 A 的读完成 + 一拍 macrotask：A 的停表必然已置位
+          //（屏障 + 事件循环次序，非次数计数）。
+          while (!aReadDone) await new Promise((res) => setImmediate(res));
+          await new Promise((res) => setImmediate(res));
+          const { readTranscript } = await import("../../src/transcript.js");
+          return readTranscript(p);
+        },
+        runnerGoneFn: async () => {
+          proofCalls += 1;
+          return { gone: false, refusal: "runner_scan_failed" };
+        },
+        sleepFn: () => new Promise(() => {}),
+      },
+    });
+    assert.equal(proofCalls, 0, "停表已置位：B 的 runner 缺席证明一次都不开始");
+    assert.equal(r.exitCode, undefined, "A 收口 → 0");
+    assert.ok(r.outLines.includes(`Still waiting: ${b}`), "B 仍在等（即时判定也判不出结局）");
+    assert.ok(!/Unproven:/.test(r.out), "不误报 runner_unproven");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-13: 多目标下缺席证明串行——同一时刻至多 1 个在跑", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m13a";
+    const b = "run_m13b";
+    writeLines(dir, a, unprovenEvents(a));
+    writeLines(dir, b, unprovenEvents(b));
+    let active = 0;
+    let maxActive = 0;
+    let proofCalls = 0;
+    let emitted = false;
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b],
+      deps: {
+        ...unprovenDeps({ refusal: "runner_alive" }), // 非闭集拒绝：不触发 5
+        runnerGoneFn: async () => {
+          proofCalls += 1;
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((res) => setTimeout(res, 25));
+          active -= 1;
+          return { gone: false, refusal: "runner_alive" };
+        },
+        sleepFn: async () => {
+          // 两个证明都完成后收尾（SIGINT）——sleep 即回，等待器快速空转直至停表。
+          if (!emitted && proofCalls >= 2) {
+            emitted = true;
+            process.emit("SIGINT");
+          }
+        },
+      },
+    });
+    assert.equal(proofCalls, 2, "两个目标各证明一次");
+    assert.equal(maxActive, 1, `同一时刻至多一个证明在跑，实测峰值 ${maxActive}`);
+    assert.equal(r.exitCode, 130, "SIGINT 收尾（证明都完成后）");
+    assert.ok(!/Unproven:/.test(r.out), "串行错峰下不出现 runner_unproven 误报");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-14: SIGINT 发生在即时判定期间 → 仍一份输出、130；有结局目标打印结局行且不在 remaining", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m14a";
+    const b = "run_m14b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false })]);
+    const base = process.listenerCount("SIGINT");
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b], asJson: true,
+      deps: {
+        sleepFn: () => new Promise(() => {}), // B 睡到被停表唤醒
+        judgeOnceFn: async (input) => {
+          process.emit("SIGINT"); // 即时判定进行中按 Ctrl+C——判定照常完成
+          return judgeRunSettlementOnce(input);
+        },
+      },
+    });
+    assert.equal(r.exitCode, 130, "中断以 130 退出（压过聚合）");
+    assert.equal(r.outLines.length, 1, `stdout 只留最终 JSON，实际: ${JSON.stringify(r.outLines)}`);
+    const parsed = JSON.parse(r.out);
+    assert.equal(parsed.multi, true);
+    assert.equal(parsed.results.length, 2, "A 的结局行 + B 的中断快照各一份");
+    const aRes = parsed.results.find((x) => x.runId === a);
+    const bRes = parsed.results.find((x) => x.runId === b);
+    assert.equal(aRes.settled, true, "A 照常打印收口结局");
+    assert.equal(bRes.interrupted, true, "B 打印单目标同款中断快照");
+    assert.deepEqual(parsed.remaining, [b], "remaining 只列没出结局的目标");
+    assert.equal(parsed.rearmCommand, `wao runs wait ${b} --until-settled --run-dir ${dir} --format json`);
+    assert.equal(process.listenerCount("SIGINT"), base, "SIGINT handler 注销（无泄漏）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-15: 重挂行照抄 --run-dir（含空格加引号）；JSON 再带 --format json", async () => {
+  const outer = makeRunDir();
+  try {
+    const dir = join(outer, "runs with space");
+    mkdirSync(dir);
+    const a = "run_m15a";
+    const b = "run_m15b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false })]);
+    const r = await runWaitSettledMulti({ dir, runIds: [a, b] });
+    assert.ok(
+      r.outLines.includes(`Re-arm: wao runs wait ${b} --until-settled --run-dir "${dir}"`),
+      `含空格路径加双引号，实际: ${JSON.stringify(r.outLines)}`,
+    );
+    const j = await runWaitSettledMulti({ dir, runIds: [a, b], asJson: true });
+    assert.equal(JSON.parse(j.out).rearmCommand, `wao runs wait ${b} --until-settled --run-dir "${dir}" --format json`);
+  } finally {
+    cleanupDir(outer);
+  }
+});
+
+test("M-16: 即时判定的确认阶段才见冲突 → 按等待器纪律当仍在等，不报 4", async () => {
+  const dir = makeRunDir();
+  try {
+    const a = "run_m16a";
+    const b = "run_m16b";
+    writeLines(dir, a, [started(a, { delivery: false }), stateChange(a, "completed")]);
+    writeLines(dir, b, [started(b, { delivery: false }), stateChange(b, "completed")]);
+    const bPending = [JSON.parse(line(started(b, { delivery: false })))];
+    const bSettled = [JSON.parse(line(started(b, { delivery: false }))), JSON.parse(line(stateChange(b, "completed")))];
+    let bReads = 0;
+    let bResolves = 0;
+    const real = realResolver(dir);
+    const r = await runWaitSettledMulti({
+      dir, runIds: [a, b],
+      deps: {
+        readTranscriptFn: async (p) => {
+          if (String(p).includes(b)) {
+            bReads += 1;
+            return bReads === 1 ? bPending : bSettled;
+          }
+          const { readTranscript } = await import("../../src/transcript.js");
+          return readTranscript(p);
+        },
+        // B 的解析计数：1 = 等待器首轮；2 = 即时判定首解；3 = 收口确认——确认
+        // 阶段才见冲突（首解不是冲突）→ 按仍在等交回，不当 4。
+        resolveDetailedFn: (rd, rid) => {
+          if (rid === b) {
+            bResolves += 1;
+            if (bResolves === 3) return { path: null, found: false, conflict: true };
+          }
+          return real(rd, rid);
+        },
+        sleepFn: () => new Promise(() => {}),
+      },
+    });
+    assert.equal(r.exitCode, undefined, "A 收口 → 0（B 的确认冲突不当 4）");
+    assert.ok(r.outLines.includes(`Still waiting: ${b}`), JSON.stringify(r.outLines));
+    assert.ok(!r.outLines.some((l) => l.startsWith("Conflict:")), "确认阶段的冲突不报 4");
+    assert.equal(bResolves, 3, "等待器一解 + 即时判定两解（首解与确认）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M-17: 退出码聚合补组合——4 压 3（conflict + runner_gone）、3 压 0（verifier_gone + settled）", async () => {
+  {
+    const dir = makeRunDir();
+    try {
+      const conflictId = "run_m17a";
+      const goneId = "run_m17b";
+      // 同 M-03 的次序：证明已开始就照常跑完 → 3 先落地停表；冲突目标的等待器
+      // 首轮只看到"未找到"（睡到被停），被停后交即时判定，首解即冲突 → 4 压 3。
+      writeLines(dir, goneId, runnerGoneEvents(goneId));
+      let conflictResolves = 0;
+      const real = realResolver(dir);
+      const r = await runWaitSettledMulti({
+        dir, runIds: [goneId, conflictId],
+        deps: {
+          ...runnerProofDeps,
+          resolveDetailedFn: (rd, rid) => {
+            if (rid === conflictId) {
+              conflictResolves += 1;
+              return conflictResolves >= 2
+                ? { path: null, found: false, conflict: true }
+                : { path: null, found: false, conflict: false };
+            }
+            return real(rd, rid);
+          },
+          sleepFn: () => new Promise(() => {}),
+        },
+      });
+      assert.equal(r.exitCode, 4, "4 压 3");
+      assert.ok(r.outLines.some((l) => l.startsWith(`Stuck: the runner of ${goneId}`)), "3 的结局也打印");
+      assert.ok(r.outLines.some((l) => l.startsWith(`Conflict: ${conflictId}`)), JSON.stringify(r.outLines));
+    } finally {
+      cleanupDir(dir);
+    }
+  }
+  {
+    const dir = makeRunDir();
+    try {
+      const vg = "run_m17c";
+      const st = "run_m17d";
+      const { events } = verifierEvents(vg);
+      writeLines(dir, vg, events);
+      writeLines(dir, st, [started(st, { delivery: false }), stateChange(st, "completed")]);
+      let vgProofStarted = false;
+      const r = await runWaitSettledMulti({
+        dir, runIds: [vg, st],
+        deps: {
+          ...verifierProofDeps,
+          verifierGoneFn: async () => {
+            vgProofStarted = true;
+            return { gone: true, basis: "lease_missing" };
+          },
+          // 同 M-02 的屏障：verifier 证明先开始（已开始就照常跑完出 3），收口
+          // 目标的 0 随后同轮落地 → 3 压 0。
+          readTranscriptFn: async (p) => {
+            if (String(p).includes(st)) {
+              while (!vgProofStarted) await new Promise((res) => setImmediate(res));
+            }
+            const { readTranscript } = await import("../../src/transcript.js");
+            return readTranscript(p);
+          },
+          sleepFn: () => new Promise(() => {}),
+        },
+      });
+      assert.equal(r.exitCode, 3, "3 压 0");
+      assert.ok(r.outLines.some((l) => l.startsWith(`Stuck: the verification of ${vg}`)));
+      assert.ok(r.outLines.includes(`Run: ${st} (completed)`));
+    } finally {
+      cleanupDir(dir);
+    }
+  }
+});
+
+test("M-18: 去重后 16 个目标被接受（17 个 argv、1 个重复）", async () => {
+  const dir = makeRunDir();
+  try {
+    const ids = Array.from({ length: 16 }, (_, i) => `run_m18_${String(i).padStart(2, "0")}`);
+    for (const id of ids) {
+      writeLines(dir, id, id === ids[0]
+        ? [started(id, { delivery: false }), stateChange(id, "completed")]
+        : [started(id, { delivery: false })]);
+    }
+    const r = await runWaitSettledMulti({
+      dir, runIds: [...ids, ids[0]], // 17 个 argv、去重后 16：不再报 at most 16
+      deps: { sleepFn: () => new Promise(() => {}) },
+    });
+    assert.equal(r.exitCode, undefined, "1 个收口 → 0");
+    const j = await runWaitSettledMulti({ dir, runIds: ids, asJson: true, deps: { sleepFn: () => new Promise(() => {}) } });
+    const parsed = JSON.parse(j.out);
+    assert.equal(parsed.multi, true);
+    assert.equal(parsed.results.length, 1);
+    assert.equal(parsed.remaining.length, 15, "15 个仍在等");
   } finally {
     cleanupDir(dir);
   }

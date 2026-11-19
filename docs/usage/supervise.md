@@ -54,7 +54,7 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 1. 先看它在做什么：MCP `run_activity`（缺省最新在前）；CLI `status <runId>`。
 2. 最近 10 分钟内有生命体征（任何 worker 事件，含 `runtime_activity`）就不要随意中止——建议，不拦你：长测试、长思考、等后台任务都是这副样子。
-3. 写明理由并带位置：MCP `run_stop({ runId, observedSeq, reason })`（`observedSeq` 取 `run_activity` 最新条目的 `seq`，没有填 0）；CLI `stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 取 `status` 的 `observedSeq`）。两项记进 `run.stop_requested`，连同体征距今多久。
+3. 写明理由并带位置：MCP `run_stop({ runId, observedSeq, reason })`（`observedSeq` 取 `run_activity` 最新条目的 `seq`，没有填 0）；CLI `stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 取 `status` 的 `observedSeq`，缺项即报错）。两项记进 `run.stop_requested`，连同体征距今多久。
 4. 你看的位置之后 worker 又有动作且已是 2 分钟前，或其后运行被重放过（目标换成新进程）——决定照着过时状态做的，stop 拒绝（零副作用）：重看再决定。刚落下的事件不算过时。
 
 输入只接受 `runId`、`observedSeq`、`reason`；观察过时、其后被重放、或 `observedSeq` 不是该转录位置时以固定文案拒绝（零副作用）；只带 `runId` 会被 schema 拒绝。其余控制参数 server-owned。安全输出只返回机器标识 + 终态事实，不含路径/PID/session：
@@ -62,8 +62,6 @@ read_when: run 在跑时：等待、看状态和活动、停止
 - `terminalAccepted`（first-terminal-wins 仲裁是否认领 `aborted`）、`terminalState`（终态）、`sideEffectAttempted`（是否执行了 taskkill/abort 等破坏性副作用——rejected loser 为 false）、`stopVerified`（进程式 worker 已退出，或服务端会话（kimi-web）已由会话状态与 token/message 稳定性确认静默）。服务端观察面不可读时返回 unverified，不能把网络/endpoint 失败当作已停止；观察到 session 仍 active 时也只报告并告警，WAO 不自动执行会波及其他会话的全局清理。stop verification 以后置 PID 存活检查为准，不假验证（ESRCH=已退出，EPERM/未知=保守 alive）。失败返回固定安全文案 `run_stop failed`。
 
 停止路由由会话记录的事实决定：`proc_<pid>` 占位 id 或带 `hostPid` 的会话（进程式后端，如 zcode）走进程树击杀并核验；带 `serveUrl` 的走服务端中止——kimi-web 中止会话正在跑和排队的 prompt，鉴权用 registry 里派发该运行的 agent（`run.started.agentId`）；会话记录没有 `backend` 字段时不发任何请求（停止路由无法解析，固定文案 `unresolved`）。该 agent 取不到（registry 不可读/不在册）、token 取不到（token 文件或环境变量：先进程环境、再 Windows 用户环境）、与会话记录对不上（backend/`serveUrl` 不同）、backend 无服务端中止，或会话既无 pid 也无 `serveUrl` 时：什么都不发、不认领终态，记 `run.stop_unverified`（`outcome:"stop_route_unavailable"`）并告警，返回 `terminalAccepted:false`、原状态、`sideEffectAttempted:false`——worker 还在跑，需修好 registry 再停或手动处理（CLI 另带该 outcome 与固定说明）。resume 重放过的运行目标取 `run.rerun` 的新会话/新进程，不取旧进程。会话查找与 agentId 读取都是 runId 绑定读取（末条绑定），外 run 伪造 `session.created` 夺不走 kill 目标；信封前的 legacy transcript 落入 `no session metadata` 拒绝面。
-
-CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由>"`（`n` 同第 3 步，缺项即报错）。
 
 ## MCP `run_wait`（长等待）
 
@@ -97,7 +95,7 @@ CLI fallback：`npm run cli -- stop <runId> --observed-seq <n> --reason "<理由
 
 `run.metrics`（token/cost tick）算作进展，但其原始 token/cost 数值绝不返回——只暴露 `lastActivityKind:"metrics"`。证据事件的闭集由 `runWait.js` 所有；`ownerLiveness.js` 只负责心跳新鲜度 SSOT，不是完整 liveness 投影 SSOT。
 
-绝不返回原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。`content` 的 JSON 与 `structuredContent` 语义一致。
+脱敏口径同 `run_status`（另加不返回 token/cost 原值）；`content` 的 JSON 与 `structuredContent` 语义一致。
 
 **归属拒绝**：会话绑定下，`run_activity`、`run_wait`、`run_await_result`、`run_delivery`、`run_delivery_review` 与 `run_delivery_review_bundle` 读到不能证明属于绑定工作区的运行时，返回 `<工具> refused: this run cannot be shown to belong to the bound workspace …` 固定文案：归属事实指向另一项目、子目录、非 Git、相对或已消失的路径，或缺失、重复、缺 cwd、互相冲突；只读、零写入；运行属于另一项目时，用 `workspace_select` 或 `lead_preflight` 的 `workspaceRoot` 选中它再重试。不回显路径或 runId。其余 service 失败返回固定安全文案（如 `run_wait failed`），不泄漏 zod 校验信息。
 
@@ -114,6 +112,8 @@ CLI fallback：MCP `run_wait` 与 CLI `runs wait <runId> [--wait-ms N]` 共用�
 **收口（settled）**是同一份可信快照上的闭集判定：运行已终态；有交付时，原始验证与最新 reverify 链都已有结果。未请求交付、打包失败、隔离失败都算收口；事实校验 malformed、原始验证尚无结果却已有 reverify 事实、reverify malformed、孤立 reverify 链、绑定的打包失败不止一条、请求了交付而终态后既无 `delivery_created` 也无 `delivery_failed` 是"无法判定"。收口不含"验证通过""Lead 已验收""WAO 收尾已完成"——`verification passed is not acceptance` 恒成立。
 
 `wao runs wait <runId> --until-settled`（与 `--wait-ms` 互斥）：每 15 秒一轮，重新解析路径、读新快照、判定一次；只读、不停 worker、不设总时长。退出码：`0` 收口（终行带验证结果与 `nextStep`；JSON `{ settled, runId, state, settlement, nextStep }`）；`3` 连续 4 轮不可信或无法判定（读取失败、副本读不出、未找到，或交付事实不能收口；后者先报运行状态，再指向 `runs diagnose` 与 `runs delivery`），或 `verifier_gone`（终态等验证、验证进程已不在；completed 的不可重试，重新打包的以相同输入再调 `run_delivery_repackage`；JSON 以 `reason` 与本轮的不可信面区分，附 `basis` 与 `nextStep`），或 `runner_gone`（非终态运行的 runner 已不在，由只读干跑 `runs settle` 的门证明，结算见维护页；不可重试）；`4` 持久冲突（多副本内容不同，立即退出）；`5` `runner_unproven`——静默满 30 分钟、owner 心跳不新鲜、本轮 runner 缺席证明被"未知类"理由拒绝（扫描失败/身份判不了/租约损坏/会话锚取不出/证明抛错）时报警退出：证明不了 runner 已不在、运行仍可能变化。JSON 附 `refusal`、`quietMinutes`、`rebootedSinceLastActivity`（重启关系成立时给两个时刻，否则 `null`）；`nextStep` 先 `wao status` 再干跑 `runs settle`，停/结算/重挂归 Lead（最早约 30、最晚约 35 分钟退出）；`130` SIGINT（只输出一份标注快照读取时间的结果）。两道证明各自每 5 分钟至多一次，成立后重新解析、重读、再判一次：已收口照常退出 0，仍等验证或仍非终态才退出 3。诚实边界：只保证收口时退出——能否因此唤醒 Lead 取决于宿主；仍会一直挂着：前台运行（验证在 `wao run` 进程里跑，转录不记 pid）、resumed 运行（`run.rerun`）、reverify 请求后进程死了（再调一次 `wao runs delivery reverify` 会接着跑）、证明被正面证据拒绝（心跳新鲜、仍见 runner 或会话进程、有活 daemon、前台无会话、serveUrl 通道）照旧一直等；未知类拒绝静默满 30 分钟以 5 报警退出。非终态满 30 分钟未见新体征时进度行给出 `runs settle`/`stop`（只在 Lead 决定时用）。进度：文本写 stdout，`--format json` 时写 stderr、stdout 只留最终 JSON；只在首轮、状态或原因变化、不可信轮及其后一轮、距上一行满 5 分钟时打印。
+
+多目标：`<runId> [<runId>...]`（去重后 2–16 个，仅 `--until-settled`）先到先返回：首个结局立即停其余（唤醒在睡的、不再新起证明，在途的跑完；证明排队错峰，至多一个在跑）；停掉的目标即时判定一次：只认收口与首次解析即冲突，读不到/不可信等交给重挂。有结局的各打同款终行；仍在等的补 `Still waiting: …` 与重挂行（照抄原命令 `--run-dir`/`--format json`）。退出码取最需处置的（`4 > 5 > 3 > 0`）；SIGINT 仍 130，有结局照打终行、其余打中断快照。
 
 重启之后：主机重启杀掉后台等待与全部 runner，宿主应用重启只杀等待（runner 经 WMI 启动桥存活，决定 0120）。回来先 `lead_preflight` 核对未结运行；等待以非 0 码退出时先看 `run_status` 再决定是否重挂。
 

@@ -123,8 +123,16 @@ import { runnerStderrTailText, runnerStderrPath } from "../application/runnerStd
 // --until-settled` 共用的收口等待器（轮询循环 + 验证者缺席证明），家在
 // runSettlementWait.js；收口判定与 proveVerifierGone 的家分别在
 // runSettlement.js / runSettle.js，由等待器消费——命令面不复制算法。
+// 第 118 批 B：多目标 `runs wait` 停表后对其余目标的"只判一次"入口同家
+//（judgeRunSettlementOnce——同一 determineRunSettlement，无轮询无证明）。
+// 续修 2：两道缺席证明的缺省入口与等待器同一份（runSettle.js /
+// runnerGoneProof.js）——多目标命令要在注入缝外再包一层共享串行队列，必须
+// 显式拿到缺省函数本体；commands → application 下向边，与既有 import 同向。
+import { proveVerifierGone } from "../application/runSettle.js";
+import { proveRunnerGone } from "../application/runnerGoneProof.js";
 import {
   waitRunSettlement,
+  judgeRunSettlementOnce,
   SETTLEMENT_MAX_UNTRUSTED_ROUNDS as RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS,
 } from "../application/runSettlementWait.js";
 import { runWaitNextStep, buildNextStep, runnerUnprovenReport } from "../application/runNextStep.js";
@@ -315,13 +323,19 @@ async function runsCommand(args, config, deps) {
 // runs delivery review / reverify). 决定 0095：`--until-settled` 是布尔旗标
 //（不带值），与 `--wait-ms` 互斥。
 const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir", "--until-settled"]);
+// 第 118 批 B：多目标收口等待的目标数上限（去重后 2–16 个；16 个 = 一个 worker
+// 加最多 15 个会审席位的常见并发规模，再多的清单只会让先到先返回的输出失控）。
+const RUNS_WAIT_MAX_TARGETS = 16;
 // F-④（2026-10-10 摩擦处置批）：`runs wait --run-id X` 连续两报错且都不含正确
 // 用法（runId 是位置参数、没有 --run-id 旗标）。所有 argv 解析错误附本行——
-// 报错即教学，用户不需要去翻 help。
-const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [--wait-ms <ms> | --until-settled] [--format json|text] [--run-dir <dir>]（runId 为位置参数，无 --run-id 旗标；--until-settled 不带值，不能与 --wait-ms 同用）";
+// 报错即教学，用户不需要去翻 help。第 118 批 B：用法行改多目标形式（多个
+// runId 去重后 2–16 个、只能与 --until-settled 同用、先到先返回）。
+const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [<runId>...] [--wait-ms <ms> | --until-settled] [--format json|text] [--run-dir <dir>]（runId 为位置参数，无 --run-id 旗标；--until-settled 不带值，不能与 --wait-ms 同用；多个 runId 去重后 2–16 个，只能与 --until-settled 同用，先到先返回）";
 
 /**
- * TD-109: `runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]`
+ * TD-109: `runs wait <runId> [<runId>...] [--wait-ms N] [--format json|text] [--run-dir DIR]`
+ *         （第 118 批 B：多个 runId 去重后 2–16 个，只与 --until-settled 同用，
+ *          先到先返回——多目标收口等待见 runsWaitMultiUntilSettledCommand）
  *
  * Read-only bounded long-poll. Delegates to the SAME runWait application
  * service the MCP run_wait tool uses — the CLI never re-implements the
@@ -372,10 +386,15 @@ async function runsWaitCommand(args, config, deps = {}) {
       positionals.push(a);
     }
   }
-  if (positionals.length !== 1) {
-    throw linesError([`runs wait requires exactly one <runId>`, RUNS_WAIT_USAGE]);
+  if (positionals.length === 0) {
+    throw linesError([`runs wait requires exactly one <runId>, or 2–16 with --until-settled`, RUNS_WAIT_USAGE]);
   }
-  const runId = positionals[0];
+  // 第 118 批 B：位置参数是 1–16 个 runId——重复的去掉、保留首次出现顺序
+  //（`a a` 去重后按单目标走；`a b a` 按 `a b` 走）。
+  const runIds = [...new Set(positionals)];
+  if (runIds.length > RUNS_WAIT_MAX_TARGETS) {
+    throw linesError([`runs wait accepts at most ${RUNS_WAIT_MAX_TARGETS} runIds (got ${runIds.length} after dedup)`, RUNS_WAIT_USAGE]);
+  }
   if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {
     throw linesError([`--format only supports json|text`, RUNS_WAIT_USAGE]);
   }
@@ -383,14 +402,26 @@ async function runsWaitCommand(args, config, deps = {}) {
   if (untilSettled && flags.waitMs !== undefined) {
     throw linesError([`--until-settled and --wait-ms are mutually exclusive`, RUNS_WAIT_USAGE]);
   }
+  // 多目标只能与 --until-settled 同用：与 --wait-ms 同用、或两个旗标都不给，
+  // 都在这里报错（上面先拒掉 --until-settled + --wait-ms 的任意组合）。
+  if (runIds.length > 1 && !untilSettled) {
+    throw linesError([`multiple runIds require --until-settled`, RUNS_WAIT_USAGE]);
+  }
   const runDir = resolve(flags.runDir ?? config.runDir);
 
   // 决定 0095：`--until-settled` 走收口等待器（无界轮询直到收口/不可信/冲突/
-  // SIGINT），不经有界 runWait 服务。
+  // SIGINT），不经有界 runWait 服务。第 118 批 B：去重后一个目标照旧单目标面
+  //（行为逐字节不变）；多个目标走多目标收口等待（先到先返回）。
   if (untilSettled) {
-    await runsWaitUntilSettledCommand({ runId, asJson, runDir, config }, deps);
+    if (runIds.length === 1) {
+      await runsWaitUntilSettledCommand({ runId: runIds[0], asJson, runDir, config }, deps);
+    } else {
+      // 续修 4：重挂行照抄原命令的 --run-dir（用户输入的旗标值原样回显）。
+      await runsWaitMultiUntilSettledCommand({ runIds, asJson, runDir, runDirFlag: flags.runDir }, deps);
+    }
     return;
   }
+  const runId = runIds[0];
 
   // CLI only coerces; the service is the shared business boundary and throws
   // its own exact error for out-of-range / non-integer values (not reworded).
@@ -509,6 +540,10 @@ async function runsWaitCommand(args, config, deps = {}) {
  * readTranscriptFn / nowFn / sleepFn / pollIntervalMs / verifierGoneFn /
  * verifierProofDeps / runnerGoneFn / runnerProofDeps / bootTimeFn（只喂
  * runner_unproven 的重启关系读数）。
+ *
+ * 第 118 批 B：终行渲染抽到 renderInterruptedSettlementOutcome /
+ * renderSettledOutcome（与多目标命令 runsWaitMultiUntilSettledCommand 共用同一
+ * 份）；本命令的输出字节与抽提前逐字节一致（现有单目标用例守着）。
  */
 async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {}) {
   // 决定 0096：验证者已不在的证明。daemon 握手 SSOT 在 adapters 层（daemon.js），
@@ -561,32 +596,61 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
   }
 
   // —— 单一最终输出点（每条路径恰好一份；SIGINT 与正常完成的竞争只有一个出口：
-  //    置位后即便本轮已判收口，也只输出中断结果并退出 130，绝不出第二份）——
-  const snapshotReadIso = outcome.snapshotReadAt === null
-    ? null
-    : new Date(outcome.snapshotReadAt).toISOString();
+  //    置位后即便本轮已判收口，也只输出中断结果并退出 130，绝不出第二份）。
+  //    第 118 批 B：终行渲染抽到 renderInterruptedSettlementOutcome /
+  //    renderSettledOutcome（单目标与多目标共用同一份），本命令只打印与设
+  //    退出码——各分支输出字节与抽提前逐字节一致。
   if (interrupted) {
     // interrupted：退出码 130，唯一一份最终结果，标注快照读取时间。
     process.exitCode = 130;
-    const state = outcome.settlement?.facts?.state ?? "unknown";
-    if (asJson) {
-      console.log(JSON.stringify({
-        settled: false,
-        runId,
-        interrupted: true,
-        state,
-        settlement: outcome.settlement
-          ? { status: outcome.settlement.status, reason: outcome.settlement.reason, facts: outcome.settlement.facts }
-          : null,
-        snapshotReadAt: snapshotReadIso,
-      }, null, 2));
-    } else {
-      console.log(`Run: ${runId} (${state})`);
-      console.log(`Settlement: ${outcome.settlement ? `${outcome.settlement.status} (${outcome.settlement.reason})` : "not yet judged"}`);
-      console.log(`(interrupted; snapshot read at ${snapshotReadIso ?? "never"})`);
-    }
+    const rendered = renderInterruptedSettlementOutcome({ outcome, runId });
+    if (asJson) console.log(JSON.stringify(rendered.json, null, 2));
+    else for (const line of rendered.lines) console.log(line);
     return;
   }
+  const rendered = await renderSettledOutcome({ outcome, runId, runDir, deps });
+  if (asJson) console.log(JSON.stringify(rendered.json, null, 2));
+  else for (const line of rendered.lines) console.log(line);
+  if (rendered.exitCode !== 0) process.exitCode = rendered.exitCode;
+}
+
+// 第 118 批 B 抽提：收口等待 outcome 的终行渲染器——单目标命令与多目标命令
+// 共用同一份（每分支的文本行、JSON 对象与退出码一次算好返回，调用面只负责
+// 打印与 process.exitCode）；各分支字符串与键序原样保留（单目标现有用例守着
+// 逐字节一致）。
+
+/** 中断快照（SIGINT）：单目标与多目标（逐目标）同一份三行文本 / JSON。 */
+function renderInterruptedSettlementOutcome({ outcome, runId }) {
+  const snapshotReadIso = outcome.snapshotReadAt === null
+    ? null
+    : new Date(outcome.snapshotReadAt).toISOString();
+  const state = outcome.settlement?.facts?.state ?? "unknown";
+  return {
+    lines: [
+      `Run: ${runId} (${state})`,
+      `Settlement: ${outcome.settlement ? `${outcome.settlement.status} (${outcome.settlement.reason})` : "not yet judged"}`,
+      `(interrupted; snapshot read at ${snapshotReadIso ?? "never"})`,
+    ],
+    json: {
+      settled: false,
+      runId,
+      interrupted: true,
+      state,
+      settlement: outcome.settlement
+        ? { status: outcome.settlement.status, reason: outcome.settlement.reason, facts: outcome.settlement.facts }
+        : null,
+      snapshotReadAt: snapshotReadIso,
+    },
+  };
+}
+
+/**
+ * 闭集 outcome（非 interrupted）的终行渲染：settled / verifier_gone /
+ * runner_gone / runner_unproven / conflict / untrusted 每支的文本行、JSON
+ * 对象与退出码（0 = 调用面不设 process.exitCode）。settled 支的可续提示判定
+ *（决定 0112）照旧用等待器读到的同一份快照事件，不另读新快照。
+ */
+async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
   if (outcome.kind === "settled") {
     const s = outcome.settlement;
     // 决定 0112：delivery_settled、未采纳、且同一份快照判定为可续谱系成员时，
@@ -611,22 +675,23 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       settlementReason: s.reason,
       acceptanceStatus,
     });
-    if (asJson) {
-      console.log(JSON.stringify({
+    const reverify = s.facts.reverifyStatus === "complete" ? `; reverify ${s.facts.effectiveVerificationStatus}` : "";
+    const verification = s.facts.verificationStatus ? `; verification ${s.facts.verificationStatus}${reverify}` : "";
+    return {
+      exitCode: 0,
+      lines: [
+        `Run: ${runId} (${s.facts.state})`,
+        `Settlement: settled (${s.reason}${verification})`,
+        `Next step: ${nextStep}`,
+      ],
+      json: {
         settled: true,
         runId,
         state: s.facts.state,
         settlement: { status: s.status, reason: s.reason, facts: s.facts },
         nextStep,
-      }, null, 2));
-    } else {
-      console.log(`Run: ${runId} (${s.facts.state})`);
-      const reverify = s.facts.reverifyStatus === "complete" ? `; reverify ${s.facts.effectiveVerificationStatus}` : "";
-      const verification = s.facts.verificationStatus ? `; verification ${s.facts.verificationStatus}${reverify}` : "";
-      console.log(`Settlement: settled (${s.reason}${verification})`);
-      console.log(`Next step: ${nextStep}`);
-    }
-    return;
+      },
+    };
   }
   if (outcome.kind === "verifier_gone") {
     // 决定 0096：证明成立且重读仍是终态等验证。退出码 3。completed 形状不可
@@ -634,7 +699,6 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // 走到这里——可再调 MCP 工具 run_delivery_repackage（相同输入）重跑
     // 验证，nextStep 按收口事实里的终态分支（B91）。
     // JSON 以 reason 与本轮的不可信面区分；只给闭集 basis，不回显 pid/路径。
-    process.exitCode = 3;
     const s = outcome.settlement;
     const nextStep = buildNextStep({
       surface: "cli",
@@ -643,21 +707,22 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
       acceptanceStatus: s.facts.acceptanceStatus,
       terminalState: s.facts.state,
     });
-    if (asJson) {
-      console.log(JSON.stringify({
+    return {
+      exitCode: 3,
+      lines: [
+        `Run: ${runId} (${s.facts.state})`,
+        `Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (${outcome.basis}); waiting will not change this.`,
+        `Next step: ${nextStep}`,
+      ],
+      json: {
         settled: false,
         runId,
         state: s.facts.state,
         reason: "verifier_gone",
         basis: outcome.basis,
         nextStep,
-      }, null, 2));
-    } else {
-      console.log(`Run: ${runId} (${s.facts.state})`);
-      console.log(`Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (${outcome.basis}); waiting will not change this.`);
-      console.log(`Next step: ${nextStep}`);
-    }
-    return;
+      },
+    };
   }
   if (outcome.kind === "runner_gone") {
     // 第 83 批 B：runner 缺席证明成立且重读仍非终态。退出码 3（不可重试）；
@@ -665,26 +730,26 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // owner 心跳、无可能仍在驱动它的进程"，不回显 pid/路径/命令行。
     // TD-341（第 89 批 C3）：附 runner stderr 尾部（展示处理后的文本，限长）；
     // 无文件/空文件分固定文案（第 89 批之前派发、未经 resume 接管的运行没有文件）。
-    process.exitCode = 3;
     const s = outcome.settlement;
     const nextStep = buildNextStep({ surface: "cli", situation: "runner_gone", runId });
     const stderrText = runnerStderrTailText(runDir, runId);
-    if (asJson) {
-      console.log(JSON.stringify({
+    return {
+      exitCode: 3,
+      lines: [
+        `Run: ${runId} (${s.facts.state})`,
+        `Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`,
+        `Runner stderr tail: ${stderrText}`,
+        `Next step: ${nextStep}`,
+      ],
+      json: {
         settled: false,
         runId,
         state: s.facts.state,
         reason: "runner_gone",
         runnerStderrTail: stderrText,
         nextStep,
-      }, null, 2));
-    } else {
-      console.log(`Run: ${runId} (${s.facts.state})`);
-      console.log(`Stuck: the runner of ${runId} is gone (no live owner heartbeat, no process that could still drive it); waiting will not change this.`);
-      console.log(`Runner stderr tail: ${stderrText}`);
-      console.log(`Next step: ${nextStep}`);
-    }
-    return;
+      },
+    };
   }
   if (outcome.kind === "runner_unproven") {
     // 第 107 批：静默满 30 分钟、owner 心跳不新鲜、但本轮 runner 缺席证明被
@@ -693,61 +758,294 @@ async function runsWaitUntilSettledCommand({ runId, asJson, runDir }, deps = {})
     // 纪律：不说 "waiting will not change this"、不断言 runner 已死；重启关系
     // 成立时照实陈述（开机晚于最后活动——重启前的 runner 活不过重启，但开机后
     // 有人续跑不能排除）。
-    process.exitCode = 5;
     const s = outcome.settlement;
     const report = runnerUnprovenReport({
       state: s.facts.state, refusal: outcome.refusal, quietMs: outcome.quietMs, rebooted: outcome.rebooted,
     });
     const nextStep = buildNextStep({ surface: "cli", situation: "runner_unproven", runId });
-    if (asJson) {
-      console.log(JSON.stringify({
+    return {
+      exitCode: 5,
+      lines: [
+        `Run: ${runId} (${s.facts.state})`,
+        ...report.lines,
+        `Next step: ${nextStep}`,
+      ],
+      json: {
         settled: false,
         runId,
         state: s.facts.state,
         reason: "runner_unproven",
         ...report.fields,
         nextStep,
-      }, null, 2));
-    } else {
-      console.log(`Run: ${runId} (${s.facts.state})`);
-      for (const line of report.lines) console.log(line);
-      console.log(`Next step: ${nextStep}`);
-    }
-    return;
+      },
+    };
   }
   if (outcome.kind === "conflict") {
-    process.exitCode = 4;
-    if (asJson) {
-      console.log(JSON.stringify({ settled: false, runId, conflict: true, diagnostics: `wao runs diagnose ${runId}` }, null, 2));
-    } else {
-      console.log(`Conflict: ${runId} has multiple distinct transcript copies — refusing to pick one.`);
-      console.log(`Diagnostics: wao runs diagnose ${runId}`);
-    }
-    return;
+    return {
+      exitCode: 4,
+      lines: [
+        `Conflict: ${runId} has multiple distinct transcript copies — refusing to pick one.`,
+        `Diagnostics: wao runs diagnose ${runId}`,
+      ],
+      json: { settled: false, runId, conflict: true, diagnostics: `wao runs diagnose ${runId}` },
+    };
   }
   if (outcome.kind === "untrusted") {
-    process.exitCode = 3;
     // 最后一轮读到了快照、只是交付事实不能收口（如终态前没打包的失败运行）时，
     // 照实说"无法判定"并给出运行状态；读取/解析层的失败才说"不可信"。
     const undeterminable = outcome.reason.startsWith("undeterminable:");
     const state = undeterminable ? outcome.settlement.facts.state : null;
-    if (asJson) {
-      console.log(JSON.stringify({
+    return {
+      exitCode: 3,
+      lines: undeterminable ? [
+        `Run: ${runId} (${state})`,
+        `Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`,
+        `Diagnostics: wao runs diagnose ${runId}; delivery facts: wao runs delivery ${runId}`,
+      ] : [
+        `Untrusted: ${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS} consecutive rounds could not be trusted (last: ${outcome.reason}).`,
+        `Diagnostics: wao runs diagnose ${runId}`,
+      ],
+      json: {
         settled: false,
         runId,
         ...(state ? { state } : {}),
         untrustedRounds: outcome.rounds,
         reason: outcome.reason,
         diagnostics: `wao runs diagnose ${runId}`,
-      }, null, 2));
-    } else if (undeterminable) {
-      console.log(`Run: ${runId} (${state})`);
-      console.log(`Undeterminable: the delivery facts cannot settle (${outcome.reason.slice("undeterminable:".length)}); waiting will not change them.`);
-      console.log(`Diagnostics: wao runs diagnose ${runId}; delivery facts: wao runs delivery ${runId}`);
-    } else {
-      console.log(`Untrusted: ${RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS} consecutive rounds could not be trusted (last: ${outcome.reason}).`);
-      console.log(`Diagnostics: wao runs diagnose ${runId}`);
+      },
+    };
+  }
+  // 闭集之外的 kind 是接线错误：响亮失败，不静默无输出。
+  throw new Error(`renderSettledOutcome: unknown outcome kind: ${JSON.stringify(outcome.kind)}`);
+}
+
+// 第 118 批 B：多目标收口等待的退出码聚合——本轮各结局按单目标规则各得一个
+// 码，进程退出码取最需要处置的那个（4 持久冲突 > 5 runner_unproven > 3 卡死/
+// 不可信 > 0 收口）；SIGINT 是独立出口（130），不进该聚合。
+const MULTI_WAIT_EXIT_RANK = { 0: 0, 3: 1, 5: 2, 4: 3 };
+
+/**
+ * 第 118 批 B：`wao runs wait <runId> [<runId>...] --until-settled`——一条
+ * 命令等多个运行（去重后 2–16 个，解析层已保证；只与 --until-settled 同用）。
+ * 每个目标并发跑一个既有的收口等待器 waitRunSettlement（同一算法、同一注入
+ * 缝，不复制收口判定）；第一个目标出本轮第一个真实结局（单目标模式下会让
+ * 命令退出的任何结局）后立即停表（续修 1：唤醒在睡的等待器、等待器不再开始
+ * 新的缺席证明；在途证明跑完），对其余每个目标用 judgeRunSettlementOnce 做
+ * 一次即时判定（不额外等待），同轮已出结局的等待器结果一并算进本轮——然后
+ * 只做一次最终输出：
+ *   - 本轮每个有结局的目标各打印与单目标完全同款的终行（同一 renderSettledOutcome）；
+ *   - 仍有目标在等时补 `Still waiting: …` 与重挂行（续修 4：照抄原命令的
+ *     --run-dir〔含空格加引号〕与 JSON 模式的 --format json，可直接照抄执行；
+ *     全部有结局则两行都不出现）；JSON 是 { multi, results, remaining,
+ *     rearmCommand }（results 每项与单目标 JSON 同形）。
+ * 退出码聚合见 MULTI_WAIT_EXIT_RANK；SIGINT（130，续修 3：处理器保持到最终
+ * 输出完成，即时判定期间按 Ctrl+C 也走同一出口）压过聚合：已有结局的目标照
+ * 常打印结局行，其余目标打印单目标同款的中断快照行，remaining 与重挂行只列
+ * 没有结局的目标。
+ * 续修 2：两道缺席证明经共享串行队列注入各等待器（同一时刻至多一个证明在
+ * 跑，算法与各等待器自己的 5 分钟节流不动）——16 个目标同时各起一次进程扫描
+ * 会自己制造负载、把已静默满 30 分钟的目标误报成 runner_unproven。
+ * 进度行由各等待器自带 runId（不改）；JSON 模式照旧走 stderr、stdout 只留最
+ * 终 JSON。
+ */
+async function runsWaitMultiUntilSettledCommand({ runIds, asJson, runDir, runDirFlag }, deps = {}) {
+  // 决定 0096 / 第 83 批 B 同款注入：daemon 握手读器在 adapters 层，由本命令
+  // 注入（application 层不得上向导入）；其余读器与 settle 同一套，测试可经
+  // proof deps 覆写。多目标共用同一份注入；各等待器与即时判定各自独立记账
+  //（节流与不可信计数互不串）。
+  const verifierProofDeps = {
+    nowFn: deps.nowFn ?? Date.now,
+    handshakeReader: readHandshakeDetailed,
+    daemonAliveFn: isDaemonAlive,
+    ...(deps.verifierProofDeps ?? {}),
+  };
+  const runnerProofDeps = {
+    nowFn: deps.nowFn ?? Date.now,
+    handshakeReader: readHandshakeDetailed,
+    daemonAliveFn: isDaemonAlive,
+    ...(deps.runnerProofDeps ?? {}),
+  };
+  // 停表双源，都只置位：SIGINT（真中断，压过一切）与"已有目标出真实结局"。
+  // 续修 1：置位的同时唤醒所有在睡的等待器（停表是"立即停"，不是"睡满这一轮
+  // 再说"）；停表后才开始的睡眠直接返回（电平触发，不靠唤醒竞速）。
+  let sigint = false;
+  let stopWaiters = false;
+  const sleepWakeups = new Set();
+  const wakeAllSleepers = () => {
+    for (const wake of [...sleepWakeups]) wake();
+  };
+  const stopNow = () => {
+    stopWaiters = true;
+    wakeAllSleepers();
+  };
+  const onSigint = () => { sigint = true; stopNow(); };
+  process.on("SIGINT", onSigint);
+  // 续修 1：各等待器的睡眠可被停表唤醒。注入缝（deps.sleepFn）包一层竞速；
+  // 缺省分支自己起定时器并在唤醒时 clearTimeout——被放弃的睡眠不留悬挂定时
+  // 器，命令输出后进程立即退出（不拖一个 15 秒的尾巴）。
+  const sleepFn = deps.sleepFn !== undefined
+    ? async (ms) => {
+      if (stopWaiters) return;
+      let wake;
+      const woken = new Promise((resolve) => { wake = resolve; });
+      sleepWakeups.add(wake);
+      try {
+        await Promise.race([deps.sleepFn(ms), woken]);
+      } finally {
+        sleepWakeups.delete(wake);
+      }
     }
+    : (ms) => new Promise((resolve) => {
+      if (stopWaiters) {
+        resolve();
+        return;
+      }
+      let timer = null;
+      const finish = () => {
+        sleepWakeups.delete(finish);
+        if (timer !== null) clearTimeout(timer);
+        resolve();
+      };
+      sleepWakeups.add(finish);
+      timer = setTimeout(finish, ms);
+    });
+  // 续修 2：缺席证明共享串行队列——同一时刻至多一个证明在跑（等待器的注入缝
+  // 之外再包一层；缺省函数与等待器同一份本体）。队列只延迟开始时机：证明算
+  // 法、结果语义与各等待器自己的节流记账都不动。停表后才轮到的排队证明不再
+  // 开始，以 null（= 无证明结果）了结——等待器对 null 的既有折法是"不构成死亡
+  // 证明，继续等"，该轮随后在循环顶部以 interrupted 收口，不会拿 null 去触发
+  // runner_unproven 的闭集判定。
+  let proofQueueTail = Promise.resolve();
+  const serializeProofFn = (fn) => async (input) => {
+    const run = proofQueueTail.then(() => (stopWaiters ? null : fn(input)));
+    proofQueueTail = run.then(() => {}, () => {});
+    return run;
+  };
+  const waiterDeps = {
+    pollIntervalMs: deps.pollIntervalMs,
+    resolveDetailedFn: deps.resolveDetailedFn,
+    readTranscriptFn: deps.readTranscriptFn,
+    nowFn: deps.nowFn,
+    sleepFn,
+    verifierGoneFn: serializeProofFn(deps.verifierGoneFn ?? proveVerifierGone),
+    verifierProofDeps,
+    runnerGoneFn: serializeProofFn(deps.runnerGoneFn ?? proveRunnerGone),
+    runnerProofDeps,
+    bootTimeFn: deps.bootTimeFn,
+  };
+  // 即时判定的注入缝（续修：测试可显式断言/控制即时判定这一步）。
+  const judgeOnceFn = deps.judgeOnceFn ?? judgeRunSettlementOnce;
+
+  const progress = (line) => {
+    // 文本模式进度写 stdout；JSON 模式进度写 stderr，stdout 只留最终 JSON。
+    if (asJson) console.error(line);
+    else console.log(line);
+  };
+  const waiters = runIds.map((runId) => waitRunSettlement({
+    runId,
+    runDir,
+    runnerGoneProof: true,
+    progress,
+    isInterrupted: () => stopWaiters,
+    deps: waiterDeps,
+  }).then(
+    (outcome) => {
+      // 第一个真实结局立即停表（唤醒在睡的、挡住还没开始的证明）；同轮已出
+      // 结局的照常完整返回（一并算进本轮）。
+      if (outcome.kind !== "interrupted") stopNow();
+      return { runId, outcome };
+    },
+    (error) => {
+      // 等待器意外抛错（判定链闭集之外的异常）：也停表再向上抛——与单目标同一
+      // 失败面（命令终止，不出最终输出），其余等待器不悬挂。
+      stopNow();
+      throw error;
+    },
+  ));
+
+  // 续修 3：SIGINT 处理器保持到最终输出完成——即时判定与渲染期间按 Ctrl+C 仍
+  // 有中断输出（try/finally 全程罩住，输出完才注销）。
+  let waited;
+  try {
+    waited = await Promise.all(waiters);
+    // 每目标定结局：等待器的真实结局照用；被停掉的做一次即时判定（不额外等待），
+    // 判不出结局（未收口/无法判定/读不到/确认解析变化——含确认阶段冲突）的按
+    // "仍在等"交回。
+    const outcomeByRun = new Map();
+    for (const { runId, outcome } of waited) {
+      outcomeByRun.set(
+        runId,
+        outcome.kind === "interrupted"
+          ? await judgeOnceFn({ runId, runDir, deps: waiterDeps })
+          : outcome,
+      );
+    }
+    // —— 单一最终输出点（每条路径恰好一份；SIGINT 与正常完成的竞争只有一个
+    //    出口：sigint 置位后以 130 退出，仍只输出这一份）——
+    const interruptOutcomeByRun = new Map(waited.map(({ runId, outcome }) => [runId, outcome]));
+    const rendered = [];
+    const remaining = [];
+    for (const runId of runIds) {
+      const outcome = outcomeByRun.get(runId) ?? null;
+      if (outcome !== null) {
+        rendered.push(await renderSettledOutcome({ outcome, runId, runDir, deps }));
+        continue;
+      }
+      remaining.push(runId);
+      // 续修 3：中断时没有结局的目标补单目标同款的中断快照行（数据取该等待器
+      // 的 interrupted outcome——最后一次判定与快照读取时刻）；正常完成时这些
+      // 目标不出终行，只进 Still waiting/重挂行。
+      if (sigint) {
+        rendered.push(renderInterruptedSettlementOutcome({ outcome: interruptOutcomeByRun.get(runId), runId }));
+      }
+    }
+    if (sigint) {
+      process.exitCode = 130;
+    } else {
+      // 退出码：本轮各结局里最需要处置的那个（4 > 5 > 3 > 0；全收口 = 不设
+      // 退出码。本分支的 rendered 只含结局渲染，不含中断快照）。
+      const exitCode = rendered.reduce(
+        (worst, r) => (MULTI_WAIT_EXIT_RANK[r.exitCode] > MULTI_WAIT_EXIT_RANK[worst] ? r.exitCode : worst),
+        0,
+      );
+      if (exitCode !== 0) process.exitCode = exitCode;
+    }
+    emitMultiWaitFinal({ asJson, rendered, remaining, runDirFlag });
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+}
+
+// 续修 4：重挂命令要能照抄执行——原命令带了 --run-dir 就带上同一个（含空格
+// 的路径加双引号）；JSON 模式再带 --format json。没有剩余目标时为 null。
+function renderRearmCommand(remaining, { runDirFlag, asJson }) {
+  if (remaining.length === 0) return null;
+  const parts = ["wao", "runs", "wait", ...remaining, "--until-settled"];
+  if (runDirFlag !== undefined) {
+    parts.push("--run-dir", /\s/.test(runDirFlag) ? `"${runDirFlag}"` : runDirFlag);
+  }
+  if (asJson) parts.push("--format", "json");
+  return parts.join(" ");
+}
+
+/** 多目标的唯一最终输出口：逐目标终行（单目标同款）+ 仍在等两行 / 多目标 JSON。 */
+function emitMultiWaitFinal({ asJson, rendered, remaining, runDirFlag }) {
+  const rearmCommand = renderRearmCommand(remaining, { runDirFlag, asJson });
+  if (asJson) {
+    console.log(JSON.stringify({
+      multi: true,
+      results: rendered.map((r) => r.json),
+      remaining,
+      rearmCommand,
+    }, null, 2));
+    return;
+  }
+  for (const r of rendered) {
+    for (const line of r.lines) console.log(line);
+  }
+  if (remaining.length > 0) {
+    console.log(`Still waiting: ${remaining.join(" ")}`);
+    console.log(`Re-arm: ${rearmCommand}`);
   }
 }
 
