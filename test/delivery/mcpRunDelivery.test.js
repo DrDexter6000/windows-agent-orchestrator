@@ -1576,7 +1576,7 @@ test("0097 五′: run_delivery waitMs cross-workspace → ownership-refusal fix
     try {
       const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 1000 } });
       const dumped = JSON.stringify(res);
-      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to the bound workspace/,
+      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to this call's workspace/,
         "归属拒绝专属固定文案");
       assert.ok(!dumped.includes("run_delivery failed"), "不再折叠成笼统失败文案");
       assert.ok(!dumped.includes(runId), "不回显 runId");
@@ -1619,7 +1619,7 @@ test("TD-324: run_delivery point-in-time cross-workspace → ownership-refusal f
     try {
       const res = await client.callTool({ name: "run_delivery", arguments: { runId } });
       const dumped = JSON.stringify(res);
-      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to the bound workspace/,
+      assert.match(dumped, /run_delivery refused: this run cannot be shown to belong to this call's workspace/,
         "即时查询的归属拒绝专属固定文案（与等待路径同款）");
       assert.ok(!dumped.includes("run_delivery failed"), "不再折叠成笼统失败文案");
       assert.ok(!res.structuredContent, "no structuredContent on error");

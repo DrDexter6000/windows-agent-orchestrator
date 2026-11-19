@@ -28,7 +28,7 @@ test("NEXT-00: 上限常量与 leadAdvisory 同值（480），情形闭集冻结
 
 test("NEXT-01: 等待类五支——两面渲染 + MCP 不含 runId + CLI 带 runId", () => {
   const cases = [
-    { vitalSignAgeMs: 120_000, mcp: /Call run_wait again/, cli: /wao runs wait run_\S+ --until-settled/ },
+    { vitalSignAgeMs: 120_000, mcp: /Call run_await_result again \(waitMs up to 270000\)/, cli: /wao runs wait run_\S+ --until-settled/ },
     { vitalSignAgeMs: 700_000, mcp: /may be inside a long-running command[\s\S]*run_activity/, cli: /may be inside a long-running command[\s\S]*wao status run_/ },
     { vitalSignAgeMs: 31 * 60_000, mcp: /No new signs of life in the transcript for 31 min[\s\S]*run_stop is only for an explicit Lead decision/, cli: /No new signs of life in the transcript for 31 min[\s\S]*wao runs settle and wao stop/ },
     { vitalSignAgeMs: null, mcp: /not observable[\s\S]*run_status/, cli: /not observable[\s\S]*wao status run_/ },
@@ -57,7 +57,7 @@ test("NEXT-02: delivery_unsettled / dispatch_accepted 两类固定模板", () =>
   assert.match(delivery, /Verification passed is not acceptance/);
   const dispatch = buildNextStep({ surface: "mcp", situation: "dispatch_accepted" });
   assert.match(dispatch, /Before ending the turn, keep a wait attached/);
-  assert.match(dispatch, /call run_wait repeatedly/);
+  assert.match(dispatch, /call run_await_result repeatedly \(waitMs up to 270000 each\)/);
   const dispatchCli = buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID });
   assert.match(dispatchCli, /wao runs wait run_\S+ --until-settled/);
 });
@@ -184,7 +184,7 @@ test("NEXT-08: consult_seats_running——MCP 面不落任何具体 id；CLI 面
     surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 3,
   });
   assert.match(mcp, /^3 of 5 seats are not terminal yet\./);
-  assert.match(mcp, /call run_wait repeatedly/);
+  assert.match(mcp, /call run_await_result repeatedly \(waitMs up to 270000 each\)/);
   assert.match(mcp, /seats\[\]\.runId/);
   assert.match(mcp, /re-read this consult with run_consult and its consultId/);
   assert.ok(!mcp.includes(RUN_ID) && !/consult_\d/.test(mcp), "MCP 面不含 runId/consultId 字面");

@@ -372,7 +372,7 @@ test("MAR-11: cross-workspace → fixed error (workspace-bound)", async () => {
     try {
       const res = await client.callTool({ name: "run_await_result", arguments: { runId: "run_xws", waitMs: 0 } });
       const dumped = JSON.stringify(res);
-      assert.match(dumped, /run_await_result refused: this run cannot be shown to belong to the bound workspace/, "归属拒绝专属固定文案（0097 五′）");
+      assert.match(dumped, /run_await_result refused: this run cannot be shown to belong to this call's workspace/, "归属拒绝专属固定文案（0097 五′）");
       assert.ok(!dumped.includes("run_xws"), "不回显 runId");
       // 文本里查原生反斜杠与正斜杠两种写法，序列化结果里查 JSON 转义写法。
       const text = res.content.map((c) => c.text ?? "").join("\n");
@@ -475,7 +475,7 @@ test("MAR-14: repeated terminal calls append ZERO audits (idempotent read-only)"
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
-test("MAR-15: current tool count is 23 (M12-10 resources; M12-16 run_correct; M13 run_consult)", async () => {
+test("MAR-15: current tool count is 20 (batch 119 removed workspace_select/workspace_status/run_wait)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mar15-"));
   try {
     makeGitRepo(dir);
@@ -484,7 +484,7 @@ test("MAR-15: current tool count is 23 (M12-10 resources; M12-16 run_correct; M1
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_await_result"), "run_await_result present");
-      assert.equal(tools.tools.length, 23, "exactly 23 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct; M13 added run_consult)");
+      assert.equal(tools.tools.length, 20, "exactly 20 tools (batch 119 removed workspace_select/workspace_status/run_wait)");
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); }
 });

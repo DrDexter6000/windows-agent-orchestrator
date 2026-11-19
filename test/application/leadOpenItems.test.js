@@ -79,7 +79,7 @@ function makeLinkedWorktree(root, dir) {
 
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
-const CROSS_TREE_HINT = "some runs were dispatched from another worktree: workspace_select it (or run the CLI there) first";
+const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass that worktree's root as expectedWorkspaceRoot (or run the CLI there) first";
 // b78：留待回收行的固定尾巴——"能否回收以回收计划为准 + 空计划可能正常"；分钟数
 // 从 worktreeReclaim 的 RECENT_BOUND_EVENT_MS 派生（改常量时文案跟着变，不抄数字）。
 const RECLAIM_TAIL = " left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only; "

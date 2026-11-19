@@ -27,7 +27,7 @@
     },
     {
       "id": "supervise",
-      "intent": "Observe all lanes via run_wait until each reaches terminal.",
+      "intent": "Observe all lanes via run_await_result until each reaches terminal.",
       "importance": "core",
       "evidence": ["Each lane terminal or liveness observed"],
       "adaptations": ["Stop a runaway lane without aborting siblings"]

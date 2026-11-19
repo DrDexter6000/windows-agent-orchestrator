@@ -116,7 +116,7 @@ test("M9-3B-01: tools/list has registry_list + run_dispatch + run_status with co
 
       const rs = tools.tools.find((t) => t.name === "run_status");
       assert.ok(rs, "run_status present");
-      assert.deepEqual(Object.keys(rs.inputSchema.properties ?? {}), ["runId"], "input has only runId");
+      assert.deepEqual(Object.keys(rs.inputSchema.properties ?? {}), ["runId", "expectedWorkspaceRoot"], "input is runId + optional per-call target (batch 119)");
       assert.equal(rs.inputSchema.additionalProperties, false, "input is strict");
       // Read-only annotations.
       assert.equal(rs.annotations.readOnlyHint, true, "readOnlyHint:true");

@@ -146,7 +146,7 @@ export async function correctRun({
   const agentId = extractCanonicalAgentId(events, runId);
   if (agentId === "unknown") return reject("unknown_run");
 
-  // 3. Workspace ownership (the run must belong to the bound workspace).
+  // 3. Workspace ownership (the run must belong to the call's authorized root).
   try {
     verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   } catch {

@@ -5,11 +5,11 @@
 // Mainline: the Lead must be able to confirm the actual worker from WAO's
 // structured result WITHOUT parsing worker free-text. Whatever the worker
 // answers (researcher, Coder-HQ, /root, or nothing at all), the Lead gets a
-// unified agentId from run_dispatch / run_status / run_wait / run_collect.
+// unified agentId from run_dispatch / run_status / run_await_result / run_collect.
 //
 // Package A — structured identity SSOT:
 //   - Field is uniformly named `agentId`; no parallel workerId/displayName.
-//   - run_dispatch, run_status, run_wait, run_collect output includes agentId.
+//   - run_dispatch, run_status, run_await_result, run_collect output includes agentId.
 //   - runs_list keeps its existing agentId semantics (regression).
 //   - status/wait/collect MUST reuse the SAME transcript snapshot they already
 //     read — no extra transcript/registry/fs read for identity.
@@ -332,9 +332,9 @@ test("M11-8B-A9: MCP run_dispatch output schema declares + returns agentId", asy
 });
 
 // =====================================================================
-// RED A10: MCP run_wait + run_collect output schemas declare agentId.
+// RED A10: MCP run_await_result + run_collect output schemas declare agentId.
 // =====================================================================
-test("M11-8B-A10: MCP run_wait + run_collect outputSchema declare agentId", async () => {
+test("M11-8B-A10: MCP run_await_result + run_collect outputSchema declare agentId", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m118b-a10-"));
   try {
     makeGitRepo(dir);
@@ -345,8 +345,8 @@ test("M11-8B-A10: MCP run_wait + run_collect outputSchema declare agentId", asyn
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();
-      const wait = tools.tools.find((t) => t.name === "run_wait");
-      assert.ok("agentId" in (wait.outputSchema.properties ?? {}), "run_wait outputSchema declares agentId");
+      const wait = tools.tools.find((t) => t.name === "run_await_result");
+      assert.ok("agentId" in (wait.outputSchema.properties ?? {}), "run_await_result outputSchema declares agentId");
       const collect = tools.tools.find((t) => t.name === "run_collect");
       assert.ok("agentId" in (collect.outputSchema.properties ?? {}), "run_collect outputSchema declares agentId");
     } finally {

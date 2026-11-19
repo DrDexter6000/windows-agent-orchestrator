@@ -4,8 +4,9 @@
 //
 // Proves over the REAL stdio MCP transport that a fresh (unconfigured) Lead can
 // discover lead_preflight and complete a full preflight in ONE call:
-//   unbound server → lead_preflight(workspaceRoot) → bound lead_session +
+//   unbound server → lead_preflight(expectedWorkspaceRoot) → bound call_target +
 //   worker inventory + empty active runs + complete=true. No model invoked.
+// 批 119：输入改名 expectedWorkspaceRoot，source 报 call_target（无共享会话状态）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -64,14 +65,14 @@ test("M11-8-SMOKE: unbound → lead_preflight discovers + completes full preflig
       const { tools } = await client.listTools();
       assert.ok(tools.some((t) => t.name === "lead_preflight"), "lead_preflight discoverable over stdio");
 
-      // 2. One call: select workspace + readiness + active runs.
+      // 2. One call: per-call target + readiness + active runs.
       const res = await client.callTool({
         name: "lead_preflight",
-        arguments: { workspaceRoot: workspaceDir },
+        arguments: { expectedWorkspaceRoot: workspaceDir },
       });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.workspace.bound, true);
-      assert.equal(parsed.workspace.source, "lead_session");
+      assert.equal(parsed.workspace.source, "call_target");
       assert.ok(parsed.workspace.gitHead);
       assert.ok(Array.isArray(parsed.workers));
       assert.ok(parsed.workers.length >= 1, "worker inventory present");

@@ -5,7 +5,7 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 > [使用手册](../usage.md)
 
-本页四个 MCP 工具（`run_status`、`run_activity`、`run_stop`、`run_wait`）的参数与形状以生成层 `docs/surface/mcp-tools.md` 为准（权威源是代码，随代码再生成）；本页写完成监督需要的用法、默认值、闭集取值和边界。状态机与事件定义见 `docs/02-architecture.md`，事件表见 [transcript 格式](transcript.md)。
+本页的 MCP 工具（`run_status`、`run_activity`、`run_stop`、`run_await_result`）的参数与形状以生成层 `docs/surface/mcp-tools.md` 为准（权威源是代码，随代码再生成）；本页写完成监督需要的用法、默认值、闭集取值和边界。状态机与事件定义见 `docs/02-architecture.md`，事件表见 [transcript 格式](transcript.md)。
 
 <a id="lead-quiet-supervision"></a>
 ## Lead 安静监督与续接
@@ -20,13 +20,13 @@ read_when: run 在跑时：等待、看状态和活动、停止
   - **kimi-web**：命令与工具调用在输入就绪后落转录、结果在工具结束时落；写文件调用在途先落一条只带路径的预告，证据与结果仍等整轮带正文完成。turn 结构有变化算进度；没有变化时等 60–240 秒问 serve 这一轮是否还活着，不活跃或问不到就收口。但自上次产出增长以来这样续命的静默满 30 分钟仍会收口（只有 steps / 帧 / 文本变多才清零，state 来回变不算）：serve 的"还活着"是自我声明，工具挂死时同样报 active，无别的体征可交叉印证。一条超过 30 分钟、期间不落任何帧的命令会被收掉。
   - **进程式后端**（codex / claude-code / deepseek-acp）：没有"轮内等不到进展"的自动收口门——运行到进程退出或 Lead 中止（可选 `silentTimeout` 只管"启动后一条事件都没有"，默认关；deepseek 的握手等请求级超时见 `docs/surface/certification.md` 生命体征条目）。崩溃、协议错误等失败照常收口。codex / claude-code 在转录静默满 5 分钟后取基线、30 秒后再取一次比对，约每 5.5 分钟一轮：读到后代进程在干活落 `process_active`、工作目录有变化落 `files_changed`，没读到什么都不落——只是给 Lead 看的事实，不收口；模型长思考期间读不到体征，deepseek-acp 未接取样。deepseek-acp 的命令在调用到达时就落一条 `tool_use`（带命令原文），`run_activity` 看得到在跑的命令；codex 等命令时会自己隔一两分钟发一句话，取样很少轮到它。
 
-  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你。CLI `status` 附一行 `advisory`、MCP `run_status` 带 `leadAdvisory`：写明多久没有、最近活动是什么、要停怎么停（带 `observedSeq` 与理由；MCP 版写先读 `run_activity`，CLI 版写先看最新状态），最近 10 分钟内见过生命体征时还建议没有具体理由先别停。`run_wait` / `run_await_result` 只在 `semanticNotes` 带一条 `observation.transcript_quiet`，说至少 30 分钟没有新的动作或正文。提示陈述的是转录看得到的事实：zcode 的正文到轮末才落转录，长回答期间看起来也是静默的。runner 经下节 `runner_gone` 的同一证明已不在时，`status` / `run_status` 静默满 15 分钟就给，改说观察时没有 WAO 进程还能驱动它、先干跑 `runs settle`；CLI `status` 与 `runner_gone` 出口另附 runner stderr 尾部。本机开机晚于该运行最后可见活动（含租约心跳）且 runner 未被证明不在时，advisory 另带一句（替下"建议别停"那句）：重启前的 runner 活不过重启、开机后续跑未经证明（Fast Startup 关机不重置 uptime，读不出）。停不停由 Lead 决定。
+  运行未到终态、转录读取可信，且转录里 ≥30 分钟没有新的动作或正文时，三个面都会直接告诉你。CLI `status` 附一行 `advisory`、MCP `run_status` 带 `leadAdvisory`：写明多久没有、最近活动是什么、要停怎么停（带 `observedSeq` 与理由；MCP 版写先读 `run_activity`，CLI 版写先看最新状态），最近 10 分钟内见过生命体征时还建议没有具体理由先别停。`run_await_result`（CLI `runs wait` 同款）只在 `semanticNotes` 带一条 `observation.transcript_quiet`，说至少 30 分钟没有新的动作或正文。提示陈述的是转录看得到的事实：zcode 的正文到轮末才落转录，长回答期间看起来也是静默的。runner 经下节 `runner_gone` 的同一证明已不在时，`status` / `run_status` 静默满 15 分钟就给，改说观察时没有 WAO 进程还能驱动它、先干跑 `runs settle`；CLI `status` 与 `runner_gone` 出口另附 runner stderr 尾部。本机开机晚于该运行最后可见活动（含租约心跳）且 runner 未被证明不在时，advisory 另带一句（替下"建议别停"那句）：重启前的 runner 活不过重启、开机后续跑未经证明（Fast Startup 关机不重置 uptime，读不出）。停不停由 Lead 决定。
 - **宿主例外**：Owner 可明确要求固定频率更新；宿主更高优先级指令要求更短等待/更频繁更新时遵守并简要说明限制，把无变化更新压到最低。不要把某一宿主的频率限制变成 WAO 通用规则，也不承诺本手册覆盖宿主指令。
 - **跨会话续接**：经 Owner 要求或批准，在项目本地工作笔记保留目标、授权范围、已确认事实/待证假设、证据路径、断点、下一步与停止条件，给后续 Lead 留可发现入口；只在事实或决策变化时更新，不抄轮询流水。compaction 摘要是线索，续接前重读笔记并核对 Git、WAO 查询与原始报告；笔记不能冒充运行台账、验收结果或新授权。
 
 ## MCP `run_status`（即时状态查询）
 
-`run_status` 让 MCP host 查询一个 run 的当前状态，与 CLI `status` 复用同一 service（`getRunStatus()`），不 shell-out CLI；只读。输入只接受 `runId`（`runDir` 等控制参数 server-owned）。安全输出只返回机器标识 + 时间戳，不含内容；`lastEvent`/`lastActivity` 不存在时为 `null`。
+`run_status` 让 MCP host 查询一个 run 的当前状态，与 CLI `status` 复用同一 service（`getRunStatus()`），不 shell-out CLI；只读。输入接受 `runId`，可选 `expectedWorkspaceRoot`（absolute Git 顶层）：给了就证明并核验该运行的归属（不属于即归属拒绝，见下文）；不给时按 `runId` 直读，行为不变。`runDir` 等控制参数 server-owned。安全输出只返回机器标识 + 时间戳，不含内容；`lastEvent`/`lastActivity` 不存在时为 `null`。
 
 - `lastEvent.meaning` 只对停止验证事件给出闭集解释：`runtime_quiet_verified|runtime_quiet_unverified|null`。`run.stop_verified` 的稳定含义是"worker runtime 已静默"——可能来自普通终态清理或显式 `run_stop`，不得据此推断 Lead 调过 stop。
 - `agentId` 是 transcript envelope 盖戳的 canonical worker 身份（闭集字符 `[A-Za-z0-9._-]`，长度 1..128，SSOT 在 `canonicalAgentId.js`）。只有每个事件都具备与请求 `runId` 一致的 `runId` 且同一个合法 canonical agentId 才返回该 id；缺失、冲突、非法或跨 run 一律降级为 `"unknown"`——不抛错、不伪造身份、不是自动停止门，不从 worker 自由文本推断。
@@ -42,7 +42,7 @@ read_when: run 在跑时：等待、看状态和活动、停止
   - tool_use：工具名 + 输入里最能说明"在对什么动手"的字段（`detail`：命令/文件/模式/查询/URL/任务 id，脱敏、200 字符；无则缺席），脱敏同命令原文。tool_result：错误布尔与输出尾部（`tail`，脱敏后取最后 400 字符，`truncated` = 清洗后长于 400）；失败工具的尾部可含报错正文。
   - 文件：只给安全 repo-relative path。`runtime_status`：闭集（`initialized|streaming|provider_retry|process_active|files_changed|serve_active|unknown`），不返回 stream delta/retry error/session/model；未知事件用固定 sentinel。
 - 安全顺序：动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页；绝不返回完整 tool input/output、error text、credential、PID、provider session。
-- cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图与位置；append-only 增长可继续。历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 返回有界结构化恢复结果：`status:"cursor_rejected"` + 静态 `choices`（`isError:true`、带 `structuredContent`、无首页 entries/counts/nextCursor），需显式重新请求——重新请求无 cursor 的第一页，或用已知序列中的 `afterSeq`（如 `run_wait` 的数值 cursor）重入。WAO 只呈现事实与选择，不自动重试/停止/决策，不回显 raw cursor 或动态错误。归属不明的运行见下文 `run_wait` 节的归属拒绝；无效 envelope、畸形输出返回固定通用错误（`run_activity failed`，无 structuredContent）。
+- cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图与位置；append-only 增长可继续。历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 返回有界结构化恢复结果：`status:"cursor_rejected"` + 静态 `choices`（`isError:true`、带 `structuredContent`、无首页 entries/counts/nextCursor），需显式重新请求——重新请求无 cursor 的第一页，或用已知序列中的 `afterSeq`（如 `run_await_result` 的数值 cursor）重入。WAO 只呈现事实与选择，不自动重试/停止/决策，不回显 raw cursor 或动态错误。归属不明的运行见下文 `run_await_result` 节的归属拒绝；无效 envelope、畸形输出返回固定通用错误（`run_activity failed`，无 structuredContent）。
 - `scopeObservation`（advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`；字段（`observedFileCount`、上限 25 条的脱敏 `outsidePaths` 等）与 `complete:true` 的准确语义——只说明快照已终态且每条确认的 `file_written` 都能在有效合同权威下求值，不证明文件系统完整性、语义、验收，也不表示 worker 仍在运行——见[架构](../02-architecture.md)的 scope 投影段（该口径的唯一完整家）。
 - `readOnlyObservation`（advisive、additive、仅声明过只读的 run 才出现）：闭集 `no_writes_observed | writes_observed | unknown`。权威、fail-closed 与诚实读法（`writes_observed` 是运行中告警、`no_writes_observed` 不是"没写"、观察到越界写不自动停止——终审归 Lead）见[架构](../02-architecture.md)的只读声明段；cursor 续页从冻结前缀投影（append-only 稳定），新读第一页可观察后追加的写。
 
@@ -63,18 +63,18 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 停止路由由会话记录的事实决定：`proc_<pid>` 占位 id 或带 `hostPid` 的会话（进程式后端，如 zcode）走进程树击杀并核验；带 `serveUrl` 的走服务端中止——kimi-web 中止会话正在跑和排队的 prompt，鉴权用 registry 里派发该运行的 agent（`run.started.agentId`）；会话记录没有 `backend` 字段时不发任何请求（停止路由无法解析，固定文案 `unresolved`）。该 agent 取不到（registry 不可读/不在册）、token 取不到（token 文件或环境变量：先进程环境、再 Windows 用户环境）、与会话记录对不上（backend/`serveUrl` 不同）、backend 无服务端中止，或会话既无 pid 也无 `serveUrl` 时：什么都不发、不认领终态，记 `run.stop_unverified`（`outcome:"stop_route_unavailable"`）并告警，返回 `terminalAccepted:false`、原状态、`sideEffectAttempted:false`——worker 还在跑，需修好 registry 再停或手动处理（CLI 另带该 outcome 与固定说明）。resume 重放过的运行目标取 `run.rerun` 的新会话/新进程，不取旧进程。会话查找与 agentId 读取都是 runId 绑定读取（末条绑定），外 run 伪造 `session.created` 夺不走 kill 目标；信封前的 legacy transcript 落入 `no session metadata` 拒绝面。
 
-## MCP `run_wait`（长等待）
+## MCP 等待（`run_await_result`）
 
-`run_wait` 让 MCP host 以 long-poll 等待一个 run 到终态或产出 liveness 摘要，避免 busy `run_status` 轮询。与 CLI 长等待复用同一 service（`runWait.js` + owner 心跳 SSOT `ownerLiveness.js`），不 shell-out CLI；只读——不追加 transcript、不改 terminal state。`run_await_result` 是同一等待的取结果形态（终态附 compact 结果），语义同本节。
+MCP 面用 `run_await_result` 等待一个 run 到终态或产出 liveness 摘要，避免 busy `run_status` 轮询；与 CLI 长等待复用同一族 service（`runAwaitResult.js` 内含 `runWait.js` 的等待/投影 + owner 心跳 SSOT `ownerLiveness.js`），不 shell-out CLI；只读——不追加 transcript、不改 terminal state。原 MCP 长轮询工具已真删除（v0.10.0 减面）：**长等待 = 重复调用 `run_await_result`（单次 `waitMs` ≤ 270000）直到终态，请求了交付的 run 终态后用 `run_delivery` 带 `waitMs` 等交付收口；要一直挂着等收口用 CLI `runs wait <runId> --until-settled`（见下节）**。注意 `run_await_result` 单次上限 270 秒，与 CLI 单次最长 600 秒不等价。
 
 `runId` 必填；`runDir`、registry、`force`、timeout 等控制面参数是 server-owned。`afterSeq`（整数 ≥0，可选）：
 
 - 省略：以首次读取时的最大 `seq` 为基线——只统计窗口内的新进展，不把历史误报为 progress。
 - 显式 `0` 或正整数：统计 `seq > afterSeq` 的全部进展（含历史），用于续读——把上次返回的 `cursor` 传回即可。
 
-`waitMs` 是 Lead 的单次观察窗口：30000..600000，MCP 缺省 45000（CLI 有界 `runs wait` 缺省 270000）；`waitMs:0` 有意无效——point-in-time 读取用 `run_await_result({waitMs:0})` 或 `run_status`。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口（见下节），不跳过 `run_delivery`。
+`waitMs` 是 Lead 的单次观察窗口（区间与缺省见生成层；`waitMs:0` 是 point-in-time 读取，与 CLI `runs wait` 的 30000 下限不同——本工具 0 合法）。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口（见下节），不跳过 `run_delivery`。
 
-状态投影与 liveness 计数都按 runId 绑定（全无信封的 legacy 快照除外，其活动计数仍按全部事件统计）：`run_wait` / `run_await_result` 只看本 run 信封事件（初始读与每次 poll 同一过滤）——外 run 高 seq 活动行不伪造 `progress`，尾部伪造 `run.state_change` 不把等待翻成终态、也不阻断终态观察。全无信封的 legacy transcript 状态投影降级 `pending`，不可归属永不投影为终态——不 throw、不转 read_failure，窗口如实耗尽后返回非终态。CLI `runs wait` 的 Ctrl-C 中断快照同款绑定。
+状态投影与 liveness 计数都按 runId 绑定（全无信封的 legacy 快照除外，其活动计数仍按全部事件统计）：`run_await_result` 只看本 run 信封事件（初始读与每次 poll 同一过滤）——外 run 高 seq 活动行不伪造 `progress`，尾部伪造 `run.state_change` 不把等待翻成终态、也不阻断终态观察。全无信封的 legacy transcript 状态投影降级 `pending`，不可归属永不投影为终态——不 throw、不转 read_failure，窗口如实耗尽后返回非终态。CLI `runs wait` 的 Ctrl-C 中断快照同款绑定。
 
 安全有界输出只返回机器字段 + liveness 摘要，不含内容/路径/session。字段语义：
 
@@ -97,15 +97,15 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 脱敏口径同 `run_status`（另加不返回 token/cost 原值）；`content` 的 JSON 与 `structuredContent` 语义一致。
 
-**归属拒绝**：会话绑定下，`run_activity`、`run_wait`、`run_await_result`、`run_delivery`、`run_delivery_review` 与 `run_delivery_review_bundle` 读到不能证明属于绑定工作区的运行时，返回 `<工具> refused: this run cannot be shown to belong to the bound workspace …` 固定文案：归属事实指向另一项目、子目录、非 Git、相对或已消失的路径，或缺失、重复、缺 cwd、互相冲突；只读、零写入；运行属于另一项目时，用 `workspace_select` 或 `lead_preflight` 的 `workspaceRoot` 选中它再重试。不回显路径或 runId。其余 service 失败返回固定安全文案（如 `run_wait failed`），不泄漏 zod 校验信息。
+**归属拒绝**：`run_activity`、`run_await_result`、`run_delivery`、`run_delivery_review` 与 `run_delivery_review_bundle`（以及带 `expectedWorkspaceRoot` 的 `run_status` / `run_diagnose`）读到不能证明属于本次调用工作区（`expectedWorkspaceRoot`，省略时为解析绑定）的运行时，返回 `<工具> refused: this run cannot be shown to belong to this call's workspace …` 固定文案：归属事实指向另一项目、子目录、非 Git、相对或已消失的路径，或缺失、重复、缺 cwd、互相冲突；只读、零写入；运行属于另一项目时，把那个项目的根作为 `expectedWorkspaceRoot` 传入再重试。不回显路径或 runId。其余 service 失败返回固定安全文案（如 `run_await_result failed`），不泄漏 zod 校验信息。
 
 transport keepalive：MCP SDK 的请求超时可能短于观察窗口。client 通过 `onprogress` 请求进度时，server 每次 poll 后向该 `progressToken` 发标准 `notifications/progress`；client 设 `resetTimeoutOnProgress:true` 则每条进度重置自身计时器。标准 MCP 机制，不 patch host、不改全局 timeout；最大总超时仍由 host 决定。host 不请求进度时 server 不发通知。
 
-transport 恢复契约：`run_wait` / `run_await_result` 都是只读 advisory 工具。一次调用没有返回结果（transport drop/超时被 host 中断）时观察状态是 unknown——没有 control-plane 变更、没有停止 worker；恢复方式是 point-in-time 重读（`run_await_result(waitMs:0)` 或 `run_status`）。绝不能从 transport 丢失推断 worker 是 alive 还是 dead；只有干净观测到的终态（`termination` 非空）才陈述终止事实，且来源是闭集 `termination.source`，不是猜测。
+transport 恢复契约：`run_await_result` 是只读 advisory 工具。一次调用没有返回结果（transport drop/超时被 host 中断）时观察状态是 unknown——没有 control-plane 变更、没有停止 worker；恢复方式是 point-in-time 重读（`run_await_result(waitMs:0)` 或 `run_status`）。绝不能从 transport 丢失推断 worker 是 alive 还是 dead；只有干净观测到的终态（`termination` 非空）才陈述终止事实，且来源是闭集 `termination.source`，不是猜测。
 
-三个互相独立的时钟（执行截止、后端请求超时、Lead 观察等待）的职责划分见 [架构](../02-architecture.md) 的"三钟分离"；`run_wait` 的 `waitMs`（区间与缺省见上）只决定一次调用等多久，不影响 worker 生命周期。
+三个互相独立的时钟（执行截止、后端请求超时、Lead 观察等待）的职责划分见 [架构](../02-architecture.md) 的"三钟分离"；`run_await_result` 的 `waitMs`（区间与缺省见生成层）只决定一次调用等多久，不影响 worker 生命周期。
 
-CLI fallback：MCP `run_wait` 与 CLI `runs wait <runId> [--wait-ms N]` 共用同一等待服务；要一直等到收口用 `runs wait <runId> --until-settled`（见下节）。`status` 轮询或 `tail --follow` 也能拼出观察，但语义不等同。
+CLI fallback：MCP 等待与 CLI `runs wait <runId> [--wait-ms N]` 共用同一族等待服务；要一直等到收口用 `runs wait <runId> --until-settled`（见下节）。`status` 轮询或 `tail --follow` 也能拼出观察，但语义不等同。
 
 ## 等待到收口：`runs wait --until-settled` 与 `nextStep`（决定 0095）
 

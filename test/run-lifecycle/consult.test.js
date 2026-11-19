@@ -592,7 +592,7 @@ test("FLOW-5: 非作者砖——被审 run 作者 ∈ 席位清单 → authorInS
   assert.equal(result.record.reviewedRunId, "run_reviewed_1");
 });
 
-test("FLOW-6: budgetMs 范围校验（同 run_wait 域），越界拒绝", async () => {
+test("FLOW-6: budgetMs 范围校验（同等待族域），越界拒绝", async () => {
   await assert.rejects(
     () => runConsult(baseInput({ budgetMs: 179999, writeFileFn: async () => {}, mkdirFn: async () => {} })),
     /budgetMs must be an integer/,

@@ -171,7 +171,7 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 ## `availableDrilldowns`：结果自带的下钻提示
 
-`run_wait`、`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 七个工具的输出统一携带（schema REQUIRED）`availableDrilldowns`：≤4 条静态披露元数据，告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价。只披露，不自动调用，不做任何语义决策。运行中的 `run_wait` 直接提示 `run_activity`；终态成功提示 activity + compact result；终态失败提示 diagnosis + activity。目的：省 Lead 的 token 与注意力，判断、停止与后续工具选择完全留给 Lead。
+`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 六个工具的输出统一携带（schema REQUIRED）`availableDrilldowns`：≤4 条静态披露元数据，告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价。只披露，不自动调用，不做任何语义决策。运行中的 `run_await_result` 直接提示 `run_activity`；终态成功提示 activity + compact result；终态失败提示 diagnosis + activity。目的：省 Lead 的 token 与注意力，判断、停止与后续工具选择完全留给 Lead。
 
 每条 entry 是严格七键对象：
 
@@ -248,7 +248,7 @@ CLI 只做 argv/format/console，数据逻辑与 MCP resource 委托同一 servi
 
 ## `semanticNotes` 与 resources `wao://semantics`
 
-恰好四个 standalone 只读成功结果——`run_wait`/`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条）。每条恰好三键 `{ id, meaning, doesNotMean }`：`id` 是冻结的 namespaced 闭集值（`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）；`meaning` 是一句确定性事实；`doesNotMean` 是 0..2 条确定性非含义。没有 `scope` 字段、没有 per-entry `semanticsRef`；详情 URI 机械派生 `wao://semantics/{id}`。
+恰好三个 standalone MCP 只读成功结果——`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条；CLI `runs wait` 同一目录与 selector）。每条恰好三键 `{ id, meaning, doesNotMean }`：`id` 是冻结的 namespaced 闭集值（`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）；`meaning` 是一句确定性事实；`doesNotMean` 是 0..2 条确定性非含义。没有 `scope` 字段、没有 per-entry `semanticsRef`；详情 URI 机械派生 `wao://semantics/{id}`。
 
 notes 完全由既有机器事实决定，由单一选择器挑出：永不回显 transcript/provider/path/prompt/command/session，永不建议 accept/reject/repackage/stop/retry/dispatch——每条的 `meaning`/`doesNotMean` 已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
 

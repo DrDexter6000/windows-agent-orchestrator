@@ -346,7 +346,7 @@ test("MAA-08: cross-workspace → ownership-refusal fixed text, no leak", async 
     try {
       const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_xws" } });
       const dumped = JSON.stringify(res);
-      assert.match(dumped, /run_activity refused: this run cannot be shown to belong to the bound workspace/,
+      assert.match(dumped, /run_activity refused: this run cannot be shown to belong to this call's workspace/,
         "归属拒绝专属固定文案（不是笼统 failed）");
       assert.ok(!dumped.includes("run_activity failed"), "不再折叠成笼统失败文案");
       assert.ok(!res.structuredContent, "no partial structuredContent");

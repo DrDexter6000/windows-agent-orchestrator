@@ -65,7 +65,7 @@ test("M11-3C-01: run_delivery_review is registered; current tool count; read-onl
     try {
       const { tools } = await client.listTools();
       assert.ok(tools.find((t) => t.name === "run_delivery_review"), "run_delivery_review present");
-      assert.equal(tools.length, 23, "exactly 23 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct; M13 added run_consult)");
+      assert.equal(tools.length, 20, "exactly 20 tools (batch 119 removed workspace_select/workspace_status/run_wait)");
       const t = tools.find((x) => x.name === "run_delivery_review");
       assert.equal(t.annotations.readOnlyHint, true);
       assert.equal(t.annotations.destructiveHint, false);
@@ -673,7 +673,7 @@ test("TD-324: cross-workspace run → ownership-refusal fixed text (real service
       assert.equal(res.isError, true, "cross-workspace review is an error");
       assert.ok(!res.structuredContent, "no structuredContent on error");
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-      assert.match(text, /^run_delivery_review refused: this run cannot be shown to belong to the bound workspace/,
+      assert.match(text, /^run_delivery_review refused: this run cannot be shown to belong to this call's workspace/,
         "归属拒绝专属固定文案");
       assert.match(text, /duplicated, incomplete \(no cwd\) or in conflict/, "原因清单为完整的六类");
       assert.ok(!text.includes("run_delivery_review failed"), "不再折叠成笼统失败文案");

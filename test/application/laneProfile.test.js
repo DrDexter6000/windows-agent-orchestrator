@@ -476,7 +476,7 @@ test("projectLaneProfiles：行数至多 PROJECTION_ROWS_CAP；不排序不加�
 
 const noWorkers = async () => ({ agents: [], issues: [], issuesTruncated: false });
 const noRuns = async () => ({ runs: [], matchedCount: 0, unresolvedCount: 0 });
-const binding = { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false };
+const binding = { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false };
 const goodProjection = () => projectLaneProfiles({
   lanesDoc: laneDoc([LANE_A]),
   traitsResult: {

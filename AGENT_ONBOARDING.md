@@ -193,7 +193,7 @@ npm run cli -- mcp bind --host <host> --cwd <目标项目>
 
 - 逐宿主的注册方式、`mcp status`、`wao onboarding --host <id>`、未验证宿主入表、zcode 插件接入：见 `docs/usage/host.md`「项目级 Workspace Activation」。
 - **CLI `--cwd` 指定派发目标项目**（run 族：worker 的工作目录，须是已存在目录；workspace 观察/过滤面随之）。
-- **MCP 派发的 workspace 来自本次调用**：会动工作区的工具必传 `expectedWorkspaceRoot`（本项目 Git 顶层）；`--workspace-root` / `roots/list` / `workspace_select` 只定只读工具的缺省范围，与 CLI `--cwd` 是两回事，别混。
+- **MCP 派发的 workspace 来自本次调用**：会动工作区的工具必传 `expectedWorkspaceRoot`（本项目 Git 顶层）；`--workspace-root` / `roots/list` 只定只读工具的缺省范围（读类工具也可按调用带 `expectedWorkspaceRoot`，带了只认它），与 CLI `--cwd` 是两回事，别混。
 
 ### 4f. 首次只读 canary
 
@@ -314,7 +314,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 |---|---|
 | `delivery/` | 交付投影、验证、审查 |
 | `run-lifecycle/` | run 生命周期、续谱、sessionReuse |
-| `mcp-surface/` | 23-tool 冻结工具面与 MCP wire 契约 |
+| `mcp-surface/` | 20-tool 冻结工具面与 MCP wire 契约 |
 | `transcript/` | 事件解析、summary、collect 投影 |
 | `registry-roles/` | registry schema、角色与车道 |
 | `backends/` | 各 backend 适配 |

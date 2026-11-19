@@ -29,8 +29,9 @@
 //      裁定工具按**会话绑定**核对归属（run_delivery_review_bundle /
 //      run_delivery 不收 expectedWorkspaceRoot，wao runs wait 不收 --cwd），
 //      所以"等裁定/终态未收口/无法判定收口"三行在**该行列出的运行里至少有
-//      一个派发自与绑定根不同的工作树**时，提示先用 workspace_select 选那棵
-//      工作树（或在那棵工作树里跑 CLI）再查；行内不出现绝对路径。
+//      一个派发自与绑定根不同的工作树**时，提示按调用带那棵工作树的根
+//      （expectedWorkspaceRoot）再查（或在那棵工作树里跑 CLI）；行内不出现
+//      绝对路径。
 //      运行树计数同理数整个仓库：`git worktree list --porcelain` 列的是全仓
 //      工作树，数所有路径以 `.wao-worktrees/<合法 runId>` 结尾的条目；回收与
 //      否以 `wao worktree reclaim` 的只读计划为准，这里只报数。
@@ -333,10 +334,10 @@ async function collectRunBranchOpenItems({
   }
 
   // 跨工作树提示（#2）：审查/裁定工具（run_delivery_review_bundle /
-  // run_delivery / wao runs wait）按会话绑定核对归属，不收 expectedWorkspaceRoot
-  // / --cwd——查别的工作树里的运行，先 workspace_select 那棵树（或在那里跑
-  // CLI）。只在对应行确实列出这样的运行时出现；行内无绝对路径。
-  const CROSS_TREE_HINT = "some runs were dispatched from another worktree: workspace_select it (or run the CLI there) first";
+  // run_delivery）按会话绑定核对归属，不收 expectedWorkspaceRoot——查别的
+  // 工作树里的运行，按调用带那棵树的根，或在那里跑 CLI。只在对应行确实列出
+  // 这样的运行时出现；行内无绝对路径。
+  const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass that worktree's root as expectedWorkspaceRoot (or run the CLI there) first";
 
   const lines = [];
   if (awaitingDecision.length > 0) {

@@ -91,13 +91,15 @@ async function buildClient(server) {
   return client;
 }
 
-const FOUR_TOOLS = ["run_wait", "run_await_result", "run_delivery", "run_diagnose"];
+// 批 119：MCP 长轮询等待工具已真删除——MCP 面携带 semanticNotes 的 standalone
+// 成功结果剩三个（run_wait 的目录键与 selector 保留给 CLI runs wait）。
+const THREE_TOOLS = ["run_await_result", "run_delivery", "run_diagnose"];
 
 // =====================================================================
 // M-* — REAL MCP handlers (all four) attach semanticNotes before parse.
 // =====================================================================
 
-test("M-01: four output schemas REQUIRE semanticNotes; schema/catalog parity; bundle excludes it", async () => {
+test("M-01: three output schemas REQUIRE semanticNotes; schema/catalog parity; bundle excludes it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m01-"));
   try {
     makeGitRepo(dir);
@@ -108,7 +110,7 @@ test("M-01: four output schemas REQUIRE semanticNotes; schema/catalog parity; bu
         SEMANTIC_NOTE_ID_MAX_LEN, SEMANTIC_NOTE_ID_PATTERN }
         = await import("../../src/application/runSemanticsNotes.js");
       const tools = await client.listTools();
-      for (const name of FOUR_TOOLS) {
+      for (const name of THREE_TOOLS) {
         const t = tools.tools.find((x) => x.name === name);
         assert.ok(t, `${name} discoverable`);
         const props = t.outputSchema.properties ?? {};
@@ -145,7 +147,7 @@ test("M-01: four output schemas REQUIRE semanticNotes; schema/catalog parity; bu
       }
       // No OTHER tool carries semanticNotes.
       for (const t of tools.tools) {
-        if (FOUR_TOOLS.includes(t.name)) continue;
+        if (THREE_TOOLS.includes(t.name)) continue;
         assert.equal(t.outputSchema?.properties?.semanticNotes, undefined, `${t.name} must NOT carry semanticNotes`);
       }
       // run_delivery_review_bundle: neither top level nor nested delivery carries/requires it.
@@ -158,90 +160,6 @@ test("M-01: four output schemas REQUIRE semanticNotes; schema/catalog parity; bu
       assert.ok(!(nested.required ?? []).includes("semanticNotes"), "bundle nested delivery does not require it");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("M-02: run_wait window_expired → [observation.window_expired] (no termination note); legacy fields intact", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m02-"));
-  const runDir = mkdtempSync(join(tmpdir(), "wao-m1212-m02-rd-"));
-  try {
-    makeGitRepo(dir);
-    seedTranscript(runDir, "run_m2", { workspaceCwd: dir, messages: [], terminal: false });
-    let clock = 1000000;
-    const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir, workspaceRoot: dir,
-      runWaitFn: async (input) => {
-        const { runWait } = await import("../../src/application/runWait.js");
-        // One bounded virtual interval: a single 180000ms tick advances the
-        // virtual clock straight to the window deadline (was 90 × 2000ms re-reads).
-        return runWait({ ...input, nowFn: () => clock, pollIntervalMs: 180000, sleepFn: async (ms) => { clock += ms; } });
-      },
-    });
-    const client = await buildClient(server);
-    try {
-      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_m2", waitMs: 180000 } });
-      assert.equal(res.isError, undefined);
-      const p = res.structuredContent;
-      assert.deepEqual(p.semanticNotes.map((n) => n.id), ["observation.window_expired"]);
-      assert.ok(!p.semanticNotes.some((n) => n.id.startsWith("termination.")), "no termination note on window expiry");
-      // Legacy fields intact (M12-8B availableDrilldowns coexists).
-      assert.ok(Array.isArray(p.availableDrilldowns), "availableDrilldowns still present");
-      assert.equal(p.observation.outcome, "window_expired");
-    } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
-});
-
-test("M-03: run_wait terminal completed → [observation.terminal, termination.completion]", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m03-"));
-  const runDir = mkdtempSync(join(tmpdir(), "wao-m1212-m03-rd-"));
-  try {
-    makeGitRepo(dir);
-    seedTranscript(runDir, "run_m3", { workspaceCwd: dir, messages: ["FINAL"], terminal: "completed" });
-    const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir, workspaceRoot: dir,
-      runWaitFn: async (input) => {
-        const { runWait } = await import("../../src/application/runWait.js");
-        return runWait({ ...input, sleepFn: () => Promise.resolve(), nowFn: () => 1 });
-      },
-    });
-    const client = await buildClient(server);
-    try {
-      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_m3", waitMs: 180000 } });
-      assert.equal(res.isError, undefined);
-      assert.deepEqual(res.structuredContent.semanticNotes.map((n) => n.id),
-        ["observation.terminal", "termination.completion"]);
-    } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
-});
-
-test("M-04: run_wait read_failure → [observation.read_failure] (NO termination note)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m04-"));
-  const runDir = mkdtempSync(join(tmpdir(), "wao-m1212-m04-rd-"));
-  try {
-    makeGitRepo(dir);
-    seedTranscript(runDir, "run_m4", { workspaceCwd: dir, messages: [], terminal: false });
-    const { readTranscript: readReal } = await import("../../src/transcript.js");
-    let reads = 0;
-    let clock = 1000000;
-    const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir, workspaceRoot: dir,
-      runWaitFn: async (input) => {
-        const { runWait } = await import("../../src/application/runWait.js");
-        return runWait({
-          ...input, nowFn: () => clock, pollIntervalMs: 2000, sleepFn: async (ms) => { clock += ms; },
-          readTranscriptFn: async (p) => { reads += 1; if (reads === 1) return readReal(p); throw new Error("gone"); },
-        });
-      },
-    });
-    const client = await buildClient(server);
-    try {
-      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_m4", waitMs: 180000 } });
-      assert.equal(res.isError, undefined);
-      const p = res.structuredContent;
-      assert.equal(p.observationOutcome, "read_failure");
-      assert.deepEqual(p.semanticNotes.map((n) => n.id), ["observation.read_failure"]);
-      assert.ok(!p.semanticNotes.some((n) => n.id.startsWith("termination.")), "read_failure MUST NOT carry a termination note");
-    } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
 test("M-05: run_await_result terminal completed → [observation.terminal, termination.completion]", async () => {
@@ -386,7 +304,7 @@ test("M-10: unchanged TOOLS.length tool surface; all four tools carry semanticNo
       assert.equal(tools.tools.length, TOOLS.length, "tool count equals toolSurface TOOLS.length SSOT");
       const names = new Set(tools.tools.map((t) => t.name));
       assert.equal(names.size, tools.tools.length, "tool names are distinct (count matches tool count)");
-      for (const n of FOUR_TOOLS) assert.ok(names.has(n), `${n} present`);
+      for (const n of THREE_TOOLS) assert.ok(names.has(n), `${n} present`);
       // No new tools named anything semantic-related.
       assert.ok(![...names].some((n) => /semantic/i.test(n)), "no semantic-named tool added");
     } finally { await client.close(); await server.close(); }
@@ -574,7 +492,7 @@ test("X-01: availableDrilldowns (7-key) and semanticNotes (3-key) coexist; drill
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      for (const name of FOUR_TOOLS) {
+      for (const name of THREE_TOOLS) {
         const t = tools.tools.find((x) => x.name === name);
         const props = t.outputSchema.properties ?? {};
         // availableDrilldowns entry shape unchanged (exact seven keys).
@@ -599,16 +517,11 @@ test("X-02: four descriptions mention semanticNotes self-explain + detail uri; g
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      for (const name of FOUR_TOOLS) {
+      for (const name of THREE_TOOLS) {
         const t = tools.tools.find((x) => x.name === name);
         assert.ok(/semanticNotes/i.test(t.description), `${name} mentions semanticNotes`);
         assert.ok(/wao:\/\/semantics\/\{id\}/.test(t.description), `${name} names the detail uri`);
       }
-      // run_wait guarded keywords (runWait.test.js M11-11A-RED-02) preserved.
-      const wait = tools.tools.find((x) => x.name === "run_wait").description;
-      assert.ok(/default 45000/.test(wait), "run_wait keeps the 45000 default (decision 0095)");
-      // 决定 0095：run_wait 描述新增 nextStep 一句。
-      assert.ok(/nextStep/.test(wait), "run_wait names nextStep");
       // run_diagnose keeps "Lead" (m12-10 G guard).
       assert.ok(/lead/i.test(tools.tools.find((x) => x.name === "run_diagnose").description), "run_diagnose keeps Lead");
     } finally { await client.close(); await server.close(); }

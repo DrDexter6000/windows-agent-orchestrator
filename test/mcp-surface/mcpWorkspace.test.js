@@ -6,8 +6,8 @@
 // 1. Explicit --workspace-root priority over client roots
 // 2. No explicit config + exactly one valid MCP file root → bound
 // 3. Zero/multiple/non-file/malformed/unsupported roots → fixed safe failure
-// 4. workspace_status returns accurate source/head/dirty, zero path leak
-// 5. workspace_status malformed service result → fixed safe failure
+// 4. lead_preflight.workspace returns accurate source/head/dirty/root, zero path leak
+// 5. (batch 119) the removed binding/select tools are off the surface
 // 6. run_dispatch passes canonical root as cwd to dispatcher
 // 7. Registry agent cwd is overridden by MCP server-owned binding
 // 8. Workspace resolve/proof failure → dispatcher=0, transcript=0, fork=0
@@ -15,8 +15,11 @@
 // 10. CLI --cwd and text/JSON output unchanged (regression guard — checked via existing tests)
 // 11. stdio --workspace-root with spaces works; empty/relative/missing/duplicate rejected
 // 12. Fixed stderr/MCP error does not leak absolute path or raw exception
-// 13. No-model real stdio smoke: workspace_status → run_dispatch(delivery) → terminal → delivery verification
+// 13. No-model real stdio smoke (moved to mcpWorkspaceSmoke.test.js)
 // 14. At least one real SDK client/server integration test for MCP roots
+//
+// 批 119（v0.10.0）：MCP workspace_status / workspace_select 已真删除——本文件的
+// 绑定观察全部改经 lead_preflight 的 workspace 节（不带参数 = 走缺省解析）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,9 +75,15 @@ async function buildInMemoryClient(server, clientCapabilities = {}) {
   return client;
 }
 
-// ===== 4. workspace_status returns accurate source/head/dirty, zero path leak =====
+// ===== 4. lead_preflight.workspace returns accurate source/head/dirty/root =====
 
-test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty, workspaceRoot", async () => {
+// 批 119：绑定观察经 lead_preflight.workspace（不带参数 = 缺省解析）。
+async function binding(client, args = {}) {
+  const res = await client.callTool({ name: "lead_preflight", arguments: args });
+  return JSON.parse(res.content.find((b) => b.type === "text").text).workspace;
+}
+
+test("WSB-04: lead_preflight.workspace returns bound=true, source, gitHead, dirty, workspaceRoot", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-wsb-04-"));
   try {
     const head = makeGitRepo(dir);
@@ -85,15 +94,13 @@ test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty, works
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "workspace_status", arguments: {} });
-      const textBlock = res.content.find((b) => b.type === "text");
-      const parsed = JSON.parse(textBlock.text);
+      const parsed = await binding(client);
       assert.equal(parsed.bound, true);
       assert.equal(parsed.source, "server_config");
       assert.equal(parsed.gitHead, head);
       assert.equal(parsed.dirty, false);
-      // M11-6: workspaceRoot is now returned (the Lead/host explicitly submitted
-      // the path; it is not a credential to hide). It must be the canonical root.
+      // 批 119：workspaceRoot 在 preflight.workspace 返回（Lead/host 已显式提交
+      // 并经证明的根，非凭据）。必须是 canonical root。
       assert.equal(parsed.workspaceRoot.replace(/\\/g, "/"), dir.replace(/\\/g, "/"),
         "workspaceRoot is the canonical Git root");
     } finally {
@@ -105,9 +112,9 @@ test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty, works
   }
 });
 
-// ===== 5. workspace_status unbound contract (no workspace → bound=false) =====
+// ===== 5. unbound contract (no workspace → bound=false) =====
 
-test("WSB-05: workspace_status with no workspace bound → bound=false, all fields null", async () => {
+test("WSB-05: lead_preflight with no workspace bound → workspace.bound=false, fields null", async () => {
   const server = createWaoMcpServer({
     registryPath: "/r.json",
     runDir: "/runs",
@@ -115,13 +122,13 @@ test("WSB-05: workspace_status with no workspace bound → bound=false, all fiel
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "workspace_status", arguments: {} });
-    const textBlock = res.content.find((b) => b.type === "text");
-    const parsed = JSON.parse(textBlock.text);
+    const parsed = await binding(client);
     assert.equal(parsed.bound, false);
     assert.equal(parsed.source, null);
+    assert.equal(parsed.workspaceRoot, null);
     assert.equal(parsed.gitHead, null);
     assert.equal(parsed.dirty, null);
+    assert.equal(parsed.unboundReason, "no_workspace_authority");
   } finally {
     await client.close();
     await server.close();
@@ -234,22 +241,26 @@ test("WSB-09: run_dispatch strict schema rejects cwd/workspaceRoot/rootUri/path"
   }
 });
 
-// ===== 1. workspace_status schema is strict empty input =====
+// ===== 1. (batch 119) the removed binding tools are off the surface; preflight input is strict =====
 
-test("WSB-01: workspace_status input is strict empty — extra fields rejected", async () => {
+test("WSB-01: removed binding tools absent; lead_preflight input is strict single-key", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
     const tools = await client.listTools();
-    const ws = tools.tools.find((t) => t.name === "workspace_status");
-    assert.ok(ws, "workspace_status tool exists");
-    const inputKeys = Object.keys(ws.inputSchema.properties ?? {});
-    assert.deepEqual(inputKeys, [], "input schema is strict empty");
-    assert.equal(ws.inputSchema.additionalProperties, false, "strict additionalProperties");
-    // Annotations
-    assert.equal(ws.annotations.readOnlyHint, true, "read-only");
-    assert.equal(ws.annotations.destructiveHint, false, "non-destructive");
-    assert.equal(ws.annotations.idempotentHint, true, "idempotent");
+    const names = tools.tools.map((t) => t.name);
+    for (const removed of ["workspace_status", "workspace_select", "run_wait"]) {
+      assert.ok(!names.includes(removed), `${removed} must NOT be on the surface (v0.10.0)`);
+    }
+    const pre = tools.tools.find((t) => t.name === "lead_preflight");
+    assert.ok(pre, "lead_preflight tool exists");
+    const inputKeys = Object.keys(pre.inputSchema.properties ?? {}).sort();
+    assert.deepEqual(inputKeys, ["expectedWorkspaceRoot"], "input schema is the optional per-call target only");
+    assert.equal(pre.inputSchema.additionalProperties, false, "strict additionalProperties");
+    // 批 119（A3）：聚合器只读（证明与读，不写共享状态）。
+    assert.equal(pre.annotations.readOnlyHint, true, "read-only");
+    assert.equal(pre.annotations.destructiveHint, false, "non-destructive");
+    assert.equal(pre.annotations.idempotentHint, true, "idempotent");
   } finally {
     await client.close();
     await server.close();
@@ -292,7 +303,7 @@ test("WSB-11: parseMcpArgs parses valid --workspace-root and rejects malformed",
 
 // ===== 12. Fixed MCP error does not leak absolute path =====
 
-test("WSB-12: workspace_status with invalid workspaceRoot does not leak path in error", async () => {
+test("WSB-12: lead_preflight with unprovable server_config root → unbound, no path leak", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-wsb-12-"));
   try {
     // Create a non-Git directory
@@ -304,9 +315,10 @@ test("WSB-12: workspace_status with invalid workspaceRoot does not leak path in 
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "workspace_status", arguments: {} });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text).workspace;
       assert.equal(parsed.bound, false);
+      assert.equal(parsed.unboundReason, "server_config_git_proof_failed");
       // No path leak in the full response
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no path leak");
@@ -348,8 +360,7 @@ test("WSB-14: real SDK client roots → server binds to single file root", async
         }),
       );
 
-      const res = await client.callTool({ name: "workspace_status", arguments: {} });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      const parsed = await binding(client);
       assert.equal(parsed.bound, true);
       assert.equal(parsed.source, "mcp_root");
       assert.equal(parsed.gitHead, head);
@@ -382,8 +393,7 @@ test("WSB-03: multiple roots → bound=false (fail closed, no first-root selecti
           { uri: pathToFileURL(dir2).href, name: "b" },
         ],
       }));
-      const res = await client.callTool({ name: "workspace_status", arguments: {} });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      const parsed = await binding(client);
       assert.equal(parsed.bound, false, "multiple roots must fail closed");
     } finally {
       await client.close();

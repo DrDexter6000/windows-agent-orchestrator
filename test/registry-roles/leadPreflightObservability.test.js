@@ -74,7 +74,7 @@ async function importFactsModuleFrom(root, tag, { commit = true } = {}) {
 
 function baseInput(overrides = {}) {
   return {
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({ runs: [], matchedCount: 0 }),

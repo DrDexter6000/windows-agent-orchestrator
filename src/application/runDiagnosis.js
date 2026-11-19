@@ -22,6 +22,8 @@ import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { diagnoseFailure } from "../diagnosis.js";
+// 批 119（A4）：带调用目标根时的归属核验（与 readRunActivity 同一 SSOT 入口）。
+import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 /**
  * Get the read-only diagnosis of a run.
@@ -30,6 +32,9 @@ import { diagnoseFailure } from "../diagnosis.js";
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
+ * @param {string} [input.authorizedWorkspaceRoot] — 批 119（A4）：可选调用目标根
+ *   （canonical Git root）。给了就在读完转录后 fail-closed 核验归属（归属比较抛
+ *   code="workspace_not_authorized"）；不给则按 runId 直读，行为不变。
  * @returns {Promise<{runId, state, terminal, category, code, evidence}>}
  *   code — nullable closed-set diagnosis code, a member of the single general
  *   DIAGNOSIS_CODES SSOT (provider-auth ∪ provider-capacity ∪ no-effect).
@@ -47,6 +52,7 @@ export async function getRunDiagnosis({
   runId,
   runDir,
   readTranscriptFn,
+  authorizedWorkspaceRoot,
 }) {
   if (!runId || typeof runId !== "string") {
     throw new Error("getRunDiagnosis: runId is required");
@@ -61,6 +67,12 @@ export async function getRunDiagnosis({
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const filePath = resolveTranscriptPath(runDir, runId);
   const events = await _readTranscript(filePath);
+
+  // 批 119（A4）：带 authorizedWorkspaceRoot 时在读后、任何推导前核验归属
+  //（fail-closed，绝不降级成部分结果；不给则按 runId 直读，行为不变）。
+  if (authorizedWorkspaceRoot !== undefined && authorizedWorkspaceRoot !== null) {
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  }
 
   // R20 (TD-128 M4)：诊断的 state/terminal 投影绑定到请求 runId（与同文件
   // M11-8C Gap B 起 diagnoseFailure 的绑定分类读取同族，boundReportScope 单一

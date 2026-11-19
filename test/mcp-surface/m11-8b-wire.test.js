@@ -104,7 +104,7 @@ test("WIRE-RED2: dispatch agentId wire schema rejects 'unknown'; read tools acce
       const tools = await client.listTools();
       const dispatch = tools.tools.find((t) => t.name === "run_dispatch");
       const status = tools.tools.find((t) => t.name === "run_status");
-      const wait = tools.tools.find((t) => t.name === "run_wait");
+      const wait = tools.tools.find((t) => t.name === "run_await_result");
       const collect = tools.tools.find((t) => t.name === "run_collect");
       const dispatchSchema = dispatch.outputSchema.properties.agentId;
       const statusSchema = status.outputSchema.properties.agentId;
@@ -119,7 +119,7 @@ test("WIRE-RED2: dispatch agentId wire schema rejects 'unknown'; read tools acce
       assert.ok(!isSchemaAcceptingUnknown(dispatchSchema),
         "dispatch agentId wire schema rejects literal 'unknown'");
       // 2. read tools must structurally ACCEPT "unknown" at the wire layer.
-      for (const [name, sch] of [["run_status", statusSchema], ["run_wait", waitSchema], ["run_collect", collectSchema]]) {
+      for (const [name, sch] of [["run_status", statusSchema], ["run_await_result", waitSchema], ["run_collect", collectSchema]]) {
         assert.ok(isSchemaAcceptingUnknown(sch),
           `${name} agentId wire schema accepts literal 'unknown'`);
       }

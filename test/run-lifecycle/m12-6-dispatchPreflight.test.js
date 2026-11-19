@@ -526,7 +526,7 @@ test("M12-6-FR03-K: checkWorkspaceExpectation handles 64-hex head, proof shape, 
 
 test("M12-6-FR03-L: checkWorkspaceExpectation proof exposes no absolute workspace path", () => {
   const ok = checkWorkspaceExpectation({
-    binding: { bound: true, source: "lead_session", root: "C:/very/secret/path", gitHead: "d".repeat(40), dirty: true },
+    binding: { bound: true, source: "call_target", root: "C:/very/secret/path", gitHead: "d".repeat(40), dirty: true },
     expectedGitHead: "d".repeat(40),
     expectedDirty: true,
   });

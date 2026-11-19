@@ -26,7 +26,7 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 | 用途 | MCP 工具 | CLI 等价 | 差异注 |
 |---|---|---|---|
 | 单 run 状态 | `run_status` | `status <runId>` | 同一 service（`getRunStatus`），等价；诊断与指标另有 `runs diagnose` / `runs metrics` |
-| 等待/观察 | `run_wait` | `runs wait <runId>` | 同一 service，等价 |
+| 等待/观察 | `run_await_result` | `runs wait <runId>` | 同族等待 service；CLI 另有 `--until-settled` 收口等待 |
 | 收集结果 | `run_collect` | `collect <runId>` | 等价（CLI 另有 `--final`/游标续读） |
 | 全局统计 | —（无直接等价） | `runs summary` / `runs list` | MCP 侧用 `runs_list` 按需过滤 |
 | run 列表 | `runs_list` | `runs list` | 等价 |

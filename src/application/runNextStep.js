@@ -70,12 +70,12 @@ function render(surface, situation, runId, extras) {
   switch (situation) {
     case "wait_vital_recent":
       text = surface === "mcp"
-        ? `Signs of life were last observed ${m} min ago. Call run_wait again (choose waitMs within the host's tool-call timeout) before ending the turn.`
+        ? `Signs of life were last observed ${m} min ago. Call run_await_result again (waitMs up to 270000) before ending the turn.`
         : `Signs of life were last observed ${m} min ago. Before ending the turn, attach: wao runs wait ${runId} --until-settled (in the background if your host notifies you when background commands finish, otherwise in the foreground).`;
       break;
     case "wait_vital_ageing":
       text = surface === "mcp"
-        ? `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Call run_wait again (choose waitMs within the host's tool-call timeout); read run_activity if you need detail.`
+        ? `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Call run_await_result again (waitMs up to 270000); read run_activity if you need detail.`
         : `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Run: wao runs wait ${runId} --until-settled; use wao status ${runId} if you need detail.`;
       break;
     case "wait_vital_quiet":
@@ -100,7 +100,7 @@ function render(surface, situation, runId, extras) {
       break;
     case "dispatch_accepted":
       text = surface === "mcp"
-        ? "Background run accepted. Before ending the turn, keep a wait attached: call run_wait repeatedly on this run until it settles."
+        ? "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly (waitMs up to 270000 each) on this run until it settles."
         : `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId} --until-settled.`;
       break;
     case "settled_line": {
@@ -167,7 +167,7 @@ function render(surface, situation, runId, extras) {
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {
-        text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_wait repeatedly (within the host's tool-call timeout) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
+        text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly (waitMs up to 270000 each) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
       } else {
         // CLI 面：一条 `consult wait <consultId> --until-settled` 等全部席位收口
         //（逐席 runs wait 是旧用法，命令已提供整场等待）。runId 清单仍是事实陈列
@@ -307,7 +307,8 @@ export function buildNextStep({
 }
 
 /**
- * 等待族（run_wait / runs wait）的 nextStep：按终态与体征年龄自动选支。
+ * 等待族（CLI runs wait；MCP 面的等待由 run_await_result 承担，有意不带本
+ * nextStep）的 nextStep：按终态与体征年龄自动选支。
  * 阈值直接引用 runQuietAdvisory 的两个常量（10 分钟 / 30 分钟），毫秒直比，
  * 不预取整——恰好 10 分钟不算 recent（同 runStatus 的 < 口径），恰好 30 分钟
  * 已算 quiet（同 advisory 的 >= 口径）。

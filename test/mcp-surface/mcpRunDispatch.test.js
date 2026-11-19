@@ -1189,9 +1189,11 @@ test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本
       assert.ok(rows.some((l) => l.startsWith("known lanes")), "合法 lane 行在场");
       assert.ok(rows.some((l) => l.startsWith("fix: run_dispatch(")), "修正例行在场");
       assert.ok(rows.every((l) => !l.includes("\n")), "每行单行");
-      // 非错误结果字节不变：workspace_status 在未绑定工作区时也是结构化成功输出，
-      // 其 JSON 文本不经转义层（withToolErrorTextEscape 对非 isError 原样返回）。
-      const status = await client.callTool({ name: "workspace_status", arguments: {} });
+      // 非错误结果字节不变：lead_preflight 在未绑定工作区时也是结构化成功输出
+      //（workspace 节如实报 bound:false），其 JSON 文本不经转义层
+      //（withToolErrorTextEscape 对非 isError 原样返回）。批 119：绑定状态查询
+      // 工具已真删除，本断言改经 lead_preflight。
+      const status = await client.callTool({ name: "lead_preflight", arguments: {} });
       assert.notEqual(status.isError, true);
       assert.doesNotThrow(() => JSON.parse(status.content.find((b) => b.type === "text").text), "成功 JSON 文本仍可解析（未过转义层）");
     } finally { await client.close(); await server.close(); }

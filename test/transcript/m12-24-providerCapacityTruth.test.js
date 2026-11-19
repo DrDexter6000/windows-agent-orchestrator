@@ -48,7 +48,7 @@ test("M12-24-PF1: complete preflight explicitly says live auth/entitlement/quota
     credentialAvailability: "not_required",
   };
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "C:/repo", gitHead: "abc", dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "C:/repo", gitHead: "abc", dirty: false },
     getRegistryInventoryFn: async () => [{
       id: "auditor", backend: "claude-code", model: "claude-opus-5",
       reasoningEffort: "xhigh", certification: "certified",

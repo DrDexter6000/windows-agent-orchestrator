@@ -4,7 +4,7 @@
 //
 // Full end-to-end test: real stdio MCP subprocess + temp Git repo (path with
 // spaces) + fake worker + delivery verification. Proves with EXACT assertions:
-//   - workspace_status reports bound=true, source=server_config
+//   - lead_preflight.workspace reports bound=true, source=server_config
 //   - terminal state is exactly "completed" (not "failed")
 //   - run.delivery_created count is exactly 1
 //   - run.delivery_verification_passed count is exactly 1
@@ -87,7 +87,7 @@ async function buildStdioClient({ registryPath, runDir, workspaceRoot, env = {} 
   return { client, transport };
 }
 
-test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → delivery verification passed (exact)", async () => {
+test("WSB-SMOKE: lead_preflight → run_dispatch(delivery) → completed → delivery verification passed (exact)", async () => {
   const baseDir = mkdtempSync(join(tmpdir(), "wao smoke "));
   const workspaceDir = join(baseDir, "my project");
   const waoDir = join(baseDir, "wao");
@@ -150,9 +150,9 @@ test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → d
       registryPath, runDir, workspaceRoot: workspaceDir,
     }));
 
-    // 5. workspace_status: verify bound.
-    const statusRes = await client.callTool({ name: "workspace_status", arguments: {} });
-    const statusParsed = JSON.parse(statusRes.content.find((b) => b.type === "text").text);
+    // 5. lead_preflight.workspace（批 119：绑定状态观察改经 preflight）: verify bound.
+    const statusRes = await client.callTool({ name: "lead_preflight", arguments: {} });
+    const statusParsed = JSON.parse(statusRes.content.find((b) => b.type === "text").text).workspace;
     assert.equal(statusParsed.bound, true);
     assert.equal(statusParsed.source, "server_config");
     assert.equal(statusParsed.gitHead, headCommit);

@@ -80,7 +80,7 @@ export const EXPECTED_WORKSPACE_ROOT_MAX = 1024;
  * (provenHead.startsWith(expected)), so any head sharing that prefix passes.
  * A full 40/64-hex form remains an exact-equality assertion (a same-length
  * prefix is exactly the equality). Consumers that need the strong freeze
- * should pin the full head from workspace_status.
+ * should pin the full head from lead_preflight (expectedWorkspaceRoot) or git.
  *
  * @param {object} input
  * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}} input.binding

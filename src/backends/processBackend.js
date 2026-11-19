@@ -571,7 +571,7 @@ export class ProcessBackend {
     // 决定 0070：只供观察的静默期取样——转录静默满 5 分钟后，看这个 worker 的后代
     // 进程是否在干活、工作目录是否有文件变化，读到就落一条 runtime_activity。它不
     // 是收口门：进程式后端不因静默被控制面收掉，取样读到什么都不改变这一点。落下的
-    // 事实仍是 run.event：下游照常把它当活动（first_event、run_wait 的 liveness、
+    // 事实仍是 run.event：下游照常把它当活动（first_event、等待器的 liveness、
     // advisory 的最近活动、stop 的新鲜度校验）；只是不参与本后端的 silentTimeout
     // 与 completed_empty 判据，诊断里也不当作 provider 在出流的证据。两个
     // 探针都不在场（测试注入的假 spawn）时不建取样器，等待节奏与此前相同。

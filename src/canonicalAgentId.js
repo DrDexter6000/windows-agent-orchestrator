@@ -7,8 +7,8 @@
 //
 // A canonical agentId is a closed-vocabulary registry identifier. It is the
 // value stamped on the transcript envelope by the control plane at dispatch
-// time, and the value surfaced by run_dispatch / run_status / run_wait /
-// run_collect. It is NEVER:
+// time, and the value surfaced by run_dispatch / run_status /
+// run_await_result / run_collect. It is NEVER:
 //   - worker free-text (a worker may self-report /root, Coder-HQ, or nothing);
 //   - an OS user, cwd, model name, backend output, or role title;
 //   - an arbitrary string supplied by a model or attacker.

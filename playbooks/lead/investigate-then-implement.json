@@ -35,7 +35,7 @@
     },
     {
       "id": "supervise",
-      "intent": "Observe the coder via run_wait until terminal.",
+      "intent": "Observe the coder via run_await_result until terminal.",
       "importance": "core",
       "evidence": ["Terminal or liveness observed"],
       "adaptations": ["Continue if progress is fresh"]

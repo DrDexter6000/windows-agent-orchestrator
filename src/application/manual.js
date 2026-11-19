@@ -90,8 +90,8 @@ function splitLines(text) {
 
 /**
  * 标题去掉 Markdown 行内标记（反引号、强调、链接）后用于节名匹配。
- * 下划线/星号只按成对强调剥离，且两侧不是字母数字——isolation_failed、run_wait
- * 这类标识符里的下划线不是强调，不能剥。
+ * 下划线/星号只按成对强调剥离，且两侧不是字母数字——isolation_failed、
+ * run_await_result 这类标识符里的下划线不是强调，不能剥。
  * 查询侧做同一次去标记（决定 0115 续修）：`wao manual <页>` 列出的节标题带反引号，
  * 照抄回查询必须能命中。
  */

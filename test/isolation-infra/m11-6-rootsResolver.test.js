@@ -1,19 +1,23 @@
-// test/m11-6-rootsResolver.test.js
+// test/isolation-infra/m11-6-rootsResolver.test.js
 //
 // M11-6 CTO closeout B: causal resolver-behavior tests.
 //
-// Proves the four resolver cases by running the PRODUCTION resolver
-// (resolveWorkspaceBinding, reached via workspace_status) with a spy on
-// mcp.server.listRoots to assert exact call counts and fallback causality:
+// 批 119（v0.10.0）起，绑定解析只剩两档（MCP roots → 启动配置 → 未绑定），
+// 会话级选择档已随其工具真删除；绑定事实经 `lead_preflight` 的 `workspace`
+// 节观测（source/workspaceRoot/unboundReason）。本文件用 PRODUCTION resolver
+// （resolveWorkspaceBinding，经 lead_preflight 触达）+ spy on
+// mcp.server.listRoots 断言精确调用计数与回退因果：
 //   1. client without roots capability → listRoots NOT called, server_config used.
 //   2. client with one valid root → source=mcp_root, wins over server_config.
 //   3. client with roots but listRoots throws → falls back to server_config.
-//   4. lead_session already selected → listRoots NOT called, source=lead_session.
-//   5. failed workspace_select keeps the prior valid selection.
+//   4. (batch 119) expectedWorkspaceRoot given → source=call_target, listRoots
+//      NOT called, and the call_target wins over every default authority.
+//   5. (M12-19 recovery truth) server_config root fails proof →
+//      unboundReason=server_config_git_proof_failed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -66,9 +70,10 @@ function spyListRoots(server) {
   };
 }
 
-async function status(client) {
-  const res = await client.callTool({ name: "workspace_status", arguments: {} });
-  return JSON.parse(res.content.find((b) => b.type === "text").text);
+// 批 119：绑定事实经 lead_preflight.workspace 观测（不带参数 = 走缺省解析）。
+async function binding(client) {
+  const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+  return JSON.parse(res.content.find((b) => b.type === "text").text).workspace;
 }
 
 // ===== 1. client without roots capability → listRoots NOT called, server_config used =====
@@ -83,7 +88,7 @@ test("M11-6-CAUSE-1: no roots capability → listRoots callCount=0, server_confi
       // Client with NO roots capability.
       const client = await buildInMemoryClient(server, {});
       try {
-        const parsed = await status(client);
+        const parsed = await binding(client);
         assert.equal(parsed.bound, true);
         assert.equal(parsed.source, "server_config");
         assert.equal(spy.count(), 0, "listRoots NOT called when client has no roots capability");
@@ -119,7 +124,7 @@ test("M11-6-CAUSE-2: one valid root → source=mcp_root (wins over server_config
         client.setRequestHandler(ListRootsRequestSchema, async () => ({
           roots: [{ uri: pathToFileURL(dirRoot).href, name: "root" }],
         }));
-        const parsed = await status(client);
+        const parsed = await binding(client);
         assert.equal(parsed.bound, true);
         assert.equal(parsed.source, "mcp_root", "mcp_root wins over server_config");
         assert.equal(parsed.workspaceRoot.replace(/\\/g, "/"), dirRoot.replace(/\\/g, "/"));
@@ -152,7 +157,7 @@ test("M11-6-CAUSE-3: roots declared but listRoots throws → fallback to server_
         client.setRequestHandler(ListRootsRequestSchema, async () => {
           throw new Error("simulated roots/list failure");
         });
-        const parsed = await status(client);
+        const parsed = await binding(client);
         assert.equal(parsed.bound, true);
         assert.equal(parsed.source, "server_config", "falls back to server_config on roots failure");
         assert.equal(parsed.workspaceRoot.replace(/\\/g, "/"), dir.replace(/\\/g, "/"));
@@ -172,29 +177,36 @@ test("M11-6-CAUSE-3: roots declared but listRoots throws → fallback to server_
   }
 });
 
-// ===== 4. lead_session selected → listRoots NOT called, source=lead_session =====
+// ===== 4. (batch 119) expectedWorkspaceRoot wins over every default authority =====
 
-test("M11-6-CAUSE-4: lead_session selected → listRoots callCount=0, source=lead_session", async () => {
-  const dirSession = mkdtempSync(join(tmpdir(), "wao-m116-c4-sess-"));
+test("M11-6-CAUSE-4: expectedWorkspaceRoot given → source=call_target, listRoots NOT called", async () => {
+  const dirTarget = mkdtempSync(join(tmpdir(), "wao-m116-c4-target-"));
+  const dirRoot = mkdtempSync(join(tmpdir(), "wao-m116-c4-root-"));
   const dirCfg = mkdtempSync(join(tmpdir(), "wao-m116-c4-cfg-"));
   try {
-    makeGitRepo(dirSession);
+    makeGitRepo(dirTarget);
+    makeGitRepo(dirRoot);
     makeGitRepo(dirCfg);
+    const { pathToFileURL } = await import("node:url");
+    const { ListRootsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+    // Both default authorities are valid but point elsewhere; the call target wins.
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", workspaceRoot: dirCfg });
     const spy = spyListRoots(server);
     try {
       const client = await buildInMemoryClient(server, { roots: { listChanged: false } });
       try {
-        // Select a session workspace first.
-        const sel = await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirSession } });
-        assert.equal(JSON.parse(sel.content.find((b) => b.type === "text").text).source, "lead_session");
-        // Reset spy count after the select (select does not call listRoots, but be precise).
-        const countAfterSelect = spy.count();
-        const parsed = await status(client);
-        assert.equal(parsed.bound, true);
-        assert.equal(parsed.source, "lead_session", "lead_session used, not mcp_root/server_config");
-        assert.equal(parsed.workspaceRoot.replace(/\\/g, "/"), dirSession.replace(/\\/g, "/"));
-        assert.equal(spy.count(), countAfterSelect, "listRoots NOT called when lead_session is selected");
+        client.setRequestHandler(ListRootsRequestSchema, async () => ({
+          roots: [{ uri: pathToFileURL(dirRoot).href, name: "root" }],
+        }));
+        const res = await client.callTool({
+          name: "lead_preflight",
+          arguments: { expectedWorkspaceRoot: dirTarget },
+        });
+        const payload = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(payload.workspace.bound, true);
+        assert.equal(payload.workspace.source, "call_target", "per-call target wins over roots + server_config");
+        assert.equal(payload.workspace.workspaceRoot.replace(/\\/g, "/"), dirTarget.replace(/\\/g, "/"));
+        assert.equal(spy.count(), 0, "listRoots NOT consulted when the call target is given");
       } finally {
         await client.close();
       }
@@ -203,48 +215,16 @@ test("M11-6-CAUSE-4: lead_session selected → listRoots callCount=0, source=lea
       await server.close();
     }
   } finally {
-    cleanupDir(dirSession); cleanupDir(dirCfg);
+    cleanupDir(dirTarget); cleanupDir(dirRoot); cleanupDir(dirCfg);
   }
 });
 
-// ===== 5. failed workspace_select keeps the prior valid selection =====
+// ===== 5. (M12-19) recovery truth in the resolver =====
 
-test("M11-6-CAUSE-5: failed workspace_select keeps the prior valid selection", async () => {
-  const dirA = mkdtempSync(join(tmpdir(), "wao-m116-c5-a-"));
-  const notGit = mkdtempSync(join(tmpdir(), "wao-m116-c5-nogit-"));
-  try {
-    makeGitRepo(dirA);
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
-    try {
-      const client = await buildInMemoryClient(server, {});
-      try {
-        await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirA } });
-        const before = await status(client);
-        assert.equal(before.source, "lead_session");
-        // Attempt a bad select.
-        const bad = await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: notGit } });
-        assert.ok(bad.isError, "bad select errors");
-        // Prior selection intact.
-        const after = await status(client);
-        assert.equal(after.source, "lead_session");
-        assert.equal(after.workspaceRoot.replace(/\\/g, "/"), dirA.replace(/\\/g, "/"));
-      } finally {
-        await client.close();
-      }
-    } finally {
-      await server.close();
-    }
-  } finally {
-    cleanupDir(dirA); cleanupDir(notGit);
-  }
-});
-
-// ===== M12-19: recovery truth in the resolver =====
-
-// M12-19-CAUSE-6: server_config root whose Git proof fails (not a repo) →
+// M12-19-CAUSE-5: server_config root whose Git proof fails (not a repo) →
 // unboundReason=server_config_git_proof_failed (distinct from no_workspace_authority).
-test("M11-6-M12-19-CAUSE-6: server_config root fails proof → unboundReason=server_config_git_proof_failed", async () => {
-  const notGit = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c6-nogit-"));
+test("M11-6-M12-19-CAUSE-5: server_config root fails proof → unboundReason=server_config_git_proof_failed", async () => {
+  const notGit = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c5-nogit-"));
   try {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", workspaceRoot: notGit });
     const spy = spyListRoots(server);
@@ -252,7 +232,7 @@ test("M11-6-M12-19-CAUSE-6: server_config root fails proof → unboundReason=ser
       // Client WITHOUT roots capability: server_config is the only authority.
       const client = await buildInMemoryClient(server, {});
       try {
-        const parsed = await status(client);
+        const parsed = await binding(client);
         assert.equal(parsed.bound, false);
         assert.equal(parsed.unboundReason, "server_config_git_proof_failed");
         assert.equal(parsed.source, null);
@@ -266,48 +246,5 @@ test("M11-6-M12-19-CAUSE-6: server_config root fails proof → unboundReason=ser
     }
   } finally {
     cleanupDir(notGit);
-  }
-});
-
-// M12-19-CAUSE-7: lead_session proof fails even though server_config and mcp_root
-// are valid → NO fall-through. The failed lead_session still outranks: bound:false,
-// unboundReason=lead_session_git_proof_failed, and listRoots is NOT consulted.
-test("M11-6-M12-19-CAUSE-7: broken lead_session never falls through to valid server_config/mcp_root", async () => {
-  const dirSession = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c7-sess-"));
-  const dirCfg = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c7-cfg-"));
-  try {
-    makeGitRepo(dirSession);
-    makeGitRepo(dirCfg);
-    const { pathToFileURL } = await import("node:url");
-    const { ListRootsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
-    // server_config points at a VALID repo; the client ALSO advertises a valid root.
-    // Only the lead_session is broken — it must still win (no fall-through).
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", workspaceRoot: dirCfg });
-    const spy = spyListRoots(server);
-    try {
-      const client = await buildInMemoryClient(server, { roots: { listChanged: false } });
-      try {
-        client.setRequestHandler(ListRootsRequestSchema, async () => ({
-          roots: [{ uri: pathToFileURL(dirCfg).href, name: "root" }],
-        }));
-        // Select the session repo, then delete it so its proof fails.
-        const sel = await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirSession } });
-        assert.equal(JSON.parse(sel.content.find((b) => b.type === "text").text).source, "lead_session");
-        rmSync(dirSession, { recursive: true, force: true });
-        const countAfterSelect = spy.count();
-        const parsed = await status(client);
-        assert.equal(parsed.bound, false, "no fall-through: a failed lead_session keeps the server unbound");
-        assert.equal(parsed.unboundReason, "lead_session_git_proof_failed");
-        assert.equal(parsed.source, null);
-        assert.equal(spy.count(), countAfterSelect, "listRoots NOT consulted when a broken lead_session outranks");
-      } finally {
-        await client.close();
-      }
-    } finally {
-      spy.restore();
-      await server.close();
-    }
-  } finally {
-    cleanupDir(dirSession); cleanupDir(dirCfg);
   }
 });

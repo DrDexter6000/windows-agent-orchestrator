@@ -1,11 +1,12 @@
 // src/application/runSemanticsNotes.js
 //
 // M12-12: Self-Describing Results — the SINGLE pure, provider-neutral
-// application SSOT for the bounded `semanticNotes` carried by EXACTLY four
-// standalone MCP success results: run_wait, run_await_result, run_delivery,
-// run_diagnose.
+// application SSOT for the bounded `semanticNotes` carried by EXACTLY three
+// standalone MCP success results (run_await_result, run_delivery,
+// run_diagnose) plus the CLI wait command (`wao runs wait`, source key
+// "run_wait"——批 119 起 MCP 面已无该工具，键与目录为 CLI 面保留).
 //
-// Every successful result from those four tools carries 1..4 plain-English notes
+// Every successful result from those faces carries 1..4 plain-English notes
 // that self-explain the CURRENT facts: each note is { id, meaning, doesNotMean }
 // where `id` is a frozen namespaced closed-set value, `meaning` is one
 // deterministic factual sentence, and `doesNotMean` is 0..2 deterministic factual
@@ -58,7 +59,8 @@ export const SEMANTIC_NOTE_MAX_DOES_NOT_MEAN = 2;
 
 export const SEMANTIC_DETAIL_URI_PREFIX = "wao://semantics/";
 
-// ===== Closed set: the four source tools that carry semanticNotes =====
+// ===== Closed set: the source tools/faces that carry semanticNotes
+// (三个 MCP 工具 + CLI 等待命令；run_wait 键为 CLI 面保留——批 119) =====
 
 export const SEMANTIC_SOURCE_TOOLS = Object.freeze([
   "run_wait",

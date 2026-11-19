@@ -79,7 +79,7 @@ function reviewPage(runId, overrides = {}) {
   };
 }
 
-test("M12-3B-RED-01: bundle tool is discoverable; current count is 23 after run_continue (M13 run_consult)", async () => {
+test("M12-3B-RED-01: bundle tool is discoverable; current count is 20 (batch 119 removed three tools)", async () => {
   const dir = makeGitDir("m123b-discovery-");
   try {
     const server = createWaoMcpServer({ registryPath: "/registry.json", runDir: dir, workspaceRoot: dir });
@@ -88,7 +88,7 @@ test("M12-3B-RED-01: bundle tool is discoverable; current count is 23 after run_
       const { tools } = await client.listTools();
       const tool = tools.find((entry) => entry.name === "run_delivery_review_bundle");
       assert.ok(tool, "run_delivery_review_bundle must be registered");
-      assert.equal(tools.length, 23, "exactly 23 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct; M13 added run_consult)");
+      assert.equal(tools.length, 20, "exactly 20 tools (batch 119 removed workspace_select/workspace_status/run_wait)");
       assert.deepEqual(
         Object.keys(tool.inputSchema.properties).sort(),
         ["cursor", "expectedWorkspaceRoot", "fileIndex", "runId", "waitMs"],
@@ -952,7 +952,7 @@ test("TD-324: cross-workspace run → ownership-refusal fixed text (real readine
       assert.equal(res.isError, true, "cross-workspace bundle is an error");
       assert.ok(!res.structuredContent, "no structuredContent on error");
       const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-      assert.match(text, /^run_delivery_review_bundle refused: this run cannot be shown to belong to the bound workspace/,
+      assert.match(text, /^run_delivery_review_bundle refused: this run cannot be shown to belong to this call's workspace/,
         "归属拒绝专属固定文案");
       assert.ok(!text.includes("run_delivery_review_bundle failed"), "不再折叠成笼统失败文案");
       const dumped = JSON.stringify(res);

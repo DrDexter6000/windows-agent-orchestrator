@@ -732,7 +732,7 @@ test("0108 doctor：非默认 --registry（车道表停用）不产 lane_wiring 
 
 const EMPTY_BINDING = {
   bound: true,
-  source: "lead_session",
+  source: "call_target",
   root: "D:/fixture-root",
   gitHead: null,
   dirty: false,

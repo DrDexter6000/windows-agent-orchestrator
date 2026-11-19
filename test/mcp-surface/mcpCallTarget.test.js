@@ -45,7 +45,6 @@ import { readTranscript, findState, findLatest } from "../../src/transcript.js";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { projectFactFromCwd } from "../../src/projectIdentity.js";
 import { packageDelivery } from "../../src/delivery.js";
-import { runWait as runWaitService } from "../../src/application/runWait.js";
 import { runAwaitResult as runAwaitResultService } from "../../src/application/runAwaitResult.js";
 import { getRunDeliveryReadiness as deliveryReadinessService } from "../../src/application/runDelivery.js";
 
@@ -123,12 +122,10 @@ function spyListRoots(server) {
 test("CT-1: two sessions on one server instance — dispatch follows each CALL's target", async () => {
   const x = mkdtempSync(join(tmpdir(), "wao-ct-x-"));
   const y = mkdtempSync(join(tmpdir(), "wao-ct-y-"));
-  const z = mkdtempSync(join(tmpdir(), "wao-ct-z-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct-aux-"));
   try {
     const headY = makeGitRepo(y);
     makeGitRepo(x);
-    makeGitRepo(z);
     const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: x } });
     const cwds = [];
     const heads = [];
@@ -145,20 +142,19 @@ test("CT-1: two sessions on one server instance — dispatch follows each CALL's
     });
     const client = await buildClient(server);
     try {
-      // Session A selects X; session B (same instance) dispatches naming Y.
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: x } });
+      // 批 119：会话级选择已删除——同实例的多个会话各自按调用带目标，互不影响。
       const r1 = await client.callTool({
         name: "run_dispatch",
         arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: y },
       });
       assert.equal(r1.isError, undefined, "dispatch on the call's target succeeds");
-      // Session B re-selects Z; session A dispatches naming X — still X.
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: z } });
+      // A second call naming X on the same instance goes to X, not to the
+      // previous call's Y (no shared per-instance target exists).
       await client.callTool({
         name: "run_dispatch",
         arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: x },
       });
-      assert.deepEqual(cwds.map(fwd), [fwd(y), fwd(x)], "cwd follows each call's target, never the selection");
+      assert.deepEqual(cwds.map(fwd), [fwd(y), fwd(x)], "cwd follows each call's target, never a shared state");
       assert.equal(heads[0], headY, "frozenGitHead is the target's head");
       const proof1 = JSON.parse(r1.content.find((b) => b.type === "text").text).workspaceProof;
       assert.equal(proof1.source, "call_target");
@@ -168,11 +164,11 @@ test("CT-1: two sessions on one server instance — dispatch follows each CALL's
       await server.close();
     }
   } finally {
-    cleanupDir(x); cleanupDir(y); cleanupDir(z); cleanupDir(aux);
+    cleanupDir(x); cleanupDir(y); cleanupDir(aux);
   }
 });
 
-test("CT-2: lead_session binding X never overrides a call naming Y (and selection survives)", async () => {
+test("CT-2: server_config binding X never overrides a call naming Y (and no state is written)", async () => {
   const x = mkdtempSync(join(tmpdir(), "wao-ct2-x-"));
   const y = mkdtempSync(join(tmpdir(), "wao-ct2-y-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct2-aux-"));
@@ -190,20 +186,21 @@ test("CT-2: lead_session binding X never overrides a call naming Y (and selectio
     });
     const client = await buildClient(server);
     try {
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: x } });
-      const st = JSON.parse((await client.callTool({ name: "workspace_status", arguments: {} }))
-        .content.find((b) => b.type === "text").text);
-      assert.equal(st.source, "lead_session", "binding is X via lead_session");
+      // The default binding (read scope) is X via server_config.
+      const st = JSON.parse((await client.callTool({ name: "lead_preflight", arguments: {} }))
+        .content.find((b) => b.type === "text").text).workspace;
+      assert.equal(st.source, "server_config", "default binding is X via server_config");
       await client.callTool({
         name: "run_dispatch",
         arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: y },
       });
-      assert.equal(fwd(captured.cwd), fwd(y), "call target Y wins over the lead_session binding X");
-      // The selection is untouched (read scope still X).
-      const st2 = JSON.parse((await client.callTool({ name: "workspace_status", arguments: {} }))
-        .content.find((b) => b.type === "text").text);
-      assert.equal(st2.source, "lead_session");
-      assert.equal(fwd(st2.workspaceRoot), fwd(x), "dispatch never mutated the session selection");
+      assert.equal(fwd(captured.cwd), fwd(y), "call target Y wins over the server_config binding X");
+      // The default binding is untouched (read scope still X) — the dispatch
+      // never mutates any shared state (there is none to mutate).
+      const st2 = JSON.parse((await client.callTool({ name: "lead_preflight", arguments: {} }))
+        .content.find((b) => b.type === "text").text).workspace;
+      assert.equal(st2.source, "server_config");
+      assert.equal(fwd(st2.workspaceRoot), fwd(x), "dispatch never mutated the default binding");
     } finally {
       await client.close();
       await server.close();
@@ -616,8 +613,8 @@ test("CT-8: MCP roots binding X never overrides a call naming Y", async () => {
     const spy = spyListRoots(server);
     const client = await buildRootsClient(server, x);
     try {
-      const st = JSON.parse((await client.callTool({ name: "workspace_status", arguments: {} }))
-        .content.find((b) => b.type === "text").text);
+      const st = JSON.parse((await client.callTool({ name: "lead_preflight", arguments: {} }))
+        .content.find((b) => b.type === "text").text).workspace;
       assert.equal(st.source, "mcp_root", "binding is X via mcp_root");
       assert.equal(fwd(st.workspaceRoot), fwd(x));
       const res = await client.callTool({
@@ -814,7 +811,6 @@ const CT13_INVALID_TEXT =
 const CT13_CASES = [
   { name: "run_delivery", arguments: { runId: CT13_RUN_ID } },
   { name: "runs_list", arguments: {} },
-  { name: "run_wait", arguments: { runId: CT13_RUN_ID, waitMs: 30000 } },
   { name: "run_await_result", arguments: { runId: CT13_RUN_ID, waitMs: 0 } },
   { name: "run_activity", arguments: { runId: CT13_RUN_ID } },
   { name: "run_delivery_review", arguments: { runId: CT13_RUN_ID, fileIndex: 0 } },
@@ -836,7 +832,7 @@ function ct13AssertSuccess(testCase, result, expectedSource) {
   }
 }
 
-test("CT-13: seven read tools prove the call target, never fall back, and preserve selection", async () => {
+test("CT-13: six read tools prove the call target, never fall back, and touch no shared state", async () => {
   const owned = mkdtempSync(join(tmpdir(), "wao-ct13-owned-"));
   const other = mkdtempSync(join(tmpdir(), "wao-ct13-other-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct13-aux-"));
@@ -847,50 +843,29 @@ test("CT-13: seven read tools prove the call target, never fall back, and preser
     const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: owned } });
     seedOwnedDeliveryRun(runDir, CT13_RUN_ID, owned);
     mkdirSync(join(aux, "plain"), { recursive: true });
+    // 批 119：会话级选择已删除。(a)/(c) 在未绑定实例上证明按调用目标；随后用
+    // server_config=other 的实例证明缺省绑定行为与目标权威。
     const server = createWaoMcpServer({ registryPath, runDir });
     const client = await buildClient(server);
     try {
-      const status = async () => (await client.callTool({ name: "workspace_status", arguments: {} })).structuredContent;
+      const binding = async () => (await client.callTool({ name: "lead_preflight", arguments: {} }))
+        .structuredContent.workspace;
 
-      // (a) No workspace_select or startup binding: the proved call root is enough.
+      // (a) No startup binding: the proved call root is enough.
       for (const testCase of CT13_CASES) {
-        const before = await status();
+        const before = await binding();
         assert.equal(before.bound, false, `${testCase.name}: precondition is unbound`);
         const result = await client.callTool({
           name: testCase.name,
           arguments: { ...testCase.arguments, expectedWorkspaceRoot: owned },
         });
         ct13AssertSuccess(testCase, result, "call_target");
-        assert.deepEqual(await status(), before, `${testCase.name}: (e) success leaves selection untouched`);
+        assert.deepEqual(await binding(), before, `${testCase.name}: (e) success leaves the binding untouched`);
       }
 
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: owned } });
+      // (c) Relative, vanished, and non-Git targets all use the fixed proof error.
       for (const testCase of CT13_CASES) {
-        // (b) Even with the session selecting the run's project, another valid Git
-        // root remains authoritative. A list filters; single-run tools refuse.
-        const before = await status();
-        const mismatch = await client.callTool({
-          name: testCase.name,
-          arguments: { ...testCase.arguments, expectedWorkspaceRoot: other },
-        });
-        if (testCase.name === "runs_list") {
-          assert.equal(mismatch.isError, undefined);
-          assert.equal(mismatch.structuredContent.scope.source, "call_target");
-          assert.equal(mismatch.structuredContent.returnedCount, 0, "no fallback to the selected project");
-        } else {
-          assert.equal(mismatch.isError, true, `${testCase.name}: cross-project target refuses`);
-          const mismatchText = ct13Text(mismatch);
-          assert.ok(mismatchText.startsWith(
-            `${testCase.name} refused: this run cannot be shown to belong to the bound workspace`,
-          ), `${testCase.name}: existing ownership refusal`);
-          for (const path of [owned, other]) {
-            assert.ok(!mismatchText.includes(path) && !mismatchText.includes(fwd(path)),
-              `${testCase.name}: ownership refusal echoes no input path`);
-          }
-        }
-        assert.deepEqual(await status(), before, `${testCase.name}: (e) mismatch leaves selection untouched`);
-
-        // (c) Relative, vanished, and non-Git targets all use the fixed proof error.
+        const before = await binding();
         for (const invalid of ["relative/path", join(aux, "missing"), join(aux, "plain")]) {
           const refused = await client.callTool({
             name: testCase.name,
@@ -898,24 +873,58 @@ test("CT-13: seven read tools prove the call target, never fall back, and preser
           });
           assert.equal(refused.isError, true, `${testCase.name}: invalid target refuses`);
           assert.equal(ct13Text(refused), CT13_INVALID_TEXT, `${testCase.name}: fixed proof failure text`);
-          assert.deepEqual(await status(), before, `${testCase.name}: invalid target leaves selection untouched`);
         }
-
-        // (d) Omitting the field retains the existing session-binding behavior.
-        const legacy = await client.callTool({ name: testCase.name, arguments: testCase.arguments });
-        ct13AssertSuccess(testCase, legacy, "lead_session");
-        assert.deepEqual(await status(), before, `${testCase.name}: legacy call leaves selection untouched`);
+        assert.deepEqual(await binding(), before, `${testCase.name}: invalid target leaves the binding untouched`);
       }
     } finally {
       await client.close();
       await server.close();
+    }
+
+    // (b)+(d) with a startup binding pointing at the run's OWN project
+    // (server_config=owned): the per-call target stays authoritative (refuse/
+    // filter against `other`, never fall back to the binding), and omitting the
+    // field follows the resolved binding (success under the modern default).
+    const server2 = createWaoMcpServer({ registryPath, runDir, workspaceRoot: owned });
+    const client2 = await buildClient(server2);
+    try {
+      for (const testCase of CT13_CASES) {
+        // (b) The call names a valid Git root that does not own the run:
+        // a list filters; single-run tools refuse.
+        const mismatch = await client2.callTool({
+          name: testCase.name,
+          arguments: { ...testCase.arguments, expectedWorkspaceRoot: other },
+        });
+        if (testCase.name === "runs_list") {
+          assert.equal(mismatch.isError, undefined);
+          assert.equal(mismatch.structuredContent.scope.source, "call_target");
+          assert.equal(mismatch.structuredContent.returnedCount, 0, "no fallback to the bound project");
+        } else {
+          assert.equal(mismatch.isError, true, `${testCase.name}: cross-project target refuses`);
+          const mismatchText = ct13Text(mismatch);
+          assert.match(mismatchText, new RegExp(
+            `^${testCase.name} refused: this run cannot be shown to belong to this call's workspace`,
+          ), `${testCase.name}: existing ownership refusal`);
+          for (const path of [owned, other]) {
+            assert.ok(!mismatchText.includes(path) && !mismatchText.includes(fwd(path)),
+              `${testCase.name}: ownership refusal echoes no input path`);
+          }
+        }
+
+        // (d) Omitting the field retains the resolved-default-binding behavior.
+        const legacy = await client2.callTool({ name: testCase.name, arguments: testCase.arguments });
+        ct13AssertSuccess(testCase, legacy, "server_config");
+      }
+    } finally {
+      await client2.close();
+      await server2.close();
     }
   } finally {
     cleanupDir(owned); cleanupDir(other); cleanupDir(aux);
   }
 });
 
-test("CT-14: run_wait and run_await_result keep their entry proof after selection changes", async () => {
+test("CT-14: run_await_result keeps its entry proof even with a different default binding", async () => {
   const owned = mkdtempSync(join(tmpdir(), "wao-ct14-owned-"));
   const other = mkdtempSync(join(tmpdir(), "wao-ct14-other-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct14-aux-"));
@@ -927,25 +936,14 @@ test("CT-14: run_wait and run_await_result keep their entry proof after selectio
     makeGitRepo(other);
     const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: owned } });
     seedOwnedRun(runDir, runId, owned);
-    let markWaitRead;
     let markAwaitRead;
-    const waitRead = new Promise((resolve) => { markWaitRead = resolve; });
     const awaitRead = new Promise((resolve) => { markAwaitRead = resolve; });
+    // 批 119：会话选择已删除；等价的威胁是缺省绑定（这里 server_config=other）
+    // 与调用目标不同——入口证明按调用目标，后续 poll 不受缺省绑定影响。
     const server = createWaoMcpServer({
       registryPath,
       runDir,
-      runWaitFn: (input) => {
-        let first = true;
-        return runWaitService({
-          ...input,
-          pollIntervalMs: 10,
-          readTranscriptFn: async (path) => {
-            const events = await readTranscript(path);
-            if (first) { first = false; markWaitRead(); }
-            return events;
-          },
-        });
-      },
+      workspaceRoot: other,
       runAwaitResultFn: (input) => {
         let first = true;
         return runAwaitResultService({
@@ -961,30 +959,23 @@ test("CT-14: run_wait and run_await_result keep their entry proof after selectio
     });
     const client = await buildClient(server);
     try {
-      const waiting = client.callTool({
-        name: "run_wait",
-        arguments: { runId, waitMs: 30000, expectedWorkspaceRoot: owned },
-      });
       const awaiting = client.callTool({
         name: "run_await_result",
         arguments: { runId, waitMs: 30000, expectedWorkspaceRoot: owned },
       });
-      // Both calls have completed their initial owned-root read. The timer only
+      // The call has completed its initial owned-root read. The timer only
       // prevents a broken implementation from hanging this test before refusal.
-      startupTimer = setTimeout(() => { markWaitRead(); markAwaitRead(); }, 2000);
-      await Promise.all([waitRead, awaitRead]);
+      startupTimer = setTimeout(() => { markAwaitRead(); }, 2000);
+      await awaitRead;
       clearTimeout(startupTimer);
       startupTimer = null;
 
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: other } });
       appendFileSync(join(runDir, `${runId}.jsonl`), [
         JSON.stringify({ type: "run.completed", ts: "2026-10-15T00:00:03.000Z", runId, agentId: "w" }),
         JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-10-15T00:00:04.000Z", runId, agentId: "w" }),
       ].map((line) => line + "\n").join(""), "utf8");
-      const [waitResult, awaitResult] = await Promise.all([waiting, awaiting]);
-      assert.equal(waitResult.isError, undefined, `run_wait: ${ct13Text(waitResult)}`);
+      const awaitResult = await awaiting;
       assert.equal(awaitResult.isError, undefined, `run_await_result: ${ct13Text(awaitResult)}`);
-      assert.equal(waitResult.structuredContent.terminal, true);
       assert.equal(awaitResult.structuredContent.terminal, true);
     } finally {
       if (startupTimer) clearTimeout(startupTimer);
@@ -997,7 +988,7 @@ test("CT-14: run_wait and run_await_result keep their entry proof after selectio
 });
 
 
-test("CT-15: run_delivery and review-bundle waits keep their entry proof after selection changes", async () => {
+test("CT-15: run_delivery and review-bundle waits keep their entry proof with a different default binding", async () => {
   const owned = mkdtempSync(join(tmpdir(), "wao-ct15-owned-"));
   const other = mkdtempSync(join(tmpdir(), "wao-ct15-other-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct15-aux-"));
@@ -1019,9 +1010,12 @@ test("CT-15: run_delivery and review-bundle waits keep their entry proof after s
       const promise = new Promise((resolve) => { mark = resolve; });
       firstReads.set(testCase.runId, { promise, mark });
     }
+    // 批 119：会话选择已删除；缺省绑定（server_config=other）与调用目标不同，
+    // 入口证明按调用目标，等待不因缺省绑定被拒。
     const server = createWaoMcpServer({
       registryPath,
       runDir,
+      workspaceRoot: other,
       getRunDeliveryReadinessFn: (input) => {
         let first = true;
         return deliveryReadinessService({
@@ -1048,7 +1042,6 @@ test("CT-15: run_delivery and review-bundle waits keep their entry proof after s
       clearTimeout(startupTimer);
       startupTimer = null;
 
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: other } });
       for (const testCase of cases) {
         appendFileSync(join(runDir, `${testCase.runId}.jsonl`), [
           JSON.stringify({ type: "run.delivery_verification_passed", ts: "2026-10-15T00:00:04.000Z", seq: 6, runId: testCase.runId, agentId: "w", delivery: refs.get(testCase.runId) }),

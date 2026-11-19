@@ -27,6 +27,8 @@ import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } f
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
+// 批 119（A4）：带调用目标根时的归属核验（与 readRunActivity 同一 SSOT 入口）。
+import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { projectExecutionStage } from "./runStageProjection.js";
 // TD-153: scorecard 检查名闭集 SSOT —— 投影端成员校验的唯一登记处（与构造端
 // 不变式、MCP wire enum 同源，三层不可能漂移）。scorecard.js 是横切层叶模块，
@@ -252,6 +254,10 @@ function projectScorecardSummary(scopeEvents) {
  *   machineBootTimeMs）与 ownerLeaseReader（缺省 readOwnerLease）——不注入时真读。
  * @param {object} [input.runnerGoneCache] — TD-341: optional per-process proof
  *   cache instance (createRunnerGoneProofCache(); held by the adapter, not here).
+ * @param {string} [input.authorizedWorkspaceRoot] — 批 119（A4）：可选调用目标
+ *   根（canonical Git root）。给了就在读完转录后 fail-closed 核验该运行的归属
+ *   （verifyRunWorkspaceOwnershipTyped 同款语义，归属比较抛
+ *   code="workspace_not_authorized"）；不给则按 runId 直读，行为不变。
  * @returns {Promise<object>} structured status (CLI prints a subset; MCP a safe subset)
  */
 export async function getRunStatus({
@@ -261,6 +267,7 @@ export async function getRunStatus({
   nowFn,
   runnerGoneDeps,
   runnerGoneCache,
+  authorizedWorkspaceRoot,
 }) {
   if (!runId || typeof runId !== "string") {
     throw new Error("getRunStatus: runId is required");
@@ -282,6 +289,12 @@ export async function getRunStatus({
   // The service must NOT create the file.（TD-341：证明成立且重读仍非终态时，
   // 下方以重读快照替换 events——所以是 let。）
   let events = await _readTranscript(filePath);
+
+  // 批 119（A4）：带 authorizedWorkspaceRoot 时在读后、任何推导前核验归属
+  //（与 readRunActivity 同一纪律：fail-closed，绝不降级成部分结果）。
+  if (authorizedWorkspaceRoot !== undefined && authorizedWorkspaceRoot !== null) {
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+  }
 
   // TD-341（第 89 批 C）：runner 已不在的证明（只读；读面说出"runner 已不在"）。
   // 仅当适配层注入了证明 deps 才跑；前置筛选（非终态、owner 心跳不新鲜、满结算

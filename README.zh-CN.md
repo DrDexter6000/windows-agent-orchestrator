@@ -77,9 +77,9 @@ Codex CLI、OpenCode 或任何 MCP host——以 stdio MCP server 方式驱动 W
 状态、隔离、transcript、交付验证与 Lead 接受/拒绝决策的持久记录（它记录 Lead 的决策，
 不替 Lead 决策）；worker 只收到有界的任务 prompt，不参与编排。
 
-WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
+WAO 暴露 **20 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 
-> `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
+> `inventory → preflight（按调用带目标根）→ dispatch → await result → delivery query/review → Lead decision`
 
 外加 `runs_list` 恢复入口。`run_consult`（CLI `wao consult`，即 **Agent Union**）召集
 有界多席跨族系咨询：机械扇出、原文收集、council-diff 把每席完整原话并列呈现——

@@ -2,10 +2,11 @@
 //
 // 决定 0095（第 49 批）第 7.6 节：MCP 等待族 nextStep 的 wire 事实与
 // 新上下限/缺省（一律从常量取数）。真实 MCP server + in-memory transport。
+// 批 119：MCP run_wait 工具已真删除——原 NS-M1/M2 的 run_wait wire 测试随工具
+// 退役（CLI runs wait 的 nextStep 由 runsWait.test.js 覆盖）；等待族的 MCP 面
+// 事实全部落在 run_await_result（NS-M1 重写为其输入上下限/缺省）。
 // 覆盖：
-//   - run_wait：出参 nextStep（非终态/终态都给）≤480、不含 runId；
-//     输入缺省/下限取自常量（MCP_RUN_WAIT_DEFAULT_MS / RUN_WAIT_MIN_MS）。
-//   - run_await_result：缺省 45000（常量），无 nextStep。
+//   - run_await_result：输入 0..270000、缺省 45000（常量），无 nextStep。
 //   - run_consult：缺省 45000（描述与 schema 一致）。
 //   - run_delivery_review_bundle：缺省 45000（描述提取值 == handler 实际值）。
 //   - run_delivery：带 waitMs 且到期未收口 → nextStep；不带 waitMs → 无。
@@ -22,12 +23,10 @@ import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
-  runWait as runWaitService,
-  RUN_WAIT_MIN_MS,
-  RUN_WAIT_MAX_MS,
-  MCP_RUN_WAIT_DEFAULT_MS,
-} from "../../src/application/runWait.js";
-import { RUN_AWAIT_RESULT_DEFAULT_MS } from "../../src/application/runAwaitResult.js";
+  RUN_AWAIT_RESULT_MIN_MS,
+  RUN_AWAIT_RESULT_MAX_MS,
+  RUN_AWAIT_RESULT_DEFAULT_MS,
+} from "../../src/application/runAwaitResult.js";
 
 // ===== Helpers =====
 
@@ -94,73 +93,21 @@ async function buildServerClient({ dir, registryPath, overrides = {} }) {
 }
 
 // =====================================================================
-// run_wait — nextStep on the wire + constants-locked bounds/defaults
+// run_await_result — constants-locked bounds/defaults（批 119 起 MCP 面唯一等待工具）
 // =====================================================================
 
-test("NS-M1: run_wait input bounds/default from constants (30000..600000, default 45000)", async () => {
+test("NS-M1: run_await_result input bounds/default from constants (0..270000, default 45000)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ns-m1-"));
   try {
     makeGitRepo(dir);
     const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
     try {
       const tools = await client.listTools();
-      const t = tools.tools.find((x) => x.name === "run_wait");
+      const t = tools.tools.find((x) => x.name === "run_await_result");
       const w = t.inputSchema.properties.waitMs;
-      assert.equal(w.minimum, RUN_WAIT_MIN_MS, "下限取自常量（决定 0095：30000）");
-      assert.equal(w.maximum, RUN_WAIT_MAX_MS);
-      assert.equal(w.default, MCP_RUN_WAIT_DEFAULT_MS, "MCP 缺省取自常量（45000）");
-      assert.match(t.description, new RegExp(`default ${MCP_RUN_WAIT_DEFAULT_MS}`));
-      // 出参 schema：可选 nextStep，≤480。
-      const ns = t.outputSchema.properties.nextStep;
-      assert.ok(ns, "output schema 声明 nextStep");
-      assert.equal(ns.maxLength, 480);
-    } finally {
-      await client.close(); await server.close();
-    }
-  } finally { cleanupDir(dir); }
-});
-
-test("NS-M2: run_wait 非终态返回带 nextStep（按体征年龄渲染，不含 runId）；终态也带", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m2-"));
-  const runDir = join(dir, "runs");
-  try {
-    makeGitRepo(dir);
-    // 非终态：最近体征 30+ 分钟前 → quiet 分支模板。
-    seedTranscript(runDir, "run_ns_quiet", { lastEventTs: "2026-08-02T00:00:00.000Z", workspaceCwd: dir });
-    seedTranscript(runDir, "run_ns_term", { terminal: true, workspaceCwd: dir });
-    const { server, client } = await buildServerClient({
-      dir, registryPath: makeRegistry(dir),
-      overrides: {
-        runWaitFn: (input) => runWaitService({
-          ...input,
-          sleepFn: () => Promise.resolve(),
-          nowFn: (() => { let t = Date.now(); return () => (t += 200_000); })(),
-        }),
-      },
-    });
-    try {
-      const res = await client.callTool({
-        name: "run_wait",
-        arguments: { runId: "run_ns_quiet", waitMs: RUN_WAIT_MIN_MS },
-      });
-      const parsed = res.structuredContent;
-      assert.equal(parsed.terminal, false);
-      assert.match(parsed.nextStep, /No new signs of life in the transcript for \d+ min/);
-      assert.match(parsed.nextStep, /run_stop is only for an explicit Lead decision/);
-      assert.ok(!parsed.nextStep.includes("run_ns_quiet"), "MCP 面 nextStep 不含 runId");
-      assert.ok(parsed.nextStep.length <= 480);
-      // waitWindowHint / transcriptQuiet 仍不进 wire（TD-149(b) 钉）。
-      assert.equal("waitWindowHint" in parsed, false);
-      assert.equal("transcriptQuiet" in parsed, false);
-
-      const resT = await client.callTool({
-        name: "run_wait",
-        arguments: { runId: "run_ns_term", waitMs: RUN_WAIT_MIN_MS },
-      });
-      const parsedT = resT.structuredContent;
-      assert.equal(parsedT.terminal, true);
-      assert.match(parsedT.nextStep, /run_delivery with an explicit waitMs/);
-      assert.ok(!parsedT.nextStep.includes("run_ns_term"));
+      assert.equal(w.minimum, RUN_AWAIT_RESULT_MIN_MS, "下限取自常量（0 = point-in-time）");
+      assert.equal(w.maximum, RUN_AWAIT_RESULT_MAX_MS, "上限取自常量（270000——长等待靠重复调用，不是加长单次）");
+      assert.equal(w.default, RUN_AWAIT_RESULT_DEFAULT_MS, "缺省取自常量（45000）");
     } finally {
       await client.close(); await server.close();
     }
@@ -601,7 +548,7 @@ test("NS-M7: run_dispatch accepted:true → nextStep（静态模板，无 runId�
         arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined);
-      assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_wait repeatedly/);
+      assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly \(waitMs up to 270000 each\)/);
       assert.ok(!res.structuredContent.nextStep.includes("run_ns_m7_ok"), "静态模板不含 runId");
     } finally {
       await client.close(); await server.close();

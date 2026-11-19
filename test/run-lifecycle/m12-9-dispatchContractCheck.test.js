@@ -65,7 +65,7 @@ function writeRealRegistry(dir, agents) {
   return registryPath;
 }
 
-const BOUND = { bound: true, source: "lead_session", root: "/tmp/repo" };
+const BOUND = { bound: true, source: "call_target", root: "/tmp/repo" };
 
 test("B4: output shape is bounded — advisory true, closed-set sections, profile counts only", async () => {
   const r = await runDispatchContractCheck({
@@ -455,7 +455,7 @@ test("M12-13-CONTRACT-TIMEOUT-INVALID: an invalid contract-check verificationTim
 // flip because of it — that is the whole point of TD-157: the probe reports,
 // it never gates.
 
-const PROBE_WS = { bound: true, source: "lead_session", root: "/ws" };
+const PROBE_WS = { bound: true, source: "call_target", root: "/ws" };
 
 // Injected fake-fs existence predicate. The service hands us ABSOLUTE joined
 // paths; normalize separators and read the relative tail after the "/ws/"

@@ -9,7 +9,7 @@ read_when: 把 MCP 服务注册进表内七类宿主（宿主表见该页），�
 
 WAO 是 MCP-first 控制面（为什么见决定 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用，CLI 是 fallback。每个工具直接调用共享 application service，不 shell-out CLI。工具计数、参数与形状不在本页维护，见生成层 docs/surface/mcp-tools.md。
 
-常用 Lead 闭环：`registry_list`（inventory）→ `workspace_status` / `workspace_select`（或一次 `lead_preflight`）→ `run_dispatch` → `run_await_result`（等终态）→ `run_delivery_review_bundle`（审查）→ `run_delivery_decide`（验收）。原子观察工具（`run_status` / `run_wait` / `run_collect` / `run_activity` / `run_diagnose`）、delivery 查询与审查、`run_stop` / `runs_list` 恢复、Lead 授权的 `run_continue` / `run_correct`，各工具的完整语义按任务分页：[派发](dispatch.md)、[监督](supervise.md)、[取结果与查历史](results.md)、[交付与验收](delivery.md)、[会审](consult.md)。
+常用 Lead 闭环：`registry_list`（inventory）→ `lead_preflight`（带 `expectedWorkspaceRoot` 看该项目）→ `run_dispatch` → `run_await_result`（等终态，可重复调用）→ `run_delivery_review_bundle`（审查）→ `run_delivery_decide`（验收）。原子观察工具（`run_status` / `run_collect` / `run_activity` / `run_diagnose`）、delivery 查询与审查、`run_stop` / `runs_list` 恢复、Lead 授权的 `run_continue` / `run_correct`，各工具的完整语义按任务分页：[派发](dispatch.md)、[监督](supervise.md)、[取结果与查历史](results.md)、[交付与验收](delivery.md)、[会审](consult.md)。
 
 `run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 区间与默认值见生成层；`waitMs:0` 为 point-in-time 读取）后返回安全 compact 结果与 run/liveness 观测，非终态时可按任意合法 waitMs 再调。`waitMs` 约束工具主动 sleep/poll 的总等待预算，不是给每个内部阶段各分配一份；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算——工具不把这种环境延迟谎报成 worker 失败。观察窗口、终止事实、读失败与 transport 恢复的完整语义见[监督](supervise.md)；终态附带的有界 `outcome` 捆绑（terminalState / diagnosis / delivery 安全事实，不含 commit id、changed paths、diff、command 文本或绝对路径）见生成层，其中 `outcome.delivery.isolationFailureCode` 的语义见[交付与验收](delivery.md)。
 
@@ -80,31 +80,15 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 认证与就绪字段的语义（`certificationReasonCode` / `certificationLastHealthyAt`、凭据可用性 `credentialAvailability`、`providerReadiness`——历史认证与当前凭据、授权、容量的区别）见 `docs/certification-runbook.md` §认证与当前就绪（唯一权威）。
 
-## MCP `workspace_status`（绑定状态查询）
-
-`workspace_status` 查询当前 workspace 绑定状态，输入是 strict empty schema（拒绝任何字段）。会动工作区的调用不读此绑定（目标来自各次调用的 `expectedWorkspaceRoot`）；只读工具按它取缺省范围。
-
-`source` 的三个取值对应三种 workspace authority，优先级从高到低：`"lead_session"`（Lead 会话选择，见 `workspace_select`）> `"mcp_root"`（client roots/list）> `"server_config"`（显式 `--workspace-root`，全局静态启动参数）。`workspaceRoot` 是当前绑定的 canonical Git 顶层绝对路径（Lead/host 已显式提交，非 credential，故返回）；`bound=false` 时其余字段均为 `null`。
-
-未绑定时 `unboundReason` 是闭集恢复事实（已绑定时恒为 `null`）：`"lead_session_git_proof_failed"`（既有 Lead 会话选择的 Git proof 现在失败，如 repo 被删除——不回退到更低优先级 authority）、`"server_config_git_proof_failed"`（显式 `--workspace-root` 的 proof 失败）或 `"no_workspace_authority"`（无可用 workspace authority；mcp_root 失败折叠于此）。它只区分"哪个 authority 的证明失败"，绝不返回路径或动态错误。失败返回固定安全文案 `workspace_status failed`。
-
-## MCP `workspace_select`（会话级工作区选择）
-
-`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**该选择只决定只读工具的缺省范围**；写调用只认 `expectedWorkspaceRoot`，`docs/surface/mcp-tools.md` 里带此字段的读工具也可按调用带，带了只认它，证明失败即拒、不回退；共用实例时建议这些读工具每次带。**实例级而非会话级**：同实例宿主会话共享选择（已知接受的残余），实例间严格隔离；不持久化，无需重启。`proveWorkspace` SSOT 只接受 canonical Git 顶层。仅成功才改选择；幂等。
-
-输入 `workspaceRoot` 必须为非空绝对路径（≤1024 字符）；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。失败返回固定安全文案 `workspace_select failed: workspaceRoot must be a canonical Git top-level directory`（不回显传入路径、stderr 或异常 message）。
-
-典型 Lead 流程：`workspace_select(<current Git root>)`（定只读缺省范围）→ `run_dispatch` 带 `expectedWorkspaceRoot`（派发目标）。
-
 ## MCP `lead_preflight`（advisory 启动检查）
 
-`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询 + 车道画像，替代逐个调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。车道画像经 `lanes` 字段给出（分项评分、族系、注意事项、成本、`dispatchHold` 说明）；带依据的完整画像见 `wao lanes`，字段见 `docs/surface/mcp-tools.md`。**advisory，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，不是 authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定。认证/授权证明边界见 `docs/certification-runbook.md` §认证与当前就绪。
+`lead_preflight` 让 Lead 一次调用完成 workspace 绑定 + worker credential 可用性 + active-run 查询 + 车道画像，替代逐个调用 `registry_list` + `runs_list`。车道画像经 `lanes` 字段给出（分项评分、族系、注意事项、成本、`dispatchHold` 说明）；带依据的完整画像见 `wao lanes`，字段见 `docs/surface/mcp-tools.md`。**advisory，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，不是 authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定。认证/授权证明边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
-输入 `workspaceRoot` 可选；提供时复用 `workspace_select` 的选择权威，失败不覆盖既有选择；省略时只检查当前选择。`workspace.projectBucket` 是绑定根所属项目的非绝对标签（链接工作树取主工作树的项目；认不出项目时为 null）；输出不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
+输入 `expectedWorkspaceRoot` 可选（≤1024 字符的绝对路径）。提供时当场用 `proveWorkspace` 证明（canonical Git 顶层，子目录拒绝）、**只作用于这一次调用**（`workspace.source` 报 `call_target`）、不写任何共享状态——服务实例没有会话级选择可写；证明失败返回固定文案且**不展示任何项目的运行、待办等内容**（不回落到 roots/启动配置展示别的项目）。省略时按 MCP roots（client roots/list）→ 启动配置 `--workspace-root` 解析缺省绑定，两者都不可用即未绑定。`workspace.workspaceRoot` 是绑定根规范化后的绝对路径（Lead/host 已显式提交并经证明，非 credential，故返回；未绑定为 `null`）；`workspace.projectBucket` 是绑定根所属项目的非绝对标签（链接工作树取主工作树的项目；认不出项目时为 null）；其余输出不含绝对路径/credential value/prompt/command/PID/session。不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 的派发边界见 `docs/certification-runbook.md` §认证与当前就绪。
 
 `registryIssues`/`registryIssuesTruncated` 复用与 `registry_list` 同一闭集 issue 形状与同一快照。`registryIssues` 非空时 `checkStatus.workers` 升为 `"warning"`（`complete:false`）并追加一条计数 warning，但有效 worker 照常返回。registry 整源不可读时 `workers` 为 `null`、`checkStatus.workers:"unknown"`、`registryIssues:[]`（unknown 绝不伪造为"零坏条目"）。
 
-未绑定时 `workspace.unboundReason` 与 `workspace_status` 同一闭集（见上文）。
+未绑定时 `workspace.unboundReason` 是闭集恢复事实（已绑定时恒为 `null`）：`"server_config_git_proof_failed"`（显式 `--workspace-root` 的 proof 失败）或 `"no_workspace_authority"`（无可用 workspace authority；mcp_root 失败折叠于此）。它只区分"哪个 authority 的证明失败"，绝不返回路径或动态错误。
 
 `activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，也不据此推断它 failed/dead/stopped（它可能仍在跑或休眠）。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描）；`unresolvedRunCount > 0` 时追加一条 advisory observation（不在 `activeRuns` 里，不证明失败或停止，用 `runs_list` 查看）。`activeRunCount=0` 不等于"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
 
@@ -116,7 +100,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 
-正常使用不要求先 bind：只读缺省范围用 `workspace_select` 现场选定（见上文）。`mcp bind` 只是**可选的持久项目级默认**（冷启动即绑定），写入的 `--workspace-root` 属 `server_config` 来源（优先级最低）。
+正常使用不要求先 bind：读类工具按调用带 `expectedWorkspaceRoot`（带了只认它），省略时缺省范围来自 MCP roots。`mcp bind` 只是**可选的持久项目级默认**（冷启动即绑定），写入的 `--workspace-root` 属 `server_config` 来源（优先级最低）。
 
 `mcp bind/status/unbind` 命令是各 agent harness 接入 WAO MCP 的操作面（Human Owner 面，不是 MCP 工具）：`bind` 给出或写入注册，`status` 回答"这个 harness 上 WAO 的 MCP 注册了没有"。宿主闭集与能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表派生，三能力轴：snippet（能产出该宿主形态的注册片段）/ autoBind（`bind` 能真写该宿主配置）/ hostVerified（已在真实宿主上验证加载）。三种能力为何分开算，见决定 0043。
 
@@ -133,12 +117,12 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 | claude-code | `claude mcp add wao --scope user -- <argv>` | 按 Claude Code 的优先级：当前目录的 local 级 > 项目 `.mcp.json` > user 级（前后两项在 `~/.claude.json`，随 `CLAUDE_CONFIG_DIR` 迁移） |
 | codex | 项目级 `mcp bind --host codex --cwd <git-root>`；用户级 `codex mcp add wao -- <argv>` | 项目 `.codex/config.toml` 与用户级（经 `codex mcp list --json`，不解析 TOML） |
 | zcode | 本地插件包（见下） | `~/.zcode/cli/config.json` 的启用标记 + 已安装插件副本（缓存里多个版本指向不一致时报 unknown） |
-| kimi-code | 把片段的 `mcpServers.wao` 并入 `~/.kimi-code/mcp.json`（无注册子命令）；该宿主不提供 MCP roots，接入后先调 `workspace_select` | 同一文件 |
+| kimi-code | 把片段的 `mcpServers.wao` 并入 `~/.kimi-code/mcp.json`（无注册子命令）；该宿主不提供 MCP roots，读类工具省略 `expectedWorkspaceRoot` 时未绑定——按调用带或配 `--workspace-root` | 同一文件 |
 | opencode | 把片段的 `mcp.wao` 并入 `~/.config/opencode/opencode.json`（`opencode mcp add` 是交互式向导） | 各来源**按键合并**后的 wao 条目，覆盖顺序：`OPENCODE_CONFIG_CONTENT` 内联 > 项目根 `opencode.json(c)` > `OPENCODE_CONFIG` 指定文件 > 全局文件（合并语义按官方文档纳入，本机只核实过全局文件的形状） |
 | claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件 |
 | dsh | 把片段的 `insert` 行并入 `~/.dsh/profiles/<profile>/cordis.patch.yml`（YAML，不是 `mcpServers` JSON）；profile 声明 `patchReload: live` 时改完立即生效，否则重启 dsh | 各 profile 的 `cordis.patch.yml` 与 `cordis.yml`（按 id 覆盖、`disabled` 表达式、flow 行记 unknown；bundle 层、`--patch` 叠加与 `cordis:include` 不在探测范围） |
 
-表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态（接入步骤与排坑见下方「zcode 接入」一段）；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_wait` / `run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
+表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态（接入步骤与排坑见下方「zcode 接入」一段）；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
 
 **一站式指引与一行注册示例**：已装宿主时 `wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤），指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。不带 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 与 dsh 标注 experimental）——示例的 flag 随宿主版本演进，权威形状 = 本页 + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
 

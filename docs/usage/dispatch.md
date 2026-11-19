@@ -31,7 +31,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 
 前台与后台共用一套生命周期规则：
 
-- 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期只通知不终止：前台 CLI 打一行指引后继续等到自然终态，`--background` 同样只记事实、继续监督。到期即通知的机制与三钟分离（派发侧等待窗 ≠ Lead 观察等待 ≠ 后端请求超时）见[架构](../02-architecture.md)的「三钟分离」；等待的读数与边界见 `wao manual supervise "MCP run_wait（长等待）"`。
+- 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期只通知不终止：前台 CLI 打一行指引后继续等到自然终态，`--background` 同样只记事实、继续监督。到期即通知的机制与三钟分离（派发侧等待窗 ≠ Lead 观察等待 ≠ 后端请求超时）见[架构](../02-architecture.md)的「三钟分离」；等待的读数与边界见 `wao manual supervise "MCP 等待"`。
 - 终止 worker 只有两个来源：Lead 显式 `stop`；硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
 - 前台等到失败终态时（`run`、`spawn --wait`）不抛裸错误，返回 `{runId, completed:false, failed:true, timedOut:false, error, transcript, diagnosis?}`：`error` 超过 500 字符时截断并注明总长，`diagnosis` 是同一 runId 的诊断（同 `runs diagnose`）。
@@ -72,7 +72,7 @@ npm run cli -- runs wait <runId> --until-settled     # 轮询到收口才退出�
 
 runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
-`runs wait` 与 MCP `run_wait` 共用同一等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP run_wait（长等待）"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
+`runs wait` 与 MCP 等待（`run_await_result`）共用同一族等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP 等待"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`：本地进程式 backend 两层都查，HTTP serve backend——kimi-web 豁免）；两层=前台执行通道（RunManager start/resume）与后台派发通道（dispatchRun，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
@@ -164,7 +164,7 @@ Kimi 车道模型策略：registry 用结构化 `model.id` 与 `reasoning.effort
 
 `delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容在未声明 OS 写沙箱的车道是侦测不是沙箱（写后侦测非写前阻止；codex 车道例外——见 `docs/02-architecture.md` §4.6）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
 
-单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用；它不是 `run_wait` / `run_await_result` 的观察窗口——只约束 exact verifier 的逐条 setup/assertion 命令。非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn。仅在显式声明时持久化（事件/ref 零漂移）；持久值贯穿 resume / profile 折叠 / 转发 / repackage / reverify 继承的完整合同见[架构](../02-architecture.md) §4.8 第 6 条。超时结果如实投影为闭集 `command_timeout` / `setup_timeout`，无自动加宽、无自动重试、无超时自动 stop/decision。
+单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用；它不是 `runs wait` / `run_await_result` 的观察窗口——只约束 exact verifier 的逐条 setup/assertion 命令。非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn。仅在显式声明时持久化（事件/ref 零漂移）；持久值贯穿 resume / profile 折叠 / 转发 / repackage / reverify 继承的完整合同见[架构](../02-architecture.md) §4.8 第 6 条。超时结果如实投影为闭集 `command_timeout` / `setup_timeout`，无自动加宽、无自动重试、无超时自动 stop/decision。
 
 continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"continuable": true`（与 `delivery` 同级），标记为可续谱系的根。CLI 等价：`run --background` + `--delivery-spec-file` 顶层 `"continuable": true`（前台拒绝）。dispatch 以 `run_lineage` / `turn:first` 建立 provider-native 会话（opaque uuid 与路由键由谱系自身钉住的事实派生：目标 cwd + canonical agentId + rootRunId + 车道内容指纹 + 角色正文 sha256；不含 Lead 会话），保留 retained worktree。explicit 车道+角色派发同样可作续谱根；续修子运行按根钉住的车道/角色重建。日后 Lead 审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 续一个修正回合（见下节）。wire 广告 native id（codex `thread.started`）时，终态前记 `run.provider_session_bound`（`session.created` 仍唯一 `proc_<pid>`），供续修取回真实会话。`continuable` 默认 `false`（省略字节兼容）；必须配 `delivery`（delivery-only，否则 fail-closed）。WAO 从不自动续跑——由 Lead 事后显式 `run_continue`。
 

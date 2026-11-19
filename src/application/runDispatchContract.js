@@ -430,13 +430,13 @@ export async function runDispatchContractCheck({
   // (unbound) + advisory issueCode. bound:true → observed.
   if (workspaceBinding == null) {
     sections.workspace = "unknown";
-    observations.push("workspace binding could not be resolved — use workspace_status to check directly");
+    observations.push("workspace binding could not be resolved — pass expectedWorkspaceRoot (the dispatch target) to check directly");
   } else if (workspaceBinding.bound) {
     sections.workspace = "observed";
   } else {
     sections.workspace = "observed";
     issueCodes.push("workspace_unbound");
-    observations.push("workspace is not bound — run_dispatch will refuse until a workspace is selected (reported only; not a contract defect)");
+    observations.push("workspace is not bound — run_dispatch refuses without its own expectedWorkspaceRoot target (reported only; not a contract defect)");
   }
 
   // ===== Section 2: registry (independent; read-only) =====

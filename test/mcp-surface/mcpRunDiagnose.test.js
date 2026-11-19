@@ -65,7 +65,7 @@ test("M9-5B-01: tools/list has five tools, run_diagnose schema/annotations corre
       assert.ok(names.includes("run_diagnose"), "run_diagnose present");
 
       const rd = tools.tools.find((t) => t.name === "run_diagnose");
-      assert.deepEqual(Object.keys(rd.inputSchema.properties ?? {}), ["runId"], "input has only runId");
+      assert.deepEqual(Object.keys(rd.inputSchema.properties ?? {}), ["runId", "expectedWorkspaceRoot"], "input is runId + optional per-call target (batch 119)");
       assert.equal(rd.inputSchema.additionalProperties, false, "input strict");
       assert.equal(rd.annotations.readOnlyHint, true, "readOnlyHint:true");
       assert.equal(rd.annotations.destructiveHint, false, "destructiveHint:false");

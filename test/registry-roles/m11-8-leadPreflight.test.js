@@ -1,12 +1,14 @@
 // test/m11-8-leadPreflight.test.js
 //
 // M11-8A: Lead single-call preflight (lead_preflight) — advisory aggregator.
+// 批 119（v0.10.0）：输入 expectedWorkspaceRoot 只作用于本次调用（call_target），
+// 会话级选择与其状态机（workspaceSelection/selected/failed_*）已随工具真删除。
 //
-// Covers the 15 required behaviors + the advisory-independence tests:
-//   - single call selects workspace + readiness + active runs
-//   - safe projection (no paths/creds/prompts/PIDs)
-//   - idempotent re-select
-//   - failed selection leaves prior selection intact
+// Covers the required behaviors + the advisory-independence tests:
+//   - single call carries the per-call workspace target + readiness + active runs
+//   - safe projection (no creds/prompts/PIDs; the proven root IS reported)
+//   - per-call target repeatable (no shared state to drift)
+//   - failed proof → fixed invalid-target error, no project content, no state written
 //   - each section settles independently (runs_list failure ≠ swallow workspace)
 //   - advisory warning does not block an independent run_dispatch
 //   - Lead can get a different conclusion from a direct tool
@@ -72,9 +74,9 @@ test("M11-8-G1: lead_preflight is registered and discoverable", async () => {
   } finally { cleanupDir(dir); }
 });
 
-// ===== 1. unbound + valid workspaceRoot → source=lead_session =====
+// ===== 1. valid expectedWorkspaceRoot → source=call_target，只作用于本次调用 =====
 
-test("M11-8-1: unbound + valid workspaceRoot → single call binds lead_session", async () => {
+test("M11-8-1: valid expectedWorkspaceRoot → workspace.source=call_target", async () => {
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m118-1-"));
   const ws = mkdtempSync(join(tmpdir(), "wao-m118-1-ws-"));
@@ -84,19 +86,21 @@ test("M11-8-1: unbound + valid workspaceRoot → single call binds lead_session"
     const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.workspace.bound, true);
-      assert.equal(parsed.workspace.source, "lead_session");
+      assert.equal(parsed.workspace.source, "call_target");
       assert.ok(parsed.workspace.gitHead);
+      // 批 119（A3）：规范化绝对根随绑定事实投影。
+      assert.equal(parsed.workspace.workspaceRoot.replace(/\\/g, "/"), ws.replace(/\\/g, "/"));
       assert.equal(parsed.complete, true);
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(ws); }
 });
 
-// ===== 2. idempotent re-select =====
+// ===== 2. per-call target is repeatable (no shared state to drift) =====
 
-test("M11-8-2: re-selecting same repo is idempotent", async () => {
+test("M11-8-2: passing the same root twice yields the same call_target facts", async () => {
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m118-2-"));
   const ws = mkdtempSync(join(tmpdir(), "wao-m118-2-ws-"));
@@ -106,21 +110,21 @@ test("M11-8-2: re-selecting same repo is idempotent", async () => {
     const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      const r1 = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
-      const r2 = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const r1 = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
+      const r2 = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       const p1 = JSON.parse(r1.content.find((b) => b.type === "text").text);
       const p2 = JSON.parse(r2.content.find((b) => b.type === "text").text);
-      assert.equal(p1.workspace.source, "lead_session");
-      assert.equal(p2.workspace.source, "lead_session");
+      assert.equal(p1.workspace.source, "call_target");
+      assert.equal(p2.workspace.source, "call_target");
       assert.equal(p1.workspace.gitHead, p2.workspace.gitHead);
       assert.ok(!r1.isError && !r2.isError);
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(ws); }
 });
 
-// ===== 3. illegal/subdir/non-Git rejected; prior selection intact =====
+// ===== 3. bad expectedWorkspaceRoot → fixed error, no project content（批 119 A3）=====
 
-test("M11-8-3: bad workspaceRoot rejected, prior selection intact", async () => {
+test("M11-8-3: bad expectedWorkspaceRoot → isError fixed text, NO project content", async () => {
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m118-3-"));
   const ws = mkdtempSync(join(tmpdir(), "wao-m118-3-ws-"));
@@ -131,15 +135,21 @@ test("M11-8-3: bad workspaceRoot rejected, prior selection intact", async () => 
     const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      // Select valid first.
-      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
-      // Now a bad select via lead_preflight.
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      // Selection failed → warning, but prior lead_session selection intact.
-      assert.ok(parsed.warnings.some((w) => /selection failed/i.test(w)));
-      assert.equal(parsed.workspace.bound, true);
-      assert.equal(parsed.workspace.source, "lead_session");
+      // A bad per-call target is an isError with the fixed invalid-target text —
+      // it does NOT fall back to roots/server config and shows no project content.
+      const res = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: notGit } });
+      assert.equal(res.isError, true);
+      const text = res.content.find((b) => b.type === "text").text;
+      assert.match(text, /workspace target invalid: expectedWorkspaceRoot must be an absolute path to a canonical/);
+      assert.equal(res.structuredContent, undefined, "no structured payload with project content");
+      assert.ok(!text.includes("workers"), "no worker inventory in the refusal");
+      // A follow-up call without the target still resolves normally (no shared
+      // state was written or broken by the failed proof).
+      const after = await client.callTool({ name: "lead_preflight", arguments: {} });
+      assert.equal(after.isError, undefined);
+      const parsedAfter = JSON.parse(after.content.find((b) => b.type === "text").text);
+      assert.equal(parsedAfter.workspace.bound, false, "no binding was mutated by the failed proof");
+      assert.equal(parsedAfter.workspace.unboundReason, "no_workspace_authority");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(ws); cleanupDir(notGit); }
 });
@@ -161,7 +171,7 @@ test("M11-8-4: workers preserve certification + credentialAvailability", async (
       workers: { good: { status: "certified" }, bad: { status: "conditional" } },
     }), "utf8");
     const result = await aggregateLeadPreflight({
-      workspaceBinding: { bound: true, source: "lead_session", root: dir, gitHead: "a".repeat(40), dirty: false },
+      workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "a".repeat(40), dirty: false },
       registryPath: reg, runDir: summaryDir, userEnvReader: noopReader,
     });
     const good = result.workers.find((w) => w.id === "good");
@@ -184,7 +194,7 @@ test("M11-8-5: active runs recoverable; empty list is fine", async () => {
   let listCalls = 0;
   const fakeListRuns = async () => { listCalls += 1; return { runs: [], matchedCount: 0 }; };
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "b".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/repo", gitHead: "b".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: fakeListRuns,
@@ -202,7 +212,7 @@ test("M11-8-6: output leaks no paths, credential values, prompts, PIDs, sessions
     process.env.TEST_M118_SECRET = "test-key-leakcheck";
     const reg = makeRegistry(dir, { w: { backend: "deepseek-acp", cwd: dir, credentialEnv: "TEST_M118_SECRET" } });
     const result = await aggregateLeadPreflight({
-      workspaceBinding: { bound: true, source: "lead_session", root: dir, gitHead: "c".repeat(40), dirty: false },
+      workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "c".repeat(40), dirty: false },
       registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,
     });
     const dumped = JSON.stringify(result);
@@ -227,7 +237,7 @@ test("M11-8-7: lead_preflight writes no .codex/global/project config", async () 
     const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       await client.callTool({ name: "lead_preflight", arguments: {} });
     } finally { await client.close(); await server.close(); }
     const after = new Set(readdirSync(ws));
@@ -248,7 +258,7 @@ test("M11-8-8: lead_preflight creates no run/transcript/worktree", async () => {
     const server = createWaoMcpServer({ registryPath: reg, runDir, userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
     } finally { await client.close(); await server.close(); }
     const jsonl = existsSync(runDir) ? readdirSync(runDir).filter((f) => f.endsWith(".jsonl")) : [];
     assert.equal(jsonl.length, 0, "no transcript/run files created");
@@ -278,7 +288,7 @@ test("M11-8-ADV1: runs_list failure → workspace + workers still returned", asy
   try {
     const reg = makeRegistry(dir, { w: { backend: "codex", cwd: dir } });
     const result = await aggregateLeadPreflight({
-      workspaceBinding: { bound: true, source: "lead_session", root: dir, gitHead: "d".repeat(40), dirty: false },
+      workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "d".repeat(40), dirty: false },
       registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,
       listRunsFn: async () => { throw new Error("simulated runs_list failure"); },
     });
@@ -294,7 +304,7 @@ test("M11-8-ADV1: runs_list failure → workspace + workers still returned", asy
 
 test("M11-8-ADV2: registry failure → workspace still returned; workers=null (not [])", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "e".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/repo", gitHead: "e".repeat(40), dirty: false },
     registryPath: "/missing.json", runDir: "/runs", userEnvReader: noopReader,
   });
   assert.equal(result.workspace.bound, true, "workspace still returned");
@@ -313,7 +323,7 @@ test("M11-8-ADV2: registry failure → workspace still returned; workers=null (n
 test("M12-25-PRE-7: null/malformed injected inventory → workers unknown/null (NOT observed-empty)", async () => {
   for (const bad of [null, undefined, { noAgentsKey: true }, 42, "a-string"]) {
     const result = await aggregateLeadPreflight({
-      workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "f".repeat(40), dirty: false },
+      workspaceBinding: { bound: true, source: "call_target", root: "/repo", gitHead: "f".repeat(40), dirty: false },
       registryPath: "/r.json", runDir: "/runs", userEnvReader: noopReader,
       getRegistryInventoryFn: async () => bad,
       listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 0 }),
@@ -342,7 +352,7 @@ test("M11-8-ADV3: advisory warning does not block independent run_dispatch", asy
     const client = await buildClient(server);
     try {
       // preflight with a warning (e.g. missing worker) — advisory only.
-      const pf = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const pf = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       const parsed = JSON.parse(pf.content.find((b) => b.type === "text").text);
       // Even if there are warnings, run_dispatch must still be callable independently.
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do", expectedWorkspaceRoot: ws } });
@@ -369,34 +379,17 @@ test("M11-8-ADV4: no PASS/FAIL verdict; complete is mechanical readability", asy
 
 test("M11-8-ADV5: manualChecks point at original tools for independent re-verify", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "f".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/repo", gitHead: "f".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
   });
-  assert.ok(result.manualChecks.some((m) => /workspace_status/.test(m)));
-  assert.ok(result.manualChecks.some((m) => /registry_list/.test(m)));
-  assert.ok(result.manualChecks.some((m) => /runs_list/.test(m)));
+  assert.ok(result.manualChecks.some((m) => /runs_list/.test(m)), "manualChecks points at runs_list (binding + active runs)");
+  assert.ok(result.manualChecks.some((m) => /registry_list/.test(m)), "manualChecks points at registry_list");
 });
 
 // ===== Truthfulness/boundedness RED→GREEN (CTO micro-closeout) =====
 
 // T-1: bound A, request select illegal B → must NOT be complete; explicit failed_using_prior.
-test("M11-8-T1: failed selection → workspaceSelection=failed_using_prior, complete=false", async () => {
-  // All other sections succeed, so WITHOUT the fix complete would be true.
-  const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
-    selectionRequested: true,
-    selectionFailed: true,
-    registryPath: "/r.json", runDir: "/runs",
-    getRegistryInventoryFn: async () => [{ id: "w", backend: "claude-code", model: "m", certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
-    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
-  });
-  assert.equal(result.workspaceSelection, "failed_using_prior");
-  assert.equal(result.checkStatus.workspace, "warning");
-  assert.equal(result.complete, false, "failed selection MUST NOT be complete even if other sections observed");
-  assert.ok(result.warnings.some((w) => /selection failed/i.test(w)), "explicit warning about prior selection");
-});
-
 // T-2: resolver threw (binding null) → workspace=null + unknown (not faked bound:false).
 test("M11-8-T2: resolver threw → workspace=null, checkStatus.workspace=unknown", async () => {
   const result = await aggregateLeadPreflight({
@@ -411,7 +404,7 @@ test("M11-8-T2: resolver threw → workspace=null, checkStatus.workspace=unknown
 // T-3: registry throws → workers=null; listRuns throws → activeRuns=null (distinct from known-empty).
 test("M11-8-T3: registry/runs throw → null (not empty array)", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "b".repeat(40), dirty: false },
     registryPath: "/missing.json", runDir: "/runs",
     listRunsFn: async () => { throw new Error("boom"); },
   });
@@ -425,7 +418,7 @@ test("M11-8-T3: registry/runs throw → null (not empty array)", async () => {
 test("M11-8-T4: many active runs → capped at 10, count + truncated", async () => {
   const many = Array.from({ length: 25 }, (_, i) => ({ runId: `run_${i}`, agentId: "w", state: "running", terminal: false, updatedAt: null }));
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "c".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({ runs: many, matchedCount: 25 }),
@@ -435,39 +428,12 @@ test("M11-8-T4: many active runs → capped at 10, count + truncated", async () 
   assert.equal(result.activeRunsTruncated, true, "truncation flag set");
 });
 
-// T-5: failed selection via real MCP tool → payload has workspaceSelection + complete=false.
-test("M11-8-T5: MCP lead_preflight failed selection → explicit failed_using_prior, not complete", async () => {
-  const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "wao-m118-t5-"));
-  const wsA = mkdtempSync(join(tmpdir(), "wao-m118-t5-a-"));
-  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-t5-nogit-"));
-  try {
-    makeGitRepo(wsA);
-    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: wsA } });
-    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
-    const client = await buildClient(server);
-    try {
-      // Select A first.
-      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: wsA } });
-      // Request B (illegal) — must report failed_using_prior, NOT complete.
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      assert.equal(parsed.workspaceSelection, "failed_using_prior");
-      assert.equal(parsed.complete, false);
-      // The reported workspace is still A (prior), explicitly flagged.
-      assert.equal(parsed.workspace.bound, true);
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); cleanupDir(wsA); cleanupDir(notGit); }
-});
-
-// ===== Final truth-boundary RED→GREEN (CTO micro-closeout) =====
-
 // FB-A: registry single read — failed snapshot must NOT trigger a second read.
 test("M11-8-FBA: registry failure → exactly ONE read, workers=null (no fallback re-read)", async () => {
   let readCount = 0;
   const failingResolver = async () => { readCount += 1; throw new Error("snapshot failed"); };
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: failingResolver,
     listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
@@ -475,54 +441,6 @@ test("M11-8-FBA: registry failure → exactly ONE read, workers=null (no fallbac
   assert.equal(readCount, 1, "registry read exactly once (no fallback)");
   assert.equal(result.workers, null, "failed read → null, not []");
   assert.equal(result.checkStatus.workers, "unknown");
-});
-
-// FB-B1: fresh unbound + selection failed → failed_unbound (NOT failed_using_prior).
-test("M11-8-FBB1: fresh unbound + failed selection → failed_unbound", async () => {
-  const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: false },
-    selectionRequested: true,
-    selectionFailed: true,
-    registryPath: "/r.json", runDir: "/runs",
-    getRegistryInventoryFn: async () => [],
-  });
-  assert.equal(result.workspaceSelection, "failed_unbound", "no prior → failed_unbound, not failed_using_prior");
-  assert.equal(result.complete, false);
-});
-
-// FB-B2: selection succeeded → selected.
-test("M11-8-FBB2: successful selection → selected", async () => {
-  const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
-    selectionRequested: true,
-    selectionFailed: false,
-    registryPath: "/r.json", runDir: "/runs",
-    getRegistryInventoryFn: async () => [],
-  });
-  assert.equal(result.workspaceSelection, "selected");
-});
-
-// FB-B3: no workspaceRoot → not_requested.
-test("M11-8-FBB3: no selection requested → not_requested", async () => {
-  const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
-    registryPath: "/r.json", runDir: "/runs",
-    getRegistryInventoryFn: async () => [],
-  });
-  assert.equal(result.workspaceSelection, "not_requested");
-});
-
-// FB-B4: selection failed + resolver threw → failed_unknown.
-test("M11-8-FBB4: failed selection + resolver threw → failed_unknown", async () => {
-  const result = await aggregateLeadPreflight({
-    workspaceBinding: null,
-    selectionRequested: true,
-    selectionFailed: true,
-    registryPath: "/r.json", runDir: "/runs",
-    getRegistryInventoryFn: async () => [],
-  });
-  assert.equal(result.workspaceSelection, "failed_unknown");
-  assert.equal(result.complete, false);
 });
 
 // FB-C: schema enforces maxItems via shared SSOT (prove caps are consistent).
@@ -542,7 +460,7 @@ test("M11-8-FBC2: workers truncated at WORKERS_CAP", async () => {
     credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [],
   }));
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "d".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => many,
   });
@@ -567,7 +485,7 @@ test("M11-8-FE1: MCP handler reads registry exactly ONCE on failure (real transp
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(readCount, 1, "registry read exactly once via real MCP handler");
       assert.equal(parsed.workers, null, "failed read → null via MCP");
@@ -577,49 +495,6 @@ test("M11-8-FE1: MCP handler reads registry exactly ONCE on failure (real transp
   } finally { cleanupDir(dir); cleanupDir(ws); }
 });
 
-// FE-2: fresh unbound session + illegal workspaceRoot → failed_unbound (NOT failed_using_prior).
-test("M11-8-FE2: fresh unbound + bad selection → failed_unbound via real MCP", async () => {
-  const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe2-"));
-  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-fe2-nogit-"));
-  try {
-    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } });
-    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
-    const client = await buildClient(server);
-    try {
-      // NO prior selection — fresh unbound session.
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      assert.equal(parsed.workspaceSelection, "failed_unbound", "fresh unbound → failed_unbound, not failed_using_prior");
-      assert.equal(parsed.complete, false);
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); cleanupDir(notGit); }
-});
-
-// FE-3: prior selection active + illegal workspaceRoot → failed_using_prior.
-test("M11-8-FE3: prior selection + bad selection → failed_using_prior via real MCP", async () => {
-  const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe3-"));
-  const wsA = mkdtempSync(join(tmpdir(), "wao-m118-fe3-a-"));
-  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-fe3-nogit-"));
-  try {
-    makeGitRepo(wsA);
-    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: wsA } });
-    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
-    const client = await buildClient(server);
-    try {
-      // Select A first.
-      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: wsA } });
-      // Now request illegal B.
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
-      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      assert.equal(parsed.workspaceSelection, "failed_using_prior", "prior active → failed_using_prior");
-      assert.equal(parsed.complete, false);
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); cleanupDir(wsA); cleanupDir(notGit); }
-});
-
-// FE-4: real output schema maxItems matches SSOT caps (not just "constant exists").
 test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps", async () => {
   const { ACTIVE_RUNS_CAP, WORKERS_CAP } = await import("../../src/application/leadPreflight.js");
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
@@ -676,7 +551,7 @@ function preVerifier(authorizedRoot) {
 // PRE-01: activeRunCount counts only proven active; unresolvedRunCount exposed separately.
 test("M12-15-PRE-01: activeRunCount counts only proven active; unresolvedRunCount exposed", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({
@@ -697,7 +572,7 @@ test("M12-15-PRE-01: activeRunCount counts only proven active; unresolvedRunCoun
 // PRE-02: unresolved runs produce an advisory observation (omitted + do not prove failure/stop).
 test("M12-15-PRE-02: unresolved runs → advisory observation (omitted from activeRuns; not failure/stop)", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "b".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 4 }),
@@ -714,7 +589,7 @@ test("M12-15-PRE-02: unresolved runs → advisory observation (omitted from acti
 // PRE-03: no unresolved advisory when unresolvedRunCount is 0.
 test("M12-15-PRE-03: no unresolved advisory observation when unresolvedRunCount is 0", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "c".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 0 }),
@@ -726,7 +601,7 @@ test("M12-15-PRE-03: no unresolved advisory observation when unresolvedRunCount 
 // PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=null (unknown, not faked 0).
 test("M12-15-PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=null (unknown, not faked 0)", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "d".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
     listRunsFn: async () => { throw new Error("simulated runs_list failure"); },
@@ -742,7 +617,7 @@ test("M12-15-PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=n
 // PRE-A: bound workspace → unboundReason projects null (never a string when bound).
 test("M12-19-PRE-A: bound workspace → unboundReason=null", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
   });
@@ -752,7 +627,7 @@ test("M12-19-PRE-A: bound workspace → unboundReason=null", async () => {
 
 // PRE-B: every closed-set unboundReason projects verbatim (truthful passthrough).
 test("M12-19-PRE-B: each closed-set unboundReason projects verbatim", async () => {
-  for (const reason of ["lead_session_git_proof_failed", "server_config_git_proof_failed", "no_workspace_authority"]) {
+  for (const reason of ["server_config_git_proof_failed", "no_workspace_authority"]) {
     const result = await aggregateLeadPreflight({
       workspaceBinding: { bound: false, unboundReason: reason },
       registryPath: "/r.json", runDir: "/runs",
@@ -791,35 +666,6 @@ test("M12-19-PRE-F: unknown unboundReason fails closed to null at the applicatio
     assert.equal(result.workspace.bound, false, `still known-unbound for ${JSON.stringify(unknown)}`);
     assert.equal(result.workspace.unboundReason, null, `fails closed to null for ${JSON.stringify(unknown)}`);
   }
-});
-
-// PRE-D: real MCP — lead_session selection breaks (repo deleted) →
-// lead_preflight reports workspace.unboundReason=lead_session_git_proof_failed
-// with workspaceSelection=not_requested (no re-select attempted).
-test("M12-19-PRE-D: real MCP — broken lead_session → unboundReason=lead_session_git_proof_failed", async () => {
-  const { createWaoMcpServer } = await import("../../src/mcp/server.js");
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1219-pred-"));
-  const ws = mkdtempSync(join(tmpdir(), "wao-m1219-pred-ws-"));
-  try {
-    makeGitRepo(ws);
-    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: ws } });
-    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
-    const client = await buildClient(server);
-    try {
-      // Bind via lead_preflight's select.
-      const r1 = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
-      assert.equal(JSON.parse(r1.content.find((b) => b.type === "text").text).workspace.bound, true);
-      // Break the session repo, then re-run preflight WITHOUT workspaceRoot.
-      rmSync(ws, { recursive: true, force: true });
-      const r2 = await client.callTool({ name: "lead_preflight", arguments: {} });
-      const parsed = JSON.parse(r2.content.find((b) => b.type === "text").text);
-      assert.equal(parsed.workspace.bound, false);
-      assert.equal(parsed.workspace.unboundReason, "lead_session_git_proof_failed");
-      assert.equal(parsed.workspace.source, null);
-      assert.equal(parsed.workspaceSelection, "not_requested");
-      assert.ok(!r2.isError, "recovery fact is a payload field, never an error");
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); cleanupDir(ws); }
 });
 
 // PRE-E: real MCP — fresh unbound server → workspace.unboundReason=no_workspace_authority.
@@ -861,7 +707,7 @@ test("M12-15-PRE-05: real listRuns composition — activeRunCount excludes stale
     };
     const livenessFn = (runDir, runId, now) => livenessMap[runId] ?? { fresh: false, heartbeatAt: null };
     const result = await aggregateLeadPreflight({
-      workspaceBinding: { bound: true, source: "lead_session", root: ROOT, gitHead: "e".repeat(40), dirty: false },
+      workspaceBinding: { bound: true, source: "call_target", root: ROOT, gitHead: "e".repeat(40), dirty: false },
       registryPath: "/r.json", runDir,
       getRegistryInventoryFn: async () => [],
       listRunsFn: (args) => listRuns({
@@ -894,7 +740,7 @@ test("M12-15-PRE-05: real listRuns composition — activeRunCount excludes stale
 test("M12-25-PRE-1: partial inventory → workers=warning, complete=false, valid workers + issues shown (single read)", async () => {
   let readCount = 0;
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "a".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => {
       readCount += 1;
@@ -919,7 +765,7 @@ test("M12-25-PRE-1: partial inventory → workers=warning, complete=false, valid
 
 test("M12-25-PRE-2: empty valid registry (no issues) → workers=observed, complete", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "b".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => ({ agents: [], issues: [], issuesTruncated: false }),
     listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
@@ -932,7 +778,7 @@ test("M12-25-PRE-2: empty valid registry (no issues) → workers=observed, compl
 
 test("M12-25-PRE-3: zero valid entries WITH issues → warning, complete=false (NOT observed-clean empty)", async () => {
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "c".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => ({
       agents: [],
@@ -960,7 +806,7 @@ test("M12-25-PRE-4: real MCP lead_preflight with a real malformed registry → w
     const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: ws } });
       assert.equal(res.isError, undefined, "partial inventory is a normal result");
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal(parsed.checkStatus.workers, "warning", "warning because one entry is malformed");
@@ -1011,7 +857,7 @@ test("M12-25-PRE-6: injected >cap issues with issuesTruncated:false → bounded 
     config: { secret: i },
   }));
   const result = await aggregateLeadPreflight({
-    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    workspaceBinding: { bound: true, source: "call_target", root: "/A", gitHead: "d".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => ({
       agents: [{ id: "good", backend: "claude-code", model: "m", reasoningEffort: null, certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
@@ -1044,7 +890,7 @@ test("M12-25-PRE-6: injected >cap issues with issuesTruncated:false → bounded 
 // 证明一律注入桩（runnerGoneProbeFn），不跑真实进程扫描。
 // ═══════════════════════════════════════════════════════════════════════════
 
-const RG_WS = { bound: true, source: "lead_session", root: "/repo", gitHead: "d".repeat(40), dirty: false };
+const RG_WS = { bound: true, source: "call_target", root: "/repo", gitHead: "d".repeat(40), dirty: false };
 
 // rgPreflightInput 的 listRunsFn 收到的调用参数（续修 7：断言候选上限用）。
 const seenListRunsArgs = [];

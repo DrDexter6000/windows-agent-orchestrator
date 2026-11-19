@@ -4,12 +4,12 @@
 //
 // Aggregates the mechanical facts a Lead needs to start WAO orchestration —
 // workspace binding, worker credential availability, and active runs — into ONE
-// result so the Lead does not have to call workspace_select/status +
-// registry_list + runs_list as separate round trips.
+// result so the Lead does not have to call registry_list + runs_list as
+// separate round trips.
 //
 // This is an OPTIONAL ADVISORY aggregator, NOT an authorization gate:
 //   - It never produces permit/token/approval/preflightPassed state.
-//   - run_dispatch / workspace_select / registry_list / runs_list do NOT depend
+//   - run_dispatch / registry_list / runs_list do NOT depend
 //     on it having succeeded.
 //   - Each check is settled INDEPENDENTLY: a failure in one (e.g. runs_list)
 //     does NOT swallow the others (workspace/registry results are still returned).
@@ -109,10 +109,13 @@ export {
 /**
  * @typedef {Object} PreflightWorkspace
  * @property {boolean} bound
- * @property {("lead_session"|"server_config"|"mcp_root"|null)} source
+ * @property {("call_target"|"server_config"|"mcp_root"|null)} source
+ * @property {string|null} workspaceRoot
+ *   批 119（A3）：规范化后的绝对根路径（原绑定状态查询工具的职责收编于此）。
+ *   null when unbound.
  * @property {string|null} gitHead
  * @property {boolean|null} dirty
- * @property {("lead_session_git_proof_failed"|"server_config_git_proof_failed"|"no_workspace_authority"|null)} unboundReason
+ * @property {("server_config_git_proof_failed"|"no_workspace_authority"|null)} unboundReason
  *   Recovery fact (M12-19): closed-set reason the workspace is not bound.
  *   null when bound, or when the caller supplied no reason (never fabricated).
  */
@@ -158,15 +161,15 @@ export const RUNNER_GONE_PREFLIGHT_BUDGET_MS = 20000;
 // TD-341：open item 行的字符上限（与 observations 的 wire 上限同值，这里在构造
 // 侧强制截断 runId 清单，不依赖 wire 兜底）。
 export const RUNNER_GONE_OPEN_ITEM_MAX_LEN = 512;
-// Closed set of unbound workspace reasons (M12-19 recovery truth). The smallest
-// truthful set distinguishing: (a) a lead_session whose Git proof now fails,
-// (b) an explicit server_config whose proof fails, (c) no usable workspace
-// authority. mcp_root failures collapse into (c) via the existing fall-through.
+// Closed set of unbound workspace reasons (M12-19 recovery truth; 批 119 起两
+// 成员——会话级选择档已随其工具真删除). The smallest truthful set
+// distinguishing: (a) an explicit server_config whose proof fails, (b) no
+// usable workspace authority. mcp_root failures collapse into (b) via the
+// existing fall-through.
 // A closed set — the MCP layer derives its zod enums from this SSOT; dynamic
 // error text and paths are NEVER returned. Exported so the MCP output schemas
 // enforce the SAME set (single SSOT).
 export const WORKSPACE_UNBOUND_REASONS = Object.freeze([
-  "lead_session_git_proof_failed",
   "server_config_git_proof_failed",
   "no_workspace_authority",
 ]);
@@ -286,26 +289,16 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   - "unknown" (could not read) is NEVER faked as a known-empty/known-false
  *     value. An unreadable section returns null (or unknown), NOT [] / false.
  *     This keeps "could not confirm" structurally distinct from "confirmed none".
- *   - A workspace selection outcome is reported via a closed set:
- *       not_requested      — no workspaceRoot was provided.
- *       selected           — selection succeeded.
- *       failed_using_prior — selection failed but a prior binding is active.
- *       failed_unbound     — selection failed and no prior binding exists.
- *       failed_unknown     — selection failed and the resolver also threw.
- *     All failure states set checkStatus.workspace="warning" and complete=false.
- *   - complete is true ONLY when every requested check was reliably observed
- *     AND no workspace selection failure occurred.
+ *   - complete is true ONLY when every requested check was reliably observed.
+ *     批 119（A3）：会话选择结果闭集（选择状态机）已随共享
+ *     会话选择一起删除——聚合器只接收已解析的绑定（调用目标或缺省绑定）。
  *
  * @param {object} input
  * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}|null} [input.workspaceBinding]
- *   The already-resolved workspace binding (from the MCP adapter's session state).
- *   null/undefined when the resolver itself threw (→ unknown, not faked unbound).
- * @param {boolean} [input.selectionRequested] — true when a workspaceRoot was
- *   provided (selection was attempted). Combined with the binding outcome this
- *   derives the workspaceSelection value.
- * @param {boolean} [input.selectionFailed] — true when the attempted selection
- *   threw (kept for backward compat; selectionRequested+selectionFailed together
- *   determine the outcome).
+ *   The already-resolved workspace binding (the per-call proved target when the
+ *   caller supplied expectedWorkspaceRoot, else the adapter's default binding:
+ *   MCP roots → server config). null/undefined when the resolver itself threw
+ *   (→ unknown, not faked unbound).
  * @param {string} input.registryPath
  * @param {string} input.runDir
  * @param {Function} [input.userEnvReader] — for credential readiness
@@ -370,8 +363,6 @@ function renderGateStatusLine(lease, knownAgentIds) {
  */
 export async function aggregateLeadPreflight({
   workspaceBinding,
-  selectionRequested = false,
-  selectionFailed = false,
   registryPath,
   runDir,
   userEnvReader,
@@ -393,7 +384,6 @@ export async function aggregateLeadPreflight({
   const warnings = [];
   const observations = [];
   const checkStatus = {};
-  let workspaceSelection = null;
 
   // --- Section 0: server-build facts (injected dependency; advisory only) ---
   // The git subprocess lives in serverBuildFacts.js; only the structured
@@ -466,18 +456,20 @@ export async function aggregateLeadPreflight({
   if (workspaceBinding == null) {
     // Resolver threw — cannot confirm binding state.
     checkStatus.workspace = "unknown";
-    warnings.push("workspace binding could not be resolved — use workspace_status to check directly");
+    warnings.push("workspace binding could not be resolved — retry with expectedWorkspaceRoot, or check the server's --workspace-root / MCP roots");
   } else if (workspaceBinding.bound) {
     workspace = {
       bound: true,
       source: workspaceBinding.source ?? null,
+      // 批 119（A3）：规范化后的绝对根路径随绑定事实投影（不是凭据——
+      // 绑定根是 Lead/宿主给出并经证明的 Git 根）。
+      workspaceRoot: workspaceBinding.root ?? null,
       gitHead: workspaceBinding.gitHead ?? null,
       dirty: workspaceBinding.dirty ?? null,
       unboundReason: null,
       // 非绝对、确定性的项目标签（与写侧桶 slug 同派生式，来自
-      // projectIdentity SSOT）——在"preflight 不输出绝对路径"合同内让 Lead
-      // 看出绑定根所属项目的标签；链接工作树取主工作树的项目（决定 0099 R8）。
-      // 根不可识别 → null（绝不编造）。
+      // projectIdentity SSOT）——让 Lead 看出绑定根所属项目的标签；
+      // 链接工作树取主工作树的项目（决定 0099 R8）。根不可识别 → null（绝不编造）。
       projectBucket: projectBucketLabel(workspaceBinding.root),
     };
     checkStatus.workspace = "observed";
@@ -497,6 +489,7 @@ export async function aggregateLeadPreflight({
     workspace = {
       bound: false,
       source: null,
+      workspaceRoot: null,
       gitHead: null,
       dirty: null,
       unboundReason,
@@ -504,38 +497,7 @@ export async function aggregateLeadPreflight({
       projectBucket: null,
     };
     checkStatus.workspace = "observed";
-    observations.push("workspace not bound — call workspace_select or lead_preflight with workspaceRoot");
-  }
-  // Derive workspaceSelection from the explicit closed set:
-  //   not_requested      — no workspaceRoot was provided.
-  //   selected           — selection was requested and succeeded (binding is the
-  //                        newly-selected lead_session).
-  //   failed_using_prior — selection was requested but failed, and a PRIOR
-  //                        binding is still active (the reported workspace is the
-  //                        prior one, NOT the requested one).
-  //   failed_unbound     — selection was requested but failed, and there was NO
-  //                        prior binding (nothing is bound).
-  //   failed_unknown     — selection was requested but failed, and the resolver
-  //                        also threw (cannot tell if a prior binding exists).
-  if (!selectionRequested) {
-    workspaceSelection = "not_requested";
-  } else if (!selectionFailed) {
-    workspaceSelection = "selected";
-  } else {
-    // Selection failed — distinguish by whether a prior binding exists.
-    if (workspaceBinding == null) {
-      workspaceSelection = "failed_unknown";
-      checkStatus.workspace = "warning";
-      warnings.push("workspace selection failed and binding state could not be confirmed — use workspace_status to check directly");
-    } else if (workspaceBinding.bound) {
-      workspaceSelection = "failed_using_prior";
-      checkStatus.workspace = "warning";
-      warnings.push("workspace selection failed — prior session selection is unchanged; the reported workspace is the PRIOR selection, not the requested one");
-    } else {
-      workspaceSelection = "failed_unbound";
-      checkStatus.workspace = "warning";
-      warnings.push("workspace selection failed and no prior workspace is bound — call workspace_select with a valid Git top-level to retry");
-    }
+    observations.push("workspace not bound — provide expectedWorkspaceRoot on the next call (or configure --workspace-root / exactly one MCP root)");
   }
 
   // --- Section 2: worker credential availability (independent) ---
@@ -869,22 +831,19 @@ export async function aggregateLeadPreflight({
     observeLaneOmission("lane profiles could not be read — use wao lanes");
   }
 
-  // complete = every section reliably observed AND no selection failure.
-  // A selection failure or any "unknown"/"warning" makes it false.
+  // complete = every section reliably observed. Any "unknown"/"warning" makes
+  // it false.（批 119：选择失败分支已随会话选择删除，只剩分节观察口径。）
   const sections = ["workspace", "workers", "activeRuns"];
   const allObserved = sections.every((s) => checkStatus[s] === "observed");
-  // complete is false if any section is unknown/warning OR a selection failed.
-  const complete = allObserved && !(selectionRequested && selectionFailed);
+  const complete = allObserved;
 
   const manualChecks = [
-    "workspace_status — verify binding independently",
+    "runs_list (expectedWorkspaceRoot) — verify the workspace binding and active runs independently",
     "registry_list — verify configured workers, recorded certification, and credential presence (not live provider quota)",
-    "runs_list — verify active runs independently",
   ];
 
   return {
     workspace,
-    workspaceSelection,
     workers,
     // M12-25: bounded safe per-entry issues from the partial inventory (empty when
     // observed-clean or unknown). Non-empty ⇒ checkStatus.workers="warning".

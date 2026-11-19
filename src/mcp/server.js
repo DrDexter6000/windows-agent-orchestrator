@@ -148,17 +148,11 @@ import {
 } from "../application/runStop.js";
 import { listRuns, ACTIVITY_STATUSES, ACTIVITY_BASES } from "../application/runList.js";
 import { createRunSummaryCache } from "../application/runSummaryCache.js";
-import {
-  runWait,
-  RUN_WAIT_MIN_MS,
-  RUN_WAIT_MAX_MS,
-  // 决定 0095：MCP 调用面的缺省 45000（CLI 有界缺省 RUN_WAIT_DEFAULT_MS
-  // 270000 不变，两者各自命名）。
-  MCP_RUN_WAIT_DEFAULT_MS,
-} from "../application/runWait.js";
+// 批 119（A5）：MCP 长轮询等待工具真删除——runWait 服务与它的等待域常量只剩
+// CLI 面在用，server.js 不再 import。长等待指引改为重复 run_await_result。
 // 决定 0095：nextStep——等待族工具没等到收口时的一句固定英文模板（MCP 面只写
 // 工具名、不含 runId）。run_await_result 有意不加（它是取结果形态）。
-import { runWaitNextStep, buildNextStep } from "../application/runNextStep.js";
+import { buildNextStep } from "../application/runNextStep.js";
 import {
   runAwaitResult,
   RUN_AWAIT_RESULT_MIN_MS,
@@ -310,7 +304,6 @@ import {
   getSemanticNoteById,
 } from "../application/runSemanticsNotes.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
-import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/workspaceExpectation.js";
 // 非绝对项目标签（只读范围显示——lead_preflight workspace.projectBucket
 // 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。标签是绑定根
@@ -401,7 +394,8 @@ import { TOOLS as FROZEN_TOOL_SURFACE } from "./toolSurface.js";
 //     rejects the literal "unknown" at the wire layer. A dispatch result is a
 //     binding from the control plane: it MUST be a real canonical id.
 //
-//   READ_AGENT_ID_SCHEMA — used by run_status / run_wait / run_collect output.
+//   READ_AGENT_ID_SCHEMA — used by run_status / run_await_result / run_collect
+//     output.
 //     A union of the REAL pattern and the literal sentinel. It serializes to
 //     anyOf, so the wire visibly expresses "real id OR unknown". Read tools
 //     return the sentinel when a transcript is corrupt/stale.
@@ -697,7 +691,7 @@ const DISPATCH_CREDENTIAL_MISSING_TEXT =
 const DISPATCH_REUSE_BUSY_TEXT =
   "run_dispatch refused: this expert still has an active run for the current Lead session and workspace. " +
   "A provider session cannot be driven concurrently. Wait for the prior run to reach a terminal state " +
-  "(keep waiting with run_wait; run_status is a point-in-time read), then re-dispatch the follow-up to resume the conversation.";
+  "(keep waiting with run_await_result; run_status is a point-in-time read), then re-dispatch the follow-up to resume the conversation.";
 
 // M12-6 (FR-04 / P1-B): fixed, actionable text for an invalid_verification_path
 // DeliveryError. Unlike the generic dispatch failure, this surfaces the closed-
@@ -800,7 +794,7 @@ function dispatchExpectationMismatchText(field) {
   // 闭集分支——只有 label 变化，无动态值）。gitHead 提示短形是弱化断言；dirty
   // 提示未跟踪文件计入 dirty，可复核后再冻结。
   const hint = field === "gitHead"
-    ? "A short-form expectedGitHead matches by prefix (weakened assertion) — re-read the full head via workspace_status before freezing it."
+    ? "A short-form expectedGitHead matches by prefix (weakened assertion) — re-read the full head via lead_preflight (expectedWorkspaceRoot) or git before freezing it."
     : field === "dirty"
       ? "dirty counts untracked files too — re-check with git status --porcelain before freezing expectedDirty."
       : "";
@@ -810,7 +804,7 @@ function dispatchExpectationMismatchText(field) {
   return "run_dispatch refused: workspace_expectation_mismatch (" + label + "). " +
     "The target's HEAD or dirty state differs from the frozen expectation, or the " +
     "expectation was not canonical. Re-read the target's current head and dirty state " +
-    "(workspace_status or git), then retry with current values." + (hint ? " " + hint : "");
+    "(lead_preflight with expectedWorkspaceRoot, or git), then retry with current values." + (hint ? " " + hint : "");
 }
 
 // run_dispatch input: agentId + prompt required; optional delivery block.
@@ -1031,7 +1025,7 @@ const RUN_DISPATCH_INPUT = z.object({
 // reported as one of the binding sources (the dispatch path no longer reads
 // the binding at all).
 const WORKSPACE_PROOF = z.object({
-  source: z.enum(["call_target", "lead_session", "server_config", "mcp_root"]),
+  source: z.enum(["call_target", "server_config", "mcp_root"]),
   gitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
   dirty: z.boolean(),
   expectedGitHeadMatch: z.boolean().nullable(),
@@ -1141,7 +1135,7 @@ const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
   // resolved session binding. source + non-absolute project label only — never
   // an absolute path (same contract as runs_list scope).
   workspaceScope: z.object({
-    source: z.enum(["call_target", "lead_session", "server_config", "mcp_root"]).nullable(),
+    source: z.enum(["call_target", "server_config", "mcp_root"]).nullable(),
     projectBucket: z.string().nullable(),
   }).strict(),
 }).strict();
@@ -1187,7 +1181,7 @@ const RUN_CONSULT_ERROR_TEXT = "run_consult failed before any seat was dispatche
 const RUN_CONSULT_READ_ERROR_TEXT =
   "run_consult read failed: no readable consult record with this consultId — records live in " +
   "<workspace>/.wao/runs/consults (this call's expectedWorkspaceRoot, or the bound workspace; " +
-  "a linked worktree uses its main worktree's .wao); check workspace_status and the id";
+  "a linked worktree uses its main worktree's .wao); check the id and pass the record's project root as expectedWorkspaceRoot";
 const RUN_CONSULT_RENDER_ERROR_TEXT =
   "run_consult read failed: the consult record was found, but rendering it failed — " +
   "read the seats directly: run_collect with each seat runId (runs_list shows them)";
@@ -1649,9 +1643,9 @@ const STATUS_ERROR_TEXT = "run_status failed";
 
 // ===== M12-8B: shared bounded progressive-disclosure metadata schema =====
 //
-// `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY seven
+// `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY six
 // tools (run_await_result, run_status, run_diagnose, run_collect, run_delivery,
-// run_activity, run_wait). It tells the Lead which safe observation tool can reveal more
+// run_activity). It tells the Lead which safe observation tool can reveal more
 // about the returned result — never auto-calls it, never makes a semantic
 // decision, never advertises a destructive/mutating tool, and never contains
 // transcript/provider/repository text (every string is static, chosen by
@@ -1678,7 +1672,7 @@ const DRILLDOWN_ENTRY = z.object({
 const AVAILABLE_DRILLDOWNS = z.array(DRILLDOWN_ENTRY).min(1).max(DRILLDOWN_MAX_ENTRIES);
 
 // M12-12: Self-Describing Results — the REQUIRED `semanticNotes` field carried
-// by EXACTLY four standalone MCP success results (run_wait, run_await_result,
+// by EXACTLY three standalone MCP success results (run_await_result,
 // run_delivery, run_diagnose). Every note self-explains a CURRENT fact as plain
 // English with the EXACT three-key shape { id, meaning, doesNotMean }: meaning is
 // one deterministic factual sentence, doesNotMean is 0..2 deterministic factual
@@ -1707,9 +1701,13 @@ const SEMANTIC_NOTE_ENTRY = z.object({
 // empty list is a contract violation, never a legitimate result.
 const SEMANTIC_NOTES = z.array(SEMANTIC_NOTE_ENTRY).min(1).max(SEMANTIC_NOTE_MAX_ENTRIES);
 
-// run_status input: only runId. runDir is server-owned; a model cannot override it.
+// run_status input: only runId, plus the optional per-call target (batch 119 A4):
+// when expectedWorkspaceRoot is supplied it is proved and the run's ownership is
+// verified fail-closed; when omitted the read stays the legacy direct-by-runId
+// path, byte-for-byte unchanged. runDir is server-owned; a model cannot override it.
 const RUN_STATUS_INPUT = z.object({
   runId: z.string().min(1),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // run_status output: ONLY safe machine fields. No raw event payloads, commands,
@@ -1780,7 +1778,9 @@ const RUN_STATUS_ANNOTATIONS = {
 
 const RUN_STATUS_DESCRIPTION =
   "Point-in-time status of a run: state, terminal flag, last event / last worker activity " +
-  "timestamp and age. Read-only; safe machine fields only.";
+  "timestamp and age. Read-only; safe machine fields only. Optional expectedWorkspaceRoot " +
+  "(absolute Git worktree top-level): when given, the run must belong to it or the call is " +
+  "refused; when omitted the read is direct by runId.";
 
 // ===== run_collect bounded projection constants =====
 //
@@ -1813,19 +1813,24 @@ const CURSOR_REJECTED_GUIDANCE =
   "cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); " +
   "never hand-modify a cursor token";
 // 0097 五′（2026-10-30 Lead 实遇：读一个属于另一工作树项目的运行时，run_activity
-// 把归属拒绝折成了笼统的 "run_activity failed"）。会话绑定（workspace_select /
-// lead_preflight 选定项目）下的只读观察工具照 run_collect 的写法给同款固定文案
-// ——Lead 必须能分清"归属拒绝"与"一般失败"。单一构造器生成，各工具一份常量，
-// 不回显路径或 runId。run_status 不做归属核验（statusService 无绑定入参），无此分支。
+// 把归属拒绝折成了笼统的 "run_activity failed"）。按调用带目标根（或省略时的
+// 解析绑定）的只读观察工具照 run_collect 的写法给同款固定文案——Lead 必须能分清
+// "归属拒绝"与"一般失败"。单一构造器生成，各工具一份常量，不回显路径或 runId。
+// run_status / run_diagnose 不带 expectedWorkspaceRoot 时不做归属核验（按 runId
+// 直读，行为不变），带上后同样走此文案。
 // 原因按 runWorkspaceOwnership.js 的六类拒绝逐类写（TD-324 起清单本体由该 SSOT
 // 导出的 WORKSPACE_MISMATCH_REASONS_TEXT 单一持有，本构造器只拼前后缀）：不匹配
 // （另一项目、子目录、非 Git 路径）、证明不了（相对或已消失的路径）、没有、重复、
 // 缺 cwd、冲突（提交与开跑记下的 cwd 不一致）。换项目只对"属于另一个项目"有用，
 // 所以写成条件句。
 const boundWorkspaceMismatchText = (tool) =>
-  `${tool} refused: this run cannot be shown to belong to the bound workspace — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
+  `${tool} refused: this run cannot be shown to belong to this call's workspace (expectedWorkspaceRoot when given, else the resolved binding) — ${WORKSPACE_MISMATCH_REASONS_TEXT}. `
   + "Read-only; nothing was written. If the run belongs to another project, "
-  + "select it (workspace_select / lead_preflight workspaceRoot) and retry.";
+  + "pass that project's root as expectedWorkspaceRoot and retry.";
+// 批 119（A4）：run_status / run_diagnose 带调用目标根时的归属拒绝专属文案
+//（同款构造器；不带该参数时两工具按 runId 直读，无此分支）。
+const STATUS_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_status");
+const DIAGNOSE_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_diagnose");
 const COLLECT_CURSOR_REJECTED_TEXT = `run_collect failed — ${CURSOR_REJECTED_GUIDANCE}`;
 // TD-224 (2026-10-08): compact too_large degradation guidance — the D1-D3
 // discipline from the CLI --final marker (src/commands/observe.js), lifted to
@@ -1978,6 +1983,8 @@ const SAFE_DIAGNOSIS_EVENT_TYPES = new Set([
 
 const RUN_DIAGNOSE_INPUT = z.object({
   runId: z.string().min(1),
+  // 批 119（A4）：可选调用目标——给了就证明并核验归属；不给保持按 runId 直读。
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // Category enum from the diagnosis SSOT — no second hand-maintained list.
@@ -2020,7 +2027,9 @@ const RUN_DIAGNOSE_DESCRIPTION =
   // 必须保留：Lead decides（M12-10-G/X-02 钉）；semanticNotes + 详情 URI；
   // 禁用词见 M9-5B-08（recommendation/advice/suggest/retry 等）。
   "Diagnose a run's failure category and signal event types. Read-only, idempotent; safe " +
-  "machine fields only. The Lead decides; facts only. Self-explaining semanticNotes; " +
+  "machine fields only. Optional expectedWorkspaceRoot (absolute Git worktree top-level): " +
+  "when given, the run must belong to it or the call is refused; when omitted the read is " +
+  "direct by runId. The Lead decides; facts only. Self-explaining semanticNotes; " +
   "wao://semantics/{id}.";
 
 // ===== run_delivery (read-only query) constants =====
@@ -2898,10 +2907,12 @@ const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
   "recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns " +
   "accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.";
 
-// ===== workspace_status (read-only binding proof) constants =====
+// ===== workspace binding / per-call target constants =====
+// 批 119：MCP 绑定状态查询与会话级项目选择两个工具已真删除（Owner 批准的减面）。
+// 绑定事实只在带调用目标的工具回执与 lead_preflight.workspace 里投影；
+// 每实例共享的会话选择不复存在。
 
-const WORKSPACE_ERROR_TEXT = "workspace_status failed";
-const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: call workspace_select with a Git worktree top-level, configure --workspace-root, or provide exactly one MCP root";
+const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: pass expectedWorkspaceRoot for this call, configure --workspace-root, or provide exactly one MCP root";
 
 // A call that starts workers or writes transcripts takes its target
 // ONLY from the call's own expectedWorkspaceRoot argument — never from the
@@ -2938,77 +2949,18 @@ function proveCallWorkspaceRoot(expectedWorkspaceRoot) {
   }
 }
 
-const WORKSPACE_STATUS_INPUT = z.object({}).strict();
-
-const WORKSPACE_STATUS_OUTPUT = z.object({
-  bound: z.boolean(),
-  source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
-  workspaceRoot: z.string().nullable(),
-  gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
-  dirty: z.boolean().nullable(),
-  // M12-19: closed-set recovery fact — which authority failed to re-prove.
-  // null when bound (or when no reason applies). Shares the application SSOT.
-  unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
-});
-
-const WORKSPACE_STATUS_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const WORKSPACE_STATUS_DESCRIPTION =
-  // 必须保留：unboundReason 闭集三成员（M11-6-M12-19-4 钉）与恢复入口。
-  "Read-only binding query: bound flag, source, canonical Git workspaceRoot, HEAD, dirty. " +
-  "When unbound, unboundReason is a closed-set recovery fact — lead_session_git_proof_failed / " +
-  "server_config_git_proof_failed / no_workspace_authority; null when bound. " +
-  "workspace_select binds a project in-session without host bind or restart.";
-
-// ===== workspace_select (Lead session-level workspace selection) constants =====
-// M11-6: lets a Lead choose the working Git project in the current MCP session.
-// Validates via proveWorkspace (canonical Git top-level only). Session-scoped:
-// per createWaoMcpServer instance, not global, not persisted. A failed select
-// leaves the prior valid selection intact.
-
-const WORKSPACE_SELECT_INPUT = z.object({
-  workspaceRoot: z.string().min(1).max(1024),
-}).strict();
-
-const WORKSPACE_SELECT_OUTPUT = z.object({
-  bound: z.literal(true),
-  source: z.literal("lead_session"),
-  workspaceRoot: z.string().min(1),
-  gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/),
-  dirty: z.boolean(),
-});
-
-const WORKSPACE_SELECT_ANNOTATIONS = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const WORKSPACE_SELECT_ERROR_TEXT = "workspace_select failed: workspaceRoot must be a canonical Git top-level directory";
-
-const WORKSPACE_SELECT_DESCRIPTION =
-  // 必须保留：绝对路径指向 Git worktree 顶层（schema 表达不了）；失败不改现选。
-  "Select the working Git project for this session (lead_session source): pass an " +
-  "absolute path to a Git worktree top-level; WAO proves it canonical. The selection " +
-  "is the default scope for read-only tools only — worker-touching calls take their " +
-  "target per call. Shared per server instance: other sessions on the same instance " +
-  "see the same selection. No config write, no host bind or restart; idempotent, " +
-  "a failed select leaves the prior selection intact.";
-
 // ===== lead_preflight (advisory single-call aggregator) constants =====
 // M11-8A: lets a Lead gather workspace binding + worker credential availability +
-// active runs in ONE call instead of workspace_select/status + registry_list +
-// runs_list. ADVISORY ONLY — not a gate. Each section settles independently; a
+// active runs in ONE call instead of registry_list + runs_list round trips.
+// ADVISORY ONLY — not a gate. Each section settles independently; a
 // failure is a warning, never a hard stop. No PASS/FAIL verdict.
+// 批 119（A3）：输入 workspaceRoot 改名 expectedWorkspaceRoot。给了就当场证明、
+// 只作用于这一次调用（source:"call_target"）、不写任何共享状态；证明失败返回
+// 固定文案，绝不回落到 roots/启动配置展示别的项目。省略时按 MCP roots →
+// 启动配置解析缺省绑定。
 
 const LEAD_PREFLIGHT_INPUT = z.object({
-  workspaceRoot: z.string().min(1).max(1024).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // 0087: lane-profile compact projection — ONE closed sub-schema used BOTH for
@@ -3083,14 +3035,18 @@ const LANES_PROJECTION_OUTPUT = z.object({
 
 const LEAD_PREFLIGHT_OUTPUT = z.object({
   // workspace is null when the binding could not be resolved (unknown), NOT
-  // when known-unbound (that is {bound:false}). workspaceSelection is the
-  // closed-set outcome (see comment at the handler).
+  // when known-unbound (that is {bound:false}). source is call_target when the
+  // call supplied expectedWorkspaceRoot (proved; scopes ONLY this call), else
+  // the resolved default binding (mcp_root / server_config).
   workspace: z.object({
     bound: z.boolean(),
-    source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
+    source: z.enum(["call_target", "server_config", "mcp_root"]).nullable(),
+    // 批 119（A3）：规范化后的绝对根路径（原绑定状态查询工具的职责收编于此）。
+    // 绑定根是 Lead/宿主给出并经证明的 Git 根，不是凭据；未绑定为 null。
+    workspaceRoot: z.string().min(1).nullable(),
     gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
     dirty: z.boolean().nullable(),
-    // M12-19: closed-set recovery fact, same SSOT enum as workspace_status.
+    // M12-19: closed-set recovery fact, same SSOT enum (批 119 起两成员).
     // null when bound, or when the binding carried no reason (never fabricated).
     unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
     // 非绝对项目标签（<displayName>-<hash8>，与写侧桶 slug 同派生式）——
@@ -3098,10 +3054,6 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     // null=未绑定或根不可识别。
     projectBucket: z.string().min(1).max(128).nullable(),
   }).strict().nullable(),
-  workspaceSelection: z.enum([
-    "not_requested", "selected",
-    "failed_using_prior", "failed_unbound", "failed_unknown",
-  ]).nullable(),
   // workers/activeRuns are null when unreadable (unknown), NOT when known-empty.
   // Array bounds share the application-layer SSOT caps so they cannot drift.
   workers: z.array(z.object({
@@ -3155,7 +3107,8 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
 }).strict();
 
 const LEAD_PREFLIGHT_ANNOTATIONS = {
-  readOnlyHint: false,
+  // 批 119（A3）：只读聚合——expectedWorkspaceRoot 只证明并读，不写任何状态。
+  readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
   openWorldHint: false,
@@ -3163,16 +3116,17 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 
 const LEAD_PREFLIGHT_DESCRIPTION =
   // 必须保留：advisory + not a gate（M12-10-G 钉）；分节独立沉降、原工具复验。
-  // unboundReason 的语义只写在 workspace_status 的 description 里，这里不复述。
+  // unboundReason 的语义（闭集恢复事实）只在这里的 workspace 一节陈述。
   // 决定 0113：open item 观察行一句话（行本体由 leadOpenItems.js 生成）。
   "Advisory single-call preflight: workspace binding, worker credentials, active runs, " +
   "lane profiles (per-dimension star ratings, not routing rules; wao lanes has full " +
-  "profiles). Optional workspaceRoot selects the project, same authority as " +
-  "workspace_select (read-tool default scope only, shared per server instance). " +
-  "ADVISORY ONLY — not a gate: warnings are facts, never an auto-stop; sections settle " +
-  "independently, re-verify via the original tools. `open item:` observation lines " +
-  "list what awaits Lead closeout (unsettled deliveries, reclaimable worktrees/" +
-  "branches, feedback inbox) with the next command.";
+  "profiles). Optional expectedWorkspaceRoot proves that project on the spot and scopes " +
+  "ONLY this call (source call_target; no shared session state); when omitted the " +
+  "default binding falls back to MCP roots / server config. A failed proof returns its " +
+  "fixed refusal text with NO project content. ADVISORY ONLY — not a gate: warnings are " +
+  "facts, never an auto-stop; sections settle independently, re-verify via the original " +
+  "tools. `open item:` observation lines list what awaits Lead closeout (unsettled " +
+  "deliveries, reclaimable worktrees/branches, feedback inbox) with the next command.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -3261,7 +3215,7 @@ const RUNS_LIST_OUTPUT = z.object({
   // 取主工作树的项目（决定 0099 R8）；绑定根不可识别时 projectBucket 为 null。
   // runs_list 可按调用带目标根；缺省仍跟随会话绑定（B 类缺省范围）。
   scope: z.object({
-    source: z.enum(["lead_session", "server_config", "mcp_root", "call_target"]),
+    source: z.enum(["call_target", "server_config", "mcp_root"]),
     projectBucket: z.string().min(1).max(128).nullable(),
   }).strict(),
   runs: z.array(z.object({
@@ -3299,21 +3253,15 @@ const RUNS_LIST_DESCRIPTION =
   "(non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped and is counted in " +
   "unresolvedCount. limit defaults to 50. Read-only, idempotent.";
 
-// ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
-
-const RUN_WAIT_ERROR_TEXT = "run_wait failed";
-// 0097 五′：归属拒绝专属固定文案（调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
-const RUN_WAIT_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_wait");
-
-const RUN_WAIT_INPUT = z.object({
-  runId: z.string().min(1),
-  afterSeq: z.number().int().nonnegative().optional(),
-  waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(MCP_RUN_WAIT_DEFAULT_MS),
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
-}).strict();
+// ===== observation/termination facts（等待族共享投影）constants =====
+// 批 119（A5）：MCP 长轮询等待工具已真删除——长等待用重复 run_await_result
+// （单次 waitMs ≤ 270000）直到终态，交付运行再用 run_delivery 带 waitMs 收口；
+// 更长等待走 CLI `wao runs wait <runId> --until-settled`。共享等待服务
+// src/application/runWait.js 保留（CLI 面照用）。
 
 // M12-11: the additive observation + termination facts, shared verbatim by
-// run_wait and run_await_result. Closed-set enums are built from the pure
+// run_await_result (the deleted long-poll tool's copy went with it, batch 119).
+// Closed-set enums are built from the pure
 // application SSOT (runObservationProjection) so the wire schema and the service
 // cannot drift. observation is always present; termination is null unless a
 // terminal state was cleanly observed (an expired window / transport loss /
@@ -3331,55 +3279,6 @@ const TERMINATION_FACT = z.object({
   configuredMs: z.number().int().positive().nullable(),
   policySource: z.enum([...WAIT_POLICY_SOURCES]),
 }).strict();
-
-const RUN_WAIT_OUTPUT = z.object({
-  runId: z.string(),
-  agentId: READ_AGENT_ID_SCHEMA,
-  state: z.enum([...RUN_STATES, "unknown"]),
-  terminal: z.boolean(),
-  cursor: z.number().int().nullable(),
-  returnedEarly: z.boolean(),
-  // M12-11: observationOutcome/readFailureReason bring run_wait to parity with
-  // run_await_result. "unknown" liveness/ownerHeartbeat + null activity tally
-  // appear ONLY on a read_failure (the snapshot could not be trusted, so stale
-  // event liveness is never combined with a fresh heartbeat).
-  observationOutcome: z.enum(["observed", "read_failure"]),
-  readFailureReason: z.enum([...READ_FAILURE_REASONS]).nullable(),
-  liveness: z.enum(["terminal", "progress", "process_only", "silent", "unknown"]),
-  activityEventCount: z.number().int().nonnegative().nullable(),
-  lastActivityKind: z.string().nullable(),
-  ownerHeartbeat: z.enum(["fresh", "stale", "n/a", "unknown"]),
-  observation: OBSERVATION_FACT,
-  termination: TERMINATION_FACT.nullable(),
-  availableDrilldowns: AVAILABLE_DRILLDOWNS,
-  // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES).
-  semanticNotes: SEMANTIC_NOTES,
-  // 决定 0095：未等到收口时的一句固定模板（终态与非终态都给；runId 不上
-  // MCP 面）。waitWindowHint / transcriptQuiet 仍不进 wire（TD-149(b) 钉）。
-  nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
-}).strict();
-
-const RUN_WAIT_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const RUN_WAIT_DESCRIPTION =
-  // 必须保留（M12-10-G、M6、X-02、runWait.test.js 钉）：区间/默认/0 无效/
-  // 即时替代、Host transport 原句、re-read point-in-time、observation unknown、
-  // semanticNotes + 详情 URI。决定 0095：区间/默认改为常量插值（30000..600000，
-  // default 45000），新增 nextStep 一句。
-  "Wait for terminal state or observation-window expiry, then a liveness summary; early " +
-  "return ONLY on terminal. waitMs " +
-  `${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms (default ${MCP_RUN_WAIT_DEFAULT_MS}; ` +
-  "waitMs=0 is intentionally invalid — point-in-time: run_await_result(waitMs:0) or " +
-  "run_status). Expiry never terminates; the additive nextStep names the next call " +
-  "(call run_wait again within the host's tool timeout; on terminal, run_delivery with " +
-  "an explicit waitMs). Host transport loss/cancellation does not stop the " +
-  "detached run: observation unknown; no control-plane mutation — re-read point-in-time; " +
-  "never infer a stop. Self-explaining semanticNotes; wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
 //
@@ -3509,11 +3408,12 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   // Bounded pattern shape (not a serialized enum): same wire discipline as the
   // M12-12 note-id shape; ISOLATION_VIOLATION_REASONS is the exact authority.
   isolationFailureReason: ISOLATION_FAILURE_REASON_SCHEMA.nullable(),
-  // M12-11: additive observation/termination facts (same shape as run_wait).
+  // M12-11: additive observation/termination facts (the shared
+  // observation/termination schema).
   observation: OBSERVATION_FACT,
   termination: TERMINATION_FACT.nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
@@ -4007,10 +3907,6 @@ export function createWaoMcpServer({
   // M11-7: injectable Windows user-env reader (default reads HKCU\Environment).
   // Used by registry_list readiness + run_dispatch pre-check. Injectable for tests.
   userEnvReader,
-  // M12-19: injectable workspace-binding resolver (test seam, same pattern as
-  // dispatchRunFn). Defaults to the internal resolver; lets causal tests inject
-  // out-of-set unboundReason values at the handler boundary.
-  resolveWorkspaceBindingFn,
   // M11-11C: server-owned Lead session identity. Generated once per server
   // (stable across calls in one server = one Lead session) and threaded to
   // dispatchRun so reusable experts can resume the provider-native
@@ -4038,8 +3934,8 @@ export function createWaoMcpServer({
   certGateOverride,
   getRunStatusFn,
   collectRunMessagesFn,
-  // TD-121: injectable collect projection (test seam, same pattern as M12-19
-  // resolveWorkspaceBindingFn). Defaults to the module-direct projectCollectResult;
+  // TD-121: injectable collect projection (test seam, same pattern as
+  // dispatchRunFn). Defaults to the module-direct projectCollectResult;
   // lets causal tests inject an inconsistent page at the handler boundary to
   // prove the boundary consistency check fails closed.
   projectCollectResultFn,
@@ -4056,9 +3952,9 @@ export function createWaoMcpServer({
   decideRunDeliveryFn,
   stopRunFn,
   listRunsFn,
-  runWaitFn,
   // M12-3: injectable read-only composite (bounded wait + observation + terminal
   // compact). Defaults to the real service; threaded for transport tests.
+  // （批 119：MCP 等待只剩 run_await_result，原 runWaitFn 注入缝随工具删除。）
   runAwaitResultFn,
   // M12-8: injectable shared read-only activity reader. Defaults to the real
   // service; workspace-bound — threaded only when a workspace binding authorizes
@@ -4215,7 +4111,6 @@ export function createWaoMcpServer({
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
-  const runWaitService = runWaitFn ?? runWait;
   const runAwaitResultService = runAwaitResultFn ?? runAwaitResult;
   const runActivityReader = readRunActivityFn ?? readRunActivity;
   const playbookListService = listLeadPlaybooksFn ?? listLeadPlaybooks;
@@ -4326,47 +4221,19 @@ export function createWaoMcpServer({
 
   /**
    * Resolve the workspace binding using the authority precedence:
-   *   1. Lead session selection (workspace_select) — highest authority; the
-   *      Lead is the Owner's trusted coordinator and may choose the project.
-   *   2. MCP client roots/list — exactly one valid file:// root
-   *   3. Explicit workspaceRoot (server startup --workspace-root, legacy default)
-   *   4. Otherwise: not bound (fail closed)
+   *   1. MCP client roots/list — exactly one valid file:// root
+   *   2. Explicit workspaceRoot (server startup --workspace-root, legacy default)
+   *   3. Otherwise: not bound (fail closed)
    *
-   * Every resolution re-proves via proveWorkspace (no cached identity). A failed
-   * session selection does NOT clear leadSelection — the prior valid selection
-   * survives (setSessionWorkspace only stores on success).
+   * Every resolution re-proves via proveWorkspace (no cached identity).
+   * 批 119：会话级选择档（原 lead-session 来源）已随其工具真删除——服务实例
+   * 不再持有任何共享的项目选择状态；按调用的目标根（expectedWorkspaceRoot）
+   * 由 proveCallWorkspaceRoot 单独证明，不经此函数。
    *
    * Returns { bound, source, root, gitHead, dirty } or { bound: false }.
    */
-  // M11-6: per-server session selection state. Lives in this closure (not a
-  // global), so two createWaoMcpServer instances are strictly isolated. Only
-  // setSessionWorkspace mutates it, and only with a proven canonical root.
-  let leadSelection = null;
-
-  function setSessionWorkspace(workspaceRoot) {
-    // selectSessionWorkspace delegates to proveWorkspace (re-proves, no cache).
-    // Throws on any failure; leadSelection is only updated on success, so a
-    // failed select leaves the prior valid selection intact.
-    const proof = selectSessionWorkspace({ workspaceRoot });
-    leadSelection = proof;
-    return proof;
-  }
-
   async function resolveWorkspaceBinding() {
-    // Priority 1: Lead session selection (re-prove to avoid cached identity)
-    if (leadSelection) {
-      try {
-        const proof = proveWorkspace(leadSelection.root);
-        return { bound: true, source: "lead_session", ...proof };
-      } catch {
-        // M12-19: recovery fact, closed set. A failed lead_session NEVER falls
-        // through to lower authorities — the Lead's explicit selection still
-        // outranks, and its brokenness is reported, not papered over.
-        return { bound: false, unboundReason: "lead_session_git_proof_failed" };
-      }
-    }
-
-    // Priority 2: MCP client roots
+    // Priority 1: MCP client roots
     try {
       // Guard: only query roots if the client declared a roots capability at
       // initialize. A raw JSON-RPC client (or one without roots support) never
@@ -4410,7 +4277,7 @@ export function createWaoMcpServer({
       // Client does not support roots, or roots/list failed/timed out — fall through.
     }
 
-    // Priority 3: explicit server config (startup --workspace-root, legacy default)
+    // Priority 2: explicit server config (startup --workspace-root, legacy default)
     if (workspaceRoot) {
       try {
         const proof = proveWorkspace(workspaceRoot);
@@ -4508,90 +4375,9 @@ export function createWaoMcpServer({
     },
   );
 
-  register(
-    "workspace_status",
-    {
-      description: WORKSPACE_STATUS_DESCRIPTION,
-      inputSchema: WORKSPACE_STATUS_INPUT,
-      outputSchema: WORKSPACE_STATUS_OUTPUT,
-      annotations: WORKSPACE_STATUS_ANNOTATIONS,
-    },
-    async () => {
-      try {
-        // M12-19: BOTH the bound and unbound payloads are constructed, passed
-        // through WORKSPACE_STATUS_OUTPUT.parse, and returned as the PARSED
-        // value — the handler never returns a raw, unvalidated payload and never
-        // relies on SDK post-validation alone. An out-of-set unboundReason
-        // (dependency-injected or future caller) fails closed right here to the
-        // fixed error text; a valid one survives parse and is returned.
-        const binding = await (resolveWorkspaceBindingFn ?? resolveWorkspaceBinding)();
-        const payload = binding.bound
-          ? {
-              bound: true,
-              source: binding.source,
-              // M11-6: workspaceRoot is the Lead-/host-chosen canonical Git root.
-              // It is not a credential — the Lead explicitly submitted it via
-              // workspace_select, or the host supplied it via --workspace-root/MCP root.
-              workspaceRoot: binding.root,
-              gitHead: binding.gitHead,
-              dirty: binding.dirty,
-              unboundReason: null,
-            }
-          : {
-              bound: false, source: null, workspaceRoot: null, gitHead: null, dirty: null,
-              unboundReason: binding.unboundReason ?? null,
-            };
-        const validated = WORKSPACE_STATUS_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(validated) }],
-          structuredContent: validated,
-        };
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: WORKSPACE_ERROR_TEXT }],
-        };
-      }
-    },
-  );
-
-  register(
-    "workspace_select",
-    {
-      description: WORKSPACE_SELECT_DESCRIPTION,
-      inputSchema: WORKSPACE_SELECT_INPUT,
-      outputSchema: WORKSPACE_SELECT_OUTPUT,
-      annotations: WORKSPACE_SELECT_ANNOTATIONS,
-    },
-    async ({ workspaceRoot }) => {
-      // M11-6: Lead session-level workspace selection. Validates the chosen
-      // path via proveWorkspace (canonical Git top-level only). setSessionWorkspace
-      // only stores the selection on SUCCESS — a failed select leaves the prior
-      // valid selection intact (no mutation on failure).
-      try {
-        const proof = setSessionWorkspace(workspaceRoot);
-        const payload = {
-          bound: true,
-          source: proof.source,
-          workspaceRoot: proof.root,
-          gitHead: proof.gitHead,
-          dirty: proof.dirty,
-        };
-        WORKSPACE_SELECT_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      } catch {
-        // Fixed safe text — never concatenate err.message, the absolute path,
-        // stderr, or role/project content.
-        return {
-          isError: true,
-          content: [{ type: "text", text: WORKSPACE_SELECT_ERROR_TEXT }],
-        };
-      }
-    },
-  );
+  // 批 119：MCP 绑定状态查询与会话级项目选择两个工具已真删除（Owner 批准的
+  // 减面，23→20）。绑定事实改由 lead_preflight.workspace 投影；每实例共享的
+  // 会话选择不复存在——读类工具按调用带 expectedWorkspaceRoot。
 
   register(
     "lead_preflight",
@@ -4601,31 +4387,27 @@ export function createWaoMcpServer({
       outputSchema: LEAD_PREFLIGHT_OUTPUT,
       annotations: LEAD_PREFLIGHT_ANNOTATIONS,
     },
-    async ({ workspaceRoot }) => {
-      // M11-8A: advisory single-call preflight. Optional workspaceRoot selects
-      // the project via the SAME authority as workspace_select (setSessionWorkspace).
-      // A failed selection does NOT overwrite the prior valid session selection
-      // (setSessionWorkspace only stores on success) — and is reported EXPLICITLY
-      // via workspaceSelection, a closed set derived from the binding state:
-      //   not_requested / selected / failed_using_prior / failed_unbound / failed_unknown
-      // so a Lead cannot misread the outcome regardless of prior binding state.
-      const selectionRequested = typeof workspaceRoot === "string" && workspaceRoot.length > 0;
-      let selectionFailed = false;
-      if (selectionRequested) {
-        try {
-          setSessionWorkspace(workspaceRoot);
-        } catch {
-          selectionFailed = true;
-        }
-      }
-      // Resolve the (possibly just-selected) binding. If the resolver itself
-      // throws, pass null so the aggregator reports workspace=unknown (NOT faked
-      // as known-unbound bound:false).
+    async ({ expectedWorkspaceRoot }) => {
+      // M11-8A: advisory single-call preflight. 批 119（A3）：可选
+      // expectedWorkspaceRoot 用 proveCallWorkspaceRoot 当场证明、只作用于这一
+      // 次调用（source "call_target"）、不写任何共享状态（服务实例已无会话选择
+      // 可写）。证明失败返回其固定文案，isError 且无 structuredContent——绝不
+      // 回落到 roots/启动配置展示别的项目的运行、待办等内容。省略时按
+      // MCP roots → 启动配置解析缺省绑定；解析器本身抛错时传 null，聚合器报
+      // workspace=unknown（不伪造 known-unbound）。
       let workspaceBinding = null;
-      try {
-        workspaceBinding = await resolveWorkspaceBinding();
-      } catch {
-        workspaceBinding = null;
+      if (expectedWorkspaceRoot !== undefined) {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
+        }
+        workspaceBinding = { bound: true, source: "call_target", ...target.proof };
+      } else {
+        try {
+          workspaceBinding = await resolveWorkspaceBinding();
+        } catch {
+          workspaceBinding = null;
+        }
       }
       // M11-8A closeout (P3/truth): read the registry EXACTLY ONCE. Capture the
       // outcome (snapshot or failure) and pass a resolver that replays THAT
@@ -4662,8 +4444,6 @@ export function createWaoMcpServer({
       try {
         payload = await aggregateLeadPreflight({
           workspaceBinding,
-          selectionRequested,
-          selectionFailed,
           registryPath,
           runDir,
           userEnvReader: resolveUserEnv,
@@ -4709,7 +4489,6 @@ export function createWaoMcpServer({
         // fake unknown as known-empty/false. Return null for unreadable sections.
         const fallback = {
           workspace: null,
-          workspaceSelection: null,
           workers: null,
           // M12-25: no partial-inventory issues derivable on aggregate failure.
           registryIssues: [],
@@ -4721,11 +4500,10 @@ export function createWaoMcpServer({
           // 0087: no lane profiles derivable on aggregate failure.
           lanes: null,
           observations: [],
-          warnings: ["lead_preflight could not aggregate — use workspace_status, registry_list, and runs_list directly"],
+          warnings: ["lead_preflight could not aggregate — use registry_list and runs_list directly"],
           manualChecks: [
-            "workspace_status — verify binding independently",
+            "runs_list (expectedWorkspaceRoot) — verify the workspace binding and active runs independently",
             "registry_list — verify worker certification + credential availability",
-            "runs_list — verify active runs independently",
           ],
           checkStatus: { workspace: "unknown", workers: "unknown", activeRuns: "unknown" },
           complete: false,
@@ -4894,9 +4672,9 @@ export function createWaoMcpServer({
       }
       // the dispatch target comes ONLY from this call's
       // expectedWorkspaceRoot — proved via proveWorkspace (canonical Git
-      // top-level). The session selection / MCP roots / server config are NOT
+      // top-level). The MCP roots / server config are NOT
       // consulted (a shared server instance can no longer redirect another
-      // session's dispatch), and setSessionWorkspace is never touched. A
+      // session's dispatch), and no session state is ever touched. A
       // missing or unprovable target refuses with a fixed text BEFORE any
       // side effect (zero transcript, zero fork, zero worktree).
       let workspaceCwd;
@@ -5374,8 +5152,8 @@ export function createWaoMcpServer({
       //   create mode (A-class): EVERY seat's cwd, the consult record, and the
       //     transcript attribution come ONLY from this call's
       //     expectedWorkspaceRoot — proved canonical Git top-level, never the
-      //     session binding / MCP roots / server config, and never
-      //     setSessionWorkspace. The binding is not resolved on this path at
+      //     session binding / MCP roots / server config, and no session state
+      //     is ever written. The binding is not resolved on this path at
       //     all (no roots/list round-trip, no 5s wait).
       let consultTarget = null;
       let effectiveRoot = null;
@@ -5620,8 +5398,9 @@ export function createWaoMcpServer({
           budgetMs: input.waitMs,
           // MCP face domain: 0..600000 (0 = fan out + immediate point-in-time
           // snapshot). The service's own default floor (CONSULT_WAIT_MIN_MS,
-          // 180000 — consult CLI domain since 决定 0095, no longer run_wait's)
-          // is the CLI/r1 policy — injected down to this face's floor here.
+          // 180000 — the consult CLI domain since 决定 0095, decoupled from the
+          // wait family) is the CLI/r1 policy — injected down to this face's
+          // floor here.
           budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
           registryPath,
           runDir,
@@ -5885,18 +5664,29 @@ export function createWaoMcpServer({
       outputSchema: RUN_STATUS_OUTPUT,
       annotations: RUN_STATUS_ANNOTATIONS,
     },
-    async ({ runId }) => {
+    async ({ runId, expectedWorkspaceRoot }) => {
       // The entire service call + safe-payload construction + output-schema
       // validation are inside ONE try/catch. Any malformed service result or
       // schema mismatch must collapse to the fixed safe text — never leak the
       // SDK's detailed Output validation error (which can include field names,
       // expected types, or internal structure).
       try {
+        // 批 119（A4）：带 expectedWorkspaceRoot 时先证明，服务在读转录后
+        // fail-closed 核验归属；不带时按 runId 直读，逐字节不变。
+        let authorizedWorkspaceRoot;
+        if (expectedWorkspaceRoot !== undefined) {
+          const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+          if (target.error) {
+            return { isError: true, content: [{ type: "text", text: target.error }] };
+          }
+          authorizedWorkspaceRoot = target.proof.root;
+        }
         // TD-341：runner 缺席证明读器 + 节流缓存注入（适配层接线；application
         // 层不上向导入 daemon.js）。前置筛选不过的运行零证明、字节不变。
         const status = await statusService({
           runId,
           runDir,
+          ...(authorizedWorkspaceRoot !== undefined ? { authorizedWorkspaceRoot } : {}),
           runnerGoneDeps,
           runnerGoneCache: runnerGoneProofCache,
         });
@@ -5986,7 +5776,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // 批 119（A4）：带 expectedWorkspaceRoot 时的归属拒绝专属固定文案
+        //（服务 fail-closed 核验；不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: STATUS_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         // Redaction: fixed safe text. Covers service throw, malformed result,
         // and any payload/schema mismatch. Never surface err.message/path/secret
         // or SDK validation detail.
@@ -6122,10 +5920,24 @@ export function createWaoMcpServer({
       outputSchema: RUN_DIAGNOSE_OUTPUT,
       annotations: RUN_DIAGNOSE_ANNOTATIONS,
     },
-    async ({ runId }) => {
+    async ({ runId, expectedWorkspaceRoot }) => {
       // Entire service call + safe projection + output validation in ONE try/catch.
       try {
-        const diag = await diagnosisService({ runId, runDir });
+        // 批 119（A4）：带 expectedWorkspaceRoot 时先证明，服务在读转录后
+        // fail-closed 核验归属；不带时按 runId 直读，逐字节不变。
+        let authorizedWorkspaceRoot;
+        if (expectedWorkspaceRoot !== undefined) {
+          const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+          if (target.error) {
+            return { isError: true, content: [{ type: "text", text: target.error }] };
+          }
+          authorizedWorkspaceRoot = target.proof.root;
+        }
+        const diag = await diagnosisService({
+          runId,
+          runDir,
+          ...(authorizedWorkspaceRoot !== undefined ? { authorizedWorkspaceRoot } : {}),
+        });
         // Safe projection: only event TYPES from evidence (no raw fact/error/path).
         // Exact-set filter: only the 8 types diagnoseFailure can legitimately produce
         // pass through. Everything else — paths, commands, control chars, and
@@ -6177,7 +5989,15 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // 批 119（A4）：带 expectedWorkspaceRoot 时的归属拒绝专属固定文案
+        //（服务 fail-closed 核验；不回显路径或 runId）。
+        if (e?.code === "workspace_not_authorized") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DIAGNOSE_WORKSPACE_MISMATCH_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DIAGNOSE_ERROR_TEXT }],
@@ -6201,7 +6021,7 @@ export function createWaoMcpServer({
 
         // M11-10: bounded read-only readiness handshake. The long poll re-reads
         // the transcript repeatedly, so it is workspace-bound (same proof as
-        // run_wait) and reuses the run_wait SDK-native notifications/progress
+        // run_await_result) and reuses the SDK-native notifications/progress
         // keepalive so a resetTimeoutOnProgress client spans the wait across the
         // MCP 60s default request timeout. The service never writes, never
         // stop/retry/accept/rejects; a pending-at-deadline outcome is a truthful
@@ -6612,146 +6432,9 @@ export function createWaoMcpServer({
     },
   );
 
-  // ===== run_wait (workspace-bound liveness-aware long-poll) =====
-
-  register(
-    "run_wait",
-    {
-      description: RUN_WAIT_DESCRIPTION,
-      inputSchema: RUN_WAIT_INPUT,
-      outputSchema: RUN_WAIT_OUTPUT,
-      annotations: RUN_WAIT_ANNOTATIONS,
-    },
-    async (input, extra) => {
-      try {
-        const runId = input?.runId;
-        if (!isValidRunId(runId)) {
-          return { isError: true, content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }] };
-        }
-        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
-        if (resolvedBinding.error) {
-          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
-        }
-        const binding = resolvedBinding.binding;
-        if (!binding.bound) {
-          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
-        }
-
-        // M10-pre3 closeout (P1-A): keep the MCP request alive across a long
-        // poll. The MCP SDK default request timeout is 60s, so a server-side
-        // wait longer than that would be killed by the client before it
-        // returns. The standard mechanism is notifications/progress: when the
-        // client passes `onprogress`, the SDK attaches _meta.progressToken
-        // (= the request id) to the request; we read it from `extra` and emit
-        // progress notifications keyed to that token on each poll. A client
-        // that set `resetTimeoutOnProgress:true` then resets its 60s timer on
-        // each notification. This is entirely opt-in and standard — we do NOT
-        // patch the host or require a global timeout change. If the client did
-        // not request progress (no token), we send nothing.（决定 0095：MCP 面
-        // 缺省已降到 45000，落在已观测最紧的 ~60s 宿主工具超时内；宿主允许长
-        // 调用时 Lead 可显式加长，此机制继续兜底。）
-        const progressToken = extra?._meta?.progressToken;
-        const hasKeepalive = progressToken !== undefined && progressToken !== null
-          && typeof extra?.sendNotification === "function";
-        const onPoll = hasKeepalive
-          ? async ({ fraction }) => {
-              // progress must be monotonically non-decreasing per spec; the
-              // service already clamps fraction to [0,1).
-              const progress = Math.max(1, Math.floor(fraction * 100));
-              await extra.sendNotification({
-                method: "notifications/progress",
-                params: {
-                  progressToken,
-                  progress,
-                  total: 100,
-                },
-              });
-            }
-          : undefined;
-
-        const result = await runWaitService({
-          runId,
-          runDir,
-          // Preserve omitted-vs-explicit-0 semantics (M10-pre3 closeout P1-B):
-          //   - afterSeq omitted on the tool call → key absent here → service
-          //     treats it as baseline-at-first-read (history not counted).
-          //   - afterSeq:0 passed → forwarded as 0 → counts all history.
-          // The earlier `input?.afterSeq ?? 0` coercion collapsed both into 0,
-          // which made every first poll misreport history as progress.
-          ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
-          waitMs: input?.waitMs ?? MCP_RUN_WAIT_DEFAULT_MS,
-          authorizedWorkspaceRoot: binding.root,
-          ...(onPoll ? { onPoll } : {}),
-        });
-
-        const payload = {
-          runId,
-          // M11-8B closeout: project agentId through the SSOT (closed-set).
-          agentId: safeProjectAgentId(result.agentId),
-          state: result.state,
-          terminal: result.terminal,
-          cursor: result.cursor,
-          returnedEarly: result.returnedEarly,
-          // M12-11: parity with run_await_result — closed-set observation outcome
-          // + nullable readFailureReason, plus the additive observation/
-          // termination facts. No fabricated fields; missing service values
-          // collapse to null/unknown via the schema.
-          observationOutcome: result.observationOutcome,
-          readFailureReason: result.readFailureReason ?? null,
-          liveness: result.liveness,
-          activityEventCount: result.activityEventCount,
-          lastActivityKind: result.lastActivityKind,
-          ownerHeartbeat: result.ownerHeartbeat,
-          observation: result.observation,
-          termination: result.termination ?? null,
-        };
-        payload.availableDrilldowns = selectDrilldowns("run_wait", {
-          state: payload.state,
-          terminal: payload.terminal,
-          liveness: payload.liveness,
-        });
-        // M12-12: self-describing notes — a pure function of the M12-11
-        // observation outcome + termination source. Attached immediately before
-        // the strict parse (same trust boundary as availableDrilldowns).
-        payload.semanticNotes = selectSemanticNotes("run_wait", {
-          observationOutcome: payload.observationOutcome,
-          outcome: payload.observation?.outcome,
-          terminal: payload.terminal,
-          terminationSource: payload.termination?.source ?? null,
-          transcriptQuiet: result.transcriptQuiet === true,
-        });
-        // 决定 0095：nextStep——终态与非终态都给（MCP 面不含 runId）；读失败
-        // （observationOutcome read_failure）时体征年龄不可观测，走重读分支。
-        payload.nextStep = runWaitNextStep({
-          surface: "mcp",
-          terminal: payload.terminal === true,
-          vitalSignAgeMs: Number.isFinite(result.vitalSignAgeMs) ? result.vitalSignAgeMs : null,
-        });
-
-        // M11-8B closeout: return the PARSED safe object.
-        const parsed = RUN_WAIT_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(parsed) }],
-          structuredContent: parsed,
-        };
-      } catch (e) {
-        // 0097 五′：归属拒绝专属固定文案（服务在每次读转录前 fail-closed 核验
-        // 归属；固定文案，不回显路径或 runId）。
-        if (e?.code === "workspace_not_authorized") {
-          return {
-            isError: true,
-            content: [{ type: "text", text: RUN_WAIT_WORKSPACE_MISMATCH_TEXT }],
-          };
-        }
-        return {
-          isError: true,
-          content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }],
-        };
-      }
-    },
-  );
-
-  // ===== run_await_result (M12-3 read-only composite) =====
+  // ===== run_await_result (M12-3 read-only composite; 批 119 起是 MCP 面唯一的
+  // 等待工具——重复调用（单次 waitMs ≤ 270000）直到终态；长等待走 CLI
+  // `wao runs wait <runId> --until-settled`） =====
 
   register(
     "run_await_result",
@@ -6777,9 +6460,9 @@ export function createWaoMcpServer({
         }
 
         // Standard notifications/progress keepalive (opt-in via onprogress),
-        // exactly like run_wait. The service throttles to a 30000 ms default
-        // INDEPENDENT of its internal poll interval, so notifications stay
-        // bounded even with a tiny poll interval.
+        // same mechanism as run_delivery's wait. The service throttles to a
+        // 30000 ms default INDEPENDENT of its internal poll interval, so
+        // notifications stay bounded even with a tiny poll interval.
         const progressToken = extra?._meta?.progressToken;
         const hasKeepalive = progressToken !== undefined && progressToken !== null
           && typeof extra?.sendNotification === "function";
@@ -6851,9 +6534,9 @@ export function createWaoMcpServer({
             && ISOLATION_VIOLATION_REASONS.includes(result.isolationFailureReason)
             ? result.isolationFailureReason
             : null,
-          // M12-11: additive observation/termination facts (same shape as
-          // run_wait). No fabricated fields — termination is null unless a
-          // terminal state was cleanly observed.
+          // M12-11: additive observation/termination facts (the shared
+          // observation/termination schema). No fabricated fields — termination
+          // is null unless a terminal state was cleanly observed.
           observation: result.observation,
           termination: result.termination ?? null,
         };

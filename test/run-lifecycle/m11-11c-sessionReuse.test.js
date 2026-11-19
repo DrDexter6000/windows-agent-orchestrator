@@ -1505,7 +1505,7 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
         "workspaceProof has only source/head/dirty + 3 nullable match booleans",
       );
       assert.ok(
-        ["call_target", "lead_session", "server_config", "mcp_root"].includes(parsed.workspaceProof.source),
+        ["call_target", "server_config", "mcp_root"].includes(parsed.workspaceProof.source),
         "proof source is the closed-set enum",
       );
       assert.ok(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(parsed.workspaceProof.gitHead), "proof gitHead is canonical hex");

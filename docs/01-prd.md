@@ -14,16 +14,16 @@
 
 **WAO is a Lead-Agent-facing, Skill-guided multi-runtime collaboration toolkit with deterministic MCP and CLI control surfaces.**
 
-WAO 是面向 Lead Agent 的多 runtime 协作工具。它通过 MCP/CLI 提供可靠、确定性的派发、活性观察（`run_wait`）、恢复、交付验证与 Lead 决策记录原语（监督与验收由 Lead 负责），通过 Skill/Playbook 提供可复用但不强制的工程思维与工作流；Lead 保留任务理解、语义拆解、编排选择和最终判断。
+WAO 是面向 Lead Agent 的多 runtime 协作工具。它通过 MCP/CLI 提供可靠、确定性的派发、活性观察（`run_await_result`）、恢复、交付验证与 Lead 决策记录原语（监督与验收由 Lead 负责），通过 Skill/Playbook 提供可复用但不强制的工程思维与工作流；Lead 保留任务理解、语义拆解、编排选择和最终判断。
 
-- **MCP 是当前 primary agent-facing adapter，但不是产品存在的目的，也不是唯一可能形态**：任意支持 MCP 的 Agent Runtime 都可以作为 Lead Agent 使用 WAO。Lead 通过 MCP 调用 dispatch、`run_wait`（liveness observation）、collect、diagnose、delivery 和 `run_delivery_decide`（记录 Lead accept/reject）等确定性能力；监督与验收始终由 Lead 负责。Skill、CLI、plugin/MCP adapter 都服务于同一个产品核心。
+- **MCP 是当前 primary agent-facing adapter，但不是产品存在的目的，也不是唯一可能形态**：任意支持 MCP 的 Agent Runtime 都可以作为 Lead Agent 使用 WAO。Lead 通过 MCP 调用 dispatch、`run_await_result`（liveness observation）、collect、diagnose、delivery 和 `run_delivery_decide`（记录 Lead accept/reject）等确定性能力；监督与验收始终由 Lead 负责。Skill、CLI、plugin/MCP adapter 都服务于同一个产品核心。
 - **Skill-guided**：`SKILL.md` 承载工程纪律、角色合同与 Lead guidance，并提供可复用但不强制的可选 Lead Playbook Catalog（Adaptive Playbooks：只读、可选、Lead 可修改的决策脚手架，四个内置 playbook 以 MCP 资源 `wao://playbooks` / `wao://playbooks/{id}` 提供，CLI 对应 `playbook list` / `playbook show`）。Skill 告诉 Lead 何时派工、如何验收和遵守边界。Skill 不保存运行状态，不代替 transcript，不实现控制逻辑。Lead 继续负责语义分解、失败响应和最终验收。WAO 不自动执行语义任务分解，Catalog 不自动拆解/选 worker/派发/推进 phase/验收，不存在 `playbook_run` 类执行入口。
 - **CLI-backed**：CLI 保留为人类操作、debug、运维、CI 和 fallback 接口。MCP 与 CLI 必须调用同一个 application-service 层。禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。RunManager、transcript、delivery、Backend 不依赖 MCP。M9/M10 最小 Lead 闭环 shared application services 已完成提取；其它非闭环 use case 仍可留在 `src/commands/*.js`。
 - **配置责任**：WAO 可以提供自身 MCP Server 的启动和配置入口。WAO 不接管 host runtime 的全局 MCP 配置、provider 配置或认证系统。一个 runtime 可以作为 Lead host，也可以通过 Backend 作为 worker，但两种角色必须保持边界清楚。
 
 ### 0.1 两项一级目标
 
-1. **让任意有能力的 Lead runtime 稳定、可靠地协调多个 worker runtime** 的信息流转、任务派发、活性观察（`run_wait`）、交付验证与 Lead 决策记录；监督、语义审查与验收由 Lead 负责。
+1. **让任意有能力的 Lead runtime 稳定、可靠地协调多个 worker runtime** 的信息流转、任务派发、活性观察（`run_await_result`）、交付验证与 Lead 决策记录；监督、语义审查与验收由 Lead 负责。
 2. **给 Lead 提供成熟的工程思维、角色合同和可选模板**，同时保留编排自由（是否持续自主思考、何时继续/停止属于用户选择的 Lead runtime）。
 
 ### 0.2 非目标 / 责任边界
@@ -105,7 +105,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 - **U2 后台跑 + 恢复**：我启动一批 run 后去做别的；机器重启或进程崩了，我能让它们接续跑，不丢失历史。
 - **U3 看清楚发生了什么**：对任意一个 run，我要知道它到底干了什么——跑了哪些命令、产出了什么、卡在哪。
 - **U4 重试不丢历史**：一个 run 失败了，我要基于它的原始 prompt 重跑，但保留旧 run 的完整记录。
-- **U5 等价驱动**：MCP-capable Agent Runtime 通过 MCP 调用 WAO 确定性能力（dispatch、`run_wait`（liveness observation）、collect、diagnose、delivery、`run_delivery_decide`（记录 Lead accept/reject）；监督与验收由 Lead 负责）——这是 agent-facing primary interface。人类通过 CLI 做操作、debug、运维和 fallback。两者共享同一个 application-service 层。等价的 state-changing operation 必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，MCP/CLI 返回语义等价的结构化结果。bash 脚本和 CI 通过 CLI 驱动。三者在同一套原语上**平权**。
+- **U5 等价驱动**：MCP-capable Agent Runtime 通过 MCP 调用 WAO 确定性能力（dispatch、`run_await_result`（liveness observation）、collect、diagnose、delivery、`run_delivery_decide`（记录 Lead accept/reject）；监督与验收由 Lead 负责）——这是 agent-facing primary interface。人类通过 CLI 做操作、debug、运维和 fallback。两者共享同一个 application-service 层。等价的 state-changing operation 必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，MCP/CLI 返回语义等价的结构化结果。bash 脚本和 CI 通过 CLI 驱动。三者在同一套原语上**平权**。
 
 ### 5.2 可靠性（短期→中期）
 
@@ -120,7 +120,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ### 5.4 长任务可监督与可恢复（中长期）
 
-- **U12 长任务可监督与可恢复**：我派发长任务后，系统持有 durable state、持续 liveness observation（`run_wait`，Lead 据此做监督）、可在进程崩溃/机器重启后恢复，失败/卡住时把证据交回让我决定继续/collect/stop。系统不承诺自动产生 goal/autonomy 或自动故障策略——是否持续在线、自主继续或请求 Owner 介入由 Lead runtime 决定。
+- **U12 长任务可监督与可恢复**：我派发长任务后，系统持有 durable state、持续 liveness observation（`run_await_result`，Lead 据此做监督）、可在进程崩溃/机器重启后恢复，失败/卡住时把证据交回让我决定继续/collect/stop。系统不承诺自动产生 goal/autonomy 或自动故障策略——是否持续在线、自主继续或请求 Owner 介入由 Lead runtime 决定。
 - **U13 无对照物也能判定对错**：全新项目没有"标准答案"，我要能通过用户定义的验收契约（行为快照/契约测试/验收脚本）判定产出是否合格。
 
 ## 6. 能力清单（按架构层组织）

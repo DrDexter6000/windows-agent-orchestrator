@@ -19,15 +19,16 @@
 //   claude-code — M9-7B Claude Code/Fable Lead dogfood（run_20260715124226755a97el2）
 //   zcode       — 真机验证（2026-10-03）：官方通路 `zcode plugins marketplace add
 //                 <本地名录>`（source kind=directory）+ `plugins install wao@wao-local`
-//                 装入；新会话实测加载全部 23 个工具（前缀 mcp__plugin_wao_wao__），
+//                 装入；新会话实测加载当时在面的全部工具（前缀
+//                 mcp__plugin_wao_wao__），
 //                 initialize 握手返回 wao-mcp 0.2.0。名录与插件包源在
 //                 ~/.zcode/wao-local-marketplace/（机器级资产，不进仓库）。
 //   kimi-code   — 真机验证（2026-10-12，kimi 2.1.1）：中立仓库里 `kimi -p` 无头会话
-//                 列出全部 23 个工具并调用 workspace_status 成功返回（该宿主不
-//                 提供 MCP roots，返回 bound=false——Lead 需 workspace_select）。
+//                 列出当时在面的全部工具并成功调用（该宿主不提供 MCP roots，读
+//                 面缺省未绑定——按调用带 expectedWorkspaceRoot）。
 //   opencode    — 真机验证（2026-10-12）：`opencode mcp list` 报 wao connected；
-//                 中立仓库里 `opencode run` 无头会话列出 23 个工具（前缀 wao_）
-//                 并调用 workspace_status 返回 bound=true。
+//                 中立仓库里 `opencode run` 无头会话列出当时在面的全部工具
+//                 （前缀 wao_）并成功调用（当时绑定状态查询返回已绑定）。
 //   claude-desktop — 真机验证（2026-10-12，Owner 重启桌面端后）：宿主自己的 MCP
 //                 日志（%LOCALAPPDATA%\Claude\Logs\mcp-server-wao.log）记录 server
 //                 启动、initialize 握手、tools/list 与 resources/list 均收到返回。
@@ -35,11 +36,11 @@
 //   dsh         — 真机验证（2026-10-18，dsh 0.2.1-rc.2）：web profile 的
 //                 cordis.patch.yml 加一条 dsh-mcp-client 的 insert 行后由
 //                 patchReload live 生效；宿主内 initialize 握手成功、tools/list
-//                 23 个工具（前缀 mcp__wao__），并在真实会话里调用 lead_preflight
-//                 返回完整结果（server build 行确认加载本检出 HEAD）。片段见
-//                 docs/usage/host.md。
-//   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话 23 工具；
-//   codex 0.159.2 `codex exec` 调用 wao.workspace_status completed。详见决定 0066。）
+//                 当时在面的全部工具（前缀 mcp__wao__），并在真实会话里调用
+//                 lead_preflight 返回完整结果（server build 行确认加载本检出
+//                 HEAD）。片段见 docs/usage/host.md。
+//   （2026-10-12 同批复验：claude-code 用户级注册后中立仓库无头会话加载当时
+//   在面的全部工具；codex 0.159.2 `codex exec` 成功调用 WAO 工具。详见决定 0066。）
 //   skillSlot   — 2026-11-02 Lead 实测（决定 0107）：各候选目录放临时探针技能，
 //                 再无头问宿主看到哪些。claude-code（桌面内置）读 ~/.claude/skills
 //                 （新技能几秒内出现在正在运行的会话），不读 ~/.agents/skills；
@@ -80,8 +81,8 @@ function opencodeShape(entry) {
 
 // zcode 对单个 MCP 工具调用的默认超时是 30000ms（zcode-guide diagnosing-mcp；
 // .mcp.json stdio 条目可选 timeoutMs 字段覆盖）。WAO 等待族可超该默认
-//（决定 0095 起 run_wait 30000..600000、MCP 缺省 45000；显式加长仍可远超 30s：
-// run_await_result ≤270000、run_consult waitMs ≤600000）——不带此字段时每个
+//（MCP 面 run_await_result ≤270000、run_consult waitMs ≤600000；CLI runs wait
+// 30000..600000）——不带此字段时每个
 // >30s 的等待调用都会被宿主掐成"假失败"（2026-10-04 跨项目会话实测：
 // run_consult/run_await_result 双双 30s 死亡）。
 // 660000 = 最大阻塞预算 600s + 60s 响应余量。插件通道透传+执行已实证：
@@ -108,8 +109,8 @@ function zcodePluginShape(entry) {
 
 // dsh 的 MCP 客户端插件（@deepseek-ai/dsh-mcp-client）给单次 tools/call 的默认
 // 超时是 60000ms；WAO 等待族最长 600s。660000 = 600s 最大阻塞预算 + 60s 余量
-// （与 zcode 同一算法、同一理由：不设时 run_wait / run_await_result / run_consult
-// 会被宿主掐成"假失败"）。
+// （与 zcode 同一算法、同一理由：不设时 run_await_result / run_consult 会被
+// 宿主掐成"假失败"）。
 const DSH_MCP_TOOL_TIMEOUT_MS = 660_000;
 
 /** YAML 双引号标量：路径与命令行值不需要多行/转义花样，只转义反斜杠与引号。 */

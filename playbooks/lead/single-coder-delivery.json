@@ -27,7 +27,7 @@
     },
     {
       "id": "supervise",
-      "intent": "Observe the coder via run_wait until terminal or liveness warrants action.",
+      "intent": "Observe the coder via run_await_result until terminal or liveness warrants action.",
       "importance": "core",
       "evidence": ["Terminal or liveness summary observed"],
       "adaptations": ["Continue waiting if progress is fresh"]

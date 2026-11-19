@@ -2,8 +2,8 @@
 //
 // 决定 0067 / 0068：控制面不替 Lead 放弃一个还在跑的运行，只把事实摆出来。
 // "转录里多久没有新的动作或正文"这一事实只在这里推导（纯函数、零 I/O、转录零
-// 写入）：CLI status 的 advisory 行、MCP run_status 的 leadAdvisory、run_wait /
-// run_await_result 的 observation.transcript_quiet 语义注记共用它。
+// 写入）：CLI status 的 advisory 行、MCP run_status 的 leadAdvisory、CLI 等待器
+// 与 run_await_result 的 observation.transcript_quiet 语义注记共用它。
 // TD-341（第 89 批 C）：runner 已被证明不在时的 advisory 双语模板同在本模块
 //（runnerGoneAdvisoryText / runnerGoneAdvisoryWireText）——advisory 文本单一 SSOT。
 // 第 107 批：静默 advisory 之上的重启关系陈述（rebootedSinceLastActivity 成立

@@ -8,7 +8,7 @@
 // preserved verbatim; no test was added, removed, or relaxed.
 //
 // This slice carries:
-//   M-*   real MCP behavior for run_wait + run_await_result: output shape,
+//   M-*   real MCP behavior for run_await_result: output shape,
 //         strict parsed boundary, and the descriptions' transport-recovery
 //         contract.
 //   X-*   cross-field invariants + cross-run contamination + backward compat
@@ -99,101 +99,9 @@ async function buildClient(server) {
 }
 
 // =====================================================================
-// Section M — real MCP behavior for run_wait + run_await_result.
+// Section M — real MCP behavior for run_await_result (批 119：MCP run_wait 工具已真删除，
+// 原 M1-M3/M6 的 MCP 工具面测试随工具退役；X1/X3 的 runWait 服务测试保留——CLI 面)。
 // =====================================================================
-
-test("M1: run_wait output schema is strict + exposes observation/termination closed sets", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1211-m1-"));
-  try {
-    makeGitRepo(dir);
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
-    const client = await buildClient(server);
-    try {
-      const tools = await client.listTools();
-      const t = tools.tools.find((x) => x.name === "run_wait");
-      const props = t.outputSchema.properties ?? {};
-      assert.equal(t.outputSchema.additionalProperties, false, "strict output");
-      assert.ok(props.observation, "run_wait exposes observation");
-      assert.deepEqual([...(props.observation.properties.outcome.enum ?? [])].sort(),
-        ["point_in_time", "read_failure", "terminal", "window_expired"]);
-      assert.ok(props.observation.properties.waitedMs, "observation.waitedMs");
-      assert.ok(props.observation.properties.windowMs, "observation.windowMs");
-      // termination is nullable → serializes as anyOf:[object, null]; drill in.
-      const termObj = props.termination?.anyOf?.find((s) => s.type === "object") ?? props.termination;
-      assert.ok(termObj, "run_wait exposes termination");
-      assert.deepEqual([...(termObj.properties.state.enum ?? [])].sort(),
-        ["aborted", "completed", "failed", "timed_out"]);
-      assert.deepEqual([...(termObj.properties.source.enum ?? [])].sort(),
-        ["backend", "completion", "control_plane", "execution_deadline", "manual", "provider", "unknown"]);
-      assert.ok(props.observationOutcome, "run_wait exposes observationOutcome");
-      assert.ok(props.readFailureReason, "run_wait exposes readFailureReason");
-    } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("M2: run_wait window-expiry via real transport → observation/termination, no worker-stopped claim", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1211-m2-"));
-  const runDir = mkdtempSync(join(tmpdir(), "wao-m1211-m2-rd-"));
-  try {
-    makeGitRepo(dir);
-    seedTranscript(runDir, "run_m2", { workspaceCwd: dir, messages: [], terminal: false });
-    let clock = 1000000;
-    const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir, workspaceRoot: dir,
-      runWaitFn: async (input) => {
-        const { runWait } = await import("../../src/application/runWait.js");
-        return runWait({
-          // One bounded virtual interval: a single 180000ms tick advances the
-          // virtual clock straight to the window deadline (was 90 × 2000ms re-reads).
-          ...input, nowFn: () => clock, pollIntervalMs: 180000,
-          sleepFn: async (ms) => { clock += ms; },
-        });
-      },
-    });
-    const client = await buildClient(server);
-    try {
-      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_m2", waitMs: 180000 } });
-      assert.equal(res.isError, undefined);
-      const p = res.structuredContent;
-      assert.equal(p.observation.outcome, "window_expired");
-      assert.equal(p.termination, null);
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); rmrfRetry(runDir); }
-});
-
-test("M3: run_wait read_failure via real transport → structured read_failure (NOT opaque error)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1211-m3-"));
-  const runDir = mkdtempSync(join(tmpdir(), "wao-m1211-m3-rd-"));
-  try {
-    makeGitRepo(dir);
-    seedTranscript(runDir, "run_m3", { workspaceCwd: dir, messages: [], terminal: false });
-    const { readTranscript: readReal } = await import("../../src/transcript.js");
-    let reads = 0;
-    let clock = 1000000;
-    const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir, workspaceRoot: dir,
-      runWaitFn: async (input) => {
-        const { runWait } = await import("../../src/application/runWait.js");
-        return runWait({
-          ...input, nowFn: () => clock, pollIntervalMs: 2000,
-          sleepFn: async (ms) => { clock += ms; },
-          readTranscriptFn: async (p) => { reads += 1; if (reads === 1) return readReal(p); throw new Error("gone"); },
-        });
-      },
-    });
-    const client = await buildClient(server);
-    try {
-      const res = await client.callTool({ name: "run_wait", arguments: { runId: "run_m3", waitMs: 180000 } });
-      const p = res.structuredContent;
-      assert.ok(p, "structured read_failure returned (NOT opaque error)");
-      assert.equal(res.isError, undefined);
-      assert.equal(p.observationOutcome, "read_failure");
-      assert.equal(p.observation.outcome, "read_failure");
-      assert.equal(p.liveness, "unknown");
-      assert.equal(p.termination, null);
-    } finally { await client.close(); await server.close(); }
-  } finally { cleanupDir(dir); rmrfRetry(runDir); }
-});
 
 test("M4: run_await_result output schema strict + observation/termination closed sets", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1211-m4-"));
@@ -230,27 +138,6 @@ test("M5: run_await_result terminal via real transport → observation terminal 
       assert.equal(p.termination.source, "completion");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); rmrfRetry(runDir); }
-});
-
-test("M6: run_wait description carries Host-neutral transport-recovery contract", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m1211-m6-"));
-  try {
-    makeGitRepo(dir);
-    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
-    const client = await buildClient(server);
-    try {
-      const tools = await client.listTools();
-      const t = tools.tools.find((x) => x.name === "run_wait");
-      const d = t.description.toLowerCase();
-      // A missing result means observation unknown; these read-only tools did no mutation.
-      assert.ok(/observation unknown|unknown observation|no.*mutation|no control-plane/i.test(t.description),
-        "description must say a missing result means observation unknown / no mutation");
-      // Re-read point-in-time guidance via run_await_result(waitMs:0) or run_status.
-      assert.ok(/run_await_result|run_status/.test(t.description), "must name a re-read tool");
-      // Must NOT claim worker alive/dead from transport loss.
-      assert.ok(!/worker (is )?(alive|dead|stopped)/i.test(t.description), "must not claim worker alive/dead from transport loss");
-    } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("M7: run_await_result description carries Host-neutral transport-recovery contract", async () => {

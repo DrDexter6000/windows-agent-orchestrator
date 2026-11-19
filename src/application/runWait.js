@@ -29,9 +29,9 @@ import { boundReportScope } from "../metrics.js";
 import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 // M12-11: the pure backend-neutral observation/termination projector (SSOT).
-// Re-export READ_FAILURE_REASONS from the projector so the MCP schema for BOTH
-// run_wait and run_await_result is built from one closed set, with no import
-// cycle (runAwaitResult already imports summarizeLiveness from here).
+// Re-export READ_FAILURE_REASONS from the projector so the read-failure closed
+// set stays single-sourced, with no import cycle (runAwaitResult already
+// imports summarizeLiveness from here).
 import { projectObservation, READ_FAILURE_REASONS } from "./runObservationProjection.js";
 import { isTranscriptQuiet, vitalSignAgeMs } from "./runQuietAdvisory.js";
 
@@ -41,10 +41,8 @@ export const RUN_WAIT_MIN_MS = 30000;
 // CLI 有界 `runs wait` 的缺省观察窗（保持 270000 不变）。
 export const RUN_WAIT_DEFAULT_MS = 270000;
 export const RUN_WAIT_MAX_MS = 600000;
-// MCP 调用面的缺省（决定 0095：已观测最紧的宿主约 60 秒工具超时，45000 留
-// 15 秒余量）；宿主允许长调用时 Lead 可显式加长。与 CLI 缺省各自命名、互不
-// 派生。
-export const MCP_RUN_WAIT_DEFAULT_MS = 45000;
+// 批 119（A5）：MCP 调用面的等待缺省常量（原 45000）已随 MCP 长轮询等待工具
+// 真删除移除——本服务与这些常量只剩 CLI 面在用。
 
 // TD-137②：三个观察窗上限的交叉提示（上限数值零变更）。同族三个等待命令的
 // 窗口各不相同（runs wait / delivery waitMs / await-result），窗口到期返回的

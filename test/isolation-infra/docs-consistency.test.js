@@ -949,11 +949,13 @@ test("派发页列出的 run_continue 拒绝原因与代码闭集 CONTINUE_REJEC
   assert.deepEqual(unknown, [], "派发页列了代码闭集里没有的拒绝原因");
 });
 
-test("使用手册 host 页与 team-roles 记录 workspace 工具（SKILL 不再维护工具名单）", () => {
+test("使用手册 host 页与 team-roles 记录 workspace 绑定事实（SKILL 不再维护工具名单）", () => {
   const host = read("docs/usage/host.md");
-  assert.ok(host.includes("workspace_status"), "docs/usage/host.md must document workspace_status tool");
+  // 批 119：绑定状态/会话选择工具已真删除——绑定事实由 lead_preflight.workspace
+  // 承载（workspaceRoot/source/unboundReason），host 页必须写清。
+  assert.ok(host.includes("lead_preflight"), "docs/usage/host.md must document lead_preflight (binding carrier)");
+  assert.ok(host.includes("expectedWorkspaceRoot"), "docs/usage/host.md must document the per-call target");
   assert.ok(host.includes("--workspace-root"), "docs/usage/host.md must mention --workspace-root startup flag");
-  assert.ok(host.includes("workspace_select"), "docs/usage/host.md must document workspace_select tool");
   // 79 批 A2：SKILL 按批流程重排后不再写工具名单（宿主自己列出工具），原先
   // "tool table must include …" 的三条名单钉随名单一起退役；工具面权威是
   // src/mcp/toolSurface.js 与生成层，计数若写必须等于 TOOLS.length（TD-120 守卫）。
@@ -2450,11 +2452,11 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
 
 test("README 是新读者入口：当前工具计数 / 快速开始节地图指针 / 链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // 当前工具计数与陈旧计数（18/16）负向。
-  assert.ok(/23 MCP tools|23 tools/.test(readme),
-    "README 必须声明当前 23 MCP tools");
-  assert.ok(!/18 MCP tools|16-tool|16 MCP/.test(readme),
-    "README 不得再声称 18/16-tool（当前 23 always-registered MCP tools）");
+  // 当前工具计数与陈旧计数（18/16/23）负向。
+  assert.ok(/20 MCP tools|20 tools/.test(readme),
+    "README 必须声明当前 20 MCP tools");
+  assert.ok(!/18 MCP tools|16-tool|16 MCP|23 MCP tools|23 tools/.test(readme),
+    "README 不得再声称 18/16/23-tool（当前 20 always-registered MCP tools）");
   // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");
@@ -3693,10 +3695,10 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
   const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
   const { TOOLS } = await import("../../src/mcp/toolSurface.js");
   const { RUNS_SUBCOMMANDS } = await import("../../src/commands/runs.js");
-  // 冻结期望配对（改表 = 有意变更，须同步此钉）：
+  // 冻结期望配对（改表 = 有意变更，须同步此钉；批 119：等待行改指 run_await_result）：
   const expected = [
     { mcp: ["run_status"], cli: ["status"] },
-    { mcp: ["run_wait"], cli: ["runs wait"] },
+    { mcp: ["run_await_result"], cli: ["runs wait"] },
     { mcp: ["run_collect"], cli: ["collect"] },
     { mcp: [], cli: ["runs summary", "runs list"] },
     { mcp: ["runs_list"], cli: ["runs list"] },

@@ -302,9 +302,10 @@ export function verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, req
  * 败。TD-324 必改 2：打标收窄到归属比较本身——绑定根本身证明失败（目录不在、
  * Git 证明失败，proveWorkspaceRoot 在构造时抛出、处于 try 之外）与意外异常
  * （如事件形状导致的 TypeError）不标 code，照旧走笼统失败。消息原文保留
- * （CLI 面照旧读到具体原因）；供只读观察工具（run_activity / run_wait /
- * run_await_result / run_delivery 两条路径、run_delivery_review）使用——写面
- * 用 assert 同款语义。
+ * （CLI 面照旧读到具体原因）；供只读观察工具（run_activity /
+ * run_await_result / run_delivery 两条路径、run_delivery_review，及批 119 起
+ * 带调用目标根的 run_status / run_diagnose；CLI 等待器走 runWait 服务同款）
+ * 使用——写面用 assert 同款语义。
  */
 export function verifyRunWorkspaceOwnershipTyped(events, authorizedWorkspaceRoot, requestedRunId) {
   const verify = createRunWorkspaceVerifier(authorizedWorkspaceRoot);

@@ -1347,7 +1347,7 @@ export class RunManager {
       ).trim();
       if (sourceHead !== frozenGitHead) {
         throw new Error(
-          "frozen_base_mismatch: workspace HEAD moved between the dispatch proof and run start; refusing to spawn from a newer base. Re-prove the workspace (workspace_status) and re-issue run_dispatch with the current expectedGitHead.",
+          "frozen_base_mismatch: workspace HEAD moved between the dispatch proof and run start; refusing to spawn from a newer base. Re-prove the workspace (git, or lead_preflight with expectedWorkspaceRoot) and re-issue run_dispatch with the current expectedGitHead.",
         );
       }
     }
@@ -3120,8 +3120,9 @@ export class Run {
         } else if (ev.kind === "thinking" || ev.kind === "runtime_activity") {
           await markRunningOnce(STATE_CHANGE_REASON.first_event);
           // Provider activity is a payload-free supervision fact. Persist it
-          // for run_wait/run_activity/dashboard visibility, but do not count it
-          // as delivery evidence or expose the provider's raw stream payload.
+          // for the wait family/run_activity/dashboard visibility, but do not
+          // count it as delivery evidence or expose the provider's raw stream
+          // payload.
           const { kind, ...rest } = ev;
           await this.transcript.append("run.event", { kind, ...rest });
         } else if (
