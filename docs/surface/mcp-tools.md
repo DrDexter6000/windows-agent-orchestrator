@@ -387,6 +387,7 @@ Input:
 | --- | --- | --- | --- |
 | runId | string | yes |  |
 | waitMs | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -484,6 +485,7 @@ Input:
 | --- | --- | --- | --- |
 | activeOnly | boolean | no |  |
 | limit | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -508,6 +510,7 @@ Input:
 | runId | string | yes |  |
 | afterSeq | integer | no |  |
 | waitMs | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -544,6 +547,7 @@ Input:
 | runId | string | yes |  |
 | afterSeq | integer | no |  |
 | waitMs | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -586,6 +590,7 @@ Input:
 | cursor | string | no |  |
 | pageSize | integer | no |  |
 | order | string | no | enum: desc \| asc |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -619,6 +624,7 @@ Input:
 | runId | string | yes |  |
 | fileIndex | integer | yes |  |
 | cursor | string | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 
@@ -652,6 +658,7 @@ Input:
 | fileIndex | integer | yes |  |
 | cursor | string | no |  |
 | waitMs | integer | no |  |
+| expectedWorkspaceRoot | string | no |  |
 
 Output:
 

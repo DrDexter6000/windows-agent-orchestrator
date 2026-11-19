@@ -90,7 +90,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## MCP `workspace_select`（会话级工作区选择）
 
-`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**该选择只决定只读工具的缺省范围**；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`。**实例级而非会话级**：选择存在服务实例里，同一实例上的其他宿主会话看到同一选择（已知接受的残余）；实例间严格隔离；不写任何持久状态，无需重启。验证委托 `proveWorkspace` SSOT（只接受 canonical Git 顶层）。失败选择不影响既有选择（只在成功时更新）；幂等。
+`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**该选择只决定只读工具的缺省范围**；写调用只认 `expectedWorkspaceRoot`，`docs/surface/mcp-tools.md` 里带此字段的读工具也可按调用带，带了只认它，证明失败即拒、不回退；共用实例时建议这些读工具每次带。**实例级而非会话级**：同实例宿主会话共享选择（已知接受的残余），实例间严格隔离；不持久化，无需重启。`proveWorkspace` SSOT 只接受 canonical Git 顶层。仅成功才改选择；幂等。
 
 输入 `workspaceRoot` 必须为非空绝对路径（≤1024 字符）；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。失败返回固定安全文案 `workspace_select failed: workspaceRoot must be a canonical Git top-level directory`（不回显传入路径、stderr 或异常 message）。
 

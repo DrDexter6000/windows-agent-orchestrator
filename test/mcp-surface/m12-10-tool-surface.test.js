@@ -436,7 +436,8 @@ const RED_23_WIRE = 75492;
 // run_stop 描述不再说 bound workspace：87406→88048（实测；硬顶同上）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate：
 // 90795→91293（实测；硬顶 94532 内）。
-const FROZEN_23_WIRE_CEILING = 93324;
+// 第 118 批：7 个读工具加可选 expectedWorkspaceRoot：93324→93849（实测；Owner 硬顶内）。
+const FROZEN_23_WIRE_CEILING = 93849;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -683,8 +684,10 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // SSOT 缩员）——outputSchema 在 stripped 载荷内，SHA 如实翻新；描述与 inputSchema
 // 零改动（desc/hostVisible 冻结线未动）。（历史值：5f79ca12afe1d343f606547a5d3fe2d1e2549344e86fda618cdee6c6bbf73d55
 // 为 TD-329 后的冻结值。）
+// 第 118 批：7 个读工具输入增 expectedWorkspaceRoot、runs_list scope.source 增
+// call_target——schema 在 stripped 载荷内，SHA 如实翻新；描述零增量。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "8c2971bcdf120528f5ccbe796a8a8e0fc11e93253668fc30bc9eb8c1fb857cde";
+  "0be12f41e3926e9cb4dd85bffd9f2d3d5d7d0ee32e2cd26d2de2b9386a183360";
 // TD-327（2026-11-01，Owner 批准重冻；闭集扩员、additive）：run_continue 出参 rejectionReason
 // enum 增 explicit_dispatch_continuable_unsupported（TD-327 具名拒因——
 // CONTINUE_REJECTION_REASONS SSOT 扩员）——outputSchema 在 stripped 载荷内，
@@ -794,6 +797,7 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // （见 DESC_STRIPPED_CONTRACT_SHA 重冻注释）——各工具描述各加一句必传目标说明：
 // 10125→11438（实测；Owner 硬顶 12347 内）。同批会审修复：run_stop 描述改写、
 // run_consult 读取模式说明、contract_check 范围说明：11438→11783（实测；硬顶同上）。
+// 第 118 批：7 个读工具加可选 expectedWorkspaceRoot：12219→12219（实测；Owner 硬顶内）。
 const FROZEN_23_DESC_CEILING = 12219;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：12063→12219（实测；Owner 硬顶 12347 内）。
@@ -811,7 +815,8 @@ const FROZEN_23_DESC_CEILING = 12219;
 // 2026-10-15（Owner 批准重冻）：同上批次——描述句 + inputSchema 增字段进
 // hostVisible：20699→22596（实测；hostVisible 无独立硬顶，在 wire 硬顶内）。
 // 同批会审修复再实测：22596→22941（硬顶同上）。
-const FROZEN_23_HOSTVISIBLE_CEILING = 23426;
+// 第 118 批：7 个读工具加可选 expectedWorkspaceRoot：23426→23937（实测；Owner 硬顶内）。
+const FROZEN_23_HOSTVISIBLE_CEILING = 23937;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句

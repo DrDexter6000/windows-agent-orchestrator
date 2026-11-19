@@ -140,7 +140,7 @@ test("MAA-02: input schema — runId required, categories enum, afterSeq int≥0
       assert.ok(props.cursor, "cursor present");
       assert.ok(props.pageSize, "pageSize present");
       // 决定 0069：+order（缺省最新在前，asc 按时间顺读）。
-      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "categories", "cursor", "order", "pageSize", "runId"].sort());
+      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "categories", "cursor", "expectedWorkspaceRoot", "order", "pageSize", "runId"].sort());
       assert.deepEqual(props.order.enum, ["desc", "asc"]);
       // categories is a closed set matching ACTIVITY_CATEGORIES.
       const catEnum = props.categories.items?.enum ?? props.categories.enum ?? [];

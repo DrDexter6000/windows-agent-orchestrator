@@ -72,7 +72,7 @@ test("M11-3C-01: run_delivery_review is registered; current tool count; read-onl
       assert.equal(t.annotations.idempotentHint, true);
       assert.equal(t.annotations.openWorldHint, false);
       // input schema: strict, only runId/fileIndex/cursor
-      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["cursor", "fileIndex", "runId"]);
+      assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["cursor", "expectedWorkspaceRoot", "fileIndex", "runId"]);
       assert.equal(t.inputSchema.additionalProperties, false);
       // output schema exists
       assert.ok(t.outputSchema, "output schema present");

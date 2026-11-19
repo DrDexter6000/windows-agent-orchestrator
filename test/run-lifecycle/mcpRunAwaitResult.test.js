@@ -137,7 +137,7 @@ test("MAR-02: input schema — runId required, waitMs default 45000 max 270000 m
       const tools = await client.listTools();
       const t = tools.tools.find((x) => x.name === "run_await_result");
       const props = t.inputSchema.properties ?? {};
-      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "runId", "waitMs"].sort());
+      assert.deepEqual(Object.keys(props).sort(), ["afterSeq", "expectedWorkspaceRoot", "runId", "waitMs"].sort());
       assert.equal(t.inputSchema.additionalProperties, false, "strict input");
       // 决定 0095：MCP 缺省 45000（上限 270000 不变），数值取自常量。
       const { RUN_AWAIT_RESULT_DEFAULT_MS, RUN_AWAIT_RESULT_MAX_MS } = await import("../../src/application/runAwaitResult.js");

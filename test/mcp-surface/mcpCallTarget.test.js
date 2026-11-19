@@ -26,10 +26,16 @@
 //    target when given and reports the scope used.
 // 8. projectBucketLabel agrees with the write-side bucket kind: a root under
 //    os.tmpdir() is _scratch (no project label), a real checkout is a project.
+// 9. Seven read-only tools accept expectedWorkspaceRoot: proof failure and
+//    ownership mismatch never fall back; omitted input keeps legacy behavior.
+// 10. run_wait / run_await_result retain the entry proof if the shared selection
+//     changes while they are waiting.
+// 11. run_delivery(waitMs) / run_delivery_review_bundle retain the entry proof
+//     through selection changes and settle; ownership refusals echo no input path.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -38,6 +44,10 @@ import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
 import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { projectFactFromCwd } from "../../src/projectIdentity.js";
+import { packageDelivery } from "../../src/delivery.js";
+import { runWait as runWaitService } from "../../src/application/runWait.js";
+import { runAwaitResult as runAwaitResultService } from "../../src/application/runAwaitResult.js";
+import { getRunDeliveryReadiness as deliveryReadinessService } from "../../src/application/runDelivery.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
@@ -371,6 +381,40 @@ function seedOwnedRun(runDir, runId, cwd) {
     JSON.stringify({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "hi" }], ts: "2026-10-15T00:00:01.000Z", runId, agentId: "w" }),
     JSON.stringify({ type: "run.state_change", to: "running", ts: "2026-10-15T00:00:02.000Z", runId, agentId: "w" }),
   ].map((l) => l + "\n").join(""), "utf8");
+}
+
+function seedOwnedDeliveryRun(runDir, runId, cwd, { terminal = true } = {}) {
+  const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+  const worktreePath = join(cwd, ".wao-worktrees", runId);
+  mkdirSync(join(cwd, ".wao-worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", worktreePath, "-b", `wao/${runId}`], { cwd, stdio: "pipe" });
+  writeFileSync(join(worktreePath, "README.md"), "# delivered\n", "utf8");
+  const ref = packageDelivery({
+    runId,
+    worktreePath,
+    baseCommit,
+    allowedPaths: ["README.md"],
+    isolation: { type: "worktree", strategy: "persistent" },
+    verificationCommands: ["node --version"],
+  });
+  execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd, stdio: "pipe" });
+  mkdirSync(runDir, { recursive: true });
+  const events = [
+    { type: "session.created", backend: "process", backendSessionId: "proc_delivery", runId, agentId: "w" },
+    { type: "run.started", backend: "claude-code", ts: "2026-10-15T00:00:00.000Z", seq: 1, runId, agentId: "w", cwd },
+    { type: "run.background_submitted", background: true, cwd, ts: "2026-10-15T00:00:00.100Z", seq: 2, runId, agentId: "w" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }], ts: "2026-10-15T00:00:01.000Z", seq: 3, runId, agentId: "w" },
+    { type: "run.delivery_created", ts: "2026-10-15T00:00:02.000Z", seq: 4, runId, agentId: "w", delivery: ref },
+    ...(terminal ? [
+      { type: "run.delivery_verification_passed", ts: "2026-10-15T00:00:03.000Z", seq: 5, runId, agentId: "w", delivery: ref },
+      { type: "run.completed", ts: "2026-10-15T00:00:04.000Z", seq: 6, runId, agentId: "w" },
+      { type: "run.state_change", to: "completed", reason: "done", ts: "2026-10-15T00:00:05.000Z", seq: 7, runId, agentId: "w" },
+    ] : [
+      { type: "run.state_change", to: "running", ts: "2026-10-15T00:00:03.000Z", seq: 5, runId, agentId: "w" },
+    ]),
+  ];
+  writeFileSync(join(runDir, `${runId}.jsonl`), events.map((event) => JSON.stringify(event) + "\n").join(""), "utf8");
+  return ref;
 }
 
 test("CT-6: runId A-class tools — target≠ownership refuses, target=ownership proceeds", async () => {
@@ -758,3 +802,280 @@ test("CT-12: run_dispatch_contract_check honours the call's target and reports t
   }
 });
 
+
+
+// ===== 9: seven read-only tools accept a per-call workspace target =====
+
+const CT13_RUN_ID = "run_ct13_delivery";
+const CT13_INVALID_TEXT =
+  "workspace target invalid: expectedWorkspaceRoot must be an absolute path to a canonical " +
+  "Git worktree top-level (a subdirectory of a repo is rejected). Re-check the project root " +
+  "and retry.";
+const CT13_CASES = [
+  { name: "run_delivery", arguments: { runId: CT13_RUN_ID } },
+  { name: "runs_list", arguments: {} },
+  { name: "run_wait", arguments: { runId: CT13_RUN_ID, waitMs: 30000 } },
+  { name: "run_await_result", arguments: { runId: CT13_RUN_ID, waitMs: 0 } },
+  { name: "run_activity", arguments: { runId: CT13_RUN_ID } },
+  { name: "run_delivery_review", arguments: { runId: CT13_RUN_ID, fileIndex: 0 } },
+  { name: "run_delivery_review_bundle", arguments: { runId: CT13_RUN_ID, fileIndex: 0, waitMs: 1000 } },
+];
+
+function ct13Text(result) {
+  return (result.content ?? []).map((block) => block.text ?? "").join(" ");
+}
+
+function ct13AssertSuccess(testCase, result, expectedSource) {
+  assert.equal(result.isError, undefined, `${testCase.name}: ${ct13Text(result)}`);
+  if (testCase.name === "runs_list") {
+    assert.equal(result.structuredContent.scope.source, expectedSource);
+    assert.equal(result.structuredContent.returnedCount, 1);
+    assert.equal(result.structuredContent.runs[0].runId, CT13_RUN_ID);
+  } else {
+    assert.equal(result.structuredContent.runId, CT13_RUN_ID);
+  }
+}
+
+test("CT-13: seven read tools prove the call target, never fall back, and preserve selection", async () => {
+  const owned = mkdtempSync(join(tmpdir(), "wao-ct13-owned-"));
+  const other = mkdtempSync(join(tmpdir(), "wao-ct13-other-"));
+  const aux = mkdtempSync(join(tmpdir(), "wao-ct13-aux-"));
+  const runDir = join(aux, "runs");
+  try {
+    makeGitRepo(owned);
+    makeGitRepo(other);
+    const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: owned } });
+    seedOwnedDeliveryRun(runDir, CT13_RUN_ID, owned);
+    mkdirSync(join(aux, "plain"), { recursive: true });
+    const server = createWaoMcpServer({ registryPath, runDir });
+    const client = await buildClient(server);
+    try {
+      const status = async () => (await client.callTool({ name: "workspace_status", arguments: {} })).structuredContent;
+
+      // (a) No workspace_select or startup binding: the proved call root is enough.
+      for (const testCase of CT13_CASES) {
+        const before = await status();
+        assert.equal(before.bound, false, `${testCase.name}: precondition is unbound`);
+        const result = await client.callTool({
+          name: testCase.name,
+          arguments: { ...testCase.arguments, expectedWorkspaceRoot: owned },
+        });
+        ct13AssertSuccess(testCase, result, "call_target");
+        assert.deepEqual(await status(), before, `${testCase.name}: (e) success leaves selection untouched`);
+      }
+
+      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: owned } });
+      for (const testCase of CT13_CASES) {
+        // (b) Even with the session selecting the run's project, another valid Git
+        // root remains authoritative. A list filters; single-run tools refuse.
+        const before = await status();
+        const mismatch = await client.callTool({
+          name: testCase.name,
+          arguments: { ...testCase.arguments, expectedWorkspaceRoot: other },
+        });
+        if (testCase.name === "runs_list") {
+          assert.equal(mismatch.isError, undefined);
+          assert.equal(mismatch.structuredContent.scope.source, "call_target");
+          assert.equal(mismatch.structuredContent.returnedCount, 0, "no fallback to the selected project");
+        } else {
+          assert.equal(mismatch.isError, true, `${testCase.name}: cross-project target refuses`);
+          const mismatchText = ct13Text(mismatch);
+          assert.ok(mismatchText.startsWith(
+            `${testCase.name} refused: this run cannot be shown to belong to the bound workspace`,
+          ), `${testCase.name}: existing ownership refusal`);
+          for (const path of [owned, other]) {
+            assert.ok(!mismatchText.includes(path) && !mismatchText.includes(fwd(path)),
+              `${testCase.name}: ownership refusal echoes no input path`);
+          }
+        }
+        assert.deepEqual(await status(), before, `${testCase.name}: (e) mismatch leaves selection untouched`);
+
+        // (c) Relative, vanished, and non-Git targets all use the fixed proof error.
+        for (const invalid of ["relative/path", join(aux, "missing"), join(aux, "plain")]) {
+          const refused = await client.callTool({
+            name: testCase.name,
+            arguments: { ...testCase.arguments, expectedWorkspaceRoot: invalid },
+          });
+          assert.equal(refused.isError, true, `${testCase.name}: invalid target refuses`);
+          assert.equal(ct13Text(refused), CT13_INVALID_TEXT, `${testCase.name}: fixed proof failure text`);
+          assert.deepEqual(await status(), before, `${testCase.name}: invalid target leaves selection untouched`);
+        }
+
+        // (d) Omitting the field retains the existing session-binding behavior.
+        const legacy = await client.callTool({ name: testCase.name, arguments: testCase.arguments });
+        ct13AssertSuccess(testCase, legacy, "lead_session");
+        assert.deepEqual(await status(), before, `${testCase.name}: legacy call leaves selection untouched`);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(owned); cleanupDir(other); cleanupDir(aux);
+  }
+});
+
+test("CT-14: run_wait and run_await_result keep their entry proof after selection changes", async () => {
+  const owned = mkdtempSync(join(tmpdir(), "wao-ct14-owned-"));
+  const other = mkdtempSync(join(tmpdir(), "wao-ct14-other-"));
+  const aux = mkdtempSync(join(tmpdir(), "wao-ct14-aux-"));
+  const runDir = join(aux, "runs");
+  const runId = "run_ct14_wait";
+  let startupTimer;
+  try {
+    makeGitRepo(owned);
+    makeGitRepo(other);
+    const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: owned } });
+    seedOwnedRun(runDir, runId, owned);
+    let markWaitRead;
+    let markAwaitRead;
+    const waitRead = new Promise((resolve) => { markWaitRead = resolve; });
+    const awaitRead = new Promise((resolve) => { markAwaitRead = resolve; });
+    const server = createWaoMcpServer({
+      registryPath,
+      runDir,
+      runWaitFn: (input) => {
+        let first = true;
+        return runWaitService({
+          ...input,
+          pollIntervalMs: 10,
+          readTranscriptFn: async (path) => {
+            const events = await readTranscript(path);
+            if (first) { first = false; markWaitRead(); }
+            return events;
+          },
+        });
+      },
+      runAwaitResultFn: (input) => {
+        let first = true;
+        return runAwaitResultService({
+          ...input,
+          pollIntervalMs: 10,
+          readTranscriptFn: async (path) => {
+            const events = await readTranscript(path);
+            if (first) { first = false; markAwaitRead(); }
+            return events;
+          },
+        });
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const waiting = client.callTool({
+        name: "run_wait",
+        arguments: { runId, waitMs: 30000, expectedWorkspaceRoot: owned },
+      });
+      const awaiting = client.callTool({
+        name: "run_await_result",
+        arguments: { runId, waitMs: 30000, expectedWorkspaceRoot: owned },
+      });
+      // Both calls have completed their initial owned-root read. The timer only
+      // prevents a broken implementation from hanging this test before refusal.
+      startupTimer = setTimeout(() => { markWaitRead(); markAwaitRead(); }, 2000);
+      await Promise.all([waitRead, awaitRead]);
+      clearTimeout(startupTimer);
+      startupTimer = null;
+
+      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: other } });
+      appendFileSync(join(runDir, `${runId}.jsonl`), [
+        JSON.stringify({ type: "run.completed", ts: "2026-10-15T00:00:03.000Z", runId, agentId: "w" }),
+        JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-10-15T00:00:04.000Z", runId, agentId: "w" }),
+      ].map((line) => line + "\n").join(""), "utf8");
+      const [waitResult, awaitResult] = await Promise.all([waiting, awaiting]);
+      assert.equal(waitResult.isError, undefined, `run_wait: ${ct13Text(waitResult)}`);
+      assert.equal(awaitResult.isError, undefined, `run_await_result: ${ct13Text(awaitResult)}`);
+      assert.equal(waitResult.structuredContent.terminal, true);
+      assert.equal(awaitResult.structuredContent.terminal, true);
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(owned); cleanupDir(other); cleanupDir(aux);
+  }
+});
+
+
+test("CT-15: run_delivery and review-bundle waits keep their entry proof after selection changes", async () => {
+  const owned = mkdtempSync(join(tmpdir(), "wao-ct15-owned-"));
+  const other = mkdtempSync(join(tmpdir(), "wao-ct15-other-"));
+  const aux = mkdtempSync(join(tmpdir(), "wao-ct15-aux-"));
+  const runDir = join(aux, "runs");
+  const cases = [
+    { name: "run_delivery", runId: "run_ct15_delivery", arguments: { waitMs: 30000 } },
+    { name: "run_delivery_review_bundle", runId: "run_ct15_bundle", arguments: { fileIndex: 0, waitMs: 30000 } },
+  ];
+  let startupTimer;
+  try {
+    makeGitRepo(owned);
+    makeGitRepo(other);
+    const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: owned } });
+    const refs = new Map();
+    const firstReads = new Map();
+    for (const testCase of cases) {
+      refs.set(testCase.runId, seedOwnedDeliveryRun(runDir, testCase.runId, owned, { terminal: false }));
+      let mark;
+      const promise = new Promise((resolve) => { mark = resolve; });
+      firstReads.set(testCase.runId, { promise, mark });
+    }
+    const server = createWaoMcpServer({
+      registryPath,
+      runDir,
+      getRunDeliveryReadinessFn: (input) => {
+        let first = true;
+        return deliveryReadinessService({
+          ...input,
+          pollIntervalMs: 10,
+          readTranscriptFn: async (path) => {
+            const events = await readTranscript(path);
+            if (first) { first = false; firstReads.get(input.runId).mark(); }
+            return events;
+          },
+        });
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const waiting = cases.map((testCase) => client.callTool({
+        name: testCase.name,
+        arguments: { ...testCase.arguments, runId: testCase.runId, expectedWorkspaceRoot: owned },
+      }));
+      startupTimer = setTimeout(() => {
+        for (const { mark } of firstReads.values()) mark();
+      }, 2000);
+      await Promise.all([...firstReads.values()].map(({ promise }) => promise));
+      clearTimeout(startupTimer);
+      startupTimer = null;
+
+      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: other } });
+      for (const testCase of cases) {
+        appendFileSync(join(runDir, `${testCase.runId}.jsonl`), [
+          JSON.stringify({ type: "run.delivery_verification_passed", ts: "2026-10-15T00:00:04.000Z", seq: 6, runId: testCase.runId, agentId: "w", delivery: refs.get(testCase.runId) }),
+          JSON.stringify({ type: "run.completed", ts: "2026-10-15T00:00:05.000Z", seq: 7, runId: testCase.runId, agentId: "w" }),
+          JSON.stringify({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-10-15T00:00:06.000Z", seq: 8, runId: testCase.runId, agentId: "w" }),
+        ].map((line) => line + "\n").join(""), "utf8");
+      }
+      const results = await Promise.all(waiting);
+      for (const [index, testCase] of cases.entries()) {
+        const result = results[index];
+        assert.equal(result.isError, undefined, `${testCase.name}: ${ct13Text(result)}`);
+        assert.equal(result.structuredContent.runId, testCase.runId);
+        if (testCase.name === "run_delivery") {
+          assert.equal(result.structuredContent.readiness, "reviewable");
+          assert.equal(result.structuredContent.waitReturnedEarly, true);
+        } else {
+          assert.equal(result.structuredContent.delivery.readiness, "reviewable");
+          assert.equal(result.structuredContent.delivery.waitReturnedEarly, true);
+          assert.equal(result.structuredContent.review.available, true);
+        }
+      }
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(owned); cleanupDir(other); cleanupDir(aux);
+  }
+});

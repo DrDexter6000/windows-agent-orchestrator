@@ -91,7 +91,7 @@ test("M12-3B-RED-01: bundle tool is discoverable; current count is 23 after run_
       assert.equal(tools.length, 23, "exactly 23 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct; M13 added run_consult)");
       assert.deepEqual(
         Object.keys(tool.inputSchema.properties).sort(),
-        ["cursor", "fileIndex", "runId", "waitMs"],
+        ["cursor", "expectedWorkspaceRoot", "fileIndex", "runId", "waitMs"],
       );
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.equal(tool.annotations.readOnlyHint, true);

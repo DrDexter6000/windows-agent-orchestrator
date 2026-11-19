@@ -2081,6 +2081,7 @@ const VERIFICATION_FAILURE_SUMMARY = z.object({
 const RUN_DELIVERY_INPUT = z.object({
   runId: z.string().min(1),
   waitMs: z.number().int().min(DELIVERY_WAIT_MS_MIN).max(DELIVERY_WAIT_MS_MAX).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // M11-10: readiness closed set, derived from the application SSOT.
@@ -2918,7 +2919,7 @@ const CALL_TARGET_INVALID_TEXT =
   "and retry.";
 
 /**
- * Prove the per-call workspace target (A-class tools). Returns
+ * Prove a per-call workspace target. Returns
  * { proof: { root, gitHead, dirty } } (proveWorkspace SSOT — canonical Git
  * top-level only), or { error } with a fixed refusal text when the argument is
  * missing or cannot be proven. Never falls back to any binding source and never
@@ -3251,15 +3252,16 @@ const RUNS_LIST_ERROR_TEXT = "runs_list failed";
 const RUNS_LIST_INPUT = z.object({
   activeOnly: z.boolean().optional(),
   limit: z.number().int().min(1).max(100).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 const RUNS_LIST_OUTPUT = z.object({
   // 绑定来源 + 非绝对项目标签（<displayName>-<hash8>，与 lead_preflight
   // workspace.projectBucket 同派生式）——标签是绑定根所属项目的，链接工作树
   // 取主工作树的项目（决定 0099 R8）；绑定根不可识别时 projectBucket 为 null。
-  // runs_list 本身仍跟随会话绑定（B 类缺省范围），不加目标参数。
+  // runs_list 可按调用带目标根；缺省仍跟随会话绑定（B 类缺省范围）。
   scope: z.object({
-    source: z.enum(["lead_session", "server_config", "mcp_root"]),
+    source: z.enum(["lead_session", "server_config", "mcp_root", "call_target"]),
     projectBucket: z.string().min(1).max(128).nullable(),
   }).strict(),
   runs: z.array(z.object({
@@ -3300,13 +3302,14 @@ const RUNS_LIST_DESCRIPTION =
 // ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
 
 const RUN_WAIT_ERROR_TEXT = "run_wait failed";
-// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+// 0097 五′：归属拒绝专属固定文案（调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
 const RUN_WAIT_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_wait");
 
 const RUN_WAIT_INPUT = z.object({
   runId: z.string().min(1),
   afterSeq: z.number().int().nonnegative().optional(),
   waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(MCP_RUN_WAIT_DEFAULT_MS),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // M12-11: the additive observation + termination facts, shared verbatim by
@@ -3388,7 +3391,7 @@ const RUN_WAIT_DESCRIPTION =
 // available for arbitrary re-polling.
 
 const RUN_AWAIT_RESULT_ERROR_TEXT = "run_await_result failed";
-// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+// 0097 五′：归属拒绝专属固定文案（调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
 const RUN_AWAIT_RESULT_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_await_result");
 
 const RUN_AWAIT_RESULT_INPUT = z.object({
@@ -3397,6 +3400,7 @@ const RUN_AWAIT_RESULT_INPUT = z.object({
   // One shared composition budget. 0 = point-in-time (read once, return).
   waitMs: z.number().int().min(RUN_AWAIT_RESULT_MIN_MS).max(RUN_AWAIT_RESULT_MAX_MS)
     .default(RUN_AWAIT_RESULT_DEFAULT_MS),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // Numeric fields are int/nonnegative everywhere they are observed; unobserved
@@ -3551,7 +3555,7 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 // idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
 
 const RUN_ACTIVITY_ERROR_TEXT = "run_activity failed";
-// 0097 五′：归属拒绝专属固定文案（会话绑定语义，见 boundWorkspaceMismatchText）。
+// 0097 五′：归属拒绝专属固定文案（调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
 const RUN_ACTIVITY_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_activity");
 
 // Cursor wire contract: opaque base64url, ≤ ACTIVITY_CURSOR_MAX_CHARS — the
@@ -3569,6 +3573,7 @@ const RUN_ACTIVITY_INPUT = z.object({
   pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP).optional(),
   // 决定 0069：缺省最新在前（Lead 要看的是 worker 现在在做什么）；asc = 按时间顺读。
   order: z.enum(["desc", "asc"]).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // Entry variants — a discriminated union on `category`. Each variant carries
@@ -3882,8 +3887,8 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
 // that the inline version lacked.
 
 const DELIVERY_REVIEW_ERROR_TEXT = "run_delivery_review failed";
-// TD-324（83 批 W2）：归属拒绝专属固定文案（服务层 typed code；会话绑定语义，
-// 见 boundWorkspaceMismatchText）——Lead 分得清"属于另一项目"与一般失败。
+// TD-324（83 批 W2）：归属拒绝专属固定文案（服务层 typed code；调用目标或
+// 缺省会话绑定语义，见 boundWorkspaceMismatchText）——Lead 分得清"属于另一项目"与一般失败。
 const DELIVERY_REVIEW_WORKSPACE_MISMATCH_TEXT = boundWorkspaceMismatchText("run_delivery_review");
 // F5 (2026-10-08): 坏 cursor 专属拒绝文案（instanceof CursorRejectedError 折叠；
 // 共享指引句见 CURSOR_REJECTED_GUIDANCE，不透子类型，零 structuredContent）。
@@ -3893,6 +3898,7 @@ const DELIVERY_REVIEW_INPUT = z.object({
   runId: z.string().min(1),
   fileIndex: z.number().int().nonnegative(),
   cursor: z.string().max(192).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 // M11-12A: the five proof-backed fields are nullable — they are null ONLY for
@@ -3946,7 +3952,7 @@ const DELIVERY_REVIEW_DESCRIPTION =
 // stop/retry/repackage/accept/rejects. Atomic tools remain available.
 const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
 // TD-324（83 批 W2）：归属拒绝专属固定文案（readiness 与 review 服务均 typed
-// code；会话绑定语义，见 boundWorkspaceMismatchText）。
+// code；调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
 const DELIVERY_REVIEW_BUNDLE_WORKSPACE_MISMATCH_TEXT =
   boundWorkspaceMismatchText("run_delivery_review_bundle");
 // F5 (2026-10-08): 坏 cursor 专属拒绝文案（同上，组合工具同款折叠）。
@@ -3959,6 +3965,7 @@ const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
   fileIndex: z.number().int().nonnegative(),
   cursor: z.string().max(192).optional(),
   waitMs: z.number().int().min(DELIVERY_WAIT_MS_MIN).max(DELIVERY_WAIT_MS_MAX).optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
 const DELIVERY_REVIEW_BUNDLE_OUTPUT = z.object({
@@ -4415,6 +4422,15 @@ export function createWaoMcpServer({
 
     // No usable authority (mcp_root failures collapse here via fall-through).
     return { bound: false, unboundReason: "no_workspace_authority" };
+  }
+
+  async function resolveReadWorkspaceBinding(expectedWorkspaceRoot) {
+    if (expectedWorkspaceRoot !== undefined) {
+      const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+      if (target.error) return { error: target.error };
+      return { binding: { bound: true, source: "call_target", ...target.proof } };
+    }
+    return { binding: await resolveWorkspaceBinding() };
   }
 
   register(
@@ -6191,7 +6207,11 @@ export function createWaoMcpServer({
         // stop/retry/accept/rejects; a pending-at-deadline outcome is a truthful
         // fact returned in the structured payload, never an error.
         if (waitMs !== undefined) {
-          const binding = await resolveWorkspaceBinding();
+          const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+          if (resolvedBinding.error) {
+            return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+          }
+          const binding = resolvedBinding.binding;
           if (!binding.bound) {
             return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
           }
@@ -6261,7 +6281,11 @@ export function createWaoMcpServer({
         // is authority-gated by the workspace binding. An unbound/failed
         // binding does NOT error the query — the service simply returns
         // candidateInventory null (never an unbound worktree/Git read).
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         const inventoryAuthority = binding.bound
           ? { authorizedWorkspaceRoot: binding.root, computeInventoryFn: candidateInventoryReader }
           : {};
@@ -6271,8 +6295,8 @@ export function createWaoMcpServer({
         // builder (the review bundle strict-parses the builder output against
         // the BASE and must stay byte-identical) — standalone only.
         payload.isolationFailure = safeProjectIsolationFailure(delivery.isolationFailure);
-        // 决定 0098：adoption 由共享 service 附带（仓库根=会话绑定根；未绑定 →
-        // service 报 unchecked/unbound，不跑 git）；安全投影后进独立出参。
+        // 决定 0098：adoption 由共享 service 附带（仓库根=调用目标或会话绑定根；
+        // 未绑定 → service 报 unchecked/unbound，不跑 git）；安全投影后进独立出参。
         payload.adoption = safeProjectAdoption(delivery.adoption);
         // M12-8B: bounded progressive-disclosure metadata (point-in-time path).
         payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
@@ -6512,7 +6536,11 @@ export function createWaoMcpServer({
     },
     async (input) => {
       try {
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return {
             isError: true,
@@ -6600,7 +6628,11 @@ export function createWaoMcpServer({
         if (!isValidRunId(runId)) {
           return { isError: true, content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }] };
         }
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
@@ -6735,7 +6767,11 @@ export function createWaoMcpServer({
         if (!isValidRunId(runId)) {
           return { isError: true, content: [{ type: "text", text: RUN_AWAIT_RESULT_ERROR_TEXT }] };
         }
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
@@ -6897,7 +6933,11 @@ export function createWaoMcpServer({
         if (!isValidRunId(runId)) {
           return { isError: true, content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }] };
         }
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
@@ -7138,7 +7178,11 @@ export function createWaoMcpServer({
         // Workspace binding — review is workspace-bound (the service needs the
         // authorized source repo to prove the exact commit). No binding → the
         // service is NEVER called.
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
@@ -7217,7 +7261,11 @@ export function createWaoMcpServer({
 
         // Review content is workspace-bound. Resolve authority before either
         // service so invalid/unbound requests perform zero transcript/Git reads.
-        const binding = await resolveWorkspaceBinding();
+        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
+        if (resolvedBinding.error) {
+          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
+        }
+        const binding = resolvedBinding.binding;
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
