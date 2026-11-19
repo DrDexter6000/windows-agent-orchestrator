@@ -333,9 +333,8 @@ async function collectRunBranchOpenItems({
     worktreeCount = null;
   }
 
-  // 跨工作树提示（#2）：审查/裁定工具（run_delivery_review_bundle /
-  // run_delivery）按会话绑定核对归属，不收 expectedWorkspaceRoot——查别的
-  // 工作树里的运行，按调用带那棵树的根，或在那里跑 CLI。只在对应行确实列出
+  // 跨工作树提示（#2）：审查/裁定工具缺省按默认绑定核对归属——查别的
+  // 工作树里的运行，按调用带那棵树的根（expectedWorkspaceRoot），或在那里跑 CLI。只在对应行确实列出
   // 这样的运行时出现；行内无绝对路径。
   const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass that worktree's root as expectedWorkspaceRoot (or run the CLI there) first";
 

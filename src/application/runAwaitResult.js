@@ -3,9 +3,8 @@
 // M12-3 Package A: runAwaitResult — a read-only, advisory composite that folds
 // (1) a Lead-controlled bounded wait for terminal (waitMs 0..270000), (2) a
 // truthful run/liveness/cursor observation, and (3) a safe terminal-then-compact
-// collection into ONE call. All existing atomic tools (run_wait / run_collect /
-// run_status …) remain available for arbitrary re-polling; this tool only adds
-// a convenience path.
+// collection into ONE call. The atomic tools (run_collect / run_status …)
+// remain available; this tool only adds a convenience path.
 //
 // HARD ADVISORY CONTRACT — it must NEVER:
 //   - stop / retry / diagnose / decide / accept / reject / repackage a run,
@@ -87,8 +86,8 @@ import { diagnoseFailure, DIAGNOSIS_CATEGORIES, isValidDiagnosisCode, ISOLATION_
 // projectObservation derives the additive observation {outcome, waitedMs,
 // windowMs} + termination facts from the SAME in-memory snapshot, for every
 // return path of this composite. READ_FAILURE_REASONS is re-exported from the
-// projector so the MCP schema (run_wait + run_await_result) is built from ONE
-// closed set, with no import cycle (runWait imports it from the projector too).
+// projector so the run_await_result schema is built from ONE closed set, with
+// no import cycle (runWait imports it from the projector too).
 import { projectObservation } from "./runObservationProjection.js";
 import { isTranscriptQuiet } from "./runQuietAdvisory.js";
 import {
@@ -107,8 +106,7 @@ import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 // return immediately). 决定 0095：MCP 调用面的缺省改为 45000（已观测最紧的
 // 宿主约 60 秒工具超时，留 15 秒余量；上限不变，宿主允许长调用时显式加长）。
 // The hard cap (270000) is the maximum a caller may ask this ONE call
-// to wait; arbitrary re-polling via run_wait/run_collect remains unbounded by
-// this tool's budget.
+// to wait; longer waits are repeated calls or the CLI `runs wait`.
 export const RUN_AWAIT_RESULT_MIN_MS = 0;
 export const RUN_AWAIT_RESULT_DEFAULT_MS = 45000;
 export const RUN_AWAIT_RESULT_MAX_MS = 270000;
@@ -123,7 +121,7 @@ export const RUN_AWAIT_RESULT_DEFAULT_PROGRESS_MS = 30000;
 // `observed` outcomes carry readFailureReason=null; a read_failure carries
 // exactly ONE of these machine codes — never an error message/path/command/
 // credential. The SSOT now lives in runObservationProjection.js (shared with
-// run_wait); re-exported here so existing consumers (and the MCP schema enum)
+// the CLI wait service runWait.js); re-exported here so existing consumers (and the MCP schema enum)
 // import from ONE place with no drift.
 export { READ_FAILURE_REASONS } from "./runObservationProjection.js";
 
@@ -473,7 +471,7 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
 export async function runAwaitResult(input) {
   const { runId, runDir, waitMs = RUN_AWAIT_RESULT_DEFAULT_MS, authorizedWorkspaceRoot } = input;
 
-  // Distinguish omitted afterSeq from explicit 0 (same semantic as run_wait).
+  // Distinguish omitted afterSeq from explicit 0 (same semantic as the CLI wait).
   const afterSeqOmitted = !Object.prototype.hasOwnProperty.call(input, "afterSeq")
     || input.afterSeq === undefined;
   if (!afterSeqOmitted) {

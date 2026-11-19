@@ -26,28 +26,32 @@ test("NEXT-00: 上限常量与 leadAdvisory 同值（480），情形闭集冻结
   assert.ok(NEXT_STEP_SITUATIONS.includes("settled_line"));
 });
 
-test("NEXT-01: 等待类五支——两面渲染 + MCP 不含 runId + CLI 带 runId", () => {
+test("NEXT-01: 等待类五支——只有 CLI 渲染（MCP 面已无调用方，119 续修 3）", () => {
   const cases = [
-    { vitalSignAgeMs: 120_000, mcp: /Call run_await_result again \(waitMs up to 270000\)/, cli: /wao runs wait run_\S+ --until-settled/ },
-    { vitalSignAgeMs: 700_000, mcp: /may be inside a long-running command[\s\S]*run_activity/, cli: /may be inside a long-running command[\s\S]*wao status run_/ },
-    { vitalSignAgeMs: 31 * 60_000, mcp: /No new signs of life in the transcript for 31 min[\s\S]*run_stop is only for an explicit Lead decision/, cli: /No new signs of life in the transcript for 31 min[\s\S]*wao runs settle and wao stop/ },
-    { vitalSignAgeMs: null, mcp: /not observable[\s\S]*run_status/, cli: /not observable[\s\S]*wao status run_/ },
+    { vitalSignAgeMs: 120_000, cli: /Signs of life were last observed 2 min ago[\s\S]*wao runs wait run_\S+ --until-settled/ },
+    { vitalSignAgeMs: 700_000, cli: /may be inside a long-running command[\s\S]*wao status run_/ },
+    { vitalSignAgeMs: 31 * 60_000, cli: /No new signs of life in the transcript for 31 min[\s\S]*wao runs settle and wao stop/ },
+    { vitalSignAgeMs: null, cli: /not observable[\s\S]*wao status run_/ },
   ];
   for (const c of cases) {
-    const mcp = runWaitNextStep({ surface: "mcp", terminal: false, vitalSignAgeMs: c.vitalSignAgeMs });
     const cli = runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: c.vitalSignAgeMs, runId: RUN_ID });
-    assert.match(mcp, c.mcp);
     assert.match(cli, c.cli);
-    assert.ok(!mcp.includes(RUN_ID), "MCP 面不含 runId");
     assert.ok(cli.includes(RUN_ID), "CLI 面带 runId");
-    assert.ok(mcp.length <= NEXT_STEP_MAX_LEN && cli.length <= NEXT_STEP_MAX_LEN);
+    assert.ok(cli.length <= NEXT_STEP_MAX_LEN);
   }
-  // 终态支：MCP 指向 run_delivery + 显式 waitMs；CLI 指向 --until-settled / runs delivery。
-  const mcpT = runWaitNextStep({ surface: "mcp", terminal: true, vitalSignAgeMs: null });
+  // 终态支：CLI 指向 --until-settled / runs delivery。
   const cliT = runWaitNextStep({ surface: "cli", terminal: true, vitalSignAgeMs: null, runId: RUN_ID });
-  assert.match(mcpT, /run_delivery with an explicit waitMs/);
   assert.match(cliT, /--until-settled/);
-  assert.ok(!mcpT.includes(RUN_ID), "终态支 MCP 面也不含 runId");
+  assert.match(cliT, /wao runs delivery/);
+  // 等待族五支已 CLI-only：MCP 面请求直接抛错（原 MCP run_wait 工具删除后无调用方，
+  // MCP 面从终态到交付收口的一跳由 run_await_result 的 availableDrilldowns 承载）。
+  for (const args of [
+    { surface: "mcp", terminal: false, vitalSignAgeMs: 120_000 },
+    { surface: "mcp", terminal: true, vitalSignAgeMs: null },
+  ]) {
+    assert.throws(() => runWaitNextStep(args), /CLI-only/,
+      "wait-family situations must refuse surface \"mcp\" (no MCP caller exists)");
+  }
 });
 
 test("NEXT-02: delivery_unsettled / dispatch_accepted 两类固定模板", () => {
@@ -88,10 +92,16 @@ test("NEXT-04: 输入校验——未知 surface/situation 抛错；CLI 面缺 ru
 
 test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超长 runId 触发守卫）", () => {
   // 所有情形 × 两面 × 大龄数字均在限内（新情形按各自需要的入参渲染；
-  // verifier_gone、runner_gone 与 runner_unproven 只有 CLI 面，MCP 面必须拒绝）。
+  // 等待族五支（wait_*，119 续修 3 起）与等待器证明三支只有 CLI 面，
+  // MCP 面必须拒绝）。
+  const CLI_ONLY = new Set([
+    "wait_vital_recent", "wait_vital_ageing", "wait_vital_quiet",
+    "wait_vital_unobservable", "wait_terminal",
+    "verifier_gone", "runner_gone", "runner_unproven",
+  ]);
   for (const situation of NEXT_STEP_SITUATIONS) {
     for (const surface of ["mcp", "cli"]) {
-      if ((situation === "verifier_gone" || situation === "runner_gone" || situation === "runner_unproven") && surface === "mcp") {
+      if (CLI_ONLY.has(situation) && surface === "mcp") {
         assert.throws(
           () => buildNextStep({ surface, situation }),
           /CLI-only/,
@@ -123,11 +133,12 @@ test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超�
 test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把体征说成推进/停止结论", () => {
   const hosts = ["claude-code", "claude-desktop", "codex", "zcode", "kimi-web", "kimi-code", "opencode", "dsh"];
   const samples = [
-    runWaitNextStep({ surface: "mcp", terminal: false, vitalSignAgeMs: 60_000 }),
-    runWaitNextStep({ surface: "mcp", terminal: false, vitalSignAgeMs: 700_000 }),
-    runWaitNextStep({ surface: "mcp", terminal: false, vitalSignAgeMs: 31 * 60_000 }),
-    runWaitNextStep({ surface: "mcp", terminal: false, vitalSignAgeMs: null }),
-    runWaitNextStep({ surface: "mcp", terminal: true, vitalSignAgeMs: null }),
+    // 119 续修 3：等待族五支只有 CLI 面（MCP 样本换成仍在 MCP 面渲染的情形）。
+    runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: 60_000, runId: RUN_ID }),
+    runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: 700_000, runId: RUN_ID }),
+    runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: 31 * 60_000, runId: RUN_ID }),
+    runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: null, runId: RUN_ID }),
+    runWaitNextStep({ surface: "cli", terminal: true, vitalSignAgeMs: null, runId: RUN_ID }),
     buildNextStep({ surface: "mcp", situation: "delivery_unsettled" }),
     buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }),
     buildNextStep({ surface: "cli", situation: "settled_line", runId: RUN_ID, settlementReason: "delivery_settled" }),

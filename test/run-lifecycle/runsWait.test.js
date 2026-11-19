@@ -3,8 +3,8 @@
 // TD-109 (TDD plan v2 D1): CLI `runs wait <runId>` + `runs` unknown-subcommand
 // fail-closed.
 //
-// The command is a thin CLI adapter over the SAME runWait application service
-// the MCP run_wait tool uses (src/application/runWait.js). The CLI owns only:
+// The command is a thin CLI adapter over the runWait application service
+// (src/application/runWait.js). The CLI owns only:
 //   - argv parsing (--wait-ms / --format / --run-dir)
 //   - Number() coercion of --wait-ms (the SERVICE is the boundary validator —
 //     its exact error text must reach the user unmodified; D1-D3 收口起唯一
@@ -39,7 +39,7 @@ import { OBSERVATION_OUTCOMES } from "../../src/application/runObservationProjec
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
-// Service-level closed set (mirrors the MCP RUN_WAIT_OUTPUT enum).
+// Service-level closed set of observation outcomes.
 const SERVICE_OBSERVATION_OUTCOMES = ["observed", "read_failure"];
 
 function makeRunDir() {
@@ -108,7 +108,7 @@ test("TD-109-W1: terminal run → runs wait --format json prints service result 
     assert.equal(parsed.state, "completed");
     assert.equal(parsed.returnedEarly, true);
     assert.equal(parsed.observationOutcome, "observed");
-    // semanticNotes reuse the MCP run_wait selector (no copied catalog).
+    // semanticNotes reuse the shared selector, source key run_wait (no copied catalog).
     assert.ok(Array.isArray(parsed.semanticNotes), "semanticNotes must be an array");
     assert.ok(parsed.semanticNotes.length >= 1, "semanticNotes must be non-empty");
     const ids = parsed.semanticNotes.map((n) => n.id);

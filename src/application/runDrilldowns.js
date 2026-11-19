@@ -131,6 +131,18 @@ const CATALOG = Object.freeze({
     cost: "low",
     readOnly: true,
   }),
+  // 119 续修 3（会审必改）：终态但交付未收口（打包/验证仍在进行）时，把 Lead
+  // 引到 run_delivery 带 waitMs 等收口——这是 MCP 面从"终态"到"交付收口"的一跳
+  //（run_await_result 有意不带 nextStep，指引只经此下钻条目）。
+  deliveryWait: Object.freeze({
+    tool: "run_delivery",
+    view: "delivery",
+    detail: "wait for delivery settlement",
+    purpose: "call run_delivery with waitMs to wait for packaging/verification to settle",
+    reveals: "readiness as it settles to reviewable or a settled failure code",
+    cost: "low",
+    readOnly: true,
+  }),
   deliveryReview: Object.freeze({
     tool: "run_delivery_review",
     view: "delivery",
@@ -198,6 +210,11 @@ function selectForRunAwaitResult(f) {
   }
   if (f.outcomeVerificationStatus === "failed") {
     return ["deliveryReview", "diagnose", "activity"];
+  }
+  // 119 续修 3：终态但未收口（打包/验证还在进行）——指引带 waitMs 调
+  // run_delivery 等收口（deliveryWait 条目），activity 照旧在列。
+  if (f.outcomeReadiness === "waiting_for_packaging" || f.outcomeReadiness === "waiting_for_verification") {
+    return ["deliveryWait", "activity"];
   }
   if (f.outcomeReadiness === "packaging_failed" || f.outcomeDeliveryFailureCode != null) {
     return ["diagnose", "delivery", "activity"];

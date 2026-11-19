@@ -2457,6 +2457,13 @@ test("README 是新读者入口：当前工具计数 / 快速开始节地图指�
     "README 必须声明当前 20 MCP tools");
   assert.ok(!/18 MCP tools|16-tool|16 MCP|23 MCP tools|23 tools/.test(readme),
     "README 不得再声称 18/16/23-tool（当前 20 always-registered MCP tools）");
+  // 119 续修 5（会审必改）：中文 README（含导航表）照英文同款补钉——此前导航表
+  // 写"23 个 MCP 工具"未被抓（正文已有 20 使正向探针通过、负向探针只查 n±1）。
+  const readmeZh = read("README.zh-CN.md");
+  assert.ok(/20 个 MCP 工具/.test(readmeZh),
+    "README.zh-CN.md 必须声明当前 20 个 MCP 工具");
+  assert.ok(!/23 个 MCP 工具|22 个 MCP 工具|18 个 MCP 工具|16 个 MCP 工具/.test(readmeZh),
+    "README.zh-CN.md 不得再声称 16/18/22/23 个 MCP 工具（当前 20）");
   // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");

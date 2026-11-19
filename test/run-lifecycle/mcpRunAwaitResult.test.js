@@ -590,3 +590,113 @@ test("MAR-M12-21: completed-empty terminal run → outcome diagnosis category=no
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
+
+// =====================================================================
+// 119 续修 3（会审必改）：终态但交付未收口（waiting_for_packaging /
+// waiting_for_verification）时，availableDrilldowns 必须包含指向 run_delivery
+// 的条目（deliveryWait：带 waitMs 等收口）——这是 MCP 面从"终态"到"交付收口"
+// 的一跳（run_await_result 有意不带 nextStep）。真实服务 + 真实 transport。
+// =====================================================================
+
+test("MAR-DD-119: terminal + verification pending → drilldowns carry the run_delivery wait entry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar-dd119-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar-dd119-rd-"));
+  try {
+    makeGitRepo(dir);
+    const id = "run_dd119";
+    const agentId = "coder_low";
+    const TS = "2026-11-19T00:00:00.000Z";
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId: id,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${id}`, worktreePath: "D:/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    // 终态 + 交付已创建 + 验证仍 pending → outcome.delivery.readiness =
+    // waiting_for_verification（未收口）。
+    const lines = [
+      jl({ type: "run.background_submitted", background: true, cwd: dir, deliveryRequested: true, ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", to: "pending", reason: "created", ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: TS, runId: id, agentId }),
+      jl({
+        type: "run.started", backend: "claude-code", cwd: dir, ts: TS, runId: id, agentId,
+        delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      }),
+      jl({ type: "run.delivery_created", runId: id, agentId, ts: TS, delivery: ref }),
+      jl({ type: "run.completed", ts: TS, runId: id, agentId }),
+      jl({ type: "run.state_change", from: "running", to: "completed", reason: "done", ts: TS, runId: id, agentId }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: id, waitMs: 0 } });
+      assert.equal(res.isError, undefined, "service must succeed");
+      const parsed = res.structuredContent;
+      assert.equal(parsed.terminal, true, "terminal run");
+      assert.equal(parsed.outcome.delivery.readiness, "waiting_for_verification",
+        "precondition: delivery is requested but not settled");
+      const dd = parsed.availableDrilldowns.filter((e) => e.tool === "run_delivery");
+      assert.equal(dd.length, 1, "exactly one run_delivery drilldown entry");
+      assert.match(dd[0].purpose, /run_delivery with waitMs/, "entry says to wait with waitMs for settlement");
+      assert.equal(dd[0].readOnly, true);
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});
+
+// =====================================================================
+// 119 续修 10（建议）：afterSeq 透传——省略与显式 0 在服务入参上不同
+//（省略 → 键缺席，服务按首读基线；显式 0 → 原样转发，计入全部历史）。
+// 原钉在已删除的 MCP run_wait 工具上（MCP-WAIT-06/07），此处按 run_await_result
+// 补同款两条（注入缝捕获服务入参，真实 MCP transport）。
+// =====================================================================
+
+test("MAR-AFTERSEQ-1: adapter passes an OMITTED afterSeq through (key absent, not coerced to 0)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar-as1-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar-as1-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_as", { workspaceCwd: dir, messages: ["x"], terminal: true });
+    let captured = null;
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir, workspaceRoot: dir,
+      runAwaitResultFn: async (input) => {
+        captured = input;
+        const { runAwaitResult } = await import("../../src/application/runAwaitResult.js");
+        return runAwaitResult(input);
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: "run_as", waitMs: 0 } });
+      assert.equal(res.isError, undefined);
+      assert.equal("afterSeq" in captured, false, "omitted afterSeq → key ABSENT in the service input");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});
+
+test("MAR-AFTERSEQ-2: adapter passes an EXPLICIT afterSeq:0 through as 0", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar-as2-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar-as2-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_as", { workspaceCwd: dir, messages: ["x"], terminal: true });
+    let captured = null;
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir, workspaceRoot: dir,
+      runAwaitResultFn: async (input) => {
+        captured = input;
+        const { runAwaitResult } = await import("../../src/application/runAwaitResult.js");
+        return runAwaitResult(input);
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: "run_as", waitMs: 0, afterSeq: 0 } });
+      assert.equal(res.isError, undefined);
+      assert.equal(captured.afterSeq, 0, "explicit afterSeq:0 → forwarded as 0 (counts all history)");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});

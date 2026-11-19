@@ -11,8 +11,8 @@
 //     （diagnoseFailure）、../waoDir.js
 //     （getWaoStateDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
 //     （summarizeStages）
-//   - 共享 service：../application/runWait.js（runs wait 与 MCP run_wait 同一
-//     等待服务）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
+//   - 共享 service：../application/runWait.js（runs wait 的等待服务；MCP
+//     run_await_result 复用其活性投影）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd，纯函数）
 //   - node built-in：fs/promises（unlink/mkdir/rename/stat）、fs
 //     （existsSync）、path（join/resolve/dirname）
@@ -111,9 +111,9 @@ import { parseOptions, resolveTargetCwd } from "./shared.js";
 // 里注入三态读器 readHandshakeDetailed（分清文件不在/读不出/读出——readHandshake
 // 把读不出也归为无 daemon，对证明不够）。
 import { readHandshakeDetailed, isDaemonAlive } from "../daemon.js";
-// TD-109: `runs wait` delegates to the SAME liveness-aware wait service the
-// MCP run_wait tool uses, and attaches notes via the SAME semanticNotes
-// selector — no copied algorithm, no copied catalog.
+// TD-109: `runs wait` delegates to the liveness-aware wait service and
+// attaches notes via the shared semanticNotes selector (source key run_wait,
+// kept for the CLI) — no copied algorithm, no copied catalog.
 import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
 import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
 // TD-341（第 89 批 C3）：runner 被证明不在时附 runner stderr 尾部（展示处理后的
@@ -337,9 +337,9 @@ const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [<runId>...] [--wait-ms 
  *         （第 118 批 B：多个 runId 去重后 2–16 个，只与 --until-settled 同用，
  *          先到先返回——多目标收口等待见 runsWaitMultiUntilSettledCommand）
  *
- * Read-only bounded long-poll. Delegates to the SAME runWait application
- * service the MCP run_wait tool uses — the CLI never re-implements the
- * wait/liveness/observation algorithm and never copies boundary constants.
+ * Read-only bounded long-poll. Delegates to the runWait application service
+ * — the CLI never re-implements the wait/liveness/observation algorithm and
+ * never copies boundary constants.
  * The CLI owns only:
  *   - strict argv parsing (flag-aware positional walk)
  *   - --wait-ms Number() coercion — the SERVICE stays the boundary validator,
@@ -348,7 +348,7 @@ const RUNS_WAIT_USAGE = "用法：wao runs wait <runId> [<runId>...] [--wait-ms 
  *     rejected at the CLI with the fixed "--wait-ms must be a number" — NaN
  *     would reach the service as "got: null", hiding the real problem.
  *   - text/JSON rendering (JSON = full service result + semanticNotes via the
- *     SAME selector + facts shape as the MCP run_wait handler)
+ *     shared selector, source key run_wait)
  *   - SIGINT: print the last known point-in-time snapshot, exit non-zero
  *
  * No authorizedWorkspaceRoot is passed (CLI is human/ops — it does not bind a
@@ -479,7 +479,7 @@ async function runsWaitCommand(args, config, deps = {}) {
   }
 
   if (asJson) {
-    // Same selector and facts shape as the MCP run_wait handler — no copied
+    // Shared selector (source key run_wait, kept for the CLI) — no copied
     // catalog, no adapted semantics. 决定 0095：附 nextStep（CLI 面，带 runId）。
     const semanticNotes = selectSemanticNotes("run_wait", {
       observationOutcome: result.observationOutcome,

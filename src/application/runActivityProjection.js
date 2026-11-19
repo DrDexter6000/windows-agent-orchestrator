@@ -250,7 +250,7 @@ export const ACTIVITY_CURSOR_RECOVERY_CHOICES = Object.freeze([
   // Re-request the first page WITHOUT a cursor — starts a fresh cursor chain.
   "request_page_1_without_cursor",
   // Re-enter via afterSeq sourced from a KNOWN wait/activity sequence
-  // (e.g. a numeric cursor from run_wait / run_await_result).
+  // (e.g. a numeric cursor from runs wait / run_await_result).
   "use_afterSeq_from_known_sequence",
 ]);
 

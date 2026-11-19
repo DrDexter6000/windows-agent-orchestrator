@@ -468,4 +468,52 @@ test("WAIT-12b (P2-A): afterSeq non-integer rejected by service", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-// MCP adapter must distinguish omitted vs explicit 0 (no ?? 0 coercion).
+// ── 119 续修 4（会审必改）：从父提交 6826b48e 原样恢复两条纯服务测试。───────
+// 它们直接调 runWait()（CLI runs wait 面），与已删除的 MCP run_wait 工具无关，
+// 上一轮删 MCP 段时被误删；断言逐字保留。
+
+test("M11-11A-RED-01: omitted service wait uses the 270-second observation default", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-wait-m1111a-01-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-wait-m1111a-01-rd-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunningRun(runDir, "run_default_270", dir);
+    const { runWait } = await import("../../src/application/runWait.js");
+    let now = 0;
+    let slept = 0;
+    const result = await runWait({
+      runId: "run_default_270",
+      runDir,
+      pollIntervalMs: 30000,
+      nowFn: () => now,
+      sleepFn: async (ms) => {
+        slept += ms;
+        now += ms;
+      },
+    });
+    assert.equal(result.returnedEarly, false);
+    assert.equal(slept, 270000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("WAIT-13 (P2-B): two concurrent runWait calls → zero durable writes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-wait-13-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-wait-13-rd-"));
+  try {
+    makeGitRepo(dir);
+    const tp = await seedRunningRun(runDir, "run_conc", dir);
+    const before = readFileSync(tp);
+    const { runWait } = await import("../../src/application/runWait.js");
+    const jump = (() => { let t = Date.now(); return () => (t += 200000); })();
+    await Promise.all([
+      runWait({ runId: "run_conc", runDir, waitMs: 180000, sleepFn: () => Promise.resolve(), nowFn: jump }),
+      runWait({ runId: "run_conc", runDir, waitMs: 180000, sleepFn: () => Promise.resolve(), nowFn: jump }),
+    ]);
+    const after = readFileSync(tp);
+    assert.deepEqual(after, before, "concurrent runWait must not write any transcript bytes");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+

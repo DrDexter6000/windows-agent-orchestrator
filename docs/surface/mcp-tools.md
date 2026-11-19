@@ -59,7 +59,7 @@ Output:
 
 ## run_dispatch
 
-Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is REQUIRED and is this call's target — the session binding is not consulted; expectedGitHead/expectedDirty are optional assertions against it. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
+Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is REQUIRED and is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions against it. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -98,7 +98,7 @@ Output:
 
 ## run_dispatch_contract_check
 
-Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract (inline verification or a frozen execution profile) and observes the workspace scope + worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot (absolute Git worktree top-level) checks against that proved project instead of the session binding; workspaceScope in the result names the scope actually used. NOT a gate — contractValid never auto-blocks; run_dispatch stays authoritative.
+Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract (inline verification or a frozen execution profile) and observes the workspace scope + worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot (absolute Git worktree top-level) checks against that proved project instead of the default binding; workspaceScope in the result names the scope actually used. NOT a gate — contractValid never auto-blocks; run_dispatch stays authoritative.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -137,7 +137,7 @@ Output:
 
 ## run_consult
 
-Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — seats run in it, records in its main worktree; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). The receipt carries nextStep when a dispatched seat is not terminal yet. Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the session binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
+Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top-level) is required — seats run in it, records in its main worktree; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats keep running, never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts). The receipt carries nextStep when a dispatched seat is not terminal yet. Facts only — never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries textSha256 of the full text — a mismatch across pages means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot to locate the record under that project (default: the default binding). seat/page in create, page without seat, unknown or out-of-range → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -408,7 +408,7 @@ Output:
 
 ## run_stop
 
-Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it, not to the session binding. Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill / backend abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
+Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it, not to the default binding. Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill / backend abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=false
 

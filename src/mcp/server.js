@@ -933,7 +933,7 @@ const RUN_DISPATCH_INPUT = z.object({
   // dispatch target. Absence or an unprovable value refuses with a fixed text
   // before any side effect. run_dispatch_contract_check takes the field
   // optionally: given, it checks against that proved project and reports
-  // workspaceScope; omitted, it follows the session binding.
+  // workspaceScope; omitted, it follows the default binding.
   expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
@@ -1071,7 +1071,7 @@ const RUN_DISPATCH_DESCRIPTION =
   // never-infers 边界。参数表由 strict inputSchema 表达。
   "Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns " +
   "runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git " +
-  "worktree top-level) is REQUIRED and is this call's target — the session binding is " +
+  "worktree top-level) is REQUIRED and is this call's target — the default binding is " +
   "not consulted; expectedGitHead/expectedDirty are optional assertions against it. " +
   "continuable roots a lineage run_continue can " +
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
@@ -1132,7 +1132,7 @@ const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
   availableProfiles: z.array(CONTRACT_AVAILABLE_PROFILE).max(EXECUTION_PROFILE_IDS.length).optional(),
   // Which scope this check ran against: call_target when the call supplied
   // expectedWorkspaceRoot (proved and used for the path probes), otherwise the
-  // resolved session binding. source + non-absolute project label only — never
+  // resolved default binding. source + non-absolute project label only — never
   // an absolute path (same contract as runs_list scope).
   workspaceScope: z.object({
     source: z.enum(["call_target", "server_config", "mcp_root"]).nullable(),
@@ -1153,7 +1153,7 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
   "(inline verification or a frozen execution profile) and observes the workspace scope + " +
   "worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot " +
   "(absolute Git worktree top-level) checks against that proved project instead of the " +
-  "session binding; workspaceScope in the result names the scope actually used. NOT a gate " +
+  "default binding; workspaceScope in the result names the scope actually used. NOT a gate " +
   "— contractValid never auto-blocks; run_dispatch stays authoritative.";
 
 // ===== run_consult (M13-r2 multi-seat read-only council consult) constants =====
@@ -1358,7 +1358,7 @@ const RUN_CONSULT_DESCRIPTION =
   "final text (page default 1; each page ≤12KiB serialized; pages reassemble " +
   "byte-exact; every page carries textSha256 of the full text — a mismatch across pages " +
   "means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot " +
-  "to locate the record under that project (default: the session binding). " +
+  "to locate the record under that project (default: the default binding). " +
   "seat/page in create, page without " +
   "seat, unknown or out-of-range → fixed refusal text.";
 
@@ -1455,7 +1455,7 @@ const RUN_CONTINUE_INPUT = z.object({
   // the continuation target comes from THIS call (proved via
   // proveWorkspace; required by the handler with a fixed refusal). The parent
   // run must belong to this target (verifyRunWorkspaceOwnership inside the
-  // shared service) — the session binding is not consulted.
+  // shared service) — the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -1597,7 +1597,7 @@ const RUN_CORRECT_INPUT = z.object({
   correctionId: z.string().min(1).max(CORRECTION_ID_MAX_LEN).regex(CORRECTION_ID_PATTERN),
   prompt: z.string().min(1).max(CORRECTION_PROMPT_MAX_LEN),
   // per-call target (proved; required by the handler). The run must
-  // belong to it — the session binding is not consulted.
+  // belong to it — the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -1865,7 +1865,7 @@ const RUN_COLLECT_INPUT = z.object({
   mode: z.enum(["full", "compact"]).optional(),
   // per-call target (proved; required by the handler — run_collect
   // appends an audit event to the run's transcript, so it is an A-class
-  // call). The run must belong to it; the session binding is not consulted.
+  // call). The run must belong to it; the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -2791,7 +2791,7 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   // Bounded optional timeout (bound by the exported SSOT constants).
   timeoutMs: z.number().int().min(REVERIFY_TIMEOUT_MS_MIN).max(REVERIFY_TIMEOUT_MS_MAX).optional(),
   // per-call target (proved; required by the handler). The run must
-  // belong to it; the session binding is not consulted.
+  // belong to it; the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -2865,7 +2865,7 @@ const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
   runId: z.string().min(1),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
   // per-call target (proved; required by the handler). The run must
-  // belong to it; the session binding is not consulted.
+  // belong to it; the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -2916,8 +2916,8 @@ const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: pass expectedWorkspaceRoo
 
 // A call that starts workers or writes transcripts takes its target
 // ONLY from the call's own expectedWorkspaceRoot argument — never from the
-// session selection, MCP roots, or server config (those remain the default
-// scope for read-only tools). Fixed refusal copy naming what to pass; the
+// MCP roots or server config (those remain the default scope for read-only
+// tools). Fixed refusal copy naming what to pass; the
 // refusal happens in the HANDLER (not as a schema-required field) because the
 // shared schemas must stay omit-tolerant for the tools that ignore the field.
 const CALL_TARGET_REQUIRED_TEXT =
@@ -3148,7 +3148,7 @@ const RUN_STOP_INPUT = z.object({
   reason: z.string().min(STOP_REASON_MIN_LEN).max(STOP_REASON_MAX_LEN),
   observedSeq: z.number().int().nonnegative(),
   // per-call target (proved; required by the handler). The run must
-  // belong to it; the session binding is not consulted.
+  // belong to it; the default binding is not consulted.
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
@@ -3189,7 +3189,7 @@ const RUN_STOP_DESCRIPTION =
   // first-terminal-wins。
   "Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot " +
   "(absolute Git worktree top-level) is required — the run must belong to it, not to the " +
-  "session binding. " +
+  "default binding. " +
   "Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and " +
   "reason (why stop) — both " +
   `recorded; worker events after observedSeq older than ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} min ` +
@@ -3985,7 +3985,7 @@ export function createWaoMcpServer({
   // is not given, records live in `runs/consults` under the state directory
   // (getWaoStateDir, decision 0111: a linked worktree's main worktree .wao) of the
   // call's expectedWorkspaceRoot (create mode always; read mode when supplied) or
-  // the resolved session binding (read mode) — the same place the CLI uses with
+  // the resolved default binding (read mode) — the same place the CLI uses with
   // --cwd <workspace>; a read with neither target nor binding refuses.
   runConsultFn,
   consultsDir,
@@ -5144,7 +5144,7 @@ export function createWaoMcpServer({
       }
 
       // — two scope authorities, by mode:
-      //   read mode (B-class): the session binding remains the DEFAULT scope
+      //   read mode (B-class): the default binding remains the DEFAULT scope
       //     (records + paging follow it; no dispatch happens on this path) —
       //     but a call may pass expectedWorkspaceRoot to prove and use that
       //     root for this read instead, so a consult created under Y stays
@@ -5152,7 +5152,7 @@ export function createWaoMcpServer({
       //   create mode (A-class): EVERY seat's cwd, the consult record, and the
       //     transcript attribution come ONLY from this call's
       //     expectedWorkspaceRoot — proved canonical Git top-level, never the
-      //     session binding / MCP roots / server config, and no session state
+      //     default binding / MCP roots / server config, and no session state
       //     is ever written. The binding is not resolved on this path at
       //     all (no roots/list round-trip, no 5s wait).
       let consultTarget = null;
@@ -5290,7 +5290,7 @@ export function createWaoMcpServer({
       // are model-supplied bounded strings (safe to name back — they are not
       // secrets); every refusal below leaves the dispatch count at 0. The
       // target (consultTarget) was already proved above — every seat's cwd and
-      // the record live under THAT root, regardless of the session binding.
+      // the record live under THAT root, regardless of the default binding.
       const seatIds = input.seats;
       const duplicates = [...new Set(seatIds.filter((id, i) => seatIds.indexOf(id) !== i))];
       if (duplicates.length > 0) {
@@ -5449,7 +5449,7 @@ export function createWaoMcpServer({
       // the continuation target comes ONLY from this call's
       // expectedWorkspaceRoot (proved canonical Git top-level). The shared
       // service verifies the parent run belongs to this target via
-      // verifyRunWorkspaceOwnership — the session binding is not consulted.
+      // verifyRunWorkspaceOwnership — the default binding is not consulted.
       // A missing or unprovable target refuses before any mutation/fork.
       let workspaceCwd;
       {
@@ -5600,7 +5600,7 @@ export function createWaoMcpServer({
       // the correction target comes ONLY from this call's
       // expectedWorkspaceRoot (proved canonical Git top-level). The shared
       // service verifies the run belongs to this target via
-      // verifyRunWorkspaceOwnership — the session binding is not consulted.
+      // verifyRunWorkspaceOwnership — the default binding is not consulted.
       // A missing or unprovable target refuses before any append.
       let workspaceCwd;
       {
@@ -5825,7 +5825,7 @@ export function createWaoMcpServer({
       // so it is an A-class call — the target comes ONLY from this call's
       // expectedWorkspaceRoot. collectRunMessages verifies the run's
       // ownership against that root (fail closed before any read-side fetch
-      // or append); the session binding is not consulted.
+      // or append); the default binding is not consulted.
       try {
         if ((mode ?? "full") === "compact" && cursor != null) {
           return {
@@ -6157,7 +6157,7 @@ export function createWaoMcpServer({
       // the decision durably writes the run's transcript, so the
       // target comes ONLY from this call's expectedWorkspaceRoot. The service
       // verifies run ownership against that root (fail closed before the
-      // locked append); the session binding is not consulted. A missing or
+      // locked append); the default binding is not consulted. A missing or
       // unprovable target refuses before any service call.
       const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
       if (target.error) {
@@ -6282,7 +6282,7 @@ export function createWaoMcpServer({
         }
         // the stop target comes ONLY from this call's
         // expectedWorkspaceRoot (proved canonical Git top-level). stopRun
-        // verifies the run's ownership against this root — the session binding
+        // verifies the run's ownership against this root — the default binding
         // is not consulted.
         const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
         if (target.error) {
@@ -7087,7 +7087,7 @@ export function createWaoMcpServer({
         // the repackage target comes ONLY from this call's
         // expectedWorkspaceRoot (proved canonical Git top-level). The service
         // proves ownership + reuses the persisted linked worktree against
-        // that root — the session binding is not consulted.
+        // that root — the default binding is not consulted.
         const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
         if (target.error) {
           return { isError: true, content: [{ type: "text", text: target.error }] };
@@ -7200,7 +7200,7 @@ export function createWaoMcpServer({
         // the reverify target comes ONLY from this call's
         // expectedWorkspaceRoot (proved canonical Git top-level). The service
         // proves ownership + verifies the unchanged artifact against that
-        // root — the session binding is not consulted.
+        // root — the default binding is not consulted.
         const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
         if (target.error) {
           return { isError: true, content: [{ type: "text", text: target.error }] };

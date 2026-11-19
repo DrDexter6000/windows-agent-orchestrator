@@ -325,6 +325,12 @@ export async function getRunStatus({
         reEvents = null; // 重读失败：证明不算数，退回首读快照
       }
       if (reEvents !== null) {
+        // 第 119 批续修 1（会审必改）：重读快照与首读过同一个归属核验——不通过
+        // 即抛 workspace_not_authorized，绝不用另一项目的快照做判断或输出
+        //（也不退回首读快照：转录在读间被换成外项目内容本身就是归属拒绝）。
+        if (authorizedWorkspaceRoot !== undefined && authorizedWorkspaceRoot !== null) {
+          verifyRunWorkspaceOwnership(reEvents, authorizedWorkspaceRoot, runId);
+        }
         const reScope = boundReportScope(reEvents, runId) ?? reEvents;
         const reState = findState(reScope);
         if (!TERMINAL_STATES.includes(reState)) {

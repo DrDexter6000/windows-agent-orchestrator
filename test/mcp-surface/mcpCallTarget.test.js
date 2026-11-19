@@ -1,14 +1,14 @@
 // test/mcp-surface/mcpCallTarget.test.js
 //
 // Workspace-touching MCP tools take their target ONLY from the call's
-// expectedWorkspaceRoot (proveWorkspace canonical Git top-level; the session
-// selection / MCP roots / server config are NOT consulted for the target).
+// expectedWorkspaceRoot (proveWorkspace canonical Git top-level; MCP roots /
+// server config are NOT consulted for the target).
 //
 // Covers:
 // 1. Two host sessions on ONE server instance cannot redirect each other:
-//    selection X, dispatch names Y → Y; later selection Z, dispatch names X → X.
-// 2. A binding pointing at X (server_config AND lead_session) never overrides
-//    a call that names Y.
+//    each dispatch follows its own call's target (no shared state since 批 119).
+// 2. A binding pointing at X (server_config) never overrides a call that
+//    names Y.
 // 3. Missing / relative / non-Git / subdirectory targets refuse BEFORE any
 //    side effect — zero dispatch, zero transcript, zero worktree.
 // 4. run_consult create: every seat's cwd and the record live under the CALL's
@@ -28,10 +28,9 @@
 //    os.tmpdir() is _scratch (no project label), a real checkout is a project.
 // 9. Seven read-only tools accept expectedWorkspaceRoot: proof failure and
 //    ownership mismatch never fall back; omitted input keeps legacy behavior.
-// 10. run_wait / run_await_result retain the entry proof if the shared selection
-//     changes while they are waiting.
+// 10. run_await_result retains the entry proof while it waits.
 // 11. run_delivery(waitMs) / run_delivery_review_bundle retain the entry proof
-//     through selection changes and settle; ownership refusals echo no input path.
+//     and settle; ownership refusals echo no input path.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

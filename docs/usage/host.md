@@ -100,7 +100,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 ## 项目级 Workspace Activation（`mcp bind`，可选）
 
-正常使用不要求先 bind：读类工具按调用带 `expectedWorkspaceRoot`（带了只认它），省略时缺省范围来自 MCP roots。`mcp bind` 只是**可选的持久项目级默认**（冷启动即绑定），写入的 `--workspace-root` 属 `server_config` 来源（优先级最低）。
+正常使用不要求先 bind：读类工具按调用带 `expectedWorkspaceRoot`（带了只认它），省略时走 MCP roots，再到启动配置（`run_status`/`run_diagnose` 省略则按 runId 直读）。`mcp bind` 只是**可选的持久项目级默认**（冷启动即绑定），写入的 `--workspace-root` 属 `server_config` 来源（优先级最低）。
 
 `mcp bind/status/unbind` 命令是各 agent harness 接入 WAO MCP 的操作面（Human Owner 面，不是 MCP 工具）：`bind` 给出或写入注册，`status` 回答"这个 harness 上 WAO 的 MCP 注册了没有"。宿主闭集与能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表派生，三能力轴：snippet（能产出该宿主形态的注册片段）/ autoBind（`bind` 能真写该宿主配置）/ hostVerified（已在真实宿主上验证加载）。三种能力为何分开算，见决定 0043。
 

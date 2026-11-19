@@ -65,14 +65,14 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 ## MCP 等待（`run_await_result`）
 
-MCP 面用 `run_await_result` 等待一个 run 到终态或产出 liveness 摘要，避免 busy `run_status` 轮询；与 CLI 长等待复用同一族 service（`runAwaitResult.js` 内含 `runWait.js` 的等待/投影 + owner 心跳 SSOT `ownerLiveness.js`），不 shell-out CLI；只读——不追加 transcript、不改 terminal state。原 MCP 长轮询工具已真删除（v0.10.0 减面）：**长等待 = 重复调用 `run_await_result`（单次 `waitMs` ≤ 270000）直到终态，请求了交付的 run 终态后用 `run_delivery` 带 `waitMs` 等交付收口；要一直挂着等收口用 CLI `runs wait <runId> --until-settled`（见下节）**。注意 `run_await_result` 单次上限 270 秒，与 CLI 单次最长 600 秒不等价。
+MCP 面用 `run_await_result` 等待终态或 liveness 摘要，避免 busy `run_status` 轮询；`runAwaitResult.js` 自带自己的有界等待循环（从 `runWait.js` 只导入 `summarizeLiveness`/`buildWaitWindowHint` 投影；心跳 SSOT 在 `ownerLiveness.js`），不 shell-out CLI；只读——不追加 transcript、不改 terminal state。原 MCP 长轮询工具已真删除（决定 0125）：**长等待 = 重复调用 `run_await_result` 直到终态；交付 run 终态后用 `run_delivery` 带 `waitMs` 等收口；挂到收口用 CLI `runs wait --until-settled`（见下节）。单次 `waitMs` ≤270000（0 合法），与 CLI 的 30000..600000 不等价。**
 
 `runId` 必填；`runDir`、registry、`force`、timeout 等控制面参数是 server-owned。`afterSeq`（整数 ≥0，可选）：
 
 - 省略：以首次读取时的最大 `seq` 为基线——只统计窗口内的新进展，不把历史误报为 progress。
 - 显式 `0` 或正整数：统计 `seq > afterSeq` 的全部进展（含历史），用于续读——把上次返回的 `cursor` 传回即可。
 
-`waitMs` 是 Lead 的单次观察窗口（区间与缺省见生成层；`waitMs:0` 是 point-in-time 读取，与 CLI `runs wait` 的 30000 下限不同——本工具 0 合法）。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口（见下节），不跳过 `run_delivery`。
+`waitMs` 是 Lead 的单次观察窗口（区间与缺省见生成层；`waitMs:0` 是 point-in-time 读取）。窗口到期只返回 liveness（此时 `terminal:false`），不表示 worker 失败，也不会中止 worker。返回时机只有两种：run 到达终态（completed/failed/aborted/timed_out，`returnedEarly:true`）；或 `waitMs` 到期仍未终态（`returnedEarly:false`，附带 liveness 摘要让 Lead 决定下一步）。普通新事件不会触发提前返回——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`（无交付的 run 不需要再调用一次 `run_status`）；请求了交付的 run 在终态后继续等交付收口，不跳过 `run_delivery`（终态而未收口时 `availableDrilldowns` 会给出指向 `run_delivery` 的等待条目）。
 
 状态投影与 liveness 计数都按 runId 绑定（全无信封的 legacy 快照除外，其活动计数仍按全部事件统计）：`run_await_result` 只看本 run 信封事件（初始读与每次 poll 同一过滤）——外 run 高 seq 活动行不伪造 `progress`，尾部伪造 `run.state_change` 不把等待翻成终态、也不阻断终态观察。全无信封的 legacy transcript 状态投影降级 `pending`，不可归属永不投影为终态——不 throw、不转 read_failure，窗口如实耗尽后返回非终态。CLI `runs wait` 的 Ctrl-C 中断快照同款绑定。
 
@@ -84,7 +84,7 @@ MCP 面用 `run_await_result` 等待一个 run 到终态或产出 liveness 摘�
 - `ownerHeartbeat`：字符串枚举——`"fresh"`/`"stale"`（.owner 心跳在/不在阈值内）/`"n/a"`（终态返回）/`"unknown"`（读失败不查心跳）。
 - `observation`：`{ outcome, waitedMs, windowMs }`，`outcome ∈ { point_in_time, window_expired, terminal, read_failure }`——区分"窗口到期""终态""读失败"；到期绝不意味着 worker 已停止。
 - `termination`：仅干净观测到终态时非空（`{ state, source, configuredMs, policySource }`），否则 `null`。`source ∈ { completion, execution_deadline, manual, provider, backend, control_plane, unknown }`：`execution_deadline` 仅当 wall-clock 截止定时器真的触发（有 bound `run.timed_out` 事实），否则 `timed_out` 态降级 `unknown`——Lead 不会误判 WAO 停了 worker；`configuredMs`/`policySource` 来自绑定的 `run.wait_policy`（缺失/冲突/畸形 → `null`/`unknown`，缺失不等于 disabled）。
-- `agentId`：envelope 盖戳的 canonical worker 身份（同 `run_status`，缺失/冲突降级 `"unknown"`）；`availableDrilldowns`：静态有界披露（`run_activity`/`run_diagnose`/`run_collect`），不自动调用、不停止 run。
+- `agentId`：envelope 盖戳的 canonical worker 身份（同 `run_status`，缺失/冲突降级 `"unknown"`）；`availableDrilldowns`：静态有界披露（`run_activity`/`run_diagnose`/`run_collect`；终态未收口时另给指向 `run_delivery` 的等待条目），不自动调用、不停止 run。
 
 `liveness` 取值（从 transcript 事件流 + owner 心跳投影，不引 isAlive）：
 
@@ -103,9 +103,9 @@ transport keepalive：MCP SDK 的请求超时可能短于观察窗口。client �
 
 transport 恢复契约：`run_await_result` 是只读 advisory 工具。一次调用没有返回结果（transport drop/超时被 host 中断）时观察状态是 unknown——没有 control-plane 变更、没有停止 worker；恢复方式是 point-in-time 重读（`run_await_result(waitMs:0)` 或 `run_status`）。绝不能从 transport 丢失推断 worker 是 alive 还是 dead；只有干净观测到的终态（`termination` 非空）才陈述终止事实，且来源是闭集 `termination.source`，不是猜测。
 
-三个互相独立的时钟（执行截止、后端请求超时、Lead 观察等待）的职责划分见 [架构](../02-architecture.md) 的"三钟分离"；`run_await_result` 的 `waitMs`（区间与缺省见生成层）只决定一次调用等多久，不影响 worker 生命周期。
+三个互相独立的时钟（执行截止、后端请求超时、Lead 观察等待）的职责划分见 [架构](../02-architecture.md) 的"三钟分离"。
 
-CLI fallback：MCP 等待与 CLI `runs wait <runId> [--wait-ms N]` 共用同一族等待服务；要一直等到收口用 `runs wait <runId> --until-settled`（见下节）。`status` 轮询或 `tail --follow` 也能拼出观察，但语义不等同。
+CLI fallback：`status` 轮询或 `tail --follow` 也能拼出观察，但语义不等同（等收口用下节的 `runs wait --until-settled`）。
 
 ## 等待到收口：`runs wait --until-settled` 与 `nextStep`（决定 0095）
 

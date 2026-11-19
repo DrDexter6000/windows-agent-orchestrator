@@ -58,7 +58,7 @@ async function buildClient(server) {
 const RUN_ID = "run_a4_target_001";
 
 for (const tool of ["run_status", "run_diagnose"]) {
-  test(`A4-${tool}-1: 正确项目根 → 证明+归属通过，输出同形`, async () => {
+  test(`A4-${tool}-1: 正确项目根 → 证明+归属通过；省略参数的响应与之完全相等`, async () => {
     const owned = mkdtempSync(join(tmpdir(), "wao-a4-ok-"));
     const aux = mkdtempSync(join(tmpdir(), "wao-a4-ok-aux-"));
     try {
@@ -71,6 +71,12 @@ for (const tool of ["run_status", "run_diagnose"]) {
         const res = await client.callTool({ name: tool, arguments: { runId: RUN_ID, expectedWorkspaceRoot: owned } });
         assert.equal(res.isError, undefined, `must succeed: ${(res.content ?? []).map((b) => b.text ?? "").join(" ")}`);
         assert.equal(res.structuredContent.runId, RUN_ID);
+        // 119 续修 2（会审必改）：同一夹具下，省略参数与带正确根的两次响应
+        // 完全相等——省略 = 按 runId 直读，不引入任何其它差异。
+        const omitted = await client.callTool({ name: tool, arguments: { runId: RUN_ID } });
+        assert.equal(omitted.isError, undefined);
+        assert.deepStrictEqual(omitted.content, res.content, "content（含 text JSON）完全相等");
+        assert.deepStrictEqual(omitted.structuredContent, res.structuredContent, "structuredContent 完全相等");
       } finally { await client.close(); await server.close(); }
     } finally { cleanupDir(owned); cleanupDir(aux); }
   });
@@ -121,7 +127,7 @@ for (const tool of ["run_status", "run_diagnose"]) {
     } finally { cleanupDir(owned); cleanupDir(aux); }
   });
 
-  test(`A4-${tool}-4: 省略参数 → 按 runId 直读（既有行为不变）`, async () => {
+  test(`A4-${tool}-4: 省略参数（未绑定实例）→ 按 runId 直读成功`, async () => {
     const owned = mkdtempSync(join(tmpdir(), "wao-a4-omit-"));
     const aux = mkdtempSync(join(tmpdir(), "wao-a4-omit-aux-"));
     try {

@@ -1106,6 +1106,65 @@ test("TD-341-C1: 不注入证明 deps → 证明不跑（advisory 在场条件�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 第 119 批续修 1（会审必改）：runner 缺席证明的重读快照同样过归属核验。
+// 首读归属 A 并通过；证明成立后的重读换成同一 runId、归属 B 的转录——服务
+// 必须抛 code="workspace_not_authorized"，绝不用 B 的快照投影 state/runnerGone。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("119 续修 1: 首读归属 A、重读归属 B → workspace_not_authorized（不输出 B 的事实）", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const repoA = mkdtempSync(join(tmpdir(), "wao-a4repoA-"));
+  const repoB = mkdtempSync(join(tmpdir(), "wao-a4repoB-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-a4rd-"));
+  try {
+    for (const d of [repoA, repoB]) {
+      execFileSync("git", ["init", "-q"], { cwd: d, stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: d, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: d, stdio: "pipe" });
+      writeFileSync(join(d, "R.md"), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: d, stdio: "pipe" });
+      execFileSync("git", ["commit", "-q", "-m", "i"], { cwd: d, stdio: "pipe" });
+    }
+    // A 所属转录落盘：settle 六门可过（后台派发、非终态、静默满窗），归属事实
+    //（run.background_submitted.cwd 与 run.started.cwd，各恰一条）都指向 A。
+    //（不用 rgEvents——它的 background_submitted 不带 cwd，补一条会变重复。）
+    writeTranscript(runDir, RG_RUN, [
+      ev({ type: "run.background_submitted", background: true, cwd: repoA, ts: "2026-10-12T10:00:00.000Z", seq: 1, runId: RG_RUN, agentId: "coder_low" }),
+      ev({ type: "run.state_change", to: "pending", reason: "background_spawned", ts: "2026-10-12T10:00:00.000Z", seq: 2, runId: RG_RUN, agentId: "coder_low" }),
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-10-12T10:00:00.000Z", seq: 3, runId: RG_RUN, agentId: "coder_low" }),
+      ev({ type: "run.started", backend: "claude-code", cwd: repoA, ts: "2026-10-12T10:00:00.000Z", seq: 4, runId: RG_RUN, agentId: "coder_low" }),
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-10-12T10:00:00.000Z", seq: 5, runId: RG_RUN, agentId: "coder_low" }),
+    ].join(""));
+    const { readTranscript } = await import("../../src/transcript.js");
+    const aEventsOnDisk = await readTranscript(join(runDir, `${RG_RUN}.jsonl`));
+    // 重读快照：同一 runId、同一形状，但两条 cwd 归属事实都指向项目 B。
+    const bEvents = aEventsOnDisk.map((e) => (
+      e.type === "run.started" || e.type === "run.background_submitted" ? { ...e, cwd: repoB } : e
+    ));
+    let reads = 0;
+    const readTranscriptFn = async () => {
+      reads += 1;
+      return reads === 1 ? aEventsOnDisk : bEvents;
+    };
+    await assert.rejects(
+      getRunStatus({
+        runId: RG_RUN,
+        runDir,
+        readTranscriptFn,
+        nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
+        runnerGoneDeps: rgProofDeps(),
+        authorizedWorkspaceRoot: repoA,
+      }),
+      (e) => e.code === "workspace_not_authorized",
+      "重读快照归属 B → 与首读同款的 workspace_not_authorized",
+    );
+    assert.equal(reads, 2, "首读 + 证明后的重读都被消费（重读确实发生）");
+  } finally {
+    cleanupDir(repoA); cleanupDir(repoB); cleanupDir(runDir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 第 107 批：重启关系陈述——非终态、普通静默 advisory 已在场（≥30 分钟）、
 // runner 未被证明不在、且 rebootedSinceLastActivity 成立时，中文 advisory 末尾
 // 加一句、wire 换用固定英文变体模板。开机时刻经 runnerGoneDeps.bootTimeFn 注入。

@@ -9,8 +9,8 @@
 //
 // This module turns ONE trusted transcript snapshot + the observation mode
 // (read-failure / terminal / point-in-time / window-expired) into two additive,
-// closed-set, Host-neutral facts consumed by BOTH read-only observation tools
-// (run_wait + run_await_result):
+// closed-set, Host-neutral facts consumed by BOTH read-only observation paths
+// (MCP run_await_result + the CLI wait service runWait.js):
 //
 //   observation : { outcome ∈ OBSERVATION_OUTCOMES, waitedMs, windowMs }
 //   termination : null | { state ∈ TERMINATION_STATES,
@@ -112,8 +112,8 @@ export const WAIT_POLICY_SOURCES = Object.freeze([
 /**
  * Frozen closed set of safe read-failure machine codes (SSOT). `observed`
  * outcomes carry readFailureReason=null; a read_failure carries exactly ONE of
- * these — never an error message/path/command/credential. The MCP schema enum
- * for BOTH run_wait and run_await_result is built from this single set.
+ * these — never an error message/path/command/credential. The run_await_result
+ * schema enum and the CLI wait service share this single set.
  */
 export const READ_FAILURE_REASONS = Object.freeze([
   "transcript_parse_failed", // transcript read or JSON parse exception

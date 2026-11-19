@@ -51,8 +51,20 @@ export const NEXT_STEP_SITUATIONS = Object.freeze([
   "delivery_continuable",
 ]);
 
-/** 只有 CLI 面渲染的情形（等待器证明只在 CLI 面做）。 */
-const CLI_ONLY_SITUATIONS = Object.freeze(["verifier_gone", "runner_gone", "runner_unproven"]);
+// 119 续修 3：等待族五支（wait_*）只有 CLI 面渲染——原 MCP run_wait 工具删除后，
+// 生产代码没有任何 MCP 调用方（run_await_result 有意不带 nextStep；MCP 面从
+// 终态到交付收口的一跳由 run_await_result 的 availableDrilldowns 承载，
+// 见 runDrilldowns.js 的 deliveryWait 条目）。等待器证明三支照旧只有 CLI 面。
+const CLI_ONLY_SITUATIONS = Object.freeze([
+  "wait_vital_recent",
+  "wait_vital_ageing",
+  "wait_vital_quiet",
+  "wait_vital_unobservable",
+  "wait_terminal",
+  "verifier_gone",
+  "runner_gone",
+  "runner_unproven",
+]);
 
 /** CLI consult 的 nextStep 在列出 runId 会超限时改用的说法。 */
 const CONSULT_RUNNING_FALLBACK = Object.freeze({
@@ -69,29 +81,19 @@ function render(surface, situation, runId, extras) {
   let text;
   switch (situation) {
     case "wait_vital_recent":
-      text = surface === "mcp"
-        ? `Signs of life were last observed ${m} min ago. Call run_await_result again (waitMs up to 270000) before ending the turn.`
-        : `Signs of life were last observed ${m} min ago. Before ending the turn, attach: wao runs wait ${runId} --until-settled (in the background if your host notifies you when background commands finish, otherwise in the foreground).`;
+      text = `Signs of life were last observed ${m} min ago. Before ending the turn, attach: wao runs wait ${runId} --until-settled (in the background if your host notifies you when background commands finish, otherwise in the foreground).`;
       break;
     case "wait_vital_ageing":
-      text = surface === "mcp"
-        ? `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Call run_await_result again (waitMs up to 270000); read run_activity if you need detail.`
-        : `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Run: wao runs wait ${runId} --until-settled; use wao status ${runId} if you need detail.`;
+      text = `Signs of life were last observed ${m} min ago. The worker may be inside a long-running command. Run: wao runs wait ${runId} --until-settled; use wao status ${runId} if you need detail.`;
       break;
     case "wait_vital_quiet":
-      text = surface === "mcp"
-        ? `No new signs of life in the transcript for ${m} min. Read run_activity and run_diagnose first; the run has not been stopped. run_stop is only for an explicit Lead decision.`
-        : `No new signs of life in the transcript for ${m} min. Check wao status ${runId} and wao runs diagnose ${runId} first; the run has not been stopped. The exits are wao runs settle and wao stop — only on an explicit Lead decision.`;
+      text = `No new signs of life in the transcript for ${m} min. Check wao status ${runId} and wao runs diagnose ${runId} first; the run has not been stopped. The exits are wao runs settle and wao stop — only on an explicit Lead decision.`;
       break;
     case "wait_vital_unobservable":
-      text = surface === "mcp"
-        ? "Vital-sign age is not observable on this snapshot. Re-read with run_status before deciding anything."
-        : `Vital-sign age is not observable on this snapshot. Re-read with wao status ${runId} before deciding anything.`;
+      text = `Vital-sign age is not observable on this snapshot. Re-read with wao status ${runId} before deciding anything.`;
       break;
     case "wait_terminal":
-      text = surface === "mcp"
-        ? "Terminal state reached. If a delivery was requested, call run_delivery with an explicit waitMs (e.g. 45000) to wait for settlement, then review."
-        : `Terminal state reached. Wait to settlement with wao runs wait ${runId} --until-settled, or inspect the delivery with wao runs delivery ${runId}.`;
+      text = `Terminal state reached. Wait to settlement with wao runs wait ${runId} --until-settled, or inspect the delivery with wao runs delivery ${runId}.`;
       break;
     case "delivery_unsettled":
       text = surface === "mcp"
@@ -308,13 +310,14 @@ export function buildNextStep({
 
 /**
  * 等待族（CLI runs wait；MCP 面的等待由 run_await_result 承担，有意不带本
- * nextStep）的 nextStep：按终态与体征年龄自动选支。
+ * nextStep——等待族五支因此只有 CLI 渲染，见 CLI_ONLY_SITUATIONS）的
+ * nextStep：按终态与体征年龄自动选支。
  * 阈值直接引用 runQuietAdvisory 的两个常量（10 分钟 / 30 分钟），毫秒直比，
  * 不预取整——恰好 10 分钟不算 recent（同 runStatus 的 < 口径），恰好 30 分钟
  * 已算 quiet（同 advisory 的 >= 口径）。
  *
  * @param {object} input
- * @param {"mcp"|"cli"} input.surface
+ * @param {"mcp"|"cli"} input.surface — 等待族只接受 "cli"（MCP 面无调用方）
  * @param {boolean} input.terminal
  * @param {number|null} input.vitalSignAgeMs
  * @param {string} [input.runId]

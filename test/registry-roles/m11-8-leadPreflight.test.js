@@ -215,9 +215,14 @@ test("M11-8-6: output leaks no paths, credential values, prompts, PIDs, sessions
       workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "c".repeat(40), dirty: false },
       registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,
     });
-    const dumped = JSON.stringify(result);
+    // 批 119：workspace.workspaceRoot 有意返回规范根；其余输出里不得再出现
+    // 工作区绝对路径（两种分隔符都查）。
+    assert.equal(result.workspace.workspaceRoot, dir, "the canonical root is reported in workspace.workspaceRoot");
+    const rest = { ...result, workspace: { ...result.workspace, workspaceRoot: null } };
+    const dumped = JSON.stringify(rest);
     assert.ok(!dumped.includes("test-key-leakcheck"), "no credential value leak");
-    assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no workspace absolute path leak");
+    assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no workspace absolute path leak (forward slashes)");
+    assert.ok(!dumped.includes(JSON.stringify(dir).slice(1, -1)), "no workspace absolute path leak (escaped backslashes)");
   } finally {
     delete process.env.TEST_M118_SECRET;
     cleanupDir(dir);

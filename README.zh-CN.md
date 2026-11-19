@@ -111,7 +111,7 @@ WAO 暴露 **20 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 | 你想…… | 读这个 |
 |---|---|
 | **从零开始——安装、单 worker、校验、MCP host、首个 canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)——唯一的新用户上手路径 |
-| **作为 agent / 脚本使用编排器**（23 个 MCP 工具、命令、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
+| **作为 agent / 脚本使用编排器**（20 个 MCP 工具、命令、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
 | **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——部署与使用各页的地图 |
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |

@@ -68,6 +68,9 @@ const FACT_MATRIX = [
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "legacy_event_shape", liveness: "unknown", resultStatus: "unavailable" }],
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "snapshot_unavailable", liveness: "unknown", resultStatus: "unavailable" }],
   ["run_await_result", { state: "failed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable" }],
+  // 119 续修 3：终态但交付未收口 → deliveryWait（带 waitMs 等收口）+ activity。
+  ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null }],
+  ["run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_packaging", outcomeVerificationStatus: null }],
   ["run_await_result", { state: "failed", terminal: true, observationOutcome: "terminal", readFailureReason: null, liveness: "terminal", outcomeReadiness: "isolation_failed", outcomeVerificationStatus: null, resultStatus: null }],
   // run_diagnose
   ["run_diagnose", { state: "failed", terminal: true, category: "delivery_packaging_failed" }],
@@ -297,6 +300,8 @@ test("U-06: representative context-sensitive selections (facts-driven, no infere
   expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "available" }, ["run_activity", "run_collect"]);
   // too_large → full collect is primary.
   expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "too_large" }, ["run_collect", "run_activity"]);
+  // 119 续修 3：终态未收口 → 指引带 waitMs 调 run_delivery 等收口。
+  expect("run_await_result", { state: "completed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable", outcomeReadiness: "waiting_for_verification", outcomeVerificationStatus: null }, ["run_delivery", "run_activity"]);
   // failure category → activity/collect facts.
   expect("run_diagnose", { state: "failed", terminal: true, category: "provider_auth" }, ["run_activity", "run_collect"]);
   // delivery packaging failure → delivery facts + activity.
