@@ -1738,6 +1738,49 @@ test("TD-228① SESSION: a selection change re-arms the slot; re-selecting an al
     "re-selecting an already-terminal run triggers ONE idempotent refetch");
 });
 
+// 第 118 批：上面的 REFETCH 用例用记录器模拟重取，它只记槽、不按转移再重取，
+// 漏掉了真实 bootstrap 的形状——选中已终态 run 时重取的 bootstrap 又判出转移、
+// 再重取，永不渲染（看板详情一直空着、请求不停）。这里按 bootstrapActivity 的
+// 形状模拟：判出转移就经 terminalRefetchOnce 重取并返回，否则渲染。
+async function simulateBootstrapLoop(state, pageTerminal) {
+  const counts = { bootstraps: 0, renders: 0 };
+  async function bootstrap(s) {
+    counts.bootstraps += 1;
+    if (counts.bootstraps > 10) throw new Error("refetch loop: more than 10 bootstraps");
+    const fold = app.foldSelectionTerminal(s.selectionTerminalObserved, pageTerminal);
+    s.selectionTerminalObserved = fold.observed;
+    if (fold.transition) {
+      await app.terminalRefetchOnce(s, { refetch: bootstrap });
+      return;
+    }
+    counts.renders += 1;
+  }
+  await bootstrap(state);
+  return counts;
+}
+
+test("第 118 批 LOOP: selecting an already-terminal run renders after exactly one refetch (bootstrap-shaped refetch)", async () => {
+  const state = freshSelectionState();
+  app.advanceSelection(state, "run_done");
+  const counts = await simulateBootstrapLoop(state, true);
+  assert.deepEqual(counts, { bootstraps: 2, renders: 1 },
+    "first bootstrap sees terminal → one refetch; the refetched bootstrap renders");
+  assert.equal(state.selectionTerminalObserved, true);
+});
+
+test("第 118 批 LOOP: a poll-observed transition refetches once and the refetched bootstrap renders", async () => {
+  const state = freshSelectionState();
+  app.advanceSelection(state, "run_live");
+  state.selectionTerminalObserved = false; // bootstrap saw it running
+  const counts = await simulateBootstrapLoop(state, true); // the poll page now says terminal
+  assert.deepEqual(counts, { bootstraps: 2, renders: 1 });
+  // A failing refetch keeps the latch: later polls never re-trigger a refetch.
+  const failing = freshSelectionState();
+  app.advanceSelection(failing, "run_x");
+  await assert.rejects(() => app.terminalRefetchOnce(failing, { refetch: async () => { throw new Error("net"); } }));
+  assert.equal(app.foldSelectionTerminal(failing.selectionTerminalObserved, true).transition, false);
+});
+
 test("TD-228① WIRING: both observe sites route the transition through the epoch-bound refetch and skip their trailing commit", () => {
   const js = readAsset("app.js");
   // The per-selection fold drives the trigger at the observation site.
@@ -1754,9 +1797,10 @@ test("TD-228① WIRING: both observe sites route the transition through the epoc
   // The refetch reuses THE existing epoch mechanism — advanceSelection inside
   // terminalRefetchOnce; no second epoch counter, no new concurrency primitive.
   // TD-232（2026-10-08）：快照保留（try/catch 包 refetch）后形状更新——epoch bump
-  // 仍在 refetch 之前，await 在 try 内。
+  // 仍在 refetch 之前，await 在 try 内。第 118 批：bump 之后、refetch 之前把槽
+  // 记为已见终态（防重取循环），钉住这一行。
   assert.match(js,
-    /const binding = advanceSelection\(state, runId\);\s*\r?\n\s*if \(deps && typeof deps\.refetch === "function"\) \{\s*\r?\n\s*try \{\s*\r?\n\s*await deps\.refetch\(state\);/,
+    /const binding = advanceSelection\(state, runId\);\s*\r?\n\s*\/\/[^\n]*\r?\n\s*state\.selectionTerminalObserved = true;\s*\r?\n\s*if \(deps && typeof deps\.refetch === "function"\) \{\s*\r?\n\s*try \{\s*\r?\n\s*await deps\.refetch\(state\);/,
     "terminalRefetchOnce bumps the EXISTING selection epoch BEFORE the refetch and awaits it inside a snapshot-protecting try");
   // The SAME advanceSelection resets the slot — the re-arm point per selection.
   // 会审修（2026-10-08，astra R2）：重置区现在还重置 fetchSeq 计数器（插在槽重置

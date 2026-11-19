@@ -749,7 +749,8 @@ export function foldSelectionTerminal(prev, terminal) {
   // 语义（null+terminal 只记录不重取）在同 epoch 乱序下不可靠——poll 先至终态
   // 建立 baseline 后，迟到的非终态首屏快照可覆盖较新状态且重取永不触发。
   // 统一为"首观察即终态 → 一次幂等重取"：选中已终态 run 的代价是多余但无循环
-  // 的一次 bootstrap（重取的 bootstrap 观察到终态时槽已 true → absorbing），
+  // 的一次 bootstrap（槽由 terminalRefetchOnce 在重取前置为 true → absorbing；
+  // 第 118 批前它只靠 advanceSelection 置 null，重取会无限循环），
   // 乱序漏检场景则被彻底修复。
   if (prev === null || prev === undefined) return { observed: terminal, transition: terminal };
   return { observed: terminal, transition: terminal };
@@ -767,10 +768,13 @@ export function foldSelectionTerminal(prev, terminal) {
  * maxSeq is rebuilt from its response exactly as a fresh selection would.
  * No new concurrency mechanism.
  *
- * Exactly-once is inherited from foldSelectionTerminal's absorbing slot: the
- * transition fires at most once per selection session, and this executor's own
- * advanceSelection re-baselines the slot (null → the refetched bootstrap's
- * baseline), so the same terminal fact can never re-trigger.
+ * Exactly-once comes from foldSelectionTerminal's absorbing slot: this
+ * executor's advanceSelection resets the slot to null, so it latches the slot
+ * to true right after (a refetch is only ever issued for a terminal
+ * observation). The refetched bootstrap then folds true+terminal → no
+ * transition and renders. Without the latch, first-observation-is-a-transition
+ * (foldSelectionTerminal) made the refetched bootstrap trigger another refetch,
+ * forever: selecting an already-terminal run never rendered (第 118 批).
  *
  * @param {{selectedRunId:string|null, selectionEpoch:number}} state
  * @param {{refetch:(state:object)=>Promise<void>}} deps — the browser supplies
@@ -793,6 +797,8 @@ export async function terminalRefetchOnce(state, deps) {
     lastGoodActivity: state.lastGoodActivity,
   };
   const binding = advanceSelection(state, runId);
+  // 第 118 批：重取只因终态观察而发，新会话的槽直接记为已见终态（见上方说明）。
+  state.selectionTerminalObserved = true;
   if (deps && typeof deps.refetch === "function") {
     try {
       await deps.refetch(state);
