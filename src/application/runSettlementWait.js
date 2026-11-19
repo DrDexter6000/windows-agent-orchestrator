@@ -292,10 +292,13 @@ export async function waitRunSettlement({
             // 决定 0096 / 0119：终态等验证（completed 的后台运行，或终态 failed、
             // 交付来自重新打包）、验证显式 pending、无结果、无 reverify——验证者
             // 可能已经不在了。节流：同一等待器 5 分钟至多证明一次。
+            // 第 118 批 B 续修 1：停表已置位（多目标的停表位或 SIGINT）就不开始
+            // 新的缺席证明——在途的证明照常跑完（它有自己的超时），也不记节流
+            // 账：这轮已是停止轮，循环顶部即退出。
             const proofNow = nowFn();
             const proofDue = lastVerifierProofAt === null
               || proofNow - lastVerifierProofAt >= SETTLEMENT_VERIFIER_PROOF_EVERY_MS;
-            if (proofDue) {
+            if (proofDue && !isInterrupted()) {
               lastVerifierProofAt = proofNow;
               let proof;
               try {
@@ -383,7 +386,9 @@ export async function waitRunSettlement({
           // 的闭集标签）——不发证明、不扫进程，进度行的 `runner proof: owner_fresh`
           // 注脚保住（相对 061d565d 的可见行为）。其余拒绝理由照旧：不发证明、不
           // 更新记录的理由。
-          if (runnerGoneProof && !settlement.facts.terminal) {
+          // 第 118 批 B 续修 1：停表已置位就不开始新的 runner 缺席证明（前置筛与
+          // owner_fresh 记账一并跳过——进度行本就被中断门挡住）；在途证明跑完。
+          if (runnerGoneProof && !settlement.facts.terminal && !isInterrupted()) {
             const proofNow = nowFn();
             // 静默窗与 settle 门 4 / 前置筛选同一取法（lastQuietWindowBoundMs）：
             // 被拒的重打包审计不算活动，不重置这 15 分钟。
@@ -587,4 +592,58 @@ export async function waitRunSettlement({
       ? { refusal: outcome.refusal, quietMs: outcome.quietMs, rebooted: outcome.rebooted }
       : {}),
   };
+}
+
+/**
+ * 第 118 批 B：多目标等待（CLI `runs wait <runId> [<runId>...] --until-settled`）
+ * 的"只判一次"入口——第一个目标出结局、其余等待器被停掉后，对其余每个目标做
+ * 一次即时判定（不额外等待、不发证明、不轮询）：解析 → 读一份新快照 → 同一
+ * determineRunSettlement 判一次。能就地成立的结局只有两种：冲突（**首次解析
+ * 即见**——与循环首轮同款立即成立）与收口（照循环同一纪律"收口后再解析一次"
+ * 确认路径与冲突状态未变；**确认阶段的冲突不算结局**——等待器把它记成不可信
+ * 轮继续等、不是立即 conflict 出口，即时判定同折法返回 null）。未收口、无法
+ * 判定、读取失败、未找到都不算结局——等待器被停时来不及做的轮询与证明（不可
+ * 信计数、验证者/runner 缺席证明）不属于即时判定，该目标按"仍在等"交回调用
+ * 面（重挂行归调用面渲染）。不复制判定：与 waitRunSettlement 同一依赖入口
+ *（determineRunSettlement / 解析 / 读器），不改既有函数行为。
+ *
+ * @param {object} input
+ * @param {string} input.runId
+ * @param {string} input.runDir
+ * @param {object} [input.deps] — { resolveDetailedFn, readTranscriptFn, nowFn }
+ *   测试确定性注入缝
+ * @returns {Promise<object|null>} null（本轮无结局）或与 waitRunSettlement 同形
+ *   的 outcome 子集：{ kind: "conflict", settlement: null, snapshotReadAt: null,
+ *   events: null } / { kind: "settled", settlement, snapshotReadAt, events }
+ */
+export async function judgeRunSettlementOnce({ runId, runDir, deps = {} }) {
+  const resolveDetailedFn = deps.resolveDetailedFn ?? resolveTranscriptPathDetailed;
+  const readTranscriptFn = deps.readTranscriptFn ?? readTranscript;
+  const nowFn = deps.nowFn ?? Date.now;
+  // 解析链自身的意外 I/O 错误照等待器同款折法：不算冲突、不算结局。
+  const safeResolve = () => {
+    try {
+      return resolveDetailedFn(runDir, runId);
+    } catch {
+      return { path: null, found: false, conflict: false };
+    }
+  };
+  const resolution = safeResolve();
+  if (resolution.conflict) {
+    return { kind: "conflict", settlement: null, snapshotReadAt: null, events: null };
+  }
+  if (!resolution.found) return null;
+  let events;
+  try {
+    events = await readTranscriptFn(resolution.path);
+  } catch {
+    return null;
+  }
+  const settlement = determineRunSettlement(events, runId);
+  if (settlement.status !== "settled") return null;
+  // 收口后再解析一次（与等待器同一确认纪律）：路径变了、未找到、或这一步才见
+  // 冲突——都不算结局（确认阶段的冲突按等待器纪律当仍在等，不报 4）。
+  const confirm = safeResolve();
+  if (confirm.conflict || !confirm.found || confirm.path !== resolution.path) return null;
+  return { kind: "settled", settlement, snapshotReadAt: nowFn(), events };
 }

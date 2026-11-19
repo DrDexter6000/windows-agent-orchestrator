@@ -45,7 +45,7 @@ Commands:
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery review <runId> (--file-index N [--cursor TOKEN] [--format json] | --all [--since-parent] [--out FILE]) [--cwd DIR] [--run-dir DIR]   # 逐文件读交付 diff 片段（≤16KiB/页，--cursor 翻页）；--all 一次读全交付，续修子运行加 --since-parent 只看本轮（文本输出，--out 写文件）；未验证/不可用给闭集原因
   runs delivery reverify <runId> --reason <code> [--attempt 1|2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 未变工件审计式重验证；--attempt 2 为第二次（也是最后一次）机会，仅当第一次因环境/工具码失败
-  runs wait <runId> [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标，见 wao manual supervise "等待到收口"）
+  runs wait <runId> [<runId>...] [--wait-ms N | --until-settled] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（到期 exit 0）；--until-settled 轮询到收口才退出（互斥旗标）；多个 runId 去重后 2–16 个只与 --until-settled 同用、先到先返回并给重挂行（见 wao manual supervise "等待到收口"）
   runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt；--release 人工破锁（破除失败 fail-closed）
   runs verify-commit <runId> --commit <sha> --commands-file FILE [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]   # 临时 worktree 检出该提交→执行命令→落证→清理（Lead 侧自检）
   playbook list [--format json]   # 列出内置 Lead playbook 摘要（只读）
