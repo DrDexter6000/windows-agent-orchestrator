@@ -1089,3 +1089,43 @@ test("MAA-REC-unexpected: an unexpected internal error stays the fixed generic e
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// =====================================================================
+// TD-354（第 124 批）：失败事实 run.error 此前在活动页显示为 [unknown_event]。
+// 投影漏了信封分类——按现有闭集补上固定标签 error；错误原文（kimi 上游报文、
+// turn id）绝不跨 MCP 边界。
+// =====================================================================
+test("TD-354: run.error 在活动页是 envelope kind=error（不再是 unknown_event），错误原文不跨 MCP", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td354-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td354-rd-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_td354_activity";
+    const RAW = "kimi turn failed (turn t_1b5c97b03f0c, error: provider.api_error: The server had an error while processing your request)";
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-11-20T09:00:00.000Z", seq: 1, runId }),
+      jl({ type: "session.created", backend: "kimi-web", backendSessionId: "serve_td354", seq: 2, runId, agentId: "coder_low" }),
+      jl({ type: "run.started", backend: "kimi-web", ts: "2026-11-20T09:00:01.000Z", seq: 3, runId, agentId: "coder_low" }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, seq: 4, runId, agentId: "coder_low" }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-11-20T09:00:02.000Z", seq: 5, runId, agentId: "coder_low" }),
+      jl({ type: "run.error", phase: "wait", error: RAW, ts: "2026-11-20T09:10:05.000Z", seq: 6, runId, agentId: "coder_low" }),
+      jl({ type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-11-20T09:10:05.000Z", seq: 7, runId, agentId: "coder_low" }),
+    ].join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId, order: "asc" } });
+      assert.equal(res.isError, undefined, "call succeeds");
+      const sc = res.structuredContent;
+      const err = sc.entries.find((e) => e.category === "envelope");
+      assert.deepEqual(err, {
+        category: "envelope", ts: "2026-11-20T09:10:05.000Z", seq: 6, kind: "error",
+      }, "run.error 投影为信封固定标签 error（恰四键）");
+      assert.equal(sc.counts.other, 0, "不再计入未知事件");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("[unknown_event]"), "不再是未知事件");
+      assert.ok(!dumped.includes("provider.api_error") && !dumped.includes("The server had an error"), "上游报文原文不跨 MCP");
+      assert.ok(!dumped.includes("t_1b5c97b03f0c"), "turn id 不跨 MCP");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});

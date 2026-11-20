@@ -137,7 +137,11 @@ const CORRECTION_TYPE_TO_STATUS = Object.freeze({
 });
 
 // TD-220（2026-10-07）：信封只投影源码闭集标签，避免暴露 prompt、会话与指标载荷。
+// TD-354（2026-11-20）：失败事实 run.error 此前落 other/[unknown_event]——活动页读不出
+// "这次运行报过错"。只补一枚固定标签（信封条目只有 category/ts/seq/kind 四键），
+// 错误的原文仍在信封之外，绝不进活动页。
 const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
+  "run.error": "error",
   "prompt.sent": "prompt",
   "run.wait_policy": "wait_policy",
   "run.metrics": "metrics",

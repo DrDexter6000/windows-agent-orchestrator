@@ -413,6 +413,10 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
 const RED_23_WIRE = 75492;
 
 // 冻结线 = 实测值，只在 Owner 批准的批次里重冻；硬顶与规则见决定 0078。
+// TD-354（2026-11-20，批次合同授权的闭集扩员、additive）：run_activity 出参
+// envelope enum 增固定标签 error（服务端 ENVELOPE_TYPE_TO_LABEL 增 run.error
+// 映射的镜像，失败事实不再落 [unknown_event]）：87149→87157（实测；Owner 硬顶
+// 94532 内）。描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
 // 2026-10-15（Owner 批准重冻）：会动工作区的工具（run_dispatch / run_continue /
 // run_correct / run_stop / run_collect / run_delivery_decide / run_delivery_
 // repackage / run_delivery_reverify / run_consult create）的目标改为只取本次
@@ -430,7 +434,7 @@ const RED_23_WIRE = 75492;
 // 三个工具（23→20）；lead_preflight 输入改名 expectedWorkspaceRoot、workspace 增
 // workspaceRoot/call_target、run_status/run_diagnose 增可选目标、runs_list scope
 // 收 call_target 语义：93849→87149（实测；Owner 硬顶 94532 内）。
-const FROZEN_20_WIRE_CEILING = 87149;
+const FROZEN_20_WIRE_CEILING = 87157;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -659,6 +663,10 @@ test("M12-10-H: deterministic 20-tool wire at or below the frozen ceiling", asyn
 // 0090（2026-10-18）：lanes 每行增 family（string ≤32）——SHA 如实翻新。
 // 0088 修订条（2026-10-28，Owner 批准放宽）：lanes 每行的 caveats 上限 4→6
 // （CAVEATS_CAP）——outputSchema 的 maxItems 改一位数，wire 字节不变，SHA 如实翻新。
+// TD-354（2026-11-20，批次合同授权的闭集扩员、additive）：run_activity 出参
+// envelope enum 增固定标签 error（服务端 ENVELOPE_TYPE_TO_LABEL 增 run.error
+// 映射的镜像——失败事实此前落 [unknown_event]）——outputSchema 在 stripped 载荷
+// 内，SHA 如实翻新；无描述字节变化；wire 帽同批重冻（87149→87157，帽内 additive）。
 // TD-267（2026-10-29，Owner 批准的批次）：run_delivery 出参增可选 verificationGate——SHA 如实翻新。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 出参增可选 nextStep——outputSchema
 // 在 stripped 载荷内，SHA 如实翻新（决定 0096，工具面重冻）。
@@ -680,7 +688,7 @@ test("M12-10-H: deterministic 20-tool wire at or below the frozen ceiling", asyn
 // 第 118 批：7 个读工具输入增 expectedWorkspaceRoot、runs_list scope.source 增
 // call_target——schema 在 stripped 载荷内，SHA 如实翻新；描述零增量。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "89ad965c1b5c16316f9fba6c4f440b90879ff0524b1152c39b2d65ac217856d0";
+  "b5abee2571f96bcbbeaa1742a54ab6be0bf21c1ef7cc9c2dcc2fbdc6665d3667";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。

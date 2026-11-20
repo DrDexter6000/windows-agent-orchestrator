@@ -46,10 +46,12 @@ export const CATEGORIES = Object.freeze([
 
 // TD-220（2026-10-07）：浏览器独立校验固定标签，未知标签不回显载荷。
 // TD-250（决定 0056）：+终态上游会话卫生事件族四标签；TD-251（决定 0057）：
-// +worktree 释放事件族四标签；TD-260（决定 0062 丙′）：+分支回收两标签
+// +worktree 释放事件族四标签；TD-260（决定 0062 丙′）：+分支回收两标签；
+// TD-354（第 124 批）：+run.error 的固定标签 error
 //（镜像服务端 ENVELOPE_TYPE_TO_LABEL 的值闭集——两端由 ownerDashboard
 // 一致性测试钉住）。
 const ENVELOPE_LABELS = Object.freeze([
+  "error",
   "prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
   "cleanup_done", "session_reuse", "provider_session_bound",
   "upstream_session_deleted", "upstream_session_already_gone",

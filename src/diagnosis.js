@@ -20,7 +20,7 @@
 //   budget                      — run.state_change reason:budget_exceeded
 //   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
 //   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
-//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据五条：
+//   provider_disconnect         — provider 侧流中断（非 runtime 真崩）。判据六条：
 //                                 ① worker 活跃工作后静默≥120s 且 exit≠0；
 //                                 ② zcode/kimi-web 静默收口文案——backend 在静默到点后
 //                                   有界收口。kimi-web 逐门判定（见
@@ -53,6 +53,13 @@
 //                                   （DNS 解析失败/连接被拒/连接被断/连接超时/请求
 //                                   未发出，闭集见 NETWORK_UNREACHABLE_SIGNAL）——
 //                                   本机网络中断与上游不可达在本转录内无法区分
+//                                 ⑥ kimi-web 报出的上游服务端失败——本运行最后
+//                                   一条 run.error 是 phase:wait 的 backend turn
+//                                   失败文案、错误码恰为 provider.api_error（唯一
+//                                   有真实样本的码；其它码不猜），且整条文本就是
+//                                   控制面那句话（码后接 ": "+报文直到收尾 ")"，
+//                                   或只有码且紧跟 ")" 结束）：上游服务端处理本
+//                                   轮请求时失败
 //   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
 //   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
 //   aborted_manual              — run.aborted 事件
@@ -454,6 +461,30 @@ const KIMI_WEB_SILENT_CLOSEOUT_GATES = Object.freeze([
     causeFact: KIMI_WEB_SILENT_CLOSEOUT_NO_CAUSE,
   },
 ]);
+
+// TD-354（第 124 批）：kimi-web 上游服务端失败 → provider_disconnect。真实样本
+// （kimi-web 车道 11-19、11-20 两次撞上 Kimi 服务端故障）：turn 以 outcome=failed
+// 收口时，backend 的 turnFailureText 把轮 error 的 code/message 拼成
+// run.error(phase:wait)：
+//   "kimi turn failed (turn <turnId>, error: provider.api_error: <上游报文>)"
+// 这类 run 此前落 no_effect/unknown，读不出这是服务商故障。识别边界刻意收紧：
+//   - 只认 phase === "wait"（真实样本都在 wait；spawn 等阶段不认）；
+//   - 整条字符串必须就是控制面自己写的这句话：前缀锚定在开头，码恰为
+//     provider.api_error，码后只能是 ": " + 报文直到收尾 ")"，或紧跟 ")" 且
+//     字符串到此结束；报文部分允许换行（kimi 的 message 被原样拼入，JSONL 也
+//     原样保留）。截断（少了收尾 ")"）、")" 后还有附文、带外层前缀的改写都不认
+//     （宁漏贴勿误贴）。
+// 诚实上限：kimiWeb 的 turnErrorText 会把「只有 message、没有 code」的错误拼成
+// 与 code+message 相同的文本，因此本规则无法区分二者——这种文本若恰好以
+// "provider.api_error: " 开头会被当作真实错误码；同理，报文自身含 ")" 且整串仍以
+// ")" 结尾时，无法与 formatter 的收尾 ")" 区分。本批只收紧可判读的形状，不改
+// 格式器，也不为此新增信号。
+// 其它码（限流、鉴权等）没有样本，不猜、保持既有归类（例如带 429 正文的文案照旧
+// 归 provider_capacity）。绑定本运行最后一条 run.error（与 zcode/deepseek-acp
+// 上游识别同一口径）。证据只写固定事实，不回显上游报文原文。
+const KIMI_WEB_PROVIDER_API_ERROR_SIGNAL =
+  /^kimi turn failed \(turn [^()\r\n]*, error: provider\.api_error(?:\)|: [\s\S]*\))$/;
+const KIMI_WEB_PROVIDER_API_ERROR_FACT = "kimi 上游返回 provider.api_error（服务端错误）";
 
 // zcode 本轮失败的固定文案（backend 自己写的收口句）：
 //   - step-finish reason error（3.18 路径，part 不带错误明细）；
@@ -1188,6 +1219,22 @@ function diagnoseFailureInner(events, expectedRunId) {
   if (state === "failed" && lastErrorEvent !== null
     && NETWORK_UNREACHABLE_SIGNAL.test(stripUpstreamSummary(lastErrorEvent.error))) {
     evidence.push({ eventType: "run.error", fact: NETWORK_UNREACHABLE_FACT });
+    return { category: "provider_disconnect", evidence };
+  }
+
+  //      ③''' TD-354（第 124 批）：kimi-web 的上游服务端失败——本运行最后一条
+  //      run.error 是 backend 的 turn 失败文案（phase:wait）、错误码恰为
+  //      provider.api_error（唯一有真实样本的码；其它码没有样本，不猜，照原路径
+  //      走）。上游在处理本轮请求时失败，与 zcode 5xx 快速收口同类归因（provider
+  //      侧中断）。排序：auth/config/capacity 文本规则之后（同文本带真实 401/429
+  //      文本的仍按那些规则判）、evidence_passed_backend_failed 之后（有产出的运行
+  //      仍归后者）、网络不可达规则之后（报文里带 ECONNREFUSED/ETIMEDOUT 等更具体
+  //      的网络证据时保留那条事实——类别本来就是 provider_disconnect）、
+  //      no_effect/crash 之前。证据只写固定事实，不回显上游报文、不给处方。
+  if (state === "failed" && lastErrorEvent !== null
+    && lastErrorEvent.phase === "wait"
+    && KIMI_WEB_PROVIDER_API_ERROR_SIGNAL.test(lastErrorEvent.error)) {
+    evidence.push({ eventType: "run.error", fact: KIMI_WEB_PROVIDER_API_ERROR_FACT });
     return { category: "provider_disconnect", evidence };
   }
 

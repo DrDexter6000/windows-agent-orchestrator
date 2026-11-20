@@ -1937,6 +1937,174 @@ test("kimi-web 收口排序: 带上游错误正文的 kimi turn failed (… 429 
 });
 
 // ---------------------------------------------------------------------------
+// TD-354（第 124 批）：kimi-web 上游服务端失败（provider.api_error）→
+// provider_disconnect。
+//
+// 真实样本（kimi-web 车道 11-19、11-20 两次撞上 Kimi 服务端故障）：turn 以
+// outcome=failed 收口，backend 的 turnFailureText 把轮 error 的 code/message 拼成
+// run.error(phase:wait)：
+//   kimi turn failed (turn t_1b5c97b03f0c, error: provider.api_error: The server
+//   had an error while processing your request)
+// 旧读法落 no_effect/unknown，读不出这是服务商故障。契约：
+//   - 本运行最后一条 run.error 是 phase:wait 的这个形状、且错误码恰为
+//     provider.api_error → provider_disconnect，一条固定事实，不回显上游报文、
+//     不给处方；
+//   - 识别边界收紧：整条字符串就是控制面那句话——码后接 ": "+报文直到收尾 ")"，
+//     或只有码且紧跟 ")" 结束；报文可含换行（kimi 的 message 原样拼入、JSONL 也
+//     原样保留）；截断（少了收尾 ")"）、")" 后还有附文、带外层前缀的改写都不认；
+//     phase 不是 wait 不认；
+//   - 其它 kimi 错误码（没有真实样本）保持原归类，不冒充服务端失败；
+//   - 排序：同报文带 401/429 仍归 auth/capacity，有产出的运行仍归
+//     evidence_passed_backend_failed，报文带网络不可达信号时保留网络证据；
+//   - 只认最后一条：更早的 provider.api_error 不抢其后真终局错误（进程退出 → crash）。
+// 诚实上限：kimiWeb 的 turnErrorText 会把「只有 message、没有 code」的错误拼成与
+// code+message 相同的文本——规则无法区分二者，本批不改格式器。
+// ---------------------------------------------------------------------------
+
+const KIMI_API_ERROR_RUN = "run_kimi_api_error";
+const KIMI_API_ERROR_REAL =
+  "kimi turn failed (turn t_1b5c97b03f0c, error: provider.api_error: The server had an error while processing your request)";
+const KIMI_API_ERROR_FACT = "kimi 上游返回 provider.api_error（服务端错误）";
+
+function kimiApiErrorEvents(runId, error, { extra = [], lastError, phase = "wait" } = {}) {
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-20T09:00:01.000Z" },
+    ...extra,
+    { type: "run.error", phase, runId, ts: "2026-11-20T09:10:05.000Z", error },
+  ];
+  if (lastError !== undefined) {
+    events.push({ type: "run.error", phase: "wait", runId, ts: "2026-11-20T09:11:05.000Z", error: lastError });
+  }
+  events.push({
+    type: "run.state_change", to: "failed", reason: "backend_error", runId,
+    ts: lastError !== undefined ? "2026-11-20T09:11:05.000Z" : "2026-11-20T09:10:05.000Z",
+  });
+  return events;
+}
+
+function kimiApiErrorDiagnosis(error, opts) {
+  return diagnoseFailure(kimiApiErrorEvents(KIMI_API_ERROR_RUN, error, opts), KIMI_API_ERROR_RUN);
+}
+
+test("TD-354: kimi-web provider.api_error 真实形状 → provider_disconnect，证据不回显上游报文", () => {
+  const d = kimiApiErrorDiagnosis(KIMI_API_ERROR_REAL, {
+    extra: [
+      { type: "run.event", kind: "tool_use", tool: "Read", input: {}, runId: KIMI_API_ERROR_RUN, ts: "2026-11-20T09:02:00.000Z" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading…" }], runId: KIMI_API_ERROR_RUN, ts: "2026-11-20T09:03:00.000Z" },
+    ],
+  });
+  assert.equal(d.category, "provider_disconnect", "上游服务端失败 → provider 流中断一类归因，不再 no_effect/unknown");
+  assert.equal(d.code, null, "provider_disconnect 不带 code");
+  assert.deepEqual(d.evidence, [{ eventType: "run.error", fact: KIMI_API_ERROR_FACT }],
+    "一条固定句式事实（kimi 上游返回 provider.api_error）");
+  const dumped = JSON.stringify(d.evidence);
+  assert.ok(!dumped.includes("The server had an error"), "上游报文原文不得进证据");
+  assert.ok(!dumped.includes("t_1b5c97b03f0c"), "turn id 不得进证据");
+  assert.ok(!dumped.match(/建议|应该|retry|重派|换\s*worker/), "证据不得含处方");
+});
+
+test("TD-354: 其它 kimi 错误码没有真实样本 → 保持原归类（不冒充服务端失败）", () => {
+  const other = "kimi turn failed (turn t_other, error: provider.upstream_timeout: upstream request took too long)";
+  const active = kimiApiErrorDiagnosis(other, {
+    extra: [
+      { type: "run.event", kind: "tool_use", tool: "Read", input: {}, runId: KIMI_API_ERROR_RUN, ts: "2026-11-20T09:02:00.000Z" },
+    ],
+  });
+  assert.equal(active.category, "no_effect", "有活动无产出 → 原归类 no_effect 不变");
+  assert.ok(!active.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), "不得带 provider.api_error 事实");
+  const bare = kimiApiErrorDiagnosis(other);
+  assert.equal(bare.category, "unknown", "无信号 → 原兜底 unknown 不变");
+  assert.ok(!bare.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), "不得带 provider.api_error 事实");
+});
+
+test("TD-354 绑定: 只认本运行最后一条 run.error——更早的 provider.api_error 不抢进程退出归类", () => {
+  const d = kimiApiErrorDiagnosis(KIMI_API_ERROR_REAL, { lastError: "process exited with code 1" });
+  assert.equal(d.category, "crash", "最后一条 run.error 是进程退出 → 照原路径 crash");
+  assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), "更早的 api_error 不得带事实");
+});
+
+test("TD-354 锚定: 只是引用该文案/码被改写时不命中（宁漏贴勿误贴）", () => {
+  for (const error of [
+    "upstream relay: kimi turn failed (turn t_1, error: provider.api_error: The server had an error)",
+    "kimi turn failed (turn t_1, error: provider.api_error_extra: The server had an error)",
+  ]) {
+    const d = kimiApiErrorDiagnosis(error);
+    assert.notEqual(d.category, "provider_disconnect", `引用/改写不命中：${error.slice(0, 40)}…`);
+    assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), "不得带 provider.api_error 事实");
+  }
+});
+
+test("TD-354 只有码、没有报文的形状（…error: provider.api_error) 命中）", () => {
+  const d = kimiApiErrorDiagnosis("kimi turn failed (turn t_1, error: provider.api_error)");
+  assert.equal(d.category, "provider_disconnect", "码后紧跟收尾 ) 且字符串到此结束 → 命中");
+  assert.deepEqual(d.evidence, [{ eventType: "run.error", fact: KIMI_API_ERROR_FACT }]);
+});
+
+test("TD-354 多行报文命中（kimi 的 message 可含换行，formatter 与 JSONL 原样保留）", () => {
+  for (const [label, nl] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+    const error = `kimi turn failed (turn t_1, error: provider.api_error: The server had an error${nl}while processing your request)`;
+    const d = kimiApiErrorDiagnosis(error);
+    assert.equal(d.category, "provider_disconnect", `${label}：多行报文仍是明确的服务端失败，不得漏成 unknown`);
+    assert.deepEqual(d.evidence, [{ eventType: "run.error", fact: KIMI_API_ERROR_FACT }], `${label}：固定事实`);
+    assert.ok(!JSON.stringify(d.evidence).includes("The server had an error"), `${label}：报文原文不进证据`);
+  }
+});
+
+test("TD-354 边界收紧: 截断 / 收尾 ) 后有附文 / phase 不是 wait 都不命中", () => {
+  const notMatched = [
+    ["截断在报文中间（少了收尾 )）", "kimi turn failed (turn t_1, error: provider.api_error: The server had an error"],
+    ["截断在码后面（少了收尾 )）", "kimi turn failed (turn t_1, error: provider.api_error"],
+    ["只有码、收尾 ) 后还有附文", "kimi turn failed (turn t_1, error: provider.api_error) trailing text"],
+    ["带报文、收尾 ) 后还有附文", "kimi turn failed (turn t_1, error: provider.api_error: The server had an error) trailing text"],
+    ["码后先 ) 再附文", "kimi turn failed (turn t_1, error: provider.api_error) The server had an error"],
+  ];
+  for (const [label, error] of notMatched) {
+    const d = kimiApiErrorDiagnosis(error);
+    assert.notEqual(d.category, "provider_disconnect", `${label}：不命中`);
+    assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), `${label}：不得带 provider.api_error 事实`);
+  }
+  // phase 不是 wait：spawn 阶段照原路径归 crash，delivery 阶段无其它信号 → unknown。
+  for (const [phase, expected] of [["spawn", "crash"], ["delivery", "unknown"]]) {
+    const d = kimiApiErrorDiagnosis(KIMI_API_ERROR_REAL, { phase });
+    assert.equal(d.category, expected, `phase=${phase}：新规则不认，照原路径 ${expected}`);
+    assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), `phase=${phase}：不得带 provider.api_error 事实`);
+  }
+});
+
+test("TD-354 排序: 同报文带 401 → provider_auth；带 429 → provider_capacity；有产出 → evidence_passed_backend_failed", () => {
+  const with401 = kimiApiErrorDiagnosis(
+    "kimi turn failed (turn t_1, error: provider.api_error: request 401 rejected)",
+  );
+  assert.equal(with401.category, "provider_auth", "报文里的独立 401 → 更具体的认证规则先判");
+  const with429 = kimiApiErrorDiagnosis(
+    "kimi turn failed (turn t_1, error: provider.api_error: too many requests (429))",
+  );
+  assert.equal(with429.category, "provider_capacity", "报文里的限流文本 → 额度规则先判");
+  assert.equal(with429.code, "rate_limited");
+  const withAudit = kimiApiErrorDiagnosis(KIMI_API_ERROR_REAL, {
+    extra: [
+      { type: "run.evidence_audit", passed: true, runId: KIMI_API_ERROR_RUN, ts: "2026-11-20T09:05:00.000Z" },
+    ],
+  });
+  assert.equal(withAudit.category, "evidence_passed_backend_failed", "有产出的运行仍归证据通过一类");
+  for (const [label, d] of [["401", with401], ["429", with429], ["evidence_audit", withAudit]]) {
+    assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT),
+      `${label}：新规则不抢，不得带 provider.api_error 事实`);
+  }
+});
+
+test("TD-354 排序: 报文含 ECONNREFUSED → 保留网络不可达证据（规则在网络规则之后）", () => {
+  const d = kimiApiErrorDiagnosis(
+    "kimi turn failed (turn t_1, error: provider.api_error: connect ECONNREFUSED 127.0.0.1:443)",
+  );
+  assert.equal(d.category, "provider_disconnect");
+  // NETWORK_UNREACHABLE_FACT_TEXT 定义在本节之后的网络不可达小节；测试体在模块求值后执行。
+  assert.deepEqual(d.evidence, [{ eventType: "run.error", fact: NETWORK_UNREACHABLE_FACT_TEXT }],
+    "更具体的网络证据保留：不是 provider.api_error 那条事实");
+  assert.ok(!d.evidence.some((e) => e.fact === KIMI_API_ERROR_FACT), "网络证据取代通用服务端事实");
+});
+
+// ---------------------------------------------------------------------------
 // 2026-10-30：deepseek-acp 报出的上游传输失败 → provider_disconnect（反馈
 // fb_20261030T122616Z_sr9otr）。
 //

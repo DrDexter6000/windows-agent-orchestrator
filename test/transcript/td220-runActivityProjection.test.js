@@ -88,7 +88,7 @@ test("TD-220 验收修: inference gated to proven backends — kimi-web tool_don
 });
 
 test("TD-220: thinking is count-only; envelope labels fixed; collect audits skipped; unknown remains opaque", () => {
-  const types = ["prompt.sent", "run.wait_policy", "run.metrics", "scorecard.checked", "run.stop_verified",
+  const types = ["run.error", "prompt.sent", "run.wait_policy", "run.metrics", "scorecard.checked", "run.stop_verified",
     "run.cleanup_done", "run.session_reuse", "run.provider_session_bound",
     // 0056（TD-250）：终态上游会话卫生事件族（additive）。
     "run.upstream_session_deleted", "run.upstream_session_already_gone",
@@ -98,7 +98,7 @@ test("TD-220: thinking is count-only; envelope labels fixed; collect audits skip
     "run.worktree_release_skipped", "run.worktree_release_failed",
     // 0062（TD-260 丙′）：零独有分支回收事件族（additive，树释放成功之后追加）。
     "run.worktree_branch_recycled", "run.worktree_branch_kept"];
-  const labels = ["prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
+  const labels = ["error", "prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
     "cleanup_done", "session_reuse", "provider_session_bound",
     "upstream_session_deleted", "upstream_session_already_gone",
     "upstream_session_delete_skipped", "upstream_session_delete_failed",

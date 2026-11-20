@@ -380,7 +380,7 @@ test("#10 full tool payloads and absolute file paths never cross the lead schema
     fileWrittenEvent("C:\\Users\\leak\\secret.txt"), // absolute path must NOT cross
     fileWrittenEvent("/etc/passwd"), // posix absolute must NOT cross
     fileWrittenEvent("src/../etc/escape.txt"), // traversal must NOT cross
-    lifecycleEvent("run.error", { error: "raw error " + SECRET }), // raw error must NOT cross -> other
+    lifecycleEvent("run.error", { error: "raw error " + SECRET }), // raw error must NOT cross -> envelope label only (TD-354)
   ];
   void SECRET;
   const r = project(events, { env: { LEAK_TOKEN: SECRET } });
@@ -412,10 +412,28 @@ test("#10 full tool payloads and absolute file paths never cross the lead schema
   // (safeFilePath never returns it) and must not be re-introduced.
   const fw = r.entries.filter((e) => e.category === "file_written").map((e) => e.path);
   assert.ok(fw.every((p) => p === "[path_withheld]"), "unsafe paths ALWAYS withheld with the exact marker");
-  // run.error becomes a bounded `other` (label only), never the raw error.
-  const other = r.entries.find((e) => e.category === "other");
-  assert.ok(other.label, "other has a bounded label");
-  assert.ok(!JSON.stringify(other).includes("raw error"), "no raw error payload echoed");
+  // run.error projects as a closed-set envelope label (TD-354); the raw error never crosses.
+  const err = r.entries.find((e) => e.category === "envelope");
+  assert.equal(err.kind, "error", "run.error → fixed envelope label error");
+  assert.ok(!JSON.stringify(err).includes("raw error"), "no raw error payload echoed");
+});
+
+// TD-354（第 124 批）：活动页把 run.error 显示为未知事件——投影漏了信封分类。
+// 失败事实本身是控制面信封级事实，按现有闭集归 envelope；固定标签 error，
+// 错误原文（含上游报文、turn id）绝不进活动页。
+test("TD-354: run.error → 闭集 envelope 事实（kind=error），不再是 [unknown_event]，错误原文不进活动页", () => {
+  resetSeq();
+  const RAW = "kimi turn failed (turn t_1b5c97b03f0c, error: provider.api_error: The server had an error while processing your request)";
+  const r = project([lifecycleEvent("run.error", { phase: "wait", error: RAW })]);
+  assert.equal(r.entries.length, 1);
+  assert.deepEqual(r.entries[0], {
+    category: "envelope", ts: "2026-08-02T00:00:00.000Z", seq: 1, kind: "error",
+  }, "信封条目恰四键，无错误载荷");
+  assert.equal(r.counts.envelope, 1);
+  assert.equal(r.counts.other, 0, "不再落 other/[unknown_event]");
+  const dumped = JSON.stringify(r.entries);
+  assert.ok(!dumped.includes("provider.api_error") && !dumped.includes("The server had an error"), "错误原文不进活动页");
+  assert.ok(!dumped.includes("t_1b5c97b03f0c"), "turn id 不进活动页");
 });
 
 test("#10b exitStatus maps ok/failed/unknown without leaking the raw exit code", () => {

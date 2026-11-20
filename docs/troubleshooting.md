@@ -96,6 +96,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 - **根因**：provider API 返回错误，worker runtime 把错误包进失败响应
 - **WAO 行为**：完成判定检测到错误事实即 `done(failed)` 并透传错误，不等超时
 - **修复**：按 statusCode 处理——401 查 key（§1.5 / §7.6 的 doctor 检查），quota/限流 等待或换 provider
+- **kimi-web 服务端故障**：终态 `failed`、本运行最后一条带字符串 `error` 的 `run.error`（`phase: wait`）且文本恰为 `kimi turn failed (…, error: provider.api_error: …)`（或只有码）时，`run_diagnose` 归 `provider_disconnect`；401/429 或产出证据等更具体规则先判。`run_activity` 的 `kind` 为 `"error"`（看板 `envelope · error`）。
 
 ### 1.5 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
 
