@@ -130,6 +130,7 @@ npm run cli -- wao stage --cwd <目标项目>
 ```
 
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
+- 组席与替补由 Lead 决定：`auditor` 不可用、超时或无 verdict 时可换另一条车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。Lead 先自审方案和结果，意见不替代 Lead 裁定；首轮任务书写明必改口径，必改须附现实触发场景，其余记备注，复核一轮后 Lead 收口。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（panel 字段只在方案（2）/交付物验收（4）登记）；同一 stage 允许多条记录，返工/窄复核照常再登记。
 - 席位不声明角色，对抗性是派生事实：带 `--reviewed-run <runId>` 登记时，按当时的 registry 车道配置 × 被审 run 的 `run.started` 钉住作者——审者车道与作者车道不同 = 对抗前提成立；席位与作者同车道 = 回避违反，大声提示（advisory，不阻断）。`--reviewed-run` 可给多个 runId（共同作者）；作者不可读或缺 `run.started` 时如实输出 unknown，不折叠成"无违反"。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。

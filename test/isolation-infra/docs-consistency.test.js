@@ -11,6 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -1292,10 +1293,22 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
 });
 
 test("Advisor/Auditor failure remains Lead-governed and may fall back to another lane", () => {
-  const skill = read("SKILL.md");
-  assert.match(skill, /不可用、超时或无 verdict 时可换另一条车道/);
-  assert.match(skill, /不阻断 dispatch/);
-  assert.match(skill, /项目权威明令必审时停为 governance block，不得称 WAO control-plane failure/);
+  // 127 批瘦身（决定 0115 后续）：组席规则仍在 SKILL.md（决定 0090，入口只留一句），
+  // 替补/governance block/必改口径的操作正文落在 consult 页 panel 节。这里按决定 0115
+  // 的同一节解析器只取「三席会审」那一节（不查整页——别的节出现同样措辞不算数）。
+  const index = readManualIndex({ packageRoot: ROOT });
+  const page = findManualPage(index, "consult");
+  const section = resolveManualSection(page, "三席会审");
+  const text = page.text.slice(section.startOffset, section.endOffset);
+  assert.match(text, /不可用、超时或无 verdict 时可换另一条车道/);
+  assert.match(text, /不阻断 dispatch/);
+  assert.match(text, /项目权威明令必审时停为 governance block，不得称 WAO control-plane failure/);
+  assert.match(text, /意见不替代 Lead 裁定/);
+  // 入口侧只守触发点与指针在场，且指针必须落在会审分支那一条（不查整份 SKILL）。
+  const panelBranch = read("SKILL.md").split("\n").find((line) => line.startsWith("- **独立会审"));
+  assert.ok(panelBranch, "SKILL.md 缺独立会审分支");
+  assert.match(panelBranch, /wao manual consult "三席会审"/,
+    "SKILL.md 会审分支缺 consult 面板节指针（指针出现在别处不算）");
 });
 
 test("M12 worker routing: SKILL keeps semantic routing and Lead authority", () => {
@@ -2002,8 +2015,10 @@ test("M11-11D-DOC-04: token forecast is retired from current product surfaces", 
 
 test("M11-12C-DOC-01: every delivery run queries delivery truth after terminal", () => {
   const skill = read("SKILL.md");
-  assert.ok(/every run dispatched with a delivery block.*run_delivery.*terminal.*failed/is.test(skill),
-    "SKILL queries run_delivery after every delivery run, including failed terminal runs");
+  // 127 批续修：原 /s 正则里的 "failed" 可被后文 isolation_failed 顶替命中——把
+  // "including failed terminal states" 写成同句内必须按序出现的短语，删掉该短语即红。
+  assert.ok(/every run dispatched with a delivery block[^.]*run_delivery[^.]*after terminal[^.]*including failed terminal states/i.test(skill),
+    "SKILL queries run_delivery after every delivery run, including failed terminal states");
   assert.ok(/deliveryAvailable=false.*deliveryFailure\.code.*do not call `?run_delivery_review`?.*`?run_delivery_decide`?/is.test(skill),
     "SKILL routes packaging failure through its structured code without review or decision");
   assert.ok(/run_diagnose.*does not replace.*run_delivery/is.test(skill),
@@ -2173,11 +2188,13 @@ test("M12-6 docs: exact verifier env does NOT inherit worker node_modules — Le
 // fallback + the Lead guidance. Failure → fix the doc, not the test.
 // ============================================================
 
-test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间并限定使用条件", async () => {
+test("M12-6 FR-07 docs: SKILL 留触发点，权威节承载 reverify 资格（不变 commit/追加 setup/不自动决定）", async () => {
   const skill = read("SKILL.md");
+  const delivery = read("docs/usage/delivery.md");
   const { REVERIFY_REASONS } = await import("../../src/application/runDeliveryReverify.js");
-  // (1) 流程语义（79 批 A2 重排后 SKILL 不再有工具表）：续修（run_continue）与
-  // reverify（run_delivery_reverify）的入口都必须出现在裁定步骤（裁定与收尾）之前
+  // (1) 入口侧只守触发点与顺序（127 批瘦身：完整资格与不可违反的约束下沉到交付页
+  // 的 run_delivery_reverify 权威节）：续修（run_continue）与 reverify
+  // （run_delivery_reverify）的入口都必须出现在裁定步骤（裁定与收尾）之前
   // ——窄缺陷先交回原 worker、环境类失败先归因重验，然后才决定。锚在裁定步骤名
   // 而不是 `run_delivery_decide` 的首次字面出现：交付真相一步的"打包失败不得调
   // review/decide"路由句（M11-12C 钉）也点名 decide，但它不是裁定动作本身。
@@ -2188,22 +2205,43 @@ test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间
   assert.ok(skill.indexOf("`run_continue`") < skill.indexOf("裁定与收尾")
     && skill.indexOf("`run_delivery_reverify`") < skill.indexOf("裁定与收尾"),
     "SKILL.md 里续修与 reverify 都出现在裁定之前（先修/先归因重验，后决定）");
-  // (2) Use only when the ORIGINAL verification FAILED and the Lead has judged a
-  // closed-set environment cause.
-  assert.ok(/original verification.*failed|原.*verification.*failed|原始终态.*failed|original.*失败/i.test(skill),
-    "SKILL 必须说明仅当 original verification failed 时使用 reverify");
-  assert.ok(REVERIFY_REASONS.length > 0 && /tooling_invalid|environment_contaminated|dependency_setup_missing/.test(skill),
-    "SKILL 必须携带闭集环境原因（tooling_invalid/environment_contaminated/dependency_setup_missing）");
-  // (3) The delivery commit is UNCHANGED; new setup may be APPENDED, the ORIGINAL
-  // assertions can never be modified.
-  assert.ok(/unchanged|不变|同一.*commit|same.*commit/i.test(skill),
-    "SKILL 必须说明 reverify 针对 unchanged 同一 delivery commit");
-  assert.ok(/append|追加|新增.*setup|setup.*新增/.test(skill)
-    && /原.*assertions.*不可改|assertions?.*(?:不可改|不变|immutable|never be modified|cannot be modified|can never be modified)|不.*替换.*assertion/i.test(skill),
-    "SKILL 必须说明新 setup 可追加、原 assertions 不可改");
-  // (4) The result NEVER auto-decides.
-  assert.ok(/不.*自动.*decision|不.*自动.*accept|never auto.*decide|不自动 accept\/reject/i.test(skill),
-    "SKILL 必须说明 reverify 结果不自动决定");
+  // (2) 先读门必须钉在失败处置分支内、且位于资格说明（original verification failed）之前：
+  // 整份 SKILL 里任意位置出现不算数——挪到基础导航/别处会红（sol 变异实证）。
+  const lines = skill.split("\n");
+  const branchStart = lines.findIndex((line) => line.startsWith("- **失败处置"));
+  assert.ok(branchStart !== -1, "SKILL.md 缺失败处置分支");
+  let branchEnd = lines.findIndex((line, i) => i > branchStart && line.startsWith("- **"));
+  if (branchEnd === -1) branchEnd = lines.length;
+  const failureBranch = lines.slice(branchStart, branchEnd).join("\n");
+  const gate = '**Before any reverify**: read `wao manual delivery "MCP run_delivery_reverify"`';
+  assert.ok(failureBranch.includes(gate),
+    "SKILL.md 失败处置分支内缺 reverify 先读门（写在别处不算）");
+  const gateAt = failureBranch.indexOf("**Before any reverify**");
+  const eligibilityAt = failureBranch.indexOf("original verification failed");
+  assert.ok(eligibilityAt !== -1 && gateAt < eligibilityAt,
+    "reverify 先读门必须位于资格说明（original verification failed）之前");
+  assert.equal(skill.split("**Before any reverify**").length - 1, 1,
+    "reverify 先读门只应出现一次（出现在基础导航等别处 = 门被挪走）");
+  // (3) 权威节承载被下沉的完整条件。每条绑定到规则自身的写法，不用 /不变/、/追加/
+  // 这类会被别的句子（如 candidateInventory 的“追加”）顶替命中的宽正则：
+  // 未变同一 commit、只能追加 setup、原 assertions 不可改、结果不自动决定。
+  const start = delivery.indexOf("## MCP `run_delivery_reverify`");
+  const end = delivery.indexOf("## 验证失败采纳协议", start);
+  assert.ok(start !== -1 && end > start, "交付页缺 run_delivery_reverify 权威节");
+  const section = delivery.slice(start, end);
+  assert.ok(REVERIFY_REASONS.length > 0, "REVERIFY_REASONS 必须有闭集成员");
+  for (const reason of REVERIFY_REASONS) {
+    assert.ok(section.includes(reason),
+      `run_delivery_reverify 权威节缺闭集环境原因 ${reason}（SKILL 指针所指内容）`);
+  }
+  assert.ok(/对同一个未变 delivery commit/.test(section),
+    "权威节必须说明 reverify 针对同一个未变 delivery commit（只认这条规则的写法，不接受别处“不变”顶替）");
+  assert.ok(/Lead 只能追加新的 setup 命令/.test(section),
+    "权威节必须说明 Lead 只能追加新的 setup 命令（只认这条规则的写法，不接受别处“追加”顶替）");
+  assert.ok(/原始 assertion 命令逐字节重跑且不可修改/.test(section),
+    "权威节必须说明原始 assertion 命令逐字节重跑且不可修改");
+  assert.ok(/任何 reverify 都不自动 accept\/reject/.test(section),
+    "权威节必须说明 reverify 结果不自动 accept/reject");
 });
 
 test("使用手册交付页记录 reverify CLI 入口、eligible failure、幂等与原\/有效 verification（字段形状由生成层承载）", () => {
@@ -2277,30 +2315,20 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 14600 bytes; Owner reset 2026-09-19 to 12000 — TD-166; +15% 2026-10-02 for TD-191③; +600 2026-11-04 for the continuation step, decision 0112; +200 the same day for the batch-close open items, decision 0113; 2026-11-06 batch 79 A2 restructure 14600→13800 (13564B), same-day continuation restored gates & split step 3 → 14498B, +2% exceeds the original cap so the cap returns to 14600, never above it)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 12000 bytes)", () => {
   // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
   // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
   // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
   // 可无损压缩语义的空间——届时作为临时议题呈 Owner 批准，不得自行抬。
-  // 2026-09-19（TD-166）：SKILL.md 重构为"结构化路由+指针"（一句话内核+动作锚定
-  // 指针，渐进披露三级化），Owner 批准冻结值 17000→12000 单值替换（无多层并存）。
-  // 2026-10-02（TD-191③）：Owner 明示授权帽 +15%（12000→13800）——宿主条件句
-  // 与支持闭集句式需要增量空间；授权原文在 M13 会话记录，消耗情况逐次回填 TD-191 行。
-  // 2026-11-04（决定 0112）：Owner 预先授权 Lead 按需扩限，13800→14400——验收一节
-  // 加"窄缺陷裁定前交回原 worker 续修"一步。同日（决定 0113）14400→14600——批次收尾
-  // 先看 lead_preflight 的待收口事项。
-  // 2026-11-06（第 79 批 A2，决定 0115 后续）：SKILL.md 重排为"一个批次的路径"
-  // （七步 + 条件分支 + 情形表），手册指针改 `wao manual`，工具名单与计数删除，
-  // 重排后 13564 字节、帽降 13800。同日续修（会审必改项）：先读门回到所属步骤
-  // 首句、第 3 步拆子项并补回硬参数细则、七步/分支标题双语——14498 字节，
-  // 新字节数 + 约 2% 已超原帽，帽回到 14600（续修授权明言不得超过原帽）。
+  // 2026-11-20（第 127 批）：SKILL.md 瘦身为单入口 + `wao manual` 按节指针
+  // （情形细节下沉到手册既有节，见决定 0115），当前约 10.9 KB；帽 14600→12000，
+  // 留约 1 KB 余量。历次抬帽经过不再追加——帽值唯一权威在本守卫的现值断言。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
-  assert.ok(bytes <= 14600,
-    `SKILL.md must stay a slim entrypoint ≤ 14600 bytes (got ${bytes}); move detail to authority docs`);
-  // TD-191 追加（2026-10-02 SSOT 审计）：帽值唯一权威在本守卫——其它文档只许指针
-  // 不许第二份数值（当天实证：守卫抬 13800 后 milestone-discipline §8 的 12,000
-  // 字面量变成冲突陈述，被 Owner SSOT 体检点名）。此处反向钉住"无字面量"。
+  assert.ok(bytes <= 12000,
+    `SKILL.md must stay a slim entrypoint ≤ 12000 bytes (got ${bytes}); move detail to authority docs`);
+  // 帽值唯一权威在本守卫——其它文档只许指针不许第二份数值（防两处冲突陈述）。
+  // 此处反向钉住"无字面量"。
   const discipline = read("docs/milestone-discipline.md");
   assert.ok(!/1[2-9],?\d{3} ?字节/.test(discipline),
     "milestone-discipline 不得携带 SKILL 帽数值字面量（唯一权威在本守卫；历史事件值以事件时点措辞记载）");
@@ -2313,13 +2341,26 @@ test("TD-166: SKILL.md 指针完整性——docs//references/ 路径存在，承
   // 指向不存在的文件/锚点 = 决策时刻读不到纪律。守卫断言关系（路径存在 + 锚点词
   // 在目标文件中出现），不断言字节数以外的内容值（TD-120 原则）。
   const skill = read("SKILL.md");
-  // 1) 每个 `docs/...` / `references/...` 路径字面量必须真实存在。
-  const pathMentions = [...skill.matchAll(/`(docs\/[A-Za-z0-9_\/.-]+|references\/[A-Za-z0-9_\/.-]+)`/g)]
+  // 1) 每个 `docs/...` / `references/...` / 点开头目录（如 `.wao/`）路径字面量必须是
+  //    **git 跟踪**的路径。只用 existsSync 会随本地是否留有被忽略目录而变（主仓库
+  //    本地有 `.woa-worktrees/` 时绿、干净克隆红，127 批 opus 变异 M4）。改判
+  //    `git ls-files -- <path>` 是否有输出：干净克隆与本地同一判据，也照样拦住
+  //    `.woa/` 这类手滑（不钉句子）。
+  const pathMentions = [...skill.matchAll(/`((?:docs|references|\.[A-Za-z0-9_-]+)(?:\/[A-Za-z0-9_\/.-]*)?)`/g)]
     .map((m) => m[1]);
   const uniquePaths = [...new Set(pathMentions)];
   assert.ok(uniquePaths.length >= 6, `SKILL.md 指针面异常收缩（仅 ${uniquePaths.length} 条）——路由化结构可能被退回`);
+  const isGitTracked = (p) => {
+    let out;
+    try {
+      out = execFileSync("git", ["ls-files", "--", p], { cwd: ROOT, encoding: "utf8" });
+    } catch (err) {
+      assert.fail(`git ls-files 执行失败，无法判定 SKILL.md 指针是否为跟踪路径：${p}（${err.message}）`);
+    }
+    return out.trim().length > 0;
+  };
   for (const p of uniquePaths) {
-    assert.ok(existsSync(join(ROOT, p)), `SKILL.md 指针目标不存在：${p}`);
+    assert.ok(isGitTracked(p), `SKILL.md 指针目标不是 git 跟踪路径：${p}（干净克隆里打不开）`);
   }
   // 2) 承重手册指针（79 批 A2：手册指针统一 `wao manual <页> "<节>"`，解析由 0115
   //    指针守卫承载——它已扫描 SKILL.md 并逐指针核到节）。原先核对 delivery.md /
@@ -2333,8 +2374,18 @@ test("TD-166: SKILL.md 指针完整性——docs//references/ 路径存在，承
     { page: "delivery", section: "场景 4c" }, // Lead 验收细则
     { page: "delivery", section: "MCP run_delivery_reverify" }, // reverify 资格闭集
     { page: "delivery", section: "MCP run_delivery_repackage" }, // 重打包
+    { page: "delivery", section: "isolation_failed" }, // 第三种终端失败形状
     { page: "dispatch", section: "MCP run_dispatch" }, // 派发字段语义
+    { page: "dispatch", section: "MCP run_continue" }, // 续修任务书写法
+    { page: "supervise", section: "Lead 安静监督与续接" }, // 安静监督
     { page: "supervise", section: "等待到收口" }, // 等待纪律
+    { page: "results", section: "MCP run_collect" }, // 取结果与游标
+    { page: "results", section: "semanticNotes" }, // 哪几个工具带语义注记/下钻
+    { page: "consult", section: "三席会审" }, // 会审操作细节
+    { page: "host", section: "MCP registry_list" }, // 认证 advisory 语义
+    { page: "host", section: "项目级 Workspace Activation" }, // 读类目标回落
+    { page: "delivery", section: "安全 delivery diff 审查" }, // 一次读完/续修轮审阅
+    { page: "maintenance", section: "管理历史 run" }, // lineage-close 配方
   ];
   for (const expected of expectedManualPointers) {
     const label = `wao manual ${expected.page} "${expected.section}"`;
@@ -2356,6 +2407,87 @@ test("TD-166: SKILL.md 指针完整性——docs//references/ 路径存在，承
   }
   const ts = read("docs/troubleshooting.md");
   assert.ok(ts.includes("8.2"), "docs/troubleshooting.md 缺 §8.2 锚点（SKILL 集成终验指针）");
+});
+
+// TD-339（台账定守法：下次改 SKILL 的批次）：入口承重规则守语义、不钉逐字句。
+// 每条按所属步骤/分支切片，只查工具名、字段名或关键词——措辞可以改，规则删掉即红。
+// 交付真相含失败终态由上方 M11-12C-DOC-01 的严格正则承载（本用例不重复造钉）。
+// 变异自证：逐条从 SKILL.md 删掉/反转对应规则，本用例必红。
+test("TD-339: SKILL 入口承重规则语义守卫（守语义不钉句子；删规则即红）", () => {
+  const skill = read("SKILL.md");
+  const lines = skill.split("\n");
+  // 步骤切片：`n. **` 到下一步或下一个二级标题。
+  const step = (n) => {
+    const start = lines.findIndex((line) => line.startsWith(`${n}. **`));
+    assert.ok(start !== -1, `SKILL.md 缺第 ${n} 步`);
+    let end = lines.findIndex((line, i) => i > start && (/^\d+\. \*\*/.test(line) || line.startsWith("## ")));
+    if (end === -1) end = lines.length;
+    return lines.slice(start, end).join("\n");
+  };
+  // 条件分支切片：`- **名` 到下一个分支或下一个二级标题。
+  const branch = (needle) => {
+    const start = lines.findIndex((line) => line.startsWith(`- **${needle}`));
+    assert.ok(start !== -1, `SKILL.md 缺 ${needle} 分支`);
+    let end = lines.findIndex((line, i) => i > start && (line.startsWith("- **") || line.startsWith("## ")));
+    if (end === -1) end = lines.length;
+    return lines.slice(start, end).join("\n");
+  };
+
+  const step1 = step(1);
+  const step3 = step(3);
+  const step4 = step(4);
+  const step5 = step(5);
+  const state = skill.slice(skill.indexOf("## State 与批次收尾"));
+  assert.ok(state.length > 0, "SKILL.md 缺 State 与批次收尾节");
+
+  // 1) expectedWorkspaceRoot：写类工具必传。
+  assert.ok(step3.includes("expectedWorkspaceRoot") && /write tools require it|写类[^\n]*必传/i.test(step3),
+    "TD-339: 第 3 步缺 expectedWorkspaceRoot 写类必传语义");
+  // 2) 派发身份二选一：agentId 或车道+角色，恰好一种形式。
+  assert.ok(step3.includes("`agentId`") && /`lane`\+`role`|`lane`\s*\+\s*`role`/.test(step3)
+    && /exactly one form|二选一/i.test(step3),
+    "TD-339: 第 3 步缺 agentId 与 lane+role 二选一语义");
+  // 3) continuable 派发。
+  assert.ok(step3.includes("continuable"),
+    "TD-339: 第 3 步缺 continuable 语义");
+  // 4) 凭据红线：否定词必须在 credential 之前、同一句里（never … credential）。反转成
+  //    "credential values may go" 或删掉否定词都要红。
+  const credentialSentence = step1.split(/(?<=[.!?])\s+/).find((sentence) => /credential/i.test(sentence));
+  assert.ok(credentialSentence, "TD-339: 第 1 步缺凭据红线（credential 不在任何规则句里）");
+  assert.match(credentialSentence, /never[^.]*credential|(?:must not|do not|不得|绝不)[^.]*credential/i,
+    "TD-339: 凭据红线必须是「否定词在前」的禁止语义（never … credential），不是允许或中性描述");
+  assert.ok(/worker prompts?|任务书/i.test(credentialSentence),
+    "TD-339: 凭据红线必须点名不进 worker prompt/任务书");
+  // 5) 活运行必挂等待（回合结束前）。
+  assert.ok(/live run needs a live wait|active run[^\n]*(attach a wait|wait must)/i.test(step4),
+    "TD-339: 第 4 步缺活运行必挂等待语义");
+  // 6) 宿主调用超时不等于运行死亡。
+  assert.ok(/Host per-call timeout[^\n]*run death|timeout[^\n]*(not|≠)[^\n]*run[^\n]*(death|failure)/i.test(step4),
+    "TD-339: 第 4 步缺宿主超时不等于运行死亡的语义");
+  // 7) isolation_failed 是第三种终端失败形状。
+  assert.ok(step5.includes("isolation_failed") && /terminal failure shape|终端失败形状|dispatch anew|另行派发/.test(step5),
+    "TD-339: 第 5 步缺 isolation_failed 终端失败形状语义");
+  // 8) provider_capacity 是既成事实，WAO 不自动重试/换道。
+  const failure = branch("失败处置");
+  assert.ok(failure.includes("provider_capacity") && /never auto-retries|never[^\n]*swap|不自动重试/i.test(failure),
+    "TD-339: 失败处置分支缺 provider_capacity 不自动重试/换道语义");
+  // 9) lead_preflight 的 open item 要收口并上报：「收」与「报」各自断言，
+  //    删掉任何一半都要红（127 批复核 M1/M14 曾证明两半合一的 OR 会放行）。
+  assert.ok(state.includes("open item:"), "TD-339: State 节缺 lead_preflight 的 open item 事实");
+  assert.match(state, /close what you can/,
+    "TD-339: State 节缺 open item 的「收」（close what you can）");
+  assert.match(state, /report the rest/,
+    "TD-339: State 节缺 open item 的「报」（report the rest）");
+  // 10) Owner 看板每会话一次，且必须后台启动、在宿主内置浏览器打开 URL。
+  assert.match(step1, /Owner dashboard/i, "TD-339: 第 1 步缺 Owner 看板句");
+  assert.match(step1, /once per session/, "TD-339: 第 1 步看板缺「每会话一次」语义");
+  assert.match(step1, /in the background/i,
+    "TD-339: 第 1 步看板缺 in the background（Owner 要求的后台启动）");
+  assert.match(step1, /built-in browser/i,
+    "TD-339: 第 1 步看板缺 built-in browser（在宿主内置浏览器打开 URL）");
+  // 11) 已 accepted 的父交付不可续修。
+  assert.ok(/accepted parent cannot continue|已 accepted[^\n]*不可续/i.test(branch("续修")),
+    "TD-339: 续修分支缺已 accepted 父交付不可续语义");
 });
 
 // 79 批 A2 续修（会审必改项）：先读门回到所属步骤的首句。会审实证过盲区——

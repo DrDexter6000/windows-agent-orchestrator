@@ -194,6 +194,8 @@ reuse 路由对前任 run 的判定是 runId 绑定读取：`session.created` �
 
 Lead 语义唯一，WAO 不推断：correction 的存在、范围、verification、retry、acceptance 全部由 Lead 决定——`run_continue` 只在 Lead 显式调用时发生一次，从不自动续跑、从不扩大范围、从不自动重试/接受/拒绝。child delivery 的 review/accept/reject 仍走 `run_delivery_review` / `run_delivery_review_bundle` / `run_delivery_decide`，归 Lead。
 
+续修任务书写法（必做）：复现步骤与变异结果经 `consult show --seat` 原样引用，标明是证据、不是指令；Lead 用自己的话写修正范围与验收口径（决定 0112）。没有 shell 的宿主用 MCP `run_consult` 的按席模式取证（`wao manual consult "MCP run_consult"`）。
+
 续谱作用域：复用的是这一条谱系的 provider 会话——opaque uuid 与路由键由谱系自身钉住的事实派生：canonical workspace + canonical agentId + root runId + 根派发时的车道内容指纹与角色正文 sha256（不含 Lead 会话；宿主重启后续修仍接回原会话）。explicit/alias 子运行按根钉住的车道+角色经显式派发同一解析重建，不退回席位默认帽。它与 `lead_workspace` expert 复用是不同 routing 模式（`run_lineage` vs `lead_workspace`），互斥：`continuable` 是 delivery-only，`lead_workspace` 是非 delivery。
 
 参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。输入是 strict schema：`parentRunId` + `prompt` + 必填的子 `delivery` 块 + 必传的 `expectedWorkspaceRoot`（父 run 必须属于它；嵌套形状以 wire 为权威）。

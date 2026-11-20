@@ -29,6 +29,8 @@ Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层
 
 交付规格凡允许 worker 新增、移动或删除 `*.test.js` 文件，必须同时把 `test/manifest.json` 纳入 `allowedPaths`，并在任务书要求同步登记。否则交付提交独立过 canonical 验证必失败（manifest 漂移 = INVALID ENVIRONMENT），只能 Lead 事后补登记。
 
+**任务书纪律**（Lead 写交付任务书时）：prompt 只含 bounded 任务与许可路径、读写/环境约束、必须的验收命令或可观察结果、期望的最终回复形状；不给 roadmap 或其他 worker 的上下文；授权确切路径并要求一条独立验证命令；不要求 worker commit 或产出提交哈希（WAO 拥有交付提交），改要 changed paths/tests/risks。
+
 CLI 的 run 用法可用 `npm run cli -- run --help` 查看。
 
 Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` / `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
