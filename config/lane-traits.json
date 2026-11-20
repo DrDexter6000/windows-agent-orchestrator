@@ -387,6 +387,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "reviewPending": "claude-code 2.1.326→2.1.330（11-20）：delta 认证（conditional）与真实续修冒烟通过；code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 3,
       "cost": "Claude 订阅（OAuth 长期 token）",
       "caveats": [
