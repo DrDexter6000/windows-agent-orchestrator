@@ -29,7 +29,7 @@ import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases, matrixScopeFromRegistry, classifyExternalBlocker } from "./reliability/certification.mjs";
+import { certifyCase, classifyExternalBlocker, caseProviderCapacityUndeterminable, planReliabilityPublish, reliabilityExitCode, reliabilityVerdictBanner, providerCapacityUndeterminableLine, unpublishedResultsNotice, summarizeCertification, mergeCaseResults, pruneStaleCases, matrixScopeFromRegistry } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 // TD-186：认证证据绑定执行画像——运行时身份探测复用组件层既有探针（一次 spawn /
 // backend，零新指纹平台），探不到如实 verified:false，绝不猜。
@@ -323,7 +323,30 @@ writeFileSync(join(TMP_DIR, "sent_b.txt"), SENTINEL_B);
 // TD-186 复核 FAIL-B：drill 转录目录（sentinel/scorecard 派发 --run-dir 到此）。
 mkdirSync(DRILL_TRANSCRIPTS_DIR, { recursive: true });
 
+// 第 122 批续修：无法判定行要报该车道在 prior 台账里的原状态与日期。报告用快照
+// 每次现读（不缓存：跑矩阵期间别的发布者可能已写盘）；发布阶段另行读取权威快照。
+const summaryPath = resolve(ROOT, "runs", "reliability-summary.json");
+function readPriorSummary() {
+  try {
+    const parsed = JSON.parse(readFileSync(summaryPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null; // 无旧 summary 或解析失败 = 全新认证
+  }
+}
+function priorLaneRecordFor(agentId) {
+  const workers = readPriorSummary()?.workers ?? {};
+  for (const record of Object.values(workers)) {
+    if (!record || typeof record !== "object") continue;
+    if (record.agentId === agentId) return record;
+    if (Array.isArray(record.agentIds) && record.agentIds.includes(agentId)) return record;
+  }
+  return null;
+}
+
 const results = [];
+// 第 122 批（TD-359）：服务商额度/限流导致无法判定的 case（不判级、不进 results）。
+const undeterminableCases = [];
 let allPass = true;
 
 if (ONLY_AGENT) {
@@ -375,6 +398,16 @@ for (const tc of MATRIX) {
   // 断言
   const checks = [];
   const handledDrills = new Set();
+  // 第 122 批续修：每个能拿到 CLI 结果的演练都收进 drillResults；任一终态诊断为
+  // provider_capacity（服务商额度/限流）→ 整个用例无法判定（跳过余下演练、不判级、
+  // 不进 results）。整轮只要有一个这样的用例，发布阶段就整轮不写台账。401/403 归
+  // provider_auth，不豁免，照旧判级。
+  const drillResults = [];
+  let providerCapacity = null;
+  const noteDrillResult = (drill, result) => {
+    drillResults.push({ drill, result: result ?? null });
+    providerCapacity = caseProviderCapacityUndeterminable(drillResults);
+  };
 
   if (tc.drills.includes("sentinel")) {
     handledDrills.add("sentinel");
@@ -402,6 +435,7 @@ for (const tc of MATRIX) {
     caseResult.sentinelB = result ? hasSentinel(result, SENTINEL_B) : false;
     caseResult.metricsInput = result?.metrics?.tokens?.input ?? null;
     caseResult.error = result?.error ?? (ok ? null : error);
+    noteDrillResult("sentinel", result);
 
     if (tc.expectComplete) {
       checks.push(check("completed", caseResult.completed, "core", `completed=${caseResult.completed}`, { capability: "complete" }));
@@ -424,7 +458,7 @@ for (const tc of MATRIX) {
     }));
   }
 
-  if (tc.drills.includes("scorecard")) {
+  if (providerCapacity === null && tc.drills.includes("scorecard")) {
     handledDrills.add("scorecard");
     console.log(`    [DRILL] scorecard command/file evidence...`);
     const drill = runStrictScorecardDrill(tc);
@@ -447,15 +481,18 @@ for (const tc of MATRIX) {
         : `fileExists=${drill.fileExists}, contentCarriesSentinel=${drill.fileContentMatches} (${drill.fileName}) — existence alone is not file evidence (ADR-0032 §8)`,
       { capability: "fileMaterialized" },
     ));
+    noteDrillResult("scorecard", drill.result);
   }
 
-  if (tc.drills.includes("isolation")) {
+  if (providerCapacity === null && tc.drills.includes("isolation")) {
     handledDrills.add("isolation");
     console.log(`    [DRILL] isolate worktree...`);
-    checks.push(...runIsolationDrill(tc));
+    const drill = runIsolationDrill(tc);
+    checks.push(...drill.checks);
+    noteDrillResult("isolation", drill.result);
   }
 
-  if (tc.drills.includes("containmentEvidence")) {
+  if (providerCapacity === null && tc.drills.includes("containmentEvidence")) {
     handledDrills.add("containmentEvidence");
     console.log(`    [DRILL] containment evidence live write...`);
     const drill = await runContainmentEvidenceDrill(tc);
@@ -466,9 +503,10 @@ for (const tc of MATRIX) {
     checks.push(...(externalBlocker
       ? [blockedCheck("containmentEvidence", externalBlocker, "operational", { capability: "containmentEvidence" })]
       : drill.checks));
+    noteDrillResult("containmentEvidence", drill.result);
   }
 
-  if (tc.drills.includes("sandboxEnforcement")) {
+  if (providerCapacity === null && tc.drills.includes("sandboxEnforcement")) {
     handledDrills.add("sandboxEnforcement");
     console.log(`    [DRILL] sandbox enforcement probe...`);
     // 决定 0086：不经模型的 OS 写沙箱执行取证（与 containmentEvidence 同一
@@ -481,15 +519,32 @@ for (const tc of MATRIX) {
     checks.push(...(externalBlocker
       ? [blockedCheck("sandboxEnforcement", externalBlocker, "operational", { capability: "sandboxEnforcement" })]
       : drill.checks));
+    // sandbox 探针不经模型、没有 CLI 结果——不可能撞服务商额度，不参与判定。
+  }
+
+  if (providerCapacity !== null) {
+    // 服务商额度/限流：整案无法判定。不 push 进 results，也不跑 certifyCase
+    // （否则含 429 的失败会被 classifyExternalBlocker 归成 blocked 写台账）。
+    // 整轮只要有任一无法判定用例，发布阶段不写台账（见下）。
+    undeterminableCases.push({ caseId: tc.label, agentId: tc.agentId, ...providerCapacity });
+    console.log(`  ${providerCapacityUndeterminableLine({
+      caseId: tc.label,
+      agentId: tc.agentId,
+      code: providerCapacity.code,
+      drill: providerCapacity.drill,
+      prior: priorLaneRecordFor(tc.agentId),
+    })}`);
+    console.log("");
+    continue;
   }
 
   checks.push(...unsupportedDrillChecks(tc, handledDrills));
 
-  // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
-  // 记实际 runId；drills.mjs 只回 checks、不上抛内部 runId 的 drill（isolation/
-  // containmentEvidence/stop）如实记 null。派发失败/无 runId 时的
-  // "unknown" 占位也如实归 null——它不是可回查 id，入账即悬空指针（复核 FAIL-B
-  // 硬禁令：不得记录指向不存在证据的 id）。
+  // TD-186：该 case 各 drill 的 runId——只有 runner 显式落盘到 DRILL_TRANSCRIPTS_DIR
+  // 的 drill（sentinel/scorecard）记实际 runId；isolation/containmentEvidence 的
+  // CLI 结果只用于额度判定、其转录随 TMP_DIR 收尾删除，如实记 null。派发失败/无
+  // runId 时的 "unknown" 占位也如实归 null——它不是可回查 id，入账即悬空指针
+  // （复核 FAIL-B 硬禁令：不得记录指向不存在证据的 id）。
   const resolvableRunId = (value) =>
     typeof value === "string" && value.length > 0 && value !== "unknown" ? value : null;
   caseResult.executionProfile.drillRunIds = Object.fromEntries(
@@ -549,7 +604,20 @@ try {
 }
 
 // 输出 summary
-const summaryPath = resolve(ROOT, "runs", "reliability-summary.json");
+const exitCode = reliabilityExitCode({ allPass, undeterminableCases });
+const printFinalVerdict = () => {
+  console.log(`\n=== ${reliabilityVerdictBanner({ allPass, undeterminableCases })} ===`);
+};
+// 第 122 批（续修 4）：本轮只要有任一用例无法判定，整轮**不写**台账——summary
+// 一个字节都不动（不 mkdir、不读 prior、不裁剪、不清理）。已判出的结果只打印，
+// 输出点名未发布的 case；进程非 0，额度恢复后重跑。
+// 没有无法判定用例时，下面的发布序列与第 122 批之前完全相同。
+const publication = planReliabilityPublish({ results, undeterminableCases });
+if (!publication.write) {
+  console.log(`\n${unpublishedResultsNotice({ results, undeterminableCases })}`);
+  printFinalVerdict();
+  process.exit(exitCode);
+}
 try { mkdirSync(RUNS_DIR, { recursive: true }); } catch {}
 // 增量合并：读磁盘旧 summary 的 cases，与本次 results 合并。
 // 本次 case 覆盖同 caseId（重认证刷新），未重跑的旧 case 保留（不丢失其他 worker）。
@@ -624,5 +692,5 @@ for (const w of Object.values(summary.workers ?? {})) {
 } else {
   console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
 }
-console.log(`\n=== ${allPass ? "ALL PASS" : "SOME FAILED"} ===`);
-process.exit(allPass ? 0 : 1);
+printFinalVerdict();
+process.exit(exitCode);

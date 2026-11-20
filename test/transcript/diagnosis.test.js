@@ -611,6 +611,72 @@ test("zcode 上游摘要: 链尾 model_request_failed + statusCode 401 → provi
   assert.ok(!JSON.stringify(d.evidence).includes("api_key"), "不一概说成密钥错误");
 });
 
+test("zcode 上游摘要: 主轮请求不可重试的快速收口文案（第 122 批）→ provider_capacity/rate_limited", () => {
+  const runId = "run_zcode_upstream_failfast_429";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn failed (upstream main-turn request failed and will not be retried); upstream: last main-turn request model_request_failed (statusCode 429, attempt 1/11)",
+  ), runId);
+  assert.equal(d.category, "provider_capacity", "链尾 failed + 429 → 限流类（与三道门/step-finish 文案同款升级）");
+  assert.equal(d.code, "rate_limited", "单凭 429 不断言额度耗尽");
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /model_request_failed/);
+  assert.match(joined, /statusCode 429/);
+  assert.match(joined, /attempt 1\/11/);
+});
+
+test("zcode 上游摘要: 快速收口文案的 5xx / 无状态码 → provider_disconnect，不虚构 step-finish 路径", () => {
+  for (const [name, summary] of [
+    ["500", "statusCode 500, attempt 4/11"],
+    ["无状态码", "attempt 4/11"],
+  ]) {
+    const runId = `run_zcode_upstream_failfast_${name === "500" ? "500" : "nostatus"}`;
+    const d = diagnoseFailure(zcodeCloseoutFixture(
+      runId,
+      "zcode turn failed (upstream main-turn request failed and will not be retried); "
+        + `upstream: last main-turn request model_request_failed (${summary})`,
+    ), runId);
+    assert.equal(d.category, "provider_disconnect", `${name}：上游服务端/连接层失败 = 流中断一类归因`);
+    assert.equal(d.code, null);
+    const joined = d.evidence.map((e) => e.fact).join(" ");
+    assert.match(joined, /不会重试/);
+    assert.match(joined, /model_request_failed/);
+    assert.ok(!joined.includes("step-finish"), "这不是 step-finish reason error 路径——事实不得冒充");
+  }
+});
+
+test("zcode 上游摘要: 快速收口文案的 4xx（400 请求本身不合法）→ 不归类（unknown），不冒充流中断", () => {
+  const runId = "run_zcode_upstream_failfast_400";
+  const d = diagnoseFailure(zcodeCloseoutFixture(
+    runId,
+    "zcode turn failed (upstream main-turn request failed and will not be retried); upstream: last main-turn request model_request_failed (statusCode 400, attempt 1/11)",
+  ), runId);
+  assert.equal(d.category, "unknown", "请求本身被拒不是断流；run 终态理由仍由 backend_error 承载");
+  assert.equal(d.code, null);
+  const joined = d.evidence.map((e) => e.fact).join(" ");
+  assert.match(joined, /4xx/);
+  assert.match(joined, /不是流中断/);
+  assert.match(joined, /model_request_failed/);
+  assert.ok(!joined.includes("provider 流中断"), "证据不得声称流中断");
+  assert.ok(!joined.includes("step-finish"), "不虚构 step-finish 路径");
+});
+
+test("zcode 上游摘要: 快速收口文案的 2xx/3xx 异常状态码 → 中性事实，不写“4xx 请求级失败”", () => {
+  for (const statusCode of [200, 302]) {
+    const runId = `run_zcode_upstream_failfast_${statusCode}`;
+    const d = diagnoseFailure(zcodeCloseoutFixture(
+      runId,
+      "zcode turn failed (upstream main-turn request failed and will not be retried); "
+        + `upstream: last main-turn request model_request_failed (statusCode ${statusCode}, attempt 1/11)`,
+    ), runId);
+    assert.equal(d.category, "unknown", `${statusCode}：不是 4xx/5xx，不冒充任何归因`);
+    assert.equal(d.code, null);
+    const joined = d.evidence.map((e) => e.fact).join(" ");
+    assert.ok(!joined.includes("4xx"), `${statusCode}：证据不得声称 4xx 请求级失败`);
+    assert.match(joined, /model_request_failed/, `${statusCode}：中性链尾摘要仍在`);
+  }
+});
+
 test("zcode 上游摘要: 链尾 retry_scheduled → provider_disconnect，事实带最后状态与次数", () => {
   const runId = "run_zcode_upstream_retry";
   const d = diagnoseFailure(zcodeCloseoutFixture(

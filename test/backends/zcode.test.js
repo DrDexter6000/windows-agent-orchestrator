@@ -2321,7 +2321,7 @@ test("zcode ⑥j: 链尾 429 failed 的上游摘要与 unanswered 段共存 → 
       fakeNow += 30_000;
       tick += 1;
       if (tick === 1) peer.notify(...turnStarted());
-      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 11, statusCode: 429, retryable: false }));
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 10, statusCode: 429, retryable: true }));
     },
   });
   const done = events.at(-1);
@@ -2330,7 +2330,7 @@ test("zcode ⑥j: 链尾 429 failed 的上游摘要与 unanswered 段共存 → 
   // 锚在句尾时诊断也会丢升级。
   assert.match(
     done.error,
-    /; session\/messages unanswered for 270s; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 11\/11\)$/,
+    /; session\/messages unanswered for 270s; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 10\/11\)$/,
   );
   // 同一条真实文案装进转录交给诊断：429 摘要升级先于 unanswered 槽。
   const runId = "run_zcode_6j_upstream";
@@ -2653,7 +2653,7 @@ test("zcode ⑥i: failed 与 stream_stalled 本身不续命（只说明出过问
       const tick = failedOnly.peer.polls();
       if (tick === 1) failedOnly.peer.notify(...turnStarted());
       if (tick === 2) failedOnly.peer.notify(...reqStatus());
-      if (tick === 3) failedOnly.peer.notify(...reqStatus({ status: "model_request_failed", attempt: 11, statusCode: 429, retryable: false }));
+      if (tick === 3) failedOnly.peer.notify(...reqStatus({ status: "model_request_failed", attempt: 3, statusCode: 429, retryable: true }));
     },
   });
   assert.equal(failedEvents.at(-1).reason, "failed");
@@ -2661,7 +2661,7 @@ test("zcode ⑥i: failed 与 stream_stalled 本身不续命（只说明出过问
   assert.equal(failedEvents.filter((e) => e.kind === "runtime_activity" && e.status === "provider_retry").length, 0);
   assert.match(
     failedEvents.at(-1).error,
-    /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 11\/11\)$/,
+    /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 3\/11\)$/,
   );
   failedOnly.child.kill();
 
@@ -2690,12 +2690,480 @@ test("zcode ⑥i: failed 与 stream_stalled 本身不续命（只说明出过问
   stalledStream.child.kill();
 });
 
+// ===== 第 122 批（TD-359）：上游宣布本轮主轮请求不可重试 → 几秒内收口 =====
+//
+// 事故形态（2026-11-19 GLM 周额度用尽）：ZCode 3.19 收到 429/1310
+// （retryable:false）后 4 秒内记下 model.request.failed，不再重试；旧实现没有
+// assistant 消息就没有 step-finish，只能等零 part 预算/停滞门（实测 5 分多钟）才
+// 以 failed/backend_error 结束——reliability 的观察截止先到，运行没有终态。新判据：
+// 本轮链尾 failed 且 retryable:false 或 attempt 已到 maxAttempts，宽限窗内没有新的
+// started/retry_scheduled 换掉链尾 → done(failed)，文案固定句 + 现有摘要。
+
+test("zcode ⑥k: 本轮主轮请求 failed(retryable:false) → 宽限后几秒内收口（不等零 part 预算/停滞门），诊断 provider_capacity", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] }, // 零 part：与事故同形（没有 assistant 消息/step-finish）
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(
+    done.error,
+    "zcode turn failed (upstream main-turn request failed and will not be retried); upstream: last main-turn request model_request_failed (statusCode 429, attempt 1/11)",
+  );
+  assert.equal(
+    peer.polls(),
+    9,
+    "注入钟 +1s/拍：5s 宽限过后的下一拍（t=9s）收口——远早于 120 拍零 part 预算 / 300s 停滞 floor",
+  );
+  assert.ok(!done.error.includes("turn stalled"), "不是停滞门文案");
+  assert.ok(!done.error.includes("thinking budget"), "不是零 part 预算文案");
+  // 同一条真实文案装进转录交给诊断：429 摘要升级 → provider_capacity/rate_limited。
+  const runId = "run_zcode_6k_upstream_fastfail";
+  const d = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-19T16:30:00.000Z" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-19T16:30:04.000Z", error: done.error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-19T16:30:04.000Z" },
+  ], runId);
+  assert.equal(d.category, "provider_capacity");
+  assert.equal(d.code, "rate_limited");
+  child.kill();
+});
+
+test("zcode ⑥k: attempt 已到 maxAttempts（retryable:true）同样走宽限快速收口，不等到兜底门", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 11, maxAttempts: 11, statusCode: 503, retryable: true }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(
+    done.error,
+    "zcode turn failed (upstream main-turn request failed and will not be retried); upstream: last main-turn request model_request_failed (statusCode 503, attempt 11/11)",
+    "maxAttempts 已到 = 最后一次尝试失败，重试预算用尽",
+  );
+  assert.equal(peer.polls(), 9, "attempt 到顶与 retryable:false 同一条宽限路径（宽限过后即收口）");
+  child.kill();
+});
+
+test("zcode ⑥k: turn.terminal 不提前收口——晚一拍到达的 step-finish 仍正常完成", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 2 ? [] : n < 6
+        ? [userMsg("do the task"), stepStartMsg()]
+        : [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]),
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_started", attempt: 1 }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      if (tick === 4) peer.notify(...turnTerminal());
+    },
+  });
+  assert.equal(events.at(-1).reason, "completed", "terminal 到达后仍等宽限/完成判据；第 6 拍的 stop 生效");
+  assert.equal(peer.polls(), 6);
+  child.kill();
+});
+
+test("zcode ⑥k: terminal 先到、不可重试失败后到 → 仍等满宽限（不立即收口）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...turnTerminal());
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(
+    done.error,
+    "zcode turn failed (upstream main-turn request failed and will not be retried); upstream: last main-turn request model_request_failed (statusCode 429, attempt 1/11)",
+  );
+  assert.equal(peer.polls(), 9, "terminal 不加速：失败候选仍要等满 5s 宽限（t=9s）");
+  child.kill();
+});
+
+test("zcode ⑥k: 被替换的旧请求的重复失败不重新立候选（req_a 失败 → req_b 开始 → 迟到的 req_a 失败忽略）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 2 ? [] : n < 12
+        ? [userMsg("do the task"), stepStartMsg()]
+        : [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]),
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_started", attempt: 1 }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      if (tick === 4) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_started", attempt: 2 }));
+      // 迟到的旧请求重复失败：若重新立候选，第 6 拍就会误杀，等不到第 12 拍 stop。
+      if (tick === 5) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+    },
+  });
+  assert.equal(events.at(-1).reason, "completed", "旧请求已被 req_b 替换——它的重复失败不得立候选");
+  assert.ok(!events.some((e) => e.kind === "done" && e.reason === "failed"), "从未发射快速失败");
+  assert.equal(peer.polls(), 12, "第 12 拍的 step-finish(stop) 正常完成");
+  child.kill();
+});
+
+test("zcode ⑥k: 同一失败的重复通知不重置宽限", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      // 同一失败（同 requestId/attempt/状态码）重复到达：不延长宽限。
+      if (tick === 6) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+    },
+  });
+  assert.equal(events.at(-1).reason, "failed");
+  assert.equal(peer.polls(), 9, "宽限仍从首见（t=4s）算起，第 9 拍收口；重复通知没有推到第 12 拍");
+  child.kill();
+});
+
+test("zcode ⑥k: 跨拍到达的 retry_scheduled 清空候选——旧请求被替换后不再立候选", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : n < 10
+        ? [userMsg("do the task"), stepStartMsg()]
+        : [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]),
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      // 下一拍（跨拍）才到的新尝试安排：替换 req_a，清空候选。
+      if (tick === 5) peer.notify(...reqStatus({ requestId: "req_b", status: "model_retry_scheduled", attempt: 2, delayMs: 60_000, statusCode: 429, retryable: true }));
+    },
+  });
+  assert.equal(events.at(-1).reason, "completed", "跨拍 retry_scheduled 清空候选；第 10 拍正常完成");
+  assert.ok(!JSON.stringify(events).includes("will not be retried"));
+  assert.equal(peer.polls(), 10);
+  child.kill();
+});
+
+test("zcode ⑥k: 换轮后旧轮的不可重试失败不立候选", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 2 ? [] : n < 10
+        ? [userMsg("do the task"), stepStartMsg()]
+        : [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")]),
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      if (tick === 3) peer.notify(...turnStarted("turn_fx_next")); // 换轮：候选清空
+      if (tick === 4) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+    },
+  });
+  assert.equal(events.at(-1).reason, "completed", "换轮后旧轮的失败通知不采纳；第 10 拍正常完成");
+  assert.equal(peer.polls(), 10);
+  child.kill();
+});
+
+test("zcode ⑥k: maxAttempts:0（上游重试预算无界）不算到顶——仍走兜底门，不早收口", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus());
+      if (tick === 3) peer.notify(...reqStatus({ status: "model_request_failed", attempt: 3, maxAttempts: 0, statusCode: 429, retryable: true }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.equal(peer.polls(), 13, "maxAttempts:0 = 无界预算，不按 attempt>=maxAttempts 提前收口");
+  assert.match(
+    done.error,
+    /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 3\/0\)$/,
+  );
+  assert.ok(!done.error.includes("will not be retried"), "不是快速收口文案");
+  child.kill();
+});
+
+test("zcode ⑥k: 不可重试失败后同批出现 retry_scheduled / model_request_started → 链尾被换掉，不早收口", async () => {
+  for (const [name, followUp] of [
+    ["retry_scheduled", { status: "model_retry_scheduled", attempt: 2, requestId: "req_b", delayMs: 60_000, statusCode: 429, retryable: true }],
+    ["model_request_started", { status: "model_request_started", attempt: 2, requestId: "req_b" }],
+  ]) {
+    let fakeNow = 0;
+    const scenario = await runScenario({
+      peerOptions: {
+        messages: (n) => (n < 6 ? [] : [userMsg("do the task"), assistantMsg("done text", "stop")]),
+      },
+    });
+    const events = await collect(scenario.handle, {
+      pollInterval: 2,
+      stallClock: () => fakeNow,
+      onPollTick: () => {
+        fakeNow += 1_000;
+        const tick = scenario.peer.polls();
+        if (tick === 1) scenario.peer.notify(...turnStarted());
+        if (tick === 3) {
+          scenario.peer.notify(...reqStatus({ status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+          // 上游实际还在推进：失败通知与下一次尝试的首个状态同批到达。
+          scenario.peer.notify(...reqStatus(followUp));
+        }
+      },
+    });
+    assert.equal(events.at(-1).reason, "completed", `${name}：链尾已换掉，不按不可重试失败收口`);
+    assert.ok(!JSON.stringify(events).includes("will not be retried"), `${name}：从未发射快速失败文案`);
+    scenario.child.kill();
+  }
+});
+
+test("zcode ⑥k: 快照未应答的拍上不判快速失败（完成判据没跑，可能只是快照没回来）", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const controller = new AbortController();
+  const { handle, child, peer } = await runScenario({
+    // 基线之后轮询请求一直挂着：宽限过了也不能判——本拍没有快照、完成判据没跑过。
+    peerOptions: { messages: (n) => (n <= 1 ? [] : null) },
+  });
+  const events = [];
+  for await (const event of handle.events(controller.signal, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 30_000;
+      tick += 1;
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      if (tick >= 8) controller.abort();
+    },
+  })) {
+    events.push(event);
+  }
+  assert.ok(
+    !events.some((e) => e.kind === "done" && String(e.error ?? "").includes("will not be retried")),
+    "未应答的拍上不抢先收口（宽限已过也不判，等快照回来）",
+  );
+  assert.equal(peer.hungMessages(), true, "快照请求仍挂在途");
+  // 中止会杀进程；收口竞态里最多出现 transport closed，绝不能是快速失败文案。
+  for (const done of events.filter((e) => e.kind === "done")) {
+    assert.match(String(done.error ?? ""), /zcode polling failed: zcode app-server transport closed/);
+    assert.ok(!String(done.error ?? "").includes("will not be retried"));
+  }
+  child.kill();
+});
+
+test("zcode ⑥k: 快速门只认失败之后发出的快照——失败前发出的旧快照晚到不作证", async () => {
+  let fakeNow = 0;
+  let tick = 0;
+  const controller = new AbortController();
+  const { handle, child, peer } = await runScenario({
+    // 基线之后快照请求一直挂着；由 onPollTick 指定拍补答。
+    peerOptions: { messages: (n) => (n === 1 ? [] : null) },
+  });
+  const events = [];
+  for await (const event of handle.events(controller.signal, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      tick += 1;
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      // 第 8 拍补答第 2 拍（失败前）发出的旧快照：宽限早已过，但它不能作证。
+      if (tick === 8) peer.answerHungMessages([]);
+      // 之后引擎会发一份新快照（发出于失败之后），第 10 拍补答——这一份才能作证。
+      if (tick === 10) peer.answerHungMessages([]);
+      if (tick >= 20) controller.abort();
+    },
+  })) {
+    events.push(event);
+  }
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /^zcode turn failed \(upstream main-turn request failed and will not be retried\)/);
+  assert.equal(
+    peer.polls(),
+    3,
+    "旧快照（第 2 拍发出）第 8 拍到达时被拒绝作证；第 9 拍发出、第 10 拍到达的新快照才触发收口——若旧快照被采纳，第 8 拍（polls=2）就会收口",
+  );
+  child.kill();
+});
+
+test("zcode ⑥k: 被替换请求的迟到通知不清当前请求的失败候选", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_started", attempt: 1 }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      if (tick === 4) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_started", attempt: 2 }));
+      if (tick === 5) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_failed", attempt: 2, statusCode: 429, retryable: false }));
+      // 旧请求 req_a 的迟到通知（已被 req_b 替换）：不得清掉 req_b 的失败候选。
+      if (tick === 6) peer.notify(...reqStatus({ requestId: "req_a", status: "model_retry_scheduled", attempt: 1, delayMs: 60_000, statusCode: 429, retryable: true }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /^zcode turn failed \(upstream main-turn request failed and will not be retried\)/,
+    "旧通知没有把候选清掉——快速门照常收口（否则退回 120 拍零 part 预算）");
+  assert.equal(peer.polls(), 11, "req_b 的失败候选在 t=6s 成立，5s 宽限后第 11 拍收口");
+  child.kill();
+});
+
+test("zcode ⑥k: 迟到的旧请求 429 不得改写当前请求 401 的收口诊断（⑥i 续修 4）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_started", attempt: 1 }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_started", attempt: 2 }));
+      // 当前请求 req_b 401 不可重试 → 候选。
+      if (tick === 4) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_failed", attempt: 2, statusCode: 401, retryable: false }));
+      // 已被替换的旧请求 req_a 迟到 429：整条忽略，不得把链尾/诊断改成额度问题。
+      if (tick === 5) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
+      // 当前请求重发同一条 401：重复通知不重置宽限。
+      if (tick === 6) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_failed", attempt: 2, statusCode: 401, retryable: false }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /; upstream: last main-turn request model_request_failed \(statusCode 401, attempt 2\/11\)$/,
+    "旧请求的 429 整条忽略——链尾仍是当前请求的 401");
+  const runId = "run_zcode_6k_stale_429";
+  const d = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-19T16:30:00.000Z" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-19T16:30:04.000Z", error: done.error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-19T16:30:04.000Z" },
+  ], runId);
+  assert.equal(d.category, "provider_auth", "按当前请求 401 判认证类——不是额度问题");
+  assert.equal(d.code, "unauthorized");
+  child.kill();
+});
+
+test("zcode ⑥k: 迟到的旧请求 retry_scheduled 不得把当前 429 盖成未知（⑥i 续修 4）", async () => {
+  let fakeNow = 0;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: () => fakeNow,
+    onPollTick: () => {
+      fakeNow += 1_000;
+      const tick = peer.polls();
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_started", attempt: 1 }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_started", attempt: 2 }));
+      // 当前请求 req_b 429 不可重试 → 候选。
+      if (tick === 4) peer.notify(...reqStatus({ requestId: "req_b", status: "model_request_failed", attempt: 2, statusCode: 429, retryable: false }));
+      // 已被替换的旧请求 req_a 迟到 retry_scheduled：整条忽略，不得改写链尾。
+      if (tick === 5) peer.notify(...reqStatus({ requestId: "req_a", status: "model_retry_scheduled", attempt: 1, delayMs: 60_000, statusCode: 429, retryable: true }));
+    },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 2\/11\)$/,
+    "旧请求的 retry_scheduled 整条忽略——链尾仍是当前请求的 429");
+  const runId = "run_zcode_6k_stale_retry";
+  const d = diagnoseFailure([
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-19T16:30:00.000Z" },
+    { type: "run.error", phase: "wait", runId, ts: "2026-11-19T16:30:04.000Z", error: done.error },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-19T16:30:04.000Z" },
+  ], runId);
+  assert.equal(d.category, "provider_capacity", "按当前请求 429 判额度类——不被旧退避通知盖成 unknown");
+  assert.equal(d.code, "rate_limited");
+  child.kill();
+});
+
 test("zcode ⑥i: session_title 请求、别的会话、别的 turn、拿不到本轮 turnId —— 各自不采纳（无摘要收口）", async () => {
   const scenarios = {
     "session_title 的请求不采纳": (peer, tick) => {
       if (tick === 1) peer.notify(...turnStarted());
       if (tick >= 4) {
         peer.notify(...reqStatus({ querySource: "session_title", status: "model_retry_scheduled", attempt: tick, requestId: `title_${tick}`, delayMs: 120_000, statusCode: 429, transport: "http" }));
+      }
+    },
+    "session_title 的 failed(retryable:false) 不采纳（第 122 批）": (peer, tick) => {
+      if (tick === 1) peer.notify(...turnStarted());
+      if (tick >= 4) {
+        peer.notify(...reqStatus({ querySource: "session_title", status: "model_request_failed", attempt: 1, statusCode: 429, retryable: false }));
       }
     },
     "别的会话的状态不采纳": (peer, tick) => {
@@ -2846,14 +3314,14 @@ test("zcode ⑥i: zcode 以失败结束本轮（step-finish reason error）→ �
       const reason = "upstream said sk-LIVE-FAKE-KEY-9f3a quota window drained, retry pointless";
       if (tick === 1) peer.notify(...turnStarted());
       if (tick === 2) peer.notify(...reqStatus({ requestId: "req_a", reason }));
-      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 11, statusCode: 429, retryable: false, reason }));
+      if (tick === 3) peer.notify(...reqStatus({ requestId: "req_a", status: "model_request_failed", attempt: 10, statusCode: 429, retryable: true, reason }));
     },
   });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(
     done.error,
-    /zcode turn failed \(step-finish reason error; no verified error detail on this part — refusing to invent one\); upstream: last main-turn request model_request_failed \(statusCode 429, attempt 11\/11\)$/,
+    /zcode turn failed \(step-finish reason error; no verified error detail on this part — refusing to invent one\); upstream: last main-turn request model_request_failed \(statusCode 429, attempt 10\/11\)$/,
   );
   assert.ok(!JSON.stringify(events).includes("sk-LIVE-FAKE-KEY-9f3a"), "reason（自由文本）绝不进任何事件");
   assert.ok(!JSON.stringify(events).includes("quota window drained"), "reason 的内容不回显");
@@ -2881,7 +3349,7 @@ test("zcode ⑥i: turn.started 在 send 应答之前、与应答同块到达都�
         fakeNow += 30_000;
         const tick = scenario.peer.polls();
         if (tick === 2) scenario.peer.notify(...reqStatus());
-        if (tick === 3) scenario.peer.notify(...reqStatus({ status: "model_request_failed", attempt: 11, statusCode: 429, retryable: false }));
+        if (tick === 3) scenario.peer.notify(...reqStatus({ status: "model_request_failed", attempt: 10, statusCode: 429, retryable: true }));
       },
     });
     const done = events.at(-1);
@@ -2889,7 +3357,7 @@ test("zcode ⑥i: turn.started 在 send 应答之前、与应答同块到达都�
     assert.equal(scenario.peer.polls(), 13, `${name}：杀点不变`);
     assert.match(
       done.error,
-      /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 11\/11\)$/,
+      /; upstream: last main-turn request model_request_failed \(statusCode 429, attempt 10\/11\)$/,
       `${name}：send 应答前/同块的 turn.started 已被采纳——链尾进摘要`,
     );
     scenario.child.kill();
@@ -3004,7 +3472,7 @@ test("zcode ⑥i: 小数 delayMs（400000.5ms）同样立窗续命——采纳�
 //    的安排连同其重复通知不再立窗；只有作废之后新出现的安排才能。
 test("zcode ⑥i: 作废粘住——重复通知不复活作废的安排；作废之后的新安排可立窗", async () => {
   // 腿 1：A 安排（req_a:1，delayMs 300s ⇒ 窗至 450s）被 B started 作废后，A 的
-  // 重复通知不得复活（无修复时会重立至 t=150+330=480s、越过 360s 杀点）。
+  // 重复通知整条忽略（第 122 批续修 4）——不复活续命窗，也不覆盖链尾摘要。
   let fakeNow = 0;
   const dead = await runScenario({
     peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]) },
@@ -3027,8 +3495,8 @@ test("zcode ⑥i: 作废粘住——重复通知不复活作废的安排；作�
   assert.equal(deadEvents.filter((e) => e.kind === "runtime_activity" && e.status === "provider_retry").length, 0, "从未续命");
   assert.match(
     deadEvents.at(-1).error,
-    /; upstream: last main-turn request model_retry_scheduled \(statusCode 429, attempt 1\/11\)$/,
-    "链保留：重复通知本身仍是链尾",
+    /; upstream: last main-turn request model_request_started \(attempt 2\/11\)$/,
+    "作废后的重复通知整条忽略：链尾仍是 req_b 的 started，不被旧 req_a 覆盖",
   );
   dead.child.kill();
 

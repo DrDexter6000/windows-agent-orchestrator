@@ -8,8 +8,17 @@ import {
   summarizeCertification,
   mergeCaseResults,
   pruneStaleCases,
+  drillRunProviderCapacity,
+  caseProviderCapacityUndeterminable,
+  planReliabilityPublish,
+  reliabilityExitCode,
+  reliabilityVerdictBanner,
+  providerCapacityUndeterminableLine,
+  unpublishedResultsNotice,
+  PROVIDER_CAPACITY_UNDETERMINABLE_NOTE,
 } from "../../scripts/reliability/certification.mjs";
 import { inconclusiveCheck, naCheck } from "../../scripts/reliability/checkStates.mjs";
+import { diagnoseFailure } from "../../src/diagnosis.js";
 import {
   drillTranscriptsDir,
   collectReferencedDrillRunIds,
@@ -1146,4 +1155,173 @@ test("certifyCase: 必需类目里有 inconclusive 检查时，同类目别的�
   const delta = certifyCase({ caseId: "delta-partial", profile: "delta", drills: ["sentinel", "scorecard", "containmentEvidence"], requiredCategories, checks });
   assert.equal(delta.status, "conditional");
   assert.doesNotMatch(delta.reason, /delta certification scope passed/);
+});
+
+// =====================================================================
+// 第 122 批（TD-359）：服务商额度/限流 → 演练无法判定，不改台账
+//
+// 事故（2026-11-19 GLM 周额度用尽）：zcode 收到 429/1310（retryable:false）后
+// 4 秒内记下本轮失败；旧 backend 5 分多钟才兜底收口，reliability 的观察截止先到、
+// 拿不到终态，case 以 rejected 落账并覆盖车道原来的 conditional。
+// 判级口径（续修 4）：不新增状态闭集成员，也不复用 rejected/blocked（两者都会写
+// 台账）；该 case 不判级、不进结果集。**本轮只要有任一无法判定的用例，整轮不写
+// summary**（已判出的结果只打印、不发布，进程非 0）；没有无法判定时，发布序列与
+// 第 122 批之前完全相同。入口只调用 certification.mjs 的纯函数：
+//   - caseProviderCapacityUndeterminable：一个用例的各演练结果 → 无法判定/判级；
+//   - planReliabilityPublish：有无法判定 → write:false，否则照旧发布。
+// =====================================================================
+
+/** 演练运行夹具：CLI `run --format json` 的失败结果（diagnosis 经真实内核派生）。 */
+function providerCapacityDrillResult(runId, { statusCode = 429 } = {}) {
+  const events = [
+    { type: "run.state_change", to: "running", reason: "start", runId, ts: "2026-11-19T16:30:00.000Z" },
+    { type: "run.event", kind: "message", runId, ts: "2026-11-19T16:30:01.000Z" },
+    {
+      type: "run.error",
+      phase: "wait",
+      runId,
+      ts: "2026-11-19T16:30:04.000Z",
+      error: "zcode turn failed (upstream main-turn request failed and will not be retried); "
+        + `upstream: last main-turn request model_request_failed (statusCode ${statusCode}, attempt 1/11)`,
+    },
+    { type: "run.state_change", to: "failed", reason: "backend_error", runId, ts: "2026-11-19T16:30:04.000Z" },
+  ];
+  const diagnosis = diagnoseFailure(events, runId);
+  return { runId, completed: false, failed: true, timedOut: false, error: events[2].error, diagnosis };
+}
+
+const GREEN_DRILL_RESULT = { runId: "run_green", completed: true, failed: false, timedOut: false, error: null };
+
+test("第 122 批: caseProviderCapacityUndeterminable——sentinel 通过、scorecard 撞额度 → 整案无法判定；401 不豁免", () => {
+  const capacity = providerCapacityDrillResult("run_20261119163000000glm429");
+  const auth = providerCapacityDrillResult("run_20261119163000001glm401", { statusCode: 401 });
+  assert.equal(capacity.diagnosis.category, "provider_capacity", "前置：真实诊断内核给 provider_capacity");
+  assert.equal(auth.diagnosis.category, "provider_auth", "前置：401 归 provider_auth");
+  assert.deepEqual(drillRunProviderCapacity(capacity), { category: "provider_capacity", code: "rate_limited" });
+  // 后续演练（scorecard）撞额度也算整案无法判定，并指出是哪一场演练。
+  assert.deepEqual(
+    caseProviderCapacityUndeterminable([
+      { drill: "sentinel", result: GREEN_DRILL_RESULT },
+      { drill: "scorecard", result: capacity },
+    ]),
+    { category: "provider_capacity", code: "rate_limited", drill: "scorecard" },
+  );
+  // 401/403 不豁免：认证类不触发"无法判定"，照旧走判级/blocked。
+  assert.equal(caseProviderCapacityUndeterminable([{ drill: "sentinel", result: auth }]), null,
+    "401/403 不在额度豁免内");
+  assert.equal(caseProviderCapacityUndeterminable([]), null);
+  assert.equal(caseProviderCapacityUndeterminable([{ drill: "sentinel", result: null }]), null);
+  assert.equal(PROVIDER_CAPACITY_UNDETERMINABLE_NOTE, "服务商额度/限流，无法判定，台账未改",
+    "输出文案是单一定义（入口消费同一常量）");
+});
+
+test("第 122 批: 401 结果不被豁免——certifyCase 仍走 classifyExternalBlocker 判 blocked", () => {
+  const auth = providerCapacityDrillResult("run_20261119163000001glm401", { statusCode: 401 });
+  const cert = certifyCase({
+    caseId: "glm-flash case",
+    checks: [check("completed", false, "core", "failed", { capability: "complete" })],
+    error: auth.error,
+  });
+  assert.equal(cert.status, "blocked", "旧路径不变：认证类失败判 blocked，不触发额度豁免");
+  assert.equal(cert.reason, "provider/credential/quota blocker");
+});
+
+// 第 122 批（续修 4）：任一用例无法判定 → 整轮不写台账。
+test("第 122 批: planReliabilityPublish——有无法判定就 {write:false}，否则照旧发布", () => {
+  assert.deepEqual(planReliabilityPublish({ results: [], undeterminableCases: [] }), { write: true });
+  assert.deepEqual(
+    planReliabilityPublish({ results: [], undeterminableCases: [{ caseId: "undet" }] }),
+    { write: false, unpublishedCaseIds: [] },
+    "全部无法判定：不写",
+  );
+  assert.deepEqual(
+    planReliabilityPublish({
+      results: [{ caseId: "judged-1" }, { caseId: "judged-2" }],
+      undeterminableCases: [{ caseId: "undet" }],
+    }),
+    { write: false, unpublishedCaseIds: ["judged-1", "judged-2"] },
+    "混合轮：整轮不写，并点名未发布的判级结果",
+  );
+});
+
+test("第 122 批: unpublishedResultsNotice——说明整轮未发布并点名 case", () => {
+  const mixed = unpublishedResultsNotice({
+    results: [{ caseId: "judged-a" }, { caseId: "judged-b" }],
+    undeterminableCases: [{ caseId: "undet" }],
+  });
+  assert.match(mixed, /本轮有无法判定的用例/);
+  assert.match(mixed, /判出的 2 个结果未发布/);
+  assert.match(mixed, /额度恢复后重跑/);
+  assert.match(mixed, /judged-a/);
+  assert.match(mixed, /judged-b/);
+  const all = unpublishedResultsNotice({ results: [], undeterminableCases: [{ caseId: "undet" }] });
+  assert.match(all, /判出的 0 个结果未发布/);
+});
+
+test("第 122 批（续修 4）: 没有无法判定时入口走第 122 批之前的发布序列", () => {
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  const mergeAt = entry.indexOf("mergeCaseResults(pruneStaleCases(priorCases, MATRIX), results)");
+  const guardAt = entry.indexOf("missingDrillTranscripts(freshRunIds, DRILL_TRANSCRIPTS_DIR)");
+  const nullAt = entry.indexOf("nullUnresolvableDrillRunIds(mergedCases, {");
+  const summarizeAt = entry.indexOf("summarizeCertification(closedCases, MATRIX_SCOPE)");
+  assert.ok(mergeAt >= 0, "恢复 pre-122 的 merge 调用形状（prune → merge）");
+  assert.ok(guardAt > mergeAt, "取证守卫在 merge 之后");
+  assert.ok(nullAt > guardAt, "悬空 id 清理在守卫之后");
+  assert.ok(summarizeAt > nullAt, "聚合在清理之后");
+  const noWriteAt = entry.indexOf("if (!publication.write)");
+  assert.ok(noWriteAt >= 0, "入口先判整轮不写");
+  assert.ok(noWriteAt < entry.indexOf("mkdirSync(RUNS_DIR,"), "不写分支在任何目录准备之前");
+  assert.ok(noWriteAt < entry.indexOf("const prior = JSON.parse(readFileSync(summaryPath"), "不写分支不读 prior 台账");
+  assert.match(entry, /planReliabilityPublish\(\{ results, undeterminableCases \}\)/);
+  assert.match(entry, /unpublishedResultsNotice\(\{ results, undeterminableCases \}\)/);
+});
+
+test("第 122 批: providerCapacityUndeterminableLine——含说明/车道/演练/原记录状态与日期", () => {
+  const line = providerCapacityUndeterminableLine({
+    caseId: "new glm label",
+    agentId: "glm-flash",
+    code: "rate_limited",
+    drill: "scorecard",
+    prior: { status: "conditional", lastHealthyRunAt: "2026-11-01T00:00:00.000Z" },
+  });
+  assert.ok(line.includes(PROVIDER_CAPACITY_UNDETERMINABLE_NOTE), "含“服务商额度/限流，无法判定，台账未改”");
+  assert.ok(line.includes("new glm label") && line.includes("glm-flash"), "带车道 label/agentId");
+  assert.ok(line.includes("scorecard"), "带撞额度的演练名");
+  assert.ok(line.includes("conditional") && line.includes("2026-11-01T00:00:00.000Z"),
+    "带原记录状态与日期");
+  // lastHealthyRunAt 为 null（非全绿记录）→ 退到 executionProfile.capturedAt。
+  const fallback = providerCapacityUndeterminableLine({
+    caseId: "x",
+    agentId: "y",
+    prior: {
+      status: "rejected",
+      lastHealthyRunAt: null,
+      executionProfile: { capturedAt: "2026-11-02T03:04:05.000Z" },
+    },
+  });
+  assert.ok(fallback.includes("2026-11-02T03:04:05.000Z"), "退到执行画像 capturedAt");
+  assert.ok(!fallback.includes("dated unknown"), "有 capturedAt 时不写 unknown");
+  const unknown = providerCapacityUndeterminableLine({
+    caseId: "x",
+    agentId: "y",
+    prior: { status: "rejected", lastHealthyRunAt: null },
+  });
+  assert.ok(unknown.includes("dated unknown"), "两者都没有才写 unknown");
+  const none = providerCapacityUndeterminableLine({ caseId: "x", agentId: "y", code: null });
+  assert.ok(none.includes("prior ledger: no record"), "没有原记录时如实写明");
+});
+
+test("第 122 批: reliabilityExitCode / reliabilityVerdictBanner——失败与无法判定同时存在时两者都说", () => {
+  const detail = { category: "provider_capacity", code: "rate_limited" };
+  assert.equal(reliabilityExitCode({ allPass: true, undeterminableCases: [] }), 0, "没有不可判定 → 全过即 0");
+  assert.equal(reliabilityExitCode({ allPass: true, undeterminableCases: [detail] }), 1, "有不可判定 → 认证没成立，非 0");
+  assert.equal(reliabilityExitCode({ allPass: false, undeterminableCases: [] }), 1, "普通失败照旧非 0");
+  assert.equal(reliabilityExitCode({ allPass: false, undeterminableCases: [detail] }), 1);
+  assert.equal(reliabilityVerdictBanner({ allPass: true, undeterminableCases: [] }), "ALL PASS");
+  assert.equal(reliabilityVerdictBanner({ allPass: false, undeterminableCases: [] }), "SOME FAILED");
+  assert.match(reliabilityVerdictBanner({ allPass: true, undeterminableCases: [detail] }),
+    /CERTIFICATION INCOMPLETE/);
+  const both = reliabilityVerdictBanner({ allPass: false, undeterminableCases: [detail] });
+  assert.match(both, /FAILED/, "失败要说");
+  assert.match(both, /UNDETERMINABLE/, "无法判定也要说");
 });

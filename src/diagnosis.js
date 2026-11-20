@@ -455,9 +455,14 @@ const KIMI_WEB_SILENT_CLOSEOUT_GATES = Object.freeze([
   },
 ]);
 
-// zcode 自己以失败结束本轮的文案（backend 固定句式，step-finish reason error
-// 的 part 不带错误明细）。
+// zcode 本轮失败的固定文案（backend 自己写的收口句）：
+//   - step-finish reason error（3.18 路径，part 不带错误明细）；
+//   - 本轮主轮请求 failed 且上游不会重试（第 122 批 TD-359：retryable:false 或
+//     attempt 已到 maxAttempts 时几秒内收口，见 src/backends/zcode.js）。
+// 两者都可能带尾部上游摘要；摘要的升级/归类见 4.4/4.6 槽。
 const ZCODE_TURN_FAILED_SIGNAL = /^zcode turn failed \(step-finish reason error/;
+const ZCODE_UPSTREAM_FAILURE_SIGNAL =
+  /^zcode turn failed \(upstream main-turn request failed and will not be retried\)/;
 
 // deepseek-acp 报出的上游传输失败 → provider_disconnect。prompt 轮在 harness 内部
 // 失败、其到 DeepSeek 上游的传输断掉时，dsh 以 JSON-RPC 错误回绝 session/prompt；
@@ -836,7 +841,8 @@ function diagnoseFailureInner(events, expectedRunId) {
   }
   const lastUpstream = lastErrorEvent !== null
     && (SILENT_CLOSEOUT_GATES.some((g) => g.re.test(lastErrorEvent.error))
-      || ZCODE_TURN_FAILED_SIGNAL.test(lastErrorEvent.error))
+      || ZCODE_TURN_FAILED_SIGNAL.test(lastErrorEvent.error)
+      || ZCODE_UPSTREAM_FAILURE_SIGNAL.test(lastErrorEvent.error))
     ? parseUpstreamSummary(lastErrorEvent.error)
     : null;
   // 未被升级/流中断消费的中性摘要事实：链尾 started/completed（请求已完成、轮次
@@ -1075,6 +1081,39 @@ function diagnoseFailureInner(events, expectedRunId) {
           : "静默收口本身不带上游原因——额度窗口用尽、限流与网络中断在本转录内无法区分（provider 流中断）",
       });
       return { category: "provider_disconnect", evidence };
+    }
+    // ①'' 第 122 批：本轮主轮请求 failed 且上游不会重试的快速收口文案。4.4 已先
+    //     把 429/401/403 升级为 provider_capacity/provider_auth；剩余按状态码分账：
+    //     - 无状态码（连接层失败，未拿到 HTTP 应答）或 5xx（上游服务端失败）→
+    //       provider_disconnect（请求失败且不会重试，流中断一类归因）；
+    //     - 确属 4xx（400 请求本身不合法、404、422…）→ **不冒充流中断**：请求
+    //       被上游按请求本身拒绝，不是断流；类别 unknown（run 终态理由仍是
+    //       backend_error），证据给固定事实 + 中性链尾摘要。
+    //     - 其它（2xx/3xx 等异常状态码）→ 同样不归类，证据只给中性链尾摘要
+    //       （状态码不是 4xx，不得声称"4xx 请求级失败"）。
+    //     事实只陈述链尾，不虚构 step-finish（这条文案不是 step-finish 路径）。
+    if (lastUpstream !== null && lastUpstream.status === "model_request_failed"
+      && ZCODE_UPSTREAM_FAILURE_SIGNAL.test(lastErrorEvent.error)) {
+      const statusCode = lastUpstream.statusCode;
+      if (statusCode === null || statusCode >= 500) {
+        evidence.push({
+          eventType: "run.error",
+          fact: "zcode 本轮主轮请求失败且上游不会重试（backend 有界收口）",
+        });
+        evidence.push({
+          eventType: "run.error",
+          fact: upstreamDisconnectFact(lastUpstream),
+        });
+        return { category: "provider_disconnect", evidence };
+      }
+      if (statusCode >= 400 && statusCode < 500) {
+        evidence.push({
+          eventType: "run.error",
+          fact: "zcode 本轮主轮请求被上游按请求本身拒绝且不会重试（4xx 请求级失败，不是流中断）",
+        });
+      }
+      evidence.push({ eventType: "run.error", fact: upstreamNeutralFact(lastUpstream) });
+      return { category: "unknown", evidence };
     }
     // ①' zcode 以失败结束本轮（step-finish reason error）的文案带摘要（绑定本
     //    运行最后一条 run.error）：链尾 failed/stream_stalled/retry_scheduled →

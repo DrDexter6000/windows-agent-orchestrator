@@ -220,22 +220,29 @@ export function createDrills(deps) {
     const fileName = `wao_isolate_${safeAgent}_${Date.now().toString(36)}.txt`;
     try {
       ensureTmpGitRepo();
-      const result = runFileScorecardTask(tc, fileName, {
+      const scored = runFileScorecardTask(tc, fileName, {
         promptPrefix: "Create this file in the current working directory only.",
         extraArgs: ["--isolate"],
       });
-      const events = result.result?.runId ? readRunEvents(result.result.runId) : [];
+      const events = scored.result?.runId ? readRunEvents(scored.result.runId) : [];
       const started = events.find((e) => e.type === "run.started");
       const worktreePath = started?.worktreePath;
-      return [
-        check("isolationWorktreeCreated", Boolean(worktreePath), "operational", worktreePath ?? "missing worktreePath", { capability: "isolation" }),
-        check("isolationFileInWorktree", Boolean(worktreePath && existsSync(join(worktreePath, fileName))), "operational", fileName, { capability: "isolation" }),
-        check("isolationFileNotInSource", !existsSync(join(tmpDir, fileName)), "operational", fileName, { capability: "isolation" }),
-      ];
+      return {
+        // 第 122 批续修：把 CLI 结果一并带回，入口据此识别服务商额度失败。
+        result: scored.result ?? null,
+        checks: [
+          check("isolationWorktreeCreated", Boolean(worktreePath), "operational", worktreePath ?? "missing worktreePath", { capability: "isolation" }),
+          check("isolationFileInWorktree", Boolean(worktreePath && existsSync(join(worktreePath, fileName))), "operational", fileName, { capability: "isolation" }),
+          check("isolationFileNotInSource", !existsSync(join(tmpDir, fileName)), "operational", fileName, { capability: "isolation" }),
+        ],
+      };
     } catch (error) {
-      return [
-        check("isolation", false, "operational", error.message ?? String(error), { capability: "isolation" }),
-      ];
+      return {
+        result: null,
+        checks: [
+          check("isolation", false, "operational", error.message ?? String(error), { capability: "isolation" }),
+        ],
+      };
     }
   }
 
@@ -330,6 +337,8 @@ export function createDrills(deps) {
           : null;
 
       return {
+        // 第 122 批续修：把 CLI 结果一并带回，入口据此识别服务商额度失败。
+        result: result ?? null,
         checks: containmentEvidenceChecks({
           events,
           targetRelPath: relPath,
@@ -344,6 +353,7 @@ export function createDrills(deps) {
       };
     } catch (error) {
       return {
+        result: null,
         checks: [
           check("containmentEvidence", false, "operational", error.message ?? String(error), { capability: "containmentEvidence" }),
         ],

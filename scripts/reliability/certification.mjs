@@ -698,3 +698,128 @@ export function classifyExternalBlocker(error) {
   }
   return null;
 }
+
+// ===== 第 122 批（TD-359）：服务商额度/限流造成演练无法判定 =====
+//
+// 背景：GLM 周额度用尽时 zcode 以 model_request_failed(429, retryable:false) 终态
+// 失败；旧 backend 要等 5 分多钟兜底门，reliability 的观察窗口先到、拿不到终态，
+// 该 case 以 rejected 落账，覆盖了车道原有的 conditional——额度耗尽不是车道质量
+// 证据。判据 = 演练运行（CLI run --format json 的失败结果）的终态诊断 category 为
+// provider_capacity（诊断内核 diagnoseFailure 的既有闭集成员，run --format json 的
+// 失败路径已内嵌该 diagnosis 字段，不在此复制第二套判定）。
+//
+// 判级口径：**不新增 CERTIFICATION_STATUSES 成员**——状态闭集投影到派发门与
+// registry list，新增成员会改变 wire/门语义；也不复用 rejected（那正是要避免的
+// 台账降级）或 blocked（blocked 仍会写入台账，覆盖旧记录）。无法判定是**本次认证
+// 运行的结局**：该 case 不判级、不进结果集；**本轮只要有任一无法判定的用例，整轮
+// 不写 summary**（已判出的结果只打印、不发布，非零退出，额度恢复后重跑）。没有
+// 无法判定用例时，入口的发布序列与第 122 批之前完全相同。
+export const PROVIDER_CAPACITY_UNDETERMINABLE_NOTE = "服务商额度/限流，无法判定，台账未改";
+
+/**
+ * 入口输出行：命中 provider_capacity 时打印的说明（含车道 label/诊断码/演练名，
+ * 以及该车道在 prior 台账里的原状态与日期——持续 429 与配置错误的区分线索）。
+ * @param {{caseId:string, agentId:string, code?:string|null, drill?:string|null, prior?:object|null}} input
+ */
+export function providerCapacityUndeterminableLine({ caseId, agentId, code = null, drill = null, prior = null }) {
+  const head = `[UNDETERMINABLE] ${caseId} (${agentId}): ${PROVIDER_CAPACITY_UNDETERMINABLE_NOTE}`
+    + " — provider quota/rate limit"
+    + (typeof code === "string" && code.length > 0 ? ` (${code})` : "")
+    + (typeof drill === "string" && drill.length > 0 ? ` during ${drill} drill` : "");
+  const priorAt = typeof prior?.lastHealthyRunAt === "string"
+    ? prior.lastHealthyRunAt
+    : (typeof prior?.executionProfile?.capturedAt === "string" ? prior.executionProfile.capturedAt : null);
+  const priorText = prior === null || prior === undefined
+    ? "prior ledger: no record"
+    : `prior ledger: ${typeof prior.status === "string" ? prior.status : "unknown"}`
+      + ` (dated ${priorAt ?? "unknown"})`;
+  return `${head}; ${priorText}; case not judged, ledger untouched, certification did not pass`;
+}
+
+/**
+ * 演练运行结果是否是"服务商额度/限流 → 无法判定"。
+ * @param {object} result — CLI `run --format json` 的结果对象（失败路径带 diagnosis）
+ * @returns {{category:string, code:string|null}|null} 命中返回闭集诊断（code 可为 null）
+ */
+export function drillRunProviderCapacity(result) {
+  if (result?.failed !== true) return null;
+  const diagnosis = result?.diagnosis;
+  if (diagnosis?.category !== "provider_capacity") return null;
+  return {
+    category: diagnosis.category,
+    code: typeof diagnosis.code === "string" ? diagnosis.code : null,
+  };
+}
+
+/**
+ * 一个用例的各演练结果 → "无法判定"或 null（照常判级）。
+ * 任一能拿到 CLI 结果的演练（sentinel/scorecard/isolation/containment…）终态诊断
+ * 为 provider_capacity 即整案无法判定；401/403 归 provider_auth，不在豁免内。
+ * @param {Array<{drill:string, result:object|null}>} drillResults
+ * @returns {{category:string, code:string|null, drill:string|null}|null}
+ */
+export function caseProviderCapacityUndeterminable(drillResults = []) {
+  for (const entry of Array.isArray(drillResults) ? drillResults : []) {
+    const capacity = drillRunProviderCapacity(entry?.result);
+    if (capacity !== null) {
+      return { ...capacity, drill: typeof entry?.drill === "string" ? entry.drill : null };
+    }
+  }
+  return null;
+}
+
+/**
+ * reliability 最终退出码：任何"无法判定"的用例都表示本次认证没有成立 → 非 0。
+ * 不与 allPass 混算（allPass 只看判级过的 case）。
+ * @param {{allPass:boolean, undeterminableCases?: unknown[]}} input
+ */
+export function reliabilityExitCode({ allPass, undeterminableCases = [] }) {
+  return allPass === true && undeterminableCases.length === 0 ? 0 : 1;
+}
+
+/**
+ * 最终横幅：失败与不可判定同时存在时两者都要说出来。
+ * @param {{allPass:boolean, undeterminableCases?: unknown[]}} input
+ */
+export function reliabilityVerdictBanner({ allPass, undeterminableCases = [] }) {
+  const failed = allPass !== true;
+  const undeterminable = undeterminableCases.length > 0;
+  if (!failed && !undeterminable) return "ALL PASS";
+  if (failed && undeterminable) {
+    return "SOME FAILED + SOME UNDETERMINABLE (provider capacity — no ledger write this run)";
+  }
+  if (failed) return "SOME FAILED";
+  return "CERTIFICATION INCOMPLETE (provider capacity — case(s) could not be judged)";
+}
+
+/**
+ * 发布计划（第 122 批续修 4，纯函数）：**任一用例无法判定 → 整轮不写台账**（summary
+ * 一个字节不动）；没有无法判定用例时照旧发布（发布序列在入口，与第 122 批之前相同）。
+ * @param {{results?:Array, undeterminableCases?:Array}} input
+ * @returns {{write:false, unpublishedCaseIds:string[]} | {write:true}}
+ */
+export function planReliabilityPublish({ results = [], undeterminableCases = [] } = {}) {
+  if (Array.isArray(undeterminableCases) && undeterminableCases.length > 0) {
+    return {
+      write: false,
+      unpublishedCaseIds: (Array.isArray(results) ? results : [])
+        .map((c) => c?.caseId)
+        .filter((id) => typeof id === "string" && id.length > 0),
+    };
+  }
+  return { write: true };
+}
+
+/**
+ * "整轮不写台账"时的输出说明：本轮有无法判定的用例，判出的 N 个结果未发布，
+ * 额度恢复后重跑（点名未发布的 case）。
+ * @param {{results?:Array, undeterminableCases?:Array}} input
+ */
+export function unpublishedResultsNotice({ results = [], undeterminableCases = [] } = {}) {
+  const ids = (Array.isArray(results) ? results : [])
+    .map((c) => c?.caseId)
+    .filter((id) => typeof id === "string" && id.length > 0);
+  const undeterminable = Array.isArray(undeterminableCases) ? undeterminableCases.length : 0;
+  return `[reliability] 本轮有无法判定的用例（${undeterminable} 个），判出的 ${ids.length} 个结果未发布，额度恢复后重跑`
+    + (ids.length > 0 ? `：${ids.join(", ")}` : "");
+}

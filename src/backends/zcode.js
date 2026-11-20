@@ -104,7 +104,12 @@
 // 在案，取值依据见 NO_PROGRESS_POLL_LIMIT 注释）有界收口；零 part 阶段（正常
 // 思考中——GLM-5.3 high reasoning 首 part 延迟实测 >8s，
 // run_20261001195259045cle1ft）该门不生效，改由 silentTimeout（在场）或零 part
-// 思考预算（缺席，120 拍）有界收口。通信失败 =
+// 思考预算（缺席，120 拍）有界收口。上游已宣布本轮主轮请求不可重试
+// （model_request_failed 且 retryable:false，或 attempt 已到 maxAttempts）时不等
+// 这些兜底门：短宽限窗内没有新 started/retry_scheduled、也没有本轮 assistant 的
+// step-finish 即 done(failed)（第 122 批 TD-359，见 UPSTREAM_FAILURE_GRACE_MS）。
+// 快速门只在快照拉取成功、快照请求晚于失败、完成判据跑过之后判；turn.terminal 不加速。
+// 通信失败 =
 // 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/传输关闭同路径）。
 //
 // **TD-199（2026-10-02）证据投影同乘追加假设**：增量台账按 part 序号键控
@@ -297,6 +302,18 @@ const RETRY_GRACE_MARGIN_MS = 30_000;
 // retry-after 400000ms ⇒ 采纳 400000ms）。1 小时宽于一切已核证的缺省形状，只拒
 // 非有限值、负数与超过它的值（fail-closed）。
 const RETRY_DELAY_MAX_MS = 3_600_000;
+// 第 122 批（TD-359）：不可重试失败的收口宽限。上游对主轮请求回
+// model_request_failed 且 retryable === false（或 attempt 已到 maxAttempts）时，
+// 本轮不会再有正常完成——ZCode 3.19 在 4 秒内就记下 model.request.failed /
+// turn.failed 并停止重试，旧实现却要等零 part 预算/停滞门（实测 5 分多钟）才收口。
+// 现在只等这一小段：窗内若出现新的 started/retry_scheduled（链尾被换掉），或本轮
+// assistant 的 step-finish（完成判据先于本门处理），就不收口；窗过仍以该失败为
+// 链尾 → done(failed)，文案带固定句 + 现有 summarySuffix。
+// 5s 的依据：retry_scheduled 与 failed 由同一个退避循环连发（现有夹具即同批到达），
+// 5s 足够分辨；后端轮询缺省 5s/拍 ⇒ 最迟两拍内收口。turn.terminal **不**加速
+// （它可能先于晚一拍到达的 step-finish）；本门只在快照拉取成功、且快照请求晚于
+// 失败、完成判据跑过之后判。
+const UPSTREAM_FAILURE_GRACE_MS = 5_000;
 // 流在收时向转录发 runtime_activity("streaming") 的最小间隔：一分钟一条——流活着
 // 时，任何满 60s 的观察窗内至少有一条（更短的单次等待可能遇不上，体征年龄仍按
 // 最后一条算）。
@@ -543,6 +560,18 @@ function createUpstreamRequestTracker() {
   // 的安排照常立窗。首见表在运行期内只增不清。delayMs 无效 / requestId 缺席时
   // 不立窗（fail-closed）；无效的首见同样记入首见表。
   let grace = null;
+  // 不可重试失败候选（第 122 批）：链尾是 model_request_failed 且 retryable===false
+  // 或 attempt 已到 maxAttempts 时记 {key, at}——key 含 requestId，用于识别重复
+  // 通知（同一失败重复到达不重置宽限），at 是首见时刻。只有**当前最新请求**的失败
+  // 才能立候选；被后续请求替换过的 requestId 的迟到失败不立候选（见
+  // supersededRequestIds），避免旧请求的重复失败误杀新请求。链尾换成任何其它
+  // 状态即清空候选。
+  let failureCandidate = null;
+  // 当前最新请求的 requestId，与已被后续请求替换过的 requestId 集合。requestId 每次
+  // 尝试轮换；旧请求之后到达的**任何**通知整条忽略（更新链/摘要、失败候选、续命窗
+  // 都不参与）——否则迟到的旧 429 会把当前 401 改写成额度问题，或把当前失败盖掉。
+  let activeRequestId = null;
+  const supersededRequestIds = new Set();
   const seenScheduleKeys = new Set();
   // send 武装状态：sendWritten = send 帧已进入写出（markSent 先于 request 调用）。
   // seenTurnIds = 见过的全部 turnId：send 之前到达的（基线：别的输入的残留轮）
@@ -553,6 +582,14 @@ function createUpstreamRequestTracker() {
 
   const intIn = (value, min, max) => (Number.isInteger(value) && value >= min && value <= max ? value : null);
   const numIn = (value, min, max) => (typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : null);
+  // 上游已宣布本轮主轮请求不会重试：failed 且明确 retryable:false，或本次尝试已
+  // 是 maxAttempts 里的最后一次（attempt 从 1 起数，maxAttempts 数总尝试次数；
+  // maxAttempts:0 = 上游重试预算无界，不是"到顶"——不得据此提前收口）。
+  const willNotRetry = (entry) => entry.status === "model_request_failed"
+    && (entry.retryable === false
+      || (entry.maxAttempts > 0 && entry.attempt >= entry.maxAttempts));
+  const failureKey = (entry) =>
+    `${entry.requestId ?? "-"}:${entry.status}:${entry.attempt}/${entry.maxAttempts}:${entry.statusCode ?? "-"}:${entry.retryable ?? "-"}`;
 
   const handleTurnStarted = (p) => {
     if (typeof p.turnId !== "string" || p.turnId.length === 0) return;
@@ -564,23 +601,44 @@ function createUpstreamRequestTracker() {
     turnId = p.turnId;
     chain = null;
     grace = null;
+    failureCandidate = null;
+    activeRequestId = null;
+    supersededRequestIds.clear();
   };
   const handleTurnTerminal = (p) => {
     if (turnId === null || p.turnId !== turnId) return;
     // 轮已结束：续命资格立即失效（粘住）。链保留——收口摘要仍要用本轮最后状态。
+    // 第 122 批续修：terminal **不再**加速快速收口——它可能先于晚一拍到达的
+    // step-finish；快速门只靠 5 秒宽限，且只在快照拉取成功、完成判据跑过之后判。
     grace = null;
   };
   const handleRequestStatus = (p) => {
     if (turnId === null || p.turnId !== turnId) return;
     if (p.querySource !== MAIN_TURN_QUERY_SOURCE) return;
     if (!MODEL_REQUEST_STATUSES.includes(p.status)) return;
+    const requestId = nonEmptyString(p.requestId);
+    // 第 122 批续修 4：已被后续请求替换的 requestId，它的**任何**通知整条忽略——
+    // 不更新链/摘要、不立/清候选、不动续命窗。旧请求迟到的 429 不得把当前请求的
+    // 401 改写成额度问题，反向也不得把当前 429 盖成未知状态。
+    if (requestId !== null && supersededRequestIds.has(requestId)) return;
     const attempt = intIn(p.attempt, 0, Number.MAX_SAFE_INTEGER);
     const maxAttempts = intIn(p.maxAttempts, 0, Number.MAX_SAFE_INTEGER);
     if (attempt === null || maxAttempts === null) return;
+    // requestId 追踪：新 id = 换了一次尝试，旧的进 superseded 集合；此后只采纳
+    // 当前最新请求的状态。
+    if (requestId !== null) {
+      if (activeRequestId === null) {
+        activeRequestId = requestId;
+      } else if (requestId !== activeRequestId) {
+        supersededRequestIds.add(activeRequestId);
+        activeRequestId = requestId;
+      }
+    }
     const statusCode = intIn(p.statusCode, 100, 599);
     const delayMs = numIn(p.delayMs, 0, RETRY_DELAY_MAX_MS);
     chain = {
       status: p.status,
+      requestId,
       statusCode,
       attempt,
       maxAttempts,
@@ -603,6 +661,19 @@ function createUpstreamRequestTracker() {
     // model_request_failed / model_stream_stalled 本身不续命（只说明出过问题，
     // 不说明还在推进），也不作废在途的窗：紧随其后的新 retry_scheduled 才是
     // 下一次续命；不再有则窗自然到期。
+    //
+    // 第 122 批续修：不可重试失败候选只在**当前最新请求**的失败上成立（key 含
+    // requestId）；当前请求自己的任何会换掉链尾的新状态都清空候选。同一失败的重复
+    // 通知（key 相同）保留首见时刻，不重置宽限。被替换请求的通知在上面已整条忽略，
+    // 到这里的 requestId 只可能是 null 或当前请求。
+    if (willNotRetry(chain) && requestId !== null && requestId === activeRequestId) {
+      const key = failureKey(chain);
+      if (failureCandidate === null || failureCandidate.key !== key) {
+        failureCandidate = { key, at: chain.at };
+      }
+    } else {
+      failureCandidate = null;
+    }
   };
 
   return {
@@ -631,6 +702,16 @@ function createUpstreamRequestTracker() {
     // 时刻 at 仍有效的续命窗终点；无效返回 null。
     retryGraceUntil(at) {
       return grace !== null && grace.until > at ? grace.until : null;
+    },
+    // 本轮主轮请求已被上游宣布不会重试（failed 且 retryable:false，或 attempt 已
+    // 到 maxAttempts）：宽限窗满、且用于作证的快照是**失败之后发出**的 ⇒ true。
+    // snapshotSentAt = 本拍快照请求的发出时刻（与失败候选同一只钟）。失败前发出的
+    // 旧快照晚到不能作证——它拍到的是失败前的画面，不能说明"没有 step-finish"。
+    // turn.terminal 不加速（可能抢在晚一拍到达的 step-finish 之前）。
+    upstreamFailureWillNotRetry(at, snapshotSentAt = null) {
+      if (failureCandidate === null) return false;
+      if (typeof snapshotSentAt !== "number" || snapshotSentAt <= failureCandidate.at) return false;
+      return at - failureCandidate.at >= UPSTREAM_FAILURE_GRACE_MS;
     },
     // 收口文案末尾的有界上游摘要（状态未知返回 null——文案逐字不变）。只放
     // 闭集 status、整数 statusCode、attempt/maxAttempts；attempt/max 经校验必在。
@@ -1796,6 +1877,8 @@ export class ZcodeBackend {
         // 应（每拍几百字节、不含快照），应答或关闭时一并释放。
         let pollAnswered = false;
         let pollResult = null;
+        // 本拍应答的那份快照请求的发出时刻（快速失败门要求它晚于失败候选）。
+        let answeredSnapshotSentAt = null;
         {
           let tickTimer = null;
           const tickElapsed = new Promise((resolve) => { tickTimer = setTimeout(resolve, pollInterval); });
@@ -1823,6 +1906,7 @@ export class ZcodeBackend {
             return;
           }
           if (raced.answered) {
+            answeredSnapshotSentAt = pollInFlight.sentAt;
             pollInFlight = null;
             pollAnswered = true;
             pollResult = raced.value;
@@ -1936,6 +2020,22 @@ export class ZcodeBackend {
             yield doneEvent(
               "failed",
               "zcode turn failed (step-finish reason error; no verified error detail on this part — refusing to invent one)"
+                + (upstreamRequests.summarySuffix() ?? ""),
+            );
+            return;
+          }
+          // 第 122 批（TD-359，续修）：本轮主轮请求已被上游判定为不可重试
+          // （failed 且 retryable:false，或 attempt 已到 maxAttempts）。宽限窗内
+          // 没有新的 started/retry_scheduled 换掉链尾，且上面的完成判据已经在本拍
+          // 快照上跑过（没有 step-finish）→ 上游已宣布本轮失败，几秒内收口，不再
+          // 等零 part 预算/停滞门。**只在快照拉取成功的拍上判、且只认失败之后
+          // 发出的快照**（续修 3）：未应答的拍/失败前发出的旧快照都不能作证——
+          // 它们可能只是没回来或拍到失败前的画面；turn.terminal 也不加速。
+          if (upstreamRequests.upstreamFailureWillNotRetry(stallNow(), answeredSnapshotSentAt)) {
+            finish();
+            yield doneEvent(
+              "failed",
+              "zcode turn failed (upstream main-turn request failed and will not be retried)"
                 + (upstreamRequests.summarySuffix() ?? ""),
             );
             return;

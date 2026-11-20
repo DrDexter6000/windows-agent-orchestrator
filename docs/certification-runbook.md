@@ -309,6 +309,16 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
 - **blocked**（检查级外部阻塞——夹具/基础设施不可用）映射 case 级 `blocked`（阻塞
   不是质量失败，是证据面不可用，不满足类目覆盖）；**inconclusive** 不覆盖类目
   （fail-closed 降 conditional）。
+- **服务商额度/限流造成的失败记为无法判定**：一个用例的任一演练（sentinel /
+  scorecard / isolation / containmentEvidence；sandboxEnforcement 不经模型）运行
+  终态诊断为 `provider_capacity` 时，整案不判 `rejected`、不进入结果集；**本轮只要
+  有任一无法判定的用例，整轮不写 `runs/reliability-summary.json`（一个字节不动）**，
+  已判出的结果只打印、不发布，`npm run reliability` 以非零退出提示额度恢复后重跑
+  ——额度耗尽不是车道质量证据。401/403 归 `provider_auth`，不豁免。认证状态闭集
+  （`certified / conditional / draft-only / blocked / rejected`）不变。同一车道反复
+  无法判定时，要人工确认是不是配置错了（持续 429 与暂时限流单凭诊断分不开）；
+  30 天新鲜度兜底只适用于启用新鲜度检查的门（CLI 认证门），MCP 认证清单门不查
+  新鲜度（见「认证清单门禁」节）。
 - **现行判定规则**：backend 类声明不上报 usage（`reportsTokenUsage` 非 true——
   deepseek-acp 即此形状）的 lane，`metricsNonZero` 检查不适用，记 N/A + 原因；serve
   不可达时 `silentTimeout` 记 N/A + 原因；`hasSentinel` 只认 **assistant 回显**
