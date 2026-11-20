@@ -1,0 +1,11 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "deleted": true
+  },
+  "request_id": "01M7XNAQT7JGK9PN9SHJFAK7WK"
+ }
+}

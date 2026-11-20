@@ -1,0 +1,8 @@
+{
+ "http": 404,
+ "json": {
+  "message": "Route GET:/api/v1/sessions/session_e8e6ec53-68d9-4600-8f65-632bc57dd3fb/messages not found",
+  "error": "Not Found",
+  "statusCode": 404
+ }
+}

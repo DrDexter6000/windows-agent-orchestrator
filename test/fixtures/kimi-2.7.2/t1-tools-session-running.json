@@ -1,0 +1,20 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "id": "session_e8e6ec53-68d9-4600-8f65-632bc57dd3fb",
+   "workspace_id": "wd_cwd_f0c6643ba75d",
+   "cwd": "C:\\wao-probe\\cwd",
+   "title": "wao-td362-probe",
+   "created_at": "2026-11-20T23:39:02.652Z",
+   "updated_at": "2026-11-20T23:39:02.904Z",
+   "activity": "turn",
+   "pending_interaction": "none",
+   "archived": false,
+   "last_prompt": "Use your shell tool to run the command `echo wao-probe` in the working directory. Then create a file named probe.txt in the working directory containing the single word ok. Then reply with exactly: DONE"
+  },
+  "request_id": "01M7XN7TF36BPS24Q4G277R3QW"
+ }
+}

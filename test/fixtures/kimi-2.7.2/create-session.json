@@ -1,0 +1,19 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "id": "session_e8e6ec53-68d9-4600-8f65-632bc57dd3fb",
+   "workspace_id": "wd_cwd_f0c6643ba75d",
+   "cwd": "C:\\wao-probe\\cwd",
+   "title": "wao-td362-probe",
+   "created_at": "2026-11-20T23:39:02.652Z",
+   "updated_at": "2026-11-20T23:39:02.652Z",
+   "activity": "idle",
+   "pending_interaction": "none",
+   "archived": false
+  },
+  "request_id": "01M7XN7SZGHDFMDBFABSCAV11S"
+ }
+}

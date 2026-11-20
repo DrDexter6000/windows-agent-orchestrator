@@ -1,0 +1,39 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "id": "session_270387e8-ced0-4c8e-a8f1-826df7860ff8",
+   "workspace_id": "wd_cwd26_1921da4399f0",
+   "title": "wao-td362-bg26",
+   "created_at": "2026-11-20T23:42:00.031Z",
+   "updated_at": "2026-11-20T23:42:08.669Z",
+   "busy": true,
+   "main_turn_active": false,
+   "pending_interaction": "none",
+   "last_turn_reason": "completed",
+   "archived": false,
+   "last_prompt": "Start the command `ping -n 40 127.0.0.1` as a background task (do not wait for it), then immediately reply with exactly: STARTED",
+   "metadata": {
+    "cwd": "C:\\wao-probe\\cwd26"
+   },
+   "agent_config": {
+    "model": "kimi-code/k3.1-pro"
+   },
+   "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "total_cost_usd": 0,
+    "context_tokens": 0,
+    "context_limit": 0,
+    "turn_count": 0
+   },
+   "permission_rules": [],
+   "message_count": 0
+  },
+  "request_id": "01M7XNDTH7ANP5H038YDRMFZFJ"
+ }
+}

@@ -1,0 +1,20 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "prompt_id": "msg_01M7XN7TBKNN8R952GP3G5XSYY",
+   "user_message_id": "msg_01M7XN7TBKNN8R952GP3G5XSYY",
+   "status": "running",
+   "content": [
+    {
+     "type": "text",
+     "text": "Use your shell tool to run the command `echo wao-probe` in the working directory. Then create a file named probe.txt in the working directory containing the single word ok. Then reply with exactly: DONE"
+    }
+   ],
+   "created_at": "2026-11-20T23:39:02.907Z"
+  },
+  "request_id": "01M7XN7TBJ46HJFQNM3G94DSM7"
+ }
+}

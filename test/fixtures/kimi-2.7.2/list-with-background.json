@@ -1,0 +1,54 @@
+{
+ "http": 200,
+ "json": {
+  "code": 0,
+  "msg": "success",
+  "data": {
+   "items": [
+    {
+     "id": "session_e8e6ec53-68d9-4600-8f65-632bc57dd3fb",
+     "workspace_id": "wd_cwd_f0c6643ba75d",
+     "cwd": "C:\\wao-probe\\cwd",
+     "title": "wao-td362-probe",
+     "created_at": "2026-11-20T23:39:02.652Z",
+     "updated_at": "2026-11-20T23:40:16.324Z",
+     "activity": "background",
+     "pending_interaction": "none",
+     "last_turn_outcome": "completed",
+     "archived": false,
+     "last_prompt": "Start the command `ping -n 40 127.0.0.1` as a background task (do not wait for it), then immediately reply with exactly: STARTED"
+    },
+    {
+     "id": "session_466e7943-c871-4ec2-9472-ad4ca7bee41d",
+     "workspace_id": "wd_run_20261120232427086mnhnvr_181a5b23ff94",
+     "cwd": "C:\\wao-probe\\insp1121\\cont-kimi-002426\\repo\\.wao-worktrees\\run_20261120232427086mnhnvr",
+     "title": "wao",
+     "created_at": "2026-11-20T23:24:31.422Z",
+     "updated_at": "2026-11-20T23:25:10.069Z",
+     "activity": "idle",
+     "pending_interaction": "none",
+     "last_turn_outcome": "completed",
+     "archived": false,
+     "last_prompt": "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction): - The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace. - Every file you create or modify with your tools, including temporary files, probes and scratch, must be inside it; put scratch under .wao/runs/. A tool write or write intent outside it ends the run as failed (workdir_escape). This check is not an OS sandbox: do not write outside this directory by any other means either, except throwaway repositories and files your test commands create under the system temporary directory. - Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout. - Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag. This applies to this workspace and every other existing checkout, not to throwaway repositories your test commands create under the system temporary directory. - Do NOT move HEAD. Do NOT create any commit, tag, or branch. - Keep your authorized file changes as UNSTAGED working-tree changes. Do not stage them. - Report only: changed paths, test results, and risks. Do not report a 'Final commit SHA' or claim to have committed. - The WAO control plane inspects your working-tree changes, stages them, and creates the single atomic delivery commit. You do not commit. - If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only. - Do not read credential or secret stores (token files, key files, .env files, private registries). Do not list the environment or print the values of environment variables; you may use a variable and report whether it is set. Tool output may be sent to your model provider. - Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running. - AUTHORIZED WORK SCOPE (single source of truth — the WAO control plane persists and delivers this exact list before you start; do not infer, widen, or observe scope from the filesystem): - AUTHORIZED_PATHS_JSON: [\"src\"] - Each changed path must be EXACTLY one of the entries above, or a descendant on a \"/\" segment boundary: \"src\" authorizes \"src/a.js\" and \"src/d/b.js\", but NOT \"src2/a.js\" or \"srcfoo\". Matching is case-sensitive — case-shape is authoritative (\"src\" does not authorize \"SRC/a.js\"). - If your task requires a path NOT covered by the list above, do NOT edit it: STOP, leave your changes as unstaged working-tree changes, report `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`, and await instructions. - A later turn of this conversation may restate this contract at the top of the user message, starting with \"[WAO control plane]\". That restatement is issued by this same control plane and replaces this contract and any earlier restatement, AUTHORIZED_PATHS_JSON included. --- Write the codeword I gave you in my first message into the file src/codeword.txt (only the codeword, nothing else), then stop."
+    },
+    {
+     "id": "session_e449b3f2-133b-45b6-bb21-83f7b883a368",
+     "workspace_id": "wd_reliability-tmp_82eccca01297",
+     "cwd": "D:\\projects\\windows-agent-orchestrator-poc\\scripts\\reliability-tmp",
+     "title": "wao",
+     "created_at": "2026-11-20T23:23:38.217Z",
+     "updated_at": "2026-11-20T23:23:52.536Z",
+     "activity": "idle",
+     "pending_interaction": "none",
+     "last_turn_outcome": "completed",
+     "archived": false,
+     "last_prompt": "Create a file named wao_cert_kimi_mwpluzuu.txt in this directory containing exactly: FILE_MWPLUZUU_kimi Run this command: node --version Then reply with one line of JSON: {\"file\":\"wao_cert_kimi_mwpluzuu.txt\",\"done\":true}"
+    }
+   ],
+   "total": 51,
+   "has_more": true,
+   "next_page_token": "eyJ2IjoxLCJmIjoiMW1fNDhwVjRuR3dZZjhjUCIsImsiOlsxNzk1MjE3MDMyNTM2LCJzZXNzaW9uX2U0NDliM2YyLTEzM2ItNDViNi1iYjIxLTgzZjdiODgzYTM2OCJdfQ"
+  },
+  "request_id": "01M7XNAQHY8QSK0D79CCXM74PF"
+ }
+}
