@@ -694,8 +694,8 @@ async function classifierLandingFixture() {
   return { root, base };
 }
 
-// The retry waits are irrelevant to these verdict tests (all final one-shots
-// except the deliberately unresolved shapes); skip the wall-clock cost.
+// The retry waits are irrelevant to these verdict tests (every shape here is
+// unresolved on each attempt); skip the wall-clock cost.
 const NO_SLEEP = { sleep: async () => {} };
 
 test("TD-357-L3: a dangling link at the leaf still fails closed (physical_unresolved)", async (t) => {
