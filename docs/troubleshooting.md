@@ -169,7 +169,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 
 - **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在
 - **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**——Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`。
-- **现状**：不存在的 cwd 已在任何副作用之前双层早拒绝（typed error `DispatchCwdNotFoundError`，reasonCode `dispatch_cwd_not_found`，message 含解析后绝对路径与来源）；机制与两层通道见[派发](usage/dispatch.md)的工作目录段。本判读保留给**旧 transcript** 与目录后被删的情形（§3.1）。
+- **现状**：本地进程式后端遇到不存在的 cwd，已在任何副作用之前双层早拒绝（typed error `DispatchCwdNotFoundError`，reasonCode `dispatch_cwd_not_found`，message 含解析后绝对路径与来源）；机制、两层通道与 HTTP serve 豁免见[派发](usage/dispatch.md)场景 2 的工作目录段。本判读保留给**旧 transcript** 与目录后被删的情形（§3.1）。
 - **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json 里该 worker 的 `cwd` 改成真实项目路径。`wao doctor` 对 registry 里不存在的本地进程式 worker cwd 会预先给 WARN。
 
 ---
@@ -398,7 +398,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
   - **行动**：**安静窗口单发复验通过后走 reverify**（复验前确认无其他全量/验证在本机在跑）。不走 reject——reverify 至多两条链，attempt 2 是 Lead 显式申请的第二次、也是最后一次机会、从不自动重试（语义见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 小节）；链烧完后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
 - **预防（机器级 advisory inflight 标记）**：runner 开跑前（runs-guard 基线快照之前）在**机器级状态目录**（win32 `%LOCALAPPDATA%\wao`，回退 `~/.wao-machine`；经 `src/machineGatePaths.js`，对 harness per-attempt TEMP 注入免疫）放 `wao-canonical-test.inflight` **机器全局 advisory 标记（非锁）**。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`；**WARNING = 结果可能受资源争用污染，顺序复跑即可**——永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则打 `[canonical] NOTICE: stale inflight marker`；自己持有同机验证租约的全量随即接管（删前复读，内容没变才删，再建本次的标记），不持租约的全量（含交付验证里的）只打这一行；pid 活/不可判仍打 WARNING，不产生新失败面；标记只在自持的退出路径删除（强杀不删，孤儿由下一次持租约的全量接管）。
-- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化；租约参数、fail-open、kill switch 与 `runs gate` / `--release`（破锁失败 fail-closed 非零退出）的合同见架构 §4.8，运维语义见[交付与验收](usage/delivery.md)场景 4b。不经闸的跑法（单文件跑等）仍由上面的 inflight 标记兜底告警。
+- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化；租约参数、fail-open、kill switch 与 `runs gate` / `--release`（破锁失败 fail-closed 非零退出）的合同见架构 §4.8，运维语义见[交付与验收](usage/delivery.md)场景 4b。不经闸的跑法（fail-open、kill switch、单文件跑）仍由上面的 inflight 标记兜底告警。
 
 ### 8.2 主仓根跑全量前确认无活跃 worker/daemon（runs-guard 红灯，TD-134）
 
