@@ -96,6 +96,11 @@
 - 1.0.0 额外门槛（§9 第 7 步）：不适用，本版仍是 0.x；TD-194 未关。
 - 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.9.0 v0.10.0`；`git rev-list --count v0.9.0..v0.10.0`。
 
-## 总量与发版记录
+## 总量
 
-打标后追加。
+62 个提交（含 v0.9.0 打标后的门槛证据补记、发版提交与豁免提交），195 个文件，+17,084 / −6,567 行（`git diff --shortstat v0.9.0 v0.10.0`）。
+
+## 发版记录
+
+- tag：`v0.10.0`（annotated → 24bb4992，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩。
