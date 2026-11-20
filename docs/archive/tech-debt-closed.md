@@ -171,3 +171,4 @@
 | TD-117 | kimi-code 与 deepseek-harness 两个后端暂停使用、不配车道：kimi-code 不上报用量，deepseek-harness 不支持会话复用；在用的是 kimi-web 与 deepseek-acp | 2026-11-10 第 101 批（决定 0123）：两个后端退役出闭集（KNOWN_BACKENDS 7→5），通道留观察表；存档 tag archive/kimi-code-backend / archive/deepseek-harness-backend |
 | TD-352 | claude-code 续修轮看不到新的交付合同：`claude --resume` 沿用建会话时的系统提示，放宽的 allowedPaths 对 worker 不可见 | 2026-11-18 第 110 批：codex `exec resume` 同样沿用（实测），两个后端声明 resumeKeepsSessionInstructions，resume 轮由 ProcessBackend 把本轮合同重述进提示词；deepseek-acp 实测能看到新合同，zcode、kimi 的合同本就随每轮提示词 |
 | TD-353 | 交付谱系收尾要 Lead 逐条裁决（采纳最终 run、被续修取代的父辈逐条拒收）再另做回收 | 2026-11-20 第 120 批（决定 0126）：祖先由谱系派生为被取代（`supersededByRunId`，不写事件），preflight 不再催，回收直接摘树；显式“谱系裁决”命令不做 |
+| TD-359 | GLM 周额度用尽（429/1310）时 zcode 运行要等 5 分多钟停滞门才收口；可靠性门先超时，把车道判成 rejected，认证门随即拒派所有项目的这两条车道 | 2026-11-20 第 122 批：当前主轮请求不可重试时 5 秒内收口，诊断 provider_capacity；任一演练撞服务商额度即整案无法判定，本轮有无法判定就整轮不写台账、进程非 0。额度用尽时实测 21 秒、台账逐字节不变 |
