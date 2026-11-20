@@ -74,11 +74,28 @@
   - 架构 §1 角色合同段补续修重述指针（架构余量为 0）。
 - 两处余量：本版合入后架构 133,000 / 133,000、整本手册 226,292 / 226,300。
 
-## reliability
+## reliability 豁免（Owner 具名，只对 v0.10.0）
 
-- deepseek-pro：Owner 的暂停派发说明（“调试中，暂勿派发”）仍在；本版这一行的处理待 Owner 点名，打标前写入此处。
-- 其余车道的结果打标后写入下文的门槛证据。
+- deepseek-pro（delta）、glm-flash（delta）、glm-pro（delta）：
+  - deepseek-pro 仍挂着 Owner 的暂停派发说明（“调试中，暂勿派发”），本版未派发、未探测。
+  - glm-flash、glm-pro 在 97685da4 上跑过，两轮都在派发子进程超时后记为 rejected。原因是 GLM 周额度用尽：服务商返回 429，代码 1310，限额 2026-11-21 06:35Z 重置（ZCode CLI 日志 `model.request.failed` 原文）。WAO 没有把这种失败认成服务商额度问题，另记 TD-359。
+  - Lead 报告 GLM 额度要到次日早上才恢复、deepseek-pro 待点名后，Owner 原话：“我不能干等一天，在明早GLM额度恢复之前，我可以给GLM、deepseek-pro车道也给豁免，我们把其它可以做的事先做起来”。
+- 状态是“豁免”，不是“通过”；不常驻，不沿用到下一版。
+- glm-flash、glm-pro 在认证台账里仍是 rejected，认证门拒派这两条车道；额度恢复后 Lead 重跑恢复派发资格，结果追加在本文件。
 
-## 发版门槛证据
+## 发版门槛证据（2026-11-20，本地实跑）
+
+- 全量 `npm test`：**374/374 通过**（6 波，816 秒，其中 filesystem 波 469 秒；无隔离重跑，runs 守卫干净），跑在发版提交 97685da4 上，插电。tag 指向的提交在它之上只加了本节、豁免节与 TD-359 一行（只改文档），按 `docs/testing.md` 只改文档那一行跑了横切守卫组与读这些文档的测试。
+- surface 再生成（§9 第 3 步）：在 97685da4 上重跑 `npm run gen:surface`，生成物与入库文件逐字节一致。
+- `npm run reliability`：从主检出在 97685da4 上逐车道跑（`--agent <lane>`，07:16–07:56Z）：
+  - sol、astra：certified（full，含越界写被 OS 沙箱拒绝的检查）。
+  - kimi、deepseek-flash、opus、fable：全过，评 conditional（delta 子集全过不产生 certified）。
+  - glm-flash、glm-pro：rejected，按上文豁免。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`（主检出 97685da4，08:01Z）：claude-code PASS，codex PASS（回复 `smoke ok`）。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 1.0.0 额外门槛（§9 第 7 步）：不适用，本版仍是 0.x；TD-194 未关。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`git diff --shortstat v0.9.0 v0.10.0`；`git rev-list --count v0.9.0..v0.10.0`。
+
+## 总量与发版记录
 
 打标后追加。
