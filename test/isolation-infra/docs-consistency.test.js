@@ -830,12 +830,12 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
 
 test("tier-1 四大文档保持在 byte cap 内（usage.md 帽盖整本手册）", () => {
   const caps = {
-    // 79 批 A1b（含会审续修）后：架构约 133.0KB、整本手册约 225.4KB、排障 55.9KB
-    // 未动。三处净减都不到 2%，"新字节数 + 约 2%"会高于现帽（抬帽归 Owner，
-    // ssot §4），故三帽维持原值；手册再减到 ≈221.9KB 以下时才够按公式降帽。
-    "docs/02-architecture.md": 133000, // 改写为现状描述后约 130.3KB，上限留约 2%
+    // 帽 = 当前字节数 + 约 2%（抬帽归 Owner，ssot §4）：架构 130211 B
+    // （≈130.2KB）→ 132700；整本手册 221788 B（≈221.8KB）→ 226200；
+    // 排障未动（约 55.9KB），帽维持原值。
+    "docs/02-architecture.md": 132700, // 现约 130.2KB，上限留约 2%
     "docs/roadmap.md": 3000,          // 精简为里程碑表后 1835；全文快照在 docs/archive/roadmap-2026-10-14.md
-    "docs/usage.md": 226300,          // 整本手册（地图加 docs/usage/ 全部页）的合计；上限留约 2%
+    "docs/usage.md": 226200,          // 整本手册（地图加 docs/usage/ 全部页）的合计；上限留约 2%
     "docs/troubleshooting.md": 57000, // 66b 去重后约 55.9KB（契约段迁架构、重复收指针），上限留约 2%
   };
   for (const [rel, cap] of Object.entries(caps)) {

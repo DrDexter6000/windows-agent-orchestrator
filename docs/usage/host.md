@@ -74,9 +74,9 @@ legacy argv 兼容：旧 profile 参数当作普通未知 flag 忽略，既有 H
 
 只读操作。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。输入无参数——`registryPath`/`runDir` 是 server 启动配置，模型每次调用不能覆盖。输出为 MCP `content`（text = JSON）+ `structuredContent`（同义对象）；`agents` 元素语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。调用前后 runDir 不会有新增 transcript/run 文件。
 
-registry 源可读但某条目无法 normalize/project 时，走**部分投影**：有效 worker 照常返回，另附有界安全的逐条 `issues`，而非整表失败。`issues` 元素形状固定为 `{ "code": "invalid_id" | "invalid_configuration", "agentId": "<canonical id>" | null }`：`invalid_id` = id 非 canonical；`invalid_configuration` = canonical id 但 backend/cwd/model/provider/sessionReuse/waitTimeout/systemPrompt 校验失败。`agentId` 仅当 id 为 canonical 时投影，否则为 `null`（绝不回显原始 id）；`issues` 绝不携带原始 error 文本、配置、路径或凭据值。条目数上限 32（`REGISTRY_ISSUES_CAP`），超限设 `issuesTruncated:true`（真实 malformed 数无界）。零有效 worker 但有 issues，不等于观察干净的空 registry。WAO 不据此自动停止派发、不自动换 worker、不把坏条目标记为 healthy。
+registry 源可读但某条目无法 normalize/project 时走**部分投影**：有效 worker 照常返回，另附有界安全的逐条 `issues`（闭集 `code` ∈ `invalid_id` / `invalid_configuration`；`agentId` 仅在 canonical 时投影，绝不回显原始 id/error 文本/配置/路径/凭据值；上限 `REGISTRY_ISSUES_CAP=32` + `issuesTruncated`），而非整表失败；零有效 worker 但有 issues 不等于空 registry。WAO 不据此自动停止派发、换 worker 或把坏条目标记为 healthy。判定细节见[架构](../02-architecture.md) §2.3。
 
-整表源不可读或非法 JSON 是另一类失败：`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果。registry 源每次 MCP 操作只读/解析一次，`lead_preflight` 复用同一快照。严格的读整表路径与这一投影是分开的（哪些命令走严格路径见 `docs/02-architecture.md` §2.3）。
+整表源不可读或非法 JSON 是另一类失败：`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果；严格读整表路径与这一投影分开（见[架构](../02-architecture.md) §2.3）。
 
 认证与就绪字段的语义（`certificationReasonCode` / `certificationLastHealthyAt`、凭据可用性 `credentialAvailability`、`providerReadiness`——历史认证与当前凭据、授权、容量的区别）见 `docs/certification-runbook.md` §认证与当前就绪（唯一权威）。
 
@@ -90,9 +90,9 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 
 未绑定时 `workspace.unboundReason` 是闭集恢复事实（已绑定时恒为 `null`）：`"server_config_git_proof_failed"`（显式 `--workspace-root` 的 proof 失败）或 `"no_workspace_authority"`（无可用 workspace authority；mcp_root 失败折叠于此）。它只区分"哪个 authority 的证明失败"，绝不返回路径或动态错误。
 
-`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，也不据此推断它 failed/dead/stopped（它可能仍在跑或休眠）。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描）；`unresolvedRunCount > 0` 时追加一条 advisory observation（不在 `activeRuns` 里，不证明失败或停止，用 `runs_list` 查看）。`activeRunCount=0` 不等于"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
+`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为**已知非终态**，且有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，也不据此推断它 failed/dead/stopped（它可能仍在跑或休眠）；它计入 `unresolvedRunCount`（同一次扫描），`> 0` 时追加一条 advisory observation（不在 `activeRuns` 里，不证明失败或停止，用 `runs_list` 查看）。`activeRunCount=0` 不等于"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）；`activeRuns` 为数组，其截断另由布尔字段 `activeRunsTruncated` 表示。
 
-`observations` 里的 server build 一行说明服务进程跑的是哪一版代码。MCP 服务进程只在启动时加载 WAO 代码，派发的 runner 加载当下检出，合入后两者可能不同。`server build: started <启动时间> at HEAD <提交>, src/ unchanged since start` 表示启动以来 `src/` 的树哈希（`HEAD:src`）没变、前后都干净；HEAD 动过时 `<提交>` 后补 `(HEAD now <当前提交>)`。树哈希或 `src/` 的干净状态变了，这一行换成 warning `server src/ differs from server start…`，重启宿主才加载新代码；只改 `src/` 以外的提交不触发。树哈希读不出时只给启动时间与包版本。这一行不影响 `complete`。
+`observations` 里的 server build 一行说明服务进程跑的是哪版代码：MCP 服务只在启动时加载 WAO 代码，detached runner 加载当下检出，合入后两者可能不同。`server build: started <启动时间> at HEAD <提交>, src/ unchanged since start` 表示启动以来 `src/` 树哈希（`HEAD:src`）没变、前后都干净；HEAD 动过时 `<提交>` 后补 `(HEAD now <当前提交>)`。树哈希或干净状态变了就换成 warning `server src/ differs from server start…`（重启宿主才加载新代码）；只改 `src/` 以外的提交不触发；树哈希读不出时只给启动时间与包版本。这一行不影响 `complete`。
 
 项目桶超过 64 个时，`observations` 多一行 `run buckets: …`（桶数与阈值；按 runId 解析要逐桶查），不影响 `complete`。
 

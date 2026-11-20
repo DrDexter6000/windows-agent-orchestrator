@@ -14,7 +14,7 @@ npm run cli -- runs metrics --summary          # 跨 run 合计
 ```
 
 `tokens` 是转录里记的原值；`usageScope`（文本 `scope`）说明它是本运行（`run`）、会话累计（`session`）还是未知。`selfTokens`（文本 `self`）是**自身用量**：同一 provider 会话第一轮取记下的数，后续轮减同一会话紧邻的前一轮；前一轮无 metrics、范围不同或会话 id 读不到 → `unknown (原因码)`，不猜。
-`cacheRatio`（文本 `cache`）是缓存占比：后端声明 input 已含缓存读取时 `cacheRead ÷ input`，否则 `cacheRead ÷ (input + cacheRead)`；声明未知 → 未知。后端看得到逐请求用量时 `firstRequest`（文本 `first`）给出第一个请求的 input/cacheRead 及其缓存占比；只报每轮合计的后端没有这一项。
+`cacheRatio`（文本 `cache`）是缓存占比（口径见[架构](../02-architecture.md) §2.2）；后端看得到逐请求用量时 `firstRequest`（文本 `first`）给出第一个请求的 input/cacheRead 及其缓存占比；只报每轮合计的后端没有这一项。
 `--lineage` 从根到最新列出 runId、席位、范围、自身 input/output、缓存占比与第一个请求的缓存占比，并给自身用量合计。`--summary` 按自身用量相加，会话累计不重复计；自身用量未知的 run 单列 `Self usage unknown: N run(s)`，不以 0 计入。三者都支持 `--format json`。
 
 报表读取按 runId 绑定（`docs/02-architecture.md` §6.2）；非法 runId 固定文案拒绝。
@@ -171,23 +171,23 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 ## `availableDrilldowns`：结果自带的下钻提示
 
-`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 六个工具的输出统一携带（schema REQUIRED）`availableDrilldowns`：≤4 条静态披露元数据，告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价。只披露，不自动调用，不做任何语义决策。运行中的 `run_await_result` 直接提示 `run_activity`；终态成功提示 activity + compact result；终态失败提示 diagnosis + activity。目的：省 Lead 的 token 与注意力，判断、停止与后续工具选择完全留给 Lead。
+`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 六个工具的输出统一携带（schema REQUIRED）`availableDrilldowns`：≤4 条静态披露元数据，告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价。只披露，不自动调用，不做任何语义决策；判断、停止与后续工具选择完全留给 Lead。
 
 每条 entry 是严格七键对象：
 
-- `tool` ∈ 闭集 `run_status | run_activity | run_collect | run_delivery | run_delivery_review | run_diagnose`（观察类闭集，永不出现 `run_stop`/`run_continue`/`run_dispatch`/`run_delivery_decide` 等控制或变更工具）。
-- `view` ∈ 闭集 `compact | timeline | evidence | delivery | diagnosis`（深度由浅到深：compact 最后一助手文本 → timeline 活动时间线一页 → evidence 一页有界 worker 输出 → delivery 交付事实 → diagnosis 故障诊断）。
-- `detail` = 一行深度短语；`purpose` = Lead 为何可能想看它；`reveals` = 展开后能看到的额外事实（均为字段/文本级的既有安全输出，无新内容）。
-- `cost` ∈ 闭集 `low | medium | high`：`low` 小而有界的输出（单次快照，或有界等待里的重读）；`medium` 分页或较大输出；`high` 完整 delivery diff 审阅。
+- `tool` ∈ 闭集 `run_status | run_activity | run_collect | run_delivery | run_delivery_review | run_diagnose`（永不出现控制或变更工具）。
+- `view` ∈ 闭集 `compact | timeline | evidence | delivery | diagnosis`（深度由浅到深：最后一助手文本 → 活动时间线一页 → 一页有界 worker 输出 → 交付事实 → 故障诊断）。
+- `detail` = 一行深度短语；`purpose` = Lead 为何可能想看它；`reveals` = 展开后能看到的额外既有安全事实。
+- `cost` ∈ 闭集 `low | medium | high`：小而有界 / 分页或较大 / 完整 delivery diff 审阅。
 - `readOnly` 按被披露工具如实标注：`run_collect` 每次成功调用追加一条 `messages.collected` 审计，其三条 entry 报 `readOnly:false`；其余五个可披露工具零 append，报 `readOnly:true`。
 
-每个工具的输出都基于已返回的机器事实选择披露：不推断、不给处方、不选文件、不遍历 cursor；内容全是 WAO 代码选定的静态字符串，不含 transcript/provider/仓库文本。上限（≤4 条、序列化 ≤2048 字节、字段 ≤160 字符）由共享模块硬性强制，≤4 条同时反映到 schema `maxItems`。代表性披露：
+披露由已返回的机器事实机械选择：不推断、不给处方、不选文件、不遍历 cursor；内容全是静态字符串，不含 transcript/provider/仓库文本。上限（≤4 条、序列化 ≤2048 字节、字段 ≤160 字符）由共享模块硬性强制；≤4 条同时反映到 schema `maxItems`，2048 B 与单字段长度是各自的限制。代表性披露：
 
 - `run_await_result` 终态 compact 可用 → `run_activity`（timeline，medium）+ `run_collect`（evidence，medium）；`too_large` → `run_collect` 优先；非终态 / 静默 / read_failure → `run_status`（timeline，low）+ `run_activity`。
 - `run_status` 失败终态 → `run_diagnose`（diagnosis，low）+ `run_activity`；completed → `run_activity` + `run_collect` compact（low）。
 - `run_diagnose` 类别 `delivery_packaging_failed` → `run_delivery`（delivery，low）+ `run_activity`；其它失败类别 → `run_activity` + `run_collect` compact。
 - `run_collect` compact 可用 → `run_collect` full（evidence，medium）+ `run_activity`；full 带 `nextCursor` → 续页 + `run_activity`；单页读完 → `run_activity`。
-- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（含 `workdir_escape`）→ `run_activity` + `run_diagnose`，不外广告 `run_delivery_review`；未请求 delivery → `run_activity` + `run_status`。readiness 等待路径与 point-in-time 路径披露一致；point-in-time 即使不携带 `readiness`，也由已安全投影的 `isolationFailure.code:"workdir_escape"` 驱动同一语义，未知 code 不提升。
+- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（含 `workdir_escape`）→ `run_activity` + `run_diagnose`，不外广告 `run_delivery_review`；未请求 delivery → `run_activity` + `run_status`。readiness 等待路径与 point-in-time 路径披露一致；无 `readiness` 时，仅 `isolationFailure.code === "workdir_escape"` 触发同一下钻提示（未知 code 不提升）。
 - `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
 
 该字段是加法字段：既有输出字段、行为、audit 语义不变；Lead 可以忽略它，直接用原子工具。`run_delivery_review_bundle` 的输出不携带该字段——其嵌套 `delivery` 保持既有合同，只有 standalone `run_delivery` 带。
@@ -248,15 +248,13 @@ CLI 只做 argv/format/console，数据逻辑与 MCP resource 委托同一 servi
 
 ## `semanticNotes` 与 resources `wao://semantics`
 
-恰好三个 standalone MCP 只读成功结果——`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条；CLI `runs wait` 同一目录与 selector）。每条恰好三键 `{ id, meaning, doesNotMean }`：`id` 是冻结的 namespaced 闭集值（`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）；`meaning` 是一句确定性事实；`doesNotMean` 是 0..2 条确定性非含义。没有 `scope` 字段、没有 per-entry `semanticsRef`；详情 URI 机械派生 `wao://semantics/{id}`。
-
-notes 完全由既有机器事实决定，由单一选择器挑出：永不回显 transcript/provider/path/prompt/command/session，永不建议 accept/reject/repackage/stop/retry/dispatch——每条的 `meaning`/`doesNotMean` 已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
+恰好三个 standalone 只读成功结果——`run_await_result`/`run_delivery`/`run_diagnose`（CLI `runs wait` 同一目录与 selector）——携带 REQUIRED `semanticNotes`（1..4 条；每条三键 `{ id, meaning, doesNotMean }`；`id` 是冻结的 namespaced 闭集值：`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）。每条已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
 
 两个只读 resources（`resources/read`，mimeType `application/json`）：
 
 ```
-wao://semantics            → { semantics: [{ id, meaning }] }                 // summary：每个 id + meaning（无 doesNotMean）
+wao://semantics            → { semantics: [{ id, meaning }] }                 // summary：每个 id + meaning
 wao://semantics/{id}       → { note: { id, meaning, doesNotMean } }           // 详情：单条完整 note
 ```
 
-`resources/list` 返回 summary resource（`wao://semantics`）；`resources/templates/list` 返回 `wao://semantics/{id}` 模板；不把每个 detail id 注册为独立静态 resource。读取委托同一 SSOT。未知/畸形 id 与 service 失败折叠为固定安全文本——`semantics summary failed`（summary）/ `semantics detail failed`（detail，含未知 id）——不回显请求 id 或目录原始内容；唯一例外是协议要求回显 caller 提供的 `uri`。
+`resources/list` 返回 summary resource；`resources/templates/list` 返回 `{id}` 模板。未知/畸形 id 与 service 失败折叠为固定安全文本——`semantics summary failed` / `semantics detail failed`——不回显请求 id 或目录原始内容；唯一例外是协议要求回显 caller 提供的 `uri`。

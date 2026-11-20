@@ -83,21 +83,21 @@ Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.deliv
 
 ### isolation_failed（隔离违反 readiness）
 
-终端且已请求 delivery 的 run，**唯一**较高优先级 delivery 事实是恰好一条 run-bound 安全 `run.isolation_violation`（code 为闭集 `workdir_escape`）时，readiness 才 settle 为 `isolation_failed` 并投影 `isolationFailure:{code:"workdir_escape"}`；违反缺失/多条/跨 run/malformed code 时 fail-closed 折叠 `ambiguous`，facts 优先于隔离事实（同时有 packaging failure 等更高优先级事实时按其投影，闭集判定见[架构](../02-architecture.md) §4.6「readiness 投影联动」）。含义：与 packaging failure（`deliveryFailure`）严格分离的第三类失败形状，无 packaging/diff/review/decision 面、不出现 `candidateInventory`、不触发任何恢复动作，Lead 只能另行派发；现象→动作见[排障手册](../troubleshooting.md) §delivery 表。`run_await_result` 的 `outcome.delivery.isolationFailureCode` 投影同一事实（无隔离失败时 `null`）。
+终端且已请求 delivery 的 run，唯一较高优先级 delivery 事实是恰好一条 run-bound `run.isolation_violation`（code `workdir_escape`）时，readiness settle 为 `isolation_failed` 并投影 `isolationFailure:{code:"workdir_escape"}`；违反缺失/多条/跨 run/malformed code 时 fail-closed `ambiguous`，有更高优先级交付事实（如 packaging failure）时按其投影（判定见[架构](../02-architecture.md) §1 `runDelivery.js` 条目）。它与 packaging failure（`deliveryFailure`）严格分离：无 packaging/diff/review/decision 面、不出现 `candidateInventory`、不触发任何恢复动作，Lead 只能另行派发；现象→动作见[排障手册](../troubleshooting.md) §delivery 表。`run_await_result` 的 `outcome.delivery.isolationFailureCode` 投影同一事实（无隔离失败时 `null`）。
 
 ### 无交付、packaging failure 与 candidate inventory
 
 `deliveryRequested` 标明本次 run 是否声明过 delivery。普通非 delivery run 返回 `deliveryAvailable:false, deliveryRequested:false, deliveryFailure:null`，这是正常查询结果而非错误；已请求但尚未打包返回 `deliveryAvailable:false, deliveryRequested:true, deliveryFailure:null`。当存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`），返回 `deliveryAvailable:false, deliveryRequested:true` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值）。transcript 缺失/损坏或 durable 事实冲突固定返回 `run_delivery failed`。`run_delivery_decide` 在没有 DeliveryRef 时不可调用成功。`run_diagnose` 对 packaging failure 返回 `category:"delivery_packaging_failed"`（只给事实不给处方/重试）。
 
-可恢复候选附加 nullable `candidateInventory` 与 `candidateKind:"disallowed_scope"|"backend_failed"|"process_missing"`——持久化的原始批准路径、candidate 的实际改动路径（相对持久化原始 base 的 tracked diff + 非 ignored untracked，两次必需 Git read 都成功才产出），以及其中超出原始合同的子集：
+可恢复候选附加 nullable `candidateInventory` 与 `candidateKind:"disallowed_scope"|"backend_failed"|"process_missing"`——持久化的原始批准路径、candidate 的实际改动路径（相对持久化原始 base 的 tracked diff + 非 ignored untracked，两次必需 Git read 都成功才产出），以及其中超出原始合同的子集（kind 语义与安全门见[架构](../02-architecture.md) §1「retained-candidate recovery」）：
 
 - `disallowed_scope` 来自绑定的 `disallowed_path` packaging failure。
 - `backend_failed` 只来自已请求 delivery、唯一终态 `failed` 原因为 `backend_error|backend_stream_ended`、存在绑定 `run.stop_verified` 且无 stop/isolation/budget/scorecard/既有 delivery chain 冲突的 retained worktree。
-- `process_missing`——已请求 delivery、detached runner/provider 进程被保守地证明已消失的 run 的恢复候选，覆盖两形。仍处 `pending|submitted|running` 时是非终态候选：owner lease 缺失或 stale-valid 且 owner PID 已证死；唯一 `session.created` 的 `backendSessionId` 形如 `proc_<pid>` 的子进程 PID 仅在 ESRCH 时判死，EPERM/未知/探测错误一律判活、绝不误判死；恰好一个绑定 `run.started`（canonical base + 非空 allowedPaths + 持久 worktreePath + verification 声明），且无任何 delivery_created/outcome/decision/repackaged/delivery_failed/`run.process_missing_confirmed`/冲突事实。被 `runs settle` 结算为终态 `failed`（闭集 reason `process_missing` + 恰好一条 `run.process_missing_confirmed`）后照样保留这个候选，Lead 仍可 `run_delivery_repackage`。
+- `process_missing` 覆盖两形。仍处 `pending|submitted|running` 时是非终态候选：owner lease 缺失可继续、陈旧有效须证死 owner、新鲜或损坏即返回 `null`；唯一绑定 `session.created`（`backendSessionId=proc_<正整数>`）的子进程 PID 仅在 ESRCH 时判死，EPERM/未知/探测错误一律判活、绝不误判死；恰好一个绑定 `run.started`（canonical base + 非空 allowedPaths + 持久 worktreePath + verification 声明），且无任何 delivery_created/outcome/decision/repackaged/delivery_failed/既有终态转移/`run.process_missing_confirmed`/冲突事实。被 `runs settle` 结算为终态 `failed`（闭集 reason `process_missing` + 恰好一条 `run.process_missing_confirmed`）后照样保留这个候选，Lead 仍可 `run_delivery_repackage`。
 
 形状：`{ originalAllowedPaths, originalAllowedCount, originalAllowedTruncated, actualChangedPaths, actualChangedCount, actualChangedTruncated, disallowedPaths, disallowedCount, disallowedTruncated }`；每条路径列表 cap 256（wire schema `maxItems:256` / `maxLength:512` 可见），count 永远是去重排序后的完整基数，truncated 精确反映截断。
 
-candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，WAO 绝不自动 scope 扩展/repackage/stop/retry/decision/推荐。候选投影要求 linked-worktree-at-base；崩溃窗口后 HEAD 已漂移的 run 投影为 null——但这不代表 repackage 不能重试：可证明的漂移 HEAD（单父==base、精确消息/身份、净树、范围）经 repackage 全验救回。`process_missing` 尤其绝不等于语义 accept——只有 Lead 显式调用 `run_delivery_repackage` 才能以 first-terminal-wins 原子结算该 orphan。失败关闭规则：workspace ownership、恰好一个绑定 `run.started`（含可用 delivery 上下文）、linked-worktree-at-base 证明（worktree HEAD 恰好等于持久化原始 baseCommit）任一失败、owner lease corrupt/malformed 或 fresh、owner/子进程 PID 仍活/未知、任一必需 Git read 失败、任一路径未过严格投影 SSOT（`validateProjectedPath`），或候选 inventory 为空/任一列表截断 → 整个候选投影为 null（绝不部分真实）；无 authority 即 null 且零 worktree/Git read。其它 failure code、success 和非候选状态不携带候选字段；point-in-time 与 waitMs readiness 两条路径投影一致。严格只读：transcript 字节、HEAD/branch、index/worktree 内容不变；MCP 输出绝不返回 PID/path/错误文本。
+candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，WAO 绝不自动 scope 扩展/repackage/stop/retry/decision/推荐。候选投影要求 linked-worktree-at-base；崩溃窗口后 HEAD 已漂移的 run 投影为 null——但这不代表 repackage 不能重试：可证明的漂移 HEAD（单父==base、精确消息/身份、净树、范围）经 repackage 全验救回。`process_missing` 绝不等于语义 accept——候选可由 `runs settle --apply` 或显式 `run_delivery_repackage` 结算为 failed（first-terminal-wins 原子写入），打包收口只由显式 repackage 执行。失败关闭规则：workspace ownership、恰好一个绑定 `run.started`（含可用 delivery 上下文）、linked-worktree-at-base 证明（worktree HEAD 恰好等于持久化原始 baseCommit）任一失败、任一必需 Git read 失败、任一路径未过严格投影 SSOT（`validateProjectedPath`），或候选 inventory 为空/任一列表截断 → 整个候选投影为 null（绝不部分真实）；非终态候选另须满足上段的租约条件与 PID 证死前提，已结算候选以持久记录（确认事实 + 终态转移）为准。无 authority 即 null 且零 worktree/Git read。其它 failure code、success 和非候选状态不携带候选字段；point-in-time 与 waitMs readiness 两条路径投影一致。严格只读：transcript 字节、HEAD/branch、index/worktree 内容不变；MCP 输出绝不返回 PID/path/错误文本。
 
 ### 读绑定（伪终态防御）
 
@@ -110,7 +110,7 @@ candidate inventory 是纯 advisory 事实：null 表示交 Lead 人工核实，
 - `readiness` 为严格闭集（消费方必须视其为穷举，任何其它值都是 bug；`isolation_failed` 见上）。
 - `reviewable` 仅当存在 durable `delivery_created` 且恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
 - 冲突或不完整的 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created，或 run 已终态但声明的 delivery 没有 created/failed 结果）折叠为 `ambiguous`（fail-closed，不回显动态值）；后者会立即返回，不耗尽 wait 窗口。
-- wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、零 transcript append、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 的 keepalive 同 `run_await_result`（见[监督](supervise.md)）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000` / `DELIVERY_WAIT_MS_MAX=300000` 锁定。
+- wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、零 transcript append、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 的 keepalive 同 `run_await_result`（见[监督](supervise.md)）；`waitMs` 区间与 `waitMs=0` 无效的约束见生成层描述。
 - pending-at-deadline 是诚实的事实（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。初始读取失败即抛错（不进入 wait）；wait 期间某次 re-read 失败时不把 stale waiting 快照伪装成 deadline 到期，而是 fail-closed 为 `ambiguous` 并提前返回（`waitReturnedEarly:true`，不回显错误、不重试）。
 - 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）。
 
@@ -148,7 +148,7 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 - 输入：`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` 共用，何时返回见[监督](supervise.md)「等待到收口」。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
 - 输出（strict）：`delivery` 为 `run_delivery` 安全投影，`review` 为单页 review 或 `null`。非 `reviewable` 状态返回 `review:null`，同时保留完整安全 delivery/readiness 事实；该路径零 diff/Git review read。`reviewable` 时 review commit 与 changed-file count 必须和 delivery 投影精确一致，否则整次调用固定失败。
 - Lead 权限不变：WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment、不判定 binary/diff-too-large 是否可接受，也不 stop/retry/repackage/accept/reject。Lead 仍须审查 `0..changedFileCount-1` 的全部文件和全部页面，然后独立调用 `run_delivery_decide`。
-- 原子路径保留：`run_delivery` 继续提供 point-in-time/readiness-only 查询；`run_delivery_review` 继续提供单独或 continuation-page 读取。长 worker、人工轮询、故障排查和非标准流程不受组合工具限制。
+- 原子路径保留：`run_delivery` 与 `run_delivery_review` 继续可单独调用；长 worker、人工轮询、故障排查和非标准流程不受组合工具限制。
 - 安全边界：workspace/runId-bound；非 reviewable 时携带 cursor 会 fail-closed，而不是静默忽略；任何服务异常、malformed output 或跨 artifact 拼接固定返回 `run_delivery_review_bundle failed`，无 partial structured output、动态错误、路径或 secret 泄漏。
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
@@ -158,7 +158,7 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 一个交付至多两条 reverify 链，WAO 绝不自动重试：第一条链（`attempt` 缺省或 1）之后，Lead 可以显式申请第二次（`attempt: 2`，理由同样取自 `REVERIFY_REASONS` 闭集、可与第一次不同，setup 可重新声明），这是最后一次机会；第三次申请被拒绝：CLI 返回闭集原因 `reverify_attempts_exhausted`，MCP 的 `attempt` 只接受 1 或 2，越界由 schema 直接拒绝。第二条链的全部资格条件（缺一不可）：第一条链完整（请求 + 结果）且结果为 failed、失败码在可重验闭集内（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`——`artifact_mutated` 与 unavailable 不可）；尚无 Lead 决定（写入申请时在锁内复查）；同一个不可变交付提交；原断言命令逐字节不变。
 
 - 输入（strict）：`reason` 是闭集环境/工具原因（枚举见生成层）；`attempt` 可选（整数 1 或 2，缺省 1；2 = 第二次也是最后一次机会，资格如上）；`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数，与 `verificationTimeoutMs` 共享闭界与缺省——见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`；zod 边界与 service 常量同源）——省略时继承该 delivery ref 上持久化的执行预算，ref 无持久值才用 service 默认；持久值缺失/损坏/越界 fail-closed 拒绝（不自动回退默认值）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
-- eligible failure：第一次链的原 verification 失败 code 必须在上文第二条链资格的可重验闭集内；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）不可 reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
+- eligible failure：原 verification 失败码须属于上文可重验闭集（`artifact_mutated`/`artifact_mismatch` 不可 reverify）；已有 Lead decision 或 reverify 链损坏一律 fail-closed。
 - 幂等/并发：每条链各自 reentrant + crash-safe——重试/并发收敛到该 attempt 首调用者记录的 setup 与同一个 commit，每条链最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_passed` / `_failed` / `_unavailable`；结果只写进本次 attempt 自己的那条链；`attempt` 字段只在值为 2 时落盘，缺省视为 1，旧 transcript 读取逐字节不变）。不带 attempt 或 `attempt: 1` 的重复调用绝不跑第二次验证（在第一条链上收敛）。
 - 原 vs effective verification：原始终态 verification 保留不改写，第二条链也不改写第一条链的事实；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（最新一条 reverify 链的结果，含 `reverify: {status, reason}` 链事实）。消费方一律以最新一条链为准：只有最新链完整（requested + outcome）时 effective 才取其结果，非完整链（none/pending/malformed）不改变 effective 状态（fail-closed）。有 reverify 链时，决定门禁取"决定之前最近一条完整链"的结果作支撑，accept 须 passed；决定之后追加的请求不能事后给决定撑腰。
 - 安全输出：不返回 commands/worktree 路径/stderr/reason/env/raw events（字段形状与闭集见生成层；settled 输出含本次收敛的 `attempt`）。
@@ -173,7 +173,7 @@ CLI 等价（同一 service 与安全投影，不是 raw 通道，不能改断�
 npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attempt 2] [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
 ```
 
-`--attempt` 缺省为 1；`--attempt 2` 显式申请第二次（也是最后一次）重验，资格判定在 service（闭集，不足即拒），整数 ≥3 到达 service 后按 `reverify_attempts_exhausted` 拒绝。`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 解析（继承 ref 持久预算，否则 service 默认），提供时必须是共享闭界内的严格整数（闭界与缺省见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`）；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
+`--attempt` 缺省为 1；`--attempt 2` 显式申请第二次（也是最后一次）重验，资格判定在 service（闭集，不足即拒），整数 ≥3 到达 service 后按 `reverify_attempts_exhausted` 拒绝。`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串，边界同 `setupCommands`）；`--timeout-ms` 缺失由 service 解析（继承 ref 持久预算，否则 service 默认），提供时必须是共享闭界内的严格整数（闭界与缺省见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`）；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
 
 ## 验证失败采纳协议
 
@@ -196,14 +196,14 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 
 本命令只承载上述协议第 1 步（Lead 侧归因）与第 4 步（集成后终验）的执行——在临时 worktree 检出指定提交、执行 Lead 提供的命令清单、把证据以 `run.lead_commit_check_started/_outcome` 事件族追加进该 run 转录（仅 started 无 outcome = 合法不完整证据，不读作通过）。它不满足第 3 步独立审计证据规格（outcome 不当受审对象替代品，独立审计席仍须按第 3 步另行回审）。两事件带 `kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁，CLI 输出与投影不出现 accepted/verified 措辞，事件族不进 validateDeliveryFacts / decide / wao accept 任何判定输入。
 
-- `--commit`：全形 canonical SHA（40/64 小写 hex；短形拒绝，短形只用于期望锚），经 `rev-parse --verify --end-of-options <sha>^{commit}` 等值校验。`--commands-file`：UTF-8 JSON 字符串数组（与 `runs delivery reverify --setup-commands-file` 同一解析器与边界：≤32 条、每条 ≤512 字符；命令含静态可辨绝对路径字面量即拒绝——防越出临时 worktree）。`--timeout-ms`：每命令预算，闭区间与缺省同 `verificationTimeoutMs`（见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`）。
+- `--commit`：全形 canonical SHA（40/64 小写 hex；短形拒绝，短形只用于期望锚），经 `rev-parse --verify --end-of-options <sha>^{commit}` 等值校验。`--commands-file`：UTF-8 JSON 字符串数组（与 `runs delivery reverify --setup-commands-file` 同一解析器与边界，≤32 条、每条 ≤512 字符；命令含静态可辨绝对路径字面量即拒绝——防越出临时 worktree）。`--timeout-ms`：每命令预算，闭区间与缺省同 `verificationTimeoutMs`（见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`）。
 - 前置：runId 须为该 workspace 的已终态 delivery run（转录含 `run.delivery_created`）；提交与 run 的关系记事实字段（isDeliveryCommit / containsDeliveryCommit / adoptedFromTrailer）不设拒。
 - 执行：一律走系统唯一有意 shell 边界（`runVerificationCommand`）+ verifier 同款 attempt env 确定性钉 + 同机机器验证闸串行；临时 worktree 在 `<repo>/.wao-worktrees/verify-<nonce>/`（检出 + 用后清理，与 `wao worktree remove` 同一删树能力：上锁（`git worktree lock`）的树不删，目录原样、`cleanup:"failed"` 如实落事件；不进 os.tmpdir()）。
 - 退出码：outcome 为 passed 且 cleanup 为 ok 才是 0；失败/中断/清理失败均非零（结果照记，`cleanup:"failed"` 如实落事件）。
 
 `run_delivery` 失败摘要带 `stderrTailInTranscript` 提示位（true = 失败命令 result frame 有非空尾，细节去转录读；投影永不携带尾内容本身）。
 
-审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用可机读锚点、禁止转述交付内容——最低四要素与理由见[会审](consult.md)「场景 4e：审计席测试协议」里的「审计任务书纪律」一段。
+审计任务书纪律：给审计席（auditor/复核席）的任务书必须引用可机读锚点、禁止转述交付内容；最低四要素与理由见[会审](consult.md)「场景 4e」的「审计任务书纪律」一段。
 
 ## MCP `run_delivery_decide`（持久 Lead 决策）
 
@@ -216,12 +216,12 @@ expected policy rejection 是正常结构化结果，不是错误：已存在决
 
 ## MCP `run_delivery_repackage`（model-free 重打包）
 
-`run_delivery_repackage` 由 Lead 对 `run_delivery` 已投影的 `candidateKind` 候选传入 `{ runId, allowedPaths }` 重打包。它复用该 run 原始持久化的 worktree / base / verification 配置：不调用 model、不 resume worker、不推断 path、不修改 verification 命令、不自动 accept/reject。`candidateInventory.originalAllowedPaths` 给出新合同必须保留的旧批准范围；Lead 审查实际与越界路径后，独立提交最终 `allowedPaths`，它是唯一新 scope 权威，并且必须包含全部原始路径且覆盖所有实际变更路径。重打包重新计算完整候选清单；read-fail/truncate/empty 一律拒绝。WAO 不合并清单、不判断修改是否合理。原始 `verificationCommands`/`unavailableReason` 按 `run.started` 原值复用，不接受 caller 覆盖。
+`run_delivery_repackage` 由 Lead 对 `run_delivery` 已投影的 `candidateKind` 候选传入 `{ runId, allowedPaths }` 重打包。它复用该 run 原始持久化的 worktree / base / verification 配置：不调用 model、不 resume worker、不推断 path、不修改 verification 命令、不自动 accept/reject。`candidateInventory.originalAllowedPaths` 给出新合同必须保留的旧批准范围；Lead 审查实际与越界路径后独立提交最终 `allowedPaths`——唯一新 scope 权威，须包含全部原始路径并覆盖所有实际变更路径。重打包重算完整候选清单（read-fail/truncate/empty 一律拒绝）。WAO 不合并清单、不判断修改是否合理。原始 `verificationCommands`/`unavailableReason` 按 `run.started` 原值复用，不接受 caller 覆盖。
 
-process_missing 结算：两形候选（非终态 orphan 与被 `runs settle` 结算成终态 `failed` 的候选，资格见上文候选清单）都可经 repackage 收口。非终态 orphan 的结算：repackage 在任何持久化变更之前先证明全部前置条件（workspace ownership、运行时 liveness、原始合同、完整非空未截断 inventory、Lead scope 覆盖），然后以 first-terminal-wins 原子写入一条安全确认事实（`run.process_missing_confirmed`，无 PID/path 载荷）与一条到 `failed` 的状态转移（闭集 reason `process_missing`），再重读权威事实。若并发终态已先到，仅当权威终态独立符合既有恢复 kind（`disallowed_scope`/`backend_failed`/`process_missing`）时才继续，否则拒绝且不动 Git。非终态 run 上已存在的 `run.process_missing_confirmed` 事实（不完整/损坏的持久化记录）在任何变更之前使候选失效并拒绝。已结算的候选不再复跑运行时 liveness 证明——结算时原子落盘的 durable 记录（确认事实 + 终态转移）即权威，直接与其余恢复 kind 走完全相同的打包/精确验证/provenance/幂等语义。无 model/backend/session resume。
+process_missing 结算：两形候选（非终态 orphan 与被 `runs settle` 结算成终态 `failed` 的候选，资格见上文）都可经 repackage 收口。非终态 orphan 在持久化变更前先证明全部前置条件（workspace ownership、运行时 liveness、原始合同、完整非空未截断 inventory、Lead scope 覆盖），再以 first-terminal-wins 原子写入 `run.process_missing_confirmed`（无 PID/path 载荷）与到 `failed` 的转移（reason `process_missing`），并重读权威事实；并发终态已先到且独立符合既有恢复 kind 才继续，否则拒绝且不动 Git。已存在的不完整/损坏确认事实使候选失效。已结算候选不再复跑 liveness——durable 记录即权威，直接走相同的打包/精确验证/provenance/幂等语义。无 model/backend/session resume。
 
 - 输入（strict）：形状见生成层。
-- 可重入/崩溃恢复/并发安全：相同输入的并发或重试 → 恰好一条终态事实、恰好一条 `run.delivery_created` 与恰好一个最终 verification 结果；不同 allowedPaths 的竞争请求互不覆盖。重入会重跑验证（含副作用），上次调用未结束时勿重试。打包在 transcript append 锁外进行（长操作不持锁）；只有短读/校验/CAS-append 在锁内。包装移动了分支但 transcript append 失败/崩溃时，下次同名调用从 Git 精确对象恢复同一个 commit（严格证明 parent/count/files/message/identity/branch/clean 后才落盘，不丢结果、不重调 model）。
+- 可重入/崩溃恢复/并发安全：相同输入的并发或重试 → 恰好一条终态事实、一条 `run.delivery_created` 与一个最终 verification 结果；不同 allowedPaths 的竞争请求互不覆盖。重入会重跑验证（含副作用），上次调用未结束时勿重试。打包在 transcript append 锁外进行（长操作不持锁），只有短读/校验/CAS-append 在锁内。包装移动了分支但 transcript append 失败/崩溃时，下次同名调用从 Git 精确对象恢复同一个 commit（严格证明 parent/count/files/message/identity/branch/clean 后才落盘，不丢结果、不重调 model）。
 - 安全输出：不返回 worktreePath/commands/stderr/reason/PID/path（字段形状与闭集见生成层）。
 
 追加一条 recovery provenance（`run.delivery_repackaged`），绑定 DeliveryRef / 请求 runId / 已批准 scope / `recoveryKind`。原始终态 failed 不被改写为 completed；但当且仅当 durable recovery facts、provenance、唯一 DeliveryRef 与 verification chain 一致且原始 verification=passed 或原合同声明无可跑验证时，`run_delivery_decide(accepted)` 可被 Lead 显式接受。verification failed 仍可供 Lead review/reject，绝不自动 reject。
@@ -240,4 +240,4 @@ expected policy rejection 是正常结构化结果，不是错误：资格/合�
 - `concurrent_terminal_ineligible`：process_missing 结算输给不可恢复的并发终态。
 - `liveness_proof_failed`：进程仍在，禁止结算。
 
-每次被拒尝试在 transcript 追加至多一条有界审计事件 `run.delivery_repackage_rejected`（尽力写入——写失败只降级可观测性、绝不吞 typed 拒绝；payload 仅 `rejectionReason`；`malformed_input`/`run_not_found`/`workspace_not_authorized` 均不落——后者跨项目，不写他人转录）。拒绝不消费 Lead 决策，也不保证发生在所有状态变更之前：CAS 拒绝发生时 Git 分支可能已移动、`delivery_created` 可能已存在；此前成功的持久化事实不回滚，拒绝本身不改写终态（process_missing 路径若已把 run 结算为 failed，该结算不因后续拒绝回滚）；重试仍须重新证明候选与交付链。防洗白守卫按实测 HEAD==base 判定：HEAD 仍在 base 时 resolve 阶段的 `artifact_mismatch` 只能是本方打包回退残留，保留为意外错误，不洗成政策拒绝。只有意外内部异常（未桥接的 Git 打包/回退故障、严格输入校验与不变量、验证器崩溃、append/锁基础设施、锁内读取错误等）保留固定 `run_delivery_repackage failed` 塌缩，无 partial structured output。`run_delivery`（结果查询）与 `run_delivery_review`（审查）仍是各自面的 SSOT。
+每次被拒尝试追加至多一条有界审计事件 `run.delivery_repackage_rejected`（尽力写入——写失败只降级可观测性、绝不吞 typed 拒绝；payload 仅 `rejectionReason`；`malformed_input`/`run_not_found`/`workspace_not_authorized` 均不落——后者跨项目，不写他人转录）。拒绝不消费 Lead 决策，也不保证发生在所有状态变更之前：CAS 拒绝发生时 Git 分支可能已移动、`delivery_created` 可能已存在；此前成功的持久化事实不回滚，拒绝本身不改写终态（process_missing 的 failed 结算不因后续拒绝回滚）；重试仍须重新证明候选与交付链。防洗白守卫按实测 HEAD==base 判定：HEAD 仍在 base 时 resolve 阶段的 `artifact_mismatch` 只能是本方打包回退残留，保留为意外错误，不洗成政策拒绝。只有意外内部异常（未桥接的 Git 打包/回退故障、严格输入校验与不变量、验证器崩溃、append/锁基础设施、锁内读取错误等）保留固定 `run_delivery_repackage failed` 塌缩，无 partial structured output。`run_delivery`（结果查询）与 `run_delivery_review`（审查）仍是各自面的 SSOT。

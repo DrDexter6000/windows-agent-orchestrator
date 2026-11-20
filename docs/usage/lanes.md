@@ -38,9 +38,7 @@ read_when: 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 
       "model": { "id": "<modelId>", "providerID": "deepseek-official" },  // 可选；配则 id 与 providerID 都必填
       "reasoning": { "effort": "low" },      // 可选，仅 low/high/max（见生成层 docs/surface/certification.md 能力表；其余值被拒）
       "cwd": "D:/projects/my-app"
-      // model 块只接受 { id, providerID }
-      // 两个子字段，其他子字段（variant/contextWindow 等）配了同样被拒。不配
-      // model 时模型取 profile 缺省。
+      // model 块只接受 { id, providerID }，其他子字段配了同样被拒；不配时取 profile 缺省。
     },
 
     // ── codex（进程式；用途与限制见 wao lanes）──
@@ -83,15 +81,7 @@ deepseek-acp 通道的适用限制、`registry validate` 能力交叉 `⚠` 警�
 
 ## 认证正文总落点（certification runbook）
 
-认证操作正文都在 `docs/certification-runbook.md`（唯一权威），本页不重复，只留入口。它包含：
-
-- 认证结果用于派发选择的边界
-- DSH 通道适用限制与能力交叉警告
-- backend 能力对照表（权威投影是生成层 `docs/surface/certification.md`，由 `npm run gen:certification` 再生成，禁止手改）
-- 认证与转录维护命令（smoke / reliability / prune）
-- 单次派发换模型 / 换推理力度（含 MCP 覆盖特有规则）
-- retry 的 per-dispatch 覆盖继承
-- 认证与当前就绪（历史认证 ≠ 当前凭据/授权/容量）
+认证操作正文都在 `docs/certification-runbook.md`（唯一权威），本页不重复，只留入口：认证结果用于派发选择的边界、DSH 通道适用限制与能力交叉警告、backend 能力对照表（权威投影是生成层 `docs/surface/certification.md`，由 `npm run gen:certification` 再生成，禁止手改）、认证与转录维护命令（smoke / reliability / prune）、单次派发换模型 / 换推理力度（含 MCP 覆盖特有规则）、retry 的 per-dispatch 覆盖继承、认证与当前就绪（历史认证 ≠ 当前凭据/授权/容量）。
 
 ## 接入新模型 / 新运行时
 
