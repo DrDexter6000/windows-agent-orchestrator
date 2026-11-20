@@ -1,11 +1,8 @@
 # Troubleshooting（运维诊断手册）
 
-> 定位：本文件是 WAO 运维/诊断的按需读取层。SKILL.md 是 agent 入口层（每次加载技能都读）；
-> 本文件是出问题时第一时间读的诊断手册——记录已知的故障模式、根因、诊断套路、修复方法。
+> 定位：出现问题时第一时间读的按需诊断手册（已知故障模式、根因、诊断套路、修复方法）；SKILL.md 是每次加载技能都读的 agent 入口层。
 >
-> 本文件讲"已经踩坑了怎么诊断"的排障知识。
->
-> 新发现的坑按 symptom/root-cause/fix 三段式追加到对应章节末尾，保持本文件持续更新。
+> 新发现的坑按 symptom/root-cause/fix 三段式追加到对应章节末尾。
 
 ---
 
@@ -44,11 +41,11 @@
 
 ## delivery 失败模式 → 正确工具（闭集查表）
 
-> 行为合同权威在 `docs/02-architecture.md` §4.6–§4.9（readiness 投影、候选恢复、决策门）与 `docs/usage/delivery.md`（`run_delivery_reverify` / `run_delivery_repackage` / review 各工具操作节）；本表是"现象→动作"runbook，表中枚举值由 docs-consistency 关系型守卫与代码闭集双向对账。
+> 行为合同权威在 `docs/02-architecture.md` §4.6–§4.9 与 `docs/usage/delivery.md`（各工具操作节）；本表只写"现象→动作"，枚举值由 docs-consistency 守卫与代码闭集双向对账。
 >
-> 跨切规则：任何 readiness 结果只要带 `candidateInventory`/`candidateKind`，先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage` 结算），不按 readiness 标签直接人工核或重读。
+> 任何带 `candidateInventory`/`candidateKind` 的 readiness 先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage`），不按标签直接人工核或重读。
 >
-> 打包失败的 `run.delivery_failed` / `run.error` 事件在能从错误对象的结构化属性（不读消息原文）分出环境类别时另携 `errorClass`（闭集 `git_index_locked`/`file_locked`/`permission_denied`/`disk_full`/`git_spawn_failed`/`git_timeout`/`git_command_failed`，SSOT=`src/deliveryErrorClass.js`；分不出时键缺席）——`run_diagnose` 把每个闭集值转成一条固定文案事实，例如 `git_index_locked`＝打包时工作树的索引锁文件在场，可能仍有 git 进程在写，也可能是退出的进程留下的残锁；这种失败没有重打包候选，处置见 [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场)。
+> 打包失败的 `run.delivery_failed` / `run.error` 事件在能从结构化属性（不读消息原文）分出环境类别时另携 `errorClass`（闭集 `git_index_locked`/`file_locked`/`permission_denied`/`disk_full`/`git_spawn_failed`/`git_timeout`/`git_command_failed`，SSOT=`src/deliveryErrorClass.js`；分不出时键缺席）；`run_diagnose` 把每个值转成一条固定文案事实（`git_index_locked` 的判读与出口见 [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场)）。
 
 | 观察到的失败形状 | 正确动作 |
 |---|---|
@@ -142,7 +139,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 ### 2.3 scorecard rules 没生效（PowerShell JSON quoting）
 
 - **症状**：`--scorecard-rules '{"requireEvidence":true}'` 传了，但 `runs scorecard` 返回 "no rules"
-- **根因**：PowerShell 下 inline JSON 经 `npm run cli --` 转发后不一定完好（随 shell 及其版本而变），"双引号 + 转义"形式经 npm 转发同样到不了完整 JSON。这不是 WAO bug，是 shell quoting 问题（经过与取证见事故复盘 `docs/incidents/2026-06-26-fresh-agent-e2e-frictionlog.md` N2）
+- **根因**：shell quoting 问题（不是 WAO bug）：PowerShell/npm 转发不一定完好（随 shell 及其版本而变），"双引号 + 转义"同样不成立；经过与取证见事故复盘 `docs/incidents/2026-06-26-fresh-agent-e2e-frictionlog.md` N2
 - **修复（PowerShell）**：从文件读，绕开 shell quoting；`--scorecard-rules-file` 与 `--scorecard-rules` 互斥（`src/commands/run.js`）：
   ```powershell
   --scorecard-rules-file rules.json
@@ -172,7 +169,7 @@ HTTP 车道（kimi-web）的任务由本机 serve 转发给 provider API——se
 
 - **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在
 - **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**——Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`。
-- **现状**：对不存在的 cwd 已双层早拒绝——前台执行通道（RunManager start/resume）与后台派发通道（dispatchRun）都在 transcript 写入/worktree 创建/fork/spawn **之前**，按 backend 能力（`preflightInvocation`；HTTP serve backend 豁免——cwd 是远端提示）预测 `path.resolve` 后非已存在目录（是文件同样算），抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后绝对路径与来源）。新派发不会再走到 spawn 期；本判读保留给**旧 transcript** 与自配 cwd 打错/目录后被删的情形（§3.1）。
+- **现状**：不存在的 cwd 已在任何副作用之前双层早拒绝（typed error `DispatchCwdNotFoundError`，reasonCode `dispatch_cwd_not_found`，message 含解析后绝对路径与来源）；机制与两层通道见[派发](usage/dispatch.md)的工作目录段。本判读保留给**旧 transcript** 与目录后被删的情形（§3.1）。
 - **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json 里该 worker 的 `cwd` 改成真实项目路径。`wao doctor` 对 registry 里不存在的本地进程式 worker cwd 会预先给 WARN。
 
 ---
@@ -254,16 +251,16 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 完成判定在各 backend 内：进程式 backend 按解析到的 done 事件，缺省按进程退出码收口（§6.3）；kimi-web 按 transcript 里本轮的终态；zcode 见 §6.9。completed 却没有 assistant 文本的情形，另由 scorecard 的 `requireAssistantText` 规则拦截。
 
-### 6.3 ProcessBackend（claude-code/codex）exit 1 → done(failed)（已实现）
+### 6.3 ProcessBackend（claude-code/codex）exit 1 → done(failed)
 
-- **退出码兜底（合同见架构 §2.5「完成收口兜底」）**：进程式 backend 流结束时若无显式 done 事件，按进程 exit code 收口：0 → `done(completed)`，非 0 → `done(failed)`（`run.error` 如 `"process exited with code 1"`，state=failed）。
+- **退出码兜底**：进程式 backend 流结束时若无显式 done 事件，按进程 exit code 收口：0 → `done(completed)`，非 0 → `done(failed)`（`run.error` 如 `"process exited with code 1"`，state=failed）；合同见架构 §2.5「完成收口兜底」。
 - **metrics 缺失（不可避免）**：claude 进程在打印最终 `type:"result"`（含 token usage）**之前**崩溃 → result 事件从未产生 → metrics 无法提取。这不是 WAO bug，是进程崩溃的固有后果（数据源没产生）。
-- **exit 0 ≠ 有用结果（completed-empty）**：进程 exit 0 → `done(completed)` 仅是**传输完成**，不是 worker 产出可用结果的证据——没有任何可用产出（assistant 文本、命令活动、文件写入、tool_use/tool_result）的 completed 判 `no_effect` + `completed_empty`，主控据此不会把空转 worker 误判为有效 review/delivery。判类闭集、failed/正常完成的 code 取值与 wire 投影见架构 §2.2、§2.5 与 `docs/usage/results.md`「MCP `run_diagnose`」一节。
+- **exit 0 ≠ 有用结果（completed-empty）**：没有任何可用产出（assistant 文本、命令活动、文件写入、tool_use/tool_result）的 completed 判 `no_effect` + `completed_empty`——exit 0 只证明传输完成，主控不会把空转 worker 误判为有效 review/delivery；判类闭集与 wire 投影见架构 §2.2、§2.5 与 `docs/usage/results.md`「MCP `run_diagnose`」。
 
 ### 6.6 静默无响应早失败（silentTimeout）
 
 - **症状**：上游静默拒收（不报错也不回复）。waitTimeout 到期只通知、不终止（ADR-0030），收口要靠下面的判据。
-- **现状**：`silentTimeout` 的解析顺序（调用参数 → registry 条目 → 全局配置）与各 backend 的收口判据（进程式：读流后超时仍无任何 parser 事件；kimi-web：本轮 turn 迟迟不现，无配置时连续 8 拍）见架构 §2.5「静默门」。
+- **现状**：`silentTimeout` 的解析顺序（调用参数 → registry 条目 → 全局配置）与各 backend 的收口判据见架构 §2.5「静默门」。
 
 ### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"
 
@@ -281,23 +278,11 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 
 ### 6.9 zcode 运行什么时候会被控制面自动收口（生命体征口径，决定 0067）
 
-- **口径**：控制面只在运行**完全没有生命体征**时自动收口；只要有生命体征就继续等，
-  放弃与否由 Lead 决定，WAO 只提供事实与建议。三道收口门（零 part 阶段的
-  silentTimeout/120 拍思考预算、已有产出后 300–600s 自适应停滞预算）、生命体征判据
-  （进度/模型流/工具子进程/工作目录文件变化）与错误文案合同见架构 §2.5「zcode 自动
-  收口口径」；读数与阈值来由见决定 0067，上游重试退避窗（`provider_retry`）见决定 0069。
-- **证词会看错**：与任务无关的插件进程在耗 CPU、反复崩溃重启的 helper、别人在同一个未
-  隔离的工作目录里写文件，都会让一个其实没在推进的运行一直"活着"；被 `.gitignore` 排除
-  的写入、宿主进程内部的工作、低 CPU 的等待，则读不出活动。所以去留要 Lead 自己看。
-- **Lead 怎么判断去留**：转录长时间没有新的动作或正文时，三个面都会直接给提示（阈值、
-  各面字段、提示写什么与怎么读，见[监督](usage/supervise.md#lead-quiet-supervision)）。
-- **中止**（先看最新状态并写明理由，见 usage）：`stop` / MCP `run_stop`——会话记录带
-  `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。会话
-  记录既无 pid 也无 `serveUrl` 的运行停不下：核实其进程后手动结束进程树，runner 在时转录
-  以 `transport closed` 落 failed。
-- **诚实边界**：流分片是上游内部遥测，首次实测在 zcode CLI 0.16.9，3.18.x 只确认通知形状未变、未复测分片续命；进程活跃度阈值
-  （空闲 CPU 0–2.5 ms/s、I/O 4–9 KB/s）来自一次真机探针，不是长期统计。读数与来由见
-  决定 0067。
+- **口径**：控制面只在运行**完全没有生命体征**时自动收口；有生命体征就继续等，去留由 Lead 决定，WAO 只提供事实与建议。三道收口门、生命体征判据与错误文案合同见架构 §2.5「zcode 自动收口口径」；读数与阈值来由见决定 0067，上游重试退避窗（`provider_retry`）见决定 0069。
+- **证词会看错**：无关插件进程耗 CPU、反复崩溃重启的 helper、别人在同一个未隔离的工作目录里写文件，都能让其实没在推进的运行一直"活着"；`.gitignore` 排除的写入、宿主内部工作、低 CPU 的等待则读不出活动（完整清单见决定 0067「诚实边界」）。所以去留要 Lead 自己看。
+- **Lead 怎么判断去留**：转录长时间没有新的动作或正文时，三个面都会直接给提示（阈值、各面字段、提示写什么与怎么读，见[监督](usage/supervise.md#lead-quiet-supervision)）。
+- **中止**（先看最新状态并写明理由，见 usage）：`stop` / MCP `run_stop` 的停止路由按会话事实决定（见架构 §4.1）。会话记录既无 pid 也无 `serveUrl` 的运行停不下：核实其进程后手动结束进程树，runner 在时转录以 `transport closed` 落 failed。
+- **诚实边界**：流分片是上游内部遥测：只在 zcode CLI 0.16.9 实测过续命，3.18.x 只确认通知形状未变、未复测；进程活跃度阈值来自一次真机探针，不是长期统计。读数与来由见决定 0067。
 
 ---
 
@@ -412,8 +397,8 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
   - **判定**：操作参数记 `environment_contaminated`（reverify 资格用的操作分类）——**它不代表根因已确认**；本次失败**原因未明**。
   - **行动**：**安静窗口单发复验通过后走 reverify**（复验前确认无其他全量/验证在本机在跑）。不走 reject——reverify 至多两条链，attempt 2 是 Lead 显式申请的第二次、也是最后一次机会、从不自动重试（语义见 `docs/usage/delivery.md` 的 `run_delivery_reverify` 小节）；链烧完后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
-- **预防（机器级 advisory inflight 标记）**：runner 开跑前（runs-guard 基线快照之前）在**机器级状态目录**（win32 `%LOCALAPPDATA%\wao`，回退 `~/.wao-machine`；经 `src/machineGatePaths.js`——该路径对 harness per-attempt TEMP 注入免疫）放 `wao-canonical-test.inflight` **机器全局 advisory 标记（非锁）**。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则打一行 `[canonical] NOTICE: stale inflight marker`；自己持有同机验证租约的全量随即接管（删前复读，内容没变才删孤儿，再建本次的标记），交付验证里的全量与不经租约的全量只打这一行；pid 活/不可判仍打 WARNING，不产生新失败面；标记在自己拥有的退出路径删除（强杀路径不删，留下的孤儿由下一次自己持租约的全量接管）。
-- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化；租约参数（30s 心跳/90s 陈旧/130min 接管）、fail-open 与 kill switch 的合同见架构 §4.8，运维语义与破锁见[交付与验收](usage/delivery.md)场景 4b。inflight 标记保留为**降级态告警层**：fail-open、kill switch（`WAO_VERIFICATION_GATE=off`）、单文件跑等不经闸的场景仍由它兜底告警。运维出口：`npm run cli -- runs gate` 只读查询 free/held/corrupt 与 kill switch；`--release` 人工破锁仅限确认没有验证在跑而租约残留的场景（破除失败 fail-closed 非零退出）。
+- **预防（机器级 advisory inflight 标记）**：runner 开跑前（runs-guard 基线快照之前）在**机器级状态目录**（win32 `%LOCALAPPDATA%\wao`，回退 `~/.wao-machine`；经 `src/machineGatePaths.js`，对 harness per-attempt TEMP 注入免疫）放 `wao-canonical-test.inflight` **机器全局 advisory 标记（非锁）**。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`；**WARNING = 结果可能受资源争用污染，顺序复跑即可**——永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则打 `[canonical] NOTICE: stale inflight marker`；自己持有同机验证租约的全量随即接管（删前复读，内容没变才删，再建本次的标记），不持租约的全量（含交付验证里的）只打这一行；pid 活/不可判仍打 WARNING，不产生新失败面；标记只在自持的退出路径删除（强杀不删，孤儿由下一次持租约的全量接管）。
+- **根治层（同机验证串行化闸）**：`verification.lease` 租约闸把交付验证与直连的 canonical 全量串行化；租约参数、fail-open、kill switch 与 `runs gate` / `--release`（破锁失败 fail-closed 非零退出）的合同见架构 §4.8，运维语义见[交付与验收](usage/delivery.md)场景 4b。不经闸的跑法（单文件跑等）仍由上面的 inflight 标记兜底告警。
 
 ### 8.2 主仓根跑全量前确认无活跃 worker/daemon（runs-guard 红灯，TD-134）
 
