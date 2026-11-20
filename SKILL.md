@@ -23,7 +23,7 @@ A WAO worker and a host-native subagent are different channels — only a succes
 
 ## Mainline
 
-Before expanding work, stop at the first true line: (1) It does not block the current roadmap item: defer it. (2) A smaller containment lets the roadmap continue: do that and stop. (3) New subsystem, protocol, persistent state, or separate workstream expected to exceed half a day: ask the Owner first. (4) Otherwise the minimum change that advances the roadmap item. Active safety incident: contain immediate harm first; full remediation is a separate Owner-approved task.
+Before expanding work, stop at the first true line: (1) It does not block the current roadmap item: defer it. (2) A smaller containment lets the roadmap continue: do that and stop. (3) New subsystem, protocol, persistent state, or separate workstream expected to exceed half a day: ask the Owner first. (4) Otherwise make the minimum change that advances the roadmap item. Active safety incident: contain immediate harm first; full remediation is a separate Owner-approved task.
 
 ## 一个批次 (One batch)
 
