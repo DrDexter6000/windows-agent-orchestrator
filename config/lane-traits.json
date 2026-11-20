@@ -319,7 +319,7 @@
         "providerID": null,
         "effort": null
       },
-      "reviewPending": "kimi 2.5.2→2.6.3（11-18，后端改读 turns 端点）：delta 认证、续修、纠偏与停止冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
+      "reviewPending": "kimi 2.5.2→2.6.3（11-18，后端改读 turns 端点）：delta 认证（conditional）、续修、纠偏与停止冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [

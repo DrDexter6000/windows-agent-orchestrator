@@ -194,9 +194,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 ## MCP `runs_list`：列出 run
 
-`runs_list` 让 MCP host 列出当前绑定范围内的 run。只读、幂等：不修改任何持久状态、不追加 transcript event。workspace 未绑定时返回空 `runs:[]`，不 fail-closed——这是只读列举，不是 state-changing 操作；其它项目的 run 不可见，不跨 workspace 探测。
+`runs_list` 让 MCP host 列出当前绑定范围内的 run。只读、幂等：不修改任何持久状态、不追加 transcript event。既没给 `expectedWorkspaceRoot` 又没有缺省绑定时返回固定错误（`workspace not bound: …`）；其它项目的 run 不可见，不跨 workspace 探测。
 
-输入两字段均可选。`activeOnly`（bool，默认 `false`）：只返回经证明 active 的 run——transcript 为已知非终态且有 fresh owner heartbeat（默认 10s 阈值）。单纯"未到终态"不足以算 active：一个非终态但缺 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也绝不据此推断它 failed/dead/stopped（仍可能长时间运行或休眠）；它计入 `unresolvedCount`，仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。`runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned——绑定由 server 解析，不能通过 tool argument 提供。
+输入三字段均可选。`expectedWorkspaceRoot`：给了就当场证明，只作用于本次调用；省略时用缺省绑定（MCP roots → 启动配置）。`activeOnly`（bool，默认 `false`）：只返回经证明 active 的 run——transcript 为已知非终态且有 fresh owner heartbeat（默认 10s 阈值）。单纯"未到终态"不足以算 active：一个非终态但缺 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也绝不据此推断它 failed/dead/stopped（仍可能长时间运行或休眠）；它计入 `unresolvedCount`，仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。`runDir`、registry、`agentId`、`cwd` 等 server-owned。
 
 `runs` 每个元素含 `runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
 

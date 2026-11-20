@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.9.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-11-v0.9.0.md)
+[![version](https://img.shields.io/badge/version-v0.10.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-20-v0.10.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -58,27 +58,25 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.9.0 (2026-11-11)
+## What's new in v0.10.0 (2026-11-20)
 
-- **Upgrade action** — the `kimi-code` and `deepseek-harness` worker backends are retired
-  (decision 0123): delete any private registry entry that still names them. A delivery whose
-  verification runs the full `npm test` declares `verificationTimeoutMs` of at least 3600000.
-- **Workers survive an MCP server restart** — background runners start through a WMI-created
-  bridge, so a host that restarts the WAO MCP server after a request timeout no longer takes the
-  running workers with it (decision 0120); repackage and reverify waits fit inside the host's
-  request limit (decision 0119).
-- **The Lead can tell a runner is gone** — the runner's stderr stays on disk; `status` and
-  `run_status` say so once a quiet run's runner is provably absent, and `consult wait
-  --until-settled` exits 3 with `runner_gone` as `runs wait` does.
-- **Fewer false verdicts** — the zcode stall gate also watches a Windows job on its app-server, so
-  children started through npm or npx no longer look stalled (decision 0121); unresolved
-  write-boundary checks are retried.
-- **Keep-awake respects the screen saver** — while WAO holds the display on, it starts the user's
-  own screen saver after the user's idle timeout (decision 0122).
-- **New fable lane** — Claude Fable 5.2 via claude-code, for design and brainstorm reviews only
-  (needs Claude Code CLI 2.1.321 or later).
+- **Upgrade action** — the MCP tool surface goes from 23 to 20 (decision 0125): `workspace_select`,
+  `workspace_status` and MCP `run_wait` are gone. Each call names its project with
+  `expectedWorkspaceRoot` (required on write tools, optional on read tools); wait with repeated
+  `run_await_result`, `run_delivery` with `waitMs`, or CLI `runs wait --until-settled`. Restart the
+  MCP host. The kimi-web lane needs kimi 2.6 or later; the sol and astra lanes change model
+  (`wao registry align`).
+- **Continuation lineages close in one decision** — accepting the final candidate marks its
+  continuation ancestors as superseded, so they need no rejection each and reclaim can remove
+  them (decision 0126); `worktree reclaim` keeps more when facts are unclear.
+- **Resumed workers see the new contract** — claude-code and codex resume turns restate the turn's
+  role and delivery contract in the prompt.
+- **Waits** — `runs wait` takes several runs and returns at the first to settle; a settlement wait
+  that cannot prove its runner gone exits 5 `runner_unproven` (decision 0124).
+- **Lanes** — implementation follows the ladder glm-pro → deepseek-flash → opus; ratings come from
+  real deliveries and reviews.
 - Scope, review record and release-gate evidence:
-  [`docs/changelog-2026-11-11-v0.9.0.md`](docs/changelog-2026-11-11-v0.9.0.md).
+  [`docs/changelog-2026-11-20-v0.10.0.md`](docs/changelog-2026-11-20-v0.10.0.md).
 
 ## Current status
 

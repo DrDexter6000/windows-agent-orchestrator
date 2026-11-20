@@ -11,7 +11,7 @@ WAO 是 MCP-first 控制面（为什么见决定 0017）：一个 MCP host（如
 
 常用 Lead 闭环：`registry_list`（inventory）→ `lead_preflight`（带 `expectedWorkspaceRoot` 看该项目）→ `run_dispatch` → `run_await_result`（等终态，可重复调用）→ `run_delivery_review_bundle`（审查）→ `run_delivery_decide`（验收）。原子观察工具（`run_status` / `run_collect` / `run_activity` / `run_diagnose`）、delivery 查询与审查、`run_stop` / `runs_list` 恢复、Lead 授权的 `run_continue` / `run_correct`，各工具的完整语义按任务分页：[派发](dispatch.md)、[监督](supervise.md)、[取结果与查历史](results.md)、[交付与验收](delivery.md)、[会审](consult.md)。
 
-`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 区间与默认值见生成层；`waitMs:0` 为 point-in-time 读取）后返回安全 compact 结果与 run/liveness 观测，非终态时可按任意合法 waitMs 再调。`waitMs` 约束工具主动 sleep/poll 的总等待预算，不是给每个内部阶段各分配一份；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算——工具不把这种环境延迟谎报成 worker 失败。观察窗口、终止事实、读失败与 transport 恢复的完整语义见[监督](supervise.md)；终态附带的有界 `outcome` 捆绑（terminalState / diagnosis / delivery 安全事实，不含 commit id、changed paths、diff、command 文本或绝对路径）见生成层，其中 `outcome.delivery.isolationFailureCode` 的语义见[交付与验收](delivery.md)。
+`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 区间与默认值见[监督](supervise.md)「MCP 等待」；`waitMs:0` 为 point-in-time 读取）后返回安全 compact 结果与 run/liveness 观测，非终态时可按任意合法 waitMs 再调。`waitMs` 约束工具主动 sleep/poll 的总等待预算，不是给每个内部阶段各分配一份；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算——工具不把这种环境延迟谎报成 worker 失败。观察窗口、终止事实、读失败与 transport 恢复的完整语义见[监督](supervise.md)；终态附带的有界 `outcome` 捆绑（terminalState / diagnosis / delivery 安全事实，不含 commit id、changed paths、diff、command 文本或绝对路径）见生成层，其中 `outcome.delivery.isolationFailureCode` 的语义见[交付与验收](delivery.md)。
 
 built-in playbook catalog 不在工具面：它是按需读取的 MCP resources（`wao://playbooks`），见[取结果与查历史](results.md)。
 
@@ -122,7 +122,7 @@ registry 源可读但某条目无法 normalize/project 时，走**部分投影**
 | claude-desktop | 把片段的 `mcpServers.wao` 并入 `%APPDATA%\Claude\claude_desktop_config.json`，完全退出并重启桌面端 | 同一文件 |
 | dsh | 把片段的 `insert` 行并入 `~/.dsh/profiles/<profile>/cordis.patch.yml`（YAML，不是 `mcpServers` JSON）；profile 声明 `patchReload: live` 时改完立即生效，否则重启 dsh | 各 profile 的 `cordis.patch.yml` 与 `cordis.yml`（按 id 覆盖、`disabled` 表达式、flow 行记 unknown；bundle 层、`--patch` 叠加与 `cordis:include` 不在探测范围） |
 
-表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态（接入步骤与排坑见下方「zcode 接入」一段）；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_await_result` / `run_consult`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
+表内宿主的真机加载验证状态与证据锚点以 `src/hostAdapters/hostDescriptors.js` 冻结表为唯一权威。codex 偶发某个会话看不到工具（未归因）。zcode 的接法特殊——本地插件包形态（接入步骤与排坑见下方「zcode 接入」一段）；其 `.mcp.json` 的 wao 条目携带 **`timeoutMs: 660000`**：zcode 宿主对单个工具调用的默认超时是 30000ms，会把超过 30s 的等待族调用（`run_await_result`、`run_consult`、带 `waitMs` 的 `run_delivery`）掐成假失败；660000 = 600s 最大阻塞预算 + 60s 余量。早期装机没有该字段，需重装或更新插件（或按片段手改 `.mcp.json`）。dsh 片段同样带 `toolCallTimeoutMs: 660000`（其 MCP 客户端默认单次调用超时 60s，理由同 zcode）。
 
 **一站式指引与一行注册示例**：已装宿主时 `wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤），指引块排在输出第一屏（先于 worker 选择）；表外宿主名也接受，给通用 stdio 路线。不带 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 与 dsh 标注 experimental）——示例的 flag 随宿主版本演进，权威形状 = 本页 + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
 

@@ -3213,7 +3213,7 @@ const RUNS_LIST_OUTPUT = z.object({
   // 绑定来源 + 非绝对项目标签（<displayName>-<hash8>，与 lead_preflight
   // workspace.projectBucket 同派生式）——标签是绑定根所属项目的，链接工作树
   // 取主工作树的项目（决定 0099 R8）；绑定根不可识别时 projectBucket 为 null。
-  // runs_list 可按调用带目标根；缺省仍跟随会话绑定（B 类缺省范围）。
+  // runs_list 可按调用带目标根；省略时用缺省绑定（MCP roots → 启动配置）。
   scope: z.object({
     source: z.enum(["call_target", "server_config", "mcp_root"]),
     projectBucket: z.string().min(1).max(128).nullable(),

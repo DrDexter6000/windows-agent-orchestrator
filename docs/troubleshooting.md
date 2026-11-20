@@ -16,6 +16,7 @@
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
 | `run_continue` 拒 `no_provider_session`（Codex continuable 父 run） | [§1.6](#16-run_continue-返回-no_provider_sessioncodex-continuable-父-run) |
 | claude-code 续修轮启动即失败，报 provider 会话不存在 | [§1.7](#17-claude-code-续修报-provider-会话不存在) |
+| `runs wait` / `consult wait --until-settled` 以 5 退出（`runner_unproven`） | `wao manual supervise "等待到收口"` |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
 | `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
@@ -293,7 +294,7 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
   `hostPid` 的运行走进程树击杀并核验；resume 重放过的运行，目标是重放记录的新进程。会话
   记录既无 pid 也无 `serveUrl` 的运行停不下：核实其进程后手动结束进程树，runner 在时转录
   以 `transport closed` 落 failed。
-- **诚实边界**：流分片是上游内部遥测，只在 zcode CLI 0.16.9 上验证过；进程活跃度阈值
+- **诚实边界**：流分片是上游内部遥测，首次实测在 zcode CLI 0.16.9，3.18.x 只确认通知形状未变、未复测分片续命；进程活跃度阈值
   （空闲 CPU 0–2.5 ms/s、I/O 4–9 KB/s）来自一次真机探针，不是长期统计。读数与来由见
   决定 0067。
 

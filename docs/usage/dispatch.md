@@ -72,7 +72,7 @@ npm run cli -- runs wait <runId> --until-settled     # 轮询到收口才退出�
 
 runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
-`runs wait` 与 MCP 等待（`run_await_result`）共用同一族等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP 等待"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes` 与 `nextStep`（与 MCP 同一 selector/模板）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
+`runs wait` 与 MCP 等待（`run_await_result`）共用同一族等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP 等待"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes`（与 MCP 同一目录）与 `nextStep`（模板见监督页）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
 
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`：本地进程式 backend 两层都查，HTTP serve backend——kimi-web 豁免）；两层=前台执行通道（RunManager start/resume）与后台派发通道（dispatchRun，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
@@ -176,7 +176,7 @@ continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"
 
 verification 环境合同：可选声明 `verificationSetupCommands: string[]`——在 assertion 命令（`verificationCommands`）之前顺序执行的环境准备命令（如 `npm ci` 安装依赖、生成构建产物）。exact-artifact verifier 运行在独立的 per-attempt 临时环境，依赖不继承：selected / worker worktree 的 `node_modules` 等 ignored / untracked 依赖不会自动出现在 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。setup/assertion 的分开验证与投影闭集、逐命令后 re-proof、漂移即 `artifact_mutated`、per-attempt temp 注入等完整合同见[架构](../02-architecture.md) §4.8 第 5 条。
 
-派发目标只来自本次调用：`run_dispatch` 必传 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径），经 `proveWorkspace` 证明——缺参或证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。会话选择、MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。归属核验比 cwd 规范路径、不看桶名：另一项目、子目录或非 Git cwd 派出的 run，以及 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过——读面工具（collect / delivery / decide 等）用同一核验。
+派发目标只来自本次调用：`run_dispatch` 必传 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径），经 `proveWorkspace` 证明——缺参或证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。归属核验比 cwd 规范路径、不看桶名：另一项目、子目录或非 Git cwd 派出的 run，以及 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过——读面工具（collect / delivery / decide 等）用同一核验。
 
 输出（成功/拒绝同形，MCP `content` + `structuredContent`）：字段清单见生成层。返回的 `agentId`（transcript envelope 盖戳的 canonical worker 身份）必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
 

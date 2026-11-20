@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.9.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-11-v0.9.0.md)
+[![version](https://img.shields.io/badge/version-v0.10.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-20-v0.10.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,24 +51,20 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.9.0 新增（2026-11-11）
+## v0.10.0 新增（2026-11-20）
 
-- **升级要动手**——`kimi-code` 与 `deepseek-harness` 两个 worker 后端退役（决定 0123）：私有注册表里
-  还写着它们的条目要删掉。交付验证跑全量 `npm test` 时，`verificationTimeoutMs` 至少声明 3600000。
-- **MCP 服务重启不再带走 worker**——后台 runner 经 WMI 创建的启动桥起，宿主因请求超时重启 WAO MCP
-  服务时，在跑的 worker 不受牵连（决定 0120）；repackage 与 reverify 的等待落在宿主的请求时限之内
-  （决定 0119）。
-- **读得出 runner 已经不在**——runner 的 stderr 落盘；静默运行的 runner 能证明已不在时，`status` 与
-  `run_status` 直接说出来；`consult wait --until-settled` 也像 `runs wait` 一样以退出码 3
-  `runner_gone` 退出。
-- **少一些误判**——zcode 停滞门另读挂在 app-server 上的 Windows 作业对象，经 npm、npx 起的子进程不再
-  被误判停滞（决定 0121）；隔离门解析不出物理路径的写一律重试。
-- **保持唤醒时照顾屏保**——WAO 持有"显示器保持开启"期间，空闲达到用户自己的屏保超时就启动用户的屏保
-  （决定 0122）。
-- **新增 fable 车道**——Claude Fable 5.2，经 claude-code，只用于方案设计与头脑风暴会审（要 Claude Code
-  CLI 2.1.321 或更新）。
+- **升级要动手**——MCP 工具面 23 → 20（决定 0125）：`workspace_select`、`workspace_status` 与 MCP
+  `run_wait` 撤出。每次调用用 `expectedWorkspaceRoot` 指定项目（写类必传、读类可选）；等待改用重复
+  `run_await_result`、`run_delivery` 带 `waitMs`，或 CLI `runs wait --until-settled`。MCP 宿主要重启。
+  kimi-web 车道要 kimi 2.6 或更新；sol、astra 两条车道换型号（`wao registry align`）。
+- **续修谱系一次裁决收尾**——采纳最终候选后，续修祖先自动算被取代，不用逐条拒收，回收可直接摘掉
+  （决定 0126）；事实不清时 `worktree reclaim` 保留得更多。
+- **续修轮看得到新合同**——claude-code 与 codex 的续修轮把本轮角色与交付合同重述在提示词里。
+- **等待**——`runs wait` 可同时等多个运行、先到先返回；收口等待证明不了 runner 已不在时以退出码 5
+  `runner_unproven` 退出（决定 0124）。
+- **车道**——写代码按 glm-pro → deepseek-flash → opus 的阶梯选；评级来自真实交付与会审。
 - 范围、会审记录与发版门槛证据见
-  [`docs/changelog-2026-11-11-v0.9.0.md`](docs/changelog-2026-11-11-v0.9.0.md)。
+  [`docs/changelog-2026-11-20-v0.10.0.md`](docs/changelog-2026-11-20-v0.10.0.md)。
 
 ## 当前状态
 
