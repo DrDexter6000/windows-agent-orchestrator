@@ -24,7 +24,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { basename, join } from "node:path";
@@ -305,7 +305,7 @@ test("OI-A1: 等裁定 / 终态未收口 / 留待回收（已采纳+已拒收+�
       "open item: 1 terminal run(s) not settled (verification/reverify without a result; "
       + "run_delivery or `wao runs wait <runId> --until-settled`): run_a2");
     assert.equal(lines[2],
-      "open item: 3 decided/no-delivery wao/run_* branch(es)" + RECLAIM_TAIL);
+      "open item: 3 decided / superseded / lineage-closed / no-delivery wao/run_* branch(es)" + RECLAIM_TAIL);
     for (const line of lines) {
       assert.ok(!line.includes(CROSS_TREE_HINT), `同根派发不出跨工作树提示: ${line}`);
     }
@@ -393,7 +393,7 @@ test("OI-A1d: 终态 failed + 重打包 + 验证 pending——已拒收的不进
       + "run_delivery or `wao runs wait <runId> --until-settled`): run_d1",
       "未裁定的仍在终态未收口行；已拒收的不在（run_d2 未被点名）");
     assert.equal(lines[1],
-      "open item: 1 decided/no-delivery wao/run_* branch(es)" + RECLAIM_TAIL,
+      "open item: 1 decided / superseded / lineage-closed / no-delivery wao/run_* branch(es)" + RECLAIM_TAIL,
       "已拒收的计入留待回收");
   } finally { cleanupDir(root); }
 });
@@ -420,7 +420,7 @@ test("OI-A2: 可续计数正例（谱系在、未采纳、未闭合）在等裁�
   } finally { cleanupDir(root); }
 });
 
-test("OI-A3: 可续计数负例——线系已闭合时不计", async () => {
+test("OI-A3: 线系已显式关闭（第 120 批）——不再进等裁定行、不计可续，计入留待回收", async () => {
   const root = mkdtempSync(join(tmpdir(), "wao-oi-a3-"));
   try {
     makeGitRepo(root);
@@ -434,8 +434,113 @@ test("OI-A3: 可续计数负例——线系已闭合时不计", async () => {
       worktrees: [],
       eventsByRun: { run_c3: closedLineage },
     });
-    assert.ok(lines[0].endsWith("): run_c3"), `线系已闭合 → 无可续计数: ${lines[0]}`);
+    assert.equal(lines.length, 1, `关闭的线系只出回收一行: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].startsWith("open item: 1 decided / superseded / lineage-closed / no-delivery"),
+      `计入留待回收: ${lines[0]}`);
+    assert.ok(!lines[0].includes("await a Lead decision"), "关闭的谱系不再催裁决（第 120 批修的旧行为）");
     assert.ok(!lines[0].includes("continuable"), "无 continuable 计数");
+  } finally { cleanupDir(root); }
+});
+
+test("OI-A3b: 链 A→B→C 采纳 C（第 120 批派生）——A、B 被取代，不进等裁定行、不计可续，三者都计入留待回收", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a3b-"));
+  const runDir = join(root, "runs");
+  try {
+    makeGitRepo(root);
+    mkdirSync(runDir, { recursive: true });
+    const lineageRoot = (runId) => [
+      { type: "run.session_reuse", runId, mode: "run_lineage", turn: "first", rootRunId: runId },
+      ...settledUndecided(runId, root),
+    ];
+    const lineageChild = (runId, parentRunId, rootRunId) => [
+      { type: "run.background_submitted", runId, continuation: true, parentRunId, rootRunId },
+      { type: "run.session_reuse", runId, mode: "run_lineage", turn: "resume", rootRunId },
+      ...settledUndecided(runId, root),
+    ];
+    const eventsByRun = {
+      run_la: lineageRoot("run_la"),
+      run_lb: lineageChild("run_lb", "run_la", "run_la"),
+      run_lc: [...lineageChild("run_lc", "run_lb", "run_la"), accepted("run_lc")],
+    };
+    // 归属口径：首事件必须带在档 project 事实（写侧续修事实上就落了 project；
+    // 首事件没有 cwd 时 identityOfFirstEvent 不退回推导）。
+    const boundKey = identifyProjectFromCwd(root, TEST_PROJECT_IO).key;
+    for (const [runId, events] of Object.entries(eventsByRun)) {
+      eventsByRun[runId] = withRecordedFact(events, projectFact(boundKey));
+    }
+    // 转录真实在场（谱系枚举按三处文件集找成员）；读取仍走注入读器。
+    for (const [runId, events] of Object.entries(eventsByRun)) {
+      writeFileSync(join(runDir, `${runId}.jsonl`), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    }
+    const { lines } = await runCollect(root, {
+      refs: ["wao/run_la", "wao/run_lb", "wao/run_lc"],
+      worktrees: [],
+      eventsByRun,
+      over: { runDir },
+    });
+    assertLineShape(lines);
+    assert.equal(lines.length, 1, `三运行一行（无等裁决行）: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].startsWith("open item: 3 decided / superseded / lineage-closed / no-delivery"),
+      `A、B 被取代，C 已裁决 → 三条都留待回收: ${lines[0]}`);
+    assert.ok(!lines[0].includes("await a Lead decision"), "被取代的祖先不再催裁决");
+    assert.ok(!lines[0].includes("continuable"), "被取代的运行不计入可续计数");
+  } finally { cleanupDir(root); }
+});
+
+test("OI-A3c（第 120 批续修 E1/E4）：普通运行不触发派生预筛（注入字节读计数）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a3c-"));
+  const runDir = join(root, "runs");
+  try {
+    makeGitRepo(root);
+    mkdirSync(runDir, { recursive: true });
+    const boundKey = identifyProjectFromCwd(root, TEST_PROJECT_IO).key;
+    // 5 个普通交付运行（无谱系引用）：会进"等裁决"行，但不会走到 forRoot。
+    const eventsByRun = {};
+    for (let i = 1; i <= 5; i += 1) {
+      const runId = `run_plain_${i}`;
+      eventsByRun[runId] = withRecordedFact(settledUndecided(runId, root), projectFact(boundKey));
+      writeFileSync(join(runDir, `${runId}.jsonl`), eventsByRun[runId].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    }
+    let byteReads = 0;
+    const readBytesFn = async (path) => {
+      byteReads += 1;
+      return readFileSync(path);
+    };
+    const plain = await runCollect(root, {
+      refs: Object.keys(eventsByRun).map((id) => `wao/${id}`),
+      worktrees: [],
+      eventsByRun,
+      over: { runDir, readBytesFn },
+    });
+    assert.equal(byteReads, 0, "全是普通运行 → 一次全库字节预筛都不该做");
+    assert.ok(plain.lines[0].includes("5 settled delivery run(s) await a Lead decision"), plain.lines[0]);
+
+    // 正例对照：加入"有谱系引用 + 打包 + 未裁决 + 已收口"的根与已采纳后代，
+    // 预筛才发生，且根不再进等裁决行。
+    const lineageRoot = (runId) => [
+      { type: "run.session_reuse", runId, mode: "run_lineage", turn: "first", rootRunId: runId },
+      ...settledUndecided(runId, root),
+    ];
+    const lineageChild = (runId, parentRunId) => [
+      { type: "run.background_submitted", runId, continuation: true, parentRunId, rootRunId: parentRunId },
+      { type: "run.session_reuse", runId, mode: "run_lineage", turn: "resume", rootRunId: parentRunId },
+      ...settledUndecided(runId, root),
+      accepted(runId),
+    ];
+    eventsByRun.run_lin = withRecordedFact(lineageRoot("run_lin"), projectFact(boundKey));
+    eventsByRun.run_lin_c = withRecordedFact(lineageChild("run_lin_c", "run_lin"), projectFact(boundKey));
+    for (const runId of ["run_lin", "run_lin_c"]) {
+      writeFileSync(join(runDir, `${runId}.jsonl`), eventsByRun[runId].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    }
+    byteReads = 0;
+    const withLineage = await runCollect(root, {
+      refs: Object.keys(eventsByRun).map((id) => `wao/${id}`),
+      worktrees: [],
+      eventsByRun,
+      over: { runDir, readBytesFn },
+    });
+    assert.ok(byteReads > 0, "有真会推导的运行 → 预筛发生");
+    assert.ok(!withLineage.lines.some((l) => l.includes("run_lin")), "被取代的根不进等裁决行");
   } finally { cleanupDir(root); }
 });
 
@@ -503,7 +608,7 @@ test("OI-A12: 派发自已删除工作树的运行——首事件记着与绑定
     assert.ok(lines[0].includes("): run_g1"), "runId 点名");
     assert.ok(lines[0].includes(CROSS_TREE_HINT),
       "cwd 指向另一棵（已删的）工作树 → 提示按 cwd 与绑定根比较、照常给出");
-    assert.ok(lines[1].startsWith("open item: 1 decided/no-delivery"), `回收行计入: ${lines[1]}`);
+    assert.ok(lines[1].startsWith("open item: 1 decided / superseded / lineage-closed / no-delivery"), `回收行计入: ${lines[1]}`);
     assertLineShape(lines);
   } finally { cleanupDir(root); }
 });
@@ -562,7 +667,7 @@ test("OI-A6: 超过 50 条只查看最新 50 条（排序参数敏感：旧到�
       "枚举请求新到旧排序（变异为旧到新时假 git 返回不同顺序）");
     assert.equal(readCalls.length, OPEN_ITEM_BRANCH_CAP, `只读 ${OPEN_ITEM_BRANCH_CAP} 份转录`);
     assert.equal(lines.length, 1, `最新 50 条全落留待回收 → 一行: ${JSON.stringify(lines)}`);
-    assert.ok(lines[0].startsWith(`open item: ${OPEN_ITEM_BRANCH_CAP} decided/no-delivery wao/run_* branch(es) `),
+    assert.ok(lines[0].startsWith(`open item: ${OPEN_ITEM_BRANCH_CAP} decided / superseded / lineage-closed / no-delivery wao/run_* branch(es) `),
       `计数是已查看的（最新）部分: ${lines[0]}`);
     assert.ok(!lines.some((l) => l.includes("await a Lead decision")),
       "最旧 5 条等裁定不在已查看的 50 条里（--sort=committerdate 变异时会进 → 此断言红）");
@@ -614,7 +719,7 @@ test("OI-A8: 运行树按全仓口径数——路径以 .wao-worktrees/<合法 r
     });
     assert.equal(lines.length, 1);
     assert.equal(lines[0],
-      "open item: 1 decided/no-delivery wao/run_* branch(es) + 2 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
+      "open item: 1 decided / superseded / lineage-closed / no-delivery wao/run_* branch(es) + 2 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
   } finally { cleanupDir(root); }
 });
 
@@ -629,7 +734,7 @@ test("OI-A9: 0 分支但残留运行树 → 仍出留待回收行；worktree lis
     });
     assert.equal(withTrees.lines.length, 1, "0 分支 + 1 棵运行树 → 仍一行");
     assert.equal(withTrees.lines[0],
-      "open item: 0 decided/no-delivery wao/run_* branch(es) + 1 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
+      "open item: 0 decided / superseded / lineage-closed / no-delivery wao/run_* branch(es) + 1 run worktree(s) under .wao-worktrees/" + RECLAIM_TAIL);
     // worktree list 失败 → 只有分支数，无运行树数。
     const git = fakeGit({ refs: ["wao/run_w2"] });
     const baseFn = git.fn;
@@ -850,7 +955,7 @@ test("OI-B4: 复数条目用 entries；A 的行在前、收件箱行在后", asy
       ]),
     });
     assert.equal(lines.length, 2);
-    assert.ok(lines[0].startsWith("open item: 1 decided/no-delivery"), "A 行在前");
+    assert.ok(lines[0].startsWith("open item: 1 decided / superseded / lineage-closed / no-delivery"), "A 行在前");
     assert.equal(lines[1], "open item: 2 unprocessed feedback entries in the WAO inbox (`wao feedback list`)");
     assertLineShape(lines);
   } finally { cleanupDir(root); }

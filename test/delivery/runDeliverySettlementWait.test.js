@@ -12,9 +12,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { getRunDeliveryReadiness } from "../../src/application/runDelivery.js";
+import { readTranscript } from "../../src/transcript.js";
 
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
@@ -144,6 +145,54 @@ test("DSW-02: 验证中拒收一直无结果 → 等到 deadline 如实返回（
     assert.equal(r.readiness, "reviewable");
     assert.equal(r.waitReturnedEarly, false, "未收口 → 等满窗口（旧行为会立即返回）");
     assert.equal(r.verification.status, "pending", "验证仍无结果，如实报告");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// 第 120 批续修（审查 B1/A1）：等待到期仍未收口时不推导"被取代"——调用方
+// 不用这个结果，且窗口到期后再付一次全库预筛会撞宿主约 60 秒上限。夹具是
+// "验证仍 pending 的续修祖先 + 已采纳后代"：即使不看 A1，到期路径也不该带出字段。
+test("DSW-10: 等待到期仍未收口 → 不做派生（结果无 supersededByRunId，且不读成员转录）", async () => {
+  const dir = makeRunDir();
+  const ROOT = "run_dsw10_root";
+  const CHILD = "run_dsw10_child";
+  try {
+    const rootRef = makeRef(ROOT);
+    writeEvents(dir, ROOT, [
+      started(ROOT),
+      { type: "run.session_reuse", runId: ROOT, agentId: "coder_low", mode: "run_lineage", turn: "first", rootRunId: ROOT },
+      { type: "run.delivery_created", runId: ROOT, agentId: "coder_low", delivery: rootRef },
+      stateChange(ROOT, "completed"),
+    ]);
+    const childRef = makeVerifiedRef(CHILD, "passed");
+    writeEvents(dir, CHILD, [
+      { type: "run.background_submitted", runId: CHILD, agentId: "coder_low", cwd: "D:/fake/ws", continuation: true, parentRunId: ROOT, rootRunId: ROOT },
+      { type: "run.session_reuse", runId: CHILD, agentId: "coder_low", mode: "run_lineage", turn: "resume", rootRunId: ROOT },
+      started(CHILD),
+      { type: "run.delivery_created", runId: CHILD, agentId: "coder_low", delivery: childRef },
+      { type: "run.delivery_verification_passed", runId: CHILD, agentId: "coder_low", delivery: childRef },
+      stateChange(CHILD, "completed"),
+      {
+        type: "run.delivery_accepted", runId: CHILD, agentId: "coder_low",
+        delivery: { ...childRef, acceptance: { status: "accepted", reviewerType: "lead_agent" } },
+        deliveryCommit: childRef.deliveryCommit, reason: "ok",
+      },
+    ]);
+    const clock = makeClock();
+    const readPaths = [];
+    const r = await getRunDeliveryReadiness({
+      runId: ROOT, runDir: dir, waitMs: 5000,
+      sleepFn: clock.sleepFn, nowFn: clock.nowFn, pollIntervalMs: 1000,
+      readTranscriptFn: async (path) => {
+        readPaths.push(basename(path));
+        return readTranscript(path);
+      },
+    });
+    assert.equal(r.waitReturnedEarly, false, "验证 pending → 等满窗口");
+    assert.equal("supersededByRunId" in r, false, "到期路径不推导");
+    assert.ok(!readPaths.includes(`${CHILD}.jsonl`), "到期路径不读后代转录（不做派生）");
+    assert.equal(r.continuableHint, undefined, "到期路径照旧不带可续提示");
   } finally {
     cleanupDir(dir);
   }

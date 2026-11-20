@@ -156,10 +156,16 @@ export function lineageClosedIn(events, fileRunId) {
  * 归档会把成员错认缺席。归档枚举复用 listArchiveTranscriptFiles（同一实现）。
  * 归档枚举的 skipped（目录/文件读不出、符号链接不跟随）不静默丢弃——返回给
  * 调用方，由它保守处置（worktree reclaim 归 undeterminable）。
+ * `strict: true`（第 120 批续修 L2）：桶目录/存储根读不出（权限等）时抛出而不是
+ * 静默跳过——把"枚举不完整"和"确实没有转录"分开。派生读器与回收执行用它；
+ * `runs lineage-close` 保持缺省的非严格口径。
  */
-export function lineageMemberFiles(runDir) {
+export function lineageMemberFiles(runDir, { strict = false } = {}) {
   const archive = listArchiveTranscriptFiles(runDir);
-  return { files: [...listTranscriptsDeep(runDir), ...archive.files], skipped: archive.skipped };
+  return {
+    files: [...listTranscriptsDeep(runDir, { strict }), ...archive.files],
+    skipped: archive.skipped,
+  };
 }
 
 /**

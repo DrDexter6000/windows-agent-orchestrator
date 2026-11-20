@@ -199,6 +199,49 @@ test("M9-6B-03: run_delivery extra args rejected, service count 0", async () => 
   }
 });
 
+test("M9-6B-05 (第 120 批续修 A5/B1): 未绑定会话 → 不派生；绑定 → 后代以同一绑定根核验", async () => {
+  const seen = [];
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    // 无 workspaceRoot：未绑定会话（没有归属授权）。
+    getRunDeliveryFn: async (input) => { seen.push(input); return sensitiveDeliveryResult(); },
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, undefined);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].skipSupersession, true, "未绑定 → 不做派生（核验不了归属）");
+    assert.equal(seen[0].descendantWorkspaceRoot, undefined);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+  // 绑定会话：同一个绑定根既核验被查询运行，也核验被采纳的后代。
+  const boundDir = mkdtempSync(join(tmpdir(), "m96b-05-bound-"));
+  try {
+    await makeGitRepo(boundDir);
+    const seenBound = [];
+    const boundServer = createWaoMcpServer({
+      registryPath: "/r.json", runDir: boundDir, workspaceRoot: boundDir,
+      getRunDeliveryFn: async (input) => { seenBound.push(input); return sensitiveDeliveryResult(); },
+    });
+    const boundClient = await buildInMemoryClient(boundServer);
+    try {
+      const res = await boundClient.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+      assert.equal(res.isError, undefined);
+      assert.equal(seenBound.length, 1);
+      assert.equal(seenBound[0].skipSupersession, undefined, "绑定 → 允许派生");
+      // 绑定根经 proveWorkspaceRoot 规范化（正斜杠）——比较规范化形态。
+      assert.equal(String(seenBound[0].descendantWorkspaceRoot).replace(/\\/g, "/"),
+        resolve(boundDir).replace(/\\/g, "/"), "后代 D 用同一授权根核验");
+    } finally {
+      await boundClient.close();
+      await boundServer.close();
+    }
+  } finally { cleanupDir(boundDir); }
+});
+
 test("M9-6B-04: run_delivery service error → fixed 'run_delivery failed'", async () => {
   const server = createWaoMcpServer({
     registryPath: "/r.json", runDir: "/runs",

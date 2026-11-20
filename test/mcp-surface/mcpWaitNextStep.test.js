@@ -293,9 +293,12 @@ test("NS-M6: run_delivery 带 waitMs 到期未收口 → nextStep；不带 waitM
 // 决定 0112：收口交付 + 可续谱系事实的转录（真实 service 消费，不注入假服务——
 // 负例要证明的是判定本身，不是适配层的 === true 门）。默认谱系根=本 run（first）；
 // lineageTurn:"resume" 时根指向另一个 run（rootRunId 必填，根转录单独落盘）。
+// 第 120 批：continuationParent 给定时首事件落 runId 绑定的续修事实
+// （continuation:true + parentRunId + rootRunId），谱系改 turn:resume——生产上
+// run_continue 写出的子运行形状。
 function seedSettledContinuableDelivery(runDir, runId, {
   workspaceCwd, lineage = true, decision = null, explicit = false, closed = false,
-  verificationPending = false, lineageTurn = "first", rootRunId = null,
+  verificationPending = false, lineageTurn = "first", rootRunId = null, continuationParent = null,
 } = {}) {
   mkdirSync(runDir, { recursive: true });
   const a = "coder_low";
@@ -312,8 +315,12 @@ function seedSettledContinuableDelivery(runDir, runId, {
     ...ref,
     verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
   };
+  const lineageTurnActual = continuationParent ? "resume" : lineageTurn;
   const lines = [
-    jl({ type: "run.background_submitted", background: true, cwd: workspaceCwd, deliveryRequested: true, ts: TS, runId, agentId: a }),
+    jl({
+      type: "run.background_submitted", background: true, cwd: workspaceCwd, deliveryRequested: true, ts: TS, runId, agentId: a,
+      ...(continuationParent ? { continuation: true, parentRunId: continuationParent, rootRunId } : {}),
+    }),
     jl({ type: "run.state_change", to: "pending", reason: "created", ts: TS, runId, agentId: a }),
     jl({ type: "run.state_change", to: "running", reason: "first_event", ts: TS, runId, agentId: a }),
     jl({
@@ -322,8 +329,8 @@ function seedSettledContinuableDelivery(runDir, runId, {
       delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"], verificationCommands: ["npm test"] },
     }),
     ...(lineage ? [jl({
-      type: "run.session_reuse", mode: "run_lineage", turn: lineageTurn,
-      rootRunId: lineageTurn === "first" ? runId : rootRunId, ts: TS, runId, agentId: a,
+      type: "run.session_reuse", mode: "run_lineage", turn: lineageTurnActual,
+      rootRunId: lineageTurnActual === "first" ? runId : rootRunId, ts: TS, runId, agentId: a,
     })] : []),
     jl({ type: "run.delivery_created", runId, agentId: a, ts: TS, delivery: ref }),
     // 无终态验证结果（verificationPending）= "验证中拒收"形状；否则验证 passed。
@@ -517,6 +524,46 @@ test("NS-M15: 续跑子运行——根转录已闭合（bound run.lineage_closed
       const parsed = res.structuredContent;
       assert.equal(parsed.waitReturnedEarly, true, "子运行自身已收口 → 提前返回");
       assert.equal("nextStep" in parsed, false, "根已闭合 → 不给可续提示");
+    } finally {
+      await client.close(); await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// 第 120 批：被取代（已有被采纳的后代）→ delivery_superseded nextStep
+// =====================================================================
+
+test("NS-M16: 收口交付已有被采纳的后代 → 即时查询与 waitMs 都给被取代的 nextStep；不改 schema", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m16-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    const ROOT = "run_ns_m16_root";
+    const CHILD = "run_ns_m16_child";
+    seedSettledContinuableDelivery(runDir, ROOT, { workspaceCwd: dir });
+    seedSettledContinuableDelivery(runDir, CHILD, {
+      workspaceCwd: dir, decision: "accepted", continuationParent: ROOT, rootRunId: ROOT,
+    });
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const expected = `Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`;
+      // 即时查询与带 waitMs 的查询都给（收口提前返回路径）。
+      for (const args of [{ runId: ROOT }, { runId: ROOT, waitMs: 1000 }]) {
+        const res = await client.callTool({ name: "run_delivery", arguments: args });
+        assert.equal(res.isError, undefined, JSON.stringify(res.content?.[0]?.text ?? ""));
+        assert.equal(res.structuredContent.nextStep, expected, JSON.stringify(args));
+        assert.ok(!res.structuredContent.nextStep.includes("run_continue"), "不给续修提示");
+        assert.ok(!/awaits the Lead's review/.test(res.structuredContent.nextStep), "不再说等 Lead 裁决");
+      }
+      // 已采纳的子运行自己没有派生文案（自身裁决优先；即时查询本来就不给 nextStep）。
+      const child = await client.callTool({ name: "run_delivery", arguments: { runId: CHILD } });
+      assert.equal(child.isError, undefined);
+      assert.equal("nextStep" in child.structuredContent, false);
+      // schema 未变：nextStep 仍是既有可选字段（输出键集由 RUN_DELIVERY_OUTPUT 锁定）。
+      const tools = await client.listTools();
+      const t = tools.tools.find((x) => x.name === "run_delivery");
+      assert.ok(Object.prototype.hasOwnProperty.call(t.outputSchema.properties, "nextStep"));
     } finally {
       await client.close(); await server.close();
     }

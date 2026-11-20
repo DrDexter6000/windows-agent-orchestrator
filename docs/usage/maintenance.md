@@ -45,12 +45,12 @@ npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 
 
 1. 生成计划（只读）：`npm run cli -- worktree reclaim --cwd <repo> --out <plan.json> [--run-dir DIR] [--include <runId>]...`，打印计划 sha256、可照抄 apply 命令、分类计数与逐条回收项的审批事实（嵌套项另打目标与父树）；不传 `--run-dir` 时缺省安装根的运行目录。
 2. 审阅与判定：谁判定、哪些要用户同意，见 `docs/02-architecture.md` §4.3「人工清退」。`include_required` 类保留项（未并入 main，且 tip 短 SHA 被 docs/`.wao/decisions/`/README 引用或只有分支没有树且三处无转录）判定可以回收的，带 `--include <runId>` 重新生成计划。
-3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库身份与计划绑定，一律用计划里的运行目录（`--run-dir` 不一致整体拒绝）；分支先进 bundle（完整历史，list-heads 含各 tip）；树逐棵复核——嵌套项先重证范围（父树仍在册同仓、路径未变、逐级无链接；旧形状嵌套项不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落盘；记录写失败、遇目录缺失登记或删分支阶段登记读不出以非零退出码结束并如实列出已删除部分。
+3. 执行：`npm run cli -- worktree reclaim --apply <plan.json> --expect-sha256 <hex> [--run-dir DIR]`。apply 重核仓库与计划绑定，一律用计划里的运行目录（不一致拒绝）；分支先进 bundle（完整历史，list-heads 含 tip）；树逐棵复核：嵌套项先重证范围（父树在册同仓、路径未变、无链接；旧形状不动）、内容指纹、逐成员现读转录后才摘，ref 比对后才删；删前对依赖被取代放行者按现状重证、其余已打包成员复核（裁决/线系/被取代三条都不满足才跳过：`delivery_packaged_undecided_now`；枚举不完整时计划不出删除项、执行跳过）；记录（计划副本、逐项结果、快照、bundle sha256）落 `<runs 同级>/runs-archive/<yyyy-mm>/worktree-reclaim-*/`，成败都落；记录写失败、目录缺失或删分支时登记读不出以非零退出码结束并列出已删部分。
 4. 收口：`npm run hygiene`。
 
-清退范围：主检出与每个经核验的关联工作树（在册、同 common git dir、目录在、路径无链接/junction）下各自的 `.wao-worktrees/` 一级 `<runId>` 子目录；嵌套项在计划里记范围证明（父树真实路径、common git dir、目标真实路径）。
+清退范围：主检出与每个经核验的关联工作树（在册、同 common git dir、目录在、路径无链接/junction）下各自的 `.wao-worktrees/` 一级 `<runId>` 子目录；嵌套项在计划里记范围证明（父树、common git dir、目标真实路径）。
 
-一律保留的形态（闭集，细节见计划文件与命令输出）：事实读不出或身份无法唯一判定（含有树但三处找不到转录、登记目录已不存在、重名或转录声明与登记树不一致；空库普查到树目标时整体拒绝生成计划）；范围外路径（源工作树、关联工作树本身、符号链接/junction、外仓 worktree）；运行中（非终态/近期事件/新鲜心跳）；复用线系未闭合；未裁决（已打包未决或树脏）；头指针漂移；嵌套保留；只读 run 留下的私有克隆（`private_clone`，TD-326）。已并入 main 的分支不做引用检查（提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走上方 prune --archive 通道，两套清退互不越界。
+一律保留的形态（闭集，见计划与命令输出）：事实读不出或身份无法唯一判定（含有树但三处找不到转录、登记目录已不存在、重名或转录声明与登记树不一致；空库普查到树目标时整体拒绝生成计划）；范围外路径（源工作树、关联工作树本身、符号链接/junction、外仓 worktree）；运行中（非终态/近期事件/新鲜心跳）；复用线系未闭合；未裁决（已打包未决——已被取代的祖先除外——或树脏）；头指针漂移；嵌套保留；只读 run 留下的私有克隆（`private_clone`，TD-326）。已并入 main 的分支不做引用检查（提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走上方 prune --archive 通道，两套清退互不越界。
 
 ## daemon 与自愈（无人值守长跑）
 

@@ -1046,6 +1046,143 @@ test("3C2-PRE-E: stale caller — in-lock recheck rejects duplicate added after 
   }
 });
 
+// ===== 第 120 批：被取代（已有被采纳的后代）=====
+
+/** 平铺 JSONL 写入（事件自带 ts/seq/runId/agentId，与写侧形状同序）。 */
+function writeFlatTranscript(dir, runId, events) {
+  writeFileSync(
+    join(dir, `${runId}.jsonl`),
+    events.map((e, i) => JSON.stringify({
+      ts: "2026-11-20T00:00:00.000Z", seq: i + 1, runId, agentId: "coder_low", ...e,
+    })).join("\n") + "\n",
+    "utf8",
+  );
+}
+
+function flatDeliveryRef(runId, { status = "pending", acceptance = "pending" } = {}) {
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId,
+    baseCommit: "b".repeat(40),
+    deliveryCommit: "d".repeat(40),
+    branch: `wao/${runId}`,
+    worktreePath: "D:/fake/wt",
+    changedFiles: ["src/a.js"],
+    verification: { status, commands: [], verifiedCommit: "d".repeat(40), results: [] },
+    acceptance: { status: acceptance, reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+}
+
+test("SUP-CLI-01: 被取代的交付——文本多一行、--format json 带 supersededByRunId（不改 acceptance）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-sup-cli-"));
+  const ROOT = "run_sup_cli_root";
+  const CHILD = "run_sup_cli_child";
+  try {
+    // 第 120 批续修（审查 A5→H）：本地 CLI 不核验被查询运行的归属，后代 D 也不核验；
+    // 这里保留 Git 初始化的工作区只为走真实 CLI 路径。
+    execSync("git init -q", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.email t@t", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.name T", { cwd: dir, stdio: "pipe" });
+    writeFileSync(join(dir, "README.md"), "# ws\n", "utf8");
+    execSync("git add -A", { cwd: dir, stdio: "pipe" });
+    execSync("git commit -q -m i", { cwd: dir, stdio: "pipe" });
+    const rootRef = flatDeliveryRef(ROOT);
+    writeFlatTranscript(dir, ROOT, [
+      { type: "run.started", backend: "claude-code", cwd: dir, delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40) } },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: ROOT },
+      { type: "run.delivery_created", delivery: rootRef },
+      {
+        type: "run.delivery_verification_passed",
+        delivery: { ...rootRef, verification: { ...rootRef.verification, status: "passed" } },
+      },
+      { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ]);
+    const childRef = flatDeliveryRef(CHILD);
+    writeFlatTranscript(dir, CHILD, [
+      { type: "run.background_submitted", background: true, continuation: true, parentRunId: ROOT, rootRunId: ROOT, cwd: dir },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: ROOT },
+      { type: "run.started", backend: "claude-code", cwd: dir, delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40) } },
+      { type: "run.delivery_created", delivery: childRef },
+      {
+        type: "run.delivery_verification_passed",
+        delivery: { ...childRef, verification: { ...childRef.verification, status: "passed" } },
+      },
+      { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+      {
+        type: "run.delivery_accepted",
+        delivery: {
+          ...childRef,
+          verification: { ...childRef.verification, status: "passed" },
+          acceptance: { status: "accepted", reviewerType: "lead_agent" },
+        },
+        deliveryCommit: childRef.deliveryCommit,
+        reason: "ok",
+      },
+    ]);
+    const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+    const expectedLine = `Superseded: a descendant delivery was already accepted (${CHILD}); no Lead decision is needed here`;
+
+    const text = await captureLog(async () => {
+      await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", dir], {});
+    });
+    assert.ok(text.split("\n").includes(expectedLine), `文本多一行: ${text}`);
+    assert.match(text, /Acceptance: pending/, "acceptance 不改（仍是 pending）");
+
+    const waitText = await captureLog(async () => {
+      await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", dir, "--wait-ms", "1000"], {});
+    });
+    assert.ok(waitText.split("\n").includes(expectedLine), `--wait-ms 文本也给: ${waitText}`);
+
+    const jsonOut = await captureLog(async () => {
+      await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", dir, "--format", "json"], {});
+    });
+    const parsed = JSON.parse(jsonOut);
+    assert.equal(parsed.supersededByRunId, CHILD, "--format json 带派生字段");
+    assert.equal(parsed.acceptance.status, "pending", "不改 acceptance");
+
+    const waitJson = await captureLog(async () => {
+      await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", dir, "--wait-ms", "1000", "--format", "json"], {});
+    });
+    assert.equal(JSON.parse(waitJson).supersededByRunId, CHILD, "waitMs 的 JSON 同一字段");
+
+    // 第 120 批续修（K4/H）：本地 CLI 不核验被查询运行的归属，也不给后代 D 加
+    // 单边归属门——`--cwd` 指向无关目录时照常给出后代（提示不会悄悄消失）。
+    const otherDir = mkdtempSync(join(tmpdir(), "wao-sup-cli-other-"));
+    try {
+      execSync("git init -q", { cwd: otherDir, stdio: "pipe" });
+      const otherText = await captureLog(async () => {
+        await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", otherDir], {});
+      });
+      assert.ok(otherText.split("\n").includes(expectedLine), `--cwd 指向无关目录仍给出后代: ${otherText}`);
+      const otherJson = await captureLog(async () => {
+        await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", otherDir, "--format", "json"], {});
+      });
+      assert.equal(JSON.parse(otherJson).supersededByRunId, CHILD, "无关 --cwd 的 JSON 同一字段");
+      const otherWait = await captureLog(async () => {
+        await runsDeliveryCommand([ROOT, "--run-dir", dir, "--cwd", otherDir, "--wait-ms", "1000"], {});
+      });
+      assert.ok(otherWait.split("\n").includes(expectedLine), `无关 --cwd 的 --wait-ms 也给: ${otherWait}`);
+    } finally {
+      await cleanupDir(otherDir);
+    }
+
+    // 已采纳的子运行：没有派生字段，也不多那一行。
+    const childText = await captureLog(async () => {
+      await runsDeliveryCommand([CHILD, "--run-dir", dir, "--cwd", dir], {});
+    });
+    assert.ok(!childText.includes("Superseded:"), `自身已裁决 → 不出派生: ${childText}`);
+    const childJson = await captureLog(async () => {
+      await runsDeliveryCommand([CHILD, "--run-dir", dir, "--cwd", dir, "--format", "json"], {});
+    });
+    assert.equal("supersededByRunId" in JSON.parse(childJson), false,
+      "非被取代的运行不带该字段（读面形状逐字节不变）");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
 /** Exported wrapper for testing _reconstructDelivery (not part of public API). */
 function _reconstructDeliveryExported(events) {
   // Inline copy of the logic for test-side pre-read verification

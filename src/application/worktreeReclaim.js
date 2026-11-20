@@ -21,7 +21,12 @@
 //                       别的成员）求值：线系成员非终态 / 槽目录新鲜认领 /
 //                       线系既未关闭也未 accepted
 //   5 pending_lead      交付已打包未裁决 / 未裁决且树有未提交、暂存、未跟踪或
-//                       被忽略的内容（只读与普通运行没有决定，一律算未裁决）
+//                       被忽略的内容（只读与普通运行没有决定，一律算未裁决）。
+//                       第 120 批：已有合法采纳后代的祖先（lineageSupersession
+//                       的派生事实）不再被"已打包未裁决"挡住——只撤掉这一个
+//                       阻塞，树脏/共享树有保留成员等其余保护照旧；apply 删树
+//                       与删分支前都按磁盘现状重新推导，证不出就跳过
+//                       （supersession_unproven_now）
 //   6 include_required  只对未并入主分支的分支求值：tip 短 SHA 被被清退仓库的
 //                       docs/、.wao/decisions/、README.md 引用 / 三处找不到转录
 //                       且未并入（已并入的分支不做引用检查——删掉后提交仍在
@@ -82,6 +87,10 @@ import { checkOwnerLiveness } from "./ownerLiveness.js";
 import {
   enumerateLineageMembers, lineageClosedIn, lineageMemberFiles, lineageRootFromEvents, lineageSlotClaimBusy,
 } from "./lineageClose.js";
+// 第 120 批：派生"被取代"（与 lead_preflight / 交付读面同一份实现）。计划面
+// 复用它撤掉 delivery_packaged_undecided 这一个阻塞；执行面删树/删分支前重新
+// 推导一次（证不出就跳过并如实记原因）。
+import { createLineageSupersession, legalDeliveryDecision } from "./lineageSupersession.js";
 import { removeWorktreeAdminEntry } from "../isolation.js";
 
 /** 类别闭集（计划 items[].category 与计数键）。 */
@@ -93,7 +102,7 @@ export const RECLAIM_CATEGORIES = Object.freeze([
 /** 保留理由闭集（action=keep 的 items[].reason）。 */
 export const RECLAIM_KEEP_REASONS = Object.freeze([
   "transcript_unreadable", "twin_transcripts", "transcript_missing", "git_fact_failed", "lineage_refused",
-  "registered_missing", "registration_ambiguous",
+  "registered_missing", "registration_ambiguous", "undeterminable",
   "source_worktree", "outside_worktrees_dir", "symlink_or_junction", "foreign_worktree", "private_clone",
   "non_terminal", "recent_event", "fresh_owner_heartbeat",
   "lineage_member_active", "slot_claim_fresh", "lineage_not_closed",
@@ -363,7 +372,22 @@ export async function computeTreeFingerprint(treePath, { nestedExcluded = [] } =
  * 关线系照常枚举——同样与 lineageClose 一致。
  */
 export async function buildTranscriptFacts(runDirAbs) {
-  const { files, skipped: archiveSkipped } = lineageMemberFiles(runDirAbs);
+  // 第 120 批续修（N1/R1）：先严格枚举。桶/存储根读不出时严格枚举抛出——退回
+  // 非严格清单（计划其余逻辑保持 b120 之前的样子），并记下"枚举不完整"：
+  // 派生读器据此不出任何"被取代"依据（看不全清单时不能断言谱系里没有环），
+  // 计划据此不出任何删除项（P1）。归档扫描报 skipped（月份目录读不出、链接
+  // 不跟随等）同样是枚举不完整——看不见归档里的转录，就分不清"没有转录"与
+  // "读不到转录"。
+  let enumerated;
+  let enumerationIncomplete = false;
+  try {
+    enumerated = lineageMemberFiles(runDirAbs, { strict: true });
+  } catch {
+    enumerationIncomplete = true;
+    enumerated = lineageMemberFiles(runDirAbs);
+  }
+  const { files, skipped: archiveSkipped } = enumerated;
+  if (archiveSkipped.length > 0) enumerationIncomplete = true;
   const readMemo = new Map();
   const readFn = async (path) => {
     if (!readMemo.has(path)) {
@@ -439,7 +463,19 @@ export async function buildTranscriptFacts(runDirAbs) {
   }
   // twinMismatch 不进全局毒化（见函数注释）；线系内拒绝由 enumerateLineageMembers
   // 按 byRoot 候选集自己完成。
-  return { files, byRun, byRoot, byDeclaredReal, unreadable, twinMismatch, poison, readFn, fileStamps, fileFacts };
+  return {
+    files,
+    byRun,
+    byRoot,
+    byDeclaredReal,
+    unreadable,
+    twinMismatch,
+    poison,
+    readFn,
+    fileStamps,
+    fileFacts,
+    enumerationIncomplete,
+  };
 }
 
 /** per-file 事实派生：声明绑定（run.started.worktreePath 的 realpath；失效声
@@ -522,7 +558,9 @@ function aggregateFileFacts(files, fileFacts) {
  * 定"跳过这棵树。stat 失败同样如此（返回 statFailed）。
  */
 export async function refreshTranscriptFacts(transcripts, runDirAbs) {
-  const fresh = lineageMemberFiles(runDirAbs);
+  // 第 120 批续修（L2）：执行期刷新用严格枚举——桶/存储根读不出时抛出（调用方
+  // 已按"无法判定"跳过），不能静默漏掉读不出的桶。
+  const fresh = lineageMemberFiles(runDirAbs, { strict: true });
   for (const f of fresh.files) {
     let st;
     try {
@@ -562,6 +600,11 @@ function lastBoundState(events, runId) {
   return state;
 }
 
+/** 运行是否"尚未终态"（计划分类第 3 类与执行期普通分支门共用同一谓词）。 */
+function isNonTerminalState(state) {
+  return typeof state === "string" && !TERMINAL_STATES.includes(state);
+}
+
 function lastBoundEventTs(events, runId) {
   let ts = null;
   for (const e of events) {
@@ -571,13 +614,10 @@ function lastBoundEventTs(events, runId) {
 }
 
 function deliveryDecision(events, runId) {
-  let decision = null;
-  for (const e of events) {
-    if (!e || e.runId !== runId) continue;
-    if (e.type === "run.delivery_accepted") decision = "accepted";
-    else if (e.type === "run.delivery_rejected") decision = "rejected";
-  }
-  return decision;
+  // 第 120 批续修（G3）：与派生模块的 legalDeliveryDecision 是同一份判定（采纳
+  // 必须 validateDeliveryFacts 合法；拒收沿用事件类型口径），计划分类与执行
+  // 放行共用，不另写。
+  return legalDeliveryDecision(events, runId);
 }
 
 function hasPackagedDelivery(events, runId) {
@@ -750,7 +790,80 @@ export async function planWorktreeReclaim({
   const refScan = referencedShortShas(repo.mainWorktreePath, referenceScanIo);
 
   const transcripts = await buildTranscriptFacts(runDirAbs);
+  // 第 120 批续修（审查 B3）：派生"被取代"的读器复用转录事实索引——成员候选
+  // 直接取索引的 byRoot（零额外 I/O，不做全库字节预筛），转录内容也走同一份
+  // 共享 memo。读不出的文件仍按"无法推导"折叠：byRoot 里不可读的 run 只保留
+  // 自身归属，候选集不含它时自然断边（保守方向）。
+  const supersession = createLineageSupersession({
+    runDir: runDirAbs,
+    readTranscriptFn: async (path) => {
+      const r = await transcripts.readFn(path);
+      if (r.ok !== true) throw new Error("transcript unreadable");
+      return r.events;
+    },
+    files: transcripts.files,
+    // 第 120 批续修（N1）：计划侧的清单可能因枚举失败而不完整——此时不出任何
+    // "被取代"依据（看不全清单就不能断言谱系里没有环）。归档 skipped 走既有的
+    // lineage_refused 毒化面，不在这里。
+    filesIncomplete: transcripts.enumerationIncomplete === true,
+    memberFilesForRoot: (rootRunId) => transcripts.byRoot.get(rootRunId) ?? [],
+  });
+  const supersessionCache = new Map(); // runId → {lineageClosed, supersededByRunId}
+  async function supersessionOf(runId, events) {
+    if (!supersessionCache.has(runId)) {
+      let derived = { lineageClosed: false, supersededByRunId: null };
+      try {
+        const r = await supersession.forRun({ runId, events });
+        derived = {
+          lineageClosed: r.lineageClosed === true,
+          supersededByRunId: typeof r.supersededByRunId === "string" ? r.supersededByRunId : null,
+        };
+      } catch { /* 派生读不出：不推导（保持待裁决） */ }
+      supersessionCache.set(runId, derived);
+    }
+    return supersessionCache.get(runId);
+  }
   const runInfoCache = new Map();
+  /** 线系闭态（分类门与树成员门共用）：读根转录。 */
+  function lineageClosedOf(runId, events) {
+    const root = lineageRootFromEvents(events, runId) ?? runId;
+    const rootInfo = runInfo(root);
+    return rootInfo.events ? lineageClosedIn(rootInfo.events, root) : false;
+  }
+  /**
+   * 第 120 批续修（G1/K1/K2）：树的成员放行门。树的每个成员（属主、共享成员、
+   * 只靠路径声明的成员）只要转录可读且有打包事实，都必须满足"合法裁决 / 谱系
+   * 已关闭 / 派生被取代"之一，否则整棵树按 delivery_packaged_undecided 保留。
+   * 无转录或不带打包事实的成员走既有分类口径（无转录分支照旧可删）。
+   * 孪生成员（内容不同的副本，最后状态相同也算）：任一副本带打包事实就保留
+   * 整树——歧义成员不能既不当候选、又被当成不存在（K1）。
+   * @returns {Promise<{ok: true, superseded: string[]} | {ok: false, blockedBy: string}>}
+   */
+  async function treeMemberGate(memberIds) {
+    const superseded = [];
+    for (const memberId of memberIds) {
+      const info = runInfo(memberId);
+      if (info.twin) {
+        const entry = transcripts.byRun.get(memberId);
+        const copies = Array.isArray(entry?.readsEvents) ? entry.readsEvents : [];
+        if (copies.some((ev) => hasPackagedDelivery(ev, memberId))) {
+          return { ok: false, blockedBy: memberId };
+        }
+        continue;
+      }
+      if (!info.events) continue;
+      if (!hasPackagedDelivery(info.events, memberId)) continue;
+      if (deliveryDecision(info.events, memberId) !== null) continue;
+      if (lineageClosedOf(memberId, info.events)) continue;
+      const derived = await supersessionOf(memberId, info.events);
+      if (typeof derived.supersededByRunId === "string") {
+        superseded.push(memberId);
+        continue;
+      }
+      return { ok: false, blockedBy: memberId };
+    }
+    return { ok: true, superseded: superseded.sort() };
+  }
   /** 读一个 runId 的绑定事件事实（事实索引上的缓存视图；twin → 二义性位）。 */
   function runInfo(runId) {
     if (runInfoCache.has(runId)) return runInfoCache.get(runId);
@@ -986,9 +1099,7 @@ export async function planWorktreeReclaim({
     // 线系根与闭态：任何有事件的 run 都求值（第 5/8 类的"线系已关"不限于
     // 复用线系形态）。
     if (info.events) {
-      const root = lineageRootFromEvents(info.events, runId) ?? runId;
-      const rootInfo = runInfo(root);
-      f.lineageClosed = rootInfo.events ? lineageClosedIn(rootInfo.events, root) : false;
+      f.lineageClosed = lineageClosedOf(runId, info.events);
     }
 
     // 2 out_of_scope。
@@ -1087,7 +1198,7 @@ export async function planWorktreeReclaim({
     }
 
     // 3 running。
-    if (info.state && !TERMINAL_STATES.includes(info.state)) { keep("running", "non_terminal"); return; }
+    if (isNonTerminalState(info.state)) { keep("running", "non_terminal"); return; }
     if (info.lastTs) {
       const ts = Date.parse(info.lastTs);
       if (Number.isFinite(ts) && now() - ts < RECENT_BOUND_EVENT_MS) { keep("running", "recent_event"); return; }
@@ -1112,6 +1223,13 @@ export async function planWorktreeReclaim({
       if (hasReuseLineage) {
         f.lineageRoot = root;
         f.lineageMembers = enumerated.members;
+        // 4b 线系成员的空转录（J3）：空文件不是"在跑"，如实归无法判定并点名
+        //（否则会被下一行的"成员非终态"误报成 lineage_member_active）。
+        const emptyMember = enumerated.members.find((m) => {
+          const mi = runInfo(m.runId);
+          return Array.isArray(mi.events) && mi.events.length === 0;
+        });
+        if (emptyMember) { keep("undeterminable", "transcript_empty_now", emptyMember.runId); return; }
         if (enumerated.members.some((m) => !TERMINAL_STATES.includes(m.state ?? ""))) {
           keep("reuse_open", "lineage_member_active"); return;
         }
@@ -1128,10 +1246,18 @@ export async function planWorktreeReclaim({
       }
     }
 
+    // 4b 线系成员的空转录在 reuse_open 块内判定（先于"成员非终态"，见 J3）。
+
     // 5 pending_lead（无决定的运行一律算未裁决）。
+    // 第 120 批：已有被采纳后代的祖先（派生事实）不再被"已打包未裁决"挡住——
+    // 只撤掉这一个阻塞；树脏（undecided_dirty_tree）等其余保护照旧。
     const decided = info.decision === "accepted" || info.decision === "rejected";
+    if (!decided && !f.lineageClosed && info.events) {
+      const derived = await supersessionOf(runId, info.events);
+      f.supersededByRunId = derived.supersededByRunId;
+    }
     if (!decided && !f.lineageClosed) {
-      if (info.packaged) { keep("pending_lead", "delivery_packaged_undecided"); return; }
+      if (info.packaged && !f.supersededByRunId) { keep("pending_lead", "delivery_packaged_undecided"); return; }
       const dirty = f.fingerprint?.dirty ?? null;
       const huskNonEmpty = f.isHusk && !isDirEmpty(f.treePath);
       const hasContent = dirty
@@ -1139,6 +1265,8 @@ export async function planWorktreeReclaim({
         : huskNonEmpty;
       if (f.treePath && hasContent) { keep("pending_lead", "undecided_dirty_tree"); return; }
     }
+
+    // 5b 树成员门在全部主体分类完后、树分组之后统一判定（见下方注释，K2）。
 
     // 6 include_required（--include 点名豁免）。只对未并入主分支的分支求值：
     // 已并入的分支删掉后提交仍从主分支可达，引用与转录缺口都不受影响——先判
@@ -1193,6 +1321,37 @@ export async function planWorktreeReclaim({
         }
       }
     }
+  }
+
+  // 树成员门（K2/G1/L3）：放在树分组之后、嵌套保护之前。放在树分组之后是为了让
+  // "共享树里有成员自己保留"仍按 tree_shared/shared_tree_kept 归类；放在嵌套保护
+  // 之前，被成员门保留的内层树会进 blockedPaths，外层树在计划里就以
+  // has_kept_descendant 保留（不会写出等执行时才被拦下的 remove_tree）。
+  // L3：保留的是**整组共享成员**——同一路径上的其他运行（比如已采纳、共享该树
+  // 的续修子）一并改判，否则它仍是 reclaim_candidate：外层树重新进入
+  // reclaimTreeReals（计划写错），它自己的分支还会出 delete_branch（执行时真删）。
+  for (const [runId, f] of facts) {
+    if (classifications.get(runId)?.category !== "reclaim_candidate") continue;
+    if (!f.treeRealPath || f.isHusk || f.isLooseSymlink) continue;
+    if (!f.treePath || basename(f.treePath) !== runId) continue; // 只对树属主求值
+    const treeKey = f.treeRealPath.toLowerCase();
+    const memberIds = new Set([runId]);
+    for (const m of transcripts.byDeclaredReal.get(treeKey) ?? []) memberIds.add(m);
+    const gate = await treeMemberGate(memberIds);
+    if (!gate.ok) {
+      const keepReason = {
+        category: "pending_lead",
+        reason: "delivery_packaged_undecided",
+        detail: `tree member ${gate.blockedBy}`,
+      };
+      for (const [otherRunId, otherFacts] of facts) {
+        if (otherFacts.treeRealPath?.toLowerCase() !== treeKey) continue;
+        if (classifications.get(otherRunId)?.category !== "reclaim_candidate") continue;
+        classifications.set(otherRunId, { ...keepReason });
+      }
+      continue;
+    }
+    f.supersededMembers = gate.superseded;
   }
 
   // 嵌套保护：树内部有任何保留/无法判定的路径，或其他不在删除集的在册 worktree。
@@ -1256,12 +1415,31 @@ export async function planWorktreeReclaim({
     approvalFactsOf.set(runId, facts);
     return facts;
   };
+  // 第 120 批续修（P1）：计划期枚举不完整（严格枚举失败、退回了非严格清单）时，
+  // 整份计划不出任何删除项——漏掉一份转录就可能把"在跑/未裁决"看成"无转录，
+  // 已并入"。所有主体一律按无法判定保留，条目照常列出供 Lead 查看；回收从来不
+  // 急，存储读不全时什么都不删。派生读器也不会出"被取代"依据（N1）。
+  if (transcripts.enumerationIncomplete) {
+    for (const runId of facts.keys()) {
+      classifications.set(runId, {
+        category: "undeterminable",
+        reason: "undeterminable",
+        detail: "transcript_enumeration_incomplete",
+      });
+    }
+  }
+
   const items = [];
   const deleteBranchSet = new Set();
   for (const runId of [...facts.keys()].sort()) {
     const f = facts.get(runId);
     const cls = classifications.get(runId) ?? { category: "undeterminable", reason: "git_fact_failed", detail: "no_classification" };
     const notes = included.has(runId) ? ["--include 点名"] : [];
+    // 第 120 批：派生事实——被取代的运行在计划条目里写明那个被采纳的后代
+    //（不是采纳、不是已合入；只是回收审批要看的事实）。
+    const supersededField = typeof f.supersededByRunId === "string"
+      ? { supersededByRunId: f.supersededByRunId }
+      : {};
     const keepItem = (reason, detail) => ({
       runId,
       category: cls.category,
@@ -1270,6 +1448,7 @@ export async function planWorktreeReclaim({
       ...(detail ? { detail } : {}),
       ...(f.branch ? { branch: f.branch.branch, branchTip: f.branch.tip } : {}),
       ...(f.treePath ? { treePath: f.treePath } : {}),
+      ...supersededField,
     });
     if (cls.category !== "reclaim_candidate") {
       items.push({ ...keepItem(cls.reason, cls.detail), facts: approvalFacts(runId) });
@@ -1291,6 +1470,7 @@ export async function planWorktreeReclaim({
         treeRealPath: f.treeRealPath,
         ...scopeProof,
         notes,
+        ...supersededField,
         facts: approvalFacts(runId),
       });
       continue;
@@ -1308,6 +1488,10 @@ export async function planWorktreeReclaim({
       // 成员快照。
       const memberIds = new Set([runId]);
       for (const m of transcripts.byDeclaredReal.get(f.treeRealPath?.toLowerCase() ?? "") ?? []) memberIds.add(m);
+      // 第 120 批续修（C1）：这棵树里"只靠派生被取代才可回收"的成员（成员门
+      // 在分类阶段算过，K2）；apply 只重证这些成员，其余成员在执行时按通用门
+      // （G2）复核。
+      const supersededMembers = f.supersededMembers ?? [];
       items.push({
         runId,
         category: "reclaim",
@@ -1316,6 +1500,7 @@ export async function planWorktreeReclaim({
         treeRealPath: f.treeRealPath,
         ...scopeProof,
         treeMembers: [...memberIds].sort(),
+        ...(supersededMembers.length > 0 ? { supersededMembers } : {}),
         treeBranch: f.treeBranch ?? null,
         branch: f.branch?.branch ?? null,
         branchTip: f.branch?.tip ?? null,
@@ -1327,6 +1512,7 @@ export async function planWorktreeReclaim({
         },
         dirty: d,
         notes: treeNotes,
+        ...supersededField,
         facts: approvalFacts(runId),
       });
     }
@@ -1339,6 +1525,7 @@ export async function planWorktreeReclaim({
         branch: f.branch.branch,
         branchTip: f.branch.tip,
         notes,
+        ...supersededField,
         facts: approvalFacts(runId),
       });
     }
@@ -1446,6 +1633,11 @@ async function stillActiveFromDisk(runId, filesByRun, factsView, runDirAbs, now)
     if (states.some((s) => s !== states[0])) return { undetermined: true, detail: "twin_transcripts_now" };
   }
   const events = reads.flat();
+  // 第 120 批续修（G4）：空转录不是"没有终态的在跑运行"，而是无法判定——
+  // 报 running_now 会让人以为观测到了活进程。这里如实归 undeterminable_now。
+  if (reads.every((ev) => ev.length === 0)) {
+    return { undetermined: true, detail: "transcript_empty_now" };
+  }
   const state = lastBoundState(events, runId);
   if (state && !TERMINAL_STATES.includes(state)) return { active: true, detail: "non_terminal" };
   // 孪生副本各自取最后一条绑定事件的时间，再取各副本的最大值——拼接后取
@@ -1471,6 +1663,25 @@ async function stillActiveFromDisk(runId, filesByRun, factsView, runDirAbs, now)
   };
   const enumerated = await enumerateLineageMembers(root, factsView.byRoot.get(root) ?? [], freshRead);
   if (enumerated.refuse) return { active: true, detail: `lineage_refused_now:${enumerated.refuse}` };
+  // 第 120 批续修（J3）：成员的空转录不是"在跑"——如实归无法判定并点名。
+  // 只对没有终态的成员现读（有终态的一定非空），代价与成员数同阶。
+  const candFiles = factsView.byRoot.get(root) ?? [];
+  for (const member of enumerated.members) {
+    if (member.state != null && TERMINAL_STATES.includes(member.state)) continue;
+    const memberFiles = candFiles.filter((f) => String(f?.name).replace(/\.jsonl$/, "") === member.runId);
+    if (memberFiles.length === 0) continue;
+    let allEmpty = true;
+    for (const f of memberFiles) {
+      try {
+        const ev = await readTranscript(f.path);
+        if (ev.length > 0) { allEmpty = false; break; }
+      } catch {
+        allEmpty = false;
+        break;
+      }
+    }
+    if (allEmpty) return { undetermined: true, detail: `transcript_empty_now:${member.runId}` };
+  }
   if (enumerated.members.some((m) => !TERMINAL_STATES.includes(m.state ?? ""))) {
     return { active: true, detail: "lineage_member_active" };
   }
@@ -1524,6 +1735,122 @@ function reverifyNestedScope(item, ctx, reg) {
     if (!st.isDirectory()) return { skip: "scope_parent_gone", detail: level };
   }
   return { ok: true };
+}
+
+/** 转录读不出时的 detail（K3/L2）：空/不可读/冲突/枚举不完整各写各的原因，
+ * 不都叫"缺失"——"确实没有"与"枚举看不到"必须分开。 */
+function transcriptDetail(state, runId) {
+  const kind = state?.refreshFailed === true || state?.transcriptState === "untrusted" ? "refresh_failed_now"
+    : state?.transcriptState === "empty" ? "transcript_empty_now"
+      : state?.transcriptState === "conflict" ? "transcript_conflict_now"
+        : state?.transcriptState === "unreadable" ? "transcript_unreadable_now"
+          : "transcript_missing_now";
+  return `${kind}:${runId}`;
+}
+
+/**
+ * 第 120 批续修（C1/C2/C3 + G2/J2）：apply 删树/删分支/删空壳前的"被取代"重证
+ * ——只对计划里记了"靠派生放行"的运行执行（`item.supersededMembers` /
+ * `item.supersededByRunId`）。
+ *
+ * 放行标准（满足其一）：
+ *   - 仍被已证明、已采纳的后代取代（派生模块的 A 组全部条件，含"自己已收口"）；
+ *   - 现在自己有了**合法裁决**（legalDeliveryDecision，G3）；
+ *   - 谱系现在已关闭。
+ * 不放行（跳过并记原因）：转录读不出/为空（detail 各写各的原因）、不再有打包
+ * 事实或证不出上述任一条（`supersession_unproven_now`）；刷新失败一律跳过
+ * （`undeterminable_now` + `refresh_failed_now`），不拿旧索引放行。
+ *
+ * 用执行级共享的读器（`ctx.supersession`，一次执行一个实例 + 一次批量预筛），
+ * 删前对这几份转录现读重证（`refresh` 会重新枚举文件清单，F2/J1）。
+ *
+ * @param {string[]} runIds
+ * @param {{supersession: object}} ctx
+ * @returns {Promise<{ok:true}|{skip:string, detail:string}>}
+ */
+async function reverifySupersessionBasis(runIds, ctx) {
+  for (const runId of runIds) {
+    let state;
+    try {
+      // 现读重证（审查 C3）：丢掉内容/派生缓存并重枚举文件清单，保留已准备的根。
+      await ctx.supersession.refresh();
+    } catch {
+      return { skip: "undeterminable_now", detail: `refresh_failed_now:${runId}` };
+    }
+    try {
+      state = await ctx.supersession.forRunId(runId);
+    } catch {
+      return { skip: "undeterminable_now", detail: `supersession_unproven:${runId}` };
+    }
+    if (!state || state.transcriptReadable !== true) {
+      return { skip: "undeterminable_now", detail: transcriptDetail(state, runId) };
+    }
+    // 交付事实没了（含祖先转录被截空）：派生依据不再成立。
+    if (state.packaged !== true) return { skip: "supersession_unproven_now", detail: runId };
+    if (state.legalDecision) continue; // 自己现在有了合法裁决
+    if (state.lineageClosed) continue; // 谱系现在已关闭
+    if (typeof state.supersededByRunId === "string") continue; // 仍被已采纳后代取代
+    return { skip: "supersession_unproven_now", detail: runId };
+  }
+  return { ok: true };
+}
+
+/**
+ * 第 120 批续修（G2/K1/K3/J2/L2）：没记"靠派生放行"的成员/条目在执行时的通用门。
+ * 转录此刻可读、且有打包事实的，同样必须满足"合法裁决 / 谱系已关闭 / 派生被取代"
+ * 之一，否则跳过并记 `delivery_packaged_undecided_now`；无转录（missing）走
+ * b120 之前的旧逻辑（已并入 main、或经 `--include` 点名的无转录分支照旧可删）。
+ * 空/不可读/内容冲突的副本不是"没有转录"——跳过并记各自的 `undeterminable_now`
+ * 理由（K1/K3）；刷新失败或枚举不完整也跳过（J2/L2）——枚举不完整时"确实没有
+ * 转录"不可信，不能走旧逻辑放行。
+ *
+ * @param {string[]} runIds
+ * @param {{supersession: object}} ctx
+ * @returns {Promise<{ok:true}|{skip:string, detail:string}>}
+ */
+async function reverifyMemberGate(runIds, ctx) {
+  if (runIds.length === 0) return { ok: true };
+  try {
+    await ctx.supersession.refresh();
+  } catch {
+    return { skip: "undeterminable_now", detail: `refresh_failed_now:${runIds[0]}` };
+  }
+  for (const runId of runIds) {
+    let state;
+    try {
+      state = await ctx.supersession.forRunId(runId);
+    } catch {
+      return { skip: "undeterminable_now", detail: `transcript_unreadable_now:${runId}` };
+    }
+    if (!state || state.transcriptReadable !== true) {
+      // 只有"确实没有这份转录"（且枚举完整、实例可信）才走旧逻辑。
+      if (state?.transcriptState === "missing" && state?.refreshFailed !== true
+        && state?.enumerationIncomplete !== true) continue;
+      return { skip: "undeterminable_now", detail: transcriptDetail(state, runId) };
+    }
+    if (isNonTerminalState(state.lastState)) {
+      return { skip: "running_now", detail: `${runId}:non_terminal` };
+    }    // P2：转录此刻可读而运行尚未终态 → 跳过。计划的"无转录可删"结论建立在这条
+    // 运行已经没有活跃转录；批准后才出现的转录可能还在跑，不能按旧逻辑放行。
+    // 判定与计划第 3 类（running / non_terminal）共用同一个谓词。
+
+    if (state.packaged !== true) continue; // 无打包事实：旧逻辑
+    if (state.legalDecision) continue;
+    if (state.lineageClosed) continue;
+    if (typeof state.supersededByRunId === "string") continue;
+    return { skip: "delivery_packaged_undecided_now", detail: runId };
+  }
+  return { ok: true };
+}
+
+/** 计划条目里"依赖派生放行"的运行（只重证这些）。 */
+function supersessionBasisRunIds(item) {
+  if (item.action === "remove_tree") {
+    const members = Array.isArray(item.supersededMembers) ? item.supersededMembers : [];
+    if (members.length > 0) return members;
+    return typeof item.supersededByRunId === "string" ? [item.runId] : [];
+  }
+  return typeof item.supersededByRunId === "string" ? [item.runId] : [];
 }
 
 /** 删树前复核：真实路径、HEAD/分支/tip、指纹（嵌套在册树不计入清单）、嵌套
@@ -1625,6 +1952,18 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
     if (a.active) return { skip: "running_now", detail: `${memberRunId}:${a.detail}` };
     if (a.undetermined) return { skip: "undeterminable_now", detail: `${memberRunId}:${a.detail}` };
   }
+  // 第 120 批续修（C1/G2）：计划记了"靠派生放行"的成员走严格重证；其余成员
+  // 也执行时复核（转录可读且有打包事实的必须满足三条之一）。无转录成员走
+  // b120 之前的旧逻辑。
+  const basisRunIds = supersessionBasisRunIds(item);
+  if (basisRunIds.length > 0) {
+    const basis = await reverifySupersessionBasis(basisRunIds, ctx);
+    if (basis.skip) return basis;
+  }
+  const basisSet = new Set(basisRunIds);
+  const otherMembers = [...memberIds].filter((m) => !basisSet.has(m));
+  const memberGate = await reverifyMemberGate(otherMembers, ctx);
+  if (memberGate.skip) return memberGate;
   return { ok: true };
 }
 
@@ -1651,6 +1990,8 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
 export async function applyWorktreeReclaim({
   planPath, expectSha256, runDir, now = Date.now, beforeBranchDelete = null, beforeTreeSnapshot = null,
   afterTranscriptIndex = null, removeTreeExec = null, worktreeListFn = null,
+  // 测试缝：派生读器的文件枚举（注入枚举失败，证明刷新失败不会放行删除）。
+  supersessionEnumerateFn = null,
 }) {
   let planBytes;
   try {
@@ -1847,6 +2188,29 @@ export async function applyWorktreeReclaim({
       : resolve(String(item.treePath ?? ""));
     return !samePath(dirname(real), mainRoot);
   };
+  // 第 120 批续修（审查 C3）：一次执行一个派生读器；只为"依赖派生放行"的
+  // 运行收集根并做一次批量字节预筛（不按条目重复全量扫描）。
+  const supersession = createLineageSupersession({
+    runDir: runDirAbs,
+    ...(typeof supersessionEnumerateFn === "function" ? { enumerateFilesFn: supersessionEnumerateFn } : {}),
+  });
+  const supersessionRelied = new Set(
+    plan.items.flatMap((item) => supersessionBasisRunIds(item)),
+  );
+  if (supersessionRelied.size > 0) {
+    const basisRoots = new Set();
+    for (const runId of supersessionRelied) {
+      try {
+        const declared = await supersession.rootOfRun(runId);
+        if (declared.conflict !== true && typeof declared.rootRunId === "string") basisRoots.add(declared.rootRunId);
+      } catch { /* 读不出：该条目重证时按 transcript_missing_now 跳过 */ }
+    }
+    if (basisRoots.size > 0) {
+      try {
+        await supersession.prepare([...basisRoots]);
+      } catch { /* 预筛失败：各条目各自兜底为"不推导" */ }
+    }
+  }
   const ctx = {
     transcripts,
     runDirAbs,
@@ -1855,6 +2219,7 @@ export async function applyWorktreeReclaim({
     liveRegState,
     nestedShape,
     commonDir,
+    supersession,
   };
   const orderedTrees = [...treeItems].sort((a, b) => b.treePath.split(sep).length - a.treePath.split(sep).length);
   const failedBranches = new Set();
@@ -1967,6 +2332,19 @@ export async function applyWorktreeReclaim({
           results.push({ runId: item.runId, action: "delete_branch", outcome: "skipped", reason: "checked_out", branch: item.branch });
           continue;
         }
+        // 第 120 批续修（审查 C1）：只有计划条目写明"靠派生放行"的运行才重证；
+        // 其余分支（含无转录的已并入/被点名分支）恢复 b120 之前的逻辑。
+        const basisRunIds = supersessionBasisRunIds(item);
+        const basis = basisRunIds.length > 0
+          ? await reverifySupersessionBasis(basisRunIds, ctx)
+          : await reverifyMemberGate([item.runId], ctx);
+        if (basis.skip) {
+          results.push({
+            runId: item.runId, action: "delete_branch", outcome: "skipped",
+            reason: basis.skip, detail: basis.detail, branch: item.branch,
+          });
+          continue;
+        }
         // 测试缝：预检与检出判断都已过后、CAS 删除前一刻的钩子（证明 update-ref -d
         // 的比较删除门自身起作用，而非只靠预检拦截）。生产为 null。
         if (typeof beforeBranchDelete === "function") await beforeBranchDelete(item);
@@ -2000,6 +2378,19 @@ export async function applyWorktreeReclaim({
           results.push({ runId: item.runId, action: "rmdir_husk", outcome: "skipped", ...scopeSkip });
           continue;
         }
+      }
+      // 第 120 批续修（审查 C2）：空壳路径同样按磁盘现状重证（只对靠派生
+      // 放行的条目；证不出就跳过并记原因）。
+      const basisRunIds = supersessionBasisRunIds(item);
+      const huskBasis = basisRunIds.length > 0
+        ? await reverifySupersessionBasis(basisRunIds, ctx)
+        : await reverifyMemberGate([item.runId], ctx);
+      if (huskBasis.skip) {
+        results.push({
+          runId: item.runId, action: "rmdir_husk", outcome: "skipped",
+          reason: huskBasis.skip, detail: huskBasis.detail,
+        });
+        continue;
       }
       try {
         rmdirSync(item.treePath);

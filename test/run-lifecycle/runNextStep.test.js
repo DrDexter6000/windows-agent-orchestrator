@@ -116,6 +116,7 @@ test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超�
         vitalSignAgeMs: 6 * 60 * 60 * 1000,
         settlementReason: "delivery_settled",
         acceptanceStatus: null,
+        ...(situation === "delivery_superseded" ? { supersededByRunId: RUN_ID } : {}),
         ...(situation === "consult_seats_running"
           ? { seatRunIds: [RUN_ID], consultId: "consult_20261029210000000abc123", seatCount: 1, nonTerminalSeatCount: 1 }
           : {}),
@@ -147,6 +148,8 @@ test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把
     buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" }),
     buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null }),
     buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" }),
+    // 第 120 批：被取代的一面一句。
+    buildNextStep({ surface: "mcp", situation: "delivery_superseded", supersededByRunId: "run_20261029210000000child01" }),
   ];
   for (const text of samples) {
     for (const host of hosts) {
@@ -388,6 +391,46 @@ test("NEXT-13: runner_unproven——只有 CLI 面；先 status 再干跑 settle
   // 超长 runId 触发上限守卫（模板内嵌两次 runId）。
   assert.throws(
     () => buildNextStep({ surface: "cli", situation: "runner_unproven", runId: "r".repeat(240) }),
+    /exceeds 480/,
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 120 批：delivery_superseded——收口的交付已有被采纳的后代（派生事实）。
+// 两面同一句：只说"已有被采纳的后代 <runId>、这里无需裁决"，不说祖先已被
+// 采纳/已合入/已回收，也不再提示 run_delivery review 或 run_continue。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-14: delivery_superseded——两面同一句、点名被采纳的后代、不给 review/续修提示", () => {
+  assert.ok(NEXT_STEP_SITUATIONS.includes("delivery_superseded"), "新情形进闭集");
+  const DESCENDANT = "run_20261029210000000child01";
+  const mcp = buildNextStep({
+    surface: "mcp", situation: "delivery_superseded", supersededByRunId: DESCENDANT,
+  });
+  const cli = buildNextStep({
+    surface: "cli", situation: "delivery_superseded", runId: RUN_ID, supersededByRunId: DESCENDANT,
+  });
+  assert.equal(mcp, cli, "两面同一句（不渲染 CLI 命令，故无需区分）");
+  assert.equal(mcp,
+    `Settled. A descendant of this run was already accepted (${DESCENDANT}); no Lead decision is needed here.`);
+  assert.ok(mcp.includes(DESCENDANT), "点名被采纳的后代");
+  assert.ok(!mcp.includes(RUN_ID), "不说本 run 的 runId");
+  assert.ok(!/awaits the Lead's review/.test(mcp), "不再说等 Lead 裁决");
+  assert.ok(!/run_continue|wao runs delivery/.test(mcp), "不给续修/再审查提示");
+  assert.ok(!/merged|reclaimed|landed|adopted/i.test(mcp), "不说已合入/已回收/已采纳");
+  assert.ok(mcp.length <= NEXT_STEP_MAX_LEN, `${mcp.length}`);
+
+  // 必须点名那个后代（缺/空 fail closed）。
+  assert.throws(() => buildNextStep({ surface: "mcp", situation: "delivery_superseded" }), /supersededByRunId/);
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "delivery_superseded", runId: RUN_ID, supersededByRunId: "" }),
+    /supersededByRunId/,
+  );
+  // CLI 面仍需 runId 渲染（既有合同不变）。
+  assert.throws(() => buildNextStep({ surface: "cli", situation: "delivery_superseded", supersededByRunId: DESCENDANT }), /runId/);
+  // 超长后代 runId 触发上限守卫（不静默截断）。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "delivery_superseded", supersededByRunId: "r".repeat(500) }),
     /exceeds 480/,
   );
 });

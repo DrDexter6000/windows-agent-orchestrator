@@ -19,7 +19,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1483,6 +1483,71 @@ test("U-12: 可续未决定交付收口 → 终行与 JSON 的 nextStep 用 deli
   }
 });
 
+function continuationFact(runId, parentRunId, rootRunId) {
+  return {
+    type: "run.background_submitted", runId, agentId: "coder_low",
+    background: true, continuation: true, parentRunId, rootRunId,
+  };
+}
+
+function acceptedDecision(runId, ref) {
+  return {
+    type: "run.delivery_accepted", runId, agentId: "coder_low",
+    delivery: {
+      ...ref,
+      verification: { status: "passed", commands: [], verifiedCommit: ref.deliveryCommit, results: [] },
+      acceptance: { status: "accepted", reviewerType: "lead_agent" },
+    },
+    deliveryCommit: ref.deliveryCommit,
+    reason: "ok",
+  };
+}
+
+test("U-15: 收口交付已有被采纳的后代（第 120 批派生被取代）→ 终行说无需裁决，不给 run_continue 提示", async () => {
+  const dir = makeRunDir();
+  const ROOT = "run_u15_root";
+  const CHILD = "run_u15_child";
+  try {
+    const refRoot = makeRef(ROOT);
+    writeLines(dir, ROOT, [
+      started(ROOT),
+      lineageFirst(ROOT),
+      created(ROOT, refRoot),
+      stateChange(ROOT, "completed"),
+      outcome(ROOT, "passed", refRoot),
+    ]);
+    const refChild = makeRef(CHILD);
+    writeLines(dir, CHILD, [
+      { ...continuationFact(CHILD, ROOT, ROOT) },
+      lineageResume(CHILD, ROOT),
+      started(CHILD),
+      created(CHILD, refChild),
+      stateChange(CHILD, "completed"),
+      outcome(CHILD, "passed", refChild),
+      acceptedDecision(CHILD, refChild),
+    ]);
+    const r = await runWaitSettled({ dir, runId: ROOT });
+    assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.equal(r.outLines.length, 3, `终行三行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[1], "Settlement: settled (delivery_settled; verification passed)");
+    assert.equal(
+      r.outLines[2],
+      `Next step: Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`,
+    );
+    assert.ok(!r.outLines[2].includes("awaits the Lead's review"), "不再说等 Lead 裁决");
+    assert.ok(!r.outLines[2].includes("run_continue"), "不给续修提示");
+    // JSON 面：键集不变（{settled,runId,state,settlement,nextStep}），nextStep 同款。
+    const j = await runWaitSettled({ dir, runId: ROOT, asJson: true });
+    assert.equal(j.exitCode, undefined);
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "runId", "settled", "settlement", "state"]);
+    assert.equal(parsed.nextStep,
+      `Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("U-13: 无谱系事件的普通交付收口 → 照旧 settled_line（负例）", async () => {
   const dir = makeRunDir();
   try {
@@ -1626,6 +1691,125 @@ test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向�
     );
     assert.match(r.outLines[2], /^Next step: Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit\. Or reject it while it is pending: wao runs delivery run_wg07 --reject --reason-file <FILE>\.$/);
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-16（第 120 批续修 E2/E4）：多目标——普通目标不触发派生预筛；有被取代目标时才预筛一次", async () => {
+  const dir = makeRunDir();
+  try {
+    // 两个普通交付目标（无谱系引用）都收口未决定 → 会渲然 settled_line，但不推导。
+    const ids = ["run_u16a", "run_u16b"];
+    for (const id of ids) {
+      const ref = makeRef(id);
+      writeLines(dir, id, [
+        started(id),
+        created(id, ref),
+        stateChange(id, "completed"),
+        outcome(id, "passed", ref),
+      ]);
+    }
+    let byteReads = 0;
+    const readBytes = async (path) => {
+      byteReads += 1;
+      return readFileSync(path);
+    };
+    const plain = await runWaitSettledMulti({
+      dir, runIds: ids, deps: { supersessionReadBytesFn: readBytes },
+    });
+    assert.equal(byteReads, 0, "普通目标不该触发全库字节预筛");
+    assert.ok(!plain.outLines.some((l) => l.includes("Superseded:")), plain.outLines.join("\n"));
+
+    // 正例：一条谱系根（收口未决定）+ 已采纳后代 → 预筛发生，终行写被取代。
+    const ROOT = "run_u16root";
+    const CHILD = "run_u16child";
+    const rootRef = makeRef(ROOT);
+    writeLines(dir, ROOT, [
+      started(ROOT),
+      lineageFirst(ROOT),
+      created(ROOT, rootRef),
+      stateChange(ROOT, "completed"),
+      outcome(ROOT, "passed", rootRef),
+    ]);
+    const childRef = makeRef(CHILD);
+    writeLines(dir, CHILD, [
+      continuationFact(CHILD, ROOT, ROOT),
+      lineageResume(CHILD, ROOT),
+      started(CHILD),
+      created(CHILD, childRef),
+      stateChange(CHILD, "completed"),
+      outcome(CHILD, "passed", childRef),
+      acceptedDecision(CHILD, childRef),
+    ]);
+    byteReads = 0;
+    const withLineage = await runWaitSettledMulti({
+      dir, runIds: [...ids, ROOT], deps: { supersessionReadBytesFn: readBytes },
+    });
+    assert.equal(byteReads, 4, "预筛只扫一遍库：读次数 == 文件数（2 普通 + 根 + 后代）");
+    const expected = `Next step: Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`;
+    assert.ok(withLineage.outLines.includes(expected), withLineage.outLines.join("\n"));
+
+    // 停表后才收口：等待器看到的是**旧快照**（非终态），磁盘上已经是收口事实；
+    // 表被第一个目标停掉后，即时判定（judgeOnceFn）按磁盘现状把它并入
+    // outcomeByRun。收根与渲染用同一集合——两个目标各贡献一个根，仍只扫一遍库。
+    const A = "run_u16late_a";
+    const LATE = "run_u16late_root";
+    const LATE_CHILD = "run_u16late_child";
+    const lateRef = makeRef(LATE);
+    const aRef = makeRef(A);
+    writeLines(dir, A, [
+      started(A), lineageFirst(A), created(A, aRef), stateChange(A, "completed"), outcome(A, "passed", aRef),
+    ]);
+    // 磁盘上的 LATE 一开始就是收口事实；等待器的解析缝指向另一份**旧快照**。
+    writeLines(dir, LATE, [
+      started(LATE), lineageFirst(LATE), created(LATE, lateRef),
+      stateChange(LATE, "completed"), outcome(LATE, "passed", lateRef),
+    ]);
+    const lateChildRef = makeRef(LATE_CHILD);
+    writeLines(dir, LATE_CHILD, [
+      continuationFact(LATE_CHILD, LATE, LATE),
+      lineageResume(LATE_CHILD, LATE),
+      started(LATE_CHILD),
+      created(LATE_CHILD, lateChildRef),
+      stateChange(LATE_CHILD, "completed"),
+      outcome(LATE_CHILD, "passed", lateChildRef),
+      acceptedDecision(LATE_CHILD, lateChildRef),
+    ]);
+    const staleDir = mkdtempSync(join(tmpdir(), "wao-u16-stale-"));
+    writeLines(staleDir, LATE, [started(LATE), lineageFirst(LATE)]); // 非终态旧快照
+    const filesNow = readdirSync(dir).filter((n) => n.endsWith(".jsonl")).length;
+    assert.equal(filesNow, 7, `夹具前提：库里有 7 份转录，实际 ${filesNow}`);
+    const baseResolver = realResolver(dir);
+    let judgeCalls = 0;
+    byteReads = 0;
+    try {
+      const late = await runWaitSettledMulti({
+        dir, runIds: [A, LATE], asJson: true,
+        deps: {
+          supersessionReadBytesFn: readBytes,
+          // 等待器只看到旧快照（LATE 始终"在跑"）→ 只能等停表后的即时判定。
+          resolveDetailedFn: (rd, rid) => (rid === LATE ? realResolver(staleDir)(rd, rid) : baseResolver(rd, rid)),
+          judgeOnceFn: async (input) => {
+            judgeCalls += 1;
+            // 即时判定按磁盘现状（不被等待器的旧快照解析缝影响）。
+            return judgeRunSettlementOnce({
+              ...input,
+              deps: { ...input.deps, resolveDetailedFn: baseResolver },
+            });
+          },
+        },
+      });
+      assert.equal(late.exitCode, undefined, "正常停表（无 SIGINT）");
+      assert.equal(judgeCalls, 1, "确实走了一次即时判定（不是等待器直接收口）");
+      const parsed = JSON.parse(late.out);
+      const lateResult = parsed.results.find((x) => x.runId === LATE);
+      assert.equal(lateResult.settled, true, "即时判定按磁盘现状判为收口");
+      assert.ok(JSON.stringify(lateResult).includes(LATE_CHILD), "停表后收口的目标也带出后代");
+      assert.equal(byteReads, filesNow, "两个目标共一次预筛（读次数 == 文件数）");
+    } finally {
+      cleanupDir(staleDir);
+    }
   } finally {
     cleanupDir(dir);
   }

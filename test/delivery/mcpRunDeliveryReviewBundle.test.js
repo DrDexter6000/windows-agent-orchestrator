@@ -152,6 +152,9 @@ test("M12-3B-RED-02: one call waits once and returns one requested review page",
         "bundle nested delivery must NOT carry availableDrilldowns");
       assert.equal(readinessCalls.length, 1, "exactly one readiness call");
       assert.equal(readinessCalls[0].waitMs, 120000);
+      // 第 120 批续修（审查 B1）：bundle 不消费"被取代"派生结果 → 显式跳过
+      // 全库预筛（默认 45 秒等待之后再加一次扫描会撞宿主约 60 秒上限）。
+      assert.equal(readinessCalls[0].skipSupersession, true, "bundle 不做派生");
       assert.equal(reviewCalls.length, 1, "exactly one review page");
       assert.equal(reviewCalls[0].fileIndex, 1);
       assert.equal(decideCalls, 0, "never decides");

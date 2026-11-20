@@ -54,6 +54,9 @@ import { proveProcessMissing } from "./processRecovery.js";
 // 判定在家 runContinue.js（与 continueRun 第 5 步共用谱系事实函数）；本模块
 // 不 import 它会丢掉这份共享，import 它不成环（其传递依赖不含本模块）。
 import { deliveryContinuableHint } from "./runContinue.js";
+// 第 120 批：交付读面的"被取代"派生（只读；与 lead_preflight / 回收共用同一份
+// 派生函数）。非续修谱系成员不派生（没有谱系就没有已证明的后代）。
+import { createLineageSupersession } from "./lineageSupersession.js";
 // 决定 0098：交付读面的 adoption 查询（主分支上声明采纳本运行的提交）。
 import { queryRunAdoption } from "./adoptionQuery.js";
 
@@ -647,6 +650,54 @@ async function _safeAdoption(runId, repoRoot, gitFn, timeoutMs) {
   }
 }
 
+/**
+ * 第 120 批：交付读面的派生"被取代"（`supersededByRunId`）。
+ * 只读、绝不抛错：任何失败折叠成 null（交付读面本身不因派生失败而失败）。
+ * 谱系枚举 / 父边 / 合法性判定全部在 lineageSupersession 的唯一实现里；自身
+ * 已裁决 / 未打包 / 未收口时那边直接返回（只读根转录判闭态）。
+ * @private
+ * @param {string} [descendantWorkspaceRoot] — 给了就要求后代 D 通过该根的归属
+ *   核验（审查 A5：读面带出后代 runId 的前提）；不给则不核验（CLI 特权通道）
+ * @returns {Promise<string|null>}
+ */
+async function _safeSupersededByRunId(events, runId, runDir, readTranscriptFn, descendantWorkspaceRoot) {
+  try {
+    if (!Array.isArray(events)) return null;
+    const reader = createLineageSupersession({
+      runDir,
+      ...(readTranscriptFn ? { readTranscriptFn } : {}),
+      ...(typeof descendantWorkspaceRoot === "string" && descendantWorkspaceRoot.length > 0
+        ? { descendantWorkspaceRoot }
+        : {}),
+    });
+    const derived = await reader.forRun({ runId, events });
+    return derived.supersededByRunId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 读面只对"交付可用、acceptance 仍 pending"的视图求值（其余恒无字段）。 */
+function _mayBeSuperseded(view) {
+  return view?.deliveryAvailable === true && view?.acceptance?.status === "pending";
+}
+
+/**
+ * 第 120 批续修（审查 B1）：把派生结果附加到读面视图。只在确实被取代时加字段
+ * （additive-conditional，与 waitWindowHint/continuableHint 同形——非被取代的
+ * 读面形状逐字节不变，M11-10-SVC-09 的兼容契约保持）。
+ * @private
+ */
+async function _attachSupersession(view, events, runId, runDir, readTranscriptFn, options) {
+  if (options?.skipSupersession === true) return view;
+  if (!_mayBeSuperseded(view)) return view;
+  const supersededByRunId = await _safeSupersededByRunId(
+    events, runId, runDir, readTranscriptFn, options?.descendantWorkspaceRoot,
+  );
+  if (supersededByRunId) view.supersededByRunId = supersededByRunId;
+  return view;
+}
+
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
 
 /**
@@ -672,7 +723,13 @@ async function _safeAdoption(runId, repoRoot, gitFn, timeoutMs) {
  *   authorizedWorkspaceRoot（MCP 会话绑定根），两者都没有 → unchecked/unbound。
  * @param {Function} [input.adoptionGitFn] — injectable adoption git executor
  * @param {number} [input.adoptionTimeoutMs] — per-call adoption git timeout
- * @returns {Promise<object>} delivery view: {runId, terminalState, deliveryRef, verification, acceptance}
+ * @param {string} [input.descendantWorkspaceRoot] — 第 120 批续修（审查 A5）：
+ *   派生"被取代"时要求被采纳的后代 D 通过该授权根的归属核验。CLI 传它自己的
+ *   项目根（`--cwd` 派生）；MCP 传会话绑定根；不给则不核验。
+ * @param {boolean} [input.skipSupersession] — 第 120 批续修（审查 B1）：调用方
+ *   不消费派生结果时置 true（MCP 未绑定会话、review bundle 等），不做全库预筛。
+ * @returns {Promise<object>} delivery view: {runId, terminalState, deliveryRef, verification, acceptance,
+ *   [supersededByRunId]}（最后一项是第 120 批的派生事实：只在被取代时在场，不写事件、不改 acceptance）
  */
 export async function getRunDelivery({
   runId,
@@ -686,6 +743,8 @@ export async function getRunDelivery({
   adoptionRepoRoot,
   adoptionGitFn,
   adoptionTimeoutMs,
+  descendantWorkspaceRoot,
+  skipSupersession,
 }) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDelivery: runDir is required");
@@ -800,6 +859,12 @@ export async function getRunDelivery({
     adoptionGitFn,
     adoptionTimeoutMs,
   );
+  // 第 120 批：派生"被取代"（不写事件、不改 acceptance）。只在交付可用且
+  // acceptance 仍 pending 时求值；跳过时不做任何全库预筛。
+  await _attachSupersession(view, events, runId, resolve(runDir), _readTranscript, {
+    descendantWorkspaceRoot,
+    skipSupersession,
+  });
   return view;
 }
 
@@ -954,8 +1019,14 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  *  （MCP 会话绑定根）；都没有 → unchecked/unbound。
  * @param {Function} [input.adoptionGitFn] — injectable adoption git executor
  * @param {number} [input.adoptionTimeoutMs] — per-call adoption git timeout
+ * @param {string} [input.descendantWorkspaceRoot] — 第 120 批续修（审查 A5）：
+ *   派生"被取代"时被采纳的后代 D 必须通过的授权根（MCP 绑定根 / CLI 项目根）。
+ * @param {boolean} [input.skipSupersession] — 第 120 批续修（审查 B1）：调用方
+ *   不消费派生结果时置 true（review bundle），不做全库预筛。等待到期仍未收口
+ *   时也不推导（同一审查条：到期结果不给 nextStep）。
  * @returns {Promise<object>} { runId, readiness, waitReturnedEarly, terminalState,
  *   deliveryAvailable, deliveryRef, deliveryFailure, verification, acceptance,
+ *   supersededByRunId（第 120 批派生事实：仅被取代时在场，收口且未被自己裁定时才可能非空）,
  *   adoption, [waitWindowHint]（仅到期）, [continuableHint]（决定 0112：仅
  *   settled/delivery_settled 提前返回——收口且未采纳时可续谱系成员的内部布尔，
  *   MCP 适配层据此给 delivery_continuable 的 nextStep） }
@@ -976,6 +1047,8 @@ export async function getRunDeliveryReadiness({
   adoptionRepoRoot,
   adoptionGitFn,
   adoptionTimeoutMs,
+  descendantWorkspaceRoot,
+  skipSupersession,
 }) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDeliveryReadiness: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDeliveryReadiness: runDir is required");
@@ -1030,13 +1103,26 @@ export async function getRunDeliveryReadiness({
   // 决定 0098 第 5 条：adoption 的 git 查询只在返回前算一次，绝不进轮询——
   // 每条返回路径都经 finishWithAdoption 收尾（等待 N 轮也只查一次 git）。
   const adoptionRoot = adoptionRepoRoot ?? authorizedWorkspaceRoot;
-  const finishWithAdoption = async (result) => {
+  /**
+   * @param {object} result
+   * @param {boolean} [allowSupersession] — 审查 B1：等待到期仍未收口时不推导
+   *   （到期结果不给 nextStep；且有了"自身已收口"条件本来也推不出）。
+   */
+  const finishWithAdoption = async (result, allowSupersession = true) => {
     result.adoption = await _safeAdoption(
       runId,
       adoptionRoot,
       adoptionGitFn,
       adoptionTimeoutMs,
     );
+    // 第 120 批：与即时查询同一派生（收口提前返回路径）。只在确实被取代时加
+    // 字段；绝不抛错、绝不写事件。
+    if (allowSupersession) {
+      await _attachSupersession(result, events, runId, resolve(runDir), _readTranscript, {
+        descendantWorkspaceRoot,
+        skipSupersession,
+      });
+    }
     return result;
   };
   // 决定 0112：settled 且 reason=delivery_settled 的提前返回附带内部布尔
@@ -1142,9 +1228,11 @@ export async function getRunDeliveryReadiness({
   // TD-137②：到期（waitReturnedEarly:false）附带同族上限交叉提示；提前返回
   // （settled / read-failed ambiguous）不带。MCP 适配层以显式键集合构造 wire
   // payload，该字段不进入合同形状。
+  // 第 120 批续修（审查 B1）：到期仍未收口时不做"被取代"派生（调用方不用它，
+  // 且等待窗口里再付一次全库预筛会撞宿主 60 秒上限）。
   const result = _buildReadinessResult(runId, events, terminalState, readiness, false, inventoryOpts);
   result.waitWindowHint = buildWaitWindowHint(DELIVERY_WAIT_MS_MAX);
-  return finishWithAdoption(result);
+  return finishWithAdoption(result, false);
 }
 
 // ===== Service: decideRunDelivery (durable decision) =====

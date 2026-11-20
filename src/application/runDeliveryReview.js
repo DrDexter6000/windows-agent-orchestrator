@@ -50,12 +50,19 @@ import { validateDeliveryFacts } from "../transcript.js";
 // TD-324（83 批 W2）：只读审查面用 typed 形态——归属比较抛出的 Error 标
 // code="workspace_not_authorized"，MCP/CLI 适配层按 TYPE 折叠成归属拒绝专属文案，
 // 不再是笼统 failed。绑定根本身证明失败在打标区之外（不是归属拒绝，照旧）。
-import { verifyRunWorkspaceOwnership, verifyRunWorkspaceOwnershipTyped } from "./runWorkspaceOwnership.js";
+import { verifyRunWorkspaceOwnershipTyped } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { assertDeliveryCommitInRepository, isValidRunId, gitChildEnv } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
 import { projectDeliveryReadiness } from "./runDelivery.js";
-import { continuableLineageFact } from "./runContinue.js";
+// 第 120 批续修（审查 D2）：父边检查搬去依赖更低的模块，本模块只导入——
+// 拒绝文案与 `waoSinceParentRejection` 标记仍从同一处来。
+import {
+  continuationFactCandidates,
+  resolveContinuationParentEdge,
+  sinceParentRejection,
+  SINCE_PARENT_AMBIGUOUS_TEXT,
+} from "./continuationParentEdge.js";
 import { REVIEW_PENDING_REASON } from "./reviewUnavailableReasons.js";
 // F5 (2026-10-08): typed cursor-rejection signal — the SAME class run_activity
 // (M12-19) defined and exported. One class definition keeps instanceof identity
@@ -86,68 +93,25 @@ function validateFileIndex(fileIndex, fileCount) {
 // the sole switch is the literal boolean sinceParent, so an arbitrary
 // commit can never enter the diff base.
 //
-// Continuation-round hardening (consult b2f2f9d review): the ONLY parent
-// fact source is `run.background_submitted` (the sole production event that
-// writes parentRunId), it must be runId-bound, `continuation:true`, and
-// EXACTLY ONE such fact may exist (duplicates refuse — the same uniqueness
-// discipline as delivery facts). Parent fields on `run.started` are NEVER
-// recognized, so a forged appended run.started cannot hijack the base. The
-// fact's rootRunId must agree with THIS run's own run.session_reuse lineage
-// root (decision 0112 SSOT), and the parent must belong to the same lineage.
+// 第 120 批续修（审查 D2）：父边判定的唯一实现已抽到依赖更低的
+// application/continuationParentEdge.js（同一份检查也供"被取代"派生使用），
+// 本模块从中导入——固定文案、检查顺序与标记都逐字节不变，只是不再把
+// runDelivery.js 拉进这条依赖链（`runDelivery.js` → `lineageSupersession.js`
+// → 本模块曾构成应用层环）。
 // =====================================================================
 
-const SINCE_PARENT_NO_PARENT_TEXT =
-  "--since-parent is only available for a continuation child run: no bound parent run fact";
-const SINCE_PARENT_AMBIGUOUS_TEXT =
-  "--since-parent rejected: ambiguous continuation facts (expected exactly one bound run.background_submitted continuation fact)";
-const SINCE_PARENT_WORKSPACE_TEXT =
-  "--since-parent rejected: the parent run does not belong to the authorized workspace";
-const SINCE_PARENT_LINEAGE_TEXT =
-  "--since-parent rejected: lineage mismatch (rootRunId does not match the parent lineage)";
 const SINCE_PARENT_NO_DELIVERY_TEXT =
   "--since-parent rejected: the parent run has no proven delivery commit";
 const SINCE_PARENT_EMPTY_DELTA_TEXT =
   "--since-parent rejected: this round has no changes relative to the parent delivery";
 
 /**
- * Closed-set marker on the six fixed --since-parent rejection errors, so the
- * CLI --all adapter can surface exactly these fixed texts while folding every
- * OTHER unexpected exception into the generic review failure copy.
- * @private
- */
-function sinceParentRejection(text) {
-  const error = new Error(text);
-  error.waoSinceParentRejection = true;
-  return error;
-}
-
-/**
- * Count the runId-BOUND run.background_submitted continuation facts. Shared by
- * the getRunDeliveryReview gate (so a duplicated fact is classified as the
- * closed-set ambiguity rejection BEFORE the workspace-ownership verifier would
- * reject the same transcript for a less specific reason) and by
- * resolveContinuationParent (the authoritative shape checks).
- * @private
- */
-function continuationFactCandidates(events, runId) {
-  const candidates = [];
-  for (const e of events) {
-    if (!e || e.runId !== runId) continue;
-    if (e.type !== "run.background_submitted" || e.continuation !== true) continue;
-    candidates.push(e);
-  }
-  return candidates;
-}
-
-/**
  * Resolve the PROVEN parent delivery commit for a continuation child run.
- * Fixed-text rejections (closed set): no parent fact / unreadable parent
- * transcript; ambiguous (duplicated) continuation facts; parent not in the
- * authorized workspace; lineage mismatch (fact root vs own session_reuse
- * root, or vs the parent's lineage root); parent without a proven delivery
- * commit (final verification outcome required — passed/failed/unavailable
- * all qualify; only pending does not). None of them echo paths, run ids,
- * commits, or Git errors.
+ * The parent EDGE comes from resolveContinuationParentEdge (the one shared
+ * fact check); this wrapper then proves the parent's delivery facts and its
+ * exact delivery commit in the authorized source repo. The parent's delivery
+ * needs a FINAL verification outcome (passed/failed/unavailable all qualify;
+ * only pending does not).
  *
  * @param {object} input
  * @param {string} input.runId — the child run id (facts are read bound to it)
@@ -160,76 +124,29 @@ function continuationFactCandidates(events, runId) {
 async function resolveContinuationParent({
   runId, events, runDir, authorizedWorkspaceRoot, readTranscriptFn,
 }) {
-  // 1. The continuation fact: runId-BOUND run.background_submitted with
-  //    continuation:true — count them ALL; exactly one is acceptable.
-  //    run.started parent fields are never a fact source. AND that fact must
-  //    be THIS run's FIRST transcript event: runContinue step 15 writes it
-  //    before anything else (before the runner starts), so a continuation
-  //    fact appended later — a foreground run, or an ordinary background
-  //    dispatch — is a forgery, refused as "no parent run".
-  const candidates = continuationFactCandidates(events, runId);
-  if (candidates.length > 1) {
-    throw sinceParentRejection(SINCE_PARENT_AMBIGUOUS_TEXT);
-  }
-  const factEvent = candidates[0];
-  if (!factEvent
-    || events[0] !== factEvent
-    || typeof factEvent.parentRunId !== "string" || !isValidRunId(factEvent.parentRunId)
-    || typeof factEvent.rootRunId !== "string" || !isValidRunId(factEvent.rootRunId)
-    || factEvent.parentRunId === runId) {
-    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
-  }
-  const fact = { parentRunId: factEvent.parentRunId, rootRunId: factEvent.rootRunId };
-
-  // 2. The child's own lineage fact must agree: the continuation fact's
-  //    rootRunId must equal the root of THIS run's bound run.session_reuse
-  //    (decision 0112 SSOT — no second membership algorithm).
-  const childLineage = continuableLineageFact(events, runId);
-  if (!childLineage || childLineage.rootRunId !== fact.rootRunId) {
-    throw sinceParentRejection(SINCE_PARENT_LINEAGE_TEXT);
-  }
-
-  // 3. Read the parent transcript (unreadable/malformed = no parent run).
-  let parentEvents;
-  try {
-    parentEvents = await (readTranscriptFn ?? readTranscript)(
-      resolveTranscriptPath(runDir, fact.parentRunId),
-    );
-  } catch {
-    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
-  }
-  if (!Array.isArray(parentEvents)) {
-    throw sinceParentRejection(SINCE_PARENT_NO_PARENT_TEXT);
-  }
-
-  // 4. The parent must belong to the SAME authorized workspace (before any
-  //    Git proof, same gate order as the child).
-  try {
-    verifyRunWorkspaceOwnership(parentEvents, authorizedWorkspaceRoot, fact.parentRunId);
-  } catch {
-    throw sinceParentRejection(SINCE_PARENT_WORKSPACE_TEXT);
-  }
-
-  // 5. The parent must be a member of the SAME lineage (its own lineage root
-  //    equals the fact's rootRunId — a root run satisfies this trivially).
-  const parentLineage = continuableLineageFact(parentEvents, fact.parentRunId);
-  if (!parentLineage || parentLineage.rootRunId !== fact.rootRunId) {
-    throw sinceParentRejection(SINCE_PARENT_LINEAGE_TEXT);
-  }
+  const {
+    parentRunId, parentEvents,
+  } = await resolveContinuationParentEdge({
+    runId,
+    events,
+    runDir,
+    authorizedWorkspaceRoot,
+    ...(readTranscriptFn ? { readTranscriptFn } : {}),
+  });
 
   // 6. Parent delivery facts + full durable identity binding — the SAME
   //    validateDeliveryFacts SSOT and binding discipline as the child. A
   //    FINAL verification outcome is required (passed/failed/unavailable all
   //    qualify); a pending parent is not a proven delivery.
-  const pf = validateDeliveryFacts(parentEvents, { expectedRunId: fact.parentRunId });
+  const pf = validateDeliveryFacts(parentEvents, { expectedRunId: parentRunId });
   if (!pf.valid || pf.verificationStatus === "pending") {
     throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
   }
   if (
-    pf.createdEventRunId !== fact.parentRunId
-    || pf.verificationEventRunId !== fact.parentRunId
-    || !pf.createdRef || pf.createdRef.runId !== fact.parentRunId
-    || !pf.latestRef || pf.latestRef.runId !== fact.parentRunId
+    pf.createdEventRunId !== parentRunId
+    || pf.verificationEventRunId !== parentRunId
+    || !pf.createdRef || pf.createdRef.runId !== parentRunId
+    || !pf.latestRef || pf.latestRef.runId !== parentRunId
   ) {
     throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
   }
@@ -246,7 +163,7 @@ async function resolveContinuationParent({
   } catch {
     throw sinceParentRejection(SINCE_PARENT_NO_DELIVERY_TEXT);
   }
-  return { parentRunId: fact.parentRunId, deliveryCommit: parentProof.deliveryCommit };
+  return { parentRunId, deliveryCommit: parentProof.deliveryCommit };
 }
 
 /**

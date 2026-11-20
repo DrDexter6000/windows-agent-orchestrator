@@ -139,21 +139,49 @@ export function cleanRunEvents({ repo, wt, branch }) {
   ];
 }
 
-/** 已裁决（decision = accepted|rejected）的交付 run 事件。 */
-export function decidedRunEvents({ repo, wt, branch, baseCommit, decision }) {
+/**
+ * 已裁决（decision = accepted|rejected）的交付 run 事件。
+ * 第 120 批续修第 2 轮（G3）：计划分类与执行放行都用"合法裁决"——采纳必须过
+ * `validateDeliveryFacts`，所以这里给出完整的合法交付链（created + 验证 passed +
+ * 决策同形 ref）。runId 从 `wao/<runId>` 分支名取（这些夹具的分支名就是 runId），
+ * 也可显式传 `runId`；取不到时退回旧的裸事件形状（只用于变异/反例夹具）。
+ */
+export function decidedRunEvents({ repo, wt, branch, baseCommit, decision, runId = null }) {
+  const started = {
+    type: "run.started",
+    backend: "test",
+    cwd: repo,
+    worktreePath: wt,
+    worktreeBranch: branch,
+    delivery: { mode: "git_commit_v1", baseCommit },
+  };
+  const running = { type: "run.state_change", from: null, to: "running", reason: "spawned" };
+  const completed = { type: "run.state_change", from: "running", to: "completed", reason: "done" };
+  const resolvedRunId = runId
+    ?? (typeof branch === "string" && branch.startsWith("wao/") ? branch.slice("wao/".length) : null);
+  if (resolvedRunId === null) {
+    return [
+      started,
+      running,
+      { type: "run.delivery_created" },
+      { type: decision === "accepted" ? "run.delivery_accepted" : "run.delivery_rejected" },
+      completed,
+    ];
+  }
+  const verified = verifiedDeliveryRef(resolvedRunId, { baseCommit });
+  const decided = verifiedDeliveryRef(resolvedRunId, { baseCommit, acceptance: decision });
   return [
+    started,
+    running,
+    { type: "run.delivery_created", delivery: verified },
+    { type: "run.delivery_verification_passed", delivery: verified },
     {
-      type: "run.started",
-      backend: "test",
-      cwd: repo,
-      worktreePath: wt,
-      worktreeBranch: branch,
-      delivery: { mode: "git_commit_v1", baseCommit },
+      type: `run.delivery_${decision}`,
+      delivery: decided,
+      deliveryCommit: verified.deliveryCommit,
+      reason: "decision",
     },
-    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
-    { type: "run.delivery_created" },
-    { type: decision === "accepted" ? "run.delivery_accepted" : "run.delivery_rejected" },
-    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    completed,
   ];
 }
 
@@ -172,6 +200,97 @@ export function memberRunEvents({ repo, wt, branch, rootRunId, terminal = true }
   ];
   if (terminal) events.push({ type: "run.state_change", from: "running", to: "completed", reason: "done" });
   return events;
+}
+
+// ── 第 120 批：续修谱系的合法交付链（被取代派生要 validateDeliveryFacts 通过）──
+
+const DELIVERY_COMMIT = "d".repeat(40);
+
+/** 已验证的 DeliveryRef（created / outcome / decision 三处同形——绑定口径）。
+ * verificationStatus 供"验证仍 pending（未收口）"的反例夹具用。 */
+export function verifiedDeliveryRef(runId, { baseCommit, acceptance = "pending", verificationStatus = "passed" } = {}) {
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId,
+    baseCommit,
+    deliveryCommit: DELIVERY_COMMIT,
+    branch: `wao/${runId}`,
+    worktreePath: `D:/fake/${runId}`,
+    changedFiles: ["a.txt"],
+    verification: { status: verificationStatus, commands: [], verifiedCommit: DELIVERY_COMMIT, results: [] },
+    acceptance: { status: acceptance, reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+}
+
+/** 已打包 + 验证 passed 的交付链事件（尚未裁决）。 */
+export function packagedDeliveryEvents(runId, { baseCommit } = {}) {
+  const delivery = verifiedDeliveryRef(runId, { baseCommit });
+  return [
+    { type: "run.delivery_created", delivery },
+    { type: "run.delivery_verification_passed", delivery },
+  ];
+}
+
+/** 合法采纳决策事件（与 created/outcome 同一 ref 形状）。 */
+export function acceptedDecisionEvent(runId, { baseCommit } = {}) {
+  const delivery = verifiedDeliveryRef(runId, { baseCommit, acceptance: "accepted" });
+  return {
+    type: "run.delivery_accepted",
+    delivery,
+    deliveryCommit: delivery.deliveryCommit,
+    reason: "ok",
+  };
+}
+
+/**
+ * 续修谱系根：首事件 run.session_reuse（turn:first，rootRunId = 自己），随后
+ * 终态 + 已打包交付链（decision 可选）。
+ */
+export function lineageRootRunEvents({
+  runId, repo, wt = null, branch = null, baseCommit, decision = null,
+}) {
+  return [
+    { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: runId },
+    {
+      type: "run.started",
+      backend: "test",
+      cwd: repo,
+      worktreePath: wt,
+      worktreeBranch: branch,
+      delivery: { mode: "git_commit_v1", baseCommit },
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ...packagedDeliveryEvents(runId, { baseCommit }),
+    ...(decision === "accepted" ? [acceptedDecisionEvent(runId, { baseCommit })] : []),
+  ];
+}
+
+/**
+ * 续修子运行：首事件必须是 runId 绑定的 run.background_submitted
+ * （continuation:true + parentRunId），随后 run.session_reuse（turn:resume）。
+ */
+export function lineageChildRunEvents({
+  runId, parentRunId, rootRunId, repo, wt = null, branch = null, baseCommit, decision = null,
+}) {
+  return [
+    { type: "run.background_submitted", continuation: true, parentRunId, rootRunId },
+    { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId },
+    {
+      type: "run.started",
+      backend: "test",
+      cwd: repo,
+      worktreePath: wt,
+      worktreeBranch: branch,
+      delivery: { mode: "git_commit_v1", baseCommit },
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ...packagedDeliveryEvents(runId, { baseCommit }),
+    ...(decision === "accepted" ? [acceptedDecisionEvent(runId, { baseCommit })] : []),
+  ];
 }
 
 /** best-effort 清理临时目录（Windows 文件锁下有界重试）。 */

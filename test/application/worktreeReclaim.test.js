@@ -9,6 +9,9 @@ import assert from "node:assert/strict";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { symlinkSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+
+const require = createRequire(import.meta.url);
 import { spawn } from "node:child_process";
 
 import {
@@ -19,6 +22,7 @@ import { worktreeCommand } from "../../src/commands/worktree.js";
 import {
   git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
   cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow, OLD_TS,
+  lineageRootRunEvents, lineageChildRunEvents, packagedDeliveryEvents, verifiedDeliveryRef,
 } from "../_worktreeReclaimHarness.mjs";
 
 const bases = [];
@@ -215,6 +219,431 @@ test("分类：已打包未裁决 → pending_lead/delivery_packaged_undecided",
   const item = oneItem(plan, "run_pk");
   assert.equal(item.category, "pending_lead");
   assert.equal(item.reason, "delivery_packaged_undecided");
+});
+
+test("分类（第 120 批）：已打包未裁决但有被采纳的后代（派生被取代）→ 树干净即可回收，条目写明 supersededByRunId", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_a");
+  s.seed("run_sp_a", lineageRootRunEvents({
+    runId: "run_sp_a", repo: s.repo, wt, branch: "wao/run_sp_a", baseCommit: s.mainCommit,
+  }));
+  // 续修子运行与父共享 retained worktree（生产形状），已合法采纳 → 父被取代。
+  s.seed("run_sp_b", lineageChildRunEvents({
+    runId: "run_sp_b", parentRunId: "run_sp_a", rootRunId: "run_sp_a",
+    repo: s.repo, wt, branch: "wao/run_sp_a", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const tree = itemsOf(plan, "run_sp_a").find((i) => i.action === "remove_tree");
+  assert.ok(tree, `被取代的祖先应可回收: ${JSON.stringify(itemsOf(plan, "run_sp_a"))}`);
+  assert.equal(tree.category, "reclaim");
+  assert.equal(tree.supersededByRunId, "run_sp_b", "计划条目写明那个被采纳的后代");
+  assert.equal(itemsOf(plan, "run_sp_a").filter((i) => i.reason === "delivery_packaged_undecided").length, 0,
+    "被取代只撤掉 delivery_packaged_undecided 这一个阻塞");
+});
+
+test("分类（第 120 批）：被取代但树脏 → 仍按 undecided_dirty_tree 保留（只撤一个阻塞）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_c");
+  writeFileSync(join(wt, "uncommitted.txt"), "dirty\n", "utf8");
+  s.seed("run_sp_c", lineageRootRunEvents({
+    runId: "run_sp_c", repo: s.repo, wt, branch: "wao/run_sp_c", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sp_d", lineageChildRunEvents({
+    runId: "run_sp_d", parentRunId: "run_sp_c", rootRunId: "run_sp_c",
+    repo: s.repo, wt, branch: "wao/run_sp_c", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_sp_c");
+  assert.equal(item.category, "pending_lead");
+  assert.equal(item.reason, "undecided_dirty_tree", "树脏的字节后代不一定有 → 仍保留");
+  assert.equal(item.supersededByRunId, "run_sp_d");
+  assert.equal(itemsOf(plan, "run_sp_c").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批）：共享树里另一成员待裁决 → 整棵树保留（被取代的祖先也不回收）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_e");
+  s.seed("run_sp_e", lineageRootRunEvents({
+    runId: "run_sp_e", repo: s.repo, wt, branch: "wao/run_sp_e", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sp_f", lineageChildRunEvents({
+    runId: "run_sp_f", parentRunId: "run_sp_e", rootRunId: "run_sp_e",
+    repo: s.repo, wt, branch: "wao/run_sp_e", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 同树成员（无续修父边、已打包未裁决、没有已采纳后代）→ 仍待裁决。
+  s.seed("run_sp_m", [
+    ...memberRunEvents({ repo: s.repo, wt, branch: "wao/run_sp_e", rootRunId: "run_sp_e" }),
+    ...packagedDeliveryEvents("run_sp_m", { baseCommit: s.mainCommit }),
+  ]);
+  const { plan } = await s.plan();
+  const member = oneItem(plan, "run_sp_m");
+  assert.equal(member.reason, "delivery_packaged_undecided", "成员自己仍待裁决");
+  const root = oneItem(plan, "run_sp_e");
+  assert.equal(root.category, "tree_shared");
+  assert.equal(root.reason, "shared_tree_kept");
+  assert.equal(itemsOf(plan, "run_sp_e").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修 G1）：只靠路径声明的共享成员带打包未裁决事实 → 整树按 delivery_packaged_undecided 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_gp_a");
+  s.seed("run_gp_a", lineageRootRunEvents({
+    runId: "run_gp_a", repo: s.repo, wt, branch: "wao/run_gp_a", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_gp_b", lineageChildRunEvents({
+    runId: "run_gp_b", parentRunId: "run_gp_a", rootRunId: "run_gp_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 只靠 run.started.worktreePath 声明这棵树：没有自有树/分支、不在属主谱系内，
+  // 因此不会被逐 runId 分类，但它是整棵树的成员（有打包、未裁决）。
+  s.seed("run_gp_m", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_gp_m", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_gp_m", { baseCommit: s.mainCommit }) },
+  ]);
+  const { plan } = await s.plan();
+  const root = oneItem(plan, "run_gp_a");
+  assert.equal(root.category, "pending_lead", "整树保留");
+  assert.equal(root.reason, "delivery_packaged_undecided");
+  assert.equal(root.detail, "tree member run_gp_m");
+  assert.equal(itemsOf(plan, "run_gp_a").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修 G3）：缺交付载荷的采纳事件不算合法裁决 → 整树保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_gd_a");
+  s.seed("run_gd_a", [
+    ...lineageRootRunEvents({ runId: "run_gd_a", repo: s.repo, wt, branch: "wao/run_gd_a", baseCommit: s.mainCommit }),
+    // 裸采纳事件（没有任何交付载荷）：validateDeliveryFacts 判 malformed，不算裁决。
+    { type: "run.delivery_accepted" },
+  ]);
+  s.seed("run_gd_b", lineageChildRunEvents({
+    runId: "run_gd_b", parentRunId: "run_gd_a", rootRunId: "run_gd_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_gd_a");
+  assert.equal(item.category, "pending_lead", "非法采纳不算裁决");
+  assert.equal(item.reason, "delivery_packaged_undecided");
+  assert.equal(itemsOf(plan, "run_gd_a").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修 A1）：祖先自身验证未收口——不推导，仍按 delivery_packaged_undecided 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_vp");
+  s.seed("run_sp_vp", [
+    { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: "run_sp_vp" },
+    { type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: "wao/run_sp_vp", delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit } },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    // 只有打包、验证仍 pending → 未收口。
+    {
+      type: "run.delivery_created",
+      delivery: verifiedDeliveryRef("run_sp_vp", { baseCommit: s.mainCommit, verificationStatus: "pending" }),
+    },
+  ]);
+  s.seed("run_sp_vq", lineageChildRunEvents({
+    runId: "run_sp_vq", parentRunId: "run_sp_vp", rootRunId: "run_sp_vp",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_sp_vp");
+  assert.equal(item.category, "pending_lead", "验证未收口的祖先仍被回收门挡住");
+  assert.equal(item.reason, "delivery_packaged_undecided");
+  assert.equal(item.supersededByRunId, undefined, "未收口 → 不出派生字段");
+  assert.equal(itemsOf(plan, "run_sp_vp").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修 C1）：计划树条目写明 supersededMembers（apply 只重证这些成员）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_sm");
+  s.seed("run_sp_sm", lineageRootRunEvents({
+    runId: "run_sp_sm", repo: s.repo, wt, branch: "wao/run_sp_sm", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sp_sn", lineageChildRunEvents({
+    runId: "run_sp_sn", parentRunId: "run_sp_sm", rootRunId: "run_sp_sm",
+    repo: s.repo, wt, branch: "wao/run_sp_sm", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const tree = itemsOf(plan, "run_sp_sm").find((i) => i.action === "remove_tree");
+  assert.ok(tree, "夹具前提：树可回收");
+  assert.deepEqual(tree.supersededMembers, ["run_sp_sm"], "依赖派生放行的成员名单进计划");
+  assert.equal(tree.supersededByRunId, "run_sp_sn");
+});
+
+test("分类（第 120 批续修第 6 轮 P1）：桶 statSync 持续 EACCES → 计划不出任何删除项", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_n1_a");
+  s.seed("run_n1_a", lineageRootRunEvents({
+    runId: "run_n1_a", repo: s.repo, wt, branch: "wao/run_n1_a", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_n1_accept", lineageChildRunEvents({
+    runId: "run_n1_accept", parentRunId: "run_n1_a", rootRunId: "run_n1_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 同根旁支 X↔Y 放在项目桶里：枚举完整时成环 → 不推导；桶读不出时清单漏掉环。
+  const member = (runId, parentRunId) => [
+    { type: "run.background_submitted", runId, continuation: true, parentRunId, rootRunId: "run_n1_a" },
+    { type: "run.session_reuse", runId, mode: "run_lineage", turn: "resume", rootRunId: "run_n1_a" },
+    ...packagedDeliveryEvents(runId, { baseCommit: s.mainCommit }),
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+  ];
+  s.seed("run_n1_x", member("run_n1_x", "run_n1_y"), { bucket: "proj-a" });
+  s.seed("run_n1_y", member("run_n1_y", "run_n1_x"), { bucket: "proj-a" });
+  // sol 的两个扩展形状：只有分支还在跑的运行；漏掉已打包未裁决的共享成员。
+  git(["branch", "wao/run_n1_active"], s.repo);
+  s.seed("run_n1_active", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: null,
+      worktreeBranch: "wao/run_n1_active",
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+  ]);
+  const tree = s.wt("run_n1_tree");
+  s.seed("run_n1_tree", lineageRootRunEvents({
+    runId: "run_n1_tree", repo: s.repo, wt: tree, branch: "wao/run_n1_tree",
+    baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  s.seed("run_n1_shared", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: tree, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ...packagedDeliveryEvents("run_n1_shared", { baseCommit: s.mainCommit }),
+  ]);
+  // 健康对照里真的可删的已裁决分支：注入后必须一起消失（证明规则不是空转）。
+  git(["branch", "wao/run_n1_del"], s.repo);
+  s.seed("run_n1_del", decidedRunEvents({
+    repo: s.repo, baseCommit: s.mainCommit, branch: "wao/run_n1_del", decision: "accepted",
+  }));
+  const normalize = (plan) => plan.items
+    .map((i) => ({ runId: i.runId, action: i.action, reason: i.reason ?? null }))
+    .sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  const healthy = await s.plan();
+  assert.equal(itemsOf(healthy.plan, "run_n1_a").filter((i) => i.action === "delete_branch").length, 0,
+    "夹具前提：完整枚举下成环，不出 delete_branch");
+  assert.equal(oneItem(healthy.plan, "run_n1_active").reason, "non_terminal", "夹具前提：在跑");
+  assert.ok(itemsOf(healthy.plan, "run_n1_del").some((i) => i.action === "delete_branch"),
+    "夹具前提：健康计划里有真的删除项");
+  assert.equal(oneItem(healthy.plan, "run_n1_tree").reason, "delivery_packaged_undecided",
+    "夹具前提：共享成员让整树保留");
+  const healthySnapshot = normalize(healthy.plan);
+  // 桶 statSync 持续 EACCES：严格枚举抛错 → 退回非严格清单（同样漏掉该桶）+
+  // 记枚举不完整。
+  const bucketDir = join(s.runDir, "projects", readdirSync(join(s.runDir, "projects"))[0]);
+  const fsCjs = require("node:fs");
+  const realStat = fsCjs.statSync;
+  let injected = 0;
+  fsCjs.statSync = (p, ...rest) => {
+    if (resolve(String(p)) === resolve(bucketDir)) {
+      injected += 1;
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return realStat(p, ...rest);
+  };
+  syncBuiltinESMExports();
+  let injectedPlan;
+  try {
+    injectedPlan = await s.plan();
+  } finally {
+    fsCjs.statSync = realStat;
+    syncBuiltinESMExports();
+  }
+  assert.ok(injected > 0, "注入生效");
+  // P1：枚举不完整时整份计划不出任何删除项；所有条目保留、理由 undeterminable。
+  const deleting = injectedPlan.plan.items.filter((i) => i.action !== "keep");
+  assert.deepEqual(deleting, [], "枚举不完整时计划没有任何删除项");
+  for (const item of injectedPlan.plan.items) {
+    assert.equal(item.reason, "undeterminable", `${item.runId} 的保留理由`);
+    assert.equal(item.detail, "transcript_enumeration_incomplete", `${item.runId} 的 detail`);
+  }
+  assert.equal(injectedPlan.plan.counts.byCategory.reclaim, 0, "计数里没有回收项");
+  assert.equal(injectedPlan.plan.items.length, injectedPlan.plan.counts.byCategory.undeterminable,
+    "所有主体都归无法判定，且照常列出条目");
+  // 恢复访问后重新出计划：与健康对照一致。
+  const restored = await s.plan();
+  assert.deepEqual(normalize(restored.plan), healthySnapshot, "恢复后计划与健康对照一致");
+});
+
+test("分类（第 120 批续修第 4 轮 L3）：成员门保留整组共享成员——续修子一并保留、外层仍 has_kept_descendant", async () => {
+  const s = await scenario();
+  const outer = s.wt("run_l3_out");
+  const inner = join(outer, ".wao-worktrees", "run_l3_in");
+  git(["worktree", "add", inner, "-b", "wao/run_l3_in"], s.repo);
+  git(["branch", "wao/run_l3_c"], s.repo);
+  s.seed("run_l3_out", decidedRunEvents({
+    repo: s.repo, wt: outer, branch: "wao/run_l3_out", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  s.seed("run_l3_in", lineageRootRunEvents({
+    runId: "run_l3_in", repo: s.repo, wt: inner, branch: "wao/run_l3_in", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 已采纳、共享内层树的续修子：自己有独立分支（旧行为会出 delete_branch）。
+  s.seed("run_l3_c", lineageChildRunEvents({
+    runId: "run_l3_c", parentRunId: "run_l3_in", rootRunId: "run_l3_in",
+    repo: s.repo, wt: inner, branch: "wao/run_l3_c", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 阻断内层树的只靠路径声明成员。
+  s.seed("run_l3_m", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: inner, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_l3_m", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_l3_m", { baseCommit: s.mainCommit }) },
+  ]);
+  const { plan } = await s.plan();
+  for (const id of ["run_l3_in", "run_l3_c"]) {
+    const item = oneItem(plan, id);
+    assert.equal(item.category, "pending_lead", `${id} 整组保留`);
+    assert.equal(item.reason, "delivery_packaged_undecided");
+    assert.equal(item.detail, "tree member run_l3_m");
+    assert.equal(itemsOf(plan, id).filter((i) => i.action === "remove_tree").length, 0);
+    assert.equal(itemsOf(plan, id).filter((i) => i.action === "delete_branch").length, 0,
+      `${id} 不该出 delete_branch`);
+  }
+  const outerItem = oneItem(plan, "run_l3_out");
+  assert.equal(outerItem.category, "tree_protection");
+  assert.equal(outerItem.reason, "has_kept_descendant");
+  assert.equal(itemsOf(plan, "run_l3_out").filter((i) => i.action === "remove_tree").length, 0);
+  assert.equal(plan.counts.byCategory.reclaim, 0, "计划里没有任何回收项");
+  // 计划本身不删分支——分支仍在。
+  assert.match(git(["rev-parse", "--verify", "refs/heads/wao/run_l3_c"], s.repo), /^[0-9a-f]{40}$/);
+});
+
+test("分类（第 120 批续修第 3 轮 K4）：裸拒收按事件类型算已裁决（拒收兼容例外），进回收", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bare_r");
+  s.seed("run_bare_r", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt,
+      worktreeBranch: "wao/run_bare_r", delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    // 裸拒收：没有任何交付载荷。拒收沿用 b120 之前的事件类型口径（兼容例外），
+    // 与"采纳必须过 validateDeliveryFacts"分开。
+    { type: "run.delivery_rejected" },
+  ]);
+  const { plan } = await s.plan();
+  const tree = plan.items.find((i) => i.action === "remove_tree" && i.runId === "run_bare_r");
+  assert.ok(tree, "裸拒收照类型算已裁决 → 可回收");
+  assert.equal(tree.facts.lastDecision, "rejected", "审批事实如实写 rejected");
+});
+
+test("分类（第 120 批续修第 3 轮 J3）：谱系根转录为空（属主是续修子）→ undeterminable/transcript_empty_now", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_je_o");
+  // 属主是续修子 O；谱系根 R 的转录被截空。
+  s.seed("run_je_r", []);
+  s.seed("run_je_o", lineageChildRunEvents({
+    runId: "run_je_o", parentRunId: "run_je_r", rootRunId: "run_je_r",
+    repo: s.repo, wt, branch: "wao/run_je_o", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_je_d", lineageChildRunEvents({
+    runId: "run_je_d", parentRunId: "run_je_o", rootRunId: "run_je_r",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_je_o");
+  assert.equal(item.category, "undeterminable", "空转录如实归无法判定");
+  assert.equal(item.reason, "transcript_empty_now");
+  assert.equal(item.detail, "run_je_r", "点名空转录的谱系成员");
+  assert.equal(itemsOf(plan, "run_je_o").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修第 3 轮 K1）：内容不同、最后状态相同的孪生成员带打包事实 → 整树保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_kt_a");
+  s.seed("run_kt_a", lineageRootRunEvents({
+    runId: "run_kt_a", repo: s.repo, wt, branch: "wao/run_kt_a", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 只靠路径声明共享树、无独立分支的成员 M：两份副本内容不同（副本多一条无害
+  // 事件），最后状态与声明路径相同，均带打包事实、未裁决。
+  const memberEvents = [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_kt_m", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_kt_m", { baseCommit: s.mainCommit }) },
+  ];
+  s.seed("run_kt_m", memberEvents);
+  s.seed("run_kt_m", [...memberEvents, { type: "run.lead_note", text: "harmless" }], { bucket: "conflict" });
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_kt_a");
+  assert.equal(item.category, "pending_lead", "歧义成员不能既不当候选又被当成不存在");
+  assert.equal(item.reason, "delivery_packaged_undecided");
+  assert.equal(item.detail, "tree member run_kt_m");
+  assert.equal(itemsOf(plan, "run_kt_a").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批续修第 3 轮 K2）：被成员门保留的内层树 → 外层树在计划里就 has_kept_descendant", async () => {
+  const s = await scenario();
+  const outer = s.wt("run_kn_out");
+  const inner = join(outer, ".wao-worktrees", "run_kn_in");
+  git(["worktree", "add", inner, "-b", "wao/run_kn_in"], s.repo);
+  s.seed("run_kn_out", decidedRunEvents({
+    repo: s.repo, wt: outer, branch: "wao/run_kn_out", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  s.seed("run_kn_in", lineageRootRunEvents({
+    runId: "run_kn_in", repo: s.repo, wt: inner, branch: "wao/run_kn_in", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 内层树的只靠路径声明成员：带打包事实、未裁决 → 内层树被成员门保留。
+  s.seed("run_kn_m", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: inner, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_kn_m", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_kn_m", { baseCommit: s.mainCommit }) },
+  ]);
+  const { plan } = await s.plan();
+  assert.equal(oneItem(plan, "run_kn_in").reason, "delivery_packaged_undecided");
+  const outerItem = oneItem(plan, "run_kn_out");
+  assert.equal(outerItem.category, "tree_protection");
+  assert.equal(outerItem.reason, "has_kept_descendant", "外层在计划里就保留，不写出等执行才拦下的 remove_tree");
+  assert.equal(itemsOf(plan, "run_kn_out").filter((i) => i.action === "remove_tree").length, 0);
+});
+
+test("分类（第 120 批）：末代被拒收——祖先不推导，仍按 delivery_packaged_undecided 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sp_g");
+  s.seed("run_sp_g", lineageRootRunEvents({
+    runId: "run_sp_g", repo: s.repo, wt, branch: "wao/run_sp_g", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sp_h", lineageChildRunEvents({
+    runId: "run_sp_h", parentRunId: "run_sp_g", rootRunId: "run_sp_g",
+    repo: s.repo, wt, branch: "wao/run_sp_g", baseCommit: s.mainCommit,
+  }));
+  // 末代拒收（不是采纳）——拒收不上传。
+  s.seed("run_sp_i", [
+    ...lineageChildRunEvents({
+      runId: "run_sp_i", parentRunId: "run_sp_h", rootRunId: "run_sp_g",
+      repo: s.repo, wt, branch: "wao/run_sp_g", baseCommit: s.mainCommit,
+    }),
+    {
+      type: "run.delivery_rejected",
+      delivery: verifiedDeliveryRef("run_sp_i", { baseCommit: s.mainCommit, acceptance: "rejected" }),
+      deliveryCommit: verifiedDeliveryRef("run_sp_i", { baseCommit: s.mainCommit }).deliveryCommit,
+      reason: "no",
+    },
+  ]);
+  const { plan } = await s.plan();
+  // 拒收不进 accepted 集合 → 不派生；线系又未显式关闭 → 既有 reuse_open 门先保留
+  //（反正不回收），祖先仍待裁决。
+  assert.equal(oneItem(plan, "run_sp_g").category, "reuse_open");
+  assert.equal(oneItem(plan, "run_sp_g").reason, "lineage_not_closed");
+  assert.equal(oneItem(plan, "run_sp_h").reason, "lineage_not_closed");
+  assert.equal(itemsOf(plan, "run_sp_g").filter((i) => i.action === "remove_tree").length, 0);
 });
 
 test("分类：未裁决且树脏 → pending_lead/undecided_dirty_tree", async () => {
@@ -862,7 +1291,7 @@ test("分类：引用文本读不出（注入缝，无独占锁）→ 已并入�
   assert.equal(itemsOf(plan, "run_rf").filter((i) => i.action === "remove_tree").length, 0);
 });
 
-test("分类：归档枚举 skipped（归档里的符号链接）→ 线系枚举拒绝，undeterminable/lineage_refused", async () => {
+test("分类（第 120 批续修第 7 轮 R1）：归档枚举 skipped（归档里的符号链接）→ 枚举不完整，整份计划不出删除项", async () => {
   const s = await scenario();
   const wt = s.wt("run_ask");
   s.seed("run_ask", decidedRunEvents({
@@ -874,9 +1303,12 @@ test("分类：归档枚举 skipped（归档里的符号链接）→ 线系枚�
   symlinkSync("C:/nowhere-run-ask", join(archDir, "run_ask_link.jsonl"), "file");
   const { plan } = await s.plan();
   const item = oneItem(plan, "run_ask");
+  // 口径统一到 P1：所有主体 undeterminable + transcript_enumeration_incomplete。
   assert.equal(item.category, "undeterminable");
-  assert.equal(item.reason, "lineage_refused");
-  assert.match(item.detail ?? "", /archive_enumeration_skipped/);
+  assert.equal(item.reason, "undeterminable");
+  assert.equal(item.detail, "transcript_enumeration_incomplete");
+  assert.equal(itemsOf(plan, "run_ask").filter((i) => i.action === "remove_tree").length, 0);
+  assert.deepEqual(plan.items.filter((i) => i.action !== "keep"), [], "整份计划没有删除项");
 });
 
 test("清单指纹：lstat/readdir 读不出 → 抛错（读不出就保留，不静默漏项）", async () => {
@@ -961,7 +1393,7 @@ test("毒化局部化：无关线系有孪生冲突 → 正常线系照常回收
   assert.ok(itemsOf(plan, "run_norm").some((i) => i.action === "remove_tree"), "无关线系照常回收");
 });
 
-test("归档根目录读不出（runs-archive 是文件）→ 相关项 undeterminable/lineage_refused，不当成归档为空", async () => {
+test("归档根目录读不出（runs-archive 是文件）→ 枚举不完整，整份计划保留（不当成归档为空）", async () => {
   const s = await scenario();
   const wt = s.wt("run_archroot");
   s.seed("run_archroot", decidedRunEvents({
@@ -971,9 +1403,69 @@ test("归档根目录读不出（runs-archive 是文件）→ 相关项 undeterm
   const { plan } = await s.plan();
   const item = oneItem(plan, "run_archroot");
   assert.equal(item.category, "undeterminable");
-  assert.equal(item.reason, "lineage_refused");
-  assert.match(item.detail ?? "", /archive_enumeration_skipped/);
+  assert.equal(item.reason, "undeterminable", "归档 skipped 归枚举不完整");
+  assert.equal(item.detail, "transcript_enumeration_incomplete");
   assert.equal(itemsOf(plan, "run_archroot").filter((i) => i.action === "remove_tree").length, 0);
+  assert.equal(plan.items.filter((i) => i.action !== "keep").length, 0);
+});
+
+test("分类（第 120 批续修第 7 轮 R1）：归档月份 readdirSync 持续 EACCES → 计划不出任何删除项", async () => {
+  const s = await scenario();
+  // 已裁决、健康时可删的纯分支：注入后必须一起保留（证明规则不是空转）。
+  git(["branch", "wao/run_r1_del"], s.repo);
+  s.seed("run_r1_del", decidedRunEvents({
+    repo: s.repo, baseCommit: s.mainCommit, branch: "wao/run_r1_del", decision: "accepted",
+  }));
+  // 已打包未裁决的纯分支：转录只放在归档月份里——归档读不出时它会"看起来没有转录"。
+  git(["branch", "wao/run_r1_und"], s.repo);
+  s.seed("run_r1_und", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: null, worktreeBranch: "wao/run_r1_und",
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ...packagedDeliveryEvents("run_r1_und", { baseCommit: s.mainCommit }),
+  ], { archiveMonth: "2026-01" });
+  const normalize = (plan) => plan.items
+    .map((i) => ({ runId: i.runId, action: i.action, reason: i.reason ?? null }))
+    .sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  const healthy = await s.plan();
+  assert.equal(oneItem(healthy.plan, "run_r1_und").reason, "delivery_packaged_undecided",
+    "夹具前提：健康时因已打包未裁决保留");
+  assert.ok(itemsOf(healthy.plan, "run_r1_del").some((i) => i.action === "delete_branch"),
+    "夹具前提：健康计划里有真的删除项");
+  const healthySnapshot = normalize(healthy.plan);
+  // 归档月份目录持续 readdirSync EACCES：归档扫描报 skipped。
+  const archDir = join(s.base, "runs-archive", "2026-01");
+  assert.ok(existsSync(archDir), "夹具前提：归档月份在场");
+  const fsCjs = require("node:fs");
+  const realReaddir = fsCjs.readdirSync;
+  let injected = 0;
+  fsCjs.readdirSync = (p, ...rest) => {
+    if (resolve(String(p)) === resolve(archDir)) {
+      injected += 1;
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return realReaddir(p, ...rest);
+  };
+  syncBuiltinESMExports();
+  let injectedPlan;
+  try {
+    injectedPlan = await s.plan();
+  } finally {
+    fsCjs.readdirSync = realReaddir;
+    syncBuiltinESMExports();
+  }
+  assert.ok(injected > 0, "注入生效");
+  assert.deepEqual(injectedPlan.plan.items.filter((i) => i.action !== "keep"), [],
+    "归档读不全 → 计划没有任何删除项");
+  for (const item of injectedPlan.plan.items) {
+    assert.equal(item.reason, "undeterminable", `${item.runId} 的保留理由`);
+    assert.equal(item.detail, "transcript_enumeration_incomplete", `${item.runId} 的 detail`);
+  }
+  assert.equal(injectedPlan.plan.counts.byCategory.reclaim, 0);
+  // 恢复访问后重新出计划：与健康对照一致。
+  const restored = await s.plan();
+  assert.deepEqual(normalize(restored.plan), healthySnapshot, "恢复后计划与健康对照一致");
 });
 
 test("分类：登记指向的目录已不存在 → undeterminable/registered_missing，计划不崩", async () => {

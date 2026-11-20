@@ -281,6 +281,117 @@ test("M11-3C-CLI-RUNDIR: --run-dir passes through to service", async () => {
 });
 
 // =====================================================================
+// 第 120 批：review 文本多一行——收口的交付已有被采纳的后代（派生事实）
+// =====================================================================
+
+/** 平铺 JSONL（事件自带 ts/seq/runId/agentId）。 */
+function writeFlat(dir, runId, events) {
+  writeFileSync(
+    join(dir, `${runId}.jsonl`),
+    events.map((e, i) => JSON.stringify({
+      ts: "2026-11-20T00:00:00.000Z", seq: i + 1, runId, agentId: "coder_low", ...e,
+    })).join("\n") + "\n",
+    "utf8",
+  );
+}
+
+function reviewRef(runId, { status = "pending", acceptance = "pending" } = {}) {
+  return {
+    schemaVersion: 1, kind: "git_commit", runId,
+    baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+    branch: `wao/${runId}`, worktreePath: "D:/fake/wt", changedFiles: ["src/app.js"],
+    verification: { status, commands: [], verifiedCommit: "d".repeat(40), results: [] },
+    acceptance: { status: acceptance, reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+}
+
+test("SUP-CLI-02: runs delivery review 文本加一行（已有被采纳的后代）；自身已裁决的不加", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-sup-review-"));
+  const ROOT = "run_sup_rev_root";
+  const CHILD = "run_sup_rev_child";
+  try {
+    // 第 120 批续修（审查 A5）：review 的授权根（--cwd）也是后代 D 的归属
+    // 核验根，必须是可证明的 Git 顶层。
+    execSync("git init -q", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.email t@t", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.name T", { cwd: dir, stdio: "pipe" });
+    writeFileSync(join(dir, "README.md"), "# ws\n", "utf8");
+    execSync("git add -A", { cwd: dir, stdio: "pipe" });
+    execSync("git commit -q -m i", { cwd: dir, stdio: "pipe" });
+    const rootRef = reviewRef(ROOT);
+    writeFlat(dir, ROOT, [
+      { type: "run.started", backend: "claude-code", cwd: dir },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "first", rootRunId: ROOT },
+      { type: "run.delivery_created", delivery: rootRef },
+      {
+        type: "run.delivery_verification_passed",
+        delivery: { ...rootRef, verification: { ...rootRef.verification, status: "passed" } },
+      },
+      { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    ]);
+    const childRef = reviewRef(CHILD);
+    writeFlat(dir, CHILD, [
+      { type: "run.background_submitted", background: true, continuation: true, parentRunId: ROOT, rootRunId: ROOT, cwd: dir },
+      { type: "run.session_reuse", mode: "run_lineage", turn: "resume", rootRunId: ROOT },
+      { type: "run.started", backend: "claude-code", cwd: dir },
+      { type: "run.delivery_created", delivery: childRef },
+      {
+        type: "run.delivery_verification_passed",
+        delivery: { ...childRef, verification: { ...childRef.verification, status: "passed" } },
+      },
+      { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+      {
+        type: "run.delivery_accepted",
+        delivery: {
+          ...childRef,
+          verification: { ...childRef.verification, status: "passed" },
+          acceptance: { status: "accepted", reviewerType: "lead_agent" },
+        },
+        deliveryCommit: childRef.deliveryCommit,
+        reason: "ok",
+      },
+    ]);
+    const config = { runDir: dir };
+    const expectedLine = `Superseded: a descendant delivery was already accepted (${CHILD}); no Lead decision is needed here`;
+    const reviewOf = (runId) => ({ getRunDeliveryReviewFn: async () => validReviewResult({ runId }) });
+
+    const out = await captureLog(async () => {
+      await runsDeliveryCommand(["review", ROOT, "--file-index", "0", "--cwd", dir], config, reviewOf(ROOT));
+    });
+    assert.ok(out.split("\n").includes(expectedLine), `文本多一行: ${out}`);
+    assert.match(out, /^File: src\/app\.js \(1\/1\)/, "既有文件行不变（新行在末尾）");
+
+    const childOut = await captureLog(async () => {
+      await runsDeliveryCommand(["review", CHILD, "--file-index", "0", "--cwd", dir], config, reviewOf(CHILD));
+    });
+    assert.ok(!childOut.includes("Superseded:"), `自身已裁决 → 不加: ${childOut}`);
+
+    // 第 120 批续修（E3）：提示与派生只在第一页（fileIndex 0 且无 cursor）；
+    // 后续页/游标页不重复付全库预筛，也不重复打印。
+    const secondPage = await captureLog(async () => {
+      await runsDeliveryCommand(
+        ["review", ROOT, "--file-index", "1", "--cwd", dir],
+        config,
+        { getRunDeliveryReviewFn: async () => validReviewResult({ runId: ROOT, fileIndex: 1, changedFileCount: 2 }) },
+      );
+    });
+    assert.ok(!secondPage.includes("Superseded:"), `第二页不打印提示: ${secondPage}`);
+    assert.match(secondPage, /^File: src\/app\.js \(2\/2\)/, "既有文件行照旧");
+    const cursorPage = await captureLog(async () => {
+      await runsDeliveryCommand(
+        ["review", ROOT, "--file-index", "0", "--cursor", "abc", "--cwd", dir],
+        config,
+        { getRunDeliveryReviewFn: async () => validReviewResult({ runId: ROOT }) },
+      );
+    });
+    assert.ok(!cursorPage.includes("Superseded:"), `游标页不打印提示: ${cursorPage}`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
 // TD-324（83 批 W2）：CLI 单文件 review 的归属拒绝专属固定文案——运行不属于
 // --cwd（缺省当前目录）给的工作区时打印「run_delivery_review refused: … pass
 // --cwd with the run's own project root」并抛错（cli.js 顶层 catch 置非零退

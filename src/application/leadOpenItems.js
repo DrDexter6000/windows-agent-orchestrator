@@ -10,7 +10,10 @@
 //      （determineRunSettlement SSOT）再看裁定（只认绑定本 runId 的
 //      run.delivery_accepted / run.delivery_rejected）：
 //        - 收口且原因 delivery_settled、未裁定 → 等 Lead 裁定（其中 0112 的
-//          deliveryContinuableHint 为 true 的另计数）；
+//          deliveryContinuableHint 为 true 的另计数）；第 120 批例外：谱系已
+//          显式关闭（根转录有 run.lineage_closed）或已有被采纳的后代
+//          （lineageSupersession 的派生事实 supersededByRunId）→ 不再催裁决，
+//          计入留待回收（派生事实不写事件、不计入可续计数）；
 //        - 终态但验证/reverify 还没结果、未裁定 → 终态未收口（已裁定的除外，
 //          按已裁定走留待回收）；
 //        - 终态但交付事实判不出收口（undeterminable）→ 单独一行，与"还没
@@ -73,6 +76,8 @@ import {
 import { readTranscript } from "../transcript.js";
 import { determineRunSettlement } from "./runSettlement.js";
 import { deliveryContinuableHint } from "./runContinue.js";
+// 第 120 批：谱系派生事实（显式关闭 / 被取代）与交付读面、回收共用同一份实现。
+import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGate } from "./lineageSupersession.js";
 import { findRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { parseWorktreePorcelain, RECENT_BOUND_EVENT_MS } from "./worktreeReclaim.js";
 import {
@@ -168,6 +173,8 @@ async function collectRunBranchOpenItems({
   execGitFn = defaultExecGit,
   resolveTranscriptFn,
   readTranscriptFn = readTranscript,
+  // 第 120 批续修（E4）：字节预筛的读缝（测试注入计数用；缺省 node:fs）。
+  readBytesFn,
   projectIo = productionProjectIo(),
   parseWorktreePorcelainFn = parseWorktreePorcelain,
 }) {
@@ -221,6 +228,14 @@ async function collectRunBranchOpenItems({
   const awaitingDecision = [];
   const terminalUnsettled = [];
   const undeterminable = [];
+  // 第 120 批：一次请求内按根缓存的谱系派生（显式关闭 / 被取代）。只在
+  // "收口且未裁定"的运行上求值；非续修谱系成员不会派生（没有已证明的后代），
+  // 且只有会走到 forRoot 的运行才被收根做全库预筛（第 120 批续修 E1）。
+  const supersession = createLineageSupersession({
+    runDir: resolvedRunDir,
+    readTranscriptFn,
+    ...(typeof readBytesFn === "function" ? { readBytesFn } : {}),
+  });
   // 跨工作树提示按行跟踪：该行列出的运行里至少有一个派发自与绑定根不同的
   // 工作树时，那行才加提示（审查/裁定工具按会话绑定核对归属）。
   const crossTree = { awaiting: false, unsettled: false, undeterminable: false };
@@ -228,9 +243,11 @@ async function collectRunBranchOpenItems({
   let missingTranscripts = 0;
   let continuable = 0;
 
+  // 3a) 解析 + 读取（先全部读进来，再一次性按根预筛——审查 B3：多个根共用
+  //     一次全库字节扫描）。found 才读；conflict/unreadable/未找到/解析抛错
+  //     都不分类，与单条读失败一起计入"找不到或有冲突副本"。
+  const branchReads = [];
   for (const runId of examined) {
-    // 3a) 解析：found 才读；conflict/unreadable/未找到/解析抛错都不分类，
-    //     与单条读失败一起计入"找不到或有冲突副本"。
     let detail;
     try {
       detail = resolveTranscript(resolvedRunDir, runId);
@@ -253,6 +270,30 @@ async function collectRunBranchOpenItems({
       missingTranscripts += 1;
       continue;
     }
+    branchReads.push({ runId, events });
+  }
+  // 一次性预筛：只把**真会走到 forRoot** 的运行声明的根交给读器（第 120 批续修
+  // E1）——自身有谱系引用、已打包、自身未裁决、已收口，且属于绑定项目。普通
+  // 运行对自己返回自己的 runId，若照收会让每个被查看的分支都触发一次全库字节
+  // 扫描（50 个分支 = 50 次）。判定函数从派生模块导入，与 forRun 的门共用。
+  const pendingRoots = new Set();
+  for (const { runId, events } of branchReads) {
+    if (!supersessionCandidateGate(events, runId).candidate) continue;
+    const { identity, factError } = identityOfFirstEvent(events[0], projectIo);
+    if (factError != null) continue;
+    if (boundKey == null || identity?.kind !== "project" || identity.key !== boundKey) continue;
+    const declared = declaredLineageRoot(events, runId);
+    if (!declared.conflict && typeof declared.rootRunId === "string") pendingRoots.add(declared.rootRunId);
+  }
+  if (pendingRoots.size > 0) {
+    try {
+      await supersession.prepare([...pendingRoots]);
+    } catch {
+      // 预筛失败：各 run 的派生各自兜底为"不推导"（保持待裁决）。
+    }
+  }
+
+  for (const { runId, events } of branchReads) {
     // 3b) 归属（记录的项目身份，0113 修订）：首事件在档的 project 事实优先
     //     （identityOfFirstEvent，与 `runs list --project` 同语义——派发时算
     //     好落档，开发树删了也认得出），没有记录的旧运行由它退回按 cwd 推导
@@ -287,14 +328,27 @@ async function collectRunBranchOpenItems({
         if (decided) {
           reclaimBranches += 1; // 已裁定 → 留待回收
         } else {
-          awaitingDecision.push(runId);
-          if (fromAnotherWorktree) crossTree.awaiting = true;
+          // 第 120 批：优先级 自身显式裁决 > 谱系显式关闭 > 派生被取代 > 待裁决。
+          // 谱系已显式关闭、或已有被采纳的后代（派生事实）时不再催 Lead 裁决
+          //（关闭/被取代都不写事件，也不计入可续计数）。派生读不出时保持待裁决。
+          let lineage = null;
           try {
-            if (await deliveryContinuableHint({ events, runId, runDir: resolvedRunDir, readTranscriptFn })) {
-              continuable += 1;
-            }
+            lineage = await supersession.forRun({ runId, events });
           } catch {
-            // 可续判定读不出当不可续（提示性计数，不猜）。
+            lineage = null;
+          }
+          if (lineage?.lineageClosed === true || typeof lineage?.supersededByRunId === "string") {
+            reclaimBranches += 1;
+          } else {
+            awaitingDecision.push(runId);
+            if (fromAnotherWorktree) crossTree.awaiting = true;
+            try {
+              if (await deliveryContinuableHint({ events, runId, runDir: resolvedRunDir, readTranscriptFn })) {
+                continuable += 1;
+              }
+            } catch {
+              // 可续判定读不出当不可续（提示性计数，不猜）。
+            }
           }
         }
       } else {
@@ -373,9 +427,11 @@ async function collectRunBranchOpenItems({
       : "";
     // b78：写明"能否回收以回收计划为准"——计划保留最近 RECENT_BOUND_EVENT_MS
     // 内有事件的运行，Lead 做出空计划不是出错；分钟数由常量派生，不另写数字。
+    // 第 120 批：这一行如实覆盖"已裁决、被取代、谱系已关闭、无交付"四种来源
+    //（后两种不写事件，也不再催裁决）。
     const keptRecentMinutes = Math.round(RECENT_BOUND_EVENT_MS / 60_000);
     lines.push(boundedLine(
-      `${OPEN_ITEM_PREFIX}${reclaimBranches} decided/no-delivery wao/run_* branch(es)${wt} `
+      `${OPEN_ITEM_PREFIX}${reclaimBranches} decided / superseded / lineage-closed / no-delivery wao/run_* branch(es)${wt} `
       + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only; `
       + `the plan decides what is reclaimable — an empty plan can be normal, `
       + `runs with an event in the last ${keptRecentMinutes} minutes are kept)${truncSuffix}`,

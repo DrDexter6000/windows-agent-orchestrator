@@ -6042,6 +6042,9 @@ export function createWaoMcpServer({
             runDir,
             waitMs,
             authorizedWorkspaceRoot: binding.root,
+            // 第 120 批续修（审查 A5）：派生"被取代"时后代 D 必须通过同一个
+            // 会话绑定根的归属核验。
+            descendantWorkspaceRoot: binding.root,
             // M12-1S1: the wait path is already workspace-bound; thread the
             // inventory reader so a settled disallowed_path failure carries
             // the same additive nullable candidateInventory.
@@ -6076,6 +6079,15 @@ export function createWaoMcpServer({
           // nextStep；不带 waitMs 的即时查询不给。
           if (result.waitReturnedEarly === false) {
             payload.nextStep = buildNextStep({ surface: "mcp", situation: "delivery_unsettled" });
+          } else if (result.supersededByRunId && isValidRunId(result.supersededByRunId)) {
+            // 第 120 批：收口的交付已有被采纳的后代（派生事实）——无需再裁决，
+            // 也不再给 run_continue 提示（谱系只裁决最终候选）。第 120 批续修
+            // （审查 A5）：渲染前对后代 runId 再做一次合法性校验。
+            payload.nextStep = buildNextStep({
+              surface: "mcp",
+              situation: "delivery_superseded",
+              supersededByRunId: result.supersededByRunId,
+            });
           } else if (result.continuableHint === true) {
             // 决定 0112：因收口提前返回、且服务在同一份快照上判定了"带
             // continuable 派发的谱系成员、未采纳、线系未闭合"时给可续提示
@@ -6109,7 +6121,13 @@ export function createWaoMcpServer({
         const inventoryAuthority = binding.bound
           ? { authorizedWorkspaceRoot: binding.root, computeInventoryFn: candidateInventoryReader }
           : {};
-        const delivery = await deliveryQueryService({ runId, runDir, ...inventoryAuthority });
+        // 第 120 批续修（审查 A5/B1）：后代 runId 只在会话绑定根核验过被查询
+        // 运行的读面上带出——绑定根同时作为 D 的归属核验根；未绑定（无归属
+        // 授权）时不做派生，零全库预筛。
+        const supersessionScope = binding.bound
+          ? { descendantWorkspaceRoot: binding.root }
+          : { skipSupersession: true };
+        const delivery = await deliveryQueryService({ runId, runDir, ...inventoryAuthority, ...supersessionScope });
         const payload = buildRunDeliveryPayload(runId, delivery);
         // M12-13: isolation-failure evidence is projected AFTER the shared
         // builder (the review bundle strict-parses the builder output against
@@ -6123,6 +6141,16 @@ export function createWaoMcpServer({
         // M12-12: self-describing notes (point-in-time path).
         payload.semanticNotes = selectDeliverySemanticNotes(payload);
         await attachVerificationGate(payload, delivery, runId);
+        // 第 120 批：即时查询也给出"已有被采纳的后代，无需再裁决"（派生事实，
+        // 复用已有的可选 nextStep 字段——不改输出 schema）。等待路径在收口
+        // 提前返回时给同一句。第 120 批续修（审查 A5）：渲染前校验后代 runId。
+        if (delivery.supersededByRunId && isValidRunId(delivery.supersededByRunId)) {
+          payload.nextStep = buildNextStep({
+            surface: "mcp",
+            situation: "delivery_superseded",
+            supersededByRunId: delivery.supersededByRunId,
+          });
+        }
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -6963,6 +6991,9 @@ export function createWaoMcpServer({
           waitMs,
           authorizedWorkspaceRoot: binding.root,
           computeInventoryFn: candidateInventoryReader,
+          // 第 120 批续修（审查 B1）：review bundle 不消费"被取代"派生结果
+          // ——不付全库预筛的代价（默认 45 秒等待之后再加一次扫描会撞宿主上限）。
+          skipSupersession: true,
           ...(onPoll ? { onPoll } : {}),
         });
         READINESS_ENUM.parse(readinessView.readiness);

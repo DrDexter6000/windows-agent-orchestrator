@@ -34,7 +34,9 @@ export const NEXT_STEP_SURFACES = Object.freeze(["mcp", "cli"]);
 // 门事实，停/结算/重挂都归 Lead；consult_seats_running 是 consult 回执还有未
 // 到终态的席位（MCP 面与 CLI 面各自渲染）；delivery_continuable（决定 0112）
 // 是收口且未采纳的可续交付——MCP run_delivery 带 waitMs 因收口提前返回，与
-// CLI --until-settled 的收口终行各自渲染，提示窄缺陷可用 run_continue 续修。
+// CLI --until-settled 的收口终行各自渲染，提示窄缺陷可用 run_continue 续修；
+// delivery_superseded（第 120 批）是收口的交付已有被采纳的后代——谱系只裁决
+// 最终候选，这里无需再裁决（不再提示 run_delivery review / run_continue）。
 export const NEXT_STEP_SITUATIONS = Object.freeze([
   "wait_vital_recent",
   "wait_vital_ageing",
@@ -49,6 +51,7 @@ export const NEXT_STEP_SITUATIONS = Object.freeze([
   "runner_unproven",
   "consult_seats_running",
   "delivery_continuable",
+  "delivery_superseded",
 ]);
 
 // 119 续修 3：等待族五支（wait_*）只有 CLI 面渲染——原 MCP run_wait 工具删除后，
@@ -140,6 +143,11 @@ function render(surface, situation, runId, extras) {
           ? `Settled. The Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. Verification passed is not acceptance.`
           : `Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.`);
       break;
+    case "delivery_superseded":
+      // 第 120 批：收口的交付已有被采纳的后代（派生事实）。只说这一件事——
+      // 不说祖先已被采纳、已合入或已回收，也不提示再审查或续修。
+      text = `Settled. A descendant of this run was already accepted (${extras.supersededByRunId}); no Lead decision is needed here.`;
+      break;
     case "verifier_gone":
       // 终态等验证、验证者已证明不在。出口仍是既有的：未决定时有界拒收，
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
@@ -224,7 +232,9 @@ export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
  * 不含 runId（传了也不会渲染）。settled_line 需要 settlementReason（收口判定
  * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
  * acceptanceStatus 只接受 null（未决定）或 "rejected"，其余抛错（调用方把服务
- * 里表示未决定的值如 "pending" 转成 null 再传）；verifier_gone、runner_gone
+ * 里表示未决定的值如 "pending" 转成 null 再传）；delivery_superseded（第 120
+ * 批）需要非空的 supersededByRunId——文案点名那个被采纳的后代，只说"无需再
+ * 裁决"；verifier_gone、runner_gone
  * 与 runner_unproven 只有 CLI 面（verifier_gone 可另给 terminalState——运行
  * 终态：failed 且未决定时渲染重新打包交付的续验文案，其余值渲染 completed
  * 形状的既有文案）；
@@ -241,6 +251,8 @@ export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
  * @param {string|null} [input.acceptanceStatus]
  * @param {string|null} [input.terminalState] — verifier_gone 用：收口事实里的
  *   运行终态（"failed" → 重新打包形状的续验文案；其余/completed → 既有文案）
+ * @param {string|null} [input.supersededByRunId] — delivery_superseded 用：那个
+ *   已被采纳的后代 runId（第 120 批的派生事实）
  * @param {string[]} [input.seatRunIds] — CLI consult：未终态席位的 runId 清单
  * @param {string} [input.consultId] — CLI consult：重读用的 consultId
  * @param {boolean} [input.cliJson] — CLI consult 回退说法用 JSON 面措辞
@@ -256,6 +268,7 @@ export function buildNextStep({
   settlementReason = null,
   acceptanceStatus = null,
   terminalState = null,
+  supersededByRunId = null,
   seatRunIds = null,
   consultId = null,
   cliJson = false,
@@ -275,6 +288,11 @@ export function buildNextStep({
   // 服务侧表示未决定的值（如收口事实里的 "pending"）由调用方转成 null 再传。
   if (situation === "delivery_continuable" && acceptanceStatus !== null && acceptanceStatus !== "rejected") {
     throw new Error(`buildNextStep: delivery_continuable needs acceptanceStatus null or "rejected", got: ${JSON.stringify(acceptanceStatus)}`);
+  }
+  // 第 120 批：被取代的文案要点名那个被采纳的后代（runId 字符串，非空）。
+  if (situation === "delivery_superseded"
+    && (typeof supersededByRunId !== "string" || supersededByRunId.length === 0)) {
+    throw new Error(`buildNextStep: delivery_superseded needs a non-empty supersededByRunId, got: ${JSON.stringify(supersededByRunId)}`);
   }
   if (situation === "consult_seats_running") {
     if (surface === "cli") {
@@ -300,6 +318,7 @@ export function buildNextStep({
     settlementReason,
     acceptanceStatus,
     terminalState,
+    supersededByRunId,
     seatRunIds: Array.isArray(seatRunIds) ? seatRunIds : [],
     consultId,
     cliJson: cliJson === true,

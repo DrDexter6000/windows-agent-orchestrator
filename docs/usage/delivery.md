@@ -186,6 +186,8 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--attemp
 5. 集成前工作区纪律：cherry-pick 交付提交前 Lead 工作区必须干净（未提交改动先提交），否则与本地改动触碰同一文件时会冲突中止。
 6. 续修轮的子交付是累计候选（见派发页 run_continue 节），默认集成它；父交付已先集成时，用 `git diff --binary --output=<补丁> <父交付> <子交付>` 再 `git apply --index <补丁>` 取增量，不要 cherry-pick 子交付。
 
+续修谱系只裁决最终候选：采纳后代后，沿已证明续修父边的祖先自动算**被取代**，不用逐条拒收。派生事实（不写事件、非采纳/已合入；CLI `acceptance.status` 仍 `pending`）：祖先已打包、已收口、无自身裁决、谱系未关、后代已合法采纳时现。CLI `runs delivery --format json` 给 `supersededByRunId`；MCP `run_delivery` 在 `nextStep` 点名后代（MCP 与 `runs delivery review` 要求后代同授权根；`runs delivery`/`runs wait` 不核验；未绑定会话不派生）。
+
 ### 读面 adoption 三态
 
 `runs delivery`（`--cwd DIR` 指定仓库根，缺省同其他命令）与 MCP `run_delivery` 附带 `adoption`：在主工作树当前检出的分支按 runId 找 trailer；`status` 为 `found`/`not_found`/`unchecked`（unchecked 给闭集原因），`commits` 为命中提交（≤5，另 `truncated`）。它只说明“主分支上有提交声明采纳了这个运行”，不是“已落地”：`not_found` 不等于没落地——squash 丢了 trailer 就是 not_found，accepted 交付也不要求 trailer。

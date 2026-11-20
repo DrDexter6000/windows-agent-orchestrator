@@ -10,12 +10,17 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+
+const require = createRequire(import.meta.url);
 import { planWorktreeReclaim, applyWorktreeReclaim } from "../../src/application/worktreeReclaim.js";
+import { lineageMemberFiles } from "../../src/application/lineageClose.js";
 import { worktreeCommand } from "../../src/commands/worktree.js";
 
 import {
   git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
   cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow,
+  lineageRootRunEvents, lineageChildRunEvents, verifiedDeliveryRef,
 } from "../_worktreeReclaimHarness.mjs";
 
 const bases = [];
@@ -356,6 +361,428 @@ test("apply：另传不同 runDir → 整体拒绝 run_dir_mismatch（apply 一�
   assert.ok(git(["branch", "--list", "wao/run_rd"], s.repo).length > 0, "拒绝后分支不动");
 });
 
+test("apply（第 120 批）：删树路径——计划后后代转录被删，派生被取代不再成立 → 跳过并如实记原因", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sup_a");
+  s.seed("run_sup_a", lineageRootRunEvents({
+    runId: "run_sup_a", repo: s.repo, wt, branch: "wao/run_sup_a", baseCommit: s.mainCommit,
+  }));
+  // 子运行不声明这棵树（树的成员只有 run_sup_a）——删前复核必须靠"被取代"重证。
+  s.seed("run_sup_b", lineageChildRunEvents({
+    runId: "run_sup_b", parentRunId: "run_sup_a", rootRunId: "run_sup_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_sup_a"),
+    "夹具前提：计划里 run_sup_a 可回收（被取代）");
+  // 批准之后被采纳后代转录被删：执行时重新推导不出来 → 跳过。
+  rmSync(join(s.runDir, "run_sup_b.jsonl"));
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_sup_a");
+  assert.equal(tree.outcome, "skipped");
+  assert.equal(tree.reason, "supersession_unproven_now");
+  assert.equal(tree.detail, "run_sup_a");
+  assert.ok(existsSync(wt), "证不出被取代 → 树保留");
+  assert.equal(outcomeOf(result, "delete_branch", "run_sup_a").reason, "tree_not_removed");
+  assert.ok(git(["branch", "--list", "wao/run_sup_a"], s.repo).length > 0, "分支保留");
+});
+
+test("apply（第 120 批）：只删分支路径——同样重证被取代；证不出则跳过、分支保留", async () => {
+  const s = await scenario();
+  // 只有分支、没有树的目标。
+  git(["branch", "wao/run_sup_c"], s.repo);
+  s.seed("run_sup_c", lineageRootRunEvents({
+    runId: "run_sup_c", repo: s.repo, baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sup_d", lineageChildRunEvents({
+    runId: "run_sup_d", parentRunId: "run_sup_c", rootRunId: "run_sup_c",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "delete_branch" && i.runId === "run_sup_c"),
+    "夹具前提：计划里 run_sup_c 的分支可删（被取代）");
+  rmSync(join(s.runDir, "run_sup_d.jsonl"));
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const branch = outcomeOf(result, "delete_branch", "run_sup_c");
+  assert.equal(branch.outcome, "skipped");
+  assert.equal(branch.reason, "supersession_unproven_now");
+  assert.ok(git(["branch", "--list", "wao/run_sup_c"], s.repo).length > 0, "证不出 → 分支保留");
+});
+
+test("apply（第 120 批续修 C1）：无转录分支恢复 b120 之前逻辑——已并入 / --include 点名的照旧可删", async () => {
+  const s = await scenario();
+  // 转录库非空（普查到树目标时空库整体拒绝）。
+  seedTranscript(s.runDir, "run_dummy_lib", [
+    { type: "run.state_change", from: null, to: "completed", reason: "done" },
+  ]);
+  // run_mrg：只有分支、已并入 main、三处无转录。
+  git(["branch", "wao/run_mrg"], s.repo);
+  // run_nom：只有分支、未并入、三处无转录，靠 --include 点名放行。
+  const tmpWt = s.wt("run_nom_work");
+  const orphan = commitIn(tmpWt, "orphan.txt", "x\n");
+  git(["worktree", "remove", "--force", tmpWt], s.repo);
+  git(["branch", "-D", "wao/run_nom_work"], s.repo);
+  git(["branch", "wao/run_nom", orphan], s.repo);
+  const planPath = join(s.base, "plan.json");
+  const { planSha256 } = await planWorktreeReclaim({
+    repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow, includeRunIds: ["run_nom"],
+  });
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: planSha256, runDir: s.runDir, now: fixedNow });
+  assert.equal(outcomeOf(result, "delete_branch", "run_mrg")?.outcome, "deleted",
+    "已并入 main 的无转录分支照旧可删（不再被 transcript_missing_now 挡住）");
+  assert.equal(outcomeOf(result, "delete_branch", "run_nom")?.outcome, "deleted",
+    "--include 点名的无转录分支照旧可删");
+  assert.equal(git(["branch", "--list", "wao/run_mrg"], s.repo), "");
+  assert.equal(git(["branch", "--list", "wao/run_nom"], s.repo), "");
+});
+
+test("apply（第 120 批续修 C2）：祖先转录被截空 → 执行时跳过（不把空转录当可读且无交付）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sup_t");
+  s.seed("run_sup_t", lineageRootRunEvents({
+    runId: "run_sup_t", repo: s.repo, wt, branch: "wao/run_sup_t", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sup_u", lineageChildRunEvents({
+    runId: "run_sup_u", parentRunId: "run_sup_t", rootRunId: "run_sup_t",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_sup_t"),
+    "夹具前提：计划里 run_sup_t 可回收（被取代）");
+  // 祖先转录被截空：既有"线系成员状态不可证"复核与新增的派生重证都必须拦下。
+  // 第 120 批续修（G4）：空转录如实归 undeterminable_now（detail 写明为空），
+  // 不再报成"观测到在跑"的 running_now。
+  writeFileSync(join(s.runDir, "run_sup_t.jsonl"), "", "utf8");
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_sup_t");
+  assert.equal(tree.outcome, "skipped", `空转录必须跳过: ${JSON.stringify(tree)}`);
+  assert.equal(tree.reason, "undeterminable_now", `空转录理由: ${JSON.stringify(tree)}`);
+  assert.match(String(tree.detail), /transcript_empty_now/, "detail 写明转录为空");
+  assert.ok(existsSync(wt), "祖先转录为空 → 树保留");
+  assert.equal(outcomeOf(result, "delete_branch", "run_sup_t").reason, "tree_not_removed");
+});
+
+// ═══ 第 120 批续修第 2 轮（G2/G3）：执行门对所有成员成立 ═══
+
+test("apply（G2）：计划后新出现的、已打包未裁决的共享成员 → 整树跳过并记原因", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_gm_a");
+  s.seed("run_gm_a", lineageRootRunEvents({
+    runId: "run_gm_a", repo: s.repo, wt, branch: "wao/run_gm_a", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_gm_b", lineageChildRunEvents({
+    runId: "run_gm_b", parentRunId: "run_gm_a", rootRunId: "run_gm_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_gm_a"),
+    "夹具前提：计划里 run_gm_a 可回收（被取代）");
+  // 批准之后才出现的共享成员：只声明这棵树，有打包事实、未裁决。
+  s.seed("run_gm_new", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_gm_new", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_gm_new", { baseCommit: s.mainCommit }) },
+  ]);
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_gm_a");
+  assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
+  assert.equal(tree.reason, "delivery_packaged_undecided_now");
+  assert.equal(tree.detail, "run_gm_new");
+  assert.ok(existsSync(wt), "新成员挡住整棵树");
+  assert.equal(outcomeOf(result, "delete_branch", "run_gm_a").reason, "tree_not_removed");
+});
+
+test("apply（G2）：旧形状计划缺 supersededMembers → 成员仍按通用门重证（后代消失即跳过）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_go_a");
+  // 属主已裁决（合法）；成员 M 是属主的续修子（与树共享 retained worktree），
+  // 自己未裁决、只靠后代 D 的采纳放行 → 计划记 supersededMembers。
+  s.seed("run_go_a", lineageRootRunEvents({
+    runId: "run_go_a", repo: s.repo, wt, branch: "wao/run_go_a", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  s.seed("run_go_m", lineageChildRunEvents({
+    runId: "run_go_m", parentRunId: "run_go_a", rootRunId: "run_go_a",
+    repo: s.repo, wt, branch: null, baseCommit: s.mainCommit,
+  }));
+  s.seed("run_go_d", lineageChildRunEvents({
+    runId: "run_go_d", parentRunId: "run_go_m", rootRunId: "run_go_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  const treeItem = plan.items.find((i) => i.action === "remove_tree" && i.runId === "run_go_a");
+  assert.ok(treeItem, "夹具前提：树可回收");
+  assert.deepEqual(treeItem.supersededMembers, ["run_go_m"], "成员靠派生放行");
+  // 旧形状：只去掉 supersededMembers（保留 treeMembers），按新字节重算 sha。
+  const oldPlan = JSON.parse(readFileSync(planPath, "utf8"));
+  for (const item of oldPlan.items) delete item.supersededMembers;
+  const bytes = Buffer.from(JSON.stringify(oldPlan, null, 2) + "\n", "utf8");
+  writeFileSync(planPath, bytes);
+  const oldSha = createHash("sha256").update(bytes).digest("hex");
+  rmSync(join(s.runDir, "run_go_d.jsonl"));
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: oldSha, runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_go_a");
+  assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
+  assert.equal(tree.reason, "delivery_packaged_undecided_now", "旧计划也按通用门重证");
+  assert.equal(tree.detail, "run_go_m");
+  assert.ok(existsSync(wt));
+});
+
+test("apply（G3）：缺交付载荷的采纳事件不算合法裁决 → 跳过", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_gl_a");
+  s.seed("run_gl_a", lineageRootRunEvents({
+    runId: "run_gl_a", repo: s.repo, wt, branch: "wao/run_gl_a", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_gl_b", lineageChildRunEvents({
+    runId: "run_gl_b", parentRunId: "run_gl_a", rootRunId: "run_gl_a",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_gl_a"),
+    "夹具前提：计划里 run_gl_a 可回收（被取代）");
+  // 移除已采纳后代；祖先只留一个缺交付载荷的采纳事件（validateDeliveryFacts 不合法）。
+  rmSync(join(s.runDir, "run_gl_b.jsonl"));
+  s.seed("run_gl_a", [
+    ...lineageRootRunEvents({ runId: "run_gl_a", repo: s.repo, wt, branch: "wao/run_gl_a", baseCommit: s.mainCommit }),
+    { type: "run.delivery_accepted" },
+  ]);
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_gl_a");
+  assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
+  assert.equal(tree.reason, "supersession_unproven_now");
+  assert.ok(existsSync(wt), "非法采纳不算裁决 → 树保留");
+});
+
+test("apply（G2/F2）：执行过程中（beforeBranchDelete）新出现的冲突副本 → 后续条目跳过", async () => {
+  const s = await scenario();
+  // 两条"只删分支"的目标，各自靠一个已采纳后代放行。
+  for (const [id, child] of [["run_gc1", "run_gc1_c"], ["run_gc2", "run_gc2_c"]]) {
+    git(["branch", `wao/${id}`], s.repo);
+    s.seed(id, lineageRootRunEvents({ runId: id, repo: s.repo, baseCommit: s.mainCommit }));
+    s.seed(child, lineageChildRunEvents({
+      runId: child, parentRunId: id, rootRunId: id, repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+    }));
+  }
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.filter((i) => i.action === "delete_branch").length >= 2, "夹具前提：两条分支可删");
+  let injected = false;
+  const result = await applyWorktreeReclaim({
+    planPath,
+    expectSha256: shaOfPlan(s),
+    runDir: s.runDir,
+    now: fixedNow,
+    beforeBranchDelete: async (item) => {
+      if (injected) return;
+      injected = true;
+      // 在第一个分支删除前，给第二个目标的已采纳后代放进一份内容不同的副本。
+      seedTranscript(s.runDir, "run_gc2_c", [
+        { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_gc2_c", { baseCommit: s.mainCommit }) },
+      ], { bucket: "conflict" });
+    },
+  });
+  // 先删的那条照常成功；注入之后的那条必须跳过（refresh 看到新文件）。
+  const deleted = ["run_gc1", "run_gc2"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "deleted");
+  const skipped = ["run_gc1", "run_gc2"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "skipped");
+  assert.equal(deleted.length, 1, `先删一条: ${JSON.stringify(result.results)}`);
+  assert.equal(skipped.length, 1, "注入后的一条跳过");
+  assert.equal(outcomeOf(result, "delete_branch", skipped[0]).reason, "supersession_unproven_now");
+});
+
+test("apply（第 120 批续修 C2）：祖先转录还在但交付事实没了 → supersession_unproven_now，树保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_sup_v");
+  s.seed("run_sup_v", lineageRootRunEvents({
+    runId: "run_sup_v", repo: s.repo, wt, branch: "wao/run_sup_v", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sup_w", lineageChildRunEvents({
+    runId: "run_sup_w", parentRunId: "run_sup_v", rootRunId: "run_sup_v",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_sup_v"),
+    "夹具前提：计划里 run_sup_v 可回收（被取代）");
+  // 截成"只有终态、没有交付事实"的转录：可读、可判终态，但打包事实没了。
+  s.seed("run_sup_v", cleanRunEvents({ repo: s.repo, wt, branch: "wao/run_sup_v" }));
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_sup_v");
+  assert.equal(tree.outcome, "skipped");
+  assert.equal(tree.reason, "supersession_unproven_now", JSON.stringify(tree));
+  assert.ok(existsSync(wt), "交付事实没了 → 树保留");
+});
+
+test("apply（第 120 批续修 C2）：删空壳路径也重证——计划后后代消失 → 跳过、空壳保留", async () => {
+  const s = await scenario();
+  const husk = join(s.repo, ".wao-worktrees", "run_sup_husk");
+  mkdirSync(husk, { recursive: true });
+  s.seed("run_sup_husk", lineageRootRunEvents({
+    runId: "run_sup_husk", repo: s.repo, baseCommit: s.mainCommit,
+  }));
+  s.seed("run_sup_husk_c", lineageChildRunEvents({
+    runId: "run_sup_husk_c", parentRunId: "run_sup_husk", rootRunId: "run_sup_husk",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  const huskItem = plan.items.find((i) => i.action === "rmdir_husk" && i.runId === "run_sup_husk");
+  assert.ok(huskItem, "夹具前提：计划里空壳可删（被取代）");
+  assert.equal(huskItem.supersededByRunId, "run_sup_husk_c");
+  rmSync(join(s.runDir, "run_sup_husk_c.jsonl"));
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const huskOutcome = outcomeOf(result, "rmdir_husk", "run_sup_husk");
+  assert.equal(huskOutcome.outcome, "skipped");
+  assert.equal(huskOutcome.reason, "supersession_unproven_now");
+  assert.ok(existsSync(husk), "证不出被取代 → 空壳保留");
+});
+
+// ═══ 第 120 批续修第 3 轮（J1/J2/J3/K1）：刷新内容变化、刷新失败、空谱系根、孪生副本 ═══
+
+test("apply（J1）：两次删分支之间已有文件长出根引用并成环 → 后一条跳过", async () => {
+  const s = await scenario();
+  for (const [id, child] of [["run_j1a", "run_j1a_c"], ["run_j1b", "run_j1b_c"]]) {
+    git(["branch", `wao/${id}`], s.repo);
+    s.seed(id, lineageRootRunEvents({ runId: id, repo: s.repo, baseCommit: s.mainCommit }));
+    s.seed(child, lineageChildRunEvents({
+      runId: child, parentRunId: id, rootRunId: id, repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+    }));
+  }
+  // X、Y 先在清单里、还不含任何根引用（预筛不会把它们当候选）。
+  s.seed("run_j1x", cleanRunEvents({ repo: s.repo }));
+  s.seed("run_j1y", cleanRunEvents({ repo: s.repo }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.filter((i) => i.action === "delete_branch").length >= 2, "夹具前提：两条分支可删");
+  let injected = false;
+  const result = await applyWorktreeReclaim({
+    planPath,
+    expectSha256: shaOfPlan(s),
+    runDir: s.runDir,
+    now: fixedNow,
+    beforeBranchDelete: async (item) => {
+      if (injected) return;
+      injected = true;
+      // 已有文件此刻才长出同根声明并互相成环（X↔Y，根都记第二条目标）。
+      const loop = (runId, parentRunId) => [
+        {
+          type: "run.background_submitted", runId, continuation: true,
+          parentRunId, rootRunId: "run_j1b",
+        },
+        { type: "run.session_reuse", runId, mode: "run_lineage", turn: "resume", rootRunId: "run_j1b" },
+        { type: "run.delivery_created", delivery: verifiedDeliveryRef(runId, { baseCommit: s.mainCommit }) },
+        { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+      ];
+      s.seed("run_j1x", loop("run_j1x", "run_j1y"));
+      s.seed("run_j1y", loop("run_j1y", "run_j1x"));
+    },
+  });
+  const deleted = ["run_j1a", "run_j1b"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "deleted");
+  const skipped = ["run_j1a", "run_j1b"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "skipped");
+  assert.equal(deleted.length, 1, `先删一条: ${JSON.stringify(result.results)}`);
+  assert.equal(skipped.length, 1, "成环后的一条跳过");
+  assert.equal(outcomeOf(result, "delete_branch", skipped[0]).reason, "supersession_unproven_now");
+});
+
+test("apply（J2）：删前刷新枚举失败 → 跳过（不拿旧索引放行删除）", async () => {
+  const s = await scenario();
+  for (const [id, child] of [["run_j2a", "run_j2a_c"], ["run_j2b", "run_j2b_c"]]) {
+    git(["branch", `wao/${id}`], s.repo);
+    s.seed(id, lineageRootRunEvents({ runId: id, repo: s.repo, baseCommit: s.mainCommit }));
+    s.seed(child, lineageChildRunEvents({
+      runId: child, parentRunId: id, rootRunId: id, repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+    }));
+  }
+  const planPath = join(s.base, "plan.json");
+  await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  // 第 1 次是执行开头的批量预筛枚举；第 2 次是第一条的删前刷新；第 3 次是第二条。
+  let calls = 0;
+  const supersessionEnumerateFn = (dir) => {
+    calls += 1;
+    if (calls === 3) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    return lineageMemberFiles(dir);
+  };
+  const result = await applyWorktreeReclaim({
+    planPath,
+    expectSha256: shaOfPlan(s),
+    runDir: s.runDir,
+    now: fixedNow,
+    supersessionEnumerateFn,
+  });
+  const outcomes = ["run_j2a", "run_j2b"].map((id) => outcomeOf(result, "delete_branch", id));
+  assert.equal(outcomes.filter((o) => o?.outcome === "deleted").length, 1, JSON.stringify(result.results));
+  const skipped = outcomes.find((o) => o?.outcome === "skipped");
+  assert.equal(skipped.reason, "undeterminable_now", "刷新失败必须跳过");
+  assert.match(String(skipped.detail), /refresh_failed_now/, "detail 写明刷新失败");
+});
+
+test("apply（J3）：属主是续修子、被截空的是谱系根 → undeterminable_now / transcript_empty_now", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_j3_o");
+  s.seed("run_j3_r", lineageRootRunEvents({
+    runId: "run_j3_r", repo: s.repo, wt, branch: null, baseCommit: s.mainCommit,
+  }));
+  s.seed("run_j3_o", lineageChildRunEvents({
+    runId: "run_j3_o", parentRunId: "run_j3_r", rootRunId: "run_j3_r",
+    repo: s.repo, wt, branch: "wao/run_j3_o", baseCommit: s.mainCommit,
+  }));
+  s.seed("run_j3_d", lineageChildRunEvents({
+    runId: "run_j3_d", parentRunId: "run_j3_o", rootRunId: "run_j3_r",
+    repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_j3_o"),
+    "夹具前提：属主的树可回收（被取代）");
+  // 计划之后才把谱系根截空。
+  writeFileSync(join(s.runDir, "run_j3_r.jsonl"), "", "utf8");
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_j3_o");
+  assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
+  assert.equal(tree.reason, "undeterminable_now", "空转录不是'在跑'");
+  assert.match(String(tree.detail), /transcript_empty_now/, "detail 写明转录为空");
+  assert.match(String(tree.detail), /run_j3_r/, "点名空的谱系成员");
+  assert.ok(existsSync(wt), "树保留");
+});
+
+test("apply（K1）：计划后出现内容冲突的孪生成员（最后状态相同）→ 跳过，不当成无转录放行", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_k1_a");
+  s.seed("run_k1_a", decidedRunEvents({
+    repo: s.repo, wt, branch: "wao/run_k1_a", baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "remove_tree" && i.runId === "run_k1_a"), "夹具前提：树可回收");
+  // 批准之后才出现只靠路径声明的成员 M：两份副本内容不同、最后状态相同、带打包事实。
+  const memberEvents = [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: null,
+      delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit },
+    },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef("run_k1_m", { baseCommit: s.mainCommit }) },
+    { type: "run.delivery_verification_passed", delivery: verifiedDeliveryRef("run_k1_m", { baseCommit: s.mainCommit }) },
+  ];
+  s.seed("run_k1_m", memberEvents);
+  s.seed("run_k1_m", [...memberEvents, { type: "run.lead_note", text: "harmless" }], { bucket: "conflict" });
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const tree = outcomeOf(result, "remove_tree", "run_k1_a");
+  assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
+  assert.equal(tree.reason, "undeterminable_now");
+  assert.match(String(tree.detail), /transcript_conflict_now/, "内容冲突各写各的原因");
+  assert.ok(existsSync(wt), "歧义成员挡住整棵树");
+});
+
 test("apply：转录此刻缺失 → 按无法判定跳过（找不到转录≠不在跑）", async () => {
   const s = await scenario();
   const wt = s.wt("run_gone");
@@ -428,16 +855,207 @@ test("apply：脏树快照写失败 → 这棵树不删、分支不删、记为�
   assert.equal(outcomeOf(result, "delete_branch", "run_snapf").reason, "tree_not_removed");
 });
 
+test("apply（L1）：对某根是候选的已有文件改成另一根的 X↔Y → 后一条跳过", async () => {
+  const s = await scenario();
+  git(["branch", "wao/run_l1a"], s.repo);
+  git(["branch", "wao/run_l1b"], s.repo);
+  for (const id of ["run_l1a", "run_l1b"]) {
+    s.seed(id, lineageRootRunEvents({ runId: id, repo: s.repo, baseCommit: s.mainCommit }));
+    s.seed(`${id}_c`, lineageChildRunEvents({
+      runId: `${id}_c`, parentRunId: id, rootRunId: id, repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+    }));
+  }
+  // X、Y 先命中根 A（A 的成员；对根 B 不是候选）。
+  const asMember = (runId, parentRunId, rootRunId) => [
+    {
+      type: "run.background_submitted", runId, continuation: true,
+      parentRunId, rootRunId,
+    },
+    { type: "run.session_reuse", runId, mode: "run_lineage", turn: "resume", rootRunId },
+    { type: "run.delivery_created", delivery: verifiedDeliveryRef(runId, { baseCommit: s.mainCommit }) },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+  ];
+  s.seed("run_l1x", asMember("run_l1x", "run_l1a", "run_l1a"));
+  s.seed("run_l1y", asMember("run_l1y", "run_l1a_c", "run_l1a"));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.filter((i) => i.action === "delete_branch").length >= 2, "夹具前提：两条分支可删");
+  let injected = false;
+  const result = await applyWorktreeReclaim({
+    planPath,
+    expectSha256: shaOfPlan(s),
+    runDir: s.runDir,
+    now: fixedNow,
+    beforeBranchDelete: async () => {
+      if (injected) return;
+      injected = true;
+      // 已有文件改成根 B 的 X↔Y（它们对 A 仍是候选、对 B 不是）。多一条无害
+      // 事件让新内容变长——同尺寸改写只能靠 mtime 判断，粗粒度时间戳会偶发漏检。
+      const rewritten = (runId, parentRunId) => [
+        ...asMember(runId, parentRunId, "run_l1b"),
+        { type: "run.lead_note", text: "rewritten after plan" },
+      ];
+      s.seed("run_l1x", rewritten("run_l1x", "run_l1y"));
+      s.seed("run_l1y", rewritten("run_l1y", "run_l1x"));
+    },
+  });
+  const deleted = ["run_l1a", "run_l1b"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "deleted");
+  const skipped = ["run_l1a", "run_l1b"].filter((id) => outcomeOf(result, "delete_branch", id)?.outcome === "skipped");
+  assert.equal(deleted.length, 1, `先删一条: ${JSON.stringify(result.results)}`);
+  assert.equal(skipped.length, 1, "成环后的一条跳过");
+  assert.equal(outcomeOf(result, "delete_branch", skipped[0]).reason, "supersession_unproven_now");
+});
+
+test("apply（N2/O2）：未预热读器 + 桶 statSync EACCES（真实调用链）→ 跳过、分支保留", async () => {
+  const s = await scenario();
+  git(["branch", "wao/run_n2_br"], s.repo);
+  s.seed("run_n2_br", decidedRunEvents({
+    repo: s.repo, baseCommit: s.mainCommit, branch: "wao/run_n2_br", decision: "accepted",
+  }));
+  // 项目桶在场（里面有转录），给桶目录的 statSync 注入 EACCES。
+  s.seed("run_bucket_dummy", cleanRunEvents({ repo: s.repo }), { bucket: "proj-a" });
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "delete_branch" && i.runId === "run_n2_br"),
+    "夹具前提：已裁决分支可删（读器未预热、无派生需求）");
+  const bucketDir = join(s.runDir, "projects", "proj-a");
+  const fsCjs = require("node:fs");
+  const realStat = fsCjs.statSync;
+  let injected = 0;
+  fsCjs.statSync = (p, ...rest) => {
+    if (String(p) === bucketDir) {
+      injected += 1;
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return realStat(p, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try {
+    result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  } finally {
+    fsCjs.statSync = realStat;
+    syncBuiltinESMExports();
+  }
+  assert.ok(injected > 0, "注入生效");
+  const outcome = outcomeOf(result, "delete_branch", "run_n2_br");
+  assert.equal(outcome.outcome, "skipped", JSON.stringify(result.results));
+  assert.equal(outcome.reason, "undeterminable_now", "首次刷新遇到枚举异常也跳过");
+  assert.match(String(outcome.detail), /refresh_failed_now/);
+  assert.match(git(["rev-parse", "--verify", "refs/heads/wao/run_n2_br"], s.repo), /^[0-9a-f]{40}$/, "分支仍在");
+});
+
+test("apply（L2）：执行中归档面变得不可枚举 → 跳过（不按 missing 放行）", async () => {
+  const s = await scenario();
+  git(["branch", "wao/run_l2a"], s.repo);
+  git(["branch", "wao/run_l2b"], s.repo);
+  s.seed("run_l2a", lineageRootRunEvents({ runId: "run_l2a", repo: s.repo, baseCommit: s.mainCommit }));
+  s.seed("run_l2a_c", lineageChildRunEvents({
+    runId: "run_l2a_c", parentRunId: "run_l2a", rootRunId: "run_l2a", repo: s.repo, baseCommit: s.mainCommit, decision: "accepted",
+  }));
+  // 第二条是"计划时确无转录"的已并入分支：旧逻辑会放行。
+  git(["merge", "--no-ff", "-m", "m", "wao/run_l2b"], s.repo);
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "delete_branch" && i.runId === "run_l2b"),
+    "夹具前提：无转录的已并入分支可删");
+  const archiveRoot = join(dirname(s.runDir), "runs-archive");
+  let swapped = false;
+  const result = await applyWorktreeReclaim({
+    planPath,
+    expectSha256: shaOfPlan(s),
+    runDir: s.runDir,
+    now: fixedNow,
+    beforeBranchDelete: async () => {
+      if (swapped) return;
+      swapped = true;
+      // 归档面在两次删除之间变得读不出（占成文件 → 枚举 skipped）。
+      rmSync(archiveRoot, { recursive: true, force: true });
+      writeFileSync(archiveRoot, "not a directory\n", "utf8");
+    },
+  });
+  const skipped = outcomeOf(result, "delete_branch", "run_l2b");
+  assert.equal(skipped.outcome, "skipped", JSON.stringify(result.results));
+  assert.equal(skipped.reason, "undeterminable_now", "枚举不完整不能按缺失放行");
+  assert.match(String(skipped.detail), /refresh_failed_now/);
+  assert.match(git(["rev-parse", "--verify", "refs/heads/wao/run_l2b"], s.repo), /^[0-9a-f]{40}$/, "分支仍在");
+});
+
+test("apply（M2）：转录读不出（目录占位）→ 删分支、删空壳都跳过并写准原因", async () => {
+  const s = await scenario();
+  const husk = join(s.repo, ".wao-worktrees", "run_m2_husk");
+  mkdirSync(husk, { recursive: true });
+  git(["branch", "wao/run_m2_br"], s.repo);
+  s.seed("run_m2_br", decidedRunEvents({
+    repo: s.repo, baseCommit: s.mainCommit, branch: "wao/run_m2_br", decision: "accepted",
+  }));
+  s.seed("run_m2_husk", decidedRunEvents({
+    repo: s.repo, baseCommit: s.mainCommit, branch: null, runId: "run_m2_husk", decision: "accepted",
+  }));
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "delete_branch" && i.runId === "run_m2_br"));
+  assert.ok(plan.items.some((i) => i.action === "rmdir_husk" && i.runId === "run_m2_husk"));
+  // 计划后把两份转录换成同名目录：readFile 报 EISDIR → unreadable。
+  for (const id of ["run_m2_br", "run_m2_husk"]) {
+    const p = join(s.runDir, `${id}.jsonl`);
+    rmSync(p, { force: true });
+    mkdirSync(p);
+  }
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const br = outcomeOf(result, "delete_branch", "run_m2_br");
+  assert.equal(br.outcome, "skipped", JSON.stringify(result.results));
+  assert.equal(br.reason, "undeterminable_now");
+  assert.match(String(br.detail), /transcript_unreadable_now/);
+  const hu = outcomeOf(result, "rmdir_husk", "run_m2_husk");
+  assert.equal(hu.outcome, "skipped", JSON.stringify(result.results));
+  assert.equal(hu.reason, "undeterminable_now");
+  assert.match(String(hu.detail), /transcript_unreadable_now/);
+  assert.ok(existsSync(husk), "空壳保留");
+});
+
+test("apply（P2）：计划后出现非终态转录的普通分支 → 跳过 running_now、分支保留", async () => {
+  const s = await scenario();
+  git(["branch", "wao/run_p2_br"], s.repo);
+  // 计划时这条运行没有转录、分支已并入：按旧逻辑归"无转录的已并入分支"，可删。
+  git(["merge", "--no-ff", "-m", "m", "wao/run_p2_br"], s.repo);
+  const planPath = join(s.base, "plan.json");
+  const { plan } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: planPath, now: fixedNow });
+  assert.ok(plan.items.some((i) => i.action === "delete_branch" && i.runId === "run_p2_br"),
+    "夹具前提：计划里可删（无转录、已并入）");
+  // 批准后才出现这份转录：运行仍在跑。
+  s.seed("run_p2_br", [
+    {
+      type: "run.started", backend: "test", cwd: s.repo, worktreePath: null, worktreeBranch: "wao/run_p2_br",
+    },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+  ]);
+  const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
+  const outcome = outcomeOf(result, "delete_branch", "run_p2_br");
+  assert.equal(outcome.outcome, "skipped", JSON.stringify(result.results));
+  assert.equal(outcome.reason, "running_now", "转录可读而运行尚未终态 → 跳过");
+  assert.match(String(outcome.detail), /non_terminal/);
+  assert.match(git(["rev-parse", "--verify", "refs/heads/wao/run_p2_br"], s.repo), /^[0-9a-f]{40}$/, "分支仍在");
+});
+
 test("apply：最终记录写失败 → 如实标记，CLI 非零退出码且不打印完成（删除照实列出）", async () => {
   const s = await scenario();
-  // 只含空壳回收的计划：无 bundle、无快照，保全目录只在记录落盘时创建——
-  // runs-archive 是文件时记录必失败，而删除已发生。
+  // 只含空壳回收的计划：无 bundle、无快照，保全目录只在记录落盘时创建。
+  // 让记录必失败：把保全目录所用的**月份目录**占成文件（归档枚举只看目录，
+  // 非目录条目静默跳过——不会像"归档根不可读"那样按枚举不完整拦住删除）。
+  const base = dirname(s.runDir);
+  const month = (() => {
+    const d = new Date(fixedNow());
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  })();
+  const archiveMonthFile = join(base, "runs-archive", month);
+  mkdirSync(join(base, "runs-archive"), { recursive: true });
   const husk = join(s.repo, ".wao-worktrees", "run_rechusk");
   mkdirSync(husk, { recursive: true });
   s.seed("run_rechusk", cleanRunEvents({ repo: s.repo, wt: husk, branch: null }));
   const outPath = join(s.base, "plan.json");
   const { planSha256 } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath, now: fixedNow });
-  writeFileSync(join(dirname(s.runDir), "runs-archive"), "not a directory\n", "utf8");
+  writeFileSync(archiveMonthFile, "not a directory\n", "utf8");
   const result = await applyWorktreeReclaim({ planPath: outPath, expectSha256: planSha256, runDir: s.runDir, now: fixedNow });
   assert.ok(!result.refused, `不应拒绝：${result.refused}`);
   assert.equal(outcomeOf(result, "rmdir_husk", "run_rechusk").outcome, "removed");
@@ -458,12 +1076,12 @@ test("apply：最终记录写失败 → 如实标记，CLI 非零退出码且不
     const husk2 = join(s.repo, ".wao-worktrees", "run_rechusk2");
     mkdirSync(husk2, { recursive: true });
     s.seed("run_rechusk2", cleanRunEvents({ repo: s.repo, wt: husk2, branch: null }));
-    // 第二份计划须在归档根可读时生成（读不出会把计划整体毒化）；生成后再占
-    // 成文件，让记录落盘失败、删除已发生。
-    rmSync(join(dirname(s.runDir), "runs-archive"), { force: true });
+    // 第二份计划须在归档月份目录可读时生成（生成后再占成文件，让记录落盘失败、
+    // 删除已发生）。
+    rmSync(archiveMonthFile, { force: true });
     const outPath2 = join(s.base, "plan2.json");
     const { planSha256: sha2 } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath: outPath2, now: fixedNow });
-    writeFileSync(join(dirname(s.runDir), "runs-archive"), "not a directory\n", "utf8");
+    writeFileSync(archiveMonthFile, "not a directory\n", "utf8");
     await worktreeCommand(["reclaim", "--apply", outPath2, "--expect-sha256", sha2, "--run-dir", s.runDir], {});
     exitCodeSeen = process.exitCode;
   } finally {

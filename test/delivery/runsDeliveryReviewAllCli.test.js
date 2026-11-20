@@ -412,6 +412,75 @@ function writeChildTranscriptWith(runDir, { cwd, ref2, extra = [] }) {
   ]);
 }
 
+// 第 120 批续修（审查 D1/B1）：被审的续修轮自己已被取代时，stdout 多一行提示；
+// `--out` 写出的正文逐字节不变（提示行不进文件），`--since-parent` 的父边检查与
+// 拒绝文案不受影响。
+const GRAND_RUN = "run_b80c_grand_0001";
+function syntheticRef(runId, baseCommit, acceptance = "pending") {
+  const commit = "e".repeat(40);
+  return {
+    schemaVersion: 1, kind: "git_commit", runId, baseCommit, deliveryCommit: commit,
+    branch: `wao/${runId}`, worktreePath: "D:/fake/wt", changedFiles: ["src/a.js"],
+    verification: { status: "passed", commands: [], verifiedCommit: commit, results: [] },
+    acceptance: { status: acceptance, reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+}
+function seedAcceptedGrandchild(runDir, cwd, baseCommit) {
+  const created = syntheticRef(GRAND_RUN, baseCommit);
+  const accepted = { ...created, acceptance: { status: "accepted", reviewerType: "lead_agent" } };
+  writeTranscript(runDir, GRAND_RUN, [
+    {
+      type: "run.background_submitted", runId: GRAND_RUN, ts: "2026-01-05T00:00:00Z", seq: 1, cwd,
+      background: true, deliveryRequested: true, continuation: true, parentRunId: CHILD_RUN, rootRunId: ROOT_RUN,
+    },
+    { type: "run.started", runId: GRAND_RUN, ts: "2026-01-05T00:00:00Z", seq: 2 },
+    { type: "run.session_reuse", runId: GRAND_RUN, ts: "2026-01-05T00:00:00Z", seq: 3, mode: "run_lineage", turn: "resume", rootRunId: ROOT_RUN },
+    { type: "run.delivery_created", runId: GRAND_RUN, ts: "2026-01-05T00:00:01Z", seq: 4, delivery: created },
+    { type: "run.delivery_verification_passed", runId: GRAND_RUN, ts: "2026-01-05T00:00:02Z", seq: 5, delivery: created },
+    { type: "run.state_change", runId: GRAND_RUN, ts: "2026-01-05T00:00:03Z", seq: 6, from: "running", to: "completed" },
+    {
+      type: "run.delivery_accepted", runId: GRAND_RUN, ts: "2026-01-05T00:00:04Z", seq: 7,
+      delivery: accepted, deliveryCommit: created.deliveryCommit, reason: "ok",
+    },
+  ]);
+}
+
+test("0116-SP-SUPERSEDED: 被审的续修轮已被取代 → stdout 加提示行，--out 正文逐字节不变", async () => {
+  const { repo, baseCommit, runDir, ref1, ref2 } = await buildLineageScenario("wao-b80c-sup-");
+  writeChildTranscriptWith(runDir, { cwd: repo, ref2 });
+  seedAcceptedGrandchild(runDir, repo, baseCommit);
+  try {
+    const expectedDelta = expectedAllText({
+      runId: CHILD_RUN, repo, base: ref1.deliveryCommit, delivery: ref2.deliveryCommit,
+      sinceParent: true, parentDelivery: ref1.deliveryCommit,
+    });
+    const expectedLine = `Superseded: a descendant delivery was already accepted (${GRAND_RUN}); no Lead decision is needed here`;
+
+    // stdout 模式：正文 + 一行提示（正文仍是逐字节的 git 派生拼装）。
+    const stdout = await captureLog(() => runsDeliveryCommand(
+      ["review", CHILD_RUN, "--all", "--since-parent", "--cwd", repo],
+      { runDir },
+    ));
+    assert.equal(stdout, `${expectedDelta}\n${expectedLine}`,
+      "提示行追加在正文之后，正文本身逐字节不变");
+
+    // --out 模式：正文文件逐字节不变（不含提示行），stdout 是摘要 + 提示行。
+    const outPath = join(runDir, "review.txt");
+    const outStdout = await captureLog(() => runsDeliveryCommand(
+      ["review", CHILD_RUN, "--all", "--since-parent", "--cwd", repo, "--out", outPath],
+      { runDir },
+    ));
+    assert.equal(readFileSync(outPath, "utf8"), `${expectedDelta}\n`, "--out 正文逐字节不变");
+    const outLines = outStdout.split("\n");
+    assert.match(outLines[0], /^wrote .*: \d+ bytes, \d+ files, 0 unavailable$/, "摘要行照旧");
+    assert.equal(outLines[1], expectedLine, "提示行只在 stdout");
+  } finally {
+    await cleanupRepo(repo);
+    cleanupDir(runDir);
+  }
+});
+
 test("0116-SP-01: --since-parent output STRICTLY equals the git diff between the two delivery commits", async () => {
   const { repo, runDir, ref1, ref2 } = await buildLineageScenario();
   writeChildTranscriptWith(runDir, { cwd: repo, ref2 });
