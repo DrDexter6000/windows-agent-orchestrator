@@ -219,6 +219,84 @@ test("file_change kind=delete 不 emit file_written（只记写入）", () => {
   assert.ok(!events.some((e) => e.kind === "file_written"), "删除不应算 file_written");
 });
 
+// ===== TD-357: 只有 completed 的补丁才算写入 =====
+// 上游 item.completed 的 file_change 带必填 status。三个值出自 Rust 侧
+// codex-rs/exec/src/exec_events.rs：PatchApplyStatus = "in_progress" | "completed" |
+// "failed"（app-server 的 Declined 折成 failed；回合结束时没完成的补丁项仍以
+// item.completed 发出，status 保持 in_progress）；TypeScript SDK（items.ts）的
+// PatchApplyStatus 只声明 completed 与 failed，解析器按 Rust 侧三值理解线上帧。
+// 补丁失败时 item 仍会到达；原解析不看 status，给从未落地的路径发 file_written，
+// 隔离门 ENOENT → workdir_escape，杀掉只是补丁没应用的 worker（11-19 sol 生图运行）。
+// 现在只认 completed：in_progress（回合中断）、failed（含 declined）与缺字段都不记
+// 写入；即便失败/中断的补丁可能已写了一部分文件，行为仍是只认 completed——codex 每次
+// 调用都在 workspace-write 沙箱里，只许写工作目录与系统临时目录，部分写入不会落到别处；
+// 交付打包按真实改动清点。其余情形落一条失败 tool_result。
+
+test("TD-357: file_change status=failed 不发 file_written，只落一条 isError 的 tool_result", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed(
+    '{"type":"item.completed","item":{"id":"f4","type":"file_change","changes":[{"path":"docs/product/assets/m4-concepts/notes.md","kind":"add"}],"status":"failed"}}\n',
+  );
+  assert.ok(!events.some((e) => e.kind === "file_written"), "失败的补丁不是写入证据");
+  assert.equal(events.length, 1, "整个 item 只落一条工具结果事件");
+  assert.equal(events[0].kind, "tool_result");
+  assert.equal(events[0].isError, true, "失败状态标明 isError");
+  assert.match(events[0].output, /did not complete/i, "标明补丁未完成（不断言未落地，失败补丁可能已部分落盘）");
+  assert.match(events[0].output, /patch failed/i);
+  assert.ok(!events[0].output.includes("notes.md"), "不回显被补丁涉及的路径");
+});
+
+test("TD-357: file_change status=in_progress（回合中断的补丁项）不算写入", () => {
+  // 回合结束时没完成的补丁项仍以 item.completed 发出、status 保持 in_progress；
+  // 它可能已写了一部分文件，但行为仍只认 completed（理由见本节头注释）。
+  const p = new CodexStreamParser();
+  const events = p.feed(
+    '{"type":"item.completed","item":{"id":"f4b","type":"file_change","changes":[{"path":"src/half-written.js","kind":"add"}],"status":"in_progress"}}\n',
+  );
+  assert.ok(!events.some((e) => e.kind === "file_written"), "未完成的补丁不是确认写入");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "tool_result");
+  assert.equal(events[0].isError, true);
+  assert.match(events[0].output, /did not complete/i);
+  assert.match(events[0].output, /no completed status/i, "标明没有 completed 状态");
+  assert.ok(!events[0].output.includes("half-written.js"), "不回显被补丁涉及的路径");
+});
+
+test("TD-357: file_change 缺 status 不发 file_written（上游必填字段缺失 = fail closed）", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed(
+    '{"type":"item.completed","item":{"id":"f5","type":"file_change","changes":[{"path":"src/never-applied.js","kind":"add"}]}}\n',
+  );
+  assert.ok(!events.some((e) => e.kind === "file_written"), "没有正面 completed 就不宣称写过");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "tool_result");
+  assert.equal(events[0].isError, true);
+  assert.match(events[0].output, /did not complete/i);
+  assert.match(events[0].output, /no completed status/i, "缺字段与 failed 区分，便于诊断");
+});
+
+test("TD-357: file_change 的其它 status 值同样不算写入（未来形状不被误读）", () => {
+  const p = new CodexStreamParser();
+  for (const status of ["partial", "Completed", ""]) {
+    const events = p.feed(
+      `${JSON.stringify({ type: "item.completed", item: { id: "f6", type: "file_change", changes: [{ path: "/a/x.js", kind: "add" }], status } })}\n`,
+    );
+    assert.ok(!events.some((e) => e.kind === "file_written"), `status=${JSON.stringify(status)} 不记写入`);
+    assert.equal(events[0]?.kind, "tool_result");
+    assert.equal(events[0]?.isError, true);
+  }
+});
+
+test("TD-357: completed 的补丁（含多 change）仍逐条 emit file_written——正向对照不被收紧", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed(
+    '{"type":"item.completed","item":{"id":"f7","type":"file_change","changes":[{"path":"/a/x.js","kind":"add"},{"path":"/b/y.js","kind":"edit"},{"path":"/c/old.js","kind":"delete"}],"status":"completed"}}\n',
+  );
+  assert.deepEqual(events.map((e) => e.kind), ["file_written", "file_written"]);
+  assert.deepEqual(events.map((e) => e.path), ["/a/x.js", "/b/y.js"]);
+  assert.ok(!events.some((e) => e.kind === "tool_result"), "成功补丁不落失败工具结果");
+});
+
 // ===== 自报失败原话（可选接口 failureReason）=====
 // codex 失败时原因原话只在 stdout 的 JSON 里：type:"error" 的 message，或
 // turn.failed 的 error.message；stderr 往往只有 "Reading additional input from

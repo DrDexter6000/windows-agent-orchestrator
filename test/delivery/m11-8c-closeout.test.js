@@ -178,9 +178,74 @@ test("CLOSEOUT-A1: delivery resume injects the delivery contract even WITHOUT sy
 
     assert.equal(spawnCount, 1, "spawn called exactly once on resume");
     assert.ok(capturedTask.roleContract, "roleContract set on resume in delivery mode (no systemPrompt)");
+    // TD-357: no backend-declared supplement on the resume path either → the
+    // contract is the frozen base, byte-identically (same pin as start).
+    const { composeDeliveryExecutionContract } = await import("../../src/application/roleContract.js");
+    assert.equal(
+      capturedTask.roleContract,
+      composeDeliveryExecutionContract({ allowedPaths: ["src"] }),
+      "resume without backend supplement → byte-identical delivery contract",
+    );
     assert.match(capturedTask.roleContract, /git add/i, "delivery contract forbids git add on resume");
     assert.match(capturedTask.roleContract, /commit SHA|final commit|do not.*SHA/i,
       "delivery contract forbids reporting a final commit SHA on resume");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("CLOSEOUT-A5: a backend-declared delivery contract supplement rides the resume-path contract (TD-357)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cl-a5-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_cl_a5";
+    const wt = makeWorktree(dir, `wao/${runId}`);
+    const lines = [
+      ev({ type: "run.started", backend: "codex", cwd: dir, worktreePath: wt.path, worktreeBranch: wt.branch, delivery: { mode: "git_commit_v1", baseCommit: wt.baseCommit, allowedPaths: ["docs"], verificationCommands: ["echo ok"], scorecardRules: { requireEvidence: true, mode: "warn" } }, scorecardConfigured: true, ts: "2026-07-25T00:00:00.000Z", runId, agentId: "coder_sol", seq: 1 }),
+      ev({ type: "session.created", backend: "codex", backendSessionId: "s1", serveUrl: undefined, ts: "2026-07-25T00:00:00.200Z", runId, agentId: "coder_sol", seq: 2 }),
+      ev({ type: "prompt.sent", prompt: "copy the generated image in", ts: "2026-07-25T00:00:00.300Z", runId, agentId: "coder_sol", seq: 3 }),
+      ev({ type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-07-25T00:00:00.400Z", runId, agentId: "coder_sol", seq: 4 }),
+    ].join("");
+    writeTranscript(join(dir, "runs"), runId, lines);
+    const registryPath = makeRegistry(dir, { coder_sol: { backend: "codex", cwd: dir } });
+
+    // Use the real backend declaration as the fixture, so this test follows the
+    // exact supplement text (TD-357) instead of duplicating it.
+    const { CODEX_DELIVERY_CONTRACT_SUPPLEMENT: supplement } =
+      await import("../../src/backends/codex.js");
+    const { RunManager } = await import("../../src/runManager.js");
+    const { composeDeliveryExecutionContract } = await import("../../src/application/roleContract.js");
+    let capturedTask = null;
+    const fakeBackend = {
+      supportsRoleContract: true, sessionOutlivesProcess: false,
+      deliveryContractSupplement: supplement,
+      async spawn(agent, task) {
+        capturedTask = task;
+        return { backend: "codex", backendSessionId: "s2", messageId: "m1", admittedSeq: 5,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {} };
+      },
+      defaultBinary() { return "codex"; },
+      credentialEnvNames: () => [],
+    };
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
+      readRegistry: async () => { const { readRegistry } = await import("../../src/registry.js"); return readRegistry(registryPath); },
+      transcriptDir: join(dir, "runs"),
+      backendFor: () => fakeBackend,
+      userEnvReader: async () => ({}),
+    });
+    const resumed = await manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath });
+    assert.ok(resumed, "resume returned a Run");
+    try { await resumed.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
+
+    assert.ok(capturedTask?.roleContract, "roleContract set on resume in delivery mode");
+    assert.equal(
+      capturedTask.roleContract,
+      composeDeliveryExecutionContract({ allowedPaths: ["docs"], backendSupplement: supplement }),
+      "resume path composes exactly the base contract + the backend-declared supplement",
+    );
+    assert.match(capturedTask.roleContract, /\$CODEX_HOME\/generated_images\//, "supplement reaches the worker-visible contract on resume");
   } finally {
     cleanupDir(dir);
   }

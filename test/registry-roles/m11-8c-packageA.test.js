@@ -115,6 +115,14 @@ test("PA-RED1: delivery mode injects the delivery contract even WITHOUT a system
     assert.equal(capturedTask.deliveryMode, true,
       "delivery mode is threaded to the backend for runtime-level containment");
     assert.ok(capturedTask.roleContract, "roleContract is set in delivery mode even without systemPrompt");
+    // TD-357: a backend that declares no supplement gets the frozen base
+    // contract byte-identically (no drift for claude-code-like backends).
+    const { composeDeliveryExecutionContract } = await import("../../src/application/roleContract.js");
+    assert.equal(
+      capturedTask.roleContract,
+      composeDeliveryExecutionContract({ allowedPaths: ["src"] }),
+      "backend without deliveryContractSupplement → byte-identical delivery contract",
+    );
     assert.match(capturedTask.roleContract, /git add/i, "delivery contract forbids git add");
     assert.match(capturedTask.roleContract, /commit SHA|final commit|do not.*SHA/i,
       "delivery contract forbids reporting a final commit SHA");
@@ -128,6 +136,67 @@ test("PA-RED1: delivery mode injects the delivery contract even WITHOUT a system
       "prompt.sent stores ONLY the original task prompt");
     assert.ok(!/git add/i.test(promptSent.prompt),
       "delivery contract must NOT leak into prompt.sent");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("PA-S3: a backend-declared delivery contract supplement rides the start-path contract (TD-357)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118c-pa-s3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { coder_sol: { backend: "codex", cwd: dir } },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+    const { RunManager } = await import("../../src/runManager.js");
+    const { composeDeliveryExecutionContract } = await import("../../src/application/roleContract.js");
+    // Use the real backend declaration as the fixture, so this test follows the
+    // exact supplement text (TD-357) instead of duplicating it.
+    const { CODEX_DELIVERY_CONTRACT_SUPPLEMENT: supplement } =
+      await import("../../src/backends/codex.js");
+    let capturedTask = null;
+    const fakeBackend = {
+      supportsRoleContract: true,
+      sessionOutlivesProcess: false,
+      deliveryContractSupplement: supplement,
+      async spawn(agent, task) {
+        capturedTask = task;
+        return {
+          backend: "codex", backendSessionId: "s1", messageId: "m1", admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+        };
+      },
+      defaultBinary() { return "codex"; },
+      credentialEnvNames: () => [],
+    };
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir, defaultIsolation: "none" },
+      readRegistry: async () => {
+        const { readRegistry } = await import("../../src/registry.js");
+        return readRegistry(registryPath);
+      },
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+      userEnvReader: async () => ({}),
+    });
+    const run = await manager.start("coder_sol", {
+      prompt: "generate the image and copy it in",
+      runDir, registry: registryPath, fireAndForget: false,
+      isolate: true,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["docs"], verificationCommands: ["npm test"] },
+    });
+    try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
+
+    assert.ok(capturedTask?.roleContract, "roleContract is set in delivery mode");
+    assert.equal(
+      capturedTask.roleContract,
+      composeDeliveryExecutionContract({ allowedPaths: ["docs"], backendSupplement: supplement }),
+      "start path composes exactly the base contract + the backend-declared supplement",
+    );
+    assert.match(capturedTask.roleContract, /\$CODEX_HOME\/generated_images\//, "supplement reaches the worker-visible contract");
   } finally {
     cleanupDir(dir);
   }

@@ -20,6 +20,17 @@ export const CODEX_WRITE_SANDBOX_ARGS = Object.freeze([
 // 秒级完成；给到分钟级只为容忍冷启动。
 const SANDBOX_PROBE_TIMEOUT_MS = 120_000;
 
+// TD-357（Owner 2026-11-20：生图是 Owner 规则 1 的例外——codex 车道只做会审，
+// 但生图交付照派）。codex 的内置生图工具把图写到它自己的缓存
+// （$CODEX_HOME/generated_images/），不在授权工作树内；旧交付合同只许写工作树，
+// worker 要么被隔离门误杀、要么按合同拒做。补充条款只给这一条窄例外：读取本轮
+// 生成的图并拷进授权路径。树外仍不得写由基础合同那一条覆盖，这里不重复；也不
+// 另说"缓存之外怎么算"，以免与基础合同允许的系统临时目录一次性文件冲突。声明在
+// backend 上（能力驱动，共享代码不按运行时名字分支），RunManager 组装交付合同时原样附上。
+export const CODEX_DELIVERY_CONTRACT_SUPPLEMENT = Object.freeze([
+  "- Exception: the built-in image generation tool saves images to its own cache (`$CODEX_HOME/generated_images/`). You may read the images generated in this run from there and copy them into your authorized paths; do not write to that cache yourself.",
+]);
+
 /**
  * Codex backend（M2-6）。
  *
@@ -38,6 +49,12 @@ export class CodexBackend extends ProcessBackend {
   // RunManager reads this boolean to decide role injection — no runtime-name
   // branch. codex injects via -c developer_instructions (append, not replace).
   supportsRoleContract = true;
+
+  // TD-357: delivery-contract supplement owned by this backend (the image
+  // generation cache allowance, see CODEX_DELIVERY_CONTRACT_SUPPLEMENT).
+  // RunManager composes it into the delivery execution contract at start and
+  // resume; backends that do not declare it deliver the byte-identical base.
+  deliveryContractSupplement = CODEX_DELIVERY_CONTRACT_SUPPLEMENT;
 
   // ADR-0025 批次 2（TD-87）：codex --json 的 turn.completed 帧携带 usage
   // （CodexStreamParser 产出 metrics token 事实）——tokenBudget 闸门对该

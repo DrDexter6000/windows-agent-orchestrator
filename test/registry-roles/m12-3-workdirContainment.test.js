@@ -286,3 +286,119 @@ test("M12-3-ISO-R5: blank file_written paths fail closed before packaging", asyn
     await rm(output.root, { recursive: true, force: true });
   }
 });
+
+// ===== TD-357: unresolved post-write targets fail closed =====
+// The batch's containment fix is parser-side only (a codex file_change whose
+// status is not "completed" is no longer reported as file_written). The gate
+// itself is unchanged: a reported write whose target realpath cannot resolve
+// (missing leaf, dangling link, removed junction, outside junction) still ends
+// the run as workdir_escape before packaging. These regressions pin the
+// fail-closed end-to-end behavior; no missing-leaf case passes.
+
+async function createJunctionOrSkip(t, target, path) {
+  try {
+    await symlink(target, path, "junction");
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`junction creation denied by platform: ${error.code}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
+test("M12-3-ISO-R6: a dangling link at the reported leaf still fails closed (TD-357)", async (t) => {
+  const fixture = await makeDeliveryRun({ reportedPath: "" });
+  const link = join(fixture.effectiveCwd, "src", "dangling.js");
+  await mkdir(dirname(link), { recursive: true });
+  if (!await createJunctionOrSkip(t, join(fixture.root, "missing-r6-target"), link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  fixture.run.handle.events = async function* events() {
+    yield { kind: "file_written", path: join("src", "dangling.js") };
+    yield { kind: "done", reason: "completed" };
+  };
+  try {
+    const result = await fixture.run.waitForCompletion({ pollInterval: 1 });
+    const events = await readTranscript(fixture.transcriptPath);
+    assert.equal(fixture.getPackageCount(), 0);
+    assert.equal(fixture.run.state, "failed");
+    assert.equal(result.isolationViolation, true);
+    const violation = events.find((event) => event.type === "run.isolation_violation");
+    assert.equal(violation?.eventKind, "file_written");
+    assert.equal(violation?.reason, "file_written_physical_unresolved");
+    assert.equal(violation?.errorCode, "ENOENT");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("M12-3-ISO-R7: a missing leaf under an outside junction stays an escape", async (t) => {
+  const fixture = await makeDeliveryRun({ reportedPath: "" });
+  const outside = join(fixture.root, "outside-r7");
+  await mkdir(outside, { recursive: true });
+  await mkdir(fixture.effectiveCwd, { recursive: true });
+  if (!await createJunctionOrSkip(t, outside, join(fixture.effectiveCwd, "linked-r7"))) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  fixture.run.handle.events = async function* events() {
+    yield { kind: "file_written", path: join("linked-r7", "never-created.js") };
+    yield { kind: "done", reason: "completed" };
+  };
+  try {
+    const result = await fixture.run.waitForCompletion({ pollInterval: 1 });
+    const events = await readTranscript(fixture.transcriptPath);
+    assert.equal(fixture.getPackageCount(), 0);
+    assert.equal(fixture.run.state, "failed");
+    assert.equal(result.isolationViolation, true);
+    const violation = events.find((event) => event.type === "run.isolation_violation");
+    assert.equal(violation?.eventKind, "file_written");
+    assert.equal(violation?.reason, "file_written_physical_unresolved");
+    assert.equal(violation?.errorCode, "ENOENT");
+    assert.equal(violation?.path, "linked-r7/never-created.js");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("M12-3-ISO-R8 (sol scenario): write through an in-tree junction, then remove it → fails closed", async (t) => {
+  const fixture = await makeDeliveryRun({ reportedPath: "" });
+  const outside = join(fixture.root, "outside-r8");
+  await mkdir(outside, { recursive: true });
+  await mkdir(fixture.effectiveCwd, { recursive: true });
+  const link = join(fixture.effectiveCwd, "shared-fixtures");
+  if (!await createJunctionOrSkip(t, outside, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  // A worker mistakes the junction for an independent copy and writes a test
+  // config through it; routine cleanup removes the junction before the
+  // transcript is classified. The outside file survives.
+  await writeFile(join(link, "wao-test-config.json"), "{\"fixture\":true}\n", "utf8");
+  await rm(link, { recursive: true, force: true });
+  fixture.run.handle.events = async function* events() {
+    yield { kind: "file_written", path: join("shared-fixtures", "wao-test-config.json") };
+    yield { kind: "done", reason: "completed" };
+  };
+  try {
+    const result = await fixture.run.waitForCompletion({ pollInterval: 1 });
+    const events = await readTranscript(fixture.transcriptPath);
+    assert.equal(
+      await readFile(join(outside, "wao-test-config.json"), "utf8"),
+      "{\"fixture\":true}\n",
+      "the write really landed outside the worktree",
+    );
+    assert.equal(fixture.getPackageCount(), 0, "the package must not run on this escape");
+    assert.equal(fixture.run.state, "failed");
+    assert.equal(result.isolationViolation, true);
+    const violation = events.find((event) => event.type === "run.isolation_violation");
+    assert.equal(violation?.eventKind, "file_written");
+    assert.equal(violation?.reason, "file_written_physical_unresolved");
+    assert.equal(violation?.errorCode, "ENOENT");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

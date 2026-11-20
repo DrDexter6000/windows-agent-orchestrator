@@ -339,7 +339,9 @@ function codexChainHandle(frames) {
 
 const codexFileChangeFrame = (path) => ({
   type: "item.completed",
-  item: { type: "file_change", changes: [{ kind: "add", path }] },
+  // TD-357: file_change carries the upstream-required PatchApplyStatus; only
+  // "completed" is a confirmed write (this helper models a successful patch).
+  item: { type: "file_change", changes: [{ kind: "add", path }], status: "completed" },
 });
 
 test("containment chain / codex: 源级钉——file_change 逐 change 取 ch.path 且只认写入类 kind", () => {

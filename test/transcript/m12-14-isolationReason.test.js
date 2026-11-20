@@ -676,6 +676,128 @@ test("M12-14-W16: the write_intent branch also withholds the path when the raw p
 });
 
 // =====================================================================
+// Section L — TD-357: unresolved post-write targets fail closed
+// =====================================================================
+//
+// The batch's containment fix is on the parser side only (a codex file_change
+// whose status is not "completed" is no longer reported as file_written). The
+// post-write classifier itself is unchanged: when realpath cannot prove the
+// reported target's physical location, the verdict stays physical_unresolved
+// and the run fails. These regressions pin that fail-closed behavior for the
+// shapes the incident and later reviews brought up (dangling links, outside
+// junctions, junctions removed after the write went through).
+
+async function classifierLandingFixture() {
+  const root = await mkdtemp(join(tmpdir(), "wao-m1214-landed-"));
+  const base = join(root, "delivery-worktree");
+  await mkdir(base, { recursive: true });
+  return { root, base };
+}
+
+// The retry waits are irrelevant to these verdict tests (all final one-shots
+// except the deliberately unresolved shapes); skip the wall-clock cost.
+const NO_SLEEP = { sleep: async () => {} };
+
+test("TD-357-L3: a dangling link at the leaf still fails closed (physical_unresolved)", async (t) => {
+  const fixture = await classifierLandingFixture();
+  try {
+    const link = join(fixture.base, "src", "dangling-file.js");
+    await mkdir(dirname(link), { recursive: true });
+    if (!await createJunctionOrSkip(t, join(fixture.root, "missing-l3-target"), link)) return;
+    const result = await classifyReportedWriteContainment(
+      join("src", "dangling-file.js"), fixture.base, NO_SLEEP,
+    );
+    assert.deepEqual(result, {
+      verdict: "physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/dangling-file.js",
+    }, "an unresolvable target fails closed");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-357-L4: a missing leaf under an outside junction fails closed (physical_unresolved)", async (t) => {
+  const fixture = await classifierLandingFixture();
+  try {
+    const outside = join(fixture.root, "outside-l4");
+    await mkdir(outside, { recursive: true });
+    if (!await createJunctionOrSkip(t, outside, join(fixture.base, "linked-l4"))) return;
+    const result = await classifyReportedWriteContainment(
+      join("linked-l4", "missing.js"), fixture.base, NO_SLEEP,
+    );
+    // The leaf itself cannot be resolved, so the verdict is unresolved even
+    // though the junction parent points outside: fail closed, never "inside".
+    assert.equal(result.verdict, "physical_unresolved");
+    assert.equal(result.errorCode, "ENOENT");
+    assert.equal(result.path, "linked-l4/missing.js");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-357-L5: a missing leaf under a dangling directory link still fails closed", async (t) => {
+  const fixture = await classifierLandingFixture();
+  try {
+    const link = join(fixture.base, "dangling-dir");
+    if (!await createJunctionOrSkip(t, join(fixture.root, "missing-l5-target"), link)) return;
+    const result = await classifyReportedWriteContainment(
+      join("dangling-dir", "missing.js"), fixture.base, NO_SLEEP,
+    );
+    assert.equal(result.verdict, "physical_unresolved");
+    assert.equal(result.errorCode, "ENOENT");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-357-L6: a non-ENOENT failure at the leaf still fails closed", async () => {
+  const fixture = await classifierLandingFixture();
+  try {
+    // A NUL byte makes the filesystem call fail with a non-ENOENT error; the
+    // verdict stays physical_unresolved.
+    const result = await classifyReportedWriteContainment(
+      "src/invalid\0path.js", fixture.base, NO_SLEEP,
+    );
+    assert.equal(result.verdict, "physical_unresolved");
+    assert.equal(result.errorCode, "other");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-357-L8 (sol scenario): in-tree junction → write through it → junction removed → physical_unresolved", async (t) => {
+  const fixture = await classifierLandingFixture();
+  try {
+    // A worker mistakes the in-tree junction for an independent copy and writes
+    // a test config through it; the test script then removes the junction by
+    // routine cleanup before the transcript is classified. The outside file
+    // survives and the reported leaf no longer resolves — the classifier must
+    // fail closed, never pass it as an in-tree write.
+    const outside = join(fixture.root, "outside-l8");
+    await mkdir(outside, { recursive: true });
+    const link = join(fixture.base, "shared-fixtures");
+    if (!await createJunctionOrSkip(t, outside, link)) return;
+    await writeFile(join(link, "wao-test-config.json"), "{\"fixture\":true}\n", "utf8");
+    await rm(link, { recursive: true, force: true });
+
+    const result = await classifyReportedWriteContainment(
+      join("shared-fixtures", "wao-test-config.json"), fixture.base, NO_SLEEP,
+    );
+    assert.equal(result.verdict, "physical_unresolved", "the target no longer resolves: fail closed");
+    assert.equal(result.errorCode, "ENOENT");
+    assert.equal(result.path, "shared-fixtures/wao-test-config.json");
+    assert.equal(
+      await readFile(join(outside, "wao-test-config.json"), "utf8"),
+      "{\"fixture\":true}\n",
+      "the write really landed outside the worktree",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
 // Section T — transient filesystem-error retry (both verdict functions)
 // =====================================================================
 //

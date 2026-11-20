@@ -476,3 +476,73 @@ test("交付合同补齐：新写入边界行与 git 行扩展在场，共用条
   // 无 allowedPaths 时 base 也带共用条款（既有调用方字节形状只增不换）
   assert.ok(base.endsWith(finishClause), "base 合同以共用条款收尾");
 });
+
+// ── TD-357：后端声明的交付合同补充条款（codex 生图缓存）────────────────────
+// Owner 2026-11-20：生图是 Owner 规则 1 的例外。codex 后端声明一段补充条款，
+// RunManager 组装交付合同时原样附上；其余后端/只读合同逐字节不变。共享代码不按
+// 运行时名字分支——能力（数组）在场就附，不在场就还是冻结的 base。
+
+test("TD-357: 后端补充条款插在写入边界行之后；缺省/空/畸形输入下交付合同逐字节不变", async () => {
+  const { composeDeliveryExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const { CODEX_DELIVERY_CONTRACT_SUPPLEMENT } = await import("../../src/backends/codex.js");
+
+  const base = composeDeliveryExecutionContract();
+  // 非 codex 后端不声明 → 与无参调用逐字节相同（三种"没提供"的形状）。
+  assert.equal(composeDeliveryExecutionContract({}), base);
+  assert.equal(composeDeliveryExecutionContract({ backendSupplement: undefined }), base);
+  assert.equal(composeDeliveryExecutionContract({ backendSupplement: [] }), base);
+  assert.equal(composeDeliveryExecutionContract({ backendSupplement: "not-an-array" }), base);
+  assert.equal(
+    composeDeliveryExecutionContract({ backendSupplement: [42, null, "   "] }),
+    base,
+    "畸形/空白条目一条都不落",
+  );
+  assert.ok(!base.includes("$CODEX_HOME"), "base 合同不带任何后端专属条款");
+
+  assert.ok(Array.isArray(CODEX_DELIVERY_CONTRACT_SUPPLEMENT)
+    && CODEX_DELIVERY_CONTRACT_SUPPLEMENT.length > 0, "codex 声明了补充条款");
+  for (const clause of CODEX_DELIVERY_CONTRACT_SUPPLEMENT) {
+    assert.match(clause, /^- /, "补充条款与合同同形（一行一条）");
+    assert.ok(!clause.includes("\n"), "每条是一行");
+  }
+  const supplemented = composeDeliveryExecutionContract({
+    backendSupplement: CODEX_DELIVERY_CONTRACT_SUPPLEMENT,
+  });
+  const lines = supplemented.split("\n");
+  const writeRuleIndex = lines.findIndex((l) => l.startsWith("- Every file you create or modify with your tools"));
+  assert.ok(writeRuleIndex !== -1, "写入边界行在场");
+  for (const [offset, clause] of CODEX_DELIVERY_CONTRACT_SUPPLEMENT.entries()) {
+    assert.equal(lines[writeRuleIndex + 1 + offset], clause, "补充条款紧跟写入边界行");
+    assert.equal(supplemented.split(clause).length - 1, 1, "每条恰一次");
+  }
+  // 语义：只给"读本轮生图缓存并拷进授权路径"这条窄例外；树外仍不得写由基础
+  // 合同覆盖，补充条款不重复、也不与基础合同的系统临时目录一次性文件冲突。
+  assert.match(supplemented, /`\$CODEX_HOME\/generated_images\/`/, "点明内置生图缓存的路径");
+  assert.match(supplemented, /read the images generated in this run from there/i, "允许读本轮生成的图");
+  assert.match(supplemented, /copy them into your authorized paths/i, "允许拷进授权路径");
+  assert.match(supplemented, /do not write to that cache yourself/i, "缓存本身只许内置工具写");
+  assert.ok(
+    !/do not write outside this directory/i.test(CODEX_DELIVERY_CONTRACT_SUPPLEMENT.join("\n")),
+    "补充条款不重复基础合同的树外禁写句（重复且会与临时目录例外冲突）",
+  );
+});
+
+test("TD-357: 带授权清单时补充条款仍紧邻写入边界行，授权清单段不变、仍在末尾", async () => {
+  const { composeDeliveryExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const { CODEX_DELIVERY_CONTRACT_SUPPLEMENT } = await import("../../src/backends/codex.js");
+  const scoped = composeDeliveryExecutionContract({
+    allowedPaths: ["src", "docs"],
+    backendSupplement: CODEX_DELIVERY_CONTRACT_SUPPLEMENT,
+  });
+  const lines = scoped.split("\n");
+  const writeRuleIndex = lines.findIndex((l) => l.startsWith("- Every file you create or modify with your tools"));
+  assert.equal(lines[writeRuleIndex + 1], CODEX_DELIVERY_CONTRACT_SUPPLEMENT[0]);
+  const scopeIndex = lines.findIndex((l) => l.startsWith("- AUTHORIZED WORK SCOPE"));
+  assert.ok(scopeIndex > writeRuleIndex, "授权清单段仍在补充条款之后");
+  // 授权清单段逐字节不变：与不带补充条款的同参调用相比只多一行补充条款。
+  const plainScoped = composeDeliveryExecutionContract({ allowedPaths: ["src", "docs"] });
+  const stripped = lines.filter((l) => !CODEX_DELIVERY_CONTRACT_SUPPLEMENT.includes(l)).join("\n");
+  assert.equal(stripped, plainScoped, "去掉补充条款后与不带补充的合同逐字节相同");
+});

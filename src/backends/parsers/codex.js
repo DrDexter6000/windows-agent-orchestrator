@@ -11,7 +11,8 @@ import {
  *   type:"item.started"   + item.type:"command_execution"   → toolUseEvent("shell", { command })（决定 0070）
  *   type:"item.completed" + item.type:"command_execution"   → commandEvent（证据链用）
  *                                                             + toolResultEvent("shell", aggregated_output)（决定 0070）
- *   type:"item.completed" + item.type:"file_change"         → fileWrittenEvent（每个非 delete change）
+ *   type:"item.completed" + item.type:"file_change"         → status 为 "completed" 时 fileWrittenEvent（每个非 delete change）；
+ *                                                            否则一条 isError 的 toolResultEvent（TD-357，补丁未完成）
  *   type:"turn.completed"                                    → metricsEvent(usage) + doneEvent("completed")
  *   type:"error"        + message                            → 不 emit；记下过程报错的原话供失败兜底
  *   type:"turn.failed"  + error.message                      → 不 emit；记下本轮终局的原话供失败兜底
@@ -47,6 +48,24 @@ import {
  * file_change（2026-06-24 修复）：codex 写文件用 file_change item（不是 claude-code 的 Write tool）。
  * 原漏认 → filesExist 认证找不到 file_written → 误判 tester draft-only。现每个 add/edit change
  * emit 一个 fileWrittenEvent（path 保留绝对路径原样，供 scorecard 按文件名匹配）；delete 不算写入。
+ *
+ * TD-357（2026-11-20）：file_change 的 `status` 是上游 PatchApplyStatus 必填字段。
+ * 三个值的出处是 Rust 侧 codex-rs/exec/src/exec_events.rs：`"in_progress" |
+ * "completed" | "failed"`；app-server 的 Declined 也折成 `"failed"`，回合结束时没完成
+ * 的补丁项会以 item.completed 发出、status 仍是 `"in_progress"`。TypeScript SDK
+ * （sdk/typescript/src/items.ts）的 `PatchApplyStatus` 只声明 `"completed"` 与
+ * `"failed"`，与 Rust 侧枚举不同——解析器按 Rust 侧三值理解线上帧。补丁写失败时 item
+ * 仍会以 item.completed 到达，原解析只看 changes、不看 status，给从未落地的路径发了
+ * file_written——隔离门在磁盘上找不到它（ENOENT），重试后判 workdir_escape，杀掉根本
+ * 只是补丁没应用的 worker（11-19 sol 生图运行即此形，该 file_change 的 status 是 failed）。
+ *
+ * 现在只有 `status === "completed"` 才记写入；`in_progress`（回合中断）、`failed`
+ * （含 declined）与缺字段都不记文件写入——缺字段按上游必填的违约形状处理，与未完成同侧
+ * fail closed：没有正面 completed 就不宣称写过。行为上仍只认 completed，即使失败/中断的
+ * 补丁可能已经写了一部分文件：codex 每次调用都在 workspace-write 沙箱里，只许写工作目录
+ * 与系统临时目录，部分写入不会落到别处；交付打包按真实改动清点。这些情形落一条既有形状的
+ * 失败 tool_result（isError:true），让活动页看得见补丁未完成——不新增事件类型，也不回显
+ * 上游 status 原文。
  */
 const WRITE_KINDS = new Set(["add", "edit", "update", "create"]);
 
@@ -112,9 +131,21 @@ export class CodexStreamParser extends LineStreamParser {
         if (typeof item.aggregated_output !== "string") return [ev];
         return [ev, toolResultEvent("shell", item.aggregated_output, typeof item.exit_code === "number" && item.exit_code !== 0)];
       }
-      if (item?.type === "file_change" && Array.isArray(item.changes)) {
+      if (item?.type === "file_change") {
+        if (item.status !== "completed") {
+          // TD-357: a failed/malformed patch must never become file_written
+          // evidence. One existing-shape tool result for the whole item keeps
+          // the activity page honest; the raw upstream status is not echoed.
+          return [toolResultEvent(
+            "file_change",
+            item.status === "failed"
+              ? "file_change did not complete: the patch failed"
+              : "file_change did not complete: no completed status",
+            true,
+          )];
+        }
         const events = [];
-        for (const ch of item.changes) {
+        for (const ch of Array.isArray(item.changes) ? item.changes : []) {
           // 只记写入类（add/edit/create/update），delete 不算 file_written
           if (typeof ch.path === "string" && WRITE_KINDS.has(ch.kind)) {
             events.push(fileWrittenEvent(ch.path));

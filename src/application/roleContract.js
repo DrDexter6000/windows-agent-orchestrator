@@ -332,9 +332,19 @@ export function composeRoleContractWithIdentity({ roleContract, agentId, identit
  * returned byte-identical, preserving every existing no-arg caller (m12-3
  * ISO-C1, m12-6 WQ-RED-04, m11-8c package tests, non-delivery resume).
  *
+ * TD-357 (decision: owner rule 1 exception for image generation): a backend may
+ * declare `deliveryContractSupplement` — an array of extra clause lines owned
+ * by that backend — and RunManager passes it here as `backendSupplement`. The
+ * clauses are inserted right after the workspace write rule, so the worker sees
+ * the narrow exception where the blanket rule is stated. Shared code never
+ * branches on a runtime name; any backend that declares the array gets the same
+ * treatment, and every caller without it gets the byte-identical contract.
+ *
  * @param {object} [input]
  * @param {string[]} [input.allowedPaths] — the control-plane-prepared (validated,
  *   normalized) authorized-paths list; omit/empty to get the base contract.
+ * @param {string[]} [input.backendSupplement] — backend-declared extra clause
+ *   lines; non-array / non-string / blank entries are ignored (no clause lands).
  * @returns {string} the fixed delivery execution contract
  */
 /**
@@ -403,11 +413,19 @@ export const RESUMED_INSTRUCTIONS_HEADER =
   + "or read-only contract in this conversation, in your system instructions and in earlier messages; where they "
   + "differ (for example AUTHORIZED_PATHS_JSON), follow these.";
 
-export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
+export function composeDeliveryExecutionContract({ allowedPaths, backendSupplement } = {}) {
+  // TD-357: backend-declared extra clauses (e.g. codex's image-generation cache
+  // allowance). Anything that is not a well-formed array of non-blank strings
+  // contributes NOTHING — the contract then stays byte-identical to the frozen
+  // base, so a non-codex backend or the read-only contract cannot drift.
+  const supplementClauses = Array.isArray(backendSupplement)
+    ? backendSupplement.filter((clause) => typeof clause === "string" && clause.trim().length > 0)
+    : [];
   const base = [
     "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
     "- The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace.",
     "- Every file you create or modify with your tools, including temporary files, probes and scratch, must be inside it; put scratch under .wao/runs/. A tool write or write intent outside it ends the run as failed (workdir_escape). This check is not an OS sandbox: do not write outside this directory by any other means either, except throwaway repositories and files your test commands create under the system temporary directory.",
+    ...supplementClauses,
     "- Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout.",
     "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag. This applies to this workspace and every other existing checkout, not to throwaway repositories your test commands create under the system temporary directory.",
     "- Do NOT move HEAD. Do NOT create any commit, tag, or branch.",

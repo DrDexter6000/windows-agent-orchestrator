@@ -1050,6 +1050,9 @@ export class RunManager {
       }
       const deliveryContract = composeDeliveryExecutionContract({
         allowedPaths: deliveryPrepared.allowedPaths,
+        // TD-357: backend-declared supplement (codex image-generation cache
+        // allowance). Absent on every other backend → byte-identical contract.
+        backendSupplement: backend.deliveryContractSupplement,
       });
       roleContract = roleContract
         ? `${deliveryContract}\n\n---\n\n${roleContract}`
@@ -2133,6 +2136,9 @@ export class RunManager {
       }
       const deliveryContract = composeDeliveryExecutionContract({
         allowedPaths: deliveryContext.allowedPaths,
+        // TD-357: same backend-declared supplement as the start path, re-derived
+        // from the selected backend so a resumed run sees the same contract.
+        backendSupplement: backend.deliveryContractSupplement,
       });
       resumeRoleContract = resumeRoleContract
         ? `${deliveryContract}\n\n---\n\n${resumeRoleContract}`

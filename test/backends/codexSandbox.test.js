@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
-import { CodexBackend, CODEX_WRITE_SANDBOX_ARGS, PROBE_MARKERS, probeOutcome, probeWriteCommand } from "../../src/backends/codex.js";
+import { CodexBackend, CODEX_WRITE_SANDBOX_ARGS, CODEX_DELIVERY_CONTRACT_SUPPLEMENT, PROBE_MARKERS, probeOutcome, probeWriteCommand } from "../../src/backends/codex.js";
 import { backendFor, backendCapabilitySnapshot } from "../../src/backends/factory.js";
 import { sandboxEnforcementChecks } from "../../scripts/reliability/sandboxEnforcement.mjs";
 import { checkStateOf } from "../../scripts/reliability/checkStates.mjs";
@@ -227,6 +227,31 @@ test("能力面：codex 声明 enforcesWriteSandbox=true 且独有 probeWriteSan
       `${name} 不提供探测方法（共享代码按声明分支，不按名字猜）`,
     );
     assert.equal(backendCapabilitySnapshot({ backend: name }).enforcesWriteSandbox, false);
+  }
+});
+
+test("能力面：TD-357 交付合同补充条款只由 codex 声明，且不是认证能力轴", () => {
+  // TD-357（Owner 2026-11-20：生图是规则 1 的例外）：codex 后端声明交付合同的
+  // 补充条款（内置生图缓存例外）；共享 RunManager 只按"后端是否提供"附上，
+  // 不按运行时名字分支。其余工厂 backend 不声明 → 交付合同逐字节不变。
+  const codex = backendFor({ backend: "codex" });
+  assert.deepEqual(codex.deliveryContractSupplement, CODEX_DELIVERY_CONTRACT_SUPPLEMENT);
+  assert.ok(Array.isArray(CODEX_DELIVERY_CONTRACT_SUPPLEMENT) && CODEX_DELIVERY_CONTRACT_SUPPLEMENT.length > 0);
+  // 它不是第七轴那样的认证能力轴（BACKEND_CAPABILITY_AXES 闭集不含它）。
+  assert.ok(!Object.hasOwn(backendCapabilitySnapshot({ backend: "codex" }), "deliveryContractSupplement"));
+
+  const others = [
+    ["claude-code", { backend: "claude-code", cwd: "D:/x" }],
+    ["deepseek-acp", { backend: "deepseek-acp", cwd: "D:/x" }],
+    ["kimi-web", { backend: "kimi-web", serveUrl: "http://127.0.0.1:4310", cwd: "D:/x", model: { id: "kimi-code/k3" }, tokenEnv: "T" }],
+    ["zcode", { backend: "zcode", cwd: "D:/x" }],
+  ];
+  for (const [name, spec] of others) {
+    assert.equal(
+      backendFor(spec).deliveryContractSupplement,
+      undefined,
+      `${name} 不声明交付合同补充条款（其交付合同保持冻结正文）`,
+    );
   }
 });
 
