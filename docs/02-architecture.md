@@ -251,8 +251,8 @@ input/cacheRead（决定 0114）。
 多个 `agent_message_chunk`）先在适配器里合并成整段再发。**最后一条非空** assistant
 message 就是运行的回答，读取端（会审席位最终文本、compact 视图、`collect --final`）
 都只取它。不承诺 message 事件与工具事件在转录里的穿插顺序；"completed 却没有回答"
-按整轮判——整轮没有一段非空发言才算，各 backend 按此收口（N1）。运行被停止时还没
-结束的那段发言不记录，各后端一致。
+按整轮判——整轮没有一段非空发言才算，各 backend 按此收口（N1）。运行被停止时，还没
+落进转录的那段发言不保证记录：可能丢失，也可能落在终态之后，各后端一致。
 
 ### 2.3 AgentDef（registry 条目规范化后）
 
