@@ -177,12 +177,13 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
     const registryPath = makeRegistry(dir);
     const runDir = join(dir, "runs");
     const consultsDir = join(dir, ".wao", "runs", "consults");
-    // seat_a：结构化长回复（多页体量；正文只经分页读出，回执零携带）。
+    // seat_a：结构化长回复（多页体量；正文只经分页读出，回执零携带）。结论值
+    // 按 0128 紧跟规则写在锚点后（Q1: A 形），长理由跟在后面。
     const longBody = "理由是成本可控。".repeat(520);
-    const seatAText = `Q1: 采纳 A\n${longBody}\n\nQ2: 选 B\n风险可控。\n`;
+    const seatAText = `Q1: A\n${longBody}\n\nQ2: 选 B\n风险可控。\n`;
     assert.ok(seatAText.length > 4000, "测试前提：seat_a 回复超过 4000 字");
     writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: seatAText }));
-    writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: "Q1: 采纳 B\n\nQ2: 选 A\n" }));
+    writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: "Q1: B\n\nQ2: 选 A\n" }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
     try {
       const { res, threw } = await callConsult(client, {
@@ -204,10 +205,12 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
       assert.equal(aCall.readOnly, true, "seat_a sub-run is read-only");
       assert.equal(bCall.readOnly, true, "seat_b sub-run is read-only");
       // kimi 诊断会审（2026-10-10）：席位级固定会审合同始终追加（裸车道
-      // 席位此前收不到任何禁令）；brief 与视角仍逐字节保留在前。
+      // 席位此前收不到任何禁令）；brief 与视角仍逐字节保留在前。决定 0128：
+      // fields 有值时，固定合同之后机械追加结论字段格式段（声明即合同）。
       const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
-      assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。${CONTRACT}`, "brief 逐字节 + 视角尾巴 + 固定合同");
-      assert.equal(bCall.prompt, `${BRIEF}${CONTRACT}`, "无视角席 = 纯 brief 内核 + 固定合同");
+      const FIELDS_CONTRACT = "\n\n【结论字段格式（声明即合同）】\n- Q1 单独起一行写成「Q1: <值>」，值只能是 A、B 之一，这一行不写别的";
+      assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。${CONTRACT}${FIELDS_CONTRACT}`, "brief 逐字节 + 视角尾巴 + 固定合同 + 声明字段格式段");
+      assert.equal(bCall.prompt, `${BRIEF}${CONTRACT}${FIELDS_CONTRACT}`, "无视角席 = 纯 brief 内核 + 固定合同 + 声明字段格式段");
 
       const p = res.structuredContent;
       assert.equal(p.view, "receipt", "0051：create 成功 → 机械回执");
@@ -426,8 +429,8 @@ test("MRC-C1: read mode re-renders the group record as the SAME receipt shape wi
     const registryPath = makeRegistry(dir);
     const runDir = join(dir, "runs");
     const consultsDir = join(dir, ".wao", "runs", "consults");
-    const reply = "Q1: 采纳 A\n\nQ2: 选 B\n";
-    const replyB = "Q1: 采纳 B\n\nQ2: 选 A\n";
+    const reply = "Q1: 采纳 A\n\nQ2: B\n";
+    const replyB = "Q1: 采纳 B\n\nQ2: A\n";
     writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { finalText: reply }));
     writeTranscript(runDir, "run_consult_stub_seat_b", makeTranscript("run_consult_stub_seat_b", { finalText: replyB }));
     const { server, client, dispatchCalls } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
@@ -675,6 +678,37 @@ test("MRC-D2: waitMs and fields are wire-validated closed sets (600001 / bad fie
       assert.equal(badPage.res.isError, true, "page=0 rejected by the input schema");
       assert.match(errText(badPage.res), /Input validation error|-32602/);
       assert.equal(dispatchCalls.length, 0, "schema-rejected calls never dispatch");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("MRC-D3: 候选值不合格 → 专门的固定拒绝文案点名 Qn（不回显候选值），零派发（0128 续修）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-d3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const { server, client, dispatchCalls } = await buildConsultClient({
+      dir, registryPath, runDir: join(dir, "runs"), consultsDir: join(dir, ".wao", "runs", "consults"),
+    });
+    try {
+      const candidate = "PASS WITH NOTES"; // 含空格——文案里不得出现候选值原文
+      const { res, threw } = await callConsult(client, {
+        brief: BRIEF, seats: ["seat_a"], fields: { Q2: [candidate] }, waitMs: 0, expectedWorkspaceRoot: dir,
+      });
+      assert.equal(threw, false);
+      assert.equal(res.isError, true, "候选值不合格 → 创建被拒绝");
+      const text = errText(res);
+      // 点名 Qn + 说明约束的专门文案（区别于通用"零派发"文案；白名单措辞、无内部前缀）。
+      assert.equal(text,
+        "declared field values for Q2 must be non-empty and use only letters, digits, _ and -");
+      assert.ok(!text.includes(candidate), "不回显候选值原文");
+      assert.notEqual(text, "run_consult failed before any seat was dispatched", "不再淹没进通用文案");
+      assert.equal(dispatchCalls.length, 0, "一次席位都不派发");
     } finally {
       await client.close();
       await server.close();

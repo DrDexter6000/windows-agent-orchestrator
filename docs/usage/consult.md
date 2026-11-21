@@ -16,7 +16,7 @@ npm run cli -- consult run brief.md --seats a,b,c
 # 带每席视角片段（答题姿势 2-3 句：差异化资产 + 自测问题；原样拼在该席 prompt 尾部）
 npm run cli -- consult run brief.md --seats a,b --perspective a=persp-a.md --perspective b=persp-b.md
 
-# 闭集字段比对（只标"字段值不同"；声明值按整词匹配、大小写敏感，不出结论词）
+# 闭集字段比对（声明即合同：WAO 自动追加格式行；值紧跟锚点、多块异值记未填，不出结论词）
 npm run cli -- consult run brief.md --seats a,b --fields Q1=A,B
 
 # 黄牌核查：被审 run 的作者是否在席位清单（advisory，不拦截）
@@ -49,6 +49,18 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 三块拼接逐字节等于原文；② 标记即提示——闭集字段值不同仅标"字段值不同(Qn)"，
 工具永不输出"一致/分歧"类结论；③ malformed 零自动重发——格式不合格只是观察
 事实，WAO 绝不替 Lead 重问。
+
+**审查会审的结论字段（决定 0128"声明即合同"）**：要每席给出机械可读的结论，
+照抄这套写法——声明闭集字段 `fields: {"Q1": ["PASS","PASS_WITH_NOTES","FIX_FIRST"]}`
+（CLI：`--fields Q1=PASS,PASS_WITH_NOTES,FIX_FIRST`），并把任务书第一题写成
+`Q1:` 结论题。声明后 WAO 自动在每席提示词末尾、固定会审合同之后追加格式行：
+每个 `Qn` 单独起一行写成 `Qn: <值>`，值取自声明的闭集。键写成 `Q1`、`Q2`（不
+带前导零），每个键至少一个候选值；候选值只由文字（含中文）、数字、`_` 与 `-`
+组成——有一项不合格即整次拒绝、零派发。取值只认紧跟：值必须紧跟该块 `Qn` 锚点
+（中间只允许空白含换行、`*` 或 `**` 与反引号；标题形 `## Q1` 可带分隔符、允许
+换行），且单独成词（前后不紧跟文字、数字、`_` 或 `-`），"Q1: 不是 PASS"这类句
+式记未填；同一 `Qn` 多块取值不同也记未填。结论并列呈现在回执 `fieldValues`
+（仍只标"字段值不同"，不出结论词）。
 
 **组记录**：每次扇出后即在 `<项目根>/.wao/runs/consults/<consultId>.json` 落一份
 组记录（席位-runId 映射，是意见到决策的回链锚点，供 decisions/declare 引用），
@@ -141,7 +153,7 @@ npm run cli -- wao stage --cwd <目标项目>
 
 `run_consult` 与 CLI consult 同一 service（扇出、组记录、席位只读子 run、council-diff 文本渲染的语义见场景 4d）。单工具双模式：
 
-- **创建模式** `{brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}`：`brief` 是内联文本（编号问题 Q1..Qn + 输出格式契约）——MCP 面不接受文件路径；`perspectives` 同理内联（每席 `{agentId, text}`，只写"答题姿势"，禁止列期望结论）。每席一个 readOnly 子 run，席位 prompt = brief 逐字节 + 该席视角尾巴。服务端有界等待 `waitMs`（区间与缺省见生成层描述；`0` 合法=扇出后立即取观察快照）；到期是观察截止（席位照跑、状态如实 running、`budgetExpired:true`），永不杀进程、永不重发。返回机械回执 `view:"receipt"`：`consultId`/`recordPath` + 每席 `{runId, runState, formatState, chars, pages, textFinal, dispatchError?}`（零正文、零摘要、零预览；视角全文与组记录在 recordPath）+ `fieldDiff`/`fieldValues` 闭集标记 + 三块砖独立性事实（registry 原始字段直读）+ 席位-runId 回链；回执帽 8KiB。`fields` 闭集声明字段（`{"Q1":["A","B"]}`）只产生"字段值不同"标记，永不出一致/分歧结论。席位 malformed/缺席/派发失败/到期任一混合都组装降级视图（部分成功），不中断其余席位；malformed（纯散文）= 观察事实（`formatState:unstructured`），零惩罚、零重发。
+- **创建模式** `{brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}`：`brief` 是内联文本（编号问题 Q1..Qn + 输出格式契约）——MCP 面不接受文件路径；`perspectives` 同理内联（每席 `{agentId, text}`，只写"答题姿势"，禁止列期望结论）。每席一个 readOnly 子 run，席位 prompt = brief 逐字节 + 该席视角尾巴 + 固定会审合同。服务端有界等待 `waitMs`（区间与缺省见生成层描述；`0` 合法=扇出后立即取观察快照）；到期是观察截止（席位照跑、状态如实 running、`budgetExpired:true`），永不杀进程、永不重发。返回机械回执 `view:"receipt"`：`consultId`/`recordPath` + 每席 `{runId, runState, formatState, chars, pages, textFinal, dispatchError?}`（零正文、零摘要、零预览；视角全文与组记录在 recordPath）+ `fieldDiff`/`fieldValues` 闭集标记 + 三块砖独立性事实（registry 原始字段直读）+ 席位-runId 回链；回执帽 8KiB。`fields` 闭集声明字段（`{"Q1":["A","B"]}`）声明即合同：WAO 按声明在每席提示词追加格式行、按紧跟规则取值，标记面仍只产生"字段值不同"、永不出一致/分歧结论；审查会审的完整写法见场景 4d。席位 malformed/缺席/派发失败/到期任一混合都组装降级视图（部分成功），不中断其余席位；malformed（纯散文）= 观察事实（`formatState:unstructured`），零惩罚、零重发。
 - **读取模式** `{consultId}`（可带 `expectedWorkspaceRoot` 指定项目，省略时用缺省绑定）：从组记录（该项目的 `.wao/runs/consults/<consultId>.json`，与 CLI `--cwd <工作区>` 同一落点；扇出后即可读）重渲染同一回执形状，零派发——读取路径不触碰 dispatch 通道；runState/formatState 按当前 transcript 真值重导出。
 - **按席分页** `{consultId, seat, page?}`：返回该席最终正文单页（`view:"seatPage"`；`page` 默认 1）——每整页响应 ≤12KiB（序列化 UTF-8 字节，含外壳与转义）；行边界优先切页、单行超帽按码点硬切（不拆代理对）；各页按序拼接逐字节等于该席最终正文；每页携带全文 `textSha256` 版本锚（跨页不一致=正文在读取间隙变化，从第 1 页重读，不跨版本拼接）；`textFinal:false`（非终态席）标记分页边界会漂移。
 

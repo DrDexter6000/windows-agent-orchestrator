@@ -200,6 +200,9 @@ import {
   consultTextSha256,
   paginateConsultText,
   projectConsultReceipt,
+  // 决定 0128 续修：候选值不合格的创建拒绝——识别后原样回固定文案（点名 Qn，
+  // 不回显候选值），其余 pre-dispatch 失败照旧回通用"零派发"文案。
+  DeclaredFieldRefusalError,
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
@@ -1345,22 +1348,25 @@ const RUN_CONSULT_DESCRIPTION =
   // re-dispatched / MECHANICAL RECEIPT /
   // no per-seat body text, no excerpts / 12KiB serialized / reassemble byte-exact /
   // textSha256 / restart from page 1 / never synthesizes / ZERO dispatch。
-  "Convene a multi-seat read-only council consult. Create {brief, seats}: brief is INLINE " +
-  "text (never a file path), one sub-run per seat; expectedWorkspaceRoot (absolute Git " +
-  "worktree top-level) is required — seats run in it, records in its main worktree; " +
+  // 决定 0128 续修（第 131 批）：压缩既有措辞腾字节，加进 fields 审查结论一句；
+  // 三条字节帽（desc/hostVisible/wire）一个未抬——本工具描述实测 1152→1139。
+  "Convene a multi-seat read-only consult. Create {brief, seats}: brief is INLINE text, " +
+  "never a file path, one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree " +
+  "top) is required — seats run in it, records in its main worktree; " +
   "waitMs 0..600000 (default " +
-  `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats keep running, never killed or ` +
+  `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats are never killed or ` +
   "re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — " +
-  "per-seat runId/state/pages, fieldDiff, independence facts). The receipt carries " +
-  "nextStep when a dispatched seat is not terminal yet. Facts only — " +
-  "never synthesizes, merges, ranks, or concludes. Read {consultId}: same receipt, " +
-  "ZERO dispatch; read {consultId, seat, page?}: ONE page of that seat's " +
+  "per-seat runId/state/pages, fieldDiff, independence facts, nextStep when a dispatched " +
+  "seat is not terminal). Review verdicts: declare fields (Q1: " +
+  "PASS/PASS_WITH_NOTES/FIX_FIRST); WAO appends the format line; see fieldValues. " +
+  "Facts only — never synthesizes, merges, ranks or concludes. Read {consultId}: same " +
+  "receipt, ZERO dispatch; {consultId, seat, page?}: ONE page of its " +
   "final text (page default 1; each page ≤12KiB serialized; pages reassemble " +
-  "byte-exact; every page carries textSha256 of the full text — a mismatch across pages " +
-  "means a mid-read change: restart from page 1). Read also accepts expectedWorkspaceRoot " +
-  "to locate the record under that project (default: the default binding). " +
+  "byte-exact; every page carries the full-text textSha256 — a mismatch " +
+  "means a mid-read change: restart from page 1). expectedWorkspaceRoot also locates " +
+  "the record (default binding). " +
   "seat/page in create, page without " +
-  "seat, unknown or out-of-range → fixed refusal text.";
+  "seat, unknown/out-of-range → fixed refusal text.";
 
 // 0051：seatPage 视图的唯一信封构造器——真实页与 measure 试算共用同一形状，
 // 防两处漂移。measure 试算用 page/totalPages=text.length 作占位：每页至少一个
@@ -5417,7 +5423,12 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (error) {
+        // 决定 0128 续修：候选值不合格的创建拒绝原样回自己的固定文案（点名
+        // Qn、说明约束；不含候选值原文——service 层已保证）。
+        if (error instanceof DeclaredFieldRefusalError) {
+          return { isError: true, content: [{ type: "text", text: error.message }] };
+        }
         // Any service/output failure (including an oversized or malformed
         // result object) collapses to one of two fixed safe texts — never an
         // unstructured error, never dynamic content. Which one says whether

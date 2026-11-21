@@ -102,11 +102,13 @@ function parseFields(rawValues) {
     if (!/^Q\d+$/.test(key)) {
       throw new Error(`--fields key must look like Q1/Q2..., got: ${key}`);
     }
-    const values = raw.slice(eq + 1).split(",").map((v) => v.trim()).filter(Boolean);
-    if (values.length === 0) {
-      throw new Error(`--fields ${key} requires at least one declared value`);
+    // 决定 0128 续修：CLI 不得在校验前改写声明——逗号两侧的空白照旧去掉（CLI
+    // 语法），空候选不再过滤、原样交给 service 拒绝；同一 Qn 二次 --fields 直接
+    // 拒绝（否则后一次覆盖前一次，前一次的非法声明躲过校验）。
+    if (Object.hasOwn(declared, key)) {
+      throw new Error(`--fields ${key} given more than once: merge the values into one --fields ${key}=v1,v2,...`);
     }
-    declared[key] = values;
+    declared[key] = raw.slice(eq + 1).split(",").map((v) => v.trim());
   }
   return declared;
 }
@@ -772,9 +774,13 @@ export const CONSULT_USAGE_LINES = [
   "consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "",
-  "  --fields        key is Q<n>, the question number in the brief; a declared value matches only as a whole token",
-  "                  (letters, digits and _ are word characters; at the same position the longest declared value wins).",
-  "                  CJK text has no word boundaries: do not declare a value that is part of another word a seat may write.",
+  "  --fields        key is Q<n> with no leading zero (Q0 is not a question); declaring makes WAO append a format",
+  "                  line to every seat prompt (the Q<n> answer goes alone on one line as Q<n>: <value>). A value",
+  "                  is read only right after the Q<n> anchor (only whitespace, * or **, and backticks may sit",
+  "                  between); the same Q<n> answered in several blocks must agree, else it counts as unfilled.",
+  "                  Candidates must be non-empty and use only letters, digits, _ and -; a value must stand alone",
+  "                  as a word (no letter, digit, _ or - may touch it; at the same position the longest declared",
+  "                  value wins). Repeatable flag, but each Q<n> may be declared only once.",
   "  --wait-timeout  how long `run` waits for the seats, 180000-600000 ms (default 600000). When it expires the seats",
   "                  keep running. The consult id is printed on stderr as soon as the seats are dispatched:",
   "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",
