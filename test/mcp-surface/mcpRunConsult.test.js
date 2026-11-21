@@ -1243,7 +1243,7 @@ test("MRC-A2: 投影——只有未终态席位（有 runId、非 missing）才�
   ]), { pageMeasure: measure });
   assert.deepEqual(Object.keys(running).sort(), RECEIPT_RUNNING_KEYS);
   assert.equal(running.nextStep,
-    "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly (waitMs up to 270000 each) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.");
+    "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.");
   // 批 119：模板点名 run_await_result——具体席位 id 的检查用词边界（run_a 不再
   // 是子串误报：run_await_result 里 run_a 后面是 w，\b 不成立）。
   assert.ok(!/\brun_a\b/.test(running.nextStep) && !running.nextStep.includes(running.consultId), "不含具体 id");

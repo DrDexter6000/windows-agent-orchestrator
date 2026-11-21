@@ -3261,7 +3261,9 @@ const RUNS_LIST_DESCRIPTION =
 
 // ===== observation/termination facts（等待族共享投影）constants =====
 // 批 119（A5）：MCP 长轮询等待工具已真删除——长等待用重复 run_await_result
-// （单次 waitMs ≤ 270000）直到终态，交付运行再用 run_delivery 带 waitMs 收口；
+//（单次 waitMs 用缺省值；在按手册配好请求超时的宿主里缺省值不会超时——zcode
+// 未配 timeoutMs 时单次调用只有 30s，见 docs/usage/host.md，TD-364）直到终态，
+// 交付运行再用 run_delivery 带 waitMs 收口；
 // 更长等待走 CLI `wao runs wait <runId> --until-settled`。共享等待服务
 // src/application/runWait.js 保留（CLI 面照用）。
 
@@ -6472,7 +6474,7 @@ export function createWaoMcpServer({
   );
 
   // ===== run_await_result (M12-3 read-only composite; 批 119 起是 MCP 面唯一的
-  // 等待工具——重复调用（单次 waitMs ≤ 270000）直到终态；长等待走 CLI
+  // 等待工具——重复调用（单次 waitMs 用缺省值，TD-364）直到终态；长等待走 CLI
   // `wao runs wait <runId> --until-settled`） =====
 
   register(

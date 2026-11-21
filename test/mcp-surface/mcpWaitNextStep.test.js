@@ -595,7 +595,8 @@ test("NS-M7: run_dispatch accepted:true → nextStep（静态模板，无 runId�
         arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined);
-      assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly \(waitMs up to 270000 each\)/);
+      assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly with its default waitMs/);
+      assert.ok(!res.structuredContent.nextStep.includes("270000"), "TD-364：不写 waitMs 上限数字");
       assert.ok(!res.structuredContent.nextStep.includes("run_ns_m7_ok"), "静态模板不含 runId");
     } finally {
       await client.close(); await server.close();

@@ -11,7 +11,7 @@ WAO 是 MCP-first 控制面（为什么见决定 0017）：一个 MCP host（如
 
 常用 Lead 闭环：`registry_list`（inventory）→ `lead_preflight`（带 `expectedWorkspaceRoot` 看该项目）→ `run_dispatch` → `run_await_result`（等终态，可重复调用）→ `run_delivery_review_bundle`（审查）→ `run_delivery_decide`（验收）。原子观察工具（`run_status` / `run_collect` / `run_activity` / `run_diagnose`）、delivery 查询与审查、`run_stop` / `runs_list` 恢复、Lead 授权的 `run_continue` / `run_correct`，各工具的完整语义按任务分页：[派发](dispatch.md)、[监督](supervise.md)、[取结果与查历史](results.md)、[交付与验收](delivery.md)、[会审](consult.md)。
 
-`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 区间与默认值见[监督](supervise.md)「MCP 等待」；`waitMs:0` 为 point-in-time 读取）后返回安全 compact 结果与 run/liveness 观测，非终态时可按任意合法 waitMs 再调。`waitMs` 约束工具主动 sleep/poll 的总等待预算，不是给每个内部阶段各分配一份；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算——工具不把这种环境延迟谎报成 worker 失败。观察窗口、终止事实、读失败与 transport 恢复的完整语义见[监督](supervise.md)；终态附带的有界 `outcome` 捆绑（terminalState / diagnosis / delivery 安全事实，不含 commit id、changed paths、diff、command 文本或绝对路径）见生成层，其中 `outcome.delivery.isolationFailureCode` 的语义见[交付与验收](delivery.md)。
+`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 区间与默认值见[监督](supervise.md)「MCP 等待」；`waitMs:0` 为 point-in-time 读取）后返回安全 compact 结果与 run/liveness 观测，非终态时用缺省 waitMs 再调。`waitMs` 约束工具主动 sleep/poll 的总等待预算，不是给每个内部阶段各分配一份；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算——工具不把这种环境延迟谎报成 worker 失败。观察窗口、终止事实、读失败与 transport 恢复的完整语义见[监督](supervise.md)；终态附带的有界 `outcome` 捆绑（terminalState / diagnosis / delivery 安全事实，不含 commit id、changed paths、diff、command 文本或绝对路径）见生成层，其中 `outcome.delivery.isolationFailureCode` 的语义见[交付与验收](delivery.md)。
 
 built-in playbook catalog 不在工具面：它是按需读取的 MCP resources（`wao://playbooks`），见[取结果与查历史](results.md)。
 

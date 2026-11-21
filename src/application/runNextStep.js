@@ -105,7 +105,7 @@ function render(surface, situation, runId, extras) {
       break;
     case "dispatch_accepted":
       text = surface === "mcp"
-        ? "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly (waitMs up to 270000 each) on this run until it settles."
+        ? "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles."
         : `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId} --until-settled.`;
       break;
     case "settled_line": {
@@ -177,7 +177,7 @@ function render(surface, situation, runId, extras) {
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {
-        text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly (waitMs up to 270000 each) on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
+        text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
       } else {
         // CLI 面：一条 `consult wait <consultId> --until-settled` 等全部席位收口
         //（逐席 runs wait 是旧用法，命令已提供整场等待）。runId 清单仍是事实陈列

@@ -16,11 +16,12 @@
 //   - 共享工具：./shared.js（parseOptions/loadRun）
 //   - 共享 service：../application/runStatus.js（status）、../application/runCollect.js（collect）
 //   - 共享投影：../application/runCollectProjection.js（M11-4 collect continuation）
-//   - node built-in：fs/promises（readFile）、fs（watchFile/unwatchFile）、path（resolve）
+//   - node built-in：fs/promises（readFile/writeFile/rename/rm/stat）、fs（watchFile/
+//     unwatchFile）、path（resolve/dirname/join/basename）
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename, rm, stat } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname, join, basename } from "node:path";
 
 import { readTranscript } from "../transcript.js";
 import { parseOptions, loadRun } from "./shared.js";
@@ -271,6 +272,26 @@ const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
 const COLLECT_FINAL_TOO_LARGE_MARKER =
   "final message exceeds bounded projection; write it to a file: collect <runId> --final --out FILE - or re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
 
+// TD-365（第 132 批，续修改按文件身份）：--out 目标是否落在运行存储目录里——
+// 不做路径字符串比较（UNC 别名、大小写、8.3 短名绕得过字符串，绕不过身份）：
+// 用 bigint stat 取存储目录的 (dev, ino)，从目标的父目录逐级往上各取身份比较
+//（stat 跟随 junction/符号链接，文件系统自己归一），哪一级相同即在存储里；
+// 不存在的层级跳过——等于向上找到最近一个存在的祖先后再继续比。
+async function outTargetInsideStore(target, storeStat) {
+  let dir = dirname(target);
+  for (;;) {
+    try {
+      const s = await stat(dir, { bigint: true });
+      if (s.dev === storeStat.dev && s.ino === storeStat.ino) return true;
+    } catch {
+      // 该层级不存在——继续向上（存在一级之后祖先都存在，不再走到这里）。
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;
   const options = parseOptions(tail);
@@ -463,9 +484,27 @@ export async function collectCommand(args, config) {
   // 字符；单快照读整份转录本就在内存里，无长度上限）。
   let outReport = null;
   if (hasOut) {
-    const text = finalAssistantTextFromSnapshot(raw);
+    // TD-365：写文件之前先判目标——按文件身份（dev+ino），落在本次运行存储目录
+    // 里的任何路径（不只本运行的转录：这里存的全是 WAO 的事实记录）都固定文案
+    // 拒绝，零写入、零审计追加；UNC 别名、junction、大小写、8.3 短名由文件系统
+    // 身份自己归一。
+    const storeStat = await stat(runDir, { bigint: true });
     const target = resolve(options.out);
-    await writeFile(target, text, "utf8");
+    if (await outTargetInsideStore(target, storeStat)) {
+      throw new Error(`collect --out: ${target} is inside the run store (${runDir}); write the answer somewhere else`);
+    }
+    const text = finalAssistantTextFromSnapshot(raw);
+    // 续修：写入改为目标同目录的临时文件 + rename 覆盖——rename 只替换目标这个
+    // 目录项，永不透过已存在的文件写进去（目标是硬链接时，另一头的转录原样）。
+    // 写或改名失败时删掉临时文件、抛原错误（此时审计尚未追加，保持零追加）。
+    const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      await writeFile(tmp, text, "utf8");
+      await rename(tmp, target);
+    } catch (error) {
+      try { await rm(tmp, { force: true }); } catch { /* 清理尽力而为 */ }
+      throw error;
+    }
     outReport = payload.compactStatus === "empty"
       ? `${COLLECT_FINAL_EMPTY_MARKER} (empty file written to ${target})`
       : `final message: ${text.length} chars written to ${target}`;

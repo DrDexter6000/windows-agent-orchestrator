@@ -61,7 +61,9 @@ test("NEXT-02: delivery_unsettled / dispatch_accepted 两类固定模板", () =>
   assert.match(delivery, /Verification passed is not acceptance/);
   const dispatch = buildNextStep({ surface: "mcp", situation: "dispatch_accepted" });
   assert.match(dispatch, /Before ending the turn, keep a wait attached/);
-  assert.match(dispatch, /call run_await_result repeatedly \(waitMs up to 270000 each\)/);
+  assert.match(dispatch, /call run_await_result repeatedly with its default waitMs/);
+  // TD-364：引导句不再写上限数字（桌面宿主约 60s 超时，照旧文案做必超时）。
+  assert.ok(!dispatch.includes("270000"), "不写 waitMs 上限数字");
   const dispatchCli = buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID });
   assert.match(dispatchCli, /wao runs wait run_\S+ --until-settled/);
 });
@@ -198,7 +200,8 @@ test("NEXT-08: consult_seats_running——MCP 面不落任何具体 id；CLI 面
     surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 3,
   });
   assert.match(mcp, /^3 of 5 seats are not terminal yet\./);
-  assert.match(mcp, /call run_await_result repeatedly \(waitMs up to 270000 each\)/);
+  assert.match(mcp, /call run_await_result repeatedly with its default waitMs/);
+  assert.ok(!mcp.includes("270000"), "TD-364：不写 waitMs 上限数字");
   assert.match(mcp, /seats\[\]\.runId/);
   assert.match(mcp, /re-read this consult with run_consult and its consultId/);
   assert.ok(!mcp.includes(RUN_ID) && !/consult_\d/.test(mcp), "MCP 面不含 runId/consultId 字面");
