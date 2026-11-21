@@ -76,8 +76,10 @@
 // blocked/failed，或仅接纳的纠偏到界未出现按"未执行"），最终轮 ended，且集合里
 // 没有 id 还在 active/queued，才按 outcome 收口。细则见 streamEvents。
 //
-// 答案拼接：2.6.3 的回答是独立的 assistant_message 条目（各有 item_id），不再是可能
+// 答案分段：2.6.3 起回答是独立的 assistant_message 条目（各有 item_id），不再是可能
 // 重复下发的流式文本帧——旧帧流的"相邻重复文本帧"去重启发式及其 system 说明已删除。
+// 收口时按发言分段各发一个 assistant message 事件（约定见 docs/02-architecture.md
+// §2.2），最后一条即回答；不再把整轮文本粘成一条。
 //
 // 未实测、只按文档防御的形状：turn outcome "failed" 与 error 的结构（按
 // {code,message} 或字符串读）、prompt status blocked/failed、在途 tool_call 的
@@ -966,9 +968,10 @@ export class KimiWebBackend {
    *         也不在 active/queued 时计；到界 ⇒ 按"未执行"结算并发一条 system 消息，
    *         之后若出现在某轮里照常归属。
    *   - 收口：全部结算、最终轮 status "ended"、集合里没有 id 还在 active/queued ⇒
-   *     按 outcome：completed → 最终轮的 assistant_message 拼成答案（空 ⇒ failed，
-   *     绝不伪造完成），先补齐全部归属轮的工具证据，再发 user echo（第一个归属轮的
-   *     开场 user_message）、答案、metrics（各归属轮 usage 之和）、done(completed)；
+   *     按 outcome：completed → 最终轮的 assistant_message 按发言分段各发一个
+   *     assistant message 事件（全部为空 ⇒ failed，绝不伪造完成），先补齐全部归属轮的
+   *     工具证据，再发 user echo（第一个归属轮的开场 user_message）、各段发言（按发生
+   *     先后，最后一段即回答）、metrics（各归属轮 usage 之和）、done(completed)；
    *     interrupted ⇒ failed（end_reason）；failed ⇒ failed（error）。来自响应体的
    *     诊断文字一律过 redactToken。
    *   - 闭集外的 status / outcome ⇒ 一律非终态，最终轮连续 SHAPE_DRIFT_POLL_LIMIT 拍
@@ -1135,10 +1138,11 @@ export class KimiWebBackend {
           yield doneEvent("failed", redact(turnFailureText(final)));
           return;
         }
-        const text = answerOfTurn(final);
-        if (text.trim().length === 0) {
-          // N1 教训：传输成功不是可用答案——completed 轮没有回答按 failed 收口。这里不
-          // 补发证据（在途已落的命令 / 工具调用留着；写文件证据只在成功路径落）。
+        const segments = answerOfTurn(final);
+        if (segments.length === 0) {
+          // N1 教训：传输成功不是可用答案——completed 轮没有回答按 failed 收口（全部段
+          // 为空才算没有回答）。这里不补发证据（在途已落的命令 / 工具调用留着；写文件
+          // 证据只在成功路径落）。
           yield doneEvent(
             "failed",
             "kimi turn completed without assistant text (outcome=completed, no assistant_message text — refusing to fabricate completion)",
@@ -1151,7 +1155,11 @@ export class KimiWebBackend {
         }
         const echo = openerText(attributed[0]);
         if (echo !== null) yield messageEvent("user", [{ type: "text", text: echo }]);
-        yield messageEvent("assistant", [{ type: "text", text }]);
+        // 每段发言一个 assistant message 事件（约定见 docs/02-architecture.md §2.2），
+        // 按发生先后发——最后一条就是运行的回答。
+        for (const segment of segments) {
+          yield messageEvent("assistant", [{ type: "text", text: segment }]);
+        }
         const metrics = metricsEventFromTurns(attributed);
         if (metrics !== null) yield metrics;
         yield doneEvent("completed");
@@ -1440,22 +1448,24 @@ function openerText(turn) {
   return typeof opener?.text === "string" && opener.text.length > 0 ? opener.text : null;
 }
 
-// 答案：轮的 assistant_message 条目按出现顺序；同一 step_index 首尾相接，不同步之间
-// 空一行——模型在两次工具调用之间说的话和最后的答案是分开说的，粘成一行会让答案里
-// 行首的 `Q1:` 这类锚点落到上一句话的句尾。reasoning 不进答案。
+// 发言分段：轮的 assistant_message 条目按出现顺序切成发言列表——同一 step_index 的
+// 首尾相接是一段，不同步各是一段，空段（含纯空白）丢掉。模型在两次工具调用之间说的
+// 话和最后的答案是分开说的，每段各发一个 assistant message 事件（约定见
+// docs/02-architecture.md §2.2，最后一条即回答）后，旧"整轮粘成一条"把行首 `Q1:`
+// 这类锚点挤到上一句句尾的问题自然消失。reasoning 不进发言。
 function answerOfTurn(turn) {
-  const chunks = [];
+  const segments = [];
   let step;
   for (const item of arrayOf(turn?.items)) {
     if (item?.type !== "assistant_message" || typeof item.text !== "string") continue;
-    if (chunks.length > 0 && item.step_index === step) {
-      chunks[chunks.length - 1] += item.text;
+    if (segments.length > 0 && item.step_index === step) {
+      segments[segments.length - 1] += item.text;
     } else {
-      chunks.push(item.text);
+      segments.push(item.text);
       step = item.step_index;
     }
   }
-  return chunks.filter((chunk) => chunk.length > 0).join("\n\n");
+  return segments.filter((segment) => segment.trim().length > 0);
 }
 
 // 工具调用证据的增量投影（决定 0071）：轮的 items 里 type "tool_call" 的条目，按台账

@@ -646,11 +646,13 @@ test("zcode ④: step-finish(stop) → user echo + assistant text + metrics + do
   });
   const events = await collect(handle);
   const messages = events.filter((e) => e.kind === "message");
-  assert.equal(messages.length, 2);
+  assert.equal(messages.length, 3);
   assert.equal(messages[0].role, "user");
   assert.equal(messages[0].parts[0].text, "do the task", "user echo = 发送的 content 原文");
   assert.equal(messages[1].role, "assistant");
-  assert.equal(messages[1].parts[0].text, "chunk one chunk two", "text parts 按序拼接（跨消息）");
+  assert.equal(messages[1].parts[0].text, "chunk one ", "跨消息：一条 assistant 消息一段（§2.2：每段发言一个事件）");
+  assert.equal(messages[2].role, "assistant");
+  assert.equal(messages[2].parts[0].text, "chunk two", "最后一条 assistant message 即回答");
   const metrics = events.filter((e) => e.kind === "metrics");
   assert.equal(metrics.length, 1);
   assert.deepEqual(
@@ -684,7 +686,9 @@ test("zcode ④b: 中间 step-finish(非 stop|error) 不算完成；step-finish(
   const { handle, child } = await runScenario({ peerOptions: { messages: progressing } });
   const events = await collect(handle);
   assert.equal(events.at(-1).reason, "completed");
-  assert.equal(events.filter((e) => e.kind === "message" && e.role === "assistant").length, 1);
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 2, "中间步的 partial 与最终回答分段各一条");
+  assert.equal(assistant.at(-1).parts[0].text, "final", "最后一条 assistant message 即回答");
   child.kill();
 
   // step-finish(error) → done(failed)（固定文案——该 part 未实证携带错误明细）。
@@ -768,6 +772,134 @@ test("zcode ④c: completed 轮 tool(write) part → file_written + tool_result�
   assert.equal(events[3].role, "assistant");
   assert.deepEqual(events[3].parts, [{ type: "text", text: "wrote the probe file" }]);
   assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+// ===== ④d 分段发言（§2.2 约定，决定 0128）：一条 assistant 消息（一步）一段 =====
+
+test("zcode ④d: 工具调用之间的叙述与最终回答分段各发一条 assistant message——一条消息一段、换了消息才是新段；最后一条即回答", async () => {
+  const bashOne = toolPart({
+    callId: "call_seg_one", tool: "Bash", status: "completed",
+    input: { command: "echo one" }, output: "one\n",
+  });
+  const bashTwo = toolPart({
+    callId: "call_seg_two", tool: "Bash", status: "completed",
+    input: { command: "echo two" }, output: "two\n",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      // 形状对齐 3.19.1 实录（test/fixtures/zcode-3.19.1/README.md）：每条 assistant
+      // 消息是一步（step-start、至多一个 text、若干 tool、step-finish），叙述在带
+      // 工具调用的步，回答在最后不调工具的步。
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        assistantPartsMsg([
+          { type: "step-start" },
+          { type: "text", text: "narration before the first tool" },
+          bashOne,
+          { type: "step-finish", reason: "tool-calls", tokens: {} },
+        ]),
+        assistantPartsMsg([
+          { type: "step-start" },
+          { type: "text", text: "narration between the tools" },
+          bashTwo,
+          { type: "step-finish", reason: "tool-calls", tokens: {} },
+        ]),
+        assistantPartsMsg([
+          { type: "step-start" },
+          { type: "text", text: "VERDICT: OK" },
+          { type: "step-finish", reason: "stop", tokens: {} },
+        ]),
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["command", "tool_result", "command", "tool_result",
+      "message", "message", "message", "message", "metrics", "done"],
+    "证据先行 → user echo → 每步一条 assistant message → metrics → done",
+  );
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.deepEqual(assistant.map((e) => e.parts[0].text), [
+    "narration before the first tool",
+    "narration between the tools",
+    "VERDICT: OK",
+  ], "一条 assistant 消息一段（决定 0128），换了消息才是新段");
+  assert.ok(assistant.at(-1).parts[0].text.startsWith("VERDICT: OK"), "最后一条 assistant message 即回答（§2.2 约定）");
+  assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+// 会审 sol 复现（第 130 批必改①）：同一条 assistant 消息里 text → reasoning → text，
+// 旧"隔了非 text part 就切"会发两条，最终读取只剩 Q2——一条消息一段后基线行为保留。
+
+test("zcode ④f: 同一条 assistant 消息的多个 text part（含被 reasoning / tool 隔开的）首尾相接成一段——最终读取保留全部", async () => {
+  const bash = toolPart({
+    callId: "call_intra", tool: "Bash", status: "completed",
+    input: { command: "echo x" }, output: "x\n",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("answer two questions in one message"),
+        assistantPartsMsg([
+          { type: "text", text: "Q1: OK\n" },
+          { type: "reasoning", text: "(between the two answers)" },
+          { type: "text", text: "Q2: OK" },
+          bash,
+          { type: "text", text: "Q3: OK" },
+          { type: "step-finish", reason: "stop", tokens: {} },
+        ]),
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1, "一条 assistant 消息就是一段（决定 0128）");
+  assert.equal(assistant[0].parts[0].text, "Q1: OK\nQ2: OKQ3: OK", "消息内全部 text parts 按顺序首尾相接（与基线同一消息内的拼法相同）");
+  assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+// ===== ④e 真实夹具（zcode 3.19.1，第 130 批）：叙述步与最终回答的分段切分 =====
+
+test("zcode ④e: 3.19.1 实测 session/messages——每条带 text 的 assistant 步各出一条事件、顺序一致，最后一条以“全部通过。最终报告”开头", async () => {
+  // 夹具 = 真实 glm-pro 运行的一个轮，形状实录见 test/fixtures/zcode-3.19.1/README.md
+  // （每条 assistant 消息一步、至多一个 text part、叙述在带工具调用的步、回答在最后
+  // 不调工具的步）。服务形状只做一处调整：去掉夹具里那条中途 user 消息——实录里它
+  // 是 ZCode 在一轮中途插入的 user 角色消息（截断提示、"用户很久没听到你"之类的
+  // 提醒），WAO 生产路径按 parent 锚点切片不受它影响；但锚点解析对多条无回显 user
+  // 按歧义续等，单轮收口路径要求锚点唯一，测试因此去掉它。assistant 步原样。
+  const fixture = JSON.parse(readFileSync(
+    new URL("../fixtures/zcode-3.19.1/narration-turn-messages.json", import.meta.url), "utf8",
+  ));
+  let seenUser = false;
+  const turn = fixture.messages.filter((m) => {
+    if (m?.info?.role !== "user") return true;
+    if (seenUser) return false;
+    seenUser = true;
+    return true;
+  });
+  const { handle, child } = await runScenario({
+    task: { prompt: "narrate as you go, then report" },
+    peerOptions: { messages: (n) => (n <= 1 ? [] : turn) },
+  });
+  const events = await collect(handle);
+  assert.equal(events.at(-1).reason, "completed");
+  const expected = fixture.messages
+    .filter((m) => m?.info?.role === "assistant")
+    .flatMap((m) => (m.parts ?? []).filter((p) => p?.type === "text").map((p) => p.text));
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.deepEqual(
+    assistant.map((e) => e.parts[0].text),
+    expected,
+    "每条带 text 的 assistant 步各一条事件，顺序与文本和夹具一致（3.18 拼写 messageId/parentMessageId）",
+  );
+  assert.ok(assistant.at(-1).parts[0].text.startsWith("全部通过。最终报告"), "最后一条 assistant message 即回答");
+  assert.ok(!JSON.stringify(assistant).includes("narrate as you go, then report"), "用户提示不进 assistant 事件");
+  const echo = events.find((e) => e.kind === "message" && e.role === "user");
+  assert.equal(echo.parts[0].text, "narrate as you go, then report", "user echo 是发送的 prompt 原文");
   child.kill();
 });
 

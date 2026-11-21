@@ -23,6 +23,7 @@ import { KimiWebBackend, createRunPrompts } from "../../src/backends/kimiWeb.js"
 import { backendFor, backendCapabilitySnapshot } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
 import { verifyStopQuiet } from "../../src/backends/serveStopVerify.js";
+import { extractFinalAssistantText } from "../../src/application/consultService.js";
 
 // 底层信封/路由夹具在共享文件里（多文件共用，同一函数只留一份）。
 import {
@@ -750,7 +751,7 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
 
 // ===== ⑤ events 轮询生成器：turns 轮按 prompt_ids 归属、最终轮 ended 按 outcome 收口 =====
 
-test("kimi-web ⑤ ①: 完成轮——工具证据先行（Write / Bash / Read / 出错的 Bash）→ 用户回显 → 答案（跨步空一行）→ metrics（轮级 usage）→ completed；reasoning 不投影", async () => {
+test("kimi-web ⑤ ①: 完成轮——工具证据先行（Write / Bash / Read / 出错的 Bash）→ 用户回显 → 分段发言（不同步各一条）→ metrics（轮级 usage）→ completed；reasoning 不投影", async () => {
   const turn = kimiTurn({
     steps: [
       stepItem({ index: 1, finish_reason: "tool_use", usage: { input_other: 100, output: 7, input_cache_read: 10, input_cache_creation: 3 } }),
@@ -777,7 +778,7 @@ test("kimi-web ⑤ ①: 完成轮——工具证据先行（Write / Bash / Read 
     "command", "tool_result", // Bash
     "tool_use", "tool_result", // Read（非 shell / 写文件类 → tool_use）
     "command", "tool_result", // 出错的 Bash（outcome 非 completed → isError）
-    "message", "message", "metrics", "done",
+    "message", "message", "message", "metrics", "done",
   ]);
   assert.deepEqual(events[0], { kind: "file_written", path: "D:/projects/worktree/wao_perm_probe.txt" }, "路径取 display.path，不取 input.path");
   assert.deepEqual(events[1], { kind: "tool_result", tool: "tc_write", output: "Wrote 5 bytes to wao_perm_probe.txt", isError: false });
@@ -785,14 +786,15 @@ test("kimi-web ⑤ ①: 完成轮——工具证据先行（Write / Bash / Read 
   assert.deepEqual(events[4], { kind: "tool_use", tool: "Read", input: { path: "README.md" } });
   assert.deepEqual(events[7], { kind: "tool_result", tool: "tc_err", output: "exit status 1", isError: true });
   assert.deepEqual(events[8].parts, [{ type: "text", text: "hi" }]);
-  assert.deepEqual(events[9].parts, [{ type: "text", text: "Hello\n\n world" }], "不同步之间空一行");
+  assert.deepEqual(events[9].parts, [{ type: "text", text: "Hello" }], "不同步各是一段发言（§2.2：每段一个事件）");
+  assert.deepEqual(events[10].parts, [{ type: "text", text: " world" }], "最后一条 assistant message 即回答");
   assert.ok(!JSON.stringify(events).includes("internal reasoning"), "reasoning 不进事件流");
-  assert.deepEqual(events[10], {
+  assert.deepEqual(events[11], {
     kind: "metrics",
     tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 },
     firstRequest: { input: 100, cacheRead: 10 },
   }, "轮级 usage 求和；firstRequest 取 index 最小那一步");
-  assert.equal(events[11].reason, "completed");
+  assert.equal(events[12].reason, "completed");
   assert.equal(polls, 1);
 });
 
@@ -3190,9 +3192,9 @@ test("kimi-web 0075: 没声明 serveWorkspaceDir 不做任何事；声明了 →
   assert.equal(normalizeAgent("kimi", { ...makeAgent(), serveWorkspaceDir: ws }).serveWorkspaceDir, ws);
 });
 
-// ===== 分步拼接：同一步的文本帧首尾相接，不同步之间隔一个空行 =====
+// ===== 分段发言（§2.2 约定）：同一步的 assistant_message 首尾相接成一段，不同步各是一段 =====
 
-test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同 step → 答案里行首的 Q1: 仍在行首；同一步的 assistant_message 首尾相接", async () => {
+test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同 step → 各发一条 assistant message；同一步的 assistant_message 首尾相接", async () => {
   const turn = kimiTurn({
     items: [
       userMessageItem(),
@@ -3204,8 +3206,10 @@ test("kimi-web 分步: 工具调用之间说的话与最后的答案分属不同
   });
   const { events } = await runScript("session_steps1", { script: [[turn]] });
   const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(assistant.length, 1);
-  assert.equal(assistant[0].parts[0].text, "Now let me check the files.\n\nQ1: FIX_FIRST\n理由。");
+  assert.equal(assistant.length, 2);
+  assert.equal(assistant[0].parts[0].text, "Now let me check the files.");
+  assert.equal(assistant[1].parts[0].text, "Q1: FIX_FIRST\n理由。", "同一步的两条 assistant_message 首尾相接成一段");
+  assert.ok(assistant[1].parts[0].text.startsWith("Q1:"), "分段发出后 Q1: 锚点天然在段首——旧拼接把它挤到上一句句尾的问题消失");
 });
 
 // ===== 答案拼接：旧帧流的重复帧去重已删除 =====
@@ -3842,6 +3846,58 @@ test("kimi-web 2.7.2 在途纠偏⑤: held 期工具状态每拍抖动（停滞�
     done.error,
   );
   assert.ok(done.error.includes("(held past the 30-minute hold cap)"), done.error);
+});
+
+// ===== t8（2026-11-21 实测，第 130 批）：工具调用之间的叙述——分段发言约定（§2.2）=====
+
+test("kimi 2.7.2 实测·t8: 两次叙述与最终回答 → 三条 assistant message 按序发出，最后一条以 VERDICT: OK 开头即回答", async () => {
+  const T8_SESSION = "session_t8";
+  const T8_BASE = `http://127.0.0.1:4310/api/v1/sessions/${T8_SESSION}`;
+  const t8Items = () => kimi272("t8-narration-turns-ended.json").json.data.turns[0].items;
+  let spawned = false;
+  const { fetchImpl } = kimiServer((url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (method === "POST" && url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: T8_SESSION });
+    if (method === "GET" && url === T8_BASE) return replay272("session-detail-fresh.json");
+    if (method === "GET" && url === `${T8_BASE}/agents/main/turns`) {
+      return spawned ? replay272("t8-narration-turns-ended.json") : turnsEnvelope([]);
+    }
+    if (method === "GET" && url === `${T8_BASE}/prompts`) return promptsEnvelope();
+    if (method === "POST" && url === `${T8_BASE}/prompts`) {
+      spawned = true;
+      return envelope({ prompt_id: "msg_01M7YJBPPM16XAS4RSZPNZJ282", user_message_id: "msg_01M7YJBPPM16XAS4RSZPNZJ282", status: "running" });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "narrate as you go, then answer" });
+  const events = await collect(handle);
+  // 证据先行（两个 Bash 条目）→ user 回显 → 三段发言各一条（§2.2）→ metrics → done。
+  assert.deepEqual(events.map((e) => e.kind), [
+    "command", "tool_result", "command", "tool_result",
+    "message", "message", "message", "message", "metrics", "done",
+  ]);
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.deepEqual(
+    assistant.map((e) => e.parts[0].text),
+    t8Items().filter((item) => item.type === "assistant_message").map((item) => item.text),
+    "三条 assistant message 的顺序与文本和夹具一致（step 1/2 叙述、step 3 回答）",
+  );
+  assert.match(assistant.at(-1).parts[0].text, /^VERDICT: OK/, "最后一条 assistant message 即回答");
+  assert.equal(
+    events.find((e) => e.kind === "message" && e.role === "user").parts[0].text,
+    t8Items().find((item) => item.type === "user_message").text,
+    "用户回显取归属轮的开场 user_message",
+  );
+  assert.deepEqual(events.find((e) => e.kind === "metrics"), {
+    kind: "metrics",
+    tokens: { input: 5073, output: 207, cacheRead: 46080, cacheWrite: 0 },
+    firstRequest: { input: 4649, cacheRead: 12288 },
+  }, "轮级 usage；firstRequest 取 index 最小那一步（实测值）");
+  assert.equal(events.at(-1).reason, "completed");
+  // 跨后端约定（§2.2）：读取端只取最后一条 assistant message——会审最终文本投影取到 VERDICT。
+  const finalText = extractFinalAssistantText(events.map((e) => ({ type: "run.event", ...e })));
+  assert.equal(finalText, "VERDICT: OK\nOutputs: one, two");
 });
 
 // ===== 收尾：kimi 2.6.3 实测目录覆盖（须是本文件最后一个测试——前面的测试先读完）=====

@@ -489,8 +489,8 @@ test("ACP 投影表：message/thinking/write_intent/file_written/tool_result/com
 
   assert.ok(events.some((e) => e.kind === "runtime_activity" && e.status === "initialized"));
   const messages = events.filter((e) => e.kind === "message" && e.role === "assistant");
-  assert.equal(messages.length, 2);
-  assert.deepEqual(messages[0].parts, [{ type: "text", text: "hello " }]);
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].parts, [{ type: "text", text: "hello world" }], "两个 agent_message_chunk 合并成一段（§2.2：流式分片在适配器里合并成整段再发）");
   assert.ok(events.some((e) => e.kind === "thinking"));
   // user_message_chunk 回显不投影
   assert.ok(!events.some((e) => JSON.stringify(e).includes("task echo")));
@@ -517,6 +517,93 @@ test("ACP 投影表：message/thinking/write_intent/file_written/tool_result/com
   assert.ok(!JSON.stringify(metrics).includes("4210"));
   assert.ok(!JSON.stringify(metrics).includes("4608"));
   assert.deepEqual(events.at(-1), { kind: "done", reason: "completed" });
+});
+
+// ===== §2.2 分段（第 130 批）：agent_message_chunk 合并成段 =====
+
+test("ACP 分段①: chunk → 工具调用 → chunk → 两条 assistant message（工具调用切段），尾段在回合结束前发出", async () => {
+  const { events } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "narration before the tool" } });
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_n1", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "echo one" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_n1", status: "completed", content: [{ type: "text", text: "one" }] });
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "VERDICT: OK" } });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.deepEqual(assistant.map((e) => e.parts[0].text), [
+    "narration before the tool",
+    "VERDICT: OK",
+  ], "工具调用切段；没有后续工具的尾段在回合结束（done 之前）发出");
+  const firstTool = events.findIndex((e) => ["tool_use", "command", "tool_result"].includes(e.kind));
+  assert.ok(events.indexOf(assistant[0]) < firstTool, "第一段发言先于该工具的证据事件");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP 分段②: agent_thought_chunk 与 usage_update 不切断一段发言——chunk、思考、usage、chunk 合成一条", async () => {
+  const { events } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "part one " } });
+      peer.notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "pondering" } });
+      peer.notify({ sessionUpdate: "usage_update", used: 4210, size: 1000000 });
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "part two" } });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1, "思考片段与计量不是发言边界");
+  assert.equal(assistant[0].parts[0].text, "part one part two");
+  assert.ok(events.some((e) => e.kind === "thinking"), "thought chunk 照发 thinking 心跳");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP 分段③: 被切在两个 chunk 之间的密钥整段脱敏（按片脱敏漏掉的形状）", async () => {
+  const SECRET = "dsh-acp-test-secret-0123456789";
+  const { events } = await runAcpScenario({
+    task: { prompt: "do the task", resolvedCredentials: { DEEPSEEK_API_KEY: SECRET } },
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the key is dsh-acp-test-" } });
+      peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "secret-0123456789 and done" } });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1);
+  const text = assistant[0].parts[0].text;
+  assert.ok(!text.includes(SECRET), "整段脱敏：密钥完整值绝不出现（两片单独都不含完整值，按片脱敏会漏）");
+  assert.equal(text, "the key is [REDACTED:DEEPSEEK_API_KEY] and done");
+});
+
+test("ACP 分段④: 纯空白段丢弃——最终读取的最后一条非空白（第 130 批会审必改②复现）", async () => {
+  {
+    // 复现：chunk("Q1: OK") → 工具调用切段 → chunk(" \t ") → end_turn。纯空白尾段
+    // 绝不能成为"最后一条 assistant message"（会审最终文本/compact 都会读到空白）。
+    const { events } = await runAcpScenario({
+      drive: ({ peer, promptRequest }) => {
+        peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Q1: OK" } });
+        peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_ws", title: "pwsh", kind: "other", status: "in_progress", rawInput: { command: "echo x" } });
+        peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_ws", status: "completed", content: [{ type: "text", text: "x" }] });
+        peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: " \t " } });
+        peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+      },
+    });
+    const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+    assert.deepEqual(assistant.map((e) => e.parts[0].text), ["Q1: OK"], "纯空白尾段丢弃——最后一条非空 assistant message 即回答");
+    assert.equal(events.at(-1).reason, "completed");
+  }
+  {
+    // 整轮只有纯空白发言：一段都不发，completed 带 completed_empty 标记（N1 口径与
+    // kimi/zcode 一致：传输成功不是可用答案）。
+    const { events } = await runAcpScenario({
+      drive: ({ peer, promptRequest }) => {
+        peer.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "   " } });
+        peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+      },
+    });
+    assert.equal(events.filter((e) => e.kind === "message" && e.role === "assistant").length, 0, "纯空白段一条都不发");
+    assert.deepEqual(events.at(-1), { kind: "done", reason: "completed", marker: "completed_empty" });
+  }
 });
 
 test("ACP 0072: shell 命令在调用到达时先落 tool_use（在途可见），command 证据仍在终态落、条数不变", async () => {

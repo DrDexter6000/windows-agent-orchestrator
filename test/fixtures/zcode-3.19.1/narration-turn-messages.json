@@ -1,0 +1,399 @@
+{
+ "note": "trimmed from a real session/messages result (ZCode 3.19.1, CLI 0.18.0), see README",
+ "messages": [
+  {
+   "info": {
+    "messageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "user",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "text",
+     "messageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+     "partId": "part_mwq4om6q_0bf7636e-dc4d-4d17-8937-dfc3ad7f986f",
+     "text": "(prompt text omitted from the fixture)"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4om86_220081cc-9af9-4e39-8d04-90f1c6c3a790",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4om88_b0941af0-1bff-4ebc-8c29-6f3c09fe4dd2"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4ox15_2d496115-43cc-48b9-ba5f-634daf30abc5"
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4owph_b8e2e398-1f97-4c37-aaed-a765154f5b64",
+     "callId": "call_2f2bb9efc6cf4228904c2d5f",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4owzv_1763121d-70b2-4322-83dc-019c9876f653",
+     "callId": "call_a1c473c1f37647acabfa9efd",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4ox5r_a839fe6c-ee1c-4d36-a243-c04f27d14196",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4ox4k_c5f7e6e3-cd2b-42c7-b1a7-69f773729638",
+    "role": "user",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "text",
+     "messageId": "msg_mwq4ox4k_c5f7e6e3-cd2b-42c7-b1a7-69f773729638",
+     "partId": "part_mwq4ox4k_15c22eea-5e86-43db-9cff-dff4b108b7f4",
+     "text": "(prompt text omitted from the fixture)"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4ox61_998d4684-b97d-4b49-87b0-a143cf4cce54",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4ox63_c75f8218-0dfb-4f4d-8c89-936585bce588"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4p45k_b75c4acf-1cc5-42b7-a869-10a9a54a80c3"
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4p43k_57daea14-81d8-4389-9824-b32d93898bf2",
+     "callId": "call_ca04cd49367a492a9e84468c",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4p45x_4e307cc5-88bc-4e41-80d0-8c7354482029",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4p46t_5fc5de8b-3a9c-4643-abe1-7faf723d7aa8",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4p46z_61a01526-455d-4c92-9122-c6b69234e0f1"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4pkp7_ca6a9f67-bc55-4ea8-840b-70449a295349"
+    },
+    {
+     "type": "text",
+     "messageId": "msg_mwq4p46t_5fc5de8b-3a9c-4643-abe1-7faf723d7aa8",
+     "partId": "part_mwq4pkpa_d5ff6773-2015-472a-86f1-13c4a64d1759",
+     "text": "现在我来看看 zcode 后端、fixture README 以及 fixture："
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4pkpi_53b02c8f-06ff-46e4-8aad-864bbc323186",
+     "callId": "call_09f028e2cede414990b406f0",
+     "tool": "Bash",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4pknk_7738c687-20f2-4719-a536-0dbe19167dbc",
+     "callId": "call_f8f5b90a16064ad8ae86d62b",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4ptml_204231af-ca25-40ab-b4ba-9711b577c4ea",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4ptmw_2b1b4329-5186-47e1-86b4-c5d5e0ff4178",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4ptn0_519ea2a8-d1ce-4752-8a30-0c43d5eab363"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4pzq1_4e42e221-3a44-400c-9ef3-f9559a2e87fa"
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4pzoo_6e5ff4e3-9b68-46ac-950f-fd1f2acf4697",
+     "callId": "call_e04e2c41dbc04f79974426ec",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4pzqi_ec091b54-bc4a-4d27-85cd-e38cc70c3a42",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4pzra_7fd5c0a0-e5ff-4833-9a75-8c96782ebc93",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4pzrc_4825b1c2-8703-4c75-85e5-6ac1b81464d6"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4q5jh_48e5d535-c282-40e3-b668-a8283ccb277c"
+    },
+    {
+     "type": "text",
+     "messageId": "msg_mwq4pzra_7fd5c0a0-e5ff-4833-9a75-8c96782ebc93",
+     "partId": "part_mwq4q5jn_ee4314a0-a42d-42ab-91a7-72015c11a1ac",
+     "text": "现在来看看 zcode 后端——文件头以及 2185 行附近的答案组装区域："
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4q5im_0860aa34-766a-49b5-9ad7-1a6e3554c713",
+     "callId": "call_7c2ccfb9717042dbb1233e67",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4q5ku_fd13f314-1cfe-4000-9918-68a3512f5f5d",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4q5l0_098de6a7-a3d0-421e-b10e-dfc952f5a356",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4q5l1_0a428d64-906f-4949-b203-c94e02923716"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4qds6_1bd0fc70-f3be-4e7d-bd64-dcdfa234def4"
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4qdr1_aeda86ee-1cc0-4cb0-9ab1-2080114d9d86",
+     "callId": "call_f8c408257192470a9624736d",
+     "tool": "Read",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4qdtd_aab3f606-25c7-4041-898f-51e260d58f09",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq4qdto_b024e5ce-75b5-4e49-908b-74308b2e19c5",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq4qdtr_be4c978b-6d5f-45a2-af8d-c9856ac4be24"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq4qt66_083b125e-0d7c-453f-87ea-e2e62ac1a24f"
+    },
+    {
+     "type": "text",
+     "messageId": "msg_mwq4qdto_b024e5ce-75b5-4e49-908b-74308b2e19c5",
+     "partId": "part_mwq4qt6g_14640184-a659-4f11-add1-b9ed36404703",
+     "text": "现在让我看看这两个测试文件——首先通过 targeted grep 在 zcode 测试中查找消息构造的形状："
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4qt6z_1fcd7f82-55fd-4666-a99e-ab084493edc6",
+     "callId": "call_b08d51982cc04317aabc43ab",
+     "tool": "Bash",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq4qt74_61514cce-9965-4d3e-be19-b85b5e812327",
+     "callId": "call_5b3a429db7944768b04a84e3",
+     "tool": "Bash",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq4qv64_6501c8cf-2877-448e-9fc0-51cf5b2faa73",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq5iq3e_3a1148d5-7c4d-4beb-adc1-a0b7914bee9f",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq5iq3h_5217ee1e-a741-427b-82a4-93ecffd67c29"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq5ix76_6fa0fcf8-cf19-47c3-ae36-3cba59e8a2f5"
+    },
+    {
+     "type": "text",
+     "messageId": "msg_mwq5iq3e_3a1148d5-7c4d-4beb-adc1-a0b7914bee9f",
+     "partId": "part_mwq5ix7t_b0d81fa4-10d7-4abc-b9e6-8c67aa0555a4",
+     "text": "所有检查清单测试均已通过。最后验证 — grep 查找剩余的依赖项，并确认工作树状态："
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq5ix85_2978954a-ea1b-43b2-97ee-df954241b54c",
+     "callId": "call_90bd3c3e7c4d49089e9c9c7b",
+     "tool": "Bash",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq5iyhc_416aa56e-88c2-4500-98e7-8390999bcd0f",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq5iyhs_47b92571-06ff-4b09-abdb-f719fe44158f",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq5iyhv_e5b55caa-7b77-4965-b1a3-38d5d2f613e6"
+    },
+    {
+     "type": "tool",
+     "partId": "part_mwq5j1gr_6be763bc-74f1-43cf-8191-55bcf1213103",
+     "callId": "call_1f698a43bec14f2ab8930333",
+     "tool": "Bash",
+     "state": {
+      "status": "completed"
+     }
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq5j28t_5d4e0a08-1d0b-45c5-9811-4a2abe6c2195",
+     "reason": "tool-calls"
+    }
+   ]
+  },
+  {
+   "info": {
+    "messageId": "msg_mwq5j29a_6b1345a6-79cd-481b-a8e7-94de92e19b5b",
+    "parentMessageId": "msg_mwq4om64_20c9d079-5378-407c-b379-9f2a36d7ba34",
+    "role": "assistant",
+    "sessionId": "sess_c8ec7c9a-7966-4f22-b0e7-7576c1913583"
+   },
+   "parts": [
+    {
+     "type": "step-start",
+     "partId": "part_mwq5j29d_a8d10af9-a01c-400d-9789-951c56219139"
+    },
+    {
+     "type": "reasoning",
+     "partId": "part_mwq5js7k_753432a3-e3be-461b-bfde-1ba34e0fc6b5"
+    },
+    {
+     "type": "text",
+     "messageId": "msg_mwq5j29a_6b1345a6-79cd-481b-a8e7-94de92e19b5b",
+     "partId": "part_mwq5js7r_0a8d3ab3-3ee4-465b-a158-79404d331263",
+     "text": "全部通过。最终报告：\n\n完成\n\n## 改了哪些文件\n\n- **docs/02-architecture.md**：§2.2 末尾新增一段“assistant message 分段”约定（每段发言一个事件、按发生先后、叙述与回答分开发、最后一条即回答、读取端只取它）——唯一出处，一处。\n- **src/backends/kimiWeb.js**：`answerOfTurn` 从\"返回拼接字符串\"改为\"返回发言列表\"（同一 `step_index` 首尾相接一段，不同步各一段，空段丢弃）；收口路径按序每段发一个 `messageEvent(\"assistant\", …)`，证据补齐 → 用户回显 → 各段 → metrics → done 的次序不变；\"completed 无回答\"判失败改为\"所有段为空\"，失败文案逐字不变。同步改写了文件头\"答案拼接\"段、`streamEvents` 文档串和 `answerOfTurn` 注释（Q1: 锚点问题自然消失已写明）。\n- **src/backends/zcode.js**：`_completeTurn` 把本轮助手文本切成发言列表——同一条 assistant 消息里**相邻** text part 首尾相接一段；隔了非 text part（工具调用、step-finish 等）或换了 assistant 消息就是新的一段；按序每段发一个 assistant message 事件；全部为空仍判失败（文案不变）。`_completeTurn` 文档串与文件头\"诚实边界\"段同步改写。\n- **test/backends/kimiWeb.test.js**：新增 t8 夹具用例；改两个既有用例期望（见下）。\n- **test/backends/zcode.test.js**：新增 ④d 分段用例；改两个既有用例期望（见下）。\n\n## zcode 的切分点依据（读到的 part 形状）\n\nzcode.js 文件头与 `_completeTurn` 的身份切片：本轮助手产出 = `session/messages` 快照里 `info.role === \"assistant\"` 且 `info.parentID === 锚点 U.id` 的新消息，每条消息的 `parts[]` 按序混排 `type:\"text\"`（带 `text`）、`type:\"tool\"`（`{callId, tool, state:{status,input,output|error}}`）、`type:\"step-start\"` / `type:\"step-finish\"`（带 `reason:\"stop\"|\"error\"|\"tool-use\"` 与 `tokens`）——测试夹具（`assistantPartsMsg` / `toolPart`，bundle zod schema 核证形状）就是按这个混排构造的。所以切分点 = part 序列里 text 与 text 之间是否相邻：`[text, tool, text]` → 两段；`[text(\"final \"), text(\"answer\")]` → 相接一段；跨两条 assistant 消息（即使文本紧邻）→ 各一段。`step-finish` 也是非 text part，同样切段（④d 用例覆盖）。\n\n## 改动的既有测试期望\n\n- kimi ⑤①（完成轮序列）：期望从 1 条 `Hello\\n\\n world` 改为 2 条（\"Hello\"、\" world\"），事件序列多一个 message，metrics/done 下标后移；测试名\"跨步空一行\"改为\"分段发言（不同步各一条）\"。\n- kimi 分步（Q1: 锚点）：期望从 1 条拼接文本改为 2 条；断言 `Q1:` 在段首。\n- zcode ④：期望从 2 条消息（\"chunk one chunk two\"）改为 3 条（跨消息各一段，\"chunk one \" 与 \"chunk two\" 分开）。\n- zcode ④b：assistant 计数从 1 改为 2（中间步 \"partial\" 与最终 \"final\" 分段各一条）。\n- 其余期望未动；两个新用例各断言一次\"最后一条即回答\"（kimi 侧还用 `extractFinalAssistantText` 把事件包成 `run.event` 喂进去验证读取端取到 `VERDICT: OK`）。\n\n## 自检结果（逐个文件）\n\n| 文件 | 结果 |\n|---|---|\n| test/backends/kimiWeb.test.js | ✅ 133/133（需 `WAO_ALLOW_NESTED_DISPATCH=1`，见下） |\n| test/backends/zcode.test.js | ✅ 134/134 |\n| test/backends/containmentChain.test.js | ✅ 26/26 |\n| test/backends/stallBudget.test.js | ✅ 8/8 |\n| test/run-lifecycle/consult.test.js | ✅ 79/79 |\n| test/mcp-surface/mcpRunConsult.test.js | ✅ 22/22（需 `WAO_ALLOW_NESTED_DISPATCH=1`） |\n| test/registry-roles/laneReviewStats.test.js | ✅ 25/25 |\n| test/transcript/runCollectCompact.test.js | ✅ 32/32 |\n| test/transcript/collectFinal.test.js | ✅ 11/11 |\n| test/isolation-infra/layering.test.js | ✅ 18/18 |\n| docs-consistency / docsSurface / staticRunsGuard / desensitization / controlBytes / m12-10-tool-surface / cliHelpCoverage / workflowReachability | ✅ 190/6/8/3/1/16/4/4 全绿 |\n\n说明：kimiWeb 一个用例与 mcpRunConsult 16 个用例是派发类测试，在 worker 上下文里先被嵌套派发守卫拒绝（与本次改动无关）；按任务书授权加 `WAO_ALLOW_NESTED_DISPATCH=1` 后全绿。未跑全量，其余未测。\n\n`git grep -l \"answerOfTurn\\|textParts.join\" -- src test`：`kimiWeb.js`（定义与唯一调用点）、`runActivityProjection.js` / `runCollectProjection.js`（这两处 `textParts.join(\"\\n\")` 是读取端把**单条** message 事件内的 parts 投影成文本，与旧拼接无关）——没有别处依赖旧的拼接结果。改动全部未暂存，未 commit。\n\n## 建议 Lead 再看一眼\n\n1. **空段判定从 `length > 0` 收紧为 `trim().length > 0`**（两个后端一致）：kimi 旧代码成功路径会保留\"纯空白的中间段\"，现在丢弃。对失败判定（全空 ⇒ failed）与旧 trim 检查等价，但极端形状（段全为空白但轮有回答）的转录内容会少一截空白——我认为是收紧而非行为漂移，如需保旧形状可改回。\n2. **zcode 文件头\"诚实边界\"段**：原句\"找得到回显 → 取其后；找不到 → 全量拼接\"描述的是 B′ 之前已退役的回显剔除启发式，本次\"拼接\"二字被我的改动进一步证伪，我把该段改写为\"身份切片 + §2.2 分段\"。这超出任务书点名的注释范围一小步，请确认措辞。\n3. **`completed_empty` 边界**（清单外的自检项）：RunManager/diagnosis 按\"非空白 assistant 文本\"判可用效应——拼接文本非空白 ⇔ 至少一段非空白，语义等价，无漂移（containmentChain 也绿）。\n4. t8 用例顺带锁了实测 metrics/firstRequest 数值（5073/207/46080/0 与 4649/12288）；若上游夹具将来更新，这一断言会红——是有意的钉子。"
+    },
+    {
+     "type": "step-finish",
+     "partId": "part_mwq5js87_93bed128-25e0-4cd2-b06d-0be20d44030f",
+     "reason": "stop"
+    }
+   ]
+  }
+ ]
+}

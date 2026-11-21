@@ -38,7 +38,7 @@ import { collectRunMessages } from "../application/runCollect.js";
 import { CursorRejectedError } from "../application/runActivityProjection.js";
 // M11-4: shared safe projection — same module MCP uses, so CLI continuation
 // output is deep-equal to MCP structuredContent.
-import { projectCollectResult } from "../application/runCollectProjection.js";
+import { projectCollectResult, finalAssistantTextFromSnapshot } from "../application/runCollectProjection.js";
 // TD-319：collect 取回失败的"原报错 + 指路"两行有意分行——linesError 构造
 //（原错误带 lines 就沿用它的行，否则 message 算一行；.message 与改前逐字一致）。
 import { errorLines, linesError } from "../safeText.js";
@@ -271,51 +271,6 @@ const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
 const COLLECT_FINAL_TOO_LARGE_MARKER =
   "final message exceeds bounded projection; write it to a file: collect <runId> --final --out FILE - or re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
 
-const COLLECT_OUT_MAX_CHARS = 1_000_000;
-const COLLECT_OUT_CHANGED_TEXT =
-  "collect --final --out: the transcript changed while it was being read (the run is still producing " +
-  "output) — nothing was written; run it again once the run is terminal";
-const COLLECT_OUT_LIMIT_TEXT =
-  "collect --final --out: a message in this transcript is longer than 1,000,000 characters, " +
-  "the most this command reads — nothing was written";
-
-/**
- * 逐页读完全量投影，拼出最后一条 assistant 消息的完整文本。同一条消息的切片
- * 首尾相接，`truncated: false` 的切片是这条消息的末尾。只读：这些翻页不追加审计
- * 事件。单条消息最多读 COLLECT_OUT_MAX_CHARS 个字符（分页游标能寻址的范围略大于
- * 此数，这里取整并明确执行）：读到的内容一超过就报固定文案、不写文件。读取途中
- * 游标被拒，说明转录在读的过程中变了，报另一句固定文案。
- */
-async function readFinalMessageByPages({ runId, runDir }) {
-  let cursor;
-  let current = "";
-  let currentRole = null;
-  let last = "";
-  for (let page = 0; page < 2000; page += 1) {
-    const raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
-    let payload;
-    try {
-      payload = projectCollectResult(raw, { runId, cursor, mode: "full" });
-    } catch (error) {
-      if (error instanceof CursorRejectedError) throw new Error(COLLECT_OUT_CHANGED_TEXT);
-      throw error;
-    }
-    for (const entry of payload.messages ?? []) {
-      if (entry.role !== currentRole) { current = ""; currentRole = entry.role; }
-      current += entry.text ?? "";
-      if (current.length > COLLECT_OUT_MAX_CHARS) throw new Error(COLLECT_OUT_LIMIT_TEXT);
-      if (entry.truncated !== true) {
-        if (entry.role === "assistant") last = current;
-        current = "";
-        currentRole = null;
-      }
-    }
-    cursor = payload.nextCursor ?? undefined;
-    if (!cursor) return last;
-  }
-  throw new Error(COLLECT_OUT_LIMIT_TEXT);
-}
-
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;
   const options = parseOptions(tail);
@@ -501,14 +456,14 @@ export async function collectCommand(args, config) {
     }
     throw error;
   }
-  // --out：先把要写的全文取齐、写进文件，再追加审计事件——逐页读取或写文件失败时
-  // 与其它投影失败一样零追加。文本经同一套投影逐页取回，脱敏与控制字符清理与分页
-  // 读取完全相同（写进文件的是清理后的文本，不是转录里的原始字节）。
+  // --out：先把要写的全文取齐、写进文件，再追加审计事件——取文本或写文件失败时
+  // 与其它投影失败一样零追加。第 130 批必改④：单快照取全文——对**同一份** raw 调
+  // finalAssistantTextFromSnapshot（与 compact/分页投影同一套 extractAssistantTexts
+  // + redactor + 控制字符清理，逐字节一致），不再逐页翻读（游标只能寻址到一百万
+  // 字符；单快照读整份转录本就在内存里，无长度上限）。
   let outReport = null;
   if (hasOut) {
-    const text = payload.compactStatus === "available"
-      ? payload.messages[0].text
-      : payload.compactStatus === "empty" ? "" : await readFinalMessageByPages({ runId, runDir });
+    const text = finalAssistantTextFromSnapshot(raw);
     const target = resolve(options.out);
     await writeFile(target, text, "utf8");
     outReport = payload.compactStatus === "empty"

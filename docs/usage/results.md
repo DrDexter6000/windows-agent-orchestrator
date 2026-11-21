@@ -142,7 +142,7 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 - `available`（最后一条 assistant 文本 ≤4000 字符）→ stdout 恰为消毒后的最终 assistant 文本（secret redaction + C0/C1/DEL 清洗之后，不承诺逐字节等于原文），exit 0。
 - `empty`（无 assistant 文本）→ 固定标记 `[final: no assistant message]`，exit 0。
-- `too_large`（最后一条 >4000 字符）→ stdout 是一行固定指引（不给部分文本、不给 cursor），exit 0。加 `--out FILE` 把最终回答写进文件：写的是脱敏与控制字符清理之后的完整文本，单条消息不超过一百万字符（超过则报固定文案、不写文件）；或去掉 `--final`，用 `--format json` 分页读（同一条消息的切片首尾相接，`truncated:false` 的切片是这条消息的末尾，跟着 `nextCursor` 翻页）。
+- `too_large`（最后一条 >4000 字符）→ stdout 是一行固定指引（不给部分文本、不给 cursor），exit 0。加 `--out FILE` 把最终回答写进文件：写的是脱敏与控制字符清理之后的完整文本（单快照读取，无长度上限）；或去掉 `--final`，用 `--format json` 分页读（同一条消息的切片首尾相接，`truncated:false` 的切片是这条消息的末尾，跟着 `nextCursor` 翻页）。
 
 `--final` 是布尔 flag（不接受值），与 `--cursor` 互斥（沿用 compact 的既有互斥拒绝，非零退出）；与 `--format json`/`--mode` 同用时由 `--final` 的四态渲染接管输出；`--out` 只与 `--final` 同用。审计与 collect 相同：成功调用追加恰好一条 `messages.collected`（`--final` 不豁免——collect 本就非只读），任何失败零追加。
 

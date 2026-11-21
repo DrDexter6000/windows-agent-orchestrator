@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -251,56 +251,110 @@ test("TD-112 守卫: 只给 --out 不给 --final 抛错（非零退出，点名�
   }
 });
 
-test("--out：单条消息超出分页可寻址范围（一百万字符）时报固定文案、不写文件、不追加审计事件", () => {
-  const dir = makeTempDir("wao-final-out-limit-");
+// ===== 第 130 批必改④：--out 单快照取全文（不再逐页翻读，无长度上限） =====
+
+test("--out：早先叙述 2,000,000 字、最终回答 4,004 字——写出的文件恰为回答（游标寻址不到也不挡）", () => {
+  const dir = makeTempDir("wao-final-out-narr-");
   try {
-    const text = "超出分页寻址范围的长文。".repeat(84100); // 约 100.9 万字符
-    assert.ok(text.length > 1_000_000, "测试前提：单条消息超过一百万字符");
-    writeTranscript(dir, "run_final_out_limit", [
+    const narration = "叙".repeat(2_000_000);
+    const answer = "答".repeat(4004);
+    writeTranscript(dir, "run_final_out_narr", [
       { type: "run.started", backend: "claude-code" },
       { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
       { type: "prompt.sent", prompt: "say hi" },
       { type: "run.submitted" },
-      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text }] },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: narration }] },
+      { type: "run.event", kind: "tool_use", tool: "Bash", input: { command: "echo done" } },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: answer }] },
       { type: "run.completed" },
     ]);
     const outFile = join(dir, "final.txt");
-    const r = runCollectFinal(dir, "run_final_out_limit", ["--out", outFile]);
-    assert.notEqual(r.status, 0, "读不全就失败，不写出半截文件");
-    assert.match(r.stderr, /longer than 1,000,000 characters, the most this command reads — nothing was written/);
-    assert.equal(existsSync(outFile), false, "没有写出文件");
-    const after = readFileSync(join(dir, "run_final_out_limit.jsonl"), "utf8");
-    assert.equal(after.split(/\r?\n/).filter((l) => l.includes('"type":"messages.collected"')).length, 0,
-      "失败的调用零审计追加");
+    const r = runCollectFinal(dir, "run_final_out_narr", ["--out", outFile]);
+    assert.equal(r.status, 0, `早先的 200 万字叙述不再挡住 --final --out（stderr: ${r.stderr}）`);
+    assert.equal(readFileSync(outFile, "utf8"), answer, "文件 = 最终回答（不是叙述、不是半截）");
+    assert.match(r.stdout.trim(), new RegExp(`^final message: ${answer.length} chars written to .+$`), "stdout 报最终回答的字符数");
+    const after = readFileSync(join(dir, "run_final_out_narr.jsonl"), "utf8");
+    assert.equal(after.split(/\r?\n/).filter((l) => l.includes('"type":"messages.collected"')).length, 1,
+      "成功调用恰一条审计");
   } finally {
     cleanupDir(dir);
   }
 });
 
-test("--out：长度上限恰好是一百万字符——一百万整写得出，多一个字符就拒绝", () => {
-  const dir = makeTempDir("wao-final-out-edge-");
+test("--out：最终回答本身超过一百万字——照样完整写出（单快照读无长度上限）", () => {
+  const dir = makeTempDir("wao-final-out-over-");
   try {
-    const events = (text) => [
+    const answer = "终".repeat(1_200_000);
+    writeTranscript(dir, "run_final_out_over", [
       { type: "run.started", backend: "claude-code" },
       { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
       { type: "prompt.sent", prompt: "say hi" },
       { type: "run.submitted" },
-      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text }] },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: answer }] },
       { type: "run.completed" },
-    ];
-    const exact = "甲".repeat(1_000_000);
-    writeTranscript(dir, "run_final_out_exact", events(exact));
-    const exactFile = join(dir, "exact.txt");
-    const ok = runCollectFinal(dir, "run_final_out_exact", ["--out", exactFile]);
-    assert.equal(ok.status, 0, ok.stderr);
-    assert.equal(readFileSync(exactFile, "utf8").length, 1_000_000);
+    ]);
+    const outFile = join(dir, "final.txt");
+    const r = runCollectFinal(dir, "run_final_out_over", ["--out", outFile]);
+    assert.equal(r.status, 0, `超百万的最终回答完整写出（stderr: ${r.stderr}）`);
+    assert.equal(readFileSync(outFile, "utf8").length, answer.length, "零截断");
+    assert.match(r.stdout.trim(), new RegExp(`^final message: ${answer.length} chars written to .+$`));
+  } finally {
+    cleanupDir(dir);
+  }
+});
 
-    writeTranscript(dir, "run_final_out_over", events(`${exact}乙`));
-    const overFile = join(dir, "over.txt");
-    const over = runCollectFinal(dir, "run_final_out_over", ["--out", overFile]);
-    assert.notEqual(over.status, 0);
-    assert.match(over.stderr, /longer than 1,000,000 characters/);
-    assert.equal(existsSync(overFile), false);
+test("--out：写出的文本与 --format json 分页读到的同一条消息拼接结果逐字相同，脱敏一致", () => {
+  const dir = makeTempDir("wao-final-out-parity-");
+  try {
+    // 正文带环境密钥与控制字符：两条路径共用同一 extractAssistantTexts + redactor +
+    // 控制字符清理，逐字一致必须连脱敏与消毒结果也一致。
+    const SECRET = "wao-collect-test-secret-value-0123";
+    const body = `开头 ${SECRET} 中段\u0001` + "尾".repeat(9000) + " 收尾";
+    writeTranscript(dir, "run_final_out_parity", [
+      { type: "run.started", backend: "claude-code" },
+      { type: "session.created", backend: "process", backendSessionId: "proc_12345" },
+      { type: "prompt.sent", prompt: "say hi" },
+      { type: "run.submitted" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "早先的一段叙述" }] },
+      { type: "run.event", kind: "tool_use", tool: "Bash", input: { command: "echo done" } },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: body }] },
+      { type: "run.completed" },
+    ]);
+    const outFile = join(dir, "final.txt");
+    const env = { ...process.env, WAO_COLLECT_TEST_SECRET: SECRET };
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "collect", "run_final_out_parity", "--run-dir", dir, "--final", "--out", outFile,
+    ], { cwd: ROOT, encoding: "utf8", env: { ...env, WAO_SKIP_VERSION_GUARD: "1" }, timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    const fileText = readFileSync(outFile, "utf8");
+
+    // 分页读同一条消息：跟着 nextCursor 翻完，取最后一条消息（truncated:false 结尾）
+    // 的全部切片拼接。
+    const entries = [];
+    let cursor = undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const args = ["src/cli.js", "collect", "run_final_out_parity", "--run-dir", dir, "--format", "json"];
+      if (cursor !== undefined) args.push("--cursor", cursor);
+      const p = spawnSync(process.execPath, args,
+        { cwd: ROOT, encoding: "utf8", env: { ...env, WAO_SKIP_VERSION_GUARD: "1" }, timeout: 60_000 });
+      assert.equal(p.status, 0, p.stderr);
+      const payload = JSON.parse(p.stdout);
+      entries.push(...payload.messages);
+      if (!payload.nextCursor) break;
+      cursor = payload.nextCursor;
+    }
+    // 按消息边界重拼：切片累积，`truncated:false` 收一条消息；最后收完的就是最终消息
+    //（文档规则：同一条消息的切片首尾相接，`truncated:false` 的切片是这条消息的末尾）。
+    let pagedText = "";
+    let current = "";
+    for (const e of entries) {
+      current += e.text;
+      if (e.truncated !== true) { pagedText = current; current = ""; }
+    }
+
+    assert.equal(fileText, pagedText, "文件与分页拼接逐字相同（含脱敏与控制字符清理）");
+    assert.ok(!fileText.includes(SECRET), "密钥两条路径同样被脱敏");
+    assert.ok(fileText.includes("\uFFFD"), "控制字符两条路径同样被替换为 U+FFFD");
   } finally {
     cleanupDir(dir);
   }

@@ -276,6 +276,34 @@ function extractAssistantTexts(rawResult, redactor) {
   return { evidenceCounts, redactedTexts, itemCount: items.length };
 }
 
+// ===== Final assistant text (single snapshot) =====
+//
+// "最后一条 assistant 文本"的语义只在 lastAssistantText 定义一次：compact 分支与
+// CLI `collect --final --out`（第 130 批必改④：单快照取全文，不再逐页翻读——游标
+// 只能寻址到一百万字符，而单快照读整份转录本就在内存里）共用它，脱敏与控制字符
+// 清理天然与 compact/分页投影逐字节相同（同一 extractAssistantTexts）。
+
+function lastAssistantText(redactedTexts) {
+  return redactedTexts.length > 0 ? redactedTexts[redactedTexts.length - 1] : "";
+}
+
+/**
+ * 从同一份 rawResult（collectRunMessages 的单次快照）返回最后一条脱敏 + 控制字符
+ * 清理后的 assistant 文本；没有非空 assistant 文本时返回空串。
+ *
+ * @param {object} rawResult — collect 服务结果（data 必须是数组，同 projectCollectResult）
+ * @param {object} [opts] — { env }：secret redactor 的环境（缺省 process.env）
+ * @returns {string}
+ */
+export function finalAssistantTextFromSnapshot(rawResult, { env } = {}) {
+  if (!rawResult || typeof rawResult !== "object" || !Array.isArray(rawResult.data)) {
+    throw new Error("invalid collect result: data must be an array");
+  }
+  const redactor = createSecretRedactor(env ?? process.env);
+  const { redactedTexts } = extractAssistantTexts(rawResult, redactor);
+  return lastAssistantText(redactedTexts);
+}
+
 // ===== Pagination =====
 //
 // Given the full list of redacted assistant texts and a starting position
@@ -523,7 +551,8 @@ export function projectCollectResult(rawResult, { runId, cursor, mode, env } = {
       compactStatus = "empty";
       messages = [];
     } else {
-      const lastText = redactedTexts[assistantMessageCount - 1];
+      // "最后一条"语义的唯一出处：lastAssistantText（compact 与 CLI --final --out 共用）。
+      const lastText = lastAssistantText(redactedTexts);
       if (lastText.length <= COLLECT_MAX_TEXT_CHARS) {
         compactStatus = "available";
         messages = [{ role: "assistant", text: lastText, truncated: false }];

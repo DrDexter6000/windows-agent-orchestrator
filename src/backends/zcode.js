@@ -119,9 +119,9 @@
 // （snapshot shrank → done(failed)），不可检测的头插与完成判据同残余等级。
 //
 // assistant 文本切片的诚实边界：上游消息表未实证携带 role 标注（live 事实只有
-// parts 的 type 闭集 text|step-finish）——`session/send` 的 content 若以 text part
-// 回显进 messages，按**精确等值**剔除首个匹配（找得到回显 → 取其后；找不到 →
-// 全量拼接）。两种上游形状都不会把 prompt 误报成 assistant 产出；剔除后为空 =
+// parts 的 type 闭集 text|step-finish）——B′ 身份切片后 echo 是 user 消息自己的
+// part，parent 过滤天然排除，回显剔除启发式已退役；本轮发言按 docs/02-architecture.md
+// §2.2 分段各发一个 assistant message 事件（最后一条即回答），全部为空 =
 // 按 failed 收口（N1 教训：传输成功不是可用答案，绝不伪造完成）。tool part 的
 // 形状后经 bundle zod schema 核证（见 zcodeToolIdentityEvents 注释）——
 // completed 轮投影为证据事件（file_written/command/tool_use/tool_result，2026-10-01
@@ -2173,29 +2173,37 @@ export class ZcodeBackend {
    * completed 轮发射序列：usage（session/usage——reportsTokenUsage=true 的通道；
    * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮消息的 type:"tool"
    * 帧逐帧投影——身份键台账，证据先行）→ 台账补漏
-   * （TD-199：终态先补未发证据）→ user echo → assistant text（身份切片：只取
+   * （TD-199：终态先补未发证据）→ user echo → assistant 发言分段（身份切片：只取
    * parentID===锚点 U 的新 assistant 消息的 text parts——回显启发式退役：echo
-   * 是 user 消息自己的 part，parent 过滤天然排除；发射前非空复检，N1 教训）
-   * → metrics（分量在场才发）→ done(completed)。
+   * 是 user 消息自己的 part，parent 过滤天然排除；一条消息的全部 text parts 首尾
+   * 相接一段（决定 0128：分段单位 = 整条消息），换了消息才是新的一段，每段一个
+   * assistant message 事件，最后一条即回答——约定见 docs/02-architecture.md §2.2；
+   * 全部为空的复检保留，N1 教训）→ metrics（分量在场才发）→ done(completed)。
    */
   async *_completeTurn({ wire, child, sessionId, newMsgs, anchor, sentContent, finish, toolLedger }) {
-    // 身份切片：本轮 assistant 文本 = 宿主为锚点 U 的新 assistant 消息的全部
-    // text parts（多个 assistant 消息按快照顺序拼接）。
-    const textParts = [];
+    // 身份切片 + 发言分段：本轮 assistant 发言 = 宿主为锚点 U 的新 assistant 消息的
+    // text parts——**一条 assistant 消息的全部 text parts 按顺序首尾相接是一段**
+    // （决定 0128：分段单位是整条消息/一步，与基线在同一消息内的拼法相同；消息内
+    // 的 reasoning / tool 等 part 不切段），换了一条 assistant 消息才是新的一段，
+    // 纯空白段丢弃。真实形状实录见 test/fixtures/zcode-3.19.1/README.md（ZCode
+    // 3.19.1 实测 session/messages：每条 assistant 消息是一步，叙述是带工具调用的
+    // 那一步的 text，最终回答是最后一步——不调工具——的 text，与本切分一致）。
+    const segments = [];
     for (const { ident, message } of newMsgs) {
       if (ident.role !== "assistant" || ident.parentID !== anchor.id) continue;
-      for (const part of Array.isArray(message?.parts) ? message.parts : []) {
-        if (part?.type === "text" && typeof part.text === "string") textParts.push(part.text);
-      }
+      segments.push((Array.isArray(message?.parts) ? message.parts : [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join(""));
     }
-    const text = textParts.join("");
+    const speeches = segments.filter((segment) => segment.trim().length > 0);
     // TD-199（双席会审修正）：终态先跑台账补漏扫描再判失败——空文本/usage 失败
     // 路径下，已发生的工具事实必须保留（原实现空文本会压掉全部证据，已记录的
     // 真实工具活动随失败丢失）；轮询期已增量发过的事件由台账天然去重。
     for (const event of projectTurnToolEvents(newMsgs, toolLedger)) {
       yield event;
     }
-    if (text.trim().length === 0) {
+    if (speeches.length === 0) {
       finish();
       yield doneEvent(
         "failed",
@@ -2219,7 +2227,11 @@ export class ZcodeBackend {
     if (typeof sentContent === "string" && sentContent.length > 0) {
       yield messageEvent("user", [{ type: "text", text: sentContent }]);
     }
-    yield messageEvent("assistant", [{ type: "text", text }]);
+    // 每段发言一个 assistant message 事件（约定见 docs/02-architecture.md §2.2），
+    // 按发生先后发——最后一条就是运行的回答。
+    for (const segment of speeches) {
+      yield messageEvent("assistant", [{ type: "text", text: segment }]);
+    }
     const metrics = metricsEventFromUsage(usageResult);
     if (metrics !== null) {
       // 首个请求的用量（有逐步 tokens 才写；缺就不写字段）。

@@ -589,6 +589,27 @@ export class DeepSeekAcpBackend {
       if (patchDir) await rm(patchDir, { recursive: true, force: true }).catch(() => {});
     };
 
+    // 发言分段缓冲（docs/02-architecture.md §2.2）：agent_message_chunk 是传输层的
+    // 流式分片，连续分片累积成一段逻辑发言，整段过 redactor 后发一个 assistant
+    // message 事件——密钥被切在两片之间也能整段命中替换（按片脱敏漏掉的形状）。
+    // 分段边界 = 工具调用（tool_call / tool_call_update）或回合结束（flushSegment
+    // 在 metrics / done 之前调用）；agent_thought_chunk 与 usage_update 不切断发言
+    // （思考与计量不是发言边界）。纯空白段丢弃（trim 后非空才发——与 kimi/zcode
+    // 同一 N1 口径：最后一条非空 assistant message 才是回答，纯空白尾段绝不能成为
+    // "回答"）。活性核查（第 130 批）：本 backend 无停滞/活性门（无 stallTracker、
+    // 轮生命周期由 waitTimeout/abort 治理），控制面按事件新鲜度只产 advisory
+    // （runQuietAdvisory，决定 0067/0068/0069）——缓冲期间不需要补流式活性事件。
+    let segmentText = "";
+    const flushSegment = () => {
+      if (segmentText.trim().length === 0) {
+        segmentText = "";
+        return;
+      }
+      const text = segmentText;
+      segmentText = "";
+      queue.push(redactor.redact(messageEvent("assistant", [{ type: "text", text }])));
+    };
+
     const request = (method, params, timeoutMs = HANDSHAKE_TIMEOUT_MS) => new Promise((resolve, reject) => {
       const id = nextRequestId++;
       let timer = null;
@@ -619,6 +640,8 @@ export class DeepSeekAcpBackend {
     const queueTerminal = (event) => {
       if (terminalQueued) return;
       terminalQueued = true;
+      // 回合结束（含失败/未知形状的提前终态）：缓冲里的尾段发言先于终态事件发出。
+      flushSegment();
       queue.push(event);
       void this._shutdown(child, request, acpSessionId).finally(cleanup);
     };
@@ -641,7 +664,7 @@ export class DeepSeekAcpBackend {
       if (type === "agent_message_chunk") {
         const text = update?.content?.text;
         if (typeof text === "string" && text.length > 0) {
-          queue.push(redactor.redact(messageEvent("assistant", [{ type: "text", text }])));
+          segmentText += text;
         }
         return;
       }
@@ -650,10 +673,12 @@ export class DeepSeekAcpBackend {
         return;
       }
       if (type === "tool_call") {
+        flushSegment();
         handleToolCall(update);
         return;
       }
       if (type === "tool_call_update") {
+        flushSegment();
         handleToolCallUpdate(update);
         return;
       }
@@ -888,6 +913,8 @@ export class DeepSeekAcpBackend {
       }
       pending.clear();
       if (!terminalQueued) {
+        // 传输先断：缓冲里的尾段发言仍先于失败终态发出（终态前最后说过的话是事实）。
+        flushSegment();
         queue.push(doneEvent(
           "failed",
           "deepseek-acp transport closed before completion; " + exitFact + stderrFact,
@@ -1115,6 +1142,9 @@ export class DeepSeekAcpBackend {
       }, 0);
       promptPromise.then((result) => {
         if (terminalQueued) return;
+        // 回合正常结束：尾段发言（最后一条非空 assistant message 即回答）先于终局
+        // usage 与 done 发出。
+        flushSegment();
         // 终局用量唯一来源：PromptResponse.usage（usage_update 绝不计入）。
         const usage = result?.usage;
         if (usage && typeof usage === "object") {
