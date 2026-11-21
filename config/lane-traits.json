@@ -326,8 +326,7 @@
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [
         "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败",
-        "sol 额度用尽时可顶会审：11-15 life-index、carloha_fde 各一轮，意见带复现脚本、被 Lead 采纳",
-        "会审答复多不在开头给结论：10-29 起 149 次里只有 29 次开头写明；任务书要求第一行写结论"
+        "sol 额度用尽时可顶会审：11-15 life-index、carloha_fde 各一轮，意见带复现脚本、被 Lead 采纳"
       ],
       "contextWindow": {
         "tokens": 1048576,
