@@ -3591,6 +3591,259 @@ test("TD-362: 停止探针——turns 页 has_more:true（超过一页）→ 抛
   assert.deepEqual(result, { quiet: null, observation: "unavailable" });
 });
 
+// ===== 第 129 批：kimi 2.7.2 在途纠偏（夹具 t7，2026-11-21 采集）=====
+// t7 拍序（test/fixtures/kimi-2.7.2/README.md 的 t7 节）：转入前一拍（原轮 running、Bash
+// 在 executing）→ 约 19s 的 held 拍（被转入的 prompt 既不在 prompts 列表——active 仍是原
+// prompt、queued 空——也不在任何轮里）→ 工具结束那一拍原轮以 completed 无回答结束、同一
+// 拍新轮以纠偏为开场消息开轮 → settled（idle 终态）。2.6.3 在转入时立即结束原轮，被转入
+// 的 prompt 一两拍内就出现。
+
+const T7_SESSION = kimi272("t7-steer-midtool-held.json").detail.json.data.id;
+const T7_BASE = `http://127.0.0.1:4310/api/v1/sessions/${T7_SESSION}`;
+const T7_CORRECTION_ID = "msg_01M7XSRC47HN38RNYTTBQJH96T";
+
+/** 读 t7 的一份拍实录 {turns, prompts, detail}，三项都按录到的 HTTP 状态回放。 */
+function t7Poll(name) {
+  const record = kimi272(`t7-steer-midtool-${name}.json`);
+  return {
+    prompts: jsonResponse(record.prompts.json, record.prompts.http),
+    turns: jsonResponse(record.turns.json, record.turns.http),
+    detail: jsonResponse(record.detail.json, record.detail.http),
+  };
+}
+
+/**
+ * t7 拍序的假服务器：spawn 期建会话（回 t7 录到的会话 id）→ 会话详情（提交前用录到的
+ * session-detail-fresh：activity idle，静默门放行）→ 提交前 turns 空 → POST prompts 回
+ * submit；之后第 i 拍（一拍 = 一次 GET prompts）回放 ticks[i-1] 的 {prompts, turns,
+ * detail}（超出恒重复最后一拍）；纠偏的 POST prompts / steer 按 corrections / steers
+ * 队列回放。
+ */
+function kimi272PollServer({ ticks, submit, corrections = [], steers = [] }) {
+  let spawned = false;
+  let tick = 0;
+  const correctionQueue = [...corrections];
+  const steerQueue = [...steers];
+  const current = () => ticks[Math.min(Math.max(tick, 1), ticks.length) - 1];
+  return kimiServer((url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (method === "POST" && url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: T7_SESSION });
+    if (method === "GET" && url === T7_BASE) return spawned ? current().detail : replay272("session-detail-fresh.json");
+    if (method === "GET" && url === `${T7_BASE}/agents/main/turns`) return spawned ? current().turns : turnsEnvelope([]);
+    if (method === "GET" && url === `${T7_BASE}/prompts`) {
+      if (spawned) tick += 1;
+      return current().prompts;
+    }
+    if (method === "POST" && url === `${T7_BASE}/prompts`) {
+      if (!spawned) {
+        spawned = true;
+        return submit;
+      }
+      return correctionQueue.shift();
+    }
+    if (method === "POST" && url === `${T7_BASE}/prompts:steer`) return steerQueue.shift();
+    throw new Error(`unexpected ${method} ${url}`);
+  });
+}
+
+/**
+ * 按 t7 拍序回放并跑完事件流：派发与纠偏的文本都取自实录；纠偏在第 2 拍投递（第 1 拍 =
+ * 转入前的那一拍，之后按 ticks 回放）。onPoll(poll) 是拍号钩子（推假钟 / 中止用）。
+ */
+async function runT7(ticks, {
+  corrections = [], steers = [], signal, silentTimeout, pollInterval = 5, settleClock, onPoll = null,
+} = {}) {
+  const dispatch = kimi272("t7-steer-midtool-before-steer.json").prompts.json.data.active;
+  const correctionText = kimi272("t7-steer-midtool-correction-submit.json").json.data.content[0].text;
+  const { fetchImpl, calls } = kimi272PollServer({
+    ticks,
+    submit: envelope({ prompt_id: dispatch.prompt_id, user_message_id: dispatch.user_message_id, status: dispatch.status }),
+    corrections,
+    steers,
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: dispatch.content[0].text });
+  let polls = 0;
+  let sent = null;
+  const events = [];
+  for await (const ev of handle.events(signal, {
+    pollInterval,
+    silentTimeout,
+    settleClock,
+    onPollTick: async () => {
+      polls += 1;
+      if (polls === 2) sent = await handle.sendCorrection(correctionText);
+      if (typeof onPoll === "function") onPoll(polls);
+    },
+  })) events.push(ev);
+  return { events, polls, sent, calls, dispatchText: dispatch.content[0].text };
+}
+
+/** settled 拍去掉新轮（ordinal 1）：原轮已结束、被转入的纠偏既不在轮里也不在 prompts 列表里。 */
+function t7SettledWithoutNewTurn() {
+  const { turns, prompts, detail } = kimi272("t7-steer-midtool-settled.json");
+  const endedOnly = turns.json.data.turns.filter((turn) => turn.ordinal === 0);
+  return {
+    turns: jsonResponse({ ...turns.json, data: { ...turns.json.data, turns: endedOnly } }, turns.http),
+    prompts: jsonResponse(prompts.json, prompts.http),
+    detail: jsonResponse(detail.json, detail.http),
+  };
+}
+
+/**
+ * t7 的 held 快照，工具条目的 status 换成给定值（其余字段原样）——会审 sol 的离线复现
+ * 用 running / pending 每拍交替：签名每拍都变，停滞门每拍都算"进展"。
+ */
+function t7HeldWithToolStatus(status) {
+  const record = kimi272("t7-steer-midtool-held.json");
+  const turns = record.turns.json.data.turns.map((turn) => ({
+    ...turn,
+    items: turn.items.map((item) => (item.type === "tool_call" ? { ...item, status } : item)),
+  }));
+  return {
+    prompts: jsonResponse(record.prompts.json, record.prompts.http),
+    turns: jsonResponse({ ...record.turns.json, data: { ...record.turns.json.data, turns } }, record.turns.http),
+    detail: jsonResponse(record.detail.json, record.detail.http),
+  };
+}
+
+const T7_HELD_JITTER = [t7HeldWithToolStatus("running"), t7HeldWithToolStatus("pending")];
+
+test("kimi-web 2.7.2 在途纠偏①: t7 实录——转入后 12 个 held 拍（>8）都不判失败；工具跑完新轮开轮，运行以 completed 收口、答案取新轮", async () => {
+  const ticks = [
+    t7Poll("before-steer"),
+    ...Array(12).fill(t7Poll("held")),
+    t7Poll("new-turn"),
+    t7Poll("settled"),
+  ];
+  const { events, polls, sent, dispatchText } = await runT7(ticks, {
+    corrections: [replay272("t7-steer-midtool-correction-submit.json")],
+    steers: [replay272("t7-steer-midtool-steer.json")],
+  });
+  assert.deepEqual(sent, { ok: true }, "steer 回 steered:true");
+  assert.equal(polls, 15, "12 个 held 拍都不计等待，new-turn + settled 两拍才收口");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed");
+  const messages = events.filter((e) => e.kind === "message");
+  assert.deepEqual(messages.map((e) => `${e.role}:${e.parts[0].text}`), [
+    `user:${dispatchText}`,
+    "assistant:20 replies came back: 20 sent, 20 received, 0% packet loss.\n\nSTEERED-OK",
+  ], "回显取第一个归属轮（派发）的开场消息，答案取新轮——两条 prompt 都归属本运行");
+  assert.deepEqual(events.find((e) => e.kind === "metrics"), {
+    kind: "metrics",
+    tokens: { input: 5626, output: 217, cacheRead: 28928, cacheWrite: 0 },
+    firstRequest: { input: 4518, cacheRead: 12288 },
+  }, "各归属轮 usage 之和（两轮都计入）");
+  assert.deepEqual(events.filter((e) => e.kind === "command").map((e) => e.command), ["ping -n 20 127.0.0.1"]);
+  assert.deepEqual(
+    events.filter((e) => e.kind === "tool_result").map((e) => [e.tool, e.isError]),
+    [["tool_QWJ7No2y7wXSOBiVVk8W6lUN", false]],
+    "在途工具调用在 held 期间只预告一次，工具结束后落结果",
+  );
+});
+
+test("kimi-web 2.7.2 在途纠偏②: held 后原轮结束、被转入的 prompt 仍不在任何轮里也不在 prompts 列表里 → 连续 8 拍后仍按'转入但没有轮执行它'失败", async () => {
+  const ticks = [
+    t7Poll("before-steer"),
+    ...Array(2).fill(t7Poll("held")),
+    ...Array(12).fill(t7SettledWithoutNewTurn()),
+  ];
+  const { events, polls, sent } = await runT7(ticks, {
+    corrections: [replay272("t7-steer-midtool-correction-submit.json")],
+    steers: [replay272("t7-steer-midtool-steer.json")],
+  });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(polls, 11, "拍 2..3 held 不计；拍 4..11 从原轮结束起连续数满 8 拍");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.ok(
+    done.error.includes(`${T7_CORRECTION_ID} was steered into the session but no turn ran it within 8 consecutive polls`),
+    done.error,
+  );
+  assert.ok(!events.some((e) => e.kind === "message" && e.role === "assistant"), "没有答案可收口");
+});
+
+test("kimi-web 2.7.2 在途纠偏③: 原轮一直 running——held 快照重复 20 拍不到界；随后 signal 中止，事件流静默退出", async () => {
+  const controller = new AbortController();
+  const ticks = [t7Poll("before-steer"), ...Array(20).fill(t7Poll("held"))];
+  const { events, polls, sent } = await runT7(ticks, {
+    corrections: [replay272("t7-steer-midtool-correction-submit.json")],
+    steers: [replay272("t7-steer-midtool-steer.json")],
+    signal: controller.signal,
+    onPoll: (poll) => { if (poll === 21) controller.abort(); },
+  });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(polls, 21, "转入前 1 拍 + held 20 拍，全部不计等待");
+  assert.ok(!events.some((e) => e.kind === "done"), "中止静默退出——不 emit done（终态归 RunManager）");
+  assert.ok(!JSON.stringify(events).includes("no turn ran it"), "原轮一直在跑，不判'没有轮执行它'");
+  assert.ok(!events.some((e) => e.kind === "message"), "等待期没有消息事件（没被结算成未执行）");
+});
+
+test("kimi-web 2.7.2 在途纠偏④: silentTimeout 在场——到界从最后一次 held 起算（held 期间每拍刷新 heldAt），原轮结束后没开新轮 → 按该上界失败", async () => {
+  // 受控钟每拍 +60ms：首次 held（拍 2）到原轮结束（拍 7）跨 300ms，远大于 silentTimeout
+  // 100ms。若 heldAt 只在第一次 held 赋值（变异版本），拍 7 就会因 300ms > 100ms 立即到界；
+  // 正确实现每拍刷新 heldAt，拍 7 从最后一次 held（拍 6）起只过了 60ms，拍 8 才到界。
+  const t0 = Date.now();
+  let fakeNow = t0;
+  const ticks = [
+    t7Poll("before-steer"),
+    ...Array(5).fill(t7Poll("held")),
+    ...Array(3).fill(t7SettledWithoutNewTurn()),
+  ];
+  const { events, polls, sent } = await runT7(ticks, {
+    corrections: [replay272("t7-steer-midtool-correction-submit.json")],
+    steers: [replay272("t7-steer-midtool-steer.json")],
+    settleClock: () => fakeNow,
+    silentTimeout: 100,
+    onPoll: (poll) => { fakeNow = t0 + poll * 60; },
+  });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(polls, 8, "拍 7 只过了最后一次 held 后 60ms（未到界），拍 8 过 120ms 才失败");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.ok(
+    done.error.includes(`${T7_CORRECTION_ID} was steered into the session but no turn ran it within 100ms of the steer`),
+    done.error,
+  );
+});
+
+test("kimi-web 2.7.2 在途纠偏⑤: held 期工具状态每拍抖动（停滞门误判进展）——按住 30 分钟后不再按住，8 拍后按'转入但没有轮执行它'失败并注明超过上限", async () => {
+  // 会审 sol 的离线复现形状：工具条目 status 每拍在 running/pending 之间换，签名每拍都变，
+  // 停滞门每拍都算进展（活体证词与 30min 硬顶永不击发）。没有按住上限的话这条流不会退出；
+  // 有上限时拍 2..30（转入 ≤ 30 分钟）按住，拍 31 起按 8 拍计数，拍 38 失败。
+  const t0 = Date.now();
+  let fakeNow = t0;
+  const controller = new AbortController();
+  const ticks = [
+    t7Poll("before-steer"),
+    ...Array.from({ length: 39 }, (_, index) => T7_HELD_JITTER[index % 2]),
+  ];
+  const { events, polls, sent } = await runT7(ticks, {
+    corrections: [replay272("t7-steer-midtool-correction-submit.json")],
+    steers: [replay272("t7-steer-midtool-steer.json")],
+    signal: controller.signal,
+    settleClock: () => fakeNow,
+    onPoll: (poll) => {
+      fakeNow = t0 + poll * 60_000; // 每拍 60s：30 分钟上限落在拍 30 与 31 之间
+      if (poll === 60) controller.abort(); // 没有上限时应在此中止：断言先失败，不会挂到测试超时
+    },
+  });
+  assert.deepEqual(sent, { ok: true });
+  assert.equal(polls, 38, "拍 2..30 按住（转入时长 ≤ 30 分钟），拍 31..38 数满 8 拍后到界");
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  assert.ok(
+    done.error.includes(`${T7_CORRECTION_ID} was steered into the session but no turn ran it within 8 consecutive polls`),
+    done.error,
+  );
+  assert.ok(done.error.includes("(held past the 30-minute hold cap)"), done.error);
+});
+
 // ===== 收尾：kimi 2.6.3 实测目录覆盖（须是本文件最后一个测试——前面的测试先读完）=====
 
 test("kimi 2.6.3 实测：目录里每个文件都被本文件读到（README 写明了采集方式）", () => {

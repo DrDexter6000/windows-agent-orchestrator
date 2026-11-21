@@ -174,6 +174,13 @@ const NO_PROGRESS_CEILING_MS = 240_000;
 // main_turn_active / busy 是服务端的自我声明，工具挂死时它同样报 active——没有
 // 别的体征可以交叉印证，所以单段静默仍在此值收口。
 const LIVENESS_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
+// 第 129 批会审（sol 离线复现）：2.7.2 的"等原轮的在途工具调用结束再开轮"可以很长，而
+// serve 的轮状态抖动（工具条目 status 每拍在 running/pending 之间往返）会让签名每拍都变、
+// 停滞门每拍都算进展——活体证词与上面的 30min 硬顶都不会击发，于是"已转入的纠偏被在跑的
+// 归属轮按住"成了无界等待（复现里推进约 41 分钟仍不退出，只在 signal 中止时停）。所以
+// 按住必须自带上界，取值与活体证词硬顶相同：从转入时刻（steeredAt）起最多按住 30 分钟；
+// 超过即不再按住，按原规则计数与到界——此时"原轮结束了却没有轮执行它"本就有界失败。
+const STEER_HOLD_CAP_MS = 30 * 60_000;
 
 // usage 的字段映射（kimi 2.6 轮级 usage 四计数 → metrics 轴，1:1 语义映射，不发明
 // 聚合；reasoning/costUsd 无 kimi 对应字段，省略）。
@@ -417,6 +424,8 @@ export class KimiWebBackend {
         runPrompts,
         // TD-197① test seam: injectable monotonic clock for the stall budget.
         stallClock: opts?.stallClock,
+        // 第 129 批测试缝：可注入的结算时钟（steeredAt/heldAt/到界与按住上限的 epoch ms）。
+        settleClock: opts?.settleClock,
         serveStartNote,
       }),
       // 停止面（abort / session / messages / sessionStatus）与 wao stop 共用同一实现。
@@ -691,7 +700,7 @@ export class KimiWebBackend {
       if (typeof promptId !== "string" || promptId.length === 0 || PROMPT_FAILED_STATUSES.has(queued?.status)) {
         return { ok: false, reason: "send_failed" };
       }
-      const accepted = { kind: "correction", submittedAt: Date.now(), steeredAt: null, waitPolls: 0, notExecuted: false };
+      const accepted = { kind: "correction", submittedAt: Date.now(), steeredAt: null, heldAt: null, waitPolls: 0, notExecuted: false };
       runPrompts?.prompts.set(promptId, accepted);
       const steered = await this.request(
         agent,
@@ -940,8 +949,19 @@ export class KimiWebBackend {
    *     done(failed) 写明哪条、什么状态。其余各按自己的计时原点等，上界 =
    *     silentTimeout（缺席时连续 SHAPE_DRIFT_POLL_LIMIT 拍）：
    *       · 派发：原点 = 提交时刻；到界仍不在任何轮里 ⇒ silent timeout 失败。
-   *       · 已转入的纠偏：原点 = 转入时刻；prompts 里看不到它也算未结算；到界 ⇒
-   *         失败（转入了但没有轮执行它）。
+   *       · 已转入的纠偏：2.7.2 实测（夹具 t7，2026-11-21）——转入时原轮的在途工具
+   *         调用（tool_call.status "running"、stage "executing"）还在跑，纠偏要等它
+   *         跑完才开自己的轮；这期间（实录约 19s）它既不在 prompts 列表（active 仍是
+   *         原 prompt、queued 空）也不在任何轮里。所以只要归属轮里还有 status
+   *         "running" 的轮就不计等待：每拍把 waitPolls 清零、把计时原点挪到当前时刻
+   *         （heldAt），silentTimeout 的到界原点就是它。按住自带上界（第 129 批会审：
+   *         serve 的轮状态抖动——工具条目 status 往返 running/pending——会让签名每拍
+   *         都变、停滞门误判进展，无上界的按住等于无界等待）：从转入时刻起最多
+   *         STEER_HOLD_CAP_MS（30 分钟），超过即不再按住、按原规则计数与到界
+   *         （silentTimeout 缺席 8 拍，在场则从最后一次 held 起算；失败文案附
+   *         "held past the …hold cap"）。prompts 里看不到它也算未结算；归属轮都不再
+   *         running 后到界 ⇒ 失败（转入了但没有轮执行它）。2.6 的原轮在转入时立即
+   *         结束，这条规则不会延长任何等待。
    *       · 只接纳（steer 失败）的纠偏：原点 = 它自己的提交时刻，只在它既不在轮里
    *         也不在 active/queued 时计；到界 ⇒ 按"未执行"结算并发一条 system 消息，
    *         之后若出现在某轮里照常归属。
@@ -959,12 +979,15 @@ export class KimiWebBackend {
    *     静默 return（终态归 RunManager）。
    */
   async *streamEvents(agent, sessionId, {
-    signal, interval = 1000, silentTimeout, onPollTick, runPrompts, stallClock, serveStartNote,
+    signal, interval = 1000, silentTimeout, onPollTick, runPrompts, stallClock, settleClock, serveStartNote,
   } = {}) {
     // 决定 0075：本次派发拉起过（或等过）worker serve——告诉 Lead。
     if (typeof serveStartNote === "string" && serveStartNote.length > 0) {
       yield messageEvent("system", [{ type: "text", text: serveStartNote }]);
     }
+    // 结算计时（steeredAt/heldAt/到界/按住上限）的 epoch ms 时钟；settleClock 为测试注入缝
+    // （与 stallClock 同款），缺省 Date.now——原值与 sendCorrection 写下的 steeredAt 同一域。
+    const settleNow = typeof settleClock === "function" ? settleClock : Date.now;
     // 直调防御形状（没有 spawn 建的集合）：派发记在永不匹配的键下，由有界出口收口。
     const run = runPrompts ?? createRunPrompts();
     // 响应体里的文字（error、end_reason、状态值）走的是 HTTP 200 成功路径，不经
@@ -1015,6 +1038,8 @@ export class KimiWebBackend {
       }
       const attributed = turns.filter((turn) => turnPromptIds(turn).some((id) => run.prompts.has(id)));
       const seen = new Set(attributed.flatMap(turnPromptIds));
+      const anyRunning = attributed.some((turn) => turn.status === "running");
+      const now = settleNow();
       // 结算：每个 id 各按自己的原点计（初次派发的原点绝不用于纠偏）。
       let pending = false;
       for (const [id, entry] of run.prompts) {
@@ -1031,10 +1056,23 @@ export class KimiWebBackend {
           pending = true;
           continue;
         }
+        // 2.7.2 在途纠偏（夹具 t7）：转入的纠偏要等原轮的在途工具调用跑完才开自己的
+        // 轮，这期间它既不在 prompts 列表也不在任何轮里。归属轮里还有 running 的轮就
+        // 不计等待——清零拍数、把计时原点挪到当前时刻（heldAt）；归属轮都不再 running
+        // 后按原规则计数与到界，所以"原轮结束了却没开轮"仍是有界失败。按住自带上界
+        // （STEER_HOLD_CAP_MS，见常量注释）：serve 的轮状态抖动会让停滞门误判进展，超过
+        // 上限即不再按住、按下面的原规则计数与到界。
+        if (entry.kind === "correction" && entry.steeredAt !== null && anyRunning
+          && now - entry.steeredAt <= STEER_HOLD_CAP_MS) {
+          entry.waitPolls = 0;
+          entry.heldAt = now;
+          pending = true;
+          continue;
+        }
         entry.waitPolls += 1;
-        const origin = entry.steeredAt ?? entry.submittedAt;
+        const origin = entry.heldAt ?? entry.steeredAt ?? entry.submittedAt;
         const expired = silentTimeout
-          ? Date.now() - origin > silentTimeout
+          ? now - origin > silentTimeout
           : entry.waitPolls >= SHAPE_DRIFT_POLL_LIMIT;
         if (!expired) {
           pending = true;
@@ -1050,9 +1088,13 @@ export class KimiWebBackend {
           return;
         }
         if (entry.steeredAt !== null) {
+          // 按住超过上限后的失败补一句，原有前缀不动（既有测试与文案匹配它）。
+          const heldPastCap = now - entry.steeredAt > STEER_HOLD_CAP_MS
+            ? ` (held past the ${Math.round(STEER_HOLD_CAP_MS / 60_000)}-minute hold cap)`
+            : "";
           yield doneEvent(
             "failed",
-            redact(`kimi-web backend: correction prompt ${String(id)} was steered into the session but no turn ran it within ${bound} of the steer`),
+            redact(`kimi-web backend: correction prompt ${String(id)} was steered into the session but no turn ran it within ${bound} of the steer${heldPastCap}`),
           );
           return;
         }
@@ -1354,9 +1396,10 @@ const NO_PROMPT_ID = Symbol("kimi-web dispatch without prompt_id");
 
 /**
  * 一次运行的提示集合（spawn 建一份，sendCorrection 与 streamEvents 共用）。
- * prompts: id → {kind:"dispatch"|"correction", submittedAt, steeredAt, waitPolls,
- * notExecuted}；steeredAt 非 null = 已转入。boundaryOrdinal = 提交前最大的轮
- * ordinal（没有轮为 -1），事件流往回翻页到它为止。
+ * prompts: id → {kind:"dispatch"|"correction", submittedAt, steeredAt, heldAt,
+ * waitPolls, notExecuted}；steeredAt 非 null = 已转入；heldAt 非 null = 已转入的纠偏
+ * 最近一次因"归属轮还在 running"被按住（之后它就是等待的计时原点，见 streamEvents）；
+ * boundaryOrdinal = 提交前最大的轮 ordinal（没有轮为 -1），事件流往回翻页到它为止。
  */
 export function createRunPrompts({ promptId = null, status, boundaryOrdinal = -1, submittedAt = Date.now() } = {}) {
   return {
@@ -1364,7 +1407,7 @@ export function createRunPrompts({ promptId = null, status, boundaryOrdinal = -1
     dispatchId: promptId,
     dispatchStatus: status,
     prompts: new Map([[promptId ?? NO_PROMPT_ID, {
-      kind: "dispatch", submittedAt, steeredAt: null, waitPolls: 0, notExecuted: false,
+      kind: "dispatch", submittedAt, steeredAt: null, heldAt: null, waitPolls: 0, notExecuted: false,
     }]]),
   };
 }
