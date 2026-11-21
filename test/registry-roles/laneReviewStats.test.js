@@ -5,11 +5,15 @@
 //     之后才算，词内/第 4 行起/句中（测试计数、fail()）不认；PASS 词前紧挨否定
 //     改判 FIX_FIRST；连字符/空格拼写变体与中文 PASS_WITH_NOTES 变体归类；
 //   - 计数：每车道席位数、作答数（declared/inferred 之和）、各结论次数（含
-//     constructor 这类键名）；两种读法都取不到的席位算未作答；
+//     constructor 这类键名）；两种读法都取不到的席位算未作答，认不出按决定
+//     0128 拆 undeclared（没声明字段或独立会审）与 declaredUnfilled（声明了
+//     字段但未填），文本行同显两数；
 //   - 两两比较：任何一次会审里有 ≥2 席结论属于 VERDICT_RANK 就比较（不论
 //     声明还是推断），同车道配对不自比；独立会审运行没有同场席位，不参与比较；
 //   - 收集：按 consultId 去重、createdAt 落在 [since, until) 才计、坏记录跳过；
-//     席位结论先按声明 Q1 读（declared），读不出再 inferVerdict（inferred）；
+//     席位结论先按声明 Q1 读（declared）；声明了 Q1 的会审不回退推断（取不到
+//     = declaredUnfilled，0128 续修：收紧规则只把含糊值改记未填，推断不得翻
+//     案），没声明 Q1 的会审与独立会审才 inferVerdict（inferred）；
 //   - 数据源：本检出/工作树/归档目录之外，从 runs/projects/ 桶的转录 project
 //     事实发现各项目的 .wao/runs/consults（坏路径跳过不炸）；项目桶（有
 //     .project.json）里 roleId auditor/reviewer 且带 runId 绑定只读声明的运行
@@ -264,9 +268,33 @@ test("aggregateSeatVerdicts：独立会审只计数，不参与比较", () => {
   assert.deepEqual(lanes.kimi.stricterThan, {});
 });
 
+test("aggregateSeatVerdicts + render：认不出拆 undeclared 与 declaredUnfilled（决定 0128），两数同显", () => {
+  const consults = [
+    { seats: [
+      { lane: "sol", q1: null, fieldsDeclared: true },  // 声明了字段但未填 → declaredUnfilled
+      { lane: "kimi", q1: null },                        // 没声明也推断不到 → undeclared
+      { lane: "opus", q1: "PASS", source: "inferred" },  // 声明了但推断救回 → answered，不进认不出
+    ] },
+  ];
+  const standalone = [
+    { lane: "kimi", q1: null },                                  // 独立会审推断不到 → undeclared
+    { lane: "sol", q1: "FIX_FIRST", source: "inferred" },
+  ];
+  const lanes = aggregateSeatVerdicts(consults, standalone);
+  assert.equal(lanes.sol.declaredUnfilled, 1, "声明了没填才是车道信号");
+  assert.equal(lanes.sol.undeclared, 0);
+  assert.equal(lanes.kimi.undeclared, 2, "会审未声明席 + 独立会审都算 undeclared");
+  assert.equal(lanes.kimi.declaredUnfilled, 0);
+  assert.equal(lanes.opus.answered, 1);
+  assert.equal(lanes.opus.declaredUnfilled + lanes.opus.undeclared, 0, "推断救回的席位不进认不出");
+  const report = renderLaneReviewStats({ consults, standaloneReviews: standalone, lanes });
+  assert.match(report, /sol: reviews 2, answered 1 \(declared 0, inferred 1\), unrecognized 1 \(undeclared 0, declaredUnfilled 1\)/);
+  assert.match(report, /kimi: reviews 2, answered 0 \(declared 0, inferred 0\), unrecognized 2 \(undeclared 2, declaredUnfilled 0\)/);
+});
+
 // ── collectConsults ──
 
-test("collectConsults：去重、时间窗、坏记录跳过；声明读得出记 declared，读不出推断记 inferred", async () => {
+test("collectConsults：去重、时间窗、坏记录跳过；声明读得出记 declared，声明了 Q1 不回退推断", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-lrs-"));
   try {
     const a = join(dir, "a");
@@ -286,7 +314,7 @@ test("collectConsults：去重、时间窗、坏记录跳过；声明读得出�
     writeFileSync(join(a, "notes.txt"), "ignored");
     const replies = {
       run_s1: "Q1: FIX_FIRST\n理由", // 声明 Q1 读得出 → declared
-      run_k1: "**FAIL — 方向不对**", // 声明 Q1 读不出（FAIL 不在声明值里）→ 推断 FIX_FIRST
+      run_k1: "**FAIL — 方向不对**", // 声明 Q1 读不出（无锚点）→ 不推断，记未填（0128 续修）
     };
     const observeFn = async ({ runId }) => {
       if (!(runId in replies)) throw new Error("transcript unreadable");
@@ -295,15 +323,47 @@ test("collectConsults：去重、时间窗、坏记录跳过；声明读得出�
     const consults = await collectConsults({ dirs: [a, b], runDir: join(dir, "runs"), since: "2026-10-06", until: "2026-10-18", observeFn });
     assert.deepEqual(consults.map((c) => c.consultId), ["consult_1"], "按 consultId 去重；窗外与坏记录不计");
     assert.deepEqual(consults[0].seats, [
-      { lane: "sol", runId: "run_s1", q1: "FIX_FIRST", source: "declared" },
-      { lane: "kimi", runId: "run_k1", q1: "FIX_FIRST", source: "inferred" },
-      { lane: "opus", runId: "run_gone", q1: null },
+      { lane: "sol", runId: "run_s1", q1: "FIX_FIRST", source: "declared", fieldsDeclared: true },
+      { lane: "kimi", runId: "run_k1", q1: null, fieldsDeclared: true },
+      { lane: "opus", runId: "run_gone", q1: null, fieldsDeclared: true },
     ]);
     const report = renderLaneReviewStats({ consults, lanes: aggregateSeatVerdicts(consults) });
-    assert.match(report, /^consults 1 \(with 2\+ rated seats 1\), standalone reviews 0/);
-    assert.match(report, /sol: reviews 1, answered 1 \(declared 1, inferred 0\), unrecognized 0 — FIX_FIRST 1/);
-    assert.match(report, /kimi: reviews 1, answered 1 \(declared 0, inferred 1\), unrecognized 0 — FIX_FIRST 1/);
-    assert.match(report, /opus: reviews 1, answered 0 \(declared 0, inferred 0\), unrecognized 1 — -/);
+    assert.match(report, /^consults 1 \(with 2\+ rated seats 0\), standalone reviews 0/,
+      "kimi 不再推断 → 结论席位只剩 sol 一个，2+ 阈值不计");
+    assert.match(report, /sol: reviews 1, answered 1 \(declared 1, inferred 0\), unrecognized 0 \(undeclared 0, declaredUnfilled 0\) — FIX_FIRST 1/);
+    assert.match(report, /kimi: reviews 1, answered 0 \(declared 0, inferred 0\), unrecognized 1 \(undeclared 0, declaredUnfilled 1\) — -/,
+      "声明了 Q1 的会审读不到不推断（0128 续修）");
+    assert.match(report, /opus: reviews 1, answered 0 \(declared 0, inferred 0\), unrecognized 1 \(undeclared 0, declaredUnfilled 1\) — -/,
+      "声明了 Q1 的会审里读不到 = declaredUnfilled（决定 0128）");
+  } finally { cleanupDir(dir); }
+});
+
+test("collectConsults：声明了 Q1 的会审不回退推断（0128 续修两个反例）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lrs-noreinfer-"));
+  try {
+    const consults = join(dir, "consults");
+    mkdirSync(consults);
+    writeFileSync(join(consults, "consult_a.json"), JSON.stringify(record("consult_a", "2026-10-10T08:00:00.000Z", [
+      { agentId: "sol", runId: "run_d1" },
+      { agentId: "kimi", runId: "run_d2" },
+    ])));
+    const replies = {
+      run_d1: "Q1: PASS\nQ1: FIX_FIRST\n",            // 多块异值：回执记未填
+      run_d2: "Q1: FAIL 只是反例，最终结论是 PASS\n",  // 叙述句：回执记未填
+    };
+    const out = await collectConsults({
+      dirs: [consults], runDir: join(dir, "runs"),
+      observeFn: async ({ runId }) => ({ finalText: replies[runId] }),
+    });
+    assert.deepEqual(out[0].seats, [
+      { lane: "sol", runId: "run_d1", q1: null, fieldsDeclared: true },
+      { lane: "kimi", runId: "run_d2", q1: null, fieldsDeclared: true },
+    ], "声明提取是唯一来源：取不到就未填，推断不得把未填翻成 PASS/FIX_FIRST");
+    const lanes = aggregateSeatVerdicts(out);
+    assert.equal(lanes.sol.inferred, 0);
+    assert.equal(lanes.sol.declaredUnfilled, 1);
+    assert.equal(lanes.kimi.inferred, 0);
+    assert.equal(lanes.kimi.declaredUnfilled, 1);
   } finally { cleanupDir(dir); }
 });
 
@@ -330,8 +390,8 @@ test("collectConsults + consultSeatRunIds：坏 seats/坏席位跳过不计，�
     });
     assert.deepEqual(out.map((c) => c.consultId).sort(), ["consult_good", "consult_null", "consult_seats"]);
     assert.deepEqual(out.find((c) => c.consultId === "consult_good").seats, [
-      { lane: "sol", runId: "run_bg1", q1: "PASS", source: "inferred" },
-    ], "null/非对象/缺 agentId/runId 的席位不计");
+      { lane: "sol", runId: "run_bg1", q1: null, fieldsDeclared: true },
+    ], "声明了 Q1 的会审读不到不推断（0128 续修）；null/非对象/缺 agentId/runId 的席位不计");
     assert.deepEqual(out.find((c) => c.consultId === "consult_seats").seats, [], "seats 非数组按零席位处理");
     assert.deepEqual(out.find((c) => c.consultId === "consult_null").seats, []);
     // 排除面同样只收有效席位的 runId（缺 agentId 的席位一并跳过），不抛。
@@ -360,7 +420,7 @@ test("collectConsults：默认读法从席位转录的最终答复取 Q1", async
     writeFileSync(join(runDir, "run_real1.jsonl"), [event("先看一下文件。"), event("Q1: PASS_WITH_NOTES\n\n理由与证据。")].join("\n") + "\n");
     writeFileSync(join(consults, "consult_r.json"), JSON.stringify(record("consult_r", "2026-10-10T08:00:00.000Z", [{ agentId: "kimi", runId: "run_real1" }])));
     const out = await collectConsults({ dirs: [consults], runDir });
-    assert.deepEqual(out[0].seats, [{ lane: "kimi", runId: "run_real1", q1: "PASS_WITH_NOTES", source: "declared" }], "只看最后一条答复");
+    assert.deepEqual(out[0].seats, [{ lane: "kimi", runId: "run_real1", q1: "PASS_WITH_NOTES", source: "declared", fieldsDeclared: true }], "只看最后一条答复");
   } finally { cleanupDir(dir); }
 });
 
@@ -419,7 +479,8 @@ test("discoverProjectConsultDirs + collectConsults：从转录 project 事实发
       observeFn: async () => ({ finalText: "FAIL — 先修" }),
     });
     assert.deepEqual(consults.map((c) => c.consultId), ["consult_x"]);
-    assert.deepEqual(consults[0].seats, [{ lane: "sol", runId: "run_px", q1: "FIX_FIRST", source: "inferred" }]);
+    assert.deepEqual(consults[0].seats, [{ lane: "sol", runId: "run_px", q1: null, fieldsDeclared: true }],
+      "声明了 Q1 的会审读不到不推断（0128 续修）");
   } finally { cleanupDir(dir); }
 });
 

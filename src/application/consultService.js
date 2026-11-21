@@ -73,12 +73,14 @@ import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js"
 // ===== 锚点规则（brief 解析与席位回复归组共用同一 SSOT）=====
 //
 // 行首编号问题锚点，两条确定性规则（0039 r1 任务书）：
-//   ① Markdown 标题形：/^#{1,3}\s*Q(\d+)\b/   —— "## Q1 这个方案可行吗"
+//   ① Markdown 标题形：/^#{1,3}\s*Q(\d+)\b(?:\*\*)?\s*[.::：]?/
+//      —— "## Q1 这个方案可行吗"；0128 续修：可选 ** + 分隔符（. : ：），
+//      "## Q1: PASS" 的分隔符不再把值顶开（尾部全可选，锚点判定面不变）。
 //   ② 裸编号形：      /^Q(\d+)\s*[.::：]/      —— "Q1: ..." / "Q1：" / "Q1."；
 //      行首可带加粗标记 **（"**Q1：…**" / "**Q1**：…"）——席位常把结论行整行加粗
 // 不做模糊匹配、不做句子级切分（切错比不切更糟，0039 §2.2 收集规则）。
 const ANCHOR_PATTERNS = [
-  /^#{1,3}\s*Q(\d+)\b/,
+  /^#{1,3}\s*Q(\d+)\b(?:\*\*)?\s*[.::：]?/,
   /^(?:\*\*)?Q(\d+)(?:\*\*)?\s*[.::：]/,
 ];
 
@@ -152,14 +154,18 @@ export function attributeReply(replyText) {
 }
 
 /**
- * 闭集声明字段值的字面提取 + "字段值不同"标记（纯函数，不变式②）。
+ * 闭集声明字段值的字面提取 + "字段值不同"标记（纯函数，不变式②；决定 0128
+ * 第 2 条收紧提取口径）。
  *
- * declaredFields 形如 {"Q1":["A","B"]}（Lead 声明的闭集候选值）。字段值
- * 提取 = 该席 Qn 第一个有命中的归组块里**首个整词匹配**某个声明值的 token
- * （大小写敏感、字面匹配且前后不紧邻字母/数字/下划线；位置最早者胜，同位置取
- * 最长的声明值；不猜）。缺席 = 未填
- * （null）。fieldDiff 只在"≥2 席有值 且 值不全同"时收该 Qn——标记即提示，
- * 本函数及其输出永不携带"一致/分歧/agree/disagree"类结论词（测试钉住）。
+ * declaredFields 形如 {"Q1":["A","B"]}（Lead 声明的闭集候选值）。字段值提取 =
+ * 该席 Qn 的每个归组块各按**紧跟规则**取一个值：值必须紧跟该块 Qn 锚点（冒号
+ * 形的分隔符已被锚点匹配吃掉；中间只允许空白含换行、** 与反引号；标题形
+ * ## Q1 同规则、值允许换行后紧跟），然后按整词匹配声明值（大小写敏感、前后
+ * 不紧邻字母/数字/下划线；同位置取最长的声明值；不猜）。不紧跟 = 该块记未
+ * 填——"Q1: 不是 PASS，应为 FIX_FIRST"不再被取成 PASS。同一 Qn 多块取到的
+ * 非空值全都相同就是这个值，有不同 = 未填（null）——自相矛盾不再取第一个块。
+ * fieldDiff 只在"≥2 席有值 且 值不全同"时收该 Qn——标记即提示，本函数及其
+ * 输出永不携带"一致/分歧/agree/disagree"类结论词（测试钉住）。
  *
  * @param {Record<string, {ordered: Array<{q:number,text:string}>, unclassified: string, preamble: string}>} perSeatAttribution
  *   席位 agentId → attributeReply 输出。
@@ -196,44 +202,74 @@ export function compareFields(perSeatAttribution, declaredFields) {
   return { fieldDiff, fieldValues };
 }
 
-const WORD_CHAR = /[A-Za-z0-9_]/;
+// 紧跟桥接（决定 0128）：锚点与值之间只允许空白（含换行）、*（覆盖 **）与反引号。
+const ANCHOR_VALUE_BRIDGE_RE = /^[\s*`]+/;
 
-/**
- * value 在 text 里第一次作为整词出现的位置（没有则 -1）。整词 = 前后紧邻的字符
- * 都不是字母、数字或下划线——声明值 `MERGE` 不会命中 `MERGE_AFTER_FIXES` 的前缀，
- * `PASS` 不会命中 `PASSED`。汉字、标点、空白、行首行尾都算边界。
- */
-function indexOfWholeToken(text, value) {
-  for (let from = 0; ; ) {
-    const at = text.indexOf(value, from);
-    if (at === -1) return -1;
-    const before = at === 0 ? "" : text[at - 1];
-    const after = text[at + value.length] ?? "";
-    if (!WORD_CHAR.test(before) && !WORD_CHAR.test(after)) return at;
-    from = at + 1;
-  }
+/** 取 text[index] 起的完整字符（按码点，代理对不拆；越界返回 ""）。 */
+function charAt(text, index) {
+  const code = text.codePointAt(index);
+  return code === undefined ? "" : String.fromCodePoint(code);
+}
+
+/** at 前紧邻的完整字符（at-1 落在代理对后半时回退一格，取整个星面字符）。 */
+function charBefore(text, at) {
+  if (at <= 0) return "";
+  let i = at - 1;
+  const c = text.charCodeAt(i);
+  if (c >= 0xdc00 && c <= 0xdfff && i > 0) i -= 1;
+  return charAt(text, i);
+}
+
+/** text 在 at 处以整词开始 value：前缀匹配且前后紧邻的完整字符（按码点取，
+ * 代理对不拆——PASS𝟙 的 𝟙 是一个码点）都不在共用字符类里（字母任何文字/
+ * 数字/_/-，与候选值白名单同一处定义）——声明值 `MERGE` 不会命中
+ * `MERGE_AFTER_FIXES` 的前缀；只声明 `PASS` 时 `PASSé`、`PASS𝟙`、
+ * `PASS-WITH-NOTES`、`通过理由` 都记未填。中文因此也有边界；标点、空白、
+ * 行首行尾都是边界。 */
+function wholeTokenAt(text, at, value) {
+  if (!text.startsWith(value, at)) return false;
+  return !WORD_CHAR.test(charBefore(text, at)) && !WORD_CHAR.test(charAt(text, at + value.length));
 }
 
 /**
- * Qn 的归组块按文档顺序看，取第一个有命中的块；块内位置最早者胜，同一位置取最长的
- * 声明值（`PASS-WITH-NOTES` 胜过它的前缀 `PASS`），长度也相同才看声明顺序。
+ * 一个归组块按紧跟规则取值（决定 0128 第 2 条）。块文本以锚点行开头，直接用
+ * ANCHOR_PATTERNS 匹配锚点行（两形的分隔符 [.::：] 连同其前置 ** 都已被锚点
+ * 匹配吃掉——标题形 0128 续修起也吃可选分隔符，"## Q1: PASS" 不再把值顶开）；
+ * 锚点之后先吃桥接（空白含换行、*、反引号——标题形的值允许换行后紧跟），再在
+ * 该位置按整词匹配声明值，同位置取最长（`PASS-WITH-NOTES` 胜过它的前缀
+ * `PASS`）。桥接之后第一个词不是声明值 → null（不再在块内任意位置找首个命中）。
  */
-function firstLiteralMatch(attribution, qn, candidates) {
-  for (const entry of attribution?.ordered ?? []) {
-    if (entry?.q !== qn) continue;
-    let bestValue = null;
-    let bestIndex = Infinity;
-    for (const value of candidates) {
-      const at = indexOfWholeToken(String(entry.text ?? ""), value);
-      if (at === -1) continue;
-      if (at < bestIndex || (at === bestIndex && value.length > bestValue.length)) {
-        bestIndex = at;
-        bestValue = value;
-      }
+function valueAfterAnchor(entry, candidates) {
+  const text = String(entry?.text ?? "");
+  const nl = text.indexOf("\n");
+  const line = nl === -1 ? text : text.slice(0, nl);
+  for (const re of ANCHOR_PATTERNS) {
+    const m = re.exec(line);
+    if (!m) continue;
+    let at = m[0].length;
+    at += ANCHOR_VALUE_BRIDGE_RE.exec(text.slice(at))?.[0].length ?? 0;
+    for (const value of [...candidates].sort((a, b) => b.length - a.length)) {
+      if (wholeTokenAt(text, at, value)) return value;
     }
-    if (bestValue !== null) return bestValue;
+    return null;
   }
   return null;
+}
+
+/**
+ * Qn 的每个归组块各按紧跟规则取一个值（决定 0128 第 2 条"多块规则"；历史名
+ * firstLiteralMatch 保留）：取到的非空值全都相同就是这个值；有不同 = 未填
+ * （null），不再取第一个有命中的块；一块都取不到也是未填。
+ */
+function firstLiteralMatch(attribution, qn, candidates) {
+  const filled = [];
+  for (const entry of attribution?.ordered ?? []) {
+    if (entry?.q !== qn) continue;
+    const value = valueAfterAnchor(entry, candidates);
+    if (value !== null) filled.push(value);
+  }
+  if (filled.length === 0) return null;
+  return new Set(filled).size === 1 ? filled[0] : null;
 }
 
 /**
@@ -399,6 +435,66 @@ export function isValidConsultId(id) {
   return typeof id === "string" && /^consult_[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
+// 决定 0128 续修：候选值白名单与整词边界共用同一字符类（只写这一处）——字母
+//（任何文字，含中文）、数字、下划线、连字符。黑名单只要漏一个字符就有歧义
+//（标题形锚点的可选分隔符 . : ： 会吃掉以分隔符开头的候选首字符；空白会切开
+// 格式行；* 与反引号会被紧跟桥接先吃掉；顿号让 "A、B" 与 ["A","B"] 同形）。
+// 整词边界用同一类：PASSé/PASS𝟙/通过理由 都不再是前缀的整词，中文因此也有
+// 边界（"Q1: 通过，理由" 取到、"Q1: 通过理由" 记未填），无需 CJK 例外。
+const VALUE_CHAR_SOURCE = "[\\p{L}\\p{N}_-]";
+const DECLARED_FIELD_VALUE_RE = new RegExp(`^${VALUE_CHAR_SOURCE}+$`, "u");
+// 词字符集（wholeTokenAt 的整词判定）与候选值白名单同源——见上。
+const WORD_CHAR = new RegExp(VALUE_CHAR_SOURCE, "u");
+
+/** 候选值合法性（纯函数）：非空，且只由字母（任何文字）、数字、下划线、连字符组成。 */
+export function isValidDeclaredFieldValue(value) {
+  return typeof value === "string" && DECLARED_FIELD_VALUE_RE.test(value);
+}
+
+/** 创建面的固定拒绝文案（不回显候选值原文——值内容不可信；Qn 键是已过形状门的
+ * 有界串，安全具名）。这句话会直接出现在 MCP 面上，不带内部函数名前缀；CLI
+ * 透出本层 throw，MCP 侧识别本错误类后原样回给调用者。 */
+const DECLARED_FIELD_VALUE_REFUSAL = (key) =>
+  `declared field values for ${key} must be non-empty and use only letters, digits, _ and -`;
+
+/** 键规范化拒绝文案（0128 续修）：Q01 的格式行会被读取端归到第 1 题、Q0 生成
+ * 格式行却永远取不到——声明键必须不带前导零、不能是 Q0。 */
+const DECLARED_FIELD_KEY_REFUSAL = (key) =>
+  `declared field key ${key} must be Q1, Q2, ... with no leading zero (Q0 is not a question number)`;
+
+/**
+ * 决定 0128 续修：声明字段不合格的创建拒绝——专门错误类，供 MCP 面 instanceof
+ * 可靠判别后原样回文案（通用 catch 只回"零派发"文案，只接 MCP 的 Lead 无从
+ * 知道是哪个 Qn 不合格）。message 是上面的固定文案（只含 Qn 键）；CLI 行为不变。
+ */
+export class DeclaredFieldRefusalError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "DeclaredFieldRefusalError";
+  }
+}
+
+/**
+ * 决定 0128 第 2 条"声明即合同"：fields 有值时追加在每席提示词固定会审合同
+ * 之后的格式段。按声明顺序机械生成，每个声明的 Qn 一行；候选值从 fields 原样
+ * 取、不改写。声明键不是 Qn 形或候选为空 → 该行不生成（与 compareFields 的
+ * 读取口径一致）；一行都不生成时返回 ""——提示词与没有 fields 时逐字节相同。
+ */
+export function buildDeclaredFieldsContract(declaredFields) {
+  const declared = declaredFields && typeof declaredFields === "object" ? declaredFields : {};
+  const lines = [];
+  for (const key of Object.keys(declared)) {
+    if (!/^Q\d+$/.test(key)) continue;
+    const candidates = Array.isArray(declared[key])
+      ? declared[key].filter((v) => typeof v === "string" && v.length > 0)
+      : [];
+    if (candidates.length === 0) continue;
+    lines.push(`- ${key} 单独起一行写成「${key}: <值>」，值只能是 ${candidates.join("、")} 之一，这一行不写别的`);
+  }
+  if (lines.length === 0) return "";
+  return `\n\n【结论字段格式（声明即合同）】\n${lines.join("\n")}`;
+}
+
 /**
  * 只读观察一个席位 run：transcript 真值状态 + 最终 assistant 文本。
  * runConsult 收集阶段与 consult show 重渲染共用（同一投影，零漂移）。
@@ -518,6 +614,20 @@ export async function runConsult({
   if (!Number.isInteger(budgetMs) || budgetMs < budgetFloorMs || budgetMs > CONSULT_WAIT_MAX_MS) {
     throw new Error(`budgetMs must be an integer in [${budgetFloorMs}, ${CONSULT_WAIT_MAX_MS}], got: ${JSON.stringify(budgetMs)}`);
   }
+  // 决定 0128 续修：声明键规范化 + 候选值约束——创建面（CLI 与 MCP 共用本
+  // service）有一项不合格即整次拒绝，发生在任何派发之前（零席位派出）。键先
+  // 过 ^Q\d+$ 宽形状门（不过的直接跳过：MCP wire 层与 CLI 解析层各自拒绝），
+  // 再要求 ^Q[1-9]\d*$（无前导零、非 Q0）。重渲染旧记录不做这两项校验
+  //（rerenderConsultFromRecord 照旧读记录里的声明）。
+  for (const key of Object.keys(declaredFields ?? {})) {
+    if (!/^Q\d+$/.test(key) || !Array.isArray(declaredFields[key])) continue;
+    if (!/^Q[1-9]\d*$/.test(key)) {
+      throw new DeclaredFieldRefusalError(DECLARED_FIELD_KEY_REFUSAL(key));
+    }
+    if (!declaredFields[key].every(isValidDeclaredFieldValue)) {
+      throw new DeclaredFieldRefusalError(DECLARED_FIELD_VALUE_REFUSAL(key));
+    }
+  }
 
   const startNow = nowFn();
   const resolvedRegistry = resolve(registryPath);
@@ -608,7 +718,9 @@ export async function runConsult({
     const seatBody = typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
       ? `${text}\n\n${seat.perspectiveText}`
       : text;
-    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
+    // 决定 0128 第 2 条"声明即合同"：fields 有值时，固定会审合同之后机械追加
+    // 结论字段格式段（每席同一份；无 fields 时追加空串——prompt 逐字节不变）。
+    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。${buildDeclaredFieldsContract(declaredFields)}`;
     try {
       // 派发目标取扇出前的那次解析（seatTargets），与身份事实同源。
       const { dispatchAgentId, policy } = seatTargets.get(seat.agentId);

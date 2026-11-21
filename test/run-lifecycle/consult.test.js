@@ -272,9 +272,9 @@ test("INV-1g: 行首加粗的结论行也是锚点（**Q1：…** / **Q1**：…
 
 test("INV-2a: 闭集值不同 → fieldDiff 恰含该 Qn；同值/未填不标", () => {
   const perSeat = {
-    seat_a: attrOf("Q1: 采纳 A\n"),
-    seat_b: attrOf("Q1: 采纳 B\n"),
-    seat_c: attrOf("Q1: 采纳 A\n"),
+    seat_a: attrOf("Q1: A\n"),
+    seat_b: attrOf("Q1: B\n"),
+    seat_c: attrOf("Q1: A\n"),
   };
   const r = compareFields(perSeat, { Q1: ["A", "B"] });
   assert.deepEqual(r.fieldDiff, ["Q1"]);
@@ -299,7 +299,7 @@ test("INV-2b: 全同值 → 无 fieldDiff；仅一席有值（其余未填）→
 
 test("INV-2c: 字面匹配大小写敏感、不猜（小写 a 不命中声明 A）", () => {
   const r = compareFields(
-    { a: attrOf("Q1: value a\n"), b: attrOf("Q1: value A\n") },
+    { a: attrOf("Q1: a\n"), b: attrOf("Q1: A\n") },
     { Q1: ["A"] },
   );
   assert.equal(r.fieldValues.Q1.a, null, "大小写敏感：小写 a ≠ A → 未填");
@@ -323,7 +323,7 @@ test("INV-2d: 输出永不携带结论词；比对零改动输入内容（标记
   assert.deepEqual(before.seat_a.ordered[0].text, "Q1: 采纳 A\n理由甲。\n");
 });
 
-test("INV-2e: 声明值按整词匹配——MERGE 不误领 MERGE_AFTER_FIXES 前缀；PASS 不命中 PASSED；中文标点紧邻算边界；长词先出现不遮蔽后文整词", () => {
+test("INV-2e: 声明值按整词匹配——MERGE 不误领 MERGE_AFTER_FIXES 前缀；PASS 不命中 PASSED；中文标点紧邻算边界；不紧跟的句中值记未填", () => {
   // 声明 ["MERGE","MERGE_AFTER_FIXES","REJECT"]、正文写 MERGE_AFTER_FIXES：
   // 取值必须是 MERGE_AFTER_FIXES（整词命中），两席同值 → fieldDiff 不含 Q1。
   const both = compareFields(
@@ -339,15 +339,36 @@ test("INV-2e: 声明值按整词匹配——MERGE 不误领 MERGE_AFTER_FIXES �
   // 后缀也是词边界违例：声明 PASS 不命中 PASSED。
   const pass = compareFields({ a: attrOf("Q1: PASSED\n") }, { Q1: ["PASS"] });
   assert.equal(pass.fieldValues.Q1.a, null);
+  // 决定 0128 续修：词字符并进连字符（与候选值白名单一致）——只声明 PASS 时，
+  // 席位写的 PASS-WITH-NOTES（未声明的值）不再被取成 PASS 前缀。
+  const hyphenOnly = compareFields({ a: attrOf("Q1: PASS-WITH-NOTES\n") }, { Q1: ["PASS"] });
+  assert.equal(hyphenOnly.fieldValues.Q1.a, null, "PASS-WITH-NOTES 不是 PASS 的整词");
+  // 连字符/标点后接理由不影响紧跟写出的完整值。
+  const spaced = compareFields({ a: attrOf("Q1: PASS - 理由\n") }, { Q1: ["PASS"] });
+  assert.equal(spaced.fieldValues.Q1.a, "PASS");
+  const cnComma = compareFields({ a: attrOf("Q1: PASS，理由\n") }, { Q1: ["PASS"] });
+  assert.equal(cnComma.fieldValues.Q1.a, "PASS");
+  // 0128 续修：整词边界与白名单共用同一字符类——Unicode 字母/数字也是词字符，
+  // 中文因此也有边界（不再有 CJK 例外）。
+  const eAcute = compareFields({ a: attrOf("Q1: PASSé\n") }, { Q1: ["PASS"] });
+  assert.equal(eAcute.fieldValues.Q1.a, null, "PASSé 不是 PASS 的整词");
+  const mathDigit = compareFields({ a: attrOf("Q1: PASS𝟙\n") }, { Q1: ["PASS"] });
+  assert.equal(mathDigit.fieldValues.Q1.a, null, "PASS𝟙（Unicode 数字）不是 PASS 的整词");
+  const cjkRun = compareFields({ a: attrOf("Q1: 通过理由\n") }, { Q1: ["通过"] });
+  assert.equal(cjkRun.fieldValues.Q1.a, null, "通过理由 不是 通过 的整词");
+  const cjkComma = compareFields({ a: attrOf("Q1: 通过，理由\n") }, { Q1: ["通过"] });
+  assert.equal(cjkComma.fieldValues.Q1.a, "通过", "标点仍是边界");
+  const paren = compareFields({ a: attrOf("Q1: PASS（理由）\n") }, { Q1: ["PASS"] });
+  assert.equal(paren.fieldValues.Q1.a, "PASS", "全角括号是边界");
   // 中文标点紧邻（"："与"。"）都是词边界——Q1：PASS。 取到 PASS。
   const cn = compareFields({ a: attrOf("Q1：PASS。\n") }, { Q1: ["PASS"] });
   assert.equal(cn.fieldValues.Q1.a, "PASS");
-  // 声明值先作为更长单词的一部分出现（非整词）、之后才作为整词出现 → 仍取得到。
+  // 决定 0128 紧跟规则：块内别处才整词出现的声明值不再算——值必须紧跟锚点。
   const later = compareFields(
     { a: attrOf("Q1: 首先排除 MERGE_AFTER_FIXES，最终建议 MERGE。\n") },
     { Q1: ["MERGE"] },
   );
-  assert.equal(later.fieldValues.Q1.a, "MERGE");
+  assert.equal(later.fieldValues.Q1.a, null, "句中后位的声明值不紧跟锚点 → 未填");
 });
 
 // ===== INV-3：malformed 零自动重发 =====
@@ -567,6 +588,131 @@ test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=bri
   }
   assert.ok(calls[0].prompt.endsWith("缺证据时报告缺口。"), "无视角席：合同在尾部");
   assert.ok(calls[1].prompt.includes(`\n\n${perspective}\n\n${CONTRACT_MARK}`), "视角片段原样拼接在 brief 与合同之间");
+});
+
+test("FLOW-4b（决定 0128 声明即合同）：有 fields 时每席提示词在固定合同后按声明顺序追加格式行，候选值原样；没有 fields 时逐字节不变", async () => {
+  const briefText = "共享任务书\n\n## Q1 结论\n";
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: PASS\n" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: FIX_FIRST\n" })],
+  ]));
+  const FORMAT_MARK = "【结论字段格式（声明即合同）】";
+  const CONTRACT_MARK = "---\n【会审席边界（固定合同，席位级）】";
+  // 有 fields：格式段在固定会审合同之后，按声明顺序（Q2 先声明就先出现）。
+  const declared = makeDispatchStub();
+  await runConsult(baseInput({
+    briefText,
+    declaredFields: { Q2: ["C"], Q1: ["PASS", "PASS_WITH_NOTES", "FIX_FIRST"] },
+    dispatchFn: declared.dispatchFn,
+    readTranscriptFn,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+  }));
+  for (const c of declared.calls) {
+    assert.ok(c.prompt.includes(FORMAT_MARK), "每席 prompt 都带格式段");
+    assert.ok(c.prompt.indexOf(CONTRACT_MARK) < c.prompt.indexOf(FORMAT_MARK), "格式段在固定会审合同之后");
+    assert.ok(c.prompt.endsWith(
+      "【结论字段格式（声明即合同）】\n"
+      + "- Q2 单独起一行写成「Q2: <值>」，值只能是 C 之一，这一行不写别的\n"
+      + "- Q1 单独起一行写成「Q1: <值>」，值只能是 PASS、PASS_WITH_NOTES、FIX_FIRST 之一，这一行不写别的",
+    ), "按声明顺序逐行收尾，候选值原样");
+  }
+  // 没有 fields：与旧 prompt 逐字节相同（整串相等，不是只看结尾）。
+  const bare = makeDispatchStub();
+  await runConsult(baseInput({
+    briefText,
+    dispatchFn: bare.dispatchFn,
+    readTranscriptFn,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+  }));
+  const noFieldsPrompt = `${briefText}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
+  for (const c of bare.calls) {
+    assert.ok(!c.prompt.includes(FORMAT_MARK), "无 fields：不出现格式段");
+    assert.equal(c.prompt, noFieldsPrompt, "无 fields：prompt 与旧构造逐字节相同");
+  }
+});
+
+test("0128 续修：候选值白名单——不合格创建整次拒绝（固定文案、零派发）；重渲染旧记录不校验", async () => {
+  const { dispatchFn, calls } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map());
+  // 白名单外各一类：分隔符字符（. : ：会与锚点分隔符歧义）、斜杠、空白（含换
+  // 行）、*、反引号、顿号、空串。
+  for (const bad of [[".PASS"], ["A:B"], ["A.B"], ["A/B"], ["A B"], ["*STAR*"], ["`X`"], ["A、B"], ["PASS\nFIX_FIRST"], [""]]) {
+    await assert.rejects(
+      () => runConsult(baseInput({
+        declaredFields: { Q1: bad },
+        dispatchFn,
+        readTranscriptFn,
+        writeFileFn: async () => {},
+        mkdirFn: async () => {},
+      })),
+      /declared field values for Q1 must be non-empty and use only letters, digits, _ and -/,
+    );
+  }
+  assert.equal(calls.length, 0, "一次席位都不派发");
+  // 合法候选（下划线长值、连字符、CJK、单词、数字）照常扇出、照常取值。
+  const ok = makeDispatchStub();
+  const { readTranscriptFn: rt } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: 通过\n" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: A-B\n" })],
+  ]));
+  const result = await runConsult(baseInput({
+    declaredFields: { Q1: ["PASS_WITH_NOTES", "A-B", "通过", "Q", "7"] },
+    dispatchFn: ok.dispatchFn,
+    readTranscriptFn: rt,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+  }));
+  assert.equal(ok.calls.length, 2, "合法候选照常扇出");
+  assert.deepEqual(result.fieldValues.Q1, { seat_a: "通过", seat_b: "A-B" });
+  // 重渲染旧记录不做这项校验：坏候选不抛，照旧读声明（取不到就是未填）。
+  const legacy = await rerenderConsultFromRecord({
+    record: {
+      consultId: "consult_20261121000000000legacy1",
+      seats: [{ agentId: "seat_a", runId: "run_stub_seat_a", runState: "completed" }],
+      questions: [], declaredFields: { Q1: ["*STAR*"] }, brief: "x", budgetMs: 1000,
+    },
+    runDir: "C:/unused-run-dir", consultsDir: "C:/unused-consults-dir",
+    readTranscriptFn: rt, env: {},
+  });
+  assert.equal(legacy.fieldValues.Q1.seat_a, null, "旧记录坏候选不抛、不取值");
+});
+
+test("0128 续修：声明键规范化——Q0/前导零拒绝（固定文案、零派发）；Q1/Q12 合法", async () => {
+  const { dispatchFn, calls } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map());
+  // Q01 的格式行会被读取端归到第 1 题（两行要求、一行读取）；Q0 生成格式行却
+  // 永远取不到——创建时整次拒绝。
+  for (const key of ["Q01", "Q0"]) {
+    await assert.rejects(
+      () => runConsult(baseInput({
+        declaredFields: { [key]: ["PASS"] },
+        dispatchFn,
+        readTranscriptFn,
+        writeFileFn: async () => {},
+        mkdirFn: async () => {},
+      })),
+      new RegExp(`declared field key ${key} must be Q1, Q2, \\.\\.\\. with no leading zero`),
+    );
+  }
+  assert.equal(calls.length, 0, "一次席位都不派发");
+  // Q1 与多位 Q12 照常声明、照常取值。
+  const ok = makeDispatchStub();
+  const { readTranscriptFn: rt } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: PASS\nQ12: B\n" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: PASS\nQ12: B\n" })],
+  ]));
+  const result = await runConsult(baseInput({
+    briefText: "b\n\nQ1: 结论\nQ12: 备注结论\n",
+    declaredFields: { Q1: ["PASS"], Q12: ["B"] },
+    dispatchFn: ok.dispatchFn,
+    readTranscriptFn: rt,
+    writeFileFn: async () => {},
+    mkdirFn: async () => {},
+  }));
+  assert.equal(ok.calls.length, 2, "合法键照常扇出");
+  assert.deepEqual(result.fieldValues.Q12, { seat_a: "B", seat_b: "B" });
 });
 
 test("FLOW-5: 非作者砖——被审 run 作者 ∈ 席位清单 → authorInSeats=true（advisory）", async () => {
@@ -1454,7 +1600,7 @@ test("CLI-3: consult run 参数面——seats 必填、perspective 席位校验�
     ),
     /Q1\/Q2/,
   );
-  // 重复 --fields 两个都收到。
+  // 重复 --fields（不同 Qn）两个都收到。
   const seen = [];
   await consultCommand(
     ["run", "brief.md", "--seats", "a", "--fields", "Q1=A,B", "--fields", "Q2=C", "--cwd", "C:/tmp/x"],
@@ -1467,6 +1613,36 @@ test("CLI-3: consult run 参数面——seats 必填、perspective 席位校验�
     },
   );
   assert.deepEqual(seen[0], { Q1: ["A", "B"], Q2: ["C"] });
+  // 0128 续修：CLI 不得在校验前改写声明——空候选原样交给 service（拒绝在 service 层，
+  // 该层的零派发钉在候选值白名单用例里）。
+  const seenEmpty = [];
+  await consultCommand(
+    ["run", "brief.md", "--seats", "a", "--fields", "Q1=A,,B", "--cwd", "C:/tmp/x"],
+    {},
+    {
+      runConsult: async (input) => {
+        seenEmpty.push(input.declaredFields);
+        return craftedResult();
+      },
+    },
+  );
+  assert.deepEqual(seenEmpty[0], { Q1: ["A", "", "B"] }, "空候选不过滤，原样交给 service");
+  // 同一 Qn 二次 --fields：CLI 直接拒绝（点名 Qn），不进 service。
+  const seenDup = [];
+  await assert.rejects(
+    () => consultCommand(
+      ["run", "brief.md", "--seats", "a", "--fields", "Q1=A", "--fields", "Q1=*BAD*", "--cwd", "C:/tmp/x"],
+      {},
+      {
+        runConsult: async (input) => {
+          seenDup.push(input);
+          return craftedResult();
+        },
+      },
+    ),
+    /--fields Q1 given more than once/,
+  );
+  assert.equal(seenDup.length, 0, "重复 Qn 不进 service（零派发）");
 });
 
 test("CLI-4: consult show 从组记录重渲染（只读；问题原序 + 席位原文在场）", async () => {
@@ -1684,13 +1860,40 @@ test("0055: 席位在工作树内有工具写入 → readOnlyViolation FAIL；�
 
 // ===== 整词匹配的两个边角；组记录被替换时的读取 =====
 
-test("字段值：同一位置取最长的声明值；多个归组块时取第一个有命中的块", () => {
+test("字段值：同一位置取最长的声明值；多块各取一值——同值取到、异值记未填（决定 0128）", () => {
   const hyphen = compareFields({ a: attributeReply("Q1: PASS-WITH-NOTES\n") }, { Q1: ["PASS", "PASS-WITH-NOTES"] });
   assert.equal(hyphen.fieldValues.Q1.a, "PASS-WITH-NOTES", "连字符后缀不让较短的前缀抢先");
   const reversed = compareFields({ a: attributeReply("Q1: PASS-WITH-NOTES\n") }, { Q1: ["PASS-WITH-NOTES", "PASS"] });
   assert.equal(reversed.fieldValues.Q1.a, "PASS-WITH-NOTES", "与声明顺序无关");
-  const blocks = compareFields({ a: attributeReply("Q1:              PASS\nQ1: FAIL\n") }, { Q1: ["PASS", "FAIL"] });
-  assert.equal(blocks.fieldValues.Q1.a, "PASS", "后一块里更靠左的值不覆盖先出现的块");
+  const same = compareFields({ a: attributeReply("Q1:              PASS\nQ1: PASS\n") }, { Q1: ["PASS", "FAIL"] });
+  assert.equal(same.fieldValues.Q1.a, "PASS", "多块各按紧跟规则取到同值 → 该值");
+  const differ = compareFields({ a: attributeReply("Q1:              PASS\nQ1: FAIL\n") }, { Q1: ["PASS", "FAIL"] });
+  assert.equal(differ.fieldValues.Q1.a, null, "多块异值 → 未填（不再取第一个有命中的块）");
+  const oneFilled = compareFields({ a: attributeReply("Q1: PASS\nQ1: 理由见下。\n") }, { Q1: ["PASS", "FAIL"] });
+  assert.equal(oneFilled.fieldValues.Q1.a, "PASS", "取不到值的块不拖累取到值的块");
+});
+
+test("决定 0128 紧跟规则：值紧跟锚点（只隔空白/**/反引号）取到；不紧跟记未填", () => {
+  const F = (text) => compareFields(
+    { a: attrOf(text) },
+    { Q1: ["PASS", "PASS_WITH_NOTES", "FIX_FIRST"] },
+  ).fieldValues.Q1.a;
+  // 正例（决定 0128 列举的三条 + 标题形）。
+  assert.equal(F("Q1: FIX_FIRST\n理由。"), "FIX_FIRST");
+  assert.equal(F("**Q1:** `PASS`\n理由。"), "PASS");
+  assert.equal(F("Q1：PASS_WITH_NOTES\n"), "PASS_WITH_NOTES");
+  assert.equal(F("Q1:PASS\n"), "PASS", "分隔符后零空白也算紧跟");
+  assert.equal(F("## Q1\n\n**PASS**\n理由。"), "PASS", "标题形：值换行后紧跟");
+  // 0128 续修：标题形带分隔符——分隔符（可带前置 **）被锚点匹配吃掉，不再把值顶开。
+  assert.equal(F("## Q1: PASS\n理由。"), "PASS", "标题形半角冒号");
+  assert.equal(F("### Q1：PASS\n"), "PASS", "标题形全角冒号");
+  assert.equal(F("## Q1**：PASS\n"), "PASS", "分隔符带前置 **");
+  // 反例：句中叙述的声明值不算（决定 0128 原例）。
+  assert.equal(F("Q1: 不是 PASS，应为 FIX_FIRST\n"), null, "叙述句里的 PASS 不再被取成");
+  assert.equal(F("## Q1: 不是 PASS\n"), null, "标题形带分隔符的叙述句同样记未填");
+  assert.equal(F("## Q1 这个方案可行吗\nPASS\n"), null, "标题正文把值顶开 → 不紧跟");
+  assert.equal(F("Q1: 采纳 PASS 方案\n"), null);
+  assert.equal(F("P1: PASS\n"), null, "非 Qn 锚点不取");
 });
 
 test("loadConsultRecord：读到替换中的半截内容时重试；文件不存在不重试；一直解析不了才报错", async () => {

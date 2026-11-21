@@ -6,12 +6,19 @@
 // scripts/lane-review-stats-cli.mjs.
 //
 // A seat's verdict is the declared Q1 value that WAO's consult field parser
-// (attributeReply + compareFields) finds in the seat's final reply (source
-// "declared"); when that reads no value, inferVerdict reads the verdict word
-// from the head of the final reply (source "inferred"). A seat with neither
-// counts as not answered. Pairwise stricter/lenient/same comparisons cover
-// every consult with 2+ seats whose verdicts are in VERDICT_RANK, declared or
-// inferred; standalone review runs have no co-seat and never compare.
+// (attributeReply + compareFields, decision 0128 adjacency rule) finds in the
+// seat's final reply (source "declared"). When the consult declared no Q1 field
+// (fieldsDeclared marks the Q1 declaration only), inferVerdict reads the verdict
+// word from the head of the final reply (source "inferred"); a declared-but-
+// unread Q1 is NEVER re-inferred (decision 0128 续修: the tightened rule may
+// only turn an ambiguous read into unfilled — inference must not flip it back,
+// e.g. "Q1: FAIL 只是反例，最终结论是 PASS" stays unfilled). A seat with no
+// verdict counts as not answered — split per decision 0128 into undeclared (no
+// declared Q1, or a standalone review) and declaredUnfilled (Q1 declared but the
+// seat filled none); only the latter is a lane signal. Pairwise stricter/
+// lenient/same comparisons cover every consult with 2+ seats whose verdicts are
+// in VERDICT_RANK, declared or inferred; standalone review runs have no co-seat
+// and never compare.
 //
 // Sources (all read-only): this checkout's consult record directories
 // (defaultConsultDirs), other projects' consult directories discovered from
@@ -179,7 +186,12 @@ function tally(map, key) {
 
 function countAnswered(L, seat) {
   L.seats += 1;
-  if (typeof seat.q1 !== "string") return;
+  if (typeof seat.q1 !== "string") {
+    // 决定 0128：认不出拆两类——声明了字段但未填（车道信号）与没声明字段
+    //（会审或独立会审）也推断不到。
+    if (seat.fieldsDeclared) L.declaredUnfilled += 1; else L.undeclared += 1;
+    return;
+  }
   L.answered += 1;
   if (seat.source === "inferred") L.inferred += 1; else L.declared += 1;
   tally(L.verdicts, seat.q1);
@@ -191,11 +203,14 @@ export function ratedSeatCount(consult) {
 }
 
 /**
- * Per-lane counts (pure). Seats: {lane, q1, source?}（source 缺省按 declared 计）。
- * @param {Array<{seats: Array<{lane: string, q1: string|null, source?: string}>}>} consults
+ * Per-lane counts (pure). Seats: {lane, q1, source?, fieldsDeclared?}（source
+ * 缺省按 declared 计；fieldsDeclared 标记席位所在会审声明了 Q1 闭集——专指
+ * Q1，决定 0128 认不出拆类的依据，独立会审运行恒不带）。
+ * @param {Array<{seats: Array<{lane: string, q1: string|null, source?: string, fieldsDeclared?: boolean}>}>} consults
  * @param {Array<{lane: string, q1: string|null, source?: string}>} [standaloneReviews]
  *   独立会审运行（每条一次 review）；只计数，不参与比较。
  * @returns {Record<string, {seats: number, answered: number, declared: number, inferred: number,
+ *   undeclared: number, declaredUnfilled: number,
  *   verdicts: Record<string, number>, stricterThan: Record<string, number>,
  *   lenientThan: Record<string, number>, sameAs: Record<string, number>}>}
  */
@@ -207,7 +222,7 @@ export function aggregateSeatVerdicts(consults, standaloneReviews = []) {
     let L = per.get(id);
     if (L === undefined) {
       L = {
-        seats: 0, answered: 0, declared: 0, inferred: 0,
+        seats: 0, answered: 0, declared: 0, inferred: 0, undeclared: 0, declaredUnfilled: 0,
         verdicts: new Map(), stricterThan: new Map(), lenientThan: new Map(), sameAs: new Map(),
       };
       per.set(id, L);
@@ -234,6 +249,8 @@ export function aggregateSeatVerdicts(consults, standaloneReviews = []) {
     answered: L.answered,
     declared: L.declared,
     inferred: L.inferred,
+    undeclared: L.undeclared,
+    declaredUnfilled: L.declaredUnfilled,
     verdicts: Object.fromEntries(L.verdicts),
     stricterThan: Object.fromEntries(L.stricterThan),
     lenientThan: Object.fromEntries(L.lenientThan),
@@ -507,14 +524,23 @@ export async function collectConsults({ dirs, runDir, since = null, until = null
         }
         if (q1 !== null) {
           source = "declared";
-        } else if (finalText !== null) {
+        } else if (q1Values.length === 0 && finalText !== null) {
+          // 决定 0128 续修：声明了 Q1 的会审，声明提取是唯一来源——取不到就算
+          // declaredUnfilled，不回退推断（推断会把收紧后如实记未填的含糊值再
+          // 翻成结论，甚至翻成相反的结论）。
           const hit = inferVerdict(finalText);
           if (hit !== null) {
             q1 = hit.verdict;
             source = "inferred";
           }
         }
-        seats.push({ lane: s.agentId, runId: typeof s.runId === "string" ? s.runId : null, q1, ...(q1 === null ? {} : { source }) });
+        // fieldsDeclared（决定 0128）：本会审声明了 Q1 闭集（专指 Q1）——席位
+        // 认不出时 aggregateSeatVerdicts 据此拆 declaredUnfilled 与 undeclared。
+        seats.push({
+          lane: s.agentId, runId: typeof s.runId === "string" ? s.runId : null, q1,
+          ...(q1Values.length > 0 ? { fieldsDeclared: true } : {}),
+          ...(q1 === null ? {} : { source }),
+        });
       }
       out.push({ consultId: rec.consultId, createdAt, seats });
     }
@@ -531,7 +557,8 @@ export function renderLaneReviewStats({ consults, standaloneReviews = [], lanes 
   const withRated = consults.filter((c) => ratedSeatCount(c) >= 2).length;
   const lines = [`consults ${consults.length} (with 2+ rated seats ${withRated}), standalone reviews ${standaloneReviews.length}`];
   for (const [id, L] of Object.entries(lanes).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    lines.push(`${id}: reviews ${L.seats}, answered ${L.answered} (declared ${L.declared}, inferred ${L.inferred}), unrecognized ${L.seats - L.answered} — ${list(L.verdicts)}`);
+    // 决定 0128：认不出拆两类并显示两个数——declaredUnfilled 才是车道信号。
+    lines.push(`${id}: reviews ${L.seats}, answered ${L.answered} (declared ${L.declared}, inferred ${L.inferred}), unrecognized ${L.seats - L.answered} (undeclared ${L.undeclared ?? 0}, declaredUnfilled ${L.declaredUnfilled ?? 0}) — ${list(L.verdicts)}`);
     lines.push(`  in consults with 2+ rated seats: stricter than ${list(L.stricterThan)}; more lenient than ${list(L.lenientThan)}; same as ${list(L.sameAs)}`);
   }
   return lines.join("\n");
