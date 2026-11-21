@@ -4,7 +4,10 @@
 // backend 层）。API 事实全部来自 2026-10-10 live 探针（依据记录：
 // .wao/decisions/0056 + src/backends/kimiWeb.js 文件头 TD-250 节）：
 //   - GET  /api/v1/sessions（Bearer；信封 {code,msg,data}；page_size 可传）
-//   - GET  /api/v1/sessions/{id}（detail：busy/main_turn_active/workspace_id）
+//   - GET  /api/v1/sessions/{id}（detail：workspace_id，外加会话活性——2.6 的
+//     busy/main_turn_active；2.7.2 改为 activity 闭集 idle|turn|background，
+//     2026-11-20 实测，夹具 test/fixtures/kimi-2.7.2/。读取边界统一经
+//     projectSessionActivity 投影回 2.6 这一对）
 //   - POST /api/v1/sessions/{id}:delete（code 0=deleted；40401=不存在）
 //   - GET  /api/v1/workspaces（items[{id, root}]）
 //   - POST /api/v1/shutdown（code 0 —— **全量拆荚原语**：serve+每会话助手进程组
@@ -20,6 +23,34 @@ import { join } from "node:path";
 
 // 会话级 40401 = "session … does not exist"（HTTP 200 信封码，非路由 404）。
 export const SERVE_SESSION_GONE_CODE = 40401;
+
+// 2.7.2（2026-11-20 实测，test/fixtures/kimi-2.7.2/）会话对象（详情 data 与列表条目）
+// 用 activity 闭集取代 2.6 的 busy/main_turn_active。对应关系依据 2.6.3 在后台任务
+// 运行、轮已结束时报 busy:true, main_turn_active:false
+//（test/fixtures/kimi-2.6.3/background-task-session-detail.json）。
+const SESSION_ACTIVITY_FIELDS = Object.freeze({
+  idle: Object.freeze({ busy: false, main_turn_active: false }),
+  turn: Object.freeze({ busy: true, main_turn_active: true }),
+  background: Object.freeze({ busy: true, main_turn_active: false }),
+});
+
+/**
+ * 读取边界的活性投影：把会话对象（详情 data 或列表条目）统一成 2.6 的
+ * busy/main_turn_active 形状——其后的代码照旧读那一对字段。
+ *   - 有 activity 字段（2.7）：值是闭集内的**字符串** → 返回补上双字段的副本；
+ *     闭集外或非字符串（数组/数字/对象/null——属性键会被 ToPropertyKey 折叠，
+ *     例如 ["idle"] → "idle"，必须先卡类型）→ null（形状不认识，调用方 fail-closed）。
+ *   - 没有 activity 字段（2.6）：原样返回，2.6 判定逻辑一字不改。
+ * 非对象入参同样返回 null（详情/列表探针的在场门本来就会拒）。
+ */
+export function projectSessionActivity(session) {
+  if (!session || typeof session !== "object" || Array.isArray(session)) return null;
+  if (!Object.prototype.hasOwnProperty.call(session, "activity")) return session;
+  if (typeof session.activity !== "string") return null;
+  if (!Object.prototype.hasOwnProperty.call(SESSION_ACTIVITY_FIELDS, session.activity)) return null;
+  const mapped = SESSION_ACTIVITY_FIELDS[session.activity];
+  return { ...session, busy: mapped.busy, main_turn_active: mapped.main_turn_active };
+}
 
 /**
  * 单枪 serve REST 请求。返回形状闭集：
@@ -90,6 +121,7 @@ function isConnectionRefused(error) {
  * TD-252①（TD-256 批）：archivedOnly=true 走同一端点的归档视图——0057 W2
  * 实测 `sessions:archive` 归档的会话默认列表隐藏、archived_only=true 可见
  * （归档≠不可运行），recycle soak 快照必须两面都拉。
+ * 2.7.2 条目用 activity 取代双忙碌字段：逐条在读取边界投影，闭集外 → shape_unknown。
  */
 export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis.fetch, timeoutMs, pageSize = 100, maxPages = 20, archivedOnly = false }) {
   const size = Math.min(Number.isInteger(pageSize) && pageSize > 0 ? pageSize : 100, 100);
@@ -114,8 +146,10 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
     // 的前提是全量视图与可证活性，"查不到"不得变成"没问题"。
     if (typeof r.data.has_more !== "boolean") return { ok: false, reason: "shape_unknown" };
     let advanced = false;
-    for (const it of r.data.items) {
-      if (typeof it?.id !== "string" || it.id.length === 0) return { ok: false, reason: "shape_unknown" };
+    for (const rawItem of r.data.items) {
+      // 2.7 条目：activity 在读取边界投影成 busy/main_turn_active；闭集外 → null。
+      const it = projectSessionActivity(rawItem);
+      if (!it || typeof it?.id !== "string" || it.id.length === 0) return { ok: false, reason: "shape_unknown" };
       if (typeof it?.busy !== "boolean" && typeof it?.main_turn_active !== "boolean") return { ok: false, reason: "shape_unknown" };
       if (seen.has(it.id)) continue;
       seen.add(it.id);
@@ -145,6 +179,9 @@ export async function listServeSessions({ baseUrl, token, fetchImpl = globalThis
  * TD-256 批（sol 会审，注入响应实证）：code 0 但双字段**全部缺席**时旧实现仍
  * 折叠成 busy:false——"未知"不得变成"空闲"（sweep 会据此删会话）。修法：
  * 双字段无一为 boolean → shape_unknown 拒判（落 probeFailed=retained 方向）。
+ * 2.7.2：detail 的 activity 在读取边界投影成双字段，闭集外 → shape_unknown。
+ * 另：投影后还要求 detail 的 id 是非空字符串——缺身份的对象不能证成"这个会话"的
+ * 存活/归属（否则 {activity:"idle"} 这类残件会让 sweep 拿到 busy:false）。
  */
 export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl = globalThis.fetch, timeoutMs }) {
   const r = await serveRequest({
@@ -158,14 +195,16 @@ export async function probeServeSession({ baseUrl, token, sessionId, fetchImpl =
   if (r.code !== 0 || !r.data || typeof r.data !== "object") {
     return { ok: false, reason: "upstream_rejected", ...(Number.isInteger(r.code) ? { code: r.code } : {}) };
   }
-  if (typeof r.data.busy !== "boolean" && typeof r.data.main_turn_active !== "boolean") {
+  const data = projectSessionActivity(r.data);
+  if (!data || typeof data.id !== "string" || data.id.length === 0
+    || (typeof data.busy !== "boolean" && typeof data.main_turn_active !== "boolean")) {
     return { ok: false, reason: "shape_unknown" };
   }
   return {
     ok: true,
     gone: false,
-    workspaceId: typeof r.data.workspace_id === "string" ? r.data.workspace_id : null,
-    busy: r.data.busy === true || r.data.main_turn_active === true,
+    workspaceId: typeof data.workspace_id === "string" ? data.workspace_id : null,
+    busy: data.busy === true || data.main_turn_active === true,
   };
 }
 

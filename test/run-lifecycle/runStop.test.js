@@ -469,6 +469,7 @@ function kwServer({ stillBusy = false } = {}) {
   const reply = (data) => ({ ok: true, status: 200, async text() { return JSON.stringify({ code: 0, msg: "", data }); } });
   const fetchImpl = async (url, init = {}) => {
     const u = String(url);
+    const path = u.split("?")[0];
     calls.push({ url: u, method: init.method ?? "GET", authorization: init.headers?.authorization });
     if (u === `${KW_SESSION_URL}/prompts`) return reply({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
     if (u === `${KW_SESSION_URL}/prompts/msg_live:abort`) { aborted = true; return reply({ aborted: true }); }
@@ -476,7 +477,8 @@ function kwServer({ stillBusy = false } = {}) {
       const busy = stillBusy || !aborted;
       return reply({ id: "session_kw", busy, main_turn_active: busy, last_turn_reason: aborted ? "cancelled" : null });
     }
-    if (u === `${KW_SESSION_URL}/messages`) return reply({ items: [] });
+    // 停止验证的消息探针读 turns 最新一页（2.7.2 删除了 /messages）；没有增长 = 空页。
+    if (path === `${KW_SESSION_URL}/agents/main/turns`) return reply({ turns: [], has_more: false });
     throw new Error(`unexpected request ${u}`);
   };
   return { calls, fetchImpl };

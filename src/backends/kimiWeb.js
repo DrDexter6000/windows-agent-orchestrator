@@ -1,11 +1,15 @@
 // src/backends/kimiWeb.js
 //
 // kimi-web backend（HTTP attach 型）：驱动 `kimi web` 本地服务器的 Kimi Code 官方
-// REST API。只支持 kimi 2.6+（turns 端点；2.6 已删除旧的 GET …/transcript，实测
+// REST API。支持 kimi 2.6 与 2.7（turns 端点；2.6 已删除旧的 GET …/transcript，实测
 // 回 HTTP 404 路由不存在）。在用版本见 docs/certification-runbook.md 原语表。
 //
 // 上游 API 事实（标 2.6.3 的是 2026-11-17 的实测，原始响应在
-// test/fixtures/kimi-2.6.3/；标 2.4.0 / 2.1.1 的是更早的实测，2.6.3 未见反证）：
+// test/fixtures/kimi-2.6.3/；标 2.7.2 的是 2026-11-20 的实测，原始响应在
+// test/fixtures/kimi-2.7.2/；标 2.4.0 / 2.1.1 的是更早的实测，2.6.3/2.7.2 未见反证）。
+// 除非另标 2.7.2，下列条目在 2.7.2 上形状相同（建会话、prompts、steer/abort/:delete、
+// turns 均复核；turns 的在途工具调用在 2.7.2 实测为 status:"running" 且带 stage，
+// WAO 按非 "ended" 当在途，判定不变）：
 //   - 所有请求需 Authorization: Bearer <token>；响应统一包 {code,msg,data}，
 //     code!==0 即失败（msg 含原因）。
 //   - POST /api/v1/sessions {title?, metadata:{cwd}} → data.id（session_ 前缀）；
@@ -18,7 +22,8 @@
 //     model 时接口照样返回成功，但轮次静默秒败（validateAgentPolicy 在派发前拒绝）。
 //   - **GET /api/v1/sessions/{id}/agents/main/turns（2.6.3）**→ data {turns[],
 //     has_more}：按 ordinal 从旧到新；不带参数取最新一页（含在跑的轮）；
-//     before_ordinal 往回翻，page_size 1–200（默认 50；WAO 不发，用默认）。
+//     before_ordinal 往回翻，page_size 1–200（默认 50；事件流用默认，停止验证探针
+//     传 200）。
 //       · 轮：turn_id、ordinal、kind（只见过 "agent"）、status（running|ended）、
 //         outcome（ended 才有：completed|interrupted；文档另列 failed，未实测）、
 //         end_reason（见过 "user_cancelled"）、error（未见非空值）、usage
@@ -44,10 +49,20 @@
 //     不被清掉，中止后会自己开一轮（2.6 文档）。这一轮已启动的 shell 命令进程跑到
 //     自己结束（2.4.0）。另有 POST /api/v1/shutdown（服务器级，杀全部会话）——
 //     abort() 绝不调它。
-//   - GET /api/v1/sessions/{id} → data{busy, main_turn_active, last_turn_reason,
-//     …}（2.6.3 形状不变）：提交前静默门、停滞证词、中止后复查与停止验证探针。
-//   - GET /api/v1/sessions/{id}/messages → data.items[]（newest-first；2.6.3 形状
-//     不变，见 final-messages.json）：只供停止验证消费者，不参与完成判定。
+//   - **GET /api/v1/sessions/{id}**（会话详情）：2.6.3 → data{busy,
+//     main_turn_active, last_turn_reason, …}。2.7.2 → 同一对象不再有这两个字段，
+//     改为 activity（闭集 "idle"|"turn"|"background"）、pending_interaction 与轮
+//     结束后的 last_turn_outcome（README、session-detail-fresh.json / t6-*）。
+//     WAO 在读取边界把它们投影回 2.6 的一对（kimiServeOps.projectSessionActivity）：
+//     idle = 双 false、turn = 双 true、background = busy 真而 main_turn_active 假
+//     （依据 kimi-2.6.3/background-task-session-detail.json 的 busy:true,
+//     main_turn_active:false）；activity 非字符串或闭集外 = 形状不认识，各处 fail-closed。
+//     提交前静默门、停滞证词、中止后复查与停止验证探针读的都是投影后的这一对。
+//   - 停止验证的消息计数不再读 GET /api/v1/sessions/{id}/messages：2.7.2 已删除该
+//     端点（HTTP 404，见 kimi-2.7.2/messages-endpoint-404.json），2.6/2.7 统一读
+//     turns 最新一页（page_size=200）把各轮 items 拼起来计数。看不全即不可观察：
+//     页的 has_more:true（会话超过一页/200 轮）或某轮缺 items 数组，探针一律抛错，
+//     verifyStopQuiet 记 stop_unverified——绝不把"看不全"折叠成"没有增长"。
 //   - thinking（2.4.0）：prompts body 的力度字符串；"low"/"high"/"max" 被接受；非法
 //     值 → code 50001。K3.1 Pro 只支持思考模式，关闭思考会被上游拒绝。
 //   - 会话生命周期（TD-250，2.1.1，决定 0056）：POST /api/v1/sessions/{id}:delete
@@ -97,6 +112,7 @@ import { ensureServeRunning } from "./kimiServeStart.js";
 import { IDLE_WATCH_IDLE_THRESHOLD_MS, startServeIdleWatch } from "./kimiServeIdleWatch.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { createStallTracker } from "./stallBudget.js";
+import { projectSessionActivity } from "./kimiServeOps.js";
 
 // role/task 分隔符（"\n\n---\n\n"）——prompt 级 role-contract 通道的 backend
 // （kimi-web / zcode）共用同一分隔形状，避免两套事实并存。
@@ -104,6 +120,11 @@ const ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
 // 2.6 turns 端点的 agent 段：WAO 只读主 agent。
 const TURNS_AGENT = "main";
+
+// 停止验证的消息计数：turns 最新一页的页大小（2.6.3 实测上限 200）。2.7.2 删除
+// /messages 后计数改读 turns；页 has_more:true（超过一页）即看不全 → 探针抛错、
+// 停止验证记不可观察。
+const STOP_VERIFY_TURNS_PAGE_SIZE = 200;
 
 // prompt 状态里表示"提交前就失败、不会执行"的值（2.6 文档；未实测）。
 const PROMPT_FAILED_STATUSES = new Set(["blocked", "failed"]);
@@ -413,8 +434,10 @@ export class KimiWebBackend {
    *     共享服务器上的无关会话）。幂等：同一目标二次调用复用首次结果（含首次的拒绝）。
    *   - session / messages / sessionStatus：停止探针。实际调用形状是
    *     (serveUrl, sessionId, {cwd})——形参忽略，会话身份用这里的 agent+sessionId。
-   *     messages 返回 {data} 页形状（sample 读 page?.data 计数）；sessionStatus 是 GET
-   *     会话详情的 busy 投影，形状为 {type:"busy"|
+   *     messages 返回 {data} 页形状（sample 读 page?.data 计数）——内容来自 turns
+   *     最新一页的各轮 items 拼接（2.7.2 已删除 /messages，见文件头）；看不全
+   *     （has_more:true 或某轮缺 items 数组）即抛错，验证器记不可观察；sessionStatus 是
+   *     GET 会话详情的 busy 投影，形状为 {type:"busy"|
    *     "idle"}；无 retry 形状，绝不虚构，也绝不 else-推断-idle；R9 F1：detail 在场但
    *     双字段任一非布尔 → **busy** 保守投影）。detail 不可得时底层 sessionStatus()
    *     返回 null，这里把 null 转成抛错——isKnownStatus(null)===true，直接交出 null 会
@@ -433,9 +456,31 @@ export class KimiWebBackend {
         return abortPromise;
       },
       session: (_serveUrl, _sessionId, _probeOpts) => this.sessionDetail(agent, sessionId),
-      messages: async (_serveUrl, _sessionId, _probeOpts) => ({
-        data: await this.messages(agent, sessionId),
-      }),
+      messages: async (_serveUrl, _sessionId, _probeOpts) => {
+        // 2.7.2 删除了 /messages（HTTP 404）：2.6/2.7 统一读 turns 最新一页，把各轮
+        // items 拼成消息页形状。看不全 = 不可观察（抛错让 verifyStopQuiet 记
+        // stop_unverified），绝不折叠成"没有增长"：任一轮的 items 不是数组，或
+        // has_more:true（超过一页，窗口滑动时总数可能不变）都抛错。与旧 /messages
+        // 缺 items 时同一口径（见文件头）。
+        const page = await this.turnsPage(agent, sessionId, null, STOP_VERIFY_TURNS_PAGE_SIZE);
+        if (page.has_more === true) {
+          throw new Error(
+            "kimi web stop probe incomplete (turns page has_more:true — more than one page of turns; "
+            + "a session that outgrew the window cannot be counted for stop verification — refusing to guess)",
+          );
+        }
+        const items = [];
+        for (const turn of page.turns) {
+          if (!Array.isArray(turn?.items)) {
+            throw new Error(
+              "kimi web stop probe malformed (every turn needs an items array to count messages — "
+              + "refusing to guess; an uncounted turn would read as no growth)",
+            );
+          }
+          items.push(...turn.items);
+        }
+        return { data: items };
+      },
       // 状态读不到（null）时抛错：停止验证器才会把这一轮记为不可观察，而不是已知非活跃。
       sessionStatus: async (_serveUrl, _sessionId, _probeOpts) => {
         const status = await this.sessionStatus(agent, sessionId);
@@ -666,32 +711,16 @@ export class KimiWebBackend {
 
 
   /**
-   * GET messages（仅供停止验证消费者——handle.messages 按 serveStopVerify.sample 的
-   * 页形状返回；本端点不参与任何完成判定）。A4（缺数据虚报停止）：缺 items
-   * 数组 ⇒ 抛固定错误（fail-closed，绝不回落 []——空数组会被消费者当成"会话
-   * 真的没有消息"的健康观测，虚报停止面）。
-   */
-  async messages(agent, sessionId) {
-    const response = await this.request(
-      agent,
-      `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { method: "GET" },
-    );
-    if (!Array.isArray(response?.data?.items)) {
-      throw new Error(
-        "kimi web messages response malformed (data.items array is required — refusing to guess)",
-      );
-    }
-    return response.data.items;
-  }
-
-  /**
-   * GET turns 一页（2.6.3，形状见文件头）：beforeOrdinal 为 null 取最新一页。形状门
+   * GET turns 一页（2.6.3，形状见文件头）：beforeOrdinal 为 null 取最新一页；
+   * pageSize 可选（停止验证探针传 200，事件流不传=服务端默认）。形状门
    * （fail-closed）：data.turns 须是数组、has_more 须是布尔、每个轮须有非空 turn_id 与
    * 整数 ordinal ⇒ 否则抛固定错误（回落 [] 会把"不可观察"当成"没有轮"）。
    */
-  async turnsPage(agent, sessionId, beforeOrdinal) {
-    const query = beforeOrdinal === null ? "" : `?before_ordinal=${beforeOrdinal}`;
+  async turnsPage(agent, sessionId, beforeOrdinal, pageSize) {
+    const params = [];
+    if (beforeOrdinal !== null && beforeOrdinal !== undefined) params.push(`before_ordinal=${beforeOrdinal}`);
+    if (Number.isInteger(pageSize) && pageSize > 0) params.push(`page_size=${pageSize}`);
+    const query = params.length > 0 ? `?${params.join("&")}` : "";
     const response = await this.request(
       agent,
       `${trimSlash(agent.serveUrl)}/api/v1/sessions/${encodeURIComponent(sessionId)}/agents/${TURNS_AGENT}/turns${query}`,
@@ -738,11 +767,13 @@ export class KimiWebBackend {
 
 
   /**
-   * GET 会话详情（A4 fail-closed 门）：响应缺 id 或 busy/main_turn_active 字段
-   * 缺席 ⇒ 抛固定错误，绝不回落 {}——{} 会让下游把"不可观察"当成宽松的
-   * idle/unknown 形状（缺数据虚报停止面）。字段**在场但非布尔**的值原样透传：
-   * 值级严格性归状态机/sessionStatus（A3——非布尔视为未知，绝不推断 idle）。
-   * 两层分工：在场性是结构契约（这里硬拒）；值形状是观测语义（严格相等判定）。
+   * GET 会话详情（A4 fail-closed 门）：2.7 的 activity 先经 projectSessionActivity
+   * 投影回 2.6 的 busy/main_turn_active（idle/turn/background → 双字段），投影返回
+   * null（activity 闭集外，形状不认识）与响应缺 id 或双字段缺席同罪：抛固定错误，
+   * 绝不回落 {}——{} 会让下游把"不可观察"当成宽松的 idle/unknown 形状（缺数据虚报
+   * 停止面）。字段**在场但非布尔**的值原样透传：值级严格性归状态机/sessionStatus
+   * （A3——非布尔视为未知，绝不推断 idle）。两层分工：在场性是结构契约（这里硬拒）；
+   * 值形状是观测语义（严格相等判定）。
    */
   async sessionDetail(agent, sessionId, requestOpts) {
     const response = await this.request(
@@ -751,7 +782,7 @@ export class KimiWebBackend {
       { method: "GET" },
       requestOpts,
     );
-    const data = response?.data;
+    const data = projectSessionActivity(response?.data);
     if (!data || typeof data !== "object"
       || typeof data.id !== "string" || data.id.length === 0
       || data.busy === undefined || data.main_turn_active === undefined) {
@@ -765,7 +796,8 @@ export class KimiWebBackend {
 
   /**
    * 停止验证的 busy 投影（handle.sessionStatus 的实现，#1/A4）：GET 会话详情的
-   * busy/main_turn_active 双字段投影为 {type:"busy"|"idle"}——返回形状对齐
+   * busy/main_turn_active 双字段投影为 {type:"busy"|"idle"}（2.7 的 activity 已在
+   * sessionDetail 投影成这一对）——返回形状对齐
    * 会话状态探针（其 statuses[sessionId] 值即该形状；kimi-web
    * 无 retry 形状，绝不虚构）。A4：detail 不可得（任何错误——HTTP/信封/在场门）
    * ⇒ 返回 **null**（消费者把"观测不可得"如实记 stop_unverified，与下面的形状
@@ -813,8 +845,10 @@ export class KimiWebBackend {
    * 语义（闭集结果，载荷绝不含 token/上游回显文本）：
    *   - 删前探针一次（非 sessionStatus——它把 40401 已亡折叠成 null 不可观，
    *     这里必须区分）：GET detail code 40401 → {outcome:"already_gone"}；
-   *     busy/main_turn_active 任一严格 true，或值形状非严格布尔（sessionStatus
-   *     F5/R9 F1 同款保守折叠——宁可当忙、不当闲）→ {outcome:"skipped_busy"}
+   *     busy/main_turn_active（2.7 的 activity 在读取边界投影成这一对）任一严格 true，
+   *     或值形状非严格布尔、或 activity 闭集外、或详情缺非空 id（不能证成就是目标
+   *     会话；sessionStatus F5/R9 F1 同款保守折叠——宁可当忙、不当闲）
+   *     → {outcome:"skipped_busy"}
    *     （纠偏排队-未 steer 的不对称：上游可能另开轮消费，idle 是删除的必要
    *     非充分条件，busy 是充分拒绝条件）。
    *   - POST :delete：code 0 → {outcome:"deleted"}；40401 → already_gone；其他
@@ -877,9 +911,14 @@ export class KimiWebBackend {
     if (detail.code !== 0 || !detail.data || typeof detail.data !== "object") {
       return { outcome: "failed", reason: "upstream_rejected", ...(Number.isInteger(detail.code) ? { code: detail.code } : {}) };
     }
-    if (detail.data.busy !== false || detail.data.main_turn_active !== false) {
-      // 严格 false 双证才放行：任一 true、任一非布尔（保守折叠）、字段缺席
-      // （sessionDetail 在场门的宽松版——缺席同样当忙）都拒绝删除。
+    // 2.7 的 activity 在读取边界投影成 2.6 的双字段；闭集外（投影 null）、字段
+    // 缺席、或详情缺非空 id（不能证成就是目标会话）同样当忙——删前探针是删除的
+    // 唯一活性证据，形状不认识绝不推断 idle。
+    const projected = projectSessionActivity(detail.data);
+    if (!projected || typeof projected.id !== "string" || projected.id.length === 0
+      || projected.busy !== false || projected.main_turn_active !== false) {
+      // 严格 false 双证 + 身份在场才放行：任一 true、任一非布尔（保守折叠）、字段
+      // 缺席（sessionDetail 在场门的宽松版——缺席同样当忙）、缺 id 都拒绝删除。
       return { outcome: "skipped_busy" };
     }
     const del = await rawJson("POST", `/api/v1/sessions/${enc}:delete`, {});

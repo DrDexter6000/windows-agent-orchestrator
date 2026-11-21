@@ -21,7 +21,7 @@
    ],
    "total": 50,
    "has_more": true,
-   "next_page_token": "eyJ2IjoxLCJmIjoiUmd0Z08yYUNnY1VDa096dyIsImsiOlsxNzk1MjE3MTEwMDY5LCJzZXNzaW9uXzQ2NmU3OTQzLWM4NzEtNGVjMi05NDcyLWFkNGNhN2JlZTQxZCJdfQ"
+   "next_page_token": "redacted-page-token"
   },
   "request_id": "01M7XN7SKJDJEXT9TDZV14TF04"
  }

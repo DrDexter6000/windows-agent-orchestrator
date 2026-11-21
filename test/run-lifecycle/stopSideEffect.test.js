@@ -423,9 +423,11 @@ test("TD-100.9c: kimi-web stop via CLI——config.registry 里的 agent 鉴权�
     const fetchImpl = async (url, init = {}) => {
       auth.push(init.headers?.authorization);
       const u = String(url);
+      const path = u.split("?")[0];
       if (u.endsWith("/prompts")) return reply({ active: aborted ? null : { prompt_id: "msg_live" }, queued: [] });
       if (u.endsWith("/prompts/msg_live:abort")) { aborted = true; return reply({ aborted: true }); }
-      if (u.endsWith("/messages")) return reply({ items: [] });
+      // 停止验证的消息探针读 turns（2.7.2 删除了 /messages）：没有增长 = 空页。
+      if (path.endsWith("/agents/main/turns")) return reply({ turns: [], has_more: false });
       return reply({ id: "session_kw", busy: !aborted, main_turn_active: !aborted });
     };
     const { stopCommand } = await import("../../src/commands/stop.js");

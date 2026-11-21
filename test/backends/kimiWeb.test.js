@@ -2,7 +2,9 @@
 //
 // 「kimi-web」backend（HTTP attach，`kimi web` 本地服务器的官方 REST API）的离线单元
 // 测试：注入 fetchImpl 的假服务器构造全部上游形状，零真实服务器、零网络。上游事实锚点
-// = kimi 2.6.3 的实测响应（test/fixtures/kimi-2.6.3/，src/backends/kimiWeb.js 文件头）。
+// = kimi 2.6.3 的实测响应（test/fixtures/kimi-2.6.3/，src/backends/kimiWeb.js 文件头）；
+// TD-362 加 kimi 2.7.2 的实录（test/fixtures/kimi-2.7.2/，2026-11-20 采集）——2.7 会话
+// 详情的 activity 在读取边界投影回 2.6 的 busy/main_turn_active。
 //
 // 完成判定（第 109 批）：GET …/agents/main/turns 的轮按 user_message.prompt_ids 归属到
 // 运行的提示集合（派发 + 被接纳的纠偏）；每个 id 结算后，最终轮（归属轮里 ordinal 最大的）
@@ -101,6 +103,20 @@ function replay263(name) {
 }
 const KIMI_263_SESSION = "session_e6772cf8-e1a2-4eb3-93f8-59d713ed8020";
 const KIMI_263_BASE = `http://127.0.0.1:4310/api/v1/sessions/${KIMI_263_SESSION}`;
+
+// ===== kimi 2.7.2 真实响应（test/fixtures/kimi-2.7.2/，2026-11-20 采集）=====
+// 只读本批用到的几份（会话详情三态、列表、40401、turns）；不要求整目录覆盖。
+
+const KIMI_272_DIR = new URL("../fixtures/kimi-2.7.2/", import.meta.url);
+/** 读一份实测响应：{http, json}。 */
+function kimi272(name) {
+  return JSON.parse(readFileSync(new URL(name, KIMI_272_DIR), "utf8"));
+}
+/** 实测响应原样回放（HTTP 状态与正文都按录到的）。 */
+function replay272(name) {
+  const { http, json } = kimi272(name);
+  return jsonResponse(json, http);
+}
 
 /**
  * 按拍回放实测响应的假服务器：spawn 期 POST /sessions → create-session、GET 会话详情 →
@@ -269,7 +285,7 @@ test("kimi 2.6.3 实测·纠偏链：t4 转入后 t3 那一轮无回答结束—
   }, "各归属轮 usage 之和（t3 被打断那一步没有 usage）；第一个归属轮没有带 usage 的步 → 不写 firstRequest");
 });
 
-test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cancelled → failed；中止面读录到的 :abort、40402、会话详情与 messages", async () => {
+test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cancelled → failed；中止面读录到的 :abort、40402、会话详情与 turns 停止探针", async () => {
   const { fetchImpl } = kimi263Server({
     preTurns: "t3-steer-target-turns-after-steer.json",
     submit: "t5-abort-submit.json", // 录到的回执是 status "queued"（前一轮还在跑）——不是失败
@@ -284,7 +300,8 @@ test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cance
 
   // 中止面：GET prompts 有活动 → :abort（录到的 aborted:true）→ 复查：列表空、会话详情
   // （录到的中止后详情）main_turn_active:false → 已停。再中止一次：列表已空，不发 :abort。
-  // 对已停的 prompt 再 :abort 录到 40402。messages 读录到的终态页（形状不变）。
+  // 对已停的 prompt 再 :abort 录到 40402。停止探针自 TD-362 起读 turns 最新一页
+  // （2.7.2 删除了 /messages）——录到的终态轮：计数 = 各轮 items 之和。
   let aborts = 0;
   const abortFetch = kimiServer((url, init = {}) => {
     const method = init.method ?? "GET";
@@ -296,7 +313,7 @@ test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cance
       return replay263(aborts === 1 ? "t5-abort.json" : "t5-abort-again-40402.json");
     }
     if (url === KIMI_263_BASE) return replay263("t5-abort-session-after.json");
-    if (url === `${KIMI_263_BASE}/messages`) return replay263("final-messages.json");
+    if (method === "GET" && url.startsWith(`${KIMI_263_BASE}/agents/main/turns`)) return replay263("t5-abort-turns-ended.json");
     throw new Error(`unexpected ${method} ${url}`);
   });
   const stopper = new KimiWebBackend({ fetchImpl: abortFetch.fetchImpl, timeout: 5000, retries: 0, abortSettleMs: 0 });
@@ -310,7 +327,18 @@ test("kimi 2.6.3 实测·中止轮：outcome interrupted / end_reason user_cance
   const target = stopper.stopTarget(makeAgent(), KIMI_263_SESSION);
   assert.deepEqual(await target.sessionStatus(), { type: "idle" });
   const page = await target.messages();
-  assert.equal(page.data[0].metadata.origin.variant, "interruption", "messages 形状不变（newest-first）");
+  const recordedTurns = kimi263("t5-abort-turns-ended.json").json.data.turns;
+  const recordedMessages = kimi263("final-messages.json").json.data.items;
+  assert.equal(
+    page.data.length,
+    recordedTurns.reduce((n, turn) => n + turn.items.length, 0),
+    "停止探针计数 = 各轮 items 之和",
+  );
+  assert.equal(
+    page.data.length,
+    recordedMessages.length,
+    "2.6.3 上 turns items 之和 = 当时 /messages 的条数（换端点后计数口径等价；final-messages.json 是旧端点的历史证据）",
+  );
   assert.ok(page.data.length > 10);
 });
 
@@ -1517,14 +1545,19 @@ test("kimi-web ⑥: 中止前会话忙、中止后不忙——sessionStatus busy
   assert.deepEqual(await probe(), { type: "idle" });
 });
 
-test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面（wao stop 用）：abort 走 GET prompts → :abort → 复查，带 agent 的 Bearer、幂等；探针读会话详情与消息", async () => {
+test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面（wao stop 用）：abort 走 GET prompts → :abort → 复查，带 agent 的 Bearer、幂等；探针读会话详情与 turns 消息页", async () => {
   let aborted = false;
   const { calls, fetchImpl } = kimiServer((url) => {
     if (url.includes("/api/v1/shutdown")) throw new Error("server-level shutdown must never be called");
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old") {
       return detailEnvelope("session_old", !aborted, !aborted, aborted ? "cancelled" : null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/messages") return envelope({ items: [{ id: "m1" }] });
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/messages") {
+      throw new Error("the removed /messages endpoint must never be requested");
+    }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/agents/main/turns?page_size=200") {
+      return turnsEnvelope([runningTurn({ items: [userMessageItem(["msg_live"], "hi"), assistantItem("m1")] })]);
+    }
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_old/prompts") return promptsEnvelope(aborted ? null : "msg_live");
     if (url.endsWith("/prompts/msg_live:abort")) { aborted = true; return envelope({ aborted: true }); }
     throw new Error(`unexpected ${url}`);
@@ -1544,7 +1577,10 @@ test("kimi-web ⑥: stopTarget(agent, sessionId)——不经 spawn 的停止面�
   for (const call of calls) assert.equal(call.headers.authorization, `Bearer ${TOKEN_VALUE}`);
   assert.deepEqual(await target.sessionStatus(), { type: "idle" });
   assert.equal((await target.session()).busy, false);
-  assert.deepEqual(await target.messages(), { data: [{ id: "m1" }] });
+  const page = await target.messages();
+  assert.ok(Array.isArray(page.data));
+  assert.equal(page.data.length, 2, "消息页 = turns 最新一页各轮 items 之和");
+  assert.ok(!calls.some((c) => c.url.includes("/messages")), "绝不请求已删除的 /messages（2.7.2 回 404）");
 });
 
 test("kimi-web ⑥: 停止面的状态读不到时抛错——状态读 HTTP 500、同轮详情读 busy、消息不增长：verifyStopQuiet 记不可观察，绝不判 quiet", async () => {
@@ -1557,7 +1593,9 @@ test("kimi-web ⑥: 停止面的状态读不到时抛错——状态读 HTTP 500
         ? jsonResponse({ code: 0, msg: "down", data: null }, 500)
         : detailEnvelope("session_flaky", true, true, null);
     }
-    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_flaky/messages") return envelope({ items: [] });
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_flaky/agents/main/turns?page_size=200") {
+      return turnsEnvelope([]);
+    }
     throw new Error(`unexpected ${url}`);
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
@@ -1653,7 +1691,7 @@ test("kimi-web ②: --reasoning 覆盖经 RunManager 合成进 agent.reasoning �
   }
 });
 
-test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + messages 页形状；serveUrl 形参可忽略", async () => {
+test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形状 (serveUrl, sessionId, {cwd}) 可观察 busy——sessionStatus busy 投影 + session detail + turns 消息页形状；serveUrl 形参可忽略", async () => {
   // F3 静默门后夹具分相：spawn 期（静默门 + turns 读）idle 放行；探针期翻
   // busy——"探针可观察 busy"的意图不变（静默门只约束提交前）。
   let probePhase = false;
@@ -1668,8 +1706,14 @@ test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形�
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_p/agents/main/turns") {
       return turnsEnvelope([]);
     }
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_p/agents/main/turns?page_size=200") {
+      return turnsEnvelope([{
+        turn_id: "t_p", ordinal: 0,
+        items: [{ type: "user_message", prompt_ids: ["msg_q1"], placement: "opener", text: "hi" }],
+      }]);
+    }
     if (url.endsWith("/api/v1/sessions/session_p/messages")) {
-      return envelope({ items: [{ id: "msg_x", role: "user", content: [] }] });
+      throw new Error("the removed /messages endpoint must never be requested");
     }
     throw new Error(`unexpected ${url}`);
   });
@@ -1695,6 +1739,7 @@ test("kimi-web ⑥: handle 探针按 runManager/serveStopVerify 真实调用形�
   // GET + 发 prompt POST 之后不再有写请求）。
   assert.equal(calls.length, 7);
   assert.deepEqual(calls.slice(4).map((c) => c.method), ["GET", "GET", "GET"]);
+  assert.ok(!calls.some((c) => c.url.endsWith("/messages")), "消息探针读 turns，不碰已删除的 /messages");
 });
 
 test("kimi-web ⑥: verifyStopQuiet 真实消费者闭环——idle 静默会话 → quiet:true；busy 会话 → quiet:false(session_status)", async () => {
@@ -1712,8 +1757,8 @@ test("kimi-web ⑥: verifyStopQuiet 真实消费者闭环——idle 静默会话
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v/agents/main/turns") {
         return turnsEnvelope([]);
       }
-      if (url.endsWith("/api/v1/sessions/session_v/messages")) {
-        return envelope({ items: [{ id: "msg_x", role: "user", content: [] }] });
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v/agents/main/turns?page_size=200") {
+        return turnsEnvelope([]);
       }
       throw new Error(`unexpected ${url}`);
     });
@@ -1742,8 +1787,8 @@ test("kimi-web ⑥: verifyStopQuiet 真实消费者闭环——idle 静默会话
       if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v2/agents/main/turns") {
         return turnsEnvelope([]);
       }
-      if (url.endsWith("/api/v1/sessions/session_v2/messages")) {
-        return envelope({ items: [] });
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_v2/agents/main/turns?page_size=200") {
+        return turnsEnvelope([]);
       }
       throw new Error(`unexpected ${url}`);
     });
@@ -1951,7 +1996,7 @@ test("kimi-web ⑧: POST 盲重试收紧——ECONNRESET / fetch failed / 500 �
       throw error;
     });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 1 });
-    await backend.messages(makeAgent(), "ses_g").catch(() => {});
+    await backend.turnsPage(makeAgent(), "ses_g", null, 200).catch(() => {});
     assert.equal(calls.length, 2, "GET 的 ECONNRESET 仍重试（既有策略不变）");
   }
   // 腿 5（#8）：HTTP 500 且响应正文含 "ECONNREFUSED" 字样——消息字符串匹配已删
@@ -2006,7 +2051,7 @@ test("kimi-web ⑧: 超时覆盖正文读取——headers 立即返回、正文�
 
 // ===== ⑫-⑮ 保留面（A4 残余形状门 / A5 深层清洗 / ⑮ 重试单 POST 重申） =====
 
-test("kimi-web ⑫ A4 缺数据不虚报：detail 缺 id 或 busy/main_turn_active（spawn 静默门读）→ spawn 拒绝；messages 缺 items（探针路径）→ messages() 抛固定错误；sessionStatus 缺形状/不可得/非布尔 → null", async () => {
+test("kimi-web ⑫ A4 缺数据不虚报：detail 缺 id 或 busy/main_turn_active（spawn 静默门读）→ spawn 拒绝；停止探针的 turns 页缺形状 → turnsPage 抛固定错误；sessionStatus 缺形状/不可得/非布尔 → null", async () => {
   // 腿 1：detail 缺 busy/main_turn_active（仅有 id）→ spawn 静默门首读即拒
   //（detail 已退出完成判定——它的 A4 在场门现在守 spawn 门与探针）。
   {
@@ -2040,21 +2085,26 @@ test("kimi-web ⑫ A4 缺数据不虚报：detail 缺 id 或 busy/main_turn_acti
       /session detail malformed/,
     );
   }
-  // 腿 3：messages 缺 items 数组 → messages() 直接抛固定错误（v8 起该端点仅供
-  // 停止验证探针——A4 门守探针路径）。
+  // 腿 3：停止探针的 turns 页缺形状 → turnsPage 直接抛固定错误（TD-362 起消息
+  // 探针读 turns 最新一页；A4 门守探针路径，绝不回落空页）。
   {
     const { fetchImpl } = kimiServer((url) => {
-      if (url.endsWith("/messages")) return envelope({ has_more: false });
+      if (url.includes("/agents/main/turns")) return envelope({ turns: [] });
       throw new Error(`unexpected ${url}`);
     });
     const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
     await assert.rejects(
-      () => backend.messages(makeAgent(), "ses_m3"),
+      () => backend.turnsPage(makeAgent(), "ses_m3", null, 200),
       (err) => {
-        assert.match(err.message, /messages response malformed/);
-        assert.match(err.message, /items array is required/);
+        assert.match(err.message, /turns response malformed/);
+        assert.match(err.message, /boolean data\.has_more/);
         return true;
       },
+    );
+    await assert.rejects(
+      () => backend.stopTarget(makeAgent(), "ses_m3").messages(),
+      /turns response malformed/,
+      "停止探针经同一形状门 fail-closed",
     );
   }
   // 腿 4：sessionStatus——detail 缺字段 → null（不抛、不虚报 idle）。
@@ -2239,8 +2289,8 @@ test("kimi-web R9 F1: sessionStatus 非布尔形状（detail 在场、值形状�
     if (url === "http://127.0.0.1:4310/api/v1/sessions/session_f1/agents/main/turns") {
       return turnsEnvelope([]);
     }
-    if (url.endsWith("/api/v1/sessions/session_f1/messages")) {
-      return envelope({ items: [] });
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_f1/agents/main/turns?page_size=200") {
+      return turnsEnvelope([]);
     }
     throw new Error(`unexpected ${url}`);
   });
@@ -2565,6 +2615,8 @@ function attestedScriptServer(sessionId, { script, detailMode = "active" }) {
       if (!submitted) return detailEnvelope(sessionId, false, false, null);
       detailCalls += 1;
       if (detailMode === "active") return detailEnvelope(sessionId, false, true, null);
+      // TD-362：2.7.2 实录的 activity:"turn" 详情（投影后 = 双 true，同样算活）。
+      if (detailMode === "activity-turn") return replay272("t1-tools-session-running.json");
       if (detailMode === "throw") throw new Error("detail probe failed");
       return detailEnvelope(sessionId, false, false, null);
     }
@@ -3301,6 +3353,242 @@ test("kimi-web 会审⑤: 跨轮工具证据——较早的归属轮有 Bash 与
   assert.equal(failed.at(-1).reason, "failed");
   assert.deepEqual(failed.filter((e) => e.kind === "command").map((e) => e.command), ["npm test"], "在途已落的命令留下");
   assert.ok(!failed.some((e) => e.kind === "file_written"), "整次失败：file_written 不落");
+});
+
+// ===== TD-362（kimi 2.7.2，2026-11-20 实测）：activity 投影贯通各读取点 =====
+
+test("TD-362: 提交前静默门——2.7 activity:idle 放行；turn/background 到界报 session busy at dispatch", async () => {
+  const spawnWithDetail = async (fixtureName) => {
+    let posted = 0;
+    let detailReads = 0;
+    const { calls, fetchImpl } = kimiServer((url, init = {}) => {
+      const method = init.method ?? "GET";
+      if (url === "http://127.0.0.1:4310/api/v1/sessions") return envelope({ id: "session_gate27" });
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_gate27") {
+        detailReads += 1;
+        return replay272(fixtureName);
+      }
+      if (url === "http://127.0.0.1:4310/api/v1/sessions/session_gate27/agents/main/turns") return turnsEnvelope([]);
+      if (method === "POST" && url === "http://127.0.0.1:4310/api/v1/sessions/session_gate27/prompts") {
+        posted += 1;
+        return envelope({ prompt_id: "msg_q1", status: "running" });
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    let error = null;
+    try {
+      await backend.spawn(makeAgent(), { prompt: "hi" }, { silentTimeout: 60, pollInterval: 5 });
+    } catch (caught) {
+      error = caught;
+    }
+    return { error, posted, detailReads, calls };
+  };
+  const idle = await spawnWithDetail("session-detail-fresh.json");
+  assert.equal(idle.error, null, "2.7 idle（投影双 false）放行");
+  assert.equal(idle.posted, 1, "放行后提交恰一次");
+  for (const fixtureName of ["t1-tools-session-running.json", "t6-background-session-after-turn.json"]) {
+    const busy = await spawnWithDetail(fixtureName);
+    assert.ok(busy.error, `${fixtureName}：门必须到界`);
+    assert.match(busy.error.message, /session busy at dispatch/);
+    assert.match(busy.error.message, /within 60ms/);
+    assert.equal(busy.posted, 0, `${fixtureName}：零提交`);
+    assert.ok(busy.detailReads >= 2, `${fixtureName}：静默门多拍到界（实际 ${busy.detailReads} 拍）`);
+    assert.ok(!busy.calls.some((c) => c.url.includes("/agents/main/turns")), "门未过不读提交前边界");
+  }
+});
+
+test("TD-362: sessionStatus——2.7 activity 三态投影（idle → idle；turn/background → busy）", async () => {
+  const statusFor = async (fixtureName) => {
+    const backend = new KimiWebBackend({ fetchImpl: async () => replay272(fixtureName), timeout: 5000, retries: 0 });
+    return backend.sessionStatus(makeAgent(), "session_27");
+  };
+  assert.deepEqual(await statusFor("session-detail-fresh.json"), { type: "idle" }, "idle = 双 false");
+  assert.deepEqual(await statusFor("t1-tools-session-running.json"), { type: "busy" }, "turn = 双 true");
+  assert.deepEqual(
+    await statusFor("t6-background-session-after-turn.json"),
+    { type: "busy" },
+    "background = busy 真而 main_turn_active 假（任一真即忙）",
+  );
+});
+
+test("TD-362: sessionStatus——activity 闭集外：详情门拒判，停止面/停止验证保守记不可观察（绝不虚报 idle 或 quiet）", async () => {
+  // 投影约定：activity 闭集外 → null → sessionDetail 抛 malformed。sessionStatus 的
+  // 既有分工把"详情不可得"记 null（不改停止投影逻辑），停止面再把 null 转成抛错、
+  // 验证器记 stop_unverified——保守方向是不虚报 idle/quiet（删除路径则独立保守当忙，
+  // 见 releaseSession 用例）。
+  const unknownDetail = () => jsonResponse({ code: 0, msg: "success", data: { id: "session_27", activity: "paused" } });
+  const backend = new KimiWebBackend({ fetchImpl: async () => unknownDetail(), timeout: 5000, retries: 0 });
+  assert.equal(await backend.sessionStatus(makeAgent(), "session_27"), null, "详情门拒判 → 不可得");
+  const target = backend.stopTarget(makeAgent(), "session_27");
+  await assert.rejects(() => target.sessionStatus(), /kimi-web session status unavailable/);
+  const result = await verifyStopQuiet(target, "http://127.0.0.1:4310", "session_27", { rounds: 2, intervalMs: 1 });
+  assert.deepEqual(result, { quiet: null, observation: "unavailable" }, "不可观察 ≠ 已停止");
+});
+
+test("TD-362: releaseSession——2.7 background → skipped_busy；idle → :delete deleted；实录 40401 → already_gone", async () => {
+  const release = async (fixtureName, sessionId) => {
+    const { calls, fetchImpl } = kimiServer((url) => {
+      if (url.endsWith(`/api/v1/sessions/${sessionId}`)) return replay272(fixtureName);
+      if (url.endsWith(`/api/v1/sessions/${sessionId}:delete`)) return envelope({ deleted: true });
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    return { result: await backend.releaseSession(makeAgent(), sessionId), calls };
+  };
+  const sessionId = "session_e8e6ec53-68d9-4600-8f65-632bc57dd3fb";
+  const background = await release("t6-background-session-after-turn.json", sessionId);
+  assert.deepEqual(background.result, { outcome: "skipped_busy" }, "background（busy 真）不删");
+  assert.equal(background.calls.filter((c) => c.url.endsWith(":delete")).length, 0, "background 零删除请求");
+
+  const idle = await release("session-detail-fresh.json", sessionId);
+  assert.deepEqual(idle.result, { outcome: "deleted" });
+  assert.equal(idle.calls.filter((c) => c.url.endsWith(":delete")).length, 1, "idle 才走删除（恰一枪）");
+
+  const goneId = "session_719454d9-45f0-4e58-ba1f-c680f2ab4d83";
+  const gone = await release("session-detail-gone-40401.json", goneId);
+  assert.deepEqual(gone.result, { outcome: "already_gone" }, "2.7 实录的会话不存在（HTTP 200 + 40401）");
+  assert.equal(gone.calls.filter((c) => c.url.endsWith(":delete")).length, 0);
+
+  // 闭集外 activity：删前探针不可证 idle → 保守当忙（与字段缺席同款）。
+  const unknown = await kimiServer((url) => {
+    if (url.endsWith(`/api/v1/sessions/${sessionId}`)) {
+      return jsonResponse({ code: 0, msg: "success", data: { id: sessionId, activity: "paused" } });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl: unknown.fetchImpl, timeout: 5000, retries: 0 });
+  assert.deepEqual(await backend.releaseSession(makeAgent(), sessionId), { outcome: "skipped_busy" });
+});
+
+test("TD-362: 2.6.3 后台任务详情（busy:true, main_turn_active:false）原样通过——2.6 判定不变：sessionStatus busy、releaseSession 保守不删", async () => {
+  const recordedDetail = kimi263("background-task-session-detail.json").json.data;
+  assert.equal(recordedDetail.activity, undefined, "2.6 实录没有 activity（投影原样返回）");
+  assert.equal(recordedDetail.busy, true);
+  assert.equal(recordedDetail.main_turn_active, false);
+  const sessionId = "session_270387e8-ced0-4c8e-a8f1-826df7860ff8";
+  const backend = new KimiWebBackend({
+    fetchImpl: async () => replay263("background-task-session-detail.json"),
+    timeout: 5000,
+    retries: 0,
+  });
+  assert.deepEqual(await backend.sessionStatus(makeAgent(), sessionId), { type: "busy" });
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url.endsWith(`/api/v1/sessions/${sessionId}`)) return replay263("background-task-session-detail.json");
+    throw new Error(`unexpected ${url}`);
+  });
+  const releaseBackend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  assert.deepEqual(await releaseBackend.releaseSession(makeAgent(), sessionId), { outcome: "skipped_busy" });
+  assert.equal(calls.filter((c) => c.url.endsWith(":delete")).length, 0);
+});
+
+test("TD-362: 停滞门活体证词——2.7 activity:turn 算活轮，续命不杀，最终 completed", async () => {
+  const frozen = [runningTurn()];
+  const script = [...Array(15).fill(frozen), [kimiTurn({ answer: "long-thought-answer" })]];
+  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5_27", { script, detailMode: "activity-turn" });
+  const events = await runClocked(handler, markSpawned, 10_000);
+  assert.equal(events.at(-1).reason, "completed", "2.7 的 turn 投影为双 true → 活体证词续命");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"));
+  assert.ok(detailCalls() >= 1, "预算击发时确实取了证词");
+  assert.equal(
+    events.filter((e) => e.kind === "runtime_activity" && e.status === "serve_active").length,
+    detailCalls(),
+    "一次证词续命一条 serve_active（决定 0069）",
+  );
+});
+
+test("TD-362: stopTarget().messages——读 turns 最新一页（page_size=200），条目数 = 各轮 items 之和；不请求 /messages", async () => {
+  const turnsResponse = kimi272("t1-tools-turns-ended.json").json;
+  const expected = turnsResponse.data.turns.reduce((n, turn) => n + turn.items.length, 0);
+  const { calls, fetchImpl } = kimiServer((url) => {
+    if (url.includes("/messages")) throw new Error("the removed /messages endpoint must never be requested");
+    if (url === "http://127.0.0.1:4310/api/v1/sessions/session_stop/agents/main/turns?page_size=200") {
+      return jsonResponse(turnsResponse);
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const page = await backend.stopTarget(makeAgent(), "session_stop").messages();
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [[
+    "GET",
+    "http://127.0.0.1:4310/api/v1/sessions/session_stop/agents/main/turns?page_size=200",
+  ]], "只读 turns 一页（带页大小）");
+  assert.ok(!calls.some((c) => c.url.includes("/messages")), "2.7.2 已删除 /messages（404）——绝不请求");
+  assert.equal(page.data.length, expected, "消息页条目数 = 各轮 items 之和");
+  assert.equal(page.data.length, 7, "t1 实录：一轮 7 个条目");
+  assert.equal(page.data[0].type, "user_message", "保留 turns 条目原形（计数只读长度）");
+});
+
+test("TD-362: releaseSession——activity 非字符串（数组/数字/对象/null）、详情缺 id（2.6/2.7）→ 一律 skipped_busy 且零删除", async () => {
+  const sessionId = "session_shape_gap";
+  const releaseWithDetail = async (data) => {
+    const { calls, fetchImpl } = kimiServer((url) => {
+      if (url.endsWith(`/api/v1/sessions/${sessionId}`)) return jsonResponse({ code: 0, msg: "success", data });
+      if (url.endsWith(`/api/v1/sessions/${sessionId}:delete`)) return envelope({ deleted: true });
+      throw new Error(`unexpected ${url}`);
+    });
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const result = await backend.releaseSession(makeAgent(), sessionId);
+    return { result, deletes: calls.filter((c) => c.url.endsWith(":delete")).length };
+  };
+  // ToPropertyKey 陷阱的端到端反例：["idle"] 若被折叠成 "idle" 就会删掉活会话。
+  const nonStringActivities = [["idle"], ["background"], 7, { value: "idle" }, null];
+  for (const activity of nonStringActivities) {
+    const r = await releaseWithDetail({ id: sessionId, activity });
+    assert.deepEqual(r.result, { outcome: "skipped_busy" }, `activity=${JSON.stringify(activity)} 必须拒删`);
+    assert.equal(r.deletes, 0);
+  }
+  // 缺 id 的两代形状：不能证成就是目标会话，删除前探针保守当忙。
+  for (const data of [
+    { activity: "idle", workspace_id: "w1" }, // 2.7 残件
+    { busy: false, main_turn_active: false, workspace_id: "w1" }, // 2.6 缺口
+    { id: "", activity: "idle" }, // 空串 id
+  ]) {
+    const r = await releaseWithDetail(data);
+    assert.deepEqual(r.result, { outcome: "skipped_busy" }, JSON.stringify(data));
+    assert.equal(r.deletes, 0);
+  }
+});
+
+function stopProbeServer(sessionId, turnsResponse) {
+  return kimiServer((url) => {
+    if (url.endsWith(`/api/v1/sessions/${sessionId}`)) {
+      return jsonResponse({ code: 0, msg: "success", data: { id: sessionId, busy: false, main_turn_active: false } });
+    }
+    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}/agents/main/turns?page_size=200`) {
+      return jsonResponse(turnsResponse);
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+}
+
+test("TD-362: 停止探针——某轮缺 items 数组 → 抛错，verifyStopQuiet 记不可观察（绝不把看不全当没增长）", async () => {
+  const sessionId = "session_stop_items";
+  const turnsResponse = { code: 0, data: { turns: [{ turn_id: "t_1", ordinal: 0 }], has_more: false } };
+  const { fetchImpl } = stopProbeServer(sessionId, turnsResponse);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const target = backend.stopTarget(makeAgent(), sessionId);
+  await assert.rejects(() => target.messages(), /every turn needs an items array/);
+  const result = await verifyStopQuiet(target, "http://127.0.0.1:4310", sessionId, { rounds: 2, intervalMs: 1 });
+  assert.deepEqual(result, { quiet: null, observation: "unavailable" });
+});
+
+test("TD-362: 停止探针——turns 页 has_more:true（超过一页）→ 抛错，verifyStopQuiet 记不可观察", async () => {
+  const sessionId = "session_stop_more";
+  // 最新一页满窗口且还有更旧的轮：窗口滑动时总数可能不变，增长检测不可信。
+  const turnsResponse = {
+    code: 0,
+    data: {
+      turns: [{ turn_id: "t_200", ordinal: 200, items: [{ type: "assistant_message", text: "x" }] }],
+      has_more: true,
+    },
+  };
+  const { fetchImpl } = stopProbeServer(sessionId, turnsResponse);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const target = backend.stopTarget(makeAgent(), sessionId);
+  await assert.rejects(() => target.messages(), /turns page has_more:true/);
+  const result = await verifyStopQuiet(target, "http://127.0.0.1:4310", sessionId, { rounds: 2, intervalMs: 1 });
+  assert.deepEqual(result, { quiet: null, observation: "unavailable" });
 });
 
 // ===== 收尾：kimi 2.6.3 实测目录覆盖（须是本文件最后一个测试——前面的测试先读完）=====

@@ -182,6 +182,7 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
     let submitted = false;
     const slowFetch = async (url, init = {}) => {
       const urlStr = String(url);
+      const urlPath = urlStr.split("?")[0];
       const method = init.method ?? "GET";
       if (method === "POST" && urlStr === `${KIMI_TEST_SERVE_URL}/api/v1/sessions`) {
         return envelope({ id: "session_slow" });
@@ -189,10 +190,7 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
       if (method === "GET" && urlStr === sessionSlow) {
         return detailEnvelope("session_slow", false, false, null);
       }
-      if (method === "GET" && urlStr === `${sessionSlow}/messages`) {
-        return envelope({ items: [] });
-      }
-      if (method === "GET" && urlStr === `${sessionSlow}/agents/main/turns`) {
+      if (method === "GET" && urlPath === `${sessionSlow}/agents/main/turns`) {
         if (!submitted) return turnsEnvelope([]);
         const done = polls > 3;
         return turnsEnvelope([done
