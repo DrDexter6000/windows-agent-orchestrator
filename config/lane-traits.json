@@ -187,6 +187,7 @@
         "providerID": null,
         "effort": "max"
       },
+      "reviewPending": "ZCode 3.18.2→3.19.1（11-19 起 3.19.0，11-21 升 3.19.1，CLI 0.18.0）：delta 认证（conditional）与真实续修冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 1,
       "cost": "GLM 订阅；GLM 高峰（工作日北京 9:00–18:00，即 UTC 01:00–10:00；周末与中国法定节假日全天不算高峰）消耗 ×3，批量派发几十分钟就用尽 5 小时窗口",
       "caveats": [
@@ -253,7 +254,7 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "ZCode 3.18（11-12 起）：调研（life-index 11-12）、把关（carloha_fde 11-14）已有实际任务；写代码待 3.18 上的实际交付，相符才解除，不符改格",
+      "reviewPending": "ZCode 3.18.2→3.19.1（11-19 起 3.19.0，11-21 升 3.19.1，CLI 0.18.0）：delta 认证（conditional）通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 0.5,
       "cost": "GLM 订阅",
       "caveats": [],
