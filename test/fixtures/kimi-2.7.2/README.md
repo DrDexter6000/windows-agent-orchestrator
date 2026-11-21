@@ -27,3 +27,11 @@ any turn (`-held`, `-held-late`). When the tool ends, the first turn ends `compl
 same poll, the next turn opens with the steered prompt as its opener (`-new-turn`); `-settled` is the idle end state.
 2.6.3 ended the running turn at the steer instead, so the steered prompt showed up within a poll or two.
 
+## t8: narration between tool calls (captured 2026-11-21, batch 130)
+
+`t8-narration-turns-ended.json` is the ended turns page of one prompt that asked the model to say what it is about to
+do before each of two shell calls, then answer with a first line `VERDICT: OK`. The turn's items run: reasoning,
+`assistant_message` (step 1, narration), `tool_call` Bash (step 1), reasoning, `assistant_message` (step 2,
+narration), `tool_call` Bash (step 2), reasoning, `assistant_message` (step 3, the final answer). Each step's text is
+its own item; only the last step's text is the answer.
+
