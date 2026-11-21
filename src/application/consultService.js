@@ -462,6 +462,11 @@ const DECLARED_FIELD_VALUE_REFUSAL = (key) =>
 const DECLARED_FIELD_KEY_REFUSAL = (key) =>
   `declared field key ${key} must be Q1, Q2, ... with no leading zero (Q0 is not a question number)`;
 
+/** 空候选列表拒绝文案（0128 复核）：{"Q1":[]} 不生成格式行、统计却按"声明了 Q1"
+ * 计——声明一个 Qn 至少要给一个候选值。 */
+const DECLARED_FIELD_EMPTY_REFUSAL = (key) =>
+  `declared field ${key} needs at least one candidate value`;
+
 /**
  * 决定 0128 续修：声明字段不合格的创建拒绝——专门错误类，供 MCP 面 instanceof
  * 可靠判别后原样回文案（通用 catch 只回"零派发"文案，只接 MCP 的 Lead 无从
@@ -623,6 +628,9 @@ export async function runConsult({
     if (!/^Q\d+$/.test(key) || !Array.isArray(declaredFields[key])) continue;
     if (!/^Q[1-9]\d*$/.test(key)) {
       throw new DeclaredFieldRefusalError(DECLARED_FIELD_KEY_REFUSAL(key));
+    }
+    if (declaredFields[key].length === 0) {
+      throw new DeclaredFieldRefusalError(DECLARED_FIELD_EMPTY_REFUSAL(key));
     }
     if (!declaredFields[key].every(isValidDeclaredFieldValue)) {
       throw new DeclaredFieldRefusalError(DECLARED_FIELD_VALUE_REFUSAL(key));

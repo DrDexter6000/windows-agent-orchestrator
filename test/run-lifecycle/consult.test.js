@@ -696,6 +696,17 @@ test("0128 续修：声明键规范化——Q0/前导零拒绝（固定文案、
       new RegExp(`declared field key ${key} must be Q1, Q2, \\.\\.\\. with no leading zero`),
     );
   }
+  // 空候选列表：不生成格式行、统计却会按"声明了 Q1"计——同样整次拒绝。
+  await assert.rejects(
+    () => runConsult(baseInput({
+      declaredFields: { Q1: [] },
+      dispatchFn,
+      readTranscriptFn,
+      writeFileFn: async () => {},
+      mkdirFn: async () => {},
+    })),
+    /declared field Q1 needs at least one candidate value/,
+  );
   assert.equal(calls.length, 0, "一次席位都不派发");
   // Q1 与多位 Q12 照常声明、照常取值。
   const ok = makeDispatchStub();
