@@ -59,6 +59,7 @@
         "providerID": null,
         "effort": "high"
       },
+      "reviewPending": "codex 0.170.0→0.171.0（11-21）：strict 认证（certified）、跨 run drill 与真实续修冒烟通过；review 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -549,6 +550,7 @@
         "providerID": "deepseek-official",
         "effort": "max"
       },
+      "reviewPending": "dsh 0.2.1-rc.4→0.2.2-rc.5（11-21）：delta 认证（conditional）、跨 run drill、跨版本续修与停止冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 1.5,
       "cost": "DeepSeek API 按量计费：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周一至周五（不含中国法定节假日）北京时间 9:00–12:00、14:00–18:00（UTC 01:00–04:00、06:00–10:00）为高峰，其余时段空闲价（官方定价页）；通道不报 token 用量",
       "caveats": [
