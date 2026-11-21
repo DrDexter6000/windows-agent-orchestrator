@@ -18,7 +18,7 @@
 //   - 共享投影：../application/runCollectProjection.js（M11-4 collect continuation）
 //   - node built-in：fs/promises（readFile）、fs（watchFile/unwatchFile）、path（resolve）
 
-import { readFile, writeFile, realpath } from "node:fs/promises";
+import { readFile, writeFile, realpath, lstat } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
 import { resolve, dirname, join, basename, sep } from "node:path";
 
@@ -279,6 +279,14 @@ async function realOutTarget(target) {
   try {
     return await realpath(target);
   } catch {
+    // 目标解析不出——先看它是否作为链接存在（失效的符号链接）：那样回退到外部
+    // 目录判断、再让 writeFile 跟着链接写，就会写到链接原先指向的地方。返回
+    // null，由调用方拒绝。
+  }
+  try {
+    await lstat(target);
+    return null;
+  } catch {
     // 目标不存在——按组件向上回退。
   }
   let dir = dirname(target);
@@ -301,7 +309,8 @@ function isInsideRunStore(candidateReal, storeReal) {
   const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
   const c = norm(candidateReal);
   const s = norm(storeReal);
-  return c === s || c.startsWith(s + sep);
+  // 卷根的真实路径已带末尾分隔符（`D:\`），不再追加。
+  return c === s || c.startsWith(s.endsWith(sep) ? s : s + sep);
 }
 
 export async function collectCommand(args, config) {
@@ -502,7 +511,11 @@ export async function collectCommand(args, config) {
     // 路径为准，Windows 按大小写不敏感比较。
     const storeReal = await realpath(runDir);
     const target = resolve(options.out);
-    if (isInsideRunStore(await realOutTarget(target), storeReal)) {
+    const targetReal = await realOutTarget(target);
+    if (targetReal === null) {
+      throw new Error(`collect --out: ${target} is a link whose target cannot be resolved; write the answer somewhere else`);
+    }
+    if (isInsideRunStore(targetReal, storeReal)) {
       throw new Error(`collect --out: ${target} is inside the run store (${storeReal}); write the answer somewhere else`);
     }
     const text = finalAssistantTextFromSnapshot(raw);

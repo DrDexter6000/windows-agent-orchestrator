@@ -498,6 +498,30 @@ test("TD-365: --out 经 junction 指进运行存储——以真实路径拒绝�
   }
 });
 
+test("TD-365: --out 是一个失效的符号链接（原先指进运行存储）——拒绝，存储里零写入（建不了符号链接就跳过）", (t) => {
+  const dir = makeTempDir("wao-td365-dangling-");
+  const linkDir = makeTempDir("wao-td365-dangling-link-");
+  try {
+    writeTranscript(dir, "run_td365_dangling", TD365_EVENTS);
+    const gone = join(dir, "gone.txt");
+    const link = join(linkDir, "answer.txt");
+    try {
+      symlinkSync(gone, link, "file");
+    } catch (error) {
+      t.skip(`本机建不了符号链接：${error?.message ?? error}`);
+      return;
+    }
+    const r = runCollectFinal(dir, "run_td365_dangling", ["--out", link]);
+    assert.notEqual(r.status, 0, "解析不出的链接不跟着写");
+    assert.match(r.stderr, /is a link whose target cannot be resolved/);
+    assert.ok(!existsSync(gone), "存储里零写入");
+    assert.equal(countCollected(readFileSync(join(dir, "run_td365_dangling.jsonl"), "utf8")), 0, "零审计追加");
+  } finally {
+    cleanupDir(linkDir);
+    cleanupDir(dir);
+  }
+});
+
 test("TD-365: 运行存储之外的普通路径照常写出（含审计）", () => {
   const dir = makeTempDir("wao-td365-ok-");
   const outDir = makeTempDir("wao-td365-ok-out-");
